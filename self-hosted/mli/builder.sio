@@ -1,0 +1,240 @@
+// MLI builder (S1) — construction API over mli::ir.
+//
+// Discipline:
+//   - Every capacity wall is fail-closed: the function is marked
+//     `overflowed` with a detail string and the offending append is refused.
+//     Verify rejects overflowed functions. Never a silent drop.
+//   - There is deliberately NO phi / block-parameter API (design §4.4, D2):
+//     SSA joins are resolved by the feed via copy insertion before MLI.
+//   - Compares produce Bool vregs; mli_term_br consumes a Bool operand
+//     (design D2: Flags retired as a long-lived kind).
+
+module mli::builder
+
+use mli::ir::*
+
+// ---------------------------------------------------------------------------
+// Function-level construction.
+// ---------------------------------------------------------------------------
+
+pub fn mli_func_new(name: string, ret: MliKind) -> MliFunction with Mut {
+    var f = mli_func_empty()
+    f.name = name
+    f.ret = ret
+    f
+}
+
+// Allocate a fresh vreg of the given kind. Returns the vreg id, or 0-1 on
+// overflow (function marked overflowed).
+pub fn mli_new_vreg(f: &!MliFunction, kind: MliKind) -> i64 with Mut, Panic {
+    if f.vreg_count >= MLI_MAX_VREGS {
+        f.overflowed = true
+        f.overflow_detail = "vreg_capacity"
+        return 0 - 1
+    }
+    let id = f.vreg_count
+    f.vreg_kinds[id] = kind
+    f.vreg_count = id + 1
+    id
+}
+
+// Declare a function argument. Arguments must be declared before any other
+// vreg allocation so that arg i is vreg i (verify checks the prefix).
+// Returns the arg's vreg id, or 0-1 on failure.
+pub fn mli_add_arg(f: &!MliFunction, kind: MliKind) -> i64 with Mut, Panic {
+    if f.arg_count >= MLI_MAX_ARGS {
+        f.overflowed = true
+        f.overflow_detail = "arg_capacity"
+        return 0 - 1
+    }
+    if f.arg_count != f.vreg_count {
+        f.overflowed = true
+        f.overflow_detail = "args_after_vregs"
+        return 0 - 1
+    }
+    let id = mli_new_vreg(f, kind)
+    if id < 0 { return id }
+    f.arg_kinds[f.arg_count] = kind
+    f.arg_count = f.arg_count + 1
+    id
+}
+
+// Append a new block; returns its id (block 0 is the entry block), or 0-1 on
+// overflow.
+pub fn mli_new_block(f: &!MliFunction) -> i64 with Mut, Panic {
+    if f.block_count >= MLI_MAX_BLOCKS {
+        f.overflowed = true
+        f.overflow_detail = "block_capacity"
+        return 0 - 1
+    }
+    let id = f.block_count
+    f.blk_id[id] = id
+    f.blk_instr_count[id] = 0
+    f.blk_has_term[id] = 0
+    f.block_count = id + 1
+    id
+}
+
+// Append a body instruction to block b. Appending past the wall is
+// fail-closed. Terminators in the body are NOT refused here: the builder can
+// construct invalid MLI on purpose (fixtures need it); the verifier is the
+// enforcement point (MLI_VERR_CONTROL_IN_BODY).
+pub fn mli_emit(f: &!MliFunction, b: i64, inst: MliInst) -> bool with Mut, Panic {
+    if b < 0 || b >= f.block_count {
+        f.overflowed = true
+        f.overflow_detail = "emit_block_range"
+        return false
+    }
+    if f.blk_instr_count[b] >= MLI_MAX_INSTRS {
+        f.overflowed = true
+        f.overflow_detail = "instr_capacity"
+        return false
+    }
+    let n = f.blk_instr_count[b]
+    mli_inst_put(f, mli_slot(b, n), inst)
+    f.blk_instr_count[b] = n + 1
+    true
+}
+
+// Set the terminator of block b. Double-termination is fail-closed.
+pub fn mli_set_term(f: &!MliFunction, b: i64, term: MliInst) -> bool with Mut, Panic {
+    if b < 0 || b >= f.block_count {
+        f.overflowed = true
+        f.overflow_detail = "term_block_range"
+        return false
+    }
+    if f.blk_has_term[b] == 1 {
+        f.overflowed = true
+        f.overflow_detail = "double_terminator"
+        return false
+    }
+    mli_inst_put(f, mli_term_slot(b), term)
+    f.blk_has_term[b] = 1
+    true
+}
+
+// Operand for an existing vreg, pulling the kind from the function's table
+// (the source of truth). Out-of-range ids yield a NONE operand, which verify
+// rejects downstream.
+pub fn mli_vreg_opd(f: &MliFunction, id: i64) -> MliOperand with Panic {
+    if id < 0 || id >= f.vreg_count {
+        return mli_opd_none()
+    }
+    mli_opd_vreg(id, f.vreg_kinds[id])
+}
+
+// ---------------------------------------------------------------------------
+// Instruction constructors (pure).
+// ---------------------------------------------------------------------------
+
+pub fn mli_inst1(opcode: i64, dst: MliOperand) -> MliInst {
+    MliInst {
+        opcode: opcode,
+        dst: dst,
+        src1: mli_opd_none(),
+        src2: mli_opd_none(),
+        src3: mli_opd_none(),
+        cc: MLI_CC_NONE,
+        assoc_policy: MLI_ASSOC_NONE,
+        zd_policy: MLI_ZD_NONE,
+        call_target: 0,
+    }
+}
+
+pub fn mli_inst2(opcode: i64, dst: MliOperand, src1: MliOperand) -> MliInst {
+    MliInst {
+        opcode: opcode,
+        dst: dst,
+        src1: src1,
+        src2: mli_opd_none(),
+        src3: mli_opd_none(),
+        cc: MLI_CC_NONE,
+        assoc_policy: MLI_ASSOC_NONE,
+        zd_policy: MLI_ZD_NONE,
+        call_target: 0,
+    }
+}
+
+pub fn mli_inst3(opcode: i64, dst: MliOperand, src1: MliOperand, src2: MliOperand) -> MliInst {
+    MliInst {
+        opcode: opcode,
+        dst: dst,
+        src1: src1,
+        src2: src2,
+        src3: mli_opd_none(),
+        cc: MLI_CC_NONE,
+        assoc_policy: MLI_ASSOC_NONE,
+        zd_policy: MLI_ZD_NONE,
+        call_target: 0,
+    }
+}
+
+pub fn mli_inst4(opcode: i64, dst: MliOperand, src1: MliOperand, src2: MliOperand, src3: MliOperand) -> MliInst {
+    MliInst {
+        opcode: opcode,
+        dst: dst,
+        src1: src1,
+        src2: src2,
+        src3: src3,
+        cc: MLI_CC_NONE,
+        assoc_policy: MLI_ASSOC_NONE,
+        zd_policy: MLI_ZD_NONE,
+        call_target: 0,
+    }
+}
+
+// Compares: produce a Bool vreg (dst kind must be Bool; verify enforces).
+pub fn mli_inst_icmp(cc: i64, dst: MliOperand, a: MliOperand, b: MliOperand) -> MliInst {
+    var inst = mli_inst3(MLI_OP_ICMP, dst, a, b)
+    inst.cc = cc
+    inst
+}
+
+pub fn mli_inst_fcmp(cc: i64, dst: MliOperand, a: MliOperand, b: MliOperand) -> MliInst {
+    var inst = mli_inst3(MLI_OP_FCMP, dst, a, b)
+    inst.cc = cc
+    inst
+}
+
+// Cayley-Dickson multiply with mandatory policies. Verify rejects cd_mul /
+// associator instructions whose policies are left at *_NONE.
+pub fn mli_inst_cd_mul(dst: MliOperand, a: MliOperand, b: MliOperand, assoc_policy: i64, zd_policy: i64) -> MliInst {
+    var inst = mli_inst3(MLI_OP_CD_MUL, dst, a, b)
+    inst.assoc_policy = assoc_policy
+    inst.zd_policy = zd_policy
+    inst
+}
+
+pub fn mli_inst_cd_associator(dst: MliOperand, a: MliOperand, b: MliOperand, c: MliOperand, assoc_policy: i64, zd_policy: i64) -> MliInst {
+    var inst = mli_inst4(MLI_OP_CD_ASSOCIATOR, dst, a, b, c)
+    inst.assoc_policy = assoc_policy
+    inst.zd_policy = zd_policy
+    inst
+}
+
+// lane is the component index (0 = real). Stored as an i64 immediate in src2.
+pub fn mli_inst_cd_extract(dst: MliOperand, src: MliOperand, lane: i64) -> MliInst {
+    mli_inst3(MLI_OP_CD_EXTRACT, dst, src, mli_opd_imm_int(lane, mli_kind_int(64, 1)))
+}
+
+// ---------------------------------------------------------------------------
+// Terminator constructors.
+// ---------------------------------------------------------------------------
+
+pub fn mli_term_ret(value: MliOperand) -> MliInst {
+    mli_inst2(MLI_OP_RET, mli_opd_none(), value)
+}
+
+pub fn mli_term_ret_void() -> MliInst {
+    mli_inst2(MLI_OP_RET, mli_opd_none(), mli_opd_none())
+}
+
+pub fn mli_term_jmp(target_block: i64) -> MliInst {
+    mli_inst2(MLI_OP_JMP, mli_opd_none(), mli_opd_blockref(target_block))
+}
+
+// Conditional branch: cond MUST be a Bool operand (verify enforces —
+// MLI_VERR_BR_COND_NOT_BOOL otherwise). then/else are block ids.
+pub fn mli_term_br(cond: MliOperand, then_block: i64, else_block: i64) -> MliInst {
+    mli_inst4(MLI_OP_BR, mli_opd_none(), cond, mli_opd_blockref(then_block), mli_opd_blockref(else_block))
+}

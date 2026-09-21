@@ -18,6 +18,8 @@ bit-exact vs independent golden). Census kernel remains outline-only.
 - `run_hls_san_scan.tcl` — `vitis_hls` flow (csim → csynth → cosim), part `xcu250-figd2104-2L-e`, 250 MHz.
 - `build_san_scan_xclbin.sh` — v++ compile+link for `xilinx_u250_gen3x16_xdma_4_1_202210_1` (targets hw / hw_emu / sw_emu).
 - `host_san_scan.cpp` — complete XRT-native host: loads the exported T3 artifacts (`artifacts/san_dl380_t3/`), packs cohorts, runs the card, verifies hist/catastrophes/MACs **bit-exactly** against the control VM (spec T3), reports measured throughput.
+- `host_san_scan_e2e.cpp` — stdin-to-card host for the Python-orchestrated end-to-end loop. Reads a packed cohort from stdin (binary header + 512-bit beats), runs `krnl_san_scan`, and reports decomposed timing: setup, DMA H2D, kernel, DMA D2H, total.
+- `scripts/research/san_fpga_endtoend.py` — end-to-end orchestration: train/load SAN-ResNet-18 on ImageNette2-160, run PyTorch forward, quantize confidences to Q0.15, pack into the same 512-bit beats as `host_san_scan`, stream to `host_san_scan_e2e`, and validate the card output bit-exactly against a Python golden scan. Supports `--mock-host` for CI/offline validation.
 - Gated golden model: `scripts/research/san_imagenet_fpga_dl380.py` via `scripts/ci/san_imagenet_fpga_dl380_gate.sh` (clause I6); on-target acceptance: `scripts/research/san_dl380_t3_export.py` + `san_dl380_t3_acceptance.py`.
 
 ## Intended build flow (on the DL380, Vitis 2022.1+ / XRT sourced)
@@ -34,6 +36,34 @@ for ds in val_resnet val_vit stress_1p2M; do
 done
 # acceptance: HOST_SAN_SCAN_PASS for all three datasets (bit-exact vs control VM)
 ```
+
+## End-to-end SAN-ImageNette flow
+
+The Python+C++ loop connects a real SAN-ResNet-18 trunk to the U250 scan kernel:
+
+```bash
+# 1. Build the stdin host (on DL380, XRT sourced)
+cd hardware/fpga/u250_catastrophe_scan
+g++ -O2 -std=c++17 host_san_scan_e2e.cpp -o host_san_scan_e2e \
+    -I/opt/xilinx/xrt/include -L/opt/xilinx/xrt/lib -lxrt_coreutil -lpthread
+
+# 2. Ensure ImageNette2-160 is at datasets/imagenette2-160
+
+# 3. Run end-to-end (CPU forward on DL380, then card scan)
+cd ../..
+.venv/bin/python scripts/research/san_fpga_endtoend.py \
+    --xclbin hardware/fpga/u250_catastrophe_scan/krnl_san_scan.hw.xclbin
+# expect: SAN_FPGA_ENDTOEND_PASS bit_exact=True
+
+# 4. Offline / CI validation without FPGA
+.venv/bin/python scripts/research/san_fpga_endtoend.py --mock-host
+```
+
+Measured on the DL380/U250 (2026-08-04, single cohort of 3 925 real ImageNette
+images, CPU forward): forward ≈ 18.4 s, pack ≈ 40 ms, xclbin setup ≈ 135 ms,
+DMA H2D ≈ 0.12 ms, kernel ≈ 0.66 ms, DMA D2H ≈ 0.15 ms, total ≈ 136 ms. The
+xclbin setup is paid once per process; the kernel itself sustains the same
+~24 Msamples/s single-shot rate reported in Table 1 for small cohorts.
 
 Census kernel acceptance (unchanged): kernel census must equal the CI-gated
 C model at levels b = 4..9 (growth law `Z(b)`, nullity histograms, fiber

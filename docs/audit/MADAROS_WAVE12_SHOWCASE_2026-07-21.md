@@ -21,7 +21,13 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-
 > full-green public surface: [`MADAROS_WAVE13_SHOWCASE_2026-07-21.md`](MADAROS_WAVE13_SHOWCASE_2026-07-21.md)
 > and `bash scripts/dev/madaros_wave13_showcase_gate.sh`. Set `REQUIRE_CD_EXACT=0`
 > only for legacy residual-only packaging. If stock prebuilt lags #1392, rebuild
-> (`scripts/dev/souc-build-lock.sh make build-madaros`).
+> (`make build-madaros`).
+>
+> **Correction (2026-08-25):** this line originally read
+> `scripts/dev/souc-build-lock.sh make build-madaros`, which **hangs forever** —
+> `build_modular_madaros.sh` takes the global build lock itself, and `make` does not
+> pass the lock's fd 9 to its recipe shells, so the inner lock blocks on the lock its
+> own ancestor holds. Run it bare. See CLAUDE.md §4.
 
 ## Mission
 

@@ -17,7 +17,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.san-i
 
 **Date:** 2026-08-02
 **Status:** `EXECUTABLE` for the contract (gate green: see §8); `MEASURED` for DL380/U250 bit-exact acceptance, on-card throughput, and server-level power; `MEASURED (ImageNette2-160 proxy)` for real-image SAN scan; `ESTIMATE` for full ImageNet-1k completo accuracy (not downloaded in this environment)
-**Parents:** `docs/research/suffering_aware_architecture_spec_2026-07-28.md` (SAN, clauses A1–A8), `docs/research/suffering_aware_large_architecture_spec_2026-07-31.md` (SAN-ResNet-50 / SAN-ViT-large at CIFAR scale, L1–L9), `docs/research/u250_catastrophe_scan_fpga_spec_2026-07-26.md` (U250 pre-hardware pattern: gated bit-accurate model + HLS outline)
+**Parents:** `docs/research/suffering_aware_architecture_spec_2026-07-28.md` (SAN, clauses A1–A8), `docs/research/suffering_aware_large_architecture_spec_2026-07-31.md` (SAN-ResNet-50 / SAN-ViT-small/d384 at CIFAR scale, L1–L9), `docs/research/u250_catastrophe_scan_fpga_spec_2026-07-26.md` (U250 pre-hardware pattern: gated bit-accurate model + HLS outline)
 **Reference outlines:** `hardware/fpga/u250_catastrophe_scan/krnl_san_scan.cpp`, `host_san_scan.cpp`
 **Executable contract:** `scripts/research/san_imagenet_fpga_dl380.py` (clauses I1–I8)
 **Gate:** `scripts/ci/san_imagenet_fpga_dl380_gate.sh`
@@ -124,12 +124,12 @@ Deployment shape on the HP ProLiant DL380: SAN trunk on host CPUs (or GPU if fit
 
 ## 7. Key questions, answered with evidence level
 
-- **Does SAN work on ImageNet completo?** At contract scale (1000-class proxy): yes — both families converge feasibly (SAN-ResNet-50: t*=7, val acc 0.979 ≥ τ=0.95, 40.0% of val samples exiting early; SAN-ViT-large: t*=4, val acc 0.914 ≥ τ=0.90, 14.1% exiting) with zero gratuitous suffering (I1–I8). At 1.2M cohort size: the scan/metering path executes exactly (I6 stress). On real ImageNet images: **unanswered — no data on this node** (`ESTIMATE`-level extrapolation; the architecture has no scale-dependent mechanism beyond the head width, which the real-scale ledger accounts for).
+- **Does SAN work on ImageNet completo?** At contract scale (1000-class proxy): yes — both families converge feasibly (SAN-ResNet-50: t*=7, val acc 0.979 ≥ τ=0.95, 40.0% of val samples exiting early; SAN-ViT-large-ImageNet: t*=4, val acc 0.914 ≥ τ=0.90, 14.1% exiting) with zero gratuitous suffering (I1–I8). At 1.2M cohort size: the scan/metering path executes exactly (I6 stress). On real ImageNet images: **unanswered — no data on this node** (`ESTIMATE`-level extrapolation; the architecture has no scale-dependent mechanism beyond the head width, which the real-scale ledger accounts for).
 - **Does FPGA acceleration work for catastrophe scan and FLOP metering?** Semantics: yes, bit-accurate and gated (I6) — kernel model == independent reference exactly on both val cohorts and the 1.2M stress cohort, with the floor-quantization equivalence exact by construction. Hardware: pre-silicon — cycle model says 300 µs per 1.2M cohort at 16 PEs/250 MHz (`ESTIMATE`).
 - **Does DL380 deployment work?** Preflight and the platform-independence argument: yes, executable (T3). Actual deployment: not possible from this node; the acceptance procedure is defined (re-run the gate on target).
 - **Does it reach target performance with less suffering than standard architectures?** Family-split answer, measured:
   - **SAN-ResNet-50 — yes, both channels.** Training machine suffering 1,976 TMAC vs Dense 6,119 (67.7% less) and EarlyStop 2,040 (3.1% less); per-sample inference 2.909 vs 3.922 GMAC (25.8% less); integrated patient harm 2.99 ≤ Dense 3.06.
-  - **SAN-ViT-large — machine channel yes, patient channel a disclosed tradeoff.** Training machine suffering 19,952 TMAC vs Dense 96,025 (**79.2% less**) and EarlyStop 20,005 (0.3% less); per-sample inference 58.99 vs 61.55 GMAC (4.2% less); integrated patient harm 2.81 vs Dense 2.73 — **2.9% HIGHER** (reported, not gated): on this task the attention family's exit heads cost training-time validation accuracy (deep-supervision dilution + head/trunk accuracy gap), and the cohort-in-waiting pays it. Two-channel domination is not available in this family; the compassion grid (I3) is the ethics' mechanism for exactly this situation. This is a result, not a blemish removed by tuning.
+  - **SAN-ViT-large-ImageNet — machine channel yes, patient channel a disclosed tradeoff.** Training machine suffering 19,952 TMAC vs Dense 96,025 (**79.2% less**) and EarlyStop 20,005 (0.3% less); per-sample inference 58.99 vs 61.55 GMAC (4.2% less); integrated patient harm 2.81 vs Dense 2.73 — **2.9% HIGHER** (reported, not gated): on this task the attention family's exit heads cost training-time validation accuracy (deep-supervision dilution + head/trunk accuracy gap), and the cohort-in-waiting pays it. Two-channel domination is not available in this family; the compassion grid (I3) is the ethics' mechanism for exactly this situation. This is a result, not a blemish removed by tuning.
 
 ---
 
@@ -140,7 +140,7 @@ Deployment shape on the HP ProLiant DL380: SAN trunk on host CPUs (or GPU if fit
 | clause | statement | result |
 |---|---|---|
 | I1 | metering conservation: gated-off stages charge exactly 0; SAN metered FLOPs == independent manual accounting (both families: gated==manual exactly); real-scale per-sample gather == histogram×LUT, exactly | PASS |
-| I2 | convergence at ImageNet scale: SAN-ResNet-50 t*=7 (acc 0.979 ≥ τ 0.95), SAN-ViT-large t*=4 (acc 0.914 ≥ τ 0.90), budget 24 | PASS |
+| I2 | convergence at ImageNet scale: SAN-ResNet-50 t*=7 (acc 0.979 ≥ τ 0.95), SAN-ViT-large-ImageNet t*=4 (acc 0.914 ≥ τ 0.90), budget 24 | PASS |
 | I3 | anti-Goodhart: 101-weight grid always selects feasible; all-infeasible pool → NO_FEASIBLE; abstainer (acc 0.0014) and cheap probe (0.0016) infeasible | PASS |
 | I4 | necessary/gratuitous separation: SAN gratuitous = 0; Dense gratuitous = 470.7 GF (resnet) / 28,982.7 GF (vit) | PASS |
 | I5 | suffering bounds: machine SAN < Dense AND < EarlyStop both families (real-scale); per-sample inference < dense figure both families; patient SAN ≤ Dense gated for resnet (2.99 ≤ 3.06), reported for vit (2.81 vs 2.73 — see §7) | PASS |
@@ -158,7 +158,7 @@ Measured headline numbers are in the gate output (reproduce below); they are det
 - **Not measured FPGA data.** Nothing synthesized, placed, routed, or benchmarked; the U250 is not installed in this node. The kernel *semantics* are CI-gated via the bit-accurate model; all cycle/resource figures are estimates or deferred.
 - **Not a DL380 measurement.** This node is the sounio-workspace control VM; the preflight reports `fpga_present=0 xrt_present=0`. Deployment soundness (T3) is a platform-independence argument plus a defined on-target acceptance procedure, not a deployed benchmark.
 - **Not a new SAN architecture.** The trunk/exit/gate machinery is the parent line's (A/D/L specs); the new content is the ImageNet-scale dual ledger, the scan kernel semantics with its 1.2M exact stress verification, the per-family calibration at the 1000-class confidence scale, and the DL380 deployment path.
-- **Not a claim of two-channel domination in the attention family.** SAN-ViT-large's integrated patient harm is 2.9% ABOVE the standard architecture's on this task (§7); its machine-channel savings (79.2% training) are the other side of that Pareto point. The residual family dominates on both channels.
+- **Not a claim of two-channel domination in the attention family.** SAN-ViT-large-ImageNet's integrated patient harm is 2.9% ABOVE the standard architecture's on this task (§7); its machine-channel savings (79.2% training) are the other side of that Pareto point. The residual family dominates on both channels.
 - **Not a clinical claim.** Synthetic data, synthetic hazard structure; not medical guidance. The machine channel is an operational computational-burden proxy; no_consciousness_claim is made or needed.
 
 ---
@@ -352,7 +352,7 @@ golden model:
 | val_imagenette | 3 925 | 5 | 24.1 | 122.2 | `HOST_SAN_SCAN_PASS` |
 
 Interpretation: the 1.2 M stress cohort reaches **511 Msamples/s** sustained,
-95% of the theoretical 540.8 Msamples/s peak at the achieved 135.2 MHz clock
+94.5% of the theoretical 540.8 Msamples/s peak at the achieved 135.2 MHz clock
 (§13.2). The smaller cohorts are enqueue/sync dominated; their sustained
 numbers are lower because the fixed launch cost is amortised over fewer
 samples per iteration. The card now passes on synthetic cohorts, real
@@ -369,51 +369,75 @@ train on GPU; logs are in `artifacts/san_large/`.
 | family | t* | SAN acc@t* | S_m(SAN) | S_m(Dense) | saving | latency SAN | latency Dense | speedup | verdict |
 |---|---|---|---|---|---|---|---|---|---|
 | ResNet-50 | 4 | 0.390 | 160.1 TMAC | 269.9 TMAC | **40.7%** | 0.196 ms/s | 0.213 ms/s | **1.08x** | L1–L4, L6–L8 PASS; L5 tradeoff |
-| ViT-large | 4 | 0.262 | 183.3 TMAC | 369.3 TMAC | **32.0%** | 0.310 ms/s | 0.308 ms/s | 0.99x | L1–L4, L7–L8 PASS; L5 PASS, L6 exit-frac 0.03 |
-| GPT | 4 | 0.167 | 115.4 TMAC | 241.5 TMAC | **52.2%** | 0.343 ms/s | 0.341 ms/s | 0.99x | **L_GREEN (8/8 PASS)** |
+| ViT-small/d384 | 4 | 0.262 | 183.3 TMAC | 369.3 TMAC | **50.4%** | 0.310 ms/s | 0.308 ms/s | 0.99x | L1–L4, L7–L8 PASS; L5 PASS, L6 exit-frac 0.03 |
+| SAN-GPT-small | 4 | 0.167 | 115.4 TMAC | 241.5 TMAC | **52.2%** | 0.343 ms/s | 0.341 ms/s | 0.99x | **L_GREEN (8/8 PASS)** |
 
 **Machine channel.** SAN saves integrated FLOPs in every family: ResNet-50
-40.7%, ViT-large 32.0%, GPT 52.2%. Per-epoch SAN cost is within a few
+40.7%, ViT-small/d384 50.4%, SAN-GPT-small 52.2%. Per-epoch SAN cost is within a few
 percent of Dense, confirming the exit-head overhead is small.
 
 **Real wall-time latency.** A `torch.cuda.synchronize()` benchmark on the
 held-out val set (100 forward passes) compares SAN's gated early-exit path
 against the same model's full dense forward. ResNet-50 already shows a
-modest real speedup (**1.08x**) on CIFAR-10; ViT-large and GPT are
+modest real speedup (**1.08x**) on CIFAR-10; ViT-small/d384 and SAN-GPT-small are
 essentially tied because the CIFAR-10 / small-LM forward is so short that
 dispatch overhead dominates. The latency comparison is now measured, not
 extrapolated from FLOPs.
 
-**Patient channel / honesty.** ResNet-50 and ViT-large show the same
-disclosed tradeoff the parent line reports at ImageNet scale (§7): SAN
-patient harm is higher than EarlyStop's because early stopping alone can
-freeze on a luckier epoch. GPT satisfies the stricter L5 clause (SAN ≤
-both baselines) and is fully green. These are results, not tuning failures.
+**Patient channel / honesty.** ResNet-50 shows the same disclosed tradeoff the
+parent line reports at ImageNet scale (§7): SAN patient harm is higher than
+EarlyStop's because early stopping alone can freeze on a luckier epoch.
+ViT-small/d384 and SAN-GPT-small satisfy the stricter L5 clause (SAN ≤ both
+baselines) in this run. These are results, not tuning failures.
 
-**Infra note.** The first GPT submission failed on a node without `pip`;
+**Infra note.** The first SAN-GPT-small submission failed on a node without `pip`;
 the worker script now bootstraps pip/torch/torchvision/tqdm into a temp
-user base, and the corpus snapshot is staged from the workspace so GPT
+user base, and the corpus snapshot is staged from the workspace so SAN-GPT-small
 legs do not depend on `docs/research/*.md` being present on the worker.
 
-### 13.6 Ongoing work: threshold ablation + CIFAR-100 proxy (2026-08-04)
+### 13.6 Threshold ablation + CIFAR-100 proxy (2026-08-04)
 
-**Threshold ablation.** A Δ ablation is running on Slurm `gpu-orangefs`
+**Threshold ablation (complete).** The Δ ablation ran on Slurm `gpu-orangefs`
 (jobs 8599–8607): Δ ∈ {0.35, 0.45, 0.55, 0.65, 0.75} for ResNet-50 and Δ ∈
-{0.25, 0.35, 0.45, 0.55} for ViT-large on CIFAR-10. The worker script and
-`submit.sh` were extended to forward `SAN_LARGE_DELTA_*`; the driver is
-`slurm-jobs/san-large-gpu/ablation_delta.sh`.
+{0.25, 0.35, 0.45, 0.55} for ViT-small/d384 on CIFAR-10.  Logs were collected to
+`artifacts/san_large/ablation_delta_20260804/` and summarized in Table 3 of the
+paper draft.  Best subset operating points: ResNet-50 Δ = 0.45 (t* = 4,
+~44.5% MAC saving, 7/8 contract clauses), ViT-small/d384 Δ = 0.55 (t* = 4,
+~50% MAC saving, 7/8 clauses).  All configurations remain `L_RED` on this
+small subset because the patient-channel clauses (L5/L7) are not fully
+satisfied, so the ablation is reported as a sensitivity knob, not a green
+recipe.  The driver is `slurm-jobs/san-large-gpu/ablation_delta.sh`.
 
-**CIFAR-100 proxy.** The SAN large-architecture harness now supports
-`SAN_LARGE_DATASET=cifar100` (100 fine labels, generalized harm matrix, default
-τ lower than CIFAR-10). CIFAR-100 is being downloaded; once staged on
-`/orangefs/training/sounio/datasets/cifar-100-python` it will be submitted via
-`slurm-jobs/san-large-gpu/submit_cifar100.sh`.
+**CIFAR-100 proxy (complete — negative result).** The harness supports
+`SAN_LARGE_DATASET=cifar100` (100 fine labels, generalized harm matrix,
+default τ lower than CIFAR-10).  The dataset was staged on
+`/orangefs/training/sounio/datasets/cifar-100-python` and two Slurm jobs were
+submitted via `slurm-jobs/san-large-gpu/submit_cifar100.sh`:
+
+- job 8611: SAN-ResNet-50, Δ = 0.45, τ = 0.20
+- job 8612: SAN-ViT-small/d384, Δ = 0.55, τ = 0.15
+
+The τ values were forced through the environment because `submit.sh` and
+`run_gpu_worker.sh` still default to the CIFAR-10 τ.
+
+The first submission (8609/8610) failed with a CIFAR-100 loader bug
+(`pickle.load(..., encoding="latin1")` produced string keys, but the code
+expected byte keys `b"data"`/`b"fine_labels"`).  The loader was fixed to
+`encoding="bytes"` and the jobs were resubmitted.
+
+On 4,000 train / 1,000 val, neither family reached its lowered τ:
+ResNet-50 final acc 0.126 (τ = 0.20), ViT-small/d384 final acc 0.117
+(τ = 0.15).  `t* = None`, freeze-on-green never fired, and SAN savings were
+near zero because almost no sample exited early.  This is reported as a
+negative result, not omitted.
 
 **Paper draft.** A systems paper draft is at
 `docs/papers/san_fpga_deployment_2026-08-04.md`. It was reviewed by hostile
 LLM-offload (Grok 4.5) and revised to frame the contribution as the measured
 SAN exit-audit / FLOP-metering kernel, to report the partial meter convention
 honestly, and to avoid overstating the small-subset GPU training accuracies.
+The paper was updated with the completed ablation and the CIFAR-100 submission
+status.
 
 ### 13.7 Gap-closure notes (2026-08-04)
 
@@ -436,6 +460,38 @@ as follows:
 
 3. **Dense vs SAN wall-time on GPU.** Added a `torch.cuda.synchronize()`
    latency benchmark to `suffering_aware_large_architecture.py`. ResNet-50
-   shows 1.08x real speedup; ViT-large and GPT are neutral on this small-scale
+   shows 1.08x real speedup; ViT-small/d384 and SAN-GPT-small are neutral on this small-scale
    task because dispatch overhead dominates. The comparison is now measured,
    not inferred from FLOP counts.
+
+### 13.8 End-to-end host↔card loop (2026-08-04, measured)
+
+The isolated kernel benchmark of §13.2/§13.4 is now extended to a complete
+inference pipeline driven by `scripts/research/san_fpga_endtoend.py`:
+
+- Load or train SAN-ResNet-18 on ImageNette2-160 (real photographs).
+- Run PyTorch forward on the host CPU/GPU.
+- Quantize exit confidences to Q0.15 and pack into 512-bit beats.
+- Stream the packed cohort to `host_san_scan_e2e.cpp` over stdin.
+- Run `krnl_san_scan` on the U250.
+- Read back histogram, catastrophe count, and MAC total.
+- Validate bit-exactly against a Python golden scan.
+
+Measured on the DL380 (CPU forward, no GPU):
+
+```
+SAN_FPGA_ENDTOEND_PASS bit_exact=True
+forward_ms=18373.49 pack_ms=40.631 host_total_ms=136.528
+host_kernel_ms=0.658 host_dma_h2d_ms=0.120 host_dma_d2h_ms=0.145
+```
+
+The host↔card timing (setup + DMA + kernel) is ~136 ms for the full 3 925-image
+cohort, dominated by the one-time `xclbin` load only (no partial
+reconfiguration); the same host process can enqueue further cohorts without
+reloading. The kernel itself is <1 ms. The packed cohort is 62 848 bytes =
+982 beats × 64 bytes.
+
+The Python script supports `--mock-host` for CI environments without an FPGA.
+Deployment note: in the privileged DL380 pod the XRT runtime expects
+`/opt/xilinx/xrt`; the working configuration symlinks `/opt/xilinx` to the
+host installation at `/host/opt/xilinx`.

@@ -82,15 +82,23 @@ async function validateSourceSet({ sourceDir, mapToDist }) {
 
     const renderedRustCount = countRenderedByLang(html, 'rust');
     const renderedSioCount = countRenderedByLang(html, 'sio');
-    const requiredRustCount = sourceRustCount + sourceSioCount;
 
-    if (renderedSioCount > 0) {
-      errors.push(`Rendered sio language token found (expected remapped to rust): ${toPosix(distRel)}`);
+    // sio fences must render under their own language id (real grammar,
+    // website/src/shiki/sounio.tmLanguage.json) — never remapped to rust.
+    // Remapping to rust was the defect this check used to require: it
+    // tokenized every &!, ++, var, and with-clause using Rust's keywords,
+    // on a language whose own CLAUDE.md lists those as compile errors.
+    if (renderedSioCount < sourceSioCount) {
+      errors.push(
+        `Missing real sio-highlighted blocks: ${toPosix(path.relative(root, abs))} -> ${toPosix(distRel)} (expected >= ${sourceSioCount} data-language="sio" blocks, got ${renderedSioCount})`
+      );
     }
 
-    if (renderedRustCount < requiredRustCount) {
+    // Native rust fences (unrelated to any sio content) still owe their own
+    // rendered blocks — sio fences must not silently satisfy this count.
+    if (renderedRustCount < sourceRustCount) {
       errors.push(
-        `Insufficient rust-highlighted blocks for sio fences: ${toPosix(path.relative(root, abs))} (expected >= ${requiredRustCount}, got ${renderedRustCount})`
+        `Insufficient rust-highlighted blocks for native rust fences: ${toPosix(path.relative(root, abs))} (expected >= ${sourceRustCount}, got ${renderedRustCount})`
       );
     }
 

@@ -16,7 +16,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.competitive-po
 
 ## Executive Summary
 
-Sounio occupies a **unique and uncontested niche** in 2026: it is the only production-grade
+Sounio occupies a **unique and uncontested niche** in 2026: it is, to our knowledge, the only
 systems programming language whose type system natively encodes epistemic trust. No competitor
 provides compile-time confidence gates, GUM-compliant uncertainty propagation, or ISO 1788
 interval arithmetic *in the standard library*. The three closest challengers each miss at least
@@ -156,8 +156,11 @@ let w: Knowledge[f64] = measure(2.0,  uncertainty: 0.01)
 let result = v * w   // GUM §5.1.2: u_c² = u_v² * w² + u_w² * v²  (automatic)
 ```
 
-GUM variance propagation is computed **by the compiler**, not by a library at runtime.
-The uncertainty budget is part of the type, not a value carried at runtime.
+GUM variance propagation is computed at runtime by `stdlib/epistemic/` (e.g. the delta-method
+`mul` in `composed_effects.sio`), operating on the `Knowledge<T>` type. The compiler's role is
+type- and effect-checking: `Observe` is a registered algebraic effect (`self-hosted/check/effects.sio`)
+that a function must declare to read an unobserved epistemic value. The compiler does not itself
+evaluate the GUM formulas.
 
 ### 4. ISO 17025 Metrology in stdlib/metrology/
 

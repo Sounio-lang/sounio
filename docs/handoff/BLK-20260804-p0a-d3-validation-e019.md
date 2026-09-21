@@ -11,34 +11,28 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.handoff.blk-20
 
 ```text
 Blocker-ID: BLK-20260804-p0a-d3-validation-e019
-Status: classified
+Status: closed
 Severity: B1
 Class: compiler-semantics
-Owner: unassigned (needs check.sio / specializer lane; do not steal from issue901 claim)
-Lane: p0a-d3-residual-20260804 (residual after fixed-array OLS closeout)
-Worktree: /tmp/sounio-p0a-d3-20260804
-Branch: research/p0a-d3-residual-20260804
-Files-Owned: (open — likely self-hosted/check/** when claimed)
-Do-Not-Touch: self-hosted/check/check.sio while issue901 claim is ACTIVE
-Repro: ./bin/souc compile /tmp/neg.sio
-  with `use stats::validation::{linear_regression}` + fixed [f64;5] args
-Observed: error[E019] method calls are not supported for this type (during multi-module check)
-Expected: slice/array `.len()` on `&[f64]` resolves under Madaros multi-module check
-Acceptance-Gate: validation import compiles+runs textbook OLS under default Madaros;
-  negative control in scripts/ci/madaros_ols_fixed_e2e_gate.sh must flip from E019 to green
-  only when this blocker closes (update gate accordingly)
+Owner: cursor--madaros-d3-d6-effects-20260806
+Lane: madaros-d3-d6-effects-20260806
+Closed-utc: 2026-08-06
+Closeout: stats::validation migrated to fixed [f64;256]+n (no open-slice .len());
+  Madaros import green via scripts/ci/madaros_validation_import_gate.sh and
+  positive control in scripts/ci/madaros_ols_fixed_e2e_gate.sh.
+  Checker also accepts .len() on TyArray/TySlice via len_method_supported when
+  present; science path no longer depends on open-slice methods.
+Acceptance-Gate: MADAROS_VALIDATION_IMPORT_GATE_OK + MADAROS_OLS_FIXED_E2E_GATE_OK
 Evidence-Level: E3
-Evidence: scripts/ci/madaros_ols_fixed_e2e_gate.sh negative control; /tmp/p0a_val.err
-Fallback-Path: use stats::ols_fixed::{linear_regression_n,r_squared_n} + cooks_distance + shapiro_wilk
-Legacy-Kept: yes (stats::validation unchanged)
+Legacy-Kept: yes (ols_fixed remains the thinner OLS surface)
 LLM-Offload: not-required
-Next-Action: When issue901 / check.sio write window is free, claim check surfaces and
-  teach Madaros multi-module check to resolve `.len()` on slice/array types (or rewrite
-  validation to fixed arrays). Do not widen ols_fixed claims beyond fixed buffers.
+Residual: open-slice &[f64] + imported .len() lowering is NOT claimed closed
+  (KNOWN_LIMITATIONS D3 remaining surface).
 ```
 
 ## Context
 
-Attention P0=A closed the **science-usable** OLS path under Madaros via fixed arrays.
-The historical "OLS multi-mod still red with E019" note is narrowed: only
-`stats::validation` slice methods remain red; cooks/shapiro/ols_fixed are green.
+Attention P0=A closed the science-usable OLS path under Madaros via fixed arrays.
+Shepherd-merge `1e74b97610` migrated `stats::validation` to the same fixed-buffer
+contract. The historical E019 negative control is retired; gates pin
+`SOUNIO_STDLIB_PATH=$ROOT/stdlib` so a foreign stdlib cannot revive the false red.

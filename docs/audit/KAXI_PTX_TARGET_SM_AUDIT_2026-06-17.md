@@ -9,6 +9,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.kaxi-ptx
 
 # K-AXI → PTX emitter correctness audit — 2026-06-17
 
+> The `ACCEPT=318/318` on this page is Slurm job 4311 (2026-06-17), a JIT-accept receipt, not the byte-compare golden gate. The golden gate on 2026-08-18 measured **0/318** PASS, rc=1, 80 s (#1915). Do not read this dated audit as current 318/318.
+
 Static, local audit of every `(pattern × mode)` PTX emitted by
 `./bin/kretikos kaxi-emit-ptx … --no-ptxas` (318 combos: 53 patterns × 6 modes).
 No GPU / ptxas required for these checks.

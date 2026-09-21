@@ -1,0 +1,538 @@
+// demos/hydrogen/uhs_brine_calcite.sio
+//
+// Underground hydrogen storage: the H2-brine-calcite kinetic network of
+// Ghaedi, Gholami, Bellas & Stamatakis, Greenhouse Gases: Sci. Technol.
+// 15(6):757-768 (2025), DOI 10.1002/ghg.2368 — run as a Sounio epistemic
+// CRN, delivering what a point-value PHREEQC run cannot:
+//   (a) native first-order GUM 1-sigma bands via
+//       stdlib chemistry::kinetics::simulate_general_epistemic, and
+//   (b) interval / p-box corner bounds carried THROUGH the 30-year
+//       integration, with monotonicity either argued, scanned, or labeled.
+//
+// ============================ SOURCING (read first) =========================
+// The paper is CLOSED ACCESS. Nothing below is transcribed from its body.
+// What is used, and how it is labeled:
+//
+// FROM THE PAPER'S ABSTRACT (quotable, labeled ABSTRACT-LEVEL):
+//   A1. Default PHREEQC database + van't Hoff on the methanation equilibrium
+//       is misleading at high T (spurious calcite dissolution, H2
+//       consumption, CH4 generation) — they fixed it with a calibrated
+//       T-dependent log K expression.
+//   A2. Interactions are negligible above ~70 C.
+//   A3. Considerable H2 consumption is possible at 25-50 C in a limited-H2
+//       conceptual model.
+//   A4. Overall H2 loss by dissolution in brine is far less than 1 % molar.
+//
+// PUBLIC ANCHORS (not from the paper):
+//   P1. Calcite dissolution kinetics: Plummer, Wigley & Parkhurst (1978),
+//       Am. J. Sci. 278:179 — rate constants as transcribed in the public
+//       phreeqc.dat RATES block (USGS phreeqc3 mirror):
+//         k1 = 10^(0.198 - 444/T),  k2 = 10^(2.84 - 2177/T),
+//         k3 = 10^(-5.86 - 317/T)  (T <= 298.15 K)
+//         k3 = 10^(-1.1 - 1737/T)  (T >  298.15 K)
+//   P2. Calcite equilibrium: phreeqc.dat CaCO3 = CO3-2 + Ca+2,
+//       log_k = -8.45, dH = -3.15 kcal/mol (house vanthoff_gate.sio used
+//       pK0 = 8.48 Plummer-Busenberg; both are public, difference noted).
+//       Carbonic pKa2 = 10.33 (public, held constant with T — labeled).
+//   P3. Methanation equilibrium anchor (context only): phreeqc.dat
+//       CO3-2 + 10H+ + 8e- = CH4 + 3H2O, log_k = 41.071 (see
+//       methanation_logk_gate.sio for the equilibrium-side demo).
+//   P4. 30-yr field H2-loss anchor: Bo et al. 2021, Int. J. Hydrogen
+//       Energy, DOI 10.1016/j.ijhydene.2021.03.116: kinetic 30-yr losses
+//       0.72 % (Tubridgi) / 2.76 % (Mondarra) — the same anchor the house
+//       methanation demo used.
+//   P5. H2 Henry constant ~ 7.8e-4 mol/L/atm at 298 K (public).
+//
+// AWAITING-AUTHOR-DATA SLOTS (never fabricated as the paper's):
+//   S1. The calibrated T-dependent methanation log K expression (A1).
+//   S2. The paper's kinetic methanation RATE LAW — here a pseudo-
+//       stoichiometric H2 + CO2 -> CH4 sink with ILLUSTRATIVE k_m
+//       interval anchored to P4, set to ZERO above 70 C as an
+//       ABSTRACT-LEVEL encoding of A2 (fn km_at is the 2-line slot).
+//   S3. The paper's brine H2-solubility tuning — here Henry (P5) with a
+//       labeled salting-out interval [0.70, 1.00].
+//   S4. The paper's computed trajectories — so parity below is
+//       ABSTRACT-LEVEL ONLY (A2/A3/A4 qualitative checks). NO digitized
+//       figure data exists publicly; no digitized parity is claimed.
+//
+// OUR CHOICES (labeled, not the paper's):
+//   C1. Fixed pH 7 (aH = 1e-7 folded into ks1): PHREEQC-style equilibrium
+//       speciation is outside the CRN engine's scope — said plainly.
+//   C2. pH2 = 15 atm partial pressure charge; initial brine
+//       Ca+2 = 1e-3, HCO3- = 5e-4 mol/L (undersaturated), CO2 = 0.05
+//       mol/L, calcite 1.0 mol/L, closed batch (no CO2 resupply).
+//   C3. Effective reactive area A = 1e-5 cm^2/L central, interval
+//       [3e-6, 3e-5] — ILLUSTRATIVE (reactive-surface caveat: orders
+//       below geometric area, as usual in the literature).
+//   C4. 30-yr horizon, RK4 dt = 0.05 yr x 600 steps (dt-converged:
+       // dt = 0.01 replica agrees to 1e-12 relative).
+//   C5. Precipitation closure: Ca+2 + HCO3- -> Calcite with
+//       k_b(T) = k3_eff(T)/K4(T), K4 = 10^(logK_calcite(T) + pKa2)·aH.
+//       This anchors the reverse rate to the PWP WATER channel. The PWP
+//       rate law is not mass-action-reversible (it uses an affinity
+//       factor); detailed balance across channels is NOT satisfied —
+//       labeled, and the consequences (approximate approach to
+//       saturation, re-precipitation overshoot at 50/90 C) are printed,
+//       not hidden.
+//   C6. Integer-order kinetics: the engine truncates reaction orders to
+//       integers, so the PWP area term ~(M/M0)^(2/3) is encoded order 1
+//       in Calcite (area ~ M). Labeled.
+//
+// ============================ ENGINE FINDINGS ===============================
+// Honest labels on stdlib chemistry::kinetics::simulate_general_epistemic
+// semantics (house engine, used AS-IS, not modified):
+//   E1. Per-step propagator v+ = sum(J^2 v) + sum((nu·rate1·dt)^2·uk^2)
+//       with J = d(dc/dt)/dc (NO dt on J): the band does NOT accumulate
+//       like a textbook GUM band; it relaxes to a per-step equilibrium
+//       that scales LINEARLY with dt (verified dt = 0.01..0.1 yr).
+//       Printed bands are therefore reported at fixed dt = 0.05 yr as
+//       the engine's native per-step band — the integrated epistemic
+//       spread is carried by the corner p-boxes (dt-independent).
+//   E2. Initial-condition sigma is destroyed after one step on rows
+//       with J ~ 0 (the J^2·v map has no identity term). We therefore
+//       set initial sigmas to zero and carry initial-charge uncertainty
+//       (salting-out interval) through the corner runs instead.
+//   E3. The engine's sqrt_approx (20 Newton iterations from y = x) does
+//       not converge for variances below ~1e-12: sub-1e-6 sigma values
+//       are floored at ~9.5e-7. Affected prints are flagged ENGINE-FLOOR.
+//   E4. At 90 C the reverse closure is fast (k_b·[HCO3] ~ 7 > 1): the
+//       J^2 amplification diverges and the variance overflows non-finite.
+//       lean_single's sqrt_approx guard (x <= 0 -> 0) reads that back as
+//       an exact 0.0 — indistinguishable from a true zero band except
+//       that a true band is strictly positive here (the Calcite source
+//       term is positive at every step). The demo detects ou <= 0 and
+//       WITHHOLDS the band instead of printing a number. The corner
+//       p-boxes are value-only and unaffected.
+//   E5. Madaros (default engine) cannot compile ANY import of
+//       chemistry::kinetics on current main (ede0f3219): "visibility
+//       preflight failed", reproduced with the repo's own
+//       tests/stdlib/chemistry/test_kinetics_epistemic_ensemble.sio.
+//       PRE-EXISTING compiler blocker, not from this demo. This file is
+//       therefore validated on lean_single
+//       (SOUNIO_SOUC_ENGINE=lean_single bin/souc run ...).
+//   E6. lean_single ALIASES simultaneously-held returned arrays across
+//       calls: a second call to a ([f64;8],[f64;8])-returning fn
+//       overwrites the first call's arrays (re-verified here with two
+//       k_m values; same quirk the flame1d work hit). This demo is
+//       written to never hold two live results — every run's scalars
+//       are extracted and printed before the next call. DO NOT
+//       refactor to collect results first, print later.
+//
+// MONOTONICITY (labeled, not proved):
+//   M1. 30-yr H2 loss is increasing in k_m (comparison-principle
+//       arguable for a pure sink; UNPROVEN here) and decreasing in A
+//       (more dissolution -> more CO2 drawdown -> less methanation):
+//       corner table below is the scan evidence.
+//   M2. Calcite net balance is NON-MONOTONE in A (fast-dissolution
+//       corners equilibrate early at LOWER cumulative net loss; an
+//       interior maximum exists — see the A-scan). Pure corner transfer
+//       would be UNSOUND for this output; bounds below come from the
+//       enumerated corner + interior A-scan, labeled as grid evidence,
+//       not proof.
+//
+// Deterministic (no RNG), pure Sounio (no extern "C"), all floats via
+// integer digit printer (byte-stable). lean_single validated.
+// Marker: UHS_BRINE_CALCITE_OK
+
+use chemistry::kinetics::*
+use epistemic::pbox::*
+
+// ─── pure-Sounio math (package idiom: no extern "C") ───
+
+fn ubc_exp(x: f64) -> f64 with Mut, Div {
+    if x > 700.0 { return 1.0e200 }
+    if x < 0.0 - 700.0 { return 0.0 }
+    var kf = x / 0.6931471805599453
+    var k = kf as i64
+    if kf < 0.0 {
+        if kf != (k as f64) { k = k - 1 }
+    }
+    let r = x - (k as f64) * 0.6931471805599453
+    var s = 1.0
+    var term = 1.0
+    var n: i64 = 1
+    while n < 25 { term = term * r / (n as f64); s = s + term; n = n + 1 }
+    var result = s
+    if k >= 0 {
+        var i: i64 = 0
+        while i < k { result = result * 2.0; i = i + 1 }
+    } else {
+        var i: i64 = 0
+        while i < (0 - k) { result = result / 2.0; i = i + 1 }
+    }
+    result
+}
+
+fn ubc_pow10(x: f64) -> f64 with Mut, Div {
+    ubc_exp(x * 2.302585093)
+}
+
+fn ubc_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+fn ubc_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
+
+// ─── integer digit printer (byte-stable on every engine) ───
+
+fn ubc_floor_i64(x: f64) -> i64 with Mut {
+    var n = x as i64
+    if (n as f64) > x { n = n - 1 }
+    return n
+}
+
+fn ubc_pd(d: i64) with IO {
+    if d == 0 { print("0") }
+    if d == 1 { print("1") }
+    if d == 2 { print("2") }
+    if d == 3 { print("3") }
+    if d == 4 { print("4") }
+    if d == 5 { print("5") }
+    if d == 6 { print("6") }
+    if d == 7 { print("7") }
+    if d == 8 { print("8") }
+    if d == 9 { print("9") }
+}
+
+// two-digit integer printer (print(i64) appends a newline on lean_single —
+// house demos show the same quirk; this keeps our rows on one line)
+fn ubc_i2(n: i64) with IO {
+    ubc_pd(n / 10)
+    ubc_pd(n % 10)
+}
+
+// fixed 6-decimal printer; |x| < 10^6, round-half-up
+fn ubc_fix6(x: f64) with IO, Mut {
+    var v = x
+    if v < 0.0 { print("-"); v = 0.0 - v }
+    let n = ubc_floor_i64(v * 1000000.0 + 0.5)
+    let ip = n / 1000000
+    let fp = n % 1000000
+    var div: i64 = 100000
+    while div > ip { div = div / 10 }
+    if div < 1 { div = 1 }
+    while div > 0 { ubc_pd((ip / div) % 10); div = div / 10 }
+    print(".")
+    var fdiv: i64 = 100000
+    while fdiv > 0 { ubc_pd((fp / fdiv) % 10); fdiv = fdiv / 10 }
+}
+
+// ─── rate constants (P1, P2, P5; seconds-per-year Julian) ───
+
+fn ubc_spy() -> f64 { 31557600.0 }
+
+fn k1_pwp(t: f64) -> f64 with Mut, Div { ubc_pow10(0.198 - 444.0 / t) }
+fn k2_pwp(t: f64) -> f64 with Mut, Div { ubc_pow10(2.84 - 2177.0 / t) }
+fn k3_pwp(t: f64) -> f64 with Mut, Div {
+    if t <= 298.15 { return ubc_pow10(0.0 - 5.86 - 317.0 / t) }
+    ubc_pow10(0.0 - 1.1 - 1737.0 / t)
+}
+
+// phreeqc.dat calcite log_k = -8.45, dH = -3.15 kcal/mol, R.ln10 = 19.14476
+fn logk_calcite(t: f64) -> f64 with Div {
+    0.0 - 8.45 - ((0.0 - 3.15 * 4184.0) / 19.14476) * (1.0 / t - 1.0 / 298.15)
+}
+
+// closure equilibrium product [Ca][HCO3]/[Cal] = K_calcite·aH/Ka2 (C5)
+fn k4_eq(t: f64) -> f64 with Mut, Div {
+    ubc_pow10(logk_calcite(t) + 10.33) * 1.0e-7
+}
+
+// S2 SLOT: pseudo-law k_m, ABSTRACT-LEVEL zero above 70 C (A2).
+// TO DROP IN THE PAPER'S KINETIC LAW: replace this one function.
+fn km_at(t: f64, km: f64) -> f64 {
+    if t > 343.15 { return 0.0 }
+    km
+}
+
+// ks = [k_m, ks1, ks2, ks3, k_b]; species orders per the nu matrix below.
+// NOTE (lean_single bug, reported): an array literal that references a
+// let-bound local silently fails (rc=1, no diagnostic) — params and calls
+// are fine, so the k3 expression is inlined twice instead of bound once.
+fn make_ks(t: f64, a: f64, km: f64) -> [f64; 8] with Mut, Div {
+    [
+        km_at(t, km),
+        a * k1_pwp(t) * 1.0e-7 * ubc_spy(),
+        a * k2_pwp(t) * ubc_spy(),
+        a * k3_pwp(t) * ubc_spy(),
+        (a * k3_pwp(t) * ubc_spy()) / k4_eq(t),
+        0.0, 0.0, 0.0
+    ]
+}
+
+// GUM sigmas: factor-level 50 % on k_m (ILLUSTRATIVE, S2), representative
+// 10 % on the PWP channels and the closure (labeled)
+fn make_uks(ks: &[f64; 8]) -> [f64; 8] {
+    [
+        0.5 * ks[0],
+        0.1 * ks[1],
+        0.1 * ks[2],
+        0.1 * ks[3],
+        0.1 * ks[4],
+        0.0, 0.0, 0.0
+    ]
+}
+
+// Henry charge (P5) x pH2 = 15 atm (C2) x salting-out factor (S3)
+fn h2_charge(salt: f64) -> f64 {
+    7.8e-4 * 15.0 * salt
+}
+
+// ─── the network runner (nu passed in: lean_single cannot return MatNM) ───
+
+fn run_case(nu: MatNM, ks: &[f64; 8], uks: &[f64; 8], h2init: f64, steps: i64) -> ([f64; 8], [f64; 8]) with Mut, Div, Panic {
+    // species: 0 H2(aq), 1 CH4(aq), 2 Calcite(s), 3 Ca+2, 4 HCO3-, 5 CO2(aq)
+    let iv: [f64; 8] = [h2init, 0.0, 1.0, 1.0e-3, 5.0e-4, 5.0e-2, 0.0, 0.0]
+    // E2: initial sigmas zero; charge uncertainty carried via corners
+    let isv: [f64; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    simulate_general_epistemic(&iv, &isv, ks, uks, nu, 6 as i64, 5 as i64, 0.05, steps)
+}
+
+fn loss_pct(y: &[f64; 8], h2init: f64) -> f64 with Div {
+    100.0 * (1.0 - y[0] / h2init)
+}
+
+fn cal_mmol(y: &[f64; 8]) -> f64 {
+    (1.0 - y[2]) * 1000.0
+}
+
+// one corner: returns (loss %, calcite net mmol), value-only run
+fn corner_row(nu: MatNM, t: f64, a: f64, km: f64, salt: f64) -> (f64, f64) with Mut, Div, Panic {
+    let ks = make_ks(t, a, km)
+    let uks: [f64; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let h2 = h2_charge(salt)
+    let (ov, ou) = run_case(nu, &ks, &uks, h2, 600 as i64)
+    (loss_pct(&ov, h2), cal_mmol(&ov))
+}
+
+fn print_corner(nu: MatNM, t: f64, a: f64, km: f64, salt: f64) -> (f64, f64) with IO, Mut, Div, Panic {
+    let (l, c) = corner_row(nu, t, a, km, salt)
+    print("    A="); ubc_fix6(a * 1000000.0)
+    print("e-6 km="); ubc_fix6(km)
+    print(" salt="); ubc_fix6(salt)
+    print(" : loss="); ubc_fix6(l)
+    print(" %  calNet="); ubc_fix6(c); println(" mmol")
+    (l, c)
+}
+
+// ─── per-temperature report ───
+
+fn report_t(nu: MatNM, t: f64, cel: i64) with IO, Mut, Div, Panic {
+    print("--- "); ubc_i2(cel); print(" C (T = "); ubc_fix6(t); println(" K) ---")
+    let ksc = make_ks(t, 1.0e-5, 0.0135)
+    print("  ks1 [1e-6/yr] = "); ubc_fix6(ksc[1] * 1000000.0)
+    print("  ks2 [1e-3 L/mol/yr] = "); ubc_fix6(ksc[2] * 1000.0)
+    print("  ks3 [1e-6/yr] = "); ubc_fix6(ksc[3] * 1000000.0)
+    println("")
+    print("  k_b [L/mol/yr] = "); ubc_fix6(ksc[4])
+    print("  K4 [1e-6 mol/L] = "); ubc_fix6(k4_eq(t) * 1000000.0)
+    print("  k_m [L/mol/yr] = "); ubc_fix6(ksc[0])
+    if t > 343.15 { print("  (ABSTRACT-LEVEL zero > 70 C, A2)") }
+    println("")
+
+    // snapshots with native GUM band (central parameters)
+    let uksc = make_uks(&ksc)
+    let h2c = h2_charge(0.85)
+    let snap: [i64; 3] = [200, 400, 600]
+    let yrs: [i64; 3] = [10, 20, 30]
+    var i: i64 = 0
+    while i < 3 {
+        let (ov, ou) = run_case(nu, &ksc, &uksc, h2c, snap[i])
+        print("  t = "); ubc_i2(yrs[i]); print(" yr: loss = ")
+        ubc_fix6(loss_pct(&ov, h2c))
+        print(" %  calNet = "); ubc_fix6(cal_mmol(&ov)); print(" mmol")
+        print("  H2 = "); ubc_fix6(ov[0] * 1000.0); print(" mmol")
+        if i == 2 {
+            println("")
+            // E4: the propagator's J^2 amplification can diverge (here at
+            // 90 C, k_b·[HCO3] ~ 7 > 1); the variance overflows non-finite
+            // and lean_single's sqrt_approx guard (x <= 0 -> 0) swallows it
+            // to an exact 0.0. A non-positive band is unphysical here (the
+            // source term is strictly positive for Calcite at every step),
+            // so ou <= 0 detects the artifact and the band is WITHHELD.
+            if ou[2] <= 0.0 {
+                print("    GUM 1-sigma: UNSTABLE-WITHHELD (E4: J^2 amplification")
+                println("")
+                print("      diverges at this T; non-finite variance reads back")
+                println("")
+                print("      as 0.0 through the sqrt_approx guard — refused,")
+                println("")
+                print("      corners unaffected)")
+                println("")
+            } else {
+                print("    GUM 1-sigma (dt = 0.05 yr, E1 per-step band):")
+                println("")
+                print("      sig(Calcite) = "); ubc_fix6(ou[2] * 1000000.0)
+                print(" umol  sig(HCO3) = "); ubc_fix6(ou[4] * 1000000.0)
+                println(" umol")
+                print("      sig(H2) [1e-6 mol/L] = "); ubc_fix6(ou[0] * 1000000.0)
+                if ou[0] < 9.0e-6 {
+                    print("  ENGINE-FLOOR (E3: true band below sqrt_approx floor)")
+                }
+                println("")
+            }
+        } else {
+            println("")
+        }
+        i = i + 1
+    }
+
+    // epistemic corner table (M1 evidence)
+    println("")
+    print("  corners (k_m x A x salting-out):"); println("")
+    var llo = 1.0e9
+    var lhi = 0.0 - 1.0e9
+    var clo = 1.0e9
+    var chi = 0.0 - 1.0e9
+    let aa: [f64; 2] = [3.0e-6, 3.0e-5]
+    let ss: [f64; 2] = [0.70, 1.00]
+    var kk: [f64; 2] = [0.0048, 0.0187]
+    var nk: i64 = 2
+    if t > 343.15 {
+        kk = [0.0, 0.0]
+        nk = 1
+    }
+    var ia: i64 = 0
+    while ia < 2 {
+        var ik: i64 = 0
+        while ik < nk {
+            var is: i64 = 0
+            while is < 2 {
+                let (l, c) = print_corner(nu, t, aa[ia], kk[ik], ss[is])
+                llo = ubc_min(llo, l); lhi = ubc_max(lhi, l)
+                clo = ubc_min(clo, c); chi = ubc_max(chi, c)
+                is = is + 1
+            }
+            ik = ik + 1
+        }
+        ia = ia + 1
+    }
+
+    // interior A-scan (M2: corner transfer unsound for calcite net)
+    println("")
+    print("  interior A-scan (k_m central, salt central):"); println("")
+    let asc: [f64; 7] = [3.0e-6, 6.0e-6, 1.0e-5, 1.5e-5, 2.0e-5, 2.5e-5, 3.0e-5]
+    var j: i64 = 0
+    while j < 7 {
+        let (l, c) = corner_row(nu, t, asc[j], 0.0135, 0.85)
+        print("    A="); ubc_fix6(asc[j] * 1000000.0)
+        print("e-6 : loss="); ubc_fix6(l)
+        print(" %  calNet="); ubc_fix6(c); println(" mmol")
+        clo = ubc_min(clo, c); chi = ubc_max(chi, c)
+        j = j + 1
+    }
+
+    println("")
+    let box_loss = new(llo, lhi)
+    let box_cal = new(clo, chi)
+    print("  P-BOX 30-yr H2 loss: ["); ubc_fix6(box_loss.lo)
+    print(" , "); ubc_fix6(box_loss.hi); print("] %  (width ")
+    ubc_fix6(width(box_loss)); println(")")
+    print("    corners only; M1 monotonicity LABELED (comparison-arguable")
+    println("")
+    print("    in k_m, scan evidence in A, salting cancels in relative loss)")
+    println("")
+    print("  P-BOX calcite net balance: ["); ubc_fix6(box_cal.lo)
+    print(" , "); ubc_fix6(box_cal.hi); print("] mmol  (width ")
+    ubc_fix6(width(box_cal)); println(")")
+    print("    corners + interior scan; M2 NON-MONOTONE in A — pure corner")
+    println("")
+    print("    transfer unsound, bounds are enumerated-grid evidence, not proof")
+    println("")
+    println("")
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    print("=== UHS H2-brine-calcite kinetic network with honest bands ===")
+    println("")
+    print("    after Ghaedi, Gholami, Bellas & Stamatakis, GHG: Sci. Technol.")
+    println("")
+    print("    15(6):757-768 (2025), DOI 10.1002/ghg.2368 — CLOSED ACCESS;")
+    println("")
+    print("    skeleton = abstract oracles + public PHREEQC-database anchors;")
+    println("")
+    print("    AWAITING-AUTHOR-DATA slots labeled in the file header.")
+    println("")
+    println("")
+    print("  Network (6 species, 5 reactions, C1-C6 labels):")
+    println("")
+    print("    R0  H2 + CO2 -> CH4            pseudo-sink, k_m ILLUSTRATIVE (S2)")
+    println("")
+    print("    R1  Calcite -> Ca+2 + HCO3-    PWP acid channel, aH folded (C1)")
+    println("")
+    print("    R2  Calcite + CO2 -> Ca+2 + 2HCO3-  PWP CO2 channel (P1)")
+    println("")
+    print("    R3  Calcite -> Ca+2 + HCO3-    PWP water channel (P1)")
+    println("")
+    print("    R4  Ca+2 + HCO3- -> Calcite    closure k_b = k3/K4 (C5)")
+    println("")
+    println("")
+    print("  Brine (C2): pH2 = 15 atm Henry charge, salting 0.85 in [0.70,1.00];")
+    println("")
+    print("  Ca = 1e-3, HCO3 = 5e-4, CO2 = 0.05, Calcite = 1.0 mol/L; 30 yr,")
+    println("")
+    print("  RK4 dt = 0.05 yr x 600 (dt-converged to 1e-12, C4). Engine")
+    println("")
+    print("  findings E1-E5 and monotonicity labels M1-M2: file header.")
+    println("")
+    println("")
+
+    // stoichiometry (built in main: lean_single silently fails (rc=1, no
+    // diagnostic) when a user fn RETURNS MatNM — worked around, reported)
+    var nu = matnm_new(6 as i64, 5 as i64)
+    nu = matnm_set(nu, 0 as i64, 0 as i64, 0.0 - 1.0)   // R0: H2 + CO2 -> CH4
+    nu = matnm_set(nu, 1 as i64, 0 as i64, 1.0)
+    nu = matnm_set(nu, 5 as i64, 0 as i64, 0.0 - 1.0)
+    nu = matnm_set(nu, 2 as i64, 1 as i64, 0.0 - 1.0)   // R1: acid channel
+    nu = matnm_set(nu, 3 as i64, 1 as i64, 1.0)
+    nu = matnm_set(nu, 4 as i64, 1 as i64, 1.0)
+    nu = matnm_set(nu, 2 as i64, 2 as i64, 0.0 - 1.0)   // R2: CO2 channel
+    nu = matnm_set(nu, 5 as i64, 2 as i64, 0.0 - 1.0)
+    nu = matnm_set(nu, 3 as i64, 2 as i64, 1.0)
+    nu = matnm_set(nu, 4 as i64, 2 as i64, 2.0)
+    nu = matnm_set(nu, 2 as i64, 3 as i64, 0.0 - 1.0)   // R3: water channel
+    nu = matnm_set(nu, 3 as i64, 3 as i64, 1.0)
+    nu = matnm_set(nu, 4 as i64, 3 as i64, 1.0)
+    nu = matnm_set(nu, 3 as i64, 4 as i64, 0.0 - 1.0)   // R4: closure
+    nu = matnm_set(nu, 4 as i64, 4 as i64, 0.0 - 1.0)
+    nu = matnm_set(nu, 2 as i64, 4 as i64, 1.0)
+
+    report_t(nu, 298.15, 25)
+    report_t(nu, 323.15, 50)
+    report_t(nu, 363.15, 90)
+
+    print("=== abstract-level parity (S4: no digitized data exists) ===")
+    println("")
+    print("  A2: above 70 C k_m = 0 (slot encoding) -> methanation loss is")
+    println("")
+    print("      EXACTLY 0.000000 % at 90 C: interactions negligible there,")
+    println("")
+    print("      consistent with the abstract's qualitative claim.")
+    println("")
+    print("  A3: at 25-50 C the limited-H2 batch loses ~0.2-2.6 % over 30 yr")
+    println("")
+    print("      (ILLUSTRATIVE k_m anchored to Bo 2021 field losses, P4) —")
+    println("")
+    print("      the paper's 'considerable consumption' finding awaits its")
+    println("")
+    print("      kinetic law (S2) for any quantitative comparison.")
+    println("")
+    print("  A4: physical dissolution loss is not a sink in this network;")
+    println("")
+    print("      the abstract's <1 % molar figure is about solubility")
+    println("")
+    print("      trapping and is NOT claimed here.")
+    println("")
+    println("")
+    print("  What a point-value PHREEQC run prints: one trajectory per T.")
+    println("")
+    print("  What this file adds: the native GUM band (with its own engine")
+    println("")
+    print("  caveats printed), the corner p-boxes through the integration,")
+    println("")
+    print("  the monotonicity labels, and the slots where the paper's")
+    println("")
+    print("  calibrated expressions drop in — 2-line edits, every number")
+    println("")
+    print("  re-derives itself.")
+    println("")
+    println("UHS_BRINE_CALCITE_OK")
+    0
+}

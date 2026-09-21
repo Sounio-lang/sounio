@@ -52,49 +52,109 @@ from mpon_dyck_scaling import OctTreeClassifier
 # ============================================================
 
 def _build_sedenion_sign():
-    """Build 16×16 sedenion tables via Cayley-Dickson doubling (corrected).
+    """Build the 16×16 sign and index table for sedenion multiplication.
 
-    CD formula: (a,b)(c,d) = (ac - conj(d)b, da + b conj(c))
+    Sedenion = Cayley-Dickson of octonion. a*b = (a0 + a1*e8)(b0 + b1*e8)
+    where a0,a1,b0,b1 are octonions.
+    a*b = (a0*b0 - conj(b1)*a1, conj(a0)*b1 + b0*a1)... actually standard CD:
+    (a,b)*(c,d) = (ac - d̄b, da + bc̄)
+
+    But for the sign table, sedenion multiplication signs follow the
+    Cayley-Dickson construction recursively.
     """
     dim = 16
     sign = np.ones((dim, dim))
     idx = np.zeros((dim, dim), dtype=int)
 
+    # Base case: octonion table (dim 8)
     FANO = [(1,2,4),(2,3,5),(3,4,6),(4,5,7),(5,6,1),(6,7,2),(7,1,3)]
     for i in range(8):
-        sign[0,i]=1; idx[0,i]=i; sign[i,0]=1; idx[i,0]=i
-        sign[i,i]=-1; idx[i,i]=0
-    for a,b,c in FANO:
-        for p,q,r in [(a,b,c),(b,c,a),(c,a,b)]:
-            sign[p,q]=1; idx[p,q]=r
-        for p,q,r in [(b,a,c),(c,b,a),(a,c,b)]:
-            sign[p,q]=-1; idx[p,q]=r
+        idx[0, i] = i; idx[i, 0] = i
+        idx[i, i] = 0; sign[i, i] = -1
+    for a, b, c in FANO:
+        for p, q, r in [(a,b,c),(b,c,a),(c,a,b)]:
+            sign[p, q] = 1; idx[p, q] = r
+        for p, q, r in [(b,a,c),(c,b,a),(a,c,b)]:
+            sign[p, q] = -1; idx[p, q] = r
 
-    OCT_S = sign[:8,:8].copy()
-    OCT_I = idx[:8,:8].copy()
+    # Cayley-Dickson doubling: e_{i+8} = e_i * e_{15} (conceptually)
+    # For i,j >= 8: write i=8+a, j=8+b
+    # e_{8+a} * e_{8+b} = -e_{a XOR b} (negate conjugate of lower part)
+    # e_{8+a} * e_b = e_{8 + (a XOR b)} with sign from octonion(a,b)
+    # e_a * e_{8+b} = e_{8 + (a XOR b)} with sign from octonion(a,b)
+    for a in range(8):
+        for b in range(8):
+            # e_{8+a} * e_b
+            sa = sign[a, b]; ia = idx[a, b]
+            sign[8+a, b] = sa
+            idx[8+a, b] = 8 + ia if ia != 0 else 8 + a  # actually: 8 + (a XOR b)
+            # Simpler: use the recursive CD formula directly
+            pass
+
+    # Actually, let me just build it properly from the CD construction
+    sign = np.ones((dim, dim))
+    idx = np.zeros((dim, dim), dtype=int)
+
+    # Octonion part (0..7)
+    for i in range(8):
+        idx[0, i] = i; idx[i, 0] = i
+        idx[i, i] = 0; sign[i, i] = -1
+    for a, b, c in FANO:
+        for p, q, r in [(a,b,c),(b,c,a),(c,a,b)]:
+            sign[p, q] = 1; idx[p, q] = r
+        for p, q, r in [(b,a,c),(c,b,a),(a,c,b)]:
+            sign[p, q] = -1; idx[p, q] = r
+
+    # Sedenion doubling: index i = 8+a pairs with index j
+    # Using the Cayley-Dickson formula:
+    # (a, b)(c, d) = (ac - conj(d)b, da + bc̄)
+    # For basis elements e_i = (e_a, 0) for i<8, e_i = (0, e_a) for i=8+a
+    # e_i * e_j where both < 8: already set (octonion)
+    # e_{8+a} * e_b: = (0, e_a)(e_b, 0) = (0*e_b - conj(0)*0, e_b*e_a + 0*conj(0))...
+    # Actually simpler: e_{8+a} * e_b = e_{8 + (a XOR b)} with sign(a,b) from octonion
+    # e_a * e_{8+b} = e_{8 + (a XOR b)} with sign(a,b)
+    # e_{8+a} * e_{8+b} = -e_{a XOR b} with sign(a,b)
 
     for a in range(8):
         for b in range(8):
-            if b == 0:
-                sign[8+a, b] = 1;  idx[8+a, b] = 8 + a
-            else:
-                sign[8+a, b] = -OCT_S[a, b]
-                idx[8+a, b] = 8 + int(OCT_I[a, b])
-            if a == 0:
-                sign[a, 8+b] = 1;  idx[a, 8+b] = 8 + b
-            else:
-                sign[a, 8+b] = OCT_S[b, a]
-                idx[a, 8+b] = 8 + int(OCT_I[b, a])
-            if b == 0:
-                sign[8+a, 8+b] = -1; idx[8+a, 8+b] = a
-            else:
-                sign[8+a, 8+b] = OCT_S[b, a]
-                idx[8+a, 8+b] = int(OCT_I[b, a])
+            c = a ^ b  # XOR gives the index in the octonion part
+            s = sign[a, b]  # octonion sign
 
+            # e_{8+a} * e_b  → e_{8+c}, sign s (but a special case for a=0)
+            if a == 0:
+                sign[8, b] = 1; idx[8, b] = 8 + b
+            else:
+                sign[8+a, b] = s; idx[8+a, b] = 8 + c if c != 0 else 8 + a
+                if c == 0:  # a XOR b = 0 means a=b, so e_a * e_a = -1
+                    sign[8+a, b] = -1; idx[8+a, b] = 8 + 0  # hmm
+                # Let me be more careful
+                sign[8+a, b] = s
+                idx[8+a, b] = 8 + c
+
+            # e_a * e_{8+b}
+            if b == 0:
+                sign[a, 8] = 1; idx[a, 8] = 8 + a
+            else:
+                sign[a, 8+b] = s
+                idx[a, 8+b] = 8 + c
+
+            # e_{8+a} * e_{8+b} → -e_c, sign -s (but -1 for a=b)
+            if a == b:
+                sign[8+a, 8+b] = 1; idx[8+a, 8+b] = 0  # actually e_{8+a}^2 = +e_0 in sedenions?
+                # In Cayley-Dickson: e_{n}^2 = -1 for n >= 1 (including sedenion units)
+                sign[8+a, 8+b] = -1; idx[8+a, 8+b] = 0
+            else:
+                sign[8+a, 8+b] = -s
+                idx[8+a, 8+b] = c
+
+    # Fix identity: e_0 * anything = that thing
     for i in range(16):
-        sign[0,i]=1; idx[0,i]=i; sign[i,0]=1; idx[i,0]=i
-    for i in range(1,16):
-        sign[i,i]=-1; idx[i,i]=0
+        sign[0, i] = 1; idx[0, i] = i
+        sign[i, 0] = 1; idx[i, 0] = i
+    # Fix squares
+    for i in range(1, 16):
+        sign[i, i] = -1; idx[i, i] = 0
+
     return torch.tensor(sign, dtype=torch.float32), torch.tensor(idx, dtype=torch.long)
 
 

@@ -1,0 +1,81 @@
+// #1649: the two side pools must LATCH on exhaustion, not drop the payload.
+//
+// ir_arena_put_name used to write NAME_LEN = 0 and ir_arena_put_args used to
+// write ARG_COUNT = 0 when their pool filled, and carry on. A dropped name
+// changes call resolution; a dropped argument list is a different program. Both
+// are rc=12 with the alarm removed.
+//
+// This witness proves the alarm exists AND fires exactly where arithmetic says
+// it must. No capacity is reduced: the pools are consumed for real.
+//
+//   name pool: 4194304 bytes / 128-byte names  = 32768 stores, fires at 32768
+//   arg  pool: 262144 slots  / 64 args a call  =  4096 calls,  fires at 4096
+//
+// Writing to a FRESH slot each time is what keeps the store from being deduped —
+// put_name only keeps the binding when that same slot already holds that name —
+// so the name contents need not vary.
+
+use ir::ir::*
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    // ---- name pool ----------------------------------------------------------
+    if ir_instr_arena_init() != IR_ARENA_OK { print("INIT_FAIL\n")  return 10 }
+    if ir_instr_arena_violation() { print("DIRTY_START\n")  return 11 }
+
+    let nm = Name { buf: [65; 128], len: 128 }
+    var fired: i64 = 0 - 1
+    var i: i64 = 0
+    while i < 40000 {
+        ir_arena_put_name(i, nm)
+        if ir_instr_arena_violation() {
+            fired = i
+            i = 40000
+        }
+        i = i + 1
+    }
+    print("NAME_POOL_FIRED_AT ")
+    print_int(fired)
+    print("\n")
+    if fired < 0 { print("NAME_POOL_NEVER_FIRED\n")  return 12 }
+    if fired != 32768 { print("NAME_POOL_WRONG_BOUNDARY\n")  return 13 }
+    if IR_ARENA_VIOLATION_KIND != IR_ARENA_VIOLATION_NAME_POOL {
+        print("NAME_POOL_WRONG_KIND\n")
+        return 14
+    }
+    // The dropped-name slot must be visibly empty, not silently stale.
+    if IR_A_NAME_LEN[fired as usize] != 0 { print("NAME_NOT_CLEARED\n")  return 15 }
+
+    // ---- arg pool -----------------------------------------------------------
+    // init clears the violation flag but deliberately NOT the pool lengths, so
+    // the arg pool is measured on its own budget regardless of the above.
+    if ir_instr_arena_init() != IR_ARENA_OK { print("REINIT_FAIL\n")  return 20 }
+    if ir_instr_arena_violation() { print("VIOLATION_NOT_CLEARED\n")  return 21 }
+
+    let empty: Option<Box<IrRegList>> = None
+    var afired: i64 = 0 - 1
+    var j: i64 = 0
+    while j < 6000 {
+        ir_arena_put_args(j, empty, 64)
+        if ir_instr_arena_violation() {
+            afired = j
+            j = 6000
+        }
+        j = j + 1
+    }
+    print("ARG_POOL_FIRED_AT ")
+    print_int(afired)
+    print("\n")
+    if afired < 0 { print("ARG_POOL_NEVER_FIRED\n")  return 22 }
+    if afired != 4096 { print("ARG_POOL_WRONG_BOUNDARY\n")  return 23 }
+    if IR_ARENA_VIOLATION_KIND != IR_ARENA_VIOLATION_ARG_POOL {
+        print("ARG_POOL_WRONG_KIND\n")
+        return 24
+    }
+    if IR_A_ARG_COUNT[afired as usize] != 0 { print("ARGS_NOT_CLEARED\n")  return 25 }
+
+    // The driver consults this; it must say so out loud.
+    if !ir_arena_report_violation() { print("REPORT_SILENT\n")  return 26 }
+
+    print("IR_ARENA_POOL_WITNESS_PASS\n")
+    0
+}

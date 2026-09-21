@@ -1,9 +1,21 @@
 # Claude Code memory lanes (`-workspace-sounio`)
 
-Files live under **project memory** (not in git):
+Files live under **project memory** (not in git). There are **two habitats on this image**, and
+which one you are writing to depends on how your session was launched — check before assuming a
+file you wrote is visible to anyone else:
 
-- **Typical path:** `~/.claude/projects/-workspace-sounio/memory/`
-- **Remote habitat (this image):** `/workspace/.home/openvscode-server/.claude/projects/-workspace-sounio/memory/`
+| habitat | path | what lives there |
+|---|---|---|
+| **shared** | `/workspace/.home/openvscode-server/.claude/projects/-workspace-sounio/memory/` | the lanes indexed below |
+| **per-agent** | `/workspace/.home/openvscode-server/.agents/<lane>/.claude/projects/-workspace-sounio/memory/` | that lane's own memory, e.g. `.agents/claude-3/…` |
+
+- **Typical path elsewhere:** `~/.claude/projects/-workspace-sounio/memory/`
+- Each habitat has its **own `MEMORY.md`** serving as that habitat's index. The tables below cover
+  the shared one only.
+- **A file written to a per-agent habitat is invisible to an agent reading the shared one, and
+  vice versa.** Measured 2026-08-24: 314 files shared, 45 under `.agents/claude-3/`, with no
+  overlap in the recent entries. If you want a finding read by other lanes, put it in the
+  repository — a commit message, a script header, a doc — not in memory.
 
 ## Reading policy (token hygiene)
 
@@ -144,6 +156,30 @@ Style, identity, session UX, Garden journal — **high token cost** if read toge
 
 ---
 
+## Lane: `exact_algebra_zd`
+
+Cayley-Dickson zero-divisor fibers, the 168-theorem, the Lean development in
+`formal/lean4/SounioZDFiberAntisym.lean`, and the deviation law. **Per-agent habitat**
+(`.agents/claude-3/…`), not the shared one.
+
+| File | When to read |
+|------|----------------|
+| `zd-t1-leg-closed-2026-08-13.md` | The deviation law, the transfer rows, the Lean dev loop and its traps |
+| `zd-transfer-matrix-closes-2026-08-08.md` | The 2×2 transfer matrix |
+| `zd-strategy-reset-spectral-completeness-2026-08-07.md` | What the headline claim actually is |
+| `ontology-frontiers-reproducibility-2026-08-24.md` | Which `.owl` inputs are fetchable; **chebi is not** |
+| `cd-tower-168-acts-on-zd-fibers-2026-07-11.md` | The orbit theorem |
+| `cd-tower-168-known-kirshtein-2026-07-11.md` | Prior-art firewall — read before claiming novelty |
+
+---
+
 ## Inventory check
 
-All **77** `*.md` files under `memory/` as of 2026-04-16 appear exactly once across `compiler_self_host`, `stdlib_checker_types`, `gpu_epistemic`, `research_math_connectomics`, `interop_tooling`, and `garden_meta_user`. Re-run `ls memory/*.md` after adding new files and update this document.
+**Stale, and knowingly so.** The line this replaces asserted that all **77** `*.md` files as of
+2026-04-16 appeared exactly once across the six lanes above. Measured 2026-08-24: the shared
+habitat holds **314**, so the lane tables cover a fraction of it, and the per-agent habitats are
+not inventoried at all.
+
+Re-inventorying is a real task, not a doc edit — `ls memory/*.md` in **both** habitats, then
+placing each file in a lane. This note exists so the next reader knows the tables are a partial
+index rather than a complete one, which is the part that was actively misleading.

@@ -50,16 +50,30 @@ chmod +x "$WORK/repro"
 
 BIN_MD5="$(md5sum "$SOUC"        | cut -d' ' -f1)"
 REP_MD5="$(md5sum "$WORK/repro"  | cut -d' ' -f1)"
-printf '[canonical-compiler] bin/souc md5     = %s\n' "$BIN_MD5"
+printf '[canonical-compiler] committed md5    = %s  (%s)\n' "$BIN_MD5" "$SOUC"
 printf '[canonical-compiler] self-compile md5 = %s\n' "$REP_MD5"
 
 if [[ "$BIN_MD5" != "$REP_MD5" ]]; then
-  echo "[canonical-compiler] FAIL: bin/souc is NOT the fixed point of $SRC."
-  echo "[canonical-compiler]   bin/souc has drifted from the current source. To resync:"
-  echo "[canonical-compiler]   bin/souc $SRC /tmp/s1 && /tmp/s1 $SRC /tmp/s2 && cp /tmp/s2 bin/souc"
-  echo "[canonical-compiler]   (verify /tmp/s2 self-reproduces, then commit bin/souc)"
+  echo "[canonical-compiler] FAIL: $SOUC is NOT the fixed point of $SRC."
+  echo "[canonical-compiler]   committed md5=$BIN_MD5  self-compile md5=$REP_MD5"
+  echo "[canonical-compiler]   The committed lean_single ELF has drifted from current source."
+  echo "[canonical-compiler]   Do NOT cp into bin/souc (that is the Madaros wrapper)."
+  echo "[canonical-compiler]   Resync recipe (executable):"
+  echo "[canonical-compiler]     bash scripts/dev/refresh_lean_seed.sh --print"
+  echo "[canonical-compiler]     docs/ops/LEAN_SINGLE_SEED_REFRESH.md"
+  echo "[canonical-compiler]   Founder rebuild (consumes cluster; srun not sbatch):"
+  echo "[canonical-compiler]     SOUNIO_SEED_REFRESH_EXECUTE=1 \\"
+  echo "[canonical-compiler]       bash scripts/dev/refresh_lean_seed.sh --execute --via-slurm"
   exit 1
 fi
 
-echo "[canonical-compiler] PASS: bin/souc IS the canonical self-reproducing fixed point of $SRC (md5=$BIN_MD5)"
+echo "[canonical-compiler] PASS: $SOUC IS the canonical self-reproducing fixed point of $SRC (md5=$BIN_MD5)"
+
+# Provenance leg: when a SeedReceipt is committed beside the ELF, prove it
+# names *this* source and *this* seed — not merely that the ELF self-reproduces.
+# Missing receipt → WARN+PASS (day-1 policy). See seed_receipt_provenance_gate.sh.
+if [[ -x "$ROOT_DIR/scripts/ci/seed_receipt_provenance_gate.sh" || -f "$ROOT_DIR/scripts/ci/seed_receipt_provenance_gate.sh" ]]; then
+  # shellcheck disable=SC2093
+  bash "$ROOT_DIR/scripts/ci/seed_receipt_provenance_gate.sh"
+fi
 exit 0

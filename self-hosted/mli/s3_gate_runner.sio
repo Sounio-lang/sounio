@@ -1,0 +1,359 @@
+// MLI S3 gate (MLI level) — the commitment test made executable.
+//
+// Run: ./bin/souc run self-hosted/mli/s3_gate_runner.sio
+// Exit 0 iff every case passes. (The byte-level bit-identity half of S3
+// lives in scripts/ci/mli_s3_bit_identity_gate.sh, which compares this
+// pipeline's emitted bytes against a fresh compile by the pinned emitter.)
+//
+// What this gate proves:
+//   X1-X5  expand_k carries ALL Min3 lanes as real computation — val, VAR
+//          and conf (min -> *99/100 -> clamp, the stdlib ep_add oracle) —
+//          through verify + interp. X2 is the headline: the VARIANCE of a
+//          k_add arrives in the executed result.
+//   X6     a Knowledge operand reaching legalize UNEXPANDED is refused with
+//          the DEDICATED code — the erasure guard, the single control that
+//          distinguishes a first-class kind from decoration.
+//   X7     S3b: the EXPANDED function LEGALIZES. The byte stream contains
+//          TWO addsd (val + var). The second addsd is the named point
+//          where every production backend erases. We kept it.
+//   X8     the golden pipeline (IR -> MLI -> verify -> legalize) emits a
+//          non-empty, deterministic byte body ending in ret.
+//   X9     two k_adds overflow the S1 block walls fail-closed — the
+//          measured trigger for the deferred module-arena decision.
+//   X10-12 k_mul GUM delta method (ep_mul oracle) through expand→interp.
+//   X13    expanded k_mul LEGALIZES with ≥5 mulsd (1 val + 4 var).
+
+use ir::ir::*
+use mli::ir::*
+use mli::builder::*
+use mli::verify::*
+use mli::ir_to_mli::*
+use mli::interp::*
+use mli::expand_k::*
+use mli::legalize_x86::*
+
+fn report_pass(name: string) -> i64 with IO {
+    print("PASS: ")
+    print(name)
+    print("\n")
+    0
+}
+
+fn report_fail(name: string, detail: string, got: i64, want: i64) -> i64 with IO {
+    print("FAIL: ")
+    print(name)
+    print(" [")
+    print(detail)
+    print("] got=")
+    print_int(got)
+    print(" want=")
+    print_int(want)
+    print("\n")
+    1
+}
+
+// Build the k-function: kc = k_add(ka, kb); ret <lane of kc>.
+// lane: 0 = discharge val (ret f64), 1 = extract var (ret f64),
+//       2 = extract conf (ret i64), 3 = ret the RAW Knowledge value's
+//       discharge but leave function UNEXPANDED for the X6 control,
+//       4 = two k_adds chained (for the wall-trigger control).
+fn build_kfn(lane: i64) -> MliFunction with Mut, Panic {
+    let kk = mli_kind_knowledge(MLI_KIND_FLOAT, 64, MLI_KSHAPE_MIN3)
+    var ret_kind = mli_kind_float(64)
+    if lane == 2 || lane == 12 { ret_kind = mli_kind_int(64, 1) }
+    var f = mli_func_new("kfn", ret_kind)
+    let ka = mli_add_arg(&!f, kk)
+    let kb = mli_add_arg(&!f, kk)
+    let b0 = mli_new_block(&!f)
+    let kc = mli_new_vreg(&!f, kk)
+    if ka < 0 || kb < 0 || b0 < 0 || kc < 0 { return f }
+
+    let kco = mli_opd_vreg(kc, kk)
+    let kao = mli_opd_vreg(ka, kk)
+    let kbo = mli_opd_vreg(kb, kk)
+    var kop = MLI_OP_K_ADD
+    var elane = lane
+    if lane >= 10 {
+        kop = MLI_OP_K_MUL
+        elane = lane - 10
+    }
+    var ok = mli_emit(&!f, b0, mli_inst3(kop, kco, kao, kbo))
+
+    if lane == 4 {
+        let kd = mli_new_vreg(&!f, kk)
+        if kd < 0 { return f }
+        let kdo = mli_opd_vreg(kd, kk)
+        ok = ok && mli_emit(&!f, b0, mli_inst3(MLI_OP_K_ADD, kdo, kco, kbo))
+        let dv = mli_new_vreg(&!f, mli_kind_float(64))
+        if dv < 0 { return f }
+        ok = ok && mli_emit(&!f, b0, mli_inst2(MLI_OP_K_DISCHARGE, mli_opd_vreg(dv, mli_kind_float(64)), kdo))
+        ok = ok && mli_set_term(&!f, b0, mli_term_ret(mli_opd_vreg(dv, mli_kind_float(64))))
+        return f
+    }
+
+    var op = MLI_OP_K_DISCHARGE
+    if elane == 1 { op = MLI_OP_K_EXTRACT_VAR }
+    if elane == 2 { op = MLI_OP_K_EXTRACT_CONF }
+    let d = mli_new_vreg(&!f, ret_kind)
+    if d < 0 { return f }
+    ok = ok && mli_emit(&!f, b0, mli_inst2(op, mli_opd_vreg(d, ret_kind), kco))
+    ok = ok && mli_set_term(&!f, b0, mli_term_ret(mli_opd_vreg(d, ret_kind)))
+    f
+}
+
+// Expand + verify + interp one k-function with Min3 args
+// (va,ra,ca) and (vb,rb,cb).
+pub struct KCaseResult {
+    pub ok: bool,
+    pub stage_code: i64,
+    pub ret_is_float: bool,
+    pub ret_i: i64,
+    pub ret_f: f64,
+}
+
+fn run_kfn(lane: i64, va: f64, ra: f64, ca: i64, vb: f64, rb: f64, cb: i64) -> KCaseResult with Mut, Panic, Div {
+    var src = build_kfn(lane)
+    let vs = mli_verify_function(&src)
+    if vs.code != MLI_VERR_OK {
+        return KCaseResult { ok: false, stage_code: 1000 + vs.code, ret_is_float: false, ret_i: 0, ret_f: 0.0 }
+    }
+    var ex = mli_func_empty()
+    let xs = mli_expand_min3(&src, &!ex)
+    if !xs.ok {
+        return KCaseResult { ok: false, stage_code: 2000 + xs.code, ret_is_float: false, ret_i: 0, ret_f: 0.0 }
+    }
+    let ve = mli_verify_function(&ex)
+    if ve.code != MLI_VERR_OK {
+        return KCaseResult { ok: false, stage_code: 3000 + ve.code, ret_is_float: false, ret_i: 0, ret_f: 0.0 }
+    }
+    var args = mli_interp_args_empty()
+    args.af[0] = va
+    args.af[1] = ra
+    args.ai[2] = ca
+    args.af[3] = vb
+    args.af[4] = rb
+    args.ai[5] = cb
+    let res = mli_interp_run(&ex, &args)
+    if !res.ok {
+        return KCaseResult { ok: false, stage_code: 4000 + res.code, ret_is_float: false, ret_i: 0, ret_f: 0.0 }
+    }
+    KCaseResult { ok: true, stage_code: 0, ret_is_float: res.ret_is_float, ret_i: res.ret_i, ret_f: res.ret_f }
+}
+
+fn case_val() -> i64 with IO, Mut, Panic, Div {
+    let r = run_kfn(0, 2.0, 0.5, 900, 3.0, 0.25, 800)
+    if !r.ok { return report_fail("X1 k_add val", "stage", r.stage_code, 0) }
+    if !r.ret_is_float || r.ret_f != 5.0 { return report_fail("X1 k_add val", "value", 0, 1) }
+    report_pass("X1 k_add val lane == 5.0 (expand->verify->interp)")
+}
+
+fn case_var() -> i64 with IO, Mut, Panic, Div {
+    let r = run_kfn(1, 2.0, 0.5, 900, 3.0, 0.25, 800)
+    if !r.ok { return report_fail("X2 k_add VAR", "stage", r.stage_code, 0) }
+    if !r.ret_is_float || r.ret_f != 0.75 { return report_fail("X2 k_add VAR", "value", 0, 1) }
+    report_pass("X2 k_add VARIANCE lane == 0.75 — uncertainty carried to the result")
+}
+
+fn case_conf() -> i64 with IO, Mut, Panic, Div {
+    let r = run_kfn(2, 2.0, 0.5, 900, 3.0, 0.25, 800)
+    if !r.ok { return report_fail("X3 k_add conf", "stage", r.stage_code, 0) }
+    if r.ret_is_float || r.ret_i != 792 { return report_fail("X3 k_add conf", "value", r.ret_i, 792) }
+    report_pass("X3 k_add conf lane == 792 (min(900,800)*99/100, stdlib oracle)")
+}
+
+fn case_conf_clamp_low() -> i64 with IO, Mut, Panic, Div {
+    let r = run_kfn(2, 2.0, 0.5, 0 - 50, 3.0, 0.25, 800)
+    if !r.ok { return report_fail("X4 conf clamp low", "stage", r.stage_code, 0) }
+    if r.ret_is_float || r.ret_i != 0 { return report_fail("X4 conf clamp low", "value", r.ret_i, 0) }
+    report_pass("X4 conf clamps low to 0")
+}
+
+fn case_conf_clamp_high() -> i64 with IO, Mut, Panic, Div {
+    let r = run_kfn(2, 2.0, 0.5, 1100, 3.0, 0.25, 1200)
+    if !r.ok { return report_fail("X5 conf clamp high", "stage", r.stage_code, 0) }
+    if r.ret_is_float || r.ret_i != 1000 { return report_fail("X5 conf clamp high", "value", r.ret_i, 1000) }
+    report_pass("X5 conf clamps high to 1000")
+}
+
+// X6 — THE ERASURE GUARD: unexpanded Knowledge reaching codegen must refuse
+// with the dedicated code, not lower its base value.
+fn case_legalize_refuses_unexpanded() -> i64 with IO, Mut, Panic, Div {
+    var src = build_kfn(0)
+    let vs = mli_verify_function(&src)
+    if vs.code != MLI_VERR_OK { return report_fail("X6 erasure guard", "src-verify", vs.code, 0) }
+    var cb = mli_codebuf_empty()
+    let ok = mli_legalize_x86(&src, &!cb)
+    if ok { return report_fail("X6 erasure guard", "legalized-anyway", MLI_L_OK, MLI_L_KNOWLEDGE_UNEXPANDED) }
+    if cb.code != MLI_L_KNOWLEDGE_UNEXPANDED {
+        return report_fail("X6 erasure guard", "code", cb.code, MLI_L_KNOWLEDGE_UNEXPANDED)
+    }
+    report_pass("X6 unexpanded Knowledge at codegen REFUSED with dedicated code")
+}
+
+// Count the measured xmm binop encoding f2 0f <opbyte> c1.
+fn count_f64_op(cb: &MliCodeBuf, opbyte: i64) -> i64 with Panic {
+    var n: i64 = 0
+    var i: i64 = 0
+    while i + 3 < cb.len {
+        if cb.bytes[i] == 242 && cb.bytes[i + 1] == 15 && cb.bytes[i + 2] == opbyte && cb.bytes[i + 3] == 193 {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    n
+}
+
+// X7 — S3b: expanded k_add LEGALIZES. Two addsd in the stream: val, then
+// THE variance addsd. Returning extract_var still emits the val addsd
+// (and vice versa) — unused-lane DCE of variance would be erasure.
+fn case_legalize_expanded_variance_in_stream() -> i64 with IO, Mut, Panic, Div {
+    var src = build_kfn(1)
+    var ex = mli_func_empty()
+    let xs = mli_expand_min3(&src, &!ex)
+    if !xs.ok { return report_fail("X7 variance-in-stream", "expand", xs.code, 0) }
+    var cb = mli_codebuf_empty()
+    if !mli_legalize_x86(&ex, &!cb) {
+        return report_fail("X7 variance-in-stream", "legalize", cb.code, 0)
+    }
+    if cb.len < 40 { return report_fail("X7 variance-in-stream", "len", cb.len, 40) }
+    if cb.bytes[cb.len - 1] != 195 { return report_fail("X7 variance-in-stream", "ret", cb.bytes[cb.len - 1], 195) }
+    let nadd = count_f64_op(&cb, 88)
+    if nadd < 2 { return report_fail("X7 variance-in-stream", "addsd-count", nadd, 2) }
+    report_pass("X7 expanded k_add LEGALIZES with 2 addsd — variance in the instruction stream")
+}
+
+// X8 — golden pipeline emits deterministically.
+fn gate_push_ir(f: &!IrFunction, inst: IrInstr) -> bool with Mut, Panic, Div {
+    var r = f.region
+    if ir_region_push(&!r, inst) != IR_ARENA_OK { return false }
+    f.region = r
+    f.instr_count = f.instr_count + 1
+    true
+}
+
+fn build_add1_ir() -> IrFunction with Mut, Panic, Div {
+    var f = ir_empty_function()
+    var r = ir_region_invalid()
+    if ir_instr_arena_alloc(4, &!r) != IR_ARENA_OK { return f }
+    f.region = r
+    f.param_regs[0] = 0
+    f.param_count = 1
+    f.reg_count = 3
+    f.returns_float = 1
+    let rc = ir_float_bits_set(&!f, 0)
+    if rc < 0 { f.param_count = 0 - 100 }
+    var ok = gate_push_ir(&!f, ir_load_float(1, 1.0))
+    ok = ok && gate_push_ir(&!f, ir_binop_typed(2, 0, BinaryOp::OpAdd, 1, true, true))
+    ok = ok && gate_push_ir(&!f, ir_return(2))
+    if !ok { f.param_count = 0 - 100 }
+    f
+}
+
+fn case_golden_bytes() -> i64 with IO, Mut, Panic, Div {
+    var f = build_add1_ir()
+    var m = mli_func_empty()
+    let st = ir_to_mli_scalar(&f, &!m)
+    if !st.ok { return report_fail("X8 golden bytes", "lower", st.code, 0) }
+    let vr = mli_verify_function(&m)
+    if vr.code != MLI_VERR_OK { return report_fail("X8 golden bytes", "verify", vr.code, 0) }
+
+    var cb1 = mli_codebuf_empty()
+    if !mli_legalize_x86(&m, &!cb1) { return report_fail("X8 golden bytes", "legalize", cb1.code, 0) }
+    if cb1.len < 40 { return report_fail("X8 golden bytes", "len", cb1.len, 40) }
+    if cb1.bytes[cb1.len - 1] != 195 { return report_fail("X8 golden bytes", "trailing-ret", cb1.bytes[cb1.len - 1], 195) }
+
+    var cb2 = mli_codebuf_empty()
+    if !mli_legalize_x86(&m, &!cb2) { return report_fail("X8 golden bytes", "legalize2", cb2.code, 0) }
+    if cb1.len != cb2.len { return report_fail("X8 golden bytes", "determinism-len", cb2.len, cb1.len) }
+    var k: i64 = 0
+    while k < cb1.len {
+        if cb1.bytes[k] != cb2.bytes[k] { return report_fail("X8 golden bytes", "determinism-byte", k, 0 - 1) }
+        k = k + 1
+    }
+    report_pass("X8 golden pipeline emits deterministic bytes (ret-terminated)")
+}
+
+// X9 — two k_adds overflow the S1 block walls fail-closed: the measured
+// trigger for the module-arena tranche (deferred by decision, not neglect).
+fn case_two_kadds_hit_wall() -> i64 with IO, Mut, Panic, Div {
+    var src = build_kfn(4)
+    let vs = mli_verify_function(&src)
+    if vs.code != MLI_VERR_OK { return report_fail("X9 wall trigger", "src-verify", vs.code, 0) }
+    var ex = mli_func_empty()
+    let xs = mli_expand_min3(&src, &!ex)
+    if xs.ok { return report_fail("X9 wall trigger", "expanded-anyway", MLI_X_OK, MLI_X_BUILDER_OVERFLOW) }
+    if xs.code != MLI_X_BUILDER_OVERFLOW {
+        return report_fail("X9 wall trigger", "code", xs.code, MLI_X_BUILDER_OVERFLOW)
+    }
+    report_pass("X9 second k_add overflows block wall FAIL-CLOSED (arena trigger measured)")
+}
+
+fn case_kmul_val() -> i64 with IO, Mut, Panic, Div {
+    let r = run_kfn(10, 2.0, 0.5, 900, 3.0, 0.25, 800)
+    if !r.ok { return report_fail("X10 k_mul val", "stage", r.stage_code, 0) }
+    if !r.ret_is_float || r.ret_f != 6.0 { return report_fail("X10 k_mul val", "value", 0, 1) }
+    report_pass("X10 k_mul val lane == 6.0 (2*3, expand->verify->interp)")
+}
+
+fn case_kmul_var() -> i64 with IO, Mut, Panic, Div {
+    // GUM: Var(XY) ≈ Y² Var(X) + X² Var(Y) = 9*0.5 + 4*0.25 = 5.5
+    let r = run_kfn(11, 2.0, 0.5, 900, 3.0, 0.25, 800)
+    if !r.ok { return report_fail("X11 k_mul VAR", "stage", r.stage_code, 0) }
+    if !r.ret_is_float || r.ret_f != 5.5 { return report_fail("X11 k_mul VAR", "value", 0, 1) }
+    report_pass("X11 k_mul VARIANCE lane == 5.5 — GUM product in the result")
+}
+
+fn case_kmul_conf() -> i64 with IO, Mut, Panic, Div {
+    // min(900,800)*98/100 = 784 (ep_mul decay, not the add *99)
+    let r = run_kfn(12, 2.0, 0.5, 900, 3.0, 0.25, 800)
+    if !r.ok { return report_fail("X12 k_mul conf", "stage", r.stage_code, 0) }
+    if r.ret_is_float || r.ret_i != 784 { return report_fail("X12 k_mul conf", "value", r.ret_i, 784) }
+    report_pass("X12 k_mul conf lane == 784 (min*98/100, ep_mul oracle)")
+}
+
+fn case_kmul_bytes() -> i64 with IO, Mut, Panic, Div {
+    var src = build_kfn(11)
+    var ex = mli_func_empty()
+    let xs = mli_expand_min3(&src, &!ex)
+    if !xs.ok { return report_fail("X13 k_mul bytes", "expand", xs.code, 0) }
+    var cb = mli_codebuf_empty()
+    if !mli_legalize_x86(&ex, &!cb) { return report_fail("X13 k_mul bytes", "legalize", cb.code, 0) }
+    let nmul = count_f64_op(&cb, 89)
+    if nmul < 5 { return report_fail("X13 k_mul bytes", "mulsd-count", nmul, 5) }
+    let nadd = count_f64_op(&cb, 88)
+    if nadd < 1 { return report_fail("X13 k_mul bytes", "addsd-count", nadd, 1) }
+    report_pass("X13 expanded k_mul LEGALIZES with 5 mulsd + 1 addsd — product GUM in the stream")
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    println("=== MLI S3 gate: GUM in the instruction stream + erasure guard ===")
+    if ir_instr_arena_init() != IR_ARENA_OK {
+        println("FAIL: arena init")
+        return 1
+    }
+
+    var failures: i64 = 0
+    failures = failures + case_val()
+    failures = failures + case_var()
+    failures = failures + case_conf()
+    failures = failures + case_conf_clamp_low()
+    failures = failures + case_conf_clamp_high()
+    failures = failures + case_legalize_refuses_unexpanded()
+    failures = failures + case_legalize_expanded_variance_in_stream()
+    failures = failures + case_golden_bytes()
+    failures = failures + case_two_kadds_hit_wall()
+    failures = failures + case_kmul_val()
+    failures = failures + case_kmul_var()
+    failures = failures + case_kmul_conf()
+    failures = failures + case_kmul_bytes()
+
+    if failures == 0 {
+        println("=== MLI S3: ALL CASES PASS ===")
+        return 0
+    }
+    print("=== MLI S3: FAILURES = ")
+    print_int(failures)
+    print(" ===")
+    print("\n")
+    1
+}

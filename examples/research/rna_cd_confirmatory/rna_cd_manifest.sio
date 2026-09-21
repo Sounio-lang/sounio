@@ -1,0 +1,714 @@
+//@ run-pass
+
+// Fixture-scale canonical producer for the RNA Cayley-Dickson confirmatory lane.
+//
+// Input is a frozen, LF-only TSV sorted strictly by record_id:
+// record_id, family, clan_or_NO_CLAN, sequence, structure,
+// sequence_sha256, structure_sha256.
+//
+// This producer validates the serialisation and emits the canonical split
+// manifest. Julia independently recomputes the SHA-256 fields and the complete
+// output bytes. The current fixture contract accepts four bracket classes;
+// full WUSS extraction is a later gate and is not claimed here.
+
+const FIELD_COUNT: i64 = 7
+const MAX_RECORD_ID: i64 = 255
+const MAX_SEQUENCE: i64 = 4096
+const MAX_PAIRS: i64 = 2048
+const OUT_CAP: i64 = 4096
+const HASH_BASE: i64 = 131
+const HASH_MODULUS: i64 = 2147483647
+const OUTER_FOLDS: i64 = 5
+const MAX_SPLIT_KEYS: i64 = 64
+
+var G_FIELD_START: [i64; 7] = [0; 7]
+var G_FIELD_END: [i64; 7] = [0; 7]
+var G_PREVIOUS_ID: [i8; 256] = [0; 256]
+var G_PREVIOUS_ID_LEN: i64 = 0
+var G_SEEN_COUNT: i64 = 0
+var G_SEEN_FAMILY_LEN: [i64; 64] = [0; 64]
+var G_SEEN_FAMILY_BYTES: [i8; 2048] = [0; 2048]
+var G_SEEN_GROUP_KIND: [i64; 64] = [0; 64]
+var G_SEEN_GROUP_LEN: [i64; 64] = [0; 64]
+var G_SEEN_GROUP_BYTES: [i8; 2048] = [0; 2048]
+var G_SEEN_SEQUENCE_SHA_BYTES: [i8; 4096] = [0; 4096]
+var G_PAIR_COUNT: i64 = 0
+var G_GC_COUNT: i64 = 0
+var G_CROSSING_RELATION_COUNT: i64 = 0
+var G_CROSSING_PAIR_COUNT: i64 = 0
+var G_CROSSING_COMPONENT_COUNT: i64 = 0
+var G_MAX_CROSSING_DEGREE: i64 = 0
+var G_ROUND_STACK: [i64; 4096] = [0; 4096]
+var G_SQUARE_STACK: [i64; 4096] = [0; 4096]
+var G_CURLY_STACK: [i64; 4096] = [0; 4096]
+var G_ANGLE_STACK: [i64; 4096] = [0; 4096]
+var G_PAIR_LEFT: [i64; 2048] = [0; 2048]
+var G_PAIR_RIGHT: [i64; 2048] = [0; 2048]
+var G_CROSSING_DEGREE: [i64; 2048] = [0; 2048]
+var G_CROSSING_PARENT: [i64; 2048] = [0; 2048]
+var G_OUT_LEN: i64 = 0
+var G_OUT_OVERFLOW: bool = false
+var G_DIGITS: [i8; 32] = [0; 32]
+var G_ERROR_LINE: i64 = 0
+var G_ERROR_REASON: string = ""
+
+fn refuse(line: i64, reason: string) -> bool with Mut {
+    G_ERROR_LINE = line
+    G_ERROR_REASON = reason
+    false
+}
+
+fn span_len(field: i64) -> i64 with Mut, Panic {
+    G_FIELD_END[field as usize] - G_FIELD_START[field as usize]
+}
+
+fn span_equals(text: string, field: i64, expected: string) -> bool with Mut, Panic, Div {
+    let n = span_len(field)
+    if n != str_len(expected) { return false }
+    var i: i64 = 0
+    while i < n {
+        if str_char_at(text, G_FIELD_START[field as usize] + i) != str_char_at(expected, i) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn span_equals_at(text: string, start: i64, end: i64, expected: string) -> bool with Mut, Panic, Div {
+    let n = end - start
+    if n != str_len(expected) { return false }
+    var i: i64 = 0
+    while i < n {
+        if str_char_at(text, start + i) != str_char_at(expected, i) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn parse_fields(text: string, start: i64, end: i64) -> bool with Mut, Panic, Div {
+    if end <= start { return false }
+    var field: i64 = 0
+    var field_start = start
+    var i = start
+    while i <= end {
+        if i == end || str_char_at(text, i) == 9 {
+            if field >= FIELD_COUNT { return false }
+            G_FIELD_START[field as usize] = field_start
+            G_FIELD_END[field as usize] = i
+            field = field + 1
+            field_start = i + 1
+        } else if str_char_at(text, i) == 13 || str_char_at(text, i) == 0 {
+            return false
+        }
+        i = i + 1
+    }
+    field == FIELD_COUNT
+}
+
+fn byte_is_token(ch: i64) -> bool {
+    let upper = ch >= 65 && ch <= 90
+    let lower = ch >= 97 && ch <= 122
+    let digit = ch >= 48 && ch <= 57
+    upper || lower || digit || ch == 45 || ch == 46 || ch == 47 || ch == 58 || ch == 95
+}
+
+fn valid_token(text: string, field: i64, max_len: i64) -> bool with Mut, Panic, Div {
+    let n = span_len(field)
+    if n <= 0 || n > max_len { return false }
+    var i = G_FIELD_START[field as usize]
+    let end = G_FIELD_END[field as usize]
+    while i < end {
+        if !byte_is_token(str_char_at(text, i)) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn valid_family(text: string) -> bool with Mut, Panic, Div {
+    let n = span_len(1)
+    if n < 3 || n > 32 { return false }
+    let start = G_FIELD_START[1]
+    if str_char_at(text, start) != 82 || str_char_at(text, start + 1) != 70 { return false }
+    var i = start + 2
+    let end = G_FIELD_END[1]
+    while i < end {
+        let ch = str_char_at(text, i)
+        if ch < 48 || ch > 57 { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn valid_clan(text: string) -> bool with Mut, Panic, Div {
+    if span_equals(text, 2, "NO_CLAN") { return true }
+    let n = span_len(2)
+    if n < 3 || n > 32 { return false }
+    let start = G_FIELD_START[2]
+    if str_char_at(text, start) != 67 || str_char_at(text, start + 1) != 76 { return false }
+    var i = start + 2
+    let end = G_FIELD_END[2]
+    while i < end {
+        let ch = str_char_at(text, i)
+        if ch < 48 || ch > 57 { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn valid_sha256(text: string, field: i64) -> bool with Mut, Panic, Div {
+    if span_len(field) != 64 { return false }
+    var i = G_FIELD_START[field as usize]
+    let end = G_FIELD_END[field as usize]
+    while i < end {
+        let ch = str_char_at(text, i)
+        let digit = ch >= 48 && ch <= 57
+        let lower_hex = ch >= 97 && ch <= 102
+        if !digit && !lower_hex { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn valid_sequence(text: string) -> bool with Mut, Panic, Div {
+    let n = span_len(3)
+    if n <= 0 || n > MAX_SEQUENCE { return false }
+    G_GC_COUNT = 0
+    var i = G_FIELD_START[3]
+    let end = G_FIELD_END[3]
+    while i < end {
+        let ch = str_char_at(text, i)
+        if ch != 65 && ch != 67 && ch != 71 && ch != 85 && ch != 78 { return false }
+        if ch == 67 || ch == 71 { G_GC_COUNT = G_GC_COUNT + 1 }
+        i = i + 1
+    }
+    true
+}
+
+fn add_pair(left: i64, right: i64) -> bool with Mut, Panic {
+    if G_PAIR_COUNT >= MAX_PAIRS { return false }
+    G_PAIR_LEFT[G_PAIR_COUNT as usize] = left
+    G_PAIR_RIGHT[G_PAIR_COUNT as usize] = right
+    G_PAIR_COUNT = G_PAIR_COUNT + 1
+    true
+}
+
+fn pairs_cross(first: i64, second: i64) -> bool with Mut, Panic {
+    let a = G_PAIR_LEFT[first as usize]
+    let b = G_PAIR_RIGHT[first as usize]
+    let c = G_PAIR_LEFT[second as usize]
+    let d = G_PAIR_RIGHT[second as usize]
+    (a < c && c < b && b < d) || (c < a && a < d && d < b)
+}
+
+fn crossing_root(index: i64) -> i64 with Mut, Panic {
+    var root = index
+    while G_CROSSING_PARENT[root as usize] != root {
+        root = G_CROSSING_PARENT[root as usize]
+    }
+    root
+}
+
+fn crossing_union(first: i64, second: i64) with Mut, Panic {
+    let first_root = crossing_root(first)
+    let second_root = crossing_root(second)
+    if first_root != second_root {
+        G_CROSSING_PARENT[second_root as usize] = first_root
+    }
+}
+
+fn compute_crossing_metrics() with Mut, Panic {
+    G_CROSSING_RELATION_COUNT = 0
+    G_CROSSING_PAIR_COUNT = 0
+    G_CROSSING_COMPONENT_COUNT = 0
+    G_MAX_CROSSING_DEGREE = 0
+    var i: i64 = 0
+    while i < G_PAIR_COUNT {
+        G_CROSSING_DEGREE[i as usize] = 0
+        G_CROSSING_PARENT[i as usize] = i
+        i = i + 1
+    }
+    i = 0
+    while i < G_PAIR_COUNT {
+        var j = i + 1
+        while j < G_PAIR_COUNT {
+            if pairs_cross(i, j) {
+                G_CROSSING_RELATION_COUNT = G_CROSSING_RELATION_COUNT + 1
+                G_CROSSING_DEGREE[i as usize] = G_CROSSING_DEGREE[i as usize] + 1
+                G_CROSSING_DEGREE[j as usize] = G_CROSSING_DEGREE[j as usize] + 1
+                crossing_union(i, j)
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < G_PAIR_COUNT {
+        let degree = G_CROSSING_DEGREE[i as usize]
+        if degree > 0 {
+            G_CROSSING_PAIR_COUNT = G_CROSSING_PAIR_COUNT + 1
+            if degree > G_MAX_CROSSING_DEGREE { G_MAX_CROSSING_DEGREE = degree }
+            if crossing_root(i) == i {
+                G_CROSSING_COMPONENT_COUNT = G_CROSSING_COMPONENT_COUNT + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+fn valid_structure(text: string) -> bool with Mut, Panic, Div {
+    let n = span_len(4)
+    if n <= 0 || n > MAX_SEQUENCE { return false }
+    var round_depth: i64 = 0
+    var square_depth: i64 = 0
+    var curly_depth: i64 = 0
+    var angle_depth: i64 = 0
+    G_PAIR_COUNT = 0
+    var i = G_FIELD_START[4]
+    let end = G_FIELD_END[4]
+    while i < end {
+        let ch = str_char_at(text, i)
+        let position = i - G_FIELD_START[4]
+        if ch == 40 {
+            G_ROUND_STACK[round_depth as usize] = position
+            round_depth = round_depth + 1
+        }
+        else if ch == 41 {
+            if round_depth <= 0 { return false }
+            round_depth = round_depth - 1
+            if !add_pair(G_ROUND_STACK[round_depth as usize], position) { return false }
+        }
+        else if ch == 91 {
+            G_SQUARE_STACK[square_depth as usize] = position
+            square_depth = square_depth + 1
+        }
+        else if ch == 93 {
+            if square_depth <= 0 { return false }
+            square_depth = square_depth - 1
+            if !add_pair(G_SQUARE_STACK[square_depth as usize], position) { return false }
+        }
+        else if ch == 123 {
+            G_CURLY_STACK[curly_depth as usize] = position
+            curly_depth = curly_depth + 1
+        }
+        else if ch == 125 {
+            if curly_depth <= 0 { return false }
+            curly_depth = curly_depth - 1
+            if !add_pair(G_CURLY_STACK[curly_depth as usize], position) { return false }
+        }
+        else if ch == 60 {
+            G_ANGLE_STACK[angle_depth as usize] = position
+            angle_depth = angle_depth + 1
+        }
+        else if ch == 62 {
+            if angle_depth <= 0 { return false }
+            angle_depth = angle_depth - 1
+            if !add_pair(G_ANGLE_STACK[angle_depth as usize], position) { return false }
+        }
+        else if ch != 46 { return false }
+        i = i + 1
+    }
+    if round_depth != 0 || square_depth != 0 || curly_depth != 0 || angle_depth != 0 {
+        return false
+    }
+    compute_crossing_metrics()
+    true
+}
+
+fn record_id_after_previous(text: string) -> bool with Mut, Panic, Div {
+    let n = span_len(0)
+    if n <= 0 || n > MAX_RECORD_ID { return false }
+    if G_PREVIOUS_ID_LEN == 0 { return true }
+    let common = if n < G_PREVIOUS_ID_LEN { n } else { G_PREVIOUS_ID_LEN }
+    var i: i64 = 0
+    while i < common {
+        let current = str_char_at(text, G_FIELD_START[0] + i)
+        let previous = G_PREVIOUS_ID[i as usize] as i64
+        if current > previous { return true }
+        if current < previous { return false }
+        i = i + 1
+    }
+    n > G_PREVIOUS_ID_LEN
+}
+
+fn save_record_id(text: string) with Mut, Panic, Div {
+    G_PREVIOUS_ID_LEN = span_len(0)
+    var i: i64 = 0
+    while i < G_PREVIOUS_ID_LEN {
+        G_PREVIOUS_ID[i as usize] = str_char_at(text, G_FIELD_START[0] + i) as i8
+        i = i + 1
+    }
+}
+
+fn current_group_kind(text: string) -> i64 with Mut, Panic, Div {
+    if span_equals(text, 2, "NO_CLAN") { 0 } else { 1 }
+}
+
+fn current_group_field(text: string) -> i64 with Mut, Panic, Div {
+    if span_equals(text, 2, "NO_CLAN") { 1 } else { 2 }
+}
+
+fn family_matches_seen(text: string, slot: i64) -> bool with Mut, Panic, Div {
+    let n = span_len(1)
+    if G_SEEN_FAMILY_LEN[slot as usize] != n { return false }
+    var i: i64 = 0
+    while i < n {
+        if str_char_at(text, G_FIELD_START[1] + i) !=
+           G_SEEN_FAMILY_BYTES[(slot * 32 + i) as usize] as i64 {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn sequence_sha_matches_seen(text: string, slot: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < 64 {
+        if str_char_at(text, G_FIELD_START[5] + i) !=
+           G_SEEN_SEQUENCE_SHA_BYTES[(slot * 64 + i) as usize] as i64 {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn group_matches_seen(text: string, slot: i64) -> bool with Mut, Panic, Div {
+    let kind = current_group_kind(text)
+    let field = current_group_field(text)
+    let n = span_len(field)
+    if G_SEEN_GROUP_KIND[slot as usize] != kind ||
+       G_SEEN_GROUP_LEN[slot as usize] != n {
+        return false
+    }
+    var i: i64 = 0
+    while i < n {
+        if str_char_at(text, G_FIELD_START[field as usize] + i) !=
+           G_SEEN_GROUP_BYTES[(slot * 32 + i) as usize] as i64 {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn save_split_keys(text: string) with Mut, Panic, Div {
+    let slot = G_SEEN_COUNT
+    let family_n = span_len(1)
+    G_SEEN_FAMILY_LEN[slot as usize] = family_n
+    var i: i64 = 0
+    while i < family_n {
+        G_SEEN_FAMILY_BYTES[(slot * 32 + i) as usize] =
+            str_char_at(text, G_FIELD_START[1] + i) as i8
+        i = i + 1
+    }
+    let group_field = current_group_field(text)
+    let group_n = span_len(group_field)
+    G_SEEN_GROUP_KIND[slot as usize] = current_group_kind(text)
+    G_SEEN_GROUP_LEN[slot as usize] = group_n
+    i = 0
+    while i < group_n {
+        G_SEEN_GROUP_BYTES[(slot * 32 + i) as usize] =
+            str_char_at(text, G_FIELD_START[group_field as usize] + i) as i8
+        i = i + 1
+    }
+    i = 0
+    while i < 64 {
+        G_SEEN_SEQUENCE_SHA_BYTES[(slot * 64 + i) as usize] =
+            str_char_at(text, G_FIELD_START[5] + i) as i8
+        i = i + 1
+    }
+    G_SEEN_COUNT = G_SEEN_COUNT + 1
+}
+
+fn validate_split_keys(text: string, line: i64) -> bool with Mut, Panic, Div {
+    if G_SEEN_COUNT >= MAX_SPLIT_KEYS { return refuse(line, "SPLIT_KEY_CAP") }
+    var slot: i64 = 0
+    while slot < G_SEEN_COUNT {
+        if family_matches_seen(text, slot) && !group_matches_seen(text, slot) {
+            return refuse(line, "FAMILY_GROUP_CONFLICT")
+        }
+        if sequence_sha_matches_seen(text, slot) && !group_matches_seen(text, slot) {
+            return refuse(line, "DUPLICATE_SEQUENCE_CROSS_GROUP")
+        }
+        slot = slot + 1
+    }
+    save_split_keys(text)
+    true
+}
+
+fn validate_row(text: string, start: i64, end: i64, line: i64) -> bool with Mut, Panic, Div {
+    if !parse_fields(text, start, end) { return refuse(line, "COLUMN_COUNT_OR_CONTROL_BYTE") }
+    var field: i64 = 0
+    while field < FIELD_COUNT {
+        if span_len(field) <= 0 { return refuse(line, "EMPTY_FIELD") }
+        field = field + 1
+    }
+    if !valid_token(text, 0, MAX_RECORD_ID) { return refuse(line, "RECORD_ID") }
+    if !valid_family(text) { return refuse(line, "FAMILY") }
+    if !valid_clan(text) { return refuse(line, "CLAN") }
+    if !valid_sequence(text) { return refuse(line, "SEQUENCE") }
+    if !valid_structure(text) { return refuse(line, "STRUCTURE") }
+    if span_len(3) != span_len(4) { return refuse(line, "LENGTH_MISMATCH") }
+    if G_PAIR_COUNT < 1 { return refuse(line, "NO_MASKABLE_PAIR") }
+    if !valid_sha256(text, 5) || !valid_sha256(text, 6) { return refuse(line, "SHA256_FORMAT") }
+    if !record_id_after_previous(text) { return refuse(line, "RECORD_ID_ORDER") }
+    if !validate_split_keys(text, line) { return false }
+    save_record_id(text)
+    true
+}
+
+fn valid_salt(salt: string) -> bool with Mut, Panic, Div {
+    let n = str_len(salt)
+    if n <= 0 || n > 128 { return false }
+    var i: i64 = 0
+    while i < n {
+        if !byte_is_token(str_char_at(salt, i)) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn validate_input(text: string, n: i64) -> bool with Mut, Panic, Div {
+    let header = "record_id\tfamily\tclan_or_NO_CLAN\tsequence\tstructure\tsequence_sha256\tstructure_sha256"
+    if n <= 0 || str_char_at(text, n - 1) != 10 { return refuse(1, "TERMINAL_LF") }
+    var header_end: i64 = 0
+    while header_end < n && str_char_at(text, header_end) != 10 { header_end = header_end + 1 }
+    if header_end >= n || !span_equals_at(text, 0, header_end, header) { return refuse(1, "HEADER") }
+    G_PREVIOUS_ID_LEN = 0
+    G_SEEN_COUNT = 0
+    var line: i64 = 2
+    var start = header_end + 1
+    var rows: i64 = 0
+    while start < n {
+        var end = start
+        while end < n && str_char_at(text, end) != 10 { end = end + 1 }
+        if end >= n { return refuse(line, "TERMINAL_LF") }
+        if !validate_row(text, start, end, line) { return false }
+        rows = rows + 1
+        line = line + 1
+        start = end + 1
+    }
+    if rows <= 0 { return refuse(2, "NO_RECORDS") }
+    true
+}
+
+fn hash_string(h0: i64, value: string) -> i64 with Mut, Panic, Div {
+    var h = h0
+    var i: i64 = 0
+    while i < str_len(value) {
+        h = (h * HASH_BASE + str_char_at(value, i)) % HASH_MODULUS
+        i = i + 1
+    }
+    h
+}
+
+fn hash_span(h0: i64, text: string, field: i64) -> i64 with Mut, Panic, Div {
+    var h = h0
+    var i = G_FIELD_START[field as usize]
+    let end = G_FIELD_END[field as usize]
+    while i < end {
+        h = (h * HASH_BASE + str_char_at(text, i)) % HASH_MODULUS
+        i = i + 1
+    }
+    h
+}
+
+fn outer_fold(text: string, salt: string) -> i64 with Mut, Panic, Div {
+    var h = hash_string(0, salt)
+    h = (h * HASH_BASE + 124) % HASH_MODULUS
+    if span_equals(text, 2, "NO_CLAN") {
+        h = hash_string(h, "family:")
+        h = hash_span(h, text, 1)
+    } else {
+        h = hash_string(h, "clan:")
+        h = hash_span(h, text, 2)
+    }
+    h % OUTER_FOLDS
+}
+
+fn out_reset() with Mut {
+    G_OUT_LEN = 0
+    G_OUT_OVERFLOW = false
+}
+
+fn out_byte(output: &![i8; 4096], ch: i64) with Mut, Panic {
+    if G_OUT_LEN < OUT_CAP {
+        output[G_OUT_LEN as usize] = ch as i8
+        G_OUT_LEN = G_OUT_LEN + 1
+    } else {
+        G_OUT_OVERFLOW = true
+    }
+}
+
+fn out_string(output: &![i8; 4096], value: string) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < str_len(value) {
+        out_byte(output, str_char_at(value, i))
+        i = i + 1
+    }
+}
+
+fn out_span(output: &![i8; 4096], text: string, field: i64) with Mut, Panic, Div {
+    var i = G_FIELD_START[field as usize]
+    let end = G_FIELD_END[field as usize]
+    while i < end {
+        out_byte(output, str_char_at(text, i))
+        i = i + 1
+    }
+}
+
+fn out_i64(output: &![i8; 4096], value: i64) with Mut, Panic, Div {
+    if value == 0 {
+        out_byte(output, 48)
+        return
+    }
+    var n: i64 = 0
+    var x = value
+    while x > 0 {
+        G_DIGITS[n as usize] = (48 + (x % 10)) as i8
+        n = n + 1
+        x = x / 10
+    }
+    while n > 0 {
+        n = n - 1
+        out_byte(output, G_DIGITS[n as usize] as i64)
+    }
+}
+
+fn begin_output(output: &![i8; 4096]) with Mut, Panic, Div {
+    out_reset()
+    // Keep literals short: the pinned native backend mislowers a single long
+    // string literal in this call path. Field-wise emission is byte-stable.
+    out_string(output, "schema_version")
+    out_byte(output, 9)
+    out_string(output, "record_id")
+    out_byte(output, 9)
+    out_string(output, "family")
+    out_byte(output, 9)
+    out_string(output, "group_id")
+    out_byte(output, 9)
+    out_string(output, "length")
+    out_byte(output, 9)
+    out_string(output, "gc_count")
+    out_byte(output, 9)
+    out_string(output, "pair_count")
+    out_byte(output, 9)
+    out_string(output, "structural_stratum")
+    out_byte(output, 9)
+    out_string(output, "crossing_relation_count")
+    out_byte(output, 9)
+    out_string(output, "crossing_pair_count")
+    out_byte(output, 9)
+    out_string(output, "crossing_component_count")
+    out_byte(output, 9)
+    out_string(output, "maximum_crossing_degree")
+    out_byte(output, 9)
+    out_string(output, "outer_fold")
+    out_byte(output, 9)
+    out_string(output, "sequence_sha256")
+    out_byte(output, 9)
+    out_string(output, "structure_sha256")
+    out_byte(output, 10)
+}
+
+fn emit_row(output: &![i8; 4096], text: string, start: i64, end: i64, salt: string) -> bool with Mut, Panic, Div {
+    if !parse_fields(text, start, end) { return false }
+    valid_sequence(text)
+    valid_structure(text)
+    out_string(output, "rna-cd-manifest-v0.2.0")
+    out_byte(output, 9)
+    out_span(output, text, 0)
+    out_byte(output, 9)
+    out_span(output, text, 1)
+    out_byte(output, 9)
+    if span_equals(text, 2, "NO_CLAN") {
+        out_string(output, "family:")
+        out_span(output, text, 1)
+    } else {
+        out_string(output, "clan:")
+        out_span(output, text, 2)
+    }
+    out_byte(output, 9)
+    out_i64(output, span_len(3))
+    out_byte(output, 9)
+    out_i64(output, G_GC_COUNT)
+    out_byte(output, 9)
+    out_i64(output, G_PAIR_COUNT)
+    out_byte(output, 9)
+    if G_CROSSING_RELATION_COUNT > 0 {
+        out_string(output, "crossing")
+    } else {
+        out_string(output, "nested")
+    }
+    out_byte(output, 9)
+    out_i64(output, G_CROSSING_RELATION_COUNT)
+    out_byte(output, 9)
+    out_i64(output, G_CROSSING_PAIR_COUNT)
+    out_byte(output, 9)
+    out_i64(output, G_CROSSING_COMPONENT_COUNT)
+    out_byte(output, 9)
+    out_i64(output, G_MAX_CROSSING_DEGREE)
+    out_byte(output, 9)
+    out_i64(output, outer_fold(text, salt))
+    out_byte(output, 9)
+    out_span(output, text, 5)
+    out_byte(output, 9)
+    out_span(output, text, 6)
+    out_byte(output, 10)
+    !G_OUT_OVERFLOW
+}
+
+fn build_manifest(output: &![i8; 4096], text: string, n: i64, salt: string) -> bool with Mut, Panic, Div {
+    begin_output(output)
+    var header_end: i64 = 0
+    while header_end < n && str_char_at(text, header_end) != 10 { header_end = header_end + 1 }
+    var start = header_end + 1
+    while start < n {
+        var end = start
+        while end < n && str_char_at(text, end) != 10 { end = end + 1 }
+        if !emit_row(output, text, start, end, salt) { return false }
+        start = end + 1
+    }
+    !G_OUT_OVERFLOW
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    if arg_count() != 3 {
+        println("usage: rna_cd_manifest <records.tsv> <manifest.tsv> <salt>")
+        return 2
+    }
+    let input_path = get_arg(0)
+    let output_path = get_arg(1)
+    let salt = get_arg(2)
+    if !valid_salt(salt) {
+        println("RNA_CD_MANIFEST_REFUSE code=11 line=0 reason=SALT")
+        return 11
+    }
+    let n = file_size(input_path)
+    if n <= 0 {
+        println("RNA_CD_MANIFEST_REFUSE code=11 line=0 reason=INPUT")
+        return 11
+    }
+    let text = read_file(input_path)
+    if !validate_input(text, n) {
+        print("RNA_CD_MANIFEST_REFUSE code=11 line=")
+        print_int(G_ERROR_LINE)
+        print(" reason=")
+        println(G_ERROR_REASON)
+        return 11
+    }
+    var output: [i8; 4096] = [0; 4096]
+    if !build_manifest(&!output, text, n, salt) {
+        println("RNA_CD_MANIFEST_REFUSE code=12 line=0 reason=OUTPUT")
+        return 12
+    }
+    let written = write_file(output_path, output, G_OUT_LEN)
+    if written != G_OUT_LEN {
+        println("RNA_CD_MANIFEST_REFUSE code=12 line=0 reason=OUTPUT")
+        return 12
+    }
+    println("RNA_CD_MANIFEST_PASS schema=rna-cd-manifest-v0.2.0")
+    0
+}

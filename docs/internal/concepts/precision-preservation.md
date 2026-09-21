@@ -9,6 +9,9 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 
 # Precision Preservation
 
+
+Status: **executable**
+
 Concept-ID: `SOUNIO-PRECISION-PRESERVATION`
 
 ## Founder Intent
@@ -38,3 +41,10 @@ double-double, and quad-double paths are scientific surfaces.
 `dd64` has a native passing control. The qd128/EISA graph lowers without the
 former segmentation fault but native emission still fails closed on classified
 paths. This is a compiler frontier, not permission to demote precision.
+
+
+## Claims Forbidden
+
+- Do not claim clinical validity, ClinicalAuthority, or ClinicalRelease from this contract alone.
+- Do not claim compiler-wide integration or production cutover from fixture evidence alone.
+- Do not claim scientific truth or independent replay beyond the scoped witnesses bound in `bindings.tsv`.

@@ -1,0 +1,203 @@
+// stdlib/viz/causal_canvas.sio - headless causal graph receipts
+//
+// The renderer consumes causal::categorical DAGs. It visualizes graph surgery
+// and observed-data identifiability; it does not estimate a causal effect.
+
+use causal::categorical::{
+    CatCausalDAG,
+    cat_dag_has_edge,
+    cat_dag_is_observed,
+    cat_dag_is_intervened,
+    cat_satisfies_backdoor,
+}
+use display::canvas::{
+    Canvas,
+    canvas_clear,
+    canvas_draw_circle,
+    canvas_draw_line,
+    canvas_draw_rect,
+    canvas_fill_circle,
+    canvas_fill_rect,
+    canvas_set_pixel,
+}
+use display::font::{font_glyph}
+
+// The packed atlas stores its leftmost pixel in the low bit. Keep this receipt
+// local so correcting shared font behavior remains a separate compatibility job.
+fn cc_draw_char(c: &!Canvas, ch: i64, x: i64, y: i64, r: i64, g: i64, b: i64) with Mut {
+    let glyph = font_glyph(ch)
+    var row: i64 = 0
+    while row < 8 {
+        let bits = (glyph >> (row * 8)) & 255
+        var col: i64 = 0
+        while col < 8 {
+            if ((bits >> col) & 1) == 1 {
+                canvas_set_pixel(c, x + col, y + row, r, g, b)
+            }
+            col = col + 1
+        }
+        row = row + 1
+    }
+}
+
+fn cc_text8(
+    c: &!Canvas, x: i64, y: i64,
+    a: i64, b: i64, d: i64, e: i64, f: i64, g: i64, h: i64, i: i64,
+    r: i64, gr: i64, bl: i64,
+) with Mut {
+    let chars = [a, b, d, e, f, g, h, i]
+    var n: i64 = 0
+    while n < 8 {
+        let ch = chars[n as usize]
+        if ch != 0 { cc_draw_char(c, ch, x + n * 8, y, r, gr, bl) }
+        n = n + 1
+    }
+}
+
+fn cc_dashed_line(
+    c: &!Canvas, x0: i64, y0: i64, x1: i64, y1: i64,
+    r: i64, g: i64, b: i64,
+) with Mut, Div {
+    var step: i64 = 0
+    while step < 16 {
+        if step - (step / 2) * 2 == 0 {
+            let ax = x0 + (x1 - x0) * step / 16
+            let ay = y0 + (y1 - y0) * step / 16
+            let bx = x0 + (x1 - x0) * (step + 1) / 16
+            let by = y0 + (y1 - y0) * (step + 1) / 16
+            canvas_draw_line(c, ax, ay, bx, by, r, g, b)
+        }
+        step = step + 1
+    }
+}
+
+fn cc_arrow_tip(c: &!Canvas, x: i64, y: i64, direction: i64, r: i64, g: i64, b: i64) with Mut {
+    if direction == 0 {
+        canvas_draw_line(c, x, y, x - 7, y - 4, r, g, b)
+        canvas_draw_line(c, x, y, x - 7, y + 4, r, g, b)
+    } else if direction < 0 {
+        canvas_draw_line(c, x, y, x + 7, y - 1, r, g, b)
+        canvas_draw_line(c, x, y, x + 2, y - 7, r, g, b)
+    } else {
+        canvas_draw_line(c, x, y, x - 7, y - 1, r, g, b)
+        canvas_draw_line(c, x, y, x - 2, y - 7, r, g, b)
+    }
+}
+
+fn cc_node(c: &!Canvas, x: i64, y: i64, label: i64, observed: bool, intervened: bool) with Mut {
+    if intervened {
+        canvas_fill_circle(c, x, y, 17, 188, 80, 146)
+        canvas_draw_circle(c, x, y, 20, 250, 128, 184)
+    } else if observed {
+        canvas_fill_circle(c, x, y, 17, 45, 135, 154)
+        canvas_draw_circle(c, x, y, 18, 105, 225, 224)
+    } else {
+        canvas_fill_circle(c, x, y, 15, 20, 27, 38)
+        canvas_draw_circle(c, x, y, 18, 238, 178, 62)
+        canvas_draw_circle(c, x, y, 20, 110, 87, 48)
+    }
+    cc_draw_char(c, label, x - 4, y - 4, 238, 244, 248)
+}
+
+// Tests only the empty set and one named candidate. This is not general ID.
+pub fn causal_candidate_adjustment_identified(
+    dag: &CatCausalDAG,
+    treatment: i32,
+    outcome: i32,
+    candidate: i32,
+) -> bool with Mut, Div, Panic {
+    var empty: [i32; 16] = [0; 16]
+    if cat_satisfies_backdoor(dag, treatment, outcome, &empty, 0) { return true }
+    if candidate < 0 { return false }
+    empty[0] = candidate
+    cat_dag_is_observed(dag, candidate)
+        && cat_satisfies_backdoor(dag, treatment, outcome, &empty, 1)
+}
+
+fn cc_graph_panel(c: &!Canvas, dag: &CatCausalDAG, ox: i64, surgery: bool) with Mut, Div, Panic {
+    let top_y = 82
+    let xy = 158
+    let zx = ox + 54
+    let ux = ox + 156
+    let xx = ox + 54
+    let yx = ox + 156
+
+    canvas_fill_rect(c, ox, 50, 210, 160, 12, 18, 27)
+    canvas_draw_rect(c, ox, 50, 210, 160, 49, 66, 82)
+
+    if surgery {
+        cc_text8(c, ox + 12, 60, 68, 79, 32, 88, 32, 68, 65, 71, 250, 128, 184)
+        cc_text8(c, ox + 76, 60, 32, 83, 85, 82, 71, 69, 82, 89, 250, 128, 184)
+    } else {
+        cc_text8(c, ox + 12, 60, 79, 66, 83, 69, 82, 86, 69, 68, 105, 225, 224)
+        cc_text8(c, ox + 76, 60, 32, 68, 65, 71, 0, 0, 0, 0, 105, 225, 224)
+    }
+
+    if cat_dag_has_edge(dag, 0, 2) {
+        canvas_draw_line(c, zx, top_y + 19, xx, xy - 19, 112, 177, 194)
+        cc_arrow_tip(c, xx, xy - 19, 1, 112, 177, 194)
+    } else if surgery {
+        canvas_draw_line(c, zx, top_y + 19, xx, xy - 43, 56, 77, 91)
+        canvas_draw_line(c, xx - 5, xy - 47, xx + 5, xy - 37, 250, 128, 184)
+        canvas_draw_line(c, xx + 5, xy - 47, xx - 5, xy - 37, 250, 128, 184)
+    }
+    if cat_dag_has_edge(dag, 0, 3) {
+        canvas_draw_line(c, zx + 10, top_y + 16, yx - 10, xy - 16, 112, 177, 194)
+        cc_arrow_tip(c, yx - 10, xy - 16, 1, 112, 177, 194)
+    }
+    if cat_dag_has_edge(dag, 1, 2) {
+        cc_dashed_line(c, ux - 10, top_y + 16, xx + 10, xy - 16, 238, 178, 62)
+        cc_arrow_tip(c, xx + 10, xy - 16, 0 - 1, 238, 178, 62)
+    } else if surgery {
+        cc_dashed_line(c, ux - 10, top_y + 16, xx + 30, xy - 42, 104, 78, 45)
+        canvas_draw_line(c, xx + 22, xy - 47, xx + 32, xy - 37, 250, 128, 184)
+        canvas_draw_line(c, xx + 32, xy - 47, xx + 22, xy - 37, 250, 128, 184)
+    }
+    if cat_dag_has_edge(dag, 1, 3) {
+        cc_dashed_line(c, ux, top_y + 19, yx, xy - 19, 238, 178, 62)
+        cc_arrow_tip(c, yx, xy - 19, 1, 238, 178, 62)
+    }
+    if cat_dag_has_edge(dag, 2, 3) {
+        canvas_draw_line(c, xx + 19, xy, yx - 19, xy, 105, 225, 224)
+        cc_arrow_tip(c, yx - 19, xy, 0, 105, 225, 224)
+    }
+
+    cc_node(c, zx, top_y, 90, cat_dag_is_observed(dag, 0), cat_dag_is_intervened(dag, 0))
+    cc_node(c, ux, top_y, 85, cat_dag_is_observed(dag, 1), cat_dag_is_intervened(dag, 1))
+    cc_node(c, xx, xy, 88, cat_dag_is_observed(dag, 2), cat_dag_is_intervened(dag, 2))
+    cc_node(c, yx, xy, 89, cat_dag_is_observed(dag, 3), cat_dag_is_intervened(dag, 3))
+}
+
+pub fn causal_render_confounding_receipt(
+    observed: &CatCausalDAG,
+    intervened: &CatCausalDAG,
+    c: &!Canvas,
+) with Mut, Div, Panic {
+    canvas_clear(c, 7, 12, 20)
+    canvas_fill_rect(c, 20, 22, 116, 3, 105, 225, 224)
+    cc_text8(c, 20, 31, 67, 65, 85, 83, 65, 76, 32, 70, 230, 238, 244)
+    cc_text8(c, 84, 31, 82, 79, 78, 84, 73, 69, 82, 0, 230, 238, 244)
+
+    cc_graph_panel(c, observed, 20, false)
+    cc_graph_panel(c, intervened, 250, true)
+
+    let identified = causal_candidate_adjustment_identified(observed, 2, 3, 0)
+    canvas_fill_rect(c, 20, 220, 440, 72, 12, 18, 27)
+    canvas_draw_rect(c, 20, 220, 440, 72, 49, 66, 82)
+    cc_text8(c, 32, 229, 65, 68, 74, 85, 83, 84, 32, 90, 158, 177, 194)
+    cc_text8(c, 96, 229, 58, 32, 79, 80, 69, 78, 0, 0, 238, 178, 62)
+    cc_text8(c, 32, 246, 76, 65, 84, 69, 78, 84, 32, 85, 158, 177, 194)
+    cc_text8(c, 96, 246, 58, 32, 85, 78, 79, 66, 83, 69, 238, 178, 62)
+    cc_text8(c, 160, 246, 82, 86, 69, 68, 0, 0, 0, 0, 238, 178, 62)
+    cc_text8(c, 32, 263, 66, 65, 67, 75, 68, 79, 79, 82, 158, 177, 194)
+    cc_text8(c, 96, 263, 32, 73, 68, 58, 32, 0, 0, 0, 158, 177, 194)
+    if identified {
+        cc_text8(c, 160, 263, 73, 68, 69, 78, 84, 73, 70, 73, 105, 225, 224)
+        cc_text8(c, 224, 263, 69, 68, 0, 0, 0, 0, 0, 0, 105, 225, 224)
+    } else {
+        cc_text8(c, 160, 263, 82, 69, 70, 85, 83, 69, 68, 0, 250, 128, 184)
+    }
+    cc_text8(c, 32, 280, 78, 79, 32, 69, 70, 70, 69, 67, 158, 177, 194)
+    cc_text8(c, 96, 280, 84, 32, 69, 83, 84, 73, 77, 65, 158, 177, 194)
+    cc_text8(c, 160, 280, 84, 69, 0, 0, 0, 0, 0, 0, 158, 177, 194)
+}

@@ -11,35 +11,30 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.handoff.blk-20
 
 ```text
 Blocker-ID: BLK-20260804-p0b-qd128-native-v2
-Status: classified (narrowed 2026-08-04)
-Severity: B1
-Class: compiler-native
-Owner: unassigned (needs native codegen window; do not steal ACTIVE Codex claims on lower.sio / codegen_x86_linux.sio)
-Lane: p0b2-qd128-leaf-20260804 (stdlib thin-leaf closeout; arithmetic residual remains)
-Worktree: /tmp/sounio-p0b2-qd128-leaf-20260804
-Branch: research/p0b2-qd128-leaf-20260804
-Files-Owned: (open — self-hosted/native/codegen_x86_linux.sio and/or math::qd128 arithmetic reshape)
-Do-Not-Touch: self-hosted/ir/lower.sio, self-hosted/native/codegen_x86_linux.sio while Codex epistemic claim is ACTIVE
-Repro: SOUNIO_NV2_IR_TRACE=1 ./bin/souc compile tests/known_failures/qd128_import_native_v2_probe.sio -o /tmp/qd.elf
-Observed: imported lowering completes (into_acc_done 2); native emit fails closed with
-  "NV2_IR unsupported fn=… name=qd_mul" then "Failed to write native binary … rc=12"
-Expected: full math::qd128::{qd_zero,qd_mul,…} import compiles+runs under default Madaros
-Acceptance-Gate: known_failures/qd128_import_native_v2_probe.sio flips to rc=0 + QD128_IMPORT_NATIVE_V2 PASS;
-  zero_provenance (eisa→qd_mul) may remain a separate residual
+Status: closed (2026-08-04)
+Severity: B1 (was)
+Class: compiler-native / stdlib-reshape
+Owner: cursor--p0b3-qd-mul-native-v2-20260804
+Lane: p0b3-qd-mul-native-v2-20260804
+Worktree: /tmp/sounio-p0b3-qd-mul-20260804
+Branch: research/p0b3-qd-mul-native-v2-20260804
+Closed-By: stdlib-only reshape of qd_nine_two_sum / qd_nine_one_sum to take [f64; 9]
+Root-Cause: Madaros native-v2 rejects IrCall with 9+ scalar f64 args from *imported*
+  module function bodies (same-file / main-unit calls and ≤8 float scalars succeed).
+Acceptance-Gate: scripts/ci/madaros_qd128_mul_native_v2_gate.sh
+  + scripts/ci/zero_event_native_v2_matrix.sh (qd128 green; combined still fail-closed on stock Madaros)
 Evidence-Level: E3
-Evidence: matrix fail-closed full-qd128 lane; SOUNIO_NV2_IR_TRACE naming qd_mul
-Fallback-Path: use math::qd128_core::{qd_zero,qd_from_f64} under Madaros
-  (gate scripts/ci/madaros_qd128_core_native_v2_gate.sh → MADAROS_QD128_CORE_NATIVE_V2_GATE_OK);
-  lean_single for full arithmetic oracles
-Legacy-Kept: yes (full math::qd128 + known_failures probe retained)
-LLM-Offload: not-required
-Next-Action: When codegen write window is free, classify why
-  compile_ir_function_v2_from_ir_into rejects qd_mul (opcode / frame / arity).
+LLM-Offload: not-required (mechanical ABI reshape; HLB arithmetic unchanged)
+Residual: combined sedenion+eisa zero-provenance thin-link `rc=12` on stock Madaros (lean_single green)
+Next-Action: none for qd_mul; zero-provenance multi-import remains a separate BLK/lane
 ```
 
 ## Context
 
-Constructor import is **closed** via `stdlib/math/qd128_core.sio` (no `qd_mul`).
-Full `math::qd128` remains fail-closed because importing the module compiles
-`qd_mul` into the native-v2 unit. Combined zero-provenance stays blocked on the
-same `qd_mul` edge through eisa.
+`math::qd128_core` constructors closed earlier. Full `math::qd128` including
+`qd_mul` now compiles and runs under default Madaros after packing the nine-term
+helpers into a single array argument (same pattern family as sedenion’s
+array-ref CD helpers for high-arity float calls). Combined sedenion+eisa
+zero-provenance remains fail-closed under stock Madaros thin-link (`rc=12`) as of
+shepherd-merge onto `origin/main` 2026-08-05; lean_single still prints
+`ZERO_PROVENANCE PASS`.

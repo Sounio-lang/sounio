@@ -1,0 +1,197 @@
+//@ run-pass
+// Scalarized native executor for proof-carrying policy-state feedback D5.
+
+struct ContestState {
+    survivor_mask: i64,
+    survivor_count: i64,
+    evidence_count: i64,
+    burden_spent: i64,
+    last_provenance_id: i64,
+    provenance_fingerprint: i64,
+}
+
+fn as_i64(value: bool) -> i64 { if value { 1 } else { 0 } }
+
+fn popcount2(mask: i64) -> i64 with Panic {
+    assert(mask >= 0 && mask <= 3)
+    as_i64(mask % 2 == 1) + as_i64((mask / 2) % 2 == 1)
+}
+
+fn anchor_value(mode: i64) -> i64 with Panic {
+    assert(mode == 0 || mode == 1)
+    2
+}
+
+fn target_value(mode: i64) -> i64 with Panic {
+    assert(mode == 0 || mode == 1)
+    if mode == 0 { 2 } else { 8 }
+}
+
+fn adaptive_probe_eligible(summary_code: i64) -> bool with Panic {
+    assert(summary_code == 2)
+    false
+}
+
+fn mode_for_hypothesis_id(
+    low_id: i64,
+    high_id: i64,
+    hypothesis_id: i64,
+) -> i64 with Panic {
+    assert(low_id != high_id)
+    assert(hypothesis_id == low_id || hypothesis_id == high_id)
+    if hypothesis_id == low_id { 0 } else { 1 }
+}
+
+fn prediction_signature_for_id(
+    low_id: i64,
+    high_id: i64,
+    hypothesis_id: i64,
+) -> i64 with Panic {
+    let mode = mode_for_hypothesis_id(low_id, high_id, hypothesis_id)
+    100 * anchor_value(mode) + 10 * target_value(mode) +
+        as_i64(adaptive_probe_eligible(anchor_value(mode)))
+}
+
+fn apply_optional_fixture_evidence(
+    prior_mask: i64,
+    evidence_present: bool,
+    evidence_mask: i64,
+) -> i64 with Panic {
+    assert(prior_mask == 3)
+    assert(evidence_mask >= 0 && evidence_mask <= 3)
+    if evidence_present { evidence_mask } else { prior_mask }
+}
+
+fn initial_contest() -> ContestState {
+    ContestState {
+        survivor_mask: 3,
+        survivor_count: 2,
+        evidence_count: 0,
+        burden_spent: 0,
+        last_provenance_id: 0,
+        provenance_fingerprint: 0,
+    }
+}
+
+fn update_anchor(source: ContestState, provenance_id: i64) -> ContestState with Panic {
+    assert(source.survivor_mask == 3 && source.evidence_count == 0)
+    assert(anchor_value(0) == 2 && anchor_value(1) == 2)
+    ContestState {
+        survivor_mask: 3,
+        survivor_count: 2,
+        evidence_count: 1,
+        burden_spent: source.burden_spent + 3,
+        last_provenance_id: provenance_id,
+        provenance_fingerprint: source.provenance_fingerprint * 31 + provenance_id,
+    }
+}
+
+fn update_probe(
+    source: ContestState,
+    provenance_id: i64,
+    previous_provenance_id: i64,
+    observed_value: i64,
+) -> ContestState with Panic {
+    assert(source.survivor_mask == 3 && source.evidence_count == 1)
+    assert(source.burden_spent == 3 && source.burden_spent + 4 == 7)
+    assert(previous_provenance_id == source.last_provenance_id)
+    assert(observed_value == 2 || observed_value == 8)
+    let mask = if observed_value == 2 { 1 } else { 2 }
+    ContestState {
+        survivor_mask: mask,
+        survivor_count: popcount2(mask),
+        evidence_count: 2,
+        burden_spent: source.burden_spent + 4,
+        last_provenance_id: provenance_id,
+        provenance_fingerprint: source.provenance_fingerprint * 31 + provenance_id,
+    }
+}
+
+fn main() with Mut, Panic {
+    assert(anchor_value(0) == anchor_value(1))
+    assert(target_value(0) == 2 && target_value(1) == 8)
+
+    let after_anchor = update_anchor(initial_contest(), 8101)
+    assert(after_anchor.survivor_mask == 3)
+    assert(after_anchor.survivor_count == 2)
+    assert(after_anchor.burden_spent == 3)
+    let summary_code = 2
+    assert(!adaptive_probe_eligible(summary_code))
+    let decision_id = 8102
+    let feedback_fingerprint = after_anchor.last_provenance_id * 31 + decision_id
+    assert(feedback_fingerprint == 259233)
+
+    var iteration: i64 = 0
+    while iteration < 2 {
+        assert(summary_code == 2)
+        assert(!adaptive_probe_eligible(summary_code))
+        iteration = iteration + 1
+    }
+
+    // No adaptive eligibility means no support in the discriminating cell.
+    let eligible_opportunities = 0
+    let observed_opportunities = 0
+    assert(eligible_opportunities == 0 && observed_opportunities == 0)
+    let statistical_positivity = false
+    let policy_value_identified = false
+    assert(!statistical_positivity && !policy_value_identified)
+
+    // One synthetic exogenous probe exactly spends the remaining four units.
+    let after_low = update_probe(after_anchor, 8103, 8101, 2)
+    let after_high = update_probe(after_anchor, 8103, 8101, 8)
+    assert(after_low.survivor_mask == 1 && after_low.survivor_count == 1)
+    assert(after_high.survivor_mask == 2 && after_high.survivor_count == 1)
+    assert(after_low.burden_spent == 7 && after_high.burden_spent == 7)
+    assert(after_low.provenance_fingerprint == 259234)
+    assert(after_high.provenance_fingerprint == 259234)
+
+    let remaining_after_probe = 7 - after_low.burden_spent
+    let requested_second_probe = 4
+    let second_probe_executed = requested_second_probe <= remaining_after_probe
+    assert(remaining_after_probe == 0 && !second_probe_executed)
+
+    let policy_erased_mask = apply_optional_fixture_evidence(
+        after_anchor.survivor_mask, false, 0,
+    )
+    let disconnected_probe_mask = apply_optional_fixture_evidence(
+        after_anchor.survivor_mask, false, 0,
+    )
+    assert(policy_erased_mask == 3 && disconnected_probe_mask == 3)
+    assert(apply_optional_fixture_evidence(after_anchor.survivor_mask, true, 0) == 0)
+
+    // Resolve actual identifiers through each family before comparing modes.
+    let original_ids = [510, 511]
+    let relabeled_ids = [611, 610]
+    var mode: i64 = 0
+    while mode < 2 {
+        let original_id = original_ids[mode]
+        let relabeled_id = relabeled_ids[mode]
+        assert(original_id != relabeled_id)
+        assert(mode_for_hypothesis_id(
+            original_ids[0], original_ids[1], original_id,
+        ) == mode)
+        assert(mode_for_hypothesis_id(
+            relabeled_ids[0], relabeled_ids[1], relabeled_id,
+        ) == mode)
+        let original_signature = prediction_signature_for_id(
+            original_ids[0], original_ids[1], original_id,
+        )
+        let relabeled_signature = prediction_signature_for_id(
+            relabeled_ids[0], relabeled_ids[1], relabeled_id,
+        )
+        assert(original_signature == relabeled_signature)
+        mode = mode + 1
+    }
+    let maximum_two_link_fingerprint = 1000000 * 31 + 1000000
+    assert(maximum_two_link_fingerprint == 32000000)
+
+    println("D5-W0 anchor value=2 mask=3 summary=2 ambiguous=true burden=3")
+    println("D5-W1 feedback decision=withhold eligible=0 mask=3 hidden=2|8 trace_equal=true")
+    println("D5-W2 coverage support=absent positivity=false policy_value_identified=false")
+    println("D5-W3 exogenous_low value=2 mask=1 selected=510 burden=7 fingerprint=259234")
+    println("D5-W4 exogenous_high value=8 mask=2 selected=511 burden=7 fingerprint=259234")
+    println("D5-W5 budget cap=7 remaining=4 probe=4 excess=refused")
+    println("D5-W6 policy_erased=abstain disconnected=abstain mask=3")
+    println("D5-W7 relabel=invariant consent=false suffering=false clinical=false fingerprint_max2=32000000")
+    println("PROOF-CARRYING POLICY-STATE FEEDBACK D5 PASS")
+}

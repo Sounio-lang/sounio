@@ -26,7 +26,14 @@ On this repo snapshot, `bin/souc` is a host-aware launcher around the checked se
 - To use the compatibility legacy engine, set `SOUNIO_SOUC_ENGINE=lean_single`.
 - `--target aarch64-macos` and `--target x86_64-macos` emit Mach-O binaries
 - `--target aarch64-linux` emits Linux ARM64 ELF binaries
-- It still does not provide the broader omega-only workflows such as `repl`, `gpu-emit`, or the full pinned-release tool surface
+- **Update 2026-08-14 (checked, not assumed):** the "does not provide repl/gpu-emit/full tool surface" line just above went stale in the
+  opposite direction of the usual overclaim. Verified today with `./bin/souc --help` and
+  running each command: `souc repl` starts a working file-backed REPL; `souc format` and
+  `souc fmt` run the checked formatter; `souc lsp --stdio` starts and shuts down cleanly;
+  `souc pkg build`/`souc pkg verify` exist; GPU artifact emission is available as
+  `souc build <file.sio> --backend gpu -o out.ptx` (not a separate `gpu-emit` subcommand).
+  This section otherwise describes April 22, 2026 and has not been re-audited beyond the
+  five commands above -- do not assume anything else here is current.
 
 On macOS, the emitted binaries are Mach-O instead of ELF.
 

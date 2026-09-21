@@ -9,13 +9,15 @@ usage() {
   cat <<'USAGE'
 Usage: scripts/dev/install_sounio_coord_runtime.sh [options]
 
-Install and atomically activate the coordination runtime shared by every
+Install or atomically activate the coordination runtime shared by every
 worktree attached to this repository.
 
 Options:
   --source-root PATH       source bundle root (default: current worktree)
   --runtime-dir PATH       shared runtime root override
+  --stage                  install and validate without changing current
   --activate RUNTIME_ID    activate an already installed version
+  --cutover-root PATH      repository whose Sounio 9046 drain admits a legacy-to-native activation
   --list                   list installed versions
   -h, --help               show this help
 USAGE
@@ -29,6 +31,70 @@ die() {
 manifest_value() {
   local manifest="$1" key="$2"
   sed -n "s/^${key}=//p" "$manifest" | head -1
+}
+
+verify_manifest_binary_sha256() {
+  local manifest="$1" key="$2" binary="$3" expected actual
+  expected="$(manifest_value "$manifest" "$key")"
+  [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || \
+    die "installed runtime has invalid $key: $manifest"
+  [[ -f "$binary" ]] || die "installed runtime hash target is absent: $binary"
+  actual="$(sha256sum "$binary" | awk '{print $1}')"
+  [[ "$actual" == "$expected" ]] || \
+    die "installed runtime binary hash mismatch: $key expected=$expected actual=$actual"
+}
+
+require_native_cutover_admission() {
+  local previous_bundle="$1" version_dir="$2" manifest="$3"
+  local runtime_id previous_runtime_id admission_output admission_rc
+  [[ -n "$previous_bundle" ]] || return 0
+  [[ -e "$previous_bundle/hooks/sounio_coord_agent_hook_runtime.py" || \
+    -e "$previous_bundle/hooks/sounio_coord_agent_hook.py" ]] || return 0
+  [[ ! -e "$version_dir/hooks/sounio_coord_agent_hook_runtime.py" && \
+    ! -e "$version_dir/hooks/sounio_coord_agent_hook.py" ]] || return 0
+  runtime_id="$(manifest_value "$manifest" runtime_id)"
+  grep -q '^capability=loom-native-hook-generation-drain-v1$' "$manifest" ||
+    die "bridge-free activation omits frozen Sounio action 9046: $runtime_id"
+  [[ -x "$version_dir/bin/sounio-loom-runtime" && \
+    -x "$version_dir/bin/sounio-loom-native-hook-generation-drain" ]] ||
+    die "bridge-free activation omits the native drain kernel or Sounio action 9046: $runtime_id"
+  [[ -L "$RUNTIME_ROOT/native-next" && \
+    "$(readlink -f "$RUNTIME_ROOT/native-next")" == "$version_dir" ]] ||
+    die "bridge-free activation target is not the selected native-next generation: $runtime_id"
+  [[ -n "$CUTOVER_ROOT" ]] ||
+    die "legacy-to-native activation requires --cutover-root and a CUTOVER_READY receipt"
+  [[ "$(git -C "$CUTOVER_ROOT" rev-parse --show-toplevel 2>/dev/null || true)" == \
+    "$CUTOVER_ROOT" ]] || die "cutover root is not a Git worktree: $CUTOVER_ROOT"
+  if grep -q '^capability=loom-generation-pinned-cutover-v1$' "$manifest"; then
+    previous_runtime_id="$(basename "$previous_bundle")"
+    set +e
+    admission_output="$(
+      SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" \
+        "$version_dir/bin/sounio-loom-runtime" hook-generation-pin-seal \
+          --source-root "$CUTOVER_ROOT" --git-common "$GIT_COMMON_DIR" \
+          --old-runtime "$previous_runtime_id" --candidate-runtime "$runtime_id" \
+          9>&- 2>&1
+    )"
+    admission_rc=$?
+    set -e
+    ((admission_rc == 0)) &&
+      grep -q '^SOUNIO_GENERATION_PINNED_CUTOVER CUTOVER_READY semantic_authority=Sounio action=9048$' \
+        <<< "$admission_output" ||
+      die "Sounio action 9048 refused generation-pinned activation: $admission_output"
+    printf '%s\n' "$admission_output"
+    return 0
+  fi
+  set +e
+  admission_output="$(
+    SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" \
+      "$version_dir/bin/sounio-loom-runtime" hook-generation-cutover-admit \
+        --cwd "$CUTOVER_ROOT" 9>&- 2>&1
+  )"
+  admission_rc=$?
+  set -e
+  ((admission_rc == 0)) ||
+    die "Sounio action 9046 refused legacy-to-native activation: $admission_output"
+  printf '%s\n' "$admission_output"
 }
 
 ensure_obligation_activation() {
@@ -78,12 +144,43 @@ ensure_obligation_activation() {
   flock -u 8
 }
 
+# Frozen authorities are re-frozen append-only. An installed bundle may carry any
+# accepted generation, so activating (or rolling back to) a bundle sealed before
+# a re-freeze stays possible; each check below still fails closed on unknown values.
+manifest_value_in() {
+  local manifest="$1" key="$2" value accepted
+  value="$(manifest_value "$manifest" "$key")"
+  shift 2
+  for accepted in "$@"; do [[ "$value" == "$accepted" ]] && return 0; done
+  return 1
+}
+
+# Semantics and freeze manifest must belong to the same frozen generation.
+manifest_pair_in() {
+  local manifest="$1" first="$2" second="$3" pair accepted
+  pair="$(manifest_value "$manifest" "$first"):$(manifest_value "$manifest" "$second")"
+  shift 3
+  for accepted in "$@"; do [[ "$pair" == "$accepted" ]] && return 0; done
+  return 1
+}
+
+# The newest frozen generation shipped in a policy capsule (…freeze.v3, …v2, else …v1).
+frozen_capsule_file() {
+  local generation
+  for generation in v3 v2; do
+    [[ -f "$1.$generation" ]] && { printf '%s\n' "$1.$generation"; return 0; }
+  done
+  printf '%s\n' "$1.v1"
+}
+
 activate_runtime() {
   local runtime_id="$1" version_dir manifest protocol link_tmp
+  local previous_target='' previous_bundle='' previous_runtime=''
+  local control_state control_status='' control_service_was_live=0
+  local ensure_output='' ensure_rc=0
   version_dir="$RUNTIME_ROOT/versions/$runtime_id"
   manifest="$version_dir/manifest"
-  [[ -f "$manifest" && -x "$version_dir/bin/sounio-coord-runtime" && \
-    -f "$version_dir/hooks/sounio_coord_agent_hook_runtime.py" ]] || \
+  [[ -f "$manifest" && -x "$version_dir/bin/sounio-coord-runtime" ]] || \
     die "installed runtime is incomplete: $runtime_id"
   protocol="$(manifest_value "$manifest" protocol_version)"
   [[ "$protocol" == "$CLIENT_PROTOCOL" ]] || \
@@ -95,6 +192,455 @@ activate_runtime() {
   if grep -q '^capability=loom-kernel-v1$' "$manifest"; then
     [[ -x "$version_dir/bin/sounio-loom-runtime" ]] || \
       die "installed runtime declares Loom but omits its OCaml kernel: $runtime_id"
+  fi
+  if grep -q '^capability=loom-authenticated-message-bridge-v1$' "$manifest"; then
+    [[ -x "$version_dir/bin/sounio-loom-message-runtime" ]] || \
+      die "installed runtime declares the authenticated message bridge but omits its OCaml runtime: $runtime_id"
+    verify_manifest_binary_sha256 "$manifest" loom_message_runtime_sha256 \
+      "$version_dir/bin/sounio-loom-message-runtime"
+  fi
+  if grep -q '^capability=loom-routing-authority-v1$' "$manifest"; then
+    local routing_capsule="$version_dir/policy/routing-authority"
+    local routing_freeze
+    routing_freeze="$(frozen_capsule_file "$routing_capsule/tools/loom/routing_authority.freeze")"
+    local routing_source="$routing_capsule/stdlib/coordination/loom_routing_authority.sio"
+    local routing_entrypoint="$routing_capsule/tools/loom/routing_authority_main.sio"
+    [[ -x "$version_dir/bin/sounio-loom-routing-authority-runtime" && \
+      -f "$routing_freeze" && \
+      -f "$routing_capsule/stdlib/coordination/loom_routing_authority.sio" && \
+      -f "$routing_capsule/tools/loom/routing_authority_main.sio" ]] || \
+      die "installed runtime declares routing authority but omits frozen Sounio action 9032: $runtime_id"
+    [[ "$(manifest_value "$manifest" loom_routing_authority_action)" == 9032 ]] && \
+      manifest_value_in "$manifest" loom_routing_authority_semantics_sha256 \
+        cf625edcbc8c21a6c05e6ccb18adb254af3ffb1cec54bea3ce4fc14df739a8ea \
+        edd7944d759a398589e2c4a5f0798f1d3df79e68c514d3b0e4081a94c9c32fb1 || \
+      die "installed routing authority is not bound to frozen Sounio semantics: $runtime_id"
+    [[ "$(sha256sum "$routing_freeze" | awk '{print $1}')" == \
+      "$(manifest_value "$manifest" loom_routing_authority_manifest_sha256)" && \
+      "$(sha256sum "$routing_source" | awk '{print $1}')" == \
+        "$(manifest_value "$routing_freeze" source_sha256)" && \
+      "$(sha256sum "$routing_entrypoint" | awk '{print $1}')" == \
+        "$(manifest_value "$routing_freeze" entrypoint_sha256)" ]] || \
+      die "installed routing authority policy capsule drifted: $runtime_id"
+    verify_manifest_binary_sha256 "$manifest" loom_routing_authority_runtime_sha256 \
+      "$version_dir/bin/sounio-loom-routing-authority-runtime"
+  fi
+  if grep -q '^capability=loom-transactional-custody-transfer-v1$' "$manifest"; then
+    [[ -x "$version_dir/bin/sounio-loom-runtime" && \
+      -x "$version_dir/bin/sounio-loom-custody-transfer-runtime" ]] || \
+      die "installed runtime declares transactional custody transfer but omits Loom or frozen Sounio frame 9040: $runtime_id"
+    manifest_value_in "$manifest" loom_custody_transfer_semantics_sha256 \
+      4ce6630421544f40a13b88b17e5692e7906a7a1a12056334fe35fea0f0803727 \
+      5f53d3edcb6731c5b0f4e58ff7b27d251e6c0b40eda8c68366e48b17e596f55c || \
+      die "installed custody transfer is not bound to frozen Sounio semantics: $runtime_id"
+    verify_manifest_binary_sha256 "$manifest" loom_custody_transfer_runtime_sha256 \
+      "$version_dir/bin/sounio-loom-custody-transfer-runtime"
+  fi
+  if grep -q '^capability=loom-durable-execution-outcome-v1$' "$manifest"; then
+    grep -q '^capability=loom-transactional-custody-transfer-v1$' "$manifest" && \
+      [[ -x "$version_dir/bin/sounio-loom-runtime" && \
+        -x "$version_dir/bin/sounio-loom-execution-outcome-runtime" ]] || \
+      die "installed runtime declares durable execution outcomes without transactional custody, Loom, or frozen Sounio frame 9022: $runtime_id"
+    manifest_value_in "$manifest" loom_execution_outcome_semantics_sha256 \
+      9dc1bf465c15259b15eee447d27c24450550df0a2c41c48dc2fd0712a3232b59 \
+      c98c13d30d66ba2fb3d0fb34d75bd21b14b353bc88fd80acf7dbb385cb9fa914 || \
+      die "installed execution outcome is not bound to frozen Sounio semantics: $runtime_id"
+    manifest_value_in "$manifest" loom_execution_outcome_manifest_sha256 \
+      e0ebf1a24dea80a57c2fa256474620fb4a93e047ea027538f8ecdc8bdc27b6e1 \
+      f5e63a2fd6a946cea1a4cb57013ae0cfa1772c42c3cc52e42d300dfb7b45e16e || \
+      die "installed execution outcome has an unknown freeze manifest: $runtime_id"
+    verify_manifest_binary_sha256 "$manifest" loom_execution_outcome_runtime_sha256 \
+      "$version_dir/bin/sounio-loom-execution-outcome-runtime"
+  fi
+  if grep -q '^capability=loom-native-agent-hook-v1$' "$manifest"; then
+    [[ -x "$version_dir/bin/sounio-loom-runtime" && \
+      -x "$version_dir/bin/sounio-loom-language-authority-runtime" ]] || \
+      die "installed runtime declares the native agent hook but omits its OCaml kernel or frozen Sounio authority: $runtime_id"
+    manifest_value_in "$manifest" loom_language_authority_semantics_sha256 \
+      16e283166d29d6b18ed690b000e2eb595a7d965e4357553a8380714486429fff \
+      7a0115e5918ca6ff3f7ad82f073e1c08d1d98b62f6f927dd69265c14205190b6 || \
+      die "installed native hook is not bound to the frozen Sounio authority: $runtime_id"
+  fi
+  if grep -q '^capability=loom-native-hook-cutover-v1$' "$manifest"; then
+    local cutover_capsule="$version_dir/policy/native-hook-cutover"
+    local cutover_config
+    grep -q '^capability=loom-native-agent-hook-v1$' "$manifest" && \
+      [[ -x "$version_dir/bin/sounio-loom-runtime" && \
+        -x "$version_dir/bin/sounio-loom-native-hook-cutover" ]] || \
+      die "installed runtime declares native hook cutover without Loom or frozen Sounio action 9045: $runtime_id"
+    [[ ! -e "$version_dir/hooks/sounio_coord_agent_hook_runtime.py" && \
+      ! -e "$version_dir/hooks/sounio_coord_agent_hook.py" ]] || \
+      die "installed native hook cutover still contains a Python hook bridge: $runtime_id"
+    manifest_pair_in "$manifest" loom_native_hook_cutover_semantics_sha256 \
+      loom_native_hook_cutover_manifest_sha256 \
+      27c5fd758d161026c5c41d0cd0be0f1aa90bd4e3f4287da3c60fb748d1334882:16a4f7e24e1fcdb71690b3031914b2fe6cd389ad866154b7bf73907f007cfc4a \
+      842152d98a0222353d4432fc3549ce5df9730c73e1b319617cf340e75cf1d998:4ce46da965e6e19390dcfde8119bf8e9dcb1dab2c1722f5c27cc5e330532932a || \
+      die "installed native hook cutover is not bound to frozen Sounio action 9045: $runtime_id"
+    verify_manifest_binary_sha256 "$manifest" loom_native_hook_cutover_runtime_sha256 \
+      "$version_dir/bin/sounio-loom-native-hook-cutover"
+    verify_manifest_binary_sha256 "$manifest" loom_native_hook_cutover_manifest_sha256 \
+      "$(frozen_capsule_file "$cutover_capsule/tools/loom/native_hook_cutover.freeze")"
+    verify_manifest_binary_sha256 "$manifest" loom_native_hook_cutover_source_sha256 \
+      "$cutover_capsule/stdlib/coordination/loom_native_hook_cutover_authority.sio"
+    verify_manifest_binary_sha256 "$manifest" loom_native_hook_cutover_entrypoint_sha256 \
+      "$cutover_capsule/tools/loom/native_hook_cutover_authority_main.sio"
+    for cutover_config in codex claude cursor grok; do
+      verify_manifest_binary_sha256 "$manifest" \
+        "loom_native_hook_cutover_${cutover_config}_config_sha256" \
+        "$cutover_capsule/configs/${cutover_config}.json"
+      if grep -Eiq 'python|pypy|rustc|cargo|node[[:space:]]|ruby[[:space:]]|awk[[:space:]]|bc[[:space:]]' \
+        "$cutover_capsule/configs/${cutover_config}.json"; then
+        die "installed native hook config contains a prohibited bridge: $cutover_config"
+      fi
+    done
+  fi
+  if grep -q '^capability=loom-native-hook-generation-reconcile-v1$' "$manifest"; then
+    local reconcile_capsule="$version_dir/policy/native-hook-generation-reconcile"
+    [[ -x "$version_dir/bin/sounio-loom-runtime" && \
+      -x "$version_dir/bin/sounio-loom-native-hook-generation-reconcile" ]] || \
+      die "installed runtime declares generation reconciliation without Loom or frozen Sounio action 9047: $runtime_id"
+    manifest_pair_in "$manifest" loom_native_hook_generation_reconcile_semantics_sha256 \
+      loom_native_hook_generation_reconcile_manifest_sha256 \
+      63733afa5f88bb5bc867ce59f5a7b481927b0126096d602c3bdf949b25935fff:a38fcb98dbaeb68b1913aec07b1646d8e965249a1bb05a01427327a78aea7cd7 \
+      9741264b94d06e7063673063c9c328f91f9ae25e1211f4a083522b05a513c5f7:35b6dc397a250eb2dfe9e57384a96bf07a37199bc28fe66daad1fd4ee6ffd39b || \
+      die "installed generation reconciliation is not bound to frozen Sounio action 9047: $runtime_id"
+    verify_manifest_binary_sha256 "$manifest" \
+      loom_native_hook_generation_reconcile_runtime_sha256 \
+      "$version_dir/bin/sounio-loom-native-hook-generation-reconcile"
+    verify_manifest_binary_sha256 "$manifest" \
+      loom_native_hook_generation_reconcile_manifest_sha256 \
+      "$(frozen_capsule_file "$reconcile_capsule/tools/loom/native_hook_generation_reconcile.freeze")"
+  fi
+  if grep -q '^capability=loom-generation-pinned-cutover-v1$' "$manifest"; then
+    local pin_capsule="$version_dir/policy/generation-pinned-cutover"
+    [[ -x "$version_dir/bin/sounio-loom-generation-pinned-cutover" && \
+      -f "$(frozen_capsule_file "$pin_capsule/tools/loom/generation_pinned_cutover.freeze")" ]] || \
+      die "installed runtime declares generation pinning without frozen Sounio action 9048: $runtime_id"
+    manifest_pair_in "$manifest" loom_generation_pinned_cutover_semantics_sha256 \
+      loom_generation_pinned_cutover_manifest_sha256 \
+      9a323d98a6c732e0a7f70a6d50cf684e5039eb2af211e5f891fd0c9761351549:0765d7e941a5def05e8ae7d08a90c7826491c86b4c1efc8679b40a6a728de29d \
+      a6edaa3e31036e4c70fc5ee24811e7811e5b6552f0c55413694abe7ee2ec40ff:0f29211004af425cd9946f35be8c94a5b2f44a1758a22066a88a410bb13baef4 || \
+      die "installed generation pinning is not bound to frozen Sounio action 9048: $runtime_id"
+    verify_manifest_binary_sha256 "$manifest" \
+      loom_generation_pinned_cutover_runtime_sha256 \
+      "$version_dir/bin/sounio-loom-generation-pinned-cutover"
+  fi
+  if grep -q '^capability=loom-activation-epoch-v1$' "$manifest"; then
+    local epoch_capsule="$version_dir/policy/activation-epoch"
+    grep -q '^capability=loom-generation-pinned-cutover-v1$' "$manifest" || \
+      die "installed activation epoch omits generation pinning: $runtime_id"
+    verify_manifest_binary_sha256 "$manifest" loom_activation_epoch_runtime_sha256 \
+      "$version_dir/bin/sounio-loom-activation-epoch"
+    verify_manifest_binary_sha256 "$manifest" loom_activation_epoch_manifest_sha256 \
+      "$(frozen_capsule_file "$epoch_capsule/tools/loom/activation_epoch.freeze")"
+  fi
+  if grep -q '^capability=loom-native-hook-generation-drain-v1$' "$manifest"; then
+    local drain_capsule="$version_dir/policy/native-hook-generation-drain"
+    [[ -x "$version_dir/bin/sounio-loom-runtime" && \
+      -x "$version_dir/bin/sounio-loom-native-hook-generation-drain" ]] || \
+      die "installed runtime declares generation drain without Loom or frozen Sounio action 9046: $runtime_id"
+    manifest_pair_in "$manifest" loom_native_hook_generation_drain_semantics_sha256 \
+      loom_native_hook_generation_drain_manifest_sha256 \
+      00c5d07b77434b37844e3704dd935d04367646c4f8541a8cce77bc143deb46a3:9a40674a135a4c4f43ae0ba8a2658eba32e311b6cedaad5c26124eb6de657ca1 \
+      c3804ea1f88a415ffdffaa7c505eb2d372237ced9250580ce84b7132aef099fb:ba87be5dbd1fa9c8d372c3c93ec6685ce10daa11e5de22bb904b698ec1733a61 || \
+      die "installed generation drain is not bound to frozen Sounio action 9046: $runtime_id"
+    verify_manifest_binary_sha256 "$manifest" \
+      loom_native_hook_generation_drain_runtime_sha256 \
+      "$version_dir/bin/sounio-loom-native-hook-generation-drain"
+    verify_manifest_binary_sha256 "$manifest" \
+      loom_native_hook_generation_drain_manifest_sha256 \
+      "$(frozen_capsule_file "$drain_capsule/tools/loom/native_hook_generation_drain.freeze")"
+  fi
+  if grep -q '^capability=loom-runtime-authority-capsule-v1$' "$manifest"; then
+    local authority_capsule="$version_dir/policy/language-authority"
+    grep -q '^capability=loom-native-agent-hook-v1$' "$manifest" || \
+      die "installed runtime declares an authority capsule without the native hook: $runtime_id"
+    verify_manifest_binary_sha256 "$manifest" \
+      loom_language_authority_policy_manifest_sha256 \
+      "$(frozen_capsule_file "$authority_capsule/tools/loom/language_authority.freeze")"
+    verify_manifest_binary_sha256 "$manifest" \
+      loom_language_authority_policy_source_sha256 \
+      "$authority_capsule/stdlib/coordination/loom_language_authority.sio"
+    verify_manifest_binary_sha256 "$manifest" \
+      loom_language_authority_policy_entrypoint_sha256 \
+      "$authority_capsule/tools/loom/language_authority_main.sio"
+  fi
+  if grep -q '^capability=loom-product-launch-dark-attachment-v1$' "$manifest"; then
+    local activation_capsule="$version_dir/policy/product-activation"
+    [[ -x "$version_dir/bin/sounio-loom-runtime" && \
+      -x "$version_dir/bin/sounio-loom-resident-membrane-runtime-v5.v2" ]] || \
+      die "installed runtime declares product launch observation without Loom or resident Sounio v5: $runtime_id"
+    [[ "$(manifest_value "$manifest" loom_product_activation_action_manifest_sha256)" == \
+      5e368c64ce889fbbdb54ffe8e9dace9ae0277ad5a88cbd7e687a22a0e42069f2 && \
+      "$(manifest_value "$manifest" loom_product_activation_operational_manifest_sha256)" == \
+      d7521e8fb60501dc8192ebbeade4a09649164c5b509a2dda8af5c465bf3de793 && \
+      "$(manifest_value "$manifest" loom_product_activation_resident_manifest_sha256)" == \
+      09313a1c90d15b3503e66559685cd38b7b93388ef49ddaa5439cdbe7a19e7472 && \
+      "$(manifest_value "$manifest" loom_product_activation_projection_sha256)" == \
+      8a72e9bcd510a751b856cf29960b7389486defcc4d13d7614546023d3d355014 ]] || \
+      die "installed product launch observation is not bound to frozen Sounio action 9031: $runtime_id"
+    verify_manifest_binary_sha256 "$manifest" \
+      loom_product_activation_action_manifest_sha256 \
+      "$activation_capsule/tools/loom/kernel_peer_activation_capsule_authority.freeze.v2"
+    verify_manifest_binary_sha256 "$manifest" \
+      loom_product_activation_operational_manifest_sha256 \
+      "$activation_capsule/tools/loom/kernel_peer_activation_capsule.runtime.v1"
+    verify_manifest_binary_sha256 "$manifest" \
+      loom_product_activation_resident_manifest_sha256 \
+      "$activation_capsule/tools/loom/resident_membrane.runtime.v5.v2"
+    verify_manifest_binary_sha256 "$manifest" \
+      loom_product_activation_projection_sha256 \
+      "$activation_capsule/tools/loom/kernel_peer_activation_capsule.current.v1"
+    verify_manifest_binary_sha256 "$manifest" \
+      loom_product_activation_resident_runtime_sha256 \
+      "$version_dir/bin/sounio-loom-resident-membrane-runtime-v5.v2"
+  fi
+  local exec_ingress_capsule="$version_dir/policy/product-exec-ingress"
+  local exec_ingress_freeze="$exec_ingress_capsule/tools/loom/product_exec_ingress_dark.runtime.v1"
+  if [[ -f "$exec_ingress_freeze" ]]; then
+    verify_manifest_binary_sha256 "$manifest" \
+      loom_product_exec_ingress_manifest_sha256 "$exec_ingress_freeze"
+    verify_manifest_binary_sha256 "$manifest" \
+      loom_product_exec_ingress_contract_sha256 \
+      "$exec_ingress_capsule/tools/loom/PRODUCT_EXEC_INGRESS_DARK_ATTACHMENT_V1.md"
+    verify_manifest_binary_sha256 "$manifest" \
+      loom_product_exec_ingress_evidence_sha256 \
+      "$exec_ingress_capsule/tools/loom/evidence/loom-product-exec-ingress-dark-v1-20260829.txt"
+    local source_pair source_path_key source_hash_key source_rel source_expected source_actual
+    for source_pair in \
+      exec_ingress_source_path:exec_ingress_source_sha256 \
+      hook_source_path:hook_source_sha256 \
+      membrane_source_path:membrane_source_sha256 \
+      cli_source_path:cli_source_sha256 \
+      c_stub_path:c_stub_sha256 \
+      dune_path:dune_sha256; do
+      source_path_key="${source_pair%%:*}"
+      source_hash_key="${source_pair#*:}"
+      source_rel="$(manifest_value "$exec_ingress_freeze" "$source_path_key")"
+      [[ "$source_rel" == tools/loom/src/* && "$source_rel" != *'..'* ]] ||
+        die "installed product ExecIngress source path is unsafe: $source_rel"
+      source_expected="$(manifest_value "$exec_ingress_freeze" "$source_hash_key")"
+      source_actual="$(sha256sum "$exec_ingress_capsule/$source_rel" | awk '{print $1}')"
+      [[ "$source_actual" == "$source_expected" ]] ||
+        die "installed product ExecIngress source drifted: $source_rel"
+    done
+    [[ "$(manifest_value "$exec_ingress_freeze" semantic_authority)" == Sounio &&
+      "$(manifest_value "$exec_ingress_freeze" semantic_action)" == 9031 &&
+      "$(manifest_value "$exec_ingress_freeze" operational_language)" == OCaml &&
+      "$(manifest_value "$exec_ingress_freeze" operational_role)" == OPERATIONAL_ATTACHMENT &&
+      "$(manifest_value "$exec_ingress_freeze" descriptor_dark_attached)" == true &&
+      "$(manifest_value "$exec_ingress_freeze" descriptor_is_bearer)" == false &&
+      "$(manifest_value "$exec_ingress_freeze" same_uid_self_broker)" == refused &&
+      "$(manifest_value "$exec_ingress_freeze" contract_sha256)" == \
+        "$(manifest_value "$manifest" loom_product_exec_ingress_contract_sha256)" &&
+      "$(manifest_value "$exec_ingress_freeze" evidence_sha256)" == \
+        "$(manifest_value "$manifest" loom_product_exec_ingress_evidence_sha256)" &&
+      "$(manifest_value "$exec_ingress_freeze" runtime_sha256)" == \
+        "$(manifest_value "$manifest" loom_product_exec_ingress_reference_runtime_sha256)" &&
+      "$(manifest_value "$exec_ingress_freeze" action_9031_manifest_sha256)" == \
+        "$(manifest_value "$manifest" loom_product_activation_action_manifest_sha256)" &&
+      "$(manifest_value "$exec_ingress_freeze" action_9031_runtime_sha256)" == \
+        "$(manifest_value "$manifest" loom_product_activation_operational_manifest_sha256)" ]] ||
+      die "installed product ExecIngress is not bound to its frozen Sounio authority and OCaml runtime: $runtime_id"
+    if grep -q '^capability=loom-product-exec-ingress-dark-attachment-v1$' "$manifest"; then
+      grep -q '^capability=loom-native-agent-hook-v1$' "$manifest" &&
+        grep -q '^capability=loom-native-hook-binary-attestation-v1$' "$manifest" &&
+        grep -q '^capability=loom-product-launch-dark-attachment-v1$' "$manifest" &&
+        [[ "$(manifest_value "$exec_ingress_freeze" runtime_version)" == \
+          "$(manifest_value "$manifest" runtime_version)" ]] ||
+        die "installed runtime declares product ExecIngress without its exact attested runtime and Sounio action 9031: $runtime_id"
+    fi
+  fi
+  if grep -q '^capability=loom-sovereign-execution-kernel-product-v1$' "$manifest"; then
+    local sovereign_capsule="$version_dir/policy/sovereign-execution"
+    local sovereign_product="$sovereign_capsule/tools/loom/sovereign_execution_kernel_product.runtime.v2"
+    local sovereign_evidence="$sovereign_capsule/tools/loom/evidence/loom-sovereign-execution-kernel-product-v2-20260915.txt"
+    if [[ ! -f "$sovereign_product" ]]; then
+      sovereign_product="$sovereign_capsule/tools/loom/sovereign_execution_kernel_product.runtime.v1"
+      sovereign_evidence="$sovereign_capsule/tools/loom/evidence/loom-sovereign-execution-kernel-product-v1-20260831.txt"
+    fi
+    grep -q '^capability=loom-native-agent-hook-v1$' "$manifest" &&
+      grep -q '^capability=loom-native-hook-binary-attestation-v1$' "$manifest" &&
+      [[ -x "$version_dir/bin/sounio-loom-runtime" &&
+        -x "$version_dir/bin/sounio-loom-sovereign-execution-kernel" ]] ||
+      die "installed sovereign execution product omits its native hook, OCaml kernel, or Sounio action 9042: $runtime_id"
+    verify_manifest_binary_sha256 "$manifest" \
+      loom_sovereign_product_manifest_sha256 "$sovereign_product"
+    verify_manifest_binary_sha256 "$manifest" \
+      loom_sovereign_product_contract_sha256 \
+      "$sovereign_capsule/tools/loom/SOVEREIGN_EXECUTION_KERNEL_PRODUCT_ATTACHMENT_V1.md"
+    verify_manifest_binary_sha256 "$manifest" \
+      loom_sovereign_product_evidence_sha256 \
+      "$sovereign_evidence"
+    verify_manifest_binary_sha256 "$manifest" \
+      loom_sovereign_runtime_sha256 \
+      "$version_dir/bin/sounio-loom-sovereign-execution-kernel"
+    [[ "$(manifest_value "$sovereign_product" semantic_authority)" == Sounio &&
+      "$(manifest_value "$sovereign_product" semantic_action)" == 9042 &&
+      "$(manifest_value "$sovereign_product" grant_residency)" == Loom_kernel_memory &&
+      "$(manifest_value "$sovereign_product" grant_is_bearer)" == false &&
+      "$(manifest_value "$sovereign_product" exported_token)" == false &&
+      "$(manifest_value "$sovereign_product" exported_handle)" == false &&
+      "$(manifest_value "$sovereign_product" interface_release_authority)" == zero &&
+      "$(manifest_value "$sovereign_product" same_uid_peer_isolation)" == true &&
+      "$(manifest_value "$sovereign_product" production_activation)" == true &&
+      "$(manifest_value "$sovereign_product" exec_attached)" == true &&
+      "$(manifest_value "$sovereign_product" semantic_manifest_sha256):$(manifest_value "$sovereign_product" material_manifest_sha256)" =~ \
+        ^(966f022c98bc7df89ce40a90ede9ec8a9a726499baec0fd21e72f327f286a176:1005da28d4375da8d67fecc4a301c0c6e768902d720952f93e3f82a74fd41f92|f891df667140493b47422999d6493a7f73546d641be5e472c45ab74523d1afd6:4999975f46ab21033e356df36c007eba51e3f48627353dd2bbd83766125edc37)$ &&
+      "$(manifest_value "$sovereign_product" sounio_runtime_sha256)" == \
+        "$(manifest_value "$manifest" loom_sovereign_runtime_sha256)" ]] ||
+      die "installed sovereign execution product is not bound to frozen Sounio action 9042: $runtime_id"
+    local sovereign_pair sovereign_path_key sovereign_hash_key
+    local sovereign_rel sovereign_expected sovereign_actual
+    for sovereign_pair in \
+      contract_path:contract_sha256 \
+      semantic_manifest_path:semantic_manifest_sha256 \
+      material_manifest_path:material_manifest_sha256 \
+      sounio_source_path:sounio_source_sha256 \
+      sounio_entrypoint_path:sounio_entrypoint_sha256 \
+      loom_source_path:loom_source_sha256 \
+      exec_source_path:exec_source_sha256 \
+      hook_source_path:hook_source_sha256 \
+      sovereign_source_path:sovereign_source_sha256 \
+      provider_fixture_path:provider_fixture_sha256 \
+      c_stub_path:c_stub_sha256 \
+      dune_path:dune_sha256 \
+      loom_build_path:loom_build_sha256 \
+      installer_path:installer_sha256 \
+      coord_runtime_path:coord_runtime_sha256 \
+      product_gate_path:product_gate_sha256 \
+      freeze_gate_path:freeze_gate_sha256; do
+      sovereign_path_key="${sovereign_pair%%:*}"
+      sovereign_hash_key="${sovereign_pair#*:}"
+      sovereign_rel="$(manifest_value "$sovereign_product" "$sovereign_path_key")"
+      [[ -n "$sovereign_rel" && "$sovereign_rel" != /* &&
+        "$sovereign_rel" != *'..'* ]] ||
+        die "installed sovereign product source path is unsafe: $sovereign_rel"
+      sovereign_expected="$(manifest_value "$sovereign_product" "$sovereign_hash_key")"
+      sovereign_actual="$(sha256sum "$sovereign_capsule/$sovereign_rel" | awk '{print $1}')"
+      [[ "$sovereign_actual" == "$sovereign_expected" ]] ||
+        die "installed sovereign execution product source drifted: $sovereign_rel"
+    done
+  fi
+  if grep -q '^capability=loom-sovereign-change-kernel-v2$' "$manifest"; then
+    local change_capsule="$version_dir/policy/sovereign-change"
+    local change_product_relative change_product
+    change_product_relative="$(manifest_value "$manifest" loom_material_change_product_path)"
+    [[ "$change_product_relative" == tools/loom/sovereign_material_change_product.runtime.v* &&
+      "$change_product_relative" != *'..'* ]] || \
+      die "installed sovereign change product path is unsafe: $runtime_id"
+    change_product="$change_capsule/$change_product_relative"
+    [[ -x "$version_dir/bin/sounio-loom-runtime" &&
+      -x "$version_dir/bin/sounio-loom-sovereign-change-kernel" &&
+      -x "$version_dir/bin/sounio-loom-sovereign-material-change" &&
+      -f "$change_product" ]] ||
+      die "installed sovereign change product omits Loom or Sounio actions 9043/9044: $runtime_id"
+    verify_manifest_binary_sha256 "$manifest" loom_change_runtime_sha256 \
+      "$version_dir/bin/sounio-loom-sovereign-change-kernel"
+    verify_manifest_binary_sha256 "$manifest" loom_material_change_runtime_sha256 \
+      "$version_dir/bin/sounio-loom-sovereign-material-change"
+    verify_manifest_binary_sha256 "$manifest" loom_change_manifest_sha256 \
+      "$(frozen_capsule_file "$change_capsule/tools/loom/sovereign_change_kernel.freeze")"
+    verify_manifest_binary_sha256 "$manifest" loom_material_change_manifest_sha256 \
+      "$(frozen_capsule_file "$change_capsule/tools/loom/sovereign_material_change.freeze")"
+    verify_manifest_binary_sha256 "$manifest" loom_material_change_product_sha256 \
+      "$change_product"
+    [[ "$(manifest_value "$change_product" semantic_authority)" == Sounio &&
+      "$(manifest_value "$change_product" producing_language)" == Sounio &&
+      "$(manifest_value "$change_product" language_role)" == SEMANTIC_AUTHORITY &&
+      "$(manifest_value "$change_product" action)" == 9044 &&
+      "$(manifest_value "$change_product" stage)" == CLAIM_READY &&
+      "$(manifest_value "$change_product" operational_language)" == OCaml &&
+      "$(manifest_value "$change_product" operational_role)" == OPERATIONAL_ATTACHMENT &&
+      "$(manifest_value "$change_product" operational_semantic_authority)" == false &&
+      "$(manifest_value "$change_product" loom_runtime_reproducible)" == true &&
+      "$(manifest_value "$change_product" loom_repro_build_count)" == 2 &&
+      "$(manifest_value "$change_product" loom_link_policy)" == strip-symbols+omit-gnu-build-id &&
+      "$(manifest_value "$change_product" provider_root_readonly)" == true &&
+      "$(manifest_value "$change_product" staging_outside_root)" == true &&
+      "$(manifest_value "$change_product" grant_residency)" == Loom_kernel_memory &&
+      "$(manifest_value "$change_product" grant_is_bearer)" == false &&
+      "$(manifest_value "$change_product" grant_single_use)" == true &&
+      "$(manifest_value "$change_product" consume_atomic)" == true &&
+      "$(manifest_value "$change_product" exported_token)" == false &&
+      "$(manifest_value "$change_product" exported_handle)" == false &&
+      "$(manifest_value "$change_product" exact_call_id)" == true &&
+      "$(manifest_value "$change_product" exact_patch_hash)" == true &&
+      "$(manifest_value "$change_product" exact_worktree_state)" == true &&
+      "$(manifest_value "$change_product" authenticated_peer)" == true &&
+      "$(manifest_value "$change_product" exact_file_set)" == true &&
+      "$(manifest_value "$change_product" write_attached)" == true &&
+      "$(manifest_value "$change_product" commit_attached)" == true &&
+      "$(manifest_value "$change_product" ci_attached)" == true &&
+      "$(manifest_value "$change_product" ci_policy)" == consume-not-reinterpret &&
+      "$(manifest_value "$change_product" policy_executed_by_ci)" == false &&
+      "$(manifest_value "$change_product" parity_open)" == true &&
+      "$(manifest_value "$change_product" parity_executed)" == false &&
+      "$(manifest_value "$change_product" parity_receipts_semantic_authority)" == false &&
+      "$(manifest_value "$change_product" claim_ready)" == true ]] ||
+      die "installed sovereign change product is not bound to CLAIM_READY action 9044: $runtime_id"
+    [[ "$(manifest_value "$change_product" parent_sounio_runtime_sha256)" == \
+        "$(manifest_value "$manifest" loom_change_runtime_sha256)" &&
+      "$(manifest_value "$change_product" sounio_runtime_sha256)" == \
+        "$(manifest_value "$manifest" loom_material_change_runtime_sha256)" &&
+      "$(manifest_value "$change_product" loom_runtime_sha256)" == \
+        "$(manifest_value "$manifest" loom_runtime_sha256)" ]] ||
+      die "installed sovereign change product runtime hashes diverged: $runtime_id"
+    local change_pair change_path_key change_hash_key change_rel
+    local change_expected change_actual
+    for change_pair in \
+      parent_manifest_path:parent_manifest_sha256 \
+      material_manifest_path:material_manifest_sha256 \
+      sounio_source_path:sounio_source_sha256 \
+      loom_change_source_path:loom_change_source_sha256 \
+      loom_source_path:loom_source_sha256 \
+      ui_source_path:ui_source_sha256 \
+      hook_source_path:hook_source_sha256 \
+      canary_source_path:canary_source_sha256 \
+      drain_source_path:drain_source_sha256 \
+      guardian_source_path:guardian_source_sha256 \
+      reconcile_source_path:reconcile_source_sha256 \
+      generation_pin_source_path:generation_pin_source_sha256 \
+      c_stub_path:c_stub_sha256 \
+      provider_fixture_path:provider_fixture_sha256 \
+      dune_path:dune_sha256 \
+      loom_build_path:loom_build_sha256 \
+      installer_path:installer_sha256 \
+      coord_runtime_path:coord_runtime_sha256 \
+      canary_gate_path:canary_gate_sha256 \
+      guardian_gate_path:guardian_gate_sha256 \
+      reconcile_gate_path:reconcile_gate_sha256 \
+      generation_pin_gate_path:generation_pin_gate_sha256 \
+      operational_gate_path:operational_gate_sha256 \
+      ci_entrypoint_path:ci_entrypoint_sha256; do
+      change_path_key="${change_pair%%:*}"
+      change_hash_key="${change_pair#*:}"
+      change_rel="$(manifest_value "$change_product" "$change_path_key")"
+      [[ -n "$change_rel" && "$change_rel" != /* && "$change_rel" != *'..'* ]] ||
+        die "installed sovereign change source path is unsafe: $change_rel"
+      change_expected="$(manifest_value "$change_product" "$change_hash_key")"
+      change_actual="$(sha256sum "$change_capsule/$change_rel" | awk '{print $1}')"
+      [[ "$change_actual" == "$change_expected" ]] ||
+        die "installed sovereign change source drifted: $change_rel"
+    done
+  fi
+  if grep -q '^capability=loom-truthful-lane-health-v1$' "$manifest"; then
+    [[ -x "$version_dir/bin/sounio-loom-runtime" && \
+      -x "$version_dir/bin/sounio-loom-lane-health-runtime" && \
+      -x "$version_dir/bin/sounio-loom-lane-health-parity-runtime" ]] || \
+      die "installed runtime declares truthful lane health but omits its OCaml realization or frozen Sounio executables: $runtime_id"
+    manifest_value_in "$manifest" loom_lane_health_semantics_sha256 \
+      8d4b03d3cf327bafa476c7e8bae309a6e1603565cd139be0674e579d6bcfcc74 \
+      5eb48f9cb214f6018569fb24e1e419b3e800dccde2e6e8d775246f4c05e4c93f || \
+      die "installed truthful lane health is not bound to the frozen Sounio semantics: $runtime_id"
+  fi
+  if grep -q '^capability=loom-native-hook-binary-attestation-v1$' "$manifest"; then
+    grep -q '^capability=loom-native-agent-hook-v1$' "$manifest" || \
+      die "installed runtime declares native hook attestation without the native hook: $runtime_id"
+    verify_manifest_binary_sha256 "$manifest" coord_runtime_sha256 \
+      "$version_dir/bin/sounio-coord-runtime"
+    verify_manifest_binary_sha256 "$manifest" loom_runtime_sha256 \
+      "$version_dir/bin/sounio-loom-runtime"
   fi
   if grep -q '^capability=loom-native-sounio-continuity-v1$' "$manifest"; then
     [[ -x "$version_dir/bin/sounio-loom-continuity-runtime" ]] || \
@@ -301,13 +847,97 @@ activate_runtime() {
       [[ -x "$version_dir/bin/sounio-fleet-trace-verify" ]] || \
       die "installed runtime declares recovery-latch refinement without its directory authority and verifier: $runtime_id"
   fi
+  control_state="${SOUNIO_COORD_DIR:-$GIT_COMMON_DIR/sounio-coord-state}"
+  if [[ -L "$RUNTIME_ROOT/current" ]]; then
+    previous_target="$(readlink "$RUNTIME_ROOT/current" 2>/dev/null || true)"
+    previous_bundle="$(readlink -f "$RUNTIME_ROOT/current" 2>/dev/null || true)"
+    previous_runtime="$previous_bundle/bin/sounio-coord-runtime"
+    if [[ -x "$previous_runtime" ]]; then
+      control_status="$(
+        SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$control_state" \
+          "$previous_runtime" obligation-supervisor-status 2>/dev/null || true
+      )"
+      if grep -q '^LOOM_OBLIGATION_SUPERVISOR_STATUS state=live ' \
+        <<< "$control_status"; then
+        control_service_was_live=1
+      fi
+    fi
+  fi
+  require_native_cutover_admission "$previous_bundle" "$version_dir" "$manifest"
+  if [[ -n "$previous_bundle" && \
+        ! -e "$previous_bundle/hooks/sounio_coord_agent_hook_runtime.py" && \
+        ! -e "$previous_bundle/hooks/sounio_coord_agent_hook.py" && \
+        -f "$control_state/generation-runtime-pins/activation.v1" ]]; then
+    grep -q '^capability=loom-activation-epoch-v1$' "$manifest" || \
+      die "native-to-native activation omits frozen Sounio action 9049: $runtime_id"
+    [[ -n "$CUTOVER_ROOT" ]] || \
+      die "native-to-native activation requires --cutover-root for Sounio action 9049"
+    epoch_output="$(SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$control_state" \
+      "$version_dir/bin/sounio-loom-runtime" hook-activation-epoch-advance \
+      --source-root "$CUTOVER_ROOT" --git-common "$GIT_COMMON_DIR" \
+      --next-runtime "$runtime_id" 9>&- 2>&1)" || \
+      die "Sounio action 9049 refused native activation: $epoch_output"
+    printf '%s\n' "$epoch_output"
+  fi
   [[ ! -e "$RUNTIME_ROOT/current" || -L "$RUNTIME_ROOT/current" ]] || \
     die "refusing to replace non-symlink runtime path: $RUNTIME_ROOT/current"
   link_tmp="$RUNTIME_ROOT/.current.$$.$RANDOM"
   ln -s "versions/$runtime_id" "$link_tmp"
   mv -Tf "$link_tmp" "$RUNTIME_ROOT/current"
+  if ((control_service_was_live)); then
+    set +e
+    ensure_output="$(
+      SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$control_state" \
+        "$version_dir/bin/sounio-coord-runtime" obligation-supervisor-ensure \
+        --interval-seconds 2 9>&- 2>&1
+    )"
+    ensure_rc=$?
+    set -e
+    if ((ensure_rc != 0)); then
+      link_tmp="$RUNTIME_ROOT/.current-rollback.$$.$RANDOM"
+      ln -s "$previous_target" "$link_tmp"
+      mv -Tf "$link_tmp" "$RUNTIME_ROOT/current"
+      if [[ -x "$previous_runtime" ]]; then
+        SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$control_state" \
+          "$previous_runtime" obligation-supervisor-ensure --interval-seconds 2 \
+          9>&- >/dev/null 2>&1 || true
+      fi
+      die "runtime activation could not assume the control service and was rolled back: $ensure_output"
+    fi
+    printf '%s\n' "$ensure_output"
+  fi
   printf 'ACTIVATED runtime_id=%s protocol=%s path=%s\n' \
     "$runtime_id" "$protocol" "$version_dir"
+}
+
+stage_runtime() {
+  local runtime_id="$1" version_dir manifest protocol expected actual link_tmp
+  version_dir="$RUNTIME_ROOT/versions/$runtime_id"
+  manifest="$version_dir/manifest"
+  [[ -f "$manifest" && -x "$version_dir/bin/sounio-coord-runtime" && \
+    -x "$version_dir/bin/sounio-loom-runtime" ]] ||
+    die "cannot select incomplete staged runtime: $runtime_id"
+  protocol="$(manifest_value "$manifest" protocol_version)"
+  [[ "$protocol" == "$CLIENT_PROTOCOL" ]] ||
+    die "cannot stage protocol $protocol with installer protocol $CLIENT_PROTOCOL"
+  grep -q '^loom_native_hook_cutover_python_bridge_absent=true$' "$manifest" ||
+    die "cannot select staged runtime without native hook cutover: $runtime_id"
+  [[ ! -e "$version_dir/hooks/sounio_coord_agent_hook_runtime.py" && \
+    ! -e "$version_dir/hooks/sounio_coord_agent_hook.py" ]] ||
+    die "cannot select staged runtime containing a Python hook bridge: $runtime_id"
+  expected="$(manifest_value "$manifest" loom_runtime_sha256)"
+  [[ "$expected" =~ ^[0-9a-f]{64}$ ]] ||
+    die "staged runtime has invalid Loom hash: $runtime_id"
+  actual="$(sha256sum "$version_dir/bin/sounio-loom-runtime" | awk '{print $1}')"
+  [[ "$actual" == "$expected" ]] ||
+    die "staged runtime Loom hash mismatch: expected=$expected actual=$actual"
+  [[ ! -e "$RUNTIME_ROOT/native-next" || -L "$RUNTIME_ROOT/native-next" ]] ||
+    die "refusing to replace non-symlink candidate path: $RUNTIME_ROOT/native-next"
+  link_tmp="$RUNTIME_ROOT/.native-next.$$.$RANDOM"
+  ln -s "versions/$runtime_id" "$link_tmp"
+  mv -Tf "$link_tmp" "$RUNTIME_ROOT/native-next"
+  [[ "$(readlink -f "$RUNTIME_ROOT/native-next")" == "$version_dir" ]] ||
+    die "staged runtime selector verification failed: $runtime_id"
 }
 
 WORKTREE="$(git rev-parse --show-toplevel 2>/dev/null || true)"
@@ -324,11 +954,15 @@ SOURCE_ROOT="$WORKTREE"
 RUNTIME_ROOT="${SOUNIO_COORD_RUNTIME_DIR:-$GIT_COMMON_DIR/sounio-coord-runtime}"
 action=install
 activate_id=''
+activate_after_install=1
+CUTOVER_ROOT=''
 while (($#)); do
   case "$1" in
     --source-root) (($# >= 2)) || die "$1 requires a value"; SOURCE_ROOT="$2"; shift 2 ;;
     --runtime-dir) (($# >= 2)) || die "$1 requires a value"; RUNTIME_ROOT="$2"; shift 2 ;;
+    --stage) action=install; activate_after_install=0; shift ;;
     --activate) (($# >= 2)) || die "$1 requires a value"; action=activate; activate_id="$2"; shift 2 ;;
+    --cutover-root) (($# >= 2)) || die "$1 requires a value"; CUTOVER_ROOT="$2"; shift 2 ;;
     --list) action=list; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown installer option: $1" ;;
@@ -336,6 +970,9 @@ while (($#)); do
 done
 
 SOURCE_ROOT="$(cd "$SOURCE_ROOT" && pwd -P)"
+if [[ -n "$CUTOVER_ROOT" ]]; then
+  CUTOVER_ROOT="$(cd "$CUTOVER_ROOT" && pwd -P)"
+fi
 mkdir -p "$RUNTIME_ROOT/versions"
 RUNTIME_ROOT="$(cd "$RUNTIME_ROOT" && pwd -P)"
 exec 9>"$RUNTIME_ROOT/.install.lock"
@@ -343,15 +980,20 @@ flock 9
 
 if [[ "$action" == list ]]; then
   current=''
+  candidate=''
   [[ ! -e "$RUNTIME_ROOT/current" ]] || current="$(basename "$(readlink -f "$RUNTIME_ROOT/current")")"
+  [[ ! -e "$RUNTIME_ROOT/native-next" ]] ||
+    candidate="$(basename "$(readlink -f "$RUNTIME_ROOT/native-next")")"
   version_paths=("$RUNTIME_ROOT"/versions/*)
   for version_dir in "${version_paths[@]}"; do
     [[ -d "$version_dir" && -f "$version_dir/manifest" ]] || continue
     runtime_id="$(basename "$version_dir")"
     marker=no
+    candidate_marker=no
     [[ "$runtime_id" != "$current" ]] || marker=yes
-    printf 'RUNTIME runtime_id=%s current=%s protocol=%s runtime_version=%s source_sha=%s\n' \
-      "$runtime_id" "$marker" \
+    [[ "$runtime_id" != "$candidate" ]] || candidate_marker=yes
+    printf 'RUNTIME runtime_id=%s current=%s candidate=%s protocol=%s runtime_version=%s source_sha=%s\n' \
+      "$runtime_id" "$marker" "$candidate_marker" \
       "$(manifest_value "$version_dir/manifest" protocol_version)" \
       "$(manifest_value "$version_dir/manifest" runtime_version)" \
       "$(manifest_value "$version_dir/manifest" source_sha)"
@@ -366,7 +1008,6 @@ fi
 
 installer_source="$SOURCE_ROOT/scripts/dev/install_sounio_coord_runtime.sh"
 runtime_source="$SOURCE_ROOT/scripts/dev/sounio_coord_runtime.sh"
-hook_source="$SOURCE_ROOT/scripts/dev/sounio_coord_agent_hook_runtime.py"
 causal_source="$SOURCE_ROOT/scripts/dev/sounio_coord_causal_runtime.py"
 agentd_source="$SOURCE_ROOT/scripts/dev/sounio_coord_agentd.py"
 fleet_source="$SOURCE_ROOT/scripts/dev/sounio_coord_fleet.py"
@@ -376,6 +1017,13 @@ fleet_model_config="$SOURCE_ROOT/formal/tla/SounioFleet.cfg"
 fleet_model_generator="$SOURCE_ROOT/scripts/dev/sounio_fleet_tla_sabotage.py"
 fleet_trace_verifier="$SOURCE_ROOT/scripts/dev/sounio_fleet_trace_verify.py"
 loom_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom.sh"
+loom_routing_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_routing_authority.sh"
+loom_language_authority_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_language_authority.sh"
+loom_native_hook_cutover_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_native_hook_cutover.sh"
+loom_custody_transfer_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_custody_transfer.sh"
+loom_execution_outcome_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_execution_outcome.sh"
+loom_lane_health_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_lane_health.sh"
+loom_lane_health_parity_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_lane_health_parity.sh"
 loom_continuity_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_continuity_adapter.sh"
 loom_obligation_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_obligation_adapter.sh"
 loom_epistemic_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_epistemic_adapter.sh"
@@ -388,6 +1036,133 @@ loom_witness_mesh_v1_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_wi
 loom_witness_epoch_handoff_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_witness_epoch_handoff_adapter.sh"
 loom_witness_epoch_transparency_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_witness_epoch_transparency_adapter.sh"
 loom_project="$SOURCE_ROOT/tools/loom"
+loom_message_source="$loom_project/message_bridge/loom_message_bridge.ml"
+loom_message_dune="$loom_project/message_bridge/dune"
+loom_language_authority_entrypoint="$SOURCE_ROOT/tools/loom/language_authority_main.sio"
+loom_language_authority_module="$SOURCE_ROOT/stdlib/coordination/loom_language_authority.sio"
+loom_language_authority_freeze="$SOURCE_ROOT/tools/loom/language_authority.freeze.v2"
+loom_routing_garden="$SOURCE_ROOT/tools/loom/GARDEN_ROUTING_AUTHORITY_V1.md"
+loom_routing_entrypoint="$SOURCE_ROOT/tools/loom/routing_authority_main.sio"
+loom_routing_module="$SOURCE_ROOT/stdlib/coordination/loom_routing_authority.sio"
+loom_routing_freeze="$SOURCE_ROOT/tools/loom/routing_authority.freeze.v2"
+loom_routing_gate="$SOURCE_ROOT/scripts/ci/sounio_loom_routing_authority_selftest.sh"
+loom_routing_freeze_gate="$SOURCE_ROOT/scripts/ci/sounio_loom_routing_authority_freeze_selftest.sh"
+loom_native_hook_cutover_entrypoint="$SOURCE_ROOT/tools/loom/native_hook_cutover_authority_main.sio"
+loom_native_hook_cutover_module="$SOURCE_ROOT/stdlib/coordination/loom_native_hook_cutover_authority.sio"
+loom_native_hook_cutover_freeze="$SOURCE_ROOT/tools/loom/native_hook_cutover.freeze.v2"
+loom_native_hook_cutover_codex_config="$SOURCE_ROOT/.codex/hooks.json"
+loom_native_hook_cutover_claude_config="$SOURCE_ROOT/.claude/settings.json"
+loom_native_hook_cutover_cursor_config="$SOURCE_ROOT/.cursor/hooks.json"
+loom_native_hook_cutover_grok_config="$SOURCE_ROOT/.grok/hooks/loom-native.json"
+loom_native_hook_generation_drain_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_native_hook_generation_drain.sh"
+loom_native_hook_generation_drain_entrypoint="$SOURCE_ROOT/tools/loom/native_hook_generation_drain_authority_main.sio"
+loom_native_hook_generation_drain_module="$SOURCE_ROOT/stdlib/coordination/loom_native_hook_generation_drain_authority.sio"
+loom_native_hook_generation_drain_freeze="$SOURCE_ROOT/tools/loom/native_hook_generation_drain.freeze.v2"
+loom_native_hook_generation_drain_capsule_relpaths=(
+  "tools/loom/GARDEN_NATIVE_HOOK_GENERATION_DRAIN_V1.md"
+  "stdlib/coordination/loom_native_hook_generation_drain_authority.sio"
+  "tools/loom/native_hook_generation_drain_authority_main.sio"
+  "scripts/dev/build_sounio_loom_native_hook_generation_drain.sh"
+  "scripts/ci/sounio_loom_native_hook_generation_drain_selftest.sh"
+  "scripts/ci/sounio_loom_native_hook_generation_drain_freeze_selftest.sh"
+  "tools/loom/native_hook_generation_drain.first.v1"
+  "tools/loom/evidence/loom-native-hook-generation-drain-first-v1-20260831.txt"
+  "tools/loom/evidence/loom-native-hook-generation-drain-frozen-v1-20260831.txt"
+  "tools/loom/native_hook_cutover.freeze.v1"
+  "tools/loom/GARDEN_NATIVE_HOOK_GENERATION_DRAIN_V2.md"
+  "tools/loom/native_hook_generation_drain.first.v2"
+  "tools/loom/evidence/loom-native-hook-generation-drain-first-v2-20260915.txt"
+  "tools/loom/evidence/loom-native-hook-generation-drain-frozen-v2-20260915.txt"
+  "tools/loom/native_hook_cutover.freeze.v2"
+  "tools/loom/native_hook_generation_drain.freeze.v1"
+  "bin/souc"
+  "bin/souc-lean-single-x86_64"
+)
+loom_native_hook_generation_reconcile_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_native_hook_generation_reconcile.sh"
+loom_native_hook_generation_reconcile_entrypoint="$SOURCE_ROOT/tools/loom/native_hook_generation_reconcile_authority_main.sio"
+loom_native_hook_generation_reconcile_module="$SOURCE_ROOT/stdlib/coordination/loom_native_hook_generation_reconcile_authority.sio"
+loom_native_hook_generation_reconcile_freeze="$SOURCE_ROOT/tools/loom/native_hook_generation_reconcile.freeze.v2"
+loom_native_hook_generation_reconcile_capsule_relpaths=(
+  "tools/loom/GARDEN_NATIVE_HOOK_GENERATION_RECONCILE_V1.md"
+  "stdlib/coordination/loom_native_hook_generation_reconcile_authority.sio"
+  "tools/loom/native_hook_generation_reconcile_authority_main.sio"
+  "scripts/dev/build_sounio_loom_native_hook_generation_reconcile.sh"
+  "scripts/ci/sounio_loom_native_hook_generation_reconcile_selftest.sh"
+  "scripts/ci/sounio_loom_native_hook_generation_reconcile_freeze_selftest.sh"
+  "tools/loom/native_hook_generation_reconcile.first.v1"
+  "tools/loom/evidence/loom-native-hook-generation-reconcile-first-v1-20260901.txt"
+  "tools/loom/evidence/loom-native-hook-generation-reconcile-frozen-v1-20260901.txt"
+  "tools/loom/native_hook_generation_drain.freeze.v1"
+  "tools/loom/GARDEN_NATIVE_HOOK_GENERATION_RECONCILE_V2.md"
+  "tools/loom/native_hook_generation_reconcile.first.v2"
+  "tools/loom/evidence/loom-native-hook-generation-reconcile-first-v2-20260915.txt"
+  "tools/loom/evidence/loom-native-hook-generation-reconcile-frozen-v2-20260915.txt"
+  "tools/loom/native_hook_generation_drain.freeze.v2"
+  "tools/loom/native_hook_generation_reconcile.freeze.v1"
+  "bin/souc"
+  "bin/souc-lean-single-x86_64"
+)
+loom_generation_pinned_cutover_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_generation_pinned_cutover.sh"
+loom_generation_pinned_cutover_entrypoint="$SOURCE_ROOT/tools/loom/generation_pinned_cutover_authority_main.sio"
+loom_generation_pinned_cutover_module="$SOURCE_ROOT/stdlib/coordination/loom_generation_pinned_cutover_authority.sio"
+loom_generation_pinned_cutover_freeze="$SOURCE_ROOT/tools/loom/generation_pinned_cutover.freeze.v2"
+loom_generation_pinned_cutover_capsule_relpaths=(
+  "tools/loom/GARDEN_GENERATION_PINNED_CUTOVER_V1.md"
+  "stdlib/coordination/loom_generation_pinned_cutover_authority.sio"
+  "tools/loom/generation_pinned_cutover_authority_main.sio"
+  "scripts/dev/build_sounio_loom_generation_pinned_cutover.sh"
+  "scripts/ci/sounio_loom_generation_pinned_cutover_selftest.sh"
+  "scripts/ci/sounio_loom_generation_pinned_cutover_freeze_selftest.sh"
+  "tools/loom/generation_pinned_cutover.first.v1"
+  "tools/loom/evidence/loom-generation-pinned-cutover-first-v1-20260904.txt"
+  "tools/loom/evidence/loom-generation-pinned-cutover-frozen-v1-20260904.txt"
+  "tools/loom/native_hook_generation_drain.freeze.v1"
+  "tools/loom/native_hook_generation_reconcile.freeze.v1"
+  "tools/loom/GARDEN_GENERATION_PINNED_CUTOVER_V2.md"
+  "tools/loom/generation_pinned_cutover.first.v2"
+  "tools/loom/evidence/loom-generation-pinned-cutover-first-v2-20260915.txt"
+  "tools/loom/evidence/loom-generation-pinned-cutover-frozen-v2-20260915.txt"
+  "tools/loom/native_hook_generation_drain.freeze.v2"
+  "tools/loom/native_hook_generation_reconcile.freeze.v2"
+  "tools/loom/generation_pinned_cutover.freeze.v1"
+  "bin/souc"
+  "bin/souc-lean-single-x86_64"
+)
+loom_activation_epoch_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_activation_epoch.sh"
+loom_activation_epoch_entrypoint="$SOURCE_ROOT/tools/loom/activation_epoch_authority_main.sio"
+loom_activation_epoch_module="$SOURCE_ROOT/stdlib/coordination/loom_activation_epoch_authority.sio"
+loom_activation_epoch_freeze="$SOURCE_ROOT/tools/loom/activation_epoch.freeze.v2"
+loom_activation_epoch_capsule_relpaths=(
+  "tools/loom/GARDEN_ACTIVATION_EPOCH_V1.md"
+  "stdlib/coordination/loom_activation_epoch_authority.sio"
+  "tools/loom/activation_epoch_authority_main.sio"
+  "scripts/dev/build_sounio_loom_activation_epoch.sh"
+  "scripts/ci/sounio_loom_activation_epoch_selftest.sh"
+  "scripts/ci/sounio_loom_activation_epoch_freeze_selftest.sh"
+  "tools/loom/activation_epoch.first.v1"
+  "tools/loom/evidence/loom-activation-epoch-first-v1-20260904.txt"
+  "tools/loom/evidence/loom-activation-epoch-frozen-v1-20260904.txt"
+  "tools/loom/generation_pinned_cutover.freeze.v1"
+  "tools/loom/generation_pinned_cutover.freeze.v2"
+  "tools/loom/GARDEN_ACTIVATION_EPOCH_V2.md"
+  "tools/loom/activation_epoch.first.v2"
+  "tools/loom/evidence/loom-activation-epoch-first-v2-20260915.txt"
+  "tools/loom/activation_epoch.freeze.v1"
+  "bin/souc"
+  "bin/souc-lean-single-x86_64"
+)
+loom_custody_transfer_entrypoint="$SOURCE_ROOT/tools/loom/custody_transfer_main.sio"
+loom_custody_transfer_module="$SOURCE_ROOT/stdlib/coordination/loom_custody_transfer.sio"
+loom_custody_transfer_freeze="$SOURCE_ROOT/tools/loom/custody_transfer.freeze.v2"
+loom_execution_outcome_entrypoint="$SOURCE_ROOT/tools/loom/execution_outcome_main.sio"
+loom_execution_outcome_module="$SOURCE_ROOT/stdlib/coordination/loom_execution_outcome_authority.sio"
+loom_execution_outcome_freeze="$SOURCE_ROOT/tools/loom/execution_outcome.freeze.v2"
+loom_lane_health_entrypoint="$SOURCE_ROOT/tools/loom/lane_health_main.sio"
+loom_lane_health_parity_entrypoint="$SOURCE_ROOT/tools/loom/lane_health_parity_main.sio"
+loom_lane_health_module="$SOURCE_ROOT/stdlib/coordination/loom_lane_health.sio"
+loom_lane_health_freeze="$SOURCE_ROOT/tools/loom/lane_health.freeze.v2"
+loom_lane_health_ocaml_receipt="$SOURCE_ROOT/tools/loom/lane_health.ocaml.v1"
+loom_sha256_module="$SOURCE_ROOT/stdlib/crypto/sha256.sio"
 loom_continuity_entrypoint="$SOURCE_ROOT/tools/loom/continuity_adapter_main.sio"
 loom_continuity_module="$SOURCE_ROOT/stdlib/coordination/loom_continuity.sio"
 loom_obligation_entrypoint="$SOURCE_ROOT/tools/loom/obligation_adapter_main.sio"
@@ -410,9 +1185,97 @@ loom_witness_epoch_handoff_entrypoint="$SOURCE_ROOT/tools/loom/witness_epoch_han
 loom_witness_epoch_handoff_module="$SOURCE_ROOT/stdlib/coordination/loom_witness_epoch_handoff.sio"
 loom_witness_epoch_transparency_entrypoint="$SOURCE_ROOT/tools/loom/epoch_transparency_adapter_main.sio"
 loom_witness_epoch_transparency_module="$SOURCE_ROOT/stdlib/coordination/loom_witness_epoch_transparency.sio"
+loom_product_activation_garden="$SOURCE_ROOT/tools/loom/GARDEN_KERNEL_PEER_ACTIVATION_CAPSULE_V1.md"
+loom_product_activation_source="$SOURCE_ROOT/stdlib/coordination/loom_kernel_peer_activation_capsule_authority.sio"
+loom_product_activation_entrypoint="$SOURCE_ROOT/tools/loom/kernel_peer_activation_capsule_authority_main.sio"
+loom_product_activation_action_freeze="$SOURCE_ROOT/tools/loom/kernel_peer_activation_capsule_authority.freeze.v2"
+loom_product_activation_operational_freeze="$SOURCE_ROOT/tools/loom/kernel_peer_activation_capsule.runtime.v1"
+loom_product_activation_projection="$SOURCE_ROOT/tools/loom/kernel_peer_activation_capsule.current.v1"
+loom_product_activation_resident_freeze="$SOURCE_ROOT/tools/loom/resident_membrane.runtime.v5.v2"
+loom_product_activation_parent_9023="$SOURCE_ROOT/tools/loom/subprocess_membrane.freeze.v2"
+loom_product_activation_parent_9024="$SOURCE_ROOT/tools/loom/resident_authority.freeze.v2"
+loom_product_activation_parent_9025="$SOURCE_ROOT/tools/loom/effect_closure_authority.freeze.v2"
+loom_product_activation_parent_9029="$SOURCE_ROOT/tools/loom/kernel_invocation_cell_authority.freeze.v3"
+loom_product_activation_parent_9030="$SOURCE_ROOT/tools/loom/kernel_exec_grant_cell_authority.freeze.v2"
+loom_product_activation_parent_9025_v13="$SOURCE_ROOT/tools/loom/kernel_peer_material_judgment_v13.freeze.v2"
+loom_product_activation_resident_v4="$SOURCE_ROOT/tools/loom/resident_membrane.runtime.v4.v2"
+loom_product_activation_dispatcher="$SOURCE_ROOT/tools/loom/resident_membrane_v5_main.sio"
+loom_product_activation_build="$SOURCE_ROOT/scripts/dev/build_sounio_loom_resident_membrane_v5.sh"
+loom_product_activation_gate="$SOURCE_ROOT/scripts/ci/sounio_loom_resident_transport_v5_selftest.sh"
+loom_product_exec_ingress_freeze="$SOURCE_ROOT/tools/loom/product_exec_ingress_dark.runtime.v1"
+loom_product_exec_ingress_contract="$SOURCE_ROOT/tools/loom/PRODUCT_EXEC_INGRESS_DARK_ATTACHMENT_V1.md"
+loom_product_exec_ingress_evidence="$SOURCE_ROOT/tools/loom/evidence/loom-product-exec-ingress-dark-v1-20260829.txt"
+loom_product_exec_ingress_sources=(
+  "$SOURCE_ROOT/tools/loom/src/loom_exec_ingress.ml"
+  "$SOURCE_ROOT/tools/loom/src/loom_hook.ml"
+  "$SOURCE_ROOT/tools/loom/src/loom_membrane.ml"
+  "$SOURCE_ROOT/tools/loom/src/loom.ml"
+  "$SOURCE_ROOT/tools/loom/src/loom_pty_stubs.c"
+  "$SOURCE_ROOT/tools/loom/src/dune"
+)
+loom_sovereign_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_sovereign_execution_kernel.sh"
+loom_sovereign_source="$SOURCE_ROOT/stdlib/coordination/loom_sovereign_execution_kernel_authority.sio"
+loom_sovereign_entrypoint="$SOURCE_ROOT/tools/loom/sovereign_execution_kernel_authority_main.sio"
+loom_sovereign_semantic_freeze="$SOURCE_ROOT/tools/loom/sovereign_execution_kernel.freeze.v2"
+loom_sovereign_material_freeze="$SOURCE_ROOT/tools/loom/sovereign_execution_kernel_material.runtime.v2"
+loom_sovereign_product_freeze="$SOURCE_ROOT/tools/loom/sovereign_execution_kernel_product.runtime.v2"
+loom_sovereign_product_contract="$SOURCE_ROOT/tools/loom/SOVEREIGN_EXECUTION_KERNEL_PRODUCT_ATTACHMENT_V1.md"
+loom_sovereign_product_evidence="$SOURCE_ROOT/tools/loom/evidence/loom-sovereign-execution-kernel-product-v2-20260915.txt"
+loom_sovereign_product_gate="$SOURCE_ROOT/scripts/ci/sounio_loom_sovereign_execution_kernel_product_selftest.sh"
+loom_sovereign_product_freeze_gate="$SOURCE_ROOT/scripts/ci/sounio_loom_sovereign_execution_kernel_product_freeze_selftest.sh"
+loom_sovereign_sources=(
+  "$SOURCE_ROOT/tools/loom/src/loom.ml"
+  "$SOURCE_ROOT/tools/loom/src/loom_exec.ml"
+  "$SOURCE_ROOT/tools/loom/src/loom_hook.ml"
+  "$SOURCE_ROOT/tools/loom/src/loom_sovereign_exec.ml"
+  "$SOURCE_ROOT/tools/loom/src/loom_sovereign_provider_fixture.ml"
+  "$SOURCE_ROOT/tools/loom/src/loom_pty_stubs.c"
+  "$SOURCE_ROOT/tools/loom/src/dune"
+  "$SOURCE_ROOT/scripts/dev/build_sounio_loom.sh"
+  "$SOURCE_ROOT/scripts/dev/install_sounio_coord_runtime.sh"
+  "$SOURCE_ROOT/scripts/dev/sounio_coord_runtime.sh"
+  "$SOURCE_ROOT/scripts/ci/sounio_loom_sovereign_execution_kernel_product_selftest.sh"
+  "$SOURCE_ROOT/scripts/ci/sounio_loom_sovereign_execution_kernel_product_freeze_selftest.sh"
+)
+loom_change_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_sovereign_change_kernel.sh"
+loom_material_change_build_source="$SOURCE_ROOT/scripts/dev/build_sounio_loom_sovereign_material_change.sh"
+loom_change_source="$SOURCE_ROOT/stdlib/coordination/loom_sovereign_change_kernel_authority.sio"
+loom_change_entrypoint="$SOURCE_ROOT/tools/loom/sovereign_change_kernel_authority_main.sio"
+loom_change_freeze="$SOURCE_ROOT/tools/loom/sovereign_change_kernel.freeze.v2"
+loom_material_change_source="$SOURCE_ROOT/stdlib/coordination/loom_sovereign_material_change_authority.sio"
+loom_material_change_entrypoint="$SOURCE_ROOT/tools/loom/sovereign_material_change_authority_main.sio"
+loom_material_change_freeze="$SOURCE_ROOT/tools/loom/sovereign_material_change.freeze.v3"
+loom_material_change_product="$(
+  find "$SOURCE_ROOT/tools/loom" -maxdepth 1 -type f \
+    -name 'sovereign_material_change_product.runtime.v*' -print | sort -V | tail -1
+)"
+loom_material_change_evidence="$SOURCE_ROOT/$(
+  manifest_value "$loom_material_change_product" evidence_path
+)"
+loom_change_operational_gate="$SOURCE_ROOT/scripts/ci/sounio_loom_sovereign_change_kernel_operational_selftest.sh"
+loom_change_ci_admit="$SOURCE_ROOT/scripts/ci/sounio_loom_sovereign_change_receipt_admit.sh"
+loom_change_sources=(
+  "$SOURCE_ROOT/tools/loom/src/loom_change.ml"
+  "$SOURCE_ROOT/tools/loom/src/loom_change_stubs.c"
+  "$SOURCE_ROOT/tools/loom/src/loom_change_provider_fixture.ml"
+  "$SOURCE_ROOT/tools/loom/src/loom.ml"
+  "$SOURCE_ROOT/tools/loom/src/loom_hook.ml"
+  "$SOURCE_ROOT/tools/loom/src/loom_hook_generation_canary.ml"
+  "$SOURCE_ROOT/tools/loom/src/loom_hook_generation_drain.ml"
+  "$SOURCE_ROOT/tools/loom/src/loom_hook_generation_guardian.ml"
+  "$SOURCE_ROOT/tools/loom/src/loom_hook_generation_reconcile.ml"
+  "$SOURCE_ROOT/tools/loom/src/loom_hook_generation_pin.ml"
+  "$SOURCE_ROOT/tools/loom/src/loom_hook_activation_epoch.ml"
+  "$SOURCE_ROOT/tools/loom/src/loom_ui.ml"
+  "$SOURCE_ROOT/tools/loom/src/dune"
+  "$SOURCE_ROOT/scripts/ci/sounio_loom_native_hook_generation_canary_ocaml_selftest.sh"
+  "$SOURCE_ROOT/scripts/ci/sounio_loom_native_hook_generation_guardian_ocaml_selftest.sh"
+  "$SOURCE_ROOT/scripts/ci/sounio_loom_native_hook_generation_reconcile_ocaml_selftest.sh"
+  "$SOURCE_ROOT/scripts/ci/sounio_loom_generation_pinned_cutover_ocaml_selftest.sh"
+  "$SOURCE_ROOT/scripts/ci/sounio_loom_activation_epoch_ocaml_selftest.sh"
+)
 [[ -x "$installer_source" ]] || die "runtime installer source missing or not executable: $installer_source"
 [[ -x "$runtime_source" ]] || die "runtime source missing or not executable: $runtime_source"
-[[ -f "$hook_source" ]] || die "hook runtime source missing: $hook_source"
 [[ -x "$causal_source" ]] || die "causal runtime source missing or not executable: $causal_source"
 [[ -x "$agentd_source" ]] || die "agent supervisor source missing or not executable: $agentd_source"
 [[ -x "$fleet_source" ]] || die "fleet launcher source missing or not executable: $fleet_source"
@@ -424,6 +1287,27 @@ loom_witness_epoch_transparency_module="$SOURCE_ROOT/stdlib/coordination/loom_wi
 [[ -x "$fleet_trace_verifier" ]] || \
   die "fleet trace verifier missing or not executable: $fleet_trace_verifier"
 [[ -x "$loom_build_source" ]] || die "Loom build entrypoint missing or not executable: $loom_build_source"
+[[ -x "$loom_routing_build_source" ]] || \
+  die "Loom routing-authority build entrypoint missing or not executable: $loom_routing_build_source"
+[[ -x "$loom_language_authority_build_source" ]] || \
+  die "Loom language-authority build entrypoint missing or not executable: $loom_language_authority_build_source"
+[[ -x "$loom_native_hook_cutover_build_source" ]] || \
+  die "Loom native-hook cutover build entrypoint missing or not executable: $loom_native_hook_cutover_build_source"
+[[ -x "$loom_native_hook_generation_drain_build_source" ]] || \
+  die "Loom native-hook generation-drain build entrypoint missing or not executable: $loom_native_hook_generation_drain_build_source"
+[[ -x "$loom_native_hook_generation_reconcile_build_source" ]] || \
+  die "Loom native-hook generation-reconcile build entrypoint missing or not executable: $loom_native_hook_generation_reconcile_build_source"
+[[ -x "$loom_generation_pinned_cutover_build_source" ]] || \
+  die "Loom generation-pinned cutover build entrypoint missing or not executable: $loom_generation_pinned_cutover_build_source"
+[[ -x "$loom_activation_epoch_build_source" ]] || \
+  die "Loom activation-epoch build entrypoint missing or not executable: $loom_activation_epoch_build_source"
+[[ -x "$loom_custody_transfer_build_source" ]] || \
+  die "Loom custody-transfer build entrypoint missing or not executable: $loom_custody_transfer_build_source"
+[[ -x "$loom_execution_outcome_build_source" ]] || \
+  die "Loom execution-outcome build entrypoint missing or not executable: $loom_execution_outcome_build_source"
+[[ -x "$loom_lane_health_build_source" && \
+  -x "$loom_lane_health_parity_build_source" ]] || \
+  die "Loom lane-health build entrypoints are incomplete"
 [[ -x "$loom_continuity_build_source" ]] || \
   die "Loom continuity build entrypoint missing or not executable: $loom_continuity_build_source"
 [[ -x "$loom_obligation_build_source" ]] || \
@@ -446,8 +1330,58 @@ loom_witness_epoch_transparency_module="$SOURCE_ROOT/stdlib/coordination/loom_wi
   die "Loom witness-epoch-handoff build entrypoint missing or not executable: $loom_witness_epoch_handoff_build_source"
 [[ -x "$loom_witness_epoch_transparency_build_source" ]] || \
   die "Loom witness-epoch-transparency build entrypoint missing or not executable: $loom_witness_epoch_transparency_build_source"
+[[ -x "$loom_sovereign_build_source" && -f "$loom_sovereign_source" &&
+  -f "$loom_sovereign_entrypoint" && -f "$loom_sovereign_semantic_freeze" &&
+  -f "$loom_sovereign_material_freeze" && -f "$loom_sovereign_product_freeze" &&
+  -f "$loom_sovereign_product_contract" && -f "$loom_sovereign_product_evidence" &&
+  -x "$loom_sovereign_product_gate" && -x "$loom_sovereign_product_freeze_gate" ]] ||
+  die "Loom sovereign execution product source bundle is incomplete"
 [[ -f "$loom_continuity_entrypoint" && -f "$loom_continuity_module" ]] || \
   die "Loom native Sounio continuity source bundle is incomplete"
+[[ -f "$loom_language_authority_entrypoint" && \
+  -f "$loom_language_authority_module" && \
+  -f "$loom_language_authority_freeze" ]] || \
+  die "Loom frozen Sounio language-authority source bundle is incomplete"
+[[ -f "$loom_routing_garden" && -f "$loom_routing_entrypoint" && \
+  -f "$loom_routing_module" && -f "$loom_routing_freeze" && \
+  -x "$loom_routing_gate" && -x "$loom_routing_freeze_gate" ]] || \
+  die "Loom frozen Sounio routing-authority source bundle is incomplete"
+[[ -f "$loom_native_hook_cutover_entrypoint" && \
+  -f "$loom_native_hook_cutover_module" && \
+  -f "$loom_native_hook_cutover_freeze" && \
+  -f "$loom_native_hook_cutover_codex_config" && \
+  -f "$loom_native_hook_cutover_claude_config" && \
+  -f "$loom_native_hook_cutover_cursor_config" && \
+  -f "$loom_native_hook_cutover_grok_config" ]] || \
+  die "Loom frozen Sounio native-hook cutover bundle is incomplete"
+[[ -f "$loom_native_hook_generation_drain_entrypoint" && \
+  -f "$loom_native_hook_generation_drain_module" && \
+  -f "$loom_native_hook_generation_drain_freeze" ]] || \
+  die "Loom frozen Sounio native-hook generation-drain bundle is incomplete"
+[[ -f "$loom_native_hook_generation_reconcile_entrypoint" && \
+  -f "$loom_native_hook_generation_reconcile_module" && \
+  -f "$loom_native_hook_generation_reconcile_freeze" ]] || \
+  die "Loom frozen Sounio native-hook generation-reconcile bundle is incomplete"
+[[ -f "$loom_generation_pinned_cutover_entrypoint" && \
+  -f "$loom_generation_pinned_cutover_module" && \
+  -f "$loom_generation_pinned_cutover_freeze" ]] || \
+  die "Loom frozen Sounio generation-pinned cutover bundle is incomplete"
+[[ -f "$loom_activation_epoch_entrypoint" && -f "$loom_activation_epoch_module" && \
+  -f "$loom_activation_epoch_freeze" ]] || \
+  die "Loom frozen Sounio activation-epoch bundle is incomplete"
+[[ -f "$loom_custody_transfer_entrypoint" && \
+  -f "$loom_custody_transfer_module" && \
+  -f "$loom_custody_transfer_freeze" ]] || \
+  die "Loom frozen Sounio custody-transfer source bundle is incomplete"
+[[ -f "$loom_execution_outcome_entrypoint" && \
+  -f "$loom_execution_outcome_module" && \
+  -f "$loom_execution_outcome_freeze" ]] || \
+  die "Loom frozen Sounio execution-outcome source bundle is incomplete"
+[[ -f "$loom_lane_health_entrypoint" && \
+  -f "$loom_lane_health_parity_entrypoint" && \
+  -f "$loom_lane_health_module" && -f "$loom_lane_health_freeze" && \
+  -f "$loom_lane_health_ocaml_receipt" && -f "$loom_sha256_module" ]] || \
+  die "Loom frozen Sounio lane-health source bundle is incomplete"
 [[ -f "$loom_obligation_entrypoint" && -f "$loom_obligation_module" ]] || \
   die "Loom native Sounio obligation source bundle is incomplete"
 [[ -f "$loom_epistemic_entrypoint" && -f "$loom_epistemic_module" ]] || \
@@ -473,8 +1407,66 @@ loom_witness_epoch_transparency_module="$SOURCE_ROOT/stdlib/coordination/loom_wi
 [[ -f "$loom_witness_epoch_transparency_entrypoint" && \
   -f "$loom_witness_epoch_transparency_module" ]] || \
   die "Loom native Sounio witness-epoch-transparency source bundle is incomplete"
+for product_activation_source in \
+  "$loom_product_activation_garden" \
+  "$loom_product_activation_source" \
+  "$loom_product_activation_entrypoint" \
+  "$loom_product_activation_action_freeze" \
+  "$loom_product_activation_operational_freeze" \
+  "$loom_product_activation_projection" \
+  "$loom_product_activation_resident_freeze" \
+  "$loom_product_activation_parent_9023" \
+  "$loom_product_activation_parent_9024" \
+  "$loom_product_activation_parent_9025" \
+  "$loom_product_activation_parent_9029" \
+  "$loom_product_activation_parent_9030" \
+  "$loom_product_activation_parent_9025_v13" \
+  "$loom_product_activation_resident_v4" \
+  "$loom_product_activation_dispatcher" \
+  "$loom_product_activation_build" \
+  "$loom_product_activation_gate"; do
+  [[ -f "$product_activation_source" ]] || \
+    die "Loom product activation capsule is incomplete: $product_activation_source"
+done
+for product_exec_ingress_source in \
+  "$loom_product_exec_ingress_freeze" \
+  "$loom_product_exec_ingress_contract" \
+  "$loom_product_exec_ingress_evidence" \
+  "${loom_product_exec_ingress_sources[@]}"; do
+  [[ -f "$product_exec_ingress_source" ]] ||
+    die "Loom product ExecIngress capsule is incomplete: $product_exec_ingress_source"
+done
+for sovereign_change_source in \
+  "$loom_change_build_source" \
+  "$loom_material_change_build_source" \
+  "$loom_change_source" \
+  "$loom_change_entrypoint" \
+  "$loom_change_freeze" \
+  "$loom_material_change_source" \
+  "$loom_material_change_entrypoint" \
+  "$loom_material_change_freeze" \
+  "$loom_material_change_product" \
+  "$loom_material_change_evidence" \
+  "$loom_change_operational_gate" \
+  "$loom_change_ci_admit" \
+  "${loom_change_sources[@]}"; do
+  [[ -f "$sovereign_change_source" ]] ||
+    die "Loom sovereign change capsule is incomplete: $sovereign_change_source"
+done
+[[ -f "$loom_message_source" && -f "$loom_message_dune" ]] || \
+  die "Loom authenticated message bridge source bundle is incomplete"
 [[ -f "$loom_project/src/loom.ml" && -f "$loom_project/src/loom_arrow.ml" && \
   -f "$loom_project/src/loom_epistemic.ml" && \
+  -f "$loom_project/src/loom_exec.ml" && \
+  -f "$loom_project/src/loom_exec_ingress.ml" && \
+  -f "$loom_project/src/loom_hook.ml" && \
+  -f "$loom_project/src/loom_hook_generation_reconcile.ml" && \
+  -f "$loom_project/src/loom_hook_generation_pin.ml" && \
+  -f "$loom_project/src/loom_change.ml" && \
+  -f "$loom_project/src/loom_change_stubs.c" && \
+  -f "$loom_project/src/loom_sovereign_exec.ml" && \
+  -f "$loom_project/src/loom_sovereign_provider_fixture.ml" && \
+  -f "$loom_project/src/loom_lane_health.ml" && \
   -f "$loom_project/src/loom_witness.ml" && \
   -f "$loom_project/src/loom_witness_epoch.ml" && \
   -f "$loom_project/src/loom_witness_transparency.ml" && \
@@ -504,6 +1496,18 @@ fleetd_protocol="$(sed -n 's/^protocol_version=//p' <<< "$fleetd_version_output"
 
 "$loom_build_source" >/dev/null
 loom_binary="$loom_project/_build/default/src/loom.exe"
+loom_message_binary="$loom_project/_build/default/message_bridge/loom_message_bridge.exe"
+loom_routing_binary="$loom_project/_build/default/src/sounio-loom-routing-authority-runtime"
+loom_language_authority_binary="$loom_project/.runtime/sounio-loom-language-authority-runtime"
+loom_native_hook_cutover_binary="$loom_project/.runtime/sounio-loom-native-hook-cutover"
+loom_native_hook_generation_drain_binary="$loom_project/.runtime/sounio-loom-native-hook-generation-drain"
+loom_native_hook_generation_reconcile_binary="$loom_project/.runtime/sounio-loom-native-hook-generation-reconcile"
+loom_generation_pinned_cutover_binary="$loom_project/.runtime/sounio-loom-generation-pinned-cutover"
+loom_activation_epoch_binary="$loom_project/.runtime/sounio-loom-activation-epoch"
+loom_custody_transfer_binary="$loom_project/_build/default/src/sounio-loom-custody-transfer-runtime"
+loom_execution_outcome_binary="$loom_project/.runtime/sounio-loom-execution-outcome-runtime"
+loom_lane_health_binary="$loom_project/.runtime/sounio-loom-lane-health-runtime"
+loom_lane_health_parity_binary="$loom_project/.runtime/sounio-loom-lane-health-parity-runtime"
 loom_continuity_binary="$loom_project/_build/default/src/sounio-loom-continuity-runtime"
 loom_obligation_binary="$loom_project/_build/default/src/sounio-loom-obligation-runtime"
 loom_epistemic_binary="$loom_project/_build/default/src/sounio-loom-epistemic-runtime"
@@ -515,7 +1519,97 @@ loom_witness_mesh_binary="$loom_project/_build/default/src/sounio-loom-witness-m
 loom_witness_mesh_v1_binary="$loom_project/_build/default/src/sounio-loom-witness-mesh-v1-runtime"
 loom_witness_epoch_handoff_binary="$loom_project/_build/default/src/sounio-loom-witness-epoch-handoff-runtime"
 loom_witness_epoch_transparency_binary="$loom_project/_build/default/src/sounio-loom-witness-epoch-transparency-runtime"
+loom_product_activation_resident_binary="$loom_project/.runtime/sounio-loom-resident-membrane-runtime-v5.v2"
+loom_sovereign_binary="$loom_project/_build/default/src/sounio-loom-sovereign-execution-kernel"
+loom_change_binary="$loom_project/_build/default/src/sounio-loom-sovereign-change-kernel"
+loom_material_change_binary="$loom_project/_build/default/src/sounio-loom-sovereign-material-change"
 [[ -x "$loom_binary" ]] || die "Loom build omitted its native executable"
+[[ -x "$loom_routing_binary" ]] || \
+  die "Loom build omitted frozen Sounio routing-authority action 9032"
+loom_routing_expected_sha="$(manifest_value "$loom_routing_freeze" executable_sha256)"
+[[ "$(sha256sum "$loom_routing_binary" | awk '{print $1}')" == \
+  "$loom_routing_expected_sha" ]] || \
+  die "Loom Sounio action 9032 runtime failed frozen hash verification"
+[[ "$(printf '0\n' | "$loom_routing_binary")" == \
+  'SOUNIO_ROUTING_AUTHORITY_SELFTEST PASS cases=29' ]] || \
+  die "Loom Sounio action 9032 failed its install probe"
+[[ -x "$loom_native_hook_generation_drain_binary" ]] || \
+  die "Loom build omitted frozen Sounio action 9046"
+loom_native_hook_generation_drain_expected_sha="$(
+  manifest_value "$loom_native_hook_generation_drain_freeze" executable_sha256
+)"
+[[ "$(sha256sum "$loom_native_hook_generation_drain_binary" | awk '{print $1}')" == \
+  "$loom_native_hook_generation_drain_expected_sha" ]] || \
+  die "Loom Sounio action 9046 runtime failed frozen hash verification"
+[[ -x "$loom_native_hook_generation_reconcile_binary" ]] || \
+  die "Loom build omitted frozen Sounio action 9047"
+loom_native_hook_generation_reconcile_expected_sha="$(
+  manifest_value "$loom_native_hook_generation_reconcile_freeze" executable_sha256
+)"
+[[ "$(sha256sum "$loom_native_hook_generation_reconcile_binary" | awk '{print $1}')" == \
+  "$loom_native_hook_generation_reconcile_expected_sha" ]] || \
+  die "Loom Sounio action 9047 runtime failed frozen hash verification"
+[[ "$(printf '0\n' | "$loom_native_hook_generation_reconcile_binary")" == \
+  'SOUNIO_NATIVE_HOOK_GENERATION_RECONCILE_SELFTEST PASS cases=13' ]] || \
+  die "Loom Sounio action 9047 failed its install probe"
+[[ -x "$loom_generation_pinned_cutover_binary" ]] || \
+  die "Loom build omitted frozen Sounio action 9048"
+loom_generation_pinned_cutover_expected_sha="$(
+  manifest_value "$loom_generation_pinned_cutover_freeze" executable_sha256
+)"
+[[ "$(sha256sum "$loom_generation_pinned_cutover_binary" | awk '{print $1}')" == \
+  "$loom_generation_pinned_cutover_expected_sha" ]] || \
+  die "Loom Sounio action 9048 runtime failed frozen hash verification"
+[[ "$(printf '0\n' | "$loom_generation_pinned_cutover_binary")" == \
+  'SOUNIO_GENERATION_PINNED_CUTOVER_SELFTEST PASS cases=16' ]] || \
+  die "Loom Sounio action 9048 failed its install probe"
+[[ -x "$loom_activation_epoch_binary" ]] || die "Loom build omitted frozen Sounio action 9049"
+[[ "$(sha256sum "$loom_activation_epoch_binary" | awk '{print $1}')" == \
+  "$(manifest_value "$loom_activation_epoch_freeze" executable_sha256)" ]] || \
+  die "Loom Sounio action 9049 runtime failed frozen hash verification"
+[[ "$(printf '0\n' | "$loom_activation_epoch_binary")" == \
+  'SOUNIO_ACTIVATION_EPOCH_SELFTEST PASS cases=13' ]] || \
+  die "Loom Sounio action 9049 failed its install probe"
+[[ -x "$loom_sovereign_binary" ]] || \
+  die "Loom build omitted frozen Sounio action 9042"
+[[ -x "$loom_change_binary" && -x "$loom_material_change_binary" ]] ||
+  die "Loom build omitted frozen Sounio actions 9043/9044"
+loom_sovereign_expected_sha="$(manifest_value "$loom_sovereign_semantic_freeze" executable_sha256)"
+loom_sovereign_actual_sha="$(sha256sum "$loom_sovereign_binary" | awk '{print $1}')"
+[[ "$loom_sovereign_actual_sha" == "$loom_sovereign_expected_sha" ]] || \
+  die "Loom Sounio action 9042 runtime failed frozen hash verification"
+loom_sovereign_probe="$(printf '0\n' | "$loom_sovereign_binary")"
+[[ "$loom_sovereign_probe" == \
+  'SOUNIO_SOVEREIGN_EXECUTION_KERNEL_SELFTEST PASS cases=14' ]] || \
+  die "Loom Sounio action 9042 failed its install probe"
+loom_change_expected_sha="$(manifest_value "$loom_change_freeze" executable_sha256)"
+loom_material_change_expected_sha="$(
+  manifest_value "$loom_material_change_freeze" executable_sha256
+)"
+[[ "$(sha256sum "$loom_change_binary" | awk '{print $1}')" == \
+   "$loom_change_expected_sha" ]] ||
+  die "Loom Sounio action 9043 runtime failed frozen hash verification"
+[[ "$(sha256sum "$loom_material_change_binary" | awk '{print $1}')" == \
+   "$loom_material_change_expected_sha" ]] ||
+  die "Loom Sounio action 9044 runtime failed frozen hash verification"
+[[ "$(printf '0\n' | "$loom_change_binary")" == \
+   'SOUNIO_SOVEREIGN_CHANGE_KERNEL_SELFTEST PASS cases=21' ]] ||
+  die "Loom Sounio action 9043 failed its install probe"
+[[ "$(printf '0\n' | "$loom_material_change_binary")" == \
+   'SOUNIO_SOVEREIGN_MATERIAL_CHANGE_SELFTEST PASS cases=8' ]] ||
+  die "Loom Sounio action 9044 failed its install probe"
+[[ -x "$loom_message_binary" ]] || \
+  die "Loom build omitted its authenticated message bridge runtime"
+[[ -x "$loom_language_authority_binary" ]] || \
+  die "Loom build omitted its frozen Sounio language-authority runtime"
+[[ -x "$loom_native_hook_cutover_binary" ]] || \
+  die "Loom build omitted frozen Sounio native-hook cutover action 9045"
+[[ -x "$loom_custody_transfer_binary" ]] || \
+  die "Loom build omitted its frozen Sounio custody-transfer runtime"
+[[ -x "$loom_execution_outcome_binary" ]] || \
+  die "Loom build omitted its frozen Sounio execution-outcome runtime"
+[[ -x "$loom_lane_health_binary" && -x "$loom_lane_health_parity_binary" ]] || \
+  die "Loom build omitted its frozen Sounio lane-health runtimes"
 [[ -x "$loom_continuity_binary" ]] || \
   die "Loom build omitted its native Sounio continuity adapter"
 [[ -x "$loom_obligation_binary" ]] || \
@@ -538,6 +1632,8 @@ loom_witness_epoch_transparency_binary="$loom_project/_build/default/src/sounio-
   die "Loom build omitted its native Sounio witness-epoch-handoff adapter"
 [[ -x "$loom_witness_epoch_transparency_binary" ]] || \
   die "Loom build omitted its native Sounio witness-epoch-transparency adapter"
+[[ -x "$loom_product_activation_resident_binary" ]] || \
+  die "Loom build omitted its frozen Sounio resident v5 runtime"
 loom_version_output="$($loom_binary runtime-version)"
 loom_protocol="$(sed -n 's/^protocol_version=//p' <<< "$loom_version_output" | head -1)"
 loom_runtime_version="$(sed -n 's/^runtime_version=//p' <<< "$loom_version_output" | head -1)"
@@ -546,6 +1642,64 @@ loom_language="$(sed -n 's/^language=//p' <<< "$loom_version_output" | head -1)"
   die "Loom kernel must report protocol 1 and language OCaml"
 [[ "$loom_runtime_version" == "$runtime_version" ]] || \
   die "Loom kernel version $loom_runtime_version does not match coordination runtime $runtime_version"
+loom_language_authority_probe="$(printf '0\n' | "$loom_language_authority_binary")"
+[[ "$loom_language_authority_probe" == \
+  'SOUNIO_LANGUAGE_AUTHORITY_SELFTEST PASS cases=33' ]] || \
+  die "Loom frozen Sounio language-authority runtime failed its install probe"
+loom_language_authority_expected_sha="$(
+  manifest_value "$loom_language_authority_freeze" executable_sha256
+)"
+read -r loom_language_authority_actual_sha _ < <(
+  sha256sum "$loom_language_authority_binary"
+)
+[[ "$loom_language_authority_actual_sha" == "$loom_language_authority_expected_sha" ]] || \
+  die "Loom language-authority runtime does not match its freeze manifest"
+loom_native_hook_cutover_probe="$(printf '0\n' | "$loom_native_hook_cutover_binary")"
+[[ "$loom_native_hook_cutover_probe" == \
+  'SOUNIO_NATIVE_HOOK_CUTOVER_SELFTEST PASS cases=12' ]] || \
+  die "Loom frozen Sounio native-hook cutover runtime failed its install probe"
+loom_native_hook_cutover_expected_sha="$(
+  manifest_value "$loom_native_hook_cutover_freeze" executable_sha256
+)"
+loom_native_hook_cutover_actual_sha="$(sha256sum "$loom_native_hook_cutover_binary" | awk '{print $1}')"
+[[ "$loom_native_hook_cutover_actual_sha" == "$loom_native_hook_cutover_expected_sha" ]] || \
+  die "Loom native-hook cutover runtime does not match its freeze manifest"
+loom_custody_transfer_probe="$(printf '0\n' | "$loom_custody_transfer_binary")"
+[[ "$loom_custody_transfer_probe" == \
+  'SOUNIO_CUSTODY_TRANSFER_SELFTEST PASS cases=30' ]] || \
+  die "Loom frozen Sounio custody-transfer runtime failed its install probe"
+loom_custody_transfer_expected_sha="$(
+  manifest_value "$loom_custody_transfer_freeze" executable_sha256
+)"
+read -r loom_custody_transfer_actual_sha _ < <(
+  sha256sum "$loom_custody_transfer_binary"
+)
+[[ "$loom_custody_transfer_actual_sha" == "$loom_custody_transfer_expected_sha" ]] || \
+  die "Loom custody-transfer runtime does not match its freeze manifest"
+loom_execution_outcome_probe="$(printf '0\n' | "$loom_execution_outcome_binary")"
+[[ "$loom_execution_outcome_probe" == \
+  'SOUNIO_EXECUTION_OUTCOME_SELFTEST PASS cases=28' ]] || \
+  die "Loom frozen Sounio execution-outcome runtime failed its install probe"
+loom_execution_outcome_expected_sha="$(
+  manifest_value "$loom_execution_outcome_freeze" executable_sha256
+)"
+read -r loom_execution_outcome_actual_sha _ < <(
+  sha256sum "$loom_execution_outcome_binary"
+)
+[[ "$loom_execution_outcome_actual_sha" == "$loom_execution_outcome_expected_sha" ]] || \
+  die "Loom execution-outcome runtime does not match its freeze manifest"
+loom_lane_health_probe="$(printf '0\n' | "$loom_lane_health_binary")"
+[[ "$loom_lane_health_probe" == \
+  'SOUNIO_LANE_HEALTH_SELFTEST PASS cases=28' ]] || \
+  die "Loom frozen Sounio lane-health runtime failed its install probe"
+loom_lane_health_expected_sha="$(
+  manifest_value "$loom_lane_health_freeze" executable_sha256
+)"
+read -r loom_lane_health_actual_sha _ < <(
+  sha256sum "$loom_lane_health_binary"
+)
+[[ "$loom_lane_health_actual_sha" == "$loom_lane_health_expected_sha" ]] || \
+  die "Loom lane-health runtime does not match its freeze manifest"
 loom_continuity_probe="$(
   printf '101 111 201 301 401 501 0 0 0 0 1 0 0\n' | "$loom_continuity_binary"
 )"
@@ -673,13 +1827,49 @@ loom_quorum_probe="$({
   die "Loom native Sounio journal-quorum adapter failed its install probe"
 
 bundle_sources=(
-  "$installer_source" "$runtime_source" "$hook_source" "$causal_source"
+  "$installer_source" "$runtime_source" "$causal_source"
   "$agentd_source"
   "$fleet_source" "$fleetd_source" "$fleet_model_source"
   "$fleet_model_config" "$fleet_model_generator" "$fleet_trace_verifier"
-  "$loom_build_source" "$loom_project/dune-project" "$loom_project/src/dune"
+  "$loom_build_source" "$loom_language_authority_build_source"
+  "$loom_routing_build_source" "$loom_routing_garden" "$loom_routing_entrypoint"
+  "$loom_routing_module" "$loom_routing_freeze" "$loom_routing_gate"
+  "$loom_routing_freeze_gate"
+  "$loom_message_source" "$loom_message_dune"
+  "$loom_language_authority_entrypoint" "$loom_language_authority_module"
+  "$loom_language_authority_freeze"
+  "$loom_native_hook_cutover_build_source"
+  "$loom_native_hook_cutover_entrypoint" "$loom_native_hook_cutover_module"
+  "$loom_native_hook_cutover_freeze" "$loom_native_hook_cutover_codex_config"
+  "$loom_native_hook_cutover_claude_config" "$loom_native_hook_cutover_cursor_config"
+  "$loom_native_hook_cutover_grok_config"
+  "$loom_native_hook_generation_reconcile_build_source"
+  "$loom_native_hook_generation_reconcile_entrypoint"
+  "$loom_native_hook_generation_reconcile_module"
+  "$loom_native_hook_generation_reconcile_freeze"
+  "$loom_generation_pinned_cutover_build_source"
+  "$loom_generation_pinned_cutover_entrypoint"
+  "$loom_generation_pinned_cutover_module"
+  "$loom_generation_pinned_cutover_freeze"
+  "$loom_activation_epoch_build_source" "$loom_activation_epoch_entrypoint"
+  "$loom_activation_epoch_module" "$loom_activation_epoch_freeze"
+  "$loom_custody_transfer_build_source" "$loom_custody_transfer_entrypoint"
+  "$loom_custody_transfer_module" "$loom_custody_transfer_freeze"
+  "$loom_execution_outcome_build_source" "$loom_execution_outcome_entrypoint"
+  "$loom_execution_outcome_module" "$loom_execution_outcome_freeze"
+  "$loom_lane_health_build_source" "$loom_lane_health_parity_build_source"
+  "$loom_lane_health_entrypoint" "$loom_lane_health_parity_entrypoint"
+  "$loom_lane_health_module" "$loom_lane_health_freeze"
+  "$loom_lane_health_ocaml_receipt" "$loom_sha256_module"
+  "$loom_project/dune-project" "$loom_project/src/dune"
   "$loom_project/src/loom.ml" "$loom_project/src/loom_arrow.ml"
-  "$loom_project/src/loom_epistemic.ml" "$loom_project/src/loom_witness.ml"
+  "$loom_project/src/loom_epistemic.ml" "$loom_project/src/loom_exec.ml"
+  "$loom_project/src/loom_exec_ingress.ml"
+  "$loom_project/src/loom_hook.ml"
+  "$loom_project/src/loom_sovereign_exec.ml"
+  "$loom_project/src/loom_sovereign_provider_fixture.ml"
+  "$loom_project/src/loom_lane_health.ml"
+  "$loom_project/src/loom_witness.ml"
   "$loom_project/src/loom_witness_epoch.ml"
   "$loom_project/src/loom_witness_transparency.ml" "$loom_project/src/loom_ui.ml"
   "$loom_project/src/loom_pty_stubs.c" "$loom_project/src/loom_arrow_stubs.c"
@@ -705,7 +1895,48 @@ bundle_sources=(
   "$loom_witness_epoch_transparency_build_source"
   "$loom_witness_epoch_transparency_entrypoint"
   "$loom_witness_epoch_transparency_module"
+  "$loom_product_activation_garden" "$loom_product_activation_source"
+  "$loom_product_activation_entrypoint" "$loom_product_activation_action_freeze"
+  "$loom_product_activation_operational_freeze"
+  "$loom_product_activation_projection" "$loom_product_activation_resident_freeze"
+  "$loom_product_activation_parent_9023" "$loom_product_activation_parent_9024"
+  "$loom_product_activation_parent_9025" "$loom_product_activation_parent_9029"
+  "$loom_product_activation_parent_9030" "$loom_product_activation_parent_9025_v13"
+  "$loom_product_activation_resident_v4" "$loom_product_activation_dispatcher"
+  "$loom_product_activation_build" "$loom_product_activation_gate"
+  "$loom_product_exec_ingress_freeze" "$loom_product_exec_ingress_contract"
+  "$loom_product_exec_ingress_evidence"
+  "$loom_sovereign_build_source" "$loom_sovereign_source"
+  "$loom_sovereign_entrypoint" "$loom_sovereign_semantic_freeze"
+  "$loom_sovereign_material_freeze" "$loom_sovereign_product_freeze"
+  "$loom_sovereign_product_contract" "$loom_sovereign_product_evidence"
+  "$loom_sovereign_product_gate" "$loom_sovereign_product_freeze_gate"
+  "$loom_change_build_source" "$loom_material_change_build_source"
+  "$loom_change_source" "$loom_change_entrypoint" "$loom_change_freeze"
+  "$loom_material_change_source" "$loom_material_change_entrypoint"
+  "$loom_material_change_freeze" "$loom_material_change_product"
+  "$loom_material_change_evidence" "$loom_change_operational_gate"
+  "$loom_change_ci_admit" "${loom_change_sources[@]}"
+  "$loom_project/src/loom_membrane.ml"
+  "$loom_project/src/loom_peer_activation_capsule.ml"
+  "$loom_project/src/loom_resident.ml"
 )
+for relative_path in "${loom_native_hook_generation_drain_capsule_relpaths[@]}"; do
+  bundle_sources+=("$SOURCE_ROOT/$relative_path")
+done
+bundle_sources+=("$loom_native_hook_generation_drain_freeze")
+for relative_path in "${loom_native_hook_generation_reconcile_capsule_relpaths[@]}"; do
+  bundle_sources+=("$SOURCE_ROOT/$relative_path")
+done
+bundle_sources+=("$loom_native_hook_generation_reconcile_freeze")
+for relative_path in "${loom_generation_pinned_cutover_capsule_relpaths[@]}"; do
+  bundle_sources+=("$SOURCE_ROOT/$relative_path")
+done
+bundle_sources+=("$loom_generation_pinned_cutover_freeze")
+for relative_path in "${loom_activation_epoch_capsule_relpaths[@]}"; do
+  bundle_sources+=("$SOURCE_ROOT/$relative_path")
+done
+bundle_sources+=("$loom_activation_epoch_freeze")
 
 source_sha=unknown
 source_state=unversioned
@@ -747,7 +1978,25 @@ else
     [[ -z "${stage:-}" ]] || rm -rf "$stage"
   }
   trap cleanup_stage EXIT
-  mkdir -p "$stage/bin" "$stage/hooks" "$stage/formal"
+  mkdir -p "$stage/bin" "$stage/hooks" "$stage/formal" \
+    "$stage/policy/language-authority/tools/loom" \
+    "$stage/policy/language-authority/stdlib/coordination" \
+    "$stage/policy/routing-authority/tools/loom" \
+    "$stage/policy/routing-authority/stdlib/coordination" \
+    "$stage/policy/native-hook-cutover/tools/loom" \
+    "$stage/policy/native-hook-cutover/stdlib/coordination" \
+    "$stage/policy/native-hook-cutover/configs" \
+    "$stage/policy/native-hook-generation-drain" \
+    "$stage/policy/generation-pinned-cutover" \
+    "$stage/policy/activation-epoch" \
+    "$stage/policy/product-activation/tools/loom" \
+    "$stage/policy/product-activation/stdlib/coordination" \
+    "$stage/policy/product-activation/scripts/dev" \
+    "$stage/policy/product-activation/scripts/ci" \
+    "$stage/policy/product-exec-ingress/tools/loom/evidence" \
+    "$stage/policy/product-exec-ingress/tools/loom/src" \
+    "$stage/policy/sovereign-execution" \
+    "$stage/policy/sovereign-change"
   install -m 0755 "$runtime_source" "$stage/bin/sounio-coord-runtime"
   install -m 0755 "$causal_source" "$stage/bin/sounio-coord-causal-runtime"
   install -m 0755 "$agentd_source" "$stage/bin/sounio-agentd-runtime"
@@ -756,6 +2005,93 @@ else
   install -m 0755 "$fleet_model_generator" "$stage/bin/sounio-fleet-tla-sabotage"
   install -m 0755 "$fleet_trace_verifier" "$stage/bin/sounio-fleet-trace-verify"
   install -m 0755 "$loom_binary" "$stage/bin/sounio-loom-runtime"
+  install -m 0555 "$loom_routing_binary" \
+    "$stage/bin/sounio-loom-routing-authority-runtime"
+  install -m 0444 "$loom_routing_garden" \
+    "$stage/policy/routing-authority/tools/loom/GARDEN_ROUTING_AUTHORITY_V1.md"
+  install -m 0444 "$loom_routing_freeze" \
+    "$stage/policy/routing-authority/tools/loom/routing_authority.freeze.v2"
+  install -m 0444 "$loom_routing_entrypoint" \
+    "$stage/policy/routing-authority/tools/loom/routing_authority_main.sio"
+  install -m 0444 "$loom_routing_module" \
+    "$stage/policy/routing-authority/stdlib/coordination/loom_routing_authority.sio"
+  install -m 0555 "$loom_sovereign_binary" \
+    "$stage/bin/sounio-loom-sovereign-execution-kernel"
+  install -m 0555 "$loom_change_binary" \
+    "$stage/bin/sounio-loom-sovereign-change-kernel"
+  install -m 0555 "$loom_material_change_binary" \
+    "$stage/bin/sounio-loom-sovereign-material-change"
+  install -m 0755 "$loom_message_binary" "$stage/bin/sounio-loom-message-runtime"
+  install -m 0755 "$loom_language_authority_binary" \
+    "$stage/bin/sounio-loom-language-authority-runtime"
+  install -m 0644 "$loom_language_authority_freeze" \
+    "$stage/policy/language-authority/tools/loom/language_authority.freeze.v2"
+  install -m 0644 "$loom_language_authority_entrypoint" \
+    "$stage/policy/language-authority/tools/loom/language_authority_main.sio"
+  install -m 0644 "$loom_language_authority_module" \
+    "$stage/policy/language-authority/stdlib/coordination/loom_language_authority.sio"
+  install -m 0555 "$loom_native_hook_cutover_binary" \
+    "$stage/bin/sounio-loom-native-hook-cutover"
+  install -m 0555 "$loom_native_hook_generation_drain_binary" \
+    "$stage/bin/sounio-loom-native-hook-generation-drain"
+  for relative_path in "${loom_native_hook_generation_drain_capsule_relpaths[@]}"; do
+    mkdir -p "$(dirname "$stage/policy/native-hook-generation-drain/$relative_path")"
+    install -m 0444 "$SOURCE_ROOT/$relative_path" \
+      "$stage/policy/native-hook-generation-drain/$relative_path"
+  done
+  mkdir -p "$stage/policy/native-hook-generation-drain/tools/loom"
+  install -m 0444 "$loom_native_hook_generation_drain_freeze" \
+    "$stage/policy/native-hook-generation-drain/tools/loom/native_hook_generation_drain.freeze.v2"
+  install -m 0555 "$loom_native_hook_generation_reconcile_binary" \
+    "$stage/bin/sounio-loom-native-hook-generation-reconcile"
+  for relative_path in "${loom_native_hook_generation_reconcile_capsule_relpaths[@]}"; do
+    mkdir -p "$(dirname "$stage/policy/native-hook-generation-reconcile/$relative_path")"
+    install -m 0444 "$SOURCE_ROOT/$relative_path" \
+      "$stage/policy/native-hook-generation-reconcile/$relative_path"
+  done
+  mkdir -p "$stage/policy/native-hook-generation-reconcile/tools/loom"
+  install -m 0444 "$loom_native_hook_generation_reconcile_freeze" \
+    "$stage/policy/native-hook-generation-reconcile/tools/loom/native_hook_generation_reconcile.freeze.v2"
+  install -m 0555 "$loom_generation_pinned_cutover_binary" \
+    "$stage/bin/sounio-loom-generation-pinned-cutover"
+  for relative_path in "${loom_generation_pinned_cutover_capsule_relpaths[@]}"; do
+    mkdir -p "$(dirname "$stage/policy/generation-pinned-cutover/$relative_path")"
+    install -m 0444 "$SOURCE_ROOT/$relative_path" \
+      "$stage/policy/generation-pinned-cutover/$relative_path"
+  done
+  mkdir -p "$stage/policy/generation-pinned-cutover/tools/loom"
+  install -m 0444 "$loom_generation_pinned_cutover_freeze" \
+    "$stage/policy/generation-pinned-cutover/tools/loom/generation_pinned_cutover.freeze.v2"
+  install -m 0555 "$loom_activation_epoch_binary" "$stage/bin/sounio-loom-activation-epoch"
+  for relative_path in "${loom_activation_epoch_capsule_relpaths[@]}"; do
+    mkdir -p "$(dirname "$stage/policy/activation-epoch/$relative_path")"
+    install -m 0444 "$SOURCE_ROOT/$relative_path" "$stage/policy/activation-epoch/$relative_path"
+  done
+  mkdir -p "$stage/policy/activation-epoch/tools/loom"
+  install -m 0444 "$loom_activation_epoch_freeze" \
+    "$stage/policy/activation-epoch/tools/loom/activation_epoch.freeze.v2"
+  install -m 0444 "$loom_native_hook_cutover_freeze" \
+    "$stage/policy/native-hook-cutover/tools/loom/native_hook_cutover.freeze.v2"
+  install -m 0444 "$loom_native_hook_cutover_entrypoint" \
+    "$stage/policy/native-hook-cutover/tools/loom/native_hook_cutover_authority_main.sio"
+  install -m 0444 "$loom_native_hook_cutover_module" \
+    "$stage/policy/native-hook-cutover/stdlib/coordination/loom_native_hook_cutover_authority.sio"
+  install -m 0444 "$loom_native_hook_cutover_codex_config" \
+    "$stage/policy/native-hook-cutover/configs/codex.json"
+  install -m 0444 "$loom_native_hook_cutover_claude_config" \
+    "$stage/policy/native-hook-cutover/configs/claude.json"
+  install -m 0444 "$loom_native_hook_cutover_cursor_config" \
+    "$stage/policy/native-hook-cutover/configs/cursor.json"
+  install -m 0444 "$loom_native_hook_cutover_grok_config" \
+    "$stage/policy/native-hook-cutover/configs/grok.json"
+  install -m 0755 "$loom_custody_transfer_binary" \
+    "$stage/bin/sounio-loom-custody-transfer-runtime"
+  install -m 0755 "$loom_execution_outcome_binary" \
+    "$stage/bin/sounio-loom-execution-outcome-runtime"
+  install -m 0755 "$loom_lane_health_binary" \
+    "$stage/bin/sounio-loom-lane-health-runtime"
+  install -m 0755 "$loom_lane_health_parity_binary" \
+    "$stage/bin/sounio-loom-lane-health-parity-runtime"
   install -m 0755 "$loom_continuity_binary" \
     "$stage/bin/sounio-loom-continuity-runtime"
   install -m 0755 "$loom_obligation_binary" \
@@ -778,9 +2114,271 @@ else
     "$stage/bin/sounio-loom-witness-epoch-handoff-runtime"
   install -m 0755 "$loom_witness_epoch_transparency_binary" \
     "$stage/bin/sounio-loom-witness-epoch-transparency-runtime"
+  install -m 0555 "$loom_product_activation_resident_binary" \
+    "$stage/bin/sounio-loom-resident-membrane-runtime-v5.v2"
+  for product_activation_file in \
+    "$loom_product_activation_garden" \
+    "$loom_product_activation_entrypoint" \
+    "$loom_product_activation_action_freeze" \
+    "$loom_product_activation_operational_freeze" \
+    "$loom_product_activation_projection" \
+    "$loom_product_activation_resident_freeze" \
+    "$loom_product_activation_parent_9023" \
+    "$loom_product_activation_parent_9024" \
+    "$loom_product_activation_parent_9025" \
+    "$loom_product_activation_parent_9029" \
+    "$loom_product_activation_parent_9030" \
+    "$loom_product_activation_parent_9025_v13" \
+    "$loom_product_activation_resident_v4" \
+    "$loom_product_activation_dispatcher"; do
+    install -m 0444 "$product_activation_file" \
+      "$stage/policy/product-activation/tools/loom/$(basename "$product_activation_file")"
+  done
+  install -m 0444 "$loom_product_activation_source" \
+    "$stage/policy/product-activation/stdlib/coordination/$(basename "$loom_product_activation_source")"
+  install -m 0555 "$loom_product_activation_build" \
+    "$stage/policy/product-activation/scripts/dev/$(basename "$loom_product_activation_build")"
+  install -m 0555 "$loom_product_activation_gate" \
+    "$stage/policy/product-activation/scripts/ci/$(basename "$loom_product_activation_gate")"
+  install -m 0444 "$loom_product_exec_ingress_freeze" \
+    "$stage/policy/product-exec-ingress/tools/loom/$(basename "$loom_product_exec_ingress_freeze")"
+  install -m 0444 "$loom_product_exec_ingress_contract" \
+    "$stage/policy/product-exec-ingress/tools/loom/$(basename "$loom_product_exec_ingress_contract")"
+  install -m 0444 "$loom_product_exec_ingress_evidence" \
+    "$stage/policy/product-exec-ingress/tools/loom/evidence/$(basename "$loom_product_exec_ingress_evidence")"
+  product_exec_ingress_frozen_head="$(
+    manifest_value "$loom_product_exec_ingress_freeze" implementation_commit
+  )"
+  [[ "$product_exec_ingress_frozen_head" =~ ^[0-9a-f]{40}$ ]] &&
+    git -C "$SOURCE_ROOT" cat-file -e \
+      "$product_exec_ingress_frozen_head^{commit}" ||
+    die "Loom product ExecIngress historical source commit is unavailable"
+  for product_exec_ingress_source in "${loom_product_exec_ingress_sources[@]}"; do
+    product_exec_ingress_relative="${product_exec_ingress_source#"$SOURCE_ROOT/"}"
+    product_exec_ingress_target="$stage/policy/product-exec-ingress/$product_exec_ingress_relative"
+    case "$(basename "$product_exec_ingress_source")" in
+      loom_exec_ingress.ml) product_exec_ingress_hash_key=exec_ingress_source_sha256 ;;
+      loom_hook.ml) product_exec_ingress_hash_key=hook_source_sha256 ;;
+      loom_membrane.ml) product_exec_ingress_hash_key=membrane_source_sha256 ;;
+      loom.ml) product_exec_ingress_hash_key=cli_source_sha256 ;;
+      loom_pty_stubs.c) product_exec_ingress_hash_key=c_stub_sha256 ;;
+      dune) product_exec_ingress_hash_key=dune_sha256 ;;
+      *) die "Loom product ExecIngress source has no frozen hash key" ;;
+    esac
+    product_exec_ingress_expected="$(
+      manifest_value "$loom_product_exec_ingress_freeze" \
+        "$product_exec_ingress_hash_key"
+    )"
+    [[ "$product_exec_ingress_expected" =~ ^[0-9a-f]{64}$ ]] ||
+      die "Loom product ExecIngress source has an invalid frozen hash"
+    install -m 0444 "$product_exec_ingress_source" \
+      "$product_exec_ingress_target"
+    product_exec_ingress_actual="$(
+      sha256sum "$product_exec_ingress_target" | awk '{print $1}'
+    )"
+    if [[ "$product_exec_ingress_actual" != "$product_exec_ingress_expected" ]]; then
+      product_exec_ingress_temporary="$product_exec_ingress_target.frozen.$$.$RANDOM"
+      git -C "$SOURCE_ROOT" cat-file blob \
+        "$product_exec_ingress_frozen_head:$product_exec_ingress_relative" \
+        > "$product_exec_ingress_temporary" ||
+        die "Loom product ExecIngress historical source is unavailable: $product_exec_ingress_relative"
+      product_exec_ingress_actual="$(
+        sha256sum "$product_exec_ingress_temporary" | awk '{print $1}'
+      )"
+      [[ "$product_exec_ingress_actual" == "$product_exec_ingress_expected" ]] ||
+        die "Loom product ExecIngress historical source hash diverged: $product_exec_ingress_relative"
+      chmod 0444 "$product_exec_ingress_temporary"
+      mv "$product_exec_ingress_temporary" "$product_exec_ingress_target"
+    fi
+  done
+  sovereign_capsule_sources=(
+    "$loom_sovereign_source" "$loom_sovereign_entrypoint"
+    "$loom_sovereign_semantic_freeze" "$loom_sovereign_material_freeze"
+    "$loom_sovereign_product_freeze" "$loom_sovereign_product_contract"
+    "$loom_sovereign_product_evidence" "$loom_sovereign_build_source"
+    "${loom_sovereign_sources[@]}"
+  )
+  for sovereign_source in "${sovereign_capsule_sources[@]}"; do
+    sovereign_relative="${sovereign_source#"$SOURCE_ROOT/"}"
+    sovereign_target="$stage/policy/sovereign-execution/$sovereign_relative"
+    mkdir -p "$(dirname "$sovereign_target")"
+    install -m 0444 "$sovereign_source" "$sovereign_target"
+  done
+  sovereign_frozen_head="$(
+    manifest_value "$loom_sovereign_product_evidence" source_head
+  )"
+  [[ "$sovereign_frozen_head" =~ ^[0-9a-f]{40}$ ]] &&
+    git -C "$SOURCE_ROOT" cat-file -e "$sovereign_frozen_head^{commit}" ||
+    die "Loom sovereign execution product historical source commit is unavailable"
+  for sovereign_pair in \
+    contract_path:contract_sha256 \
+    semantic_manifest_path:semantic_manifest_sha256 \
+    material_manifest_path:material_manifest_sha256 \
+    sounio_source_path:sounio_source_sha256 \
+    sounio_entrypoint_path:sounio_entrypoint_sha256 \
+    loom_source_path:loom_source_sha256 \
+    exec_source_path:exec_source_sha256 \
+    hook_source_path:hook_source_sha256 \
+    sovereign_source_path:sovereign_source_sha256 \
+    provider_fixture_path:provider_fixture_sha256 \
+    c_stub_path:c_stub_sha256 \
+    dune_path:dune_sha256 \
+    loom_build_path:loom_build_sha256 \
+    installer_path:installer_sha256 \
+    coord_runtime_path:coord_runtime_sha256 \
+    product_gate_path:product_gate_sha256 \
+    freeze_gate_path:freeze_gate_sha256; do
+    sovereign_path_key="${sovereign_pair%%:*}"
+    sovereign_hash_key="${sovereign_pair#*:}"
+    sovereign_relative="$(
+      manifest_value "$loom_sovereign_product_freeze" "$sovereign_path_key"
+    )"
+    sovereign_expected="$(
+      manifest_value "$loom_sovereign_product_freeze" "$sovereign_hash_key"
+    )"
+    [[ -n "$sovereign_relative" && "$sovereign_relative" != /* &&
+      "$sovereign_relative" != *'..'* &&
+      "$sovereign_expected" =~ ^[0-9a-f]{64}$ ]] ||
+      die "Loom sovereign execution product has an unsafe frozen source entry"
+    sovereign_target="$stage/policy/sovereign-execution/$sovereign_relative"
+    sovereign_actual="$(sha256sum "$sovereign_target" | awk '{print $1}')"
+    if [[ "$sovereign_actual" != "$sovereign_expected" ]]; then
+      sovereign_temporary="$sovereign_target.frozen.$$.$RANDOM"
+      git -C "$SOURCE_ROOT" cat-file blob \
+        "$sovereign_frozen_head:$sovereign_relative" >"$sovereign_temporary" ||
+        die "Loom sovereign execution frozen source is unavailable: $sovereign_relative"
+      sovereign_actual="$(sha256sum "$sovereign_temporary" | awk '{print $1}')"
+      [[ "$sovereign_actual" == "$sovereign_expected" ]] ||
+        die "Loom sovereign execution historical source hash diverged: $sovereign_relative"
+      chmod 0444 "$sovereign_temporary"
+      mv "$sovereign_temporary" "$sovereign_target"
+    fi
+  done
+  sovereign_change_capsule_sources=(
+    "$installer_source" "$runtime_source"
+    "$loom_build_source"
+    "$loom_change_build_source" "$loom_material_change_build_source"
+    "$loom_change_source" "$loom_change_entrypoint" "$loom_change_freeze"
+    "$loom_material_change_source" "$loom_material_change_entrypoint"
+    "$loom_material_change_freeze" "$loom_material_change_product"
+    "$SOURCE_ROOT/tools/loom/sovereign_change_kernel.freeze.v1" "$SOURCE_ROOT/tools/loom/sovereign_material_change.freeze.v2"
+    "$loom_material_change_evidence" "$loom_change_operational_gate"
+    "$loom_change_ci_admit" "${loom_change_sources[@]}"
+  )
+  for sovereign_change_source in "${sovereign_change_capsule_sources[@]}"; do
+    sovereign_change_relative="${sovereign_change_source#"$SOURCE_ROOT/"}"
+    sovereign_change_target="$stage/policy/sovereign-change/$sovereign_change_relative"
+    mkdir -p "$(dirname "$sovereign_change_target")"
+    case "$sovereign_change_relative" in
+      scripts/dev/*|scripts/ci/*)
+        install -m 0555 "$sovereign_change_source" "$sovereign_change_target"
+        ;;
+      *)
+        install -m 0444 "$sovereign_change_source" "$sovereign_change_target"
+        ;;
+    esac
+  done
   install -m 0644 "$fleet_model_source" "$stage/formal/SounioFleet.tla"
   install -m 0644 "$fleet_model_config" "$stage/formal/SounioFleet.cfg"
-  install -m 0755 "$hook_source" "$stage/hooks/sounio_coord_agent_hook_runtime.py"
+  coord_runtime_sha256="$(sha256sum "$stage/bin/sounio-coord-runtime" | awk '{print $1}')"
+  loom_runtime_sha256="$(sha256sum "$stage/bin/sounio-loom-runtime" | awk '{print $1}')"
+  loom_sovereign_runtime_sha256="$(
+    sha256sum "$stage/bin/sounio-loom-sovereign-execution-kernel" | awk '{print $1}'
+  )"
+  loom_change_runtime_sha256="$(
+    sha256sum "$stage/bin/sounio-loom-sovereign-change-kernel" | awk '{print $1}'
+  )"
+  loom_material_change_runtime_sha256="$(
+    sha256sum "$stage/bin/sounio-loom-sovereign-material-change" | awk '{print $1}'
+  )"
+  loom_change_manifest_sha256="$(
+    sha256sum "$stage/policy/sovereign-change/tools/loom/sovereign_change_kernel.freeze.v2" | awk '{print $1}'
+  )"
+  loom_material_change_manifest_sha256="$(
+    sha256sum "$stage/policy/sovereign-change/tools/loom/sovereign_material_change.freeze.v3" | awk '{print $1}'
+  )"
+  loom_material_change_product_sha256="$(
+    sha256sum "$stage/policy/sovereign-change/${loom_material_change_product#"$SOURCE_ROOT/"}" | awk '{print $1}'
+  )"
+  loom_sovereign_product_manifest_sha256="$(
+    sha256sum "$stage/policy/sovereign-execution/tools/loom/sovereign_execution_kernel_product.runtime.v2" | awk '{print $1}'
+  )"
+  loom_sovereign_product_contract_sha256="$(
+    sha256sum "$stage/policy/sovereign-execution/tools/loom/SOVEREIGN_EXECUTION_KERNEL_PRODUCT_ATTACHMENT_V1.md" | awk '{print $1}'
+  )"
+  loom_sovereign_product_evidence_sha256="$(
+    sha256sum "$stage/policy/sovereign-execution/tools/loom/evidence/loom-sovereign-execution-kernel-product-v2-20260915.txt" | awk '{print $1}'
+  )"
+  loom_message_runtime_sha256="$(
+    sha256sum "$stage/bin/sounio-loom-message-runtime" | awk '{print $1}'
+  )"
+  loom_routing_authority_runtime_sha256="$(
+    sha256sum "$stage/bin/sounio-loom-routing-authority-runtime" | awk '{print $1}'
+  )"
+  loom_routing_authority_manifest_sha256="$(
+    sha256sum "$stage/policy/routing-authority/tools/loom/routing_authority.freeze.v2" | awk '{print $1}'
+  )"
+  loom_language_authority_policy_manifest_sha256="$(
+    sha256sum "$stage/policy/language-authority/tools/loom/language_authority.freeze.v2" | awk '{print $1}'
+  )"
+  loom_language_authority_policy_source_sha256="$(
+    sha256sum "$stage/policy/language-authority/stdlib/coordination/loom_language_authority.sio" | awk '{print $1}'
+  )"
+  loom_language_authority_policy_entrypoint_sha256="$(
+    sha256sum "$stage/policy/language-authority/tools/loom/language_authority_main.sio" | awk '{print $1}'
+  )"
+  loom_native_hook_cutover_runtime_sha256="$(
+    sha256sum "$stage/bin/sounio-loom-native-hook-cutover" | awk '{print $1}'
+  )"
+  loom_native_hook_cutover_manifest_sha256="$(
+    sha256sum "$stage/policy/native-hook-cutover/tools/loom/native_hook_cutover.freeze.v2" | awk '{print $1}'
+  )"
+  loom_native_hook_cutover_source_sha256="$(
+    sha256sum "$stage/policy/native-hook-cutover/stdlib/coordination/loom_native_hook_cutover_authority.sio" | awk '{print $1}'
+  )"
+  loom_native_hook_cutover_entrypoint_sha256="$(
+    sha256sum "$stage/policy/native-hook-cutover/tools/loom/native_hook_cutover_authority_main.sio" | awk '{print $1}'
+  )"
+  loom_native_hook_cutover_codex_config_sha256="$(sha256sum "$stage/policy/native-hook-cutover/configs/codex.json" | awk '{print $1}')"
+  loom_native_hook_cutover_claude_config_sha256="$(sha256sum "$stage/policy/native-hook-cutover/configs/claude.json" | awk '{print $1}')"
+  loom_native_hook_cutover_cursor_config_sha256="$(sha256sum "$stage/policy/native-hook-cutover/configs/cursor.json" | awk '{print $1}')"
+  loom_native_hook_cutover_grok_config_sha256="$(sha256sum "$stage/policy/native-hook-cutover/configs/grok.json" | awk '{print $1}')"
+  loom_native_hook_generation_drain_runtime_sha256="$(
+    sha256sum "$stage/bin/sounio-loom-native-hook-generation-drain" | awk '{print $1}'
+  )"
+  loom_native_hook_generation_reconcile_runtime_sha256="$(
+    sha256sum "$stage/bin/sounio-loom-native-hook-generation-reconcile" | awk '{print $1}'
+  )"
+  loom_generation_pinned_cutover_runtime_sha256="$(
+    sha256sum "$stage/bin/sounio-loom-generation-pinned-cutover" | awk '{print $1}'
+  )"
+  loom_activation_epoch_runtime_sha256="$(sha256sum "$stage/bin/sounio-loom-activation-epoch" | awk '{print $1}')"
+  loom_custody_transfer_runtime_sha256="$(
+    sha256sum "$stage/bin/sounio-loom-custody-transfer-runtime" | awk '{print $1}'
+  )"
+  loom_execution_outcome_runtime_sha256="$(
+    sha256sum "$stage/bin/sounio-loom-execution-outcome-runtime" | awk '{print $1}'
+  )"
+  loom_product_activation_resident_runtime_sha256="$(
+    sha256sum "$stage/bin/sounio-loom-resident-membrane-runtime-v5.v2" | awk '{print $1}'
+  )"
+  loom_product_exec_ingress_manifest_sha256="$(
+    sha256sum "$stage/policy/product-exec-ingress/tools/loom/product_exec_ingress_dark.runtime.v1" | awk '{print $1}'
+  )"
+  loom_product_exec_ingress_contract_sha256="$(
+    sha256sum "$stage/policy/product-exec-ingress/tools/loom/PRODUCT_EXEC_INGRESS_DARK_ATTACHMENT_V1.md" | awk '{print $1}'
+  )"
+  loom_product_exec_ingress_evidence_sha256="$(
+    sha256sum "$stage/policy/product-exec-ingress/tools/loom/evidence/loom-product-exec-ingress-dark-v1-20260829.txt" | awk '{print $1}'
+  )"
+  loom_product_exec_ingress_reference_runtime_sha256="$(
+    manifest_value "$loom_product_exec_ingress_freeze" runtime_sha256
+  )"
+  loom_product_exec_ingress_reference_runtime_match=false
+  if [[ "$loom_product_exec_ingress_reference_runtime_sha256" == \
+    "$loom_runtime_sha256" ]]; then
+    loom_product_exec_ingress_reference_runtime_match=true
+  fi
   {
     printf 'runtime_id=%s\n' "$runtime_id"
     printf 'protocol_version=%s\n' "$protocol"
@@ -788,6 +2386,144 @@ else
     printf 'fleet_protocol_version=%s\n' "$fleet_protocol"
     printf 'fleetd_protocol_version=%s\n' "$fleetd_protocol"
     printf 'loom_protocol_version=%s\n' "$loom_protocol"
+    printf 'loom_language_authority_language=Sounio\n'
+    printf 'loom_language_authority_role=SEMANTIC_AUTHORITY\n'
+    printf 'loom_language_authority_stage=SEMANTICS_FROZEN\n'
+    printf 'loom_language_authority_frame=9020\n'
+    printf 'loom_language_authority_semantics_sha256=7a0115e5918ca6ff3f7ad82f073e1c08d1d98b62f6f927dd69265c14205190b6\n'
+    printf 'loom_language_authority_manifest_sha256=5fe5e5c9cdcb83935770f58df52f2d614d11f8abde519c4a2505ca20998fae2e\n'
+    printf 'loom_language_authority_policy_manifest_sha256=%s\n' \
+      "$loom_language_authority_policy_manifest_sha256"
+    printf 'loom_language_authority_policy_source_sha256=%s\n' \
+      "$loom_language_authority_policy_source_sha256"
+    printf 'loom_language_authority_policy_entrypoint_sha256=%s\n' \
+      "$loom_language_authority_policy_entrypoint_sha256"
+    printf 'loom_routing_authority_language=Sounio\n'
+    printf 'loom_routing_authority_role=SEMANTIC_AUTHORITY\n'
+    printf 'loom_routing_authority_stage=SEMANTICS_FROZEN\n'
+    printf 'loom_routing_authority_action=9032\n'
+    printf 'loom_routing_authority_semantics_sha256=cf625edcbc8c21a6c05e6ccb18adb254af3ffb1cec54bea3ce4fc14df739a8ea\n'
+    printf 'loom_routing_authority_manifest_sha256=%s\n' \
+      "$loom_routing_authority_manifest_sha256"
+    printf 'loom_routing_authority_runtime_sha256=%s\n' \
+      "$loom_routing_authority_runtime_sha256"
+    printf 'loom_native_hook_cutover_language=Sounio\n'
+    printf 'loom_native_hook_cutover_role=SEMANTIC_AUTHORITY\n'
+    printf 'loom_native_hook_cutover_operational_attachment=OCaml\n'
+    printf 'loom_native_hook_cutover_stage=SEMANTICS_FROZEN\n'
+    printf 'loom_native_hook_cutover_frame=9045\n'
+    printf 'loom_native_hook_cutover_semantics_sha256=842152d98a0222353d4432fc3549ce5df9730c73e1b319617cf340e75cf1d998\n'
+    printf 'loom_native_hook_cutover_runtime_sha256=%s\n' \
+      "$loom_native_hook_cutover_runtime_sha256"
+    printf 'loom_native_hook_cutover_manifest_sha256=%s\n' \
+      "$loom_native_hook_cutover_manifest_sha256"
+    printf 'loom_native_hook_cutover_source_sha256=%s\n' \
+      "$loom_native_hook_cutover_source_sha256"
+    printf 'loom_native_hook_cutover_entrypoint_sha256=%s\n' \
+      "$loom_native_hook_cutover_entrypoint_sha256"
+    printf 'loom_native_hook_cutover_codex_config_sha256=%s\n' \
+      "$loom_native_hook_cutover_codex_config_sha256"
+    printf 'loom_native_hook_cutover_claude_config_sha256=%s\n' \
+      "$loom_native_hook_cutover_claude_config_sha256"
+    printf 'loom_native_hook_cutover_cursor_config_sha256=%s\n' \
+      "$loom_native_hook_cutover_cursor_config_sha256"
+    printf 'loom_native_hook_cutover_grok_config_sha256=%s\n' \
+      "$loom_native_hook_cutover_grok_config_sha256"
+    printf 'loom_native_hook_cutover_python_bridge_absent=true\n'
+    printf 'loom_native_hook_generation_drain_action=9046\n'
+    printf 'loom_native_hook_generation_drain_semantics_sha256=c3804ea1f88a415ffdffaa7c505eb2d372237ced9250580ce84b7132aef099fb\n'
+    printf 'loom_native_hook_generation_drain_manifest_sha256=ba87be5dbd1fa9c8d372c3c93ec6685ce10daa11e5de22bb904b698ec1733a61\n'
+    printf 'loom_native_hook_generation_drain_runtime_sha256=%s\n' \
+      "$loom_native_hook_generation_drain_runtime_sha256"
+    printf 'loom_native_hook_generation_reconcile_action=9047\n'
+    printf 'loom_native_hook_generation_reconcile_semantics_sha256=9741264b94d06e7063673063c9c328f91f9ae25e1211f4a083522b05a513c5f7\n'
+    printf 'loom_native_hook_generation_reconcile_manifest_sha256=35b6dc397a250eb2dfe9e57384a96bf07a37199bc28fe66daad1fd4ee6ffd39b\n'
+    printf 'loom_native_hook_generation_reconcile_runtime_sha256=%s\n' \
+      "$loom_native_hook_generation_reconcile_runtime_sha256"
+    printf 'loom_generation_pinned_cutover_action=9048\n'
+    printf 'loom_generation_pinned_cutover_semantics_sha256=a6edaa3e31036e4c70fc5ee24811e7811e5b6552f0c55413694abe7ee2ec40ff\n'
+    printf 'loom_generation_pinned_cutover_manifest_sha256=0f29211004af425cd9946f35be8c94a5b2f44a1758a22066a88a410bb13baef4\n'
+    printf 'loom_generation_pinned_cutover_runtime_sha256=%s\n' \
+      "$loom_generation_pinned_cutover_runtime_sha256"
+    printf 'loom_activation_epoch_action=9049\n'
+    printf 'loom_activation_epoch_semantics_sha256=a63f34dfbdd56621b3af502a2c4f46bb87fc6d6e528efd62c241b5ace31052ec\n'
+    printf 'loom_activation_epoch_manifest_sha256=133d3e10ceb06e88b82c017e1110bedc726fb4e083b00e0598f2393a837d4c6a\n'
+    printf 'loom_activation_epoch_runtime_sha256=%s\n' "$loom_activation_epoch_runtime_sha256"
+    printf 'loom_custody_transfer_language=Sounio\n'
+    printf 'loom_custody_transfer_role=SEMANTIC_AUTHORITY\n'
+    printf 'loom_custody_transfer_stage=SEMANTICS_FROZEN\n'
+    printf 'loom_custody_transfer_frame=9040\n'
+    printf 'loom_custody_transfer_semantics_sha256=4ce6630421544f40a13b88b17e5692e7906a7a1a12056334fe35fea0f0803727\n'
+    printf 'loom_custody_transfer_manifest_sha256=d1815a7be8734e2c64b3acbbe9e607b0e0dd86290a598146dacccc47b79f9bab\n'
+    printf 'loom_execution_outcome_language=Sounio\n'
+    printf 'loom_execution_outcome_role=SEMANTIC_AUTHORITY\n'
+    printf 'loom_execution_outcome_stage=SEMANTICS_FROZEN\n'
+    printf 'loom_execution_outcome_realization=OCaml\n'
+    printf 'loom_execution_outcome_frame=9022\n'
+    printf 'loom_execution_outcome_semantics_sha256=9dc1bf465c15259b15eee447d27c24450550df0a2c41c48dc2fd0712a3232b59\n'
+    printf 'loom_execution_outcome_manifest_sha256=e0ebf1a24dea80a57c2fa256474620fb4a93e047ea027538f8ecdc8bdc27b6e1\n'
+    printf 'loom_lane_health_language=Sounio\n'
+    printf 'loom_lane_health_role=SEMANTIC_AUTHORITY\n'
+    printf 'loom_lane_health_realization=OCaml\n'
+    printf 'loom_lane_health_frame=9030\n'
+    printf 'loom_lane_health_semantics_sha256=8d4b03d3cf327bafa476c7e8bae309a6e1603565cd139be0674e579d6bcfcc74\n'
+    printf 'loom_lane_health_manifest_sha256=0eb79261d357425a2ec732dcebb608aee9e421850663d049d949fc0a337fd4f3\n'
+    printf 'loom_product_activation_language=Sounio\n'
+    printf 'loom_product_activation_role=SEMANTIC_AUTHORITY\n'
+    printf 'loom_product_activation_operational_attachment=OCaml\n'
+    printf 'loom_product_activation_action=9031\n'
+    printf 'loom_product_activation_action_manifest_sha256=5e368c64ce889fbbdb54ffe8e9dace9ae0277ad5a88cbd7e687a22a0e42069f2\n'
+    printf 'loom_product_activation_operational_manifest_sha256=d7521e8fb60501dc8192ebbeade4a09649164c5b509a2dda8af5c465bf3de793\n'
+    printf 'loom_product_activation_resident_manifest_sha256=09313a1c90d15b3503e66559685cd38b7b93388ef49ddaa5439cdbe7a19e7472\n'
+    printf 'loom_product_activation_projection_sha256=8a72e9bcd510a751b856cf29960b7389486defcc4d13d7614546023d3d355014\n'
+    printf 'loom_product_activation_resident_runtime_sha256=%s\n' \
+      "$loom_product_activation_resident_runtime_sha256"
+    printf 'loom_product_exec_ingress_language=Sounio\n'
+    printf 'loom_product_exec_ingress_role=SEMANTIC_AUTHORITY\n'
+    printf 'loom_product_exec_ingress_operational_attachment=OCaml\n'
+    printf 'loom_product_exec_ingress_action=9031\n'
+    printf 'loom_product_exec_ingress_manifest_sha256=%s\n' \
+      "$loom_product_exec_ingress_manifest_sha256"
+    printf 'loom_product_exec_ingress_contract_sha256=%s\n' \
+      "$loom_product_exec_ingress_contract_sha256"
+    printf 'loom_product_exec_ingress_evidence_sha256=%s\n' \
+      "$loom_product_exec_ingress_evidence_sha256"
+    printf 'loom_product_exec_ingress_reference_runtime_sha256=%s\n' \
+      "$loom_product_exec_ingress_reference_runtime_sha256"
+    printf 'loom_product_exec_ingress_reference_runtime_match=%s\n' \
+      "$loom_product_exec_ingress_reference_runtime_match"
+    printf 'loom_sovereign_language=Sounio\n'
+    printf 'loom_sovereign_role=SEMANTIC_AUTHORITY\n'
+    printf 'loom_sovereign_operational_kernel=OCaml\n'
+    printf 'loom_sovereign_action=9042\n'
+    printf 'loom_sovereign_semantic_manifest_sha256=f891df667140493b47422999d6493a7f73546d641be5e472c45ab74523d1afd6\n'
+    printf 'loom_sovereign_material_manifest_sha256=4999975f46ab21033e356df36c007eba51e3f48627353dd2bbd83766125edc37\n'
+    printf 'loom_sovereign_runtime_sha256=%s\n' \
+      "$loom_sovereign_runtime_sha256"
+    printf 'loom_sovereign_product_manifest_sha256=%s\n' \
+      "$loom_sovereign_product_manifest_sha256"
+    printf 'loom_sovereign_product_contract_sha256=%s\n' \
+      "$loom_sovereign_product_contract_sha256"
+    printf 'loom_sovereign_product_evidence_sha256=%s\n' \
+      "$loom_sovereign_product_evidence_sha256"
+    printf 'loom_change_language=Sounio\n'
+    printf 'loom_change_role=SEMANTIC_AUTHORITY\n'
+    printf 'loom_change_operational_kernel=OCaml\n'
+    printf 'loom_change_actions=9043,9044\n'
+    printf 'loom_change_manifest_sha256=%s\n' \
+      "$loom_change_manifest_sha256"
+    printf 'loom_material_change_manifest_sha256=%s\n' \
+      "$loom_material_change_manifest_sha256"
+    printf 'loom_change_runtime_sha256=%s\n' \
+      "$loom_change_runtime_sha256"
+    printf 'loom_material_change_runtime_sha256=%s\n' \
+      "$loom_material_change_runtime_sha256"
+    printf 'loom_material_change_product_sha256=%s\n' \
+      "$loom_material_change_product_sha256"
+    printf 'loom_material_change_product_path=%s\n' \
+      "${loom_material_change_product#"$SOURCE_ROOT/"}"
+    printf 'loom_change_ci_policy=consume-not-reinterpret\n'
+    printf 'loom_change_claim_ready=true\n'
     printf 'loom_continuity_language=Sounio\n'
     printf 'loom_continuity_engine=lean_single\n'
     printf 'loom_obligation_language=Sounio\n'
@@ -812,6 +2548,13 @@ else
     printf 'loom_witness_epoch_transparency_frame=9016\n'
     printf 'runtime_version=%s\n' "$runtime_version"
     printf 'bundle_sha256=%s\n' "$bundle_sha"
+    printf 'coord_runtime_sha256=%s\n' "$coord_runtime_sha256"
+    printf 'loom_runtime_sha256=%s\n' "$loom_runtime_sha256"
+    printf 'loom_message_runtime_sha256=%s\n' "$loom_message_runtime_sha256"
+    printf 'loom_custody_transfer_runtime_sha256=%s\n' \
+      "$loom_custody_transfer_runtime_sha256"
+    printf 'loom_execution_outcome_runtime_sha256=%s\n' \
+      "$loom_execution_outcome_runtime_sha256"
     printf 'source_sha=%s\n' "$source_sha"
     printf 'source_state=%s\n' "$source_state"
     printf 'capability=causal-experiment-receipts-v1\n'
@@ -822,6 +2565,24 @@ else
     printf 'capability=agentd-logical-command-v1\n'
     printf 'capability=agentd-runtime-registration-v1\n'
     printf 'capability=loom-kernel-v1\n'
+    printf 'capability=loom-authenticated-message-bridge-v1\n'
+    printf 'capability=loom-thread-truth-v1\n'
+    printf 'capability=loom-routing-authority-v1\n'
+    printf 'capability=loom-transactional-custody-transfer-v1\n'
+    printf 'capability=loom-durable-execution-outcome-v1\n'
+    printf 'capability=loom-native-agent-hook-v1\n'
+    printf 'capability=loom-native-hook-cutover-v1\n'
+    printf 'capability=loom-native-hook-generation-drain-v1\n'
+    printf 'capability=loom-native-hook-generation-reconcile-v1\n'
+    printf 'capability=loom-generation-pinned-cutover-v1\n'
+    printf 'capability=loom-activation-epoch-v1\n'
+    printf 'capability=loom-runtime-authority-capsule-v1\n'
+    printf 'capability=loom-product-launch-dark-attachment-v1\n'
+    printf 'capability=loom-sovereign-execution-kernel-product-v1\n'
+    printf 'capability=loom-sovereign-change-kernel-v2\n'
+    printf 'capability=loom-truthful-lane-health-v1\n'
+    printf 'capability=loom-nondestructive-health-reconcile-v1\n'
+    printf 'capability=loom-native-hook-binary-attestation-v1\n'
     printf 'capability=loom-native-sounio-continuity-v1\n'
     printf 'capability=loom-durable-obligation-v1\n'
     printf 'capability=loom-epistemic-machine-v0\n'
@@ -866,6 +2627,7 @@ else
     printf 'capability=loom-read-only-gui-v1\n'
     printf 'capability=loom-fusion-cockpit-v1\n'
     printf 'capability=loom-authority-overlay-v1\n'
+    printf 'capability=loom-authority-overlay-v2\n'
     printf 'capability=coord-cockpit-snapshot-v1\n'
     printf 'capability=loom-persistent-provider-custody-v1\n'
     printf 'capability=coord-reply-command-v1\n'
@@ -876,6 +2638,7 @@ else
     printf 'capability=loom-dual-journal-v1\n'
     printf 'capability=loom-persistent-fleet-catalog-v1\n'
     printf 'capability=loom-fleet-custody-catalog-v2\n'
+    printf 'capability=loom-fleet-custody-catalog-v3\n'
     printf 'capability=loom-conflict-free-active-adoption-v1\n'
     printf 'capability=loom-coordination-authority-binding-v1\n'
     printf 'capability=loom-post-pod-reconcile-v1\n'
@@ -904,4 +2667,10 @@ else
     "$runtime_id" "$protocol" "$version_dir"
 fi
 
-activate_runtime "$runtime_id"
+if ((activate_after_install)); then
+  activate_runtime "$runtime_id"
+else
+  stage_runtime "$runtime_id"
+  printf 'STAGED runtime_id=%s protocol=%s path=%s current_unchanged=true candidate_selected=true\n' \
+    "$runtime_id" "$protocol" "$version_dir"
+fi

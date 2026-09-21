@@ -14,10 +14,11 @@ global_output="$(bash "$SCANNER" --main-ref HEAD)"
 grep -q '^Sounio compiler lane status$' <<< "$current_output"
 grep -Eq '^main_ref=HEAD main_sha=[0-9a-f]{10}$' <<< "$current_output"
 grep -q '^scanner_mode=current-only$' <<< "$current_output"
-# This gate's own HEAD changes coordination files only. It must not be
-# misreported as a compiler review lane.
-if grep -q '^state=' <<< "$current_output"; then
-  echo 'compiler-lanes: non-compiler current worktree leaked into lane output' >&2
+# The checked-out HEAD may itself include compiler files. That is still the
+# integrated product in CI because this gate pins --main-ref HEAD. What must not
+# leak into this read-only gate is an active/stale/review compiler lane.
+if grep -Eq '^state=(ACTIVE|STALE_WITH_RESIDUE|SCRATCH_COPY|REVIEW_READY|FRONTIER|FRONTIER_INTEGRATED|UNCLASSIFIED)' <<< "$current_output"; then
+  echo 'compiler-lanes: current worktree was reported as an outstanding compiler lane' >&2
   exit 1
 fi
 grep -q '^scanner_mode=all-worktrees$' <<< "$global_output"

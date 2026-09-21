@@ -88,7 +88,7 @@ the prose.
 | # | Contribution | Rung | Verdict token |
 |---|---|---|---|
 | C1 | An implementation of claim-gated code generation in a self-hosted compiler. **Not a novel capability** (cf. `build.rs`, §8.1); reported because everything else is measured on it. | R0 | `SUBSTRATE_LIVE__CORPUS_BOUND__HISTORICAL_FAILURES_ARE_INTERPRETIVE` |
-| C2 | What it costs to attach such a guard to a real corpus, and the wall it hits: claims in **imported modules never execute**. | R1 | `BOUND_15__MODULE_CLOSURE_BLOCKS` |
+| C2 | **What it costs to attach such a guard to a real corpus** (R1), and **a limitation of this mechanism removed** (R29). Verification ran on the main source file only, so a refuted claim in an imported module was never checked; it now walks the transitive import closure, so under `--verify-claims` a premise refuted anywhere in that closure blocks the build. Measured past one hop: a claim refuted **two** imports away blocks (`modules=3`), and a diamond visits its shared leaf **once** (`modules=4, pass=4`). Propagation across dependency edges is **not** novel — a failing `build.rs` already fails its dependents (§8.1) — so what is claimed here is the cost measurement and the repair, not the propagation. | R1, R29 | `BOUND_16__MODULE_CLOSURE_PASSES`; `CLOSURE_WALKED__MODULE_CLOSURE_PASSES` |
 | C3 | **Verdict-token binding**: bind the build to the *proposition* a check reports, where prior art binds an exit status or a literal output. | R2 | `TOKEN_BINDING_IMPLEMENTED__CATCHES_DRIFT_NOT_MISINTERPRETATION` |
 | C4 | *Drift* vs *shared misinterpretation*, with an argument that the latter is out of reach, and a test of what does reach it. | R3 | `FALSIFIERS_NONVACUOUS_ONLY_FOR_CLOSED_FORM_CLAIMS` |
 | C5 | A retrospective under a predicate **fixed before the study ran**: a negative result and a degenerate arm, reported as such. | R4 | `RETROSPECTIVE_RUN__SOME_ARM_FIRED` |
@@ -108,6 +108,12 @@ the prose.
 | C14 | **The same instrument turned around, and a pre-registered hypothesis losing.** Of everything these contracts compute — to level 10, 1 024 dimensions — how much does the conclusion depend on? **407 verdict changes, 117 crashes, 12 survivors in 536 cells**; levels 9 and 10 are pure verdict changes. Vacuity refuted; the corpus checks what it computes. | R14 | `VACUITY_REFUTED__CORPUS_CHECKS_WHAT_IT_COMPUTES` |
 | C15 | **The limit above C3, and its repair.** C3 binds the build to the *proposition* a check reports. That is still blind to anything preserving the proposition's truth: a flip changing **126 of 128 fiber graphs and every spectrum** leaves `#spectra = 24` intact, so the token holds. A token's resolution is bounded by the **invariance group of its proposition**. Repair, verified: **bind the witness, not the predicate**. | R15 | `TOKEN_RESOLUTION_BOUNDED_BY_PROPOSITION_INVARIANCE` |
 | C16 | **The invariance group, identified.** The blind spot is not "maps preserving the count" but maps acting **within the blocks** of the classification: the flip preserves the *identical set partition* of fibers into spectrum-classes and relabels every block, changing exactly **2 edges per fiber**, because the perturbed pair's home fiber is the one the check never examines. **Any claim whose check tests only the *number* of equivalence classes has this blind spot by construction** — it is a property of predicates that project away the witness. | R16 | `INVARIANCE_GROUP_IS_PARTITION_PRESERVING_NOT_MERELY_COUNT_PRESERVING` |
+
+
+
+The line contains eleven further rungs — R17, R19–R28 — whose results are
+bound to gates but not argued in this paper. They are indexed in Appendix A
+so that a rung is not quietly dropped; none is claimed as a contribution here.
 
 ### Methodological results that generalise
 
@@ -265,13 +271,74 @@ And binding walked into the wall the mechanism spec had already noted as a
 caveat, converting it from a caveat into the line's main engineering obstacle:
 **claims in imported modules never execute.** A module carrying a claim bound
 to an always-failing gate, imported by a main source that calls into it,
-compiles cleanly — `VERIFY_CLAIMS_OK pass=1`, ELF emitted, program runs — and
-the imported false claim is never run. A library whose scientific premise has
-been refuted passes silently into every dependent build. Binding today
-therefore means hoisting claims out of the libraries they describe into a
-manifest that CI compiles; the manifest is R1's deliverable *and* the evidence
-of the limitation's cost. 15 of 295 gates is 5.1 %: the corpus is no longer at
-zero, and it is not bound.
+compiled cleanly — `VERIFY_CLAIMS_OK pass=1`, ELF emitted, the program ran — and
+the imported false claim was never run. A library whose scientific premise had
+been refuted passed silently into every dependent build. Binding therefore
+meant hoisting claims out of the libraries they describe into a manifest that
+CI compiles; that manifest is R1's deliverable *and* the evidence of the
+limitation's cost. 15 of 295 gates is 5.1 % **as measured at R1, 2026-07-26**: the corpus was no longer
+at zero, and it was not bound. Both figures have since moved — the manifest
+carries 16 claims and the tree 423 gate scripts — which is why this rung's token
+counts bindings rather than embedding a denominator (§5), and why the draft's
+citation of `BOUND_15__…` was a drift its own contract caught.
+
+R29 removed that limitation. Verification collects the module closure before it
+verifies anything and walks every node in it, so under `--verify-claims` a premise
+refuted anywhere in the closure blocks the build: the probe that compiled clean at
+R1 reports `CLAIM_FAIL` on the imported claim, `VERIFY_CLAIMS_FALSIFIED fail=1`,
+and emits no ELF.
+
+**Transitivity is measured, not inferred from the one-hop case.** A two-module
+probe cannot distinguish a closure walk from a walk over direct imports, so the
+claim is tested past one hop. A chain in which the refuted claim sits **two**
+imports away — the importer and the middle module both green — reports
+`modules=3` and is blocked by the leaf (`CLAIM_FAIL mcl_chain_leaf_claim_false`,
+no ELF); a depth-1 walk would have emitted that ELF. A diamond whose two arms
+import one shared leaf reports `modules=4, pass=4`, so a module reachable by more
+than one path is verified once rather than counted twice.
+
+**What this is not is a novelty claim, and the related-work position is the
+opposite of what it may look like.** Carrying a build failure across a dependency
+edge is ordinary: a `build.rs` that exits non-zero fails every crate that depends
+on it, and Make and Bazel propagate the same way over their graphs (§8.1). This
+mechanism simply *lacked* that property until R29 and now has it. What C2 reports
+is therefore the cost of binding a real corpus and the removal of a limitation
+peculiar to this implementation — not a capability the prior art is missing. The
+novelty of the line lives in C3 and C15, where the build is bound to the
+*proposition* and to the *witness* rather than to an exit status — and, in work
+this paper indexes but does not argue, in R20's binding of the *provenance*
+(Appendix A).
+
+The practical consequence is local and worth stating plainly: a claim can live in
+the module whose science it describes instead of being hoisted into a manifest to
+be seen at all. The manifest is not thereby obsolete — it is the file CI actually
+compiles under `--verify-claims`, so it remains the one place that guarantees a
+claim runs on every push regardless of whether anything imports it.
+
+**Three limits, all measured.** The widening is **scope, not corpus**, and the
+size of that scope today is a census rather than an inference: outside the
+purpose-built probe fixtures, claims exist in exactly three files of this
+repository — the manifest and two tests — and no library, compiler module or
+stdlib module carries one. The manifest itself has no imports. So the walk
+changes the set of claims actually reached by zero at the time of writing; what
+it changes is where a claim *may* be put, and the bindability criteria that
+decide what can be bound at all are untouched.
+
+It is **opt-in**: without `--verify-claims` no claim in any module executes,
+verified as its own arm.
+
+And discrimination is tested directly, because "a refuted import blocks" is also
+satisfied by a compiler that simply fails whatever it imports. A single
+compilation importing one green-claimed module and one red-claimed module
+reports `CLAIM_PASS mcl_green_library_claim` and `CLAIM_FAIL
+mcl_library_claim_that_is_false` in the same run, blocks, and emits no ELF. The
+green claim is not merely tolerated; it is executed and reported as a pass while
+its red neighbour is reported as a failure.
+
+Cost on an import-free source, three trials each against the pre-R29 binary:
+10 s, 11 s, 10 s before and 11 s, 11 s, 10 s after, with verdicts unchanged — the
+two are indistinguishable at this resolution, which is the strongest statement
+three runs support.
 
 ---
 
@@ -634,8 +701,11 @@ budget (30 s; a quarter of a 20-gate sample exceeds it), **hermeticity** (a
 gate that rewrites tracked files makes builds non-idempotent — one of the
 first 16 bound gates did exactly that and was unbound), and the existence of a
 declared verdict token (8.9 % of specs at R1, 9.3 % — 25 of 270 — at R2; the
-convention is days old and the history predates it). Module closure bounds
-where claims can live: main source files only.
+convention is days old and the history predates it). Module closure bounded
+where claims could live — main source files only — until R29 walked it; under
+`--verify-claims` claims now execute anywhere in a build's transitive import
+closure, measured to depth 2 and across a shared leaf. The criteria above are
+unchanged and still bound *which* gates can be bound at all.
 
 ### 7.2 The retrospective
 
@@ -1199,6 +1269,32 @@ Every numbered claim is reproducible from the repository:
 - Recorded batteries (too large to regenerate in CI): `scripts/research/r13/`,
   `scripts/research/r14/`, `scripts/research/r15/`, with producing scripts
   alongside.
+
+
+## Appendix A — the rest of the line: bound to gates, not argued here
+
+The rungs below are results of the same line, each with an executable gate and a
+declared verdict token that this paper's contract checks on every run. They are
+**not** claimed as contributions of this paper: their arguments live in their
+rung specs, and a contribution table is a promise about the body. They are listed
+because a rung dropped from the index is a result quietly disappeared — including
+the three (R22, R23, R25) that are findings about this project's own governance
+metadata, which are engineering observations rather than research results and are
+marked as such here rather than promoted by placement.
+
+| Result | Rung | Verdict token |
+|---|---|---|
+| **Witness binding.** A claim may declare a `witness`; the compiler refuses codegen when the gate exits 0 **and** emits exactly the declared token while the evidence establishing it has been replaced — the repair C15 identified. | R17 | `WITNESS_BINDING_IMPLEMENTED__REFUSES_ON_PRESERVED_PROPOSITION` |
+| **Half of C16 derived, two explanations killed.** C16's "two edges per fiber" follows from index arithmetic and the exceptional fiber is predicted rather than observed; two candidate accounts of the remaining half were tested and both failed, leaving one equivariance lemma stated precisely enough to be attacked. | R19 | `LOCALITY_DERIVED__EQUIVARIANCE_REDUCED_TO_ONE_LEMMA` |
+| **Provenance binding.** A claim may declare `provenance = "<path>"`; the compiler refuses codegen when that **path is absent from the tree**, emitting `CLAIM_PROVENANCE_MISSING`. Audit behind it: 2 155 cited artifacts, 93 absent, 8 on an unmerged branch. | R20 | `PROVENANCE_BINDING_IMPLEMENTED__CITED_DERIVATION_MUST_EXIST` |
+| **C16's inference proved, not merely made plausible.** Both relations generating the classification are F₂-linear and fix `h`, so each carries the added edge to the added edge and the partition is preserved; the proof is stated in the rung and completes the lemma R19 isolated. It could not be written until R20 restored the derivation it depends on. | R21 | `EQUIVARIANCE_PROVED__R16_INFERENCE_IS_A_THEOREM` |
+| **A green gate that certifies a constant.** `last_validated` is the string `2026-03-07`, hardcoded at two sites in the registry generator and declared identically by **1 063 of 1 063** governed documents — a date fixed in the generator, not read from any validation event, and earlier than this repository's first commit. CI enforces the constant, so a document recording a real validation date fails the gate. | R22 | `VALIDATION_DATE_IS_A_LITERAL__GATE_REJECTS_THE_TRUE_DATE` |
+| **The sibling field.** `validated_by` is filled from the topic's owner, and every path under `docs/research/` carries the literal `A6` (309/309). The checker enforces equality, so a document naming its real validator fails the gate: the field answers a directory question under a validation name. | R23 | `VALIDATED_BY_IS_PATH_OWNERSHIP__GATE_REJECTS_TRUE_VALIDATOR` |
+| **A binding refused where it would be a rubber stamp.** Of 16 production claims exactly **one** has a derivation its gate does not itself run; for the other 15 a `provenance` field would name a file the gate already fails on if absent. Bound where it carries information and nowhere else, both directions gate-enforced. | R24 | `PROVENANCE_BOUND_WHERE_HONEST__REST_WOULD_BE_HOLLOW` |
+| **The third field in the same header.** `authority` is computed as membership of a **three-literal** whitelist, defaulting everything else to `historical`; **317 of 320** research topics are historical, and claiming to be current without whitelist membership fails the gate. The value records a path property, not an assessment. | R25 | `RESEARCH_AUTHORITY_IS_PATH_DEFAULT_HISTORICAL__GATE_REJECTS_CURRENT` |
+| **The dangling dependency closed by reconstruction.** The oracle R20 found never committed anywhere — loaded with no fallback by the orbit theorem's verifier, which therefore could not run in any checkout — is rebuilt from that verifier's own proof and checked by running it: it reproduces the predicted orbit structure at n = 4, 5, 6, 7. Of the 168 GL(3,2) maps all admit a sign completion and 21 preserve the signed table. | R26 | `ORACLE_RECONSTRUCTED__ORBIT_VERIFIER_RUNS_IN_TREE` |
+| **The literal-field shape found inside the compiler.** By static census of checked-in source: every production claim declares `verdict = Verdict::Alive`, the executor's only read of that field scans the slice for the substring `"archived"`, and the token `Alive` occurs nowhere in the executor. Aliveness is asserted by every claim and tested by none; **1 of 16** binds anything beyond an exit code. | R27 | `CLAIM_LIVENESS_DEFINED__DECLARED_ALIVE_IS_UNCHECKED__1_OF_16_BOUND` |
+| **The question that precedes calibration.** The confidence scalar in `0..1000` with its gate at 950 takes **66 distinct values** over 30.6 M expression tokens — graded, not boolean — while **99.9933 %** of the mass sits at exactly 0 or exactly 1000 and only **891 tokens (0.003 %)** fall strictly between 0 and the gate. Whether 950 is calibrated is a question about a population that barely exists. | R28 | `CONFIDENCE_IS_GRADED_IN_PRINCIPLE__BINARY_IN_PRACTICE` |
 
 ## AI disclosure
 

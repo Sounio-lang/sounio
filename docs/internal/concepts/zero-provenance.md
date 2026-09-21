@@ -9,6 +9,9 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 
 # Zero Provenance
 
+
+Status: **executable**
+
 Concept-ID: `SOUNIO-ZERO-PROVENANCE`
 
 ## Founder Intent

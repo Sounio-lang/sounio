@@ -1,0 +1,273 @@
+//! Sounio semantic authority for transactional Loom custody transfer.
+//!
+//! The source remains authoritative until a positively proved Loom target is
+//! committed. Dual authority aborts the provisional side; target failure after
+//! source quiescence restores the source.
+
+fn custody_transfer_flag(value: i64) -> bool {
+    value == 0 || value == 1
+}
+
+fn custody_transfer_flags_valid(
+    source_catalog_agentd: i64,
+    catalog_committed_loom: i64,
+    target_staged: i64,
+    target_descriptor_sealed: i64,
+    resume_identity_bound: i64,
+    source_active: i64,
+    source_identity_verified: i64,
+    source_quiesced: i64,
+    target_active: i64,
+    target_presence_verified: i64,
+    target_endpoint_verified: i64,
+    target_session_verified: i64,
+    rollback_available: i64,
+    deadline_expired: i64,
+    observation_authority_verified: i64,
+    sample_fresh: i64,
+) -> bool {
+    custody_transfer_flag(source_catalog_agentd) &&
+    custody_transfer_flag(catalog_committed_loom) &&
+    custody_transfer_flag(target_staged) &&
+    custody_transfer_flag(target_descriptor_sealed) &&
+    custody_transfer_flag(resume_identity_bound) &&
+    custody_transfer_flag(source_active) &&
+    custody_transfer_flag(source_identity_verified) &&
+    custody_transfer_flag(source_quiesced) &&
+    custody_transfer_flag(target_active) &&
+    custody_transfer_flag(target_presence_verified) &&
+    custody_transfer_flag(target_endpoint_verified) &&
+    custody_transfer_flag(target_session_verified) &&
+    custody_transfer_flag(rollback_available) &&
+    custody_transfer_flag(deadline_expired) &&
+    custody_transfer_flag(observation_authority_verified) &&
+    custody_transfer_flag(sample_fresh)
+}
+
+fn custody_transfer_target_proven(
+    target_active: i64,
+    target_presence_verified: i64,
+    target_endpoint_verified: i64,
+    target_session_verified: i64,
+) -> bool {
+    target_active == 1 &&
+    target_presence_verified == 1 &&
+    target_endpoint_verified == 1 &&
+    target_session_verified == 1
+}
+
+pub fn loom_custody_transfer_decide(
+    phase: i64,
+    policy_state: i64,
+    source_catalog_agentd: i64,
+    catalog_committed_loom: i64,
+    target_staged: i64,
+    target_descriptor_sealed: i64,
+    resume_identity_bound: i64,
+    source_active: i64,
+    source_identity_verified: i64,
+    source_quiesced: i64,
+    target_active: i64,
+    target_presence_verified: i64,
+    target_endpoint_verified: i64,
+    target_session_verified: i64,
+    rollback_available: i64,
+    deadline_expired: i64,
+    observation_authority_verified: i64,
+    sample_fresh: i64,
+) -> i64 {
+    if policy_state != 1 { return 101 }
+    if !custody_transfer_flags_valid(
+        source_catalog_agentd,
+        catalog_committed_loom,
+        target_staged,
+        target_descriptor_sealed,
+        resume_identity_bound,
+        source_active,
+        source_identity_verified,
+        source_quiesced,
+        target_active,
+        target_presence_verified,
+        target_endpoint_verified,
+        target_session_verified,
+        rollback_available,
+        deadline_expired,
+        observation_authority_verified,
+        sample_fresh,
+    ) { return 119 }
+    if observation_authority_verified != 1 || sample_fresh != 1 { return 102 }
+    if phase < 1 || phase > 6 { return 118 }
+
+    if source_catalog_agentd == 1 && catalog_committed_loom == 1 { return 103 }
+    if source_catalog_agentd == 0 && catalog_committed_loom == 0 { return 104 }
+    if phase == 5 {
+        if catalog_committed_loom != 1 { return 114 }
+    } else if source_catalog_agentd != 1 { return 114 }
+
+    if target_active == 0 &&
+        (target_presence_verified == 1 || target_endpoint_verified == 1 ||
+         target_session_verified == 1) { return 109 }
+
+    if phase <= 5 {
+        if target_staged != 1 || target_descriptor_sealed != 1 { return 106 }
+        if resume_identity_bound != 1 { return 107 }
+    }
+    if phase != 5 && rollback_available != 1 { return 105 }
+
+    // This is the single dual-authority intervention rule. Before catalog
+    // commit the source wins and the provisional target is aborted. After
+    // commit Loom wins and the reappearing source is aborted.
+    if source_active == 1 && target_active == 1 {
+        if phase == 5 { return 10 }
+        return 6
+    }
+
+    if phase == 1 {
+        if source_active != 1 { return 110 }
+        if source_identity_verified != 1 { return 108 }
+        return 1
+    }
+
+    if phase == 2 {
+        if source_quiesced == 1 && source_active == 0 {
+            if target_active == 1 { return 6 }
+            return 2
+        }
+        if source_active == 1 {
+            if deadline_expired == 1 { return 8 }
+            return 7
+        }
+        return 110
+    }
+
+    if phase == 3 {
+        if source_quiesced != 1 { return 110 }
+        if source_active == 1 && target_active == 0 { return 8 }
+        if custody_transfer_target_proven(
+            target_active,
+            target_presence_verified,
+            target_endpoint_verified,
+            target_session_verified,
+        ) { return 3 }
+        if deadline_expired == 1 {
+            if target_active == 1 { return 6 }
+            return 5
+        }
+        return 7
+    }
+
+    if phase == 4 {
+        if source_quiesced != 1 { return 110 }
+        if source_active == 1 && target_active == 0 { return 8 }
+        if custody_transfer_target_proven(
+            target_active,
+            target_presence_verified,
+            target_endpoint_verified,
+            target_session_verified,
+        ) { return 3 }
+        if deadline_expired == 1 {
+            if target_active == 1 { return 6 }
+            return 5
+        }
+        return 7
+    }
+
+    if phase == 5 {
+        if source_active == 1 { return 10 }
+        if source_quiesced != 1 { return 114 }
+        if custody_transfer_target_proven(
+            target_active,
+            target_presence_verified,
+            target_endpoint_verified,
+            target_session_verified,
+        ) { return 4 }
+        return 11
+    }
+
+    // Rollback retains agentd catalog authority. Any provisional target is
+    // removed first; only then may the source be restored.
+    if target_active == 1 { return 6 }
+    if source_active == 1 {
+        if source_identity_verified != 1 { return 108 }
+        return 9
+    }
+    5
+}
+
+fn custody_transfer_test_case(
+    phase: i64,
+    policy_state: i64,
+    source_catalog_agentd: i64,
+    catalog_committed_loom: i64,
+    target_staged: i64,
+    target_descriptor_sealed: i64,
+    resume_identity_bound: i64,
+    source_active: i64,
+    source_identity_verified: i64,
+    source_quiesced: i64,
+    target_active: i64,
+    target_presence_verified: i64,
+    target_endpoint_verified: i64,
+    target_session_verified: i64,
+    rollback_available: i64,
+    deadline_expired: i64,
+    observation_authority_verified: i64,
+    sample_fresh: i64,
+) -> i64 {
+    loom_custody_transfer_decide(
+        phase,
+        policy_state,
+        source_catalog_agentd,
+        catalog_committed_loom,
+        target_staged,
+        target_descriptor_sealed,
+        resume_identity_bound,
+        source_active,
+        source_identity_verified,
+        source_quiesced,
+        target_active,
+        target_presence_verified,
+        target_endpoint_verified,
+        target_session_verified,
+        rollback_available,
+        deadline_expired,
+        observation_authority_verified,
+        sample_fresh,
+    )
+}
+
+pub fn loom_custody_transfer_selftest() -> i64 {
+    // Expected results originate here in Sounio. Operational realizations may
+    // implement them only after this exact executable semantics is frozen.
+    if custody_transfer_test_case(1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 0, 1, 1) != 1 { return 1 }
+    if custody_transfer_test_case(1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1) != 105 { return 2 }
+    if custody_transfer_test_case(1, 1, 1, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1) != 108 { return 3 }
+    if custody_transfer_test_case(1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1) != 6 { return 4 }
+    if custody_transfer_test_case(2, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 0, 1, 1) != 7 { return 5 }
+    if custody_transfer_test_case(2, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 1) != 8 { return 6 }
+    if custody_transfer_test_case(2, 1, 1, 0, 1, 1, 1, 0, 1, 1, 0, 0, 0, 0, 1, 0, 1, 1) != 2 { return 7 }
+    if custody_transfer_test_case(2, 1, 1, 0, 1, 1, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 1) != 110 { return 8 }
+    if custody_transfer_test_case(3, 1, 1, 0, 1, 1, 1, 0, 1, 1, 0, 0, 0, 0, 1, 0, 1, 1) != 7 { return 9 }
+    if custody_transfer_test_case(3, 1, 1, 0, 1, 1, 1, 0, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1) != 5 { return 10 }
+    if custody_transfer_test_case(3, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 0, 1, 1) != 7 { return 11 }
+    if custody_transfer_test_case(3, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1) != 3 { return 12 }
+    if custody_transfer_test_case(3, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1) != 6 { return 13 }
+    if custody_transfer_test_case(4, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1) != 3 { return 14 }
+    if custody_transfer_test_case(4, 1, 1, 0, 1, 1, 1, 0, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1) != 5 { return 15 }
+    if custody_transfer_test_case(5, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1) != 4 { return 16 }
+    if custody_transfer_test_case(5, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1) != 10 { return 17 }
+    if custody_transfer_test_case(5, 1, 0, 1, 1, 1, 1, 0, 1, 1, 0, 0, 0, 0, 1, 0, 1, 1) != 11 { return 18 }
+    if custody_transfer_test_case(6, 1, 1, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1) != 6 { return 19 }
+    if custody_transfer_test_case(6, 1, 1, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 1, 0, 1, 1) != 5 { return 20 }
+    if custody_transfer_test_case(6, 1, 1, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 1, 1) != 9 { return 21 }
+    if custody_transfer_test_case(1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 0, 1, 1) != 103 { return 22 }
+    if custody_transfer_test_case(1, 1, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 0, 1, 1) != 104 { return 23 }
+    if custody_transfer_test_case(1, 0, 1, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 0, 1, 1) != 101 { return 24 }
+    if custody_transfer_test_case(1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 1) != 102 { return 25 }
+    if custody_transfer_test_case(1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0) != 102 { return 26 }
+    if custody_transfer_test_case(1, 1, 1, 0, 1, 0, 1, 1, 1, 0, 0, 0, 0, 0, 1, 0, 1, 1) != 106 { return 27 }
+    if custody_transfer_test_case(1, 1, 1, 0, 1, 1, 0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 1, 1) != 107 { return 28 }
+    if custody_transfer_test_case(3, 1, 1, 0, 1, 1, 1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1) != 109 { return 29 }
+    if custody_transfer_test_case(7, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 0, 1, 1) != 118 { return 30 }
+    0
+}

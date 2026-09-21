@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 
 SOUNIO_COORD_PROTOCOL_VERSION=3
-SOUNIO_COORD_RUNTIME_VERSION=2026.08.26.26
+SOUNIO_COORD_RUNTIME_VERSION=2026.08.31.0
 
 usage() {
   cat <<'USAGE'
@@ -46,6 +46,16 @@ Commands:
                                  bind a lane to a tmux-independent process identity
   presence-unregister --agent ID --lane ID
                                  remove the lane's process identity on a clean exit
+  hook-capability-register --agent ID --lane ID --session-id ID
+                                 attest a native OCaml hook generation
+  hook-capability-unregister --agent ID --lane ID
+                                 retire a native hook attestation
+  hook-session-close --agent ID --lane ID --session-id ID --reason TEXT
+                                 atomically retire one attested native hook generation
+  hook-capability-status --agent ID --lane ID
+                                 inspect native hook eligibility
+  hook-caller-attest --agent ID
+                                 attest the native hook's exact provider caller
   recover [--agent ID --lane ID] [--all]
                                  reconstruct one lane or audit the fleet after a crash
   obligation-open --agent ID --lane ID --message ID
@@ -67,11 +77,12 @@ Commands:
   obligation-supervise [--once] [--interval-seconds N]
   obligation-supervisor-status
                                  run or inspect the tmux-independent replay supervisor
-  obligation-supervisor-ensure [--interval-seconds N]
+  obligation-supervisor-ensure [--interval-seconds N] [--timeout-seconds N]
   obligation-supervisor-stop [--timeout-seconds N]
                                  idempotently start or stop the detached control service
   wake    --agent ID --lane ID --message MESSAGE_ID
                                  retry immediate delivery for a visible directed message
+  wake-reconcile                 retry pending submissions without reinserting prompts
   experiment-open --agent ID --lane ID --receipt PATH --statement TEXT
           --falsifier TEXT --intervention TEXT --treatment-predicate TEXT
           --control-predicate TEXT --resource RESOURCE [--resource RESOURCE ...]
@@ -97,6 +108,10 @@ Commands:
           [--limit N] [--from-agent ID] [--from-lane ID] [--kind KIND]
           [--thread ID] [--since-epoch N]
                                  show unread messages for one lane
+  outbox  --agent ID --lane ID [--newest-first] [--limit N]
+          [--to-agent ID] [--to-lane ID] [--kind KIND]
+          [--thread ID] [--since-epoch N]
+                                 show durable messages sent by one lane
   injected --agent ID --lane ID --messages ID [ID ...]
                                  record that the hook surfaced messages to a lane
   ack     --agent ID --lane ID --message ID
@@ -175,7 +190,15 @@ DURABLE_STATE_DIR="$GIT_COMMON_DIR/sounio-coord-state"
 OBLIGATION_ACTIVATION_FILE="$DURABLE_STATE_DIR/loom-obligation-activation.v1"
 
 migrate_legacy_state() {
+  # Depois da migracao o lock mora dentro do estado duravel. Fora dele o lock
+  # precisava de escrita no git common dir, que a membrana do change kernel
+  # (SOUNIO_LOOM_SOVEREIGN_CHANGE_MEDIATED=1) monta read-only: todo claim do
+  # agente mediado falhava com EROFS aqui. O caminho antigo so e usado no mundo
+  # pre-migracao, quando ainda nao existe estado duravel onde pegar o lock.
   local lock_file="$GIT_COMMON_DIR/.sounio-coord-state-migration.lock"
+  if [[ -d "$DURABLE_STATE_DIR" ]]; then
+    lock_file="$DURABLE_STATE_DIR/.migration.lock"
+  fi
   exec 8>"$lock_file"
   flock 8
 
@@ -210,10 +233,13 @@ ACKS_DIR="$STATE_DIR/message-acks"
 INJECTIONS_DIR="$STATE_DIR/message-injections"
 ENDPOINTS_DIR="$STATE_DIR/delivery-endpoints"
 PRESENCES_DIR="$STATE_DIR/process-presences"
+HOOK_CAPABILITIES_DIR="$STATE_DIR/hook-capabilities"
 WAKES_DIR="$STATE_DIR/message-wakes"
+WAKE_SUBMISSIONS_DIR="$STATE_DIR/message-wake-submissions"
 EVENT_LOG="$STATE_DIR/events.log"
 mkdir -p "$CLAIMS_DIR" "$MESSAGES_DIR" "$ACKS_DIR" "$INJECTIONS_DIR" \
-  "$ENDPOINTS_DIR" "$PRESENCES_DIR" "$WAKES_DIR"
+  "$ENDPOINTS_DIR" "$PRESENCES_DIR" "$HOOK_CAPABILITIES_DIR" "$WAKES_DIR" \
+  "$WAKE_SUBMISSIONS_DIR"
 
 NOW_EPOCH="$(date +%s)"
 NOW_TICK="$(date +%s%N)"
@@ -225,6 +251,8 @@ LOCK_FD=''
 cleanup_lock() {
   if [[ -n "$LOCK_FD" ]]; then
     flock -u "$LOCK_FD" 2>/dev/null || true
+    eval "exec ${LOCK_FD}>&-" 2>/dev/null || true
+    LOCK_FD=''
   fi
   if [[ -n "$LOCK_TO_CLEAN" ]]; then
     rmdir "$LOCK_TO_CLEAN" 2>/dev/null || true
@@ -235,10 +263,14 @@ cleanup_lock() {
 trap cleanup_lock EXIT
 
 acquire_state_lock() {
-  local action="$1" lock_dir lock_epoch
+  local action="$1" lock_dir lock_epoch lock_wait
   if command -v flock >/dev/null 2>&1; then
+    lock_wait="${SOUNIO_COORD_LOCK_WAIT_SECONDS:-2}"
+    [[ "$lock_wait" =~ ^[0-9]+([.][0-9]+)?$ ]] || \
+      die "SOUNIO_COORD_LOCK_WAIT_SECONDS must be a non-negative number"
     exec {LOCK_FD}>"$STATE_DIR/.claims.lock"
-    flock -n "$LOCK_FD" || die "coordination state is being changed; retry $action"
+    flock -w "$lock_wait" "$LOCK_FD" || \
+      die "coordination state is being changed; retry $action"
     return 0
   fi
 
@@ -666,6 +698,85 @@ wake_receipt_path() {
   fi
 }
 
+wake_submission_path() {
+  printf '%s/%s--%s--%s.submitted' "$WAKE_SUBMISSIONS_DIR" "$(slug "$1")" \
+    "$(slug "$2")" "$(slug "$3")"
+}
+
+load_wake_submission() {
+  local submission_file="$1" line
+  S_SCHEMA=''
+  S_STATE=''
+  S_MESSAGE_ID=''
+  S_ENDPOINT_ID=''
+  S_AGENT=''
+  S_LANE=''
+  S_HARNESS=''
+  S_WORKTREE=''
+  S_TRANSPORT=''
+  S_ADDRESS=''
+  S_SOCKET=''
+  S_GENERATION=''
+  S_DISCOVERY=''
+  S_CREATED_UTC=''
+  S_INSERTION_STATE=''
+  S_INSERTED_UTC=''
+  S_SUBMITTED_UTC=''
+  S_LAST_ATTEMPT_EPOCH=0
+  S_ATTEMPTS=0
+  [[ -r "$submission_file" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      schema=*) S_SCHEMA="${line#schema=}" ;;
+      state=*) S_STATE="${line#state=}" ;;
+      message_id=*) S_MESSAGE_ID="${line#message_id=}" ;;
+      endpoint_id=*) S_ENDPOINT_ID="${line#endpoint_id=}" ;;
+      agent=*) S_AGENT="${line#agent=}" ;;
+      lane=*) S_LANE="${line#lane=}" ;;
+      harness=*) S_HARNESS="${line#harness=}" ;;
+      worktree=*) S_WORKTREE="${line#worktree=}" ;;
+      transport=*) S_TRANSPORT="${line#transport=}" ;;
+      address=*) S_ADDRESS="${line#address=}" ;;
+      socket=*) S_SOCKET="${line#socket=}" ;;
+      generation=*) S_GENERATION="${line#generation=}" ;;
+      discovery=*) S_DISCOVERY="${line#discovery=}" ;;
+      created_utc=*) S_CREATED_UTC="${line#created_utc=}" ;;
+      insertion_state=*) S_INSERTION_STATE="${line#insertion_state=}" ;;
+      inserted_utc=*) S_INSERTED_UTC="${line#inserted_utc=}" ;;
+      submitted_utc=*) S_SUBMITTED_UTC="${line#submitted_utc=}" ;;
+      last_attempt_epoch=*) S_LAST_ATTEMPT_EPOCH="${line#last_attempt_epoch=}" ;;
+      attempts=*) S_ATTEMPTS="${line#attempts=}" ;;
+    esac
+  done < "$submission_file"
+}
+
+write_wake_submission() {
+  local submission_file="$1" tmp_file
+  tmp_file="$(mktemp "$WAKE_SUBMISSIONS_DIR/.submission-write.XXXXXX")"
+  {
+    printf 'schema=loom-wake-submission-v1\n'
+    printf 'state=%s\n' "$S_STATE"
+    printf 'message_id=%s\n' "$S_MESSAGE_ID"
+    printf 'endpoint_id=%s\n' "$S_ENDPOINT_ID"
+    printf 'agent=%s\n' "$S_AGENT"
+    printf 'lane=%s\n' "$S_LANE"
+    printf 'harness=%s\n' "$S_HARNESS"
+    printf 'worktree=%s\n' "$S_WORKTREE"
+    printf 'transport=%s\n' "$S_TRANSPORT"
+    printf 'address=%s\n' "$S_ADDRESS"
+    printf 'socket=%s\n' "$S_SOCKET"
+    printf 'generation=%s\n' "$S_GENERATION"
+    printf 'discovery=%s\n' "$S_DISCOVERY"
+    printf 'created_utc=%s\n' "$S_CREATED_UTC"
+    printf 'insertion_state=%s\n' "$S_INSERTION_STATE"
+    printf 'inserted_utc=%s\n' "$S_INSERTED_UTC"
+    printf 'submitted_utc=%s\n' "$S_SUBMITTED_UTC"
+    printf 'last_attempt_epoch=%s\n' "$S_LAST_ATTEMPT_EPOCH"
+    printf 'attempts=%s\n' "$S_ATTEMPTS"
+  } > "$tmp_file"
+  mv "$tmp_file" "$submission_file"
+}
+
 process_presence_delivery_generation() {
   local agent="$1" lane="$2" worktree="$3" harness="$4" presence_file
   presence_file="$(presence_path "$agent" "$lane")"
@@ -1047,7 +1158,12 @@ discover_history_endpoint() {
     history_branch_matches=1
   fi
 
-  socket="${SOUNIO_COORD_DISCOVERY_SOCKET:-${TMUX%%,*}}"
+  if [[ -n "${SOUNIO_COORD_DISCOVERY_SOCKET:-}" ]]; then
+    socket="$SOUNIO_COORD_DISCOVERY_SOCKET"
+  else
+    socket="${TMUX:-}"
+    socket="${socket%%,*}"
+  fi
   [[ -n "$socket" && -S "$socket" ]] || return 1
   pane_lines="$(tmux -S "$socket" list-panes -a -F \
     '#{pane_id}|#{pane_pid}|#{pane_current_command}|#{pane_current_path}' 2>/dev/null || true)"
@@ -1191,6 +1307,7 @@ remove_endpoint_for_lane() {
   [[ -f "$endpoint_file" ]] || return 0
   load_endpoint "$endpoint_file"
   [[ "$E_AGENT" == "$agent" && "$E_LANE" == "$lane" ]] || die "endpoint owner mismatch"
+  [[ "$E_WORKTREE" == "$worktree" ]] || die "endpoint belongs to worktree $E_WORKTREE"
   unlink "$endpoint_file"
   printf 'utc=%s event=ENDPOINT_UNREGISTERED endpoint_id=%s agent=%s lane=%s worktree=%s reason=%s\n' \
     "$NOW_UTC" "$E_ID" "$E_AGENT" "$E_LANE" "$E_WORKTREE" "$reason" >> "$EVENT_LOG"
@@ -1309,13 +1426,933 @@ append_presence_event() {
 }
 
 remove_presence_for_lane() {
-  local agent="$1" lane="$2" worktree="$3" reason="$4" presence_file
+  local agent="$1" lane="$2" worktree="$3" reason="$4" presence_file capability_file
   presence_file="$(presence_path "$agent" "$lane")"
   [[ -f "$presence_file" ]] || return 0
   load_presence "$presence_file"
   [[ "$P_AGENT" == "$agent" && "$P_LANE" == "$lane" ]] || die "presence owner mismatch"
+  [[ "$P_WORKTREE" == "$worktree" ]] || die "presence belongs to worktree $P_WORKTREE"
+  case "$P_HARNESS" in
+    codex|claude|cursor|grok)
+      append_presence_event PRESENCE_RETIREMENT_REQUESTED \
+        "$reason; retained for Sounio action 9047"
+      return 0
+      ;;
+  esac
   unlink "$presence_file"
+  capability_file="$(hook_capability_path "$agent" "$lane")"
+  [[ ! -f "$capability_file" ]] || unlink "$capability_file"
   append_presence_event PRESENCE_UNREGISTERED "$reason"
+}
+
+hook_capability_path() {
+  printf '%s/%s.capability' "$HOOK_CAPABILITIES_DIR" "$(claim_id_for "$1" "$2")"
+}
+
+load_hook_capability() {
+  local capability_file="$1" line
+  HC_SCHEMA=''
+  HC_STATE=''
+  HC_AGENT=''
+  HC_LANE=''
+  HC_SESSION_ID=''
+  HC_GENERATION=''
+  HC_WORKTREE=''
+  HC_HARNESS=''
+  HC_PRESENCE_PID=0
+  HC_PRESENCE_PID_START=0
+  HC_PRESENCE_BOOT_ID=''
+  HC_PRESENCE_PID_NAMESPACE=''
+  HC_PRODUCER_EXECUTABLE=''
+  HC_PRODUCER_SHA256=''
+  HC_COORD_EXECUTABLE=''
+  HC_COORD_SHA256=''
+  HC_CALLER_PID=0
+  HC_CALLER_PID_START=0
+  HC_CALLER_BOOT_ID=''
+  HC_CALLER_PID_NAMESPACE=''
+  HC_CALLER_EXECUTABLE=''
+  HC_CALLER_SHA256=''
+  HC_WAKE_ELIGIBLE=0
+  HC_RUNTIME_ID=''
+  HC_SOURCE_SHA=''
+  HC_CREATED_UTC=''
+  HC_CREATED_EPOCH=0
+  HC_EXPIRES_EPOCH=0
+  [[ -r "$capability_file" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    case "$line" in
+      schema=*) HC_SCHEMA="${line#schema=}" ;;
+      state=*) HC_STATE="${line#state=}" ;;
+      agent=*) HC_AGENT="${line#agent=}" ;;
+      lane=*) HC_LANE="${line#lane=}" ;;
+      session_id=*) HC_SESSION_ID="${line#session_id=}" ;;
+      generation=*) HC_GENERATION="${line#generation=}" ;;
+      worktree=*) HC_WORKTREE="${line#worktree=}" ;;
+      harness=*) HC_HARNESS="${line#harness=}" ;;
+      presence_pid=*) HC_PRESENCE_PID="${line#presence_pid=}" ;;
+      presence_pid_start=*) HC_PRESENCE_PID_START="${line#presence_pid_start=}" ;;
+      presence_boot_id=*) HC_PRESENCE_BOOT_ID="${line#presence_boot_id=}" ;;
+      presence_pid_namespace=*) HC_PRESENCE_PID_NAMESPACE="${line#presence_pid_namespace=}" ;;
+      producer_executable=*) HC_PRODUCER_EXECUTABLE="${line#producer_executable=}" ;;
+      producer_sha256=*) HC_PRODUCER_SHA256="${line#producer_sha256=}" ;;
+      coord_executable=*) HC_COORD_EXECUTABLE="${line#coord_executable=}" ;;
+      coord_sha256=*) HC_COORD_SHA256="${line#coord_sha256=}" ;;
+      caller_pid=*) HC_CALLER_PID="${line#caller_pid=}" ;;
+      caller_pid_start=*) HC_CALLER_PID_START="${line#caller_pid_start=}" ;;
+      caller_boot_id=*) HC_CALLER_BOOT_ID="${line#caller_boot_id=}" ;;
+      caller_pid_namespace=*) HC_CALLER_PID_NAMESPACE="${line#caller_pid_namespace=}" ;;
+      caller_executable=*) HC_CALLER_EXECUTABLE="${line#caller_executable=}" ;;
+      caller_sha256=*) HC_CALLER_SHA256="${line#caller_sha256=}" ;;
+      wake_eligible=*) HC_WAKE_ELIGIBLE="${line#wake_eligible=}" ;;
+      runtime_id=*) HC_RUNTIME_ID="${line#runtime_id=}" ;;
+      source_sha=*) HC_SOURCE_SHA="${line#source_sha=}" ;;
+      created_utc=*) HC_CREATED_UTC="${line#created_utc=}" ;;
+      created_epoch=*) HC_CREATED_EPOCH="${line#created_epoch=}" ;;
+      expires_epoch=*) HC_EXPIRES_EPOCH="${line#expires_epoch=}" ;;
+    esac
+  done < "$capability_file"
+}
+
+manifest_field() {
+  local manifest="$1" key="$2"
+  sed -n "s/^${key}=//p" "$manifest" | head -n 1
+}
+
+active_coord_runtime_root() {
+  local runtime_root
+  runtime_root="${SOUNIO_COORD_RUNTIME_DIR:-$GIT_COMMON_DIR/sounio-coord-runtime}"
+  runtime_root="$(readlink -f "$runtime_root" 2>/dev/null || true)"
+  [[ -n "$runtime_root" ]] || return 1
+  printf '%s\n' "$runtime_root"
+}
+
+native_hook_bundle_is_selected() {
+  local runtime_root="$1" bundle="$2" current_bundle candidate_bundle manifest
+  current_bundle="$(readlink -f "$runtime_root/current" 2>/dev/null || true)"
+  [[ -n "$current_bundle" ]] || return 1
+  if [[ "$bundle" == "$current_bundle" ]]; then
+    return 0
+  fi
+
+  candidate_bundle="$(readlink -f "$runtime_root/native-next" 2>/dev/null || true)"
+  [[ -n "$candidate_bundle" && "$bundle" == "$candidate_bundle" ]] || return 1
+  manifest="$candidate_bundle/manifest"
+  [[ -r "$manifest" ]] || return 1
+  grep -Fqx 'capability=loom-native-hook-cutover-v1' "$manifest" || return 1
+  grep -Fqx 'capability=loom-native-hook-generation-drain-v1' "$manifest" || return 1
+  if [[ -d "$candidate_bundle/hooks" ]] &&
+    find "$candidate_bundle/hooks" -type f -name '*.py' -print -quit | grep -q .; then
+    return 1
+  fi
+  return 0
+}
+
+# A live provider session is allowed to remain bound to the immutable runtime
+# generation it started with.  A newer selected coordinator may deliver a wake
+# for that session only when the sealed generation pin and its private selector
+# still bind every identity and executable digest in the capability record.
+native_hook_capability_bundle_is_pinned() {
+  local runtime_root="$1" bundle="$2" agent="$3" lane="$4" pin_path
+  local selector expected_bundle manifest manifest_sha
+  pin_path="$STATE_DIR/generation-runtime-pins/$(claim_id_for "$agent" "$lane").pin"
+  [[ -f "$pin_path" && ! -L "$pin_path" ]] || return 1
+  manifest="$bundle/manifest"
+  [[ -r "$manifest" ]] || return 1
+  manifest_sha="$(sha256sum "$manifest" | awk '{print $1}')"
+  [[ "$(manifest_field "$pin_path" schema)" == loom-generation-runtime-pin-v1 && \
+    "$(manifest_field "$pin_path" state)" == SEALED && \
+    "$(manifest_field "$pin_path" agent)" == "$agent" && \
+    "$(manifest_field "$pin_path" lane)" == "$lane" && \
+    "$(manifest_field "$pin_path" session_id)" == "$HC_SESSION_ID" && \
+    "$(manifest_field "$pin_path" harness)" == "$HC_HARNESS" && \
+    "$(manifest_field "$pin_path" worktree)" == "$HC_WORKTREE" && \
+    "$(manifest_field "$pin_path" boot_id)" == "$HC_PRESENCE_BOOT_ID" && \
+    "$(manifest_field "$pin_path" pid_namespace)" == "$HC_PRESENCE_PID_NAMESPACE" && \
+    "$(manifest_field "$pin_path" pid)" == "$HC_PRESENCE_PID" && \
+    "$(manifest_field "$pin_path" pid_start)" == "$HC_PRESENCE_PID_START" && \
+    "$(manifest_field "$pin_path" selection)" == capability && \
+    "$(manifest_field "$pin_path" runtime_id)" == "$HC_RUNTIME_ID" && \
+    "$(manifest_field "$pin_path" runtime_manifest_sha256)" == "$manifest_sha" && \
+    "$(manifest_field "$pin_path" loom_runtime_sha256)" == "$HC_PRODUCER_SHA256" && \
+    "$(manifest_field "$pin_path" coord_runtime_sha256)" == "$HC_COORD_SHA256" && \
+    "$(manifest_field "$pin_path" runtime_source_sha)" == "$HC_SOURCE_SHA" && \
+    "$(manifest_field "$pin_path" action)" == 9048 && \
+    "$(manifest_field "$pin_path" semantic_authority)" == Sounio ]] || return 1
+
+  selector="$runtime_root/generation-selectors-v2/$HC_RUNTIME_ID"
+  expected_bundle="$(readlink -f "$selector/current" 2>/dev/null || true)"
+  [[ -n "$expected_bundle" && "$bundle" == "$expected_bundle" && \
+    "$bundle" == "$selector/versions/$HC_RUNTIME_ID" ]] || return 1
+  [[ "$(manifest_field "$manifest" runtime_id)" == "$HC_RUNTIME_ID" && \
+    "$(manifest_field "$manifest" source_sha)" == "$HC_SOURCE_SHA" && \
+    "$(manifest_field "$manifest" loom_runtime_sha256)" == "$HC_PRODUCER_SHA256" && \
+    "$(manifest_field "$manifest" coord_runtime_sha256)" == "$HC_COORD_SHA256" ]] || return 1
+  return 0
+}
+
+native_hook_capability_bundle_is_admitted() {
+  local runtime_root="$1" bundle="$2" agent="$3" lane="$4" runtime_self current_bundle
+  runtime_self="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || true)"
+  current_bundle="$(readlink -f "$runtime_root/current" 2>/dev/null || true)"
+  [[ -n "$runtime_self" && -n "$current_bundle" && \
+    "$runtime_self" == "$current_bundle/bin/sounio-coord-runtime" ]] || return 1
+  native_hook_bundle_is_selected "$runtime_root" "$bundle" || \
+    native_hook_capability_bundle_is_pinned "$runtime_root" "$bundle" "$agent" "$lane"
+}
+
+native_hook_runtime_parent_identity() {
+  local parent_pid="$PPID" runtime_self local_runtime local_loom
+  local runtime_root parent_bundle runtime_bundle manifest runtime_version expected_parent_sha expected_coord_sha
+  NATIVE_HOOK_PARENT_EXECUTABLE="$(readlink -f "/proc/$parent_pid/exe" 2>/dev/null || true)"
+  [[ -n "$NATIVE_HOOK_PARENT_EXECUTABLE" ]] || return 1
+  runtime_self="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || true)"
+  [[ -n "$runtime_self" ]] || return 1
+  NATIVE_HOOK_COORD_EXECUTABLE="$runtime_self"
+  NATIVE_HOOK_PARENT_SHA256="$(sha256sum "$NATIVE_HOOK_PARENT_EXECUTABLE" | awk '{print $1}')"
+  NATIVE_HOOK_COORD_SHA256="$(sha256sum "$runtime_self" | awk '{print $1}')"
+  [[ "$NATIVE_HOOK_PARENT_SHA256" =~ ^[0-9a-f]{64}$ && \
+    "$NATIVE_HOOK_COORD_SHA256" =~ ^[0-9a-f]{64}$ ]] || return 1
+
+  local_runtime="$(readlink -f "$WORKTREE/scripts/dev/sounio_coord_runtime.sh" 2>/dev/null || true)"
+  local_loom="$(readlink -f "$WORKTREE/tools/loom/_build/default/src/loom.exe" 2>/dev/null || true)"
+  if [[ -n "$local_runtime" && -n "$local_loom" && \
+    "$runtime_self" == "$local_runtime" && \
+    "$NATIVE_HOOK_PARENT_EXECUTABLE" == "$local_loom" ]]; then
+    [[ "${SOUNIO_COORD_RUNTIME_MODE:-}" == local && \
+      "${SOUNIO_COORD_NATIVE_HOOK_SELFTEST:-0}" == 1 ]] || return 1
+    case "$STATE_DIR" in
+      "${TMPDIR:-/tmp}"/sounio-loom-native-hook.*/coord | \
+        "${TMPDIR:-/tmp}"/sounio-loom-exec-capability.*/coord | \
+        "${TMPDIR:-/tmp}"/sounio-loom-custody.*/coord | \
+        "${TMPDIR:-/tmp}"/sounio-coord-crash-selftest.*/repo/.git/sounio-coord-state | \
+        "${TMPDIR:-/tmp}"/sounio-coord-agentd-selftest.*/coord-state) ;;
+      *) return 1 ;;
+    esac
+    NATIVE_HOOK_RUNTIME_ID="local-${SOUNIO_COORD_RUNTIME_VERSION}"
+    NATIVE_HOOK_SOURCE_SHA="$(current_sha)"
+    NATIVE_HOOK_WAKE_ELIGIBLE=0
+  else
+    runtime_root="$(active_coord_runtime_root)" || return 1
+    parent_bundle="$(readlink -f "$(dirname "$NATIVE_HOOK_PARENT_EXECUTABLE")/.." 2>/dev/null || true)"
+    runtime_bundle="$(readlink -f "$(dirname "$runtime_self")/.." 2>/dev/null || true)"
+    [[ -n "$parent_bundle" && "$parent_bundle" == "$runtime_bundle" ]] || return 1
+    case "$parent_bundle" in
+      "$runtime_root"/versions/*) ;;
+      *) return 1 ;;
+    esac
+    native_hook_bundle_is_selected "$runtime_root" "$parent_bundle" || return 1
+    [[ "$NATIVE_HOOK_PARENT_EXECUTABLE" == "$parent_bundle/bin/sounio-loom-runtime" ]] || return 1
+    manifest="$parent_bundle/manifest"
+    [[ -r "$manifest" ]] || return 1
+    runtime_version="$(manifest_field "$manifest" runtime_version)"
+    [[ "$runtime_version" == "$SOUNIO_COORD_RUNTIME_VERSION" ]] || return 1
+    expected_parent_sha="$(manifest_field "$manifest" loom_runtime_sha256)"
+    expected_coord_sha="$(manifest_field "$manifest" coord_runtime_sha256)"
+    [[ "$expected_parent_sha" =~ ^[0-9a-f]{64}$ && \
+      "$expected_coord_sha" =~ ^[0-9a-f]{64}$ && \
+      "$NATIVE_HOOK_PARENT_SHA256" == "$expected_parent_sha" && \
+      "$NATIVE_HOOK_COORD_SHA256" == "$expected_coord_sha" ]] || return 1
+    NATIVE_HOOK_RUNTIME_ID="$(manifest_field "$manifest" runtime_id)"
+    NATIVE_HOOK_SOURCE_SHA="$(manifest_field "$manifest" source_sha)"
+    [[ -n "$NATIVE_HOOK_RUNTIME_ID" && -n "$NATIVE_HOOK_SOURCE_SHA" ]] || return 1
+    NATIVE_HOOK_WAKE_ELIGIBLE=1
+    if [[ "${SOUNIO_COORD_RUNTIME_MODE:-}" == installed-selftest &&
+      "${SOUNIO_COORD_NATIVE_HOOK_SELFTEST:-0}" == 1 ]]; then
+      case "$STATE_DIR" in
+        "${TMPDIR:-/tmp}"/sounio-loom-native-hook.*/coord)
+          NATIVE_HOOK_WAKE_ELIGIBLE=0
+          ;;
+        *) return 1 ;;
+      esac
+    fi
+  fi
+}
+
+NATIVE_HOOK_PROCESS_EXECUTABLE=''
+NATIVE_HOOK_PROCESS_COMMAND=''
+NATIVE_HOOK_PROCESS_SHA256=''
+
+native_hook_process_executable_identity() {
+  local pid="$1" proc_executable raw_executable canonical_executable
+  NATIVE_HOOK_PROCESS_EXECUTABLE=''
+  NATIVE_HOOK_PROCESS_COMMAND=''
+  NATIVE_HOOK_PROCESS_SHA256=''
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  proc_executable="/proc/$pid/exe"
+  raw_executable="$(readlink "$proc_executable" 2>/dev/null || true)"
+  [[ -n "$raw_executable" && -x "$proc_executable" ]] || return 1
+  if [[ "$raw_executable" == *' (deleted)' ]]; then
+    NATIVE_HOOK_PROCESS_EXECUTABLE="$proc_executable"
+    raw_executable="${raw_executable% \(deleted\)}"
+  else
+    canonical_executable="$(readlink -f "$proc_executable" 2>/dev/null || true)"
+    [[ -n "$canonical_executable" ]] || return 1
+    NATIVE_HOOK_PROCESS_EXECUTABLE="$canonical_executable"
+  fi
+  NATIVE_HOOK_PROCESS_COMMAND="$(basename "$raw_executable")"
+  NATIVE_HOOK_PROCESS_SHA256="$(sha256sum "$proc_executable" 2>/dev/null | awk '{print $1}')"
+  [[ -n "$NATIVE_HOOK_PROCESS_COMMAND" && \
+    "$NATIVE_HOOK_PROCESS_SHA256" =~ ^[0-9a-f]{64}$ ]]
+}
+
+native_hook_provider_caller_identity() {
+  local parent_pid="$PPID" parent_tail caller_tail
+  parent_tail="$(sed 's/^[^)]*) //' "/proc/$parent_pid/stat" 2>/dev/null || true)"
+  NATIVE_HOOK_CALLER_PID="$(awk '{print $2}' <<< "$parent_tail")"
+  [[ "$NATIVE_HOOK_CALLER_PID" =~ ^[1-9][0-9]*$ ]] || return 1
+  caller_tail="$(sed 's/^[^)]*) //' "/proc/$NATIVE_HOOK_CALLER_PID/stat" 2>/dev/null || true)"
+  NATIVE_HOOK_CALLER_PID_START="$(awk '{print $20}' <<< "$caller_tail")"
+  native_hook_process_executable_identity "$NATIVE_HOOK_CALLER_PID" || return 1
+  NATIVE_HOOK_CALLER_EXECUTABLE="$NATIVE_HOOK_PROCESS_EXECUTABLE"
+  NATIVE_HOOK_CALLER_COMMAND="$NATIVE_HOOK_PROCESS_COMMAND"
+  NATIVE_HOOK_CALLER_SHA256="$NATIVE_HOOK_PROCESS_SHA256"
+  NATIVE_HOOK_CALLER_CMDLINE="$(tr '\0' ' ' < "/proc/$NATIVE_HOOK_CALLER_PID/cmdline" 2>/dev/null || true)"
+  NATIVE_HOOK_CALLER_BOOT_ID="$(cat /proc/sys/kernel/random/boot_id 2>/dev/null || true)"
+  NATIVE_HOOK_CALLER_PID_NAMESPACE="$(readlink "/proc/$NATIVE_HOOK_CALLER_PID/ns/pid" 2>/dev/null || true)"
+  [[ "$NATIVE_HOOK_CALLER_PID_START" =~ ^[1-9][0-9]*$ && \
+    -n "$NATIVE_HOOK_CALLER_EXECUTABLE" && \
+    "$NATIVE_HOOK_CALLER_SHA256" =~ ^[0-9a-f]{64}$ && \
+    -n "$NATIVE_HOOK_CALLER_BOOT_ID" && \
+    -n "$NATIVE_HOOK_CALLER_PID_NAMESPACE" ]] || return 1
+}
+
+native_hook_parent_identity() {
+  native_hook_runtime_parent_identity && native_hook_provider_caller_identity
+}
+
+native_hook_caller_is_exact_harness() {
+  local harness="$1"
+  case "$harness" in
+    codex) [[ "$NATIVE_HOOK_CALLER_COMMAND" == codex ]] ;;
+    claude)
+      [[ "$NATIVE_HOOK_CALLER_COMMAND" == claude ||
+        "$NATIVE_HOOK_CALLER_COMMAND" == claude.exe ]] ||
+        [[ "$NATIVE_HOOK_CALLER_COMMAND" == node &&
+          "$NATIVE_HOOK_CALLER_CMDLINE" == *'/@anthropic-ai/claude-code/'* &&
+          "$NATIVE_HOOK_CALLER_CMDLINE" == *'cli.js'* ]]
+      ;;
+    cursor)
+      [[ "$NATIVE_HOOK_CALLER_COMMAND" == cursor-agent ||
+        "$NATIVE_HOOK_CALLER_COMMAND" == cursor ]] ||
+        [[ "$NATIVE_HOOK_CALLER_COMMAND" == node &&
+          "$NATIVE_HOOK_CALLER_CMDLINE" == *'/bin/cursor-agent '* &&
+          "$NATIVE_HOOK_CALLER_CMDLINE" == *'/cursor-agent/versions/'*'/index.js'* ]]
+      ;;
+    grok)
+      [[ "$NATIVE_HOOK_CALLER_COMMAND" == grok ]] ||
+        [[ "$NATIVE_HOOK_CALLER_COMMAND" == grok-*-linux-x86_64 &&
+          ( "$NATIVE_HOOK_CALLER_CMDLINE" == grok\ * ||
+            "$NATIVE_HOOK_CALLER_CMDLINE" == */bin/grok\ * ) ]]
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+native_hook_caller_matches_presence() {
+  [[ "$NATIVE_HOOK_CALLER_PID" == "$P_PID" && \
+    "$NATIVE_HOOK_CALLER_PID_START" == "$P_PID_START" && \
+    "$NATIVE_HOOK_CALLER_BOOT_ID" == "$P_BOOT_ID" && \
+    "$NATIVE_HOOK_CALLER_PID_NAMESPACE" == "$P_PID_NAMESPACE" ]] || return 1
+  if ((NATIVE_HOOK_WAKE_ELIGIBLE)); then
+    native_hook_caller_is_exact_harness "$P_HARNESS"
+  else
+    [[ "${SOUNIO_COORD_NATIVE_HOOK_SELFTEST:-0}" == 1 ]]
+  fi
+}
+
+hook_caller_attest_command() {
+  local agent="${SOUNIO_AGENT_ID:-}" harness
+  while (($#)); do
+    case "$1" in
+      --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
+      *) die "unknown hook-caller-attest option: $1" ;;
+    esac
+  done
+  [[ -n "$agent" ]] || die "hook-caller-attest requires --agent or SOUNIO_AGENT_ID"
+  validate_value agent "$agent"
+  harness="$(
+    case "$agent" in
+      codex*) printf codex ;;
+      claude*) printf claude ;;
+      cursor*) printf cursor ;;
+      grok*) printf grok ;;
+      *) die "unsupported native hook caller: $agent" ;;
+    esac
+  )"
+  native_hook_parent_identity ||
+    die "native hook caller attestation requires the matching OCaml runtime parent"
+  if ((NATIVE_HOOK_WAKE_ELIGIBLE)); then
+    native_hook_caller_is_exact_harness "$harness" ||
+      die "native hook caller does not match provider $harness"
+  else
+    [[ "${SOUNIO_COORD_NATIVE_HOOK_SELFTEST:-0}" == 1 ]] ||
+      die "native hook caller selftest attestation is disabled"
+  fi
+  printf 'HOOK_CALLER_ATTESTED agent=%s harness=%s caller_pid=%s caller_pid_start=%s caller_sha256=%s runtime_id=%s source_sha=%s\n' \
+    "$agent" "$harness" "$NATIVE_HOOK_CALLER_PID" \
+    "$NATIVE_HOOK_CALLER_PID_START" "$NATIVE_HOOK_CALLER_SHA256" \
+    "$NATIVE_HOOK_RUNTIME_ID" "$NATIVE_HOOK_SOURCE_SHA"
+}
+
+native_hook_wake_selftest_fixture() {
+  [[ "${SOUNIO_COORD_RUNTIME_MODE:-}" == local && \
+    "${SOUNIO_COORD_NATIVE_HOOK_WAKE_SELFTEST:-0}" == 1 ]] || return 1
+  case "$STATE_DIR" in
+    "${TMPDIR:-/tmp}"/sounio-coord-wake-selftest.*/state) return 0 ;;
+    "${TMPDIR:-/tmp}"/sounio-loom-native-hook.*/coord)
+      [[ "${SOUNIO_COORD_NATIVE_HOOK_SELFTEST:-0}" == 1 ]]
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+HOOK_CAPABILITY_REASON='absent'
+hook_capability_binding_is_current() {
+  local agent="$1" lane="$2" generation="$3" capability_file presence_file
+  local current_generation current_sha256 current_coord_sha256 current_caller_sha256
+  local manifest runtime_root bundle runtime_self
+  HOOK_CAPABILITY_REASON='absent'
+  capability_file="$(hook_capability_path "$agent" "$lane")"
+  [[ -f "$capability_file" ]] || return 1
+  load_hook_capability "$capability_file"
+  [[ "$HC_SCHEMA" == loom-native-hook-capability-v1 && \
+    "$HC_STATE" == NATIVE_HOOK_ATTESTED && "$HC_AGENT" == "$agent" && \
+    "$HC_LANE" == "$lane" && "$HC_GENERATION" == "$generation" && \
+    "$HC_WAKE_ELIGIBLE" =~ ^[01]$ && \
+    "$HC_CREATED_EPOCH" =~ ^[0-9]+$ && "$HC_EXPIRES_EPOCH" =~ ^[0-9]+$ ]] || \
+    { HOOK_CAPABILITY_REASON='invalid-record'; return 1; }
+  ((NOW_EPOCH <= HC_EXPIRES_EPOCH)) || \
+    { HOOK_CAPABILITY_REASON='expired'; return 1; }
+  if ((! HC_WAKE_ELIGIBLE)); then
+    [[ "$HC_SOURCE_SHA" == "$(current_sha)" ]] || \
+      { HOOK_CAPABILITY_REASON='source-binding-drift'; return 1; }
+  fi
+  presence_file="$(presence_path "$agent" "$lane")"
+  [[ -f "$presence_file" ]] || { HOOK_CAPABILITY_REASON='presence-absent'; return 1; }
+  load_presence "$presence_file"
+  presence_state || { HOOK_CAPABILITY_REASON="presence-${PRESENCE_REASON}"; return 1; }
+  current_generation="$(process_presence_delivery_generation \
+    "$agent" "$lane" "$HC_WORKTREE" "$HC_HARNESS" 2>/dev/null || true)"
+  [[ -n "$current_generation" && "$current_generation" == "$generation" && \
+    "$P_SESSION_ID" == "$HC_SESSION_ID" && "$P_PID" == "$HC_PRESENCE_PID" && \
+    "$P_PID_START" == "$HC_PRESENCE_PID_START" && \
+    "$P_BOOT_ID" == "$HC_PRESENCE_BOOT_ID" && \
+    "$P_PID_NAMESPACE" == "$HC_PRESENCE_PID_NAMESPACE" ]] || \
+    { HOOK_CAPABILITY_REASON='presence-generation-drift'; return 1; }
+  [[ "$HC_CALLER_PID" == "$P_PID" && \
+    "$HC_CALLER_PID_START" == "$P_PID_START" && \
+    "$HC_CALLER_BOOT_ID" == "$P_BOOT_ID" && \
+    "$HC_CALLER_PID_NAMESPACE" == "$P_PID_NAMESPACE" ]] || \
+    { HOOK_CAPABILITY_REASON='caller-presence-drift'; return 1; }
+  [[ -x "$HC_CALLER_EXECUTABLE" ]] || \
+    { HOOK_CAPABILITY_REASON='caller-executable-absent'; return 1; }
+  [[ -x "$HC_PRODUCER_EXECUTABLE" ]] || \
+    { HOOK_CAPABILITY_REASON='producer-absent'; return 1; }
+  [[ -x "$HC_COORD_EXECUTABLE" ]] || \
+    { HOOK_CAPABILITY_REASON='coord-runtime-absent'; return 1; }
+  current_sha256="$(sha256sum "$HC_PRODUCER_EXECUTABLE" | awk '{print $1}')"
+  current_coord_sha256="$(sha256sum "$HC_COORD_EXECUTABLE" | awk '{print $1}')"
+  native_hook_process_executable_identity "$HC_CALLER_PID" || \
+    { HOOK_CAPABILITY_REASON='caller-executable-absent'; return 1; }
+  current_caller_sha256="$NATIVE_HOOK_PROCESS_SHA256"
+  [[ "$current_sha256" == "$HC_PRODUCER_SHA256" ]] || \
+    { HOOK_CAPABILITY_REASON='producer-drift'; return 1; }
+  [[ "$current_coord_sha256" == "$HC_COORD_SHA256" ]] || \
+    { HOOK_CAPABILITY_REASON='coord-runtime-drift'; return 1; }
+  [[ "$current_caller_sha256" == "$HC_CALLER_SHA256" && \
+    "$NATIVE_HOOK_PROCESS_EXECUTABLE" == "$HC_CALLER_EXECUTABLE" ]] || \
+    { HOOK_CAPABILITY_REASON='caller-executable-drift'; return 1; }
+  if ((HC_WAKE_ELIGIBLE)); then
+    runtime_root="$(active_coord_runtime_root)" || \
+      { HOOK_CAPABILITY_REASON='runtime-root-absent'; return 1; }
+    runtime_self="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || true)"
+    bundle="$(readlink -f "$(dirname "$HC_PRODUCER_EXECUTABLE")/.." 2>/dev/null || true)"
+    manifest="$bundle/manifest"
+    if [[ ! -r "$manifest" ]] ||
+      ! native_hook_capability_bundle_is_admitted "$runtime_root" "$bundle" "$agent" "$lane" ||
+      [[ "$(manifest_field "$manifest" runtime_id)" != "$HC_RUNTIME_ID" ||
+        "$(manifest_field "$manifest" source_sha)" != "$HC_SOURCE_SHA" ||
+        "$(manifest_field "$manifest" loom_runtime_sha256)" != "$HC_PRODUCER_SHA256" ||
+        "$(manifest_field "$manifest" coord_runtime_sha256)" != "$HC_COORD_SHA256" ]]; then
+      HOOK_CAPABILITY_REASON='manifest-binding-drift'
+      return 1
+    fi
+  fi
+  HOOK_CAPABILITY_REASON='native-generation-attested'
+  return 0
+}
+
+hook_capability_is_current() {
+  local agent="$1" lane="$2" generation="$3"
+  if native_hook_wake_selftest_fixture; then
+    HOOK_CAPABILITY_REASON='explicit-selftest-fixture'
+    return 0
+  fi
+  hook_capability_binding_is_current "$agent" "$lane" "$generation" || return 1
+  [[ "$HC_WAKE_ELIGIBLE" == 1 ]] || \
+    { HOOK_CAPABILITY_REASON='selftest-only'; return 1; }
+  return 0
+}
+
+hook_capability_register_command() {
+  local agent="${SOUNIO_AGENT_ID:-}" lane='' session_id='' ttl capability_file
+  local presence_file generation tmp_file
+  while (($#)); do
+    case "$1" in
+      --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
+      --lane) require_arg "$1" "$2"; lane="$2"; shift 2 ;;
+      --session-id) require_arg "$1" "$2"; session_id="$2"; shift 2 ;;
+      *) die "unknown hook-capability-register option: $1" ;;
+    esac
+  done
+  [[ -n "$agent" && -n "$lane" && -n "$session_id" ]] || \
+    die "hook-capability-register requires --agent, --lane, and --session-id"
+  validate_value agent "$agent"
+  validate_value lane "$lane"
+  validate_value session-id "$session_id"
+  native_hook_parent_identity || \
+    die "native hook capability requires the matching OCaml runtime parent"
+  ttl="${SOUNIO_COORD_HOOK_TTL_SECONDS:-1800}"
+  [[ "$ttl" =~ ^[1-9][0-9]*$ ]] || die "hook capability ttl must be positive"
+  acquire_state_lock "the native hook capability registration"
+  presence_file="$(presence_path "$agent" "$lane")"
+  [[ -f "$presence_file" ]] || die "native hook capability requires process presence"
+  load_presence "$presence_file"
+  presence_state || die "native hook capability presence is not live: $PRESENCE_REASON"
+  [[ "$P_AGENT" == "$agent" && "$P_LANE" == "$lane" && \
+    "$P_SESSION_ID" == "$session_id" && "$P_WORKTREE" == "$WORKTREE" ]] || \
+    die "native hook capability does not match process presence"
+  native_hook_caller_matches_presence || \
+    die "native hook caller does not match the existing process presence"
+  generation="$(process_presence_delivery_generation \
+    "$agent" "$lane" "$P_WORKTREE" "$P_HARNESS")" || \
+    die "native hook capability has no process generation"
+  capability_file="$(hook_capability_path "$agent" "$lane")"
+  tmp_file="$(mktemp "$HOOK_CAPABILITIES_DIR/.hook-capability-write.XXXXXX")"
+  {
+    printf 'schema=loom-native-hook-capability-v1\n'
+    printf 'state=NATIVE_HOOK_ATTESTED\n'
+    printf 'agent=%s\n' "$agent"
+    printf 'lane=%s\n' "$lane"
+    printf 'session_id=%s\n' "$session_id"
+    printf 'generation=%s\n' "$generation"
+    printf 'worktree=%s\n' "$P_WORKTREE"
+    printf 'harness=%s\n' "$P_HARNESS"
+    printf 'presence_pid=%s\n' "$P_PID"
+    printf 'presence_pid_start=%s\n' "$P_PID_START"
+    printf 'presence_boot_id=%s\n' "$P_BOOT_ID"
+    printf 'presence_pid_namespace=%s\n' "$P_PID_NAMESPACE"
+    printf 'producer_executable=%s\n' "$NATIVE_HOOK_PARENT_EXECUTABLE"
+    printf 'producer_sha256=%s\n' "$NATIVE_HOOK_PARENT_SHA256"
+    printf 'coord_executable=%s\n' "$NATIVE_HOOK_COORD_EXECUTABLE"
+    printf 'coord_sha256=%s\n' "$NATIVE_HOOK_COORD_SHA256"
+    printf 'caller_pid=%s\n' "$NATIVE_HOOK_CALLER_PID"
+    printf 'caller_pid_start=%s\n' "$NATIVE_HOOK_CALLER_PID_START"
+    printf 'caller_boot_id=%s\n' "$NATIVE_HOOK_CALLER_BOOT_ID"
+    printf 'caller_pid_namespace=%s\n' "$NATIVE_HOOK_CALLER_PID_NAMESPACE"
+    printf 'caller_executable=%s\n' "$NATIVE_HOOK_CALLER_EXECUTABLE"
+    printf 'caller_sha256=%s\n' "$NATIVE_HOOK_CALLER_SHA256"
+    printf 'wake_eligible=%s\n' "$NATIVE_HOOK_WAKE_ELIGIBLE"
+    printf 'runtime_id=%s\n' "$NATIVE_HOOK_RUNTIME_ID"
+    printf 'source_sha=%s\n' "$NATIVE_HOOK_SOURCE_SHA"
+    printf 'created_utc=%s\n' "$NOW_UTC"
+    printf 'created_epoch=%s\n' "$NOW_EPOCH"
+    printf 'expires_epoch=%s\n' "$((NOW_EPOCH + ttl))"
+  } > "$tmp_file"
+  mv "$tmp_file" "$capability_file"
+  printf 'utc=%s event=HOOK_CAPABILITY_REGISTERED agent=%s lane=%s session_id=%s generation=%s runtime_id=%s source_sha=%s state=NATIVE_HOOK_ATTESTED wake_eligible=%s\n' \
+    "$NOW_UTC" "$agent" "$lane" "$session_id" "$generation" \
+    "$NATIVE_HOOK_RUNTIME_ID" "$NATIVE_HOOK_SOURCE_SHA" \
+    "$NATIVE_HOOK_WAKE_ELIGIBLE" >> "$EVENT_LOG"
+  printf 'HOOK_CAPABILITY_REGISTERED agent=%s lane=%s session_id=%s generation=%s runtime_id=%s source_sha=%s state=NATIVE_HOOK_ATTESTED wake_eligible=%s\n' \
+    "$agent" "$lane" "$session_id" "$generation" "$NATIVE_HOOK_RUNTIME_ID" \
+    "$NATIVE_HOOK_SOURCE_SHA" "$NATIVE_HOOK_WAKE_ELIGIBLE"
+}
+
+hook_capability_unregister_command() {
+  local agent="${SOUNIO_AGENT_ID:-}" lane='' session_id='' capability_file presence_file
+  while (($#)); do
+    case "$1" in
+      --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
+      --lane) require_arg "$1" "$2"; lane="$2"; shift 2 ;;
+      --session-id) require_arg "$1" "$2"; session_id="$2"; shift 2 ;;
+      *) die "unknown hook-capability-unregister option: $1" ;;
+    esac
+  done
+  [[ -n "$agent" && -n "$lane" && -n "$session_id" ]] || \
+    die "hook-capability-unregister requires --agent, --lane, and --session-id"
+  native_hook_parent_identity || \
+    die "native hook capability removal requires the matching OCaml runtime parent"
+  acquire_state_lock "the native hook capability removal"
+  presence_file="$(presence_path "$agent" "$lane")"
+  [[ -f "$presence_file" ]] || die "native hook capability removal requires process presence"
+  load_presence "$presence_file"
+  [[ "$P_SESSION_ID" == "$session_id" ]] || die "native hook capability session mismatch"
+  native_hook_caller_matches_presence || \
+    die "native hook removal caller does not match process presence"
+  capability_file="$(hook_capability_path "$agent" "$lane")"
+  [[ -f "$capability_file" ]] && unlink "$capability_file"
+  printf 'utc=%s event=HOOK_CAPABILITY_UNREGISTERED agent=%s lane=%s\n' \
+    "$NOW_UTC" "$agent" "$lane" >> "$EVENT_LOG"
+  printf 'HOOK_CAPABILITY_UNREGISTERED agent=%s lane=%s\n' "$agent" "$lane"
+}
+
+hook_session_close_command() {
+  local agent="${SOUNIO_AGENT_ID:-}" lane='' session_id='' reason=''
+  local claim_file presence_file capability_file endpoint_file expected_generation
+  local revocation_mode='' presence_reason
+  while (($#)); do
+    case "$1" in
+      --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
+      --lane) require_arg "$1" "$2"; lane="$2"; shift 2 ;;
+      --session-id) require_arg "$1" "$2"; session_id="$2"; shift 2 ;;
+      --reason) require_arg "$1" "$2"; reason="$2"; shift 2 ;;
+      *) die "unknown hook-session-close option: $1" ;;
+    esac
+  done
+  [[ -n "$agent" && -n "$lane" && -n "$session_id" && -n "$reason" ]] || \
+    die "hook-session-close requires --agent, --lane, --session-id, and --reason"
+  validate_value agent "$agent"
+  validate_value lane "$lane"
+  validate_value session-id "$session_id"
+  validate_value reason "$reason"
+  native_hook_runtime_parent_identity || \
+    die "native hook session close requires the matching OCaml runtime parent"
+
+  claim_file="$CLAIMS_DIR/$(claim_id_for "$agent" "$lane").claim"
+  presence_file="$(presence_path "$agent" "$lane")"
+  capability_file="$(hook_capability_path "$agent" "$lane")"
+  endpoint_file="$(endpoint_path "$agent" "$lane")"
+  acquire_state_lock "the native hook session close"
+
+  if [[ ! -f "$claim_file" && ! -f "$presence_file" && \
+    ! -f "$capability_file" && ! -f "$endpoint_file" ]]; then
+    printf 'HOOK_SESSION_ABSENT agent=%s lane=%s session_id=%s\n' \
+      "$agent" "$lane" "$session_id"
+    return 0
+  fi
+  [[ -f "$claim_file" && -f "$presence_file" && -f "$capability_file" ]] || \
+    die "native hook session close found incomplete coordination state"
+
+  load_claim "$claim_file"
+  [[ "$C_AGENT" == "$agent" && "$C_LANE" == "$lane" && \
+    "$C_WORKTREE" == "$WORKTREE" ]] || \
+    die "native hook session close claim mismatch"
+  load_presence "$presence_file"
+  [[ "$P_AGENT" == "$agent" && "$P_LANE" == "$lane" && \
+    "$P_SESSION_ID" == "$session_id" && "$P_WORKTREE" == "$WORKTREE" && \
+    "$P_GENERATION" =~ ^[1-9][0-9]*$ ]] || \
+    die "native hook session close presence mismatch"
+  load_hook_capability "$capability_file"
+  expected_generation="process-${P_SESSION_ID}-g${P_GENERATION}-${P_PID}-${P_PID_START}"
+  [[ "$HC_SCHEMA" == loom-native-hook-capability-v1 && \
+    "$HC_STATE" == NATIVE_HOOK_ATTESTED && "$HC_AGENT" == "$agent" && \
+    "$HC_LANE" == "$lane" && "$HC_SESSION_ID" == "$session_id" && \
+    "$HC_GENERATION" == "$expected_generation" && \
+    "$HC_WORKTREE" == "$P_WORKTREE" && "$HC_HARNESS" == "$P_HARNESS" && \
+    "$HC_PRESENCE_PID" == "$P_PID" && \
+    "$HC_PRESENCE_PID_START" == "$P_PID_START" && \
+    "$HC_PRESENCE_BOOT_ID" == "$P_BOOT_ID" && \
+    "$HC_PRESENCE_PID_NAMESPACE" == "$P_PID_NAMESPACE" && \
+    "$HC_CALLER_PID" == "$P_PID" && "$HC_CALLER_PID_START" == "$P_PID_START" && \
+    "$HC_CALLER_BOOT_ID" == "$P_BOOT_ID" && \
+    "$HC_CALLER_PID_NAMESPACE" == "$P_PID_NAMESPACE" ]] || \
+    die "native hook session close capability generation mismatch"
+  [[ "$HC_PRODUCER_EXECUTABLE" == "$NATIVE_HOOK_PARENT_EXECUTABLE" && \
+    "$HC_PRODUCER_SHA256" == "$NATIVE_HOOK_PARENT_SHA256" && \
+    "$HC_COORD_EXECUTABLE" == "$NATIVE_HOOK_COORD_EXECUTABLE" && \
+    "$HC_COORD_SHA256" == "$NATIVE_HOOK_COORD_SHA256" && \
+    "$HC_RUNTIME_ID" == "$NATIVE_HOOK_RUNTIME_ID" && \
+    "$HC_SOURCE_SHA" == "$NATIVE_HOOK_SOURCE_SHA" ]] || \
+    die "native hook session close runtime binding mismatch"
+  if [[ -f "$endpoint_file" ]]; then
+    load_endpoint "$endpoint_file"
+    [[ "$E_AGENT" == "$agent" && "$E_LANE" == "$lane" && \
+      "$E_WORKTREE" == "$WORKTREE" ]] || \
+      die "native hook session close endpoint mismatch"
+  fi
+
+  if native_hook_provider_caller_identity && native_hook_caller_matches_presence; then
+    revocation_mode='live-provider'
+  else
+    presence_state || true
+    presence_reason="$PRESENCE_REASON"
+    [[ "$PRESENCE_STATE" == orphaned && \
+      "$presence_reason" =~ ^(process-missing|pid-reused|boot-changed|pid-namespace-changed)$ ]] || \
+      die "native hook session close caller mismatch while provider generation is not dead"
+    revocation_mode="dead-provider-${presence_reason}"
+  fi
+
+  remove_presence_for_lane "$agent" "$lane" "$WORKTREE" hook-session-close
+  remove_endpoint_for_lane "$agent" "$lane" "$WORKTREE" hook-session-close
+  C_BRANCH="$(current_branch)"
+  C_SHA="$(current_sha)"
+  append_event RELEASE "$reason"
+  unlink "$claim_file"
+  printf 'utc=%s event=HOOK_SESSION_CLOSED agent=%s lane=%s session_id=%s generation=%s runtime_id=%s revocation_mode=%s reconcile_pending=true\n' \
+    "$NOW_UTC" "$agent" "$lane" "$session_id" "$expected_generation" \
+    "$NATIVE_HOOK_RUNTIME_ID" "$revocation_mode" >> "$EVENT_LOG"
+  printf 'HOOK_SESSION_CLOSED agent=%s lane=%s session_id=%s generation=%s runtime_id=%s revocation_mode=%s reconcile_pending=true\n' \
+    "$agent" "$lane" "$session_id" "$expected_generation" \
+    "$NATIVE_HOOK_RUNTIME_ID" "$revocation_mode"
+}
+
+hook_capability_status_command() {
+  local agent="${SOUNIO_AGENT_ID:-}" lane='' capability_file
+  while (($#)); do
+    case "$1" in
+      --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
+      --lane) require_arg "$1" "$2"; lane="$2"; shift 2 ;;
+      *) die "unknown hook-capability-status option: $1" ;;
+    esac
+  done
+  [[ -n "$agent" && -n "$lane" ]] || \
+    die "hook-capability-status requires --agent and --lane"
+  capability_file="$(hook_capability_path "$agent" "$lane")"
+  [[ -f "$capability_file" ]] || die "native hook capability not found: $agent/$lane"
+  load_hook_capability "$capability_file"
+  if hook_capability_binding_is_current "$agent" "$lane" "$HC_GENERATION"; then
+    printf 'HOOK_CAPABILITY_STATUS agent=%s lane=%s session_id=%s generation=%s runtime_id=%s source_sha=%s state=NATIVE_HOOK_ATTESTED wake_eligible=%s reason=%s\n' \
+      "$agent" "$lane" "$HC_SESSION_ID" "$HC_GENERATION" "$HC_RUNTIME_ID" \
+      "$HC_SOURCE_SHA" "$HC_WAKE_ELIGIBLE" "$HOOK_CAPABILITY_REASON"
+  else
+    printf 'HOOK_CAPABILITY_STATUS agent=%s lane=%s session_id=%s generation=%s runtime_id=%s source_sha=%s state=INELIGIBLE reason=%s\n' \
+      "$agent" "$lane" "$HC_SESSION_ID" "$HC_GENERATION" "$HC_RUNTIME_ID" \
+      "$HC_SOURCE_SHA" "$HOOK_CAPABILITY_REASON"
+    return 1
+  fi
+}
+
+wake_submission_generation_is_current() {
+  local current_pane current_pid current_command current_path current_root current_generation
+  case "$S_TRANSPORT" in
+    tmux)
+      [[ -S "$S_SOCKET" ]] || return 1
+      current_pane="$(tmux -S "$S_SOCKET" display-message -p -t "$S_ADDRESS" '#{pane_id}' 2>/dev/null || true)"
+      current_pid="$(tmux -S "$S_SOCKET" display-message -p -t "$S_ADDRESS" '#{pane_pid}' 2>/dev/null || true)"
+      current_command="$(tmux -S "$S_SOCKET" display-message -p -t "$S_ADDRESS" '#{pane_current_command}' 2>/dev/null || true)"
+      current_path="$(tmux -S "$S_SOCKET" display-message -p -t "$S_ADDRESS" '#{pane_current_path}' 2>/dev/null || true)"
+      [[ "$current_pane" == "$S_ADDRESS" && "$current_pid" =~ ^[1-9][0-9]*$ && \
+        -n "$current_path" ]] || return 1
+      harness_command_matches "$S_HARNESS" "$current_command" || return 1
+      current_root="$(git -C "$current_path" rev-parse --show-toplevel 2>/dev/null || true)"
+      [[ -n "$current_root" ]] || return 1
+      current_root="$(cd "$current_root" && pwd -P)"
+      [[ "$current_root" == "$S_WORKTREE" ]] || return 1
+      if [[ "$S_GENERATION" == process-* ]]; then
+        current_generation="$(process_presence_delivery_generation \
+          "$S_AGENT" "$S_LANE" "$S_WORKTREE" "$S_HARNESS" 2>/dev/null || true)"
+      else
+        current_generation="tmux-$S_ADDRESS-$current_pid"
+      fi
+      [[ -n "$current_generation" && "$current_generation" == "$S_GENERATION" ]]
+      ;;
+    agentd|loom)
+      local endpoint_file
+      endpoint_file="$(endpoint_path "$S_AGENT" "$S_LANE")"
+      [[ -f "$endpoint_file" ]] || return 1
+      load_endpoint "$endpoint_file"
+      endpoint_state || return 1
+      [[ "$E_ID" == "$S_ENDPOINT_ID" ]] || return 1
+      current_generation="$(registered_delivery_generation 2>/dev/null || true)"
+      [[ -n "$current_generation" && "$current_generation" == "$S_GENERATION" ]]
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+wait_for_wake_start() {
+  local receipt_file="$1" timeout_millis checks attempt
+  timeout_millis="${SOUNIO_COORD_WAKE_START_TIMEOUT_MILLIS:-1500}"
+  [[ "$timeout_millis" =~ ^[0-9]+$ ]] || \
+    die "SOUNIO_COORD_WAKE_START_TIMEOUT_MILLIS must be a non-negative integer"
+  checks=$((timeout_millis / 50))
+  for ((attempt = 0; attempt <= checks; attempt++)); do
+    [[ -f "$receipt_file" ]] && return 0
+    ((attempt == checks)) || sleep 0.05
+  done
+  return 1
+}
+
+tmux_wake_prompt_is_visible() {
+  local socket="$1" address="$2" message_id="$3"
+  tmux -S "$socket" capture-pane -p -J -t "$address" 2>/dev/null | \
+    grep -Fq -- "$message_id"
+}
+
+attempt_tmux_wake_submission() {
+  local message_id="$1" endpoint_id="$2" target_agent="$3" target_lane="$4"
+  local harness="$5" target_worktree="$6" socket="$7" address="$8"
+  local generation="$9" discovery="${10}" prompt="${11}"
+  local receipt_file submission_file current_utc current_epoch needs_insert=1
+  local insertion_uncertain=0
+
+  receipt_file="$(wake_receipt_path "$message_id" "$endpoint_id" "$generation")"
+  submission_file="$(wake_submission_path "$message_id" "$endpoint_id" "$generation")"
+  if [[ -f "$receipt_file" ]]; then
+    WAKE_STATUS='deduplicated'
+    printf 'WAKE_SKIPPED message_id=%s endpoint_id=%s generation=%s reason=already-started discovery=%s\n' \
+      "$message_id" "$endpoint_id" "$generation" "$discovery"
+    return 0
+  fi
+
+  current_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  current_epoch="$(date +%s)"
+  if [[ -f "$submission_file" ]]; then
+    load_wake_submission "$submission_file"
+    [[ "$S_SCHEMA" == loom-wake-submission-v1 && "$S_MESSAGE_ID" == "$message_id" && \
+      "$S_ENDPOINT_ID" == "$endpoint_id" && "$S_AGENT" == "$target_agent" && \
+      "$S_LANE" == "$target_lane" && "$S_GENERATION" == "$generation" ]] || \
+      die "wake submission identity mismatch: $submission_file"
+    case "$S_STATE" in
+      prepared|submit-uncertain|submitted) ;;
+      *) die "wake submission has invalid transport state: $submission_file" ;;
+    esac
+    case "$S_INSERTION_STATE" in
+      not-attempted) needs_insert=1 ;;
+      confirmed) needs_insert=0 ;;
+      uncertain)
+        needs_insert=0
+        if tmux_wake_prompt_is_visible "$socket" "$address" "$message_id"; then
+          S_INSERTION_STATE='confirmed'
+          [[ -n "$S_INSERTED_UTC" ]] || S_INSERTED_UTC="$current_utc"
+        else
+          insertion_uncertain=1
+        fi
+        ;;
+      *) die "wake submission has invalid insertion state: $submission_file" ;;
+    esac
+  else
+    S_SCHEMA='loom-wake-submission-v1'
+    S_STATE='prepared'
+    S_MESSAGE_ID="$message_id"
+    S_ENDPOINT_ID="$endpoint_id"
+    S_AGENT="$target_agent"
+    S_LANE="$target_lane"
+    S_HARNESS="$harness"
+    S_WORKTREE="$target_worktree"
+    S_TRANSPORT='tmux'
+    S_ADDRESS="$address"
+    S_SOCKET="$socket"
+    S_GENERATION="$generation"
+    S_DISCOVERY="$discovery"
+    S_CREATED_UTC="$current_utc"
+    S_INSERTION_STATE='not-attempted'
+    S_INSERTED_UTC=''
+    S_SUBMITTED_UTC=''
+    S_LAST_ATTEMPT_EPOCH=0
+    S_ATTEMPTS=0
+  fi
+  if ! hook_capability_is_current "$target_agent" "$target_lane" "$generation"; then
+    # A legacy lane may retain a durable obligation, but it must not look like
+    # an attempted terminal write. A later native generation can start here.
+    write_wake_submission "$submission_file"
+    cleanup_lock
+    WAKE_STATUS='pending-native-hook'
+    printf 'utc=%s event=WAKE_DEFERRED message_id=%s endpoint_id=%s agent=%s lane=%s transport=tmux address=%s generation=%s reason=hook-capability-%s\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$message_id" "$endpoint_id" \
+      "$target_agent" "$target_lane" "$address" "$generation" \
+      "$HOOK_CAPABILITY_REASON" >> "$EVENT_LOG"
+    printf 'WAKE_PENDING message_id=%s endpoint_id=%s transport=tmux address=%s generation=%s state=awaiting-native-hook reason=%s discovery=%s\n' \
+      "$message_id" "$endpoint_id" "$address" "$generation" \
+      "$HOOK_CAPABILITY_REASON" "$discovery"
+    return 1
+  fi
+
+  S_LAST_ATTEMPT_EPOCH="$current_epoch"
+  S_ATTEMPTS=$((S_ATTEMPTS + 1))
+  if ((needs_insert)); then
+    # Persist uncertainty immediately before the external write. A crash after
+    # send-keys can recover by observing this exact message id, but may never
+    # blindly reinsert.
+    S_INSERTION_STATE='uncertain'
+  fi
+  write_wake_submission "$submission_file"
+  cleanup_lock
+
+  if ((insertion_uncertain)); then
+    WAKE_STATUS='pending-insertion-uncertain'
+    printf 'WAKE_PENDING message_id=%s endpoint_id=%s transport=tmux address=%s generation=%s state=insertion-uncertain discovery=%s\n' \
+      "$message_id" "$endpoint_id" "$address" "$generation" "$discovery"
+    return 1
+  fi
+
+  if [[ -f "$receipt_file" ]]; then
+    WAKE_STATUS='started'
+    printf 'WAKE_STARTED message_id=%s endpoint_id=%s transport=tmux address=%s generation=%s discovery=%s\n' \
+      "$message_id" "$endpoint_id" "$address" "$generation" "$discovery"
+    return 0
+  fi
+
+  if ((needs_insert)); then
+    if ! tmux -S "$socket" send-keys -t "$address" -l "$prompt" 2>/dev/null; then
+      WAKE_STATUS='pending-insertion-uncertain'
+      printf 'WAKE_PENDING message_id=%s endpoint_id=%s transport=tmux address=%s generation=%s state=insertion-uncertain discovery=%s\n' \
+        "$message_id" "$endpoint_id" "$address" "$generation" "$discovery"
+      return 1
+    fi
+    if [[ "${SOUNIO_COORD_TEST_FAIL_AFTER_WAKE_INSERT:-0}" == 1 ]]; then
+      WAKE_STATUS='pending-insertion-uncertain'
+      printf 'WAKE_PENDING message_id=%s endpoint_id=%s transport=tmux address=%s generation=%s state=insertion-uncertain discovery=%s sabotage=after-external-insert\n' \
+        "$message_id" "$endpoint_id" "$address" "$generation" "$discovery"
+      return 1
+    fi
+    acquire_state_lock "the wake insertion receipt"
+    if [[ -f "$submission_file" && ! -f "$receipt_file" ]]; then
+      load_wake_submission "$submission_file"
+      S_INSERTION_STATE='confirmed'
+      S_INSERTED_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      write_wake_submission "$submission_file"
+    fi
+    cleanup_lock
+    printf 'utc=%s event=WAKE_INSERTED message_id=%s endpoint_id=%s agent=%s lane=%s transport=tmux address=%s generation=%s discovery=%s\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$message_id" "$endpoint_id" \
+      "$target_agent" "$target_lane" "$address" "$generation" "$discovery" >> "$EVENT_LOG"
+  fi
+
+  acquire_state_lock "the wake submit preparation"
+  if [[ -f "$submission_file" && ! -f "$receipt_file" ]]; then
+    load_wake_submission "$submission_file"
+    case "$S_STATE" in
+      prepared) S_STATE='submit-uncertain' ;;
+      submit-uncertain|submitted) ;;
+      *) die "wake submission has invalid pre-submit state: $submission_file" ;;
+    esac
+    write_wake_submission "$submission_file"
+  fi
+  cleanup_lock
+
+  if [[ ! -f "$receipt_file" ]] && \
+    ! tmux -S "$socket" send-keys -t "$address" Enter 2>/dev/null; then
+    WAKE_STATUS='pending-submit'
+    printf 'WAKE_PENDING message_id=%s endpoint_id=%s transport=tmux address=%s generation=%s state=submit-pending discovery=%s\n' \
+      "$message_id" "$endpoint_id" "$address" "$generation" "$discovery"
+    return 1
+  fi
+  acquire_state_lock "the wake submit receipt"
+  if [[ -f "$submission_file" && ! -f "$receipt_file" ]]; then
+    load_wake_submission "$submission_file"
+    S_STATE='submitted'
+    [[ -n "$S_SUBMITTED_UTC" ]] || \
+      S_SUBMITTED_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    write_wake_submission "$submission_file"
+  fi
+  cleanup_lock
+  printf 'utc=%s event=WAKE_SUBMITTED message_id=%s endpoint_id=%s agent=%s lane=%s transport=tmux address=%s generation=%s discovery=%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$message_id" "$endpoint_id" \
+    "$target_agent" "$target_lane" "$address" "$generation" "$discovery" >> "$EVENT_LOG"
+
+  if wait_for_wake_start "$receipt_file"; then
+    WAKE_STATUS='started'
+    printf 'WAKE_STARTED message_id=%s endpoint_id=%s transport=tmux address=%s generation=%s discovery=%s\n' \
+      "$message_id" "$endpoint_id" "$address" "$generation" "$discovery"
+    return 0
+  fi
+  WAKE_STATUS='pending-start'
+  printf 'WAKE_PENDING message_id=%s endpoint_id=%s transport=tmux address=%s generation=%s state=awaiting-start discovery=%s\n' \
+    "$message_id" "$endpoint_id" "$address" "$generation" "$discovery"
+  return 1
 }
 
 WAKE_STATUS='unavailable'
@@ -1358,44 +2395,39 @@ attempt_message_wake() {
     receipt_file="$(wake_receipt_path "$M_ID" "$D_ENDPOINT_ID" "$delivery_generation")"
     if [[ -f "$receipt_file" ]]; then
       WAKE_STATUS='deduplicated'
-      printf 'WAKE_SKIPPED message_id=%s endpoint_id=%s generation=%s reason=already-delivered discovery=%s\n' \
+      printf 'WAKE_SKIPPED message_id=%s endpoint_id=%s generation=%s reason=already-started discovery=%s\n' \
         "$M_ID" "$D_ENDPOINT_ID" "$delivery_generation" "$D_DISCOVERY"
       return 0
     fi
     launcher="$(coord_inbox_launcher)"
     prompt="Sounio coordination wake: $M_KIND $M_ID from $(slug "$M_FROM_AGENT")/$(slug "$M_FROM_LANE") is waiting. Run $launcher inbox --agent $D_AGENT --lane $D_LANE --directed-only --newest-first, then run $launcher reply --agent $D_AGENT --lane $D_LANE --reply-to $M_ID --message \"<response>\" or $launcher ack --agent $D_AGENT --lane $D_LANE --message $M_ID."
-    if ! tmux -S "$D_SOCKET" send-keys -t "$D_ADDRESS" -l "$prompt" 2>/dev/null || \
-      ! tmux -S "$D_SOCKET" send-keys -t "$D_ADDRESS" Enter 2>/dev/null; then
-      WAKE_STATUS='failed'
-      printf 'WAKE_FAILED message_id=%s endpoint_id=%s transport=tmux discovery=%s\n' \
-        "$M_ID" "$D_ENDPOINT_ID" "$D_DISCOVERY" >&2
-      return 1
-    fi
-    tmp_file="$(mktemp "$WAKES_DIR/.wake-write.XXXXXX")"
-    printf 'utc=%s message_id=%s endpoint_id=%s transport=tmux address=%s generation=%s discovery=%s\n' \
-      "$NOW_UTC" "$M_ID" "$D_ENDPOINT_ID" "$D_ADDRESS" "$delivery_generation" \
-      "$D_DISCOVERY" > "$tmp_file"
-    mv "$tmp_file" "$receipt_file"
-    printf 'utc=%s event=WAKE_DELIVERED message_id=%s endpoint_id=%s agent=%s lane=%s transport=tmux address=%s generation=%s discovery=%s\n' \
-      "$NOW_UTC" "$M_ID" "$D_ENDPOINT_ID" "$D_AGENT" "$D_LANE" "$D_ADDRESS" \
-      "$delivery_generation" "$D_DISCOVERY" >> "$EVENT_LOG"
-    WAKE_STATUS='delivered'
-    printf 'WAKE_DELIVERED message_id=%s endpoint_id=%s transport=tmux address=%s generation=%s discovery=%s\n' \
-      "$M_ID" "$D_ENDPOINT_ID" "$D_ADDRESS" "$delivery_generation" "$D_DISCOVERY"
-    return 0
+    attempt_tmux_wake_submission "$M_ID" "$D_ENDPOINT_ID" "$D_AGENT" "$D_LANE" \
+      "$D_HARNESS" "$D_WORKTREE" "$D_SOCKET" "$D_ADDRESS" "$delivery_generation" \
+      "$D_DISCOVERY" "$prompt"
+    return $?
   fi
   load_endpoint "$endpoint_file"
   delivery_generation="$(registered_delivery_generation)" || return 1
   receipt_file="$(wake_receipt_path "$M_ID" "$E_ID" "$delivery_generation")"
   if [[ -f "$receipt_file" ]]; then
     WAKE_STATUS='deduplicated'
-    printf 'WAKE_SKIPPED message_id=%s endpoint_id=%s generation=%s reason=already-delivered\n' \
-      "$M_ID" "$E_ID" "$delivery_generation"
+    if [[ "$E_TRANSPORT" == tmux ]]; then
+      printf 'WAKE_SKIPPED message_id=%s endpoint_id=%s generation=%s reason=already-started\n' \
+        "$M_ID" "$E_ID" "$delivery_generation"
+    else
+      printf 'WAKE_SKIPPED message_id=%s endpoint_id=%s generation=%s reason=already-delivered\n' \
+        "$M_ID" "$E_ID" "$delivery_generation"
+    fi
     return 0
   fi
 
   launcher="$(coord_inbox_launcher)"
   prompt="Sounio coordination wake: $M_KIND $M_ID from $(slug "$M_FROM_AGENT")/$(slug "$M_FROM_LANE") is waiting. Run $launcher inbox --agent $E_AGENT --lane $E_LANE --directed-only --newest-first, then run $launcher reply --agent $E_AGENT --lane $E_LANE --reply-to $M_ID --message \"<response>\" or $launcher ack --agent $E_AGENT --lane $E_LANE --message $M_ID."
+  if [[ "$E_TRANSPORT" == tmux ]]; then
+    attempt_tmux_wake_submission "$M_ID" "$E_ID" "$E_AGENT" "$E_LANE" "$E_HARNESS" \
+      "$E_WORKTREE" "$E_SOCKET" "$E_ADDRESS" "$delivery_generation" registered "$prompt"
+    return $?
+  fi
   if ! deliver_registered_endpoint "$prompt" "$M_ID"; then
     WAKE_STATUS='failed'
     printf 'WAKE_FAILED message_id=%s endpoint_id=%s transport=%s\n' \
@@ -1431,6 +2463,8 @@ print_message_line() {
         "$M_EXPERIMENT_PREREG_SHA256" "$M_EXPERIMENT_OUTCOME_SHA256"
     fi
   fi
+  printf ' to_agent=%s to_lane=%s created_epoch=%s' \
+    "${M_TO_AGENT:--}" "${M_TO_LANE:--}" "$M_CREATED_EPOCH"
   printf '\n'
 }
 
@@ -2160,7 +3194,12 @@ presence_unregister_command() {
     return 0
   fi
   remove_presence_for_lane "$agent" "$lane" "$WORKTREE" clean-exit
-  printf 'PRESENCE_UNREGISTERED presence_id=%s\n' "$(claim_id_for "$agent" "$lane")"
+  if [[ -f "$presence_file" ]]; then
+    printf 'PRESENCE_RECONCILE_PENDING presence_id=%s action=9047\n' \
+      "$(claim_id_for "$agent" "$lane")"
+  else
+    printf 'PRESENCE_UNREGISTERED presence_id=%s\n' "$(claim_id_for "$agent" "$lane")"
+  fi
 }
 
 pending_directed_count() {
@@ -2622,10 +3661,82 @@ coord_obligation_reconcile_command() {
     "$opened" "$marked" "$legacy" "$ignored"
 }
 
+coord_wake_reconcile_command() {
+  (($# == 0)) || die "wake-reconcile does not accept arguments"
+  local submission_file message_file runtime_self now_epoch retry_interval attempt_budget
+  local attempted=0 started=0 pending=0 skipped=0 eligible=0 budget_skipped=0
+  local sender_agent sender_lane output
+  local -a submission_paths=()
+  retry_interval="${SOUNIO_COORD_WAKE_RETRY_INTERVAL_SECONDS:-300}"
+  [[ "$retry_interval" =~ ^[1-9][0-9]*$ ]] || \
+    die "SOUNIO_COORD_WAKE_RETRY_INTERVAL_SECONDS must be a positive integer"
+  attempt_budget="${SOUNIO_COORD_WAKE_RECONCILE_BUDGET:-4}"
+  [[ "$attempt_budget" =~ ^[1-9][0-9]*$ ]] || \
+    die "SOUNIO_COORD_WAKE_RECONCILE_BUDGET must be a positive integer"
+  now_epoch="$(date +%s)"
+  runtime_self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/$(basename "${BASH_SOURCE[0]}")"
+  submission_paths=("$WAKE_SUBMISSIONS_DIR"/*.submitted)
+  for submission_file in "${submission_paths[@]}"; do
+    [[ -f "$submission_file" ]] || continue
+    load_wake_submission "$submission_file"
+    [[ "$S_SCHEMA" == loom-wake-submission-v1 && \
+      "$S_LAST_ATTEMPT_EPOCH" =~ ^[0-9]+$ ]] || \
+      { skipped=$((skipped + 1)); continue; }
+    case "$S_STATE" in
+      prepared|submit-uncertain|submitted) ;;
+      *) skipped=$((skipped + 1)); continue ;;
+    esac
+    ((now_epoch >= S_LAST_ATTEMPT_EPOCH + retry_interval)) || { skipped=$((skipped + 1)); continue; }
+    message_file="$MESSAGES_DIR/$(slug "$S_MESSAGE_ID").message"
+    [[ -f "$message_file" ]] || { skipped=$((skipped + 1)); continue; }
+    eligible=$((eligible + 1))
+    if ((attempted >= attempt_budget)); then
+      budget_skipped=$((budget_skipped + 1))
+      continue
+    fi
+    load_message "$message_file"
+    sender_agent="$M_FROM_AGENT"
+    sender_lane="$M_FROM_LANE"
+    attempted=$((attempted + 1))
+    if output="$(env SOUNIO_COORD_DIR="$STATE_DIR" \
+      SOUNIO_COORD_WAKE_START_TIMEOUT_MILLIS="${SOUNIO_COORD_WAKE_RETRY_WAIT_MILLIS:-250}" \
+      "$runtime_self" wake --agent "$sender_agent" --lane "$sender_lane" \
+      --message "$S_MESSAGE_ID" 2>&1)"; then
+      started=$((started + 1))
+    else
+      pending=$((pending + 1))
+    fi
+    printf '%s\n' "$output"
+  done
+  printf 'WAKE_RECONCILE attempted=%s started=%s pending=%s skipped=%s eligible=%s budget_skipped=%s budget=%s retry_interval_seconds=%s\n' \
+    "$attempted" "$started" "$pending" "$skipped" "$eligible" "$budget_skipped" \
+    "$attempt_budget" "$retry_interval"
+}
+
 coord_obligation_supervisor_stop_children() {
-  local child
-  for child in $(jobs -pr); do
+  local child attempt proc_tail proc_state
+  local -a children=() remaining=()
+  mapfile -t children < <(jobs -pr)
+  for child in "${children[@]}"; do
     kill "$child" 2>/dev/null || true
+  done
+  for attempt in {1..10}; do
+    remaining=()
+    for child in "${children[@]}"; do
+      if kill -0 "$child" 2>/dev/null; then
+        proc_tail="$(sed 's/^[^)]*) //' "/proc/$child/stat" 2>/dev/null || true)"
+        proc_state="${proc_tail%% *}"
+        [[ -z "$proc_tail" || "$proc_state" == Z ]] || remaining+=("$child")
+      fi
+    done
+    ((${#remaining[@]} == 0)) && break
+    sleep 0.1
+  done
+  for child in "${remaining[@]}"; do
+    kill -KILL "$child" 2>/dev/null || true
+  done
+  for child in "${children[@]}"; do
+    wait "$child" 2>/dev/null || true
   done
 }
 
@@ -2671,11 +3782,80 @@ coord_obligation_supervisor_owned_executable() {
   [[ -n "$local_loom" && "$executable" == "$local_loom" ]]
 }
 
+coord_obligation_supervisor_owned_pids() {
+  local proc pid owner ppid value index observed_state_dir script_path runtime_root local_runtime
+  local expected_state_dir env_value
+  local -a argv=()
+  expected_state_dir="$(readlink -f "$STATE_DIR" 2>/dev/null || true)"
+  [[ -n "$expected_state_dir" ]] || return 0
+  runtime_root="${SOUNIO_COORD_RUNTIME_DIR:-$GIT_COMMON_DIR/sounio-coord-runtime}"
+  runtime_root="$(readlink -f "$runtime_root" 2>/dev/null || true)"
+  local_runtime="$(readlink -f "$WORKTREE/scripts/dev/sounio_coord_runtime.sh" 2>/dev/null || true)"
+  for proc in /proc/[1-9]*; do
+    [[ -d "$proc" ]] || continue
+    pid="${proc##*/}"
+    argv=()
+    while IFS= read -r -d '' value; do
+      argv+=("$value")
+    done < "$proc/cmdline" 2>/dev/null || true
+    [[ "${argv[2]:-}" == obligation-supervise ]] || continue
+    owner="$(stat -c %u "$proc" 2>/dev/null || true)"
+    [[ "$owner" == "$(id -u)" ]] || continue
+    ppid="$(sed -n 's/^PPid:[[:space:]]*//p' "$proc/status" 2>/dev/null || true)"
+    [[ "$ppid" == 1 ]] || continue
+    script_path="$(readlink -f "${argv[1]:-}" 2>/dev/null || true)"
+    [[ -n "$script_path" ]] || continue
+    if [[ -n "$runtime_root" ]]; then
+      case "$script_path" in
+        "$runtime_root"/versions/*/bin/sounio-coord-runtime) ;;
+        *) [[ -n "$local_runtime" && "$script_path" == "$local_runtime" ]] || continue ;;
+      esac
+    elif [[ -z "$local_runtime" || "$script_path" != "$local_runtime" ]]; then
+      continue
+    fi
+    observed_state_dir=''
+    for ((index = 3; index + 1 < ${#argv[@]}; index++)); do
+      if [[ "${argv[$index]}" == --state-dir ]]; then
+        observed_state_dir="$(readlink -f "${argv[$((index + 1))]}" 2>/dev/null || true)"
+        break
+      fi
+    done
+    if [[ -z "$observed_state_dir" && -r "$proc/environ" ]]; then
+      while IFS= read -r -d '' env_value; do
+        case "$env_value" in
+          SOUNIO_COORD_DIR=*)
+            observed_state_dir="$(readlink -f "${env_value#SOUNIO_COORD_DIR=}" 2>/dev/null || true)"
+            break
+            ;;
+        esac
+      done 2>/dev/null < "$proc/environ" || true
+      # De dentro da membrana do change kernel o supervisor roda noutro
+      # namespace de usuario: o kernel nega abrir o environ dele mesmo com o
+      # [[ -r ]] passando. Sem ler, cai na regra de baixo, que ja e a do caso
+      # normal (supervisor do bundle usa o sounio-coord-state do git common).
+    fi
+    if [[ -z "$observed_state_dir" && -n "$runtime_root" ]]; then
+      case "$script_path" in
+        "$runtime_root"/versions/*/bin/sounio-coord-runtime)
+          observed_state_dir="$(readlink -f "$GIT_COMMON_DIR/sounio-coord-state" 2>/dev/null || true)"
+          ;;
+      esac
+    fi
+    [[ "$observed_state_dir" == "$expected_state_dir" ]] || continue
+    printf '%s\n' "$pid"
+  done
+  return 0
+}
+
 coord_obligation_supervisor_service_command() {
   local action="$1"; shift
-  local interval=2 timeout=10 lock_file="$STATE_DIR/.obligation-supervisor-bootstrap.lock"
+  local interval=2 timeout=120 lock_file="$STATE_DIR/.obligation-supervisor-bootstrap.lock"
+  local leader_lock="$STATE_DIR/.obligation-supervisor-leader.lock"
   local runtime_self log_file attempt previous_pid='' previous_start=''
-  local expected_loom='' actual_loom='' ensured_state=started
+  local expected_loom='' actual_loom='' ensured_state=started state_live=0 pid
+  local proc_tail proc_state
+  local supervisor_wrapper_pid=''
+  local -a owned_pids=() remaining_pids=()
   while (($#)); do
     case "$1" in
       --interval-seconds)
@@ -2683,7 +3863,6 @@ coord_obligation_supervisor_service_command() {
         require_arg "$1" "$2"; interval="$2"; shift 2
         ;;
       --timeout-seconds)
-        [[ "$action" == stop ]] || die "$1 is only valid for obligation-supervisor-stop"
         require_arg "$1" "$2"; timeout="$2"; shift 2
         ;;
       -h|--help) usage; return 0 ;;
@@ -2692,20 +3871,38 @@ coord_obligation_supervisor_service_command() {
   done
   [[ "$interval" =~ ^[1-9][0-9]*$ ]] && ((interval <= 60)) ||
     die "obligation supervisor interval must be between 1 and 60 seconds"
-  [[ "$timeout" =~ ^[1-9][0-9]*$ ]] && ((timeout <= 60)) ||
-    die "obligation supervisor timeout must be between 1 and 60 seconds"
+  [[ "$timeout" =~ ^[1-9][0-9]*$ ]] && ((timeout <= 300)) ||
+    die "obligation supervisor timeout must be between 1 and 300 seconds"
   mkdir -p "$STATE_DIR"
   exec 6>"$lock_file"
   flock 6
   if coord_obligation_supervisor_state; then
+    state_live=1
     previous_pid="$COORD_OBLIGATION_SUPERVISOR_PID"
     previous_start="$COORD_OBLIGATION_SUPERVISOR_PID_START"
+  fi
+  mapfile -t owned_pids < <(coord_obligation_supervisor_owned_pids)
+  if ((!state_live)) && [[ "$action" == ensure ]] && ((${#owned_pids[@]} == 1)); then
+    for ((attempt = 0; attempt < timeout * 10; attempt++)); do
+      if coord_obligation_supervisor_state; then
+        state_live=1
+        previous_pid="$COORD_OBLIGATION_SUPERVISOR_PID"
+        previous_start="$COORD_OBLIGATION_SUPERVISOR_PID_START"
+        break
+      fi
+      sleep 0.1
+    done
+  fi
+  if ((state_live)); then
     actual_loom="$(readlink -f "/proc/$previous_pid/exe" 2>/dev/null || true)"
     coord_obligation_supervisor_owned_executable "$actual_loom" ||
       die "refusing to signal unowned obligation supervisor pid=$previous_pid executable=${actual_loom:-unknown}"
+    supervisor_wrapper_pid="$(sed -n 's/^PPid:[[:space:]]*//p' "/proc/$previous_pid/status" 2>/dev/null || true)"
+    array_contains "$supervisor_wrapper_pid" "${owned_pids[@]}" ||
+      die "refusing to signal obligation supervisor outside the selected state directory: pid=$previous_pid wrapper=${supervisor_wrapper_pid:-unknown}"
     if [[ "$action" == ensure ]]; then
       expected_loom="$(readlink -f "$(coord_loom_obligation_runtime)")"
-      if [[ "$actual_loom" == "$expected_loom" ]]; then
+      if [[ "$actual_loom" == "$expected_loom" && ${#owned_pids[@]} == 1 ]]; then
         printf 'LOOM_OBLIGATION_SUPERVISOR_ENSURED state=already-running pid=%s pid_start=%s replayed_utc=%s\n' \
           "$previous_pid" "$previous_start" "$COORD_OBLIGATION_SUPERVISOR_REPLAYED_UTC"
         flock -u 6
@@ -2713,17 +3910,32 @@ coord_obligation_supervisor_service_command() {
       fi
       ensured_state=restarted
     fi
-    kill -TERM "$previous_pid" 2>/dev/null || true
+  elif ((${#owned_pids[@]})) && [[ "$action" == ensure ]]; then
+    ensured_state=restarted
+  fi
+  if ((${#owned_pids[@]})); then
+    for pid in "${owned_pids[@]}"; do
+      kill -TERM "$pid" 2>/dev/null || true
+    done
     for ((attempt = 0; attempt < timeout * 10; attempt++)); do
-      coord_obligation_supervisor_state || break
+      remaining_pids=()
+      for pid in "${owned_pids[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+          proc_tail="$(sed 's/^[^)]*) //' "/proc/$pid/stat" 2>/dev/null || true)"
+          proc_state="${proc_tail%% *}"
+          [[ -z "$proc_tail" || "$proc_state" == Z ]] || remaining_pids+=("$pid")
+        fi
+      done
+      ((${#remaining_pids[@]} == 0)) && break
       sleep 0.1
     done
-    if coord_obligation_supervisor_state; then
-      die "obligation supervisor did not stop within ${timeout}s: pid=$previous_pid"
-    fi
+    ((${#remaining_pids[@]} == 0)) ||
+      die "obligation supervisors did not stop within ${timeout}s: pids=$(IFS=,; printf '%s' "${remaining_pids[*]}")"
+    flock -w "$timeout" "$leader_lock" -c true ||
+      die "obligation supervisor leader lock did not release within ${timeout}s: lock=$leader_lock"
     if [[ "$action" == stop ]]; then
-      printf 'LOOM_OBLIGATION_SUPERVISOR_STOPPED state=stopped pid=%s pid_start=%s\n' \
-        "$previous_pid" "$previous_start"
+      printf 'LOOM_OBLIGATION_SUPERVISOR_STOPPED state=stopped pid=%s pid_start=%s retired=%s\n' \
+        "${previous_pid:--}" "${previous_start:--}" "${#owned_pids[@]}"
       flock -u 6
       return 0
     fi
@@ -2738,7 +3950,7 @@ coord_obligation_supervisor_service_command() {
   log_file="$STATE_DIR/obligation-supervisor.log"
   touch "$log_file"
   chmod 0600 "$log_file"
-  /usr/bin/setsid -f "$runtime_self" obligation-supervise \
+  SOUNIO_COORD_DIR="$STATE_DIR" /usr/bin/setsid -f "$runtime_self" obligation-supervise \
     --interval-seconds "$interval" >> "$log_file" 2>&1 </dev/null 6>&-
   for ((attempt = 0; attempt < timeout * 10; attempt++)); do
     if coord_obligation_supervisor_state; then
@@ -2756,6 +3968,7 @@ coord_obligation_supervisor_service_command() {
 coord_obligation_supervisor_command() {
   local action="$1"; shift
   local once=0 interval=2 bridge_pid='' loom_pid='' supervisor_status
+  local leader_lock="$STATE_DIR/.obligation-supervisor-leader.lock"
   local -a args=("obligation-$action")
   while (($#)); do
     case "$1" in
@@ -2776,7 +3989,17 @@ coord_obligation_supervisor_command() {
   fi
   [[ "$interval" =~ ^[1-9][0-9]*$ ]] && ((interval <= 60)) ||
     die "obligation supervisor interval must be between 1 and 60 seconds"
+  if ((!once)); then
+    mkdir -p "$STATE_DIR"
+    exec 7>"$leader_lock"
+    if ! flock -n 7; then
+      printf 'LOOM_OBLIGATION_SUPERVISOR_REFUSED state=duplicate-leader lock=%s\n' \
+        "$leader_lock" >&2
+      return 73
+    fi
+  fi
   coord_obligation_reconcile_command >/dev/null
+  coord_wake_reconcile_command >/dev/null
   if ((once)); then
     coord_obligation_invoke "${args[@]}"
     return 0
@@ -2786,14 +4009,15 @@ coord_obligation_supervisor_command() {
   trap 'coord_obligation_supervisor_stop_children; exit 143' TERM
   (
     while sleep "$interval"; do
-      if ! (coord_obligation_reconcile_command >/dev/null); then
+      if ! (coord_obligation_reconcile_command >/dev/null && \
+        coord_wake_reconcile_command >/dev/null); then
         kill -TERM "$$" 2>/dev/null || true
         exit 1
       fi
     done
-  ) &
+  ) 7>&- &
   bridge_pid=$!
-  coord_obligation_exec "${args[@]}" &
+  coord_obligation_exec "${args[@]}" 7>&- &
   loom_pid=$!
   if wait "$loom_pid"; then
     supervisor_status=0
@@ -3138,6 +4362,143 @@ inbox_command() {
   printf 'inbox_omitted=%s\n' "$omitted"
 }
 
+outbox_command() {
+  local agent="${SOUNIO_AGENT_ID:-}" lane='' newest_first=0 limit_set=0
+  local limit=0 to_agent='' to_lane='' kind='' thread_id='' since_epoch=0
+  local message_file shown=0 matching=0 omitted=0 index
+  local -a message_paths=() matching_paths=() ordered_paths=()
+  while (($#)); do
+    case "$1" in
+      --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
+      --lane) require_arg "$1" "$2"; lane="$2"; shift 2 ;;
+      --newest-first) newest_first=1; shift ;;
+      --limit) require_arg "$1" "$2"; limit="$2"; limit_set=1; shift 2 ;;
+      --to-agent) require_arg "$1" "$2"; to_agent="$2"; shift 2 ;;
+      --to-lane) require_arg "$1" "$2"; to_lane="$2"; shift 2 ;;
+      --kind) require_arg "$1" "$2"; kind="$2"; shift 2 ;;
+      --thread) require_arg "$1" "$2"; thread_id="$2"; shift 2 ;;
+      --since-epoch) require_arg "$1" "$2"; since_epoch="$2"; shift 2 ;;
+      -h|--help) usage; return 0 ;;
+      *) die "unknown outbox option: $1" ;;
+    esac
+  done
+  [[ -n "$agent" ]] || die "outbox requires --agent or SOUNIO_AGENT_ID"
+  [[ -n "$lane" ]] || die "outbox requires --lane"
+  ((limit_set == 0)) || [[ "$limit" =~ ^[1-9][0-9]*$ ]] || \
+    die "--limit must be a positive integer"
+  [[ "$since_epoch" =~ ^[0-9]+$ ]] || die "--since-epoch must be a non-negative integer"
+  [[ -z "$kind" || "$kind" =~ ^(info|request|reply|blocker|handoff)$ ]] || \
+    die "--kind must be info, request, reply, blocker, or handoff"
+  validate_value agent "$agent"
+  validate_value lane "$lane"
+  validate_value to-agent "$to_agent"
+  validate_value to-lane "$to_lane"
+  validate_value thread "$thread_id"
+
+  message_paths=("$MESSAGES_DIR"/*.message)
+  for message_file in "${message_paths[@]}"; do
+    [[ -f "$message_file" ]] || continue
+    load_message "$message_file"
+    message_expired && continue
+    [[ "$M_FROM_AGENT" == "$agent" && "$M_FROM_LANE" == "$lane" ]] || continue
+    [[ -z "$to_agent" || "$M_TO_AGENT" == "$to_agent" ]] || continue
+    [[ -z "$to_lane" || "$M_TO_LANE" == "$to_lane" ]] || continue
+    [[ -z "$kind" || "$M_KIND" == "$kind" ]] || continue
+    [[ -z "$thread_id" || "$M_THREAD_ID" == "$thread_id" ]] || continue
+    ((M_CREATED_EPOCH >= since_epoch)) || continue
+    matching_paths+=("$message_file")
+  done
+
+  matching="${#matching_paths[@]}"
+  if ((newest_first)); then
+    for ((index = matching - 1; index >= 0; index--)); do
+      ordered_paths+=("${matching_paths[index]}")
+    done
+  else
+    ordered_paths=("${matching_paths[@]}")
+  fi
+
+  for message_file in "${ordered_paths[@]}"; do
+    ((limit == 0 || shown < limit)) || break
+    load_message "$message_file"
+    print_message_line
+    shown=$((shown + 1))
+  done
+  omitted=$((matching - shown))
+  printf 'outbox_messages=%s\n' "$shown"
+  printf 'outbox_matching=%s\n' "$matching"
+  printf 'outbox_omitted=%s\n' "$omitted"
+}
+
+promote_wake_submissions_for_injection() {
+  local message_id="$1" agent="$2" lane="$3" submission_file receipt_file tmp_file
+  local promoted=0
+  local -a submission_paths=()
+  submission_paths=("$WAKE_SUBMISSIONS_DIR/$(slug "$message_id")"--*.submitted)
+  for submission_file in "${submission_paths[@]}"; do
+    [[ -f "$submission_file" ]] || continue
+    load_wake_submission "$submission_file"
+    [[ "$S_SCHEMA" == loom-wake-submission-v1 && \
+      "$S_MESSAGE_ID" == "$message_id" && "$S_AGENT" == "$agent" && \
+      "$S_LANE" == "$lane" && "$S_INSERTION_STATE" == confirmed && \
+      -n "$S_INSERTED_UTC" ]] || continue
+    case "$S_STATE" in
+      submit-uncertain) ;;
+      submitted) [[ -n "$S_SUBMITTED_UTC" ]] || continue ;;
+      *) continue ;;
+    esac
+    if ! hook_capability_is_current "$agent" "$lane" "$S_GENERATION"; then
+      printf 'utc=%s event=WAKE_START_REFUSED message_id=%s endpoint_id=%s agent=%s lane=%s generation=%s reason=hook-capability-%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$message_id" "$S_ENDPOINT_ID" \
+        "$agent" "$lane" "$S_GENERATION" "$HOOK_CAPABILITY_REASON" >> "$EVENT_LOG"
+      continue
+    fi
+    if ! wake_submission_generation_is_current; then
+      printf 'utc=%s event=WAKE_START_REFUSED message_id=%s endpoint_id=%s agent=%s lane=%s generation=%s reason=generation-drift\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$message_id" "$S_ENDPOINT_ID" \
+        "$agent" "$lane" "$S_GENERATION" >> "$EVENT_LOG"
+      continue
+    fi
+    if [[ "$S_STATE" == submit-uncertain ]]; then
+      S_STATE='submitted'
+      S_SUBMITTED_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      write_wake_submission "$submission_file"
+    fi
+    receipt_file="$(wake_receipt_path "$message_id" "$S_ENDPOINT_ID" "$S_GENERATION")"
+    if [[ ! -f "$receipt_file" ]]; then
+      tmp_file="$(mktemp "$WAKES_DIR/.wake-start-write.XXXXXX")"
+      printf 'utc=%s message_id=%s endpoint_id=%s transport=%s address=%s generation=%s discovery=%s state=started insertion_state=%s inserted_utc=%s submitted_utc=%s attempts=%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$message_id" "$S_ENDPOINT_ID" \
+        "$S_TRANSPORT" "$S_ADDRESS" "$S_GENERATION" "$S_DISCOVERY" \
+        "$S_INSERTION_STATE" "${S_INSERTED_UTC:--}" "$S_SUBMITTED_UTC" \
+        "$S_ATTEMPTS" > "$tmp_file"
+      mv "$tmp_file" "$receipt_file"
+      printf 'utc=%s event=WAKE_STARTED message_id=%s endpoint_id=%s agent=%s lane=%s transport=%s address=%s generation=%s discovery=%s attempts=%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$message_id" "$S_ENDPOINT_ID" \
+        "$agent" "$lane" "$S_TRANSPORT" "$S_ADDRESS" "$S_GENERATION" \
+        "$S_DISCOVERY" "$S_ATTEMPTS" >> "$EVENT_LOG"
+    fi
+    unlink "$submission_file"
+    promoted=$((promoted + 1))
+    printf 'WAKE_STARTED message_id=%s endpoint_id=%s transport=%s address=%s generation=%s discovery=%s\n' \
+      "$message_id" "$S_ENDPOINT_ID" "$S_TRANSPORT" "$S_ADDRESS" \
+      "$S_GENERATION" "$S_DISCOVERY"
+  done
+  if ((promoted)); then
+    submission_paths=("$WAKE_SUBMISSIONS_DIR/$(slug "$message_id")"--*.submitted)
+    for submission_file in "${submission_paths[@]}"; do
+      [[ -f "$submission_file" ]] || continue
+      load_wake_submission "$submission_file"
+      if [[ "$S_SCHEMA" == loom-wake-submission-v1 && \
+        "$S_MESSAGE_ID" == "$message_id" && "$S_AGENT" == "$agent" && \
+        "$S_LANE" == "$lane" ]]; then
+        unlink "$submission_file"
+      fi
+    done
+  fi
+  return 0
+}
+
 injected_command() {
   local agent="${SOUNIO_AGENT_ID:-}" lane='' message_id message_file injection_file index
   local -a message_ids=() injection_files=()
@@ -3182,6 +4543,7 @@ injected_command() {
       printf 'utc=%s agent=%s lane=%s\n' "$NOW_UTC" "$agent" "$lane" > "$injection_file"
     fi
     printf 'INJECTED message_id=%s agent=%s lane=%s\n' "$message_id" "$agent" "$lane"
+    promote_wake_submissions_for_injection "$message_id" "$agent" "$lane"
   done
 }
 
@@ -3189,11 +4551,11 @@ message_status_command() {
   local agent="${SOUNIO_AGENT_ID:-}" lane='' message_id='' message_file receipt_file
   local original_from_agent original_from_lane original_to_agent original_to_lane
   local original_kind original_thread original_epoch request_state latest_response='-'
-  local latest_kind='' latest_epoch=0 latest_file='' responses=0 injected=0 acknowledged=0 wakes=0
+  local latest_kind='' latest_epoch=0 latest_file='' responses=0 injected=0 acknowledged=0 wakes=0 wake_pending=0
   local receipt_utc receipt_agent receipt_lane token_utc token_agent token_lane
-  local token token_message token_endpoint token_transport token_address token_generation
+  local token token_message token_endpoint token_transport token_address token_generation token_state
   local receipt_generation
-  local -a message_paths=() injection_paths=() ack_paths=() wake_paths=() receipt_tokens=()
+  local -a message_paths=() injection_paths=() ack_paths=() wake_paths=() submission_paths=() receipt_tokens=()
   while (($#)); do
     case "$1" in
       --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
@@ -3260,12 +4622,15 @@ message_status_command() {
   injection_paths=("$INJECTIONS_DIR/$(slug "$message_id")"--*.injected)
   ack_paths=("$ACKS_DIR/$(slug "$message_id")"--*.ack)
   wake_paths=("$WAKES_DIR/$(slug "$message_id")"--*.wake)
+  submission_paths=("$WAKE_SUBMISSIONS_DIR/$(slug "$message_id")"--*.submitted)
   injected="${#injection_paths[@]}"
   acknowledged="${#ack_paths[@]}"
   wakes="${#wake_paths[@]}"
-  printf 'MESSAGE_STATUS id=%s kind=%s thread=%s request_state=%s injected=%s acknowledged=%s responses=%s latest_response=%s wakes=%s\n' \
+  wake_pending="${#submission_paths[@]}"
+  printf 'MESSAGE_STATUS id=%s kind=%s thread=%s request_state=%s injected=%s acknowledged=%s responses=%s latest_response=%s wakes=%s wake_pending=%s created_epoch=%s\n' \
     "$message_id" "$original_kind" "$original_thread" "$request_state" "$injected" \
-    "$acknowledged" "$responses" "$latest_response" "$wakes"
+    "$acknowledged" "$responses" "$latest_response" "$wakes" "$wake_pending" \
+    "$original_epoch"
   for receipt_file in "${injection_paths[@]}"; do
     [[ -f "$receipt_file" ]] || continue
     read -r token_utc token_agent token_lane < "$receipt_file" || true
@@ -3292,6 +4657,7 @@ message_status_command() {
     token_transport=''
     token_address=''
     token_generation=''
+    token_state=''
     receipt_tokens=()
     read -r -a receipt_tokens < "$receipt_file" || true
     for token in "${receipt_tokens[@]}"; do
@@ -3302,13 +4668,15 @@ message_status_command() {
         transport=*) token_transport="$token" ;;
         address=*) token_address="$token" ;;
         generation=*) token_generation="$token" ;;
+        state=*) token_state="$token" ;;
       esac
     done
     receipt_generation="${token_generation#generation=}"
-    printf 'WAKE_RECEIPT message_id=%s utc=%s endpoint_id=%s transport=%s address=%s generation=%s\n' \
+    printf 'WAKE_RECEIPT message_id=%s utc=%s endpoint_id=%s transport=%s address=%s' \
       "$message_id" "${token_utc#utc=}" "${token_endpoint#endpoint_id=}" \
-      "${token_transport#transport=}" "${token_address#address=}" \
-      "${receipt_generation:--}"
+      "${token_transport#transport=}" "${token_address#address=}"
+    [[ -z "$token_state" ]] || printf ' state=%s' "${token_state#state=}"
+    printf ' generation=%s\n' "${receipt_generation:--}"
   done
 }
 
@@ -3382,7 +4750,9 @@ wait_command() {
 }
 
 ack_command() {
-  local agent="${SOUNIO_AGENT_ID:-}" lane='' message_id='' message_file ack_file
+  local agent="${SOUNIO_AGENT_ID:-}" lane='' message_id='' message_file ack_file submission_file
+  local cancelled=0
+  local -a submission_paths=()
   while (($#)); do
     case "$1" in
       --agent) require_arg "$1" "$2"; agent="$2"; shift 2 ;;
@@ -3403,14 +4773,25 @@ ack_command() {
   acquire_state_lock "the acknowledgement"
   ack_file="$(message_ack_path "$M_ID" "$agent" "$lane")"
   printf 'utc=%s agent=%s lane=%s\n' "$NOW_UTC" "$agent" "$lane" > "$ack_file"
-  printf 'ACKED message_id=%s agent=%s lane=%s\n' "$M_ID" "$agent" "$lane"
+  submission_paths=("$WAKE_SUBMISSIONS_DIR/$(slug "$M_ID")"--*.submitted)
+  for submission_file in "${submission_paths[@]}"; do
+    [[ -f "$submission_file" ]] || continue
+    load_wake_submission "$submission_file"
+    unlink "$submission_file"
+    cancelled=$((cancelled + 1))
+    printf 'utc=%s event=WAKE_CANCELLED message_id=%s endpoint_id=%s agent=%s lane=%s generation=%s reason=acknowledged\n' \
+      "$NOW_UTC" "$M_ID" "$S_ENDPOINT_ID" "$agent" "$lane" \
+      "$S_GENERATION" >> "$EVENT_LOG"
+  done
+  printf 'ACKED message_id=%s agent=%s lane=%s wake_cancelled=%s\n' \
+    "$M_ID" "$agent" "$lane" "$cancelled"
 }
 
 prune_command() {
   local removed=0 messages_removed=0 endpoints_removed=0 presences_removed=0
   local recovery_retention="${SOUNIO_COORD_RECOVERY_RETENTION_SECONDS:-604800}"
-  local claim_file message_file ack_file injection_file endpoint_file presence_file wake_file
-  local -a message_paths=() ack_paths=() injection_paths=() endpoint_paths=() presence_paths=() wake_paths=()
+  local claim_file message_file ack_file injection_file endpoint_file presence_file wake_file submission_file
+  local -a message_paths=() ack_paths=() injection_paths=() endpoint_paths=() presence_paths=() wake_paths=() submission_paths=()
   [[ "$recovery_retention" =~ ^[1-9][0-9]*$ ]] || \
     die "SOUNIO_COORD_RECOVERY_RETENTION_SECONDS must be a positive integer"
   acquire_state_lock "prune"
@@ -3444,6 +4825,10 @@ prune_command() {
       for wake_file in "${wake_paths[@]}"; do
         [[ -f "$wake_file" ]] && unlink "$wake_file"
       done
+      submission_paths=("$WAKE_SUBMISSIONS_DIR/$(slug "$M_ID")"--*.submitted)
+      for submission_file in "${submission_paths[@]}"; do
+        [[ -f "$submission_file" ]] && unlink "$submission_file"
+      done
       messages_removed=$((messages_removed + 1))
       printf 'PRUNED_MESSAGE message_id=%s\n' "$M_ID"
     fi
@@ -3465,9 +4850,19 @@ prune_command() {
     presence_state || true
     if [[ "$PRESENCE_STATE" == orphaned ]] && \
       ((NOW_EPOCH > P_LAST_EPOCH + recovery_retention)); then
-      unlink "$presence_file"
-      presences_removed=$((presences_removed + 1))
-      printf 'PRUNED_PRESENCE presence_id=%s agent=%s lane=%s\n' "$P_ID" "$P_AGENT" "$P_LANE"
+      case "$P_HARNESS" in
+        codex|claude|cursor|grok)
+          append_presence_event PRESENCE_RECONCILE_PENDING \
+            "prune refused; Sounio action 9047 required"
+          printf 'RETAINED_PRESENCE presence_id=%s agent=%s lane=%s action=9047\n' \
+            "$P_ID" "$P_AGENT" "$P_LANE"
+          ;;
+        *)
+          unlink "$presence_file"
+          presences_removed=$((presences_removed + 1))
+          printf 'PRUNED_PRESENCE presence_id=%s agent=%s lane=%s\n' "$P_ID" "$P_AGENT" "$P_LANE"
+          ;;
+      esac
     fi
   done
   printf 'pruned=%s pruned_messages=%s\n' "$removed" "$messages_removed"
@@ -3786,6 +5181,11 @@ case "$command" in
   endpoint-status) endpoint_status_command "$@" ;;
   presence-register) presence_register_command "$@" ;;
   presence-unregister) presence_unregister_command "$@" ;;
+  hook-capability-register) hook_capability_register_command "$@" ;;
+  hook-capability-unregister) hook_capability_unregister_command "$@" ;;
+  hook-session-close) hook_session_close_command "$@" ;;
+  hook-capability-status) hook_capability_status_command "$@" ;;
+  hook-caller-attest) hook_caller_attest_command "$@" ;;
   recover) recover_command "$@" ;;
   obligation-open) coord_obligation_open_command "$@" ;;
   obligation-consume) coord_obligation_recipient_command consume "$@" ;;
@@ -3804,6 +5204,7 @@ case "$command" in
   obligation-supervisor-ensure) coord_obligation_supervisor_service_command ensure "$@" ;;
   obligation-supervisor-stop) coord_obligation_supervisor_service_command stop "$@" ;;
   wake) wake_command "$@" ;;
+  wake-reconcile) coord_wake_reconcile_command "$@" ;;
   experiment-open) causal_runtime_command open "$@" ;;
   experiment-close) causal_runtime_command close "$@" ;;
   experiment-status) causal_runtime_command status "$@" ;;
@@ -3811,6 +5212,7 @@ case "$command" in
   send) send_command "$@" ;;
   reply) send_command "$@" --kind reply ;;
   inbox) inbox_command "$@" ;;
+  outbox) outbox_command "$@" ;;
   injected) injected_command "$@" ;;
   ack) ack_command "$@" ;;
   message-status) message_status_command "$@" ;;
@@ -3820,5 +5222,5 @@ case "$command" in
     prune_command
     ;;
   -h|--help|help) usage ;;
-  *) die "unknown command: $command (try runtime-version, brief, status, check, claim, scope, heartbeat, release, authorize, endpoint-register, endpoint-unregister, endpoint-status, presence-register, presence-unregister, recover, obligation-open, obligation-consume, obligation-claim, obligation-renew, obligation-interrupt, obligation-recover, obligation-complete, obligation-status, obligation-list, obligation-reconcile, obligation-supervise, obligation-supervisor-ensure, obligation-supervisor-stop, wake, experiment-open, experiment-close, experiment-status, handoff, send, reply, inbox, injected, ack, message-status, wait, or prune)" ;;
+  *) die "unknown command: $command (try runtime-version, brief, status, check, claim, scope, heartbeat, release, authorize, endpoint-register, endpoint-unregister, endpoint-status, presence-register, presence-unregister, hook-capability-register, hook-capability-unregister, hook-session-close, hook-capability-status, hook-caller-attest, recover, obligation-open, obligation-consume, obligation-claim, obligation-renew, obligation-interrupt, obligation-recover, obligation-complete, obligation-status, obligation-list, obligation-reconcile, obligation-supervise, obligation-supervisor-ensure, obligation-supervisor-stop, wake, wake-reconcile, experiment-open, experiment-close, experiment-status, handoff, send, reply, inbox, outbox, injected, ack, message-status, wait, or prune)" ;;
 esac

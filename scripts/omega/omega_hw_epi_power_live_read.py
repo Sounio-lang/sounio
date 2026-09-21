@@ -143,8 +143,13 @@ def main() -> int:
     fpga = load_json(fpga_path)
     launch = load_json(launch_path)
 
-    accum_sim = str(fpga.get("epistemic_power_accumulator_sim_status", "missing"))
-    accum_synth = str(fpga.get("epistemic_power_accumulator_synth_status", "missing"))
+    # hardware/** has never been versioned in this repository -- a stale
+    # report's status fields describe an environment this checkout doesn't
+    # have (see fpga_seed_report.json's stale_reason). Read them as "stale"
+    # rather than let a fake "pass" make live_read_conformant true below.
+    fpga_stale = bool(fpga.get("stale"))
+    accum_sim = "stale" if fpga_stale else str(fpga.get("epistemic_power_accumulator_sim_status", "missing"))
+    accum_synth = "stale" if fpga_stale else str(fpga.get("epistemic_power_accumulator_synth_status", "missing"))
 
     symbol_mode, symbol_ok = check_symbols(cubin_path)
 

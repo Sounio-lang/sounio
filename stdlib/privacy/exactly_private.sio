@@ -4,47 +4,121 @@
 //
 // Unlike differential privacy — which bounds a user's contribution in an
 // epsilon-norm but leaves a measurable trace — ExactlyPrivate<T> guarantees
-// that the contribution is *algebraically zero* in the kernel subspace of
-// the sedenion ZD operator.  Implementing "Right To Be Forgotten" no
-// longer requires full retraining: one bilinear application of A o w
-// annihilates the user's contribution when it has been stored in the
-// right-annihilator subspace.
+// that the contribution is *algebraically zero* in the kernel subspace of the
+// sedenion ZD operator L_z, z = e3 + e10.  Forgetting is one orthogonal
+// projection off that subspace; no retraining.
+//
+// Wired to the CONSTRUCTIVE, verified kernel basis (algebra::sedenion_kernel::
+// sed_ker_lz_basis):  ker L_z = span{ g0=e6−e15, g1=e4+e13, g2=e5−e12,
+// g3=e7+e14 }.  These four have pairwise-disjoint supports, so they are
+// orthogonal and each g_k·g_k = 2; the projection is therefore a plain sum,
+// c_k = (w·g_k)·0.5, with no Gram inversion and no floating-point rank.
+//
+// Three exact facts about the subspace decide what the type may promise:
+//   (1) ker L_z is a LINEAR subspace (each ĝ_k² = −1). ExactlyPrivate is
+//       preserved under + and scalar — model averaging, gradient steps.
+//   (2) It is NOT a subalgebra: g_i*g_j (i≠j) leaves span{g}. So exact-privacy
+//       is NOT preserved under general sedenion multiplication.
+//   (3) A proper subset of multipliers preserves it two-sidedly (z and the
+//       identity among them; e1, e4 do not). `preserves_exact_privacy` decides
+//       membership in that set — the composition-safety predicate.
+// The certificate lives under +; the associator is its adversary under *. This
+// module states that honestly rather than letting the wrapper oversell.
 //
 // Formal backing: `unlearning_kernel_exact` in
 // formal/lean4/SounioSurgicalInterventions.lean.
-// Operational benchmark: examples/zd_machine_unlearning.sio
-// (Method 3 residual L2 = 0.000000 vs DP=0.78, grad-ascent=0.008).
+// Operational benchmark: examples/zd_machine_unlearning.sio.
 
-// forget_contribution: given a stored weight vector `w` containing a
-// user contribution encoded in the ZD kernel of A = e3 + e10, return
-// `w` minus its kernel projection.  This is the analogue of `revoke`
-// in stdlib/epistemic/revocable.sio; we keep a privacy-scoped copy so
-// downstream call sites do not have to import the epistemic path.
-fn forget_contribution(w: &[f64; 16]) -> [f64; 16] with Mut, ZD {
-    let s = 0.707107
-    var u1: [f64; 16] = [0.0; 16]
-    u1[6]  = s
-    u1[15] = 0.0 - s
-    var u2: [f64; 16] = [0.0; 16]
-    u2[7]  = s
-    u2[14] = s
+use algebra::sedenion_kernel::{sed_ker_lz_basis, sed_ker_lz_preserves}
 
-    var c1 = 0.0; var c2 = 0.0
-    var i = 0
-    while i < 16 { c1 = c1 + (*w)[i] * u1[i]; c2 = c2 + (*w)[i] * u2[i]; i = i + 1 }
+// decompose_ker_lz: the one operation everything derives from. Splits w into its
+// kernel part and its retained part, w = Σ_k coords[k]·g_k + residual, with
+// residual ⊥ ker L_z. Orthogonal because the g_k have disjoint supports.
+pub fn decompose_ker_lz(w: &[f64; 16],
+                        coords_out: &![f64; 4],
+                        residual_out: &![f64; 16]) with Mut {
+    var basis: [f64; 64] = [0.0; 64]
+    sed_ker_lz_basis(&!basis)
+    var i: i64 = 0
+    while i < 16 { residual_out[i] = (*w)[i]; i = i + 1 }
+    var k: i64 = 0
+    while k < 4 {
+        var dot = 0.0
+        i = 0
+        while i < 16 { dot = dot + (*w)[i] * basis[(k * 16 + i) as usize]; i = i + 1 }
+        let ck = dot * 0.5                      // g_k·g_k = 2; ·0.5 is exact
+        coords_out[k] = ck
+        i = 0
+        while i < 16 {
+            residual_out[i] = residual_out[i] - ck * basis[(k * 16 + i) as usize]
+            i = i + 1
+        }
+        k = k + 1
+    }
+}
 
+// forget_contribution: return `w` minus its full kernel projection — the exact
+// "Right To Be Forgotten" operation. Now removes ALL FOUR generators (the prior
+// code removed only g0 and g3, silently leaving g1/g2 contributions behind).
+pub fn forget_contribution(w: &[f64; 16]) -> [f64; 16] with Mut, ZD {
+    var coords: [f64; 4] = [0.0; 4]
+    var residual: [f64; 16] = [0.0; 16]
+    decompose_ker_lz(w, &!coords, &!residual)
+    residual
+}
+
+// kernel_coords: the membership certificate — how much of w lives along each
+// generator. w's private part is Σ_k coords[k]·g_k.
+pub fn kernel_coords(w: &[f64; 16]) -> [f64; 4] with Mut {
+    var coords: [f64; 4] = [0.0; 4]
+    var residual: [f64; 16] = [0.0; 16]
+    decompose_ker_lz(w, &!coords, &!residual)
+    coords
+}
+
+// from_kernel_coords: reconstruct Σ_k c[k]·g_k — a value built from its
+// certificate, in ker L_z by construction.
+pub fn from_kernel_coords(c: &[f64; 4]) -> [f64; 16] with Mut {
+    var basis: [f64; 64] = [0.0; 64]
+    sed_ker_lz_basis(&!basis)
     var out: [f64; 16] = [0.0; 16]
-    i = 0
-    while i < 16 { out[i] = (*w)[i] - c1 * u1[i] - c2 * u2[i]; i = i + 1 }
+    var k: i64 = 0
+    while k < 4 {
+        var i: i64 = 0
+        while i < 16 { out[i] = out[i] + (*c)[k] * basis[(k * 16 + i) as usize]; i = i + 1 }
+        k = k + 1
+    }
     out
 }
 
-// compare_to_never_trained: compute the L2 distance between a forgotten
-// weight and a reference "never-trained-on-user-X" weight.  For the
-// ZD-exact method this is 0 to fp precision; for DP/grad-ascent it is
-// strictly positive.  Used for auditing GDPR compliance.
-fn compare_to_never_trained(w_forgotten: &[f64; 16],
-                             w_reference: &[f64; 16]) -> f64 with Mut {
+// is_exactly_private: 1 iff w lies ENTIRELY in ker L_z, i.e. its retained part
+// is zero. Constructive (uses the named basis). Because span{g} = ker L_z
+// (proven: dim ker L_z = 4, these four independent), this is EQUIVALENT to the
+// semantic property L_z(w) = 0 — the soundness test asserts the equivalence.
+pub fn is_exactly_private(w: &[f64; 16]) -> i64 with Mut {
+    var coords: [f64; 4] = [0.0; 4]
+    var residual: [f64; 16] = [0.0; 16]
+    decompose_ker_lz(w, &!coords, &!residual)
+    var s = 0.0
+    var i: i64 = 0
+    while i < 16 { s = s + residual[i] * residual[i]; i = i + 1 }
+    if s == 0.0 { 1 } else { 0 }
+}
+
+// preserves_exact_privacy: 1 iff left- AND right-multiplication by `a` keep
+// ExactlyPrivate values private (a is in the two-sided kernel-preserving set).
+// This is the composition-safety predicate: it answers "may I apply this
+// operation to a forgotten weight and keep it forgotten?" ker L_z is not a
+// subalgebra, so the answer is not always yes — e.g. z preserves, e1 does not.
+pub fn preserves_exact_privacy(a: &[f64; 16]) -> i64 with Mut {
+    sed_ker_lz_preserves(a)
+}
+
+// compare_to_never_trained: L2 distance between a forgotten weight and a
+// reference "never-trained-on-user-X" weight. 0 to fp precision for the ZD-exact
+// method; strictly positive for DP/grad-ascent. GDPR-compliance audit.
+pub fn compare_to_never_trained(w_forgotten: &[f64; 16],
+                                w_reference: &[f64; 16]) -> f64 with Mut {
     var s = 0.0
     var i = 0
     while i < 16 {

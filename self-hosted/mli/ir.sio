@@ -1,0 +1,616 @@
+// MLI — Machine-Level IR: kind model and data structures (S1)
+//
+// Design authority: docs/architecture/MLI_DESIGN.md (Option C, founder-approved
+// 2026-08-16, preflight amendments D1-D4 folded in) and
+// docs/architecture/WS_C_D_PREFLIGHT_REVIEW_2026-08-16.md.
+//
+// S1 scope: kinds, builder, text dump, V-struct verify. No lowering, no
+// legalize, no codegen. Kinds for Knowledge and Cayley-Dickson algebras are
+// first-class FROM THE START (binding design principle) even though R0 emits
+// only the scalar subset — S5 must not be a breaking rewrite.
+//
+// Frozen kind-model rules (preflight D2 — load-bearing, do not relax):
+//
+//   1. QD128 is NOT IEEE f128. Route-B EMIR error lanes are double-double
+//      family (stdlib/math/qd128.sio); MLI Float{128} is IEEE binary128
+//      (WS-G). They are DISTINCT kinds here. A move between them without an
+//      explicit conversion op is a verify ERROR with its own code
+//      (MLI_VERR_QD128_F128_CONFLATION) — a silent f128 := qd128 mapping
+//      would be a semantic miscompile by construction. No qd conversion op
+//      exists in R0: the path fails closed.
+//
+//   2. There is NO Int{bits:128} in MLI R0, even though language-level
+//      i128/u128 already reach ELF on the direct wide-int path (2026-06).
+//      The exclusion is explicit: a kind claiming Int 128 bits is rejected
+//      by verify with a dedicated code (MLI_VERR_INT128_EXCLUDED). Until an
+//      S4+ wide-int tranche, ir_to_mli must fail closed on i128/u128
+//      functions (design §4.1 option (a)) — never pretend coverage.
+//
+//   3. There is NO Flags kind and NO FLAG register class as long-lived MLI
+//      values. On x86 nearly every ALU op clobbers eflags, so a live Flags
+//      value separated from its consumer is unverifiable by V-struct.
+//      Compares (icmp/fcmp) produce a Bool vreg; br consumes that Bool.
+//      legalize_x86 (S3) may fuse cmp+br into flag use as a target detail.
+//
+//   4. There are NO block parameters and NO phi nodes in MLI (design §4.4
+//      decision). SSA joins are resolved BEFORE MLI (copy insertion in the
+//      feed); MliBlock deliberately has no params field and the builder has
+//      no phi API. A future feed needing in-MLI joins is a versioned
+//      extension, not this default.
+
+module mli::ir
+
+// ---------------------------------------------------------------------------
+// Capacities (fixed backing storage; growth is a one-line change per cap).
+// Overflow anywhere is fail-closed via MliFunction.overflowed — never a
+// silent drop past a wall (machine_ir MIR_MAX_INSTRS lesson).
+// ---------------------------------------------------------------------------
+
+pub let MLI_MAX_BLOCKS: i64 = 16
+pub let MLI_MAX_INSTRS: i64 = 32
+pub let MLI_MAX_VREGS: i64 = 128
+pub let MLI_MAX_ARGS: i64 = 8
+pub let MLI_MAX_FUNCS: i64 = 2
+
+// Instruction pool geometry (see "storage layout" note below): one stride per
+// block = body slots plus one terminator slot.
+pub let MLI_BLOCK_STRIDE: i64 = 33
+pub let MLI_POOL_SIZE: i64 = 528
+
+// Construction canary: mli_func_empty() stamps this; verify checks it first.
+// Catches large-struct return-boundary corruption loudly instead of silently.
+pub let MLI_FUNC_MAGIC: i64 = 5065801
+
+// ---------------------------------------------------------------------------
+// Kind tags (design §4.1). Note the deliberate absences:
+//   - no MLI_KIND_FLAGS (rule 3 above)
+//   - Int bits domain is {8,16,32,64} only (rule 2 above)
+//   - QD128 is its own tag, not Float{128} (rule 1 above)
+// ---------------------------------------------------------------------------
+
+pub let MLI_KIND_VOID: i64 = 0
+pub let MLI_KIND_INT: i64 = 1
+pub let MLI_KIND_PTR: i64 = 2
+pub let MLI_KIND_FLOAT: i64 = 3
+pub let MLI_KIND_QD128: i64 = 4
+pub let MLI_KIND_BOOL: i64 = 5
+pub let MLI_KIND_VECF64: i64 = 6
+pub let MLI_KIND_KNOWLEDGE: i64 = 7
+pub let MLI_KIND_CD: i64 = 8
+pub let MLI_KIND_BUNDLE: i64 = 9
+
+// Knowledge shapes (design §4.1 KnowledgeLanes table).
+pub let MLI_KSHAPE_NONE: i64 = 0
+pub let MLI_KSHAPE_MIN3: i64 = 1
+pub let MLI_KSHAPE_GPU4: i64 = 2
+pub let MLI_KSHAPE_EMIR_BUNDLE: i64 = 3
+
+// ---------------------------------------------------------------------------
+// Physical register classes (design §5.1). FLAG deliberately absent — eflags
+// is a legalize_x86 fusion detail, not an MLI value class.
+// ---------------------------------------------------------------------------
+
+pub let MLI_CLASS_NONE: i64 = 0
+pub let MLI_CLASS_GPR: i64 = 1
+pub let MLI_CLASS_FPR: i64 = 2
+pub let MLI_CLASS_V256: i64 = 3
+pub let MLI_CLASS_V512: i64 = 4
+pub let MLI_CLASS_KMASK: i64 = 5
+pub let MLI_CLASS_KNOW: i64 = 6
+pub let MLI_CLASS_CD: i64 = 7
+
+// ---------------------------------------------------------------------------
+// Operand tags (design §4.2).
+// ---------------------------------------------------------------------------
+
+pub let MLI_OPD_NONE: i64 = 0
+pub let MLI_OPD_VREG: i64 = 1
+pub let MLI_OPD_PHYS: i64 = 2
+pub let MLI_OPD_STACK: i64 = 3
+pub let MLI_OPD_IMM: i64 = 4
+pub let MLI_OPD_RELOC: i64 = 5
+pub let MLI_OPD_BLOCKREF: i64 = 6
+
+// ---------------------------------------------------------------------------
+// Opcodes. R0 (required for Phase-2) in 0..99; R1 epistemic in 100..149;
+// R1 Cayley-Dickson in 150..199. R1 opcodes are LEGAL MLI from S1 (kinds are
+// first-class); they simply have no emit path yet (Option C dual-track).
+// ---------------------------------------------------------------------------
+
+pub let MLI_OP_NOP: i64 = 0
+pub let MLI_OP_MOV: i64 = 1
+pub let MLI_OP_LOAD: i64 = 2
+pub let MLI_OP_STORE: i64 = 3
+pub let MLI_OP_LEA: i64 = 4
+
+pub let MLI_OP_ADD: i64 = 10
+pub let MLI_OP_SUB: i64 = 11
+pub let MLI_OP_MUL: i64 = 12
+pub let MLI_OP_DIV: i64 = 13
+pub let MLI_OP_REM: i64 = 14
+pub let MLI_OP_SHL: i64 = 15
+pub let MLI_OP_SHR: i64 = 16
+pub let MLI_OP_AND: i64 = 17
+pub let MLI_OP_OR: i64 = 18
+pub let MLI_OP_XOR: i64 = 19
+
+pub let MLI_OP_FADD: i64 = 30
+pub let MLI_OP_FSUB: i64 = 31
+pub let MLI_OP_FMUL: i64 = 32
+pub let MLI_OP_FDIV: i64 = 33
+
+pub let MLI_OP_I2F: i64 = 40
+pub let MLI_OP_F2I: i64 = 41
+pub let MLI_OP_FCAST: i64 = 42
+
+pub let MLI_OP_ICMP: i64 = 50
+pub let MLI_OP_FCMP: i64 = 51
+
+// Terminators only — must appear as MliBlock.term, never in the body.
+pub let MLI_OP_JMP: i64 = 60
+pub let MLI_OP_BR: i64 = 61
+pub let MLI_OP_RET: i64 = 62
+
+pub let MLI_OP_CALL: i64 = 63
+pub let MLI_OP_ALLOCA: i64 = 70
+pub let MLI_OP_COPY: i64 = 80
+pub let MLI_OP_KEEP_ALIVE: i64 = 81
+
+// R1 epistemic (design §4.3). k_discharge is the ONLY legal Knowledge→scalar
+// path; treating k_add as a plain fadd on val is a verify error.
+pub let MLI_OP_K_MEASURE: i64 = 100
+pub let MLI_OP_K_ADD: i64 = 101
+pub let MLI_OP_K_SUB: i64 = 102
+pub let MLI_OP_K_MUL: i64 = 103
+pub let MLI_OP_K_DIV: i64 = 104
+pub let MLI_OP_K_FMA: i64 = 105
+pub let MLI_OP_K_EXTRACT_VAL: i64 = 110
+pub let MLI_OP_K_EXTRACT_VAR: i64 = 111
+pub let MLI_OP_K_EXTRACT_CONF: i64 = 112
+pub let MLI_OP_K_INSERT_VAL: i64 = 115
+pub let MLI_OP_K_INSERT_VAR: i64 = 116
+pub let MLI_OP_K_INSERT_CONF: i64 = 117
+pub let MLI_OP_K_CAST_BASE: i64 = 120
+pub let MLI_OP_K_LIFT: i64 = 121
+pub let MLI_OP_K_DISCHARGE: i64 = 122
+
+// R1 Cayley-Dickson (design §4.3). cd_mul / associator REQUIRE explicit
+// assoc/zd policies so optimizers cannot silently reassociate.
+pub let MLI_OP_CD_ADD: i64 = 150
+pub let MLI_OP_CD_SUB: i64 = 151
+pub let MLI_OP_CD_MUL: i64 = 152
+pub let MLI_OP_CD_CONJ: i64 = 153
+pub let MLI_OP_CD_NORM2: i64 = 154
+pub let MLI_OP_CD_ASSOCIATOR: i64 = 155
+pub let MLI_OP_CD_VAR_ASSOCIATOR: i64 = 156
+pub let MLI_OP_CD_ZD_PROBE: i64 = 157
+// Scalar projection: the ONLY legal CD → float path (lane index in src2.aux).
+// Analogous to k_discharge / k_extract_*. Without this, a CD value can never
+// leave the kind and S3 cannot witness a component in the instruction stream.
+pub let MLI_OP_CD_EXTRACT: i64 = 158
+
+// Compare condition codes (icmp/fcmp produce a Bool vreg — rule 3).
+pub let MLI_CC_NONE: i64 = 0
+pub let MLI_CC_EQ: i64 = 1
+pub let MLI_CC_NE: i64 = 2
+pub let MLI_CC_LT: i64 = 3
+pub let MLI_CC_LE: i64 = 4
+pub let MLI_CC_GT: i64 = 5
+pub let MLI_CC_GE: i64 = 6
+
+// Closed set. Anything else (including NONE) is not a runnable compare —
+// verify and interp must refuse, not treat it as "false".
+pub fn mli_cc_known(cc: i64) -> bool {
+    cc == MLI_CC_EQ || cc == MLI_CC_NE || cc == MLI_CC_LT || cc == MLI_CC_LE || cc == MLI_CC_GT || cc == MLI_CC_GE
+}
+
+// Instruction attributes (design §4.3): associativity / zero-divisor policy.
+pub let MLI_ASSOC_NONE: i64 = 0
+pub let MLI_ASSOC_STRICT: i64 = 1
+pub let MLI_ASSOC_ALLOW_REASSOC_IF_FANO: i64 = 2
+pub let MLI_ASSOC_FORCE_EXPAND: i64 = 3
+
+pub let MLI_ZD_NONE: i64 = 0
+pub let MLI_ZD_IGNORE: i64 = 1
+pub let MLI_ZD_FLAG: i64 = 2
+pub let MLI_ZD_TRAP: i64 = 3
+
+// ---------------------------------------------------------------------------
+// Kind. Unused payload fields are normalized to 0 by the constructors so
+// mli_kind_eq is a plain field-wise comparison.
+//   bits:     Int 8/16/32/64 | Float 32/64/128/256 (IEEE) | CD coeff bits
+//             | Knowledge base bits | VecF64 element bits (64)
+//   signed:   Int only (1 signed, 0 unsigned)
+//   dim:      CD 1/2/4/8/16 | VecF64 lanes 2/4/8 | Bundle field count
+//   base_tag: Knowledge only (MLI_KIND_FLOAT or MLI_KIND_INT)
+//   shape:    Knowledge only (MLI_KSHAPE_*)
+// ---------------------------------------------------------------------------
+
+pub struct MliKind {
+    pub tag: i64,
+    pub bits: i64,
+    pub signed: i64,
+    pub dim: i64,
+    pub base_tag: i64,
+    pub shape: i64,
+}
+
+pub fn mli_kind_void() -> MliKind {
+    MliKind { tag: MLI_KIND_VOID, bits: 0, signed: 0, dim: 0, base_tag: 0, shape: 0 }
+}
+
+pub fn mli_kind_int(bits: i64, signed_flag: i64) -> MliKind {
+    MliKind { tag: MLI_KIND_INT, bits: bits, signed: signed_flag, dim: 0, base_tag: 0, shape: 0 }
+}
+
+pub fn mli_kind_ptr() -> MliKind {
+    MliKind { tag: MLI_KIND_PTR, bits: 64, signed: 0, dim: 0, base_tag: 0, shape: 0 }
+}
+
+pub fn mli_kind_float(bits: i64) -> MliKind {
+    MliKind { tag: MLI_KIND_FLOAT, bits: bits, signed: 0, dim: 0, base_tag: 0, shape: 0 }
+}
+
+// Double-double error lane kind. NOT IEEE binary128 (rule 1).
+pub fn mli_kind_qd128() -> MliKind {
+    MliKind { tag: MLI_KIND_QD128, bits: 128, signed: 0, dim: 0, base_tag: 0, shape: 0 }
+}
+
+pub fn mli_kind_bool() -> MliKind {
+    MliKind { tag: MLI_KIND_BOOL, bits: 1, signed: 0, dim: 0, base_tag: 0, shape: 0 }
+}
+
+pub fn mli_kind_vecf64(lanes: i64) -> MliKind {
+    MliKind { tag: MLI_KIND_VECF64, bits: 64, signed: 0, dim: lanes, base_tag: 0, shape: 0 }
+}
+
+pub fn mli_kind_knowledge(base_tag: i64, base_bits: i64, shape: i64) -> MliKind {
+    MliKind { tag: MLI_KIND_KNOWLEDGE, bits: base_bits, signed: 0, dim: 0, base_tag: base_tag, shape: shape }
+}
+
+pub fn mli_kind_cd(dim: i64, coeff_bits: i64) -> MliKind {
+    MliKind { tag: MLI_KIND_CD, bits: coeff_bits, signed: 0, dim: dim, base_tag: 0, shape: 0 }
+}
+
+pub fn mli_kind_bundle(field_count: i64) -> MliKind {
+    MliKind { tag: MLI_KIND_BUNDLE, bits: 0, signed: 0, dim: field_count, base_tag: 0, shape: 0 }
+}
+
+pub fn mli_kind_eq(a: MliKind, b: MliKind) -> bool {
+    if a.tag != b.tag { return false }
+    if a.bits != b.bits { return false }
+    if a.signed != b.signed { return false }
+    if a.dim != b.dim { return false }
+    if a.base_tag != b.base_tag { return false }
+    a.shape == b.shape
+}
+
+// Domain validity for a kind. Int bits 128 is deliberately NOT valid here —
+// verify reports it with the dedicated MLI_VERR_INT128_EXCLUDED code before
+// falling back to generic invalidity.
+pub fn mli_kind_valid(k: MliKind) -> bool {
+    if k.tag == MLI_KIND_VOID { return true }
+    if k.tag == MLI_KIND_INT {
+        if k.signed != 0 && k.signed != 1 { return false }
+        return k.bits == 8 || k.bits == 16 || k.bits == 32 || k.bits == 64
+    }
+    if k.tag == MLI_KIND_PTR { return k.bits == 64 }
+    if k.tag == MLI_KIND_FLOAT {
+        return k.bits == 32 || k.bits == 64 || k.bits == 128 || k.bits == 256
+    }
+    if k.tag == MLI_KIND_QD128 { return k.bits == 128 }
+    if k.tag == MLI_KIND_BOOL { return k.bits == 1 }
+    if k.tag == MLI_KIND_VECF64 {
+        return k.dim == 2 || k.dim == 4 || k.dim == 8
+    }
+    if k.tag == MLI_KIND_KNOWLEDGE {
+        if k.base_tag != MLI_KIND_FLOAT && k.base_tag != MLI_KIND_INT { return false }
+        if k.shape != MLI_KSHAPE_MIN3 && k.shape != MLI_KSHAPE_GPU4 && k.shape != MLI_KSHAPE_EMIR_BUNDLE { return false }
+        if k.base_tag == MLI_KIND_FLOAT {
+            return k.bits == 32 || k.bits == 64 || k.bits == 128 || k.bits == 256
+        }
+        return k.bits == 8 || k.bits == 16 || k.bits == 32 || k.bits == 64
+    }
+    if k.tag == MLI_KIND_CD {
+        if k.dim != 1 && k.dim != 2 && k.dim != 4 && k.dim != 8 && k.dim != 16 { return false }
+        return k.bits == 32 || k.bits == 64
+    }
+    if k.tag == MLI_KIND_BUNDLE { return k.dim > 0 }
+    false
+}
+
+// ---------------------------------------------------------------------------
+// Operand (design §4.2). Invariant: every VReg/Phys/Stack (and Imm) carries a
+// kind. Cross-kind moves without an explicit conversion op are verify errors.
+//   id:  VREG id | PHYS idx | STACK slot | BLOCKREF block id | RELOC symbol id
+//   aux: STACK offset_bytes | RELOC addend | IMM integer/bool payload
+//   fimm: IMM float payload (f32/f64 immediates)
+// ---------------------------------------------------------------------------
+
+pub struct MliOperand {
+    pub tag: i64,
+    pub id: i64,
+    pub phys_class: i64,
+    pub aux: i64,
+    pub fimm: f64,
+    pub kind: MliKind,
+}
+
+pub fn mli_opd_none() -> MliOperand {
+    MliOperand { tag: MLI_OPD_NONE, id: 0, phys_class: 0, aux: 0, fimm: 0.0, kind: mli_kind_void() }
+}
+
+pub fn mli_opd_vreg(id: i64, kind: MliKind) -> MliOperand {
+    MliOperand { tag: MLI_OPD_VREG, id: id, phys_class: 0, aux: 0, fimm: 0.0, kind: kind }
+}
+
+pub fn mli_opd_phys(cls: i64, idx: i64, kind: MliKind) -> MliOperand {
+    MliOperand { tag: MLI_OPD_PHYS, id: idx, phys_class: cls, aux: 0, fimm: 0.0, kind: kind }
+}
+
+pub fn mli_opd_stack(slot: i64, offset_bytes: i64, kind: MliKind) -> MliOperand {
+    MliOperand { tag: MLI_OPD_STACK, id: slot, phys_class: 0, aux: offset_bytes, fimm: 0.0, kind: kind }
+}
+
+pub fn mli_opd_imm_int(value: i64, kind: MliKind) -> MliOperand {
+    MliOperand { tag: MLI_OPD_IMM, id: 0, phys_class: 0, aux: value, fimm: 0.0, kind: kind }
+}
+
+pub fn mli_opd_imm_f64(value: f64) -> MliOperand {
+    MliOperand { tag: MLI_OPD_IMM, id: 0, phys_class: 0, aux: 0, fimm: value, kind: mli_kind_float(64) }
+}
+
+pub fn mli_opd_reloc(symbol_id: i64, addend: i64) -> MliOperand {
+    MliOperand { tag: MLI_OPD_RELOC, id: symbol_id, phys_class: 0, aux: addend, fimm: 0.0, kind: mli_kind_ptr() }
+}
+
+pub fn mli_opd_blockref(block_id: i64) -> MliOperand {
+    MliOperand { tag: MLI_OPD_BLOCKREF, id: block_id, phys_class: 0, aux: 0, fimm: 0.0, kind: mli_kind_void() }
+}
+
+// ---------------------------------------------------------------------------
+// Instruction.
+// ---------------------------------------------------------------------------
+
+pub struct MliInst {
+    pub opcode: i64,
+    pub dst: MliOperand,
+    pub src1: MliOperand,
+    pub src2: MliOperand,
+    pub src3: MliOperand,
+    pub cc: i64,
+    pub assoc_policy: i64,
+    pub zd_policy: i64,
+    pub call_target: i64,
+}
+
+pub fn mli_inst_nop() -> MliInst {
+    MliInst {
+        opcode: MLI_OP_NOP,
+        dst: mli_opd_none(),
+        src1: mli_opd_none(),
+        src2: mli_opd_none(),
+        src3: mli_opd_none(),
+        cc: MLI_CC_NONE,
+        assoc_policy: MLI_ASSOC_NONE,
+        zd_policy: MLI_ZD_NONE,
+        call_target: 0,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Block descriptor. Deliberately NO params field and NO phi list (rule 4).
+//
+// Storage layout note (measured, 2026-08-16, this lane): storing a whole
+// MliInst (360 B, operand structs nested 3 deep) into an array element —
+// `blk.instrs[i] = inst` — miscompiles at runtime under current Madaros
+// native-v2 (#1678/#1749 aggregate-array-element family; the landed fix
+// covers shallower shapes). MliOperand (80 B, kind nested 2 deep) and MliKind
+// (48 B, flat) element stores are verified safe. Instructions are therefore
+// stored as a struct-of-arrays pool on MliFunction (the same shape main's IR
+// arena adopted), one column per instruction field, and MliInst exists as an
+// in-memory VALUE type assembled/disassembled by mli_inst_get / mli_inst_put.
+// Block b owns pool slots [b*MLI_BLOCK_STRIDE, b*MLI_BLOCK_STRIDE+MLI_MAX_INSTRS)
+// for its body and slot b*MLI_BLOCK_STRIDE+MLI_MAX_INSTRS for its terminator.
+// ---------------------------------------------------------------------------
+
+// MliBlock is an API view assembled by mli_block_get; block metadata is
+// STORED as scalar SoA columns on MliFunction (blk_id / blk_instr_count /
+// blk_has_term). Measured on this lane: scalar field writes through
+// &!MliFunction into an array-of-struct element (f.blocks[b].field = v) also
+// misaddress under current Madaros native-v2; plain [i64; N] element stores
+// are reliable.
+pub struct MliBlock {
+    pub id: i64,
+    pub instr_count: i64,
+    pub has_term: bool,
+}
+
+pub fn mli_slot(b: i64, i: i64) -> i64 {
+    b * MLI_BLOCK_STRIDE + i
+}
+
+pub fn mli_term_slot(b: i64) -> i64 {
+    b * MLI_BLOCK_STRIDE + MLI_MAX_INSTRS
+}
+
+// ---------------------------------------------------------------------------
+// Function. vreg_kinds is the kind source of truth per vreg id; operands must
+// agree with it (verified). Builder allocates argument vregs first, so arg i
+// is vreg i. Block 0 is the entry block.
+// ---------------------------------------------------------------------------
+
+pub struct MliFunction {
+    pub magic: i64,
+    pub name: string,
+    pub arg_kinds: [MliKind; 8],
+    pub arg_count: i64,
+    pub ret: MliKind,
+    pub blk_id: [i64; 16],
+    pub blk_instr_count: [i64; 16],
+    pub blk_has_term: [i64; 16],
+    pub block_count: i64,
+    pub vreg_kinds: [MliKind; 128],
+    pub vreg_count: i64,
+    pub overflowed: bool,
+    pub overflow_detail: string,
+    // Instruction pool (SoA columns; see storage layout note above).
+    // i_live is the #1830 bit: i_op zero-inits to NOP (0), so an unwritten
+    // slot is a plausible successful no-op unless presence is separate.
+    // 0 = nobody wrote this slot; 1 = mli_inst_put ran. Scalar column only.
+    pub i_live: [i64; 528],
+    pub i_op: [i64; 528],
+    pub i_cc: [i64; 528],
+    pub i_assoc: [i64; 528],
+    pub i_zd: [i64; 528],
+    pub i_call: [i64; 528],
+    pub i_dst: [MliOperand; 528],
+    pub i_src1: [MliOperand; 528],
+    pub i_src2: [MliOperand; 528],
+    pub i_src3: [MliOperand; 528],
+}
+
+pub fn mli_func_empty() -> MliFunction {
+    MliFunction {
+        magic: MLI_FUNC_MAGIC,
+        name: "",
+        arg_kinds: [mli_kind_void(); 8],
+        arg_count: 0,
+        ret: mli_kind_void(),
+        blk_id: [0; 16],
+        blk_instr_count: [0; 16],
+        blk_has_term: [0; 16],
+        block_count: 0,
+        vreg_kinds: [mli_kind_void(); 128],
+        vreg_count: 0,
+        overflowed: false,
+        overflow_detail: "",
+        i_live: [0; 528],
+        i_op: [0; 528],
+        i_cc: [0; 528],
+        i_assoc: [0; 528],
+        i_zd: [0; 528],
+        i_call: [0; 528],
+        i_dst: [mli_opd_none(); 528],
+        i_src1: [mli_opd_none(); 528],
+        i_src2: [mli_opd_none(); 528],
+        i_src3: [mli_opd_none(); 528],
+    }
+}
+
+// Store an instruction value into a pool slot (column-wise scalar and
+// MliOperand stores only — the verified-safe shapes).
+pub fn mli_inst_put(f: &!MliFunction, slot: i64, inst: MliInst) with Mut, Panic {
+    f.i_live[slot] = 1
+    f.i_op[slot] = inst.opcode
+    f.i_cc[slot] = inst.cc
+    f.i_assoc[slot] = inst.assoc_policy
+    f.i_zd[slot] = inst.zd_policy
+    f.i_call[slot] = inst.call_target
+    f.i_dst[slot] = inst.dst
+    f.i_src1[slot] = inst.src1
+    f.i_src2[slot] = inst.src2
+    f.i_src3[slot] = inst.src3
+}
+
+// Assemble a block view from the SoA columns.
+pub fn mli_block_get(f: &MliFunction, b: i64) -> MliBlock with Panic {
+    MliBlock {
+        id: f.blk_id[b],
+        instr_count: f.blk_instr_count[b],
+        has_term: f.blk_has_term[b] == 1,
+    }
+}
+
+// Operand projections for arg-forwarding call chains (see the landing note
+// on mli_inst_get below): `helper(mli_inst_get(f, s))` is the safe shape.
+pub fn mli_inst_dst(inst: MliInst) -> MliOperand {
+    inst.dst
+}
+
+// ---------------------------------------------------------------------------
+// Per-slot column accessors — the PREFERRED read path. They return scalars
+// or a single MliOperand (88 B), whose local landings are S1-proven, and
+// never materialise a full MliInst (see the landing hazard below).
+// ---------------------------------------------------------------------------
+
+pub fn mli_slot_live(f: &MliFunction, slot: i64) -> i64 with Panic {
+    f.i_live[slot]
+}
+
+pub fn mli_slot_opcode(f: &MliFunction, slot: i64) -> i64 with Panic {
+    f.i_op[slot]
+}
+
+pub fn mli_slot_cc(f: &MliFunction, slot: i64) -> i64 with Panic {
+    f.i_cc[slot]
+}
+
+pub fn mli_slot_assoc(f: &MliFunction, slot: i64) -> i64 with Panic {
+    f.i_assoc[slot]
+}
+
+pub fn mli_slot_zd(f: &MliFunction, slot: i64) -> i64 with Panic {
+    f.i_zd[slot]
+}
+
+pub fn mli_slot_call(f: &MliFunction, slot: i64) -> i64 with Panic {
+    f.i_call[slot]
+}
+
+pub fn mli_slot_dst(f: &MliFunction, slot: i64) -> MliOperand with Panic {
+    f.i_dst[slot]
+}
+
+pub fn mli_slot_src1(f: &MliFunction, slot: i64) -> MliOperand with Panic {
+    f.i_src1[slot]
+}
+
+pub fn mli_slot_src2(f: &MliFunction, slot: i64) -> MliOperand with Panic {
+    f.i_src2[slot]
+}
+
+pub fn mli_slot_src3(f: &MliFunction, slot: i64) -> MliOperand with Panic {
+    f.i_src3[slot]
+}
+
+// Assemble an instruction value from a pool slot.
+//
+// LANDING HAZARD (measured 2026-08-16, this lane, 8-module closure): binding
+// the returned MliInst to a local (`let inst = mli_inst_get(...)`) can land
+// a CORRUPTED copy under Madaros native-v2 — operand fields shift one slot
+// (id reads as tag). Forwarding the result directly as a call argument
+// (`consume(mli_inst_get(f, s))`) reads true data — mli::dump prints
+// correctly for exactly this reason. Consumers must use the arg-forwarding
+// shape; do not add `let`-landings of this return.
+pub fn mli_inst_get(f: &MliFunction, slot: i64) -> MliInst with Panic {
+    MliInst {
+        opcode: f.i_op[slot],
+        dst: f.i_dst[slot],
+        src1: f.i_src1[slot],
+        src2: f.i_src2[slot],
+        src3: f.i_src3[slot],
+        cc: f.i_cc[slot],
+        assoc_policy: f.i_assoc[slot],
+        zd_policy: f.i_zd[slot],
+        call_target: f.i_call[slot],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Module (design §4.4). S1 carries the shape; population is S2's job.
+// ---------------------------------------------------------------------------
+
+pub struct MliModule {
+    pub funcs: [MliFunction; 2],
+    pub fn_count: i64,
+    pub target_hint: i64,
+}
+
+pub fn mli_module_empty() -> MliModule {
+    MliModule {
+        funcs: [mli_func_empty(); 2],
+        fn_count: 0,
+        target_hint: 0,
+    }
+}

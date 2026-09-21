@@ -275,7 +275,6 @@ sed -i \
     -e "s|\${RUN_ID}|${RUN_ID}|g" \
     -e "s|\${JOB_ID}|${JOB_ID}|g" \
     -e "s|\${RESULTS_ROOT}|${RESULTS_ROOT}|g" \
-    -e "s|\${STAGE_ROOT}|${STAGE_ROOT}|g" \
     -e "s|\${RAW_ROOT}|${RAW_ROOT}|g" \
     -e "s|\${ENDPOINTS}|${ENDPOINTS}|g" \
     -e "s|\${CACHE_DIR}|${CACHE_DIR}|g" \

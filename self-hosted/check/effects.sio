@@ -1,212 +1,246 @@
 // Effect processing for type checker
 //
 // Converts parsed EffectList from AST to effect ID arrays in FnSig.
-// Effect IDs: 0=IO, 1=Mut, 2=Alloc, 3=Panic, 4=Div, 5=GPU, 6=Async,
-// 7=Prob, 8=Epistemic, 9=Causal, 10=Network, 11=Sensor, 12=Render,
-// 13=Observe, 14=NonAssoc, 15=Audit, 16=Hypothesis, 17=MultiTest,
-// 18=ZD (zero-divisor effect for Forgettable<T>),
-// 19=Witness (emits machine-checkable Lean witness, required by Audited<T>),
-// 20=Temporal (time-bounded reversibility, required by Revivable<T>),
-// 21=Learn (gradient production; required by SurgicalOptimizer)
+// Effect IDs are EffectKind discriminants in declaration order (ID order,
+// not the historical source-arm order).
+//
+// Production ids 0-22 (phase 2a, unchanged):
+//   0=IO 1=Mut 2=Alloc 3=Panic 4=Div 5=GPU 6=Async 7=Prob
+//   8=Epistemic 9=Causal 10=Network 11=Sensor 12=Render 13=Observe
+//   14=NonAssoc 15=Audit 16=Hypothesis 17=MultiTest 18=ZD 19=Witness
+//   20=Temporal 21=Learn 22=Chaotic
+//
+// Production ids 23-28 (phase 2b). These are NEW consecutive ids.
+// They are NOT seed FN_EFFECTS bits. Mixing the two numberings
+// silently aliases Perturbative onto Chaotic (production id 22).
+//   23=Approx          seed bit 18 = 262144
+//   24=NaturalityG2    seed bit 20 = 1048576
+//   25=Deterministic   seed bit 12 = 4096
+//   26=Perturbative    stdlib comment "bit 23" = 8388608 (a BIT, not id 23)
+//   27=NarrowWidthApproximation  stdlib comment "bit 24" = 16777216
+//   28=NonUnitary      stdlib comment "bit 22" = 4194304 (a BIT; id 22 is Chaotic)
+//
+// Mod is HELD, not forgotten (founder 2026-08-19, hold_mod_claude1).
+// 360 files / 2800 `with Mod` still return -1. If those sites are Mut
+// misspellings, adding Mod would consecrate the error. No reserved
+// hole: a vacant id invites someone to fill it.
+//
+// Confidence is an alias of Epistemic (id 8). Same id, not a new variant.
+//
+// EffVar is the row-polymorphism slot (discriminant 29 after 2b hold).
+// It is not a user-facing `with` name and effect_name_to_id never returns it.
 
 // ============================================================
-// Effect name to ID mapping
+// Production effect enum — ID order
 // ============================================================
+
+enum EffectKind {
+    EffIO,
+    EffMut,
+    EffAlloc,
+    EffPanic,
+    EffDiv,
+    EffGPU,
+    EffAsync,
+    EffProb,
+    EffEpistemic,
+    EffCausal,
+    EffNetwork,
+    EffSensor,
+    EffRender,
+    EffObserve,
+    EffNonAssoc,
+    EffAudit,
+    EffHypothesis,
+    EffMultiTest,
+    EffZD,
+    EffWitness,
+    EffTemporal,
+    EffLearn,
+    EffChaotic,
+    EffApprox,
+    EffNaturalityG2,
+    EffDeterministic,
+    EffPerturbative,
+    EffNarrowWidthApproximation,
+    EffNonUnitary,
+    EffVar,
+}
+
+fn effect_named_id_max() -> i64 {
+    28
+}
+
+fn effect_kind_name_len(k: i64) -> i64 {
+    if k == 0 { 2 }
+    else if k == 1 { 3 }
+    else if k == 2 { 5 }
+    else if k == 3 { 5 }
+    else if k == 4 { 3 }
+    else if k == 5 { 3 }
+    else if k == 6 { 5 }
+    else if k == 7 { 4 }
+    else if k == 8 { 9 }
+    else if k == 9 { 6 }
+    else if k == 10 { 7 }
+    else if k == 11 { 6 }
+    else if k == 12 { 6 }
+    else if k == 13 { 7 }
+    else if k == 14 { 8 }
+    else if k == 15 { 5 }
+    else if k == 16 { 10 }
+    else if k == 17 { 9 }
+    else if k == 18 { 2 }
+    else if k == 19 { 7 }
+    else if k == 20 { 8 }
+    else if k == 21 { 5 }
+    else if k == 22 { 7 }
+    else if k == 23 { 6 }
+    else if k == 24 { 12 }
+    else if k == 25 { 13 }
+    else if k == 26 { 12 }
+    else if k == 27 { 24 }
+    else if k == 28 { 10 }
+    else { 0 }
+}
+
+fn effect_kind_name_byte(k: i64, i: i64) -> i8 {
+    if k == 0 {
+        if i == 0 { 73 as i8 } else { 79 as i8 }
+    } else if k == 1 {
+        if i == 0 { 77 as i8 } else if i == 1 { 117 as i8 } else { 116 as i8 }
+    } else if k == 2 {
+        if i == 0 { 65 as i8 } else if i == 1 { 108 as i8 } else if i == 2 { 108 as i8 } else if i == 3 { 111 as i8 } else { 99 as i8 }
+    } else if k == 3 {
+        if i == 0 { 80 as i8 } else if i == 1 { 97 as i8 } else if i == 2 { 110 as i8 } else if i == 3 { 105 as i8 } else { 99 as i8 }
+    } else if k == 4 {
+        if i == 0 { 68 as i8 } else if i == 1 { 105 as i8 } else { 118 as i8 }
+    } else if k == 5 {
+        if i == 0 { 71 as i8 } else if i == 1 { 80 as i8 } else { 85 as i8 }
+    } else if k == 6 {
+        if i == 0 { 65 as i8 } else if i == 1 { 115 as i8 } else if i == 2 { 121 as i8 } else if i == 3 { 110 as i8 } else { 99 as i8 }
+    } else if k == 7 {
+        if i == 0 { 80 as i8 } else if i == 1 { 114 as i8 } else if i == 2 { 111 as i8 } else { 98 as i8 }
+    } else if k == 8 {
+        if i == 0 { 69 as i8 } else if i == 1 { 112 as i8 } else if i == 2 { 105 as i8 } else if i == 3 { 115 as i8 } else if i == 4 { 116 as i8 } else if i == 5 { 101 as i8 } else if i == 6 { 109 as i8 } else if i == 7 { 105 as i8 } else { 99 as i8 }
+    } else if k == 9 {
+        if i == 0 { 67 as i8 } else if i == 1 { 97 as i8 } else if i == 2 { 117 as i8 } else if i == 3 { 115 as i8 } else if i == 4 { 97 as i8 } else { 108 as i8 }
+    } else if k == 10 {
+        if i == 0 { 78 as i8 } else if i == 1 { 101 as i8 } else if i == 2 { 116 as i8 } else if i == 3 { 119 as i8 } else if i == 4 { 111 as i8 } else if i == 5 { 114 as i8 } else { 107 as i8 }
+    } else if k == 11 {
+        if i == 0 { 83 as i8 } else if i == 1 { 101 as i8 } else if i == 2 { 110 as i8 } else if i == 3 { 115 as i8 } else if i == 4 { 111 as i8 } else { 114 as i8 }
+    } else if k == 12 {
+        if i == 0 { 82 as i8 } else if i == 1 { 101 as i8 } else if i == 2 { 110 as i8 } else if i == 3 { 100 as i8 } else if i == 4 { 101 as i8 } else { 114 as i8 }
+    } else if k == 13 {
+        if i == 0 { 79 as i8 } else if i == 1 { 98 as i8 } else if i == 2 { 115 as i8 } else if i == 3 { 101 as i8 } else if i == 4 { 114 as i8 } else if i == 5 { 118 as i8 } else { 101 as i8 }
+    } else if k == 14 {
+        if i == 0 { 78 as i8 } else if i == 1 { 111 as i8 } else if i == 2 { 110 as i8 } else if i == 3 { 65 as i8 } else if i == 4 { 115 as i8 } else if i == 5 { 115 as i8 } else if i == 6 { 111 as i8 } else { 99 as i8 }
+    } else if k == 15 {
+        if i == 0 { 65 as i8 } else if i == 1 { 117 as i8 } else if i == 2 { 100 as i8 } else if i == 3 { 105 as i8 } else { 116 as i8 }
+    } else if k == 16 {
+        if i == 0 { 72 as i8 } else if i == 1 { 121 as i8 } else if i == 2 { 112 as i8 } else if i == 3 { 111 as i8 } else if i == 4 { 116 as i8 } else if i == 5 { 104 as i8 } else if i == 6 { 101 as i8 } else if i == 7 { 115 as i8 } else if i == 8 { 105 as i8 } else { 115 as i8 }
+    } else if k == 17 {
+        if i == 0 { 77 as i8 } else if i == 1 { 117 as i8 } else if i == 2 { 108 as i8 } else if i == 3 { 116 as i8 } else if i == 4 { 105 as i8 } else if i == 5 { 84 as i8 } else if i == 6 { 101 as i8 } else if i == 7 { 115 as i8 } else { 116 as i8 }
+    } else if k == 18 {
+        if i == 0 { 90 as i8 } else { 68 as i8 }
+    } else if k == 19 {
+        if i == 0 { 87 as i8 } else if i == 1 { 105 as i8 } else if i == 2 { 116 as i8 } else if i == 3 { 110 as i8 } else if i == 4 { 101 as i8 } else if i == 5 { 115 as i8 } else { 115 as i8 }
+    } else if k == 20 {
+        if i == 0 { 84 as i8 } else if i == 1 { 101 as i8 } else if i == 2 { 109 as i8 } else if i == 3 { 112 as i8 } else if i == 4 { 111 as i8 } else if i == 5 { 114 as i8 } else if i == 6 { 97 as i8 } else { 108 as i8 }
+    } else if k == 21 {
+        if i == 0 { 76 as i8 } else if i == 1 { 101 as i8 } else if i == 2 { 97 as i8 } else if i == 3 { 114 as i8 } else { 110 as i8 }
+    } else if k == 22 {
+        if i == 0 { 67 as i8 } else if i == 1 { 104 as i8 } else if i == 2 { 97 as i8 } else if i == 3 { 111 as i8 } else if i == 4 { 116 as i8 } else if i == 5 { 105 as i8 } else { 99 as i8 }
+    } else if k == 23 {
+        if i == 0 { 65 as i8 } else if i == 1 { 112 as i8 } else if i == 2 { 112 as i8 } else if i == 3 { 114 as i8 } else if i == 4 { 111 as i8 } else { 120 as i8 }
+    } else if k == 24 {
+        if i == 0 { 78 as i8 } else if i == 1 { 97 as i8 } else if i == 2 { 116 as i8 } else if i == 3 { 117 as i8 } else if i == 4 { 114 as i8 } else if i == 5 { 97 as i8 } else if i == 6 { 108 as i8 } else if i == 7 { 105 as i8 } else if i == 8 { 116 as i8 } else if i == 9 { 121 as i8 } else if i == 10 { 71 as i8 } else { 50 as i8 }
+    } else if k == 25 {
+        if i == 0 { 68 as i8 } else if i == 1 { 101 as i8 } else if i == 2 { 116 as i8 } else if i == 3 { 101 as i8 } else if i == 4 { 114 as i8 } else if i == 5 { 109 as i8 } else if i == 6 { 105 as i8 } else if i == 7 { 110 as i8 } else if i == 8 { 105 as i8 } else if i == 9 { 115 as i8 } else if i == 10 { 116 as i8 } else if i == 11 { 105 as i8 } else { 99 as i8 }
+    } else if k == 26 {
+        if i == 0 { 80 as i8 } else if i == 1 { 101 as i8 } else if i == 2 { 114 as i8 } else if i == 3 { 116 as i8 } else if i == 4 { 117 as i8 } else if i == 5 { 114 as i8 } else if i == 6 { 98 as i8 } else if i == 7 { 97 as i8 } else if i == 8 { 116 as i8 } else if i == 9 { 105 as i8 } else if i == 10 { 118 as i8 } else { 101 as i8 }
+    } else if k == 27 {
+        if i == 0 { 78 as i8 } else if i == 1 { 97 as i8 } else if i == 2 { 114 as i8 } else if i == 3 { 114 as i8 } else if i == 4 { 111 as i8 } else if i == 5 { 119 as i8 } else if i == 6 { 87 as i8 } else if i == 7 { 105 as i8 } else if i == 8 { 100 as i8 } else if i == 9 { 116 as i8 } else if i == 10 { 104 as i8 } else if i == 11 { 65 as i8 } else if i == 12 { 112 as i8 } else if i == 13 { 112 as i8 } else if i == 14 { 114 as i8 } else if i == 15 { 111 as i8 } else if i == 16 { 120 as i8 } else if i == 17 { 105 as i8 } else if i == 18 { 109 as i8 } else if i == 19 { 97 as i8 } else if i == 20 { 116 as i8 } else if i == 21 { 105 as i8 } else if i == 22 { 111 as i8 } else { 110 as i8 }
+    } else if k == 28 {
+        if i == 0 { 78 as i8 } else if i == 1 { 111 as i8 } else if i == 2 { 110 as i8 } else if i == 3 { 85 as i8 } else if i == 4 { 110 as i8 } else if i == 5 { 105 as i8 } else if i == 6 { 116 as i8 } else if i == 7 { 97 as i8 } else if i == 8 { 114 as i8 } else { 121 as i8 }
+    } else {
+        0 as i8
+    }
+}
+
+// ============================================================
+// Effect name to ID mapping — enum lookup, not 23 handwritten arms
+// ============================================================
+
+fn name_is_confidence(name_buf: [i8; 64], name_len: i64) -> bool {
+    if name_len != 10 { return false }
+    if name_buf[0] != 67 as i8 { return false }
+    if name_buf[1] != 111 as i8 { return false }
+    if name_buf[2] != 110 as i8 { return false }
+    if name_buf[3] != 102 as i8 { return false }
+    if name_buf[4] != 105 as i8 { return false }
+    if name_buf[5] != 100 as i8 { return false }
+    if name_buf[6] != 101 as i8 { return false }
+    if name_buf[7] != 110 as i8 { return false }
+    if name_buf[8] != 99 as i8 { return false }
+    if name_buf[9] != 101 as i8 { return false }
+    true
+}
+
+// Held-effect transition list - the E210 valve.
+//
+// Founder ruling 2026-08-19 (hold_mod_claude1, recorded in this file's
+// header): Mod is HELD, not forgotten - ~2800 `with Mod` sites still resolve
+// to -1 pending the misspelling audit, and no vacant id may be reserved.
+// The other names below are the frozen accused set measured by
+// scripts/ci/effect_name_closed_list_gate.sh on 2026-08-25 (the ratchet
+// that owns their removal). A name on this list checks exactly as it does
+// today - silently dropped - because the corpus load-bearingly depends on
+// it. Any OTHER name outside the closed list and the user-effect registry
+// is refused with E210 at collection time (see checker_collect_effects_mut).
+// When the gate's frozen set shrinks past a name, delete it here in the
+// same commit: this list must equal the frozen set, no more.
+pub fn effect_name_is_held(name_buf: [i8; 64], name_len: i64) -> bool {
+    if name_len == 3 && name_buf[0 as usize] == 77 as i8 && name_buf[1 as usize] == 111 as i8 && name_buf[2 as usize] == 100 as i8 { return true }
+    if name_len == 7 && name_buf[0 as usize] == 67 as i8 && name_buf[1 as usize] == 111 as i8 && name_buf[2 as usize] == 109 as i8 && name_buf[3 as usize] == 112 as i8 && name_buf[4 as usize] == 117 as i8 && name_buf[5 as usize] == 116 as i8 && name_buf[6 as usize] == 101 as i8 { return true }
+    if name_len == 3 && name_buf[0 as usize] == 70 as i8 && name_buf[1 as usize] == 111 as i8 && name_buf[2 as usize] == 111 as i8 { return true }
+    if name_len == 3 && name_buf[0 as usize] == 69 as i8 && name_buf[1 as usize] == 120 as i8 && name_buf[2 as usize] == 112 as i8 { return true }
+    if name_len == 3 && name_buf[0 as usize] == 76 as i8 && name_buf[1 as usize] == 111 as i8 && name_buf[2 as usize] == 103 as i8 { return true }
+    if name_len == 16 && name_buf[0 as usize] == 78 as i8 && name_buf[1 as usize] == 111 as i8 && name_buf[2 as usize] == 109 as i8 && name_buf[3 as usize] == 101 as i8 && name_buf[4 as usize] == 81 as i8 && name_buf[5 as usize] == 117 as i8 && name_buf[6 as usize] == 101 as i8 && name_buf[7 as usize] == 78 as i8 && name_buf[8 as usize] == 97 as i8 && name_buf[9 as usize] == 111 as i8 && name_buf[10 as usize] == 69 as i8 && name_buf[11 as usize] == 120 as i8 && name_buf[12 as usize] == 105 as i8 && name_buf[13 as usize] == 115 as i8 && name_buf[14 as usize] == 116 as i8 && name_buf[15 as usize] == 101 as i8 { return true }
+    if name_len == 6 && name_buf[0 as usize] == 67 as i8 && name_buf[1 as usize] == 104 as i8 && name_buf[2 as usize] == 111 as i8 && name_buf[3 as usize] == 105 as i8 && name_buf[4 as usize] == 99 as i8 && name_buf[5 as usize] == 101 as i8 { return true }
+    if name_len == 7 && name_buf[0 as usize] == 67 as i8 && name_buf[1 as usize] == 111 as i8 && name_buf[2 as usize] == 117 as i8 && name_buf[3 as usize] == 110 as i8 && name_buf[4 as usize] == 116 as i8 && name_buf[5 as usize] == 101 as i8 && name_buf[6 as usize] == 114 as i8 { return true }
+    if name_len == 5 && name_buf[0 as usize] == 70 as i8 && name_buf[1 as usize] == 101 as i8 && name_buf[2 as usize] == 116 as i8 && name_buf[3 as usize] == 99 as i8 && name_buf[4 as usize] == 104 as i8 { return true }
+    if name_len == 4 && name_buf[0 as usize] == 70 as i8 && name_buf[1 as usize] == 97 as i8 && name_buf[2 as usize] == 105 as i8 && name_buf[3 as usize] == 108 as i8 { return true }
+    if name_len == 13 && name_buf[0 as usize] == 78 as i8 && name_buf[1 as usize] == 111 as i8 && name_buf[2 as usize] == 83 as i8 && name_buf[3 as usize] == 117 as i8 && name_buf[4 as usize] == 99 as i8 && name_buf[5 as usize] == 104 as i8 && name_buf[6 as usize] == 69 as i8 && name_buf[7 as usize] == 102 as i8 && name_buf[8 as usize] == 102 as i8 && name_buf[9 as usize] == 101 as i8 && name_buf[10 as usize] == 99 as i8 && name_buf[11 as usize] == 116 as i8 && name_buf[12 as usize] == 88 as i8 { return true }
+    if name_len == 8 && name_buf[0 as usize] == 83 as i8 && name_buf[1 as usize] == 97 as i8 && name_buf[2 as usize] == 109 as i8 && name_buf[3 as usize] == 112 as i8 && name_buf[4 as usize] == 108 as i8 && name_buf[5 as usize] == 105 as i8 && name_buf[6 as usize] == 110 as i8 && name_buf[7 as usize] == 103 as i8 { return true }
+    false
+}
 
 pub fn effect_name_to_id(name_buf: [i8; 64], name_len: i64) -> i64 with Mut, Panic, Div {
-    // IO
-    if name_len == 2 {
-        if name_buf[0] == 73 as i8 && name_buf[1] == 79 as i8 {  // "IO"
-            return 0
-        }
+    // Confidence is an alias of Epistemic (id 8). Not a new variant.
+    if name_is_confidence(name_buf, name_len) {
+        return 8
     }
-
-    // Mut
-    if name_len == 3 {
-        if name_buf[0] == 77 as i8 && name_buf[1] == 117 as i8 && name_buf[2] == 116 as i8 {  // "Mut"
-            return 1
+    var k: i64 = 0
+    let last = effect_named_id_max()
+    while k <= last {
+        let nlen = effect_kind_name_len(k)
+        if nlen == name_len {
+            var i: i64 = 0
+            var ok = true
+            while i < nlen {
+                if name_buf[i as usize] != effect_kind_name_byte(k, i) {
+                    ok = false
+                }
+                i = i + 1
+            }
+            if ok {
+                return k
+            }
         }
-        // Div
-        if name_buf[0] == 68 as i8 && name_buf[1] == 105 as i8 && name_buf[2] == 118 as i8 {  // "Div"
-            return 4
-        }
-        // GPU
-        if name_buf[0] == 71 as i8 && name_buf[1] == 80 as i8 && name_buf[2] == 85 as i8 {  // "GPU"
-            return 5
-        }
+        k = k + 1
     }
-
-    // Alloc
-    if name_len == 5 {
-        if name_buf[0] == 65 as i8 && name_buf[1] == 108 as i8 && name_buf[2] == 108 as i8
-           && name_buf[3] == 111 as i8 && name_buf[4] == 99 as i8 {  // "Alloc"
-            return 2
-        }
-        // Async
-        if name_buf[0] == 65 as i8 && name_buf[1] == 115 as i8 && name_buf[2] == 121 as i8
-           && name_buf[3] == 110 as i8 && name_buf[4] == 99 as i8 {  // "Async"
-            return 6
-        }
-        // Panic
-        if name_buf[0] == 80 as i8 && name_buf[1] == 97 as i8 && name_buf[2] == 110 as i8
-           && name_buf[3] == 105 as i8 && name_buf[4] == 99 as i8 {  // "Panic"
-            return 3
-        }
-    }
-
-    // Prob
-    if name_len == 4 {
-        if name_buf[0] == 80 as i8 && name_buf[1] == 114 as i8 && name_buf[2] == 111 as i8
-           && name_buf[3] == 98 as i8 {  // "Prob"
-            return 7
-        }
-    }
-
-    // Epistemic (9 chars)
-    if name_len == 9 {
-        if name_buf[0] == 69 as i8 && name_buf[1] == 112 as i8 && name_buf[2] == 105 as i8
-           && name_buf[3] == 115 as i8 && name_buf[4] == 116 as i8 && name_buf[5] == 101 as i8
-           && name_buf[6] == 109 as i8 && name_buf[7] == 105 as i8 && name_buf[8] == 99 as i8 {
-            return 8
-        }
-    }
-
-    // Causal (6 chars)
-    if name_len == 6 {
-        if name_buf[0] == 67 as i8 && name_buf[1] == 97 as i8 && name_buf[2] == 117 as i8
-           && name_buf[3] == 115 as i8 && name_buf[4] == 97 as i8 && name_buf[5] == 108 as i8 {
-            return 9
-        }
-    }
-
-    // Network (7 chars)
-    if name_len == 7 {
-        if name_buf[0] == 78 as i8 && name_buf[1] == 101 as i8 && name_buf[2] == 116 as i8
-           && name_buf[3] == 119 as i8 && name_buf[4] == 111 as i8 && name_buf[5] == 114 as i8
-           && name_buf[6] == 107 as i8 {
-            return 10
-        }
-    }
-
-    // Sensor (6 chars)
-    if name_len == 6 {
-        if name_buf[0] == 83 as i8 && name_buf[1] == 101 as i8 && name_buf[2] == 110 as i8
-           && name_buf[3] == 115 as i8 && name_buf[4] == 111 as i8 && name_buf[5] == 114 as i8 {
-            return 11
-        }
-    }
-
-    // Render (6 chars)
-    if name_len == 6 {
-        if name_buf[0] == 82 as i8 && name_buf[1] == 101 as i8 && name_buf[2] == 110 as i8
-           && name_buf[3] == 100 as i8 && name_buf[4] == 101 as i8 && name_buf[5] == 114 as i8 {
-            return 12
-        }
-    }
-
-    // Observe (7 chars) — von Foerster's observer-inclusion effect
-    // Any function that performs observation (reads system state through
-    // an observer with measurable cost) must declare this effect.
-    if name_len == 7 {
-        if name_buf[0] == 79 as i8 && name_buf[1] == 98 as i8 && name_buf[2] == 115 as i8
-           && name_buf[3] == 101 as i8 && name_buf[4] == 114 as i8 && name_buf[5] == 118 as i8
-           && name_buf[6] == 101 as i8 {  // "Observe"
-            return 13
-        }
-    }
-
-    // NonAssoc (8 chars) — non-associative algebraic operations
-    // Any function that multiplies elements of a non-associative algebra
-    // (octonions, sedenions, or higher Cayley-Dickson) must declare this.
-    // The compiler uses this to block unsafe reassociation optimizations.
-    if name_len == 8 {
-        if name_buf[0] == 78 as i8 && name_buf[1] == 111 as i8 && name_buf[2] == 110 as i8
-           && name_buf[3] == 65 as i8 && name_buf[4] == 115 as i8 && name_buf[5] == 115 as i8
-           && name_buf[6] == 111 as i8 && name_buf[7] == 99 as i8 {  // "NonAssoc"
-            return 14
-        }
-    }
-
-    // Audit (5 chars) — runtime provenance and regulatory trace logging
-    if name_len == 5 {
-        if name_buf[0] == 65 as i8 && name_buf[1] == 117 as i8 && name_buf[2] == 100 as i8
-           && name_buf[3] == 105 as i8 && name_buf[4] == 116 as i8 {  // "Audit"
-            return 15
-        }
-    }
-
-    // Hypothesis (10 chars) — statistical tests must target registered study outcomes
-    if name_len == 10 {
-        if name_buf[0] == 72 as i8 && name_buf[1] == 121 as i8 && name_buf[2] == 112 as i8
-           && name_buf[3] == 111 as i8 && name_buf[4] == 116 as i8 && name_buf[5] == 104 as i8
-           && name_buf[6] == 101 as i8 && name_buf[7] == 115 as i8 && name_buf[8] == 105 as i8
-           && name_buf[9] == 115 as i8 {
-            return 16
-        }
-    }
-
-    // MultiTest (9 chars) — multiple statistical tests in one function
-    // require an explicit correction call before the function exits.
-    if name_len == 9 {
-        if name_buf[0] == 77 as i8 && name_buf[1] == 117 as i8 && name_buf[2] == 108 as i8
-           && name_buf[3] == 116 as i8 && name_buf[4] == 105 as i8 && name_buf[5] == 84 as i8
-           && name_buf[6] == 101 as i8 && name_buf[7] == 115 as i8 && name_buf[8] == 116 as i8 {
-            return 17
-        }
-    }
-
-    // ZD (2 chars) — zero-divisor effect for sedenion-based exact erasure
-    // Functions that use Forgettable<T> must declare this effect.
-    // Enforces that the ZD algebraic structure is available for hard reset.
-    if name_len == 2 {
-        if name_buf[0] == 90 as i8 && name_buf[1] == 68 as i8 {  // "ZD"
-            return 18
-        }
-    }
-
-    // Witness (7 chars) — required alongside ZD by Audited<T>.
-    // Signals that every surgical op emits a machine-checkable Lean term.
-    if name_len == 7 {
-        if name_buf[0] == 87 as i8 && name_buf[1] == 105 as i8 && name_buf[2] == 116 as i8
-           && name_buf[3] == 110 as i8 && name_buf[4] == 101 as i8 && name_buf[5] == 115 as i8
-           && name_buf[6] == 115 as i8 {  // "Witness"
-            return 19
-        }
-    }
-
-    // Chaotic (7 chars) — A-layer-2: the function integrates a vector field with a
-    // positive largest Lyapunov exponent (chaos-sensitivity manifest). The compiler
-    // refuses float reassociation on its integration path (e^{λt} amplification).
-    if name_len == 7 {
-        if name_buf[0] == 67 as i8 && name_buf[1] == 104 as i8 && name_buf[2] == 97 as i8
-           && name_buf[3] == 111 as i8 && name_buf[4] == 116 as i8 && name_buf[5] == 105 as i8
-           && name_buf[6] == 99 as i8 {  // "Chaotic"
-            return 22
-        }
-    }
-
-    // Temporal (8 chars) — required alongside ZD by Revivable<T>.
-    // Signals that surgical ops are reversible within a bounded window.
-    if name_len == 8 {
-        if name_buf[0] == 84 as i8 && name_buf[1] == 101 as i8 && name_buf[2] == 109 as i8
-           && name_buf[3] == 112 as i8 && name_buf[4] == 111 as i8 && name_buf[5] == 114 as i8
-           && name_buf[6] == 97 as i8 && name_buf[7] == 108 as i8 {  // "Temporal"
-            return 20
-        }
-    }
-
-    // Learn (5 chars) — declared by functions that produce gradients and
-    // will be consumed by a SurgicalOptimizer that enforces preservation
-    // of the ZD annihilator at each step.
-    if name_len == 5 {
-        if name_buf[0] == 76 as i8 && name_buf[1] == 101 as i8 && name_buf[2] == 97 as i8
-           && name_buf[3] == 114 as i8 && name_buf[4] == 110 as i8 {  // "Learn"
-            return 21
-        }
-    }
-
-    // Unknown effect
-    -1
+    0 - 1
 }
 
 // ============================================================
@@ -280,31 +314,93 @@ pub fn effects_subset(required: [i64; 8], req_count: i64, declared: [i64; 8], de
     true
 }
 
-// Print effect name by ID (for diagnostics)
+// Print one ASCII byte. The print table is the lookup table: print_effect_name
+// walks effect_kind_name_byte so an id with a name cannot fall through to
+// Effect#N. Digits + A-Z + a-z; anything else is the generic fallback.
+// pub since E210: check.sio's diagnostic prints an offending effect name
+// byte-for-byte through the same printer the id-table path uses.
+pub fn print_ascii_i8(b: i8) with IO {
+    let c = b as i64
+    if c == 48 { print("0") }
+    else if c == 49 { print("1") }
+    else if c == 50 { print("2") }
+    else if c == 51 { print("3") }
+    else if c == 52 { print("4") }
+    else if c == 53 { print("5") }
+    else if c == 54 { print("6") }
+    else if c == 55 { print("7") }
+    else if c == 56 { print("8") }
+    else if c == 57 { print("9") }
+    else if c == 65 { print("A") }
+    else if c == 66 { print("B") }
+    else if c == 67 { print("C") }
+    else if c == 68 { print("D") }
+    else if c == 69 { print("E") }
+    else if c == 70 { print("F") }
+    else if c == 71 { print("G") }
+    else if c == 72 { print("H") }
+    else if c == 73 { print("I") }
+    else if c == 74 { print("J") }
+    else if c == 75 { print("K") }
+    else if c == 76 { print("L") }
+    else if c == 77 { print("M") }
+    else if c == 78 { print("N") }
+    else if c == 79 { print("O") }
+    else if c == 80 { print("P") }
+    else if c == 81 { print("Q") }
+    else if c == 82 { print("R") }
+    else if c == 83 { print("S") }
+    else if c == 84 { print("T") }
+    else if c == 85 { print("U") }
+    else if c == 86 { print("V") }
+    else if c == 87 { print("W") }
+    else if c == 88 { print("X") }
+    else if c == 89 { print("Y") }
+    else if c == 90 { print("Z") }
+    else if c == 97 { print("a") }
+    else if c == 98 { print("b") }
+    else if c == 99 { print("c") }
+    else if c == 100 { print("d") }
+    else if c == 101 { print("e") }
+    else if c == 102 { print("f") }
+    else if c == 103 { print("g") }
+    else if c == 104 { print("h") }
+    else if c == 105 { print("i") }
+    else if c == 106 { print("j") }
+    else if c == 107 { print("k") }
+    else if c == 108 { print("l") }
+    else if c == 109 { print("m") }
+    else if c == 110 { print("n") }
+    else if c == 111 { print("o") }
+    else if c == 112 { print("p") }
+    else if c == 113 { print("q") }
+    else if c == 114 { print("r") }
+    else if c == 115 { print("s") }
+    else if c == 116 { print("t") }
+    else if c == 117 { print("u") }
+    else if c == 118 { print("v") }
+    else if c == 119 { print("w") }
+    else if c == 120 { print("x") }
+    else if c == 121 { print("y") }
+    else if c == 122 { print("z") }
+    else { print("?") }
+}
+
+// Print effect name by ID. One table: if name_len(id) > 0 the name is printed
+// from the same bytes lookup uses. Generic Effect#N only when the id has no
+// name (EffVar, unknown). Chaotic is id 22 and must print "Chaotic".
 pub fn print_effect_name(id: i64) with IO, Mut, Panic, Div {
-    if id == 0 { print("IO") }
-    else if id == 1 { print("Mut") }
-    else if id == 2 { print("Alloc") }
-    else if id == 3 { print("Panic") }
-    else if id == 4 { print("Div") }
-    else if id == 5 { print("GPU") }
-    else if id == 6 { print("Async") }
-    else if id == 7 { print("Prob") }
-    else if id == 8 { print("Epistemic") }
-    else if id == 9 { print("Causal") }
-    else if id == 10 { print("Network") }
-    else if id == 11 { print("Sensor") }
-    else if id == 12 { print("Render") }
-    else if id == 13 { print("Observe") }
-    else if id == 14 { print("NonAssoc") }
-    else if id == 15 { print("Audit") }
-    else if id == 16 { print("Hypothesis") }
-    else if id == 17 { print("MultiTest") }
-    else if id == 18 { print("ZD") }
-    else if id == 19 { print("Witness") }
-    else if id == 20 { print("Temporal") }
-    else if id == 21 { print("Learn") }
-    else { print("Effect#"); print_int(id) }
+    let nlen = effect_kind_name_len(id)
+    if nlen <= 0 {
+        print("Effect#")
+        print_int(id)
+        return
+    }
+    var i: i64 = 0
+    while i < nlen {
+        print_ascii_i8(effect_kind_name_byte(id, i))
+        i = i + 1
+    }
 }
 
 // Find missing effects: returns effects in required that are not in declared

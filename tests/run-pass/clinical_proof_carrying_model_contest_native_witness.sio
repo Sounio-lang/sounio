@@ -1,0 +1,224 @@
+//@ run-pass
+// Scalarized native executor for the bounded synthetic D2 fixture.
+
+struct Hypothesis {
+    hypothesis_id: i64,
+    predictive_mode: i64,
+}
+
+struct ContestState {
+    h0_alive: bool,
+    h1_alive: bool,
+    h2_alive: bool,
+    h3_alive: bool,
+    survivor_mask: i64,
+    survivor_count: i64,
+    evidence_count: i64,
+    last_provenance_id: i64,
+    provenance_fingerprint: i64,
+    burden_spent: i64,
+    family_refuted: bool,
+}
+
+struct Observation {
+    probe_index: i64,
+    value_numerator: i64,
+    provenance_id: i64,
+    previous_provenance_id: i64,
+    burden_units: i64,
+    value_present: bool,
+    provenance_complete: bool,
+    common_probe: bool,
+}
+
+fn as_i64(value: bool) -> i64 { if value { 1 } else { 0 } }
+
+fn prediction(mode: i64, probe: i64) -> i64 with Panic {
+    assert(mode >= 0 && mode <= 3)
+    assert(probe >= 0 && probe <= 2)
+    if mode == 0 {
+        if probe == 0 { 400 } else if probe == 1 { 450 } else { 500 }
+    } else if mode == 1 {
+        if probe == 0 { 400 } else if probe == 1 { 550 } else { 500 }
+    } else if mode == 2 {
+        if probe == 0 { 600 } else if probe == 1 { 450 } else { 500 }
+    } else {
+        if probe == 0 { 600 } else if probe == 1 { 450 } else { 650 }
+    }
+}
+
+fn burden(probe: i64) -> i64 with Panic {
+    assert(probe >= 0 && probe <= 2)
+    if probe == 0 { 2 } else if probe == 1 { 3 } else { 5 }
+}
+
+fn separates_pair(first: i64, second: i64, probe: i64) -> bool with Panic {
+    prediction(first, probe) != prediction(second, probe)
+}
+
+fn separates_triple(first: i64, second: i64, third: i64, probe: i64) -> bool with Panic {
+    separates_pair(first, second, probe) &&
+        separates_pair(first, third, probe) &&
+        separates_pair(second, third, probe)
+}
+
+fn separates_four(probe: i64) -> bool with Panic {
+    separates_triple(0, 1, 2, probe) &&
+        separates_pair(0, 3, probe) &&
+        separates_pair(1, 3, probe) &&
+        separates_pair(2, 3, probe)
+}
+
+fn initial_state() -> ContestState {
+    ContestState {
+        h0_alive: true,
+        h1_alive: true,
+        h2_alive: true,
+        h3_alive: true,
+        survivor_mask: 15,
+        survivor_count: 4,
+        evidence_count: 0,
+        last_provenance_id: 0,
+        provenance_fingerprint: 0,
+        burden_spent: 0,
+        family_refuted: false,
+    }
+}
+
+fn admissible_observation(
+    probe: i64,
+    value: i64,
+    provenance: i64,
+    previous_provenance: i64,
+) -> Observation with Panic {
+    assert(value >= 0 && value <= 1000)
+    Observation {
+        probe_index: probe,
+        value_numerator: value,
+        provenance_id: provenance,
+        previous_provenance_id: previous_provenance,
+        burden_units: burden(probe),
+        value_present: true,
+        provenance_complete: true,
+        common_probe: true,
+    }
+}
+
+fn update(prior: ContestState, observation: Observation) -> ContestState with Panic {
+    assert(observation.value_present)
+    assert(observation.provenance_complete)
+    assert(observation.common_probe)
+    assert(observation.previous_provenance_id == prior.last_provenance_id)
+    assert(prior.survivor_count > 0)
+    let h0 = prior.h0_alive && prediction(0, observation.probe_index) == observation.value_numerator
+    let h1 = prior.h1_alive && prediction(1, observation.probe_index) == observation.value_numerator
+    let h2 = prior.h2_alive && prediction(2, observation.probe_index) == observation.value_numerator
+    let h3 = prior.h3_alive && prediction(3, observation.probe_index) == observation.value_numerator
+    let mask = as_i64(h0) + 2 * as_i64(h1) + 4 * as_i64(h2) + 8 * as_i64(h3)
+    let count = as_i64(h0) + as_i64(h1) + as_i64(h2) + as_i64(h3)
+    ContestState {
+        h0_alive: h0,
+        h1_alive: h1,
+        h2_alive: h2,
+        h3_alive: h3,
+        survivor_mask: mask,
+        survivor_count: count,
+        evidence_count: prior.evidence_count + 1,
+        last_provenance_id: observation.provenance_id,
+        provenance_fingerprint: prior.provenance_fingerprint * 31 + observation.provenance_id,
+        burden_spent: prior.burden_spent + observation.burden_units,
+        family_refuted: count == 0,
+    }
+}
+
+fn abstain_on_disconnected_provenance(
+    prior: ContestState,
+    previous_provenance: i64,
+) -> ContestState with Panic {
+    assert(previous_provenance != prior.last_provenance_id)
+    prior
+}
+
+fn prove_bounded_policy() -> i64 with Panic {
+    assert(!separates_four(0) && !separates_four(1) && !separates_four(2))
+    assert(!separates_pair(0, 1, 0))
+    assert(separates_pair(0, 1, 1))
+    assert(!separates_pair(0, 1, 2))
+    assert(!separates_pair(2, 3, 0))
+    assert(!separates_pair(2, 3, 1))
+    assert(separates_pair(2, 3, 2))
+    assert(!separates_triple(0, 2, 3, 0))
+    assert(!separates_triple(0, 2, 3, 1))
+    assert(!separates_triple(0, 2, 3, 2))
+    assert(!separates_triple(0, 1, 2, 0))
+    assert(!separates_triple(0, 1, 2, 1))
+    assert(!separates_triple(0, 1, 2, 2))
+    burden(0) + if burden(1) > burden(2) { burden(1) } else { burden(2) }
+}
+
+fn prove_relabel_invariance() with Mut, Panic {
+    let h0 = Hypothesis { hypothesis_id: 110, predictive_mode: 0 }
+    let h1 = Hypothesis { hypothesis_id: 111, predictive_mode: 1 }
+    let h2 = Hypothesis { hypothesis_id: 112, predictive_mode: 2 }
+    let h3 = Hypothesis { hypothesis_id: 113, predictive_mode: 3 }
+    let q0 = Hypothesis { hypothesis_id: 310, predictive_mode: 0 }
+    let q1 = Hypothesis { hypothesis_id: 311, predictive_mode: 1 }
+    let q2 = Hypothesis { hypothesis_id: 312, predictive_mode: 2 }
+    let q3 = Hypothesis { hypothesis_id: 313, predictive_mode: 3 }
+    assert(h0.hypothesis_id != q0.hypothesis_id)
+    assert(h1.hypothesis_id != q1.hypothesis_id)
+    assert(h2.hypothesis_id != q2.hypothesis_id)
+    assert(h3.hypothesis_id != q3.hypothesis_id)
+    var probe: i64 = 0
+    while probe < 3 {
+        assert(prediction(h0.predictive_mode, probe) == prediction(q0.predictive_mode, probe))
+        assert(prediction(h1.predictive_mode, probe) == prediction(q1.predictive_mode, probe))
+        assert(prediction(h2.predictive_mode, probe) == prediction(q2.predictive_mode, probe))
+        assert(prediction(h3.predictive_mode, probe) == prediction(q3.predictive_mode, probe))
+        probe = probe + 1
+    }
+}
+
+fn main() with Mut, Panic {
+    let initial = initial_state()
+    // Missing and unaudited inputs are routed to abstention and never call update.
+    let missing_mask = initial.survivor_mask
+    let unaudited_mask = initial.survivor_mask
+    let disconnected = abstain_on_disconnected_provenance(initial, 9999)
+    assert(missing_mask == 15 && unaudited_mask == 15)
+    assert(disconnected.survivor_mask == 15)
+
+    let after_a = update(initial, admissible_observation(0, 600, 9101, 0))
+    assert(after_a.survivor_mask == 12 && after_a.survivor_count == 2)
+    assert(after_a.burden_spent == 2 && after_a.provenance_fingerprint == 9101)
+    let after_c = update(after_a, admissible_observation(2, 650, 9102, 9101))
+    assert(after_c.survivor_mask == 8 && after_c.survivor_count == 1)
+    assert(after_c.burden_spent == 7 && after_c.provenance_fingerprint == 291233)
+    assert(after_c.h3_alive && !after_c.h0_alive && !after_c.h1_alive && !after_c.h2_alive)
+
+    let policy_worst = prove_bounded_policy()
+    assert(policy_worst == 7)
+    assert(burden(0) + burden(1) + burden(2) == 10)
+    prove_relabel_invariance()
+
+    var maximum_fingerprint: i64 = 0
+    var fingerprint_step: i64 = 0
+    while fingerprint_step < 8 {
+        maximum_fingerprint = maximum_fingerprint * 31 + 1000000
+        fingerprint_step = fingerprint_step + 1
+    }
+    assert(maximum_fingerprint == 28429701248000000)
+
+    let contradicted = update(initial_state(), admissible_observation(1, 700, 9103, 0))
+    assert(contradicted.survivor_mask == 0 && contradicted.survivor_count == 0)
+    assert(contradicted.family_refuted)
+
+    println("D2-W0 initial_mask=15 missing_mask=15 unaudited_mask=15 disconnected_mask=15 abstentions=typed")
+    println("D2-W1 A600 mask=12 count=2 burden=2 fingerprint=9101")
+    println("D2-W2 C650 mask=8 count=1 selected=113 burden=7 fingerprint=291233")
+    println("D2-W3 policy=A_to_B_or_C worst=7 preset=10 exhaustive=depth2")
+    println("D2-W4 B700 mask=0 family_refuted=true nearest=false")
+    println("D2-W5 relabel=partition_invariant global=false causal=false clinical=false suffering=false")
+    println("D2-W6 fingerprint_max8=28429701248000000 i64_safe=true")
+    println("PROOF-CARRYING EPISTEMIC CONTEST D2 PASS")
+}

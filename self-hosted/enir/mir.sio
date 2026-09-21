@@ -1,0 +1,826 @@
+// ABI-independent semantic MIR for translation-validated ENIR lowering.
+// E3A admits only one-block qd128 constants, arithmetic, observations, and halt.
+
+use enir::ir::*
+use enir::verify::*
+use enir::canonical::*
+use enir::qd::*
+
+pub let EMIR_SCHEMA_VERSION: i64 = 2
+pub let EMIR_STAGE_LOWERED: i64 = 3
+pub let EMIR_MAX_VALUES: i64 = 128
+pub let EMIR_MAX_PROVENANCE: i64 = 128
+pub let EMIR_MAX_INSTRS: i64 = 128
+pub let EMIR_MAX_OBSERVATIONS: i64 = 64
+pub let EMIR_MAX_MEMORY_SLOTS: i64 = 16
+
+pub let EMIR_OP_CONST: i64 = 20
+pub let EMIR_OP_ADD: i64 = 21
+pub let EMIR_OP_SUB: i64 = 22
+pub let EMIR_OP_MUL: i64 = 23
+pub let EMIR_OP_DIV: i64 = 24
+pub let EMIR_OP_SQRT: i64 = 25
+pub let EMIR_OP_OBSERVE: i64 = 26
+pub let EMIR_OP_LOAD: i64 = 27
+pub let EMIR_OP_STORE: i64 = 28
+pub let EMIR_OP_MOVE: i64 = 29
+
+pub let EMIR_EFFECT_PURE: i64 = 0
+pub let EMIR_EFFECT_OBSERVE: i64 = 1
+pub let EMIR_EFFECT_MEMORY_READ: i64 = 2
+pub let EMIR_EFFECT_MEMORY_WRITE: i64 = 3
+pub let EMIR_TRAP_NONE: i64 = 0
+pub let EMIR_TRAP_POISON_INVALID: i64 = 1
+pub let EMIR_TERM_HALT: i64 = 0
+
+pub struct EnirMirValue {
+    pub id: i64,
+    pub type_id: i64,
+    pub known_bits: i64,
+    pub value_bits: i64,
+    pub fp_class: i64,
+    pub error0_bits: i64,
+    pub error1_bits: i64,
+    pub error2_bits: i64,
+    pub error3_bits: i64,
+    pub uncertainty_bits: i64,
+    pub status_kind: i64,
+    pub status_reason: i64,
+    pub provenance_id: i64,
+    pub source_value_id: i64,
+}
+
+pub struct EnirMirProvenance {
+    pub id: i64,
+    pub source_span_id: i64,
+    pub input_origin_id: i64,
+    pub transform_id: i64,
+    pub assumption_id: i64,
+    pub policy_id: i64,
+    pub source_provenance_id: i64,
+}
+
+pub struct EnirMirInstr {
+    pub id: i64,
+    pub opcode: i64,
+    pub result_id: i64,
+    pub type_id: i64,
+    pub a: i64,
+    pub b: i64,
+    pub effect_kind: i64,
+    pub trap_kind: i64,
+    pub policy_id: i64,
+    pub source_op_id: i64,
+    pub semantic_tick: i64,
+    pub memory_slot: i64,
+    pub store_origin: i64,
+}
+
+pub struct EnirMirObservation {
+    pub id: i64,
+    pub program_name: EnirName,
+    pub ordinal: i64,
+    pub kind: i64,
+    pub source_observation_id: i64,
+}
+
+pub struct EnirMirBlock {
+    pub id: i64,
+    pub first_instr: i64,
+    pub instr_count: i64,
+    pub terminator_kind: i64,
+    pub terminator_tick: i64,
+}
+
+pub struct EnirMirModule {
+    pub schema_version: i64,
+    pub stage: i64,
+    pub name: EnirName,
+    pub profile: i64,
+    pub fuel_limit: i64,
+    pub source_enir_hash: i64,
+    pub ty: EnirType,
+    pub type_count: i64,
+    pub values: [EnirMirValue; 128],
+    pub value_count: i64,
+    pub provenance: [EnirMirProvenance; 128],
+    pub provenance_count: i64,
+    pub block: EnirMirBlock,
+    pub block_count: i64,
+    pub instrs: [EnirMirInstr; 128],
+    pub instr_count: i64,
+    pub observations: [EnirMirObservation; 64],
+    pub observation_count: i64,
+    pub declared_type_count: i64,
+    pub declared_value_count: i64,
+    pub declared_provenance_count: i64,
+    pub declared_block_count: i64,
+    pub declared_instr_count: i64,
+    pub declared_observation_count: i64,
+}
+
+pub struct EnirMirLowerResult {
+    pub ok: bool,
+    pub error_code: i64,
+    pub module: EnirMirModule,
+}
+
+pub struct EnirMirParseResult {
+    pub ok: bool,
+    pub error_code: i64,
+    pub module: EnirMirModule,
+}
+
+pub struct EnirMirExecResult {
+    pub ok: bool,
+    pub error_code: i64,
+    pub executed_instrs: i64,
+    pub observations: i64,
+    pub fuel_left: i64,
+    pub last_write: i64,
+}
+
+struct EnirMirParsedI64 {
+    ok: bool,
+    value: i64,
+}
+
+struct EnirMirRuntimeValue {
+    val: f64,
+    err: Qd128,
+    uncertainty: f64,
+    poisoned: i64,
+}
+
+pub fn enir_mir_empty() -> EnirMirModule {
+    EnirMirModule {
+        schema_version: EMIR_SCHEMA_VERSION,
+        stage: EMIR_STAGE_LOWERED,
+        name: enir_name_empty(),
+        profile: -1,
+        fuel_limit: -1,
+        source_enir_hash: 0,
+        ty: EnirType { id: -1, value_kind: -1, error_kind: -1, uncertainty_kind: -1, status_tracked: 0, provenance_tracked: 0, profile: -1 },
+        type_count: 0,
+        values: [EnirMirValue { id: -1, type_id: -1, known_bits: 0, value_bits: 0, fp_class: -1, error0_bits: 0, error1_bits: 0, error2_bits: 0, error3_bits: 0, uncertainty_bits: 0, status_kind: -1, status_reason: -1, provenance_id: -1, source_value_id: -1 }; 128],
+        value_count: 0,
+        provenance: [EnirMirProvenance { id: -1, source_span_id: -1, input_origin_id: -1, transform_id: -1, assumption_id: -1, policy_id: -1, source_provenance_id: -1 }; 128],
+        provenance_count: 0,
+        block: EnirMirBlock { id: -1, first_instr: -1, instr_count: -1, terminator_kind: -1, terminator_tick: -1 },
+        block_count: 0,
+        instrs: [EnirMirInstr { id: -1, opcode: -1, result_id: -1, type_id: -1, a: -1, b: -1, effect_kind: -1, trap_kind: -1, policy_id: -1, source_op_id: -1, semantic_tick: -1, memory_slot: -1, store_origin: -1 }; 128],
+        instr_count: 0,
+        observations: [EnirMirObservation { id: -1, program_name: EnirName { buf: [0; 64], len: 0 }, ordinal: -1, kind: -1, source_observation_id: -1 }; 64],
+        observation_count: 0,
+        declared_type_count: -1,
+        declared_value_count: -1,
+        declared_provenance_count: -1,
+        declared_block_count: -1,
+        declared_instr_count: -1,
+        declared_observation_count: -1,
+    }
+}
+
+fn enir_mir_fail(code: i64, module: EnirMirModule) -> EnirMirLowerResult {
+    EnirMirLowerResult { ok: false, error_code: code, module: module }
+}
+
+fn enir_mir_opcode(source_opcode: i64) -> i64 {
+    if source_opcode == enir_op_econst() { return EMIR_OP_CONST }
+    if source_opcode == enir_op_eadd() { return EMIR_OP_ADD }
+    if source_opcode == enir_op_esub() { return EMIR_OP_SUB }
+    if source_opcode == enir_op_emul() { return EMIR_OP_MUL }
+    if source_opcode == enir_op_ediv() { return EMIR_OP_DIV }
+    if source_opcode == enir_op_esqrt() { return EMIR_OP_SQRT }
+    if source_opcode == enir_op_egate() { return EMIR_OP_OBSERVE }
+    if source_opcode == enir_op_eload() { return EMIR_OP_LOAD }
+    if source_opcode == enir_op_estore() { return EMIR_OP_STORE }
+    if source_opcode == enir_op_emov() { return EMIR_OP_MOVE }
+    -1
+}
+
+fn enir_mir_source_opcode(opcode: i64) -> i64 {
+    if opcode == EMIR_OP_CONST { return enir_op_econst() }
+    if opcode == EMIR_OP_ADD { return enir_op_eadd() }
+    if opcode == EMIR_OP_SUB { return enir_op_esub() }
+    if opcode == EMIR_OP_MUL { return enir_op_emul() }
+    if opcode == EMIR_OP_DIV { return enir_op_ediv() }
+    if opcode == EMIR_OP_SQRT { return enir_op_esqrt() }
+    if opcode == EMIR_OP_OBSERVE { return enir_op_egate() }
+    if opcode == EMIR_OP_LOAD { return enir_op_eload() }
+    if opcode == EMIR_OP_STORE { return enir_op_estore() }
+    if opcode == EMIR_OP_MOVE { return enir_op_emov() }
+    -1
+}
+
+pub fn enir_lower_to_mir(source: EnirModule, source_hash: i64) -> EnirMirLowerResult with Mut, Panic, Div {
+    var out = enir_mir_empty()
+    if enir_verify(source) != 0 || source.schema_version != ENIR_SCHEMA_CFG_VERSION || source.stage != ENIR_STAGE_LOWERED { return enir_mir_fail(10, out) }
+    if source.profile != enir_profile_eisa_v2() || source.type_count != 1 || source.block_count != 1 || source.block_arg_count != 0 || source.edge_count != 0 { return enir_mir_fail(11, out) }
+    let source_block = source.blocks[0]
+    if source_block.id != 0 || source_block.first_op != 0 || source_block.op_count != source.op_count || source_block.terminator_kind != enir_term_halt() || source_block.terminator_fuel_cost != 1 { return enir_mir_fail(12, out) }
+    var i: i64 = 0
+    while i < source.op_count {
+        if enir_mir_opcode(source.ops[i as usize].opcode) < 0 { return enir_mir_fail(20 + i, out) }
+        i = i + 1
+    }
+    out.name = source.name
+    out.profile = source.profile
+    out.fuel_limit = source.fuel_limit
+    out.source_enir_hash = source_hash
+    out.ty = source.types[0]
+    out.type_count = 1
+    i = 0
+    while i < source.value_count {
+        let value = source.values[i as usize]
+        out.values[i as usize] = EnirMirValue {
+            id: value.id, type_id: value.type_id, known_bits: value.known_bits, value_bits: value.value_bits,
+            fp_class: value.fp_class, error0_bits: value.error0_bits, error1_bits: value.error1_bits,
+            error2_bits: value.error2_bits, error3_bits: value.error3_bits, uncertainty_bits: value.uncertainty_bits,
+            status_kind: value.status_kind, status_reason: value.status_reason,
+            provenance_id: value.provenance_id, source_value_id: value.id,
+        }
+        i = i + 1
+    }
+    out.value_count = source.value_count
+    i = 0
+    while i < source.provenance_count {
+        let provenance = source.provenance[i as usize]
+        out.provenance[i as usize] = EnirMirProvenance {
+            id: provenance.id, source_span_id: provenance.source_span_id,
+            input_origin_id: provenance.input_origin_id, transform_id: provenance.transform_id,
+            assumption_id: provenance.assumption_id, policy_id: provenance.policy_id,
+            source_provenance_id: provenance.id,
+        }
+        i = i + 1
+    }
+    out.provenance_count = source.provenance_count
+    out.block = EnirMirBlock { id: 0, first_instr: 0, instr_count: source.op_count, terminator_kind: EMIR_TERM_HALT, terminator_tick: 1 }
+    out.block_count = 1
+    i = 0
+    while i < source.op_count {
+        let op = source.ops[i as usize]
+        let opcode = enir_mir_opcode(op.opcode)
+        let effect = if opcode == EMIR_OP_OBSERVE { EMIR_EFFECT_OBSERVE } else {
+            if opcode == EMIR_OP_LOAD { EMIR_EFFECT_MEMORY_READ } else {
+                if opcode == EMIR_OP_STORE { EMIR_EFFECT_MEMORY_WRITE } else { EMIR_EFFECT_PURE }
+            }
+        }
+        let trap = if opcode >= EMIR_OP_ADD && opcode <= EMIR_OP_SQRT { EMIR_TRAP_POISON_INVALID } else { EMIR_TRAP_NONE }
+        let store_origin = if opcode == EMIR_OP_LOAD {
+            source.provenance[source.values[op.result_id as usize].provenance_id as usize].input_origin_id
+        } else { -1 }
+        out.instrs[i as usize] = EnirMirInstr {
+            id: i, opcode: opcode, result_id: op.result_id, type_id: op.type_id,
+            a: op.a, b: op.b, effect_kind: effect, trap_kind: trap,
+            policy_id: op.policy_id, source_op_id: op.id, semantic_tick: op.fuel_cost,
+            memory_slot: op.memory_slot, store_origin: store_origin,
+        }
+        i = i + 1
+    }
+    out.instr_count = source.op_count
+    i = 0
+    while i < source.observation_count {
+        let observation = source.observations[i as usize]
+        out.observations[i as usize] = EnirMirObservation {
+            id: observation.id, program_name: observation.program_name, ordinal: observation.ordinal,
+            kind: observation.kind, source_observation_id: observation.id,
+        }
+        i = i + 1
+    }
+    out.observation_count = source.observation_count
+    out.declared_type_count = out.type_count
+    out.declared_value_count = out.value_count
+    out.declared_provenance_count = out.provenance_count
+    out.declared_block_count = out.block_count
+    out.declared_instr_count = out.instr_count
+    out.declared_observation_count = out.observation_count
+    let rc = enir_mir_verify(out)
+    if rc != 0 { return enir_mir_fail(1000 + rc, out) }
+    EnirMirLowerResult { ok: true, error_code: 0, module: out }
+}
+
+pub fn enir_mir_verify(module: EnirMirModule) -> i64 with Mut, Panic, Div {
+    if module.schema_version != EMIR_SCHEMA_VERSION || module.stage != EMIR_STAGE_LOWERED || module.name.len <= 0 { return 1 }
+    if module.profile != enir_profile_eisa_v2() || module.fuel_limit <= 0 || module.source_enir_hash == 0 { return 2 }
+    if module.type_count != 1 || module.ty.id != 0 || module.ty.value_kind != enir_value_f64() || module.ty.error_kind != enir_error_qd128() || module.ty.uncertainty_kind != enir_uncertainty_gum1() || module.ty.status_tracked != 1 || module.ty.provenance_tracked != 1 || module.ty.profile != enir_profile_eisa_v2() { return 3 }
+    if module.value_count < 1 || module.value_count > EMIR_MAX_VALUES || module.provenance_count != module.value_count || module.instr_count < 2 || module.instr_count > EMIR_MAX_INSTRS || module.observation_count < 1 || module.observation_count > EMIR_MAX_OBSERVATIONS { return 4 }
+    if module.block_count != 1 || module.block.id != 0 || module.block.first_instr != 0 || module.block.instr_count != module.instr_count || module.block.terminator_kind != EMIR_TERM_HALT || module.block.terminator_tick != 1 { return 5 }
+    if module.declared_type_count != module.type_count || module.declared_value_count != module.value_count || module.declared_provenance_count != module.provenance_count || module.declared_block_count != module.block_count || module.declared_instr_count != module.instr_count || module.declared_observation_count != module.observation_count { return 6 }
+    if module.fuel_limit < module.instr_count + module.block.terminator_tick { return 7 }
+    var defs: [i64; 128] = [0; 128]
+    var i: i64 = 0
+    while i < module.value_count {
+        let value = module.values[i as usize]
+        let provenance = module.provenance[i as usize]
+        if value.id != i || value.type_id != 0 || value.provenance_id != i || value.source_value_id != i { return 20 + i }
+        if value.known_bits != 0 && value.known_bits != 1 { return 160 + i }
+        if value.known_bits == 0 && (value.value_bits != 0 || value.fp_class != -1 || value.error0_bits != 0 || value.error1_bits != 0 || value.error2_bits != 0 || value.error3_bits != 0 || value.uncertainty_bits != 0) { return 300 + i }
+        if value.known_bits == 1 {
+            let fp_class = enir_f64_class_from_bits(value.value_bits)
+            if value.fp_class != fp_class || fp_class >= enir_fp_positive_infinity() || value.error0_bits != 0 || value.error1_bits != 0 || value.error2_bits != 0 || value.error3_bits != 0 || value.uncertainty_bits != 0 { return 370 + i }
+        }
+        if value.status_kind != enir_status_clean() || value.status_reason != -1 { return 410 + i }
+        if provenance.id != i || provenance.source_provenance_id != i { return 440 + i }
+        i = i + 1
+    }
+    var gate_count: i64 = 0
+    var memory_sites: [i64; 16] = [-1; 16]
+    i = 0
+    while i < module.instr_count {
+        let instr = module.instrs[i as usize]
+        if instr.id != i || instr.source_op_id != i || instr.semantic_tick != 1 { return 600 + i }
+        let source_opcode = enir_mir_source_opcode(instr.opcode)
+        if source_opcode < 0 { return 740 + i }
+        var produces = false
+        if instr.opcode == EMIR_OP_CONST {
+            produces = true
+            if instr.result_id < 0 || instr.result_id >= module.value_count || instr.a != -1 || instr.b != -1 || instr.effect_kind != EMIR_EFFECT_PURE || instr.trap_kind != EMIR_TRAP_NONE || instr.policy_id != -1 || instr.memory_slot != -1 || instr.store_origin != -1 { return 880 + i }
+            if module.values[instr.result_id as usize].known_bits != 1 { return 1020 + i }
+        } else if instr.opcode >= EMIR_OP_ADD && instr.opcode <= EMIR_OP_DIV {
+            produces = true
+            if instr.a < 0 || instr.a >= module.value_count || instr.b < 0 || instr.b >= module.value_count || defs[instr.a as usize] == 0 || defs[instr.b as usize] == 0 || instr.effect_kind != EMIR_EFFECT_PURE || instr.trap_kind != EMIR_TRAP_POISON_INVALID || instr.policy_id != -1 || instr.memory_slot != -1 || instr.store_origin != -1 { return 1160 + i }
+        } else if instr.opcode == EMIR_OP_SQRT {
+            produces = true
+            if instr.a < 0 || instr.a >= module.value_count || defs[instr.a as usize] == 0 || instr.b != -1 || instr.effect_kind != EMIR_EFFECT_PURE || instr.trap_kind != EMIR_TRAP_POISON_INVALID || instr.policy_id != -1 || instr.memory_slot != -1 || instr.store_origin != -1 { return 1300 + i }
+        } else if instr.opcode == EMIR_OP_LOAD {
+            produces = true
+            if instr.a != -1 || instr.b != -1 || instr.effect_kind != EMIR_EFFECT_MEMORY_READ || instr.trap_kind != EMIR_TRAP_NONE || instr.policy_id != -1 || instr.memory_slot < 0 || instr.memory_slot >= EMIR_MAX_MEMORY_SLOTS || memory_sites[instr.memory_slot as usize] < 0 || instr.store_origin != memory_sites[instr.memory_slot as usize] { return 1370 + i }
+        } else if instr.opcode == EMIR_OP_STORE {
+            if instr.result_id != -1 || instr.type_id != -1 || instr.a < 0 || instr.a >= module.value_count || defs[instr.a as usize] == 0 || instr.b != -1 || instr.effect_kind != EMIR_EFFECT_MEMORY_WRITE || instr.trap_kind != EMIR_TRAP_NONE || instr.policy_id != -1 || instr.memory_slot < 0 || instr.memory_slot >= EMIR_MAX_MEMORY_SLOTS || instr.store_origin != -1 { return 1400 + i }
+            memory_sites[instr.memory_slot as usize] = instr.id
+        } else if instr.opcode == EMIR_OP_MOVE {
+            produces = true
+            if instr.a < 0 || instr.a >= module.value_count || defs[instr.a as usize] == 0 || instr.b != -1 || instr.effect_kind != EMIR_EFFECT_PURE || instr.trap_kind != EMIR_TRAP_NONE || instr.policy_id != -1 || instr.memory_slot != -1 || instr.store_origin != -1 { return 1420 + i }
+        } else {
+            if instr.result_id != -1 || instr.type_id != -1 || instr.a < 0 || instr.a >= module.value_count || defs[instr.a as usize] == 0 || instr.b != -1 || instr.effect_kind != EMIR_EFFECT_OBSERVE || instr.trap_kind != EMIR_TRAP_NONE || instr.policy_id != 0 || instr.memory_slot != -1 || instr.store_origin != -1 { return 1440 + i }
+            gate_count = gate_count + 1
+        }
+        if produces {
+            if instr.result_id < 0 || instr.result_id >= module.value_count || instr.type_id != 0 || defs[instr.result_id as usize] != 0 { return 1580 + i }
+            if module.provenance[instr.result_id as usize].transform_id != source_opcode { return 1720 + i }
+            if instr.opcode == EMIR_OP_LOAD && module.provenance[instr.result_id as usize].input_origin_id != instr.store_origin { return 1800 + i }
+            defs[instr.result_id as usize] = 1
+        }
+        i = i + 1
+    }
+    if gate_count != module.observation_count { return 1900 }
+    i = 0
+    while i < module.observation_count {
+        let observation = module.observations[i as usize]
+        if observation.id != i || observation.source_observation_id != i || observation.ordinal != i || observation.kind != enir_observation_gate() || !enir_name_eq(observation.program_name, module.name) { return 1920 + i }
+        i = i + 1
+    }
+    0
+}
+
+pub fn enir_mir_validate_relation(source: EnirModule, mir: EnirMirModule, source_hash: i64) -> i64 with Mut, Panic, Div {
+    if enir_verify(source) != 0 || enir_mir_verify(mir) != 0 { return 1 }
+    if mir.source_enir_hash != source_hash || !enir_name_eq(mir.name, source.name) || mir.profile != source.profile || mir.fuel_limit != source.fuel_limit { return 2 }
+    if source.schema_version != ENIR_SCHEMA_CFG_VERSION || source.stage != ENIR_STAGE_LOWERED || source.profile != enir_profile_eisa_v2() || source.block_count != 1 || source.block_arg_count != 0 || source.edge_count != 0 { return 3 }
+    if mir.type_count != source.type_count || mir.value_count != source.value_count || mir.provenance_count != source.provenance_count || mir.instr_count != source.op_count || mir.observation_count != source.observation_count { return 4 }
+    let source_type = source.types[0]
+    if mir.ty.id != source_type.id || mir.ty.value_kind != source_type.value_kind || mir.ty.error_kind != source_type.error_kind || mir.ty.uncertainty_kind != source_type.uncertainty_kind || mir.ty.status_tracked != source_type.status_tracked || mir.ty.provenance_tracked != source_type.provenance_tracked || mir.ty.profile != source_type.profile { return 5 }
+    var i: i64 = 0
+    while i < source.value_count {
+        let a = source.values[i as usize]
+        let b = mir.values[i as usize]
+        if b.id != a.id || b.type_id != a.type_id || b.known_bits != a.known_bits || b.value_bits != a.value_bits || b.fp_class != a.fp_class || b.error0_bits != a.error0_bits || b.error1_bits != a.error1_bits || b.error2_bits != a.error2_bits || b.error3_bits != a.error3_bits || b.uncertainty_bits != a.uncertainty_bits || b.status_kind != a.status_kind || b.status_reason != a.status_reason || b.provenance_id != a.provenance_id || b.source_value_id != a.id { return 20 + i }
+        let ap = source.provenance[i as usize]
+        let bp = mir.provenance[i as usize]
+        if bp.id != ap.id || bp.source_span_id != ap.source_span_id || bp.input_origin_id != ap.input_origin_id || bp.transform_id != ap.transform_id || bp.assumption_id != ap.assumption_id || bp.policy_id != ap.policy_id || bp.source_provenance_id != ap.id { return 160 + i }
+        i = i + 1
+    }
+    i = 0
+    while i < source.op_count {
+        let a = source.ops[i as usize]
+        let b = mir.instrs[i as usize]
+        let wanted_opcode = enir_mir_opcode(a.opcode)
+        if wanted_opcode < 0 || b.opcode != wanted_opcode || b.result_id != a.result_id || b.type_id != a.type_id || b.a != a.a || b.b != a.b || b.policy_id != a.policy_id || b.source_op_id != a.id || b.semantic_tick != a.fuel_cost || b.memory_slot != a.memory_slot { return 300 + i }
+        let wanted_effect = if a.opcode == enir_op_egate() { EMIR_EFFECT_OBSERVE } else {
+            if a.opcode == enir_op_eload() { EMIR_EFFECT_MEMORY_READ } else {
+                if a.opcode == enir_op_estore() { EMIR_EFFECT_MEMORY_WRITE } else { EMIR_EFFECT_PURE }
+            }
+        }
+        let wanted_trap = if a.opcode >= enir_op_eadd() && a.opcode <= enir_op_esqrt() { EMIR_TRAP_POISON_INVALID } else { EMIR_TRAP_NONE }
+        let wanted_origin = if a.opcode == enir_op_eload() { source.provenance[source.values[a.result_id as usize].provenance_id as usize].input_origin_id } else { -1 }
+        if b.effect_kind != wanted_effect || b.trap_kind != wanted_trap || b.store_origin != wanted_origin { return 440 + i }
+        i = i + 1
+    }
+    i = 0
+    while i < source.observation_count {
+        let a = source.observations[i as usize]
+        let b = mir.observations[i as usize]
+        if b.id != a.id || !enir_name_eq(b.program_name, a.program_name) || b.ordinal != a.ordinal || b.kind != a.kind || b.source_observation_id != a.id { return 580 + i }
+        i = i + 1
+    }
+    0
+}
+
+fn enir_mir_append(out: string, value: i64) -> string with Mut, Panic, Div, Alloc {
+    out ++ "|" ++ enir_i64_string(value)
+}
+
+pub fn enir_mir_print(module: EnirMirModule) -> string with Mut, Panic, Div, Alloc {
+    var out = "emir" ++ "|" ++ enir_i64_string(module.schema_version) ++ "|" ++ enir_i64_string(module.stage)
+    out = out ++ "|" ++ enir_name_to_string(module.name)
+    out = enir_mir_append(out, module.profile)
+    out = enir_mir_append(out, module.fuel_limit)
+    out = enir_mir_append(out, module.source_enir_hash) ++ "\n"
+    let ty = module.ty
+    out = out ++ "mtype"
+    out = enir_mir_append(out, ty.id)
+    out = enir_mir_append(out, ty.value_kind)
+    out = enir_mir_append(out, ty.error_kind)
+    out = enir_mir_append(out, ty.uncertainty_kind)
+    out = enir_mir_append(out, ty.status_tracked)
+    out = enir_mir_append(out, ty.provenance_tracked)
+    out = enir_mir_append(out, ty.profile) ++ "\n"
+    var i: i64 = 0
+    while i < module.value_count {
+        let value = module.values[i as usize]
+        out = out ++ "mvalue"
+        out = enir_mir_append(out, value.id)
+        out = enir_mir_append(out, value.type_id)
+        out = enir_mir_append(out, value.known_bits)
+        out = enir_mir_append(out, value.value_bits)
+        out = enir_mir_append(out, value.fp_class)
+        out = enir_mir_append(out, value.error0_bits)
+        out = enir_mir_append(out, value.error1_bits)
+        out = enir_mir_append(out, value.error2_bits)
+        out = enir_mir_append(out, value.error3_bits)
+        out = enir_mir_append(out, value.uncertainty_bits)
+        out = enir_mir_append(out, value.status_kind)
+        out = enir_mir_append(out, value.status_reason)
+        out = enir_mir_append(out, value.provenance_id)
+        out = enir_mir_append(out, value.source_value_id) ++ "\n"
+        i = i + 1
+    }
+    i = 0
+    while i < module.provenance_count {
+        let provenance = module.provenance[i as usize]
+        out = out ++ "mprov"
+        out = enir_mir_append(out, provenance.id)
+        out = enir_mir_append(out, provenance.source_span_id)
+        out = enir_mir_append(out, provenance.input_origin_id)
+        out = enir_mir_append(out, provenance.transform_id)
+        out = enir_mir_append(out, provenance.assumption_id)
+        out = enir_mir_append(out, provenance.policy_id)
+        out = enir_mir_append(out, provenance.source_provenance_id) ++ "\n"
+        i = i + 1
+    }
+    let block = module.block
+    out = out ++ "mblock"
+    out = enir_mir_append(out, block.id)
+    out = enir_mir_append(out, block.first_instr)
+    out = enir_mir_append(out, block.instr_count)
+    out = enir_mir_append(out, block.terminator_kind)
+    out = enir_mir_append(out, block.terminator_tick) ++ "\n"
+    i = 0
+    while i < module.instr_count {
+        let instr = module.instrs[i as usize]
+        out = out ++ "minstr"
+        out = enir_mir_append(out, instr.id)
+        out = enir_mir_append(out, instr.opcode)
+        out = enir_mir_append(out, instr.result_id)
+        out = enir_mir_append(out, instr.type_id)
+        out = enir_mir_append(out, instr.a)
+        out = enir_mir_append(out, instr.b)
+        out = enir_mir_append(out, instr.effect_kind)
+        out = enir_mir_append(out, instr.trap_kind)
+        out = enir_mir_append(out, instr.policy_id)
+        out = enir_mir_append(out, instr.source_op_id)
+        out = enir_mir_append(out, instr.semantic_tick)
+        out = enir_mir_append(out, instr.memory_slot)
+        out = enir_mir_append(out, instr.store_origin) ++ "\n"
+        i = i + 1
+    }
+    i = 0
+    while i < module.observation_count {
+        let observation = module.observations[i as usize]
+        out = out ++ "mobs"
+        out = enir_mir_append(out, observation.id)
+        out = out ++ "|" ++ enir_name_to_string(observation.program_name)
+        out = enir_mir_append(out, observation.ordinal)
+        out = enir_mir_append(out, observation.kind)
+        out = enir_mir_append(out, observation.source_observation_id) ++ "\n"
+        i = i + 1
+    }
+    out = out ++ "mend"
+    out = enir_mir_append(out, module.declared_type_count)
+    out = enir_mir_append(out, module.declared_value_count)
+    out = enir_mir_append(out, module.declared_provenance_count)
+    out = enir_mir_append(out, module.declared_block_count)
+    out = enir_mir_append(out, module.declared_instr_count)
+    out = enir_mir_append(out, module.declared_observation_count) ++ "\n"
+    out
+}
+
+fn enir_mir_field_count(text: string, start: i64, finish: i64) -> i64 with Mut, Panic, Div {
+    var count: i64 = 1
+    var i = start
+    while i < finish {
+        let ch = str_char_at(text, i) as i64
+        if ch == 13 { return -1 }
+        if ch == 124 { count = count + 1 }
+        i = i + 1
+    }
+    count
+}
+
+fn enir_mir_field(text: string, start: i64, finish: i64, wanted: i64) -> EnirName with Mut, Panic, Div {
+    var field: i64 = 0
+    var token_start = start
+    var i = start
+    while i <= finish {
+        let split = if i == finish { true } else { (str_char_at(text, i) as i64) == 124 }
+        if split {
+            if field == wanted {
+                let len = i - token_start
+                if len <= 0 || len > ENIR_NAME_CAP { return enir_name_empty() }
+                var out = enir_name_empty()
+                var j: i64 = 0
+                while j < len {
+                    let ch = str_char_at(text, token_start + j) as i64
+                    if ch < 33 || ch > 126 || ch == 124 { return enir_name_empty() }
+                    out.buf[j as usize] = ch as i8
+                    j = j + 1
+                }
+                out.len = len
+                return out
+            }
+            field = field + 1
+            token_start = i + 1
+        }
+        i = i + 1
+    }
+    enir_name_empty()
+}
+
+fn enir_mir_token_eq(token: EnirName, text: string) -> bool with Mut, Panic, Div {
+    if token.len != str_len(text) { return false }
+    var i: i64 = 0
+    while i < token.len {
+        if token.buf[i as usize] != (str_char_at(text, i) as i8) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn enir_mir_i64(token: EnirName) -> EnirMirParsedI64 {
+    if token.len <= 0 { return EnirMirParsedI64 { ok: false, value: 0 } }
+    var negative = false
+    var i: i64 = 0
+    if token.buf[0] == (45 as i8) { negative = true; i = 1 }
+    if i >= token.len { return EnirMirParsedI64 { ok: false, value: 0 } }
+    var limit: i64 = -9223372036854775807
+    if negative { limit = -9223372036854775807 - 1 }
+    let multiply_limit = limit / 10
+    var value: i64 = 0
+    while i < token.len {
+        let ch = token.buf[i as usize] as i64
+        if ch < 48 || ch > 57 || value < multiply_limit { return EnirMirParsedI64 { ok: false, value: 0 } }
+        let digit = ch - 48
+        value = value * 10
+        if value < limit + digit { return EnirMirParsedI64 { ok: false, value: 0 } }
+        value = value - digit
+        i = i + 1
+    }
+    EnirMirParsedI64 { ok: true, value: if negative { value } else { 0 - value } }
+}
+
+fn enir_mir_parse_fail(code: i64, module: EnirMirModule) -> EnirMirParseResult {
+    EnirMirParseResult { ok: false, error_code: code, module: module }
+}
+
+pub fn enir_mir_parse(text: string) -> EnirMirParseResult with Mut, Panic, Div, Alloc {
+    var module = enir_mir_empty()
+    let n = str_len(text)
+    if n <= 0 || (str_char_at(text, n - 1) as i64) != 10 { return enir_mir_parse_fail(1, module) }
+    var pos: i64 = 0
+    var line: i64 = 0
+    var seen_end = false
+    while pos < n {
+        var finish = pos
+        while finish < n && (str_char_at(text, finish) as i64) != 10 { finish = finish + 1 }
+        if finish <= pos || seen_end { return enir_mir_parse_fail(2, module) }
+        let fields = enir_mir_field_count(text, pos, finish)
+        let tag = enir_mir_field(text, pos, finish, 0)
+        if fields <= 0 || tag.len <= 0 { return enir_mir_parse_fail(3, module) }
+        if enir_mir_token_eq(tag, "emir") {
+            if line != 0 || fields != 7 { return enir_mir_parse_fail(10, module) }
+            let schema = enir_mir_i64(enir_mir_field(text, pos, finish, 1))
+            let stage = enir_mir_i64(enir_mir_field(text, pos, finish, 2))
+            let name = enir_mir_field(text, pos, finish, 3)
+            let profile = enir_mir_i64(enir_mir_field(text, pos, finish, 4))
+            let fuel = enir_mir_i64(enir_mir_field(text, pos, finish, 5))
+            let hash = enir_mir_i64(enir_mir_field(text, pos, finish, 6))
+            if !schema.ok || !stage.ok || name.len <= 0 || !profile.ok || !fuel.ok || !hash.ok { return enir_mir_parse_fail(11, module) }
+            module.schema_version = schema.value; module.stage = stage.value; module.name = name
+            module.profile = profile.value; module.fuel_limit = fuel.value; module.source_enir_hash = hash.value
+        } else if enir_mir_token_eq(tag, "mtype") {
+            if fields != 8 || module.type_count != 0 { return enir_mir_parse_fail(20, module) }
+            let a = enir_mir_i64(enir_mir_field(text, pos, finish, 1)); let b = enir_mir_i64(enir_mir_field(text, pos, finish, 2)); let c = enir_mir_i64(enir_mir_field(text, pos, finish, 3)); let d = enir_mir_i64(enir_mir_field(text, pos, finish, 4)); let e = enir_mir_i64(enir_mir_field(text, pos, finish, 5)); let f = enir_mir_i64(enir_mir_field(text, pos, finish, 6)); let g = enir_mir_i64(enir_mir_field(text, pos, finish, 7))
+            if !a.ok || !b.ok || !c.ok || !d.ok || !e.ok || !f.ok || !g.ok { return enir_mir_parse_fail(21, module) }
+            module.ty = EnirType { id: a.value, value_kind: b.value, error_kind: c.value, uncertainty_kind: d.value, status_tracked: e.value, provenance_tracked: f.value, profile: g.value }; module.type_count = 1
+        } else if enir_mir_token_eq(tag, "mvalue") {
+            if fields != 15 || module.value_count >= EMIR_MAX_VALUES { return enir_mir_parse_fail(30, module) }
+            var v: [i64; 14] = [0; 14]
+            var j: i64 = 0
+            while j < 14 { let parsed = enir_mir_i64(enir_mir_field(text, pos, finish, j + 1)); if !parsed.ok { return enir_mir_parse_fail(31, module) }; v[j as usize] = parsed.value; j = j + 1 }
+            module.values[module.value_count as usize] = EnirMirValue { id: v[0], type_id: v[1], known_bits: v[2], value_bits: v[3], fp_class: v[4], error0_bits: v[5], error1_bits: v[6], error2_bits: v[7], error3_bits: v[8], uncertainty_bits: v[9], status_kind: v[10], status_reason: v[11], provenance_id: v[12], source_value_id: v[13] }
+            module.value_count = module.value_count + 1
+        } else if enir_mir_token_eq(tag, "mprov") {
+            if fields != 8 || module.provenance_count >= EMIR_MAX_PROVENANCE { return enir_mir_parse_fail(40, module) }
+            var v: [i64; 7] = [0; 7]
+            var j: i64 = 0
+            while j < 7 { let parsed = enir_mir_i64(enir_mir_field(text, pos, finish, j + 1)); if !parsed.ok { return enir_mir_parse_fail(41, module) }; v[j as usize] = parsed.value; j = j + 1 }
+            module.provenance[module.provenance_count as usize] = EnirMirProvenance { id: v[0], source_span_id: v[1], input_origin_id: v[2], transform_id: v[3], assumption_id: v[4], policy_id: v[5], source_provenance_id: v[6] }
+            module.provenance_count = module.provenance_count + 1
+        } else if enir_mir_token_eq(tag, "mblock") {
+            if fields != 6 || module.block_count != 0 { return enir_mir_parse_fail(50, module) }
+            var v: [i64; 5] = [0; 5]
+            var j: i64 = 0
+            while j < 5 { let parsed = enir_mir_i64(enir_mir_field(text, pos, finish, j + 1)); if !parsed.ok { return enir_mir_parse_fail(51, module) }; v[j as usize] = parsed.value; j = j + 1 }
+            module.block = EnirMirBlock { id: v[0], first_instr: v[1], instr_count: v[2], terminator_kind: v[3], terminator_tick: v[4] }; module.block_count = 1
+        } else if enir_mir_token_eq(tag, "minstr") {
+            if fields != 14 || module.instr_count >= EMIR_MAX_INSTRS { return enir_mir_parse_fail(60, module) }
+            var v: [i64; 13] = [0; 13]
+            var j: i64 = 0
+            while j < 13 { let parsed = enir_mir_i64(enir_mir_field(text, pos, finish, j + 1)); if !parsed.ok { return enir_mir_parse_fail(61, module) }; v[j as usize] = parsed.value; j = j + 1 }
+            module.instrs[module.instr_count as usize] = EnirMirInstr { id: v[0], opcode: v[1], result_id: v[2], type_id: v[3], a: v[4], b: v[5], effect_kind: v[6], trap_kind: v[7], policy_id: v[8], source_op_id: v[9], semantic_tick: v[10], memory_slot: v[11], store_origin: v[12] }
+            module.instr_count = module.instr_count + 1
+        } else if enir_mir_token_eq(tag, "mobs") {
+            if fields != 6 || module.observation_count >= EMIR_MAX_OBSERVATIONS { return enir_mir_parse_fail(70, module) }
+            let a = enir_mir_i64(enir_mir_field(text, pos, finish, 1)); let name = enir_mir_field(text, pos, finish, 2); let b = enir_mir_i64(enir_mir_field(text, pos, finish, 3)); let c = enir_mir_i64(enir_mir_field(text, pos, finish, 4)); let d = enir_mir_i64(enir_mir_field(text, pos, finish, 5))
+            if !a.ok || name.len <= 0 || !b.ok || !c.ok || !d.ok { return enir_mir_parse_fail(71, module) }
+            module.observations[module.observation_count as usize] = EnirMirObservation { id: a.value, program_name: name, ordinal: b.value, kind: c.value, source_observation_id: d.value }; module.observation_count = module.observation_count + 1
+        } else if enir_mir_token_eq(tag, "mend") {
+            if fields != 7 || seen_end { return enir_mir_parse_fail(80, module) }
+            var v: [i64; 6] = [0; 6]
+            var j: i64 = 0
+            while j < 6 { let parsed = enir_mir_i64(enir_mir_field(text, pos, finish, j + 1)); if !parsed.ok { return enir_mir_parse_fail(81, module) }; v[j as usize] = parsed.value; j = j + 1 }
+            module.declared_type_count = v[0]; module.declared_value_count = v[1]; module.declared_provenance_count = v[2]; module.declared_block_count = v[3]; module.declared_instr_count = v[4]; module.declared_observation_count = v[5]; seen_end = true
+        } else { return enir_mir_parse_fail(90, module) }
+        line = line + 1
+        pos = finish + 1
+    }
+    if !seen_end { return enir_mir_parse_fail(91, module) }
+    EnirMirParseResult { ok: true, error_code: 0, module: module }
+}
+
+fn enir_mir_bits_to_f64(bits: i64) -> f64 with Mut, Div {
+    let sign = (bits >> 63) & 1
+    let exponent = (bits >> 52) & 2047
+    let fraction = bits & 4503599627370495
+    if exponent == 2047 { return 0.0 / 0.0 }
+    if exponent == 0 && fraction == 0 { return if sign == 1 { (0.0 - 1.0) * 0.0 } else { 0.0 } }
+    var scale = if exponent == 0 { -1022 } else { exponent - 1023 }
+    var mantissa = if exponent == 0 { fraction as f64 } else { (fraction + 4503599627370496) as f64 }
+    scale = scale - 52
+    while scale > 0 { mantissa = mantissa * 2.0; scale = scale - 1 }
+    while scale < 0 { mantissa = mantissa * 0.5; scale = scale + 1 }
+    if sign == 1 { 0.0 - mantissa } else { mantissa }
+}
+
+fn enir_mir_clean(value: f64) -> EnirMirRuntimeValue {
+    EnirMirRuntimeValue { val: if value == 0.0 { 0.0 } else { value }, err: qd_zero(), uncertainty: 0.0, poisoned: 0 }
+}
+
+fn enir_mir_poison() -> EnirMirRuntimeValue {
+    EnirMirRuntimeValue { val: 0.0, err: qd_zero(), uncertainty: 0.0, poisoned: 1 }
+}
+
+fn enir_mir_true(value: EnirMirRuntimeValue) -> Qd128 with Mut, Panic {
+    qd_add(qd_from_f64(value.val), value.err)
+}
+
+fn enir_mir_sqrt(value: f64) -> f64 with Mut, Div {
+    if value <= 0.0 { return 0.0 }
+    var guess = if value > 1.0 { value * 0.5 } else { 1.0 }
+    var i: i64 = 0
+    while i < 40 { guess = 0.5 * (guess + value / guess); i = i + 1 }
+    guess
+}
+
+fn enir_mir_binary(x: EnirMirRuntimeValue, y: EnirMirRuntimeValue, opcode: i64) -> EnirMirRuntimeValue with Mut, Panic, Div {
+    if x.poisoned == 1 || y.poisoned == 1 || (opcode == EMIR_OP_DIV && y.val == 0.0) { return enir_mir_poison() }
+    let raw = if opcode == EMIR_OP_ADD { x.val + y.val } else { if opcode == EMIR_OP_SUB { x.val - y.val } else { if opcode == EMIR_OP_MUL { x.val * y.val } else { x.val / y.val } } }
+    let value = if raw == 0.0 { 0.0 } else { raw }
+    let tx = enir_mir_true(x)
+    let ty = enir_mir_true(y)
+    let truth = if opcode == EMIR_OP_ADD { qd_add(tx, ty) } else { if opcode == EMIR_OP_SUB { qd_sub(tx, ty) } else { if opcode == EMIR_OP_MUL { qd_mul(tx, ty) } else { qd_div(tx, ty) } } }
+    EnirMirRuntimeValue { val: value, err: qd_sub(truth, qd_from_f64(value)), uncertainty: 0.0, poisoned: 0 }
+}
+
+fn enir_mir_sqrt_value(x: EnirMirRuntimeValue) -> EnirMirRuntimeValue with Mut, Panic, Div {
+    if x.poisoned == 1 { return enir_mir_poison() }
+    if x.val <= 0.0 { return enir_mir_clean(0.0) }
+    let value = enir_mir_sqrt(x.val)
+    EnirMirRuntimeValue { val: value, err: qd_sub(qd_sqrt(enir_mir_true(x)), qd_from_f64(value)), uncertainty: 0.0, poisoned: 0 }
+}
+
+fn enir_mir_gate_class(value: EnirMirRuntimeValue) -> i64 {
+    if value.poisoned == 1 { return 2 }
+    let total = value.err.x0 + value.err.x1 + value.err.x2 + value.err.x3
+    let roundoff = if total < 0.0 { 0.0 - total } else { total }
+    if value.uncertainty <= 0.0 { return if roundoff == 0.0 { 0 } else { 2 } }
+    if roundoff * 10.0 >= value.uncertainty { return 2 }
+    if roundoff * 100.0 >= value.uncertainty { return 1 }
+    0
+}
+
+fn enir_mir_receipt(module: EnirMirModule, instr: EnirMirInstr, value: EnirMirRuntimeValue, ordinal: i64) -> string with Mut, Panic, Div, Alloc {
+    let provenance = module.provenance[module.values[instr.a as usize].provenance_id as usize]
+    var out = "mir-exec|schema=" ++ enir_i64_string(module.schema_version)
+    out = out ++ "|stage=" ++ enir_i64_string(module.stage)
+    out = out ++ "|module=" ++ enir_name_to_string(module.name)
+    out = out ++ "|source_enir_hash=" ++ enir_i64_string(module.source_enir_hash)
+    out = out ++ "|ordinal=" ++ enir_i64_string(ordinal)
+    out = out ++ "|site=" ++ enir_i64_string(instr.id)
+    out = out ++ "|source_op=" ++ enir_i64_string(instr.source_op_id)
+    out = out ++ "|value_id=" ++ enir_i64_string(instr.a)
+    out = out ++ "|value_bits=" ++ enir_i64_string(if value.poisoned == 1 { 9218868437227405313 } else { f64_to_bits(value.val) })
+    out = out ++ "|error0_bits=" ++ enir_i64_string(f64_to_bits(value.err.x0))
+    out = out ++ "|error1_bits=" ++ enir_i64_string(f64_to_bits(value.err.x1))
+    out = out ++ "|error2_bits=" ++ enir_i64_string(f64_to_bits(value.err.x2))
+    out = out ++ "|error3_bits=" ++ enir_i64_string(f64_to_bits(value.err.x3))
+    out = out ++ "|uncertainty_bits=" ++ enir_i64_string(if value.poisoned == 1 { 9218868437227405312 } else { f64_to_bits(value.uncertainty) })
+    out = out ++ "|status=" ++ enir_i64_string(value.poisoned)
+    out = out ++ "|gate_class=" ++ enir_i64_string(enir_mir_gate_class(value))
+    out = out ++ "|source_span=" ++ enir_i64_string(provenance.source_span_id) ++ "\n"
+    out
+}
+
+fn enir_mir_memory_receipt(module: EnirMirModule, slot: i64, site: i64, value: EnirMirRuntimeValue) -> string with Mut, Panic, Div, Alloc {
+    var out = "mir-memory|schema=" ++ enir_i64_string(module.schema_version)
+    out = out ++ "|stage=" ++ enir_i64_string(module.stage)
+    out = out ++ "|module=" ++ enir_name_to_string(module.name)
+    out = out ++ "|source_enir_hash=" ++ enir_i64_string(module.source_enir_hash)
+    out = out ++ "|slot=" ++ enir_i64_string(slot)
+    out = out ++ "|site=" ++ enir_i64_string(site)
+    out = out ++ "|source_op=" ++ enir_i64_string(module.instrs[site as usize].source_op_id)
+    out = out ++ "|value_bits=" ++ enir_i64_string(if value.poisoned == 1 { 9218868437227405313 } else { f64_to_bits(value.val) })
+    out = out ++ "|error0_bits=" ++ enir_i64_string(f64_to_bits(value.err.x0))
+    out = out ++ "|error1_bits=" ++ enir_i64_string(f64_to_bits(value.err.x1))
+    out = out ++ "|error2_bits=" ++ enir_i64_string(f64_to_bits(value.err.x2))
+    out = out ++ "|error3_bits=" ++ enir_i64_string(f64_to_bits(value.err.x3))
+    out = out ++ "|uncertainty_bits=" ++ enir_i64_string(if value.poisoned == 1 { 9218868437227405312 } else { f64_to_bits(value.uncertainty) })
+    out = out ++ "|status=" ++ enir_i64_string(value.poisoned) ++ "\n"
+    out
+}
+
+pub fn enir_mir_interpret(module: EnirMirModule) -> EnirMirExecResult with IO, Mut, Panic, Div, Alloc {
+    let verify_rc = enir_mir_verify(module)
+    if verify_rc != 0 { return EnirMirExecResult { ok: false, error_code: verify_rc, executed_instrs: 0, observations: 0, fuel_left: module.fuel_limit, last_write: -1 } }
+    var values: [EnirMirRuntimeValue; 128] = [EnirMirRuntimeValue { val: 0.0, err: Qd128 { x0: 0.0, x1: 0.0, x2: 0.0, x3: 0.0 }, uncertainty: 0.0, poisoned: 1 }; 128]
+    var defined: [i64; 128] = [0; 128]
+    var memory: [EnirMirRuntimeValue; 16] = [EnirMirRuntimeValue { val: 0.0, err: Qd128 { x0: 0.0, x1: 0.0, x2: 0.0, x3: 0.0 }, uncertainty: 0.0, poisoned: 1 }; 16]
+    var memory_defined: [i64; 16] = [0; 16]
+    var memory_site: [i64; 16] = [-1; 16]
+    var fuel = module.fuel_limit
+    var executed: i64 = 0
+    var observations: i64 = 0
+    var last_write: i64 = -1
+    var i: i64 = 0
+    while i < module.instr_count {
+        let instr = module.instrs[i as usize]
+        if fuel < instr.semantic_tick { return EnirMirExecResult { ok: false, error_code: 3000 + i, executed_instrs: executed, observations: observations, fuel_left: fuel, last_write: last_write } }
+        fuel = fuel - instr.semantic_tick; executed = executed + 1
+        if instr.opcode == EMIR_OP_CONST {
+            values[instr.result_id as usize] = enir_mir_clean(enir_mir_bits_to_f64(module.values[instr.result_id as usize].value_bits))
+            defined[instr.result_id as usize] = 1; last_write = instr.result_id
+        } else if instr.opcode >= EMIR_OP_ADD && instr.opcode <= EMIR_OP_DIV {
+            values[instr.result_id as usize] = enir_mir_binary(values[instr.a as usize], values[instr.b as usize], instr.opcode)
+            defined[instr.result_id as usize] = 1; last_write = instr.result_id
+        } else if instr.opcode == EMIR_OP_SQRT {
+            values[instr.result_id as usize] = enir_mir_sqrt_value(values[instr.a as usize])
+            defined[instr.result_id as usize] = 1; last_write = instr.result_id
+        } else if instr.opcode == EMIR_OP_LOAD {
+            if memory_defined[instr.memory_slot as usize] == 0 || memory_site[instr.memory_slot as usize] != instr.store_origin { return EnirMirExecResult { ok: false, error_code: 3180 + i, executed_instrs: executed, observations: observations, fuel_left: fuel, last_write: last_write } }
+            values[instr.result_id as usize] = memory[instr.memory_slot as usize]
+            defined[instr.result_id as usize] = 1; last_write = instr.result_id
+        } else if instr.opcode == EMIR_OP_STORE {
+            memory[instr.memory_slot as usize] = values[instr.a as usize]
+            memory_defined[instr.memory_slot as usize] = 1
+            memory_site[instr.memory_slot as usize] = instr.id
+        } else if instr.opcode == EMIR_OP_MOVE {
+            values[instr.result_id as usize] = values[instr.a as usize]
+            defined[instr.result_id as usize] = 1; last_write = instr.result_id
+        } else {
+            if defined[instr.a as usize] == 0 { return EnirMirExecResult { ok: false, error_code: 3200 + i, executed_instrs: executed, observations: observations, fuel_left: fuel, last_write: last_write } }
+            print(enir_mir_receipt(module, instr, values[instr.a as usize], observations))
+            observations = observations + 1
+        }
+        i = i + 1
+    }
+    if fuel < module.block.terminator_tick { return EnirMirExecResult { ok: false, error_code: 3400, executed_instrs: executed, observations: observations, fuel_left: fuel, last_write: last_write } }
+    fuel = fuel - module.block.terminator_tick; executed = executed + 1
+    if observations != module.observation_count { return EnirMirExecResult { ok: false, error_code: 3500, executed_instrs: executed, observations: observations, fuel_left: fuel, last_write: last_write } }
+    var slot: i64 = 0
+    while slot < EMIR_MAX_MEMORY_SLOTS {
+        if memory_defined[slot as usize] == 1 { print(enir_mir_memory_receipt(module, slot, memory_site[slot as usize], memory[slot as usize])) }
+        slot = slot + 1
+    }
+    EnirMirExecResult { ok: true, error_code: 0, executed_instrs: executed, observations: observations, fuel_left: fuel, last_write: last_write }
+}

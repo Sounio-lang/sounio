@@ -1,0 +1,101 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: VAR_ACCUM_OK
+
+// Regression pin for #1535: a mutable local must carry its uncertainty across
+// reassignment, including when it was initialised from an EXPRESSION and when the
+// reassignment happens inside a loop.
+//
+// Two defects sat here, and the second hid behind the first:
+//
+//   1. Assignment REBOUND the local's variance/sens to the RHS's fresh vregs
+//      instead of copying into fixed slots. A rebind is a compile-time map update
+//      and a loop body's IR is emitted once, so every iteration recomputed from
+//      the pre-loop uncertainty and only one iteration's contribution survived.
+//
+//   2. The fix for (1) allocated those slots BEFORE the branches that bind a
+//      declaration's variance from its RHS, so those branches overwrote them.
+//      Only a literal-initialised local escaped, because a literal leaves those
+//      branches nothing to bind.
+//
+// Truth values below are first-order GUM propagation, computed independently
+// rather than read off either engine. var(cl) = 1.24^2 = 1.5376.
+//
+// TEST 1 deliberately uses NO loop. The defect never needed one — a loop only
+// turned a wrong answer into a catastrophic one. Four loop-based repros failed to
+// separate the two causes; three straight-line assignments did it immediately.
+// If this pin ever regresses, TEST 1 is the one that localises it.
+
+fn approx(actual: f64, expected: f64, tol: f64) -> bool {
+    let d = actual - expected
+    if d < 0.0 { return (0.0 - d) < tol }
+    return d < tol
+}
+
+fn main() with IO, Mut, Div, Epistemic {
+    let k: Knowledge<f64> = measure(12.4, uncertainty: 1.24)
+    let cl = k.value
+    let v0 = 5.0
+
+    // TEST 1 — expression-initialised accumulator, no loop.
+    // Each `+ 0.1*cl` adds 0.1 to d(a)/d(cl), so after n assignments
+    // var = (0.1n)^2 * 1.5376.
+    var a = 6.0 / v0
+    a = a + 0.1 * cl
+    let a1 = variance_of(a)          // (0.1)^2 * 1.5376 = 0.015376
+    a = a + 0.1 * cl
+    let a2 = variance_of(a)          // (0.2)^2 * 1.5376 = 0.061504
+    a = a + 0.1 * cl
+    let a3 = variance_of(a)          // (0.3)^2 * 1.5376 = 0.138384
+
+    let t1 = approx(a1, 0.015376, 0.000001)
+        && approx(a2, 0.061504, 0.000001)
+        && approx(a3, 0.138384, 0.000001)
+
+    // TEST 2 — same accumulation in a loop: 20 steps, d(b)/d(cl) = 2.0,
+    // var = 4 * 1.5376 = 6.1504. Before the fix this read 0.015376 (one step).
+    var b = 6.0 / v0
+    var i: i64 = 0
+    while i < 20 {
+        b = b + 0.1 * cl
+        i = i + 1
+    }
+    let t2 = approx(variance_of(b), 6.150400, 0.000001)
+
+    // TEST 3 — self-dependent accumulation in a loop.
+    // c = (1+u)^2 with u = measure(2.0, 0.5): d(c)/d(u) = 2(1+u) = 6, var = 36*0.25 = 9.
+    let ku: Knowledge<f64> = measure(2.0, uncertainty: 0.5)
+    let u = ku.value
+    var c = 1.0
+    var j: i64 = 0
+    while j < 2 {
+        c = c + u * c
+        j = j + 1
+    }
+    let t3 = approx(variance_of(c), 9.000000, 0.000001)
+
+    // TEST 4 — straight-line correlation must be unaffected by all of the above.
+    let z = cl - cl
+    let s = cl + cl + cl
+    let t4 = approx(variance_of(z), 0.0, 0.000001)
+        && approx(variance_of(s), 13.838400, 0.000001)
+
+    if t1 && t2 && t3 && t4 {
+        println("VAR_ACCUM_OK")
+        return
+    }
+
+    print("VAR_ACCUM_FAIL t1_expr_init_noloop=")
+    print_f64(a1)
+    print(",")
+    print_f64(a2)
+    print(",")
+    print_f64(a3)
+    print(" t2_loop=")
+    print_f64(variance_of(b))
+    print(" t3_selfdep=")
+    print_f64(variance_of(c))
+    print(" t4_straightline=")
+    print_f64(variance_of(s))
+    println("")
+}

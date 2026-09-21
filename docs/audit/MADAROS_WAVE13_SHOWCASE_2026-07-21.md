@@ -60,8 +60,15 @@ bash scripts/dev/madaros_wave12_showcase_gate.sh   # REQUIRE_CD_EXACT=1 by defau
 PR #1392 ships `bin/madaros-linux-x86_64` with the e2e closeout.  
 If a checkout still has an **older** stock ELF, `cd_exact` may be RED even though source on `main` is fixed. **Do not invent green** — rebuild:
 
+> **Correction (2026-08-25):** this originally read
+> `scripts/dev/souc-build-lock.sh make build-madaros`, which **hangs forever**.
+> `scripts/ci/build_modular_madaros.sh` takes the global build lock itself, and
+> `make` does not pass the lock's file descriptor (fd 9) to its recipe shells, so
+> the inner lock blocks on the lock its own ancestor holds — silently, at 0% CPU.
+> Run the target bare, as below. See CLAUDE.md §4.
+
 ```bash
-scripts/dev/souc-build-lock.sh make build-madaros
+make build-madaros
 # then either install the rebuilt ELF or:
 MADAROS_RAW_BIN=artifacts/self-hosted/madaros bash scripts/dev/madaros_wave13_showcase_gate.sh
 ```

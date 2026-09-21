@@ -1,0 +1,60 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: MADAROS_HESSIAN_TRANSCENDENTAL_PASS
+//@ sabotage: hessian-chain
+
+// hessian_of over the transcendental chain rule.
+//
+// Before this rule existed the second-order machinery had storage and a
+// product rule but no chain rule, so hessian_of(x*x) was the correct 2.0
+// while hessian_of(sin(x)) was a confident 0.0 -- a shipped builtin
+// returning a plausible wrong answer for every transcendental.
+//
+// The composite rows are as load-bearing as the exact ones: with a compound
+// argument the rule is REFUSED and must read exactly 0.0. Skipping the
+// computation is not enough -- so_expr_hess then still holds the argument's
+// own Hessian and hessian_of reports it as the outer expression's, which
+// made hessian_of(exp(x*x)) read 2.0: H(x*x) wearing the wrong name, and
+// far harder to catch than a zero. Refusal has to clear.
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn main() -> i64 with Mut, Panic, Div, Alloc, Epistemic, IO {
+    let k: Knowledge<f64> = measure(0.5, uncertainty: 0.05)
+    let x = k.value
+
+    // exact: f''(g)*s_g^2 with H_g = 0
+    let h_poly = hessian_of(x * x, 0, 0)          // product rule, must not move
+    let h_sin  = hessian_of(sin(x), 0, 0)         // -sin(0.5)
+    let h_cos  = hessian_of(cos(x), 0, 0)         // -cos(0.5)
+    let h_exp  = hessian_of(exp(x), 0, 0)         // exp(0.5)
+    let h_e2x  = hessian_of(exp(2.0 * x), 0, 0)   // 4*exp(1), linear inner
+
+    // refused: compound argument, must be exactly zero
+    let r_exx  = hessian_of(exp(x * x), 0, 0)
+    let r_esin = hessian_of(exp(sin(x)), 0, 0)
+    let r_ssin = hessian_of(sin(sin(x)), 0, 0)
+
+    print("h_poly="); print_f64(h_poly); print("\n")
+    print("h_sin=");  print_f64(h_sin);  print("\n")
+    print("h_cos=");  print_f64(h_cos);  print("\n")
+    print("h_exp=");  print_f64(h_exp);  print("\n")
+    print("h_e2x=");  print_f64(h_e2x);  print("\n")
+
+    let ok = abs_f(h_poly - 2.0) < 1.0e-12
+        && abs_f(h_sin - (0.0 - 0.479425538604203)) < 1.0e-9
+        && abs_f(h_cos - (0.0 - 0.8775825618903728)) < 1.0e-9
+        && abs_f(h_exp - 1.6487212707001282) < 1.0e-9
+        && abs_f(h_e2x - 10.87312731383618) < 1.0e-8
+        && r_exx == 0.0
+        && r_esin == 0.0
+        && r_ssin == 0.0
+    if ok {
+        print("MADAROS_HESSIAN_TRANSCENDENTAL_PASS\n")
+    } else {
+        print("MADAROS_HESSIAN_TRANSCENDENTAL_FAIL\n")
+    }
+    0
+}

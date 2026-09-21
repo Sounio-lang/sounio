@@ -291,7 +291,7 @@ def load_cifar100():
     Normalized with the standard CIFAR channel statistics."""
     def read_batch(name):
         with open(os.path.join(DATA_DIR, name), "rb") as f:
-            d = pickle.load(f, encoding="latin1")
+            d = pickle.load(f, encoding="bytes")
         x = d[b"data"].reshape(-1, 3, 32, 32).astype(np.float32) / 255.0
         y = np.array(d[b"fine_labels"], dtype=np.int64)
         return x, y

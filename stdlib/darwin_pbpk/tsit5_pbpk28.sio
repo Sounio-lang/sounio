@@ -12,9 +12,10 @@
 //     a single scalar equation for C_b_new closes the step.
 //
 // Derivation (Schur complement):
-//   For each peripheral organ i ∈ {1..13}, the CN step on (C_v_i, C_t_i) at
-//   frozen blood midpoint gives a 2×2 system:
-//       [ p  -q ] [Cv_i_new]   [rhs_v + γ·C_b_mid]
+//   For each peripheral organ i ∈ {1..13}, the CN step on (C_v_i, C_t_i)
+//   with unknown blood C_b_new (fully coupled via Schur, not a frozen
+//   midpoint guess) gives a 2×2 system:
+//       [ p  -q ] [Cv_i_new]   [rhs_v + γ·C_b_new]
 //       [-r   s ] [Ct_i_new] = [rhs_t            ]
 //   where p, q, r, s are the local mass-balance coefficients (functions of
 //   Q_i, PS_i, V_v_i, V_t_i, K_p_i, h). Solving for (Cv_i, Ct_i) yields
@@ -34,13 +35,45 @@
 
 use darwin_pbpk::core::pbpk28_params::*
 
+// Apply Schur coefficients to reconstruct the new PBPK28 state in place.
+// Lives in a separate function on purpose: Madaros multimodule native miscompiles
+// a second `while` in the same frame as the Schur fill that reads `a_v[i]` with a
+// dynamic index (observes zeros; lean_single is fine). Crossing a function
+// boundary with `&[f64; 14]` restores correct loads
+// (docs/audit/MADAROS_IMPORTED_PBPK28_CN_SIGSEGV_2026-08-16.md).
+fn pbpk28_cn_apply_schur(
+    state: &!PBPKState28,
+    cb_new: f64,
+    a_v: &[f64; 14],
+    b_v: &[f64; 14],
+    a_t: &[f64; 14],
+    b_t: &[f64; 14]
+) with Mut, Div {
+    (*state).cv[0] = if cb_new < 0.0 { 0.0 } else { cb_new }
+    var i: i32 = 1
+    while i < 14 {
+        let cv = (*a_v)[i] + (*b_v)[i] * cb_new
+        let ct = (*a_t)[i] + (*b_t)[i] * cb_new
+        (*state).cv[i] = if cv < 0.0 { 0.0 } else { cv }
+        (*state).ct[i] = if ct < 0.0 { 0.0 } else { ct }
+        i = i + 1
+    }
+}
+
 // One fully-coupled implicit-CN step at midpoint release rate `rel_mid` (mg/h
-// — set to 0.0 for bolus-IV scenarios). Pure function: takes current state +
-// drug-specific params + rel_mid + dt, returns new state. Does not touch
-// TMDD or PD layers — those compose at the scenario level.
-pub fn pbpk28_full_cn_step(state: PBPKState28, p: PBPKParams28, rel_mid: f64, dt: f64)
-    -> PBPKState28 with Mut, Div
-{
+// — set to 0.0 for bolus-IV scenarios). Writes the new state into `*state`.
+// Does not touch TMDD or PD layers — those compose at the scenario level.
+//
+// Madaros multimodule native workarounds (same audit note):
+// 1. Do not return a freshly rebuilt `PBPKState28` from the Schur frame —
+//    caller's field load SIGSEGVs. In-place mut + thin by-value wrapper below.
+// 2. Do not reconstruct with a second dynamic-index loop over local `a_v`/`b_v`
+//    in this same frame — use `pbpk28_cn_apply_schur` instead.
+pub fn pbpk28_full_cn_step_mut(state: &!PBPKState28, p: PBPKParams28, rel_mid: f64, dt: f64) with Mut, Div {
+    var a_v: [f64; 14] = [0.0; 14]
+    var b_v: [f64; 14] = [0.0; 14]
+    var a_t: [f64; 14] = [0.0; 14]
+    var b_t: [f64; 14] = [0.0; 14]
     let h = 0.5 * dt
     let vb = p.v_ref[0]
 
@@ -53,14 +86,10 @@ pub fn pbpk28_full_cn_step(state: PBPKState28, p: PBPKParams28, rel_mid: f64, dt
     }
     let big_s = h * (sum_q + p.cl_central) / vb
 
-    let cb_old = state.cv[0]
+    let cb_old = (*state).cv[0]
     var rhs0 = (1.0 - big_s) * cb_old + dt * rel_mid / vb
 
     // Per-organ Schur-complement coefficients.
-    var a_v: [f64; 14] = [0.0; 14]
-    var b_v: [f64; 14] = [0.0; 14]
-    var a_t: [f64; 14] = [0.0; 14]
-    var b_t: [f64; 14] = [0.0; 14]
     var sum_beta_a = 0.0
     var sum_beta_b = 0.0
 
@@ -86,10 +115,10 @@ pub fn pbpk28_full_cn_step(state: PBPKState28, p: PBPKParams28, rel_mid: f64, dt
         let sb    = 1.0 + h * ps / (vt * kp)
         let det   = pp * sb - qq * rr
 
-        rhs0 = rhs0 + beta * state.cv[i]
+        rhs0 = rhs0 + beta * (*state).cv[i]
 
-        let rhs_v = gamma * cb_old + (1.0 - h * (qi + ps) / vv) * state.cv[i] + qq * state.ct[i]
-        let rhs_t = rr * state.cv[i] + (1.0 - h * ps / (vt * kp)) * state.ct[i]
+        let rhs_v = gamma * cb_old + (1.0 - h * (qi + ps) / vv) * (*state).cv[i] + qq * (*state).ct[i]
+        let rhs_t = rr * (*state).cv[i] + (1.0 - h * ps / (vt * kp)) * (*state).ct[i]
 
         let av = (sb * rhs_v + qq * rhs_t) / det
         let bv = (sb * gamma) / det
@@ -108,19 +137,17 @@ pub fn pbpk28_full_cn_step(state: PBPKState28, p: PBPKParams28, rel_mid: f64, dt
 
     // Close the step: scalar equation for C_b_new.
     let cb_new = (rhs0 + sum_beta_a) / ((1.0 + big_s) - sum_beta_b)
+    pbpk28_cn_apply_schur(state, cb_new, &a_v, &b_v, &a_t, &b_t)
+}
 
-    // Reconstruct peripheral organs from C_b_new.
-    var out = pbpk28_state_zero()
-    out.cv[0] = if cb_new < 0.0 { 0.0 } else { cb_new }
-    i = 1
-    while i < 14 {
-        let cv = a_v[i] + b_v[i] * cb_new
-        let ct = a_t[i] + b_t[i] * cb_new
-        out.cv[i] = if cv < 0.0 { 0.0 } else { cv }
-        out.ct[i] = if ct < 0.0 { 0.0 } else { ct }
-        i = i + 1
-    }
-    return out
+// By-value API preserved for existing callers. Thin: copy → mut → return copy.
+// Math identical to the pre-mitigation reconstruct-into-`out` body.
+pub fn pbpk28_full_cn_step(state: PBPKState28, p: PBPKParams28, rel_mid: f64, dt: f64)
+    -> PBPKState28 with Mut, Div
+{
+    var st = state
+    pbpk28_full_cn_step_mut(&!st, p, rel_mid, dt)
+    return st
 }
 
 // Convenience: organ-average concentration C_avg,i = (V_v · C_v + V_t · C_t) / V_i

@@ -64,7 +64,9 @@ Verdict: `CD_TOWER_ZDFAN_VERDICT ZD_FIBER_SPECTRAL_FORALL_N_STRONG_EVIDENCE_NOT_
   > **Superseded 2026-07-31 — the factorisation was found.** It is not a Walsh character sum but a
   > rank-2 folding: `A_σ(l ⊕ L_lo, y) = −A_σ(l, y)`, giving `A_σ = Jᵀ M J` with `J Jᵀ = 2I`, hence
   > `rank(A_σ) ≤ 2^{n-2}−1` **derived ∀n** and an exact spectral halving. See
-  > [`cd_tower_zd_fiber_antisymmetry_lemma_spec_2026-07-31.md`](cd_tower_zd_fiber_antisymmetry_lemma_spec_2026-07-31.md).
+  > `cd_tower_zd_fiber_antisymmetry_lemma_spec_2026-07-31.md` (on the live ZD-fiber lane branch
+  > `research/zd-fiber-antisymmetry-lemma-20260731`, byte-identical to PR #1580's copy; lands with
+  > that lane — linked here without a hyperlink until it reaches main).
   > This closes the low-rank half only — `V1` (`#spectra = 3·2^{n-5}`) remains **OPEN**. The harness
   > and verdict token of *this* rung are deliberately left untouched: they are measured objects in the
   > R13/R14 kill-set corpora.
@@ -103,3 +105,8 @@ discipline: real progress + honest boundary, not a claimed solution). The substa
 claim (`n≤8`) was Grok-reviewed in the parent classifier rung; this rung is verified-empirical progress
 plus an explicit open boundary. Numerical certificate; ∀n OPEN. No semantic claim, no clinical content.
 GAIDeT-ICMJE 2025.
+
+**Post-session correction (2026-08-18, landed from the PR #1580 audit):** "not found in-session" was
+true of the 2026-07-26 session and stayed in this disclosure untouched as a measured record — but the
+low-rank factorisation WAS found on 2026-07-31 (rank-2 folding; see the supersession note in §2).
+`V1` remains OPEN; ∀n completeness is still not closed.

@@ -1,0 +1,48 @@
+// #1678 -- `&container.items[i]` on an AGGREGATE element is a wrong address.
+//
+//   $ ./bin/souc-lean-single-x86_64 repro_aggregate_element_ref.sio out.elf
+//   $ ./out.elf
+//   hoisted=5 inplace=8154823786712        <-- both should be 5
+//
+// Must be compiled with LEAN_SINGLE, the seed that builds Madaros and therefore
+// the compiler that generates the miscompiled code. Running it through
+// `madaros --native-v2-compile` proves nothing: that is a different backend,
+// where the non-boxed case is CORRECT and Box in a user program faults before
+// the reference is reached.
+//
+// THE BOX IS NOT THE INGREDIENT. An earlier version of this file was named
+// repro_boxed_element_ref.sio and asserted "without the Box the same program
+// prints 5 and 5" -- that line was measured on the wrong compiler and is false.
+// A local container, a reference parameter and a Box all fail alike; so do
+// `&elem` and `&elem.field`. See repro_container_kinds.sio and
+// repro_elem_vs_field.sio.
+//
+// What IS fine: reading a SCALAR field in place, and by-value struct copies.
+// Also broken, and it will silently confound a test that relies on it:
+// returning a large aggregate by value -- seed containers inline.
+
+struct Inner { tag: i64, bits: [i64; 8] }
+struct Outer { n: i64, items: [Inner; 4] }
+
+fn inner_sum(p: &Inner) -> i64 with Mut, Panic, Div {
+    var t: i64 = 0
+    var i: i64 = 0
+    while i < 8 { t = t + (*p).bits[i as usize]; i = i + 1 }
+    t
+}
+
+fn main() -> i64 with IO, Alloc, Mut, Panic, Div {
+    var seed = Outer { n: 0, items: [Inner { tag: 0, bits: [0; 8] }; 4] }
+    var slot = seed.items[2 as usize]
+    var k: i64 = 0
+    while k < 5 { slot.bits[k as usize] = 1; k = k + 1 }
+    seed.items[2 as usize] = slot
+    var ob = Box::new(seed)
+    var hoisted = (*ob).items[2 as usize]
+    print("hoisted=")
+    print_int(inner_sum(&hoisted))
+    print(" inplace=")
+    print_int(inner_sum(&(*ob).items[2 as usize]))
+    print("\n")
+    0
+}

@@ -1,23 +1,21 @@
-// stdlib/stats/validation.d
-// Statistical Validation Primitives
+// stdlib/stats/validation.sio
+// Statistical validation primitives (Madaros-safe fixed buffers).
 //
-// Provides functions for statistical validation:
-// - Descriptive statistics (mean, variance, std dev)
-// - Correlation and R-squared
-// - Basic hypothesis testing
-// - Confidence intervals
+// Contract: all public entry points take `&[f64; 256]` + explicit `n: i32`
+// (n in 0..=256). Imported Madaros native-v2 / multi-module check rejects
+// growable `[f64].push()` (E019) and segfaults lowering `.len()` method
+// calls on slices/arrays — so length is always an explicit argument, matching
+// `stats::ols_fixed` / `cooks_distance` / `shapiro_wilk`.
 
-// =============================================================================
-// Helper Functions
-// =============================================================================
+module stats::validation
 
-fn val_sqrt_f64(x: f64) -> f64 {
-    if x <= 0.0 { return 0.0; }
-    var y = x;
-    var i: usize = 0;
+fn val_sqrt_f64(x: f64) -> f64 with Div {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
     while i < 15 {
-        y = 0.5 * (y + x / y);
-        i = i + 1;
+        y = 0.5 * (y + x / y)
+        i = i + 1
     }
     y
 }
@@ -26,179 +24,157 @@ fn val_abs_f64(x: f64) -> f64 {
     if x < 0.0 { 0.0 - x } else { x }
 }
 
+fn val_clamp_n(n: i32) -> i32 {
+    if n < 0 { return 0 }
+    if n > 256 { return 256 }
+    n
+}
+
 // =============================================================================
 // Descriptive Statistics
 // =============================================================================
 
-// Calculate mean of an array
-pub fn mean(data: &[f64]) -> f64 {
-    let n = data.len();
-    if n == 0 { return 0.0; }
-
-    var sum: f64 = 0.0;
-    var i: usize = 0;
-    while i < n {
-        sum = sum + data[i];
-        i = i + 1;
+pub fn mean(data: &[f64; 256], n: i32) -> f64 with Div, Panic {
+    let nn = val_clamp_n(n)
+    if nn == 0 { return 0.0 }
+    var sum: f64 = 0.0
+    var i = 0
+    while i < nn {
+        sum = sum + data[i as usize]
+        i = i + 1
     }
-    sum / (n as f64)
+    sum / (nn as f64)
 }
 
-// Calculate sample variance (using n-1 denominator)
-pub fn variance(data: &[f64]) -> f64 {
-    let n = data.len();
-    if n < 2 { return 0.0; }
-
-    let m = mean(data);
-    var sum_sq: f64 = 0.0;
-    var i: usize = 0;
-    while i < n {
-        let diff = data[i] - m;
-        sum_sq = sum_sq + diff * diff;
-        i = i + 1;
+pub fn variance(data: &[f64; 256], n: i32) -> f64 with Div, Panic {
+    let nn = val_clamp_n(n)
+    if nn < 2 { return 0.0 }
+    let m = mean(data, nn)
+    var sum_sq: f64 = 0.0
+    var i = 0
+    while i < nn {
+        let diff = data[i as usize] - m
+        sum_sq = sum_sq + diff * diff
+        i = i + 1
     }
-    sum_sq / ((n - 1) as f64)
+    sum_sq / ((nn - 1) as f64)
 }
 
-// Calculate sample standard deviation
-pub fn std_dev(data: &[f64]) -> f64 {
-    val_sqrt_f64(variance(data))
+pub fn std_dev(data: &[f64; 256], n: i32) -> f64 with Div, Panic {
+    val_sqrt_f64(variance(data, n))
 }
 
-// Calculate population variance (using n denominator)
-pub fn variance_population(data: &[f64]) -> f64 {
-    let n = data.len();
-    if n == 0 { return 0.0; }
-
-    let m = mean(data);
-    var sum_sq: f64 = 0.0;
-    var i: usize = 0;
-    while i < n {
-        let diff = data[i] - m;
-        sum_sq = sum_sq + diff * diff;
-        i = i + 1;
+pub fn variance_population(data: &[f64; 256], n: i32) -> f64 with Div, Panic {
+    let nn = val_clamp_n(n)
+    if nn == 0 { return 0.0 }
+    let m = mean(data, nn)
+    var sum_sq: f64 = 0.0
+    var i = 0
+    while i < nn {
+        let diff = data[i as usize] - m
+        sum_sq = sum_sq + diff * diff
+        i = i + 1
     }
-    sum_sq / (n as f64)
+    sum_sq / (nn as f64)
 }
 
-// Calculate standard error of the mean
-pub fn standard_error(data: &[f64]) -> f64 {
-    let n = data.len();
-    if n == 0 { return 0.0; }
-    std_dev(data) / val_sqrt_f64(n as f64)
+pub fn standard_error(data: &[f64; 256], n: i32) -> f64 with Div, Panic {
+    let nn = val_clamp_n(n)
+    if nn == 0 { return 0.0 }
+    std_dev(data, nn) / val_sqrt_f64(nn as f64)
 }
 
-// Find minimum value
-pub fn min(data: &[f64]) -> f64 {
-    let n = data.len();
-    if n == 0 { return 0.0; }
-
-    var m = data[0];
-    var i: usize = 1;
-    while i < n {
-        if data[i] < m {
-            m = data[i];
+pub fn min(data: &[f64; 256], n: i32) -> f64 with Panic {
+    let nn = val_clamp_n(n)
+    if nn == 0 { return 0.0 }
+    var m = data[0]
+    var i = 1
+    while i < nn {
+        if data[i as usize] < m {
+            m = data[i as usize]
         }
-        i = i + 1;
+        i = i + 1
     }
     m
 }
 
-// Find maximum value
-pub fn max(data: &[f64]) -> f64 {
-    let n = data.len();
-    if n == 0 { return 0.0; }
-
-    var m = data[0];
-    var i: usize = 1;
-    while i < n {
-        if data[i] > m {
-            m = data[i];
+pub fn max(data: &[f64; 256], n: i32) -> f64 with Panic {
+    let nn = val_clamp_n(n)
+    if nn == 0 { return 0.0 }
+    var m = data[0]
+    var i = 1
+    while i < nn {
+        if data[i as usize] > m {
+            m = data[i as usize]
         }
-        i = i + 1;
+        i = i + 1
     }
     m
 }
 
-// Calculate range
-pub fn range(data: &[f64]) -> f64 {
-    max(data) - min(data)
+pub fn range(data: &[f64; 256], n: i32) -> f64 with Panic {
+    max(data, n) - min(data, n)
 }
 
 // =============================================================================
 // Correlation and Regression
 // =============================================================================
 
-// Pearson correlation coefficient
-pub fn correlation(x: &[f64], y: &[f64]) -> f64 {
-    let n = x.len();
-    if n != y.len() || n < 2 { return 0.0; }
-
-    let mean_x = mean(x);
-    let mean_y = mean(y);
-
-    var sum_xy: f64 = 0.0;
-    var sum_x2: f64 = 0.0;
-    var sum_y2: f64 = 0.0;
-
-    var i: usize = 0;
-    while i < n {
-        let dx = x[i] - mean_x;
-        let dy = y[i] - mean_y;
-        sum_xy = sum_xy + dx * dy;
-        sum_x2 = sum_x2 + dx * dx;
-        sum_y2 = sum_y2 + dy * dy;
-        i = i + 1;
+pub fn correlation(x: &[f64; 256], y: &[f64; 256], n: i32) -> f64 with Div, Panic {
+    let nn = val_clamp_n(n)
+    if nn < 2 { return 0.0 }
+    let mean_x = mean(x, nn)
+    let mean_y = mean(y, nn)
+    var sum_xy: f64 = 0.0
+    var sum_x2: f64 = 0.0
+    var sum_y2: f64 = 0.0
+    var i = 0
+    while i < nn {
+        let dx = x[i as usize] - mean_x
+        let dy = y[i as usize] - mean_y
+        sum_xy = sum_xy + dx * dy
+        sum_x2 = sum_x2 + dx * dx
+        sum_y2 = sum_y2 + dy * dy
+        i = i + 1
     }
-
-    let denom = val_sqrt_f64(sum_x2 * sum_y2);
-    if denom < 1.0e-15 { return 0.0; }
-
+    let denom = val_sqrt_f64(sum_x2 * sum_y2)
+    if denom < 1.0e-15 { return 0.0 }
     sum_xy / denom
 }
 
-// R-squared (coefficient of determination)
-pub fn r_squared(x: &[f64], y: &[f64]) -> f64 {
-    let r = correlation(x, y);
+pub fn r_squared(x: &[f64; 256], y: &[f64; 256], n: i32) -> f64 with Div, Panic {
+    let r = correlation(x, y, n)
     r * r
 }
 
-// Simple linear regression: y = a + b*x
-// Returns (intercept, slope)
 pub struct LinearFit {
-    pub intercept: f64,
-    pub slope: f64,
-    pub r_squared: f64,
+    pub intercept: f64
+    pub slope: f64
+    pub r_squared: f64
 }
 
-pub fn linear_regression(x: &[f64], y: &[f64]) -> LinearFit {
-    let n = x.len();
-    if n != y.len() || n < 2 {
-        return LinearFit { intercept: 0.0, slope: 0.0, r_squared: 0.0 };
+pub fn linear_regression(x: &[f64; 256], y: &[f64; 256], n: i32) -> LinearFit with Div, Panic {
+    let nn = val_clamp_n(n)
+    if nn < 2 {
+        return LinearFit { intercept: 0.0, slope: 0.0, r_squared: 0.0 }
     }
-
-    let mean_x = mean(x);
-    let mean_y = mean(y);
-
-    var sum_xy: f64 = 0.0;
-    var sum_x2: f64 = 0.0;
-
-    var i: usize = 0;
-    while i < n {
-        let dx = x[i] - mean_x;
-        sum_xy = sum_xy + dx * (y[i] - mean_y);
-        sum_x2 = sum_x2 + dx * dx;
-        i = i + 1;
+    let mean_x = mean(x, nn)
+    let mean_y = mean(y, nn)
+    var sum_xy: f64 = 0.0
+    var sum_x2: f64 = 0.0
+    var i = 0
+    while i < nn {
+        let dx = x[i as usize] - mean_x
+        sum_xy = sum_xy + dx * (y[i as usize] - mean_y)
+        sum_x2 = sum_x2 + dx * dx
+        i = i + 1
     }
-
     if sum_x2 < 1.0e-15 {
-        return LinearFit { intercept: mean_y, slope: 0.0, r_squared: 0.0 };
+        return LinearFit { intercept: mean_y, slope: 0.0, r_squared: 0.0 }
     }
-
-    let slope = sum_xy / sum_x2;
-    let intercept = mean_y - slope * mean_x;
-    let rsq = r_squared(x, y);
-
+    let slope = sum_xy / sum_x2
+    let intercept = mean_y - slope * mean_x
+    let rsq = r_squared(x, y, nn)
     LinearFit { intercept: intercept, slope: slope, r_squared: rsq }
 }
 
@@ -206,95 +182,90 @@ pub fn linear_regression(x: &[f64], y: &[f64]) -> LinearFit {
 // Residual Analysis
 // =============================================================================
 
-// Calculate residuals from predicted values
-pub fn residuals(actual: &[f64], predicted: &[f64]) -> [f64] {
-    let n = actual.len();
-    var result: [f64] = [];
-
-    var i: usize = 0;
-    while i < n && i < predicted.len() {
-        result.push(actual[i] - predicted[i]);
-        i = i + 1;
+/// Write residual vector into out[0..count); returns count written.
+pub fn residuals_n(
+    actual: &[f64; 256],
+    predicted: &[f64; 256],
+    out: &![f64; 256],
+    n: i32
+) -> i32 with Mut, Panic {
+    let nn = val_clamp_n(n)
+    var i = 0
+    while i < nn {
+        (*out)[i as usize] = actual[i as usize] - predicted[i as usize]
+        i = i + 1
     }
-    result
+    nn
 }
 
-// Sum of squared residuals (SSR)
-pub fn sum_squared_residuals(actual: &[f64], predicted: &[f64]) -> f64 {
-    let n = actual.len();
-    var sum: f64 = 0.0;
-
-    var i: usize = 0;
-    while i < n && i < predicted.len() {
-        let diff = actual[i] - predicted[i];
-        sum = sum + diff * diff;
-        i = i + 1;
+pub fn sum_squared_residuals(
+    actual: &[f64; 256],
+    predicted: &[f64; 256],
+    n: i32
+) -> f64 with Panic {
+    let nn = val_clamp_n(n)
+    var sum: f64 = 0.0
+    var i = 0
+    while i < nn {
+        let diff = actual[i as usize] - predicted[i as usize]
+        sum = sum + diff * diff
+        i = i + 1
     }
     sum
 }
 
-// Mean squared error (MSE)
-pub fn mse(actual: &[f64], predicted: &[f64]) -> f64 {
-    let n = actual.len();
-    if n == 0 { return 0.0; }
-    sum_squared_residuals(actual, predicted) / (n as f64)
+pub fn mse(actual: &[f64; 256], predicted: &[f64; 256], n: i32) -> f64 with Div, Panic {
+    let nn = val_clamp_n(n)
+    if nn == 0 { return 0.0 }
+    sum_squared_residuals(actual, predicted, nn) / (nn as f64)
 }
 
-// Root mean squared error (RMSE)
-pub fn rmse(actual: &[f64], predicted: &[f64]) -> f64 {
-    val_sqrt_f64(mse(actual, predicted))
+pub fn rmse(actual: &[f64; 256], predicted: &[f64; 256], n: i32) -> f64 with Div, Panic {
+    val_sqrt_f64(mse(actual, predicted, n))
 }
 
-// Mean absolute error (MAE)
-pub fn mae(actual: &[f64], predicted: &[f64]) -> f64 {
-    let n = actual.len();
-    if n == 0 { return 0.0; }
-
-    var sum: f64 = 0.0;
-    var i: usize = 0;
-    while i < n && i < predicted.len() {
-        sum = sum + val_abs_f64(actual[i] - predicted[i]);
-        i = i + 1;
+pub fn mae(actual: &[f64; 256], predicted: &[f64; 256], n: i32) -> f64 with Div, Panic {
+    let nn = val_clamp_n(n)
+    if nn == 0 { return 0.0 }
+    var sum: f64 = 0.0
+    var i = 0
+    while i < nn {
+        sum = sum + val_abs_f64(actual[i as usize] - predicted[i as usize])
+        i = i + 1
     }
-    sum / (n as f64)
+    sum / (nn as f64)
 }
 
 // =============================================================================
 // Hypothesis Testing (simplified)
 // =============================================================================
 
-// One-sample t-statistic
-pub fn t_statistic(data: &[f64], hypothesized_mean: f64) -> f64 {
-    let n = data.len();
-    if n < 2 { return 0.0; }
-
-    let sample_mean = mean(data);
-    let se = standard_error(data);
-
-    if se < 1.0e-15 { return 0.0; }
-
+pub fn t_statistic(data: &[f64; 256], n: i32, hypothesized_mean: f64) -> f64 with Div, Panic {
+    let nn = val_clamp_n(n)
+    if nn < 2 { return 0.0 }
+    let sample_mean = mean(data, nn)
+    let se = standard_error(data, nn)
+    if se < 1.0e-15 { return 0.0 }
     (sample_mean - hypothesized_mean) / se
 }
 
-// Two-sample t-statistic (independent samples, equal variance assumed)
-pub fn t_statistic_two_sample(x: &[f64], y: &[f64]) -> f64 {
-    let n1 = x.len();
-    let n2 = y.len();
-    if n1 < 2 || n2 < 2 { return 0.0; }
-
-    let mean1 = mean(x);
-    let mean2 = mean(y);
-    let var1 = variance(x);
-    let var2 = variance(y);
-
-    // Pooled variance
-    let sp2 = (((n1 - 1) as f64) * var1 + ((n2 - 1) as f64) * var2) /
-              ((n1 + n2 - 2) as f64);
-
-    let se = val_sqrt_f64(sp2 * (1.0 / (n1 as f64) + 1.0 / (n2 as f64)));
-
-    if se < 1.0e-15 { return 0.0; }
-
+pub fn t_statistic_two_sample(
+    x: &[f64; 256],
+    n1: i32,
+    y: &[f64; 256],
+    n2: i32
+) -> f64 with Div, Panic {
+    let nn1 = val_clamp_n(n1)
+    let nn2 = val_clamp_n(n2)
+    if nn1 < 2 || nn2 < 2 { return 0.0 }
+    let mean1 = mean(x, nn1)
+    let mean2 = mean(y, nn2)
+    let var1 = variance(x, nn1)
+    let var2 = variance(y, nn2)
+    let sp2 = (((nn1 - 1) as f64) * var1 + ((nn2 - 1) as f64) * var2) /
+              ((nn1 + nn2 - 2) as f64)
+    let se = val_sqrt_f64(sp2 * (1.0 / (nn1 as f64) + 1.0 / (nn2 as f64)))
+    if se < 1.0e-15 { return 0.0 }
     (mean1 - mean2) / se
 }
 
@@ -302,21 +273,17 @@ pub fn t_statistic_two_sample(x: &[f64], y: &[f64]) -> f64 {
 // Confidence Intervals
 // =============================================================================
 
-// Result of confidence interval calculation
 pub struct ConfidenceInterval {
-    pub lower: f64,
-    pub upper: f64,
-    pub center: f64,
-    pub margin: f64,
+    pub lower: f64
+    pub upper: f64
+    pub center: f64
+    pub margin: f64
 }
 
-// Calculate 95% confidence interval for the mean
-// Uses z=1.96 (large sample approximation)
-pub fn confidence_interval_95(data: &[f64]) -> ConfidenceInterval {
-    let m = mean(data);
-    let se = standard_error(data);
-    let margin = 1.96 * se;
-
+pub fn confidence_interval_95(data: &[f64; 256], n: i32) -> ConfidenceInterval with Div, Panic {
+    let m = mean(data, n)
+    let se = standard_error(data, n)
+    let margin = 1.96 * se
     ConfidenceInterval {
         lower: m - margin,
         upper: m + margin,
@@ -325,12 +292,10 @@ pub fn confidence_interval_95(data: &[f64]) -> ConfidenceInterval {
     }
 }
 
-// Calculate confidence interval with custom z-value
-pub fn confidence_interval(data: &[f64], z: f64) -> ConfidenceInterval {
-    let m = mean(data);
-    let se = standard_error(data);
-    let margin = z * se;
-
+pub fn confidence_interval(data: &[f64; 256], n: i32, z: f64) -> ConfidenceInterval with Div, Panic {
+    let m = mean(data, n)
+    let se = standard_error(data, n)
+    let margin = z * se
     ConfidenceInterval {
         lower: m - margin,
         upper: m + margin,
@@ -343,31 +308,25 @@ pub fn confidence_interval(data: &[f64], z: f64) -> ConfidenceInterval {
 // Validation Summary
 // =============================================================================
 
-// Complete validation result
 pub struct ValidationResult {
-    pub n: usize,
-    pub mean: f64,
-    pub std_dev: f64,
-    pub min: f64,
-    pub max: f64,
-    pub ci_lower: f64,
-    pub ci_upper: f64,
+    pub n: i32
+    pub mean: f64
+    pub std_dev: f64
+    pub min: f64
+    pub max: f64
+    pub ci_lower: f64
+    pub ci_upper: f64
 }
 
-// Generate comprehensive validation summary
-pub fn validate(data: &[f64]) -> ValidationResult {
-    let ci = confidence_interval_95(data);
-
+pub fn validate(data: &[f64; 256], n: i32) -> ValidationResult with Div, Panic {
+    let ci = confidence_interval_95(data, n)
     ValidationResult {
-        n: data.len(),
-        mean: mean(data),
-        std_dev: std_dev(data),
-        min: min(data),
-        max: max(data),
+        n: val_clamp_n(n),
+        mean: mean(data, n),
+        std_dev: std_dev(data, n),
+        min: min(data, n),
+        max: max(data, n),
         ci_lower: ci.lower,
         ci_upper: ci.upper,
     }
 }
-
-// =============================================================================
-// Tests

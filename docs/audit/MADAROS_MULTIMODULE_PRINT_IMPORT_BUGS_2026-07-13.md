@@ -78,6 +78,21 @@ Neither blocks the epistemic/GUM hardening (both have clean caller-side workarou
 papercuts that make stdlib modules feel unusable to newcomers (the natural `use mod::name` + `print_f64`
 both fail). Fixing them would materially improve real-world usability of the whole stdlib.
 
+## Closeout 2026-08-06
+
+Shipped Madaros (post-#1627 tip promote) accepts the #862 triad:
+
+- named `use epistemic::knowledge::ep_measured`
+- user helper `fn twice(x: f64) -> f64`
+- `print_f64(...)`
+
+Gate: `scripts/ci/madaros_862_import_print_gate.sh` → `MADAROS_862_GATE_OK`.
+Fixture: `tests/epistemic_trust/madaros_862_import_print_accept.sio`.
+
+Root already in checker source (`checker_collect_runtime_builtins_inplace` binds
+`print_f64`; path-form named import binds last segment) — promote made it live
+in `bin/madaros-linux-x86_64`. Issue #862 closable.
+
 ## Repro (self-contained)
 ```sounio
 // FAILS (E137): single-symbol import

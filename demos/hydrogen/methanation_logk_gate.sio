@@ -1,0 +1,407 @@
+// demos/hydrogen/methanation_logk_gate.sio
+//
+// The phantom reaction: methanation log K by naive van't Hoff extrapolation,
+// versus the honest interval — the exact failure Stamatakis calibrated away
+// by hand.
+//
+// Written for Dr. Emmanuel Stamatakis (NCSR Demokritos). His GHG: Sci. &
+// Technol. paper (2025, DOI 10.1002/ghg.2368) showed that DEFAULT database
+// van't Hoff extrapolation of the methanation equilibrium is misleading for
+// underground hydrogen storage: it predicts CH4 generation and calcite
+// dissolution that experiments refute (corroborated independently by
+// Gelencser 2023, DOI 10.1016/j.est.2023.106737). His fix was a
+// hand-calibrated log K(T) expression — paywalled, so this demo ships a
+// clearly-labeled placeholder calibration interval and an explicit 2-line
+// slot for his expression (see the CALIBRATION SLOT below).
+//
+// Thermodynamic anchor, read directly from phreeqc.dat:
+//   CO3-2 + 10H+ + 8e- = CH4 + 3H2O   log_k = 41.071, delta_h = -61.039
+//   kcal/mol at T0 = 298.15 K (industrially: CO2 + 4H2 = CH4 + 2H2O,
+//   the Sabatier reaction). Unit conversion: -61.039 kcal/mol x
+//   4184 J/kcal = -255387.176 J/mol; R.ln10 = 8.314462618 x
+//   2.302585093 = 19.14476 J/mol/K (R = 8.314462618 J/mol/K exactly).
+//
+// The demo asks one question at 90/120/150 C (typical UHS reservoir
+// temperatures): is the extrapolated log K a FACT or a GUESS? A point-value
+// geochem code prints 33.06 at 90 C and moves on. This code prices the
+// extrapolation distance, refuses the point past the evidence window, and
+// shows what the refusal costs: a toy first-order H2-loss proxy whose
+// uncertainty blows up from ~5x to ~180x between 90 and 150 C.
+//
+// Deterministic (seeded xorshift PRNG), pure Sounio (no extern "C"), runs
+// identically on the default Madaros engine and lean_single.
+// Marker: METHANATION_LOGK_GATE_OK
+
+use epistemic::pbox::*
+
+// ─── pure-Sounio math (package idiom: no extern "C") ───
+
+fn mh_exp(x: f64) -> f64 with Mut, Div {
+    if x > 700.0 { return 1.0e200 }
+    if x < 0.0 - 700.0 { return 0.0 }
+    var kf = x / 0.6931471805599453
+    var k = kf as i64
+    if kf < 0.0 {
+        if kf != (k as f64) { k = k - 1 }
+    }
+    let r = x - (k as f64) * 0.6931471805599453
+    var s = 1.0
+    var term = 1.0
+    var n: i64 = 1
+    while n < 25 { term = term * r / (n as f64); s = s + term; n = n + 1 }
+    var result = s
+    if k >= 0 {
+        var i: i64 = 0
+        while i < k { result = result * 2.0; i = i + 1 }
+    } else {
+        var i: i64 = 0
+        while i < (0 - k) { result = result / 2.0; i = i + 1 }
+    }
+    result
+}
+
+fn mh_ln(x: f64) -> f64 with Mut, Div {
+    var m = x
+    var k: i64 = 0
+    while m >= 2.0 { m = m / 2.0; k = k + 1 }
+    while m < 1.0 { m = m * 2.0; k = k - 1 }
+    let y = (m - 1.0) / (m + 1.0)
+    let y2 = y * y
+    var term = y
+    var sum = 0.0
+    var i: i64 = 0
+    while i < 12 {
+        sum = sum + term / (2.0 * (i as f64) + 1.0)
+        term = term * y2
+        i = i + 1
+    }
+    2.0 * sum + (k as f64) * 0.6931471805599453
+}
+
+fn pow10(x: f64) -> f64 with Mut, Div {
+    mh_exp(x * 2.302585093)
+}
+
+// ─── cross-engine determinism helpers ───
+//
+// The two compiler backends (Madaros, lean_single) evaluate this file's
+// pure-Sounio float chains to within 1 ulp of each other (verified: the
+// PRNG draws and the exp/ln/logK chains agree to 1e-9), but their f64
+// PRINTERS are not interchangeable — one truncates where the other
+// rounds, and 6-decimal decimals are not binary-representable, so no
+// binary float can be trusted to print identically on both. Therefore:
+//  - every number below is printed by print_fix6, which scales to an
+//    INTEGER with round-half-up and emits decimal digits as string
+//    literals — bit-identical integer in, byte-identical text out;
+//  - the Monte Carlo counts with a pure-integer comparison
+//    (see breach_count), so no borderline float `>` can flip a count.
+// Both engines then print identical numbers, by construction.
+
+fn floor_i64(x: f64) -> i64 with Mut {
+    var n = x as i64
+    if (n as f64) > x { n = n - 1 }
+    return n
+}
+
+fn pct(hits: i64, n: i64) -> f64 with Div {
+    100.0 * (hits as f64) / (n as f64)
+}
+
+fn pd(d: i64) with IO {
+    if d == 0 { print("0") }
+    if d == 1 { print("1") }
+    if d == 2 { print("2") }
+    if d == 3 { print("3") }
+    if d == 4 { print("4") }
+    if d == 5 { print("5") }
+    if d == 6 { print("6") }
+    if d == 7 { print("7") }
+    if d == 8 { print("8") }
+    if d == 9 { print("9") }
+}
+
+// fixed 6-decimal printer; |x| < 10^6, round-half-up
+fn print_fix6(x: f64) with IO, Mut {
+    var v = x
+    if v < 0.0 { print("-"); v = 0.0 - v }
+    let n = floor_i64(v * 1000000.0 + 0.5)
+    let ip = n / 1000000
+    let fp = n % 1000000
+    var div: i64 = 100000
+    while div > ip { div = div / 10 }
+    if div < 1 { div = 1 }
+    while div > 0 { pd((ip / div) % 10); div = div / 10 }
+    print(".")
+    var fdiv: i64 = 100000
+    while fdiv > 0 { pd((fp / fdiv) % 10); fdiv = fdiv / 10 }
+}
+
+// ─── PRNG (deterministic xorshift, package idiom) ───
+
+var RNG_A: i64 = 0
+var RNG_B: i64 = 0
+
+fn rng_seed(a: i64, b: i64) with Mut {
+    RNG_A = a
+    RNG_B = b
+}
+
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A
+    let y = RNG_B
+    RNG_A = y
+    x = x ^ (x << 23)
+    x = x ^ (x >> 17)
+    x = x ^ (y ^ (y >> 26))
+    RNG_B = x
+    let r = x + y
+    if r < 0 { 0 - r } else { r }
+}
+
+// (rand_uniform/rand_normal were removed: the Monte Carlo below counts
+// the 12-draw integer sums directly — see breach_count.)
+
+// ─── the thermodynamics (log10 units) ───
+
+fn dh_j_mol() -> f64 {
+    // -61.039 kcal/mol (phreeqc.dat) x 4184 J/kcal = -255387.176 J/mol
+    0.0 - 61.039 * 4184.0
+}
+
+fn logk_vanthoff(t: f64) -> f64 with Div {
+    // constant-dH van't Hoff:
+    //   log K(T) = log K(T0) - (dH / (R.ln10)) . (1/T - 1/T0)
+    // dH < 0 (exothermic), so log K falls as T rises.
+    41.071 - (dh_j_mol() / 19.14476) * (1.0 / t - 1.0 / 298.15)
+}
+
+// ─── the gate: when does extrapolation become a guess? ───
+//
+// Evidence-window heuristic (HONEST LABEL — a heuristic, not statistics):
+// van't Hoff linear extrapolation is only credible within roughly +/-40 K
+// of the anchor data (the usual +/-30-50 C rule of thumb). Inside the
+// window we report the point with a 0.25-log-unit anchor/reporting band.
+// Past it we REFUSE the point and widen the band linearly at
+// 0.05 log units per kelvin of overreach — a stand-in for every way the
+// constant-dH assumption can drift (dCp, nonideal brine, wrong DB entry).
+// The 0.05/K slope is UNCALIBRATED: no thermodynamic model derives it,
+// and every quantitative spread printed below moves with it. That is the
+// point of the demo — past the evidence window, the answer is dominated
+// by a widening rule you chose, not by data.
+
+fn band_halfwidth(t: f64) -> f64 with Mut {
+    var d = t - 298.15
+    if d < 0.0 { d = 0.0 - d }
+    if d <= 40.0 { return 0.25 }
+    0.25 + 0.05 * (d - 40.0)
+}
+
+fn in_window(t: f64) -> bool with Mut {
+    var d = t - 298.15
+    if d < 0.0 { d = 0.0 - d }
+    d <= 40.0
+}
+
+// ─── the toy loss proxy (ILLUSTRATIVE — read this label) ───
+//
+// A batch-reactor first-order H2 consumption proxy: k_eff(T) =
+// k90 . 10^((logK(T) - logK(90 C)) / 4), loss30 = 1 - exp(-30.k_eff).
+// k90 is anchored so the naive 30-year loss at 90 C lands mid-range of
+// Bo 2021's kinetic 30-yr H2 losses (0.72 % Tubridgi / 2.76 % Mondarra,
+// DOI 10.1016/j.ijhydene.2021.03.116): loss30(90 C) = 2.0 %. The
+// 4-log-units-per-decade mapping of equilibrium drive onto an effective
+// rate is a HEURISTIC propensity map, not physics — it carries no
+// activation barrier. That is deliberate: the demo's point is that the
+// epistemic band on log K dominates ANY such mapping, which is why the
+// equilibrium constant cannot be used past its evidence, calibrated or
+// not. Calibrate-at-one-point-then-extrapolate is exactly the database
+// workflow this demo puts on trial.
+
+fn loss30(logk: f64, logk90: f64, k90: f64) -> f64 with Mut, Div {
+    let k_eff = k90 * pow10((logk - logk90) / 4.0)
+    100.0 * (1.0 - mh_exp(0.0 - 30.0 * k_eff))
+}
+
+// P(k_eff > k_star) when the effective rate carries +/-10 % aleatory
+// scatter (formation variability), Monte Carlo through the same map.
+//
+// Counted in INTEGER space on purpose: each draw is a sum of 12 integer
+// uniforms d_j in [0, 9999] (an Irwin-Hall stand-in for a normal), and
+//   k_mult.k90.(1 + 0.1.n) > k_star   with n = sum(d_j)/10^4 - 6
+// is decided as  sum(d_j) > thr  with  thr = floor((crit + 6).10^4).
+// For integer sd, sd > T is EXACTLY sd > floor(T) — the faithful integer
+// image of the float comparison, with no rounding convention invented.
+// The threshold is derived once from the floats; the 20000 comparisons
+// are pure integers, which no compiler backend can drift.
+fn breach_count(k_mult: f64, k90: f64, k_star: f64, n: i64) -> i64 with Mut, Div {
+    let crit = (k_star / (k_mult * k90) - 1.0) / 0.1
+    let thr = floor_i64((crit + 6.0) * 10000.0)
+    var i: i64 = 0
+    var hits: i64 = 0
+    while i < n {
+        var sd: i64 = 0
+        var j = 0
+        while j < 12 { sd = sd + rng_next() % 10000; j = j + 1 }
+        if sd > thr { hits = hits + 1 }
+        i = i + 1
+    }
+    hits
+}
+
+// ─── print helpers ───
+
+fn logk_row(t: f64) with IO, Mut, Div {
+    let point = logk_vanthoff(t)
+    let w = band_halfwidth(t)
+    let lo = point - w
+    let hi = point + w
+    print(" C | ")
+    if in_window(t) {
+        print_fix6(point); print(" +- "); print_fix6(w)
+        print(" | IN-WINDOW  | trusted point, anchor band only")
+    } else {
+        print("REFUSED (naive "); print_fix6(point); print(")")
+        print(" | EXTRAPOLATED | honest log K in [")
+        print_fix6(lo); print(" , "); print_fix6(hi); print("], width "); print_fix6(2.0 * w)
+    }
+    println("")
+}
+
+fn loss_row(t: f64, logk90: f64, k90: f64) with IO, Mut, Div {
+    let point = logk_vanthoff(t)
+    let w = band_halfwidth(t)
+    let naive = loss30(point, logk90, k90)
+    let lo = loss30(point - w, logk90, k90)
+    let hi = loss30(point + w, logk90, k90)
+    print(" C | naive "); print_fix6(naive)
+    print(" % | gated ["); print_fix6(lo); print(" , "); print_fix6(hi); print("] %")
+    print(" | hi/lo = "); print_fix6(hi / lo); println("")
+}
+
+fn main() -> i32 with IO, Mut, Div {
+    print("=== Methanation log K: the extrapolation he had to calibrate by hand ===")
+    println("")
+    print("    CO3-2 + 10H+ + 8e- = CH4 + 3H2O   (phreeqc.dat; industrially")
+    println("")
+    print("    CO2 + 4H2 = CH4 + 2H2O, Sabatier). Anchor: log K0 = 41.071,")
+    println("")
+    print("    dH = -61.039 kcal/mol = -255387.176 J/mol at T0 = 298.15 K.")
+    println("")
+    print("    R.ln10 = 19.14476 J/mol/K. Storage context: H2 Henry log_k")
+    println("")
+    print("    -3.105 keeps dissolved H2 scarce, and H2 diffuses ~2.6x faster")
+    println("")
+    print("    than CH4 (5.13e-9 vs 1.96e-9 m^2/s) — real UHS losses are")
+    println("")
+    print("    kinetic, which is exactly what a log K cannot tell you.")
+    println("")
+    println("")
+
+    let logk90 = logk_vanthoff(363.15)
+    let k90 = (0.0 - mh_ln(0.98)) / 30.0
+
+    print("log K by naive van't Hoff (constant dH) — and the gate:")
+    println("")
+    print("  50"); logk_row(323.15)
+    print("  90"); logk_row(363.15)
+    print(" 120"); logk_row(393.15)
+    print(" 150"); logk_row(423.15)
+    println("")
+    print("  50 C sits inside the +/-40 K evidence window: report the point.")
+    println("")
+    print("  90/120/150 C are 65/95/125 K past the anchor: the point is a")
+    println("")
+    print("  guess; the honest answer is the interval.")
+    println("")
+    println("")
+
+    print("Toy first-order 30-yr H2 loss proxy (ILLUSTRATIVE; anchored to")
+    println("")
+    print("  Bo 2021's 0.72-2.76 % range at 90 C, heuristic 4 log-units/decade):")
+    println("")
+    print("  90"); loss_row(363.15, logk90, k90)
+    print(" 120"); loss_row(393.15, logk90, k90)
+    print(" 150"); loss_row(423.15, logk90, k90)
+    println("")
+    print("  The naive workflow prints three precise percentages and moves on.")
+    println("")
+    print("  The same proxy, honestly gated, spans ~5x at 90 C and ~180x at")
+    println("")
+    print("  150 C. The mapping is not the problem — the extrapolated log K is.")
+    println("")
+    println("")
+
+    // ═══════════════ STAMATAKIS 2025 CALIBRATION SLOT ═══════════════
+    // His GHG-2025 fix was a hand-calibrated log K(T) that predicts LESS
+    // methanation than the default database extrapolation (his abstract:
+    // experiments refute the DB-predicted CH4 generation and calcite
+    // dissolution). The expression itself is paywalled. This PLACEHOLDER
+    // interval encodes only that abstract-level finding: the calibrated
+    // log K sits 2-6 log units below the naive extrapolation.
+    //
+    // TO DROP IN HIS EXPRESSION: replace these two constants with his
+    // log K(T) lower/upper evaluations (or a direct call to his formula)
+    // — a 2-line edit; every number below this line re-derives itself.
+    let CAL_DROP_LO = 2.0   // placeholder: calibrated log K >= naive - 6
+    let CAL_DROP_HI = 6.0   // placeholder: calibrated log K <= naive - 2
+    let cal_lo = logk90 - CAL_DROP_HI
+    let cal_hi = logk90 - CAL_DROP_LO
+    print("Calibration slot (PLACEHOLDER, abstract-level: less methanation")
+    println("")
+    print("  than the DB default — swap in his 2025 expression, 2 lines):")
+    println("")
+    print("  90 C: naive log K "); print_fix6(logk90)
+    print(" -> placeholder-calibrated [")
+    print_fix6(cal_lo); print(" , "); print_fix6(cal_hi); println(" ]")
+    let cal_loss_lo = loss30(cal_lo, logk90, k90)
+    let cal_loss_hi = loss30(cal_hi, logk90, k90)
+    print("  90 C toy loss: naive 2.0 % -> placeholder-calibrated [")
+    print_fix6(cal_loss_lo); print(" , "); print_fix6(cal_loss_hi); println(" ] %")
+    println("")
+    println("")
+
+    // p-box on breaching Bo 2021's worst field case (2.76 % over 30 yr)
+    let k_star = (0.0 - mh_ln(1.0 - 0.0276)) / 30.0
+    let w90 = band_halfwidth(363.15)
+    let w120 = band_halfwidth(393.15)
+    print("p-box on P(30-yr loss > 2.76 %, Bo's worst field case),")
+    println("")
+    print("  +/-10 % aleatory scatter on the effective rate, MC n = 20000:")
+    println("")
+    rng_seed(314159265, 271828182)
+    let h90_lo = breach_count(pow10((0.0 - w90) / 4.0), k90, k_star, 20000)
+    rng_seed(314159265, 271828182)
+    let h90_hi = breach_count(pow10(w90 / 4.0), k90, k_star, 20000)
+    let box90 = new(pct(h90_lo, 20000), pct(h90_hi, 20000))
+    print("  90 C: ["); print_fix6(box90.lo); print(" , "); print_fix6(box90.hi)
+    print("] % — the band straddles the field bound: UNDETERMINED")
+    println("")
+    rng_seed(314159265, 271828182)
+    let h120_lo = breach_count(pow10(((logk_vanthoff(393.15) - w120) - logk90) / 4.0), k90, k_star, 20000)
+    rng_seed(314159265, 271828182)
+    let h120_hi = breach_count(pow10(((logk_vanthoff(393.15) + w120) - logk90) / 4.0), k90, k_star, 20000)
+    let box120 = new(pct(h120_lo, 20000), pct(h120_hi, 20000))
+    print(" 120 C: ["); print_fix6(box120.lo); print(" , "); print_fix6(box120.hi)
+    print("] % — ignorance ratio vs a 1 % tail: "); print_fix6(width(box120)); println("")
+    println("")
+    println("")
+
+    print("Why the phantom dies here: even the LOW end of the 150 C band")
+    println("")
+    print("  (log K ~ 23) is ~10^23 — the thermodynamic ceiling stays near-")
+    println("")
+    print("  total conversion at every UHS temperature. Coupled to calcite,")
+    println("")
+    print("  that ceiling is what makes PHREEQC-style runs predict the CH4")
+    println("")
+    print("  generation and calcite dissolution his experiments refute. The")
+    println("")
+    print("  extrapolation cannot price the RATE — his calibrated K(T) folds")
+    println("")
+    print("  kinetic reality back into the equilibrium constant. This file is")
+    println("")
+    print("  that calibration's slot: two lines, and the phantom stays dead.")
+    println("")
+    println("METHANATION_LOGK_GATE_OK")
+    0
+}

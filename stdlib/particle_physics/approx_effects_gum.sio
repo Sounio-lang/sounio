@@ -1,0 +1,133 @@
+// stdlib/particle_physics/approx_effects_gum.sio
+// Madaros-safe free-fn LO/NWA variants (EXP residual #1).
+// Separated from approx_effects.sio so lean_single multi-module typecheck of
+// the original method-chain LO/NWA path remains unchanged.
+
+module particle_physics::approx_effects_gum
+
+use epistemic::knowledge::{Epistemic, ep_val, ep_variance, ep_confidence, ep_new, ep_certain}
+use particle_physics::sm_params::{alpha_s_mz, mass_h, mass_z}
+
+let AE_PI: f64 = 3.14159265358979323846
+
+fn ae_abs(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn ae_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    if g > 1.0 { g = x / 2.0 }
+    var i: i64 = 0
+    while i < 40 {
+        g = 0.5 * (g + x / g)
+        i = i + 1
+    }
+    g
+}
+
+fn ae_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    var m = x
+    var e = 0.0
+    while m >= 2.0 {
+        m = m / 2.0
+        e = e + 1.0
+    }
+    while m < 0.5 {
+        m = m * 2.0
+        e = e - 1.0
+    }
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k: i64 = 1
+    while k < 30 {
+        term = term * t2
+        let odd = 2.0 * (k as f64) + 1.0
+        sum = sum + term / odd
+        k = k + 1
+    }
+    let ln2 = 0.6931471805599453
+    e * ln2 + 2.0 * sum
+}
+
+fn perturbative_sentinel() -> bool with Perturbative { true }
+fn nwa_sentinel() -> bool with NarrowWidthApproximation { true }
+
+pub fn alpha_s_lo_ep_gum(mu_gev: f64) -> Epistemic with Perturbative, Mut, Div, Panic {
+    let _flag = perturbative_sentinel()
+    let a_ep = alpha_s_mz()
+    let a_mz = ep_val(&a_ep)
+    let a_var = ep_variance(&a_ep)
+    let conf = ep_confidence(&a_ep)
+    let mz = ep_val(&mass_z())
+    if mu_gev <= 0.0 || mz <= 0.0 {
+        return ep_certain(0.0)
+    }
+    var nf = 3.0
+    if mu_gev > 1.27 { nf = nf + 1.0 }
+    if mu_gev > 4.18 { nf = nf + 1.0 }
+    if mu_gev > 172.69 { nf = nf + 1.0 }
+    let b0 = (33.0 - 2.0 * nf) / (12.0 * AE_PI)
+    let ln_mu_mz = ae_ln(mu_gev / mz)
+    let denom = 1.0 + 2.0 * b0 * a_mz * ln_mu_mz
+    if denom == 0.0 {
+        return ep_certain(0.0)
+    }
+    let val = a_mz / denom
+    let std = ae_sqrt(a_var) / ae_abs(denom)
+    ep_new(val, std * std, conf)
+}
+
+pub fn ggh_lo_xsec_ep_gum(m_h_gev: f64, sqrt_s_gev: f64) -> Epistemic with Perturbative, Mut, Div, Panic {
+    let _flag = perturbative_sentinel()
+    let as_lo = alpha_s_lo_ep_gum(m_h_gev)
+    let a = ep_val(&as_lo)
+    let av = ep_variance(&as_lo)
+    let conf = ep_confidence(&as_lo)
+    let c_lo = AE_PI * AE_PI / 576.0
+    let s = sqrt_s_gev * sqrt_s_gev
+    let a2 = a * a
+    let a2_var = 4.0 * a2 * av
+    let scale = c_lo / s
+    ep_new(a2 * scale, a2_var * scale * scale, conf)
+}
+
+pub fn z_partial_width_nwa_ep_gum(
+    g_v_sq_plus_g_a_sq: f64,
+    n_color: f64
+) -> Epistemic with NarrowWidthApproximation, Mut, Div, Panic {
+    let _flag = nwa_sentinel()
+    let mz = mass_z()
+    let m = ep_val(&mz)
+    let mv = ep_variance(&mz)
+    let conf = ep_confidence(&mz)
+    let gf = 1.1663787e-5
+    let factor = gf * n_color * g_v_sq_plus_g_a_sq / (6.0 * 1.41421356237 * AE_PI)
+    let m3 = m * m * m
+    let dm3 = 3.0 * m * m
+    ep_new(factor * m3, factor * factor * dm3 * dm3 * mv, conf)
+}
+
+pub fn h_bb_width_nwa_ep_gum() -> Epistemic with NarrowWidthApproximation, Perturbative, Mut, Div, Panic {
+    let _flag = nwa_sentinel()
+    let mh = mass_h()
+    let mh_val = ep_val(&mh)
+    let mh_var = ep_variance(&mh)
+    let mh_conf = ep_confidence(&mh)
+    let mb_mh = 2.79
+    let gf = 1.1663787e-5
+    let factor_lo = 3.0 * gf * mb_mh * mb_mh / (4.0 * 1.41421356237 * AE_PI)
+    let as_mh = alpha_s_lo_ep_gum(mh_val)
+    let as_v = ep_val(&as_mh)
+    let as_var = ep_variance(&as_mh)
+    let k = 5.67 / AE_PI
+    let corr_val = 1.0 + k * as_v
+    let base_val = factor_lo * mh_val
+    let base_var = factor_lo * factor_lo * mh_var
+    let val = base_val * corr_val
+    let var = base_val * base_val * (k * k * as_var) + corr_val * corr_val * base_var
+    ep_new(val, var, mh_conf)
+}

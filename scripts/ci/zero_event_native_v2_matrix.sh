@@ -66,26 +66,46 @@ require_rc qd128_core 0
 require_marker qd128_core 'QD128_CORE_IMPORT_NATIVE_V2 PASS'
 reject_marker qd128_core 'Segmentation fault'
 
-# Fail-closed residuals: full math::qd128 still pulls qd_mul → ELF write rc=12
-run_capture qd128 tests/known_failures/qd128_import_native_v2_probe.sio
-require_rc qd128 1
-require_marker qd128 'lower_array: into_acc_done 2'
-require_marker qd128 'Failed to write native binary'
+run_capture qd128 tests/run-pass/qd128_import_native_v2_smoke.sio
+require_rc qd128 0
+require_marker qd128 'QD128_IMPORT_NATIVE_V2 PASS'
 reject_marker qd128 'Segmentation fault'
-reject_marker qd128 'QD128_IMPORT_NATIVE_V2 PASS'
 
+run_capture qd128_mul tests/run-pass/qd128_mul_native_v2_smoke.sio
+require_rc qd128_mul 0
+require_marker qd128_mul 'QD128_MUL_NATIVE_V2 PASS'
+reject_marker qd128_mul 'Segmentation fault'
+
+# Compact zero-provenance (sedenion + local f64 kinds) — Madaros-green
+run_capture zp_compact tests/run-pass/zero_provenance_native_v2_smoke.sio
+require_rc zp_compact 0
+require_marker zp_compact 'ZERO_PROVENANCE PASS'
+reject_marker zp_compact 'Segmentation fault'
+
+# Full eisa::core_v2 + sedenion combined import still thin-link fail-closed
 run_capture combined tests/known_failures/zero_provenance_native_v2_probe.sio
 require_rc combined 1
-require_marker combined 'lower_array: final_fn_count'
 require_marker combined 'Failed to write native binary'
 reject_marker combined 'Segmentation fault'
 reject_marker combined 'ZERO_PROVENANCE PASS'
 
-# Receipt constructors still unsupported under native-v2 (lean_single oracle in zero_event_gate.sh)
-run_capture receipt tests/known_failures/zero_event_stdlib_native_v2_probe.sio
-require_rc receipt 1
-require_marker receipt 'Failed to write native binary'
-reject_marker receipt 'Segmentation fault'
-reject_marker receipt 'ZERO_EVENT_STDLIB PASS'
+# Bool-cmp-in-struct-field shape residual (not an IR fn-count ceiling)
+run_capture bool_cmp_precomp tests/run-pass/thinlink_bool_cmp_field_precomp_smoke.sio
+require_rc bool_cmp_precomp 0
+require_marker bool_cmp_precomp 'BOOL_CMP_FIELD_PRECOMP PASS'
+reject_marker bool_cmp_precomp 'Segmentation fault'
 
-echo '[zero-native-matrix] PASS: dd64+sedenion+qd128_core green; full qd128/combined/receipt fail closed (rc=12) without segfault'
+run_capture bool_cmp_probe tests/known_failures/thinlink_bool_cmp_field_probe.sio
+require_rc bool_cmp_probe 1
+require_marker bool_cmp_probe 'Failed to write native binary'
+reject_marker bool_cmp_probe 'Segmentation fault'
+reject_marker bool_cmp_probe 'BOOL_CMP_FIELD PASS'
+
+# Receipt stdlib probe is green on stock Madaros (main already closed this surface)
+run_capture receipt tests/known_failures/zero_event_stdlib_native_v2_probe.sio
+require_rc receipt 0
+require_marker receipt 'Compilation successful!'
+require_marker receipt 'ZERO_EVENT_STDLIB PASS'
+reject_marker receipt 'Segmentation fault'
+
+echo '[zero-native-matrix] PASS: dd64+sedenion+qd128(+core,+mul)+zp_compact+bool_cmp_precomp+receipt green; eisa+sedenion combined + bool_cmp_probe fail-closed'

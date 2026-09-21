@@ -156,18 +156,23 @@ pub fn r3d_shade(
 // ============================================================
 
 pub fn r3d_depth_buf_alloc(w: i64, h: i64) -> *mut i64 with Alloc {
-    // We store depth as i64 bit-pattern of f64; caller casts.
+    // Positive 20-bit fixed-point depth: deterministic and precise enough to
+    // distinguish coplanar-near surfaces without f64 bit reinterpretation.
     heap_alloc(w * h * 8) as *mut i64
 }
 
 pub fn r3d_depth_buf_clear(buf: *mut i64, w: i64, h: i64) with Mut {
-    // Write +infinity (0x7FF0000000000000 = +Inf as IEEE 754 double) to all entries.
-    let pos_inf_bits: i64 = 0x7FF0000000000000
+    let far_depth: i64 = 0x7FFFFFFFFFFFFFFF
     var i: i64 = 0
     while i < w * h {
-        write_i64(buf, i, pos_inf_bits)
+        write_i64(buf, i, far_depth)
         i = i + 1
     }
+}
+
+fn r3d_depth_key(depth: f64) -> i64 {
+    if depth <= 0.0 { return 0 }
+    (depth * 1048576.0) as i64
 }
 
 // ============================================================
@@ -178,6 +183,56 @@ fn r3d_edge(ax: i64, ay: i64, bx: i64, by: i64, cx: i64, cy: i64) -> i64 {
     (cx - ax) * (by - ay) - (cy - ay) * (bx - ax)
 }
 
+// Four fixed subpixel coverage samples at quarter-pixel offsets. Shading and
+// depth remain per-pixel, so this is coverage AA rather than full MSAA.
+fn r3d_coverage4(
+    ax: i64, ay: i64, bx: i64, by: i64, cx: i64, cy: i64,
+    px: i64, py: i64,
+) -> i64 with Div {
+    let sax = ax * 4
+    let say = ay * 4
+    let sbx = bx * 4
+    let sby = by * 4
+    let scx = cx * 4
+    let scy = cy * 4
+    let area = r3d_edge(sax, say, sbx, sby, scx, scy)
+    var covered: i64 = 0
+    var sample: i64 = 0
+    while sample < 4 {
+        let ox = if sample == 0 || sample == 2 { 1 } else { 3 }
+        let oy = if sample < 2 { 1 } else { 3 }
+        let sx = px * 4 + ox
+        let sy = py * 4 + oy
+        let w0 = r3d_edge(sbx, sby, scx, scy, sx, sy)
+        let w1 = r3d_edge(scx, scy, sax, say, sx, sy)
+        let w2 = r3d_edge(sax, say, sbx, sby, sx, sy)
+        let inside = if area > 0 {
+            w0 >= 0 && w1 >= 0 && w2 >= 0
+        } else {
+            w0 <= 0 && w1 <= 0 && w2 <= 0
+        }
+        if inside { covered = covered + 1 }
+        sample = sample + 1
+    }
+    (covered * 255 + 2) / 4
+}
+
+fn r3d_write_coverage(c: &!Canvas, idx: i64, r: i64, g: i64, b: i64, coverage: i64) with Mut, Div {
+    if coverage >= 255 {
+        write_i64(c.pixels, idx, b | (g << 8) | (r << 16))
+        return
+    }
+    let dst = read_i64(c.pixels, idx)
+    let dr = (dst >> 16) & 0xFF
+    let dg = (dst >> 8) & 0xFF
+    let db = dst & 0xFF
+    let inv = 255 - coverage
+    let out_r = (r * coverage + dr * inv + 127) / 255
+    let out_g = (g * coverage + dg * inv + 127) / 255
+    let out_b = (b * coverage + db * inv + 127) / 255
+    write_i64(c.pixels, idx, out_b | (out_g << 8) | (out_r << 16))
+}
+
 fn r3d_rasterize_tri(
     sx0: i64, sy0: i64,
     sx1: i64, sy1: i64,
@@ -186,7 +241,7 @@ fn r3d_rasterize_tri(
     cr: i64, cg: i64, cb: i64,
     depth_buf: *mut i64,
     c: &!Canvas,
-) with Mut {
+) with Mut, Div {
     let area = r3d_edge(sx0, sy0, sx1, sy1, sx2, sy2)
     if area == 0 { return }
 
@@ -194,8 +249,6 @@ fn r3d_rasterize_tri(
     let max_x = r3d_clamp_i(r3d_max_i(r3d_max_i(sx0, sx1), sx2), 0, c.width - 1)
     let min_y = r3d_clamp_i(r3d_min_i(r3d_min_i(sy0, sy1), sy2), 0, c.height - 1)
     let max_y = r3d_clamp_i(r3d_max_i(r3d_max_i(sy0, sy1), sy2), 0, c.height - 1)
-    let color = cb | (cg << 8) | (cr << 16)
-
     var py = min_y
     while py <= max_y {
         var px = min_x
@@ -203,12 +256,8 @@ fn r3d_rasterize_tri(
             let w0 = r3d_edge(sx1, sy1, sx2, sy2, px, py)
             let w1 = r3d_edge(sx2, sy2, sx0, sy0, px, py)
             let w2 = r3d_edge(sx0, sy0, sx1, sy1, px, py)
-            let inside = if area > 0 {
-                w0 >= 0 && w1 >= 0 && w2 >= 0
-            } else {
-                w0 <= 0 && w1 <= 0 && w2 <= 0
-            }
-            if inside {
+            let coverage = r3d_coverage4(sx0, sy0, sx1, sy1, sx2, sy2, px, py)
+            if coverage > 0 {
                 let idx = py * c.width + px
                 // Depth interpolation (perspective-correct approximation)
                 let area_f = area as f64
@@ -216,14 +265,12 @@ fn r3d_rasterize_tri(
                 let b1 = (w1 as f64) / area_f
                 let b2 = (w2 as f64) / area_f
                 let depth = b0 * d0 + b1 * d1 + b2 * d2
-                // Compare against stored depth (re-interpret bits)
-                let stored_bits = read_i64(depth_buf, idx)
-                // Treat stored_bits as f64 bit pattern for comparison.
-                // Since depth > 0 and we use IEEE 754, bit comparison holds for positives.
-                let depth_bits = depth as i64  // approximate: cast f64→i64 for comparison
-                if depth_bits < stored_bits {
-                    write_i64(depth_buf, idx, depth_bits)
-                    write_i64(c.pixels, idx, color)
+                // Compare deterministic fixed-point depths.
+                let stored_depth = read_i64(depth_buf, idx)
+                let depth_key = r3d_depth_key(depth)
+                if depth_key < stored_depth {
+                    write_i64(depth_buf, idx, depth_key)
+                    r3d_write_coverage(c, idx, cr, cg, cb, coverage)
                 }
             }
             px = px + 1
@@ -262,12 +309,8 @@ pub fn r3d_rasterize_tri_gouraud(
             let w0 = r3d_edge(sx1, sy1, sx2, sy2, px, py)
             let w1 = r3d_edge(sx2, sy2, sx0, sy0, px, py)
             let w2 = r3d_edge(sx0, sy0, sx1, sy1, px, py)
-            let inside = if area > 0 {
-                w0 >= 0 && w1 >= 0 && w2 >= 0
-            } else {
-                w0 <= 0 && w1 <= 0 && w2 <= 0
-            }
-            if inside {
+            let coverage = r3d_coverage4(sx0, sy0, sx1, sy1, sx2, sy2, px, py)
+            if coverage > 0 {
                 let idx = py * cv.width + px
                 let area_f = area as f64
                 let bw0 = (w0 as f64) / area_f
@@ -275,16 +318,16 @@ pub fn r3d_rasterize_tri_gouraud(
                 let bw2 = (w2 as f64) / area_f
                 let depth = bw0 * d0 + bw1 * d1 + bw2 * d2
                 let stored = read_i64(depth_buf, idx)
-                let dbits = depth as i64
-                if dbits < stored {
-                    write_i64(depth_buf, idx, dbits)
+                let depth_key = r3d_depth_key(depth)
+                if depth_key < stored {
+                    write_i64(depth_buf, idx, depth_key)
                     let fr = bw0 * c0.x + bw1 * c1.x + bw2 * c2.x
                     let fg = bw0 * c0.y + bw1 * c1.y + bw2 * c2.y
                     let fb = bw0 * c0.z + bw1 * c1.z + bw2 * c2.z
                     let pr = r3d_clamp_i(fr as i64, 0, 255)
                     let pg = r3d_clamp_i(fg as i64, 0, 255)
                     let pb = r3d_clamp_i(fb as i64, 0, 255)
-                    write_i64(cv.pixels, idx, pb | (pg << 8) | (pr << 16))
+                    r3d_write_coverage(cv, idx, pr, pg, pb, coverage)
                 }
             }
             px = px + 1
@@ -294,7 +337,7 @@ pub fn r3d_rasterize_tri_gouraud(
 }
 
 // Phong rasterize — interpolates vertex normals per-pixel, shades with Blinn-Phong, applies
-// linear depth fog. Produces sharper highlights than Gouraud at the cost of ~10 extra ops/px.
+// linear depth fog, and resolves four subpixel coverage samples at triangle edges.
 pub fn r3d_rasterize_tri_phong(
     sx0: i64, sy0: i64,
     sx1: i64, sy1: i64,
@@ -320,12 +363,8 @@ pub fn r3d_rasterize_tri_phong(
             let w0 = r3d_edge(sx1, sy1, sx2, sy2, px, py)
             let w1 = r3d_edge(sx2, sy2, sx0, sy0, px, py)
             let w2 = r3d_edge(sx0, sy0, sx1, sy1, px, py)
-            let inside = if area > 0 {
-                w0 >= 0 && w1 >= 0 && w2 >= 0
-            } else {
-                w0 <= 0 && w1 <= 0 && w2 <= 0
-            }
-            if inside {
+            let coverage = r3d_coverage4(sx0, sy0, sx1, sy1, sx2, sy2, px, py)
+            if coverage > 0 {
                 let idx = py * cv.width + px
                 let area_f = area as f64
                 let bw0 = (w0 as f64) / area_f
@@ -333,9 +372,9 @@ pub fn r3d_rasterize_tri_phong(
                 let bw2 = (w2 as f64) / area_f
                 let depth = bw0 * d0 + bw1 * d1 + bw2 * d2
                 let stored = read_i64(depth_buf, idx)
-                let dbits = depth as i64
-                if dbits < stored {
-                    write_i64(depth_buf, idx, dbits)
+                let depth_key = r3d_depth_key(depth)
+                if depth_key < stored {
+                    write_i64(depth_buf, idx, depth_key)
                     // Per-pixel normal interpolation + Blinn-Phong
                     let ni_x = bw0 * n0.x + bw1 * n1.x + bw2 * n2.x
                     let ni_y = bw0 * n0.y + bw1 * n1.y + bw2 * n2.y
@@ -350,7 +389,7 @@ pub fn r3d_rasterize_tri_phong(
                     let pr = r3d_clamp_i(out_r as i64, 0, 255)
                     let pg = r3d_clamp_i(out_g as i64, 0, 255)
                     let pb = r3d_clamp_i(out_b as i64, 0, 255)
-                    write_i64(cv.pixels, idx, pb | (pg << 8) | (pr << 16))
+                    r3d_write_coverage(cv, idx, pr, pg, pb, coverage)
                 }
             }
             px = px + 1
@@ -414,12 +453,8 @@ pub fn r3d_rasterize_tri_cel(
             let w0 = r3d_edge(sx1, sy1, sx2, sy2, px, py)
             let w1 = r3d_edge(sx2, sy2, sx0, sy0, px, py)
             let w2 = r3d_edge(sx0, sy0, sx1, sy1, px, py)
-            let inside = if area > 0 {
-                w0 >= 0 && w1 >= 0 && w2 >= 0
-            } else {
-                w0 <= 0 && w1 <= 0 && w2 <= 0
-            }
-            if inside {
+            let coverage = r3d_coverage4(sx0, sy0, sx1, sy1, sx2, sy2, px, py)
+            if coverage > 0 {
                 let idx = py * cv.width + px
                 let area_f = area as f64
                 let bw0 = (w0 as f64) / area_f
@@ -427,9 +462,9 @@ pub fn r3d_rasterize_tri_cel(
                 let bw2 = (w2 as f64) / area_f
                 let depth = bw0 * d0 + bw1 * d1 + bw2 * d2
                 let stored = read_i64(depth_buf, idx)
-                let dbits = depth as i64
-                if dbits < stored {
-                    write_i64(depth_buf, idx, dbits)
+                let depth_key = r3d_depth_key(depth)
+                if depth_key < stored {
+                    write_i64(depth_buf, idx, depth_key)
                     let ni_x = bw0 * n0.x + bw1 * n1.x + bw2 * n2.x
                     let ni_y = bw0 * n0.y + bw1 * n1.y + bw2 * n2.y
                     let ni_z = bw0 * n0.z + bw1 * n1.z + bw2 * n2.z
@@ -437,7 +472,7 @@ pub fn r3d_rasterize_tri_cel(
                     let pr = col.x as i64
                     let pg = col.y as i64
                     let pb = col.z as i64
-                    write_i64(cv.pixels, idx, pb | (pg << 8) | (pr << 16))
+                    r3d_write_coverage(cv, idx, pr, pg, pb, coverage)
                 }
             }
             px = px + 1
@@ -529,12 +564,8 @@ pub fn r3d_rasterize_tri_pbr(
             let w0 = r3d_edge(sx1, sy1, sx2, sy2, px, py)
             let w1 = r3d_edge(sx2, sy2, sx0, sy0, px, py)
             let w2 = r3d_edge(sx0, sy0, sx1, sy1, px, py)
-            let inside = if area > 0 {
-                w0 >= 0 && w1 >= 0 && w2 >= 0
-            } else {
-                w0 <= 0 && w1 <= 0 && w2 <= 0
-            }
-            if inside {
+            let coverage = r3d_coverage4(sx0, sy0, sx1, sy1, sx2, sy2, px, py)
+            if coverage > 0 {
                 let idx = py * cv.width + px
                 let area_f = area as f64
                 let bw0 = (w0 as f64) / area_f
@@ -542,9 +573,9 @@ pub fn r3d_rasterize_tri_pbr(
                 let bw2 = (w2 as f64) / area_f
                 let depth = bw0 * d0 + bw1 * d1 + bw2 * d2
                 let stored = read_i64(depth_buf, idx)
-                let dbits = depth as i64
-                if dbits < stored {
-                    write_i64(depth_buf, idx, dbits)
+                let depth_key = r3d_depth_key(depth)
+                if depth_key < stored {
+                    write_i64(depth_buf, idx, depth_key)
                     let ni_x = bw0 * n0.x + bw1 * n1.x + bw2 * n2.x
                     let ni_y = bw0 * n0.y + bw1 * n1.y + bw2 * n2.y
                     let ni_z = bw0 * n0.z + bw1 * n1.z + bw2 * n2.z
@@ -557,7 +588,7 @@ pub fn r3d_rasterize_tri_pbr(
                     let pr = r3d_clamp_i(out_r as i64, 0, 255)
                     let pg = r3d_clamp_i(out_g as i64, 0, 255)
                     let pb = r3d_clamp_i(out_b as i64, 0, 255)
-                    write_i64(cv.pixels, idx, pb | (pg << 8) | (pr << 16))
+                    r3d_write_coverage(cv, idx, pr, pg, pb, coverage)
                 }
             }
             px = px + 1

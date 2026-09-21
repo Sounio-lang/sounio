@@ -1,0 +1,146 @@
+//! Sobol variance-based sensitivity analysis — which input uncertainty
+//! carries the output variance, and therefore which measurement buys the
+//! most certainty.
+//!
+//! Scope: lightweight Jansen estimators on PRE-COMPUTED model outputs.
+//! For the full analysis pipeline (Sobol sequences, Saltelli sampling,
+//! correlation gates, dominance policies, typed Type A/B inputs) see the
+//! sibling module `epistemic::sobol`; this one stays dependency-free and
+//! HOF-free so it runs on every engine.
+//!
+//! HOF-free design: the caller evaluates their own model on Saltelli sample
+//! matrices (A, B, and A with column i swapped from B) and passes the
+//! PRE-COMPUTED model outputs; this module provides the estimators:
+//!
+//!   - `total_index_jansen`:   T_i = E[(f(A) − f(A_B^i))²] / (2·Var)
+//!       (Jansen 1999 — total-order: direct effect + all interactions)
+//!   - `first_order_jansen`:   S_i = E[f(B)·(f(A_B^i) − f(A))] / Var
+//!       (first-order: direct effect only)
+//!   For additive models with independent inputs, T_i = S_i.
+//!   - `log_linear_indices`: exact shares for models linear in log-space
+//!       (ln Y = c + Σ ln X_i): S_i = σ_i² / Σ σ_j², computed from the
+//!       per-variable sigmas — no sampling at all.
+//!
+//! Array contract: fixed-size [f64; SOBOL_CAP] buffers (the Madaros-native
+//! idiom, matching stdlib/algebra); pass the actual sample count n ≤
+//! SOBOL_CAP = 16384. Unsized slices are not portable across engines.
+//!
+//! Engine note: this module originally surfaced a Madaros native segfault
+//! when a caller array was passed as a slice argument INTO an imported
+//! module without an explicit `&` (implicit borrow; minimal witness:
+//! 64-element array, 2026-07-26, issue #1510). Fixed by #1545 — the
+//! self-test now runs green on the default Madaros engine as well as
+//! lean_single; the math itself is engine-independent.
+//!
+//! References:
+//!   - Sobol' (2001), Math. Comput. Simul. 55:271
+//!   - Jansen (1999), Comput. Phys. Commun. 117:35
+//!   - Saltelli et al. (2010), Comput. Phys. Commun. 181:259
+//!
+//! Pure-Sounio math only: no extern, deterministic on every engine.
+
+module epistemic::sobol_indices
+
+/// Maximum sample count supported by the estimator buffers.
+pub fn cap() -> i64 { 16384 }
+
+/// Sample variance of the first n entries (denominator n−1).
+pub fn variance(xs: &[f64; 16384], n: i64) -> f64 with Mut, Div {
+    var mean = 0.0
+    var i: i64 = 0
+    while i < n { mean = mean + xs[i]; i = i + 1 }
+    mean = mean / (n as f64)
+    var acc = 0.0
+    i = 0
+    while i < n {
+        let d = xs[i] - mean
+        acc = acc + d * d
+        i = i + 1
+    }
+    acc / ((n - 1) as f64)
+}
+
+/// Jansen total-order index from pre-computed model outputs:
+/// fa[j] = f(A_j), fab[j] = f(A with column i taken from B_j).
+pub fn total_index_jansen(fa: &[f64; 16384], fab: &[f64; 16384], n: i64, var_tot: f64) -> f64 with Div {
+    var acc = 0.0
+    var i: i64 = 0
+    while i < n {
+        let d = fa[i] - fab[i]
+        acc = acc + d * d
+        i = i + 1
+    }
+    acc / (n as f64) / (2.0 * var_tot)
+}
+
+/// Jansen/Saltelli first-order index from pre-computed model outputs:
+/// fa[j] = f(A_j), fb[j] = f(B_j), fab[j] = f(A with column i from B_j).
+pub fn first_order_jansen(fa: &[f64; 16384], fb: &[f64; 16384], fab: &[f64; 16384], n: i64, var_tot: f64) -> f64 with Div {
+    var acc = 0.0
+    var i: i64 = 0
+    while i < n {
+        acc = acc + fb[i] * (fab[i] - fa[i])
+        i = i + 1
+    }
+    acc / (n as f64) / var_tot
+}
+
+/// Exact Sobol shares for models linear in log-space, ln Y = c + Σ ln X_i
+/// with independent inputs: S_i = σ_i² / Σ σ_j² over the given sigmas.
+/// Writes the n normalized shares into `out` (they sum to 1).
+pub fn log_linear_indices(sigmas: &[f64; 16384], out: &![f64; 16384], n: i64) with Mut, Div {
+    var tot = 0.0
+    var i: i64 = 0
+    while i < n { tot = tot + sigmas[i] * sigmas[i]; i = i + 1 }
+    i = 0
+    while i < n {
+        out[i] = sigmas[i] * sigmas[i] / tot
+        i = i + 1
+    }
+}
+
+/// Self-test buffers in BSS (large local arrays overflow the native
+/// soft-stack — keep them global).
+var ST_XS: [f64; 16384] = [0.0; 16384]
+var ST_FA: [f64; 16384] = [0.0; 16384]
+var ST_FB: [f64; 16384] = [0.0; 16384]
+var ST_FAB: [f64; 16384] = [0.0; 16384]
+var ST_SIG: [f64; 16384] = [0.0; 16384]
+var ST_OUT: [f64; 16384] = [0.0; 16384]
+
+/// Self-test: returns 0 when all identities hold.
+pub fn run_tests() -> i32 with Mut, Div {
+    var fails = 0
+    ST_XS[0] = 1.0
+    ST_XS[1] = 2.0
+    ST_XS[2] = 3.0
+    ST_XS[3] = 4.0
+    // variance([1,2,3,4]) = 5/3
+    if abs_f(variance(ST_XS, 4) - 1.6666667) > 0.001 { fails = fails + 1 }
+    // Jansen total: fa=[0,1,2,3], fab=[1,1,2,3] -> E[d^2]=0.25, V=5/3
+    // T = 0.25 / (2·5/3) = 0.075
+    ST_FA[1] = 1.0
+    ST_FA[2] = 2.0
+    ST_FA[3] = 3.0
+    ST_FB[0] = 1.0
+    ST_FB[2] = 1.0
+    ST_FAB[0] = 1.0
+    ST_FAB[1] = 1.0
+    ST_FAB[2] = 2.0
+    ST_FAB[3] = 3.0
+    if abs_f(total_index_jansen(ST_FA, ST_FAB, 4, 1.6666667) - 0.075) > 0.001 { fails = fails + 1 }
+    // first-order: E[fB·(fAB−fA)] = (1·1 + 0 + 0 + 0)/4 = 0.25 -> S = 0.15
+    if abs_f(first_order_jansen(ST_FA, ST_FB, ST_FAB, 4, 1.6666667) - 0.15) > 0.001 { fails = fails + 1 }
+    // log-linear shares for sigmas [1,2]: [0.2, 0.8]
+    ST_SIG[0] = 1.0
+    ST_SIG[1] = 2.0
+    log_linear_indices(ST_SIG, &!ST_OUT, 2)
+    if abs_f(ST_OUT[0] - 0.2) > 0.001 { fails = fails + 1 }
+    if abs_f(ST_OUT[1] - 0.8) > 0.001 { fails = fails + 1 }
+    if abs_f(ST_OUT[0] + ST_OUT[1] - 1.0) > 0.0001 { fails = fails + 1 }
+    fails
+}
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}

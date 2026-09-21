@@ -1,0 +1,192 @@
+// demos/hydrogen/mh_stage_uq.sio
+//
+// Single-stage metal-hydride thermal hydrogen compressor with uncertainty
+// quantification IN THE LANGUAGE — GUM first-order propagation vs an
+// in-language 20,000-sample Monte Carlo through the same nonlinear map.
+//
+// Written for Dr. Emmanuel Stamatakis (NCSR Demokritos, Integrated Hydrogen
+// Laboratory): the model is the single-stage core of the multi-stage MH
+// compression systems in his Renewable Energy 147 (2020) 164-178 (DOI 10.1016/j.renene.2019.08.104) work.
+//
+// Physics (van't Hoff equilibrium, P in bar):
+//     ln P = ΔS/R − ΔH/(R·T)
+// Hydride: LaNi5-type alloy
+//     ΔH = 30.8 ± 1.5 kJ/mol H2   (desorption enthalpy, 1σ)
+//     ΔS = 108  ± 2   J/(mol·K)   (desorption entropy,  1σ)
+// Cycle: absorb at T_cold = 293.15 K (20 °C cooling water),
+//        desorb at T_hot  = 353.15 K (80 °C hot water).
+// Thermal energy per cycle (per mol H2):
+//     Q = ΔH + C_eff·(T_hot − T_cold),  C_eff = 400 ± 80 J/(mol H2·K)
+//         (effective bed heat capacity: alloy + container per mol H2)
+//
+// What this shows:
+//   1. Nominal point: P_cold, P_hot, single-stage ratio, thermal demand.
+//   2. GUM (JCGM first-order) uncertainty on P_hot — analytic, exact for
+//      ln P, but only linear through exp().
+//   3. Monte Carlo truth: exp() amplifies and skews — mean delivery
+//      pressure sits ~17 % ABOVE the nominal point (Jensen effect), and
+//      the GUM σ_P underestimates the real spread by ~20 %.
+//   4. The honest conclusion printed at the end: linear UQ is not enough
+//      for van't Hoff; higher-order UQ (PCE, stdlib/epistemic/pce.sio)
+//      is the right tool.
+
+// ─── math helpers (self-contained, no extern) ───
+
+fn mh_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn mh_sqrt(x: f64) -> f64 with Mut {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 30 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn mh_exp(x: f64) -> f64 with Mut, Div {
+    if x > 700.0 { return 1.0e200 }
+    if x < 0.0 - 700.0 { return 0.0 }
+    var kf = x / 0.6931471805599453
+    var k = kf as i64
+    if kf < 0.0 {
+        if kf != (k as f64) { k = k - 1 }
+    }
+    let r = x - (k as f64) * 0.6931471805599453
+    var s = 1.0
+    var term = 1.0
+    var n: i64 = 1
+    while n < 25 { term = term * r / (n as f64); s = s + term; n = n + 1 }
+    var result = s
+    if k >= 0 {
+        var i: i64 = 0
+        while i < k { result = result * 2.0; i = i + 1 }
+    } else {
+        var i: i64 = 0
+        while i < (0 - k) { result = result / 2.0; i = i + 1 }
+    }
+    result
+}
+
+// ─── PRNG (xorshift, deterministic seed → reproducible receipt) ───
+
+var RNG_A: i64 = 0
+var RNG_B: i64 = 0
+
+fn rng_init() with Mut {
+    RNG_A = 314159265
+    RNG_B = 271828182
+}
+
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A
+    let y = RNG_B
+    RNG_A = y
+    x = x ^ (x << 23)
+    x = x ^ (x >> 17)
+    x = x ^ (y ^ (y >> 26))
+    RNG_B = x
+    let r = x + y
+    if r < 0 { 0 - r } else { r }
+}
+
+fn rand_uniform() -> f64 with Mut, Div {
+    let r = rng_next()
+    (r % 10000) as f64 / 10000.0
+}
+
+fn rand_normal() -> f64 with Mut, Div {
+    var sum = 0.0
+    var j = 0
+    while j < 12 { sum = sum + rand_uniform(); j = j + 1 }
+    sum - 6.0
+}
+
+fn rand_gaussian(mu: f64, sigma: f64) -> f64 with Mut, Div {
+    mu + sigma * rand_normal()
+}
+
+// ─── physics ───
+
+// van't Hoff equilibrium pressure [bar]
+fn vanthoff_p(dh: f64, ds: f64, t: f64) -> f64 with Mut, Div {
+    mh_exp(ds / 8.314 - dh / (8.314 * t))
+}
+
+// thermal energy per cycle [kJ/mol H2]
+fn stage_energy(dh_kj: f64, c_eff: f64, dt: f64) -> f64 {
+    dh_kj + c_eff * dt / 1000.0
+}
+
+// ─── main ───
+
+fn main() -> i32 with IO, Mut, Div {
+    let dh = 30800.0        // J/mol H2
+    let ds = 108.0          // J/(mol·K)
+    let t_cold = 293.15
+    let t_hot = 353.15
+    let c_eff = 400.0       // J/(mol H2·K)
+    let s_dh = 1500.0       // 1σ on ΔH [J/mol]
+    let s_ds = 2.0          // 1σ on ΔS [J/(mol·K)]
+    let s_ce = 80.0         // 1σ on C_eff
+
+    print("=== Single-stage MH hydrogen compressor — Sounio UQ demo ===")
+    println("")
+
+    // 1. nominal point
+    let p_cold = vanthoff_p(dh, ds, t_cold)
+    let p_hot = vanthoff_p(dh, ds, t_hot)
+    let ratio = p_hot / p_cold
+    let q = stage_energy(dh / 1000.0, c_eff, t_hot - t_cold)
+    print("P_eq (20 C, absorption)  [bar]: "); println(p_cold)
+    print("P_eq (80 C, delivery)    [bar]: "); println(p_hot)
+    print("single-stage ratio            : "); println(ratio)
+    print("thermal demand [kJ/mol H2]      : "); println(q)
+    print("thermal demand [kWh/kg H2]      : "); println(q * 500.0 / 3600.0)
+    println("")
+
+    // 2. GUM first-order on P_hot (exact in ln P, linear through exp)
+    let s_lnp = mh_sqrt((s_ds / 8.314) * (s_ds / 8.314)
+              + (s_dh / (8.314 * t_hot)) * (s_dh / (8.314 * t_hot)))
+    let s_p_gum = p_hot * s_lnp
+    print("GUM sigma_ln P                : "); println(s_lnp)
+    print("GUM sigma P_hot        [bar]  : "); println(s_p_gum)
+    // energy is linear in the parameters → GUM is exact there
+    let s_q = mh_sqrt(s_dh * s_dh + (t_hot - t_cold) * (t_hot - t_cold) * s_ce * s_ce) / 1000.0
+    print("GUM sigma Q [kJ/mol] (exact)  : "); println(s_q)
+    println("")
+
+    // 3. Monte Carlo through the same nonlinear map (deterministic seed)
+    rng_init()
+    let n: i64 = 20000
+    var i: i64 = 0
+    var sum = 0.0
+    var sumsq = 0.0
+    var inside: i64 = 0
+    let band = 2.0 * s_p_gum
+    while i < n {
+        let p = vanthoff_p(rand_gaussian(dh, s_dh), rand_gaussian(ds, s_ds), t_hot)
+        sum = sum + p
+        sumsq = sumsq + p * p
+        if mh_abs(p - p_hot) <= band { inside = inside + 1 }
+        i = i + 1
+    }
+    let mc_mean = sum / (n as f64)
+    let mc_var = sumsq / (n as f64) - mc_mean * mc_mean
+    let mc_sigma = mh_sqrt(mc_var)
+    let coverage = (inside as f64) / (n as f64)
+    print("MC mean P_hot          [bar]  : "); println(mc_mean)
+    print("MC mean shift vs nominal  [%] : "); println(100.0 * (mc_mean - p_hot) / p_hot)
+    print("MC sigma P_hot         [bar]  : "); println(mc_sigma)
+    print("GUM/MC sigma ratio            : "); println(s_p_gum / mc_sigma)
+    print("coverage of GUM 2-sigma band  : "); println(coverage)
+    println("")
+
+    // 4. honest conclusion
+    print("Jensen effect: exp(van't Hoff) pushes mean delivery pressure ~17 %")
+    println("")
+    print("above the nominal point, and linear GUM underestimates sigma_P by")
+    println("")
+    print("~20 %. First-order UQ is not enough here -> use PCE (stdlib/epistemic).")
+    println("")
+    println("MH_STAGE_UQ_OK")
+    0
+}

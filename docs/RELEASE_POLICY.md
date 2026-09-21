@@ -22,7 +22,7 @@ Sounio follows [Semantic Versioning 2.0.0](https://semver.org/) with pre-release
 
 **Current version:** See `CITATION.cff` (single source of truth for version metadata).
 
-The checked-in JIT artifact (`bin/souc`) is not rebuilt for every changelog entry. Its `--version` output may trail the source version by one or two pre-release increments. The discrepancy is documented in `README.md`.
+The checked-in **legacy** JIT artifact (`bin/souc`) is a development/reference binary, not the shipped engine (see Artifact Policy below), and is not rebuilt for every changelog entry. Its `--version` output may trail the authoritative version in `CITATION.cff` by one or two increments; the discrepancy is documented in `README.md`.
 
 ## Release Cadence
 
@@ -59,9 +59,9 @@ Before tagging a release:
 
 | Artifact | Path | Purpose |
 |----------|------|---------|
-| JIT compiler | `bin/souc` | Default: Cranelift JIT backend |
+| Native compiler (default) | `artifacts/omega/souc-bin/souc-linux-x86_64` | **Shipped engine**: self-hosted native-v2 (Madaros) x86-64 backend |
 | GPU compiler | `artifacts/omega/souc-bin/souc-linux-x86_64-gpu` | PTX/CUDA codegen |
-| Native compiler | `artifacts/omega/souc-bin/souc-linux-x86_64` | Full native x86-64 backend |
+| JIT compiler (legacy) | `bin/souc` | Cranelift JIT backend — development/reference artifact only, **not** the shipped default |
 
 ### Signing and Provenance
 

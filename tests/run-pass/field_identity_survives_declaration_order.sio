@@ -1,0 +1,57 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: FIELD_IDENTITY_PASS
+
+// Member resolution must not depend on declaration order.
+//
+// `arr[i].field` reaches field_idx_from_name_simple, which scans struct_layouts
+// and returns the FIRST layout carrying that field name. Both structs below
+// have `value`, at different slots, so whichever is registered first used to
+// win for BOTH -- and the loser read the wrong offset:
+//
+//   A then B:   bs[i].value read A.value@0, returning B's pad (111, 333)
+//   B then A:   as_[1].value read slot 1 of a ONE-field struct -- out of bounds
+//
+// #2126 fixed the Knowledge half of this by deferring the synthetic layout,
+// which reversed the victim: ks[i].value on [Knowledge<f64>; N] then returned
+// the VARIANCE, 0.010000 where 1.000000 belongs. Precedence in either
+// direction is still "first name wins".
+//
+// The fix records the array local's ELEMENT type from its declared annotation,
+// so the receiver has an identity to resolve against. Both halves are asserted
+// here: neither struct may be sacrificed for the other, and Knowledge in an
+// array must survive a user struct that spells `value`.
+
+struct A { value: i64 }
+struct B { pad: i64, value: i64 }
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+fn main() -> i64 with Mut, Panic, Div, Alloc, Epistemic, IO {
+    var as_: [A; 2] = [A { value: 7 }, A { value: 9 }]
+    var bs: [B; 2] = [B { pad: 111, value: 222 }, B { pad: 333, value: 444 }]
+    var ks: [Knowledge<f64>; 2] = [measure(1.0, uncertainty: 0.1), measure(3.0, uncertainty: 0.2)]
+
+    print("as_[1].value="); print_int(as_[1].value); print("\n")
+    print("bs[0].value=");  print_int(bs[0].value);  print("\n")
+    print("bs[1].value=");  print_int(bs[1].value);  print("\n")
+    print("bs[0].pad=");    print_int(bs[0].pad);    print("\n")
+    print("ks[0].value=");  print_f64(ks[0].value);  print("\n")
+    print("ks[1].value=");  print_f64(ks[1].value);  print("\n")
+
+    let ok = as_[1].value == 9
+        && bs[0].value == 222
+        && bs[1].value == 444
+        && bs[0].pad == 111
+        && abs_f(ks[0].value - 1.0) < 1.0e-12
+        && abs_f(ks[1].value - 3.0) < 1.0e-12
+    if ok {
+        print("FIELD_IDENTITY_PASS\n")
+    } else {
+        print("FIELD_IDENTITY_FAIL\n")
+    }
+    0
+}

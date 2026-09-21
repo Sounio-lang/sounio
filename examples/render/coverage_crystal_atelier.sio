@@ -1,0 +1,109 @@
+// Headless four-sample coverage-AA material study.
+//
+// Emits a PPM P3 image on stdout. The scene is rendered entirely by Sounio:
+// a gradient framebuffer, coverage-resolved Phong triangles, depth-tested
+// facets, and antialiased construction lines.
+//
+// Generate:
+//   SOUNIO_SOUC_ENGINE=lean_single bin/souc run examples/render/coverage_crystal_atelier.sio > /tmp/sounio-coverage-crystal.ppm
+
+use display::canvas::{Canvas, canvas_clear}
+use display::canvas_ext::{canvas_draw_line_aa}
+use render::renderer3d::{FogParams, Light3D, Vec3f, r3d_depth_buf_alloc, r3d_depth_buf_clear, r3d_rasterize_tri_phong}
+
+fn abs_i64(v: i64) -> i64 { if v < 0 { 0 - v } else { v } }
+
+fn make_canvas(w: i64, h: i64) -> Canvas with Alloc {
+    let pixels = heap_alloc(w * h * 8) as *mut i64
+    Canvas { pixels: pixels, width: w, height: h }
+}
+
+fn paint_background(c: &!Canvas) with Mut, Div {
+    var y: i64 = 0
+    while y < c.height {
+        var x: i64 = 0
+        while x < c.width {
+            let horizon = (y * 16) / c.height
+            let radial = (abs_i64(x - c.width / 2) + abs_i64(y - c.height / 2)) / 22
+            let r = 7 + horizon + radial
+            let g = 12 + horizon + radial
+            let b = 24 + horizon * 2 + radial * 2
+            write_i64(c.pixels, y * c.width + x, b | (g << 8) | (r << 16))
+            x = x + 1
+        }
+        y = y + 1
+    }
+}
+
+fn emit_ppm(c: &Canvas) with IO, Mut {
+    println("P3")
+    print_int(c.width)
+    print(" ")
+    print_int(c.height)
+    print("\n255\n")
+    var i: i64 = 0
+    while i < c.width * c.height {
+        let px = read_i64(c.pixels, i)
+        print_int((px >> 16) & 0xFF)
+        print(" ")
+        print_int((px >> 8) & 0xFF)
+        print(" ")
+        print_int(px & 0xFF)
+        print("\n")
+        i = i + 1
+    }
+}
+
+fn main() with IO, Alloc, Mut, Div {
+    let w: i64 = 320
+    let h: i64 = 200
+    var canvas = make_canvas(w, h)
+    canvas_clear(&!canvas, 7, 12, 24)
+    paint_background(&!canvas)
+
+    // A quiet scientific-coordinate field behind the material study.
+    var gx: i64 = 24
+    while gx < w {
+        canvas_draw_line_aa(&!canvas, gx, 18, gx + 34, h - 18, 28, 43, 68)
+        gx = gx + 44
+    }
+    var gy: i64 = 34
+    while gy < h {
+        canvas_draw_line_aa(&!canvas, 18, gy, w - 18, gy - 12, 24, 38, 62)
+        gy = gy + 32
+    }
+
+    let depth = r3d_depth_buf_alloc(w, h)
+    r3d_depth_buf_clear(depth, w, h)
+    let light = Light3D {
+        dx: -0.42, dy: -0.58, dz: 0.70,
+        r: 255, g: 244, b: 224,
+        ambient: 0.18,
+    }
+    let fog = FogParams { near: 2.0, far: 8.0, r: 10, g: 16, b: 31 }
+
+    let n_top = Vec3f { x: -0.18, y: -0.68, z: 0.72 }
+    let n_left = Vec3f { x: -0.72, y: 0.10, z: 0.68 }
+    let n_right = Vec3f { x: 0.72, y: 0.10, z: 0.68 }
+    let n_low = Vec3f { x: 0.08, y: 0.76, z: 0.64 }
+    let n_front = Vec3f { x: 0.0, y: 0.0, z: 1.0 }
+
+    // Four depth-tested facets share the same projected crystal silhouette.
+    r3d_rasterize_tri_phong(160, 20, 58, 101, 160, 103, 3.8, 4.6, 2.8,
+        n_top, n_left, n_front, 34, 176, 210, &fog, &light, depth, &!canvas)
+    r3d_rasterize_tri_phong(160, 20, 160, 103, 262, 101, 3.8, 2.8, 4.6,
+        n_top, n_front, n_right, 242, 171, 52, &fog, &light, depth, &!canvas)
+    r3d_rasterize_tri_phong(58, 101, 160, 181, 160, 103, 4.6, 4.2, 2.8,
+        n_left, n_low, n_front, 44, 194, 128, &fog, &light, depth, &!canvas)
+    r3d_rasterize_tri_phong(160, 103, 160, 181, 262, 101, 2.8, 4.2, 4.6,
+        n_front, n_low, n_right, 222, 72, 117, &fog, &light, depth, &!canvas)
+
+    // Internal construction seams remain visible without repainting the
+    // coverage-resolved outer silhouette.
+    canvas_draw_line_aa(&!canvas, 58, 101, 262, 101, 104, 124, 150)
+    canvas_draw_line_aa(&!canvas, 160, 20, 160, 181, 104, 124, 150)
+
+    emit_ppm(&canvas)
+    heap_free(depth as *mut i8)
+    heap_free(canvas.pixels as *mut i8)
+}

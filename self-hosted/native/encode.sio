@@ -5,8 +5,15 @@
 
 module native::encode
 
+// Lane B residual (2026-08-13): `.bytes` is vestigial on the Linux native_v2 path.
+// Real machine code lives in NC_BIG_CODE; `.len` is the only live field threaded
+// through by-value emit_* and by-ref nc_emit_*. Keeping a multi-256 KiB array here
+// forced every `var out = buf` / `nc: NativeCompiler` copy to pay ~256 KiB per
+// stack frame (and nested emit_u64 → emit_u32 → emit_byte chains stacked several).
+// The 64-byte stub preserves a non-empty array type for the few macho/pe readers
+// that still mention `.bytes`; those paths must read NC_BIG_CODE for payload.
 pub struct CodeBuffer {
-    pub bytes: [i8; 262144],
+    pub bytes: [i8; 64],
     pub len: i64,
 }
 
@@ -16,13 +23,49 @@ pub struct CodeBuffer {
 // module-global BSS array holds the emitted code so NativeCompiler stays small on
 // the stack, while `.len` (a scalar, threaded through BOTH the by-ref nc_emit_byte
 // path and the by-value emit_byte path) stays the authoritative length. Both emit
-// paths write NC_BIG_CODE[.len]; the struct .bytes field is now vestigial for the
-// Linux path (kept only for the macho/pe by-value readers). Because .len is threaded
-// consistently, the by-value builtin emitters (which emit into a copy of nc) append
-// to the same global at the shared offset, so no persist/call-site changes are
-// needed. Accessed INLINE only — never via a returning helper (miscompiles under
-// the seed). NOT used by the aarch64/suite scratch-buffer paths (those keep .bytes).
-pub var NC_BIG_CODE: [i8; 2097152] = [0; 2097152]
+// paths write NC_BIG_CODE[.len]; the struct .bytes field is now a 64-byte stub (see
+// struct comment). Because .len is threaded consistently, the by-value builtin
+// emitters (which emit into a copy of nc) append to the same global at the shared
+// offset, so no persist/call-site changes are needed. Accessed INLINE only —
+// never via a returning helper (miscompiles under the seed).
+pub var NC_BIG_CODE: [i8; 8388608] = [0; 8388608]
+
+// Single source of truth for the NC_BIG_CODE bound. The DECLARATION above must
+// stay a literal (Sounio array sizes are not expressions), but every bound CHECK
+// across the backend calls this accessor, so the next capacity bump is one edit
+// here plus the declaration. Companions: nc_flat_reloc_capacity() in
+// native::frame, nc_elf_capacity_bytes() in native::codegen_x86_linux.
+// Declaration/accessor coherence is pinned by
+// scripts/ci/native_capacity_tiers_gate.sh.
+pub fn nc_code_capacity_bytes() -> i64 { 8388608 }
+
+// Materialise NC_BIG_CODE into fixed arrays expected by legacy macho/pe assemblers
+// that still take by-value `[i8; N]`. Linux ELF writers read NC_BIG_CODE directly.
+pub fn nc_code_copy_to_262144(code_len: i64) -> [i8; 262144] with Mut, Panic, Div {
+    var out: [i8; 262144] = [0; 262144]
+    var i: i64 = 0
+    let n = if code_len < 262144 { code_len } else { 262144 }
+    let cap = nc_code_capacity_bytes()
+    let lim = if n < cap { n } else { cap }
+    while i < lim {
+        out[i as usize] = NC_BIG_CODE[i as usize]
+        i = i + 1
+    }
+    out
+}
+
+pub fn nc_code_copy_to_65536(code_len: i64) -> [i8; 65536] with Mut, Panic, Div {
+    var out: [i8; 65536] = [0; 65536]
+    var i: i64 = 0
+    let n = if code_len < 65536 { code_len } else { 65536 }
+    let cap = nc_code_capacity_bytes()
+    let lim = if n < cap { n } else { cap }
+    while i < lim {
+        out[i as usize] = NC_BIG_CODE[i as usize]
+        i = i + 1
+    }
+    out
+}
 
 pub fn code_buffer_new() -> CodeBuffer {
     var out: CodeBuffer
@@ -59,10 +102,11 @@ pub fn wide_emit_byte(buf: WideCodeBuffer, b: i64) -> WideCodeBuffer with Mut, P
 }
 
 pub fn wide_copy_from_code_buffer(dst: WideCodeBuffer, src: CodeBuffer) -> WideCodeBuffer with Mut, Panic, Div {
+    // Payload is in NC_BIG_CODE keyed by src.len — not the vestigial src.bytes stub.
     var out = dst
     var i: i64 = 0
-    while i < src.len && out.len < 262144 {
-        out.bytes[out.len as usize] = src.bytes[i as usize]
+    while i < src.len && out.len < 262144 && i < nc_code_capacity_bytes() {
+        out.bytes[out.len as usize] = NC_BIG_CODE[i as usize]
         out.len = out.len + 1
         i = i + 1
     }
@@ -72,7 +116,7 @@ pub fn wide_copy_from_code_buffer(dst: WideCodeBuffer, src: CodeBuffer) -> WideC
 pub fn emit_byte(buf: CodeBuffer, b: i64) -> CodeBuffer with Mut, Panic, Div {
     var out = buf
     if out.len >= 0 {
-        if out.len < 2097152 {
+        if out.len < nc_code_capacity_bytes() {
             NC_BIG_CODE[out.len as usize] = low8(b) as i8
             out.len = out.len + 1
         }
@@ -82,7 +126,7 @@ pub fn emit_byte(buf: CodeBuffer, b: i64) -> CodeBuffer with Mut, Panic, Div {
 
 pub fn emit_byte_mut(buf: &! CodeBuffer, b: i64) with Mut, Panic, Div {
     if (*buf).len >= 0 {
-        if (*buf).len < 2097152 {
+        if (*buf).len < nc_code_capacity_bytes() {
             NC_BIG_CODE[(*buf).len as usize] = low8(b) as i8
             (*buf).len = (*buf).len + 1
         }
@@ -1492,6 +1536,25 @@ pub fn emit_sar_rax_cl(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
     b
 }
 
+// SHR rax, cl — LOGICAL right shift. The one this file was missing.
+//
+// Verified against as(1): `shr rax, cl` assembles to 48 D3 E8, `sar` to
+// 48 D3 F8, `shl` to 48 D3 E0. Only the last two had encoders, so anyone
+// needing a logical shift either hand-wrote the bytes -- codegen.sio does
+// exactly that when extracting a biased exponent, with the comment
+// "shr rax, cl: 48 D3 E8" -- or reached for emit_sar_rax_cl and relied on the
+// sign bit being clear. The second habit is the dangerous one: it is correct
+// until the value it shifts can go negative, and then it is wrong by 2^64
+// with nothing to notice.
+pub fn emit_shr_rax_cl(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    // 48 D3 E8
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0xD3)
+    b = emit_byte(b, 0xE8)
+    b
+}
+
 // mov rcx, rbx — 48 89 d9
 pub fn emit_mov_rcx_rbx(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
     var b = buf
@@ -1907,6 +1970,86 @@ pub fn emit_sqrtsd_xmm0_xmm0(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div
     b
 }
 
+// MOVSD xmm0/xmm1 <-> [rbp+disp32] — the disp32 forms of the four disp8 slot
+// moves above.
+//
+// Added because disp8 caps the frame at 15 double slots below rbp, and that
+// cap is a code limit masquerading as a numerical one. The comment on
+// emit_horner_step already records this failure mode once: the exp and log
+// emitters open-coded their Horner steps and stopped at degree 6 and degree 4
+// because the code, not the mathematics, set the accuracy. A double-double
+// pow needs more live intermediates than 15, so the same wall was waiting.
+//
+// Encoding differs from the disp8 form only in ModRM.mod (10 instead of 01)
+// and a 4-byte little-endian displacement: 0x85 for xmm0, 0x8D for xmm1.
+
+pub fn emit_movsd_xmm0_rbp_disp32(buf: CodeBuffer, disp: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0xF2)
+    b = emit_byte(b, 0x0F)
+    b = emit_byte(b, 0x10)
+    b = emit_byte(b, 0x85)   // ModRM: mod=10 reg=xmm0 r/m=rbp
+    b = emit_u32_le(b, disp)
+    b
+}
+
+pub fn emit_movsd_xmm1_rbp_disp32(buf: CodeBuffer, disp: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0xF2)
+    b = emit_byte(b, 0x0F)
+    b = emit_byte(b, 0x10)
+    b = emit_byte(b, 0x8D)   // ModRM: mod=10 reg=xmm1 r/m=rbp
+    b = emit_u32_le(b, disp)
+    b
+}
+
+pub fn emit_movsd_rbp_disp32_xmm0(buf: CodeBuffer, disp: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0xF2)
+    b = emit_byte(b, 0x0F)
+    b = emit_byte(b, 0x11)
+    b = emit_byte(b, 0x85)   // ModRM: mod=10 reg=xmm0 r/m=rbp
+    b = emit_u32_le(b, disp)
+    b
+}
+
+pub fn emit_movsd_rbp_disp32_xmm1(buf: CodeBuffer, disp: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0xF2)
+    b = emit_byte(b, 0x0F)
+    b = emit_byte(b, 0x11)
+    b = emit_byte(b, 0x8D)   // ModRM: mod=10 reg=xmm1 r/m=rbp
+    b = emit_u32_le(b, disp)
+    b
+}
+
+// ROUNDSD xmm0, xmm0, imm8 — round scalar double under an explicit mode.
+//
+// SSE4.1 (66 0F 3A 0B /r ib). imm8 low two bits select the mode when bit 2 is
+// clear: 0 = nearest-even, 1 = toward -inf (floor), 2 = toward +inf (ceil),
+// 3 = toward zero (trunc). Bit 3 (0x08) suppresses the inexact exception,
+// which is what libm's floor/ceil do, so callers pass 0x09 / 0x0A.
+//
+// This is one instruction where the alternative is a branch sequence around
+// cvttsd2si, and the branch version is not merely longer: cvttsd2si saturates
+// on |x| >= 2^63 and has no defined answer for NaN, so the emulation needs a
+// magnitude guard and a NaN guard to stay IEEE-correct. ROUNDSD is correct on
+// -0.0, on both infinities, and on NaN by construction.
+//
+// SSE4.1 has been present on every x86-64 part since Penryn (2007); this
+// backend already targets Linux x86-64 only.
+pub fn emit_roundsd_xmm0_xmm0_imm8(buf: CodeBuffer, mode: i64) -> CodeBuffer with Mut, Panic, Div {
+    // 66 0F 3A 0B C0 ib
+    var b = buf
+    b = emit_byte(b, 0x66)
+    b = emit_byte(b, 0x0F)
+    b = emit_byte(b, 0x3A)
+    b = emit_byte(b, 0x0B)
+    b = emit_byte(b, 0xC0)
+    b = emit_byte(b, mode)
+    b
+}
+
 // UCOMISD xmm0, xmm1 — unordered compare scalar doubles (sets EFLAGS)
 pub fn emit_ucomisd_xmm0_xmm1(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
     // 66 0F 2E C1
@@ -1971,6 +2114,15 @@ pub fn emit_cvtsi2sd_xmm0_rax(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Di
 }
 
 // CVTTSD2SI rax, xmm0 — truncate f64 to i64 (Sprint 87: float-to-int)
+pub fn emit_sub_rax_rbx(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    // 48 29 D8 — sub rax, rbx
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x29)
+    b = emit_byte(b, 0xD8)
+    b
+}
+
 pub fn emit_cvttsd2si_rax_xmm0(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
     // F2 REX.W 0F 2C C0
     var b = buf

@@ -40,6 +40,10 @@ bin/sounio-loom fleet-reconcile --apply
 bin/sounio-loom list
 bin/sounio-loom tui
 bin/sounio-loom serve --bind 127.0.0.1 --port 8787
+bin/sounio-loom message-serve --bind 127.0.0.1 --port 8789 \
+  --token-file /private/path/loom-message.cap \
+  --routing-state-dir /private/path/loom-routing-state \
+  --agent founder-ui --lane loom-apple
 bin/sounio-loom export-events-arrow --out loom-events.arrow
 bin/sounio-loom verify-events-arrow --file loom-events.arrow
 bin/sounio-loom beagle-serve --bind 127.0.0.1 --port 4372
@@ -66,6 +70,286 @@ bin/sounio-loom obligation-tui
 bin/sounio-loom obligation-serve --bind 127.0.0.1 --port 8788
 bin/sounio-loom obligation-supervise --state-dir PATH
 ```
+
+## Sovereign Change Kernel
+
+With `SOUNIO_LOOM_SOVEREIGN_CHANGE_MEDIATED=1`, the provider sees both the
+worktree and its Git common directory as read-only. `Write`, `Edit`, and
+`apply_patch` are redirected to kernel-owned staging outside the worktree. A
+single-use in-memory `ChangeGrant` binds the exact tool-call ID, mutation bytes,
+worktree and index preimage, authenticated harness peer, and file set. The
+kernel materializes only the expected postimage.
+
+The hook accepts only `git commit -m MESSAGE` or `git commit --message MESSAGE`.
+The kernel builds a temporary index from the authorized postimages, asks frozen
+Sounio action 9044 for `COMMIT_ADMIT` and `CI_ADMIT`, and atomically advances the
+branch together with a `refs/loom/change-receipts/<sha256>` receipt ref. Direct,
+widened, dynamic, and replayed commit forms fail closed.
+
+CI consumes the pinned receipt without executing or reinterpreting its policy:
+
+```sh
+scripts/ci/sounio_loom_sovereign_change_receipt_admit.sh \
+  /absolute/change/worktree /absolute/commit.receipt
+```
+
+Only after receipt consumption does the separate claim stage ask the frozen
+Sounio authority for `CLAIM_READY`. The operational gate exercises a disposable
+Git repository, direct-write and direct-commit refusal, exact-tree admission,
+receipt tamper, replay, and Python/Rust execution sentinels:
+
+```sh
+scripts/ci/sounio_loom_sovereign_change_kernel_operational_selftest.sh
+```
+
+## Authenticated Message Bridge
+
+`message-serve` is a separate authenticated command and thread-read plane. Its
+token file must be a regular file owned by the current user with no group/world
+permissions. The server fixes sender agent and lane at startup, accepts only
+`info` or `request`, invokes the durable coordination runtime without a shell,
+and returns `202` only after parsing the runtime's `SENT` receipt. Authenticated
+`GET /v1/threads` and `GET /v1/threads/<request-id>` derive a correlated stream
+of durable request, wake, response, ACK, timeout, and durable-only evidence
+through the runtime's public commands; `POST /v1/messages/<response-id>/ack`
+records the durable ACK. Runtime errors or the eight-second runtime deadline
+return a fail-closed refusal. The endpoint is loopback-only unless
+`--allow-remote` is explicit, and audit lines never contain the bearer token or
+message body.
+
+The same bridge owns a narrow configuration plane at authenticated
+`GET /v1/routing/config` and `PUT /v1/routing/config`. It persists only a
+bounded, declarative routing input: policy, model, effort, pool order, and
+adapter order. Every accepted replacement is atomically written with a
+monotonic revision and SHA-256 digest receipt; malformed and duplicate input is
+rejected before replacement. By default its private state is under the shared
+Git metadata; `--routing-state-dir` selects an absolute, private,
+deployment-owned directory. This config plane never starts a provider, selects
+a route, or emits a `RouteReceipt`: the backend arbiter remains the sole route
+authority.
+
+## Subprocess Membrane
+
+LOOM has frozen Sounio semantics for a process-tree effect membrane and a Linux
+x86_64 OCaml/C diagnostic probe inside a hash-pinned Bubblewrap namespace. The
+probe stops root and descendant execution, write-capable opens, and path
+mutations for a hash-pinned Sounio decision. Its negative gate verifies that
+direct Python, Python hidden behind a shell, a Rust-named executable,
+out-of-scope writes, semantic writes, path mutation, inherited writable file
+descriptors, and deadline-surviving descendants produce no forbidden external
+effect. A sabotage control disables the filesystem observer and proves the
+read-only kernel root still protects paths outside the exact writable scope.
+
+This is deliberately not attached to general Bash/Exec, commit, or CI. The
+current ptrace realization does not claim a closed syscall algebra or race-free
+path mediation. See [SUBPROCESS_MEMBRANE_V1.md](SUBPROCESS_MEMBRANE_V1.md) for
+the proved surface, nonclaims, and kernel attachment path.
+
+## Resident Sounio Authority
+
+Actions `9024` and `9025` are the Sounio-first transport and effect-closure
+authorities for the resident decision process. Action `9024` binds every
+generation to the frozen `9023` parent,
+requires strict request/response sequencing and correlation, and makes timeout,
+unhealthy transport, or poisoned-generation reuse explicit refusals. Its native
+executable, adversarial gate, and content-addressed semantic freeze now exist.
+Action `9025` defines absence as a positive, receipt-bound closure certificate:
+all twelve effect families need an explicit material coverage mode, unknown
+effects must be kernel-denied, and five independent sabotage witnesses must
+remain complete. The frozen v2 runtime keeps actions `9023`, `9024`, and `9025`
+resident in one stable Sounio process and matches their frozen single-shot
+outputs byte for byte. The v1 runtime remains available for compatibility.
+An OCaml supervisor now binds one random generation to the hash-pinned runtime,
+PID and process birth identity; sequences requests, applies monotonic deadlines,
+journals hash-bound receipts, and permanently poisons the generation on replay,
+correlation failure, timeout, EOF, or process drift. It cannot alter the frozen
+decision bundle. The resident runtime uses a bounded `read_byte()` framer because
+the current `lean_single` `read_line()` builtin performs one bulk read rather
+than newline framing.
+
+The bounded performance gate measures authority transport separately from
+durable audit persistence. On the recorded x86_64 run, 20 resident decisions
+took 5,369 microseconds of transport versus 14,097 microseconds for 20
+single-shot decisions (2.625x). The same resident run took 837,382
+microseconds end to end because its current audit policy performs an `fsync` for
+each REQUEST, EFFECT, and RESPONSE receipt. Both numbers are acceptance
+evidence; the transport result is not presented as an end-to-end durability
+speedup.
+
+The Linux x86_64 diagnostic subprocess probe now opens one resident generation
+before admitting the root process and keeps that same Sounio PID, generation,
+and monotonic sequence through effect-closure validation, observed effects, and
+final outcome. The closure check runs before the diagnostic child and currently
+returns `DENY447` because material effect-family coverage is incomplete; the
+diagnostic effect may still run only to collect evidence while product
+attachment remains refused. Resident startup failure, identity drift, timeout,
+EOF, replay, correlation failure, runtime hash drift, or either frozen-manifest
+drift fails closed before child execution. Hostile same-UID peer isolation also
+remains a hard, explicit blocker. This remains a diagnostic membrane: general
+Exec/Bash, commit, and CI attachment are still explicitly false.
+
+The frozen v3 resident adds action `9029` without changing the producer of any
+expected result. The OCaml `InvocationCell` kernel validates the exact Sounio
+freeze and resident-v3 manifest before spawn, then owns only lifecycle,
+correlation, deadlines, receipts, and irreversible poisoning. Its operational
+states are `UNPREPARED`, `PREPARED`, `EFFECT_STOPPED`, `CLOSED`, and
+`POISONED`. Sounio `DENY481` and `DENY488` leave an unprepared cell without
+promoting it; replay, operation mismatch, timeout, EOF, and typed abort poison
+the generation and make reuse impossible. The OCaml freeze gate rejects any
+encoded `ALLOW`/`DENY481`/`DENY488` oracle and rebuilds the binary twice to the
+same digest. This is an operational kernel, not semantic or material authority.
+
+Action `9026` now freezes the stronger kernel-principal contract behind that
+blocker. Its C++20 material probe distinguishes a configured subordinate-ID
+range, an installed helper, a successful helper exit, and an actually installed
+kernel UID/GID map. On the recorded pod, ordinary user namespaces remain bound
+to outer UID `1000`, the subordinate-map syscall is refused with `EPERM`, and
+the outer account can regain root through passwordless sudo; Sounio therefore
+returns `DENY455`. See [KERNEL_PRINCIPAL_V1.md](KERNEL_PRINCIPAL_V1.md).
+
+Action `9027` freezes the principal-lease lifecycle after `9026`: `FREE`,
+`RESERVED`, `MAPPED`, `LAUNCHED`, `DRAINING`, `QUARANTINED`, and only then
+`FREE` again after affirmative process, namespace, and authority extinction.
+The transitory C++20 host broker verifies the exact frozen Sounio executable,
+keeps a hash-chained and per-record-synchronized lease journal, and quarantines
+uncertain generations after recovery. Its host installer builds immutable
+releases addressed by the manifest, broker, and complete operational bundle;
+the live root-only probe proves systemd activation while deliberately keeping
+`LAUNCH` and `RECYCLE` closed. The same immutable release now pins action `9029`;
+its decision-only `ADMIT` operation reaches Sounio but cannot create a lease,
+grant, pidfd, barrier, or process. A `HOST_ACTIVATION_PASS` therefore still reports
+`material_broker=false` until namespace, cgroup, pidfd, attack, extinction, and
+Sounio `ALLOW` gates all execute on the real host. See
+[HOST_KERNEL_PRINCIPAL_BROKER_INSTALL_V1.md](HOST_KERNEL_PRINCIPAL_BROKER_INSTALL_V1.md).
+
+Action `9028` removes the last ambient process-identity shortcut: a lane process
+is not denotable inside Loom as a bare PID or numeric pidfd. Frozen Sounio admits
+only a non-bearer `PrincipalCapsule` that binds the proposed `9026`/`9027`
+launch, PID/start-time identity, namespace and cgroup vector, privilege posture,
+broker-only pidfd custody, single-use grant fence, and provenance. A broker
+restart may reacquire custody only into `QUARANTINED`; it cannot restore grants,
+release a barrier, or resume execution. Capsule bytes name broker custody but
+grant no authority on their own. The current Pod returns `DENY472`, and a bare
+PID authority witness returns `DENY476`. See
+[GARDEN_KERNEL_PRINCIPAL_CAPSULE_V1.md](GARDEN_KERNEL_PRINCIPAL_CAPSULE_V1.md).
+
+Action `9029` freezes the `InvocationCell` semantic join. A valid
+`PrincipalCapsule` cannot authorize an unclosed effect stream, and a valid
+effect-closure result cannot be reassigned to another principal. Sounio binds
+the exact `9028`, `9025`, and transitive `9023` manifests to one principal
+generation, membrane generation, event sequence, command, worktree, claim
+scope, deadline, and terminal outcome lineage. The four operations are
+`PREPARE_ROOT`, `ADMIT_EFFECT`, `CLOSE_OUTCOME`, and irreversible
+`ABORT_INCOMPLETE`. Ten single-rule source sabotages prove that each named
+refusal is load-bearing; a deliberate Python-oracle frame returns `DENY488`.
+The current Pod returns `DENY481` because neither parent has supplied an
+`ALLOW` for the same material observation. Cell bytes remain non-authorizing,
+and material one-shot custody, hostile same-UID isolation, Exec/Bash, commit,
+and CI attachment remain closed. See
+[GARDEN_KERNEL_INVOCATION_CELL_V1.md](GARDEN_KERNEL_INVOCATION_CELL_V1.md).
+
+Action `9030` freezes the next authority boundary: the `ExecGrantCell` that
+joins action `9029` with pre-execution action `9021` and outcome action `9022`.
+The opaque handle is only a lookup coordinate. Sounio requires kernel-derived
+peer identity, a kernel-distinct principal, exact Guardian ancestry, pre-write
+shape validation, atomic single-use custody, fail-closed crash revocation, and
+the same command and generation vector across issue, consume, close, or revoke.
+Grant extinction is affirmative evidence, not a table miss: one receipt must
+bind observed state absence after a terminal transition, retired generations,
+and revoked barrier/descriptor/grant authority. Eleven causal source sabotages
+make every rule falsifiable; the deliberate Python-oracle path returns
+`DENY499` without reaching its executable sentinel. Current material returns
+`DENY491`, and `material_grant`, hostile same-UID isolation, parity, Exec/Bash,
+commit, and CI attachment all remain false. See
+[GARDEN_KERNEL_EXEC_GRANT_CELL_V1.md](GARDEN_KERNEL_EXEC_GRANT_CELL_V1.md).
+
+The frozen resident v4 adds action `9030` to the same long-lived Sounio process.
+Its OCaml `ExecGrantCell` client owns only the operational lifecycle
+`VACANT -> ISSUED -> OUTCOME_PENDING -> CLOSED | REVOKED | POISONED`; it loads
+the exact action-9030 and resident-v4 manifests before spawn, preserves state on
+a semantic denial, and poisons the generation on replay, correlation mismatch,
+timeout, EOF, or resident loss. Two deterministic builds and a source scan prove
+that OCaml contains no copied Sounio result table. This remains an isolated
+operational probe: the existing product `EXEC_ISSUE`, `EXEC_CONSUME`, and
+`EXEC_OUTCOME` route is not yet attached.
+
+The frozen resident v5 adds Sounio action `9031` and the non-bearer
+`PeerActivationCapsule`. LOOM now executes the frozen `current_material`
+projection before creating any session directory, token, daemon, Guardian, or
+provider process on real `start`, `provider-start`, `provider-open`, and
+`recover` paths. The normal dark observation is `DENY502` and remains
+nonauthorizing, so the established lifecycle continues; the positive `seal`
+sabotage is instead treated as an unexpected `ALLOW` and refuses before any
+session exists. Every observation records hashes for the Sounio semantics and
+projection, command, cwd, identities, resident generation, and result. Policy
+lookup is anchored to the source binary or its immutable installed capsule, not
+to caller-controlled `--cwd`. The installed capsule keeps policy bytes separate
+from its writable audit root.
+
+This is a real launch-path observation, not material activation. It does not
+yet attach the `ExecGrantCell` to arbitrary Exec/Bash, forbid a Python command
+on the general `start` path, or enforce write, commit, and CI boundaries.
+`production_activation`, `exec_attached`, `commit_attached`, and `ci_attached`
+therefore remain false. See
+[GARDEN_PRODUCT_LAUNCH_DARK_ATTACHMENT_V1.md](GARDEN_PRODUCT_LAUNCH_DARK_ATTACHMENT_V1.md).
+
+The host `PrincipalCell` experiment now measures the missing hostile-principal
+prerequisite on t560. Two simultaneous systemd `DynamicUser` cells received
+distinct UID/GID values and cgroups; reciprocal `kill`, `/proc` memory and fd,
+`ptrace`, `process_vm_readv`, `pidfd_send_signal`, and `pidfd_getfd` attacks were
+refused even when the attacker inherited a root-opened pidfd for its peer. The
+preregistered sabotage retained the same binary, hardening, and distinct
+cgroups but assigned both cells the same DynamicUser. `kill(..., 0)` and
+`pidfd_send_signal(..., 0)` then became usable in both directions, making the
+kernel-distinct principal rule causal rather than correlational. The receipt
+still reports `material_grant=false`, `grant_extinction=false`,
+`same_uid_peer_isolation=false`, and every product attachment flag false. See
+[HOST_EXEC_GRANT_PRINCIPAL_CELL_V1.md](HOST_EXEC_GRANT_PRINCIPAL_CELL_V1.md) and
+[HOST_EXEC_GRANT_PRINCIPAL_CELL_SABOTAGE_V1.md](HOST_EXEC_GRANT_PRINCIPAL_CELL_SABOTAGE_V1.md).
+
+The action `9029` OCaml operational kernel and its resident Sounio v3 route are
+now frozen in `kernel_invocation_cell.runtime.v1`. The retained adversarial gate
+exercises the full positive lifecycle, typed abort, current-material and
+Python-oracle refusals, replay, operation mismatch, timeout, EOF, receipt
+binding, and manifest/runtime tamper before spawn. It does not open material
+invocation or attach the cell to general Exec/Bash, commit, or CI.
+
+The transitory C++ broker now has a separately frozen action `9029` admission
+adapter in `kernel_invocation_cell.material.v1`. The same broker binary routes a
+positive fixture to Sounio `ALLOW` and the current Pod observation to Sounio
+`DENY481`; it contains neither the `481` result nor its reason. Manifest,
+authority, and multiline-frame drift fail closed, while the live broker still
+refuses `LAUNCH` and `RECYCLE`. The host bundle exposes that adapter as
+root-controller-only `ADMIT` and reports all six action `9027`/`9028`/`9029`
+artifact hashes. This freezes `MATERIAL_PARITY`, not material
+execution: no grant, pidfd, barrier, or process is created, and hostile
+same-UID isolation remains false. See
+[INVOCATION_CELL_MATERIAL_ADMISSION_V1.md](INVOCATION_CELL_MATERIAL_ADMISSION_V1.md).
+
+The host bundle can now cross the Kubernetes/host boundary as a deterministic,
+content-addressed promotion capsule. The source worktree rebuilds and freezes
+the Sounio authorities once; the host verifies and installs those exact bytes
+rather than recompiling semantics with a different checkout or toolchain. A
+strict inner inventory remains effective even if a test recomputes the outer
+archive hash, and a causal sabotage proves the pre-execution refusal of a
+Python host-gate oracle. The Beagle hostPID transport does not remount the live
+`ReadWriteOncePod` workspace PVC and carries no semantic authority. Host
+promotion still leaves `PARITY_OPEN`, `CLAIM_READY`, `LAUNCH`, material
+invocation, and same-UID peer isolation closed. See
+[HOST_PROMOTION_CAPSULE_V1.md](HOST_PROMOTION_CAPSULE_V1.md).
+
+The main Loom build reconstructs all frozen resident runtime generations with
+the frozen Sounio toolchain, verifies each frozen digest, installs it under a
+`sha256-<digest>` directory, and atomically switches the stable runtime symlink
+under a filesystem lock. A live generation therefore keeps its original
+executable inode while a concurrent build stages the same content-addressed
+generation.
+
+The gate includes two single-rule sabotages. Removing only the frozen-parent
+rule admits an unchanged orphan request, and removing only strict progression
+admits an unchanged replay. See
+[GARDEN_RESIDENT_AUTHORITY_V1.md](GARDEN_RESIDENT_AUTHORITY_V1.md) for the
+protocol, evidence stages, and nonclaims.
 
 `serve` is read-only and binds to loopback by default. A non-loopback bind is
 refused unless `--allow-remote` is explicit. The session directory and token are
@@ -102,6 +386,21 @@ build dependencies. The HTTP response uses
 `application/vnd.apache.arrow.stream` and declares
 `X-Loom-Authority: verified-derived`; corruption or journal verification failure
 returns a refusal rather than a fallback JSON dataset.
+
+Projection is schema-evolution aware without weakening current authority. The
+known pre-Guardian runtime `2026.08.24.0` has no Guardian journal by design, so
+its verified semantic history is projected with the explicit
+`semantic-only-legacy` profile. That exception also requires a terminal
+hash-verified journal whose `SESSION_STARTED` receipt predates the Guardian
+release, no `guardian.tsv` in the generation, and an agreeing generation
+snapshot when one exists. A descriptor-only runtime downgrade therefore
+refuses instead of laundering modern history. HTTP receipts expose both
+`X-Loom-Guardian-Sessions` and
+`X-Loom-Legacy-Semantic-Only-Sessions`. A current or unknown runtime that omits
+`guardian_journal_file`, or any descriptor that names a missing Guardian
+journal, still refuses the complete projection. `/api/events` carries the same
+per-session `journal_profile`, keeping JSON and Arrow consumers on one
+authority boundary.
 
 This split is intentional:
 
@@ -666,6 +965,8 @@ bin/loom provider-start --provider codex --agent codex --lane work \
   --session-id UUID --cwd DIR --prompt-file PROMPT --isolate-context
 bin/loom provider-open --provider codex --agent codex --lane persistent-work \
   --session-id UUID --cwd DIR --prompt-file PROMPT
+bin/loom provider-open --provider kimi --agent kimi --lane persistent-work \
+  --session-id UUID --cwd DIR --prompt-file PROMPT
 bin/loom provider-auth-login --provider codex
 ```
 
@@ -676,26 +977,61 @@ the native status or login operation and never reads or copies token files.
 Dangerous auto-approval flags are absent unless `--unsafe-auto` is explicit.
 
 `provider-start` executes the selected CLI without a shell through an internal
-OCaml trampoline that closes stdin and removes inherited Codex, Claude, and tmux
-harness identity variables. `--isolate-context` maps provider-specific
+OCaml trampoline that closes stdin and removes inherited Codex, Claude, Kimi,
+Cursor, Grok, tmux, and Sounio agentd/session identity variables while retaining
+native provider credentials. `--isolate-context` maps provider-specific
 reductions in memory, rules, and subagent context; it is deliberately not
 described as a sandbox. The provider remains the Guardian-owned child, so kernel
-recovery does not replace its process identity. Codex, Claude Code, Grok, and
-OpenCode are supported. Their stream, authentication, and session-binding
-differences remain typed rather than being flattened into a false common
-denominator. The complete contract and current boundaries are in
+recovery does not replace its process identity. Codex, Claude Code, Kimi Code,
+Grok, and OpenCode are supported. Their stream, authentication, and
+session-binding differences remain typed rather than being flattened into a
+false common denominator. The complete contract and current boundaries are in
 `tools/loom/PROVIDER_ABI_V1.md`.
 
 `provider-open` is the persistent counterpart. Its provider stdin remains
 attached to the Guardian-owned PTY and is reachable only through Loom's
-exclusive input lease or authenticated wake transport. The initial vertical is
-Codex-only and fails closed for persistent resume or context-isolation requests
-that the native TUI cannot honor. Killing and recovering the disposable Loom
-kernel preserves the Guardian, Codex process, instance identity, conversation,
-and durable output cursor. A woken lane can answer with
+exclusive input lease or authenticated wake transport. Codex takes its initial
+prompt in the native TUI argv; Kimi starts with a prompt-free argv and receives
+its bootstrap through the authenticated lease because its TUI exposes no
+positional prompt contract. Persistent adapters for other providers and
+context-isolation requests that the native TUIs cannot honor fail closed.
+Killing and recovering the disposable Loom kernel preserves the Guardian,
+provider process, instance identity, conversation, and durable output cursor.
+A woken lane can answer with
 `bin/sounio-coord reply --agent A --lane L --reply-to MESSAGE_ID --message TEXT`;
 the command derives the original sender and thread instead of requiring the
 provider to reconstruct routing metadata.
+
+The kernel treats claim refresh, process presence, and the Loom delivery
+endpoint as one convergent registration attempt. A failed operation exits the
+refresh child nonzero; the parent retries after lane-jittered delays of 1, 2, 4,
+8, 16, and at most 30 seconds. Only a complete endpoint registration restores
+the five-minute steady-state refresh period. A transient lock refusal or an
+endpoint-specific refusal therefore cannot silently leave a live lane
+unreachable for the rest of its lease. The integration gate holds the
+coordination lock for the first attempt, refuses the first endpoint registration
+after presence succeeds, and requires the same kernel to converge without
+terminal input.
+
+Native lifecycle hooks are rooted in the active shared runtime, not in a
+possibly old worktree. The hook command resolves the content-addressed runtime
+behind `current` once and uses both its OCaml executable and its frozen Sounio
+language-authority capsule. The capsule carries the exact manifest, source, and
+entrypoint bytes with independent hashes in the runtime manifest. Worktrees
+that predate the LOOM product can therefore join the same native control plane
+without Python and without importing semantics from OCaml. Missing or modified
+capsule bytes, a broken activation link, or a bundle switch during attestation
+fails closed. Each hook receipt identifies whether authority came from the
+worktree or the immutable runtime capsule.
+
+Native hook adoption across a control checkout uses
+`scripts/dev/install_sounio_loom_native_hooks.sh --target-root PATH --activate`.
+It freezes the candidate bytes, holds the target Git index against branch
+switches, keeps an out-of-worktree backup, swaps both provider configurations
+atomically, and runs a production-mode policyless canary before returning. A
+failed canary restores both files. The installer is operational machinery only;
+the ALLOW decisions and semantic hashes still come from the packaged Sounio
+authority.
 
 ## Durable Obligations
 
@@ -722,19 +1058,34 @@ lock, asks native Sounio frame `9007` to admit each transition, and fsyncs the
 event before reporting success.
 
 `obligation-supervisor-ensure` owns the tmux-free service lifecycle. It takes a
-state-local bootstrap lock, validates both PID and Linux process-start tick,
-refuses duplicate starts, and uses `setsid` to launch the physically selected
-immutable runtime bundle. If `current` moves during an upgrade or rollback,
-the next ensure replaces the old-bundle supervisor with a new generation.
-`obligation-supervisor-stop` terminates the verified OCaml process and waits
-until its identity is no longer live. Before sending any signal, both commands
-also require the executable to belong to an installed immutable Loom bundle (or
-the expected local build), so a corrupted state file cannot redirect lifecycle
-control at an unrelated reused PID. The detached service explicitly closes the
-bootstrap-lock descriptor before `exec`; killing an `ensure` caller mid-start
-therefore cannot leave a surviving daemon that holds the election lock. These
-commands are the inner control-plane API; a Pod-external guardian such as Beagle
-should call `ensure` after a Pod restart rather than manufacturing a tmux session.
+state-local bootstrap lock and uses `setsid` to launch the physically selected
+immutable runtime bundle. The detached wrapper holds a separate nonblocking
+lifetime leader lock; a raw second `obligation-supervise` therefore exits 73
+before replay. Lifecycle discovery enumerates only same-UID, PID-1-parented
+wrappers whose immutable script and coordination state match this repository.
+It also validates the published OCaml child by PID, Linux process-start tick,
+parent wrapper, and executable path. If `current` moves during an upgrade or
+rollback, the next ensure retires every matching legacy wrapper and starts one
+new generation. A singleton wrapper whose OCaml child is still replaying is
+given a bounded warm-up period instead of being mistaken for a dead service.
+Restart waits for descendant-held lifetime locks to be released.
+`obligation-supervisor-stop` terminates the verified wrapper and waits until its
+identity is no longer live. These checks prevent a corrupted state file from
+redirecting lifecycle control at an unrelated reused PID. The detached service
+explicitly closes the bootstrap-lock descriptor before launch; killing an
+`ensure` caller mid-start therefore cannot leave a surviving daemon that holds
+the bootstrap election. These commands are the inner control-plane API; a
+Pod-external guardian such as Beagle should call `ensure` after a Pod restart
+rather than manufacturing a tmux session. The production and sabotage receipts
+are recorded in
+`tools/loom/evidence/loom-autonomous-coordination-v1-20260827.txt`.
+The detached wrapper also exports its exact coordination state root so an
+independent primary checkout can rediscover the same leader without confusing
+its own Git common directory for the supervisor's custody boundary.
+When a live leader exists, runtime activation itself now performs this handoff:
+the installer returns `ACTIVATED` only after the selected immutable bundle owns
+a new verified generation. If that assumption fails, activation restores the
+previous bundle and its leader before refusing.
 
 The authoritative state lives under the shared coordination directory in
 `loom-obligations/*/journal.tsv`. The TUI, GUI, JSON endpoint, and supervisor are
@@ -743,6 +1094,21 @@ does not close, acknowledge, or lose unfinished work. A new
 `obligation-supervise` process reconstructs every unclosed object by replay.
 `obligation-reconcile` repairs the bounded crash window between publishing a
 request message and opening its obligation.
+
+## Durable execution outcomes
+
+Shared runtime `2026.08.27.39` adds frozen Sounio action `9022` and the
+`loom-durable-execution-outcome-v1` capability. Consuming an in-memory execution
+grant now opens a kernel-owned outcome obligation. The OCaml broker supervises
+the measured leaf, records exit or signal, asks Sounio to admit the complete
+receipt, and closes the obligation through an authenticated `EXEC_OUTCOME`
+transition. A crash before that commit replays as explicit `INCOMPLETE`; it is
+never inferred as success. Receipt, semantics, manifest, runtime, grant,
+generation, command, environment, executable, toolchain, hardware, and both
+pre-execution Sounio decisions are hash-bound. See
+`tools/loom/EXECUTION_OUTCOME_V1.md` and
+`tools/loom/EXECUTION_CUSTODY_V2.md` for the proof boundary. Arbitrary Bash/Exec
+attachment remains disabled until general shell closure is classifiable.
 
 The Pod-external lane guardian uses the separate `sounio-fleet` authority
 boundary. `sounio-fleet watch --apply-recovery` is start-only: it may consume a
@@ -775,6 +1141,14 @@ The default remains `agentd` for compatibility. A `loom` slot records a stable
 agent, session UUID, native provider kind, credential home, shared coordination
 authority, and SHA-256-bound bootstrap prompt. The raw prompt is copied into
 private catalog storage rather than embedded in the descriptor.
+
+Verified persistent catalog kinds are currently `codex` and `kimi`. The Kimi
+bootstrap is delivered only after the native TUI is under Loom custody, and the
+catalog sabotage gate proves that changing the stored kind to an unverified
+provider such as Cursor is refused by the persistent-adapter allowlist.
+Because Kimi binds sessions through its native store, concurrent cataloged Kimi
+slots must use distinct HOME directories; same-HOME enrollment fails before a
+second prompt or descriptor is published.
 
 `fleet-reconcile` is a no-mutation plan by default. It observes both the legacy
 fleet adapter and Loom before taking action. A slot whose non-selected authority

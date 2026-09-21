@@ -1,0 +1,120 @@
+//@ run-pass
+//@ expect-stdout: PASS
+// test_conformal_weaning.sio — validação da camada Conformal Weaning (P2)
+// Self-contained (padrão test_morphine_validation; workaround thin-link #1715).
+// Flagship: Mondrian (label-conditional) conformal sobre o score load0 (E1),
+// com correção finita (+1), honestidade em células pequenas e mini-LOO.
+
+fn cw_pvalue(k: i64, n_cal: i64) -> f64 with Div {
+    let num = (k + 1) as f64
+    let den = (n_cal + 1) as f64
+    return num / den
+}
+fn cw_mask(p0: f64, p1: f64, alpha: f64) -> i64 with Mut {
+    var m: i64 = 0
+    if p0 > alpha { m = m + 1 }
+    if p1 > alpha { m = m + 2 }
+    return m
+}
+fn cw_covered(mask: i64, y: i64) -> i64 {
+    if y == 0 {
+        if mask == 1 || mask == 3 { return 1 }
+        return 0
+    }
+    if mask == 2 || mask == 3 { return 1 }
+    return 0
+}
+fn cw_rank_lower(n1: i64, alpha: f64) -> i64 {
+    let x = alpha * ((n1 + 1) as f64)
+    let m = x as i64
+    return m
+}
+fn cw_rank_upper(n0: i64, alpha: f64) -> i64 with Mut {
+    let x = (1.0 - alpha) * ((n0 + 1) as f64)
+    var m = x as i64
+    if (m as f64) < x { m = m + 1 }
+    return m
+}
+
+fn main() -> i64 with Mut, Div, IO {
+    println("VALIDAÇÃO Conformal Weaning (P2)")
+    var ok: i64 = 1
+    let alpha = 0.10
+
+    // A) p-valor conformal com correção (+1): (4+1)/(45+1) = 5/46
+    let p = cw_pvalue(4, 45)
+    let d = p - 0.1086956522
+    if d > 0.000001 || d < 0.0 - 0.000001 { ok = 0 println("  G FAIL pvalue") }
+    print("A p(4,45)="); println(p)
+
+    // B) máscara do conjunto de predição (4 combinações)
+    if cw_mask(0.5, 0.05, alpha) != 1 { ok = 0 println("  G FAIL mask so0") }
+    if cw_mask(0.05, 0.5, alpha) != 2 { ok = 0 println("  G FAIL mask so1") }
+    if cw_mask(0.5, 0.5, alpha) != 3 { ok = 0 println("  G FAIL mask ambos") }
+    if cw_mask(0.05, 0.05, alpha) != 0 { ok = 0 println("  G FAIL mask vazio") }
+    println("B máscaras OK")
+
+    // C) cobertura do rótulo verdadeiro
+    if cw_covered(3, 0) != 1 || cw_covered(3, 1) != 1 { ok = 0 println("  G FAIL cov3") }
+    if cw_covered(1, 0) != 1 || cw_covered(1, 1) != 0 { ok = 0 println("  G FAIL cov1") }
+    if cw_covered(2, 1) != 1 || cw_covered(2, 0) != 0 { ok = 0 println("  G FAIL cov2") }
+    if cw_covered(0, 0) != 0 || cw_covered(0, 1) != 0 { ok = 0 println("  G FAIL cov0") }
+    println("C cobertura OK")
+
+    // D) ranks finitos do protocolo: coorte n1=45 -> 4; n0=16 -> 16
+    if cw_rank_lower(45, alpha) != 4 { ok = 0 println("  G FAIL rank_inf") }
+    if cw_rank_upper(16, alpha) != 16 { ok = 0 println("  G FAIL rank_sup") }
+    println("D ranks coorte OK (m1=4, m0=16)")
+
+    // E) honestidade em células pequenas: neonato n0=2 -> rank 3 > 2 (vacuo);
+    //    n1=4 -> rank 0 (vacuo). ESTRITO: p0 = 1/10 = alpha NÃO inclui (>).
+    if cw_rank_upper(2, alpha) <= 2 { ok = 0 println("  G FAIL vacuo_sup") }
+    if cw_rank_lower(4, alpha) != 0 { ok = 0 println("  G FAIL vacuo_inf") }
+    let pb = cw_pvalue(0, 9)
+    if cw_mask(pb, 0.75, alpha) != 2 { ok = 0 println("  G FAIL estrito") }
+    println("E vacuidade + fronteira estrita OK")
+
+    // F) mini-LOO: 5 pacientes, contagem leave-one-out exclui o próprio
+    let sc: [f64; 5] = [0.1, 0.2, 0.55, 0.6, 0.65]
+    let yy: [i64; 5] = [0, 0, 1, 1, 1]
+    var cov = 0
+    var i = 0
+    while i < 5 {
+        var k1 = 0
+        var k0 = 0
+        var n1 = 0
+        var n0 = 0
+        var j = 0
+        while j < 5 {
+            if j != i {
+                if yy[j] == 1 {
+                    n1 = n1 + 1
+                    if sc[j] <= sc[i] { k1 = k1 + 1 }
+                } else {
+                    n0 = n0 + 1
+                    if sc[j] >= sc[i] { k0 = k0 + 1 }
+                }
+            }
+            j = j + 1
+        }
+        let p1 = cw_pvalue(k1, n1)
+        let p0 = cw_pvalue(k0, n0)
+        let m = cw_mask(p0, p1, alpha)
+        // i=2 (y=1): calibração label-1 tem n1=2 (self excluído) => p1=1/3
+        if i == 2 {
+            let dp = p1 - 0.3333333333
+            if dp > 0.000001 || dp < 0.0 - 0.000001 { ok = 0 println("  G FAIL loo_self") }
+        }
+        cov = cov + cw_covered(m, yy[i])
+        i = i + 1
+    }
+    if cov != 5 { ok = 0 println("  G FAIL loo_cov") }
+    print("F mini-LOO: cobertura "); print(cov); println("/5 (self excluído OK)")
+
+    if ok == 1 {
+        println("PASS")
+        return 0
+    }
+    println("FAIL")
+    return 1
+}

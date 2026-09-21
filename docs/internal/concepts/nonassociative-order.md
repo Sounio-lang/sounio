@@ -9,6 +9,9 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 
 # Nonassociative Order
 
+
+Status: **executable**
+
 Concept-ID: `SOUNIO-NONASSOCIATIVE-ORDER`
 
 ## Founder Intent

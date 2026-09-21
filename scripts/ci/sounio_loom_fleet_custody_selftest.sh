@@ -6,19 +6,31 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-fleet-custody.XXXXXX")"
 STATE_DIR="$TEST_ROOT/state"
 ADOPT_STATE_DIR="$TEST_ROOT/adopt-state"
+KIMI_STATE_DIR="$TEST_ROOT/kimi-state"
+CLAUDE_STATE_DIR="$TEST_ROOT/claude-state"
 WORKTREE="$TEST_ROOT/worktree"
 HOME_DIR="$TEST_ROOT/home"
 LEGACY_STATE="$TEST_ROOT/legacy"
 COORD_DIR="$TEST_ROOT/coord"
-ADOPT_COORD_DIR="$TEST_ROOT/adopt-coord"
-FAKE_CODEX="$TEST_ROOT/fake-codex"
+ADOPT_COORD_DIR="$COORD_DIR"
+FAKE_CODEX="$TEST_ROOT/providers/codex"
+FAKE_CLAUDE="$TEST_ROOT/providers/claude"
+FAKE_KIMI="$TEST_ROOT/providers/kimi"
 FAKE_FLEET_AGENT="$TEST_ROOT/fake-fleet-agent"
-LOOM="${SOUNIO_LOOM_BIN:-$ROOT_DIR/tools/loom/_build/default/src/loom.exe}"
+LOOM_BUILD="${SOUNIO_LOOM_BIN:-$ROOT_DIR/tools/loom/_build/default/src/loom.exe}"
+LOOM="$TEST_ROOT/bin/sounio-loom-runtime"
 AGENT=codex
 LANE=catalog-codex
 SESSION_ID=44444444-4444-4444-8444-444444444444
 ADOPT_LANE=adopted-codex
 ADOPT_SESSION=55555555-5555-4555-8555-555555555555
+KIMI_AGENT=kimi
+KIMI_LANE=catalog-kimi
+KIMI_SESSION=77777777-7777-4777-8777-777777777777
+CLAUDE_AGENT=claude
+CLAUDE_LANE=catalog-claude
+CLAUDE_SESSION=88888888-8888-4888-8888-888888888888
+CLAUDE_PROVIDER_SESSION=99999999-9999-4999-8999-999999999999
 
 fail() {
   printf 'sounio-loom-fleet-custody-selftest: FAIL: %s\n' "$*" >&2
@@ -26,20 +38,44 @@ fail() {
 }
 
 stop_lane() {
-  local state_dir="$1" lane="$2"
-  loom stop --state-dir "$state_dir" --agent "$AGENT" --lane "$lane" \
+  local state_dir="$1" lane="$2" agent="${3:-$AGENT}"
+  loom stop --state-dir "$state_dir" --agent "$agent" --lane "$lane" \
     --cwd "$WORKTREE" >/dev/null 2>&1 || true
+}
+
+wait_for_active_endpoint() {
+  local coord_dir="$1" agent="$2" lane="$3" endpoint=''
+  for _ in $(seq 1 100); do
+    endpoint="$({
+      cd "$WORKTREE"
+      SOUNIO_COORD_DIR="$coord_dir" "$(dirname "$LOOM")/sounio-coord-runtime" \
+        endpoint-status --agent "$agent" --lane "$lane"
+    } 2>/dev/null || true)"
+    [[ "$endpoint" == *' state=active '* ]] && return 0
+    sleep 0.05
+  done
+  fail "Loom custody did not publish an active endpoint for $agent/$lane"
 }
 
 cleanup() {
   stop_lane "$STATE_DIR" "$LANE"
   stop_lane "$ADOPT_STATE_DIR" "$ADOPT_LANE"
-  rm -rf "$TEST_ROOT"
+  stop_lane "$KIMI_STATE_DIR" "$KIMI_LANE" "$KIMI_AGENT"
+  stop_lane "$CLAUDE_STATE_DIR" "$CLAUDE_LANE" "$CLAUDE_AGENT"
+  if [[ "${SOUNIO_LOOM_KEEP_TEST_ROOT:-0}" != 1 ]]; then
+    rm -rf "$TEST_ROOT"
+  fi
 }
 trap cleanup EXIT
 
-[[ -x "$LOOM" ]] || "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" >/dev/null
-mkdir -p "$WORKTREE" "$HOME_DIR/.codex" "$LEGACY_STATE"
+[[ -x "$LOOM_BUILD" ]] || "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" >/dev/null
+mkdir -p "$(dirname "$LOOM")"
+cp "$LOOM_BUILD" "$LOOM"
+cp "$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" \
+  "$(dirname "$LOOM")/sounio-coord-runtime"
+chmod +x "$(dirname "$LOOM")/sounio-coord-runtime"
+mkdir -p "$WORKTREE" "$HOME_DIR/.codex" "$LEGACY_STATE" \
+  "$(dirname "$FAKE_CODEX")"
 git -C "$WORKTREE" init -q
 git -C "$WORKTREE" config user.name 'Loom Fleet Custody Selftest'
 git -C "$WORKTREE" config user.email 'loom-fleet-custody@sounio.local'
@@ -74,6 +110,55 @@ esac
 FAKE_CODEX
 chmod +x "$FAKE_CODEX"
 
+cat > "$FAKE_CLAUDE" <<'FAKE_CLAUDE'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}:${2:-}" in
+  --version:)
+    printf 'Claude Code loom-fleet-custody-test\n'
+    ;;
+  auth:status)
+    printf '{"loggedIn":true,"authMethod":"subscription"}\n'
+    ;;
+  --session-id:*|--resume:*)
+    printf 'FLEET_CLAUDE_READY:%s:HOME=%s:COORD=%s:PID=%s\n' \
+      "$*" "$HOME" "${SOUNIO_COORD_DIR:-missing}" "$$"
+    while IFS= read -r wake; do
+      printf 'FLEET_CLAUDE_WAKE:%s\n' "$wake"
+      [[ "$wake" == /exit ]] && break
+    done
+    ;;
+  *)
+    printf 'unexpected fake Claude invocation: %s\n' "$*" >&2
+    exit 42
+    ;;
+esac
+FAKE_CLAUDE
+chmod +x "$FAKE_CLAUDE"
+
+cat > "$FAKE_KIMI" <<'FAKE_KIMI'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}:${2:-}" in
+  --version:)
+    printf '0.38.0-loom-fleet-custody-test\n'
+    ;;
+  :)
+    printf 'FLEET_KIMI_READY:HOME=%s:COORD=%s:PID=%s\n' \
+      "$HOME" "${SOUNIO_COORD_DIR:-missing}" "$$"
+    while IFS= read -r wake; do
+      printf 'FLEET_KIMI_WAKE:%s\n' "$wake"
+      [[ "$wake" == /exit ]] && break
+    done
+    ;;
+  *)
+    printf 'unexpected fake Kimi invocation: %s\n' "$*" >&2
+    exit 42
+    ;;
+esac
+FAKE_KIMI
+chmod +x "$FAKE_KIMI"
+
 cat > "$FAKE_FLEET_AGENT" <<'FAKE_FLEET'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -107,8 +192,11 @@ chmod +x "$FAKE_FLEET_AGENT"
 
 loom() {
   SOUNIO_LOOM_PROVIDER_CODEX="$FAKE_CODEX" \
-    SOUNIO_LOOM_FLEET_AGENT_COMMAND="$FAKE_FLEET_AGENT" \
-    SOUNIO_FAKE_LEGACY_STATE="$LEGACY_STATE" "$LOOM" "$@"
+  SOUNIO_LOOM_PROVIDER_CLAUDE="$FAKE_CLAUDE" \
+  SOUNIO_LOOM_PROVIDER_KIMI="$FAKE_KIMI" \
+  SOUNIO_LOOM_FLEET_AGENT_COMMAND="$FAKE_FLEET_AGENT" \
+    SOUNIO_COORD_DIR="$COORD_DIR" \
+  SOUNIO_FAKE_LEGACY_STATE="$LEGACY_STATE" "$LOOM" "$@"
 }
 
 bootstrap_prompt='CATALOG_BOOTSTRAP_PROMPT'
@@ -121,9 +209,10 @@ enrolled="$(loom fleet-enroll --state-dir "$STATE_DIR" --slot "$LANE" \
 
 descriptor="$STATE_DIR/fleet/$LANE.state"
 prompt_file="$STATE_DIR/fleet/prompts/$LANE.txt"
-grep -q '^version=2$' "$descriptor" || fail 'catalog did not write schema v2'
+grep -q '^version=3$' "$descriptor" || fail 'catalog did not write schema v3'
 grep -q '^custody=loom$' "$descriptor" || fail 'catalog omitted Loom custody'
 grep -q "^session_id=$SESSION_ID$" "$descriptor" || fail 'catalog omitted stable session identity'
+grep -q '^provider_mode=new$' "$descriptor" || fail 'catalog omitted provider lifecycle mode'
 grep -q "^coord_dir=$COORD_DIR$" "$descriptor" || \
   fail 'catalog omitted the shared coordination authority'
 [[ "$(stat -c '%a' "$prompt_file")" == 600 ]] || fail 'sealed prompt permissions are not private'
@@ -133,12 +222,13 @@ if grep -Fq "$bootstrap_prompt" "$descriptor"; then
 fi
 
 plan="$(loom fleet-reconcile --state-dir "$STATE_DIR" --cwd "$WORKTREE")"
-[[ "$plan" == *'custody=loom state=absent action=provider-open mode=plan'* ]] || \
+[[ "$plan" == *'custody=loom state=DEAD action=provider-open mode=plan'* ]] || \
   fail 'reconciler did not plan persistent provider custody'
 
 opened="$(loom fleet-reconcile --state-dir "$STATE_DIR" --cwd "$WORKTREE" --apply)"
-[[ "$opened" == *'custody=loom state=active action=opened'* ]] || \
+[[ "$opened" == *'custody=loom state=DEAD action=opened post_state=active'* ]] || \
   fail 'reconciler did not open the persistent provider'
+wait_for_active_endpoint "$COORD_DIR" "$AGENT" "$LANE"
 status="$(loom status --machine --state-dir "$STATE_DIR" --agent "$AGENT" \
   --lane "$LANE" --cwd "$WORKTREE")"
 before_instance="$(sed -n 's/^instance_id=//p' <<< "$status")"
@@ -149,7 +239,7 @@ before_provider="$(sed -n 's/^harness_pid=//p' <<< "$status")"
   -n "$before_provider" ]] || fail 'opened custody omitted process identities'
 
 repeat="$(loom fleet-reconcile --state-dir "$STATE_DIR" --cwd "$WORKTREE" --apply)"
-[[ "$repeat" == *'custody=loom state=active action=noop'* ]] || \
+[[ "$repeat" == *'custody=loom state=UNKNOWN action=operator-required agentd=absent loom=active'* ]] || \
   fail 'idempotent reconcile opened a duplicate provider'
 
 : > "$LEGACY_STATE/$LANE.active"
@@ -192,10 +282,10 @@ for _ in $(seq 1 100); do
   sleep 0.05
 done
 recover_plan="$(loom fleet-reconcile --state-dir "$STATE_DIR" --cwd "$WORKTREE")"
-[[ "$recover_plan" == *'custody=loom state=recoverable action=recover mode=plan'* ]] || \
+[[ "$recover_plan" == *'custody=loom state=ORPHANED action=recover mode=plan'* ]] || \
   fail 'catalog did not distinguish recoverable custody from absence'
 recovered="$(loom fleet-reconcile --state-dir "$STATE_DIR" --cwd "$WORKTREE" --apply)"
-[[ "$recovered" == *'custody=loom state=active action=recovered'* ]] || \
+[[ "$recovered" == *'custody=loom state=ORPHANED action=recovered post_state=active'* ]] || \
   fail 'catalog did not recover the disposable kernel'
 after="$(loom status --machine --state-dir "$STATE_DIR" --agent "$AGENT" \
   --lane "$LANE" --cwd "$WORKTREE")"
@@ -228,6 +318,7 @@ manual_prompt='ACTIVE_ADOPTION_BOOTSTRAP'
 loom provider-open --provider codex --state-dir "$ADOPT_STATE_DIR" \
   --agent "$AGENT" --lane "$ADOPT_LANE" --session-id "$ADOPT_SESSION" \
   --cwd "$WORKTREE" --prompt "$manual_prompt" >/dev/null
+wait_for_active_endpoint "$ADOPT_COORD_DIR" "$AGENT" "$ADOPT_LANE"
 if loom fleet-enroll --state-dir "$ADOPT_STATE_DIR" --slot "$ADOPT_LANE" \
   --kind codex --custody agentd --agent "$AGENT" --home "$HOME_DIR" \
   --cwd "$WORKTREE" > "$TEST_ROOT/reverse-authority.out" 2>&1; then
@@ -265,9 +356,137 @@ adopted="$(loom fleet-enroll --state-dir "$ADOPT_STATE_DIR" --slot "$ADOPT_LANE"
 [[ "$adopted" == *'adopted=active'* ]] || \
   fail 'explicit active adoption did not publish its receipt'
 adopt_plan="$(loom fleet-reconcile --state-dir "$ADOPT_STATE_DIR" --cwd "$WORKTREE")"
-[[ "$adopt_plan" == *'custody=loom state=active action=noop'* ]] || \
+[[ "$adopt_plan" == *'custody=loom state=UNKNOWN action=operator-required agentd=absent loom=active'* ]] || \
   fail 'adopted lane did not reconcile idempotently'
+
+claude_prompt='CLAUDE_CATALOG_RESUME_PROMPT'
+claude_enrolled="$(loom fleet-enroll --state-dir "$CLAUDE_STATE_DIR" \
+  --slot "$CLAUDE_LANE" --kind claude --custody loom \
+  --agent "$CLAUDE_AGENT" --home "$HOME_DIR" --session-id "$CLAUDE_SESSION" \
+  --mode resume --provider-session "$CLAUDE_PROVIDER_SESSION" \
+  --coord-dir "$COORD_DIR" --prompt "$claude_prompt" --cwd "$WORKTREE")"
+[[ "$claude_enrolled" == *'kind=claude custody=loom'* && \
+   "$claude_enrolled" == *"provider_mode=resume provider_session=$CLAUDE_PROVIDER_SESSION"* ]] || \
+  fail 'catalog did not seal persistent Claude resume identity'
+claude_descriptor="$CLAUDE_STATE_DIR/fleet/$CLAUDE_LANE.state"
+grep -q '^version=3$' "$claude_descriptor" || \
+  fail 'Claude catalog did not use schema v3'
+grep -q '^provider_mode=resume$' "$claude_descriptor" || \
+  fail 'Claude catalog omitted resume mode'
+grep -q "^provider_session=$CLAUDE_PROVIDER_SESSION$" "$claude_descriptor" || \
+  fail 'Claude catalog omitted native resume identity'
+claude_opened="$(loom fleet-reconcile --state-dir "$CLAUDE_STATE_DIR" \
+  --cwd "$WORKTREE" --apply)"
+[[ "$claude_opened" == *'custody=loom state=DEAD action=opened post_state=active'* ]] || \
+  fail 'catalog did not open persistent Claude resume custody'
+wait_for_active_endpoint "$COORD_DIR" "$CLAUDE_AGENT" "$CLAUDE_LANE"
+claude_replay=''
+for _ in $(seq 1 100); do
+  claude_replay="$(loom snapshot --state-dir "$CLAUDE_STATE_DIR" \
+    --agent "$CLAUDE_AGENT" --lane "$CLAUDE_LANE" --cwd "$WORKTREE" \
+    --cursor 0 2>/dev/null || true)"
+  grep -q "FLEET_CLAUDE_WAKE:$claude_prompt" <<< "$claude_replay" && break
+  sleep 0.05
+done
+grep -q "FLEET_CLAUDE_READY:--resume $CLAUDE_PROVIDER_SESSION --setting-sources user,local" \
+  <<< "$claude_replay" || fail 'Claude catalog lost exact resume argv'
+grep -q "FLEET_CLAUDE_WAKE:$claude_prompt" <<< "$claude_replay" || \
+  fail 'Claude catalog bootstrap did not traverse the Loom lease'
+
+kimi_prompt='KIMI_CATALOG_BOOTSTRAP_PROMPT'
+kimi_enrolled="$(loom fleet-enroll --state-dir "$KIMI_STATE_DIR" \
+  --slot "$KIMI_LANE" --kind kimi --custody loom --agent "$KIMI_AGENT" \
+  --home "$HOME_DIR" --session-id "$KIMI_SESSION" --coord-dir "$COORD_DIR" \
+  --prompt "$kimi_prompt" --cwd "$WORKTREE")"
+[[ "$kimi_enrolled" == *'kind=kimi custody=loom'* ]] || \
+  fail 'catalog did not admit verified persistent Kimi custody'
+kimi_descriptor="$KIMI_STATE_DIR/fleet/$KIMI_LANE.state"
+if loom fleet-enroll --state-dir "$KIMI_STATE_DIR" \
+  --slot kimi-native-store-alias --kind kimi --custody loom \
+  --agent kimi-native-store-alias --home "$HOME_DIR" \
+  --session-id 99999999-9999-4999-8999-999999999999 \
+  --coord-dir "$COORD_DIR" --prompt "$kimi_prompt" --cwd "$WORKTREE" \
+  > "$TEST_ROOT/kimi-home-alias.out" 2>&1; then
+  fail 'catalog admitted two native-store Kimi lanes with one HOME'
+fi
+grep -q 'fleet-native-store-home-conflict provider=kimi .*existing_slot=catalog-kimi requested_slot=kimi-native-store-alias' \
+  "$TEST_ROOT/kimi-home-alias.out" || \
+  fail 'same-HOME native-store alias was refused by an unrelated rule'
+
+kimi_plan="$(loom fleet-reconcile --state-dir "$KIMI_STATE_DIR" --cwd "$WORKTREE")"
+[[ "$kimi_plan" == *'custody=loom state=DEAD action=provider-open mode=plan'* ]] || \
+  fail 'catalog did not plan persistent Kimi custody'
+kimi_opened="$(loom fleet-reconcile --state-dir "$KIMI_STATE_DIR" \
+  --cwd "$WORKTREE" --apply)"
+[[ "$kimi_opened" == *'custody=loom state=DEAD action=opened post_state=active'* ]] || \
+  fail 'catalog did not open persistent Kimi custody'
+wait_for_active_endpoint "$COORD_DIR" "$KIMI_AGENT" "$KIMI_LANE"
+
+kimi_status="$(loom status --machine --state-dir "$KIMI_STATE_DIR" \
+  --agent "$KIMI_AGENT" --lane "$KIMI_LANE" --cwd "$WORKTREE")"
+kimi_before_instance="$(sed -n 's/^instance_id=//p' <<< "$kimi_status")"
+kimi_before_kernel="$(sed -n 's/^daemon_pid=//p' <<< "$kimi_status")"
+kimi_before_guardian="$(sed -n 's/^guardian_pid=//p' <<< "$kimi_status")"
+kimi_before_provider="$(sed -n 's/^harness_pid=//p' <<< "$kimi_status")"
+grep -q '^command=kimi$' \
+  "$KIMI_STATE_DIR/sessions/$KIMI_AGENT--$KIMI_LANE/session.state" || \
+  fail 'catalog obscured the native Kimi process identity'
+
+kimi_replay=''
+for _ in $(seq 1 100); do
+  kimi_replay="$(loom snapshot --state-dir "$KIMI_STATE_DIR" \
+    --agent "$KIMI_AGENT" --lane "$KIMI_LANE" --cwd "$WORKTREE" \
+    --cursor 0 2>/dev/null || true)"
+  grep -q "FLEET_KIMI_WAKE:$kimi_prompt" <<< "$kimi_replay" && break
+  sleep 0.05
+done
+grep -q "FLEET_KIMI_READY:HOME=$HOME_DIR:COORD=$COORD_DIR" \
+  <<< "$kimi_replay" || fail 'Kimi did not inherit enrolled authorities'
+grep -q "FLEET_KIMI_WAKE:$kimi_prompt" <<< "$kimi_replay" || \
+  fail 'catalog bootstrap did not traverse the Kimi input lease'
+
+loom crash-kernel --state-dir "$KIMI_STATE_DIR" --agent "$KIMI_AGENT" \
+  --lane "$KIMI_LANE" --cwd "$WORKTREE" --at now >/dev/null
+for _ in $(seq 1 100); do
+  if ! loom status --state-dir "$KIMI_STATE_DIR" --agent "$KIMI_AGENT" \
+    --lane "$KIMI_LANE" --cwd "$WORKTREE" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.05
+done
+kimi_recover_plan="$(loom fleet-reconcile --state-dir "$KIMI_STATE_DIR" \
+  --cwd "$WORKTREE")"
+[[ "$kimi_recover_plan" == *'custody=loom state=ORPHANED action=recover mode=plan'* ]] || \
+  fail 'catalog did not classify Kimi kernel loss as recoverable'
+kimi_recovered="$(loom fleet-reconcile --state-dir "$KIMI_STATE_DIR" \
+  --cwd "$WORKTREE" --apply)"
+[[ "$kimi_recovered" == *'custody=loom state=ORPHANED action=recovered post_state=active'* ]] || \
+  fail 'catalog did not recover Kimi custody'
+kimi_after="$(loom status --machine --state-dir "$KIMI_STATE_DIR" \
+  --agent "$KIMI_AGENT" --lane "$KIMI_LANE" --cwd "$WORKTREE")"
+[[ "$(sed -n 's/^instance_id=//p' <<< "$kimi_after")" == "$kimi_before_instance" ]] || \
+  fail 'Kimi catalog recovery replaced the Loom instance'
+[[ "$(sed -n 's/^guardian_pid=//p' <<< "$kimi_after")" == "$kimi_before_guardian" ]] || \
+  fail 'Kimi catalog recovery replaced the Guardian'
+[[ "$(sed -n 's/^harness_pid=//p' <<< "$kimi_after")" == "$kimi_before_provider" ]] || \
+  fail 'Kimi catalog recovery replaced the provider process'
+[[ "$(sed -n 's/^daemon_pid=//p' <<< "$kimi_after")" != "$kimi_before_kernel" ]] || \
+  fail 'Kimi kernel sabotage did not produce a new kernel'
+
+cp "$kimi_descriptor" "$TEST_ROOT/kimi-catalog.backup"
+sed 's/^kind=.*/kind=cursor/' "$kimi_descriptor" > "$kimi_descriptor.tmp"
+mv "$kimi_descriptor.tmp" "$kimi_descriptor"
+if loom fleet-reconcile --state-dir "$KIMI_STATE_DIR" --cwd "$WORKTREE" \
+  > "$TEST_ROOT/unverified-persistent-provider.out" 2>&1; then
+  fail 'catalog accepted a provider without a verified persistent adapter'
+fi
+grep -q 'persistent fleet provider unavailable for kind cursor' \
+  "$TEST_ROOT/unverified-persistent-provider.out" || \
+  fail 'persistent-provider sabotage was refused by the wrong rule'
+mv "$TEST_ROOT/kimi-catalog.backup" "$kimi_descriptor"
 
 stop_lane "$STATE_DIR" "$LANE"
 stop_lane "$ADOPT_STATE_DIR" "$ADOPT_LANE"
-printf 'sounio-loom-fleet-custody-selftest: PASS catalog=v2 custody=typed prompt=sealed dual_authority=refused adoption=explicit kernel_recovery=stable-provider\n'
+stop_lane "$KIMI_STATE_DIR" "$KIMI_LANE" "$KIMI_AGENT"
+stop_lane "$CLAUDE_STATE_DIR" "$CLAUDE_LANE" "$CLAUDE_AGENT"
+printf 'sounio-loom-fleet-custody-selftest: PASS catalog=v3 custody=typed providers=claude,codex,kimi provider_session=sealed prompt=sealed prompt_transport=loom-wake native_store_home=isolated dual_authority=refused unsupported_persistent=refused adoption=explicit kernel_recovery=stable-provider\n'

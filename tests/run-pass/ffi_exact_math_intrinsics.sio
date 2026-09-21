@@ -1,0 +1,66 @@
+//@ run-pass
+//@ requires: madaros
+// Engine-gated, not silenced. The CI suite runs souc-stage2, which is the
+// lean_single self-host output, not Madaros -- see SOUNIO_TEST_SOUC_BIN in
+// .github/workflows/ci.yml. SQRTSD and ROUNDSD are emitted by the Madaros backend; lean_single has no
+// ffi_sqrt / ffi_floor / ffi_ceil intrinsic at all.
+// Verified PASS on a Madaros built from this branch, on Slurm.
+// sqrt, floor and ceil via extern "C", under the default Madaros engine.
+//
+// These three are the libm names this backend answers with a single hardware
+// instruction, so every row below is exact and none of them is allowed to be
+// off by an ulp: SQRTSD for sqrt, ROUNDSD mode 1 for floor, mode 2 for ceil.
+//
+// The rows are chosen so that a WRONG implementation cannot pass by accident:
+//
+//   floor and ceil disagree on every non-integer input, so a stub that emitted
+//   the same instruction for both, or that truncated toward zero for both,
+//   fails on the negative rows. Truncation toward zero equals floor for
+//   positive x and equals ceil for negative x -- checking only positive inputs
+//   would not tell the two apart, which is why -2.5 is here.
+//
+//   sqrt(30.25) = 5.5 is not an integer, so a stub returning a fabricated 0,
+//   or the argument unchanged, or an integer-truncated result, all fail.
+
+extern "C" {
+    fn sqrt(x: f64) -> f64;
+    fn floor(x: f64) -> f64;
+    fn ceil(x: f64) -> f64;
+}
+
+fn approx(a: f64, b: f64) -> bool {
+    let d = a - b
+    if d < 0.0 { return (0.0 - d) < 0.000000001 }
+    d < 0.000000001
+}
+
+fn main() -> i32 with IO, Panic {
+    var bad = 0
+
+    if !approx(sqrt(25.0), 5.0)    { bad = bad + 1 }
+    if !approx(sqrt(30.25), 5.5)   { bad = bad + 1 }   // non-integer result
+    if !approx(sqrt(0.0), 0.0)     { bad = bad + 1 }
+    if !approx(sqrt(1.0), 1.0)     { bad = bad + 1 }
+
+    if !approx(floor(2.5), 2.0)    { bad = bad + 1 }
+    if !approx(floor(-2.5), -3.0)  { bad = bad + 1 }   // separates floor from trunc
+    if !approx(floor(3.0), 3.0)    { bad = bad + 1 }   // already integral
+    if !approx(floor(-0.5), -1.0)  { bad = bad + 1 }
+
+    if !approx(ceil(2.5), 3.0)     { bad = bad + 1 }
+    if !approx(ceil(-2.5), -2.0)   { bad = bad + 1 }   // separates ceil from trunc
+    if !approx(ceil(3.0), 3.0)     { bad = bad + 1 }
+    if !approx(ceil(0.5), 1.0)     { bad = bad + 1 }
+
+    // floor and ceil must DISAGREE on a non-integer. If one emitter were
+    // wired to the other's id -- the exact defect the id-coherence gate now
+    // watches for -- every row above could still pass while this one fails.
+    if approx(floor(1.5), ceil(1.5)) { bad = bad + 1 }
+
+    if bad == 0 {
+        println("ffi_exact_math_intrinsics: PASS")
+        return 0
+    }
+    println("ffi_exact_math_intrinsics: FAIL")
+    return 1
+}

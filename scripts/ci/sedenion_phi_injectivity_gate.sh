@@ -27,9 +27,9 @@ OUT="$("$SOUC" run tests/stdlib/nn/test_fractal_sedenion_e2e.sio 2>/tmp/phi_inj_
   echo "[phi-inj] FAIL: Sounio test exited nonzero"; echo "$OUT"; tail -20 /tmp/phi_inj_sio.log; exit 1; }
 # run-pass exit 0 above already guarantees fail==0 (main returns 0 iff all pass);
 # these greps confirm the new tests actually ran.
-echo "$OUT" | grep -q "T9 OK"  || { echo "[phi-inj] FAIL: T9 missing"; echo "$OUT"; exit 1; }
-echo "$OUT" | grep -q "T10 OK" || { echo "[phi-inj] FAIL: T10 missing"; echo "$OUT"; exit 1; }
-echo "$OUT" | grep -q "/ 10 passed" || { echo "[phi-inj] FAIL: passed-line missing"; echo "$OUT"; exit 1; }
+grep -q "T9 OK" <<<"$OUT"  || { echo "[phi-inj] FAIL: T9 missing"; echo "$OUT"; exit 1; }
+grep -q "T10 OK" <<<"$OUT" || { echo "[phi-inj] FAIL: T10 missing"; echo "$OUT"; exit 1; }
+grep -q "/ 10 passed" <<<"$OUT" || { echo "[phi-inj] FAIL: passed-line missing"; echo "$OUT"; exit 1; }
 echo "[phi-inj]   Sounio: 10 / 10 passed (T9, T10 present; exit 0)"
 
 echo "[phi-inj] PASS: Φ̄ non-injective (126, 42 collisions) machine-checked in both codebases"

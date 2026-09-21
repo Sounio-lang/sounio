@@ -1,0 +1,93 @@
+// Headless molecular material study rendered entirely by Sounio.
+//
+// The molecular input is stdlib's explicitly coarse, idealized rapamycin
+// scaffold: 44 heavy atoms and 45 bonds. This is a renderer receipt, not a
+// crystallographic reconstruction or a scientific claim about conformation.
+//
+// Generate:
+//   SOUNIO_SOUC_ENGINE=lean_single bin/souc run examples/render/rapamycin_material_study.sio > /tmp/sounio-rapamycin-study.ppm
+
+use display::canvas::{Canvas}
+use display::canvas_ext::{canvas_draw_line_aa}
+use render::renderer3d::{Camera3D}
+use viz::mol3d::{mol3d_precompute_ao, mol3d_render, mol3d_render_ao}
+use viz::physchem::{molecule_rapamycin_coarse}
+
+fn abs_i64(v: i64) -> i64 { if v < 0 { 0 - v } else { v } }
+
+fn make_canvas(w: i64, h: i64) -> Canvas with Alloc {
+    let pixels = heap_alloc(w * h * 8) as *mut i64
+    Canvas { pixels: pixels, width: w, height: h }
+}
+
+fn paint_material_field(c: &!Canvas) with Mut, Div {
+    var y: i64 = 0
+    while y < c.height {
+        var x: i64 = 0
+        while x < c.width {
+            let horizon = (y * 18) / c.height
+            let radial = (abs_i64(x - c.width / 2) + abs_i64(y - c.height / 2)) / 36
+            let r = 6 + horizon + radial
+            let g = 10 + horizon + radial
+            let b = 20 + horizon * 2 + radial * 2
+            write_i64(c.pixels, y * c.width + x, b | (g << 8) | (r << 16))
+            x = x + 1
+        }
+        y = y + 1
+    }
+
+    // Perspective construction plane behind the molecular scaffold.
+    var gy: i64 = 46
+    while gy < c.height - 16 {
+        canvas_draw_line_aa(c, 22, gy, c.width - 22, gy - 18, 24, 38, 61)
+        gy = gy + 36
+    }
+    var gx: i64 = 34
+    while gx < c.width - 12 {
+        canvas_draw_line_aa(c, gx, 24, gx + 54, c.height - 18, 22, 34, 55)
+        gx = gx + 54
+    }
+}
+
+fn emit_ppm(c: &Canvas) with IO, Mut {
+    println("P3")
+    print_int(c.width)
+    print(" ")
+    print_int(c.height)
+    print("\n255\n")
+    var i: i64 = 0
+    while i < c.width * c.height {
+        let px = read_i64(c.pixels, i)
+        print_int((px >> 16) & 0xFF)
+        print(" ")
+        print_int((px >> 8) & 0xFF)
+        print(" ")
+        print_int(px & 0xFF)
+        print("\n")
+        i = i + 1
+    }
+}
+
+fn main() with IO, Alloc, Mut, Div {
+    let w: i64 = 480
+    let h: i64 = 300
+    var canvas = make_canvas(w, h)
+    paint_material_field(&!canvas)
+
+    var mol = molecule_rapamycin_coarse()
+    // Ball-and-stick display radii. Coordinates and bond topology stay intact.
+    var ai: i64 = 0
+    while ai < mol.atom_count {
+        let z = mol.atoms[ai as usize].atomic_number
+        mol.atoms[ai as usize].radius = if z == 8 { 0.42 } else if z == 7 { 0.40 } else { 0.34 }
+        ai = ai + 1
+    }
+    let cam = Camera3D { pos_x: 0.0, pos_y: -0.3, pos_z: 21.0, focal: 380.0 }
+    var ao: [f64; 64] = [0.0; 64]
+    mol3d_precompute_ao(&mol, &!ao)
+    mol3d_render(&mol, &cam, 0.52, 0.30, &!canvas)
+    mol3d_render_ao(&mol, &cam, 0.52, 0.30, &ao, &!canvas)
+
+    emit_ppm(&canvas)
+    heap_free(canvas.pixels as *mut i8)
+}

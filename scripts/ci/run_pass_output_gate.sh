@@ -127,6 +127,12 @@ printf '[run-pass-output] checked=%d  PASS=%d  MISMATCH=%d  COMPILE-ERR=%d  RUN-
   "$n_total" "$n_pass" "$n_mismatch" "$n_compile_err" "$n_run_err"
 
 if [ "$MODE" = "baseline" ]; then
+  # A baseline of zero tests blesses every future empty comparison; the scan
+  # must have selected something before its verdict is worth recording.
+  if [ "$n_total" -lt 1 ]; then
+    echo "[run-pass-output] FAIL: no expect-stdout tests found -- the corpus scan answered nothing (marker drift or missing corpus?)" >&2
+    exit 1
+  fi
   mkdir -p "$(dirname "$BASELINE_FILE")"
   cp "$CUR" "$BASELINE_FILE"
   echo "[run-pass-output] BASELINE recorded -> $BASELINE_FILE ($n_total tests)"
@@ -135,6 +141,10 @@ fi
 
 if [ "$MODE" = "strict" ] || [ ! -f "$BASELINE_FILE" ]; then
   [ "$MODE" != "strict" ] && echo "[run-pass-output] no baseline at $BASELINE_FILE -> STRICT mode"
+  if [ "$n_total" -lt 1 ]; then
+    echo "[run-pass-output] FAIL (strict): no expect-stdout tests found -- the corpus scan answered nothing (marker drift or missing corpus?)" >&2
+    exit 1
+  fi
   if [ "$n_mismatch" -eq 0 ] && [ "$n_run_err" -eq 0 ] && [ "$n_compile_err" -eq 0 ]; then
     echo "[run-pass-output] PASS (strict): all $n_total expect-stdout tests produce expected output"
     exit 0

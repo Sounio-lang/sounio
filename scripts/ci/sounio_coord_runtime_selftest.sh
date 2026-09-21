@@ -9,8 +9,20 @@ SECOND="$TEST_ROOT/second-worktree"
 STATE="$TEST_ROOT/state"
 ALT="$TEST_ROOT/upgrade-source"
 BAD="$TEST_ROOT/bad-source"
+POLICYLESS="$TEST_ROOT/policyless-worktree"
+CAPSULE_STATE="$TEST_ROOT/policyless-state"
 
 "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" >/dev/null
+export SOUNIO_LOOM_LANGUAGE_AUTHORITY_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-language-authority-runtime"
+export SOUNIO_LOOM_EXECUTION_AUTHORITY_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-execution-authority-runtime"
+export SOUNIO_LOOM_EXECUTION_OUTCOME_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-execution-outcome-runtime"
+export SOUNIO_LOOM_SUBPROCESS_MEMBRANE_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-subprocess-membrane-runtime"
+export SOUNIO_LOOM_RESIDENT_MEMBRANE_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-resident-membrane-runtime"
+export SOUNIO_LOOM_RESIDENT_MEMBRANE_V2_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-resident-membrane-runtime-v2"
+export SOUNIO_LOOM_RESIDENT_MEMBRANE_V3_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-resident-membrane-runtime-v3"
+export SOUNIO_LOOM_CUSTODY_TRANSFER_PREBUILT="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-custody-transfer-runtime"
+export SOUNIO_LOOM_LANE_HEALTH_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-lane-health-runtime"
+export SOUNIO_LOOM_LANE_HEALTH_PARITY_PREBUILT="$ROOT_DIR/tools/loom/.runtime/sounio-loom-lane-health-parity-runtime"
 export SOUNIO_LOOM_CONTINUITY_PREBUILT="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-continuity-runtime"
 export SOUNIO_LOOM_OBLIGATION_PREBUILT="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-obligation-runtime"
 export SOUNIO_LOOM_EPISTEMIC_PREBUILT="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-epistemic-runtime"
@@ -24,10 +36,12 @@ export SOUNIO_LOOM_WITNESS_EPOCH_HANDOFF_PREBUILT="$ROOT_DIR/tools/loom/_build/d
 export SOUNIO_LOOM_WITNESS_EPOCH_TRANSPARENCY_PREBUILT="$ROOT_DIR/tools/loom/_build/default/src/sounio-loom-witness-epoch-transparency-runtime"
 
 cleanup() {
+  [[ -z "${lock_holder_pid:-}" ]] || kill "$lock_holder_pid" 2>/dev/null || true
   [[ -z "${supervisor_pid:-}" ]] || kill "$supervisor_pid" 2>/dev/null || true
   [[ -z "${failing_supervisor_pid:-}" ]] || \
     kill "$failing_supervisor_pid" 2>/dev/null || true
   git -C "$REPO" worktree remove --force "$SECOND" >/dev/null 2>&1 || true
+  chmod -R u+w "$TEST_ROOT" 2>/dev/null || true
   rm -rf "$TEST_ROOT"
 }
 trap cleanup EXIT
@@ -37,9 +51,34 @@ fail() {
   exit 1
 }
 
-mkdir -p "$REPO/bin" "$REPO/scripts/dev" "$REPO/formal/tla" "$REPO/tools"
+assert_processes_do_not_hold() {
+  local path="$1" label="$2" process_pid fd
+  shift 2
+  for process_pid in "$@"; do
+    [[ -d "/proc/$process_pid/fd" ]] ||
+      fail "$label process disappeared before descriptor inspection: $process_pid"
+    for fd in "/proc/$process_pid/fd/"*; do
+      [[ "$(readlink -f "$fd" 2>/dev/null || true)" != "$(readlink -f "$path")" ]] ||
+        fail "$label inherited forbidden descriptor: $path"
+    done
+  done
+}
+
+snapshot_coord_state() {
+  (
+    cd "$STATE"
+    find . -mindepth 1 ! -name '.claims.lock' -printf '%P|%y|%s\n' | sort
+    find . -type f ! -name '.claims.lock' -print0 | sort -z | \
+      xargs -0 -r sha256sum
+  )
+}
+
+mkdir -p "$REPO/bin" "$REPO/scripts/dev" "$REPO/scripts/ci" \
+  "$REPO/formal/tla" "$REPO/tools" "$REPO/.codex" "$REPO/.claude" \
+  "$REPO/.cursor" "$REPO/.grok/hooks"
 cp "$ROOT_DIR/bin/sounio-coord" "$ROOT_DIR/bin/sounio-agentd" \
-  "$ROOT_DIR/bin/sounio-fleet" "$ROOT_DIR/bin/sounio-loom" "$REPO/bin/"
+  "$ROOT_DIR/bin/sounio-fleet" "$ROOT_DIR/bin/sounio-loom" \
+  "$ROOT_DIR/bin/souc" "$ROOT_DIR/bin/souc-lean-single-x86_64" "$REPO/bin/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_agentd.py" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_fleet.py" "$REPO/scripts/dev/"
@@ -48,11 +87,20 @@ cp "$ROOT_DIR/scripts/dev/sounio_fleet_tla_sabotage.py" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_fleet_trace_verify.py" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/formal/tla/SounioFleet.tla" "$ROOT_DIR/formal/tla/SounioFleet.cfg" \
   "$REPO/formal/tla/"
-cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook.py" "$REPO/scripts/dev/"
-cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook_runtime.py" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_causal_runtime.py" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/install_sounio_coord_runtime.sh" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_routing_authority.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_language_authority.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_native_hook_cutover.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_native_hook_generation_drain.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_native_hook_generation_reconcile.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_generation_pinned_cutover.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_activation_epoch.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_custody_transfer.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_execution_outcome.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_lane_health.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_lane_health_parity.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_continuity_adapter.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_obligation_adapter.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_epistemic_adapter.sh" \
@@ -64,9 +112,93 @@ cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_witness_mesh_v1_adapter.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_witness_epoch_handoff_adapter.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_witness_epoch_transparency_adapter.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_sovereign_execution_kernel.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_sovereign_change_kernel.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_sovereign_material_change.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_kernel_peer_activation_capsule_authority.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_kernel_peer_activation_capsule_current_frame.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_resident_membrane_v5.sh" \
   "$REPO/scripts/dev/"
-mkdir -p "$REPO/tools/loom/src"
+cp "$ROOT_DIR/.codex/hooks.json" "$REPO/.codex/"
+cp "$ROOT_DIR/.claude/settings.json" "$REPO/.claude/"
+cp "$ROOT_DIR/.cursor/hooks.json" "$REPO/.cursor/"
+cp "$ROOT_DIR/.grok/hooks/loom-native.json" "$REPO/.grok/hooks/"
+cp "$ROOT_DIR/scripts/ci/sounio_loom_resident_transport_v5_selftest.sh" \
+  "$ROOT_DIR/scripts/ci/sounio_loom_routing_authority_selftest.sh" \
+  "$ROOT_DIR/scripts/ci/sounio_loom_routing_authority_freeze_selftest.sh" \
+  "$ROOT_DIR/scripts/ci/sounio_loom_sovereign_execution_kernel_product_selftest.sh" \
+  "$ROOT_DIR/scripts/ci/sounio_loom_sovereign_execution_kernel_product_freeze_selftest.sh" \
+  "$ROOT_DIR/scripts/ci/sounio_loom_sovereign_change_kernel_operational_selftest.sh" \
+  "$ROOT_DIR/scripts/ci/sounio_loom_sovereign_change_receipt_admit.sh" \
+  "$ROOT_DIR/scripts/ci/sounio_loom_native_hook_generation_canary_ocaml_selftest.sh" \
+  "$ROOT_DIR/scripts/ci/sounio_loom_native_hook_generation_guardian_ocaml_selftest.sh" \
+  "$ROOT_DIR/scripts/ci/sounio_loom_native_hook_generation_drain_selftest.sh" \
+  "$ROOT_DIR/scripts/ci/sounio_loom_native_hook_generation_drain_freeze_selftest.sh" \
+  "$ROOT_DIR/scripts/ci/sounio_loom_native_hook_generation_reconcile_selftest.sh" \
+  "$ROOT_DIR/scripts/ci/sounio_loom_native_hook_generation_reconcile_freeze_selftest.sh" \
+  "$ROOT_DIR/scripts/ci/sounio_loom_native_hook_generation_reconcile_ocaml_selftest.sh" \
+  "$ROOT_DIR/scripts/ci/sounio_loom_generation_pinned_cutover_selftest.sh" \
+  "$ROOT_DIR/scripts/ci/sounio_loom_generation_pinned_cutover_freeze_selftest.sh" \
+  "$ROOT_DIR/scripts/ci/sounio_loom_generation_pinned_cutover_ocaml_selftest.sh" \
+  "$ROOT_DIR/scripts/ci/sounio_loom_activation_epoch_selftest.sh" \
+  "$ROOT_DIR/scripts/ci/sounio_loom_activation_epoch_freeze_selftest.sh" \
+  "$ROOT_DIR/scripts/ci/sounio_loom_activation_epoch_ocaml_selftest.sh" \
+  "$REPO/scripts/ci/"
+mkdir -p "$REPO/tools/loom/src" "$REPO/tools/loom/message_bridge"
 cp "$ROOT_DIR/tools/loom/dune-project" "$REPO/tools/loom/"
+cp "$ROOT_DIR/tools/loom/kernel_peer_activation_capsule_authority.freeze.v2" \
+  "$ROOT_DIR/tools/loom/resident_membrane.runtime.v5.v2" \
+  "$ROOT_DIR/tools/loom/resident_membrane.runtime.v1.v2" \
+  "$ROOT_DIR/tools/loom/resident_membrane.runtime.v2.v2" \
+  "$ROOT_DIR/tools/loom/resident_membrane.runtime.v3.v2" \
+  "$ROOT_DIR/tools/loom/resident_membrane.runtime.v4.v2" \
+  "$ROOT_DIR/tools/loom/subprocess_membrane.freeze.v2" \
+  "$ROOT_DIR/tools/loom/resident_authority.freeze.v2" \
+  "$ROOT_DIR/tools/loom/effect_closure_authority.freeze.v2" \
+  "$ROOT_DIR/tools/loom/kernel_invocation_cell_authority.freeze.v3" \
+  "$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v2" \
+  "$ROOT_DIR/tools/loom/kernel_peer_material_judgment_v13.freeze.v2" \
+  "$REPO/tools/loom/"
+cp "$ROOT_DIR/tools/loom/message_bridge/dune" \
+  "$ROOT_DIR/tools/loom/message_bridge/loom_message_bridge.ml" \
+  "$REPO/tools/loom/message_bridge/"
+cp "$ROOT_DIR/tools/loom/language_authority_main.sio" \
+  "$ROOT_DIR/tools/loom/language_authority.freeze.v2" \
+  "$ROOT_DIR/tools/loom/GARDEN_ROUTING_AUTHORITY_V1.md" \
+  "$ROOT_DIR/tools/loom/routing_authority_main.sio" \
+  "$ROOT_DIR/tools/loom/routing_authority.freeze.v2" \
+  "$ROOT_DIR/tools/loom/native_hook_cutover_authority_main.sio" \
+  "$ROOT_DIR/tools/loom/native_hook_cutover.freeze.v1" \
+  "$ROOT_DIR/tools/loom/native_hook_cutover.freeze.v2" \
+  "$ROOT_DIR/tools/loom/GARDEN_NATIVE_HOOK_GENERATION_DRAIN_V1.md" \
+  "$ROOT_DIR/tools/loom/native_hook_generation_drain_authority_main.sio" \
+  "$ROOT_DIR/tools/loom/native_hook_generation_drain.freeze.v1" \
+  "$ROOT_DIR/tools/loom/native_hook_generation_drain.freeze.v2" \
+  "$ROOT_DIR/tools/loom/native_hook_generation_drain.first.v1" \
+  "$ROOT_DIR/tools/loom/GARDEN_NATIVE_HOOK_GENERATION_RECONCILE_V1.md" \
+  "$ROOT_DIR/tools/loom/native_hook_generation_reconcile_authority_main.sio" \
+  "$ROOT_DIR/tools/loom/native_hook_generation_reconcile.freeze.v1" \
+  "$ROOT_DIR/tools/loom/native_hook_generation_reconcile.freeze.v2" \
+  "$ROOT_DIR/tools/loom/native_hook_generation_reconcile.first.v1" \
+  "$ROOT_DIR/tools/loom/GARDEN_GENERATION_PINNED_CUTOVER_V1.md" \
+  "$ROOT_DIR/tools/loom/generation_pinned_cutover_authority_main.sio" \
+  "$ROOT_DIR/tools/loom/generation_pinned_cutover.freeze.v1" \
+  "$ROOT_DIR/tools/loom/generation_pinned_cutover.freeze.v2" \
+  "$ROOT_DIR/tools/loom/generation_pinned_cutover.first.v1" \
+  "$ROOT_DIR/tools/loom/GARDEN_ACTIVATION_EPOCH_V1.md" \
+  "$ROOT_DIR/tools/loom/activation_epoch_authority_main.sio" \
+  "$ROOT_DIR/tools/loom/activation_epoch.freeze.v1" \
+  "$ROOT_DIR/tools/loom/activation_epoch.freeze.v2" \
+  "$ROOT_DIR/tools/loom/activation_epoch.first.v1" \
+  "$ROOT_DIR/tools/loom/execution_authority.freeze.v3" "$REPO/tools/loom/"
+cp "$ROOT_DIR/tools/loom/custody_transfer_main.sio" \
+  "$ROOT_DIR/tools/loom/custody_transfer.freeze.v2" "$REPO/tools/loom/"
+cp "$ROOT_DIR/tools/loom/execution_outcome_main.sio" \
+  "$ROOT_DIR/tools/loom/execution_outcome.freeze.v2" "$REPO/tools/loom/"
+cp "$ROOT_DIR/tools/loom/lane_health_main.sio" \
+  "$ROOT_DIR/tools/loom/lane_health_parity_main.sio" \
+  "$ROOT_DIR/tools/loom/lane_health.freeze.v2" \
+  "$ROOT_DIR/tools/loom/lane_health.ocaml.v1" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/continuity_adapter_main.sio" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/obligation_adapter_main.sio" "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/epistemic_adapter_main.sio" "$REPO/tools/loom/"
@@ -80,14 +212,121 @@ cp "$ROOT_DIR/tools/loom/witness_epoch_handoff_adapter_main.sio" \
   "$REPO/tools/loom/"
 cp "$ROOT_DIR/tools/loom/epoch_transparency_adapter_main.sio" \
   "$REPO/tools/loom/"
+cp "$ROOT_DIR/tools/loom/subprocess_membrane_main.sio" \
+  "$ROOT_DIR/tools/loom/resident_authority_main.sio" \
+  "$ROOT_DIR/tools/loom/effect_closure_authority_main.sio" \
+  "$ROOT_DIR/tools/loom/kernel_invocation_cell_authority_main.sio" \
+  "$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority_main.sio" \
+  "$REPO/tools/loom/"
+cp "$ROOT_DIR/tools/loom/GARDEN_KERNEL_PEER_ACTIVATION_CAPSULE_V1.md" \
+  "$ROOT_DIR/tools/loom/kernel_peer_activation_capsule_authority_main.sio" \
+  "$ROOT_DIR/tools/loom/kernel_peer_activation_capsule_authority.freeze.v1" \
+  "$ROOT_DIR/tools/loom/kernel_peer_activation_capsule.runtime.v1" \
+  "$ROOT_DIR/tools/loom/kernel_peer_activation_capsule.current.v1" \
+  "$ROOT_DIR/tools/loom/resident_membrane.runtime.v5" \
+  "$ROOT_DIR/tools/loom/subprocess_membrane.freeze.v1" \
+  "$ROOT_DIR/tools/loom/resident_authority.freeze.v1" \
+  "$ROOT_DIR/tools/loom/effect_closure_authority.freeze.v1" \
+  "$ROOT_DIR/tools/loom/kernel_invocation_cell_authority.freeze.v1" \
+  "$ROOT_DIR/tools/loom/kernel_exec_grant_cell_authority.freeze.v1" \
+  "$ROOT_DIR/tools/loom/kernel_peer_material_judgment_v13.freeze.v1" \
+  "$ROOT_DIR/tools/loom/PRODUCT_EXEC_INGRESS_DARK_ATTACHMENT_V1.md" \
+  "$ROOT_DIR/tools/loom/product_exec_ingress_dark.runtime.v1" \
+  "$ROOT_DIR/tools/loom/resident_membrane.runtime.v1" \
+  "$ROOT_DIR/tools/loom/resident_membrane.runtime.v2" \
+  "$ROOT_DIR/tools/loom/resident_membrane.runtime.v3" \
+  "$ROOT_DIR/tools/loom/resident_membrane.runtime.v4" \
+  "$ROOT_DIR/tools/loom/resident_membrane_v5_main.sio" \
+  "$ROOT_DIR/tools/loom/SOVEREIGN_EXECUTION_KERNEL_PRODUCT_ATTACHMENT_V1.md" \
+  "$ROOT_DIR/tools/loom/sovereign_execution_kernel_authority_main.sio" \
+  "$ROOT_DIR/tools/loom/sovereign_execution_kernel.freeze.v1" \
+  "$ROOT_DIR/tools/loom/sovereign_execution_kernel.freeze.v2" \
+  "$ROOT_DIR/tools/loom/sovereign_execution_kernel_material.runtime.v1" \
+  "$ROOT_DIR/tools/loom/sovereign_execution_kernel_material.runtime.v2" \
+  "$ROOT_DIR/tools/loom/sovereign_execution_kernel_product.runtime.v1" \
+  "$ROOT_DIR/tools/loom/sovereign_execution_kernel_product.runtime.v2" \
+  "$ROOT_DIR/tools/loom/sovereign_change_kernel_authority_main.sio" \
+  "$ROOT_DIR/tools/loom/sovereign_change_kernel.freeze.v1" \
+  "$ROOT_DIR/tools/loom/sovereign_change_kernel.freeze.v2" \
+  "$ROOT_DIR/tools/loom/sovereign_material_change_authority_main.sio" \
+  "$ROOT_DIR/tools/loom/sovereign_material_change.freeze.v2" \
+  "$ROOT_DIR/tools/loom/sovereign_material_change.freeze.v3" \
+  "$ROOT_DIR/tools/loom/sovereign_material_change_product.runtime.v2" \
+  "$ROOT_DIR/tools/loom/sovereign_material_change_product.runtime.v3" \
+  "$ROOT_DIR/tools/loom/sovereign_material_change_product.runtime.v4" \
+  "$ROOT_DIR/tools/loom/sovereign_material_change_product.runtime.v5" \
+  "$ROOT_DIR/tools/loom/sovereign_material_change_product.runtime.v6" \
+  "$ROOT_DIR/tools/loom/sovereign_material_change_product.runtime.v7" \
+  "$ROOT_DIR/tools/loom/sovereign_material_change_product.runtime.v8" \
+  "$ROOT_DIR/tools/loom/sovereign_material_change_product.runtime.v9" \
+  "$ROOT_DIR/tools/loom/sovereign_material_change_product.runtime.v10" \
+  "$ROOT_DIR/tools/loom/sovereign_material_change_product.runtime.v11" \
+  "$ROOT_DIR/tools/loom/sovereign_material_change_product.runtime.v12" \
+  "$ROOT_DIR/tools/loom/sovereign_material_change_product.runtime.v13" \
+  "$ROOT_DIR/tools/loom/sovereign_material_change_product.runtime.v14" \
+  "$REPO/tools/loom/"
+mkdir -p "$REPO/tools/loom/evidence"
+cp "$ROOT_DIR/tools/loom/evidence/loom-product-exec-ingress-dark-v1-20260829.txt" \
+  "$ROOT_DIR/tools/loom/evidence/loom-sovereign-execution-kernel-product-v1-20260831.txt" \
+  "$ROOT_DIR/tools/loom/evidence/loom-sovereign-execution-kernel-product-v2-20260915.txt" \
+  "$ROOT_DIR/tools/loom/evidence/loom-sovereign-material-change-product-v2-20260831.txt" \
+  "$ROOT_DIR/tools/loom/evidence/loom-sovereign-material-change-product-v3-20260901.txt" \
+  "$ROOT_DIR/tools/loom/evidence/loom-sovereign-material-change-product-v4-20260901.txt" \
+  "$ROOT_DIR/tools/loom/evidence/loom-sovereign-material-change-product-v5-20260901.txt" \
+  "$ROOT_DIR/tools/loom/evidence/loom-sovereign-material-change-product-v6-20260902.txt" \
+  "$ROOT_DIR/tools/loom/evidence/loom-sovereign-material-change-product-v7-20260902.txt" \
+  "$ROOT_DIR/tools/loom/evidence/loom-sovereign-material-change-product-v8-20260902.txt" \
+  "$ROOT_DIR/tools/loom/evidence/loom-sovereign-material-change-product-v9-20260902.txt" \
+  "$ROOT_DIR/tools/loom/evidence/loom-sovereign-material-change-product-v10-20260903.txt" \
+  "$ROOT_DIR/tools/loom/evidence/loom-sovereign-material-change-product-v11-20260904.txt" \
+  "$ROOT_DIR/tools/loom/evidence/loom-sovereign-material-change-product-v12-20260904.txt" \
+  "$ROOT_DIR/tools/loom/evidence/loom-sovereign-material-change-product-v13-20260904.txt" \
+  "$ROOT_DIR/tools/loom/evidence/loom-sovereign-material-change-product-v14-20260904.txt" \
+  "$ROOT_DIR/tools/loom/evidence/loom-native-hook-generation-drain-first-v1-20260831.txt" \
+  "$ROOT_DIR/tools/loom/evidence/loom-native-hook-generation-drain-frozen-v1-20260831.txt" \
+  "$ROOT_DIR/tools/loom/evidence/loom-native-hook-generation-reconcile-first-v1-20260901.txt" \
+  "$ROOT_DIR/tools/loom/evidence/loom-native-hook-generation-reconcile-frozen-v1-20260901.txt" \
+  "$ROOT_DIR/tools/loom/evidence/loom-generation-pinned-cutover-first-v1-20260904.txt" \
+  "$ROOT_DIR/tools/loom/evidence/loom-generation-pinned-cutover-frozen-v1-20260904.txt" \
+  "$ROOT_DIR/tools/loom/evidence/loom-activation-epoch-first-v1-20260904.txt" \
+  "$ROOT_DIR/tools/loom/evidence/loom-activation-epoch-frozen-v1-20260904.txt" \
+  "$REPO/tools/loom/evidence/"
 cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
   "$ROOT_DIR/tools/loom/src/loom_arrow.ml" \
   "$ROOT_DIR/tools/loom/src/loom_epistemic.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_effect_closure.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_exec.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_exec_intent.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_exec_catalog.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_exec_operation_cell.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_exec_result_record.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_exec_result.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_exec_ingress.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_exec_grant_cell.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_hook.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_hook_generation_canary.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_hook_generation_drain.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_hook_generation_guardian.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_hook_generation_reconcile.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_hook_generation_pin.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_hook_activation_epoch.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_invocation_cell.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_lane_health.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_membrane.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_peer_activation_capsule.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_resident.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_sovereign_exec.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_sovereign_provider_fixture.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_change.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_change_provider_fixture.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_change_stubs.c" \
+  "$ROOT_DIR/tools/loom/src/loom_provider_hook_fixture.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness_epoch.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness_transparency.ml" \
   "$ROOT_DIR/tools/loom/src/loom_ui.ml" \
   "$ROOT_DIR/tools/loom/src/loom_pty_stubs.c" \
+  "$ROOT_DIR/tools/loom/src/loom_membrane_stubs.c" \
   "$ROOT_DIR/tools/loom/src/loom_arrow_stubs.c" \
   "$ROOT_DIR/tools/loom/src/loom_nanoarrow.c" \
   "$ROOT_DIR/tools/loom/src/loom_nanoarrow_ipc.c" \
@@ -95,6 +334,29 @@ cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
 cp -R "$ROOT_DIR/tools/loom/src/vendor" "$REPO/tools/loom/src/"
 mkdir -p "$REPO/stdlib/coordination"
 cp "$ROOT_DIR/stdlib/coordination/loom_continuity.sio" \
+  "$ROOT_DIR/stdlib/coordination/loom_sovereign_execution_kernel_authority.sio" \
+  "$ROOT_DIR/stdlib/coordination/loom_sovereign_change_kernel_authority.sio" \
+  "$ROOT_DIR/stdlib/coordination/loom_sovereign_material_change_authority.sio" \
+  "$REPO/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_language_authority.sio" \
+  "$REPO/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_routing_authority.sio" \
+  "$REPO/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_native_hook_cutover_authority.sio" \
+  "$REPO/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_native_hook_generation_drain_authority.sio" \
+  "$REPO/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_native_hook_generation_reconcile_authority.sio" \
+  "$REPO/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_generation_pinned_cutover_authority.sio" \
+  "$REPO/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_activation_epoch_authority.sio" \
+  "$REPO/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_custody_transfer.sio" \
+  "$REPO/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_execution_outcome_authority.sio" \
+  "$REPO/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_lane_health.sio" \
   "$REPO/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_obligation.sio" \
   "$REPO/stdlib/coordination/"
@@ -116,35 +378,460 @@ cp "$ROOT_DIR/stdlib/coordination/loom_witness_epoch_handoff.sio" \
   "$REPO/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_witness_epoch_transparency.sio" \
   "$REPO/stdlib/coordination/"
-chmod +x "$REPO/bin/"* "$REPO/scripts/dev/"*.sh "$REPO/scripts/dev/"*.py
+cp "$ROOT_DIR/stdlib/coordination/loom_kernel_peer_activation_capsule_authority.sio" \
+  "$REPO/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_subprocess_membrane_authority.sio" \
+  "$ROOT_DIR/stdlib/coordination/loom_resident_authority.sio" \
+  "$ROOT_DIR/stdlib/coordination/loom_effect_closure_authority.sio" \
+  "$ROOT_DIR/stdlib/coordination/loom_kernel_invocation_cell_authority.sio" \
+  "$ROOT_DIR/stdlib/coordination/loom_kernel_exec_grant_cell_authority.sio" \
+  "$REPO/stdlib/coordination/"
+mkdir -p "$REPO/stdlib/crypto"
+cp "$ROOT_DIR/stdlib/crypto/sha256.sio" "$REPO/stdlib/crypto/"
+chmod +x "$REPO/bin/"* "$REPO/scripts/dev/"*.sh "$REPO/scripts/dev/"*.py \
+  "$REPO/scripts/ci/"*.sh
 git -C "$REPO" init -q
 git -C "$REPO" config user.name 'Sounio Runtime Selftest'
 git -C "$REPO" config user.email 'coord-runtime-selftest@sounio.local'
 git -C "$REPO" add .
 git -C "$REPO" commit -qm seed
+subprocess_toolchain_commit="$(sed -n 's/^sounio_executable_commit=//p' \
+  "$REPO/tools/loom/subprocess_membrane.freeze.v1")"
+native_hook_cutover_toolchain_commit="$(sed -n 's/^sounio_executable_commit=//p' \
+  "$REPO/tools/loom/native_hook_cutover.freeze.v2")"
+[[ "$subprocess_toolchain_commit" =~ ^[0-9a-f]{40}$ ]] || \
+  fail 'subprocess membrane fixture has no frozen toolchain commit'
+[[ "$native_hook_cutover_toolchain_commit" =~ ^[0-9a-f]{40}$ ]] || \
+  fail 'native hook cutover fixture has no frozen toolchain commit'
+source_objects="$(git -C "$ROOT_DIR" rev-parse --path-format=absolute --git-path objects)"
+printf '%s\n' "$source_objects" > "$REPO/.git/objects/info/alternates"
+git -C "$REPO" cat-file -e "$subprocess_toolchain_commit^{commit}" ||
+  fail 'subprocess membrane frozen toolchain commit is unavailable through the source alternate'
+git -C "$REPO" cat-file -e "$native_hook_cutover_toolchain_commit^{commit}" ||
+  fail 'native hook cutover frozen toolchain commit is unavailable through the source alternate'
 git -C "$REPO" worktree add -q -b second-lane "$SECOND"
 RUNTIME_ROOT="$REPO/.git/sounio-coord-runtime"
+
+# Protocol-v3 runtimes predating ensure timeouts accept only the interval option.
+# A live control service must still transfer when such a runtime is reactivated.
+COMPAT_RUNTIME_ROOT="$TEST_ROOT/cross-generation-runtime"
+COMPAT_PREVIOUS_ID='p3-compat-previous'
+COMPAT_TARGET_ID='p3-compat-target'
+mkdir -p "$COMPAT_RUNTIME_ROOT/versions/$COMPAT_PREVIOUS_ID/bin" \
+  "$COMPAT_RUNTIME_ROOT/versions/$COMPAT_TARGET_ID/bin"
+cat > "$COMPAT_RUNTIME_ROOT/versions/$COMPAT_PREVIOUS_ID/manifest" <<EOF
+runtime_id=$COMPAT_PREVIOUS_ID
+protocol_version=3
+EOF
+cat > "$COMPAT_RUNTIME_ROOT/versions/$COMPAT_TARGET_ID/manifest" <<EOF
+runtime_id=$COMPAT_TARGET_ID
+protocol_version=3
+EOF
+cat > "$COMPAT_RUNTIME_ROOT/versions/$COMPAT_PREVIOUS_ID/bin/sounio-coord-runtime" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  obligation-supervisor-status)
+    printf 'LOOM_OBLIGATION_SUPERVISOR_STATUS state=live pid=41 replayed_utc=fixture count=0 unclosed=0\n'
+    ;;
+  obligation-supervisor-ensure)
+    printf 'LOOM_OBLIGATION_SUPERVISOR_ENSURED state=already-running pid=41 pid_start=1 replayed_utc=fixture\n'
+    ;;
+esac
+EOF
+cat > "$COMPAT_RUNTIME_ROOT/versions/$COMPAT_TARGET_ID/bin/sounio-coord-runtime" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-}" in
+  obligation-supervisor-ensure)
+    shift
+    for argument in "$@"; do
+      [[ "$argument" != --timeout-seconds ]] || {
+        printf '%s\n' 'error: --timeout-seconds is only valid for obligation-supervisor-stop' >&2
+        exit 64
+      }
+    done
+    printf 'LOOM_OBLIGATION_SUPERVISOR_ENSURED state=restarted pid=42 pid_start=2 replayed_utc=fixture\n'
+    ;;
+esac
+EOF
+chmod 0555 \
+  "$COMPAT_RUNTIME_ROOT/versions/$COMPAT_PREVIOUS_ID/bin/sounio-coord-runtime" \
+  "$COMPAT_RUNTIME_ROOT/versions/$COMPAT_TARGET_ID/bin/sounio-coord-runtime"
+ln -s "versions/$COMPAT_PREVIOUS_ID" "$COMPAT_RUNTIME_ROOT/current"
+compat_activation_output="$(
+  cd "$REPO"
+  scripts/dev/install_sounio_coord_runtime.sh \
+    --runtime-dir "$COMPAT_RUNTIME_ROOT" --activate "$COMPAT_TARGET_ID"
+)"
+grep -q '^LOOM_OBLIGATION_SUPERVISOR_ENSURED state=restarted pid=42 ' \
+  <<< "$compat_activation_output" || \
+  fail 'cross-generation activation passed a target-incompatible ensure timeout'
+grep -q "^ACTIVATED runtime_id=$COMPAT_TARGET_ID " <<< "$compat_activation_output" || \
+  fail 'cross-generation activation did not select the compatibility target'
+[[ "$(readlink -f "$COMPAT_RUNTIME_ROOT/current")" == \
+  "$COMPAT_RUNTIME_ROOT/versions/$COMPAT_TARGET_ID" ]] || \
+  fail 'cross-generation activation did not commit the compatibility target'
+
+# A legacy bridge may cross into a bridge-free generation only through the
+# native action-9046 admission command. Missing and DRAINING receipts must leave
+# current byte-for-byte selected on the legacy generation.
+CUTOVER_RUNTIME_ROOT="$TEST_ROOT/cutover-runtime"
+CUTOVER_PREVIOUS_ID='p3-cutover-legacy'
+CUTOVER_TARGET_ID='p3-cutover-native'
+mkdir -p "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_PREVIOUS_ID/bin" \
+  "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_PREVIOUS_ID/hooks" \
+  "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_TARGET_ID/bin" \
+  "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_TARGET_ID/policy/native-hook-generation-drain/tools/loom"
+cp "$ROOT_DIR/tools/loom/native_hook_generation_drain.freeze.v2" \
+  "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_TARGET_ID/policy/native-hook-generation-drain/tools/loom/"
+printf 'runtime_id=%s\nprotocol_version=3\n' "$CUTOVER_PREVIOUS_ID" \
+  > "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_PREVIOUS_ID/manifest"
+printf 'legacy-bridge-fixture\n' \
+  > "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_PREVIOUS_ID/hooks/sounio_coord_agent_hook_runtime.py"
+cat > "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_PREVIOUS_ID/bin/sounio-coord-runtime" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+cat > "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_TARGET_ID/bin/sounio-loom-native-hook-generation-drain" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' 'SOUNIO_NATIVE_HOOK_GENERATION_DRAIN CUTOVER_READY semantic_authority=Sounio action=9046'
+EOF
+cat > "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_TARGET_ID/bin/sounio-loom-runtime" <<'EOF'
+#!/usr/bin/env bash
+[[ "${1:-}" == hook-generation-cutover-admit ]] || exit 64
+if [[ "${SOUNIO_CUTOVER_TRANSPORT_FIXTURE:-draining}" == ready ]]; then
+  printf '%s\n' '{"schema":"loom-native-hook-generation-drain-snapshot-v1","semantic_authority":"Sounio","action":9046,"decision":"CUTOVER_READY","cutover_ready":true}'
+  exit 0
+fi
+printf '%s\n' '{"schema":"loom-native-hook-generation-drain-snapshot-v1","semantic_authority":"Sounio","action":9046,"decision":"DRAINING","cutover_ready":false}'
+exit 42
+EOF
+cat > "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_TARGET_ID/bin/sounio-coord-runtime" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod 0555 \
+  "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_PREVIOUS_ID/bin/sounio-coord-runtime" \
+  "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_TARGET_ID/bin/sounio-coord-runtime" \
+  "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_TARGET_ID/bin/sounio-loom-runtime" \
+  "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_TARGET_ID/bin/sounio-loom-native-hook-generation-drain"
+cutover_authority_sha="$(sha256sum \
+  "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_TARGET_ID/bin/sounio-loom-native-hook-generation-drain" | awk '{print $1}')"
+cat > "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_TARGET_ID/manifest" <<EOF
+runtime_id=$CUTOVER_TARGET_ID
+protocol_version=3
+loom_native_hook_generation_drain_semantics_sha256=c3804ea1f88a415ffdffaa7c505eb2d372237ced9250580ce84b7132aef099fb
+loom_native_hook_generation_drain_manifest_sha256=ba87be5dbd1fa9c8d372c3c93ec6685ce10daa11e5de22bb904b698ec1733a61
+loom_native_hook_generation_drain_runtime_sha256=$cutover_authority_sha
+capability=loom-native-hook-generation-drain-v1
+EOF
+ln -s "versions/$CUTOVER_PREVIOUS_ID" "$CUTOVER_RUNTIME_ROOT/current"
+ln -s "versions/$CUTOVER_TARGET_ID" "$CUTOVER_RUNTIME_ROOT/native-next"
+set +e
+cutover_missing_output="$(
+  cd "$REPO"
+  scripts/dev/install_sounio_coord_runtime.sh \
+    --runtime-dir "$CUTOVER_RUNTIME_ROOT" --activate "$CUTOVER_TARGET_ID" 2>&1
+)"
+cutover_missing_rc=$?
+cutover_draining_output="$(
+  cd "$REPO"
+  scripts/dev/install_sounio_coord_runtime.sh \
+    --runtime-dir "$CUTOVER_RUNTIME_ROOT" --activate "$CUTOVER_TARGET_ID" \
+    --cutover-root "$REPO" 2>&1
+)"
+cutover_draining_rc=$?
+set -e
+[[ "$cutover_missing_rc" -ne 0 && \
+  "$cutover_missing_output" == *'requires --cutover-root and a CUTOVER_READY receipt'* ]] ||
+  fail 'bridge-free activation did not fail closed without a cutover root'
+[[ "$cutover_draining_rc" -ne 0 && \
+  "$cutover_draining_output" == *'Sounio action 9046 refused legacy-to-native activation'* && \
+  "$cutover_draining_output" == *'"decision":"DRAINING"'* ]] ||
+  fail 'bridge-free activation accepted a DRAINING receipt'
+[[ "$(readlink -f "$CUTOVER_RUNTIME_ROOT/current")" == \
+  "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_PREVIOUS_ID" ]] ||
+  fail 'refused bridge-free activation changed current'
+cutover_ready_output="$(
+  cd "$REPO"
+  SOUNIO_CUTOVER_TRANSPORT_FIXTURE=ready \
+    scripts/dev/install_sounio_coord_runtime.sh \
+      --runtime-dir "$CUTOVER_RUNTIME_ROOT" --activate "$CUTOVER_TARGET_ID" \
+      --cutover-root "$REPO"
+)"
+grep -q '"decision":"CUTOVER_READY"' <<< "$cutover_ready_output" ||
+  fail 'bridge-free activation omitted its native CUTOVER_READY receipt'
+grep -q "^ACTIVATED runtime_id=$CUTOVER_TARGET_ID " <<< "$cutover_ready_output" ||
+  fail 'bridge-free activation did not select its admitted generation'
+[[ "$(readlink -f "$CUTOVER_RUNTIME_ROOT/current")" == \
+  "$CUTOVER_RUNTIME_ROOT/versions/$CUTOVER_TARGET_ID" ]] ||
+  fail 'CUTOVER_READY activation did not commit current'
 
 output="$(cd "$REPO" && SOUNIO_COORD_RUNTIME_MODE=local bin/sounio-coord runtime-info)"
 grep -q '^selection=local$' <<< "$output" || fail 'launcher did not report its local fallback'
 grep -q '^protocol_version=3$' <<< "$output" || fail 'local runtime protocol is wrong'
 
+# Lock contention waits for a bounded interval, then fails closed without
+# changing coordination state.
+SOUNIO_COORD_DIR="$STATE" SOUNIO_COORD_RUNTIME_MODE=local \
+  "$REPO/bin/sounio-coord" brief >/dev/null
+: > "$STATE/.claims.lock"
+lock_snapshot_before="$(snapshot_coord_state)"
+lock_ready="$TEST_ROOT/lock-ready"
+(
+  exec 9>"$STATE/.claims.lock"
+  flock 9
+  : > "$lock_ready"
+  sleep 5
+) &
+lock_holder_pid=$!
+for _ in $(seq 1 50); do
+  [[ -f "$lock_ready" ]] && break
+  sleep 0.02
+done
+[[ -f "$lock_ready" ]] || fail 'lock sabotage holder did not become ready'
+lock_started_ns="$(date +%s%N)"
+set +e
+lock_output="$(cd "$REPO" && SOUNIO_COORD_DIR="$STATE" \
+  SOUNIO_COORD_RUNTIME_MODE=local SOUNIO_COORD_LOCK_WAIT_SECONDS=0.2 \
+  bin/sounio-coord claim --agent lock-test --lane held \
+  --intent 'held lock must fail closed' --files lock-sabotage.test 2>&1)"
+lock_rc=$?
+set -e
+lock_elapsed_ms=$((($(date +%s%N) - lock_started_ns) / 1000000))
+kill "$lock_holder_pid" 2>/dev/null || true
+wait "$lock_holder_pid" 2>/dev/null || true
+lock_holder_pid=''
+[[ "$lock_rc" -ne 0 ]] || fail 'held lock sabotage was allowed'
+grep -q 'coordination state is being changed; retry the claim' <<< "$lock_output" || \
+  fail "held lock refusal omitted its retry reason: $lock_output"
+((lock_elapsed_ms >= 100 && lock_elapsed_ms < 1500)) || \
+  fail "held lock timeout was not bounded: ${lock_elapsed_ms}ms"
+lock_snapshot_after="$(snapshot_coord_state)"
+[[ "$lock_snapshot_after" == "$lock_snapshot_before" ]] || \
+  fail 'held lock refusal mutated coordination state'
+
 output="$(cd "$REPO" && bin/sounio-coord install-runtime)"
 first_id="$(sed -n 's/^INSTALLED runtime_id=\([^ ]*\).*/\1/p' <<< "$output")"
 [[ -n "$first_id" ]] || fail 'installer did not return the first runtime id'
 grep -q "^ACTIVATED runtime_id=$first_id " <<< "$output" || fail 'first runtime was not activated'
+current_before_stage="$(readlink -f "$RUNTIME_ROOT/current")"
+stage_output="$(cd "$REPO" && bin/sounio-coord install-runtime --stage)"
+grep -q "^STAGED runtime_id=$first_id .*current_unchanged=true candidate_selected=true$" \
+  <<< "$stage_output" || fail 'staged runtime did not publish the candidate selector'
+[[ "$(readlink -f "$RUNTIME_ROOT/current")" == "$current_before_stage" ]] ||
+  fail 'staging changed the active runtime'
+[[ "$(readlink -f "$RUNTIME_ROOT/native-next")" == \
+  "$RUNTIME_ROOT/versions/$first_id" ]] ||
+  fail 'staging did not atomically select native-next'
 first_manifest="$RUNTIME_ROOT/versions/$first_id/manifest"
 first_source_sha="$(git -C "$REPO" rev-parse --short=12 HEAD)"
 grep -q "^source_sha=$first_source_sha$" "$first_manifest" || \
   fail 'runtime manifest source SHA does not identify the committed source'
 grep -q '^source_state=clean$' "$first_manifest" || \
   fail 'runtime manifest omitted clean source provenance'
+coord_runtime_sha="$(sha256sum "$RUNTIME_ROOT/versions/$first_id/bin/sounio-coord-runtime" | awk '{print $1}')"
+loom_runtime_sha="$(sha256sum "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-runtime" | awk '{print $1}')"
+loom_custody_transfer_sha="$(sha256sum "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-custody-transfer-runtime" | awk '{print $1}')"
+loom_execution_outcome_sha="$(sha256sum "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-execution-outcome-runtime" | awk '{print $1}')"
+loom_generation_reconcile_sha="$(sha256sum "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-native-hook-generation-reconcile" | awk '{print $1}')"
+loom_routing_authority_sha="$(sha256sum "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-routing-authority-runtime" | awk '{print $1}')"
+grep -qx "coord_runtime_sha256=$coord_runtime_sha" "$first_manifest" || \
+  fail 'runtime manifest did not pin the coordination runtime executable'
+grep -qx "loom_runtime_sha256=$loom_runtime_sha" "$first_manifest" || \
+  fail 'runtime manifest did not pin the compiled OCaml Loom executable'
+grep -qx "loom_custody_transfer_runtime_sha256=$loom_custody_transfer_sha" \
+  "$first_manifest" || \
+  fail 'runtime manifest did not pin the frozen Sounio custody-transfer executable'
+grep -qx "loom_execution_outcome_runtime_sha256=$loom_execution_outcome_sha" \
+  "$first_manifest" || \
+  fail 'runtime manifest did not pin the frozen Sounio execution-outcome executable'
+grep -qx "loom_native_hook_generation_reconcile_runtime_sha256=$loom_generation_reconcile_sha" \
+  "$first_manifest" || \
+  fail 'runtime manifest did not pin frozen Sounio action 9047'
+grep -qx "loom_routing_authority_runtime_sha256=$loom_routing_authority_sha" \
+  "$first_manifest" || \
+  fail 'runtime manifest did not pin frozen Sounio routing action 9032'
+grep -q '^capability=loom-routing-authority-v1$' "$first_manifest" || \
+  fail 'runtime manifest omitted routing authority'
+[[ -f "$RUNTIME_ROOT/versions/$first_id/policy/routing-authority/tools/loom/routing_authority.freeze.v2" ]] || \
+  fail 'installed runtime omitted the routing authority policy capsule'
+outbox_output="$(SOUNIO_COORD_DIR="$STATE" \
+  "$RUNTIME_ROOT/versions/$first_id/bin/sounio-coord-runtime" \
+    outbox --agent runtime-selftest --lane outbox-selftest)"
+grep -q '^outbox_messages=0$' <<< "$outbox_output" || \
+  fail "installed coordination runtime omitted working outbox: $outbox_output"
+grep -q '^capability=loom-native-hook-generation-reconcile-v1$' "$first_manifest" || \
+  fail 'runtime manifest omitted native hook generation reconciliation'
+grep -q '^capability=loom-native-hook-binary-attestation-v1$' "$first_manifest" || \
+  fail 'runtime manifest omitted native hook binary attestation'
+if grep -q '^capability=loom-product-exec-ingress-dark-attachment-v1$' \
+    "$first_manifest"; then
+  fail 'runtime manifest revived the superseded product ExecIngress capability'
+fi
+grep -q '^capability=loom-sovereign-execution-kernel-product-v1$' \
+  "$first_manifest" || fail 'runtime manifest omitted sovereign execution'
+exec_ingress_capsule="$RUNTIME_ROOT/versions/$first_id/policy/product-exec-ingress"
+exec_ingress_freeze="$exec_ingress_capsule/tools/loom/product_exec_ingress_dark.runtime.v1"
+exec_ingress_contract="$exec_ingress_capsule/tools/loom/PRODUCT_EXEC_INGRESS_DARK_ATTACHMENT_V1.md"
+exec_ingress_evidence="$exec_ingress_capsule/tools/loom/evidence/loom-product-exec-ingress-dark-v1-20260829.txt"
+for pair in \
+  "$exec_ingress_freeze:loom_product_exec_ingress_manifest_sha256" \
+  "$exec_ingress_contract:loom_product_exec_ingress_contract_sha256" \
+  "$exec_ingress_evidence:loom_product_exec_ingress_evidence_sha256"; do
+  capsule_path="${pair%%:*}"
+  manifest_key="${pair#*:}"
+  capsule_sha="$(sha256sum "$capsule_path" | awk '{print $1}')"
+  grep -qx "$manifest_key=$capsule_sha" "$first_manifest" ||
+    fail "runtime manifest did not pin $capsule_path"
+done
+exec_ingress_reference_sha="$(sed -n 's/^runtime_sha256=//p' \
+  "$exec_ingress_freeze")"
+grep -qx "loom_product_exec_ingress_reference_runtime_sha256=$exec_ingress_reference_sha" \
+  "$first_manifest" || fail 'runtime manifest omitted the reference Loom binary'
+expected_reference_match=false
+[[ "$exec_ingress_reference_sha" != "$loom_runtime_sha" ]] ||
+  expected_reference_match=true
+grep -qx "loom_product_exec_ingress_reference_runtime_match=$expected_reference_match" \
+  "$first_manifest" || fail 'runtime manifest misstated reference reproducibility'
+for source_pair in \
+  exec_ingress_source_path:exec_ingress_source_sha256 \
+  hook_source_path:hook_source_sha256 \
+  membrane_source_path:membrane_source_sha256 \
+  cli_source_path:cli_source_sha256 \
+  c_stub_path:c_stub_sha256 \
+  dune_path:dune_sha256; do
+  source_path_key="${source_pair%%:*}"
+  source_hash_key="${source_pair#*:}"
+  source_rel="$(sed -n "s/^${source_path_key}=//p" "$exec_ingress_freeze")"
+  source_expected="$(sed -n "s/^${source_hash_key}=//p" "$exec_ingress_freeze")"
+  source_actual="$(sha256sum "$exec_ingress_capsule/$source_rel" | awk '{print $1}')"
+  [[ "$source_actual" == "$source_expected" ]] ||
+    fail "product ExecIngress source capsule drifted: $source_rel"
+done
+
+active_before_tamper="$(readlink -f "$RUNTIME_ROOT/current")"
+cp -a "$RUNTIME_ROOT/versions/$first_id" \
+  "$RUNTIME_ROOT/versions/product-exec-ingress-historical-source-drift"
+sed -i \
+  's/^runtime_id=.*/runtime_id=product-exec-ingress-historical-source-drift/' \
+  "$RUNTIME_ROOT/versions/product-exec-ingress-historical-source-drift/manifest"
+chmod u+w \
+  "$RUNTIME_ROOT/versions/product-exec-ingress-historical-source-drift/policy/product-exec-ingress/tools/loom/src/loom_exec_ingress.ml"
+printf '\n(* historical product ExecIngress source sabotage *)\n' >> \
+  "$RUNTIME_ROOT/versions/product-exec-ingress-historical-source-drift/policy/product-exec-ingress/tools/loom/src/loom_exec_ingress.ml"
+set +e
+historical_exec_ingress_tamper_output="$(cd "$REPO" && \
+  scripts/dev/install_sounio_coord_runtime.sh --runtime-dir "$RUNTIME_ROOT" \
+    --activate product-exec-ingress-historical-source-drift 2>&1)"
+historical_exec_ingress_tamper_rc=$?
+set -e
+[[ "$historical_exec_ingress_tamper_rc" -ne 0 && \
+  "$historical_exec_ingress_tamper_output" == \
+    *'installed product ExecIngress source drifted: tools/loom/src/loom_exec_ingress.ml'* ]] ||
+  fail "activation did not causally refuse historical product ExecIngress source drift: rc=$historical_exec_ingress_tamper_rc output=$historical_exec_ingress_tamper_output"
+[[ "$(readlink -f "$RUNTIME_ROOT/current")" == "$active_before_tamper" ]] ||
+  fail 'failed historical product ExecIngress source activation changed the current runtime link'
+
+cp -a "$RUNTIME_ROOT/versions/$first_id" \
+  "$RUNTIME_ROOT/versions/sovereign-execution-source-drift"
+sed -i \
+  's/^runtime_id=.*/runtime_id=sovereign-execution-source-drift/' \
+  "$RUNTIME_ROOT/versions/sovereign-execution-source-drift/manifest"
+chmod u+w \
+  "$RUNTIME_ROOT/versions/sovereign-execution-source-drift/policy/sovereign-execution/tools/loom/src/loom_sovereign_exec.ml"
+printf '\n(* sovereign execution source sabotage *)\n' >> \
+  "$RUNTIME_ROOT/versions/sovereign-execution-source-drift/policy/sovereign-execution/tools/loom/src/loom_sovereign_exec.ml"
+set +e
+sovereign_tamper_output="$(cd "$REPO" && \
+  scripts/dev/install_sounio_coord_runtime.sh --runtime-dir "$RUNTIME_ROOT" \
+    --activate sovereign-execution-source-drift 2>&1)"
+sovereign_tamper_rc=$?
+set -e
+[[ "$sovereign_tamper_rc" -ne 0 && \
+  "$sovereign_tamper_output" == \
+    *'installed sovereign execution product source drifted: tools/loom/src/loom_sovereign_exec.ml'* ]] ||
+  fail "activation did not causally refuse sovereign source drift: rc=$sovereign_tamper_rc output=$sovereign_tamper_output"
+[[ "$(readlink -f "$RUNTIME_ROOT/current")" == "$active_before_tamper" ]] ||
+  fail 'failed sovereign source activation changed the current runtime link'
+for tamper_binary in sounio-coord-runtime sounio-loom-runtime \
+  sounio-loom-custody-transfer-runtime sounio-loom-execution-outcome-runtime \
+  sounio-loom-native-hook-generation-reconcile; do
+  binary="$RUNTIME_ROOT/versions/$first_id/bin/$tamper_binary"
+  saved_binary="$TEST_ROOT/$tamper_binary.saved"
+  cp -p "$binary" "$saved_binary"
+  chmod u+w "$binary"
+  printf x >> "$binary"
+  set +e
+  tamper_output="$(cd "$REPO" && scripts/dev/install_sounio_coord_runtime.sh \
+    --runtime-dir "$RUNTIME_ROOT" --activate "$first_id" 2>&1)"
+  tamper_rc=$?
+  set -e
+  [[ "$tamper_rc" -ne 0 && "$tamper_output" == *'binary hash mismatch'* ]] || \
+    fail "activation accepted tampered $tamper_binary: rc=$tamper_rc output=$tamper_output"
+  [[ "$(readlink -f "$RUNTIME_ROOT/current")" == "$active_before_tamper" ]] || \
+    fail 'failed binary activation changed the current runtime link'
+  cp -p "$saved_binary" "$binary"
+done
+
+cp -a "$RUNTIME_ROOT/versions/$first_id" \
+  "$RUNTIME_ROOT/versions/execution-outcome-semantics-drift"
+sed -i 's/^runtime_id=.*/runtime_id=execution-outcome-semantics-drift/' \
+  "$RUNTIME_ROOT/versions/execution-outcome-semantics-drift/manifest"
+sed -i 's/^loom_execution_outcome_semantics_sha256=.*/loom_execution_outcome_semantics_sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/' \
+  "$RUNTIME_ROOT/versions/execution-outcome-semantics-drift/manifest"
+set +e
+outcome_semantics_output="$(cd "$REPO" && scripts/dev/install_sounio_coord_runtime.sh \
+  --runtime-dir "$RUNTIME_ROOT" --activate execution-outcome-semantics-drift 2>&1)"
+outcome_semantics_rc=$?
+set -e
+[[ "$outcome_semantics_rc" -ne 0 && \
+  "$outcome_semantics_output" == *'not bound to frozen Sounio semantics'* ]] || \
+  fail "activation accepted execution-outcome semantics drift: rc=$outcome_semantics_rc output=$outcome_semantics_output"
+
+cp -a "$RUNTIME_ROOT/versions/$first_id" \
+  "$RUNTIME_ROOT/versions/execution-outcome-manifest-drift"
+sed -i 's/^runtime_id=.*/runtime_id=execution-outcome-manifest-drift/' \
+  "$RUNTIME_ROOT/versions/execution-outcome-manifest-drift/manifest"
+sed -i 's/^loom_execution_outcome_manifest_sha256=.*/loom_execution_outcome_manifest_sha256=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/' \
+  "$RUNTIME_ROOT/versions/execution-outcome-manifest-drift/manifest"
+set +e
+outcome_manifest_output="$(cd "$REPO" && scripts/dev/install_sounio_coord_runtime.sh \
+  --runtime-dir "$RUNTIME_ROOT" --activate execution-outcome-manifest-drift 2>&1)"
+outcome_manifest_rc=$?
+set -e
+[[ "$outcome_manifest_rc" -ne 0 && \
+  "$outcome_manifest_output" == *'unknown freeze manifest'* ]] || \
+  fail "activation accepted execution-outcome manifest drift: rc=$outcome_manifest_rc output=$outcome_manifest_output"
+
+cp -a "$RUNTIME_ROOT/versions/$first_id" \
+  "$RUNTIME_ROOT/versions/execution-outcome-custody-omitted"
+sed -i 's/^runtime_id=.*/runtime_id=execution-outcome-custody-omitted/' \
+  "$RUNTIME_ROOT/versions/execution-outcome-custody-omitted/manifest"
+sed -i '/^capability=loom-transactional-custody-transfer-v1$/d' \
+  "$RUNTIME_ROOT/versions/execution-outcome-custody-omitted/manifest"
+set +e
+outcome_custody_output="$(cd "$REPO" && scripts/dev/install_sounio_coord_runtime.sh \
+  --runtime-dir "$RUNTIME_ROOT" --activate execution-outcome-custody-omitted 2>&1)"
+outcome_custody_rc=$?
+set -e
+[[ "$outcome_custody_rc" -ne 0 && \
+  "$outcome_custody_output" == *'without transactional custody'* ]] || \
+  fail "activation accepted execution outcome without custody: rc=$outcome_custody_rc output=$outcome_custody_output"
+[[ "$(readlink -f "$RUNTIME_ROOT/current")" == "$active_before_tamper" ]] || \
+  fail 'failed execution-outcome activation changed the current runtime link'
+
 git -C "$REPO" ls-tree -r --name-only "$first_source_sha" | \
-  grep -qx 'stdlib/coordination/loom_witness_epoch_handoff.sio' || \
+  grep -x 'stdlib/coordination/loom_witness_epoch_handoff.sio' >/dev/null || \
   fail 'runtime source SHA omits the frame-9015 source'
 git -C "$REPO" ls-tree -r --name-only "$first_source_sha" | \
-  grep -qx 'stdlib/coordination/loom_witness_epoch_transparency.sio' || \
+  grep -x 'stdlib/coordination/loom_witness_epoch_transparency.sio' >/dev/null || \
   fail 'runtime source SHA omits the frame-9016 source'
+git -C "$REPO" ls-tree -r --name-only "$first_source_sha" | \
+  grep -x 'stdlib/coordination/loom_custody_transfer.sio' >/dev/null || \
+  fail 'runtime source SHA omits the frame-9040 source'
+git -C "$REPO" ls-tree -r --name-only "$first_source_sha" | \
+  grep -x 'stdlib/coordination/loom_execution_outcome_authority.sio' >/dev/null || \
+  fail 'runtime source SHA omits the frame-9022 source'
 
 printf '\n# dirty runtime source control\n' >> \
   "$REPO/stdlib/coordination/loom_witness_epoch_handoff.sio"
@@ -163,6 +850,48 @@ git -C "$REPO" show HEAD:stdlib/coordination/loom_witness_epoch_handoff.sio > \
   fail 'installed runtime omitted the detached agent supervisor'
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-runtime" ]] || \
   fail 'installed runtime omitted the OCaml Loom kernel'
+[[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-language-authority-runtime" ]] || \
+  fail 'installed runtime omitted the frozen Sounio language authority'
+[[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-native-hook-generation-reconcile" ]] || \
+  fail 'installed runtime omitted frozen Sounio action 9047'
+[[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-custody-transfer-runtime" ]] || \
+  fail 'installed runtime omitted the frozen Sounio custody-transfer authority'
+grep -q '^loom_custody_transfer_semantics_sha256=4ce6630421544f40a13b88b17e5692e7906a7a1a12056334fe35fea0f0803727$' \
+  "$first_manifest" || \
+  fail 'installed runtime omitted frozen custody-transfer semantics'
+[[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-execution-outcome-runtime" ]] || \
+  fail 'installed runtime omitted the frozen Sounio execution-outcome authority'
+grep -q '^loom_execution_outcome_semantics_sha256=9dc1bf465c15259b15eee447d27c24450550df0a2c41c48dc2fd0712a3232b59$' \
+  "$first_manifest" || \
+  fail 'installed runtime omitted frozen execution-outcome semantics'
+grep -q '^loom_execution_outcome_manifest_sha256=e0ebf1a24dea80a57c2fa256474620fb4a93e047ea027538f8ecdc8bdc27b6e1$' \
+  "$first_manifest" || \
+  fail 'installed runtime omitted the execution-outcome freeze identity'
+[[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-lane-health-runtime" && \
+  -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-lane-health-parity-runtime" ]] || \
+  fail 'installed runtime omitted the frozen Sounio lane-health executables'
+grep -q '^loom_lane_health_semantics_sha256=8d4b03d3cf327bafa476c7e8bae309a6e1603565cd139be0674e579d6bcfcc74$' \
+  "$first_manifest" || fail 'installed runtime omitted frozen lane-health semantics'
+grep -q '^capability=loom-native-agent-hook-v1$' "$first_manifest" || \
+  fail 'installed runtime omitted the native-agent-hook capability'
+grep -q '^loom_language_authority_semantics_sha256=7a0115e5918ca6ff3f7ad82f073e1c08d1d98b62f6f927dd69265c14205190b6$' \
+  "$first_manifest" || fail 'installed native hook is not bound to frozen Sounio semantics'
+authority_capsule="$RUNTIME_ROOT/versions/$first_id/policy/language-authority"
+[[ -f "$authority_capsule/tools/loom/language_authority.freeze.v2" && \
+  -f "$authority_capsule/tools/loom/language_authority_main.sio" && \
+  -f "$authority_capsule/stdlib/coordination/loom_language_authority.sio" ]] || \
+  fail 'installed runtime omitted the frozen Sounio authority capsule'
+for binding in \
+  "loom_language_authority_policy_manifest_sha256:$authority_capsule/tools/loom/language_authority.freeze.v2" \
+  "loom_language_authority_policy_source_sha256:$authority_capsule/stdlib/coordination/loom_language_authority.sio" \
+  "loom_language_authority_policy_entrypoint_sha256:$authority_capsule/tools/loom/language_authority_main.sio"; do
+  key="${binding%%:*}"
+  path="${binding#*:}"
+  expected="$(sed -n "s/^${key}=//p" "$first_manifest")"
+  actual="$(sha256sum "$path" | awk '{print $1}')"
+  [[ -n "$expected" && "$actual" == "$expected" ]] || \
+    fail "installed authority capsule binding drifted: key=$key"
+done
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-continuity-runtime" ]] || \
   fail 'installed runtime omitted the native Sounio continuity adapter'
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-obligation-runtime" ]] || \
@@ -185,6 +914,15 @@ git -C "$REPO" show HEAD:stdlib/coordination/loom_witness_epoch_handoff.sio > \
   fail 'installed runtime omitted the native Sounio witness-epoch-handoff adapter'
 [[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-witness-epoch-transparency-runtime" ]] || \
   fail 'installed runtime omitted the native Sounio witness-epoch-transparency adapter'
+[[ -x "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-message-runtime" ]] || \
+  fail 'installed runtime omitted the authenticated OCaml message bridge'
+message_runtime_sha="$(
+  sha256sum "$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-message-runtime" | \
+    awk '{print $1}'
+)"
+grep -q "^loom_message_runtime_sha256=$message_runtime_sha$" \
+  "$RUNTIME_ROOT/versions/$first_id/manifest" || \
+  fail 'installed message bridge binary is not bound to its manifest hash'
 grep -q '^loom_witness_mesh_language=Sounio$' \
   "$RUNTIME_ROOT/versions/$first_id/manifest" || \
   fail 'installed runtime omitted the witness-mesh language declaration'
@@ -239,6 +977,10 @@ grep -q '^capability=fleet-reconciler-v1$' "$RUNTIME_ROOT/versions/$first_id/man
 for capability in agentd-argv-attestation-v1 agentd-tui-submit-v1 \
   agentd-logical-command-v1 coord-reply-correlation-v1 \
   agentd-runtime-registration-v1 loom-kernel-v1 loom-cursor-replay-v1 \
+  loom-native-hook-binary-attestation-v1 loom-runtime-authority-capsule-v1 \
+  loom-authenticated-message-bridge-v1 \
+  loom-transactional-custody-transfer-v1 \
+  loom-truthful-lane-health-v1 loom-nondestructive-health-reconcile-v1 \
   loom-native-sounio-continuity-v1 \
   loom-durable-obligation-v1 \
   loom-epistemic-machine-v0 loom-epistemic-arrow-projection-v0 \
@@ -270,14 +1012,16 @@ for capability in agentd-argv-attestation-v1 agentd-tui-submit-v1 \
   loom-journal-authority-quorum-v1 \
   loom-cross-node-replay-v1 \
   loom-exclusive-input-lease-v1 loom-read-only-gui-v1 \
-  loom-fusion-cockpit-v1 loom-authority-overlay-v1 \
+  loom-fusion-cockpit-v1 loom-authority-overlay-v1 loom-authority-overlay-v2 \
   coord-cockpit-snapshot-v1 loom-persistent-provider-custody-v1 \
   coord-reply-command-v1 loom-coord-transport-v1 \
   coord-generation-scoped-wake-v1 \
   loom-recoverable-guardian-v1 loom-kernel-recovery-v1 loom-dual-journal-v1 \
   loom-persistent-fleet-catalog-v1 loom-post-pod-reconcile-v1 \
-  loom-fleet-custody-catalog-v2 loom-conflict-free-active-adoption-v1 \
+  loom-fleet-custody-catalog-v2 loom-fleet-custody-catalog-v3 \
+  loom-conflict-free-active-adoption-v1 \
   loom-coordination-authority-binding-v1 \
+  loom-durable-execution-outcome-v1 \
   fleet-linear-capability-v1 \
   fleet-home-isolation-v1 \
   fleet-presentation-follow-v1 \
@@ -302,8 +1046,83 @@ output="$(cd "$SECOND" && bin/sounio-loom runtime-info)"
 grep -q '^selection=shared$' <<< "$output" || fail 'Loom launcher did not select the shared runtime'
 grep -q "^runtime_id=$first_id$" <<< "$output" || fail 'Loom selected a different runtime id'
 grep -q '^language=OCaml$' <<< "$output" || fail 'shared Loom runtime is not the OCaml kernel'
-grep -q '^runtime_version=2026.08.26.26$' <<< "$output" || \
+first_runtime_version="$(sed -n 's/^runtime_version=//p' "$first_manifest")"
+[[ -n "$first_runtime_version" ]] || fail 'installed runtime manifest omitted its version'
+grep -qx "runtime_version=$first_runtime_version" <<< "$output" || \
   fail 'shared Loom kernel version diverged from its runtime bundle'
+set +e
+message_bridge_probe="$(
+  cd "$SECOND" && bin/sounio-loom message-serve \
+    --cwd "$SECOND" --token-file "$TEST_ROOT/missing-message-bridge.cap" 2>&1
+)"
+message_bridge_probe_rc=$?
+set -e
+[[ "$message_bridge_probe_rc" -ne 0 ]] || \
+  fail 'installed Loom message bridge accepted a missing capability'
+grep -q 'message-bridge-token-missing' <<< "$message_bridge_probe" || \
+  fail 'installed Loom runtime omitted the authenticated message bridge command'
+
+mkdir -p "$POLICYLESS/bin"
+git init -q "$POLICYLESS"
+cp "$ROOT_DIR/bin/sounio-coord" "$POLICYLESS/bin/"
+capsule_session="runtime-capsule-$$"
+capsule_receipt="$TEST_ROOT/runtime-capsule.tsv"
+capsule_runtime="$RUNTIME_ROOT/versions/$first_id/bin/sounio-loom-runtime"
+capsule_harness="$TEST_ROOT/codex"
+cp "$(command -v bash)" "$capsule_harness"
+chmod 0755 "$capsule_harness"
+capsule_start_event="{\"hook_event_name\":\"SessionStart\",\"session_id\":\"$capsule_session\",\"cwd\":\"$POLICYLESS\"}"
+capsule_end_event="{\"hook_event_name\":\"SessionEnd\",\"session_id\":\"$capsule_session\",\"cwd\":\"$POLICYLESS\"}"
+capsule_hook_command='runtime_dir="$(readlink -f "${SOUNIO_COORD_RUNTIME_DIR:-$(git rev-parse --path-format=absolute --git-common-dir)/sounio-coord-runtime}/current")" && test -n "$runtime_dir" && exec env SOUNIO_LOOM_LANGUAGE_AUTHORITY_ROOT="$runtime_dir/policy/language-authority" "$runtime_dir/bin/sounio-loom-runtime" agent-hook --agent codex'
+output="$(
+  cd "$POLICYLESS"
+  printf '%s\n%s\n' "$capsule_start_event" "$capsule_end_event" | \
+    SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$CAPSULE_STATE" \
+    SOUNIO_COORD_NATIVE_HOOK_SELFTEST=1 SOUNIO_LOOM_HOOK_TEST_MODE=1 \
+    SOUNIO_LOOM_LANGUAGE_AUTHORITY_LOG="$capsule_receipt" \
+    "$capsule_harness" -c \
+      'while IFS= read -r event; do printf "%s\n" "$event" | /bin/bash -c "$1" || exit $?; done' \
+      _ "$capsule_hook_command"
+)"
+grep -Fq 'Sounio coordination joined:' <<< "$output" || \
+  fail 'policyless SessionStart did not join through the exact hook command'
+grep -Fq 'decision=ALLOW' "$capsule_receipt" || \
+  fail 'policyless worktree did not reach an ALLOW receipt'
+grep -Fq 'semantic_authority_origin=runtime-capsule' "$capsule_receipt" || \
+  fail 'policyless worktree did not use the installed authority capsule'
+capsule_supervisor_status="$(
+  SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$CAPSULE_STATE" \
+    "$POLICYLESS/bin/sounio-coord" obligation-supervisor-status
+)"
+grep -Fq 'state=live' <<< "$capsule_supervisor_status" || \
+  fail 'policyless SessionStart did not leave the native obligation supervisor live'
+capsule_supervisor_pid="$(sed -n 's/.* pid=\([0-9][0-9]*\) .*/\1/p' <<< "$capsule_supervisor_status")"
+capsule_supervisor_wrapper="$(sed -n 's/^PPid:[[:space:]]*//p' "/proc/$capsule_supervisor_pid/status")"
+grep -Fxq "SOUNIO_COORD_DIR=$CAPSULE_STATE" \
+  < <(tr '\0' '\n' < "/proc/$capsule_supervisor_wrapper/environ") || \
+  fail 'detached supervisor wrapper omitted its explicit state-root identity'
+SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$CAPSULE_STATE" \
+  "$POLICYLESS/bin/sounio-coord" obligation-supervisor-stop \
+  --timeout-seconds 5 >/dev/null
+
+capsule_source="$authority_capsule/stdlib/coordination/loom_language_authority.sio"
+cp "$capsule_source" "$TEST_ROOT/authority-source.saved"
+printf 'sabotaged\n' > "$capsule_source"
+set +e
+capsule_sabotage_output="$(
+  cd "$POLICYLESS"
+  printf '%s\n' "$capsule_end_event" | \
+    SOUNIO_COORD_RUNTIME_DIR="$RUNTIME_ROOT" SOUNIO_COORD_DIR="$CAPSULE_STATE" \
+    SOUNIO_COORD_NATIVE_HOOK_SELFTEST=1 SOUNIO_LOOM_HOOK_TEST_MODE=1 \
+    SOUNIO_LOOM_LANGUAGE_AUTHORITY_LOG="$capsule_receipt" \
+    "$capsule_runtime" agent-hook --agent codex 2>&1
+)"
+capsule_sabotage_rc=$?
+set -e
+mv "$TEST_ROOT/authority-source.saved" "$capsule_source"
+[[ "$capsule_sabotage_rc" -ne 0 && \
+  "$capsule_sabotage_output" == *'Sounio-authority-source-hash-mismatch'* ]] || \
+  fail "authority capsule sabotage was not refused: rc=$capsule_sabotage_rc output=$capsule_sabotage_output"
 output="$(cd "$SECOND" && bin/sounio-fleet runtime-info)"
 grep -q '^selection=shared$' <<< "$output" || fail 'fleet launcher did not select the shared runtime'
 grep -q "^runtime_id=$first_id$" <<< "$output" || fail 'fleet selected a different runtime id'
@@ -365,8 +1184,18 @@ output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" bin/sounio-coord obligation-
 grep -q '"count":2,"unclosed":2' <<< "$output" || \
   fail 'post-activation stale request was not imported or historical control leaked in'
 
+set +e
 output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
-  bin/sounio-coord obligation-supervisor-ensure --interval-seconds 1)"
+  bin/sounio-coord obligation-supervisor-ensure --timeout-seconds 301 2>&1)"
+supervisor_timeout_status=$?
+set -e
+((supervisor_timeout_status != 0)) && \
+  grep -q 'obligation supervisor timeout must be between 1 and 300 seconds' \
+    <<< "$output" ||
+  fail 'out-of-range supervisor takeover timeout was not refused'
+output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
+  bin/sounio-coord obligation-supervisor-ensure --interval-seconds 1 \
+    --timeout-seconds 30)"
 grep -q '^LOOM_OBLIGATION_SUPERVISOR_ENSURED state=started ' <<< "$output" || \
   fail 'control-service ensure did not start the obligation supervisor'
 supervisor_pid="$(sed -n 's/.* pid=\([0-9][0-9]*\) .*/\1/p' <<< "$output")"
@@ -383,10 +1212,32 @@ for service_pid in "$supervisor_wrapper_pid" "$supervisor_pid"; do
       fail 'detached control service inherited the bootstrap-lock descriptor'
   done
 done
+leader_lock="$STATE/.obligation-supervisor-leader.lock"
+mapfile -t supervisor_child_pids < <(
+  tr ' ' '\n' < "/proc/$supervisor_wrapper_pid/task/$supervisor_wrapper_pid/children" |
+    sed '/^$/d'
+)
+((${#supervisor_child_pids[@]} >= 2)) ||
+  fail 'detached obligation supervisor child set was incomplete'
+assert_processes_do_not_hold "$leader_lock" 'detached obligation supervisor child' \
+  "${supervisor_child_pids[@]}"
 output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
   bin/sounio-coord obligation-supervisor-ensure --interval-seconds 1)"
 grep -q "state=already-running pid=$supervisor_pid " <<< "$output" || \
   fail 'control-service ensure was not idempotent'
+rm "$STATE/obligation-supervisor.state"
+output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
+  bin/sounio-coord obligation-supervisor-ensure --interval-seconds 1)"
+grep -q "state=already-running pid=$supervisor_pid " <<< "$output" || \
+  fail 'control-service ensure restarted a warming supervisor after snapshot loss'
+set +e
+output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" timeout 3 \
+  bin/sounio-coord obligation-supervise --interval-seconds 1 2>&1)"
+duplicate_supervisor_status=$?
+set -e
+((duplicate_supervisor_status == 73)) && \
+  grep -q 'state=duplicate-leader' <<< "$output" || \
+  fail 'raw supervisor start was not fenced by the lifetime leader lock'
 output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
   bin/sounio-coord obligation-supervisor-status)"
 grep -q "state=live pid=$supervisor_pid " <<< "$output" || \
@@ -606,148 +1457,171 @@ grep -q '"count":4,"unclosed":0' <<< "$output" || \
   fail 'completed shared-runtime obligation remained unclosed'
 
 printf '#!/usr/bin/env bash\nexit 97\n' > "$SECOND/scripts/dev/sounio_coord_runtime.sh"
-printf '#!/usr/bin/env python3\nraise SystemExit(98)\n' > \
-  "$SECOND/scripts/dev/sounio_coord_agent_hook_runtime.py"
 printf '#!/usr/bin/env python3\nraise SystemExit(99)\n' > \
   "$SECOND/scripts/dev/sounio_coord_causal_runtime.py"
 printf '#!/usr/bin/env python3\nraise SystemExit(100)\n' > \
   "$SECOND/scripts/dev/sounio_coord_agentd.py"
 chmod +x "$SECOND/scripts/dev/sounio_coord_runtime.sh" \
-  "$SECOND/scripts/dev/sounio_coord_agent_hook_runtime.py" \
   "$SECOND/scripts/dev/sounio_coord_causal_runtime.py" \
   "$SECOND/scripts/dev/sounio_coord_agentd.py"
 output="$(cd "$SECOND" && bin/sounio-coord runtime-info)"
 grep -q "^runtime_id=$first_id$" <<< "$output" || \
   fail 'sabotaged worktree fallback displaced the shared CLI runtime'
+shared_hook_harness="$TEST_ROOT/claude"
+cp "$(command -v bash)" "$shared_hook_harness"
+chmod 0755 "$shared_hook_harness"
 output="$(
   cd "$SECOND"
-  printf '%s\n' \
-    "{\"session_id\":\"runtime-test\",\"cwd\":\"$SECOND\",\"hook_event_name\":\"SessionStart\"}" | \
-    SOUNIO_COORD_DIR="$STATE" python3 scripts/dev/sounio_coord_agent_hook.py --agent claude
+  event="{\"session_id\":\"runtime-test\",\"cwd\":\"$SECOND\",\"hook_event_name\":\"SessionStart\"}"
+  SOUNIO_COORD_DIR="$STATE" SOUNIO_COORD_NATIVE_HOOK_SELFTEST=1 \
+    SOUNIO_LOOM_HOOK_TEST_MODE=1 "$shared_hook_harness" -c \
+      'printf "%s\n" "$1" | bin/sounio-loom agent-hook --agent claude' \
+      _ "$event"
 )"
 grep -q 'agent=claude lane=session-runtime-test' <<< "$output" || \
   fail 'sabotaged worktree fallback displaced the shared hook runtime'
+shared_grok_harness="$TEST_ROOT/grok-1.0.0-linux-x86_64"
+cp "$(command -v bash)" "$shared_grok_harness"
+chmod 0755 "$shared_grok_harness"
+output="$(
+  cd "$SECOND"
+  event='{"sessionId":"runtime-grok-test","cwd":"'"$SECOND"'","workspaceRoot":"'"$SECOND"'","hookEventName":"session_start"}'
+  SOUNIO_COORD_DIR="$STATE" SOUNIO_COORD_NATIVE_HOOK_SELFTEST=1 \
+    SOUNIO_LOOM_HOOK_TEST_MODE=1 bash -c \
+      'exec -a grok "$@"' _ "$shared_grok_harness" -c \
+      'printf "%s\n" "$1" | bin/sounio-loom agent-hook --agent grok' _ "$event"
+)"
+grep -q 'agent=grok lane=session-runtime-grok-test' <<< "$output" || \
+  fail 'versioned Grok executable with argv0=grok was not admitted'
+(
+  cd "$SECOND"
+  event='{"sessionId":"runtime-grok-test","cwd":"'"$SECOND"'","workspaceRoot":"'"$SECOND"'","hookEventName":"session_end"}'
+  SOUNIO_COORD_DIR="$STATE" SOUNIO_COORD_NATIVE_HOOK_SELFTEST=1 \
+    SOUNIO_LOOM_HOOK_TEST_MODE=1 bash -c \
+      'exec -a grok "$@"' _ "$shared_grok_harness" -c \
+      'printf "%s\n" "$1" | bin/sounio-loom agent-hook --agent grok' _ "$event"
+)
 output="$(cd "$SECOND" && bin/sounio-agentd runtime-info)"
 grep -q "^runtime_id=$first_id$" <<< "$output" || \
   fail 'sabotaged worktree fallback displaced the shared agentd runtime'
 output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
   bin/sounio-coord obligation-supervisor-ensure --interval-seconds 1)"
-grep -q '^LOOM_OBLIGATION_SUPERVISOR_ENSURED state=started ' <<< "$output" || \
-  fail 'pre-upgrade control service did not start'
+grep -Eq '^LOOM_OBLIGATION_SUPERVISOR_ENSURED state=(started|already-running) ' \
+  <<< "$output" || fail 'pre-upgrade control service was not live'
 supervisor_pid="$(sed -n 's/.* pid=\([0-9][0-9]*\) .*/\1/p' <<< "$output")"
+[[ -n "$supervisor_pid" ]] || fail 'pre-upgrade control service omitted its PID'
 
-mkdir -p "$ALT/scripts/dev" "$ALT/formal/tla" "$ALT/tools"
-cp "$ROOT_DIR/scripts/dev/install_sounio_coord_runtime.sh" "$ALT/scripts/dev/"
-cp "$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" "$ALT/scripts/dev/"
-cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook_runtime.py" "$ALT/scripts/dev/"
-cp "$ROOT_DIR/scripts/dev/sounio_coord_causal_runtime.py" "$ALT/scripts/dev/"
-cp "$ROOT_DIR/scripts/dev/sounio_coord_agentd.py" "$ALT/scripts/dev/"
-cp "$ROOT_DIR/scripts/dev/sounio_coord_fleet.py" "$ALT/scripts/dev/"
-cp "$ROOT_DIR/scripts/dev/sounio_coord_fleetd.py" "$ALT/scripts/dev/"
-cp "$ROOT_DIR/scripts/dev/sounio_fleet_tla_sabotage.py" "$ALT/scripts/dev/"
-cp "$ROOT_DIR/scripts/dev/sounio_fleet_trace_verify.py" "$ALT/scripts/dev/"
-cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
-  "$ROOT_DIR/scripts/dev/build_sounio_loom_continuity_adapter.sh" \
-  "$ROOT_DIR/scripts/dev/build_sounio_loom_obligation_adapter.sh" \
-  "$ROOT_DIR/scripts/dev/build_sounio_loom_epistemic_adapter.sh" \
-  "$ROOT_DIR/scripts/dev/build_sounio_loom_attention_adapter.sh" \
-  "$ROOT_DIR/scripts/dev/build_sounio_loom_portfolio_attention_adapter.sh" \
-  "$ROOT_DIR/scripts/dev/build_sounio_loom_contingent_policy_adapter.sh" \
-  "$ROOT_DIR/scripts/dev/build_sounio_loom_outcome_authority_adapter.sh" \
-  "$ROOT_DIR/scripts/dev/build_sounio_loom_witness_mesh_adapter.sh" \
-  "$ROOT_DIR/scripts/dev/build_sounio_loom_witness_mesh_v1_adapter.sh" \
-  "$ROOT_DIR/scripts/dev/build_sounio_loom_witness_epoch_handoff_adapter.sh" \
-  "$ROOT_DIR/scripts/dev/build_sounio_loom_witness_epoch_transparency_adapter.sh" \
-  "$ALT/scripts/dev/"
-mkdir -p "$ALT/tools/loom/src"
-cp "$ROOT_DIR/tools/loom/dune-project" "$ALT/tools/loom/"
-cp "$ROOT_DIR/tools/loom/continuity_adapter_main.sio" "$ALT/tools/loom/"
-cp "$ROOT_DIR/tools/loom/obligation_adapter_main.sio" "$ALT/tools/loom/"
-cp "$ROOT_DIR/tools/loom/epistemic_adapter_main.sio" "$ALT/tools/loom/"
-cp "$ROOT_DIR/tools/loom/attention_adapter_main.sio" "$ALT/tools/loom/"
-cp "$ROOT_DIR/tools/loom/portfolio_attention_adapter_main.sio" "$ALT/tools/loom/"
-cp "$ROOT_DIR/tools/loom/contingent_policy_adapter_main.sio" "$ALT/tools/loom/"
-cp "$ROOT_DIR/tools/loom/outcome_authority_adapter_main.sio" "$ALT/tools/loom/"
-cp "$ROOT_DIR/tools/loom/witness_mesh_adapter_main.sio" "$ALT/tools/loom/"
-cp "$ROOT_DIR/tools/loom/witness_mesh_v1_adapter_main.sio" "$ALT/tools/loom/"
-cp "$ROOT_DIR/tools/loom/witness_epoch_handoff_adapter_main.sio" \
-  "$ALT/tools/loom/"
-cp "$ROOT_DIR/tools/loom/epoch_transparency_adapter_main.sio" \
-  "$ALT/tools/loom/"
-cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
-  "$ROOT_DIR/tools/loom/src/loom_arrow.ml" \
-  "$ROOT_DIR/tools/loom/src/loom_epistemic.ml" \
-  "$ROOT_DIR/tools/loom/src/loom_witness.ml" \
-  "$ROOT_DIR/tools/loom/src/loom_witness_epoch.ml" \
-  "$ROOT_DIR/tools/loom/src/loom_witness_transparency.ml" \
-  "$ROOT_DIR/tools/loom/src/loom_ui.ml" \
-  "$ROOT_DIR/tools/loom/src/loom_pty_stubs.c" \
-  "$ROOT_DIR/tools/loom/src/loom_arrow_stubs.c" \
-  "$ROOT_DIR/tools/loom/src/loom_nanoarrow.c" \
-  "$ROOT_DIR/tools/loom/src/loom_nanoarrow_ipc.c" \
-  "$ROOT_DIR/tools/loom/src/loom_flatcc.c" "$ALT/tools/loom/src/"
-cp -R "$ROOT_DIR/tools/loom/src/vendor" "$ALT/tools/loom/src/"
-mkdir -p "$ALT/stdlib/coordination"
-cp "$ROOT_DIR/stdlib/coordination/loom_continuity.sio" \
-  "$ALT/stdlib/coordination/"
-cp "$ROOT_DIR/stdlib/coordination/loom_obligation.sio" \
-  "$ALT/stdlib/coordination/"
-cp "$ROOT_DIR/stdlib/coordination/loom_epistemic_machine.sio" \
-  "$ALT/stdlib/coordination/"
-cp "$ROOT_DIR/stdlib/coordination/loom_attention_compiler.sio" \
-  "$ALT/stdlib/coordination/"
-cp "$ROOT_DIR/stdlib/coordination/loom_portfolio_attention.sio" \
-  "$ALT/stdlib/coordination/"
-cp "$ROOT_DIR/stdlib/coordination/loom_contingent_policy.sio" \
-  "$ALT/stdlib/coordination/"
-cp "$ROOT_DIR/stdlib/coordination/loom_outcome_authority.sio" \
-  "$ALT/stdlib/coordination/"
-cp "$ROOT_DIR/stdlib/coordination/loom_witness_mesh.sio" \
-  "$ALT/stdlib/coordination/"
-cp "$ROOT_DIR/stdlib/coordination/loom_witness_mesh_v1.sio" \
-  "$ALT/stdlib/coordination/"
-cp "$ROOT_DIR/stdlib/coordination/loom_witness_epoch_handoff.sio" \
-  "$ALT/stdlib/coordination/"
-cp "$ROOT_DIR/stdlib/coordination/loom_witness_epoch_transparency.sio" \
-  "$ALT/stdlib/coordination/"
-cp "$ROOT_DIR/formal/tla/SounioFleet.tla" "$ROOT_DIR/formal/tla/SounioFleet.cfg" \
-  "$ALT/formal/tla/"
-sed -i 's/^SOUNIO_COORD_RUNTIME_VERSION=.*/SOUNIO_COORD_RUNTIME_VERSION=2026.08.23.8-test/' \
+git clone --local --no-hardlinks --quiet "$REPO" "$ALT"
+git -C "$ALT" fetch -q "$ROOT_DIR" "$subprocess_toolchain_commit"
+git -C "$ALT" fetch -q "$ROOT_DIR" "$native_hook_cutover_toolchain_commit"
+printf '\n# runtime upgrade selftest marker\n' >> \
   "$ALT/scripts/dev/sounio_coord_runtime.sh"
-sed -i 's/^let runtime_version = .*/let runtime_version = "2026.08.23.8-test"/' \
-  "$ALT/tools/loom/src/loom.ml"
 chmod +x "$ALT/scripts/dev/"*
-output="$(cd "$REPO" && bin/sounio-coord install-runtime --source-root "$ALT")"
+upgrade_coord_sha="$(sha256sum "$ALT/scripts/dev/sounio_coord_runtime.sh" | awk '{print $1}')"
+alt_change_product="$(
+  find "$ALT/tools/loom" -maxdepth 1 -type f \
+    -name 'sovereign_material_change_product.runtime.v*' -print | sort -V | tail -1
+)"
+alt_change_evidence="$ALT/$(sed -n 's/^evidence_path=//p' "$alt_change_product")"
+sed -i "s/^coord_runtime_sha256=.*/coord_runtime_sha256=$upgrade_coord_sha/" \
+  "$alt_change_product"
+upgrade_change_product_sha="$(
+  sha256sum "$alt_change_product" | awk '{print $1}'
+)"
+sed -i "s/^product_manifest_sha256=.*/product_manifest_sha256=$upgrade_change_product_sha/" \
+  "$alt_change_evidence"
+git -C "$ALT" config user.name 'Sounio Runtime Upgrade Selftest'
+git -C "$ALT" config user.email 'coord-runtime-upgrade@sounio.local'
+git -C "$ALT" add scripts/dev/sounio_coord_runtime.sh \
+  "${alt_change_product#"$ALT/"}" "${alt_change_evidence#"$ALT/"}"
+git -C "$ALT" commit -qm 'test runtime upgrade source'
+output="$(cd "$REPO" && SOUNIO_COORD_DIR="$STATE" \
+  bin/sounio-coord install-runtime --source-root "$ALT")"
+upgrade_output="$output"
 second_id="$(sed -n 's/^INSTALLED runtime_id=\([^ ]*\).*/\1/p' <<< "$output")"
 [[ -n "$second_id" && "$second_id" != "$first_id" ]] || fail 'upgrade did not create a new runtime id'
+grep -q '^LOOM_OBLIGATION_SUPERVISOR_ENSURED state=restarted ' <<< "$upgrade_output" || \
+  fail 'runtime upgrade did not assume the live control service before activation returned'
+upgraded_supervisor_pid="$(sed -n 's/.* pid=\([0-9][0-9]*\) .*/\1/p' <<< "$upgrade_output")"
+[[ -n "$upgraded_supervisor_pid" && "$upgraded_supervisor_pid" != "$supervisor_pid" ]] || \
+  fail 'runtime upgrade retained the old control-service generation'
+upgraded_supervisor_wrapper_pid="$(sed -n 's/^PPid:[[:space:]]*//p' \
+  "/proc/$upgraded_supervisor_pid/status")"
+assert_processes_do_not_hold "$RUNTIME_ROOT/.install.lock" \
+  'upgraded control service' "$upgraded_supervisor_wrapper_pid" \
+  "$upgraded_supervisor_pid"
 output="$(cd "$SECOND" && bin/sounio-coord runtime-info)"
 grep -q "^runtime_id=$second_id$" <<< "$output" || fail 'worktree did not observe atomic runtime upgrade'
-grep -q '^runtime_version=2026.08.23.8-test$' <<< "$output" || fail 'upgraded runtime version is wrong'
+grep -qx "runtime_version=$first_runtime_version" <<< "$output" || \
+  fail 'upgrade changed the frozen Loom runtime version'
 [[ "$(sha256sum "$activation_file" | awk '{print $1}')" == "$activation_sha" ]] || \
   fail 'runtime upgrade rewrote the activation watermark'
 output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
   bin/sounio-coord obligation-supervisor-ensure --interval-seconds 1)"
-grep -q '^LOOM_OBLIGATION_SUPERVISOR_ENSURED state=restarted ' <<< "$output" || \
-  fail 'runtime upgrade did not restart the control service onto the selected bundle'
-upgraded_supervisor_pid="$(sed -n 's/.* pid=\([0-9][0-9]*\) .*/\1/p' <<< "$output")"
-[[ -n "$upgraded_supervisor_pid" && "$upgraded_supervisor_pid" != "$supervisor_pid" ]] || \
-  fail 'runtime upgrade retained the old control-service generation'
+grep -q "^LOOM_OBLIGATION_SUPERVISOR_ENSURED state=already-running pid=$upgraded_supervisor_pid " <<< "$output" || \
+  fail 'post-upgrade ensure did not observe the installer-owned control-service generation'
 supervisor_pid="$upgraded_supervisor_pid"
 
-output="$(cd "$REPO" && bin/sounio-coord install-runtime --activate "$first_id")"
+output="$(cd "$REPO" && SOUNIO_COORD_DIR="$STATE" \
+  bin/sounio-coord install-runtime --activate "$first_id")"
+rollback_output="$output"
 grep -q "^ACTIVATED runtime_id=$first_id " <<< "$output" || fail 'runtime rollback failed'
+grep -q '^LOOM_OBLIGATION_SUPERVISOR_ENSURED state=restarted ' <<< "$rollback_output" || \
+  fail 'runtime rollback did not assume the live control service before activation returned'
+rolled_back_supervisor_pid="$(sed -n 's/.* pid=\([0-9][0-9]*\) .*/\1/p' <<< "$rollback_output")"
+[[ -n "$rolled_back_supervisor_pid" && "$rolled_back_supervisor_pid" != "$supervisor_pid" ]] || \
+  fail 'runtime rollback retained the upgraded control-service generation'
+rolled_back_supervisor_wrapper_pid="$(sed -n 's/^PPid:[[:space:]]*//p' \
+  "/proc/$rolled_back_supervisor_pid/status")"
+assert_processes_do_not_hold "$RUNTIME_ROOT/.install.lock" \
+  'rolled-back control service' "$rolled_back_supervisor_wrapper_pid" \
+  "$rolled_back_supervisor_pid"
 output="$(cd "$SECOND" && bin/sounio-coord runtime-info)"
 grep -q "^runtime_id=$first_id$" <<< "$output" || fail 'worktree did not observe runtime rollback'
 [[ "$(sha256sum "$activation_file" | awk '{print $1}')" == "$activation_sha" ]] || \
   fail 'runtime rollback rewrote the activation watermark'
 output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
   bin/sounio-coord obligation-supervisor-ensure --interval-seconds 1)"
-grep -q '^LOOM_OBLIGATION_SUPERVISOR_ENSURED state=restarted ' <<< "$output" || \
-  fail 'runtime rollback did not restart the control service onto the selected bundle'
-rolled_back_supervisor_pid="$(sed -n 's/.* pid=\([0-9][0-9]*\) .*/\1/p' <<< "$output")"
-[[ -n "$rolled_back_supervisor_pid" && "$rolled_back_supervisor_pid" != "$supervisor_pid" ]] || \
-  fail 'runtime rollback retained the upgraded control-service generation'
+grep -q "^LOOM_OBLIGATION_SUPERVISOR_ENSURED state=already-running pid=$rolled_back_supervisor_pid " <<< "$output" || \
+  fail 'post-rollback ensure did not observe the installer-owned control-service generation'
 supervisor_pid="$rolled_back_supervisor_pid"
+
+handoff_refusal_id='control-service-handoff-refuses'
+cp -a "$RUNTIME_ROOT/versions/$first_id" \
+  "$RUNTIME_ROOT/versions/$handoff_refusal_id"
+sed -i "s/^runtime_id=.*/runtime_id=$handoff_refusal_id/" \
+  "$RUNTIME_ROOT/versions/$handoff_refusal_id/manifest"
+handoff_runtime="$RUNTIME_ROOT/versions/$handoff_refusal_id/bin/sounio-coord-runtime"
+handoff_runtime_tmp="$handoff_runtime.sabotage"
+{
+  head -1 "$handoff_runtime"
+  printf '%s\n' \
+    'if [[ "${1:-}" == obligation-supervisor-ensure ]]; then' \
+    '  printf "sabotage-control-service-handoff-refused\\n" >&2' \
+    '  exit 70' \
+    'fi'
+  tail -n +2 "$handoff_runtime"
+} > "$handoff_runtime_tmp"
+mv "$handoff_runtime_tmp" "$handoff_runtime"
+chmod +x "$handoff_runtime"
+handoff_runtime_sha="$(sha256sum "$handoff_runtime" | awk '{print $1}')"
+sed -i "s/^coord_runtime_sha256=.*/coord_runtime_sha256=$handoff_runtime_sha/" \
+  "$RUNTIME_ROOT/versions/$handoff_refusal_id/manifest"
+if handoff_refusal_output="$(cd "$REPO" && SOUNIO_COORD_DIR="$STATE" \
+    bin/sounio-coord install-runtime --activate "$handoff_refusal_id" 2>&1)"; then
+  fail 'runtime activation survived a refused control-service handoff'
+fi
+grep -q 'runtime activation could not assume the control service and was rolled back: sabotage-control-service-handoff-refused' \
+  <<< "$handoff_refusal_output" || \
+  fail 'refused control-service handoff did not identify transactional rollback'
+output="$(cd "$SECOND" && bin/sounio-coord runtime-info)"
+grep -q "^runtime_id=$first_id$" <<< "$output" || \
+  fail 'refused control-service handoff did not restore the previous runtime'
+output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
+  bin/sounio-coord obligation-supervisor-status)"
+grep -q "^LOOM_OBLIGATION_SUPERVISOR_STATUS state=live pid=$supervisor_pid " <<< "$output" || \
+  fail 'refused control-service handoff did not preserve the previous live generation'
+
 output="$(cd "$SECOND" && SOUNIO_COORD_DIR="$STATE" \
   bin/sounio-coord obligation-supervisor-stop --timeout-seconds 5)"
 grep -q "state=stopped pid=$supervisor_pid " <<< "$output" || \
@@ -756,7 +1630,6 @@ supervisor_pid=''
 
 mkdir -p "$BAD/scripts/dev" "$BAD/formal/tla" "$BAD/tools"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" "$BAD/scripts/dev/"
-cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook_runtime.py" "$BAD/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_causal_runtime.py" "$BAD/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/install_sounio_coord_runtime.sh" "$BAD/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_agentd.py" "$BAD/scripts/dev/"
@@ -765,6 +1638,12 @@ cp "$ROOT_DIR/scripts/dev/sounio_coord_fleetd.py" "$BAD/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_fleet_tla_sabotage.py" "$BAD/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_fleet_trace_verify.py" "$BAD/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_language_authority.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_native_hook_cutover.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_custody_transfer.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_execution_outcome.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_lane_health.sh" \
+  "$ROOT_DIR/scripts/dev/build_sounio_loom_lane_health_parity.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_continuity_adapter.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_obligation_adapter.sh" \
   "$ROOT_DIR/scripts/dev/build_sounio_loom_epistemic_adapter.sh" \
@@ -779,6 +1658,16 @@ cp "$ROOT_DIR/scripts/dev/build_sounio_loom.sh" \
   "$BAD/scripts/dev/"
 mkdir -p "$BAD/tools/loom/src"
 cp "$ROOT_DIR/tools/loom/dune-project" "$BAD/tools/loom/"
+cp "$ROOT_DIR/tools/loom/language_authority_main.sio" \
+  "$ROOT_DIR/tools/loom/language_authority.freeze.v2" "$BAD/tools/loom/"
+cp "$ROOT_DIR/tools/loom/custody_transfer_main.sio" \
+  "$ROOT_DIR/tools/loom/custody_transfer.freeze.v2" "$BAD/tools/loom/"
+cp "$ROOT_DIR/tools/loom/execution_outcome_main.sio" \
+  "$ROOT_DIR/tools/loom/execution_outcome.freeze.v2" "$BAD/tools/loom/"
+cp "$ROOT_DIR/tools/loom/lane_health_main.sio" \
+  "$ROOT_DIR/tools/loom/lane_health_parity_main.sio" \
+  "$ROOT_DIR/tools/loom/lane_health.freeze.v2" \
+  "$ROOT_DIR/tools/loom/lane_health.ocaml.v1" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/continuity_adapter_main.sio" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/obligation_adapter_main.sio" "$BAD/tools/loom/"
 cp "$ROOT_DIR/tools/loom/epistemic_adapter_main.sio" "$BAD/tools/loom/"
@@ -795,6 +1684,9 @@ cp "$ROOT_DIR/tools/loom/epoch_transparency_adapter_main.sio" \
 cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
   "$ROOT_DIR/tools/loom/src/loom_arrow.ml" \
   "$ROOT_DIR/tools/loom/src/loom_epistemic.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_exec.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_hook.ml" \
+  "$ROOT_DIR/tools/loom/src/loom_lane_health.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness_epoch.ml" \
   "$ROOT_DIR/tools/loom/src/loom_witness_transparency.ml" \
@@ -807,6 +1699,14 @@ cp "$ROOT_DIR/tools/loom/src/dune" "$ROOT_DIR/tools/loom/src/loom.ml" \
 cp -R "$ROOT_DIR/tools/loom/src/vendor" "$BAD/tools/loom/src/"
 mkdir -p "$BAD/stdlib/coordination"
 cp "$ROOT_DIR/stdlib/coordination/loom_continuity.sio" \
+  "$BAD/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_language_authority.sio" \
+  "$BAD/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_custody_transfer.sio" \
+  "$BAD/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_execution_outcome_authority.sio" \
+  "$BAD/stdlib/coordination/"
+cp "$ROOT_DIR/stdlib/coordination/loom_lane_health.sio" \
   "$BAD/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_obligation.sio" \
   "$BAD/stdlib/coordination/"
@@ -828,6 +1728,8 @@ cp "$ROOT_DIR/stdlib/coordination/loom_witness_epoch_handoff.sio" \
   "$BAD/stdlib/coordination/"
 cp "$ROOT_DIR/stdlib/coordination/loom_witness_epoch_transparency.sio" \
   "$BAD/stdlib/coordination/"
+mkdir -p "$BAD/stdlib/crypto"
+cp "$ROOT_DIR/stdlib/crypto/sha256.sio" "$BAD/stdlib/crypto/"
 cp "$ROOT_DIR/formal/tla/SounioFleet.tla" "$ROOT_DIR/formal/tla/SounioFleet.cfg" \
   "$BAD/formal/tla/"
 sed -i 's/SOUNIO_COORD_PROTOCOL_VERSION=3/SOUNIO_COORD_PROTOCOL_VERSION=4/' \
@@ -840,6 +1742,19 @@ mkdir -p "$RUNTIME_ROOT/versions/incomplete"
 if (cd "$REPO" && bin/sounio-coord install-runtime --activate incomplete) >/dev/null 2>&1; then
   fail 'installer activated an incomplete runtime'
 fi
+cp -a "$RUNTIME_ROOT/versions/$first_id" \
+  "$RUNTIME_ROOT/versions/lane-health-authority-omitted"
+sed -i 's/^runtime_id=.*/runtime_id=lane-health-authority-omitted/' \
+  "$RUNTIME_ROOT/versions/lane-health-authority-omitted/manifest"
+rm -f \
+  "$RUNTIME_ROOT/versions/lane-health-authority-omitted/bin/sounio-loom-lane-health-runtime"
+if (cd "$REPO" && bin/sounio-coord install-runtime \
+    --activate lane-health-authority-omitted) >/dev/null 2>&1; then
+  fail 'installer activated truthful lane health without its Sounio authority executable'
+fi
+output="$(cd "$REPO" && bin/sounio-coord runtime-info)"
+grep -q "^runtime_id=$first_id$" <<< "$output" || \
+  fail 'failed lane-health activation changed the current runtime'
 cp -a "$RUNTIME_ROOT/versions/$first_id" \
   "$RUNTIME_ROOT/versions/portfolio-adapter-omitted"
 sed -i 's/^runtime_id=.*/runtime_id=portfolio-adapter-omitted/' \
@@ -1003,6 +1918,8 @@ grep -q "^runtime_id=$first_id$" <<< "$output" || \
 output="$(cd "$REPO" && bin/sounio-coord install-runtime --list)"
 grep -q "runtime_id=$first_id current=yes" <<< "$output" || fail 'runtime list lost the current marker'
 grep -q "runtime_id=$second_id current=no" <<< "$output" || fail 'runtime list lost installed upgrade'
+grep -q "runtime_id=$first_id current=yes candidate=yes" <<< "$output" ||
+  fail 'runtime list lost the staged candidate marker'
 
 unlink "$RUNTIME_ROOT/current"
 ln -s versions/missing "$RUNTIME_ROOT/current"
@@ -1019,7 +1936,8 @@ if (
   cd "$REPO"
   printf '%s\n' \
     "{\"session_id\":\"broken-link\",\"cwd\":\"$REPO\",\"hook_event_name\":\"SessionStart\"}" | \
-    SOUNIO_COORD_DIR="$STATE" python3 scripts/dev/sounio_coord_agent_hook.py --agent claude
+    SOUNIO_COORD_DIR="$STATE" SOUNIO_COORD_NATIVE_HOOK_SELFTEST=1 \
+    SOUNIO_LOOM_HOOK_TEST_MODE=1 bin/sounio-loom agent-hook --agent claude
 ) >/dev/null 2>&1; then
   fail 'hook launcher silently fell back across a broken shared-runtime link'
 fi

@@ -1,0 +1,195 @@
+// demos/hydrogen/mh_cascade_uq.sio
+//
+// Three-stage metal-hydride hydrogen compression cascade with THREE LEVELS
+// of uncertainty quantification in one deterministic run:
+//     GUM (first-order) / PCE (stdlib epistemic) / Monte Carlo (20 000)
+//
+// Written for Dr. Emmanuel Stamatakis (NCSR Demokritos, H2Lab): the cascade
+// architecture follows his multi-stage MH compression work (Renewable Energy
+// 147 (2020) 164-178, DOI 10.1016/j.renene.2019.08.104); the design question it
+// answers is one his
+// techno-economic studies face: given alloy batch uncertainty, what fraction
+// of hydride batches still reach the 200 bar refuelling target?
+//
+// Physics: per-stage van't Hoff ratio between T_cold = 293.15 K and
+// T_hot = 353.15 K for a LaNi5-type alloy:
+//     ln r = ΔH/R · (1/T_cold − 1/T_hot) + ln η
+// NOTE: ΔS cancels in the ratio — stage ratio depends only on ΔH and the
+// temperature swing. η = 0.80 ± 0.05 lumps hysteresis, plateau slope and
+// pressure drops. ΔH = 30.8 ± 2.5 kJ/mol H2 (batch-to-batch spread).
+// Supply pressure P0 = 1.0 bar (low-pressure electrolyser outlet).
+//
+// Correlation model (this matters): one alloy batch fills the whole
+// cascade, so ΔH is sampled ONCE per virtual batch and shared by all three
+// stages (fully correlated); η varies stage to stage (independent).
+// Treating the stages as independent would underestimate σ_P3 by ~2x —
+// a classic UQ mistake the cascade exposes.
+//
+// UQ levels:
+//   GUM: first-order, mean pinned at the nominal point.
+//   PCE: stdlib epistemic::pce build_exp on the exact log-space normal —
+//        the cascade delivery pressure is lognormal, and the Hermite PCE
+//        recovers its exact moments.
+//   MC:  20 000 virtual alloy batches through the same equations.
+
+use epistemic::pce::*
+
+// ─── pure-Sounio math (no extern; deterministic on every engine) ───
+
+fn mh_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn mh_sqrt(x: f64) -> f64 with Mut {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 30 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn mh_exp(x: f64) -> f64 with Mut, Div {
+    if x > 700.0 { return 1.0e200 }
+    if x < 0.0 - 700.0 { return 0.0 }
+    var kf = x / 0.6931471805599453
+    var k = kf as i64
+    if kf < 0.0 {
+        if kf != (k as f64) { k = k - 1 }
+    }
+    let r = x - (k as f64) * 0.6931471805599453
+    var s = 1.0
+    var term = 1.0
+    var n: i64 = 1
+    while n < 25 { term = term * r / (n as f64); s = s + term; n = n + 1 }
+    var result = s
+    if k >= 0 {
+        var i: i64 = 0
+        while i < k { result = result * 2.0; i = i + 1 }
+    } else {
+        var i: i64 = 0
+        while i < (0 - k) { result = result / 2.0; i = i + 1 }
+    }
+    result
+}
+
+// ─── PRNG (xorshift, deterministic seed) ───
+
+var RNG_A: i64 = 0
+var RNG_B: i64 = 0
+
+fn rng_init() with Mut {
+    RNG_A = 314159265
+    RNG_B = 271828182
+}
+
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A
+    let y = RNG_B
+    RNG_A = y
+    x = x ^ (x << 23)
+    x = x ^ (x >> 17)
+    x = x ^ (y ^ (y >> 26))
+    RNG_B = x
+    let r = x + y
+    if r < 0 { 0 - r } else { r }
+}
+
+fn rand_uniform() -> f64 with Mut, Div {
+    let r = rng_next()
+    (r % 10000) as f64 / 10000.0
+}
+
+fn rand_normal() -> f64 with Mut, Div {
+    var sum = 0.0
+    var j = 0
+    while j < 12 { sum = sum + rand_uniform(); j = j + 1 }
+    sum - 6.0
+}
+
+fn rand_gaussian(mu: f64, sigma: f64) -> f64 with Mut, Div {
+    mu + sigma * rand_normal()
+}
+
+// ─── main ───
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let r_gas = 8.314
+    let dh = 30800.0          // J/mol H2
+    let s_dh = 2500.0         // batch spread
+    let t_cold = 293.15
+    let t_hot = 353.15
+    let eta = 0.80            // per-stage efficiency (hysteresis+slope+drops)
+    let s_eta = 0.05
+    let p0 = 1.0              // bar supply
+    let target = 200.0        // bar HRS delivery target
+    let dtinv = 1.0 / t_cold - 1.0 / t_hot
+
+    print("=== 3-stage MH cascade — GUM / PCE / Monte Carlo ===")
+    println("")
+
+    // ── nominal cascade ──
+    // ln r at nominal point (ln 0.8 folded in analytically)
+    let mu_lnr = dh / r_gas * dtinv + 0.0 - 0.22314355131420976
+    let r_eff = mh_exp(mu_lnr)
+    let p3_nom = p0 * r_eff * r_eff * r_eff
+    print("effective ratio per stage     : "); println(r_eff)
+    print("nominal delivery P3    [bar]  : "); println(p3_nom)
+    println("")
+
+    // ── level 1: GUM first-order (mean pinned at nominal) ──
+    // correlated batch: ΔH term enters 3x coherently, η incoherently
+    let s_lnp3 = mh_sqrt(9.0 * (s_dh / r_gas * dtinv) * (s_dh / r_gas * dtinv)
+               + 3.0 * (s_eta / eta) * (s_eta / eta))
+    let gum_std = p3_nom * s_lnp3
+    print("GUM  sigma P3          [bar]  : "); println(gum_std)
+    print("GUM  2-sigma band      [bar]  : "); println(p3_nom * mh_exp(0.0 - 2.0 * s_lnp3))
+    print("                       ...to   : "); println(p3_nom * mh_exp(2.0 * s_lnp3))
+    println("")
+
+    // ── level 2: PCE from stdlib epistemic (exact lognormal moments) ──
+    let mu_lnp3 = 3.0 * mu_lnr   // ln(p0=1) = 0
+    let inp = input_normal(mu_lnp3, s_lnp3)
+    let pce = build_exp(inp, 4)
+    print("PCE  mean P3           [bar]  : "); println(pce.mean)
+    print("PCE  std  P3           [bar]  : "); println(std(pce))
+    print("PCE  mean shift vs nom   [%]  : "); println(100.0 * (pce.mean - p3_nom) / p3_nom)
+    println("")
+
+    // ── level 3: Monte Carlo, 20 000 virtual batches ──
+    rng_init()
+    let n: i64 = 20000
+    var i: i64 = 0
+    var sum = 0.0
+    var sumsq = 0.0
+    var hits: i64 = 0
+    while i < n {
+        let dh_s = rand_gaussian(dh, s_dh)
+        var p = p0
+        var k = 0
+        while k < 3 {
+            p = p * mh_exp(dh_s / r_gas * dtinv) * rand_gaussian(eta, s_eta)
+            k = k + 1
+        }
+        sum = sum + p
+        sumsq = sumsq + p * p
+        if p >= target { hits = hits + 1 }
+        i = i + 1
+    }
+    let mc_mean = sum / (n as f64)
+    let mc_std = mh_sqrt(sumsq / (n as f64) - mc_mean * mc_mean)
+    let rel = 100.0 * (hits as f64) / (n as f64)
+    print("MC   mean P3           [bar]  : "); println(mc_mean)
+    print("MC   std  P3           [bar]  : "); println(mc_std)
+    print("MC   reliability >=200 bar [%]: "); println(rel)
+    println("")
+
+    // ── the design statement ──
+    print("Nominal design says 321 bar — comfortable margin over the 200 bar")
+    println("")
+    print("HRS target. UQ says: ~19 % of alloy batches MISS the target. Batch")
+    println("")
+    print("correlation across stages roughly doubles sigma_P3 vs independent-")
+    println("")
+    print("stage math, and only PCE/MC give the skew-correct mean (+15 %).")
+    println("")
+    println("MH_CASCADE_UQ_OK")
+    0
+}

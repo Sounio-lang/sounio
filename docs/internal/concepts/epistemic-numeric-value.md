@@ -9,6 +9,9 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 
 # Epistemic Numeric Value
 
+
+Status: **executable**
+
 Concept-ID: `SOUNIO-EPISTEMIC-NUMERIC-VALUE`
 
 ## Founder Intent
@@ -49,3 +52,10 @@ These axes are related but not interchangeable.
 
 Bind a physical observation to frame, instrument, projection, protocol, and
 resolution without collapsing these axes.
+
+
+## Claims Forbidden
+
+- Do not claim clinical validity, ClinicalAuthority, or ClinicalRelease from this contract alone.
+- Do not claim compiler-wide integration or production cutover from fixture evidence alone.
+- Do not claim scientific truth or independent replay beyond the scoped witnesses bound in `bindings.tsv`.

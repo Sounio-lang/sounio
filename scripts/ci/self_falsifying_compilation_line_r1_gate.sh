@@ -116,14 +116,21 @@ set +e
 C3_OUT="$("$RAW" run "$MC_MAIN" -o "$TMP_DIR/mc.elf" --verify-claims 2>&1)"
 C3_RC=$?
 set -e
-if [[ $C3_RC -eq 0 ]] && grep -q "VERIFY_CLAIMS_OK pass=1" <<<"$C3_OUT"; then
-    grep -q "CLAIM_FAIL" <<<"$C3_OUT" \
-        && fail "C3: inconsistent — imported claim ran yet compile succeeded"
-    echo "C3_MODULE_CLOSURE PASS — MODULE_CLOSURE_BLOCKS: imported claims never execute"
-elif grep -q "VERIFY_CLAIMS_FALSIFIED" <<<"$C3_OUT"; then
-    fail "C3: MODULE_CLOSURE_PASSES — imported claims now DO execute. This is a \
-real change in the mechanism, not a gate bug: update the spec's verdict token \
-from MODULE_CLOSURE_BLOCKS and re-derive R1's conclusions."
+# R29 (2026-08-01) closed this wall: claim_executor_verify now walks the module
+# closure, so the imported false claim executes and blocks the build. R1's
+# original outcome — MODULE_CLOSURE_BLOCKS, measured 2026-07-26 — was a true
+# observation of the compiler as it stood then; it is superseded, not retracted.
+# The polarity below is therefore inverted ON PURPOSE. A return to BLOCKS is now
+# the regression, and is what this clause fails on.
+if [[ $C3_RC -ne 0 ]] && grep -q "VERIFY_CLAIMS_FALSIFIED" <<<"$C3_OUT"; then
+    grep -q "^CLAIM_FAIL mcl_library_claim_that_is_false" <<<"$C3_OUT" \
+        || fail "C3: build blocked, but not by the imported claim — probe no longer decisive"
+    [[ ! -f "$TMP_DIR/mc.elf" ]] || fail "C3: ELF emitted despite a falsified imported claim"
+    echo "C3_MODULE_CLOSURE PASS — MODULE_CLOSURE_PASSES: imported claims execute (R29)"
+elif [[ $C3_RC -eq 0 ]] && grep -q "VERIFY_CLAIMS_OK pass=1" <<<"$C3_OUT"; then
+    fail "C3: MODULE_CLOSURE_BLOCKS — the import wall is back. R29 closed it; \
+either claim_executor_verify lost its closure walk or this binary predates it. \
+Do not edit the token to match: re-measure, then re-derive."
 else
     echo "$C3_OUT" >&2
     fail "C3: probe outcome unrecognised (rc=$C3_RC)"

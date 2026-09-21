@@ -1,0 +1,218 @@
+//! stdlib/math/libm.sio — libm-equivalent functions with no FFI
+//!
+//! Why this module exists (#1622)
+//! ------------------------------
+//! The native backend has no dynamic linker. An `extern "C"` declaration is
+//! flushed to codegen as an empty stub, and only 27 names are implemented as
+//! builtins, so a call to `fabs`, `pow`, `floor`, `atan2` or `tanh` used to
+//! compile into a function returning whatever sat in rax — 0 — with exit status
+//! 0 and no diagnostic. Since E219 those calls are refused instead, which is
+//! what left twenty-seven stdlib modules unable to compile under Madaros.
+//!
+//! This module implements them on the builtins that do exist (`sqrt`, `exp`,
+//! `log`) so the same source works under both engines.
+//!
+//! Why the names are prefixed
+//! --------------------------
+//! Not style. `pub fn pow` and `pub fn atan2` here were bound to **libm** by
+//! lean_single, with an argument convention that does not match, so
+//! `pow(-2.0, 3.0)` returned 0.0 and `atan2(1.0, 2.0)` returned atan(2.0)
+//! instead of atan(0.5). Renaming the identical bodies to `zpow`/`zatan2` made
+//! both correct immediately. Under Madaros, which has no libm, the same source
+//! was correct all along — so an unprefixed name here is a silent
+//! engine-dependent divergence. The prefix makes both engines run THIS code.
+//!
+//! That collision cost two wrong diagnoses before the rename test, because the
+//! failures look exactly like a register-allocation defect: inserting a `print`
+//! changes the answer, and a minimal two-argument repro does not reproduce.
+//!
+//! Accuracy, measured
+//! ------------------
+//! Worst-case ULP distance from glibc over a 17-point grid spanning 1e-3 to
+//! 1e6, references baked in from CPython rather than called (calling an
+//! in-process `extern atan` returns atan(1/x) for x in (0.268, 1) — the same
+//! collision, seen from the other side):
+//!
+//!     symbol       lean_single   limited by
+//!     libm_fabs         0        exact — a sign flip is exact in IEEE 754
+//!     libm_floor        0        exact — i64 round trip
+//!     libm_atan         2        pure arithmetic
+//!     libm_atan2        2        pure arithmetic
+//!     libm_pow       6455        the exp/log builtins
+//!     libm_tanh       990        the exp builtin
+//!
+//! `pow` and `tanh` are the only two that reach for a builtin, and under
+//! Madaros that is the binding constraint rather than the algorithm: `exp` and
+//! `log` there carry about SEVEN significant digits, not sixteen —
+//! `exp(10.0)` gives 22026.465124 against 22026.465795. Filed as #1626.
+//! `libm_pow` sidesteps it for the common case with exact binary
+//! exponentiation whenever the exponent is an integer, so `libm_pow(10.0, 7.0)`
+//! is exactly 10000000.0 rather than 9999999.950639.
+//!
+//! Relationship to stdlib/math/pure.sio
+//! ------------------------------------
+//! `pure.sio` is not importable — its functions are not `pub`, which is part of
+//! why callers bound libm instead. It also implements `exp`/`ln`/`cos` as Taylor
+//! series (less accurate than the builtins used here) and its `atan` is the
+//! plain Leibniz series, which leaves ~1.2e-2 of error at x = 1.
+
+// =============================================================================
+// Exact — no approximation anywhere in these
+// =============================================================================
+
+/// |x|. Bit-identical to glibc: a sign flip is exact in IEEE 754.
+pub fn libm_fabs(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    x
+}
+
+/// Largest integer <= x. Exact via an i64 round trip, which truncates toward
+/// zero, then corrects for negatives. Magnitudes beyond the i64 range are
+/// already integers in binary64, so they are returned unchanged.
+pub fn libm_floor(x: f64) -> f64 {
+    if x >= 9223372036854775000.0 { return x }
+    if x <= 0.0 - 9223372036854775000.0 { return x }
+    let t = (x as i64) as f64
+    if x < 0.0 && t != x { return t - 1.0 }
+    t
+}
+
+/// Smallest integer >= x.
+pub fn libm_ceil(x: f64) -> f64 {
+    if x >= 9223372036854775000.0 { return x }
+    if x <= 0.0 - 9223372036854775000.0 { return x }
+    let t = (x as i64) as f64
+    if x > 0.0 && t != x { return t + 1.0 }
+    t
+}
+
+// =============================================================================
+// Pure arithmetic — 2 ULP, independent of the transcendental builtins
+// =============================================================================
+
+/// arctangent, two-stage argument reduction.
+///
+/// A plain Taylor series on |x| <= 1 IS the Leibniz series at x = 1: 40 terms
+/// still leave ~1.2e-2 of error, which is what `stdlib/math/pure.sio` does.
+/// Reducing first to |t| <= tan(pi/12) = 0.2679 makes t^2 <= 0.072, so 24 terms
+/// land below 1e-27 and the result is 2 ULP from glibc across the grid.
+///
+/// Iterative rather than recursive: both are correct once the name is prefixed,
+/// and folding the two reductions into flags keeps it to a single frame.
+pub fn libm_atan(x: f64) -> f64 with Mut, Div, Panic {
+    var a = x
+    var negate = false
+    if a < 0.0 {
+        a = 0.0 - a
+        negate = true
+    }
+    var invert = false
+    if a > 1.0 {
+        a = 1.0 / a
+        invert = true
+    }
+    var t = a
+    var offset = 0.0
+    if a > 0.26794919243112270647 {
+        // tan(a - b) with b = pi/6: (a - 1/sqrt3) / (1 + a/sqrt3)
+        let s3 = 1.73205080756887729353
+        t = (a * s3 - 1.0) / (a + s3)
+        offset = 0.52359877559829887308
+    }
+    var sum = t
+    var term = t
+    let t2 = t * t
+    var k: i64 = 1
+    while k < 24 {
+        term = 0.0 - term * t2
+        sum = sum + term / ((2 * k + 1) as f64)
+        k = k + 1
+    }
+    var r = offset + sum
+    if invert { r = 1.57079632679489661923 - r }
+    if negate { r = 0.0 - r }
+    r
+}
+
+/// Full-quadrant arctangent. Sign and quadrant follow C99 atan2(y, x).
+pub fn libm_atan2(y: f64, x: f64) -> f64 with Mut, Div, Panic {
+    if x == 0.0 {
+        if y > 0.0 { return 1.57079632679489661923 }
+        if y < 0.0 { return 0.0 - 1.57079632679489661923 }
+        return 0.0
+    }
+    let r = libm_atan(y / x)
+    if x > 0.0 { return r }
+    if y >= 0.0 { return r + 3.14159265358979323846 }
+    r - 3.14159265358979323846
+}
+
+// =============================================================================
+// Built on the exp/log builtins — see the accuracy note in the header
+// =============================================================================
+
+/// x^y.
+///
+/// An integer exponent takes an exact binary-exponentiation path: every multiply
+/// is a single rounding, so `libm_pow(10.0, 7.0)` is exactly 10000000.0 rather
+/// than the 9999999.950639 that `exp(y * log x)` yields under Madaros (#1626).
+/// Only fractional exponents fall through to the builtins.
+pub fn libm_pow(x: f64, y: f64) -> f64 with Mut, Div, Panic {
+    if y == 0.0 { return 1.0 }
+    if y == 1.0 { return x }
+    if y == 0.5 && x >= 0.0 { return sqrt(x) }
+    if x == 0.0 {
+        if y > 0.0 { return 0.0 }
+        return 1.0e308
+    }
+
+    var base = x
+    var negative_base = false
+    if base < 0.0 {
+        base = 0.0 - base
+        negative_base = true
+    }
+
+    // Bounded at 1024: past that the result has overflowed for any base > 1,
+    // and the loop stops being free.
+    let n = y as i64
+    if (n as f64) == y && n > 0 - 1024 && n < 1024 {
+        var result = 1.0
+        var b = base
+        var e = n
+        if e < 0 { e = 0 - e }
+        while e > 0 {
+            if e % 2 == 1 { result = result * b }
+            b = b * b
+            e = e / 2
+        }
+        if n < 0 { result = 1.0 / result }
+        if negative_base && n % 2 != 0 { return 0.0 - result }
+        return result
+    }
+
+    // A fractional exponent on a negative base is not real-valued.
+    if negative_base { return 0.0 }
+    exp(y * log(base))
+}
+
+/// tanh(x) = (e^2x - 1) / (e^2x + 1), saturating outside |x| > 20 where the
+/// result is 1.0 to within 4e-18 and e^2x starts costing range for nothing.
+pub fn libm_tanh(x: f64) -> f64 with Mut, Div, Panic {
+    if x > 20.0 { return 1.0 }
+    if x < 0.0 - 20.0 { return 0.0 - 1.0 }
+    let e = exp(2.0 * x)
+    (e - 1.0) / (e + 1.0)
+}
+
+/// sinh(x) = (e^x - e^-x) / 2
+pub fn libm_sinh(x: f64) -> f64 with Mut, Div, Panic {
+    let e = exp(x)
+    (e - 1.0 / e) / 2.0
+}
+
+/// cosh(x) = (e^x + e^-x) / 2
+pub fn libm_cosh(x: f64) -> f64 with Mut, Div, Panic {
+    let e = exp(x)
+    (e + 1.0 / e) / 2.0
+}

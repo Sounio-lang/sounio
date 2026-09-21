@@ -18,6 +18,203 @@
 >    (`souc main.sio` / `lean_single.sio` / `make build`). Bare full builds are
 >    what saturate CPU and trip the probe. Cheap `souc check` is exempt.
 
+> **⚠️ SOUNIO_STDLIB_PATH in a worktree (2026-08-15).** CLAUDE.md's own dev
+> instructions export `SOUNIO_STDLIB_PATH` globally in the interactive pod. If
+> your worktree session inherits that export, every `souc`/`madaros`/gate-script
+> invocation in your worktree silently resolves the stdlib from the SHARED
+> checkout (`/workspace/sounio/stdlib`), not your own worktree's copy — a
+> worktree edit to `stdlib/` then measures as absent no matter what you change.
+> Bit this session twice independently (a false "pub not honored in mod.sio"
+> conclusion, retracted in `f0e7869765`, and the same confound hit a parallel
+> lane separately). This is NOT a real CI bug — GitHub Actions runners are
+> ephemeral checkouts and only set the var locally per-step
+> (`madaros-prebuilt-refresh.yml`) — it is purely a worktree/dev-pod trap.
+> Before trusting any `souc check`/gate result from a worktree, run
+> `echo $SOUNIO_STDLIB_PATH` and confirm it points at *this* worktree's
+> `stdlib/`, or `unset SOUNIO_STDLIB_PATH` and pass it explicitly per-command.
+
+> **⚠️ SOUC_BIN does the SAME thing, for the compiler binary itself
+> (2026-08-15).** The pod also exports `SOUC_BIN=/workspace/sounio/bin/souc`
+> globally. `scripts/lib/resolve_souc.sh`'s `_sounio_resolve_bin()` honors a
+> pre-set `SOUC_BIN` before it ever tries `$ROOT_DIR/bin/souc` relative to the
+> script's own location — so `scripts/run_sio_test_suite.sh` (and anything
+> else that sources `resolve_souc.sh`) silently runs against the SHARED
+> checkout's compiler from a worktree, regardless of `MADAROS_RAW_BIN`. This
+> one is more dangerous than the stdlib-path trap because it fails silently
+> with plausible-looking numbers rather than an obvious "file not found": a
+> regression check can report "identical results before/after" while never
+> having touched your build at all (caught this session — see
+> `CAMINHO_CRITICO_CORTADO_2026-08-14.md`'s 2026-08-15 update, which corrects
+> an already-landed commit's unsupported claim). `unset SOUC_BIN` before any
+> regression check in a worktree, alongside `SOUNIO_STDLIB_PATH`.
+
+---
+
+## LANE CLAIM + ownership-conflict — 2026-08-06
+
+### Parallel Lane Contract
+
+```text
+Lane:            Madaros self-compilation (gen2 == gen3) — the fixed-point line
+Owner:           claude-1
+Base:            b260dba66e (origin/main, 2026-08-05) — 24 commits BEHIND origin/main
+Worktree:        /tmp/claude-1000/-workspace-sounio/fecdd497-.../scratchpad/wt-fpw
+Branch:          feat/madaros-fixed-point-line @ a807138314 (45 commits ahead)
+Write-Set:       self-hosted/ir/ir.sio, self-hosted/ir/lower.sio,
+                 self-hosted/check/specializer.sio,
+                 self-hosted/compiler/module_frontend.sio,
+                 self-hosted/compiler/main.sio, self-hosted/compiler/main_tests.sio (new),
+                 scripts/ci/madaros_*_gate.sh, scripts/ci/global_aggregate_store_gate.sh,
+                 scripts/lib/souc_invoke.sh, tests/known_failures/lean_single_global_*.sio
+                 (89 files total vs origin/main)
+Read-Set:        self-hosted/check/check.sio, self-hosted/native/*
+Required-Gates:  scripts/ci/madaros_fixed_point_gate.sh (rung `check`, green),
+                 scripts/ci/global_aggregate_store_gate.sh (4/4, green)
+Merge-Target:    main
+Known-Blockers:  BLK-20260806-madaros-fixedpoint-mainsio-overlap (below)
+```
+
+### Blocker record
+
+```text
+Blocker-ID: BLK-20260806-madaros-fixedpoint-mainsio-overlap
+Status: reproduced
+Severity: B2
+Class: ownership-conflict
+Owner: claude-1
+Lane: Madaros self-compilation (gen2 == gen3)
+Worktree: /tmp/claude-1000/-workspace-sounio/fecdd497-.../scratchpad/wt-fpw
+Branch: feat/madaros-fixed-point-line @ a807138314
+Files-Owned: see Write-Set above
+Files-Read-Only: self-hosted/ir/opt_cleanup.sio, self-hosted/ir/tailcall.sio
+Do-Not-Touch: self-hosted/compiler/main.sio until this record is resolved
+Repro: git worktree add --detach <tmp> probe/ir-soa-phase0
+       && cd <tmp> && git merge --no-commit --no-ff feat/madaros-fixed-point-line
+Observed: 10 conflicted files, ~110 conflict hunks. 81 of them are in
+          self-hosted/compiler/main.sio alone. Measured 2026-08-06 against
+          probe/ir-soa-phase0 @ 6b0698ce22.
+Expected: disjoint write sets, per Ownership Rule 1 (one active writer per file)
+Acceptance-Gate: a clean `git merge` of both lanes, then
+                 scripts/ci/madaros_fixed_point_gate.sh at rung `check`
+Evidence-Level: E1
+Evidence: trial merge above; per-file hunk counts recorded in this entry
+Fallback-Path: land this lane WITHOUT the main.sio test-suite extraction
+Legacy-Kept: yes — no test assertion removed (1163 test fns before and after)
+LLM-Offload: not-required
+Next-Action: human decision on merge order (see below)
+```
+
+### What actually overlaps, measured
+
+`probe/ir-soa-phase0` (tip `6b0698ce22`, last commit 2026-08-06 15:25Z, NOT merged
+to main, merge-base 2026-07-25) and this lane both write
+`ir/ir.sio`, `ir/lower.sio` and `compiler/main.sio`. That sounds total. It is not:
+
+| file | conflict hunks |
+|---|---|
+| `compiler/main.sio` | **81** |
+| `ir/opt_cleanup.sio` | 13 |
+| `compiler/module_frontend.sio` | 7 |
+| `ir/ir.sio` | **2** |
+| `ir/lower.sio` | **2** |
+| 5 others | 1 each |
+
+Of 89 files this lane changes, 10 conflict. The two lanes turn out to work on
+DIFFERENT PARTS of the same files: `probe/ir-soa-phase0` is in the optimizer
+(`compact_nops`, float markers, the `-O` miscompile, #1667); this lane is in
+lowering, capacities and diagnostics. `ir/lower.sio` — 3600 changed lines on
+their side, ~700 on ours — collides in two hunks.
+
+**The wall is one change, not the lane:** the extraction of main.sio's 1163-test
+self-test suite into `compiler/main_tests.sio` (main.sio 28525 -> 9408 lines).
+It is also the most re-doable change here — it is mechanical, its inputs are
+recorded (commit `1241ac359e`), and re-running it after the other lane lands
+costs a script, not a rediscovery.
+
+### Recommendation (human decision required)
+
+Land this lane WITHOUT `compiler/main.sio`, and redo the extraction afterwards.
+That drops the conflict from ~110 hunks to ~29 across 9 files, all of them
+ordinary review-sized. Everything this lane found stays landable:
+
+- module-level globals are `ItemFn`, and cross-module DCE was deleting them all
+  (`541536f777`) — a silent-wrong-code fix, independent of main.sio
+- `IR_MAX_INSTRS` 3072 -> 4096, required by `lex_source_to_globals` at 3269
+- `StructFieldEntry` name interning (~18.6 KB -> ~2.1 KB per layout entry)
+- the IR slot census, the error-site ledger, the unresolved-identifier ledger
+- two checked-in seed-defect reproductions + `global_aggregate_store_gate.sh`
+
+The cost of the alternative — merging main.sio too — is 81 hunks in a file both
+lanes restructured, where a wrong resolution is a silent miscompile rather than
+a build error.
+
+
+### Active-lane map over `self-hosted/ir` + `compiler` — surveyed 2026-08-06
+
+Surveyed because this lane worked ~15 hours in `ir/lower.sio` without one, and
+`#1649` — which its own commits reference — had two PRs open against it since
+2026-08-05. The survey is the deliverable; the numbers below are measured trial
+merges, not impressions.
+
+**The three "IR lanes" are one lane, stacked.** Each contains the previous:
+
+```
+refactor/ir-instruction-arena (#1650)  ⊂  refactor/ir-arena-step2 (#1651)  ⊂  probe/ir-soa-phase0
+      7dde0d403d, 08-05                       6c32908852, 08-05                94bcff71a3, 08-06
+```
+
+`probe/ir-soa-phase0` is the tip, not a rival. (`6c32908852` is also where this
+lane took `tests/known_failures/lean_single_global_aggregate_store.sio` from —
+the file only, never the commit, which is why no history was duplicated.)
+
+**Conflict against `feat/madaros-fixed-point-core` (#1672), measured:**
+
+| lane | files | hunks | where |
+|---|---|---|---|
+| #1650 `refactor/ir-instruction-arena` | **0** | **0** | merges clean |
+| #1651 `refactor/ir-arena-step2` | 8 | 14 | `module_frontend.sio` 6, `ir/lower.sio` 2, six files at 1 |
+| `probe/ir-soa-phase0` | 10 | 30 | as above plus `ir/opt_cleanup.sio` 13 |
+
+`ir/ir.sio` does NOT conflict with #1651: this lane's `StructFieldEntry`
+interning and their arena work sit in different regions of the file.
+
+**Twelve other open PRs touch this write-set**, all last active 07-17..07-29 and
+none in the past week: #1527, #1500, #1508, #1531, #1501, #1493, #1421, #1339,
+#1069, #1605. #1527 is the self-parse/visibility/Box lane this lane's own plan
+said to re-slice rather than merge.
+
+### Proposed landing order
+
+```
+1. #1650  refactor/ir-instruction-arena   — base of the stack, 0 conflicts with anything
+2. #1672  feat/madaros-fixed-point-core   — 0 conflicts with #1650
+3. #1651  refactor/ir-arena-step2         — absorbs 14 hunks
+4.        probe/ir-soa-phase0             — tip, absorbs the rest
+```
+
+Rationale, and the one place it is arguable:
+
+- #1650 first because it is free — it conflicts with nothing measured here.
+- #1672 second because its load-bearing fix is **silent wrong code**:
+  cross-module DCE deleted every module-level global, and the emitted binary
+  printed nothing rather than failing. That class should not wait behind a
+  refactor.
+- #1651 third. Note it **removes** `instrs: [IrInstr; 4096]`, the field #1672
+  grows from 3072. The two agree on the number, so this is supersession and not
+  contradiction. **If #1651 is landed before #1672 instead**, drop the
+  `IR_MAX_INSTRS` hunks from #1672 (21 type positions across six files, the
+  constant, the struct field, eight initialisers) — nothing else in #1672
+  depends on them.
+- The finding behind that raise survives the representation and argues FOR the
+  arena: `lex_source_to_globals` needs 3269 instructions, and it never appeared
+  in the corpus census that justified the 3072 cap, because that census does not
+  contain this compiler's own 120-module closure. A fixed cap chosen from the
+  corpus will keep being wrong for self-compilation.
+
+Owner of #1650/#1651/`probe/ir-soa-phase0` has not been contacted. This map is
+on the #1672 branch; relaying it is a human action.
+
+
 ## 6-Agent Lane Activation — 2026-05-10T13:35Z
 
 **Authority**: human-approved at 2026-05-10 (this commit).

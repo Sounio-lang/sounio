@@ -56,3 +56,10 @@ Evolution x Projection x Instrument x Protocol -> PhysicalObservationReceipt
 
 Remain a hypothesis until a narrow physical witness shows that a typed receipt
 distinguishes experimentally meaningful cases collapsed by a scalar interface.
+
+
+## Claims Forbidden
+
+- Do not claim clinical validity, ClinicalAuthority, or ClinicalRelease from this contract alone.
+- Do not claim compiler-wide integration or production cutover from fixture evidence alone.
+- Do not claim scientific truth or independent replay beyond the scoped witnesses bound in `bindings.tsv`.

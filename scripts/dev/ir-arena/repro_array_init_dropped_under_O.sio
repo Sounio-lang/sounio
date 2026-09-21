@@ -1,0 +1,40 @@
+// -O drops a local array's initialiser. 10 lines, no loop, no struct.
+//
+//   without -O   read_after_init_only: a0=7 a3=7 | after_one_store: b0=7 b1=5
+//   with -O      read_after_init_only: a0=0 a3=0 | after_one_store: b0=0 b1=0
+//   with -O on origin/main: the program HANGS (rc=124)
+//
+// WHY. The IR diff between the two compiles differs by exactly ONE instruction:
+//
+//   i=1 op=load_imm dst=1
+//
+// and NO IR instruction anywhere references register 1 as a source -- grep the
+// trace, the count is zero. So it is dead by the IR's own semantics and any
+// liveness-based removal is correct to remove it. The backend nevertheless reads
+// that register to fill the array, because `[7; 4]` emits no fill instruction
+// into the IR at all.
+//
+// The defect is therefore in how array initialisation is REPRESENTED, not in the
+// optimizer. Bisecting the twelve opt_cleanup peels one at a time changes
+// nothing -- SOUNIO_OCP_SKIP_{DCE,DSE,DEDUP_IMM,CONST_FOLD,COPY_PROP,SCCP,CSE,
+// COMPACT_NOPS} all still produce 0 -- which is the tell that no peel is at
+// fault: they are all reading a truthful liveness answer to a question the IR
+// answers wrongly.
+//
+// Refs #1649
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    var a: [i64; 4] = [7; 4]
+    print("read_after_init_only: a0=")
+    print_int(a[0 as usize])
+    print(" a3=")
+    print_int(a[3 as usize])
+    var b: [i64; 4] = [7; 4]
+    b[1 as usize] = 5
+    print(" | after_one_store: b0=")
+    print_int(b[0 as usize])
+    print(" b1=")
+    print_int(b[1 as usize])
+    print("\n")
+    0
+}

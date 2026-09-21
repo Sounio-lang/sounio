@@ -3,12 +3,20 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-coord-hook-selftest.XXXXXX")"
+TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-native-hook.XXXXXX")"
 REPO="$TEST_ROOT/repo"
 SECOND="$TEST_ROOT/second-worktree"
-STATE="$TEST_ROOT/state"
+STATE="$TEST_ROOT/coord"
+SOURCE_LOOM_RUNTIME="$ROOT_DIR/tools/loom/_build/default/src/loom.exe"
+LOOM_RUNTIME="$REPO/tools/loom/_build/default/src/loom.exe"
 
 cleanup() {
+  if [[ -x "$REPO/bin/sounio-coord" ]]; then
+    SOUNIO_COORD_DIR="$STATE" SOUNIO_COORD_RUNTIME_MODE=local \
+    SOUNIO_COORD_DURABLE_OBLIGATIONS=0 \
+      "$REPO/bin/sounio-coord" obligation-supervisor-stop \
+      --timeout-seconds 5 >/dev/null 2>&1 || true
+  fi
   git -C "$REPO" worktree remove --force "$SECOND" >/dev/null 2>&1 || true
   rm -rf "$TEST_ROOT"
 }
@@ -19,14 +27,15 @@ fail() {
   exit 1
 }
 
-mkdir -p "$REPO/bin" "$REPO/scripts/dev" "$REPO/self-hosted/parser"
+"$ROOT_DIR/scripts/dev/build_sounio_loom.sh" >/dev/null
+[[ -x "$SOURCE_LOOM_RUNTIME" ]] || fail "Loom runtime was not built: $SOURCE_LOOM_RUNTIME"
+
+mkdir -p "$REPO/bin" "$REPO/scripts/dev" "$REPO/self-hosted/parser" \
+  "$REPO/tools/loom/_build/default/src"
+cp "$SOURCE_LOOM_RUNTIME" "$LOOM_RUNTIME"
 cp "$ROOT_DIR/bin/sounio-coord" "$REPO/bin/sounio-coord"
-cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook.py" "$REPO/scripts/dev/"
 cp "$ROOT_DIR/scripts/dev/sounio_coord_runtime.sh" "$REPO/scripts/dev/"
-cp "$ROOT_DIR/scripts/dev/sounio_coord_agent_hook_runtime.py" "$REPO/scripts/dev/"
-chmod +x "$REPO/bin/sounio-coord" "$REPO/scripts/dev/sounio_coord_agent_hook.py" \
-  "$REPO/scripts/dev/sounio_coord_runtime.sh" \
-  "$REPO/scripts/dev/sounio_coord_agent_hook_runtime.py"
+chmod +x "$REPO/bin/sounio-coord" "$REPO/scripts/dev/sounio_coord_runtime.sh"
 git -C "$REPO" init -q
 git -C "$REPO" config user.name 'Sounio Hook Selftest'
 git -C "$REPO" config user.email 'coord-hook-selftest@sounio.local'
@@ -36,17 +45,30 @@ printf 'items\n' > "$REPO/self-hosted/parser/items.sio"
 git -C "$REPO" add .
 git -C "$REPO" commit -qm seed
 git -C "$REPO" worktree add -q -b second-lane "$SECOND"
+rm "$SECOND/tools/loom/_build/default/src/loom.exe"
+ln -s "$LOOM_RUNTIME" "$SECOND/tools/loom/_build/default/src/loom.exe"
 
 run_hook() {
   local agent="$1" cwd="$2" payload="$3"
-  printf '%s\n' "$payload" | SOUNIO_COORD_DIR="$STATE" SOUNIO_COORD_RUNTIME_MODE=local \
-    python3 "$cwd/scripts/dev/sounio_coord_agent_hook.py" --agent "$agent"
+  local config="$ROOT_DIR/.${agent}/hooks.json"
+  [[ "$agent" != claude ]] || config="$ROOT_DIR/.claude/settings.json"
+  printf '%s\n' "$payload" | \
+    SOUNIO_COORD_DIR="$STATE" SOUNIO_COORD_RUNTIME_MODE=local \
+    SOUNIO_COORD_DURABLE_OBLIGATIONS=0 \
+    SOUNIO_LOOM_HOOK_TEST_MODE=1 SOUNIO_COORD_NATIVE_HOOK_SELFTEST=1 \
+    SOUNIO_LOOM_LANGUAGE_AUTHORITY_ROOT="$ROOT_DIR" \
+    SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_ROOT="$ROOT_DIR" \
+    SOUNIO_LOOM_LANGUAGE_AUTHORITY_RUNTIME="$ROOT_DIR/tools/loom/.runtime/sounio-loom-language-authority-runtime" \
+    SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_RUNTIME="$ROOT_DIR/tools/loom/.runtime/sounio-loom-native-hook-cutover" \
+    SOUNIO_LOOM_NATIVE_HOOK_CONFIG="$config" \
+    "$cwd/tools/loom/_build/default/src/loom.exe" agent-hook --agent "$agent"
 }
 
 run_coord() {
   local cwd="$1"
   shift
-  (cd "$cwd" && SOUNIO_COORD_DIR="$STATE" bin/sounio-coord "$@")
+  (cd "$cwd" && SOUNIO_COORD_DIR="$STATE" \
+    SOUNIO_COORD_DURABLE_OBLIGATIONS=0 bin/sounio-coord "$@")
 }
 
 output="$(run_hook codex "$REPO" \
@@ -68,17 +90,27 @@ grep -q 'files=self-hosted/parser/ast.sio,self-hosted/parser/items.sio' <<< "$ou
 run_coord "$SECOND" claim --agent codex --lane cross-worktree --ttl-seconds 600 \
   --intent 'cross-worktree target owned explicitly' \
   --files self-hosted/parser/cross-new.sio self-hosted/parser/own-new.sio >/dev/null
-cp "$SECOND/bin/sounio-coord" "$SECOND/bin/sounio-coord.target-copy"
-printf '#!/usr/bin/env bash\nexit 97\n' > "$SECOND/bin/sounio-coord"
-chmod +x "$SECOND/bin/sounio-coord"
-run_hook codex "$REPO" \
-  "{\"session_id\":\"codex-a\",\"cwd\":\"$REPO\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$SECOND/self-hosted/parser/cross-new.sio\"}}"
+set +e
+claimed_cross_output="$(run_hook codex "$REPO" \
+  "{\"session_id\":\"codex-a\",\"cwd\":\"$REPO\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$SECOND/self-hosted/parser/cross-new.sio\"}}" 2>&1)"
+claimed_cross_rc=$?
+set -e
+[[ "$claimed_cross_rc" -eq 2 ]] ||
+  fail "claimed cross-worktree write returned $claimed_cross_rc instead of 2"
+grep -q 'write-path-outside-session-worktree' <<< "$claimed_cross_output" ||
+  fail 'claimed cross-worktree write escaped the native session boundary'
 printf '%s\n' \
   "{\"session_id\":\"codex-target\",\"cwd\":\"$SECOND\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$SECOND/self-hosted/parser/own-new.sio\"}}" | \
   SOUNIO_COORD_DIR="$STATE" \
   SOUNIO_COORD_RUNTIME_MODE=local \
-  python3 "$REPO/scripts/dev/sounio_coord_agent_hook.py" --agent codex
-mv "$SECOND/bin/sounio-coord.target-copy" "$SECOND/bin/sounio-coord"
+  SOUNIO_COORD_DURABLE_OBLIGATIONS=0 \
+  SOUNIO_LOOM_HOOK_TEST_MODE=1 SOUNIO_COORD_NATIVE_HOOK_SELFTEST=1 \
+  SOUNIO_LOOM_LANGUAGE_AUTHORITY_ROOT="$ROOT_DIR" \
+  SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_ROOT="$ROOT_DIR" \
+  SOUNIO_LOOM_LANGUAGE_AUTHORITY_RUNTIME="$ROOT_DIR/tools/loom/.runtime/sounio-loom-language-authority-runtime" \
+  SOUNIO_LOOM_NATIVE_HOOK_CUTOVER_RUNTIME="$ROOT_DIR/tools/loom/.runtime/sounio-loom-native-hook-cutover" \
+  SOUNIO_LOOM_NATIVE_HOOK_CONFIG="$ROOT_DIR/.codex/hooks.json" \
+  "$SECOND/tools/loom/_build/default/src/loom.exe" agent-hook --agent codex
 output="$(run_coord "$SECOND" brief --max-rows 6)"
 grep -Fq "ACTIVE claim_id=codex--cross-worktree" <<< "$output" || \
   fail 'cross-worktree claim disappeared during target authorization'
@@ -94,8 +126,8 @@ cross_rc=$?
 set -e
 cross_output="$(<"$cross_log")"
 [[ "$cross_rc" -eq 2 ]] || fail "unclaimed cross-worktree write returned $cross_rc instead of 2"
-grep -q 'no active claim in worktree' <<< "$cross_output" || \
-  fail 'unclaimed cross-worktree write did not explain the missing target claim'
+grep -q 'write-path-outside-session-worktree' <<< "$cross_output" || \
+  fail 'unclaimed cross-worktree write escaped the native session boundary'
 
 output="$(run_hook claude "$SECOND" \
   "{\"session_id\":\"claude-b\",\"cwd\":\"$SECOND\",\"hook_event_name\":\"SessionStart\"}")"
@@ -114,8 +146,8 @@ output="$(run_hook claude "$SECOND" \
 grep -q "MESSAGE id=$message_id" <<< "$output" || fail 'message was not delivered to Claude'
 grep -q 'broadcast hook exclusion marker' <<< "$output" && \
   fail 'hook injected a broadcast alongside directed work'
-grep -q "Pending request ids: $message_id" <<< "$output" || \
-  fail 'hook did not show the correlated reply command for a request'
+grep -q "ack --agent claude --lane session-claude-b --message <id>" <<< "$output" || \
+  fail 'hook did not show the explicit acknowledgement command'
 output="$(run_coord "$REPO" message-status --agent codex --lane session-codex-a \
   --message "$message_id")"
 grep -q 'request_state=open injected=1 acknowledged=0 responses=0' <<< "$output" || \

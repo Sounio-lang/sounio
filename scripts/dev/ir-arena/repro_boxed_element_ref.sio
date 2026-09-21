@@ -1,0 +1,45 @@
+// Standalone reproducer: `&(*boxed).array[i]` is a WRONG ADDRESS on the seed.
+//
+//   $ ./bin/souc-lean-single-x86_64 repro_boxed_element_ref.sio out.elf && ./out.elf
+//   hoisted=5 inplace=22499901309144        <-- both should be 5
+//
+// Must be compiled with LEAN_SINGLE, which is the seed that builds Madaros and
+// therefore the compiler that produced the miscompiled code. Running it through
+// `madaros --native-v2-compile` proves nothing: Box in a user program segfaults
+// on that path before the reference is reached.
+//
+// NARROW SHAPE. Reading a scalar field in place through the Box is CORRECT --
+// the fuller version of this program reads tag_inplace=77 right. What breaks is
+// taking a reference to an aggregate ELEMENT and dereferencing it in a callee.
+// Without the Box the same program prints 5 and 5.
+//
+// This is why ir_module_seal_functions sealed 0 of 7 regions until the element
+// was hoisted into a local, and why every alarming number in the #1669
+// float-bits investigation was an artifact of the measuring code.
+//
+// Refs #1649, #1669
+struct Inner { tag: i64, bits: [i64; 8] }
+struct Outer { n: i64, items: [Inner; 4] }
+
+fn inner_sum(p: &Inner) -> i64 with Mut, Panic, Div {
+    var t: i64 = 0
+    var i: i64 = 0
+    while i < 8 { t = t + (*p).bits[i as usize]; i = i + 1 }
+    t
+}
+
+fn main() -> i64 with IO, Alloc, Mut, Panic, Div {
+    var seed = Outer { n: 0, items: [Inner { tag: 0, bits: [0; 8] }; 4] }
+    var slot = seed.items[2 as usize]
+    var k: i64 = 0
+    while k < 5 { slot.bits[k as usize] = 1; k = k + 1 }
+    seed.items[2 as usize] = slot
+    var ob = Box::new(seed)
+    var hoisted = (*ob).items[2 as usize]
+    print("hoisted=")
+    print_int(inner_sum(&hoisted))
+    print(" inplace=")
+    print_int(inner_sum(&(*ob).items[2 as usize]))
+    print("\n")
+    0
+}

@@ -162,7 +162,10 @@ def compute_family_speedups(
     fallback_count = int(sass.get("fallback_count", 0))
 
     launch_ok = bool(ptx.get("launch_accepted", False)) and not bool(ptx.get("used_fallback", True))
-    fpga_ok = (
+    # A stale fpga report's *_status fields describe an environment this
+    # checkout doesn't have (see fpga_seed_report.json's stale_reason) --
+    # treating them as pass would credit a measurement that never happened.
+    fpga_ok = not fpga.get("stale") and (
         normalize_status_pass(fpga.get("sim_status"))
         and normalize_status_pass(fpga.get("synth_status"))
         and normalize_status_pass(fpga.get("k_axi_sim_status"))

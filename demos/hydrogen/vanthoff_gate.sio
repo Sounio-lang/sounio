@@ -1,0 +1,221 @@
+// demos/hydrogen/vanthoff_gate.sio
+//
+// The silent failure his own papers flagged: van't Hoff EXTRAPOLATION of
+// equilibrium constants, done honestly.
+//
+// Stamatakis et al., Greenhouse Gases: Sci. & Technol. (2025) showed that
+// PHREEQC defaults + van't Hoff extrapolation of the methanation
+// equilibrium constant produce MISLEADING results (spurious CH4 and
+// calcite dissolution) — fixed only by a temperature-dependent expression
+// calibrated to experiment. His 2026 geothermal paper (Geoenergy Sci.
+// Eng.) models calcite scaling with the same class of extrapolation.
+//
+// This demo takes the calcite solubility equilibrium — the shared core of
+// both papers — and asks the question a point-value geochem code never
+// answers: WHEN DOES THE EXTRAPOLATION STOP BEING A FACT AND BECOME A
+// GUESS?
+//
+// Model (pK units, so the arithmetic spine is exactly rational):
+//   pK(T) = pK0 + (dH / (R·ln10)) · (1/T − 1/T0)         [constant-dH]
+//   pK(T) = pK(T) − (dCp / (R·ln10)) · [ln(T/T0) + T0/T − 1]  [dCp corr.]
+//   calcite: pK0 = 8.48 at T0 = 298.15 K (Plummer & Busenberg)
+//   dH_dissolution = −9.61 kJ/mol nominal, epistemic INTERVAL [−12, −7]
+//   dCp epistemic INTERVAL [−80, 20] J/mol·K (literature scatter)
+// Saturation index: SI = log10(IAP) + pK. SI > 0 means scaling.
+// A marginal brine (log10 IAP = −8.78 ± 0.04 aleatory) is chosen to sit
+// AT the decision boundary — because that is where decisions live.
+//
+// The gate: SI interval all-positive -> CERTAIN_SCALE; all-negative ->
+// CERTAIN_NO_SCALE; straddling zero -> UNDETERMINED. A point code says
+// "scale!" at 90 C with SI = +0.001 — a rounding artifact dressed as a
+// decision. This code refuses.
+//
+// Rational spine machine-checked in formal/lean4/SounioHydrogenVanthoff.lean.
+// Marker: VANTHOFF_GATE_OK
+
+use epistemic::pbox::*
+
+// ─── pure-Sounio math ───
+
+fn mh_sqrt(x: f64) -> f64 with Mut {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 30 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn mh_ln(x: f64) -> f64 with Mut, Div {
+    var m = x
+    var k: i64 = 0
+    while m >= 2.0 { m = m / 2.0; k = k + 1 }
+    while m < 1.0 { m = m * 2.0; k = k - 1 }
+    let y = (m - 1.0) / (m + 1.0)
+    let y2 = y * y
+    var term = y
+    var sum = 0.0
+    var i: i64 = 0
+    while i < 12 {
+        sum = sum + term / (2.0 * (i as f64) + 1.0)
+        term = term * y2
+        i = i + 1
+    }
+    2.0 * sum + (k as f64) * 0.6931471805599453
+}
+
+// ─── PRNG ───
+
+var RNG_A: i64 = 0
+var RNG_B: i64 = 0
+
+fn rng_seed(a: i64, b: i64) with Mut {
+    RNG_A = a
+    RNG_B = b
+}
+
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A
+    let y = RNG_B
+    RNG_A = y
+    x = x ^ (x << 23)
+    x = x ^ (x >> 17)
+    x = x ^ (y ^ (y >> 26))
+    RNG_B = x
+    let r = x + y
+    if r < 0 { 0 - r } else { r }
+}
+
+fn rand_uniform() -> f64 with Mut, Div {
+    let r = rng_next()
+    (r % 10000) as f64 / 10000.0
+}
+
+fn rand_normal() -> f64 with Mut, Div {
+    var sum = 0.0
+    var j = 0
+    while j < 12 { sum = sum + rand_uniform(); j = j + 1 }
+    sum - 6.0
+}
+
+// ─── the extrapolation engine (pK units; R·ln10 = 19.147 J/mol·K) ───
+
+fn pk_const_dh(dh_j: f64, t: f64) -> f64 with Div {
+    8.48 + (dh_j / 19.147) * (1.0 / t - 1.0 / 298.15)
+}
+
+fn dcp_term(t: f64) -> f64 with Mut, Div {
+    mh_ln(t / 298.15) + 298.15 / t - 1.0
+}
+
+fn pk_full(dh_j: f64, dcp: f64, t: f64) -> f64 with Mut, Div {
+    pk_const_dh(dh_j, t) - (dcp / 19.147) * dcp_term(t)
+}
+
+// P(SI > 0) at a fixed dH corner, aleatory brine scatter only
+fn prob_scale(log_iap: f64, sigma: f64, dh_j: f64, t: f64, n: i64) -> f64 with Mut, Div {
+    var i: i64 = 0
+    var hits: i64 = 0
+    while i < n {
+        let li = log_iap + sigma * rand_normal()
+        if li + pk_const_dh(dh_j, t) > 0.0 { hits = hits + 1 }
+        i = i + 1
+    }
+    100.0 * (hits as f64) / (n as f64)
+}
+
+// gate verdict: 0 = CERTAIN_NO_SCALE, 1 = CERTAIN_SCALE, 2 = UNDETERMINED
+fn gate(si_lo: f64, si_hi: f64) -> i64 {
+    if si_hi < 0.0 { return 0 }
+    if si_lo > 0.0 { return 1 }
+    2
+}
+
+fn print_verdict(v: i64) with IO {
+    if v == 0 { print("CERTAIN_NO_SCALE") }
+    if v == 1 { print("CERTAIN_SCALE  ") }
+    if v == 2 { print("UNDETERMINED   ") }
+}
+
+fn row(t: f64, label: i64) with IO, Mut, Div {
+    let lo = pk_const_dh(0.0 - 7000.0, t)    // pK decreases in dH: -7000 gives min
+    let hi = pk_const_dh(0.0 - 12000.0, t)   // -12000 gives max
+    let si_lo = 0.0 - 8.78 + lo
+    let si_hi = 0.0 - 8.78 + hi
+    print("  "); print(label); print(" C | pK ["); print(lo); print(" , ")
+    print(hi); print("]  width "); print(hi - lo)
+    print(" | SI ["); print(si_lo); print(" , "); print(si_hi); print("] -> ")
+    print_verdict(gate(si_lo, si_hi))
+    println("")
+}
+
+fn main() -> i32 with IO, Mut, Div {
+    print("=== van't Hoff extrapolation, honest edition: calcite scaling ===")
+    println("")
+    print("    pK0 = 8.48 @ 25 C, dH in [-12, -7] kJ/mol (epistemic),")
+    println("")
+    print("    marginal brine log10 IAP = -8.78 +- 0.04 (aleatory)")
+    println("")
+    println("")
+
+    // 25 C baseline
+    row(298.15, 25)
+    row(333.15, 60)
+    row(363.15, 90)
+    row(423.15, 150)
+    println("")
+
+    // the point estimate's fragile "decision" at 90 C
+    let pk_point = pk_const_dh(0.0 - 9610.0, 363.15)
+    let si_point = 0.0 - 8.78 + pk_point
+    print("point estimate (dH = -9.61) at 90 C: pK = "); println(pk_point)
+    print("   SI = "); println(si_point)
+    print("   -> a point code says SCALE on a margin of +0.001: a rounding")
+    println("")
+    print("   artifact dressed as a decision. PHREEQC never tells you.")
+    println("")
+    println("")
+
+    // model-form divergence at 150 C: constant-dH vs dCp-corrected
+    print("model-form divergence at 150 C:")
+    println("")
+    print("   constant-dH,  dH in [-12,-7]:  pK in [")
+    print(pk_const_dh(0.0 - 7000.0, 423.15)); print(" , ")
+    print(pk_const_dh(0.0 - 12000.0, 423.15)); println(" ]")
+    print("   dCp-corrected, dCp in [-80,20]: pK in [")
+    print(pk_full(0.0 - 9610.0, 20.0, 423.15)); print(" , ")
+    print(pk_full(0.0 - 9610.0, 0.0 - 80.0, 423.15)); println(" ]")
+    print("   (the two MODELS' intervals do not overlap at the top end —")
+    println("")
+    print("    model-form uncertainty, invisible to any single-code run)")
+    println("")
+    println("")
+
+    // p-box on the scaling decision at 90 C
+    print("p-box on P(scaling) at 90 C, marginal brine:")
+    println("")
+    rng_seed(314159265, 271828182)
+    let p_hi = prob_scale(0.0 - 8.78, 0.04, 0.0 - 12000.0, 363.15, 20000)
+    print("   at dH = -12 kJ/mol: P [%] = "); println(p_hi)
+    rng_seed(314159265, 271828182)
+    let p_lo = prob_scale(0.0 - 8.78, 0.04, 0.0 - 7000.0, 363.15, 20000)
+    print("   at dH =  -7 kJ/mol: P [%] = "); println(p_lo)
+    let box = new(p_lo, p_hi)
+    print("   PBOX on the scaling decision: ["); print(box.lo)
+    print(" , "); print(box.hi); println(" ]")
+    println("")
+
+    print("The extrapolation distance |1/T - 1/T0| prices itself: pK width")
+    println("")
+    print("0 at 25 C, 0.09 at 60 C, 0.16 at 90 C, 0.26 at 150 C. At 60 C")
+    println("")
+    print("code is certain (no scale); at 90 C the honest verdict is")
+    println("")
+    print("UNDETERMINED — measure dH or the brine; at 150 C certain (scale).")
+    println("")
+    print("His GHG-2025 fix was a better correlation. The deeper fix is a")
+    println("")
+    print("code that knows when extrapolation has become a guess.")
+    println("")
+    println("VANTHOFF_GATE_OK")
+    0
+}

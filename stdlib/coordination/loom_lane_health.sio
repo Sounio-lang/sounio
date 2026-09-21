@@ -1,0 +1,255 @@
+//! Sounio semantic authority for truthful Loom lane health.
+//!
+//! This module classifies positive operational observations. Silence and
+//! missing records are never treated as evidence of idleness or death.
+
+fn lane_health_flag(value: i64) -> bool {
+    value == 0 || value == 1
+}
+
+fn lane_health_flags_valid(
+    expected_lane: i64,
+    claim_active: i64,
+    record_residue: i64,
+    pane_or_harness_exists: i64,
+    process_verified: i64,
+    process_unresponsive: i64,
+    process_absent: i64,
+    endpoint_verified: i64,
+    endpoint_absent: i64,
+    endpoint_stale: i64,
+    custody_active: i64,
+    custody_recoverable: i64,
+    obligation_active: i64,
+    blocker_active: i64,
+    obligation_census_complete: i64,
+    progress_observed: i64,
+    progress_window_complete: i64,
+    liveness_window_complete: i64,
+    ready_observed: i64,
+    observation_authority_verified: i64,
+    sample_fresh: i64,
+) -> bool {
+    lane_health_flag(expected_lane) &&
+    lane_health_flag(claim_active) &&
+    lane_health_flag(record_residue) &&
+    lane_health_flag(pane_or_harness_exists) &&
+    lane_health_flag(process_verified) &&
+    lane_health_flag(process_unresponsive) &&
+    lane_health_flag(process_absent) &&
+    lane_health_flag(endpoint_verified) &&
+    lane_health_flag(endpoint_absent) &&
+    lane_health_flag(endpoint_stale) &&
+    lane_health_flag(custody_active) &&
+    lane_health_flag(custody_recoverable) &&
+    lane_health_flag(obligation_active) &&
+    lane_health_flag(blocker_active) &&
+    lane_health_flag(obligation_census_complete) &&
+    lane_health_flag(progress_observed) &&
+    lane_health_flag(progress_window_complete) &&
+    lane_health_flag(liveness_window_complete) &&
+    lane_health_flag(ready_observed) &&
+    lane_health_flag(observation_authority_verified) &&
+    lane_health_flag(sample_fresh)
+}
+
+fn lane_health_affirmative_idle(
+    obligation_census_complete: i64,
+    progress_window_complete: i64,
+    ready_observed: i64,
+) -> bool {
+    obligation_census_complete == 1 && progress_window_complete == 1 && ready_observed == 1
+}
+
+pub fn loom_lane_health_decide(
+    policy_state: i64,
+    expected_lane: i64,
+    claim_active: i64,
+    record_residue: i64,
+    pane_or_harness_exists: i64,
+    process_verified: i64,
+    process_unresponsive: i64,
+    process_absent: i64,
+    endpoint_verified: i64,
+    endpoint_absent: i64,
+    endpoint_stale: i64,
+    custody_active: i64,
+    custody_recoverable: i64,
+    obligation_active: i64,
+    blocker_active: i64,
+    obligation_census_complete: i64,
+    progress_observed: i64,
+    progress_window_complete: i64,
+    liveness_window_complete: i64,
+    ready_observed: i64,
+    observation_authority_verified: i64,
+    sample_fresh: i64,
+) -> i64 {
+    // UNKNOWN is fail-closed for absent policy, observation failure, timeout,
+    // unauthorized observers, stale samples, and malformed semantic flags.
+    if policy_state != 1 { return 9 }
+    if !lane_health_flags_valid(
+        expected_lane,
+        claim_active,
+        record_residue,
+        pane_or_harness_exists,
+        process_verified,
+        process_unresponsive,
+        process_absent,
+        endpoint_verified,
+        endpoint_absent,
+        endpoint_stale,
+        custody_active,
+        custody_recoverable,
+        obligation_active,
+        blocker_active,
+        obligation_census_complete,
+        progress_observed,
+        progress_window_complete,
+        liveness_window_complete,
+        ready_observed,
+        observation_authority_verified,
+        sample_fresh,
+    ) { return 9 }
+    if observation_authority_verified != 1 || sample_fresh != 1 { return 9 }
+
+    // CONFLICTED is reserved for mutually incompatible positive facts.
+    if process_absent == 1 &&
+        (process_verified == 1 || process_unresponsive == 1) { return 8 }
+    if endpoint_verified == 1 &&
+        (endpoint_absent == 1 || endpoint_stale == 1) { return 8 }
+    if endpoint_absent == 1 && endpoint_stale == 1 { return 8 }
+    if custody_active == 1 && custody_recoverable == 1 { return 8 }
+    if blocker_active == 1 && obligation_active == 0 { return 8 }
+    if ready_observed == 1 && obligation_active == 1 { return 8 }
+
+    if expected_lane != 1 { return 9 }
+
+    // An owning process can disappear while claims, receipts, or persistent
+    // custody remain. That is residue to reconcile, never a dead lane.
+    if process_absent == 1 && liveness_window_complete == 1 &&
+        (record_residue == 1 || claim_active == 1 ||
+         custody_active == 1 || custody_recoverable == 1) { return 6 }
+
+    // DEAD requires the complete affirmative-absence triple: expectation,
+    // authorized fresh observation, and a completed liveness window.
+    if process_absent == 1 && endpoint_absent == 1 &&
+        liveness_window_complete == 1 && record_residue == 0 &&
+        claim_active == 0 && custody_active == 0 &&
+        custody_recoverable == 0 { return 7 }
+
+    if process_verified == 1 && process_unresponsive == 1 &&
+        liveness_window_complete == 1 { return 5 }
+
+    if pane_or_harness_exists == 1 &&
+        (endpoint_absent == 1 || endpoint_stale == 1) {
+        return 4
+    }
+
+    if process_verified == 1 && endpoint_verified == 1 &&
+        obligation_active == 1 && blocker_active == 1 &&
+        progress_observed == 0 && progress_window_complete == 1 {
+        return 3
+    }
+
+    if process_verified == 1 && endpoint_verified == 1 &&
+        process_unresponsive == 0 && blocker_active == 0 &&
+        (obligation_active == 1 || progress_observed == 1) { return 1 }
+
+    // The absence of obligation and progress is not inferred. Both bounded
+    // observations and the harness's positive ready signal are required.
+    if process_verified == 1 && endpoint_verified == 1 &&
+        process_unresponsive == 0 && obligation_active == 0 &&
+        blocker_active == 0 && progress_observed == 0 &&
+        lane_health_affirmative_idle(
+            obligation_census_complete,
+            progress_window_complete,
+            ready_observed,
+        ) { return 2 }
+
+    9
+}
+
+fn lane_health_test_case(
+    policy_state: i64,
+    expected_lane: i64,
+    claim_active: i64,
+    record_residue: i64,
+    pane_or_harness_exists: i64,
+    process_verified: i64,
+    process_unresponsive: i64,
+    process_absent: i64,
+    endpoint_verified: i64,
+    endpoint_absent: i64,
+    endpoint_stale: i64,
+    custody_active: i64,
+    custody_recoverable: i64,
+    obligation_active: i64,
+    blocker_active: i64,
+    obligation_census_complete: i64,
+    progress_observed: i64,
+    progress_window_complete: i64,
+    liveness_window_complete: i64,
+    ready_observed: i64,
+    observation_authority_verified: i64,
+    sample_fresh: i64,
+) -> i64 {
+    loom_lane_health_decide(
+        policy_state,
+        expected_lane,
+        claim_active,
+        record_residue,
+        pane_or_harness_exists,
+        process_verified,
+        process_unresponsive,
+        process_absent,
+        endpoint_verified,
+        endpoint_absent,
+        endpoint_stale,
+        custody_active,
+        custody_recoverable,
+        obligation_active,
+        blocker_active,
+        obligation_census_complete,
+        progress_observed,
+        progress_window_complete,
+        liveness_window_complete,
+        ready_observed,
+        observation_authority_verified,
+        sample_fresh,
+    )
+}
+
+pub fn loom_lane_health_selftest() -> i64 {
+    // Expected results originate here in Sounio. Native implementations may
+    // consume this table only after its executable semantics are frozen.
+    if lane_health_test_case(1, 1, 1, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 1) != 1 { return 1 }
+    if lane_health_test_case(1, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 1, 1) != 1 { return 2 }
+    if lane_health_test_case(1, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 1, 1, 1) != 2 { return 3 }
+    if lane_health_test_case(1, 1, 1, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 0, 1, 0, 0, 1, 1) != 3 { return 4 }
+    if lane_health_test_case(1, 1, 1, 0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1) != 4 { return 5 }
+    if lane_health_test_case(1, 1, 1, 0, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1) != 5 { return 6 }
+    if lane_health_test_case(1, 1, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1) != 6 { return 7 }
+    if lane_health_test_case(1, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1) != 6 { return 8 }
+    if lane_health_test_case(1, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 1, 0, 1, 1) != 7 { return 9 }
+    if lane_health_test_case(0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1) != 9 { return 10 }
+    if lane_health_test_case(2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1) != 9 { return 11 }
+    if lane_health_test_case(3, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1) != 9 { return 12 }
+    if lane_health_test_case(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1) != 9 { return 13 }
+    if lane_health_test_case(1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0) != 9 { return 14 }
+    if lane_health_test_case(1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1) != 9 { return 15 }
+    if lane_health_test_case(1, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1) != 9 { return 16 }
+    if lane_health_test_case(1, 1, 1, 0, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1) != 5 { return 17 }
+    if lane_health_test_case(1, 1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1) != 8 { return 18 }
+    if lane_health_test_case(1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1) != 8 { return 19 }
+    if lane_health_test_case(1, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 1, 0, 1, 1, 1) != 8 { return 20 }
+    if lane_health_test_case(1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1) != 8 { return 21 }
+    if lane_health_test_case(1, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1) != 9 { return 22 }
+    if lane_health_test_case(1, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 1, 1) != 9 { return 23 }
+    if lane_health_test_case(1, 0, 0, 0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1) != 9 { return 24 }
+    if lane_health_test_case(1, 1, 0, 0, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1) != 4 { return 25 }
+    if lane_health_test_case(1, 1, 1, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 1) != 9 { return 26 }
+    if lane_health_test_case(1, 1, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 1) != 6 { return 27 }
+    if lane_health_test_case(1, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1) != 8 { return 28 }
+    0
+}

@@ -5,11 +5,13 @@ import {
   MATRIX_RELATIVE_PATH,
   REGISTRY_RELATIVE_PATH,
   buildGovernedTopicRegistry,
-  formatAcceptanceReport,
+  formatAcceptanceReportStub,
   formatAuthorityMatrix,
   formatHistoricalStatusNote,
   formatRepoMetadataBlock,
   metadataFieldsForTopic,
+  parseFrontmatter,
+  parseRepoMetadata,
   stripStatusNote,
 } from './governance_registry.mjs';
 
@@ -20,7 +22,11 @@ function ensureTrailingNewline(content) {
 }
 
 function syncRepoMetadata(content, topic, relPath) {
-  const metadataBlock = `${formatRepoMetadataBlock(topic)}\n\n`;
+  // Pass the document's OWN current header through so a real provenance record
+  // (last_validated / validated_by) survives the sync instead of being
+  // regressed to the generator's placeholder. Structural fields (topic_id,
+  // authority, audience, source_of_truth) stay registry-authoritative.
+  const metadataBlock = `${formatRepoMetadataBlock(topic, parseRepoMetadata(content))}\n\n`;
   let next = content;
 
   if (next.startsWith('<!-- docs:meta\n')) {
@@ -49,7 +55,9 @@ function syncFrontmatter(content, topic) {
     throw new Error('Expected frontmatter block at file start.');
   }
 
-  const fields = metadataFieldsForTopic(topic);
+  // Same preserve rule as repo docs: an existing well-formed provenance record
+  // in the page's own frontmatter wins over the generator's placeholder.
+  const fields = metadataFieldsForTopic(topic, parseFrontmatter(content));
   const body = match[1];
   let lines = body.split('\n');
 
@@ -83,7 +91,7 @@ async function main() {
 
   await writeFile(registryAbsPath, `${JSON.stringify(registry, null, 2)}\n`, 'utf8');
   await writeFile(matrixAbsPath, ensureTrailingNewline(formatAuthorityMatrix(registry)), 'utf8');
-  await writeFile(acceptanceAbsPath, ensureTrailingNewline(formatAcceptanceReport(registry)), 'utf8');
+  await writeFile(acceptanceAbsPath, ensureTrailingNewline(formatAcceptanceReportStub()), 'utf8');
 
   const repoTopics = registry.topics.filter((topic) => topic.repo_doc_path);
   const websiteTopics = registry.topics.filter((topic) => Object.keys(topic.website_paths ?? {}).length > 0);
