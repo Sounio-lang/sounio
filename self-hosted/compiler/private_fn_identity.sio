@@ -1,0 +1,732 @@
+// self-hosted::compiler::private_fn_identity
+//
+// Module-aware identity for same-named PRIVATE free functions.
+//
+// THE DEFECT. The merged IR identifies a function by its UNQUALIFIED name
+// (lowerer_find_or_add_fn_id_mut / lowerer_lookup_fn_id_by_name_ref are linear
+// ir_name_eq scans; the dep merge, the DCE mark set and the FO transfer registry
+// are keyed by name as well). Two modules that each define a private
+// `fn helper` therefore collapse into ONE slot, the first-loaded body wins, and
+// every caller in every module runs it -- with no diagnostic. The type checker
+// already keeps the two apart (checker_fn_sigs_find_inplace ->
+// fn_sig_table_find_prefer_module, docs/audit/
+// MADAROS_DUAL_GUM_KNOWLEDGE_IMPORT_2026-07-19.md), so the program is accepted
+// and then miscompiled. Swapping the two `use` lines swaps the winner.
+//
+// THE FIX. Give each such function a module-qualified identity BEFORE anything
+// keys on its name. This pass runs once, at the top of
+// module_frontend_specialized_prepare, i.e. after every module is loaded and
+// before the specializer merge, the typechecker, the DCE mark set, FO
+// preregistration and lowering -- so all of them, on both the ordinary
+// multi-module pipeline and the specialized-collapse pipeline, see one
+// consistent set of names and nothing downstream needs to learn about modules.
+//
+//   private fn `helper` defined (with a body) in >= 2 loaded modules
+//     -> in EACH module that defines it privately:
+//          the definition, and every reference to it inside that module,
+//          become `helper__m<module index>`.
+//
+// A name is renamed only in the module(s) that define it PRIVATELY. A pub `helper`
+// keeps its name (it is the module's interface, and importers spell it that way),
+// so a private-vs-pub collision leaves the pub one untouched. `main`, `extern`
+// declarations and GPU kernels are never touched.
+//
+// WHAT THIS PASS WILL NOT GUESS AT. A rename is only sound if every occurrence of
+// the identifier in the module means the function. Two shapes cannot be proven:
+//   * a local binding (let/var, fn parameter, pattern binding, `for` variable or
+//     closure parameter) with the same spelling -- the identifier may name the
+//     local, not the function;
+//   * a value use of the function name in a slot this pass cannot rewrite in
+//     place (a match-arm body or a struct-literal field value, which the AST
+//     stores by value inside a list node rather than behind a Box).
+// For such a (module, name) the rename is skipped and the collision is REPORTED
+// (warning below) instead of being silently left to first-loaded-wins. The pass
+// never renames a name it could not fully account for.
+//
+// MUTATION IS IN PLACE, through raw pointers to heap nodes reachable from
+// programs[i].items. That is deliberate: module_frontend documents that a nested
+// field-in-array store `(*programs)[k].items = ...` is dropped by lean_single and
+// that a whole-Program array writeback was measured to SEGV at seed_begin, so
+// nothing here writes back into `programs`. Every write is to a Box'd Expr, a
+// Box'd FnDef, or an ItemList / ExprList node (the same `*mut` shape the
+// checker's ExprListHandle and the specializer's SpecItemNode already use).
+// Stage0 miscompiles an `Option<Box<T>>` passed by value into a `*mut`
+// function (check.sio, ExprListHandle), so the pointers are produced by small
+// non-`*mut` helpers and the walkers take Expr/Block BY VALUE, as
+// spec_dce_scan_expr does.
+//
+// OFF SWITCH. SOUNIO_DISABLE_PRIVATE_FN_IDENTITY=1 skips the pass, restoring the
+// old behaviour, so a suspected miscompile can be attributed to it (same idea as
+// SOUNIO_DISABLE_MM_DCE).
+//
+// NOT COVERED (same class, different tables): same-named private GLOBALS
+// (`var`/`const` items are BSS slots keyed by name) and same-named types
+// (struct_layouts / enum_variants are name-keyed too). See
+// docs/audit/MADAROS_PRIVATE_FN_IDENTITY_2026-09-21.md.
+
+use parser::ast::*
+use io::env::{read_env}
+use io::trace::{io_trace_i64_string}
+
+let PFI_SLOTS: i64 = 32768
+let PFI_T_MAX: i64 = 64
+
+// Census: distinct-module count per fn-name hash (open addressing).
+var PFI_KEY: [i64; 32768]
+var PFI_MODS: [i64; 32768]
+var PFI_LAST: [i64; 32768]
+var PFI_DUP_ANY: i64 = 0
+
+// Per-module rename table. Names are kept as (hash, len) so no Name value has to
+// live in a global or be held across the deep walkers.
+var PFI_T_HASH: [i64; 64]
+var PFI_T_LEN: [i64; 64]
+var PFI_T_UNSAFE: [i64; 64]
+var PFI_T_COUNT: i64 = 0
+var PFI_T_OVERFLOW: i64 = 0
+
+// Walker state. MODE 0 = scan for shapes that forbid a rename; MODE 1 = rename.
+var PFI_MODE: i64 = 0
+var PFI_CUR_MOD: i64 = 0
+
+var PFI_RENAMED_TOTAL: i64 = 0
+var PFI_MODULES_TOUCHED: i64 = 0
+var PFI_SKIPPED_TOTAL: i64 = 0
+
+var PFI_OFF: i64 = 0
+var PFI_OFF_CHECKED: i64 = 0
+
+fn pfi_disabled() -> bool with IO, Mut, Panic, Div {
+    if PFI_OFF_CHECKED == 0 {
+        PFI_OFF_CHECKED = 1
+        if str_eq(read_env("SOUNIO_DISABLE_PRIVATE_FN_IDENTITY"), "1") {
+            PFI_OFF = 1
+        }
+    }
+    PFI_OFF == 1
+}
+
+// ---------------------------------------------------------------------------
+// Raw-pointer producers. Non-`*mut` on purpose (see header).
+// ---------------------------------------------------------------------------
+
+fn pfi_expr_ptr(opt: Option<Box<Expr> >) -> *mut Expr with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(e) => e as *mut Expr
+        None => 0 as *mut Expr
+    }
+}
+
+fn pfi_exprlist_ptr(opt: Option<Box<ExprList> >) -> *mut ExprList with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(l) => l as *mut ExprList
+        None => 0 as *mut ExprList
+    }
+}
+
+fn pfi_exprlist_next(node: *mut ExprList) -> *mut ExprList with Mut, Panic, Div {
+    match (*node).tail {
+        Some(n) => n as *mut ExprList
+        None => 0 as *mut ExprList
+    }
+}
+
+fn pfi_itemlist_ptr(opt: Option<Box<ItemList> >) -> *mut ItemList with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(l) => l as *mut ItemList
+        None => 0 as *mut ItemList
+    }
+}
+
+fn pfi_itemlist_next(node: *mut ItemList) -> *mut ItemList with Mut, Panic, Div {
+    match (*node).tail {
+        Some(n) => n as *mut ItemList
+        None => 0 as *mut ItemList
+    }
+}
+
+fn pfi_fn_def_ptr(opt: Option<Box<FnDef> >) -> *mut FnDef with Mut, Panic, Div, Alloc {
+    match opt {
+        Some(f) => f as *mut FnDef
+        None => 0 as *mut FnDef
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Census
+// ---------------------------------------------------------------------------
+
+fn pfi_slot_of(h: i64) -> i64 {
+    var s = h % PFI_SLOTS
+    if s < 0 { s = s + PFI_SLOTS }
+    s
+}
+
+// Record that module `mod_idx` defines a real fn with name-hash `h`. Returns
+// false when the table is full: the caller then skips the whole pass rather than
+// working from a census it knows is incomplete.
+fn pfi_census_note(h: i64, mod_idx: i64) -> bool with Mut, Panic, Div {
+    if h == 0 { return true }
+    var slot = pfi_slot_of(h)
+    var probes: i64 = 0
+    while probes < PFI_SLOTS {
+        let cur = PFI_KEY[slot as usize]
+        if cur == h {
+            if PFI_LAST[slot as usize] != mod_idx {
+                PFI_LAST[slot as usize] = mod_idx
+                PFI_MODS[slot as usize] = PFI_MODS[slot as usize] + 1
+                if PFI_MODS[slot as usize] >= 2 { PFI_DUP_ANY = 1 }
+            }
+            return true
+        }
+        if cur == 0 {
+            PFI_KEY[slot as usize] = h
+            PFI_LAST[slot as usize] = mod_idx
+            PFI_MODS[slot as usize] = 1
+            return true
+        }
+        slot = (slot + 1) % PFI_SLOTS
+        probes = probes + 1
+    }
+    false
+}
+
+fn pfi_census_mods(h: i64) -> i64 with Mut, Panic, Div {
+    if h == 0 { return 0 }
+    var slot = pfi_slot_of(h)
+    var probes: i64 = 0
+    while probes < PFI_SLOTS {
+        let cur = PFI_KEY[slot as usize]
+        if cur == h { return PFI_MODS[slot as usize] }
+        if cur == 0 { return 0 }
+        slot = (slot + 1) % PFI_SLOTS
+        probes = probes + 1
+    }
+    0
+}
+
+// A top-level item this pass counts and may rename: a real fn (has a body, is not
+// an `extern` declaration, is not a GPU kernel) that is not `main`.
+fn pfi_item_real_fn(it: Item) -> bool with Mut, Panic, Div {
+    if it.kind != ItemKind::ItemFn { return false }
+    match it.fn_def {
+        None => { return false }
+        Some(fd) => {
+            if (*fd).is_extern { return false }
+            if (*fd).is_kernel { return false }
+        }
+    }
+    if name_is_empty(it.name) { return false }
+    if name_eq(it.name, make_name("main")) { return false }
+    true
+}
+
+fn pfi_census_items(items: Option<Box<ItemList> >, mod_idx: i64) -> bool with Mut, Panic, Div {
+    var cur = items
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                if pfi_item_real_fn((*list).head) {
+                    if !pfi_census_note(ast_name_hash((*list).head.name), mod_idx) {
+                        return false
+                    }
+                }
+                cur = (*list).tail
+            }
+        }
+    }
+    true
+}
+
+// ---------------------------------------------------------------------------
+// Mangling and the per-module table
+// ---------------------------------------------------------------------------
+
+// `helper` in module 3 -> `helper__m3`. Empty name when it would not fit.
+fn pfi_mangle(n: Name, mod_idx: i64) -> Name with Mut, Panic, Div, Alloc {
+    if n.len <= 0 || n.len > 360 { return empty_name() }
+    var buf: [i8; 384] = n.buf
+    let view = str_from_bytes(buf, n.len)
+    // str_from_bytes borrows a scratch buffer; copy before anything reuses it.
+    let base = str_concat(view, "")
+    let suffix = str_concat("__m", io_trace_i64_string(mod_idx))
+    make_name(str_concat(base, suffix))
+}
+
+fn pfi_table_find(h: i64, len: i64) -> i64 {
+    var i: i64 = 0
+    while i < PFI_T_COUNT {
+        if PFI_T_HASH[i as usize] == h && PFI_T_LEN[i as usize] == len { return i }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn pfi_table_find_name(n: Name) -> i64 with Mut, Panic, Div {
+    if PFI_T_COUNT <= 0 { return 0 - 1 }
+    if n.len <= 0 { return 0 - 1 }
+    pfi_table_find(ast_name_hash(n), n.len)
+}
+
+fn pfi_table_add(n: Name, mod_idx: i64) with Mut, Panic, Div, Alloc {
+    let h = ast_name_hash(n)
+    if pfi_table_find(h, n.len) >= 0 { return }
+    if PFI_T_COUNT >= PFI_T_MAX {
+        PFI_T_OVERFLOW = 1
+        return
+    }
+    let idx = PFI_T_COUNT
+    PFI_T_HASH[idx as usize] = h
+    PFI_T_LEN[idx as usize] = n.len
+    PFI_T_UNSAFE[idx as usize] = 0
+    PFI_T_COUNT = idx + 1
+    // The mangled spelling must not already be a fn name anywhere, or the rename
+    // would create the very collision it exists to remove.
+    let m = pfi_mangle(n, mod_idx)
+    if m.len <= 0 {
+        PFI_T_UNSAFE[idx as usize] = 1
+    } else if pfi_census_mods(ast_name_hash(m)) > 0 {
+        PFI_T_UNSAFE[idx as usize] = 1
+    }
+}
+
+// This module's rename table: its PRIVATE real fns whose name is also defined by
+// a real fn in at least one other module.
+fn pfi_build_table(items: Option<Box<ItemList> >, mod_idx: i64) with Mut, Panic, Div, Alloc {
+    PFI_T_COUNT = 0
+    var cur = items
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                if pfi_item_real_fn((*list).head) && (*list).head.visibility.kind == 0 {
+                    if pfi_census_mods(ast_name_hash((*list).head.name)) >= 2 {
+                        pfi_table_add((*list).head.name, mod_idx)
+                    }
+                }
+                cur = (*list).tail
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MODE 0 helpers: shapes that forbid a rename
+// ---------------------------------------------------------------------------
+
+fn pfi_note_unsafe_name(n: Name) with Mut, Panic, Div {
+    let idx = pfi_table_find_name(n)
+    if idx >= 0 { PFI_T_UNSAFE[idx as usize] = 1 }
+}
+
+// A local binding spelled like a colliding private fn.
+fn pfi_note_binder(n: Name) with Mut, Panic, Div {
+    pfi_note_unsafe_name(n)
+}
+
+// The identifier is a bare Ident / single-segment Path.
+fn pfi_note_embedded_value(e: Expr) with Mut, Panic, Div {
+    if e.kind == ExprKind::ExprIdent {
+        pfi_note_unsafe_name(e.name)
+    } else if e.kind == ExprKind::ExprPath {
+        if e.path.seg_count == 1 {
+            pfi_note_unsafe_name(Name { buf: e.path.segments.head_buf, len: e.path.segments.head_len })
+        }
+    }
+}
+
+fn pfi_pattern(p: Pattern) with Mut, Panic, Div {
+    if p.kind == PatternKind::PatBinding {
+        pfi_note_binder(p.name)
+    }
+    var sub = p.sub_patterns
+    var sgo = true
+    while sgo {
+        match sub {
+            None => { sgo = false }
+            Some(l) => {
+                pfi_pattern((*l).head)
+                sub = (*l).tail
+            }
+        }
+    }
+    var pf = p.pat_fields
+    var fgo = true
+    while fgo {
+        match pf {
+            None => { fgo = false }
+            Some(l) => {
+                pfi_pattern((*l).head.pattern)
+                pf = (*l).tail
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MODE 1 helpers: the in-place rewrites
+// ---------------------------------------------------------------------------
+
+// Rename a Box'd Expr node if it is a bare reference to a table name.
+fn pfi_rename_expr_node(p: *mut Expr) with Mut, Panic, Div, Alloc {
+    if (*p).kind == ExprKind::ExprIdent {
+        let idx = pfi_table_find_name((*p).name)
+        if idx >= 0 && PFI_T_UNSAFE[idx as usize] == 0 {
+            let m = pfi_mangle((*p).name, PFI_CUR_MOD)
+            if m.len > 0 { (*p).name = m }
+        }
+    } else if (*p).kind == ExprKind::ExprPath && (*p).path.seg_count == 1 {
+        let single = Name { buf: (*p).path.segments.head_buf, len: (*p).path.segments.head_len }
+        let idx = pfi_table_find_name(single)
+        if idx >= 0 && PFI_T_UNSAFE[idx as usize] == 0 {
+            let m = pfi_mangle(single, PFI_CUR_MOD)
+            if m.len > 0 {
+                (*p).path = AstPath {
+                    segments: StringList { head_buf: m.buf, head_len: m.len, tail: None },
+                    seg_count: 1,
+                }
+                (*p).name = m
+            }
+        }
+    }
+}
+
+// Same, for an argument whose Expr is stored by value as the head of an ExprList
+// node (`apply(helper, 3)`): the write goes through the node pointer.
+fn pfi_rename_args_head(node: *mut ExprList) with Mut, Panic, Div, Alloc {
+    if (*node).head.kind == ExprKind::ExprIdent {
+        let idx = pfi_table_find_name((*node).head.name)
+        if idx >= 0 && PFI_T_UNSAFE[idx as usize] == 0 {
+            let m = pfi_mangle((*node).head.name, PFI_CUR_MOD)
+            if m.len > 0 { (*node).head.name = m }
+        }
+    } else if (*node).head.kind == ExprKind::ExprPath && (*node).head.path.seg_count == 1 {
+        let single = Name { buf: (*node).head.path.segments.head_buf, len: (*node).head.path.segments.head_len }
+        let idx = pfi_table_find_name(single)
+        if idx >= 0 && PFI_T_UNSAFE[idx as usize] == 0 {
+            let m = pfi_mangle(single, PFI_CUR_MOD)
+            if m.len > 0 {
+                (*node).head.path = AstPath {
+                    segments: StringList { head_buf: m.buf, head_len: m.len, tail: None },
+                    seg_count: 1,
+                }
+                (*node).head.name = m
+            }
+        }
+    }
+}
+
+// The definition: Item.name and FnDef.name.
+fn pfi_rename_item_def(node: *mut ItemList) with Mut, Panic, Div, Alloc {
+    if (*node).head.kind != ItemKind::ItemFn { return }
+    if (*node).head.visibility.kind != 0 { return }
+    if !pfi_item_real_fn((*node).head) { return }
+    let idx = pfi_table_find_name((*node).head.name)
+    if idx < 0 { return }
+    if PFI_T_UNSAFE[idx as usize] != 0 { return }
+    let m = pfi_mangle((*node).head.name, PFI_CUR_MOD)
+    if m.len <= 0 { return }
+    (*node).head.name = m
+    let fdp = pfi_fn_def_ptr((*node).head.fn_def)
+    if fdp != 0 as *mut FnDef {
+        (*fdp).name = m
+    }
+    PFI_RENAMED_TOTAL = PFI_RENAMED_TOTAL + 1
+}
+
+// ---------------------------------------------------------------------------
+// The walkers (shape mirrors spec_dce_scan_expr, which must already reach every
+// call form or reachability DCE would delete live code)
+// ---------------------------------------------------------------------------
+
+fn pfi_child(opt: Option<Box<Expr> >) with IO, Mut, Panic, Div, Alloc {
+    let p = pfi_expr_ptr(opt)
+    if p == 0 as *mut Expr { return }
+    if PFI_MODE == 1 {
+        pfi_rename_expr_node(p)
+    }
+    pfi_expr(*p)
+}
+
+fn pfi_args(opt: Option<Box<ExprList> >) with IO, Mut, Panic, Div, Alloc {
+    var node = pfi_exprlist_ptr(opt)
+    while node != 0 as *mut ExprList {
+        if PFI_MODE == 1 {
+            pfi_rename_args_head(node)
+        }
+        pfi_expr((*node).head)
+        node = pfi_exprlist_next(node)
+    }
+}
+
+fn pfi_arms(opt: Option<Box<MatchArmList> >) with IO, Mut, Panic, Div, Alloc {
+    var cur = opt
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                if PFI_MODE == 0 {
+                    pfi_pattern((*list).head.pattern)
+                    // The arm body is stored by value in the list node: a bare
+                    // reference to the fn there cannot be rewritten in place.
+                    pfi_note_embedded_value((*list).head.body)
+                }
+                pfi_child((*list).head.guard)
+                pfi_expr((*list).head.body)
+                cur = (*list).tail
+            }
+        }
+    }
+}
+
+fn pfi_fields(opt: Option<Box<StructFieldList> >) with IO, Mut, Panic, Div, Alloc {
+    var cur = opt
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                if PFI_MODE == 0 {
+                    pfi_note_embedded_value((*list).head.value)
+                }
+                pfi_expr((*list).head.value)
+                cur = (*list).tail
+            }
+        }
+    }
+}
+
+fn pfi_block(b: Block) with IO, Mut, Panic, Div, Alloc {
+    var cur = b.stmts
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                if PFI_MODE == 0 {
+                    if (*list).head.kind == StmtKind::StmtLet || (*list).head.kind == StmtKind::StmtVar {
+                        pfi_note_binder((*list).head.name)
+                    }
+                }
+                pfi_child((*list).head.expr)
+                pfi_child((*list).head.target)
+                cur = (*list).tail
+            }
+        }
+    }
+}
+
+fn pfi_expr(e: Expr) with IO, Mut, Panic, Div, Alloc {
+    if PFI_MODE == 0 {
+        if e.kind == ExprKind::ExprForIn {
+            pfi_note_binder(e.name)
+        } else if e.kind == ExprKind::ExprClosure {
+            var cp = e.closure_params
+            var cgo = true
+            while cgo {
+                match cp {
+                    None => { cgo = false }
+                    Some(cl) => {
+                        pfi_note_binder((*cl).head.name)
+                        cp = (*cl).tail
+                    }
+                }
+            }
+        }
+    }
+    pfi_child(e.left)
+    pfi_child(e.right)
+    pfi_child(e.else_expr)
+    pfi_child(e.closure_body)
+    match e.block {
+        Some(b) => pfi_block(*b)
+        None => {}
+    }
+    match e.handler_block {
+        Some(b) => pfi_block(*b)
+        None => {}
+    }
+    pfi_args(e.args)
+    pfi_arms(e.arms)
+    pfi_fields(e.fields)
+}
+
+fn pfi_fn_def(opt: Option<Box<FnDef> >) with IO, Mut, Panic, Div, Alloc {
+    match opt {
+        None => {}
+        Some(fd) => {
+            if PFI_MODE == 0 {
+                var pc = (*fd).params
+                var pgo = true
+                while pgo {
+                    match pc {
+                        None => { pgo = false }
+                        Some(pl) => {
+                            pfi_note_binder((*pl).head.name)
+                            pc = (*pl).tail
+                        }
+                    }
+                }
+            }
+            pfi_block((*fd).body)
+        }
+    }
+}
+
+// Method / default-method bodies: walked for references, never renamed as
+// definitions (a method is keyed by its type-mangled name, not by the bare one).
+fn pfi_method_bodies(methods: Option<Box<ItemList> >) with IO, Mut, Panic, Div, Alloc {
+    var cur = methods
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(mlist) => {
+                if (*mlist).head.kind == ItemKind::ItemFn {
+                    pfi_fn_def((*mlist).head.fn_def)
+                }
+                cur = (*mlist).tail
+            }
+        }
+    }
+}
+
+fn pfi_items(items: Option<Box<ItemList> >) with IO, Mut, Panic, Div, Alloc {
+    var node = pfi_itemlist_ptr(items)
+    while node != 0 as *mut ItemList {
+        let kind = (*node).head.kind
+        if kind == ItemKind::ItemFn {
+            if PFI_MODE == 1 {
+                pfi_rename_item_def(node)
+            }
+            pfi_fn_def((*node).head.fn_def)
+        } else if kind == ItemKind::ItemImpl {
+            match (*node).head.impl_def {
+                Some(id) => pfi_method_bodies((*id).methods)
+                None => {}
+            }
+        } else if kind == ItemKind::ItemTrait {
+            match (*node).head.trait_def {
+                Some(td) => pfi_method_bodies((*td).methods)
+                None => {}
+            }
+        }
+        node = pfi_itemlist_next(node)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Reporting
+// ---------------------------------------------------------------------------
+
+fn pfi_print_name(n: Name) with IO, Mut, Panic, Div {
+    var buf: [i8; 384] = n.buf
+    print(str_from_bytes(buf, n.len))
+}
+
+// One warning per (module, name) that had to be left alone. The strings are kept
+// short on purpose: a printed string is truncated at 128 bytes with no notice.
+fn pfi_report_skipped(items: Option<Box<ItemList> >, mod_idx: i64) with IO, Mut, Panic, Div {
+    var cur = items
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                if pfi_item_real_fn((*list).head) && (*list).head.visibility.kind == 0 {
+                    let idx = pfi_table_find_name((*list).head.name)
+                    if idx >= 0 && PFI_T_UNSAFE[idx as usize] != 0 {
+                        PFI_SKIPPED_TOTAL = PFI_SKIPPED_TOTAL + 1
+                        print("warning[private_fn_identity]: private fn `")
+                        pfi_print_name((*list).head.name)
+                        print("` in module #")
+                        print_int(mod_idx)
+                        print("\n")
+                        print("  has the same name as a fn in another module and could not be renamed:\n")
+                        print("  a local, parameter or pattern uses that name, or the fn is used as a\n")
+                        print("  value in a match arm / struct-literal field. Lowering may bind both\n")
+                        print("  modules to ONE body. Rename one of the functions.\n")
+                    }
+                }
+                cur = (*list).tail
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+// Disambiguate same-named private fns across programs[0..count). Returns the
+// number of definitions renamed, or -1 when the pass refused to run (census
+// overflow / disabled), in which case NOTHING was changed.
+pub fn private_fn_identity_apply(programs: &! [Program; 256], count: i64) -> i64 with IO, Mut, Panic, Div, Alloc {
+    if count < 2 { return 0 }
+    if pfi_disabled() { return 0 - 1 }
+
+    var z: i64 = 0
+    while z < PFI_SLOTS {
+        PFI_KEY[z as usize] = 0
+        PFI_MODS[z as usize] = 0
+        PFI_LAST[z as usize] = 0
+        z = z + 1
+    }
+    PFI_DUP_ANY = 0
+    PFI_RENAMED_TOTAL = 0
+    PFI_MODULES_TOUCHED = 0
+    PFI_SKIPPED_TOTAL = 0
+
+    var i: i64 = 0
+    while i < count && i < 256 {
+        // Whole-Program by-value load, then read .items: the A14-safe pattern
+        // (a nested `&(*programs)[i].items` reads as None under lean_single).
+        var prog = (*programs)[i as usize]
+        if !pfi_census_items(prog.items, i) {
+            print("private_fn_identity: census table full; pass skipped\n")
+            return 0 - 1
+        }
+        i = i + 1
+    }
+    if PFI_DUP_ANY == 0 { return 0 }
+
+    i = 0
+    while i < count && i < 256 {
+        var prog = (*programs)[i as usize]
+        PFI_CUR_MOD = i
+        PFI_T_OVERFLOW = 0
+        pfi_build_table(prog.items, i)
+        if PFI_T_COUNT > 0 {
+            PFI_MODE = 0
+            pfi_items(prog.items)
+            let before = PFI_RENAMED_TOTAL
+            PFI_MODE = 1
+            pfi_items(prog.items)
+            PFI_MODE = 0
+            if PFI_RENAMED_TOTAL > before {
+                PFI_MODULES_TOUCHED = PFI_MODULES_TOUCHED + 1
+            }
+            pfi_report_skipped(prog.items, i)
+            if PFI_T_OVERFLOW != 0 {
+                print("warning[private_fn_identity]: module #")
+                print_int(i)
+                print(" has more than 64 colliding private fns; the rest were not renamed\n")
+            }
+        }
+        i = i + 1
+    }
+    PFI_T_COUNT = 0
+
+    if PFI_RENAMED_TOTAL > 0 {
+        print("private_fn_identity: renamed ")
+        print_int(PFI_RENAMED_TOTAL)
+        print(" same-named private fn(s) in ")
+        print_int(PFI_MODULES_TOUCHED)
+        print(" module(s)\n")
+    }
+    PFI_RENAMED_TOTAL
+}
