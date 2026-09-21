@@ -578,6 +578,45 @@ var FO_XFER_LIT: [f64; 64] = [0.0; 64]
 var FO_XFER_HASH: [i64; 64] = [0; 64]
 var FO_XFER_FWD_HASH: [i64; 64] = [0; 64]
 
+// ρ_ij for GUM Cov_ij = ρ · σ_i · σ_j. Upper triangle, index i*8+j with i<j.
+// 8 channels, matching so_hess_idx. 0.0 is independence (the default).
+// Module-level because Lowerer is copied by value through every walk.
+var FO_COV_RHO: [f64; 64] = [0.0; 64]
+
+fn fo_cov_rho_clear() with Mut {
+    var i: i64 = 0
+    while i < 64 {
+        FO_COV_RHO[i as usize] = 0.0
+        i = i + 1
+    }
+}
+
+fn fo_cov_rho_get(i: i64, j: i64) -> f64 with Mut {
+    if i < 0 || j < 0 || i >= 8 || j >= 8 { return 0.0 }
+    if i == j { return 0.0 }
+    var a = i
+    var b = j
+    if a > b {
+        let tmp = a
+        a = b
+        b = tmp
+    }
+    FO_COV_RHO[(a * 8 + b) as usize]
+}
+
+fn fo_cov_rho_set(i: i64, j: i64, rho: f64) with Mut {
+    if i < 0 || j < 0 || i >= 8 || j >= 8 { return }
+    if i == j { return }
+    var a = i
+    var b = j
+    if a > b {
+        let tmp = a
+        a = b
+        b = tmp
+    }
+    FO_COV_RHO[(a * 8 + b) as usize] = rho
+}
+
 fn fo_name_hash(n: Name) -> i64 with Mut, Panic, Div {
     var h: i64 = 5381
     var i: i64 = 0
@@ -599,6 +638,7 @@ pub fn fo_xfer_global_reset() with Mut {
         FO_XFER_FWD_HASH[i as usize] = 0
         i = i + 1
     }
+    fo_cov_rho_clear()
 }
 
 // Chain-rule entries for the transcendentals, as kind-6 transfers:
@@ -6059,6 +6099,7 @@ impl Lowerer {
             lo.fo_pending_sens[fci as usize] = -1
             fci = fci + 1
         }
+        fo_cov_rho_clear()
         lo
     }
 
@@ -8088,6 +8129,17 @@ impl Lowerer {
         && n.buf[16] == 110 as i8
     }
 
+    // correlate(a, b, rho) — set FO Cov ρ between primary channels of a and b
+    fn name_is_correlate(self, n: Name) -> bool with Div {
+        // "correlate" = 9 chars
+        n.len == 9
+        && n.buf[0] == 99 as i8 && n.buf[1] == 111 as i8
+        && n.buf[2] == 114 as i8 && n.buf[3] == 114 as i8
+        && n.buf[4] == 101 as i8 && n.buf[5] == 108 as i8
+        && n.buf[6] == 97 as i8 && n.buf[7] == 116 as i8
+        && n.buf[8] == 101 as i8
+    }
+
     fn name_is_uncertainty_of(self, n: Name) -> bool with Div {
         n.len == 14
         && n.buf[0] == 117 as i8 && n.buf[1] == 110 as i8
@@ -8213,6 +8265,28 @@ impl Lowerer {
         (lo, d.1)
     }
 
+    fn so_sub_or_take(self, acc: i64, x: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        if x < 0 {
+            return (lo, acc)
+        }
+        if acc < 0 {
+            let z = lo.emit_f64_const(0.0)
+            lo = z.0
+            lo = lo.emit(ir_mark_float_reg(z.1))
+            let d = lo.fresh_reg()
+            lo = d.0
+            lo = lo.emit(ir_binop_typed(d.1, z.1, BinaryOp::OpSub, x, true, true))
+            lo = lo.emit(ir_mark_float_reg(d.1))
+            return (lo, d.1)
+        }
+        let d = lo.fresh_reg()
+        lo = d.0
+        lo = lo.emit(ir_binop_typed(d.1, acc, BinaryOp::OpSub, x, true, true))
+        lo = lo.emit(ir_mark_float_reg(d.1))
+        (lo, d.1)
+    }
+
     // H(x*y)_jk = Hx_jk*y + x*Hy_jk + Sx_j*Sy_k + Sx_k*Sy_j.
     //
     // The last two terms are why this cannot be derived from the gradient
@@ -8253,6 +8327,110 @@ impl Lowerer {
                 let a4 = lo.so_add_or_take(acc, c2.1)
                 lo = a4.0
                 acc = a4.1
+
+                lo.so_expr_hess[idx as usize] = acc
+                k = k + 1
+            }
+            j = j + 1
+        }
+        lo
+    }
+
+    // H(a/b)_jk = Ha_jk/b − (Sa_j Sb_k + Sa_k Sb_j)/b² − a Hb_jk/b²
+    //             + 2 a Sb_j Sb_k / b³
+    //
+    // Written against this tree's so_hess_idx / so_expr_hess, not imported
+    // from the lane's fo_expr_hess. Seeds have Ha=Hb=0, so a quotient of two
+    // measures is H_xy = −1/b², H_yy = 2a/b³, H_xx = 0.
+    fn so_combine_hess_div(self, hL: [i64; 36], hR: [i64; 36], sL: [i64; 32], sR: [i64; 32], lhs_v: i64, rhs_val: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self.so_clear_expr_hess()
+        var nch = lo.fo_nchan
+        if nch > 8 { nch = 8 }
+        let bb_p = lo.fresh_reg()
+        lo = bb_p.0
+        let bb = bb_p.1
+        lo = lo.emit(ir_binop_typed(bb, rhs_val, BinaryOp::OpMul, rhs_val, true, true))
+        lo = lo.emit(ir_mark_float_reg(bb))
+        let b3_p = lo.fresh_reg()
+        lo = b3_p.0
+        let b3 = b3_p.1
+        lo = lo.emit(ir_binop_typed(b3, bb, BinaryOp::OpMul, rhs_val, true, true))
+        lo = lo.emit(ir_mark_float_reg(b3))
+        let two_p = lo.emit_f64_const(2.0)
+        lo = two_p.0
+        let two = two_p.1
+        var j: i64 = 0
+        while j < nch {
+            var k: i64 = j
+            while k < nch {
+                let idx = lo.so_hess_idx(j, k)
+                var acc: i64 = 0 - 1
+
+                let ha = hL[idx as usize]
+                if ha >= 0 {
+                    let t = lo.fresh_reg()
+                    lo = t.0
+                    lo = lo.emit(ir_binop_typed(t.1, ha, BinaryOp::OpDiv, rhs_val, true, true))
+                    lo = lo.emit(ir_mark_float_reg(t.1))
+                    acc = t.1
+                }
+
+                let c1 = lo.so_mul_or_none(sL[j as usize], sR[k as usize])
+                lo = c1.0
+                if c1.1 >= 0 {
+                    let t = lo.fresh_reg()
+                    lo = t.0
+                    lo = lo.emit(ir_binop_typed(t.1, c1.1, BinaryOp::OpDiv, bb, true, true))
+                    lo = lo.emit(ir_mark_float_reg(t.1))
+                    let a1 = lo.so_sub_or_take(acc, t.1)
+                    lo = a1.0
+                    acc = a1.1
+                }
+
+                let c2 = lo.so_mul_or_none(sL[k as usize], sR[j as usize])
+                lo = c2.0
+                if c2.1 >= 0 {
+                    let t = lo.fresh_reg()
+                    lo = t.0
+                    lo = lo.emit(ir_binop_typed(t.1, c2.1, BinaryOp::OpDiv, bb, true, true))
+                    lo = lo.emit(ir_mark_float_reg(t.1))
+                    let a2 = lo.so_sub_or_take(acc, t.1)
+                    lo = a2.0
+                    acc = a2.1
+                }
+
+                let hb = hR[idx as usize]
+                if hb >= 0 {
+                    let t1 = lo.so_mul_or_none(lhs_v, hb)
+                    lo = t1.0
+                    if t1.1 >= 0 {
+                        let t = lo.fresh_reg()
+                        lo = t.0
+                        lo = lo.emit(ir_binop_typed(t.1, t1.1, BinaryOp::OpDiv, bb, true, true))
+                        lo = lo.emit(ir_mark_float_reg(t.1))
+                        let a3 = lo.so_sub_or_take(acc, t.1)
+                        lo = a3.0
+                        acc = a3.1
+                    }
+                }
+
+                let rr = lo.so_mul_or_none(sR[j as usize], sR[k as usize])
+                lo = rr.0
+                if rr.1 >= 0 {
+                    let ar = lo.so_mul_or_none(lhs_v, rr.1)
+                    lo = ar.0
+                    let t2 = lo.so_mul_or_none(two, ar.1)
+                    lo = t2.0
+                    if t2.1 >= 0 {
+                        let t = lo.fresh_reg()
+                        lo = t.0
+                        lo = lo.emit(ir_binop_typed(t.1, t2.1, BinaryOp::OpDiv, b3, true, true))
+                        lo = lo.emit(ir_mark_float_reg(t.1))
+                        let a4 = lo.so_add_or_take(acc, t.1)
+                        lo = a4.0
+                        acc = a4.1
+                    }
+                }
 
                 lo.so_expr_hess[idx as usize] = acc
                 k = k + 1
@@ -8473,8 +8651,35 @@ impl Lowerer {
         lo.fo_clear_expr_sens()
     }
 
-    // Var = Σ_k s_k² · σ²_k from current fo_expr_sens.
-    fn fo_emit_var_from_sens(self) -> (Lowerer, i64) with Mut, Panic, Div, IO {
+    // Cov_ij = ρ · √(σi² · σj²) = ρ · σi · σj. One sqrt of the product.
+    fn fo_emit_cov(self, sigi: i64, sigj: i64, rho: f64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let prod_p = lo.fresh_reg()
+        lo = prod_p.0
+        let prod = prod_p.1
+        lo = lo.emit(ir_binop_typed(prod, sigi, BinaryOp::OpMul, sigj, true, true))
+        lo = lo.emit(ir_mark_float_reg(prod))
+        let sqrt_id = lowerer_find_or_add_fn_id_mut(&! lo, make_name("sqrt"))
+        let sqrt_args: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_single(prod)))
+        let pair_s = lo.fresh_reg()
+        lo = pair_s.0
+        let sreg = pair_s.1
+        var instr = ir_call(sreg, sqrt_id, make_name("sqrt"), sqrt_args, 1)
+        instr.imm_flags = IR_FLOAT_REG_MARKER_FLAG
+        lo = lo.emit(instr)
+        lo = lo.emit(ir_mark_float_reg(sreg))
+        let rho_p = lo.emit_f64_const(rho)
+        lo = rho_p.0
+        let c_p = lo.fresh_reg()
+        lo = c_p.0
+        let cov = c_p.1
+        lo = lo.emit(ir_binop_typed(cov, sreg, BinaryOp::OpMul, rho_p.1, true, true))
+        lo = lo.emit(ir_mark_float_reg(cov))
+        (lo, cov)
+    }
+
+    // Var = Σ_k s_k² · σ²_k + 2 Σ_{i<j} s_i s_j Cov_ij from current fo_expr_sens.
+    fn fo_emit_var_from_sens(self) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         let z = self.emit_f64_const(0.0)
         var lo = z.0
         var acc = z.1
@@ -8504,6 +8709,45 @@ impl Lowerer {
                 acc = nacc
             }
             k = k + 1
+        }
+        // Correlated: + 2 Σ_{i<j} s_i s_j Cov_ij, Cov = ρ √(σi² σj²)
+        let two_p = lo.emit_f64_const(2.0)
+        lo = two_p.0
+        let two = two_p.1
+        var i: i64 = 0
+        while i < 8 {
+            var j: i64 = i + 1
+            while j < 8 {
+                let si = lo.fo_expr_sens[i as usize]
+                let sj = lo.fo_expr_sens[j as usize]
+                let sigi = lo.fo_sigma2[i as usize]
+                let sigj = lo.fo_sigma2[j as usize]
+                let rho = fo_cov_rho_get(i, j)
+                if si >= 0 && sj >= 0 && sigi >= 0 && sigj >= 0 && rho != 0.0 {
+                    let cov_p = lo.fo_emit_cov(sigi, sigj, rho)
+                    lo = cov_p.0
+                    let pss = lo.fresh_reg()
+                    lo = pss.0
+                    lo = lo.emit(ir_binop_typed(pss.1, si, BinaryOp::OpMul, sj, true, true))
+                    lo = lo.emit(ir_mark_float_reg(pss.1))
+                    let pc = lo.fresh_reg()
+                    lo = pc.0
+                    lo = lo.emit(ir_binop_typed(pc.1, pss.1, BinaryOp::OpMul, cov_p.1, true, true))
+                    lo = lo.emit(ir_mark_float_reg(pc.1))
+                    let t2 = lo.fresh_reg()
+                    lo = t2.0
+                    lo = lo.emit(ir_binop_typed(t2.1, two, BinaryOp::OpMul, pc.1, true, true))
+                    lo = lo.emit(ir_mark_float_reg(t2.1))
+                    let a_p = lo.fresh_reg()
+                    lo = a_p.0
+                    let nacc = a_p.1
+                    lo = lo.emit(ir_binop_typed(nacc, acc, BinaryOp::OpAdd, t2.1, true, true))
+                    lo = lo.emit(ir_mark_float_reg(nacc))
+                    acc = nacc
+                }
+                j = j + 1
+            }
+            i = i + 1
         }
         (lo, acc)
     }
@@ -9767,10 +10011,11 @@ impl Lowerer {
                     let rhs_val_pair = lo.lower_opt_expr_ref(&(*e).right)
                     lo = rhs_val_pair.0
                     let rhs_v = rhs_val_pair.1
-                    // No second-order rule for division in this increment. Clear
-                    // rather than leave an operand's Hessian standing in for the
-                    // quotient's -- that would be a wrong number, not a missing one.
-                    lo = lo.so_clear_expr_hess()
+                    if lo.so_enabled {
+                        lo = lo.so_combine_hess_div(hL, hR, sL, sR, lhs_v, rhs_v)
+                    } else {
+                        lo = lo.so_clear_expr_hess()
+                    }
                     lo = lo.fo_combine_sens_div(sL, sR, lhs_v, rhs_v)
                     return lo.fo_emit_var_from_sens()
                 }
@@ -11017,7 +11262,8 @@ impl Lowerer {
                         || self.name_is_uncertainty_of(callee_name)
                         || self.name_is_sensitivity_of(callee_name)
                         || self.name_is_second_order_mean(callee_name)
-                        || self.name_is_hessian_of(callee_name) {
+                        || self.name_is_hessian_of(callee_name)
+                        || self.name_is_correlate(callee_name) {
                         return true
                     }
                     if (*callee_expr).kind == ExprKind::ExprIdent {
@@ -15070,6 +15316,34 @@ impl Lowerer {
                     }
                     k = k + 1
                 }
+                // Off-diagonal: Σ_{i<j} H_ij Cov_ij  (Taylor ½·2·H_ij·Cov)
+                var i2: i64 = 0
+                while i2 < 8 {
+                    var j2: i64 = i2 + 1
+                    while j2 < 8 {
+                        let idx = lo.so_hess_idx(i2, j2)
+                        let hreg = lo.so_expr_hess[idx as usize]
+                        let sigi = lo.fo_sigma2[i2 as usize]
+                        let sigj = lo.fo_sigma2[j2 as usize]
+                        let rho = fo_cov_rho_get(i2, j2)
+                        if hreg >= 0 && sigi >= 0 && sigj >= 0 && rho != 0.0 {
+                            let cov_p = lo.fo_emit_cov(sigi, sigj, rho)
+                            lo = cov_p.0
+                            let hc = lo.fresh_reg()
+                            lo = hc.0
+                            lo = lo.emit(ir_binop_typed(hc.1, hreg, BinaryOp::OpMul, cov_p.1, true, true))
+                            lo = lo.emit(ir_mark_float_reg(hc.1))
+                            let ap = lo.fresh_reg()
+                            lo = ap.0
+                            let nacc = ap.1
+                            lo = lo.emit(ir_binop_typed(nacc, acc, BinaryOp::OpAdd, hc.1, true, true))
+                            lo = lo.emit(ir_mark_float_reg(nacc))
+                            acc = nacc
+                        }
+                        j2 = j2 + 1
+                    }
+                    i2 = i2 + 1
+                }
                 // First-order mean: the expression evaluated at the seed means.
                 let vp = lo.lower_expr_ref(&(*list).head)
                 lo = vp.0
@@ -15087,6 +15361,54 @@ impl Lowerer {
                 lo_z = lo_z.emit(ir_mark_float_reg(z.1))
                 (lo_z, z.1)
             }
+        }
+    }
+
+    fn fo_primary_channel(self) -> i64 with Mut {
+        var k: i64 = 0
+        while k < 8 {
+            if self.fo_expr_sens[k as usize] >= 0 {
+                return k
+            }
+            k = k + 1
+        }
+        0 - 1
+    }
+
+    fn lower_correlate_call_ref(self, args: &Option<Box<ExprList>>) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        // correlate(a, b, rho): walk FO of a and b, set ρ between primary channels.
+        match *args {
+            Some(list) => {
+                let pair_a = self.lower_expr_variance_ref(&(*list).head)
+                var lo = pair_a.0
+                let ch_a = lo.fo_primary_channel()
+                match (*list).tail {
+                    Some(rest) => {
+                        let pair_b = lo.lower_expr_variance_ref(&(*rest).head)
+                        lo = pair_b.0
+                        let ch_b = lo.fo_primary_channel()
+                        var rho: f64 = 0.0
+                        match (*rest).tail {
+                            Some(r3) => {
+                                let e_rho = &(*r3).head
+                                if (*e_rho).kind == ExprKind::ExprFloatLit {
+                                    rho = (*e_rho).float_val
+                                } else if (*e_rho).kind == ExprKind::ExprIntLit {
+                                    rho = (*e_rho).int_val as f64
+                                }
+                            }
+                            _ => {}
+                        }
+                        if ch_a >= 0 && ch_b >= 0 && ch_a != ch_b {
+                            fo_cov_rho_set(ch_a, ch_b, rho)
+                        }
+                        return lo.emit_f64_const(rho)
+                    }
+                    _ => {}
+                }
+                lo.emit_f64_const(0.0)
+            }
+            _ => self.emit_f64_const(0.0),
         }
     }
 
@@ -15633,6 +15955,9 @@ impl Lowerer {
         }
         if self.name_is_second_order_mean(callee_name) {
             return self.lower_second_order_mean_call_ref(&e.args)
+        }
+        if self.name_is_correlate(callee_name) {
+            return self.lower_correlate_call_ref(&e.args)
         }
         if self.contest_witness_kind_from_callee(callee_name) >= 0 {
             return self.lower_contest_witness_call(e.span, callee_name)
