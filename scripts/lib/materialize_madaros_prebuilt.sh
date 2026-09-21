@@ -56,13 +56,13 @@ sounio_materialize_madaros_prebuilt() {
   local stamp="$root/bin/.madaros-linux-x86_64.verified"
 
   # A tree from before the prebuilt was compressed (or a sparse checkout without
-  # bin/): nothing to materialize, and resolution reports what it cannot find.
-  if [[ ! -e "$gz" ]]; then
+  # bin/): nothing to materialize only if both packed files are absent.
+  if [[ ! -e "$gz" && ! -e "$sum" ]]; then
     return 0
   fi
 
-  if [[ ! -s "$sum" ]]; then
-    echo "error: madaros prebuilt: bin/madaros-linux-x86_64.gz is present but bin/madaros-linux-x86_64.sha256 is missing or empty" >&2
+  if [[ ! -e "$gz" || ! -s "$sum" ]]; then
+    echo "error: madaros prebuilt: incomplete — bin/madaros-linux-x86_64.gz and bin/madaros-linux-x86_64.sha256 must both be present and valid" >&2
     return 78
   fi
   local want
