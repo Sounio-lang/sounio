@@ -12,7 +12,8 @@
 // Usage:
 //   1. Create an ODESystem with a system_id
 //   2. Register your RHS by adding a branch in ode_rhs_dispatch, and the parameter range it reads
-//      in ode_system_params_present (an id with no range is rejected as invalid input)
+//      in ode_system_params_present and its dimension in ode_system_canonical_dims (an id with no
+//      entry is rejected as invalid input)
 //   3. Call solve_ode() or solve_ode_adaptive()
 //
 // Built-in systems:
@@ -193,7 +194,8 @@ struct ODESystem {
 }
 
 // Public so a caller can name a system id (user-defined systems are 100+, see the header) and so an id with
-// no registered right-hand side / parameter range can be shown to be rejected.
+// no registered right-hand side / parameter range can be shown to be rejected. It accepts ANY
+// (id, n_dims) pair; the solvers reject a dimension that is not the built-in's own.
 pub fn ode_system_new(system_id: i64, n_dims: i64) -> ODESystem {
     ODESystem {
         system_id: system_id,
@@ -393,6 +395,29 @@ fn ode_params_range_set(p: &ODEParams, lo: i64, hi: i64) -> bool {
     true
 }
 
+// Dimension of each built-in system: the number of derivatives its right-hand side WRITES (read off
+// the rhs_* functions: exp_decay 1; pbpk_14 14; linear_2 2; linear_3 3; chem_simple and
+// pbpk_clearance 4). ode_system_new(id, n_dims) accepts any pair, so `ode_system_new(1, 4)` with a
+// four-element state would agree with itself yet integrate ONE channel and leave three frozen;
+// `ode_system_new(5, 1)` would let the RHS write past the declared state. 0 = not a built-in id.
+fn ode_system_canonical_dims(id: i64) -> i64 {
+    if id == 1 { return 1 }
+    if id == 2 { return 14 }
+    if id == 3 { return 2 }
+    if id == 4 { return 3 }
+    if id == 5 { return 4 }
+    if id == 6 { return 4 }
+    0
+}
+
+// n_dims must be the built-in's own dimension, and inside the fixed 64-slot storage.
+fn ode_system_dims_ok(sys: &ODESystem) -> bool {
+    let c = ode_system_canonical_dims(sys.system_id)
+    if c < 1 || c > 64 { return false }
+    if sys.n_dims < 1 || sys.n_dims > 64 { return false }
+    sys.n_dims == c
+}
+
 fn ode_system_params_present(sys: &ODESystem, p: &ODEParams) -> bool {
     let id = sys.system_id
     if id == 1 { return ode_params_range_set(p, 0, 1) }
@@ -431,14 +456,17 @@ fn ode_initial_covariance_ok(state: &EState, p: &ODEParams, n: i64) -> bool with
 //   - t_start, t_end finite, and t_end >= t_start (backward solves are not supported)
 //   - step size (the fixed dt, or the adaptive initial dt) finite and > 0: a zero or negative
 //     step used to fall into `dt <= 0 -> t = t_end` and return the initial state as finished
-//   - the initial state has the system's dimensions, and every parameter the system reads was SET
+//   - the system's n_dims is the built-in's own (ode_system_dims_ok) and within 1..64, the initial
+//     state has that many dimensions, and every parameter the system reads was SET
 //     (ode_system_params_present); an unknown system id is invalid
 //   - every model parameter p[0..n_params) finite
 //   - adaptive: rtol, atol finite and >= 0
 fn ode_solve_inputs_ok(t_start: f64, t_end: f64, opts: &SolverOptions, p: &ODEParams, sys: &ODESystem, y0_dims: i64, adaptive: bool) -> bool with Mut, Div, Panic {
     if !ode_finite(t_start) || !ode_finite(t_end) { return false }
-    // the initial state must have exactly the system's dimensions (a smaller one leaves the rest
-    // of the state silently 0), and the system must have every parameter it reads
+    // the system's dimension must be the built-in's own (and within the 64-slot storage); the
+    // initial state must have exactly that many dimensions (a smaller one leaves the rest of the
+    // state silently 0); and the system must have every parameter it reads
+    if !ode_system_dims_ok(sys) { return false }
     if y0_dims != sys.n_dims { return false }
     if !ode_system_params_present(sys, p) { return false }
     // every model parameter must be finite: a NaN/inf rate is invalid INPUT (status 3), not an
