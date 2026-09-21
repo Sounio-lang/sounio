@@ -116,7 +116,9 @@ sounio_materialize_madaros_prebuilt() {
   # Always verify existing ELF's hash, but skip archive verification in normal mode.
   # In verify mode, validate both the ELF and the .gz archive to ensure the entire
   # artifact chain (.gz + .sha256) is valid, not just the materialized ELF.
+  local elf_hash_matches=0
   if [[ -f "$elf" ]] && [[ "$(_sounio_madaros_sha256 "$elf")" == "$want" ]]; then
+    elf_hash_matches=1
     # In normal mode, ELF hash match is sufficient; skip archive verification
     # for performance (avoid decompressing the 95 MB binary).
     if [[ "$verify" -eq 0 ]]; then
@@ -134,7 +136,8 @@ sounio_materialize_madaros_prebuilt() {
     # chain is correct (continue to decompression verification below).
   fi
 
-  if [[ -f "$elf" ]]; then
+  # Only emit mismatch message when the existing ELF hash actually differs
+  if [[ "$elf_hash_matches" -eq 0 && -f "$elf" ]]; then
     echo "madaros prebuilt: bin/madaros-linux-x86_64 does not match bin/madaros-linux-x86_64.sha256; replacing it with the committed prebuilt" >&2
   fi
 
