@@ -180,7 +180,15 @@ if [ "$_rc" -ne 0 ]; then
   exit 0
 fi
 chmod +x "$elf" 2>/dev/null
-out="$("$WORK/timeout_run.sh" "$elf")" || { echo "$name run"; exit 0; }
+# A test says how long it may run with `//@ timeout: N` (seconds), and the run-pass
+# harness honors it. A fixed 30s here recorded every slow-but-correct program as a
+# `run` failure, so a test declaring a longer limit (pbpk28_m2 declares 300 and runs
+# ~20s under Madaros on an idle pod, far longer on a loaded one) sat one busy machine
+# away from a spurious `run` entry. Anything that is not a positive integer keeps the
+# 30s default.
+tmo="$(sed -n 's|^//@[[:space:]]*timeout:[[:space:]]*\([0-9][0-9]*\).*|\1|p' "$src" | head -1)"
+if [ -z "$tmo" ] || [ "$tmo" -le 0 ] 2>/dev/null; then tmo=30; fi
+out="$("$WORK/timeout_run.sh" "$elf" "$tmo")" || { echo "$name run"; exit 0; }
 
 # If the test declares an expected marker, assert it. Exit status alone is not
 # evidence: a CPC 2026 receipt was found compiling, exiting 0 and printing ZERO
@@ -200,7 +208,7 @@ chmod +x "$WORK/run_one.sh"
 
 cat > "$WORK/timeout_run.sh" <<'TR'
 #!/usr/bin/env bash
-timeout 30 "$1" 2>/dev/null
+timeout "${2:-30}" "$1" 2>/dev/null
 TR
 chmod +x "$WORK/timeout_run.sh"
 export MADAROS WORK MADAROS_VMEM_LIMIT_KB
