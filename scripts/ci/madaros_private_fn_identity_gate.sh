@@ -23,6 +23,11 @@
 #             accepted because the other module was renamed and no collision remains
 #   unresolved  the same shape in EVERY colliding module: the compile must be
 #             REFUSED with error[private_fn_identity], not emitted with a warning
+#   restricted  two pub(crate) fns of one name: exported, so unrenamable -> REFUSED
+#   restrictedmix  a pub(crate) fn met first + a private one: the private is renamed,
+#             the exported one is then unique, and it compiles
+#   capacity boundary  512 colliding names are accepted, 513 are REFUSED (the
+#             per-module table limit), generated here rather than committed
 # and a positive control: with the pass switched off
 # (SOUNIO_DISABLE_PRIVATE_FN_IDENTITY=1) the repro must NOT come out right, so a
 # green run cannot be a program that never exercised the collision.
@@ -141,7 +146,7 @@ echo "$TAG PASS(rich): colliding private fns, recursion, fn values, impl method,
 # --- skip: unprovable shape is reported, not guessed ------------------------
 compile_and_run skip "$FIX/skip/main.sio"
 expect_output skip "$FIX/skip/expected.txt"
-expect_log skip "private_fn_identity: left 1 private fn(s) unrenamed" "the skipped-rename note"
+expect_log skip "private_fn_identity: left 1 fn(s) unrenamed; no collision remains" "the skipped-rename note"
 if grep -Fq "error[private_fn_identity]" "$WORK/skip.log"; then
   fail "skip: refused a compile whose collision was fully resolved"
 fi
@@ -169,22 +174,94 @@ expect_output capacity "$FIX/capacity/expected.txt"
 expect_log capacity "private_fn_identity: renamed 70 same-named private fn(s) in 1 module(s)" "all 70 renames (the second module is then unique)"
 echo "$TAG PASS(capacity): 70 colliding private fns per module, none left behind"
 
-# --- unresolved: refuse, do not warn -------------------------------------------
-# Every colliding module has a parameter spelled like the fn, so none can be
-# renamed and the two bodies would share one slot. The compile must STOP.
-ulog="$WORK/unresolved.log" uelf="$WORK/unresolved.elf"
-if "$RAW" --native-compile "$FIX/unresolved/main.sio" -o "$uelf" >"$ulog" 2>&1; then
-  tail -n 25 "$ulog" >&2 || true
-  fail "unresolved: compiled although every colliding module was unrenamable (a known-wrong executable)"
-fi
-grep -Fq 'error[private_fn_identity]: private fn `helper` (module #1)' "$ulog" || {
-  tail -n 25 "$ulog" >&2 || true
-  fail "unresolved: refused, but without the error[private_fn_identity] diagnostic naming the fn and module"
+# --- refusals ------------------------------------------------------------------
+# expect_refusal <label> <main.sio> <diagnostic-substring> [second-substring]
+# The compile must EXIT NON-ZERO, print the diagnostic, and write no ELF.
+expect_refusal() {
+  local label="$1" src="$2" want="$3" want2="${4:-}"
+  local log="$WORK/$label.log" elf="$WORK/$label.elf"
+  if "$RAW" --native-compile "$src" -o "$elf" >"$log" 2>&1; then
+    tail -n 25 "$log" >&2 || true
+    fail "$label: compiled, but the collision cannot be resolved (a known-wrong executable)"
+  fi
+  grep -Fq -- "$want" "$log" || {
+    tail -n 25 "$log" >&2 || true
+    fail "$label: refused, but without the expected diagnostic ($want)"
+  }
+  if [[ -n "$want2" ]]; then
+    grep -Fq -- "$want2" "$log" || {
+      tail -n 25 "$log" >&2 || true
+      fail "$label: the diagnostic does not state the real reason ($want2)"
+    }
+  fi
+  if [[ -s "$elf" ]]; then
+    fail "$label: the compile was refused but an ELF was still written"
+  fi
 }
-if [[ -s "$uelf" ]]; then
-  fail "unresolved: the compile was refused but an ELF was still written"
-fi
+
+# Every colliding module has a parameter spelled like the fn, so none can be
+# renamed and the two bodies would share one slot. The compile must STOP -- and
+# say the shadowing reason, not some other one.
+expect_refusal unresolved "$FIX/unresolved/main.sio" \
+  'error[private_fn_identity]: fn `helper` (module #1)' "a local, parameter or pattern uses that name"
 echo "$TAG PASS(unresolved): unrenamable collision refused with a diagnostic, no executable"
+
+# pub(crate) is exported, so it cannot be renamed; two of one name are refused, and
+# the diagnostic must give THAT reason (not a shadowing one).
+expect_refusal restricted "$FIX/restricted/main.sio" \
+  'error[private_fn_identity]: fn `helper` (module #1)' "it is exported (pub(crate)"
+echo "$TAG PASS(restricted): two pub(crate) fns of one name refused, with the exported reason"
+
+compile_and_run restrictedmix "$FIX/restrictedmix/main.sio"
+expect_output restrictedmix "$FIX/restrictedmix/expected.txt"
+expect_log restrictedmix "private_fn_identity: left 1 fn(s) unrenamed; no collision remains" "the skipped-rename note"
+echo "$TAG PASS(restrictedmix): a private fn is renamed away from a pub(crate) one"
+
+# --- capacity boundary: 512 accepted, 513 refused ------------------------------
+# The per-module table holds 512 names (PFI_T_MAX). A regression that silently
+# dropped entries again at the boundary would pass a 70-name test, so pin both
+# sides of it. Generated, not committed: ~1000 lines per side.
+gen_cap_case() {  # gen_cap_case <dir> <n>
+  local dir="$1" n="$2" i side off
+  mkdir -p "$dir"
+  for side in a b; do
+    off=0; [[ "$side" == b ]] && off=1000
+    {
+      for ((i = 0; i < n; i++)); do echo "fn f$i() -> i64 { $((i + off)) }"; done
+      echo "pub fn ${side}_sum() -> i64 {"
+      echo "    var t: i64 = 0"
+      for ((i = 0; i < n; i++)); do echo "    t = t + f$i()"; done
+      echo "    t"
+      echo "}"
+    } >"$dir/pfi_cb_$side.sio"
+  done
+  cat >"$dir/main.sio" <<'SIO'
+use pfi_cb_a::{a_sum}
+use pfi_cb_b::{b_sum}
+
+fn main() -> i32 with IO, Mut, Panic {
+    print("a=")
+    print_int(a_sum())
+    print(" b=")
+    print_int(b_sum())
+    println("")
+    0
+}
+SIO
+}
+
+gen_cap_case "$WORK/cap512" 512
+sa=$((512 * 511 / 2)); sb=$((sa + 1000 * 512))
+printf 'a=%d b=%d\n' "$sa" "$sb" >"$WORK/cap512.expected"
+compile_and_run cap512 "$WORK/cap512/main.sio"
+expect_output cap512 "$WORK/cap512.expected"
+expect_log cap512 "private_fn_identity: renamed 512 same-named private fn(s) in 1 module(s)" "all 512 renames"
+echo "$TAG PASS(cap512): exactly 512 colliding names accepted and all renamed"
+
+gen_cap_case "$WORK/cap513" 513
+expect_refusal cap513 "$WORK/cap513/main.sio" \
+  'error[private_fn_identity]: more than 512 same-named private fns in one module'
+echo "$TAG PASS(cap513): 513 colliding names refused, no executable"
 
 # --- positive control: pass off => the repro is NOT right -------------------
 # A green gate must be able to go red. With the pass disabled the merged IR is
