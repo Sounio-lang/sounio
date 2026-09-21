@@ -63,12 +63,14 @@ sounio_materialize_madaros_prebuilt() {
 
   if [[ ! -e "$gz" || ! -s "$sum" ]]; then
     echo "error: madaros prebuilt: incomplete — bin/madaros-linux-x86_64.gz and bin/madaros-linux-x86_64.sha256 must both be present and valid" >&2
+    rm -f "$elf" "$stamp"
     return 78
   fi
   local want
   want="$(awk 'NR == 1 {print $1}' "$sum")"
   if [[ ! "$want" =~ ^[0-9a-f]{64}$ ]]; then
     echo "error: madaros prebuilt: bin/madaros-linux-x86_64.sha256 does not start with a sha256" >&2
+    rm -f "$elf" "$stamp"
     return 78
   fi
 
