@@ -75,6 +75,24 @@ TUPLE_CAP="$(grep -E '^let LOWER_FN_TUPLE_ARR_CAP: i64 = [0-9]+' \
     "$ROOT_DIR/self-hosted/ir/lower.sio" | grep -oE '[0-9]+$' | head -1)"
 [[ -n "$TUPLE_CAP" ]] || fail "LOWER_FN_TUPLE_ARR_CAP is no longer declared where this gate looks"
 TUPLE_OVER="$((TUPLE_CAP + 1))"
+
+# Compile-boundary ordering. This is a STRUCTURAL check, and deliberately says so:
+# the property it protects -- an over-cap source must not poison the NEXT source
+# compiled in the same process -- cannot be exercised here, because every
+# madaros CLI invocation compiles exactly once. What can be pinned is the one
+# ordering that would silently break it. lower_hard_error_reset() re-arms reason 3
+# from the table's sticky overflow bit, so the table must be reset FIRST at the
+# compile barrier; the other way round, a stale overflow re-arms straight into the
+# next compile and rejects a perfectly good source.
+BARRIER_BODY="$(awk '/^fn module_frontend_global_init_compile_begin\(/{on=1} on{print} on&&/^}/{exit}' \
+    "$ROOT_DIR/self-hosted/compiler/module_frontend.sio" | sed 's|//.*$||')"
+[[ -n "$BARRIER_BODY" ]] || fail "module_frontend_global_init_compile_begin is no longer where this gate looks"
+reset_line="$(grep -n 'lower_fn_tuple_arr_reset()' <<<"$BARRIER_BODY" | head -1 | cut -d: -f1)"
+herr_line="$(grep -n 'lower_hard_error_reset()' <<<"$BARRIER_BODY" | head -1 | cut -d: -f1)"
+[[ -n "$reset_line" ]] || fail "the compile barrier no longer resets the f64-array tuple table: an over-cap source would poison every later compile in the process"
+[[ -n "$herr_line" ]] || fail "the compile barrier no longer calls lower_hard_error_reset(); this ordering check has nothing to order against"
+[[ "$reset_line" -lt "$herr_line" ]] || fail "the compile barrier resets the tuple table AFTER lower_hard_error_reset(): the hard-error reset re-arms from the previous compile's stale overflow bit"
+
 TUPLE_DIR="$WORK/tuple-capacity"
 mkdir -p "$TUPLE_DIR"
 
