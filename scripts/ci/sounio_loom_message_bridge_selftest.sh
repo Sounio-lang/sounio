@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
+LOOM="$ROOT_DIR/bin/sounio-loom"
+TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-loom-message-bridge.XXXXXX")"
+TOKEN_FILE="$TEST_ROOT/token.cap"
+BRIDGE_LOG="$TEST_ROOT/bridge.log"
+BRIDGE_PID=''
+BASE_URL=''
+SECRET='4bdf72c971154463b928f6d64c8cb5cab245107657fc93dd9d9bcc50e7e7b186'
+MESSAGE='message bridge isolated acceptance canary'
+
+export SOUNIO_COORD_DIR="$TEST_ROOT/coord-state"
+export SOUNIO_COORD_RUNTIME_MODE=local
+export SOUNIO_COORD_DURABLE_OBLIGATIONS=0
+
+fail() {
+  echo "sounio-loom-message-bridge-selftest: FAIL: $* test_root=$TEST_ROOT" >&2
+  exit 1
+}
+
+cleanup() {
+  [[ -z "$BRIDGE_PID" ]] || kill "$BRIDGE_PID" >/dev/null 2>&1 || true
+  [[ -z "$BRIDGE_PID" ]] || wait "$BRIDGE_PID" >/dev/null 2>&1 || true
+  if [[ "${SOUNIO_LOOM_KEEP_TEST_ROOT:-0}" != 1 ]]; then
+    rm -rf "$TEST_ROOT"
+  fi
+}
+trap cleanup EXIT
+
+http_status() {
+  local output="$1"
+  shift
+  curl --silent --show-error --max-time 5 --output "$output" \
+    --write-out '%{http_code}' "$@"
+}
+
+command -v curl >/dev/null || fail 'curl is required'
+"$ROOT_DIR/scripts/dev/build_sounio_loom.sh" >/dev/null
+
+printf '%s\n' "$SECRET" > "$TOKEN_FILE"
+chmod 0644 "$TOKEN_FILE"
+if "$LOOM" message-serve --cwd "$ROOT_DIR" --token-file "$TOKEN_FILE" \
+  --bind 127.0.0.1 --port 0 >"$TEST_ROOT/insecure-token.out" 2>&1; then
+  fail 'bridge accepted a group/world-readable capability'
+fi
+grep -q 'message-bridge-token-permissions' "$TEST_ROOT/insecure-token.out" ||
+  fail 'insecure token refusal omitted its reason'
+
+if "$LOOM" message-serve --cwd "$ROOT_DIR" --token-file "$TEST_ROOT/missing.cap" \
+  --bind 127.0.0.1 --port 0 >"$TEST_ROOT/missing-token.out" 2>&1; then
+  fail 'bridge accepted a missing capability file'
+fi
+grep -q 'message-bridge-token-missing' "$TEST_ROOT/missing-token.out" ||
+  fail 'missing token refusal omitted its reason'
+
+chmod 0600 "$TOKEN_FILE"
+ln -s "$TOKEN_FILE" "$TEST_ROOT/token-link.cap"
+if "$LOOM" message-serve --cwd "$ROOT_DIR" --token-file "$TEST_ROOT/token-link.cap" \
+  --bind 127.0.0.1 --port 0 >"$TEST_ROOT/symlink-token.out" 2>&1; then
+  fail 'bridge accepted a symlinked capability file'
+fi
+grep -q 'message-bridge-token-not-regular' "$TEST_ROOT/symlink-token.out" ||
+  fail 'symlinked token refusal omitted its reason'
+
+if "$LOOM" message-serve --cwd "$ROOT_DIR" --token-file "$TOKEN_FILE" \
+  --bind 0.0.0.0 --port 0 >"$TEST_ROOT/remote-bind.out" 2>&1; then
+  fail 'bridge accepted a non-loopback bind without --allow-remote'
+fi
+grep -q 'remote message bridge bind requires --allow-remote' \
+  "$TEST_ROOT/remote-bind.out" || fail 'remote bind refusal omitted its reason'
+
+"$LOOM" message-serve --cwd "$ROOT_DIR" --token-file "$TOKEN_FILE" \
+  --agent loom-ui-test --lane apple-client-test --bind 127.0.0.1 --port 0 \
+  >"$BRIDGE_LOG" 2>&1 &
+BRIDGE_PID=$!
+
+for _ in $(seq 1 100); do
+  grep -q '^LOOM_MESSAGE_BRIDGE ' "$BRIDGE_LOG" 2>/dev/null && break
+  kill -0 "$BRIDGE_PID" 2>/dev/null || fail "bridge exited: $(cat "$BRIDGE_LOG")"
+  sleep 0.05
+done
+port="$(sed -n 's#.*url=http://127\.0\.0\.1:\([0-9][0-9]*\).*#\1#p' \
+  "$BRIDGE_LOG" | head -1)"
+[[ -n "$port" ]] || fail 'bridge did not report its selected port'
+BASE_URL="http://127.0.0.1:$port"
+
+status="$(http_status "$TEST_ROOT/health.json" "$BASE_URL/health")"
+[[ "$status" == 200 ]] || fail "health returned HTTP $status"
+grep -q '"schema":"loom-message-bridge-v1"' "$TEST_ROOT/health.json" ||
+  fail 'health omitted the bridge schema'
+
+status="$(http_status "$TEST_ROOT/no-token.json" --request POST \
+  --header 'content-type: application/json' --data '{}' "$BASE_URL/v1/messages")"
+[[ "$status" == 401 ]] || fail "missing capability returned HTTP $status"
+
+status="$(http_status "$TEST_ROOT/wrong-token.json" --request POST \
+  --header 'content-type: application/json' --header 'authorization: Bearer wrong' \
+  --data '{}' "$BASE_URL/v1/messages")"
+[[ "$status" == 401 ]] || fail "wrong capability returned HTTP $status"
+
+status="$(http_status "$TEST_ROOT/bad-kind.json" --request POST \
+  --header 'content-type: application/json' --header "authorization: Bearer $SECRET" \
+  --data '{"toAgent":"target","toLane":"lane","kind":"handoff","message":"no"}' \
+  "$BASE_URL/v1/messages")"
+[[ "$status" == 400 ]] || fail "forbidden kind returned HTTP $status"
+
+status="$(http_status "$TEST_ROOT/bad-target.json" --request POST \
+  --header 'content-type: application/json' --header "authorization: Bearer $SECRET" \
+  --data '{"toAgent":"bad\nagent","toLane":"lane","kind":"info","message":"no"}' \
+  "$BASE_URL/v1/messages")"
+[[ "$status" == 400 ]] || fail "newline-bearing target returned HTTP $status"
+
+status="$(http_status "$TEST_ROOT/accepted.json" --request POST \
+  --header 'content-type: application/json' --header "authorization: Bearer $SECRET" \
+  --data "{\"toAgent\":\"bridge-target\",\"toLane\":\"isolated-lane\",\"kind\":\"info\",\"message\":\"$MESSAGE\"}" \
+  "$BASE_URL/v1/messages")"
+[[ "$status" == 202 ]] || fail "valid message returned HTTP $status: $(cat "$TEST_ROOT/accepted.json")"
+grep -q '"schema":"loom-message-receipt-v1"' "$TEST_ROOT/accepted.json" ||
+  fail 'accepted response omitted the receipt schema'
+grep -q '"status":"accepted"' "$TEST_ROOT/accepted.json" ||
+  fail 'accepted response omitted accepted status'
+message_id="$(sed -n 's/.*"messageId":"\([^"]*\)".*/\1/p' "$TEST_ROOT/accepted.json")"
+[[ -n "$message_id" ]] || fail 'accepted response omitted messageId'
+message_file="$SOUNIO_COORD_DIR/messages/$message_id.message"
+[[ -f "$message_file" ]] || fail 'receipt did not identify a durable bus record'
+grep -q '^from_agent=loom-ui-test$' "$message_file" || fail 'durable sender agent drifted'
+grep -q '^from_lane=apple-client-test$' "$message_file" || fail 'durable sender lane drifted'
+grep -q '^to_agent=bridge-target$' "$message_file" || fail 'durable destination drifted'
+grep -q '^kind=info$' "$message_file" || fail 'durable message kind drifted'
+grep -Fq "text=$MESSAGE" "$message_file" || fail 'durable message body drifted'
+
+grep -q 'LOOM_MESSAGE_DECISION decision=ALLOW' "$BRIDGE_LOG" ||
+  fail 'bridge did not audit its ALLOW decision'
+[[ "$(grep -c 'LOOM_MESSAGE_DECISION decision=DENY' "$BRIDGE_LOG")" -ge 4 ]] ||
+  fail 'bridge did not audit every DENY decision'
+if grep -Fq "$SECRET" "$BRIDGE_LOG"; then
+  fail 'bridge leaked its bearer capability into the audit log'
+fi
+if grep -Fq "$MESSAGE" "$BRIDGE_LOG"; then
+  fail 'bridge leaked message content into the audit log'
+fi
+
+kill "$BRIDGE_PID" >/dev/null 2>&1 || true
+wait "$BRIDGE_PID" >/dev/null 2>&1 || true
+BRIDGE_PID=''
+printf '%s\n' '#!/usr/bin/env bash' 'sleep 30' >"$TEST_ROOT/stalled-coord"
+chmod 0700 "$TEST_ROOT/stalled-coord"
+SOUNIO_COORD_COMMAND="$TEST_ROOT/stalled-coord" \
+  "$LOOM" message-serve --cwd "$ROOT_DIR" --token-file "$TOKEN_FILE" \
+  --agent loom-ui-test --lane timeout-test --bind 127.0.0.1 --port 0 \
+  >"$TEST_ROOT/timeout-bridge.log" 2>&1 &
+BRIDGE_PID=$!
+for _ in $(seq 1 100); do
+  grep -q '^LOOM_MESSAGE_BRIDGE ' "$TEST_ROOT/timeout-bridge.log" 2>/dev/null && break
+  kill -0 "$BRIDGE_PID" 2>/dev/null || fail 'timeout bridge exited before serving'
+  sleep 0.05
+done
+timeout_port="$(sed -n 's#.*url=http://127\.0\.0\.1:\([0-9][0-9]*\).*#\1#p' \
+  "$TEST_ROOT/timeout-bridge.log" | head -1)"
+[[ -n "$timeout_port" ]] || fail 'timeout bridge did not report its selected port'
+BASE_URL="http://127.0.0.1:$timeout_port"
+status="$(curl --silent --show-error --max-time 12 --output "$TEST_ROOT/timeout.json" \
+  --write-out '%{http_code}' --request POST --header 'content-type: application/json' \
+  --header "authorization: Bearer $SECRET" \
+  --data '{"toAgent":"target","toLane":"lane","kind":"info","message":"timeout"}' \
+  "$BASE_URL/v1/messages")"
+[[ "$status" == 503 ]] || fail "stalled runtime returned HTTP $status"
+grep -q 'message-bridge-runtime-timeout' "$TEST_ROOT/timeout.json" ||
+  fail 'timeout refusal omitted its reason'
+grep -q 'decision=DENY reason=message-bridge-runtime-timeout' \
+  "$TEST_ROOT/timeout-bridge.log" || fail 'timeout refusal was not audited'
+
+echo "sounio-loom-message-bridge-selftest: PASS receipt=$message_id authority=durable-message-bus"

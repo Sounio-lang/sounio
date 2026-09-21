@@ -13,6 +13,7 @@ let max_outcome_receipt_bytes = 16 * 1024
 
 external forkpty : unit -> int * file_descr = "sounio_loom_forkpty"
 external set_winsize : file_descr -> int -> int -> unit = "sounio_loom_set_winsize"
+external get_winsize : file_descr -> int * int = "sounio_loom_get_winsize"
 
 let failf format = Printf.ksprintf (fun value -> raise (Loom_error value)) format
 
@@ -213,7 +214,7 @@ let process_output command arguments =
   | WEXITED 0 -> trim output
   | _ -> failf "command failed: %s" command
 
-let process_output_all cwd command arguments =
+let process_output_all ?timeout_seconds cwd command arguments =
   let reader, writer = Unix.pipe () in
   Unix.set_close_on_exec reader;
   match Unix.fork () with
@@ -222,6 +223,11 @@ let process_output_all cwd command arguments =
       Unix.dup2 writer Unix.stdout;
       Unix.dup2 writer Unix.stderr;
       if writer <> Unix.stdout && writer <> Unix.stderr then Unix.close writer;
+      (match timeout_seconds with
+      | Some seconds when seconds > 0 ->
+          ignore (Unix.setsid ());
+          ignore (Unix.alarm seconds)
+      | _ -> ());
       (try
          Unix.chdir cwd;
          Unix.execve command arguments (Unix.environment ())
@@ -230,18 +236,46 @@ let process_output_all cwd command arguments =
       Unix.close writer;
       let output = Buffer.create 4096 in
       let bytes = Bytes.create 16384 in
-      let rec read () =
+      let read_once () =
         match Unix.read reader bytes 0 (Bytes.length bytes) with
-        | 0 -> ()
-        | count -> Buffer.add_subbytes output bytes 0 count; read ()
-        | exception Unix_error (EINTR, _, _) -> read ()
+        | 0 -> false
+        | count -> Buffer.add_subbytes output bytes 0 count; true
+        | exception Unix_error (EINTR, _, _) -> true
       in
-      Fun.protect ~finally:(fun () -> Unix.close reader) read;
+      let rec read_all () = if read_once () then read_all () in
+      let timed_out =
+        Fun.protect
+          ~finally:(fun () -> Unix.close reader)
+          (fun () ->
+            match timeout_seconds with
+            | None -> read_all (); false
+            | Some seconds ->
+                let deadline = Unix.gettimeofday () +. float_of_int seconds in
+                let rec read_until_deadline () =
+                  let remaining = deadline -. Unix.gettimeofday () in
+                  if remaining <= 0.0 then true
+                  else
+                    let readable, _, _ =
+                      try Unix.select [ reader ] [] [] remaining
+                      with Unix_error (EINTR, _, _) -> ([], [], [])
+                    in
+                    if readable = [] then
+                      if Unix.gettimeofday () >= deadline then true
+                      else read_until_deadline ()
+                    else if read_once () then read_until_deadline ()
+                    else false
+                in
+                read_until_deadline ())
+      in
+      if timed_out then
+        (try Unix.kill (-pid) Sys.sigkill with Unix_error _ -> ());
       let _, status = Unix.waitpid [] pid in
       let code =
-        match status with
-        | WEXITED value -> value
-        | WSIGNALED signal | WSTOPPED signal -> 128 + signal
+        if timed_out then 128 + Sys.sigalrm
+        else
+          match status with
+          | WEXITED value -> value
+          | WSIGNALED signal | WSTOPPED signal -> 128 + signal
       in
       (code, Buffer.contents output)
 
@@ -1447,7 +1481,7 @@ let guardian_handle_request guardian client line =
             let rows = parse_nonnegative "rows" rows in
             if cols < 1 || cols > 1000 || rows < 1 || rows > 1000 then
               failf "invalid-terminal-size";
-            set_winsize guardian.guardian_master_fd cols rows;
+            set_winsize guardian.guardian_master_fd rows cols;
             ignore
               (append_event guardian.guardian_journal "RESIZE"
                  (Printf.sprintf "%d:%d" cols rows));
@@ -3207,11 +3241,72 @@ let load_cursor paths instance =
 let save_cursor paths instance cursor =
   atomic_write paths.cursor_path (Printf.sprintf "%s\t%d\n" instance cursor)
 
+let terminal_raw_settings original =
+  {
+    original with
+    c_ignbrk = false;
+    c_brkint = false;
+    c_parmrk = false;
+    c_istrip = false;
+    c_inlcr = false;
+    c_igncr = false;
+    c_icrnl = false;
+    c_ixon = false;
+    c_csize = 8;
+    c_parenb = false;
+    c_isig = false;
+    c_icanon = false;
+    c_echo = false;
+    c_echonl = false;
+    c_vmin = 1;
+    c_vtime = 0;
+  }
+
 let set_terminal_raw descriptor =
   let original = Unix.tcgetattr descriptor in
-  let raw = { original with c_icanon = false; c_echo = false; c_vmin = 1; c_vtime = 0 } in
+  let raw = terminal_raw_settings original in
   Unix.tcsetattr descriptor TCSANOW raw;
   original
+
+let terminal_dimensions descriptor =
+  try
+    let rows, cols = get_winsize descriptor in
+    if rows > 0 && rows <= 1000 && cols > 0 && cols <= 1000 then
+      Some (cols, rows)
+    else None
+  with Failure _ | Unix_error _ -> None
+
+let terminal_raw_probe_command cli =
+  if not (Unix.isatty Unix.stdin) then failf "terminal-raw-probe-requires-tty";
+  let original = set_terminal_raw Unix.stdin in
+  Fun.protect
+    ~finally:(fun () -> Unix.tcsetattr Unix.stdin TCSANOW original)
+    (fun () ->
+      let actual = Unix.tcgetattr Unix.stdin in
+      if actual.c_icrnl || actual.c_inlcr || actual.c_igncr then
+        failf "terminal-raw-probe-cr-translation-active";
+      if actual.c_isig then failf "terminal-raw-probe-signals-active";
+      if actual.c_ixon then failf "terminal-raw-probe-flow-control-active";
+      if actual.c_icanon || actual.c_echo || actual.c_echonl then
+        failf "terminal-raw-probe-line-discipline-active";
+      if actual.c_opost <> original.c_opost then
+        failf "terminal-raw-probe-output-processing-changed";
+      let byte =
+        if flag cli "--read-byte" then (
+          let bytes = Bytes.create 1 in
+          if Unix.read Unix.stdin bytes 0 1 <> 1 then
+            failf "terminal-raw-probe-input-eof";
+          Printf.sprintf "%02x" (Char.code (Bytes.get bytes 0)))
+        else "none"
+      in
+      let dimensions =
+        match terminal_dimensions Unix.stdin with
+        | Some (cols, rows) -> Printf.sprintf "%dx%d" cols rows
+        | None -> "unknown"
+      in
+      Printf.printf
+        "LOOM_TERMINAL_RAW state=pass icrnl=false isig=false ixon=false icanon=false echo=false opost=preserved dimensions=%s byte=%s\n%!"
+        dimensions byte)
 
 let stream_command cli interactive =
   let _, paths = session_locator cli in
@@ -3224,6 +3319,18 @@ let stream_command cli interactive =
     | Some value -> parse_nonnegative "cursor" value
   in
   let token = trim (read_file paths.token_path) in
+  let terminal_input = interactive && Unix.isatty Unix.stdin in
+  let terminal_size = ref None in
+  let sync_terminal_size () =
+    if terminal_input then
+      match terminal_dimensions Unix.stdin with
+      | Some dimensions when Some dimensions <> !terminal_size ->
+          let cols, rows = dimensions in
+          ignore (resize_request paths cols rows);
+          terminal_size := Some dimensions
+      | _ -> ()
+  in
+  sync_terminal_size ();
   let socket = connect paths in
   let mode = if interactive then "interactive" else "observe" in
   write_all socket (request_line token "ATTACH" [ mode; string_of_int cursor ]);
@@ -3234,7 +3341,7 @@ let stream_command cli interactive =
   in
   let cursor = ref start_cursor in
   let terminal =
-    if interactive && Unix.isatty Unix.stdin && not (flag cli "--no-raw") then
+    if terminal_input && not (flag cli "--no-raw") then
       Some (set_terminal_raw Unix.stdin)
     else None
   in
@@ -3246,7 +3353,8 @@ let stream_command cli interactive =
     (fun () ->
       while !running do
         let read_fds = if interactive then [ socket; Unix.stdin ] else [ socket ] in
-        let readable, _, _ = Unix.select read_fds [] [] (-1.0) in
+        let timeout = if terminal_input then 0.25 else -1.0 in
+        let readable, _, _ = Unix.select read_fds [] [] timeout in
         List.iter
           (fun descriptor ->
             if descriptor = socket then (
@@ -3268,7 +3376,8 @@ let stream_command cli interactive =
                 | Some index ->
                     if index > 0 then write_all socket (String.sub value 0 index);
                     running := false)
-          readable
+          readable;
+        sync_terminal_size ()
       done)
 
 let offline_snapshot paths cursor limit =
@@ -6732,6 +6841,212 @@ let serve_http cli =
   done;
   Unix.close server
 
+let constant_time_equal left right =
+  let left_length = String.length left and right_length = String.length right in
+  let length = max left_length right_length in
+  let difference = ref (left_length lxor right_length) in
+  for index = 0 to length - 1 do
+    let left_code = if index < left_length then Char.code left.[index] else 0 in
+    let right_code = if index < right_length then Char.code right.[index] else 0 in
+    difference := !difference lor (left_code lxor right_code)
+  done;
+  !difference = 0
+
+let message_bridge_token path =
+  if not (Sys.file_exists path) then failf "message-bridge-token-missing";
+  let metadata = Unix.stat path in
+  if metadata.st_kind <> S_REG then failf "message-bridge-token-not-regular";
+  if metadata.st_uid <> Unix.getuid () then failf "message-bridge-token-owner-mismatch";
+  if metadata.st_perm land 0o077 <> 0 then failf "message-bridge-token-permissions";
+  let token = trim (read_file path) in
+  if String.length token < 32 || String.length token > 256
+     || String.contains token '\000' || String.contains token '\n'
+  then failf "message-bridge-token-invalid";
+  token
+
+let message_bridge_authorized request token =
+  match Hashtbl.find_opt request.http_headers "authorization" with
+  | Some value when starts_with value "Bearer " ->
+      let supplied = String.sub value 7 (String.length value - 7) in
+      constant_time_equal supplied token
+  | _ -> false
+
+let message_bridge_field label maximum value =
+  if value = "" then failf "message-bridge-%s-empty" label;
+  if String.length value > maximum then failf "message-bridge-%s-too-long" label;
+  if String.contains value '\000' || String.contains value '\n'
+     || String.contains value '\r'
+  then failf "message-bridge-%s-invalid" label;
+  value
+
+let message_bridge_sent_fields output =
+  let sent_line =
+    output |> split_on '\n'
+    |> List.find_opt (fun line -> starts_with line "SENT ")
+    |> Option.value ~default:""
+  in
+  if sent_line = "" then failf "message-bridge-runtime-omitted-receipt";
+  let fields = split_on ' ' sent_line |> List.tl |> snapshot_fields in
+  let message_id = table_value fields "message_id" in
+  let thread_id = table_value fields "thread_id" in
+  if message_id = "" || thread_id = "" then
+    failf "message-bridge-runtime-invalid-receipt";
+  (message_id, thread_id)
+
+let message_bridge_send cwd sender_agent sender_lane body =
+  let parsed = parse_json body in
+  let target_agent =
+    json_string_field parsed [ "toAgent"; "to_agent" ]
+    |> message_bridge_field "target-agent" 256
+  in
+  let target_lane =
+    json_string_field parsed [ "toLane"; "to_lane" ]
+    |> message_bridge_field "target-lane" 512
+  in
+  let message =
+    json_string_field parsed [ "message" ]
+    |> message_bridge_field "message" max_control_bytes
+  in
+  let kind = json_string_field ~default:"request" parsed [ "kind" ] in
+  if not (List.mem kind [ "info"; "request" ]) then
+    failf "message-bridge-kind-refused";
+  let command =
+    coordination_snapshot_command cwd
+    |> Option.value ~default:""
+  in
+  if command = "" then failf "message-bridge-runtime-missing";
+  let arguments =
+    [| command; "send"; "--agent"; sender_agent; "--lane"; sender_lane;
+       "--to-agent"; target_agent; "--to-lane"; target_lane; "--kind"; kind;
+       "--message"; message |]
+  in
+  let code, output =
+    process_output_all ~timeout_seconds:8 cwd command arguments
+  in
+  if code = 128 + Sys.sigalrm then failf "message-bridge-runtime-timeout";
+  if code <> 0 then
+    failf "message-bridge-runtime-refused:%s" (sha256 output);
+  let message_id, thread_id = message_bridge_sent_fields output in
+  let wake_status =
+    if output |> split_on '\n'
+       |> List.exists (fun line -> starts_with line "WAKE_UNAVAILABLE ")
+    then "durable_only"
+    else "delivery_attempted"
+  in
+  Printf.sprintf
+    "{\"schema\":\"loom-message-receipt-v1\",\"messageId\":%s,\"threadId\":%s,\"toAgent\":%s,\"toLane\":%s,\"kind\":%s,\"status\":\"accepted\",\"wakeStatus\":%s}"
+    (json_quote message_id) (json_quote thread_id) (json_quote target_agent)
+    (json_quote target_lane) (json_quote kind) (json_quote wake_status)
+
+let message_bridge_handle cwd token sender_agent sender_lane descriptor =
+  let respond status body =
+    write_all descriptor
+      (json_response ~headers:[ ("X-Loom-Authority", "durable-message-bus") ]
+         status body)
+  in
+  try
+    let request = read_http_request descriptor in
+    let path, _ = parse_query request.http_target in
+    if request.http_method = "GET" && path = "/health" then
+      respond "200 OK"
+        "{\"schema\":\"loom-message-bridge-v1\",\"status\":\"ready\",\"authentication\":\"bearer-capability\"}"
+    else if request.http_method = "POST" && path = "/v1/messages" then
+      if not (message_bridge_authorized request token) then (
+        Printf.eprintf
+          "LOOM_MESSAGE_DECISION decision=DENY reason=invalid-capability sender_agent=%s sender_lane=%s\n%!"
+          sender_agent sender_lane;
+        respond "401 Unauthorized" "{\"error\":\"unauthorized\"}")
+      else
+        let receipt = message_bridge_send cwd sender_agent sender_lane request.http_body in
+        Printf.eprintf
+          "LOOM_MESSAGE_DECISION decision=ALLOW reason=durable-bus-accepted sender_agent=%s sender_lane=%s receipt_sha256=%s\n%!"
+          sender_agent sender_lane (sha256 receipt);
+        respond "202 Accepted" receipt
+    else respond "404 Not Found" "{\"error\":\"not_found\"}"
+  with
+  | Loom_error message ->
+      let status =
+        if starts_with message "invalid-json:" || starts_with message "message-bridge-target-"
+           || starts_with message "message-bridge-message-"
+           || message = "message-bridge-kind-refused"
+        then "400 Bad Request"
+        else if starts_with message "message-bridge-runtime-" then "503 Service Unavailable"
+        else "500 Internal Server Error"
+      in
+      Printf.eprintf
+        "LOOM_MESSAGE_DECISION decision=DENY reason=%s sender_agent=%s sender_lane=%s\n%!"
+        (slug message) sender_agent sender_lane;
+      (try respond status (Printf.sprintf "{\"error\":%s}" (json_quote message))
+       with _ -> ())
+  | error ->
+      Printf.eprintf
+        "LOOM_MESSAGE_DECISION decision=DENY reason=internal-error sender_agent=%s sender_lane=%s detail_sha256=%s\n%!"
+        sender_agent sender_lane (sha256 (Printexc.to_string error));
+      (try respond "500 Internal Server Error"
+             "{\"error\":\"internal_error\"}"
+       with _ -> ())
+
+let message_serve_command cli =
+  let cwd = cwd_option cli in
+  let bind = optional cli "--bind" |> Option.value ~default:"127.0.0.1" in
+  if bind <> "127.0.0.1" && bind <> "localhost"
+     && not (flag cli "--allow-remote")
+  then failf "remote message bridge bind requires --allow-remote";
+  let port = optional cli "--port" |> Option.value ~default:"8789" |> int_of_string in
+  let token_path = required cli "--token-file" in
+  if not (Sys.file_exists token_path) then failf "message-bridge-token-missing";
+  if (Unix.lstat token_path).st_kind <> S_REG then
+    failf "message-bridge-token-not-regular";
+  let token_path = Unix.realpath token_path in
+  let token = message_bridge_token token_path in
+  let sender_agent =
+    optional cli "--agent" |> Option.value ~default:"loom-ui"
+    |> message_bridge_field "sender-agent" 256
+  in
+  let sender_lane =
+    optional cli "--lane" |> Option.value ~default:"apple-client"
+    |> message_bridge_field "sender-lane" 512
+  in
+  if coordination_snapshot_command cwd = None then
+    failf "message-bridge-runtime-missing";
+  let address =
+    try Unix.inet_addr_of_string bind
+    with _ -> (Unix.gethostbyname bind).h_addr_list.(0)
+  in
+  let server = Unix.socket PF_INET SOCK_STREAM 0 in
+  Unix.setsockopt server SO_REUSEADDR true;
+  Unix.bind server (ADDR_INET (address, port));
+  Unix.listen server 32;
+  let actual_port =
+    match Unix.getsockname server with ADDR_INET (_, value) -> value | _ -> port
+  in
+  let running = ref true in
+  let stop _ = running := false in
+  Sys.set_signal Sys.sigterm (Sys.Signal_handle stop);
+  Sys.set_signal Sys.sigint (Sys.Signal_handle stop);
+  Sys.set_signal Sys.sigpipe Sys.Signal_ignore;
+  Sys.set_signal Sys.sigchld Sys.Signal_ignore;
+  Printf.printf
+    "LOOM_MESSAGE_BRIDGE url=http://%s:%d schema=loom-message-bridge-v1 auth=bearer-capability sender_agent=%s sender_lane=%s\n%!"
+    bind actual_port sender_agent sender_lane;
+  while !running do
+    let readable, _, _ =
+      try Unix.select [ server ] [] [] 0.25
+      with Unix_error (EINTR, _, _) -> ([], [], [])
+    in
+    if readable <> [] then
+      let client, _ = Unix.accept server in
+      match Unix.fork () with
+      | 0 ->
+          Unix.close server;
+          Sys.set_signal Sys.sigchld Sys.Signal_default;
+          message_bridge_handle cwd token sender_agent sender_lane client;
+          Unix.close client;
+          Unix._exit 0
+      | _ -> Unix.close client
+  done;
+  Unix.close server
+
 let tui_command cli =
   let cwd = cwd_option cli in
   let root = root_option cli cwd in
@@ -8751,6 +9066,8 @@ let usage () =
   Printf.eprintf
     "\nPareto Portfolio Attention Compiler v0:\n  attention-portfolio-compile --world W --portfolio P --candidates FILE --token-budget N --wall-budget N --gpu-budget N --quota-budget N --policy information-first|falsification-first|counterfactual-first --owner A --generation G\n  attention-portfolio-complete --world W --portfolio P --owner A --generation G --outcome SHA\n";
   Printf.eprintf
+    "\nAuthenticated message bridge:\n  message-serve --token-file PATH [--agent A] [--lane L] [--bind 127.0.0.1] [--port 8789]\n";
+  Printf.eprintf
     "\nRobust Contingent Policy Compiler v0:\n  contingent-policy-compile --world W --contingent-policy P --root-state S --actions FILE --outcomes FILE --token-budget N --wall-budget N --gpu-budget N --quota-budget N --order information-first|falsification-first|counterfactual-first --owner A --generation G [--measurement-principal M --measurement-public-key PEM --classifier-principal C --classifier-public-key PEM --classifier-spec-digest SHA]\n  contingent-measurement-attest --world W --contingent-policy P --measurement FILE --measurement-principal M --measurement-private-key PEM --measurement-nonce N --receipt FILE\n  contingent-classification-attest --world W --contingent-policy P --measurement-receipt FILE --outcome O --classifier-principal C --classifier-private-key PEM --receipt FILE\n  contingent-policy-observe-attested --world W --contingent-policy P --measurement-receipt FILE --classification-receipt FILE --owner A --generation G\n  contingent-policy-observe --world W --contingent-policy P --outcome O --owner A --generation G --outcome-digest SHA (legacy opaque policies only)\n";
   Printf.eprintf
     "\nWitness Mesh v0/v1:\n  witness-serve --witness-state-dir DIR --membership FILE --witness ID --private-key PEM [--bind IP] [--port N]\n  witness-mesh-anchor --state-dir DIR --world W --membership FILE --endpoints FILE --anchor-private-key PEM\n  witness-mesh-verify --state-dir DIR --world W --membership FILE --endpoints FILE [--policy byzantine-strict|crash-quorum]\n  witness-epoch-handoff --epoch-state-dir DIR --world W --from-epoch N --to-epoch N --old-state-dir DIR --old-membership FILE --old-endpoints FILE --new-state-dir DIR --new-membership FILE --new-endpoints FILE\n  witness-epoch-verify --epoch-state-dir DIR --world W --active-state-dir DIR --membership FILE --endpoints FILE\n  witness-epoch-log-serve --log-state-dir DIR --operator ID --operator-public-key PEM --operator-private-key PEM --publisher-public-key PEM [--bind IP] [--log-port N]\n  witness-epoch-log-status --log-host HOST --log-port N --operator ID --operator-public-key PEM --world W\n  witness-epoch-transparency-publish --epoch-state-dir DIR --transparency-state-dir DIR --world W --log-host HOST --log-port N --operator ID --operator-public-key PEM --publisher-public-key PEM --publisher-private-key PEM --transparency-membership FILE --transparency-endpoints FILE --transparency-anchor-private-key PEM\n  witness-epoch-transparency-verify --epoch-state-dir DIR --transparency-state-dir DIR --world W --log-host HOST --log-port N --operator ID --operator-public-key PEM --transparency-membership FILE --transparency-endpoints FILE\n";
@@ -8771,7 +9088,7 @@ let main () =
       provider_tui_command (arguments_after_command ())
     else
       let booleans =
-        [ "--no-raw"; "--meta"; "--machine"; "--allow-remote"; "--apply";
+        [ "--no-raw"; "--read-byte"; "--meta"; "--machine"; "--allow-remote"; "--apply";
           "--replace"; "--adopt-active"; "--json"; "--once"; "--unsafe-auto";
           "--isolate-context" ]
       in
@@ -8809,12 +9126,14 @@ let main () =
     | "journal-authority-serve" -> journal_authority_serve_command cli; 0
     | "journal-authority-status" -> journal_authority_status_command cli; 0
     | "stop" -> stop_command cli; 0
+    | "terminal-raw-probe" -> terminal_raw_probe_command cli; 0
     | "attach" -> stream_command cli true; 0
     | "observe" -> stream_command cli false; 0
     | "snapshot" -> snapshot_command cli; 0
     | "list" -> list_command cli; 0
     | "tui" -> tui_command cli; 0
     | "serve" -> serve_http cli; 0
+    | "message-serve" -> message_serve_command cli; 0
     | "world-create" -> world_create_command cli; 0
     | "knowledge-observe" -> knowledge_observe_command cli; 0
     | "epistemic-claim-open" -> epistemic_claim_open_command cli; 0
