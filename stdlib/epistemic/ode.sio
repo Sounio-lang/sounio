@@ -282,12 +282,18 @@ pub struct ODESolution {
     //    carried through every step. 0: diagonal-only fallback, used only when
     //    n_dims + n_params > 64; it drops all correlations and is known to
     //    UNDERSTATE the variance of intermediates (see propagate_covariance_step).
+    // 2: the full covariance became non-finite (the finite-difference Jacobian lost
+    //    conditioning, or an input variance was NaN). The reported variances are then
+    //    NaN/inf, NOT zero; the state values are unaffected.
     pub covariance_mode: i64,
     // Last time reached, and why the solve stopped:
     //   status 0: reached t_end
     //   status 1: max_steps steps were used up before t_end
-    //   status 2: (adaptive) the trial bound was hit -- repeated rejection, or a
-    //             non-finite error estimate, left no acceptable step
+    //   status 2: (adaptive) no acceptable step: the trial bound was hit, or the step size
+    //             collapsed far from t_end (repeated rejection, or a non-finite error
+    //             estimate: NaN/inf never passes for an accepted step)
+    //   status 3: the state was non-finite (NaN/inf) at the start, or a fixed step produced
+    //             one; the solve stops there and t_final is the last valid time
     // A truncated solve is NOT an error return: the last recorded point is then the state
     // at t_final, not at t_end. Check status == 0 before using it as the requested result.
     pub t_final: f64,
@@ -308,6 +314,33 @@ fn ode_solution_new(n_dims: i64) -> ODESolution {
         t_final: 0.0,
         status: 0,
     }
+}
+
+// finite: false for NaN and +-inf (x - x is 0 only for finite x)
+fn ode_finite(x: f64) -> bool {
+    (x - x) == 0.0
+}
+
+fn ode_estate_values_finite(s: &EState, n: i64) -> bool with Mut, Div, Panic {
+    var i = 0
+    while i < n {
+        if i < 64 {
+            if !ode_finite(s.values[i]) { return false }
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn ode_estate_variances_finite(s: &EState, n: i64) -> bool with Mut, Div, Panic {
+    var i = 0
+    while i < n {
+        if i < 64 {
+            if !ode_finite(s.variances[i]) { return false }
+        }
+        i = i + 1
+    }
+    true
 }
 
 // t_end reached, up to the rounding left by accumulating t += dt
@@ -981,7 +1014,10 @@ fn augcov_write_variances(cov: &AugCov, state: &!EState, n: i64) with Mut {
     while i < n {
         if i < 64 {
             let v = cov.data[i * 64 + i]
-            state.variances[i] = if v > 0.0 { v } else { 0.0 }
+            // Round-off can leave a tiny negative diagonal: clamp only those. `v > 0.0` is
+            // false for NaN, so the old form turned a NaN diagonal into a reported variance
+            // of 0 -- a failed propagation shown as "no uncertainty".
+            state.variances[i] = if v < 0.0 { 0.0 } else { v }
         }
         i = i + 1
     }
@@ -1326,6 +1362,7 @@ fn rk45_step(
     // and reduced by max over components: a step is acceptable when it is <= 1, and the
     // controller is driven by that same number. atol therefore governs near-zero components.
     var max_err = 0.0
+    var invalid = false
     i = 0
     while i < n {
         if i < 64 {
@@ -1339,11 +1376,14 @@ fn rk45_step(
             var sci = atol + rtol * ode_max(ode_abs(tmp.values[i]), ode_abs(state.values[i]))
             if sci < 1.0e-300 { sci = 1.0e-300 }
             let rel = ei / sci
+            // `rel > max_err` is false for NaN, which would leave a NaN state with error 0
+            // and accept it. A non-finite estimate or state is reported as 1e300 instead.
+            if !ode_finite(rel) || !ode_finite(state.values[i]) { invalid = true }
             if rel > max_err { max_err = rel }
         }
         i = i + 1
     }
-    *err_out = max_err
+    if invalid { *err_out = 1.0e300 } else { *err_out = max_err }
 }
 
 // ============================================================================
@@ -1383,6 +1423,14 @@ pub fn solve_ode(
             } else {
                 eode_rk4_step(&sys, t, &!state, &p, dt, &!n_evals)
             }
+            if !ode_estate_values_finite(&state, sys.n_dims) {
+                // do not record it: t_final stays at the last valid time
+                sol.n_rhs_evals = n_evals
+                sol.t_final = t
+                sol.status = 3
+                return sol
+            }
+            if !ode_estate_variances_finite(&state, sys.n_dims) { sol.covariance_mode = 2 }
             t = t + dt
             step = step + 1
             solution_record(&!sol, t, &state)
@@ -1420,12 +1468,23 @@ pub fn solve_ode_adaptive(
     if !full_cov { sol.covariance_mode = 0 }
 
     solution_record(&!sol, t, &state)
+    if !ode_estate_values_finite(&state, sys.n_dims) {
+        sol.t_final = t
+        sol.status = 3
+        return sol
+    }
 
     // max_steps counts ACCEPTED steps; the trial bound keeps a run whose error estimate is
     // never acceptable (NaN state, absurd tolerance) from retrying forever.
     while t < t_end && step < opts.max_steps && step + n_rejected < opts.max_steps * 10 {
         dt = ode_min(dt, t_end - t)
-        if dt <= 1.0e-15 { t = t_end }
+        if ode_reached(t, t_end) { t = t_end }
+        else if dt <= 1.0e-15 {
+            // The step size collapsed while t_end is still far away (only a rounding
+            // remainder may be skipped, above). That is failure, not completion: stop, and
+            // status 2 reports it.
+            break
+        }
         else {
             // Save state in case we reject
             var saved = estate_new(sys.n_dims)
@@ -1435,7 +1494,9 @@ pub fn solve_ode_adaptive(
             rk45_step(&sys, t, &!state, &p, dt, opts.rtol, opts.atol, &!err, &!n_evals)
 
             // err is normalized by atol + rtol * max(|y_old|, |y_new|): accept when <= 1
-            if err <= 1.0 || dt <= 1.0e-12 {
+            // The forced acceptance at dt <= 1e-12 is for a step that is merely too small to
+            // improve; it must never accept a non-finite estimate (reported as >= 1e299).
+            if err <= 1.0 || (dt <= 1.0e-12 && err < 1.0e299) {
                 // Accept step — propagate uncertainty through the step just taken,
                 // differentiated at the pre-step point
                 if full_cov {
@@ -1444,6 +1505,7 @@ pub fn solve_ode_adaptive(
                 } else {
                     propagate_variance_gum(&sys, t, &!state, &p, dt, &!n_evals)
                 }
+                if !ode_estate_variances_finite(&state, sys.n_dims) { sol.covariance_mode = 2 }
                 t = t + dt
                 step = step + 1
                 solution_record(&!sol, t, &state)

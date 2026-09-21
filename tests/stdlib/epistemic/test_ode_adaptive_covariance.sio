@@ -24,6 +24,9 @@
 // status (status 0 = reached t_end, 1 = max_steps used up, 2 = trial bound hit; t_final is
 // the last time reached), so a truncated trajectory cannot pass for the requested result.
 //
+// And invalid input: NaN/inf must never pass for a completed solve (status 0), and a NaN
+// covariance must stay NaN (covariance_mode 2) instead of being reported as zero variance.
+//
 // Documented limit (propagate_covariance_step): the controller's dt(z) dependence is
 // not differentiated. It enters at the tolerance level, far below the tolerances here.
 
@@ -55,6 +58,19 @@ fn expn(x: f64) -> f64 with Mut, Div, Panic {
 }
 
 fn rel(a: f64, b: f64) -> f64 { absf(a - b) / absf(b) }
+
+// inf and NaN built by overflow, so the test needs no literal for either
+fn inf_val() -> f64 { let big = 1.0e308; big * 10.0 }
+fn nan_val() -> f64 { let big = 1.0e308; let inf = big * 10.0; inf - inf }
+fn is_nan(x: f64) -> bool { !(x == x) }
+
+fn run_fixed(y0: f64, u0: f64, kk: f64, uk: f64, t_end: f64, dt: f64, n: i64) -> ODESolution with Mut, Div, Panic {
+    var init = estate_new(1)
+    estate_set(&!init, 0, y0, u0 * u0)
+    var p = ode_params_new()
+    ode_params_set(&!p, 0, kk, uk * uk)
+    solve_ode(ode_system_exp_decay(), init, p, 0.0, t_end, solver_options_fixed(dt, n))
+}
 
 fn run_adaptive_opts(dt_init: f64, rtol: f64, atol: f64, max_steps: i64, y0: f64, u0: f64, kk: f64, uk: f64, t_end: f64) -> ODESolution with Mut, Div, Panic {
     var init = estate_new(1)
@@ -150,6 +166,45 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     let yt = solution_get_value(&tight, tight.n_steps - 1, 0)
     if rel(yt, y_exact) > 1.0e-9 { fail = fail + 1; println("FAIL: tight-atol run is not accurate") }
     if !(rel(yl, y_exact) > rel(yt, y_exact)) { fail = fail + 1; println("FAIL: loose atol should be less accurate than tight atol") }
+
+    // ---- invalid input ------------------------------------------------------------------
+    let nanv = nan_val()
+    let infv = inf_val()
+    if !is_nan(nanv) { fail = fail + 1; println("FAIL: test helper did not build a NaN") }
+
+    // NaN initial state
+    let a_nan = run_adaptive_opts(0.1, 1.0e-8, 1.0e-10, 1000, nanv, u0, kk, uk, t_end)
+    let f_nan = run_fixed(nanv, u0, kk, uk, t_end, 0.1, 30)
+    print("NaN state: adaptive status=") print(a_nan.status) print(" fixed status=") print(f_nan.status) println("")
+    if a_nan.status != 3 { fail = fail + 1; println("FAIL: adaptive solve of a NaN state must report status 3, not success") }
+    if f_nan.status != 3 { fail = fail + 1; println("FAIL: fixed-step solve of a NaN state must report status 3, not success") }
+    if a_nan.t_final > 0.0 || f_nan.t_final > 0.0 { fail = fail + 1; println("FAIL: a NaN state made progress") }
+
+    // infinite rate: every trial step overflows, so no step is acceptable. It must end as
+    // status 2 (adaptive) / 3 (fixed), and far from t_end -- never as a completed solve
+    // (the old `dt <= 1e-15 -> t = t_end` shortcut called a collapsed step size "finished")
+    let a_inf = run_adaptive_opts(0.1, 1.0e-8, 1.0e-10, 1000, y0, u0, infv, uk, t_end)
+    let f_inf = run_fixed(y0, u0, infv, uk, t_end, 0.1, 30)
+    print("inf rate: adaptive status=") print(a_inf.status) print(" rejected=") print(a_inf.n_rejected)
+    print(" fixed status=") print(f_inf.status) println("")
+    if a_inf.status != 2 { fail = fail + 1; println("FAIL: adaptive solve with an infinite rate must report status 2") }
+    if a_inf.t_final > 0.0 { fail = fail + 1; println("FAIL: adaptive solve accepted a step with an infinite rate") }
+    if f_inf.status != 3 { fail = fail + 1; println("FAIL: fixed-step solve with an infinite rate must report status 3") }
+
+    // NaN covariance: the state is fine, the uncertainty is not -- it must be NaN, not 0
+    let a_cov = run_adaptive_opts(0.1, 1.0e-8, 1.0e-10, 1000, y0, nanv, kk, uk, t_end)
+    let f_cov = run_fixed(y0, nanv, kk, uk, t_end, 0.1, 30)
+    let va = solution_get_variance(&a_cov, a_cov.n_steps - 1, 0)
+    let vf = solution_get_variance(&f_cov, f_cov.n_steps - 1, 0)
+    print("NaN input variance: adaptive covariance_mode=") print(a_cov.covariance_mode)
+    print(" fixed covariance_mode=") print(f_cov.covariance_mode) println("")
+    if a_cov.covariance_mode != 2 { fail = fail + 1; println("FAIL: adaptive NaN covariance must set covariance_mode 2") }
+    if f_cov.covariance_mode != 2 { fail = fail + 1; println("FAIL: fixed NaN covariance must set covariance_mode 2") }
+    if !is_nan(va) { fail = fail + 1; println("FAIL: adaptive NaN variance was reported as a number (zero?)") }
+    if !is_nan(vf) { fail = fail + 1; println("FAIL: fixed NaN variance was reported as a number (zero?)") }
+    // the state itself is still right and the solve still completes
+    if a_cov.status != 0 { fail = fail + 1; println("FAIL: NaN covariance must not stop the state solve") }
+    if rel(solution_get_value(&a_cov, a_cov.n_steps - 1, 0), y_exact) > 1.0e-7 { fail = fail + 1; println("FAIL: state corrupted by a NaN covariance") }
 
     if fail == 0 { println("ODE ADAPTIVE COVARIANCE PASS") }
     fail
