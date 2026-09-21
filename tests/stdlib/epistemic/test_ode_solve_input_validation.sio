@@ -330,6 +330,35 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     let w_ok = solve_ode(ode_system_new(5, 4), st4, all3, 0.0, 1.0, solver_options_fixed(0.1, 20))
     if w_ok.status != 0 { fail = fail + 1; println("FAIL: ode_system_new(5, 4) is system 5 and must work") }
 
+    // ---- invalid dimensions are refused BEFORE anything is sized by them ------------------------------
+    // ode_system_new and estate_new are public, so n_dims can be any i64. augcov_init and the covariance
+    // check loop n_dims times (1e12 iterations: this test would run into its timeout), and with
+    // n_dims > 4096 solution_record turns the first step into -1 and writes times[-1]. The solvers
+    // must return immediately with status 3 and no recorded point.
+    let huge = 1000000000000
+    let h_f = solve_ode(ode_system_new(5, huge), estate_new(huge), all3, 0.0, 1.0, solver_options_fixed(0.1, 20))
+    let h_a = solve_ode_adaptive(ode_system_new(5, huge), estate_new(huge), all3, 0.0, 1.0, solver_options_adaptive(0.1, 1.0e-8, 1.0e-10, 100))
+    let h_4097 = solve_ode(ode_system_new(1, 4097), estate_new(4097), params(0.1), 0.0, 1.0, solver_options_fixed(0.1, 20))
+    let h_neg = solve_ode(ode_system_new(5, 0 - 1), estate_new(0 - 1), all3, 0.0, 1.0, solver_options_fixed(0.1, 20))
+    let h_e = solve_ode(ode_system_new(5, huge), estate_new(huge), all3, 1.0, 1.0, solver_options_fixed(0.1, 20))
+    print("invalid dimensions: 1e12 fixed=") print(h_f.status) print(" adaptive=") print(h_a.status)
+    print(" 4097=") print(h_4097.status) print(" -1=") print(h_neg.status) print(" empty interval=") println(h_e.status)
+    if h_f.status != 3 || h_a.status != 3 || h_4097.status != 3 || h_neg.status != 3 || h_e.status != 3 { fail = fail + 1; println("FAIL: an invalid dimension must be status 3 for both solvers and on an empty interval") }
+    if h_f.n_steps != 0 || h_4097.n_steps != 0 { fail = fail + 1; println("FAIL: nothing may be recorded for an invalid dimension") }
+    let h_val = solution_get_value(&h_f, 0, 0)
+    if !(h_val != h_val) { fail = fail + 1; println("FAIL: an unrecorded trajectory must read as NaN") }
+
+    // ---- solve_exp_decay (the compatibility entry point) still works --------------------------------
+    // It used to copy ODEParams field by field and dropped param_set, so parameters the caller HAD set
+    // were reported as unset (status 3).
+    let ex_f = solve_exp_decay(decay(1.0, 0.01, 0.1), params(0.1), 0.0, 1.0, solver_options_fixed(0.1, 10))
+    let ex_v = solution_get_value(&ex_f, ex_f.n_steps - 1, 0)
+    print("solve_exp_decay: status=") print(ex_f.status) print(" y(1)=") println(ex_v)
+    if ex_f.status != 0 { fail = fail + 1; println("FAIL: solve_exp_decay must accept parameters that were set with ode_params_set") }
+    if !(absf(ex_v - 0.904837418) <= 1.0e-6) { fail = fail + 1; println("FAIL: solve_exp_decay must integrate the decay") }
+    let ex_none = solve_exp_decay(decay(1.0, 0.01, 0.1), ode_params_new(), 0.0, 1.0, solver_options_fixed(0.1, 10))
+    if ex_none.status != 3 { fail = fail + 1; println("FAIL: solve_exp_decay with no parameter set must be status 3") }
+
     // ---- the initial state must have the system's dimensions ---------------------------------------
     // a smaller EState leaves the remaining variables silently at 0
     let d_small = solve_ode(ode_system_chem_simple(), decay(1.0, 0.01, 0.1), all3, 0.0, 1.0, solver_options_fixed(0.1, 20))

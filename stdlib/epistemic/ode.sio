@@ -1577,6 +1577,18 @@ pub fn solve_ode(
     opts: SolverOptions
 ) -> ODESolution with Mut, Div, Panic {
     let y0_dims = y0.n
+    // The dimensions are validated FIRST: everything below is sized by them (augcov_init and the
+    // covariance check loop n_dims times, and solution_record with n_dims > 4096 turns the first step
+    // into -1 and writes times[-1]). ode_system_new and estate_new are public, so n_dims can be any i64.
+    // Nothing is recorded for an invalid dimension: the result has no points (n_steps = 0, every
+    // accessor index is invalid -> NaN), status 3, t_final = t_start.
+    if !ode_system_dims_ok(&sys) || y0_dims != sys.n_dims {
+        var refused = ode_solution_new(1)
+        refused.n_steps = 0
+        refused.t_final = t_start
+        refused.status = 3
+        return refused
+    }
     var state = y0
     state.n = sys.n_dims
     var sol = ode_solution_new(sys.n_dims)
@@ -1654,6 +1666,18 @@ pub fn solve_ode_adaptive(
     opts: SolverOptions
 ) -> ODESolution with Mut, Div, Panic {
     let y0_dims = y0.n
+    // The dimensions are validated FIRST: everything below is sized by them (augcov_init and the
+    // covariance check loop n_dims times, and solution_record with n_dims > 4096 turns the first step
+    // into -1 and writes times[-1]). ode_system_new and estate_new are public, so n_dims can be any i64.
+    // Nothing is recorded for an invalid dimension: the result has no points (n_steps = 0, every
+    // accessor index is invalid -> NaN), status 3, t_final = t_start.
+    if !ode_system_dims_ok(&sys) || y0_dims != sys.n_dims {
+        var refused = ode_solution_new(1)
+        refused.n_steps = 0
+        refused.t_final = t_start
+        refused.status = 3
+        return refused
+    }
     var state = y0
     state.n = sys.n_dims
     var sol = ode_solution_new(sys.n_dims)
@@ -1785,25 +1809,19 @@ fn ode_pow_fifth(ratio: f64) -> f64 with Mut, Div, Panic {
 // Convenience: Solve Exponential Decay (backward-compatible API)
 // ============================================================================
 
-fn solve_exp_decay(
+// Backward-compatible entry point for the single exponential decay (system 1).
+// It used to "migrate" a 16-parameter ODEParams into a 64-parameter one by copying params,
+// param_variances and n_params; ODEParams is 64-wide now, and a field-by-field copy silently drops
+// any field added later -- it lost param_set, so a caller who had used ode_params_set got status 3
+// for a parameter they HAD set. The parameters are passed through unchanged.
+pub fn solve_exp_decay(
     y0: EState,
     p: ODEParams,
     t_start: f64,
     t_end: f64,
     opts: SolverOptions
 ) -> ODESolution with Mut, Div, Panic {
-    // Migrate old 16-param ODEParams to 64-param
-    var p64 = ode_params_new()
-    var i = 0
-    while i < 16 {
-        p64.params[i] = p.params[i]
-        p64.param_variances[i] = p.param_variances[i]
-        i = i + 1
-    }
-    p64.n_params = p.n_params
-
-    let sys = ode_system_exp_decay()
-    solve_ode(sys, y0, p64, t_start, t_end, opts)
+    solve_ode(ode_system_exp_decay(), y0, p, t_start, t_end, opts)
 }
 
 // ============================================================================
