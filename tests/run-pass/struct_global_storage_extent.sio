@@ -1,0 +1,68 @@
+// A struct-typed global must be reserved its full size in BSS.
+//
+// gl_add() used to reserve a flat 8 bytes for every non-array global and ignore the
+// element size the caller passed, so a struct global (here 1032 bytes) overlapped
+// whatever was allocated after it: the next global, and the runtime regions behind
+// the user globals. Which cells got clobbered depended on the exact BSS layout, so
+// the symptom moved with unrelated changes to the compiler's own runtime regions.
+//
+// G1 and G2 are allocated back to back. Writing G2 must not disturb G1.
+
+struct Big {
+    a: [i64; 64],
+    b: [i64; 64],
+    n: i64,
+}
+
+var G1: Big = Big { a: [0; 64], b: [0; 64], n: 0 }
+var G2: Big = Big { a: [0; 64], b: [0; 64], n: 0 }
+var TAIL: [i64; 8] = [0; 8]
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    var i: i64 = 0
+    while i < 64 {
+        G1.a[i as usize] = i + 1
+        G1.b[i as usize] = 1000 + i
+        i = i + 1
+    }
+    G1.n = 7
+
+    i = 0
+    while i < 64 {
+        G2.a[i as usize] = 0 - (i + 1)
+        G2.b[i as usize] = 5000 + i
+        i = i + 1
+    }
+    G2.n = 9
+
+    i = 0
+    while i < 8 {
+        TAIL[i as usize] = 90000 + i
+        i = i + 1
+    }
+
+    var bad: i64 = 0
+    i = 0
+    while i < 64 {
+        if G1.a[i as usize] != i + 1 { bad = bad + 1 }
+        if G1.b[i as usize] != 1000 + i { bad = bad + 1 }
+        if G2.a[i as usize] != 0 - (i + 1) { bad = bad + 1 }
+        if G2.b[i as usize] != 5000 + i { bad = bad + 1 }
+        i = i + 1
+    }
+    if G1.n != 7 { bad = bad + 1 }
+    if G2.n != 9 { bad = bad + 1 }
+    i = 0
+    while i < 8 {
+        if TAIL[i as usize] != 90000 + i { bad = bad + 1 }
+        i = i + 1
+    }
+
+    if bad == 0 {
+        println("struct_global_storage_extent: PASS")
+        return 0
+    }
+    print("struct_global_storage_extent: FAIL, corrupted cells = ")
+    println(bad)
+    return 1
+}
