@@ -11,31 +11,21 @@
 // The pass is only hooked into the single-module (no imports) pipeline
 // lanes, so imported type names can never be misread as type variables.
 //
-// Algorithm (SAME-NAME single-instantiation scheme):
-//   1. Collect every top-level ItemFn with >=1 free type var into a table;
-//      collect generic struct templates (StructDef has real type_params).
-//   2. READ-ONLY scan of all non-generic fn bodies for Call exprs carrying
-//      turbofish type_args whose callee matches a collected generic fn AND
-//      whose arg count matches the fn's free-var count. Count mismatches
-//      leave the call site untouched and pin the template so the checker's
-//      own E010 still fires.
-//   3. First matching instantiation of a template: clone + substitute the
-//      FnDef, KEEPING THE TEMPLATE'S OWN NAME, and scan the clone's body
-//      (transitive turbofish calls, incl. self-recursion; the per-slot
-//      instantiation hash guarantees termination). A SECOND instantiation
-//      with different type args POISONS the template back to baseline
-//      behavior. Call sites are NEVER rewritten: the checker ignores
-//      turbofish on non-generic signatures (generic_names comes out empty
-//      at its call-check), and the lowering has no generics concept.
-//   4. Finalize: replace each single-instantiation template item with its
-//      concrete same-name clone; keep poisoned/still-referenced templates
-//      verbatim; drop never-referenced templates. Generic-struct instances
-//      (CDExact<i64> -> struct CDExact__i64 items) referenced from clone
-//      signatures/bodies are appended, with type annotations and struct
-//      literals inside clones rewritten to the mangled concrete names
-//      (the checker's signature lowering erases generic struct args, and
-//      its literal inference is TyNamed-only, so only concrete names
-//      survive both).
+// Algorithm:
+//   1. Collect generic function/method and struct templates.
+//   2. Discover explicit instantiations in non-generic bodies and recursively
+//      in substituted clones. Cache by exact template identity and a complete,
+//      length-prefixed type-argument encoding, reserving BEFORE recursion.
+//   3. Keep the original symbol for a singleton function instantiation. Emit
+//      distinct deterministic symbols when there are multiple instances.
+//      Generic methods remain singleton-only until receiver dispatch supports
+//      separate instance names. Unrepresentable instances fail closed.
+//   4. After discovery, rewrite call targets in every surviving body, including
+//      recursive/transitive clones, through heap-staged *mut fields. Preserve
+//      original templates needed for arity diagnostics; refuse ambiguous mixed
+//      inferred/explicit multi-instantiation instead of emitting wrong code.
+//   5. Append concrete generic struct items as before. Struct mangling is not
+//      changed by the function-instance identity scheme.
 //
 // Backend-safety notes (this file runs inside the lean_single-compiled
 // Madaros binary, so it must stay inside the proven-safe subset):
@@ -121,6 +111,23 @@ struct SpecFnDefStage { fd: FnDef }
 struct SpecStructDefStage { sd: StructDef }
 struct SpecImplDefStage { id: ImplDef }
 
+// Instance identity is the template slot plus the COMPLETE canonical argument
+// encoding. The emitted symbol is a separate field; singleton templates retain
+// their original symbol. Only scalar pointers/counts live in global arrays.
+struct SpecFnInstance {
+    template_slot: i64,
+    key: Name,
+    symbol: Name,
+    clone_ptr: i64,
+}
+struct SpecItemsStage { items: Option<Box<ItemList>> }
+var SPEC_FN_INST_PTRS: [i64; 1024] = [0; 1024]
+var SPEC_FN_INST_COUNT: i64 = 0
+var SPEC_FN_MULTI: bool = false
+var SPEC_GF_INST_COUNT: [i64; 256] = [0; 256]
+var SPEC_GF_IS_METHOD: [bool; 256] = [false; 256]
+var SPEC_SOURCE_ITEMS: i64 = 0
+
 // Mutable driver state. Reset unconditionally at the top of every
 // specialize_generics() call — this pass may run more than once per
 // process (preflight + IR-lowering both invoke it on independently
@@ -128,7 +135,6 @@ struct SpecImplDefStage { id: ImplDef }
 var SPEC_GF_COUNT: i64 = 0
 var SPEC_GF_PTRS: [i64; 256] = [0; 256]
 var SPEC_GF_NEEDED: [bool; 256] = [false; 256]
-var SPEC_GF_INST_HASH: [i64; 256] = [0; 256]
 var SPEC_GF_POISONED: [bool; 256] = [false; 256]
 var SPEC_GF_CLONE_PTR: [i64; 256] = [0; 256]
 // Did any recorded instantiation of this template use a type argument that is
@@ -136,7 +142,6 @@ var SPEC_GF_CLONE_PTR: [i64; 256] = [0; 256]
 // unspecialized body reaches lowering, which has no generics concept, and
 // struct-typed arguments come back as zero. Measured on Madaros v0.80.0 —
 // see docs/handoff/BLK-20260903-specializer-nested-targ-collision.md.
-var SPEC_GF_NONSCALAR: [bool; 256] = [false; 256]
 // Set when a template is poisoned in a way lowering cannot represent.
 var SPEC_UNSOUND_POISON: bool = false
 // Fail-closed state for formerly silent fixed-capacity truncation.
@@ -154,16 +159,19 @@ var SPEC_EMITTED_COUNT: i64 = 0
 var SPEC_EXTRA_HEAD: i64 = 0
 
 fn spec_reset_state() with Mut {
+    SPEC_FN_INST_COUNT = 0
+    SPEC_FN_MULTI = false
+    SPEC_SOURCE_ITEMS = 0
     SPEC_EMITTED_COUNT = 0
     SPEC_EXTRA_HEAD = 0
     var i: i64 = 0
     while i < 256 {
+        SPEC_GF_INST_COUNT[i as usize] = 0
+        SPEC_GF_IS_METHOD[i as usize] = false
         SPEC_GF_PTRS[i as usize] = 0
         SPEC_GF_NEEDED[i as usize] = false
-        SPEC_GF_INST_HASH[i as usize] = 0
         SPEC_GF_POISONED[i as usize] = false
         SPEC_GF_CLONE_PTR[i as usize] = 0
-        SPEC_GF_NONSCALAR[i as usize] = false
         SPEC_ST_PTRS[i as usize] = 0
         i = i + 1
     }
@@ -187,9 +195,9 @@ pub fn spec_unsound_poison_detected() -> bool {
 // program would otherwise have been accepted.
 pub fn spec_report_unsound_poison() -> bool with IO {
     if !SPEC_UNSOUND_POISON { return false }
-    print("error: a generic function was instantiated with more than one type-argument list in a single compilation unit, and at least one of those arguments is not a primitive scalar\n")
-    print("  note: monomorphization keeps only one instantiation per template; the others would reach code generation unspecialized and evaluate to zero\n")
-    print("  help: write a separate concrete function for each type, or keep the generic call sites in separate compilation units\n")
+    print("error: generic specialization cannot be represented safely\n")
+    print("  note: unsupported or overlong type identity, or mixed inferred and explicit multi-instantiation\n")
+    print("  help: provide explicit supported type arguments at every call, or use separate concrete functions\n")
     true
 }
 
@@ -207,6 +215,10 @@ pub fn spec_report_cap_overflow() -> bool with IO {
         print("generic declarations support at most 4 type parameters")
     } else if SPEC_CAP_OVERFLOW_CODE == 2 {
         print("a compilation unit supports at most 256 generic functions or methods")
+    } else if SPEC_CAP_OVERFLOW_CODE == 5 {
+        print("at most 1024 function specializations")
+    } else if SPEC_CAP_OVERFLOW_CODE == 6 {
+        print("generated specialization symbol collides with a source item")
     } else if SPEC_CAP_OVERFLOW_CODE == 3 {
         print("a compilation unit supports at most 256 generic structs")
     } else if SPEC_CAP_OVERFLOW_CODE == 4 {
@@ -383,7 +395,10 @@ fn spec_generic_table_find(name: Name) -> i64 with Mut, Panic, Div {
     while i < SPEC_GF_COUNT {
         let p = SPEC_GF_PTRS[i as usize] as *mut SpecGfNode
         if (*p).name_hash == h {
-            return i
+            match (*p).fd {
+                Some(fd) => { if name_eq((*fd).name, name) { return i } }
+                None => {}
+            }
         }
         i = i + 1
     }
@@ -615,6 +630,7 @@ fn spec_collect_generic_method_items(methods: Option<Box<ItemList>>, known: Spec
                                 (*p).tp_h3 = spec_tp_hash_at(tp, 3)
                                 (*p).fd = it.fn_def
                                 SPEC_GF_PTRS[slot as usize] = p as i64
+                                SPEC_GF_IS_METHOD[slot as usize] = true
                                 SPEC_GF_NEEDED[slot as usize] = false
                                 SPEC_GF_COUNT = SPEC_GF_COUNT + 1
                             }
@@ -791,6 +807,120 @@ fn spec_mangle_name(base: Name, targs: Option<Box<TypeExprList>>) -> Name with M
     make_name(s)
 }
 
+// Length-prefix every source name; tag every constructor and delimit every
+// type-argument list. Unlike the legacy struct mangle, underscores and marker
+// spellings in source identifiers cannot alias a type constructor or a list.
+fn spec_key_length(n: i64) -> string with Mut, Panic, Div {
+    var b: [i8; 384] = [0; 384]
+    b[0] = (48 + n / 100) as i8
+    b[1] = (48 + (n / 10) % 10) as i8
+    b[2] = (48 + n % 10) as i8
+    // str_from_bytes borrows this scratch buffer in the bootstrap runtime.
+    // Copy before returning; the next name conversion reuses the same stack.
+    let view = str_from_bytes(b, 3)
+    str_concat(view, "")
+}
+
+fn spec_key_name(n: Name) -> string with Mut, Panic, Div {
+    // Keep the owned prefix separate from the temporary name spelling.
+    let length = spec_key_length(n.len)
+    let spelling = spec_name_to_string(n)
+    str_concat(length, spelling)
+}
+
+fn spec_fn_type_key(te: TypeExpr) -> string with Mut, Panic, Div, Alloc {
+    if te.kind == TypeExprKind::TypeUnit { return "U" }
+    if te.kind == TypeExprKind::TypeReference || te.kind == TypeExprKind::TypeRefMut {
+        match te.inner {
+            None => { return "" }
+            Some(t) => {
+                let inner = spec_fn_type_key(*t)
+                if str_len(inner) == 0 { return "" }
+                if te.kind == TypeExprKind::TypeRefMut { return str_concat("M", inner) }
+                return str_concat("R", inner)
+            }
+        }
+    }
+    if te.kind != TypeExprKind::TypeNamed || te.path.seg_count != 1 { return "" }
+    let name = spec_path_single_name(te.path)
+    if name.len <= 0 || name.len > 384 { return "" }
+    let spelling = spec_key_name(name)
+    let prefix = str_concat("N", spelling)
+    let args = spec_fn_args_key(te.type_args)
+    if str_len(args) == 0 { return "" }
+    str_concat(prefix, args)
+}
+
+fn spec_fn_args_key(args: Option<Box<TypeExprList>>) -> string with Mut, Panic, Div, Alloc {
+    match args {
+        None => "E"
+        Some(list) => {
+            let head = spec_fn_type_key((*list).head)
+            let tail = spec_fn_args_key((*list).tail)
+            if str_len(head) == 0 || str_len(tail) == 0 { return "" }
+            str_concat(str_concat("A", head), tail)
+        }
+    }
+}
+
+fn spec_fn_key(base: Name, args: Option<Box<TypeExprList>>) -> Name with Mut, Panic, Div, Alloc {
+    let template = spec_key_name(base)
+    let types = spec_fn_args_key(args)
+    if str_len(types) == 0 { return empty_name() }
+    let key = str_concat(template, types)
+    // Keep both key and emitted name inside the conservative backend limit.
+    if str_len(key) > 110 { return empty_name() }
+    make_name(key)
+}
+
+fn spec_fn_instance_find(slot: i64, key: Name) -> i64 with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < SPEC_FN_INST_COUNT {
+        let p = SPEC_FN_INST_PTRS[i as usize] as *mut SpecFnInstance
+        if (*p).template_slot == slot && name_eq((*p).key, key) { return i }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn spec_items_have_symbol(items: Option<Box<ItemList>>, symbol: Name) -> bool with Mut, Panic, Div {
+    match items {
+        None => false
+        Some(list) => {
+            if name_eq((*list).head.name, symbol) { return true }
+            spec_items_have_symbol((*list).tail, symbol)
+        }
+    }
+}
+
+// Called only after discovery reaches its fixed point. ctx=-1 in the existing
+// heap-staged traversal means rename-only: type substitution is a no-op.
+fn spec_rewrite_call_mut(p: *mut SpecExprStage) with Mut, Panic, Div, Alloc {
+    if (*p).e.kind != ExprKind::ExprCall { return }
+    let base = spec_call_expr_callee_name((*p).e)
+    let slot = spec_generic_table_find(base)
+    if slot < 0 { return }
+    if SPEC_GF_INST_COUNT[slot as usize] < 2 { return }
+    if SPEC_GF_POISONED[slot as usize] || SPEC_GF_NEEDED[slot as usize] { return }
+    let key = spec_fn_key(base, spec_call_expr_type_args((*p).e))
+    let idx = spec_fn_instance_find(slot, key)
+    if idx < 0 { return }
+    match (*p).e.left {
+        None => {}
+        Some(callee) => {
+            let q = heap_alloc(32768) as *mut SpecExprStage
+            let tmp = *callee
+            (*q).e = tmp
+            let inst = SPEC_FN_INST_PTRS[idx as usize] as *mut SpecFnInstance
+            (*q).e.name = (*inst).symbol
+            (*q).e.path = spec_name_to_path((*inst).symbol)
+            (*q).e.type_args = None
+            (*p).e.left = Some(Box::new((*q).e))
+            (*p).e.type_args = None
+        }
+    }
+}
+
 fn spec_name_is_empty(n: Name) -> bool {
     n.len == 0
 }
@@ -868,6 +998,7 @@ fn spec_name_to_path(n: Name) -> AstPath {
 }
 
 fn spec_subst_type(te: TypeExpr, ctx: i64, targs: Option<Box<TypeExprList>>) -> TypeExpr with Mut, Panic, Div, Alloc {
+    if ctx == 0 - 1 { return te }
     if te.kind == TypeExprKind::TypeNamed && te.path.seg_count == 1 {
         let idx = spec_ctx_tp_index(ctx, ast_name_hash(spec_path_single_name(te.path)))
         if idx >= 0 {
@@ -928,6 +1059,11 @@ fn spec_subst_expr_mut(p: *mut SpecExprStage, ctx: i64, targs: Option<Box<TypeEx
     (*p).e.closure_body = spec_subst_expr_opt((*p).e.closure_body, ctx, targs)
     (*p).e.closure_params = spec_subst_closure_param_list_opt((*p).e.closure_params, ctx, targs)
     (*p).e.type_args = spec_subst_type_list_opt((*p).e.type_args, ctx, targs)
+
+    if ctx == 0 - 1 {
+        spec_rewrite_call_mut(p)
+        return
+    }
 
     // Struct literal of a LOCAL generic struct template inside a substituted
     // body: `CDExact { ... }` written in a fn generic over F names the
@@ -1192,55 +1328,44 @@ fn spec_make_fn_item(name: Name, fd: FnDef) -> Item with Mut, Panic, Div, Alloc 
     }
 }
 
-// Ensure a monomorphized clone of template `base_name` for `targs` exists.
-//
-// SAME-NAME SCHEME: the clone keeps the TEMPLATE\'S OWN NAME and at finalize
-// time REPLACES the template item, so call sites need no rewriting at all
-// (the checker ignores turbofish on non-generic signatures — generic_names
-// comes out empty at check.sio:6323 — and the lowering has no generics
-// concept). This sidesteps the callee-rename Expr-field write that the
-// bundle backend silently drops. A template instantiated with TWO OR MORE
-// distinct type-arg lists is POISONED back to baseline behavior (template
-// kept verbatim, calls untouched).
-//
-// Reserves the instantiation hash BEFORE processing the clone\'s own body so
-// a self-recursive generic fn terminates.
+// Reserve the FULL identity before descending into the body (recursive calls
+// terminate through the reservation). Never use emitted-symbol hashes as cache
+// identity. The original AST remains immutable throughout discovery.
 fn spec_ensure_instance(base_name: Name, targs: Option<Box<TypeExprList>>) with IO, Mut, Panic, Div, Alloc {
     let gt_idx = spec_generic_table_find(base_name)
     if gt_idx < 0 { return }
     if spec_type_args_count(targs) != spec_generic_table_tp_count(gt_idx) { return }
-
-    // An instantiation we cannot name injectively must not be specialized:
-    // two different arg lists would otherwise share one hash and one clone.
-    // Poison the template so it keeps its unspecialized (baseline) behaviour.
-    let args_scalar = spec_type_args_all_scalar(targs)
-
-    let mangled_inst = spec_mangle_name(base_name, targs)
-    if spec_name_is_empty(mangled_inst) {
+    let key = spec_fn_key(base_name, targs)
+    if spec_name_is_empty(key) {
         SPEC_GF_POISONED[gt_idx as usize] = true
-        if !args_scalar { SPEC_UNSOUND_POISON = true }
-        if spec_trace_enabled() { print("specializer: poisoned (unrenderable type argument)\n") }
+        SPEC_UNSOUND_POISON = true
         return
     }
-
-    let inst_hash = ast_name_hash(mangled_inst)
-    if SPEC_GF_INST_HASH[gt_idx as usize] != 0 {
-        if SPEC_GF_INST_HASH[gt_idx as usize] != inst_hash {
-            SPEC_GF_POISONED[gt_idx as usize] = true
-            // A poisoned template keeps its unspecialized body, and lowering
-            // has no generics concept. That is survivable for scalars and
-            // silently returns zeros for everything else, so refuse rather
-            // than emit code we know is wrong.
-            if !args_scalar || SPEC_GF_NONSCALAR[gt_idx as usize] {
-                SPEC_UNSOUND_POISON = true
-            }
-            if spec_trace_enabled() { print("specializer: poisoned (second distinct instantiation)\n") }
-        }
+    if spec_fn_instance_find(gt_idx, key) >= 0 { return }
+    // Method dispatch still relies on the receiver's original method name.
+    if SPEC_GF_IS_METHOD[gt_idx as usize] && SPEC_GF_INST_COUNT[gt_idx as usize] > 0 {
+        SPEC_GF_POISONED[gt_idx as usize] = true
+        SPEC_METHOD_TARG_UNSUPPORTED = true
         return
     }
-    SPEC_GF_INST_HASH[gt_idx as usize] = inst_hash
-    if !args_scalar { SPEC_GF_NONSCALAR[gt_idx as usize] = true }
-
+    if SPEC_FN_INST_COUNT >= 1024 {
+        spec_mark_cap_overflow(5)
+        return
+    }
+    let ip = heap_alloc(4096) as *mut SpecFnInstance
+    (*ip).template_slot = gt_idx
+    (*ip).key = key
+    (*ip).symbol = make_name(str_concat("__sp_", spec_name_to_string(key)))
+    (*ip).clone_ptr = 0
+    let roots = SPEC_SOURCE_ITEMS as *mut SpecItemsStage
+    if spec_items_have_symbol((*roots).items, (*ip).symbol) {
+        spec_mark_cap_overflow(6)
+        return
+    }
+    SPEC_FN_INST_PTRS[SPEC_FN_INST_COUNT as usize] = ip as i64
+    SPEC_FN_INST_COUNT = SPEC_FN_INST_COUNT + 1
+    SPEC_GF_INST_COUNT[gt_idx as usize] = SPEC_GF_INST_COUNT[gt_idx as usize] + 1
+    if SPEC_GF_INST_COUNT[gt_idx as usize] > 1 { SPEC_FN_MULTI = true }
     match spec_generic_table_fd(gt_idx) {
         None => {}
         Some(fd_box) => {
@@ -1251,16 +1376,15 @@ fn spec_ensure_instance(base_name: Name, targs: Option<Box<TypeExprList>>) with 
             (*fp).fd.params = spec_subst_param_list_opt((*fp).fd.params, fn_ctx, targs)
             (*fp).fd.return_type = spec_subst_type_opt((*fp).fd.return_type, fn_ctx, targs)
             (*fp).fd.body = spec_subst_block((*fp).fd.body, fn_ctx, targs)
-            // Scan the clone body for transitive turbofish instantiations
-            // (read-only walk; no tree mutation).
             spec_scan_block((*fp).fd.body)
             let np = heap_alloc(16384) as *mut SpecItemNode
             (*np).it = spec_make_fn_item((*fp).fd.name, (*fp).fd)
             (*np).next = 0
+            (*ip).clone_ptr = np as i64
             SPEC_GF_CLONE_PTR[gt_idx as usize] = np as i64
             if spec_trace_enabled() {
                 print("specializer: clone_ready=")
-                print(spec_name_to_string((*fp).fd.name))
+                print(spec_name_to_string((*ip).symbol))
                 print("\n")
             }
         }
@@ -1302,17 +1426,9 @@ fn spec_call_expr_callee_name(e: Expr) -> Name with Mut, Panic, Div {
     }
 }
 
-// Rewrite a call's callee to the mangled instance name, returning the new
-// callee box. IMPORTANT: this deliberately returns only the small
-// Option<Box<Expr>> — an earlier version returned the whole rewritten Expr
-// and the caller's `out = rewrite(out, ...)` self-assignment silently lost
-// the update (the large-struct SRET self-by-value hazard documented in
-// compiler/main.sio). Callers assign the returned box into out.left and
-// clear out.type_args themselves.
-// Read-only scanner: walks fn bodies looking for turbofish calls that
-// target a collected generic template, instantiating clones as a side
-// effect. NO tree mutation happens here (call sites are deliberately left
-// untouched — see spec_ensure_instance's same-name scheme).
+// Discovery is read-only over source ASTs. Call targets are rewritten only
+// after all instances have been collected, so the singleton/multiple decision
+// cannot depend on call-site order.
 fn spec_scan_expr_opt(opt: Option<Box<Expr>>) with IO, Mut, Panic, Div, Alloc {
     match opt {
         None => {}
@@ -1501,13 +1617,51 @@ fn spec_extra_items_to_list() -> Option<Box<ItemList>> with Mut, Panic, Div, All
     out
 }
 
+fn spec_finish_fn_item(it: Item, symbol: Name) -> Item with Mut, Panic, Div, Alloc {
+    if !SPEC_FN_MULTI { return it }
+    match it.fn_def {
+        None => it
+        Some(fd) => {
+            let fp = heap_alloc(32768) as *mut SpecFnDefStage
+            let tmp = *fd
+            (*fp).fd = tmp
+            (*fp).fd.name = symbol
+            (*fp).fd.body = spec_subst_block((*fp).fd.body, 0 - 1, None)
+            let np = heap_alloc(16384) as *mut SpecItemNode
+            (*np).it = it
+            (*np).it.name = symbol
+            (*np).it.fn_def = Some(Box::new((*fp).fd))
+            (*np).it
+        }
+    }
+}
+
+fn spec_finalize_fn_instances(slot: i64, rest: Option<Box<ItemList>>) -> Option<Box<ItemList>> with Mut, Panic, Div, Alloc {
+    var out = rest
+    var i = SPEC_FN_INST_COUNT - 1
+    while i >= 0 {
+        let p = SPEC_FN_INST_PTRS[i as usize] as *mut SpecFnInstance
+        if (*p).template_slot == slot && (*p).clone_ptr != 0 {
+            let np = (*p).clone_ptr as *mut SpecItemNode
+            if SPEC_GF_INST_COUNT[slot as usize] > 1 {
+                out = Some(Box::new(ItemList { head: spec_finish_fn_item((*np).it, (*p).symbol), tail: out }))
+            } else {
+                out = Some(Box::new(ItemList { head: spec_finish_fn_item((*np).it, (*np).it.name), tail: out }))
+            }
+        }
+        i = i - 1
+    }
+    out
+}
+
 // Finalize phase (runs after ALL bodies have been scanned, so every call
 // site has voted): for each generic template item —
-//   - poisoned (2+ distinct instantiations) or still referenced by a
+//   - unsupported/poisoned or still referenced by a
 //     turbofish-less/arity-mismatched call: keep the template verbatim so
 //     the checker\'s existing diagnostics (e.g. E010) keep firing;
 //   - exactly one instantiation: REPLACE the template with its concrete
 //     same-name clone;
+//   - multiple instances: emit all clones and rewrite each call to its symbol;
 //   - never referenced: drop it so the checker never sees a body with free
 //     type vars.
 fn spec_finalize_method_items(methods: Option<Box<ItemList>>) -> Option<Box<ItemList>> with Mut, Panic, Div, Alloc {
@@ -1522,14 +1676,10 @@ fn spec_finalize_method_items(methods: Option<Box<ItemList>>) -> Option<Box<Item
                     if SPEC_GF_POISONED[gt_idx as usize] || SPEC_GF_NEEDED[gt_idx as usize] {
                         return Some(Box::new(ItemList { head: it, tail: rest }))
                     }
-                    if SPEC_GF_CLONE_PTR[gt_idx as usize] != 0 {
-                        let np = SPEC_GF_CLONE_PTR[gt_idx as usize] as *mut SpecItemNode
-                        return Some(Box::new(ItemList { head: (*np).it, tail: rest }))
-                    }
-                    return rest
+                    return spec_finalize_fn_instances(gt_idx, rest)
                 }
             }
-            Some(Box::new(ItemList { head: it, tail: rest }))
+            Some(Box::new(ItemList { head: spec_finish_fn_item(it, it.name), tail: rest }))
         }
     }
 }
@@ -1546,11 +1696,7 @@ fn spec_finalize_items(items: Option<Box<ItemList>>) -> Option<Box<ItemList>> wi
                     if SPEC_GF_POISONED[gt_idx as usize] || SPEC_GF_NEEDED[gt_idx as usize] {
                         return Some(Box::new(ItemList { head: it, tail: rest }))
                     }
-                    if SPEC_GF_CLONE_PTR[gt_idx as usize] != 0 {
-                        let np = SPEC_GF_CLONE_PTR[gt_idx as usize] as *mut SpecItemNode
-                        return Some(Box::new(ItemList { head: (*np).it, tail: rest }))
-                    }
-                    return rest
+                    return spec_finalize_fn_instances(gt_idx, rest)
                 }
             } else if it.kind == ItemKind::ItemImpl {
                 match it.impl_def {
@@ -1566,7 +1712,7 @@ fn spec_finalize_items(items: Option<Box<ItemList>>) -> Option<Box<ItemList>> wi
                     None => {}
                 }
             }
-            Some(Box::new(ItemList { head: it, tail: rest }))
+            Some(Box::new(ItemList { head: spec_finish_fn_item(it, it.name), tail: rest }))
         }
     }
 }
@@ -1620,7 +1766,17 @@ pub fn specialize_generics(items: Option<Box<ItemList>>) -> Option<Box<ItemList>
     if SPEC_GF_COUNT == 0 {
         return items
     }
+    let roots = heap_alloc(4096) as *mut SpecItemsStage
+    (*roots).items = items
+    SPEC_SOURCE_ITEMS = roots as i64
     spec_scan_items(items)
+    var slot: i64 = 0
+    while slot < SPEC_GF_COUNT {
+        if SPEC_GF_INST_COUNT[slot as usize] > 1 && SPEC_GF_NEEDED[slot as usize] {
+            SPEC_UNSOUND_POISON = true
+        }
+        slot = slot + 1
+    }
     let finalized = spec_finalize_items(items)
     let out = spec_append_items(finalized, spec_extra_items_to_list())
     if spec_trace_enabled() {

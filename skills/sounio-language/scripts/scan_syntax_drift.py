@@ -9,7 +9,7 @@ Focus:
 Default scope (curated, actionable):
 - `examples/`
 - `tests/`
-- `README.md`, `DEVELOPER.md`, `tests/README.md`, `docs/LLM_PROGRAMMING_GUIDE.md`
+- `README.md`, `DEVELOPER.md`, `tests/README.md`, `docs/guide/LLM_PROGRAMMING_GUIDE.md`
 
 Default excludes (intentional negatives):
 - `tests/compile-fail/**`
@@ -83,7 +83,7 @@ def iter_candidate_files(
         root / "README.md",
         root / "DEVELOPER.md",
         root / "tests" / "README.md",
-        root / "docs" / "LLM_PROGRAMMING_GUIDE.md",
+        root / "docs" / "guide" / "LLM_PROGRAMMING_GUIDE.md",
     ]
     for path in curated:
         if path.is_file() and not is_excluded_path(root, path, include_negative_fixtures):

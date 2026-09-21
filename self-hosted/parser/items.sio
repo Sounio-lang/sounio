@@ -1003,6 +1003,8 @@ fn items_reverse_item_list_loop(
 // name.len read back as 0x0100000000000000, E017 on the wrapper body, or a
 // native-checker segfault. Only scalar flags survive in globals here.)
 var EXTERN_BLOCK_ACTIVE: i64 = 0
+var CURRENT_DYNLINK_IDENTITY: [i8; 256] = [0; 256]
+var CURRENT_DYNLINK_IDENTITY_LEN: i64 = 0
 var EXTERN_BLOCK_VIS_KIND: i64 = 0
 
 fn ffi_name_path(name: Name, span: Span) -> Expr with Mut, Panic {
@@ -4416,6 +4418,40 @@ impl Parser {
         let start = self.current_span()
         var p = self.advance()  // skip 'extern'
         if parser_peek(p) == TokenKind::StringLit { p = p.advance() }
+        // Optional library association: from "library_name" (byte-identity model for Fase 2/A+B)
+        var lib_identity_buf: [i8; 256] = [0; 256]
+        var lib_identity_len: i64 = 0
+        if parser_peek(p) == TokenKind::Ident {
+            let potential_from = p.current_name()
+            if potential_from.len == 4
+                && potential_from.buf[0] == (102 as i8)  // 'f'
+                && potential_from.buf[1] == (114 as i8)  // 'r'
+                && potential_from.buf[2] == (111 as i8)  // 'o'
+                && potential_from.buf[3] == (109 as i8)  // 'm'
+            {
+                p = p.advance()  // consume 'from'
+                if parser_peek(p) == TokenKind::StringLit {
+                    p = p.advance()  // consume library name string
+                    let lib_name = p.current_name()
+                    let raw_str = lib_name.buf
+                    let raw_len = lib_name.len
+                    var copy_len: i64 = 0
+                    if raw_len > 255 { copy_len = 255 } else { copy_len = raw_len }
+                    var k: i64 = 0
+                    while k < copy_len {
+                        lib_identity_buf[k as usize] = raw_str[k as usize]
+                        k = k + 1
+                    }
+                    lib_identity_len = copy_len
+                        CURRENT_DYNLINK_IDENTITY_LEN = copy_len
+                        var g_idx: i64 = 0
+                        while g_idx < copy_len {
+                            CURRENT_DYNLINK_IDENTITY[g_idx as usize] = lib_identity_buf[g_idx as usize]
+                            g_idx = g_idx + 1
+                        }
+                }
+            }
+        }
         if parser_peek(p) == TokenKind::LBrace {
             // Re-entrant brace form: consume '{', arm the block state, and
             // return the FIRST declaration's wrapper via the shared

@@ -39,7 +39,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 | KL-11 | #1792 first-order / variance across user calls (pow FO closed) | madaros |
 | KL-14 | FFI: 14a–14d3 CLOSED | madaros |
 | KL-15 | `f256` surface (15a softfloat add/sub partial), `Knowledge<f128>`/GUM | madaros |
-| KL-16 | Hessian Tier-4 on the seed (16a pin; 16b ch4–7 CLOSED) | lean_single |
+| KL-16 | Hessian Tier-4 (16a–16f CLOSED; residual H-multi/non-H00 if/a64 atan2) | lean_single |
 
 ## Ledger
 
@@ -172,9 +172,30 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   x86 unary/`atan2`/`pow` FO+Hessian to channels 4–7; pins
   `epistemic_hessian_8inputs.sio` at analytic `1.0` and
   `epistemic_hessian_ch47.sio`. Seed refresh + SeedReceipt required.
-- **Residual (OPEN).** Inter-procedural SSHADOW
-  (`gtt_interprocedural_topology.sio` still expects `0.0`); loop
-  accumulation; `if/else` merge of shadow slots; a64 `atan2`/`pow` AD.
+- **KL-16c — CLOSED (seed).** Inter-procedural FO ch0 (`EXPR_SSHADOW`)
+  + `H[0,0]` (`EXPR_HSHADOW_00`) across user `f64 → f64` fns via BSS
+  ARG/RET slots mirroring β⁵ variance. Pin:
+  `tests/run-pass/kl16c_fo_across_user_fn.sio`,
+  `scripts/ci/lean_single_kl16c_interproc_shadow_gate.sh`.
+- **KL-16d — CLOSED (seed).** Extends inter-procedural FO to channels
+  1–7 (`EXPR_SSHADOW_1..7` / `VAR_SSHADOW_1..7`) across user
+  `f64 → f64` fns; HSHADOW multi-pair across calls remains OPEN.
+  Pin: `tests/run-pass/kl16d_fo_multich_across_user_fn.sio`,
+  `scripts/ci/lean_single_kl16d_interproc_multich_gate.sh`.
+- **KL-16e — CLOSED (seed).** If/else join merges FO `EXPR_SSHADOW(_1..7)`
+  and `EXPR_HSHADOW_00` via path-local spill into shared join slots
+  (phi-like select by execution). Pin:
+  `tests/run-pass/kl16e_ifelse_shadow_merge.sio`,
+  `scripts/ci/lean_single_kl16e_ifelse_shadow_merge_gate.sh`.
+- **KL-16f — CLOSED (seed).** Loop accumulation of FO
+  `VAR_SSHADOW(_1..7)` and `VAR_HSHADOW_00` on mutable `f64`. Declaration
+  allocates nine fixed slots and spills the RHS; reassignment spills into
+  those slots and does not retarget the metadata pointers (ephemeral
+  `EXPR_*` no longer alias the variable). Pin:
+  `tests/run-pass/kl16f_loop_accum.sio`,
+  `scripts/ci/lean_single_kl16f_loop_accum_gate.sh`.
+- **Residual (OPEN).** HSHADOW multi-pair interproc; HSHADOW pairs other
+  than `[0,0]` through if/else; a64 `atan2`/`pow` AD.
 - Channel-at-`.value` semantics (`MEAS_KNOW_IDX`,
   `formal/ChannelAssignmentSemantics.lean`) are a model, not a defect —
   see the history snapshot for the KAS-1 rationale.
