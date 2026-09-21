@@ -232,6 +232,89 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     if !(bad_v != bad_v) || !(bad_v2 != bad_v2) || !(bad_v3 != bad_v3) || !(bad_v4 != bad_v4) { fail = fail + 1; println("FAIL: an invalid value index must be NaN") }
     if !(bad_w != bad_w) || !(bad_w2 != bad_w2) || !(bad_w3 != bad_w3) { fail = fail + 1; println("FAIL: an invalid variance index must be NaN, not 0 (no uncertainty)") }
 
+    // ---- required parameters must have been SET -------------------------------------------------
+    // An unset slot reads as 0.0 and silently switches a reaction off. ode_params_set records
+    // n_params as the HIGHEST set index + 1, so a count check would not see it: setting only index 2
+    // of system 5 gives n_params = 3 and leaves k1 and k2 zero. Every index the right-hand side reads
+    // must have been set; a parameter set to an explicit 0.0 is legitimate.
+    var st4 = estate_new(4)
+    estate_set(&!st4, 0, 1.0, 0.01)
+    let none = ode_params_new()
+    var only01 = ode_params_new()
+    ode_params_set(&!only01, 0, 0.1, 0.0)
+    ode_params_set(&!only01, 1, 0.05, 0.0)
+    var only2 = ode_params_new()
+    ode_params_set(&!only2, 2, 0.2, 0.0)
+    var all3 = ode_params_new()
+    ode_params_set(&!all3, 0, 0.1, 0.0)
+    ode_params_set(&!all3, 1, 0.05, 0.0)
+    ode_params_set(&!all3, 2, 0.2, 0.0)
+    var zero3 = ode_params_new()
+    ode_params_set(&!zero3, 0, 0.1, 0.0)
+    ode_params_set(&!zero3, 1, 0.05, 0.0)
+    ode_params_set(&!zero3, 2, 0.0, 0.0)
+
+    let r_none = solve_ode(ode_system_chem_simple(), st4, none, 0.0, 1.0, solver_options_fixed(0.1, 20))
+    let r_01 = solve_ode(ode_system_chem_simple(), st4, only01, 0.0, 1.0, solver_options_fixed(0.1, 20))
+    let r_2 = solve_ode(ode_system_chem_simple(), st4, only2, 0.0, 1.0, solver_options_fixed(0.1, 20))
+    let r_all = solve_ode(ode_system_chem_simple(), st4, all3, 0.0, 1.0, solver_options_fixed(0.1, 20))
+    let r_zero = solve_ode(ode_system_chem_simple(), st4, zero3, 0.0, 1.0, solver_options_fixed(0.1, 20))
+    print("system 5 params: none=") print(r_none.status) print(" idx0,1 only=") print(r_01.status)
+    print(" idx2 only=") print(r_2.status) print(" all=") print(r_all.status) print(" k3=0.0 set=") println(r_zero.status)
+    if r_none.status != 3 { fail = fail + 1; println("FAIL: a solve with no parameters set must be status 3") }
+    if r_01.status != 3 { fail = fail + 1; println("FAIL: a missing parameter (k3) must be status 3") }
+    if r_2.status != 3 { fail = fail + 1; println("FAIL: setting only the LAST parameter must not pass (n_params = 3 but k1, k2 unset)") }
+    if r_all.status != 0 { fail = fail + 1; println("FAIL: a fully specified system-5 solve must complete") }
+    if r_zero.status != 0 { fail = fail + 1; println("FAIL: a parameter explicitly set to 0.0 is valid") }
+    // the same on an EMPTY interval (no right-hand side runs to expose the missing parameter)
+    let r_none_e = solve_ode(ode_system_chem_simple(), st4, none, 1.0, 1.0, solver_options_fixed(0.1, 20))
+    let a_none = solve_ode_adaptive(ode_system_chem_simple(), st4, only01, 0.0, 1.0, solver_options_adaptive(0.1, 1.0e-8, 1.0e-10, 100))
+    let a_none_e = solve_ode_adaptive(ode_system_chem_simple(), st4, none, 1.0, 1.0, solver_options_adaptive(0.1, 1.0e-8, 1.0e-10, 100))
+    if r_none_e.status != 3 || a_none.status != 3 || a_none_e.status != 3 { fail = fail + 1; println("FAIL: missing parameters must be status 3 for the adaptive solver and on an empty interval too") }
+    // system 6 needs its three rates; system 1 its one
+    let r6 = solve_ode(ode_system_pbpk_clearance(), st4, only01, 0.0, 1.0, solver_options_fixed(0.1, 20))
+    let r1 = solve_ode(ode_system_exp_decay(), decay(1.0, 0.01, 0.1), ode_params_new(), 0.0, 1.0, solver_options_fixed(0.1, 20))
+    if r6.status != 3 || r1.status != 3 { fail = fail + 1; println("FAIL: systems 6 and 1 must reject missing parameters") }
+
+    // the 14-compartment system reads p[0..43]: the default set is complete, one missing slot is not
+    var st14 = estate_new(14)
+    var di = 0
+    while di < 14 {
+        estate_set(&!st14, di, 1.0 + 0.5 * (di as f64), 0.01)
+        di = di + 1
+    }
+    var p43 = ode_params_new()
+    var pi = 0
+    while pi < 44 {
+        if pi != 20 { ode_params_set(&!p43, pi, 1.0, 0.0) }
+        pi = pi + 1
+    }
+    let r14_ok = solve_ode(ode_system_pbpk_14(), st14, pbpk_14_default_params(), 0.0, 0.01, solver_options_fixed(0.0001, 200))
+    let r14_bad = solve_ode(ode_system_pbpk_14(), st14, p43, 0.0, 0.01, solver_options_fixed(0.0001, 200))
+    print("pbpk_14: default params status=") print(r14_ok.status) print(" one slot missing status=") println(r14_bad.status)
+    if r14_ok.status != 0 { fail = fail + 1; println("FAIL: the default 14-compartment parameters must be complete") }
+    if r14_bad.status != 3 { fail = fail + 1; println("FAIL: a single missing pbpk_14 parameter must be status 3") }
+
+    // ---- an unknown system id is invalid input ------------------------------------------------------
+    // ode_rhs_dispatch would return zero derivatives for it: a constant trajectory reported as a
+    // successful solve. An id with no registered parameter range is rejected (status 3).
+    let unk_f = solve_ode(ode_system_new(999, 1), decay(1.0, 0.01, 0.1), params(0.1), 0.0, 1.0, solver_options_fixed(0.1, 20))
+    let unk_a = solve_ode_adaptive(ode_system_new(999, 1), decay(1.0, 0.01, 0.1), params(0.1), 0.0, 1.0, solver_options_adaptive(0.1, 1.0e-8, 1.0e-10, 100))
+    let unk_e = solve_ode(ode_system_new(0, 1), decay(1.0, 0.01, 0.1), params(0.1), 1.0, 1.0, solver_options_fixed(0.1, 20))
+    print("unknown system id: fixed=") print(unk_f.status) print(" adaptive=") print(unk_a.status) print(" empty interval=") println(unk_e.status)
+    if unk_f.status != 3 || unk_a.status != 3 || unk_e.status != 3 { fail = fail + 1; println("FAIL: an unknown system id must be status 3, not a constant trajectory reported as success") }
+    // and a built-in id built through the same constructor is still fine
+    let ok_f = solve_ode(ode_system_new(1, 1), decay(1.0, 0.01, 0.1), params(0.1), 0.0, 1.0, solver_options_fixed(0.1, 20))
+    if ok_f.status != 0 { fail = fail + 1; println("FAIL: system id 1 through ode_system_new must still work") }
+
+    // ---- the initial state must have the system's dimensions ---------------------------------------
+    // a smaller EState leaves the remaining variables silently at 0
+    let d_small = solve_ode(ode_system_chem_simple(), decay(1.0, 0.01, 0.1), all3, 0.0, 1.0, solver_options_fixed(0.1, 20))
+    let d_large = solve_ode(ode_system_exp_decay(), st4, params(0.1), 0.0, 1.0, solver_options_fixed(0.1, 20))
+    print("state dimensions: 1-dim state for a 4-dim system status=") print(d_small.status)
+    print(" 4-dim state for a 1-dim system status=") println(d_large.status)
+    if d_small.status != 3 || d_large.status != 3 { fail = fail + 1; println("FAIL: a state whose dimension differs from the system's must be status 3") }
+
     if fail == 0 { println("ODE SOLVE INPUT VALIDATION PASS") }
     fail
 }

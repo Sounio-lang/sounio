@@ -11,7 +11,8 @@
 //
 // Usage:
 //   1. Create an ODESystem with a system_id
-//   2. Register your RHS by adding a branch in ode_rhs_dispatch
+//   2. Register your RHS by adding a branch in ode_rhs_dispatch, and the parameter range it reads
+//      in ode_system_params_present (an id with no range is rejected as invalid input)
 //   3. Call solve_ode() or solve_ode_adaptive()
 //
 // Built-in systems:
@@ -140,6 +141,10 @@ fn estate_axpy(dst: &!EState, a: &EState, scale: f64, b: &EState) with Mut, Div,
 struct ODEParams {
     params: [f64; 64],
     param_variances: [f64; 64],
+    // n_params is the HIGHEST set index + 1, so it cannot tell a parameter that was never set from
+    // one deliberately set to 0.0 (setting only index 2 gives n_params = 3 and leaves 0 and 1
+    // silently zero). param_set[i] = 1 records that slot i was set.
+    param_set: [i64; 64],
     n_params: i64,
 }
 
@@ -147,6 +152,7 @@ pub fn ode_params_new() -> ODEParams {
     ODEParams {
         params: [0.0; 64],
         param_variances: [0.0; 64],
+        param_set: [0; 64],
         n_params: 0,
     }
 }
@@ -155,6 +161,7 @@ pub fn ode_params_set(p: &!ODEParams, idx: i64, val: f64, var_: f64) with Mut {
     if idx >= 0 && idx < 64 {
         p.params[idx] = val
         p.param_variances[idx] = var_
+        p.param_set[idx] = 1
         if idx >= p.n_params { p.n_params = idx + 1 }
     }
 }
@@ -185,7 +192,9 @@ struct ODESystem {
     n_dims: i64,
 }
 
-fn ode_system_new(system_id: i64, n_dims: i64) -> ODESystem {
+// Public so a caller can name a system id (user-defined systems are 100+, see the header) and so an id with
+// no registered right-hand side / parameter range can be shown to be rejected.
+pub fn ode_system_new(system_id: i64, n_dims: i64) -> ODESystem {
     ODESystem {
         system_id: system_id,
         n_dims: n_dims,
@@ -300,7 +309,9 @@ pub struct ODESolution {
     //             collapsed far from t_end (repeated rejection, or a non-finite error
     //             estimate: NaN/inf never passes for an accepted step)
     //   status 3: invalid input -- non-finite or backward interval, step size not finite and
-    //             > 0, negative or non-finite tolerances, a non-finite model parameter -- or a
+    //             > 0, negative or non-finite tolerances, a non-finite model parameter, a
+    //             parameter the system reads that was never set, an initial state with the wrong
+    //             number of dimensions, an unknown system id -- or a
     //             non-finite (NaN/inf) state at
     //             the start or from a fixed step. Nothing (more) was integrated; t_final is
     //             the last valid time
@@ -366,6 +377,33 @@ fn ode_reached(t: f64, t_end: f64) -> bool {
     t_end - t <= 8.0 * 2.220446049250313e-16 * ode_max(ode_abs(t), ode_abs(t_end))
 }
 
+// Parameters each built-in system's right-hand side READS, as index ranges [lo, hi) (read off the
+// rhs_* functions: exp_decay p[0]; pbpk_14 p[0..43]; linear_2 p[1..3]; linear_3 p[1..5];
+// chem_simple and pbpk_clearance p[0..2]). Every one must have been SET: a slot that was never set
+// reads as 0.0, which silently switches a reaction off and reports a "successful" solve.
+// An id that is not a built-in has no registered range and is invalid: the dispatch would return
+// zero derivatives for it. A user-defined system (id 100+) adds its branch to ode_rhs_dispatch AND
+// its range here.
+fn ode_params_range_set(p: &ODEParams, lo: i64, hi: i64) -> bool {
+    var i = lo
+    while i < hi {
+        if p.param_set[i] != 1 { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn ode_system_params_present(sys: &ODESystem, p: &ODEParams) -> bool {
+    let id = sys.system_id
+    if id == 1 { return ode_params_range_set(p, 0, 1) }
+    if id == 2 { return ode_params_range_set(p, 0, 44) }
+    if id == 3 { return ode_params_range_set(p, 1, 4) }
+    if id == 4 { return ode_params_range_set(p, 1, 6) }
+    if id == 5 { return ode_params_range_set(p, 0, 3) }
+    if id == 6 { return ode_params_range_set(p, 0, 3) }
+    false
+}
+
 // Input variances must be finite and non-negative. A NaN, infinite or negative INPUT variance is
 // invalid from the start (it is not round-off), so it sets covariance_mode 2 even when no step
 // runs (an empty interval), instead of only after the first step.
@@ -393,10 +431,16 @@ fn ode_initial_covariance_ok(state: &EState, p: &ODEParams, n: i64) -> bool with
 //   - t_start, t_end finite, and t_end >= t_start (backward solves are not supported)
 //   - step size (the fixed dt, or the adaptive initial dt) finite and > 0: a zero or negative
 //     step used to fall into `dt <= 0 -> t = t_end` and return the initial state as finished
+//   - the initial state has the system's dimensions, and every parameter the system reads was SET
+//     (ode_system_params_present); an unknown system id is invalid
 //   - every model parameter p[0..n_params) finite
 //   - adaptive: rtol, atol finite and >= 0
-fn ode_solve_inputs_ok(t_start: f64, t_end: f64, opts: &SolverOptions, p: &ODEParams, adaptive: bool) -> bool with Mut, Div, Panic {
+fn ode_solve_inputs_ok(t_start: f64, t_end: f64, opts: &SolverOptions, p: &ODEParams, sys: &ODESystem, y0_dims: i64, adaptive: bool) -> bool with Mut, Div, Panic {
     if !ode_finite(t_start) || !ode_finite(t_end) { return false }
+    // the initial state must have exactly the system's dimensions (a smaller one leaves the rest
+    // of the state silently 0), and the system must have every parameter it reads
+    if y0_dims != sys.n_dims { return false }
+    if !ode_system_params_present(sys, p) { return false }
     // every model parameter must be finite: a NaN/inf rate is invalid INPUT (status 3), not an
     // integration failure (status 2), and on an empty interval no right-hand side would ever run
     // to expose it
@@ -827,7 +871,8 @@ fn ode_rhs_dispatch(
     } else if sys.system_id == 6 {
         rhs_pbpk_clearance(t, y, p, out)
     } else {
-        // Unknown system: zero derivatives (safe fallback)
+        // Unknown system: zero derivatives. Not reachable through the solvers: an id with no
+        // registered parameter range is rejected (status 3) before anything is integrated.
         out.n = y.n
     }
 }
@@ -1503,6 +1548,7 @@ pub fn solve_ode(
     t_end: f64,
     opts: SolverOptions
 ) -> ODESolution with Mut, Div, Panic {
+    let y0_dims = y0.n
     var state = y0
     state.n = sys.n_dims
     var sol = ode_solution_new(sys.n_dims)
@@ -1517,7 +1563,7 @@ pub fn solve_ode(
     solution_record(&!sol, t, &state)
     // A non-finite starting state is status 3 even when the interval is empty (the loop below
     // would not run and the final check would call it a completed solve).
-    if !ode_solve_inputs_ok(t_start, t_end, &opts, &p, false) || !ode_estate_values_finite(&state, sys.n_dims) {
+    if !ode_solve_inputs_ok(t_start, t_end, &opts, &p, &sys, y0_dims, false) || !ode_estate_values_finite(&state, sys.n_dims) {
         sol.t_final = t
         sol.status = 3
         return sol
@@ -1579,6 +1625,7 @@ pub fn solve_ode_adaptive(
     t_end: f64,
     opts: SolverOptions
 ) -> ODESolution with Mut, Div, Panic {
+    let y0_dims = y0.n
     var state = y0
     state.n = sys.n_dims
     var sol = ode_solution_new(sys.n_dims)
@@ -1593,7 +1640,7 @@ pub fn solve_ode_adaptive(
 
     if !ode_initial_covariance_ok(&state, &p, sys.n_dims) { sol.covariance_mode = 2 }
     solution_record(&!sol, t, &state)
-    if !ode_solve_inputs_ok(t_start, t_end, &opts, &p, true) || !ode_estate_values_finite(&state, sys.n_dims) {
+    if !ode_solve_inputs_ok(t_start, t_end, &opts, &p, &sys, y0_dims, true) || !ode_estate_values_finite(&state, sys.n_dims) {
         sol.t_final = t
         sol.status = 3
         return sol
