@@ -37,6 +37,15 @@
 // so a private-vs-pub collision leaves the pub one untouched. `main`, `extern`
 // declarations and GPU kernels are never touched.
 //
+// RESTRICTED-PUBLIC (`pub(crate)`, `pub(super)`, `pub(in path)`) fns are exported
+// exactly like `pub` ones -- importers name them -- so they cannot be renamed
+// without rewriting every importer, and this pass does not. They are not ignored
+// either: a restricted-public fn that shares its name with a definition in another
+// module is treated as UNRENAMABLE and goes through the same residual check as a
+// shadowed name, so if the collision is still there after every private definition
+// has been renamed away the compile is REFUSED. (Two plain `pub` fns of one name are
+// not covered; see claims_not_made.)
+//
 // WHAT THIS PASS WILL NOT GUESS AT. A rename is only sound if every occurrence of
 // the identifier in the module means the function. Two shapes cannot be proven:
 //   * a local binding (let/var, fn parameter, pattern binding, `for` variable or
@@ -97,6 +106,11 @@ let PFI_SLOTS: i64 = 65536
 let PFI_T_MAX: i64 = 512
 let PFI_SK_MAX: i64 = 256
 
+// Why an entry cannot be renamed. Kept per entry so a refusal states the REAL reason.
+let PFI_R_SHADOWED: i64 = 1    // a local/param/pattern spelled like it, or a value use in a slot that cannot be rewritten
+let PFI_R_NAME: i64 = 2        // the generated name is already an existing symbol, or would be too long
+let PFI_R_EXPORTED: i64 = 3    // pub(crate)/pub(super)/pub(in ..): importers spell this name
+
 // Census PREFILTER: distinct-module count per name hash (open addressing). Hash
 // only -- see the header: it may over-merge, so it can only nominate candidates.
 var PFI_KEY: [i64; 65536]
@@ -110,6 +124,7 @@ var PFI_T_BUF: [i8; 196608]
 var PFI_T_HASH: [i64; 512]
 var PFI_T_LEN: [i64; 512]
 var PFI_T_UNSAFE: [i64; 512]
+var PFI_T_REASON: [i64; 512]
 var PFI_T_COUNT: i64 = 0
 var PFI_T_OVERFLOW: i64 = 0
 
@@ -117,6 +132,7 @@ var PFI_T_OVERFLOW: i64 = 0
 // has been processed and the residual-collision check can run.
 var PFI_SK_MOD: [i64; 256]
 var PFI_SK_LEN: [i64; 256]
+var PFI_SK_REASON: [i64; 256]
 var PFI_SK_BUF: [i8; 98304]
 var PFI_SK_COUNT: i64 = 0
 var PFI_SK_OVERFLOW: i64 = 0
@@ -397,7 +413,7 @@ fn pfi_table_find_name(n: Name) -> i64 with Mut, Panic, Div {
     0 - 1
 }
 
-fn pfi_table_add(n: Name, mod_idx: i64) with Mut, Panic, Div, Alloc {
+fn pfi_table_add(n: Name, mod_idx: i64, vis_kind: i64) with Mut, Panic, Div, Alloc {
     if pfi_table_find_name(n) >= 0 { return }
     if PFI_T_COUNT >= PFI_T_MAX {
         PFI_T_OVERFLOW = 1
@@ -407,6 +423,7 @@ fn pfi_table_add(n: Name, mod_idx: i64) with Mut, Panic, Div, Alloc {
     PFI_T_HASH[idx as usize] = ast_name_hash(n)
     PFI_T_LEN[idx as usize] = n.len
     PFI_T_UNSAFE[idx as usize] = 0
+    PFI_T_REASON[idx as usize] = 0
     let base = idx * 384
     var k: i64 = 0
     while k < n.len {
@@ -418,11 +435,20 @@ fn pfi_table_add(n: Name, mod_idx: i64) with Mut, Panic, Div, Alloc {
     // extern, a kernel, a global or a `Type_method`), or the rename would create
     // the very collision it exists to remove. Prefilter only: a hash hit merely
     // makes this name unrenamable, which is refused loudly below, never guessed.
+    if vis_kind != 0 {
+        // Exported: cannot be renamed without rewriting importers. Tracked so the
+        // residual check can still refuse if the collision is not resolved.
+        PFI_T_UNSAFE[idx as usize] = 1
+        PFI_T_REASON[idx as usize] = PFI_R_EXPORTED
+        return
+    }
     let m = pfi_mangle(n, mod_idx)
     if m.len <= 0 {
         PFI_T_UNSAFE[idx as usize] = 1
+        PFI_T_REASON[idx as usize] = PFI_R_NAME
     } else if pfi_census_mods(ast_name_hash(m)) > 0 {
         PFI_T_UNSAFE[idx as usize] = 1
+        PFI_T_REASON[idx as usize] = PFI_R_NAME
     }
 }
 
@@ -436,12 +462,15 @@ fn pfi_build_table(programs: &! [Program; 256], count: i64, items: Option<Box<It
         match cur {
             None => { going = false }
             Some(list) => {
-                if pfi_item_real_fn((*list).head) && (*list).head.visibility.kind == 0 {
+                // Private fns are renamed; restricted-public ones (kind 2/3/4) are only
+                // tracked so an unresolved collision with them is refused. Plain `pub`
+                // (kind 1) is the module's interface and is left alone.
+                if pfi_item_real_fn((*list).head) && (*list).head.visibility.kind != 1 {
                     // Hash prefilter first (cheap), exact scan second.
                     if pfi_census_mods(ast_name_hash((*list).head.name)) >= 2 {
                         if pfi_table_find_name((*list).head.name) < 0 {
                             if pfi_defined_elsewhere(programs, count, mod_idx, (*list).head.name) >= 0 {
-                                pfi_table_add((*list).head.name, mod_idx)
+                                pfi_table_add((*list).head.name, mod_idx, (*list).head.visibility.kind)
                             }
                         }
                     }
@@ -462,6 +491,7 @@ fn pfi_record_skipped(mod_idx: i64) -> bool with Mut, Panic, Div {
             let slot = PFI_SK_COUNT
             PFI_SK_MOD[slot as usize] = mod_idx
             PFI_SK_LEN[slot as usize] = PFI_T_LEN[i as usize]
+            PFI_SK_REASON[slot as usize] = PFI_T_REASON[i as usize]
             var k: i64 = 0
             while k < PFI_T_LEN[i as usize] {
                 PFI_SK_BUF[(slot * 384 + k) as usize] = PFI_T_BUF[(i * 384 + k) as usize]
@@ -490,7 +520,12 @@ fn pfi_sk_name(slot: i64) -> Name with Mut, Panic, Div {
 
 fn pfi_note_unsafe_name(n: Name) with Mut, Panic, Div {
     let idx = pfi_table_find_name(n)
-    if idx >= 0 { PFI_T_UNSAFE[idx as usize] = 1 }
+    if idx >= 0 {
+        if PFI_T_UNSAFE[idx as usize] == 0 {
+            PFI_T_UNSAFE[idx as usize] = 1
+            PFI_T_REASON[idx as usize] = PFI_R_SHADOWED
+        }
+    }
 }
 
 // A local binding spelled like a colliding private fn.
@@ -809,18 +844,34 @@ fn pfi_error_capacity(what: string) with IO, Mut, Panic, Div {
     print("  here rather than emit an executable that may bind them to ONE body.\n")
 }
 
-fn pfi_error_unresolved(slot: i64, other_mod: i64) with IO, Mut, Panic, Div {
-    print("error[private_fn_identity]: private fn `")
+fn pfi_error_unresolved(slot: i64, other_mod: i64) with IO, Mut, Panic, Div, Alloc {
+    print("error[private_fn_identity]: fn `")
     pfi_print_name(pfi_sk_name(slot))
     print("` (module #")
     print_int(PFI_SK_MOD[slot as usize])
     print(") shares its name with a\n")
     print("  definition in module #")
     print_int(other_mod)
-    print(" and cannot be renamed safely: a local, parameter\n")
-    print("  or pattern uses that name, or the fn is used as a value in a match arm\n")
-    print("  or struct-literal field. Both would compile to ONE function.\n")
-    print("  Rename one of them.\n")
+    print(" and cannot be renamed safely:\n")
+    let why = PFI_SK_REASON[slot as usize]
+    if why == PFI_R_EXPORTED {
+        print("  it is exported (pub(crate) / pub(super) / pub(in ..)), so other modules\n")
+        print("  refer to it by this name and renaming it would break them.\n")
+    } else if why == PFI_R_NAME {
+        print("  the name it would be given (`")
+        let gen = pfi_mangle(pfi_sk_name(slot), PFI_SK_MOD[slot as usize])
+        if gen.len > 0 {
+            pfi_print_name(gen)
+        } else {
+            print("<too long>")
+        }
+        print("`) is already an existing\n")
+        print("  symbol, or does not fit.\n")
+    } else {
+        print("  a local, parameter or pattern uses that name, or the fn is used as a\n")
+        print("  value in a match arm or struct-literal field.\n")
+    }
+    print("  Both would compile to ONE function. Rename one of them.\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -922,7 +973,7 @@ pub fn private_fn_identity_apply(programs: &! [Program; 256], count: i64) -> i64
     if PFI_LEFT_TOTAL > 0 {
         print("private_fn_identity: left ")
         print_int(PFI_LEFT_TOTAL)
-        print(" private fn(s) unrenamed (name shadowed in its module); no collision remains\n")
+        print(" fn(s) unrenamed; no collision remains\n")
     }
     PFI_RENAMED_TOTAL
 }
