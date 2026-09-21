@@ -233,6 +233,8 @@ pub fn ode_system_pbpk_clearance() -> ODESystem {
 
 struct SolverOptions {
     dt: f64,
+    // Adaptive only. A step is accepted when, for every component,
+    //   |embedded error_i| <= atol + rtol * max(|y_old_i|, |y_new_i|)
     rtol: f64,
     atol: f64,
     max_steps: i64,
@@ -259,7 +261,7 @@ pub fn solver_options_fixed(dt: f64, max_steps: i64) -> SolverOptions {
     }
 }
 
-fn solver_options_adaptive(dt_init: f64, rtol: f64, atol: f64, max_steps: i64) -> SolverOptions {
+pub fn solver_options_adaptive(dt_init: f64, rtol: f64, atol: f64, max_steps: i64) -> SolverOptions {
     SolverOptions {
         dt: dt_init,
         rtol: rtol,
@@ -288,7 +290,8 @@ pub struct ODESolution {
     n_dims: i64,
     total_error: f64,
     n_rhs_evals: i64,
-    n_rejected: i64,
+    // Trial steps the adaptive controller rejected (0 for fixed-step solves)
+    pub n_rejected: i64,
     // 1: variances come from the full first-order covariance of (state, params)
     //    carried through every step. 0: diagonal-only fallback, used only when
     //    n_dims + n_params > 64; it drops all correlations and is known to
@@ -301,17 +304,19 @@ pub struct ODESolution {
     //    that alone is clamped (a heuristic allowance; the diagonal test is necessary for positive
     //    semidefiniteness, not sufficient).
     pub covariance_mode: i64,
-    // Last time reached, and why the solve stopped. Set by solve_ode (fixed step). The adaptive
-    // solver (private here) does not report them yet: it leaves status 0 and t_final 0, so do not
-    // read them from it; that is done in the separate adaptive-solver PR.
+    // Last time reached, and why the solve stopped:
     //   status 0: reached t_end
     //   status 1: max_steps steps were used up before t_end
-    //   status 2: reserved for the adaptive solver (no acceptable step); solve_ode never sets it
+    //   status 2: (adaptive) no acceptable step: the trial bound was hit, or the step size
+    //             collapsed far from t_end (repeated rejection, or a non-finite error
+    //             estimate: NaN/inf never passes for an accepted step)
     //   status 3: invalid input -- non-finite or backward interval, step size not finite and
-    //             > 0, a non-finite model parameter, a parameter the system reads that was
-    //             never set, an initial state with the wrong number of dimensions, an unknown
-    //             system id -- or a non-finite (NaN/inf) state at the start or from a step.
-    //             Nothing (more) was integrated; t_final is the last valid time
+    //             > 0, negative or non-finite tolerances, a non-finite model parameter, a
+    //             parameter the system reads that was never set, an initial state with the wrong
+    //             number of dimensions, an unknown system id -- or a
+    //             non-finite (NaN/inf) state at
+    //             the start or from a fixed step. Nothing (more) was integrated; t_final is
+    //             the last valid time
     // A truncated solve is NOT an error return: the last recorded point is then the state
     // at t_final, not at t_end. Check status == 0 before using it as the requested result.
     pub t_final: f64,
@@ -1211,7 +1216,7 @@ fn eode_step_values(
         eode_rk4_advance(sys, t, state, p, dt, n_evals)
     } else {
         var err_unused = 0.0
-        rk45_step(sys, t, state, p, dt, &!err_unused, n_evals)
+        rk45_step(sys, t, state, p, dt, 1.0, 1.0, &!err_unused, n_evals)
     }
 }
 
@@ -1426,6 +1431,8 @@ fn rk45_step(
     state: &!EState,
     p: &ODEParams,
     dt: f64,
+    rtol: f64,
+    atol: f64,
     err_out: &!f64,
     n_evals: &!i64
 ) with Mut, Div, Panic {
@@ -1436,6 +1443,7 @@ fn rk45_step(
     var k4 = estate_new(n)
     var k5 = estate_new(n)
     var k6 = estate_new(n)
+    var k7 = estate_new(n)
     var tmp = estate_new(n)
 
     // Stage 1
@@ -1451,7 +1459,7 @@ fn rk45_step(
     var i = 0
     while i < n {
         if i < 64 {
-            tmp.values[i] = state.values[i] + dt * (0.075 * k1.values[i] + 0.225 * k2.values[i])
+            tmp.values[i] = state.values[i] + dt * ((3.0 / 40.0) * k1.values[i] + (9.0 / 40.0) * k2.values[i])
         }
         i = i + 1
     }
@@ -1462,9 +1470,9 @@ fn rk45_step(
     i = 0
     while i < n {
         if i < 64 {
-            tmp.values[i] = state.values[i] + dt * (0.977777777777778 * k1.values[i]
-                            - 3.73333333333333 * k2.values[i]
-                            + 3.55555555555556 * k3.values[i])
+            tmp.values[i] = state.values[i] + dt * ((44.0 / 45.0) * k1.values[i]
+                            - (56.0 / 15.0) * k2.values[i]
+                            + (32.0 / 9.0) * k3.values[i])
         }
         i = i + 1
     }
@@ -1475,10 +1483,10 @@ fn rk45_step(
     i = 0
     while i < n {
         if i < 64 {
-            tmp.values[i] = state.values[i] + dt * (2.95259868922420 * k1.values[i]
-                            - 11.5959564945227 * k2.values[i]
-                            + 9.82289285169509 * k3.values[i]
-                            - 0.290809327846365 * k4.values[i])
+            tmp.values[i] = state.values[i] + dt * ((19372.0 / 6561.0) * k1.values[i]
+                            - (25360.0 / 2187.0) * k2.values[i]
+                            + (64448.0 / 6561.0) * k3.values[i]
+                            - (212.0 / 729.0) * k4.values[i])
         }
         i = i + 1
     }
@@ -1489,54 +1497,71 @@ fn rk45_step(
     i = 0
     while i < n {
         if i < 64 {
-            tmp.values[i] = state.values[i] + dt * (2.84627525252526 * k1.values[i]
-                            - 10.7575757575758 * k2.values[i]
-                            + 8.90642271774548 * k3.values[i]
-                            + 0.278001721790970 * k4.values[i]
-                            - 0.273076923076923 * k5.values[i])
+            tmp.values[i] = state.values[i] + dt * ((9017.0 / 3168.0) * k1.values[i]
+                            - (355.0 / 33.0) * k2.values[i]
+                            + (46732.0 / 5247.0) * k3.values[i]
+                            + (49.0 / 176.0) * k4.values[i]
+                            - (5103.0 / 18656.0) * k5.values[i])
         }
         i = i + 1
     }
     ode_rhs_dispatch(sys, t + dt, &tmp, p, &!k6)
     bump_n_evals(n_evals)
 
-    // 5th-order solution (used as the step)
-    // b5 = [142/1105, 0, 6570212/46116585, 22482/69174, 8028/28325, -8192/34125]
-    // DP 5th-order weights (FSAL not used here for simplicity)
+    // 5th-order solution (used as the step): Dormand-Prince weights
+    //   b5 = [35/384, 0, 500/1113, 125/192, -2187/6784, 11/84]
     i = 0
     while i < n {
         if i < 64 {
+            tmp.values[i] = state.values[i]
             state.values[i] = state.values[i] + dt * (
-                0.0917194570135880 * k1.values[i]
-                + 0.449236298109796 * k3.values[i]
-                + 0.651489067543612 * k4.values[i]
-                - 0.322376179245283 * k5.values[i]
-                + 0.130888888888889 * k6.values[i])
+                (35.0 / 384.0) * k1.values[i]
+                + (500.0 / 1113.0) * k3.values[i]
+                + (125.0 / 192.0) * k4.values[i]
+                - (2187.0 / 6784.0) * k5.values[i]
+                + (11.0 / 84.0) * k6.values[i])
         }
         i = i + 1
     }
 
-    // Error estimate: difference between 4th and 5th order solutions
-    // e_i = dt * sum_j (b5_j - b4_j) * k_j[i]
-    // Error coefficients (b5 - b4):
-    //   e1 = 1/360, e3 = -128/4275, e4 = -2197/75240, e5 = 1/50, e6 = 2/55
+    // Stage 7 (FSAL): f(t + dt, y_{n+1}). Only the embedded error estimate needs it.
+    ode_rhs_dispatch(sys, t + dt, state, p, &!k7)
+    bump_n_evals(n_evals)
+
+    // Error estimate: difference between the 5th and 4th order solutions,
+    //   e_i = dt * sum_j (b5_j - b4_j) * k_j[i],  with b4 the Dormand-Prince embedded weights
+    //   b4 = [5179/57600, 0, 7571/16695, 393/640, -92097/339200, 187/2100, 1/40]:
+    //   b5 - b4 = [71/57600, 0, -71/16695, 71/1920, -17253/339200, 22/525, -1/40]
+    // (These used to be the Fehlberg RKF45 error coefficients, which do not belong to
+    // this tableau and made the estimate ~1e4 times too large.)
+    //
+    // The returned error is NORMALIZED per component by the mixed tolerance
+    //   sc_i = atol + rtol * max(|y_old_i|, |y_new_i|)
+    // and reduced by max over components: a step is acceptable when it is <= 1, and the
+    // controller is driven by that same number. atol therefore governs near-zero components.
     var max_err = 0.0
+    var invalid = false
     i = 0
     while i < n {
         if i < 64 {
             let ei = dt * ode_abs(
-                0.00277777777777778 * k1.values[i]
-                - 0.0299415204678363 * k3.values[i]
-                - 0.0291998936510851 * k4.values[i]
-                + 0.02 * k5.values[i]
-                + 0.0363636363636364 * k6.values[i])
-            let sci = ode_abs(state.values[i]) + 1.0e-10
+                (71.0 / 57600.0) * k1.values[i]
+                - (71.0 / 16695.0) * k3.values[i]
+                + (71.0 / 1920.0) * k4.values[i]
+                - (17253.0 / 339200.0) * k5.values[i]
+                + (22.0 / 525.0) * k6.values[i]
+                - 0.025 * k7.values[i])
+            var sci = atol + rtol * ode_max(ode_abs(tmp.values[i]), ode_abs(state.values[i]))
+            if sci < 1.0e-300 { sci = 1.0e-300 }
             let rel = ei / sci
+            // `rel > max_err` is false for NaN, which would leave a NaN state with error 0
+            // and accept it. A non-finite estimate or state is reported as 1e300 instead.
+            if !ode_finite(rel) || !ode_finite(state.values[i]) { invalid = true }
             if rel > max_err { max_err = rel }
         }
         i = i + 1
     }
-    *err_out = max_err
+    if invalid { *err_out = 1.0e300 } else { *err_out = max_err }
 }
 
 // ============================================================================
@@ -1632,7 +1657,7 @@ pub fn solve_ode(
 // General-Purpose Solve: Adaptive RK45 (Dormand-Prince)
 // ============================================================================
 
-fn solve_ode_adaptive(
+pub fn solve_ode_adaptive(
     sys: ODESystem,
     y0: EState,
     p: ODEParams,
@@ -1640,6 +1665,19 @@ fn solve_ode_adaptive(
     t_end: f64,
     opts: SolverOptions
 ) -> ODESolution with Mut, Div, Panic {
+    let y0_dims = y0.n
+    // The dimensions are validated FIRST: everything below is sized by them (augcov_init and the
+    // covariance check loop n_dims times, and solution_record with n_dims > 4096 turns the first step
+    // into -1 and writes times[-1]). ode_system_new and estate_new are public, so n_dims can be any i64.
+    // Nothing is recorded for an invalid dimension: the result has no points (n_steps = 0, every
+    // accessor index is invalid -> NaN), status 3, t_final = t_start.
+    if !ode_system_dims_ok(&sys) || y0_dims != sys.n_dims {
+        var refused = ode_solution_new(1)
+        refused.n_steps = 0
+        refused.t_final = t_start
+        refused.status = 3
+        return refused
+    }
     var state = y0
     state.n = sys.n_dims
     var sol = ode_solution_new(sys.n_dims)
@@ -1652,36 +1690,62 @@ fn solve_ode_adaptive(
     var cov = augcov_init(&state, &p, sys.n_dims)
     if !full_cov { sol.covariance_mode = 0 }
 
+    if !ode_initial_covariance_ok(&state, &p, sys.n_dims) { sol.covariance_mode = 2 }
     solution_record(&!sol, t, &state)
+    if !ode_solve_inputs_ok(t_start, t_end, &opts, &p, &sys, y0_dims, true) || !ode_estate_values_finite(&state, sys.n_dims) {
+        sol.t_final = t
+        sol.status = 3
+        return sol
+    }
 
-    while t < t_end && step < opts.max_steps {
-        dt = ode_min(dt, t_end - t)
-        if dt <= 1.0e-15 { t = t_end }
+    // max_steps counts ACCEPTED steps; the trial bound keeps a run whose error estimate is
+    // never acceptable (NaN state, absurd tolerance) from retrying forever.
+    let span = t_end - t_start
+    var tau = 0.0
+    while tau < span && step < opts.max_steps && step + n_rejected < opts.max_steps * 10 {
+        let remaining = span - tau
+        dt = ode_min(dt, remaining)
+        if ode_reached(tau, span) { tau = span; t = t_end }
+        else if !(tau + dt > tau) {
+            // The step size collapsed: adding it no longer advances the elapsed time, while the
+            // end is still far away (only a rounding remainder is skipped, above). That is
+            // failure, not completion: stop, and status 2 reports it. The test is "can this dt
+            // still advance tau", not a fixed floor -- an absolute 1e-15 rejected valid short
+            // integrations such as [0, 1e-16] before attempting a single step.
+            break
+        }
         else {
             // Save state in case we reject
             var saved = estate_new(sys.n_dims)
             estate_copy(&!saved, &state)
 
             var err = 0.0
-            rk45_step(&sys, t, &!state, &p, dt, &!err, &!n_evals)
+            rk45_step(&sys, t, &!state, &p, dt, opts.rtol, opts.atol, &!err, &!n_evals)
 
-            let tol = opts.atol + opts.rtol * err
-            if err <= opts.rtol || dt <= 1.0e-12 {
+            // err is normalized by atol + rtol * max(|y_old|, |y_new|): accept when <= 1
+            // Accept exactly when every component meets atol + rtol * max(|y_old|, |y_new|).
+            // There is deliberately no "accept anyway once dt is tiny" fallback: it would return
+            // a trajectory outside the requested tolerance as if it were fine. When no step size
+            // can meet the tolerance the step collapses (or the trial bound is hit) and the solve
+            // ends as status 2. A non-finite estimate is reported as 1e300 and can never pass.
+            if err <= 1.0 {
                 // Accept step — propagate uncertainty through the step just taken,
                 // differentiated at the pre-step point
                 if full_cov {
                     propagate_covariance_step(&sys, t, &saved, &p, dt, 1, &!cov, &!n_evals)
-                    augcov_write_variances(&cov, &!state, sys.n_dims)
+                    if !augcov_write_variances(&cov, &!state, sys.n_dims) { sol.covariance_mode = 2 }
                 } else {
                     propagate_variance_gum(&sys, t, &!state, &p, dt, &!n_evals)
                 }
-                t = t + dt
+                if !ode_estate_variances_finite(&state, sys.n_dims) { sol.covariance_mode = 2 }
+                // the last (clamped) step lands exactly on t_end, not one rounding short of it
+                if dt >= remaining { tau = span; t = t_end } else { tau = tau + dt; t = t_start + tau }
                 step = step + 1
                 solution_record(&!sol, t, &state)
 
                 // Grow step size
                 if err > 1.0e-20 {
-                    let factor = ode_min(5.0, 0.9 * ode_pow_fifth(opts.rtol / err))
+                    let factor = ode_min(5.0, 0.9 * ode_pow_fifth(1.0 / err))
                     dt = dt * ode_max(0.2, factor)
                 } else {
                     dt = dt * 5.0
@@ -1689,7 +1753,7 @@ fn solve_ode_adaptive(
             } else {
                 // Reject step — restore state and shrink dt
                 estate_copy(&!state, &saved)
-                let factor = ode_max(0.2, 0.9 * ode_pow_fifth(opts.rtol / err))
+                let factor = ode_max(0.2, 0.9 * ode_pow_fifth(1.0 / err))
                 dt = dt * factor
                 n_rejected = n_rejected + 1
             }
@@ -1698,28 +1762,44 @@ fn solve_ode_adaptive(
 
     sol.n_rhs_evals = n_evals
     sol.n_rejected = n_rejected
+    sol.t_final = t
+    if ode_reached(tau, span) {
+        sol.status = 0
+    } else if step >= opts.max_steps {
+        sol.status = 1
+    } else {
+        sol.status = 2
+    }
     sol
 }
 
-// (tol/err)^0.2 = (tol/err)^(1/5) — via Newton's method for x^5 = ratio
+// ratio^(1/5) for the step-size controller, clamped to [0.2/0.9, 5/0.9] so that its caller's
+// factor 0.9 * ode_pow_fifth(1/err) is exactly clamp(0.9 * err^(-1/5), 0.2, 5) (growth is capped
+// at 5, shrink at 0.2); in f64 0.9 * (5/0.9) = 5.0 and 0.9 * (0.2/0.9) = 0.2 exactly, so the
+// callers' extra min/max are only a safety net. Inside the clamp range Newton on x^5 = ratio,
+// started at the upper bound (>= the root; f(x) = x^5 - ratio is increasing and convex for x > 0),
+// decreases monotonically to the root. Measured over 2001 ratios spanning the whole range: at most
+// 20 iterations to reach a relative step of 1e-15, residual |x^5 - ratio| / ratio <= 6.5e-16, so
+// the 60 iterations below are a 3x margin (not a proved bound). (It used to start at x = ratio: for ratio < 1, i.e. exactly when a step is REJECTED,
+// the first Newton step jumped to ~1/(5 ratio^3) and the step size grew instead of shrinking, so a
+// rejected step could never be retried smaller. A later version clamped to [0.2, 5] BEFORE the
+// 0.9, which capped growth at 4.5 rather than 5.)
 fn ode_pow_fifth(ratio: f64) -> f64 with Mut, Div, Panic {
-    if ratio <= 0.0 { return 0.2 }
-    // Initial guess
-    var x = 1.0
-    if ratio > 1.0 { x = ratio }
-    if ratio < 1.0 { x = ratio }
-    // Newton iterations for x^5 = ratio: x_{n+1} = x - (x^5 - ratio) / (5*x^4)
+    let hi = 5.0 / 0.9
+    let lo = 0.2 / 0.9
+    if !(ratio > 0.0) { return lo }
+    let hi2 = hi * hi
+    let hi5 = hi2 * hi2 * hi
+    let lo2 = lo * lo
+    let lo5 = lo2 * lo2 * lo
+    if ratio >= hi5 { return hi }
+    if ratio <= lo5 { return lo }
+    var x = hi
     var iter = 0
-    while iter < 20 {
+    while iter < 60 {
         let x2 = x * x
         let x4 = x2 * x2
-        let x5 = x4 * x
-        let f = x5 - ratio
-        let fp = 5.0 * x4
-        if fp > 1.0e-30 {
-            x = x - f / fp
-        }
-        if x < 1.0e-10 { x = 1.0e-10 }
+        x = x - (x4 * x - ratio) / (5.0 * x4)
         iter = iter + 1
     }
     x
