@@ -518,8 +518,18 @@ pub fn test_crn_epistemic() -> bool with Mut, Div, Panic {
 }
 
 // Deep integration: use EState + solve_ode for chem CRN with full GUM
-// simulate_chem_network_checked: ODESolution.status of the solve (0 = reached its end time; 3 = invalid input or non-finite
-// state, ...). When it is not 0 the arrays are the state at the last valid time -- NOT a final result.
+// Standard uncertainty from a variance the solver reported. sqrt_approx clamps a negative
+// argument to 0, which would turn an invalid variance into "no uncertainty": NaN instead.
+fn kin_nan() -> f64 { let big = 1.0e308; let inf = big * 10.0; inf - inf }
+fn kin_sigma(v: f64) -> f64 with Mut, Div, Panic {
+    if !(v >= 0.0) || !((v - v) == 0.0) { return kin_nan() }
+    sqrt_approx(v)
+}
+
+// simulate_chem_network_checked: status 0 = the solve reached its end time with a sound covariance.
+// ODESolution.status otherwise (3 = invalid input or non-finite state, ...), or 4 = the state solve
+// finished but the covariance failed (a negative/NaN/infinite variance). When it is not 0 the
+// arrays are the state at the last valid time and/or carry NaN uncertainties -- NOT a final result.
 pub fn simulate_chem_network_checked(init_val: &[f64; 4], init_var: &[f64; 4], ks: &[f64; 3], uks: &[f64; 3], dt: f64, nsteps: i64) -> (i64, [f64; 4], [f64; 4]) with Mut, Div, Panic {
     var y0 = estate_new(4);
     var i = 0;
@@ -542,10 +552,14 @@ pub fn simulate_chem_network_checked(init_val: &[f64; 4], init_var: &[f64; 4], k
     i = 0;
     while i < 4 {
         outv[i] = epistemic::ode::solution_get_value(&sol, last, i);
-        outu[i] = sqrt_approx(epistemic::ode::solution_get_variance(&sol, last, i));
+        outu[i] = kin_sigma(epistemic::ode::solution_get_variance(&sol, last, i));
         i = i + 1;
     }
-    (sol.status, outv, outu)
+    // The state solve can finish (status 0) while the covariance failed (covariance_mode 2: a
+    // negative, NaN or infinite variance): that is not a usable uncertainty either, status 4.
+    var status = sol.status;
+    if status == 0 && sol.covariance_mode == 2 { status = 4 }
+    (status, outv, outu)
 }
 
 // Same as simulate_chem_network_checked but for callers that cannot use an incomplete result: it panics unless
@@ -553,7 +567,7 @@ pub fn simulate_chem_network_checked(init_val: &[f64; 4], init_var: &[f64; 4], k
 // nothing past the initial state, and returning that as the final state would be wrong.
 pub fn simulate_chem_network_full(init_val: &[f64; 4], init_var: &[f64; 4], ks: &[f64; 3], uks: &[f64; 3], dt: f64, nsteps: i64) -> ([f64; 4], [f64; 4]) with Mut, Div, Panic {
     let (status, outv, outu) = simulate_chem_network_checked(init_val, init_var, ks, uks, dt, nsteps);
-    if status != 0 { panic("chemistry::kinetics: ODE solve did not reach its end time (non-finite state or invalid input)") }
+    if status != 0 { panic("chemistry::kinetics: ODE solve failed (did not reach its end time, invalid input, or failed covariance)") }
     (outv, outu)
 }
 
@@ -562,8 +576,9 @@ pub fn simulate_chem_network_full(init_val: &[f64; 4], init_var: &[f64; 4], ks: 
 //   Drug -> M1 (k1),  M1 -> M2 (k2),  M1 -> cleared (k3)
 // State is [Drug, M1, M2, Cleared]; every reaction is first order. init_var and uks are
 // VARIANCE and standard uncertainty respectively, exactly as in simulate_chem_network_full.
-// simulate_pbpk_clearance_checked: ODESolution.status of the solve (0 = reached its end time; 3 = invalid input or non-finite
-// state, ...). When it is not 0 the arrays are the state at the last valid time -- NOT a final result.
+// simulate_pbpk_clearance_checked: same status contract as simulate_chem_network_checked (0 = sound;
+// ODESolution.status when the solve did not complete; 4 = completed but the covariance failed).
+// When it is not 0 the arrays are NOT a final result.
 pub fn simulate_pbpk_clearance_checked(init_val: &[f64; 4], init_var: &[f64; 4], ks: &[f64; 3], uks: &[f64; 3], dt: f64, nsteps: i64) -> (i64, [f64; 4], [f64; 4]) with Mut, Div, Panic {
     var y0 = estate_new(4);
     var i = 0;
@@ -586,10 +601,14 @@ pub fn simulate_pbpk_clearance_checked(init_val: &[f64; 4], init_var: &[f64; 4],
     i = 0;
     while i < 4 {
         outv[i] = epistemic::ode::solution_get_value(&sol, last, i);
-        outu[i] = sqrt_approx(epistemic::ode::solution_get_variance(&sol, last, i));
+        outu[i] = kin_sigma(epistemic::ode::solution_get_variance(&sol, last, i));
         i = i + 1;
     }
-    (sol.status, outv, outu)
+    // The state solve can finish (status 0) while the covariance failed (covariance_mode 2: a
+    // negative, NaN or infinite variance): that is not a usable uncertainty either, status 4.
+    var status = sol.status;
+    if status == 0 && sol.covariance_mode == 2 { status = 4 }
+    (status, outv, outu)
 }
 
 // Same as simulate_pbpk_clearance_checked but for callers that cannot use an incomplete result: it panics unless
@@ -597,7 +616,7 @@ pub fn simulate_pbpk_clearance_checked(init_val: &[f64; 4], init_var: &[f64; 4],
 // nothing past the initial state, and returning that as the final state would be wrong.
 pub fn simulate_pbpk_clearance_full(init_val: &[f64; 4], init_var: &[f64; 4], ks: &[f64; 3], uks: &[f64; 3], dt: f64, nsteps: i64) -> ([f64; 4], [f64; 4]) with Mut, Div, Panic {
     let (status, outv, outu) = simulate_pbpk_clearance_checked(init_val, init_var, ks, uks, dt, nsteps);
-    if status != 0 { panic("chemistry::kinetics: ODE solve did not reach its end time (non-finite state or invalid input)") }
+    if status != 0 { panic("chemistry::kinetics: ODE solve failed (did not reach its end time, invalid input, or failed covariance)") }
     (outv, outu)
 }
 

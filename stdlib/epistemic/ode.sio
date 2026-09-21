@@ -348,11 +348,40 @@ fn ode_estate_variances_finite(s: &EState, n: i64) -> bool with Mut, Div, Panic 
     true
 }
 
-// t_end reached, up to the rounding left by accumulating t += dt. Both endpoints must be
-// finite and the RESIDUAL is compared in absolute value: `t_end - t <= tol` alone is true for
-// t_end = +inf (inf <= inf) and for any t already past t_end.
+// The end of the interval is reached: `t` is at or past `t_end`, or short of it by no more than the
+// few ulps that rounding leaves when a step lands there (8 * 2^-52 * max(|t|, |t_end|)).
+// The solvers call this with ELAPSED time (tau = t - t_start, and span = t_end - t_start), so the
+// scale is the interval, not the epoch: at t = 1e15 the absolute ulp is 0.125 and a threshold
+// scaled by it (or by 1e-12 * |t_end|) would skip a real interval of 100. Both solvers land their
+// last step exactly on the end (dt is clamped to the remaining span, then tau = span).
+// Non-finite values are never "reached".
 fn ode_reached(t: f64, t_end: f64) -> bool {
-    ode_finite(t) && ode_finite(t_end) && ode_abs(t_end - t) <= 1.0e-12 * ode_max(1.0, ode_abs(t_end))
+    if !ode_finite(t) || !ode_finite(t_end) { return false }
+    if t >= t_end { return true }
+    t_end - t <= 8.0 * 2.220446049250313e-16 * ode_max(ode_abs(t), ode_abs(t_end))
+}
+
+// Input variances must be finite and non-negative. A NaN, infinite or negative INPUT variance is
+// invalid from the start (it is not round-off), so it sets covariance_mode 2 even when no step
+// runs (an empty interval), instead of only after the first step.
+fn ode_initial_covariance_ok(state: &EState, p: &ODEParams, n: i64) -> bool with Mut, Div, Panic {
+    var i = 0
+    while i < n {
+        if i < 64 {
+            let v = state.variances[i]
+            if !ode_finite(v) || v < 0.0 { return false }
+        }
+        i = i + 1
+    }
+    var k = 0
+    while k < p.n_params {
+        if k < 64 {
+            let v = p.param_variances[k]
+            if !ode_finite(v) || v < 0.0 { return false }
+        }
+        k = k + 1
+    }
+    true
 }
 
 // Inputs a solve can run on at all. Anything else is status 3, never a "completed" solve:
@@ -1456,16 +1485,24 @@ pub fn solve_ode(
     var cov = augcov_init(&state, &p, sys.n_dims)
     if !full_cov { sol.covariance_mode = 0 }
 
+    if !ode_initial_covariance_ok(&state, &p, sys.n_dims) { sol.covariance_mode = 2 }
     solution_record(&!sol, t, &state)
-    if !ode_solve_inputs_ok(t_start, t_end, &opts, false) {
+    // A non-finite starting state is status 3 even when the interval is empty (the loop below
+    // would not run and the final check would call it a completed solve).
+    if !ode_solve_inputs_ok(t_start, t_end, &opts, false) || !ode_estate_values_finite(&state, sys.n_dims) {
         sol.t_final = t
         sol.status = 3
         return sol
     }
 
-    while t < t_end && step < opts.max_steps {
-        let dt = ode_min(opts.dt, t_end - t)
-        if ode_reached(t, t_end) { t = t_end }
+    // Work in ELAPSED time tau = t - t_start (scale = the interval), and derive the absolute time
+    // as t_start + tau: at large epochs the absolute time has too few bits left for the steps.
+    let span = t_end - t_start
+    var tau = 0.0
+    while tau < span && step < opts.max_steps {
+        let remaining = span - tau
+        let dt = ode_min(opts.dt, remaining)
+        if ode_reached(tau, span) { tau = span; t = t_end }
         else {
             if full_cov {
                 var before = estate_new(sys.n_dims)
@@ -1484,7 +1521,9 @@ pub fn solve_ode(
                 return sol
             }
             if !ode_estate_variances_finite(&state, sys.n_dims) { sol.covariance_mode = 2 }
-            t = t + dt
+            // the last (possibly clamped) step lands exactly on t_end; earlier ones are all full
+            // steps, so tau_k = k dt is recomputed instead of accumulated
+            if dt >= remaining { tau = span; t = t_end } else { tau = ((step + 1) as f64) * opts.dt; t = t_start + tau }
             step = step + 1
             solution_record(&!sol, t, &state)
         }
@@ -1492,7 +1531,7 @@ pub fn solve_ode(
 
     sol.n_rhs_evals = n_evals
     sol.t_final = t
-    sol.status = if ode_reached(t, t_end) { 0 } else { 1 }
+    sol.status = if ode_reached(tau, span) { 0 } else { 1 }
     sol
 }
 
@@ -1520,6 +1559,7 @@ pub fn solve_ode_adaptive(
     var cov = augcov_init(&state, &p, sys.n_dims)
     if !full_cov { sol.covariance_mode = 0 }
 
+    if !ode_initial_covariance_ok(&state, &p, sys.n_dims) { sol.covariance_mode = 2 }
     solution_record(&!sol, t, &state)
     if !ode_solve_inputs_ok(t_start, t_end, &opts, true) || !ode_estate_values_finite(&state, sys.n_dims) {
         sol.t_final = t
@@ -1529,9 +1569,12 @@ pub fn solve_ode_adaptive(
 
     // max_steps counts ACCEPTED steps; the trial bound keeps a run whose error estimate is
     // never acceptable (NaN state, absurd tolerance) from retrying forever.
-    while t < t_end && step < opts.max_steps && step + n_rejected < opts.max_steps * 10 {
-        dt = ode_min(dt, t_end - t)
-        if ode_reached(t, t_end) { t = t_end }
+    let span = t_end - t_start
+    var tau = 0.0
+    while tau < span && step < opts.max_steps && step + n_rejected < opts.max_steps * 10 {
+        let remaining = span - tau
+        dt = ode_min(dt, remaining)
+        if ode_reached(tau, span) { tau = span; t = t_end }
         else if dt <= 1.0e-15 {
             // The step size collapsed while t_end is still far away (only a rounding
             // remainder may be skipped, above). That is failure, not completion: stop, and
@@ -1547,9 +1590,12 @@ pub fn solve_ode_adaptive(
             rk45_step(&sys, t, &!state, &p, dt, opts.rtol, opts.atol, &!err, &!n_evals)
 
             // err is normalized by atol + rtol * max(|y_old|, |y_new|): accept when <= 1
-            // The forced acceptance at dt <= 1e-12 is for a step that is merely too small to
-            // improve; it must never accept a non-finite estimate (reported as >= 1e299).
-            if err <= 1.0 || (dt <= 1.0e-12 && err < 1.0e299) {
+            // Accept exactly when every component meets atol + rtol * max(|y_old|, |y_new|).
+            // There is deliberately no "accept anyway once dt is tiny" fallback: it would return
+            // a trajectory outside the requested tolerance as if it were fine. When no step size
+            // can meet the tolerance the step collapses (or the trial bound is hit) and the solve
+            // ends as status 2. A non-finite estimate is reported as 1e300 and can never pass.
+            if err <= 1.0 {
                 // Accept step — propagate uncertainty through the step just taken,
                 // differentiated at the pre-step point
                 if full_cov {
@@ -1559,7 +1605,8 @@ pub fn solve_ode_adaptive(
                     propagate_variance_gum(&sys, t, &!state, &p, dt, &!n_evals)
                 }
                 if !ode_estate_variances_finite(&state, sys.n_dims) { sol.covariance_mode = 2 }
-                t = t + dt
+                // the last (clamped) step lands exactly on t_end, not one rounding short of it
+                if dt >= remaining { tau = span; t = t_end } else { tau = tau + dt; t = t_start + tau }
                 step = step + 1
                 solution_record(&!sol, t, &state)
 
@@ -1583,7 +1630,7 @@ pub fn solve_ode_adaptive(
     sol.n_rhs_evals = n_evals
     sol.n_rejected = n_rejected
     sol.t_final = t
-    if ode_reached(t, t_end) {
+    if ode_reached(tau, span) {
         sol.status = 0
     } else if step >= opts.max_steps {
         sol.status = 1

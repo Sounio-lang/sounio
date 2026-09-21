@@ -14,6 +14,11 @@
 // semidefiniteness failure) is reported as it came out with covariance_mode 2, not clamped to 0.
 // Only round-off (within 1e-9 of the block's largest diagonal) is clamped; every zero-variance
 // channel in the chemistry and PBPK tests exercises that path and must keep passing.
+//
+// Also: the completion test must not scale with the absolute time (a solve from 1e15 to 1e15+100
+// is a real interval, not "already done"); an empty interval with a NaN state or a NaN/negative
+// input variance must still report status 3 / covariance_mode 2; and the adaptive solver must
+// not "accept anyway" a step whose error is far above the tolerance once dt is tiny.
 
 use epistemic::ode::*
 
@@ -103,6 +108,66 @@ fn main() -> i32 with IO, Mut, Div, Panic {
 
     // and a healthy solve keeps mode 1
     if f_ok.covariance_mode != 1 || a_ok.covariance_mode != 1 { fail = fail + 1; println("FAIL: a healthy solve must keep covariance_mode 1") }
+
+    // ---- large absolute time: a real interval must be integrated, not skipped -----------------
+    // t = 1e15 -> t_end = 1e15 + 100, dy/dt = -0.01 y: y(100) = e^{-1}. A "reached" tolerance
+    // scaled by |t_end| (1e-12 * 1e15 = 1000) called this finished before the first step.
+    let t0 = 1.0e15
+    let f_big = solve_ode(ode_system_exp_decay(), decay(1.0, 0.0, 0.01), params(0.01), t0, t0 + 100.0, solver_options_fixed(10.0, 50))
+    let a_big = solve_ode_adaptive(ode_system_exp_decay(), decay(1.0, 0.0, 0.01), params(0.01), t0, t0 + 100.0, solver_options_adaptive(10.0, 1.0e-8, 1.0e-10, 200))
+    let y_big = 0.36787944117144233
+    let yf = solution_get_value(&f_big, f_big.n_steps - 1, 0)
+    let ya = solution_get_value(&a_big, a_big.n_steps - 1, 0)
+    print("t=1e15: fixed steps=") print(f_big.n_steps) print(" y=") print(yf)
+    print(" adaptive steps=") print(a_big.n_steps) print(" y=") print(ya) println("")
+    if f_big.status != 0 || a_big.status != 0 { fail = fail + 1; println("FAIL: a solve at t = 1e15 must complete") }
+    if f_big.n_steps != 11 { fail = fail + 1; println("FAIL: fixed solve at t = 1e15 must take its 10 steps") }
+    if absf(yf - y_big) > 1.0e-6 { fail = fail + 1; println("FAIL: fixed solve at t = 1e15 is not the solution (skipped or mis-timed)") }
+    if absf(ya - y_big) > 1.0e-6 { fail = fail + 1; println("FAIL: adaptive solve at t = 1e15 is not the solution (skipped or mis-timed)") }
+    if f_big.t_final != t0 + 100.0 || a_big.t_final != t0 + 100.0 { fail = fail + 1; println("FAIL: t_final must land exactly on t_end") }
+
+    // ---- no "accept anyway" at a tiny step ---------------------------------------------------
+    // dy/dt = -1e11 y to t = 5e-12 (y = e^{-0.5}), rtol = 1e-14. The first trial dt = 1e-12 is
+    // already <= 1e-12, with a normalized error ~1e5. A fallback that accepted any finite error
+    // at that size returned a "completed" solve with relative error 3e-10 (35000 x rtol). With
+    // only err <= 1 accepted, the step is rejected down to ~1e-13 and the result meets rtol.
+    let stiff = solve_ode_adaptive(ode_system_exp_decay(), decay(1.0, 0.0, 1.0e11), params(1.0e11), 0.0, 5.0e-12, solver_options_adaptive(1.0e-12, 1.0e-14, 1.0e-20, 5000))
+    let ys = solution_get_value(&stiff, stiff.n_steps - 1, 0)
+    let rel_stiff = absf(ys - 0.6065306597126334) / 0.6065306597126334
+    print("tiny-dt tolerance: status=") print(stiff.status) print(" rejected=") print(stiff.n_rejected)
+    print(" rel err=") print(rel_stiff) println("")
+    if stiff.status != 0 { fail = fail + 1; println("FAIL: the stiff solve must complete") }
+    if stiff.n_rejected < 1 { fail = fail + 1; println("FAIL: the first trial (error ~1e5 x tolerance) must be rejected, not forced through") }
+    if rel_stiff > 1.0e-12 { fail = fail + 1; println("FAIL: the result is outside the requested tolerance") }
+
+    // a tolerance no step size can meet ends as status 2, never as a "completed" solve
+    let a_tight = solve_ode_adaptive(ode_system_exp_decay(), decay(1.0, 0.0, 0.1), params(0.1), 0.0, 1.0, solver_options_adaptive(0.1, 1.0e-40, 0.0, 200))
+    print("unreachable tolerance: status=") print(a_tight.status) println("")
+    if a_tight.status != 2 { fail = fail + 1; println("FAIL: an unreachable tolerance must end as status 2") }
+
+    // ---- empty interval: initial state and covariance are still validated --------------------
+    let f_e_nan = solve_ode(ode_system_exp_decay(), decay(nan, 0.01, 0.1), params(0.1), 1.0, 1.0, solver_options_fixed(0.1, 10))
+    let a_e_nan = solve_ode_adaptive(ode_system_exp_decay(), decay(nan, 0.01, 0.1), params(0.1), 1.0, 1.0, solver_options_adaptive(0.1, 1.0e-8, 1.0e-10, 10))
+    if f_e_nan.status != 3 { fail = fail + 1; println("FAIL: fixed empty interval with a NaN state must be status 3") }
+    if a_e_nan.status != 3 { fail = fail + 1; println("FAIL: adaptive empty interval with a NaN state must be status 3") }
+
+    let f_e_neg = solve_ode(ode_system_exp_decay(), decay(1.0, 0.0 - 0.01, 0.1), params(0.1), 1.0, 1.0, solver_options_fixed(0.1, 10))
+    let a_e_neg = solve_ode_adaptive(ode_system_exp_decay(), decay(1.0, 0.0 - 0.01, 0.1), params(0.1), 1.0, 1.0, solver_options_adaptive(0.1, 1.0e-8, 1.0e-10, 10))
+    let f_e_nv = solve_ode(ode_system_exp_decay(), decay(1.0, nan, 0.1), params(0.1), 1.0, 1.0, solver_options_fixed(0.1, 10))
+    print("empty interval, negative variance: fixed mode=") print(f_e_neg.covariance_mode)
+    print(" adaptive mode=") print(a_e_neg.covariance_mode) println("")
+    if f_e_neg.status != 0 || a_e_neg.status != 0 { fail = fail + 1; println("FAIL: an empty interval with a valid state is a completed solve") }
+    if f_e_neg.covariance_mode != 2 { fail = fail + 1; println("FAIL: fixed empty interval, negative input variance, must be covariance_mode 2") }
+    if a_e_neg.covariance_mode != 2 { fail = fail + 1; println("FAIL: adaptive empty interval, negative input variance, must be covariance_mode 2") }
+    if f_e_nv.covariance_mode != 2 { fail = fail + 1; println("FAIL: fixed empty interval, NaN input variance, must be covariance_mode 2") }
+    // a negative PARAMETER variance is just as invalid
+    var pneg = ode_params_new()
+    ode_params_set(&!pneg, 0, 0.1, 0.0 - 0.0001)
+    let f_e_pneg = solve_ode(ode_system_exp_decay(), decay(1.0, 0.01, 0.1), pneg, 1.0, 1.0, solver_options_fixed(0.1, 10))
+    if f_e_pneg.covariance_mode != 2 { fail = fail + 1; println("FAIL: a negative parameter variance must be covariance_mode 2") }
+    // a valid empty interval keeps mode 1
+    let f_e_ok = solve_ode(ode_system_exp_decay(), decay(1.0, 0.01, 0.1), params(0.1), 1.0, 1.0, solver_options_fixed(0.1, 10))
+    if f_e_ok.status != 0 || f_e_ok.covariance_mode != 1 { fail = fail + 1; println("FAIL: a valid empty interval must be status 0, mode 1") }
 
     if fail == 0 { println("ODE SOLVE INPUT VALIDATION PASS") }
     fail
