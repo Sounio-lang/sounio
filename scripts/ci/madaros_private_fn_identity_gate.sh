@@ -10,10 +10,19 @@
 # module-qualified name before anything keys on it.
 #
 # What this gate pins, against the fixtures in tests/multimodule/private_fn_identity/:
-#   basic  the reported repro (a=1 b=20), in BOTH import orders
-#   rich   3 modules; colliding private fns incl. recursion, fn-as-value, an impl
-#          method, an identical benign copy, and a pub fn that must keep its name
-#   skip   a shape the pass cannot prove safe must be REPORTED, not guessed
+#   basic     the reported repro (a=1 b=20), in BOTH import orders
+#   rich      3 modules; colliding private fns incl. recursion, fn-as-value, an impl
+#             method, an identical benign copy, and a pub fn that must keep its name
+#   hashcoll  names are compared EXACTLY: `bA` shares ast_name_hash with `ab`, and a
+#             reference to it must not be rewritten because `ab` was renamed
+#   symcoll   a private free fn named like a method's emitted symbol (`Type_method`)
+#   reserved  a generated `name__m<N>` must not reuse a symbol that already exists
+#   reservedglobal  ...including a module GLOBAL (an ItemFn with no body)
+#   capacity  70 colliding private fns in one module (the old fixed table held 64)
+#   skip      a shape the pass cannot prove safe is skipped -- and that is only
+#             accepted because the other module was renamed and no collision remains
+#   unresolved  the same shape in EVERY colliding module: the compile must be
+#             REFUSED with error[private_fn_identity], not emitted with a warning
 # and a positive control: with the pass switched off
 # (SOUNIO_DISABLE_PRIVATE_FN_IDENTITY=1) the repro must NOT come out right, so a
 # green run cannot be a program that never exercised the collision.
@@ -114,7 +123,10 @@ expect_log() {
 # --- basic: the reported repro, both import orders --------------------------
 compile_and_run basic "$FIX/basic/main.sio"
 expect_output basic "$FIX/basic/expected.txt"
-expect_log basic "private_fn_identity: renamed 2 same-named private fn(s) in 2 module(s)" "the rename receipt"
+# Minimal by construction: modules are processed in load order and the exact
+# "is this name still defined elsewhere?" scan sees the programs as they now are, so
+# once module 1 is renamed module 2's `helper` is unique and keeps its bare name.
+expect_log basic "private_fn_identity: renamed 1 same-named private fn(s) in 1 module(s)" "the rename receipt"
 
 compile_and_run basic_swapped "$FIX/basic/main_swapped.sio"
 expect_output basic_swapped "$FIX/basic/expected.txt"
@@ -129,8 +141,50 @@ echo "$TAG PASS(rich): colliding private fns, recursion, fn values, impl method,
 # --- skip: unprovable shape is reported, not guessed ------------------------
 compile_and_run skip "$FIX/skip/main.sio"
 expect_output skip "$FIX/skip/expected.txt"
-expect_log skip 'warning[private_fn_identity]: private fn `helper` in module #1' "the skipped-rename warning"
-echo "$TAG PASS(skip): unprovable rename reported; the provable one still applied"
+expect_log skip "private_fn_identity: left 1 private fn(s) unrenamed" "the skipped-rename note"
+if grep -Fq "error[private_fn_identity]" "$WORK/skip.log"; then
+  fail "skip: refused a compile whose collision was fully resolved"
+fi
+echo "$TAG PASS(skip): unprovable rename skipped; no collision remains, so it compiles"
+
+# --- exact identity, symbol reservation, capacity -----------------------------
+compile_and_run hashcoll "$FIX/hashcoll/main.sio"
+expect_output hashcoll "$FIX/hashcoll/expected.txt"
+echo "$TAG PASS(hashcoll): ab / bA (same ast_name_hash) are not confused"
+
+compile_and_run symcoll "$FIX/symcoll/main.sio"
+expect_output symcoll "$FIX/symcoll/expected.txt"
+echo "$TAG PASS(symcoll): a private fn named like a method symbol is kept apart"
+
+compile_and_run reserved "$FIX/reserved/main.sio"
+expect_output reserved "$FIX/reserved/expected.txt"
+echo "$TAG PASS(reserved): a generated name never reuses an existing symbol"
+
+compile_and_run reservedglobal "$FIX/reservedglobal/main.sio"
+expect_output reservedglobal "$FIX/reservedglobal/expected.txt"
+echo "$TAG PASS(reservedglobal): a generated name never reuses a module global"
+
+compile_and_run capacity "$FIX/capacity/main.sio"
+expect_output capacity "$FIX/capacity/expected.txt"
+expect_log capacity "private_fn_identity: renamed 70 same-named private fn(s) in 1 module(s)" "all 70 renames (the second module is then unique)"
+echo "$TAG PASS(capacity): 70 colliding private fns per module, none left behind"
+
+# --- unresolved: refuse, do not warn -------------------------------------------
+# Every colliding module has a parameter spelled like the fn, so none can be
+# renamed and the two bodies would share one slot. The compile must STOP.
+ulog="$WORK/unresolved.log" uelf="$WORK/unresolved.elf"
+if "$RAW" --native-compile "$FIX/unresolved/main.sio" -o "$uelf" >"$ulog" 2>&1; then
+  tail -n 25 "$ulog" >&2 || true
+  fail "unresolved: compiled although every colliding module was unrenamable (a known-wrong executable)"
+fi
+grep -Fq 'error[private_fn_identity]: private fn `helper` (module #1)' "$ulog" || {
+  tail -n 25 "$ulog" >&2 || true
+  fail "unresolved: refused, but without the error[private_fn_identity] diagnostic naming the fn and module"
+}
+if [[ -s "$uelf" ]]; then
+  fail "unresolved: the compile was refused but an ELF was still written"
+fi
+echo "$TAG PASS(unresolved): unrenamable collision refused with a diagnostic, no executable"
 
 # --- positive control: pass off => the repro is NOT right -------------------
 # A green gate must be able to go red. With the pass disabled the merged IR is

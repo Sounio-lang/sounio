@@ -13,7 +13,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-
 
 > Under **current-source Madaros**, two modules that each define a private
 > `fn helper` keep **separate bodies**. Each module's callers run that module's
-> `helper`, in either import order, and the compiler says so when it renames.
+> `helper`, in either import order. If it cannot tell them apart it **refuses to
+> compile**; it never emits an executable in which they share one body.
 
 Before this change the program compiled clean and printed the wrong answer.
 
@@ -75,40 +76,62 @@ at the AST, before any of them run, needs no other consumer to learn about modul
 
 ```
 private fn N defined (with a body) in >= 2 loaded modules
-  -> in each module that defines it privately:
+  -> in each module, in load order, that STILL shares the name with another
+     module's definition when its turn comes:
        the definition and every reference to it in that module
        become  N__m<module index>
+
+The check is exact and runs against the programs as they now are, so the rename
+is minimal: once every other definition has been renamed away, the last one is
+unique and keeps its bare name (2 colliding modules -> 1 rename).
 ```
 
-* Only the **private** definitions are renamed. A pub `N` keeps its name (importers
-  spell it that way). `main`, `extern` declarations and GPU kernels are never touched.
+* Only the **private** real definitions are renamed. A pub `N` keeps its name
+  (importers spell it that way). `main`, `extern` declarations and GPU kernels are
+  never touched.
 * The mutation is **in place** through raw pointers to heap nodes (boxed `Expr`,
   boxed `FnDef`, `ItemList`/`ExprList` nodes). Nothing is written back into
   `programs[]`: module_frontend documents that nested field-in-array stores are
   dropped by lean_single and that a whole-`Program` writeback SEGV'd at `seed_begin`.
-* It runs before the specializer merge, typecheck, DCE, FO preregistration and
-  lowering, so both pipelines see unique names.
+* It runs once per compile, from the two multi-module entry points, before the
+  specializer merge, typecheck, DCE, FO preregistration and lowering, so both
+  pipelines see unique names. It can **refuse** (see below); both callers stop.
 * Function values (`apply(helper, x)`, `let f = helper`), recursion, and `impl` /
   `trait` method bodies that call a private fn are rewritten.
 * `SOUNIO_DISABLE_PRIVATE_FN_IDENTITY=1` skips the pass (attribution knob, like
   `SOUNIO_DISABLE_MM_DCE`).
 
+### Identity is exact, and the census is of every emitted symbol
+
+Review of the first version (PR #2598) found four ways the pass could still bind
+two functions to one body. All four were reproduced on the first version before
+being fixed, and each now has a fixture:
+
+| finding | reproduced as | fix |
+|---|---|---|
+| names were matched by `(ast_name_hash, len)`; djb2 is not collision-free (`ab` and `bA` collide) | `hashcoll`: compile error E137 -- a reference to `bA` was rewritten to the non-existent `bA__m1` | the per-module table stores and compares the **full name bytes**; the hash is only a prefilter, and a candidate is renamed only after an exact scan finds the same name in another module |
+| the census counted only real fns, so a private fn could collide with an extern / kernel / global / `Type_method` symbol, and a generated `name__m<N>` could reuse one | `reserved`: `method=1`, baseline `780` -- the generated name clobbered a method symbol. `symcoll`: garbage result | the census covers **every** symbol lowering puts in its one name-keyed table (all top-level fn items, BSS globals, and `Type_method` for every impl method); it decides both "another module defines this" and "this generated name is free" |
+| a generated name could reuse a module **global** (a global is an `ItemFn` with no body) | `reservedglobal`: `global=4198400`, baseline `41` | covered by the same complete census, which counts every `ItemFn` regardless of `fn_def` |
+| the per-module table held 64 names and silently dropped the rest | `capacity`: `b=66415`, want `72415` -- exactly the 6 names past 64 were left colliding | table 512, census 65536; exhausting either **aborts the compile** |
+| a name skipped as unsafe only produced a warning, so if every colliding module skipped, the executable was wrong | `unresolved`: `7`, correct `26` | after all modules are processed, each skipped name is re-checked (exactly) against the other modules; if another module still defines the symbol the compile is **refused** with `error[private_fn_identity]`, no ELF written |
+
 ### What it refuses to guess
 
 A rename is sound only if every occurrence of the identifier in the module means
-the function. For a `(module, name)` where that cannot be shown, **the rename is
-skipped and reported**:
+the function. The unprovable shapes are a local, parameter, pattern, `for` or
+closure binding spelled like the fn, and a value use of the fn inside a match-arm
+body or a struct-literal field (stored by value in the list node, not behind a
+`Box`). For a `(module, name)` with such a shape the rename is skipped, which is
+accepted **only if no collision remains**: when every other definition of the name
+was renamed away it is unique again and is merely noted
+(`private_fn_identity: left N private fn(s) unrenamed`). Otherwise:
 
 ```
-warning[private_fn_identity]: private fn `helper` in module #1
-  has the same name as a fn in another module and could not be renamed: ...
+error[private_fn_identity]: private fn `helper` (module #1) shares its name with a
+  definition in module #2 and cannot be renamed safely: ...
+  Both would compile to ONE function.
+  Rename one of them.
 ```
-
-The unprovable shapes are a local, parameter, pattern, `for` or closure binding
-spelled like the fn, and a value use of the fn inside a match-arm body or a
-struct-literal field (stored by value in the list node, not behind a `Box`).
-If every colliding module skips, first-loaded-wins is still in force for that
-name -- **reported, not fixed**.
 
 ## Evidence
 
@@ -121,7 +144,9 @@ Gate: `scripts/ci/madaros_private_fn_identity_gate.sh`, fixtures in
 |---|---|---|
 | repro, both import orders | `a=1 b=1` / `a=20 b=20` | `a=1 b=20` both |
 | `rich` (3 modules, recursion, fn values, impl method, pub/private mix) | 5 of 11 lines wrong | all 11 exact |
-| `skip` (parameter shadows the fn) | `sa=1 sb=1` | `sa=1 sb=20` + warning |
+| `skip` (parameter shadows the fn in one module) | `sa=1 sb=1` | `sa=1 sb=20`, noted, no error |
+| `unresolved` (shadowed in every colliding module) | compiles, prints `7` (correct `26`) | **refused**, `error[private_fn_identity]`, no ELF |
+| `hashcoll`, `symcoll`, `reserved`, `capacity` | wrong / garbage | exact |
 | gate | **FAIL** at `basic` with a diff | **PASS** (incl. off-switch control) |
 | #854 `duplicate_private_single_main` | exit 12 | `PASS`, exit 0 |
 | #854 `duplicate_private_18_main` | exit 23 | `PASS`, exit 0 |
@@ -170,6 +195,17 @@ Mangled names appear in diagnostics: an E035 on a colliding fn now names
 
 ## claims_not_made
 
+* **Parse-time constant folding is still name-keyed and is NOT fixed.** The parser
+  folds pure-fn calls in global initialisers through `GLOBAL_VAR_INIT_*`, a table
+  keyed by the *bare* name that is deliberately accumulated across modules. A
+  global initialised from a colliding private pure fn can therefore bake the wrong
+  module's value: with `pfi_a::helper() = 1`, `pfi_b::helper() = 20` and
+  `var G: i64 = helper()` in `pfi_b`, `G` reads `1` (want `20`) on the baseline
+  **and** with this change. It happens at parse time, before any AST pass runs, and
+  the same table holds same-named private *globals*, so it belongs with the
+  "same-named private globals" item below and needs the parser's tables to become
+  module-aware.
+
 * **Same-named private globals** (`var` / `const`, BSS slots keyed by name) and
   **same-named types** (`struct_layouts`, `enum_variants`) are the same class and
   are **not covered**.
@@ -179,6 +215,9 @@ Mangled names appear in diagnostics: an E035 on a colliding fn now names
   compile path renames.
 * The 81-root in-tree set was sampled (27 roots), not run exhaustively; the full
   suite is CI's job, and it was red on main for unrelated reasons before this change.
-* Skipped-rename shapes (see above) still fall back to first-loaded-wins.
+* Extern declarations and GPU kernels are counted as symbols a private fn can
+  collide with, and their names are never reused by a generated name, but no
+  fixture exercises an `extern` collision directly (its lowering has builtin-dispatch
+  special cases); the method-symbol fixtures cover the same census path.
 * Not a fix for the lowering funnels themselves: identity there is still the bare
   name. This removes the *ambiguity* before it reaches them.
