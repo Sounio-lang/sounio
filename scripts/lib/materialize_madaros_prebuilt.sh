@@ -110,7 +110,7 @@ sounio_materialize_madaros_prebuilt() {
     return 78
   fi
   if ! { chmod 755 "$tmp" && mv -f "$tmp" "$elf"; }; then
-    rm -f "$tmp"
+    rm -f "$tmp" "$elf" "$stamp"
     echo "error: madaros prebuilt: could not install bin/madaros-linux-x86_64" >&2
     return 78
   fi
