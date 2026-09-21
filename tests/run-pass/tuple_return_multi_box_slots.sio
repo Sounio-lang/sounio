@@ -1,0 +1,98 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout-contains: TUPLE_MULTI_BOX_OK
+// A function returning a tuple with SEVERAL Box slots must have every slot typed by
+// the callee's declared return, not only the first. A and B put the same field names
+// at different indices, so a field read that falls back to resolving by NAME reads the
+// wrong offset for whichever slot was left untyped.
+
+struct A {
+    x: i64,
+    y: i64,
+}
+
+struct B {
+    y: i64,
+    x: i64,
+}
+
+struct C {
+    z: i64,
+    w: i64,
+}
+
+struct Maker {
+    k: i64,
+}
+
+// Two Box slots: the second one used to lose its layout.
+fn make_pair() -> (Box<A>, Box<B>) with Alloc {
+    (Box::new(A { x: 1, y: 2 }), Box::new(B { y: 10, x: 20 }))
+}
+
+// Box slots that are not first, with plain slots in between.
+fn make_gapped() -> (i64, Box<A>, i64, Box<B>, Box<C>) with Alloc {
+    (7, Box::new(A { x: 3, y: 4 }), 8, Box::new(B { y: 30, x: 40 }), Box::new(C { z: 100, w: 200 }))
+}
+
+impl Maker {
+    // Method-call binding takes a separate path from a plain call.
+    fn pair(self: &Maker) -> (Box<B>, Box<A>) with Alloc {
+        (Box::new(B { y: 50, x: 60 }), Box::new(A { x: 5, y: 6 }))
+    }
+}
+
+fn check(bad: i64, got: i64, want: i64) -> i64 with IO, Mut, Panic, Div {
+    if got != want {
+        print("MISMATCH got=")
+        print_int(got)
+        print(" want=")
+        print_int(want)
+        print("\n")
+        return bad + 1
+    }
+    bad
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div, Alloc {
+    var bad: i64 = 0
+
+    let p = make_pair()
+    let pa = p.0
+    let pb = p.1
+    bad = check(bad, pa.x, 1)
+    bad = check(bad, pa.y, 2)
+    bad = check(bad, pb.y, 10)
+    bad = check(bad, pb.x, 20)
+
+    let g = make_gapped()
+    let gn0 = g.0
+    let ga = g.1
+    let gn2 = g.2
+    let gb = g.3
+    let gc = g.4
+    bad = check(bad, gn0, 7)
+    bad = check(bad, ga.x, 3)
+    bad = check(bad, ga.y, 4)
+    bad = check(bad, gn2, 8)
+    bad = check(bad, gb.y, 30)
+    bad = check(bad, gb.x, 40)
+    bad = check(bad, gc.z, 100)
+    bad = check(bad, gc.w, 200)
+
+    let m = Maker { k: 1 }
+    let mp = m.pair()
+    let mb = mp.0
+    let ma = mp.1
+    bad = check(bad, mb.y, 50)
+    bad = check(bad, mb.x, 60)
+    bad = check(bad, ma.x, 5)
+    bad = check(bad, ma.y, 6)
+
+    if bad == 0 {
+        print("TUPLE_MULTI_BOX_OK\n")
+        return 0
+    }
+    print("TUPLE_MULTI_BOX_FAIL\n")
+    1
+}

@@ -75,12 +75,13 @@ struct LowerLocalStack {
     // would read a bool as a struct.
     tuple_struct_layout: Box<LowerLocalI64Slots>,
     tuple_struct_slot: Box<LowerLocalI64Slots>,
-    // Slot k of a tuple local that holds Box<T> (-1 none), and T's layout (-1 unknown).
+    // fn_id of the callee whose tuple return carries Box<T> slots (-1 none). The slots
+    // and their T are read back per projected slot (return_tuple_box_layout_for_fn_slot),
+    // so a tuple with several Box slots keeps every one of them typed.
     // tuple_struct_slot records only the first NAMED struct slot, so in
     // (Parser, Box<ExprList>) the Box in slot 1 was invisible and `let first = pair.1`
     // bound an untagged local whose `*first` took the raw-pointer deref.
-    tuple_box_slot: Box<LowerLocalI64Slots>,
-    tuple_box_layout: Box<LowerLocalI64Slots>,
+    tuple_box_fn: Box<LowerLocalI64Slots>,
     // f64 register carrying the GUM variance shadow for scalar locals, or -1 when absent.
     variance_regs: Box<LowerLocalI64Slots>,
     // -1 = not a capturing closure; otherwise the synthetic closure fn_id whose captures
@@ -146,8 +147,7 @@ fn empty_lower_local_stack() -> LowerLocalStack with Alloc, Mut {
         tuple0_array_elem_layout: lowerer_box_local_i64_slots(-1),
         tuple_struct_layout: lowerer_box_local_i64_slots(-1),
         tuple_struct_slot: lowerer_box_local_i64_slots(-1),
-        tuple_box_slot: lowerer_box_local_i64_slots(-1),
-        tuple_box_layout: lowerer_box_local_i64_slots(-1),
+        tuple_box_fn: lowerer_box_local_i64_slots(-1),
         variance_regs: lowerer_box_local_i64_slots(-1),
         closure_fn_id: lowerer_box_local_i64_slots(-1),
         box_inner_layout: lowerer_box_local_i64_slots(-1),
@@ -4504,8 +4504,7 @@ fn lowerer_bind_local_mut(
         // function's Box param leaks into an unrelated local rebound at the
         // same slot and turns its plain field access into a phantom Box deref.
         (*(*locals_box).box_inner_layout).values[idx as usize] = 0 - 1
-        (*(*locals_box).tuple_box_slot).values[idx as usize] = 0 - 1
-        (*(*locals_box).tuple_box_layout).values[idx as usize] = 0 - 1
+        (*(*locals_box).tuple_box_fn).values[idx as usize] = 0 - 1
         (*locals_box).count = idx + 1
         (*lo).locals = locals_box
     } else {
@@ -6718,8 +6717,12 @@ fn lower_option_box_inner_type_name(ty: &TypeExpr) -> Name with Mut, Panic, Div 
 
 // Where a declared return type carries a Box<T>, and which T.
 //   -2      the return value itself is Box<T>
-//   k >= 0  slot k of a returned tuple is Box<T> (the first such slot)
+//   k >= 0  a returned tuple has Box<T> slots; k is the first (return_box_slot only
+//           says THAT there are some -- every slot's T is in return_box_inner_id)
 //   -1      neither
+// return_box_inner_id is the interned T for -2, and for a tuple the interned
+// per-slot list built by lower_tuple_box_slot_list, so a tuple with several Box slots
+// keeps every T and nothing outside these helpers has to know the encoding.
 // return_struct_name records only "Box" for `-> Box<T>`, and only the FIRST named
 // struct slot of a tuple, so T was lost at registration. A binding of such a
 // result then carried the "Box" tag with no inner layout, or no tag at all, and
@@ -6757,6 +6760,98 @@ fn lower_type_list_box_inner_at(opt: &Option<Box<TypeExprList>>, k: i64) -> Name
     }
 }
 
+fn lower_type_list_len(opt: &Option<Box<TypeExprList>>) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(list) => 1 + lower_type_list_len(&(*list).tail),
+        None => 0,
+    }
+}
+
+fn lower_type_list_slot_is_box(opt: &Option<Box<TypeExprList>>, k: i64) -> bool with Mut, Panic, Div {
+    match *opt {
+        Some(list) => {
+            if k <= 0 {
+                return lower_type_expr_is_box(&(*list).head)
+            }
+            lower_type_list_slot_is_box(&(*list).tail, k - 1)
+        }
+        None => false,
+    }
+}
+
+// The Box<T> slots of a returned tuple, one component per slot joined by ',': T's
+// name for a Box slot ("?" when T is unnamed, so the slot still reads as a Box),
+// empty for any other slot, cut after the last Box slot. `(A, Box<B>, i64, Box<C>)`
+// is ",B,,C". It is interned as ONE name so it rides in return_box_inner_id through
+// every copy of the function record unchanged. Empty when it does not fit a name;
+// the slots then stay untyped, which is the behaviour before any of this existed.
+fn lower_tuple_box_slot_list(te: &TypeExpr) -> Name with Mut, Panic, Div {
+    var out = ir_empty_name()
+    let n = lower_type_list_len(&(*te).type_args)
+    var pos: i64 = 0
+    var end: i64 = 0
+    var k: i64 = 0
+    var fits = true
+    while k < n {
+        if k > 0 {
+            if pos >= 384 {
+                fits = false
+            } else {
+                out.buf[pos as usize] = 44 as i8
+                pos = pos + 1
+            }
+        }
+        if lower_type_list_slot_is_box(&(*te).type_args, k) {
+            var inner = lower_type_list_box_inner_at(&(*te).type_args, k)
+            if inner.len <= 0 {
+                inner = make_name("?")
+            }
+            var j: i64 = 0
+            while j < inner.len {
+                if pos >= 384 {
+                    fits = false
+                    j = inner.len
+                } else {
+                    out.buf[pos as usize] = inner.buf[j as usize]
+                    pos = pos + 1
+                    j = j + 1
+                }
+            }
+            end = pos
+        }
+        k = k + 1
+    }
+    if !fits {
+        return ir_empty_name()
+    }
+    out.len = end
+    out
+}
+
+// Component `slot` of a list built by lower_tuple_box_slot_list; empty when the slot
+// is not a Box or is past the end.
+fn lower_box_slot_list_component(list: Name, slot: i64) -> Name with Mut, Panic, Div {
+    var out = ir_empty_name()
+    var idx: i64 = 0
+    var w: i64 = 0
+    var i: i64 = 0
+    while i < list.len {
+        let b = list.buf[i as usize] as i64
+        if b == 44 {
+            idx = idx + 1
+            if idx > slot {
+                i = list.len
+            }
+        } else if idx == slot {
+            out.buf[w as usize] = list.buf[i as usize]
+            w = w + 1
+        }
+        i = i + 1
+    }
+    out.len = w
+    out
+}
+
 fn lower_opt_type_return_box_slot(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
     match *opt {
         Some(te) => {
@@ -6779,9 +6874,8 @@ fn lower_opt_type_return_box_inner_name(opt: &Option<Box<TypeExpr>>) -> Name wit
                 return lower_box_inner_type_name(&(*te))
             }
             if (*te).kind == TypeExprKind::TypeTuple {
-                let k = lower_type_list_first_box_slot(&(*te).type_args, 0)
-                if k >= 0 {
-                    return lower_type_list_box_inner_at(&(*te).type_args, k)
+                if lower_type_list_first_box_slot(&(*te).type_args, 0) >= 0 {
+                    return lower_tuple_box_slot_list(&(*te))
                 }
             }
             ir_empty_name()
@@ -9114,8 +9208,7 @@ impl Lowerer {
                 (*(*stk).variance_regs).values[idx as usize] = -1
                 // Explicit -1: slot reuse across functions — see lowerer_bind_local_mut.
                 (*(*stk).box_inner_layout).values[idx as usize] = 0 - 1
-                (*(*stk).tuple_box_slot).values[idx as usize] = 0 - 1
-                (*(*stk).tuple_box_layout).values[idx as usize] = 0 - 1
+                (*(*stk).tuple_box_fn).values[idx as usize] = 0 - 1
                 (*(*stk).fn_ptr_ret_float).values[idx as usize] = 0
                 (*stk).count = idx + 1
             lo.locals = stk
@@ -9221,15 +9314,16 @@ impl Lowerer {
         0 - 1
     }
 
-    fn bind_local_tuple_box(self, name: Name, layout_idx: i64, slot: i64) -> Lowerer with Mut, Alloc, Panic, Div {
+    // Remember which callee's tuple return a local was bound from, so any of that
+    // tuple's Box slots can be typed when it is projected (see lookup_local_tuple_box_layout).
+    fn bind_local_tuple_box(self, name: Name, callee_fn_id: i64) -> Lowerer with Mut, Alloc, Panic, Div {
         var lo = self
-        if slot < 0 { return lo }
+        if callee_fn_id < 0 { return lo }
         var stk = *lo.locals
         var i = stk.count - 1
         while i >= 0 {
             if (*stk.depths).values[i as usize] <= lo.scope_depth && ir_name_eq((*stk.names).values[i as usize], name) {
-                (*stk.tuple_box_slot).values[i as usize] = slot
-                (*stk.tuple_box_layout).values[i as usize] = layout_idx
+                (*stk.tuple_box_fn).values[i as usize] = callee_fn_id
                 lo.locals = Box::new(stk)
                 return lo
             }
@@ -9239,15 +9333,15 @@ impl Lowerer {
     }
 
     // Layout of T when slot `slot` of tuple local `name` is Box<T> (-1 when T is
-    // unknown); -2 when that slot is not a Box -- including a DIFFERENT recorded slot.
+    // unknown); -2 when that slot is not a Box. Every Box slot of the callee's tuple
+    // return is answered, not only the first.
     fn lookup_local_tuple_box_layout(self, name: Name, slot: i64) -> i64 with Mut, Panic, Div, Alloc {
         var i = (*self.locals).count - 1
         while i >= 0 {
             if (*(*self.locals).depths).values[i as usize] <= self.scope_depth && ir_name_eq((*(*self.locals).names).values[i as usize], name) {
-                if (*(*self.locals).tuple_box_slot).values[i as usize] == slot {
-                    return (*(*self.locals).tuple_box_layout).values[i as usize]
-                }
-                return 0 - 2
+                let callee = (*(*self.locals).tuple_box_fn).values[i as usize]
+                if callee < 0 { return 0 - 2 }
+                return self.return_tuple_box_layout_for_fn_slot(callee, slot)
             }
             i = i - 1
         }
@@ -13228,11 +13322,26 @@ impl Lowerer {
         0 - 1
     }
 
+    // Whole-`Box<T>` returns only (return_box_slot == -2), where return_box_inner_id
+    // is T itself. A tuple return stores a per-slot list there instead: use
+    // return_tuple_box_layout_for_fn_slot.
     fn return_box_inner_layout_for_fn_id(self, fn_id: i64) -> i64 with Mut, Panic, Div, Alloc {
         if self.return_box_slot_for_fn_id(fn_id) == 0 - 1 {
             return 0 - 1
         }
         let inner = ir_name_at(ir_fn_get(&(*self.module), fn_id as usize).return_box_inner_id)
+        lower_struct_layout_index_of(&(*self.struct_layouts), inner)
+    }
+
+    // Layout of T for tuple slot `slot` of fn_id's declared return when that slot is
+    // Box<T> (-1 when T is unnamed or has no layout); -2 when the slot is not a Box,
+    // the function does not return a tuple with Box slots, or nothing was recorded.
+    fn return_tuple_box_layout_for_fn_slot(self, fn_id: i64, slot: i64) -> i64 with Mut, Panic, Div, Alloc {
+        if slot < 0 { return 0 - 2 }
+        if self.return_box_slot_for_fn_id(fn_id) < 0 { return 0 - 2 }
+        let list = ir_name_at(ir_fn_get(&(*self.module), fn_id as usize).return_box_inner_id)
+        let inner = lower_box_slot_list_component(list, slot)
+        if inner.len <= 0 { return 0 - 2 }
         lower_struct_layout_index_of(&(*self.struct_layouts), inner)
     }
 
@@ -16401,8 +16510,7 @@ impl Lowerer {
                         (*(*locals).is_unsigned_int).values[idx as usize] = if lower_type_expr_is_unsigned_int(&(*list).head.ty) { 1 } else { 0 }
                         (*(*locals).is_ref).values[idx as usize] = if lower_type_expr_is_ref_like(&(*list).head.ty) { 1 } else { 0 }
                         (*(*locals).box_inner_layout).values[idx as usize] = if lower_type_expr_is_box(&(*list).head.ty) { lower_struct_layout_index_of(&(*lo.struct_layouts), lower_box_inner_type_name(&(*list).head.ty)) } else { 0 - 1 }
-                        (*(*locals).tuple_box_slot).values[idx as usize] = 0 - 1
-                        (*(*locals).tuple_box_layout).values[idx as usize] = 0 - 1
+                        (*(*locals).tuple_box_fn).values[idx as usize] = 0 - 1
                         if lower_type_expr_is_box(&(*list).head.ty) && str_eq(read_env("SOUNIO_BOX_TRACE"), "1") {
                             print("boxtrace: WRITE-B ")
                             print(str_from_bytes((*list).head.name.buf, (*list).head.name.len))
@@ -17953,9 +18061,8 @@ impl Lowerer {
                             lo.return_tuple_struct_name_for_fn_id(tuple_callee_id))
                         lo = lo.bind_local_tuple_struct(s.name, tuple_struct_layout, tuple_struct_slot)
                     }
-                    let tuple_box_slot = lo.return_box_slot_for_fn_id(tuple_callee_id)
-                    if tuple_box_slot >= 0 {
-                        lo = lo.bind_local_tuple_box(s.name, lo.return_box_inner_layout_for_fn_id(tuple_callee_id), tuple_box_slot)
+                    if lo.return_box_slot_for_fn_id(tuple_callee_id) >= 0 {
+                        lo = lo.bind_local_tuple_box(s.name, tuple_callee_id)
                     }
                     if !callee_is_box {
                         let ret_name = lo.expr_call_return_struct_name_ref(&(*expr_box))
@@ -18134,9 +18241,8 @@ impl Lowerer {
                             lo.return_tuple_struct_name_for_fn_id(fn_id))
                         lo = lo.bind_local_tuple_struct(s.name, m_layout, m_slot)
                     }
-                    let m_box_slot = lo.return_box_slot_for_fn_id(fn_id)
-                    if m_box_slot >= 0 {
-                        lo = lo.bind_local_tuple_box(s.name, lo.return_box_inner_layout_for_fn_id(fn_id), m_box_slot)
+                    if lo.return_box_slot_for_fn_id(fn_id) >= 0 {
+                        lo = lo.bind_local_tuple_box(s.name, fn_id)
                     }
                 } else if (*expr_box).kind == ExprKind::ExprIf {
                     // `let pair = if cond { a.wide() } else { a.narrow() }`.
