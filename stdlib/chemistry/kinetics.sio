@@ -534,6 +534,10 @@ pub fn simulate_chem_network_full(init_val: &[f64; 4], init_var: &[f64; 4], ks: 
     let sys = epistemic::ode::ode_system_chem_simple();
     let opts = epistemic::ode::solver_options_fixed(dt, nsteps);
     let sol = epistemic::ode::solve_ode(sys, y0, p, 0.0, dt * (nsteps as f64), opts);
+    // An incomplete solve (status != 0: non-finite state, or max_steps used up first) leaves the
+    // last stored point at the last VALID time -- for a non-finite first step that is the initial
+    // state. Returning it would present it as the final state, so fail instead.
+    if sol.status != 0 { panic("chemistry::kinetics: ODE solve did not reach its end time (non-finite state)") }
     let last = sol.n_steps - 1;
     var outv: [f64; 4] = [0.0; 4];
     var outu: [f64; 4] = [0.0; 4];
@@ -567,6 +571,10 @@ pub fn simulate_pbpk_clearance_full(init_val: &[f64; 4], init_var: &[f64; 4], ks
     let sys = epistemic::ode::ode_system_pbpk_clearance();
     let opts = epistemic::ode::solver_options_fixed(dt, nsteps);
     let sol = epistemic::ode::solve_ode(sys, y0, p, 0.0, dt * (nsteps as f64), opts);
+    // An incomplete solve (status != 0: non-finite state, or max_steps used up first) leaves the
+    // last stored point at the last VALID time -- for a non-finite first step that is the initial
+    // state. Returning it would present it as the final state, so fail instead.
+    if sol.status != 0 { panic("chemistry::kinetics: ODE solve did not reach its end time (non-finite state)") }
     let last = sol.n_steps - 1;
     var outv: [f64; 4] = [0.0; 4];
     var outu: [f64; 4] = [0.0; 4];
@@ -1478,12 +1486,12 @@ pub fn test_bench_pbpk() -> bool with Mut, Div, Panic {
     let m = bench_pbpk_submodels(24.0);
     // The liver submodel is linear in its input, gut_v = fractional_decay_ml(..), whose standard
     // uncertainty is 5% of it (gut_u = 0.05 gut_v). Per unit of input, from the closed form of
-    // the linear chain (t = 23.76, k = [0.05, 0.02, 0.01], u_k = [0.004, 0.002, 0.0015]):
-    //   sigma(M1) = sqrt( (M1_unit * 0.05)^2 + sum_k (dM1/dk_k * u_k)^2 ) = 0.032250425
+    // the linear chain (t = 24, k = [0.05, 0.02, 0.01], u_k = [0.004, 0.002, 0.0015]):
+    //   sigma(M1) = sqrt( (M1_unit * 0.05)^2 + sum_k (dM1/dk_k * u_k)^2 ) = 0.032248621
     // (independent evaluation). The old target 0.05 +- 0.03 had no derivation; it passed only
     // because the initial uncertainty used to be fed to the solver as a variance, unsquared.
     let gut_v = fractional_decay_ml(1.0, 0.8, 24.0, 0.8);
-    let want = gut_v * 0.032250425;
+    let want = gut_v * 0.032248621;
     check_near(m, want, 0.001 * want)
 }
 
@@ -1539,8 +1547,18 @@ pub fn pbpk_full_metabolic(init_d: f64, u_d: f64, t: f64) -> ([f64; 4], [f64; 4]
     let u4: [f64; 4] = [u_d * u_d, 0.0, 0.0, 0.0];
     let ks: [f64; 3] = [0.05, 0.02, 0.01];
     let us: [f64; 3] = [0.004, 0.002, 0.0015];
-    let steps = (t * 3.0) as i64;
-    let (ov, ou) = simulate_pbpk_clearance_full(&init4, &u4, &ks, &us, 0.33, steps);
+    // Integrate to EXACTLY t: n = ceil(t / 0.33) equal steps of dt = t / n <= 0.33. (It used to
+    // take (t * 3) steps of 0.33, which stops at 23.76 for t = 24 and takes no step at all for
+    // t < 1/3.) t = 0 returns the initial state; NaN, negative or absurd t fails.
+    if !(t >= 0.0) || t > 1.0e6 { panic("pbpk_full_metabolic: t must be finite and in [0, 1e6]") }
+    if t == 0.0 {
+        return ([init_d, 0.0, 0.0, 0.0], [u_d, 0.0, 0.0, 0.0])
+    }
+    let ratio = t / 0.33;
+    var steps = ratio as i64;
+    if (steps as f64) < ratio { steps = steps + 1 }
+    let dt = t / (steps as f64);
+    let (ov, ou) = simulate_pbpk_clearance_full(&init4, &u4, &ks, &us, dt, steps);
     ([ov[0],ov[1],ov[2],ov[3]], [ou[0],ou[1],ou[2],ou[3]])
 }
 
@@ -1548,12 +1566,12 @@ pub fn test_pbpk_full() -> bool with Mut, Div, Panic {
     let (ov, ou) = pbpk_full_metabolic(1.0, 0.05, 24.0);
     // FULL Knowledge<CHEBI_15377>
     let _k_water: CHEBI_15377 = chebi_water();
-    // 72 steps of dt=0.33 (t=23.76). Exact solution of the linear system (independent
+    // t = 24 exactly (73 steps of 24/73). Exact solution of the linear system (independent
     // closed-form evaluation, D0=1, k=[0.05,0.02,0.01]):
-    //   Drug=0.304830  M1=0.463598  M2=0.154381  Cleared=0.077191   (sum = 1)
-    // RK4 at k*dt ~ 0.017 matches it to ~1e-10, so 1e-4 leaves room only for rounding.
-    check_near(ov[0], 0.304830, 0.0001) && check_near(ov[1], 0.463598, 0.0001)
-        && check_near(ov[2], 0.154381, 0.0001) && check_near(ov[3], 0.077191, 0.0001)
+    //   Drug=0.301194  M1=0.463895  M2=0.156607  Cleared=0.078304   (sum = 1)
+    // RK4 at k*dt ~ 0.016 matches it to ~1e-10, so 1e-4 leaves room only for rounding.
+    check_near(ov[0], 0.301194, 0.0001) && check_near(ov[1], 0.463895, 0.0001)
+        && check_near(ov[2], 0.156607, 0.0001) && check_near(ov[3], 0.078304, 0.0001)
         && check_near(ov[0] + ov[1] + ov[2] + ov[3], 1.0, 0.0001)
         && ou[1] > 0.0 && ou[3] > 0.0
 }

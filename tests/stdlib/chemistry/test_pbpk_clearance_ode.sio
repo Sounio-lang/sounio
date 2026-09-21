@@ -50,6 +50,19 @@ fn expn(x: f64) -> f64 with Mut, Div, Panic {
 
 fn rel(a: f64, b: f64) -> f64 { absf(a - b) / absf(b) }
 
+// exact [Drug, M1, M2, Cleared] of the linear chain at time t (D0 = 1, k = [0.05, 0.02, 0.01])
+fn exact_state(t: f64) -> [f64; 4] with Mut, Div, Panic {
+    let k1 = 0.05
+    let k2 = 0.02
+    let k3 = 0.01
+    let a = k2 + k3
+    let e1 = expn(k1 * t)
+    let ea = expn(a * t)
+    let integ = k1 * ((1.0 - e1) / k1 - (1.0 - ea) / a) / (a - k1)
+    let out: [f64; 4] = [e1, k1 * (e1 - ea) / (a - k1), k2 * integ, k3 * integ]
+    out
+}
+
 fn main() -> i32 with IO, Mut, Div, Panic {
     var fail: i32 = 0
     let d0 = 1.0
@@ -120,11 +133,35 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     print("sigma Drug (k1 only) ") print(u3[0]) print(" exact ") print(sig_drug) println("")
     if rel(u3[0], sig_drug) > 1.0e-6 { fail = fail + 1; println("FAIL sigma Drug from k1") }
 
-    // ---- 5. the public entry point wraps the same model -------------------------------------
+    // ---- 5. the public entry point reaches the REQUESTED time --------------------------------
+    // t = 24 is 73 steps of 24/73, not 72 steps of 0.33 (which stop at 23.76: M1 would be
+    // 0.463598 instead of 0.463895, a 6e-4 relative difference the 1e-8 bound below rejects)
+    let x24 = exact_state(24.0)
     let (pv, pu) = pbpk_full_metabolic(1.0, 0.05, 24.0)
-    if rel(pv[1], m1) > 1.0e-8 { fail = fail + 1; println("FAIL pbpk_full_metabolic M1") }
-    if rel(pv[3], cl) > 1.0e-8 { fail = fail + 1; println("FAIL pbpk_full_metabolic Cleared") }
+    print("t=24: M1 ") print(pv[1]) print(" exact ") print(x24[1]) println("")
+    if rel(pv[0], x24[0]) > 1.0e-8 { fail = fail + 1; println("FAIL pbpk_full_metabolic Drug at t=24") }
+    if rel(pv[1], x24[1]) > 1.0e-8 { fail = fail + 1; println("FAIL pbpk_full_metabolic M1 at t=24") }
+    if rel(pv[2], x24[2]) > 1.0e-8 { fail = fail + 1; println("FAIL pbpk_full_metabolic M2 at t=24") }
+    if rel(pv[3], x24[3]) > 1.0e-8 { fail = fail + 1; println("FAIL pbpk_full_metabolic Cleared at t=24") }
     if !(pu[1] > 0.0) || !(pu[3] > 0.0) { fail = fail + 1; println("FAIL pbpk_full_metabolic uncertainty") }
+
+    // shorter horizons: t < 1/3 must still take a step (it used to take none), and t that is
+    // not a multiple of 0.33 must land on t, not on the previous multiple
+    var ti = 0
+    while ti < 2 {
+        let tq = if ti == 0 { 0.2 } else { 1.0 }
+        let xq = exact_state(tq)
+        let (pq, _uq) = pbpk_full_metabolic(1.0, 0.05, tq)
+        var qi = 0
+        while qi < 4 {
+            if absf(pq[qi] - xq[qi]) > 1.0e-9 { fail = fail + 1; println("FAIL pbpk_full_metabolic at a short horizon") }
+            qi = qi + 1
+        }
+        ti = ti + 1
+    }
+    // t = 0 is the initial state, with its own standard uncertainty
+    let (p0, u0z) = pbpk_full_metabolic(1.0, 0.05, 0.0)
+    if p0[0] != 1.0 || p0[1] != 0.0 || p0[3] != 0.0 || absf(u0z[0] - 0.05) > 1.0e-15 { fail = fail + 1; println("FAIL pbpk_full_metabolic at t = 0") }
 
     // ---- 6. units: u_d is a STANDARD uncertainty. The state is linear in D0 and D0 is
     // independent of the rates, so variances add: Var(M1; u_d) - Var(M1; 0) = (M1/D0)^2 u_d^2.
@@ -133,9 +170,9 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     let (_pa, ua) = pbpk_full_metabolic(1.0, u_d, 24.0)
     let (_pb, ub) = pbpk_full_metabolic(1.0, 0.0, 24.0)
     let dvar_m1 = ua[1] * ua[1] - ub[1] * ub[1]
-    let want_m1 = (m1 / d0) * (m1 / d0) * u_d * u_d
+    let want_m1 = x24[1] * x24[1] * u_d * u_d
     let dvar_cl = ua[3] * ua[3] - ub[3] * ub[3]
-    let want_cl = (cl / d0) * (cl / d0) * u_d * u_d
+    let want_cl = x24[3] * x24[3] * u_d * u_d
     print("initial-uncertainty variance contribution M1: ") print(dvar_m1) print(" expected ") print(want_m1) println("")
     if rel(dvar_m1, want_m1) > 1.0e-4 { fail = fail + 1; println("FAIL initial uncertainty is not treated as a standard uncertainty (M1)") }
     if rel(dvar_cl, want_cl) > 1.0e-4 { fail = fail + 1; println("FAIL initial uncertainty is not treated as a standard uncertainty (Cleared)") }
