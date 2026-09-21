@@ -12501,6 +12501,40 @@ fn compile_knowledge_paren_x86() with IO, Mut, Panic, Div {
 
 // Precedence (low→high): || < && < comparison < bitwise OR < bitwise AND < shift < additive < multiplicative < unary < postfix < primary
 
+// `&t.0` / `&t.1` on a tuple. The borrow path only knew struct fields, so a
+// tuple element fell into the st_find() < 0 arm, warned, and emitted a null
+// pointer that crashed at the first use. Element layout mirrors the value read
+// of `.0` / `.1` in the postfix walker: elements are laid out in order from the
+// tuple's base address, and `.1` starts after the first element's slots.
+var TUP_BORROW_OFF: i64 = 0
+var TUP_BORROW_TY: i64 = 0
+var TUP_BORROW_HASH: i64 = 0
+
+fn tuple_borrow_elem_resolve(tup_hash: i64, tup_idx: i64) with Panic, Div, Mut {
+    let first_slots = tup_first_slots_true(tup_hash)
+    TUP_BORROW_OFF = 0
+    if tup_idx == 1 { TUP_BORROW_OFF = first_slots * 8 }
+    let tci = tup_cache_lookup(tup_hash)
+    if tci >= 0 {
+        if tup_idx == 0 {
+            TUP_BORROW_TY = TUP_CACHE_FIRST_TY[tci as usize]
+            TUP_BORROW_HASH = TUP_CACHE_FIRST_HASH[tci as usize]
+        } else if TUP_CACHE_TCOUNT[tci as usize] > 2 {
+            TUP_BORROW_TY = TUP_CACHE_ELEM_TY[(tci * 16 + 1) as usize]
+            TUP_BORROW_HASH = TUP_CACHE_ELEM_HASH[(tci * 16 + 1) as usize]
+        } else {
+            TUP_BORROW_TY = TUP_CACHE_LAST_TY[tci as usize]
+            TUP_BORROW_HASH = TUP_CACHE_LAST_HASH[tci as usize]
+        }
+    } else {
+        var elem_slots = first_slots
+        if tup_idx == 1 { elem_slots = tup_total_slots_true(tup_hash) - first_slots }
+        TUP_BORROW_TY = 6
+        TUP_BORROW_HASH = 0
+        if elem_slots > 0 { TUP_BORROW_HASH = 1000000007 + elem_slots }
+    }
+}
+
 fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
     EP = EP + 1
     var want_mut: i64 = 0
@@ -12847,7 +12881,14 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
             let fh = gl_name_hash(TS[EP as usize], TE[EP as usize])
             EP = EP + 1
             let si = st_find(inner_hash)
-            if si < 0 {
+            if si < 0 && TK[f_tok as usize] == 4 {
+                let tb_idx = TV[f_tok as usize]
+                if tb_idx > 1 { tc_error_hard(f_tok, "tuple index out of bounds") }
+                tuple_borrow_elem_resolve(inner_hash, tb_idx)
+                if TUP_BORROW_OFF > 0 { em(0x48); em(0x8d); em(0x80); em32(TUP_BORROW_OFF) }
+                inner_ty = TUP_BORROW_TY
+                inner_hash = TUP_BORROW_HASH
+            } else if si < 0 {
                 tc_error(f_tok, "field borrow requires struct base")
                 em(0x31); em(0xc0)
                 inner_ty = 0
@@ -12912,7 +12953,14 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
                 let fh2 = gl_name_hash(TS[EP as usize], TE[EP as usize])
                 EP = EP + 1
                 let si2 = st_find(inner_hash2)
-                if si2 < 0 {
+                if si2 < 0 && TK[f_tok2 as usize] == 4 {
+                    let tb_idx2 = TV[f_tok2 as usize]
+                    if tb_idx2 > 1 { tc_error_hard(f_tok2, "tuple index out of bounds") }
+                    tuple_borrow_elem_resolve(inner_hash2, tb_idx2)
+                    if TUP_BORROW_OFF > 0 { em(0x48); em(0x8d); em(0x80); em32(TUP_BORROW_OFF) }
+                    inner_ty2 = TUP_BORROW_TY
+                    inner_hash2 = TUP_BORROW_HASH
+                } else if si2 < 0 {
                     tc_error(f_tok2, "field borrow requires struct base")
                     em(0x31); em(0xc0)
                     inner_ty2 = 0
@@ -36691,7 +36739,18 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 let fbh = gl_name_hash(TS[EP as usize], TE[EP as usize])
                 EP = EP + 1
                 let fbsi = st_find(inner_hash_b)
-                if fbsi < 0 {
+                if fbsi < 0 && TK[fb_tok as usize] == 4 {
+                    let tb_idx_b = TV[fb_tok as usize]
+                    if tb_idx_b > 1 { tc_error_hard(fb_tok, "tuple index out of bounds") }
+                    tuple_borrow_elem_resolve(inner_hash_b, tb_idx_b)
+                    if TUP_BORROW_OFF != 0 {
+                        if TUP_BORROW_OFF < 4096 { em32(0x91000000 | ((TUP_BORROW_OFF & 0xFFF) << 10)) }  // add x0, x0, #off
+                        else { emit_imm64_reg_a64(9, TUP_BORROW_OFF); em32(0x8B090000) }               // x9=off; add x0,x0,x9
+                    }
+                    inner_ty_b = TUP_BORROW_TY
+                    inner_hash_b = TUP_BORROW_HASH
+                    borrow_fields_consumed = 1
+                } else if fbsi < 0 {
                     tc_error(fb_tok, "field borrow requires struct base")
                     em32(0xD2800000)
                     inner_ty_b = 0
