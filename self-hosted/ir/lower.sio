@@ -458,25 +458,30 @@ var IR_LOWER_HARD_ERROR_FN_BUF: [i8; 128]
 var IR_LOWER_HARD_ERROR_FN_LEN: i64 = 0
 var IR_LOWER_HARD_ERROR_NEEDED: i64 = 0
 // 0=unspecified, 1=instruction capacity, 2=unresolved print ABI,
-// 3=f64-array tuple side table full.
+// 3=f64-array tuple side table full, 4=f64-array tuple slot the table cannot mark.
 var IR_LOWER_HARD_ERROR_REASON: i64 = 0
-// Reason 3's sticky half. The f64-array tuple table below is process-global, so
-// its overflow is a property of the COMPILE, not of one lowering pass -- and it
-// is found in a pre-pass that runs ONE LINE before the lowerer_new() whose
-// lower_hard_error_reset() would clear it. Keeping the bit here lets that reset
-// re-arm from it instead of dropping the only warning that the metadata is
-// incomplete.
+// Reasons 3 and 4's sticky half. The f64-array tuple table below is
+// process-global, so a fault in it (full, or a slot it cannot mark) is a property
+// of the COMPILE, not of one lowering pass -- and it is found in a pre-pass that
+// runs ONE LINE before the lowerer_new() whose lower_hard_error_reset() would
+// clear it. Keeping the reason here lets that reset re-arm from it instead of
+// dropping the only warning that the metadata is incomplete. First fault wins.
 //
 // It is sticky WITHIN a compile and must NOT be sticky across compiles: the
 // frontend calls lower_fn_tuple_arr_reset() at the compile boundary
 // (module_frontend_global_init_compile_begin), BEFORE its lower_hard_error_reset(),
-// so an overflow in one source cannot re-arm into the next source compiled in
+// so a fault in one source cannot re-arm into the next source compiled in
 // the same process. The order matters -- reset the table second and the hard-error
-// reset would re-arm from the previous compile's stale bit.
-var LOWER_FN_TUPLE_ARR_OVERFLOW: i64 = 0
-var LOWER_FN_TUPLE_ARR_OVERFLOW_BUF: [i8; 128]
-var LOWER_FN_TUPLE_ARR_OVERFLOW_LEN: i64 = 0
+// reset would re-arm from the previous compile's stale fault.
+var LOWER_FN_TUPLE_ARR_FAULT: i64 = 0
+var LOWER_FN_TUPLE_ARR_FAULT_BUF: [i8; 128]
+var LOWER_FN_TUPLE_ARR_FAULT_LEN: i64 = 0
 let LOWER_FN_TUPLE_ARR_CAP: i64 = 4096
+// Slots 0..MAX_SLOTS-1 are representable. The array mask rides in bits 32+ of the
+// tuple local's i64 mask (mask * 4294967296), so slot 31 would land on bit 63, the
+// sign bit, and overflow. One constant, read by BOTH the mask builder and the slot
+// reader, so they cannot drift apart -- they were two bare `31`s.
+let LOWER_FN_TUPLE_ARR_MAX_SLOTS: i64 = 31
 // Same flat-array treatment, same reason.
 var IR_LOWER_ERROR_FIRST_FN_BUF: [i8; 128]
 var IR_LOWER_ERROR_FIRST_FN_LEN: i64 = 0
@@ -657,6 +662,16 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
         print("`;\n")
         print("         recording more would need a bigger LOWER_FN_TUPLE_ARR_CAP. Refused\n")
         print("         rather than lower those f64 array elements as integers.\n")
+    } else if IR_LOWER_HARD_ERROR_REASON == 4 {
+        print("  cause: function `")
+        ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
+        print("` returns a tuple with an `[f64; N]` in slot ")
+        print_int(IR_LOWER_HARD_ERROR_LIMIT)
+        print(" or later;\n")
+        print("         the f64-array slot table only represents slots 0..")
+        print_int(IR_LOWER_HARD_ERROR_LIMIT - 1)
+        print(". Refused rather\n")
+        print("         than lower that array's elements as integers.\n")
     } else {
         print("  cause: lowering raised a hard error and recorded no detail — if this\n")
         print("         prints, a NEW raise site was added without recording its reason.\n")
@@ -666,15 +681,19 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
 fn lower_fn_tuple_arr_arm_hard_error() with Mut {
     IR_LOWER_HARD_ERROR = 1
     if IR_LOWER_HARD_ERROR_REASON == 0 {
-        IR_LOWER_HARD_ERROR_REASON = 3
-        IR_LOWER_HARD_ERROR_LIMIT = LOWER_FN_TUPLE_ARR_CAP
+        IR_LOWER_HARD_ERROR_REASON = LOWER_FN_TUPLE_ARR_FAULT
+        if LOWER_FN_TUPLE_ARR_FAULT == 4 {
+            IR_LOWER_HARD_ERROR_LIMIT = LOWER_FN_TUPLE_ARR_MAX_SLOTS
+        } else {
+            IR_LOWER_HARD_ERROR_LIMIT = LOWER_FN_TUPLE_ARR_CAP
+        }
         IR_LOWER_HARD_ERROR_NEEDED = 0
         var i: i64 = 0
-        while i < LOWER_FN_TUPLE_ARR_OVERFLOW_LEN && i < 128 {
-            IR_LOWER_HARD_ERROR_FN_BUF[i as usize] = LOWER_FN_TUPLE_ARR_OVERFLOW_BUF[i as usize]
+        while i < LOWER_FN_TUPLE_ARR_FAULT_LEN && i < 128 {
+            IR_LOWER_HARD_ERROR_FN_BUF[i as usize] = LOWER_FN_TUPLE_ARR_FAULT_BUF[i as usize]
             i = i + 1
         }
-        IR_LOWER_HARD_ERROR_FN_LEN = LOWER_FN_TUPLE_ARR_OVERFLOW_LEN
+        IR_LOWER_HARD_ERROR_FN_LEN = LOWER_FN_TUPLE_ARR_FAULT_LEN
     }
 }
 
@@ -688,11 +707,11 @@ pub fn lower_hard_error_reset() with Mut {
     IR_LOWER_ERROR_FIRST_FN_LEN = 0
     IR_LOWER_ERROR_STAGE = 0
     IR_LOWER_ERROR_STAGE_IDX = 0
-    // Re-arm, do not drop: see LOWER_FN_TUPLE_ARR_OVERFLOW. This reset also runs
+    // Re-arm, do not drop: see LOWER_FN_TUPLE_ARR_FAULT. This reset also runs
     // from every lowerer constructor MID-compile, and none of those can
-    // un-exhaust the table. The compile boundary clears the bit first via
+    // un-fault the table. The compile boundary clears the fault first via
     // lower_fn_tuple_arr_reset(), so this only ever re-arms within one compile.
-    if LOWER_FN_TUPLE_ARR_OVERFLOW != 0 {
+    if LOWER_FN_TUPLE_ARR_FAULT != 0 {
         lower_fn_tuple_arr_arm_hard_error()
     }
 }
@@ -813,6 +832,20 @@ fn fo_name_hash(n: Name) -> i64 with Mut, Panic, Div {
 // already-present and was dropped. The stored name settles both, as
 // lowerer_lookup_fn_id_by_name_ref does with ir_name_eq.
 //
+// IDENTITY IS THE UNQUALIFIED NAME, ON PURPOSE. Two modules that each define a
+// `helper` share ONE entry here, first loaded wins -- and that is the rule the
+// merged IR applies to the functions themselves, not something this table adds.
+// Measured on the compiler before this table was touched: module a `helper() -> 1`
+// and module b `helper() -> 20` both return 1 from either module's caller, and
+// swapping the import order makes both return 20. The checker's prefer-module
+// lookup (check.sio, checker_fn_sigs_find_inplace) keeps same-named private helpers
+// apart for TYPE CHECKING only; lowering resolves calls by name in one merged
+// module. Metadata keyed by module would therefore DISAGREE with the body that
+// actually runs -- a module-b caller told b's slot layout while executing a's
+// function -- so following the IR's own identity is the coherent choice. Making
+// function identity module-aware is an IR-wide change (call resolution, DEDUP,
+// fn lookup), not one this table can make alone.
+//
 // Names live in a FLAT [i8] buffer with a parallel length array, not a
 // [Name; N] global: Name-typed globals overrun into their neighbours in this
 // tree (see IR_LOWER_HARD_ERROR_FN_BUF above and the note on why the probe
@@ -825,7 +858,7 @@ let LOWER_FN_TUPLE_ARR_NAME_STRIDE: i64 = 384
 var LOWER_FN_TUPLE_ARR_NAME_BUF: [i8; 1572864]
 var LOWER_FN_TUPLE_ARR_NAME_LEN: [i64; 4096] = [0; 4096]
 
-// Compile-boundary reset: forget every recorded entry and any overflow. The table
+// Compile-boundary reset: forget every recorded entry and any fault. The table
 // is process-global and was never cleared, so a second compile in one process saw
 // the previous source's entries -- a same-named fn with different slot types
 // inherited the stale mask -- and, since the overflow state became sticky, a
@@ -836,13 +869,13 @@ var LOWER_FN_TUPLE_ARR_NAME_LEN: [i64; 4096] = [0; 4096]
 // contents past COUNT are never read.
 //
 // Called once per compile, by the frontend, BEFORE lower_hard_error_reset(); see
-// LOWER_FN_TUPLE_ARR_OVERFLOW for why the order matters. Entry points that lower
+// LOWER_FN_TUPLE_ARR_FAULT for why the order matters. Entry points that lower
 // programs without going through that boundary keep the table for the life of
 // the process, as before.
 pub fn lower_fn_tuple_arr_reset() with Mut {
     LOWER_FN_TUPLE_ARR_COUNT = 0
-    LOWER_FN_TUPLE_ARR_OVERFLOW = 0
-    LOWER_FN_TUPLE_ARR_OVERFLOW_LEN = 0
+    LOWER_FN_TUPLE_ARR_FAULT = 0
+    LOWER_FN_TUPLE_ARR_FAULT_LEN = 0
 }
 
 fn lower_fn_tuple_arr_name_store(slot: i64, n: Name) with Mut, Panic, Div {
@@ -874,14 +907,16 @@ fn lower_fn_tuple_arr_name_eq(slot: i64, n: Name) -> bool with Mut, Panic, Div {
     true
 }
 
-// Past the cap the table used to stop recording and say nothing, so every
-// later tuple-returning fn quietly went back to the integer element path in a
-// program that still compiled clean -- the exact silent miscompile this table
-// exists to stop. Refuse instead. Reason 3 is read by lower_hard_error_report.
-fn lower_fn_tuple_arr_capacity_exhausted(n: Name) with Mut {
-    if LOWER_FN_TUPLE_ARR_OVERFLOW == 0 {
-        LOWER_FN_TUPLE_ARR_OVERFLOW = 1
-        ir_copy_name_to_flat(&n, &! LOWER_FN_TUPLE_ARR_OVERFLOW_BUF, &! LOWER_FN_TUPLE_ARR_OVERFLOW_LEN)
+// Raise a sticky fault: reason 3 = past the cap, reason 4 = a slot the mask
+// cannot represent. Both used to be silent: past the cap the table stopped
+// recording, and a slot >= MAX_SLOTS was skipped by a bare `bit < 31`, so the
+// affected fns went back to the integer element path in a program that still
+// compiled clean -- the exact silent miscompile this table exists to stop.
+// Refuse instead. Read by lower_hard_error_report.
+fn lower_fn_tuple_arr_fault(reason: i64, n: Name) with Mut {
+    if LOWER_FN_TUPLE_ARR_FAULT == 0 {
+        LOWER_FN_TUPLE_ARR_FAULT = reason
+        ir_copy_name_to_flat(&n, &! LOWER_FN_TUPLE_ARR_FAULT_BUF, &! LOWER_FN_TUPLE_ARR_FAULT_LEN)
     }
     lower_fn_tuple_arr_arm_hard_error()
 }
@@ -890,7 +925,7 @@ fn lower_type_list_f64_array_mask(opt: &Option<Box<TypeExprList>>, bit: i64) -> 
     match *opt {
         Some(list) => {
             var m: i64 = 0
-            if bit < 31 {
+            if bit < LOWER_FN_TUPLE_ARR_MAX_SLOTS {
                 if lower_type_expr_is_array_of_f64(&(*list).head) {
                     m = 1 << (bit as i32)
                 }
@@ -898,6 +933,23 @@ fn lower_type_list_f64_array_mask(opt: &Option<Box<TypeExprList>>, bit: i64) -> 
             m + lower_type_list_f64_array_mask(&(*list).tail, bit + 1)
         }
         None => 0,
+    }
+}
+
+// True when an `[f64; N]` sits at slot MAX_SLOTS or later, where the mask above
+// silently stops. The frontend's tuple LITERAL cap (E008 past 16 elements) does
+// not stop this: a 32-slot tuple TYPE with the array at slot 31 compiles clean
+// when no literal is needed to produce it (measured), so this is reachable.
+fn lower_type_list_has_unmarkable_f64_array(opt: &Option<Box<TypeExprList>>, bit: i64) -> bool with Mut, Panic, Div {
+    match *opt {
+        Some(list) => {
+            if bit >= LOWER_FN_TUPLE_ARR_MAX_SLOTS && lower_type_expr_is_array_of_f64(&(*list).head) {
+                true
+            } else {
+                lower_type_list_has_unmarkable_f64_array(&(*list).tail, bit + 1)
+            }
+        }
+        None => false,
     }
 }
 
@@ -932,6 +984,11 @@ fn lower_fn_tuple_f64_arrays_collect(items: &Option<Box<ItemList>>) with Mut, Pa
                                 Some(rt) => {
                                     if (*rt).kind == TypeExprKind::TypeTuple {
                                         let mask = lower_type_list_f64_array_mask(&(*rt).type_args, 0)
+                                        // Independent of `mask`: a tuple whose ONLY f64 array is at slot
+                                        // 31+ has mask 0 and would otherwise sail through unmarked.
+                                        if lower_type_list_has_unmarkable_f64_array(&(*rt).type_args, 0) {
+                                            lower_fn_tuple_arr_fault(4, item_ref.name)
+                                        }
                                         if mask != 0 && lower_fn_tuple_f64_array_mask(item_ref.name) == 0 {
                                             if LOWER_FN_TUPLE_ARR_COUNT < LOWER_FN_TUPLE_ARR_CAP {
                                                 let slot = LOWER_FN_TUPLE_ARR_COUNT
@@ -940,7 +997,7 @@ fn lower_fn_tuple_f64_arrays_collect(items: &Option<Box<ItemList>>) with Mut, Pa
                                                 lower_fn_tuple_arr_name_store(slot, item_ref.name)
                                                 LOWER_FN_TUPLE_ARR_COUNT = slot + 1
                                             } else {
-                                                lower_fn_tuple_arr_capacity_exhausted(item_ref.name)
+                                                lower_fn_tuple_arr_fault(3, item_ref.name)
                                             }
                                         }
                                     }
@@ -17062,7 +17119,7 @@ impl Lowerer {
             return false
         }
         let slot = lower_name_tuple_index((*e).name)
-        if slot < 0 || slot >= 31 {
+        if slot < 0 || slot >= LOWER_FN_TUPLE_ARR_MAX_SLOTS {
             return false
         }
         match (*e).left {

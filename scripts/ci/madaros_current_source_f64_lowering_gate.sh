@@ -80,9 +80,9 @@ TUPLE_OVER="$((TUPLE_CAP + 1))"
 # the property it protects -- an over-cap source must not poison the NEXT source
 # compiled in the same process -- cannot be exercised here, because every
 # madaros CLI invocation compiles exactly once. What can be pinned is the one
-# ordering that would silently break it. lower_hard_error_reset() re-arms reason 3
-# from the table's sticky overflow bit, so the table must be reset FIRST at the
-# compile barrier; the other way round, a stale overflow re-arms straight into the
+# ordering that would silently break it. lower_hard_error_reset() re-arms reasons 3/4
+# from the table's sticky fault, so the table must be reset FIRST at the
+# compile barrier; the other way round, a stale fault re-arms straight into the
 # next compile and rejects a perfectly good source.
 BARRIER_BODY="$(awk '/^fn module_frontend_global_init_compile_begin\(/{on=1} on{print} on&&/^}/{exit}' \
     "$ROOT_DIR/self-hosted/compiler/module_frontend.sio" | sed 's|//.*$||')"
@@ -91,7 +91,7 @@ reset_line="$(grep -n 'lower_fn_tuple_arr_reset()' <<<"$BARRIER_BODY" | head -1 
 herr_line="$(grep -n 'lower_hard_error_reset()' <<<"$BARRIER_BODY" | head -1 | cut -d: -f1)"
 [[ -n "$reset_line" ]] || fail "the compile barrier no longer resets the f64-array tuple table: an over-cap source would poison every later compile in the process"
 [[ -n "$herr_line" ]] || fail "the compile barrier no longer calls lower_hard_error_reset(); this ordering check has nothing to order against"
-[[ "$reset_line" -lt "$herr_line" ]] || fail "the compile barrier resets the tuple table AFTER lower_hard_error_reset(): the hard-error reset re-arms from the previous compile's stale overflow bit"
+[[ "$reset_line" -lt "$herr_line" ]] || fail "the compile barrier resets the tuple table AFTER lower_hard_error_reset(): the hard-error reset re-arms from the previous compile's stale fault"
 
 TUPLE_DIR="$WORK/tuple-capacity"
 mkdir -p "$TUPLE_DIR"
@@ -151,11 +151,70 @@ if [[ -e "$OVER_OUT" ]]; then
   fail "${TUPLE_OVER}-tuple-fn capacity rejection left an output artifact: $OVER_OUT"
 fi
 # The cap AND the first fn past it: t<CAP> is the (CAP+1)th, so it is the one
-# whose entry did not fit. Naming it proves the sticky overflow state carried the
+# whose entry did not fit. Naming it proves the sticky fault state carried the
 # name through the reset, not just a bare flag.
 grep -Fq "more than ${TUPLE_CAP} functions return a tuple with an \`[f64; N]\` slot, starting at \`t${TUPLE_CAP}\`" "$TUPLE_DIR/over_cap.log" || {
   tail -n 40 "$TUPLE_DIR/over_cap.log" >&2
   fail "${TUPLE_OVER}-tuple-fn capacity diagnostic was missing or changed"
 }
 
-echo "[madaros-f64-lowering] PASS: one shared Madaros ELF passed dereference, global f64, direct capacity, imported capacity, imported wide-call, and f64-array tuple table capacity (${TUPLE_CAP} ok, ${TUPLE_OVER} rejected) gates"
+# f64-array tuple SLOT limit (lower.sio LOWER_FN_TUPLE_ARR_MAX_SLOTS). The array mask
+# rides in bits 32+ of an i64, so slot 31 would land on the sign bit; slots
+# 0..MAX-1 are representable and a `[f64; N]` at MAX or later must be REFUSED, not
+# skipped -- it used to be skipped by a bare `bit < 31`, leaving the array to be
+# read as integers in a program that compiled clean.
+#
+# The frontend's tuple LITERAL cap (E008 past 16 elements) does not make this
+# unreachable: a wide tuple TYPE compiles clean when no literal produces it. So the
+# witness declares the type and gives it a body that needs no literal (a self call)
+# behind an `if false`, which is all the collector needs to see. Read the limit,
+# do not pin it.
+SLOT_MAX="$(grep -E '^let LOWER_FN_TUPLE_ARR_MAX_SLOTS: i64 = [0-9]+' \
+    "$ROOT_DIR/self-hosted/ir/lower.sio" | grep -oE '[0-9]+$' | head -1)"
+[[ -n "$SLOT_MAX" ]] || fail "LOWER_FN_TUPLE_ARR_MAX_SLOTS is no longer declared where this gate looks"
+SLOT_DIR="$WORK/tuple-slot"
+mkdir -p "$SLOT_DIR"
+
+# $1 = slot index of the f64 array (the tuple has $1+1 elements), $2 = output source.
+gen_wide_tuple() {
+  local k="$1" out="$2" ty="" i
+  for i in $(seq 1 "$k"); do ty="${ty}i64, "; done
+  printf 'fn wide() -> (%s[f64; 2]) {\n  wide()\n}\n\nfn main() -> i32 with IO, Mut, Panic {\n  if false {\n    let t = wide()\n    let x = t.%s\n    let d: f64 = x[0] * 2.0\n  }\n  0\n}\n' "$ty" "$k" >"$out"
+}
+
+LAST_OK_SRC="$SLOT_DIR/last_ok.sio"
+LAST_OK_OUT="$SLOT_DIR/last_ok.elf"
+gen_wide_tuple "$((SLOT_MAX - 1))" "$LAST_OK_SRC"
+set +e
+MADAROS_RAW_BIN="$MADAROS_ELF" "$ROOT_DIR/bin/madaros" compile "$LAST_OK_SRC" -o "$LAST_OK_OUT" >"$SLOT_DIR/last_ok.log" 2>&1
+last_ok_rc=$?
+set -e
+if [[ "$last_ok_rc" -ne 0 ]]; then
+  tail -n 40 "$SLOT_DIR/last_ok.log" >&2
+  fail "tuple with its f64 array at slot $((SLOT_MAX - 1)), the LAST representable one, was rejected rc=$last_ok_rc"
+fi
+
+TOO_FAR_SRC="$SLOT_DIR/too_far.sio"
+TOO_FAR_OUT="$SLOT_DIR/too_far.elf"
+gen_wide_tuple "$SLOT_MAX" "$TOO_FAR_SRC"
+set +e
+MADAROS_RAW_BIN="$MADAROS_ELF" "$ROOT_DIR/bin/madaros" compile "$TOO_FAR_SRC" -o "$TOO_FAR_OUT" >"$SLOT_DIR/too_far.log" 2>&1
+too_far_rc=$?
+set -e
+if [[ "$too_far_rc" -eq 0 ]]; then
+  tail -n 40 "$SLOT_DIR/too_far.log" >&2
+  fail "tuple with an f64 array at slot ${SLOT_MAX} compiled clean: the slot is being skipped silently again"
+fi
+if [[ "$too_far_rc" -ge 128 ]]; then
+  tail -n 40 "$SLOT_DIR/too_far.log" >&2
+  fail "slot-${SLOT_MAX} witness terminated by signal rc=$too_far_rc"
+fi
+if [[ -e "$TOO_FAR_OUT" ]]; then
+  fail "slot-${SLOT_MAX} rejection left an output artifact: $TOO_FAR_OUT"
+fi
+grep -Fq "function \`wide\` returns a tuple with an \`[f64; N]\` in slot ${SLOT_MAX} or later" "$SLOT_DIR/too_far.log" || {
+  tail -n 40 "$SLOT_DIR/too_far.log" >&2
+  fail "slot-${SLOT_MAX} diagnostic was missing or changed"
+}
+
+echo "[madaros-f64-lowering] PASS: one shared Madaros ELF passed dereference, global f64, direct capacity, imported capacity, imported wide-call, f64-array tuple table capacity (${TUPLE_CAP} ok, ${TUPLE_OVER} rejected) and slot limit (slot $((SLOT_MAX - 1)) ok, slot ${SLOT_MAX} rejected) gates"
