@@ -18,7 +18,7 @@ Make focused, idiomatic changes to the Sounio standard library and keep the repo
 
 ### 2) Keep Sounio syntax consistent
 
-- Prefer canonical syntax rules from `CLAUDE.md` and `docs/LLM_PROGRAMMING_GUIDE.md`.
+- Prefer canonical syntax rules from `CLAUDE.md` and `docs/guide/LLM_PROGRAMMING_GUIDE.md`.
 - If the compiler does not support a feature yet, avoid using it in stdlib unless it is explicitly “parser-only”.
 
 ### 3) Add tests where possible

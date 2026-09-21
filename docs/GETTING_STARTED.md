@@ -14,7 +14,7 @@ artifacts already committed under `artifacts/omega/souc-bin/`. Do not begin
 with `cargo build` at the repo root; there is no top-level compiler Cargo
 manifest there anymore.
 
-## 1. Default JIT workflow
+## 1. Default workflow (checked `bin/souc` artifact)
 
 ```bash
 export SOUC_BIN="$(pwd)/bin/souc"
@@ -37,7 +37,7 @@ What this default artifact proves today:
 Use this profile for the ordinary docs workflow, examples, and `check`-first
 validation.
 
-The website graphics showcase is also generated from this checked JIT artifact:
+The website graphics showcase is also generated from this checked compiler artifact:
 it currently publishes five real raster previews from `examples/render/`.
 
 ## 2. GPU workflow

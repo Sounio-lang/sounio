@@ -205,7 +205,7 @@ fn main() with IO, Mut, Div {
 - **Use Knowledge in pandas DataFrames** → [sounio-py API: EpistemicDataFrame](sounio-py/api.md#epistemichidden)
 - **Write interactive Sounio notebooks** → [sounio-jupyter Usage](sounio-jupyter/usage.md)
 - **Build a drug discovery pipeline** → [Drug Discovery Tutorial](drug-discovery/tutorial.md)
-- **Learn the Sounio language** → [Sounio Programming Guide](https://github.com/sounio-org/sounio/docs/LLM_PROGRAMMING_GUIDE.md)
+- **Learn the Sounio language** → [Sounio Programming Guide](https://github.com/sounio-org/sounio/blob/main/docs/guide/LLM_PROGRAMMING_GUIDE.md)
 - **Contribute to the ecosystem** → [GitHub Issues](https://github.com/sounio-org/sounio/issues)
 
 ---
