@@ -113,18 +113,25 @@ sounio_materialize_madaros_prebuilt() {
     return 0
   fi
 
-  # Always verify existing ELF's hash, even in strict mode. Only re-materialize if
-  # the hash doesn't match. This avoids unnecessary decompression of the 95 MB binary.
+  # Always verify existing ELF's hash, but skip archive verification in normal mode.
+  # In verify mode, validate both the ELF and the .gz archive to ensure the entire
+  # artifact chain (.gz + .sha256) is valid, not just the materialized ELF.
   if [[ -f "$elf" ]] && [[ "$(_sounio_madaros_sha256 "$elf")" == "$want" ]]; then
-    chmod 755 "$elf" 2>/dev/null || true
-    local stat_out
-    stat_out="$(_sounio_madaros_stat_inode_mtime_ctime "$elf")" || stat_out=""
-    inode="${stat_out%% *}"
-    local rest="${stat_out#* }"
-    mtime="${rest%% *}"
-    ctime="${rest##* }"
-    printf '%s %s %s %s %s\n' "$want" "$size" "$inode" "$mtime" "$ctime" > "$stamp.tmp.$$" && mv -f "$stamp.tmp.$$" "$stamp"
-    return 0
+    # In normal mode, ELF hash match is sufficient; skip archive verification
+    # for performance (avoid decompressing the 95 MB binary).
+    if [[ "$verify" -eq 0 ]]; then
+      chmod 755 "$elf" 2>/dev/null || true
+      local stat_out
+      stat_out="$(_sounio_madaros_stat_inode_mtime_ctime "$elf")" || stat_out=""
+      inode="${stat_out%% *}"
+      local rest="${stat_out#* }"
+      mtime="${rest%% *}"
+      ctime="${rest##* }"
+      printf '%s %s %s %s %s\n' "$want" "$size" "$inode" "$mtime" "$ctime" > "$stamp.tmp.$$" && mv -f "$stamp.tmp.$$" "$stamp"
+      return 0
+    fi
+    # In verify mode, also validate the .gz archive to ensure the full artifact
+    # chain is correct (continue to decompression verification below).
   fi
 
   if [[ -f "$elf" ]]; then
