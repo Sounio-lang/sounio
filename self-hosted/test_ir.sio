@@ -1486,6 +1486,74 @@ fn ir_test_33_module_function_table_chunks() -> bool with Mut, Panic, Div, Alloc
         ir_fn_get(&module, IR_MAX_FUNCS - 1).name.buf[0] == 101 as i8
 }
 
+// T34: the Box-return metadata call lowering reads (return_box_slot,
+// return_box_inner_id) must survive a SOIR round trip. serialize_ir_function did
+// not write them and deserialize_ir_function reset both to -1, so a module read
+// back from the persistent thin cache lowered a call to a Box<T> / tuple-with-Box
+// function as a plain scalar return. return_box_inner_id is an interned id, which
+// means nothing in another process, so the TEXT of the name has to travel; the
+// second function below carries a name past the 128 bytes write_name preserves.
+fn ir_test_34_serialize_roundtrip_box_metadata() -> bool with Mut, Panic, Div, Alloc {
+    let whole_name = ir_name_from_bytes(67, 101, 108, 108, 4)  // "Cell"
+    var long_name = ir_empty_name()
+    long_name.len = 200
+    var li: i64 = 0
+    while li < 200 {
+        long_name.buf[li as usize] = (65 + (li % 26)) as i8
+        li = li + 1
+    }
+    let inner_whole = ir_intern_name(whole_name)
+    let inner_long = ir_intern_name(long_name)
+
+    var module = ir_empty_module()
+    module.fn_count = 3
+
+    var f0 = ir_empty_function()
+    f0.name = ir_name_from_bytes(109, 107, 95, 48, 4)  // "mk_0"
+    f0.instr_count = 1
+    ir_arena_store(ir_region_slot_w(f0.region, (0)), ir_return(0))
+    f0.return_box_slot = 0 - 2
+    f0.return_box_inner_id = inner_whole
+    ir_fn_set(&! module, 0, f0)
+
+    var f1 = ir_empty_function()
+    f1.name = ir_name_from_bytes(109, 107, 95, 49, 4)  // "mk_1"
+    f1.instr_count = 1
+    ir_arena_store(ir_region_slot_w(f1.region, (0)), ir_return(0))
+    f1.return_box_slot = 1
+    f1.return_box_inner_id = inner_long
+    ir_fn_set(&! module, 1, f1)
+
+    var f2 = ir_empty_function()
+    f2.name = ir_name_from_bytes(112, 108, 97, 105, 4)  // "plai" (truncated ok, unchecked)
+    f2.instr_count = 1
+    ir_arena_store(ir_region_slot_w(f2.region, (0)), ir_return(0))
+    f2.return_box_slot = 0 - 1
+    f2.return_box_inner_id = 0 - 1
+    ir_fn_set(&! module, 2, f2)
+
+    let pair = serialize_ir_module(module)
+    let restored = deserialize_ir_module(pair.0, pair.1)
+
+    if restored.fn_count != 3 { return false }
+
+    let r0 = ir_fn_get(&restored, 0)
+    if r0.return_box_slot != 0 - 2 { return false }
+    if ir_name_eq(ir_name_at(r0.return_box_inner_id), whole_name) == false { return false }
+
+    let r1 = ir_fn_get(&restored, 1)
+    if r1.return_box_slot != 1 { return false }
+    let back = ir_name_at(r1.return_box_inner_id)
+    if back.len != 200 { return false }
+    if ir_name_eq(back, long_name) == false { return false }
+
+    let r2 = ir_fn_get(&restored, 2)
+    if r2.return_box_slot != 0 - 1 { return false }
+    if r2.return_box_inner_id != 0 - 1 { return false }
+
+    true
+}
+
 fn run_ir_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
     var total: i64 = 0
@@ -1562,6 +1630,8 @@ fn run_ir_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     if ir_test_32_serialize_refuses_oversized() { passed = passed + 1; print("  T32 OK\n") } else { print("  FAIL T32\n") }
     total = total + 1
     if ir_test_33_module_function_table_chunks() { passed = passed + 1; print("  T33 OK\n") } else { print("  FAIL T33\n") }
+    total = total + 1
+    if ir_test_34_serialize_roundtrip_box_metadata() { passed = passed + 1; print("  T34 OK\n") } else { print("  FAIL T34\n") }
 
     if passed == total { print("\n✅ IR tests: all passed\n") } else { print("\n❌ IR tests: suite fail\n") }
 
