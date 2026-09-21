@@ -233,6 +233,15 @@ var SPEC_GI_CLONE_SEQ: i64 = 0
 // Set by the read-only scan when a body names a generic-impl struct with
 // type arguments, i.e. needs the rewrite pass.
 var SPEC_RW_HIT: bool = false
+// True while spec_rewrite_fn_item rewrites an ordinary (non-generic) fn: only a struct with
+// a generic impl is replaced by its instance there. A struct without one (`Cell<T>` with only
+// `impl Cell<f64>`) has no instance impl to reach, so naming its instance `Cell__f64` in one
+// fn made the call `c.twice(..)` look for `Cell__f64_twice` while the concrete impl lowers as
+// `Cell_twice`: the call hit a body-less stub and the program died with SIGILL. Measured
+// (b5/b6 and c1 in the probe set): a `Cell<i64>` or `Cell<f64>` with a concrete impl beside an
+// instantiated `Pair<T, U>` compiled and crashed on the first method call. Generic fn clones
+// keep rewriting every generic struct they name; their bodies are all that consumers see.
+var SPEC_RW_GI_ONLY: bool = false
 // `S::f(..)` on a generic-impl struct with no type arguments: no clone can be
 // named, and the template impl is dropped, so the call would reach lowering
 // as a body-less `S_f` (measured: compiled, then SIGILL on the ud2 stub).
@@ -243,6 +252,7 @@ fn spec_reset_state() with Mut {
     SPEC_EXTRA_HEAD = 0
     SPEC_GI_COUNT = 0
     SPEC_RW_HIT = false
+    SPEC_RW_GI_ONLY = false
     SPEC_GI_STATIC_TARG_MISSING = false
     SPEC_GI_CLONE_SEQ = 0
     var g: i64 = 0
@@ -1062,7 +1072,9 @@ fn spec_subst_type(te: TypeExpr, ctx: i64, targs: Option<Box<TypeExprList>>) -> 
             Some(al) => {
                 let base = spec_path_single_name(out.path)
                 let st_idx = spec_struct_table_find(base)
-                if st_idx >= 0 && spec_type_args_count(Some(al)) == spec_struct_table_tp_count(st_idx) {
+                // In an ordinary fn only a struct with a generic impl is replaced by its
+                // instance (see SPEC_RW_GI_ONLY); any other stays as written for the checker.
+                if st_idx >= 0 && spec_type_args_count(Some(al)) == spec_struct_table_tp_count(st_idx) && (!SPEC_RW_GI_ONLY || spec_gi_has_struct(st_idx)) {
                     let mangled = spec_get_or_create_struct_instance(st_idx, base, Some(al))
                     out.path = spec_name_to_path(mangled)
                     out.type_args = None
@@ -1117,7 +1129,7 @@ fn spec_subst_expr_mut(p: *mut SpecExprStage, ctx: i64, targs: Option<Box<TypeEx
     if (*p).e.kind == ExprKind::ExprStructLit && (*p).e.path.seg_count == 1 {
         let base = spec_path_single_name((*p).e.path)
         let st_idx = spec_struct_table_find(base)
-        if st_idx >= 0 {
+        if st_idx >= 0 && (!SPEC_RW_GI_ONLY || spec_gi_has_struct(st_idx)) {
             let st_count = spec_struct_table_tp_count(st_idx)
             var all_resolved = true
             var k: i64 = 0
@@ -1647,6 +1659,10 @@ fn spec_get_or_create_struct_instance(st_idx: i64, base: Name, targs: Option<Box
     if spec_emitted_has(mangled) { return mangled }
     if !spec_emitted_push(mangled) { return base }
 
+    // The instance and its impl clones are built with the full rewrite, whatever mode the
+    // fn that named them is in (see SPEC_RW_GI_ONLY): their bodies are consumed as before.
+    let saved_gi_only = SPEC_RW_GI_ONLY
+    SPEC_RW_GI_ONLY = false
     match spec_struct_table_sd(st_idx) {
         None => {}
         Some(sd_box) => {
@@ -1662,9 +1678,11 @@ fn spec_get_or_create_struct_instance(st_idx: i64, base: Name, targs: Option<Box
             (*sp).sd.fields = spec_subst_field_list_opt((*sp).sd.fields, st_ctx, targs)
             spec_extra_push_item(spec_make_struct_item((*sp).sd.name, (*sp).sd))
             spec_emit_generic_impl_instances(st_idx, (*sp).sd.name, targs)
+            SPEC_RW_GI_ONLY = saved_gi_only
             return (*sp).sd.name
         }
     }
+    SPEC_RW_GI_ONLY = saved_gi_only
     mangled
 }
 
@@ -3113,9 +3131,11 @@ fn spec_rewrite_fn_item(it: Item) -> Item with IO, Mut, Panic, Div, Alloc {
             let fp = heap_alloc(32768) as *mut SpecFnDefStage
             let tmp_fd = (*fd_box)
             (*fp).fd = tmp_fd
+            SPEC_RW_GI_ONLY = true
             (*fp).fd.params = spec_subst_param_list_opt((*fp).fd.params, 0, None)
             (*fp).fd.return_type = spec_subst_type_opt((*fp).fd.return_type, 0, None)
             (*fp).fd.body = spec_subst_block((*fp).fd.body, 0, None)
+            SPEC_RW_GI_ONLY = false
             var out_it = it
             out_it.fn_def = Some(Box::new((*fp).fd))
             out_it
