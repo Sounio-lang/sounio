@@ -74,7 +74,7 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     if f_dtn.status != 3 { fail = fail + 1; println("FAIL: fixed dt < 0 must be status 3") }
     if f_dtnan.status != 3 { fail = fail + 1; println("FAIL: fixed dt = NaN must be status 3") }
     if a_dt0.status != 3 { fail = fail + 1; println("FAIL: adaptive dt = 0 must be status 3") }
-    if f_dt0.t_final > 0.0 { fail = fail + 1; println("FAIL: a zero step size made progress") }
+    if !(f_dt0.t_final <= 0.0) { fail = fail + 1; println("FAIL: a zero step size made progress") }
 
     // ---- tolerances ----------------------------------------------------------------------------
     let a_rn = solve_ode_adaptive(ode_system_exp_decay(), decay(1.0, 0.01, 0.1), params(0.1), 0.0, 1.0, solver_options_adaptive(0.1, 0.0 - 1.0e-8, 1.0e-10, 50))
@@ -100,7 +100,7 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     if !(vf < 0.0) { fail = fail + 1; println("FAIL: fixed negative variance was clamped to zero") }
     if !(va < 0.0) { fail = fail + 1; println("FAIL: adaptive negative variance was clamped to zero") }
     // the state itself is not affected
-    if absf(solution_get_value(&f_neg, f_neg.n_steps - 1, 0) - 0.904837418) > 1.0e-6 { fail = fail + 1; println("FAIL: state corrupted by a negative variance") }
+    if !(absf(solution_get_value(&f_neg, f_neg.n_steps - 1, 0) - 0.904837418) <= 1.0e-6) { fail = fail + 1; println("FAIL: state corrupted by a negative variance") }
 
     // -inf variance: non-finite, so mode 2 as well
     let f_ninf = solve_ode(ode_system_exp_decay(), decay(1.0, 0.0 - inf, 0.1), params(0.1), 0.0, 1.0, solver_options_fixed(0.1, 10))
@@ -122,8 +122,8 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     print(" adaptive steps=") print(a_big.n_steps) print(" y=") print(ya) println("")
     if f_big.status != 0 || a_big.status != 0 { fail = fail + 1; println("FAIL: a solve at t = 1e15 must complete") }
     if f_big.n_steps != 11 { fail = fail + 1; println("FAIL: fixed solve at t = 1e15 must take its 10 steps") }
-    if absf(yf - y_big) > 1.0e-6 { fail = fail + 1; println("FAIL: fixed solve at t = 1e15 is not the solution (skipped or mis-timed)") }
-    if absf(ya - y_big) > 1.0e-6 { fail = fail + 1; println("FAIL: adaptive solve at t = 1e15 is not the solution (skipped or mis-timed)") }
+    if !(absf(yf - y_big) <= 1.0e-6) { fail = fail + 1; println("FAIL: fixed solve at t = 1e15 is not the solution (skipped or mis-timed)") }
+    if !(absf(ya - y_big) <= 1.0e-6) { fail = fail + 1; println("FAIL: adaptive solve at t = 1e15 is not the solution (skipped or mis-timed)") }
     if f_big.t_final != t0 + 100.0 || a_big.t_final != t0 + 100.0 { fail = fail + 1; println("FAIL: t_final must land exactly on t_end") }
 
     // ---- short but valid intervals: no absolute step-size floor -------------------------------
@@ -143,8 +143,8 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         print(" fixed status=") print(f_sh.status) print(" y=") print(yf_sh) println("")
         if a_sh.status != 0 { fail = fail + 1; println("FAIL: a short adaptive interval must complete, not end as status 2") }
         if f_sh.status != 0 { fail = fail + 1; println("FAIL: a short fixed interval must complete") }
-        if absf(ya_sh - ex01) > 1.0e-6 { fail = fail + 1; println("FAIL: short adaptive solve is not the solution") }
-        if absf(yf_sh - ex01) > 1.0e-8 { fail = fail + 1; println("FAIL: short fixed solve is not the solution") }
+        if !(absf(ya_sh - ex01) <= 1.0e-6) { fail = fail + 1; println("FAIL: short adaptive solve is not the solution") }
+        if !(absf(yf_sh - ex01) <= 1.0e-8) { fail = fail + 1; println("FAIL: short fixed solve is not the solution") }
         shorts = shorts + 1
     }
 
@@ -163,7 +163,7 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     print(" rel err=") print(rel_fast) println("")
     if fast.status != 0 { fail = fail + 1; println("FAIL: the fast-decay solve must complete") }
     if fast.n_rejected < 1 { fail = fail + 1; println("FAIL: the first trial (error ~1e5 x tolerance) must be rejected, not forced through") }
-    if rel_fast > 1.0e-12 { fail = fail + 1; println("FAIL: the result is outside the requested tolerance") }
+    if !(rel_fast <= 1.0e-12) { fail = fail + 1; println("FAIL: the result is outside the requested tolerance") }
 
     // a tolerance no useful step size can meet must never end as a "completed" solve. (Which
     // non-zero status it is depends on where it gives up: at a tiny dt the embedded error is
@@ -197,6 +197,40 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     // a valid empty interval keeps mode 1
     let f_e_ok = solve_ode(ode_system_exp_decay(), decay(1.0, 0.01, 0.1), params(0.1), 1.0, 1.0, solver_options_fixed(0.1, 10))
     if f_e_ok.status != 0 || f_e_ok.covariance_mode != 1 { fail = fail + 1; println("FAIL: a valid empty interval must be status 0, mode 1") }
+
+    // ---- model parameters: every one must be finite ---------------------------------------------
+    // On an empty interval no right-hand side runs, so a NaN/inf rate used to come back as a completed
+    // solve (status 0); on a real interval the adaptive solver classified it as status 2, not as the
+    // invalid input it is.
+    var pnan = ode_params_new()
+    ode_params_set(&!pnan, 0, nan, 0.0001)
+    var pinf = ode_params_new()
+    ode_params_set(&!pinf, 0, inf, 0.0001)
+    let f_pe = solve_ode(ode_system_exp_decay(), decay(1.0, 0.01, 0.1), pnan, 1.0, 1.0, solver_options_fixed(0.1, 10))
+    let a_pe = solve_ode_adaptive(ode_system_exp_decay(), decay(1.0, 0.01, 0.1), pinf, 1.0, 1.0, solver_options_adaptive(0.1, 1.0e-8, 1.0e-10, 10))
+    let a_pn = solve_ode_adaptive(ode_system_exp_decay(), decay(1.0, 0.01, 0.1), pnan, 0.0, 1.0, solver_options_adaptive(0.1, 1.0e-8, 1.0e-10, 50))
+    let f_pn = solve_ode(ode_system_exp_decay(), decay(1.0, 0.01, 0.1), pinf, 0.0, 1.0, solver_options_fixed(0.1, 10))
+    print("bad parameter: empty fixed=") print(f_pe.status) print(" empty adaptive=") print(a_pe.status)
+    print(" adaptive=") print(a_pn.status) print(" fixed=") print(f_pn.status) println("")
+    if f_pe.status != 3 || a_pe.status != 3 { fail = fail + 1; println("FAIL: a non-finite parameter on an empty interval must be status 3, not a completed solve") }
+    if a_pn.status != 3 || f_pn.status != 3 { fail = fail + 1; println("FAIL: a non-finite parameter must be status 3 (invalid input), not 2") }
+
+    // ---- trajectory accessors: an invalid index is NaN, never another slot or a zero -------------
+    let g = solve_ode(ode_system_exp_decay(), decay(1.0, 0.01, 0.1), params(0.1), 0.0, 1.0, solver_options_fixed(0.1, 10))
+    let last = g.n_steps - 1
+    let v_ok = solution_get_value(&g, last, 0)
+    let w_ok = solution_get_variance(&g, last, 0)
+    if !(absf(v_ok - 0.904837418) <= 1.0e-6) || !(w_ok > 0.0) { fail = fail + 1; println("FAIL: a valid index must read the real value") }
+    let bad_v = solution_get_value(&g, 0 - 1, 0)
+    let bad_v2 = solution_get_value(&g, g.n_steps, 0)
+    let bad_v3 = solution_get_value(&g, 0, 0 - 1)
+    let bad_v4 = solution_get_value(&g, 0, 1)
+    let bad_w = solution_get_variance(&g, 0 - 1, 0)
+    let bad_w2 = solution_get_variance(&g, g.n_steps, 0)
+    let bad_w3 = solution_get_variance(&g, 0, 1)
+    print("invalid index: value=") print(bad_v) print(" variance=") print(bad_w3) println("")
+    if !(bad_v != bad_v) || !(bad_v2 != bad_v2) || !(bad_v3 != bad_v3) || !(bad_v4 != bad_v4) { fail = fail + 1; println("FAIL: an invalid value index must be NaN") }
+    if !(bad_w != bad_w) || !(bad_w2 != bad_w2) || !(bad_w3 != bad_w3) { fail = fail + 1; println("FAIL: an invalid variance index must be NaN, not 0 (no uncertainty)") }
 
     if fail == 0 { println("ODE SOLVE INPUT VALIDATION PASS") }
     fail

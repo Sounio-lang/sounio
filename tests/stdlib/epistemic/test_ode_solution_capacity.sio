@@ -52,6 +52,9 @@ fn expn(x: f64) -> f64 with Mut, Div, Panic {
 
 fn rel(a: f64, b: f64) -> f64 { absf(a - b) / absf(b) }
 
+// finite: false for NaN and +-inf
+fn finite(x: f64) -> bool { (x - x) == 0.0 }
+
 // all 14 compartments non-zero and distinct, so every channel moves
 fn seeded_14() -> EState with Mut, Div, Panic {
     var s = estate_new(14)
@@ -91,19 +94,19 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     let y_last = solution_get_value(&sol, last, 0)
     let v_last = solution_get_variance(&sol, last, 0)
     print("A final slot: y=") print(y_last) print(" exact=") print(y_end) println("")
-    if rel(y_last, y_end) > 1.0e-9 { fail = fail + 1; println("FAIL A: final slot value is not the final state") }
-    if rel(v_last, v_end) > 1.0e-5 { fail = fail + 1; println("FAIL A: final slot variance is not the final variance") }
+    if !(rel(y_last, y_end) <= 1.0e-9) { fail = fail + 1; println("FAIL A: final slot value is not the final state") }
+    if !(rel(v_last, v_end) <= 1.0e-5) { fail = fail + 1; println("FAIL A: final slot variance is not the final variance") }
 
     // the slot before it is the untouched state at t = 1022 dt
     let e_prev = expn(kk * dt * 1022.0)
     let y_prev = solution_get_value(&sol, last - 1, 0)
-    if rel(y_prev, y0 * e_prev) > 1.0e-9 { fail = fail + 1; println("FAIL A: slot n_steps-2 was clobbered") }
+    if !(rel(y_prev, y0 * e_prev) <= 1.0e-9) { fail = fail + 1; println("FAIL A: slot n_steps-2 was clobbered") }
     // slot 0 is still the initial state
-    if absf(solution_get_value(&sol, 0, 0) - y0) > 1.0e-15 { fail = fail + 1; println("FAIL A: slot 0 was clobbered") }
+    if !(absf(solution_get_value(&sol, 0, 0) - y0) <= 1.0e-15) { fail = fail + 1; println("FAIL A: slot 0 was clobbered") }
     if sol.covariance_mode != 1 { fail = fail + 1; println("FAIL A: covariance_mode") }
     // reaching t_end while the storage is full is still a COMPLETED solve
     if sol.status != 0 { fail = fail + 1; println("FAIL A: status of a completed solve") }
-    if absf(sol.t_final - t_end) > 1.0e-9 { fail = fail + 1; println("FAIL A: t_final") }
+    if !(absf(sol.t_final - t_end) <= 1.0e-9) { fail = fail + 1; println("FAIL A: t_final") }
     // max_steps smaller than the horizon needs: truncated, and it says so
     let cut = solve_ode(ode_system_exp_decay(), init, p, 0.0, t_end, solver_options_fixed(dt, 100))
     if cut.status != 1 { fail = fail + 1; println("FAIL A: max_steps exhaustion must report status 1") }
@@ -126,6 +129,7 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     var worst_var = 0.0
     var worst_prev = 0.0
     var n_moved = 0
+    var nonfinite = 0
     var d = 0
     while d < 14 {
         let a = solution_get_value(&sol_a, la, d)
@@ -141,6 +145,9 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         let bp = solution_get_value(&sol_b, 145, d)
         let rp = absf(ap - bp) / absf(bp)
         if rp > worst_prev { worst_prev = rp }
+        // `ratio > worst` is false for NaN, so a corrupted (NaN) slot would leave `worst` untouched and
+        // the assertions below would still pass: count non-finite ratios and reject them explicitly
+        if !finite(r) || !finite(rv) || !finite(rp) { nonfinite = nonfinite + 1 }
         // non-vacuity: the channel must have moved away from its seed value
         let seed = 1.0 + 0.5 * (d as f64)
         if absf(b - seed) > 1.0e-3 { n_moved = n_moved + 1 }
@@ -150,10 +157,11 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     print("B worst relative state difference (slot n_steps-2)=") print(worst_prev) println("")
     print("B worst relative variance difference=") print(worst_var) println("")
     print("B channels that moved from their seed=") print(n_moved) println("")
+    if nonfinite > 0 { fail = fail + 1; println("FAIL B: a compared slot is NaN/inf (the maxima below would silently ignore it)") }
     if n_moved != 14 { fail = fail + 1; println("FAIL B: comparison would be vacuous, not every channel evolved") }
-    if worst > 1.0e-6 { fail = fail + 1; println("FAIL B: final slot state differs from the reference final state") }
-    if worst_prev > 1.0e-6 { fail = fail + 1; println("FAIL B: slot n_steps-2 was clobbered") }
-    if worst_var > 1.0e-4 { fail = fail + 1; println("FAIL B: final slot variance differs from the reference final variance") }
+    if !(worst <= 1.0e-6) { fail = fail + 1; println("FAIL B: final slot state differs from the reference final state") }
+    if !(worst_prev <= 1.0e-6) { fail = fail + 1; println("FAIL B: slot n_steps-2 was clobbered") }
+    if !(worst_var <= 1.0e-4) { fail = fail + 1; println("FAIL B: final slot variance differs from the reference final variance") }
 
     if fail == 0 { println("ODE SOLUTION CAPACITY PASS") }
     fail

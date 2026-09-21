@@ -20,6 +20,9 @@
 //   SYSTEM_LINEAR_2   (3) — generic 2-compartment linear PK
 //   SYSTEM_LINEAR_3   (4) — generic 3-compartment linear PK
 //   SYSTEM_CHEM_SIMPLE (5) — A->B, B->C, A+B->D mass-action network
+//   SYSTEM_PBPK_CLEARANCE (6) — Drug->M1 (k1), M1->M2 (k2), M1->cleared (k3); linear, first order,
+//                               state [Drug, M1, M2, Cleared]. NOT system 5: there k3 is the
+//                               bimolecular Drug + M1 -> D. Pick the id that matches the model.
 //
 // User-defined systems: IDs 100+. Add branches to ode_rhs_dispatch.
 //
@@ -297,7 +300,8 @@ pub struct ODESolution {
     //             collapsed far from t_end (repeated rejection, or a non-finite error
     //             estimate: NaN/inf never passes for an accepted step)
     //   status 3: invalid input -- non-finite or backward interval, step size not finite and
-    //             > 0, negative or non-finite tolerances -- or a non-finite (NaN/inf) state at
+    //             > 0, negative or non-finite tolerances, a non-finite model parameter -- or a
+    //             non-finite (NaN/inf) state at
     //             the start or from a fixed step. Nothing (more) was integrated; t_final is
     //             the last valid time
     // A truncated solve is NOT an error return: the last recorded point is then the state
@@ -389,9 +393,19 @@ fn ode_initial_covariance_ok(state: &EState, p: &ODEParams, n: i64) -> bool with
 //   - t_start, t_end finite, and t_end >= t_start (backward solves are not supported)
 //   - step size (the fixed dt, or the adaptive initial dt) finite and > 0: a zero or negative
 //     step used to fall into `dt <= 0 -> t = t_end` and return the initial state as finished
+//   - every model parameter p[0..n_params) finite
 //   - adaptive: rtol, atol finite and >= 0
-fn ode_solve_inputs_ok(t_start: f64, t_end: f64, opts: &SolverOptions, adaptive: bool) -> bool {
+fn ode_solve_inputs_ok(t_start: f64, t_end: f64, opts: &SolverOptions, p: &ODEParams, adaptive: bool) -> bool with Mut, Div, Panic {
     if !ode_finite(t_start) || !ode_finite(t_end) { return false }
+    // every model parameter must be finite: a NaN/inf rate is invalid INPUT (status 3), not an
+    // integration failure (status 2), and on an empty interval no right-hand side would ever run
+    // to expose it
+    if p.n_params < 0 || p.n_params > 64 { return false }
+    var k = 0
+    while k < p.n_params {
+        if !ode_finite(p.params[k]) { return false }
+        k = k + 1
+    }
     if t_end < t_start { return false }
     if !ode_finite(opts.dt) || !(opts.dt > 0.0) { return false }
     if adaptive {
@@ -420,16 +434,25 @@ fn solution_record(
     sol.n_steps = step + 1
 }
 
+// NaN, built by overflow so no literal is needed
+fn ode_nan() -> f64 { let big = 1.0e308; let inf = big * 10.0; inf - inf }
+
+// Trajectory accessors. `step` must be in [0, n_steps) and `dim` in [0, n_dims); anything else
+// returns NaN. (An unchecked flat index would read another step's or another variable's slot, or
+// past the arrays; and 0.0, the convention of some accessors, would look like a real value -- for a
+// variance, like "no uncertainty". NaN is the answer that cannot be mistaken for a result.)
 pub fn solution_get_value(sol: &ODESolution, step: i64, dim: i64) -> f64 {
+    if step < 0 || step >= sol.n_steps || dim < 0 || dim >= sol.n_dims { return ode_nan() }
     sol.values[step * sol.n_dims + dim]
 }
 
 pub fn solution_get_variance(sol: &ODESolution, step: i64, dim: i64) -> f64 {
+    if step < 0 || step >= sol.n_steps || dim < 0 || dim >= sol.n_dims { return ode_nan() }
     sol.variances[step * sol.n_dims + dim]
 }
 
 fn solution_get_std(sol: &ODESolution, step: i64, dim: i64) -> f64 with Mut, Div, Panic {
-    ode_sqrt(sol.variances[step * sol.n_dims + dim])
+    ode_sqrt(solution_get_variance(sol, step, dim))
 }
 
 // ============================================================================
@@ -1494,7 +1517,7 @@ pub fn solve_ode(
     solution_record(&!sol, t, &state)
     // A non-finite starting state is status 3 even when the interval is empty (the loop below
     // would not run and the final check would call it a completed solve).
-    if !ode_solve_inputs_ok(t_start, t_end, &opts, false) || !ode_estate_values_finite(&state, sys.n_dims) {
+    if !ode_solve_inputs_ok(t_start, t_end, &opts, &p, false) || !ode_estate_values_finite(&state, sys.n_dims) {
         sol.t_final = t
         sol.status = 3
         return sol
@@ -1570,7 +1593,7 @@ pub fn solve_ode_adaptive(
 
     if !ode_initial_covariance_ok(&state, &p, sys.n_dims) { sol.covariance_mode = 2 }
     solution_record(&!sol, t, &state)
-    if !ode_solve_inputs_ok(t_start, t_end, &opts, true) || !ode_estate_values_finite(&state, sys.n_dims) {
+    if !ode_solve_inputs_ok(t_start, t_end, &opts, &p, true) || !ode_estate_values_finite(&state, sys.n_dims) {
         sol.t_final = t
         sol.status = 3
         return sol
