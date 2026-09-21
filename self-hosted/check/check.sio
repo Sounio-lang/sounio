@@ -3484,12 +3484,19 @@ fn checker_lookup_user_effect_id_mut(c: *mut Checker, name_buf: [i8; 64], name_l
     0 - 1
 }
 
-fn checker_collect_effects_mut(c: *mut Checker, list: EffectList, effects: [i64; 8], count: i64) -> MutEffectsResult with Mut, Panic, Div {
+fn checker_collect_effects_mut(c: *mut Checker, list: EffectList, effects: [i64; 8], count: i64) -> MutEffectsResult with Mut, Panic, Div, Alloc, IO {
     var effs = effects
     var n = count
     var eff_id = effect_name_to_id(list.head.name_buf, list.head.name_len)
     if eff_id < 0 {
         eff_id = checker_lookup_user_effect_id_mut(c, list.head.name_buf, list.head.name_len)
+    }
+    if eff_id < 0 {
+        let dummy = Span { file_id: 0, start: 0, end: 0 }
+        checker_report_error_at_inplace(c, dummy, 231, 0, 0, 0)
+        print("   = note: name `")
+        print_effect_ident_bytes(list.head.name_buf, list.head.name_len)
+        print("` is not in the built-in effect table and is not a registered user effect\n")
     }
     if eff_id >= 0 && n < 8 {
         var already_present = false
@@ -3511,7 +3518,7 @@ fn checker_collect_effects_mut(c: *mut Checker, list: EffectList, effects: [i64;
     }
 }
 
-fn checker_extract_effects_mut(c: *mut Checker, opt: Option<Box<EffectList> >) -> MutEffectsResult with Mut, Panic, Div {
+fn checker_extract_effects_mut(c: *mut Checker, opt: Option<Box<EffectList> >) -> MutEffectsResult with Mut, Panic, Div, Alloc, IO {
     match opt {
         None => MutEffectsResult { effects: [0; 8], count: 0 }
         Some(list) => checker_collect_effects_mut(c, *list, [0; 8], 0)
@@ -13377,6 +13384,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 217 { print("f128/f256 value conversion is not implemented; wide-float casts fail closed") }
     else if code == 218 { print("f128/f256 is reserved for compiler-owned format identity; source values are unavailable in V0-A") }
     else if code == 219 { print("call to an `extern \"C\"` function the native backend does not implement") }
+    else if code == 231 { print("unknown effect: not a built-in and not a registered user effect") }
     else { print("unknown error") }
 }
 
@@ -13663,6 +13671,9 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
     }
     else if code == 219 {
         print("   |\n   = help: only these body-less names are implemented: print, print_int, print_char, print_f64, get_arg, get_arg_count, str_len, str_char_at, str_eq, str_slice, starts_with, str_concat, str_from_bytes, read_file, write_file, file_size, sqrt, exp, log, sin, cos, assert, heap_alloc, heap_free, f64_to_bits, bits_to_f64, syscall6, malloc, free, getpid, getppid, exit, abort, system, read_i64, write_i64, read_f64, write_f64\n")
+    }
+    else if code == 231 {
+        print("   |\n   = help: use a built-in effect from the table, or declare `effect Name { ... }` before `with Name`\n")
     }
     else {
         // No help available for unknown errors
@@ -13987,6 +13998,9 @@ fn print_error_note(code: i64) with IO, Mut, Panic, Div {
     }
     else if code == 219 {
         print("   = note: there is no dynamic linker in this backend; an unimplemented extern compiles to an empty stub whose calls read 0\n")
+    }
+    else if code == 231 {
+        print("   = note: a dropped unknown name is not purity; the effect set is a table, not a silent filter\n")
     }
     else {
         // No note available for unknown errors
@@ -17433,19 +17447,27 @@ impl Checker {
         -1
     }
 
-    fn extract_effects_with_checker(self, opt: Option<Box<EffectList> >) -> ExtractEffectsResult with Mut, Panic, Div {
+    fn extract_effects_with_checker(self, opt: Option<Box<EffectList> >) -> ExtractEffectsResult with Mut, Panic, Div, Alloc, IO {
         match opt {
             None => ExtractEffectsResult { checker: self, effects: [0; 8], count: 0 }
             Some(list) => self.collect_effects_with_checker(*list, [0; 8], 0)
         }
     }
 
-    fn collect_effects_with_checker(self, list: EffectList, effects: [i64; 8], count: i64) -> ExtractEffectsResult with Mut, Panic, Div {
+    fn collect_effects_with_checker(self, list: EffectList, effects: [i64; 8], count: i64) -> ExtractEffectsResult with Mut, Panic, Div, Alloc, IO {
+        var c = self
         var effs = effects
         var n = count
         var eff_id = effect_name_to_id(list.head.name_buf, list.head.name_len)
         if eff_id < 0 {
-            eff_id = self.lookup_user_effect_id(list.head.name_buf, list.head.name_len)
+            eff_id = c.lookup_user_effect_id(list.head.name_buf, list.head.name_len)
+        }
+        if eff_id < 0 {
+            let dummy = Span { file_id: 0, start: 0, end: 0 }
+            c = c.report_error_at(dummy, 231, 0, 0, 0)
+            print("   = note: name `")
+            print_effect_ident_bytes(list.head.name_buf, list.head.name_len)
+            print("` is not in the built-in effect table and is not a registered user effect\n")
         }
         if eff_id >= 0 && n < 8 {
             var already_present = false
@@ -17462,8 +17484,8 @@ impl Checker {
             }
         }
         match list.tail {
-            None => ExtractEffectsResult { checker: self, effects: effs, count: n }
-            Some(next) => self.collect_effects_with_checker(*next, effs, n)
+            None => ExtractEffectsResult { checker: c, effects: effs, count: n }
+            Some(next) => c.collect_effects_with_checker(*next, effs, n)
         }
     }
 
