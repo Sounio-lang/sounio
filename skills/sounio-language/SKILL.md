@@ -13,14 +13,14 @@ Write correct Sounio and keep language-facing materials aligned with what the co
 
 ### 1) Decide “implemented” vs “aspirational”
 
-- Read `compiler/docs/KNOWN_LIMITATIONS.md` and `docs/MV_CORE_CHECKLIST.md`.
+- Read `docs/compiler/KNOWN_LIMITATIONS.md` and `docs/implementation/MV_CORE_CHECKLIST.md`.
 - If you touch docs/examples, prefer aligning them to the compiler over adding new surface syntax.
 
 ### 2) Anchor to canonical examples
 
 - For real, compilable syntax patterns, mirror `tests/run-pass/` and `stdlib/` (not blog-like examples).
 - When unsure about a construct, search for it in:
-  - `docs/LLM_PROGRAMMING_GUIDE.md`
+  - `docs/guide/LLM_PROGRAMMING_GUIDE.md`
   - `compiler/src/parser/tests/`
 
 ### 3) Enforce Sounio-native syntax (no Rust drift)

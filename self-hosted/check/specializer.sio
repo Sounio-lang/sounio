@@ -13,12 +13,20 @@
 //      checker's own E010 still fires; so does a call without type args.
 //   3. Every distinct instantiation: clone + substitute the FnDef and scan the
 //      clone's body (transitive turbofish calls, incl. self-recursion; the
-//      instance is reserved first, so this terminates).
+//      instance is reserved first, so this terminates). Instance identity is
+//      the template slot plus the COMPLETE canonical argument key
+//      (spec_fn_key: every source name length-prefixed, every constructor
+//      tagged, every argument list delimited), compared exactly -- never a
+//      hash of the emitted symbol. An argument with no canonical key (an
+//      unsupported or overlong type) refuses the program instead of guessing.
 //   4. Naming (spec_assign_instance_names): a template with exactly one
 //      instantiation and no call that still needs it keeps the same-name
 //      scheme -- its clone replaces it and no call site changes. Otherwise
-//      every instantiation is emitted under an injective instance name
-//      (`identity__f64`) and the calls it serves are rewritten to that name.
+//      every instantiation is emitted under the symbol `__sp_<key>` and the
+//      calls it serves are rewritten to that name. Because the key is
+//      injective, underscores or marker spellings in source identifiers
+//      cannot alias two instances; a symbol that collides with a source item
+//      is refused (capacity code 7).
 //   5. Finalize: replace each same-name template item with its clone; keep
 //      still-referenced templates verbatim; drop the rest. Generic-struct instances
 //      (CDExact<i64> -> struct CDExact__i64 items) referenced from clone
@@ -120,6 +128,7 @@ struct SpecFnDefStage { fd: FnDef }
 struct SpecStructDefStage { sd: StructDef }
 struct SpecImplDefStage { id: ImplDef }
 struct SpecNameStage { n: Name }
+struct SpecItemsStage { items: Option<Box<ItemList>> }
 struct SpecTypeStage { t: TypeExpr }
 struct SpecBindStage { slots: [i64; 4] }
 
@@ -159,18 +168,22 @@ var SPEC_GF_INST_COUNT: [i64; 256] = [0; 256]
 // Slots registered from impl methods (`fn pick<T>(self: &S, ...)`): their clones are
 // emitted inside the impl (spec_finalize_method_items), never as top-level fns.
 var SPEC_GF_IS_METHOD: [bool; 256] = [false; 256]
-// Every distinct instantiation, in creation order: its template slot, the hash of
-// its injective instance name (spec_fn_instance_name), the *mut SpecFnDefStage
-// holding the substituted clone, the *mut SpecNameStage holding the instance name,
-// and whether it is emitted under that name -- decided only after the whole scan
+// Every distinct instantiation, in creation order: its template slot, the
+// *mut SpecNameStage holding its canonical argument key (spec_fn_key; identity is
+// compared exactly, never by hash), the *mut SpecFnDefStage holding the substituted
+// clone, the *mut SpecNameStage holding the symbol `__sp_<key>`, and whether it is
+// emitted under that symbol -- decided only after the whole scan
 // (spec_assign_instance_names).
 var SPEC_FI_COUNT: i64 = 0
 var SPEC_FI_GT: [i64; 1024] = [0; 1024]
-var SPEC_FI_KEY: [i64; 1024] = [0; 1024]
+var SPEC_FI_KEYNAME: [i64; 1024] = [0; 1024]
 var SPEC_FI_STAGE: [i64; 1024] = [0; 1024]
 var SPEC_FI_NAME: [i64; 1024] = [0; 1024]
 var SPEC_FI_MANGLED: [bool; 1024] = [false; 1024]
 var SPEC_ANY_MANGLED: i64 = 0
+// *mut SpecItemsStage over the ORIGINAL item list, set by specialize_generics; a
+// generated `__sp_<key>` symbol is checked against it (capacity code 7).
+var SPEC_SOURCE_ITEMS: i64 = 0
 // Type-argument inference state (spec_infer_call_targs). Local-type scope: name
 // hash -> *mut SpecTypeStage, searched from the top. Declared return types of
 // non-generic fns. Inferred call sites: (span, the instance whose clone body the call
@@ -190,16 +203,17 @@ var SPEC_CS_CTX: [i64; 4096] = [0; 4096]
 var SPEC_CS_FI: [i64; 4096] = [0; 4096]
 var SPEC_SCAN_CTX: i64 = 0
 var SPEC_RENAME_CTX: i64 = 0
-// Set when a template is poisoned in a way lowering cannot represent. Every
-// distinct instantiation now gets its own clone (spec_ensure_instance), so no
-// template is poisoned back to its unspecialized body and this stays false; it
-// is kept so spec_report_unsound_poison keeps its callers.
+// Set when an instantiation cannot be named injectively (a type argument with no
+// canonical key: unsupported or overlong). Every representable distinct
+// instantiation gets its own clone (spec_ensure_instance), so no template is
+// poisoned back to its unspecialized body; this fails the compile closed instead
+// (spec_report_unsound_poison).
 // See docs/handoff/BLK-20260903-specializer-nested-targ-collision.md.
 var SPEC_UNSOUND_POISON: bool = false
 // Fail-closed state for formerly silent fixed-capacity truncation.
 // Codes: 1=>4 type params, 2=>256 generic fns, 3=>256 generic structs,
 // 4=>1024 emitted specialization hashes, 5=>1024 generic fn instantiations,
-// 6=>64 generic impl blocks.
+// 6=>64 generic impl blocks, 7=>a `__sp_<key>` symbol collides with a source item.
 var SPEC_CAP_OVERFLOW: bool = false
 var SPEC_CAP_OVERFLOW_CODE: i64 = 0
 // Generic methods require an explicit, unambiguous turbofish so the
@@ -249,7 +263,7 @@ fn spec_reset_state() with Mut {
     var f: i64 = 0
     while f < 1024 {
         SPEC_FI_GT[f as usize] = 0
-        SPEC_FI_KEY[f as usize] = 0
+        SPEC_FI_KEYNAME[f as usize] = 0
         SPEC_FI_STAGE[f as usize] = 0
         SPEC_FI_NAME[f as usize] = 0
         SPEC_FI_MANGLED[f as usize] = false
@@ -257,6 +271,7 @@ fn spec_reset_state() with Mut {
     }
     SPEC_FI_COUNT = 0
     SPEC_ANY_MANGLED = 0
+    SPEC_SOURCE_ITEMS = 0
     SPEC_SC_TOP = 0
     SPEC_RT_COUNT = 0
     SPEC_CS_COUNT = 0
@@ -282,9 +297,9 @@ pub fn spec_unsound_poison_detected() -> bool {
 // program would otherwise have been accepted.
 pub fn spec_report_unsound_poison() -> bool with IO {
     if !SPEC_UNSOUND_POISON { return false }
-    print("error: a generic function was instantiated with more than one type-argument list in a single compilation unit, and at least one of those arguments is not a primitive scalar\n")
-    print("  note: monomorphization keeps only one instantiation per template; the others would reach code generation unspecialized and evaluate to zero\n")
-    print("  help: write a separate concrete function for each type, or keep the generic call sites in separate compilation units\n")
+    print("error: generic specialization cannot be represented safely\n")
+    print("  note: a type argument has an unsupported or overlong identity, so the instantiation cannot be named without risking aliasing another one\n")
+    print("  help: provide supported concrete type arguments, or use separate concrete functions\n")
     true
 }
 
@@ -310,6 +325,8 @@ pub fn spec_report_cap_overflow() -> bool with IO {
         print("a compilation unit supports at most 1024 distinct generic function instantiations")
     } else if SPEC_CAP_OVERFLOW_CODE == 6 {
         print("a compilation unit supports at most 64 generic impl blocks")
+    } else if SPEC_CAP_OVERFLOW_CODE == 7 {
+        print("a generated specialization symbol collides with a source item")
     } else {
         print("an internal fixed-capacity specializer table was exhausted")
     }
@@ -500,7 +517,12 @@ fn spec_generic_table_find(name: Name) -> i64 with Mut, Panic, Div {
     while i < SPEC_GF_COUNT {
         let p = SPEC_GF_PTRS[i as usize] as *mut SpecGfNode
         if (*p).name_hash == h {
-            return i
+            // The hash only nominates a candidate: confirm the exact name, so two
+            // different templates whose names hash alike never share a slot.
+            match (*p).fd {
+                Some(fd) => { if name_eq((*fd).name, name) { return i } }
+                None => {}
+            }
         }
         i = i + 1
     }
@@ -1741,118 +1763,144 @@ fn spec_int_key(v: i64) -> string with Mut, Panic, Div {
     str_from_bytes(buf, len)
 }
 
-fn spec_path_key(path: AstPath) -> string with Mut, Panic, Div {
-    var head_buf: [i8; 384] = path.segments.head_buf
-    var s = str_from_bytes(head_buf, path.segments.head_len)
-    var cur = path.segments.tail
-    var going = true
-    while going {
-        match cur {
-            None => { going = false }
-            Some(seg) => {
-                var seg_buf: [i8; 384] = (*seg).head_buf
-                s = str_concat(str_concat(s, "_"), str_from_bytes(seg_buf, (*seg).head_len))
-                cur = (*seg).tail
-            }
-        }
-    }
-    s
+// Length-prefix every source name; tag every constructor and delimit every
+// type-argument list. Unlike the legacy struct mangle, underscores and marker
+// spellings in source identifiers cannot alias a type constructor or a list.
+// Tags: U unit, R &T, M &!T, P *T, Y [T; N], N named type, A list item, E list end.
+// A type with no tag here (tuple, function type, multi-segment path, non-literal
+// array length) has no key and is refused rather than aliased.
+fn spec_key_length(n: i64) -> string with Mut, Panic, Div {
+    var b: [i8; 384] = [0; 384]
+    b[0] = (48 + n / 100) as i8
+    b[1] = (48 + (n / 10) % 10) as i8
+    b[2] = (48 + n % 10) as i8
+    // str_from_bytes borrows this scratch buffer in the bootstrap runtime.
+    // Copy before returning; the next name conversion reuses the same stack.
+    let view = str_from_bytes(b, 3)
+    str_concat(view, "")
 }
 
-fn spec_array_size_key(opt: Option<Box<Expr>>) -> string with Mut, Panic, Div {
+fn spec_key_name(n: Name) -> string with Mut, Panic, Div {
+    // Keep the owned prefix separate from the temporary name spelling.
+    let length = spec_key_length(n.len)
+    let spelling = spec_name_to_string(n)
+    str_concat(length, spelling)
+}
+
+// Array length: a literal is length-prefixed decimal (`L`), a named constant is a
+// length-prefixed name (`I`). Any other length expression is not comparable, so it
+// has no key.
+fn spec_fn_array_size_key(opt: Option<Box<Expr>>) -> string with Mut, Panic, Div {
     match opt {
-        None => "N"
+        None => { return "" }
         Some(e) => {
             if (*e).kind == ExprKind::ExprIntLit {
-                spec_int_key((*e).int_val)
-            } else if (*e).kind == ExprKind::ExprIdent {
-                spec_name_to_string((*e).name)
-            } else {
-                "N"
+                // spec_int_key returns a borrowed scratch view: copy it before any
+                // other string is built.
+                let digits = str_concat(spec_int_key((*e).int_val), "")
+                if str_len(digits) == 0 || str_len(digits) > 32 { return "" }
+                let prefix = spec_key_length(str_len(digits))
+                return str_concat(str_concat("L", prefix), digits)
             }
+            if (*e).kind == ExprKind::ExprIdent {
+                if (*e).name.len <= 0 || (*e).name.len > 384 { return "" }
+                return str_concat("I", spec_key_name((*e).name))
+            }
+            return ""
         }
     }
 }
 
-fn spec_type_list_key(opt: Option<Box<TypeExprList>>) -> string with Mut, Panic, Div, Alloc {
-    match opt {
-        None => ""
+fn spec_fn_type_key(te: TypeExpr) -> string with Mut, Panic, Div, Alloc {
+    if te.kind == TypeExprKind::TypeUnit { return "U" }
+    if te.kind == TypeExprKind::TypeReference || te.kind == TypeExprKind::TypeRefMut {
+        match te.inner {
+            None => { return "" }
+            Some(t) => {
+                let inner = spec_fn_type_key(*t)
+                if str_len(inner) == 0 { return "" }
+                if te.kind == TypeExprKind::TypeRefMut { return str_concat("M", inner) }
+                return str_concat("R", inner)
+            }
+        }
+    }
+    if te.kind == TypeExprKind::TypeRawPtr {
+        match te.inner {
+            None => { return "" }
+            Some(t) => {
+                let inner = spec_fn_type_key(*t)
+                if str_len(inner) == 0 { return "" }
+                return str_concat("P", inner)
+            }
+        }
+    }
+    if te.kind == TypeExprKind::TypeArray {
+        let size = spec_fn_array_size_key(te.array_size)
+        if str_len(size) == 0 { return "" }
+        match te.inner {
+            None => { return "" }
+            Some(t) => {
+                let inner = spec_fn_type_key(*t)
+                if str_len(inner) == 0 { return "" }
+                return str_concat(str_concat("Y", size), inner)
+            }
+        }
+    }
+    if te.kind != TypeExprKind::TypeNamed || te.path.seg_count != 1 { return "" }
+    let name = spec_path_single_name(te.path)
+    if name.len <= 0 || name.len > 384 { return "" }
+    let spelling = spec_key_name(name)
+    let prefix = str_concat("N", spelling)
+    let args = spec_fn_args_key(te.type_args)
+    if str_len(args) == 0 { return "" }
+    str_concat(prefix, args)
+}
+
+fn spec_fn_args_key(args: Option<Box<TypeExprList>>) -> string with Mut, Panic, Div, Alloc {
+    match args {
+        None => "E"
         Some(list) => {
-            let head = spec_type_key((*list).head)
-            match (*list).tail {
-                None => head
-                Some(rest) => str_concat(str_concat(head, "_"), spec_type_list_key(Some(rest)))
-            }
+            let head = spec_fn_type_key((*list).head)
+            let tail = spec_fn_args_key((*list).tail)
+            if str_len(head) == 0 || str_len(tail) == 0 { return "" }
+            str_concat(str_concat("A", head), tail)
         }
     }
 }
 
-// A rendering of a type argument that keeps distinct types distinct: `i64`,
-// `ref_i64`, `mut_f64`, `arr4_f64`, `Pair_L_i64_f64_R`. spec_render_type_name, used
-// for struct instance names, renders everything but a plain name as `T` (and the
-// checker's mangling mirrors that), which is harmless there but would let two
-// different fn instantiations share one body.
-fn spec_type_key(te: TypeExpr) -> string with Mut, Panic, Div, Alloc {
-    if te.kind == TypeExprKind::TypeNamed {
-        var named = spec_path_key(te.path)
-        match te.type_args {
-            Some(al) => { named = str_concat(str_concat(str_concat(named, "_L_"), spec_type_list_key(Some(al))), "_R") }
-            None => {}
-        }
-        return named
-    }
-    if te.kind == TypeExprKind::TypeUnit { return "unit" }
-    var s = "k"
-    if te.kind == TypeExprKind::TypeReference {
-        s = "ref"
-    } else if te.kind == TypeExprKind::TypeRefMut {
-        s = "mut"
-    } else if te.kind == TypeExprKind::TypeRawPtr {
-        s = "ptr"
-    } else if te.kind == TypeExprKind::TypeArray {
-        s = str_concat("arr", spec_array_size_key(te.array_size))
-    } else if te.kind == TypeExprKind::TypeTuple {
-        s = "tup"
-    } else {
-        s = str_concat("k", spec_int_key(te.kind as i64))
-    }
-    match te.inner {
-        Some(inner) => { s = str_concat(str_concat(s, "_"), spec_type_key(*inner)) }
-        None => {}
-    }
-    match te.type_args {
-        Some(al) => { s = str_concat(str_concat(str_concat(s, "_L_"), spec_type_list_key(Some(al))), "_R") }
-        None => {}
-    }
-    s
+fn spec_fn_key(base: Name, args: Option<Box<TypeExprList>>) -> Name with Mut, Panic, Div, Alloc {
+    let template = spec_key_name(base)
+    let types = spec_fn_args_key(args)
+    if str_len(types) == 0 { return empty_name() }
+    let key = str_concat(template, types)
+    // Keep both key and emitted name inside the conservative backend limit.
+    if str_len(key) > 110 { return empty_name() }
+    make_name(key)
 }
 
-// The name an instantiation is emitted under when it cannot keep the template's:
-// `identity__i64`, `identity__f64`, `pick__ref_i64`. For plain-name arguments this
-// is exactly spec_mangle_name's spelling.
-fn spec_fn_instance_name(base: Name, targs: Option<Box<TypeExprList>>) -> Name with Mut, Panic, Div, Alloc {
-    var s = spec_name_to_string(base)
-    var cur = targs
-    var going = true
-    while going {
-        match cur {
-            None => { going = false }
-            Some(list) => {
-                s = str_concat(str_concat(s, "__"), spec_type_key((*list).head))
-                cur = (*list).tail
-            }
-        }
-    }
-    make_name(s)
-}
-
-fn spec_fn_instance_find(gt_idx: i64, key: i64) -> i64 with Mut, Panic, Div {
+// Instance identity is exact: the template slot plus the COMPLETE canonical key
+// (see spec_fn_key), compared name-for-name. An empty key (an unsupported or
+// overlong type argument) never matches, so callers fall through to "no instance".
+fn spec_fn_instance_find(gt_idx: i64, key: Name) -> i64 with Mut, Panic, Div {
     var i: i64 = 0
     while i < SPEC_FI_COUNT {
-        if SPEC_FI_GT[i as usize] == gt_idx && SPEC_FI_KEY[i as usize] == key { return i }
+        if SPEC_FI_GT[i as usize] == gt_idx {
+            let kp = SPEC_FI_KEYNAME[i as usize] as *mut SpecNameStage
+            if name_eq((*kp).n, key) { return i }
+        }
         i = i + 1
     }
     0 - 1
+}
+
+fn spec_items_have_symbol(items: Option<Box<ItemList>>, symbol: Name) -> bool with Mut, Panic, Div {
+    match items {
+        None => false
+        Some(list) => {
+            if name_eq((*list).head.name, symbol) { return true }
+            spec_items_have_symbol((*list).tail, symbol)
+        }
+    }
 }
 
 // ============================================================
@@ -2036,7 +2084,7 @@ fn spec_record_inferred_call(span: Span, callee: Name, targs: Option<Box<TypeExp
     }
     let gt_idx = spec_generic_table_find(callee)
     if gt_idx < 0 { return }
-    let fi = spec_fn_instance_find(gt_idx, ast_name_hash(spec_fn_instance_name(callee, targs)))
+    let fi = spec_fn_instance_find(gt_idx, spec_fn_key(callee, targs))
     if fi < 0 { return }
     let i = SPEC_CS_COUNT
     SPEC_CS_FILE[i as usize] = span.file_id as i64
@@ -2127,7 +2175,7 @@ fn spec_infer_expr_type(e: Expr) -> i64 with Mut, Panic, Div, Alloc {
         // instance's substituted return type.
         var fi: i64 = 0 - 1
         match spec_call_expr_type_args(e) {
-            Some(targs) => { fi = spec_fn_instance_find(gt_idx, ast_name_hash(spec_fn_instance_name(callee, Some(targs)))) }
+            Some(targs) => { fi = spec_fn_instance_find(gt_idx, spec_fn_key(callee, Some(targs))) }
             None => { fi = spec_inferred_call_lookup(e.span, SPEC_SCAN_CTX) }
         }
         if fi < 0 || SPEC_FI_STAGE[fi as usize] == 0 { return 0 }
@@ -2253,7 +2301,14 @@ fn spec_ensure_instance(base_name: Name, targs: Option<Box<TypeExprList>>) with 
     if gt_idx < 0 { return }
     if spec_type_args_count(targs) != spec_generic_table_tp_count(gt_idx) { return }
 
-    let key = ast_name_hash(spec_fn_instance_name(base_name, targs))
+    let key = spec_fn_key(base_name, targs)
+    if spec_name_is_empty(key) {
+        // No canonical key (an unsupported or overlong type argument): refuse the
+        // program rather than guess a name that could alias another instantiation.
+        SPEC_GF_NEEDED[gt_idx as usize] = true
+        SPEC_UNSOUND_POISON = true
+        return
+    }
     if spec_fn_instance_find(gt_idx, key) >= 0 { return }
     if SPEC_FI_COUNT >= 1024 {
         // Out of instance slots: refuse the program (capacity code 5) rather than
@@ -2262,17 +2317,30 @@ fn spec_ensure_instance(base_name: Name, targs: Option<Box<TypeExprList>>) with 
         spec_mark_cap_overflow(5)
         return
     }
+    let symbol = make_name(str_concat("__sp_", spec_name_to_string(key)))
+    if SPEC_SOURCE_ITEMS != 0 {
+        let roots = SPEC_SOURCE_ITEMS as *mut SpecItemsStage
+        if spec_items_have_symbol((*roots).items, symbol) {
+            // A source item already owns this symbol: emitting the clone would
+            // shadow it (capacity code 7).
+            SPEC_GF_NEEDED[gt_idx as usize] = true
+            spec_mark_cap_overflow(7)
+            return
+        }
+    }
     let fi = SPEC_FI_COUNT
     SPEC_FI_GT[fi as usize] = gt_idx
-    SPEC_FI_KEY[fi as usize] = key
     SPEC_FI_STAGE[fi as usize] = 0
     SPEC_FI_MANGLED[fi as usize] = false
     SPEC_FI_COUNT = fi + 1
     SPEC_GF_INST_COUNT[gt_idx as usize] = SPEC_GF_INST_COUNT[gt_idx as usize] + 1
-    // Stored before any deep call: Name values held across deep calls arrive
-    // corrupted (see spec_subst_expr_mut).
+    // Key and symbol are stored before any deep call: Name values held across deep
+    // calls arrive corrupted (see spec_subst_expr_mut).
+    let kn = heap_alloc(1024) as *mut SpecNameStage
+    (*kn).n = key
+    SPEC_FI_KEYNAME[fi as usize] = kn as i64
     let ns = heap_alloc(1024) as *mut SpecNameStage
-    (*ns).n = spec_fn_instance_name(base_name, targs)
+    (*ns).n = symbol
     SPEC_FI_NAME[fi as usize] = ns as i64
 
     match spec_generic_table_fd(gt_idx) {
@@ -2631,7 +2699,7 @@ fn spec_rename_call_target(e: Expr) -> i64 with Mut, Panic, Div, Alloc {
             if spec_type_args_count(Some(targs)) != spec_generic_table_tp_count(gt_idx) {
                 return 0 - 1
             }
-            let fi = spec_fn_instance_find(gt_idx, ast_name_hash(spec_fn_instance_name(callee_name, Some(targs))))
+            let fi = spec_fn_instance_find(gt_idx, spec_fn_key(callee_name, Some(targs)))
             if fi >= 0 && SPEC_FI_MANGLED[fi as usize] { fi } else { 0 - 1 }
         }
     }
@@ -2650,7 +2718,7 @@ fn spec_rename_method_target(e: Expr) -> i64 with Mut, Panic, Div, Alloc {
             if spec_type_args_count(Some(targs)) != spec_generic_table_tp_count(gt_idx) {
                 return 0 - 1
             }
-            let fi = spec_fn_instance_find(gt_idx, ast_name_hash(spec_fn_instance_name(e.name, Some(targs))))
+            let fi = spec_fn_instance_find(gt_idx, spec_fn_key(e.name, Some(targs)))
             if fi >= 0 && SPEC_FI_MANGLED[fi as usize] { fi } else { 0 - 1 }
         }
     }
@@ -3408,6 +3476,9 @@ pub fn specialize_generics(items: Option<Box<ItemList>>) -> Option<Box<ItemList>
     if SPEC_GF_COUNT == 0 && SPEC_GI_COUNT == 0 {
         return items
     }
+    let roots = heap_alloc(4096) as *mut SpecItemsStage
+    (*roots).items = items
+    SPEC_SOURCE_ITEMS = roots as i64
     spec_collect_return_types(items)
     spec_scan_items(items)
     var work_items = items

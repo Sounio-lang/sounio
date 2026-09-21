@@ -472,5 +472,5 @@ souc run --native my_program.sio output.elf
 
 - [**Usage Guide**](usage.md) — Detailed walkthrough with examples
 - [**Magic Commands**](usage.md#magic-commands) — All available magics
-- [**Sounio Language**](https://github.com/sounio-org/sounio/docs/LLM_PROGRAMMING_GUIDE.md) — Learn Sounio syntax
+- [**Sounio Language**](https://github.com/sounio-org/sounio/blob/main/docs/guide/LLM_PROGRAMMING_GUIDE.md) — Learn Sounio syntax
 - [**Examples**](https://github.com/sounio-org/sounio/tree/main/ecosystem/sounio-jupyter/examples) — Example notebooks
