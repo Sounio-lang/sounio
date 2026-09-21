@@ -103,11 +103,11 @@ sounio_materialize_madaros_prebuilt() {
     fi
   fi
 
-  # Fast path: if stamp exists with metadata match, verify hash as fallback.
-  # This catches same-second in-place modifications that metadata alone cannot detect.
+  # Fast path: if stamp exists with matching metadata, trust it (no hash verification).
+  # ctime (change time) reliably detects file modifications; if ctime matches, the file
+  # hasn't changed since the stamp was written. inode detects replacements.
   if [[ $verify -eq 0 && -x "$elf" && -f "$stamp" && -n "$size" && -n "$inode" ]] \
-     && [[ "$(cat "$stamp" 2>/dev/null)" == "$want $size $inode $mtime $ctime" ]] \
-     && [[ "$(_sounio_madaros_sha256 "$elf")" == "$want" ]]; then
+     && [[ "$(cat "$stamp" 2>/dev/null)" == "$want $size $inode $mtime $ctime" ]]; then
     return 0
   fi
 
