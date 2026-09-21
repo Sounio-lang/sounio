@@ -74,23 +74,33 @@ sounio_materialize_madaros_prebuilt() {
     return 78
   fi
 
-  local size=""
+  local size="" inode="" mtime=""
   if [[ -f "$elf" ]]; then
     size="$(wc -c < "$elf" 2>/dev/null | tr -d ' ')" || size=""
+    # Get inode and mtime to detect file replacements and modifications
+    # (same-size corruption is caught by hash fallback if mtime changes).
+    local stat_out
+    stat_out="$(stat -f '%i %m' "$elf" 2>/dev/null)" || stat_out=""
+    if [[ -n "$stat_out" ]]; then
+      inode="${stat_out%% *}"
+      mtime="${stat_out##* }"
+    fi
   fi
 
-  if [[ $verify -eq 0 && -x "$elf" && -f "$stamp" && -n "$size" ]] \
-     && [[ "$(cat "$stamp" 2>/dev/null)" == "$want $size" ]]; then
-    # Stamp exists and matches recorded hash+size, but re-verify the ELF hasn't been
-    # modified (same-size corruption or replacement would not be caught by size alone).
-    if [[ "$(_sounio_madaros_sha256 "$elf")" == "$want" ]]; then
-      return 0
-    fi
+  # Fast path: if stamp exists, file metadata matches, trust the stamp (no re-hash).
+  # Fallback: if metadata changed, re-hash to catch modifications.
+  if [[ $verify -eq 0 && -x "$elf" && -f "$stamp" && -n "$size" && -n "$inode" ]] \
+     && [[ "$(cat "$stamp" 2>/dev/null)" == "$want $size $inode $mtime" ]]; then
+    return 0
   fi
 
   if [[ "$verify" -eq 0 ]] && [[ -f "$elf" ]] && [[ "$(_sounio_madaros_sha256 "$elf")" == "$want" ]]; then
     chmod 755 "$elf" 2>/dev/null || true
-    printf '%s %s\n' "$want" "$size" > "$stamp.tmp.$$" && mv -f "$stamp.tmp.$$" "$stamp"
+    local stat_out
+    stat_out="$(stat -f '%i %m' "$elf" 2>/dev/null)" || stat_out=""
+    inode="${stat_out%% *}"
+    mtime="${stat_out##* }"
+    printf '%s %s %s %s\n' "$want" "$size" "$inode" "$mtime" > "$stamp.tmp.$$" && mv -f "$stamp.tmp.$$" "$stamp"
     return 0
   fi
 
@@ -119,7 +129,11 @@ sounio_materialize_madaros_prebuilt() {
     return 78
   fi
   size="$(wc -c < "$elf" | tr -d ' ')"
-  printf '%s %s\n' "$want" "$size" > "$stamp.tmp.$$" && mv -f "$stamp.tmp.$$" "$stamp"
+  local stat_out
+  stat_out="$(stat -f '%i %m' "$elf" 2>/dev/null)" || stat_out=""
+  inode="${stat_out%% *}"
+  mtime="${stat_out##* }"
+  printf '%s %s %s %s\n' "$want" "$size" "$inode" "$mtime" > "$stamp.tmp.$$" && mv -f "$stamp.tmp.$$" "$stamp"
   echo "madaros prebuilt: materialized bin/madaros-linux-x86_64 from bin/madaros-linux-x86_64.gz (sha256 ${want:0:12}, $size bytes)" >&2
   return 0
 }
