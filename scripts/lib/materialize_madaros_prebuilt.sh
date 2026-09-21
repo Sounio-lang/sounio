@@ -96,14 +96,14 @@ sounio_materialize_madaros_prebuilt() {
 
   local tmp="$elf.tmp.$$"
   if ! gzip -dc "$gz" > "$tmp" 2>/dev/null; then
-    rm -f "$tmp"
+    rm -f "$tmp" "$elf" "$stamp"
     echo "error: madaros prebuilt: cannot decompress bin/madaros-linux-x86_64.gz" >&2
     return 78
   fi
   local got
   got="$(_sounio_madaros_sha256 "$tmp")"
   if [[ "$got" != "$want" ]]; then
-    rm -f "$tmp"
+    rm -f "$tmp" "$elf" "$stamp"
     echo "error: madaros prebuilt: bin/madaros-linux-x86_64.gz decompresses to sha256 $got" >&2
     echo "  but bin/madaros-linux-x86_64.sha256 records $want" >&2
     echo "  refusing to install a prebuilt that is not the committed one" >&2
