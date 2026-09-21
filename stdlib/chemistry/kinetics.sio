@@ -546,6 +546,39 @@ pub fn simulate_chem_network_full(init_val: &[f64; 4], init_var: &[f64; 4], ks: 
     (outv, outu)
 }
 
+// Same EState + solve_ode pipeline as simulate_chem_network_full, but on the linear PBPK
+// metabolism system (epistemic::ode system 6):
+//   Drug -> M1 (k1),  M1 -> M2 (k2),  M1 -> cleared (k3)
+// State is [Drug, M1, M2, Cleared]; every reaction is first order. init_var and uks are
+// VARIANCE and standard uncertainty respectively, exactly as in simulate_chem_network_full.
+pub fn simulate_pbpk_clearance_full(init_val: &[f64; 4], init_var: &[f64; 4], ks: &[f64; 3], uks: &[f64; 3], dt: f64, nsteps: i64) -> ([f64; 4], [f64; 4]) with Mut, Div, Panic {
+    var y0 = estate_new(4);
+    var i = 0;
+    while i < 4 {
+        estate_set(&!y0, i, init_val[i], init_var[i]);
+        i = i + 1;
+    }
+    var p = ode_params_new();
+    i = 0;
+    while i < 3 {
+        ode_params_set(&!p, i, ks[i], uks[i]*uks[i]);
+        i = i + 1;
+    }
+    let sys = epistemic::ode::ode_system_pbpk_clearance();
+    let opts = epistemic::ode::solver_options_fixed(dt, nsteps);
+    let sol = epistemic::ode::solve_ode(sys, y0, p, 0.0, dt * (nsteps as f64), opts);
+    let last = sol.n_steps - 1;
+    var outv: [f64; 4] = [0.0; 4];
+    var outu: [f64; 4] = [0.0; 4];
+    i = 0;
+    while i < 4 {
+        outv[i] = epistemic::ode::solution_get_value(&sol, last, i);
+        outu[i] = sqrt_approx(epistemic::ode::solution_get_variance(&sol, last, i));
+        i = i + 1;
+    }
+    (outv, outu)
+}
+
 pub fn test_chem_full() -> bool with Mut, Div, Panic {
     let iv: [f64; 4] = [1.0, 0.0, 0.0, 0.0];
     let is: [f64; 4] = [0.01, 0.0, 0.0, 0.0];
@@ -1081,9 +1114,9 @@ pub fn simulate_pbpk_gut_liver_kidney(init_d: f64, u_d: f64, t: f64) -> ([f64; 4
     let kid_v = liv[1] * clear_k * t; // approx integrated clearance from M1
     let kid_u = livu[1] * clear_u * t + liv[1] * 0.001; // prop
 
-    // return [gut, liver_M1, liver_M2, kidney_clear]
-    let ov: [f64; 4] = [gut_v, liv[1], liv[3], kid_v];
-    let ou: [f64; 4] = [gut_u, livu[1], livu[3], kid_u];
+    // return [gut, liver_M1, liver_M2, kidney_clear]  (liv = [Drug, M1, M2, Cleared])
+    let ov: [f64; 4] = [gut_v, liv[1], liv[2], kid_v];
+    let ou: [f64; 4] = [gut_u, livu[1], livu[2], kid_u];
     (ov, ou)
 }
 
@@ -1483,37 +1516,34 @@ pub fn test_coupled_crn_equil() -> bool with Mut, Div, Panic {
     check_near(keff, 0.12, 0.05) && out[1] > 0.1
 }
 
-// 4. PBPK DEPTH (super): full multi-metabolite metabolic CRN submodel using extended/general + real lit PK numbers
-// e.g. typical for midazolam-like or scaled: k_met ~0.05-0.1 /h , clearance ~0.01-0.02, unc prop via EState
+// 4. PBPK DEPTH: multi-metabolite submodel with first-order clearance, EState/GUM uncertainty
+// Drug -> M1 (k1),  M1 -> M2 (k2),  M1 -> cleared (k3)   (epistemic::ode system 6, linear).
+// The rates are illustrative round numbers in the range used for slow hepatic metabolism
+// (k_met ~0.05 /h, clearance ~0.01 /h); they are NOT fitted to a published PBPK model, so
+// nothing here is a literature validation. What the test checks is that the solver
+// reproduces the exact solution of the model declared above.
 pub fn pbpk_full_metabolic(init_d: f64, u_d: f64, t: f64) -> ([f64; 4], [f64; 4]) with Mut, Div, Panic {
-    // Use richer extended metabolic (Drug->M1->M2 + clearance) with lit-style rates + GUM
     let init4: [f64; 4] = [init_d, 0.0, 0.0, 0.0];
     let u4: [f64; 4] = [u_d, 0.0, 0.0, 0.0];
-    // system 5 network: Drug->M1 (k1), M1->M2 (k2), Drug+M1->D (k3)
     let ks: [f64; 3] = [0.05, 0.02, 0.01];
     let us: [f64; 3] = [0.004, 0.002, 0.0015];
     let steps = (t * 3.0) as i64;
-    let (ov, ou) = simulate_chem_network_full(&init4, &u4, &ks, &us, 0.33, steps);
-    // also run general for demo variety
-    var nu = matnm_new(4 as i64, 3 as i64);
-    nu = matnm_set(nu, 0 as i64, 0 as i64, -1.0); nu = matnm_set(nu, 1 as i64, 0 as i64, 1.0);
-    nu = matnm_set(nu, 1 as i64, 1 as i64, -1.0); nu = matnm_set(nu, 2 as i64, 1 as i64, 1.0);
-    nu = matnm_set(nu, 1 as i64, 2 as i64, -1.0); // clearance on M1
-    let ks_gen: [f64; 8] = [0.05, 0.02, 0.01, 0.0,0.0,0.0,0.0,0.0];
-    let pbpk_full_gen_init: [f64; 8] = [init_d,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
-    let _ = simulate_general_crn(&pbpk_full_gen_init, &ks_gen, nu, 4 as i64, 3 as i64, 0.33, steps / (2 as i64));
+    let (ov, ou) = simulate_pbpk_clearance_full(&init4, &u4, &ks, &us, 0.33, steps);
     ([ov[0],ov[1],ov[2],ov[3]], [ou[0],ou[1],ou[2],ou[3]])
 }
 
 pub fn test_pbpk_full() -> bool with Mut, Div, Panic {
     let (ov, ou) = pbpk_full_metabolic(1.0, 0.05, 24.0);
-    // Lit validation (midazolam PBPK papers e.g. Brill 2015, McKnite 2026): at 24h scaled, M1 ~0.2-0.3 remaining for k~0.05-0.1 class, CL flux ~0.01-0.03
     // FULL Knowledge<CHEBI_15377>
     let _k_water: CHEBI_15377 = chebi_water();
-    // RK4 cross-check, 72 steps of dt=0.33 (t=23.76): Drug=0.28176 M1=0.48407 M2=0.15741 D=0.03838.
-    // The old M1 ~0.25 was never reached: the solve used to take the zero-derivative
-    // fallback and overrun ODESolution storage past 63 steps.
-    check_near(ov[1], 0.4841, 0.01) && ou[1] > 0.0 && check_near(ov[3], 0.0384, 0.005)
+    // 72 steps of dt=0.33 (t=23.76). Exact solution of the linear system (independent
+    // closed-form evaluation, D0=1, k=[0.05,0.02,0.01]):
+    //   Drug=0.304830  M1=0.463598  M2=0.154381  Cleared=0.077191   (sum = 1)
+    // RK4 at k*dt ~ 0.017 matches it to ~1e-10, so 1e-4 leaves room only for rounding.
+    check_near(ov[0], 0.304830, 0.0001) && check_near(ov[1], 0.463598, 0.0001)
+        && check_near(ov[2], 0.154381, 0.0001) && check_near(ov[3], 0.077191, 0.0001)
+        && check_near(ov[0] + ov[1] + ov[2] + ov[3], 1.0, 0.0001)
+        && ou[1] > 0.0 && ou[3] > 0.0
 }
 
 // Quantity bridge (units integration for conc/amount in PBPK)

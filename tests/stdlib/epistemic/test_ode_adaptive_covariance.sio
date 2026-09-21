@@ -1,0 +1,116 @@
+//@ run-pass
+//@ timeout: 120
+// tests/stdlib/epistemic/test_ode_adaptive_covariance.sio
+//
+// solve_ode_adaptive (Dormand-Prince 4(5)) carries the same full (state, parameter)
+// covariance as the fixed-step solver, but through its own step map (rk45_step, with
+// the Jacobian taken at the pre-step point) and with accept/reject control flow.
+// test_ode_augmented_covariance only exercises solve_ode, so this covers the
+// adaptive path, including REJECTED trial steps:
+//
+//   dy/dt = -k y,  y(0) = y0 +- u0,  k +- uk, independent inputs
+//   y(t)   = y0 exp(-k t)
+//   Var(t) = exp(-2kt) u0^2 + (y0 t exp(-kt))^2 uk^2       (first-order GUM)
+//
+// A rejected trial must leave the covariance exactly as it was: the covariance is
+// only advanced on ACCEPTED steps, from the saved pre-step state. Two runs that
+// take very different step sequences (one whose first trial is rejected, one that
+// starts at a step it never rejects) must therefore agree on the variance, and both
+// must match the closed form. If a rejected trial leaked into the covariance the
+// large-first-step run would drift from the other.
+//
+// Documented limit (propagate_covariance_step): the controller's dt(z) dependence is
+// not differentiated. It enters at the tolerance level, far below the tolerances here.
+
+use epistemic::ode::*
+
+fn absf(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn expn(x: f64) -> f64 with Mut, Div, Panic {
+    // exp(-x), x >= 0, halving and squaring
+    var y = x
+    var k = 0
+    while y > 0.5 {
+        y = y / 2.0
+        k = k + 1
+    }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i < 30 {
+        term = 0.0 - term * y / (i as f64)
+        sum = sum + term
+        i = i + 1
+    }
+    while k > 0 {
+        sum = sum * sum
+        k = k - 1
+    }
+    sum
+}
+
+fn rel(a: f64, b: f64) -> f64 { absf(a - b) / absf(b) }
+
+fn run_adaptive(dt_init: f64, y0: f64, u0: f64, kk: f64, uk: f64, t_end: f64) -> ODESolution with Mut, Div, Panic {
+    var init = estate_new(1)
+    estate_set(&!init, 0, y0, u0 * u0)
+    var p = ode_params_new()
+    ode_params_set(&!p, 0, kk, uk * uk)
+    solve_ode_adaptive(ode_system_exp_decay(), init, p, 0.0, t_end, solver_options_adaptive(dt_init, 1.0e-8, 1.0e-10, 1000))
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fail: i32 = 0
+    let y0 = 1.0
+    let u0 = 0.1
+    let kk = 1.0
+    let uk = 0.05
+    let t_end = 3.0
+
+    let e1 = expn(kk * t_end)
+    let y_exact = y0 * e1
+    let v_exact = e1 * e1 * u0 * u0 + (y0 * t_end * e1) * (y0 * t_end * e1) * uk * uk
+    // without the parameter term, for discrimination
+    let v_no_param = e1 * e1 * u0 * u0
+
+    // Run 1: first trial dt = 2.0 at k dt = 2 is far outside rtol = 1e-8, so it is rejected.
+    let big = run_adaptive(2.0, y0, u0, kk, uk, t_end)
+    // Run 2: starts small; the controller then grows dt, and it may reject on the way up.
+    let small = run_adaptive(0.001, y0, u0, kk, uk, t_end)
+
+    print("rejected trials: large-first-step run=") print(big.n_rejected)
+    print(" small-first-step run=") print(small.n_rejected) println("")
+    if big.n_rejected < 1 { fail = fail + 1; println("FAIL: the large first step was not rejected, so this test does not cover rejection") }
+    if big.covariance_mode != 1 { fail = fail + 1; println("FAIL: adaptive solve fell back to the diagonal scheme") }
+    if small.covariance_mode != 1 { fail = fail + 1; println("FAIL: adaptive solve fell back to the diagonal scheme (small)") }
+
+    let lb = big.n_steps - 1
+    let ls = small.n_steps - 1
+    let yb = solution_get_value(&big, lb, 0)
+    let vb = solution_get_variance(&big, lb, 0)
+    let ys = solution_get_value(&small, ls, 0)
+    let vs = solution_get_variance(&small, ls, 0)
+
+    print("large-first-step: y=") print(yb) print(" var=") print(vb) println("")
+    print("small-first-step: y=") print(ys) print(" var=") print(vs) println("")
+    print("closed form:      y=") print(y_exact) print(" var=") print(v_exact) println("")
+    print("relative error vs closed form: y=") print(rel(yb, y_exact))
+    print(" var=") print(rel(vb, v_exact)) println("")
+
+    // value: measured error is ~6e-9 at rtol = 1e-8; 1e-7 leaves ~15x for platform rounding
+    if rel(yb, y_exact) > 1.0e-7 { fail = fail + 1; println("FAIL: adaptive value (with rejection) off the exact solution") }
+    if rel(ys, y_exact) > 1.0e-7 { fail = fail + 1; println("FAIL: adaptive value off the exact solution") }
+    // variance: measured ~8e-9; the accepted-step map is differentiated by central
+    // differences (h = 1e-7 relative), so 1e-6 leaves >100x while still far below the
+    // 5% the parameter term is worth (checked below)
+    if rel(vb, v_exact) > 1.0e-6 { fail = fail + 1; println("FAIL: adaptive variance (with rejection) off the closed form") }
+    if rel(vs, v_exact) > 1.0e-6 { fail = fail + 1; println("FAIL: adaptive variance off the closed form") }
+    // a rejected trial must not change the result
+    if rel(vb, vs) > 1.0e-6 { fail = fail + 1; println("FAIL: rejection changed the variance") }
+    // the parameter term is visible: dropping it would be off by far more than the bound
+    if rel(v_no_param, v_exact) < 0.05 { fail = fail + 1; println("FAIL: test does not discriminate the parameter term") }
+    if rel(vb, v_no_param) < 0.05 { fail = fail + 1; println("FAIL: adaptive variance is missing the parameter term") }
+
+    if fail == 0 { println("ODE ADAPTIVE COVARIANCE PASS") }
+    fail
+}

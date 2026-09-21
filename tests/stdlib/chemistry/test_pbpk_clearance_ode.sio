@@ -1,0 +1,131 @@
+//@ run-pass
+//@ timeout: 120
+// tests/stdlib/chemistry/test_pbpk_clearance_ode.sio
+//
+// chemistry::kinetics::pbpk_full_metabolic declares the model
+//
+//     Drug -> M1 (k1),   M1 -> M2 (k2),   M1 -> cleared (k3)        (all first order)
+//
+// It used to run epistemic::ode system 5, whose k3 is the BIMOLECULAR step Drug + M1 -> D:
+// a different network (M1 = 0.484 and "D" = 0.038 at t = 23.76 instead of 0.464 and a
+// cleared amount of 0.077). System 6 is the declared model, and being linear it has an
+// exact solution, evaluated here in Sounio. With a = k2 + k3:
+//
+//   Drug(t) = D0 e^{-k1 t}
+//   M1(t)   = D0 k1 (e^{-k1 t} - e^{-a t}) / (a - k1)
+//   int_0^t M1 = D0 k1 [ (1 - e^{-k1 t})/k1 - (1 - e^{-a t})/a ] / (a - k1)
+//   M2      = k2 int M1,     Cleared = k3 int M1,      Drug + M1 + M2 + Cleared = D0
+//
+// Uncertainty: the state is linear in D0, so with exact rates Var(y_j) = (y_j / D0)^2 Var(D0);
+// and dM1/dk3, dDrug/dk1 are closed forms, so single-parameter GUM variances are exact too.
+// RK4 at k dt = 0.0165 is exact to ~1e-12 here; the central-difference Jacobian sets the
+// variance tolerance (1e-6).
+
+use chemistry::kinetics::*
+
+fn absf(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn expn(x: f64) -> f64 with Mut, Div, Panic {
+    // exp(-x), x >= 0, halving and squaring
+    var y = x
+    var k = 0
+    while y > 0.5 {
+        y = y / 2.0
+        k = k + 1
+    }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i < 30 {
+        term = 0.0 - term * y / (i as f64)
+        sum = sum + term
+        i = i + 1
+    }
+    while k > 0 {
+        sum = sum * sum
+        k = k - 1
+    }
+    sum
+}
+
+fn rel(a: f64, b: f64) -> f64 { absf(a - b) / absf(b) }
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fail: i32 = 0
+    let d0 = 1.0
+    let k1 = 0.05
+    let k2 = 0.02
+    let k3 = 0.01
+    let dt = 0.33
+    let nsteps = 72
+    let t = dt * (nsteps as f64)
+    let a = k2 + k3
+
+    let e1 = expn(k1 * t)
+    let ea = expn(a * t)
+    let drug = d0 * e1
+    let m1 = d0 * k1 * (e1 - ea) / (a - k1)
+    let integ = d0 * k1 * ((1.0 - e1) / k1 - (1.0 - ea) / a) / (a - k1)
+    let m2 = k2 * integ
+    let cl = k3 * integ
+
+    let ks: [f64; 3] = [k1, k2, k3]
+    let exact_k: [f64; 3] = [0.0, 0.0, 0.0]
+    let no_var: [f64; 4] = [0.0, 0.0, 0.0, 0.0]
+    let init: [f64; 4] = [d0, 0.0, 0.0, 0.0]
+
+    // ---- 1. values, no uncertainty ---------------------------------------------------
+    let (v0, _u0) = simulate_pbpk_clearance_full(&init, &no_var, &ks, &exact_k, dt, nsteps)
+    print("Drug ") print(v0[0]) print(" ") print(drug) println("")
+    print("M1   ") print(v0[1]) print(" ") print(m1) println("")
+    print("M2   ") print(v0[2]) print(" ") print(m2) println("")
+    print("CL   ") print(v0[3]) print(" ") print(cl) println("")
+    if rel(v0[0], drug) > 1.0e-8 { fail = fail + 1; println("FAIL Drug vs exact") }
+    if rel(v0[1], m1) > 1.0e-8 { fail = fail + 1; println("FAIL M1 vs exact") }
+    if rel(v0[2], m2) > 1.0e-8 { fail = fail + 1; println("FAIL M2 vs exact") }
+    if rel(v0[3], cl) > 1.0e-8 { fail = fail + 1; println("FAIL Cleared vs exact") }
+    // conservation
+    if absf(v0[0] + v0[1] + v0[2] + v0[3] - d0) > 1.0e-12 { fail = fail + 1; println("FAIL mass balance") }
+    // the cleared amount is the discriminator against system 5's bimolecular D (0.0384)
+    if absf(v0[3] - 0.0384) < 0.03 { fail = fail + 1; println("FAIL Cleared looks like the bimolecular product") }
+
+    // ---- 2. initial-condition uncertainty only: sigma_j = (y_j / D0) * sigma_D0 ------------
+    let var0 = 0.04
+    let iv: [f64; 4] = [var0, 0.0, 0.0, 0.0]
+    let (_v1, u1) = simulate_pbpk_clearance_full(&init, &iv, &ks, &exact_k, dt, nsteps)
+    let s0 = 0.2
+    if rel(u1[0], drug * s0 / d0) > 1.0e-6 { fail = fail + 1; println("FAIL sigma Drug (initial condition)") }
+    if rel(u1[1], m1 * s0 / d0) > 1.0e-6 { fail = fail + 1; println("FAIL sigma M1 (initial condition)") }
+    if rel(u1[2], m2 * s0 / d0) > 1.0e-6 { fail = fail + 1; println("FAIL sigma M2 (initial condition)") }
+    if rel(u1[3], cl * s0 / d0) > 1.0e-6 { fail = fail + 1; println("FAIL sigma Cleared (initial condition)") }
+
+    // ---- 3. clearance-rate uncertainty only: dM1/dk3 from the closed form -------------------
+    // d/da [ D0 k1 (e^{-k1 t} - e^{-a t}) / (a - k1) ]
+    //   = D0 k1 [ t e^{-a t} (a - k1) - (e^{-k1 t} - e^{-a t}) ] / (a - k1)^2, and a = k2 + k3
+    let uk3 = 0.0015
+    let only_k3: [f64; 3] = [0.0, 0.0, uk3]
+    let (_v2, u2) = simulate_pbpk_clearance_full(&init, &no_var, &ks, &only_k3, dt, nsteps)
+    let dm1_dk3 = d0 * k1 * (t * ea * (a - k1) - (e1 - ea)) / ((a - k1) * (a - k1))
+    let sig_m1 = absf(dm1_dk3) * uk3
+    print("sigma M1 (k3 only) ") print(u2[1]) print(" exact ") print(sig_m1) println("")
+    if rel(u2[1], sig_m1) > 1.0e-6 { fail = fail + 1; println("FAIL sigma M1 from k3") }
+    // Drug does not depend on k3 at all
+    if u2[0] > 1.0e-12 { fail = fail + 1; println("FAIL Drug picked up variance from k3") }
+
+    // ---- 4. metabolism-rate uncertainty only: dDrug/dk1 = -D0 t e^{-k1 t} ------------------
+    let uk1 = 0.004
+    let only_k1: [f64; 3] = [uk1, 0.0, 0.0]
+    let (_v3, u3) = simulate_pbpk_clearance_full(&init, &no_var, &ks, &only_k1, dt, nsteps)
+    let sig_drug = d0 * t * e1 * uk1
+    print("sigma Drug (k1 only) ") print(u3[0]) print(" exact ") print(sig_drug) println("")
+    if rel(u3[0], sig_drug) > 1.0e-6 { fail = fail + 1; println("FAIL sigma Drug from k1") }
+
+    // ---- 5. the public entry point wraps the same model -------------------------------------
+    let (pv, pu) = pbpk_full_metabolic(1.0, 0.05, 24.0)
+    if rel(pv[1], m1) > 1.0e-8 { fail = fail + 1; println("FAIL pbpk_full_metabolic M1") }
+    if rel(pv[3], cl) > 1.0e-8 { fail = fail + 1; println("FAIL pbpk_full_metabolic Cleared") }
+    if !(pu[1] > 0.0) || !(pu[3] > 0.0) { fail = fail + 1; println("FAIL pbpk_full_metabolic uncertainty") }
+
+    if fail == 0 { println("PBPK CLEARANCE ODE PASS") }
+    fail
+}

@@ -174,6 +174,7 @@ fn ode_params_get_variance(p: &ODEParams, idx: i64) -> f64 {
 // SYSTEM_LINEAR_2   = 3
 // SYSTEM_LINEAR_3   = 4
 // SYSTEM_CHEM_SIMPLE = 5
+// SYSTEM_PBPK_CLEARANCE = 6
 // User-defined: 100+
 
 struct ODESystem {
@@ -192,7 +193,7 @@ pub fn ode_system_exp_decay() -> ODESystem {
     ODESystem { system_id: 1, n_dims: 1 }
 }
 
-fn ode_system_pbpk_14() -> ODESystem {
+pub fn ode_system_pbpk_14() -> ODESystem {
     ODESystem { system_id: 2, n_dims: 14 }
 }
 
@@ -206,6 +207,10 @@ fn ode_system_linear_3() -> ODESystem {
 
 pub fn ode_system_chem_simple() -> ODESystem {
     ODESystem { system_id: 5, n_dims: 4 }
+}
+
+pub fn ode_system_pbpk_clearance() -> ODESystem {
+    ODESystem { system_id: 6, n_dims: 4 }
 }
 
 // ============================================================================
@@ -240,7 +245,7 @@ pub fn solver_options_fixed(dt: f64, max_steps: i64) -> SolverOptions {
     }
 }
 
-fn solver_options_adaptive(dt_init: f64, rtol: f64, atol: f64, max_steps: i64) -> SolverOptions {
+pub fn solver_options_adaptive(dt_init: f64, rtol: f64, atol: f64, max_steps: i64) -> SolverOptions {
     SolverOptions {
         dt: dt_init,
         rtol: rtol,
@@ -269,7 +274,8 @@ pub struct ODESolution {
     n_dims: i64,
     total_error: f64,
     n_rhs_evals: i64,
-    n_rejected: i64,
+    // Trial steps the adaptive controller rejected (0 for fixed-step solves)
+    pub n_rejected: i64,
     // 1: variances come from the full first-order covariance of (state, params)
     //    carried through every step. 0: diagonal-only fallback, used only when
     //    n_dims + n_params > 64; it drops all correlations and is known to
@@ -633,6 +639,42 @@ fn rhs_chem_simple(
 }
 
 // ============================================================================
+// Built-in RHS: linear metabolism with first-order clearance (system_id = 6)
+//
+//   Drug -> M1 (k1),   M1 -> M2 (k2),   M1 -> cleared (k3)
+//
+// y = [Drug, M1, M2, Cleared]    p = [k1, k2, k3]
+//   dDrug/dt    = -k1 Drug
+//   dM1/dt      =  k1 Drug - (k2 + k3) M1
+//   dM2/dt      =  k2 M1
+//   dCleared/dt =  k3 M1          (cumulative amount cleared from M1)
+//
+// Every reaction is first order, so the system is linear and has a closed form
+// (checked in tests/stdlib/chemistry/test_pbpk_clearance_ode.sio). It conserves
+// Drug + M1 + M2 + Cleared. This is NOT system 5: there, k3 is bimolecular
+// (Drug + M1 -> D), which is a different model.
+// ============================================================================
+
+fn rhs_pbpk_clearance(
+    t: f64,
+    y: &EState,
+    p: &ODEParams,
+    out: &!EState
+) with Mut, Div, Panic {
+    let k1 = p.params[0]
+    let k2 = p.params[1]
+    let k3 = p.params[2]
+    let r0 = k1 * y.values[0]
+    let r1 = k2 * y.values[1]
+    let r2 = k3 * y.values[1]
+    out.values[0] = 0.0 - r0
+    out.values[1] = r0 - r1 - r2
+    out.values[2] = r1
+    out.values[3] = r2
+    out.n = 4
+}
+
+// ============================================================================
 // RHS Dispatch: routes system_id to the correct RHS function
 //
 // To add a user-defined system: add an `if sys.system_id == YOUR_ID` branch.
@@ -655,6 +697,8 @@ fn ode_rhs_dispatch(
         rhs_linear_3(t, y, p, out)
     } else if sys.system_id == 5 {
         rhs_chem_simple(t, y, p, out)
+    } else if sys.system_id == 6 {
+        rhs_pbpk_clearance(t, y, p, out)
     } else {
         // Unknown system: zero derivatives (safe fallback)
         out.n = y.n
@@ -1165,6 +1209,7 @@ fn rk45_step(
     var k4 = estate_new(n)
     var k5 = estate_new(n)
     var k6 = estate_new(n)
+    var k7 = estate_new(n)
     var tmp = estate_new(n)
 
     // Stage 1
@@ -1180,7 +1225,7 @@ fn rk45_step(
     var i = 0
     while i < n {
         if i < 64 {
-            tmp.values[i] = state.values[i] + dt * (0.075 * k1.values[i] + 0.225 * k2.values[i])
+            tmp.values[i] = state.values[i] + dt * ((3.0 / 40.0) * k1.values[i] + (9.0 / 40.0) * k2.values[i])
         }
         i = i + 1
     }
@@ -1191,9 +1236,9 @@ fn rk45_step(
     i = 0
     while i < n {
         if i < 64 {
-            tmp.values[i] = state.values[i] + dt * (0.977777777777778 * k1.values[i]
-                            - 3.73333333333333 * k2.values[i]
-                            + 3.55555555555556 * k3.values[i])
+            tmp.values[i] = state.values[i] + dt * ((44.0 / 45.0) * k1.values[i]
+                            - (56.0 / 15.0) * k2.values[i]
+                            + (32.0 / 9.0) * k3.values[i])
         }
         i = i + 1
     }
@@ -1204,10 +1249,10 @@ fn rk45_step(
     i = 0
     while i < n {
         if i < 64 {
-            tmp.values[i] = state.values[i] + dt * (2.95259868922420 * k1.values[i]
-                            - 11.5959564945227 * k2.values[i]
-                            + 9.82289285169509 * k3.values[i]
-                            - 0.290809327846365 * k4.values[i])
+            tmp.values[i] = state.values[i] + dt * ((19372.0 / 6561.0) * k1.values[i]
+                            - (25360.0 / 2187.0) * k2.values[i]
+                            + (64448.0 / 6561.0) * k3.values[i]
+                            - (212.0 / 729.0) * k4.values[i])
         }
         i = i + 1
     }
@@ -1218,47 +1263,53 @@ fn rk45_step(
     i = 0
     while i < n {
         if i < 64 {
-            tmp.values[i] = state.values[i] + dt * (2.84627525252526 * k1.values[i]
-                            - 10.7575757575758 * k2.values[i]
-                            + 8.90642271774548 * k3.values[i]
-                            + 0.278001721790970 * k4.values[i]
-                            - 0.273076923076923 * k5.values[i])
+            tmp.values[i] = state.values[i] + dt * ((9017.0 / 3168.0) * k1.values[i]
+                            - (355.0 / 33.0) * k2.values[i]
+                            + (46732.0 / 5247.0) * k3.values[i]
+                            + (49.0 / 176.0) * k4.values[i]
+                            - (5103.0 / 18656.0) * k5.values[i])
         }
         i = i + 1
     }
     ode_rhs_dispatch(sys, t + dt, &tmp, p, &!k6)
     bump_n_evals(n_evals)
 
-    // 5th-order solution (used as the step)
-    // b5 = [142/1105, 0, 6570212/46116585, 22482/69174, 8028/28325, -8192/34125]
-    // DP 5th-order weights (FSAL not used here for simplicity)
+    // 5th-order solution (used as the step): Dormand-Prince weights
+    //   b5 = [35/384, 0, 500/1113, 125/192, -2187/6784, 11/84]
     i = 0
     while i < n {
         if i < 64 {
             state.values[i] = state.values[i] + dt * (
-                0.0917194570135880 * k1.values[i]
-                + 0.449236298109796 * k3.values[i]
-                + 0.651489067543612 * k4.values[i]
-                - 0.322376179245283 * k5.values[i]
-                + 0.130888888888889 * k6.values[i])
+                (35.0 / 384.0) * k1.values[i]
+                + (500.0 / 1113.0) * k3.values[i]
+                + (125.0 / 192.0) * k4.values[i]
+                - (2187.0 / 6784.0) * k5.values[i]
+                + (11.0 / 84.0) * k6.values[i])
         }
         i = i + 1
     }
 
-    // Error estimate: difference between 4th and 5th order solutions
-    // e_i = dt * sum_j (b5_j - b4_j) * k_j[i]
-    // Error coefficients (b5 - b4):
-    //   e1 = 1/360, e3 = -128/4275, e4 = -2197/75240, e5 = 1/50, e6 = 2/55
+    // Stage 7 (FSAL): f(t + dt, y_{n+1}). Only the embedded error estimate needs it.
+    ode_rhs_dispatch(sys, t + dt, state, p, &!k7)
+    bump_n_evals(n_evals)
+
+    // Error estimate: difference between the 5th and 4th order solutions,
+    //   e_i = dt * sum_j (b5_j - b4_j) * k_j[i],  with b4 the Dormand-Prince embedded weights
+    //   b4 = [5179/57600, 0, 7571/16695, 393/640, -92097/339200, 187/2100, 1/40]:
+    //   b5 - b4 = [71/57600, 0, -71/16695, 71/1920, -17253/339200, 22/525, -1/40]
+    // (These used to be the Fehlberg RKF45 error coefficients, which do not belong to
+    // this tableau and made the estimate ~1e4 times too large.)
     var max_err = 0.0
     i = 0
     while i < n {
         if i < 64 {
             let ei = dt * ode_abs(
-                0.00277777777777778 * k1.values[i]
-                - 0.0299415204678363 * k3.values[i]
-                - 0.0291998936510851 * k4.values[i]
-                + 0.02 * k5.values[i]
-                + 0.0363636363636364 * k6.values[i])
+                (71.0 / 57600.0) * k1.values[i]
+                - (71.0 / 16695.0) * k3.values[i]
+                + (71.0 / 1920.0) * k4.values[i]
+                - (17253.0 / 339200.0) * k5.values[i]
+                + (22.0 / 525.0) * k6.values[i]
+                - 0.025 * k7.values[i])
             let sci = ode_abs(state.values[i]) + 1.0e-10
             let rel = ei / sci
             if rel > max_err { max_err = rel }
@@ -1319,7 +1370,7 @@ pub fn solve_ode(
 // General-Purpose Solve: Adaptive RK45 (Dormand-Prince)
 // ============================================================================
 
-fn solve_ode_adaptive(
+pub fn solve_ode_adaptive(
     sys: ODESystem,
     y0: EState,
     p: ODEParams,
@@ -1341,7 +1392,9 @@ fn solve_ode_adaptive(
 
     solution_record(&!sol, t, &state)
 
-    while t < t_end && step < opts.max_steps {
+    // max_steps counts ACCEPTED steps; the trial bound keeps a run whose error estimate is
+    // never acceptable (NaN state, absurd tolerance) from retrying forever.
+    while t < t_end && step < opts.max_steps && step + n_rejected < opts.max_steps * 10 {
         dt = ode_min(dt, t_end - t)
         if dt <= 1.0e-15 { t = t_end }
         else {
@@ -1388,25 +1441,22 @@ fn solve_ode_adaptive(
     sol
 }
 
-// (tol/err)^0.2 = (tol/err)^(1/5) — via Newton's method for x^5 = ratio
+// ratio^(1/5), the step-size controller's exponent. Its caller clamps 0.9 * result to
+// [0.2, 5], so only ratio in [0.2^5, 5^5] needs a root; outside that the answer is the
+// bound. Inside it Newton on x^5 = ratio, started at 5 (>= the root, f convex), decreases
+// monotonically to the root. (It used to start at x = ratio: for ratio < 1, i.e. exactly
+// when a step is REJECTED, the first Newton step jumped to ~1/(5 ratio^3) and the step
+// size grew instead of shrinking, so a rejected step could never be retried smaller.)
 fn ode_pow_fifth(ratio: f64) -> f64 with Mut, Div, Panic {
-    if ratio <= 0.0 { return 0.2 }
-    // Initial guess
-    var x = 1.0
-    if ratio > 1.0 { x = ratio }
-    if ratio < 1.0 { x = ratio }
-    // Newton iterations for x^5 = ratio: x_{n+1} = x - (x^5 - ratio) / (5*x^4)
+    if !(ratio > 0.0) { return 0.2 }
+    if ratio >= 3125.0 { return 5.0 }
+    if ratio <= 0.00032 { return 0.2 }
+    var x = 5.0
     var iter = 0
-    while iter < 20 {
+    while iter < 60 {
         let x2 = x * x
         let x4 = x2 * x2
-        let x5 = x4 * x
-        let f = x5 - ratio
-        let fp = 5.0 * x4
-        if fp > 1.0e-30 {
-            x = x - f / fp
-        }
-        if x < 1.0e-10 { x = 1.0e-10 }
+        x = x - (x4 * x - ratio) / (5.0 * x4)
         iter = iter + 1
     }
     x
@@ -1447,7 +1497,7 @@ fn solve_exp_decay(
 //   - ICRP Publication 89 (2002) (reference organ volumes and flows)
 // ============================================================================
 
-fn pbpk_14_default_params() -> ODEParams with Mut {
+pub fn pbpk_14_default_params() -> ODEParams with Mut {
     var p = ode_params_new()
 
     // Cardiac output and plasma volume (70 kg human)
@@ -1520,7 +1570,7 @@ fn pbpk_14_oral_dose(dose_mg: f64, dose_var: f64) -> EState with Mut {
 }
 
 // Initial state for IV bolus of rapamycin
-fn pbpk_14_iv_dose(dose_mg: f64, dose_var: f64, v_plasma: f64) -> EState with Mut, Div, Panic {
+pub fn pbpk_14_iv_dose(dose_mg: f64, dose_var: f64, v_plasma: f64) -> EState with Mut, Div, Panic {
     var state = estate_new(14)
     // IV: drug goes directly into plasma
     let c0 = dose_mg / v_plasma
