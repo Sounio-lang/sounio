@@ -367,6 +367,73 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     print(" 4-dim state for a 1-dim system status=") println(d_large.status)
     if d_small.status != 3 || d_large.status != 3 { fail = fail + 1; println("FAIL: a state whose dimension differs from the system's must be status 3") }
 
+    // ---- max_steps: negative is invalid input, zero is a valid zero-step budget --------------------
+    // `step < max_steps` is false at once for a negative budget, which read as ordinary exhaustion
+    // (status 1). It is invalid input (status 3), also on an empty interval.
+    let m_neg = solve_ode(ode_system_exp_decay(), decay(1.0, 0.01, 0.1), params(0.1), 0.0, 1.0, solver_options_fixed(0.1, 0 - 5))
+    let m_neg_e = solve_ode(ode_system_exp_decay(), decay(1.0, 0.01, 0.1), params(0.1), 1.0, 1.0, solver_options_fixed(0.1, 0 - 1))
+    let m_zero = solve_ode(ode_system_exp_decay(), decay(1.0, 0.01, 0.1), params(0.1), 0.0, 1.0, solver_options_fixed(0.1, 0))
+    let m_zero_e = solve_ode(ode_system_exp_decay(), decay(1.0, 0.01, 0.1), params(0.1), 1.0, 1.0, solver_options_fixed(0.1, 0))
+    print("max_steps: -5=") print(m_neg.status) print(" -1 on an empty interval=") print(m_neg_e.status)
+    print(" 0=") print(m_zero.status) print(" 0 on an empty interval=") println(m_zero_e.status)
+    if m_neg.status != 3 || m_neg_e.status != 3 { fail = fail + 1; println("FAIL: a negative max_steps must be status 3, not exhaustion") }
+    if m_zero.status != 1 || m_zero.n_steps != 1 { fail = fail + 1; println("FAIL: max_steps = 0 on a real interval is a zero-step budget: status 1, only the initial point") }
+    if m_zero_e.status != 0 { fail = fail + 1; println("FAIL: max_steps = 0 on an empty interval still completes") }
+
+    // ---- the diagonal fallback must not erase an invalid variance -----------------------------------
+    // n_dims + n_params > 64 disables the full covariance and leaves the diagonal scheme (mode 0).
+    // System 1 needs only parameter 0; setting an unused parameter 63 makes n_params 64. The scheme's
+    // variance sum used to be clamped with ode_max(vi, 0.0): a NaN or negative INPUT variance became
+    // 0.0, i.e. "no uncertainty", although the solver had already flagged covariance_mode 2.
+    var pfb = ode_params_new()
+    ode_params_set(&!pfb, 0, 0.1, 0.0001)
+    ode_params_set(&!pfb, 63, 5.0, 0.0)
+    let fb_ok = solve_ode(ode_system_exp_decay(), decay(1.0, 0.01, 0.1), pfb, 0.0, 1.0, solver_options_fixed(0.1, 10))
+    let fb_neg = solve_ode(ode_system_exp_decay(), decay(1.0, 0.0 - 0.01, 0.1), pfb, 0.0, 1.0, solver_options_fixed(0.1, 10))
+    let fb_nan = solve_ode(ode_system_exp_decay(), decay(1.0, nan, 0.1), pfb, 0.0, 1.0, solver_options_fixed(0.1, 10))
+    let fb_v_ok = solution_get_variance(&fb_ok, fb_ok.n_steps - 1, 0)
+    let fb_v_neg = solution_get_variance(&fb_neg, fb_neg.n_steps - 1, 0)
+    let fb_v_nan = solution_get_variance(&fb_nan, fb_nan.n_steps - 1, 0)
+    print("diagonal fallback: healthy mode=") print(fb_ok.covariance_mode) print(" var=") print(fb_v_ok)
+    print(" | negative input: mode=") print(fb_neg.covariance_mode) print(" var=") print(fb_v_neg)
+    print(" | NaN input: mode=") print(fb_nan.covariance_mode) print(" var=") println(fb_v_nan)
+    if fb_ok.covariance_mode != 0 { fail = fail + 1; println("FAIL: the fallback (n_dims + n_params > 64) must report covariance_mode 0") }
+    if !(fb_v_ok > 0.0) || !((fb_v_ok - fb_v_ok) == 0.0) { fail = fail + 1; println("FAIL: a healthy fallback solve must give a finite positive variance") }
+    if fb_neg.covariance_mode != 2 || fb_nan.covariance_mode != 2 { fail = fail + 1; println("FAIL: an invalid input variance must set covariance_mode 2 in the fallback too") }
+    if !(fb_v_neg < 0.0) { fail = fail + 1; println("FAIL: a negative variance was erased by the fallback (clamped to 0)") }
+    if !(fb_v_nan != fb_v_nan) { fail = fail + 1; println("FAIL: a NaN variance was erased by the fallback (turned into a number)") }
+    // and the state is unaffected
+    if !(absf(solution_get_value(&fb_neg, fb_neg.n_steps - 1, 0) - 0.904837418) <= 1.0e-6) { fail = fail + 1; println("FAIL: the state must not depend on the variance") }
+
+    // ---- adaptive solver: max_steps and the diagonal fallback -----------------------------------------
+    // Same two contracts as solve_ode (see the cases above): a negative step budget is invalid input,
+    // zero is a valid zero-step budget; and in the diagonal fallback (n_dims + n_params > 64) an invalid
+    // input variance is reported unclamped with covariance_mode 2, not erased to 0.
+    let am_neg = solve_ode_adaptive(ode_system_exp_decay(), decay(1.0, 0.01, 0.1), params(0.1), 0.0, 1.0, solver_options_adaptive(0.1, 1.0e-8, 1.0e-10, 0 - 5))
+    let am_neg_e = solve_ode_adaptive(ode_system_exp_decay(), decay(1.0, 0.01, 0.1), params(0.1), 1.0, 1.0, solver_options_adaptive(0.1, 1.0e-8, 1.0e-10, 0 - 1))
+    let am_zero = solve_ode_adaptive(ode_system_exp_decay(), decay(1.0, 0.01, 0.1), params(0.1), 0.0, 1.0, solver_options_adaptive(0.1, 1.0e-8, 1.0e-10, 0))
+    let am_zero_e = solve_ode_adaptive(ode_system_exp_decay(), decay(1.0, 0.01, 0.1), params(0.1), 1.0, 1.0, solver_options_adaptive(0.1, 1.0e-8, 1.0e-10, 0))
+    print("adaptive max_steps: -5=") print(am_neg.status) print(" -1 on an empty interval=") print(am_neg_e.status)
+    print(" 0=") print(am_zero.status) print(" 0 on an empty interval=") println(am_zero_e.status)
+    if am_neg.status != 3 || am_neg_e.status != 3 { fail = fail + 1; println("FAIL: a negative adaptive max_steps must be status 3, not exhaustion") }
+    if am_zero.status != 1 || am_zero.n_steps != 1 { fail = fail + 1; println("FAIL: adaptive max_steps = 0 on a real interval: status 1, only the initial point") }
+    if am_zero_e.status != 0 { fail = fail + 1; println("FAIL: adaptive max_steps = 0 on an empty interval still completes") }
+
+    let afb_ok = solve_ode_adaptive(ode_system_exp_decay(), decay(1.0, 0.01, 0.1), pfb, 0.0, 1.0, solver_options_adaptive(0.1, 1.0e-8, 1.0e-10, 200))
+    let afb_neg = solve_ode_adaptive(ode_system_exp_decay(), decay(1.0, 0.0 - 0.01, 0.1), pfb, 0.0, 1.0, solver_options_adaptive(0.1, 1.0e-8, 1.0e-10, 200))
+    let afb_nan = solve_ode_adaptive(ode_system_exp_decay(), decay(1.0, nan, 0.1), pfb, 0.0, 1.0, solver_options_adaptive(0.1, 1.0e-8, 1.0e-10, 200))
+    let afb_v_ok = solution_get_variance(&afb_ok, afb_ok.n_steps - 1, 0)
+    let afb_v_neg = solution_get_variance(&afb_neg, afb_neg.n_steps - 1, 0)
+    let afb_v_nan = solution_get_variance(&afb_nan, afb_nan.n_steps - 1, 0)
+    print("adaptive diagonal fallback: healthy mode=") print(afb_ok.covariance_mode) print(" var=") print(afb_v_ok)
+    print(" | negative: mode=") print(afb_neg.covariance_mode) print(" var=") print(afb_v_neg)
+    print(" | NaN: mode=") print(afb_nan.covariance_mode) print(" var=") println(afb_v_nan)
+    if afb_ok.status != 0 || afb_ok.covariance_mode != 0 { fail = fail + 1; println("FAIL: the adaptive fallback must complete with covariance_mode 0") }
+    if !(afb_v_ok > 0.0) || !((afb_v_ok - afb_v_ok) == 0.0) { fail = fail + 1; println("FAIL: a healthy adaptive fallback solve must give a finite positive variance") }
+    if afb_neg.covariance_mode != 2 || afb_nan.covariance_mode != 2 { fail = fail + 1; println("FAIL: an invalid input variance must set covariance_mode 2 in the adaptive fallback") }
+    if !(afb_v_neg < 0.0) { fail = fail + 1; println("FAIL: a negative variance was erased by the adaptive fallback") }
+    if !(afb_v_nan != afb_v_nan) { fail = fail + 1; println("FAIL: a NaN variance was erased by the adaptive fallback") }
+
     if fail == 0 { println("ODE SOLVE INPUT VALIDATION PASS") }
     fail
 }

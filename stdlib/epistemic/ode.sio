@@ -296,7 +296,7 @@ pub struct ODESolution {
     //    carried through every step. 0: diagonal-only fallback, used only when
     //    n_dims + n_params > 64; it drops all correlations and is known to
     //    UNDERSTATE the variance of intermediates (see propagate_covariance_step).
-    // 2: the full covariance failed: a diagonal is non-finite, or MATERIALLY negative (loss of
+    // 2: the covariance failed: a diagonal is non-finite, or MATERIALLY negative (loss of
     //    positive semidefiniteness: the finite-difference Jacobian lost conditioning, or an
     //    input variance was NaN or negative). The offending variances are reported as they
     //    came out (NaN/inf/negative), NOT clamped to zero; the state values are unaffected.
@@ -355,11 +355,14 @@ fn ode_estate_values_finite(s: &EState, n: i64) -> bool with Mut, Div, Panic {
     true
 }
 
-fn ode_estate_variances_finite(s: &EState, n: i64) -> bool with Mut, Div, Panic {
+// A variance is valid when it is finite and non-negative. (Finite alone would let a negative one
+// through: it is invalid too, and the diagonal fallback reports it unclamped.)
+fn ode_estate_variances_valid(s: &EState, n: i64) -> bool with Mut, Div, Panic {
     var i = 0
     while i < n {
         if i < 64 {
-            if !ode_finite(s.variances[i]) { return false }
+            let v = s.variances[i]
+            if !ode_finite(v) || v < 0.0 { return false }
         }
         i = i + 1
     }
@@ -454,6 +457,7 @@ fn ode_initial_covariance_ok(state: &EState, p: &ODEParams, n: i64) -> bool with
 
 // Inputs a solve can run on at all. Anything else is status 3, never a "completed" solve:
 //   - t_start, t_end finite, and t_end >= t_start (backward solves are not supported)
+//   - max_steps >= 0 (zero is a valid zero-step budget)
 //   - step size (the fixed dt, or the adaptive initial dt) finite and > 0: a zero or negative
 //     step used to fall into `dt <= 0 -> t = t_end` and return the initial state as finished
 //   - the system's n_dims is the built-in's own (ode_system_dims_ok) and within 1..64, the initial
@@ -480,6 +484,10 @@ fn ode_solve_inputs_ok(t_start: f64, t_end: f64, opts: &SolverOptions, p: &ODEPa
     }
     if t_end < t_start { return false }
     if !ode_finite(opts.dt) || !(opts.dt > 0.0) { return false }
+    // max_steps is caller-controlled through the public options constructors. Negative makes
+    // `step < max_steps` false at once, which would read as ordinary exhaustion (status 1); it is
+    // invalid input. Zero is a legitimate zero-step budget (an empty interval still completes).
+    if opts.max_steps < 0 { return false }
     if adaptive {
         if !ode_finite(opts.rtol) || !ode_finite(opts.atol) { return false }
         if opts.rtol < 0.0 || opts.atol < 0.0 { return false }
@@ -1090,7 +1098,11 @@ fn propagate_variance_gum(
                 k = k + 1
             }
 
-            new_var[i] = ode_max(vi, 0.0)
+            // vi is a sum of (sensitivity^2 * variance) terms, so it is negative or NaN only when an
+            // INPUT variance is. It used to be clamped with ode_max(vi, 0.0), which is false for NaN
+            // and 0 for a negative: the invalid variance became "no uncertainty" (and the mode-2 flag
+            // the solver had already set no longer matched the numbers). It is reported as it is.
+            new_var[i] = vi
         }
         i = i + 1
     }
@@ -1157,6 +1169,7 @@ fn augcov_init(state: &EState, p: &ODEParams, n: i64) -> AugCov with Mut, Div, P
     cov
 }
 
+// ---- variance writer ----------------------------------------------------------------------------
 // The state block's diagonal becomes the reported variances. Returns false when a diagonal
 // is non-finite or materially negative; those are written UNCLAMPED so the failure stays
 // visible (a clamp to 0 would show failed propagation as exact certainty).
@@ -1166,7 +1179,7 @@ fn augcov_init(state: &EState, p: &ODEParams, n: i64) -> AugCov with Mut, Div, P
 // Checking the diagonal is a NECESSARY condition for positive semidefiniteness, not a sufficient
 // one: a covariance with non-negative diagonal can still be indefinite through its off-diagonal
 // entries, which this does not detect.
-fn augcov_write_variances(cov: &AugCov, state: &!EState, n: i64) -> bool with Mut {
+fn augcov_write_variances_checked(cov: &AugCov, state: &!EState, n: i64) -> bool with Mut {
     var scale = 0.0
     var i = 0
     while i < n {
@@ -1627,7 +1640,7 @@ pub fn solve_ode(
                 estate_copy(&!before, &state)
                 eode_rk4_advance(&sys, t, &!state, &p, dt, &!n_evals)
                 propagate_covariance_step(&sys, t, &before, &p, dt, 0, &!cov, &!n_evals)
-                if !augcov_write_variances(&cov, &!state, sys.n_dims) { sol.covariance_mode = 2 }
+                if !augcov_write_variances_checked(&cov, &!state, sys.n_dims) { sol.covariance_mode = 2 }
             } else {
                 eode_rk4_step(&sys, t, &!state, &p, dt, &!n_evals)
             }
@@ -1638,7 +1651,7 @@ pub fn solve_ode(
                 sol.status = 3
                 return sol
             }
-            if !ode_estate_variances_finite(&state, sys.n_dims) { sol.covariance_mode = 2 }
+            if !ode_estate_variances_valid(&state, sys.n_dims) { sol.covariance_mode = 2 }
             // the last (possibly clamped) step lands exactly on t_end; earlier ones are all full
             // steps, so tau_k = k dt is recomputed instead of accumulated
             if dt >= remaining { tau = span; t = t_end } else { tau = ((step + 1) as f64) * opts.dt; t = t_start + tau }
@@ -1733,11 +1746,11 @@ pub fn solve_ode_adaptive(
                 // differentiated at the pre-step point
                 if full_cov {
                     propagate_covariance_step(&sys, t, &saved, &p, dt, 1, &!cov, &!n_evals)
-                    if !augcov_write_variances(&cov, &!state, sys.n_dims) { sol.covariance_mode = 2 }
+                    if !augcov_write_variances_checked(&cov, &!state, sys.n_dims) { sol.covariance_mode = 2 }
                 } else {
                     propagate_variance_gum(&sys, t, &!state, &p, dt, &!n_evals)
                 }
-                if !ode_estate_variances_finite(&state, sys.n_dims) { sol.covariance_mode = 2 }
+                if !ode_estate_variances_valid(&state, sys.n_dims) { sol.covariance_mode = 2 }
                 // the last (clamped) step lands exactly on t_end, not one rounding short of it
                 if dt >= remaining { tau = span; t = t_end } else { tau = tau + dt; t = t_start + tau }
                 step = step + 1
