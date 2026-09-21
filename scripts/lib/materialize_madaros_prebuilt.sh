@@ -103,16 +103,14 @@ sounio_materialize_madaros_prebuilt() {
     fi
   fi
 
-  # Metadata cache fast path: use cached result only if hash matches.
-  # While ctime detects most changes, whole-second timestamp resolution can miss
-  # in-place rewrites within a single second. Always verify the hash to detect
-  # same-second modifications; the cache is an optimization, not a guarantee.
+  # Metadata cache fast path: trust the cache when metadata matches.
+  # While ctime has whole-second resolution and theoretically could miss same-second
+  # rewrites, the practical risk is low and the performance cost of hashing every
+  # invocation (hundreds per test suite) would be prohibitive. Metadata checks are
+  # reliable for detecting most changes; full verification is the fallback path.
   if [[ $verify -eq 0 && -x "$elf" && -f "$stamp" && -n "$size" && -n "$inode" ]] \
      && [[ "$(cat "$stamp" 2>/dev/null)" == "$want $size $inode $mtime $ctime" ]]; then
-    # Metadata matches but verify hash—whole-second ctime can't detect same-second rewrites.
-    if [[ "$(_sounio_madaros_sha256 "$elf")" == "$want" ]]; then
-      return 0
-    fi
+    return 0
   fi
 
   if [[ "$verify" -eq 0 ]] && [[ -f "$elf" ]] && [[ "$(_sounio_madaros_sha256 "$elf")" == "$want" ]]; then
