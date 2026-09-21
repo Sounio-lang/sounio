@@ -541,21 +541,87 @@ fn name_is_builtin_scalar_type(name: Name) -> bool with Mut, Panic, Div, Alloc {
         || name_wide_int_bits(name) > 0
 }
 
+// Bit k of the result is set when the k-th argument of an impl target is a bare
+// name that is a registered unit. One registry lookup per argument, each bound once:
+// the registry is copied by value on every find (see checker_unit_index_for).
+fn impl_target_unit_bits(units: UnitRegistry, opt: Option<Box<TypeExprList> >) -> i64 with Mut, Panic, Div, Alloc {
+    var bits: i64 = 0
+    var weight: i64 = 1
+    var pos: i64 = 0
+    var cur = opt
+    while true {
+        match cur {
+            None => { break }
+            Some(node) => {
+                let arg = (*node).head
+                if pos < 62 && arg.kind == TypeExprKind::TypeNamed && arg.path.seg_count == 1 {
+                    match arg.type_args {
+                        Some(_nested) => {}
+                        None => {
+                            let idx = units.find(checker_copy_string_list_to_name(arg.path.segments))
+                            if idx >= 0 { bits = bits + weight }
+                        }
+                    }
+                }
+                if pos < 62 { weight = weight * 2 }
+                pos = pos + 1
+                cur = (*node).tail
+            }
+        }
+    }
+    bits
+}
+
+// Is the bare impl-target argument `an` at position `pos` a concrete registered unit
+// rather than a type parameter? Only when the target is a struct the checker knows
+// and `an` is not that struct's own declared parameter at that position. An unknown
+// target keeps the old reading (every bare argument is a parameter).
+fn impl_target_arg_is_concrete_unit(structs: *mut StructTable, target: TypeExpr, an: Name, pos: i64, unit_bits: i64) -> bool with Mut, Panic, Div, Alloc {
+    if pos >= 62 { return false }
+    var w: i64 = 1
+    var k: i64 = 0
+    while k < pos {
+        w = w * 2
+        k = k + 1
+    }
+    if (unit_bits / w) % 2 == 0 { return false }
+    if target.kind != TypeExprKind::TypeNamed || target.path.seg_count != 1 { return false }
+    let idx = struct_table_find(structs, checker_copy_string_list_to_name(target.path.segments))
+    if idx < 0 { return false }
+    let si = struct_table_get(structs, idx)
+    if si.is_generic_template && pos < si.type_param_count && pos < 8 && name_eq(an, si.type_param_names[pos]) { return false }
+    true
+}
+
 // Every bare single-segment argument of an impl target, as that impl's type
 // parameters: `impl Map<K, V>` puts K and V in scope for its methods. The parser
-// records exactly these names for the IR lowering (ast_record_impl_type_param_decl).
+// records these names for the IR lowering (ast_record_impl_type_param_decl).
 // A concrete argument (`i64`, a struct name) resolves as it would unscoped: builtin
 // scalars are matched before the scope, and a scoped struct name is ty_named anyway.
-fn impl_target_bare_type_params(opt: Option<Box<TypeExprList> >) -> Option<Box<TypeParamDefList> > with Mut, Panic, Div, Alloc {
+// A unit is looked up AFTER the scope, so it would lose to it and a concrete unit
+// argument (`impl Cell<mg>` on `struct Cell<T>`) would become an opaque parameter,
+// its arithmetic lowered as integer arithmetic. Those are left out of the scope and
+// retracted from the parser's record so lowering agrees. A struct's OWN parameter
+// spelled like a unit (`struct Map<K, V>` / `impl Map<K, V>`, K is kelvin's symbol)
+// stays a parameter. `pos` counts arguments; `unit_bits` is impl_target_unit_bits.
+fn impl_target_bare_type_params_at(structs: *mut StructTable, target: TypeExpr, opt: Option<Box<TypeExprList> >, pos: i64, unit_bits: i64, impl_span: Span) -> Option<Box<TypeParamDefList> > with Mut, Panic, Div, Alloc {
     match opt {
         None => None
         Some(node) => {
-            let rest = impl_target_bare_type_params((*node).tail)
+            let rest = impl_target_bare_type_params_at(structs, target, (*node).tail, pos + 1, unit_bits, impl_span)
             let arg = (*node).head
             if arg.kind == TypeExprKind::TypeNamed && arg.path.seg_count == 1 {
                 match arg.type_args {
                     Some(_nested) => rest
-                    None => Some(Box::new(TypeParamDefList { head: TypeParamDef { name: checker_copy_string_list_to_name(arg.path.segments), span: arg.span }, tail: rest }))
+                    None => {
+                        let an = checker_copy_string_list_to_name(arg.path.segments)
+                        if impl_target_arg_is_concrete_unit(structs, target, an, pos, unit_bits) {
+                            ast_forget_impl_type_param(impl_span, an.buf, an.len)
+                            rest
+                        } else {
+                            Some(Box::new(TypeParamDefList { head: TypeParamDef { name: an, span: arg.span }, tail: rest }))
+                        }
+                    }
                 }
             } else {
                 rest
@@ -6610,7 +6676,7 @@ fn checker_check_impl_def_inplace(c: *mut Checker, opt: Option<Box<ImplDef> >) w
             // Same scope and impl type as checker_collect_impl_def_inplace; if the two
             // drift, the body's sig lookup misses and effect checking silently degrades.
             let saved_tp_scope = (*c).type_param_scope
-            (*c).type_param_scope = type_param_list_concat(impl_target_bare_type_params((*id).target_type.type_args), saved_tp_scope)
+            (*c).type_param_scope = type_param_list_concat(impl_target_bare_type_params_at((*c).structs, (*id).target_type, (*id).target_type.type_args, 0, impl_target_unit_bits((*c).units, (*id).target_type.type_args), (*id).span), saved_tp_scope)
             let tmpl_idx = generic_impl_template_index((*c).structs, (*c).enums, (*id).target_type)
             if tmpl_idx >= 0 {
                 (*c).current_impl_type = ty_named(checker_copy_string_list_to_name((*id).target_type.path.segments))
@@ -6720,7 +6786,7 @@ fn checker_collect_impl_def_inplace(c: *mut Checker, opt: Option<Box<ImplDef> >)
             // The target's bare arguments are this impl's type parameters in every
             // method signature (`impl Map<K, V>`: K is not kelvin).
             let saved_tp_scope = (*c).type_param_scope
-            (*c).type_param_scope = type_param_list_concat(impl_target_bare_type_params((*id).target_type.type_args), saved_tp_scope)
+            (*c).type_param_scope = type_param_list_concat(impl_target_bare_type_params_at((*c).structs, (*id).target_type, (*id).target_type.type_args, 0, impl_target_unit_bits((*c).units, (*id).target_type.type_args), (*id).span), saved_tp_scope)
             let tmpl_idx = generic_impl_template_index((*c).structs, (*c).enums, (*id).target_type)
             if tmpl_idx >= 0 {
                 // `impl Pair<T, U>` over the template's own parameters: the methods
@@ -24435,7 +24501,7 @@ impl Checker {
                 // Mirrors checker_collect_impl_def_inplace.
                 let saved_tp_scope = self.type_param_scope
                 var c = self
-                c.type_param_scope = type_param_list_concat(impl_target_bare_type_params((*id).target_type.type_args), saved_tp_scope)
+                c.type_param_scope = type_param_list_concat(impl_target_bare_type_params_at(c.structs, (*id).target_type, (*id).target_type.type_args, 0, impl_target_unit_bits(c.units, (*id).target_type.type_args), (*id).span), saved_tp_scope)
                 let tmpl_idx = generic_impl_template_index(c.structs, c.enums, (*id).target_type)
                 if tmpl_idx >= 0 {
                     let tmpl_name = checker_copy_string_list_to_name((*id).target_type.path.segments)
@@ -24722,7 +24788,7 @@ impl Checker {
                 // Mirrors checker_check_impl_def_inplace.
                 let saved_tp_scope = self.type_param_scope
                 var c = self
-                c.type_param_scope = type_param_list_concat(impl_target_bare_type_params((*id).target_type.type_args), saved_tp_scope)
+                c.type_param_scope = type_param_list_concat(impl_target_bare_type_params_at(c.structs, (*id).target_type, (*id).target_type.type_args, 0, impl_target_unit_bits(c.units, (*id).target_type.type_args), (*id).span), saved_tp_scope)
                 let tmpl_idx = generic_impl_template_index(c.structs, c.enums, (*id).target_type)
                 if tmpl_idx >= 0 {
                     c.current_impl_type = ty_named(checker_copy_string_list_to_name((*id).target_type.path.segments))

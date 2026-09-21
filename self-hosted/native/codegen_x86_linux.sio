@@ -4211,7 +4211,19 @@ fn emit_builtin_heap_realloc_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x84)
     nc_emit_u32_le(nc, 0) // jz alloc
 
-    // rdx = page_round_up(n + 8); the signed test rejects n <= 0 and overflow.
+    // Reject n <= 0 BEFORE adding, exactly as heap_alloc does. Testing only the
+    // sum let n in (-4103, 0] through: n = 0 and n = -1 became 4103 and 4102 and
+    // remapped the block to one page instead of failing.
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0x85)
+    nc_emit_byte(nc, 0xf6) // test rsi,rsi
+    let nonpositive_patch = (*nc).code.len + 2
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, 0x8e)
+    nc_emit_u32_le(nc, 0) // jle fail
+
+    // rdx = page_round_up(n + 8). n > 0 here, so the signed test after the
+    // addition only has to catch overflow.
     nc_emit_mov_reg_reg(nc, 2, 6)
     nc_emit_byte(nc, 0x48)
     nc_emit_byte(nc, 0x81)
@@ -4264,6 +4276,7 @@ fn emit_builtin_heap_realloc_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     emit_builtin_heap_alloc_into(nc)
 
     nc_patch_u32_le(nc, null_patch, alloc_offset - (null_patch + 4))
+    nc_patch_u32_le(nc, nonpositive_patch, fail_offset - (nonpositive_patch + 4))
     nc_patch_u32_le(nc, size_patch, fail_offset - (size_patch + 4))
     nc_patch_u32_le(nc, remap_error_patch, fail_offset - (remap_error_patch + 4))
 }
