@@ -74,10 +74,10 @@ sounio_materialize_madaros_prebuilt() {
 
   local size=""
   if [[ -f "$elf" ]]; then
-    size="$(wc -c < "$elf" | tr -d ' ')"
+    size="$(wc -c < "$elf" 2>/dev/null | tr -d ' ')" || size=""
   fi
 
-  if [[ $verify -eq 0 && -x "$elf" && -f "$stamp" ]] \
+  if [[ $verify -eq 0 && -x "$elf" && -f "$stamp" && -n "$size" ]] \
      && [[ "$(cat "$stamp" 2>/dev/null)" == "$want $size" ]]; then
     return 0
   fi
