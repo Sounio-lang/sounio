@@ -19,6 +19,11 @@
 // must match the closed form. If a rejected trial leaked into the covariance the
 // large-first-step run would drift from the other.
 //
+// Also covered: the tolerance model (a step is accepted when every component's embedded
+// error is <= atol + rtol * max(|y_old|, |y_new|), so atol must matter) and the completion
+// status (status 0 = reached t_end, 1 = max_steps used up, 2 = trial bound hit; t_final is
+// the last time reached), so a truncated trajectory cannot pass for the requested result.
+//
 // Documented limit (propagate_covariance_step): the controller's dt(z) dependence is
 // not differentiated. It enters at the tolerance level, far below the tolerances here.
 
@@ -51,12 +56,16 @@ fn expn(x: f64) -> f64 with Mut, Div, Panic {
 
 fn rel(a: f64, b: f64) -> f64 { absf(a - b) / absf(b) }
 
-fn run_adaptive(dt_init: f64, y0: f64, u0: f64, kk: f64, uk: f64, t_end: f64) -> ODESolution with Mut, Div, Panic {
+fn run_adaptive_opts(dt_init: f64, rtol: f64, atol: f64, max_steps: i64, y0: f64, u0: f64, kk: f64, uk: f64, t_end: f64) -> ODESolution with Mut, Div, Panic {
     var init = estate_new(1)
     estate_set(&!init, 0, y0, u0 * u0)
     var p = ode_params_new()
     ode_params_set(&!p, 0, kk, uk * uk)
-    solve_ode_adaptive(ode_system_exp_decay(), init, p, 0.0, t_end, solver_options_adaptive(dt_init, 1.0e-8, 1.0e-10, 1000))
+    solve_ode_adaptive(ode_system_exp_decay(), init, p, 0.0, t_end, solver_options_adaptive(dt_init, rtol, atol, max_steps))
+}
+
+fn run_adaptive(dt_init: f64, y0: f64, u0: f64, kk: f64, uk: f64, t_end: f64) -> ODESolution with Mut, Div, Panic {
+    run_adaptive_opts(dt_init, 1.0e-8, 1.0e-10, 1000, y0, u0, kk, uk, t_end)
 }
 
 fn main() -> i32 with IO, Mut, Div, Panic {
@@ -110,6 +119,37 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     // the parameter term is visible: dropping it would be off by far more than the bound
     if rel(v_no_param, v_exact) < 0.05 { fail = fail + 1; println("FAIL: test does not discriminate the parameter term") }
     if rel(vb, v_no_param) < 0.05 { fail = fail + 1; println("FAIL: adaptive variance is missing the parameter term") }
+
+    // ---- completion status ------------------------------------------------------------
+    if big.status != 0 || small.status != 0 { fail = fail + 1; println("FAIL: a completed solve must report status 0") }
+    if absf(big.t_final - t_end) > 1.0e-9 { fail = fail + 1; println("FAIL: t_final of a completed solve is not t_end") }
+
+    // max_steps used up before t_end: status 1, and t_final says how far it got
+    let cut = run_adaptive_opts(0.01, 1.0e-8, 1.0e-10, 3, y0, u0, kk, uk, t_end)
+    print("max_steps=3: status=") print(cut.status) print(" t_final=") print(cut.t_final) println("")
+    if cut.status != 1 { fail = fail + 1; println("FAIL: max_steps exhaustion must report status 1") }
+    if !(cut.t_final < t_end - 1.0) { fail = fail + 1; println("FAIL: a truncated solve must not claim t_end") }
+
+    // trial bound: y' = -1e8 y from dt = 1 needs ~13 rejections to get a step, the bound with
+    // max_steps = 1 is 10 trials, so no step is ever accepted: status 2, no progress
+    let stuck = run_adaptive_opts(1.0, 1.0e-8, 1.0e-10, 1, y0, u0, 1.0e8, uk, 1.0)
+    print("trial bound: status=") print(stuck.status) print(" rejected=") print(stuck.n_rejected) print(" t_final=") print(stuck.t_final) println("")
+    if stuck.status != 2 { fail = fail + 1; println("FAIL: trial-bound exhaustion must report status 2") }
+    if stuck.t_final > 0.0 { fail = fail + 1; println("FAIL: no step was accepted, t_final must stay at t_start") }
+
+    // ---- atol governs the step acceptance ----------------------------------------------
+    // rtol is tiny, so the tolerance is atol-dominated: a loose atol accepts big steps, a
+    // tight one needs many (before atol was wired in, both took the same steps)
+    let loose = run_adaptive_opts(0.1, 1.0e-10, 1.0e-3, 1000, y0, u0, kk, uk, t_end)
+    let tight = run_adaptive_opts(0.1, 1.0e-10, 1.0e-13, 1000, y0, u0, kk, uk, t_end)
+    print("atol steps: loose=") print(loose.n_steps) print(" tight=") print(tight.n_steps) println("")
+    if loose.status != 0 || tight.status != 0 { fail = fail + 1; println("FAIL: atol runs must complete") }
+    if loose.n_steps * 4 > tight.n_steps { fail = fail + 1; println("FAIL: atol has no effect on the step count") }
+    // and it buys accuracy: the tight run must be closer to the exact value
+    let yl = solution_get_value(&loose, loose.n_steps - 1, 0)
+    let yt = solution_get_value(&tight, tight.n_steps - 1, 0)
+    if rel(yt, y_exact) > 1.0e-9 { fail = fail + 1; println("FAIL: tight-atol run is not accurate") }
+    if !(rel(yl, y_exact) > rel(yt, y_exact)) { fail = fail + 1; println("FAIL: loose atol should be less accurate than tight atol") }
 
     if fail == 0 { println("ODE ADAPTIVE COVARIANCE PASS") }
     fail

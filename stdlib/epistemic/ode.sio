@@ -219,6 +219,8 @@ pub fn ode_system_pbpk_clearance() -> ODESystem {
 
 struct SolverOptions {
     dt: f64,
+    // Adaptive only. A step is accepted when, for every component,
+    //   |embedded error_i| <= atol + rtol * max(|y_old_i|, |y_new_i|)
     rtol: f64,
     atol: f64,
     max_steps: i64,
@@ -281,6 +283,15 @@ pub struct ODESolution {
     //    n_dims + n_params > 64; it drops all correlations and is known to
     //    UNDERSTATE the variance of intermediates (see propagate_covariance_step).
     pub covariance_mode: i64,
+    // Last time reached, and why the solve stopped:
+    //   status 0: reached t_end
+    //   status 1: max_steps steps were used up before t_end
+    //   status 2: (adaptive) the trial bound was hit -- repeated rejection, or a
+    //             non-finite error estimate, left no acceptable step
+    // A truncated solve is NOT an error return: the last recorded point is then the state
+    // at t_final, not at t_end. Check status == 0 before using it as the requested result.
+    pub t_final: f64,
+    pub status: i64,
 }
 
 fn ode_solution_new(n_dims: i64) -> ODESolution {
@@ -294,7 +305,14 @@ fn ode_solution_new(n_dims: i64) -> ODESolution {
         n_rhs_evals: 0,
         n_rejected: 0,
         covariance_mode: 1,
+        t_final: 0.0,
+        status: 0,
     }
+}
+
+// t_end reached, up to the rounding left by accumulating t += dt
+fn ode_reached(t: f64, t_end: f64) -> bool {
+    t_end - t <= 1.0e-12 * ode_max(1.0, ode_abs(t_end))
 }
 
 fn solution_record(
@@ -984,7 +1002,7 @@ fn eode_step_values(
         eode_rk4_advance(sys, t, state, p, dt, n_evals)
     } else {
         var err_unused = 0.0
-        rk45_step(sys, t, state, p, dt, &!err_unused, n_evals)
+        rk45_step(sys, t, state, p, dt, 1.0, 1.0, &!err_unused, n_evals)
     }
 }
 
@@ -1199,6 +1217,8 @@ fn rk45_step(
     state: &!EState,
     p: &ODEParams,
     dt: f64,
+    rtol: f64,
+    atol: f64,
     err_out: &!f64,
     n_evals: &!i64
 ) with Mut, Div, Panic {
@@ -1279,6 +1299,7 @@ fn rk45_step(
     i = 0
     while i < n {
         if i < 64 {
+            tmp.values[i] = state.values[i]
             state.values[i] = state.values[i] + dt * (
                 (35.0 / 384.0) * k1.values[i]
                 + (500.0 / 1113.0) * k3.values[i]
@@ -1299,6 +1320,11 @@ fn rk45_step(
     //   b5 - b4 = [71/57600, 0, -71/16695, 71/1920, -17253/339200, 22/525, -1/40]
     // (These used to be the Fehlberg RKF45 error coefficients, which do not belong to
     // this tableau and made the estimate ~1e4 times too large.)
+    //
+    // The returned error is NORMALIZED per component by the mixed tolerance
+    //   sc_i = atol + rtol * max(|y_old_i|, |y_new_i|)
+    // and reduced by max over components: a step is acceptable when it is <= 1, and the
+    // controller is driven by that same number. atol therefore governs near-zero components.
     var max_err = 0.0
     i = 0
     while i < n {
@@ -1310,7 +1336,8 @@ fn rk45_step(
                 - (17253.0 / 339200.0) * k5.values[i]
                 + (22.0 / 525.0) * k6.values[i]
                 - 0.025 * k7.values[i])
-            let sci = ode_abs(state.values[i]) + 1.0e-10
+            var sci = atol + rtol * ode_max(ode_abs(tmp.values[i]), ode_abs(state.values[i]))
+            if sci < 1.0e-300 { sci = 1.0e-300 }
             let rel = ei / sci
             if rel > max_err { max_err = rel }
         }
@@ -1363,6 +1390,8 @@ pub fn solve_ode(
     }
 
     sol.n_rhs_evals = n_evals
+    sol.t_final = t
+    sol.status = if ode_reached(t, t_end) { 0 } else { 1 }
     sol
 }
 
@@ -1403,10 +1432,10 @@ pub fn solve_ode_adaptive(
             estate_copy(&!saved, &state)
 
             var err = 0.0
-            rk45_step(&sys, t, &!state, &p, dt, &!err, &!n_evals)
+            rk45_step(&sys, t, &!state, &p, dt, opts.rtol, opts.atol, &!err, &!n_evals)
 
-            let tol = opts.atol + opts.rtol * err
-            if err <= opts.rtol || dt <= 1.0e-12 {
+            // err is normalized by atol + rtol * max(|y_old|, |y_new|): accept when <= 1
+            if err <= 1.0 || dt <= 1.0e-12 {
                 // Accept step — propagate uncertainty through the step just taken,
                 // differentiated at the pre-step point
                 if full_cov {
@@ -1421,7 +1450,7 @@ pub fn solve_ode_adaptive(
 
                 // Grow step size
                 if err > 1.0e-20 {
-                    let factor = ode_min(5.0, 0.9 * ode_pow_fifth(opts.rtol / err))
+                    let factor = ode_min(5.0, 0.9 * ode_pow_fifth(1.0 / err))
                     dt = dt * ode_max(0.2, factor)
                 } else {
                     dt = dt * 5.0
@@ -1429,7 +1458,7 @@ pub fn solve_ode_adaptive(
             } else {
                 // Reject step — restore state and shrink dt
                 estate_copy(&!state, &saved)
-                let factor = ode_max(0.2, 0.9 * ode_pow_fifth(opts.rtol / err))
+                let factor = ode_max(0.2, 0.9 * ode_pow_fifth(1.0 / err))
                 dt = dt * factor
                 n_rejected = n_rejected + 1
             }
@@ -1438,6 +1467,14 @@ pub fn solve_ode_adaptive(
 
     sol.n_rhs_evals = n_evals
     sol.n_rejected = n_rejected
+    sol.t_final = t
+    if ode_reached(t, t_end) {
+        sol.status = 0
+    } else if step >= opts.max_steps {
+        sol.status = 1
+    } else {
+        sol.status = 2
+    }
     sol
 }
 
