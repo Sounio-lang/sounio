@@ -5624,6 +5624,30 @@ fn tc_wrong_arity(tok: i64, expected: i64, got: i64) -> i64 with IO, Mut, Panic 
     return 0
 }
 
+// A field borrow whose base is not a registered struct -- a tuple field, `&t.0`,
+// is the case that matters -- used to be a WARNING followed by `xor eax,eax`
+// (x86) / `mov x0,#0` (a64): the compiler exited 0, emitted an ELF, and the
+// "reference" was a null pointer, so the program crashed with SIGSEGV at run time
+// (tests/run-pass/effects_sandbox_handlers.sio, #2595). Fail closed instead.
+//
+// Like tc_wrong_arity_hard, this bypasses the imported-function guard in
+// tc_mark_failed. That guard is right for advisory diagnostics from imported
+// modules and wrong for a construct whose only possible output is a null
+// dereference: a binary emitted in that state miscompiles no matter where the
+// borrow lives.
+fn tc_field_borrow_hard(tok: i64, msg: string) -> i64 with IO, Mut, Panic {
+    print("error: ")
+    print(msg)
+    print(" at ")
+    print_src_loc_for_tok(tok)
+    print(" (bundle line ")
+    print_int(TL[tok as usize])
+    print(")\n")
+    tc_mark_failed()
+    TYPECHECK_FAILED = 1
+    return 0
+}
+
 fn tc_wrong_arity_hard(tok: i64, expected: i64, got: i64) -> i64 with IO, Mut, Panic {
     print("error[E006]: arity mismatch at line ")
     print_int(TL[tok as usize])
@@ -12534,7 +12558,7 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
                 }
                 let si = st_find(inner_hash)
                 if si < 0 {
-                    tc_error(f_tok, "field borrow through deref requires struct pointee")
+                    tc_field_borrow_hard(f_tok, "field borrow through deref requires struct pointee (the pointee is not a struct, e.g. a tuple: bind it first and borrow the binding)")
                     em(0x31); em(0xc0)
                     inner_ty = 0
                     inner_hash = 0
@@ -12848,7 +12872,7 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
             EP = EP + 1
             let si = st_find(inner_hash)
             if si < 0 {
-                tc_error(f_tok, "field borrow requires struct base")
+                tc_field_borrow_hard(f_tok, "field borrow requires struct base (a tuple field cannot be borrowed by this engine: bind it first, `let (a, b) = t`, and borrow the binding)")
                 em(0x31); em(0xc0)
                 inner_ty = 0
                 inner_hash = 0
@@ -12913,7 +12937,7 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
                 EP = EP + 1
                 let si2 = st_find(inner_hash2)
                 if si2 < 0 {
-                    tc_error(f_tok2, "field borrow requires struct base")
+                    tc_field_borrow_hard(f_tok2, "field borrow requires struct base (a tuple field cannot be borrowed by this engine: bind it first, `let (a, b) = t`, and borrow the binding)")
                     em(0x31); em(0xc0)
                     inner_ty2 = 0
                     inner_hash2 = 0
@@ -36393,7 +36417,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                     }
                     let si = st_find(inner_hash)
                     if si < 0 {
-                        tc_error(f_tok, "field borrow through deref requires struct pointee")
+                        tc_field_borrow_hard(f_tok, "field borrow through deref requires struct pointee (the pointee is not a struct, e.g. a tuple: bind it first and borrow the binding)")
                         em32(0xD2800000)
                         inner_ty = 0
                         inner_hash = 0
@@ -36692,7 +36716,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EP = EP + 1
                 let fbsi = st_find(inner_hash_b)
                 if fbsi < 0 {
-                    tc_error(fb_tok, "field borrow requires struct base")
+                    tc_field_borrow_hard(fb_tok, "field borrow requires struct base (a tuple field cannot be borrowed by this engine: bind it first, `let (a, b) = t`, and borrow the binding)")
                     em32(0xD2800000)
                     inner_ty_b = 0
                     inner_hash_b = 0

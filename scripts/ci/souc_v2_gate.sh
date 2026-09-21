@@ -167,6 +167,32 @@ run_cross_compile_test() {
     fi
 }
 
+# Assert a program is REJECTED at compile time: the compiler exits non-zero,
+# emits no ELF, and prints an `error:` line containing $3. This is the contract for
+# constructs this engine cannot compile correctly. The alternative -- a warning,
+# exit 0, and a binary that dereferences a null pointer -- is a miscompile that
+# only shows up at run time. Extra arguments go to the compiler (e.g. --target).
+run_test_rejected() {
+    local name=$1 src=$2 expected=$3
+    shift 3
+    TOTAL=$((TOTAL+1))
+    rm -f /tmp/gate_rej.elf
+    local rc
+    set +e
+    timeout 30 $S "$src" /tmp/gate_rej.elf "$@" >/tmp/gate_rej.log 2>&1
+    rc=$?
+    set -e
+    if [ $rc -ne 0 ] && [ ! -s /tmp/gate_rej.elf ] \
+       && grep "^error:" /tmp/gate_rej.log | grep -qF "$expected"; then
+        echo "PASS: $name"
+        PASS=$((PASS+1))
+    else
+        echo "FAIL: $name (rc=$rc, elf=$([ -s /tmp/gate_rej.elf ] && echo emitted || echo none), want error containing: $expected)"
+        tail -n 6 /tmp/gate_rej.log 2>/dev/null | sed 's/^/  /' || true
+        FAIL=$((FAIL+1))
+    fi
+}
+
 # Test: complex_native_demo (regression)
 run_test "complex_native_demo" examples/algorithms/complex_native_demo.sio "ALL PASS"
 
@@ -277,6 +303,47 @@ else
     echo "FAIL: error_line_numbers (got: ${err_out:0:80})"
     FAIL=$((FAIL+1))
 fi
+
+# Tuple-field borrows must FAIL CLOSED. `&t.0` on a tuple used to warn "field borrow
+# requires struct base", exit 0 and compile the borrow to a null pointer, so the
+# program crashed with SIGSEGV at run time (tests/run-pass/effects_sandbox_handlers.sio,
+# #2595). Five call sites carried that behaviour -- three in the x86 backend (borrow
+# of a variable base, of a global base, through a deref) and two in the aarch64
+# backend (variable base, through a deref) -- so there is one witness per site.
+# Programs use the shapes that were measured to crash.
+TB_HDR='struct Big { tag: i64, n: i64 }
+fn mk() -> (Big, i64) with Mut { let b = Big { tag: 7, n: 5 }; return (b, 2) }
+fn has(b: &Big) -> bool { return b.tag == 7 }'
+
+cat > /tmp/gate_tb_var.sio << EOF
+$TB_HDR
+fn main() -> i64 with IO { let t = mk(); if has(&t.0) { return 0 }; return 1 }
+EOF
+run_test_rejected "tuple_field_borrow_var_x86" /tmp/gate_tb_var.sio "field borrow requires struct base"
+run_test_rejected "tuple_field_borrow_var_aarch64" /tmp/gate_tb_var.sio "field borrow requires struct base" --target aarch64-linux
+
+cat > /tmp/gate_tb_glob.sio << EOF
+$TB_HDR
+var GT: (Big, i64)
+fn main() -> i64 with IO { GT = mk(); if has(&GT.0) { return 0 }; return 1 }
+EOF
+run_test_rejected "tuple_field_borrow_global_x86" /tmp/gate_tb_glob.sio "field borrow requires struct base"
+
+cat > /tmp/gate_tb_deref.sio << EOF
+$TB_HDR
+fn viaptr(p: &(Big, i64)) -> bool { return has(&(*p).0) }
+fn main() -> i64 with IO { let t = mk(); if viaptr(&t) { return 0 }; return 1 }
+EOF
+run_test_rejected "tuple_field_borrow_deref_x86" /tmp/gate_tb_deref.sio "field borrow through deref requires struct pointee"
+run_test_rejected "tuple_field_borrow_deref_aarch64" /tmp/gate_tb_deref.sio "field borrow through deref requires struct pointee" --target aarch64-linux
+
+# Control: the same borrow through a destructured binding must still compile and run,
+# so the rejections above are the tuple-field case and not a blanket failure.
+cat > /tmp/gate_tb_ok.sio << EOF
+$TB_HDR
+fn main() -> i64 with IO { let (b, n) = mk(); if has(&b) && n == 2 { print("TB_OK\n") }; return 0 }
+EOF
+run_test "tuple_destructure_then_borrow" /tmp/gate_tb_ok.sio "TB_OK"
 
 # --- Summary ---
 echo ""
