@@ -2,24 +2,38 @@
 topic_id: repo.docs.reference.epistemic-api
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A3
+last_validated: 2026-09-19
+validated_by: Claude
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.reference.epistemic-api
 -->
 
-# Sounio Epistemic Gaps — API Documentation
+# Sounio Epistemic Gaps — Design Sketch
+
+> **Status: DESIGN SKETCH (aspirational, not current API).**
+>
+> This page preserves an earlier proposal for epistemic promotion, KEC
+> selection, SMC, and adaptive SMC APIs. The named `promotion.rs`, `kec.rs`,
+> and `adaptive_smc.sio` implementations are absent, and no current API matches
+> the `smc.sio` interface sketched here. Treat the Rust and Sounio snippets
+> below as proposed interfaces, not as documented working code.
 
 ## Module Overview
 
-This documentation covers the four main components added to close gaps in Sounio's epistemic computing system.
+This document sketches four proposed components intended to close gaps in
+Sounio's epistemic computing system. It does not describe the current
+implemented API surface. Current validated epistemic claims must be routed
+through `docs/serious-language/public-claim-registry.v1.tsv` and checked
+fixtures or named gates.
 
 ---
 
-## 1. Promotion Lattice (`promotion.rs`)
+## 1. Proposed Promotion Lattice (`promotion.rs`)
 
 ### Purpose
 
-Provides a formal mathematical lattice structure for uncertainty representations, enabling principled promotion (widening) between different uncertainty models.
+Proposed: provide a formal mathematical lattice structure for uncertainty
+representations, enabling principled promotion (widening) between different
+uncertainty models.
 
 ### Core Types
 
@@ -152,11 +166,12 @@ if let PromotedValue::Distribution { samples, mean, variance } = result {
 
 ---
 
-## 2. KEC Auto-Selection (`kec.rs`)
+## 2. Proposed KEC Auto-Selection (`kec.rs`)
 
 ### Purpose
 
-Automatically selects the optimal uncertainty propagation backend based on Knowledge, Entropy, and Complexity analysis.
+Proposed: automatically select the optimal uncertainty propagation backend
+based on Knowledge, Entropy, and Complexity analysis.
 
 ### Core Types
 
@@ -310,11 +325,12 @@ for reason in &result.reasoning {
 
 ---
 
-## 3. Sequential Monte Carlo (`smc.sio`)
+## 3. Proposed Sequential Monte Carlo (`smc.sio`)
 
 ### Purpose
 
-Provides particle-based uncertainty propagation for state-space models and sequential inference.
+Proposed: provide particle-based uncertainty propagation for state-space
+models and sequential inference.
 
 ### Core Types
 
@@ -433,11 +449,12 @@ let (lower, upper) = filter.cloud().credible_interval(|x| x, 0.05)
 
 ---
 
-## 4. Adaptive SMC (`adaptive_smc.sio`)
+## 4. Proposed Adaptive SMC (`adaptive_smc.sio`)
 
 ### Purpose
 
-Automatically determines the temperature schedule for SMC samplers based on ESS criterion.
+Proposed: automatically determine the temperature schedule for SMC samplers
+based on the ESS criterion.
 
 ### Core Types
 
@@ -543,11 +560,11 @@ println!("Completed in {} steps with {} resamples",
 
 ---
 
-## Error Types
+## Proposed Error Types
 
 ### `PromotionError`
 
-Errors during value promotion.
+Proposed errors for value promotion.
 
 ```rust
 pub enum PromotionError {
@@ -559,7 +576,11 @@ pub enum PromotionError {
 
 ---
 
-## Integration with Existing Sounio Types
+## Proposed Integration with Sounio Types
+
+The conversions and type combinations in this section are design goals. They do
+not confirm that `ParticleCloud`, `UncertainValue`, or the shown generic
+`QuantifiedKnowledge` forms are available in the current implementation.
 
 ### With `Knowledge<T>`
 
@@ -587,7 +608,7 @@ let Cmax: QuantifiedKnowledge<ParticleCloud<f64>, MilligramPerLiter> = ...
 
 ---
 
-## Performance Considerations
+## Proposed Performance Considerations
 
 | Method | Time Complexity | Space Complexity |
 |--------|-----------------|------------------|
