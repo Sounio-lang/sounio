@@ -1575,24 +1575,36 @@ pub fn test_coupled_crn_equil() -> bool with Mut, Div, Panic {
 // u_d is the STANDARD uncertainty of init_d; the returned uncertainties are standard too.
 // (simulate_pbpk_clearance_full takes the initial VARIANCE, so it is squared here. It used
 // to be passed through unsquared, which made the initial contribution sqrt(u_d), not u_d.)
-pub fn pbpk_full_metabolic(init_d: f64, u_d: f64, t: f64) -> ([f64; 4], [f64; 4]) with Mut, Div, Panic {
+//
+// pbpk_full_metabolic_checked returns (status, values, sigmas): status 0 = sound; 3 = invalid input
+// (a non-finite init_d or u_d, a NEGATIVE u_d -- squaring would make it look valid -- or a t that is
+// NaN, negative or above 1e6); otherwise the status of simulate_pbpk_clearance_checked. The inputs
+// are validated BEFORE the t = 0 shortcut, so an invalid state is not returned as a result just
+// because no integration is needed. pbpk_full_metabolic panics unless the status is 0.
+pub fn pbpk_full_metabolic_checked(init_d: f64, u_d: f64, t: f64) -> (i64, [f64; 4], [f64; 4]) with Mut, Div, Panic {
     let init4: [f64; 4] = [init_d, 0.0, 0.0, 0.0];
+    let sig4: [f64; 4] = [u_d, 0.0, 0.0, 0.0];
+    if !((init_d - init_d) == 0.0) || !((u_d - u_d) == 0.0) || u_d < 0.0 { return (3, init4, sig4) }
+    if !(t >= 0.0) || t > 1.0e6 { return (3, init4, sig4) }
+    // Integrate to EXACTLY t: n = ceil(t / 0.33) equal steps of dt = t / n <= 0.33. (It used to
+    // take (t * 3) steps of 0.33, which stops at 23.76 for t = 24 and takes no step at all for
+    // t < 1/3.) t = 0 returns the initial state.
+    if t == 0.0 { return (0, init4, sig4) }
     let u4: [f64; 4] = [u_d * u_d, 0.0, 0.0, 0.0];
     let ks: [f64; 3] = [0.05, 0.02, 0.01];
     let us: [f64; 3] = [0.004, 0.002, 0.0015];
-    // Integrate to EXACTLY t: n = ceil(t / 0.33) equal steps of dt = t / n <= 0.33. (It used to
-    // take (t * 3) steps of 0.33, which stops at 23.76 for t = 24 and takes no step at all for
-    // t < 1/3.) t = 0 returns the initial state; NaN, negative or absurd t fails.
-    if !(t >= 0.0) || t > 1.0e6 { panic("pbpk_full_metabolic: t must be finite and in [0, 1e6]") }
-    if t == 0.0 {
-        return ([init_d, 0.0, 0.0, 0.0], [u_d, 0.0, 0.0, 0.0])
-    }
     let ratio = t / 0.33;
     var steps = ratio as i64;
     if (steps as f64) < ratio { steps = steps + 1 }
     let dt = t / (steps as f64);
-    let (ov, ou) = simulate_pbpk_clearance_full(&init4, &u4, &ks, &us, dt, steps);
-    ([ov[0],ov[1],ov[2],ov[3]], [ou[0],ou[1],ou[2],ou[3]])
+    let (status, ov, ou) = simulate_pbpk_clearance_checked(&init4, &u4, &ks, &us, dt, steps);
+    (status, [ov[0],ov[1],ov[2],ov[3]], [ou[0],ou[1],ou[2],ou[3]])
+}
+
+pub fn pbpk_full_metabolic(init_d: f64, u_d: f64, t: f64) -> ([f64; 4], [f64; 4]) with Mut, Div, Panic {
+    let (status, ov, ou) = pbpk_full_metabolic_checked(init_d, u_d, t);
+    if status != 0 { panic("pbpk_full_metabolic: invalid input (init_d, u_d >= 0, t in [0, 1e6] must be finite) or the solve failed") }
+    (ov, ou)
 }
 
 pub fn test_pbpk_full() -> bool with Mut, Div, Panic {

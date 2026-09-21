@@ -126,24 +126,53 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     if absf(ya - y_big) > 1.0e-6 { fail = fail + 1; println("FAIL: adaptive solve at t = 1e15 is not the solution (skipped or mis-timed)") }
     if f_big.t_final != t0 + 100.0 || a_big.t_final != t0 + 100.0 { fail = fail + 1; println("FAIL: t_final must land exactly on t_end") }
 
-    // ---- no "accept anyway" at a tiny step ---------------------------------------------------
-    // dy/dt = -1e11 y to t = 5e-12 (y = e^{-0.5}), rtol = 1e-14. The first trial dt = 1e-12 is
-    // already <= 1e-12, with a normalized error ~1e5. A fallback that accepted any finite error
-    // at that size returned a "completed" solve with relative error 3e-10 (35000 x rtol). With
-    // only err <= 1 accepted, the step is rejected down to ~1e-13 and the result meets rtol.
-    let stiff = solve_ode_adaptive(ode_system_exp_decay(), decay(1.0, 0.0, 1.0e11), params(1.0e11), 0.0, 5.0e-12, solver_options_adaptive(1.0e-12, 1.0e-14, 1.0e-20, 5000))
-    let ys = solution_get_value(&stiff, stiff.n_steps - 1, 0)
-    let rel_stiff = absf(ys - 0.6065306597126334) / 0.6065306597126334
-    print("tiny-dt tolerance: status=") print(stiff.status) print(" rejected=") print(stiff.n_rejected)
-    print(" rel err=") print(rel_stiff) println("")
-    if stiff.status != 0 { fail = fail + 1; println("FAIL: the stiff solve must complete") }
-    if stiff.n_rejected < 1 { fail = fail + 1; println("FAIL: the first trial (error ~1e5 x tolerance) must be rejected, not forced through") }
-    if rel_stiff > 1.0e-12 { fail = fail + 1; println("FAIL: the result is outside the requested tolerance") }
+    // ---- short but valid intervals: no absolute step-size floor -------------------------------
+    // [0, 1e-16] and [0, 1e-100] are representable and well-posed (the rate is scaled so that
+    // k * span = 0.1, y = e^{-0.1}). An absolute `dt <= 1e-15 -> collapsed` test ended both as
+    // status 2 with no step attempted.
+    let ex01 = 0.9048374180359595
+    var shorts = 0
+    while shorts < 2 {
+        let span = if shorts == 0 { 1.0e-16 } else { 1.0e-100 }
+        let kk = 0.1 / span
+        let a_sh = solve_ode_adaptive(ode_system_exp_decay(), decay(1.0, 0.0, kk), params(kk), 0.0, span, solver_options_adaptive(span, 1.0e-8, 1.0e-12, 500))
+        let f_sh = solve_ode(ode_system_exp_decay(), decay(1.0, 0.0, kk), params(kk), 0.0, span, solver_options_fixed(span / 20.0, 100))
+        let ya_sh = solution_get_value(&a_sh, a_sh.n_steps - 1, 0)
+        let yf_sh = solution_get_value(&f_sh, f_sh.n_steps - 1, 0)
+        print("span=") print(span) print(": adaptive status=") print(a_sh.status) print(" y=") print(ya_sh)
+        print(" fixed status=") print(f_sh.status) print(" y=") print(yf_sh) println("")
+        if a_sh.status != 0 { fail = fail + 1; println("FAIL: a short adaptive interval must complete, not end as status 2") }
+        if f_sh.status != 0 { fail = fail + 1; println("FAIL: a short fixed interval must complete") }
+        if absf(ya_sh - ex01) > 1.0e-6 { fail = fail + 1; println("FAIL: short adaptive solve is not the solution") }
+        if absf(yf_sh - ex01) > 1.0e-8 { fail = fail + 1; println("FAIL: short fixed solve is not the solution") }
+        shorts = shorts + 1
+    }
 
-    // a tolerance no step size can meet ends as status 2, never as a "completed" solve
+    // ---- no "accept anyway" at a tiny step ---------------------------------------------------
+    // dy/dt = -1e11 y on [0, 5e-12] (y = e^{-0.5}), rtol = 1e-14. This is a FAST-DECAY, SHORT-INTERVAL
+    // problem (|lambda| * span = 0.5), not a stiff one: an explicit method needs only k*dt ~ 0.005,
+    // ~100 steps. The first trial dt = 1e-12 is already <= 1e-12 with a normalized error ~1e5. A
+    // fallback that accepted any finite error at that size returned a "completed" solve with
+    // relative error 3e-10 (35000 x rtol). With only err <= 1 accepted the step is rejected down to
+    // ~1e-13 and the result is 1e-15 (measured). The 1e-12 bound below is that measurement with
+    // margin, not a derived global-error guarantee: err <= 1 controls the LOCAL error.
+    let fast = solve_ode_adaptive(ode_system_exp_decay(), decay(1.0, 0.0, 1.0e11), params(1.0e11), 0.0, 5.0e-12, solver_options_adaptive(1.0e-12, 1.0e-14, 1.0e-20, 5000))
+    let ys = solution_get_value(&fast, fast.n_steps - 1, 0)
+    let rel_fast = absf(ys - 0.6065306597126334) / 0.6065306597126334
+    print("tiny-dt tolerance: status=") print(fast.status) print(" rejected=") print(fast.n_rejected)
+    print(" rel err=") print(rel_fast) println("")
+    if fast.status != 0 { fail = fail + 1; println("FAIL: the fast-decay solve must complete") }
+    if fast.n_rejected < 1 { fail = fail + 1; println("FAIL: the first trial (error ~1e5 x tolerance) must be rejected, not forced through") }
+    if rel_fast > 1.0e-12 { fail = fail + 1; println("FAIL: the result is outside the requested tolerance") }
+
+    // a tolerance no useful step size can meet must never end as a "completed" solve. (Which
+    // non-zero status it is depends on where it gives up: at a tiny dt the embedded error is
+    // exactly 0, so tiny steps ARE legitimately accepted until max_steps is used up -> status 1,
+    // t_final far from t_end. Only "reported as completed" is wrong.)
     let a_tight = solve_ode_adaptive(ode_system_exp_decay(), decay(1.0, 0.0, 0.1), params(0.1), 0.0, 1.0, solver_options_adaptive(0.1, 1.0e-40, 0.0, 200))
-    print("unreachable tolerance: status=") print(a_tight.status) println("")
-    if a_tight.status != 2 { fail = fail + 1; println("FAIL: an unreachable tolerance must end as status 2") }
+    print("unreachable tolerance: status=") print(a_tight.status) print(" t_final=") print(a_tight.t_final) println("")
+    if a_tight.status == 0 { fail = fail + 1; println("FAIL: an unreachable tolerance must not be reported as a completed solve") }
+    if !(a_tight.t_final < 0.5) { fail = fail + 1; println("FAIL: an unreachable tolerance made unexpected progress") }
 
     // ---- empty interval: initial state and covariance are still validated --------------------
     let f_e_nan = solve_ode(ode_system_exp_decay(), decay(nan, 0.01, 0.1), params(0.1), 1.0, 1.0, solver_options_fixed(0.1, 10))

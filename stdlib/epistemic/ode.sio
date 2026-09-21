@@ -287,7 +287,8 @@ pub struct ODESolution {
     //    input variance was NaN or negative). The offending variances are reported as they
     //    came out (NaN/inf/negative), NOT clamped to zero; the state values are unaffected.
     //    Only a diagonal within 1e-9 of the block's largest one below zero is round-off, and
-    //    that alone is clamped.
+    //    that alone is clamped (a heuristic allowance; the diagonal test is necessary for positive
+    //    semidefiniteness, not sufficient).
     pub covariance_mode: i64,
     // Last time reached, and why the solve stopped:
     //   status 0: reached t_end
@@ -1063,8 +1064,12 @@ fn augcov_init(state: &EState, p: &ODEParams, n: i64) -> AugCov with Mut, Div, P
 // The state block's diagonal becomes the reported variances. Returns false when a diagonal
 // is non-finite or materially negative; those are written UNCLAMPED so the failure stays
 // visible (a clamp to 0 would show failed propagation as exact certainty).
-// Round-off can leave a diagonal a few ulps below zero relative to the block's scale: only
-// that (within 1e-9 of the largest diagonal) is clamped to 0.
+// Round-off can leave a diagonal slightly below zero relative to the block's scale. The
+// allowance is a HEURISTIC, 1e-9 of the largest state diagonal (about 4e6 ulps; not derived from a
+// bound on the propagation error): only a diagonal that far below zero, at most, is clamped to 0.
+// Checking the diagonal is a NECESSARY condition for positive semidefiniteness, not a sufficient
+// one: a covariance with non-negative diagonal can still be indefinite through its off-diagonal
+// entries, which this does not detect.
 fn augcov_write_variances(cov: &AugCov, state: &!EState, n: i64) -> bool with Mut {
     var scale = 0.0
     var i = 0
@@ -1497,6 +1502,10 @@ pub fn solve_ode(
 
     // Work in ELAPSED time tau = t - t_start (scale = the interval), and derive the absolute time
     // as t_start + tau: at large epochs the absolute time has too few bits left for the steps.
+    // Limit: the time ARGUMENT handed to the right-hand side is still t_start + tau, quantized to
+    // the epoch's ulp (0.125 at 1e15). Autonomous systems (all built-in ones) never read it, and
+    // the step sizes and the end of the interval are unaffected; a time-dependent right-hand side
+    // at such an epoch sees a quantized time.
     let span = t_end - t_start
     var tau = 0.0
     while tau < span && step < opts.max_steps {
@@ -1575,10 +1584,12 @@ pub fn solve_ode_adaptive(
         let remaining = span - tau
         dt = ode_min(dt, remaining)
         if ode_reached(tau, span) { tau = span; t = t_end }
-        else if dt <= 1.0e-15 {
-            // The step size collapsed while t_end is still far away (only a rounding
-            // remainder may be skipped, above). That is failure, not completion: stop, and
-            // status 2 reports it.
+        else if !(tau + dt > tau) {
+            // The step size collapsed: adding it no longer advances the elapsed time, while the
+            // end is still far away (only a rounding remainder is skipped, above). That is
+            // failure, not completion: stop, and status 2 reports it. The test is "can this dt
+            // still advance tau", not a fixed floor -- an absolute 1e-15 rejected valid short
+            // integrations such as [0, 1e-16] before attempting a single step.
             break
         }
         else {
@@ -1640,17 +1651,28 @@ pub fn solve_ode_adaptive(
     sol
 }
 
-// ratio^(1/5), the step-size controller's exponent. Its caller clamps 0.9 * result to
-// [0.2, 5], so only ratio in [0.2^5, 5^5] needs a root; outside that the answer is the
-// bound. Inside it Newton on x^5 = ratio, started at 5 (>= the root, f convex), decreases
-// monotonically to the root. (It used to start at x = ratio: for ratio < 1, i.e. exactly
-// when a step is REJECTED, the first Newton step jumped to ~1/(5 ratio^3) and the step
-// size grew instead of shrinking, so a rejected step could never be retried smaller.)
+// ratio^(1/5) for the step-size controller, clamped to [0.2/0.9, 5/0.9] so that its caller's
+// factor 0.9 * ode_pow_fifth(1/err) is exactly clamp(0.9 * err^(-1/5), 0.2, 5) (growth is capped
+// at 5, shrink at 0.2); in f64 0.9 * (5/0.9) = 5.0 and 0.9 * (0.2/0.9) = 0.2 exactly, so the
+// callers' extra min/max are only a safety net. Inside the clamp range Newton on x^5 = ratio,
+// started at the upper bound (>= the root; f(x) = x^5 - ratio is increasing and convex for x > 0),
+// decreases monotonically to the root. Measured over 2001 ratios spanning the whole range: at most
+// 20 iterations to reach a relative step of 1e-15, residual |x^5 - ratio| / ratio <= 6.5e-16, so
+// the 60 iterations below are a 3x margin (not a proved bound). (It used to start at x = ratio: for ratio < 1, i.e. exactly when a step is REJECTED,
+// the first Newton step jumped to ~1/(5 ratio^3) and the step size grew instead of shrinking, so a
+// rejected step could never be retried smaller. A later version clamped to [0.2, 5] BEFORE the
+// 0.9, which capped growth at 4.5 rather than 5.)
 fn ode_pow_fifth(ratio: f64) -> f64 with Mut, Div, Panic {
-    if !(ratio > 0.0) { return 0.2 }
-    if ratio >= 3125.0 { return 5.0 }
-    if ratio <= 0.00032 { return 0.2 }
-    var x = 5.0
+    let hi = 5.0 / 0.9
+    let lo = 0.2 / 0.9
+    if !(ratio > 0.0) { return lo }
+    let hi2 = hi * hi
+    let hi5 = hi2 * hi2 * hi
+    let lo2 = lo * lo
+    let lo5 = lo2 * lo2 * lo
+    if ratio >= hi5 { return hi }
+    if ratio <= lo5 { return lo }
+    var x = hi
     var iter = 0
     while iter < 60 {
         let x2 = x * x
