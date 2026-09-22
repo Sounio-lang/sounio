@@ -10,7 +10,7 @@
 // (accepted by the self-hosted runtime's flat-bundle approach).
 // Named imports only — glob imports caused type-checker stack overflow
 use parser::ast::{AstPath, empty_path, ImportItemList, ItemKind, ItemList, Name, Program, StringList, ast_reset_global_var_inits, GLOBAL_VAR_INIT_SUPPRESS_RESET}
-use ir::ir::{ir_empty_epistemic_section, ir_empty_function, ir_empty_module, ir_empty_name, ir_empty_validated_patch_stats, IrAlgebraTable, IrEpistemicSection, IrFunction, IrInstr, IrLowerResult, IR_MAX_EPI_ACQUISITION_PLANS, IR_MAX_EPI_ACQUISITION_POLICIES, IR_MAX_EPI_ACQUISITION_REASON_WITNESSES, IR_MAX_EPI_ALTERNATIVE_CANDIDATES, IR_MAX_EPI_ALTERNATIVE_FRONTIERS, IR_MAX_EPI_ALTERNATIVE_POLICIES, IR_MAX_EPI_ALTERNATIVE_REASON_WITNESSES, IR_MAX_EPI_ALTERNATIVE_SETS, IR_MAX_EPI_AUDITS, IR_MAX_EPI_CONTESTS, IR_MAX_EPI_CONTEST_WITNESSES, IR_MAX_EPI_COUNTEREXAMPLES, IR_MAX_EPI_DECISION_CERTIFICATES, IR_MAX_EPI_DECISION_POLICIES, IR_MAX_EPI_DEFERRAL_POLICIES, IR_MAX_EPI_DEFERRED_CERTIFICATES, IR_MAX_EPI_DEFERRED_REASON_WITNESSES, IR_MAX_EPI_MECHANISTIC_REPORTS, IR_MAX_EPI_MODEL_FAMILIES, IR_MAX_EPI_MONITORING_POLICIES, IR_MAX_EPI_OBSERVED_TRANSITIONS, IR_MAX_EPI_POLICIES, IR_MAX_EPI_POSTERIOR_WEIGHTS, IR_MAX_EPI_RECOURSE_PLANS, IR_MAX_EPI_RECOURSE_POLICIES, IR_MAX_EPI_RECOURSE_REASON_WITNESSES, IR_MAX_EPI_ROBUST_PROOFS, IR_MAX_EPI_ROLLBACK_CERTIFICATES, IR_MAX_EPI_TRANSITION_PLANS, IR_MAX_EPI_TRANSITION_POLICIES, IR_MAX_EPI_TRANSITION_PROTOCOLS, IR_MAX_EPI_TRANSITION_REASON_WITNESSES, IR_MAX_EPI_TRANSITION_STEPS, IR_MAX_EPI_VALIDATED_MANIFESTS, IR_MAX_EPI_VALIDATIONS, IR_MAX_FUNCS, IR_MAX_STRINGS, IrModule, ir_name_eq, IrOpcode, IrProfCounterInfo, IR_STRATEGY_STANDARD, make_name}
+use ir::ir::{ir_empty_epistemic_section, ir_empty_function, ir_empty_module, ir_empty_name, ir_empty_validated_patch_stats, IrAlgebraTable, IrEpistemicSection, IrFunction, IrInstr, IrLowerResult, IR_MAX_EPI_ACQUISITION_PLANS, IR_MAX_EPI_ACQUISITION_POLICIES, IR_MAX_EPI_ACQUISITION_REASON_WITNESSES, IR_MAX_EPI_ALTERNATIVE_CANDIDATES, IR_MAX_EPI_ALTERNATIVE_FRONTIERS, IR_MAX_EPI_ALTERNATIVE_POLICIES, IR_MAX_EPI_ALTERNATIVE_REASON_WITNESSES, IR_MAX_EPI_ALTERNATIVE_SETS, IR_MAX_EPI_AUDITS, IR_MAX_EPI_CONTESTS, IR_MAX_EPI_CONTEST_WITNESSES, IR_MAX_EPI_COUNTEREXAMPLES, IR_MAX_EPI_DECISION_CERTIFICATES, IR_MAX_EPI_DECISION_POLICIES, IR_MAX_EPI_DEFERRAL_POLICIES, IR_MAX_EPI_DEFERRED_CERTIFICATES, IR_MAX_EPI_DEFERRED_REASON_WITNESSES, IR_MAX_EPI_MECHANISTIC_REPORTS, IR_MAX_EPI_MODEL_FAMILIES, IR_MAX_EPI_MONITORING_POLICIES, IR_MAX_EPI_OBSERVED_TRANSITIONS, IR_MAX_EPI_POLICIES, IR_MAX_EPI_POSTERIOR_WEIGHTS, IR_MAX_EPI_RECOURSE_PLANS, IR_MAX_EPI_RECOURSE_POLICIES, IR_MAX_EPI_RECOURSE_REASON_WITNESSES, IR_MAX_EPI_ROBUST_PROOFS, IR_MAX_EPI_ROLLBACK_CERTIFICATES, IR_MAX_EPI_TRANSITION_PLANS, IR_MAX_EPI_TRANSITION_POLICIES, IR_MAX_EPI_TRANSITION_PROTOCOLS, IR_MAX_EPI_TRANSITION_REASON_WITNESSES, IR_MAX_EPI_TRANSITION_STEPS, IR_MAX_EPI_VALIDATED_MANIFESTS, IR_MAX_EPI_VALIDATIONS, IR_MAX_FUNCS, IR_MAX_STRINGS, IrModule, ir_name_eq, ir_name_at, ir_intern_name, IrOpcode, IrProfCounterInfo, IR_STRATEGY_STANDARD, make_name}
 use check::mod::{check_program_epistemic_into, check_program_with_artifacts, checker_apply_ir_metadata, checker_to_ir_epistemic_into}
 use resolve::mod::{resolve_modules, ResolveBatchResult}
 use resolve::imports::{collect_module_exports, ModuleEntry, ModuleRegistry, module_registry_find, module_registry_new, module_registry_put, module_registry_report_overflow, modreg_export_kind_at, modreg_export_name_at}
@@ -2060,9 +2060,15 @@ fn thin_module_summary_from_ir_module(
 }
 
 fn THIN_HASH_SEED() -> i64 { 1000003 }
-// 2: cached SOIR modules and summaries carry the Box-return metadata (SOIR v5). The
-// version is part of every cache key, so a v1 entry, which lost it, is never read.
-fn THIN_CACHE_SCHEMA_VERSION() -> i64 { 2 }
+// 2: cached SOIR modules and summaries carry the Box-return metadata (SOIR v5).
+// 3: the TEXT-based summary cache (thin_try_write_summary_cache /
+// thin_try_read_summary_cache) also carries the Box-return metadata
+// (return_box_slot, return_box_inner_id) — a separate code path from the SOIR
+// binary cache above, which previously left it out and silently reconstructed
+// every summary function with return_box_slot/return_box_inner_id stuck at -1.
+// The version is part of every cache key, so a stale entry from an older
+// schema is never read.
+fn THIN_CACHE_SCHEMA_VERSION() -> i64 { 3 }
 
 fn thin_hash_mix(base: i64, value: i64) -> i64 with Mut, Panic, Div {
     ((base * 131) + value + 97) % 2147483647
@@ -2238,6 +2244,32 @@ fn thin_try_write_summary_cache(path: string, summary: ModuleSummary, stats: &! 
         buf = a3.0; p = a3.1
         let a4 = io_trace_append_string(buf, p, io_trace_i64_string(summary.fn_strategies[i as usize]))
         buf = a4.0; p = a4.1
+        // Box-return metadata (schema v3): return_box_slot, and the inner
+        // type NAME re-interned on read since return_box_inner_id is a
+        // process-local id — mirrors self-hosted/ir/serialize.sio's SOIR v5
+        // write of the same fields.
+        let box_inner_id = summary.fn_return_box_inner_ids[i as usize]
+        let box_inner_name = ir_name_at(box_inner_id)
+        let box_inner_has_text = box_inner_id > 0 && box_inner_name.len > 0
+        var box_inner_marker: i64 = 0
+        if box_inner_has_text {
+            box_inner_marker = 1
+        } else if box_inner_id < 0 {
+            box_inner_marker = 0 - 1
+        }
+        let box_inner_name_str = if box_inner_has_text { thin_name_to_string(box_inner_name) } else { "-" }
+        let b0 = io_trace_append_byte(buf, p, 32)
+        buf = b0.0; p = b0.1
+        let b1 = io_trace_append_string(buf, p, io_trace_i64_string(summary.fn_return_box_slots[i as usize]))
+        buf = b1.0; p = b1.1
+        let b2 = io_trace_append_byte(buf, p, 32)
+        buf = b2.0; p = b2.1
+        let b3 = io_trace_append_string(buf, p, io_trace_i64_string(box_inner_marker))
+        buf = b3.0; p = b3.1
+        let b4 = io_trace_append_byte(buf, p, 32)
+        buf = b4.0; p = b4.1
+        let b5 = io_trace_append_string(buf, p, box_inner_name_str)
+        buf = b5.0; p = b5.1
         let a5 = io_trace_append_byte(buf, p, 10)
         buf = a5.0; p = a5.1
         i = i + 1
@@ -2311,9 +2343,23 @@ fn thin_try_read_summary_cache(
         pos = param_tok.1
         let strat_tok = thin_cache_read_token(bytes, len, pos)
         pos = strat_tok.1
+        let box_slot_tok = thin_cache_read_token(bytes, len, pos)
+        pos = box_slot_tok.1
+        let box_marker_tok = thin_cache_read_token(bytes, len, pos)
+        pos = box_marker_tok.1
+        let box_name_tok = thin_cache_read_token(bytes, len, pos)
+        pos = box_name_tok.1
         summary.fn_names[i as usize] = make_name(name_tok.0)
         summary.fn_param_counts[i as usize] = parse_i64(param_tok.0)
         summary.fn_strategies[i as usize] = parse_i64(strat_tok.0)
+        summary.fn_return_box_slots[i as usize] = parse_i64(box_slot_tok.0)
+        let box_marker = parse_i64(box_marker_tok.0)
+        if box_marker == 1 {
+            // Re-intern: the writer's id is meaningless in this process.
+            summary.fn_return_box_inner_ids[i as usize] = ir_intern_name(make_name(box_name_tok.0))
+        } else {
+            summary.fn_return_box_inner_ids[i as usize] = box_marker
+        }
         i = i + 1
     }
     (true, summary)
