@@ -19,6 +19,9 @@ use epistemic::ode::*
 
 fn absf(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
 
+// NaN, built by overflow so no literal is needed
+fn nan_val() -> f64 { let big = 1.0e308; let inf = big * 10.0; inf - inf }
+
 fn expn(x: f64) -> f64 with Mut, Div, Panic {
     // exp(-x), x >= 0, halving and squaring
     var y = x
@@ -129,6 +132,33 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     if sol_clean.covariance_mode != 1 { fail = fail + 1 println("FAIL: clean run must use full covariance") }
     if sol_garbage.covariance_mode != 1 { fail = fail + 1 println("FAIL: an irrelevant parameter slot forced the diagonal fallback") }
     if !(absf(v_clean - v_garbage) <= 1.0e-15) { fail = fail + 1 println("FAIL: an irrelevant parameter slot changed the reported variance") }
+
+    // The augmented covariance is sized off np (fixed above), but two VALIDATION loops still
+    // checked p[0..p.n_params) directly: ode_initial_covariance_ok (variances) and
+    // ode_solve_inputs_ok (values). A garbage variance/value in an unread slot could fail either
+    // check on data the solver never looks at, forcing covariance_mode 2 or status 3 on an
+    // otherwise valid solve.
+    var init_nv = estate_new(1)
+    estate_set(&!init_nv, 0, y0, u0 * u0)
+    var p_neg_var = ode_params_new()
+    ode_params_set(&!p_neg_var, 0, kk, uk * uk)
+    ode_params_set(&!p_neg_var, 63, 5.0, 0.0 - 1.0) // irrelevant slot, NEGATIVE variance
+    let sol_neg_var = solve_ode(ode_system_exp_decay(), init_nv, p_neg_var, 0.0, t_end, solver_options_fixed(dt, nsteps))
+    print("garbage p[63] with negative variance: status=") print(sol_neg_var.status)
+    print(" covariance_mode=") println(sol_neg_var.covariance_mode)
+    if sol_neg_var.status != 0 { fail = fail + 1 println("FAIL: an irrelevant slot's negative variance must not fail the solve") }
+    if sol_neg_var.covariance_mode != 1 { fail = fail + 1 println("FAIL: an irrelevant slot's negative variance must not force covariance_mode 2") }
+
+    var init_nan = estate_new(1)
+    estate_set(&!init_nan, 0, y0, u0 * u0)
+    var p_nan_val = ode_params_new()
+    ode_params_set(&!p_nan_val, 0, kk, uk * uk)
+    ode_params_set(&!p_nan_val, 63, nan_val(), 0.0) // irrelevant slot, NaN VALUE (not variance)
+    let sol_nan_val = solve_ode(ode_system_exp_decay(), init_nan, p_nan_val, 0.0, t_end, solver_options_fixed(dt, nsteps))
+    print("garbage p[63] with a NaN value:       status=") print(sol_nan_val.status)
+    print(" covariance_mode=") println(sol_nan_val.covariance_mode)
+    if sol_nan_val.status != 0 { fail = fail + 1 println("FAIL: an irrelevant slot's NaN value must not fail the solve (status 3)") }
+    if sol_nan_val.covariance_mode != 1 { fail = fail + 1 println("FAIL: an irrelevant slot's NaN value must not force covariance_mode 2") }
 
     if fail == 0 { println("ODE AUGMENTED COVARIANCE PASS") }
     fail
