@@ -337,6 +337,30 @@ EOF
 run_test_rejected "tuple_field_borrow_deref_x86" /tmp/gate_tb_deref.sio "field borrow through deref requires struct pointee"
 run_test_rejected "tuple_field_borrow_deref_aarch64" /tmp/gate_tb_deref.sio "field borrow through deref requires struct pointee" --target aarch64-linux
 
+# The five witnesses above all put the borrow directly in main() -- never inside
+# an IMPORTED function -- so none of them exercises WHY tc_field_borrow_hard sets
+# TYPECHECK_FAILED directly (lean_single.sio): tc_mark_failed()'s own guard
+# tolerates errors in functions whose tokens come from an import (FN_EFFECTS &
+# 2048), which is right for advisory diagnostics and wrong for a construct whose
+# only output is a null dereference. Removing that direct assignment leaves all
+# five witnesses above green while silently restoring the exact fail-open path
+# that produced the original stdlib/nn/pinn.sio bug (#2599) -- confirmed by
+# mutation: with the assignment removed, this exact program compiles clean (rc=0,
+# ELF emitted, the `error:` line still printed but ignored) and the resulting
+# binary SIGSEGVs (rc=139). leaf.sio's tuple-field borrow sits well past
+# MAIN_SRC_END once bundled behind main.sio's `use leaf::{...}`, so this is the
+# imported-function path, not the main-file path the other five witnesses take.
+mkdir -p /tmp/gate_tb_import
+cat > /tmp/gate_tb_import/leaf.sio << EOF
+$TB_HDR
+pub fn uses_tuple_borrow() -> bool { let t = mk(); return has(&t.0) }
+EOF
+cat > /tmp/gate_tb_import/main.sio << 'EOF'
+use leaf::{uses_tuple_borrow}
+fn main() -> i64 with IO { if uses_tuple_borrow() { return 0 }; return 1 }
+EOF
+run_test_rejected "tuple_field_borrow_imported_fn_x86" /tmp/gate_tb_import/main.sio "field borrow requires struct base"
+
 # Control: the same borrow through a destructured binding must still compile and run,
 # so the rejections above are the tuple-field case and not a blanket failure.
 cat > /tmp/gate_tb_ok.sio << EOF
