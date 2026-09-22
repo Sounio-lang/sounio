@@ -74,8 +74,8 @@ Three things are simultaneously true about this repository:
 Before non-trivial changes:
 
 1. Read `CLAUDE_HANDOFF.md` — recovery history and workspace context
-2. Verify current branch (workspace default: `integration/sounio-dev-ready-base`)
-3. Do not start from `main` until reconciliation is completed
+2. Verify current branch. **`main` is now the canonical branch** (decision made 2026-09-22, superseding the prior "workspace default" pointer to `integration/sounio-dev-ready-base`).
+3. `integration/sounio-dev-ready-base` and `main` diverged for a full month (~1000 commits combined) without ever being reconciled — see `.claude/main-integration-divergence-report.md` for the full inventory. `integration`'s one substantial piece of unique work (a TCP/TLS 1.3/X.509/crypto stack for Madaros) is being ported onto `main` (branch `port/integration-tls-crypto-onto-main`); do not start new work from `integration` going forward, and do not treat it as a source of truth once that port lands.
 4. Do not propose destructive `reset`/`clean`/`rebase` flows on this repo
 
 ---
