@@ -4103,3 +4103,35 @@ This exception applies only to byte-identical archival integration. It does not 
 | 2026-09-14 | — | math-review | SounioPireusStreamingMinimumCorrespondenceCheck.lean | WAIVED | Merge of origin/main (4fa6999bcc) into feat/chemistry-surface-microkinetics for PR #2514. No new mathematics: the file arrives from main byte-identical (blob verified equal to origin/main:formal/lean4/SounioPireusStreamingMinimumCorrespondenceCheck.lean) and is not touched by this branch; its review is main's, not this merge's. |
 | 2026-09-14 | — | math-review | SounioSparkPairDecommissionParity.lean | WAIVED | Merge of origin/main (4fa6999bcc) into feat/chemistry-surface-microkinetics for PR #2514. No new mathematics: the file arrives from main byte-identical (blob verified equal to origin/main:formal/lean4/SounioSparkPairDecommissionParity.lean) and is not touched by this branch; its review is main's, not this merge's. |
 | 2026-09-22 | xai/grok-4.5 | math-review | formal/mathlib_port/OctonionGeneral.lean (+ OctonionAlgebra_proved.lean context) | PASS (1 FAIL fixed, tightenables logged) | Confirmed via independent symbolic expansion: original octMul left-alternative-law counterexample (x=e4+e5,y=e2) and the fix. Confirmed NonUnitalNonAssocRing (not Ring) is the correct target class and StarRing.star_mul's anti-multiplicative order. [FAIL]: file's own docstring claimed instances not yet built while §20 already had them -- fixed. [TIGHTENABLE] x3 folded into mathlib_port/README.md "Next step": non-associativity witness for general R, One/NonAssocRing instance, explicit FanoLabellingOrbits.lean import-independence citation for the "168-theorem unaffected" claim (now quoted verbatim in both the file docstring and README). Run from /workspace/sounio via SSH (sounio-workspace-ssh.tail21cbc4.ts.net:2222) since this local Mac checkout has no ~/.sounio-keys.env. Raw: /tmp/llm-offload-3KYRsl/ on sounio-workspace-control-0.
+
+## 2026-09-22 — math-review (xai/grok-4.6) on stdlib/science/lib.sio port fixes
+
+Ran per CLAUDE.md §10 (math-adjacent change: propagate_product_rho, measurement_div,
+correlated uncertainty propagation). First attempt timed out at 180s; retried with
+OFFLOAD_TIMEOUT=420, succeeded.
+
+Findings acted on immediately (bugs introduced by this port's own fix commits):
+- propagate_product_rho used a relative-uncertainty cross term built from |v1|,|v2|
+  separately, discarding the sign of v1*v2 that GUM's actual cross term
+  2*rho*u1*u2/(v1*v2) needs -- counter-example v=(1,-1), u=(1,1), rho=0.5 gave
+  sqrt(3) instead of the true 1. Also returned 0 whenever |v1*v2| < 1e-300 even
+  though the true (absolute-form) LPU is finite there. Rewrote using the absolute
+  form (a=v2*u1, b=v1*u2; u_c=sqrt(a^2+b^2+2*rho*a*b)), which carries the sign
+  through automatically and has no singularity at v1=0 or v2=0.
+- The "no rho declared" default for products/quotients had the same rho=+1-is-
+  always-worst-case fallacy already fixed for subtraction: added
+  propagate_product_worst_case (|v2*u1|+|v1*u2|, unconditionally correct) and
+  routed propagate_product's and measurement_div's defaults through it; fixed
+  measurement_div's dead/wrongly-scaled `let u = propagate_product(...)` and its
+  unconditional-independence default, adding measurement_div_independent.
+
+Findings logged as pre-existing and out of scope for this port's bug list (not
+introduced by these commits; flagged for separate follow-up):
+- sci_sqrt's fixed 10-iteration Heron's-method loop from y0=x converges too
+  slowly for inputs far from 1 (e.g. x=1e12 or x=1e-12) -- needs exponent-scaled
+  initial guess.
+- weighted_mean cites GUM §4.3.3 (Type B conversion) instead of §5.1.2, and
+  silently drops any point with u_i <= 1e-300 instead of treating a zero
+  uncertainty as an exact constraint that should dominate the mean.
+- significant_figures' docstring formula does not describe significant figures
+  (and conflates them with f64 binary-rounding noise).
