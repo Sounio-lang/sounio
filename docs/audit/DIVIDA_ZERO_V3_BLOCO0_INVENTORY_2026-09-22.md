@@ -224,23 +224,30 @@ Correção (apontado em revisão, review body "Execution-evidence identity field
 missing from inventory"): a tabela abaixo omitia colunas para `compiler_digest` e
 `witness_id`, embora o parágrafo acima os declarasse `PENDING`. Adicionadas
 explicitamente, com o mesmo valor `PENDING`, para que o esqueleto do schema §5.1 fique
-completo e uma sessão futura só precise preenchê-lo, não redesenhá-lo.
+completo e uma sessão futura só precise preenchê-lo, não redesenhá-lo. Correção
+adicional (apontado em revisão, `discussion_r4071539724`): `owner`, `write_set` e
+`dependencies` sofriam do mesmo problema — o texto abaixo da tabela já dizia que não
+foram atribuídos, mas a tabela não tinha colunas para eles. Adicionadas como
+`UNASSIGNED` (não `PENDING`): a distinção é deliberada — `PENDING` marca evidência de
+execução ainda não gerada, `UNASSIGNED` marca responsabilidade/lane deliberadamente não
+atribuída por este documento, por não criar leases além do já registrado em
+`bin/sounio-coord scope` (§11 do plano v3, "responsáveis/lane assignments são
+propostas, não leases efetivamente adquiridos").
 
-| contract_id (local) | capability | referência | base_commit | state | compiler_digest | witness_id | evidence_receipt |
-|---|---|---|---|---|---|---|---|
-| DZ-BLOCO1-2622 | BSS sizing, primal preservation, tuple-borrow local | PR #2622 `35513cf80f22…` | 69b7fe75 | PENDING (não requalificada nesta sessão) | PENDING | PENDING | PENDING |
-| DZ-BLOCO1-2557 | CI em camadas / artifact compartilhado | PR #2557 `c5248c46436c…` | 69b7fe75 | PENDING | PENDING | PENDING | PENDING |
-| DZ-BLOCO2-2598 | identidade de função homônima cross-module | PR #2598 `f23be0816d17…` | 69b7fe75 | PENDING | PENDING | PENDING | PENDING |
-| DZ-BLOCO2/5-2501 | inventário de deltas estabilizados (não integrar monolítico) | PR #2501 `8bfab7e6939a…` | 69b7fe75 | PENDING (revisão em blocos, §7.2 do plano) | PENDING | PENDING | PENDING |
-| DZ-BLOCO3-2511 | ODE/covariância/modelo | PR #2511 `0d389e07dd98…` | 69b7fe75 | PENDING | PENDING | PENDING | PENDING |
-| DZ-BLOCO3-2612 | EL+/SNOMED fail-closed | PR #2612 `bf7172c98b66…` | 69b7fe75 | PENDING | PENDING | PENDING | PENDING |
-| DZ-BLOCO2/3-2615 | array-reference lowering + wide-float coverage | PR #2615 `a80ca04ac4ec…` (ver polaridade anti-f64 apontada em revisão) | 69b7fe75 | PENDING | PENDING | PENDING | PENDING |
+| contract_id (local) | capability | referência | base_commit | state | compiler_digest | witness_id | evidence_receipt | owner | write_set | dependencies |
+|---|---|---|---|---|---|---|---|---|---|---|
+| DZ-BLOCO1-2622 | BSS sizing, primal preservation, tuple-borrow local | PR #2622 `35513cf80f22…` | 69b7fe75 | PENDING (não requalificada nesta sessão) | PENDING | PENDING | PENDING | UNASSIGNED | UNASSIGNED | UNASSIGNED |
+| DZ-BLOCO1-2557 | CI em camadas / artifact compartilhado | PR #2557 `c5248c46436c…` | 69b7fe75 | PENDING | PENDING | PENDING | PENDING | UNASSIGNED | UNASSIGNED | UNASSIGNED |
+| DZ-BLOCO2-2598 | identidade de função homônima cross-module | PR #2598 `f23be0816d17…` | 69b7fe75 | PENDING | PENDING | PENDING | PENDING | UNASSIGNED | UNASSIGNED | UNASSIGNED |
+| DZ-BLOCO2/5-2501 | inventário de deltas estabilizados (não integrar monolítico) | PR #2501 `8bfab7e6939a…` | 69b7fe75 | PENDING (revisão em blocos, §7.2 do plano) | PENDING | PENDING | PENDING | UNASSIGNED | UNASSIGNED | UNASSIGNED |
+| DZ-BLOCO3-2511 | ODE/covariância/modelo | PR #2511 `0d389e07dd98…` | 69b7fe75 | PENDING | PENDING | PENDING | PENDING | UNASSIGNED | UNASSIGNED | UNASSIGNED |
+| DZ-BLOCO3-2612 | EL+/SNOMED fail-closed | PR #2612 `bf7172c98b66…` | 69b7fe75 | PENDING | PENDING | PENDING | PENDING | UNASSIGNED | UNASSIGNED | UNASSIGNED |
+| DZ-BLOCO2/3-2615 | array-reference lowering + wide-float coverage | PR #2615 `a80ca04ac4ec…` (ver polaridade anti-f64 apontada em revisão) | 69b7fe75 | PENDING | PENDING | PENDING | PENDING | UNASSIGNED | UNASSIGNED | UNASSIGNED |
 
-`owner`/`write_set`/`dependencies` não foram atribuídos — §11 do plano v3 é explícito
-que "responsáveis/lane assignments são propostas, não leases efetivamente adquiridos";
-este documento não cria leases além do já registrado em `bin/sounio-coord scope` para
-esta sessão (`claude`, lane `session-fc7d9b6f-e027-5e0f-89b0--66f0de5791`, intenção
-"Bloco 0: inventário e instrumentos, sem build pesado").
+A única lease efetivamente adquirida por esta sessão é a já registrada em
+`bin/sounio-coord scope` (`claude`, lane `session-fc7d9b6f-e027-5e0f-89b0--66f0de5791`,
+intenção "Bloco 0: inventário e instrumentos, sem build pesado") — os `UNASSIGNED` acima
+não a substituem nem criam novas.
 
 ## 5. O que este documento não faz
 
@@ -264,7 +271,10 @@ frase mandaria a próxima lane refazer uma investigação já concluída.
 Bloco 1 (§6.1–§6.3 do plano v3): com o mecanismo já identificado, o próximo passo
 concreto é **produzir a evidência que falta**, não mais procurá-la — construir/usar a
 lista de testes anotados `//@ requires: slow` como `--test-list` e rodar
-`run_sio_test_suite_v2.sh --test-list <arquivo-S>` isoladamente (com
+`scripts/dev/run_sio_test_suite_v2.sh --test-list <arquivo-S>` (caminho relativo à raiz
+do repositório — corrigido após revisão, `discussion_r4071539724`'s review body, que
+apontou o caminho anterior como não executável de fora de `scripts/dev/`) isoladamente
+(com
 `SOUNIO_SLOW_TESTS_AVAILABLE=1`), para obter uma execução de **S sozinho** com seu
 próprio resultado — o que a alegação "zero falhas" de #2622 (plano v3 §3) ainda não tem
 lastro para cobrir, per §2.2 acima. Só depois disso a partição N/S para a candidata
