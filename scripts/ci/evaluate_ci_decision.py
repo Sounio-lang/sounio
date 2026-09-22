@@ -55,6 +55,10 @@ def main() -> int:
         # this dict entirely — the state this fixes — means a red R6 never
         # reaches the verdict at all.
         "r6-corpus-sweep": is_nightly(),
+        # Mirrors r6-corpus-sweep: slow-lane is selected by the EVENT, not by
+        # impact classification. `skipped` is correct on a pull request;
+        # only a nightly run must actually execute it.
+        "slow-lane": is_nightly(),
     }
 
     for job, selected in required.items():
