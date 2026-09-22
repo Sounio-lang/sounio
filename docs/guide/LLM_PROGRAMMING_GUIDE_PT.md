@@ -79,7 +79,10 @@ let (first, _) = (5, 10)       // caractere coringa (wildcard)
 struct Point { x: f64, y: f64 }
 let p = Point { x: 1.0, y: 2.0 }
 
-linear struct Handle { fd: i32 }   // Tipos lineares (devem ser consumidos)
+// Note: the `linear` struct-modifier keyword is NOT in the checked public surface;
+// see docs/compiler/KNOWN_LIMITATIONS.md. Source-tracked ownership lives in
+// stdlib/epistemic/affine (anchor: tests/run-pass/affine_shared_source_add.sio).
+struct Handle { fd: i32 }   // Tipos lineares (devem ser consumidos)
 ```
 
 ### Enumerações (Enums) [Beta]

@@ -50,11 +50,15 @@ We are trying to establish a new design center.
 In the physical world, there is no such thing as a perfect measurement. The Heisenberg uncertainty principle is not a limitation of our instruments—it's a fundamental property of reality. Even macroscopic measurements carry noise, calibration error, and finite precision.
 
 ```sio
-// Wrong: pretending we know exactly
-let concentration = 5.23  // mg/L... but really?
+use epistemic::knowledge::{ep_measured, ep_val, ep_std}
 
-// Right: acknowledging uncertainty
-let concentration = Knowledge::new(5.23 mg/L, uncertainty: 0.15 mg/L)
+// Wrong: pretending we know exactly.
+let concentration_f64: f64 = 5.23  // mg/L... but really?
+
+// Right: acknowledging uncertainty (canonical free-fn form).
+let concentration = ep_measured(5.23, 0.15)  // val=5.23 mg/L, std=0.15, conf=900/1000
+// Note: unit-as-spellet (mg/L) is aspirational in source; the dimensional
+// counterpart is stdlib/units/lib::Quantity with dim_mass()/dim_volume().
 ```
 
 Sounio makes this explicit. When you declare a value, you must consider: *how well do I actually know this?*
@@ -64,17 +68,20 @@ Sounio makes this explicit. When you declare a value, you must consider: *how we
 Data without origin is data without trust. When a regulatory agency asks "where did this number come from?", you should have an answer that traces back to primary sources.
 
 ```sio
-let clearance = Knowledge::new(
-    value: 10.5 L/h,
-    uncertainty: 1.2 L/h,
-    source: Source {
-        origin: "Phase III Trial NCT04123456",
-        timestamp: 2025-03-15,
-        method: "Population PK analysis",
-        confidence: 0.95
-    }
-)
+use epistemic::knowledge::{Epistemic}
+
+// Canonical struct-literal form (variance = std^2, confidence integer 0..1000).
+let clearance = Epistemic { val: 10.5, variance: 1.44, confidence: 950 }
+
+// Provenance is tracked separately in stdlib/epistemic/provenance.sio;
+// the Source { origin, timestamp, method, confidence } struct above is
+// not in the checked public surface — see docs/compiler/KNOWN_LIMITATIONS.md.
 ```
+
+> Note: every value carries provenance in Sounio. The lineage of your data is
+> as important as the data itself. The `Epistemic` confidence field encodes
+> statistical confidence; physical provenance lives in
+> `stdlib/epistemic/provenance.sio`.
 
 Every `Knowledge<T>` carries its provenance. The lineage of your data is as important as the data itself.
 
@@ -83,13 +90,23 @@ Every `Knowledge<T>` carries its provenance. The lineage of your data is as impo
 Manual uncertainty propagation is tedious and error-prone. The GUM (Guide to the Expression of Uncertainty in Measurement) defines how uncertainties combine through mathematical operations. Sounio implements this automatically.
 
 ```sio
-let mass = Knowledge::new(100.0 g, uncertainty: 0.5 g)
-let volume = Knowledge::new(50.0 mL, uncertainty: 0.2 mL)
+use epistemic::knowledge::{ep_measured, ep_div, ep_val, ep_std}
 
-// Density calculation with automatic propagation
-let density = mass / volume
-// density.uncertainty is computed via GUM: 
-// δρ/ρ = sqrt((δm/m)² + (δV/V)²)
+// Canonical free-fn form.
+let mass   = ep_measured(100.0, 0.5)
+let volume = ep_measured(50.0,  0.2)
+
+// Density = mass / volume; variance via GUM delta method (uncorrelated).
+let density = ep_div(&mass, &volume)
+// delta-rho / rho = sqrt((delta-m / m)^2 + (delta-V / V)^2)
+// sigma = ep_std(&density), mu = ep_val(&density)
+```
+
+> Note: `let .* = Knowledge::new(...)` named-arg calls are not in the checked
+> surface. Use `Epistemic { val, variance, confidence }` struct literals (as in
+> `tests/run-pass/ep_gum_covariance.sio`) or `ep_measured(val, std_dev)` free
+> fn. Units-as-spellets (`g`, `mL`) are aspirational; the dimensional
+> counterpart is `stdlib/units/lib::Quantity` + `dim_*()`.
 ```
 
 You write the physics. The compiler handles the statistics.

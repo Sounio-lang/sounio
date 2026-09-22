@@ -171,7 +171,10 @@ fn sqrt_approx(x: f64) -> f64 with Mut, Div, Panic {
     return g
 }
 
-linear struct FileHandle { fd: i32 }   // must be consumed exactly once
+// Note: the `linear` struct-modifier keyword is NOT in the checked public surface;
+// see docs/compiler/KNOWN_LIMITATIONS.md. Source-tracked ownership lives in
+// stdlib/epistemic/affine (anchor: tests/run-pass/affine_shared_source_add.sio).
+struct FileHandle { fd: i32 }   // must be consumed exactly once
 ```
 
 > More examples: [examples/epistemic_bmi.sio](examples/epistemic_bmi.sio), [docs/guide/SOUNIO_QUICK_START.md](docs/guide/SOUNIO_QUICK_START.md)

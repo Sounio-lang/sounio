@@ -81,8 +81,8 @@ No breaking language changes. Additive release with new stdlib modules (cybernet
 
 ### Variables: `let mut` → `var`
 
-**Before (pre-beta):**
-```sio
+**Before (Rust):**
+```rust
 let mut counter = 0
 ```
 
