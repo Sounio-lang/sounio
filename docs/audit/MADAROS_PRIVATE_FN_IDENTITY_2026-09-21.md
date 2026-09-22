@@ -2,7 +2,7 @@
 topic_id: repo.docs.audit.madaros-private-fn-identity-2026-09-21
 authority: repo_only
 audience: users
-last_validated: 2026-09-21
+last_validated: 2026-09-22
 validated_by: claude
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-private-fn-identity-2026-09-21
 -->
@@ -216,6 +216,7 @@ Gate: `scripts/ci/madaros_private_fn_identity_gate.sh`, fixtures in
 | `unresolved` (shadowed in every colliding module) | compiles, prints `7` (correct `26`) | **refused**, `error[private_fn_identity]`, no ELF |
 | `hashcoll`, `symcoll`, `reserved`, `reservedglobal`, `capacity` | wrong / garbage | exact |
 | `hashadversarial` (generated-name availability trusted hash alone) | refused, `rc=1`, no real collision | exact |
+| `hashzero` (the colliding name's `ast_name_hash` is exactly 0) | no `private_fn_identity:` log line at all -- census silently never recorded the collision | rename receipt logged (`renamed 1 ... in 1 module(s)`) -- see below for why this row cannot also pin a run |
 | `genericcollapse` -- the same collision, colliding private fns are **generic**, forcing `module_frontend_specialized_prepare`'s specialized-collapse pipeline instead of the ordinary path every other row exercises, both import orders | *(not a bug; a coverage gap -- see below)* | `a=1 b=20` both, `specialized_collapse` confirmed in the log |
 | `restricted` (two `pub(crate)` fns of one name) | compiles, one body for both | **refused**, reason "exported" |
 | `restrictedmix` (`pub(crate)` met first + a private one) | wrong | `a=1 b=20` |
@@ -250,6 +251,86 @@ should already work by construction. It did, unmodified: `specialized_collapse
 lower_count=1 (from 3 modules)` confirms the pipeline actually ran (not silently
 skipped), and both orders print `a=1 b=20`. No code change; this row closes a
 coverage gap, not a bug.
+
+### Census hash-0 sentinel (review finding), and a second, separate bug it uncovered
+
+Review (Copilot) on this pass: the census's `pfi_census_note`/`pfi_census_mods`
+used `if h == 0 { return ... }` as a fast path, meaning "nothing to record" /
+"not available" -- indistinguishable from the open-addressing table's own
+empty-slot sentinel, `PFI_KEY[slot] == 0`. `ast_name_hash`'s own clamp
+(`if hash < 0 { 0 - hash } else { hash }`) makes every real hash `>= 0`, so a
+legitimate name CAN land on exactly 0. Named example: `fZOXITBAFRX_E`,
+confirmed to hash to 0 both independently (a standalone Python
+re-implementation of the djb2 algorithm) and via this compiler's own
+`ast_name_hash`.
+
+Reproduced before fixing: two modules each privately defining
+`fZOXITBAFRX_E` (bodies `1` and `20`) produced **no** `private_fn_identity:`
+log line at all -- the census recorded nothing, `PFI_DUP_ANY` was never set,
+and the compiled program crashed with **SIGILL**, not merely a wrong printed
+value (something downstream also keys on the still-colliding merged name).
+
+Fixed by storing/comparing `key = h + 1` in the census table instead of the
+raw hash, and removing the `h == 0` early-outs entirely (`self-hosted/compiler/
+private_fn_identity.sio`, `pfi_census_note`/`pfi_census_mods`). Every real
+hash's stored key is now `>= 1`; `0` stays an unambiguous "truly empty"
+sentinel for every possible hash, including 0 itself. Rebuilt and reran the
+same two-module repro: the rename receipt (`private_fn_identity: renamed 1
+same-named private fn(s) in 1 module(s)`) now fires correctly.
+
+**What this fix does not, and cannot, also prove**: the rebuilt repro's
+compiled program still did not run to completion -- module B's un-renamed
+call to `fZOXITBAFRX_E` (only one side needs renaming once the collision is
+resolved) still crashed. Isolating this with a MINIMAL control -- a single
+module, no imports, no collision at all, just `fn fZOXITBAFRX_E() -> i64 { 20
+}` called from `main` -- reproduces a full compile failure
+(`error[E137]: use of undeclared variable`, `name fZOXITBAFRX_E`, then `IR
+lowering failed during merge: epistemic_export_failed`) on **unmodified
+`origin/main`**, with private_fn_identity.sio entirely out of the picture
+(the pass's own `count < 2` guard means it never runs for a single module).
+A control with the identical fn shape but a non-zero-hashing name (`twenty()`)
+compiles and runs cleanly, isolating the trigger to the hash value, not the
+string or the shape.
+
+Root cause, traced precisely: `self-hosted/check/specializer.sio`'s
+dead-code-elimination reachability marker, `spec_dce_hash_insert` /
+`spec_dce_hash_query`, has the **identical** `if h == 0 { return false }`
+sentinel mistake, in a *different* hash table (`marks: [i64; 16384]`, also
+empty-sentinel `0`). `spec_dce_scan_expr` marks a called name reachable via
+`spec_dce_hash_insert(marks, count, ast_name_hash(callee))`; for a hash-0
+callee this insert is a silent no-op, so `spec_dce_filter_with_global_marks`
+(driven from `module_frontend_lower_single_program_array_direct_box`,
+`self-hosted/compiler/module_frontend.sio:5569`/`:5668`) treats the function
+as unreachable and drops its `FnDef` from the item list -- even though a real
+call site to it still exists. The re-typecheck that follows
+(`check_program_epistemic_into`) then reports the dangling call as
+undeclared, which is what surfaces as E137. In the two-module collision case
+the multi-module merge path hits the same marker but does not fail as
+gracefully: the gate's `hashzero` fixture (`tests/multimodule/
+private_fn_identity/hashzero/`) crashes the compiler process itself (`rc=139`,
+SIGSEGV) after the rename receipt is logged, rather than reporting a clean
+diagnostic.
+
+This is a real, general, pre-existing compiler-correctness defect (DCE can
+delete a live, called function whenever its name hashes to exactly 0) that
+predates this whole change and is unrelated to it -- confirmed on unmodified
+`origin/main`, in a different file, in a different subsystem (dead-code
+elimination, not private-function identity). It happens to fail closed here
+(a hard compile error/crash, not a silent miscompile) only incidentally: the
+item is fully removed from the list, and the checker's re-run happens to
+still see the dangling call in this particular shape. It is out of scope for
+`private_fn_identity.sio` and is tracked as its own follow-up rather than
+folded into this change, matching the "same-named private globals" /
+parse-time `GLOBAL_VAR_INIT_*` item under `claims_not_made` below -- a
+defect this pass's fix uncovered but does not own.
+
+Because of this, the `hashzero` fixture in the gate
+(`scripts/ci/madaros_private_fn_identity_gate.sh`) is driven by a dedicated
+`expect_census_detected` helper, not `compile_and_run`: it asserts only that
+the census recorded the collision and drove a rename (the log receipt), and
+deliberately does not check the compile's exit code or run the resulting
+program, since both of those depend on the separate DCE bug's behavior, not
+on anything this pass owns.
 
 ### Madaros compiling Madaros
 

@@ -133,6 +133,23 @@ expect_log() {
   }
 }
 
+# expect_census_detected <label> <main.sio> <pattern> <what>: proves the
+# CENSUS recorded a collision and drove a rename -- nothing more. Unlike
+# compile_and_run, the exit code is deliberately not checked: a hash-0
+# collision (see hashzero below) can compile, fail cleanly, or crash the
+# compiler process itself downstream of private_fn_identity, because of a
+# SEPARATE, pre-existing bug outside this pass's scope. Checking rc here
+# would make this gate depend on that other bug's behavior.
+expect_census_detected() {
+  local label="$1" src="$2" pattern="$3" what="$4"
+  local log="$WORK/$label.log" elf="$WORK/$label.elf"
+  "$RAW" --native-compile "$src" -o "$elf" >"$log" 2>&1 || true
+  grep -Fq -- "$pattern" "$log" || {
+    tail -n 25 "$log" >&2 || true
+    fail "$label: compile log lacks $what (expected: $pattern)"
+  }
+}
+
 # --- basic: the reported repro, both import orders --------------------------
 compile_and_run basic "$FIX/basic/main.sio"
 expect_output basic "$FIX/basic/expected.txt"
@@ -185,6 +202,27 @@ echo "$TAG PASS(reservedglobal): a generated name never reuses a module global"
 compile_and_run hashadversarial "$FIX/hashadversarial/main.sio"
 expect_output hashadversarial "$FIX/hashadversarial/expected.txt"
 echo "$TAG PASS(hashadversarial): two unrelated hash-colliding decoys do not block a real rename"
+
+# `fZOXITBAFRX_E` hashes to exactly 0 under this compiler's own djb2
+# ast_name_hash (confirmed directly; ast_name_hash's own clamp makes every
+# real hash >= 0, so a legitimate name CAN land on 0). Before the h+1 key
+# shift in pfi_census_note/pfi_census_mods, `if h == 0 { return true }` /
+# `{ return 0 }` meant this exact collision was never recorded at all --
+# PFI_DUP_ANY stayed unset and the original first-loaded-wins miscompile was
+# intact (measured pre-fix: SIGILL, not merely a wrong printed value).
+#
+# This case can only pin the CENSUS half of the fix (the rename receipt
+# below), not full run-to-completion like every other case here: a call to a
+# function whose name hashes to 0 hits a SEPARATE, pre-existing bug in this
+# compiler's dead-code-elimination reachability marker
+# (self-hosted/check/specializer.sio's spec_dce_hash_insert /
+# spec_dce_hash_query, the identical `h == 0` sentinel mistake in a
+# different hash table), which is out of scope for private_fn_identity.sio
+# and tracked separately -- see
+# docs/audit/MADAROS_PRIVATE_FN_IDENTITY_2026-09-21.md.
+expect_census_detected hashzero "$FIX/hashzero/main.sio" \
+  "private_fn_identity: renamed 1 same-named private fn(s) in 1 module(s)" "the rename receipt"
+echo "$TAG PASS(hashzero): a collision whose ast_name_hash is exactly 0 is detected and renamed by the census"
 
 # Every other case here goes through the ORDINARY multi-module pipeline. A
 # collision-bearing program that also instantiates a generic anywhere routes
