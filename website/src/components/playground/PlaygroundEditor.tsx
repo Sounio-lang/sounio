@@ -310,7 +310,7 @@ export default function PlaygroundEditor({ initialCode, theme = 'dark' }: Playgr
         if (cancelled) return;
         setWasmStatus('error');
         setOutput(
-          `Failed to load Sounio WASM runtime.\n` +
+          `Failed to load the browser preview.\n` +
             `Expected assets:\n- ${WASM_JS_URL}\n- ${WASM_BIN_URL}\n\n` +
             `${String(error)}`,
         );
@@ -325,12 +325,12 @@ export default function PlaygroundEditor({ initialCode, theme = 'dark' }: Playgr
 
   const handleRun = useCallback(async () => {
     if (!wasmApi) {
-      setOutput('WASM runtime is not ready. Build assets with: bash scripts/build/build_playground_wasm.sh (repo root)');
+      setOutput('Browser preview is not ready. Regenerate its assets with: npm run build:wasm (website directory)');
       return;
     }
 
     setIsRunning(true);
-    setOutput('Compiling and running...\n');
+    setOutput('Generating simulated preview output...\n');
 
     try {
       const raw = wasmApi.run(code);
@@ -342,13 +342,13 @@ export default function PlaygroundEditor({ initialCode, theme = 'dark' }: Playgr
         text += `${diagnostics}\n\n`;
       }
       if (result.output && result.output.length > 0) {
-        text += result.output;
+        text += `Simulated output:\n${result.output}`;
       }
       if (result.returnValue != null) {
-        text += `${text ? '\n\n' : ''}Return: ${result.returnValue}`;
+        text += `${text ? '\n\n' : ''}Simulated return: ${result.returnValue}`;
       }
       if (!text) {
-        text = result.success ? 'Program finished successfully.' : 'Program failed with no output.';
+        text = result.success ? 'Preview found no hints. Compiler status unknown.' : 'Preview reported an issue.';
       }
       setOutput(text);
     } catch (error) {
@@ -385,7 +385,7 @@ export default function PlaygroundEditor({ initialCode, theme = 'dark' }: Playgr
   );
 
   const statusLabel =
-    wasmStatus === 'ready' ? 'WASM ready' : wasmStatus === 'loading' ? 'WASM loading' : 'WASM error';
+    wasmStatus === 'ready' ? 'Preview ready' : wasmStatus === 'loading' ? 'Preview loading' : 'Preview error';
 
   return (
     <div className={`flex flex-col h-full ${theme === 'dark' ? 'bg-[#1e1e1e]' : 'bg-white'}`}>
@@ -396,7 +396,7 @@ export default function PlaygroundEditor({ initialCode, theme = 'dark' }: Playgr
             disabled={isRunning || wasmStatus !== 'ready'}
             className="flex items-center gap-2 px-4 py-2 bg-green-500 hover:bg-green-600 disabled:bg-green-500/50 text-white rounded-lg font-medium transition-colors"
           >
-            Run
+            Preview
           </button>
 
           <button
@@ -437,25 +437,25 @@ export default function PlaygroundEditor({ initialCode, theme = 'dark' }: Playgr
         </div>
 
         <div className="flex flex-col">
-          <div className="p-2 text-white/60 text-xs font-mono border-b border-white/10">Output</div>
+          <div className="p-2 text-white/60 text-xs font-mono border-b border-white/10">Simulated output</div>
           <pre
             className={`flex-1 p-4 font-mono text-sm overflow-auto ${
               theme === 'dark' ? 'bg-[#1e1e1e] text-green-400' : 'bg-gray-50 text-gray-800'
             }`}
           >
-            {output || 'Click "Run" to execute your code...'}
+            {output || 'Click "Preview" for illustrative output. Use Madaros to compile or run.'}
           </pre>
         </div>
       </div>
 
       <div className="flex items-center justify-between px-4 py-2 bg-[var(--color-navy-900)] text-white/60 text-xs font-mono border-t border-white/10">
-        <span>Sounio v{claimEscape({
+        <span>Published compiler release: Sounio v{claimEscape({
           id: 'checked-artifact-version',
           class: 'version',
           reason: 'Compiler launcher version string from the public contract. Identity, not a green-count.',
           text: publicContract.versions.checkedArtifact,
         })}</span>
-        <span>{wasmApi?.version ? wasmApi.version() : 'WASM'}</span>
+        <span>{wasmApi?.version ? wasmApi.version() : 'Preview shim'}</span>
       </div>
     </div>
   );
