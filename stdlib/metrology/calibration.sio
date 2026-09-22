@@ -197,7 +197,7 @@ pub fn cal_apply(cert: &CalCertificate, indication: f64) -> CorrectedValue with 
 }
 
 // ============================================================================
-// GUM §4.3.6 — Type A Evaluation (repeated observations)
+// GUM §4.2.2–4.2.3 — Type A Evaluation (repeated observations)
 // Computes sample mean and standard deviation of the mean from N readings.
 // ============================================================================
 
@@ -209,47 +209,84 @@ pub struct TypeAEval {
     valid:          bool,
 }
 
-// Maximum 16 readings for Type A evaluation
-pub fn type_a_eval(readings: &[f64; 16], n: i64) -> TypeAEval with Mut, Panic, Div {
-    if n <= 1 {
-        return TypeAEval { mean: 0.0, s_mean: 0.0, s_std: 0.0, n: 0, valid: false }
-    }
+// Read-only public result access; representation remains private.
+pub fn type_a_is_valid(eval: &TypeAEval) -> bool with Panic { (*eval).valid }
+pub fn type_a_mean(eval: &TypeAEval) -> f64 with Panic { (*eval).mean }
+pub fn type_a_stddev(eval: &TypeAEval) -> f64 with Panic { (*eval).s_std }
+pub fn type_a_uncertainty(eval: &TypeAEval) -> f64 with Panic { (*eval).s_mean }
+pub fn type_a_count(eval: &TypeAEval) -> i64 with Panic { (*eval).n }
 
-    // Mean
+fn cal_type_a_invalid() -> TypeAEval {
+    TypeAEval { mean: 0.0, s_mean: 0.0, s_std: 0.0, n: 0, valid: false }
+}
+
+fn cal_type_a_finite(x: f64) -> bool {
+    let largest = 1.7976931348623157e308
+    x == x && x <= largest && x >= 0.0 - largest
+}
+
+// Private helper: callers supply a finite, nonnegative argument. Reduce to
+// [1,4) before Newton steps, tracking powers of two in the result scale.
+// This handles zero and avoids a fixed iteration count on unscaled variance.
+fn cal_type_a_sqrt(x: f64) -> f64 with Mut, Div {
+    if x == 0.0 { return 0.0 }
+    var v = x
+    var scale = 1.0
+    while v < 1.0 {
+        v = v * 4.0
+        scale = scale * 0.5
+    }
+    while v >= 4.0 {
+        v = v * 0.25
+        scale = scale * 2.0
+    }
+    var y = v
+    var i: i64 = 0
+    while i < 8 {
+        y = 0.5 * (y + v / y)
+        i = i + 1
+    }
+    y * scale
+}
+
+// Independent repeated observations: GUM 4.2.2–4.2.3, equations (4) and (5).
+// Maximum 16 readings. Invalid counts, nonfinite/overflowed intermediates, and
+// observed nonzero squared deviations lost to zero underflow return valid=false.
+// Two-pass f64 arithmetic still has rounding/cancellation and subnormal error;
+// valid does not certify statistical assumptions or measurement suitability.
+pub fn type_a_eval(readings: &[f64; 16], n: i64) -> TypeAEval with Mut, Panic, Div {
+    if n <= 1 || n > 16 { return cal_type_a_invalid() }
+
     var sum: f64 = 0.0
     var i: i64 = 0
     while i < n {
-        sum = sum + (*readings)[i as usize]
+        let x = (*readings)[i as usize]
+        if !cal_type_a_finite(x) { return cal_type_a_invalid() }
+        sum = sum + x
+        if !cal_type_a_finite(sum) { return cal_type_a_invalid() }
         i = i + 1
     }
-    let mean = sum / n as f64
+    let mean = sum / (n as f64)
 
-    // Variance Σ(xᵢ - x̄)² / (n-1)
     var sq_sum: f64 = 0.0
     i = 0
     while i < n {
-        var d = (*readings)[i as usize] - mean
-        sq_sum = sq_sum + d * d
+        let d = (*readings)[i as usize] - mean
+        let square = d * d
+        if !cal_type_a_finite(square) { return cal_type_a_invalid() }
+        if d != 0.0 && square == 0.0 { return cal_type_a_invalid() }
+        sq_sum = sq_sum + square
+        if !cal_type_a_finite(sq_sum) { return cal_type_a_invalid() }
         i = i + 1
     }
     let variance = sq_sum / ((n - 1) as f64)
+    if sq_sum != 0.0 && variance == 0.0 { return cal_type_a_invalid() }
+    let s = cal_type_a_sqrt(variance)
+    // Divide standard deviations, rather than dividing variance first: v/n
+    // can underflow even when sqrt(v)/sqrt(n) is representable.
+    let s_mean = s / cal_type_a_sqrt(n as f64)
 
-    // sqrt via Newton-Raphson
-    var s = variance
-    var j: i64 = 0
-    while j < 8 {
-        s = (s + variance / s) / 2.0
-        j = j + 1
-    }
-    let s_mean = s / (n as f64)  // u_A = s/√n  (GUM §4.2.3)
-
-    TypeAEval {
-        mean:   mean,
-        s_mean: s_mean,
-        s_std:  s,
-        n:      n,
-        valid:  true,
-    }
+    TypeAEval { mean: mean, s_mean: s_mean, s_std: s, n: n, valid: true }
 }
 
 // ============================================================================
