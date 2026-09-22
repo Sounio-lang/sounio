@@ -151,15 +151,25 @@ set -e
 if [[ "$gb" -ne 0 ]] && grep -Fq 'f128 literal is not exactly representable in binary64' "$TMP_DIR/greenwash.build.log"; then
   note_pass "lean_single_language_f128_inexact_literal_refused_no_greenwash"
 elif [[ "$gb" -eq 0 && -f "$GELF" ]]; then
+  # The literal-exactness refusal is not the only guard: if it were ever
+  # relaxed to let this program build, the RESULT still has to be anti-f64.
+  # The program's own print reports which one happened -- "FAIL f64_greenwash"
+  # means the compiler DID collapse to f64 (a genuine greenwash regression,
+  # not a pass), "PASS anti_f64" means it computed the real binary128 answer.
+  # Treating the former as note_pass (as this branch used to, mirroring the
+  # pre-#2387 test where seeing the program's own "FAIL" print WAS the
+  # expected/passing outcome) would let a build that reverts BOTH protections
+  # at once -- literal refusal gone AND greenwashing back -- still report this
+  # stage green.
   chmod +x "$GELF"
   set +e
   "$GELF" >"$TMP_DIR/greenwash.run.log" 2>&1
   gr=$?
   set -e
-  if grep -Fq 'FAIL f64_greenwash' "$TMP_DIR/greenwash.run.log"; then
-    note_pass "lean_single_language_f128_f64_greenwash_refused"
+  if [[ "$gr" -eq 0 ]] && grep -Fq 'PASS anti_f64' "$TMP_DIR/greenwash.run.log"; then
+    note_pass "lean_single_language_f128_build_succeeds_anti_f64_confirmed"
   else
-    note_fail "lean_single_language_f128_unexpectedly_anti_f64"
+    note_fail "lean_single_language_f128_unexpectedly_f64_greenwash rc=$gr"
     cat "$TMP_DIR/greenwash.run.log" >&2 || true
   fi
 else

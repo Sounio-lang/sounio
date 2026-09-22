@@ -123,17 +123,24 @@ fn main() -> i32 with IO, Mut, Panic, Div {
 EOF
 
 # Compound assignment on a plain f128 local: since KL-8 (#2491, 2026-09-12)
-# this is real softfloat add/sub, not a refusal -- `1.0 += 1.0` must give
-# exactly binary128 2.0 (never an f64 approximation). Checked separately
-# below, not in the fail-closed loop.
+# this is real softfloat add/sub, not a refusal. `1.0 += 1.0` alone would not
+# distinguish real binary128 arithmetic from an f64-widen-then-narrow cheat,
+# since 1.0+1.0=2.0 is exact in both formats -- use the same `tiny` anti-f64
+# operand as the rest of this ladder (an f128 value with no f64
+# representation) so a greenwashed implementation provably diverges: `1.0 +
+# tiny` keeps tiny's low-order bits (nonzero lo limb) where f64-then-widen
+# would round it away to exactly 1.0 (zero lo limb). Expected limbs match
+# scripts/ci/madaros_f128_f256_v0e4_language_lower_gate.sh's own
+# `wire_1+tiny` receipt for the identical `1 + tiny` computation. Checked
+# separately below, not in the fail-closed loop.
 cat >"$TMP_DIR/lang_compound.sio" <<'EOF'
 use math::softfloat_f128::{f128_from_limbs, f128_to_lo, f128_to_hi}
 use math::wide_float::{print_limb_hex16}
 
 fn main() -> i32 with IO, Mut, Panic, Div {
     var acc: f128 = 1.0
-    let one: f128 = 1.0
-    acc += one
+    let tiny: f128 = f128_from_limbs(3746994889972252672, 4592679628783035426)
+    acc += tiny
     print("wire_compound_assign=")
     print_limb_hex16(f128_to_lo(acc))
     print(":")
@@ -185,7 +192,7 @@ if [[ -x "$SOUC" ]]; then
   "$SOUC" run "$TMP_DIR/lang_compound.sio" >"$TMP_DIR/lang_compound.run.log" 2>&1
   lc_rc=$?
   set -e
-  if [[ "$lc_rc" -eq 0 ]] && grep -Fq 'wire_compound_assign=0000000000000000:4000000000000000' "$TMP_DIR/lang_compound.run.log"; then
+  if [[ "$lc_rc" -eq 0 ]] && grep -Fq 'wire_compound_assign=00002f3942192484:3fff000000000000' "$TMP_DIR/lang_compound.run.log"; then
     note_pass "language_f128_compound_assign_kl8_correct"
   else
     note_fail "language_f128_compound_assign_kl8_wrong rc=$lc_rc"

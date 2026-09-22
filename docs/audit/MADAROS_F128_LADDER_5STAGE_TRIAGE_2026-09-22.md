@@ -221,3 +221,32 @@ checked against `scripts/ci/madaros_full_gate.sh` and
 `&[i8; N]` FFI path directly — the feature whose `param_array_len`
 reference-peeling change created this bug's precondition — confirming that
 path still works correctly (both green).
+
+## Follow-up from review (2026-09-22, same day)
+
+Automated review on PR #2615 caught two correctness gaps in the fixture
+changes above and one CI-efficiency issue, all fixed the same day:
+
+- The KL-15a `ci.yml` loop re-ran `--stage v0e510` even though the preceding
+  KL-8 step (`madaros_kl8_f128_residuals_gate.sh`) already invokes it and
+  requires its PASS marker — redundant work in a job capped at 30 minutes.
+  Removed from the loop; KL-8 remains the sole runner for `v0e510`.
+- v0e4's fallback path (reachable only if the literal-exactness refusal
+  above ever regresses and the seed build succeeds again) had an inverted
+  check inherited from the pre-#2387 test: it treated the program printing
+  `FAIL f64_greenwash` — i.e. the compiler actually greenwashing — as
+  `note_pass`. Fixed to require the program run to completion (`rc=0`) and
+  print `PASS anti_f64`; a build that succeeds and greenwashes now correctly
+  fails the gate instead of masking the regression.
+- v0e55's new compound-assign positive check used `acc += one` (1.0+1.0=2.0),
+  which is exact in both f64 and binary128 and so could not actually
+  distinguish real softfloat arithmetic from an f64-widen-then-narrow cheat
+  for this specific value. Replaced with the same anti-f64 `tiny` constant
+  used elsewhere in this ladder (`f128_from_limbs(3746994889972252672,
+  4592679628783035426)`); the expected result
+  (`00002f3942192484:3fff000000000000`) cross-checks exactly against v0e4's
+  own `wire_1+tiny` receipt for the identical `1 + tiny` computation.
+
+All three fixes re-verified against the same fresh build; the full 18-stage
+KL-15a loop (`v0e510` now excluded, covered once by KL-8) re-ran green
+sequentially under `bash -eo pipefail`.
