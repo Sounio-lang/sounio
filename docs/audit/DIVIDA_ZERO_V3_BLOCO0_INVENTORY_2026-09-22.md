@@ -130,7 +130,7 @@ nesta sessão):
 | `tests/known_failures/` — arquivos totais (inclui `hardened_diagnostics_full_suite.txt`) | 31 | `ls tests/known_failures \| wc -l` |
 | Arquivos com `known_failure` no nome fora de `tests/known_failures/` | 4 | `find tests -iname '*known_failure*'`, excluindo o diretório e as 2 entradas já dentro dele |
 | Arquivos citando `known_failure`/`expected_failure`/`XPASS`/`xfail` no corpo | 18 | `grep -rl -e known_failure -e expected_failure -e XPASS -e xfail tests/ --include='*.sio'` |
-| Arquivos anotados `requires: madaros` (gramática do executor real, `run_sio_test_suite_v2.sh`: substring `//@ requires` + `requires:[[:space:]]*(.+)` + match exato contra `madaros`) | 1,171 | `grep -rlE '//@ requires:[[:space:]]*madaros' tests/ --include='*.sio'` |
+| Arquivos anotados `requires: madaros` (gramática do executor real, `run_sio_test_suite_v2.sh`: substring `//@ requires` + `requires:[[:space:]]*(.+)` + match exato contra `madaros`) | 1,171 | `grep -rlE '//@ requires:[[:space:]]*madaros[[:space:]]*$' tests/ --include='*.sio'` |
 | Arquivos `.sio` totais em `tests/` (informativo, do measure_repo_scale) | 4,530 | `scripts/dev/measure_repo_scale.sh` |
 
 Correção de quatro problemas desta tabela (apontado em revisão,
@@ -176,7 +176,7 @@ Correção de quatro problemas desta tabela (apontado em revisão,
      dois-pontos), e então compara esse valor com `case "$requires" in madaros) ...`
      — **igualdade exata** contra a string `madaros`.
 
-   O comando `grep -rlE '//@ requires:[[:space:]]*madaros' tests/ --include='*.sio'`
+   O comando `grep -rlE '//@ requires:[[:space:]]*madaros[[:space:]]*$' tests/ --include='*.sio'`
    (linha acima) já reproduz corretamente a gramática do executor real (espaço único
    fixo entre `//@` e `requires`, espaço opcional só após os dois-pontos) — produz
    **1,171** arquivos: 8 usam `//@ requires:madaros` sem espaço após os dois-pontos
@@ -228,8 +228,20 @@ esta sessão (`claude`, lane `session-fc7d9b6f-e027-5e0f-89b0--66f0de5791`, inte
 
 ## 6. Próximo passo declarado
 
-Bloco 1 (§6.1–§6.3 do plano v3): localizar o mecanismo real de seleção `slow`
-(resolvendo o achado §2.2 deste documento) antes de qualquer tentativa de declarar a
-partição N/S para a candidata baseada na #2622. Esse é um trabalho de leitura/repro
+Atualizado (apontado em revisão, `Sounio-lang/sounio#2637`'s review body, "Update next
+step to collect isolated-S evidence"): a formulação original — "localizar o mecanismo
+real de seleção `slow`" — ficou obsoleta assim que §2.2 acima já localizou o mecanismo
+completo (wrapper → symlink → `run_sio_test_suite_v2.sh`, seletor `requires: slow`
+existente, único defeito é o `ci.yml` de #2622 não passar `--test-list`). Repetir essa
+frase mandaria a próxima lane refazer uma investigação já concluída.
+
+Bloco 1 (§6.1–§6.3 do plano v3): com o mecanismo já identificado, o próximo passo
+concreto é **produzir a evidência que falta**, não mais procurá-la — construir/usar a
+lista de testes anotados `//@ requires: slow` como `--test-list` e rodar
+`run_sio_test_suite_v2.sh --test-list <arquivo-S>` isoladamente (com
+`SOUNIO_SLOW_TESTS_AVAILABLE=1`), para obter uma execução de **S sozinho** com seu
+próprio resultado — o que a alegação "zero falhas" de #2622 (plano v3 §3) ainda não tem
+lastro para cobrir, per §2.2 acima. Só depois disso a partição N/S para a candidata
+baseada na #2622 pode ser declarada confiável. Esse é um trabalho de leitura/repro
 mínima (§6.1 do `CLAUDE.md`, "um blocker sem reprodução mínima não está diagnosticado"),
 não um build completo, e deve ser o próximo item desta lane.
