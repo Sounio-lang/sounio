@@ -6,10 +6,12 @@ workflow execute this gate, at any call depth, by following real
 invocations (bash/sh/source), not comments and not inventory globs.
 
 Positive control (must be non-zero on this repo): at least one gate is
-reachable (ci.yml names several) AND at least one named leftover is not
-(madaros_f128_f256_ladder_gate.sh). A census that reports 0 leftovers,
-or 0 reachable, has not measured. The 2026-08-18 named three plus the
-F2 bitcast/sitofp boundary gate are wired.
+reachable (ci.yml names several) AND at least one entry of
+NAMED_DIRECT_ORPHANS below is not (e.g. mli_s3_bit_identity_gate.sh). A
+census that reports 0 leftovers, or 0 reachable, has not measured. The
+2026-08-18 named three plus the F2 bitcast/sitofp boundary gate are wired;
+madaros_f128_f256_ladder_gate.sh and two of its own stage scripts were
+removed from the tuple on 2026-09-22 -- see the comment at its definition.
 
 Usage:
   python3 scripts/dev/ci_gate_workflow_reachability.py
