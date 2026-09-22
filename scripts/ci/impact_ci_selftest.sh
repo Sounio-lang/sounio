@@ -101,7 +101,7 @@ json_sub() {
   printf '%s' "$out"
 }
 
-good_needs='{"impact":{"outputs":{"compiler":"false","runtime":"false","stdlib":"false","tests":"false","sio":"false","lean":"false","website":"false","full":"false"}},"contracts":{"result":"success"},"native-selfhost-linux-x86_64":{"result":"skipped"},"source-bootstrap-selfhost-linux-x86_64":{"result":"skipped"},"madaros-current-source-deref-f64":{"result":"skipped"},"native-selfhost-macos-arm64":{"result":"skipped"},"full-test-suite":{"result":"skipped"},"madaros-witness-gate":{"result":"skipped"},"gate-wave-0":{"result":"skipped"},"sounio-lint":{"result":"skipped"},"lean-proofs":{"result":"skipped"},"website":{"result":"skipped"},"r6-corpus-sweep":{"result":"skipped"}}'
+good_needs='{"impact":{"outputs":{"compiler":"false","runtime":"false","stdlib":"false","tests":"false","sio":"false","lean":"false","website":"false","full":"false"}},"contracts":{"result":"success"},"native-selfhost-linux-x86_64":{"result":"skipped"},"source-bootstrap-selfhost-linux-x86_64":{"result":"skipped"},"madaros-current-source-deref-f64":{"result":"skipped"},"native-selfhost-macos-arm64":{"result":"skipped"},"full-test-suite":{"result":"skipped"},"madaros-witness-gate":{"result":"skipped"},"gate-wave-0":{"result":"skipped"},"sounio-lint":{"result":"skipped"},"lean-proofs":{"result":"skipped"},"website":{"result":"skipped"},"r6-corpus-sweep":{"result":"skipped"},"slow-lane":{"result":"skipped"}}'
 NEEDS_JSON="$good_needs" python3 "$DECISION" | grep -Fq CI_DECISION_PASS
 
 bad_needs="$(json_sub "$good_needs" '"contracts":{"result":"success"}' '"contracts":{"result":"failure"}')"
@@ -110,7 +110,7 @@ if NEEDS_JSON="$bad_needs" python3 "$DECISION" >/dev/null 2>&1; then
   exit 1
 fi
 
-compiler_needs='{"impact":{"outputs":{"compiler":"true","runtime":"false","stdlib":"false","tests":"false","sio":"true","lean":"false","website":"false","full":"false"}},"contracts":{"result":"success"},"native-selfhost-linux-x86_64":{"result":"success"},"source-bootstrap-selfhost-linux-x86_64":{"result":"success"},"madaros-current-source-deref-f64":{"result":"failure"},"native-selfhost-macos-arm64":{"result":"success"},"full-test-suite":{"result":"success"},"madaros-witness-gate":{"result":"success"},"gate-wave-0":{"result":"success"},"sounio-lint":{"result":"success"},"lean-proofs":{"result":"skipped"},"website":{"result":"skipped"},"r6-corpus-sweep":{"result":"skipped"}}'
+compiler_needs='{"impact":{"outputs":{"compiler":"true","runtime":"false","stdlib":"false","tests":"false","sio":"true","lean":"false","website":"false","full":"false"}},"contracts":{"result":"success"},"native-selfhost-linux-x86_64":{"result":"success"},"source-bootstrap-selfhost-linux-x86_64":{"result":"success"},"madaros-current-source-deref-f64":{"result":"failure"},"native-selfhost-macos-arm64":{"result":"success"},"full-test-suite":{"result":"success"},"madaros-witness-gate":{"result":"success"},"gate-wave-0":{"result":"success"},"sounio-lint":{"result":"success"},"lean-proofs":{"result":"skipped"},"website":{"result":"skipped"},"r6-corpus-sweep":{"result":"skipped"},"slow-lane":{"result":"skipped"}}'
 if NEEDS_JSON="$compiler_needs" python3 "$DECISION" >/dev/null 2>&1; then
   echo "impact-ci-selftest: decision accepted failed current-source Madaros gate" >&2
   exit 1
@@ -132,7 +132,11 @@ fi
 # check below cannot catch that on its own -- absent from both sides, the two
 # still agree. These four cases are what notices.
 r6_skipped="$good_needs"
+# Two nightly-only jobs are now selected together under is_nightly(): a fixture
+# asserted PASS on a schedule event must resolve BOTH, or it fails for the
+# other one's sake, not the one this fixture is naming.
 r6_green="$(json_sub "$good_needs" '"r6-corpus-sweep":{"result":"skipped"}' '"r6-corpus-sweep":{"result":"success"}')"
+r6_green="$(json_sub "$r6_green" '"slow-lane":{"result":"skipped"}' '"slow-lane":{"result":"success"}')"
 r6_red="$(json_sub "$good_needs" '"r6-corpus-sweep":{"result":"skipped"}' '"r6-corpus-sweep":{"result":"failure"}')"
 
 # On a scheduled run, a skipped R6 is a required gate that never ran.
@@ -156,6 +160,32 @@ if NEEDS_JSON="$r6_skipped" GITHUB_EVENT_NAME=workflow_dispatch NIGHTLY_INPUT=tr
   exit 1
 fi
 NEEDS_JSON="$r6_skipped" GITHUB_EVENT_NAME=workflow_dispatch NIGHTLY_INPUT=false \
+  python3 "$DECISION" | grep -Fq CI_DECISION_PASS
+
+# slow-lane mirrors r6-corpus-sweep exactly: nightly-only, selected by the
+# EVENT rather than by impact classification. Same four cases, same reason
+# (#2392's own lesson -- absent from both needs and evaluator still "agrees").
+slow_skipped="$good_needs"
+slow_green="$(json_sub "$good_needs" '"slow-lane":{"result":"skipped"}' '"slow-lane":{"result":"success"}')"
+slow_green="$(json_sub "$slow_green" '"r6-corpus-sweep":{"result":"skipped"}' '"r6-corpus-sweep":{"result":"success"}')"
+slow_red="$(json_sub "$good_needs" '"slow-lane":{"result":"skipped"}' '"slow-lane":{"result":"failure"}')"
+
+if NEEDS_JSON="$slow_skipped" GITHUB_EVENT_NAME=schedule python3 "$DECISION" >/dev/null 2>&1; then
+  echo "impact-ci-selftest: decision accepted a skipped slow-lane on a nightly run" >&2
+  exit 1
+fi
+NEEDS_JSON="$slow_green" GITHUB_EVENT_NAME=schedule python3 "$DECISION" | grep -Fq CI_DECISION_PASS
+NEEDS_JSON="$slow_skipped" GITHUB_EVENT_NAME=pull_request python3 "$DECISION" | grep -Fq CI_DECISION_PASS
+if NEEDS_JSON="$slow_red" GITHUB_EVENT_NAME=pull_request python3 "$DECISION" >/dev/null 2>&1; then
+  echo "impact-ci-selftest: decision accepted a failed slow-lane" >&2
+  exit 1
+fi
+if NEEDS_JSON="$slow_skipped" GITHUB_EVENT_NAME=workflow_dispatch NIGHTLY_INPUT=true \
+     python3 "$DECISION" >/dev/null 2>&1; then
+  echo "impact-ci-selftest: decision accepted a skipped slow-lane on an explicit nightly dispatch" >&2
+  exit 1
+fi
+NEEDS_JSON="$slow_skipped" GITHUB_EVENT_NAME=workflow_dispatch NIGHTLY_INPUT=false \
   python3 "$DECISION" | grep -Fq CI_DECISION_PASS
 
 python3 - "$ROOT_DIR" <<'PY'
@@ -222,7 +252,7 @@ if workflow_needs != required_keys:
     )
 PY
 
-stdlib_needs='{"impact":{"outputs":{"compiler":"false","runtime":"false","stdlib":"true","tests":"false","sio":"true","lean":"false","website":"false","full":"false"}},"contracts":{"result":"success"},"native-selfhost-linux-x86_64":{"result":"skipped"},"source-bootstrap-selfhost-linux-x86_64":{"result":"skipped"},"madaros-current-source-deref-f64":{"result":"skipped"},"native-selfhost-macos-arm64":{"result":"skipped"},"full-test-suite":{"result":"skipped"},"madaros-witness-gate":{"result":"success"},"sounio-lint":{"result":"success"},"lean-proofs":{"result":"skipped"},"website":{"result":"skipped"},"r6-corpus-sweep":{"result":"skipped"}}'
+stdlib_needs='{"impact":{"outputs":{"compiler":"false","runtime":"false","stdlib":"true","tests":"false","sio":"true","lean":"false","website":"false","full":"false"}},"contracts":{"result":"success"},"native-selfhost-linux-x86_64":{"result":"skipped"},"source-bootstrap-selfhost-linux-x86_64":{"result":"skipped"},"madaros-current-source-deref-f64":{"result":"skipped"},"native-selfhost-macos-arm64":{"result":"skipped"},"full-test-suite":{"result":"skipped"},"madaros-witness-gate":{"result":"success"},"sounio-lint":{"result":"success"},"lean-proofs":{"result":"skipped"},"website":{"result":"skipped"},"r6-corpus-sweep":{"result":"skipped"},"slow-lane":{"result":"skipped"}}'
 if NEEDS_JSON="$stdlib_needs" python3 "$DECISION" >/dev/null 2>&1; then
   echo "impact-ci-selftest: decision accepted stdlib suite without native compiler/full suite" >&2
   exit 1

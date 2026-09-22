@@ -16,7 +16,7 @@
 #   //@ error-pattern: X      — stderr/stdout must contain X (compile-fail only)
 #   //@ known-failure: REASON — documented accepted failure
 #   //@ skip-if: CONDITION    — conditional skip (e.g., skip-if: no-gpu)
-#   //@ requires: FEATURE     — feature dependency (e.g., requires: gpu)
+#   //@ requires: FEATURE     — feature dependency (gpu|llvm|madaros|lean_single|slow)
 #   //@ flaky                 — known flaky test
 #   //@ timeout: SECONDS      — override default timeout
 #
@@ -464,13 +464,22 @@ run_test() {
                     return
                 fi
                 ;;
+            # `requires: slow` — tests that legitimately need minutes, not
+            # seconds (full GRI-Mech kinetics integrations, PINN training
+            # loops, a Lyapunov spectrum). The default Full Test Suite job
+            # runs on a shared GHA runner where these routinely exceed their
+            # own generous `//@ timeout:` -- not because they are wrong, but
+            # because they are slow. Skipped unless SOUNIO_SLOW_TESTS_AVAILABLE
+            # is set; the nightly slow-lane job sets it, with a much larger
+            # job timeout budget.
+            slow) [[ -z "${SOUNIO_SLOW_TESTS_AVAILABLE:-}" ]] && { echo "{\"status\":\"skip\",\"reason\":\"requires:slow\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"; return; } ;;
             # An unrecognized requires value must not fall through silently: a typo
             # (e.g. `requires: madros`) would otherwise run the test against
             # whatever engine is present instead of being gated as intended, with
             # the annotation asserting nothing -- indistinguishable from the
             # vacuous-match defect this PR exists to remove.
             *)
-                echo "{\"status\":\"fail\",\"category\":\"fail\",\"name\":\"$basename\",\"output\":\"unknown requires: $requires (expected: gpu|llvm|madaros|lean_single)\",\"idx\":$idx}" > "$output_file"
+                echo "{\"status\":\"fail\",\"category\":\"fail\",\"name\":\"$basename\",\"output\":\"unknown requires: $requires (expected: gpu|llvm|madaros|lean_single|slow)\",\"idx\":$idx}" > "$output_file"
                 return
                 ;;
         esac
