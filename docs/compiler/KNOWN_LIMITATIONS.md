@@ -37,9 +37,9 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 |---|---|---|
 | KL-9 | seed: #1494 imported-module typecheck errors non-fatal | lean_single |
 | KL-11 | #1792 first-order / variance across user calls (pow FO closed) | madaros |
-| KL-14 | FFI: aggregate-ref CLOSED; dynlink MVP (KL-14b) | madaros |
-| KL-15 | `f256` surface, `Knowledge<f128>`/GUM | madaros |
-| KL-16 | Hessian Tier-4 on the seed | lean_single |
+| KL-14 | FFI: 14a–14d3 CLOSED | madaros |
+| KL-15 | `f256` surface (15a softfloat add/sub partial), `Knowledge<f128>`/GUM | madaros |
+| KL-16 | Hessian Tier-4 (16a–16f CLOSED; residual H-multi/non-H00 if/a64 atan2) | lean_single |
 
 ## Ledger
 
@@ -124,30 +124,81 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   phdrs. Empty-stub body is `call [rip+got]; ret`. Dyn metadata is appended
   after the runtime-context data payload. Pin:
   `tests/run-pass/kl14b_dynlink_one_symbol.sio`,
-  `scripts/ci/madaros_kl14b_dynlink_gate.sh`. Residual (KL-14c): arbitrary
-  `-lfoo` / N symbols, real libzstd e2e, `dlopen` surface.
+  `scripts/ci/madaros_kl14b_dynlink_gate.sh`.
+- **N-symbol dynlink — CLOSED (KL-14c).** Engine: `madaros`. Unique symbols
+  from `extern_relocs` (cap 8) each get a dynsym + GOT slot +
+  `R_X86_64_GLOB_DAT`; SysV hash chains them under `nbucket=1`. Pin:
+  `tests/run-pass/kl14c_dynlink_n_symbols.sio` (`kl14c_add`/`mul`/`neg` via
+  `libkl14c_probe.so`), `scripts/ci/madaros_kl14c_dynlink_gate.sh`.
+- **Multi-`DT_NEEDED` — CLOSED (KL-14d1).** Engine: `madaros`. Symbol→soname
+  allowlist emits one `DT_NEEDED` per unique library (cap 4). Pin:
+  `tests/run-pass/kl14d_multi_needed.sio` (`kl14d_a`/`kl14d_b` via
+  `libkl14d_a.so` + `libkl14d_b.so`),
+  `scripts/ci/madaros_kl14d_multi_needed_gate.sh`.
+- **libzstd e2e — CLOSED (KL-14d2).** Engine: `madaros`. `ZSTD_compress` /
+  `ZSTD_decompress` / `ZSTD_isError` resolve via `DT_NEEDED libzstd.so.1`.
+  `stdlib/compress/zstd.sio` wrappers fill `ZstdResult`. Pin:
+  `tests/run-pass/kl14d_zstd_e2e.sio`,
+  `scripts/ci/madaros_kl14d_zstd_gate.sh`. Dynlink GOT stubs tail-`jmp` (not
+  `call; ret`) so SysV stack alignment holds for SIMD callees.
+- **dlopen + call-through — CLOSED (KL-14d3).** Engine: `madaros`.
+  `dlopen` / `dlsym` / `dlclose` / `dlerror` via `DT_NEEDED libdl.so.2`.
+  Pin: open + `dlsym` → `as fn(i64) -> i64` → `f(35) == 42` + close
+  (`tests/run-pass/kl14d_dlopen.sio`,
+  `scripts/ci/madaros_kl14d_dlopen_gate.sh`).
 
 ### KL-15 — `f256` surface and epistemic `f128`
 
-- Engine: `madaros`. `f256` has type spellings, exact literals (V0-B/V0-E.5.9)
-  and the V0-E.4.1 fail-closed refusal for arithmetic; fields, params,
-  arrays, printing and any `softfloat_f256` are not implemented.
-  `Knowledge<f128>`, GUM over `f128` and `MeasuredF256` are out of scope of
-  the V0-E ladder. Consequence: `benchmarks/chemistry/RESULTS.md` §7.7 stays
-  blocked on a genuine reference integration path.
-- Pin: `scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e57` pins the
-  `[f256; N]` refusal; `--stage v0e41` pins the no-greenwash rule.
+- Engine: `madaros`. **KL-15a partial CLOSED**: IEEE binary256 add/sub over
+  `F256Bits` in `stdlib/math/softfloat_f256.sio` (ladder `--stage v0f5`).
+  Residual: language `f256` arithmetic stays V0-E.4.1 fail-closed; fields,
+  params, arrays, printing, `Knowledge<f128>`, GUM over `f128`, and
+  `MeasuredF256` are not implemented. Consequence:
+  `benchmarks/chemistry/RESULTS.md` §7.7 stays blocked on a genuine reference
+  integration path.
+- Pin: `scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0f5` (add/sub);
+  `--stage v0e57` pins the `[f256; N]` refusal; `--stage v0e41` pins the
+  no-greenwash rule.
 
 ### KL-16 — Hessian Tier-4 on the seed
 
-- Engine: `lean_single`. `hessian_of(expr, j, k)` works for 8 channels,
-  arithmetic, unary transcendentals and `atan2`/`pow` on channels 0–3.
-  Not implemented: inter-procedural shadows across user fn calls, loop
-  accumulation (state resets per iteration), `if/else` merge of shadow
-  slots, channels 4–7 in transcendentals and two-arg builtins.
-- Pin: none beyond the positive witnesses. Channel-at-`.value` semantics
-  (`MEAS_KNOW_IDX`, `formal/ChannelAssignmentSemantics.lean`) are a model,
-  not a defect — see the history snapshot for the KAS-1 rationale.
+- Engine: `lean_single`. `hessian_of(expr, j, k)` works for 8-channel
+  arithmetic; unary transcendentals and `atan2`/`pow` on channels 0–7
+  (x86 seed). a64 unary already loops 8 channels; a64 `atan2`/`pow`
+  remain value-only (no AD shadow).
+- **KL-16a — CLOSED (pin only).** Gate + Tier 1–3 pins without seed edit.
+- **KL-16b — CLOSED (seed).** Fixes `VAR_HSHADOW` leak across Knowledge
+  locals (H[4,5] of a product was `1+f`, observed as `7.0`); extends
+  x86 unary/`atan2`/`pow` FO+Hessian to channels 4–7; pins
+  `epistemic_hessian_8inputs.sio` at analytic `1.0` and
+  `epistemic_hessian_ch47.sio`. Seed refresh + SeedReceipt required.
+- **KL-16c — CLOSED (seed).** Inter-procedural FO ch0 (`EXPR_SSHADOW`)
+  + `H[0,0]` (`EXPR_HSHADOW_00`) across user `f64 → f64` fns via BSS
+  ARG/RET slots mirroring β⁵ variance. Pin:
+  `tests/run-pass/kl16c_fo_across_user_fn.sio`,
+  `scripts/ci/lean_single_kl16c_interproc_shadow_gate.sh`.
+- **KL-16d — CLOSED (seed).** Extends inter-procedural FO to channels
+  1–7 (`EXPR_SSHADOW_1..7` / `VAR_SSHADOW_1..7`) across user
+  `f64 → f64` fns; HSHADOW multi-pair across calls remains OPEN.
+  Pin: `tests/run-pass/kl16d_fo_multich_across_user_fn.sio`,
+  `scripts/ci/lean_single_kl16d_interproc_multich_gate.sh`.
+- **KL-16e — CLOSED (seed).** If/else join merges FO `EXPR_SSHADOW(_1..7)`
+  and `EXPR_HSHADOW_00` via path-local spill into shared join slots
+  (phi-like select by execution). Pin:
+  `tests/run-pass/kl16e_ifelse_shadow_merge.sio`,
+  `scripts/ci/lean_single_kl16e_ifelse_shadow_merge_gate.sh`.
+- **KL-16f — CLOSED (seed).** Loop accumulation of FO
+  `VAR_SSHADOW(_1..7)` and `VAR_HSHADOW_00` on mutable `f64`. Declaration
+  allocates nine fixed slots and spills the RHS; reassignment spills into
+  those slots and does not retarget the metadata pointers (ephemeral
+  `EXPR_*` no longer alias the variable). Pin:
+  `tests/run-pass/kl16f_loop_accum.sio`,
+  `scripts/ci/lean_single_kl16f_loop_accum_gate.sh`.
+- **Residual (OPEN).** HSHADOW multi-pair interproc; HSHADOW pairs other
+  than `[0,0]` through if/else; a64 `atan2`/`pow` AD.
+- Channel-at-`.value` semantics (`MEAS_KNOW_IDX`,
+  `formal/ChannelAssignmentSemantics.lean`) are a model, not a defect —
+  see the history snapshot for the KAS-1 rationale.
 
 ## Registry-governed, not rungs
 
