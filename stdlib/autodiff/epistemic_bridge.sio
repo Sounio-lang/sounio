@@ -48,7 +48,7 @@ fn bridge_sqrt(x: f64) -> f64 {
 /// Math: u(y) = |∂f/∂x| · u(x) = |dot| · unc
 /// The sensitivity coefficient is set to dot (the computed derivative).
 pub fn edual_to_gum_uncertainty(d: EpistemicDual) -> GUMUncertainty {
-    let std_unc = bridge_abs(d.dot) * d.unc
+    let std_unc = bridge_abs(d.dot) * edual_unc(d)
     GUMUncertainty {
         std_uncertainty: std_unc,
         degrees_of_freedom: 1.0e9,
@@ -61,38 +61,21 @@ pub fn edual_to_gum_uncertainty(d: EpistemicDual) -> GUMUncertainty {
 ///
 /// This allows a GUM-characterised input to seed a forward AD computation.
 pub fn gum_to_edual(val: f64, u: GUMUncertainty) -> EpistemicDual {
-    EpistemicDual {
-        val: val,
-        dot: u.sensitivity,
-        unc: u.std_uncertainty,
-        unc_dot: 0.0,
-    }
+    edual_new(val, u.sensitivity, u.std_uncertainty, 0.0)
 }
 
 /// Convert a GUMResult to an EpistemicDual.
 /// dot is set to 1.0 (neutral sensitivity); unc = std_uncertainty.
 pub fn gum_result_to_edual(r: GUMResult) -> EpistemicDual {
-    EpistemicDual {
-        val: r.value,
-        dot: 1.0,
-        unc: r.std_uncertainty,
-        unc_dot: 0.0,
-    }
+    edual_new(gum_value(r), 1.0, gum_std_u(r), 0.0)
 }
 
 /// Convert an EpistemicDual (output of AD computation) to a GUMResult.
 /// Applies GUM §5.1: u(y) = |dot| * unc.
 /// dof: degrees of freedom (use 1e9 for Type B / infinite).
 pub fn edual_to_gum_result(d: EpistemicDual, dof: f64) -> GUMResult with Div, Panic {
-    let std_unc = bridge_abs(d.dot) * d.unc
-    let k = k_normal_95()
-    GUMResult {
-        value: d.val,
-        std_uncertainty: std_unc,
-        degrees_of_freedom: dof,
-        coverage_factor_95: k,
-        expanded_uncertainty_95: k * std_unc,
-    }
+    let std_unc = bridge_abs(d.dot) * edual_unc(d)
+    gum_result_from_parts(d.val, std_unc, dof)
 }
 
 /// Compose two GUM propagation steps through an AD computation, under a declared correlation.
@@ -114,8 +97,8 @@ pub fn edual_combine_gum_rho(d1: EpistemicDual, d2: EpistemicDual, rho: f64) -> 
     if rho < (0.0 - 1.0) || rho > 1.0 {
         panic("edual_combine_gum_rho: rho must be in [-1, 1], a correlation coefficient cannot exceed unit magnitude")
     }
-    let u1 = bridge_abs(d1.dot) * d1.unc
-    let u2 = bridge_abs(d2.dot) * d2.unc
+    let u1 = bridge_abs(d1.dot) * edual_unc(d1)
+    let u2 = bridge_abs(d2.dot) * edual_unc(d2)
     let sum_sq = u1 * u1 + u2 * u2 + 2.0 * rho * u1 * u2
     let combined = bridge_sqrt(sum_sq)
     // Effective sensitivity: magnitude of combined gradient direction
