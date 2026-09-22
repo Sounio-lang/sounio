@@ -634,12 +634,23 @@ fn impl_target_bare_type_params_at(structs: *mut StructTable, target: TypeExpr, 
 // over its own declared parameters, in order; -1 otherwise. A concrete
 // `impl Pair<i64, i64>`, or one naming a struct, enum or builtin, keeps the
 // mangled-instance registration it always had.
-fn generic_impl_template_index(structs: *mut StructTable, enums: *mut EnumTable, target: TypeExpr) -> i64 with Mut, Panic, Div, Alloc {
+//
+// When the impl declares its own header (`impl<U> Cell<U>`), those binders are
+// the authoritative parameter names — checked positionally against A1..An —
+// instead of requiring An to spell the SAME name as S's own declared parameter.
+// A renamed binder (`impl<U> Cell<U>` on `struct Cell<T>`) is still the generic
+// template: U need not equal T. Without a header, the old spelling-match against
+// S's own declared names is the only signal available, so it is kept as the
+// fallback for that shorthand (`impl Cell<T>` with no `impl<...>`).
+fn generic_impl_template_index(structs: *mut StructTable, enums: *mut EnumTable, id: ImplDef) -> i64 with Mut, Panic, Div, Alloc {
+    let target = id.target_type
     if target.kind != TypeExprKind::TypeNamed || target.path.seg_count != 1 { return 0 - 1 }
     let idx = struct_table_find(structs, checker_copy_string_list_to_name(target.path.segments))
     if idx < 0 { return 0 - 1 }
     let si = struct_table_get(structs, idx)
     if !si.is_generic_template { return 0 - 1 }
+    let hdr = collect_type_params(id.type_params)
+    if hdr.count > 0 && hdr.count != si.type_param_count { return 0 - 1 }
     var count: i64 = 0
     var cur = target.type_args
     while true {
@@ -654,7 +665,12 @@ fn generic_impl_template_index(structs: *mut StructTable, enums: *mut EnumTable,
                 }
                 let an = checker_copy_string_list_to_name(arg.path.segments)
                 if count >= si.type_param_count || count >= 8 { return 0 - 1 }
-                if !name_eq(an, si.type_param_names[count]) { return 0 - 1 }
+                let is_declared_param = if hdr.count > 0 {
+                    name_eq(an, hdr.names[count])
+                } else {
+                    name_eq(an, si.type_param_names[count])
+                }
+                if !is_declared_param { return 0 - 1 }
                 if name_is_builtin_scalar_type(an) { return 0 - 1 }
                 if struct_table_find(structs, an) >= 0 || enum_table_find(enums, an) >= 0 { return 0 - 1 }
                 count = count + 1
@@ -6685,7 +6701,7 @@ fn checker_check_impl_def_inplace(c: *mut Checker, opt: Option<Box<ImplDef> >) w
             // drift, the body's sig lookup misses and effect checking silently degrades.
             let saved_tp_scope = (*c).type_param_scope
             (*c).type_param_scope = type_param_list_concat(impl_target_bare_type_params_at((*c).structs, (*id).target_type, (*id).target_type.type_args, 0, impl_target_unit_bits((*c).units, (*id).target_type.type_args), (*id).span), saved_tp_scope)
-            let tmpl_idx = generic_impl_template_index((*c).structs, (*c).enums, (*id).target_type)
+            let tmpl_idx = generic_impl_template_index((*c).structs, (*c).enums, (*id))
             if tmpl_idx >= 0 {
                 (*c).current_impl_type = ty_named(checker_copy_string_list_to_name((*id).target_type.path.segments))
             } else {
@@ -6795,7 +6811,7 @@ fn checker_collect_impl_def_inplace(c: *mut Checker, opt: Option<Box<ImplDef> >)
             // method signature (`impl Map<K, V>`: K is not kelvin).
             let saved_tp_scope = (*c).type_param_scope
             (*c).type_param_scope = type_param_list_concat(impl_target_bare_type_params_at((*c).structs, (*id).target_type, (*id).target_type.type_args, 0, impl_target_unit_bits((*c).units, (*id).target_type.type_args), (*id).span), saved_tp_scope)
-            let tmpl_idx = generic_impl_template_index((*c).structs, (*c).enums, (*id).target_type)
+            let tmpl_idx = generic_impl_template_index((*c).structs, (*c).enums, (*id))
             if tmpl_idx >= 0 {
                 // `impl Pair<T, U>` over the template's own parameters: the methods
                 // belong to template `Pair`. Lowering the target minted a
@@ -24510,7 +24526,7 @@ impl Checker {
                 let saved_tp_scope = self.type_param_scope
                 var c = self
                 c.type_param_scope = type_param_list_concat(impl_target_bare_type_params_at(c.structs, (*id).target_type, (*id).target_type.type_args, 0, impl_target_unit_bits(c.units, (*id).target_type.type_args), (*id).span), saved_tp_scope)
-                let tmpl_idx = generic_impl_template_index(c.structs, c.enums, (*id).target_type)
+                let tmpl_idx = generic_impl_template_index(c.structs, c.enums, (*id))
                 if tmpl_idx >= 0 {
                     let tmpl_name = checker_copy_string_list_to_name((*id).target_type.path.segments)
                     c.current_impl_type = ty_named(tmpl_name)
@@ -24797,7 +24813,7 @@ impl Checker {
                 let saved_tp_scope = self.type_param_scope
                 var c = self
                 c.type_param_scope = type_param_list_concat(impl_target_bare_type_params_at(c.structs, (*id).target_type, (*id).target_type.type_args, 0, impl_target_unit_bits(c.units, (*id).target_type.type_args), (*id).span), saved_tp_scope)
-                let tmpl_idx = generic_impl_template_index(c.structs, c.enums, (*id).target_type)
+                let tmpl_idx = generic_impl_template_index(c.structs, c.enums, (*id))
                 if tmpl_idx >= 0 {
                     c.current_impl_type = ty_named(checker_copy_string_list_to_name((*id).target_type.path.segments))
                 } else {
