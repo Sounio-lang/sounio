@@ -77,24 +77,35 @@ def octNeg (x : Oct) : Oct :=
 -- ---------------------------------------------------------------------------
 
 /-- Full explicit octonion multiplication formula derived from Cayley-Dickson.
-    Each component is a bilinear polynomial in the 16 input variables. -/
+    Each component is a bilinear polynomial in the 16 input variables.
+
+    **Sign convention.** This must match the canonical Sounio implementation
+    in `stdlib/algebra/octonion.sio` (mirrored bit-for-bit in
+    `scripts/research/ossm_168_dryrun/octonion.py`), *not* an independently
+    re-derived formula: an earlier version of this file used a different
+    sign pattern on the e4..e7 cross terms that, while agreeing with the
+    canonical version on basis products (so `basis_*` spot-checks below
+    still passed), failed to satisfy the alternative law in general --
+    e.g. for x = e4+e5, y = e2, x(xy) = (0,0,2,0,0,0,0,0) but
+    (x·x)y = (0,0,-2,0,0,0,0,0). Verified against both a from-scratch
+    Cayley-Dickson doubling of quaternions and `octonion.py` before fixing. -/
 def octMul (x y : Oct) : Oct where
   e0 :=   x.e0 * y.e0 - x.e1 * y.e1 - x.e2 * y.e2 - x.e3 * y.e3
         - x.e4 * y.e4 - x.e5 * y.e5 - x.e6 * y.e6 - x.e7 * y.e7
   e1 :=   x.e0 * y.e1 + x.e1 * y.e0 + x.e2 * y.e3 - x.e3 * y.e2
-        - x.e4 * y.e5 + x.e5 * y.e4 + x.e6 * y.e7 - x.e7 * y.e6
-  e2 :=   x.e0 * y.e2 - x.e1 * y.e3 + x.e2 * y.e0 + x.e3 * y.e1
-        - x.e4 * y.e6 - x.e5 * y.e7 + x.e6 * y.e4 + x.e7 * y.e5
-  e3 :=   x.e0 * y.e3 + x.e1 * y.e2 - x.e2 * y.e1 + x.e3 * y.e0
-        - x.e4 * y.e7 + x.e5 * y.e6 - x.e6 * y.e4 + x.e7 * y.e5
-  e4 :=   x.e0 * y.e4 - x.e1 * y.e5 - x.e2 * y.e6 - x.e3 * y.e7
-        + x.e4 * y.e0 + x.e5 * y.e1 + x.e6 * y.e2 + x.e7 * y.e3
-  e5 :=   x.e0 * y.e5 + x.e1 * y.e4 + x.e2 * y.e7 - x.e3 * y.e6
-        - x.e4 * y.e1 + x.e5 * y.e0 - x.e6 * y.e3 + x.e7 * y.e2
-  e6 :=   x.e0 * y.e6 - x.e1 * y.e7 + x.e2 * y.e4 + x.e3 * y.e5
-        - x.e4 * y.e2 + x.e5 * y.e3 + x.e6 * y.e0 - x.e7 * y.e1
-  e7 :=   x.e0 * y.e7 - x.e1 * y.e6 + x.e2 * y.e5 + x.e3 * y.e4
-        - x.e4 * y.e3 - x.e5 * y.e2 + x.e6 * y.e1 + x.e7 * y.e0
+        + x.e4 * y.e5 - x.e5 * y.e4 - x.e6 * y.e7 + x.e7 * y.e6
+  e2 :=   x.e0 * y.e2 + x.e2 * y.e0 - x.e1 * y.e3 + x.e3 * y.e1
+        + x.e4 * y.e6 - x.e6 * y.e4 + x.e5 * y.e7 - x.e7 * y.e5
+  e3 :=   x.e0 * y.e3 + x.e3 * y.e0 + x.e1 * y.e2 - x.e2 * y.e1
+        + x.e4 * y.e7 - x.e7 * y.e4 - x.e5 * y.e6 + x.e6 * y.e5
+  e4 :=   x.e0 * y.e4 + x.e4 * y.e0 - x.e1 * y.e5 + x.e5 * y.e1
+        - x.e2 * y.e6 + x.e6 * y.e2 - x.e3 * y.e7 + x.e7 * y.e3
+  e5 :=   x.e0 * y.e5 + x.e5 * y.e0 + x.e1 * y.e4 - x.e4 * y.e1
+        - x.e2 * y.e7 + x.e7 * y.e2 + x.e3 * y.e6 - x.e6 * y.e3
+  e6 :=   x.e0 * y.e6 + x.e6 * y.e0 + x.e1 * y.e7 - x.e7 * y.e1
+        + x.e2 * y.e4 - x.e4 * y.e2 - x.e3 * y.e5 + x.e5 * y.e3
+  e7 :=   x.e0 * y.e7 + x.e7 * y.e0 - x.e1 * y.e6 + x.e6 * y.e1
+        + x.e2 * y.e5 - x.e5 * y.e2 + x.e3 * y.e4 - x.e4 * y.e3
 
 -- ---------------------------------------------------------------------------
 -- §5. Octonion conjugate and norm squared
