@@ -105,7 +105,7 @@ _sounio_engine_md5() {
 # bin/madaros-linux-x86_64 and every test ran on it. MADAROS_RAW_BIN, a
 # SOUNIO_SOUC_BIN override and a non-bin/souc SOUC_BIN were misreported the same
 # way, and the gen3.elf refusal below could fire on runs that were not lean_single.
-_sounio_is_elf() { [[ -n "${1:-}" && -x "$1" && "$(head -c 2 "$1" 2>/dev/null)" != "#!" ]]; }
+_sounio_is_elf() { [[ -n "${1:-}" && -x "$1" && "$(head -c 4 "$1" 2>/dev/null)" == $'\x7fELF' ]]; }
 _sounio_lean_elf="$ROOT_DIR/bin/souc-lean-single-x86_64"
 [[ -x "$_sounio_lean_elf" ]] || _sounio_lean_elf="$ROOT_DIR/bin/souc-linux-x86_64"
 if [[ -n "${SOUNIO_TEST_SOUC_BIN:-}" ]]; then
