@@ -759,6 +759,20 @@ var LOWER_FN_TUPLE_ARR_COUNT: i64 = 0
 var LOWER_FN_TUPLE_ARR_HASH: [i64; 4096] = [0; 4096]
 var LOWER_FN_TUPLE_ARR_MASK: [i64; 4096] = [0; 4096]
 
+// The table above is a global, process-lifetime side table with no per-entry
+// invalidation: line ~807 refuses to overwrite an existing nonzero mask for a
+// name, and nothing removes an entry for a function that stops returning an
+// f64-array tuple. A second frontend load in the same process (LSP, or any
+// caller compiling more than one program per process) would otherwise see the
+// FIRST program's masks bleed into the second. Call this once per
+// compilation, alongside fo_xfer_global_reset(), before collecting modules —
+// not once per module, since fo_preregister_program_items_multipass calls the
+// collector once per loaded module and must keep accumulating within one
+// compilation.
+pub fn lower_fn_tuple_arr_reset() with Mut {
+    LOWER_FN_TUPLE_ARR_COUNT = 0
+}
+
 fn lower_type_list_f64_array_mask(opt: &Option<Box<TypeExprList>>, bit: i64) -> i64 with Mut, Panic, Div {
     match *opt {
         Some(list) => {
@@ -5526,6 +5540,7 @@ fn lowerer_lower_program_items_mut(
     items: Option<Box<ItemList>>
 ) with Mut, Panic, Div, Alloc, IO {
     fo_xfer_global_reset()
+    lower_fn_tuple_arr_reset()
     lower_fn_tuple_f64_arrays_collect(&items)
     // Pre-register FO transfers so reverse-order pure helpers expand nested calls.
     lowerer_fo_preregister_pure_fns_multipass_mut(lo, &items)
@@ -15380,6 +15395,13 @@ impl Lowerer {
 
     fn lower_program_items_ref(self, items: &Option<Box<ItemList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         fo_xfer_global_reset()
+        // This ref-based path (production streaming: module_native_streaming.sio ->
+        // lower_program_to_ir_ordered_with_epistemic_boxed_trace_ref -> here) never
+        // called the tuple-array collector, so the f64-array-tuple-return fix only
+        // took effect when an earlier, unrelated module-frontend preflight happened
+        // to populate the table as a side effect first.
+        lower_fn_tuple_arr_reset()
+        lower_fn_tuple_f64_arrays_collect(items)
         var lo = self
         lowerer_fo_preregister_pure_fns_multipass_mut(&! lo, items)
         var current = items
