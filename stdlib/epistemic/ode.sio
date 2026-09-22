@@ -452,7 +452,11 @@ fn ode_system_params_present(sys: &ODESystem, p: &ODEParams) -> bool with Mut, P
 // Input variances must be finite and non-negative. A NaN, infinite or negative INPUT variance is
 // invalid from the start (it is not round-off), so it sets covariance_mode 2 even when no step
 // runs (an empty interval), instead of only after the first step.
-fn ode_initial_covariance_ok(state: &EState, p: &ODEParams, n: i64) -> bool with Mut, Div, Panic {
+// np is the MODEL's parameter count (ode_system_n_params), not p.n_params: a caller-set but
+// irrelevant slot (e.g. p[63] on a 1-parameter system) must not be able to fail this check --
+// and so force covariance_mode 2 on an otherwise valid solve -- over a variance the augmented
+// covariance never reads in the first place (it is sized off np too, see augcov_init).
+fn ode_initial_covariance_ok(state: &EState, p: &ODEParams, n: i64, np: i64) -> bool with Mut, Div, Panic {
     var i = 0
     while i < n {
         if i < 64 {
@@ -462,7 +466,7 @@ fn ode_initial_covariance_ok(state: &EState, p: &ODEParams, n: i64) -> bool with
         i = i + 1
     }
     var k = 0
-    while k < p.n_params {
+    while k < np {
         if k < 64 {
             let v = p.param_variances[k]
             if !ode_finite(v) || v < 0.0 { return false }
@@ -480,7 +484,8 @@ fn ode_initial_covariance_ok(state: &EState, p: &ODEParams, n: i64) -> bool with
 //   - the system's n_dims is the built-in's own (ode_system_dims_ok) and within 1..64, the initial
 //     state has that many dimensions, and every parameter the system reads was SET
 //     (ode_system_params_present); an unknown system id is invalid
-//   - every model parameter p[0..n_params) finite
+//   - every model parameter the system reads (p[0..ode_system_n_params(id)), NOT p[0..n_params):
+//     an irrelevant slot the caller also happened to set must stay inert, see augcov_init) finite
 //   - adaptive: rtol, atol finite and >= 0
 fn ode_solve_inputs_ok(t_start: f64, t_end: f64, opts: &SolverOptions, p: &ODEParams, sys: &ODESystem, y0_dims: i64, adaptive: bool) -> bool with Mut, Div, Panic {
     if !ode_finite(t_start) || !ode_finite(t_end) { return false }
@@ -490,12 +495,15 @@ fn ode_solve_inputs_ok(t_start: f64, t_end: f64, opts: &SolverOptions, p: &ODEPa
     if !ode_system_dims_ok(sys) { return false }
     if y0_dims != sys.n_dims { return false }
     if !ode_system_params_present(sys, p) { return false }
-    // every model parameter must be finite: a NaN/inf rate is invalid INPUT (status 3), not an
-    // integration failure (status 2), and on an empty interval no right-hand side would ever run
-    // to expose it
+    // every model parameter the system actually reads must be finite: a NaN/inf rate is invalid
+    // INPUT (status 3), not an integration failure (status 2), and on an empty interval no
+    // right-hand side would ever run to expose it. Bounded by the MODEL's own count, not
+    // p.n_params: an irrelevant slot the caller also set (e.g. p[63] on a 1-parameter system)
+    // must not be able to fail this on a value the solver never reads.
+    let sys_np = ode_system_n_params(sys.system_id)
     if p.n_params < 0 || p.n_params > 64 { return false }
     var k = 0
-    while k < p.n_params {
+    while k < sys_np {
         if !ode_finite(p.params[k]) { return false }
         k = k + 1
     }
@@ -1646,7 +1654,7 @@ pub fn solve_ode(
     var cov = augcov_init(&state, &p, sys.n_dims, sys_np)
     if !full_cov { sol.covariance_mode = 0 }
 
-    let input_cov_ok = ode_initial_covariance_ok(&state, &p, sys.n_dims)
+    let input_cov_ok = ode_initial_covariance_ok(&state, &p, sys.n_dims, sys_np)
     if !input_cov_ok { sol.covariance_mode = 2 }
     solution_record(&!sol, t, &state)
     // A non-finite starting state is status 3 even when the interval is empty (the loop below
