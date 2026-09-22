@@ -792,9 +792,25 @@ under `leanprover/lean4:v4.33.0`. Every claim is stated on *variances* rather
 than standard uncertainties — since √ is monotone on the non-negatives,
 comparing variances is comparing uncertainties, and the square root never has to
 be constructed; in that form every statement is polynomial and the linear ones
-close under `omega`. `#print axioms` reports only `propext` and `Quot.sound` on
-the arithmetic theorems, and the d-separation theorems depend on **no axioms at
-all** (closed by `rfl`).
+close under `omega`.
+
+The axiom dependencies are **measured here rather than quoted**, by appending
+`#print axioms` for all fifteen names and re-running (§8.2). Nine arithmetic
+theorems, six d-separation theorems:
+
+| axioms reported | theorems |
+|---|---|
+| `[propext, Quot.sound]` | `quadrature_iff_zero_covariance`, `quadrature_sound_of_independent`, `quadrature_understates_of_positive_covariance`, `quadrature_sound_iff_nonpositive_covariance`, `additive_sound`, `additive_tight_at_unit_correlation`, `quadrature_below_additive` |
+| **`[propext]` alone** | `quadrature_understates_correlated_sum`, `accumulation_agrees_at_one_step` |
+| **none** | all six d-separation theorems: `chain_blocked_by_conditioning`, `fork_blocked_by_conditioning`, `collider_blocked_marginally`, `collider_opened_by_conditioning`, `collider_inverts_the_others`, `conditioning_not_monotone` |
+
+> **[W] The published statement was right in substance and wrong in both
+> directions of detail, and is corrected from measurement.** It said `propext`
+> *and* `Quot.sound` on the arithmetic theorems: two of them, including the √N
+> law that §5.1–5.2 measure, need only `propext`. And it named three
+> axiom-free d-separation theorems: all **six** are axiom-free. Nothing in
+> §5.1–5.4 depends on the difference; it is corrected because it is now
+> measurable and was not measured before.
 
 Principal statements: `quadrature_iff_zero_covariance` (quadrature agrees with
 JCGM eq. 13 **iff** cov = 0 — it is the independence law, not an approximation);
@@ -1210,19 +1226,43 @@ g++ -std=c++23 -O2 -o band_crosscheck gri30_h2_band_crosscheck.cpp
 ./band_crosscheck ../gri30_h2_mechanism.json                     # ~6 min
 ```
 
-The Lean development is **not reproducible from either tree named above**, and
-the command originally printed here (`cd formal/lean4 && lake build
-SounioIndepComposition`) is withdrawn **[W]**. `formal/lean4/` in the upstream
-repository carries a Lake project but not this module's source — only stale
-`.lake/build/` artefacts from a build made elsewhere — and the frozen snapshot
-carries the source at `formal/SounioIndepComposition.lean` with no Lake project
-beside it. The development lives in the sibling pull request that targets the
-d-separation work, which is where `lake build` resolves it; §5.5's figures (15
-theorems, zero `sorry`, `#print axioms` output, toolchain
-`leanprover/lean4:v4.33.0`) are transcribed from that branch. No substitute
-invocation is offered here, because none was run: the Lean toolchain is not
-installed in the environment of §2.7, so any command given would be asserted
-rather than measured. See §8.4.
+The Lean development does **not** build through Lake in either tree, and the
+command originally printed here is withdrawn **[W]**. Measured, not inferred:
+
+```sh
+cd formal/lean4 && lake build SounioIndepComposition
+# error: unknown target `SounioIndepComposition`     (exit 1)
+```
+
+`formal/lean4/` in the upstream repository carries a Lake project but not this
+module's source — only stale `.lake/build/` artefacts from a build made
+elsewhere, which is worse than absence because it looks like evidence.
+
+**It is nevertheless reproducible, standalone, against the frozen snapshot**,
+which is what this block now prints:
+
+```sh
+elan toolchain install leanprover/lean4:v4.33.0    # the pin in formal/lean4/lean-toolchain
+lean formal/SounioIndepComposition.lean            # snapshot v1.0.3; exit 0, no diagnostics
+```
+
+Verified at 2026-09-22 under `Lean (version 4.33.0, x86_64-unknown-linux-gnu,
+commit d8b18978322de05a8f3dba51ef03cf5461676c17, Release)`: the file compiles
+clean, carries **15 `theorem` declarations and zero occurrences of `sorry`**,
+and the per-theorem axiom table of §5.5 is produced by appending
+`#print axioms Sounio.IndepComposition.<name>` for each of the fifteen and
+re-running. Being Mathlib-free core Lean 4, it needs no Lake project and no
+dependency fetch — which is why the absence of one is not an obstacle.
+
+> **[W] Corrected 2026-09-22, and the error was mine, not the record's.** The
+> first version of this paragraph said no substitute invocation could be offered
+> because "the Lean toolchain is not installed". That was `command -v lake lean
+> elan` returning nothing — and `elan` was installed all along, at
+> `~/.elan/bin`, simply not on `PATH`, with the pinned toolchain v4.33.0 and
+> v4.33.1 both present. A negative result from the wrong instrument was read as
+> a property of the environment. That is §6 instance (1) committed by this
+> manuscript about itself, and it cost the reader a reproduction path that
+> existed.
 
 Diagnostic probes: `rep_traj_bug.py` (§3.2, §3.3, §3.5), `rep_adiabatic_bug.py`
 (§3.4), `rep_prodfix.py` (§3.5), `rep_1atm.py` (§3.6), `rep_tolerance.py`
@@ -1258,16 +1298,16 @@ difference is the audit working, not a defect.
   an unpacked snapshot. This is recorded explicitly because a section citing
   files a reader does not have is precisely the defect §8.3 audits for — here it
   is intentional and scoped.
-- The **Lean development** is in neither tree in buildable form: the upstream
-  `formal/lean4/` has a Lake project but no `SounioIndepComposition.lean`
-  source, and the snapshot has the source at
-  `formal/SounioIndepComposition.lean` with no Lake project. §5.5's figures are
-  transcribed from the branch that carries it, and §8.2 withdraws the `lake
-  build` command rather than printing one that cannot run **[W]**. This is the
-  same pathology as the six missing probe artefacts above, found in this
-  manuscript by a reviewer after §8.3's auditor had passed — the auditor checks
-  for a *named file present in the released tree*, and a `cd` into a directory
-  that exists, holding a Lake project but not the module, satisfies it.
+- The **Lean development** does not build through Lake in either tree: the
+  upstream `formal/lean4/` has a Lake project but no
+  `SounioIndepComposition.lean` source, and the snapshot has the source at
+  `formal/SounioIndepComposition.lean` with no Lake project. The `lake build`
+  command is withdrawn and replaced by the standalone `lean` invocation of
+  §8.2, which is measured and does reproduce §5.5 in full **[W]**. What this
+  cost is worth recording: the auditor of §8.3 passed the section, because its
+  criterion is a *named file present in the released tree* and a `cd` into a
+  directory that exists — holding a Lake project but not the module — satisfies
+  it. The gap was found by a reviewer, not by the instrument built for it.
 - This manuscript is not part of the snapshot; the snapshot is the measurement
   record and its producers.
 
@@ -1326,8 +1366,10 @@ not that the method misbehaves.
 
 ### Appendix D — statements of the 15 Lean theorems
 
-With `#print axioms` output for each; see §5.5 for the principal ones. Built
-under `leanprover/lean4:v4.33.0`; zero `sorry`.
+With the measured `#print axioms` output for each; see §5.5 for the table and
+the principal statements. Built under `leanprover/lean4:v4.33.0` (commit
+`d8b18978322de05a8f3dba51ef03cf5461676c17`); 15 theorems, zero `sorry`,
+reproduced by the standalone command in §8.2.
 
 ### Appendix E — the nine sections remediated by the provenance audit
 

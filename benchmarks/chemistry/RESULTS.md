@@ -1029,20 +1029,33 @@ H/O checkpoint prose, not to this.
 cd formal/lean4 && lake build SounioIndepComposition
 ```
 
-> **The command above does not run in this tree, and saying "sibling PR" was
-> not enough — corrected 2026-09-22.** `formal/lean4/` here carries a Lake
-> project but **no `SounioIndepComposition.lean` source**; what is present under
-> `formal/lean4/.lake/build/` is stale output from a build made elsewhere, which
-> is worse than absence because it looks like evidence. The frozen snapshot
-> carries the source at `formal/SounioIndepComposition.lean` with **no Lake
-> project beside it**, so `lake build` resolves in neither tree a reader has.
-> The figures below are transcribed from the branch that carries the
-> development. No substitute invocation is given, because none was run: no Lean
-> toolchain is installed in the environment this document records.
+> **The command above does not run in this tree — corrected 2026-09-22, and
+> then corrected again the same day.** Measured:
+> `cd formal/lean4 && lake build SounioIndepComposition` →
+> ``error: unknown target `SounioIndepComposition` `` (exit 1). `formal/lean4/`
+> here carries a Lake project but **no source for the module**; what sits under
+> `formal/lean4/.lake/build/` is stale output from a build made elsewhere,
+> which is worse than absence because it looks like evidence. The frozen
+> snapshot carries the source at `formal/SounioIndepComposition.lean` with **no
+> Lake project beside it**, so `lake build` resolves in neither tree.
 >
-> §7.4's auditor passed this section, because its criterion is a *named file
-> present in the released tree* and the command names a directory, not a file.
-> That is a gap in the auditor, recorded here rather than patched in this pass.
+> **The development is reproducible anyway, and the first correction wrongly
+> said it was not.** Being Mathlib-free core Lean 4, it needs no Lake project:
+> ```sh
+> lean formal/SounioIndepComposition.lean     # snapshot v1.0.3; exit 0, no diagnostics
+> ```
+> That is what the Verification block below now runs. The first correction
+> claimed "no Lean toolchain is installed in the environment this document
+> records", on the strength of `command -v lake lean elan` returning nothing.
+> `elan` was installed the whole time at `~/.elan/bin`, off `PATH`, with the
+> pinned v4.33.0 present. **A negative result from the wrong instrument was
+> read as a property of the environment** — §6.3 instance (1), committed by
+> this document about itself, and it cost a reproduction path that existed.
+>
+> §7.4's auditor passed this section throughout, because its criterion is a
+> *named file present in the released tree* and the command names a directory,
+> not a file. That is a gap in the auditor, recorded here rather than patched
+> in this pass.
 
 Section 5 measures a band that scales as √dt and an underestimation that grows
 as √(T/dt). That is not a fitted exponent — it is derivable, and it is now
@@ -1083,12 +1096,36 @@ uncertainties: since √ is monotone on the non-negatives, comparing variances
 In that form every statement is polynomial, and the linear ones close under
 `omega`.
 
-**Verification.** 15 theorems, **zero `sorry`**. `#print axioms` reports only
-`propext` and `Quot.sound` — the standard Lean axioms — on the arithmetic
-theorems, and the d-separation theorems **depend on no axioms at all**
-(`collider_opened_by_conditioning`, `collider_inverts_the_others`,
-`conditioning_not_monotone` are closed by `rfl`). Built under
-`leanprover/lean4:v4.33.0`, the toolchain `formal/lean4/lean-toolchain` pins.
+**Verification, re-measured 2026-09-22 from the frozen snapshot** rather than
+quoted:
+
+```sh
+lean formal/SounioIndepComposition.lean                 # snapshot v1.0.3; exit 0
+grep -c '^theorem ' formal/SounioIndepComposition.lean  # 15
+grep -c 'sorry'     formal/SounioIndepComposition.lean  # 0
+```
+
+under `Lean (version 4.33.0, x86_64-unknown-linux-gnu, commit
+d8b18978322de05a8f3dba51ef03cf5461676c17, Release)` — the toolchain
+`formal/lean4/lean-toolchain` pins. **15 theorems, zero `sorry`**, confirmed.
+
+Axiom dependencies, by appending `#print axioms Sounio.IndepComposition.<name>`
+for all fifteen and re-running:
+
+| axioms reported | count | theorems |
+|---|---:|---|
+| `[propext, Quot.sound]` | 7 | `quadrature_iff_zero_covariance`, `quadrature_sound_of_independent`, `quadrature_understates_of_positive_covariance`, `quadrature_sound_iff_nonpositive_covariance`, `additive_sound`, `additive_tight_at_unit_correlation`, `quadrature_below_additive` |
+| **`[propext]` alone** | 2 | `quadrature_understates_correlated_sum`, `accumulation_agrees_at_one_step` |
+| **none** | 6 | `chain_blocked_by_conditioning`, `fork_blocked_by_conditioning`, `collider_blocked_marginally`, `collider_opened_by_conditioning`, `collider_inverts_the_others`, `conditioning_not_monotone` |
+
+> **Corrected from measurement.** This paragraph previously said `#print axioms`
+> reports `propext` *and* `Quot.sound` on the arithmetic theorems, and named
+> three axiom-free d-separation theorems. Both are off, in opposite directions:
+> two arithmetic theorems — including
+> `quadrature_understates_correlated_sum`, the √N law §5 measures — need only
+> `propext`, and **all six** d-separation theorems are axiom-free, not three.
+> Nothing in §5 depends on the difference. It is corrected because the file now
+> has a producer and the numbers can be read off it instead of recalled.
 
 **What this does not establish.** The theorems say what follows *given* a
 correlation structure; they do not certify that any particular program's
@@ -1600,9 +1637,15 @@ g++ -std=c++23 -O2 -o band_crosscheck gri30_h2_band_crosscheck.cpp
 ```
 
 The `cd ../../../formal/lean4 && lake build SounioIndepComposition` line that
-closed this block is **withdrawn**: it runs in neither this tree nor the frozen
-snapshot, for the reason given under §6.2. §6.2's figures come from the branch
-carrying the development.
+closed this block is **withdrawn** — it fails with `unknown target` — and is
+replaced, against the frozen snapshot, by
+
+```sh
+lean formal/SounioIndepComposition.lean    # exit 0, no diagnostics
+```
+
+which needs no Lake project because the development is Mathlib-free core
+Lean 4. §6.2 gives the measured verification and the per-theorem axiom table.
 
 ### 7.2 Oracle-verification probes
 
