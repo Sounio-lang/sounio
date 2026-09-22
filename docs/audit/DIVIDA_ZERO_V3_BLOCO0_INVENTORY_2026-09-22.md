@@ -71,35 +71,44 @@ escopo declarado deste Bloco (instrumentos de medição de corpus/inventário), 
 scripts de outra lane sem coordenação prévia viola §11 do plano v3. Registrado como
 achado; publicado no bus de coordenação (`bin/sounio-coord send`, `msg-1790076290-751-10405`).
 
-### 2.2 Seletor "slow": ausente em `main`, existente mas mal fiado em #2622
+### 2.2 Seletor "slow": existe (via wrapper), mas a CI de #2622 não o escopa
 
-Correção de um erro desta seção (apontado em revisão, `Sounio-lang/sounio#2637`
-`discussion_r4071109755`): a leitura original — "não há marcador `slow` localizável" —
-era um artefato de ter grepado só `main`/`scripts/run_sio_test_suite.sh` (v1) pelas
-strings erradas (`@slow`), não o mecanismo real. Recontado com a branch de #2622
-(`35513cf80f22…`, buscada nesta sessão via `git fetch origin pull/2622/head`):
+Esta seção já foi corrigida uma vez (histórico abaixo) e a correção anterior **também
+estava errada** — registrado aqui integralmente, porque um instrumento que erra duas
+vezes sobre o mesmo fato precisa mostrar o rastro, não só o resultado final:
 
-- **Em `main` (`69b7fe7546e8`, base desta PR):** confirmado — `scripts/run_sio_test_suite.sh`
-  não tem nenhuma ocorrência de `slow` nem de `requires:` (`grep -c "requires:"` = 0). O
-  seletor realmente não existe na árvore que este Bloco 0 audita.
-- **Em #2622:** o script **novo** `scripts/dev/run_sio_test_suite_v2.sh` implementa
-  `//@ requires: slow` (linha 461), gated por `SOUNIO_SLOW_TESTS_AVAILABLE`, com um flag
-  `--test-list FILE` dedicado para escopar a seleção (linha 189+). **Mas** o job
-  `slow-lane` do `.github/workflows/ci.yml` de #2622 não invoca esse script v2 — ele roda
-  `bash scripts/run_sio_test_suite.sh --format junit --jobs 4` (o **v1**, sem qualquer
-  noção de `requires: slow`), com `SOUNIO_SLOW_TESTS_AVAILABLE: "1"` como variável de
-  ambiente que o v1 nunca lê. O efeito observável é o que a revisão apontou — o job
-  "lento" reexecuta a suíte inteira, N e S juntos, sob o orçamento de tempo pensado só
-  para S — mas o mecanismo preciso é "workflow chama o script errado (v1, sem seletor)",
-  não "workflow chama v2 sem `--test-list`". Nenhuma das duas leituras é uma correção
-  cosmética: até o job trocar para `run_sio_test_suite_v2.sh --test-list <arquivo-S>`,
-  a alegação de #2622 "zero falhas na seleção que exclui casos lentos" (plano v3 §3) não
-  tem lastro em um seletor que rode isoladamente.
-- Isto **permanece não corrigido nesta entrega** — é dívida de #2622/CI (`ci.yml`), fora
-  do write-set deste Bloco 0 (instrumentos de inventário, branch
-  `claude/sounio-divida-zero-v3-g7svhy`); alterar o workflow de outra PR sem coordenação
-  viola §11 do plano v3. Fica como pré-requisito explícito para §5.2/§6.2 antes de
-  qualquer partição N/S ser declarada confiável.
+- **Erro original:** "não há marcador `slow` localizável" — vinha de grepar
+  `scripts/run_sio_test_suite.sh` pelas strings erradas (`@slow`), sem notar que esse
+  arquivo é um wrapper de 5 linhas (`exec bash .../run_sio_test_suite.sh "$@"`), não o
+  harness real.
+- **Primeira correção (d245c5f7), também errada:** ao investigar o wrapper eu li seu
+  alvo nominal (`scripts/dev/run_sio_test_suite.sh`) como se fosse outro arquivo de
+  texto e apliquei `grep` nele diretamente — mas **é um symlink** (`120000` no
+  `git ls-tree`, confirmado tanto em `main` quanto em `pr-2622-recheck`), apontando para
+  `run_sio_test_suite_v2.sh`. Eu nunca segui o link; concluí que o job `slow-lane`
+  chamava "o v1, sem qualquer noção de `requires: slow`" — falso. (Apontado em revisão,
+  `discussion_r4071219101`'s review body, "Correct wrapper call chain...".)
+- **Estado real, verificado agora seguindo a cadeia completa** (`git ls-tree`, `readlink`,
+  `git show`, em `main` `69b7fe7546e8` e em `pr-2622-recheck` = #2622 `35513cf80f22…`):
+  `scripts/run_sio_test_suite.sh` → `exec` → `scripts/dev/run_sio_test_suite.sh`
+  (symlink) → `run_sio_test_suite_v2.sh`. Ou seja, o job `slow-lane` do `ci.yml` de
+  #2622, ao rodar `bash scripts/run_sio_test_suite.sh --format junit --jobs 4`, **chega
+  em v2**, não em algum "v1" sem seletor. Em `main`, esse mesmo v2 já suporta
+  `--test-list` mas **não** tem nenhuma ocorrência de `slow` (`grep -n slow
+  scripts/dev/run_sio_test_suite_v2.sh` → vazio) — o seletor `requires: slow`
+  (linha ~461, gated por `SOUNIO_SLOW_TESTS_AVAILABLE`) é adicionado pelo próprio
+  #2622. Logo: o job **consome** `SOUNIO_SLOW_TESTS_AVAILABLE` normalmente (a variável
+  não é lida por um script morto); o único defeito real é a ausência de `--test-list`
+  na chamada do `ci.yml`, fazendo o job rodar N e S juntos sob o orçamento pensado só
+  para S — exatamente o que a revisão original (`discussion_r4071109755`) disse antes
+  de eu "corrigi-la" incorretamente.
+- Isto **permanece não corrigido nesta entrega** — é dívida de #2622/CI (`ci.yml`, trocar
+  a chamada para incluir `--test-list <arquivo-S>`), fora do write-set deste Bloco 0
+  (instrumentos de inventário, branch `claude/sounio-divida-zero-v3-g7svhy`); alterar o
+  workflow de outra PR sem coordenação viola §11 do plano v3. Fica como pré-requisito
+  explícito para §5.2/§6.2 antes de qualquer partição N/S ser declarada confiável — e a
+  alegação de #2622 "zero falhas na seleção que exclui casos lentos" (plano v3 §3)
+  continua sem lastro em um seletor que rode isoladamente até essa flag ser adicionada.
 
 ## 3. Amostra do universo do corpus (§5.2) — contagens, não partição qualificada
 
@@ -115,7 +124,8 @@ nesta sessão):
 | Arquivos anotados `requires: madaros` (gramática do harness: `//@\s*requires:\s*madaros\b`) | 1,171 | `grep -rlE '//@ requires:[[:space:]]*madaros' tests/ --include='*.sio'` |
 | Arquivos `.sio` totais em `tests/` (informativo, do measure_repo_scale) | 4,530 | `scripts/dev/measure_repo_scale.sh` |
 
-Correção de três problemas desta tabela:
+Correção de quatro problemas desta tabela (apontado em revisão,
+`discussion_r4071264975`: o cabeçalho dizia "três" com quatro itens já listados):
 
 1. (Apontado em revisão, `Sounio-lang/sounio#2637` `discussion_r4071109816`.) A linha
    original rotulava os 31 resultados de `ls` como ".sio", mas 30 são `.sio` e 1 é
