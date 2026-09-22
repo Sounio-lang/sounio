@@ -103,6 +103,33 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     // NaN-safe: !(v_drug < 0.0) also catches a NaN turning this vacuous
     if !(v_drug < 0.0) { fail = fail + 1 println("FAIL: invalid input variance was laundered to a non-negative value by the round-off clamp") }
 
+    // ---- an unused parameter slot must not change the algorithm or the result ----------------
+    // p.n_params is the caller's highest SET index + 1, not how many parameters the system
+    // actually reads: exp_decay reads only p[0]. Setting an irrelevant p[63] (any value, even
+    // 0.0 with 0 variance) used to inflate n_dims + p.n_params past 64 and force the coarser
+    // diagonal-only fallback for this otherwise full-covariance-eligible system, silently
+    // changing the reported variance for physically identical inputs.
+    var init_c = estate_new(1)
+    estate_set(&!init_c, 0, y0, u0 * u0)
+    var p_clean = ode_params_new()
+    ode_params_set(&!p_clean, 0, kk, uk * uk)
+    let sol_clean = solve_ode(ode_system_exp_decay(), init_c, p_clean, 0.0, t_end, solver_options_fixed(dt, nsteps))
+
+    var init_g = estate_new(1)
+    estate_set(&!init_g, 0, y0, u0 * u0)
+    var p_garbage = ode_params_new()
+    ode_params_set(&!p_garbage, 0, kk, uk * uk)
+    ode_params_set(&!p_garbage, 63, 0.0, 0.0) // irrelevant to exp_decay's RHS
+    let sol_garbage = solve_ode(ode_system_exp_decay(), init_g, p_garbage, 0.0, t_end, solver_options_fixed(dt, nsteps))
+
+    let v_clean = solution_get_variance(&sol_clean, sol_clean.n_steps - 1, 0)
+    let v_garbage = solution_get_variance(&sol_garbage, sol_garbage.n_steps - 1, 0)
+    print("no garbage slot: covariance_mode=") print(sol_clean.covariance_mode) print(" var=") println(v_clean)
+    print("garbage p[63]:   covariance_mode=") print(sol_garbage.covariance_mode) print(" var=") println(v_garbage)
+    if sol_clean.covariance_mode != 1 { fail = fail + 1 println("FAIL: clean run must use full covariance") }
+    if sol_garbage.covariance_mode != 1 { fail = fail + 1 println("FAIL: an irrelevant parameter slot forced the diagonal fallback") }
+    if !(absf(v_clean - v_garbage) <= 1.0e-15) { fail = fail + 1 println("FAIL: an irrelevant parameter slot changed the reported variance") }
+
     if fail == 0 { println("ODE AUGMENTED COVARIANCE PASS") }
     fail
 }

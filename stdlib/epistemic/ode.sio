@@ -419,14 +419,33 @@ fn ode_system_dims_ok(sys: &ODESystem) -> bool {
     sys.n_dims == c
 }
 
+// Number of parameter SLOTS a built-in system reads, counting from index 0 (matching the
+// augmented covariance's contiguous parameter block, even for a system like linear_2/linear_3
+// whose own range starts above 0 -- see ode_system_params_present). This is NOT p.n_params: that
+// field is the caller's highest SET index + 1, so a caller can inflate it by setting an
+// irrelevant slot the system never reads (e.g. p[63] on a 1-parameter system). Used to size the
+// augmented state-parameter covariance from what the MODEL needs, not from what the caller
+// happened to populate, so an unused slot cannot silently switch solve_ode onto the coarser
+// diagonal fallback (n_dims + this > 64) or make it any wider than the model actually is.
+fn ode_system_n_params(id: i64) -> i64 {
+    if id == 1 { return 1 }
+    if id == 2 { return 44 }
+    if id == 3 { return 4 }
+    if id == 4 { return 6 }
+    if id == 5 { return 3 }
+    if id == 6 { return 3 }
+    0
+}
+
 fn ode_system_params_present(sys: &ODESystem, p: &ODEParams) -> bool with Mut, Panic {
     let id = sys.system_id
-    if id == 1 { return ode_params_range_set(p, 0, 1) }
-    if id == 2 { return ode_params_range_set(p, 0, 44) }
-    if id == 3 { return ode_params_range_set(p, 1, 4) }
-    if id == 4 { return ode_params_range_set(p, 1, 6) }
-    if id == 5 { return ode_params_range_set(p, 0, 3) }
-    if id == 6 { return ode_params_range_set(p, 0, 3) }
+    let hi = ode_system_n_params(id)
+    if id == 1 { return ode_params_range_set(p, 0, hi) }
+    if id == 2 { return ode_params_range_set(p, 0, hi) }
+    if id == 3 { return ode_params_range_set(p, 1, hi) }
+    if id == 4 { return ode_params_range_set(p, 1, hi) }
+    if id == 5 { return ode_params_range_set(p, 0, hi) }
+    if id == 6 { return ode_params_range_set(p, 0, hi) }
     false
 }
 
@@ -1153,15 +1172,18 @@ struct AugCov {
     dim: i64,
 }
 
-fn augcov_init(state: &EState, p: &ODEParams, n: i64) -> AugCov with Mut, Div, Panic {
-    var cov = AugCov { data: [0.0; 4096], dim: n + p.n_params }
+// np is the MODEL's parameter count (ode_system_n_params), not p.n_params -- see that function's
+// doc. p.n_params must be >= np here (ode_system_params_present already required every index in
+// [lo, np) to be set before a solve runs), so indices [0, np) are always populated.
+fn augcov_init(state: &EState, p: &ODEParams, n: i64, np: i64) -> AugCov with Mut, Div, Panic {
+    var cov = AugCov { data: [0.0; 4096], dim: n + np }
     var i = 0
     while i < n {
         if i < 64 { cov.data[i * 64 + i] = state.variances[i] }
         i = i + 1
     }
     var k = 0
-    while k < p.n_params {
+    while k < np {
         let a = n + k
         if a < 64 { cov.data[a * 64 + a] = p.param_variances[k] }
         k = k + 1
@@ -1257,6 +1279,9 @@ fn eode_step_values(
     }
 }
 
+// np is the MODEL's parameter count (ode_system_n_params), matching augcov_init's cov -- see
+// that function's doc. Must equal what built `cov`, or the matrix dimensions this function
+// walks (dim = n + np) would no longer match cov's actual layout.
 fn propagate_covariance_step(
     sys: &ODESystem,
     t: f64,
@@ -1264,11 +1289,11 @@ fn propagate_covariance_step(
     p: &ODEParams,
     dt: f64,
     mode: i64,
+    np: i64,
     cov: &!AugCov,
     n_evals: &!i64
 ) with Mut, Div, Panic {
     let n = sys.n_dims
-    let np = p.n_params
     let dim = n + np
     let eps = 1.0e-7
     var jm: [f64; 4096] = [0.0; 4096]
@@ -1612,8 +1637,13 @@ pub fn solve_ode(
     var t = t_start
     var step = 0
     var n_evals = 0
-    let full_cov = sys.n_dims + p.n_params <= 64
-    var cov = augcov_init(&state, &p, sys.n_dims)
+    // The MODEL's parameter count, not p.n_params: a caller-set but system-irrelevant slot (e.g.
+    // p[63] on a 1-parameter system) must not be able to inflate the augmented dimension past 64
+    // and silently force the coarser diagonal fallback for an otherwise-full-covariance-eligible
+    // system.
+    let sys_np = ode_system_n_params(sys.system_id)
+    let full_cov = sys.n_dims + sys_np <= 64
+    var cov = augcov_init(&state, &p, sys.n_dims, sys_np)
     if !full_cov { sol.covariance_mode = 0 }
 
     let input_cov_ok = ode_initial_covariance_ok(&state, &p, sys.n_dims)
@@ -1644,7 +1674,7 @@ pub fn solve_ode(
                 var before = estate_new(sys.n_dims)
                 estate_copy(&!before, &state)
                 eode_rk4_advance(&sys, t, &!state, &p, dt, &!n_evals)
-                propagate_covariance_step(&sys, t, &before, &p, dt, 0, &!cov, &!n_evals)
+                propagate_covariance_step(&sys, t, &before, &p, dt, 0, sys_np, &!cov, &!n_evals)
                 if !augcov_write_variances_checked(&cov, &!state, sys.n_dims, input_cov_ok) { sol.covariance_mode = 2 }
             } else {
                 eode_rk4_step(&sys, t, &!state, &p, dt, &!n_evals)
@@ -1691,8 +1721,10 @@ fn solve_ode_adaptive(
     var step = 0
     var n_evals = 0
     var n_rejected = 0
-    let full_cov = sys.n_dims + p.n_params <= 64
-    var cov = augcov_init(&state, &p, sys.n_dims)
+    // See solve_ode: the MODEL's parameter count, not p.n_params.
+    let sys_np = ode_system_n_params(sys.system_id)
+    let full_cov = sys.n_dims + sys_np <= 64
+    var cov = augcov_init(&state, &p, sys.n_dims, sys_np)
     if !full_cov { sol.covariance_mode = 0 }
 
     solution_record(&!sol, t, &state)
@@ -1713,7 +1745,7 @@ fn solve_ode_adaptive(
                 // Accept step — propagate uncertainty through the step just taken,
                 // differentiated at the pre-step point
                 if full_cov {
-                    propagate_covariance_step(&sys, t, &saved, &p, dt, 1, &!cov, &!n_evals)
+                    propagate_covariance_step(&sys, t, &saved, &p, dt, 1, sys_np, &!cov, &!n_evals)
                     augcov_write_variances(&cov, &!state, sys.n_dims)
                 } else {
                     propagate_variance_gum(&sys, t, &!state, &p, dt, &!n_evals)

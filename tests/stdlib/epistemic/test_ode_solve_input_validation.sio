@@ -341,11 +341,18 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     if m_zero.status != 1 || m_zero.n_steps != 1 { fail = fail + 1; println("FAIL: max_steps = 0 on a real interval is a zero-step budget: status 1, only the initial point") }
     if m_zero_e.status != 0 { fail = fail + 1; println("FAIL: max_steps = 0 on an empty interval still completes") }
 
-    // ---- the diagonal fallback must not erase an invalid variance -----------------------------------
-    // n_dims + n_params > 64 disables the full covariance and leaves the diagonal scheme (mode 0).
-    // System 1 needs only parameter 0; setting an unused parameter 63 makes n_params 64. The scheme's
-    // variance sum used to be clamped with ode_max(vi, 0.0): a NaN or negative INPUT variance became
-    // 0.0, i.e. "no uncertainty", although the solver had already flagged covariance_mode 2.
+    // ---- an unused parameter must not force the diagonal fallback, and an invalid variance ----
+    // ---- must survive it regardless -------------------------------------------------------------
+    // This used to set up n_dims + n_params > 64 (System 1 needs only parameter 0; an unused
+    // parameter 63 made p.n_params 64) to reach the diagonal scheme (mode 0) and check that its
+    // variance sum, once clamped with ode_max(vi, 0.0), doesn't turn a NaN/negative INPUT variance
+    // into 0.0 ("no uncertainty") despite the solver already flagging covariance_mode 2. That
+    // n_params-inflation mechanism is itself now the fixed defect covered in
+    // test_ode_augmented_covariance.sio (an irrelevant slot must not change the algorithm or the
+    // result): the fallback now sizes off what the MODEL reads (ode_system_n_params), which none
+    // of the six built-in systems ever exceeds 64 with, so mode 0 is no longer reachable this way.
+    // Kept here: the unused slot must still be inert, and covariance_mode 2 with an unerased
+    // invalid variance must still hold with the (now unavoidable) full-covariance path.
     var pfb = ode_params_new()
     ode_params_set(&!pfb, 0, 0.1, 0.0001)
     ode_params_set(&!pfb, 63, 5.0, 0.0)
@@ -355,14 +362,14 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     let fb_v_ok = solution_get_variance(&fb_ok, fb_ok.n_steps - 1, 0)
     let fb_v_neg = solution_get_variance(&fb_neg, fb_neg.n_steps - 1, 0)
     let fb_v_nan = solution_get_variance(&fb_nan, fb_nan.n_steps - 1, 0)
-    print("diagonal fallback: healthy mode=") print(fb_ok.covariance_mode) print(" var=") print(fb_v_ok)
+    print("unused-slot run: healthy mode=") print(fb_ok.covariance_mode) print(" var=") print(fb_v_ok)
     print(" | negative input: mode=") print(fb_neg.covariance_mode) print(" var=") print(fb_v_neg)
     print(" | NaN input: mode=") print(fb_nan.covariance_mode) print(" var=") println(fb_v_nan)
-    if fb_ok.covariance_mode != 0 { fail = fail + 1; println("FAIL: the fallback (n_dims + n_params > 64) must report covariance_mode 0") }
-    if !(fb_v_ok > 0.0) || !((fb_v_ok - fb_v_ok) == 0.0) { fail = fail + 1; println("FAIL: a healthy fallback solve must give a finite positive variance") }
-    if fb_neg.covariance_mode != 2 || fb_nan.covariance_mode != 2 { fail = fail + 1; println("FAIL: an invalid input variance must set covariance_mode 2 in the fallback too") }
-    if !(fb_v_neg < 0.0) { fail = fail + 1; println("FAIL: a negative variance was erased by the fallback (clamped to 0)") }
-    if !(fb_v_nan != fb_v_nan) { fail = fail + 1; println("FAIL: a NaN variance was erased by the fallback (turned into a number)") }
+    if fb_ok.covariance_mode != 1 { fail = fail + 1; println("FAIL: an unused parameter slot must not force the diagonal fallback") }
+    if !(fb_v_ok > 0.0) || !((fb_v_ok - fb_v_ok) == 0.0) { fail = fail + 1; println("FAIL: a healthy solve must give a finite positive variance") }
+    if fb_neg.covariance_mode != 2 || fb_nan.covariance_mode != 2 { fail = fail + 1; println("FAIL: an invalid input variance must set covariance_mode 2") }
+    if !(fb_v_neg < 0.0) { fail = fail + 1; println("FAIL: a negative variance was erased (clamped to 0)") }
+    if !(fb_v_nan != fb_v_nan) { fail = fail + 1; println("FAIL: a NaN variance was erased (turned into a number)") }
     // and the state is unaffected
     if !(absf(solution_get_value(&fb_neg, fb_neg.n_steps - 1, 0) - 0.904837418) <= 1.0e-6) { fail = fail + 1; println("FAIL: the state must not depend on the variance") }
 
