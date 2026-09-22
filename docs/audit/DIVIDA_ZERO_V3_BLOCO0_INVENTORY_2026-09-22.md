@@ -130,7 +130,7 @@ nesta sessão):
 | `tests/known_failures/` — arquivos totais (inclui `hardened_diagnostics_full_suite.txt`) | 31 | `ls tests/known_failures \| wc -l` |
 | Arquivos com `known_failure` no nome fora de `tests/known_failures/` | 4 | `find tests -iname '*known_failure*'`, excluindo o diretório e as 2 entradas já dentro dele |
 | Arquivos citando `known_failure`/`expected_failure`/`XPASS`/`xfail` no corpo | 18 | `grep -rl -e known_failure -e expected_failure -e XPASS -e xfail tests/ --include='*.sio'` |
-| Arquivos anotados `requires: madaros` (gramática do executor real, `run_sio_test_suite_v2.sh`: substring `//@ requires` + `requires:[[:space:]]*(.+)` + match exato contra `madaros`) | 1,171 | `grep -rlE '//@ requires:[[:space:]]*madaros[[:space:]]*$' tests/ --include='*.sio'` |
+| Arquivos anotados `requires: madaros` (gramática do executor real, `run_sio_test_suite_v2.sh`: substring `//@ requires` + `requires:[[:space:]]*(.+)` + match exato contra `madaros`) | 1,171 | `grep -rlE '//@ requires:[[:space:]]*madaros$' tests/ --include='*.sio'` |
 | Arquivos `.sio` totais em `tests/` (informativo, do measure_repo_scale) | 4,530 | `scripts/dev/measure_repo_scale.sh` |
 
 Correção de quatro problemas desta tabela (apontado em revisão,
@@ -176,7 +176,7 @@ Correção de quatro problemas desta tabela (apontado em revisão,
      dois-pontos), e então compara esse valor com `case "$requires" in madaros) ...`
      — **igualdade exata** contra a string `madaros`.
 
-   O comando `grep -rlE '//@ requires:[[:space:]]*madaros[[:space:]]*$' tests/ --include='*.sio'`
+   O comando `grep -rlE '//@ requires:[[:space:]]*madaros$' tests/ --include='*.sio'`
    (linha acima) já reproduz corretamente a gramática do executor real (espaço único
    fixo entre `//@` e `requires`, espaço opcional só após os dois-pontos) — produz
    **1,171** arquivos: 8 usam `//@ requires:madaros` sem espaço após os dois-pontos
