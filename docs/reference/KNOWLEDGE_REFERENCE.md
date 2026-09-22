@@ -28,11 +28,13 @@ struct Knowledge<T> {
 
 ## Constructors
 
-Use `Knowledge::new(...)`-style constructors (or domain helpers such as `measure(...)`) to create epistemic values.
+Use `Epistemic { val, variance, confidence }` struct literals (or `ep_measured(val, std_dev)` free fns) (or domain helpers such as `measure(...)`) to create epistemic values.
 
 ```sio
-let mass = Knowledge::new(70.0, uncertainty: 0.2)
-let dose = measure(500.0, uncertainty: 2.5, source: "instrument")
+use epistemic::knowledge::{ep_measured, ep_val, ep_std}
+
+let mass = ep_measured(70.0, 0.2)   // val=70.0, std=0.2, confidence=900/1000
+let dose = ep_measured(500.0, 2.5)   // Source label is dropped; provenance lives in stdlib/epistemic/provenance.sio
 ```
 
 Guidelines:
@@ -54,9 +56,13 @@ Typical first-order behavior:
 Example:
 
 ```sio
-let x = Knowledge::new(10.0, uncertainty: 0.5)
-let y = Knowledge::new(20.0, uncertainty: 0.3)
-let z = x + y
+use epistemic::knowledge::{ep_measured, ep_add, ep_val, ep_std}
+
+let x = ep_measured(10.0, 0.5)
+let y = ep_measured(20.0, 0.3)
+// Canonical free-fn arithmetic; `+` operator on Epistemic is not part of the
+// checked surface -- use ep_add() (GUM δ-method, uncorrelated).
+let z = ep_add(&x, &y)
 ```
 
 ## Effect Annotations with Epistemic Values
