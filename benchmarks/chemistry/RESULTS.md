@@ -15,10 +15,21 @@
 > setting an initial state the modules do not share. The published-regime
 > numbers are kept alongside, dated, for the record.
 
-**Every number on this page was produced by the command printed above it, at
-commit `98aa8e4d5151bbc61815bf910b6c31c3d0789f5f` (branch `claude/gri-mech-cantera-preprint-776qb9`), on
-2026-09-01.** Nothing is carried forward from an earlier log, a prior session,
-or a draft. Where a run was not performed, the row says so.
+**Every number on this page was produced by the command printed above it.**
+The base measurement pass ran at commit
+`98aa8e4d5151bbc61815bf910b6c31c3d0789f5f` (branch
+`claude/gri-mech-cantera-preprint-776qb9`) on **2026-09-01**. Nothing is
+carried forward from an earlier log, a prior session, or a draft. Where a run
+was not performed, the row says so.
+
+**This is not a closed date.** Corrections, re-measurements and newly-added
+verifications made after the base pass are marked **inline, at the point they
+apply**, each carrying its own date and command — 2026-09-01 through
+2026-09-03 for the reverse-rate defect, the regime corrections and the
+instrument-hid-the-defect instances, and **2026-09-22** for the reviewer-driven
+fixes to the reproduction commands and the Lean verification of §6.2. A number
+without an inline date is the base pass; a number with one is dated as it
+carries, not silently as of 2026-09-01.
 
 Environment: Linux x86-64, Python 3.11, `cantera 3.2.0`, `numpy 2.4.6`,
 `g++ (Ubuntu 13.3.0) -std=c++23 -O2`. Sounio compiler: the committed ELF
@@ -1636,18 +1647,24 @@ python3 benchmarks/chemistry/gri30_full_python_replica.py        # ~20 s
 python3 benchmarks/chemistry/gri30_full_cantera_parity.py        # ~1 s
 python3 benchmarks/chemistry/gri30_full_cantera_uq_reference.py --jobs 4   # ~8 s
 
-cd benchmarks/chemistry/cpp
-g++ -std=c++23 -O2 -o band_crosscheck gri30_h2_band_crosscheck.cpp
-./band_crosscheck ../gri30_h2_mechanism.json                     # ~6 min
+( cd benchmarks/chemistry/cpp && \
+  g++ -std=c++23 -O2 -o band_crosscheck gri30_h2_band_crosscheck.cpp && \
+  ./band_crosscheck ../gri30_h2_mechanism.json )               # ~6 min
 ```
 
+The C++ block above is parenthesised into a subshell so it does not leave the
+working directory changed for the command that follows — an earlier revision
+`cd`'d in place, which made the Lean command below resolve under
+`benchmarks/chemistry/cpp/formal/` and fail. That is the defect §6 catalogues,
+committed by this document about itself, twice **[W]**.
+
 The `cd ../../../formal/lean4 && lake build SounioIndepComposition` line that
-closed this block is **withdrawn** — it fails with `unknown target` — and is
-replaced, against the frozen snapshot, by
+originally closed this block is **withdrawn** — it fails with `unknown
+target` — and is replaced, against the frozen snapshot, by
 
 ```sh
 elan run leanprover/lean4:v4.33.0 lean formal/SounioIndepComposition.lean
-# path relative to repo root; exit 0, no diagnostics
+# path relative to repo root (the subshell above returns here); exit 0, no diagnostics
 ```
 
 which needs no Lake project because the development is Mathlib-free core
