@@ -12,7 +12,17 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.papers.gri30-c
 **Demetrios Chiuratto Agourakis**
 ORCID [0009-0001-8671-8878](https://orcid.org/0009-0001-8671-8878) · demetrios@agourakis.med.br
 
-**Preprint.** Target venue: SSRN. Version of 2026-09-03.
+**Preprint.** Target venue: SSRN. Version of 2026-09-03, last revised
+2026-09-22. The 2026-09-22 revision is a **post-version correction pass**
+against reviewer findings, not a re-measurement of the chemistry: it fixes the
+reproduction commands (§2.7, §8.2) and re-verifies the Lean development's
+build path and axiom dependencies (§5.5), with every change dated inline and
+marked **[W]** where it corrects a prior statement. No parity, residual,
+band-scaling or instrument-count result from the 2026-09-03 version changed.
+The one content correction in this pass is the §5.5 axiom-dependency table
+itself, which was measured wrong before and is measured right now — a
+correction to a verification claim about the Lean proof, not to a chemistry
+result.
 
 **Data and code:** frozen snapshot `Sounio-lang/sounio-gri30-crossvalidation`,
 concept DOI [10.5281/zenodo.22236607](https://doi.org/10.5281/zenodo.22236607)
