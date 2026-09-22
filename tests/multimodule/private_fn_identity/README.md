@@ -2,8 +2,10 @@
 
 Regression fixtures for `self-hosted/compiler/private_fn_identity.sio` (module-aware
 identity for same-named **private** free functions). Driven by
-`scripts/ci/madaros_private_fn_identity_gate.sh`; each case directory holds the modules,
-one or more `main*.sio` roots, and `expected.txt` (the exact stdout of the compiled program).
+`scripts/ci/madaros_private_fn_identity_gate.sh`; each case directory holds the modules and
+one or more `main*.sio` roots. An **executable** case also holds `expected.txt` (the exact
+stdout of the compiled program); a **refusal** case (`unresolved`, `restricted`) has none --
+those are expected to fail the compile, so there is no successful run to compare against.
 
 Before the fix the merged IR identified functions by unqualified name, so two modules
 that each defined a private `helper` shared one body: the first-loaded module won, every
