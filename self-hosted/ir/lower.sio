@@ -14175,6 +14175,29 @@ impl Lowerer {
         }
     }
 
+    // The inner T of a Box field, resolved by the BASE's struct type (mirrors
+    // field_is_box_for_base_ref exactly, including the non-ident deref/chain
+    // fallback via expr_receiver_struct_type_ref). `let p = h.inner` binds a
+    // Box-tagged local from a FIELD-ACCESS expression, which has no argument
+    // list, so expr_first_arg_struct_name_ref (built for `Box::new(mk())`)
+    // cannot answer it and returned empty; the bind then stored layout -1,
+    // and every later `p.field` fell back to the first same-named field in
+    // ANY struct. field_box_inner_type_for_struct already reads elem_type_name_id
+    // off the field's own layout entry -- this only supplies the owner type.
+    fn field_box_inner_type_for_base_ref(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> Name with Mut, Panic, Div, Alloc {
+        match *base_opt {
+            Some(base_expr) => {
+                if (*base_expr).kind == ExprKind::ExprIdent {
+                    let type_name = self.lookup_local_struct_type((*base_expr).name)
+                    return self.field_box_inner_type_for_struct(type_name, field_name)
+                }
+                let owner_type = self.expr_receiver_struct_type_ref(&(*base_expr))
+                self.field_box_inner_type_for_struct(owner_type, field_name)
+            }
+            _ => ir_empty_name(),
+        }
+    }
+
     fn field_is_float_for_base_ref(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> bool with Mut, Panic, Div, Alloc {
         match *base_opt {
             Some(base_expr) => {
@@ -18199,15 +18222,14 @@ impl Lowerer {
                     if lo.field_is_box_for_base_ref(&(*expr_box).left, (*expr_box).name) {
                         if lower_aggregate_diag_enabled() { print("lower_agg: BIND-BOX-FROM-FIELD fired\n") }
                         lo = lo.bind_local_struct_type(s.name, make_name("Box"))
-                        // expr_first_arg_struct_name_ref answers the inner T only
-                        // for call/struct-literal RHS (`Box::new(mk())`); a
-                        // FIELD-access RHS (`let p = h.inner`) carries no argument
-                        // list, so the layout stays -1 there. The read site treats
-                        // a Box-tagged local with layout -1 as "deref, then resolve
-                        // the index by name" — the same route the explicit `(*p).f`
-                        // form takes, and the only route the layout table can offer:
-                        // it stores the declared name "Box", not the inner T.
-                        let bxl = lower_struct_layout_index_of(&(*lo.struct_layouts), lo.expr_first_arg_struct_name_ref(&(*expr_box)))
+                        // field_box_inner_type_for_base_ref resolves the inner T from
+                        // the FIELD's own stored layout (elem_type_name_id), not from
+                        // expr_first_arg_struct_name_ref -- that reader only answers a
+                        // call/struct-literal RHS (`Box::new(mk())`) and returned empty
+                        // for a field-access RHS (`let p = h.inner`), which left the
+                        // layout at -1 and every later `p.field` on the first same-named
+                        // field in ANY struct.
+                        let bxl = lower_struct_layout_index_of(&(*lo.struct_layouts), lo.field_box_inner_type_for_base_ref(&(*expr_box).left, (*expr_box).name))
                         lo = lo.bind_local_box_inner_layout(s.name, bxl)
                     } else {
                         if lower_aggregate_diag_enabled() { print("lower_agg: bind-from-field NOT pointer class\n") }
