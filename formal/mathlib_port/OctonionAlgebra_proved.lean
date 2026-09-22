@@ -1,3 +1,4 @@
+import Mathlib.Tactic.Ring
 /-!
 # Sounio.OctonionAlgebra — Phase 8 Formal Verification
 
@@ -178,12 +179,14 @@ theorem oct_scalar_mul_assoc (m n : Int) (x : Oct) :
 -- ---------------------------------------------------------------------------
 
 /-- Distributivity of octonion multiplication over addition (left). -/
-axiom oct_mul_add_left (x y z : Oct) :
-    octMul x (octAdd y z) = octAdd (octMul x y) (octMul x z)
+theorem oct_mul_add_left (x y z : Oct) :
+    octMul x (octAdd y z) = octAdd (octMul x y) (octMul x z) := by
+  simp only [octMul, octAdd]; ext <;> ring
 
 /-- Distributivity of octonion multiplication over addition (right). -/
-axiom oct_mul_add_right (x y z : Oct) :
-    octMul (octAdd x y) z = octAdd (octMul x z) (octMul y z)
+theorem oct_mul_add_right (x y z : Oct) :
+    octMul (octAdd x y) z = octAdd (octMul x z) (octMul y z) := by
+  simp only [octMul, octAdd]; ext <;> ring
 
 -- ---------------------------------------------------------------------------
 -- §10. Identity element
@@ -223,12 +226,14 @@ theorem oct_nonassociative :
 -- ---------------------------------------------------------------------------
 
 /-- Left alternative law: x(xy) = (x²)y -/
-axiom oct_left_alternative (x y : Oct) :
-    octMul x (octMul x y) = octMul (octMul x x) y
+theorem oct_left_alternative (x y : Oct) :
+    octMul x (octMul x y) = octMul (octMul x x) y := by
+  simp only [octMul]; ext <;> ring
 
 /-- Right alternative law: (yx)x = y(x²) -/
-axiom oct_right_alternative (x y : Oct) :
-    octMul (octMul y x) x = octMul y (octMul x x)
+theorem oct_right_alternative (x y : Oct) :
+    octMul (octMul y x) x = octMul y (octMul x x) := by
+  simp only [octMul]; ext <;> ring
 
 -- ---------------------------------------------------------------------------
 -- §14. Flexibility identity
@@ -236,8 +241,9 @@ axiom oct_right_alternative (x y : Oct) :
 
 /-- Flexibility: x(yx) = (xy)x  — follows from the alternative laws.
     Polynomial identity; provable by `ring`. -/
-axiom oct_flexibility (x y : Oct) :
-    octMul x (octMul y x) = octMul (octMul x y) x
+theorem oct_flexibility (x y : Oct) :
+    octMul x (octMul y x) = octMul (octMul x y) x := by
+  simp only [octMul]; ext <;> ring
 
 -- ---------------------------------------------------------------------------
 -- §15. Moufang identities
@@ -246,16 +252,19 @@ axiom oct_flexibility (x y : Oct) :
 -- ---------------------------------------------------------------------------
 
 /-- Moufang identity (left): z(x(zy)) = ((zx)z)y -/
-axiom oct_moufang_left (x y z : Oct) :
-    octMul z (octMul x (octMul z y)) = octMul (octMul (octMul z x) z) y
+theorem oct_moufang_left (x y z : Oct) :
+    octMul z (octMul x (octMul z y)) = octMul (octMul (octMul z x) z) y := by
+  simp only [octMul]; ext <;> ring
 
 /-- Moufang identity (right): ((xy)z)y = x(y(zy)) -/
-axiom oct_moufang_right (x y z : Oct) :
-    octMul (octMul (octMul x y) z) y = octMul x (octMul y (octMul z y))
+theorem oct_moufang_right (x y z : Oct) :
+    octMul (octMul (octMul x y) z) y = octMul x (octMul y (octMul z y)) := by
+  simp only [octMul]; ext <;> ring
 
 /-- Moufang identity (middle): (xy)(zx) = x((yz)x) -/
-axiom oct_moufang_middle (x y z : Oct) :
-    octMul (octMul x y) (octMul z x) = octMul x (octMul (octMul y z) x)
+theorem oct_moufang_middle (x y z : Oct) :
+    octMul (octMul x y) (octMul z x) = octMul x (octMul (octMul y z) x) := by
+  simp only [octMul]; ext <;> ring
 
 -- ---------------------------------------------------------------------------
 -- §16. Scalar multiplication commutes with octMul
@@ -264,12 +273,14 @@ axiom oct_moufang_middle (x y z : Oct) :
 -- ---------------------------------------------------------------------------
 
 /-- Integer scaling commutes with octonion multiplication (left). -/
-axiom oct_scalar_comm (n : Int) (x y : Oct) :
-    octMul (octScale n x) y = octScale n (octMul x y)
+theorem oct_scalar_comm (n : Int) (x y : Oct) :
+    octMul (octScale n x) y = octScale n (octMul x y) := by
+  simp only [octMul, octScale]; ext <;> ring
 
 /-- Integer scaling commutes with octonion multiplication (right). -/
-axiom oct_scalar_comm_right (n : Int) (x y : Oct) :
-    octMul x (octScale n y) = octScale n (octMul x y)
+theorem oct_scalar_comm_right (n : Int) (x y : Oct) :
+    octMul x (octScale n y) = octScale n (octMul x y) := by
+  simp only [octMul, octScale]; ext <;> ring
 
 -- ---------------------------------------------------------------------------
 -- §17. Conjugate laws
@@ -277,8 +288,9 @@ axiom oct_scalar_comm_right (n : Int) (x y : Oct) :
 
 /-- Conjugation is an anti-automorphism: conj(xy) = conj(y)·conj(x).
     Polynomial identity; provable by `ring`. -/
-axiom oct_conj_antimultiplicative (x y : Oct) :
-    octConj (octMul x y) = octMul (octConj y) (octConj x)
+theorem oct_conj_antimultiplicative (x y : Oct) :
+    octConj (octMul x y) = octMul (octConj y) (octConj x) := by
+  simp only [octConj, octMul]; ext <;> ring
 
 /-- Double conjugation is identity. -/
 theorem oct_conj_involution (x : Oct) : octConj (octConj x) = x := by
@@ -291,12 +303,14 @@ theorem oct_conj_add_real (x : Oct) :
 
 /-- x · conj(x) = |x|² · e₀ (the norm squared as a scalar).
     Polynomial identity; provable by `ring`. -/
-axiom oct_mul_conj (x : Oct) :
-    octMul x (octConj x) = ⟨octNormSq x, 0, 0, 0, 0, 0, 0, 0⟩
+theorem oct_mul_conj (x : Oct) :
+    octMul x (octConj x) = ⟨octNormSq x, 0, 0, 0, 0, 0, 0, 0⟩ := by
+  simp only [octMul, octConj, octNormSq]; ext <;> ring
 
 /-- conj(x) · x = |x|² · e₀.  Polynomial identity; provable by `ring`. -/
-axiom oct_conj_mul (x : Oct) :
-    octMul (octConj x) x = ⟨octNormSq x, 0, 0, 0, 0, 0, 0, 0⟩
+theorem oct_conj_mul (x : Oct) :
+    octMul (octConj x) x = ⟨octNormSq x, 0, 0, 0, 0, 0, 0, 0⟩ := by
+  simp only [octMul, octConj, octNormSq]; ext <;> ring
 
 -- ---------------------------------------------------------------------------
 -- §18. Norm multiplicativity — the Degen eight-square identity
@@ -311,8 +325,9 @@ axiom oct_conj_mul (x : Oct) :
 /-- Norm multiplicativity: the octonion norm is multiplicative.
     Encodes the Degen eight-square identity over ℤ.
     Polynomial identity; provable by `ring`. -/
-axiom oct_norm_multiplicative (x y : Oct) :
-    octNormSq (octMul x y) = octNormSq x * octNormSq y
+theorem oct_norm_multiplicative (x y : Oct) :
+    octNormSq (octMul x y) = octNormSq x * octNormSq y := by
+  simp only [octMul, octNormSq]; ring
 
 -- ---------------------------------------------------------------------------
 -- §19. Power laws (from alternative laws)
@@ -320,8 +335,9 @@ axiom oct_norm_multiplicative (x y : Oct) :
 
 /-- x(x²) = (x²)x — a consequence of left and right alternativity.
     Polynomial identity; provable by `ring`. -/
-axiom oct_sq_comm_left (x : Oct) :
-    octMul x (octMul x x) = octMul (octMul x x) x
+theorem oct_sq_comm_left (x : Oct) :
+    octMul x (octMul x x) = octMul (octMul x x) x := by
+  simp only [octMul]; ext <;> ring
 
 /-- x² is a real scalar (all imaginary components zero) iff x is a pure imaginary unit. -/
 theorem oct_neg_sq_scalar_e1 : octMul e1 e1 = octNeg e0 := by simp [octMul, e1, e0, octNeg]
