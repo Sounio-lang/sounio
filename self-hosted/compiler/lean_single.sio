@@ -1108,6 +1108,453 @@ fn ptx_emit_src_range(ns: i64, ne: i64) with Mut, Panic {
     }
 }
 
+fn src_range_eq(a_ns: i64, a_ne: i64, b_ns: i64, b_ne: i64) -> bool with Panic, Mut {
+    let a_len = a_ne - a_ns
+    let b_len = b_ne - b_ns
+    if a_len != b_len { return false }
+    var i: i64 = 0
+    while i < a_len {
+        if sb(a_ns + i) != sb(b_ns + i) { return false }
+        i = i + 1
+    }
+    return true
+}
+
+// ============================================================
+// Causal graph declared in source (Sprint 20 Track CI)
+// ============================================================
+//
+//     causal graph corpo_ceu {
+//         hora -> hrv
+//         hora -> kp
+//         hrv  <-> fc
+//     }
+//
+// `->` is a directed cause; `<->` is an unmeasured common cause (confounding).
+//
+// This is what discharges IndepKnowledge<T, A, B | Z>. Without a graph there is
+// nothing to check a claim against and only degeneracy can be caught; with one,
+// Bayes-Ball decides, and an independence that does not hold is a compile error
+// rather than a premise the program quietly relies on.
+//
+// The block is collected immediately after lexing and its tokens are removed
+// from the stream, so no later pass needs to know this syntax exists.
+
+var CG_DECLARED: i64 = 0
+var CG_NODE_COUNT: i64 = 0
+var CG_NS: [i64; 16] = [0; 16]
+var CG_NE: [i64; 16] = [0; 16]
+var CG_EDGE_COUNT: i64 = 0
+var CG_EDGE_FROM: [i64; 64] = [0; 64]
+var CG_EDGE_TO: [i64; 64] = [0; 64]
+var CG_EDGE_DIR: [i64; 64] = [0; 64]
+var CG_ZSET: [i64; 16] = [0; 16]
+var CG_ZDESC: [i64; 16] = [0; 16]
+var CG_VISITED: [i64; 32] = [0; 32]
+var CG_QUEUE: [i64; 64] = [0; 64]
+
+// Tokens live in NINE parallel arrays, not four. Any pass that compacts the
+// stream has to move all of them together: TV/TF/TD/TX carry literal values and
+// TU the unit hash, so copying only kind/start/end/line leaves every token after
+// a deletion wearing another token's literal.
+fn tok_copy(dst: i64, src: i64) with Mut, Panic {
+    TK[dst as usize] = TK[src as usize]
+    TS[dst as usize] = TS[src as usize]
+    TE[dst as usize] = TE[src as usize]
+    TV[dst as usize] = TV[src as usize]
+    TF[dst as usize] = TF[src as usize]
+    TD[dst as usize] = TD[src as usize]
+    TX[dst as usize] = TX[src as usize]
+    TL[dst as usize] = TL[src as usize]
+    TU[dst as usize] = TU[src as usize]
+}
+
+// A punctuation token synthesised by a rewrite: it carries no literal payload,
+// so the value arrays must be cleared rather than inherited.
+fn tok_put_punct(dst: i64, kind: i64, src: i64) with Mut, Panic {
+    TK[dst as usize] = kind
+    TS[dst as usize] = TS[src as usize]
+    TE[dst as usize] = TE[src as usize]
+    TL[dst as usize] = TL[src as usize]
+    TV[dst as usize] = 0
+    TF[dst as usize] = 0
+    TD[dst as usize] = 0
+    TX[dst as usize] = 0
+    TU[dst as usize] = 0
+}
+
+fn cg_find_node(ns: i64, ne: i64) -> i64 with Panic, Mut {
+    var i: i64 = 0
+    while i < CG_NODE_COUNT {
+        if src_range_eq(CG_NS[i as usize], CG_NE[i as usize], ns, ne) { return i }
+        i = i + 1
+    }
+    return 0 - 1
+}
+
+fn cg_intern_node(ns: i64, ne: i64) -> i64 with Panic, Mut {
+    let found = cg_find_node(ns, ne)
+    if found >= 0 { return found }
+    if CG_NODE_COUNT >= 16 { return 0 - 1 }
+    let idx = CG_NODE_COUNT
+    CG_NS[idx as usize] = ns
+    CG_NE[idx as usize] = ne
+    CG_NODE_COUNT = CG_NODE_COUNT + 1
+    return idx
+}
+
+fn cg_add_edge(a: i64, b: i64, directed: i64) with Mut, Panic {
+    if a < 0 || b < 0 { return }
+    if CG_EDGE_COUNT >= 64 { return }
+    CG_EDGE_FROM[CG_EDGE_COUNT as usize] = a
+    CG_EDGE_TO[CG_EDGE_COUNT as usize] = b
+    CG_EDGE_DIR[CG_EDGE_COUNT as usize] = directed
+    CG_EDGE_COUNT = CG_EDGE_COUNT + 1
+}
+
+// Collect every `causal graph` block and compact it out of the token stream.
+// Runs once, straight after lex_all(), so a claim can be checked no matter
+// whether the graph is declared above or below it.
+fn cg_collect() with IO, Mut, Panic, Div {
+    var p: i64 = 0
+    var w: i64 = 0
+    while p < TC {
+        var handled: i64 = 0
+        if TK[p as usize] == 3 && src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "causal") && p + 1 < TC && TK[(p + 1) as usize] == 3 && src_match(TS[(p + 1) as usize], TE[(p + 1) as usize] - TS[(p + 1) as usize], "graph") {
+            var q: i64 = p + 2
+            if q < TC && TK[q as usize] == 3 { q = q + 1 }
+            if q < TC && TK[q as usize] == 8 {
+                CG_DECLARED = 1
+                q = q + 1
+                while q < TC && TK[q as usize] != 9 {
+                    if TK[q as usize] == 3 {
+                        let a = cg_intern_node(TS[q as usize], TE[q as usize])
+                        var r: i64 = q + 1
+                        var dir: i64 = 0 - 1
+                        if r < TC && TK[r as usize] == 10 {
+                            dir = 1
+                            r = r + 1
+                        } else {
+                            if r + 1 < TC && TK[r as usize] == 23 && TK[(r + 1) as usize] == 10 {
+                                dir = 0
+                                r = r + 2
+                            }
+                        }
+                        if dir >= 0 && r < TC && TK[r as usize] == 3 {
+                            let b = cg_intern_node(TS[r as usize], TE[r as usize])
+                            cg_add_edge(a, b, dir)
+                            q = r + 1
+                        } else {
+                            q = q + 1
+                        }
+                    } else {
+                        q = q + 1
+                    }
+                }
+                if q < TC && TK[q as usize] == 9 { q = q + 1 }
+                p = q
+                handled = 1
+            }
+        }
+        if handled == 0 {
+            tok_copy(w, p)
+            w = w + 1
+            p = p + 1
+        }
+    }
+    TC = w
+}
+
+// A collider is opened by conditioning on it OR on any of its descendants
+// (Pearl 1988), so Z has to be closed downward before the walk starts.
+fn cg_mark_descendants(start: i64) with Mut, Panic, Div {
+    var qh: i64 = 0
+    var qt: i64 = 1
+    CG_QUEUE[0] = start
+    while qh < qt {
+        let cur = CG_QUEUE[qh as usize]
+        qh = qh + 1
+        var ei: i64 = 0
+        while ei < CG_EDGE_COUNT {
+            if CG_EDGE_DIR[ei as usize] == 1 && CG_EDGE_FROM[ei as usize] == cur {
+                let nx = CG_EDGE_TO[ei as usize]
+                if CG_ZDESC[nx as usize] == 0 {
+                    CG_ZDESC[nx as usize] = 1
+                    if qt < 64 {
+                        CG_QUEUE[qt as usize] = nx
+                        qt = qt + 1
+                    }
+                }
+            }
+            ei = ei + 1
+        }
+    }
+}
+
+fn cg_push(state: i64, qt_in: i64) -> i64 with Mut, Panic {
+    if state < 0 || state >= 32 { return qt_in }
+    if CG_VISITED[state as usize] != 0 { return qt_in }
+    if qt_in >= 64 { return qt_in }
+    CG_VISITED[state as usize] = 1
+    CG_QUEUE[qt_in as usize] = state
+    return qt_in + 1
+}
+
+// Bayes-Ball (Shachter 1998). State is (node, direction of arrival): direction 0
+// means the ball came from a parent, 1 means it came from a child. Ported from
+// self-hosted/check/causal.sio, which implements the same walk over the modular
+// tree's CausalGraph.
+//
+// Reads the conditioning set from CG_ZSET. Returns true when NO active path
+// remains between x and y — that is, when the independence actually holds.
+fn cg_d_separated(x: i64, y: i64) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < 32 {
+        CG_VISITED[i as usize] = 0
+        i = i + 1
+    }
+    i = 0
+    while i < 16 {
+        CG_ZDESC[i as usize] = CG_ZSET[i as usize]
+        i = i + 1
+    }
+    i = 0
+    while i < CG_NODE_COUNT {
+        if CG_ZSET[i as usize] == 1 { cg_mark_descendants(i) }
+        i = i + 1
+    }
+
+    var qh: i64 = 0
+    var qt: i64 = 0
+    var reached: i64 = 0
+
+    // Seed: every edge incident to x.
+    var ei: i64 = 0
+    while ei < CG_EDGE_COUNT {
+        if CG_EDGE_DIR[ei as usize] == 1 && CG_EDGE_FROM[ei as usize] == x {
+            qt = cg_push(CG_EDGE_TO[ei as usize] * 2, qt)
+        }
+        if CG_EDGE_DIR[ei as usize] == 1 && CG_EDGE_TO[ei as usize] == x {
+            qt = cg_push(CG_EDGE_FROM[ei as usize] * 2 + 1, qt)
+        }
+        if CG_EDGE_DIR[ei as usize] == 0 {
+            var other: i64 = 0 - 1
+            if CG_EDGE_FROM[ei as usize] == x { other = CG_EDGE_TO[ei as usize] }
+            if CG_EDGE_TO[ei as usize] == x { other = CG_EDGE_FROM[ei as usize] }
+            if other >= 0 { qt = cg_push(other * 2, qt) }
+        }
+        ei = ei + 1
+    }
+
+    while qh < qt && reached == 0 {
+        let state = CG_QUEUE[qh as usize]
+        qh = qh + 1
+        let node = state / 2
+        let from_parent = (state % 2) == 0
+        if node == y { reached = 1 }
+        if reached == 0 {
+            if from_parent {
+                // Chain or fork: open only while the node is unconditioned.
+                if CG_ZSET[node as usize] == 0 {
+                    var ej: i64 = 0
+                    while ej < CG_EDGE_COUNT {
+                        if CG_EDGE_DIR[ej as usize] == 1 && CG_EDGE_FROM[ej as usize] == node {
+                            qt = cg_push(CG_EDGE_TO[ej as usize] * 2, qt)
+                        }
+                        if CG_EDGE_DIR[ej as usize] == 0 {
+                            var o2: i64 = 0 - 1
+                            if CG_EDGE_FROM[ej as usize] == node { o2 = CG_EDGE_TO[ej as usize] }
+                            if CG_EDGE_TO[ej as usize] == node { o2 = CG_EDGE_FROM[ej as usize] }
+                            if o2 >= 0 { qt = cg_push(o2 * 2, qt) }
+                        }
+                        ej = ej + 1
+                    }
+                }
+                // Collider: opened, not blocked, by conditioning.
+                if CG_ZDESC[node as usize] == 1 {
+                    var ek: i64 = 0
+                    while ek < CG_EDGE_COUNT {
+                        if CG_EDGE_DIR[ek as usize] == 1 && CG_EDGE_TO[ek as usize] == node {
+                            qt = cg_push(CG_EDGE_FROM[ek as usize] * 2 + 1, qt)
+                        }
+                        ek = ek + 1
+                    }
+                }
+            } else {
+                if CG_ZSET[node as usize] == 0 {
+                    var ej: i64 = 0
+                    while ej < CG_EDGE_COUNT {
+                        if CG_EDGE_DIR[ej as usize] == 1 && CG_EDGE_TO[ej as usize] == node {
+                            qt = cg_push(CG_EDGE_FROM[ej as usize] * 2 + 1, qt)
+                        }
+                        if CG_EDGE_DIR[ej as usize] == 1 && CG_EDGE_FROM[ej as usize] == node {
+                            qt = cg_push(CG_EDGE_TO[ej as usize] * 2, qt)
+                        }
+                        if CG_EDGE_DIR[ej as usize] == 0 {
+                            var o3: i64 = 0 - 1
+                            if CG_EDGE_FROM[ej as usize] == node { o3 = CG_EDGE_TO[ej as usize] }
+                            if CG_EDGE_TO[ej as usize] == node { o3 = CG_EDGE_FROM[ej as usize] }
+                            if o3 >= 0 { qt = cg_push(o3 * 2, qt) }
+                        }
+                        ej = ej + 1
+                    }
+                }
+            }
+        }
+    }
+    return reached == 0
+}
+
+// `d_separated(A, B | Z)` — the only way to obtain a proven witness.
+//
+// The arguments exist to be VERIFIED, not evaluated. This pass checks the claim
+// against the declared graph and then rewrites the call to `d_separated()`, a
+// prelude function returning 1. After it runs, the proof is a constant that
+// could only have been produced by a claim the graph actually supports.
+//
+// The forgery that would defeat this is writing `d_separated()` directly. That
+// is why a call with no arguments is an error here: the zero-argument form only
+// ever exists as this pass's output, never as something a human wrote.
+//
+// This is what ties stdlib's graded_compose_indep to the causal model. The free
+// constructor it used to accept let any caller buy the tighter uncertainty bound
+// by asserting independence; now asserting it means proving it.
+fn dsep_lower() with IO, Mut, Panic, Div {
+    var p: i64 = 0
+    var w: i64 = 0
+    while p < TC {
+        var handled: i64 = 0
+        if TK[p as usize] == 3 && src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "d_separated") && p + 1 < TC && TK[(p + 1) as usize] == 6 && (w == 0 || TK[(w - 1) as usize] != 1) {
+            let call_tok = p
+            var q: i64 = p + 2
+            var a_tok: i64 = 0 - 1
+            var b_tok: i64 = 0 - 1
+            if q < TC && TK[q as usize] == 3 {
+                a_tok = q
+                q = q + 1
+            }
+            if q < TC && TK[q as usize] == 28 { q = q + 1 }
+            if q < TC && TK[q as usize] == 3 {
+                b_tok = q
+                q = q + 1
+            }
+            var zi: i64 = 0
+            while zi < 16 {
+                CG_ZSET[zi as usize] = 0
+                zi = zi + 1
+            }
+            var z_bad: i64 = 0
+            if q < TC && TK[q as usize] == 45 {
+                q = q + 1
+                if q < TC && TK[q as usize] == 8 { q = q + 1 }
+                while q < TC && TK[q as usize] == 3 {
+                    if CG_DECLARED == 1 {
+                        let zid = cg_find_node(TS[q as usize], TE[q as usize])
+                        if zid < 0 {
+                            tc_indep_unknown_var(q)
+                            z_bad = 1
+                        } else {
+                            CG_ZSET[zid as usize] = 1
+                        }
+                    }
+                    q = q + 1
+                    if q < TC && TK[q as usize] == 28 { q = q + 1 }
+                }
+                if q < TC && TK[q as usize] == 9 { q = q + 1 }
+            }
+            if q < TC && TK[q as usize] == 7 {
+                if a_tok < 0 || b_tok < 0 {
+                    tc_dsep_malformed(call_tok)
+                } else {
+                    if CG_DECLARED == 0 {
+                        tc_dsep_no_graph(call_tok)
+                    } else {
+                        if z_bad == 0 {
+                            let aid = cg_find_node(TS[a_tok as usize], TE[a_tok as usize])
+                            let bid = cg_find_node(TS[b_tok as usize], TE[b_tok as usize])
+                            if aid < 0 {
+                                tc_indep_unknown_var(a_tok)
+                            } else {
+                                if bid < 0 {
+                                    tc_indep_unknown_var(b_tok)
+                                } else {
+                                    if tok_text_same(a_tok, b_tok) {
+                                        tc_indep_degenerate(b_tok)
+                                    } else {
+                                        if !cg_d_separated(aid, bid) {
+                                            tc_indep_not_dseparated(a_tok, b_tok)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                // Emit `d_separated` `(` `)`; the arguments have done their job.
+                tok_copy(w, call_tok)
+                w = w + 1
+                tok_put_punct(w, 6, call_tok + 1)
+                w = w + 1
+                tok_put_punct(w, 7, q)
+                w = w + 1
+                p = q + 1
+                handled = 1
+            }
+        }
+        if handled == 0 {
+            tok_copy(w, p)
+            w = w + 1
+            p = p + 1
+        }
+    }
+    TC = w
+}
+
+fn fn_param_name_matches_token(fi: i64, arg_idx: i64, tok: i64) -> bool with Mut, Panic {
+    if fi < 0 || fi >= FN_COUNT { return false }
+    if tok < 0 || tok >= TC { return false }
+    if TK[tok as usize] != 3 { return false }
+    var q = FN_NAME_TOK[fi as usize] + 1
+    if q < 0 || q >= TC || TK[q as usize] != 6 { return false }
+    q = q + 1
+    var idx: i64 = 0
+    while q < TC && TK[q as usize] != 7 && TK[q as usize] != 0 {
+        if TK[q as usize] == 3 {
+            let pname_tok = q
+            q = q + 1
+            if TK[q as usize] == 43 {
+                if idx == arg_idx {
+                    return src_range_eq(
+                        TS[pname_tok as usize], TE[pname_tok as usize],
+                        TS[tok as usize], TE[tok as usize]
+                    )
+                }
+                idx = idx + 1
+            }
+        } else {
+            q = q + 1
+        }
+        if TK[q as usize] == 28 { q = q + 1 }
+    }
+    return false
+}
+
+fn token_is_index_assignment_target(tok: i64) -> bool with Mut, Panic {
+    if tok < 0 || tok + 1 >= TC { return false }
+    if TK[tok as usize] != 3 { return false }
+    if TK[(tok + 1) as usize] != 41 { return false }
+    var p = tok + 2
+    var depth: i64 = 1
+    while p < TC && depth > 0 {
+        if TK[p as usize] == 41 { depth = depth + 1 }
+        if TK[p as usize] == 42 { depth = depth - 1 }
+        p = p + 1
+    }
+    if depth != 0 { return false }
+    if p < TC && TK[p as usize] == 16 { return true }
+    return false
+}
+
 fn ptx_finish_fn(fi: i64, start_off: i64, kind: i64, extent_slot: i64) with Mut, Panic {
     if fi < 0 || fi >= 4096 { return }
     ptx_emit_byte(0)
@@ -1136,11 +1583,10 @@ fn fn_param_kind(fi: i64, arg_idx: i64) -> i64 with IO, Mut, Panic, Div {
 fn kernel_matches_supported_vec_binary_pattern(fi: i64, body_start: i64) -> i64 with Mut, Panic {
     if fi < 0 || fi >= FN_COUNT { return 0 }
     var saw_gpu_tid: i64 = 0
-    var saw_tid: i64 = 0
-    var saw_n: i64 = 0
-    var saw_a: i64 = 0
-    var saw_b: i64 = 0
-    var saw_c: i64 = 0
+    var saw_extent: i64 = 0
+    var saw_lhs: i64 = 0
+    var saw_rhs: i64 = 0
+    var saw_out: i64 = 0
     var saw_add: i64 = 0
     var p: i64 = body_start
     var depth: i64 = 1
@@ -1149,18 +1595,17 @@ fn kernel_matches_supported_vec_binary_pattern(fi: i64, body_start: i64) -> i64 
         if TK[p as usize] == 9 { depth = depth - 1 }
         if TK[p as usize] == 3 {
             if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "gpu_thread_id_x") { saw_gpu_tid = 1 }
-            if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "tid") { saw_tid = 1 }
-            if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "n") { saw_n = 1 }
-            if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "a") { saw_a = 1 }
-            if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "b") { saw_b = 1 }
-            if src_match(TS[p as usize], TE[p as usize] - TS[p as usize], "c") { saw_c = 1 }
+            if fn_param_name_matches_token(fi, 0, p) { saw_extent = 1 }
+            if fn_param_name_matches_token(fi, 1, p) && token_is_index_assignment_target(p) == false { saw_lhs = 1 }
+            if fn_param_name_matches_token(fi, 2, p) && token_is_index_assignment_target(p) == false { saw_rhs = 1 }
+            if fn_param_name_matches_token(fi, 3, p) && token_is_index_assignment_target(p) { saw_out = 1 }
         }
         if TK[p as usize] == 17 { saw_add = 1 }
         p = p + 1
     }
     if saw_gpu_tid == 0 { return 0 }
-    if saw_tid == 0 || saw_n == 0 { return 0 }
-    if saw_a == 0 || saw_b == 0 || saw_c == 0 { return 0 }
+    if saw_extent == 0 { return 0 }
+    if saw_lhs == 0 || saw_rhs == 0 || saw_out == 0 { return 0 }
     if saw_add == 0 { return 0 }
     return 1
 }
@@ -1171,7 +1616,8 @@ fn maybe_compile_kernel_ptx(fi: i64, body_start: i64, extent_slot: i64) with IO,
     if FN_ARITY[fi as usize] != 4 { return }
     if fn_param_kind(fi, 0) != gpu_param_kind_scalar_i64() { return }
     if fn_param_kind(fi, 1) != gpu_param_kind_slice_in_f64() { return }
-    if fn_param_kind(fi, 2) != gpu_param_kind_slice_in_f64() { return }
+    let rhs_kind = fn_param_kind(fi, 2)
+    if rhs_kind != gpu_param_kind_slice_in_f64() && rhs_kind != gpu_param_kind_slice_out_f64() { return }
     if fn_param_kind(fi, 3) != gpu_param_kind_slice_out_f64() { return }
     if kernel_matches_supported_vec_binary_pattern(fi, body_start) == 0 { return }
 
@@ -1182,7 +1628,7 @@ fn maybe_compile_kernel_ptx(fi: i64, body_start: i64, extent_slot: i64) with IO,
     let start_off = PTX_LEN
     FN_PTX_PARAM_KINDS[(fi * 8 + 0) as usize] = gpu_param_kind_scalar_i64()
     FN_PTX_PARAM_KINDS[(fi * 8 + 1) as usize] = gpu_param_kind_slice_in_f64()
-    FN_PTX_PARAM_KINDS[(fi * 8 + 2) as usize] = gpu_param_kind_slice_in_f64()
+    FN_PTX_PARAM_KINDS[(fi * 8 + 2) as usize] = rhs_kind
     FN_PTX_PARAM_KINDS[(fi * 8 + 3) as usize] = gpu_param_kind_slice_out_f64()
 
     ptx_emit_string(".version 7.0\n")
@@ -1625,11 +2071,24 @@ fn emit_load_call_arg_to_rax_x86(argc: i64, arg_idx: i64) with Mut {
     emit_load_stack_qword_to_rax_x86((argc - 1 - arg_idx) * 8)
 }
 
+fn emit_load_call_arg_to_rax_shift_x86(argc: i64, arg_idx: i64, shift_slots: i64) with Mut {
+    emit_load_stack_qword_to_rax_x86((shift_slots + argc - 1 - arg_idx) * 8)
+}
+
 fn emit_call_rax_x86(argc: i64) with Mut {
+    let extra = call_extra_stack_args_x86(argc, 6)
+    var align_pad: i64 = 0
+    if ((argc + extra) & 1) != 0 { align_pad = 1 }
+    // Argument setup may use rax as scratch when stack arguments are present.
+    // Keep the indirect C-call target in caller-saved r11 until the call.
+    em(0x49); em(0x89); em(0xc3)
     emit_setup_direct_call_args_x86(argc)
     emit_prepare_stack_call_args_x86(argc, 6)
-    em(0xff); em(0xd0)
-    emit_drop_call_args_x86(argc + call_extra_stack_args_x86(argc, 6))
+    if align_pad != 0 {
+        em(0x48); em(0x83); em(0xec); em(8)
+    }
+    em(0x41); em(0xff); em(0xd3)
+    emit_drop_call_args_x86(argc + extra + align_pad)
 }
 
 fn emit_call_abs_qword_x86(addr: i64, argc: i64) with Mut {
@@ -1922,7 +2381,7 @@ fn emit_setup_closure_call_args_x86(argc: i64) with Mut {
 }
 
 fn call_extra_stack_args_x86(argc: i64, regc: i64) -> i64 {
-    if argc > regc + 1 { return argc - regc }
+    if argc > regc { return argc - regc }
     return 0
 }
 
@@ -1941,7 +2400,7 @@ fn emit_sret_destination_x86(ret_slots: i64) with Mut, Panic, Div {
 
 fn emit_prepare_stack_call_args_x86(argc: i64, regc: i64) with Mut {
     let extra = call_extra_stack_args_x86(argc, regc)
-    if extra <= 1 { return }
+    if extra <= 0 { return }
     let scratch_bytes = extra * 8
     if scratch_bytes < 128 {
         em(0x48); em(0x83); em(0xec); em(scratch_bytes)
@@ -2733,6 +3192,18 @@ fn emit_lea_var_a64(slot: i64) with Mut, Panic {
         emit_imm64_reg_a64(0, off)
         em32(0xCB000000 | (29 << 5) | 0)  // sub x0, x29, x0
     }
+}
+
+fn tok_text_same(a: i64, b: i64) -> bool with Panic, Mut {
+    let la = TE[a as usize] - TS[a as usize]
+    let lb = TE[b as usize] - TS[b as usize]
+    if la != lb { return false }
+    var i: i64 = 0
+    while i < la {
+        if sb(TS[a as usize] + i) != sb(TS[b as usize] + i) { return false }
+        i = i + 1
+    }
+    true
 }
 
 fn src_match(p: i64, l: i64, kw: string) -> bool with Panic, Mut {
@@ -4291,6 +4762,87 @@ fn tc_kernel_nonvoid_return(tok: i64) with IO, Mut, Panic {
 }
 
 // Epistemic enforcement (E170/E171)
+// scan_type runs over the same annotation more than once, so every claim would
+// be reported twice. Remember which tokens already reported rather than just the
+// last one: with two claims in a file the passes interleave as 1,2,1,2 and a
+// single-slot guard lets both duplicates through.
+var INDEP_ERR_TOKS: [i64; 64] = [0 - 1; 64]
+var INDEP_ERR_COUNT: i64 = 0
+
+fn indep_already_reported(tok: i64) -> bool with Mut, Panic {
+    var i: i64 = 0
+    while i < INDEP_ERR_COUNT {
+        if INDEP_ERR_TOKS[i as usize] == tok { return true }
+        i = i + 1
+    }
+    if INDEP_ERR_COUNT < 64 {
+        INDEP_ERR_TOKS[INDEP_ERR_COUNT as usize] = tok
+        INDEP_ERR_COUNT = INDEP_ERR_COUNT + 1
+    }
+    return false
+}
+
+fn cg_print_node(tok: i64) with IO, Mut, Panic, Div {
+    var i: i64 = TS[tok as usize]
+    let e = TE[tok as usize]
+    while i < e {
+        print_char(SRC[i as usize] as i64)
+        i = i + 1
+    }
+}
+
+// E175: the claim mentions a variable the graph does not declare. Rejected
+// rather than ignored — a claim about a variable outside the model is not a
+// claim the model can support.
+fn tc_indep_unknown_var(tok: i64) with IO, Mut, Panic, Div {
+    if indep_already_reported(tok) { return }
+    print("error[E175]: `")
+    cg_print_node(tok)
+    print("` is not a node of the declared causal graph at line ")
+    print_int(TL[tok as usize])
+    print("\n   = help: add it to the `causal graph` block, or correct the name\n")
+    tc_mark_failed()
+}
+
+// E176: the graph says an active path remains open, so the independence does
+// not hold. This is the obligation actually being discharged.
+fn tc_indep_not_dseparated(a_tok: i64, b_tok: i64) with IO, Mut, Panic, Div {
+    if indep_already_reported(b_tok) { return }
+    print("error[E176]: `")
+    cg_print_node(a_tok)
+    print("` is not d-separated from `")
+    cg_print_node(b_tok)
+    print("` given the stated conditioning set, at line ")
+    print_int(TL[b_tok as usize])
+    print("\n   = help: an active path remains open in the declared causal graph; condition on the variables that block it, or drop the claim\n")
+    tc_mark_failed()
+}
+
+// E177: a proof was requested with no model to prove it against.
+fn tc_dsep_no_graph(tok: i64) with IO, Mut, Panic, Div {
+    if indep_already_reported(tok) { return }
+    print("error[E177]: `d_separated` needs a declared causal graph at line ")
+    print_int(TL[tok as usize])
+    print("\n   = help: add a `causal graph NAME { ... }` block; without a model there is nothing that could discharge the proof\n")
+    tc_mark_failed()
+}
+
+fn tc_dsep_malformed(tok: i64) with IO, Mut, Panic, Div {
+    if indep_already_reported(tok) { return }
+    print("error[E177]: `d_separated` takes two variables and an optional conditioning set, at line ")
+    print_int(TL[tok as usize])
+    print("\n   = help: write `d_separated(A, B)` or `d_separated(A, B | Z)`\n")
+    tc_mark_failed()
+}
+
+fn tc_indep_degenerate(tok: i64) with IO, Mut, Panic, Div {
+    if indep_already_reported(tok) { return }
+    print("error[E209]: IndepKnowledge declares a variable independent of itself at line ")
+    print_int(TL[tok as usize])
+    print("\n   = help: A and B must name two different variables; a variable is never independent of itself, so the claim asserts nothing\n")
+    tc_mark_failed()
+}
+
 fn tc_epistemic_value_access(tok: i64) with IO, Mut, Panic {
     print("error[E170]: accessing .value on Knowledge<T> requires `with Epistemic` effect at line ")
     print_int(TL[tok as usize])
@@ -6131,6 +6683,90 @@ fn scan_type(p0: i64) with IO, Mut, Panic, Div {
             SCAN_TY_NEXT = p
             return
         }
+        // IndepKnowledge<T, A, B | Z> — conditional independence as a type.
+        //
+        // Transparent to T at runtime: the claim is checked, not represented.
+        // Without a causal graph declared in source there is no d-separation to
+        // discharge it, so this compiler enforces the one rule it can actually
+        // know — A and B must be different variables. A variable is never
+        // independent of itself, so the degenerate claim asserts nothing while
+        // still licensing the tighter uncertainty bound. That is precisely the
+        // shape of an unfounded quadrature.
+        if src_match(ns, ne - ns, "IndepKnowledge") && TK[(p + 1) as usize] == 23 {
+            p = p + 2
+            scan_type(p)
+            let inner_ty = SCAN_TY
+            let inner_hash = SCAN_TY_HASH
+            p = SCAN_TY_NEXT
+            if TK[p as usize] == 28 { p = p + 1 }
+            let a_tok = p
+            if TK[p as usize] == 3 { p = p + 1 }
+            if TK[p as usize] == 28 { p = p + 1 }
+            let b_tok = p
+            if TK[p as usize] == 3 { p = p + 1 }
+            if TK[a_tok as usize] == 3 && TK[b_tok as usize] == 3 {
+                if tok_text_same(a_tok, b_tok) { tc_indep_degenerate(b_tok) }
+            }
+            // Conditioning set: `| Z`, `| {Z1, Z2}`, or `| {}` (all optional).
+            // Each variable is resolved into CG_ZSET as it is read, so the walk
+            // below sees exactly the set the programmer wrote.
+            var zi: i64 = 0
+            while zi < 16 {
+                CG_ZSET[zi as usize] = 0
+                zi = zi + 1
+            }
+            var z_bad: i64 = 0
+            if TK[p as usize] == 45 {
+                p = p + 1
+                var braced: i64 = 0
+                if TK[p as usize] == 8 { braced = 1  p = p + 1 }
+                while TK[p as usize] == 3 {
+                    if CG_DECLARED == 1 {
+                        let zid = cg_find_node(TS[p as usize], TE[p as usize])
+                        if zid < 0 {
+                            tc_indep_unknown_var(p)
+                            z_bad = 1
+                        } else {
+                            CG_ZSET[zid as usize] = 1
+                        }
+                    }
+                    p = p + 1
+                    if TK[p as usize] == 28 { p = p + 1 }
+                }
+                if braced == 1 && TK[p as usize] == 9 { p = p + 1 }
+            }
+
+            // Discharge the claim against the declared graph. With no graph
+            // there is nothing to check against, and the claim stands on the
+            // degeneracy check alone — stated, not proven.
+            if CG_DECLARED == 1 && z_bad == 0 && TK[a_tok as usize] == 3 && TK[b_tok as usize] == 3 {
+                if !tok_text_same(a_tok, b_tok) {
+                    let aid = cg_find_node(TS[a_tok as usize], TE[a_tok as usize])
+                    let bid = cg_find_node(TS[b_tok as usize], TE[b_tok as usize])
+                    if aid < 0 {
+                        tc_indep_unknown_var(a_tok)
+                    } else {
+                        if bid < 0 {
+                            tc_indep_unknown_var(b_tok)
+                        } else {
+                            if !cg_d_separated(aid, bid) {
+                                tc_indep_not_dseparated(a_tok, b_tok)
+                            }
+                        }
+                    }
+                }
+            }
+            if TK[p as usize] == 24 { p = p + 1 }
+            else if TK[p as usize] == 39 {
+                TK[p as usize] = 24
+                TS[p as usize] = TS[p as usize] + 1
+                p = p + 1
+            }
+            SCAN_TY = inner_ty
+            SCAN_TY_HASH = inner_hash
+            SCAN_TY_NEXT = p
+            return
+        }
         if src_match(ns, ne - ns, "Unobserved") && TK[(p + 1) as usize] == 23 {
             p = p + 2
             scan_type(p)
@@ -7738,6 +8374,70 @@ fn find_matching_body_close(open_tok: i64) -> i64 with Panic, Mut {
         q = q + 1
     }
     return TC
+}
+
+fn find_fn_body_open_after_name(name_tok: i64) -> i64 with IO, Mut, Panic, Div {
+    var p = name_tok + 1
+    if TK[p as usize] == 6 {
+        p = p + 1
+        while TK[p as usize] != 7 && TK[p as usize] != 0 {
+            if TK[p as usize] == 3 {
+                p = p + 1
+                if TK[p as usize] == 43 {
+                    p = p + 1
+                    scan_type(p)
+                    p = SCAN_TY_NEXT
+                }
+            } else {
+                p = p + 1
+            }
+            if TK[p as usize] == 28 { p = p + 1 }
+        }
+        if TK[p as usize] == 7 { p = p + 1 }
+    }
+    if TK[p as usize] == 10 {
+        p = p + 1
+        scan_type(p)
+        p = SCAN_TY_NEXT
+    }
+    p = skip_signature_where_clause(p)
+    if TK[p as usize] == 38 {
+        p = p + 1
+        while TK[p as usize] == 3 || TK[p as usize] == 28 {
+            if TK[p as usize] == 3 {
+                p = p + 1
+                if TK[p as usize] == 6 {
+                    p = p + 1
+                    while TK[p as usize] != 7 && TK[p as usize] != 0 { p = p + 1 }
+                    if TK[p as usize] == 7 { p = p + 1 }
+                }
+            } else {
+                p = p + 1
+            }
+        }
+    }
+    while p < TC && TK[p as usize] != 8 && TK[p as usize] != 0 { p = p + 1 }
+    return p
+}
+
+fn skip_trait_decl_at(p0: i64) -> i64 with Panic, Mut {
+    if p0 < 0 || p0 >= TC { return p0 }
+    if TK[p0 as usize] != 75 { return p0 }
+    var p = p0 + 1
+    if p < TC && TK[p as usize] == 3 { p = p + 1 }
+    while p < TC && TK[p as usize] != 8 && TK[p as usize] != 0 {
+        p = p + 1
+    }
+    if p < TC && TK[p as usize] == 8 {
+        var depth: i64 = 1
+        p = p + 1
+        while p < TC && depth > 0 {
+            if TK[p as usize] == 8 { depth = depth + 1 }
+            if TK[p as usize] == 9 { depth = depth - 1 }
+            p = p + 1
+        }
+    }
+    return p
 }
 
 fn ep_before_body_close() -> bool {
@@ -19463,6 +20163,11 @@ fn emit_kernel_dispatch_x86(fi: i64, abi_argc: i64) with Mut, Panic, Div {
     }
 
     NEEDS_GPU_RUNTIME_DYNLINK = 1
+    var entry_pad_slots: i64 = 0
+    if (abi_argc & 1) != 0 {
+        em(0x48); em(0x83); em(0xec); em(8)
+        entry_pad_slots = 1
+    }
     emit_try_gpu_runtime_init_x86()
     em(0x48); em(0x85); em(0xc0)
     em(0x0f); em(0x84)
@@ -19489,18 +20194,21 @@ fn emit_kernel_dispatch_x86(fi: i64, abi_argc: i64) with Mut, Panic, Div {
     let param1_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
     let param2_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
     let param3_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-    let paddr0_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-    let paddr1_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-    let paddr2_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    // Stack slots grow toward lower addresses. Allocate the pointer-vector
+    // slots in reverse so &paddr0 is a C-contiguous kernelParams array:
+    // [ &param0, &param1, &param2, &param3 ].
     let paddr3_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let paddr2_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let paddr1_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+    let paddr0_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
 
-    emit_load_call_arg_to_rax_x86(abi_argc, 0); emit_store_var(n_slot)
-    emit_load_call_arg_to_rax_x86(abi_argc, 1); emit_store_var(a_ptr_slot)
-    emit_load_call_arg_to_rax_x86(abi_argc, 2); emit_store_var(a_len_slot)
-    emit_load_call_arg_to_rax_x86(abi_argc, 3); emit_store_var(b_ptr_slot)
-    emit_load_call_arg_to_rax_x86(abi_argc, 4); emit_store_var(b_len_slot)
-    emit_load_call_arg_to_rax_x86(abi_argc, 5); emit_store_var(c_ptr_slot)
-    emit_load_call_arg_to_rax_x86(abi_argc, 6); emit_store_var(c_len_slot)
+    emit_load_call_arg_to_rax_shift_x86(abi_argc, 0, entry_pad_slots); emit_store_var(n_slot)
+    emit_load_call_arg_to_rax_shift_x86(abi_argc, 1, entry_pad_slots); emit_store_var(a_ptr_slot)
+    emit_load_call_arg_to_rax_shift_x86(abi_argc, 2, entry_pad_slots); emit_store_var(a_len_slot)
+    emit_load_call_arg_to_rax_shift_x86(abi_argc, 3, entry_pad_slots); emit_store_var(b_ptr_slot)
+    emit_load_call_arg_to_rax_shift_x86(abi_argc, 4, entry_pad_slots); emit_store_var(b_len_slot)
+    emit_load_call_arg_to_rax_shift_x86(abi_argc, 5, entry_pad_slots); emit_store_var(c_ptr_slot)
+    emit_load_call_arg_to_rax_shift_x86(abi_argc, 6, entry_pad_slots); emit_store_var(c_len_slot)
 
     emit_load_var(a_len_slot)
     em(0x48); em(0xc1); em(0xe0); em(3)
@@ -19596,7 +20304,7 @@ fn emit_kernel_dispatch_x86(fi: i64, abi_argc: i64) with Mut, Panic, Div {
     emit_call_abs_qword_x86(GL_BSS_BASE + GPU_RT_CUMEMFREE_PTR_BSS_OFF, 1)
     emit_load_var(dptr_c_slot); em(0x50)
     emit_call_abs_qword_x86(GL_BSS_BASE + GPU_RT_CUMEMFREE_PTR_BSS_OFF, 1)
-    emit_drop_call_args_x86(abi_argc)
+    emit_drop_call_args_x86(abi_argc + entry_pad_slots)
     em(0x31); em(0xc0)
     em(0xe9)
     let done = CL
@@ -19615,6 +20323,7 @@ fn emit_kernel_dispatch_x86(fi: i64, abi_argc: i64) with Mut, Panic, Div {
     patch32(gpu_fail_k, CL)
     emit_mark_gpu_unavailable_x86("GPU unavailable: CUDA kernel launch failed\n")
     patch32(cpu_fallback, CL)
+    emit_drop_call_args_x86(entry_pad_slots)
     emit_kernel_cpu_direct_call_x86(fi, abi_argc)
     patch32(done, CL)
 }
@@ -29010,17 +29719,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     while p < TC {
         // Skip trait declarations — trait methods are abstract signatures, not fn defs.
         if TK[p as usize] == 75 {
-            p = p + 1  // skip 'trait'
-            if p < TC && TK[p as usize] == 3 { p = p + 1 }  // skip name
-            if p < TC && TK[p as usize] == 8 {
-                p = p + 1
-                var trait_skip_depth1: i64 = 1
-                while p < TC && trait_skip_depth1 > 0 {
-                    if TK[p as usize] == 8 { trait_skip_depth1 = trait_skip_depth1 + 1 }
-                    if TK[p as usize] == 9 { trait_skip_depth1 = trait_skip_depth1 - 1 }
-                    p = p + 1
-                }
-            }
+            p = skip_trait_decl_at(p)
             continue
         }
         if TK[p as usize] == 1 && TK[(p + 1) as usize] == 3 {
@@ -29054,18 +29753,12 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
     var sig_impl_pending_open: i64 = 0
     while p < TC {
         // Skip trait declarations — trait methods are abstract signatures, not fn defs.
+        // Guarded on sig_impl_depth == 0 (unlike the other trait-skip call sites,
+        // which have no impl-depth tracking): this sig-pass loop is the only one
+        // that maintains impl-block-depth state, and token 75 must not be treated
+        // as a trait declaration while already inside an impl block's own body.
         if sig_impl_depth == 0 && TK[p as usize] == 75 {
-            p = p + 1  // skip 'trait'
-            if p < TC && TK[p as usize] == 3 { p = p + 1 }  // skip name
-            if p < TC && TK[p as usize] == 8 {
-                p = p + 1
-                var trait_skip_depth2: i64 = 1
-                while p < TC && trait_skip_depth2 > 0 {
-                    if TK[p as usize] == 8 { trait_skip_depth2 = trait_skip_depth2 + 1 }
-                    if TK[p as usize] == 9 { trait_skip_depth2 = trait_skip_depth2 - 1 }
-                    p = p + 1
-                }
-            }
+            p = skip_trait_decl_at(p)
             continue
         }
         if TK[p as usize] == 77 {
@@ -29282,25 +29975,13 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         // Skip trait declarations — must match Pass 1 / sig-pass trait skip so ret_fi
         // stays aligned with the FN_* index space (trait bodyless methods aren't registered).
         if TK[p as usize] == 75 {
-            p = p + 1  // skip 'trait'
-            if p < TC && TK[p as usize] == 3 { p = p + 1 }  // skip name
-            if p < TC && TK[p as usize] == 8 {
-                p = p + 1
-                var trait_skip_depth3: i64 = 1
-                while p < TC && trait_skip_depth3 > 0 {
-                    if TK[p as usize] == 8 { trait_skip_depth3 = trait_skip_depth3 + 1 }
-                    if TK[p as usize] == 9 { trait_skip_depth3 = trait_skip_depth3 - 1 }
-                    p = p + 1
-                }
-            }
+            p = skip_trait_decl_at(p)
             continue
         }
         if TK[p as usize] == 1 && TK[(p + 1) as usize] == 3 {
             p = p + 1
             if p + 2 < TC && TK[(p + 1) as usize] == 23 && TK[(p + 3) as usize] == 24 { p = p + 1; continue }
-            var q: i64 = p + 1
-            if TK[q as usize] == 6 { q = q + 1 }
-            while q < TC && TK[q as usize] != 8 { q = q + 1 }
+            var q: i64 = find_fn_body_open_after_name(p)
             if FN_RET_TY[ret_fi as usize] == 8 && arr_hash_alen(FN_RET_HASH[ret_fi as usize]) == 0 {
                 let ret_esiz = arr_hash_esiz(FN_RET_HASH[ret_fi as usize])
                 let ret_elem_ty = arr_hash_elem_ty(FN_RET_HASH[ret_fi as usize])
@@ -29337,17 +30018,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
         // Skip trait declarations — must match Pass 1 / sig-pass trait skip so eff_fi
         // stays aligned with the FN_* index space (trait bodyless methods aren't registered).
         if TK[p as usize] == 75 {
-            p = p + 1  // skip 'trait'
-            if p < TC && TK[p as usize] == 3 { p = p + 1 }  // skip name
-            if p < TC && TK[p as usize] == 8 {
-                p = p + 1
-                var trait_skip_depth4: i64 = 1
-                while p < TC && trait_skip_depth4 > 0 {
-                    if TK[p as usize] == 8 { trait_skip_depth4 = trait_skip_depth4 + 1 }
-                    if TK[p as usize] == 9 { trait_skip_depth4 = trait_skip_depth4 - 1 }
-                    p = p + 1
-                }
-            }
+            p = skip_trait_decl_at(p)
             continue
         }
         if TK[p as usize] == 1 && TK[(p + 1) as usize] == 3 {
@@ -29356,6 +30027,15 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             if p + 2 < TC && TK[(p + 1) as usize] == 23 && TK[(p + 3) as usize] == 24 { p = p + 1; continue }
             // Scan forward to find { (start of body) — mirror the ew algorithm so that
             // refinement types in parameter or return position don't misfire.
+            // NOTE: deliberately NOT using the shared find_fn_body_open_after_name()
+            // helper here (unlike the other three call sites above) -- that helper
+            // has no bodyless-declaration sentinel: in the "no body found" case it
+            // just advances until TC/terminator and returns a non-negative offset,
+            // whereas this call site's caller below requires eq < 0 to detect a
+            // bodyless declaration (e.g. `fn pick() -> bool` inside
+            // `effect Choice { ... }`). Using the shared helper here would silently
+            // misclassify every bodyless declaration as having a body and call
+            // find_matching_body_close on a non-brace position.
             var eq: i64 = p + 1
             // Skip parameter list
             if TK[eq as usize] == 6 {
@@ -38452,6 +39132,13 @@ fn append_src_lit(s: string) with Mut, Panic, Div {
 
 fn append_native_prelude() with Mut, Panic, Div {
     append_src_lit("\n")
+    // The discharged-proof token. Reachable only as the output of dsep_lower():
+    // a hand-written `d_separated()` with no arguments is rejected there, so the
+    // zero-argument form never appears in source that a human wrote.
+    append_src_lit("pub fn d_separated() -> i64 {\n")
+    append_src_lit("    return 1\n")
+    append_src_lit("}\n\n")
+
     append_src_lit("fn __native_abs_i64(x: i64) -> i64 {\n")
     append_src_lit("    if x < 0 { return 0 - x }\n")
     append_src_lit("    x\n")
@@ -40018,6 +40705,11 @@ fn main() -> i64 with IO, Mut, Panic, Div {
         }
         return 1
     }
+    // Collect `causal graph` blocks and remove them from the token stream before
+    // any pass runs, so an independence claim can be discharged regardless of
+    // whether the graph is declared above or below it.
+    cg_collect()
+    dsep_lower()
     print("tokens: "); print_int(TC); print("\n")
     var cr: i64 = 0
     if TARGET_ARCH == 1 {

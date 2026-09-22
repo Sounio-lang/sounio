@@ -572,6 +572,124 @@ pub fn lower_hard_error_reset() with Mut {
 // IrLowerResult/IrLowerBoxResult construction site.
 pub fn lower_had_error_with_hard(v: bool) -> bool { v || IR_LOWER_HARD_ERROR != 0 }
 fn lower_ok_without_hard(v: bool) -> bool { !lower_had_error_with_hard(v) }
+// ============================================================
+// D11: tuple-return element struct types.
+//
+// `let (r, status) = f()` is desugared BY THE PARSER
+// (self-hosted/parser/stmts.sio) into `let __tupN = f()` + `let r = __tupN.0`
+// + `let status = __tupN.1`. lower_let_stmt_ref had no binding rule for a
+// tuple-index field-access initialiser, so `r`'s struct-type slot stayed
+// empty and a later `r.field` fell through field_idx_for_base_ref to
+// field_idx_from_name_simple -- the GLOBAL, name-only, FIRST-REGISTERED-match
+// scan over every struct layout in the linked program. Any other struct
+// anywhere in the closure declaring the same field name at a different index
+// silently won. Measured: x509_parse_certificate's `cert_inner.pos` resolved
+// to tls::client's HsBuf.pos (index 3) instead of asn1::der's DerReader.pos
+// (index 1), reading 8 bytes past the end of a 24-byte DerReader and turning
+// a valid certificate into CHAIN_ERR_BAD_SIGNATURE.
+// See docs/audit/D11_ARENA_SCRATCH_RESET_CROSS_MODULE_CORRUPTION_DISPATCH_2026-08-26.md.
+//
+// Keyed by the callee's INTERNED NAME, not by fn_id: fn_ids are remapped by
+// the cross-module merge (ir_merge_place_and_remap_function), names are not --
+// name identity is exactly what the merge dedups on. A miss (unknown callee,
+// non-tuple return, non-struct element, unregistered layout, pool overflow)
+// leaves the previous behaviour untouched, so this table can only ever add
+// resolution, never mis-resolve.
+let LOWER_RTT_ARITY: i64 = 4
+let LOWER_RTT_MAX_KEY: i64 = 65536
+var LOWER_RTT_NAMEID: [i64; 262144]
+
+// Named-struct type name of tuple element k of a declared tuple type, or the
+// empty name (element k absent, or not a plain named type).
+fn lower_type_list_named_name_at(opt: &Option<Box<TypeExprList>>, k: i64) -> Name with Mut, Panic, Div {
+    match *opt {
+        Some(list) => {
+            if k <= 0 {
+                if (*list).head.kind == TypeExprKind::TypeNamed {
+                    return ir_path_first_name((*list).head.path)
+                }
+                return ir_empty_name()
+            }
+            lower_type_list_named_name_at(&(*list).tail, k - 1)
+        }
+        None => ir_empty_name(),
+    }
+}
+
+// Poison sentinel for LOWER_RTT_NAMEID: two functions that share an
+// interned NAME (this table's key -- see the note above LOWER_RTT_ARITY;
+// this codebase alone has 39 distinct `fn add(...) -> (XTable, i64)`
+// functions and 5 `parse_* -> (Parser, ...)` functions, per the review that
+// asked for this hardening) can disagree on which struct type occupies a
+// given tuple-return slot. Recording the SECOND function's answer over the
+// first's would be silent last-write-wins: whichever of the two colliding
+// functions happens to be registered last would win the slot for BOTH,
+// even though real element-struct types differ, risking a future
+// mis-resolution. Only a genuine slot flip (both a prior real registration
+// and a new one, disagreeing) poisons -- registering the SAME answer twice
+// (the ordinary case: every call site above re-derives the same function's
+// own tuple-name row) is not a conflict and never poisons.
+const LOWER_RTT_POISON: i64 = 0 - 1
+
+// Record, for a function whose DECLARED return type is a tuple, the struct
+// type name of each of its first LOWER_RTT_ARITY elements. Called from every
+// site that already fills in return_struct_name from the same TypeExpr.
+//
+// Collision handling (hardening, see LOWER_RTT_POISON above): a slot already
+// holding a non-zero, non-poison id that DISAGREES with this call's id is
+// poisoned (set to LOWER_RTT_POISON) rather than overwritten -- two
+// same-named functions in the linked program disagree on this element's
+// struct type, so neither answer can be trusted. A slot already poisoned
+// stays poisoned. An id of 0 (element absent, or not a plain named type)
+// carries no information and never overwrites or poisons an existing entry.
+fn lower_record_ret_tuple_names(fn_name: Name, return_type: &Option<Box<TypeExpr>>) with Mut, Panic, Div {
+    match *return_type {
+        Some(te) => {
+            if (*te).kind != TypeExprKind::TypeTuple { return }
+            let key = ir_intern_name(fn_name)
+            if key <= 0 || key > LOWER_RTT_MAX_KEY { return }
+            let base = (key - 1) * LOWER_RTT_ARITY
+            var k: i64 = 0
+            while k < LOWER_RTT_ARITY {
+                let elem = lower_type_list_named_name_at(&(*te).type_args, k)
+                var id: i64 = 0
+                if elem.len > 0 {
+                    id = ir_intern_name(elem)
+                }
+                if id != 0 {
+                    let slot = base + k
+                    let existing = LOWER_RTT_NAMEID[slot as usize]
+                    if existing == 0 {
+                        LOWER_RTT_NAMEID[slot as usize] = id
+                    } else if existing != id && existing != LOWER_RTT_POISON {
+                        LOWER_RTT_NAMEID[slot as usize] = LOWER_RTT_POISON
+                    }
+                }
+                k = k + 1
+            }
+        }
+        None => {}
+    }
+}
+
+fn lower_ret_tuple_elem_name(fn_name: Name, k: i64) -> Name with Mut, Panic, Div {
+    if k < 0 || k >= LOWER_RTT_ARITY { return ir_empty_name() }
+    if fn_name.len <= 0 { return ir_empty_name() }
+    let key = ir_intern_name(fn_name)
+    if key <= 0 || key > LOWER_RTT_MAX_KEY { return ir_empty_name() }
+    let id = LOWER_RTT_NAMEID[((key - 1) * LOWER_RTT_ARITY + k) as usize]
+    if id == LOWER_RTT_POISON { return ir_empty_name() }
+    ir_name_at(id)
+}
+
+// The desugared `let __tupN = f()` and its `let x = __tupN.k` element bindings
+// are emitted contiguously and in source order by parse_block, so remembering
+// only the most recent tuple-producing temp is enough to link them. Both are
+// interned ids (0 = none) rather than Names: a module-level `var` of struct
+// type is not a shape this compiler's own codegen is proven on.
+var LOWER_TUPLET_TMP_ID: i64 = 0
+var LOWER_TUPLET_CALLEE_ID: i64 = 0
+
 var FO_XFER_COUNT: i64 = 0
 var FO_XFER_KIND: [i64; 64] = [0; 64]
 var FO_XFER_LIT: [f64; 64] = [0.0; 64]
@@ -1979,6 +2097,7 @@ fn lowerer_preseed_dep_items_into_acc_mut(
                                         fn_slot_sig.returns_float = lower_opt_return_float_code(&(*fd).return_type)
                                         fn_slot_sig.return_fixed_array_len = lower_opt_type_word_scalar_array_len(&(*fd).return_type)
                                         fn_slot_sig.return_struct_name = lower_opt_type_named_name(&(*fd).return_type)
+                                        lower_record_ret_tuple_names(fn_slot_sig.name, &(*fd).return_type)
                                         fn_slot_sig.param_count = ir_param_list_count_ref(&(*fd).params)
                                         fn_slot_sig.first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
                                         if strategy_sig == IR_STRATEGY_INSTRUMENTED {
@@ -2458,6 +2577,7 @@ fn lowerer_preseed_fn_signature_mut(
     fn_slot.returns_float = lower_opt_return_float_code(return_type)
     fn_slot.return_fixed_array_len = lower_opt_type_word_scalar_array_len(return_type)
     fn_slot.return_struct_name = lower_opt_type_named_name(return_type)
+    lower_record_ret_tuple_names(name, return_type)
     fn_slot.param_count = ir_param_list_count_ref(params)
     fn_slot.first_param_is_ref = lower_fn_first_param_is_ref(params)
     if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -2756,7 +2876,24 @@ fn lowerer_preseed_external_items_into_acc_mut(
                                                 name_id: ir_intern_name((*flist).head.name),
                                                 index: fc,
                                                 is_float: if lower_type_expr_is_f64(&(*flist).head.ty) { 1 } else if lower_type_expr_is_array_of_f64(&(*flist).head.ty) { 2 } else if lower_type_expr_is_integer(&(*flist).head.ty) { 3 } else if lower_type_expr_is_bool(&(*flist).head.ty) { 3 } else if lower_type_expr_is_pointer_like(&(*flist).head.ty) { 4 } else { 0 },
-                                                elem_type_name_id: ir_intern_name(ir_empty_name()),
+                                                // Array-of-struct ELEMENT type name. This was
+                                                // `ir_empty_name()` while the very next line already
+                                                // read `named_type_name_id` off the same declared
+                                                // `(*flist).head.ty` -- an omission, not a limitation.
+                                                // Every sibling registration site that has the
+                                                // declared FieldDef type in hand records the real
+                                                // element name. Leaving it empty here made
+                                                // field_array_elem_type_name_for_struct answer "" for
+                                                // every array-of-struct field of an IMPORTED struct,
+                                                // so `owner.arrayfield[i].name` in a consuming module
+                                                // fell back to the name-only global field lookup --
+                                                // Finding 24 re-entered through a different door.
+                                                // Measured 2026-08-25: x509_verify_hostname read
+                                                // Certificate.san_entries[i].value_len as 0 while the
+                                                // byte-identical expression inside the DECLARING
+                                                // module read 21. See docs/audit/
+                                                // X509_PARSE_CERTIFICATE_SAN_VALUE_LEN_LOSS_2026-08-25.md.
+                                                elem_type_name_id: ir_intern_name(lower_type_expr_array_elem_name(&(*flist).head.ty)),
                                                 word_scalar_array_len: lower_type_expr_word_scalar_array_len(&(*flist).head.ty),
                                                 named_type_name_id: ir_intern_name(lower_type_expr_named_type_name(&(*flist).head.ty)),
                                             }
@@ -3300,6 +3437,7 @@ fn lowerer_preseed_program_items_mut(
                                     fn_slot_sig.returns_float = lower_opt_return_float_code(&(*fd).return_type)
                                     fn_slot_sig.return_fixed_array_len = lower_opt_type_word_scalar_array_len(&(*fd).return_type)
                                     fn_slot_sig.return_struct_name = lower_opt_type_named_name(&(*fd).return_type)
+                                    lower_record_ret_tuple_names(fn_slot_sig.name, &(*fd).return_type)
                                     fn_slot_sig.param_count = ir_param_list_count_ref(&(*fd).params)
                                     fn_slot_sig.first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
                                     if strategy_sig == IR_STRATEGY_INSTRUMENTED {
@@ -3434,6 +3572,7 @@ fn ir_fast_summary_preseed_fn_signature(
     module_value.functions[fn_id as usize].returns_float = lower_opt_return_float_code(return_type)
     module_value.functions[fn_id as usize].return_fixed_array_len = lower_opt_type_word_scalar_array_len(return_type)
     module_value.functions[fn_id as usize].return_struct_name = lower_opt_type_named_name(return_type)
+    lower_record_ret_tuple_names(name, return_type)
     module_value.functions[fn_id as usize].param_count = ir_param_list_count_ref(params)
     module_value.functions[fn_id as usize].first_param_is_ref = lower_fn_first_param_is_ref(params)
     if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -3562,6 +3701,7 @@ fn ir_fast_summary_preseed_fn_signature_owned(
     module_value.functions[fn_id as usize].returns_float = lower_opt_return_float_code(return_type)
     module_value.functions[fn_id as usize].return_fixed_array_len = lower_opt_type_word_scalar_array_len(return_type)
     module_value.functions[fn_id as usize].return_struct_name = lower_opt_type_named_name(return_type)
+    lower_record_ret_tuple_names(name, return_type)
     module_value.functions[fn_id as usize].param_count = ir_param_list_count_ref(params)
     module_value.functions[fn_id as usize].first_param_is_ref = lower_fn_first_param_is_ref(params)
     if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -3880,6 +4020,7 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                 module.functions[fn_id as usize].returns_float = lower_opt_return_float_code(&(*fd).return_type)
                                 module.functions[fn_id as usize].return_fixed_array_len = lower_opt_type_word_scalar_array_len(&(*fd).return_type)
                                 module.functions[fn_id as usize].return_struct_name = lower_opt_type_named_name(&(*fd).return_type)
+                                lower_record_ret_tuple_names(module.functions[fn_id as usize].name, &(*fd).return_type)
                                 module.functions[fn_id as usize].param_count = ir_param_list_count_ref(&(*fd).params)
                                 module.functions[fn_id as usize].first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
                                 if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -3974,6 +4115,7 @@ pub fn lower_program_to_ir_summary_flat_owned_with_epistemic_ref(
                                                         module.functions[fn_id as usize].returns_float = lower_opt_return_float_code(&(*fd).return_type)
                                                         module.functions[fn_id as usize].return_fixed_array_len = lower_opt_type_word_scalar_array_len(&(*fd).return_type)
                                                         module.functions[fn_id as usize].return_struct_name = lower_opt_type_named_name(&(*fd).return_type)
+                                                        lower_record_ret_tuple_names(module.functions[fn_id as usize].name, &(*fd).return_type)
                                                         module.functions[fn_id as usize].param_count = ir_param_list_count_ref(&(*fd).params)
                                                         module.functions[fn_id as usize].first_param_is_ref = lower_fn_first_param_is_ref(&(*fd).params)
                                                         if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -4522,6 +4664,7 @@ fn lowerer_lower_fn_item_mut(
     (*strategy_func_box).returns_float = lower_opt_return_float_code(&fd.return_type)
     (*strategy_func_box).return_fixed_array_len = lower_opt_type_word_scalar_array_len(&fd.return_type)
     (*strategy_func_box).return_struct_name = lower_opt_type_named_name(&fd.return_type)
+    lower_record_ret_tuple_names((*strategy_func_box).name, &fd.return_type)
     (*strategy_func_box).first_param_is_ref = lower_fn_first_param_is_ref(&fd.params)
     (*lo).current_func = strategy_func_box
 
@@ -5171,6 +5314,54 @@ fn lower_type_expr_is_array_of_f64(te: &TypeExpr) -> bool with Mut, Panic, Div {
     match (*te).inner {
         Some(inner_ty) => lower_type_expr_is_f64(&(*inner_ty)),
         None => false,
+    }
+}
+
+// Returns the element struct's name for `[StructT; N]` (and its
+// `&`/`&!`-wrapped forms), or an empty name for anything else (array of a
+// primitive, non-array type, etc). Companion to lower_type_expr_is_array_of_f64
+// above, but for named/struct element types instead of f64.
+//
+// This closes a real corruption bug: `field_idx_for_base_ref` only resolves a
+// field access's owning struct type when the access base is a plain
+// identifier (`x.field`). For `arr[i].field`, the base is an ExprIndex, not
+// an ExprIdent, so the array-of-struct case fell through to
+// `field_idx_from_name_simple` -- a GLOBAL, name-only, first-match lookup
+// across every registered struct layout. Since the built-in `Knowledge`
+// struct is registered early with a `value` field at index 0, any user
+// struct with a field literally named `value` (or any other name that
+// happens to collide with an earlier-registered struct's field) silently
+// resolved to the WRONG field index, and `arr[i].value = x` clobbered
+// whatever field actually lives at that wrong index instead of `value`'s own
+// slot. See docs/audit/X509_ARRAY_STRUCT_FIELD_CORRUPTION_DISPATCH_2026-08-24.md.
+// This helper is step one of the fix: give `lower_let_stmt_ref` a way to
+// learn and record an array-typed local's ELEMENT struct type, so
+// `field_idx_for_base_ref` can resolve `arr[i].field` the same struct-scoped
+// way it already resolves `x.field`.
+fn lower_type_expr_array_struct_elem_name(te: &TypeExpr) -> Name with Mut, Panic, Div {
+    if (*te).kind == TypeExprKind::TypeReference || (*te).kind == TypeExprKind::TypeRefMut {
+        match (*te).inner {
+            Some(inner_ty) => return lower_type_expr_array_struct_elem_name(&(*inner_ty)),
+            None => return ir_empty_name(),
+        }
+    }
+    if (*te).kind != TypeExprKind::TypeArray { return ir_empty_name() }
+    match (*te).inner {
+        Some(inner_ty) => {
+            if (*inner_ty).kind == TypeExprKind::TypeNamed {
+                ir_path_first_name((*inner_ty).path)
+            } else {
+                ir_empty_name()
+            }
+        }
+        None => ir_empty_name(),
+    }
+}
+
+fn lower_opt_type_array_struct_elem_name(opt: &Option<Box<TypeExpr>>) -> Name with Mut, Panic, Div {
+    match *opt {
+        Some(te) => lower_type_expr_array_struct_elem_name(&(*te)),
+        None => ir_empty_name(),
     }
 }
 
@@ -11611,8 +11802,16 @@ impl Lowerer {
                 // of the table before falling back to the legacy hash path;
                 // partially seeded layouts must not collapse every miss to .0.
                 var sj: i64 = 0
-                // Same Knowledge-preseed shadow as field_idx_from_name_simple:
-                // defer the synthetic layout so a user struct's own field wins.
+                // Reconciled with main's commit 01258e2b4 ("stop the
+                // synthetic Knowledge layout shadowing user field names"):
+                // ir_register_knowledge_layout preseeds a synthetic
+                // "Knowledge" layout (value@0, variance@1, confidence@2) as
+                // entry 0, before any user struct is registered. Scanned in
+                // table order, its field names -- ordinary identifiers like
+                // "value" -- shadow every later-registered user struct
+                // sharing one, so defer it: a user layout always wins here,
+                // and Knowledge answers only if nothing else does (preserving
+                // genuine Knowledge<T> access through an untyped base).
                 let kname = make_name("Knowledge")
                 var kidx: i64 = -1
                 while sj < (*self.struct_layouts).count {
@@ -11658,13 +11857,14 @@ impl Lowerer {
         if n.len == 1 && first_byte >= 48 && first_byte <= 57 {
             return first_byte - 48
         }
-        // The synthetic "Knowledge" layout (ir_register_knowledge_layout) is
-        // preseeded as entry 0, before any user struct is registered, and its
-        // field names — value / variance / confidence — are ordinary user
-        // identifiers. Scanned in table order it shadowed every user struct
-        // carrying one of them, so `arr[i].value` resolved to Knowledge's slot 0
-        // and silently clobbered whatever field really lives there. Defer it:
-        // a user layout always wins, and Knowledge answers only if nothing else
+        // Reconciled with main's commit 01258e2b4: the synthetic "Knowledge"
+        // layout (ir_register_knowledge_layout) is preseeded as entry 0,
+        // before any user struct is registered, and its field names -- value
+        // / variance / confidence -- are ordinary user identifiers. Scanned
+        // in table order it shadowed every user struct carrying one, so
+        // `arr[i].value` resolved to Knowledge's slot 0 and silently
+        // clobbered whatever field really lives there. Defer it: a user
+        // layout always wins, and Knowledge answers only if nothing else
         // does (genuine Knowledge<T> access through an untyped base).
         let knowledge_name = make_name("Knowledge")
         var knowledge_idx: i64 = -1
@@ -12030,6 +12230,47 @@ impl Lowerer {
         }
     }
 
+    // `arr[i].field`: the field-access base is the ExprIndex node itself, not
+    // a plain identifier, so field_idx_for_base_ref's ExprIdent branch never
+    // fires and it falls to the name-only global fallback -- which silently
+    // collides across unrelated structs that happen to share a field name
+    // (see lower_type_expr_array_struct_elem_name's comment for the full
+    // corruption bug this closes). This resolves the ARRAY's own identifier
+    // (arr[i].left) and looks up its element struct type -- bound by
+    // lower_let_stmt_ref via lower_opt_type_array_struct_elem_name -- so the
+    // caller can route through the struct-scoped field_idx_from_name instead.
+    // Returns -1 when it cannot resolve (caller falls back to the previous
+    // behavior). Kept as its own small function, not inlined into
+    // field_idx_for_base_ref, deliberately: this compiler's own codegen is
+    // documented-fragile around large/complex functions (stack-frame-size
+    // warnings throughout this file), and growing field_idx_for_base_ref's
+    // own body in place perturbed self-compilation enough to SIGSEGV an
+    // unrelated Knowledge-array test (tests/run-pass/knowledge_array.sio) --
+    // confirmed via bisection: the exact same logic, extracted to a separate
+    // function, does not.
+    fn field_idx_for_array_index_base(self, base_expr: &Expr, field_name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        if (*base_expr).kind != ExprKind::ExprIndex { return 0 - 1 }
+        let arr_opt = &(*base_expr).left
+        match *arr_opt {
+            Some(arr_expr) => {
+                // The array being indexed may be a bare local
+                // (`extensions[i].field`) or an arbitrarily deep field-access
+                // chain ending in an array-typed field
+                // (`cert.issuer.entries[i].field`). array_index_base_elem_struct_type
+                // resolves the element's struct type for either shape,
+                // recursively. Omitting the chained case left `arr[i].field`
+                // writes through anything but a bare local array falling back
+                // to the buggy name-only global lookup exactly like the bug
+                // this function exists to fix, just one or more levels
+                // deeper. See docs/audit/X509_ARRAY_STRUCT_FIELD_CORRUPTION_DISPATCH_2026-08-24.md.
+                let elem_type_name = self.array_index_base_elem_struct_type(&(*arr_expr))
+                if elem_type_name.len <= 0 { return 0 - 1 }
+                self.field_idx_from_name(elem_type_name, field_name)
+            }
+            _ => 0 - 1,
+        }
+    }
+
     fn field_array_elem_is_float_for_base_ref(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> bool with Mut, Panic, Div, Alloc {
         match *base_opt {
             Some(owner_expr) => {
@@ -12134,6 +12375,74 @@ impl Lowerer {
             si = si + 1
         }
         ir_empty_name()
+    }
+
+    // Sibling of field_array_elem_type_name_for_struct, but for a plain
+    // (non-array) struct-typed field: `Certificate.issuer: X509Name`'s
+    // "issuer" field's named_type_name_id is "X509Name".
+    fn field_named_type_for_struct(self, type_name: Name, field_name: Name) -> Name with Mut, Panic, Div {
+        if type_name.len <= 0 { return ir_empty_name() }
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
+                var fi: i64 = 0
+                while fi < (*self.struct_layouts).entries[si as usize].field_count {
+                    if ir_name_eq(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].name_id), field_name) {
+                        return ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].named_type_name_id)
+                    }
+                    fi = fi + 1
+                }
+            }
+            si = si + 1
+        }
+        ir_empty_name()
+    }
+
+    // Resolves the struct TYPE of an arbitrary, possibly-chained field-access
+    // base expression, recursively: `cert` (ident) -> lookup_local_struct_type;
+    // `cert.issuer` (field access) -> resolve `cert`'s type via this same
+    // function, then look up "issuer"'s named type within it. This is what
+    // makes `cert.issuer.entries[i].field` resolve correctly regardless of
+    // chain depth -- a one-level-only resolver (matching only `ident.field`)
+    // covers `name.entries[i].field` but not a further `.field` hop before
+    // the array. See docs/audit/X509_ARRAY_STRUCT_FIELD_CORRUPTION_DISPATCH_2026-08-24.md.
+    fn expr_struct_type_ref(self, expr: &Expr) -> Name with Mut, Panic, Div, Alloc {
+        if (*expr).kind == ExprKind::ExprIdent {
+            return self.lookup_local_struct_type((*expr).name)
+        }
+        if (*expr).kind == ExprKind::ExprFieldAccess {
+            match (*expr).left {
+                Some(base_expr) => {
+                    let owner_type = self.expr_struct_type_ref(&(*base_expr))
+                    if owner_type.len <= 0 { return ir_empty_name() }
+                    return self.field_named_type_for_struct(owner_type, (*expr).name)
+                }
+                _ => ir_empty_name(),
+            }
+        } else {
+            ir_empty_name()
+        }
+    }
+
+    // Array-element struct type for `arr_expr[i]`'s `arr_expr`, whether
+    // `arr_expr` is a bare local (`extensions`) or an arbitrarily deep
+    // field-access chain ending in an array-typed field (`cert.issuer.entries`).
+    fn array_index_base_elem_struct_type(self, arr_expr: &Expr) -> Name with Mut, Panic, Div, Alloc {
+        if (*arr_expr).kind == ExprKind::ExprIdent {
+            return self.lookup_local_struct_type((*arr_expr).name)
+        }
+        if (*arr_expr).kind == ExprKind::ExprFieldAccess {
+            match (*arr_expr).left {
+                Some(owner_expr) => {
+                    let owner_type = self.expr_struct_type_ref(&(*owner_expr))
+                    if owner_type.len <= 0 { return ir_empty_name() }
+                    return self.field_array_elem_type_name_for_struct(owner_type, (*arr_expr).name)
+                }
+                _ => ir_empty_name(),
+            }
+        } else {
+            ir_empty_name()
+        }
     }
 
     fn field_array_elem_type_name_for_base_ref(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> Name with Mut, Panic, Div, Alloc {
@@ -13026,6 +13335,7 @@ impl Lowerer {
         func.returns_float = lower_opt_return_float_code(return_type)
         func.return_fixed_array_len = lower_opt_type_word_scalar_array_len(return_type)
         func.return_struct_name = lower_opt_type_named_name(return_type)
+        lower_record_ret_tuple_names(func.name, return_type)
         func.param_count = ir_param_list_count_ref(params)
         func.first_param_is_ref = lower_fn_first_param_is_ref(params)
         func.param_regs = [IR_INVALID_REG; 64]
@@ -13714,6 +14024,7 @@ impl Lowerer {
         (*lo.current_func).returns_float = lower_opt_return_float_code(&fd.return_type)
         (*lo.current_func).return_fixed_array_len = lower_opt_type_word_scalar_array_len(&fd.return_type)
         (*lo.current_func).return_struct_name = lower_opt_type_named_name(&fd.return_type)
+        lower_record_ret_tuple_names((*lo.current_func).name, &fd.return_type)
         (*lo.current_func).first_param_is_ref = lower_fn_first_param_is_ref(&fd.params)
 
         // Sprint 44: allocate profiling counter for instrumented functions
@@ -13900,6 +14211,7 @@ impl Lowerer {
         (*lo.current_func).returns_float = lower_opt_return_float_code(&fd.return_type)
         (*lo.current_func).return_fixed_array_len = lower_opt_type_word_scalar_array_len(&fd.return_type)
         (*lo.current_func).return_struct_name = lower_opt_type_named_name(&fd.return_type)
+        lower_record_ret_tuple_names((*lo.current_func).name, &fd.return_type)
         (*lo.current_func).first_param_is_ref = lower_fn_first_param_is_ref(&fd.params)
 
         if strategy == IR_STRATEGY_INSTRUMENTED {
@@ -14574,6 +14886,30 @@ impl Lowerer {
                 _ => {}
             }
         }
+        // Record an array-of-struct local's ELEMENT struct type (e.g. `var
+        // extensions: [ExtensionEntry; 32] = ...`) so `field_idx_for_base_ref`
+        // can resolve `extensions[i].field` through the correct struct's own
+        // layout instead of falling back to the name-only global lookup that
+        // collides with same-named fields in unrelated structs (see
+        // lower_type_expr_array_struct_elem_name's comment for the full
+        // corruption this closes). struct_types[] is otherwise unused for
+        // array-typed locals, so this reuses the existing slot/mechanism.
+        //
+        // TypeExprKind::TypeNamed is the generic catch-all -- primitive
+        // element types (`[i64; N]`, `[u8; N]`, `[bool; N]`, ...) parse as
+        // TypeNamed too, since there is no dedicated primitive-type kind.
+        // Gate on the candidate name actually being a REGISTERED struct
+        // layout before binding, or every primitive-element array local in
+        // the whole compiled program gets falsely tagged with a bogus
+        // "struct type" (measured regression: tests/run-pass/
+        // knowledge_array.sio SIGSEGV'd once this bound `struct_types["buf"]
+        // = "i64"` for `var buf: [i64; 800]` and unrelated struct-shaped
+        // codegen paths keyed off "is this local struct-typed" started
+        // firing for it).
+        let array_struct_elem_name = lower_opt_type_array_struct_elem_name(&s.ty)
+        if array_struct_elem_name.len > 0 && lower_struct_layout_index_of(&(*lo.struct_layouts), array_struct_elem_name) >= 0 {
+            lo = lo.bind_local_struct_type(s.name, array_struct_elem_name)
+        }
         // #1502: record which slots of a tuple-typed local are f64.
         let annotated_tuple_mask = lower_opt_type_tuple_float_mask(&s.ty)
         if annotated_tuple_mask != 0 {
@@ -14775,6 +15111,16 @@ impl Lowerer {
                         let ret_name = lo.expr_call_return_struct_name_ref(&(*expr_box))
                         if ret_name.len > 0 {
                             lo = lo.bind_local_struct_type(s.name, ret_name)
+                        } else {
+                            // D11: an empty return_struct_name means the callee does
+                            // not return a single named struct -- which is also the
+                            // case for a TUPLE return. Remember this temp and its
+                            // callee so the desugared `let x = __tupN.k` bindings that
+                            // parse_block emits immediately after can recover element
+                            // k's struct type. Harmless when the return really is a
+                            // scalar: the lookup then finds no recorded element name.
+                            LOWER_TUPLET_TMP_ID = ir_intern_name(s.name)
+                            LOWER_TUPLET_CALLEE_ID = ir_intern_name(callee_struct_name)
                         }
                     } else {
                         // `let b = Box::new(...)`: tag the local's struct-type slot with
@@ -14785,6 +15131,34 @@ impl Lowerer {
                         lo = lo.bind_local_box_inner_layout(s.name, bxl)
                     }
                 } else if (*expr_box).kind == ExprKind::ExprFieldAccess {
+                    // D11: `let r = __tupN.k`, the parser's desugaring of
+                    // `let (r, ...) = f()`. Recover element k's struct type from the
+                    // callee remembered at the immediately-preceding
+                    // `let __tupN = f()` and bind it, so a later `r.field` resolves
+                    // through field_idx_from_name (struct-scoped) instead of falling
+                    // to field_idx_from_name_simple's first-registered-match scan.
+                    // Guarded on the temp's own name matching, on the element being a
+                    // registered struct layout, and on a tuple return actually having
+                    // been recorded -- any miss leaves the previous behaviour intact.
+                    let d11_tuple_idx = lower_name_tuple_index((*expr_box).name)
+                    if d11_tuple_idx >= 0 && LOWER_TUPLET_TMP_ID != 0 {
+                        match (*expr_box).left {
+                            Some(d11_base) => {
+                                if (*d11_base).kind == ExprKind::ExprIdent
+                                    && ir_intern_name((*d11_base).name) == LOWER_TUPLET_TMP_ID {
+                                    let d11_elem = lower_ret_tuple_elem_name(
+                                        ir_name_at(LOWER_TUPLET_CALLEE_ID),
+                                        d11_tuple_idx
+                                    )
+                                    if d11_elem.len > 0
+                                        && lower_struct_layout_index_of(&(*lo.struct_layouts), d11_elem) >= 0 {
+                                        lo = lo.bind_local_struct_type(s.name, d11_elem)
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                     // `let p = h.inner` where the FIELD is a Box: propagate "Box" into the
                     // local's struct-type slot, exactly as the Box::new branch above does, so
                     // that `*p` lowers to the field-0 read (box deref through the handle)
@@ -14837,6 +15211,30 @@ impl Lowerer {
                     let src_st = lo.lookup_local_struct_type((*expr_box).name)
                     if src_st.len > 0 {
                         lo = lo.bind_local_struct_type(s.name, src_st)
+                    }
+                } else if (*expr_box).kind == ExprKind::ExprIndex {
+                    // `let e = arr[i]` (bare local array) or `let e = obj.field[i]`
+                    // (array-typed struct field): propagate the ELEMENT's struct
+                    // type to the new local, so a later `e.field` resolves
+                    // through the correct struct instead of falling to the
+                    // name-only global lookup (field_idx_from_name_simple) that
+                    // collides across unrelated structs sharing a field name.
+                    // This is the read-side sibling of the write-side bug fixed
+                    // in commit 88f91fae6 (Finding 24): that fix made
+                    // `arr[i].field` resolve correctly, but a whole-value copy
+                    // out of the array element FIRST (`let e = arr[i]`, THEN
+                    // `e.field`) never recorded `e`'s struct type at all, so it
+                    // fell straight back to the same buggy global lookup from a
+                    // different call site. See docs/audit/
+                    // X509_ARRAY_STRUCT_FIELD_CORRUPTION_DISPATCH_2026-08-24.md.
+                    match (*expr_box).left {
+                        Some(idx_base_expr) => {
+                            let elem_type_name = lo.array_index_base_elem_struct_type(&(*idx_base_expr))
+                            if elem_type_name.len > 0 && lower_struct_layout_index_of(&(*lo.struct_layouts), elem_type_name) >= 0 {
+                                lo = lo.bind_local_struct_type(s.name, elem_type_name)
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -14956,7 +15354,12 @@ impl Lowerer {
                                 } else {
                                     false
                                 }
-                                let fidx = lo.field_idx_for_base_ref(&(*target_expr).left, (*target_expr).name)
+                                let fidx_arr = lo.field_idx_for_array_index_base(&(*base_expr), (*target_expr).name)
+                                let fidx = if fidx_arr >= 0 {
+                                    fidx_arr
+                                } else {
+                                    lo.field_idx_for_base_ref(&(*target_expr).left, (*target_expr).name)
+                                }
                                 let pair_base = lo.lower_expr_ref(&(*base_expr))
                                 lo = pair_base.0
                                 let base_reg = pair_base.1
@@ -17555,7 +17958,15 @@ impl Lowerer {
             // by-name scan across registered structs resolves the field.
             lo1.field_idx_from_name_simple(e.name)
         } else {
-            lo1.field_idx_for_base_ref(&e.left, e.name)
+            let fidx_arr_get = match e.left {
+                Some(base_expr_for_arr) => lo1.field_idx_for_array_index_base(&(*base_expr_for_arr), e.name),
+                _ => 0 - 1,
+            }
+            if fidx_arr_get >= 0 {
+                fidx_arr_get
+            } else {
+                lo1.field_idx_for_base_ref(&e.left, e.name)
+            }
         }
         // Tuple desugar: let __tup = f(); let a = __tup.0 — float-element base
         // means .0/.1 are f64 even without a struct layout entry.

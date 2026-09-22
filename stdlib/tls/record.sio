@@ -1,0 +1,261 @@
+// stdlib/tls/record.sio — TLS 1.3 record layer (RFC 8446 SS5.1, SS5.2, SS5.3).
+//
+// This is the first file under stdlib/tls/. It wraps/unwraps the AEAD
+// payload of a TLSCiphertext record (`stdlib/crypto/aead.sio`'s
+// `aead_seal`/`aead_open`) around a `TLSInnerPlaintext`
+// (`content || real_content_type || zero-padding`). It does NOT write or
+// parse the outer 5-byte `TLSCiphertext` header
+// (`opaque_type || legacy_record_version || length`) onto/from a wire
+// buffer -- that framing is Task 7/8's job, since it needs no state from
+// `RecordLayerState`. It DOES, however, reconstruct that same 5-byte
+// header internally, purely as AEAD Additional Authenticated Data (AAD),
+// because RFC 8446 SS5.2 requires it and every byte of it is derivable
+// from data this module already has:
+//   - opaque_type is always the fixed byte 0x17 (application_data) --
+//     RFC 8446 SS5.1: "the outer opaque_type field ... is always set to
+//     the value 23 (application_data) for outward compatibility with
+//     middleboxes" once encryption is active (this module is never used
+//     for plaintext records, which don't take this AAD-and-AEAD path at
+//     all).
+//   - legacy_record_version is always the fixed 2 bytes 0x03 0x03.
+//   - length is `plaintext_len + 1 (content_type) + 16 (AEAD tag)` on
+//     the encrypt side (this plan adds no `TLSInnerPlaintext` zero
+//     padding -- that's a traffic-analysis countermeasure, explicitly
+//     out of scope), and is simply the caller-supplied `fragment_len` on
+//     the decrypt side, since the caller already parsed it off the wire.
+//
+// AEAD nonce construction (RFC 8446 SS5.3): the per-record nonce is the
+// 12-byte write/read IV XORed with the sequence number encoded as a
+// 12-byte value (8 zero bytes, then the 8-byte big-endian sequence
+// number) -- NOT the IV alone, NOT the sequence number alone. The
+// sequence number starts at 0 immediately after `record_layer_new` or
+// the most recent `record_layer_rekey` (RFC 8446 SS5.3: "each sequence
+// number is set to zero at the beginning of a connection and whenever
+// the key is changed") and increments by 1 after every record processed
+// in that direction, independently for read and write.
+//
+// `stdlib/crypto/aead.sio`'s `aead_seal`/`aead_open` take `key: &[u8;32]`
+// even for AES-128-GCM's real 16-byte key (they slice the first 16 bytes
+// internally) -- `RecordLayerState.read_key`/`write_key` here are
+// `RawBuf`, sized to the real negotiated key length (`key_len`, 16 or
+// 32), so every call site zero-pads into a fresh `[u8;32]` array first
+// (see `key_to_fixed32` below).
+//
+// Compiler defect SSD8 (`docs/handoff/souc_v0800_defects.md`): `var x =
+// *ref` on any fixed-array reference (`&[T;N]`) ALIASES the caller's
+// array instead of copying it, even with a type annotation. This file
+// never does that -- every fixed-array value used here (`key_to_fixed32`,
+// nonce construction) is built element-by-element into a fresh local
+// array via `rawbuf_get`/index assignment, never via a bare `*ref`.
+
+use net::socket::*
+use crypto::aead::*
+
+pub const TLS_CONTENT_TYPE_CHANGE_CIPHER_SPEC: u8 = 20
+pub const TLS_CONTENT_TYPE_ALERT: u8 = 21
+pub const TLS_CONTENT_TYPE_HANDSHAKE: u8 = 22
+pub const TLS_CONTENT_TYPE_APPLICATION_DATA: u8 = 23
+
+pub struct RecordLayerState {
+    read_key: RawBuf,
+    read_iv: RawBuf,
+    read_seq: i64,
+    write_key: RawBuf,
+    write_iv: RawBuf,
+    write_seq: i64,
+    key_len: i64,
+    iv_len: i64,
+    aead_algo: i32,
+}
+
+fn zero_rawbuf(buf: &RawBuf, len: i64) with IO {
+    var i: i64 = 0
+    while i < len {
+        rawbuf_set(buf, i, 0)
+        i = i + 1
+    }
+}
+
+fn copy_rawbuf(src: &RawBuf, len: i64) -> RawBuf with IO {
+    let dst = rawbuf_new(len)
+    var i: i64 = 0
+    while i < len {
+        rawbuf_set(&dst, i, rawbuf_get(src, i))
+        i = i + 1
+    }
+    dst
+}
+
+// Zero-pads `key` (real length `key_len`, 16 for AES-128-GCM or 32 for
+// AES-256-GCM/ChaCha20-Poly1305) into the fixed 32-byte slot
+// `aead_seal`/`aead_open` require. Built element-by-element via
+// `rawbuf_get` -- never `*ref` -- per D8 above.
+fn key_to_fixed32(key: &RawBuf, key_len: i64) -> [u8; 32] with IO {
+    var arr: [u8; 32] = [(0 as u8); 32]
+    var i: i64 = 0
+    while i < 32 {
+        if i < key_len {
+            arr[i as usize] = (rawbuf_get(key, i) as u8)
+        } else {
+            arr[i as usize] = 0 as u8
+        }
+        i = i + 1
+    }
+    arr
+}
+
+// RFC 8446 SS5.3 per-record nonce: the 12-byte IV XORed with the sequence
+// number left-padded to 12 bytes (8 zero bytes || 8-byte big-endian seq).
+fn build_nonce(iv: &RawBuf, iv_len: i64, seq: i64) -> [u8; 12] with IO {
+    var nonce: [u8; 12] = [(0 as u8); 12]
+    var i: i64 = 0
+    while i < 12 {
+        let iv_byte = if i < iv_len { rawbuf_get(iv, i) } else { 0 }
+        let seq_byte = if i < 4 {
+            0
+        } else {
+            let shift = (7 - (i - 4)) * 8
+            (seq >> shift) & 255
+        }
+        nonce[i as usize] = (iv_byte ^ seq_byte) as u8
+        i = i + 1
+    }
+    nonce
+}
+
+// The fixed 5-byte TLSCiphertext outer header, used only as AEAD AAD
+// (RFC 8446 SS5.2) -- never written to a wire buffer by this module.
+fn build_aad(encrypted_record_len: i64) -> RawBuf with IO {
+    let aad = rawbuf_new(5)
+    rawbuf_set(&aad, 0, 0x17)
+    rawbuf_set(&aad, 1, 0x03)
+    rawbuf_set(&aad, 2, 0x03)
+    rawbuf_set(&aad, 3, (encrypted_record_len >> 8) & 255)
+    rawbuf_set(&aad, 4, encrypted_record_len & 255)
+    aad
+}
+
+// All-zero keys/IVs, seq=0 -- used before any keys are derived, for the
+// initial plaintext ClientHello (record_encrypt/record_decrypt are not
+// called at all while this state is in effect; the caller sends/receives
+// that one record as plaintext and only starts calling into this module
+// once record_layer_rekey has installed real traffic keys).
+pub fn record_layer_new(aead_algo: i32, key_len: i64, iv_len: i64) -> RecordLayerState with IO {
+    let read_key = rawbuf_new(key_len)
+    zero_rawbuf(&read_key, key_len)
+    let read_iv = rawbuf_new(iv_len)
+    zero_rawbuf(&read_iv, iv_len)
+    let write_key = rawbuf_new(key_len)
+    zero_rawbuf(&write_key, key_len)
+    let write_iv = rawbuf_new(iv_len)
+    zero_rawbuf(&write_iv, iv_len)
+    RecordLayerState {
+        read_key: read_key,
+        read_iv: read_iv,
+        read_seq: 0,
+        write_key: write_key,
+        write_iv: write_iv,
+        write_seq: 0,
+        key_len: key_len,
+        iv_len: iv_len,
+        aead_algo: aead_algo,
+    }
+}
+
+// RFC 8446 SS5.3: "each sequence number is set to zero at the beginning
+// of a connection and whenever the key is changed" -- a rekey always
+// restarts both sequence numbers, independently of whichever direction's
+// keys actually changed value.
+pub fn record_layer_rekey(state: &!RecordLayerState, read_key: &RawBuf, read_iv: &RawBuf, write_key: &RawBuf, write_iv: &RawBuf) with Mut, IO {
+    state.read_key = copy_rawbuf(read_key, state.key_len)
+    state.read_iv = copy_rawbuf(read_iv, state.iv_len)
+    state.write_key = copy_rawbuf(write_key, state.key_len)
+    state.write_iv = copy_rawbuf(write_iv, state.iv_len)
+    state.read_seq = 0
+    state.write_seq = 0
+}
+
+// Encrypts `plaintext` (the real content, `plaintext_len` bytes) with
+// `content_type` as the real TLSInnerPlaintext content type, using the
+// current write key/IV/sequence number, then increments the write
+// sequence number. Returns the AEAD-wrapped `encrypted_record` payload
+// only (`ciphertext || tag`, no outer 5-byte header) -- exactly
+// `plaintext_len + 1 + 16` bytes, since this plan adds no
+// TLSInnerPlaintext zero padding.
+pub fn record_encrypt(state: &!RecordLayerState, content_type: u8, plaintext: &RawBuf, plaintext_len: i64) -> RawBuf with Mut, IO {
+    let inner_len = plaintext_len + 1
+    let inner_plaintext = rawbuf_new(inner_len)
+    var i: i64 = 0
+    while i < plaintext_len {
+        rawbuf_set(&inner_plaintext, i, rawbuf_get(plaintext, i))
+        i = i + 1
+    }
+    rawbuf_set(&inner_plaintext, plaintext_len, (content_type as i64) & 255)
+
+    let encrypted_record_len = inner_len + 16
+    let aad = build_aad(encrypted_record_len)
+    let key32 = key_to_fixed32(&state.write_key, state.key_len)
+    let nonce = build_nonce(&state.write_iv, state.iv_len, state.write_seq)
+
+    let (ciphertext, ciphertext_len) = aead_seal(state.aead_algo, &key32, &nonce, &inner_plaintext, inner_len, &aad, 5)
+
+    state.write_seq = state.write_seq + 1
+
+    ciphertext
+}
+
+// Decrypts `ciphertext_record_fragment` (the `encrypted_record` payload
+// from the wire, `fragment_len` bytes -- the caller already parsed this
+// length off the outer TLSCiphertext header) using the current read
+// key/IV/sequence number, then increments the read sequence number
+// (RFC 8446 SS5.3 counts every record processed in a direction, whether
+// or not it verifies). Returns
+// `(real_content_type, content, content_len, ok)`; on AEAD
+// authentication failure, `ok` is `false` and the other three fields are
+// zeroed/empty -- never the (possibly forged) plaintext. Per RFC 8446
+// SS5.2, the real content type is the last non-zero byte of the
+// authenticated TLSInnerPlaintext, scanning backward past any zero
+// padding (this plan's own `record_encrypt` never emits padding, but a
+// real peer's record may carry it, so decryption handles it correctly
+// regardless).
+pub fn record_decrypt(state: &!RecordLayerState, ciphertext_record_fragment: &RawBuf, fragment_len: i64) -> (u8, RawBuf, i64, bool) with Mut, IO {
+    let aad = build_aad(fragment_len)
+    let key32 = key_to_fixed32(&state.read_key, state.key_len)
+    let nonce = build_nonce(&state.read_iv, state.iv_len, state.read_seq)
+
+    let (inner_plaintext, ok) = aead_open(state.aead_algo, &key32, &nonce, ciphertext_record_fragment, fragment_len, &aad, 5)
+
+    state.read_seq = state.read_seq + 1
+
+    if !ok {
+        return (0 as u8, rawbuf_new(8), 0, false)
+    }
+
+    let inner_len = fragment_len - 16
+    var idx: i64 = inner_len - 1
+    while idx >= 0 {
+        if rawbuf_get(&inner_plaintext, idx) != 0 {
+            break
+        }
+        idx = idx - 1
+    }
+
+    if idx < 0 {
+        // All-zero TLSInnerPlaintext: no real content type byte found --
+        // malformed record (RFC 8446 SS5.2: "if no such octet is found,
+        // ... terminate the connection with an unexpected_message
+        // alert"). Fail closed.
+        return (0 as u8, rawbuf_new(8), 0, false)
+    }
+
+    let real_content_type = (rawbuf_get(&inner_plaintext, idx) as u8)
+    let content_len = idx
+    let content = rawbuf_new(content_len)
+    var i: i64 = 0
+    while i < content_len {
+        rawbuf_set(&content, i, rawbuf_get(&inner_plaintext, i))
+        i = i + 1
+    }
+
+    (real_content_type, content, content_len, true)
+}

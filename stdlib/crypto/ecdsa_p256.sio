@@ -1,0 +1,655 @@
+// stdlib/crypto/ecdsa_p256.sio
+//
+// NIST P-256 (secp256r1) affine point arithmetic and ECDSA signature
+// verification (FIPS 186-4 SS6.4.2 / SEC1 SS4.1.4), used for TLS 1.3's
+// ecdsa_secp256r1_sha256 CertificateVerify signature scheme (RFC 8446
+// SS4.2.3) when a server's certificate carries an ECDSA public key rather
+// than RSA. See docs/superpowers/specs/2026-08-25-madaros-tls13-handshake-
+// design.md and this plan's task-2-brief.md.
+//
+// CURVE PARAMETERS -- independently re-verified, not transcribed secondhand:
+// `openssl ecparam -name prime256v1 -param_enc explicit -text -noout`
+// (OpenSSL 3.5.6, compiled-in curve database, an independent source from
+// this file's own code) was run directly in this sandbox and printed the
+// Prime/A/B/Generator/Order fields in full below this comment. Every limb
+// array in this file was derived by a Python script parsing THOSE bytes
+// (never retyped by hand), and cross-checked programmatically:
+//   - p == 2^256 - 2^224 + 2^192 + 2^96 - 1 (confirmed by direct computation)
+//   - a == p - 3 (confirmed by direct computation against OpenSSL's A field)
+//   - G = (Gx, Gy) satisfies Gy^2 == Gx^3 + a*Gx + b (mod p) (confirmed)
+//   - Python's `cryptography` library independently accepted G as a valid
+//     point on its own SECP256R1 curve object (EllipticCurvePublicNumbers
+//     construction succeeded), corroborating a/b/p/curve identity from a
+//     second, independent implementation.
+// Full transcript and exact byte values: see task-2-report.md.
+//
+// LIMB-REPRESENTATION DECISION (matching the discipline stdlib/crypto/
+// x25519.sio and stdlib/crypto/poly1305.sio already used): this file reuses
+// stdlib/bignum/bigint.sio's existing generic `BigInt` (512 x 16-bit limbs,
+// 8192-bit capacity) directly, rather than building a P-256-specific radix
+// representation the way X25519 built its own 32-byte little-endian field
+// representation. Justification: P-256 field elements are only 256 bits
+// (16 limbs), far under BigInt's 8192-bit storage capacity and its
+// documented BIGINT_MUL_SAFE_OPERAND_LIMBS (256-limb / 4096-bit) safe-
+// multiplication ceiling -- multiplying two 16-limb P-256 values has no
+// overflow-margin risk whatsoever, unlike X25519 where a from-scratch radix
+// was needed for its own reasons. Reduction mod p uses plain `bigint_mod`
+// (no P-256-specific fast-reduction trick, e.g. no use of p's special
+// low-Hamming-weight structure) -- slower per operation than a specialized
+// implementation, but `ecdsa_p256_verify` runs once per handshake
+// (verifying one CertificateVerify signature), not in a hot loop, so raw
+// BigInt operations are the right complexity/effort trade-off here.
+//
+// Public-key verification only, over a PUBLIC key and PUBLIC message --
+// unlike X25519's scalar multiplication (over a PRIVATE key, hence
+// constant-time), `ec_scalar_mul` below has no secret-dependent timing to
+// protect and is a plain non-constant-time double-and-add.
+//
+// Point-at-infinity representation: `EcPoint { x: bigint_zero(), y:
+// bigint_zero() }` is used as the sentinel, since (0,0) is never a valid
+// affine point on this curve (b != 0, and there is no field element x with
+// x^3 + a*x + 0 == 0 for a == p-3 other than pathological cases already
+// excluded by p's primality -- in any case DER-decoded r/s and pubkey
+// coordinates from a real certificate are never (0,0), so no valid input
+// path can collide with this sentinel).
+
+use bignum::bigint::*
+use net::socket::*
+use hash::sha256::*
+use hash::sha384::*
+use asn1::der::*
+
+pub struct EcPoint {
+    x: BigInt,
+    y: BigInt,
+}
+
+// Copies a BigInt referenced behind `&BigInt`, element-by-element over its
+// fixed `limbs` array. Per this plan's Global Constraints (compiler defect
+// SSD8, docs/handoff/souc_v0800_defects.md): `var x = *ref` on any
+// fixed-array reference ALIASES the caller's array instead of copying it,
+// even with a type annotation. This function never does that -- it only
+// ever indexes individual elements (`a.limbs[i]`), which is the same safe
+// pattern stdlib/bignum/bigint.sio's own bigint_add/bigint_cmp/etc. already
+// use throughout on `&BigInt` parameters.
+fn bigint_copy(a: &BigInt) -> BigInt {
+    var result = bigint_zero()
+    var i: i64 = 0
+    while i < 512 {
+        result.limbs[i as usize] = a.limbs[i as usize]
+        i = i + 1
+    }
+    result.len = a.len
+    result
+}
+
+fn ec_point_copy(a: &EcPoint) -> EcPoint {
+    EcPoint { x: bigint_copy(&a.x), y: bigint_copy(&a.y) }
+}
+
+fn ec_infinity() -> EcPoint {
+    EcPoint { x: bigint_zero(), y: bigint_zero() }
+}
+
+pub fn ec_is_infinity(pt: &EcPoint) -> bool {
+    bigint_cmp(&pt.x, &bigint_zero()) == 0 && bigint_cmp(&pt.y, &bigint_zero()) == 0
+}
+
+// (a - b) mod p, computed without ever calling bigint_sub with a negative
+// mathematical result (bigint_sub REQUIRES a >= b -- see stdlib/bignum/
+// bigint.sio's own doc comment on that function). Both a and b are assumed
+// already reduced mod p (every caller in this file passes field elements
+// that satisfy this), so when a < b the true difference `b - a` is itself
+// already < p, meaning `p - (b - a)` is a safe, well-defined subtraction.
+fn ec_mod_sub(a: &BigInt, b: &BigInt, p: &BigInt) -> BigInt {
+    if bigint_cmp(a, b) >= 0 {
+        bigint_mod(&bigint_sub(a, b), p)
+    } else {
+        let diff = bigint_sub(b, a)
+        bigint_sub(p, &diff)
+    }
+}
+
+// Modular inverse mod a PRIME modulus via Fermat's little theorem:
+// a^-1 mod m == a^(m-2) mod m. Reused for both mod-p (curve field) and
+// mod-n (curve order) inverses -- both p and n are prime for P-256, so one
+// bigint_modpow call suffices for either; no extended-Euclidean-algorithm
+// implementation is needed.
+fn ec_mod_inverse(a: &BigInt, m: &BigInt) -> BigInt {
+    let two = bigint_from_u32(2)
+    let m_minus_2 = bigint_sub(m, &two)
+    bigint_modpow(a, &m_minus_2, m)
+}
+
+// Standard affine point addition, lambda = (by - ay) / (bx - ax) mod p.
+// REQUIRES a and b to be distinct, non-negated points (a != b and
+// b != -a is the general "unequal points" case this formula covers).
+// When ax == bx, this function cannot distinguish "a == b" (which would
+// require doubling -- see ec_point_double, not reachable through this
+// function since it has no curve `a` parameter to do so) from "b == -a"
+// (whose correct result IS the point at infinity) without extra
+// information; both are treated as infinity here. This is a safe sentinel
+// failure (never a crash, never silent wrong-but-plausible output), and is
+// unreachable in this file's own two call sites (ec_scalar_mul only calls
+// ec_point_add on the current accumulator + a fixed addend that, other
+// than the point-at-infinity/negation degenerate cases just described, are
+// never equal across the ~2^256 space of real signatures/points this file
+// processes) other than that documented, safely-handled degenerate case.
+pub fn ec_point_add(a: &EcPoint, b: &EcPoint, p: &BigInt) -> EcPoint {
+    if ec_is_infinity(a) {
+        return ec_point_copy(b)
+    }
+    if ec_is_infinity(b) {
+        return ec_point_copy(a)
+    }
+    if bigint_cmp(&a.x, &b.x) == 0 {
+        // a == b (needs doubling, unsupported here) or b == -a (infinity).
+        // Both cases return infinity -- see the doc comment above.
+        return ec_infinity()
+    }
+
+    let lambda_num = ec_mod_sub(&b.y, &a.y, p)
+    let lambda_den = ec_mod_sub(&b.x, &a.x, p)
+    let lambda_den_inv = ec_mod_inverse(&lambda_den, p)
+    let lambda = bigint_mod(&bigint_mul(&lambda_num, &lambda_den_inv), p)
+
+    let lambda_sq = bigint_mod(&bigint_mul(&lambda, &lambda), p)
+    let x3_partial = ec_mod_sub(&lambda_sq, &a.x, p)
+    let x3 = ec_mod_sub(&x3_partial, &b.x, p)
+
+    let ax_minus_x3 = ec_mod_sub(&a.x, &x3, p)
+    let term = bigint_mod(&bigint_mul(&lambda, &ax_minus_x3), p)
+    let y3 = ec_mod_sub(&term, &a.y, p)
+
+    EcPoint { x: x3, y: y3 }
+}
+
+// Standard affine point doubling, lambda = (3*ax^2 + curve_a) / (2*ay) mod p.
+pub fn ec_point_double(a: &EcPoint, curve_a: &BigInt, p: &BigInt) -> EcPoint {
+    if ec_is_infinity(a) {
+        return ec_infinity()
+    }
+
+    let ax_sq = bigint_mod(&bigint_mul(&a.x, &a.x), p)
+    let three = bigint_from_u32(3)
+    let three_ax_sq = bigint_mod(&bigint_mul(&three, &ax_sq), p)
+    let num = bigint_mod(&bigint_add(&three_ax_sq, curve_a), p)
+
+    let two = bigint_from_u32(2)
+    let two_ay = bigint_mod(&bigint_mul(&two, &a.y), p)
+    let den_inv = ec_mod_inverse(&two_ay, p)
+    let lambda = bigint_mod(&bigint_mul(&num, &den_inv), p)
+
+    let lambda_sq = bigint_mod(&bigint_mul(&lambda, &lambda), p)
+    let two_ax = bigint_mod(&bigint_mul(&two, &a.x), p)
+    let x3 = ec_mod_sub(&lambda_sq, &two_ax, p)
+
+    let ax_minus_x3 = ec_mod_sub(&a.x, &x3, p)
+    let term = bigint_mod(&bigint_mul(&lambda, &ax_minus_x3), p)
+    let y3 = ec_mod_sub(&term, &a.y, p)
+
+    EcPoint { x: x3, y: y3 }
+}
+
+// ---------------------------------------------------------------------
+// ARENA-SAFETY NOTE (discovered during this task, not assumed up front --
+// see task-2-report.md for the full measurement): a first implementation
+// of ec_scalar_mul called ec_point_double/ec_point_add (the plain affine
+// functions above) directly in its 256-iteration double-and-add loop, each
+// of which computes a fresh modular inverse via ec_mod_inverse ->
+// bigint_modpow with a ~256-bit exponent (p-2 or n-2). That is NOT the
+// "cheap, once-per-handshake" cost this file's header comment anticipated
+// for bigint_modpow in isolation -- Finding 12 (docs/audit/
+// TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_2026-08-23.md) documents that every
+// BigInt-returning call permanently consumes budget from a never-reclaimed,
+// fixed-capacity Madaros runtime arena (measured ceiling: ~460,000 calls
+// per process). A single bigint_modpow call with a ~256-bit exponent costs
+// on the order of 256 * 3 = ~768 further BigInt-returning calls (one
+// square + mod per bit, plus a multiply + mod on set bits) -- so calling it
+// once per doubling AND once per addition across a 256-bit scalar
+// multiplication costs roughly (256 + 128) * 768 =~ 295,000 allocations for
+// ONE ec_scalar_mul call, and ecdsa_p256_verify needs two of them. Measured
+// directly: this implementation aborted with `madaros: arena full` running
+// tests/run-pass/ecdsa_p256_verify_vectors.sio.
+//
+// FIX: ec_scalar_mul below internally accumulates in JACOBIAN (projective)
+// coordinates, whose doubling/addition formulas (EFD dbl-2007-bl /
+// add-2007-bl, both independently re-derived and verified in Python against
+// (a) naive affine repeated-doubling over 200 random scalars and (b) the
+// `cryptography` library's own P-256 scalar multiplication -- deriving a
+// real private key from 20 further random scalars and comparing its public
+// point -- both all-match; see task-2-report.md) involve NO field
+// inversion at all. Only ONE inversion (mod_inverse of the final Z
+// coordinate) is needed per ec_scalar_mul call, converting back to affine
+// at the very end -- cutting the allocation cost by roughly two orders of
+// magnitude and staying comfortably under the arena ceiling.
+//
+// This does NOT change ec_point_add/ec_point_double above (still plain,
+// literal affine formulas, called directly by
+// tests/run-pass/ecdsa_p256_point_arithmetic.sio and once each, non-looped,
+// by ecdsa_p256_verify below) or EcPoint's affine representation anywhere
+// in this file's PUBLIC interface -- JacobianPoint and the jac_* functions
+// below are purely an internal implementation detail of ec_scalar_mul.
+// ---------------------------------------------------------------------
+
+struct JacobianPoint {
+    x: BigInt,
+    y: BigInt,
+    z: BigInt,
+}
+
+// Point at infinity in Jacobian coordinates is conventionally (1:1:0) --
+// any nonzero X/Y works since Z == 0 is what's actually tested.
+fn jac_infinity() -> JacobianPoint {
+    JacobianPoint { x: bigint_from_u32(1), y: bigint_from_u32(1), z: bigint_zero() }
+}
+
+fn jac_is_infinity(pt: &JacobianPoint) -> bool {
+    bigint_cmp(&pt.z, &bigint_zero()) == 0
+}
+
+fn jac_copy(pt: &JacobianPoint) -> JacobianPoint {
+    JacobianPoint { x: bigint_copy(&pt.x), y: bigint_copy(&pt.y), z: bigint_copy(&pt.z) }
+}
+
+fn jac_from_affine(pt: &EcPoint) -> JacobianPoint {
+    if ec_is_infinity(pt) {
+        jac_infinity()
+    } else {
+        JacobianPoint { x: bigint_copy(&pt.x), y: bigint_copy(&pt.y), z: bigint_from_u32(1) }
+    }
+}
+
+// EFD dbl-2007-bl (general curve `a`, Jacobian coordinates):
+//   XX = X1^2;  YY = Y1^2;  YYYY = YY^2;  ZZ = Z1^2
+//   S = 2*((X1+YY)^2 - XX - YYYY)
+//   M = 3*XX + a*ZZ^2
+//   T = M^2 - 2*S;  X3 = T
+//   Y3 = M*(S-T) - 8*YYYY
+//   Z3 = (Y1+Z1)^2 - YY - ZZ
+fn jac_double(pt: &JacobianPoint, curve_a: &BigInt, p: &BigInt) -> JacobianPoint {
+    if jac_is_infinity(pt) {
+        return jac_infinity()
+    }
+
+    let xx = bigint_mod(&bigint_mul(&pt.x, &pt.x), p)
+    let yy = bigint_mod(&bigint_mul(&pt.y, &pt.y), p)
+    let yyyy = bigint_mod(&bigint_mul(&yy, &yy), p)
+    let zz = bigint_mod(&bigint_mul(&pt.z, &pt.z), p)
+
+    let x_plus_yy = bigint_mod(&bigint_add(&pt.x, &yy), p)
+    let x_plus_yy_sq = bigint_mod(&bigint_mul(&x_plus_yy, &x_plus_yy), p)
+    let s_partial = ec_mod_sub(&x_plus_yy_sq, &xx, p)
+    let s_partial2 = ec_mod_sub(&s_partial, &yyyy, p)
+    let two = bigint_from_u32(2)
+    let s = bigint_mod(&bigint_mul(&two, &s_partial2), p)
+
+    let three = bigint_from_u32(3)
+    let three_xx = bigint_mod(&bigint_mul(&three, &xx), p)
+    let zz_sq = bigint_mod(&bigint_mul(&zz, &zz), p)
+    let a_zzzz = bigint_mod(&bigint_mul(curve_a, &zz_sq), p)
+    let m = bigint_mod(&bigint_add(&three_xx, &a_zzzz), p)
+
+    let m_sq = bigint_mod(&bigint_mul(&m, &m), p)
+    let two_s = bigint_mod(&bigint_mul(&two, &s), p)
+    let t = ec_mod_sub(&m_sq, &two_s, p)
+    let x3 = bigint_copy(&t)
+
+    let s_minus_t = ec_mod_sub(&s, &t, p)
+    let m_times = bigint_mod(&bigint_mul(&m, &s_minus_t), p)
+    let eight = bigint_from_u32(8)
+    let eight_yyyy = bigint_mod(&bigint_mul(&eight, &yyyy), p)
+    let y3 = ec_mod_sub(&m_times, &eight_yyyy, p)
+
+    let y_plus_z = bigint_mod(&bigint_add(&pt.y, &pt.z), p)
+    let y_plus_z_sq = bigint_mod(&bigint_mul(&y_plus_z, &y_plus_z), p)
+    let z3_partial = ec_mod_sub(&y_plus_z_sq, &yy, p)
+    let z3 = ec_mod_sub(&z3_partial, &zz, p)
+
+    JacobianPoint { x: x3, y: y3, z: z3 }
+}
+
+// EFD add-2007-bl (general Jacobian coordinate addition; falls back to
+// jac_double when H == 0 and r == 0 (equal points), and to infinity when
+// H == 0 and r != 0 (P2 == -P1)):
+//   Z1Z1=Z1^2; Z2Z2=Z2^2; U1=X1*Z2Z2; U2=X2*Z1Z1
+//   S1=Y1*Z2*Z2Z2; S2=Y2*Z1*Z1Z1; H=U2-U1; r=2*(S2-S1)
+//   I=(2H)^2; J=H*I; V=U1*I
+//   X3=r^2-J-2V; Y3=r*(V-X3)-2*S1*J; Z3=((Z1+Z2)^2-Z1Z1-Z2Z2)*H
+fn jac_add(a: &JacobianPoint, b: &JacobianPoint, curve_a: &BigInt, p: &BigInt) -> JacobianPoint {
+    if jac_is_infinity(a) {
+        return jac_copy(b)
+    }
+    if jac_is_infinity(b) {
+        return jac_copy(a)
+    }
+
+    let z1z1 = bigint_mod(&bigint_mul(&a.z, &a.z), p)
+    let z2z2 = bigint_mod(&bigint_mul(&b.z, &b.z), p)
+    let u1 = bigint_mod(&bigint_mul(&a.x, &z2z2), p)
+    let u2 = bigint_mod(&bigint_mul(&b.x, &z1z1), p)
+    let y1_z2 = bigint_mod(&bigint_mul(&a.y, &b.z), p)
+    let s1 = bigint_mod(&bigint_mul(&y1_z2, &z2z2), p)
+    let y2_z1 = bigint_mod(&bigint_mul(&b.y, &a.z), p)
+    let s2 = bigint_mod(&bigint_mul(&y2_z1, &z1z1), p)
+
+    let h = ec_mod_sub(&u2, &u1, p)
+    let r_diff = ec_mod_sub(&s2, &s1, p)
+
+    if bigint_cmp(&h, &bigint_zero()) == 0 {
+        if bigint_cmp(&r_diff, &bigint_zero()) == 0 {
+            return jac_double(a, curve_a, p)
+        } else {
+            return jac_infinity()
+        }
+    }
+
+    let two = bigint_from_u32(2)
+    let two_h = bigint_mod(&bigint_mul(&two, &h), p)
+    let i = bigint_mod(&bigint_mul(&two_h, &two_h), p)
+    let j = bigint_mod(&bigint_mul(&h, &i), p)
+    let r = bigint_mod(&bigint_mul(&two, &r_diff), p)
+    let v = bigint_mod(&bigint_mul(&u1, &i), p)
+
+    let r_sq = bigint_mod(&bigint_mul(&r, &r), p)
+    let two_v = bigint_mod(&bigint_mul(&two, &v), p)
+    let x3_partial = ec_mod_sub(&r_sq, &j, p)
+    let x3 = ec_mod_sub(&x3_partial, &two_v, p)
+
+    let v_minus_x3 = ec_mod_sub(&v, &x3, p)
+    let r_term = bigint_mod(&bigint_mul(&r, &v_minus_x3), p)
+    let s1_j = bigint_mod(&bigint_mul(&s1, &j), p)
+    let two_s1_j = bigint_mod(&bigint_mul(&two, &s1_j), p)
+    let y3 = ec_mod_sub(&r_term, &two_s1_j, p)
+
+    let z_sum = bigint_mod(&bigint_add(&a.z, &b.z), p)
+    let z_sum_sq = bigint_mod(&bigint_mul(&z_sum, &z_sum), p)
+    let z3_partial = ec_mod_sub(&z_sum_sq, &z1z1, p)
+    let z3_partial2 = ec_mod_sub(&z3_partial, &z2z2, p)
+    let z3 = bigint_mod(&bigint_mul(&z3_partial2, &h), p)
+
+    JacobianPoint { x: x3, y: y3, z: z3 }
+}
+
+// The ONE modular inversion per ec_scalar_mul call: (X, Y, Z) -> (X/Z^2,
+// Y/Z^3) in affine coordinates.
+fn jac_to_affine(pt: &JacobianPoint, p: &BigInt) -> EcPoint {
+    if jac_is_infinity(pt) {
+        return ec_infinity()
+    }
+    let z_inv = ec_mod_inverse(&pt.z, p)
+    let z_inv2 = bigint_mod(&bigint_mul(&z_inv, &z_inv), p)
+    let z_inv3 = bigint_mod(&bigint_mul(&z_inv2, &z_inv), p)
+    let x = bigint_mod(&bigint_mul(&pt.x, &z_inv2), p)
+    let y = bigint_mod(&bigint_mul(&pt.y, &z_inv3), p)
+    EcPoint { x: x, y: y }
+}
+
+// Double-and-add scalar multiplication. Not constant-time -- see the
+// module-level comment: verification of a signature over a public key and
+// public message has no secret-dependent timing to protect. Internally
+// Jacobian (see the ARENA-SAFETY NOTE above); the public API is still
+// plain affine in and affine out.
+pub fn ec_scalar_mul(k: &BigInt, point: &EcPoint, curve_a: &BigInt, p: &BigInt) -> EcPoint {
+    var acc = jac_infinity()
+    let base = jac_from_affine(point)
+    var bit_index = k.len * 16 - 1
+    while bit_index >= 0 {
+        acc = jac_double(&acc, curve_a, p)
+        let limb_index = bit_index / 16
+        let bit_offset = bit_index % 16
+        let this_limb: u16 = k.limbs[limb_index as usize]
+        let bit: u16 = (this_limb >> bit_offset) & 1
+        if bit == 1 {
+            acc = jac_add(&acc, &base, curve_a, p)
+        }
+        bit_index = bit_index - 1
+    }
+    jac_to_affine(&acc, p)
+}
+
+// Builds a 256-bit BigInt (16 significant limbs) from a little-endian
+// 16-bit limb array. Every curve constant below has a nonzero top limb
+// (index 15), so len == 16 always, no trailing-zero-limb trim is needed.
+fn build_bigint_16(values: [u16; 16]) -> BigInt {
+    var result = bigint_zero()
+    var i: i64 = 0
+    while i < 16 {
+        result.limbs[i as usize] = values[i as usize]
+        i = i + 1
+    }
+    result.len = 16
+    result
+}
+
+// p = 2^256 - 2^224 + 2^192 + 2^96 - 1 (FIPS 186-4 D.1.2.3 / SEC2
+// secp256r1), independently re-verified -- see this file's header comment.
+pub fn p256_field_prime() -> BigInt {
+    build_bigint_16([
+        65535, 65535, 65535, 65535, 65535, 65535, 0, 0,
+        0, 0, 0, 0, 1, 0, 65535, 65535,
+    ])
+}
+
+// a = p - 3.
+pub fn p256_curve_a() -> BigInt {
+    build_bigint_16([
+        65532, 65535, 65535, 65535, 65535, 65535, 0, 0,
+        0, 0, 0, 0, 1, 0, 65535, 65535,
+    ])
+}
+
+// b (curve equation y^2 = x^3 + a*x + b mod p).
+pub fn p256_curve_b() -> BigInt {
+    build_bigint_16([
+        24651, 10194, 15422, 15310, 45302, 52307, 1712, 25885,
+        34492, 30360, 48469, 46059, 37863, 43578, 13784, 23238,
+    ])
+}
+
+// n, the group order (a different, smaller prime than p in general
+// structure, though also 256 bits wide for P-256).
+pub fn p256_order() -> BigInt {
+    build_bigint_16([
+        9553, 64611, 51906, 62393, 40580, 42775, 64173, 48358,
+        65535, 65535, 65535, 65535, 0, 0, 65535, 65535,
+    ])
+}
+
+// G = (Gx, Gy), the base point.
+pub fn p256_base_point() -> EcPoint {
+    let gx = build_bigint_16([
+        49814, 55448, 14661, 62625, 13216, 11755, 32129, 30467,
+        16626, 25508, 59109, 63676, 16967, 57644, 53746, 27415,
+    ])
+    let gy = build_bigint_16([
+        20981, 14271, 16488, 52150, 24270, 27441, 13143, 11214,
+        40470, 31759, 60234, 36583, 32667, 65050, 17122, 20451,
+    ])
+    EcPoint { x: gx, y: gy }
+}
+
+// Converts the 32 big-endian bytes that FIPS 186-4 SS6.4.1's truncation rule
+// has already selected into the digest integer `e`, in BigInt's own
+// little-endian 16-bit limb order (limb 0 = least significant = the LAST
+// two bytes). Both public entry points below funnel through this one
+// function, so the byte-to-integer convention can never diverge between
+// the SHA-256 and SHA-384 paths -- only WHICH 32 bytes reach it does.
+fn p256_e_from_be32(digest32: &[u8; 32]) -> BigInt {
+    var e = bigint_zero()
+    var ei: i64 = 0
+    while ei < 16 {
+        let hi_idx = 30 - 2 * ei
+        let lo_idx = 31 - 2 * ei
+        let hi: i64 = digest32[hi_idx as usize] as i64
+        let lo: i64 = digest32[lo_idx as usize] as i64
+        e.limbs[ei as usize] = ((hi << 8) | lo) as u16
+        ei = ei + 1
+    }
+    e.len = 16
+    while e.len > 0 && e.limbs[(e.len - 1) as usize] == 0 {
+        e.len = e.len - 1
+    }
+    e
+}
+
+// The ECDSA verification core (FIPS 186-4 SS6.4.2 / SEC1 SS4.1.4), shared
+// verbatim by every public entry point below: DER signature parsing, the
+// r/s range checks, and the curve arithmetic. It takes the digest integer
+// `e` ALREADY COMPUTED AND ALREADY TRUNCATED, because the hash function and
+// its FIPS 186-4 SS6.4.1 truncation are the ONLY things that differ between
+// the supported signature algorithms. Deliberately private and deliberately
+// not duplicated per hash: these steps carry the reviewed security
+// properties (DER strictness, 1 <= r,s < n, point-at-infinity rejection),
+// and a second copy could silently drift from this one.
+fn ecdsa_p256_verify_with_e(
+    pubkey: &EcPoint,
+    der_signature: &RawBuf,
+    der_signature_len: i64,
+    e: &BigInt,
+) -> bool with IO {
+    let top = der_reader_new(der_signature, 0, der_signature_len)
+    let (seq_tag, seq_status) = der_peek_tag(&top)
+    if seq_status != DER_OK {
+        return false
+    }
+    if seq_tag.tag_number != DER_TAG_SEQUENCE || seq_tag.constructed == false {
+        return false
+    }
+    let (body, enter_status) = der_enter(&top, &seq_tag)
+    if enter_status != DER_OK {
+        return false
+    }
+
+    let (r_tag, r_tag_status) = der_peek_tag(&body)
+    if r_tag_status != DER_OK {
+        return false
+    }
+    let (r, r_status) = der_read_integer(&body, &r_tag)
+    if r_status != DER_OK {
+        return false
+    }
+    let (body_after_r, next_status) = der_next(&body, &r_tag)
+    if next_status != DER_OK {
+        return false
+    }
+
+    let (s_tag, s_tag_status) = der_peek_tag(&body_after_r)
+    if s_tag_status != DER_OK {
+        return false
+    }
+    let (s, s_status) = der_read_integer(&body_after_r, &s_tag)
+    if s_status != DER_OK {
+        return false
+    }
+
+    let n = p256_order()
+    let p = p256_field_prime()
+    let curve_a = p256_curve_a()
+    let g = p256_base_point()
+
+    // Step 1: 1 <= r < n and 1 <= s < n.
+    let one = bigint_from_u32(1)
+    if bigint_cmp(&r, &one) < 0 || bigint_cmp(&r, &n) >= 0 {
+        return false
+    }
+    if bigint_cmp(&s, &one) < 0 || bigint_cmp(&s, &n) >= 0 {
+        return false
+    }
+
+    // `e` arrives already hashed and already truncated -- see each public
+    // entry point below.
+
+    // Step 2: w = s^-1 mod n.
+    let w = ec_mod_inverse(&s, &n)
+
+    // Step 3: u1 = (e * w) mod n, u2 = (r * w) mod n.
+    let u1 = bigint_mod(&bigint_mul(e, &w), &n)
+    let u2 = bigint_mod(&bigint_mul(&r, &w), &n)
+
+    // Step 4: point = u1*G + u2*Q. Point at infinity is a hard failure.
+    let p1 = ec_scalar_mul(&u1, &g, &curve_a, &p)
+    let p2 = ec_scalar_mul(&u2, pubkey, &curve_a, &p)
+    let sum_point = ec_point_add(&p1, &p2, &p)
+    if ec_is_infinity(&sum_point) {
+        return false
+    }
+
+    // Step 5: v = point.x mod n; valid iff v == r.
+    let v = bigint_mod(&sum_point.x, &n)
+    bigint_cmp(&v, &r) == 0
+}
+
+// ECDSA-with-SHA-256 signature verification over P-256 (FIPS 186-4
+// SS6.4.2 / SEC1 SS4.1.4). `der_signature` must be a DER
+// SEQUENCE { r INTEGER, s INTEGER } (RFC 3279 SS2.2.3), the universal
+// ECDSA-in-X.509/TLS wire encoding.
+//
+// Hash truncation: e = SHA-256(message), interpreted as a big-endian
+// integer, truncated to the leftmost min(hash_bit_length,
+// curve_order_bit_length) bits per FIPS 186-4 SS6.4.1. For P-256 with
+// SHA-256, hash_bit_length == curve_order_bit_length == 256, so no
+// truncation is actually performed -- the full 32-byte digest is used
+// as-is.
+//
+// Wire uses: TLS 1.3's ecdsa_secp256r1_sha256 CertificateVerify scheme
+// (RFC 8446 SS4.2.3), and X.509 certificates signed ecdsa-with-SHA256.
+pub fn ecdsa_p256_verify(
+    pubkey: &EcPoint,
+    message: &RawBuf,
+    message_len: i64,
+    der_signature: &RawBuf,
+    der_signature_len: i64,
+) -> bool with IO {
+    let digest = sha256(message, message_len)
+    let e = p256_e_from_be32(&digest)
+    ecdsa_p256_verify_with_e(pubkey, der_signature, der_signature_len, &e)
+}
+
+// ECDSA-with-SHA-384 signature verification over P-256. Identical to
+// ecdsa_p256_verify in every respect except the digest: the DER parsing,
+// the r/s range checks and the curve arithmetic are the SAME CODE (see
+// ecdsa_p256_verify_with_e above), not a second copy.
+//
+// HASH TRUNCATION -- the whole substance of this function, and the one
+// place a plausible-looking mistake would produce a verifier that is
+// wrong rather than merely broken. FIPS 186-4 SS6.4.1 (identically, SEC1
+// v2 SS4.1.3 step 3, via the bit-string-to-integer conversion of SS2.3.2):
+// when the hash output is LONGER than the bit length of the curve order
+// n, e is taken from the LEFTMOST (most significant) bitlen(n) bits of
+// the digest. For P-256, bitlen(n) = 256 = 32 bytes; SHA-384 emits 48
+// bytes. So e = digest[0 .. 32), and digest[32 .. 48) -- the trailing 16
+// bytes -- are DISCARDED. Not the rightmost 32 bytes, not a reduction of
+// the full 384-bit value mod n, not a right-shift: the leftmost 32 bytes,
+// taken as a big-endian integer, exactly as if SHA-384 had emitted only
+// them. (bitlen(n) is not a multiple of 8 for some curves, which is why
+// the standard states the rule in bits; for P-256 it is exactly 256 bits,
+// so the byte-aligned slice below is the complete rule, with no leftover
+// bit-shift.) Note that e may exceed n -- that is expected and correct;
+// no reduction mod n is applied here, matching the SHA-256 path.
+//
+// Wire use: X.509 certificates signed ecdsa-with-SHA384 (OID
+// 1.2.840.10045.4.3.3) whose ISSUER key is P-256. RFC 5480 SS2 makes the
+// signature hash independent of the subject key's curve, so a P-256
+// issuer signing with SHA-384 is valid and common -- SSL.com's ECC
+// intermediates (Cloudflare's 1.1.1.1 chain among them) do exactly this.
+// This is NOT TLS 1.3's ecdsa_secp384r1_sha384 scheme (0x0503), which
+// couples SHA-384 to a P-384 KEY and is a different, unimplemented curve.
+pub fn ecdsa_p256_verify_sha384(
+    pubkey: &EcPoint,
+    message: &RawBuf,
+    message_len: i64,
+    der_signature: &RawBuf,
+    der_signature_len: i64,
+) -> bool with IO {
+    let digest = sha384(message, message_len)
+    // Leftmost 32 of 48 bytes -- see the truncation note above.
+    var digest32: [u8; 32] = [0; 32]
+    var ti: i64 = 0
+    while ti < 32 {
+        digest32[ti as usize] = digest[ti as usize]
+        ti = ti + 1
+    }
+    let e = p256_e_from_be32(&digest32)
+    ecdsa_p256_verify_with_e(pubkey, der_signature, der_signature_len, &e)
+}

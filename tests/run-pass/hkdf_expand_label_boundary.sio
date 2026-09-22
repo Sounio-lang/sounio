@@ -1,0 +1,116 @@
+//@ run-pass
+//@ requires: madaros
+// Pins down hkdf_expand_label's documented (not enforced) label-length
+// precondition: RFC 8446's `opaque label<7..255> = "tls13 " + Label`
+// requires `6 + label_len <= 255`, i.e. `label_len <= 249`. This closes
+// the final-whole-plan-review Finding 2 gap ("Spec Testing Strategy §4
+// mandates verifying hkdf_expand_label doesn't silently truncate on
+// oversized label/context -- no such test exists; reviewer confirmed real
+// silent wraparound at label_len>249 via a live probe").
+//
+// Per the operator ruling on this finding, this is a "document known
+// behavior" test, NOT a "this should fail" test: hkdf_expand_label does
+// not validate label_len/context_len, so calling it with label_len=250
+// does not error -- it silently wraps the one-byte length-prefix field
+// for ("tls13 " + label) modulo 256 (6 + 250 = 256 -> wraps to 0),
+// producing a malformed HkdfLabel (wrong length-prefix byte, but every
+// actual label/context byte still present in the underlying HKDF `info`
+// buffer) instead of a correct one. See the doc-comment directly above
+// `hkdf_expand_label` in stdlib/crypto/hkdf.sio for the full precondition
+// statement.
+//
+// This test proves that documented behavior is understood precisely: it
+// builds the *expected* wrapped `HkdfLabel` byte-for-byte by hand (with
+// the length-prefix byte hardcoded to the wrapped value `(6+250) & 0xff
+// = 0`, not computed via the same truncating store the implementation
+// uses), feeds that hand-built `info` through the already-RFC-5869-
+// verified `hkdf_expand`, and asserts the result is byte-for-byte
+// identical to what `hkdf_expand_label` itself produces when called with
+// label_len=250 -- pinning today's actual (buggy but harmless-in-this-
+// codebase) behavior as a regression test, not asserting it should stay
+// this way forever.
+use crypto::hkdf::*
+use net::socket::*
+
+fn main() -> i64 with IO {
+    let hash_algo = HKDF_HASH_SHA256
+
+    // Arbitrary 32-byte secret (HKDF-Expand-Label's `secret` argument;
+    // any well-formed input works to demonstrate the wraparound -- this
+    // is not a cryptographic vector).
+    let secret_bytes: [u8;32] = [0xab;32]
+    let secret = rawbuf_new(32)
+    var si: i64 = 0
+    while si < 32 { rawbuf_set(&secret, si, secret_bytes[si as usize] as i64); si = si + 1 }
+
+    // Oversized label: 250 bytes of 0x41 ('A'). 6 ("tls13 ") + 250 = 256,
+    // which does not fit in the HkdfLabel's one-byte length prefix.
+    let label_len: i64 = 250
+    let label_bytes: [u8;250] = [0x41;250]
+    let label = rawbuf_new(250)
+    var li: i64 = 0
+    while li < 250 { rawbuf_set(&label, li, label_bytes[li as usize] as i64); li = li + 1 }
+
+    // Ordinary 32-byte context (well within the context<0..255> limit --
+    // this test targets only the label-length wraparound).
+    let context_len: i64 = 32
+    let context_bytes: [u8;32] = [0x01;32]
+    let context = rawbuf_new(32)
+    var ci: i64 = 0
+    while ci < 32 { rawbuf_set(&context, ci, context_bytes[ci as usize] as i64); ci = ci + 1 }
+
+    let out_len: i64 = 32
+
+    // -- Hand-build the wrapped HkdfLabel's `info` buffer independently --
+    let full_label_len: i64 = 6 + label_len          // = 256 (real, unwrapped)
+    let wrapped_length_prefix: i64 = 0                // (6 + 250) & 0xff, computed by hand
+    let info_len: i64 = 2 + 1 + full_label_len + 1 + context_len   // = 292
+    let manual_info = rawbuf_new(info_len)
+
+    // uint16 length, big-endian (out_len = 32 fits in one byte, so byte 0 is 0).
+    rawbuf_set(&manual_info, 0, (out_len / 256) & 255)
+    rawbuf_set(&manual_info, 1, out_len & 255)
+
+    // The (deliberately wrong, wrapped) one-byte length prefix.
+    rawbuf_set(&manual_info, 2, wrapped_length_prefix)
+
+    // "tls13 " literal prefix.
+    let prefix = "tls13 "
+    var pi: i64 = 0
+    while pi < 6 {
+        rawbuf_set(&manual_info, 3 + pi, str_char_at(prefix, pi))
+        pi = pi + 1
+    }
+
+    // All 250 real label bytes (still fully present, despite the wrapped
+    // length prefix claiming otherwise).
+    var lj: i64 = 0
+    while lj < label_len {
+        rawbuf_set(&manual_info, 3 + 6 + lj, rawbuf_get(&label, lj))
+        lj = lj + 1
+    }
+
+    // Context length-prefix byte (32 fits in a byte -- not wrapped) and
+    // the context bytes themselves.
+    rawbuf_set(&manual_info, 3 + full_label_len, context_len)
+    var ck: i64 = 0
+    while ck < context_len {
+        rawbuf_set(&manual_info, 3 + full_label_len + 1 + ck, rawbuf_get(&context, ck))
+        ck = ck + 1
+    }
+
+    let expected = hkdf_expand(hash_algo, &secret, 32, &manual_info, info_len, out_len)
+    let actual = hkdf_expand_label(hash_algo, &secret, 32, &label, label_len, &context, context_len, out_len)
+
+    var q: i64 = 0
+    while q < out_len {
+        if rawbuf_get(&actual, q) != rawbuf_get(&expected, q) {
+            println("FAIL: label_len=250 wraparound output changed vs hand-built HkdfLabel")
+            return 1
+        }
+        q = q + 1
+    }
+
+    println("hkdf_expand_label_boundary: label_len=250 wraparound matches the documented, hand-built HkdfLabel")
+    return 0
+}

@@ -1,0 +1,168 @@
+//@ run-pass
+//@ requires: madaros
+
+// PKCS#1 v1.5 signature verification (RFC 8017 SS8.2.2) against a real
+// RSA-2048 / SHA-256 test vector, independently generated and verified
+// with openssl on 2026-08-24 (see .superpowers/sdd/2026-08-24-madaros-x509-
+// plan/task-3-report.md for the exact openssl commands and their output):
+//
+//   openssl genrsa -out priv.pem 2048
+//   openssl rsa -in priv.pem -pubout -out pub.pem
+//   printf 'pkcs1 test vector' > msg.txt
+//   openssl dgst -sha256 -sign priv.pem -out sig.bin msg.txt
+//   openssl dgst -sha256 -verify pub.pem -signature sig.bin msg.txt
+//     -> "Verified OK"
+//
+// Message: the literal bytes "pkcs1 test vector" (17 bytes).
+// SHA-256(message) = 704714b077bb8be3b0d95b5cca5ecea4a73d9d7ff45a8fd21
+//                     7b44cd09d179468 (independently confirmed via
+//                     `sha256sum msg.txt`).
+// Public exponent: 65537 (0x10001), openssl's default.
+// Modulus and signature are 2048-bit (256-byte / 128-limb) values, embedded
+// below as little-endian 16-bit limb arrays derived from the raw openssl
+// output (`openssl rsa -noout -modulus`, and the raw bytes of sig.bin).
+
+use bignum::bigint::*
+use crypto::pkcs1::*
+use hash::sha256::*
+use net::socket::*
+
+fn write_str(buf: &RawBuf, s: string) -> i64 with IO {
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        rawbuf_set(buf, i, str_char_at(s, i))
+        i = i + 1
+    }
+    n
+}
+
+// Little-endian 16-bit limbs of the RSA modulus (from `openssl rsa -in
+// priv.pem -noout -modulus`, big-endian hex, regrouped into 16-bit limbs
+// least-significant-first). Returned from a function rather than declared
+// as a top-level const, per Finding 18's workaround (a top-level const
+// array is corrupted whenever its whole value is used).
+// NOTE: a bare bracketed array literal returned directly from a function
+// with a non-i64 declared element type fails to typecheck on this compiler
+// (E008 "expected [u16; 128], found [i64; 128]") -- confirmed with a
+// minimal repro during this task and documented in stdlib/crypto/pkcs1.sio.
+// Workaround: bind the literal to an explicitly-typed `let` first, then
+// return the binding.
+fn test_modulus_limbs() -> [u16; 128] {
+    let r: [u16; 128] = [
+        21923, 21054, 46344, 49621, 24266, 54564, 35997, 26174,
+        12718, 62203, 257, 21568, 40735, 31592, 3245, 59247,
+        20476, 38755, 54327, 48388, 29010, 20598, 14390, 13092,
+        43228, 5867, 43294, 36918, 1423, 8962, 2741, 633,
+        21982, 4554, 59375, 31741, 62207, 5954, 30496, 56704,
+        35338, 52040, 32030, 7545, 33500, 33647, 13077, 56706,
+        34830, 6870, 63362, 3031, 1788, 22963, 23730, 55072,
+        53791, 4821, 17824, 28022, 14162, 64612, 18433, 11601,
+        62785, 39940, 48061, 63144, 31520, 26423, 51573, 47404,
+        38889, 24483, 20429, 18208, 48213, 9780, 38659, 6627,
+        46788, 1154, 54519, 25323, 55395, 51942, 46307, 37998,
+        15485, 22444, 41727, 48674, 32096, 21159, 53785, 23461,
+        55162, 55498, 9250, 42817, 18328, 43353, 47216, 1033,
+        1171, 44236, 48571, 13576, 35171, 24130, 49596, 32832,
+        56382, 11364, 24556, 5583, 343, 16222, 4878, 23182,
+        20472, 26464, 16875, 33875, 42130, 48508, 35504, 48761,
+    ]
+    r
+}
+
+// Little-endian 16-bit limbs of the raw PKCS#1 v1.5 signature bytes
+// (sig.bin, 256 bytes, big-endian, regrouped the same way).
+fn test_signature_limbs() -> [u16; 128] {
+    let r: [u16; 128] = [
+        33732, 52933, 36487, 26560, 13838, 13077, 3069, 38850,
+        36130, 54238, 8629, 41351, 7621, 24210, 17112, 1024,
+        14574, 30954, 31512, 1792, 9149, 12328, 14470, 43151,
+        29178, 26009, 7860, 28745, 40027, 35736, 49164, 36590,
+        43133, 15296, 47943, 33400, 52426, 65491, 10975, 14790,
+        39713, 59013, 55034, 31642, 62681, 58218, 36601, 58929,
+        16779, 50383, 42007, 18213, 43426, 9920, 28472, 9837,
+        63549, 12836, 28969, 24976, 18329, 13071, 44414, 42870,
+        34822, 10895, 59370, 506, 41523, 52472, 40824, 49590,
+        24102, 53099, 57233, 3166, 22628, 27800, 6502, 6757,
+        33188, 42267, 17114, 6106, 54965, 13604, 48838, 28587,
+        52835, 14695, 29379, 59167, 21579, 45099, 28587, 27283,
+        39410, 58059, 58005, 47197, 14307, 28318, 36852, 25275,
+        56822, 38214, 7189, 43671, 11396, 14365, 55547, 31951,
+        29959, 36807, 43101, 45544, 44112, 23428, 47634, 24364,
+        36198, 12678, 10522, 27401, 54463, 1070, 8964, 25505,
+    ]
+    r
+}
+
+fn build_bigint_128(values: [u16; 128]) -> BigInt {
+    var result = bigint_zero()
+    var i: i64 = 0
+    while i < 128 {
+        result.limbs[i as usize] = values[i as usize]
+        i = i + 1
+    }
+    result.len = 128
+    result
+}
+
+fn main() -> i64 with IO {
+    let modulus = build_bigint_128(test_modulus_limbs())
+    let signature = build_bigint_128(test_signature_limbs())
+    let exponent = bigint_from_u32(65537)
+
+    // Compute SHA-256("pkcs1 test vector") and place it in the leading 32
+    // bytes of the fixed [u8; 64] buffer pkcs1_v15_verify expects (the
+    // remaining 32 bytes are unused for SHA-256's 32-byte digest).
+    let msg_buf = rawbuf_new(17)
+    let msg_len = write_str(&msg_buf, "pkcs1 test vector")
+    if msg_len != 17 {
+        print_int(1)
+        return 1
+    }
+    let digest = sha256(&msg_buf, msg_len)
+
+    var hash64: [u8; 64] = [0; 64]
+    var hi: i64 = 0
+    while hi < 32 {
+        hash64[hi as usize] = digest[hi as usize]
+        hi = hi + 1
+    }
+
+    // ---- True case: the real, openssl-verified signature must verify. ----
+    let ok = pkcs1_v15_verify(&signature, &modulus, &exponent, 256, PKCS1_HASH_SHA256, &hash64, 32)
+    if ok == false {
+        print_int(2)
+        return 1
+    }
+    assert(ok)
+
+    // ---- False case 1: a signature with one flipped bit must NOT verify. --
+    var corrupted_sig_limbs = test_signature_limbs()
+    corrupted_sig_limbs[0] = ((corrupted_sig_limbs[0] as i64) ^ 1) as u16
+    let corrupted_signature = build_bigint_128(corrupted_sig_limbs)
+    let bad1 = pkcs1_v15_verify(&corrupted_signature, &modulus, &exponent, 256, PKCS1_HASH_SHA256, &hash64, 32)
+    if bad1 == true {
+        print_int(3)
+        return 1
+    }
+    assert(bad1 == false)
+
+    // ---- False case 2: the correct signature against a corrupted hash
+    // (one flipped bit in the message digest) must NOT verify either. -------
+    var wrong_hash64: [u8; 64] = [0; 64]
+    var wi: i64 = 0
+    while wi < 32 {
+        wrong_hash64[wi as usize] = digest[wi as usize]
+        wi = wi + 1
+    }
+    wrong_hash64[0] = ((wrong_hash64[0] as i64) ^ 1) as u8
+    let bad2 = pkcs1_v15_verify(&signature, &modulus, &exponent, 256, PKCS1_HASH_SHA256, &wrong_hash64, 32)
+    if bad2 == true {
+        print_int(4)
+        return 1
+    }
+    assert(bad2 == false)
+
+    print_int(0)
+    return 0
+}

@@ -100,6 +100,11 @@ jobs:
         run: bash scripts/dev/check_docs_consistency.sh
       - name: Docs registry
         run: bash scripts/dev/check_docs_registry.sh
+      # SYNC-004 analysis is digest-only advice. This gate proves byte parity
+      # with the public UNEQSELF vector and refuses any exported decision,
+      # authorization, branch-selection, or ledger-mutation symbol.
+      - name: SYNC-004 digest-only worldline merge ABI
+        run: bash scripts/ci/sounio_worldline_merge_epistemic_selftest.sh
       # Concept contracts must declare Status and not drift past/behind
       # bindings.tsv evidence (both directions). No skip escape.
       - name: Concept status ladder (bindings evidence)
@@ -759,7 +764,16 @@ jobs:
     # Raised again to 35 here because this branch adds three more sub-gates to
     # the same job (precise_stack_maps honesty, FPGA receipt staleness, and the
     # epistemic e-graph reassociation gate).
-    timeout-minutes: 35
+    # Raised again to 60 (measured on PR #2133, tls-on-madaros): a single large
+    # merge can legitimately change 800+ tests at once (that PR's merge with
+    # integration/sounio-dev-ready-base brought in 500+ commits in one shot),
+    # and madaros_changed_tests_gate.sh compiles+runs each changed test with
+    # the freshly-built current-source Madaros. Measured directly: two
+    # consecutive runs against the same 831-changed-test set both timed out
+    # at exactly 35m28s (deterministic, not runner-speed flakiness) -- this
+    # was genuinely still making progress, not hung, just under-budgeted for
+    # a merge this size.
+    timeout-minutes: 60
     env:
       SOUNIO_MADAROS_F64_LOWERING_GATE_DIR: /tmp/sounio-madaros-current-source-f64-lowering
       SOUNIO_MADAROS_F64_LOWERING_GATE_KEEP: 1
@@ -818,6 +832,20 @@ jobs:
           CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           SOUNIO_TEST_JOBS: 4
+          # Measured on PR #2133 (tls-on-madaros, 831 changed tests from a
+          # large merge): 33 tests -- spanning unrelated pre-existing suites,
+          # not one feature -- failed "run timed out after 30s" purely from
+          # resource contention this late in a long run; each passes in well
+          # under a second in isolation. Raised to 90, which was NOT enough
+          # for a different, heavier family (solver_portfolio_lorenz_i256_
+          # cover_child*_imported, formal-verification-style tests): a
+          # re-run hit 15 of THOSE at "timed out after 90s", a different
+          # subset each time (confirms load-dependent contention, not a
+          # deterministic per-test bug). Raised again to 180. Only ~1-2% of
+          # 831 tests ever land in this borderline zone, so this adds
+          # negligible wall-clock to the job as a whole while giving real
+          # headroom to whichever tests draw the short straw on a given run.
+          SOUNIO_TEST_TIMEOUT_DEFAULT: 180
         run: bash scripts/ci/madaros_changed_tests_gate.sh
       - name: Epistemic e-graph reassociation gate
         env:

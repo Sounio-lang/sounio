@@ -1,0 +1,352 @@
+//@ run-pass
+//@ requires: madaros
+
+// RFC 5280 SS4.2.1.6 GeneralNames parsing test: a hand-built GeneralNames
+// SEQUENCE containing one of each of the 9 GeneralName CHOICE variants.
+// Task 1's array-of-nested-struct audit fully PASSED (see GeneralName's own
+// comment in stdlib/x509/cert.sio), which was expected to let directoryName
+// get its own dedicated decode into X509Name. A LATER, dynamic discovery
+// (Finding 26, docs/audit/TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_2026-08-23.md)
+// found that specific write shape -- a struct value that itself contains an
+// array-of-structs field, written into a doubly array-indexed target --
+// still corrupts data even though the static audit passed. directoryName's
+// dedicated decode was removed from stdlib/x509/cert.sio as a result, so
+// this test's directoryName assertions below check the RAW Name-SEQUENCE
+// TLV bytes (the same generic raw-bytes path x400Address/ediPartyName use),
+// not a decoded X509Name -- all 9 variants are still exercised, count == 9.
+//
+// Every variant except otherName/directoryName/ediPartyName is an IMPLICIT
+// primitive context-specific tag, so its raw content bytes ARE the field's
+// own value directly. otherName and registeredID are both read by
+// x509_parse_general_names via the SAME raw-content-copy path (it does not
+// fully decode OtherName's inner SEQUENCE{OID, ANY} -- see the brief's own
+// simplified treatment) -- so otherName's fixture below is built as a bare
+// primitive [0] tag whose content IS exactly the bytes the parser will
+// capture into `.oid`, matching what the shipped code actually does rather
+// than a fully spec-correct OtherName encoding.
+//
+//   0. otherName [0]:            primitive, content = 5 arbitrary bytes
+//        0x80, 0x05, 0x2B, 0x06, 0x01, 0x04, 0x01                  (7 bytes)
+//   1. rfc822Name [1]:           IA5String "a@b.co" (6 bytes)
+//        0x81, 0x06, 0x61,0x40,0x62,0x2E,0x63,0x6F                 (8 bytes)
+//   2. dNSName [2]:              IA5String "example.com" (11 bytes)
+//        0x82, 0x0B, 0x65,0x78,0x61,0x6D,0x70,0x6C,0x65,0x2E,0x63,0x6F,0x6D (13 bytes)
+//   3. x400Address [3]:          raw bytes 0x01,0x02,0x03 (3 bytes)
+//        0x83, 0x03, 0x01, 0x02, 0x03                               (5 bytes)
+//   4. directoryName [4]:        EXPLICIT constructed, content = Name
+//      SEQUENCE { SET { SEQUENCE { OID commonName, PrintableString "DirCN" } } }
+//        OID commonName TLV:            0x06,0x03,0x55,0x04,0x03           (5 bytes)
+//        PrintableString "DirCN" TLV:   0x13,0x05,0x44,0x69,0x72,0x43,0x4E (7 bytes)
+//        ATV SEQUENCE: content=5+7=12, header 0x30,0x0C -> 14 bytes
+//        RDN SET:      content=14,     header 0x31,0x0E -> 16 bytes
+//        Name SEQUENCE: content=16,    header 0x30,0x10 -> 18 bytes
+//        directoryName TLV: 0xA4, 0x12, <18 bytes of Name SEQUENCE> = 20 bytes
+//   5. ediPartyName [5]:         constructed, raw bytes 0xAA..0xFF (6 bytes)
+//        0xA5, 0x06, 0xAA,0xBB,0xCC,0xDD,0xEE,0xFF                  (8 bytes)
+//   6. uniformResourceIdentifier [6]: IA5String "http://x" (8 bytes)
+//        0x86, 0x08, 0x68,0x74,0x74,0x70,0x3A,0x2F,0x2F,0x78        (10 bytes)
+//   7. iPAddress [7]:            OCTET STRING 10.0.0.1 (4 bytes)
+//        0x87, 0x04, 0x0A, 0x00, 0x00, 0x01                         (6 bytes)
+//   8. registeredID [8]:         OBJECT IDENTIFIER, reuses commonName's
+//      raw OID bytes (3 bytes) -- registeredID is IMPLICIT OBJECT
+//      IDENTIFIER, so its content bytes ARE a real OID's raw encoding
+//      (unlike otherName above).
+//        0x88, 0x03, 0x55, 0x04, 0x03                                (5 bytes)
+//
+//   Sum of all 9 TLVs = 7+8+13+5+20+8+10+6+5 = 82 bytes.
+//   GeneralNames SEQUENCE: 0x30, 0x52 (82) + 82 content bytes = 84 bytes total.
+
+use asn1::der::*
+use bignum::bigint::*
+use net::socket::*
+use x509::cert::*
+use x509::oid::*
+
+fn main() -> i64 with IO {
+    let total_len: i64 = 84
+    let buf = rawbuf_new(total_len + 8)
+
+    let bytes: [i64; 84] = [
+        // GeneralNames SEQUENCE header (len 82)
+        0x30, 0x52,
+        // 0. otherName [0]
+        0x80, 0x05, 0x2B, 0x06, 0x01, 0x04, 0x01,
+        // 1. rfc822Name [1] "a@b.co"
+        0x81, 0x06, 0x61, 0x40, 0x62, 0x2E, 0x63, 0x6F,
+        // 2. dNSName [2] "example.com"
+        0x82, 0x0B, 0x65, 0x78, 0x61, 0x6D, 0x70, 0x6C, 0x65, 0x2E, 0x63, 0x6F, 0x6D,
+        // 3. x400Address [3]
+        0x83, 0x03, 0x01, 0x02, 0x03,
+        // 4. directoryName [4]: Name SEQUENCE { SET { SEQUENCE { OID CN, PrintableString "DirCN" } } }
+        0xA4, 0x12,
+        0x30, 0x10,
+        0x31, 0x0E,
+        0x30, 0x0C,
+        0x06, 0x03, 0x55, 0x04, 0x03,
+        0x13, 0x05, 0x44, 0x69, 0x72, 0x43, 0x4E,
+        // 5. ediPartyName [5]
+        0xA5, 0x06, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF,
+        // 6. uniformResourceIdentifier [6] "http://x"
+        0x86, 0x08, 0x68, 0x74, 0x74, 0x70, 0x3A, 0x2F, 0x2F, 0x78,
+        // 7. iPAddress [7] 10.0.0.1
+        0x87, 0x04, 0x0A, 0x00, 0x00, 0x01,
+        // 8. registeredID [8], reuses commonName OID raw bytes
+        0x88, 0x03, 0x55, 0x04, 0x03,
+    ]
+
+    var i: i64 = 0
+    while i < total_len {
+        rawbuf_set(&buf, i, bytes[i as usize])
+        i = i + 1
+    }
+
+    let top = der_reader_new(&buf, 0, total_len)
+    let (top2, san_tag, s0) = der_read_tlv(&top)
+    if s0 != DER_OK {
+        print_int(1)
+        return 1
+    }
+    assert(s0 == DER_OK)
+    if san_tag.tag_number != DER_TAG_SEQUENCE {
+        print_int(2)
+        return 1
+    }
+    assert(san_tag.tag_number == DER_TAG_SEQUENCE)
+
+    var names: [GeneralName; 32] = [
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+    ]
+    let (names_raw, count, status) = x509_parse_general_names(&buf, &top, &san_tag)
+    names = names_raw
+
+    if status != X509_OK {
+        print_int(3)
+        return 1
+    }
+    assert(status == X509_OK)
+
+    if count != 9 {
+        print_int(4)
+        return 1
+    }
+    assert(count == 9)
+
+    // 0. otherName: tag == GENERAL_NAME_OTHER_NAME, oid captured raw.
+    if names[0].tag != GENERAL_NAME_OTHER_NAME {
+        print_int(5)
+        return 1
+    }
+    assert(names[0].tag == GENERAL_NAME_OTHER_NAME)
+    if names[0].oid_len != 5 {
+        print_int(6)
+        return 1
+    }
+    assert(names[0].oid_len == 5)
+    if (names[0].oid[0] as i64) != 0x2B {
+        print_int(7)
+        return 1
+    }
+    if (names[0].oid[4] as i64) != 0x01 {
+        print_int(8)
+        return 1
+    }
+    assert((names[0].oid[0] as i64) == 0x2B)
+    assert((names[0].oid[4] as i64) == 0x01)
+
+    // 1. rfc822Name: tag + value.
+    if names[1].tag != GENERAL_NAME_RFC822_NAME {
+        print_int(9)
+        return 1
+    }
+    assert(names[1].tag == GENERAL_NAME_RFC822_NAME)
+    if names[1].value_len != 6 {
+        print_int(10)
+        return 1
+    }
+    assert(names[1].value_len == 6)
+    if (names[1].value[0] as i64) != 0x61 {
+        print_int(11)
+        return 1
+    }
+    if (names[1].value[5] as i64) != 0x6F {
+        print_int(12)
+        return 1
+    }
+    assert((names[1].value[0] as i64) == 0x61)
+    assert((names[1].value[5] as i64) == 0x6F)
+
+    // 2. dNSName: tag + value.
+    if names[2].tag != GENERAL_NAME_DNS_NAME {
+        print_int(13)
+        return 1
+    }
+    assert(names[2].tag == GENERAL_NAME_DNS_NAME)
+    if names[2].value_len != 11 {
+        print_int(14)
+        return 1
+    }
+    assert(names[2].value_len == 11)
+    if (names[2].value[0] as i64) != 0x65 {
+        print_int(15)
+        return 1
+    }
+    if (names[2].value[10] as i64) != 0x6D {
+        print_int(16)
+        return 1
+    }
+    assert((names[2].value[0] as i64) == 0x65)
+    assert((names[2].value[10] as i64) == 0x6D)
+
+    // 3. x400Address: generic raw-bytes path (falls to the else branch,
+    // same as ediPartyName).
+    if names[3].tag != GENERAL_NAME_X400_ADDRESS {
+        print_int(17)
+        return 1
+    }
+    assert(names[3].tag == GENERAL_NAME_X400_ADDRESS)
+    if names[3].value_len != 3 {
+        print_int(18)
+        return 1
+    }
+    assert(names[3].value_len == 3)
+    if (names[3].value[0] as i64) != 0x01 {
+        print_int(19)
+        return 1
+    }
+    if (names[3].value[2] as i64) != 0x03 {
+        print_int(20)
+        return 1
+    }
+    assert((names[3].value[0] as i64) == 0x01)
+    assert((names[3].value[2] as i64) == 0x03)
+
+    // 4. directoryName: per stdlib/x509/cert.sio's own documented
+    // deviation (a newly discovered compiler defect -- see this task's
+    // report -- corrupts data when a struct containing an array-of-structs
+    // is written into a doubly-array-indexed target), directoryName is
+    // captured via the SAME generic raw-content-bytes path as
+    // x400Address/ediPartyName rather than getting a dedicated decoded
+    // `X509Name`. Its raw `value` bytes are therefore the Name SEQUENCE's
+    // own TLV bytes (header + content) verbatim: 0x30, 0x10, <16 content
+    // bytes> = 18 bytes total.
+    if names[4].tag != GENERAL_NAME_DIRECTORY_NAME {
+        print_int(21)
+        return 1
+    }
+    assert(names[4].tag == GENERAL_NAME_DIRECTORY_NAME)
+    if names[4].value_len != 18 {
+        print_int(22)
+        return 1
+    }
+    assert(names[4].value_len == 18)
+    if (names[4].value[0] as i64) != 0x30 {
+        print_int(23)
+        return 1
+    }
+    if (names[4].value[1] as i64) != 0x10 {
+        print_int(24)
+        return 1
+    }
+    // Last byte of the raw TLV is 'N' (0x4E), the tail of the "DirCN"
+    // PrintableString content.
+    if (names[4].value[17] as i64) != 0x4E {
+        print_int(25)
+        return 1
+    }
+    assert((names[4].value[0] as i64) == 0x30)
+    assert((names[4].value[17] as i64) == 0x4E)
+
+    // 5. ediPartyName: generic raw-bytes path.
+    if names[5].tag != GENERAL_NAME_EDI_PARTY_NAME {
+        print_int(27)
+        return 1
+    }
+    assert(names[5].tag == GENERAL_NAME_EDI_PARTY_NAME)
+    if names[5].value_len != 6 {
+        print_int(28)
+        return 1
+    }
+    assert(names[5].value_len == 6)
+    if (names[5].value[0] as i64) != 0xAA {
+        print_int(29)
+        return 1
+    }
+    if (names[5].value[5] as i64) != 0xFF {
+        print_int(30)
+        return 1
+    }
+    assert((names[5].value[0] as i64) == 0xAA)
+    assert((names[5].value[5] as i64) == 0xFF)
+
+    // 6. uniformResourceIdentifier: value.
+    if names[6].tag != GENERAL_NAME_URI {
+        print_int(31)
+        return 1
+    }
+    assert(names[6].tag == GENERAL_NAME_URI)
+    if names[6].value_len != 8 {
+        print_int(32)
+        return 1
+    }
+    assert(names[6].value_len == 8)
+    if (names[6].value[0] as i64) != 0x68 {
+        print_int(33)
+        return 1
+    }
+    if (names[6].value[7] as i64) != 0x78 {
+        print_int(34)
+        return 1
+    }
+    assert((names[6].value[0] as i64) == 0x68)
+    assert((names[6].value[7] as i64) == 0x78)
+
+    // 7. iPAddress: value.
+    if names[7].tag != GENERAL_NAME_IP_ADDRESS {
+        print_int(35)
+        return 1
+    }
+    assert(names[7].tag == GENERAL_NAME_IP_ADDRESS)
+    if names[7].value_len != 4 {
+        print_int(36)
+        return 1
+    }
+    assert(names[7].value_len == 4)
+    if (names[7].value[0] as i64) != 10 {
+        print_int(37)
+        return 1
+    }
+    if (names[7].value[3] as i64) != 1 {
+        print_int(38)
+        return 1
+    }
+    assert((names[7].value[0] as i64) == 10)
+    assert((names[7].value[3] as i64) == 1)
+
+    // 8. registeredID: oid captured raw, a real OID's bytes this time.
+    if names[8].tag != GENERAL_NAME_REGISTERED_ID {
+        print_int(39)
+        return 1
+    }
+    assert(names[8].tag == GENERAL_NAME_REGISTERED_ID)
+    if names[8].oid_len != 3 {
+        print_int(40)
+        return 1
+    }
+    assert(names[8].oid_len == 3)
+    let registered_id_oid = oid_common_name()
+    if oid_eq3(&names[8].oid, names[8].oid_len, &registered_id_oid) == false {
+        print_int(41)
+        return 1
+    }
+    assert(oid_eq3(&names[8].oid, names[8].oid_len, &registered_id_oid) == true)
+
+    println("x509_parse_general_names: all 9 GeneralName CHOICE variants decoded correctly")
+    return 0
+}

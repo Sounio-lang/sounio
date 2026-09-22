@@ -1,0 +1,150 @@
+// stdlib/net/dns.sio — Hostname resolution via /etc/hosts (Madaros v0.80.0)
+//
+// Task 3 of the sockets/HTTP-client plan. See
+// docs/audit/TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_2026-08-23.md for the
+// raw-buffer conventions this file follows (RawBuf via rawbuf_new /
+// rawbuf_get / rawbuf_set from stdlib/net/socket.sio).
+//
+// Import note: unlike a program OUTSIDE stdlib/net/ importing
+// stdlib/net/socket.sio (which must write `use net::socket::*`, per
+// Finding 6 of the audit above), a SIBLING file inside stdlib/net/
+// importing socket.sio uses the bare form `use socket::*` — confirmed
+// empirically with a throwaway spike during this task; this is folded
+// into the audit doc as Finding 8.
+//
+// File-reading note: the task brief's Step 1 spike confirmed
+// `read_file(path: string) -> string` is a compiler BUILTIN on this
+// compiler — no `extern "C"` declaration is needed or accepted, and it
+// takes a bare `string` path argument directly (not the `[i8; 32]`
+// array-buffer form the brief's draft guessed at, which fails with
+// `error[E009]: argument type does not match parameter`). `str_len(s:
+// string) -> i64` and `str_char_at(s: string, i: i64) -> i64` are also
+// compiler builtins that operate directly on the string `read_file`
+// returns. Verified: reading real `/etc/hosts` (576 bytes per `wc -c`)
+// returned `str_len == 576`, and `str_char_at` at offsets 0/1/2 returned
+// 49/50/55 (`'1'`, `'2'`, `'7'`), matching the real first line
+// `"127.0.0.1 localhost.localdomain localhost"`. No raw-syscall fallback
+// (open/read/close via syscall6) was needed for this task.
+
+use socket::*
+
+pub const ERR_DNS_RESOLVE: i64 = 0 - 1
+
+const CH_NEWLINE: i64 = 10
+const CH_CR: i64 = 13
+const CH_SPACE: i64 = 32
+const CH_TAB: i64 = 9
+const CH_HASH: i64 = 35
+
+fn is_ws(c: i64) -> bool {
+    c == CH_SPACE || c == CH_TAB || c == CH_CR
+}
+
+// Byte-for-byte compares the range [tok_start, tok_end) of `content`
+// against the first `hostname_len` bytes of `hostname` (a RawBuf).
+fn hostname_matches(content: string, tok_start: i64, tok_end: i64, hostname: &RawBuf, hostname_len: i64) -> bool with IO {
+    if tok_end - tok_start != hostname_len {
+        return false
+    }
+    var i: i64 = 0
+    while i < hostname_len {
+        let a = str_char_at(content, tok_start + i)
+        let b = rawbuf_get(hostname, i)
+        if a != b {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+// Copies the byte range [tok_start, tok_end) of `content` into `out_ip`
+// starting at offset 0. Returns ERR_DNS_RESOLVE WITHOUT writing anything if
+// the token is longer than `out_ip.cap` -- e.g. a full-form IPv6 address
+// (39 bytes, "2001:0db8:85a3:0000:0000:8a2e:0370:7334") appearing as the
+// first token of an /etc/hosts line would otherwise silently overflow the
+// caller's buffer (http_get's addr_text is only rawbuf_new(16)). Returns 0
+// on success.
+fn copy_ip_token(content: string, tok_start: i64, tok_end: i64, out_ip: &RawBuf) -> i64 with IO {
+    let tok_len = tok_end - tok_start
+    if tok_len > out_ip.cap {
+        return ERR_DNS_RESOLVE
+    }
+    var i: i64 = 0
+    while tok_start + i < tok_end {
+        let c = str_char_at(content, tok_start + i)
+        rawbuf_set(out_ip, i, c)
+        i = i + 1
+    }
+    return 0
+}
+
+// Tries to resolve `hostname` within one line of /etc/hosts content
+// (half-open byte range [line_start, line_end), excluding the trailing
+// newline). Returns 0 and fills `out_ip` on a match, ERR_DNS_RESOLVE
+// otherwise (comment lines, blank lines, and lines with no matching
+// hostname token all fall through to ERR_DNS_RESOLVE).
+fn dns_try_line(content: string, line_start: i64, line_end: i64, hostname: &RawBuf, hostname_len: i64, out_ip: &RawBuf) -> i64 with IO {
+    var pos: i64 = line_start
+    while pos < line_end && is_ws(str_char_at(content, pos)) {
+        pos = pos + 1
+    }
+    if pos >= line_end {
+        return ERR_DNS_RESOLVE
+    }
+    if str_char_at(content, pos) == CH_HASH {
+        return ERR_DNS_RESOLVE
+    }
+
+    // First whitespace-separated token on the line: the IP address.
+    let ip_start = pos
+    while pos < line_end && !is_ws(str_char_at(content, pos)) {
+        pos = pos + 1
+    }
+    let ip_end = pos
+
+    // Remaining tokens: the canonical hostname plus any aliases.
+    while pos < line_end {
+        while pos < line_end && is_ws(str_char_at(content, pos)) {
+            pos = pos + 1
+        }
+        let tok_start = pos
+        while pos < line_end && !is_ws(str_char_at(content, pos)) {
+            pos = pos + 1
+        }
+        let tok_end = pos
+        if tok_end > tok_start {
+            if hostname_matches(content, tok_start, tok_end, hostname, hostname_len) {
+                return copy_ip_token(content, ip_start, ip_end, out_ip)
+            }
+        }
+    }
+    return ERR_DNS_RESOLVE
+}
+
+// Resolves `hostname` (the first `hostname_len` bytes of the RawBuf
+// `hostname`) to an IPv4 address by scanning `/etc/hosts` line by line.
+// On success, writes the matching IP address's ASCII text (e.g.
+// "127.0.0.1") into `out_ip` starting at offset 0 and returns 0.
+// Returns ERR_DNS_RESOLVE if the hostname is not found, or the file
+// could not be read.
+pub fn resolve_ipv4(hostname: &RawBuf, hostname_len: i64, out_ip: &RawBuf) -> i64 with IO {
+    let content: string = read_file("/etc/hosts")
+    let n: i64 = str_len(content)
+    if n <= 0 {
+        return ERR_DNS_RESOLVE
+    }
+    var i: i64 = 0
+    while i < n {
+        var line_end: i64 = i
+        while line_end < n && str_char_at(content, line_end) != CH_NEWLINE {
+            line_end = line_end + 1
+        }
+        let result = dns_try_line(content, i, line_end, hostname, hostname_len, out_ip)
+        if result == 0 {
+            return 0
+        }
+        i = line_end + 1
+    }
+    return ERR_DNS_RESOLVE
+}

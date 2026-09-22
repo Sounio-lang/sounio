@@ -1,0 +1,239 @@
+//@ run-pass
+//@ requires: madaros
+
+// RSASSA-PSS signature verification (RFC 8017 SS8.1.2 / SS9.1.2) against
+// two real, independently-generated-and-verified RSA-2048 test vectors
+// (one SHA-256, one SHA-384) -- NOT transcribed from any pre-existing
+// hex in this plan or repository, per this task's brief.
+//
+// SOURCE / METHOD (see task-1-report.md for the full transcript):
+//   1. Generated with Python's `cryptography` library 43.0.0 (an
+//      OpenSSL-backed, independent implementation from this project's own
+//      Sounio code): `rsa.generate_private_key` (2048-bit, e=65537),
+//      then `priv.sign(message, padding.PSS(mgf=padding.MGF1(hash),
+//      salt_length=hash.digest_size), hash)` for SHA-256 and SHA-384.
+//      MGF1 instantiated with the same hash as the signature (sLen ==
+//      hLen), matching TLS 1.3's rsa_pss_rsae_* convention (RFC 8446
+//      SS4.2.3). Self-checked with `pub.verify(...)` at generation time.
+//   2. INDEPENDENTLY RE-VERIFIED with a second, separate tool: the
+//      system `openssl pkeyutl -verify` CLI (OpenSSL 3.5.6), against a
+//      PEM-exported public key, the raw message (`-rawin -digest
+//      sha256`/`sha384`), the signature bytes, and explicit
+//      `-pkeyopt rsa_padding_mode:pss -pkeyopt rsa_pss_saltlen:-1
+//      -pkeyopt rsa_mgf1_md:<digest>`. Both vectors printed
+//      "Signature Verified Successfully" (exit 0) from this fully
+//      independent verification path.
+//
+// Modulus/signature are 2048-bit (256-byte / 128-limb) values, embedded
+// below as little-endian 16-bit limb arrays derived from the raw
+// generated hex (regrouped least-significant-limb-first), following the
+// same pattern as tests/run-pass/pkcs1_verify.sio.
+
+use crypto::rsa_pss::*
+use bignum::bigint::*
+use net::socket::*
+
+fn write_str(buf: &RawBuf, s: string) -> i64 with IO {
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        rawbuf_set(buf, i, str_char_at(s, i))
+        i = i + 1
+    }
+    n
+}
+
+fn build_bigint_128(values: [u16; 128]) -> BigInt {
+    var result = bigint_zero()
+    var i: i64 = 0
+    while i < 128 {
+        result.limbs[i as usize] = values[i as usize]
+        i = i + 1
+    }
+    result.len = 128
+    result
+}
+
+// ---------------------------------------------------------------------
+// SHA-256 vector.
+// ---------------------------------------------------------------------
+
+fn sha256_modulus_limbs() -> [u16; 128] {
+    let r: [u16; 128] = [
+        28587, 34241, 6104, 50139, 30362, 53006, 36654, 63402,
+        63176, 6760, 38934, 8941, 20148, 6522, 11582, 25048,
+        51246, 60977, 62982, 64583, 44512, 18342, 3425, 57217,
+        37337, 59120, 893, 13988, 9460, 56226, 30908, 11216,
+        30013, 29875, 29112, 48435, 50785, 12542, 33361, 32897,
+        833, 39726, 6242, 44038, 16585, 39521, 53281, 50036,
+        45386, 45597, 7768, 42420, 8086, 40455, 8684, 23747,
+        3647, 40445, 56085, 32155, 32513, 40961, 61902, 1309,
+        45827, 2042, 52638, 26691, 15587, 35189, 61818, 35704,
+        40619, 46067, 58013, 10794, 8843, 50979, 7316, 8236,
+        36792, 16947, 514, 21087, 31163, 49017, 63175, 9556,
+        38815, 1646, 7471, 35448, 55344, 60378, 26974, 2267,
+        27198, 36600, 34991, 63779, 52161, 53040, 9436, 56126,
+        10389, 17889, 31304, 42811, 47289, 43480, 37256, 45491,
+        46930, 17294, 30555, 7977, 20991, 18721, 41281, 38167,
+        60058, 10161, 62600, 24013, 35166, 59242, 52389, 43245,
+    ]
+    r
+}
+
+fn sha256_signature_limbs() -> [u16; 128] {
+    let r: [u16; 128] = [
+        41263, 19542, 40520, 59280, 31644, 40682, 20776, 54092,
+        12262, 43372, 17948, 40927, 38007, 63570, 62271, 6712,
+        22427, 19050, 33494, 45601, 63240, 61773, 31835, 32412,
+        43075, 6893, 59745, 38400, 11679, 55121, 4524, 40514,
+        57042, 41774, 7825, 35600, 61714, 24054, 17493, 12924,
+        14605, 33065, 16294, 14350, 32839, 24962, 32196, 62619,
+        53595, 41698, 56285, 18107, 53577, 48813, 31685, 15854,
+        7203, 16348, 3069, 16218, 60989, 43219, 32473, 47896,
+        51237, 38792, 23454, 30344, 63907, 32079, 62362, 51038,
+        61675, 25674, 5781, 48526, 25663, 28416, 38831, 20776,
+        22645, 9875, 11894, 456, 8663, 44753, 33299, 16138,
+        12945, 58870, 38836, 29860, 50247, 46417, 34514, 5008,
+        49598, 55970, 26093, 1548, 27192, 38093, 62866, 1737,
+        16660, 17009, 24739, 25090, 19120, 28292, 64038, 60835,
+        11538, 54710, 26112, 10310, 28896, 56697, 59016, 55689,
+        3400, 42772, 23916, 16570, 29904, 6154, 47146, 34234,
+    ]
+    r
+}
+
+// ---------------------------------------------------------------------
+// SHA-384 vector (separate, independently generated RSA-2048 keypair).
+// ---------------------------------------------------------------------
+
+fn sha384_modulus_limbs() -> [u16; 128] {
+    let r: [u16; 128] = [
+        23761, 56448, 53699, 17017, 6720, 25315, 60720, 16959,
+        32297, 30440, 55570, 59198, 35365, 57793, 12675, 34847,
+        430, 50723, 36212, 48614, 55900, 8512, 32717, 27057,
+        7705, 33017, 34982, 10741, 37053, 6821, 39754, 59210,
+        45886, 62082, 19391, 8735, 45873, 25233, 34866, 11637,
+        23345, 15634, 54220, 5477, 49653, 27049, 48365, 30128,
+        50222, 5336, 35807, 62191, 42937, 4894, 24196, 23736,
+        23975, 64422, 36789, 37290, 50709, 37164, 46378, 9890,
+        9377, 63517, 46863, 51805, 17688, 61953, 53641, 3849,
+        35000, 54069, 6581, 32194, 58458, 60187, 28755, 62614,
+        26190, 18292, 46868, 22938, 1158, 62659, 43238, 59458,
+        18494, 64949, 37156, 59373, 45884, 13034, 22499, 27681,
+        36449, 12021, 59724, 1309, 26637, 12246, 38111, 1044,
+        33991, 27833, 19842, 21606, 13470, 61017, 35212, 47038,
+        20103, 31458, 37756, 17869, 8693, 55096, 60177, 55672,
+        19269, 63393, 62621, 41100, 53154, 6481, 34469, 44107,
+    ]
+    r
+}
+
+fn sha384_signature_limbs() -> [u16; 128] {
+    let r: [u16; 128] = [
+        61132, 43618, 5802, 53299, 20607, 20437, 23560, 28941,
+        11356, 27355, 64020, 50482, 14218, 15799, 23922, 44665,
+        128, 36476, 44310, 38907, 41406, 64763, 41821, 48611,
+        8314, 3204, 23918, 17174, 51911, 47451, 55577, 35181,
+        58942, 2080, 15715, 25613, 44535, 45825, 8916, 59071,
+        30977, 27496, 1956, 56546, 45527, 16960, 7672, 3437,
+        38786, 34308, 37036, 22500, 35771, 34806, 33330, 65483,
+        17270, 26484, 19706, 32434, 44348, 53579, 50662, 57492,
+        32159, 33161, 9831, 26419, 12510, 52303, 35268, 12898,
+        32458, 18996, 24863, 40992, 62397, 12003, 5065, 21115,
+        10190, 40517, 47078, 39356, 10914, 17042, 35401, 55073,
+        39264, 53450, 61715, 8120, 20804, 1886, 40377, 28421,
+        48618, 42453, 48434, 47611, 48750, 10357, 63174, 54210,
+        61851, 50946, 60304, 34679, 13156, 45329, 39204, 19049,
+        33484, 64333, 19031, 30766, 59005, 55825, 28499, 37105,
+        494, 3104, 8561, 16415, 27565, 64366, 52421, 7930,
+    ]
+    r
+}
+
+fn check_one(
+    modulus_limbs: [u16; 128],
+    signature_limbs: [u16; 128],
+    message_str: string,
+    message_str_len: i64,
+    hash_algo: i32,
+    fail_base: i64,
+) -> i64 with IO {
+    let modulus = build_bigint_128(modulus_limbs)
+    let signature = build_bigint_128(signature_limbs)
+    let exponent = bigint_from_u32(65537)
+
+    let msg_buf = rawbuf_new(message_str_len + 8)
+    let msg_len = write_str(&msg_buf, message_str)
+    if msg_len != message_str_len {
+        return fail_base
+    }
+
+    // ---- True case: the real, independently-verified signature must
+    // verify. ----
+    let ok = rsa_pss_verify(&modulus, &exponent, 256, &msg_buf, msg_len, &signature, hash_algo)
+    if ok == false {
+        return fail_base + 1
+    }
+    assert(ok)
+
+    // ---- Negative case: a signature with one flipped bit must NOT
+    // verify. ----
+    var corrupted_sig_limbs = signature_limbs
+    corrupted_sig_limbs[0] = ((corrupted_sig_limbs[0] as i64) ^ 1) as u16
+    let bad_signature = build_bigint_128(corrupted_sig_limbs)
+    let bad_ok = rsa_pss_verify(&modulus, &exponent, 256, &msg_buf, msg_len, &bad_signature, hash_algo)
+    if bad_ok == true {
+        return fail_base + 2
+    }
+    assert(bad_ok == false)
+
+    // ---- Negative case: the correct signature against a corrupted
+    // message must NOT verify either. ----
+    let wrong_msg_buf = rawbuf_new(message_str_len + 8)
+    let wrong_msg_len = write_str(&wrong_msg_buf, message_str)
+    if wrong_msg_len != message_str_len {
+        return fail_base + 3
+    }
+    let wrong_first = rawbuf_get(&wrong_msg_buf, 0)
+    rawbuf_set(&wrong_msg_buf, 0, wrong_first ^ 1)
+    let bad_msg_ok = rsa_pss_verify(&modulus, &exponent, 256, &wrong_msg_buf, wrong_msg_len, &signature, hash_algo)
+    if bad_msg_ok == true {
+        return fail_base + 4
+    }
+    assert(bad_msg_ok == false)
+
+    0
+}
+
+fn main() -> i64 with IO {
+    let r256 = check_one(
+        sha256_modulus_limbs(),
+        sha256_signature_limbs(),
+        "RSA-PSS independent test vector for Sounio TLS 1.3 rsa_pss_verify (SHA256)",
+        74,
+        RSA_PSS_HASH_SHA256,
+        10,
+    )
+    if r256 != 0 {
+        println("rsa_pss_verify_vectors: SHA-256 case failed")
+        print_int(r256)
+        return 1
+    }
+
+    let r384 = check_one(
+        sha384_modulus_limbs(),
+        sha384_signature_limbs(),
+        "RSA-PSS independent test vector for Sounio TLS 1.3 rsa_pss_verify (SHA384)",
+        74,
+        RSA_PSS_HASH_SHA384,
+        20,
+    )
+    if r384 != 0 {
+        println("rsa_pss_verify_vectors: SHA-384 case failed")
+        print_int(r384)
+        return 1
+    }
+
+    println("rsa_pss_verify_vectors: valid signatures accepted, corrupted signatures/messages rejected")
+    return 0
+}

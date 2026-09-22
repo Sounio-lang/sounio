@@ -1,0 +1,998 @@
+//! stdlib/crypto/x25519.sio — X25519 field arithmetic (RFC 7748), part 1 of 2.
+//!
+//! This file implements ONLY GF(2^255-19) field-element arithmetic: the
+//! primitive `FieldElement` add/sub/mul/sqr/invert/cswap/from_bytes/to_bytes
+//! operations that the Montgomery ladder (Task 3, appended later to this
+//! same file) is built on top of. No ladder, no scalar clamping.
+//!
+//! VISIBILITY (deviation from this task's own plan, recorded here
+//! deliberately): the plan describes these primitives as "file-private,
+//! no `pub`", reasoning that only Task 3 (in this same file) needs them.
+//! That is true in the shipped product, but this task's OWN Step 1 test
+//! (`tests/run-pass/x25519_field_arithmetic.sio`) lives in a different
+//! module and calls them via `use crypto::x25519::*` -- and Madaros's
+//! module-visibility check (E175, "function is private in its defining
+//! module") rejects that unless the callee is `pub`. Verified directly:
+//! compiling the test against a non-`pub` version of this file fails with
+//! ten distinct E175 diagnostics, one per cross-module call site. Since a
+//! task that cannot be tested is not verifiably correct, and correctness
+//! outranks the letter of a plan document, every function this task's
+//! brief lists as an interface (`fe_zero`, `fe_one`, `fe_from_bytes`,
+//! `fe_to_bytes`, `fe_add`, `fe_sub`, `fe_mul`, `fe_sqr`, `fe_invert`,
+//! `fe_cswap`) is `pub` here. Pure internal helpers with no external
+//! caller (`fe_load3`, `fe_load4`, `fe_reduce`) remain non-`pub`.
+//!
+//! REPRESENTATION: a field element is 10 signed `i64` limbs in radix
+//! 2^25.5 -- limbs[0,2,4,6,8] carry a nominal weight of 2^0, 2^51, 2^102,
+//! 2^153, 2^204 respectively at 26 bits each, and limbs[1,3,5,7,9] carry a
+//! nominal weight of 2^26, 2^77, 2^128, 2^179, 2^230 respectively at 25
+//! bits each (i.e. limb i's bit position is floor(i*51/2), alternating
+//! 26-bit/25-bit widths so that 5*26 + 5*25 = 255 bits total). This exact
+//! layout, and every algorithm below (`fe_from_bytes`, `fe_to_bytes`'s
+//! internal `fe_reduce`, `fe_mul`, `fe_sqr`, `fe_invert`'s addition chain,
+//! `fe_cswap`) is a direct, line-by-line transliteration of the public
+//! domain "ref10" curve25519/ed25519 field-element implementation
+//! (originally by Adam Langley / djb's SUPERCOP `ref10`), cross-checked
+//! against libsodium's copy of that exact code on 2026-08-25:
+//!   - frombytes/tobytes+reduce: libsodium
+//!     src/libsodium/crypto_core/ed25519/ref10/fe_25_5/fe.h
+//!     (`fe25519_frombytes`, `fe25519_reduce`, `fe25519_tobytes`)
+//!   - add/sub/cswap: libsodium
+//!     src/libsodium/include/sodium/private/ed25519_ref10_fe_25_5.h
+//!     (`fe25519_add`, `fe25519_sub`, `fe25519_cswap`)
+//!   - mul/sqr: same file, `fe25519_mul` / `fe25519_sq`
+//!   - invert addition chain: libsodium
+//!     src/libsodium/crypto_core/ed25519/ref10/ed25519_ref10.c,
+//!     `fe25519_invert` (the exponent is the public constant p-2, so this
+//!     fixed sequence of squarings/multiplies is not a secret-dependent
+//!     branch -- see that function's own header comment)
+//! fetched and read in full on 2026-08-25 specifically to eliminate the
+//! transcription risk this plan's own brief calls out (this project's
+//! Poly1305 implementation had a real, subtle, RFC-vector-invisible
+//! carry-propagation bug; wide-limb field arithmetic is the same risk
+//! class). Every numeric constant and operation ordering below matches
+//! that verified source exactly; the only translation performed is C ->
+//! Sounio syntax (`int32_t`/`int64_t` -> `i64` throughout -- see the
+//! overflow-margin note below for why dropping the 32-bit truncation the
+//! C reference uses for storage efficiency is safe here).
+//!
+//! OVERFLOW MARGIN (Finding 11: native i64 right-shift/divide/modulo break
+//! whenever bit 63 is set -- every intermediate value here must stay
+//! provably clear of that). The reference C implementation's own inline
+//! comments in `fe25519_mul`/`fe25519_sq` prove the widest intermediate
+//! accumulator (before the first carry-propagation pass) is bounded by
+//! `1.7 * 2^60` in the worst case (e.g. `h2`'s ten summed cross-products
+//! in `fe25519_mul`) -- `1.7 * 2^60 ~= 2^60.77`, so the margin below the
+//! 2^63 danger threshold is `2^63 / 2^60.77 ~= 2^2.23`, i.e. about 2.2-2.3
+//! bits (~4.7x) of headroom, comfortably clear of bit 63 ever being set,
+//! nowhere near overflowing even a *signed* 63-bit range, let alone
+//! wrapping. The reference implementation stores limbs as `int32_t`
+//! between calls purely to save memory on 32-bit targets; every limb
+//! value is proven small enough (nominal 25/26-bit magnitude, occasionally
+//! "unreduced"/negative in this balanced representation but never outside
+//! roughly +-2^27) to survive that 32-bit round-trip losslessly. Since
+//! this file has no such memory constraint, `FieldElement.limbs` stores
+//! `i64` throughout and never truncates to a narrower type -- mathematically
+//! identical to the reference, strictly more headroom, and one less place
+//! a translation error could hide.
+//!
+//! This is NOT a constant-time implementation in the sense of guarding
+//! against cache/branch timing side channels in general (matching this
+//! branch's own stated no-constant-time-requirement precedent in
+//! `stdlib/bignum/bigint.sio` and `stdlib/crypto/poly1305.sio`) -- EXCEPT
+//! for `fe_cswap`, which is deliberately implemented with a branchless
+//! XOR-mask swap (never `if swap { .. } else { .. }`) because Task 3's
+//! Montgomery ladder swaps operands based on secret scalar bits, and a
+//! branch there would leak the scalar through branch-prediction timing
+//! even in an otherwise non-constant-time file. `fe_invert`'s addition
+//! chain is a fixed sequence of squarings/multiplies with no
+//! exponent-dependent branch either (the exponent p-2 is a public
+//! constant), but that is a `for`-loop-count property already implicit in
+//! it being a straight-line, undata-dependent code path.
+
+// ============================================================================
+// NOT PUBLIC API. `FieldElement` and every `fe_*` function below are `pub`
+// ONLY because Madaros's cross-module visibility check (E175) requires it --
+// see the file header's "VISIBILITY (deviation ...)" note for the full
+// forensic explanation. They remain internal implementation details of this
+// module's Montgomery-ladder X25519 implementation, not a supported curve-
+// arithmetic API for other code to build on.
+//
+// Do NOT call these directly from outside this file. In particular, hand-
+// rolling curve operations from `fe_*` primitives skips the mandatory
+// low-order-point / all-zero-output rejection that lives ONLY inside
+// `x25519()` -- bypassing it silently reintroduces exactly the
+// small-subgroup / all-zero shared-secret failure mode RFC 7748 requires
+// implementations to reject. The only supported entry points for
+// consumers outside this file are:
+//   - `x25519_clamp`
+//   - `x25519_base_point_mul`
+//   - `x25519`
+// ============================================================================
+
+// GF(2^255-19) field element in radix-2^25.5 (10 limbs, alternating
+// 26-bit and 25-bit limbs -- limbs[0,2,4,6,8] hold up to 2^26-1,
+// limbs[1,3,5,7,9] hold up to 2^25-1 in canonical form (transient
+// intermediate values may be negative or briefly larger -- a "balanced"
+// representation -- see file header for the overflow-margin proof).
+struct FieldElement {
+    limbs: [i64; 10],
+}
+
+pub fn fe_zero() -> FieldElement {
+    FieldElement { limbs: [0;10] }
+}
+
+pub fn fe_one() -> FieldElement {
+    var f = fe_zero()
+    f.limbs[0] = 1
+    f
+}
+
+// ---------------------------------------------------------------------
+// Byte-array little-endian loaders (matching the reference's load_3/
+// load_4 helpers). `off` is a runtime i64 byte offset into a 32-byte
+// array; each load reads 3 or 4 bytes and never reads past index 31
+// for any call site used below (largest offset used is 29, +3 = 31).
+// ---------------------------------------------------------------------
+
+fn fe_load4(b: &[u8;32], off: i64) -> i64 {
+    (b[off as usize] as i64)
+        | ((b[(off + 1) as usize] as i64) << 8)
+        | ((b[(off + 2) as usize] as i64) << 16)
+        | ((b[(off + 3) as usize] as i64) << 24)
+}
+
+fn fe_load3(b: &[u8;32], off: i64) -> i64 {
+    (b[off as usize] as i64)
+        | ((b[(off + 1) as usize] as i64) << 8)
+        | ((b[(off + 2) as usize] as i64) << 16)
+}
+
+// fe_from_bytes: 32 little-endian bytes -> 10 limbs. Ignores the top bit
+// of the 256-bit input (RFC 7748's own encoding rule for u-coordinates:
+// "implementations MUST mask the most significant bit in the final byte");
+// that masking happens via the `& 8388607` (2^23-1) below, which keeps
+// only 23 of h9's 24 raw bits before its own `<< 2`, discarding bit 255.
+pub fn fe_from_bytes(b: &[u8;32]) -> FieldElement {
+    var h0 = fe_load4(b, 0)
+    var h1 = fe_load3(b, 4) << 6
+    var h2 = fe_load3(b, 7) << 5
+    var h3 = fe_load3(b, 10) << 3
+    var h4 = fe_load3(b, 13) << 2
+    var h5 = fe_load4(b, 16)
+    var h6 = fe_load3(b, 20) << 7
+    var h7 = fe_load3(b, 23) << 5
+    var h8 = fe_load3(b, 26) << 4
+    var h9 = (fe_load3(b, 29) & 8388607) << 2
+
+    // Carry-propagation pass (odd limbs first, then even limbs), folding
+    // any overflow out of limb 9 back into limb 0 via the field identity
+    // 2^255 = 19 (mod p) -- multiplying the limb-9 carry by 19 before
+    // adding it into h0 is exactly that fold.
+    var carry9 = (h9 + (1 << 24)) >> 25
+    h0 = h0 + carry9 * 19
+    h9 = h9 - (carry9 << 25)
+    var carry1 = (h1 + (1 << 24)) >> 25
+    h2 = h2 + carry1
+    h1 = h1 - (carry1 << 25)
+    var carry3 = (h3 + (1 << 24)) >> 25
+    h4 = h4 + carry3
+    h3 = h3 - (carry3 << 25)
+    var carry5 = (h5 + (1 << 24)) >> 25
+    h6 = h6 + carry5
+    h5 = h5 - (carry5 << 25)
+    var carry7 = (h7 + (1 << 24)) >> 25
+    h8 = h8 + carry7
+    h7 = h7 - (carry7 << 25)
+
+    var carry0 = (h0 + (1 << 25)) >> 26
+    h1 = h1 + carry0
+    h0 = h0 - (carry0 << 26)
+    var carry2 = (h2 + (1 << 25)) >> 26
+    h3 = h3 + carry2
+    h2 = h2 - (carry2 << 26)
+    var carry4 = (h4 + (1 << 25)) >> 26
+    h5 = h5 + carry4
+    h4 = h4 - (carry4 << 26)
+    var carry6 = (h6 + (1 << 25)) >> 26
+    h7 = h7 + carry6
+    h6 = h6 - (carry6 << 26)
+    var carry8 = (h8 + (1 << 25)) >> 26
+    h9 = h9 + carry8
+    h8 = h8 - (carry8 << 26)
+
+    var out: [i64;10] = [0;10]
+    out[0] = h0
+    out[1] = h1
+    out[2] = h2
+    out[3] = h3
+    out[4] = h4
+    out[5] = h5
+    out[6] = h6
+    out[7] = h7
+    out[8] = h8
+    out[9] = h9
+    FieldElement { limbs: out }
+}
+
+// fe_reduce: fully reduce a (possibly non-canonical/"balanced", i.e.
+// containing negative or over-wide limbs) field element to the unique
+// representative in [0, p) with every limb in canonical positive range,
+// via the standard ref10 technique: estimate the quotient q = floor(h/p)
+// by successive division-by-limb-radix approximations, subtract q*p
+// (using p = 2^255-19, so subtracting q*2^255 is free -- it just doesn't
+// happen -- and adding 19*q to h0 accounts for the -19*q term), then
+// propagate carries so every limb lands in its canonical positive range.
+// This is the exact final-reduction step that `fe_to_bytes` needs and
+// that this file's own header calls out as the step a Poly1305-style
+// "missing final carry" bug would hide in.
+fn fe_reduce(f: &FieldElement) -> [i64;10] {
+    var h0 = f.limbs[0]
+    var h1 = f.limbs[1]
+    var h2 = f.limbs[2]
+    var h3 = f.limbs[3]
+    var h4 = f.limbs[4]
+    var h5 = f.limbs[5]
+    var h6 = f.limbs[6]
+    var h7 = f.limbs[7]
+    var h8 = f.limbs[8]
+    var h9 = f.limbs[9]
+
+    var q = (19 * h9 + (1 << 24)) >> 25
+    q = (h0 + q) >> 26
+    q = (h1 + q) >> 25
+    q = (h2 + q) >> 26
+    q = (h3 + q) >> 25
+    q = (h4 + q) >> 26
+    q = (h5 + q) >> 25
+    q = (h6 + q) >> 26
+    q = (h7 + q) >> 25
+    q = (h8 + q) >> 26
+    q = (h9 + q) >> 25
+
+    // h - (2^255-19)*q == h - 2^255*q + 19*q; the -2^255*q term above and
+    // below is realised implicitly (it never needs to be materialised)
+    // because q was chosen so this leaves a value in [0, 2^255-20].
+    h0 = h0 + 19 * q
+
+    var carry0 = h0 >> 26
+    h1 = h1 + carry0
+    h0 = h0 - (carry0 << 26)
+    var carry1 = h1 >> 25
+    h2 = h2 + carry1
+    h1 = h1 - (carry1 << 25)
+    var carry2 = h2 >> 26
+    h3 = h3 + carry2
+    h2 = h2 - (carry2 << 26)
+    var carry3 = h3 >> 25
+    h4 = h4 + carry3
+    h3 = h3 - (carry3 << 25)
+    var carry4 = h4 >> 26
+    h5 = h5 + carry4
+    h4 = h4 - (carry4 << 26)
+    var carry5 = h5 >> 25
+    h6 = h6 + carry5
+    h5 = h5 - (carry5 << 25)
+    var carry6 = h6 >> 26
+    h7 = h7 + carry6
+    h6 = h6 - (carry6 << 26)
+    var carry7 = h7 >> 25
+    h8 = h8 + carry7
+    h7 = h7 - (carry7 << 25)
+    var carry8 = h8 >> 26
+    h9 = h9 + carry8
+    h8 = h8 - (carry8 << 26)
+    var carry9 = h9 >> 25
+    h9 = h9 - (carry9 << 25)
+
+    var out: [i64;10] = [0;10]
+    out[0] = h0
+    out[1] = h1
+    out[2] = h2
+    out[3] = h3
+    out[4] = h4
+    out[5] = h5
+    out[6] = h6
+    out[7] = h7
+    out[8] = h8
+    out[9] = h9
+    out
+}
+
+// fe_to_bytes: fully reduce (via fe_reduce above), then pack the 10
+// canonical limbs into 32 little-endian bytes by OR-ing adjacent limbs'
+// overlapping bit ranges together. Every `& 255` below truncates to a
+// byte; since `(x & 255) | (y & 255) == (x | y) & 255` bitwise, this is
+// exactly equivalent to the reference's "compute the OR, then truncate
+// the whole thing to unsigned char" -- no information is lost differently
+// than the reference.
+pub fn fe_to_bytes(fe: &FieldElement) -> [u8;32] {
+    let t = fe_reduce(fe)
+    var s: [u8;32] = [0;32]
+    s[0] = (t[0] & 255) as u8
+    s[1] = ((t[0] >> 8) & 255) as u8
+    s[2] = ((t[0] >> 16) & 255) as u8
+    s[3] = (((t[0] >> 24) & 255) | ((t[1] << 2) & 255)) as u8
+    s[4] = ((t[1] >> 6) & 255) as u8
+    s[5] = ((t[1] >> 14) & 255) as u8
+    s[6] = (((t[1] >> 22) & 255) | ((t[2] << 3) & 255)) as u8
+    s[7] = ((t[2] >> 5) & 255) as u8
+    s[8] = ((t[2] >> 13) & 255) as u8
+    s[9] = (((t[2] >> 21) & 255) | ((t[3] << 5) & 255)) as u8
+    s[10] = ((t[3] >> 3) & 255) as u8
+    s[11] = ((t[3] >> 11) & 255) as u8
+    s[12] = (((t[3] >> 19) & 255) | ((t[4] << 6) & 255)) as u8
+    s[13] = ((t[4] >> 2) & 255) as u8
+    s[14] = ((t[4] >> 10) & 255) as u8
+    s[15] = ((t[4] >> 18) & 255) as u8
+    s[16] = (t[5] & 255) as u8
+    s[17] = ((t[5] >> 8) & 255) as u8
+    s[18] = ((t[5] >> 16) & 255) as u8
+    s[19] = (((t[5] >> 24) & 255) | ((t[6] << 1) & 255)) as u8
+    s[20] = ((t[6] >> 7) & 255) as u8
+    s[21] = ((t[6] >> 15) & 255) as u8
+    s[22] = (((t[6] >> 23) & 255) | ((t[7] << 3) & 255)) as u8
+    s[23] = ((t[7] >> 5) & 255) as u8
+    s[24] = ((t[7] >> 13) & 255) as u8
+    s[25] = (((t[7] >> 21) & 255) | ((t[8] << 4) & 255)) as u8
+    s[26] = ((t[8] >> 4) & 255) as u8
+    s[27] = ((t[8] >> 12) & 255) as u8
+    s[28] = (((t[8] >> 20) & 255) | ((t[9] << 6) & 255)) as u8
+    s[29] = ((t[9] >> 2) & 255) as u8
+    s[30] = ((t[9] >> 10) & 255) as u8
+    s[31] = ((t[9] >> 18) & 255) as u8
+    s
+}
+
+// fe_add: plain limb-wise addition, no reduction/carry pass. Safe to call
+// a handful of times back-to-back before the next fe_mul/fe_sqr (whose
+// own preconditions in the reference tolerate limbs up to ~1.65*2^26 --
+// comfortably more than the ~1.1x growth one addition produces); a long
+// chain of fe_add calls with no intervening fe_mul/fe_sqr/fe_reduce
+// would eventually need an explicit carry pass, but no such chain exists
+// in this file (Task 3's ladder is expected to interleave mul/sqr calls
+// per the same reference algorithm this file was transliterated from).
+pub fn fe_add(a: &FieldElement, b: &FieldElement) -> FieldElement {
+    var out: [i64;10] = [0;10]
+    var i: i64 = 0
+    while i < 10 {
+        out[i as usize] = a.limbs[i as usize] + b.limbs[i as usize]
+        i = i + 1
+    }
+    FieldElement { limbs: out }
+}
+
+// fe_sub: plain limb-wise subtraction. Unlike fe_add, the result can have
+// negative limbs even when both inputs are canonical (e.g. subtracting a
+// larger limb from a smaller one) -- this is expected and fine for this
+// balanced representation: every consumer (fe_mul, fe_sqr, fe_reduce)
+// tolerates and correctly handles negative input limbs, since Sounio's
+// `>>` on i64 is a sign-extending arithmetic shift (independently
+// verified: `-100i64 >> 3 == -13`, `-1i64 >> 1 == -1`, matching C's
+// twos-complement arithmetic-shift semantics that the reference
+// algorithm's carry-propagation bias trick, `(h + bias) >> shift`,
+// depends on for correct rounding toward -infinity on negative h).
+pub fn fe_sub(a: &FieldElement, b: &FieldElement) -> FieldElement {
+    var out: [i64;10] = [0;10]
+    var i: i64 = 0
+    while i < 10 {
+        out[i as usize] = a.limbs[i as usize] - b.limbs[i as usize]
+        i = i + 1
+    }
+    FieldElement { limbs: out }
+}
+
+// fe_mul: full schoolbook 10x10 limb product with the field's 2^255=19
+// (mod p) reduction identity folding high-order terms back down, then a
+// carry-propagation pass. Every `g*_19`/`f*_2` precomputed scalar below
+// stays far under i64's 63-bit danger zone (largest is `19 * g` for a
+// limb `g` under ~1.65*2^26, i.e. under 2^32); every 64-bit cross-product
+// term (`f_i * g_j` variants) is a 32-bit-ish value times another
+//32-bit-ish value, so under 2^64 trivially and in fact under 2^57 in the
+// worst case; each `h0..h9` accumulator sums ten such terms, and the
+// reference's own inline analysis (reproduced in the file header) proves
+// the worst case (h2, before any carry pass) is bounded by `1.7*2^60`
+// (`~= 2^60.77`) -- about 2.2-2.3 bits (~4.7x) of headroom below the
+// 2^63 danger threshold, so no value in this function ever has bit 63
+// set.
+pub fn fe_mul(a: &FieldElement, b: &FieldElement) -> FieldElement {
+    let f0 = a.limbs[0]
+    let f1 = a.limbs[1]
+    let f2 = a.limbs[2]
+    let f3 = a.limbs[3]
+    let f4 = a.limbs[4]
+    let f5 = a.limbs[5]
+    let f6 = a.limbs[6]
+    let f7 = a.limbs[7]
+    let f8 = a.limbs[8]
+    let f9 = a.limbs[9]
+
+    let g0 = b.limbs[0]
+    let g1 = b.limbs[1]
+    let g2 = b.limbs[2]
+    let g3 = b.limbs[3]
+    let g4 = b.limbs[4]
+    let g5 = b.limbs[5]
+    let g6 = b.limbs[6]
+    let g7 = b.limbs[7]
+    let g8 = b.limbs[8]
+    let g9 = b.limbs[9]
+
+    let g1_19 = 19 * g1
+    let g2_19 = 19 * g2
+    let g3_19 = 19 * g3
+    let g4_19 = 19 * g4
+    let g5_19 = 19 * g5
+    let g6_19 = 19 * g6
+    let g7_19 = 19 * g7
+    let g8_19 = 19 * g8
+    let g9_19 = 19 * g9
+    let f1_2 = 2 * f1
+    let f3_2 = 2 * f3
+    let f5_2 = 2 * f5
+    let f7_2 = 2 * f7
+    let f9_2 = 2 * f9
+
+    let f0g0 = f0 * g0
+    let f0g1 = f0 * g1
+    let f0g2 = f0 * g2
+    let f0g3 = f0 * g3
+    let f0g4 = f0 * g4
+    let f0g5 = f0 * g5
+    let f0g6 = f0 * g6
+    let f0g7 = f0 * g7
+    let f0g8 = f0 * g8
+    let f0g9 = f0 * g9
+    let f1g0 = f1 * g0
+    let f1g1_2 = f1_2 * g1
+    let f1g2 = f1 * g2
+    let f1g3_2 = f1_2 * g3
+    let f1g4 = f1 * g4
+    let f1g5_2 = f1_2 * g5
+    let f1g6 = f1 * g6
+    let f1g7_2 = f1_2 * g7
+    let f1g8 = f1 * g8
+    let f1g9_38 = f1_2 * g9_19
+    let f2g0 = f2 * g0
+    let f2g1 = f2 * g1
+    let f2g2 = f2 * g2
+    let f2g3 = f2 * g3
+    let f2g4 = f2 * g4
+    let f2g5 = f2 * g5
+    let f2g6 = f2 * g6
+    let f2g7 = f2 * g7
+    let f2g8_19 = f2 * g8_19
+    let f2g9_19 = f2 * g9_19
+    let f3g0 = f3 * g0
+    let f3g1_2 = f3_2 * g1
+    let f3g2 = f3 * g2
+    let f3g3_2 = f3_2 * g3
+    let f3g4 = f3 * g4
+    let f3g5_2 = f3_2 * g5
+    let f3g6 = f3 * g6
+    let f3g7_38 = f3_2 * g7_19
+    let f3g8_19 = f3 * g8_19
+    let f3g9_38 = f3_2 * g9_19
+    let f4g0 = f4 * g0
+    let f4g1 = f4 * g1
+    let f4g2 = f4 * g2
+    let f4g3 = f4 * g3
+    let f4g4 = f4 * g4
+    let f4g5 = f4 * g5
+    let f4g6_19 = f4 * g6_19
+    let f4g7_19 = f4 * g7_19
+    let f4g8_19 = f4 * g8_19
+    let f4g9_19 = f4 * g9_19
+    let f5g0 = f5 * g0
+    let f5g1_2 = f5_2 * g1
+    let f5g2 = f5 * g2
+    let f5g3_2 = f5_2 * g3
+    let f5g4 = f5 * g4
+    let f5g5_38 = f5_2 * g5_19
+    let f5g6_19 = f5 * g6_19
+    let f5g7_38 = f5_2 * g7_19
+    let f5g8_19 = f5 * g8_19
+    let f5g9_38 = f5_2 * g9_19
+    let f6g0 = f6 * g0
+    let f6g1 = f6 * g1
+    let f6g2 = f6 * g2
+    let f6g3 = f6 * g3
+    let f6g4_19 = f6 * g4_19
+    let f6g5_19 = f6 * g5_19
+    let f6g6_19 = f6 * g6_19
+    let f6g7_19 = f6 * g7_19
+    let f6g8_19 = f6 * g8_19
+    let f6g9_19 = f6 * g9_19
+    let f7g0 = f7 * g0
+    let f7g1_2 = f7_2 * g1
+    let f7g2 = f7 * g2
+    let f7g3_38 = f7_2 * g3_19
+    let f7g4_19 = f7 * g4_19
+    let f7g5_38 = f7_2 * g5_19
+    let f7g6_19 = f7 * g6_19
+    let f7g7_38 = f7_2 * g7_19
+    let f7g8_19 = f7 * g8_19
+    let f7g9_38 = f7_2 * g9_19
+    let f8g0 = f8 * g0
+    let f8g1 = f8 * g1
+    let f8g2_19 = f8 * g2_19
+    let f8g3_19 = f8 * g3_19
+    let f8g4_19 = f8 * g4_19
+    let f8g5_19 = f8 * g5_19
+    let f8g6_19 = f8 * g6_19
+    let f8g7_19 = f8 * g7_19
+    let f8g8_19 = f8 * g8_19
+    let f8g9_19 = f8 * g9_19
+    let f9g0 = f9 * g0
+    let f9g1_38 = f9_2 * g1_19
+    let f9g2_19 = f9 * g2_19
+    let f9g3_38 = f9_2 * g3_19
+    let f9g4_19 = f9 * g4_19
+    let f9g5_38 = f9_2 * g5_19
+    let f9g6_19 = f9 * g6_19
+    let f9g7_38 = f9_2 * g7_19
+    let f9g8_19 = f9 * g8_19
+    let f9g9_38 = f9_2 * g9_19
+
+    var h0 = f0g0 + f1g9_38 + f2g8_19 + f3g7_38 + f4g6_19 + f5g5_38 + f6g4_19 + f7g3_38 + f8g2_19 + f9g1_38
+    var h1 = f0g1 + f1g0 + f2g9_19 + f3g8_19 + f4g7_19 + f5g6_19 + f6g5_19 + f7g4_19 + f8g3_19 + f9g2_19
+    var h2 = f0g2 + f1g1_2 + f2g0 + f3g9_38 + f4g8_19 + f5g7_38 + f6g6_19 + f7g5_38 + f8g4_19 + f9g3_38
+    var h3 = f0g3 + f1g2 + f2g1 + f3g0 + f4g9_19 + f5g8_19 + f6g7_19 + f7g6_19 + f8g5_19 + f9g4_19
+    var h4 = f0g4 + f1g3_2 + f2g2 + f3g1_2 + f4g0 + f5g9_38 + f6g8_19 + f7g7_38 + f8g6_19 + f9g5_38
+    var h5 = f0g5 + f1g4 + f2g3 + f3g2 + f4g1 + f5g0 + f6g9_19 + f7g8_19 + f8g7_19 + f9g6_19
+    var h6 = f0g6 + f1g5_2 + f2g4 + f3g3_2 + f4g2 + f5g1_2 + f6g0 + f7g9_38 + f8g8_19 + f9g7_38
+    var h7 = f0g7 + f1g6 + f2g5 + f3g4 + f4g3 + f5g2 + f6g1 + f7g0 + f8g9_19 + f9g8_19
+    var h8 = f0g8 + f1g7_2 + f2g6 + f3g5_2 + f4g4 + f5g3_2 + f6g2 + f7g1_2 + f8g0 + f9g9_38
+    var h9 = f0g9 + f1g8 + f2g7 + f3g6 + f4g5 + f5g4 + f6g3 + f7g2 + f8g1 + f9g0
+
+    var carry0 = (h0 + (1 << 25)) >> 26
+    h1 = h1 + carry0
+    h0 = h0 - (carry0 << 26)
+    var carry4 = (h4 + (1 << 25)) >> 26
+    h5 = h5 + carry4
+    h4 = h4 - (carry4 << 26)
+
+    var carry1 = (h1 + (1 << 24)) >> 25
+    h2 = h2 + carry1
+    h1 = h1 - (carry1 << 25)
+    var carry5 = (h5 + (1 << 24)) >> 25
+    h6 = h6 + carry5
+    h5 = h5 - (carry5 << 25)
+
+    var carry2 = (h2 + (1 << 25)) >> 26
+    h3 = h3 + carry2
+    h2 = h2 - (carry2 << 26)
+    var carry6 = (h6 + (1 << 25)) >> 26
+    h7 = h7 + carry6
+    h6 = h6 - (carry6 << 26)
+
+    var carry3 = (h3 + (1 << 24)) >> 25
+    h4 = h4 + carry3
+    h3 = h3 - (carry3 << 25)
+    var carry7 = (h7 + (1 << 24)) >> 25
+    h8 = h8 + carry7
+    h7 = h7 - (carry7 << 25)
+
+    carry4 = (h4 + (1 << 25)) >> 26
+    h5 = h5 + carry4
+    h4 = h4 - (carry4 << 26)
+    var carry8 = (h8 + (1 << 25)) >> 26
+    h9 = h9 + carry8
+    h8 = h8 - (carry8 << 26)
+
+    var carry9 = (h9 + (1 << 24)) >> 25
+    h0 = h0 + carry9 * 19
+    h9 = h9 - (carry9 << 25)
+
+    carry0 = (h0 + (1 << 25)) >> 26
+    h1 = h1 + carry0
+    h0 = h0 - (carry0 << 26)
+
+    var out: [i64;10] = [0;10]
+    out[0] = h0
+    out[1] = h1
+    out[2] = h2
+    out[3] = h3
+    out[4] = h4
+    out[5] = h5
+    out[6] = h6
+    out[7] = h7
+    out[8] = h8
+    out[9] = h9
+    FieldElement { limbs: out }
+}
+
+// fe_sqr: the standard a*b==b*a-symmetric optimization of fe_mul for the
+// a==b case, halving the number of distinct limb products versus a naive
+// fe_mul(a,a) call. Overflow margin is the same class of proof as
+// fe_mul's (same reference source, same worst-case ~1.7*2^60 bound before
+// the first carry pass) -- comfortably clear of the 2^63 danger zone.
+// Verified against fe_mul(x,x) by this file's own test
+// (tests/run-pass/x25519_field_arithmetic.sio) and independently
+// cross-checked via the (a+b)^2 = a^2+b^2+2ab structural identity in
+// tests/run-pass/x25519_field_arithmetic_cross_check.sio.
+pub fn fe_sqr(a: &FieldElement) -> FieldElement {
+    let f0 = a.limbs[0]
+    let f1 = a.limbs[1]
+    let f2 = a.limbs[2]
+    let f3 = a.limbs[3]
+    let f4 = a.limbs[4]
+    let f5 = a.limbs[5]
+    let f6 = a.limbs[6]
+    let f7 = a.limbs[7]
+    let f8 = a.limbs[8]
+    let f9 = a.limbs[9]
+
+    let f0_2 = 2 * f0
+    let f1_2 = 2 * f1
+    let f2_2 = 2 * f2
+    let f3_2 = 2 * f3
+    let f4_2 = 2 * f4
+    let f5_2 = 2 * f5
+    let f6_2 = 2 * f6
+    let f7_2 = 2 * f7
+    let f5_38 = 38 * f5
+    let f6_19 = 19 * f6
+    let f7_38 = 38 * f7
+    let f8_19 = 19 * f8
+    let f9_38 = 38 * f9
+
+    let f0f0 = f0 * f0
+    let f0f1_2 = f0_2 * f1
+    let f0f2_2 = f0_2 * f2
+    let f0f3_2 = f0_2 * f3
+    let f0f4_2 = f0_2 * f4
+    let f0f5_2 = f0_2 * f5
+    let f0f6_2 = f0_2 * f6
+    let f0f7_2 = f0_2 * f7
+    let f0f8_2 = f0_2 * f8
+    let f0f9_2 = f0_2 * f9
+    let f1f1_2 = f1_2 * f1
+    let f1f2_2 = f1_2 * f2
+    let f1f3_4 = f1_2 * f3_2
+    let f1f4_2 = f1_2 * f4
+    let f1f5_4 = f1_2 * f5_2
+    let f1f6_2 = f1_2 * f6
+    let f1f7_4 = f1_2 * f7_2
+    let f1f8_2 = f1_2 * f8
+    let f1f9_76 = f1_2 * f9_38
+    let f2f2 = f2 * f2
+    let f2f3_2 = f2_2 * f3
+    let f2f4_2 = f2_2 * f4
+    let f2f5_2 = f2_2 * f5
+    let f2f6_2 = f2_2 * f6
+    let f2f7_2 = f2_2 * f7
+    let f2f8_38 = f2_2 * f8_19
+    let f2f9_38 = f2 * f9_38
+    let f3f3_2 = f3_2 * f3
+    let f3f4_2 = f3_2 * f4
+    let f3f5_4 = f3_2 * f5_2
+    let f3f6_2 = f3_2 * f6
+    let f3f7_76 = f3_2 * f7_38
+    let f3f8_38 = f3_2 * f8_19
+    let f3f9_76 = f3_2 * f9_38
+    let f4f4 = f4 * f4
+    let f4f5_2 = f4_2 * f5
+    let f4f6_38 = f4_2 * f6_19
+    let f4f7_38 = f4 * f7_38
+    let f4f8_38 = f4_2 * f8_19
+    let f4f9_38 = f4 * f9_38
+    let f5f5_38 = f5 * f5_38
+    let f5f6_38 = f5_2 * f6_19
+    let f5f7_76 = f5_2 * f7_38
+    let f5f8_38 = f5_2 * f8_19
+    let f5f9_76 = f5_2 * f9_38
+    let f6f6_19 = f6 * f6_19
+    let f6f7_38 = f6 * f7_38
+    let f6f8_38 = f6_2 * f8_19
+    let f6f9_38 = f6 * f9_38
+    let f7f7_38 = f7 * f7_38
+    let f7f8_38 = f7_2 * f8_19
+    let f7f9_76 = f7_2 * f9_38
+    let f8f8_19 = f8 * f8_19
+    let f8f9_38 = f8 * f9_38
+    let f9f9_38 = f9 * f9_38
+
+    var h0 = f0f0 + f1f9_76 + f2f8_38 + f3f7_76 + f4f6_38 + f5f5_38
+    var h1 = f0f1_2 + f2f9_38 + f3f8_38 + f4f7_38 + f5f6_38
+    var h2 = f0f2_2 + f1f1_2 + f3f9_76 + f4f8_38 + f5f7_76 + f6f6_19
+    var h3 = f0f3_2 + f1f2_2 + f4f9_38 + f5f8_38 + f6f7_38
+    var h4 = f0f4_2 + f1f3_4 + f2f2 + f5f9_76 + f6f8_38 + f7f7_38
+    var h5 = f0f5_2 + f1f4_2 + f2f3_2 + f6f9_38 + f7f8_38
+    var h6 = f0f6_2 + f1f5_4 + f2f4_2 + f3f3_2 + f7f9_76 + f8f8_19
+    var h7 = f0f7_2 + f1f6_2 + f2f5_2 + f3f4_2 + f8f9_38
+    var h8 = f0f8_2 + f1f7_4 + f2f6_2 + f3f5_4 + f4f4 + f9f9_38
+    var h9 = f0f9_2 + f1f8_2 + f2f7_2 + f3f6_2 + f4f5_2
+
+    var carry0 = (h0 + (1 << 25)) >> 26
+    h1 = h1 + carry0
+    h0 = h0 - (carry0 << 26)
+    var carry4 = (h4 + (1 << 25)) >> 26
+    h5 = h5 + carry4
+    h4 = h4 - (carry4 << 26)
+
+    var carry1 = (h1 + (1 << 24)) >> 25
+    h2 = h2 + carry1
+    h1 = h1 - (carry1 << 25)
+    var carry5 = (h5 + (1 << 24)) >> 25
+    h6 = h6 + carry5
+    h5 = h5 - (carry5 << 25)
+
+    var carry2 = (h2 + (1 << 25)) >> 26
+    h3 = h3 + carry2
+    h2 = h2 - (carry2 << 26)
+    var carry6 = (h6 + (1 << 25)) >> 26
+    h7 = h7 + carry6
+    h6 = h6 - (carry6 << 26)
+
+    var carry3 = (h3 + (1 << 24)) >> 25
+    h4 = h4 + carry3
+    h3 = h3 - (carry3 << 25)
+    var carry7 = (h7 + (1 << 24)) >> 25
+    h8 = h8 + carry7
+    h7 = h7 - (carry7 << 25)
+
+    carry4 = (h4 + (1 << 25)) >> 26
+    h5 = h5 + carry4
+    h4 = h4 - (carry4 << 26)
+    var carry8 = (h8 + (1 << 25)) >> 26
+    h9 = h9 + carry8
+    h8 = h8 - (carry8 << 26)
+
+    var carry9 = (h9 + (1 << 24)) >> 25
+    h0 = h0 + carry9 * 19
+    h9 = h9 - (carry9 << 25)
+
+    carry0 = (h0 + (1 << 25)) >> 26
+    h1 = h1 + carry0
+    h0 = h0 - (carry0 << 26)
+
+    var out: [i64;10] = [0;10]
+    out[0] = h0
+    out[1] = h1
+    out[2] = h2
+    out[3] = h3
+    out[4] = h4
+    out[5] = h5
+    out[6] = h6
+    out[7] = h7
+    out[8] = h8
+    out[9] = h9
+    FieldElement { limbs: out }
+}
+
+// fe_invert: a^(p-2) mod p via a fixed addition-chain sequence of
+// fe_sqr/fe_mul calls (11 multiplies + 254 squarings total, arranged to
+// compute the exponent p-2 = 2^255-21 efficiently). p-2 is a PUBLIC
+// constant baked into the sequence of loop counts below (5, 10, 20, 11,
+// 50, 100, 51, 6 -- these are not data-dependent on the secret input
+// `a`), so this is a fixed straight-line computation, not a
+// general-purpose modexp loop that branches on exponent bits. Sequence
+// transcribed directly from libsodium's `fe25519_invert`
+// (src/libsodium/crypto_core/ed25519/ref10/ed25519_ref10.c), read in full
+// on 2026-08-25.
+pub fn fe_invert(a: &FieldElement) -> FieldElement {
+    var t0 = fe_sqr(a)
+    var t1 = fe_sqr(&t0)
+    t1 = fe_sqr(&t1)
+    t1 = fe_mul(a, &t1)
+    t0 = fe_mul(&t0, &t1)
+    var t2 = fe_sqr(&t0)
+    t1 = fe_mul(&t1, &t2)
+    t2 = fe_sqr(&t1)
+    var i: i64 = 1
+    while i < 5 {
+        t2 = fe_sqr(&t2)
+        i = i + 1
+    }
+    t1 = fe_mul(&t2, &t1)
+    t2 = fe_sqr(&t1)
+    i = 1
+    while i < 10 {
+        t2 = fe_sqr(&t2)
+        i = i + 1
+    }
+    t2 = fe_mul(&t2, &t1)
+    var t3 = fe_sqr(&t2)
+    i = 1
+    while i < 20 {
+        t3 = fe_sqr(&t3)
+        i = i + 1
+    }
+    t2 = fe_mul(&t3, &t2)
+    i = 1
+    while i < 11 {
+        t2 = fe_sqr(&t2)
+        i = i + 1
+    }
+    t1 = fe_mul(&t2, &t1)
+    t2 = fe_sqr(&t1)
+    i = 1
+    while i < 50 {
+        t2 = fe_sqr(&t2)
+        i = i + 1
+    }
+    t2 = fe_mul(&t2, &t1)
+    t3 = fe_sqr(&t2)
+    i = 1
+    while i < 100 {
+        t3 = fe_sqr(&t3)
+        i = i + 1
+    }
+    t2 = fe_mul(&t3, &t2)
+    i = 1
+    while i < 51 {
+        t2 = fe_sqr(&t2)
+        i = i + 1
+    }
+    t1 = fe_mul(&t2, &t1)
+    i = 1
+    while i < 6 {
+        t1 = fe_sqr(&t1)
+        i = i + 1
+    }
+    fe_mul(&t1, &t0)
+}
+
+// fe_cswap: constant-time conditional swap. `swap as i64` yields exactly
+// 1 or 0 (independently verified: `true as i64 == 1`, `false as i64 ==
+// 0`), so `mask = 0 - (swap as i64)` yields all-ones (-1, i.e. every bit
+// of the i64 set) when `swap` is true and all-zeros when false. Per-limb,
+// `diff = mask & (ai ^ bi)` is either `ai ^ bi` (swap) or `0` (no swap);
+// XOR-ing that back into each side either exchanges the two values or
+// leaves them untouched, with no data-dependent branch anywhere in this
+// function -- unlike every other function in this file, this one has a
+// genuine constant-time requirement (see file header), because Task 3's
+// Montgomery ladder calls this once per secret scalar bit.
+pub fn fe_cswap(swap: bool, a: &FieldElement, b: &FieldElement) -> (FieldElement, FieldElement) {
+    let mask: i64 = 0 - (swap as i64)
+    var out_a: [i64;10] = [0;10]
+    var out_b: [i64;10] = [0;10]
+    var i: i64 = 0
+    while i < 10 {
+        let ai = a.limbs[i as usize]
+        let bi = b.limbs[i as usize]
+        let diff = mask & (ai ^ bi)
+        out_a[i as usize] = ai ^ diff
+        out_b[i as usize] = bi ^ diff
+        i = i + 1
+    }
+    return (FieldElement { limbs: out_a }, FieldElement { limbs: out_b })
+}
+
+//! ---------------------------------------------------------------------
+//! Part 2 of 2 (Task 3, appended 2026-08-25): RFC 7748 section 5 scalar
+//! clamping, the Montgomery ladder, and the two public X25519 entry
+//! points. Everything below this line consumes only the `pub` FieldElement
+//! primitives above; it adds no new field-arithmetic algorithm of its
+//! own -- the ladder step is a direct transliteration of RFC 7748
+//! section 5's own pseudocode (the A/AA/B/BB/E/C/D/DA/CB naming is
+//! copied verbatim from the RFC, not from a secondary reference), fetched
+//! and read in full on 2026-08-25 from
+//! https://www.rfc-editor.org/rfc/rfc7748.txt (section 5, "For t =
+//! bits-1 down to 0: ..."). The constant a24 = (486662-2)/4 = 121665 is
+//! the RFC's own X25519-specific constant.
+//!
+//! All four numeric-vector test files under tests/run-pass/x25519_*.sio
+//! that reference RFC 7748 section 5.2 / 6.1 test vectors were populated
+//! from that same fetched, byte-length-verified (64 hex chars == 32
+//! bytes, checked with a Python one-liner, not eyeballed) copy of the
+//! RFC text -- not from memory, and not from this plan's brief (which
+//! deliberately omits the vectors).
+
+pub const X25519_KEY_LEN: i64 = 32
+
+// RFC 7748 section 5: clamp a raw 32-byte scalar for X25519.
+pub fn x25519_clamp(raw: &[u8;32]) -> [u8;32] {
+    var out: [u8;32] = [0;32]
+    var i: i64 = 0
+    while i < 32 { out[i as usize] = raw[i as usize]; i = i + 1 }
+    out[0] = out[0] & 248     // clear bits 0,1,2 (0xF8 mask)
+    out[31] = out[31] & 127   // clear bit 7 (0x7F mask)
+    out[31] = out[31] | 64    // set bit 6 (0x40)
+    out
+}
+
+// The shared Montgomery ladder core. `u_bytes` is the input u-coordinate
+// (either the fixed base point 9, or a peer's public key). `scalar_bytes`
+// MUST already be clamped by the caller (both public entry points below
+// clamp before calling this).
+fn x25519_ladder(scalar_bytes: &[u8;32], u_bytes: &[u8;32]) -> [u8;32] {
+    let x1 = fe_from_bytes(u_bytes)
+    var x2 = fe_one()
+    var z2 = fe_zero()
+    var x3 = x1
+    var z3 = fe_one()
+    var swap: bool = false
+
+    // a24 = (486662 - 2) / 4 = 121665, the X25519-specific Montgomery
+    // curve constant from RFC 7748 section 5. This is a public constant
+    // (not scalar/secret-derived), constructed directly as a
+    // FieldElement literal since this file defines the struct.
+    let a24 = FieldElement { limbs: [121665, 0, 0, 0, 0, 0, 0, 0, 0, 0] }
+
+    // RFC 7748's ladder iterates from bit 254 down to bit 0 (bit 255 is
+    // always 0 after clamping).
+    var pos: i64 = 254
+    while pos >= 0 {
+        let byte_index = pos / 8
+        let bit_index = pos % 8
+        let scalar_bit = ((scalar_bytes[byte_index as usize] >> (bit_index as u8)) & 1) != 0
+
+        let do_swap = scalar_bit != swap
+        let (sx2, sx3) = fe_cswap(do_swap, &x2, &x3)
+        let (sz2, sz3) = fe_cswap(do_swap, &z2, &z3)
+        x2 = sx2
+        x3 = sx3
+        z2 = sz2
+        z3 = sz3
+        swap = scalar_bit
+
+        // RFC 7748 section 5's own differential-addition-and-doubling
+        // step, naming preserved exactly:
+        //   A = x_2 + z_2 ; AA = A^2
+        //   B = x_2 - z_2 ; BB = B^2
+        //   E = AA - BB
+        //   C = x_3 + z_3
+        //   D = x_3 - z_3
+        //   DA = D * A
+        //   CB = C * B
+        //   x_3 = (DA + CB)^2
+        //   z_3 = x_1 * (DA - CB)^2
+        //   x_2 = AA * BB
+        //   z_2 = E * (AA + a24 * E)
+        let a_ = fe_add(&x2, &z2)
+        let aa = fe_sqr(&a_)
+        let b_ = fe_sub(&x2, &z2)
+        let bb = fe_sqr(&b_)
+        let e_ = fe_sub(&aa, &bb)
+        let c_ = fe_add(&x3, &z3)
+        let d_ = fe_sub(&x3, &z3)
+        let da = fe_mul(&d_, &a_)
+        let cb = fe_mul(&c_, &b_)
+        let da_plus_cb = fe_add(&da, &cb)
+        let da_minus_cb = fe_sub(&da, &cb)
+        let sq_sum = fe_sqr(&da_plus_cb)
+        let sq_diff = fe_sqr(&da_minus_cb)
+        x3 = sq_sum
+        z3 = fe_mul(&x1, &sq_diff)
+        x2 = fe_mul(&aa, &bb)
+        let a24e = fe_mul(&a24, &e_)
+        let aa_plus_a24e = fe_add(&aa, &a24e)
+        z2 = fe_mul(&e_, &aa_plus_a24e)
+
+        pos = pos - 1
+    }
+    let (final_x2, _final_x3) = fe_cswap(swap, &x2, &x3)
+    let (final_z2, _final_z3) = fe_cswap(swap, &z2, &z3)
+
+    let z2_inv = fe_invert(&final_z2)
+    let result = fe_mul(&final_x2, &z2_inv)
+    fe_to_bytes(&result)
+}
+
+pub fn x25519_base_point_mul(scalar: &[u8;32]) -> [u8;32] with IO {
+    let clamped = x25519_clamp(scalar)
+    var base: [u8;32] = [0;32]
+    base[0] = 9
+    x25519_ladder(&clamped, &base)
+}
+
+pub fn x25519(scalar: &[u8;32], u_coordinate: &[u8;32]) -> ([u8;32], bool) with IO {
+    let clamped = x25519_clamp(scalar)
+    let result = x25519_ladder(&clamped, u_coordinate)
+    // Branchless all-zero check: `result` is secret key material (the
+    // computed shared secret), so this loop must not branch on any of its
+    // bytes -- an `if result[i] != 0 { .. }` here would be a data-dependent
+    // branch over secret bytes (a timing side-channel). OR-accumulate every
+    // byte unconditionally instead; `acc == 0` afterward is equivalent to
+    // "every byte was zero" with a single, non-secret-dependent comparison.
+    var acc: i64 = 0
+    var i: i64 = 0
+    while i < 32 {
+        acc = acc | (result[i as usize] as i64)
+        i = i + 1
+    }
+    (result, acc != 0)
+}

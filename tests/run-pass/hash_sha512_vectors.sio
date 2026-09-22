@@ -1,0 +1,109 @@
+//@ run-pass
+//@ requires: madaros
+use hash::sha512::*
+use net::socket::*
+
+// NOTE: SHA-512 digests are 128 hex characters. A single string literal of
+// 128 hex chars plus 2 quote chars = 130 bytes hits a previously
+// undiscovered Madaros limit: string literals are silently truncated past
+// 126 content characters (128 including the two quote bytes) -- confirmed
+// by compiling a single 130-byte literal and observing
+// "warning: N string literal(s) TRUNCATED ... text past 126 characters is
+// gone -- silently, at run time." Sha256's 64-hex-char (66-byte) literals
+// never hit this because they're well under the limit. Worked around here
+// by splitting each 128-hex-char expected digest into two 64-hex-char
+// (66-byte) literal halves and comparing each half against its own 32-byte
+// slice of the digest, instead of comparing the digest against one 130-byte
+// literal.
+fn write_str(buf: &RawBuf, s: string) -> i64 with IO {
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        rawbuf_set(buf, i, str_char_at(s, i))
+        i = i + 1
+    }
+    n
+}
+
+fn hex_nibble_to_char(nibble: i64) -> i64 {
+    if nibble < 10 {
+        48 + nibble
+    } else {
+        87 + nibble
+    }
+}
+
+// Compares 32 bytes of `digest`, starting at byte `byte_offset`, against the
+// 64-hex-char string `expected_hex_half`.
+fn assert_digest_hex_half(digest: [u8; 64], byte_offset: i64, expected_hex_half: string) with IO {
+    var i: i64 = 0
+    while i < 32 {
+        let byte_val = digest[(byte_offset + i) as usize] as i64
+        let hi_nibble = byte_val / 16
+        let lo_nibble = byte_val - hi_nibble * 16
+        let expected_hi = str_char_at(expected_hex_half, i * 2)
+        let expected_lo = str_char_at(expected_hex_half, i * 2 + 1)
+        assert(hex_nibble_to_char(hi_nibble) == expected_hi)
+        assert(hex_nibble_to_char(lo_nibble) == expected_lo)
+        i = i + 1
+    }
+}
+
+fn assert_digest_hex(digest: [u8; 64], expected_hex_first: string, expected_hex_second: string) with IO {
+    assert_digest_hex_half(digest, 0, expected_hex_first)
+    assert_digest_hex_half(digest, 32, expected_hex_second)
+}
+
+fn main() with IO {
+    let buf1 = rawbuf_new(1)
+    let d1 = sha512(&buf1, 0)
+    assert_digest_hex(
+        d1,
+        "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce",
+        "47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e"
+    )
+
+    let buf2 = rawbuf_new(3)
+    let len2 = write_str(&buf2, "abc")
+    let d2 = sha512(&buf2, len2)
+    assert_digest_hex(
+        d2,
+        "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a",
+        "2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
+    )
+
+    let msg3 = "abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu"
+    let buf3 = rawbuf_new(112)
+    let len3 = write_str(&buf3, msg3)
+    let d3 = sha512(&buf3, len3)
+    assert_digest_hex(
+        d3,
+        "8e959b75dae313da8cf4f72814fc143f8f7779c6eb9f7fa17299aeadb6889018",
+        "501d289e4900f7e4331b99dec4b5433ac7d329eeb6dd26545e96e55b874be909"
+    )
+
+    // Vector 4: exactly one block (128 bytes, SHA-512's block size) of 'a'.
+    // This is the classic SHA padding boundary case: the message fills the
+    // block completely, so padding (the 0x80 byte plus the 128-bit length
+    // field) must occupy an entire second block with no message bytes in
+    // it. Built by writing byte 97 ('a') directly 128 times rather than a
+    // 128-char string literal, since Finding 17's silent-truncation limit
+    // (~126 content characters) applies to string literals in general, not
+    // only to the expected-digest literals. Expected digest independently
+    // verified with both Python's hashlib and `openssl dgst -sha512`
+    // against the same 128-byte input.
+    let buf4 = rawbuf_new(128)
+    var k4: i64 = 0
+    while k4 < 128 {
+        rawbuf_set(&buf4, k4, 97)
+        k4 = k4 + 1
+    }
+    let d4 = sha512(&buf4, 128)
+    assert_digest_hex(
+        d4,
+        "b73d1929aa615934e61a871596b3f3b33359f42b8175602e89f7e06e5f658a24",
+        "3667807ed300314b95cacdd579f3e33abdfbe351909519a846d465c59582f321"
+    )
+
+    println("hash_sha512_vectors: all cases passed")
+}

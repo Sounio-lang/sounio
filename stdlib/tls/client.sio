@@ -1,0 +1,1544 @@
+// stdlib/tls/client.sio -- TLS 1.3 handshake orchestration (Task 7 of the
+// Madaros TLS 1.3 handshake plan). Drives a real handshake from ClientHello
+// through derived application traffic keys (RFC 8446 SS2, the spec's Data
+// Flow steps 1-4), against a live TLS 1.3 peer over `stdlib/net/socket.sio`.
+// This file's own scope ends the moment the record layer is rekeyed for
+// application data -- it sends the client's Finished but exchanges no
+// application data itself (Task 8 appends tls_send/tls_recv/tls_close to
+// this same file).
+//
+// ============================================================================
+// MANDATORY D9 VERIFICATION (docs/handoff/souc_v0800_defects.md D9)
+// ============================================================================
+// D9 records a real, measured Madaros compiler defect: a struct's fixed-
+// array field (`x25519_public`/`random`) can come back corrupted at a
+// tuple-destructure boundary immediately after a function returns, when
+// another struct sharing those exact field names is compiled into the same
+// final linked program -- even though every field read correctly right up
+// to the callee's own `return`. `ServerHelloInfo` (stdlib/tls/server_hello.sio)
+// and `ClientHelloParams` (stdlib/tls/client_hello.sio) both have
+// `random: [u8;32]` and `x25519_public: [u8;32]` fields, and this file is
+// the FIRST place both are `use`d together in real orchestration code --
+// exactly the condition D9's own text flags as unverified and requiring a
+// fresh check. Two independent verifications are performed below, each
+// re-deriving the field value directly from RAW WIRE BYTES (never by
+// trusting the struct's own returned fields), so a corrupted destructure
+// cannot pass unnoticed by circularly checking itself:
+//   1. `ch_scan_random_and_key` (below) independently re-scans
+//      `encode_client_hello`'s own output buffer and compares against the
+//      pre-struct `x25519_pub`/`client_random` values (see `tls_connect`,
+//      "D9 check 1").
+//   2. `sh_scan_random_and_key` (below) independently re-scans the raw
+//      ServerHello message bytes and compares against `decode_server_hello`'s
+//      OWN POST-TUPLE-DESTRUCTURE `sh_info.x25519_public`/`sh_info.random`
+//      (see `tls_connect`, "D9 check 2") -- this is the exact shape of the
+//      original D9 corruption (correct right up to `return`, wrong at the
+//      caller's destructure point).
+// If either check fails, `tls_connect` returns immediately with
+// `TLS_CONNECT_ERR_D9_CORRUPTION` rather than silently proceeding with a
+// possibly-corrupted X25519 public key (security-critical: this is the
+// actual key-exchange material). See task-7-report.md for the observed
+// result of running these checks against a real handshake.
+//
+// Compiler defect D8 (`docs/handoff/souc_v0800_defects.md`): `var x = *ref`
+// on any fixed-array reference (`&[T;N]`) ALIASES the caller's array
+// instead of copying it. This file never does that -- every fixed-array
+// value is built element-by-element via indexed reads/writes.
+//
+// Sentinel bool/i64 error convention throughout -- never
+// `Result<T,E>`/`Option<T>`. `TcpSocket` is threaded by value through every
+// function that touches it, exactly matching `stdlib/net/socket.sio`'s own
+// established convention (never `&conn`/`&!conn`).
+
+use net::socket::*
+use tls::record::*
+use tls::transcript::*
+use tls::handshake::*
+use crypto::x25519::*
+use crypto::csprng::*
+use crypto::hkdf::*
+use crypto::aead::*
+use crypto::rsa_pss::*
+use crypto::ecdsa_p256::*
+use x509::chain::*
+use x509::cert::*
+use x509::trust_store::*
+use bignum::bigint::*
+use hash::sha256::*
+use hash::sha384::*
+
+// --- public result type and error sentinels -------------------------------
+
+// RFC 8446 SS5.1: TLSPlaintext.length MUST NOT exceed 2^14 bytes. This file
+// adds no TLSInnerPlaintext padding, so a single `record_encrypt` call's
+// input is capped at this size; `tls_send` splits any longer caller buffer
+// into multiple records via the loop further below. Also sizes
+// `TlsConnection.pending` (see its own doc comment): moved up here, ahead of
+// `tls_connection_zero`'s first use of it, since this compiler enforces
+// "no forward references" for helpers/constants (`CLAUDE.md` SS7) -- this
+// constant used to live next to `tls_send` further down, after every one of
+// its uses.
+const TLS_MAX_FRAGMENT: i64 = 16384
+
+pub struct TlsConnection {
+    sock: TcpSocket,
+    records: RecordLayerState,
+    hash_algo: i32,
+    hs_transcript: TranscriptHash,
+    master_secret: RawBuf,
+    client_ap_secret: RawBuf,
+    server_ap_secret: RawBuf,
+    // Test-observability counter (Task 8): incremented by tls_recv every
+    // time it silently discards a post-handshake NewSessionTicket message,
+    // per the plan brief's own suggestion ("a permanent return-value/
+    // counter Task 8 finds a clean way to expose for testing"). Not used
+    // by tls_send/tls_recv/tls_close's own logic -- purely observational,
+    // so tests/interop/tls_client_application_data_loopback.sio can assert
+    // openssl s_server's default post-handshake ticket(s) were actually
+    // seen and skipped, not merely "never returned as application data by
+    // accident of timing".
+    tickets_discarded: i64,
+    // Task 8 fix-round-1: a single decrypted `application_data` record's
+    // plaintext (up to TLS_MAX_FRAGMENT = 16384 bytes) can be, and in
+    // realistic HTTP-response-sized traffic often is, larger than the
+    // caller's own `cap`-sized `tls_recv` buffer -- the interop test's own
+    // 4096-byte scratch buffer included. Before this fix, `tls_recv_loop`
+    // copied only the first `cap` bytes of the decrypted content into the
+    // caller's buffer and silently dropped the rest when the local
+    // decrypted-content `RawBuf` went out of scope -- genuine, silent data
+    // loss. `pending`/`pending_offset`/`pending_len` hold whatever excess a
+    // record produced so the NEXT `tls_recv` call drains it before reading
+    // (or decrypting) anything else from the socket. `pending` is sized
+    // once, at TLS_MAX_FRAGMENT bytes, in `tls_connection_zero`/
+    // `tls_connect` -- large enough for the worst case (all but 1 byte of
+    // one maximal record held back) -- and never reallocated.
+    pending: RawBuf,
+    pending_offset: i64,
+    pending_len: i64,
+}
+
+pub const TLS_CONNECT_OK: i64 = 0
+pub const TLS_CONNECT_ERR_CONNECT: i64 = 0 - 1
+pub const TLS_CONNECT_ERR_RANDOM: i64 = 0 - 2
+pub const TLS_CONNECT_ERR_SEND: i64 = 0 - 3
+pub const TLS_CONNECT_ERR_RECV: i64 = 0 - 4
+pub const TLS_CONNECT_ERR_DECODE: i64 = 0 - 5
+pub const TLS_CONNECT_ERR_UNSUPPORTED_CIPHER: i64 = 0 - 6
+pub const TLS_CONNECT_ERR_KEY_EXCHANGE: i64 = 0 - 7
+pub const TLS_CONNECT_ERR_CERT_CHAIN: i64 = 0 - 8
+pub const TLS_CONNECT_ERR_SIGNATURE: i64 = 0 - 9
+pub const TLS_CONNECT_ERR_FINISHED: i64 = 0 - 10
+pub const TLS_CONNECT_ERR_HRR: i64 = 0 - 11
+pub const TLS_CONNECT_ERR_BAD_HOST: i64 = 0 - 12
+pub const TLS_CONNECT_ERR_D9_CORRUPTION: i64 = 0 - 13
+// RFC 8446 SS4.1.4: on a HelloRetryRequest, the server's second ServerHello
+// MUST negotiate the same cipher_suite as the (implicit) first one signalled
+// in the HelloRetryRequest itself -- see the D9-check-2b/cipher-suite-check
+// note at the HelloRetryRequest branch in tls_connect below.
+pub const TLS_CONNECT_ERR_CIPHER_SUITE_MISMATCH: i64 = 0 - 14
+// Final-review Fix 3: the design spec's own Scope Decision promises "if the
+// server's HRR instead demands a key-exchange group other than X25519, fail
+// closed with a clear error -- no other curve is implemented." Distinct
+// from TLS_CONNECT_ERR_HRR (a second, disallowed retry) and from
+// TLS_CONNECT_ERR_KEY_EXCHANGE (no key_share extension present at all, or
+// ECDHE computation failure) -- this is specifically "the HRR named a real
+// group, and it wasn't X25519".
+pub const TLS_CONNECT_ERR_UNSUPPORTED_GROUP: i64 = 0 - 15
+
+// RFC 8446 SS4.2.7 NamedGroup -- X25519 only (see plan's Out of Scope).
+// Duplicated from `stdlib/tls/server_hello.sio`'s own private constant of
+// the same name/value -- see Finding 4 of the final whole-plan review
+// (parked): a direct, harmless artifact of the D9-forced file split that
+// keeps `ServerHelloInfo`/`ClientHelloParams` physically apart (see this
+// file's own header comment on the D9 defect).
+const NAMED_GROUP_X25519: i64 = 0x001d
+
+fn tls_connection_zero() -> TlsConnection with IO {
+    TlsConnection {
+        sock: TcpSocket { fd: 0 - 1 },
+        records: record_layer_new(AEAD_AES_128_GCM, 16, 12),
+        hash_algo: HKDF_HASH_SHA256,
+        hs_transcript: transcript_new(HKDF_HASH_SHA256),
+        master_secret: rawbuf_new(1),
+        client_ap_secret: rawbuf_new(1),
+        server_ap_secret: rawbuf_new(1),
+        tickets_discarded: 0,
+        pending: rawbuf_new(TLS_MAX_FRAGMENT + 8),
+        pending_offset: 0,
+        pending_len: 0,
+    }
+}
+
+fn hash_len_for(hash_algo: i32) -> i64 {
+    if hash_algo == HKDF_HASH_SHA256 { 32 } else { 48 }
+}
+
+// --- small RawBuf helpers ---------------------------------------------------
+
+// A view into an existing RawBuf's allocation starting `offset` bytes in,
+// with `cap` bytes of room -- lets tcp_send/tcp_recv read/write directly
+// into/out of the middle of a caller-owned buffer (needed for the partial-
+// read/partial-write looping below, since tcp_send/tcp_recv always start at
+// a buffer's own `ptr`). Same underlying allocation, no copy.
+fn rawbuf_view(buf: &RawBuf, offset: i64, cap: i64) -> RawBuf with IO {
+    let addr = (buf.ptr as i64) + offset
+    RawBuf { ptr: addr as *mut u8, cap: cap }
+}
+
+fn label_buf(s: string) -> (RawBuf, i64) with IO {
+    let n = str_len(s)
+    let out = rawbuf_new(n + 8)
+    var i: i64 = 0
+    while i < n {
+        rawbuf_set(&out, i, str_char_at(s, i))
+        i = i + 1
+    }
+    (out, n)
+}
+
+fn array32_to_rawbuf(arr: &[u8; 32]) -> RawBuf with IO {
+    let out = rawbuf_new(32 + 8)
+    var i: i64 = 0
+    while i < 32 {
+        rawbuf_set(&out, i, arr[i as usize] as i64)
+        i = i + 1
+    }
+    out
+}
+
+// Big-endian bytes -> BigInt (same byte-by-byte bigint_mul-by-256-then-
+// bigint_add composition already established and proven in
+// stdlib/x509/cert.sio's file-private `bytes_be_to_bigint` / stdlib/asn1/
+// der.sio's `der_read_integer` -- re-derived here since neither is `pub`).
+fn bytes_be_to_bigint(buf: &RawBuf, len: i64) -> BigInt with IO {
+    var acc = bigint_zero()
+    let base256 = bigint_from_u32(256)
+    var i: i64 = 0
+    while i < len {
+        let byte_val = rawbuf_get(buf, i) & 255
+        let digit = bigint_from_u32(byte_val as u32)
+        let scaled = bigint_mul(&acc, &base256)
+        acc = bigint_add(&scaled, &digit)
+        i = i + 1
+    }
+    acc
+}
+
+// The minimal big-endian byte length of v's magnitude (PKCS#1's `k`) --
+// same logic as stdlib/x509/cert.sio's file-private `bigint_byte_length`.
+fn bigint_byte_length(v: &BigInt) -> i64 {
+    if v.len == 0 {
+        return 0
+    }
+    let top_limb = v.limbs[(v.len - 1) as usize]
+    let top_byte = (top_limb as i64) >> 8
+    if top_byte == 0 {
+        (v.len as i64) * 2 - 1
+    } else {
+        (v.len as i64) * 2
+    }
+}
+
+// --- dotted-decimal IPv4 parsing (same logic as stdlib/net/http_client.sio's
+// file-private parse_ipv4_dotted, re-derived here since it isn't `pub`) ----
+
+const CH_DOT: i64 = 46
+const CH_ZERO: i64 = 48
+const CH_NINE: i64 = 57
+
+fn parse_ipv4_dotted(text: &RawBuf, max_len: i64, out: &RawBuf) -> bool with IO {
+    var octet_idx: i64 = 0
+    var value: i64 = 0
+    var have_digit: bool = false
+    var i: i64 = 0
+    var done: bool = false
+    while i < max_len && !done {
+        let c = rawbuf_get(text, i)
+        if c == 0 {
+            done = true
+        } else if c == CH_DOT {
+            if !have_digit || octet_idx > 2 || value > 255 {
+                return false
+            }
+            rawbuf_set(out, octet_idx, value)
+            octet_idx = octet_idx + 1
+            value = 0
+            have_digit = false
+        } else if c >= CH_ZERO && c <= CH_NINE {
+            value = value * 10 + (c - CH_ZERO)
+            if value > 255 {
+                return false
+            }
+            have_digit = true
+        } else {
+            return false
+        }
+        i = i + 1
+    }
+    if !have_digit || octet_idx != 3 {
+        return false
+    }
+    rawbuf_set(out, octet_idx, value)
+    true
+}
+
+// --- TCP partial read/write looping -----------------------------------------
+
+// Reads exactly `want` bytes into `buf[offset..offset+want)`, looping over
+// tcp_recv's partial-read POSIX semantics (tcp_recv may return fewer bytes
+// than requested). Returns (sock, bytes_read); bytes_read < want means EOF
+// (tcp_recv returned 0) or an error (tcp_recv returned negative).
+// NOTE on control-flow shape (measured, real Madaros compiler behaviour,
+// distinct from D1-D10 in docs/handoff/souc_v0800_defects.md and worth its
+// own record -- see task-7-report.md): this compiler's linear checker
+// rejects a `while` loop that reassigns a linear-typed var (e.g. `var s =
+// sock; while ... { s = s2 }`) with `error[E039]: linear value has already
+// been used`, even though this is exactly the "thread the socket through
+// a loop" pattern real partial-read/partial-write handling needs. It
+// ALSO rejects a bare `if cond { return using X }` followed by more code
+// that uses X again afterward -- confirmed with a minimal standalone
+// repro even with NO loop involved at all (a single early return). The
+// only pattern confirmed to compile clean: (a) recursion instead of a
+// `while` loop for anything that re-threads a linear value, and (b) every
+// early-return/error branch either drops the linear value entirely
+// (never touches it) or the whole thing is written as one exhaustive
+// `if { .. } else if { .. } else { .. }` EXPRESSION (tail position, no
+// `return` keyword) rather than a sequence of top-level `if { return }`
+// statements. Every function below and in `tls_connect` follows one of
+// these two shapes.
+fn tcp_recv_exact(sock: TcpSocket, buf: &RawBuf, offset: i64, want: i64) -> (TcpSocket, i64) with IO {
+    if want <= 0 {
+        (sock, 0)
+    } else {
+        let view = rawbuf_view(buf, offset, want)
+        let (s2, n) = tcp_recv(sock, &view, want)
+        if n <= 0 {
+            (s2, 0)
+        } else if n >= want {
+            (s2, want)
+        } else {
+            let (s3, rest) = tcp_recv_exact(s2, buf, offset + n, want - n)
+            (s3, n + rest)
+        }
+    }
+}
+
+fn tcp_send_exact(sock: TcpSocket, buf: &RawBuf, offset: i64, want: i64) -> (TcpSocket, i64) with IO {
+    if want <= 0 {
+        (sock, 0)
+    } else {
+        let view = rawbuf_view(buf, offset, want)
+        let (s2, n) = tcp_send(sock, &view, want)
+        if n <= 0 {
+            (s2, 0)
+        } else if n >= want {
+            (s2, want)
+        } else {
+            let (s3, rest) = tcp_send_exact(s2, buf, offset + n, want - n)
+            (s3, n + rest)
+        }
+    }
+}
+
+fn build_record_header(opaque_type: u8, len: i64) -> RawBuf with IO {
+    let h = rawbuf_new(5 + 8)
+    rawbuf_set(&h, 0, opaque_type as i64)
+    rawbuf_set(&h, 1, 3)
+    rawbuf_set(&h, 2, 3)
+    rawbuf_set(&h, 3, (len >> 8) & 255)
+    rawbuf_set(&h, 4, len & 255)
+    h
+}
+
+// NOTE: every branch below consumes the SAME live socket binding
+// (`s1`/`s2`), never a fresh dummy, even on the error paths -- a
+// value-producing if/else EXPRESSION must consume linear values
+// symmetrically across every branch (dropping one in a branch that
+// still has it alive, while another branch consumes it, trips
+// `error[E040]`; see the note above `tcp_recv_exact`).
+fn send_plaintext_record(sock: TcpSocket, content_type: u8, payload: &RawBuf, payload_len: i64) -> (TcpSocket, i64) with IO {
+    let header = build_record_header(content_type, payload_len)
+    let (s1, n1) = tcp_send_exact(sock, &header, 0, 5)
+    if n1 < 5 {
+        (s1, 0 - 1)
+    } else {
+        let (s2, n2) = tcp_send_exact(s1, payload, 0, payload_len)
+        if n2 < payload_len {
+            (s2, 0 - 1)
+        } else {
+            (s2, 0)
+        }
+    }
+}
+
+fn send_encrypted_record(sock: TcpSocket, records: &!RecordLayerState, content_type: u8, payload: &RawBuf, payload_len: i64) -> (TcpSocket, i64) with Mut, IO {
+    let ciphertext = record_encrypt(records, content_type, payload, payload_len)
+    let ciphertext_len = payload_len + 1 + 16
+    let header = build_record_header(TLS_CONTENT_TYPE_APPLICATION_DATA, ciphertext_len)
+    let (s1, n1) = tcp_send_exact(sock, &header, 0, 5)
+    if n1 < 5 {
+        (s1, 0 - 1)
+    } else {
+        let (s2, n2) = tcp_send_exact(s1, &ciphertext, 0, ciphertext_len)
+        if n2 < ciphertext_len {
+            (s2, 0 - 1)
+        } else {
+            (s2, 0)
+        }
+    }
+}
+
+// --- running handshake-message byte accumulator -----------------------------
+//
+// Decrypted (or, before any keys exist, plaintext) handshake-layer bytes
+// accumulate here as TLS records arrive; `hsbuf_try_take_message` peels off
+// exactly one complete `msg_type || uint24 length || body` message once
+// enough bytes are available -- necessary because a real peer may split one
+// handshake message across multiple TLS records, or coalesce several
+// messages into one record, and this file must handle both correctly rather
+// than assuming a 1:1 record:message mapping.
+
+struct HsBuf {
+    buf: RawBuf,
+    len: i64,
+    cap: i64,
+    pos: i64,
+}
+
+fn hsbuf_new() -> HsBuf with IO {
+    HsBuf { buf: rawbuf_new(4096), len: 0, cap: 4096, pos: 0 }
+}
+
+fn hsbuf_append(hb: &!HsBuf, data: &RawBuf, data_len: i64) with Mut, IO {
+    let needed = hb.len + data_len
+    if needed > hb.cap {
+        let new_cap = 2 * needed
+        let new_buf = rawbuf_new(new_cap)
+        var i: i64 = 0
+        while i < hb.len {
+            rawbuf_set(&new_buf, i, rawbuf_get(&hb.buf, i))
+            i = i + 1
+        }
+        hb.buf = new_buf
+        hb.cap = new_cap
+    }
+    var j: i64 = 0
+    while j < data_len {
+        rawbuf_set(&hb.buf, hb.len + j, rawbuf_get(data, j))
+        j = j + 1
+    }
+    hb.len = hb.len + data_len
+}
+
+fn hsbuf_try_take_message(hb: &!HsBuf) -> (RawBuf, i64, bool) with Mut, IO {
+    let avail = hb.len - hb.pos
+    if avail < 4 {
+        return (rawbuf_new(1), 0, false)
+    }
+    let b1 = rawbuf_get(&hb.buf, hb.pos + 1)
+    let b2 = rawbuf_get(&hb.buf, hb.pos + 2)
+    let b3 = rawbuf_get(&hb.buf, hb.pos + 3)
+    let body_len = (b1 << 16) | (b2 << 8) | b3
+    let total = 4 + body_len
+    if avail < total {
+        return (rawbuf_new(1), 0, false)
+    }
+    let out = rawbuf_new(total + 8)
+    var i: i64 = 0
+    while i < total {
+        rawbuf_set(&out, i, rawbuf_get(&hb.buf, hb.pos + i))
+        i = i + 1
+    }
+    hb.pos = hb.pos + total
+    (out, total, true)
+}
+
+// Reads exactly one TLS record from the wire and, unless it's a
+// change_cipher_spec record (RFC 8446 Appendix D.4: "any records following
+// an initial ClientHello ... which have the content type
+// change_cipher_spec ... MUST be ignored" -- openssl s_server sends one of
+// these by default for middlebox-compatibility-mode interop), appends its
+// real content to `hb`. Returns (sock, status): 0 on success (including a
+// skipped CCS record), negative on any error (short read/EOF, decrypt
+// failure, alert, or an unexpected outer content type).
+fn read_one_record(sock: TcpSocket, records: &!RecordLayerState, encrypted: bool, hb: &!HsBuf) -> (TcpSocket, i64) with Mut, IO {
+    let header = rawbuf_new(5 + 8)
+    let (s1, n1) = tcp_recv_exact(sock, &header, 0, 5)
+    if n1 < 5 {
+        (s1, 0 - 1)
+    } else {
+        let outer_type = rawbuf_get(&header, 0)
+        let frag_len = (rawbuf_get(&header, 3) << 8) | rawbuf_get(&header, 4)
+        let payload = rawbuf_new(frag_len + 8)
+        let (s2, n2) = tcp_recv_exact(s1, &payload, 0, frag_len)
+        if n2 < frag_len {
+            (s2, 0 - 1)
+        } else if outer_type == (TLS_CONTENT_TYPE_CHANGE_CIPHER_SPEC as i64) {
+            (s2, 0)
+        } else if !encrypted {
+            if outer_type != (TLS_CONTENT_TYPE_HANDSHAKE as i64) {
+                (s2, 0 - 2)
+            } else {
+                hsbuf_append(hb, &payload, frag_len)
+                (s2, 0)
+            }
+        } else {
+            let (content_type, content, content_len, ok) = record_decrypt(records, &payload, frag_len)
+            if !ok {
+                (s2, 0 - 3)
+            } else if content_type == TLS_CONTENT_TYPE_ALERT {
+                (s2, 0 - 4)
+            } else if content_type != TLS_CONTENT_TYPE_HANDSHAKE {
+                (s2, 0 - 5)
+            } else {
+                hsbuf_append(hb, &content, content_len)
+                (s2, 0)
+            }
+        }
+    }
+}
+
+// Reads records (looping via read_one_record, transparently skipping
+// change_cipher_spec) until a complete handshake message is available in
+// `hb`, then returns it. Status: 0 ok, negative on error (propagated from
+// read_one_record). Recursive rather than `while true` -- see the control-
+// flow-shape note above `tcp_recv_exact`.
+fn next_handshake_message(sock: TcpSocket, records: &!RecordLayerState, encrypted: bool, hb: &!HsBuf) -> (TcpSocket, RawBuf, i64, i64) with Mut, IO {
+    let (msg, msg_len, found) = hsbuf_try_take_message(hb)
+    if found {
+        (sock, msg, msg_len, 0)
+    } else {
+        let (s2, rc) = read_one_record(sock, records, encrypted, hb)
+        if rc < 0 {
+            (s2, rawbuf_new(1), 0, rc)
+        } else {
+            next_handshake_message(s2, records, encrypted, hb)
+        }
+    }
+}
+
+// --- cipher-suite -> (AEAD algo, hash algo, key len, iv len) ---------------
+
+fn cipher_params(cipher_suite: i64) -> (i32, i32, i64, i64, bool) {
+    if cipher_suite == 0x1301 {
+        (AEAD_AES_128_GCM, HKDF_HASH_SHA256, 16, 12, true)
+    } else if cipher_suite == 0x1302 {
+        (AEAD_AES_256_GCM, HKDF_HASH_SHA384, 32, 12, true)
+    } else if cipher_suite == 0x1303 {
+        (AEAD_CHACHA20_POLY1305, HKDF_HASH_SHA256, 32, 12, true)
+    } else {
+        (0, 0, 0, 0, false)
+    }
+}
+
+// --- D9 verification: independent raw-wire-byte scans -----------------------
+//
+// Re-derives `random`/`x25519_public` DIRECTLY from wire bytes, with zero
+// dependency on ClientHelloParams/ServerHelloInfo/encode_client_hello/
+// decode_server_hello's own internal state -- so comparing against those
+// functions' inputs/outputs is a real, independent check, not a circular
+// one. See this file's header comment for the full D9 rationale.
+
+fn ch_scan_random_and_key(ch_bytes: &RawBuf, ch_len: i64) -> ([u8; 32], [u8; 32], bool) with IO {
+    var random_out: [u8; 32] = [0; 32]
+    var key_out: [u8; 32] = [0; 32]
+    if ch_len < 43 {
+        return (random_out, key_out, false)
+    }
+    var i: i64 = 0
+    while i < 32 {
+        random_out[i as usize] = (rawbuf_get(ch_bytes, 6 + i) as u8)
+        i = i + 1
+    }
+    var pos: i64 = 4 + 2 + 32
+    let sid_len = rawbuf_get(ch_bytes, pos)
+    pos = pos + 1 + sid_len
+    let cs_len = (rawbuf_get(ch_bytes, pos) << 8) | rawbuf_get(ch_bytes, pos + 1)
+    pos = pos + 2 + cs_len
+    let compression_len = rawbuf_get(ch_bytes, pos)
+    pos = pos + 1 + compression_len
+    let ext_total = (rawbuf_get(ch_bytes, pos) << 8) | rawbuf_get(ch_bytes, pos + 1)
+    pos = pos + 2
+    let ext_end = pos + ext_total
+    var found = false
+    while pos < ext_end {
+        let ext_type = (rawbuf_get(ch_bytes, pos) << 8) | rawbuf_get(ch_bytes, pos + 1)
+        pos = pos + 2
+        let ext_len = (rawbuf_get(ch_bytes, pos) << 8) | rawbuf_get(ch_bytes, pos + 1)
+        pos = pos + 2
+        if ext_type == 51 {
+            // ClientHello key_share extension_data: client_shares list_len(2)
+            // + group(2) + key_len(2) + key(32) -- a list, unlike ServerHello's.
+            let key_off = pos + 2 + 2 + 2
+            var k: i64 = 0
+            while k < 32 {
+                key_out[k as usize] = (rawbuf_get(ch_bytes, key_off + k) as u8)
+                k = k + 1
+            }
+            found = true
+        }
+        pos = pos + ext_len
+    }
+    (random_out, key_out, found)
+}
+
+fn sh_scan_random_and_key(sh_bytes: &RawBuf, sh_len: i64) -> ([u8; 32], [u8; 32], bool) with IO {
+    var random_out: [u8; 32] = [0; 32]
+    var key_out: [u8; 32] = [0; 32]
+    if sh_len < 38 {
+        return (random_out, key_out, false)
+    }
+    var i: i64 = 0
+    while i < 32 {
+        random_out[i as usize] = (rawbuf_get(sh_bytes, 6 + i) as u8)
+        i = i + 1
+    }
+    var pos: i64 = 4 + 2 + 32
+    let sid_len = rawbuf_get(sh_bytes, pos)
+    pos = pos + 1 + sid_len
+    pos = pos + 2 // cipher_suite
+    pos = pos + 1 // legacy_compression_method: a single byte, not a vector
+    let ext_total = (rawbuf_get(sh_bytes, pos) << 8) | rawbuf_get(sh_bytes, pos + 1)
+    pos = pos + 2
+    let ext_end = pos + ext_total
+    var found = false
+    while pos < ext_end {
+        let ext_type = (rawbuf_get(sh_bytes, pos) << 8) | rawbuf_get(sh_bytes, pos + 1)
+        pos = pos + 2
+        let ext_len = (rawbuf_get(sh_bytes, pos) << 8) | rawbuf_get(sh_bytes, pos + 1)
+        pos = pos + 2
+        if ext_type == 51 {
+            // ServerHello key_share extension_data is a single KeyShareEntry
+            // directly: group(2) + key_len(2) + key(32) -- NOT a list.
+            let group = (rawbuf_get(sh_bytes, pos) << 8) | rawbuf_get(sh_bytes, pos + 1)
+            let key_len = (rawbuf_get(sh_bytes, pos + 2) << 8) | rawbuf_get(sh_bytes, pos + 3)
+            if group == 0x001d && key_len == 32 {
+                var k: i64 = 0
+                while k < 32 {
+                    key_out[k as usize] = (rawbuf_get(sh_bytes, pos + 4 + k) as u8)
+                    k = k + 1
+                }
+                found = true
+            }
+        }
+        pos = pos + ext_len
+    }
+    (random_out, key_out, found)
+}
+
+fn arrays32_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    var i: i64 = 0
+    while i < 32 {
+        if a[i as usize] != b[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// --- CertificateVerify signed-content construction (RFC 8446 SS4.4.3) ------
+
+fn build_certificate_verify_message(transcript_hash: &RawBuf, hash_len: i64) -> (RawBuf, i64) with IO {
+    let context = "TLS 1.3, server CertificateVerify"
+    let context_len = str_len(context)
+    let total = 64 + context_len + 1 + hash_len
+    let out = rawbuf_new(total + 8)
+    var i: i64 = 0
+    while i < 64 {
+        rawbuf_set(&out, i, 0x20)
+        i = i + 1
+    }
+    var j: i64 = 0
+    while j < context_len {
+        rawbuf_set(&out, 64 + j, str_char_at(context, j))
+        j = j + 1
+    }
+    rawbuf_set(&out, 64 + context_len, 0)
+    var k: i64 = 0
+    while k < hash_len {
+        rawbuf_set(&out, 64 + context_len + 1 + k, rawbuf_get(transcript_hash, k))
+        k = k + 1
+    }
+    (out, total)
+}
+
+fn verify_certificate_signature(leaf: &Certificate, scheme: u16, signature: &RawBuf, signature_len: i64, message: &RawBuf, message_len: i64) -> bool with IO {
+    if scheme == SIG_SCHEME_RSA_PSS_RSAE_SHA256 {
+        if leaf.public_key_algorithm != PUBKEY_ALG_RSA {
+            return false
+        }
+        let modulus_byte_len = bigint_byte_length(&leaf.modulus)
+        let sig_bigint = bytes_be_to_bigint(signature, signature_len)
+        rsa_pss_verify(&leaf.modulus, &leaf.public_exponent, modulus_byte_len, message, message_len, &sig_bigint, RSA_PSS_HASH_SHA256)
+    } else if scheme == SIG_SCHEME_RSA_PSS_RSAE_SHA384 {
+        if leaf.public_key_algorithm != PUBKEY_ALG_RSA {
+            return false
+        }
+        let modulus_byte_len = bigint_byte_length(&leaf.modulus)
+        let sig_bigint = bytes_be_to_bigint(signature, signature_len)
+        rsa_pss_verify(&leaf.modulus, &leaf.public_exponent, modulus_byte_len, message, message_len, &sig_bigint, RSA_PSS_HASH_SHA384)
+    } else if scheme == SIG_SCHEME_ECDSA_SECP256R1_SHA256 {
+        if leaf.public_key_algorithm != PUBKEY_ALG_EC_P256 {
+            return false
+        }
+        ecdsa_p256_verify(&leaf.ec_public_key, message, message_len, signature, signature_len)
+    } else {
+        false
+    }
+}
+
+// --- Finished (RFC 8446 SS4.4.4) --------------------------------------------
+
+// finished_key = HKDF-Expand-Label(traffic_secret, "finished", "", Hash.length)
+fn compute_finished_key(hash_algo: i32, traffic_secret: &RawBuf, hash_len: i64) -> RawBuf with IO {
+    let (label, label_len) = label_buf("finished")
+    let empty_context = rawbuf_new(0)
+    hkdf_expand_label(hash_algo, traffic_secret, hash_len, &label, label_len, &empty_context, 0, hash_len)
+}
+
+// verify_data = HMAC(finished_key, transcript_hash). Returns the HMAC output
+// as a RawBuf (32 or 48 bytes per hash_algo) so callers can constant-time
+// compare it against a RawBuf-encoded received verify_data, or send it
+// straight into encode_finished, with no fixed-array conversion at the call
+// site.
+fn compute_verify_data(hash_algo: i32, finished_key: &RawBuf, hash_len: i64, transcript_hash: &RawBuf) -> RawBuf with IO {
+    if hash_algo == HKDF_HASH_SHA256 {
+        let mac = hmac_sha256_rawbuf(finished_key, hash_len, transcript_hash, hash_len)
+        let out = rawbuf_new(32 + 8)
+        var i: i64 = 0
+        while i < 32 {
+            rawbuf_set(&out, i, mac[i as usize] as i64)
+            i = i + 1
+        }
+        out
+    } else {
+        let mac = hmac_sha384_rawbuf(finished_key, hash_len, transcript_hash, hash_len)
+        let out = rawbuf_new(48 + 8)
+        var i: i64 = 0
+        while i < 48 {
+            rawbuf_set(&out, i, mac[i as usize] as i64)
+            i = i + 1
+        }
+        out
+    }
+}
+
+// Constant-time comparison (bitwise-accumulate-then-compare-once, matching
+// this codebase's established AEAD-tag-comparison discipline) of two
+// RawBuf-encoded byte strings of equal expected length.
+fn constant_time_eq_rawbuf(a: &RawBuf, b: &RawBuf, len: i64) -> bool with IO {
+    var diff: i64 = 0
+    var i: i64 = 0
+    while i < len {
+        diff = diff | (rawbuf_get(a, i) ^ rawbuf_get(b, i))
+        i = i + 1
+    }
+    diff == 0
+}
+
+// --- the orchestrator --------------------------------------------------
+
+pub fn tls_connect(host: &RawBuf, host_len: i64, port: u16, trust_store: &TrustStore, now_unix: i64) -> (TlsConnection, i64) with IO, Mut {
+    let zero_conn = tls_connection_zero()
+
+    // `host` is ASCII dotted-decimal text (e.g. "127.0.0.1") per this
+    // plan's own test brief -- parsed here into the 4 raw octets
+    // tcp_connect's build_sockaddr actually requires. The ORIGINAL text
+    // `host`/`host_len` is what's embedded in the SNI extension and passed
+    // to x509_verify_chain's hostname check, unchanged.
+    let ip_bytes = rawbuf_new(4 + 8)
+    if !parse_ipv4_dotted(host, host_len, &ip_bytes) {
+        return (zero_conn, TLS_CONNECT_ERR_BAD_HOST)
+    }
+
+    let (sock0, connect_err) = tcp_connect(&ip_bytes, port)
+    if connect_err != 0 {
+        return (zero_conn, TLS_CONNECT_ERR_CONNECT)
+    }
+
+    // --- client key material ---
+    let (client_random, rand_ok1) = crypto_os_random_key32()
+    let (x25519_priv, rand_ok2) = crypto_os_random_key32()
+    if !rand_ok1 || !rand_ok2 {
+        return (zero_conn, TLS_CONNECT_ERR_RANDOM)
+    }
+    let x25519_pub = x25519_base_point_mul(&x25519_priv)
+
+    let ch_params = ClientHelloParams {
+        random: client_random,
+        x25519_public: x25519_pub,
+        server_name: *host,
+        server_name_len: host_len,
+        cookie: rawbuf_new(1),
+        cookie_len: 0,
+    }
+
+    let (ch_bytes, ch_len) = encode_client_hello(&ch_params)
+
+    // --- D9 CHECK 1: encode_client_hello's actual output buffer, scanned
+    // independently, must carry the exact x25519_pub/client_random this
+    // function generated -- not whatever ClientHelloParams's own fields
+    // claim (see file header). ---
+    let (ch_scanned_random, ch_scanned_key, ch_scan_found) = ch_scan_random_and_key(&ch_bytes, ch_len)
+    if !ch_scan_found || !arrays32_eq(&ch_scanned_random, &client_random) || !arrays32_eq(&ch_scanned_key, &x25519_pub) {
+        return (zero_conn, TLS_CONNECT_ERR_D9_CORRUPTION)
+    }
+
+    let (sock1, send_err1) = send_plaintext_record(sock0, TLS_CONTENT_TYPE_HANDSHAKE, &ch_bytes, ch_len)
+    if send_err1 != 0 {
+        return (zero_conn, TLS_CONNECT_ERR_SEND)
+    }
+
+    var hb = hsbuf_new()
+    var dummy_records = record_layer_new(AEAD_AES_128_GCM, 16, 12) // unused while plaintext
+    let (sock2, sh1_bytes, sh1_len, sh1_status) = next_handshake_message(sock1, &!dummy_records, false, &!hb)
+    if sh1_status != 0 {
+        return (zero_conn, TLS_CONNECT_ERR_RECV)
+    }
+    let (sh1_info, sh1_ok) = decode_server_hello(&sh1_bytes, sh1_len)
+    if !sh1_ok {
+        return (zero_conn, TLS_CONNECT_ERR_DECODE)
+    }
+
+    // --- D9 CHECK 2: decode_server_hello's returned (post-tuple-
+    // destructure) sh1_info.x25519_public/.random, compared against an
+    // independent re-scan of the raw ServerHello wire bytes -- the exact
+    // shape of the original D9 corruption (fields read correctly right up
+    // to `return`, corrupted at the caller's destructure point). ---
+    let (sh1_scanned_random, sh1_scanned_key, sh1_scan_found) = sh_scan_random_and_key(&sh1_bytes, sh1_len)
+    if !arrays32_eq(&sh1_scanned_random, &sh1_info.random) {
+        return (zero_conn, TLS_CONNECT_ERR_D9_CORRUPTION)
+    }
+    if sh1_info.has_key_share && (!sh1_scan_found || !arrays32_eq(&sh1_scanned_key, &sh1_info.x25519_public)) {
+        return (zero_conn, TLS_CONNECT_ERR_D9_CORRUPTION)
+    }
+
+    let (aead_algo, hash_algo, key_len, iv_len, cipher_ok) = cipher_params(sh1_info.cipher_suite as i64)
+    if !cipher_ok {
+        return (zero_conn, TLS_CONNECT_ERR_UNSUPPORTED_CIPHER)
+    }
+    let hash_len = hash_len_for(hash_algo)
+
+    var hs_transcript = transcript_new(hash_algo)
+
+    // NOTE: this whole HelloRetryRequest branch is written as ONE
+    // exhaustive if/else EXPRESSION producing a single converged
+    // `(sock, sh_info, sh_bytes, sh_len, err)` tuple -- never a `var sock`
+    // reassigned across branches -- per the control-flow-shape note above
+    // `tcp_recv_exact`: reassigning an already-used linear var (even
+    // outside a loop) and using the new value later was independently
+    // confirmed to trip the same `error[E039]` as the loop case.
+    let (sock_after_sh, sh_info, sh_bytes, sh_len, hrr_err) = if sh1_info.is_hello_retry_request {
+        // RFC 8446 SS4.4.1: on a HelloRetryRequest, the transcript is
+        // replaced with a synthetic "message_hash" message (type 254)
+        // carrying Hash(ClientHello1), then the HelloRetryRequest itself is
+        // appended as if a normal handshake message.
+        let ch1_hash = if hash_algo == HKDF_HASH_SHA256 {
+            let h = sha256(&ch_bytes, ch_len)
+            array32_to_rawbuf(&h)
+        } else {
+            let h = sha384(&ch_bytes, ch_len)
+            let out = rawbuf_new(48 + 8)
+            var i: i64 = 0
+            while i < 48 {
+                rawbuf_set(&out, i, h[i as usize] as i64)
+                i = i + 1
+            }
+            out
+        }
+        let synthetic = rawbuf_new(4 + hash_len + 8)
+        rawbuf_set(&synthetic, 0, 254) // message_hash
+        rawbuf_set(&synthetic, 1, 0)
+        rawbuf_set(&synthetic, 2, 0)
+        rawbuf_set(&synthetic, 3, hash_len)
+        var si: i64 = 0
+        while si < hash_len {
+            rawbuf_set(&synthetic, 4 + si, rawbuf_get(&ch1_hash, si))
+            si = si + 1
+        }
+        transcript_append(&!hs_transcript, &synthetic, 4 + hash_len)
+        transcript_append(&!hs_transcript, &sh1_bytes, sh1_len)
+
+        // Final-review Fix 3: RFC 8446 SS4.1.4's HelloRetryRequest carries
+        // its selected group as a bare NamedGroup in its own key_share
+        // extension (`sh1_info.selected_group`, recorded unconditionally by
+        // `decode_server_hello` -- see `ServerHelloInfo`'s own doc comment).
+        // Checked explicitly and BEFORE any re-send: this plan implements
+        // X25519 only (per the plan's own Out of Scope / Scope Decision),
+        // so an HRR demanding a different group must fail closed with a
+        // clear, distinct error here -- previously this fell through
+        // indistinguishably from "no key_share in the HRR at all" (a
+        // cookie-only HRR) and the client would blindly retry with its
+        // original X25519 share, only for the server to abort the mismatched
+        // retry downstream.
+        if sh1_info.selected_group != (NAMED_GROUP_X25519 as u16) {
+            (sock2, sh1_info, sh1_bytes, sh1_len, TLS_CONNECT_ERR_UNSUPPORTED_GROUP)
+        } else {
+
+        // Re-send ClientHello with the HRR's cookie echoed back (if any).
+        // Same random/key_share: this plan supports only X25519, confirmed
+        // above to be what the HRR actually asked for.
+        let ch2_params = ClientHelloParams {
+            random: client_random,
+            x25519_public: x25519_pub,
+            server_name: *host,
+            server_name_len: host_len,
+            cookie: sh1_info.cookie,
+            cookie_len: sh1_info.cookie_len,
+        }
+        let (ch2_bytes, ch2_len) = encode_client_hello(&ch2_params)
+        transcript_append(&!hs_transcript, &ch2_bytes, ch2_len)
+
+        let (sock3, send_err2) = send_plaintext_record(sock2, TLS_CONTENT_TYPE_HANDSHAKE, &ch2_bytes, ch2_len)
+        if send_err2 != 0 {
+            // NOTE: this must consume `sock3` (not a fresh dummy) --
+            // a value-producing if/else EXPRESSION requires every branch
+            // to consume the SAME linear values symmetrically; dropping a
+            // still-live linear binding in one branch while another branch
+            // consumes it was independently confirmed to trip
+            // `error[E040]` on this compiler (distinct from the E039
+            // shape noted above `tcp_recv_exact` -- that one fires on
+            // STATEMENT-form early returns with no matching `else`; this
+            // one fires on value-producing `if/else` branch asymmetry).
+            (sock3, sh1_info, sh1_bytes, sh1_len, TLS_CONNECT_ERR_SEND)
+        } else {
+            let (sock4, sh2_bytes, sh2_len, sh2_status) = next_handshake_message(sock3, &!dummy_records, false, &!hb)
+            if sh2_status != 0 {
+                (sock4, sh1_info, sh1_bytes, sh1_len, TLS_CONNECT_ERR_RECV)
+            } else {
+                let (sh2_info, sh2_ok) = decode_server_hello(&sh2_bytes, sh2_len)
+                // --- D9 CHECK 2b: the HelloRetryRequest path's own second
+                // ServerHello. D9 check 2 above only ever re-scanned sh1 --
+                // on the HRR path, sh2 is what actually supplies the
+                // x25519_public consumed downstream (see the ECDHE
+                // derivation after this whole if/else), and it was never
+                // independently re-verified against its own raw wire bytes,
+                // leaving exactly the kind of caller-destructure corruption
+                // D9 exists to catch unchecked on the path most likely to
+                // exercise different code shapes. Same independent-re-scan
+                // discipline as D9 check 2 (see this file's header comment)
+                // -- fails closed with TLS_CONNECT_ERR_D9_CORRUPTION on any
+                // mismatch, computed unconditionally alongside decode's own
+                // ok/status so it can't be skipped by an early return
+                // built into decode_server_hello. ---
+                let (sh2_scanned_random, sh2_scanned_key, sh2_scan_found) = sh_scan_random_and_key(&sh2_bytes, sh2_len)
+                if !sh2_ok {
+                    (sock4, sh1_info, sh1_bytes, sh1_len, TLS_CONNECT_ERR_DECODE)
+                } else if sh2_info.is_hello_retry_request {
+                    // Only one retry permitted (this task's own scope).
+                    (sock4, sh1_info, sh1_bytes, sh1_len, TLS_CONNECT_ERR_HRR)
+                } else if !arrays32_eq(&sh2_scanned_random, &sh2_info.random) {
+                    (sock4, sh1_info, sh1_bytes, sh1_len, TLS_CONNECT_ERR_D9_CORRUPTION)
+                } else if sh2_info.has_key_share && (!sh2_scan_found || !arrays32_eq(&sh2_scanned_key, &sh2_info.x25519_public)) {
+                    (sock4, sh1_info, sh1_bytes, sh1_len, TLS_CONNECT_ERR_D9_CORRUPTION)
+                } else if sh2_info.cipher_suite != sh1_info.cipher_suite {
+                    // RFC 8446 SS4.1.4: the server MUST NOT change the
+                    // negotiated cipher_suite across a HelloRetryRequest
+                    // retry.
+                    (sock4, sh1_info, sh1_bytes, sh1_len, TLS_CONNECT_ERR_CIPHER_SUITE_MISMATCH)
+                } else {
+                    transcript_append(&!hs_transcript, &sh2_bytes, sh2_len)
+                    (sock4, sh2_info, sh2_bytes, sh2_len, TLS_CONNECT_OK)
+                }
+            }
+        }
+        }
+    } else {
+        transcript_append(&!hs_transcript, &ch_bytes, ch_len)
+        transcript_append(&!hs_transcript, &sh1_bytes, sh1_len)
+        (sock2, sh1_info, sh1_bytes, sh1_len, TLS_CONNECT_OK)
+    }
+
+    if hrr_err != 0 {
+        return (zero_conn, hrr_err)
+    }
+
+    if !sh_info.has_key_share {
+        return (zero_conn, TLS_CONNECT_ERR_KEY_EXCHANGE)
+    }
+
+    // --- ECDHE shared secret ---
+    let (shared_secret, ecdhe_ok) = x25519(&x25519_priv, &sh_info.x25519_public)
+    if !ecdhe_ok {
+        return (zero_conn, TLS_CONNECT_ERR_KEY_EXCHANGE)
+    }
+    let shared_secret_buf = array32_to_rawbuf(&shared_secret)
+
+    let hash_through_sh = transcript_current_hash(&hs_transcript)
+
+    let early_secret = tls13_early_secret(hash_algo)
+    let handshake_secret = tls13_handshake_secret(hash_algo, &early_secret, hash_len, &shared_secret_buf, 32)
+
+    let (chts_label, chts_label_len) = label_buf("c hs traffic")
+    let (shts_label, shts_label_len) = label_buf("s hs traffic")
+    let client_hs_traffic_secret = derive_secret(hash_algo, &handshake_secret, hash_len, &chts_label, chts_label_len, &hash_through_sh, hash_len)
+    let server_hs_traffic_secret = derive_secret(hash_algo, &handshake_secret, hash_len, &shts_label, shts_label_len, &hash_through_sh, hash_len)
+
+    let (client_hs_key, client_hs_iv) = tls13_traffic_key_and_iv(hash_algo, &client_hs_traffic_secret, hash_len, key_len, iv_len)
+    let (server_hs_key, server_hs_iv) = tls13_traffic_key_and_iv(hash_algo, &server_hs_traffic_secret, hash_len, key_len, iv_len)
+
+    var records = record_layer_new(aead_algo, key_len, iv_len)
+    record_layer_rekey(&!records, &server_hs_key, &server_hs_iv, &client_hs_key, &client_hs_iv)
+
+    // --- EncryptedExtensions ---
+    let (sock5, ee_bytes, ee_len, ee_status) = next_handshake_message(sock_after_sh, &!records, true, &!hb)
+    if ee_status != 0 {
+        return (zero_conn, TLS_CONNECT_ERR_RECV)
+    }
+    if ee_len < 1 || (rawbuf_get(&ee_bytes, 0) as u8) != HS_ENCRYPTED_EXTENSIONS {
+        return (zero_conn, TLS_CONNECT_ERR_DECODE)
+    }
+    transcript_append(&!hs_transcript, &ee_bytes, ee_len)
+
+    // --- Certificate ---
+    let (sock6, cert_bytes, cert_len, cert_status) = next_handshake_message(sock5, &!records, true, &!hb)
+    if cert_status != 0 {
+        return (zero_conn, TLS_CONNECT_ERR_RECV)
+    }
+    let (leaf, leaf_buf, intermediates, intermediate_bufs, intermediate_count, cert_ok) = decode_certificate_message(&cert_bytes, cert_len)
+    if !cert_ok {
+        return (zero_conn, TLS_CONNECT_ERR_DECODE)
+    }
+    transcript_append(&!hs_transcript, &cert_bytes, cert_len)
+
+    // Transcript hash "through Certificate" -- what CertificateVerify's own
+    // signature covers (RFC 8446 SS4.4.3: "the content that is covered
+    // under the signature is ... Transcript-Hash(Handshake Context,
+    // Certificate)", i.e. NOT including CertificateVerify itself).
+    let hash_through_certificate = transcript_current_hash(&hs_transcript)
+
+    // --- CertificateVerify ---
+    let (sock7, cv_bytes, cv_len, cv_status) = next_handshake_message(sock6, &!records, true, &!hb)
+    if cv_status != 0 {
+        return (zero_conn, TLS_CONNECT_ERR_RECV)
+    }
+    let (cv_info, cv_ok) = decode_certificate_verify(&cv_bytes, cv_len)
+    if !cv_ok {
+        return (zero_conn, TLS_CONNECT_ERR_DECODE)
+    }
+    let (cv_message, cv_message_len) = build_certificate_verify_message(&hash_through_certificate, hash_len)
+    if !verify_certificate_signature(&leaf, cv_info.signature_scheme, &cv_info.cv_signature, cv_info.cv_signature_len, &cv_message, cv_message_len) {
+        return (zero_conn, TLS_CONNECT_ERR_SIGNATURE)
+    }
+    transcript_append(&!hs_transcript, &cv_bytes, cv_len)
+
+    // --- certificate chain verification ---
+    let empty_ocsp = rawbuf_new(0)
+    let chain_result = x509_verify_chain(&leaf, &leaf_buf, &intermediates, &intermediate_bufs, intermediate_count, trust_store, host, host_len, now_unix, &empty_ocsp, 0)
+    if chain_result != CHAIN_OK {
+        return (zero_conn, TLS_CONNECT_ERR_CERT_CHAIN)
+    }
+
+    // Transcript hash "through CertificateVerify" -- what the server's own
+    // Finished HMAC covers (RFC 8446 SS4.4.4).
+    let hash_through_cv = transcript_current_hash(&hs_transcript)
+
+    // --- server Finished ---
+    let (sock8, sf_bytes, sf_len, sf_status) = next_handshake_message(sock7, &!records, true, &!hb)
+    if sf_status != 0 {
+        return (zero_conn, TLS_CONNECT_ERR_RECV)
+    }
+    let (received_verify_data, received_verify_data_len) = decode_finished(&sf_bytes, sf_len)
+    if received_verify_data_len != hash_len {
+        return (zero_conn, TLS_CONNECT_ERR_FINISHED)
+    }
+    let server_finished_key = compute_finished_key(hash_algo, &server_hs_traffic_secret, hash_len)
+    let expected_server_verify_data = compute_verify_data(hash_algo, &server_finished_key, hash_len, &hash_through_cv)
+    if !constant_time_eq_rawbuf(&expected_server_verify_data, &received_verify_data, hash_len) {
+        return (zero_conn, TLS_CONNECT_ERR_FINISHED)
+    }
+    transcript_append(&!hs_transcript, &sf_bytes, sf_len)
+
+    // --- Master Secret and application traffic secrets ---
+    let master_secret = tls13_master_secret(hash_algo, &handshake_secret, hash_len)
+    let hash_through_finished = transcript_current_hash(&hs_transcript)
+
+    let (caps_label, caps_label_len) = label_buf("c ap traffic")
+    let (saps_label, saps_label_len) = label_buf("s ap traffic")
+    let client_ap_secret = derive_secret(hash_algo, &master_secret, hash_len, &caps_label, caps_label_len, &hash_through_finished, hash_len)
+    let server_ap_secret = derive_secret(hash_algo, &master_secret, hash_len, &saps_label, saps_label_len, &hash_through_finished, hash_len)
+
+    // --- client's own Finished ---
+    let client_finished_key = compute_finished_key(hash_algo, &client_hs_traffic_secret, hash_len)
+    let client_verify_data = compute_verify_data(hash_algo, &client_finished_key, hash_len, &hash_through_finished)
+    let (cf_bytes, cf_len) = encode_finished(&client_verify_data, hash_len)
+    transcript_append(&!hs_transcript, &cf_bytes, cf_len)
+
+    let (sock9, send_err3) = send_encrypted_record(sock8, &!records, TLS_CONTENT_TYPE_HANDSHAKE, &cf_bytes, cf_len)
+    if send_err3 != 0 {
+        return (zero_conn, TLS_CONNECT_ERR_SEND)
+    }
+
+    // --- rekey for application data ---
+    let (client_ap_key, client_ap_iv) = tls13_traffic_key_and_iv(hash_algo, &client_ap_secret, hash_len, key_len, iv_len)
+    let (server_ap_key, server_ap_iv) = tls13_traffic_key_and_iv(hash_algo, &server_ap_secret, hash_len, key_len, iv_len)
+    record_layer_rekey(&!records, &server_ap_key, &server_ap_iv, &client_ap_key, &client_ap_iv)
+
+    let conn = TlsConnection {
+        sock: sock9,
+        records: records,
+        hash_algo: hash_algo,
+        hs_transcript: hs_transcript,
+        master_secret: master_secret,
+        client_ap_secret: client_ap_secret,
+        server_ap_secret: server_ap_secret,
+        tickets_discarded: 0,
+        pending: rawbuf_new(TLS_MAX_FRAGMENT + 8),
+        pending_offset: 0,
+        pending_len: 0,
+    }
+    (conn, TLS_CONNECT_OK)
+}
+
+// ============================================================================
+// Task 8: application-data lifecycle -- tls_send / tls_recv / tls_close
+// ============================================================================
+//
+// Appends the final public interface of the whole TLS-on-Madaros effort to
+// this same file. Consumes the exact `TlsConnection` state `tls_connect`
+// (above) leaves behind: `sock` positioned right after the client's own
+// Finished was sent, `records` already rekeyed for application traffic
+// (client_ap_secret/server_ap_secret installed as write/read respectively),
+// `hash_algo` fixing which HKDF hash the post-handshake KeyUpdate
+// re-derivation (RFC 8446 SS7.2) must use.
+//
+// RFC 8446 SS7.2 label independently re-verified fresh
+// (https://www.rfc-editor.org/rfc/rfc8446.txt) for this task: the KeyUpdate
+// traffic-secret re-derivation label is the literal ASCII string
+// "traffic upd" (11 bytes) -- `application_traffic_secret_N+1 =
+// HKDF-Expand-Label(application_traffic_secret_N, "traffic upd", "",
+// Hash.length)`.
+//
+// close_notify's exact 2-byte Alert encoding independently re-verified fresh
+// against the same RFC (SS6, SS6.1): AlertLevel=warning(1),
+// AlertDescription=close_notify(0) -- wire bytes `0x01 0x00`. RFC 8446 SS6
+// itself notes the `level` field is vestigial in TLS 1.3 ("the severity is
+// implicit in the type of alert being sent, and the 'level' field can
+// safely be ignored") -- this file still emits/checks the conventional
+// warning-level encoding, since that's what real peers (openssl s_server
+// included) actually send and expect.
+//
+// Same control-flow-shape discipline as `tls_connect` above (see the note
+// above `tcp_recv_exact`): every function below either recurses instead of
+// looping over a re-threaded linear value (`TcpSocket`, transitively
+// `TlsConnection` since it embeds one), or is written as one exhaustive
+// if/else EXPRESSION consuming the same linear bindings symmetrically
+// across every branch.
+
+// `TLS_IO_ERR_SEND`/`RECV`/`DECRYPT`/`ALERT`/`MALFORMED` are five distinct
+// names deliberately bound to the same negative value. That's intentional,
+// not an oversight: the design spec only promises callers "negative return
+// == error", mirroring `tcp_recv`'s own simple "any negative == error"
+// contract -- nothing in this file (or any caller) currently branches on
+// *which* of these five values came back. The separate names exist purely
+// so a future caller could start distinguishing them without an API-
+// breaking change (the constant, not its numeric value, is the stable
+// surface). `TLS_IO_ERR_RECORD_OVERFLOW` below is the one deliberate
+// exception -- final-review Fix 1 gives it a genuinely distinct value
+// because RFC 8446 SS5.4 treats an oversized record as its own alert
+// (`record_overflow`), not a generic decrypt/malformed failure.
+pub const TLS_IO_ERR_SEND: i64 = 0 - 1
+pub const TLS_IO_ERR_RECV: i64 = 0 - 1
+pub const TLS_IO_ERR_DECRYPT: i64 = 0 - 1
+pub const TLS_IO_ERR_ALERT: i64 = 0 - 1
+pub const TLS_IO_ERR_MALFORMED: i64 = 0 - 1
+pub const TLS_IO_ERR_RECORD_OVERFLOW: i64 = 0 - 2
+
+// Sends `buf[0..len)` as one or more `application_data` records
+// (RFC 8446 SS5.1 caps a single TLSPlaintext at 2^14 bytes -- this loop
+// splits correctly rather than assuming one request always fits, per the
+// task brief, even though every realistic payload in this plan's own
+// scope -- an HTTP/1.0 GET line -- is far under that cap).
+//
+// Recursive rather than a `while` loop re-threading `conn` (which embeds
+// the linear `TcpSocket`) -- see the control-flow-shape note above
+// `tcp_recv_exact` in tls_connect's own section of this file: a `while`
+// loop reassigning an already-used linear-typed var trips
+// `error[E039]: linear value has already been used` on this compiler.
+pub fn tls_send(conn: TlsConnection, buf: &RawBuf, len: i64) -> (TlsConnection, i64) with IO, Mut {
+    if len <= 0 {
+        (conn, 0)
+    } else {
+        let TlsConnection { sock, records, hash_algo, hs_transcript, master_secret, client_ap_secret, server_ap_secret, tickets_discarded, pending, pending_offset, pending_len } = conn
+        var records2 = records
+        let chunk_len = if len > TLS_MAX_FRAGMENT { TLS_MAX_FRAGMENT } else { len }
+        let view = rawbuf_view(buf, 0, chunk_len)
+        let (sock2, send_err) = send_encrypted_record(sock, &!records2, TLS_CONTENT_TYPE_APPLICATION_DATA, &view, chunk_len)
+        let conn2 = TlsConnection {
+            sock: sock2,
+            records: records2,
+            hash_algo: hash_algo,
+            hs_transcript: hs_transcript,
+            master_secret: master_secret,
+            client_ap_secret: client_ap_secret,
+            server_ap_secret: server_ap_secret,
+            tickets_discarded: tickets_discarded,
+            pending: pending,
+            pending_offset: pending_offset,
+            pending_len: pending_len,
+        }
+        if send_err != 0 {
+            (conn2, TLS_IO_ERR_SEND)
+        } else if chunk_len >= len {
+            (conn2, chunk_len)
+        } else {
+            let rest_view = rawbuf_view(buf, chunk_len, len - chunk_len)
+            let (conn3, rest_sent) = tls_send(conn2, &rest_view, len - chunk_len)
+            if rest_sent < 0 {
+                (conn3, TLS_IO_ERR_SEND)
+            } else {
+                (conn3, chunk_len + rest_sent)
+            }
+        }
+    }
+}
+
+// RFC 8446 SS7.2 KeyUpdate re-derivation: the receiving side's OWN read-
+// direction traffic secret is advanced one step, independently of the
+// write direction (RFC 8446 SS4.6.3: "each side updates its own sending
+// key independently ... a KeyUpdate does not cause an update of the peer's
+// sending key"). Builds a fresh `RecordLayerState` directly (struct-literal
+// construction, matching this codebase's established cross-file field-
+// access convention -- e.g. `stdlib/x509/cert.sio`'s `Certificate` fields
+// are read directly from this same file with no per-field `pub` -- struct-
+// level `pub` is what gates visibility here, not per-field) rather than
+// calling `record_layer_rekey`: that function (Task 4, `stdlib/tls/
+// record.sio`) unconditionally resets BOTH read and write sequence numbers
+// to 0 on every call (correct for its own designed use -- a real key
+// change on both directions at once, e.g. the handshake-to-application-
+// keys transition), which would be WRONG here -- resetting `write_seq` to
+// 0 without also rotating the write key would risk nonce reuse on this
+// connection's OWN next `tls_send`. Constructing the new state directly
+// keeps `write_key`/`write_iv`/`write_seq` completely untouched, only
+// replacing `read_key`/`read_iv` and resetting `read_seq` (RFC 8446 SS5.3:
+// a sequence number resets "whenever the key is changed", scoped to the
+// direction whose key actually changed).
+fn rekey_read_direction(records: RecordLayerState, new_read_key: &RawBuf, new_read_iv: &RawBuf) -> RecordLayerState with IO {
+    RecordLayerState {
+        read_key: *new_read_key,
+        read_iv: *new_read_iv,
+        read_seq: 0,
+        write_key: records.write_key,
+        write_iv: records.write_iv,
+        write_seq: records.write_seq,
+        key_len: records.key_len,
+        iv_len: records.iv_len,
+        aead_algo: records.aead_algo,
+    }
+}
+
+// Core `tls_recv` loop: reads and decrypts one TLS record at a time,
+// transparently discarding NewSessionTicket, transparently re-keying on
+// KeyUpdate, and recursing to read the next record in either case, until
+// either real `application_data` arrives, `close_notify` is observed (EOF,
+// returns 0), a fatal condition is hit (negative sentinel), or the
+// underlying `tcp_recv_exact` calls short-read/EOF/error (also a negative
+// sentinel, distinguished from `close_notify`'s clean EOF exactly the way
+// `tcp_recv`'s own contract distinguishes a `recv() == 0` peer-closed-
+// gracefully from a `recv() < 0` error -- this file's own `close_notify`
+// path is the ONLY way a positive-length TLS session produces a clean 0).
+// Pure arithmetic split of one decrypted `application_data` record's
+// `content_len` bytes between what a `tls_recv` caller gets back THIS call
+// (`out_len`, capped at `cap`) and how many trailing bytes of that same
+// record must be held in `TlsConnection.pending` for the NEXT call
+// (`overflow_len`) instead of being dropped -- Task 8 fix-round-1. No
+// RawBuf/network/effects involved, deliberately, so this one arithmetic
+// decision can be unit-tested directly and exhaustively (see
+// tests/run-pass/tls_client_recv_pending_split.sio, which imports and calls
+// this exact function rather than re-deriving its logic) independently of
+// the live-server-only interop tests the rest of this file's
+// `application_data` path otherwise requires. `pub` purely for that
+// testability -- no other module calls it.
+pub fn split_into_buf_and_pending(content_len: i64, cap: i64) -> (i64, i64) {
+    let out_len = if content_len < cap { content_len } else { cap }
+    let overflow_len = content_len - out_len
+    (out_len, overflow_len)
+}
+
+// Final-review Fix 1: RFC 8446 SS5.4 requires rejecting an oversized
+// TLSCiphertext/TLSInnerPlaintext with a `record_overflow`-class error
+// rather than trusting either length to bound `TlsConnection.pending`
+// (16392 bytes, TLS_MAX_FRAGMENT + 8). Neither the wire `frag_len` (up to
+// 65535, straight off the 2-byte header) nor `record_decrypt`'s returned
+// `content_len` (up to ~65518) was checked against TLS_MAX_FRAGMENT before
+// reaching `split_into_buf_and_pending`'s unchecked `rawbuf_set` loop into
+// `pending` -- a non-compliant/hostile but authenticated server could
+// overflow that fixed allocation. Both checks below are pure (no RawBuf/
+// network/effects) so they're exhaustively unit-testable without a live
+// peer, the same way `split_into_buf_and_pending` above is.
+//
+// `is_oversized_ciphertext_fragment` bounds the WIRE length, checked in
+// `tls_recv_loop` before the fragment is even read off the socket. The
+// limit is TLS_MAX_FRAGMENT + 256: RFC 8446 SS5.2's own stated ciphertext
+// expansion (the AEAD tag plus up to 255 bytes of padding this client
+// never emits but a peer's encoder might) on top of the SS5.1 plaintext
+// cap. This is the generous, early, cheap check -- not the decisive one.
+pub fn is_oversized_ciphertext_fragment(frag_len: i64) -> bool {
+    frag_len > TLS_MAX_FRAGMENT + 256
+}
+
+// `is_oversized_decrypted_content` bounds the DECRYPTED plaintext length
+// returned by `record_decrypt`, checked in `tls_recv_loop` immediately
+// after decryption succeeds and before `split_into_buf_and_pending` is
+// ever called. This is the decisive check: it directly bounds what could
+// reach the `pending` write, independent of whatever the wire header
+// claimed.
+pub fn is_oversized_decrypted_content(content_len: i64) -> bool {
+    content_len > TLS_MAX_FRAGMENT
+}
+
+fn tls_recv_loop(conn: TlsConnection, buf: &RawBuf, cap: i64) -> (TlsConnection, i64) with IO, Mut {
+    let TlsConnection { sock, records, hash_algo, hs_transcript, master_secret, client_ap_secret, server_ap_secret, tickets_discarded, pending, pending_offset, pending_len } = conn
+    var records2 = records
+    let header = rawbuf_new(5 + 8)
+    let (sock2, n1) = tcp_recv_exact(sock, &header, 0, 5)
+    if n1 < 5 {
+        let conn_err = TlsConnection {
+            sock: sock2, records: records2, hash_algo: hash_algo, hs_transcript: hs_transcript,
+            master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
+            tickets_discarded: tickets_discarded, pending: pending, pending_offset: pending_offset, pending_len: pending_len,
+        }
+        (conn_err, TLS_IO_ERR_RECV)
+    } else {
+        let outer_type = rawbuf_get(&header, 0)
+        let frag_len = (rawbuf_get(&header, 3) << 8) | rawbuf_get(&header, 4)
+        if is_oversized_ciphertext_fragment(frag_len) {
+            // Final-review Fix 1: fail closed on the wire length BEFORE
+            // ever allocating a buffer for or reading the fragment itself
+            // -- RFC 8446 SS5.4's `record_overflow` case. See
+            // `is_oversized_ciphertext_fragment`'s own doc comment above.
+            let conn_err = TlsConnection {
+                sock: sock2, records: records2, hash_algo: hash_algo, hs_transcript: hs_transcript,
+                master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
+                tickets_discarded: tickets_discarded, pending: pending, pending_offset: pending_offset, pending_len: pending_len,
+            }
+            (conn_err, TLS_IO_ERR_RECORD_OVERFLOW)
+        } else {
+        let payload = rawbuf_new(frag_len + 8)
+        let (sock3, n2) = tcp_recv_exact(sock2, &payload, 0, frag_len)
+        if n2 < frag_len {
+            let conn_err = TlsConnection {
+                sock: sock3, records: records2, hash_algo: hash_algo, hs_transcript: hs_transcript,
+                master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
+                tickets_discarded: tickets_discarded, pending: pending, pending_offset: pending_offset, pending_len: pending_len,
+            }
+            (conn_err, TLS_IO_ERR_RECV)
+        } else if outer_type == (TLS_CONTENT_TYPE_CHANGE_CIPHER_SPEC as i64) {
+            // RFC 8446 Appendix D.4: stray middlebox-compatibility CCS
+            // records MUST be ignored wherever they appear, not just
+            // immediately post-ClientHello.
+            let conn_next = TlsConnection {
+                sock: sock3, records: records2, hash_algo: hash_algo, hs_transcript: hs_transcript,
+                master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
+                tickets_discarded: tickets_discarded, pending: pending, pending_offset: pending_offset, pending_len: pending_len,
+            }
+            tls_recv_loop(conn_next, buf, cap)
+        } else {
+            let (content_type, content, content_len, ok) = record_decrypt(&!records2, &payload, frag_len)
+            if !ok {
+                let conn_err = TlsConnection {
+                    sock: sock3, records: records2, hash_algo: hash_algo, hs_transcript: hs_transcript,
+                    master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
+                    tickets_discarded: tickets_discarded, pending: pending, pending_offset: pending_offset, pending_len: pending_len,
+                }
+                (conn_err, TLS_IO_ERR_DECRYPT)
+            } else if is_oversized_decrypted_content(content_len) {
+                // Final-review Fix 1 -- the decisive check: whatever the
+                // wire header claimed, `record_decrypt`'s own returned
+                // `content_len` is what could actually reach
+                // `split_into_buf_and_pending`'s unchecked write into
+                // `pending`. Fail closed here, before that call, for every
+                // content type -- not just `application_data` -- since RFC
+                // 8446 SS5.1's 2^14 plaintext cap applies regardless of
+                // what the decrypted record turns out to contain.
+                let conn_err = TlsConnection {
+                    sock: sock3, records: records2, hash_algo: hash_algo, hs_transcript: hs_transcript,
+                    master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
+                    tickets_discarded: tickets_discarded, pending: pending, pending_offset: pending_offset, pending_len: pending_len,
+                }
+                (conn_err, TLS_IO_ERR_RECORD_OVERFLOW)
+            } else if content_type == TLS_CONTENT_TYPE_APPLICATION_DATA {
+                // Task 8 fix-round-1: `content_len` (this one record's
+                // decrypted plaintext length, up to TLS_MAX_FRAGMENT) can
+                // exceed the caller's `cap`. `split_into_buf_and_pending`
+                // (pure, unit-tested independently in
+                // tests/run-pass/tls_client_recv_pending_split.sio) decides
+                // exactly how many bytes go to the caller now (`out_len`)
+                // versus how many must be held in `conn.pending` for the
+                // NEXT `tls_recv` call (`overflow_len`) -- never dropped.
+                let (out_len, overflow_len) = split_into_buf_and_pending(content_len, cap)
+                var ci: i64 = 0
+                while ci < out_len {
+                    rawbuf_set(buf, ci, rawbuf_get(&content, ci))
+                    ci = ci + 1
+                }
+                var oi: i64 = 0
+                while oi < overflow_len {
+                    rawbuf_set(&pending, oi, rawbuf_get(&content, out_len + oi))
+                    oi = oi + 1
+                }
+                let conn_ok = TlsConnection {
+                    sock: sock3, records: records2, hash_algo: hash_algo, hs_transcript: hs_transcript,
+                    master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
+                    tickets_discarded: tickets_discarded, pending: pending, pending_offset: 0, pending_len: overflow_len,
+                }
+                (conn_ok, out_len)
+            } else if content_type == TLS_CONTENT_TYPE_ALERT {
+                // RFC 8446 SS6/SS6.1: close_notify = AlertLevel(warning=1)
+                // || AlertDescription(close_notify=0) -- verified fresh
+                // against the RFC for this task (see file section header
+                // above). Any other alert (or a malformed 2-byte alert
+                // body) is a fatal condition -- return the negative
+                // sentinel, never a partial/forged read.
+                let is_close_notify = content_len == 2 && rawbuf_get(&content, 0) == 1 && rawbuf_get(&content, 1) == 0
+                let conn_after = TlsConnection {
+                    sock: sock3, records: records2, hash_algo: hash_algo, hs_transcript: hs_transcript,
+                    master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
+                    tickets_discarded: tickets_discarded, pending: pending, pending_offset: pending_offset, pending_len: pending_len,
+                }
+                if is_close_notify {
+                    (conn_after, 0)
+                } else {
+                    (conn_after, TLS_IO_ERR_ALERT)
+                }
+            } else if content_type == TLS_CONTENT_TYPE_HANDSHAKE {
+                if content_len < 1 {
+                    let conn_err = TlsConnection {
+                        sock: sock3, records: records2, hash_algo: hash_algo, hs_transcript: hs_transcript,
+                        master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
+                        tickets_discarded: tickets_discarded, pending: pending, pending_offset: pending_offset, pending_len: pending_len,
+                    }
+                    (conn_err, TLS_IO_ERR_MALFORMED)
+                } else {
+                    let msg_type = (rawbuf_get(&content, 0) as u8)
+                    if is_new_session_ticket(msg_type) {
+                        // Silently discard (resumption is out of this
+                        // plan's scope, per the spec's own Scope
+                        // Decisions) and read the next record instead of
+                        // returning -- but bump the test-observability
+                        // counter first (see TlsConnection's own doc
+                        // comment on `tickets_discarded`).
+                        let conn_next = TlsConnection {
+                            sock: sock3, records: records2, hash_algo: hash_algo, hs_transcript: hs_transcript,
+                            master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
+                            tickets_discarded: tickets_discarded + 1, pending: pending, pending_offset: pending_offset, pending_len: pending_len,
+                        }
+                        tls_recv_loop(conn_next, buf, cap)
+                    } else if is_key_update(msg_type) {
+                        // RFC 8446 SS7.2 / SS4.6.3: re-derive this
+                        // connection's read-direction (server) application
+                        // traffic secret and rekey the read side only (see
+                        // `rekey_read_direction`'s own doc comment above
+                        // for why `record_layer_rekey` itself is NOT used
+                        // here). This plan's own scope (per the design
+                        // spec's Scope Decisions) is limited to
+                        // "transparently handles KeyUpdate ... no new key-
+                        // schedule construction" -- it does NOT echo a
+                        // KeyUpdate of its own back to the peer even when
+                        // the received KeyUpdate's request_update field
+                        // asks for one (RFC 8446 SS4.6.3's SHOULD), since
+                        // this plan never needs to actively rotate its own
+                        // write-direction key and doing so with no
+                        // consumer would be scope creep -- documented here
+                        // as a known limitation rather than silently
+                        // dropped.
+                        let hash_len = hash_len_for(hash_algo)
+                        let (upd_label, upd_label_len) = label_buf("traffic upd")
+                        let empty_ctx = rawbuf_new(0)
+                        let new_server_ap_secret = derive_secret(hash_algo, &server_ap_secret, hash_len, &upd_label, upd_label_len, &empty_ctx, 0)
+                        let (new_read_key, new_read_iv) = tls13_traffic_key_and_iv(hash_algo, &new_server_ap_secret, hash_len, records2.key_len, records2.iv_len)
+                        let records3 = rekey_read_direction(records2, &new_read_key, &new_read_iv)
+                        let conn_rekeyed = TlsConnection {
+                            sock: sock3, records: records3, hash_algo: hash_algo, hs_transcript: hs_transcript,
+                            master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: new_server_ap_secret,
+                            tickets_discarded: tickets_discarded, pending: pending, pending_offset: pending_offset, pending_len: pending_len,
+                        }
+                        tls_recv_loop(conn_rekeyed, buf, cap)
+                    } else {
+                        // Any other post-handshake handshake-layer message
+                        // (e.g. a second CertificateRequest, or a stray
+                        // ClientHello/ServerHello) is unexpected in this
+                        // state -- fail closed.
+                        let conn_err = TlsConnection {
+                            sock: sock3, records: records2, hash_algo: hash_algo, hs_transcript: hs_transcript,
+                            master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
+                            tickets_discarded: tickets_discarded, pending: pending, pending_offset: pending_offset, pending_len: pending_len,
+                        }
+                        (conn_err, TLS_IO_ERR_MALFORMED)
+                    }
+                }
+            } else {
+                let conn_err = TlsConnection {
+                    sock: sock3, records: records2, hash_algo: hash_algo, hs_transcript: hs_transcript,
+                    master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
+                    tickets_discarded: tickets_discarded, pending: pending, pending_offset: pending_offset, pending_len: pending_len,
+                }
+                (conn_err, TLS_IO_ERR_MALFORMED)
+            }
+        }
+        }
+    }
+}
+
+// Reads up to `cap` bytes of real `application_data` into `buf`, silently
+// skipping NewSessionTicket/KeyUpdate post-handshake messages and
+// transparently handling `close_notify` (returns 0, matching `tcp_recv`'s
+// own EOF convention). Negative return: error (decrypt failure, fatal
+// alert, malformed/unexpected message, or a short/failed underlying
+// `tcp_recv`).
+//
+// Task 8 fix-round-1: checks `conn.pending_len` FIRST, before touching the
+// socket at all. A previous call's decrypted record may have been larger
+// than that call's own `cap`, in which case the excess is sitting in
+// `conn.pending` (see `TlsConnection`'s own doc comment) -- this drains it
+// first, exactly like `tcp_recv`'s own contract of returning whatever is
+// already available rather than blocking for more. Only once `pending_len`
+// reaches 0 does this fall through to `tls_recv_loop`, which reads and
+// decrypts the next record from the wire.
+pub fn tls_recv(conn: TlsConnection, buf: &RawBuf, cap: i64) -> (TlsConnection, i64) with IO, Mut {
+    let TlsConnection { sock, records, hash_algo, hs_transcript, master_secret, client_ap_secret, server_ap_secret, tickets_discarded, pending, pending_offset, pending_len } = conn
+    if pending_len > 0 {
+        let take = if pending_len < cap { pending_len } else { cap }
+        var i: i64 = 0
+        while i < take {
+            rawbuf_set(buf, i, rawbuf_get(&pending, pending_offset + i))
+            i = i + 1
+        }
+        let remaining = pending_len - take
+        let new_offset = if remaining > 0 { pending_offset + take } else { 0 }
+        let conn2 = TlsConnection {
+            sock: sock, records: records, hash_algo: hash_algo, hs_transcript: hs_transcript,
+            master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
+            tickets_discarded: tickets_discarded, pending: pending, pending_offset: new_offset, pending_len: remaining,
+        }
+        (conn2, take)
+    } else {
+        let conn2 = TlsConnection {
+            sock: sock, records: records, hash_algo: hash_algo, hs_transcript: hs_transcript,
+            master_secret: master_secret, client_ap_secret: client_ap_secret, server_ap_secret: server_ap_secret,
+            tickets_discarded: tickets_discarded, pending: pending, pending_offset: pending_offset, pending_len: pending_len,
+        }
+        tls_recv_loop(conn2, buf, cap)
+    }
+}
+
+// Sends a best-effort `close_notify` alert (RFC 8446 SS6.1: "Unless some
+// other fatal alert has been transmitted, each party MUST send a
+// close_notify alert before closing" its side of the connection) then
+// closes the underlying socket regardless of whether the send succeeded --
+// a peer that has already disappeared must never hang this call.
+pub fn tls_close(conn: TlsConnection) with IO, Mut {
+    let TlsConnection { sock, records, hash_algo, hs_transcript, master_secret, client_ap_secret, server_ap_secret, tickets_discarded, pending, pending_offset, pending_len } = conn
+    var records2 = records
+    let alert = rawbuf_new(2 + 8)
+    rawbuf_set(&alert, 0, 1) // AlertLevel: warning
+    rawbuf_set(&alert, 1, 0) // AlertDescription: close_notify
+    let (sock2, send_err) = send_encrypted_record(sock, &!records2, TLS_CONTENT_TYPE_ALERT, &alert, 2)
+    // hash_algo/hs_transcript/master_secret/client_ap_secret/
+    // server_ap_secret/tickets_discarded/pending/pending_offset/
+    // pending_len/send_err are intentionally unused past this point --
+    // tls_close is a pure sink, nothing downstream
+    // consumes them.
+    tcp_close(sock2)
+}

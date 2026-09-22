@@ -1,0 +1,242 @@
+//@ run-pass
+//@ requires: madaros
+// RFC 8448's full TLS 1.3 handshake trace (section 3, "Simple 1-RTT
+// Handshake" -- confirmed X25519 + AES-128-GCM-SHA256 by ServerHello's
+// cipher suite byte pair `00 13 01` and key_share group `00 1d`).
+//
+// Every value below was independently re-verified against the actual RFC
+// 8448 text (fetched fresh from https://www.rfc-editor.org/rfc/rfc8448.txt)
+// before being trusted here -- this is the single highest-risk
+// transcription in this whole plan given RFC 8448's length and density.
+// See .superpowers/sdd/2026-08-25-madaros-hkdf-tls13-keyschedule-plan/
+// task-3-report.md for the line-by-line extraction record.
+use crypto::hkdf::*
+use net::socket::*
+
+fn set_bytes32(buf: &RawBuf, b0: i64, b1: i64, b2: i64, b3: i64, b4: i64, b5: i64, b6: i64, b7: i64, b8: i64, b9: i64, b10: i64, b11: i64, b12: i64, b13: i64, b14: i64, b15: i64, b16: i64, b17: i64, b18: i64, b19: i64, b20: i64, b21: i64, b22: i64, b23: i64, b24: i64, b25: i64, b26: i64, b27: i64, b28: i64, b29: i64, b30: i64, b31: i64) with IO {
+    rawbuf_set(buf, 0, b0)
+    rawbuf_set(buf, 1, b1)
+    rawbuf_set(buf, 2, b2)
+    rawbuf_set(buf, 3, b3)
+    rawbuf_set(buf, 4, b4)
+    rawbuf_set(buf, 5, b5)
+    rawbuf_set(buf, 6, b6)
+    rawbuf_set(buf, 7, b7)
+    rawbuf_set(buf, 8, b8)
+    rawbuf_set(buf, 9, b9)
+    rawbuf_set(buf, 10, b10)
+    rawbuf_set(buf, 11, b11)
+    rawbuf_set(buf, 12, b12)
+    rawbuf_set(buf, 13, b13)
+    rawbuf_set(buf, 14, b14)
+    rawbuf_set(buf, 15, b15)
+    rawbuf_set(buf, 16, b16)
+    rawbuf_set(buf, 17, b17)
+    rawbuf_set(buf, 18, b18)
+    rawbuf_set(buf, 19, b19)
+    rawbuf_set(buf, 20, b20)
+    rawbuf_set(buf, 21, b21)
+    rawbuf_set(buf, 22, b22)
+    rawbuf_set(buf, 23, b23)
+    rawbuf_set(buf, 24, b24)
+    rawbuf_set(buf, 25, b25)
+    rawbuf_set(buf, 26, b26)
+    rawbuf_set(buf, 27, b27)
+    rawbuf_set(buf, 28, b28)
+    rawbuf_set(buf, 29, b29)
+    rawbuf_set(buf, 30, b30)
+    rawbuf_set(buf, 31, b31)
+}
+
+fn buf_eq32(a: &RawBuf, b: &RawBuf) -> bool with IO {
+    var i: i64 = 0
+    while i < 32 {
+        if rawbuf_get(a, i) != rawbuf_get(b, i) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn write_str_buf(buf: &RawBuf, s: string, n: i64) with IO {
+    var i: i64 = 0
+    while i < n {
+        rawbuf_set(buf, i, str_char_at(s, i))
+        i = i + 1
+    }
+}
+
+fn main() -> i64 with IO {
+    // -- RFC 8448 section 3, "Simple 1-RTT Handshake" -----------------
+    // ServerHello cipher suite `00 13 01` = TLS_AES_128_GCM_SHA256;
+    // key_share group `00 1d` = x25519. Confirms this is the trace
+    // matching this branch's X25519 + AES-128-GCM-SHA256 stack.
+
+    // {server} extract secret "handshake": IKM (32 octets) -- this is the
+    // RFC's own published ECDHE (x25519) shared secret, stated directly
+    // rather than re-derived from the client/server key shares.
+    let ecdhe_shared_secret = rawbuf_new(32)
+    set_bytes32(&ecdhe_shared_secret,
+        0x8b, 0xd4, 0x05, 0x4f, 0xb5, 0x5b, 0x9d, 0x63, 0xfd, 0xfb, 0xac, 0xf9, 0xf0, 0x4b, 0x9f, 0x0d,
+        0x35, 0xe6, 0xd6, 0x3f, 0x53, 0x75, 0x63, 0xef, 0xd4, 0x62, 0x72, 0x90, 0x0f, 0x89, 0x49, 0x2d)
+
+    // {server} extract secret "handshake": secret (32 octets).
+    let expected_handshake_secret = rawbuf_new(32)
+    set_bytes32(&expected_handshake_secret,
+        0x1d, 0xc8, 0x26, 0xe9, 0x36, 0x06, 0xaa, 0x6f, 0xdc, 0x0a, 0xad, 0xc1, 0x2f, 0x74, 0x1b, 0x01,
+        0x04, 0x6a, 0xa6, 0xb9, 0x9f, 0x69, 0x1e, 0xd2, 0x21, 0xa9, 0xf0, 0xca, 0x04, 0x3f, 0xbe, 0xac)
+
+    // {server} derive secret "tls13 c hs traffic": hash (32 octets) --
+    // the transcript hash through ServerHello.
+    let sh_hash = rawbuf_new(32)
+    set_bytes32(&sh_hash,
+        0x86, 0x0c, 0x06, 0xed, 0xc0, 0x78, 0x58, 0xee, 0x8e, 0x78, 0xf0, 0xe7, 0x42, 0x8c, 0x58, 0xed,
+        0xd6, 0xb4, 0x3f, 0x2c, 0xa3, 0xe6, 0xe9, 0x5f, 0x02, 0xed, 0x06, 0x3c, 0xf0, 0xe1, 0xca, 0xd8)
+
+    // {server} derive secret "tls13 c hs traffic": expanded (32 octets).
+    let expected_client_hs_traffic_secret = rawbuf_new(32)
+    set_bytes32(&expected_client_hs_traffic_secret,
+        0xb3, 0xed, 0xdb, 0x12, 0x6e, 0x06, 0x7f, 0x35, 0xa7, 0x80, 0xb3, 0xab, 0xf4, 0x5e, 0x2d, 0x8f,
+        0x3b, 0x1a, 0x95, 0x07, 0x38, 0xf5, 0x2e, 0x96, 0x00, 0x74, 0x6a, 0x0e, 0x27, 0xa5, 0x5a, 0x21)
+
+    // {server} derive secret "tls13 s hs traffic": expanded (32 octets).
+    let expected_server_hs_traffic_secret = rawbuf_new(32)
+    set_bytes32(&expected_server_hs_traffic_secret,
+        0xb6, 0x7b, 0x7d, 0x69, 0x0c, 0xc1, 0x6c, 0x4e, 0x75, 0xe5, 0x42, 0x13, 0xcb, 0x2d, 0x37, 0xb4,
+        0xe9, 0xc9, 0x12, 0xbc, 0xde, 0xd9, 0x10, 0x5d, 0x42, 0xbe, 0xfd, 0x59, 0xd3, 0x91, 0xad, 0x38)
+
+    // {server} extract secret "master": secret (32 octets).
+    let expected_master_secret = rawbuf_new(32)
+    set_bytes32(&expected_master_secret,
+        0x18, 0xdf, 0x06, 0x84, 0x3d, 0x13, 0xa0, 0x8b, 0xf2, 0xa4, 0x49, 0x84, 0x4c, 0x5f, 0x8a, 0x47,
+        0x80, 0x01, 0xbc, 0x4d, 0x4c, 0x62, 0x79, 0x84, 0xd5, 0xa4, 0x1d, 0xa8, 0xd0, 0x40, 0x29, 0x19)
+
+    // {server} derive secret "tls13 c ap traffic": hash (32 octets) --
+    // the transcript hash through the server's Finished message.
+    let sf_hash = rawbuf_new(32)
+    set_bytes32(&sf_hash,
+        0x96, 0x08, 0x10, 0x2a, 0x0f, 0x1c, 0xcc, 0x6d, 0xb6, 0x25, 0x0b, 0x7b, 0x7e, 0x41, 0x7b, 0x1a,
+        0x00, 0x0e, 0xaa, 0xda, 0x3d, 0xaa, 0xe4, 0x77, 0x7a, 0x76, 0x86, 0xc9, 0xff, 0x83, 0xdf, 0x13)
+
+    // {server} derive secret "tls13 c ap traffic": expanded (32 octets).
+    let expected_client_ap_traffic_secret = rawbuf_new(32)
+    set_bytes32(&expected_client_ap_traffic_secret,
+        0x9e, 0x40, 0x64, 0x6c, 0xe7, 0x9a, 0x7f, 0x9d, 0xc0, 0x5a, 0xf8, 0x88, 0x9b, 0xce, 0x65, 0x52,
+        0x87, 0x5a, 0xfa, 0x0b, 0x06, 0xdf, 0x00, 0x87, 0xf7, 0x92, 0xeb, 0xb7, 0xc1, 0x75, 0x04, 0xa5)
+
+    // {server} derive secret "tls13 s ap traffic": expanded (32 octets).
+    let expected_server_ap_traffic_secret = rawbuf_new(32)
+    set_bytes32(&expected_server_ap_traffic_secret,
+        0xa1, 0x1a, 0xf9, 0xf0, 0x55, 0x31, 0xf8, 0x56, 0xad, 0x47, 0x11, 0x6b, 0x45, 0xa9, 0x50, 0x32,
+        0x82, 0x04, 0xb4, 0xf4, 0x4b, 0xfb, 0x6b, 0x3a, 0x4b, 0x4f, 0x1f, 0x3f, 0xcb, 0x63, 0x16, 0x43)
+
+    // {server} derive write traffic keys for application data (server
+    // application traffic secret 0 -> AES-128-GCM key/IV).
+    let expected_server_ap_key = rawbuf_new(16)
+    rawbuf_set(&expected_server_ap_key, 0, 0x9f)
+    rawbuf_set(&expected_server_ap_key, 1, 0x02)
+    rawbuf_set(&expected_server_ap_key, 2, 0x28)
+    rawbuf_set(&expected_server_ap_key, 3, 0x3b)
+    rawbuf_set(&expected_server_ap_key, 4, 0x6c)
+    rawbuf_set(&expected_server_ap_key, 5, 0x9c)
+    rawbuf_set(&expected_server_ap_key, 6, 0x07)
+    rawbuf_set(&expected_server_ap_key, 7, 0xef)
+    rawbuf_set(&expected_server_ap_key, 8, 0xc2)
+    rawbuf_set(&expected_server_ap_key, 9, 0x6b)
+    rawbuf_set(&expected_server_ap_key, 10, 0xb9)
+    rawbuf_set(&expected_server_ap_key, 11, 0xf2)
+    rawbuf_set(&expected_server_ap_key, 12, 0xac)
+    rawbuf_set(&expected_server_ap_key, 13, 0x92)
+    rawbuf_set(&expected_server_ap_key, 14, 0xe3)
+    rawbuf_set(&expected_server_ap_key, 15, 0x56)
+
+    let expected_server_ap_iv = rawbuf_new(12)
+    rawbuf_set(&expected_server_ap_iv, 0, 0xcf)
+    rawbuf_set(&expected_server_ap_iv, 1, 0x78)
+    rawbuf_set(&expected_server_ap_iv, 2, 0x2b)
+    rawbuf_set(&expected_server_ap_iv, 3, 0x88)
+    rawbuf_set(&expected_server_ap_iv, 4, 0xdd)
+    rawbuf_set(&expected_server_ap_iv, 5, 0x83)
+    rawbuf_set(&expected_server_ap_iv, 6, 0x54)
+    rawbuf_set(&expected_server_ap_iv, 7, 0x9a)
+    rawbuf_set(&expected_server_ap_iv, 8, 0xad)
+    rawbuf_set(&expected_server_ap_iv, 9, 0xf1)
+    rawbuf_set(&expected_server_ap_iv, 10, 0xe9)
+    rawbuf_set(&expected_server_ap_iv, 11, 0x84)
+
+    // -- Drive the key schedule under test -----------------------------
+
+    let early_secret = tls13_early_secret(HKDF_HASH_SHA256)
+
+    let handshake_secret = tls13_handshake_secret(HKDF_HASH_SHA256, &early_secret, 32, &ecdhe_shared_secret, 32)
+    if !buf_eq32(&handshake_secret, &expected_handshake_secret) {
+        println("FAIL: handshake_secret mismatch")
+        return 1
+    }
+
+    let c_hs_label_str = "c hs traffic"
+    let c_hs_label = rawbuf_new(12)
+    write_str_buf(&c_hs_label, c_hs_label_str, 12)
+    let client_hs_traffic_secret = derive_secret(HKDF_HASH_SHA256, &handshake_secret, 32, &c_hs_label, 12, &sh_hash, 32)
+    if !buf_eq32(&client_hs_traffic_secret, &expected_client_hs_traffic_secret) {
+        println("FAIL: client_handshake_traffic_secret mismatch")
+        return 1
+    }
+
+    let s_hs_label_str = "s hs traffic"
+    let s_hs_label = rawbuf_new(12)
+    write_str_buf(&s_hs_label, s_hs_label_str, 12)
+    let server_hs_traffic_secret = derive_secret(HKDF_HASH_SHA256, &handshake_secret, 32, &s_hs_label, 12, &sh_hash, 32)
+    if !buf_eq32(&server_hs_traffic_secret, &expected_server_hs_traffic_secret) {
+        println("FAIL: server_handshake_traffic_secret mismatch")
+        return 1
+    }
+
+    let master_secret = tls13_master_secret(HKDF_HASH_SHA256, &handshake_secret, 32)
+    if !buf_eq32(&master_secret, &expected_master_secret) {
+        println("FAIL: master_secret mismatch")
+        return 1
+    }
+
+    let c_ap_label_str = "c ap traffic"
+    let c_ap_label = rawbuf_new(12)
+    write_str_buf(&c_ap_label, c_ap_label_str, 12)
+    let client_ap_traffic_secret = derive_secret(HKDF_HASH_SHA256, &master_secret, 32, &c_ap_label, 12, &sf_hash, 32)
+    if !buf_eq32(&client_ap_traffic_secret, &expected_client_ap_traffic_secret) {
+        println("FAIL: client_application_traffic_secret_0 mismatch")
+        return 1
+    }
+
+    let s_ap_label_str = "s ap traffic"
+    let s_ap_label = rawbuf_new(12)
+    write_str_buf(&s_ap_label, s_ap_label_str, 12)
+    let server_ap_traffic_secret = derive_secret(HKDF_HASH_SHA256, &master_secret, 32, &s_ap_label, 12, &sf_hash, 32)
+    if !buf_eq32(&server_ap_traffic_secret, &expected_server_ap_traffic_secret) {
+        println("FAIL: server_application_traffic_secret_0 mismatch")
+        return 1
+    }
+
+    let (server_ap_key, server_ap_iv) = tls13_traffic_key_and_iv(HKDF_HASH_SHA256, &server_ap_traffic_secret, 32, 16, 12)
+
+    var i: i64 = 0
+    while i < 16 {
+        if rawbuf_get(&server_ap_key, i) != rawbuf_get(&expected_server_ap_key, i) {
+            println("FAIL: server application write key mismatch")
+            return 1
+        }
+        i = i + 1
+    }
+
+    var j: i64 = 0
+    while j < 12 {
+        if rawbuf_get(&server_ap_iv, j) != rawbuf_get(&expected_server_ap_iv, j) {
+            println("FAIL: server application write IV mismatch")
+            return 1
+        }
+        j = j + 1
+    }
+
+    println("tls13_keyschedule_rfc8448: full key schedule matches RFC 8448's published handshake trace")
+    return 0
+}
