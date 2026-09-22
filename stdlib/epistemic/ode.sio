@@ -1177,11 +1177,19 @@ fn augcov_init(state: &EState, p: &ODEParams, n: i64) -> AugCov with Mut, Div, P
 // visible (a clamp to 0 would show failed propagation as exact certainty).
 // Round-off can leave a diagonal slightly below zero relative to the block's scale. The
 // allowance is a HEURISTIC, 1e-9 of the largest state diagonal (about 4e6 ulps; not derived from a
-// bound on the propagation error): only a diagonal that far below zero, at most, is clamped to 0.
+// bound on the propagation error): only a diagonal that far below zero, at most, is clamped to 0 --
+// and only when `input_ok`. When the caller already knows an input variance was invalid
+// (ode_initial_covariance_ok was false at t_start), the round-off allowance is switched off for
+// every diagonal, not just the offending one: correlations mix all of them through the augmented
+// covariance, so which diagonal is "the invalid one" is not recoverable after even one step, and a
+// small propagated value could otherwise land inside the round-off band and be laundered to a
+// usable-looking 0 despite covariance_mode already being 2 (invalid, negative -1e-12 on Drug's
+// input can propagate to about -9.68e-13 next to a healthy ~0.98 on another channel; that is well
+// inside a 1e-9-of-scale allowance sized for the healthy channel, not for the invalid one).
 // Checking the diagonal is a NECESSARY condition for positive semidefiniteness, not a sufficient
 // one: a covariance with non-negative diagonal can still be indefinite through its off-diagonal
 // entries, which this does not detect.
-fn augcov_write_variances_checked(cov: &AugCov, state: &!EState, n: i64) -> bool with Mut {
+fn augcov_write_variances_checked(cov: &AugCov, state: &!EState, n: i64, input_ok: bool) -> bool with Mut {
     var scale = 0.0
     var i = 0
     while i < n {
@@ -1191,7 +1199,7 @@ fn augcov_write_variances_checked(cov: &AugCov, state: &!EState, n: i64) -> bool
         }
         i = i + 1
     }
-    let allow = 1.0e-9 * scale
+    let allow = if input_ok { 1.0e-9 * scale } else { 0.0 }
     var ok = true
     i = 0
     while i < n {
@@ -1614,7 +1622,8 @@ pub fn solve_ode(
     var cov = augcov_init(&state, &p, sys.n_dims)
     if !full_cov { sol.covariance_mode = 0 }
 
-    if !ode_initial_covariance_ok(&state, &p, sys.n_dims) { sol.covariance_mode = 2 }
+    let input_cov_ok = ode_initial_covariance_ok(&state, &p, sys.n_dims)
+    if !input_cov_ok { sol.covariance_mode = 2 }
     solution_record(&!sol, t, &state)
     // A non-finite starting state is status 3 even when the interval is empty (the loop below
     // would not run and the final check would call it a completed solve).
@@ -1642,7 +1651,7 @@ pub fn solve_ode(
                 estate_copy(&!before, &state)
                 eode_rk4_advance(&sys, t, &!state, &p, dt, &!n_evals)
                 propagate_covariance_step(&sys, t, &before, &p, dt, 0, &!cov, &!n_evals)
-                if !augcov_write_variances_checked(&cov, &!state, sys.n_dims) { sol.covariance_mode = 2 }
+                if !augcov_write_variances_checked(&cov, &!state, sys.n_dims, input_cov_ok) { sol.covariance_mode = 2 }
             } else {
                 eode_rk4_step(&sys, t, &!state, &p, dt, &!n_evals)
             }
@@ -1705,7 +1714,8 @@ pub fn solve_ode_adaptive(
     var cov = augcov_init(&state, &p, sys.n_dims)
     if !full_cov { sol.covariance_mode = 0 }
 
-    if !ode_initial_covariance_ok(&state, &p, sys.n_dims) { sol.covariance_mode = 2 }
+    let input_cov_ok = ode_initial_covariance_ok(&state, &p, sys.n_dims)
+    if !input_cov_ok { sol.covariance_mode = 2 }
     solution_record(&!sol, t, &state)
     if !ode_solve_inputs_ok(t_start, t_end, &opts, &p, &sys, y0_dims, true) || !ode_estate_values_finite(&state, sys.n_dims) {
         sol.t_final = t
@@ -1748,7 +1758,7 @@ pub fn solve_ode_adaptive(
                 // differentiated at the pre-step point
                 if full_cov {
                     propagate_covariance_step(&sys, t, &saved, &p, dt, 1, &!cov, &!n_evals)
-                    if !augcov_write_variances_checked(&cov, &!state, sys.n_dims) { sol.covariance_mode = 2 }
+                    if !augcov_write_variances_checked(&cov, &!state, sys.n_dims, input_cov_ok) { sol.covariance_mode = 2 }
                 } else {
                     propagate_variance_gum(&sys, t, &!state, &p, dt, &!n_evals)
                 }

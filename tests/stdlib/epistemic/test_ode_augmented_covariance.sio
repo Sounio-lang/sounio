@@ -77,6 +77,32 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     if absf(v / v_no_param - 1.0) < 0.01 { fail = fail + 1 println("FAIL test cannot see the parameter term") }
     if sol.covariance_mode != 1 { fail = fail + 1 println("FAIL covariance mode") }
 
+    // ---- an invalid input variance must not be laundered by the round-off clamp -------------
+    // augcov_write_variances_checked's round-off allowance (1e-9 of the block's largest STATE
+    // diagonal) is one number for the whole call, shared by every dimension. Drug's variance
+    // starts invalid (negative); M1's starts healthy at scale 1.0, so the allowance is sized for
+    // M1, not for Drug. Over one tiny step Drug's diagonal barely moves off its input value, which
+    // sits far inside that allowance -- so without tracking "input was already invalid"
+    // separately, Drug's variance would be silently clamped to a usable-looking 0.0 even though
+    // covariance_mode already says 2. (system 6, pbpk_clearance: Drug -> M1 -> M2 + clearance)
+    var init_bad = estate_new(4)
+    estate_set(&!init_bad, 0, 1.0, 0.0 - 1.0e-12) // Drug: invalid input variance
+    estate_set(&!init_bad, 1, 1.0, 1.0)           // M1: healthy, sets the block's scale
+    estate_set(&!init_bad, 2, 0.0, 0.0)
+    estate_set(&!init_bad, 3, 0.0, 0.0)
+    var p_bad = ode_params_new()
+    ode_params_set(&!p_bad, 0, 0.1, 0.0001)
+    ode_params_set(&!p_bad, 1, 0.1, 0.0001)
+    ode_params_set(&!p_bad, 2, 0.1, 0.0001)
+    let tiny_dt = 1.0e-6
+    let sol_bad = solve_ode(ode_system_pbpk_clearance(), init_bad, p_bad, 0.0, tiny_dt, solver_options_fixed(tiny_dt, 1))
+    let v_drug = solution_get_variance(&sol_bad, sol_bad.n_steps - 1, 0)
+    print("invalid Drug variance, healthy M1 nearby: covariance_mode=") print(sol_bad.covariance_mode)
+    print(" reported Drug variance=") println(v_drug)
+    if sol_bad.covariance_mode != 2 { fail = fail + 1 println("FAIL: invalid input variance must set covariance_mode 2") }
+    // NaN-safe: !(v_drug < 0.0) also catches a NaN turning this vacuous
+    if !(v_drug < 0.0) { fail = fail + 1 println("FAIL: invalid input variance was laundered to a non-negative value by the round-off clamp") }
+
     if fail == 0 { println("ODE AUGMENTED COVARIANCE PASS") }
     fail
 }
