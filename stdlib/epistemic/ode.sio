@@ -437,26 +437,43 @@ fn ode_system_n_params(id: i64) -> i64 {
     0
 }
 
+// The LOW end of a system's parameter range: 0 for every system except linear_2/linear_3 (3, 4),
+// which reserve index 0 for ka (oral absorption) but this build only ever runs them IV, so their
+// RHS (rhs_linear_2, rhs_linear_3) reads p[1..n_params) and never p[0]. [lo, ode_system_n_params(id))
+// is therefore the FULL active range -- not [0, ode_system_n_params(id)), which for these two
+// systems would still include the unused index 0 in validation, exposed to the same "irrelevant
+// slot changes the result" defect fixed for high indices (ode_initial_covariance_ok,
+// ode_solve_inputs_ok) if a caller sets p[0] anyway (e.g. carrying an oral-dosing ka value/variance
+// over into an IV-only solve of one of these two systems).
+fn ode_system_params_lo(id: i64) -> i64 {
+    if id == 3 { return 1 }
+    if id == 4 { return 1 }
+    0
+}
+
 fn ode_system_params_present(sys: &ODESystem, p: &ODEParams) -> bool with Mut, Panic {
     let id = sys.system_id
+    let lo = ode_system_params_lo(id)
     let hi = ode_system_n_params(id)
-    if id == 1 { return ode_params_range_set(p, 0, hi) }
-    if id == 2 { return ode_params_range_set(p, 0, hi) }
-    if id == 3 { return ode_params_range_set(p, 1, hi) }
-    if id == 4 { return ode_params_range_set(p, 1, hi) }
-    if id == 5 { return ode_params_range_set(p, 0, hi) }
-    if id == 6 { return ode_params_range_set(p, 0, hi) }
+    if id == 1 { return ode_params_range_set(p, lo, hi) }
+    if id == 2 { return ode_params_range_set(p, lo, hi) }
+    if id == 3 { return ode_params_range_set(p, lo, hi) }
+    if id == 4 { return ode_params_range_set(p, lo, hi) }
+    if id == 5 { return ode_params_range_set(p, lo, hi) }
+    if id == 6 { return ode_params_range_set(p, lo, hi) }
     false
 }
 
 // Input variances must be finite and non-negative. A NaN, infinite or negative INPUT variance is
 // invalid from the start (it is not round-off), so it sets covariance_mode 2 even when no step
 // runs (an empty interval), instead of only after the first step.
-// np is the MODEL's parameter count (ode_system_n_params), not p.n_params: a caller-set but
-// irrelevant slot (e.g. p[63] on a 1-parameter system) must not be able to fail this check --
-// and so force covariance_mode 2 on an otherwise valid solve -- over a variance the augmented
-// covariance never reads in the first place (it is sized off np too, see augcov_init).
-fn ode_initial_covariance_ok(state: &EState, p: &ODEParams, n: i64, np: i64) -> bool with Mut, Div, Panic {
+// np is the MODEL's parameter count (ode_system_n_params), and lo is where its active range
+// STARTS (ode_system_params_lo; 0 for every system except linear_2/linear_3, which reserve index
+// 0 for an unread ka) -- not p.n_params, so a caller-set but irrelevant slot (a high index like
+// p[63], or index 0 on those two systems) must not be able to fail this check, and so force
+// covariance_mode 2 on an otherwise valid solve, over a variance the augmented covariance never
+// reads in the first place (it is sized off np too, see augcov_init).
+fn ode_initial_covariance_ok(state: &EState, p: &ODEParams, n: i64, lo: i64, np: i64) -> bool with Mut, Div, Panic {
     var i = 0
     while i < n {
         if i < 64 {
@@ -465,7 +482,7 @@ fn ode_initial_covariance_ok(state: &EState, p: &ODEParams, n: i64, np: i64) -> 
         }
         i = i + 1
     }
-    var k = 0
+    var k = lo
     while k < np {
         if k < 64 {
             let v = p.param_variances[k]
@@ -497,12 +514,14 @@ fn ode_solve_inputs_ok(t_start: f64, t_end: f64, opts: &SolverOptions, p: &ODEPa
     if !ode_system_params_present(sys, p) { return false }
     // every model parameter the system actually reads must be finite: a NaN/inf rate is invalid
     // INPUT (status 3), not an integration failure (status 2), and on an empty interval no
-    // right-hand side would ever run to expose it. Bounded by the MODEL's own count, not
-    // p.n_params: an irrelevant slot the caller also set (e.g. p[63] on a 1-parameter system)
-    // must not be able to fail this on a value the solver never reads.
+    // right-hand side would ever run to expose it. Bounded by the MODEL's own [lo, n_params)
+    // range, not [0, p.n_params): an irrelevant slot the caller also set (a high index like p[63]
+    // on any system, or index 0 on linear_2/linear_3, which reserve it for an unread ka) must not
+    // be able to fail this on a value the solver never reads.
     let sys_np = ode_system_n_params(sys.system_id)
+    let sys_lo = ode_system_params_lo(sys.system_id)
     if p.n_params < 0 || p.n_params > 64 { return false }
-    var k = 0
+    var k = sys_lo
     while k < sys_np {
         if !ode_finite(p.params[k]) { return false }
         k = k + 1
@@ -1650,11 +1669,12 @@ pub fn solve_ode(
     // and silently force the coarser diagonal fallback for an otherwise-full-covariance-eligible
     // system.
     let sys_np = ode_system_n_params(sys.system_id)
+    let sys_lo = ode_system_params_lo(sys.system_id)
     let full_cov = sys.n_dims + sys_np <= 64
     var cov = augcov_init(&state, &p, sys.n_dims, sys_np)
     if !full_cov { sol.covariance_mode = 0 }
 
-    let input_cov_ok = ode_initial_covariance_ok(&state, &p, sys.n_dims, sys_np)
+    let input_cov_ok = ode_initial_covariance_ok(&state, &p, sys.n_dims, sys_lo, sys_np)
     if !input_cov_ok { sol.covariance_mode = 2 }
     solution_record(&!sol, t, &state)
     // A non-finite starting state is status 3 even when the interval is empty (the loop below

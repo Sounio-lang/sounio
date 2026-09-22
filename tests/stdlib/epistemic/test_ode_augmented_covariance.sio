@@ -160,6 +160,50 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     if sol_nan_val.status != 0 { fail = fail + 1 println("FAIL: an irrelevant slot's NaN value must not fail the solve (status 3)") }
     if sol_nan_val.covariance_mode != 1 { fail = fail + 1 println("FAIL: an irrelevant slot's NaN value must not force covariance_mode 2") }
 
+    // ---- a LOW unused index (not just a high one) must also stay inert ------------------------
+    // The fixes above bound the covariance/validation range to [0, ode_system_n_params(id)), which
+    // closes the high-index hole -- but linear_2 (system 3) reserves index 0 for ka (oral
+    // absorption) and its RHS (rhs_linear_2) reads only p[1..4). A [0, n_params) range still
+    // includes index 0, so the exact same defect reappears there if a caller sets p[0] anyway
+    // (plausibly carrying an oral-dosing ka value/variance into an IV-only solve). Reachable
+    // through the public API via ode_system_new(3, 2), even though the convenience constructor
+    // ode_system_linear_2() is private.
+    let sys3 = ode_system_new(3, 2)
+    var init3 = estate_new(2)
+    estate_set(&!init3, 0, 1.0, 0.01)
+    estate_set(&!init3, 1, 0.0, 0.0)
+    var p3_clean = ode_params_new()
+    ode_params_set(&!p3_clean, 1, 0.1, 0.0001)
+    ode_params_set(&!p3_clean, 2, 0.05, 0.0001)
+    ode_params_set(&!p3_clean, 3, 0.02, 0.0001)
+    let sol3_clean = solve_ode(sys3, init3, p3_clean, 0.0, 1.0, solver_options_fixed(0.1, 10))
+    print("system 3, p[0] never set:        status=") print(sol3_clean.status) print(" mode=") println(sol3_clean.covariance_mode)
+    if sol3_clean.status != 0 || sol3_clean.covariance_mode != 1 { fail = fail + 1 println("FAIL: system 3's own clean solve must complete in full covariance") }
+
+    var init3n = estate_new(2)
+    estate_set(&!init3n, 0, 1.0, 0.01)
+    estate_set(&!init3n, 1, 0.0, 0.0)
+    var p3_nan = ode_params_new()
+    ode_params_set(&!p3_nan, 0, nan_val(), 0.0) // unread ka slot, NaN VALUE
+    ode_params_set(&!p3_nan, 1, 0.1, 0.0001)
+    ode_params_set(&!p3_nan, 2, 0.05, 0.0001)
+    ode_params_set(&!p3_nan, 3, 0.02, 0.0001)
+    let sol3_nan = solve_ode(sys3, init3n, p3_nan, 0.0, 1.0, solver_options_fixed(0.1, 10))
+    print("system 3, p[0]=NaN value:        status=") print(sol3_nan.status) print(" mode=") println(sol3_nan.covariance_mode)
+    if sol3_nan.status != 0 { fail = fail + 1 println("FAIL: an unread p[0] value must not fail system 3's solve (status 3)") }
+
+    var init3v = estate_new(2)
+    estate_set(&!init3v, 0, 1.0, 0.01)
+    estate_set(&!init3v, 1, 0.0, 0.0)
+    var p3_negvar = ode_params_new()
+    ode_params_set(&!p3_negvar, 0, 5.0, 0.0 - 1.0) // unread ka slot, NEGATIVE variance
+    ode_params_set(&!p3_negvar, 1, 0.1, 0.0001)
+    ode_params_set(&!p3_negvar, 2, 0.05, 0.0001)
+    ode_params_set(&!p3_negvar, 3, 0.02, 0.0001)
+    let sol3_negvar = solve_ode(sys3, init3v, p3_negvar, 0.0, 1.0, solver_options_fixed(0.1, 10))
+    print("system 3, p[0] negative variance: status=") print(sol3_negvar.status) print(" mode=") println(sol3_negvar.covariance_mode)
+    if sol3_negvar.covariance_mode != 1 { fail = fail + 1 println("FAIL: an unread p[0] variance must not force covariance_mode 2 on system 3") }
+
     if fail == 0 { println("ODE AUGMENTED COVARIANCE PASS") }
     fail
 }
