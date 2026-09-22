@@ -2,12 +2,17 @@
 topic_id: repo.docs.internal.concepts.maturity-ladder
 authority: repo_only
 audience: users
-last_validated: 2026-08-19
-validated_by: claude-1
+last_validated: 2026-09-20
+validated_by: Claude
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.concepts.maturity-ladder
 -->
 
 # Maturity Ladder — five states, and how to measure one
+
+> **See also:** the canonical maturity tiers reconciled against the public-claim
+> registry live at [`docs/compiler/MATURITY.md`](../../compiler/MATURITY.md).
+> That page assigns tiers (Production / Stable / etc.). This page describes the
+> measurement rules and the five-state ladder used to decide a tier.
 
 The evidence progression in `FOUNDER_INTENT.md` and `docs/internal/garden/README.md`
 is `Garden -> Hypothesis -> Executable -> Claim-ready`. This document adds the
