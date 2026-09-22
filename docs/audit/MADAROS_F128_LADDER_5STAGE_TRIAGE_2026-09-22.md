@@ -304,3 +304,49 @@ Two more findings from a third automated review pass:
 
 Both re-verified; the full 17-stage KL-15a loop re-ran green sequentially
 under `bash -eo pipefail`.
+
+## Fourth and fifth review passes (2026-09-22, same day)
+
+A fourth pass found two doc-only nits (a stage-count off-by-one -- v0e4 was
+never one of the original 15, so it's "14 of 15" remaining once v0e510 is
+excluded, not "13 of 15" -- and a stale absolute line-number reference in a
+`lower.sio` comment, replaced with a function-name reference since this
+file's line numbers shift too often to cite numerically).
+
+A fifth pass found two more, both High severity:
+
+- **`scripts/dev/ci_gate_workflow_reachability.py`'s positive control fires
+  on this PR** (exits 2, "named direct orphans resolved as reachable":
+  `madaros_f128_f256_ladder_gate.sh`, `madaros_f128_f256_v0c_wire_gate.sh`,
+  `madaros_f128_f256_v0d_softfloat_gate.sh`). Investigated by checking out
+  this stage's `NAMED_DIRECT_ORPHANS` tuple and the census script against
+  the *original*, pre-triage PR #2615 baseline commit (`e86d83ad6b`): **the
+  same three names were already flagged there, before any of this session's
+  changes.** Traced further: `ci.yml` has invoked `bash
+  scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0f5` since
+  `d043729a45` (2026-09-16, KL-15a's introduction) -- which already made the
+  dispatcher itself workflow-reachable under this census's BFS, which then
+  transitively finds every `exec bash .../madaros_f128_f256_v0{c,d}_*.sh`
+  line inside the dispatcher's own source, independent of which `--stage`
+  value any given call site passes at runtime (by the module's own stated
+  design: "at any call depth, by following real invocations"). These three
+  names were simply never removed from `NAMED_DIRECT_ORPHANS` when the
+  dispatcher was first wired on 2026-09-16 -- a pre-existing staleness this
+  session's changes surfaced (by making a human actually run the script and
+  read its output) rather than caused. Fixed by removing the three from the
+  tuple, with a comment explaining the census's reachability semantics: it
+  measures whether an exec path *could* reach a script, not whether any
+  workflow run actually reaches it with a given `--stage` value -- so
+  `v0c_wire_gate.sh` being "workflow-reachable" here does **not** contradict
+  V0-C remaining unexercised (that operational truth lives in
+  `docs/architecture/F128_F256_LADDER.md` §V0-C and this file, not in the
+  census). Re-ran the census after the fix: exits 0, all positive-control
+  checks true.
+- v0e4's accepted fail-closed branch (the literal-exactness refusal) checked
+  the exit code and error message but not whether an ELF was actually
+  emitted, unlike the ladder's other fail-closed checks. Added
+  `[[ ! -s "$GELF" ]]` to the condition, matching the pattern used
+  elsewhere (e.g. v0e57's negative controls).
+
+Both re-verified; the full 17-stage KL-15a loop and the reachability census
+both re-ran green.

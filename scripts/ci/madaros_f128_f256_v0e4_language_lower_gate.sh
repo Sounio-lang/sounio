@@ -148,7 +148,8 @@ set +e
 "$SEED_COMPILER" "$GREEN" "$GELF" >"$TMP_DIR/greenwash.build.log" 2>&1
 gb=$?
 set -e
-if [[ "$gb" -ne 0 ]] && grep -Fq 'f128 literal is not exactly representable in binary64' "$TMP_DIR/greenwash.build.log"; then
+if [[ "$gb" -ne 0 ]] && grep -Fq 'f128 literal is not exactly representable in binary64' "$TMP_DIR/greenwash.build.log" \
+  && [[ ! -s "$GELF" ]]; then
   note_pass "lean_single_language_f128_inexact_literal_refused_no_greenwash"
 elif [[ "$gb" -eq 0 && -f "$GELF" ]]; then
   # The literal-exactness refusal is not the only guard: if it were ever
