@@ -7152,12 +7152,29 @@ pub fn bf_std_ln_dense_by(src: &BigFrame, key_col: i64, val_col: i64, vmax: i64)
 /// Exponential exp(x) via range reduction x = k·ln2 + r (|r|<=ln2/2), exp(x)=2^k·exp(r) with
 /// exp(r) a 14-term Taylor and 2^k built by bit construction. Needs a scratch i64 `sc` (bit
 /// reinterpret; reuse across a loop). Clamps |x|>700 to avoid overflow/underflow. ~1e-13 rel.
+///
+/// k = floor(x/ln2 + 0.5) is computed as a full if/else where BOTH branches assign `k`
+/// (never a bodyless-else that conditionally reassigns an already-cast-initialized `k`).
+/// That bodyless-else shape -- `var k = t as i64; if (k as f64) > t { k = k - 1 }` -- is
+/// the confirmed lean_single pow2-loop-family miscompile trigger: a cast-initialized
+/// integer, conditionally reassigned by a bodyless-else, then re-read (here via the
+/// `write_i64(sc, 0, (k+1023)<<52)` bit-construction step) after an intervening `while`
+/// loop comes back corrupted, independent of whether the correcting branch is taken.
+/// See docs/audit/LEAN_SINGLE_POW2_LOOP_MISCOMPILE_2026-09-22.md section 2.5: for
+/// x=ln(12.4) (k correctly 4, correcting branch NOT taken) the post-loop read of `k` used
+/// by the old shape came back doubled (4 -> 8), producing bf_exp(ln(12.4))=198.399985
+/// instead of 12.4. Confirmed independently here (isolated repro, same x,
+/// bin/souc-lean-single-x86_64, 2026-09-22) before this fix landed. The full-if/else form
+/// below matches the audit's "CONFIRMED HARMLESS" Group 1 pattern (e.g. gamma.sio::gm_exp)
+/// and was re-verified against the same repro plus exp(-ln(12.4))=1/12.4, exp(0.4), and the
+/// exact round-to-nearest half-boundary exp(3.5·ln2)=2^3.5 -- all now correct.
 fn bf_exp(x: f64, sc: *mut i64) -> f64 with Mut, Div, Panic {
     if x > 700.0 { return 1.0e300 }
     if x < 0.0 - 700.0 { return 0.0 }
     let t = x * 1.4426950408889634 + 0.5           // x/ln2 + 0.5
-    var k = t as i64
-    if (k as f64) > t { k = k - 1 }                // floor
+    let k_trunc = t as i64
+    var k: i64 = 0
+    if (k_trunc as f64) > t { k = k_trunc - 1 } else { k = k_trunc }  // floor
     let r = x - (k as f64) * 0.6931471805599453    // |r| <= ln2/2
     var term = 1.0
     var sum = 1.0
