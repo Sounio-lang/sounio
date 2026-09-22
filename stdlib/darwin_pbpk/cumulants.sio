@@ -64,18 +64,36 @@ pub fn m5_ln(x: f64) -> f64 with Mut {
     return r + scale
 }
 
+// Range reduction is ITERATIVE (n is accumulated inside the reduction while
+// loops themselves), NOT the "n_f = x*inv_ln2; n = n_f as i64; if (n as f64)
+// > n_f { n = n - 1 }" cast-then-correct idiom followed by a separate
+// power-of-2 loop over n. That idiom is miscompiled by lean_single: the
+// power-of-2 while loop that reads n afterward runs at roughly DOUBLE its
+// correct trip count, regardless of whether the correcting if-branch is
+// ever taken. Confirmed via minimal repro during the PBPK28 M5 fourth-order
+// cumulant-budget known-failure investigation, 2026-09-22:
+// m5_exp(6*sigma2_log) for CL_hep (sigma2_log=0.134880) returned 4.492593
+// instead of 2.246297 (exactly 2x, i.e. the single required doubling ran
+// twice), which inflated the lognormal kappa4/central4 by ~42x and made
+// var_kurtosis/var_cubic dominate the fourth-order budget. This iterative
+// form matches the already-correct ms28_exp in
+// pbpk28_mc_prior_family_sweep.sio, which was independently verified not
+// to trigger the bug.
 pub fn m5_exp(x: f64) -> f64 with Mut, Div {
+    var rx = x
+    var n: i64 = 0
     let ln2 = 0.6931471805599453
-    let inv_ln2 = 1.4426950408889634
-    let n_f = x * inv_ln2
-    var n: i64 = n_f as i64
-    if (n as f64) > n_f { n = n - 1 }
-    let r = x - (n as f64) * ln2
+    // >= / <= (not strict >/<) so x that is an exact multiple of ln2 reduces
+    // to r=0 (Taylor(0)=1 exactly) rather than r=+-ln2 (which the truncated
+    // Taylor series does not reproduce exactly) -- xai/grok-4.6 math-review
+    // finding, 2026-09-22 (.claude/llm_offload_log.md).
+    while rx >= ln2 { rx = rx - ln2; n = n + 1 }
+    while rx <= 0.0 - ln2 { rx = rx + ln2; n = n - 1 }
     var t: f64 = 1.0
     var result: f64 = 1.0
     var k: i64 = 1
     while k < 24 {
-        t = t * r / (k as f64)
+        t = t * rx / (k as f64)
         result = result + t
         k = k + 1
     }
