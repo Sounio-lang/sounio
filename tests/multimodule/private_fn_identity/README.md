@@ -5,7 +5,9 @@ identity for same-named **private** free functions). Driven by
 `scripts/ci/madaros_private_fn_identity_gate.sh`; each case directory holds the modules and
 one or more `main*.sio` roots. An **executable** case also holds `expected.txt` (the exact
 stdout of the compiled program); a **refusal** case (`unresolved`, `restricted`) has none --
-those are expected to fail the compile, so there is no successful run to compare against.
+those are expected to fail the compile cleanly with `error[private_fn_identity]`, so there is
+no successful run to compare against. `hashzero` also has none, for an unrelated reason: see
+its row below.
 
 Before the fix the merged IR identified functions by unqualified name, so two modules
 that each defined a private `helper` shared one body: the first-loaded module won, every
@@ -16,6 +18,7 @@ caller ran it, and nothing was reported.
 | `basic`      | the reported repro: `a=1 b=20`; `main_swapped.sio` swaps the `use` order and must not change the answer |
 | `rich`       | 3 modules: colliding private `inner`/`helper`/`apply`/`fact`/`twice`, recursion, a fn passed as an argument and via `let f = helper`, an `impl` method calling a private fn, and a **pub** `helper` (imported by `main`) that must keep its own name |
 | `hashcoll`   | names are compared **exactly**: `bA` has the same `ast_name_hash` as `ab`, and a reference to it must not be rewritten because `ab` was renamed |
+| `hashzero`   | the colliding name (`fZOXITBAFRX_E`) itself hashes to exactly **0** -- the census's own empty-slot sentinel. Driven by `expect_census_detected`, not `compile_and_run`: it pins only that the census still records this collision and renames it (the log receipt). It cannot also pin a successful run: calling a hash-0-named function hits a *separate*, pre-existing bug in this compiler's dead-code-elimination reachability marker (`self-hosted/check/specializer.sio`'s `spec_dce_hash_insert`/`spec_dce_hash_query`, the same `h == 0` sentinel mistake in a different hash table) -- out of scope for this pass and tracked separately (`docs/audit/MADAROS_PRIVATE_FN_IDENTITY_2026-09-21.md`). |
 | `symcoll`    | a private free fn named like a method's emitted symbol (`Counter_bump` vs `Counter::bump`) |
 | `reserved`   | a generated `helper__m1` must not reuse a symbol that already exists (here the method `helper_::m1`) |
 | `genericcollapse` | the same collision, but through the specialized-collapse pipeline (any generic instantiation routes the whole program through `module_frontend_specialized_prepare` instead of the ordinary path every other case exercises), both import orders |

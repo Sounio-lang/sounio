@@ -217,13 +217,26 @@ fn pfi_slot_of(h: i64) -> i64 {
 // Record that module `mod_idx` defines a real fn with name-hash `h`. Returns
 // false when the table is full: the caller then skips the whole pass rather than
 // working from a census it knows is incomplete.
+//
+// STORED KEY IS h+1, NOT h. ast_name_hash's own clamp (`if hash < 0 { 0 - hash }
+// else { hash }`) makes every real hash >= 0, so a legitimate name CAN hash to
+// exactly 0 (confirmed: "fZOXITBAFRX_E" does, both via this compiler's own
+// ast_name_hash and independently in Python). An earlier version used `h == 0`
+// as a shortcut meaning "nothing to record" -- indistinguishable from the
+// empty-slot sentinel `PFI_KEY[slot] == 0` this table already relies on, so a
+// colliding pair that both hashed to 0 was silently never counted: PFI_DUP_ANY
+// never set, no rename, the original first-loaded-wins miscompile intact
+// (measured: SIGILL, not just a wrong value -- something ELSE downstream also
+// keys on the merged, still-colliding name). Shifting the stored/compared key
+// by 1 keeps every real hash's slot representation >= 1, so 0 stays an
+// unambiguous "truly empty" sentinel for any hash value, including 0 itself.
 fn pfi_census_note(h: i64, mod_idx: i64) -> bool with Mut, Panic, Div {
-    if h == 0 { return true }
+    let key = h + 1
     var slot = pfi_slot_of(h)
     var probes: i64 = 0
     while probes < PFI_SLOTS {
         let cur = PFI_KEY[slot as usize]
-        if cur == h {
+        if cur == key {
             if PFI_LAST[slot as usize] != mod_idx {
                 PFI_LAST[slot as usize] = mod_idx
                 PFI_MODS[slot as usize] = PFI_MODS[slot as usize] + 1
@@ -232,7 +245,7 @@ fn pfi_census_note(h: i64, mod_idx: i64) -> bool with Mut, Panic, Div {
             return true
         }
         if cur == 0 {
-            PFI_KEY[slot as usize] = h
+            PFI_KEY[slot as usize] = key
             PFI_LAST[slot as usize] = mod_idx
             PFI_MODS[slot as usize] = 1
             return true
@@ -243,13 +256,16 @@ fn pfi_census_note(h: i64, mod_idx: i64) -> bool with Mut, Panic, Div {
     false
 }
 
+// Same h+1 shift as pfi_census_note -- see its comment. A generated name whose
+// hash is exactly 0 must be checked for real, not reported unconditionally
+// available.
 fn pfi_census_mods(h: i64) -> i64 with Mut, Panic, Div {
-    if h == 0 { return 0 }
+    let key = h + 1
     var slot = pfi_slot_of(h)
     var probes: i64 = 0
     while probes < PFI_SLOTS {
         let cur = PFI_KEY[slot as usize]
-        if cur == h { return PFI_MODS[slot as usize] }
+        if cur == key { return PFI_MODS[slot as usize] }
         if cur == 0 { return 0 }
         slot = (slot + 1) % PFI_SLOTS
         probes = probes + 1
