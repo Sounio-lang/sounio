@@ -22,8 +22,19 @@ or a draft. Where a run was not performed, the row says so.
 
 Environment: Linux x86-64, Python 3.11, `cantera 3.2.0`, `numpy 2.4.6`,
 `g++ (Ubuntu 13.3.0) -std=c++23 -O2`. Sounio compiler: the committed ELF
-`bin/madaros-linux-x86_64` (md5 `ff69dae4`, tree `98aa8e4d`), run under
-`SOUNIO_SOUC_ENGINE=lean_single`.
+**`bin/souc-lean-single-x86_64`, md5 `458d82bc22e44caaca1161231f56d82d` at tree
+`98aa8e4d`**, reached by the `SOUNIO_SOUC_ENGINE=lean_single` export in §7.1.
+
+> **Corrected 2026-09-22 — the line named the wrong binary.** It previously read
+> "`bin/madaros-linux-x86_64` (md5 `ff69dae4`, tree `98aa8e4d`), run under
+> `SOUNIO_SOUC_ENGINE=lean_single`", which identifies two different executables
+> in one sentence: `bin/souc` routes that environment variable to the legacy
+> single-file ELF and never invokes the Madaros one. The Madaros md5 is correct
+> as a description of the committed Madaros binary, and **that binary was not
+> executed for any measurement in this document.** No number moves; what was
+> wrong was the artefact identity, which is §6.3 instance (8) one layer down.
+> The replacement md5 is computed, not recalled:
+> `git cat-file -p 98aa8e4d:bin/souc-lean-single-x86_64 | md5sum`.
 
 > **Corrected 2026-09-01.** This line previously read `-std=c++20`, which does
 > not build the cross-check as shipped. Measured rather than assumed:
@@ -1018,6 +1029,21 @@ H/O checkpoint prose, not to this.
 cd formal/lean4 && lake build SounioIndepComposition
 ```
 
+> **The command above does not run in this tree, and saying "sibling PR" was
+> not enough — corrected 2026-09-22.** `formal/lean4/` here carries a Lake
+> project but **no `SounioIndepComposition.lean` source**; what is present under
+> `formal/lean4/.lake/build/` is stale output from a build made elsewhere, which
+> is worse than absence because it looks like evidence. The frozen snapshot
+> carries the source at `formal/SounioIndepComposition.lean` with **no Lake
+> project beside it**, so `lake build` resolves in neither tree a reader has.
+> The figures below are transcribed from the branch that carries the
+> development. No substitute invocation is given, because none was run: no Lean
+> toolchain is installed in the environment this document records.
+>
+> §7.4's auditor passed this section, because its criterion is a *named file
+> present in the released tree* and the command names a directory, not a file.
+> That is a gap in the auditor, recorded here rather than patched in this pass.
+
 Section 5 measures a band that scales as √dt and an underestimation that grows
 as √(T/dt). That is not a fitted exponent — it is derivable, and it is now
 machine-checked.
@@ -1470,8 +1496,22 @@ same state, and nothing in the agreement itself establishes that they were.**
 A cross-check that does not print its own initial-state deviation is
 reporting a comparison whose premise it never checked — which is the same
 fail-closed recipe as (7), applied to the harness rather than to the module,
-and the reason `initial_state_deviation` is now printed on both sides rather
-than assumed.
+and the reason `initial_state_deviation` is printed at all rather than assumed.
+
+**Precisely: that check is oracle-side only.** `gri30_h2_cantera_parity.py` and
+`gri30_full_cantera_parity.py` compare the state Cantera *realised* against the
+state they intended; the Python replicas and the Sounio modules carry no
+corresponding print, so the invariant covers the side where TPX/TDY and the
+molar volume do their damage and **not** the replica side.
+
+And it did not catch these three. `rep_adiabatic_bug.sio` is a Sounio probe,
+`rep_prodfix.py` builds its own radical-loaded state, and the third is a
+Cantera-side harness whose divergence was found by re-running it and reading
+the printed pressure against a section measured in the other regime — not by an
+invariant refusing to proceed. The remedy is asymmetric and, on this evidence,
+incomplete: it is the recipe the three instances *argue for*, not a gate that
+already covers them. Saying otherwise would be the retrofit this document
+refuses everywhere else.
 
 The residual honest statement: these three were found by re-running and by the
 snapshot verifier, one at a time, over three days. **No gate in this tree
@@ -1544,7 +1584,7 @@ not fixed in this pass.
 
 ```sh
 git rev-parse HEAD           # 98aa8e4d5151bbc61815bf910b6c31c3d0789f5f
-pip install 'cantera==3.2.0' numpy
+pip install 'cantera==3.2.0' 'numpy==2.4.6'      # the versions the header records
 
 export SOUNIO_STDLIB_PATH=$(pwd)/stdlib SOUNIO_SOUC_ENGINE=lean_single
 ./bin/souc run examples/chemistry/h2_ignition_uq_demo.sio        # ~90 s
@@ -1557,10 +1597,12 @@ python3 benchmarks/chemistry/gri30_full_cantera_uq_reference.py --jobs 4   # ~8 
 cd benchmarks/chemistry/cpp
 g++ -std=c++23 -O2 -o band_crosscheck gri30_h2_band_crosscheck.cpp
 ./band_crosscheck ../gri30_h2_mechanism.json                     # ~6 min
-
-cd ../../../formal/lean4
-lake build SounioIndepComposition                                # ~1 s
 ```
+
+The `cd ../../../formal/lean4 && lake build SounioIndepComposition` line that
+closed this block is **withdrawn**: it runs in neither this tree nor the frozen
+snapshot, for the reason given under §6.2. §6.2's figures come from the branch
+carrying the development.
 
 ### 7.2 Oracle-verification probes
 

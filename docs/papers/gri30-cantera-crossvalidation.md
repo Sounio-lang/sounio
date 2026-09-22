@@ -258,9 +258,26 @@ were never the same.
 ### 2.7 Environment
 
 Linux x86-64; Python 3.11; `cantera 3.2.0`; `numpy 2.4.6`; `g++ (Ubuntu 13.3.0)
--std=c++23 -O2`; Lean `leanprover/lean4:v4.33.0`. Sounio compiler: the committed
-ELF `bin/madaros-linux-x86_64` (md5 `ff69dae4`, tree `98aa8e4d`), run under
-`SOUNIO_SOUC_ENGINE=lean_single`.
+-std=c++23 -O2`; Lean `leanprover/lean4:v4.33.0`.
+
+Sounio compiler: **`bin/souc-lean-single-x86_64`, md5
+`458d82bc22e44caaca1161231f56d82d` at tree `98aa8e4d`**. Every Sounio command in
+§8.2 exports `SOUNIO_SOUC_ENGINE=lean_single`, and `bin/souc` routes that
+setting to the legacy single-file ELF at that path; the modular Madaros ELF
+`bin/madaros-linux-x86_64` (md5 `ff69dae4c9d733ef21c0f04c9678f34b`) is the
+default engine of the same wrapper but **was not executed for any measurement
+reported here**.
+
+> **Corrected 2026-09-22, and it is an instance of §6.** The environment line of
+> the measurement record named the Madaros ELF and its md5 while also naming the
+> `lean_single` override that routes past it, so the artefact identified was not
+> the artefact run. Nothing numerical changes — the runs were always made by the
+> `lean_single` engine, which is what §6 instance (8) would call a documentation
+> number with no resolution label, here applied to a binary identity. The md5
+> above is `git cat-file -p 98aa8e4d:bin/souc-lean-single-x86_64 | md5sum`,
+> computed rather than recalled. Note that this ELF also lags its source: per the
+> repository's own guidance, a committed binary is not evidence about the
+> compiler source at the same commit.
 
 ---
 
@@ -769,7 +786,7 @@ quadrature gives N·u² and √N·u; the ratio is **√N**. With N = T/dt that i
 **√(T/dt)** — the law measured in §5.2, and read along dt instead of T, the √dt
 dependence of §5.1.
 
-`formal/lean4/SounioIndepComposition.lean` machine-checks this and the rest of
+`SounioIndepComposition.lean` machine-checks this and the rest of
 the contract: **15 theorems, zero `sorry`**, Mathlib-free core Lean 4, built
 under `leanprover/lean4:v4.33.0`. Every claim is stated on *variances* rather
 than standard uncertainties — since √ is monotone on the non-negatives,
@@ -1036,6 +1053,13 @@ in the agreement itself establishes that they were.* A cross-check that does not
 print its own initial-state deviation is reporting a comparison whose premise it
 never checked.
 
+The scope of the existing remedy is narrower than that sentence, and is stated
+rather than rounded up: `initial_state_deviation` is implemented **oracle-side
+only**, in the two Cantera parity harnesses, and the replicas and Sounio modules
+carry no counterpart. None of the three divergences above was caught by it —
+they were found by re-running and by the snapshot verifier. The invariant is
+what these instances argue *for*; it is not a gate that already covers them.
+
 The residual honest statement: these three were found by re-running and by the
 snapshot verifier, one at a time, over three days. **No gate in the tree would
 have caught any of them**, and the count reaching ten this way is itself the
@@ -1171,7 +1195,7 @@ README says so rather than hiding it.
 
 ```sh
 git rev-parse HEAD           # 98aa8e4d5151bbc61815bf910b6c31c3d0789f5f
-pip install 'cantera==3.2.0' numpy
+pip install 'cantera==3.2.0' 'numpy==2.4.6'      # the versions §2.7 records
 
 export SOUNIO_STDLIB_PATH=$(pwd)/stdlib SOUNIO_SOUC_ENGINE=lean_single
 ./bin/souc run examples/chemistry/h2_ignition_uq_demo.sio        # ~90 s
@@ -1184,10 +1208,21 @@ python3 benchmarks/chemistry/gri30_full_cantera_uq_reference.py --jobs 4   # ~8 
 cd benchmarks/chemistry/cpp
 g++ -std=c++23 -O2 -o band_crosscheck gri30_h2_band_crosscheck.cpp
 ./band_crosscheck ../gri30_h2_mechanism.json                     # ~6 min
-
-cd ../../../formal/lean4
-lake build SounioIndepComposition                                # ~1 s
 ```
+
+The Lean development is **not reproducible from either tree named above**, and
+the command originally printed here (`cd formal/lean4 && lake build
+SounioIndepComposition`) is withdrawn **[W]**. `formal/lean4/` in the upstream
+repository carries a Lake project but not this module's source — only stale
+`.lake/build/` artefacts from a build made elsewhere — and the frozen snapshot
+carries the source at `formal/SounioIndepComposition.lean` with no Lake project
+beside it. The development lives in the sibling pull request that targets the
+d-separation work, which is where `lake build` resolves it; §5.5's figures (15
+theorems, zero `sorry`, `#print axioms` output, toolchain
+`leanprover/lean4:v4.33.0`) are transcribed from that branch. No substitute
+invocation is offered here, because none was run: the Lean toolchain is not
+installed in the environment of §2.7, so any command given would be asserted
+rather than measured. See §8.4.
 
 Diagnostic probes: `rep_traj_bug.py` (§3.2, §3.3, §3.5), `rep_adiabatic_bug.py`
 (§3.4), `rep_prodfix.py` (§3.5), `rep_1atm.py` (§3.6), `rep_tolerance.py`
@@ -1223,6 +1258,16 @@ difference is the audit working, not a defect.
   an unpacked snapshot. This is recorded explicitly because a section citing
   files a reader does not have is precisely the defect §8.3 audits for — here it
   is intentional and scoped.
+- The **Lean development** is in neither tree in buildable form: the upstream
+  `formal/lean4/` has a Lake project but no `SounioIndepComposition.lean`
+  source, and the snapshot has the source at
+  `formal/SounioIndepComposition.lean` with no Lake project. §5.5's figures are
+  transcribed from the branch that carries it, and §8.2 withdraws the `lake
+  build` command rather than printing one that cannot run **[W]**. This is the
+  same pathology as the six missing probe artefacts above, found in this
+  manuscript by a reviewer after §8.3's auditor had passed — the auditor checks
+  for a *named file present in the released tree*, and a `cd` into a directory
+  that exists, holding a Lake project but not the module, satisfies it.
 - This manuscript is not part of the snapshot; the snapshot is the measurement
   record and its producers.
 
