@@ -334,6 +334,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.madaros-selfhost-tier1-module-resolver-2026-06-24 | repo_only | docs/audit/MADAROS_SELFHOST_TIER1_MODULE_RESOLVER_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-selfhost-typeenv-sret-2026-06-25 | repo_only | docs/audit/MADAROS_SELFHOST_TYPEENV_SRET_2026-06-25.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-seq-surface-2026-08-17 | repo_only | docs/audit/MADAROS_SEQ_SURFACE_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.madaros-spec-dce-hash-zero-2026-09-22 | repo_only | docs/audit/MADAROS_SPEC_DCE_HASH_ZERO_2026-09-22.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-sret-root-synthesis-2026-06-20 | repo_only | docs/audit/MADAROS_SRET_ROOT_SYNTHESIS_2026-06-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-string-concat-2026-06-24 | repo_only | docs/audit/MADAROS_STRING_CONCAT_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-struct-field-index-fallback-2026-06-23 | repo_only | docs/audit/MADAROS_STRUCT_FIELD_INDEX_FALLBACK_2026-06-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
