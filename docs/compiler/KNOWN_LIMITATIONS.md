@@ -254,8 +254,12 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   8-byte scalars. Reads must not cast: `read_i64(..) as T` converts the number
   (2.5 read back as 4612811918334230528.0). `sum` returns the i64 sum of the
   patterns.
-- Caps: 64 generic impl blocks (specializer code 5); instances share the 64
-  emitted-specialization cap (code 4).
+- Caps: 64 generic impl blocks (specializer code 6); 1,024 emitted
+  generic-struct specializations, shared by generic-impl instances (code 4);
+  1,024 distinct generic-function instantiations (code 5); a generated `__sp_`
+  symbol that collides with a source item is refused (code 7). The
+  type-parameter registry holds 16,384 declarations, 65,536 names and 1 MiB of
+  name text; a full registry refuses the compile.
 
 ## Registry-governed, not rungs
 

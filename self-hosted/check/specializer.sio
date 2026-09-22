@@ -221,7 +221,11 @@ var SPEC_CAP_OVERFLOW_CODE: i64 = 0
 var SPEC_METHOD_TARG_UNSUPPORTED: bool = false
 var SPEC_ST_COUNT: i64 = 0
 var SPEC_ST_PTRS: [i64; 256] = [0; 256]
+// Emitted struct-instance names. The hash only nominates a candidate; the *mut
+// SpecNameStage kept beside it decides (two valid names can share a hash: the
+// suffixes `B0` and `AQ` give `Cell__B0` and `Cell__AQ` the same DJB2 value).
 var SPEC_EMITTED_HASHES: [i64; 1024] = [0; 1024]
+var SPEC_EMITTED_NAMES: [i64; 1024] = [0; 1024]
 var SPEC_EMITTED_COUNT: i64 = 0
 var SPEC_EXTRA_HEAD: i64 = 0
 // Generic impl templates and, per slot, the chain of their instance clones.
@@ -362,7 +366,7 @@ pub fn spec_report_generic_impl_static_targs() -> bool with IO {
 // Report every specializer-side refusal. Call this before folding a typecheck
 // verdict so short-circuit `||` on the checker result cannot hide these errors.
 pub fn spec_report_any_specializer_failure() -> bool with IO {
-    spec_report_unsound_poison() || spec_report_cap_overflow() || spec_report_unsupported_method_generic() || spec_report_generic_impl_static_targs()
+    spec_report_unsound_poison() || spec_report_cap_overflow() || spec_report_unsupported_method_generic() || spec_report_generic_impl_static_targs() || ast_report_type_param_registry_overflow()
 }
 
 // ============================================================
@@ -1713,21 +1717,29 @@ fn spec_path_head_name(path: AstPath) -> Name {
 }
 
 // ============================================================
-// Dedup / instantiation cache (name-hash keyed)
+// Dedup / instantiation cache (name-hash nominated, exact-name confirmed)
 // ============================================================
 
 fn spec_emitted_has(n: Name) -> bool with Mut, Panic, Div {
     let h = ast_name_hash(n)
     var i: i64 = 0
     while i < SPEC_EMITTED_COUNT {
-        if SPEC_EMITTED_HASHES[i as usize] == h { return true }
+        if SPEC_EMITTED_HASHES[i as usize] == h {
+            let np = SPEC_EMITTED_NAMES[i as usize] as *mut SpecNameStage
+            if name_eq((*np).n, n) { return true }
+        }
         i = i + 1
     }
     false
 }
 
-fn spec_emitted_push(n: Name) -> bool with Mut, Panic, Div {
+fn spec_emitted_push(n: Name) -> bool with Mut, Panic, Div, Alloc {
     if SPEC_EMITTED_COUNT < 1024 {
+        // Stored before anything else touches n: a Name held across deep calls
+        // arrives corrupted (see spec_subst_expr_mut).
+        let ns = heap_alloc(1024) as *mut SpecNameStage
+        (*ns).n = n
+        SPEC_EMITTED_NAMES[SPEC_EMITTED_COUNT as usize] = ns as i64
         SPEC_EMITTED_HASHES[SPEC_EMITTED_COUNT as usize] = ast_name_hash(n)
         SPEC_EMITTED_COUNT = SPEC_EMITTED_COUNT + 1
         return true

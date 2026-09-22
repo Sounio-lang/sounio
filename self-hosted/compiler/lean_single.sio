@@ -2030,6 +2030,18 @@ fn type_hash_unit_dim(h: i64) -> i64 with Panic, Mut, Div {
     return unit_lookup_dim(h)
 }
 
+// Whether a value declared with this type hash carries a unit brand. A unit with
+// a dimension always did. A NOMINAL unit -- `unit mg_dL;`, dimension zero -- was
+// left out because the test was "dimension is not zero", so a nominal unit
+// survived only when a literal suffix produced it (`140.0<mg_dL>`) and vanished at
+// every annotation and every function boundary: `fn f(x: mg_dL) -> f64 { x }`
+// handed back a bare number with nothing to object.
+fn unit_brand_carried(h: i64) -> bool with Panic, Mut, Div {
+    if h == 0 { return false }
+    if type_hash_unit_dim(h) != 0 { return true }
+    return unit_is_user_declared_h(h)
+}
+
 fn unit_call_arg_mismatch(param_hash: i64, expr_unit: i64, expr_dim: i64) -> bool with Panic, Mut, Div {
     let param_dim = type_hash_unit_dim(param_hash)
     // A NOMINAL unit -- declared `unit mg_dL;` with no dimensional right-hand
@@ -2049,6 +2061,15 @@ fn unit_call_arg_mismatch(param_hash: i64, expr_unit: i64, expr_dim: i64) -> boo
     // `as f64` clears EXPR_UNIT_DIM via expr_set_unit_from_type, so casts stay
     // the escape hatch.
     if param_dim == 0 {
+        // The same nominal-unit hole on the value side. A NOMINAL argument has
+        // dimension zero too, so `expr_dim != 0` below cannot see it and a
+        // `mg_dL` value walked into a bare `f64` parameter or return without the
+        // cast that every dimensionful unit needs. A nominal unit names a
+        // quantity, so leaving it takes the same explicit `as f64`. (`param_hash`
+        // being this very unit was settled above, by name.)
+        if expr_unit != 0 && unit_is_user_declared_h(expr_unit) && type_hash_unit_dim(expr_unit) == 0 {
+            return true
+        }
         return expr_dim != 0
     }
     if expr_unit == param_hash { return false }
@@ -26994,7 +27015,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 VAR_LINEAR[(VAR_COUNT - 1) as usize] = LAST_EXPR_IS_LINEAR
                 VAR_AFFINE[(VAR_COUNT - 1) as usize] = LAST_EXPR_IS_AFFINE
                 // Set unit hash for unit-typed variables (e.g. let mass: mg = 5.0, let e: J = 1.0)
-                if decl_ty_hash != 0 && type_hash_unit_dim(decl_ty_hash) != 0 {
+                if unit_brand_carried(decl_ty_hash) {
                     VAR_UNIT[(VAR_COUNT - 1) as usize] = decl_ty_hash
                 } else if decl_ty == 0 && decl_ty_hash == 0 && EXPR_UNIT != 0 {
                     VAR_UNIT[(VAR_COUNT - 1) as usize] = EXPR_UNIT
@@ -33609,7 +33630,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                         // every function boundary erased the unit: the value arrived
                         // numerically correct but unbranded, so it could go on to
                         // satisfy a parameter of some other unit entirely.
-                        if SCAN_TY_HASH != 0 && type_hash_unit_dim(SCAN_TY_HASH) != 0 {
+                        if unit_brand_carried(SCAN_TY_HASH) {
                             VAR_UNIT[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
                         }
                         if SCAN_TY == 2 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
@@ -42068,7 +42089,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 // site). The a64 pass stored no brand at a binding, so
                 // `let m: molal = 2.5` produced an unbranded local and the very
                 // next call rejected it as a mismatch.
-                if decl_ty_hash != 0 && type_hash_unit_dim(decl_ty_hash) != 0 {
+                if unit_brand_carried(decl_ty_hash) {
                     VAR_UNIT[(VAR_COUNT - 1) as usize] = decl_ty_hash
                 } else if decl_ty == 0 && decl_ty_hash == 0 && EXPR_UNIT != 0 {
                     VAR_UNIT[(VAR_COUNT - 1) as usize] = EXPR_UNIT
@@ -44060,7 +44081,7 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
                         // x86 param scan does. Without this the a64 pass erased the
                         // unit at every function boundary, so a parameter forwarded
                         // to another parameter arrived unbranded.
-                        if SCAN_TY_HASH != 0 && type_hash_unit_dim(SCAN_TY_HASH) != 0 {
+                        if unit_brand_carried(SCAN_TY_HASH) {
                             VAR_UNIT[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
                         }
                         if SCAN_TY == 2 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }

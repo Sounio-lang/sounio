@@ -1781,7 +1781,10 @@ pub fn ast_indep_name_hash(n: Name) -> i64 with Mut, Panic, Div {
 // (ast_next_parse_file_id, stamped into spans by Parser::current_span): a
 // declaration in one module can never cover a type expression in another. The
 // registry is append-only for the process -- re-parsing a module gets a fresh id --
-// and keeps names as hash + length. An impl records the bare single-segment
+// and keeps each name's bytes beside its hash and length: hash and length only
+// nominate a match (two valid names can share both), the bytes decide. It is
+// fixed-capacity, and a full registry refuses the compile
+// (ast_report_type_param_registry_overflow) instead of dropping declarations. An impl records the bare single-segment
 // arguments of its target (`impl Map<K, V>` declares K and V); a concrete argument
 // like `i64` recorded the same way changes nothing, because downstream only a
 // name that is also a unit is affected.
@@ -1795,7 +1798,56 @@ pub var TPD_NAME_COUNT: [i64; 16384]
 pub var TPD_NAMES_USED: i64 = 0
 pub var TPD_NAME_HASH: [i64; 65536]
 pub var TPD_NAME_LEN: [i64; 65536]
+pub var TPD_NAME_OFF: [i64; 65536]
+pub var TPD_BYTES_USED: i64 = 0
+pub var TPD_NAME_BYTES: [i8; 1048576]
 pub var TPD_OVERFLOW: i64 = 0
+
+// Append one name: hash, length and bytes. False, with TPD_OVERFLOW set, when the
+// name table or the byte pool is full.
+fn tpd_store_name(buf: [i8; 384], len: i64) -> bool with Mut, Panic, Div {
+    if TPD_NAMES_USED >= 65536 || TPD_BYTES_USED + len > 1048576 {
+        TPD_OVERFLOW = 1
+        return false
+    }
+    let j = TPD_NAMES_USED
+    TPD_NAME_HASH[j as usize] = ast_name_hash(Name { buf: buf, len: len })
+    TPD_NAME_LEN[j as usize] = len
+    TPD_NAME_OFF[j as usize] = TPD_BYTES_USED
+    var k: i64 = 0
+    while k < len {
+        TPD_NAME_BYTES[(TPD_BYTES_USED + k) as usize] = buf[k as usize]
+        k = k + 1
+    }
+    TPD_BYTES_USED = TPD_BYTES_USED + len
+    TPD_NAMES_USED = j + 1
+    true
+}
+
+// Is stored name j exactly the name (buf, len) whose hash is h? A retracted name has
+// length -1 and never matches.
+fn tpd_name_is(j: i64, h: i64, buf: [i8; 384], len: i64) -> bool with Mut, Panic, Div {
+    if TPD_NAME_HASH[j as usize] != h || TPD_NAME_LEN[j as usize] != len { return false }
+    let off = TPD_NAME_OFF[j as usize]
+    var k: i64 = 0
+    while k < len {
+        if TPD_NAME_BYTES[(off + k) as usize] != buf[k as usize] { return false }
+        k = k + 1
+    }
+    true
+}
+
+// The registry is fixed-capacity and append-only. Past capacity later declarations
+// would be dropped without a word, and lowering would then read a type parameter
+// spelled like a unit (K) as that unit while the checker had read it as the
+// parameter. A full registry refuses the compile instead; the specializer's
+// failure report (spec_report_any_specializer_failure) calls this.
+pub fn ast_report_type_param_registry_overflow() -> bool with IO {
+    if TPD_OVERFLOW == 0 { return false }
+    print("error: type-parameter registry capacity exceeded: a compilation supports at most 16384 declarations with type parameters, 65536 declared names and 1 MiB of name text\n")
+    print("  note: compilation is refused because dropping declarations would make lowering read a type parameter spelled like a unit as that unit\n")
+    true
+}
 
 pub fn ast_next_parse_file_id() with Mut {
     PARSE_FILE_ID = PARSE_FILE_ID + 1
@@ -1820,11 +1872,8 @@ pub fn ast_record_type_param_decl(span: Span, list: &Option<Box<TypeParamDefList
     while true {
         match *current {
             Some(node) => {
-                if TPD_NAMES_USED >= 65536 { TPD_OVERFLOW = 1; return }
                 let n = (*node).head.name
-                TPD_NAME_HASH[TPD_NAMES_USED as usize] = ast_name_hash(n)
-                TPD_NAME_LEN[TPD_NAMES_USED as usize] = n.len
-                TPD_NAMES_USED = TPD_NAMES_USED + 1
+                if !tpd_store_name(n.buf, n.len) { return }
                 count = count + 1
                 current = &(*node).tail
             }
@@ -1847,11 +1896,8 @@ pub fn ast_record_impl_type_param_decl(span: Span, target: &TypeExpr) with Mut, 
                     match (*arg).type_args {
                         Some(_nested) => {}
                         None => {
-                            if TPD_NAMES_USED >= 65536 { TPD_OVERFLOW = 1; return }
                             let seg = (*arg).path.segments
-                            TPD_NAME_HASH[TPD_NAMES_USED as usize] = ast_name_hash(Name { buf: seg.head_buf, len: seg.head_len })
-                            TPD_NAME_LEN[TPD_NAMES_USED as usize] = seg.head_len
-                            TPD_NAMES_USED = TPD_NAMES_USED + 1
+                            if !tpd_store_name(seg.head_buf, seg.head_len) { return }
                             count = count + 1
                         }
                     }
@@ -1881,7 +1927,7 @@ pub fn ast_forget_impl_type_param(span: Span, buf: [i8; 384], len: i64) with Mut
             var k: i64 = 0
             while k < TPD_NAME_COUNT[i as usize] {
                 let j = first + k
-                if TPD_NAME_HASH[j as usize] == h && TPD_NAME_LEN[j as usize] == len {
+                if tpd_name_is(j, h, buf, len) {
                     TPD_NAME_LEN[j as usize] = 0 - 1
                 }
                 k = k + 1
@@ -1904,7 +1950,7 @@ pub fn ast_type_param_declared_at(span: Span, buf: [i8; 384], len: i64) -> bool 
             var k: i64 = 0
             while k < TPD_NAME_COUNT[i as usize] {
                 let j = first + k
-                if TPD_NAME_HASH[j as usize] == h && TPD_NAME_LEN[j as usize] == len { return true }
+                if tpd_name_is(j, h, buf, len) { return true }
                 k = k + 1
             }
         }
