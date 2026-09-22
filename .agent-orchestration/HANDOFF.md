@@ -3,7 +3,7 @@
 Status: active
 Updated: 2026-05-10
 Workspace: `/workspace/sounio`
-Safe branch: `integration/sounio-dev-ready-base`
+Safe branch: `main` (canonical since 2026-09-22; `integration/sounio-dev-ready-base` is deprecated, see `CLAUDE.md` §3)
 
 ## ACTIVE: 6-Agent Lane Assignment (2026-05-10)
 

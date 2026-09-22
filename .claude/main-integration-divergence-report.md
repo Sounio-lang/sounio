@@ -72,10 +72,11 @@ Bucketed by top-level/second-level directory touched (a commit can appear in mul
 
 Full list and per-file commit/line counts were computed via:
 ```
-git diff --name-only 2a530d031d origin/main
-git diff --name-only 2a530d031d <integration-tip>
+git diff --name-only 2a530d031d e6cc1e4bf1100fb5e57193f2c59e172e57fa9ae9
+git diff --name-only 2a530d031d d502e3d5a1002514e11453707af97831e961ef19
 comm -12 <(sort ...) <(sort ...)
 ```
+(pinned SHAs, not the moving `origin/main`/`origin/integration/...` refs -- using the moving refs re-run later picks up unrelated commits merged after this analysis, including this very PR's own eventual merge)
 
 ### 3a. Highest risk — compiler internals & binaries (8 files)
 
@@ -99,7 +100,7 @@ Evidence: identical commit *subject lines* appear independently on both branches
 - `[epistemic] Quadrature is the independence law: make the assumption explicit` — on `main` as `0349a4303`, on `integration` as `66db7dd43`.
 - `[parser] Grammar for IndepKnowledge<T, A, B | Z>` and `[check] Declare the causal graph in source; discharge independence by d-separation` appear on `integration` only, but `integration`'s history contains an explicit commit `e5e742428 "fix(indep): resolve #1758's real merge conflicts with integration/sounio-dev-ready-base"` — i.e. PR #1758 (`feat/independencia-na-composicao`, merged to `main` as `8d56129c5`, notably also the current working branch's own ancestor via `integration`) was **manually replayed onto `integration` by hand**, conflict-resolved commit by commit, by the same author.
 
-Confirmed via direct content diff (`git show <tip>:<path>`) that these files are **byte-identical** between `origin/main` and the `integration` tip:
+Confirmed via direct content diff (`git show <tip>:<path>`) that these files are **byte-identical** between the pinned `main` SHA (`e6cc1e4bf1`) and the `integration` tip (`d502e3d5a1`):
 - `tests/run-pass/causal_graph_dsep.sio`
 - `tests/run-pass/gum_independence_required.sio`
 - `tests/gpu/epistemic_runtime/manifest.tsv`
