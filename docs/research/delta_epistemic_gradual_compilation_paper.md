@@ -1,19 +1,28 @@
 <!-- docs:meta
 topic_id: repo.docs.research.delta-epistemic-gradual-compilation-paper
-authority: historical
+authority: repo_only
 audience: researchers
-last_validated: 2026-03-07
-validated_by: A6
+last_validated: 2026-09-22
+validated_by: Claude
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.delta-epistemic-gradual-compilation-paper
 -->
 
-
-<!-- docs:status-note:start -->
-> Docs status: `historical`
-> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
-<!-- docs:status-note:end -->
-
 # Epistemic Gradual Compilation: A Self-Hosted Compiler that Applies its Type System to its Own Source
+
+> **Design target, not the shipped surface.** This paper is the direction
+> Sounio is being built toward. It was previously filed as `historical`, which
+> made it read as retired lineage; it is the design, so it is a current
+> `repo_only` document. The `Knowledge<T>` generic, the `Epistemic` effect that
+> gates `.value`, the refinement predicates (`confidence(k) ≥ 950`),
+> `Knowledge::exact`, units-as-type-parameters (`Knowledge<mg>`), and the
+> two-byte guard marker described below are **not** on the checked public
+> surface today — see `docs/compiler/KNOWN_LIMITATIONS.md`. What ships now is
+> `Epistemic { val: f64, variance: f64, confidence: i64 }` in
+> `stdlib/epistemic/knowledge.sio`: `ep_measured(val, std_dev)` stores
+> confidence 900, `ep_certain(val)` stores 1000, and `ep_add` / `ep_div` /
+> `ep_val` / `ep_std` propagate by the GUM delta method, anchored by
+> `tests/run-pass/ep_gum_covariance.sio`. The confidence scale already agrees:
+> the paper's 0–1000 confidence is the scale the shipped type uses.
 
 **Draft — POPL 2027 submission | Numbers updated 2026-04-21 | DOUBLE-BLIND VERSION**
 
@@ -847,7 +856,7 @@ The marker is prefix-aligned. A post-mortem coverage tool counts markers by scan
 
 ## Appendix C — the rapamycin model in Sounio
 
-The full source of the rapamycin PBPK model fits on a single page. Reproduced here with uncertainty annotations:
+The full source of the rapamycin PBPK model fits on a single page. Reproduced here with uncertainty annotations. This is target-design notation: `measure`, `Knowledge::exact`, and `Knowledge<mg>` are not constructors in the current compiler. The shipped zero-variance constructor is `ep_certain(val)`, and a measured value is `ep_measured(val, std_dev)`.
 
 ```sio
 // rapamycin PBPK — three compartment, three uncertain parameters
