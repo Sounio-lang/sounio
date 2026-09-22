@@ -1,0 +1,374 @@
+// stdlib/net/http_client.sio — Plain-text HTTP/1.1 GET client (Madaros v0.80.0)
+//
+// Task 4 of the sockets/HTTP-client plan. Builds on Task 1's
+// stdlib/net/socket.sio (RawBuf, TcpSocket, tcp_connect/tcp_send/tcp_recv/
+// tcp_close) and Task 3's stdlib/net/dns.sio (resolve_ipv4). See
+// docs/audit/TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_2026-08-23.md for the
+// linear-typing findings (4-6) this file's internals are built around.
+//
+// Import note: this file lives inside stdlib/net/, so its imports of the
+// sibling files socket.sio and dns.sio use the bare unqualified form
+// (`use socket::*`, `use dns::*`), per Finding 8 of the audit above — NOT
+// the `net::socket::*` qualified form a caller OUTSIDE stdlib/ must use.
+//
+// See Finding 10 of the audit doc above for the write-up of this finding:
+// `resolve_ipv4` (dns.sio) and the "host looks like a numeric IP" path both
+// produce/consume ASCII dotted-decimal TEXT (e.g. the bytes '1','2','7',
+// '.','0','.','0','.','1'), never raw IPv4 address octets. `tcp_connect`'s
+// `build_sockaddr` (socket.sio), by contrast, reads its `ip: &RawBuf`
+// argument as 4 raw octet bytes directly (`rawbuf_get(ip, 0..3)` used
+// verbatim as address bytes) — it does NOT parse dotted-decimal text. The
+// brief's draft skeleton conflated these two representations (it copied a
+// numeric host's ASCII bytes straight into the buffer handed to
+// `tcp_connect`, which would silently connect to the wrong address for any
+// real dotted-decimal literal). This file's `parse_ipv4_dotted` below
+// closes that gap: both the "already numeric" and "resolved via DNS"
+// branches produce ASCII dotted text, which is then parsed once, in one
+// place, into the 4 raw octets `tcp_connect` actually needs.
+
+use socket::*
+use dns::*
+
+pub struct HttpResponse {
+    status: i64,
+    headers: RawBuf,
+    body: RawBuf,
+    body_len: i64,
+    ok: bool,
+}
+
+const CH_DOT: i64 = 46
+const CH_ZERO: i64 = 48
+const CH_NINE: i64 = 57
+const CH_SPACE: i64 = 32
+const CH_CR: i64 = 13
+const CH_LF: i64 = 10
+const CH_UPPER_A: i64 = 65
+const CH_UPPER_Z: i64 = 90
+
+fn is_numeric_ip(host: &RawBuf, host_len: i64) -> bool with IO {
+    var i: i64 = 0
+    while i < host_len {
+        let c = rawbuf_get(host, i)
+        if (c < CH_ZERO || c > CH_NINE) && c != CH_DOT {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// Parses ASCII dotted-decimal text (e.g. "127.0.0.1") stored in `text`
+// into 4 raw IPv4 address octets written to out[0..4). Scans up to
+// `max_len` bytes but stops early at a zero byte -- a freshly
+// `rawbuf_new`'d buffer reads back as all-zero past whatever was actually
+// written (confirmed empirically: summing all 16 bytes of an untouched
+// `rawbuf_new(16)` returns 0), and 0 can never appear as a legitimate
+// dotted-decimal character, so it's a safe end-of-text sentinel here.
+// Returns true on success, false if the text is not well-formed
+// dotted-decimal (wrong octet count, an octet > 255, or a stray
+// character).
+fn parse_ipv4_dotted(text: &RawBuf, max_len: i64, out: &RawBuf) -> bool with IO {
+    var octet_idx: i64 = 0
+    var value: i64 = 0
+    var have_digit: bool = false
+    var i: i64 = 0
+    var done: bool = false
+    while i < max_len && !done {
+        let c = rawbuf_get(text, i)
+        if c == 0 {
+            done = true
+        } else if c == CH_DOT {
+            if !have_digit || octet_idx > 2 || value > 255 {
+                return false
+            }
+            rawbuf_set(out, octet_idx, value)
+            octet_idx = octet_idx + 1
+            value = 0
+            have_digit = false
+        } else if c >= CH_ZERO && c <= CH_NINE {
+            value = value * 10 + (c - CH_ZERO)
+            if value > 255 {
+                return false
+            }
+            have_digit = true
+        } else {
+            return false
+        }
+        i = i + 1
+    }
+    if !have_digit || octet_idx != 3 {
+        return false
+    }
+    rawbuf_set(out, octet_idx, value)
+    true
+}
+
+// Copies `str_len(s)` bytes of the string literal/value `s` into `buf`
+// starting at `offset`. Returns the offset just past the written bytes.
+fn write_str(buf: &RawBuf, offset: i64, s: string) -> i64 with IO {
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        rawbuf_set(buf, offset + i, str_char_at(s, i))
+        i = i + 1
+    }
+    offset + n
+}
+
+// Copies `src_len` bytes from `src` into `buf` starting at `offset`.
+// Returns the offset just past the written bytes.
+fn write_rawbuf(buf: &RawBuf, offset: i64, src: &RawBuf, src_len: i64) -> i64 with IO {
+    var i: i64 = 0
+    while i < src_len {
+        rawbuf_set(buf, offset + i, rawbuf_get(src, i))
+        i = i + 1
+    }
+    offset + src_len
+}
+
+// Finds the index of the first byte of the "\r\n\r\n" header/body
+// separator within buf[0..len). Returns -1 if not found.
+fn find_header_end(buf: &RawBuf, len: i64) -> i64 with IO {
+    var i: i64 = 0
+    while i + 3 < len {
+        if rawbuf_get(buf, i) == CH_CR && rawbuf_get(buf, i + 1) == CH_LF && rawbuf_get(buf, i + 2) == CH_CR && rawbuf_get(buf, i + 3) == CH_LF {
+            return i
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// Parses the numeric status code out of the response's first line
+// ("HTTP/1.1 200 OK..."): skip to the first space, then read digits.
+// Returns -1 if malformed.
+fn parse_status_code(buf: &RawBuf, len: i64) -> i64 with IO {
+    var i: i64 = 0
+    while i < len && rawbuf_get(buf, i) != CH_SPACE {
+        i = i + 1
+    }
+    if i >= len {
+        return 0 - 1
+    }
+    i = i + 1
+    var value: i64 = 0
+    var have_digit: bool = false
+    while i < len && rawbuf_get(buf, i) >= CH_ZERO && rawbuf_get(buf, i) <= CH_NINE {
+        value = value * 10 + (rawbuf_get(buf, i) - CH_ZERO)
+        have_digit = true
+        i = i + 1
+    }
+    if !have_digit {
+        return 0 - 1
+    }
+    value
+}
+
+fn lower_byte(c: i64) -> i64 {
+    if c >= CH_UPPER_A && c <= CH_UPPER_Z {
+        c + 32
+    } else {
+        c
+    }
+}
+
+// Case-insensitively checks whether buf[pos..pos+str_len(needle)) equals
+// `needle`, without reading past `end`.
+fn matches_at(buf: &RawBuf, pos: i64, end: i64, needle: string) -> bool with IO {
+    let n = str_len(needle)
+    if pos + n > end {
+        return false
+    }
+    var i: i64 = 0
+    while i < n {
+        let a = lower_byte(rawbuf_get(buf, pos + i))
+        let b = lower_byte(str_char_at(needle, i))
+        if a != b {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// Scans the header block buf[0..header_end) for a "Content-Length:" line
+// (case-insensitive) and returns its integer value, or -1 if not found
+// or malformed.
+fn find_content_length(buf: &RawBuf, header_end: i64) -> i64 with IO {
+    let needle = "Content-Length:"
+    let needle_len = str_len(needle)
+    var i: i64 = 0
+    while i < header_end {
+        // Only a real line start can begin a header name: either the very
+        // first byte of the header block, or the byte right after a
+        // "\r\n" line terminator. Without this, the literal text
+        // "Content-Length:" matches anywhere it appears as a substring --
+        // e.g. inside "X-Orig-Content-Length: 99" -- and silently returns
+        // the wrong header's value.
+        //
+        // `i == 1` must also be treated as a boundary case alongside
+        // `i == 0`: there is only one byte before index 1 (index 0), not
+        // two, so `rawbuf_get(buf, i - 2)` would read at index -1 -- one
+        // byte before the buffer start -- which this compiler executes
+        // without trapping instead of erroring. No real "\r\n" can fit
+        // before index 1 anyway, so this is never a valid line start.
+        let at_line_start = i == 0 || i == 1 || (i >= 2 && rawbuf_get(buf, i - 2) == CH_CR && rawbuf_get(buf, i - 1) == CH_LF)
+        if at_line_start && matches_at(buf, i, header_end, needle) {
+            var j: i64 = i + needle_len
+            while j < header_end && rawbuf_get(buf, j) == CH_SPACE {
+                j = j + 1
+            }
+            var value: i64 = 0
+            var have_digit: bool = false
+            while j < header_end && rawbuf_get(buf, j) >= CH_ZERO && rawbuf_get(buf, j) <= CH_NINE {
+                value = value * 10 + (rawbuf_get(buf, j) - CH_ZERO)
+                have_digit = true
+                j = j + 1
+            }
+            if have_digit {
+                return value
+            }
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn failed_response() -> HttpResponse with IO {
+    HttpResponse { status: 0 - 1, headers: rawbuf_new(1), body: rawbuf_new(1), body_len: 0, ok: false }
+}
+
+// Bounds used to reject oversized input before it ever reaches a
+// fixed-size buffer copy. `http_get` is a `pub` entry point that will
+// eventually front a web crawler processing arbitrary/untrusted URLs, so
+// these are real security limits, not style nits.
+//
+// - ADDR_TEXT_CAP matches `addr_text`'s `rawbuf_new(16)` below: the
+//   numeric-IP passthrough path copies `host_len` raw bytes into it with
+//   no other bounds check, so any host_len > 16 is a heap overflow.
+// - MAX_HOSTNAME_LEN is the real DNS limit (RFC 1035): a full hostname is
+//   at most 253 bytes.
+// - REQUEST_BUF_CAP matches the `rawbuf_new(512)` request buffer below.
+const ADDR_TEXT_CAP: i64 = 16
+const MAX_HOSTNAME_LEN: i64 = 253
+const REQUEST_BUF_CAP: i64 = 512
+
+// `ok` means "a well-formed status line + Content-Length body was
+// received and parsed" -- NOT that the HTTP status code itself indicates
+// success. A 404 or 500 response is `ok: true`; check `status` separately.
+//
+// Internals follow the value-threading discipline from Finding 4/6 of the
+// audit doc: the whole connect -> send -> recv -> close lifecycle of
+// `sock` is one unconditional straight-line sequence (no `if` ever
+// touches the `TcpSocket` binding); the resulting plain i64/bool values
+// are only inspected for pass/fail AFTER `sock` has already been
+// consumed/closed.
+pub fn http_get(host: &RawBuf, host_len: i64, port: u16, path: &RawBuf, path_len: i64) -> HttpResponse with IO {
+    if host_len < 0 || host_len > MAX_HOSTNAME_LEN || path_len < 0 {
+        return failed_response()
+    }
+
+    let addr_text = rawbuf_new(16)
+    var dns_err: i64 = 0
+
+    if is_numeric_ip(host, host_len) {
+        // Numeric-IP passthrough copies `host_len` bytes verbatim into
+        // `addr_text` below with no other bounds check -- reject anything
+        // that wouldn't fit `addr_text`'s capacity before touching it.
+        // (No valid dotted-decimal IPv4 text is longer than 15 bytes
+        // anyway, so this never rejects a well-formed address.)
+        if host_len > ADDR_TEXT_CAP {
+            return failed_response()
+        }
+        var i: i64 = 0
+        while i < host_len {
+            rawbuf_set(&addr_text, i, rawbuf_get(host, i))
+            i = i + 1
+        }
+    } else {
+        dns_err = resolve_ipv4(host, host_len, &addr_text)
+    }
+
+    if dns_err != 0 {
+        return failed_response()
+    }
+
+    let resolved_ip = rawbuf_new(4)
+    let parse_ok = parse_ipv4_dotted(&addr_text, 16, &resolved_ip)
+    if !parse_ok {
+        return failed_response()
+    }
+
+    // Build "GET <path> HTTP/1.1\r\nHost: <host>\r\nConnection: close\r\n\r\n".
+    // Reject up front if host_len + path_len (plus the fixed boilerplate
+    // around them) wouldn't fit the fixed-size request buffer below --
+    // otherwise a long host or path silently overflows it.
+    let request_boilerplate_len = str_len("GET ") + str_len(" HTTP/1.1\r\nHost: ") + str_len("\r\nConnection: close\r\n\r\n")
+    if request_boilerplate_len + host_len + path_len > REQUEST_BUF_CAP {
+        return failed_response()
+    }
+
+    let request = rawbuf_new(512)
+    var off: i64 = 0
+    off = write_str(&request, off, "GET ")
+    off = write_rawbuf(&request, off, path, path_len)
+    off = write_str(&request, off, " HTTP/1.1\r\nHost: ")
+    off = write_rawbuf(&request, off, host, host_len)
+    off = write_str(&request, off, "\r\nConnection: close\r\n\r\n")
+    let request_len = off
+
+    // Straight-line socket lifecycle: connect, send, recv, close -- no
+    // conditional ever touches `sock`/`sock2`/`sock3`.
+    let (sock, connect_err) = tcp_connect(&resolved_ip, port)
+    let (sock2, sent) = tcp_send(sock, &request, request_len)
+    let response_buf = rawbuf_new(4096)
+    let (sock3, received) = tcp_recv(sock2, &response_buf, 4096)
+    tcp_close(sock3)
+
+    if connect_err != 0 || sent < 0 || received <= 0 {
+        return failed_response()
+    }
+
+    let header_end = find_header_end(&response_buf, received)
+    if header_end < 0 {
+        return failed_response()
+    }
+
+    let status = parse_status_code(&response_buf, header_end)
+    let content_length = find_content_length(&response_buf, header_end)
+    if status < 0 || content_length < 0 {
+        return failed_response()
+    }
+
+    let headers = rawbuf_new(header_end + 1)
+    var hi: i64 = 0
+    while hi < header_end {
+        rawbuf_set(&headers, hi, rawbuf_get(&response_buf, hi))
+        hi = hi + 1
+    }
+
+    // Honesty check: this function's contract is "a well-formed status
+    // line + Content-Length body was received and parsed". If fewer body
+    // bytes actually arrived in this single recv() than Content-Length
+    // claims (body spans more than one recv(), or the response exceeds
+    // the fixed 4096-byte buffer), that is a real failure of this
+    // function -- not something to silently under-report. Reading a
+    // read-loop-until-content-length is out of scope here (larger,
+    // separate piece of work); this just refuses to fabricate a
+    // `body_len` that overstates what's actually in the buffer.
+    let body_start = header_end + 4
+    let available = received - body_start
+    if available < content_length {
+        return failed_response()
+    }
+
+    let body = rawbuf_new(content_length + 1)
+    var bi: i64 = 0
+    while bi < content_length {
+        rawbuf_set(&body, bi, rawbuf_get(&response_buf, body_start + bi))
+        bi = bi + 1
+    }
+
+    HttpResponse { status: status, headers: headers, body: body, body_len: content_length, ok: true }
+}

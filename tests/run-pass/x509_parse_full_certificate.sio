@@ -1,0 +1,299 @@
+//@ run-pass
+//@ requires: madaros
+
+// Task 7 Step 1/3: full outer Certificate ::= SEQUENCE { tbsCertificate,
+// signatureAlgorithm, signatureValue } structural assembly test. Extends
+// Task 5's TBSCertificate fixture (tests/run-pass/x509_parse_tbs_core.sio)
+// with a minimal v3 [3] Extensions block (basicConstraints + one SAN
+// dNSName entry, matching Task 6's own fixture shapes in
+// tests/run-pass/x509_parse_extensions.sio / x509_parse_san.sio), wraps it
+// in the outer Certificate SEQUENCE, and adds a PLAUSIBLE (not
+// cryptographically valid -- this test checks structural assembly, not
+// verification; Step 4's test, x509_verify_signature.sio, covers real
+// cryptographic verification) outer signature BIT STRING.
+//
+// Wire layout (byte offsets into the RawBuf; every length independently
+// re-derived and cross-checked against a Python re-implementation of the
+// same TLV nesting before being transcribed here -- see this task's report
+// for the derivation script):
+//
+//   [0..3)      Certificate SEQUENCE header: 0x30, 0x81, 0xC2 (long-form
+//               length 194, since content exceeds 127 bytes)
+//   [3..175)    tbsCertificate SEQUENCE (172 bytes total TLV):
+//     [3..6)      TBSCertificate header: 0x30, 0x81, 0xA9 (long-form
+//                 length 169)
+//     [6..11)     version [0] EXPLICIT INTEGER 2 (v3)
+//     [11..15)    serialNumber INTEGER 12345 (0x3039)
+//     [15..30)    signature AlgorithmIdentifier (sha256WithRSAEncryption + NULL)
+//     [30..50)    issuer Name (CN = "Test CA")
+//     [50..82)    validity (UTCTime x2)
+//     [82..104)   subject Name (CN = "Test Leaf")
+//     [104..133)  subjectPublicKeyInfo (RSAPublicKey { modulus 3233, exponent 17 })
+//     [133..175)  extensions [3] EXPLICIT wrapper (42 bytes):
+//                   0xA3, 0x28,                    -- [3] wrapper, len 40
+//                     0x30, 0x26,                  -- Extensions SEQUENCE, len 38
+//                       // basicConstraints (2.5.29.19), critical=TRUE, cA=TRUE, pathLen=0
+//                       0x30, 0x12, 0x06,0x03,0x55,0x1D,0x13, 0x01,0x01,0xFF,
+//                         0x04,0x08, 0x30,0x06, 0x01,0x01,0xFF, 0x02,0x01,0x00,
+//                       // subjectAltName (2.5.29.17), dNSName "a.com"
+//                       0x30, 0x10, 0x06,0x03,0x55,0x1D,0x11,
+//                         0x04,0x09, 0x30,0x07, 0x82,0x05,'a','.','c','o','m'
+//   [175..190)  outer signatureAlgorithm AlgorithmIdentifier -- IDENTICAL
+//               bytes to the TBS's own signature field (both
+//               sha256WithRSAEncryption), so the cross-check in
+//               x509_parse_certificate passes.
+//   [190..197)  outer signatureValue BIT STRING: 0x03, 0x05, 0x00, 0xDE,
+//               0xAD, 0xBE, 0xEF (unused-bits=0, 4-byte plausible payload)
+//
+// Length arithmetic (independently re-verified via the Python `tlv()`
+// helper in this task's report, byte-for-byte against the hex above):
+//   basicConstraints Extension TLV: 20 bytes (2 + [5-byte OID TLV + 3-byte
+//     critical BOOLEAN TLV + 10-byte extnValue OCTET STRING TLV])
+//   subjectAltName Extension TLV:   18 bytes (2 + [5-byte OID TLV + 11-byte
+//     extnValue OCTET STRING TLV])
+//   Extensions SEQUENCE content:    20 + 18 = 38 = 0x26. Confirmed.
+//   [3] wrapper content:            2 + 38 = 40 = 0x28. Confirmed.
+//   TBSCertificate content: 5(version)+4(serial)+15(sigalg)+20(issuer)+
+//     32(validity)+22(subject)+29(spki)+42(extensions) = 169 = 0xA9. Confirmed.
+//   TBSCertificate total TLV: 3(long-form header)+169 = 172.
+//   Certificate content: 172(tbs)+15(outer alg)+7(outer sig) = 194 = 0xC2. Confirmed.
+//   Certificate total: 3(long-form header)+194 = 197 bytes.
+
+use asn1::der::*
+use bignum::bigint::*
+use net::socket::*
+use x509::cert::*
+use x509::oid::*
+
+fn main() -> i64 with IO {
+    let total_len: i64 = 197
+    let buf = rawbuf_new(total_len + 8)
+
+    let bytes: [i64; 197] = [
+        0x30, 0x81, 0xC2, 0x30, 0x81, 0xA9, 0xA0, 0x03, 0x02, 0x01, 0x02, 0x02,
+        0x02, 0x30, 0x39, 0x30, 0x0D, 0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7,
+        0x0D, 0x01, 0x01, 0x0B, 0x05, 0x00, 0x30, 0x12, 0x31, 0x10, 0x30, 0x0E,
+        0x06, 0x03, 0x55, 0x04, 0x03, 0x13, 0x07, 0x54, 0x65, 0x73, 0x74, 0x20,
+        0x43, 0x41, 0x30, 0x1E, 0x17, 0x0D, 0x32, 0x35, 0x30, 0x31, 0x30, 0x31,
+        0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x5A, 0x17, 0x0D, 0x32, 0x36, 0x30,
+        0x31, 0x30, 0x31, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x5A, 0x30, 0x14,
+        0x31, 0x12, 0x30, 0x10, 0x06, 0x03, 0x55, 0x04, 0x03, 0x13, 0x09, 0x54,
+        0x65, 0x73, 0x74, 0x20, 0x4C, 0x65, 0x61, 0x66, 0x30, 0x1B, 0x30, 0x0D,
+        0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01, 0x05,
+        0x00, 0x03, 0x0A, 0x00, 0x30, 0x07, 0x02, 0x02, 0x0C, 0xA1, 0x02, 0x01,
+        0x11, 0xA3, 0x28, 0x30, 0x26, 0x30, 0x12, 0x06, 0x03, 0x55, 0x1D, 0x13,
+        0x01, 0x01, 0xFF, 0x04, 0x08, 0x30, 0x06, 0x01, 0x01, 0xFF, 0x02, 0x01,
+        0x00, 0x30, 0x10, 0x06, 0x03, 0x55, 0x1D, 0x11, 0x04, 0x09, 0x30, 0x07,
+        0x82, 0x05, 0x61, 0x2E, 0x63, 0x6F, 0x6D, 0x30, 0x0D, 0x06, 0x09, 0x2A,
+        0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x0B, 0x05, 0x00, 0x03, 0x05,
+        0x00, 0xDE, 0xAD, 0xBE, 0xEF,
+    ]
+
+    var i: i64 = 0
+    while i < total_len {
+        rawbuf_set(&buf, i, bytes[i as usize])
+        i = i + 1
+    }
+
+    // Per Finding 25's workaround (see this task's brief): declare `cert`
+    // first via certificate_zero() (whose struct type resolves correctly),
+    // then overwrite its VALUE via plain assignment, never `let`/`var`
+    // re-binding, so `cert`'s struct-type binding stays intact for every
+    // `cert.field` access below.
+    var cert = certificate_zero()
+    let (cert_raw, status) = x509_parse_certificate(&buf, total_len)
+    cert = cert_raw
+
+    if status != X509_OK {
+        print_int(1)
+        return 1
+    }
+    assert(status == X509_OK)
+
+    // tbs_start/tbs_len must point at exactly the TBSCertificate SEQUENCE's
+    // own TLV bytes: offset 3, length 172 (3-byte long-form header + 169
+    // content bytes).
+    if cert.tbs_start != 3 {
+        print_int(2)
+        return 1
+    }
+    assert(cert.tbs_start == 3)
+    if cert.tbs_len != 172 {
+        print_int(3)
+        return 1
+    }
+    assert(cert.tbs_len == 172)
+
+    // Independently re-read the byte at cert.tbs_start straight from the
+    // buffer (not through the parser) and confirm it's the TBSCertificate
+    // SEQUENCE's own tag byte, 0x30.
+    if (rawbuf_get(&buf, cert.tbs_start) & 255) != 0x30 {
+        print_int(4)
+        return 1
+    }
+    assert((rawbuf_get(&buf, cert.tbs_start) & 255) == 0x30)
+
+    // The outer signatureAlgorithm OID must match the TBS's own inner
+    // signature algorithm OID (both sha256WithRSAEncryption in this fixture).
+    if oid_eq(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &cert.tbs_sig_alg_oid, cert.tbs_sig_alg_oid_len) == false {
+        print_int(5)
+        return 1
+    }
+    assert(oid_eq(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &cert.tbs_sig_alg_oid, cert.tbs_sig_alg_oid_len) == true)
+
+    let sha256_rsa_oid = oid_sha256_with_rsa()
+    if oid_eq9(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &sha256_rsa_oid) == false {
+        print_int(6)
+        return 1
+    }
+    assert(oid_eq9(&cert.outer_sig_alg_oid, cert.outer_sig_alg_oid_len, &sha256_rsa_oid) == true)
+
+    // Outer signature bytes: unused-bits byte (0x00) stripped, 4 payload
+    // bytes DE AD BE EF.
+    if cert.outer_signature_len != 4 {
+        print_int(7)
+        return 1
+    }
+    assert(cert.outer_signature_len == 4)
+    if (cert.outer_signature[0] as i64) != 0xDE {
+        print_int(8)
+        return 1
+    }
+    if (cert.outer_signature[1] as i64) != 0xAD {
+        print_int(9)
+        return 1
+    }
+    if (cert.outer_signature[2] as i64) != 0xBE {
+        print_int(10)
+        return 1
+    }
+    if (cert.outer_signature[3] as i64) != 0xEF {
+        print_int(11)
+        return 1
+    }
+    assert((cert.outer_signature[0] as i64) == 0xDE)
+    assert((cert.outer_signature[3] as i64) == 0xEF)
+
+    // Every field from Tasks 5/6's own tests must still be correctly
+    // populated on the fully-assembled result.
+    if cert.version != 2 {
+        print_int(12)
+        return 1
+    }
+    assert(cert.version == 2)
+
+    let expected_serial = bigint_from_u32(12345)
+    if bigint_cmp(&cert.serial_number, &expected_serial) != 0 {
+        print_int(13)
+        return 1
+    }
+    assert(bigint_cmp(&cert.serial_number, &expected_serial) == 0)
+
+    if cert.issuer.count != 1 {
+        print_int(14)
+        return 1
+    }
+    assert(cert.issuer.count == 1)
+    if cert.issuer.entries[0].value_len != 7 {
+        print_int(15)
+        return 1
+    }
+    assert(cert.issuer.entries[0].value_len == 7)
+    if (cert.issuer.entries[0].value[0] as i64) != 0x54 {
+        print_int(16)
+        return 1
+    }
+    if (cert.issuer.entries[0].value[6] as i64) != 0x41 {
+        print_int(17)
+        return 1
+    }
+    assert((cert.issuer.entries[0].value[6] as i64) == 0x41)
+
+    if cert.subject.count != 1 {
+        print_int(18)
+        return 1
+    }
+    assert(cert.subject.count == 1)
+    if cert.subject.entries[0].value_len != 9 {
+        print_int(19)
+        return 1
+    }
+    assert(cert.subject.entries[0].value_len == 9)
+    if (cert.subject.entries[0].value[8] as i64) != 0x66 {
+        print_int(20)
+        return 1
+    }
+    assert((cert.subject.entries[0].value[8] as i64) == 0x66)
+
+    let expected_modulus = bigint_from_u32(3233)
+    if bigint_cmp(&cert.modulus, &expected_modulus) != 0 {
+        print_int(21)
+        return 1
+    }
+    assert(bigint_cmp(&cert.modulus, &expected_modulus) == 0)
+    let expected_exponent = bigint_from_u32(17)
+    if bigint_cmp(&cert.public_exponent, &expected_exponent) != 0 {
+        print_int(22)
+        return 1
+    }
+    assert(bigint_cmp(&cert.public_exponent, &expected_exponent) == 0)
+
+    // v3 extensions block: basicConstraints + one SAN dNSName entry.
+    if cert.extension_count != 2 {
+        print_int(23)
+        return 1
+    }
+    assert(cert.extension_count == 2)
+    if cert.is_ca != true {
+        print_int(24)
+        return 1
+    }
+    assert(cert.is_ca == true)
+    if cert.path_len_constraint != 0 {
+        print_int(25)
+        return 1
+    }
+    assert(cert.path_len_constraint == 0)
+
+    if cert.san_count != 1 {
+        print_int(26)
+        return 1
+    }
+    assert(cert.san_count == 1)
+    if cert.san_entries[0].tag != GENERAL_NAME_DNS_NAME {
+        print_int(27)
+        return 1
+    }
+    assert(cert.san_entries[0].tag == GENERAL_NAME_DNS_NAME)
+    if cert.san_entries[0].value_len != 5 {
+        print_int(28)
+        return 1
+    }
+    assert(cert.san_entries[0].value_len == 5)
+    if (cert.san_entries[0].value[0] as i64) != 0x61 {
+        print_int(29)
+        return 1
+    }
+    if (cert.san_entries[0].value[4] as i64) != 0x6D {
+        print_int(30)
+        return 1
+    }
+    assert((cert.san_entries[0].value[0] as i64) == 0x61)
+    assert((cert.san_entries[0].value[4] as i64) == 0x6D)
+
+    // issuerAltName / SCTs were never present in this fixture -- must stay
+    // at their zero defaults.
+    if cert.issuer_alt_name_count != 0 {
+        print_int(31)
+        return 1
+    }
+    assert(cert.issuer_alt_name_count == 0)
+    if cert.sct_count != 0 {
+        print_int(32)
+        return 1
+    }
+    assert(cert.sct_count == 0)
+
+    println("x509_parse_full_certificate: outer assembly + sig-alg cross-check + extensions/SAN wiring OK")
+    return 0
+}

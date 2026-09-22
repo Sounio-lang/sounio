@@ -97,11 +97,26 @@ fn measurement_new(val: f64, unc: f64, unit: i32) -> Measurement {
 
 // ============================================================================
 // GUM uncertainty propagation: sum rule
-// u_combined = sqrt(u1^2 + u2^2)   (independent sources, GUM §4.3.2)
+//
+// 🚨 O comentário anterior dizia "(independent sources, GUM §4.3.2)" e a função não exigia
+// nada — enunciava a pré-condição e a ignorava. A lei completa é o §5.2:
+//     u_c = sqrt(u1² + u2² + 2·rho·u1·u2)
+// Quadratura é ela em rho = 0; a soma aditiva é ela em rho = 1 (Cauchy–Schwarz).
 // ============================================================================
 
+fn propagate_sum_rho(u1: f64, u2: f64, rho: f64) -> f64 with Mut, Div, Panic {
+    let s = u1 * u1 + u2 * u2 + 2.0 * rho * u1 * u2
+    if s <= 0.0 { 0.0 } else { sci_sqrt(s) }
+}
+
+// Independência PROVADA (rho = 0), com o nome dizendo o que se assume.
+fn propagate_sum_independent(u1: f64, u2: f64) -> f64 with Mut, Div, Panic {
+    propagate_sum_rho(u1, u2, 0.0)
+}
+
+// Sem rho declarado: pior caso. Quem quiser quadratura passa a ter de pedi-la pelo nome.
 fn propagate_sum(u1: f64, u2: f64) -> f64 with Mut, Div, Panic {
-    sci_sqrt(u1 * u1 + u2 * u2)
+    propagate_sum_rho(u1, u2, 1.0)
 }
 
 // ============================================================================
@@ -122,20 +137,48 @@ fn propagate_product(v1: f64, u1: f64, v2: f64, u2: f64) -> f64 with Mut, Div, P
 // Arithmetic with uncertainty
 // ============================================================================
 
-fn measurement_add(a: &Measurement, b: &Measurement) -> Measurement with Mut, Div, Panic {
+// 🚨 `measurement_add` e `measurement_sub` combinavam as incertezas em QUADRATURA sem nenhuma
+// checagem — e são os call-sites reais desta biblioteca, o que a soma de medidas de fato usa.
+// A biblioteca NÃO PODE saber se duas medidas são independentes: dois sensores no mesmo trilho,
+// duas leituras do mesmo instrumento à mesma temperatura, ou duas grandezas ligadas pela hora do
+// dia são correlacionadas, e ali a quadratura publica um limite mais apertado que a verdade.
+//
+// O padrão passa a ser o pior caso; independência e ρ conhecido se pedem pelo nome.
+
+fn measurement_add_rho(a: &Measurement, b: &Measurement, rho: f64) -> Measurement with Mut, Div, Panic {
     Measurement {
         value: a.value + b.value,
-        uncertainty: propagate_sum(a.uncertainty, b.uncertainty),
+        uncertainty: propagate_sum_rho(a.uncertainty, b.uncertainty, rho),
         unit_code: a.unit_code,
     }
 }
 
-fn measurement_sub(a: &Measurement, b: &Measurement) -> Measurement with Mut, Div, Panic {
+// Independência DECLARADA pelo chamador (ρ = 0). Grepável.
+fn measurement_add_independent(a: &Measurement, b: &Measurement) -> Measurement with Mut, Div, Panic {
+    measurement_add_rho(a, b, 0.0)
+}
+
+fn measurement_add(a: &Measurement, b: &Measurement) -> Measurement with Mut, Div, Panic {
+    measurement_add_rho(a, b, 1.0)
+}
+
+// Na SUBTRAÇÃO o sinal de ρ se inverte: para y = a − b, o termo cruzado do GUM entra com
+// −2ρ·u_a·u_b. Logo o pior caso da subtração é ρ = −1, não ρ = +1 — e usar +1 aqui seria
+// conservador por acidente e frouxo no caso que importa. Passar ρ com o sinal já aplicado.
+fn measurement_sub_rho(a: &Measurement, b: &Measurement, rho: f64) -> Measurement with Mut, Div, Panic {
     Measurement {
         value: a.value - b.value,
-        uncertainty: propagate_sum(a.uncertainty, b.uncertainty),
+        uncertainty: propagate_sum_rho(a.uncertainty, b.uncertainty, 0.0 - rho),
         unit_code: a.unit_code,
     }
+}
+
+fn measurement_sub_independent(a: &Measurement, b: &Measurement) -> Measurement with Mut, Div, Panic {
+    measurement_sub_rho(a, b, 0.0)
+}
+
+fn measurement_sub(a: &Measurement, b: &Measurement) -> Measurement with Mut, Div, Panic {
+    measurement_sub_rho(a, b, 0.0 - 1.0)
 }
 
 fn measurement_mul(a: &Measurement, b: &Measurement) -> Measurement with Mut, Div, Panic {

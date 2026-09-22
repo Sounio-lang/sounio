@@ -1,0 +1,209 @@
+//@ run-pass
+//@ requires: madaros
+
+// Task 5 Step 6: adversarial aead_open cases for both dispatch targets
+// (AEAD_AES_128_GCM and AEAD_CHACHA20_POLY1305), 3 cases each = 6 total.
+// Split into one function per case, following this branch's established
+// pattern (see tests/run-pass/ocsp_verify_adversarial.sio's header) for
+// staying under Madaros's per-function IR instruction budget when several
+// fixtures/loops would otherwise live in one `main`.
+//
+// Case 1: flip one tag byte after sealing -> aead_open must report
+//   ok == false and return an all-zero plaintext.
+// Case 2: flip one AAD byte AFTER sealing (the AAD passed to aead_open
+//   differs from the AAD passed to aead_seal, not before sealing) ->
+//   ok == false.
+// Case 3: truncate the sealed output to fewer bytes than the tag length
+//   (using length 8, less than the 16-byte tag) -> ok == false, no panic
+//   or out-of-bounds read.
+
+use crypto::aead::*
+use net::socket::*
+
+fn gcm_case1_tag_flip() -> i64 with IO {
+    let key: [u8;32] = [
+        0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f,
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    ]
+    let nonce: [u8;12] = [0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99,0xaa,0xbb,0xcc]
+    let msg_bytes: [u8;5] = [104,101,108,108,111]  // "hello"
+    let aad_bytes: [u8;4] = [1,2,3,4]
+
+    let pt_buf = rawbuf_new(5 + 8)
+    var i: i64 = 0
+    while i < 5 { rawbuf_set(&pt_buf, i, msg_bytes[i as usize] as i64); i = i + 1 }
+    let aad_buf = rawbuf_new(4 + 8)
+    var j: i64 = 0
+    while j < 4 { rawbuf_set(&aad_buf, j, aad_bytes[j as usize] as i64); j = j + 1 }
+
+    let (sealed, sealed_len) = aead_seal(AEAD_AES_128_GCM, &key, &nonce, &pt_buf, 5, &aad_buf, 4)
+    rawbuf_set(&sealed, sealed_len - 1, rawbuf_get(&sealed, sealed_len - 1) ^ 0xFF)
+
+    let (opened, ok) = aead_open(AEAD_AES_128_GCM, &key, &nonce, &sealed, sealed_len, &aad_buf, 4)
+    if ok { return 1 }
+    var k: i64 = 0
+    while k < 5 {
+        if rawbuf_get(&opened, k) != 0 { return 2 }
+        k = k + 1
+    }
+    0
+}
+
+fn gcm_case2_aad_flip() -> i64 with IO {
+    let key: [u8;32] = [
+        0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f,
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    ]
+    let nonce: [u8;12] = [0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99,0xaa,0xbb,0xcc]
+    let msg_bytes: [u8;5] = [104,101,108,108,111]
+    let aad_bytes: [u8;4] = [1,2,3,4]
+
+    let pt_buf = rawbuf_new(5 + 8)
+    var i: i64 = 0
+    while i < 5 { rawbuf_set(&pt_buf, i, msg_bytes[i as usize] as i64); i = i + 1 }
+    let aad_buf = rawbuf_new(4 + 8)
+    var j: i64 = 0
+    while j < 4 { rawbuf_set(&aad_buf, j, aad_bytes[j as usize] as i64); j = j + 1 }
+
+    let (sealed, sealed_len) = aead_seal(AEAD_AES_128_GCM, &key, &nonce, &pt_buf, 5, &aad_buf, 4)
+
+    // Flip one AAD byte AFTER sealing, before calling aead_open.
+    rawbuf_set(&aad_buf, 0, rawbuf_get(&aad_buf, 0) ^ 0xFF)
+
+    let (opened, ok) = aead_open(AEAD_AES_128_GCM, &key, &nonce, &sealed, sealed_len, &aad_buf, 4)
+    if ok { return 3 }
+    var k: i64 = 0
+    while k < 5 {
+        if rawbuf_get(&opened, k) != 0 { return 4 }
+        k = k + 1
+    }
+    0
+}
+
+fn gcm_case3_truncated() -> i64 with IO {
+    let key: [u8;32] = [
+        0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0a,0x0b,0x0c,0x0d,0x0e,0x0f,
+        0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    ]
+    let nonce: [u8;12] = [0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99,0xaa,0xbb,0xcc]
+    let msg_bytes: [u8;5] = [104,101,108,108,111]
+    let aad_bytes: [u8;4] = [1,2,3,4]
+
+    let pt_buf = rawbuf_new(5 + 8)
+    var i: i64 = 0
+    while i < 5 { rawbuf_set(&pt_buf, i, msg_bytes[i as usize] as i64); i = i + 1 }
+    let aad_buf = rawbuf_new(4 + 8)
+    var j: i64 = 0
+    while j < 4 { rawbuf_set(&aad_buf, j, aad_bytes[j as usize] as i64); j = j + 1 }
+
+    let (sealed, sealed_len) = aead_seal(AEAD_AES_128_GCM, &key, &nonce, &pt_buf, 5, &aad_buf, 4)
+
+    // Truncate to 8 bytes -- fewer than the 16-byte GCM tag.
+    let (opened, ok) = aead_open(AEAD_AES_128_GCM, &key, &nonce, &sealed, 8, &aad_buf, 4)
+    if ok { return 5 }
+    // sealed_len is unused past this point but keep the binding alive to
+    // silence an unused-variable diagnostic in case one exists.
+    if sealed_len < 0 { return 6 }
+    0
+}
+
+fn chacha_case1_tag_flip() -> i64 with IO {
+    let key: [u8;32] = [
+        0x80,0x81,0x82,0x83,0x84,0x85,0x86,0x87,0x88,0x89,0x8a,0x8b,0x8c,0x8d,0x8e,0x8f,
+        0x90,0x91,0x92,0x93,0x94,0x95,0x96,0x97,0x98,0x99,0x9a,0x9b,0x9c,0x9d,0x9e,0x9f
+    ]
+    let nonce: [u8;12] = [0x07,0x00,0x00,0x00,0x40,0x41,0x42,0x43,0x44,0x45,0x46,0x47]
+    let msg_bytes: [u8;5] = [104,101,108,108,111]
+    let aad_bytes: [u8;4] = [1,2,3,4]
+
+    let pt_buf = rawbuf_new(5 + 8)
+    var i: i64 = 0
+    while i < 5 { rawbuf_set(&pt_buf, i, msg_bytes[i as usize] as i64); i = i + 1 }
+    let aad_buf = rawbuf_new(4 + 8)
+    var j: i64 = 0
+    while j < 4 { rawbuf_set(&aad_buf, j, aad_bytes[j as usize] as i64); j = j + 1 }
+
+    let (sealed, sealed_len) = aead_seal(AEAD_CHACHA20_POLY1305, &key, &nonce, &pt_buf, 5, &aad_buf, 4)
+    rawbuf_set(&sealed, sealed_len - 1, rawbuf_get(&sealed, sealed_len - 1) ^ 0xFF)
+
+    let (opened, ok) = aead_open(AEAD_CHACHA20_POLY1305, &key, &nonce, &sealed, sealed_len, &aad_buf, 4)
+    if ok { return 7 }
+    var k: i64 = 0
+    while k < 5 {
+        if rawbuf_get(&opened, k) != 0 { return 8 }
+        k = k + 1
+    }
+    0
+}
+
+fn chacha_case2_aad_flip() -> i64 with IO {
+    let key: [u8;32] = [
+        0x80,0x81,0x82,0x83,0x84,0x85,0x86,0x87,0x88,0x89,0x8a,0x8b,0x8c,0x8d,0x8e,0x8f,
+        0x90,0x91,0x92,0x93,0x94,0x95,0x96,0x97,0x98,0x99,0x9a,0x9b,0x9c,0x9d,0x9e,0x9f
+    ]
+    let nonce: [u8;12] = [0x07,0x00,0x00,0x00,0x40,0x41,0x42,0x43,0x44,0x45,0x46,0x47]
+    let msg_bytes: [u8;5] = [104,101,108,108,111]
+    let aad_bytes: [u8;4] = [1,2,3,4]
+
+    let pt_buf = rawbuf_new(5 + 8)
+    var i: i64 = 0
+    while i < 5 { rawbuf_set(&pt_buf, i, msg_bytes[i as usize] as i64); i = i + 1 }
+    let aad_buf = rawbuf_new(4 + 8)
+    var j: i64 = 0
+    while j < 4 { rawbuf_set(&aad_buf, j, aad_bytes[j as usize] as i64); j = j + 1 }
+
+    let (sealed, sealed_len) = aead_seal(AEAD_CHACHA20_POLY1305, &key, &nonce, &pt_buf, 5, &aad_buf, 4)
+
+    rawbuf_set(&aad_buf, 0, rawbuf_get(&aad_buf, 0) ^ 0xFF)
+
+    let (opened, ok) = aead_open(AEAD_CHACHA20_POLY1305, &key, &nonce, &sealed, sealed_len, &aad_buf, 4)
+    if ok { return 9 }
+    var k: i64 = 0
+    while k < 5 {
+        if rawbuf_get(&opened, k) != 0 { return 10 }
+        k = k + 1
+    }
+    0
+}
+
+fn chacha_case3_truncated() -> i64 with IO {
+    let key: [u8;32] = [
+        0x80,0x81,0x82,0x83,0x84,0x85,0x86,0x87,0x88,0x89,0x8a,0x8b,0x8c,0x8d,0x8e,0x8f,
+        0x90,0x91,0x92,0x93,0x94,0x95,0x96,0x97,0x98,0x99,0x9a,0x9b,0x9c,0x9d,0x9e,0x9f
+    ]
+    let nonce: [u8;12] = [0x07,0x00,0x00,0x00,0x40,0x41,0x42,0x43,0x44,0x45,0x46,0x47]
+    let msg_bytes: [u8;5] = [104,101,108,108,111]
+    let aad_bytes: [u8;4] = [1,2,3,4]
+
+    let pt_buf = rawbuf_new(5 + 8)
+    var i: i64 = 0
+    while i < 5 { rawbuf_set(&pt_buf, i, msg_bytes[i as usize] as i64); i = i + 1 }
+    let aad_buf = rawbuf_new(4 + 8)
+    var j: i64 = 0
+    while j < 4 { rawbuf_set(&aad_buf, j, aad_bytes[j as usize] as i64); j = j + 1 }
+
+    let (sealed, sealed_len) = aead_seal(AEAD_CHACHA20_POLY1305, &key, &nonce, &pt_buf, 5, &aad_buf, 4)
+
+    let (opened, ok) = aead_open(AEAD_CHACHA20_POLY1305, &key, &nonce, &sealed, 8, &aad_buf, 4)
+    if ok { return 11 }
+    if sealed_len < 0 { return 12 }
+    0
+}
+
+fn main() -> i64 with IO {
+    let r1 = gcm_case1_tag_flip()
+    if r1 != 0 { print_int(r1); return 1 }
+    let r2 = gcm_case2_aad_flip()
+    if r2 != 0 { print_int(r2); return 1 }
+    let r3 = gcm_case3_truncated()
+    if r3 != 0 { print_int(r3); return 1 }
+    let r4 = chacha_case1_tag_flip()
+    if r4 != 0 { print_int(r4); return 1 }
+    let r5 = chacha_case2_aad_flip()
+    if r5 != 0 { print_int(r5); return 1 }
+    let r6 = chacha_case3_truncated()
+    if r6 != 0 { print_int(r6); return 1 }
+
+    println("aead_adversarial: AES-128-GCM and ChaCha20-Poly1305 both fail closed on tag tamper, AAD tamper, and truncation")
+    return 0
+}

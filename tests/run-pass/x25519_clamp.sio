@@ -1,0 +1,66 @@
+//@ run-pass
+// Direct unit test of x25519_clamp against RFC 7748 section 5's exact bit
+// pattern: "set the three least significant bits of the first byte and
+// the most significant bit of the last to zero, set the second most
+// significant bit of the last byte to 1".
+use crypto::x25519::*
+
+fn main() -> i64 with IO {
+    // Pattern A: an all-0xFF input, i.e. every bit deliberately set to the
+    // OPPOSITE of what clamping should leave for the touched bits. This
+    // proves x25519_clamp actively clears/sets the right bits rather than
+    // just passing through an input that happened to already look clamped.
+    var all_ff: [u8;32] = [0;32]
+    var i: i64 = 0
+    while i < 32 {
+        all_ff[i as usize] = 255
+        i = i + 1
+    }
+    let clamped_a = x25519_clamp(&all_ff)
+
+    // Byte 0: bits 0,1,2 (mask 0x07) must be clear; every other bit of
+    // byte 0 (which was all-1s) must be unchanged, i.e. byte 0 == 0xF8.
+    if clamped_a[0] != 248 { print_int(1); return 1 }
+    // Bytes 1..30: untouched by clamping, must still be 0xFF.
+    var j: i64 = 1
+    while j < 31 {
+        if clamped_a[j as usize] != 255 { print_int(2); return 1 }
+        j = j + 1
+    }
+    // Byte 31: bit 7 (0x80) must be clear, bit 6 (0x40) must be set, and
+    // every other bit of byte 31 (which was all-1s) must be unchanged --
+    // i.e. byte 31 == 0x7F (0111_1111): bit 7 cleared from the original
+    // 1, bit 6 was already 1 and stays 1 (set is idempotent here), bits
+    // 0-5 untouched from the original all-1s.
+    if clamped_a[31] != 127 { print_int(3); return 1 }
+
+    // Pattern B: idempotency. Clamping an already-clamped value must be a
+    // no-op -- the function must not depend on residual state from a
+    // prior call, and re-clamping a valid clamped scalar must be safe.
+    let clamped_twice = x25519_clamp(&clamped_a)
+    var k: i64 = 0
+    while k < 32 {
+        if clamped_twice[k as usize] != clamped_a[k as usize] {
+            print_int(4)
+            return 1
+        }
+        k = k + 1
+    }
+
+    // Pattern C: an all-zero input. Bits 0,1,2 of byte 0 are already 0
+    // (no-op there), bit 7 of byte 31 is already 0 (no-op there), but bit
+    // 6 of byte 31 must be actively SET (not merely left alone) --
+    // proving the "set bit 6" step is a real OR, not a pass-through.
+    let all_zero: [u8;32] = [0;32]
+    let clamped_c = x25519_clamp(&all_zero)
+    if clamped_c[0] != 0 { print_int(5); return 1 }
+    var m: i64 = 1
+    while m < 31 {
+        if clamped_c[m as usize] != 0 { print_int(6); return 1 }
+        m = m + 1
+    }
+    if clamped_c[31] != 64 { print_int(7); return 1 }
+
+    println("x25519_clamp: RFC 7748 section 5 bit pattern verified on all-0xFF, idempotent-reclamp, and all-zero inputs")
+    return 0
+}

@@ -1,0 +1,135 @@
+//! stdlib/crypto/chacha20.sio — ChaCha20 stream cipher (RFC 8439).
+//!
+//! Reference: RFC 8439, "ChaCha20 and Poly1305 for IETF Protocols",
+//! June 2018. https://www.rfc-editor.org/rfc/rfc8439.txt
+//! Section 2.3 defines the block function (four "expand 32-byte k"
+//! constants, 8 key words, a 32-bit block counter, and a 96-bit nonce,
+//! run through 20 rounds -- 10 iterations of the "double round" of
+//! column round then diagonal round -- and finally added back into the
+//! initial state word-by-word, mod 2^32). Section 2.3.2's worked test
+//! vector (key = 00..1f sequential, nonce = 00:00:00:09:00:00:00:4a:
+//! 00:00:00:00, counter = 1) was independently re-fetched from the
+//! primary RFC text on 2026-08-25 and confirmed byte-for-byte against
+//! tests/run-pass/chacha20_block.sio's `expected` array (the RFC prints
+//! the keystream as four-byte little-endian words in hex, e.g. word 0 =
+//! e4e7f110, which serializes out as bytes 10,f1,e7,e4 -- exactly what
+//! this test's `expected` array's first four bytes are).
+//!
+//! All 32-bit word arithmetic uses `hash::word32`'s `add32`/`xor32`/
+//! `rotl32` helpers (plain i64 masked to 0..4294967295), never native
+//! u32 arithmetic -- Finding 13 (docs/audit/
+//! TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_2026-08-23.md) established that
+//! native u32 +/- do not wrap mod 2^32 on this compiler at all.
+//!
+//! Array-copy discipline: `var s = *state` below is safe ONLY because
+//! `s` is never subsequently used to overwrite `*state` through the
+//! same reference elsewhere -- `quarter_round` takes `state` as `&[i64;16]`
+//! and returns a brand-new `[i64;16]` by value; the caller reassigns its
+//! own `working` binding (`working = quarter_round(&working, ...)`), so
+//! the known Task 2 aliasing defect (`var x = *ref` on a `&[u8;N]`
+//! reference aliasing the caller's array rather than copying it) cannot
+//! bite here: even if `s` inside `quarter_round` aliased `*state`, the
+//! function's caller never reads `*state` again after the call, only the
+//! returned value.
+
+use hash::word32::*
+use net::socket::*
+
+pub const CHACHA20_KEY_LEN: i64 = 32
+pub const CHACHA20_NONCE_LEN: i64 = 12
+
+fn quarter_round(state: &[i64;16], a: i64, b: i64, c: i64, d: i64) -> [i64;16] {
+    var s = *state
+    s[a as usize] = add32(s[a as usize], s[b as usize])
+    s[d as usize] = rotl32(xor32(s[d as usize], s[a as usize]), 16)
+    s[c as usize] = add32(s[c as usize], s[d as usize])
+    s[b as usize] = rotl32(xor32(s[b as usize], s[c as usize]), 12)
+    s[a as usize] = add32(s[a as usize], s[b as usize])
+    s[d as usize] = rotl32(xor32(s[d as usize], s[a as usize]), 8)
+    s[c as usize] = add32(s[c as usize], s[d as usize])
+    s[b as usize] = rotl32(xor32(s[b as usize], s[c as usize]), 7)
+    s
+}
+
+pub fn chacha20_block(key: &[u8;32], counter: i64, nonce: &[u8;12]) -> [u8;64] {
+    // "expa" "nd 3" "2-by" "te k" as four little-endian 32-bit constants
+    // (RFC 8439 section 2.3), verified against the RFC text directly.
+    var state: [i64;16] = [0;16]
+    state[0] = 0x61707865
+    state[1] = 0x3320646e
+    state[2] = 0x79622d32
+    state[3] = 0x6b206574
+
+    var i: i64 = 0
+    while i < 8 {
+        state[(4 + i) as usize] =
+            (key[(i*4) as usize] as i64) |
+            ((key[(i*4+1) as usize] as i64) << 8) |
+            ((key[(i*4+2) as usize] as i64) << 16) |
+            ((key[(i*4+3) as usize] as i64) << 24)
+        i = i + 1
+    }
+
+    state[12] = counter
+    var j: i64 = 0
+    while j < 3 {
+        state[(13 + j) as usize] =
+            (nonce[(j*4) as usize] as i64) |
+            ((nonce[(j*4+1) as usize] as i64) << 8) |
+            ((nonce[(j*4+2) as usize] as i64) << 16) |
+            ((nonce[(j*4+3) as usize] as i64) << 24)
+        j = j + 1
+    }
+
+    let initial = state
+    var working = state
+    var round: i64 = 0
+    while round < 10 {   // 10 double-rounds = 20 rounds total
+        working = quarter_round(&working, 0, 4, 8, 12)
+        working = quarter_round(&working, 1, 5, 9, 13)
+        working = quarter_round(&working, 2, 6, 10, 14)
+        working = quarter_round(&working, 3, 7, 11, 15)
+        working = quarter_round(&working, 0, 5, 10, 15)
+        working = quarter_round(&working, 1, 6, 11, 12)
+        working = quarter_round(&working, 2, 7, 8, 13)
+        working = quarter_round(&working, 3, 4, 9, 14)
+        round = round + 1
+    }
+
+    var output: [u8;64] = [0;64]
+    var k: i64 = 0
+    while k < 16 {
+        let word = add32(working[k as usize], initial[k as usize])
+        output[(k*4) as usize] = (word & 255) as u8
+        output[(k*4+1) as usize] = ((word >> 8) & 255) as u8
+        output[(k*4+2) as usize] = ((word >> 16) & 255) as u8
+        output[(k*4+3) as usize] = ((word >> 24) & 255) as u8
+        k = k + 1
+    }
+    output
+}
+
+pub fn chacha20_encrypt(key: &[u8;32], counter: i64, nonce: &[u8;12], data: &RawBuf, data_len: i64) -> RawBuf with IO {
+    let out = rawbuf_new(data_len + 8)
+    var block_index: i64 = 0
+    var pos: i64 = 0
+    // Counter-wrap note: `add32(counter, block_index)` wraps mod 2^32
+    // after 2^32 64-byte blocks (~256GB per (key, nonce) pair, RFC
+    // 8439's own documented limit) -- unreachable for realistic TLS
+    // record sizes, but a wrap would reuse a keystream block, and if it
+    // wrapped back onto counter 0 (the Poly1305 one-time-key block in
+    // the AEAD_CHACHA20_POLY1305 construction, see aead.sio) that reuse
+    // would be catastrophic. Not a defect for TLS-scale inputs; noted
+    // for anyone reusing this function outside that scope.
+    while pos < data_len {
+        let ks = chacha20_block(key, add32(counter, block_index), nonce)
+        var i: i64 = 0
+        while i < 64 && pos + i < data_len {
+            rawbuf_set(&out, pos + i, rawbuf_get(data, pos + i) ^ (ks[i as usize] as i64))
+            i = i + 1
+        }
+        pos = pos + 64
+        block_index = block_index + 1
+    }
+    out
+}
