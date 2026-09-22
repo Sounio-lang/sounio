@@ -436,8 +436,16 @@ var UNIT_USER_TABLE: [i64; 2048] = [0; 2048]
 // but "unlikely" is not "refused", and a silent alias there means one declared
 // unit's contract is satisfied by passing a different one. -1 = no exact name
 // recorded (the preloaded SI/CGS/etc. table never stores one).
-let UNIT_NAME_CAP: i64 = 32
-var UNIT_NAME_BUF: [i8; 65536] = [0; 65536]
+//
+// 128, not 32: the parser accepts identifiers up to 128 bytes
+// (parser_name_at's own twin in this file clips there too -- see `unit
+// NAME;` parsing), and unit_bytes_eq/unit_register_named_h clamped BOTH the
+// stored and the compared length to whatever this cap was, so two distinct
+// unit names sharing a hash AND their first (old cap) bytes compared equal
+// past that prefix -- exactly the collision this table exists to catch,
+// just truncated instead of refused.
+let UNIT_NAME_CAP: i64 = 128
+var UNIT_NAME_BUF: [i8; 262144] = [0; 262144]
 var UNIT_NAME_LEN: [i64; 2048] = [0 - 1; 2048]
 // Parallel token unit-hash array (for _suffix literals e.g. 500_mg)
 var TU: [i64; 2097152] = [0; 2097152]
@@ -31987,7 +31995,21 @@ fn unit_register_named_h(h: i64, dim: i64, ns: i64, ne: i64, name_tok: i64) with
             // for every symbol it exposes as a type) must keep working. Record
             // the exact name now so a LATER, truly different name at this same
             // hash is caught.
-            if UNIT_NAME_LEN[probe as usize] >= 0 && !unit_bytes_eq(probe, ns, ne) {
+            if UNIT_NAME_LEN[probe as usize] >= 0 {
+                if !unit_bytes_eq(probe, ns, ne) {
+                    tc_error_hard(name_tok, "unit name collides with a different unit's hash")
+                    return
+                }
+            } else if dim != UNIT_DIM_TABLE[probe as usize] {
+                // No exact name means we cannot compare spellings, but a real
+                // dimension silently becoming a DIFFERENT one (nominal
+                // included: dim 0) is the concrete harm a hash collision here
+                // can do -- every later lookup by this hash reads the wrong
+                // dimension for whatever built-in used to own it. The one case
+                // this table already tolerates on purpose is two DIFFERENT
+                // built-in spellings sharing BOTH a hash and a dimension (km/in
+                // -- "both length OK", see init_unit_table); that still passes,
+                // since dim == UNIT_DIM_TABLE[probe] there.
                 tc_error_hard(name_tok, "unit name collides with a different unit's hash")
                 return
             }
