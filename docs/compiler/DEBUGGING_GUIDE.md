@@ -730,7 +730,7 @@ fn test_epistemic_propagation_debug() {
     let a = KnowledgeFull::new(5.0, 0.95, 4.9, 5.1, 1, 0, false);
     let b = KnowledgeFull::new(3.0, 0.90, 2.9, 3.1, 2, 0, false);
 
-    var result = KnowledgeFull::constant(0.0);
+    let mut result = KnowledgeFull::constant(0.0);
     unsafe {
         sounio_epistemic_add_full(&a, &b, &mut result);
     }

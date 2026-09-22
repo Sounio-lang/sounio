@@ -491,19 +491,19 @@ impl PassManager {
 use sounio_compiler::mir::optimization::*;
 
 // Create module
-var module = build_mir_module();
+let mut module = build_mir_module();
 
 // Run optimization
-var pass_manager = PassManager::new_with_level(OptimizationLevel::O2);
+let mut pass_manager = PassManager::new_with_level(OptimizationLevel::O2);
 let result = pass_manager.run_function_passes(&mut module)?;
 ```
 
 ### Custom Pass Sequence
 
 ```rust
-var cp = ConstantPropagation::new();
-var dce = DeadCodeElimination::new();
-var cse = CommonSubexpressionElimination::new();
+let mut cp = ConstantPropagation::new();
+let mut dce = DeadCodeElimination::new();
+let mut cse = CommonSubexpressionElimination::new();
 
 // Run passes in sequence
 cp.run_on_module(&mut module)?;
@@ -516,7 +516,7 @@ cse.run_on_module(&mut module)?;
 ```rust
 use sounio_compiler::mir::analysis::ssa_validator::SSAValidator;
 
-var validator = SSAValidator::new();
+let mut validator = SSAValidator::new();
 let result = validator.validate_function(&function);
 
 if !result.is_valid {
@@ -531,7 +531,7 @@ if !result.is_valid {
 ```rust
 use sounio_compiler::mir::benchmark::*;
 
-var benchmarker = MIROptimizationBenchmarker::new(BenchmarkConfig::default());
+let mut benchmarker = MIROptimizationBenchmarker::new(BenchmarkConfig::default());
 let result = benchmarker.benchmark_pass("constant-propagation", module)?;
 
 println!("Instructions: {} → {}", 
@@ -631,7 +631,7 @@ mod tests {
 
 ```rust
 // Validate after each optimization
-var validator = SSAValidator::new();
+let mut validator = SSAValidator::new();
 let result = validator.validate_function(&function);
 
 if !result.is_valid {

@@ -32,7 +32,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.architecture.m
 
 ```rust
 // Pipeline de otimização configurável
-var pass_manager = PassManager::new(OptimizationLevel::O3);
+let mut pass_manager = PassManager::new(OptimizationLevel::O3);
 pass_manager.add_pass(ConstantPropagation);
 pass_manager.add_pass(DeadCodeElimination);
 pass_manager.add_pass(CommonSubexpressionElimination);
@@ -98,8 +98,8 @@ impl MirAwareCraneliftJit {
     pub fn compile_mir(&self, mir_module: &MirModule) -> Result<CompiledModule, String> {
         // 1. Aplicar otimizações MIR
         let optimized_module = if let Some(opt_level) = self.mir_opt_level {
-            var module_clone = mir_module.clone();
-            var pass_manager = create_default_pass_manager(opt_level);
+            let mut module_clone = mir_module.clone();
+            let mut pass_manager = create_default_pass_manager(opt_level);
             let _modified = pass_manager.run_module_passes(&mut module_clone)?;
             module_clone
         } else {
@@ -107,7 +107,7 @@ impl MirAwareCraneliftJit {
         };
 
         // 2. Compilar para Cranelift IR
-        var compiler = MirCraneliftCompiler::new(self.optimize)?;
+        let mut compiler = MirCraneliftCompiler::new(self.optimize)?;
         compiler.compile_mir_module(&optimized_module)?;
         compiler.finalize()
     }
@@ -258,7 +258,7 @@ unsafe {
 use sounio_compiler::mir::optimization::{PassManager, OptimizationLevel};
 
 // Criar pipeline customizado
-var pass_manager = PassManager::new(OptimizationLevel::O2);
+let mut pass_manager = PassManager::new(OptimizationLevel::O2);
 
 // Adicionar passes específicos
 pass_manager.add_pass(ConstantPropagation);

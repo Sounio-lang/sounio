@@ -76,7 +76,7 @@ if args.native_opts.enable_cps.unwrap_or(false) {
 
     let cps_start = Instant::now();
     let func_count_before = hlir.functions.len();
-    var transform = CpsTransform::new();
+    let mut transform = CpsTransform::new();
     hlir = transform
         .transform(hlir)
         .map_err(|e| format!("CPS transformation error: {}", e))?;
