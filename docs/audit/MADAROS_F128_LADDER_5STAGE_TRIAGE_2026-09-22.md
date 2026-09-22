@@ -279,3 +279,28 @@ A second automated review pass found three more gaps, all fixed the same day:
 All three re-verified; the full 17-stage KL-15a loop (`v0e4` also now
 excluded, covered by `v0e41`) re-ran green sequentially under
 `bash -eo pipefail`.
+
+## Third review pass (2026-09-22, same day)
+
+Two more findings from a third automated review pass:
+
+- **`v0e41`'s stale-souc fallback could mask a real fresh-build failure.**
+  The fallback (accept `v0e4` failing if its seed-level assertions still
+  passed) was written for a *local* run where `$SOUC` resolves to the
+  checked-in `bin/souc`, which can be stale relative to source. In CI,
+  `MADAROS_RAW_BIN` is always set to the freshly built ELF, so `$SOUC` is
+  never stale there — but the fallback didn't check for that, and since
+  `v0e4` is no longer run on its own in `ci.yml` (per the second review
+  pass, above), `v0e41` is now V0-E.4's *only* CI coverage. Restricted the
+  fallback to `[[ -z "${MADAROS_RAW_BIN:-}" ]]`; under a fresh build, any
+  `v0e4` failure is now always a hard fail. Verified both directions: the
+  real fixed-build run still passes normally (never hits the fallback), and
+  a simulated fresh-build `v0e4` failure (bogus `MADAROS_RAW_BIN`, with all
+  seed-level assertions still passing) now correctly fails instead of being
+  masked.
+- A second stale comment in `v0e55`'s header (separate from the one fixed in
+  the second review pass) still described the superseded exact `acc += one`
+  witness. Updated to describe the actual `acc += tiny` anti-f64 assertion.
+
+Both re-verified; the full 17-stage KL-15a loop re-ran green sequentially
+under `bash -eo pipefail`.

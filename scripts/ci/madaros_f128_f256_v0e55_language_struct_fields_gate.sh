@@ -19,9 +19,12 @@
 #     when the program has no f128 let/param/return (struct_only probe)
 #   - Anti-f64 through a field: (1+~1e-20)^2 ≠ 1
 #   - KL-8 (2026-09-12, #2491): `+=`/`-=` on a plain f128 local desugar to
-#     real softfloat add/sub and store back correctly (`acc: f128 = 1.0;
-#     acc += one` gives exactly 2.0, no f64 greenwash) -- updated 2026-09-22,
-#     this used to be a fail-closed refusal, superseded by KL-8
+#     real softfloat add/sub and store back correctly -- `acc: f128 = 1.0;
+#     acc += tiny` (the same anti-f64 `tiny` constant used elsewhere in this
+#     ladder) keeps tiny's low-order bits, which an f64-widen-then-narrow
+#     greenwash would round away (an exact `acc += one` alone can't tell the
+#     two apart, since 1.0+1.0=2.0 is exact in both formats) -- updated
+#     2026-09-22, this used to be a fail-closed refusal, superseded by KL-8
 #   - f256 fields and inexact literals (0.1) still fail-closed
 #
 # Explicitly NOT claimed:
