@@ -1221,10 +1221,16 @@ python3 benchmarks/chemistry/gri30_full_python_replica.py        # ~20 s
 python3 benchmarks/chemistry/gri30_full_cantera_parity.py        # ~1 s
 python3 benchmarks/chemistry/gri30_full_cantera_uq_reference.py --jobs 4   # ~8 s
 
-cd benchmarks/chemistry/cpp
-g++ -std=c++23 -O2 -o band_crosscheck gri30_h2_band_crosscheck.cpp
-./band_crosscheck ../gri30_h2_mechanism.json                     # ~6 min
+( cd benchmarks/chemistry/cpp && \
+  g++ -std=c++23 -O2 -o band_crosscheck gri30_h2_band_crosscheck.cpp && \
+  ./band_crosscheck ../gri30_h2_mechanism.json )               # ~6 min
 ```
+
+The C++ block is parenthesised into a subshell so it does not leave the
+working directory changed for what follows — an earlier revision `cd`'d in
+place and left every subsequent command in this section resolving under
+`benchmarks/chemistry/cpp/`, silently, which is exactly the kind of defect §6
+catalogues **[W]**.
 
 The Lean development does **not** build through Lake in either tree, and the
 command originally printed here is withdrawn **[W]**. Measured, not inferred:
@@ -1243,8 +1249,15 @@ which is what this block now prints:
 
 ```sh
 elan toolchain install leanprover/lean4:v4.33.0    # the pin in formal/lean4/lean-toolchain
-lean formal/SounioIndepComposition.lean            # snapshot v1.0.3; exit 0, no diagnostics
+elan run leanprover/lean4:v4.33.0 lean formal/SounioIndepComposition.lean
+# snapshot v1.0.3, path relative to the repo root; exit 0, no diagnostics
 ```
+
+`elan run <toolchain> <cmd>` is the command actually needed: `elan toolchain
+install` only fetches a toolchain, it does not select it, and a bare `lean`
+afterwards runs whatever `elan`'s default or an ambient override resolves to —
+not necessarily v4.33.0. `elan run` pins the invocation explicitly, which is
+what was verified.
 
 Verified at 2026-09-22 under `Lean (version 4.33.0, x86_64-unknown-linux-gnu,
 commit d8b18978322de05a8f3dba51ef03cf5461676c17, Release)`: the file compiles

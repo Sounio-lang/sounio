@@ -1042,8 +1042,12 @@ cd formal/lean4 && lake build SounioIndepComposition
 > **The development is reproducible anyway, and the first correction wrongly
 > said it was not.** Being Mathlib-free core Lean 4, it needs no Lake project:
 > ```sh
-> lean formal/SounioIndepComposition.lean     # snapshot v1.0.3; exit 0, no diagnostics
+> elan run leanprover/lean4:v4.33.0 lean formal/SounioIndepComposition.lean
+> # snapshot v1.0.3, path relative to repo root; exit 0, no diagnostics
 > ```
+> `elan run <toolchain> <cmd>` pins the invocation explicitly — a bare `lean`
+> runs whatever elan's default or an ambient override resolves to, which is
+> not necessarily this pin.
 > That is what the Verification block below now runs. The first correction
 > claimed "no Lean toolchain is installed in the environment this document
 > records", on the strength of `command -v lake lean elan` returning nothing.
@@ -1100,7 +1104,8 @@ In that form every statement is polynomial, and the linear ones close under
 quoted:
 
 ```sh
-lean formal/SounioIndepComposition.lean                 # snapshot v1.0.3; exit 0
+elan run leanprover/lean4:v4.33.0 lean formal/SounioIndepComposition.lean
+# snapshot v1.0.3, path relative to repo root; exit 0
 grep -c '^theorem ' formal/SounioIndepComposition.lean  # 15
 grep -c 'sorry'     formal/SounioIndepComposition.lean  # 0
 ```
@@ -1641,11 +1646,14 @@ closed this block is **withdrawn** — it fails with `unknown target` — and is
 replaced, against the frozen snapshot, by
 
 ```sh
-lean formal/SounioIndepComposition.lean    # exit 0, no diagnostics
+elan run leanprover/lean4:v4.33.0 lean formal/SounioIndepComposition.lean
+# path relative to repo root; exit 0, no diagnostics
 ```
 
 which needs no Lake project because the development is Mathlib-free core
-Lean 4. §6.2 gives the measured verification and the per-theorem axiom table.
+Lean 4, and pins the toolchain explicitly rather than trusting a bare `lean`
+to resolve to v4.33.0. §6.2 gives the measured verification and the
+per-theorem axiom table.
 
 ### 7.2 Oracle-verification probes
 
