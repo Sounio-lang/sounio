@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.lean-single-pow2-loop-miscompile-2026-09-22
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.lean-single-pow2-loop-miscompile-2026-09-22
+-->
+
 # lean_single power-of-2 range-reduction miscompile: blast-radius audit
 
 **Date**: 2026-09-22
