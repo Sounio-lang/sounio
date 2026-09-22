@@ -204,6 +204,33 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     print("system 3, p[0] negative variance: status=") print(sol3_negvar.status) print(" mode=") println(sol3_negvar.covariance_mode)
     if sol3_negvar.covariance_mode != 1 { fail = fail + 1 println("FAIL: an unread p[0] variance must not force covariance_mode 2 on system 3") }
 
+    // A finite negative variance in p[0] (above) is harmless once multiplied by the RHS's exactly-
+    // zero sensitivity to it (0.0 * finite = 0.0). A NON-FINITE one is not: 0.0 * NaN and 0.0 * inf
+    // are both NaN, so augcov_init used to copy p.param_variances[0] into the augmented matrix
+    // regardless, and the J P J^T product's 0 * NaN terms poisoned the REPORTED state diagonals --
+    // not just p[0]'s own (unread) one. augcov_init now leaves an inactive slot's diagonal at its
+    // zero-initialized default instead of copying it, so this never reaches the matrix at all.
+    let sol3_clean_cmp = sol3_clean // reuse the p[0]-never-set baseline from above
+    var init3nv = estate_new(2)
+    estate_set(&!init3nv, 0, 1.0, 0.01)
+    estate_set(&!init3nv, 1, 0.0, 0.0)
+    var p3_nanvar = ode_params_new()
+    ode_params_set(&!p3_nanvar, 0, 5.0, nan_val()) // unread ka slot, NaN VARIANCE
+    ode_params_set(&!p3_nanvar, 1, 0.1, 0.0001)
+    ode_params_set(&!p3_nanvar, 2, 0.05, 0.0001)
+    ode_params_set(&!p3_nanvar, 3, 0.02, 0.0001)
+    let sol3_nanvar = solve_ode(sys3, init3nv, p3_nanvar, 0.0, 1.0, solver_options_fixed(0.1, 10))
+    let v3n_0 = solution_get_variance(&sol3_nanvar, sol3_nanvar.n_steps - 1, 0)
+    let v3n_1 = solution_get_variance(&sol3_nanvar, sol3_nanvar.n_steps - 1, 1)
+    let v3c_0 = solution_get_variance(&sol3_clean_cmp, sol3_clean_cmp.n_steps - 1, 0)
+    let v3c_1 = solution_get_variance(&sol3_clean_cmp, sol3_clean_cmp.n_steps - 1, 1)
+    print("system 3, p[0] NaN variance:      status=") print(sol3_nanvar.status) print(" mode=") print(sol3_nanvar.covariance_mode)
+    print(" v0=") print(v3n_0) print(" v1=") println(v3n_1)
+    if sol3_nanvar.covariance_mode != 1 { fail = fail + 1 println("FAIL: an unread p[0]'s NaN variance must not force covariance_mode 2 on system 3") }
+    // NaN-safe: v3n_0 != v3n_0 is true only for NaN, catching exactly the contamination this covers
+    if v3n_0 != v3n_0 || v3n_1 != v3n_1 { fail = fail + 1 println("FAIL: an unread p[0]'s NaN variance leaked NaN into the reported state covariance") }
+    if !(absf(v3n_0 - v3c_0) <= 1.0e-15) || !(absf(v3n_1 - v3c_1) <= 1.0e-15) { fail = fail + 1 println("FAIL: an unread p[0]'s NaN variance changed the reported result") }
+
     if fail == 0 { println("ODE AUGMENTED COVARIANCE PASS") }
     fail
 }

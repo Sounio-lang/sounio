@@ -1199,17 +1199,28 @@ struct AugCov {
     dim: i64,
 }
 
-// np is the MODEL's parameter count (ode_system_n_params), not p.n_params -- see that function's
-// doc. p.n_params must be >= np here (ode_system_params_present already required every index in
-// [lo, np) to be set before a solve runs), so indices [0, np) are always populated.
-fn augcov_init(state: &EState, p: &ODEParams, n: i64, np: i64) -> AugCov with Mut, Div, Panic {
+// np is the MODEL's parameter count (ode_system_n_params) and lo its active range's start
+// (ode_system_params_lo) -- not p.n_params or 0 -- see those functions' docs. p.n_params must be
+// >= np here (ode_system_params_present already required every index in [lo, np) to be set
+// before a solve runs).
+//
+// The dim = n + np block still spans [0, np), one wider than [lo, np) for linear_2/linear_3 (an
+// unused index 0 reserved for ka). That slot's diagonal is deliberately left at its zero-
+// initialized default, NOT p.param_variances[0]: propagate_covariance_step's Jacobian column/row
+// for an index the RHS never reads is exactly 0.0 (perturbing it cannot change a computation that
+// never reads it), but 0.0 * NaN and 0.0 * inf are NaN, not 0 -- so copying a non-finite garbage
+// variance in there would poison the J P J^T product and leak into the REPORTED state diagonal
+// despite the Jacobian correctly saying "no sensitivity". Leaving it at 0.0 keeps every term
+// touching that slot exactly 0 through every step, so garbage in an unused slot can never reach
+// the output, finite or not.
+fn augcov_init(state: &EState, p: &ODEParams, n: i64, lo: i64, np: i64) -> AugCov with Mut, Div, Panic {
     var cov = AugCov { data: [0.0; 4096], dim: n + np }
     var i = 0
     while i < n {
         if i < 64 { cov.data[i * 64 + i] = state.variances[i] }
         i = i + 1
     }
-    var k = 0
+    var k = lo
     while k < np {
         let a = n + k
         if a < 64 { cov.data[a * 64 + a] = p.param_variances[k] }
@@ -1671,7 +1682,7 @@ pub fn solve_ode(
     let sys_np = ode_system_n_params(sys.system_id)
     let sys_lo = ode_system_params_lo(sys.system_id)
     let full_cov = sys.n_dims + sys_np <= 64
-    var cov = augcov_init(&state, &p, sys.n_dims, sys_np)
+    var cov = augcov_init(&state, &p, sys.n_dims, sys_lo, sys_np)
     if !full_cov { sol.covariance_mode = 0 }
 
     let input_cov_ok = ode_initial_covariance_ok(&state, &p, sys.n_dims, sys_lo, sys_np)
@@ -1749,10 +1760,11 @@ fn solve_ode_adaptive(
     var step = 0
     var n_evals = 0
     var n_rejected = 0
-    // See solve_ode: the MODEL's parameter count, not p.n_params.
+    // See solve_ode: the MODEL's parameter count and range, not p.n_params / index 0.
     let sys_np = ode_system_n_params(sys.system_id)
+    let sys_lo = ode_system_params_lo(sys.system_id)
     let full_cov = sys.n_dims + sys_np <= 64
-    var cov = augcov_init(&state, &p, sys.n_dims, sys_np)
+    var cov = augcov_init(&state, &p, sys.n_dims, sys_lo, sys_np)
     if !full_cov { sol.covariance_mode = 0 }
 
     solution_record(&!sol, t, &state)
