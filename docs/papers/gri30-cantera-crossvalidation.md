@@ -34,7 +34,8 @@ DOI [10.5281/zenodo.22263060](https://doi.org/10.5281/zenodo.22263060).
 where it appears beneath the command that produced it. Unless a sentence says
 otherwise, that command was run at commit
 `98aa8e4d5151bbc61815bf910b6c31c3d0789f5f` on 2026-09-01; numbers dated
-2026-09-02 or 2026-09-03 are re-measurements and are marked in place. Nothing
+2026-09-02, 2026-09-03 or **2026-09-22** are re-measurements or newly-added
+verifications and are marked in place, each with its own command. Nothing
 here is carried forward from an earlier log, a prior session or a draft.
 
 **Notation used throughout.** **[B]** marks a claim bounded by the instrument —
