@@ -1,7 +1,7 @@
 # `main` vs `integration/sounio-dev-ready-base` — Divergence Inventory
 
 Read-only archaeology. Merge-base: `2a530d031d52e2afae5472050857944de92484a6` (2026-08-22).
-`main` tip: `origin/main` (2026-09-22). `integration` tip: `d502e3d5a1002514e11453707af97831e961ef19`.
+`main` tip at the time of this analysis: `e6cc1e4bf1100fb5e57193f2c59e172e57fa9ae9` (2026-09-22, merge of PR #2600 -- `origin/main` is a moving ref, this SHA is what the commit/file counts below were actually computed against). `integration` tip: `d502e3d5a1002514e11453707af97831e961ef19`.
 No merge/resolution decision is made or proposed here.
 
 ---
@@ -16,7 +16,7 @@ No merge/resolution decision is made or proposed here.
 - **CI is materially different, not just reformatted**: `main`'s `.github/workflows/ci.yml` gained ~25 new gates integration doesn't have (backend-claim parity, PIREUS admission engine, measured-claims gate, GUM-covariance gate, duplicate-definition gate, etc.) — 93 commits vs 4 on `integration`. Merging without reconciling CI would silently drop coverage that has been load-bearing on `main` for a month.
 - **Docs/governance/dataset files touched on both sides** (`KNOWN_LIMITATIONS.md`, `DOCS_AUTHORITY_MATRIX.md`, `topic-registry.v1.json`, the two `datasets/sounio-code-examples/*.jsonl`) are large diffs on `main`, small on `integration` — these are low-*mechanical*-risk (text/JSON merges are tractable) but will need editorial reconciliation since both sides independently documented compiler status/known-limitations.
 - **Thematically the branches are disjoint by design**: `main`'s unique work is dominated by particle-physics/GUM epistemic splits (WP20/WP25 HVP), octonion/sedenion associator and anti-garbling research, CI/gate hardening, and heavy `self-hosted/{compiler,check,ir,native}` churn. `integration`'s unique work is a TCP/TLS/X.509/crypto networking stack on Madaros (`stdlib/{x509,crypto,tls,net,hash,bignum,asn1}`, ~90 commits) plus the IndepKnowledge/d-separation type system and light CUDA/GPU backend fixes.
-- **Rough risk bucketing of the 40 overlapping files**: 8 **high-risk** (2 binaries + 6 compiler-internals `.sio` files), ~11 **medium-risk** (docs/governance/dataset/CI/script files — mechanically mergeable but need editorial reconciliation, plus 3 `stdlib/epistemic` files with divergent line-counts on an already-shared feature), ~21 **low-risk** (test fixtures, mostly already byte-identical or trivially reconcilable, modulo the 4 error-code mismatches called out above).
+- **Risk bucketing of the 40 overlapping files** (8+6+12+3+11 = 40, reconciled against a direct recount): 8 **high-risk** (2 binaries + 6 compiler-internals `.sio` files, §3a), 6 **compile-fail tests with diagnostic-code drift** (§3c: 5 with a mismatched `error-pattern:` code + 1 non-conflicting enrichment), 12 **medium-risk** (docs/governance/dataset/CI/script files, §3d — mechanically mergeable but need editorial reconciliation), 3 **medium-risk** `stdlib/epistemic` files with divergent line-counts on an already-shared feature (§3e), 11 **low-risk** test fixtures already confirmed byte-identical (§3f).
 
 ---
 
@@ -114,7 +114,7 @@ Confirmed via direct content diff (`git show <tip>:<path>`) that these files are
 
 ### 3c. Real (small) divergence inside the "reconciled" feature — error-code drift
 
-Four `tests/compile-fail/*.sio` files are identical except for the asserted diagnostic code, meaning `check.sio`'s error-code numbering has drifted independently between branches even on shared logic:
+Five `tests/compile-fail/*.sio` files are identical except for the asserted diagnostic code, meaning `check.sio`'s error-code numbering has drifted independently between branches even on shared logic:
 
 | File | `main` expects | `integration` expects |
 |---|---|---|
@@ -122,12 +122,15 @@ Four `tests/compile-fail/*.sio` files are identical except for the asserted diag
 | `tests/compile-fail/dsep_fork_unconditioned.sio` | `E255` | `E176` |
 | `tests/compile-fail/dsep_collider_conditioned.sio` | `E255` | `E176` |
 | `tests/compile-fail/indep_var_not_in_graph.sio` | `E254` | `E175` |
+| `tests/compile-fail/quadrature_needs_proof.sio` | `E255` | `E176` |
 
 `main` independently ran a diagnostic-code remap (`fix(diagnostics): remap colliding Madaros E2xx codes #2191`) after the feature was ported, which is the most likely explanation for the drift. **This means a merge cannot simply take either side's `check.sio` wholesale for the shared feature — every affected `error-pattern:` assertion needs to be re-verified against whichever `check.sio` wins.**
 
+This makes 6 overlapping `tests/compile-fail/*.sio` files in total once `refinement_subtype_strict.sio` is included (5 with error-code drift + 1 enrichment, see next paragraph) -- reconciling `check.sio`'s numbering.
+
 `tests/compile-fail/refinement_subtype_strict.sio` also overlaps, but non-conflicting: `main` added a `requires: lean_single` engine-scoping annotation plus ~27 lines of forensic commentary explaining a genuine Madaros/lean_single behavioral difference; `integration`'s version is the earlier, shorter version of the same test. This is an enrichment, not a conflicting edit — main's version should likely win, but that is not this report's call.
 
-### 3d. Docs / governance / datasets / CI / scripts (11 files) — mechanically tractable, editorially non-trivial
+### 3d. Docs / governance / datasets / CI / scripts (12 files) — mechanically tractable, editorially non-trivial
 
 | File | `main` | `integration` | Note |
 |---|---|---|---|
@@ -137,7 +140,7 @@ Four `tests/compile-fail/*.sio` files are identical except for the asserted diag
 | `docs/governance/topic-registry.v1.json` | 105 commits, +8074/‑3430 | 2 commits, +786/‑4 | Structured JSON, large main-side churn; likely regenerated/derived rather than hand-edited — check for a generator script before manual reconciliation. |
 | `datasets/sounio-code-examples/train.jsonl` | 27 commits, +1879/‑197 | 2 commits, +3/‑3 (trivial) | Low actual conflict; integration's touch is incidental. |
 | `datasets/sounio-code-examples/validation.jsonl` | 17 commits, +260/‑73 | 2 commits, +2/‑2 (trivial) | Same. |
-| `artifacts/seed-refresh/SeedReceipt.latest.{json,txt}` | 33 commits each, pure additions | 1 commit each, pure additions | Mechanically regenerated receipts (see §4, bootstrap-seed status) — should be regenerated post-merge, not hand-merged. |
+| `artifacts/seed-refresh/SeedReceipt.latest.json` + `.txt` (2 physical files, one row) | 33 commits each, pure additions | 1 commit each, pure additions | Mechanically regenerated receipts (see §4, bootstrap-seed status) — should be regenerated post-merge, not hand-merged. |
 | `artifacts/self-hosted/madaros.gate-receipt` | 9 commits, +4/‑4 | 1 commit, +3/‑4 | Same — regenerate, don't hand-merge. |
 | `scripts/ci/souc-native-wrapper.sh` | 2 commits, +20/‑1 | 1 commit, +18/‑1 | Small, plausibly compatible additive changes on both sides — verify no logic collision. |
 | `scripts/dev/run_sio_test_suite_v2.sh` | 8 commits, +173/‑9 | 1 commit, +13/‑1 | Integration's touch is small relative to main's; low risk. |
@@ -151,7 +154,7 @@ Four `tests/compile-fail/*.sio` files are identical except for the asserted diag
 | `stdlib/epistemic/graded_effects.sio` | 5 commits, +162/‑17 | 5 commits, +176/‑20 | Both sides did the same "witness of independence" feature work independently in parallel (commit messages overlap in wording but not hash), then integration additionally reconciled — see §3b for the matched commit-message evidence. The extra 14 lines/3 deletions on integration are most likely the manual-port adjustments, not a second independent design. |
 | `stdlib/epistemic/invariants.sio` | 1 commit, +37/‑2 | 3 commits, +50/‑2 | Same pattern as above — integration has one extra reconciliation commit layered on the same underlying change. |
 
-### 3f. Low-risk, already-reconciled test fixtures (~19 files)
+### 3f. Low-risk, already-reconciled test fixtures (11 files)
 
 The remaining overlap files (`tests/run-pass/causal_graph_dsep.sio`, `graded_compose_needs_witness.sio`, `gum_independence_required.sio`, `indep_knowledge_grammar.sio`, `knowledge_layout_shadows_user_field_name.sio`, `gpu_param_names_read_mut.sio`, `gpu_param_names_readonly_pair.sio`, `gpu_readonly_multi_slice.sio`, `tests/gpu/epistemic_runtime/manifest.tsv`, `tests/madaros/source_to_elf/{knowledge_field_shadow_exit0.sio,manifest.tsv}`) were spot-checked and found **byte-identical** between the two tips (see §3b). These are genuinely safe.
 
