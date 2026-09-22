@@ -1,5 +1,15 @@
 # Epistemic Computing Semantics
 
+> **Checked surface vs. intended semantics.** The shipped type is
+> `Epistemic { val: f64, variance: f64, confidence: i64 }` in
+> `stdlib/epistemic/knowledge.sio`, with the free functions `ep_measured`,
+> `ep_val`, `ep_std`, `ep_add`, `ep_mul`, `ep_div`, `ep_merge`, and
+> `ep_is_credible` (anchor: `tests/run-pass/ep_gum_covariance.sio`). The
+> `Knowledge<T>` generic, `Knowledge::interval`, `.with_conf`, `.boost`, and
+> `.unwrap` used in the formal rules below describe intended semantics and are
+> not on the checked public surface — see `docs/compiler/KNOWN_LIMITATIONS.md`.
+> The examples at the bottom use the shipped API.
+
 This document defines the formal semantics and invariants for Sounio epistemic types. These invariants are non-negotiable and enforced by the type system and runtime.
 
 ---
@@ -249,54 +259,50 @@ enum Provenance {
 
 ### Correct: GUM Propagation
 
-```d
-let mass = Knowledge::measured(75.0, StdDev(0.5), "scale_001")
-let height = Knowledge::measured(1.75, StdDev(0.01), "stadiometer")
+```sio
+use epistemic::knowledge::{ep_measured, ep_square, ep_div, ep_confidence}
 
-// BMI = mass / height²
-// u_rel(BMI)² = u_rel(mass)² + 4·u_rel(height)²
-let bmi = mass / (height * height)
+let mass = ep_measured(75.0, 0.5)
+let height = ep_measured(1.75, 0.01)
 
-// bmi.uncert correctly propagated via GUM
-// bmi.conf = min(mass.conf, height.conf) - cannot increase
+// BMI = mass / height^2
+// u_rel(BMI)^2 = u_rel(mass)^2 + 4*u_rel(height)^2, via the GUM delta method
+let bmi = ep_div(&mass, &ep_square(&height))
+
+// ep_confidence(&bmi) = min(ep_confidence(&mass), ep_confidence(&height))
+// confidence cannot increase through propagation
 ```
 
-### Correct: Interval Enclosure
+### Interval Enclosure (intended, not shipped)
 
-```d
-let a = Knowledge::interval(1.0, 2.0)  // a ∈ [1, 2]
-let b = Knowledge::interval(3.0, 4.0)  // b ∈ [3, 4]
+`Knowledge::interval` and guaranteed interval enclosure are not on the checked surface. The shipped type carries a variance, not bounds. Interval-style reasoning today uses the GUM budget in `stdlib/epistemic/gum.sio` (`gum_u95` gives the expanded 95% uncertainty).
 
-let c = a + b  // c ∈ [4, 6] - guaranteed enclosure
-let d = a * b  // d ∈ [3, 8] - guaranteed enclosure
+### Confidence Never Increases
+
+```sio
+use epistemic::knowledge::{ep_measured, ep_add, ep_confidence}
+
+let measurement = ep_measured(100.0, 5.0)  // confidence 900
+
+// There is no with_conf or boost on the checked surface.
+// ep_add keeps the lower of the two confidences:
+let other = ep_measured(1.0, 0.1)
+let combined = ep_add(&measurement, &other)
+// ep_confidence(&combined) <= ep_confidence(&measurement)
 ```
 
-### Incorrect: Confidence Increase (Rejected)
+Raising confidence on new evidence is the beta-posterior type `EpistemicBeta` in `stdlib/epistemic/beta_confidence.sio` (`eb_new`, `eb_fuse_independent`), anchored by `tests/run-pass/beta_confidence_rule.sio` — not a method on `Epistemic`.
 
-```d
-let measurement = Knowledge::new(100.0, StdDev(5.0), 0.8)
+### No Silent Unwrap
 
-// ILLEGAL - confidence cannot increase without justification
-let better = measurement.with_conf(0.95)  // ERROR
+```sio
+use epistemic::knowledge::{Epistemic, ep_val}
 
-// LEGAL - explicit boost with reason
-let validated = measurement.boost(
-    0.95,
-    "cross-validated against reference standard",
-    "ISO 17025 calibration"
-)
-```
-
-### Incorrect: Silent Unwrap (Rejected)
-
-```d
-let k: Knowledge<f64> = get_measurement()
-
-// ILLEGAL - implicit conversion discards metadata
-let x: f64 = k  // ERROR
-
-// LEGAL - explicit acknowledgment
-let x: f64 = k.unwrap("used in non-critical calculation")
+// There is no implicit Epistemic -> f64 conversion.
+// Reading the point estimate is an explicit call:
+fn read_value(k: Epistemic) -> f64 {
+    ep_val(&k)
+}
 ```
 
 ---
