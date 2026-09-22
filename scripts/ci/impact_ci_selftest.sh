@@ -102,7 +102,15 @@ json_sub() {
 }
 
 good_needs='{"impact":{"outputs":{"compiler":"false","runtime":"false","stdlib":"false","tests":"false","sio":"false","lean":"false","website":"false","full":"false"}},"contracts":{"result":"success"},"native-selfhost-linux-x86_64":{"result":"skipped"},"source-bootstrap-selfhost-linux-x86_64":{"result":"skipped"},"madaros-current-source-deref-f64":{"result":"skipped"},"native-selfhost-macos-arm64":{"result":"skipped"},"full-test-suite":{"result":"skipped"},"madaros-witness-gate":{"result":"skipped"},"gate-wave-0":{"result":"skipped"},"sounio-lint":{"result":"skipped"},"lean-proofs":{"result":"skipped"},"website":{"result":"skipped"},"r6-corpus-sweep":{"result":"skipped"}}'
-NEEDS_JSON="$good_needs" python3 "$DECISION" | grep -Fq CI_DECISION_PASS
+# GITHUB_EVENT_NAME pinned, like every other check below: a skipped r6-corpus-sweep
+# is only correct off the nightly cadence. Left ambient, this fixture inherited
+# whatever event actually invoked the selftest -- on a real `schedule` run that is
+# `schedule`, is_nightly() (evaluate_ci_decision.py) then required r6-corpus-sweep
+# to have run, and this "should PASS" fixture failed for a reason that had nothing
+# to do with what it tests. Confirmed 8/8 for 2026-09-14..21: every scheduled run
+# failed here, before any real job ran, and r6-corpus-sweep never executed on
+# cadence in that whole window. Same fix at compiler_green_needs below (same shape).
+NEEDS_JSON="$good_needs" GITHUB_EVENT_NAME=push python3 "$DECISION" | grep -Fq CI_DECISION_PASS
 
 bad_needs="$(json_sub "$good_needs" '"contracts":{"result":"success"}' '"contracts":{"result":"failure"}')"
 if NEEDS_JSON="$bad_needs" python3 "$DECISION" >/dev/null 2>&1; then
@@ -116,7 +124,8 @@ if NEEDS_JSON="$compiler_needs" python3 "$DECISION" >/dev/null 2>&1; then
   exit 1
 fi
 compiler_green_needs="${compiler_needs/\"failure\"/\"success\"}"
-NEEDS_JSON="$compiler_green_needs" python3 "$DECISION" | grep -Fq CI_DECISION_PASS
+# Same unpinned-event hazard as good_needs above (r6-corpus-sweep is skipped here too).
+NEEDS_JSON="$compiler_green_needs" GITHUB_EVENT_NAME=push python3 "$DECISION" | grep -Fq CI_DECISION_PASS
 witness_failed_needs="$(json_sub "$compiler_green_needs" '"madaros-witness-gate":{"result":"success"}' '"madaros-witness-gate":{"result":"failure"}')"
 if NEEDS_JSON="$witness_failed_needs" python3 "$DECISION" >/dev/null 2>&1; then
   echo "impact-ci-selftest: decision accepted failed selected Madaros witness gate" >&2
