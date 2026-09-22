@@ -91,20 +91,34 @@ fn mc28_ln(x: f64) -> f64 with Mut {
 
 // exp(x) — range-reduced Taylor series. Range: any real; uses 2^n reduction.
 // ln(2) ≈ 0.693147.
+//
+// Range reduction is ITERATIVE (n is accumulated inside the reduction while
+// loops themselves), NOT the "n_f = x*inv_ln2; n = n_f as i64; if (n as f64)
+// > n_f { n = n - 1 }" cast-then-correct idiom followed by a separate
+// power-of-2 loop over n. That idiom is miscompiled by lean_single: the
+// power-of-2 while loop that reads n afterward runs at roughly DOUBLE its
+// correct trip count, regardless of whether the correcting if-branch is
+// ever taken (confirmed via minimal repro: mc28_exp(ln(12.4)) returned
+// 99.2 instead of 12.4 -- 2^3 doubled to 2^6 -- during the PBPK28 M2/M5
+// known-failure investigation, 2026-09-22). This iterative form matches
+// the already-correct ms28_exp in pbpk28_mc_prior_family_sweep.sio, which
+// was independently verified not to trigger the bug.
 fn mc28_exp(x: f64) -> f64 with Mut, Div {
+    var rx = x
+    var n: i64 = 0
     let ln2 = 0.6931471805599453
-    let inv_ln2 = 1.4426950408889634
-    // range reduce: x = n*ln2 + r, |r| < ln2/2
-    let n_f = x * inv_ln2
-    var n: i64 = n_f as i64
-    if (n as f64) > n_f { n = n - 1 }   // floor
-    let r = x - (n as f64) * ln2
-    // Taylor for exp(r), |r| < 0.35
+    // >= / <= (not strict >/<) so x that is an exact multiple of ln2 reduces
+    // to r=0 (Taylor(0)=1 exactly) rather than r=+-ln2 (which the truncated
+    // Taylor series does not reproduce exactly) -- xai/grok-4.6 math-review
+    // finding, 2026-09-22 (.claude/llm_offload_log.md).
+    while rx >= ln2 { rx = rx - ln2; n = n + 1 }
+    while rx <= 0.0 - ln2 { rx = rx + ln2; n = n - 1 }
+    // Taylor for exp(rx), |rx| < ln2
     var t: f64 = 1.0
     var result: f64 = 1.0
     var k: i64 = 1
     while k < 20 {
-        t = t * r / (k as f64)
+        t = t * rx / (k as f64)
         result = result + t
         k = k + 1
     }
@@ -221,10 +235,14 @@ fn mc28_lognormal_from_z(mean: f64, variance: f64, z: f64) -> f64 with Mut, Div,
 // FAST AUC SIMULATION (dt=0.5h, 336 steps for 168h)
 // ============================================================================
 
+// Steps one state in place with one reused work value, so a sample costs no GC
+// handles per step under Madaros (handles are never reclaimed; the by-value
+// step allocated per step and N=2000 samples per prior overflowed the table).
 fn mc28_auc_fast(prm: PBPKParams28, dose_mg: f64) -> f64 with Mut, Div, Panic {
     let t_end = 168.0
     let dt    = 0.5
     var st    = pbpk28_state_zero()
+    var work  = pbpk28_cn_work_zero()
     st.cv[0]  = dose_mg / prm.v_ref[0]
     var t     = 0.0
     var auc   = 0.0
@@ -233,15 +251,14 @@ fn mc28_auc_fast(prm: PBPKParams28, dose_mg: f64) -> f64 with Mut, Div, Panic {
     while t < t_end {
         if steps > 1000 { return 0.0 }
         let dt_use = if t + dt > t_end { t_end - t } else { dt }
-        let st_new = pbpk28_full_cn_step(st, prm, 0.0, dt_use)
-        let c_new  = st_new.cv[0]
+        pbpk28_full_cn_step_ref(&!st, &prm, &!work, 0.0, dt_use)
+        let c_new  = st.cv[0]
         if c_new != c_new { return 0.0 }
         if c_new < 0.0    { return 0.0 }
         if c_new > 1.0e12 { return 0.0 }
         auc    = auc + 0.5 * (c_prev + c_new) * dt_use
         c_prev = c_new
         t      = t + dt_use
-        st     = st_new
         steps  = steps + 1
     }
     return auc

@@ -428,6 +428,25 @@ var UNIT_DIM_TABLE:  [i64; 2048] = [0; 2048]
 // The preloaded SI table (init_unit_table) leaves this 0, so a symbol like K
 // stays usable as a generic type parameter -- `struct Map<K, V>`.
 var UNIT_USER_TABLE: [i64; 2048] = [0; 2048]
+// Exact-name storage for user-declared units, parallel to UNIT_HASH_TABLE by
+// slot index. UNIT_HASH_TABLE keys identity by hash alone; unit_call_arg_mismatch
+// trusts `expr_unit == param_hash` as "same declared unit" for nominal
+// (dimension-0) units. gl_name_hash is a 37-bit FNV-1a, so an accidental
+// collision between two DIFFERENT declared names is astronomically unlikely --
+// but "unlikely" is not "refused", and a silent alias there means one declared
+// unit's contract is satisfied by passing a different one. -1 = no exact name
+// recorded (the preloaded SI/CGS/etc. table never stores one).
+//
+// 128, not 32: the parser accepts identifiers up to 128 bytes
+// (parser_name_at's own twin in this file clips there too -- see `unit
+// NAME;` parsing), and unit_bytes_eq/unit_register_named_h clamped BOTH the
+// stored and the compared length to whatever this cap was, so two distinct
+// unit names sharing a hash AND their first (old cap) bytes compared equal
+// past that prefix -- exactly the collision this table exists to catch,
+// just truncated instead of refused.
+let UNIT_NAME_CAP: i64 = 128
+var UNIT_NAME_BUF: [i8; 262144] = [0; 262144]
+var UNIT_NAME_LEN: [i64; 2048] = [0 - 1; 2048]
 // Parallel token unit-hash array (for _suffix literals e.g. 500_mg)
 var TU: [i64; 2097152] = [0; 2097152]
 // Packed dimension vector of the current compiled expression (0 = dimensionless/unknown)
@@ -2030,14 +2049,46 @@ fn type_hash_unit_dim(h: i64) -> i64 with Panic, Mut, Div {
     return unit_lookup_dim(h)
 }
 
+// Whether a value declared with this type hash carries a unit brand. A unit with
+// a dimension always did. A NOMINAL unit -- `unit mg_dL;`, dimension zero -- was
+// left out because the test was "dimension is not zero", so a nominal unit
+// survived only when a literal suffix produced it (`140.0<mg_dL>`) and vanished at
+// every annotation and every function boundary: `fn f(x: mg_dL) -> f64 { x }`
+// handed back a bare number with nothing to object.
+fn unit_brand_carried(h: i64) -> bool with Panic, Mut, Div {
+    if h == 0 { return false }
+    if type_hash_unit_dim(h) != 0 { return true }
+    return unit_is_user_declared_h(h)
+}
+
 fn unit_call_arg_mismatch(param_hash: i64, expr_unit: i64, expr_dim: i64) -> bool with Panic, Mut, Div {
     let param_dim = type_hash_unit_dim(param_hash)
+    // A NOMINAL unit -- declared `unit mg_dL;` with no dimensional right-hand
+    // side -- has dimension zero, and the dimension test below would then accept
+    // anything at all. That is not the same situation as a parameter with no
+    // unit, where accepting anything is correct, and the two were being
+    // conflated: passing mg_dL where mmol_L was declared went through unchecked.
+    // Compare such a parameter by NAME, which is what the reference design does
+    // for declared units regardless of how they were spelled.
+    if param_hash != 0 && param_dim == 0 && unit_is_user_declared_h(param_hash) {
+        if expr_unit == param_hash { return false }
+        return true
+    }
     // KL-13: a bare / dimensionless parameter must refuse a dimensionful
     // argument. The prior early-out (`param_dim == 0 → false`) was the call-
     // boundary hole: `takes_f64(t_k)` with `t_k: K` was accepted. Explicit
     // `as f64` clears EXPR_UNIT_DIM via expr_set_unit_from_type, so casts stay
     // the escape hatch.
     if param_dim == 0 {
+        // The same nominal-unit hole on the value side. A NOMINAL argument has
+        // dimension zero too, so `expr_dim != 0` below cannot see it and a
+        // `mg_dL` value walked into a bare `f64` parameter or return without the
+        // cast that every dimensionful unit needs. A nominal unit names a
+        // quantity, so leaving it takes the same explicit `as f64`. (`param_hash`
+        // being this very unit was settled above, by name.)
+        if expr_unit != 0 && unit_is_user_declared_h(expr_unit) && type_hash_unit_dim(expr_unit) == 0 {
+            return true
+        }
         return expr_dim != 0
     }
     if expr_unit == param_hash { return false }
@@ -2216,9 +2267,14 @@ var A64_FRAME_PATCH_OFF: [i64; 65536] = [0; 65536]
 var A64_FRAME_PATCH_RD: [i64; 65536] = [0; 65536]
 var FN_FRAME_SIZE: [i64; 65536] = [0; 65536]
 var LAST_EXPR_IS_CLOSURE: i64 = 0
-// Scratch globals for float scientific exponent (avoids extra locals in compile_primary)
-var FL_SCI_SCRATCH: i64 = 0
-var FL_SCI_NEG: i64 = 0
+// Scratch state for f64_literal_bits: two base-2^32 big integers of 128 limbs
+// each (region 0 at FLB[0..128], region 1 at FLB[128..256]) with their limb
+// counts, a capacity-overflow flag, and the result for the last literal.
+var FLB: [i64; 256] = [0; 256]
+var FLB_LEN: [i64; 2] = [0; 2]
+var FLB_OVF: i64 = 0
+var FL_BITS: i64 = 0
+var FL_EXACT: i64 = 0
 var FL_FRAC_DIGITS: i64 = 0
 var LAST_STMT_HAS_VALUE: i64 = 0
 
@@ -7590,12 +7646,31 @@ fn lex_all() with IO, Mut, Panic, Div {
                 while p < SRC_LEN && ((sb(p) >= 65 && sb(p) <= 90) || (sb(p) >= 97 && sb(p) <= 122) || (sb(p) >= 48 && sb(p) <= 57)) { p = p + 1 }
                 lit_unit_hash = gl_name_hash(us, p)
             }
+            // Gen 19: <unit> annotation on a numeric literal, e.g. 140.0<mg_dL>.
+            // The opening angle must touch the number: `140.0<mg_dL>` is a unit
+            // and `140.0 < x` is a comparison, and requiring no space between
+            // them is what keeps the two apart without parser context. A closing
+            // `>` is required as well, so `140.0<x` with no close still lexes as
+            // a comparison and nothing here is consumed.
+            //
+            // Unlike the `_suffix` form above, the name may contain underscores,
+            // which is what clinical units need: mg_dL, mmol_L, U_L, mm_h.
+            if lit_unit_hash == 0 && p < SRC_LEN && sb(p) == 60 && p + 1 < SRC_LEN && ((sb(p + 1) >= 65 && sb(p + 1) <= 90) || (sb(p + 1) >= 97 && sb(p + 1) <= 122)) {
+                var q = p + 1
+                let us = q
+                while q < SRC_LEN && ((sb(q) >= 65 && sb(q) <= 90) || (sb(q) >= 97 && sb(q) <= 122) || (sb(q) >= 48 && sb(q) <= 57) || sb(q) == 95) { q = q + 1 }
+                if q < SRC_LEN && sb(q) == 62 && q > us {
+                    lit_unit_hash = gl_name_hash(us, q)
+                    p = q + 1
+                }
+            }
             if is_float == 1 {
                 // Store mantissa parts without applying the exponent (avoids i64 overflow
-                // for large exponents like 1.0e30). The signed exponent is stored in TX
-                // and applied at codegen time via SSE2 multiply/divide. Leading zeros
-                // absorbed during fractional-digit accumulation are folded into TX so
-                // tiny literals like 1e-24 written as 0.000…001 don't truncate.
+                // for large exponents like 1.0e30). The signed exponent is stored in TX.
+                // Leading zeros absorbed during fractional-digit accumulation are folded
+                // into TX so tiny literals like 1e-24 written as 0.000…001 don't truncate.
+                // These parts feed compile-time predicate checks; codegen lowers the
+                // literal from its source bytes through f64_literal_bits.
                 TK[TC as usize] = 53; TS[TC as usize] = s; TE[TC as usize] = p
                 TV[TC as usize] = v; TF[TC as usize] = frac; TD[TC as usize] = denom
                 TX[TC as usize] = exp_sign * exp_val - lit_leading_zeros
@@ -9194,50 +9269,249 @@ fn emit_f128_ensure_libgcc_x86() with Mut, Panic, Div {
     patch32(already, CL)
 }
 
-// A float literal lowers through binary64 (cvtsi2sd/divsd/mulsd). Widening that
-// to binary128 is only the literal's value when the decimal is a binary64 value
-// the lowering reproduces exactly: |int| < 2^53, fraction dyadic, and an exponent
-// that keeps an integer below 2^53. Anything else (0.1, 1e-3, 1e23) would be an
-// f64 approximation under a binary128 type -- refuse it, as Madaros V0-E.5.9 does.
-fn f64_literal_is_exact_binary64(tok: i64) -> bool with Panic, Mut, Div {
-    let two53: i64 = 9007199254740992
-    let iv = TV[tok as usize]
-    let fv = TF[tok as usize]
-    let dv = TD[tok as usize]
-    let xv = TX[tok as usize]
-    if iv < 0 || iv >= two53 { return false }
-    if fv > 0 {
-        if xv != 0 { return false }
-        // denominator must be 10^d; the fraction fv/10^d is dyadic iff 5^d | fv
-        var d: i64 = 0
-        var den = dv
-        while den > 1 {
-            if den % 10 != 0 { return false }
-            den = den / 10
-            d = d + 1
-        }
-        if den != 1 || d > 52 { return false }
-        var f2 = fv
-        var k: i64 = 0
-        while k < d {
-            if f2 % 5 != 0 { return false }
-            f2 = f2 / 5
-            k = k + 1
-        }
-        // int + f2/2^d exact iff (int << d) + f2 < 2^53
-        if iv > (two53 >> d) { return false }
-        if (iv << d) + f2 >= two53 { return false }
-        return true
+// Correctly rounded float literals. A float literal's binary64 value is
+// computed here, at compile time, from the literal's source bytes (TS..TE), and
+// every lowering site emits it as a 64-bit immediate. The text gives digits D
+// and a decimal exponent E; N = D * 10^max(E,0) and P = 10^max(-E,0) are exact
+// big integers, one exact division gives a 56- or 57-bit quotient and a sticky
+// remainder, and IEEE 754 round-half-to-even is applied to that (fewer bits
+// below 2^-1022, +inf past the largest finite value).
+//
+// The lowering this replaces computed (int + frac/denom) * 10^exp at run time
+// with cvtsi2sd/divsd/mulsd, rounding at every step: 0.041 became
+// (41.0/100.0)/10.0, one ULP below the correctly rounded value, and 1.0e-12 one
+// ULP above it. The lexer's TV/TF/TD/TX (at most 18 fraction digits) still feed
+// the compile-time predicate checks; codegen no longer reads them.
+
+fn flb_set(r: i64, v: i64) with Mut, Panic {
+    FLB[(r * 128) as usize] = v
+    FLB_LEN[r as usize] = 1
+}
+
+fn flb_norm(r: i64) with Mut, Panic {
+    let base = r * 128
+    var n = FLB_LEN[r as usize]
+    while n > 1 && FLB[(base + n - 1) as usize] == 0 { n = n - 1 }
+    FLB_LEN[r as usize] = n
+}
+
+// region r = r * m + a, for 0 <= m, a < 2^31
+fn flb_mul_add(r: i64, m: i64, a: i64) with Mut, Panic {
+    let base = r * 128
+    let n = FLB_LEN[r as usize]
+    var c = a
+    var i: i64 = 0
+    while i < n {
+        let v = FLB[(base + i) as usize] * m + c
+        FLB[(base + i) as usize] = v & 0xFFFFFFFF
+        c = v >> 32
+        i = i + 1
     }
-    if xv < 0 { return iv == 0 }
-    var v = iv
-    var e: i64 = 0
-    while e < xv {
-        if v > two53 / 10 { return false }
-        v = v * 10
-        e = e + 1
+    var len = n
+    while c > 0 {
+        if len >= 128 { FLB_OVF = 1; return }
+        FLB[(base + len) as usize] = c & 0xFFFFFFFF
+        c = c >> 32
+        len = len + 1
     }
-    return v < two53
+    FLB_LEN[r as usize] = len
+}
+
+// region r = r << s; limbs are written top-down so the shift can be in place
+fn flb_shl(r: i64, s: i64) with Mut, Panic, Div {
+    let base = r * 128
+    let w = s / 32
+    let b = s % 32
+    let n = FLB_LEN[r as usize]
+    if n + w + 1 > 128 { FLB_OVF = 1; return }
+    FLB[(base + n + w) as usize] = FLB[(base + n - 1) as usize] >> (32 - b)
+    var i = n - 1
+    while i >= 1 {
+        let hi = (FLB[(base + i) as usize] << b) & 0xFFFFFFFF
+        let lo = FLB[(base + i - 1) as usize] >> (32 - b)
+        FLB[(base + i + w) as usize] = hi | lo
+        i = i - 1
+    }
+    FLB[(base + w) as usize] = (FLB[base as usize] << b) & 0xFFFFFFFF
+    var z: i64 = 0
+    while z < w { FLB[(base + z) as usize] = 0; z = z + 1 }
+    FLB_LEN[r as usize] = n + w + 1
+    flb_norm(r)
+}
+
+fn flb_shr1(r: i64) with Mut, Panic {
+    let base = r * 128
+    let n = FLB_LEN[r as usize]
+    var i: i64 = 0
+    while i < n {
+        var hi: i64 = 0
+        if i + 1 < n { hi = (FLB[(base + i + 1) as usize] & 1) << 31 }
+        FLB[(base + i) as usize] = (FLB[(base + i) as usize] >> 1) | hi
+        i = i + 1
+    }
+    flb_norm(r)
+}
+
+fn flb_bitlen(r: i64) -> i64 with Mut, Panic {
+    let n = FLB_LEN[r as usize]
+    var t = FLB[(r * 128 + n - 1) as usize]
+    var b: i64 = 0
+    while t > 0 { b = b + 1; t = t >> 1 }
+    return (n - 1) * 32 + b
+}
+
+// region 0 >= region 1
+fn flb_ge01() -> bool with Mut, Panic {
+    let n0 = FLB_LEN[0 as usize]
+    let n1 = FLB_LEN[1 as usize]
+    if n0 > n1 { return true }
+    if n0 < n1 { return false }
+    var i = n0 - 1
+    while i >= 0 {
+        let x = FLB[i as usize]
+        let y = FLB[(128 + i) as usize]
+        if x > y { return true }
+        if x < y { return false }
+        i = i - 1
+    }
+    return true
+}
+
+// region 0 = region 0 - region 1, for region 0 >= region 1
+fn flb_sub01() with Mut, Panic {
+    let n0 = FLB_LEN[0 as usize]
+    let n1 = FLB_LEN[1 as usize]
+    var br: i64 = 0
+    var i: i64 = 0
+    while i < n0 {
+        var y: i64 = 0
+        if i < n1 { y = FLB[(128 + i) as usize] }
+        var v = FLB[i as usize] - y - br
+        if v < 0 { v = v + 4294967296; br = 1 } else { br = 0 }
+        FLB[i as usize] = v
+        i = i + 1
+    }
+    flb_norm(0)
+}
+
+fn f64_literal_too_long(tok: i64) with IO, Mut, Panic {
+    tc_error_hard(tok, "float literal has more significant digits than lean_single lowers exactly (1536 bits)")
+    FL_BITS = 0
+    FL_EXACT = 0
+}
+
+// Sets FL_BITS to the correctly rounded binary64 bits of float literal token
+// `tok`, and FL_EXACT to 1 when that is the literal's exact value.
+fn f64_literal_bits(tok: i64) with IO, Mut, Panic, Div {
+    var p = TS[tok as usize]
+    let pe = TE[tok as usize]
+    FLB_OVF = 0
+    flb_set(0, 0)
+    flb_set(1, 1)
+    var e10: i64 = 0
+    // Same digit grammar as the lexer: decimal or 0x-hex integer part, then
+    // optional .digits, then optional e[+-]digits; a unit suffix ends it.
+    if sb(p) == 48 && (sb(p + 1) == 120 || sb(p + 1) == 88) {
+        p = p + 2
+        var hx: i64 = 1
+        while p < pe && hx == 1 {
+            let h = sb(p)
+            if h >= 48 && h <= 57 { flb_mul_add(0, 16, h - 48); p = p + 1 }
+            else if h >= 97 && h <= 102 { flb_mul_add(0, 16, h - 87); p = p + 1 }
+            else if h >= 65 && h <= 70 { flb_mul_add(0, 16, h - 55); p = p + 1 }
+            else { hx = 0 }
+        }
+    } else {
+        while p < pe && sb(p) >= 48 && sb(p) <= 57 { flb_mul_add(0, 10, sb(p) - 48); p = p + 1 }
+    }
+    if p < pe && sb(p) == 46 {
+        p = p + 1
+        while p < pe && sb(p) >= 48 && sb(p) <= 57 {
+            flb_mul_add(0, 10, sb(p) - 48)
+            e10 = e10 - 1
+            p = p + 1
+        }
+    }
+    if p < pe && (sb(p) == 101 || sb(p) == 69) {
+        p = p + 1
+        var esign: i64 = 1
+        if p < pe && sb(p) == 43 { p = p + 1 }
+        else if p < pe && sb(p) == 45 { esign = 0 - 1; p = p + 1 }
+        var ev: i64 = 0
+        while p < pe && sb(p) >= 48 && sb(p) <= 57 {
+            if ev < 100000 { ev = ev * 10 + sb(p) - 48 }
+            p = p + 1
+        }
+        e10 = e10 + esign * ev
+    }
+    if FLB_OVF != 0 || FLB_LEN[0 as usize] > 48 { f64_literal_too_long(tok); return }
+    let a = flb_bitlen(0)
+    if a == 0 { FL_BITS = 0; FL_EXACT = 1; return }
+    // 10^k >= 2^(3k): values at or above 2^1024 overflow, and values below
+    // 2^-1076 (under half the smallest subnormal) round to zero.
+    if e10 >= 0 && a - 1 + 3 * e10 >= 1024 { FL_BITS = 0x7FF0000000000000; FL_EXACT = 0; return }
+    if e10 < 0 && a + 3 * e10 <= 0 - 1076 { FL_BITS = 0; FL_EXACT = 0; return }
+    var i: i64 = 0
+    if e10 >= 0 {
+        while i < e10 { flb_mul_add(0, 10, 0); i = i + 1 }
+    } else {
+        while i < 0 - e10 { flb_mul_add(1, 10, 0); i = i + 1 }
+    }
+    // Scale so floor(region0 / region1) has 56 or 57 bits: value = q * 2^-s.
+    let s = 56 - (flb_bitlen(0) - flb_bitlen(1))
+    if s >= 0 { flb_shl(0, s) } else { flb_shl(1, 0 - s) }
+    flb_shl(1, 57)
+    if FLB_OVF != 0 { f64_literal_too_long(tok); return }
+    var q: i64 = 0
+    var j: i64 = 57
+    while j >= 0 {
+        if flb_ge01() { flb_sub01(); q = q | (1 << j) }
+        flb_shr1(1)
+        j = j - 1
+    }
+    var rest: i64 = 0
+    if FLB_LEN[0 as usize] > 1 || FLB[0 as usize] != 0 { rest = 1 }
+    var bl: i64 = 0
+    var t = q
+    while t > 0 { bl = bl + 1; t = t >> 1 }
+    // Keep 53 bits, or fewer where the result is subnormal (the lowest kept
+    // bit weighs 2^-1074); the dropped bits and the remainder decide rounding.
+    var drop = bl - 53
+    if s - 1074 > drop { drop = s - 1074 }
+    var m: i64 = 0
+    var guard: i64 = 0
+    if drop > 60 {
+        if q != 0 { rest = 1 }
+    } else {
+        m = q >> drop
+        guard = (q >> (drop - 1)) & 1
+        if (q & ((1 << (drop - 1)) - 1)) != 0 { rest = 1 }
+    }
+    FL_EXACT = 1
+    if guard != 0 || rest != 0 { FL_EXACT = 0 }
+    if guard != 0 && (rest != 0 || (m & 1) != 0) { m = m + 1 }
+    var te = drop - s
+    if m == 9007199254740992 { m = 4503599627370496; te = te + 1 }
+    if m == 0 { FL_BITS = 0; return }
+    if m >= 4503599627370496 {
+        let be = te + 52 + 1023
+        if be >= 2047 { FL_BITS = 0x7FF0000000000000; FL_EXACT = 0; return }
+        FL_BITS = (be << 52) | (m - 4503599627370496)
+        return
+    }
+    FL_BITS = m
+}
+
+// lean_single widens a float literal to binary128 from its binary64 value, so
+// the widening is the literal's value only when the literal is exactly a
+// binary64 value: 0.5, 0.0625 and 1.5e1 widen; 0.1, 1e-3 and 1e23 would put an
+// f64 approximation under a binary128 type -- refuse them, as Madaros V0-E.5.9
+// refuses what binary128 cannot represent. Exactness is the same computation
+// that produced the lowered bits, so the two cannot disagree.
+fn f64_literal_is_exact_binary64(tok: i64) -> bool with IO, Panic, Mut, Div {
+    f64_literal_bits(tok)
+    if FL_EXACT == 1 { return true }
+    return false
 }
 
 // aarch64 lean_single has no binary128 lowering: refuse at each site where an
@@ -10350,6 +10624,92 @@ fn emit_fo_var_from_sens_x86(
     emit_fo_channel_contrib_sq_x86(out, s5, 5)
     emit_fo_channel_contrib_sq_x86(out, s6, 6)
     emit_fo_channel_contrib_sq_x86(out, s7, 7)
+    return out
+}
+
+// ─── aarch64 twins of the two FO-variance rebuilders above ───
+// Neither β¹⁰ nor β¹¹ had an a64 site: this target kept the β⁴ blind sums
+// (var(a·b) = a²var(b) + b²var(a), var(a±b) = var(a) + var(b)) all the way
+// out, so a·a under-counted (2a²σ² where the FO rule gives 4a²σ²) and
+// a·b − a·b reported 2·var instead of the exact cancellation. Same rules and
+// the same channel loop as the x86 originals, on this target's primitives:
+// pushed operand lands in d1, current in d0, and emit_f64_binop_a64 computes
+// d0 = d1 OP d0 (0x1E610800 fmul, 0x1E612800 fadd, 0x1E613800 fsub).
+
+fn emit_fo_channel_contrib_sub_a64(acc_slot: i64, ls: i64, rs: i64, ch: i64) with Mut, Panic {
+    if ch < 0 || ch >= 8 { return }
+    let iv = CHANNEL_INPUT_VAR_SLOT[ch as usize]
+    if iv < 0 { return }
+    if ls < 0 && rs < 0 { return }
+    if ls >= 0 { emit_load_var_a64(ls) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if rs >= 0 { emit_load_var_a64(rs) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+    // x0 = ds; square
+    emit_push_a64()
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    // x0 = ds²; × σ²_k
+    emit_push_a64()
+    emit_load_var_a64(iv)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    // x0 = contrib; acc += contrib
+    emit_push_a64()
+    emit_load_var_a64(acc_slot)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+    emit_store_var_a64(acc_slot)
+}
+
+fn emit_fo_var_from_sens_diff_sub_a64(
+    ls0: i64, ls1: i64, ls2: i64, ls3: i64, ls4: i64, ls5: i64, ls6: i64, ls7: i64,
+    rs0: i64, rs1: i64, rs2: i64, rs3: i64, rs4: i64, rs5: i64, rs6: i64, rs7: i64
+) -> i64 with Mut, Panic {
+    let out = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_imm64_a64(0)
+    emit_store_var_a64(out)
+    emit_fo_channel_contrib_sub_a64(out, ls0, rs0, 0)
+    emit_fo_channel_contrib_sub_a64(out, ls1, rs1, 1)
+    emit_fo_channel_contrib_sub_a64(out, ls2, rs2, 2)
+    emit_fo_channel_contrib_sub_a64(out, ls3, rs3, 3)
+    emit_fo_channel_contrib_sub_a64(out, ls4, rs4, 4)
+    emit_fo_channel_contrib_sub_a64(out, ls5, rs5, 5)
+    emit_fo_channel_contrib_sub_a64(out, ls6, rs6, 6)
+    emit_fo_channel_contrib_sub_a64(out, ls7, rs7, 7)
+    return out
+}
+
+fn emit_fo_channel_contrib_sq_a64(acc_slot: i64, s_slot: i64, ch: i64) with Mut, Panic {
+    if ch < 0 || ch >= 8 { return }
+    let iv = CHANNEL_INPUT_VAR_SLOT[ch as usize]
+    if iv < 0 { return }
+    if s_slot < 0 { return }
+    emit_load_var_a64(s_slot)
+    emit_push_a64()
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_push_a64()
+    emit_load_var_a64(iv)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_push_a64()
+    emit_load_var_a64(acc_slot)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+    emit_store_var_a64(acc_slot)
+}
+
+fn emit_fo_var_from_sens_a64(
+    s0: i64, s1: i64, s2: i64, s3: i64, s4: i64, s5: i64, s6: i64, s7: i64
+) -> i64 with Mut, Panic {
+    let out = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_imm64_a64(0)
+    emit_store_var_a64(out)
+    emit_fo_channel_contrib_sq_a64(out, s0, 0)
+    emit_fo_channel_contrib_sq_a64(out, s1, 1)
+    emit_fo_channel_contrib_sq_a64(out, s2, 2)
+    emit_fo_channel_contrib_sq_a64(out, s3, 3)
+    emit_fo_channel_contrib_sq_a64(out, s4, 4)
+    emit_fo_channel_contrib_sq_a64(out, s5, 5)
+    emit_fo_channel_contrib_sq_a64(out, s6, 6)
+    emit_fo_channel_contrib_sq_a64(out, s7, 7)
     return out
 }
 
@@ -13070,48 +13430,17 @@ fn compile_primary() with IO, Mut, Panic, Div {
     // true=35, false=36
     if k == 35 { em(0x48); em(0xb8); em64(1); EP = EP + 1; EXPR_IS_F64 = 0; EXPR_TY = 4; return }
     if k == 36 { em(0x31); em(0xc0); EP = EP + 1; EXPR_IS_F64 = 0; EXPR_TY = 4; return }
-    // Float literal (53): runtime conversion via SSE2
+    // Float literal (53): correctly rounded binary64 bits, computed at compile time
     if k == 53 {
         let fl_int = TV[EP as usize]
         let fl_frac = TF[EP as usize]
         let fl_denom = TD[EP as usize]
         // Gen 19: _suffix unit annotation (e.g. 9.8_m)
         let flit_uh = TU[EP as usize]
-        // Store exponent info in globals to avoid extra locals shifting compile_primary's frame
-        if TX[EP as usize] >= 0 { FL_SCI_SCRATCH = TX[EP as usize]; FL_SCI_NEG = 0 }
-        else { FL_SCI_SCRATCH = 0 - TX[EP as usize]; FL_SCI_NEG = 1 }
+        f64_literal_bits(EP)
         EP = EP + 1
-        // mov rax, int_part; cvtsi2sd xmm0, rax
-        em(0x48); em(0xb8); em64(fl_int)
-        em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xc0)
-        // If fractional part: frac/denom added to xmm0
-        if fl_frac > 0 {
-            em(0x48); em(0xb8); em64(fl_frac)
-            em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xc8)  // cvtsi2sd xmm1, rax
-            em(0x48); em(0xb8); em64(fl_denom)
-            em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xd0)  // cvtsi2sd xmm2, rax
-            em(0xf2); em(0x0f); em(0x5e); em(0xca)            // divsd xmm1, xmm2
-            em(0xf2); em(0x0f); em(0x58); em(0xc1)            // addsd xmm0, xmm1
-        }
-        // Apply scientific exponent: multiply or divide xmm0 by 10.0 FL_SCI_SCRATCH times
-        if FL_SCI_SCRATCH != 0 {
-            // Load 10.0 into xmm1: movabs rax, 0x4024000000000000; movq xmm1, rax
-            em(0x48); em(0xb8); em64(0x4024000000000000)
-            em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8)
-            if FL_SCI_NEG == 0 {
-                while FL_SCI_SCRATCH > 0 {
-                    em(0xf2); em(0x0f); em(0x59); em(0xc1)  // mulsd xmm0, xmm1
-                    FL_SCI_SCRATCH = FL_SCI_SCRATCH - 1
-                }
-            } else {
-                while FL_SCI_SCRATCH > 0 {
-                    em(0xf2); em(0x0f); em(0x5e); em(0xc1)  // divsd xmm0, xmm1
-                    FL_SCI_SCRATCH = FL_SCI_SCRATCH - 1
-                }
-            }
-        }
-        // movq rax, xmm0 — store f64 bits in rax
-        em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)
+        em(0x48); em(0xb8); em64(FL_BITS)                  // movabs rax, bits
+        em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc0)   // movq xmm0, rax
         EXPR_IS_F64 = 1
         EXPR_TY = 2
         // PR-7: track f64 literal for compile-time predicate checking
@@ -18969,44 +19298,10 @@ fn compile_primary() with IO, Mut, Panic, Div {
                     if const_find_val(ns, ne) != 0 {
                         let ci = CONST_FOUND_IDX
                         if CONST_TYPE[ci as usize] == 2 && CONST_TOK_IDX[ci as usize] >= 0 {
-                            let fl_int = TV[CONST_TOK_IDX[ci as usize] as usize]
-                            let fl_frac = TF[CONST_TOK_IDX[ci as usize] as usize]
-                            let fl_denom = TD[CONST_TOK_IDX[ci as usize] as usize]
-                            var fl_sci: i64 = 0
-                            var fl_sci_neg: i64 = 0
-                            if TX[CONST_TOK_IDX[ci as usize] as usize] >= 0 {
-                                fl_sci = TX[CONST_TOK_IDX[ci as usize] as usize]
-                                fl_sci_neg = 0
-                            } else {
-                                fl_sci = 0 - TX[CONST_TOK_IDX[ci as usize] as usize]
-                                fl_sci_neg = 1
-                            }
-                            em(0x48); em(0xb8); em64(fl_int)
-                            em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xc0)
-                            if fl_frac > 0 {
-                                em(0x48); em(0xb8); em64(fl_frac)
-                                em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xc8)
-                                em(0x48); em(0xb8); em64(fl_denom)
-                                em(0xf2); em(0x48); em(0x0f); em(0x2a); em(0xd0)
-                                em(0xf2); em(0x0f); em(0x5e); em(0xca)
-                                em(0xf2); em(0x0f); em(0x58); em(0xc1)
-                            }
-                            if fl_sci != 0 {
-                                em(0x48); em(0xb8); em64(0x4024000000000000)
-                                em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc8)
-                                if fl_sci_neg == 0 {
-                                    while fl_sci > 0 {
-                                        em(0xf2); em(0x0f); em(0x59); em(0xc1)
-                                        fl_sci = fl_sci - 1
-                                    }
-                                } else {
-                                    while fl_sci > 0 {
-                                        em(0xf2); em(0x0f); em(0x5e); em(0xc1)
-                                        fl_sci = fl_sci - 1
-                                    }
-                                }
-                            }
-                            em(0x66); em(0x48); em(0x0f); em(0x7e); em(0xc0)
+                            // Correctly rounded bits of the const's literal (see f64_literal_bits)
+                            f64_literal_bits(CONST_TOK_IDX[ci as usize])
+                            em(0x48); em(0xb8); em64(FL_BITS)                  // movabs rax, bits
+                            em(0x66); em(0x48); em(0x0f); em(0x6e); em(0xc0)   // movq xmm0, rax
                             // The sign the literal token could not carry. Same
                             // instruction the unary-minus path uses on f64.
                             if CONST_NEG[ci as usize] != 0 {
@@ -19061,7 +19356,13 @@ fn compile_postfix_tail() with IO, Mut, Panic, Div {
             let tp = EP
             let src_ty = EXPR_TY
             let src_hash = EXPR_TY_HASH
-            let src_is_f64 = EXPR_IS_F64
+            var src_is_f64 = EXPR_IS_F64
+            // A builtin unit spelled in a signature or a field (`-> mg`, `amount: mg`)
+            // scans as type 0 carrying the unit hash -- only a `unit NAME;` declaration
+            // scans as 2 -- so its call result and field read arrive with EXPR_IS_F64 = 0
+            // while the value is f64 bits, and `g() as f64` converted those bits as an
+            // integer. The call-argument check already reads type 0 as unit-bearing.
+            if src_ty == 0 && unit_is_registered_h(src_hash) { src_is_f64 = 1 }
             let tns = TS[EP as usize]
             let tne = TE[EP as usize]
             scan_type(tp)
@@ -22158,7 +22459,7 @@ fn compile_additive() with IO, Mut, Panic, Div {
             let right_unit_a = EXPR_UNIT
             let right_unit_dim_a = EXPR_UNIT_DIM
             if left_unit != 0 && right_unit_a != 0 && left_unit != right_unit_a {
-                tc_linear_violation(op_tok, "unit mismatch")
+                tc_linear_violation(op_tok, "unit mismatch in arithmetic operation")
             }
             if left_unit_dim != 0 && right_unit_dim_a != 0 && left_unit_dim != right_unit_dim_a {
                 tc_linear_violation(op_tok, "unit dimension mismatch")
@@ -22212,7 +22513,7 @@ fn compile_additive() with IO, Mut, Panic, Div {
         let right_ha_77 = EXPR_HSHADOW_77
         // Gen 19: named units must match exactly for additive arithmetic.
         if left_unit != 0 && right_unit != 0 && left_unit != right_unit {
-            tc_linear_violation(op_tok, "unit mismatch")
+            tc_linear_violation(op_tok, "unit mismatch in arithmetic operation")
         }
         // Gen 19: unit dimension mismatch — compare packed dim vectors, not name hashes
         // This allows g + kg (both mass^1) while catching m + kg (length vs mass)
@@ -22263,7 +22564,9 @@ fn compile_additive() with IO, Mut, Panic, Div {
                         tc_error_hard(op_tok, "arithmetic operands must have matching numeric types")
                     }
                     if ty_eq(left_ty, left_hash, right_ty, right_hash) == false {
-                        if left_ty == 2 && right_ty == 2 { tc_error(op_tok, "unit mismatch") }
+                        // The words the checker uses for E041, so one test pins both engines. A
+                        // warning here said "unit mismatch" and let the hard error below speak.
+                        if left_ty == 2 && right_ty == 2 { tc_linear_violation(op_tok, "unit mismatch in arithmetic operation") }
                         tc_error_hard(op_tok, "arithmetic operands must have matching numeric types")
                     }
                 }
@@ -26731,7 +27034,7 @@ fn compile_stmt() with IO, Mut, Panic, Div {
                 VAR_LINEAR[(VAR_COUNT - 1) as usize] = LAST_EXPR_IS_LINEAR
                 VAR_AFFINE[(VAR_COUNT - 1) as usize] = LAST_EXPR_IS_AFFINE
                 // Set unit hash for unit-typed variables (e.g. let mass: mg = 5.0, let e: J = 1.0)
-                if decl_ty_hash != 0 && type_hash_unit_dim(decl_ty_hash) != 0 {
+                if unit_brand_carried(decl_ty_hash) {
                     VAR_UNIT[(VAR_COUNT - 1) as usize] = decl_ty_hash
                 } else if decl_ty == 0 && decl_ty_hash == 0 && EXPR_UNIT != 0 {
                     VAR_UNIT[(VAR_COUNT - 1) as usize] = EXPR_UNIT
@@ -27428,7 +27731,11 @@ fn compile_stmt() with IO, Mut, Panic, Div {
         // `fn f(x: molar) -> molal { x }` handed its caller a molal brand on a
         // molar value. The same helper the call site uses works unchanged here,
         // with the declared return hash in place of the parameter hash.
-        if unit_call_arg_mismatch(CURRENT_RET_HASH, EXPR_UNIT, EXPR_UNIT_DIM) {
+        // Only an f64-kind return type is unit-checked, the guard the call site puts
+        // on a parameter. Without it a struct named like a built-in unit (`struct W`,
+        // `struct K`) resolved its name hash to that unit's dimension, and its
+        // unit-free value was refused.
+        if (CURRENT_RET_TY == 0 || CURRENT_RET_TY == 2) && unit_call_arg_mismatch(CURRENT_RET_HASH, EXPR_UNIT, EXPR_UNIT_DIM) {
             tc_linear_violation(EP - 1, "unit mismatch in return value")
         }
         // PR-5: enforce refinement predicate on return value (literal/let-literal)
@@ -31642,6 +31949,84 @@ fn src_scan_contains(kw: string) -> bool with Panic, Mut {
 }
 
 
+fn unit_bytes_eq(slot: i64, ns: i64, ne: i64) -> bool with Panic, Mut {
+    let stored_len = UNIT_NAME_LEN[slot as usize]
+    let want_len = ne - ns
+    var cap = want_len
+    if cap > UNIT_NAME_CAP { cap = UNIT_NAME_CAP }
+    if stored_len != cap { return false }
+    var i: i64 = 0
+    while i < cap {
+        if UNIT_NAME_BUF[(slot * UNIT_NAME_CAP + i) as usize] != sb(ns + i) as i8 { return false }
+        i = i + 1
+    }
+    true
+}
+
+// Registers a user-declared unit under its EXACT source name, refusing the
+// compile (fail closed) when this hash already names something else -- either
+// a preloaded SI/CGS/etc. symbol (no exact name recorded, so safety cannot be
+// verified) or a different user-declared name. Re-declaring the SAME name is
+// idempotent, as `unit X;` appearing in more than one processed module already
+// requires.
+fn unit_register_named_h(h: i64, dim: i64, ns: i64, ne: i64, name_tok: i64) with IO, Mut, Panic, Div {
+    if h == 0 { return }
+    var idx: i64 = h % 2048
+    if idx < 0 { idx = idx + 2048 }
+    var probe: i64 = idx
+    var iters: i64 = 0
+    while iters < 2048 {
+        if UNIT_HASH_TABLE[probe as usize] == 0 {
+            UNIT_HASH_TABLE[probe as usize] = h
+            UNIT_DIM_TABLE[probe as usize] = dim
+            var cap = ne - ns
+            if cap > UNIT_NAME_CAP { cap = UNIT_NAME_CAP }
+            var i: i64 = 0
+            while i < cap { UNIT_NAME_BUF[(probe * UNIT_NAME_CAP + i) as usize] = sb(ns + i) as i8; i = i + 1 }
+            UNIT_NAME_LEN[probe as usize] = cap
+            return
+        }
+        if UNIT_HASH_TABLE[probe as usize] == h {
+            // A slot with no exact name is a preloaded built-in (unit_register_h
+            // at init has no name text to store) or a hash that reached this
+            // point only through the plain-hash path -- either way, we have no
+            // evidence it is a DIFFERENT name, and `unit AU;` re-declaring the
+            // preloaded astronomical AU (every stdlib/units/*.sio file does this
+            // for every symbol it exposes as a type) must keep working. Record
+            // the exact name now so a LATER, truly different name at this same
+            // hash is caught.
+            if UNIT_NAME_LEN[probe as usize] >= 0 {
+                if !unit_bytes_eq(probe, ns, ne) {
+                    tc_error_hard(name_tok, "unit name collides with a different unit's hash")
+                    return
+                }
+            } else if dim != UNIT_DIM_TABLE[probe as usize] {
+                // No exact name means we cannot compare spellings, but a real
+                // dimension silently becoming a DIFFERENT one (nominal
+                // included: dim 0) is the concrete harm a hash collision here
+                // can do -- every later lookup by this hash reads the wrong
+                // dimension for whatever built-in used to own it. The one case
+                // this table already tolerates on purpose is two DIFFERENT
+                // built-in spellings sharing BOTH a hash and a dimension (km/in
+                // -- "both length OK", see init_unit_table); that still passes,
+                // since dim == UNIT_DIM_TABLE[probe] there.
+                tc_error_hard(name_tok, "unit name collides with a different unit's hash")
+                return
+            }
+            UNIT_DIM_TABLE[probe as usize] = dim
+            var cap = ne - ns
+            if cap > UNIT_NAME_CAP { cap = UNIT_NAME_CAP }
+            var i: i64 = 0
+            while i < cap { UNIT_NAME_BUF[(probe * UNIT_NAME_CAP + i) as usize] = sb(ns + i) as i8; i = i + 1 }
+            UNIT_NAME_LEN[probe as usize] = cap
+            return
+        }
+        probe = probe + 1
+        if probe >= 2048 { probe = 0 }
+        iters = iters + 1
+    }
+}
+
 fn compile_all() -> i64 with IO, Mut, Panic, Div {
     CL = 0
     POOL_ALLOC_ROUTINE_CL = 0 - 1
@@ -31784,6 +32169,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             if p < TC && TK[p as usize] == 3 {
                 let uns = TS[p as usize]
                 let une = TE[p as usize]
+                let name_tok = p
                 let uhash = gl_name_hash(uns, une)
                 p = p + 1  // skip NAME
                 // Check for '= unit_expr;' form. Supports SCALE * BASE and m / s derived units.
@@ -31810,12 +32196,12 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                             }
                         }
                     }
-                    unit_register_h(uhash, derived_dim)
+                    unit_register_named_h(uhash, derived_dim, uns, une, name_tok)
                     unit_mark_user_h(uhash)
                 } else {
                     // Plain 'unit NAME;' — look up dim from preloaded table (may be 0 if new)
                     let existing_dim = unit_lookup_dim(uhash)
-                    unit_register_h(uhash, existing_dim)
+                    unit_register_named_h(uhash, existing_dim, uns, une, name_tok)
                     unit_mark_user_h(uhash)
                 }
                 // Skip to semicolon
@@ -33342,7 +33728,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                         // every function boundary erased the unit: the value arrived
                         // numerically correct but unbranded, so it could go on to
                         // satisfy a parameter of some other unit entirely.
-                        if SCAN_TY_HASH != 0 && type_hash_unit_dim(SCAN_TY_HASH) != 0 {
+                        if unit_brand_carried(SCAN_TY_HASH) {
                             VAR_UNIT[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
                         }
                         if SCAN_TY == 2 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
@@ -33642,6 +34028,18 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                             }
                         }
                     }
+                }
+                // The unit check of the `return` statement, for the tail value. A
+                // body's last expression is its return value as much as `return`
+                // is, and `fn bare() -> molal { 5.0 }` compiled while the
+                // `return 5.0` spelling was refused. EXPR_UNIT is still the tail's:
+                // nothing is compiled between the last statement and here.
+                // Only an f64-kind return type is unit-checked, the guard the call site puts
+                // on a parameter. Without it a struct named like a built-in unit (`struct W`,
+                // `struct K`) resolved its name hash to that unit's dimension, and its
+                // unit-free value was refused.
+                if (CURRENT_RET_TY == 0 || CURRENT_RET_TY == 2) && unit_call_arg_mismatch(CURRENT_RET_HASH, EXPR_UNIT, EXPR_UNIT_DIM) {
+                    tc_linear_violation(EP - 1, "unit mismatch in return value")
                 }
                 // SRET fix: stabilize whenever SRET was set up, regardless of type-eq result.
                 // Without this, functions returning tuples with a mismatched LAST_STMT_TY
@@ -35814,36 +36212,11 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         let fl_int = TV[EP as usize]
         let fl_frac = TF[EP as usize]
         let fl_denom = TD[EP as usize]
-        if TX[EP as usize] >= 0 { FL_SCI_SCRATCH = TX[EP as usize]; FL_SCI_NEG = 0 }
-        else { FL_SCI_SCRATCH = 0 - TX[EP as usize]; FL_SCI_NEG = 1 }
+        // Correctly rounded binary64 bits, computed at compile time (x86 twin above)
+        f64_literal_bits(EP)
         EP = EP + 1
-        emit_imm64_a64(fl_int)
-        em32(0x9E620000)  // scvtf d0, x0
-        if fl_frac > 0 {
-            emit_imm64_a64(fl_frac)
-            em32(0x9E620001)  // scvtf d1, x0
-            emit_imm64_a64(fl_denom)
-            em32(0x9E620002)  // scvtf d2, x0
-            em32(0x1E601800 | (2 << 16) | (1 << 5) | 1)  // fdiv d1, d1, d2
-            em32(0x1E612800)  // fadd d0, d0, d1
-        }
-        // Apply scientific exponent: mul/div d0 by 10.0 FL_SCI_SCRATCH times
-        if FL_SCI_SCRATCH != 0 {
-            emit_imm64_a64(0x4024000000000000)  // x0 = bits of 10.0
-            em32(0x9E670001)  // fmov d1, x0
-            if FL_SCI_NEG == 0 {
-                while FL_SCI_SCRATCH > 0 {
-                    em32(0x1E610800)  // fmul d0, d0, d1
-                    FL_SCI_SCRATCH = FL_SCI_SCRATCH - 1
-                }
-            } else {
-                while FL_SCI_SCRATCH > 0 {
-                    em32(0x1E611800)  // fdiv d0, d0, d1
-                    FL_SCI_SCRATCH = FL_SCI_SCRATCH - 1
-                }
-            }
-        }
-        em32(0x9E660000)  // fmov x0, d0
+        emit_imm64_a64(FL_BITS)  // x0 = bits
+        em32(0x9E670000)  // fmov d0, x0
         EXPR_IS_F64 = 1
         EXPR_TY = 2
         // PR-7: track the f64 literal for compile-time predicate checking.
@@ -38173,12 +38546,26 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EP = EP + 1
                 compile_or_a64()
                 let pw_x_slot_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1; emit_store_var_a64(pw_x_slot_a)
+                // β⁷: park x's channel state; compiling y re-enters compile_or_a64.
+                let pw_prev = B7_TOP
+                var pw_ua = B7_TOP
+                if B7_TOP + B7_FRAME * 3 > 8192 {
+                    tc_error_hard(name_tok, "expression nesting too deep for second-order shadows")
+                    pw_ua = 8192 - B7_FRAME * 3
+                } else {
+                    B7_TOP = B7_TOP + B7_FRAME
+                }
+                b7_save_a64(pw_ua)
                 // β⁹ GTT: capture x's topology before the y arg overwrites EXPR_CH_SET.
                 let pw_x_ch_set_a = EXPR_CH_SET
                 let pw_x_param_used_a = EXPR_PARAM_USED
                 if TK[EP as usize] == 28 { EP = EP + 1 }
                 compile_or_a64()
                 let pw_y_slot_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1; emit_store_var_a64(pw_y_slot_a)
+                let pw_ub = pw_ua + B7_FRAME
+                if pw_ua + B7_FRAME * 3 <= 8192 { B7_TOP = pw_ub + B7_FRAME }
+                b7_save_a64(pw_ub)
+                let pw_out = pw_ub + B7_FRAME
                 // β⁹ GTT: y's topology. pow(x, y) depends on both → union.
                 let pw_y_ch_set_a = EXPR_CH_SET
                 let pw_y_param_used_a = EXPR_PARAM_USED
@@ -38196,6 +38583,65 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 let pw_exp_fi_a = fn_find_lit("__native_exp_f64")
                 if pw_exp_fi_a >= 0 { emit_direct_fn_call_a64(pw_exp_fi_a, 1) } else { emit_drop_call_args_a64(1); em32(0xD2800000) }
                 if TK[EP as usize] == 7 { EP = EP + 1 }
+                // β⁷: x^y is a two-argument function and the a64 pass propagated
+                // neither order through it. Partials as compile_primary computes
+                // them, with res = x^y and lnx already in hand from the compose:
+                //   fa = res·y/x        fb  = res·lnx
+                //   faa = fa·(y-1)/x    fbb = res·lnx²
+                //   fab = (res/x)·(1 + y·lnx)
+                let pw_res_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var_a64(pw_res_a)
+                var pw_any: i64 = 0
+                var pw_q: i64 = 0
+                while pw_q < B7_FRAME {
+                    if B7F[(pw_ua + pw_q) as usize] >= 0 { pw_any = 1 }
+                    if B7F[(pw_ub + pw_q) as usize] >= 0 { pw_any = 1 }
+                    pw_q = pw_q + 1
+                }
+                if pw_any == 1 {
+                    let pw_fa = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_load_var_a64(pw_res_a); emit_push_a64()
+                    emit_load_var_a64(pw_y_slot_a); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                    emit_push_a64()
+                    emit_load_var_a64(pw_x_slot_a); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+                    emit_store_var_a64(pw_fa)
+                    let pw_fb = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_load_var_a64(pw_res_a); emit_push_a64()
+                    emit_load_var_a64(pw_lnx_slot_a); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                    emit_store_var_a64(pw_fb)
+                    let pw_xym1 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_load_var_a64(pw_res_a); emit_push_a64()
+                    emit_load_var_a64(pw_x_slot_a); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+                    emit_store_var_a64(pw_xym1)
+                    let pw_faa = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_load_var_a64(pw_fa); emit_push_a64()
+                    emit_load_var_a64(pw_y_slot_a); emit_push_a64()
+                    emit_imm64_a64(4607182418800017408); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+                    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                    emit_push_a64()
+                    emit_load_var_a64(pw_x_slot_a); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+                    emit_store_var_a64(pw_faa)
+                    let pw_fbb = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_load_var_a64(pw_fb); emit_push_a64()
+                    emit_load_var_a64(pw_lnx_slot_a); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                    emit_store_var_a64(pw_fbb)
+                    let pw_fab = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_load_var_a64(pw_xym1); emit_push_a64()
+                    emit_imm64_a64(4607182418800017408); emit_push_a64()
+                    emit_load_var_a64(pw_y_slot_a); emit_push_a64()
+                    emit_load_var_a64(pw_lnx_slot_a); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+                    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                    emit_store_var_a64(pw_fab)
+                    emit_two_arg_chain_a64(pw_faa, pw_fbb, pw_fab, pw_fa, pw_fb, pw_ua, pw_ub, pw_out)
+                    b7_restore_a64(pw_out)
+                    emit_load_var_a64(pw_res_a)
+                } else {
+                    var pw_t: i64 = 0
+                    while pw_t < B7_FRAME { B7F[(pw_out + pw_t) as usize] = -1; pw_t = pw_t + 1 }
+                    b7_restore_a64(pw_out)
+                }
+                B7_TOP = pw_prev
                 EXPR_IS_F64 = 1
                 EXPR_TY = 2
                 EXPR_TY_HASH = 0
@@ -38209,12 +38655,26 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 EP = EP + 1
                 compile_or_a64()
                 let a2_y_slot_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1; emit_store_var_a64(a2_y_slot_a)
+                // β⁷: park y's channel state; compiling x re-enters compile_or_a64.
+                let a2_prev = B7_TOP
+                var a2_ua = B7_TOP
+                if B7_TOP + B7_FRAME * 3 > 8192 {
+                    tc_error_hard(name_tok, "expression nesting too deep for second-order shadows")
+                    a2_ua = 8192 - B7_FRAME * 3
+                } else {
+                    B7_TOP = B7_TOP + B7_FRAME
+                }
+                b7_save_a64(a2_ua)
                 // β⁹ GTT: capture y's topology before the x arg overwrites EXPR_CH_SET.
                 let a2_y_ch_set_a = EXPR_CH_SET
                 let a2_y_param_used_a = EXPR_PARAM_USED
                 if TK[EP as usize] == 28 { EP = EP + 1 }
                 compile_or_a64()
                 let a2_x_slot_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1; emit_store_var_a64(a2_x_slot_a)
+                let a2_ub = a2_ua + B7_FRAME
+                if a2_ua + B7_FRAME * 3 <= 8192 { B7_TOP = a2_ub + B7_FRAME }
+                b7_save_a64(a2_ub)
+                let a2_out = a2_ub + B7_FRAME
                 // β⁹ GTT: x's topology. atan2(y, x) depends on both → union.
                 let a2_x_ch_set_a = EXPR_CH_SET
                 let a2_x_param_used_a = EXPR_PARAM_USED
@@ -38228,6 +38688,73 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 if a2_fi_a >= 0 { emit_direct_fn_call_a64(a2_fi_a, 2) }
                 else { tc_error(name_tok, "missing atan2 native"); emit_drop_call_args_a64(2); em32(0xD2800000) }
                 if TK[EP as usize] == 7 { EP = EP + 1 }
+                // β⁷: atan2 is the other two-argument function the a64 pass
+                // carried no derivative through. Partials as compile_primary
+                // computes them, with r2 = x²+y² and r4 = r2²:
+                //   fa  =  x/r2          fb  = -(y/r2)
+                //   faa = -(2xy/r4)      fbb =  2xy/r4
+                //   fab = (y²-x²)/r4
+                let a2_res_a = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                emit_store_var_a64(a2_res_a)
+                var a2_any: i64 = 0
+                var a2_q: i64 = 0
+                while a2_q < B7_FRAME {
+                    if B7F[(a2_ua + a2_q) as usize] >= 0 { a2_any = 1 }
+                    if B7F[(a2_ub + a2_q) as usize] >= 0 { a2_any = 1 }
+                    a2_q = a2_q + 1
+                }
+                if a2_any == 1 {
+                    let a2_r2 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_load_var_a64(a2_x_slot_a); emit_push_a64()
+                    emit_load_var_a64(a2_x_slot_a); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                    emit_push_a64()
+                    emit_load_var_a64(a2_y_slot_a); emit_push_a64()
+                    emit_load_var_a64(a2_y_slot_a); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+                    emit_store_var_a64(a2_r2)
+                    let a2_r4 = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_load_var_a64(a2_r2); emit_push_a64()
+                    emit_load_var_a64(a2_r2); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                    emit_store_var_a64(a2_r4)
+                    let a2_fa = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_load_var_a64(a2_x_slot_a); emit_push_a64()
+                    emit_load_var_a64(a2_r2); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+                    emit_store_var_a64(a2_fa)
+                    let a2_fb = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_load_var_a64(a2_y_slot_a); emit_push_a64()
+                    emit_load_var_a64(a2_r2); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+                    emit_f64_neg_a64()
+                    emit_store_var_a64(a2_fb)
+                    let a2_2xy = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_imm64_a64(4611686018427387904); emit_push_a64()
+                    emit_load_var_a64(a2_x_slot_a); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                    emit_push_a64()
+                    emit_load_var_a64(a2_y_slot_a); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                    emit_push_a64()
+                    emit_load_var_a64(a2_r4); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+                    emit_store_var_a64(a2_2xy)
+                    let a2_faa = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_load_var_a64(a2_2xy); emit_f64_neg_a64()
+                    emit_store_var_a64(a2_faa)
+                    let a2_fab = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_load_var_a64(a2_y_slot_a); emit_push_a64()
+                    emit_load_var_a64(a2_y_slot_a); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                    emit_push_a64()
+                    emit_load_var_a64(a2_x_slot_a); emit_push_a64()
+                    emit_load_var_a64(a2_x_slot_a); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+                    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+                    emit_push_a64()
+                    emit_load_var_a64(a2_r4); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+                    emit_store_var_a64(a2_fab)
+                    emit_two_arg_chain_a64(a2_faa, a2_2xy, a2_fab, a2_fa, a2_fb, a2_ua, a2_ub, a2_out)
+                    b7_restore_a64(a2_out)
+                    emit_load_var_a64(a2_res_a)
+                } else {
+                    var a2_t: i64 = 0
+                    while a2_t < B7_FRAME { B7F[(a2_out + a2_t) as usize] = -1; a2_t = a2_t + 1 }
+                    b7_restore_a64(a2_out)
+                }
+                B7_TOP = a2_prev
                 EXPR_IS_F64 = 1
                 EXPR_TY = 2
                 EXPR_TY_HASH = 0
@@ -39290,27 +39817,9 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                         let ci = CONST_FOUND_IDX
                         if CONST_TYPE[ci as usize] == 2 && CONST_TOK_IDX[ci as usize] >= 0 {
                             let ct = CONST_TOK_IDX[ci as usize]
-                            emit_imm64_a64(TV[ct as usize])
-                            em32(0x9E620000)  // scvtf d0, x0
-                            if TF[ct as usize] > 0 {
-                                emit_imm64_a64(TF[ct as usize])
-                                em32(0x9E620001)  // scvtf d1, x0
-                                emit_imm64_a64(TD[ct as usize])
-                                em32(0x9E620002)  // scvtf d2, x0
-                                em32(0x1E601800 | (2 << 16) | (1 << 5) | 1)  // fdiv d1, d1, d2
-                                em32(0x1E612800)  // fadd d0, d0, d1
-                            }
-                            if TX[ct as usize] >= 0 { FL_SCI_SCRATCH = TX[ct as usize]; FL_SCI_NEG = 0 }
-                            else { FL_SCI_SCRATCH = 0 - TX[ct as usize]; FL_SCI_NEG = 1 }
-                            if FL_SCI_SCRATCH != 0 {
-                                emit_imm64_a64(0x4024000000000000)  // bits of 10.0
-                                em32(0x9E670001)  // fmov d1, x0
-                                if FL_SCI_NEG == 0 {
-                                    while FL_SCI_SCRATCH > 0 { em32(0x1E610800); FL_SCI_SCRATCH = FL_SCI_SCRATCH - 1 }  // fmul d0, d0, d1
-                                } else {
-                                    while FL_SCI_SCRATCH > 0 { em32(0x1E611800); FL_SCI_SCRATCH = FL_SCI_SCRATCH - 1 }  // fdiv d0, d0, d1
-                                }
-                            }
+                            f64_literal_bits(ct)
+                            emit_imm64_a64(FL_BITS)  // x0 = correctly rounded bits
+                            em32(0x9E670000)  // fmov d0, x0
                             // Same sign fix as the x86 site, in the FP register
                             // where a64 already has the value: fneg d0, d0 is
                             // what the a64 unary-minus path emits.
@@ -39349,7 +39858,13 @@ fn compile_postfix_tail_a64() with IO, Mut, Panic, Div {
             let tp = EP
             let src_ty = EXPR_TY
             let src_hash = EXPR_TY_HASH
-            let src_is_f64 = EXPR_IS_F64
+            var src_is_f64 = EXPR_IS_F64
+            // A builtin unit spelled in a signature or a field (`-> mg`, `amount: mg`)
+            // scans as type 0 carrying the unit hash -- only a `unit NAME;` declaration
+            // scans as 2 -- so its call result and field read arrive with EXPR_IS_F64 = 0
+            // while the value is f64 bits, and `g() as f64` converted those bits as an
+            // integer. The call-argument check already reads type 0 as unit-bearing.
+            if src_ty == 0 && unit_is_registered_h(src_hash) { src_is_f64 = 1 }
             let tns = TS[EP as usize]
             let tne = TE[EP as usize]
             scan_type(tp)
@@ -40290,7 +40805,7 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
             if B7F[(b7_r_m + b7q_m) as usize] >= 0 { b7_any_m = 1 }
             b7q_m = b7q_m + 1
         }
-        if left_f64 == 1 && op == 19 && ((b4am_left_vshadow >= 0 || b4am_right_vshadow >= 0) || b7_any_m == 1) {
+        if left_f64 == 1 && (op == 19 || op == 20) && ((b4am_left_vshadow >= 0 || b4am_right_vshadow >= 0) || b7_any_m == 1) {
             b4am_result_slot = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
             emit_store_var_a64(b4am_result_slot)
         }
@@ -40341,6 +40856,48 @@ fn compile_multiplicative_a64() with IO, Mut, Panic, Div {
                     b7k_m = b7k_m + 1
                 }
                 b7j_m = b7j_m + 1
+            }
+        }
+        // β⁶/β⁷ through `/`. Same frames, same loop shape, the quotient rules.
+        // Division carried NEITHER order on this target: sensitivities passed
+        // through as if s(a/b) = s(a), and every Hessian entry stayed empty.
+        if left_f64 == 1 && op == 20 {
+            var b7c_d: i64 = 0
+            while b7c_d < 8 {
+                B7F[(b7_o_m + 36 + b7c_d) as usize] = emit_s_div_a64(b4am_lval_slot, b4am_rval_slot, B7F[(b7_l_m + 36 + b7c_d) as usize], B7F[(b7_r_m + 36 + b7c_d) as usize])
+                b7c_d = b7c_d + 1
+            }
+            var b7j_d: i64 = 0
+            var b7i_d: i64 = 0
+            while b7j_d < 8 {
+                var b7k_d: i64 = b7j_d
+                while b7k_d < 8 {
+                    B7F[(b7_o_m + b7i_d) as usize] = emit_h_div_a64(B7F[(b7_l_m + b7i_d) as usize], B7F[(b7_r_m + b7i_d) as usize], b4am_lval_slot, b4am_rval_slot, B7F[(b7_l_m + 36 + b7j_d) as usize], B7F[(b7_r_m + 36 + b7k_d) as usize], B7F[(b7_l_m + 36 + b7k_d) as usize], B7F[(b7_r_m + 36 + b7j_d) as usize])
+                    b7i_d = b7i_d + 1
+                    b7k_d = b7k_d + 1
+                }
+                b7j_d = b7j_d + 1
+            }
+        }
+        // β¹¹ twin: rebuild Var from the FO sensitivities now that the product's
+        // own sens frame is complete. The β⁴ block above is a blind
+        // a²·var(b) + b²·var(a), which under-counts a·a — the FO rule wants
+        // 4a²σ², not 2a²σ². The x86 site does this from EXPR_SSHADOW_*; here the
+        // product's channels are still in the output frame, so read them there.
+        if left_f64 == 1 && op == 19 {
+            var b11_any_m: i64 = 0
+            var b11_q_m: i64 = 0
+            while b11_q_m < 8 {
+                if B7F[(b7_o_m + 36 + b11_q_m) as usize] >= 0 { b11_any_m = 1 }
+                b11_q_m = b11_q_m + 1
+            }
+            if b11_any_m == 1 {
+                EXPR_VSHADOW = emit_fo_var_from_sens_a64(
+                    B7F[(b7_o_m + 36) as usize], B7F[(b7_o_m + 37) as usize],
+                    B7F[(b7_o_m + 38) as usize], B7F[(b7_o_m + 39) as usize],
+                    B7F[(b7_o_m + 40) as usize], B7F[(b7_o_m + 41) as usize],
+                    B7F[(b7_o_m + 42) as usize], B7F[(b7_o_m + 43) as usize]
+                )
             }
         }
         b7_restore_a64(b7_o_m)
@@ -40698,6 +41255,213 @@ fn emit_h_chain_a64(d1: i64, d2: i64, h: i64, sj: i64, sk: i64) -> i64 with IO, 
     return r
 }
 
+
+// s_k(a/b) = (s_k(a)·b − a·s_k(b)) / b²   -- the quotient rule, first order.
+// Mirror of the β⁶ block in compile_multiplicative. `/` used to leave the a64
+// sensitivities untouched, which asserts s(a/b) = s(a): the numerator's
+// derivative handed on as the quotient's.
+fn emit_s_div_a64(lval: i64, rval: i64, ls: i64, rs: i64) -> i64 with IO, Mut, Panic, Div {
+    if ls < 0 && rs < 0 { return -1 }
+    let res = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    if ls >= 0 { emit_load_var_a64(ls) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if rval >= 0 { emit_load_var_a64(rval) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_push_a64()
+    if lval >= 0 { emit_load_var_a64(lval) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if rs >= 0 { emit_load_var_a64(rs) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+    emit_push_a64()
+    if rval >= 0 { emit_load_var_a64(rval) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if rval >= 0 { emit_load_var_a64(rval) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+    emit_store_var_a64(res)
+    return res
+}
+
+// H_jk(a/b) = [H_jk(a)·b − a·H_jk(b) − s_j(a)·s_k(b) − s_k(a)·s_j(b)] / b²
+//             + 2·a·s_j(b)·s_k(b) / b³
+// Mirror of the β⁷ division rule in compile_multiplicative. On the diagonal the
+// caller passes saj == sak and sbj == sbk, which is what makes the two cross
+// terms coincide there, exactly as the x86 site spells out twice.
+fn emit_h_div_a64(lh: i64, rh: i64, lval: i64, rval: i64, saj: i64, sbk: i64, sak: i64, sbj: i64) -> i64 with IO, Mut, Panic, Div {
+    if lh < 0 && rh < 0 && (saj < 0 || sbk < 0) && (sak < 0 || sbj < 0) { return -1 }
+    let res = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    let partial = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    // H_jk(a)·b
+    if lh >= 0 { emit_load_var_a64(lh) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if rval >= 0 { emit_load_var_a64(rval) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_push_a64()
+    // − a·H_jk(b)
+    if lval >= 0 { emit_load_var_a64(lval) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if rh >= 0 { emit_load_var_a64(rh) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+    emit_push_a64()
+    // − s_j(a)·s_k(b)
+    if saj >= 0 { emit_load_var_a64(saj) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if sbk >= 0 { emit_load_var_a64(sbk) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+    emit_push_a64()
+    // − s_k(a)·s_j(b)
+    if sak >= 0 { emit_load_var_a64(sak) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if sbj >= 0 { emit_load_var_a64(sbj) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E613800)
+    // / b²
+    emit_push_a64()
+    if rval >= 0 { emit_load_var_a64(rval) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if rval >= 0 { emit_load_var_a64(rval) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+    emit_store_var_a64(partial)
+    // 2·a·s_j(b)·s_k(b)
+    emit_imm64_a64(4611686018427387904)
+    emit_push_a64()
+    if lval >= 0 { emit_load_var_a64(lval) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_push_a64()
+    if sbj >= 0 { emit_load_var_a64(sbj) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_push_a64()
+    if sbk >= 0 { emit_load_var_a64(sbk) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    // / b³
+    emit_push_a64()
+    if rval >= 0 { emit_load_var_a64(rval) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if rval >= 0 { emit_load_var_a64(rval) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if rval >= 0 { emit_load_var_a64(rval) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E611800)
+    // + the / b² partial
+    emit_push_a64()
+    emit_load_var_a64(partial)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+    emit_store_var_a64(res)
+    return res
+}
+
+
+// ─── ARM64 β⁷ two-argument chain rule ───
+//
+// For f(u, v) with the five partials fa=∂f/∂u, fb=∂f/∂v, faa, fbb, fab:
+//
+//   s_k(f)   = fa·s_k(u) + fb·s_k(v)
+//   H_jk(f)  = faa·s_j(u)·s_k(u) + fbb·s_j(v)·s_k(v)
+//            + fab·(s_j(u)·s_k(v) + s_k(u)·s_j(v))
+//            + fa·H_jk(u) + fb·H_jk(v)
+//
+// The same shape the x86 site spells out per entry. Only the five partials
+// differ between pow and atan2, so they are computed at the call sites and
+// these two helpers are shared.
+fn emit_s_two_a64(fa: i64, fb: i64, sa: i64, sb: i64) -> i64 with IO, Mut, Panic, Div {
+    if sa < 0 && sb < 0 { return -1 }
+    let res = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    emit_load_var_a64(fa); emit_push_a64()
+    if sa >= 0 { emit_load_var_a64(sa) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_push_a64()
+    emit_load_var_a64(fb); emit_push_a64()
+    if sb >= 0 { emit_load_var_a64(sb) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+    emit_store_var_a64(res)
+    return res
+}
+
+fn emit_h_two_a64(faa: i64, fbb: i64, fab: i64, fa: i64, fb: i64, saj: i64, sak: i64, sbj: i64, sbk: i64, ha: i64, hb: i64) -> i64 with IO, Mut, Panic, Div {
+    if ha < 0 && hb < 0 && saj < 0 && sak < 0 && sbj < 0 && sbk < 0 { return -1 }
+    let res = NEXT_SLOT
+    NEXT_SLOT = NEXT_SLOT + 1
+    // faa·s_j(u)·s_k(u)
+    emit_load_var_a64(faa); emit_push_a64()
+    if saj >= 0 { emit_load_var_a64(saj) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_push_a64()
+    if sak >= 0 { emit_load_var_a64(sak) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_push_a64()
+    // + fbb·s_j(v)·s_k(v)
+    emit_load_var_a64(fbb); emit_push_a64()
+    if sbj >= 0 { emit_load_var_a64(sbj) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_push_a64()
+    if sbk >= 0 { emit_load_var_a64(sbk) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+    emit_push_a64()
+    // + fab·(s_j(u)·s_k(v) + s_k(u)·s_j(v))
+    if saj >= 0 { emit_load_var_a64(saj) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if sbk >= 0 { emit_load_var_a64(sbk) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_push_a64()
+    if sak >= 0 { emit_load_var_a64(sak) } else { emit_imm64_a64(0) }
+    emit_push_a64()
+    if sbj >= 0 { emit_load_var_a64(sbj) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+    emit_push_a64()
+    emit_load_var_a64(fab); emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+    emit_push_a64()
+    // + fa·H_jk(u)
+    emit_load_var_a64(fa); emit_push_a64()
+    if ha >= 0 { emit_load_var_a64(ha) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+    emit_push_a64()
+    // + fb·H_jk(v)
+    emit_load_var_a64(fb); emit_push_a64()
+    if hb >= 0 { emit_load_var_a64(hb) } else { emit_imm64_a64(0) }
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E610800)
+    emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)
+    emit_store_var_a64(res)
+    return res
+}
+
+// Runs both loops over three frames: `ua` and `ub` hold the two arguments'
+// state, `out` receives the result. Shared by pow and atan2 -- the caller
+// computes the five partials, this walks the 8 channels and the 36 entries.
+fn emit_two_arg_chain_a64(faa: i64, fbb: i64, fab: i64, fa: i64, fb: i64, ua: i64, ub: i64, out: i64) with IO, Mut, Panic, Div {
+    var t: i64 = 0
+    while t < B7_FRAME { B7F[(out + t) as usize] = -1; t = t + 1 }
+    var c: i64 = 0
+    while c < 8 {
+        B7F[(out + 36 + c) as usize] = emit_s_two_a64(fa, fb, B7F[(ua + 36 + c) as usize], B7F[(ub + 36 + c) as usize])
+        c = c + 1
+    }
+    var j: i64 = 0
+    var i: i64 = 0
+    while j < 8 {
+        var k: i64 = j
+        while k < 8 {
+            B7F[(out + i) as usize] = emit_h_two_a64(faa, fbb, fab, fa, fb, B7F[(ua + 36 + j) as usize], B7F[(ua + 36 + k) as usize], B7F[(ub + 36 + j) as usize], B7F[(ub + 36 + k) as usize], B7F[(ua + i) as usize], B7F[(ub + i) as usize])
+            i = i + 1
+            k = k + 1
+        }
+        j = j + 1
+    }
+}
+
 // ─── ARM64 additive ───
 fn compile_additive_a64() with IO, Mut, Panic, Div {
     compile_multiplicative_a64()
@@ -40780,7 +41544,7 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
         // Mirror of compile_additive; the a64 pass captured neither operand's
         // unit and ran neither check.
         if left_unit_a != 0 && right_unit_a != 0 && left_unit_a != right_unit_a {
-            tc_linear_violation(op_tok, "unit mismatch")
+            tc_linear_violation(op_tok, "unit mismatch in arithmetic operation")
         }
         if left_unit_dim_a != 0 && right_unit_dim_a != 0 && left_unit_dim_a != right_unit_dim_a {
             tc_linear_violation(op_tok, "unit dimension mismatch")
@@ -40815,6 +41579,19 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
             B7_TOP = b7_prev_a
             continue
         }
+        // Mirror of compile_additive's plain-operand check. The a64 pass had the
+        // Knowledge twin of this check but not this one, so two f64 operands with
+        // different type hashes (mol_L + kJ) compiled for aarch64-linux while x86
+        // refused them. Same words and severities as the x86 site.
+        if left_ty != 0 && right_ty != 0 {
+            if ty_is_numeric(left_ty) == false || ty_is_numeric(right_ty) == false {
+                tc_error_hard(op_tok, "arithmetic operands must have matching numeric types")
+            }
+            if ty_eq(left_ty, left_hash, right_ty, right_hash) == false {
+                if left_ty == 2 && right_ty == 2 { tc_linear_violation(op_tok, "unit mismatch in arithmetic operation") }
+                tc_error_hard(op_tok, "arithmetic operands must have matching numeric types")
+            }
+        }
         emit_pop_x1_a64()
         if left_f64 == 1 {
             if op == 17 { emit_f64_binop_a64(0x1E612800) }
@@ -40829,13 +41606,54 @@ fn compile_additive_a64() with IO, Mut, Panic, Div {
                 emit_store_var_a64(b4aa_result_slot)
             }
             if b4aa_left_vshadow >= 0 || b4aa_right_vshadow >= 0 {
-                if b4aa_left_vshadow >= 0 { emit_load_var_a64(b4aa_left_vshadow) } else { emit_imm64_a64(0) }
-                emit_push_a64()
-                if b4aa_right_vshadow >= 0 { emit_load_var_a64(b4aa_right_vshadow) } else { emit_imm64_a64(0) }
-                emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)  // fadd
-                let b4aa_vres = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
-                emit_store_var_a64(b4aa_vres)
-                EXPR_VSHADOW = b4aa_vres
+                // β⁵ covariance: slot identity → Var(x−x)=0 (same shadow slot on
+                // both sides). Mirror of the x86 chain, which this site had
+                // collapsed into the blind sum below.
+                if op == 18 && b4aa_left_vshadow >= 0 && b4aa_left_vshadow == b4aa_right_vshadow {
+                    let b4aa_vzero = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                    emit_imm64_a64(0)
+                    emit_store_var_a64(b4aa_vzero)
+                    EXPR_VSHADOW = b4aa_vzero
+                } else if b4aa_right_vshadow < 0 {
+                    EXPR_VSHADOW = b4aa_left_vshadow   // Var(a ± 0) = Var(a), pass through
+                } else if b4aa_left_vshadow < 0 {
+                    EXPR_VSHADOW = b4aa_right_vshadow  // Var(0 + b) = Var(b), pass through
+                } else {
+                    // β¹⁰: FO sensitivity-difference variance on sub when multi-
+                    // channel AD shadows are live (cancels a·b − a·b, which slot
+                    // identity cannot see). Else the blind sum. The x86 site reads
+                    // the operands' EXPR_SSHADOW_*; the a64 operands are parked in
+                    // their frames, and those carry all eight channels, not four.
+                    var b4aa_use_fo: i64 = 0
+                    if op == 18 {
+                        var b10_q_a: i64 = 0
+                        while b10_q_a < 8 {
+                            if B7F[(b7_l_a + 36 + b10_q_a) as usize] >= 0 { b4aa_use_fo = 1 }
+                            if B7F[(b7_r_a + 36 + b10_q_a) as usize] >= 0 { b4aa_use_fo = 1 }
+                            b10_q_a = b10_q_a + 1
+                        }
+                    }
+                    if b4aa_use_fo == 1 {
+                        EXPR_VSHADOW = emit_fo_var_from_sens_diff_sub_a64(
+                            B7F[(b7_l_a + 36) as usize], B7F[(b7_l_a + 37) as usize],
+                            B7F[(b7_l_a + 38) as usize], B7F[(b7_l_a + 39) as usize],
+                            B7F[(b7_l_a + 40) as usize], B7F[(b7_l_a + 41) as usize],
+                            B7F[(b7_l_a + 42) as usize], B7F[(b7_l_a + 43) as usize],
+                            B7F[(b7_r_a + 36) as usize], B7F[(b7_r_a + 37) as usize],
+                            B7F[(b7_r_a + 38) as usize], B7F[(b7_r_a + 39) as usize],
+                            B7F[(b7_r_a + 40) as usize], B7F[(b7_r_a + 41) as usize],
+                            B7F[(b7_r_a + 42) as usize], B7F[(b7_r_a + 43) as usize]
+                        )
+                    } else {
+                        emit_load_var_a64(b4aa_left_vshadow)
+                        emit_push_a64()
+                        emit_load_var_a64(b4aa_right_vshadow)
+                        emit_pop_x1_a64(); emit_f64_binop_a64(0x1E612800)  // fadd
+                        let b4aa_vres = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
+                        emit_store_var_a64(b4aa_vres)
+                        EXPR_VSHADOW = b4aa_vres
+                    }
+                }
             }
             // β⁵/β⁷ through ± , as loops over the frames rather than 4 + 36
             // inline copies. Channels 4-7 had no a64 site at all before this:
@@ -41369,7 +42187,7 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
                 // site). The a64 pass stored no brand at a binding, so
                 // `let m: molal = 2.5` produced an unbranded local and the very
                 // next call rejected it as a mismatch.
-                if decl_ty_hash != 0 && type_hash_unit_dim(decl_ty_hash) != 0 {
+                if unit_brand_carried(decl_ty_hash) {
                     VAR_UNIT[(VAR_COUNT - 1) as usize] = decl_ty_hash
                 } else if decl_ty == 0 && decl_ty_hash == 0 && EXPR_UNIT != 0 {
                     VAR_UNIT[(VAR_COUNT - 1) as usize] = EXPR_UNIT
@@ -42218,7 +43036,11 @@ fn compile_stmt_a64() with IO, Mut, Panic, Div {
         // `fn f(x: molar) -> molal { x }` handed its caller a molal brand on a
         // molar value. The same helper the call site uses works unchanged here,
         // with the declared return hash in place of the parameter hash.
-        if unit_call_arg_mismatch(CURRENT_RET_HASH, EXPR_UNIT, EXPR_UNIT_DIM) {
+        // Only an f64-kind return type is unit-checked, the guard the call site puts
+        // on a parameter. Without it a struct named like a built-in unit (`struct W`,
+        // `struct K`) resolved its name hash to that unit's dimension, and its
+        // unit-free value was refused.
+        if (CURRENT_RET_TY == 0 || CURRENT_RET_TY == 2) && unit_call_arg_mismatch(CURRENT_RET_HASH, EXPR_UNIT, EXPR_UNIT_DIM) {
             tc_linear_violation(EP - 1, "unit mismatch in return value")
         }
         // PR-5: enforce refinement predicate on return value (a64 mirror)
@@ -43357,7 +44179,7 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
                         // x86 param scan does. Without this the a64 pass erased the
                         // unit at every function boundary, so a parameter forwarded
                         // to another parameter arrived unbranded.
-                        if SCAN_TY_HASH != 0 && type_hash_unit_dim(SCAN_TY_HASH) != 0 {
+                        if unit_brand_carried(SCAN_TY_HASH) {
                             VAR_UNIT[(VAR_COUNT - 1) as usize] = SCAN_TY_HASH
                         }
                         if SCAN_TY == 2 { VAR_IS_F64[(VAR_COUNT - 1) as usize] = 1 }
@@ -43590,6 +44412,14 @@ fn compile_all_arm64() -> i64 with IO, Mut, Panic, Div {
                             }
                         }
                     }
+                }
+                // Unit check of the tail value (mirror of the x86 epilogue).
+                // Only an f64-kind return type is unit-checked, the guard the call site puts
+                // on a parameter. Without it a struct named like a built-in unit (`struct W`,
+                // `struct K`) resolved its name hash to that unit's dimension, and its
+                // unit-free value was refused.
+                if (CURRENT_RET_TY == 0 || CURRENT_RET_TY == 2) && unit_call_arg_mismatch(CURRENT_RET_HASH, EXPR_UNIT, EXPR_UNIT_DIM) {
+                    tc_linear_violation(EP - 1, "unit mismatch in return value")
                 }
                 if CURRENT_SRET_SLOT > 0 || type_is_aggregate(CURRENT_RET_TY, CURRENT_RET_HASH) || type_is_aggregate(LAST_STMT_TY, LAST_STMT_TY_HASH) {
                     stabilize_return_agg_a64(LAST_STMT_TY, LAST_STMT_TY_HASH)

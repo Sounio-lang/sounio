@@ -1,4 +1,39 @@
 //@ run-pass
+//@ timeout: 90
+//@ expect-stdout-contains: M5_GUM_FOURTH_ORDER_CUMULANT_BUDGET_PASS
+// main() prints M5_GUM_FOURTH_ORDER_CUMULANT_BUDGET_OUTPUT (not _PASS) when
+// any check above set failed != 0, but then unconditionally prints PASS and
+// returns 0 regardless -- an unannotated run-pass file only checks the exit
+// code, so without this it would report success even when every scientific
+// assertion in this file failed. Requiring the real success marker closes
+// that.
+//
+// HISTORY (2026-09-22): this test was briefly tagged //@ known-failure
+// after closing the vacuous-PASS gate above, because
+// rel_fourth_residual=3.284213 measured WORSE than rel_hess_residual=0.175404
+// -- the fourth-order cumulant correction appeared to make the AUC
+// uncertainty estimate worse, not better. Root cause: NOT a modeling bug.
+// darwin_pbpk::cumulants::m5_exp (this module's own Taylor-series exp())
+// used a "n_f = x*inv_ln2; n = n_f as i64; if (n as f64) > n_f { n = n-1 }"
+// floor-then-power-of-2-loop range-reduction idiom that lean_single
+// miscompiles: the power-of-2 while loop runs at ~2x its correct trip
+// count regardless of whether the correcting if-branch is taken. For
+// CL_hep's lognormal kappa4 (needed by the fourth-order variance-budget
+// terms below), this inflated e^{6*sigma2_log} by 2x, which inflated
+// kappa4/central4 by ~42x, which made var_kurtosis and var_cubic dominate
+// var_total. Fixed by replacing m5_exp's range reduction with the
+// already-correct iterative form used by ms28_exp in
+// pbpk28_mc_prior_family_sweep.sio (independently verified not to trigger
+// the bug), confirmed via a minimal isolated repro, and reviewed
+// (bin/llm-offload -t math-review -p xai; see .claude/llm_offload_log.md,
+// 2026-09-22 entry). Post-fix: kappa4=1302.266361, matching a reference
+// closed-form lognormal-fourth-cumulant computation to 6 significant
+// figures; rel_fourth_residual=0.057910 now correctly improves over
+// rel_hess_residual=0.175404, the theoretically expected direction for
+// this endpoint's first-omitted-term correction (not a guarantee that
+// still-higher orders would keep improving -- Edgeworth/cumulant
+// expansions are asymptotic, not convergent, in general).
+//
 // Focused M5 validation: cumulants, inverse-AUC derivatives, and PBPK28
 // fourth-order budget emission.
 
@@ -37,7 +72,7 @@ fn gaussian_fixture_cumulant() -> CumulantSummary with Mut, Div {
     cumulant_finalize(s)
 }
 
-fn main() -> i32 with IO, Mut, Div, Panic {
+fn main() -> i32 with IO, Mut, Div, Panic, Epistemic {
     var failed = 0
 
     println("======================================================================")

@@ -1850,35 +1850,56 @@ band these differences sit in. A difference of a few ULP has no stable ratio.
 > |---|---|---|---|
 > | 3 | 6 | 5.730e-09 | 5.730e-09 |
 > | 4 | 8 | 8.413e-11 | 8.413e-11 |
-> | 5 | 10 | 8.942e-13 | 6.257e-13 |
-> | 6 | 12 | **5.734e-14** | **1.421e-14** |
-> | 7 | 14 | 3.066e-13 | 2.314e-14 |
-> | 8 | 16 | 2.581e-13 | 1.556e-14 |
+> | 5 | 10 | 8.978e-13 | 6.236e-13 |
+> | 6 | 12 | **5.407e-14** | 2.216e-14 |
+> | 7 | 14 | 1.876e-13 | 2.278e-14 |
+> | 8 | 16 | 3.816e-13 | **1.184e-14** |
 >
-> Both sequences bottom out at depth 6 and rise afterwards: that minimum **is**
-> the truncation-to-roundoff crossover of the extrapolation, measured in place.
-> The wider sequence bottoms out four times lower, so the instrument used below
-> is depth 6 with 2,4,6,8,12,16,24,32, resolution **1.421e-14** worst over
-> species, and per species: H2 6.198e-15, H 1.421e-14, O 3.702e-15,
-> O2 5.007e-15, OH 5.910e-15, H2O 1.334e-14, HO2 2.273e-15, H2O2 3.107e-15.
+> The narrow sequence bottoms out at depth 6 and rises afterwards: that minimum
+> **is** the truncation-to-roundoff crossover of the extrapolation, measured in
+> place. The wider sequence falls to 2.216e-14 at depth 6, holds at depth 7 and
+> is lowest at depth 8, the deepest level swept, so for it the crossover is
+> **not** located inside the sweep; its depths 6 to 8 lie within a factor of two
+> of each other on the roundoff floor. The instrument used below is the lowest
+> self-difference the sweep measured: depth 8 with 2,4,6,8,12,16,24,32,
+> resolution **1.184e-14** worst over species, and per species: H2 5.286e-15,
+> H 1.184e-14, O 3.417e-15, O2 3.570e-16, OH 3.884e-15, H2O 5.056e-15,
+> HO2 1.515e-15, H2O2 6.525e-15.
+>
+> *Re-measured 2026-09-15* on lean_single `c2cd5f68`, after float literals
+> began lowering to correctly rounded binary64 (`10ac3eb3b3`). On 2026-09-02
+> both sequences bottomed out at depth 6 and the instrument was depth 6 at
+> 1.421e-14. A one-ULP change in how the constants are formed moved the wider
+> sequence's minimum by two depths and changed single per-species resolutions
+> by more than an order of magnitude (O2: 5.007e-15 then, 3.570e-16 now). At
+> this floor the per-species resolutions are themselves roundoff: only their
+> order of magnitude carries information.
 >
 > **The halving ladder against that independent method**, relative distance
 > ×1e18, each species readable against its own resolution above:
 >
 > | dt | H2 | H | O | O2 | OH | H2O | HO2 | H2O2 |
 > |---|---|---|---|---|---|---|---|---|
-> | 1e-8 | 10755 | 4904 | 4841 | 357 | 16380 | 5898 | 2652 | 32629 |
-> | 5e-9 | 10573 | 7442 | 1851 | 2861 | 3546 | 5618 | 757 | 1709 |
-> | 2.5e-9 | 8385 | 40254 | 30185 | 2146 | 29552 | 45365 | 1705 | 24083 |
-> | 1.25e-9 | 729 | 63257 | 78596 | 13056 | 77005 | 60955 | 14212 | 73805 |
+> | 1e-8 | 1276 | 15898 | 18225 | 6080 | 6754 | 12078 | 1894 | 52829 |
+> | 5e-9 | 1276 | 18435 | 21357 | 3755 | 19420 | 12500 | 1894 | 18334 |
+> | 2.5e-9 | 546 | 50064 | 51686 | 5007 | 51337 | 50702 | 3221 | 43506 |
+> | 1.25e-9 | 8385 | 54123 | 57239 | 6080 | 55221 | 54775 | 12885 | 54849 |
 >
-> At `dt = 5e-9` seven of eight distances sit **below** the oracle's own
-> per-species resolution: there the replica agrees with an independent method
-> to within the oracle's noise. At `dt = 1.25e-9`, four steps of refinement
-> later, seven of eight are **above** it, by 2.6× to 24×. **The replica's
-> distance to an external reference has a minimum and then grows as the step
-> shrinks.** Growth measured against a different method cannot be truncation
-> being resolved, and cannot be an artefact of comparing a run with itself.
+> At `dt = 1e-8` and at `5e-9` only H2 sits below its own resolution; the other
+> seven distances are resolved. At `dt = 1.25e-9` all eight are above it, by
+> 1.6× to 17×, and every species is farther from the independent method than at
+> `5e-9`, by 1.6× to 6.8×. The low end of both ranges (1.6×) is not a clean
+> detection on its own: the per-species resolutions above are themselves
+> roundoff, good only to order of magnitude, so a ratio that close to 1 does
+> not distinguish from noise by itself -- the ratios above 3× and the monotone
+> trend across three halvings are what carry the claim. For H, O, OH and H2O
+> the distance is already smallest at the coarsest step, `1e-8`, and grows at
+> every halving; H2O2 and O2 are closest at `5e-9`, H2 at `2.5e-9`. **The
+> replica's distance to an external reference does not fall as the step
+> shrinks, and over the last two halvings it grows for every species.**
+> Growth measured against a different method cannot
+> be truncation being resolved, and cannot be an artefact of comparing a run
+> with itself.
 >
 > So the 12–140× of the table above is no longer unexplained: it is the
 > **right-hand branch of the total-error curve of a fixed-step method**, where
@@ -1887,14 +1908,15 @@ band these differences sit in. A difference of a few ULP has no stable ratio.
 > Per halving the observed factors are 2.1× to 6.6× (from the 4.6×–43× above
 > over two halvings), and a systematic accumulation predicts 2×; the fastest
 > species exceed that and no model here derives 6.6×. The location of the
-> minimum is bracketed between `1e-8` and `2.5e-9` and is **not** pinned,
-> because the `5e-9` row is at the instrument's floor.
+> minimum is **not** pinned: in the worst case it is at `5e-9`, set by H2O2,
+> while four species are already past it at `1e-8`.
 >
 > The bound that the residual line depends on is unchanged and now has
-> independent support: at `dt = 1e-8` the replica is 3.263e-14 from the second
-> method, three orders below the 2.074e-11 residual, so **the replica still
-> contributes nothing measurable to it**. It also follows that `dt = 1e-8` was
-> a fortunate choice: refining it does not improve this replica, it degrades it.
+> independent support: at `dt = 1e-8` the replica is 5.283e-14 from the second
+> method, about 390× below the 2.074e-11 residual, so **the replica still
+> contributes nothing measurable to it**. It also follows that `dt = 1e-8` cost
+> this replica little: refining it improves only H2O2 and O2 and degrades H, O,
+> OH and H2O.
 
 ### The honest statement of the central result
 

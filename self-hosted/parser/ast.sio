@@ -1135,6 +1135,11 @@ pub struct FnDef {
     // instr_count == 0 stub so builtin dispatch applies). Distinct from
     // is_kernel, which the checker treats as a GPU kernel (E070/E253).
     pub is_extern: bool,
+    // Declared type parameters: the `<T, U>` of `fn f<T, U>(...)`, or None.
+    // Until this field existed the parser consumed that list and dropped it,
+    // so every later stage had to guess which names were parameters. Last
+    // field, so existing offsets are unchanged.
+    pub type_params: Option<Box<TypeParamDefList> >,
 }
 
 pub struct Param {
@@ -1207,6 +1212,16 @@ pub struct ImplDef {
     pub span: Span,
     // For `impl TraitName for Type { }` — trait_name.len > 0 when present
     pub trait_name: Name,
+    // Declared type parameters: the `<U>` of `impl<U> Cell<U> { ... }`, or None.
+    // Until this field existed the parser consumed that list and dropped it, so
+    // generic-impl recognition (generic_impl_template_index, spec_impl_generic_struct_slot)
+    // had to guess the parameter names instead — either by requiring them to spell
+    // the target struct's own declared parameter names, or (in the specializer) by
+    // requiring a single uppercase letter. A renamed binder such as `impl<U> Cell<U>`
+    // on `struct Cell<T>` satisfied neither guess and was refused as a concrete,
+    // unresolvable instantiation (E011 on any call to its methods). Mirrors
+    // FnDef.type_params. Last field, so existing offsets are unchanged.
+    pub type_params: Option<Box<TypeParamDefList> >,
 }
 
 // Trait definition: trait Name { fn method1(); fn method2(); ... }
@@ -1759,6 +1774,199 @@ pub fn ast_indep_name_hash(n: Name) -> i64 with Mut, Panic, Div {
     }
     if h < 0 { h = 0 - h }
     h
+}
+
+// ============================================================
+// Declared type parameters, by declaration span
+// ============================================================
+//
+// Each `<T, U>` a struct, fn, trait method or generic impl declares, recorded
+// with the span of the declaration that introduces it. The checker scopes these
+// names while it walks the declaration (checker_name_is_type_param_in_scope). The
+// IR lowering cannot: it classifies types node by node, from dozens of call sites,
+// with no notion of the enclosing declaration -- so lower_type_expr_is_f64 asks
+// this registry by the type expression's own span instead.
+//
+// A span is only byte offsets, so every parsed token stream gets its own file id
+// (ast_next_parse_file_id, stamped into spans by Parser::current_span): a
+// declaration in one module can never cover a type expression in another. The
+// registry is append-only for the process -- re-parsing a module gets a fresh id --
+// and keeps each name's bytes beside its hash and length: hash and length only
+// nominate a match (two valid names can share both), the bytes decide. It is
+// fixed-capacity, and a full registry refuses the compile
+// (ast_report_type_param_registry_overflow) instead of dropping declarations. An impl records the bare single-segment
+// arguments of its target (`impl Map<K, V>` declares K and V); a concrete argument
+// like `i64` recorded the same way changes nothing, because downstream only a
+// name that is also a unit is affected.
+pub var PARSE_FILE_ID: i64 = 0
+pub var TPD_COUNT: i64 = 0
+pub var TPD_FILE: [i64; 16384]
+pub var TPD_START: [i64; 16384]
+pub var TPD_END: [i64; 16384]
+pub var TPD_NAME_FIRST: [i64; 16384]
+pub var TPD_NAME_COUNT: [i64; 16384]
+pub var TPD_NAMES_USED: i64 = 0
+pub var TPD_NAME_HASH: [i64; 65536]
+pub var TPD_NAME_LEN: [i64; 65536]
+pub var TPD_NAME_OFF: [i64; 65536]
+pub var TPD_BYTES_USED: i64 = 0
+pub var TPD_NAME_BYTES: [i8; 1048576]
+pub var TPD_OVERFLOW: i64 = 0
+
+// Append one name: hash, length and bytes. False, with TPD_OVERFLOW set, when the
+// name table or the byte pool is full.
+fn tpd_store_name(buf: [i8; 384], len: i64) -> bool with Mut, Panic, Div {
+    if TPD_NAMES_USED >= 65536 || TPD_BYTES_USED + len > 1048576 {
+        TPD_OVERFLOW = 1
+        return false
+    }
+    let j = TPD_NAMES_USED
+    TPD_NAME_HASH[j as usize] = ast_name_hash(Name { buf: buf, len: len })
+    TPD_NAME_LEN[j as usize] = len
+    TPD_NAME_OFF[j as usize] = TPD_BYTES_USED
+    var k: i64 = 0
+    while k < len {
+        TPD_NAME_BYTES[(TPD_BYTES_USED + k) as usize] = buf[k as usize]
+        k = k + 1
+    }
+    TPD_BYTES_USED = TPD_BYTES_USED + len
+    TPD_NAMES_USED = j + 1
+    true
+}
+
+// Is stored name j exactly the name (buf, len) whose hash is h? A retracted name has
+// length -1 and never matches.
+fn tpd_name_is(j: i64, h: i64, buf: [i8; 384], len: i64) -> bool with Mut, Panic, Div {
+    if TPD_NAME_HASH[j as usize] != h || TPD_NAME_LEN[j as usize] != len { return false }
+    let off = TPD_NAME_OFF[j as usize]
+    var k: i64 = 0
+    while k < len {
+        if TPD_NAME_BYTES[(off + k) as usize] != buf[k as usize] { return false }
+        k = k + 1
+    }
+    true
+}
+
+// The registry is fixed-capacity and append-only. Past capacity later declarations
+// would be dropped without a word, and lowering would then read a type parameter
+// spelled like a unit (K) as that unit while the checker had read it as the
+// parameter. A full registry refuses the compile instead; the specializer's
+// failure report (spec_report_any_specializer_failure) calls this.
+pub fn ast_report_type_param_registry_overflow() -> bool with IO {
+    if TPD_OVERFLOW == 0 { return false }
+    print("error: type-parameter registry capacity exceeded: a compilation supports at most 16384 declarations with type parameters, 65536 declared names and 1 MiB of name text\n")
+    print("  note: compilation is refused because dropping declarations would make lowering read a type parameter spelled like a unit as that unit\n")
+    true
+}
+
+pub fn ast_next_parse_file_id() with Mut {
+    PARSE_FILE_ID = PARSE_FILE_ID + 1
+}
+
+fn ast_tpd_commit(span: Span, first: i64, count: i64) with Mut, Panic {
+    if count <= 0 { return }
+    let i = TPD_COUNT
+    TPD_FILE[i as usize] = span.file_id as i64
+    TPD_START[i as usize] = span.start
+    TPD_END[i as usize] = span.end
+    TPD_NAME_FIRST[i as usize] = first
+    TPD_NAME_COUNT[i as usize] = count
+    TPD_COUNT = TPD_COUNT + 1
+}
+
+pub fn ast_record_type_param_decl(span: Span, list: &Option<Box<TypeParamDefList>>) with Mut, Panic, Div {
+    if TPD_COUNT >= 16384 { TPD_OVERFLOW = 1; return }
+    let first = TPD_NAMES_USED
+    var count: i64 = 0
+    var current = list
+    while true {
+        match *current {
+            Some(node) => {
+                let n = (*node).head.name
+                if !tpd_store_name(n.buf, n.len) { return }
+                count = count + 1
+                current = &(*node).tail
+            }
+            _ => break
+        }
+    }
+    ast_tpd_commit(span, first, count)
+}
+
+pub fn ast_record_impl_type_param_decl(span: Span, target: &TypeExpr) with Mut, Panic, Div {
+    if TPD_COUNT >= 16384 { TPD_OVERFLOW = 1; return }
+    let first = TPD_NAMES_USED
+    var count: i64 = 0
+    var current = &(*target).type_args
+    while true {
+        match *current {
+            Some(node) => {
+                let arg = &(*node).head
+                if (*arg).kind == TypeExprKind::TypeNamed && (*arg).path.seg_count == 1 {
+                    match (*arg).type_args {
+                        Some(_nested) => {}
+                        None => {
+                            let seg = (*arg).path.segments
+                            if !tpd_store_name(seg.head_buf, seg.head_len) { return }
+                            count = count + 1
+                        }
+                    }
+                }
+                current = &(*node).tail
+            }
+            _ => break
+        }
+    }
+    ast_tpd_commit(span, first, count)
+}
+
+// ast_record_impl_type_param_decl records EVERY bare argument of an impl target,
+// because the parser cannot tell `impl Map<K, V>` (parameters, K spelled like
+// kelvin) from `impl Cell<mg>` on `struct Cell<T>` (the unit mg) -- that needs the
+// struct's declared parameters. The checker can, and retracts the names it proved
+// are concrete arguments, so lowering resolves them as the unit they are.
+// `span` must be the impl's own span, exactly as it was recorded.
+pub fn ast_forget_impl_type_param(span: Span, buf: [i8; 384], len: i64) with Mut, Panic, Div {
+    if TPD_COUNT == 0 || len <= 0 { return }
+    let h = ast_name_hash(Name { buf: buf, len: len })
+    let fid = span.file_id as i64
+    var i: i64 = 0
+    while i < TPD_COUNT {
+        if TPD_FILE[i as usize] == fid && TPD_START[i as usize] == span.start && TPD_END[i as usize] == span.end {
+            let first = TPD_NAME_FIRST[i as usize]
+            var k: i64 = 0
+            while k < TPD_NAME_COUNT[i as usize] {
+                let j = first + k
+                if tpd_name_is(j, h, buf, len) {
+                    TPD_NAME_LEN[j as usize] = 0 - 1
+                }
+                k = k + 1
+            }
+        }
+        i = i + 1
+    }
+}
+
+// Is `name` a type parameter declared by a declaration whose span contains `span`?
+// An empty span (a synthesized node) is never covered.
+pub fn ast_type_param_declared_at(span: Span, buf: [i8; 384], len: i64) -> bool with Mut, Panic, Div {
+    if span.end <= span.start || TPD_COUNT == 0 { return false }
+    let h = ast_name_hash(Name { buf: buf, len: len })
+    let fid = span.file_id as i64
+    var i: i64 = 0
+    while i < TPD_COUNT {
+        if TPD_FILE[i as usize] == fid && TPD_START[i as usize] <= span.start && span.end <= TPD_END[i as usize] {
+            let first = TPD_NAME_FIRST[i as usize]
+            var k: i64 = 0
+            while k < TPD_NAME_COUNT[i as usize] {
+                let j = first + k
+                if tpd_name_is(j, h, buf, len) { return true }
+                k = k + 1
+            }
+        }
+        i = i + 1
+    }
+    false
 }
 
 // ============================================================

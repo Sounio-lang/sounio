@@ -1,5 +1,62 @@
 //@ run-pass
-//@ known-failure: measured 2026-08-30 under SOUNIO_SOUC_ENGINE=lean_single — error[E035] effect not declared in function signature at line 10. Dormant since it carried no //@ annotation, so the breakage was never visible.
+//@ timeout: 300
+//@ expect-stdout-contains: M2_HIERARCHICAL_PRIOR_PASS
+//@ known-failure: measured 2026-09-22 under SOUNIO_SOUC_ENGINE=lean_single, POST-FIX
+//   (see HISTORY note below) -- rel_Hess_individual=0.191766 and
+//   rel_Hess_population=0.194044, both still past the 0.10 criterion
+//   (M2_HIERARCHICAL_PRIOR_OUTPUT, not _PASS). This is now a genuine,
+//   independently-corroborated numerical-methods finding, not a bug: the
+//   second-order Hessian GUM approximation does not converge to within 10%
+//   of Monte Carlo for this hierarchical eta/epsilon decomposition of the
+//   rapamycin PBPK28 AUC endpoint at CV~30-40%. It is consistent with the
+//   SAME endpoint's single-level Hessian-vs-MC residual measured elsewhere
+//   in this codebase (mc28_selftest_main in pbpk28_mc_cross_validation.sio:
+//   ~0.175; pbpk28_m5_gum_4th_order.sio's rel_hess_residual: 0.175404),
+//   i.e. a repeatable ~17-19% gap for this convex (AUC ~ 1/CL-dominated)
+//   endpoint at this uncertainty magnitude, not an artifact of the
+//   hierarchical decomposition specifically. bin/llm-offload -t math-review
+//   -p xai (.claude/llm_offload_log.md, 2026-09-22 entry) confirmed this
+//   reading is defensible and that the 0.10 gate should NOT be loosened to
+//   make the test pass -- it is left as known-failure on purpose, per this
+//   repo's policy against retrofitting tolerances to observed failures.
+//
+// HISTORY (2026-09-22): this test was previously known-failure with much
+// larger numbers (rel_Hess_individual=0.875070, rel_Hess_population=
+// 0.873336, u_Hessian_individual=0.275193 vs u_MC_individual=2.202779
+// mg.h/L, MC mean AUC individual=2.631366 mg.h/L -- well outside the
+// codebase's own [0.1, 10.0] mg.h/L plausibility window once the Hessian
+// value is used as the reference). Root cause: NOT the hierarchical
+// modeling assumption, NOT a wrong MC aggregation -- a lean_single
+// compiler miscompile in darwin_pbpk::validation::pbpk28_mc_cross_validation
+// ::mc28_exp (this module's own Taylor-series exp(), used throughout
+// mc28_sample_hier_lognormal's actual Monte Carlo sampling and by
+// mc28_prior_with_logvar). mc28_exp used a "n_f = x*inv_ln2; n = n_f as
+// i64; if (n as f64) > n_f { n = n-1 }" floor-then-power-of-2-loop range
+// reduction that lean_single miscompiles: the power-of-2 while loop runs
+// at ~2x its correct trip count regardless of whether the correcting
+// if-branch is taken. Every one of the 7 physiological parameter means in
+// this model (12.4, 0.3, 0.08, 0.10, 5.40, 4.20, 0.30) requires at least
+// one doubling in range reduction (|ln(mean)| >= ln2 for all of them), so
+// essentially every Monte Carlo draw in mc28_run_hierarchical was corrupted
+// by a parameter-dependent multiplicative factor (confirmed via minimal
+// repro: mc28_exp(ln(12.4)) returned 99.2 instead of 12.4, exactly
+// 2^3 doubled to 2^6). Fixed by replacing mc28_exp's range reduction with
+// the already-correct iterative form used by ms28_exp in
+// pbpk28_mc_prior_family_sweep.sio (independently verified not to trigger
+// the bug), reviewed per bin/llm-offload -t math-review -p xai. Post-fix
+// cross-checks outside this test's own gate: the fixed single-level MC
+// baseline (mc28_selftest_main) now reproduces u_MC=0.357945, an exact
+// match (6 significant figures) to the hardcoded M6-canonical MC-truth
+// constant already used in cumulants.sio's m5_pbpk28_convergence_budget();
+// MC mean AUC individual/population (1.076898 / 1.153652 mg.h/L) are now
+// inside the codebase's own physically-plausible [0.1, 10.0] mg.h/L
+// window.
+// mc28_hierarchical_selftest_main prints M2_HIERARCHICAL_PRIOR_OUTPUT (not
+// _PASS) when individual_pass is false, but then unconditionally prints
+// PASS and returns 0 regardless -- an unannotated run-pass file only checks
+// the exit code, so without this it would report success even when the
+// hierarchical-prior criterion actually failed. Requiring the real success
+// marker closes that.
 // tests/run-pass/pbpk28_m2_hierarchical_prior.sio
 //
 // Opt-in wrapper for PBPK28 M2 hierarchical eta/epsilon prior decomposition.
@@ -8,6 +65,6 @@
 
 use darwin_pbpk::validation::pbpk28_mc_cross_validation::{mc28_hierarchical_selftest_main}
 
-fn main() -> i32 with IO, Mut, Div, Panic {
+fn main() -> i32 with IO, Mut, Div, Panic, Epistemic {
     mc28_hierarchical_selftest_main()
 }

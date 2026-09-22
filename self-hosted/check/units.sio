@@ -100,6 +100,30 @@ fn unit_dim_activity_concentration() -> UnitDim {
     }
 }
 
+fn unit_dim_volume() -> UnitDim {
+    UnitDim {
+        exponents: [0, 3, 0, 0, 0, 0, 0],
+        scale_num: 1,
+        scale_den: 1,
+    }
+}
+
+fn unit_dim_energy() -> UnitDim {
+    UnitDim {
+        exponents: [1, 2, 0 - 2, 0, 0, 0, 0],
+        scale_num: 1,
+        scale_den: 1,
+    }
+}
+
+fn unit_dim_pressure() -> UnitDim {
+    UnitDim {
+        exponents: [1, 0 - 1, 0 - 2, 0, 0, 0, 0],
+        scale_num: 1,
+        scale_den: 1,
+    }
+}
+
 fn unit_dim_length_per_time() -> UnitDim with Mut, Panic, Div {
     unit_dim_div(unit_dim_length(), unit_dim_time())
 }
@@ -172,16 +196,25 @@ pub fn unit_registry_find_dim(reg: UnitRegistry, d: UnitDim) -> i64 with Mut, Pa
 // mass^2 rather than silently collapsing to "no unit", which in this
 // representation is indistinguishable from dimensionless.
 //
-// The registry is fixed at 32 entries. When it is full the result is
-// returned unbranded, which is a REPRESENTATIONAL limit and is not a claim
-// that the quantity is dimensionless -- the honest fix is a TypeEntry that
-// carries a UnitDim rather than an index into a bounded table.
+// The registry holds 128 entries (UnitRegistry, below) -- NOT the 32 this
+// comment previously said, and this function's own `>= 32` guard, checked
+// BEFORE ever calling register(), stayed at the OLD number through that
+// resize: builtins alone claim 27, so the sixth anonymous derived dimension
+// (`mg * mg`, an ontology-quantity annotation, any product/quotient the
+// checker needs a slot for) still came back unbranded here even though
+// register() itself had 101 free slots left, and this path also never set
+// UNIT_REGISTRY_OVERFLOW -- register() only sees the entries that reach it.
+// When it is full the result is returned unbranded, which is a
+// REPRESENTATIONAL limit and is not a claim that the quantity is
+// dimensionless -- the honest fix is a TypeEntry that carries a UnitDim
+// rather than an index into a bounded table.
 pub fn unit_registry_intern_dim(reg: UnitRegistry, d: UnitDim) -> (UnitRegistry, i64) with Mut, Panic, Div {
     let existing = unit_registry_find_dim(reg, d)
     if existing >= 0 {
         return (reg, existing)
     }
-    if reg.count >= 32 {
+    if reg.count >= 128 {
+        UNIT_REGISTRY_OVERFLOW = true
         return (reg, 0 - 1)
     }
     var r = reg
@@ -218,24 +251,50 @@ fn empty_unit_entry() -> UnitEntry {
     }
 }
 
+// 128, not 32: register_builtin_units alone now claims 27 of a 32-entry table
+// (5 free), and every `unit NAME [= conv];` declaration in the source under
+// check, plus every anonymous derived-dimension a product/quotient/annotation
+// needs a slot for, shares that same table. `register` silently drops the
+// entry past capacity -- see UNIT_REGISTRY_OVERFLOW below for why a silent
+// drop there is a correctness bug, not a usability one.
 pub struct UnitRegistry {
-    pub entries: [UnitEntry; 32],
+    pub entries: [UnitEntry; 128],
     pub count: i64,
 }
 
 pub fn unit_registry_new() -> UnitRegistry {
     UnitRegistry {
-        entries: [empty_unit_entry(); 32],
+        entries: [empty_unit_entry(); 128],
         count: 0,
     }
+}
+
+// Set when `register` refuses an entry because the table is full. A dropped
+// unit does not vanish from the source -- checker_collect_unit_decl_inplace
+// still lowers its annotation to ty_with_unit(ty_f64(), idx) using whatever
+// idx .find() next returns for that name, which is -1 (unregistered) or, worse,
+// a DIFFERENT unit's idx if the name happens to prefix-match nothing and the
+// caller does not check for -1. Either way the compile proceeds with a unit
+// identity nothing verified. Reported through the same fail-closed hook chain
+// as the specializer and type-parameter-registry overflows (see
+// spec_report_any_specializer_failure).
+pub var UNIT_REGISTRY_OVERFLOW: bool = false
+
+pub fn unit_report_registry_overflow() -> bool with IO {
+    if !UNIT_REGISTRY_OVERFLOW { return false }
+    print("error: unit registry capacity exceeded: a compilation supports at most 128 distinct units (builtin, user-declared and anonymous derived combined)\n")
+    print("  note: compilation is refused because a dropped unit would leave its declared type unverified rather than absent\n")
+    true
 }
 
 impl UnitRegistry {
     fn register(self, name: Name, dim: UnitDim) -> UnitRegistry with Mut, Panic, Div {
         var reg = self
-        if reg.count < 32 {
+        if reg.count < 128 {
             reg.entries[reg.count] = UnitEntry { name: name, dim: dim }
             reg.count = reg.count + 1
+        } else {
+            UNIT_REGISTRY_OVERFLOW = true
         }
         reg
     }
@@ -326,6 +385,30 @@ pub fn register_builtin_units(reg: UnitRegistry) -> UnitRegistry with Mut, Panic
     r = r.register(name_from_str3(85, 95, 76), unit_dim_activity_concentration())               // "U_L"
     r = r.register(name_from_str4(109, 109, 95, 104), unit_dim_length_per_time())               // "mm_h"
 
+    // Volume -- concentration is built on it.
+    r = r.register(name_from_str1(76), unit_dim_with_scale(unit_dim_volume(), 1, 1000))          // "L"
+    r = r.register(name_from_str2(109, 76), unit_dim_with_scale(unit_dim_volume(), 1, 1000000))  // "mL"
+    r = r.register(name_from_str2(100, 76), unit_dim_with_scale(unit_dim_volume(), 1, 10000))    // "dL"
+
+    // Volume. Without these there is no concentration: the amount-per-volume
+    // units below are unusable, and a volume annotation degraded to an opaque
+    // nominal type (which is how tests/compile-fail/unit_mismatch_call_arg.sio
+    // reported "expected mL, found f64" instead of a unit mismatch).
+
+    // Chemistry: amount concentration, energy, pressure.
+    r = r.register(name_from_str5(109, 111, 108, 95, 76), unit_dim_with_scale(unit_dim_amount_concentration(), 1000, 1)) // "mol_L"
+    // unit_dim_energy/unit_dim_pressure both carry a MASS exponent, and this
+    // registry's mass base is grams (g scale=1, kg scale=1000 -- "Mass units
+    // (base: g)" above). Their natural (scale=1) combination is therefore
+    // g*m^2/s^2 and g/(m*s^2) -- a milliJoule and a milliPascal, not a Joule
+    // and a Pascal. Every scale below is the g-relative one, ×1000 of what a
+    // kg-based derivation would read: J and Pa now, kJ and atm carry that same
+    // ×1000 through their own multiplier.
+    r = r.register(name_from_str1(74), unit_dim_with_scale(unit_dim_energy(), 1000, 1))          // "J" = 1000 (g*m^2/s^2)
+    r = r.register(name_from_str2(107, 74), unit_dim_with_scale(unit_dim_energy(), 1000000, 1))  // "kJ" = 1e6 (g*m^2/s^2)
+    r = r.register(name_from_str2(80, 97), unit_dim_with_scale(unit_dim_pressure(), 1000, 1))    // "Pa" = 1000 (g/(m*s^2))
+    r = r.register(name_from_str3(97, 116, 109), unit_dim_with_scale(unit_dim_pressure(), 101325000, 1)) // "atm" = 101325000 (g/(m*s^2))
+
     r
 }
 
@@ -398,4 +481,20 @@ pub fn print_unit_dim(d: UnitDim) with IO, Mut, Panic, Div {
     if d.exponents[5] != 0 { if !first { print("*") }; print("current^"); print_int(d.exponents[5]); first = false }
     if d.exponents[6] != 0 { if !first { print("*") }; print("luminosity^"); print_int(d.exponents[6]); first = false }
     if first { print("dimensionless") }
+}
+
+// The builtin unit names, for code outside the checker that must agree with it on
+// which type names are units. The IR lowering needs exactly this: the checker types
+// a registered unit name as f64 carrying that unit (checker_lower_named_type_mut),
+// and lower_type_expr_is_f64 in ir/lower.sio has to classify the same names as
+// float, or a `-> mg` call result is read back as the integer bit pattern of the
+// double. Built from register_builtin_units itself so the two lists cannot drift.
+pub fn builtin_unit_count() -> i64 with Mut, Panic, Div {
+    let reg = register_builtin_units(unit_registry_new())
+    reg.count
+}
+
+pub fn builtin_unit_name_at(i: i64) -> Name with Mut, Panic, Div {
+    let reg = register_builtin_units(unit_registry_new())
+    reg.entries[i].name
 }

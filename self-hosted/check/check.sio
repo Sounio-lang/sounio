@@ -446,6 +446,16 @@ pub struct Checker {
     // vars were reassigned. Mirrors the source-cap-64 -> unknown saturation in
     // noise_sets.sio: on overflow we must lose precision, never soundness.
     pub ns_reassigned_overflow: bool,
+    // Type parameters of the struct whose field types are being lowered, or None.
+    // Only StructDef carries type_params in the AST, and struct definitions do not
+    // nest, so this is set and cleared around field collection and nowhere else.
+    // A single Option<Box<…>> at struct end, like ontology_items.
+    pub type_param_scope: Option<Box<TypeParamDefList> >,
+    // Generic struct instances and their templates (GenericInstance). A pointer,
+    // shared by every by-value copy, like structs/enums/fn_sigs.
+    pub generic_instances: *mut GenericInstanceHead,
+    // Sig ids of fns declaring type parameters (GenericFnSigTable). Shared pointer.
+    pub generic_fn_sigs: *mut GenericFnSigTable,
 }
 
 // Wrapper for inferred type arguments (avoids &![T;N] JIT bug)
@@ -457,6 +467,339 @@ pub struct InferBuf {
 pub struct TypeParamBuf {
     pub names: [Name; 8],
     pub count: i64,
+}
+
+// A monomorphized generic struct and what it was made from: `Pair__i64__i64` is
+// template `Pair` with args [i64, i64]. The mangled name cannot be split back
+// reliably (an argument can itself be a mangled instance), and resolving a method
+// call on an instance needs the template, which is where `impl Pair<T, U>` put it.
+pub struct GenericInstance {
+    mangled: Name,
+    template: Name,
+    args: TypeEntryList,
+}
+
+pub struct GenericInstanceList {
+    head: GenericInstance,
+    tail: Option<Box<GenericInstanceList> >,
+}
+
+// Heap-allocated once per checker and shared by pointer across by-value Checker
+// copies, like the struct table: an instance recorded inside a copy that is later
+// discarded must not be lost while its struct-table entry survives.
+pub struct GenericInstanceHead {
+    list: Option<Box<GenericInstanceList> >,
+}
+
+fn generic_instance_head_alloc() -> *mut GenericInstanceHead with Mut, Alloc {
+    let p = heap_alloc(64) as *mut GenericInstanceHead
+    (*p).list = None
+    p
+}
+
+// Record-if-absent. Called wherever an instance is created or reused, so a lookup
+// never depends on which path first built it.
+fn generic_instance_record(head: *mut GenericInstanceHead, mangled: Name, template: Name, args: &TypeEntryList) with Mut, Panic, Div, Alloc {
+    if head == (0 as *mut GenericInstanceHead) { return }
+    var cur = (*head).list
+    while true {
+        match cur {
+            Some(node) => {
+                if name_eq((*node).head.mangled, mangled) { return }
+                cur = (*node).tail
+            }
+            None => { break }
+        }
+    }
+    let inst = GenericInstance { mangled: mangled, template: template, args: type_entry_list_clone(args) }
+    (*head).list = Some(Box::new(GenericInstanceList { head: inst, tail: (*head).list }))
+}
+
+// The list node describing instance `mangled`, or None. Returns the small boxed
+// node rather than a GenericInstance by value (large aggregate SRET out of a fn is
+// the miscompile family documented at checker_collect_variant_list_mut).
+fn generic_instance_find(head: *mut GenericInstanceHead, mangled: Name) -> Option<Box<GenericInstanceList> > with Mut, Panic, Div {
+    if head == (0 as *mut GenericInstanceHead) { return None }
+    var cur = (*head).list
+    while true {
+        match cur {
+            Some(node) => {
+                if name_eq((*node).head.mangled, mangled) { return Some(node) }
+                cur = (*node).tail
+            }
+            None => { return None }
+        }
+    }
+    None
+}
+
+fn name_is_builtin_scalar_type(name: Name) -> bool with Mut, Panic, Div, Alloc {
+    name_is_i8(name) || name_is_i32(name) || name_is_i64(name) || name_is_u8(name)
+        || name_is_u32(name) || name_is_u64(name) || name_is_usize(name) || name_is_f32(name)
+        || name_is_f64(name) || name_is_f128(name) || name_is_f256(name) || name_is_bool(name)
+        || name_is_string(name) || name_is_char(name) || name_is_i128(name) || name_is_u128(name)
+        || name_wide_int_bits(name) > 0
+}
+
+// Bit k of the result is set when the k-th argument of an impl target is a bare
+// name that is a registered unit. One registry lookup per argument, each bound once:
+// the registry is copied by value on every find (see checker_unit_index_for).
+fn impl_target_unit_bits(units: UnitRegistry, opt: Option<Box<TypeExprList> >) -> i64 with Mut, Panic, Div, Alloc {
+    var bits: i64 = 0
+    var weight: i64 = 1
+    var pos: i64 = 0
+    var cur = opt
+    while true {
+        match cur {
+            None => { break }
+            Some(node) => {
+                let arg = (*node).head
+                if pos < 62 && arg.kind == TypeExprKind::TypeNamed && arg.path.seg_count == 1 {
+                    match arg.type_args {
+                        Some(_nested) => {}
+                        None => {
+                            let idx = units.find(checker_copy_string_list_to_name(arg.path.segments))
+                            if idx >= 0 { bits = bits + weight }
+                        }
+                    }
+                }
+                if pos < 62 { weight = weight * 2 }
+                pos = pos + 1
+                cur = (*node).tail
+            }
+        }
+    }
+    bits
+}
+
+// Is the bare impl-target argument `an` at position `pos` a concrete registered unit
+// rather than a type parameter? Only when the target is a struct the checker knows
+// and `an` is not that struct's own declared parameter at that position. An unknown
+// target keeps the old reading (every bare argument is a parameter).
+fn impl_target_arg_is_concrete_unit(structs: *mut StructTable, target: TypeExpr, an: Name, pos: i64, unit_bits: i64) -> bool with Mut, Panic, Div, Alloc {
+    if pos >= 62 { return false }
+    var w: i64 = 1
+    var k: i64 = 0
+    while k < pos {
+        w = w * 2
+        k = k + 1
+    }
+    if (unit_bits / w) % 2 == 0 { return false }
+    if target.kind != TypeExprKind::TypeNamed || target.path.seg_count != 1 { return false }
+    let idx = struct_table_find(structs, checker_copy_string_list_to_name(target.path.segments))
+    if idx < 0 { return false }
+    let si = struct_table_get(structs, idx)
+    if si.is_generic_template && pos < si.type_param_count && pos < 8 && name_eq(an, si.type_param_names[pos]) { return false }
+    true
+}
+
+// Every bare single-segment argument of an impl target, as that impl's type
+// parameters: `impl Map<K, V>` puts K and V in scope for its methods. The parser
+// records these names for the IR lowering (ast_record_impl_type_param_decl).
+// A concrete argument (`i64`, a struct name) resolves as it would unscoped: builtin
+// scalars are matched before the scope, and a scoped struct name is ty_named anyway.
+// A unit is looked up AFTER the scope, so it would lose to it and a concrete unit
+// argument (`impl Cell<mg>` on `struct Cell<T>`) would become an opaque parameter,
+// its arithmetic lowered as integer arithmetic. Those are left out of the scope and
+// retracted from the parser's record so lowering agrees. A struct's OWN parameter
+// spelled like a unit (`struct Map<K, V>` / `impl Map<K, V>`, K is kelvin's symbol)
+// stays a parameter. `pos` counts arguments; `unit_bits` is impl_target_unit_bits.
+fn impl_target_bare_type_params_at(structs: *mut StructTable, target: TypeExpr, opt: Option<Box<TypeExprList> >, pos: i64, unit_bits: i64, impl_span: Span) -> Option<Box<TypeParamDefList> > with Mut, Panic, Div, Alloc {
+    match opt {
+        None => None
+        Some(node) => {
+            let rest = impl_target_bare_type_params_at(structs, target, (*node).tail, pos + 1, unit_bits, impl_span)
+            let arg = (*node).head
+            if arg.kind == TypeExprKind::TypeNamed && arg.path.seg_count == 1 {
+                match arg.type_args {
+                    Some(_nested) => rest
+                    None => {
+                        let an = checker_copy_string_list_to_name(arg.path.segments)
+                        if impl_target_arg_is_concrete_unit(structs, target, an, pos, unit_bits) {
+                            ast_forget_impl_type_param(impl_span, an.buf, an.len)
+                            rest
+                        } else {
+                            Some(Box::new(TypeParamDefList { head: TypeParamDef { name: an, span: arg.span }, tail: rest }))
+                        }
+                    }
+                }
+            } else {
+                rest
+            }
+        }
+    }
+}
+
+// The struct-table index of S when `impl S<A1..An>` implements generic template S
+// over its own declared parameters, in order; -1 otherwise. A concrete
+// `impl Pair<i64, i64>`, or one naming a struct, enum or builtin, keeps the
+// mangled-instance registration it always had.
+//
+// When the impl declares its own header (`impl<U> Cell<U>`), those binders are
+// the authoritative parameter names — checked positionally against A1..An —
+// instead of requiring An to spell the SAME name as S's own declared parameter.
+// A renamed binder (`impl<U> Cell<U>` on `struct Cell<T>`) is still the generic
+// template: U need not equal T. Without a header, the old spelling-match against
+// S's own declared names is the only signal available, so it is kept as the
+// fallback for that shorthand (`impl Cell<T>` with no `impl<...>`).
+fn generic_impl_template_index(structs: *mut StructTable, enums: *mut EnumTable, id: ImplDef) -> i64 with Mut, Panic, Div, Alloc {
+    let target = id.target_type
+    if target.kind != TypeExprKind::TypeNamed || target.path.seg_count != 1 { return 0 - 1 }
+    let idx = struct_table_find(structs, checker_copy_string_list_to_name(target.path.segments))
+    if idx < 0 { return 0 - 1 }
+    let si = struct_table_get(structs, idx)
+    if !si.is_generic_template { return 0 - 1 }
+    let hdr = collect_type_params(id.type_params)
+    if hdr.count > 0 && hdr.count != si.type_param_count { return 0 - 1 }
+    var count: i64 = 0
+    var cur = target.type_args
+    while true {
+        match cur {
+            None => { break }
+            Some(node) => {
+                let arg = (*node).head
+                if arg.kind != TypeExprKind::TypeNamed || arg.path.seg_count != 1 { return 0 - 1 }
+                match arg.type_args {
+                    Some(_nested) => { return 0 - 1 }
+                    None => {}
+                }
+                let an = checker_copy_string_list_to_name(arg.path.segments)
+                if count >= si.type_param_count || count >= 8 { return 0 - 1 }
+                let is_declared_param = if hdr.count > 0 {
+                    name_eq(an, hdr.names[count])
+                } else {
+                    name_eq(an, si.type_param_names[count])
+                }
+                if !is_declared_param { return 0 - 1 }
+                if name_is_builtin_scalar_type(an) { return 0 - 1 }
+                if struct_table_find(structs, an) >= 0 || enum_table_find(enums, an) >= 0 { return 0 - 1 }
+                count = count + 1
+                cur = (*node).tail
+            }
+        }
+    }
+    if count != si.type_param_count { return 0 - 1 }
+    idx
+}
+
+fn generic_template_tp_buf(structs: *mut StructTable, template: Name) -> TypeParamBuf with Mut, Panic, Div {
+    let idx = struct_table_find(structs, template)
+    if idx < 0 { return empty_type_param_buf() }
+    let si = struct_table_get(structs, idx)
+    TypeParamBuf { names: si.type_param_names, count: si.type_param_count }
+}
+
+// The instance of `template` over `args`, created exactly like a type application
+// in checker_lower_named_type_with_args_mut when it does not exist yet.
+fn generic_instance_ensure(structs: *mut StructTable, instances: *mut GenericInstanceHead, template: Name, args: TypeEntryList) -> TypeEntry with Mut, Panic, Div, Alloc {
+    let tmpl_idx = struct_table_find(structs, template)
+    if tmpl_idx < 0 { return ty_error() }
+    let tmpl = struct_table_get(structs, tmpl_idx)
+    let mangled = mangle_generic_name(&template, &args)
+    generic_instance_record(instances, mangled, template, &args)
+    if struct_table_find(structs, mangled) >= 0 {
+        return ty_named(mangled)
+    }
+    let tmpl_tp_buf = TypeParamBuf { names: tmpl.type_param_names, count: tmpl.type_param_count }
+    let mono_fields = monomorphize_fields(field_info_list_clone(&tmpl.fields), tmpl_tp_buf, &args)
+    let mono_info = StructInfo {
+        name: mangled,
+        fields: mono_fields.0,
+        field_count: mono_fields.1,
+        is_linear: tmpl.is_linear,
+        type_param_count: 0,
+        type_param_names: [Name { buf: [0; 384], len: 0 }; 8],
+        is_generic_template: false,
+        visibility_kind: tmpl.visibility_kind,
+        defining_module_id: tmpl.defining_module_id,
+        visibility: tmpl.visibility,
+        defining_module: tmpl.defining_module,
+    }
+    struct_table_add(structs, mono_info)
+    ty_named(mangled)
+}
+
+// A signature type of `impl Pair<T, U>`'s method, as seen from a call on instance
+// `Pair__i64__i64`: the template's parameters replaced by the instance's args. A
+// parameter-bearing instance in the signature (`-> HeapVec<T>` is `HeapVec__T`
+// once lowered) becomes the instance over the substituted args (`HeapVec__i64`),
+// which substitute_type_param cannot do by name. References and arrays recurse.
+fn generic_instance_subst_type(structs: *mut StructTable, instances: *mut GenericInstanceHead, tp_buf: TypeParamBuf, args: &TypeEntryList, ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc {
+    if ty.kind == TypeKind::TyNamed {
+        match generic_instance_find(instances, ty.name) {
+            Some(node) => {
+                let new_args = substitute_type_param_list(type_entry_list_clone(&(*node).head.args), tp_buf, type_entry_list_clone(args))
+                return generic_instance_ensure(structs, instances, (*node).head.template, new_args)
+            }
+            None => {}
+        }
+    }
+    var out = substitute_type_param(ty, tp_buf, type_entry_list_clone(args))
+    match out.inner {
+        Some(inner_ty) => {
+            out.inner = Some(Box::new(generic_instance_subst_type(structs, instances, tp_buf, args, *inner_ty)))
+        }
+        None => {}
+    }
+    out
+}
+
+fn expr_list_opt_count(opt: Option<Box<ExprList> >) -> i64 with Mut, Panic, Div {
+    var n: i64 = 0
+    var cur = opt
+    while true {
+        match cur {
+            Some(node) => {
+                n = n + 1
+                cur = (*node).tail
+            }
+            None => { break }
+        }
+    }
+    n
+}
+
+fn generic_instance_subst_params(structs: *mut StructTable, instances: *mut GenericInstanceHead, tp_buf: TypeParamBuf, args: &TypeEntryList, opt: Option<Box<FnParamList> >) -> Option<Box<FnParamList> > with Mut, Panic, Div, Alloc {
+    match opt {
+        None => None
+        Some(list) => {
+            let new_head = FnParamInfo { name: (*list).head.name, ty: generic_instance_subst_type(structs, instances, tp_buf, args, (*list).head.ty) }
+            Some(Box::new(FnParamList { head: new_head, tail: generic_instance_subst_params(structs, instances, tp_buf, args, (*list).tail) }))
+        }
+    }
+}
+
+// Signature ids of fns that declare type parameters (`fn f<T>`). A call that still
+// reaches such a signature was not specialized: the specializer rewrites every call
+// whose type arguments it can determine -- written as a turbofish or inferred from
+// the arguments -- to a concrete clone. Checking the call against the template's
+// unsubstituted signature produced E009 "expected T, found i64", and a template kept
+// alive for such a call was lowered with its parameters erased, which is silently
+// wrong for f64. Such a call is refused instead, with the fix in the message (E263).
+// Indexed by sig id like NsProjTable; heap_alloc zeroes it.
+pub struct GenericFnSigTable {
+    flags: [bool; 1048576],
+}
+
+fn generic_fn_sig_table_alloc() -> *mut GenericFnSigTable with Mut, Alloc {
+    heap_alloc(1048576) as *mut GenericFnSigTable
+}
+
+fn generic_fn_sig_set(t: *mut GenericFnSigTable, sig_id: i64) with Mut, Panic, Div {
+    if t == (0 as *mut GenericFnSigTable) || sig_id < 0 || sig_id >= 1048576 { return }
+    (*t).flags[sig_id as usize] = true
+}
+
+fn generic_fn_sig_is(t: *mut GenericFnSigTable, sig_id: i64) -> bool with Mut, Panic, Div {
+    if t == (0 as *mut GenericFnSigTable) || sig_id < 0 || sig_id >= 1048576 { return false }
+    (*t).flags[sig_id as usize]
+}
+
+fn call_expr_has_type_args(e: Expr) -> bool with Mut, Panic, Div, Alloc {
+    match call_expr_type_args(e) {
+        Some(_targs) => true
+        None => false
+    }
 }
 // Result structs for check.sio batch C2 (converted from N-tuples)
 pub struct LowerAuditTargetTypeResult {
@@ -1422,6 +1765,9 @@ pub fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
         ns_reassigned_names: [empty_name(); 64],
         ns_reassigned_count: 0,
         ns_reassigned_overflow: false,
+        type_param_scope: None,
+        generic_instances: generic_instance_head_alloc(),
+        generic_fn_sigs: generic_fn_sig_table_alloc(),
     }
     let _ = setup_intrinsics(c.fn_sigs)
     c
@@ -1536,6 +1882,9 @@ pub fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).ns_reassigned_names = [empty_name(); 64]
     (*raw).ns_reassigned_count = 0
     (*raw).ns_reassigned_overflow = false
+    (*raw).type_param_scope = None
+    (*raw).generic_instances = generic_instance_head_alloc()
+    (*raw).generic_fn_sigs = generic_fn_sig_table_alloc()
 }
 
 fn checker_store_from_value(dst: *mut Checker, src: Checker) with Mut, Panic, Div, Alloc {
@@ -1642,6 +1991,9 @@ fn checker_store_from_value(dst: *mut Checker, src: Checker) with Mut, Panic, Di
     (*dst).ns_reassigned_names = src.ns_reassigned_names
     (*dst).ns_reassigned_count = src.ns_reassigned_count
     (*dst).ns_reassigned_overflow = src.ns_reassigned_overflow
+    (*dst).type_param_scope = src.type_param_scope
+    (*dst).generic_instances = src.generic_instances
+    (*dst).generic_fn_sigs = src.generic_fn_sigs
 }
 
 fn checker_note_type_error_mut(c: *mut Checker) with Mut {
@@ -1679,6 +2031,36 @@ fn checker_exit_type_expr_mut(c: *mut Checker) with Mut {
     }
     if (*c).complexity_budget > 0 {
         (*c).complexity_budget = (*c).complexity_budget - 1
+    }
+}
+
+// Is `name` a type parameter of the struct whose fields are being lowered? A type
+// parameter shadows every other meaning of its spelling in type position. Without
+// this the unit registry, consulted first, won: `struct Map<K, V> { key: K }` typed
+// `key` as f64 carrying kelvin, and `Map { key: 42, val: 99 }` failed E016
+// "expected f64, found i64" (measured 2026-09-14). K, L, J, g, m, s and h are all
+// builtin units, so any single-letter parameter could hit it.
+fn checker_type_param_list_has(scope: Option<Box<TypeParamDefList> >, name: Name) -> bool with Mut, Panic, Div {
+    var cur = scope
+    while true {
+        match cur {
+            Some(node) => {
+                if name_eq((*node).head.name, name) { return true }
+                cur = (*node).tail
+            }
+            None => { return false }
+        }
+    }
+    false
+}
+
+// The scope of a declaration nested in another one -- a fn's own `<...>` in front
+// of the scope already in force (a method inside a generic impl). Nothing is
+// copied when the fn declares no parameters.
+fn type_param_list_concat(front: Option<Box<TypeParamDefList> >, back: Option<Box<TypeParamDefList> >) -> Option<Box<TypeParamDefList> > with Mut, Alloc {
+    match front {
+        None => back
+        Some(node) => Some(Box::new(TypeParamDefList { head: (*node).head, tail: type_param_list_concat((*node).tail, back) }))
     }
 }
 
@@ -2197,6 +2579,7 @@ fn checker_lower_named_type_with_args_mut(c: *mut Checker, path: AstPath, type_a
                     let tmpl_visibility = tmpl.visibility
                     let tmpl_defining_module = tmpl.defining_module
                     let mangled = mangle_generic_name(&tmpl_name, &lowered_args)
+                    generic_instance_record((*c).generic_instances, mangled, tmpl_name, &lowered_args)
                     let existing_idx = struct_table_find((*c).structs, mangled)
                     if existing_idx >= 0 {
                         return ty_named(mangled)
@@ -4398,6 +4781,10 @@ fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >, vis
             let eff_pair = checker_extract_effects_mut(c, (*fd).effects)
             (*c).current_effects = eff_pair.effects
             (*c).current_effect_count = eff_pair.count
+            // A declared type parameter (`fn f<K>(x: K) -> K`) is that parameter
+            // in the signature, not the kelvin unit it is spelled like.
+            let saved_tp_scope = (*c).type_param_scope
+            (*c).type_param_scope = type_param_list_concat((*fd).type_params, saved_tp_scope)
             let params_pair = checker_collect_fn_params_mut(c, (*fd).params)
             let params = params_pair.params
             let param_count = params_pair.count
@@ -4405,6 +4792,7 @@ fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >, vis
                 Some(te) => checker_lower_type_expr_mut(c, *te)
                 None => ty_unknown()
             }
+            (*c).type_param_scope = saved_tp_scope
             (*c).current_effects = saved_effects
             (*c).current_effect_count = saved_effect_count
             (*c).current_fn_name = saved_fn_name
@@ -4496,6 +4884,10 @@ fn checker_collect_fn_def_inplace(c: *mut Checker, opt: Option<Box<FnDef> >, vis
             // FnSigTable by value (one of the large-aggregate copies the *mut
             // conversion eliminates).
             let sig_id = fn_sig_table_add((*c).fn_sigs, sig)
+            match (*fd).type_params {
+                Some(_tps) => generic_fn_sig_set((*c).generic_fn_sigs, sig_id)
+                None => {}
+            }
             // N2 (codex ruling 2026-08-23): register this fn's call-projection
             // verdict at the SAME index fn_sig_table_add just returned, so
             // checker_propagate_call_result_ns_inplace can look it up in O(1)
@@ -4787,13 +5179,14 @@ fn checker_collect_runtime_builtins_inplace(c: *mut Checker) with Mut, Panic, Di
     // surface as E137 undeclared (heap_free, f64_to_bits, ...).
     checker_bind_import_unknown_inplace(c, make_name("heap_alloc"))
     checker_bind_import_unknown_inplace(c, make_name("heap_free"))
-    // heap_realloc has a real definition (stdlib/mem/box.sio, extern "C" realloc)
-    // -- unlike read_f64 etc it is NOT a compiler-codegen builtin, it just needs
-    // the same implicit-global registration heap_alloc/heap_free already have,
-    // or callers that don't `use` it explicitly (stdlib/data/bigframe.sio,
-    // stdlib/collections/heap_vec.sio) trip E137. Found alongside Defect A
-    // while validating its fix against a real bigframe consumer test, not part
-    // of the read_i64/write_i64/read_f64/write_f64 family itself.
+    // heap_realloc now has a real native-codegen body too (id 60,
+    // emit_builtin_heap_realloc_into) and is listed in
+    // name_is_native_backend_builtin/native_backend_builtin_arity_is_valid for the
+    // strict single-module path, like heap_alloc/heap_free. This registration is
+    // for the SEPARATE imported-modules path: callers that do not `use` it
+    // explicitly (stdlib/data/bigframe.sio, stdlib/collections/heap_vec.sio)
+    // still trip E137 there without it. Found alongside Defect A while
+    // validating its fix against a real bigframe consumer test.
     checker_bind_import_unknown_inplace(c, make_name("heap_realloc"))
     checker_bind_import_unknown_inplace(c, make_name("f64_to_bits"))
     checker_bind_import_unknown_inplace(c, make_name("bits_to_f64"))
@@ -5053,10 +5446,11 @@ fn checker_collect_policy_def_inplace(c: *mut Checker, name: Name, opt: Option<B
 
 // One place that touches the unit registry, for a measured reason.
 //
-// UnitRegistry holds `entries: [UnitEntry; 32]` and every UnitEntry embeds a
-// Name with `buf: [0; 384]`, so the whole registry is about 12.5 KB and it is
-// passed BY VALUE -- `fn find(self, ...)` copies all of it. The by-value
-// checker spine calls find exactly once per type name and binds the result;
+// UnitRegistry holds `entries: [UnitEntry; 128]` (grown from 32; see units.sio)
+// and every UnitEntry embeds a Name with `buf: [0; 384]`, so the whole
+// registry is about 50 KB and it is passed BY VALUE -- `fn find(self, ...)`
+// copies all of it. The by-value checker spine calls find exactly once per
+// type name and binds the result;
 // a first version of the *mut port here called it twice in the same
 // expression (once in the guard, once in the body) and the extra copy was
 // enough to segfault the compiler on six of the unit fixtures, turning clean
@@ -6222,6 +6616,8 @@ fn checker_check_impl_method_inplace(c: *mut Checker, item: Item) with Mut, Pani
             // lane. The semantic lookup disambiguates by TypeKind (TyUnknown vs TyI64),
             // so each impl body sees ITS OWN declared effects.
             (*c).current_fn_name = (*fd).name
+            let saved_tp_scope = (*c).type_param_scope
+            (*c).type_param_scope = type_param_list_concat((*fd).type_params, saved_tp_scope)
             let sig_id = fn_sig_table_find_method_semantic((*c).fn_sigs, (*c).current_impl_type, (*fd).name)
             if sig_id >= 0 {
                 let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
@@ -6245,6 +6641,7 @@ fn checker_check_impl_method_inplace(c: *mut Checker, item: Item) with Mut, Pani
             checker_push_const_scope_inplace(c)
             checker_bind_fn_params_inplace(c, (*fd).params)
             let body_ty = checker_check_block_inplace(c, (*fd).body)
+            (*c).type_param_scope = saved_tp_scope
             if sig_id >= 0 {
                 let sig2 = fn_sig_table_get((*c).fn_sigs, sig_id)
                 if !checker_fn_body_return_compatible_inplace(c, body_ty, sig2.return_type) {
@@ -6293,10 +6690,20 @@ fn checker_check_impl_methods_inplace(c: *mut Checker, opt: Option<Box<ItemList>
 fn checker_check_impl_def_inplace(c: *mut Checker, opt: Option<Box<ImplDef> >) with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(id) => {
-            let impl_ty = checker_lower_type_expr_mut(c, (*id).target_type)
-            (*c).current_impl_type = impl_ty
+            // Same scope and impl type as checker_collect_impl_def_inplace; if the two
+            // drift, the body's sig lookup misses and effect checking silently degrades.
+            let saved_tp_scope = (*c).type_param_scope
+            (*c).type_param_scope = type_param_list_concat(impl_target_bare_type_params_at((*c).structs, (*id).target_type, (*id).target_type.type_args, 0, impl_target_unit_bits((*c).units, (*id).target_type.type_args), (*id).span), saved_tp_scope)
+            let tmpl_idx = generic_impl_template_index((*c).structs, (*c).enums, (*id))
+            if tmpl_idx >= 0 {
+                (*c).current_impl_type = ty_named(checker_copy_string_list_to_name((*id).target_type.path.segments))
+            } else {
+                let impl_ty = checker_lower_type_expr_mut(c, (*id).target_type)
+                (*c).current_impl_type = impl_ty
+            }
             checker_check_impl_methods_inplace(c, (*id).methods)
             (*c).current_impl_type = ty_error()
+            (*c).type_param_scope = saved_tp_scope
         }
         None => {}
     }
@@ -6324,6 +6731,8 @@ fn checker_collect_impl_method_inplace(c: *mut Checker, item: Item, type_name: N
             let eff_pair_early = checker_extract_effects_mut(c, (*fd).effects)
             (*c).current_effects = eff_pair_early.effects
             (*c).current_effect_count = eff_pair_early.count
+            let saved_tp_scope = (*c).type_param_scope
+            (*c).type_param_scope = type_param_list_concat((*fd).type_params, saved_tp_scope)
             let params_pair = match (*fd).params {
                 Some(pl) => {
                     if (*pl).head.is_self {
@@ -6340,6 +6749,7 @@ fn checker_collect_impl_method_inplace(c: *mut Checker, item: Item, type_name: N
                 Some(te) => checker_lower_type_expr_mut(c, *te)
                 None => ty_unknown()
             }
+            (*c).type_param_scope = saved_tp_scope
             (*c).current_effects = saved_effects
             (*c).current_effect_count = saved_effect_count
             let fn_effects = eff_pair_early.effects
@@ -6390,10 +6800,26 @@ fn checker_collect_impl_methods_inplace(c: *mut Checker, opt: Option<Box<ItemLis
 fn checker_collect_impl_def_inplace(c: *mut Checker, opt: Option<Box<ImplDef> >) with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(id) => {
-            let impl_ty = checker_lower_type_expr_mut(c, (*id).target_type)
-            (*c).current_impl_type = impl_ty
-            checker_collect_impl_methods_inplace(c, (*id).methods, impl_ty.name)
+            // The target's bare arguments are this impl's type parameters in every
+            // method signature (`impl Map<K, V>`: K is not kelvin).
+            let saved_tp_scope = (*c).type_param_scope
+            (*c).type_param_scope = type_param_list_concat(impl_target_bare_type_params_at((*c).structs, (*id).target_type, (*id).target_type.type_args, 0, impl_target_unit_bits((*c).units, (*id).target_type.type_args), (*id).span), saved_tp_scope)
+            let tmpl_idx = generic_impl_template_index((*c).structs, (*c).enums, (*id))
+            if tmpl_idx >= 0 {
+                // `impl Pair<T, U>` over the template's own parameters: the methods
+                // belong to template `Pair`. Lowering the target minted a
+                // `Pair__T__U` instance that no value ever has, so a call on
+                // `Pair__i64__i64` could never find them (E011).
+                let tmpl_name = checker_copy_string_list_to_name((*id).target_type.path.segments)
+                (*c).current_impl_type = ty_named(tmpl_name)
+                checker_collect_impl_methods_inplace(c, (*id).methods, tmpl_name)
+            } else {
+                let impl_ty = checker_lower_type_expr_mut(c, (*id).target_type)
+                (*c).current_impl_type = impl_ty
+                checker_collect_impl_methods_inplace(c, (*id).methods, impl_ty.name)
+            }
             (*c).current_impl_type = ty_error()
+            (*c).type_param_scope = saved_tp_scope
         }
         None => {}
     }
@@ -6543,6 +6969,10 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             let saved_effect_count = (*c).current_effect_count
             let saved_multitest_count = (*c).multitest_count
             let saved_multitest_corrected = (*c).multitest_corrected
+            // Declared type parameters stay in scope for the whole body: params are
+            // re-lowered when bound, and `let t: K` / `x as K` name them too.
+            let saved_tp_scope = (*c).type_param_scope
+            (*c).type_param_scope = type_param_list_concat((*fd).type_params, saved_tp_scope)
             // Proven by-value reads: .find/.get copy only the ~38KB FnSigTable,
             // never the 8MB Checker, so they're harmless against the 8MB budget.
             // Direct (*(*c).fn_sigs).entries[idx].field reads were tried but CANNOT
@@ -6593,6 +7023,7 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
                 (*c).current_effect_count = saved_effect_count
                 (*c).multitest_count = saved_multitest_count
                 (*c).multitest_corrected = saved_multitest_corrected
+                (*c).type_param_scope = saved_tp_scope
                 return
             }
             (*c).env = (*c).env.push_scope()
@@ -6601,6 +7032,7 @@ fn checker_check_fn_item_inplace(c: *mut Checker, opt: Option<Box<FnDef> >) with
             checker_bind_fn_params_inplace(c, (*fd).params)
             (*c).escape_provenance = 0
             let body_ty = checker_check_block_inplace(c, (*fd).body)
+            (*c).type_param_scope = saved_tp_scope
             if sig_id >= 0 {
                 let sig2 = fn_sig_table_get((*c).fn_sigs, sig_id)
                 if !checker_fn_body_return_compatible_inplace(c, body_ty, sig2.return_type) {
@@ -8917,6 +9349,7 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                     let si_defining_module = si.defining_module
                     // Mangled name (finalize 16683-16684).
                     let mangled = mangle_generic_name(&si_name, &args)
+                    generic_instance_record((*c).generic_instances, mangled, si_name, &args)
                     // Monomorphize if not already present (finalize 16687-16702).
                     let existing_idx = struct_table_find((*c).structs, mangled)
                     if existing_idx < 0 {
@@ -9516,24 +9949,52 @@ fn checker_check_method_call_with_base_ty_inplace(c: *mut Checker, e: Expr, base
             ty_error()
         }
     } else if base_ty.kind == TypeKind::TyNamed {
-        let sig_id = fn_sig_table_find_method_semantic((*c).fn_sigs, base_ty, e.name)
+        var sig_id = fn_sig_table_find_method_semantic((*c).fn_sigs, base_ty, e.name)
+        // A generic struct instance has no methods of its own: `impl Pair<T, U>`
+        // registered them on template `Pair` (checker_collect_impl_def_inplace). Find
+        // them there and read the signature with the instance's arguments.
+        var via_template = false
+        var tmpl_params: Option<Box<FnParamList> > = None
+        var tmpl_ret = ty_error()
+        if sig_id < 0 {
+            match generic_instance_find((*c).generic_instances, base_ty.name) {
+                Some(node) => {
+                    let tsig_id = fn_sig_table_find_method((*c).fn_sigs, (*node).head.template, e.name)
+                    if tsig_id >= 0 {
+                        let tsig = fn_sig_table_get((*c).fn_sigs, tsig_id)
+                        let tp_buf = generic_template_tp_buf((*c).structs, (*node).head.template)
+                        tmpl_params = generic_instance_subst_params((*c).structs, (*c).generic_instances, tp_buf, &(*node).head.args, fn_param_list_clone(&tsig.params))
+                        tmpl_ret = generic_instance_subst_type((*c).structs, (*c).generic_instances, tp_buf, &(*node).head.args, tsig.return_type)
+                        via_template = true
+                        sig_id = tsig_id
+                    }
+                }
+                None => {}
+            }
+        }
         if sig_id >= 0 {
             let sig = fn_sig_table_get((*c).fn_sigs, sig_id)
+            let call_params = if via_template { tmpl_params } else { fn_param_list_clone(&sig.params) }
+            let call_ret = if via_template { tmpl_ret } else { sig.return_type }
             let call_start_borrows = (*c).borrows
-            var effective_params = fn_param_list_clone(&sig.params)
-            var effective_return_type = sig.return_type
+            // The method's own turbofish (`s.pick::<i64>(...)`) binds the method's type
+            // parameters. Its names are read from the signature AFTER the instance
+            // substitution above, so a struct parameter the instance already fixed is
+            // not counted as one the turbofish must supply.
+            var effective_params = fn_param_list_clone(&call_params)
+            var effective_return_type = call_ret
             match e.type_args {
                 Some(type_arg_exprs) => {
                     let lowered_type_args = checker_lower_type_expr_list_mut(c, *type_arg_exprs)
-                    var generic_names = collect_fn_generic_names_from_params_in_tables((*c).structs, (*c).enums, fn_param_list_clone(&sig.params), empty_type_param_buf())
-                    generic_names = collect_fn_generic_names_from_type_in_tables((*c).structs, (*c).enums, sig.return_type, generic_names)
+                    var generic_names = collect_fn_generic_names_from_params_in_tables((*c).structs, (*c).enums, fn_param_list_clone(&call_params), empty_type_param_buf())
+                    generic_names = collect_fn_generic_names_from_type_in_tables((*c).structs, (*c).enums, call_ret, generic_names)
                     let provided_type_arg_count = type_entry_list_count_value(&lowered_type_args)
                     if generic_names.count > 0 {
                         if provided_type_arg_count != generic_names.count {
                             checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
                         }
                         effective_params = checker_substitute_fn_params(effective_params, generic_names, type_entry_list_clone(&lowered_type_args))
-                        effective_return_type = substitute_type_param(sig.return_type, generic_names, type_entry_list_clone(&lowered_type_args))
+                        effective_return_type = substitute_type_param(call_ret, generic_names, type_entry_list_clone(&lowered_type_args))
                     }
                 }
                 None => {}
@@ -9719,7 +10180,7 @@ fn checker_check_one_call_arg_inplace(c: *mut Checker, arg_expr: Expr, param_inf
     if implicit_borrow && (*c).suppress_linear_consume_depth > 0 {
         (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth - 1
     }
-    if arg_ty.kind == param_info.ty.kind {
+    if arg_ty.kind == param_info.ty.kind && arg_ty.unit_id < 0 && param_info.ty.unit_id < 0 {
         if arg_ty.kind == TypeKind::TyI64
         || arg_ty.kind == TypeKind::TyF64
         || arg_ty.kind == TypeKind::TyBool
@@ -9809,7 +10270,7 @@ fn checker_check_call_args_inplace(c: *mut Checker, args: ExprListHandle, params
             (*c).suppress_linear_consume_depth = (*c).suppress_linear_consume_depth - 1
         }
         var primitive_exact = false
-        if arg_ty.kind == param_info.ty.kind {
+        if arg_ty.kind == param_info.ty.kind && arg_ty.unit_id < 0 && param_info.ty.unit_id < 0 {
             if arg_ty.kind == TypeKind::TyI64
             || arg_ty.kind == TypeKind::TyF64
             || arg_ty.kind == TypeKind::TyBool
@@ -10747,6 +11208,10 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         }
     }
     var direct_sig_id: i64 = -1
+    // Set when a `Template::<Args>::f(...)` call resolved to a method of a generic
+    // impl registered on its template (see the path arm below).
+    var assoc_via_template = false
+    var assoc_template_name = Name { buf: [0; 384], len: 0 }
     // Type::method associated-function path (e.g. E::of / Epistemic::measured).
     // When the method is registered, resolve it so the return type is known and
     // subsequent instance methods typecheck. When lookup misses (multi-module
@@ -10764,6 +11229,34 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
                 // Prefer semantic match (kind+name) then name-only self_type_name.
                 let recv_ty = ty_named(path_type_name)
                 direct_sig_id = fn_sig_table_find_method_semantic((*c).fn_sigs, recv_ty, path_method_name)
+                // `impl Pair<T, U>` registers its methods on generic template `Pair`
+                // (checker_collect_impl_def_inplace), so this lookup can now find them.
+                // Two call shapes keep the unresolved legacy path they always took,
+                // because this arm cannot check them: the receiver passed explicitly
+                // (`Pair::get_first(&p)`, one argument more than the method declares --
+                // the same shape is rejected E010 for a non-generic method) and an
+                // associated fn called without type arguments (`Box2::new()`, whose
+                // template parameters nothing here can infer). With type arguments
+                // (`HeapVec::<i64>::new()`) they bind the template's parameters below.
+                if direct_sig_id >= 0 {
+                    let assoc_tmpl_idx = struct_table_find((*c).structs, path_type_name)
+                    if assoc_tmpl_idx >= 0 {
+                        let assoc_tmpl = struct_table_get((*c).structs, assoc_tmpl_idx)
+                        if assoc_tmpl.is_generic_template {
+                            let assoc_sig = fn_sig_table_get((*c).fn_sigs, direct_sig_id)
+                            let has_type_args = match (*callee_expr).type_args {
+                                Some(_targs) => true
+                                None => false
+                            }
+                            if !has_type_args || expr_list_opt_count(e.args) == assoc_sig.param_count + 1 {
+                                direct_sig_id = 0 - 1
+                            } else {
+                                assoc_via_template = true
+                                assoc_template_name = path_type_name
+                            }
+                        }
+                    }
+                }
                 // W044. The fallthrough documented just above is also what lets an
                 // associated-function call whose target resolves to NOTHING be accepted
                 // silently, evaluating to 0 and propagating that 0 as a pointer. The plain
@@ -10830,20 +11323,40 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             checker_report_error_at_inplace(c, e.span, 250, 0, 0, 0)
             refused_unimplemented = true
         }
+        // E263: a generic fn called with type arguments nothing could determine
+        // (GenericFnSigTable). Arguments are still walked, untyped, for their own errors.
+        if generic_fn_sig_is((*c).generic_fn_sigs, direct_sig_id) && !call_expr_has_type_args(e) {
+            checker_report_error_at_inplace(c, e.span, 263, 0, 0, 0)
+            checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            return ty_error()
+        }
         var effective_params = fn_param_list_clone(&direct_sig.params)
         var effective_return_type = direct_sig.return_type
         match call_expr_type_args(e) {
             Some(type_arg_exprs) => {
                 let lowered_type_args = checker_lower_type_expr_list_mut(c, *type_arg_exprs)
-                var generic_names = collect_fn_generic_names_from_params_in_tables((*c).structs, (*c).enums, fn_param_list_clone(&direct_sig.params), empty_type_param_buf())
-                generic_names = collect_fn_generic_names_from_type_in_tables((*c).structs, (*c).enums, direct_sig.return_type, generic_names)
-                if generic_names.count > 0 {
-                    let provided_type_arg_count = type_entry_list_count_value(&lowered_type_args)
-                    if provided_type_arg_count != generic_names.count {
+                if assoc_via_template {
+                    // The turbofish sat on the type segment (`HeapVec::<i64>::new`), so
+                    // the args are the template's, and a parameter-bearing instance in
+                    // the signature (`-> HeapVec__T`) must become `HeapVec__i64`.
+                    let assoc_tp_buf = generic_template_tp_buf((*c).structs, assoc_template_name)
+                    if type_entry_list_count_value(&lowered_type_args) != assoc_tp_buf.count {
                         checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
                     }
-                    effective_params = checker_substitute_fn_params(effective_params, generic_names, type_entry_list_clone(&lowered_type_args))
-                    effective_return_type = substitute_type_param(direct_sig.return_type, generic_names, type_entry_list_clone(&lowered_type_args))
+                    effective_params = generic_instance_subst_params((*c).structs, (*c).generic_instances, assoc_tp_buf, &lowered_type_args, effective_params)
+                    effective_return_type = generic_instance_subst_type((*c).structs, (*c).generic_instances, assoc_tp_buf, &lowered_type_args, direct_sig.return_type)
+                } else {
+                    var generic_names = collect_fn_generic_names_from_params_in_tables((*c).structs, (*c).enums, fn_param_list_clone(&direct_sig.params), empty_type_param_buf())
+                    generic_names = collect_fn_generic_names_from_type_in_tables((*c).structs, (*c).enums, direct_sig.return_type, generic_names)
+                    if generic_names.count > 0 {
+                        let provided_type_arg_count = type_entry_list_count_value(&lowered_type_args)
+                        if provided_type_arg_count != generic_names.count {
+                            checker_report_error_at_inplace(c, e.span, 10, 0, 0, 0)
+                        }
+                        effective_params = checker_substitute_fn_params(effective_params, generic_names, type_entry_list_clone(&lowered_type_args))
+                        effective_return_type = substitute_type_param(direct_sig.return_type, generic_names, type_entry_list_clone(&lowered_type_args))
+                    }
                 }
             }
             None => {}
@@ -10943,6 +11456,12 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             refused_unimplemented = true
         }
         let call_start_borrows = (*c).borrows
+        if generic_fn_sig_is((*c).generic_fn_sigs, callee_ty.fn_sig_id) && !call_expr_has_type_args(e) {
+            checker_report_error_at_inplace(c, e.span, 263, 0, 0, 0)
+            checker_check_expr_list_no_type_no_linear_consume_inplace(c, e.args)
+            checker_release_call_arg_borrows_inplace(c, e.args, None, call_start_borrows)
+            return ty_error()
+        }
         var effective_params = fn_param_list_clone(&sig.params)
         var effective_return_type = sig.return_type
         match call_expr_type_args(e) {
@@ -16866,6 +17385,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 256 { print("`d_separated` needs a declared causal graph and exactly two variable names, with an optional `| Z`") }
     else if code == 261 { print("ontology classes are disjoint and cannot be combined by this operator") }
     else if code == 262 { print("ontology classes are unrelated: no subsumption between them, so the operator cannot say what the result is an amount of") }
+    else if code == 263 { print("cannot infer the type arguments of this generic function call; name them with a turbofish, `f::<...>(...)`") }
     else if code == 251 { print("product variance shortcut is unsound beyond the octonions: |xy| != |x||y| on Sedenion/Clifford, so Var(x*y) = |y|^2 Var x + |x|^2 Var y fabricates precision") }
     else if code == 252 { print("algebra declares a reassociation strategy its multiplication law cannot certify: `free` needs an associative product, `fano_selective` needs the octonion level") }
     else { print("unknown error") }
@@ -18105,6 +18625,7 @@ fn name_is_native_backend_builtin(n: Name) -> bool with Mut, Panic, Div, Alloc, 
     if name_eq(n, make_name("str_from_bytes")) { return true }   // id 22
     if name_eq(n, make_name("heap_alloc")) { return true }       // id 23
     if name_eq(n, make_name("heap_free")) { return true }        // id 24
+    if name_eq(n, make_name("heap_realloc")) { return true }     // id 60
     if name_eq(n, make_name("f64_to_bits")) { return true }      // id 25
     if name_eq(n, make_name("bits_to_f64")) { return true }      // id 26
     if name_eq(n, make_name("syscall6")) { return true }         // id 27
@@ -18210,9 +18731,11 @@ fn native_backend_builtin_arity_is_valid(n: Name, argc: i64) -> bool with Mut, P
             || name_eq(n, make_name("str_from_bytes"))
             || name_eq(n, make_name("read_i64"))
             || name_eq(n, make_name("read_f64"))
+            || name_eq(n, make_name("heap_realloc"))
             || name_eq(n, make_name("acknowledge"))
             || name_eq(n, make_name("require_confidence"))
             || name_eq(n, make_name("pow"))
+            || name_eq(n, make_name("heap_realloc"))    // id 60: (ptr, new_size)
             || name_eq(n, make_name("__sounio_seq_push"))
             || name_eq(n, make_name("__sounio_seq_get"))
     }
@@ -20585,6 +21108,7 @@ impl Checker {
 
                         // Build mangled name: Name__arg1__arg2
                         let mangled = mangle_generic_name(&tmpl_name, &lowered_args)
+                        generic_instance_record(c.generic_instances, mangled, tmpl_name, &lowered_args)
 
                         // Check if already monomorphized
                         let existing_idx = struct_table_find(c.structs, mangled)
@@ -20674,6 +21198,10 @@ impl Checker {
             (self, ty_u128())
         } else if name_wide_int_bits(name) > 0 {
             (self, ty_wide_int(name_wide_int_bits(name), (name.buf[0] as i64) == 105))
+        } else if checker_type_param_list_has(self.type_param_scope, name) {
+            // A type parameter in scope shadows a unit of the same spelling; see
+            // checker_lower_named_type_mut.
+            (self, ty_named(name))
         } else {
             // Check if it's a registered unit name (mg, kg, m, s, etc.)
             let unit_idx = self.units.find(name)
@@ -22822,13 +23350,19 @@ impl Checker {
     fn collect_fn_def(self, name: Name, opt: Option<Box<FnDef> >, visibility: Visibility, defining_module: AstPath) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(fd) => {
-                let __r = self.collect_fn_params((*fd).params)
+                // Mirrors checker_collect_fn_def_inplace: declared type parameters
+                // are in scope while the signature lowers.
+                let saved_tp_scope = self.type_param_scope
+                var scoped = self
+                scoped.type_param_scope = type_param_list_concat((*fd).type_params, saved_tp_scope)
+                let __r = scoped.collect_fn_params((*fd).params)
                 var c = __r.checker
                 let params = __r.params
                 let param_count = __r.count
                 let ret_pair = c.lower_opt_return_type((*fd).return_type)
                 c = ret_pair.0
                 let ret_ty = ret_pair.1
+                c.type_param_scope = saved_tp_scope
 
                 // Extract effects from function signature (including user-defined)
                 let eff_pair = c.extract_effects_with_checker((*fd).effects)
@@ -22989,6 +23523,10 @@ impl Checker {
                     defining_module: defining_module,
                 }
                 let sig_id = fn_sig_table_add(c.fn_sigs, sig)
+                match (*fd).type_params {
+                    Some(_tps) => generic_fn_sig_set(c.generic_fn_sigs, sig_id)
+                    None => {}
+                }
                 // N2 (codex ruling 2026-08-23, call-projection fail-closed
                 // fix): by-value twin of the registration in
                 // checker_collect_fn_def_inplace -- see that site's comment.
@@ -23055,8 +23593,11 @@ impl Checker {
                 let tp_names = tp_result.names
                 let is_generic = tp_count > 0
 
-                let __r = self.collect_field_defs((*sd).fields)
+                var scoped = self
+                scoped.type_param_scope = (*sd).type_params
+                let __r = scoped.collect_field_defs((*sd).fields)
                 var c = __r.checker
+                c.type_param_scope = None
                 let fields = __r.fields
                 let field_count = __r.count
                 let info = StructInfo {
@@ -23974,12 +24515,24 @@ impl Checker {
     fn collect_impl_def(self, opt: Option<Box<ImplDef> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(id) => {
-                let pair = self.lower_type_expr((*id).target_type)
-                var c = pair.0
-                let impl_ty = pair.1
-                c.current_impl_type = impl_ty
-                c = c.collect_impl_methods((*id).methods, impl_ty.name)
+                // Mirrors checker_collect_impl_def_inplace.
+                let saved_tp_scope = self.type_param_scope
+                var c = self
+                c.type_param_scope = type_param_list_concat(impl_target_bare_type_params_at(c.structs, (*id).target_type, (*id).target_type.type_args, 0, impl_target_unit_bits(c.units, (*id).target_type.type_args), (*id).span), saved_tp_scope)
+                let tmpl_idx = generic_impl_template_index(c.structs, c.enums, (*id))
+                if tmpl_idx >= 0 {
+                    let tmpl_name = checker_copy_string_list_to_name((*id).target_type.path.segments)
+                    c.current_impl_type = ty_named(tmpl_name)
+                    c = c.collect_impl_methods((*id).methods, tmpl_name)
+                } else {
+                    let pair = c.lower_type_expr((*id).target_type)
+                    c = pair.0
+                    let impl_ty = pair.1
+                    c.current_impl_type = impl_ty
+                    c = c.collect_impl_methods((*id).methods, impl_ty.name)
+                }
                 c.current_impl_type = ty_error()
+                c.type_param_scope = saved_tp_scope
                 c
             }
             None => self
@@ -23999,13 +24552,17 @@ impl Checker {
     fn collect_impl_method(self, item: Item, type_name: Name) -> Checker with Mut, Panic, Div, Alloc, IO {
         match item.fn_def {
             Some(fd) => {
-                let result = self.collect_method_params((*fd).params)
+                let saved_tp_scope = self.type_param_scope
+                var scoped = self
+                scoped.type_param_scope = type_param_list_concat((*fd).type_params, saved_tp_scope)
+                let result = scoped.collect_method_params((*fd).params)
                 var c = result.checker
                 let params = result.params
                 let param_count = result.count
                 let ret_pair = c.lower_opt_return_type((*fd).return_type)
                 c = ret_pair.0
                 let ret_ty = ret_pair.1
+                c.type_param_scope = saved_tp_scope
 
                 // Extract effects from method signature (including user-defined)
                 let eff_pair = c.extract_effects_with_checker((*fd).effects)
@@ -24132,6 +24689,10 @@ impl Checker {
                 // the value path never did, so every diagnostic reported through
                 // `report_error_at` would have named its caller `<unnamed>`.
                 c.current_fn_name = (*fd).name
+                // Declared type parameters shadow units for the body (mirrors
+                // checker_check_fn_item_inplace).
+                let saved_tp_scope = c.type_param_scope
+                c.type_param_scope = type_param_list_concat((*fd).type_params, saved_tp_scope)
                 // Save outer effects context
                 let saved_effects = c.current_effects
                 let saved_effect_count = c.current_effect_count
@@ -24155,6 +24716,7 @@ impl Checker {
                     c.current_effect_count = saved_effect_count
                     c.multitest_count = saved_multitest_count
                     c.multitest_corrected = saved_multitest_corrected
+                    c.type_param_scope = saved_tp_scope
                     return c
                 }
                 c.env = c.env.push_scope()
@@ -24164,6 +24726,7 @@ impl Checker {
                 let pair = c.check_block((*fd).body)
                 c = pair.0
                 let body_ty = pair.1
+                c.type_param_scope = saved_tp_scope
                 // Check return type compatibility (allow integer-literal narrowing and
                 // fieldless-enum↔int coercion, matching let/var assignment).
                 if sig_id >= 0 {
@@ -24239,12 +24802,21 @@ impl Checker {
     fn check_impl_item(self, opt: Option<Box<ImplDef> >) -> Checker with Mut, Panic, Div, Alloc, IO {
         match opt {
             Some(id) => {
-                let pair = self.lower_type_expr((*id).target_type)
-                var c = pair.0
-                let impl_ty = pair.1
-                c.current_impl_type = impl_ty
+                // Mirrors checker_check_impl_def_inplace.
+                let saved_tp_scope = self.type_param_scope
+                var c = self
+                c.type_param_scope = type_param_list_concat(impl_target_bare_type_params_at(c.structs, (*id).target_type, (*id).target_type.type_args, 0, impl_target_unit_bits(c.units, (*id).target_type.type_args), (*id).span), saved_tp_scope)
+                let tmpl_idx = generic_impl_template_index(c.structs, c.enums, (*id))
+                if tmpl_idx >= 0 {
+                    c.current_impl_type = ty_named(checker_copy_string_list_to_name((*id).target_type.path.segments))
+                } else {
+                    let pair = c.lower_type_expr((*id).target_type)
+                    c = pair.0
+                    c.current_impl_type = pair.1
+                }
                 c = c.check_impl_methods((*id).methods)
                 c.current_impl_type = ty_error()
+                c.type_param_scope = saved_tp_scope
                 c
             }
             None => self
@@ -24270,6 +24842,8 @@ impl Checker {
                 let saved_effect_count = c.current_effect_count
                 let saved_multitest_count = c.multitest_count
                 let saved_multitest_corrected = c.multitest_corrected
+                let saved_tp_scope = c.type_param_scope
+                c.type_param_scope = type_param_list_concat((*fd).type_params, saved_tp_scope)
                 let sig_id = fn_sig_table_find_method(c.fn_sigs, c.current_impl_type.name, (*fd).name)
                 if sig_id >= 0 {
                     let sig = fn_sig_table_get(c.fn_sigs, sig_id)
@@ -24288,6 +24862,7 @@ impl Checker {
                 let pair = c.check_block((*fd).body)
                 c = pair.0
                 let body_ty = pair.1
+                c.type_param_scope = saved_tp_scope
                 if sig_id >= 0 {
                     let sig2 = fn_sig_table_get(c.fn_sigs, sig_id)
                     if !c.types_compatible_structural(body_ty, sig2.return_type) {
@@ -25166,12 +25741,12 @@ impl Checker {
                 }
             }
             // Comparison operators: units must match
-            BinaryOp::OpEq => { if lu != ru { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
-            BinaryOp::OpNe => { if lu != ru { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
-            BinaryOp::OpLt => { if lu != ru { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
-            BinaryOp::OpLe => { if lu != ru { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
-            BinaryOp::OpGt => { if lu != ru { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
-            BinaryOp::OpGe => { if lu != ru { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
+            BinaryOp::OpEq => { if lu >= 0 && ru >= 0 && lu != ru { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
+            BinaryOp::OpNe => { if lu >= 0 && ru >= 0 && lu != ru { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
+            BinaryOp::OpLt => { if lu >= 0 && ru >= 0 && lu != ru { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
+            BinaryOp::OpLe => { if lu >= 0 && ru >= 0 && lu != ru { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
+            BinaryOp::OpGt => { if lu >= 0 && ru >= 0 && lu != ru { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
+            BinaryOp::OpGe => { if lu >= 0 && ru >= 0 && lu != ru { c = c.report_unit_mismatch(span, lu, ru) }; (c, result) }
             // Other operators: pass through
             _ => (c, result)
         }
@@ -25636,16 +26211,39 @@ impl Checker {
                 (c, ty_error())
             }
         } else if base_ty.kind == TypeKind::TyNamed {
-            let sig_id = fn_sig_table_find_method_semantic(c.fn_sigs, base_ty, e.name)
+            var sig_id = fn_sig_table_find_method_semantic(c.fn_sigs, base_ty, e.name)
+            // Mirrors checker_check_method_call_with_base_ty_inplace: a generic
+            // instance finds the methods its template's impl registered.
+            var via_template = false
+            var tmpl_params: Option<Box<FnParamList> > = None
+            var tmpl_ret = ty_error()
+            if sig_id < 0 {
+                match generic_instance_find(c.generic_instances, base_ty.name) {
+                    Some(node) => {
+                        let tsig_id = fn_sig_table_find_method(c.fn_sigs, (*node).head.template, e.name)
+                        if tsig_id >= 0 {
+                            let tsig = fn_sig_table_get(c.fn_sigs, tsig_id)
+                            let tp_buf = generic_template_tp_buf(c.structs, (*node).head.template)
+                            tmpl_params = generic_instance_subst_params(c.structs, c.generic_instances, tp_buf, &(*node).head.args, fn_param_list_clone(&tsig.params))
+                            tmpl_ret = generic_instance_subst_type(c.structs, c.generic_instances, tp_buf, &(*node).head.args, tsig.return_type)
+                            via_template = true
+                            sig_id = tsig_id
+                        }
+                    }
+                    None => {}
+                }
+            }
             if sig_id >= 0 {
                 let sig = fn_sig_table_get(c.fn_sigs, sig_id)
+                let call_params = if via_template { tmpl_params } else { sig.params }
+                let call_ret = if via_template { tmpl_ret } else { sig.return_type }
                 let call_start_borrows = c.borrows
-                c = c.check_call_args(e.args, sig.params, sig.param_count, e.span)
+                c = c.check_call_args(e.args, fn_param_list_clone(&call_params), sig.param_count, e.span)
                 // Verify callee method's effects are subset of caller's effects
                 c = c.check_callee_effects(e.span, sig.effects, sig.effect_count)
                 // Release borrows taken for method call arguments
-                c = c.release_call_arg_borrows(e.args, sig.params, call_start_borrows)
-                (c, sig.return_type)
+                c = c.release_call_arg_borrows(e.args, call_params, call_start_borrows)
+                (c, call_ret)
             } else {
                 // A named type which is not a declared struct/enum is an unresolved
                 // function type parameter. Its trait contract was accepted at the
@@ -25793,14 +26391,36 @@ impl Checker {
                 (c, ty_error())
             }
         } else if base_ty.kind == TypeKind::TyNamed {
-            let sig_id = fn_sig_table_find_method_semantic(c.fn_sigs, base_ty, e.name)
+            var sig_id = fn_sig_table_find_method_semantic(c.fn_sigs, base_ty, e.name)
+            // Mirrors checker_check_method_call_with_base_ty_inplace.
+            var via_template = false
+            var tmpl_params: Option<Box<FnParamList> > = None
+            var tmpl_ret = ty_error()
+            if sig_id < 0 {
+                match generic_instance_find(c.generic_instances, base_ty.name) {
+                    Some(node) => {
+                        let tsig_id = fn_sig_table_find_method(c.fn_sigs, (*node).head.template, e.name)
+                        if tsig_id >= 0 {
+                            let tsig = fn_sig_table_get(c.fn_sigs, tsig_id)
+                            let tp_buf = generic_template_tp_buf(c.structs, (*node).head.template)
+                            tmpl_params = generic_instance_subst_params(c.structs, c.generic_instances, tp_buf, &(*node).head.args, fn_param_list_clone(&tsig.params))
+                            tmpl_ret = generic_instance_subst_type(c.structs, c.generic_instances, tp_buf, &(*node).head.args, tsig.return_type)
+                            via_template = true
+                            sig_id = tsig_id
+                        }
+                    }
+                    None => {}
+                }
+            }
             if sig_id >= 0 {
                 let sig = fn_sig_table_get(c.fn_sigs, sig_id)
+                let call_params = if via_template { tmpl_params } else { sig.params }
+                let call_ret = if via_template { tmpl_ret } else { sig.return_type }
                 let call_start_borrows = c.borrows
-                c = c.check_call_args(e.args, sig.params, sig.param_count, e.span)
+                c = c.check_call_args(e.args, fn_param_list_clone(&call_params), sig.param_count, e.span)
                 c = c.check_callee_effects(e.span, sig.effects, sig.effect_count)
-                c = c.release_call_arg_borrows(e.args, sig.params, call_start_borrows)
-                (c, sig.return_type)
+                c = c.release_call_arg_borrows(e.args, call_params, call_start_borrows)
+                (c, call_ret)
             } else {
                 if type_is_unresolved_type_param_in_tables(c.structs, c.enums, base_ty) {
                     let call_start_borrows = c.borrows
@@ -26164,6 +26784,13 @@ impl Checker {
                 refused_unimplemented = true
             }
             let call_start_borrows = c.borrows
+            // E263: mirrors checker_check_call_expr_inplace.
+            if generic_fn_sig_is(c.generic_fn_sigs, callee_ty.fn_sig_id) && !call_expr_has_type_args(e) {
+                c = c.report_error_at(e.span, 263, 0, 0, 0)
+                c = c.check_expr_list_no_type_no_linear_consume(e.args)
+                c = c.release_call_arg_borrows(e.args, None, call_start_borrows)
+                return (c, ty_error())
+            }
             var effective_params = fn_param_list_clone(&sig.params)
             var effective_return_type = sig.return_type
             match call_expr_type_args(e) {
@@ -28969,6 +29596,7 @@ impl Checker {
                 let tmpl_defining_module = tmpl.defining_module
                 // Build mangled name
                 let mangled = mangle_generic_name(&tmpl_name, &args)
+                generic_instance_record(self.generic_instances, mangled, tmpl_name, &args)
 
                 // Check if already monomorphized
                 var c = self
