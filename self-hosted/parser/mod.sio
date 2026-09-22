@@ -12,6 +12,7 @@ use parser::types::*
 use parser::exprs::*
 use parser::stmts::*
 use parser::items::*
+use io::env::{read_env}
 
 fn parse_program_loop(mut_p: Parser) -> Program with Mut, IO, Panic, Div, Alloc {
     var p = mut_p
@@ -123,6 +124,24 @@ fn parse_items_loop(mut_p: Parser) -> Option<Box<ItemList>> with Mut, IO, Panic,
     reverse_item_list_opt(rev_items_opt)
 }
 
+// SOUNIO_DISABLE_GLOBAL_INIT_MODULE_SCOPE=1 restores the old bare-name behaviour:
+// every module keeps serial 0, so the side table is one undifferentiated pool again
+// (ast_gvi_scope then reads the whole table). It exists so a suspected miscompile can
+// be attributed to the module scoping, and so the regression gate can prove its
+// fixtures still collide. Memoised: read_env allocates and is never reclaimed.
+var GVI_SCOPE_OFF: i64 = 0
+var GVI_SCOPE_OFF_CHECKED: i64 = 0
+
+fn parse_gvi_scope_disabled() -> bool with IO, Mut, Panic, Div {
+    if GVI_SCOPE_OFF_CHECKED == 0 {
+        GVI_SCOPE_OFF_CHECKED = 1
+        if str_eq(read_env("SOUNIO_DISABLE_GLOBAL_INIT_MODULE_SCOPE"), "1") {
+            GVI_SCOPE_OFF = 1
+        }
+    }
+    GVI_SCOPE_OFF == 1
+}
+
 pub fn parse_items_preloaded(token_count: i64) -> Option<Box<ItemList>> with Mut, IO, Panic, Div, Alloc {
     parser_reset_last_errors()
     parser_reset_truncated_literals()
@@ -133,7 +152,21 @@ pub fn parse_items_preloaded(token_count: i64) -> Option<Box<ItemList>> with Mut
     }
     var p = parser_new()
     p.token_count = token_count
-    parse_items_loop(p)
+    if GLOBAL_VAR_INIT_SUPPRESS_RESET != 0 && !parse_gvi_scope_disabled() {
+        // The side table accumulates across modules: this parse is a NEW module.
+        // Give it its own serial so its records stay distinguishable from a
+        // same-named definition in another module (see ast_gvi_scope).
+        ast_global_var_init_begin_module()
+        items_gvi_prescan_defs(p, token_count)
+    }
+    let items = parse_items_loop(p)
+    if GLOBAL_VAR_INIT_AMBIG_COUNT > 0 {
+        print("warning[global_init_ambiguous]: ")
+        print_int(GLOBAL_VAR_INIT_AMBIG_COUNT)
+        print(" global initializer(s) name a fn or global that two or more other modules define; not folded (left zero)\n")
+        GLOBAL_VAR_INIT_AMBIG_COUNT = 0
+    }
+    items
 }
 
 // ============================================================

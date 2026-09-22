@@ -1430,6 +1430,39 @@ pub var GLOBAL_VAR_INIT_COUNT: i64 = 0
 // Overflow past 8192 is still a silent drop (record fns return unit).
 pub var GLOBAL_VAR_INIT_HASHES: [i64; 8192] = [0; 8192]
 pub var GLOBAL_VAR_INIT_VALUES: [i64; 8192] = [0; 8192]
+// Module identity of every word above (parallel arrays, same index). The table is
+// keyed by the BARE name and deliberately accumulates across modules, so two
+// modules that each define a private `fn helper` (or a same-named global) used to
+// share one key: the second module's fn was never recorded ("already has init
+// words"), and a global initialiser calling `helper()` folded the OTHER module's
+// body. Each word now carries the serial of the module being parsed and whether its
+// definition is importable, and the parse-time lookups (ast_gvi_scope) resolve a
+// name against one module instead of against the whole table.
+//   MODS[i]  serial of the module that recorded word i (0 = main / single module)
+//   PUBS[i]  1 if another module may name the definition: every global (visibility
+//            is not enforced on globals), and a free fn declared `pub`/`pub(..)`;
+//            0 for a private fn
+pub var GLOBAL_VAR_INIT_MODS: [i64; 8192] = [0; 8192]
+pub var GLOBAL_VAR_INIT_PUBS: [i64; 8192] = [0; 8192]
+// CUR_MOD: the module being parsed (record tag). EVAL_MOD: the module whose names a
+// lookup resolves in -- equal to CUR_MOD except while the body of a pure fn that
+// belongs to ANOTHER module is being folded. NEXT_MOD: next serial to hand out.
+pub var GLOBAL_VAR_INIT_CUR_MOD: i64 = 0
+pub var GLOBAL_VAR_INIT_EVAL_MOD: i64 = 0
+pub var GLOBAL_VAR_INIT_NEXT_MOD: i64 = 0
+pub var GLOBAL_VAR_INIT_CUR_PUB: i64 = 1
+// Top-level definition names (fn / var / let / const) of the module being parsed,
+// as ast_name_hash values, filled by a token pre-scan before the module is parsed.
+// It answers "does the module being parsed define this name?" even for a definition
+// that is not foldable or that comes later in the file -- the case where falling
+// back to another module's record would fold the wrong body. Overflow is
+// conservative: DEF_OVERFLOW makes every name "defined", i.e. no cross-module fold.
+pub var GLOBAL_VAR_INIT_DEFS: [i64; 16384] = [0; 16384]
+pub var GLOBAL_VAR_INIT_DEF_COUNT: i64 = 0
+pub var GLOBAL_VAR_INIT_DEF_OVERFLOW: i64 = 0
+// Lookups that could not be resolved because two or more OTHER modules define the
+// name; reported (not silently zero-filled) by the parse driver.
+pub var GLOBAL_VAR_INIT_AMBIG_COUNT: i64 = 0
 // When 1, parse_items_preloaded does NOT reset the global-init table, so a
 // multi-module compilation accumulates every module's f64 global initializers
 // (main is parsed first, then each import). The multimodule lower entry sets it
@@ -1457,12 +1490,44 @@ pub fn ast_name_hash(n: Name) -> i64 with Div {
 
 pub fn ast_reset_global_var_inits() with Mut {
     GLOBAL_VAR_INIT_COUNT = 0
+    GLOBAL_VAR_INIT_CUR_MOD = 0
+    GLOBAL_VAR_INIT_EVAL_MOD = 0
+    GLOBAL_VAR_INIT_NEXT_MOD = 0
+    GLOBAL_VAR_INIT_CUR_PUB = 1
+    GLOBAL_VAR_INIT_DEF_COUNT = 0
+    GLOBAL_VAR_INIT_DEF_OVERFLOW = 0
+    GLOBAL_VAR_INIT_AMBIG_COUNT = 0
+}
+
+// A new module is about to be parsed into an ACCUMULATING table
+// (GLOBAL_VAR_INIT_SUPPRESS_RESET == 1). Hands out the next serial; the first module
+// parsed (main) is 0, then imports in load order. Not called when the table is
+// reset per parse, so a single-module compile keeps serial 0 throughout and behaves
+// exactly as before.
+pub fn ast_global_var_init_begin_module() with Mut {
+    GLOBAL_VAR_INIT_CUR_MOD = GLOBAL_VAR_INIT_NEXT_MOD
+    GLOBAL_VAR_INIT_EVAL_MOD = GLOBAL_VAR_INIT_NEXT_MOD
+    GLOBAL_VAR_INIT_NEXT_MOD = GLOBAL_VAR_INIT_NEXT_MOD + 1
+    GLOBAL_VAR_INIT_CUR_PUB = 1
+    GLOBAL_VAR_INIT_DEF_COUNT = 0
+    GLOBAL_VAR_INIT_DEF_OVERFLOW = 0
+}
+
+pub fn ast_gvi_def_add(h: i64) with Mut {
+    if GLOBAL_VAR_INIT_DEF_COUNT < 16384 {
+        GLOBAL_VAR_INIT_DEFS[GLOBAL_VAR_INIT_DEF_COUNT as usize] = h
+        GLOBAL_VAR_INIT_DEF_COUNT = GLOBAL_VAR_INIT_DEF_COUNT + 1
+    } else {
+        GLOBAL_VAR_INIT_DEF_OVERFLOW = 1
+    }
 }
 
 pub fn ast_record_global_var_init(name: Name, value: i64) with Mut, Div {
     if GLOBAL_VAR_INIT_COUNT < 8192 {
         GLOBAL_VAR_INIT_HASHES[GLOBAL_VAR_INIT_COUNT as usize] = ast_name_hash(name)
         GLOBAL_VAR_INIT_VALUES[GLOBAL_VAR_INIT_COUNT as usize] = value
+        GLOBAL_VAR_INIT_MODS[GLOBAL_VAR_INIT_COUNT as usize] = GLOBAL_VAR_INIT_CUR_MOD
+        GLOBAL_VAR_INIT_PUBS[GLOBAL_VAR_INIT_COUNT as usize] = GLOBAL_VAR_INIT_CUR_PUB
         GLOBAL_VAR_INIT_COUNT = GLOBAL_VAR_INIT_COUNT + 1
     }
 }
@@ -1519,6 +1584,129 @@ pub fn ast_record_global_str_init(name: Name, lit: Name) with Mut, Div {
     }
 }
 
+// ---- module-scoped reads -------------------------------------------------------
+// Every reader below is scoped to ONE module's words for `name`. `ast_gvi_*_in`
+// take the module explicitly; the unsuffixed ast_global_var_init_* keep their old
+// NAME-only signature (lower time has no "current module") and read the words of
+// the first module that recorded `name`. With one defining module that is the whole
+// table, as before; with two, it no longer concatenates their words into one
+// garbled element list.
+
+// Serial of the first module that recorded any word for `name`, or -1.
+pub fn ast_gvi_first_mod(name: Name) -> i64 with Div {
+    let h = ast_name_hash(name)
+    var i: i64 = 0
+    while i < GLOBAL_VAR_INIT_COUNT {
+        if GLOBAL_VAR_INIT_HASHES[i as usize] == h {
+            return GLOBAL_VAR_INIT_MODS[i as usize]
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+// Count of words module `m` recorded for `name`.
+pub fn ast_gvi_count_in(name: Name, m: i64) -> i64 with Div {
+    let h = ast_name_hash(name)
+    var n: i64 = 0
+    var i: i64 = 0
+    while i < GLOBAL_VAR_INIT_COUNT {
+        if GLOBAL_VAR_INIT_HASHES[i as usize] == h && GLOBAL_VAR_INIT_MODS[i as usize] == m {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    n
+}
+
+// Nth word (0-based, source order) module `m` recorded for `name`; 0 if out of range.
+pub fn ast_gvi_nth_in(name: Name, m: i64, index: i64) -> i64 with Div {
+    let h = ast_name_hash(name)
+    var seen: i64 = 0
+    var i: i64 = 0
+    while i < GLOBAL_VAR_INIT_COUNT {
+        if GLOBAL_VAR_INIT_HASHES[i as usize] == h && GLOBAL_VAR_INIT_MODS[i as usize] == m {
+            if seen == index {
+                return GLOBAL_VAR_INIT_VALUES[i as usize]
+            }
+            seen = seen + 1
+        }
+        i = i + 1
+    }
+    0
+}
+
+// Does the module being parsed define `name` at top level (fn / var / let / const)?
+pub fn ast_gvi_cur_module_defines(name: Name) -> bool with Div {
+    if GLOBAL_VAR_INIT_DEF_OVERFLOW != 0 {
+        return true
+    }
+    let h = ast_name_hash(name)
+    var i: i64 = 0
+    while i < GLOBAL_VAR_INIT_DEF_COUNT {
+        if GLOBAL_VAR_INIT_DEFS[i as usize] == h {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// The one OTHER module with an importable record for `name`: its serial, or -1 if
+// there is none, or -2 if more than one module has one.
+pub fn ast_gvi_foreign_pub_mod(name: Name) -> i64 with Div {
+    let h = ast_name_hash(name)
+    var found: i64 = 0 - 1
+    var i: i64 = 0
+    while i < GLOBAL_VAR_INIT_COUNT {
+        if GLOBAL_VAR_INIT_HASHES[i as usize] == h && GLOBAL_VAR_INIT_PUBS[i as usize] == 1 {
+            let m = GLOBAL_VAR_INIT_MODS[i as usize]
+            if m != GLOBAL_VAR_INIT_CUR_MOD {
+                if found == 0 - 1 {
+                    found = m
+                } else if found != m {
+                    return 0 - 2
+                }
+            }
+        }
+        i = i + 1
+    }
+    found
+}
+
+// Which module's words a PARSE-TIME lookup of `name` reads (-1 = none: unfoldable).
+//   1. the module doing the lookup, if it has recorded `name`;
+//   2. while the body of another module's pure fn is being folded (EVAL_MOD !=
+//      CUR_MOD): nothing else. That body's other names live in ITS module, and this
+//      module's same-named record must not stand in for them;
+//   3. otherwise, the single other module with an importable record -- unless the
+//      module being parsed defines `name` itself (then the name is its own, merely
+//      unfoldable, and another module's record is not a stand-in);
+//   4. two or more such modules: ambiguous, unfolded and counted.
+pub fn ast_gvi_scope(name: Name) -> i64 with Mut, Div {
+    let ctx = GLOBAL_VAR_INIT_EVAL_MOD
+    if ast_gvi_count_in(name, ctx) > 0 {
+        return ctx
+    }
+    if ctx != GLOBAL_VAR_INIT_CUR_MOD {
+        return 0 - 1
+    }
+    let f = ast_gvi_foreign_pub_mod(name)
+    if f < 0 - 1 {
+        if !ast_gvi_cur_module_defines(name) {
+            GLOBAL_VAR_INIT_AMBIG_COUNT = GLOBAL_VAR_INIT_AMBIG_COUNT + 1
+        }
+        return 0 - 1
+    }
+    if f >= 0 {
+        if ast_gvi_cur_module_defines(name) {
+            return 0 - 1
+        }
+        return f
+    }
+    0 - 1
+}
+
 pub fn ast_lookup_global_var_init(name: Name) -> i64 with Div {
     let h = ast_name_hash(name)
     var i: i64 = 0
@@ -1531,37 +1719,24 @@ pub fn ast_lookup_global_var_init(name: Name) -> i64 with Div {
     0
 }
 
-// Count of recorded init words for `name`. Scalar / array-repeat → 1;
-// element-list `[a,b,c]` → N. Zero means "no recorded initializer".
-// Distinct from lookup(value)==0: a recorded zero fill still counts as present.
+// Count of recorded init words for `name` (first defining module). Scalar /
+// array-repeat -> 1; element-list `[a,b,c]` -> N. Zero means "no recorded
+// initializer". Distinct from lookup(value)==0: a recorded zero fill still counts.
 pub fn ast_global_var_init_count(name: Name) -> i64 with Div {
-    let h = ast_name_hash(name)
-    var n: i64 = 0
-    var i: i64 = 0
-    while i < GLOBAL_VAR_INIT_COUNT {
-        if GLOBAL_VAR_INIT_HASHES[i as usize] == h {
-            n = n + 1
-        }
-        i = i + 1
+    let m = ast_gvi_first_mod(name)
+    if m < 0 {
+        return 0
     }
-    n
+    ast_gvi_count_in(name, m)
 }
 
 // Nth recorded init word for `name` (0-based, source order). Returns 0 if out of range.
 pub fn ast_global_var_init_nth(name: Name, index: i64) -> i64 with Div {
-    let h = ast_name_hash(name)
-    var seen: i64 = 0
-    var i: i64 = 0
-    while i < GLOBAL_VAR_INIT_COUNT {
-        if GLOBAL_VAR_INIT_HASHES[i as usize] == h {
-            if seen == index {
-                return GLOBAL_VAR_INIT_VALUES[i as usize]
-            }
-            seen = seen + 1
-        }
-        i = i + 1
+    let m = ast_gvi_first_mod(name)
+    if m < 0 {
+        return 0
     }
-    0
+    ast_gvi_nth_in(name, m, index)
 }
 
 // 1 if GLOBAL_VAR_INIT words for `name` encode a string literal (Wave15e).

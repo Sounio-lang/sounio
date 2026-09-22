@@ -57,6 +57,41 @@ pub fn items_reset_pure_fn_reg() with Mut {
     pure_fn_local_reset()
 }
 
+// 1 while parse_impl_item is parsing a method. A method is never reachable by the bare
+// `name()` this table folds (that needs `Type::name()` or `x.name()`), so it is not
+// recorded: recorded under its bare name it would shadow, or be mistaken for, a free
+// fn of the same name -- in its own module and, if `pub`, in every importer.
+var ITEMS_IN_IMPL: i64 = 0
+
+// Fill GLOBAL_VAR_INIT_DEFS with the top-level definition names of the module whose
+// tokens are loaded, before it is parsed. A name is a top-level definition when
+// `fn` / `var` / `let` / `const` sits at brace depth 0 directly before an
+// identifier (`const fn` is caught at the `fn`). Called only when the side table
+// accumulates across modules (parse_items_preloaded); see ast_gvi_scope for why.
+pub fn items_gvi_prescan_defs(p: Parser, token_count: i64) with Mut, Panic, Div {
+    var depth: i64 = 0
+    var i: i64 = 0
+    while i < token_count {
+        let k = pt_read_kind(i)
+        if k == TokenKind::LBrace {
+            depth = depth + 1
+        } else if k == TokenKind::RBrace {
+            if depth > 0 {
+                depth = depth - 1
+            }
+        } else if depth == 0 && (k == TokenKind::Fn || k == TokenKind::Var || k == TokenKind::Let || k == TokenKind::Const) {
+            var j = i + 1
+            while j < token_count && pt_read_kind(j) == TokenKind::Newline {
+                j = j + 1
+            }
+            if j < token_count && pt_read_kind(j) == TokenKind::Ident {
+                ast_gvi_def_add(ast_name_hash(parser_name_at(p, j)))
+            }
+        }
+        i = i + 1
+    }
+}
+
 // The extern-block pending queue (#1547) was REMOVED here, 2026-08-23, in the
 // same change that deleted its last caller.
 //
@@ -311,8 +346,9 @@ fn pure_fn_reg_record(
     params: &Option<Box<ParamList>>,
     body: &Block
 ) with Mut, Div {
-    // Already has any init words under this name — do not clobber.
-    if ast_global_var_init_count(name) != 0 {
+    // This module already has init words under this name — do not clobber. Scoped
+    // to the module being parsed: another module's same-named fn is a different fn.
+    if ast_gvi_count_in(name, GLOBAL_VAR_INIT_CUR_MOD) != 0 {
         return
     }
     var ph0: i64 = 0
@@ -460,23 +496,26 @@ fn items_eval_global_init_word(e: &Expr) -> (bool, i64) with Mut, Div {
                 }
                 match (*e).args {
                     None => {
-                        // Zero-arg pure word under the function name.
-                        let c = ast_global_var_init_count((*callee).name)
+                        // Zero-arg pure word under the function name, in the module
+                        // that owns the callee (ast_gvi_scope), not "any module".
+                        let sc = ast_gvi_scope((*callee).name)
+                        let c = ast_gvi_count_in((*callee).name, sc)
                         if c == 1 {
-                            return (true, ast_global_var_init_nth((*callee).name, 0))
+                            return (true, ast_gvi_nth_in((*callee).name, sc, 0))
                         }
                         return (false, 0)
                     }
                     Some(_) => {
                         // Paramful pure: descriptor lives in GLOBAL_VAR_INIT multi-word.
-                        let c = ast_global_var_init_count((*callee).name)
+                        let sc = ast_gvi_scope((*callee).name)
+                        let c = ast_gvi_count_in((*callee).name, sc)
                         if c < 3 {
                             return (false, 0)
                         }
                         if PURE_FN_CALL_DEPTH >= 8 {
                             return (false, 0)
                         }
-                        let magic = ast_global_var_init_nth((*callee).name, 0)
+                        let magic = ast_gvi_nth_in((*callee).name, sc, 0)
                         // Decode descriptor.
                         var kind: i64 = 0
                         var op_i: i64 = 0
@@ -492,18 +531,18 @@ fn items_eval_global_init_word(e: &Expr) -> (bool, i64) with Mut, Div {
                                 return (false, 0)
                             }
                             kind = 1
-                            op_i = ast_global_var_init_nth((*callee).name, 1)
-                            pc = ast_global_var_init_nth((*callee).name, 2)
-                            ph0 = ast_global_var_init_nth((*callee).name, 3)
-                            ph1 = ast_global_var_init_nth((*callee).name, 4)
+                            op_i = ast_gvi_nth_in((*callee).name, sc, 1)
+                            pc = ast_gvi_nth_in((*callee).name, sc, 2)
+                            ph0 = ast_gvi_nth_in((*callee).name, sc, 3)
+                            ph1 = ast_gvi_nth_in((*callee).name, sc, 4)
                         } else if magic == 0 - 900002 {
                             // ident: magic, pc, ph0
                             if c < 3 {
                                 return (false, 0)
                             }
                             kind = 2
-                            pc = ast_global_var_init_nth((*callee).name, 1)
-                            ph0 = ast_global_var_init_nth((*callee).name, 2)
+                            pc = ast_gvi_nth_in((*callee).name, sc, 1)
+                            ph0 = ast_gvi_nth_in((*callee).name, sc, 2)
                         } else if magic == 0 - 900003 {
                             // general: magic, pc, body_bits, ph0..ph3
                             // body_bits = StmtList* as i64 (Wave15a; not a REG index)
@@ -511,15 +550,18 @@ fn items_eval_global_init_word(e: &Expr) -> (bool, i64) with Mut, Div {
                                 return (false, 0)
                             }
                             kind = 3
-                            pc = ast_global_var_init_nth((*callee).name, 1)
-                            body_bits = ast_global_var_init_nth((*callee).name, 2)
-                            ph0 = ast_global_var_init_nth((*callee).name, 3)
-                            ph1 = ast_global_var_init_nth((*callee).name, 4)
-                            ph2 = ast_global_var_init_nth((*callee).name, 5)
-                            ph3 = ast_global_var_init_nth((*callee).name, 6)
+                            pc = ast_gvi_nth_in((*callee).name, sc, 1)
+                            body_bits = ast_gvi_nth_in((*callee).name, sc, 2)
+                            ph0 = ast_gvi_nth_in((*callee).name, sc, 3)
+                            ph1 = ast_gvi_nth_in((*callee).name, sc, 4)
+                            ph2 = ast_gvi_nth_in((*callee).name, sc, 5)
+                            ph3 = ast_gvi_nth_in((*callee).name, sc, 6)
                         } else {
                             return (false, 0)
                         }
+                        // Lookups made while folding the callee's body resolve in the
+                        // callee's own module (restored below with the local env).
+                        let saved_eval_mod = GLOBAL_VAR_INIT_EVAL_MOD
                         // Save outer local env.
                         var saved_n = PURE_FN_LOCAL_N
                         var saved_h: [i64; 32] = [0; 32]
@@ -598,6 +640,7 @@ fn items_eval_global_init_word(e: &Expr) -> (bool, i64) with Mut, Div {
                                 // Wave15a: body_bits is StmtList* stored as i64 in
                                 // GLOBAL_VAR_INIT (seed-safe). Walk pure return chain:
                                 // let-binders then final StmtExpr, with params bound.
+                                GLOBAL_VAR_INIT_EVAL_MOD = sc
                                 let body_ptr = body_bits as *mut StmtList
                                 if body_ptr != 0 as *mut StmtList {
                                     var bcur: *mut StmtList = body_ptr
@@ -649,6 +692,7 @@ fn items_eval_global_init_word(e: &Expr) -> (bool, i64) with Mut, Div {
                                 }
                             }
                         }
+                        GLOBAL_VAR_INIT_EVAL_MOD = saved_eval_mod
                         PURE_FN_CALL_DEPTH = PURE_FN_CALL_DEPTH - 1
                         PURE_FN_ACTIVE_SLOT = 0 - 1
                         pure_fn_local_reset()
@@ -678,9 +722,10 @@ fn items_eval_global_init_word(e: &Expr) -> (bool, i64) with Mut, Div {
         if lp.0 {
             return (true, lp.1)
         }
-        let c = ast_global_var_init_count((*e).name)
+        let sc = ast_gvi_scope((*e).name)
+        let c = ast_gvi_count_in((*e).name, sc)
         if c == 1 {
-            return (true, ast_global_var_init_nth((*e).name, 0))
+            return (true, ast_gvi_nth_in((*e).name, sc, 0))
         }
         return (false, 0)
     }
@@ -853,14 +898,18 @@ fn items_maybe_record_pure_fn_const(
     effects: &Option<Box<EffectList>>,
     body: &Block
 ) with Mut, Div {
+    if ITEMS_IN_IMPL == 1 {
+        return
+    }
     match *effects {
         Some(_) => {
             return
         }
         None => {}
     }
-    // Already has init words (prior global of same name) — do not overwrite/extend.
-    if ast_global_var_init_count(name) != 0 {
+    // This module already has init words (prior global of same name) — do not
+    // overwrite/extend. Scoped to the module being parsed, see pure_fn_reg_record.
+    if ast_gvi_count_in(name, GLOBAL_VAR_INIT_CUR_MOD) != 0 {
         return
     }
     match *params {
@@ -1696,7 +1745,15 @@ impl Parser {
 
         let span = p.span_from(start)
         // Wave10: register pure zero-arg const bodies for global element-list calls.
+        // The record carries whether another module may call this fn by its bare
+        // name: a private fn may not (ast_gvi_scope). Methods are not recorded.
+        if visibility_to_bool(visibility) {
+            GLOBAL_VAR_INIT_CUR_PUB = 1
+        } else {
+            GLOBAL_VAR_INIT_CUR_PUB = 0
+        }
         items_maybe_record_pure_fn_const(name, &params_opt, &effects_opt, &body)
+        GLOBAL_VAR_INIT_CUR_PUB = 1
         let fn_def = FnDef {
             name: name,
             params: params_opt,
@@ -2086,7 +2143,9 @@ impl Parser {
                     // `false` here was an ABI mismatch (bool bits read as a Visibility) that
                     // corrupted the call and SIGSEGV'd on every impl method; it built only
                     // because the type error is a non-fatal warning. Methods default private.
+                    ITEMS_IN_IMPL = 1
                     let pair2 = p.parse_fn_item(method_visibility, false)
+                    ITEMS_IN_IMPL = 0
                     p = pair2.0
                     let method = pair2.1
                     rev_methods_opt = Some(Box::new(ItemList { head: method, tail: rev_methods_opt }))
