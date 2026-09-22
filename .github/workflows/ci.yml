@@ -16,9 +16,12 @@ on:
   schedule:
     - cron: '23 3 * * *'
 
+permissions:
+  contents: read
+
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   impact:
@@ -35,8 +38,10 @@ jobs:
       math: ${{ steps.classify.outputs.math }}
       ontology: ${{ steps.classify.outputs.ontology }}
       clinical: ${{ steps.classify.outputs.clinical }}
+      chemistry: ${{ steps.classify.outputs.chemistry }}
       sio: ${{ steps.classify.outputs.sio }}
       full: ${{ steps.classify.outputs.full }}
+      exhaustive: ${{ steps.layers.outputs.exhaustive }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -48,8 +53,104 @@ jobs:
           CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: bash scripts/ci/classify_ci_impact.sh
+      - id: layers
+        name: Select exhaustive qualification
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          FULL_IMPACT: ${{ steps.classify.outputs.full }}
+        run: |
+          # Unknown surfaces / CI edits retain full qualification even on PRs.
+          if [[ "$EVENT_NAME" != pull_request || "$FULL_IMPACT" == true ]]; then
+            echo 'exhaustive=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'exhaustive=false' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Artifact provenance negative controls
+        run: python3 scripts/ci/test_canonical_madaros_artifact.py
       - name: Classifier self-test
         run: bash scripts/ci/impact_ci_selftest.sh
+
+  canonical-madaros:
+    name: Canonical current-source Madaros
+    needs: impact
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      sha256: ${{ steps.seal.outputs.sha256 }}
+      artifact-name: madaros-linux-x86_64-${{ github.sha }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build once from the checked-out event SHA
+        run: |
+          ulimit -s 1048576
+          # Clear overrides: the builder must derive a fresh source-tracking seed.
+          env -u SOUC_BIN -u SOUNIO_SOUC_BIN -u SOUNIO_STDLIB_PATH \
+            bash scripts/ci/build_modular_madaros.sh /tmp/madaros-canonical/madaros
+      - name: Seal source, bootstrap and binary provenance
+        id: seal
+        run: python3 scripts/ci/canonical_madaros_artifact.py seal /tmp/madaros-canonical
+      - uses: actions/upload-artifact@v4
+        with:
+          name: madaros-linux-x86_64-${{ github.sha }}-${{ github.run_attempt }}
+          path: /tmp/madaros-canonical
+          if-no-files-found: error
+          retention-days: 7
+
+  correlated-effect:
+    name: Correlated effect
+    needs: [impact, canonical-madaros]
+    runs-on: ubuntu-24.04
+    # Current-source Madaros build is required for E221 behavioural controls;
+    # the prebuilt bin/souc ELF does not carry this PR's checker.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Slot-identity debt ratchet
+        run: bash scripts/ci/correlated_slot_ratchet_gate.sh
+
+      - name: Negative control — a new slot-identity site must fail the ratchet
+        run: |
+          set -euo pipefail
+          # The ratchet freezes Knowledge-binding same-ident debt at 0 and
+          # skips tests/. Plant a live site under examples/ (counted path),
+          # assert the gate goes red for the right reason, then restore.
+          sabotage=examples/_correlated_ratchet_sabotage.sio
+          cat > "$sabotage" <<'SIO'
+          // temporary: CI negative control for correlated_slot_ratchet_gate
+          fn _corr_sabotage() -> i32 with IO, Epistemic {
+              let m = measure(1.0, uncertainty: 0.1)
+              let a = m + m
+              0
+          }
+          SIO
+          set +e
+          bash scripts/ci/correlated_slot_ratchet_gate.sh > /tmp/corr_neg.log 2>&1
+          rc=$?
+          set -e
+          rm -f "$sabotage"
+          if [[ "$rc" -eq 0 ]]; then
+            echo "NEGATIVE_CONTROL_FAIL: ratchet stayed green after planting m+m"
+            cat /tmp/corr_neg.log
+            exit 1
+          fi
+          grep -q 'debt rose' /tmp/corr_neg.log || {
+            echo "NEGATIVE_CONTROL_FAIL: red, but not for the ratchet reason"
+            cat /tmp/corr_neg.log
+            exit 1
+          }
+          echo "NEGATIVE_CONTROL_PASS"
+          tail -20 /tmp/corr_neg.log
+
+      - uses: ./.github/actions/canonical-madaros
+        with:
+          sha256: ${{ needs.canonical-madaros.outputs.sha256 }}
+          artifact-name: ${{ needs.canonical-madaros.outputs.artifact-name }}
+
+      - name: R6 acceptance controls
+        env:
+          MADAROS_RAW_BIN: /tmp/madaros-canonical/madaros
+        run: bash scripts/ci/correlated_effect_gate.sh
 
   contracts:
     name: Contracts
@@ -273,70 +374,11 @@ jobs:
         run: |
           bash scripts/ci/heuristic_firewall_gate.sh --demo
           bash scripts/ci/heuristic_firewall_gate.sh
-      # --- self-falsifying compilation line -------------------------------
-      # The line's own W4_CI_WIRING clause, carried since R5: a chain of
-      # custody guarded by a check nobody executes is aspirational. So the
-      # rungs that are green on this branch are wired here, and the ones that
-      # are not are named in the PR with the measurement that says why.
-      #
-      # Contract arm only. The compile arms (SFCL_R2_RUN_COMPILE,
-      # SFCL_R17_RUN_COMPILE, SFCL_R20_RUN_COMPILE) need a purpose-built
-      # self-hosted compiler and are deliberately NOT wired: a ~40 min build
-      # per push is not a budget this repo has. Those rungs' behaviour
-      # receipts are bound to the executor's sha256, so editing the executor
-      # turns them red rather than certifying stale behaviour — which is why
-      # R2, R17 and R20 are absent from the list below. They are red on the
-      # research branch too, measured, not introduced by this PR.
-      #
-      # R22 needs `node` (it exercises the docs-registry checker end-to-end in
-      # a hermetic hardlink farm, both control arms) and refuses rather than
-      # passing if node is absent.
-      #
-      # The BASE gate is not wired either, and CI is what found that. Its
-      # S4_RETROSPECTIVE clause audits three corrections by SHA (daa0635d0,
-      # ec579a24c, eb38e9ce5), all branch-local to the functor-F lane. It
-      # passed every local run because a git worktree SHARES THE OBJECT STORE
-      # with the branch it was cut from, so those commits resolved; in CI's
-      # fresh clone they do not, and the clause refuses rather than guessing.
-      # Same reason R4 is absent. A gate that is green only in the environment
-      # that authored it is not green.
-      # Eight of the twenty gates below import numpy (R3, R7, R8, R9, R10, R15,
-      # R16, R19) and this workflow installs no python dependencies anywhere.
-      # CI is what established that: R3 died with ModuleNotFoundError before
-      # printing a line, which is also why the branch's "21/21" was a LOCAL
-      # measurement — in CI those eight had never run at all.
-      #
-      # Installing it is the smaller change. Dropping eight rungs to avoid one
-      # pip install would be trading the checks for the convenience of not
-      # running them, which is the exact failure R5's W4 clause names.
-      - name: Self-falsifying compilation line — numpy
+      # Keep numpy available to the remaining Python contracts. The existing
+      # self-falsification battery runs concurrently in contracts-self-falsification
+      # and remains mandatory in Fast PR Gate and CI Decision.
+      - name: Python contract dependencies
         run: python3 -m pip install --quiet --disable-pip-version-check numpy
-
-      - name: Self-falsifying compilation line
-        run: |
-          for g in scripts/ci/self_falsifying_compilation_line_r1_gate.sh \
-                   scripts/ci/self_falsifying_compilation_line_r3_gate.sh \
-                   scripts/ci/self_falsifying_compilation_line_r7_gate.sh \
-                   scripts/ci/self_falsifying_compilation_line_r8_gate.sh \
-                   scripts/ci/self_falsifying_compilation_line_r9_gate.sh \
-                   scripts/ci/self_falsifying_compilation_line_r10_gate.sh \
-                   scripts/ci/self_falsifying_compilation_line_r12_gate.sh \
-                   scripts/ci/self_falsifying_compilation_line_r13_gate.sh \
-                   scripts/ci/self_falsifying_compilation_line_r14_gate.sh \
-                   scripts/ci/self_falsifying_compilation_line_r15_gate.sh \
-                   scripts/ci/self_falsifying_compilation_line_r16_gate.sh \
-                   scripts/ci/self_falsifying_compilation_line_r19_gate.sh \
-                   scripts/ci/self_falsifying_compilation_line_r21_gate.sh \
-                   scripts/ci/self_falsifying_compilation_line_r22_gate.sh \
-                   scripts/ci/self_falsifying_compilation_line_r23_gate.sh \
-                   scripts/ci/self_falsifying_compilation_line_r24_gate.sh \
-                   scripts/ci/self_falsifying_compilation_line_r25_gate.sh \
-                   scripts/ci/self_falsifying_compilation_line_r27_gate.sh \
-                   scripts/ci/self_falsifying_compilation_line_r28_gate.sh \
-                   scripts/ci/self_falsifying_compilation_line_r29_gate.sh; do
-            echo "--- $g"
-            bash "$g"
-          done
 
       # R6 corpus sweep (#2392) moved to dedicated job `r6-corpus-sweep`.
       # When executed inside Contracts, a timeout in R6 skipped the ~66
@@ -526,10 +568,6 @@ jobs:
       # is an instant green: 3.0s, 70.1s and 210s of real work respectively.
       - name: Uncertain equality keeps its trust channel
         run: bash scripts/ci/madaros_uncertain_eq_trust_gate.sh
-      - name: Ontology frontiers hold
-        run: bash scripts/ci/ontology_frontiers_gate.sh
-      - name: Multi-ontology composition holds
-        run: bash scripts/ci/ontology_multi_ontology_gate.sh
       # Absence of measurement must not read as success. Meta-gate requires a
       # positive GATE_MEASURED assertions=N receipt (see CI_ABSENCE_AS_SUCCESS_CONTRACT).
       #
@@ -706,6 +744,98 @@ jobs:
             fi
           fi
 
+  contracts-self-falsification:
+    name: Self-falsification contracts
+    needs: impact
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # --- self-falsifying compilation line -------------------------------
+      # The line's own W4_CI_WIRING clause, carried since R5: a chain of
+      # custody guarded by a check nobody executes is aspirational. So the
+      # rungs that are green on this branch are wired here, and the ones that
+      # are not are named in the PR with the measurement that says why.
+      #
+      # Contract arm only. The compile arms (SFCL_R2_RUN_COMPILE,
+      # SFCL_R17_RUN_COMPILE, SFCL_R20_RUN_COMPILE) need a purpose-built
+      # self-hosted compiler and are deliberately NOT wired: a ~40 min build
+      # per push is not a budget this repo has. Those rungs' behaviour
+      # receipts are bound to the executor's sha256, so editing the executor
+      # turns them red rather than certifying stale behaviour — which is why
+      # R2, R17 and R20 are absent from the list below. They are red on the
+      # research branch too, measured, not introduced by this PR.
+      #
+      # R22 needs `node` (it exercises the docs-registry checker end-to-end in
+      # a hermetic hardlink farm, both control arms) and refuses rather than
+      # passing if node is absent.
+      #
+      # The BASE gate is not wired either, and CI is what found that. Its
+      # S4_RETROSPECTIVE clause audits three corrections by SHA (daa0635d0,
+      # ec579a24c, eb38e9ce5), all branch-local to the functor-F lane. It
+      # passed every local run because a git worktree SHARES THE OBJECT STORE
+      # with the branch it was cut from, so those commits resolved; in CI's
+      # fresh clone they do not, and the clause refuses rather than guessing.
+      # Same reason R4 is absent. A gate that is green only in the environment
+      # that authored it is not green.
+      # Eight of the twenty gates below import numpy (R3, R7, R8, R9, R10, R15,
+      # R16, R19) and this workflow installs no python dependencies anywhere.
+      # CI is what established that: R3 died with ModuleNotFoundError before
+      # printing a line, which is also why the branch's "21/21" was a LOCAL
+      # measurement — in CI those eight had never run at all.
+      #
+      # Installing it is the smaller change. Dropping eight rungs to avoid one
+      # pip install would be trading the checks for the convenience of not
+      # running them, which is the exact failure R5's W4 clause names.
+      - name: Self-falsifying compilation line — numpy
+        run: python3 -m pip install --quiet --disable-pip-version-check numpy
+
+      - name: Self-falsifying compilation line
+        run: |
+          for g in scripts/ci/self_falsifying_compilation_line_r1_gate.sh \
+                   scripts/ci/self_falsifying_compilation_line_r3_gate.sh \
+                   scripts/ci/self_falsifying_compilation_line_r7_gate.sh \
+                   scripts/ci/self_falsifying_compilation_line_r8_gate.sh \
+                   scripts/ci/self_falsifying_compilation_line_r9_gate.sh \
+                   scripts/ci/self_falsifying_compilation_line_r10_gate.sh \
+                   scripts/ci/self_falsifying_compilation_line_r12_gate.sh \
+                   scripts/ci/self_falsifying_compilation_line_r13_gate.sh \
+                   scripts/ci/self_falsifying_compilation_line_r14_gate.sh \
+                   scripts/ci/self_falsifying_compilation_line_r15_gate.sh \
+                   scripts/ci/self_falsifying_compilation_line_r16_gate.sh \
+                   scripts/ci/self_falsifying_compilation_line_r19_gate.sh \
+                   scripts/ci/self_falsifying_compilation_line_r21_gate.sh \
+                   scripts/ci/self_falsifying_compilation_line_r22_gate.sh \
+                   scripts/ci/self_falsifying_compilation_line_r23_gate.sh \
+                   scripts/ci/self_falsifying_compilation_line_r24_gate.sh \
+                   scripts/ci/self_falsifying_compilation_line_r25_gate.sh \
+                   scripts/ci/self_falsifying_compilation_line_r27_gate.sh \
+                   scripts/ci/self_falsifying_compilation_line_r28_gate.sh \
+                   scripts/ci/self_falsifying_compilation_line_r29_gate.sh; do
+            echo "--- $g"
+            bash "$g"
+          done
+
+  distribution-contract:
+    needs: impact
+    uses: ./.github/workflows/compiler-distribution.yml
+
+  contracts-ontology:
+    name: Deep ontology contracts
+    needs: impact
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ontology frontiers hold
+        run: bash scripts/ci/ontology_frontiers_gate.sh
+      - name: Multi-ontology composition holds
+        run: bash scripts/ci/ontology_multi_ontology_gate.sh
+
   r6-corpus-sweep:
     name: R6 Corpus Sweep (Nightly)
     needs: impact
@@ -727,7 +857,7 @@ jobs:
   native-selfhost-linux-x86_64:
     name: Native Self-Host (Linux x86_64)
     needs: impact
-    if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.runtime == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true'
+    if: needs.impact.outputs.exhaustive == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
@@ -767,7 +897,7 @@ jobs:
   source-bootstrap-selfhost-linux-x86_64:
     name: Source-Bootstrap Self-Host (Linux x86_64)
     needs: impact
-    if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.full == 'true'
+    if: needs.impact.outputs.exhaustive == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
@@ -827,34 +957,15 @@ jobs:
 
   madaros-current-source-deref-f64:
     name: Madaros Current-Source f64 Lowering
-    needs: impact
+    needs: [impact, canonical-madaros]
     # `stdlib` is here for a measured reason: 7 files in main.sio's own import
     # closure live under stdlib/compiler/ontology/ and classify as stdlib, not
     # compiler. A PR that makes stdlib/compiler/ontology/store.sio unparseable
     # breaks the compiler's closure and, without this, runs none of these gates.
     if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true'
     runs-on: ubuntu-24.04
-    # 15 held a full Madaros build plus four sub-gates; the self-parse sweep adds
-    # ~20 s. The extra headroom is so a slow run reads as slow, not as a hang.
-    # Raised again to 35 here because this branch adds three more sub-gates to
-    # the same job (precise_stack_maps honesty, FPGA receipt staleness, and the
-    # epistemic e-graph reassociation gate).
-    # Raised again to 75: PR #2393 fixes the native codegen capacity walls
-    # (NC_BIG_CODE, NC_FLAT_RELOC_*) that previously made self-hosted/compiler/main.sio
-    # self-compiling into gen2 fail closed within seconds (rc=19/rc=20). It now
-    # actually runs the full multi-minute gen2 self-compile on every PR that
-    # reaches this gate, measured 20+ min for that step alone on a 4-core
-    # GH-hosted runner (it was previously never reached). 35 min was cancelled
-    # mid-compile with rc=0 errors=0 already achieved for the cheaper check rung.
-    # Raised to 110: on 2026-09-10 the gen2 self-compile alone measured 48–54 min
-    # on three consecutive green `main` runs (job totals 62–70 min), leaving
-    # under 10 min of headroom. PR #2460 (V0-E.5.7, +350 lines in lower.sio)
-    # was cancelled at the 75-min wall three times in a row with the gen2 rung
-    # still running (52+ min) and the PR-only known-failure recheck still to
-    # come; the same tree passes every other rung. The budget is a measurement
-    # of the self-compile, not a correctness claim — it must follow the
-    # compiler's size, or every lowering PR becomes a lottery at the wall.
-    timeout-minutes: 110
+    # Build time is in canonical-madaros; gen2 lives in exhaustive qualification.
+    timeout-minutes: 35
     env:
       SOUNIO_MADAROS_F64_LOWERING_GATE_DIR: /tmp/sounio-madaros-current-source-f64-lowering
       SOUNIO_MADAROS_F64_LOWERING_GATE_KEEP: 1
@@ -862,64 +973,49 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      # The gen2 self-compile ("Madaros compiles Madaros" below) is memory-bound,
-      # not CPU-bound: sampled every 5 s on a 64-core box on 2026-09-10/11, its
-      # peak RSS was 18.34 GB for `main` (c769d38f) and 18.45 GB for PR #2463 —
-      # same wall time (58 vs 57 min), same 124/125 `arena_reset_skipped`
-      # modules, so the footprint is the compiler's own, not any one PR's. A
-      # 4-vCPU GH-hosted runner has 16 GB RAM + a 4 GB /mnt/swapfile: the rung
-      # sits at ~92% of everything the VM has, and the job dies from outside
-      # with exit 143 (SIGTERM to the whole step, nothing after "[rung gen2]",
-      # runner hung for 44 min afterwards in one case). PR #2463 hit that 5
-      # attempts in a row; `main` and other PRs hit it ~2 in 5. More swap on
-      # the runner's ~70 GB /mnt temp disk moves the rung off the cliff; it is
-      # a headroom measure, not a correctness claim. Printed before/after so a
-      # future reader can see the actual numbers in the log.
-      - name: Add swap headroom for the gen2 self-compile (peak RSS 18.4 GB vs 16 GB RAM)
-        run: |
-          echo "--- before"; free -m; swapon --show; df -h /mnt
-          sudo fallocate -l 16G /mnt/swapfile-gen2
-          sudo chmod 600 /mnt/swapfile-gen2
-          sudo mkswap /mnt/swapfile-gen2
-          sudo swapon /mnt/swapfile-gen2
-          echo "--- after"; free -m; swapon --show
-      - name: Build Madaros once and run current-source f64 lowering gates
+      - uses: ./.github/actions/canonical-madaros
+        with:
+          sha256: ${{ needs.canonical-madaros.outputs.sha256 }}
+          artifact-name: ${{ needs.canonical-madaros.outputs.artifact-name }}
+      - name: Run current-source f64 lowering gates with the canonical artifact
+        env:
+          SOUNIO_MADAROS_F64_LOWERING_GATE_BIN: /tmp/madaros-canonical/madaros
         run: bash scripts/ci/madaros_current_source_f64_lowering_gate.sh
       - name: Madaros IR function table stays heap-backed
         env:
-          MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+          MADAROS_RAW_BIN: /tmp/madaros-canonical/madaros
         run: bash scripts/ci/madaros_ir_function_table_gate.sh
       # The three gates this branch added alongside its compiler fixes. Each
       # guards one of them and was written as "a named gate" -- but naming a
       # gate means a workflow runs it, and none did, which is exactly what
       # gate_workflow_reference_ratchet.sh refuses. They reuse the ELF the
-      # build step above already kept (KEEP=1) and add no build of their own.
+      # canonical producer supplied and add no build of their own.
       - name: Method calls resolve through a reference receiver
         env:
-          SOUNIO_MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+          SOUNIO_MADAROS_BIN: /tmp/madaros-canonical/madaros
         run: bash scripts/ci/madaros_method_ref_receiver_gate.sh
       - name: Seq<f64> element reads classify as float
         env:
-          SOUNIO_MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+          SOUNIO_MADAROS_BIN: /tmp/madaros-canonical/madaros
         run: bash scripts/ci/madaros_seq_f64_scalar_kind_gate.sh
       - name: Specializer nested type arguments do not collide
         env:
-          SOUNIO_MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+          SOUNIO_MADAROS_BIN: /tmp/madaros-canonical/madaros
         run: bash scripts/ci/madaros_specializer_nested_targ_gate.sh
       - name: Scalar multi-instantiation uses distinct concrete symbols
         env:
-          MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+          MADAROS_RAW_BIN: /tmp/madaros-canonical/madaros
         run: bash scripts/ci/madaros_scalar_multi_instance_gate.sh
       - name: KL-3 specializer caps and method turbofish fail closed
         env:
-          SOUNIO_MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+          SOUNIO_MADAROS_BIN: /tmp/madaros-canonical/madaros
         run: bash scripts/ci/madaros_kl3_specializer_gate.sh
       # The reference-receiver fix above shipped without a lowering-level
       # counterpart: `&Seq<T>` method calls started resolving and silently read
       # one indirection level off. This guards the load that closes it.
       - name: A &Seq<T> parameter delivers the Seq
         env:
-          SOUNIO_MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+          SOUNIO_MADAROS_BIN: /tmp/madaros-canonical/madaros
         run: bash scripts/ci/madaros_seq_ref_param_gate.sh
       # KL-6: hessian_of on Madaros. Quotient rule, the transcendental chain
       # rule with a compound inner on both transfer paths (kind 6 and kind 8),
@@ -927,15 +1023,15 @@ jobs:
       # values, with the declared sabotage hooks proving the gate can die.
       - name: KL-6 Hessian quotient and composite chain rule
         env:
-          SOUNIO_MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+          SOUNIO_MADAROS_BIN: /tmp/madaros-canonical/madaros
         run: bash scripts/ci/madaros_kl6_hessian_gate.sh
       - name: Madaros KL-11 pow FO / Hessian
         env:
-          SOUNIO_MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+          SOUNIO_MADAROS_BIN: /tmp/madaros-canonical/madaros
         run: bash scripts/ci/madaros_kl11_pow_fo_gate.sh
       - name: Madaros KL-1 parity-small witnesses
         env:
-          SOUNIO_MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+          SOUNIO_MADAROS_BIN: /tmp/madaros-canonical/madaros
         run: bash scripts/ci/madaros_kl1_parity_small_gate.sh
       # The compiler must be able to read its own source tree. On 2026-08-03 one
       # built from main could not parse self-hosted/resolve/scope.sio; 417 gates
@@ -944,7 +1040,7 @@ jobs:
       # above already built and kept (KEEP=1) — it adds no build.
       - name: Madaros parses its own source tree
         env:
-          SOUNIO_MADAROS_SELF_PARSE_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+          SOUNIO_MADAROS_SELF_PARSE_BIN: /tmp/madaros-canonical/madaros
           SOUNIO_MADAROS_SELF_PARSE_REPORT_DIR: /tmp/sounio-madaros-current-source-f64-lowering/self-parse
         run: bash scripts/ci/madaros_self_parse_gate.sh
       # Parsing its own tree is the first property; compiling it is the one
@@ -957,7 +1053,7 @@ jobs:
       # measurements, and either reaching the source cap is red.
       - name: Madaros IR capacity probe
         env:
-          MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+          MADAROS_BIN: /tmp/madaros-canonical/madaros
         run: bash scripts/ci/madaros_ir_capacity_probe.sh
       # Ratcheted, and red in BOTH directions: falling short of the recorded
       # rung is a regression, exceeding it is progress that must be written
@@ -969,7 +1065,7 @@ jobs:
       # answers 8 instead of 99.
       - name: Cross-module DCE keeps live code and still drops dead code
         env:
-          MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+          MADAROS_BIN: /tmp/madaros-canonical/madaros
         run: bash scripts/ci/madaros_dce_reachability_gate.sh
       # -O is advertised in the compiler's --help and, until this step, nothing
       # in CI compiled anything with it. 632 of 1724 buildable run-pass programs
@@ -977,19 +1073,11 @@ jobs:
       # the same compiler, differing only in the flag.
       - name: Optimiser preserves a chained-call accumulator
         env:
-          MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+          MADAROS_RAW_BIN: /tmp/madaros-canonical/madaros
         run: bash scripts/ci/madaros_opt_chained_call_gate.sh
-      - name: Madaros compiles Madaros (ratcheted rung)
-        env:
-          MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
-          SOUNIO_MADAROS_FP_DIR: /tmp/sounio-madaros-current-source-f64-lowering/fixed-point
-          # Keep the reusable gate's local default at 40, but retain the
-          # independently reproduced progress in CI.
-          SOUNIO_MADAROS_FP_MIN_INTO_ACC_DONE: "122"
-        run: bash scripts/ci/madaros_fixed_point_gate.sh
       - name: Run changed Madaros tests with the current-source compiler
         env:
-          SOUNIO_MADAROS_CHANGED_TESTS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+          SOUNIO_MADAROS_CHANGED_TESTS_BIN: /tmp/madaros-canonical/madaros
           CI_EVENT_NAME: ${{ github.event_name }}
           CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -997,7 +1085,7 @@ jobs:
         run: bash scripts/ci/madaros_changed_tests_gate.sh
       - name: Epistemic e-graph reassociation gate
         env:
-          SOUNIO_EPISTEMIC_EGRAPH_MADAROS: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+          SOUNIO_EPISTEMIC_EGRAPH_MADAROS: /tmp/madaros-canonical/madaros
         run: bash scripts/ci/epistemic_egraph_rewrite_gate.sh
       # W044: `Tipo::metodo(...)` whose target resolves to nothing typechecked
       # silently and evaluated to 0. Five cases, two warn and three quiet --
@@ -1006,7 +1094,7 @@ jobs:
       # ELF built above; adds no build.
       - name: Unknown associated-fn call warns (W044)
         env:
-          SOUNIO_MADAROS_UNKNOWN_ASSOC_FN_GATE_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+          SOUNIO_MADAROS_UNKNOWN_ASSOC_FN_GATE_BIN: /tmp/madaros-canonical/madaros
           SOUNIO_MADAROS_UNKNOWN_ASSOC_FN_GATE_DIR: /tmp/sounio-madaros-current-source-f64-lowering/unknown-assoc-fn
         run: bash scripts/ci/madaros_unknown_assoc_fn_gate.sh
       # madaros_corpus_regression_gate.sh is deliberately NOT wired in yet.
@@ -1029,11 +1117,47 @@ jobs:
           path: /tmp/sounio-madaros-current-source-f64-lowering
           retention-days: 1
 
+  madaros-fixed-point:
+    name: Exhaustive Madaros fixed point
+    needs: [impact, canonical-madaros]
+    if: needs.impact.outputs.exhaustive == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 110
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/canonical-madaros
+        with:
+          sha256: ${{ needs.canonical-madaros.outputs.sha256 }}
+          artifact-name: ${{ needs.canonical-madaros.outputs.artifact-name }}
+      - name: Add swap headroom for the gen2 self-compile (peak RSS 18.4 GB vs 16 GB RAM)
+        run: |
+          echo "--- before"; free -m; swapon --show; df -h /mnt
+          sudo fallocate -l 16G /mnt/swapfile-gen2
+          sudo chmod 600 /mnt/swapfile-gen2
+          sudo mkswap /mnt/swapfile-gen2
+          sudo swapon /mnt/swapfile-gen2
+          echo "--- after"; free -m; swapon --show
+      - name: Madaros compiles Madaros (ratcheted rung)
+        env:
+          MADAROS_BIN: /tmp/madaros-canonical/madaros
+          SOUNIO_MADAROS_FP_DIR: /tmp/sounio-madaros-current-source-f64-lowering/fixed-point
+          # Keep the reusable gate's local default at 40, but retain the
+          # independently reproduced progress in CI.
+          SOUNIO_MADAROS_FP_MIN_INTO_ACC_DONE: "122"
+        run: bash scripts/ci/madaros_fixed_point_gate.sh
+      - name: Upload fixed-point evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: madaros-fixed-point
+          path: /tmp/sounio-madaros-current-source-f64-lowering/fixed-point
+          retention-days: 7
+
   native-selfhost-macos-arm64:
     name: Native Self-Host (macOS arm64)
     runs-on: macos-15
     needs: [impact, source-bootstrap-selfhost-linux-x86_64]
-    if: always() && (needs.impact.outputs.compiler == 'true' || needs.impact.outputs.full == 'true') && needs.source-bootstrap-selfhost-linux-x86_64.result == 'success'
+    if: always() && needs.impact.outputs.exhaustive == 'true' && needs.source-bootstrap-selfhost-linux-x86_64.result == 'success'
     timeout-minutes: 15
     env:
       SOUNIO_SELFHOST_HOST_GATE_DIR: /tmp/sounio-selfhost-macos-arm64
@@ -1084,7 +1208,7 @@ jobs:
     name: Full Test Suite
     runs-on: ubuntu-24.04
     needs: [impact, native-selfhost-linux-x86_64]
-    if: always() && (needs.impact.outputs.compiler == 'true' || needs.impact.outputs.runtime == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true') && needs.native-selfhost-linux-x86_64.result == 'success'
+    if: always() && needs.impact.outputs.exhaustive == 'true' && needs.native-selfhost-linux-x86_64.result == 'success'
     # The full compiler/test suite routinely exceeds the former 15-minute cap.
     # Let it produce a completed result so CI Decision can evaluate the suite.
     timeout-minutes: 90
@@ -1130,20 +1254,20 @@ jobs:
 
   madaros-witness-gate:
     name: Madaros Witness Gate
-    needs: impact
+    needs: [impact, canonical-madaros]
     if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.runtime == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true'
     runs-on: ubuntu-24.04
     # Raised from 20 with the sabotage gate: it rebuilds each declared witness.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - name: Build Madaros from this PR's own source
-        run: |
-          ulimit -s 1048576 2>/dev/null || true
-          bash scripts/ci/build_modular_madaros.sh /tmp/madaros-ci.elf
+      - uses: ./.github/actions/canonical-madaros
+        with:
+          sha256: ${{ needs.canonical-madaros.outputs.sha256 }}
+          artifact-name: ${{ needs.canonical-madaros.outputs.artifact-name }}
       - name: Imported Seq lowering against the fresh build
         env:
-          MADAROS_RAW_BIN: /tmp/madaros-ci.elf
+          MADAROS_RAW_BIN: /tmp/madaros-canonical/madaros
         run: bash scripts/ci/madaros_imported_seed_lowering_gate.sh
       # E230 noise-set anti-garbling (Paper A wire, N1-N4): the same-source-built
       # sabotage witness -- E230 refuses x+x / x+top / ident(x)+x, vanishes under
@@ -1151,7 +1275,7 @@ jobs:
       # Then the five N2 dataflow witnesses, check-level under the knob.
       - name: E230 noise-set anti-garbling gate against the fresh build
         env:
-          MADAROS_RAW_BIN: /tmp/madaros-ci.elf
+          MADAROS_RAW_BIN: /tmp/madaros-canonical/madaros
         run: |
           bash scripts/ci/ns_antigarbling_gate.sh
           bash scripts/ci/ns_dataflow_trace_gate.sh
@@ -1163,89 +1287,89 @@ jobs:
       # Named here so the workflow-reference ratchet sees it run.
       - name: Anti-garbling third-axis gate (E251/E252) against the fresh build
         env:
-          MADAROS_RAW_BIN: /tmp/madaros-ci.elf
+          MADAROS_RAW_BIN: /tmp/madaros-canonical/madaros
         run: bash scripts/ci/antigarbling_third_axis_gate.sh
       - name: Tier 0 witness matrix against the fresh build
         env:
-          MADAROS_RAW_BIN: /tmp/madaros-ci.elf
-        run: bash tests/witness_matrix/run.sh ./bin/souc /tmp/madaros-ci.elf
+          MADAROS_RAW_BIN: /tmp/madaros-canonical/madaros
+        run: bash tests/witness_matrix/run.sh ./bin/souc /tmp/madaros-canonical/madaros
       - name: Madaros full gate against the fresh build
         env:
-          MADAROS_RAW_BIN: /tmp/madaros-ci.elf
+          MADAROS_RAW_BIN: /tmp/madaros-canonical/madaros
         run: bash scripts/ci/madaros_full_gate.sh
       - name: Madaros source-to-ELF gate against the fresh build
         env:
-          MADAROS_RAW_BIN: /tmp/madaros-ci.elf
+          MADAROS_RAW_BIN: /tmp/madaros-canonical/madaros
         run: bash scripts/ci/madaros_source_to_elf_gate.sh
       - name: KL-4 field visibility against the fresh build
         env:
-          MADAROS_RAW_BIN: /tmp/madaros-ci.elf
+          MADAROS_RAW_BIN: /tmp/madaros-canonical/madaros
         run: bash scripts/ci/madaros_kl4_field_visibility_gate.sh
       - name: KL-7 wide integer safety against the fresh build
         env:
-          MADAROS_BIN: /tmp/madaros-ci.elf
+          MADAROS_BIN: /tmp/madaros-canonical/madaros
           SOUNIO_STDLIB_PATH: ${{ github.workspace }}/stdlib
         run: |
           ulimit -s 1048576 2>/dev/null || true
           bash scripts/ci/madaros_kl7_wide_print_gate.sh
       - name: KL-14b dynlink one-symbol against the fresh build
         env:
-          MADAROS_RAW_BIN: /tmp/madaros-ci.elf
+          MADAROS_RAW_BIN: /tmp/madaros-canonical/madaros
         run: |
           ulimit -s 1048576 2>/dev/null || true
           bash scripts/ci/madaros_kl14b_dynlink_gate.sh
       - name: KL-14c dynlink N-symbols against the fresh build
         env:
-          MADAROS_RAW_BIN: /tmp/madaros-ci.elf
+          MADAROS_RAW_BIN: /tmp/madaros-canonical/madaros
         run: |
           ulimit -s 1048576 2>/dev/null || true
           bash scripts/ci/madaros_kl14c_dynlink_gate.sh
       - name: KL-14d1 multi-DT_NEEDED against the fresh build
         env:
-          MADAROS_RAW_BIN: /tmp/madaros-ci.elf
+          MADAROS_RAW_BIN: /tmp/madaros-canonical/madaros
         run: |
           ulimit -s 1048576 2>/dev/null || true
           bash scripts/ci/madaros_kl14d_multi_needed_gate.sh
       - name: KL-14d2 libzstd e2e against the fresh build
         env:
-          MADAROS_RAW_BIN: /tmp/madaros-ci.elf
+          MADAROS_RAW_BIN: /tmp/madaros-canonical/madaros
         run: |
           ulimit -s 1048576 2>/dev/null || true
           bash scripts/ci/madaros_kl14d_zstd_gate.sh
       - name: KL-14d3 dlopen/dlsym/dlclose against the fresh build
         env:
-          MADAROS_RAW_BIN: /tmp/madaros-ci.elf
+          MADAROS_RAW_BIN: /tmp/madaros-canonical/madaros
         run: |
           ulimit -s 1048576 2>/dev/null || true
           bash scripts/ci/madaros_kl14d_dlopen_gate.sh
       - name: KL-8 f128 surface residuals against the fresh build
         env:
-          MADAROS_RAW_BIN: /tmp/madaros-ci.elf
+          MADAROS_RAW_BIN: /tmp/madaros-canonical/madaros
         run: |
           ulimit -s 1048576 2>/dev/null || true
           bash scripts/ci/madaros_kl8_f128_residuals_gate.sh
       - name: KL-15a softfloat_f256 add/sub (V0-F.5) against the fresh build
         env:
-          MADAROS_RAW_BIN: /tmp/madaros-ci.elf
+          MADAROS_RAW_BIN: /tmp/madaros-canonical/madaros
         run: |
           ulimit -s 1048576 2>/dev/null || true
           bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0f5
       - name: Parameterized Epistemic confidence floor against the fresh build
         env:
-          MADAROS_RAW_BIN: /tmp/madaros-ci.elf
+          MADAROS_RAW_BIN: /tmp/madaros-canonical/madaros
           SOUNIO_WITNESS_GLOB: tests/compiler/epistemic_payload_gate/*.sio
         run: bash scripts/ci/madaros_epistemic_payload_gate.sh
       - name: KL-5 epsilon operator polarity against both engines
         env:
-          MADAROS_RAW_BIN: /tmp/madaros-ci.elf
+          MADAROS_RAW_BIN: /tmp/madaros-canonical/madaros
         run: bash scripts/ci/madaros_kl5_epsilon_polarity_gate.sh
       - name: Epsilon engine parity against the fresh build
         env:
-          MADAROS_RAW_BIN: /tmp/madaros-ci.elf
+          MADAROS_RAW_BIN: /tmp/madaros-canonical/madaros
         run: bash scripts/ci/epsilon_engine_parity_gate.sh
       - name: Clinical vancomycin TDM against default Madaros
         env:
-          MADAROS_RAW_BIN: /tmp/madaros-ci.elf
+          MADAROS_RAW_BIN: /tmp/madaros-canonical/madaros
         run: bash scripts/clinical_vanco_tdm_e2e_gate.sh
       # Full mode, not census: census reports passed=0/not_run=total, which would
       # satisfy the workflow-reference ratchet while the gate verified nothing --
@@ -1253,13 +1377,13 @@ jobs:
       # Madaros, so the real mode costs one rebuild per declared witness.
       - name: Witness sabotage declarations against the fresh build
         env:
-          SOUNIO_WITNESS_SABOTAGE_MADAROS: /tmp/madaros-ci.elf
+          SOUNIO_WITNESS_SABOTAGE_MADAROS: /tmp/madaros-canonical/madaros
         run: bash scripts/ci/witness_declares_its_sabotage_gate.sh
       # KL-2 / #2389: IEEE f64 NaN compares and print_f64 inf/nan on Madaros + lean_single.
       - name: IEEE f64 special values (KL-2)
         env:
           SOUC: ./bin/souc
-          SOUNIO_MADAROS_BIN: /tmp/madaros-ci.elf
+          SOUNIO_MADAROS_BIN: /tmp/madaros-canonical/madaros
         run: bash scripts/ci/madaros_ieee_f64_special_values_gate.sh
       # KL-16b: pin lean_single Hessian Tier 1–3 + ch4–7 (of / transcendentals /
       # 8-input analytic H[4,5]=1 / atan2+pow / epistemic_hessian_ch47).
@@ -1304,14 +1428,14 @@ jobs:
       # E250 fixture against the Madaros just built from this commit.
       - name: E250 live refuse against the fresh build
         env:
-          MADAROS_RAW_BIN: /tmp/madaros-ci.elf
+          MADAROS_RAW_BIN: /tmp/madaros-canonical/madaros
         run: bash scripts/ci/e219_madaros_live_refuse.sh
       # Static ownership and sabotage run in Contracts; this arm proves that
       # the same source-fresh compiler emits the three source-reachable codes.
       # E248 remains structural-only because parser E249 preempts wide casts.
       - name: E247-E250 diagnostic remap against the fresh build
         env:
-          MADAROS_RAW_BIN: /tmp/madaros-ci.elf
+          MADAROS_RAW_BIN: /tmp/madaros-canonical/madaros
         run: bash scripts/ci/diagnostic_remap_2170_gate.sh --souc bin/souc
       # E229: the lexer's token-table / source-byte ceiling must REFUSE, never
       # silently drop input. Same family and same reason as the E219 arm above --
@@ -1320,7 +1444,7 @@ jobs:
       # just built from this commit and cannot live in Contracts.
       - name: E229 token/source ceiling refuses against the fresh build
         env:
-          MADAROS_RAW_BIN: /tmp/madaros-ci.elf
+          MADAROS_RAW_BIN: /tmp/madaros-canonical/madaros
         run: bash scripts/ci/token_table_ceiling_gate.sh
       # E258: a string literal past Name capacity (384 bytes incl. quotes)
       # must refuse, never silently print a shortened string (measured
@@ -1329,14 +1453,14 @@ jobs:
       # just built from this commit, not the committed ELF.
       - name: String-literal truncation refuses against the fresh build
         env:
-          MADAROS_RAW_BIN: /tmp/madaros-ci.elf
+          MADAROS_RAW_BIN: /tmp/madaros-canonical/madaros
         run: bash scripts/ci/string_literal_truncation_gate.sh
       # E241: unknown Knowledge components must refuse on the Madaros just
       # built from this commit. The committed ELF still swallows them —
       # same class as E250 / E158, so this is Witness not Contracts.
       - name: E241 unknown Knowledge component live refuse against the fresh build
         env:
-          MADAROS_RAW_BIN: /tmp/madaros-ci.elf
+          MADAROS_RAW_BIN: /tmp/madaros-canonical/madaros
         run: bash scripts/ci/knowledge_unknown_component_live_refuse.sh
       # #1798: forward inverse_of must be E158 on both engines. The committed
       # bin/madaros-linux-x86_64 still accepts the witness (check: OK) —
@@ -1354,21 +1478,21 @@ jobs:
         run: bash scripts/ci/builtin_id_table_coherence_gate.sh
       - name: Ontology inverse_of declaration-order (E158) against the fresh build
         env:
-          MADAROS_BIN: /tmp/madaros-ci.elf
+          MADAROS_BIN: /tmp/madaros-canonical/madaros
         run: bash scripts/ci/madaros_ontology_enforcement_gate.sh
 
   gate-wave-0:
     name: Gate Wave 0
-    needs: impact
+    needs: [impact, canonical-madaros]
     if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.runtime == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Build Madaros from this PR's own source
-        run: |
-          ulimit -s 1048576 2>/dev/null || true
-          bash scripts/ci/build_modular_madaros.sh /tmp/madaros-wave0.elf
+      - uses: ./.github/actions/canonical-madaros
+        with:
+          sha256: ${{ needs.canonical-madaros.outputs.sha256 }}
+          artifact-name: ${{ needs.canonical-madaros.outputs.artifact-name }}
       # First four of the 472 gate scripts that no workflow named (frozen count:
       # scripts/ci/gate_workflow_reference.frozen). Picked from the PASS
       # bucket of a from-source gate sweep, for the incident each one would
@@ -1395,7 +1519,7 @@ jobs:
       # in general.
       - name: Wave 0
         env:
-          MADAROS_RAW_BIN: /tmp/madaros-wave0.elf
+          MADAROS_RAW_BIN: /tmp/madaros-canonical/madaros
         run: |
           printf '%s\n' \
             scripts/ci/madaros_gum_cross_function_gate.sh \
@@ -1530,12 +1654,54 @@ jobs:
   # and a red R6 could not fail CI: evaluate_ci_decision.py only judges jobs it
   # is given. "Required gate skipped" had been traded for "required gate not
   # counted".
+  chemistry:
+    needs: impact
+    if: needs.impact.outputs.exhaustive == 'true' || needs.impact.outputs.chemistry == 'true'
+    uses: ./.github/workflows/chemistry-probe-golden.yml
+
+  fast-pr-gate:
+    name: Fast PR Gate
+    if: always()
+    needs: [impact, contracts, contracts-self-falsification, distribution-contract, canonical-madaros, gate-wave-0, sounio-lint, website]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require every selected fast job
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+          CI_LAYER: fast
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: python3 scripts/ci/evaluate_ci_decision.py
+
+  deep-compiler-gate:
+    name: Deep Compiler Gate
+    if: always()
+    needs: [impact, contracts-ontology, correlated-effect, canonical-madaros, madaros-current-source-deref-f64, madaros-witness-gate, lean-proofs]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require every selected deep job
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+          CI_LAYER: deep
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+        run: python3 scripts/ci/evaluate_ci_decision.py
+
   ci-decision:
     name: CI Decision
     if: always()
     needs:
       - impact
       - contracts
+      - contracts-ontology
+      - contracts-self-falsification
+      - distribution-contract
+      - correlated-effect
+      - madaros-fixed-point
+      - chemistry
+      - fast-pr-gate
+      - deep-compiler-gate
+      - canonical-madaros
       - native-selfhost-linux-x86_64
       - source-bootstrap-selfhost-linux-x86_64
       - madaros-current-source-deref-f64
@@ -1553,8 +1719,7 @@ jobs:
       - name: Evaluate selected jobs
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
-          # R6 is the one job whose `skipped` is legitimate on a PR and
-          # illegitimate on a nightly run, so the evaluator needs the event.
+          # The evaluator re-derives selection and rejects missing/skipped required jobs.
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           NIGHTLY_INPUT: ${{ inputs.nightly }}
         run: python3 scripts/ci/evaluate_ci_decision.py

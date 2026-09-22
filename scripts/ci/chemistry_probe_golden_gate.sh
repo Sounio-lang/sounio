@@ -26,12 +26,31 @@ GOLD="$ROOT_DIR/benchmarks/chemistry/golden"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/chem-probe-golden.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 PROBES=(rep_traj_bug rep_stagnation rep_adiabatic_bug gbs_oracle h2_ignition_uq_demo)
+# No argument runs the complete local gate. CI selects exactly one known probe
+# per matrix job; reject typos or extra arguments instead of succeeding vacuously.
+if [[ $# -gt 0 ]]; then
+  if [[ $# -ne 1 ]]; then
+    echo "[chem-golden] expected zero arguments or one known probe" >&2
+    exit 2
+  fi
+  found=0
+  for probe in "${PROBES[@]}"; do
+    [[ "$1" == "$probe" ]] && found=1
+  done
+  if [[ $found -ne 1 ]]; then
+    echo "[chem-golden] unknown probe: $1" >&2
+    exit 2
+  fi
+  PROBES=("$1")
+fi
 FAILS=0
 echo "[chem-golden] lean_single: $(md5sum "$ROOT_DIR/bin/souc-lean-single-x86_64" 2>/dev/null | cut -c1-8) bin/souc-lean-single-x86_64"
 for p in "${PROBES[@]}"; do
   src="examples/chemistry/$p.sio"; gold="$GOLD/$p.lean_single.txt"; out="$WORK/$p.txt"
-  if ! SOUNIO_SOUC_ENGINE=lean_single timeout 1500 "$SOUC" run "$src" >"$out" 2>"$WORK/$p.err"; then
-    echo "[chem-golden] FAIL $p: run exited non-zero" >&2; tail -5 "$WORK/$p.err" >&2; FAILS=$((FAILS+1)); continue
+  SOUNIO_SOUC_ENGINE=lean_single timeout 1500 "$SOUC" run "$src" >"$out" 2>"$WORK/$p.err"
+  rc=$?
+  if [[ $rc -ne 0 ]]; then
+    echo "[chem-golden] FAIL $p: run exited $rc" >&2; tail -5 "$WORK/$p.err" >&2; FAILS=$((FAILS+1)); continue
   fi
   if [[ "${REGEN:-0}" == "1" ]]; then cp "$out" "$gold"; echo "[chem-golden] wrote $gold"; continue; fi
   if [[ ! -f "$gold" ]]; then echo "[chem-golden] FAIL $p: no golden at $gold" >&2; FAILS=$((FAILS+1)); continue; fi

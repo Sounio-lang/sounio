@@ -1,37 +1,41 @@
 name: Chemistry probe golden
 
-# Byte-for-byte golden outputs of the three Sounio replica-side probes behind
+# Byte-for-byte golden outputs of the five Sounio replica-side probes behind
 # benchmarks/chemistry/RESULTS.md (§2.6 adiabatic defect, §7.3 reverse-rate
 # defect, §7.7 stagnation test), run under lean_single -- the engine every
 # number in that file was produced on. A diff means a number in the paper
-# moved. Path-filtered because the adiabatic probe integrates ~1e6 RK4 steps.
+# moved. PR path selection is owned by the parent CI impact classifier so an
+# exhaustive PR does not also start a duplicate standalone Chemistry workflow.
 
 on:
-  pull_request:
-    paths:
-      - 'examples/chemistry/**'
-      - 'stdlib/chemistry/**'
-      - 'benchmarks/chemistry/golden/**'
-      - 'scripts/ci/chemistry_probe_golden_gate.sh'
-      - 'bin/souc*'
-  push:
-    branches: [main]
-    paths:
-      - 'examples/chemistry/**'
-      - 'stdlib/chemistry/**'
-      - 'benchmarks/chemistry/golden/**'
+  workflow_call:
   workflow_dispatch:
 
 concurrency:
-  group: chemistry-probe-golden-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: chemistry-probe-golden-${{ github.workflow }}-${{ github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   golden:
-    name: Chemistry probe golden
+    name: Chemistry probe golden (${{ matrix.probe }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    # Preserve the script's 1500-second per-probe deadline. Independent jobs
+    # let every oracle report, even when another probe reaches that deadline.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        probe:
+          - rep_traj_bug
+          - rep_stagnation
+          - rep_adiabatic_bug
+          - gbs_oracle
+          - h2_ignition_uq_demo
     steps:
       - uses: actions/checkout@v4
-      - name: Three probes match their committed output
-        run: bash scripts/ci/chemistry_probe_golden_gate.sh
+      - name: Validate probe selection and matrix coverage
+        run: python3 -m unittest discover -s scripts/ci -p test_chemistry_probe_selection.py
+      - name: Probe matches its committed output
+        env:
+          PROBE: ${{ matrix.probe }}
+        run: bash scripts/ci/chemistry_probe_golden_gate.sh "$PROBE"
