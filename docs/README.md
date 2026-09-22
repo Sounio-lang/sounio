@@ -58,6 +58,14 @@ Start with these current-state maps before diving into older deep reports:
 ## Specification
 
 - [Language Specification](spec/LANGUAGE_SPECIFICATION.md)
+- [S17 — Conformance Suite](spec/S17_CONFORMANCE_SUITE.md)
+
+> **Conformance note (S17, measured):** 437 of the 1,527 CI greens are **green
+> under `lean_single` (the bootstrap seed) but fail under source-built
+> Madaros** — 28.6% of the suite. The Full Test Suite runs `lean_single`, not
+> Madaros, by CI configuration. Until §17 is rule-promoted, every other
+> section of this specification inherits that gap. See
+> `docs/spec/S17_CONFORMANCE_SUITE.md` §17.2 for the measured table.
 
 ## Important reading rule
 
