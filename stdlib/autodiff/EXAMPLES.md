@@ -1,12 +1,20 @@
 # Autodiff Examples
 
+> **Checked surface.** `stdlib/autodiff/tape.sio` exposes free functions
+> (`new_tape`, `tape_new_var`, `tape_mul`, `tape_add`, `backward`), not the
+> `Tape::new()` / `push_var()` / `grad()` methods shown below, and
+> `EpistemicDual::new` plus `Knowledge::measured` do not exist —
+> `stdlib/autodiff/epistemic_dual.sio` builds values with `edual_new(val, dot, unc, unc_dot)`
+> and `edual_mul`. The blocks below are the intended shape, not the checked
+> surface. The working form is in `stdlib/autodiff/TAPE_IMPLEMENTATION.md`.
+
 ## 1. Tape-Based Reverse-Mode AD
 
 ```sio
 use autodiff::tape::Tape;
 
 pub fn main() with Mut, Div, Panic {
-    let mut tape = Tape::new();
+    var tape = Tape::new();
     
     // Push variable: x = 2
     let x = tape.push_var(2.0);
@@ -84,7 +92,7 @@ pub fn main() with Mut, Div, Panic {
 use autodiff::tape::Tape;
 
 pub fn main() with Mut, Div, Panic {
-    let mut tape = Tape::new();
+    var tape = Tape::new();
     
     let x = tape.push_var(1.0);
     

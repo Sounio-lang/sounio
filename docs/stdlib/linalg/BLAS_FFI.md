@@ -2,8 +2,8 @@
 topic_id: repo.docs.stdlib.linalg.blas-ffi
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A3
+last_validated: 2026-09-22
+validated_by: Claude
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.stdlib.linalg.blas-ffi
 -->
 
@@ -91,12 +91,12 @@ println("C[0,0] = " + str(c.get_val(0,0)) + " ± " + str(c.get_unc(0,0)));
 ```sio
 use linalg::blas_ffi::{blas_dgemm_rowmajor, blas_svd_rowmajor};
 
-// Direct DGEMM call
-let m = 256;
-let n = 256;
-let k = 256;
-let alpha = 1.0;
-let beta = 0.0;
+// Direct DGEMM call. Mutable borrows are `&!`; semicolons are not used.
+let m = 256
+let n = 256
+let k = 256
+let alpha = 1.0
+let beta = 0.0
 
 let rc = blas_dgemm_rowmajor(
     m, n, k,
@@ -104,15 +104,15 @@ let rc = blas_dgemm_rowmajor(
     &a,  // matrix A (m x k)
     &b,  // matrix B (k x n)
     beta,
-    &mut c  // matrix C (m x n), output
-);
+    &!c  // matrix C (m x n), output
+)
 
 // Direct SVD call
-let mut s: [f64; 256] = [0.0; 256];  // singular values
-let mut u: [f64; 65536] = [0.0; 65536];  // left singular vectors
-let mut vt: [f64; 65536] = [0.0; 65536];  // right singular vectors
+var s: [f64; 256] = [0.0; 256]  // singular values
+var u: [f64; 65536] = [0.0; 65536]  // left singular vectors
+var vt: [f64; 65536] = [0.0; 65536]  // right singular vectors
 
-let info = blas_svd_rowmajor(m, n, &mut a, &mut s, &mut u, &mut vt);
+let info = blas_svd_rowmajor(m, n, &!a, &!s, &!u, &!vt)
 ```
 
 ## Installation

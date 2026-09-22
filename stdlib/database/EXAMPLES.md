@@ -6,7 +6,7 @@
 use database::pure::engine
 use database::pure::types
 
-let mut db = in_memory_db_new()
+var db = in_memory_db_new()
 
 let create = "CREATE TABLE products (id INTEGER, name TEXT, price REAL)".to_string()
 engine_execute_sql(&mut db, create)
@@ -36,7 +36,7 @@ match result {
 ```sio
 use database::pure::engine
 
-let mut db = in_memory_db_new()
+var db = in_memory_db_new()
 
 let create = "CREATE TABLE orders (customer TEXT, amount REAL)".to_string()
 engine_execute_sql(&mut db, create)
@@ -58,7 +58,7 @@ let result = engine_execute_sql(&mut db, select)
 use database::pure::engine
 use database::pure::types
 
-let mut db = in_memory_db_new()
+var db = in_memory_db_new()
 
 let create = "CREATE TABLE users (id INTEGER, name TEXT)".to_string()
 engine_execute_sql(&mut db, create)
