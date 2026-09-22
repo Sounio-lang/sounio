@@ -15,6 +15,21 @@ defeito, não fecha M1/M2/M3, e não afirma que a suíte completa foi executada 
 sessão. Base: commit `69b7fe7546e8` na branch
 `claude/sounio-divida-zero-v3-g7svhy`.
 
+**Proveniência do plano citado (apontado em revisão,
+`Sounio-lang/sounio#2637` `discussion_r4071109861`):** nem
+`SOUNIO_DIVIDA_ZERO_PLANO_v3_2026-09-22` nem seu antecedente
+`SOUNIO_DIVIDA_ZERO_PLANO_v2_2026-09-20` estão versionados neste repositório —
+confirmado por `find . -iname '*PLANO*' -o -iname '*DIVIDA*'` nesta árvore, que só
+retorna este próprio documento. O plano v3 foi fornecido inteiramente como texto na
+sessão que gerou este Bloco 0 (não é um arquivo, não tem commit, não tem URL externa
+estável). As referências `§N` deste documento apontam para a numeração desse texto de
+sessão, não para um artefato reproduzível de dentro do repositório; um leitor sem acesso
+a essa sessão não consegue verificar as citações de seção por conta própria. Este achado
+**não é corrigido nesta entrega** — commitar o plano inteiro é uma decisão de outra lane
+(é um documento de campanha, não um artefato de auditoria técnica, e sua autoria/dono não
+foi determinado aqui); a proveniência é apenas tornada explícita para que a limitação de
+verificabilidade fique registrada.
+
 ## 1. Recalibração de escala (§1 do CLAUDE.md)
 
 `bash scripts/dev/measure_repo_scale.sh` em `69b7fe7546e8`:
@@ -29,11 +44,17 @@ sessão. Base: commit `69b7fe7546e8` na branch
 | `examples/` (linhas) | 158,544 | 130,370 | +28,174 |
 | CI gate scripts (`scripts/ci/`) | 596 | — | — |
 
-**Achado:** a tabela de calibração do `CLAUDE.md` §1 está desatualizada em ~40% (contagem
-de linhas) desde 2026-07-11. Isso não bloqueia este Bloco 0, mas é uma obrigação
-separada e barata (atualizar §1 do `CLAUDE.md` com a saída deste comando) — registrada
-aqui, não corrigida nesta entrega, para não misturar escopo de documentação com escopo
-de inventário.
+**Achado:** a tabela de calibração do `CLAUDE.md` §1 está desatualizada desde
+2026-07-11. Precisão sobre o delta, para não repetir aqui o mesmo pecado que o `CLAUDE.md`
+§1 cobra de sessões anteriores ("meça antes de afirmar"): a contagem de linhas cresceu
+1,137,484 linhas, isto é **+51.5%** sobre a base antiga de 2,208,306
+(`(3,345,790 − 2,208,306) / 2,208,306`); equivalentemente, a base antiga é **34.0%** menor
+que o total atual. Um "~40%" solto, sem dizer qual denominador, mistura as duas leituras —
+corrigido aqui após revisão (`Sounio-lang/sounio#2637`, comentário
+`discussion_r4071109706`). Isso não bloqueia este Bloco 0, mas é uma obrigação separada e
+barata (atualizar §1 do `CLAUDE.md` com a saída deste comando) — registrada aqui, não
+corrigida nesta entrega, para não misturar escopo de documentação com escopo de
+inventário.
 
 ## 2. Hazards de instrumento (§5.4 — controle antes de confiar no instrumento)
 
@@ -50,16 +71,35 @@ escopo declarado deste Bloco (instrumentos de medição de corpus/inventário), 
 scripts de outra lane sem coordenação prévia viola §11 do plano v3. Registrado como
 achado; publicado no bus de coordenação (`bin/sounio-coord send`, `msg-1790076290-751-10405`).
 
-### 2.2 Seletor "slow" não tem marcador localizável
+### 2.2 Seletor "slow": ausente em `main`, existente mas mal fiado em #2622
 
-`grep -n "slow" scripts/run_sio_test_suite.sh` não retornou nenhuma ocorrência.
-`grep -rl "//@ slow\|@slow\|requires: slow" tests --include="*.sio"` também não
-retornou nenhum arquivo. Isso é consistente com a revisão de #2622 citada no plano v3
-§3 e §6.2 ("revalidar o filtro slow" e "corrigir o seletor slow e provar a cobertura de
-N e S") — o mecanismo de seleção lenta não está onde um grep ingênuo o esperaria, e
-esta sessão não teve tempo de localizar o mecanismo real (pode estar embutido em
-harness Sounio, não em shell). **Não resolvido aqui** — fica como pré-requisito
-explícito para §5.2/§6.2 antes de qualquer partição N/S ser declarada confiável.
+Correção de um erro desta seção (apontado em revisão, `Sounio-lang/sounio#2637`
+`discussion_r4071109755`): a leitura original — "não há marcador `slow` localizável" —
+era um artefato de ter grepado só `main`/`scripts/run_sio_test_suite.sh` (v1) pelas
+strings erradas (`@slow`), não o mecanismo real. Recontado com a branch de #2622
+(`35513cf80f22…`, buscada nesta sessão via `git fetch origin pull/2622/head`):
+
+- **Em `main` (`69b7fe7546e8`, base desta PR):** confirmado — `scripts/run_sio_test_suite.sh`
+  não tem nenhuma ocorrência de `slow` nem de `requires:` (`grep -c "requires:"` = 0). O
+  seletor realmente não existe na árvore que este Bloco 0 audita.
+- **Em #2622:** o script **novo** `scripts/dev/run_sio_test_suite_v2.sh` implementa
+  `//@ requires: slow` (linha 461), gated por `SOUNIO_SLOW_TESTS_AVAILABLE`, com um flag
+  `--test-list FILE` dedicado para escopar a seleção (linha 189+). **Mas** o job
+  `slow-lane` do `.github/workflows/ci.yml` de #2622 não invoca esse script v2 — ele roda
+  `bash scripts/run_sio_test_suite.sh --format junit --jobs 4` (o **v1**, sem qualquer
+  noção de `requires: slow`), com `SOUNIO_SLOW_TESTS_AVAILABLE: "1"` como variável de
+  ambiente que o v1 nunca lê. O efeito observável é o que a revisão apontou — o job
+  "lento" reexecuta a suíte inteira, N e S juntos, sob o orçamento de tempo pensado só
+  para S — mas o mecanismo preciso é "workflow chama o script errado (v1, sem seletor)",
+  não "workflow chama v2 sem `--test-list`". Nenhuma das duas leituras é uma correção
+  cosmética: até o job trocar para `run_sio_test_suite_v2.sh --test-list <arquivo-S>`,
+  a alegação de #2622 "zero falhas na seleção que exclui casos lentos" (plano v3 §3) não
+  tem lastro em um seletor que rode isoladamente.
+- Isto **permanece não corrigido nesta entrega** — é dívida de #2622/CI (`ci.yml`), fora
+  do write-set deste Bloco 0 (instrumentos de inventário, branch
+  `claude/sounio-divida-zero-v3-g7svhy`); alterar o workflow de outra PR sem coordenação
+  viola §11 do plano v3. Fica como pré-requisito explícito para §5.2/§6.2 antes de
+  qualquer partição N/S ser declarada confiável.
 
 ## 3. Amostra do universo do corpus (§5.2) — contagens, não partição qualificada
 
@@ -68,11 +108,20 @@ nesta sessão):
 
 | Conjunto amostrado | Contagem | Método |
 |---|---:|---|
-| `tests/known_failures/*.sio` | 31 | `ls tests/known_failures \| wc -l` |
-| Arquivos com `known_failure` no nome fora desse diretório | 7 | `find tests -iname '*known_failure*'` |
+| `tests/known_failures/` — arquivos `.sio` | 30 | `find tests/known_failures -maxdepth 1 -name '*.sio' \| wc -l` |
+| `tests/known_failures/` — arquivos totais (inclui `hardened_diagnostics_full_suite.txt`) | 31 | `ls tests/known_failures \| wc -l` |
+| Arquivos com `known_failure` no nome fora de `tests/known_failures/` | 4 | `find tests -iname '*known_failure*'`, excluindo o diretório e as 2 entradas já dentro dele |
 | Arquivos citando `known_failure`/`expected_failure`/`XPASS`/`xfail` no corpo | 18 | `grep -rl` sobre `tests/**/*.sio` |
 | Arquivos anotados `requires: madaros` | 1,165 | `grep -rl "requires: madaros" tests/**/*.sio` |
 | Arquivos `.sio` totais em `tests/` (informativo, do measure_repo_scale) | 4,530 | `scripts/dev/measure_repo_scale.sh` |
+
+Correção de duas linhas desta tabela (apontado em revisão, `Sounio-lang/sounio#2637`
+`discussion_r4071109816`): a linha original rotulava os 31 resultados de `ls` como
+".sio", mas 30 são `.sio` e 1 é `hardened_diagnostics_full_suite.txt` — separados acima.
+A linha "fora do diretório" original (7) somava, sem dizer, o próprio diretório
+`tests/known_failures` mais as 2 entradas já contadas na primeira linha; o `find` bruto
+retorna 7 caminhos, mas os arquivos genuinamente fora do diretório e ainda não contados
+são 4 (`tests/run-pass/{ontology_multiple_disjoint,wide_i128_fn_abi,wide_i128_signed_div,wide_i256_divfull_scratch}_known_failure.sio`).
 
 Isto **não é** a partição `U = N ⊎ S ⊎ X` exigida por §5.2 — é uma amostra de
 instrumentação para dimensionar o problema antes de construir a partição real. A
