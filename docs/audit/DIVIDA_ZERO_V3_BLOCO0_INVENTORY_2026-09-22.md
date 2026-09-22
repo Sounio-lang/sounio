@@ -111,17 +111,31 @@ nesta sessão):
 | `tests/known_failures/` — arquivos `.sio` | 30 | `find tests/known_failures -maxdepth 1 -name '*.sio' \| wc -l` |
 | `tests/known_failures/` — arquivos totais (inclui `hardened_diagnostics_full_suite.txt`) | 31 | `ls tests/known_failures \| wc -l` |
 | Arquivos com `known_failure` no nome fora de `tests/known_failures/` | 4 | `find tests -iname '*known_failure*'`, excluindo o diretório e as 2 entradas já dentro dele |
-| Arquivos citando `known_failure`/`expected_failure`/`XPASS`/`xfail` no corpo | 18 | `grep -rl` sobre `tests/**/*.sio` |
-| Arquivos anotados `requires: madaros` | 1,165 | `grep -rl "requires: madaros" tests/**/*.sio` |
+| Arquivos citando `known_failure`/`expected_failure`/`XPASS`/`xfail` no corpo | 18 | `grep -rl -e known_failure -e expected_failure -e XPASS -e xfail tests/ --include='*.sio'` |
+| Arquivos anotados `requires: madaros` | 1,165 | `grep -rl "requires: madaros" tests/ --include='*.sio'` |
 | Arquivos `.sio` totais em `tests/` (informativo, do measure_repo_scale) | 4,530 | `scripts/dev/measure_repo_scale.sh` |
 
-Correção de duas linhas desta tabela (apontado em revisão, `Sounio-lang/sounio#2637`
-`discussion_r4071109816`): a linha original rotulava os 31 resultados de `ls` como
-".sio", mas 30 são `.sio` e 1 é `hardened_diagnostics_full_suite.txt` — separados acima.
-A linha "fora do diretório" original (7) somava, sem dizer, o próprio diretório
-`tests/known_failures` mais as 2 entradas já contadas na primeira linha; o `find` bruto
-retorna 7 caminhos, mas os arquivos genuinamente fora do diretório e ainda não contados
-são 4 (`tests/run-pass/{ontology_multiple_disjoint,wide_i128_fn_abi,wide_i128_signed_div,wide_i256_divfull_scratch}_known_failure.sio`).
+Correção de três problemas desta tabela:
+
+1. (Apontado em revisão, `Sounio-lang/sounio#2637` `discussion_r4071109816`.) A linha
+   original rotulava os 31 resultados de `ls` como ".sio", mas 30 são `.sio` e 1 é
+   `hardened_diagnostics_full_suite.txt` — separados acima. A linha "fora do diretório"
+   original (7) somava, sem dizer, o próprio diretório `tests/known_failures` mais as 2
+   entradas já contadas na primeira linha; o `find` bruto retorna 7 caminhos, mas os
+   arquivos genuinamente fora do diretório e ainda não contados são 4
+   (`tests/run-pass/{ontology_multiple_disjoint,wide_i128_fn_abi,wide_i128_signed_div,wide_i256_divfull_scratch}_known_failure.sio`).
+2. (Apontado em revisão, `discussion_r4071171510`.) O comando original das duas últimas
+   linhas usava o glob `tests/**/*.sio`, que só expande recursivamente com `shopt -s
+   globstar` habilitado — ausente por padrão num shell não-interativo. Sem `globstar`,
+   `tests/**/*.sio` expande como `tests/*/*.sio` (um nível), reduzindo a contagem de
+   `requires: madaros` de 1,165 para 1,154 (verificado: `bash -c 'shopt -u globstar;
+   grep -rl "requires: madaros" tests/**/*.sio | wc -l'` → 1154). Os comandos acima
+   passam a recursar via `grep -r`/`--include` sobre o diretório, reproduzindo 1,165 sem
+   depender de `globstar`.
+3. (Achado adicional desta correção, não reportado em revisão: `grep -rl "requires:
+   madaros" tests/` sem `--include='*.sio'` retorna 1,166, não 1,165 — captura também
+   `tests/vacuous_expect_baseline.txt`, um `.txt` fora do escopo ".sio" desta linha.
+   `--include='*.sio'` restaura o escopo correto.)
 
 Isto **não é** a partição `U = N ⊎ S ⊎ X` exigida por §5.2 — é uma amostra de
 instrumentação para dimensionar o problema antes de construir a partição real. A
