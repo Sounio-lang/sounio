@@ -274,8 +274,25 @@ lista de testes anotados `//@ requires: slow` como `--test-list` e rodar
 `scripts/dev/run_sio_test_suite_v2.sh --test-list <arquivo-S>` (caminho relativo à raiz
 do repositório — corrigido após revisão, `discussion_r4071539724`'s review body, que
 apontou o caminho anterior como não executável de fora de `scripts/dev/`) isoladamente
-(com
-`SOUNIO_SLOW_TESTS_AVAILABLE=1`), para obter uma execução de **S sozinho** com seu
+(com `SOUNIO_SLOW_TESTS_AVAILABLE=1`).
+
+**Correção sobre a base e o compilador do comando** (apontado em revisão,
+`discussion_r4071578676`): o comando acima **não é reprodutível a partir da base deste
+documento** (`main`, `69b7fe7546e8`) — §2.2 já estabeleceu que o `run_sio_test_suite_v2.sh`
+de `main` não tem nenhum ramo `requires: slow`; rodá-lo ali faria cada teste
+`requires: slow` cair no ramo `*)` de "unknown requires" (linha 459, verificado nesta
+sessão) e falhar por um motivo alheio ao que se quer medir. O comando só é significativo a partir
+da branch de **#2622**, no commit `35513cf80f22…` já buscado nesta sessão, e precisa
+fixar o compilador via `SOUNIO_TEST_SOUC_BIN=<caminho para o stage2 de #2622>` — deixar
+essa variável vazia faz o harness usar o compilador padrão do checkout em vez do
+artefato de #2622, o que também invalidaria o resultado como evidência para essa
+candidata específica. Comando completo:
+```
+git checkout 35513cf80f22…  # ou worktree dedicado — não main
+SOUNIO_TEST_SOUC_BIN=<stage2 de #2622> SOUNIO_SLOW_TESTS_AVAILABLE=1 \
+  scripts/dev/run_sio_test_suite_v2.sh --test-list <arquivo-S>
+```
+para obter uma execução de **S sozinho** com seu
 próprio resultado — o que a alegação "zero falhas" de #2622 (plano v3 §3) ainda não tem
 lastro para cobrir, per §2.2 acima. Só depois disso a partição N/S para a candidata
 baseada na #2622 pode ser declarada confiável. Esse é um trabalho de leitura/repro
