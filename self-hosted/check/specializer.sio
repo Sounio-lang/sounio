@@ -1394,7 +1394,9 @@ fn spec_extra_push_item(it: Item) with Mut, Panic, Div, Alloc {
 // ============================================================
 
 // A bare single-uppercase-letter named type that is not a generic struct:
-// the type-param shape of an impl header argument.
+// the type-param shape of an impl header argument. Used only as a fallback when
+// the impl declares no `impl<...>` header of its own (see
+// spec_type_is_declared_impl_param) -- the header, when present, is authoritative.
 fn spec_type_is_param_letter(te: TypeExpr) -> bool with Mut, Panic, Div {
     if te.kind != TypeExprKind::TypeNamed { return false }
     if te.path.seg_count != 1 { return false }
@@ -1406,6 +1408,38 @@ fn spec_type_is_param_letter(te: TypeExpr) -> bool with Mut, Panic, Div {
     if seg.len != 1 { return false }
     let c0 = seg.buf[0] as i64
     c0 >= 65 && c0 <= 90 && spec_struct_table_find(seg) < 0
+}
+
+// Is `n` one of the impl's own declared `impl<...>` header binders?
+fn spec_type_param_header_has(header: Option<Box<TypeParamDefList>>, n: Name) -> bool with Mut, Panic, Div {
+    match header {
+        None => false
+        Some(node) => {
+            if name_eq((*node).head.name, n) { return true }
+            spec_type_param_header_has((*node).tail, n)
+        }
+    }
+}
+
+// Is `te` a bare name naming one of this impl's own type parameters? When the
+// impl declares an explicit header (`impl<U> Cell<U>`), U is ground truth
+// regardless of spelling, length, or case -- a renamed binder (`U` for a struct
+// declared over `T`) is still the impl's declared parameter, not a concrete
+// argument. Without a header, fall back to the old single-uppercase-letter
+// heuristic (`impl Cell<T>` with no `impl<...>`).
+fn spec_type_is_declared_impl_param(te: TypeExpr, header: Option<Box<TypeParamDefList>>) -> bool with Mut, Panic, Div {
+    match header {
+        None => spec_type_is_param_letter(te)
+        Some(_h) => {
+            if te.kind != TypeExprKind::TypeNamed { return false }
+            if te.path.seg_count != 1 { return false }
+            match te.type_args {
+                Some(_a) => { return false }
+                None => {}
+            }
+            spec_type_param_header_has(header, spec_path_single_name(te.path))
+        }
+    }
 }
 
 // Struct-template slot for a generic impl header `S<A, ..>` whose arguments are
@@ -1422,7 +1456,7 @@ fn spec_impl_generic_struct_slot(id: ImplDef) -> i64 with Mut, Panic, Div {
         match cur {
             None => { going = false }
             Some(list) => {
-                if !spec_type_is_param_letter((*list).head) { return 0 - 1 }
+                if !spec_type_is_declared_impl_param((*list).head, id.type_params) { return 0 - 1 }
                 cur = (*list).tail
             }
         }
