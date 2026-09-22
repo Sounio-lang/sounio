@@ -21,6 +21,11 @@
 #   hashadversarial  a generated-name AVAILABILITY check that trusted the hash
 #             census alone falsely refused a program with two unrelated hash-
 #             colliding decoys and no real collision
+#   genericcollapse  the SAME collision, but through the specialized-collapse
+#             pipeline (a generic instantiation anywhere routes the whole
+#             program through module_frontend_specialized_prepare instead of
+#             the ordinary path every other case here exercises), both import
+#             orders
 #   capacity  70 colliding private fns in one module (the old fixed table held 64)
 #   skip      a shape the pass cannot prove safe is skipped -- and that is only
 #             accepted because the other module was renamed and no collision remains
@@ -180,6 +185,21 @@ echo "$TAG PASS(reservedglobal): a generated name never reuses a module global"
 compile_and_run hashadversarial "$FIX/hashadversarial/main.sio"
 expect_output hashadversarial "$FIX/hashadversarial/expected.txt"
 echo "$TAG PASS(hashadversarial): two unrelated hash-colliding decoys do not block a real rename"
+
+compile_and_run capacity "$FIX/capacity/main.sio"
+
+# Every other case here goes through the ORDINARY multi-module pipeline. A
+# collision-bearing program that also instantiates a generic anywhere routes
+# through the SEPARATE specialized-collapse pipeline instead
+# (module_frontend_specialized_prepare merges every module into one item list
+# before lowering) -- confirmed by the "specialized_collapse" log line below,
+# so a silently-skipped collapse can't pass this by accident.
+compile_and_run genericcollapse "$FIX/genericcollapse/main.sio"
+expect_output genericcollapse "$FIX/genericcollapse/expected.txt"
+expect_log genericcollapse "specialized_collapse" "confirmation the specialized-collapse pipeline actually ran"
+compile_and_run genericcollapse_swapped "$FIX/genericcollapse/main_swapped.sio"
+expect_output genericcollapse_swapped "$FIX/genericcollapse/expected.txt"
+echo "$TAG PASS(genericcollapse): colliding private GENERIC helpers, both import orders, through the specialized-collapse pipeline"
 
 compile_and_run capacity "$FIX/capacity/main.sio"
 expect_output capacity "$FIX/capacity/expected.txt"
