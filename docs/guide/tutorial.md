@@ -11,6 +11,18 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.tutorial
 
 A step-by-step guide to learning Sounio, the language for epistemic computing.
 
+> **Canonical epistemic API.** The checked public surface for epistemic values
+> is `epistemic::knowledge` (free-fn form: `ep_measured`, `ep_val`, `ep_std`,
+> `ep_add`, `ep_mul`, `ep_div`, `ep_merge`, `ep_is_credible`, `ep_*_cov` for
+> covariance-aware GUM), anchored by
+> `tests/stdlib/epistemic/test_knowledge_madaros_import_e2e.sio` and
+> `tests/run-pass/ep_gum_covariance.sio`. The legacy
+> `stdlib::epistemic::lib` surface (`epistemic_std`, `add_epistemic`,
+> `mul_epistemic`, `fuse_measurements`) is not exercised by `tests/run-pass/`
+> and is not part of the checked artifact. `with_confidence` operators and
+> units-as-type-parameters are aspirational in source and absent from the
+> checked public surface — see `docs/compiler/KNOWN_LIMITATIONS.md`.
+
 ## Table of Contents
 
 1. [Getting Started](#1-getting-started)
@@ -149,21 +161,20 @@ let first = numbers[0]
 
 This is where Sounio shines. Every measurement in science has uncertainty—Sounio makes it explicit.
 
-### Basic Knowledge Types
+### Basic Epistemic Type
 
 ```sio
-import stdlib.epistemic::*
+use epistemic::knowledge::{Epistemic, ep_measured, ep_val, ep_std, ep_confidence}
 
-// Create a measurement with uncertainty
-let mass = Knowledge::new(
-    value: 10.5,           // kg
-    uncertainty: 0.2,      // ± 0.2 kg
-    confidence: 0.95,      // 95% confidence interval
-    source: "scale_lab_1"
-)
+// Create a measurement with uncertainty.
+// ep_measured stores variance = std_dev^2 and confidence = 900 (medium).
+let mass = ep_measured(10.5, 0.2)   // val=10.5, std_dev=0.2, confidence=900/1000
 
-print("Mass: ", mass.value, " ± ", mass.uncertainty, " kg")
-print("Confidence: ", mass.confidence * 100.0, "%")
+print("Mass: ", ep_val(&mass), " ± ", ep_std(&mass), " kg")
+print("Confidence: ", ep_confidence(&mass), "/1000  (", ep_confidence(&mass) / 10, "%)")
+
+// Note: the source/instrument lives in stdlib/epistemic/provenance.sio,
+// not as a field of Epistemic.
 ```
 
 ### Automatic Propagation
@@ -171,32 +182,37 @@ print("Confidence: ", mass.confidence * 100.0, "%")
 Uncertainty propagates automatically through calculations:
 
 ```sio
-let length = Knowledge::new(5.0, uncertainty: 0.1)
-let width = Knowledge::new(3.0, uncertainty: 0.05)
+use epistemic::knowledge::{Epistemic, ep_mul, ep_val, ep_std}
 
-// Area calculation with automatic uncertainty propagation
-let area = length * width
+// Struct-literal form: variance = std_dev^2, confidence integer 0..1000.
+let length = Epistemic { val: 5.0, variance: 0.01,  confidence: 900 }
+let width  = Epistemic { val: 3.0, variance: 0.0025, confidence: 900 }
 
-// Uncertainty is calculated using GUM (Guide to Uncertainty in Measurement)
-print("Area: ", area.value, " ± ", area.uncertainty)
-// Output: Area: 15.0 ± 0.35
+// Area = length * width (GUM delta method via ep_mul, uncorrelated).
+let area = ep_mul(&length, &width)
+// Var(area) = w^2 * Var(L) + l^2 * Var(W) + Var(L)*Var(W)
+//         = 9 * 0.01    + 25 * 0.0025   + 0.01 * 0.0025
+//         ≈ 0.1525,  sigma ≈ 0.39
+print("Area: ", ep_val(&area), " ± ", ep_std(&area))
 ```
 
 ### Confidence-Based Execution
 
 ```sio
-fn administer_drug(dose: Knowledge<mg>) with IO {
-    if dose.confidence > 0.95 {
+use epistemic::knowledge::{Epistemic, ep_is_credible, ep_confidence}
+
+fn administer_drug(dose: Epistemic) with IO {
+    if ep_is_credible(&dose, 950) {
         // High confidence - proceed automatically
         inject(dose)
-    } else if dose.confidence > 0.80 {
+    } else if ep_is_credible(&dose, 800) {
         // Medium confidence - require confirmation
-        if confirm("Confidence is ", dose.confidence, ". Proceed?") {
+        if confirm("Confidence is ", ep_confidence(&dose), "/1000. Proceed?") {
             inject(dose)
         }
     } else {
         // Low confidence - reject
-        error("Dose confidence too low: ", dose.confidence)
+        error("Dose confidence too low: ", ep_confidence(&dose))
     }
 }
 ```
@@ -204,20 +220,19 @@ fn administer_drug(dose: Knowledge<mg>) with IO {
 ### Provenance Tracking
 
 ```sio
-let measurement1 = Knowledge::new(
-    value: 100.0,
-    uncertainty: 5.0,
-    source: Source {
-        instrument: "Spectrometer-A",
-        calibration_date: "2025-01-15",
-        operator: "Dr. Smith",
-    }
-)
+use epistemic::knowledge::{Epistemic, ep_mul, ep_val}
 
-// Provenance is preserved through calculations
+let measurement1 = Epistemic { val: 100.0, variance: 25.0, confidence: 900 }
+
+// Scalar arithmetic on an Epistemic takes the bare value (use epistemic fns for variance propagation).
 let result = measurement1 * 2.0
-print("Result source: ", result.provenance.instrument)
+print("Result: ", ep_val(measurement1) * 2.0)
 ```
+
+> Note: the `Source` struct with `instrument` / `calibration_date` / `operator`
+> fields, and `result.provenance.instrument`, are **not** in the checked
+> surface. Provenance is tracked separately in `stdlib/epistemic/provenance.sio`;
+> `Epistemic` itself carries only `val`, `variance`, and `confidence`.
 
 ---
 
@@ -292,49 +307,65 @@ let result = handle compute() {
 
 Sounio has first-class support for physical units, preventing dimensional errors at compile time.
 
-### Basic Units
+### Basic Units (Quantity form)
+
+> Units-as-type-spellets (`let distance: m = 100.0`, `fn f(x: kg) -> N`) are
+> **aspirational**. The checked surface is `Quantity` + `dim_*()` constructors
+> from `stdlib/units/lib.sio`; see `tests/stdlib/units/test_units_stdlib.sio`.
 
 ```sio
-import stdlib.units::*
+use units::lib::*   // dim_mass, dim_length, dim_time, quantity_new, quantity_div, ...
 
-// Declare quantities with units
-let distance: m = 100.0    // meters
-let time: s = 10.0         // seconds
-let velocity = distance / time  // Type: m/s
+let distance = quantity_new(100.0, 0.0, dim_length())  // meters
+let time     = quantity_new(10.0,  0.0, dim_time())     // seconds
+let velocity = quantity_div(distance, time)
 
-// Compile-time unit checking
-let mass: kg = 5.0
-let force: N = mass * 9.8  // N = kg⋅m/s²
+// Compile-time unit checking (via dim_eq / quantity_is_compatible).
+let mass  = quantity_new(5.0, 0.0, dim_mass())
+let force = quantity_mul(mass, quantity_new(9.8, 0.0, dim_acceleration()))
 
-// ERROR: Type mismatch
-// let invalid = distance + time  // Can't add meters to seconds!
+// Dimension mismatch:
+let invalid = quantity_add(distance, time)
+// quantity_is_compatible(distance, time) == false
 ```
 
-### Custom Units
+### Custom Units (Quantity form)
+
+> `mg`, `mL`, `mg*h/L`, `L/h` as type-spellets are **aspirational**. The
+> checked surface is `Quantity` with `dim_*()` dimensions
+> (`stdlib/units/lib.sio`).
 
 ```sio
-// Pharmacology example
-let dose: mg = 500.0
-let volume: mL = 250.0
-let concentration = dose / volume  // Type: mg/mL
+use units::lib::*;
 
-// Units in function signatures
-fn calculate_clearance(dose: mg, auc: mg*h/L) -> L/h {
-    dose / auc
+let dose         = quantity_new(500.0, 0.0, dim_mass())
+let volume       = quantity_new(250.0, 0.0, dim_volume())
+let concentration = quantity_div(dose, volume)
+
+// Units in function signatures — pass Quantity directly.
+fn calculate_clearance(dose: Quantity, auc: Quantity) -> Quantity
+    with Mut, Div, Panic
+{
+    quantity_div(dose, auc)
 }
 ```
 
 ### Unit Conversions
 
 ```sio
-import stdlib.units::conversions::*
+use units::lib::*   // exports both dim_* and convert_*_to_* free functions.
 
-let distance_m: m = 1000.0
-let distance_km: km = convert(distance_m)  // 1.0 km
+let distance_m     = 1000.0                     // bare f64 (number space)
+let distance_cm_equiv = convert_m_to_cm(distance_m)   // 100000.0
 
-let temp_c: celsius = 25.0
-let temp_f: fahrenheit = convert(temp_c)  // 77.0°F
+let temp_c = 25.0
+let temp_k = convert_celsius_to_kelvin(temp_c)        // 298.15
+let temp_f_equiv = convert_kelvin_to_celsius(temp_k)  // 25.0
 ```
+
+> `convert(value)` is not in the checked surface. The shipped conversions are
+> named free functions: `convert_m_to_cm`, `convert_kg_to_g`,
+> `convert_celsius_to_kelvin`, etc. See `stdlib/units/lib.sio`.
 
 ---
 
@@ -343,82 +374,54 @@ let temp_f: fahrenheit = convert(temp_c)  // 77.0°F
 ### Epistemic Arithmetic
 
 ```sio
-import stdlib.epistemic::*
-import stdlib.math::*
+use epistemic::knowledge::{
+    Epistemic, ep_measured, ep_add, ep_mul, ep_sqrt_ep, ep_val, ep_std
+}
 
-// Measurements with uncertainty
-let x = Knowledge::new(10.0, uncertainty: 0.5)
-let y = Knowledge::new(5.0, uncertainty: 0.2)
+// Measurements with uncertainty (canonical free-fn form).
+let x = ep_measured(10.0, 0.5)
+let y = ep_measured(5.0,  0.2)
 
-// All operations propagate uncertainty
-let sum = x + y
-let product = x * y
-let sqrt_x = sqrt(x)
-let exp_x = exp(x)
+// All operations propagate uncertainty via GUM delta method.
+let sum      = ep_add(&x, &y)                  // Var(sum) = Var(x)+Var(y)  (uncorrelated)
+let product  = ep_mul(&x, &y)                  // Var(prod) = y^2 Var(x) + x^2 Var(y) + ...
+let sqrt_x   = ep_sqrt_ep(&x)                 // Var(sqrt(x)) = Var(x)/(4 x)
+let exp_val  = /* std::lib/epistemic/propagate.sio::ep_exp */ f64::exp(ep_val(&x))
 
-print("sqrt(x) = ", sqrt_x.value, " ± ", sqrt_x.uncertainty)
+print("sqrt(x) = ", ep_val(&sqrt_x), " ± ", ep_std(&sqrt_x))
 ```
+
+> Note: `Knowledge::new(...)` is aspirational; the canonical constructor is
+> `Epistemic { val, variance, confidence }` (`tests/run-pass/ep_gum_covariance.sio`)
+> or `ep_measured(val, std_dev)`. `sqrt`/`exp` are provided as `ep_sqrt_ep` and
+> `exp` on bare `f64`; `sqrt` is not a free fn on `Epistemic`.
 
 ### ODE Solvers
 
-```sio
-import stdlib.ode::*
-
-// Define a differential equation: dy/dt = -k*y
-fn exponential_decay(t: f64, y: f64, k: f64) -> f64 {
-    -k * y
-}
-
-// Solve from t=0 to t=10
-let solution = solve_ode(
-    f: exponential_decay,
-    y0: 100.0,
-    t_span: (0.0, 10.0),
-    params: (k: 0.1),
-    method: RK45
-)
-
-for point in solution {
-    print("t=", point.t, " y=", point.y)
-}
-```
+> **Aspirational surface — not in the checked artifact.** `stdlib::ode` is not
+> present in `git ls-files stdlib/ode*` and is tracked in
+> `docs/compiler/KNOWN_LIMITATIONS.md`. The shipped source-tracked propagation
+> lives in `stdlib/epistemic/affine` (anchor: `tests/run-pass/affine_shared_source_add.sio`,
+> `affine_product_delta.sio`). For closed-form physics, see
+> `stdlib/physics/mechanics` (`kinetic_energy_q`, `hookean_force_q`, etc.,
+> exercised in `tests/stdlib/physics/test_mechanics_e2e.sio`).
 
 ### Linear Algebra
 
-```sio
-import stdlib.linalg::*
-
-// Matrix operations
-let A = matrix([
-    [1.0, 2.0],
-    [3.0, 4.0]
-])
-
-let b = vector([5.0, 6.0])
-
-// Solve Ax = b
-let x = solve(A, b)
-
-// Eigenvalues and eigenvectors
-let (eigenvalues, eigenvectors) = eig(A)
-```
+> **Aspirational surface — not in the checked artifact.** `stdlib::linalg` is
+> not present in `git ls-files stdlib/linalg*`. The shipped GPU/back-end matrix
+> primitives are in `stdlib/gpu/clifford_kernel.sio` and the clifford-kernel
+> helpers (`cl_gpu_mul_batch`, `sed_f3_batch`, `cd_gpu_count_tk`); see
+> `examples/gpu/vec_add.sio` and `examples/gpu.sio` for the canonical kernel
+> surface.
 
 ### Signal Processing
 
-```sio
-import stdlib.signal::*
-
-// FFT
-let signal = [1.0, 2.0, 3.0, 4.0, 5.0, 4.0, 3.0, 2.0]
-let spectrum = fft(signal)
-
-// Filtering
-let filtered = lowpass_filter(signal, cutoff: 0.5)
-
-// Convolution
-let kernel = [0.25, 0.5, 0.25]
-let smoothed = convolve(signal, kernel)
-```
+> **Aspirational surface — not in the checked artifact.** `stdlib::signal`
+> is not present in `git ls-files stdlib/signal*`. The shipped GPU FFT lives in
+> `stdlib/gpu/fft.sio`. For host-side numeric transforms of epistemic values,
+> use `ep_sqrt_ep`, `ep_square`, `ep_merge`, and `ep_*_cov` from
+> `epistemic::knowledge` (anchor: `tests/run-pass/ep_gum_covariance.sio`).
 
 ---
 
@@ -442,44 +445,50 @@ fn sqrt(x: Positive) -> f64 {
 
 ### Linear Types
 
+> **Aspirational syntax.** `linear struct FileHandle { … }` is not in the
+> checked source surface. The shipped source-tracked ownership semantics live in
+> `stdlib/epistemic/affine` (anchor: `tests/run-pass/affine_shared_source_add.sio`).
+> The `linear` keyword on a `struct` is not part of the checked artifact and is
+> tracked in `docs/compiler/KNOWN_LIMITATIONS.md`. For file handle ownership in
+> source, see `stdlib/coordination/fleet_transaction.sio` and the `linear_ad`
+> module of `stdlib/autodiff/linear_ad.sio`.
+
 ```sio
-// Linear types ensure single ownership
-linear struct FileHandle {
+struct FileHandle {
     fd: i32
 }
 
 fn close(handle: FileHandle) {
-    // Consumes handle - can't be used again
     os.close(handle.fd)
 }
 
 let file = open("data.txt")
 close(file)
-// ERROR: file has been moved
-// close(file)
+// Source-tracked ownership is unenforced in source; the compiler emits E249
+// for access-after-move at the IR level.
 ```
 
 ### GPU Computing
 
 ```sio
-import stdlib.gpu::*
+use gpu::*   // exports kernel fn marker, gpu_thread_id_x, perform GPU.{launch,sync}
 
-// Mark function for GPU execution
-@gpu
-fn matrix_multiply(a: [f32], b: [f32], n: i32) -> [f32] {
-    // Executes on GPU
-    let result = [0.0; n * n]
-    for i in 0..n {
-        for j in 0..n {
-            for k in 0..n {
-                result[i*n + j] += a[i*n + k] * b[k*n + j]
-            }
-        }
+// Mark the function as a GPU kernel; effect `GPU` declares GPU execution.
+kernel fn vector_add(n: i64, a: &[f64], b: &[f64], c: &![f64])
+    with GPU, Div, Panic
+{
+    // Each thread covers one element (runnable anchor: examples/gpu/vec_add.sio).
+    let i = gpu_thread_id_x()
+    if i < n {
+        c[i as usize] = a[i as usize] + b[i as usize]
     }
-    result
 }
 
-// Automatic kernel generation for CUDA/Metal
+// Host-side dispatch (canonical pattern):
+perform GPU.launch(vector_add)
+    on (grid: [n], block: [64])
+    with (args: (n, a, b, c))
+perform GPU.sync()
 ```
 
 ### Generic Programming

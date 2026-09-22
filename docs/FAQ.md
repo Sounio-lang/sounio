@@ -11,6 +11,18 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.faq
 
 Common questions about Sounio and epistemic computing.
 
+> **Canonical epistemic API.** The checked public surface for epistemic values
+> is `epistemic::knowledge` (free-fn form: `ep_measured`, `ep_val`, `ep_std`,
+> `ep_add`, `ep_mul`, `ep_div`, `ep_merge`, `ep_is_credible`, `ep_*_cov` for
+> covariance-aware GUM), anchored by
+> `tests/stdlib/epistemic/test_knowledge_madaros_import_e2e.sio` and
+> `tests/run-pass/ep_gum_covariance.sio`. The legacy
+> `stdlib::epistemic::lib` surface (`epistemic_std`, `add_epistemic`,
+> `mul_epistemic`, `fuse_measurements`) is not exercised by `tests/run-pass/`
+> and is not part of the checked artifact. `with_confidence` operators and
+> units-as-type-parameters are aspirational in source and absent from the
+> checked public surface — see `docs/compiler/KNOWN_LIMITATIONS.md`.
+
 ## Table of Contents
 
 - [General](#general)
@@ -32,7 +44,7 @@ Sounio is a systems programming language designed for **epistemic computing**—
 ### Why create a new language?
 
 Existing languages treat uncertainty as an afterthought (manual error propagation, separate libraries). Sounio makes epistemic integrity **foundational**:
-- `Knowledge<T>` types track uncertainty automatically
+- `Epistemic` (stdlib `epistemic::knowledge`) tracks point estimate, variance, and integer confidence 0–1000; free-fn arithmetic (`ep_add`, `ep_mul`, ...) propagates variance via GUM delta method
 - Effect system tracks computational side effects
 - Units of measure prevent dimensional errors
 - First-class support for scientific workflows
@@ -129,64 +141,73 @@ Computing that explicitly represents **what we know** and **how well we know it*
 - Confidence level (statistical confidence)
 - Provenance (where it came from)
 
-### Do I have to use `Knowledge<T>` everywhere?
+### Do I have to use Epistemic everywhere?
 
 No! Use it where uncertainty matters:
 ```sio
+use epistemic::knowledge::{ep_measured}
+
 // Computational geometry - exact
 let angle = 90.0  // degrees
 
-// Scientific measurement - uncertain
-let temperature = Knowledge::new(
-    value: 37.2,
-    uncertainty: 0.1,
-    source: "thermometer_A"
-)
+// Scientific measurement - uncertain (canonical free-fn form)
+let temperature = ep_measured(37.2, 0.1)
+// Note: ep_measured stores variance = std^2; the source/instrument lives in
+// stdlib/epistemic/provenance.sio, not as a field of Epistemic.
 ```
 
 ### How is uncertainty propagated?
 
 Automatically, using the **GUM** (Guide to Uncertainty in Measurement) standard:
 ```sio
-let x = Knowledge::new(10.0, uncertainty: 0.5)
-let y = Knowledge::new(5.0, uncertainty: 0.2)
+use epistemic::knowledge::{Epistemic, ep_add, ep_mul}
 
-// Addition: σ_sum = sqrt(σ_x² + σ_y²)
-let sum = x + y  // uncertainty: sqrt(0.5² + 0.2²) = 0.539
+// Constructor (struct-literal form) — variance = std^2, confidence integer 0..1000.
+let x = Epistemic { val: 10.0, variance: 0.25, confidence: 900 }
+let y = Epistemic { val:  5.0, variance: 0.04, confidence: 900 }
 
-// Multiplication uses partial derivatives
-let product = x * y  // GUM formula applied automatically
+// GUM delta method, uncorrelated: Var(X+Y) = Var(X) + Var(Y).
+let sum = ep_add(&x, &y)
+// Multiplication uses partial derivatives via ep_mul.
+let product = ep_mul(&x, &y)
+// Numerical check: Var(sum) = 0.29, Var(product) computed by ep_mul.
 ```
 
 ### What if I don't know the uncertainty?
 
 Be explicit about it:
 ```sio
-// Unknown uncertainty - use conservative estimate
-let guess = Knowledge::new(
-    value: 42.0,
-    uncertainty: LARGE_VALUE,
-    confidence: 0.50,  // Low confidence
-    source: "rough_estimate"
-)
+use epistemic::knowledge::{Epistemic}
 
-// Or use raw values when uncertainty truly doesn't matter
+// Unknown uncertainty - encode as high-variance, low-confidence struct literal.
+let guess = Epistemic { val: 42.0, variance: 1.0e6, confidence: 500 }
+
+// Or use raw values when uncertainty truly does not matter.
 let count: i32 = 5  // Counting objects - no uncertainty
 ```
 
-### Can I compare `Knowledge<T>` values?
+### Can I compare Epistemic values?
 
 Yes, but comparisons are probabilistic:
 ```sio
-let a = Knowledge::new(10.0, uncertainty: 1.0)
-let b = Knowledge::new(12.0, uncertainty: 1.0)
+use epistemic::knowledge::{Epistemic, ep_val, ep_is_credible}
 
-// Deterministic comparison (point values)
-if a.value < b.value { }
+let a = Epistemic { val: 10.0, variance: 1.0, confidence: 900 }
+let b = Epistemic { val: 12.0, variance: 1.0, confidence: 900 }
 
-// Probabilistic comparison (accounts for uncertainty)
-if a < b with_confidence 0.95 { }
+// Deterministic comparison (point values).
+if ep_val(&a) < ep_val(&b) { }
+
+// Combined credibility gate (canonical equivalent of "with_confidence 0.95"):
+// 95% threshold = integer 950 on the 0..1000 scale.
+if ep_is_credible(&a, 950) && ep_is_credible(&b, 950) {
+    // proceed with the comparison as a measured assertion
+}
 ```
+
+> **Note.** `if a < b with_confidence 0.95 { }` is **not** part of the checked
+> surface. The canonical equivalent uses `ep_is_credible(&e, 950)` (boolean)
+> and `ep_val(&e)` for the point comparison. See `tests/stdlib/epistemic/test_knowledge_stdlib.sio`.
 
 ---
 
@@ -249,11 +270,11 @@ Yes. Performance comparable to Rust/C++:
 - Fast iteration via the checked `bin/souc` artifact — AOT only, no JIT tier (measured 2026-08-27)
 - GPU acceleration for parallel workloads
 
-### Does `Knowledge<T>` have runtime overhead?
+### Does `Epistemic` have runtime overhead?
 
 Minimal:
-- `Knowledge<f64>` ≈ 3 additional f64 fields (value, uncertainty, confidence)
-- Propagation adds ~2-5% overhead vs raw arithmetic
+- `Epistemic` is `val: f64` + `variance: f64` + `confidence: i64` (24 bytes total). See `stdlib/epistemic/knowledge.sio`.
+- Propagation adds ~2–5% overhead vs raw arithmetic (GUM δ-method)
 - GPU kernels can vectorize uncertainty calculations
 
 ### When should I use GPU acceleration?
@@ -279,7 +300,7 @@ souc build --release --unsafe-fast-math file.sio
 
 Or use raw types where uncertainty doesn't matter:
 ```sio
-let fast_computation: f64 = ...  // No Knowledge<> wrapper
+let fast_computation: f64 = ...  // No Epistemic wrapper
 ```
 
 ---
@@ -303,11 +324,14 @@ fn main() {
 
 Yes, via PyO3 bindings (experimental):
 ```python
+# Prototype PyO3 bindings are not part of the checked public artifact.
 import sounio
 
-knowledge = sounio.Knowledge(value=10.0, uncertainty=0.5)
-result = knowledge + sounio.Knowledge(5.0, 0.2)
-print(f"Result: {result.value} ± {result.uncertainty}")
+# Canonical stdlib struct shape: Epistemic { val, std_dev, ... }.
+e1 = sounio.Epistemic(10.0, std_dev=0.5)
+e2 = sounio.Epistemic(5.0,  std_dev=0.2)
+print(f"Result: {e1.val} ± {e1.std_dev}")
+# (operator overloading and named-arg construction are prototype-only)
 ```
 
 ### Can I use Rust crates?
