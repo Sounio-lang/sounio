@@ -242,24 +242,50 @@ fn empty_unit_entry() -> UnitEntry {
     }
 }
 
+// 128, not 32: register_builtin_units alone now claims 27 of a 32-entry table
+// (5 free), and every `unit NAME [= conv];` declaration in the source under
+// check, plus every anonymous derived-dimension a product/quotient/annotation
+// needs a slot for, shares that same table. `register` silently drops the
+// entry past capacity -- see UNIT_REGISTRY_OVERFLOW below for why a silent
+// drop there is a correctness bug, not a usability one.
 pub struct UnitRegistry {
-    pub entries: [UnitEntry; 32],
+    pub entries: [UnitEntry; 128],
     pub count: i64,
 }
 
 pub fn unit_registry_new() -> UnitRegistry {
     UnitRegistry {
-        entries: [empty_unit_entry(); 32],
+        entries: [empty_unit_entry(); 128],
         count: 0,
     }
+}
+
+// Set when `register` refuses an entry because the table is full. A dropped
+// unit does not vanish from the source -- checker_collect_unit_decl_inplace
+// still lowers its annotation to ty_with_unit(ty_f64(), idx) using whatever
+// idx .find() next returns for that name, which is -1 (unregistered) or, worse,
+// a DIFFERENT unit's idx if the name happens to prefix-match nothing and the
+// caller does not check for -1. Either way the compile proceeds with a unit
+// identity nothing verified. Reported through the same fail-closed hook chain
+// as the specializer and type-parameter-registry overflows (see
+// spec_report_any_specializer_failure).
+pub var UNIT_REGISTRY_OVERFLOW: bool = false
+
+pub fn unit_report_registry_overflow() -> bool with IO {
+    if !UNIT_REGISTRY_OVERFLOW { return false }
+    print("error: unit registry capacity exceeded: a compilation supports at most 128 distinct units (builtin, user-declared and anonymous derived combined)\n")
+    print("  note: compilation is refused because a dropped unit would leave its declared type unverified rather than absent\n")
+    true
 }
 
 impl UnitRegistry {
     fn register(self, name: Name, dim: UnitDim) -> UnitRegistry with Mut, Panic, Div {
         var reg = self
-        if reg.count < 32 {
+        if reg.count < 128 {
             reg.entries[reg.count] = UnitEntry { name: name, dim: dim }
             reg.count = reg.count + 1
+        } else {
+            UNIT_REGISTRY_OVERFLOW = true
         }
         reg
     }
@@ -362,10 +388,17 @@ pub fn register_builtin_units(reg: UnitRegistry) -> UnitRegistry with Mut, Panic
 
     // Chemistry: amount concentration, energy, pressure.
     r = r.register(name_from_str5(109, 111, 108, 95, 76), unit_dim_with_scale(unit_dim_amount_concentration(), 1000, 1)) // "mol_L"
-    r = r.register(name_from_str1(74), unit_dim_energy())                                        // "J"
-    r = r.register(name_from_str2(107, 74), unit_dim_with_scale(unit_dim_energy(), 1000, 1))     // "kJ"
-    r = r.register(name_from_str2(80, 97), unit_dim_pressure())                                  // "Pa"
-    r = r.register(name_from_str3(97, 116, 109), unit_dim_with_scale(unit_dim_pressure(), 101325, 1)) // "atm"
+    // unit_dim_energy/unit_dim_pressure both carry a MASS exponent, and this
+    // registry's mass base is grams (g scale=1, kg scale=1000 -- "Mass units
+    // (base: g)" above). Their natural (scale=1) combination is therefore
+    // g*m^2/s^2 and g/(m*s^2) -- a milliJoule and a milliPascal, not a Joule
+    // and a Pascal. Every scale below is the g-relative one, ×1000 of what a
+    // kg-based derivation would read: J and Pa now, kJ and atm carry that same
+    // ×1000 through their own multiplier.
+    r = r.register(name_from_str1(74), unit_dim_with_scale(unit_dim_energy(), 1000, 1))          // "J" = 1000 (g*m^2/s^2)
+    r = r.register(name_from_str2(107, 74), unit_dim_with_scale(unit_dim_energy(), 1000000, 1))  // "kJ" = 1e6 (g*m^2/s^2)
+    r = r.register(name_from_str2(80, 97), unit_dim_with_scale(unit_dim_pressure(), 1000, 1))    // "Pa" = 1000 (g/(m*s^2))
+    r = r.register(name_from_str3(97, 116, 109), unit_dim_with_scale(unit_dim_pressure(), 101325000, 1)) // "atm" = 101325000 (g/(m*s^2))
 
     r
 }
