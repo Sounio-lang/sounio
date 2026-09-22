@@ -8,7 +8,9 @@
 # V0-E.4 green (this gate):
 #   - Seed-run F128Bits soft_add/sub anti-f64 case ((1+~1e-20)-1 ≠ 0)
 #   - Native IEEE hex expecteds hardcoded here (not Python/Rust judges)
-#   - lean_single language `f128` path proven f64-greenwash (negative control)
+#   - lean_single language `f128` path is anti-f64: since #2387 it refuses to
+#     widen an f64-inexact literal into binary128 rather than greenwash it
+#     (negative control; updated 2026-09-22, see the block below)
 #   - Madaros check of language f128 arith still OK (V0-E.2)
 #   - stdlib wide_float exposes f128_bits_soft_add / soft_sub
 #
@@ -109,8 +111,24 @@ else
   fi
 fi
 
-# Negative control: lean_single language f128 greenwashes to f64
+# Negative control: lean_single language f128 used to greenwash to f64
 # ((1e-20 + 1.0) - 1.0) == 0 under f64; must NOT be claimed as f128.
+#
+# Updated 2026-09-22: commit 8b99209e41 (#2387, 2026-09-13) gave lean_single
+# real binary128 lowering for annotated f128 locals -- the same commit that
+# made the language check tests/compile-fail/f128_inexact_literal_refused_on_lean_single.sio
+# a positive fixture. lean_single now refuses, at compile time, to widen an
+# f64-inexact literal like 1e-20 into a binary128 slot at all (see
+# self-hosted/compiler/lean_single.sio: f128_widen_refuses_inexact_literal),
+# matching the same fail-closed philosophy Madaros enforces on its own
+# lowering path since V0-E.5.9 (no f64 approximation is ever fabricated,
+# whether by widening a literal or by greenwashing an op). That refusal IS
+# the anti-greenwash evidence now, so this negative control accepts either
+# shape: a build that fails with the exactness-refusal message (lean_single's
+# current, intentional behavior), or -- should the literal ever be relaxed to
+# build -- a run that still proves the result is not f64-greenwashed. Only an
+# unrelated build failure, or a build that silently greenwashes, still fails
+# this check.
 GREEN="$TMP_DIR/greenwash.sio"
 cat >"$GREEN" <<'EOF'
 fn main() -> i32 with IO {
@@ -130,10 +148,9 @@ set +e
 "$SEED_COMPILER" "$GREEN" "$GELF" >"$TMP_DIR/greenwash.build.log" 2>&1
 gb=$?
 set -e
-if [[ "$gb" -ne 0 || ! -f "$GELF" ]]; then
-  note_fail "lean_single_language_f128_build"
-  tail -20 "$TMP_DIR/greenwash.build.log" >&2 || true
-else
+if [[ "$gb" -ne 0 ]] && grep -Fq 'f128 literal is not exactly representable in binary64' "$TMP_DIR/greenwash.build.log"; then
+  note_pass "lean_single_language_f128_inexact_literal_refused_no_greenwash"
+elif [[ "$gb" -eq 0 && -f "$GELF" ]]; then
   chmod +x "$GELF"
   set +e
   "$GELF" >"$TMP_DIR/greenwash.run.log" 2>&1
@@ -145,6 +162,9 @@ else
     note_fail "lean_single_language_f128_unexpectedly_anti_f64"
     cat "$TMP_DIR/greenwash.run.log" >&2 || true
   fi
+else
+  note_fail "lean_single_language_f128_build"
+  tail -20 "$TMP_DIR/greenwash.build.log" >&2 || true
 fi
 
 # Language check still green (V0-E.2)
@@ -169,7 +189,7 @@ echo "---"
 echo "PASS_COUNT=$PASS"
 echo "FAIL_COUNT=$FAIL"
 if [[ "$FAIL" -eq 0 ]]; then
-  echo "PASS f128_f256_v0e4_language_lower exact_case=stdlib anti_f64=green unsupported=explicit lean_single_language=f64_greenwash_refused language_check=ok madaros_run=deferred"
+  echo "PASS f128_f256_v0e4_language_lower exact_case=stdlib anti_f64=green unsupported=explicit lean_single_language=inexact_literal_refused_no_greenwash language_check=ok madaros_run=deferred"
   echo "PASS madaros_f128_f256_ladder_gate stage=v0e4"
   exit 0
 fi

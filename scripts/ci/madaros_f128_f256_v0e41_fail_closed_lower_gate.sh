@@ -63,9 +63,13 @@ fi
 if bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0e4_language_lower_gate.sh" >"$TMP_DIR/v0e4.log" 2>&1; then
   note_pass "v0e4_anti_f64_still_green"
 else
-  # Language check may fail on stale local souc; accept if seed anti-f64 core passed
+  # Language check may fail on stale local souc; accept if seed anti-f64 core passed.
+  # Since 2026-09-22 the seed's negative control passes as either an explicit
+  # inexact-literal refusal (lean_single's current behavior, post-#2387) or the
+  # older greenwash-refused runtime receipt -- see v0e4's own comments.
   if grep -Fq 'PASS seed_run_anti_f64_smoke' "$TMP_DIR/v0e4.log" \
-    && grep -Fq 'PASS lean_single_language_f128_f64_greenwash_refused' "$TMP_DIR/v0e4.log"; then
+    && { grep -Fq 'PASS lean_single_language_f128_inexact_literal_refused_no_greenwash' "$TMP_DIR/v0e4.log" \
+      || grep -Fq 'PASS lean_single_language_f128_f64_greenwash_refused' "$TMP_DIR/v0e4.log"; }; then
     note_pass "v0e4_anti_f64_core_green_stale_souc_ok"
   else
     note_fail "v0e4_anti_f64_regression"

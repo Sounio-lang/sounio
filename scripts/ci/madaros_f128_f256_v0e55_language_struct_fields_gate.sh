@@ -18,7 +18,11 @@
 #   - DCE: a struct with an f128 field marks the softfloat desugar targets even
 #     when the program has no f128 let/param/return (struct_only probe)
 #   - Anti-f64 through a field: (1+~1e-20)^2 ≠ 1
-#   - f256 fields, `+=` on f128, and inexact literals (0.1) still fail-closed
+#   - KL-8 (2026-09-12, #2491): `+=`/`-=` on a plain f128 local desugar to
+#     real softfloat add/sub and store back correctly (`acc: f128 = 1.0;
+#     acc += one` gives exactly 2.0, no f64 greenwash) -- updated 2026-09-22,
+#     this used to be a fail-closed refusal, superseded by KL-8
+#   - f256 fields and inexact literals (0.1) still fail-closed
 #
 # Explicitly NOT claimed:
 #   - lean_single language f128 (still f64 greenwash)
@@ -118,14 +122,23 @@ fn main() -> i32 with IO, Mut, Panic, Div {
 }
 EOF
 
-# Compound assignment on an f128 slot stays fail-closed.
+# Compound assignment on a plain f128 local: since KL-8 (#2491, 2026-09-12)
+# this is real softfloat add/sub, not a refusal -- `1.0 += 1.0` must give
+# exactly binary128 2.0 (never an f64 approximation). Checked separately
+# below, not in the fail-closed loop.
 cat >"$TMP_DIR/lang_compound.sio" <<'EOF'
 use math::softfloat_f128::{f128_from_limbs, f128_to_lo, f128_to_hi}
+use math::wide_float::{print_limb_hex16}
 
 fn main() -> i32 with IO, Mut, Panic, Div {
     var acc: f128 = 1.0
     let one: f128 = 1.0
     acc += one
+    print("wire_compound_assign=")
+    print_limb_hex16(f128_to_lo(acc))
+    print(":")
+    print_limb_hex16(f128_to_hi(acc))
+    println("")
     if f128_to_hi(acc) == 0 { return 1 }
     return 0
 }
@@ -151,8 +164,7 @@ EOF
 
 if [[ -x "$SOUC" ]]; then
   for neg in lang_f256_field:"$REFUSE_SENTINEL":language_f256_field_still_fail_closed \
-             lang_inexact_field:"no f64 widen":language_f128_inexact_field_literal_still_fail_closed \
-             lang_compound:"$REFUSE_SENTINEL":language_f128_compound_assign_still_fail_closed; do
+             lang_inexact_field:"no f64 widen":language_f128_inexact_field_literal_still_fail_closed; do
     name="${neg%%:*}"; rest="${neg#*:}"; want="${rest%:*}"; label="${rest##*:}"
     set +e
     "$SOUC" compile "$TMP_DIR/$name.sio" -o "$TMP_DIR/$name.elf" >"$TMP_DIR/$name.compile.log" 2>&1
@@ -165,6 +177,20 @@ if [[ -x "$SOUC" ]]; then
       tail -30 "$TMP_DIR/$name.compile.log" >&2 || true
     fi
   done
+
+  # KL-8: compound assignment on a plain f128 local now compiles and runs,
+  # computing the real softfloat sum -- 1.0 += 1.0 must be exactly binary128
+  # 2.0 (0000000000000000:4000000000000000), never f64 bits and never 0.
+  set +e
+  "$SOUC" run "$TMP_DIR/lang_compound.sio" >"$TMP_DIR/lang_compound.run.log" 2>&1
+  lc_rc=$?
+  set -e
+  if [[ "$lc_rc" -eq 0 ]] && grep -Fq 'wire_compound_assign=0000000000000000:4000000000000000' "$TMP_DIR/lang_compound.run.log"; then
+    note_pass "language_f128_compound_assign_kl8_correct"
+  else
+    note_fail "language_f128_compound_assign_kl8_wrong rc=$lc_rc"
+    tail -30 "$TMP_DIR/lang_compound.run.log" >&2 || true
+  fi
 
   set +e
   "$SOUC" run "$TMP_DIR/struct_only.sio" >"$TMP_DIR/struct_only.run.log" 2>&1

@@ -25,7 +25,17 @@
 #     desugar targets even when the program has no scalar f128 (array_only probe)
 #   - Anti-f64 through an element: (1+~1e-20)^2 ≠ 1
 #   - `[f256; N]`, an inexact element literal (0.1), `+=` on an element and a
-#     `[f128; N]` let without initialiser still fail closed (no ELF)
+#     `[f128; N]` let without initialiser still fail closed (no ELF); `+=` on
+#     an element refuses with "f128 compound assign target shape unsupported"
+#     (KL-8 added ExprIdent/ExprFieldAccess compound-assign store-back but not
+#     ExprIndex -- still fail-closed, just a more specific message than the
+#     general V0-E.4.1 sentinel; either is accepted here)
+#
+# Fixed 2026-09-22: `&[f128; N]` params were miscompiled (SIGSEGV or silently
+# wrong data) -- self-hosted/ir/lower.sio's by-value `[f128; N]` param copy
+# path fired on reference params too after KL-14a made param_array_len peel
+# through `&`/`&!`, copying "elements" from the address of the caller's slot
+# instead of the array. See docs/audit/MADAROS_F128_LADDER_5STAGE_TRIAGE_2026-09-22.md.
 #
 # Explicitly NOT claimed:
 #   - lean_single language f128 (still f64 greenwash)
@@ -188,7 +198,7 @@ if [[ -x "$SOUC" ]]; then
   for neg in lang_f256_array:"$REFUSE_SENTINEL":language_f256_array_still_fail_closed \
              lang_inexact_elem_store:"no f64 widen":language_f128_inexact_elem_store_still_fail_closed \
              lang_inexact_elem_literal:"no f64 widen@@expected [f128; 2]":language_f128_inexact_elem_literal_still_refused \
-             lang_compound_elem:"$REFUSE_SENTINEL":language_f128_compound_elem_assign_still_fail_closed; do
+             lang_compound_elem:"$REFUSE_SENTINEL@@f128 compound assign target shape unsupported":language_f128_compound_elem_assign_still_fail_closed; do
     name="${neg%%:*}"; rest="${neg#*:}"; want="${rest%:*}"; label="${rest##*:}"
     set +e
     "$SOUC" compile "$TMP_DIR/$name.sio" -o "$TMP_DIR/$name.elf" >"$TMP_DIR/$name.compile.log" 2>&1
