@@ -1120,14 +1120,16 @@ TDY form reports `0.000000e+00` (or one ULP once aligned), the TPX form
 
 ---
 
-## 6.3 The instrument hid the defect — nine instances
+## 6.3 The instrument hid the defect — ten instances
 
 > **A note on the count.** The brief that commissioned this section asked for
 > two new findings, bringing it to *six*. It brought it to **seven** — the
 > section already carried five instances, not four — then to **eight**,
 > when the operator recorded his own falsified premise as instance (8), and
 > to **nine** when the archive layer failed silently under the release that
-> was meant to freeze the other eight. The
+> was meant to freeze the other eight, and to **ten** on 2026-09-03, when
+> three separate harnesses turned out to have been comparing states they did
+> not share while printing agreement. The
 > miscount is worth keeping rather than absorbing, because the instance most
 > easily dropped from a mental list is (4), where the *reference's* own error
 > was the thing being attributed to the method under test, and that is the one
@@ -1145,7 +1147,7 @@ Instances **(1)–(4) are instruments set too coarse**: the resolution is a
 number, the defect is a number, and the first is larger. They are fixable by
 tightening a tolerance or choosing a finer probe.
 
-Instances **(5)–(9) have no *syntactic* signature**. They are invisible to
+Instances **(5)–(10) have no *syntactic* signature**. They are invisible to
 every tool that reads the program as text or as types — no token to grep, no
 dimension to check, no diff to review, no unit test that could have been
 written against the source alone, because each branch, file and literal
@@ -1156,7 +1158,7 @@ said they were, and then this document built an instrument that catches one of
 them, which is a contradiction and is corrected here. The distinction that
 survives is:
 
-| | (1)–(4) | (5)–(9) |
+| | (1)–(4) | (5)–(10) |
 |---|---|---|
 | signature | a magnitude | none in the syntax |
 | detected by | a tighter setting | a **behavioural** invariant, printed |
@@ -1433,6 +1435,52 @@ can check, and when it reports failure only to an authenticated view, the
 public record certifies what it was asked to reject.** The remedy is to
 pull that layer's contract — here, a schema — down to where it can be
 checked before the irreversible step.
+
+### (10) A cross-check went on printing agreement after its two sides stopped sharing a state
+
+Instance (6) is about a constant that cannot be enumerated by reading the
+program. This is what happened to the sites that enumeration missed, and it is
+a distinct failure because of *where* they were: not in the code under test,
+but in the **harnesses that measure it**. Three of them, found separately,
+all with the same shape.
+
+| harness | what it held | what the module held | found by | cost |
+|---|---|---|---|---|
+| `examples/chemistry/rep_adiabatic_bug.sio` | `1.0/(82.057*t)` | `P0/(R_SI·T)·1e-6` after #2382 | re-running it after the merge | dT/dt delay at 1100 K, 701602 → 701597 ns → §2.6 published **−2.375 %** where the shared state gives **−2.374 %** |
+| `benchmarks/chemistry/rep_prodfix.py` | `1.0/(82.057*T)` | aligned | the snapshot verifier, not by any gate here | shipped floor 9.204e-15 → **8.442e-15**; the buggy column did not move by a bit |
+| `benchmarks/chemistry/gri30_full_cantera_parity.py` | `1.0/(82.057*T)` | `gri30_full.sio`, aligned | re-running it and finding it print the published-regime pressure against a §6.2b measured in the aligned one | §6.2b had been measured from a **working copy that was never committed** |
+
+The first of the three carried a comment asserting that the two sides were
+"kept identical". The comment was true when it was written and false when it
+was read, and nothing in the tree marked the transition.
+
+Why this is not simply (6) recurring: in (6) the instrument was a `grep`, and
+it failed because a truncated literal has no signature. Here the instrument
+was **the cross-check itself**, and it failed in a way a cross-check is
+supposed to be immune to. Its whole warrant is that two independently
+constructed quantities agree. All three went on agreeing — to every digit they
+print — while charging *different initial states*, because **5.7e-06 is below
+the printed resolution of almost everything either side reports.** The one
+quantity that moved at all was the most ill-conditioned number in the
+document, a delay read off a broad dT/dt peak, and it moved by 5 ns in 701 µs.
+
+The general form: **agreement between the two sides of a cross-check is
+evidence about the two computations only if the two sides are charged from the
+same state, and nothing in the agreement itself establishes that they were.**
+A cross-check that does not print its own initial-state deviation is
+reporting a comparison whose premise it never checked — which is the same
+fail-closed recipe as (7), applied to the harness rather than to the module,
+and the reason `initial_state_deviation` is now printed on both sides rather
+than assumed.
+
+The residual honest statement: these three were found by re-running and by the
+snapshot verifier, one at a time, over three days. **No gate in this tree
+would have caught any of them**, and the count reaching ten this way is
+itself the measurement — the sweep of §1.5 reported 30 sites and closed, and
+four more surfaced afterwards, one of them (instance (6)) in the demo the
+document's own reproduction section tells a reader to run first.
+
+---
 
 ### The hazard that is NOT an instance here
 
