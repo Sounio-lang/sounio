@@ -112,6 +112,9 @@ from .numpy_integration import (
 ```
 
 #### API Python:
+
+> **Not the shipped surface.** There is no `sounio.Knowledge`, `epistemic_array`, or `sounio.run` binding in the checked artifact, and the embedded snippet uses `Knowledge[f64]`, `epistemic_mean`, and `epistemic_std`, which are not the Sounio API. The checked epistemic surface is `Epistemic` with `ep_measured`, `ep_val`, `ep_std`, and `ep_div` from `stdlib/epistemic/knowledge.sio`. The sketch below is the intended binding shape only.
+
 ```python
 import sounio
 import numpy as np
