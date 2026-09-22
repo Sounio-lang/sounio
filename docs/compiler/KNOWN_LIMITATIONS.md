@@ -2,8 +2,8 @@
 topic_id: repo.docs.compiler.known-limitations
 authority: repo_only
 audience: contributors
-last_validated: 2026-09-11
-validated_by: codex-3
+last_validated: 2026-09-22
+validated_by: claude
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.known-limitations
 -->
 
@@ -69,12 +69,31 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 
 ### KL-11 — #1792: first-order channels do not cross user calls
 
-- Engine: `madaros` prints `var=0.000000` where `lean_single` shows ~1e-5 on
-  the dissertation adaptive witnesses (`tests/run-pass/rapamycin_epistemic_adaptive.sio`,
+- Engine: `madaros` originally printed `var=0.000000` where `lean_single` shows
+  ~1e-5 on the dissertation adaptive witnesses
+  (`tests/run-pass/rapamycin_epistemic_adaptive.sio`,
   `stdlib/darwin_pbpk/epistemic_pbpk28.sio`), plus an ep28 confidence
-  bit-pattern fabrication. `tests/run-pass/gum_fo_across_call.sio` documents
-  that FO/variance channels stop at `ir_call`.
-- Pin: `scripts/ci/epistemic_fabrication_detect_gate.sh` (detect-only).
+  bit-pattern fabrication (#1792, filed 2026-08-17, two witnesses F1/F2).
+  **F2 (ep28 confidence bit-pattern) is CLOSED**, fixed by PR #1882
+  (`d33cf5856b57f3341db9392d263045d090d88ae7`, merged 2026-08-18):
+  `Knowledge.confidence` was tagged `is_float: 3` at IR layout instead of `1`,
+  so `sitofp` on the raw bits produced ~4.6e18; `ir_register_knowledge_layout`
+  now tags it `1`. **F1 (this general rung) stays OPEN**:
+  `tests/run-pass/gum_fo_across_call.sio` and
+  `tests/run-pass/fo_call_boundary_arity3.sio` still document, with a live
+  `//@ known-failure`, that FO/variance channels stop at `ir_call` for the
+  general case. Re-measured 2026-09-22: the specific
+  `rapamycin_epistemic_adaptive` witness now reports non-zero variance too,
+  but that traces to `b2df0727` (2026-09-18) changing *that test's*
+  acceptance criterion — its mutable-f64-sensitivity path keeps state and
+  update correlated, so lookbehind variance no longer needs to cross a call
+  boundary the way the two known-failure fixtures above specifically probe —
+  not a compiler-side fix to this rung. Do not read the healthy witness as
+  KL-11 closing.
+- Pin: `scripts/ci/epistemic_fabrication_detect_gate.sh` (detect-only; as of
+  2026-09-22 both its F1 and F2 checks take the "engine healthy" branch on
+  the two named witnesses, which is expected given the above and is not by
+  itself evidence this rung is closed).
 - Locus: `ir/lower.sio` Knowledge layout / `variance_*_regs` / `pending_variance_reg`.
   Audit: `docs/audit/EPISTEMIC_FABRICATION_DETECT_2026-08-17.md`,
   `docs/audit/MADAROS_FO_CALL_BOUNDARY_DISPATCH_2026-08-18.md`.
