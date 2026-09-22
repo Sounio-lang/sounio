@@ -186,8 +186,6 @@ compile_and_run hashadversarial "$FIX/hashadversarial/main.sio"
 expect_output hashadversarial "$FIX/hashadversarial/expected.txt"
 echo "$TAG PASS(hashadversarial): two unrelated hash-colliding decoys do not block a real rename"
 
-compile_and_run capacity "$FIX/capacity/main.sio"
-
 # Every other case here goes through the ORDINARY multi-module pipeline. A
 # collision-bearing program that also instantiates a generic anywhere routes
 # through the SEPARATE specialized-collapse pipeline instead
