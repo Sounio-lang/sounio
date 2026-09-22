@@ -203,10 +203,10 @@ compiler's own closure.
 
 ## Evidence
 
-Gate: `scripts/ci/madaros_private_fn_identity_gate.sh`, fixtures in
-`tests/multimodule/private_fn_identity/{basic,rich,skip}`, wired into
-`.github/workflows/ci.yml` after the scalar-multi-instance step (shared ELF via
-`MADAROS_RAW_BIN`).
+Gate: `scripts/ci/madaros_private_fn_identity_gate.sh`, fixtures under
+`tests/multimodule/private_fn_identity/` (see that directory's README for the
+full case list), wired into `.github/workflows/ci.yml` after the
+scalar-multi-instance step (shared ELF via `MADAROS_RAW_BIN`).
 
 | check | baseline | fixed |
 |---|---|---|
