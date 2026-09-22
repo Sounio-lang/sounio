@@ -549,7 +549,7 @@ pub fn lower_note_error(site: i64, n: Name) with Mut {
 }
 var IR_LOWER_HARD_ERROR_LIMIT: i64 = 0
 
-pub fn lower_hard_error_pending() -> bool { IR_LOWER_HARD_ERROR != 0 }
+pub fn lower_hard_error_pending() -> bool { IR_LOWER_HARD_ERROR != 0 || LOWER_USE_MODULE_OVERFLOWED }
 
 // Print what the flag knows, or say plainly that it knows nothing — never
 // silence. Called by the consumers that used to print a bare "ir_summary_failed".
@@ -615,6 +615,14 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
             print(")")
         }
         print("\n")
+    }
+    if LOWER_USE_MODULE_OVERFLOWED {
+        print("  cause: more than 1024 distinct lowercase `use` path segments in this\n")
+        print("         compilation; the module-qualified-call registry (LOWER_USE_MODULE_HASH)\n")
+        print("         dropped the rest. Any `mod::f(..)` naming a module past this point\n")
+        print("         falls back to the mangled `mod_f` stub this gate exists to prevent,\n")
+        print("         silently -- reported here because the transient hard-error state may\n")
+        print("         have been reset by a later module's lowerer_new().\n")
     }
     if IR_LOWER_HARD_ERROR == 0 {
         return
@@ -767,6 +775,18 @@ fn fo_name_hash(n: Name) -> i64 with Mut, Panic, Div {
 // Everything else keeps the Type::method mangling.
 var LOWER_USE_MODULE_COUNT: i64 = 0
 var LOWER_USE_MODULE_HASH: [i64; 1024] = [0; 1024]
+// Durable: NOT cleared by lower_hard_error_reset(), which fo_preregister_program_items_multipass
+// (via lowerer_new()) calls once per loaded module -- immediately after this table might be
+// filled, on the very same call path, before any compile-boundary check ever sees the flag.
+// Folded back into the hard-error report at the two barrier sites in module_frontend.sio via
+// lower_hard_error_pending()/lower_hard_error_report(), so it still refuses the binary rather
+// than reverting to the silent drop this gate exists to replace.
+var LOWER_USE_MODULE_OVERFLOWED: bool = false
+
+pub fn lower_use_module_reset() with Mut {
+    LOWER_USE_MODULE_COUNT = 0
+    LOWER_USE_MODULE_OVERFLOWED = false
+}
 // fo_name_hash is a djb2 variant with real collisions (e.g. "aar" and "ac0"
 // both hash to 193485948) and only covers a name's first 64 bytes. Hash
 // alone is not identity: store the full Name alongside it and compare
@@ -804,6 +824,11 @@ fn lower_use_module_note(n: Name) with Mut, Panic, Div {
         // Silently continuing here would recreate exactly the bug this registry exists
         // to prevent: a `mod::f(..)` call for the segment that didn't fit falls back to
         // the mangled `mod_f` stub, but now with no diagnostic at all. Refuse instead.
+        // The durable flag survives the lower_hard_error_reset() every later module's
+        // fo_preregister_program_items_multipass -> lowerer_new() call makes; the
+        // transient fields are also set for anything that checks IR_LOWER_HARD_ERROR
+        // before that next reset happens.
+        LOWER_USE_MODULE_OVERFLOWED = true
         if IR_LOWER_HARD_ERROR == 0 {
             IR_LOWER_HARD_ERROR = 1
             IR_LOWER_HARD_ERROR_REASON = 3
@@ -5556,6 +5581,7 @@ fn lowerer_lower_program_items_mut(
     items: Option<Box<ItemList>>
 ) with Mut, Panic, Div, Alloc, IO {
     fo_xfer_global_reset()
+    lower_use_module_reset()
     lower_use_modules_collect(&items)
     // Pre-register FO transfers so reverse-order pure helpers expand nested calls.
     lowerer_fo_preregister_pure_fns_multipass_mut(lo, &items)
@@ -15409,6 +15435,12 @@ impl Lowerer {
 
     fn lower_program_items_ref(self, items: &Option<Box<ItemList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         fo_xfer_global_reset()
+        // This ref-based path (production streaming) never called lower_use_modules_collect
+        // at all -- module-qualified calls only resolved on it if an earlier, unrelated
+        // preflight happened to populate the registry as a side effect first. Same gap class
+        // as the sibling f64-tuple-array table in #2516.
+        lower_use_module_reset()
+        lower_use_modules_collect(items)
         var lo = self
         lowerer_fo_preregister_pure_fns_multipass_mut(&! lo, items)
         var current = items
