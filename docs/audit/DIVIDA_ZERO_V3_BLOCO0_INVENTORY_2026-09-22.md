@@ -112,7 +112,7 @@ nesta sessão):
 | `tests/known_failures/` — arquivos totais (inclui `hardened_diagnostics_full_suite.txt`) | 31 | `ls tests/known_failures \| wc -l` |
 | Arquivos com `known_failure` no nome fora de `tests/known_failures/` | 4 | `find tests -iname '*known_failure*'`, excluindo o diretório e as 2 entradas já dentro dele |
 | Arquivos citando `known_failure`/`expected_failure`/`XPASS`/`xfail` no corpo | 18 | `grep -rl -e known_failure -e expected_failure -e XPASS -e xfail tests/ --include='*.sio'` |
-| Arquivos anotados `requires: madaros` | 1,165 | `grep -rl "requires: madaros" tests/ --include='*.sio'` |
+| Arquivos anotados `requires: madaros` (gramática do harness: `//@\s*requires:\s*madaros\b`) | 1,171 | `grep -rlE '//@ requires:[[:space:]]*madaros' tests/ --include='*.sio'` |
 | Arquivos `.sio` totais em `tests/` (informativo, do measure_repo_scale) | 4,530 | `scripts/dev/measure_repo_scale.sh` |
 
 Correção de três problemas desta tabela:
@@ -127,15 +127,29 @@ Correção de três problemas desta tabela:
 2. (Apontado em revisão, `discussion_r4071171510`.) O comando original das duas últimas
    linhas usava o glob `tests/**/*.sio`, que só expande recursivamente com `shopt -s
    globstar` habilitado — ausente por padrão num shell não-interativo. Sem `globstar`,
-   `tests/**/*.sio` expande como `tests/*/*.sio` (um nível), reduzindo a contagem de
-   `requires: madaros` de 1,165 para 1,154 (verificado: `bash -c 'shopt -u globstar;
-   grep -rl "requires: madaros" tests/**/*.sio | wc -l'` → 1154). Os comandos acima
-   passam a recursar via `grep -r`/`--include` sobre o diretório, reproduzindo 1,165 sem
-   depender de `globstar`.
+   `tests/**/*.sio` expande como `tests/*/*.sio` (um nível), reduzindo a contagem
+   literal de `requires: madaros` de 1,165 para 1,154 (verificado: `bash -c 'shopt -u
+   globstar; grep -rl "requires: madaros" tests/**/*.sio | wc -l'` → 1154). Os comandos
+   acima passam a recursar via `grep -r`/`--include` sobre o diretório, eliminando a
+   dependência de `globstar`.
 3. (Achado adicional desta correção, não reportado em revisão: `grep -rl "requires:
-   madaros" tests/` sem `--include='*.sio'` retorna 1,166, não 1,165 — captura também
-   `tests/vacuous_expect_baseline.txt`, um `.txt` fora do escopo ".sio" desta linha.
-   `--include='*.sio'` restaura o escopo correto.)
+   madaros" tests/` sem `--include='*.sio'` retornava 1,166 — captura também
+   `tests/vacuous_expect_baseline.txt`, um `.txt` fora do escopo ".sio" desta linha.)
+4. (Apontado em revisão, `discussion_r4071219101`.) A contagem 1,165 (substring literal
+   `"requires: madaros"`, com espaço, sem âncora de prefixo) não é a gramática que os
+   próprios gates da árvore usam para essa anotação — e os gates nem concordam entre si:
+   `scripts/ci/madaros_changed_tests_gate.sh` (linha 46) exige o literal exato
+   `//@ requires: madaros` (com espaço), enquanto
+   `scripts/ci/known_failure_madaros_recheck.sh` (linha 50) usa o regex Python
+   `//@\s*requires:\s*madaros\b`, aceitando zero ou mais espaços em qualquer um dos dois
+   pontos. Sob essa gramática mais permissiva, `grep -rlE '//@ requires:[[:space:]]*madaros'
+   tests/ --include='*.sio'` (linha acima) produz **1,171** arquivos — 8 usam
+   `//@ requires:madaros` sem espaço após os dois-pontos (fora da contagem 1,165, que
+   exigia o espaço) e a antiga contagem literal também incluía 2 arquivos com apenas
+   `// requires: madaros` (sem `@`, que nenhum gate reconhece como anotação ativa) que a
+   forma âncorada em `//@` corretamente exclui. Esta divergência entre gates do próprio
+   repositório (espaço obrigatório vs. opcional) é, ela mesma, um achado de instrumento —
+   não resolvido nesta entrega, fora do write-set deste Bloco 0.
 
 Isto **não é** a partição `U = N ⊎ S ⊎ X` exigida por §5.2 — é uma amostra de
 instrumentação para dimensionar o problema antes de construir a partição real. A
