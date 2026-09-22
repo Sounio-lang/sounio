@@ -137,6 +137,39 @@ the fix, then confirmed the adversarial case (two decoys, not one -- a single de
 insufficient to force a visible refusal here, because the *other* colliding module's rename
 can still absorb it) both failed pre-fix and passes post-fix.
 
+A sixth review pass found that `pfi_items` -- the walker that renames a definition and
+rewrites references to it -- only descends into `ItemFn`, `ItemImpl` and `ItemTrait`.
+`AlternativeCandidateDef.value_expr` and `TransitionStepDef.value_expr` (the `value:` clause
+of an `alternative_frontier`'s `option` / a `transition_protocol`'s `step`) are real `Expr`
+fields, live-resolved and type-checked (`resolve/resolve.sio` `resolve_alternative_candidate_defs`;
+`check/check.sio` the two `check_expr(...value_expr)` call sites near `:27404` and `:27613`),
+and were unreached: a private fn called from one of those slots would keep its old name after
+its definition was renamed out from under it.
+
+Fixed by two new walkers (`pfi_alt_candidates`, `pfi_transition_steps`) wired into `pfi_items`
+for `ItemAlternativeFrontier` / `ItemTransitionProtocol`, mirroring the *already-shipped*
+`pfi_fields` / `pfi_arms` pattern exactly: `value_expr` is stored by value inside a list node
+(not behind a `Box`), so a bare reference to the fn there is flagged unsafe (same as a
+struct-field-init or match-arm-body value) while an ordinary nested call is reached and
+rewritten through the normal recursion, because a call's own callee position is `Expr.left`,
+always a real `Box`, regardless of how the *containing* expression is stored.
+
+**Verification gap, stated plainly.** Every other row in this section has an executable
+before/after fixture. This one does not: `alternative_frontier` / `transition_protocol`
+source does not currently parse cleanly even in isolation, confirmed by running the
+*existing, unmodified* `tests/frontend/transition_reason_basic.sio` (this feature's own
+pre-existing test) against a clean `origin/main` build -- a parse failure with no private_fn_identity
+involvement at all. That file's own gates
+(`scripts/archive/sprint21_alternative_frontier_gate.sh`,
+`scripts/archive/sprint23_transition_protocol_gate.sh`) are archived, and it carries no
+`//@` run annotation, so the standard suite does not exercise it either; this reads as a
+separate, pre-existing gap in that DSL's parser, out of scope for this pass. What *is*
+verified: the fix typechecks; it is structurally identical to two patterns already proven
+correct by their own executable fixtures in this same file; and the full 16-case gate (every
+other row's fixtures, plus the control) still passes unchanged with this addition compiled in
+-- no regression to anything previously verified. Should the DSL's own parser issue get fixed
+separately, an executable fixture for this row belongs here.
+
 ### What it refuses to guess
 
 A name can be left unrenamed for one of three reasons, recorded per entry so a
