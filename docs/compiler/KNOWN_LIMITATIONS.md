@@ -194,8 +194,12 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   `EXPR_*` no longer alias the variable). Pin:
   `tests/run-pass/kl16f_loop_accum.sio`,
   `scripts/ci/lean_single_kl16f_loop_accum_gate.sh`.
-- **Residual (OPEN).** HSHADOW multi-pair interproc; HSHADOW pairs other
-  than `[0,0]` through if/else; a64 `atan2`/`pow` AD.
+- **KL-16g — CLOSED (seed).** If/else join merges the full Hessian upper
+  triangle (`EXPR_HSHADOW_jk`, 36 pairs, j≤k) into consecutive join slots.
+  H[0,0] is index 0 of that base, so it agrees with the KL-16e H00 spill.
+  Pin: `tests/run-pass/kl16g_ifelse_h_triangle.sio`,
+  `scripts/ci/lean_single_kl16g_ifelse_h_triangle_gate.sh`.
+- **Residual (OPEN).** HSHADOW multi-pair interproc; a64 `atan2`/`pow` AD.
 - Channel-at-`.value` semantics (`MEAS_KNOW_IDX`,
   `formal/ChannelAssignmentSemantics.lean`) are a model, not a defect —
   see the history snapshot for the KAS-1 rationale.
