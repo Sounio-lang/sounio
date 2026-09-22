@@ -71,8 +71,15 @@ at the AST, before any of them run, needs no other consumer to learn about modul
 
 ## The change
 
-`self-hosted/compiler/private_fn_identity.sio`, called from the top of
-`module_frontend_specialized_prepare` (both `compile` entry paths reach it).
+`self-hosted/compiler/private_fn_identity.sio`, called through the wrapper
+`module_frontend_private_fn_identity_ok` (module_frontend.sio) from the two
+multi-module `compile` entry points --
+`module_frontend_compile_imported_to_file` (module_frontend.sio:6400) and
+`module_frontend_merge_imported_box` (module_frontend.sio:6712) -- immediately
+BEFORE `module_frontend_specialized_prepare`, not from inside it: that function
+cannot return an error, and a refused rename (see "What it refuses to guess"
+below) must stop the compile before specialization, typecheck, DCE, FO
+preregistration or lowering ever run.
 
 ```
 private fn N defined (with a body) in >= 2 loaded modules
