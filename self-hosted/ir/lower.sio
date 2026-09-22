@@ -480,7 +480,8 @@ var LOWER_UNIT_NAME_BUF: [i8; 16384]
 var LOWER_UNIT_NAME_LEN: [i64; 256]
 var LOWER_UNIT_COUNT: i64 = 0
 var LOWER_UNIT_BUILTINS_SEEDED: i64 = 0
-// 0=unspecified, 1=instruction capacity, 2=unresolved print ABI.
+// 0=unspecified, 1=instruction capacity, 2=unresolved print ABI, 3=tuple Box
+// payload name overflow (over 384 bytes comma-joined).
 var IR_LOWER_HARD_ERROR_REASON: i64 = 0
 // Same flat-array treatment, same reason.
 var IR_LOWER_ERROR_FIRST_FN_BUF: [i8; 128]
@@ -654,6 +655,10 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
         print(" IR instructions but IR_MAX_INSTRS is ")
         print_int(IR_LOWER_HARD_ERROR_LIMIT)
         print("\n")
+    } else if IR_LOWER_HARD_ERROR_REASON == 3 {
+        print("  cause: a tuple return type's Box<T> payload names exceed 384 bytes\n")
+        print("         when comma-joined; its Box slots would otherwise be lowered\n")
+        print("         untyped instead of refused\n")
     } else {
         print("  cause: lowering raised a hard error and recorded no detail — if this\n")
         print("         prints, a NEW raise site was added without recording its reason.\n")
@@ -6822,6 +6827,15 @@ fn lower_tuple_box_slot_list(te: &TypeExpr) -> Name with Mut, Panic, Div {
         k = k + 1
     }
     if !fits {
+        // A Box<T> payload name that does not fit here is not "no boxes" --
+        // return_box_slot (computed separately, with no size limit of its own)
+        // still says the tuple has Box slots, so a silent empty name here left
+        // return_tuple_box_layout_for_fn_slot treating every slot as non-Box:
+        // the exact untyped fallback (raw pointer deref, name-based field
+        // lookup) this metadata exists to avoid. Fail closed through the
+        // existing IR-lowering hard-error channel instead of continuing.
+        IR_LOWER_HARD_ERROR = 1
+        IR_LOWER_HARD_ERROR_REASON = 3
         return ir_empty_name()
     }
     out.len = end

@@ -16,6 +16,17 @@
 // ============================================
 // HeapVec<T> - generic heap vector
 // ============================================
+// CONTRACT, not a suggestion: T must be a scalar that fits and round-trips
+// through exactly 8 bytes -- i64, f64, bool, a pointer, or any other type
+// whose bit pattern is 8 bytes wide. Every slot is read and written through
+// read_i64/write_i64 regardless of what T actually is (pop()'s own comment
+// explains why: a cast back to T would reinterpret the bits, not just
+// relabel them). Sounio has no generic-parameter size/layout bound to
+// enforce this at instantiation, so HeapVec<SomeMultiwordStruct> compiles
+// and silently corrupts adjacent heap storage instead of refusing -- until
+// this language has layout-aware generic allocation (the honest fix), stick
+// to HeapI64Vec / HeapF64Vec below for anything that is not an 8-byte
+// scalar, or verify by inspection that T is.
 pub struct HeapVec<T> {
     pub ptr: *mut i64,
     pub len: i64,
@@ -26,7 +37,16 @@ impl HeapVec<T> {
     pub fn new() -> HeapVec<T> {
         HeapVec { ptr: 0 as *mut i64, len: 0, cap: 0 }
     }
+    // A non-positive cap normalizes to the same empty state new() returns.
+    // Left un-normalized, a negative cap survived into the struct: len (0)
+    // >= a negative cap is true, so the next push() took the GROWTH branch
+    // with a null ptr (heap_alloc(cap*8) on a negative byte count) and called
+    // heap_realloc on it -- exactly the null/initial pointer this file's own
+    // header warns heap_realloc must never see.
     pub fn with_capacity(cap: i64) -> HeapVec<T> with Alloc {
+        if cap <= 0 {
+            return HeapVec { ptr: 0 as *mut i64, len: 0, cap: 0 }
+        }
         let bytes = cap * 8
         let ptr = heap_alloc(bytes) as *mut i64
         HeapVec { ptr: ptr, len: 0, cap: cap }
@@ -186,7 +206,11 @@ pub fn heap_i64_vec_new() -> HeapI64Vec {
     HeapI64Vec { ptr: 0 as *mut i64, len: 0, cap: 0 }
 }
 
+// Same non-positive-cap normalization as HeapVec::with_capacity above.
 pub fn heap_i64_vec_with_capacity(cap: i64) -> HeapI64Vec with Alloc {
+    if cap <= 0 {
+        return HeapI64Vec { ptr: 0 as *mut i64, len: 0, cap: 0 }
+    }
     let bytes = cap * 8
     let ptr = heap_alloc(bytes) as *mut i64
     HeapI64Vec { ptr: ptr, len: 0, cap: cap }
@@ -328,7 +352,11 @@ pub fn heap_f64_vec_new() -> HeapF64Vec {
     HeapF64Vec { ptr: 0 as *mut f64, len: 0, cap: 0 }
 }
 
+// Same non-positive-cap normalization as HeapVec::with_capacity above.
 pub fn heap_f64_vec_with_capacity(cap: i64) -> HeapF64Vec with Alloc {
+    if cap <= 0 {
+        return HeapF64Vec { ptr: 0 as *mut f64, len: 0, cap: 0 }
+    }
     let bytes = cap * 8
     let ptr = heap_alloc(bytes) as *mut f64
     HeapF64Vec { ptr: ptr, len: 0, cap: cap }
