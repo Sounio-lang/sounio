@@ -110,7 +110,7 @@ let config = MixedPrecisionConfig {
 ### Example
 
 ```rust
-let mut trainer = Phase2Trainer::new();
+var trainer = Phase2Trainer::new();
 
 for epoch in 0..10 {
     for batch in dataset.batches() {
@@ -127,7 +127,7 @@ for epoch in 0..10 {
         let gradients = compute_gradients(&scaled_loss);
         
         // 5. Unscale gradients
-        let mut unscaled = gradients.clone();
+        var unscaled = gradients.clone();
         trainer.unscale_gradients(&mut unscaled);
         
         // 6. Update weights
@@ -255,7 +255,7 @@ For every 4 consecutive quaternions, prune to keep only 2 by magnitude:
 ### Example
 
 ```rust
-let mut weights = vec![...; 128]; // 32 quaternions
+var weights = vec![...; 128]; // 32 quaternions
 
 // Apply 2:4 sparsity
 trainer.apply_2x4_sparsity(&mut weights);
@@ -342,7 +342,7 @@ let qat_config = QatConfig {
 ### Example
 
 ```rust
-let mut trainer = Phase2Trainer::new();
+var trainer = Phase2Trainer::new();
 
 for epoch in 0..20 {
     for (batch_idx, batch) in dataset.batches().enumerate() {
@@ -565,18 +565,18 @@ All 4 features together on A100 (80GB HBM):
 use examples::phase2_training_mnist::*;
 
 fn main() {
-    let mut trainer = Phase2Trainer::new();
+    var trainer = Phase2Trainer::new();
     let dataset = load_mnist("data/mnist.csv").unwrap();
     
-    let mut best_accuracy = 0.0;
+    var best_accuracy = 0.0;
     
     for epoch in 0..20 {
         trainer.state.epoch = epoch;
-        let mut epoch_loss = 0.0;
+        var epoch_loss = 0.0;
         
         for (batch_idx, batch) in dataset.batch_sample(32, true).iter().enumerate() {
-            let mut weights = vec![0.5; 100];
-            let mut bias = vec![0.1; 100];
+            var weights = vec![0.5; 100];
+            var bias = vec![0.1; 100];
             
             let loss = trainer.train_step(
                 &batch.0,  // input
@@ -639,7 +639,7 @@ fn profile_mixed_precision() {
 use compiler::codegen::gpu::serialization::*;
 
 fn save_and_load() -> Result<(), Box<dyn std::error::Error>> {
-    let mut model = QuantizedModel::new();
+    var model = QuantizedModel::new();
     
     // Add quantized tensors
     model.quantized.tensors.push(QuantTensor {
@@ -675,7 +675,7 @@ fn save_and_load() -> Result<(), Box<dyn std::error::Error>> {
 use compiler::codegen::gpu::validation::*;
 
 fn validate_all_features() {
-    let mut suite = ValidationSuite::new();
+    var suite = ValidationSuite::new();
     
     // Test numerical correctness
     let input = vec![1.0, 2.0, 3.0];

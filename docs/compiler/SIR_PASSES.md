@@ -44,7 +44,7 @@ Passes are organized in `compiler/src/sir/passes/` as independent modules, repla
 
 **Example**:
 ```rust
-let mut pass = UnitCheckInsertion::new();
+var pass = UnitCheckInsertion::new();
 pass.strict = true;
 let result = pass.run(&mut module);
 println!("Checks inserted: {}", result.checks_inserted);
@@ -77,7 +77,7 @@ println!("Checks inserted: {}", result.checks_inserted);
 
 **Example**:
 ```rust
-let mut pass = RefinementAssertionPass::new();
+var pass = RefinementAssertionPass::new();
 pass.use_smt = true;
 let result = pass.run(&mut module);
 println!("Proofs succeeded: {}/{}", 

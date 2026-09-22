@@ -161,7 +161,7 @@ pub enum SuspensionReason {
 4. Repeat until no ready tasks (stalled)
 
 ```rust
-let mut scheduler = TaskScheduler::new();
+var scheduler = TaskScheduler::new();
 
 // Schedule tasks
 let id1 = scheduler.schedule(future1);
