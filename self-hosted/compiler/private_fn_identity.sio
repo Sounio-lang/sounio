@@ -413,7 +413,7 @@ fn pfi_table_find_name(n: Name) -> i64 with Mut, Panic, Div {
     0 - 1
 }
 
-fn pfi_table_add(n: Name, mod_idx: i64, vis_kind: i64) with Mut, Panic, Div, Alloc {
+fn pfi_table_add(programs: &! [Program; 256], count: i64, n: Name, mod_idx: i64, vis_kind: i64) with Mut, Panic, Div, Alloc {
     if pfi_table_find_name(n) >= 0 { return }
     if PFI_T_COUNT >= PFI_T_MAX {
         PFI_T_OVERFLOW = 1
@@ -447,8 +447,17 @@ fn pfi_table_add(n: Name, mod_idx: i64, vis_kind: i64) with Mut, Panic, Div, All
         PFI_T_UNSAFE[idx as usize] = 1
         PFI_T_REASON[idx as usize] = PFI_R_NAME
     } else if pfi_census_mods(ast_name_hash(m)) > 0 {
-        PFI_T_UNSAFE[idx as usize] = 1
-        PFI_T_REASON[idx as usize] = PFI_R_NAME
+        // Hash hit is only a PREFILTER (ast_name_hash is djb2, not collision-free --
+        // `helper__m1` and the distinct `helper__lR` collide). Confirm with an exact
+        // scan across every module -- including mod_idx itself, since the generated
+        // name must not collide with anything there either -- via the same
+        // full-name-bytes machinery pfi_build_table already trusts for source
+        // collisions (pfi_defined_elsewhere / pfi_items_define_name / name_eq).
+        // "not_mod" = -1 excludes no module: mod_idx's own definitions count too.
+        if pfi_defined_elsewhere(programs, count, 0 - 1, m) >= 0 {
+            PFI_T_UNSAFE[idx as usize] = 1
+            PFI_T_REASON[idx as usize] = PFI_R_NAME
+        }
     }
 }
 
@@ -470,7 +479,7 @@ fn pfi_build_table(programs: &! [Program; 256], count: i64, items: Option<Box<It
                     if pfi_census_mods(ast_name_hash((*list).head.name)) >= 2 {
                         if pfi_table_find_name((*list).head.name) < 0 {
                             if pfi_defined_elsewhere(programs, count, mod_idx, (*list).head.name) >= 0 {
-                                pfi_table_add((*list).head.name, mod_idx, (*list).head.visibility.kind)
+                                pfi_table_add(programs, count, (*list).head.name, mod_idx, (*list).head.visibility.kind)
                             }
                         }
                     }

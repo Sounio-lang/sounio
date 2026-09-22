@@ -18,6 +18,9 @@
 #   symcoll   a private free fn named like a method's emitted symbol (`Type_method`)
 #   reserved  a generated `name__m<N>` must not reuse a symbol that already exists
 #   reservedglobal  ...including a module GLOBAL (an ItemFn with no body)
+#   hashadversarial  a generated-name AVAILABILITY check that trusted the hash
+#             census alone falsely refused a program with two unrelated hash-
+#             colliding decoys and no real collision
 #   capacity  70 colliding private fns in one module (the old fixed table held 64)
 #   skip      a shape the pass cannot prove safe is skipped -- and that is only
 #             accepted because the other module was renamed and no collision remains
@@ -168,6 +171,15 @@ echo "$TAG PASS(reserved): a generated name never reuses an existing symbol"
 compile_and_run reservedglobal "$FIX/reservedglobal/main.sio"
 expect_output reservedglobal "$FIX/reservedglobal/expected.txt"
 echo "$TAG PASS(reservedglobal): a generated name never reuses a module global"
+
+# A generated-name AVAILABILITY check that trusted the hash census alone (no
+# exact follow-up) falsely marked BOTH helper__m1 and helper__m2 unsafe here
+# (confirmed: they collide with the unrelated helper__lR / helper__lS under
+# djb2) and refused a program with no real generated-name collision at all
+# (measured on the pre-fix build: compile rc=1). The fix scans exactly.
+compile_and_run hashadversarial "$FIX/hashadversarial/main.sio"
+expect_output hashadversarial "$FIX/hashadversarial/expected.txt"
+echo "$TAG PASS(hashadversarial): two unrelated hash-colliding decoys do not block a real rename"
 
 compile_and_run capacity "$FIX/capacity/main.sio"
 expect_output capacity "$FIX/capacity/expected.txt"
