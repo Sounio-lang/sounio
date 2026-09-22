@@ -1888,11 +1888,16 @@ band these differences sit in. A difference of a few ULP has no stable ratio.
 > At `dt = 1e-8` and at `5e-9` only H2 sits below its own resolution; the other
 > seven distances are resolved. At `dt = 1.25e-9` all eight are above it, by
 > 1.6× to 17×, and every species is farther from the independent method than at
-> `5e-9`, by 1.6× to 6.8×. For H, O, OH and H2O the distance is already smallest
-> at the coarsest step, `1e-8`, and grows at every halving; H2O2 and O2 are
-> closest at `5e-9`, H2 at `2.5e-9`. **The replica's distance to an external
-> reference does not fall as the step shrinks, and over the last two halvings it
-> grows for every species.** Growth measured against a different method cannot
+> `5e-9`, by 1.6× to 6.8×. The low end of both ranges (1.6×) is not a clean
+> detection on its own: the per-species resolutions above are themselves
+> roundoff, good only to order of magnitude, so a ratio that close to 1 does
+> not distinguish from noise by itself -- the ratios above 3× and the monotone
+> trend across three halvings are what carry the claim. For H, O, OH and H2O
+> the distance is already smallest at the coarsest step, `1e-8`, and grows at
+> every halving; H2O2 and O2 are closest at `5e-9`, H2 at `2.5e-9`. **The
+> replica's distance to an external reference does not fall as the step
+> shrinks, and over the last two halvings it grows for every species.**
+> Growth measured against a different method cannot
 > be truncation being resolved, and cannot be an artefact of comparing a run
 > with itself.
 >
