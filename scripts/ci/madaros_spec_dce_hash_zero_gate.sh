@@ -101,7 +101,7 @@ compile_and_run() {
     tail -n 40 "$log" >&2 || true
     gate_fail "$label: did not compile"
   fi
-  [[ -s "$elf" ]] || gate_fail "$label: compiler reported success and emitted no ELF"
+  require_elf "$elf" "$label: compiler reported success but did not emit a native ELF"
   chmod +x "$elf"
   if ! timeout 30 "$elf" >"$out" 2>&1; then
     cat "$out" >&2 || true
