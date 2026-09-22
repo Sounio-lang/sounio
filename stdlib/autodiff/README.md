@@ -17,7 +17,7 @@ Automatic differentiation: tape-based reverse-mode, dual numbers for forward-mod
 use autodiff::tape::Tape;
 
 // Reverse-mode AD with tape
-let mut tape = Tape::new();
+var tape = Tape::new();
 let x = tape.push_var(3.0);
 let y = tape.push_mul(x, x);  // y = x²
 tape.backward();              // Compute gradients
