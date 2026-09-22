@@ -130,11 +130,12 @@ nesta sessão):
 | `tests/known_failures/` — arquivos totais (inclui `hardened_diagnostics_full_suite.txt`) | 31 | `ls tests/known_failures \| wc -l` |
 | Arquivos com `known_failure` no nome fora de `tests/known_failures/` | 4 | `find tests -iname '*known_failure*'`, excluindo o diretório e as 2 entradas já dentro dele |
 | Arquivos citando `known_failure`/`expected_failure`/`XPASS`/`xfail` no corpo | 18 | `grep -rl -e known_failure -e expected_failure -e XPASS -e xfail tests/ --include='*.sio'` |
-| Arquivos anotados `requires: madaros` (gramática do executor real, `run_sio_test_suite_v2.sh`: substring `//@ requires` + `requires:[[:space:]]*(.+)` + match exato contra `madaros`) | 1,171 | `grep -rlE '//@ requires:[[:space:]]*madaros$' tests/ --include='*.sio'` |
+| Arquivos anotados `requires: madaros` **que o executor de fato enxerga** (grep bruto: 1,171; ver correção 5 abaixo) | **1,170** | grep bruto: `grep -rlE '//@ requires:[[:space:]]*madaros$' tests/ --include='*.sio'`; simulação do parser (script Python ad hoc desta sessão, não commitado) para excluir arquivos onde o loop de anotações já parou antes da linha |
 | Arquivos `.sio` totais em `tests/` (informativo, do measure_repo_scale) | 4,530 | `scripts/dev/measure_repo_scale.sh` |
 
-Correção de quatro problemas desta tabela (apontado em revisão,
-`discussion_r4071264975`: o cabeçalho dizia "três" com quatro itens já listados):
+Correção de cinco problemas desta tabela (apontado em revisão,
+`discussion_r4071264975`: o cabeçalho dizia "três" com quatro itens já listados; item 5
+abaixo elevou para cinco):
 
 1. (Apontado em revisão, `Sounio-lang/sounio#2637` `discussion_r4071109816`.) A linha
    original rotulava os 31 resultados de `ls` como ".sio", mas 30 são `.sio` e 1 é
@@ -187,6 +188,25 @@ Correção de quatro problemas desta tabela (apontado em revisão,
    obrigatório vs. opcional (e sobre qual delimitador é literal vs. regex) é, ela
    mesma, um achado de instrumento — não resolvido nesta entrega, fora do write-set
    deste Bloco 0.
+5. (Apontado em revisão, `discussion_r4071474651`.) Mesmo com a gramática correta do
+   valor (item 4), `grep` sobre o arquivo inteiro ainda não é equivalente ao parser real,
+   porque o loop de anotações de `run_sio_test_suite_v2.sh` (linhas 315–316) **para de
+   ler na primeira linha que não seja `//@ <algo>`, `// <algo>` (com espaço obrigatório
+   após as barras) ou em branco** — ele só escaneia o bloco de cabeçalho inicial do
+   arquivo, não o arquivo inteiro. `tests/run-pass/global_array_len1_index.sio` tem
+   `//@ requires: madaros` na linha 11, mas sua linha 3 é uma barra dupla **sem espaço
+   seguinte** (`//` sozinho, não `// algo`), que não casa com nenhum dos três padrões de
+   continuação — o loop para ali, e a anotação na linha 11 nunca é lida pelo executor.
+   Simulação do parser real (reimplementando a condição de parada em Python sobre os
+   1,171 arquivos do grep bruto, nesta sessão, script não commitado) encontra exatamente
+   **1 arquivo** nessa situação — o citado acima — reduzindo a contagem verdadeira para
+   **1,170**. Isto é uma limitação estrutural de `grep`, não um erro de regex corrigível:
+   `grep` não tem estado de "already stopped scanning"; replicar o parser corretamente
+   para o corpus inteiro, em geral, exige rodar (uma versão de) o próprio parser, não uma
+   expressão regular sobre o arquivo inteiro. Não resolvido nesta entrega além desta
+   correção pontual — nenhum script de simulação foi commitado; o número 1,170 é
+   reportado como resultado de uma execução desta sessão, não como um comando
+   reproduzível de uma linha.
 
 Isto **não é** a partição `U = N ⊎ S ⊎ X` exigida por §5.2 — é uma amostra de
 instrumentação para dimensionar o problema antes de construir a partição real. A
@@ -200,15 +220,21 @@ Campos do schema §5.1 aplicados às referências já citadas no plano v3 §3/§
 de evidência de execução (`compiler_digest`, `witness_id`, `evidence_receipt`) ficam
 `PENDING` — não foram gerados nesta sessão, que não compilou nem executou testes.
 
-| contract_id (local) | capability | referência | base_commit | state | evidence_receipt |
-|---|---|---|---|---|---|
-| DZ-BLOCO1-2622 | BSS sizing, primal preservation, tuple-borrow local | PR #2622 `35513cf80f22…` | 69b7fe75 | PENDING (não requalificada nesta sessão) | — |
-| DZ-BLOCO1-2557 | CI em camadas / artifact compartilhado | PR #2557 `c5248c46436c…` | 69b7fe75 | PENDING | — |
-| DZ-BLOCO2-2598 | identidade de função homônima cross-module | PR #2598 `f23be0816d17…` | 69b7fe75 | PENDING | — |
-| DZ-BLOCO2/5-2501 | inventário de deltas estabilizados (não integrar monolítico) | PR #2501 `8bfab7e6939a…` | 69b7fe75 | PENDING (revisão em blocos, §7.2 do plano) | — |
-| DZ-BLOCO3-2511 | ODE/covariância/modelo | PR #2511 `0d389e07dd98…` | 69b7fe75 | PENDING | — |
-| DZ-BLOCO3-2612 | EL+/SNOMED fail-closed | PR #2612 `bf7172c98b66…` | 69b7fe75 | PENDING | — |
-| DZ-BLOCO2/3-2615 | array-reference lowering + wide-float coverage | PR #2615 `a80ca04ac4ec…` (ver polaridade anti-f64 apontada em revisão) | 69b7fe75 | PENDING | — |
+Correção (apontado em revisão, review body "Execution-evidence identity fields are
+missing from inventory"): a tabela abaixo omitia colunas para `compiler_digest` e
+`witness_id`, embora o parágrafo acima os declarasse `PENDING`. Adicionadas
+explicitamente, com o mesmo valor `PENDING`, para que o esqueleto do schema §5.1 fique
+completo e uma sessão futura só precise preenchê-lo, não redesenhá-lo.
+
+| contract_id (local) | capability | referência | base_commit | state | compiler_digest | witness_id | evidence_receipt |
+|---|---|---|---|---|---|---|---|
+| DZ-BLOCO1-2622 | BSS sizing, primal preservation, tuple-borrow local | PR #2622 `35513cf80f22…` | 69b7fe75 | PENDING (não requalificada nesta sessão) | PENDING | PENDING | PENDING |
+| DZ-BLOCO1-2557 | CI em camadas / artifact compartilhado | PR #2557 `c5248c46436c…` | 69b7fe75 | PENDING | PENDING | PENDING | PENDING |
+| DZ-BLOCO2-2598 | identidade de função homônima cross-module | PR #2598 `f23be0816d17…` | 69b7fe75 | PENDING | PENDING | PENDING | PENDING |
+| DZ-BLOCO2/5-2501 | inventário de deltas estabilizados (não integrar monolítico) | PR #2501 `8bfab7e6939a…` | 69b7fe75 | PENDING (revisão em blocos, §7.2 do plano) | PENDING | PENDING | PENDING |
+| DZ-BLOCO3-2511 | ODE/covariância/modelo | PR #2511 `0d389e07dd98…` | 69b7fe75 | PENDING | PENDING | PENDING | PENDING |
+| DZ-BLOCO3-2612 | EL+/SNOMED fail-closed | PR #2612 `bf7172c98b66…` | 69b7fe75 | PENDING | PENDING | PENDING | PENDING |
+| DZ-BLOCO2/3-2615 | array-reference lowering + wide-float coverage | PR #2615 `a80ca04ac4ec…` (ver polaridade anti-f64 apontada em revisão) | 69b7fe75 | PENDING | PENDING | PENDING | PENDING |
 
 `owner`/`write_set`/`dependencies` não foram atribuídos — §11 do plano v3 é explícito
 que "responsáveis/lane assignments são propostas, não leases efetivamente adquiridos";
@@ -243,5 +269,7 @@ lista de testes anotados `//@ requires: slow` como `--test-list` e rodar
 próprio resultado — o que a alegação "zero falhas" de #2622 (plano v3 §3) ainda não tem
 lastro para cobrir, per §2.2 acima. Só depois disso a partição N/S para a candidata
 baseada na #2622 pode ser declarada confiável. Esse é um trabalho de leitura/repro
-mínima (§6.1 do `CLAUDE.md`, "um blocker sem reprodução mínima não está diagnosticado"),
-não um build completo, e deve ser o próximo item desta lane.
+mínima (§6, princípio 12, do `CLAUDE.md` — citação verbatim, não parafraseada, corrigida
+após revisão que apontou tanto a subseção errada quanto a paráfrase apresentada como
+citação: "A blocker without a minimal repro is not diagnosed."), não um build completo, e
+deve ser o próximo item desta lane.
