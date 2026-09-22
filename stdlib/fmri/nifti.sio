@@ -181,10 +181,26 @@ fn nifti_read_file_buffer_into(path: string, out: &!NiftiFileBuffer) -> i64 with
     // ⚠️ NÃO usar `raw.len()` aqui: é strlen, e num binário ele para no primeiro NUL — na
     // fixture NIfTI isso é o offset 2, e a checagem abaixo rejeitava TODO arquivo binário como
     // truncado. O tamanho verdadeiro veio de `file_size` (stat) e está em `size`.
-    out.len = size
+    //
+    // 🚨 Mas `size` é de um `stat` feito ANTES do `read_file`. Entre as duas chamadas o
+    // arquivo pode encolher (outro processo truncando, um symlink trocado, uma leitura
+    // parcial) e `raw` conter menos bytes de verdade do que `size` promete -- indexar até
+    // `size` nesse caso lê além do buffer que `read_file` de fato devolveu. Sem uma
+    // contagem de bytes-lidos própria (ver docs/E201_NOME_DESCONHECIDO.md item 3: esta
+    // pista nativa nunca foi bem-tipada -- `read_file` devolve `string`, os acessores
+    // querem bytes -- é defeito de compilador, fora de escopo aqui), a mitigação
+    // disponível no stdlib é re-checar o tamanho DEPOIS da leitura e nunca copiar além
+    // do menor dos dois: se o arquivo encolheu entre as duas chamadas, o limite cai
+    // junto, em vez de continuar prometendo o tamanho antigo.
+    let size_after = file_size(path)
+    let effective_size = if size_after < size { size_after } else { size }
+    if effective_size <= 0 {
+        return nifti_error_code(NiftiError::TruncatedFile)
+    }
+    out.len = effective_size
     var i: i64 = 0
-    while i < size {
-        out.data[i as usize] = nifti_byte_at(raw, i, size) as u8
+    while i < effective_size {
+        out.data[i as usize] = nifti_byte_at(raw, i, effective_size) as u8
         i = i + 1
     }
     0
