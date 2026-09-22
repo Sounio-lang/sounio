@@ -288,7 +288,7 @@ essa variável vazia faz o harness usar o compilador padrão do checkout em vez 
 artefato de #2622, o que também invalidaria o resultado como evidência para essa
 candidata específica. Comando completo:
 ```
-git checkout 35513cf80f22…  # ou worktree dedicado — não main
+git checkout 35513cf80f22886ce66b583e33b05c2f456aeaff  # ou worktree dedicado — não main
 SOUNIO_TEST_SOUC_BIN=<stage2 de #2622> SOUNIO_SLOW_TESTS_AVAILABLE=1 \
   scripts/dev/run_sio_test_suite_v2.sh --test-list <arquivo-S>
 ```
