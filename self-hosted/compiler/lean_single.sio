@@ -428,6 +428,17 @@ var UNIT_DIM_TABLE:  [i64; 2048] = [0; 2048]
 // The preloaded SI table (init_unit_table) leaves this 0, so a symbol like K
 // stays usable as a generic type parameter -- `struct Map<K, V>`.
 var UNIT_USER_TABLE: [i64; 2048] = [0; 2048]
+// Exact-name storage for user-declared units, parallel to UNIT_HASH_TABLE by
+// slot index. UNIT_HASH_TABLE keys identity by hash alone; unit_call_arg_mismatch
+// trusts `expr_unit == param_hash` as "same declared unit" for nominal
+// (dimension-0) units. gl_name_hash is a 37-bit FNV-1a, so an accidental
+// collision between two DIFFERENT declared names is astronomically unlikely --
+// but "unlikely" is not "refused", and a silent alias there means one declared
+// unit's contract is satisfied by passing a different one. -1 = no exact name
+// recorded (the preloaded SI/CGS/etc. table never stores one).
+let UNIT_NAME_CAP: i64 = 32
+var UNIT_NAME_BUF: [i8; 65536] = [0; 65536]
+var UNIT_NAME_LEN: [i64; 2048] = [0 - 1; 2048]
 // Parallel token unit-hash array (for _suffix literals e.g. 500_mg)
 var TU: [i64; 2097152] = [0; 2097152]
 // Packed dimension vector of the current compiled expression (0 = dimensionless/unknown)
@@ -31930,6 +31941,70 @@ fn src_scan_contains(kw: string) -> bool with Panic, Mut {
 }
 
 
+fn unit_bytes_eq(slot: i64, ns: i64, ne: i64) -> bool with Panic, Mut {
+    let stored_len = UNIT_NAME_LEN[slot as usize]
+    let want_len = ne - ns
+    var cap = want_len
+    if cap > UNIT_NAME_CAP { cap = UNIT_NAME_CAP }
+    if stored_len != cap { return false }
+    var i: i64 = 0
+    while i < cap {
+        if UNIT_NAME_BUF[(slot * UNIT_NAME_CAP + i) as usize] != sb(ns + i) as i8 { return false }
+        i = i + 1
+    }
+    true
+}
+
+// Registers a user-declared unit under its EXACT source name, refusing the
+// compile (fail closed) when this hash already names something else -- either
+// a preloaded SI/CGS/etc. symbol (no exact name recorded, so safety cannot be
+// verified) or a different user-declared name. Re-declaring the SAME name is
+// idempotent, as `unit X;` appearing in more than one processed module already
+// requires.
+fn unit_register_named_h(h: i64, dim: i64, ns: i64, ne: i64, name_tok: i64) with IO, Mut, Panic, Div {
+    if h == 0 { return }
+    var idx: i64 = h % 2048
+    if idx < 0 { idx = idx + 2048 }
+    var probe: i64 = idx
+    var iters: i64 = 0
+    while iters < 2048 {
+        if UNIT_HASH_TABLE[probe as usize] == 0 {
+            UNIT_HASH_TABLE[probe as usize] = h
+            UNIT_DIM_TABLE[probe as usize] = dim
+            var cap = ne - ns
+            if cap > UNIT_NAME_CAP { cap = UNIT_NAME_CAP }
+            var i: i64 = 0
+            while i < cap { UNIT_NAME_BUF[(probe * UNIT_NAME_CAP + i) as usize] = sb(ns + i) as i8; i = i + 1 }
+            UNIT_NAME_LEN[probe as usize] = cap
+            return
+        }
+        if UNIT_HASH_TABLE[probe as usize] == h {
+            // A slot with no exact name is a preloaded built-in (unit_register_h
+            // at init has no name text to store) or a hash that reached this
+            // point only through the plain-hash path -- either way, we have no
+            // evidence it is a DIFFERENT name, and `unit AU;` re-declaring the
+            // preloaded astronomical AU (every stdlib/units/*.sio file does this
+            // for every symbol it exposes as a type) must keep working. Record
+            // the exact name now so a LATER, truly different name at this same
+            // hash is caught.
+            if UNIT_NAME_LEN[probe as usize] >= 0 && !unit_bytes_eq(probe, ns, ne) {
+                tc_error_hard(name_tok, "unit name collides with a different unit's hash")
+                return
+            }
+            UNIT_DIM_TABLE[probe as usize] = dim
+            var cap = ne - ns
+            if cap > UNIT_NAME_CAP { cap = UNIT_NAME_CAP }
+            var i: i64 = 0
+            while i < cap { UNIT_NAME_BUF[(probe * UNIT_NAME_CAP + i) as usize] = sb(ns + i) as i8; i = i + 1 }
+            UNIT_NAME_LEN[probe as usize] = cap
+            return
+        }
+        probe = probe + 1
+        if probe >= 2048 { probe = 0 }
+        iters = iters + 1
+    }
+}
+
 fn compile_all() -> i64 with IO, Mut, Panic, Div {
     CL = 0
     POOL_ALLOC_ROUTINE_CL = 0 - 1
@@ -32072,6 +32147,7 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
             if p < TC && TK[p as usize] == 3 {
                 let uns = TS[p as usize]
                 let une = TE[p as usize]
+                let name_tok = p
                 let uhash = gl_name_hash(uns, une)
                 p = p + 1  // skip NAME
                 // Check for '= unit_expr;' form. Supports SCALE * BASE and m / s derived units.
@@ -32098,12 +32174,12 @@ fn compile_all() -> i64 with IO, Mut, Panic, Div {
                             }
                         }
                     }
-                    unit_register_h(uhash, derived_dim)
+                    unit_register_named_h(uhash, derived_dim, uns, une, name_tok)
                     unit_mark_user_h(uhash)
                 } else {
                     // Plain 'unit NAME;' — look up dim from preloaded table (may be 0 if new)
                     let existing_dim = unit_lookup_dim(uhash)
-                    unit_register_h(uhash, existing_dim)
+                    unit_register_named_h(uhash, existing_dim, uns, une, name_tok)
                     unit_mark_user_h(uhash)
                 }
                 // Skip to semicolon
