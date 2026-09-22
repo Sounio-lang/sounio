@@ -34896,6 +34896,95 @@ fn emit_read_f64_a64() with Mut {
 }
 
 // ─── ARM64 read_file ───
+// ARM64 read_byte() -- read one byte from stdin (fd=0). Twin of emit_read_byte_x86.
+// The a64 spine never implemented this or read_line, so an aarch64-targeted build
+// that calls either fails E200 "undefined identifier" -- measured 2026-09-22 with
+// a lean_single cross-compiled --target aarch64-linux, and the same gap blocks
+// self-hosted/interop/protocol.sio (ipc_read_u8 -> read_byte) in the Madaros
+// bundle, one of the sites the aarch64 typecheck fails on.
+// -1 on EOF/error, else the byte value zero-extended in x0.
+fn emit_read_byte_a64() with Mut, Panic {
+    em32(0xD10043FF)  // sub sp, sp, #16 (reserve an aligned 1-byte buffer)
+    em32(0xD2800000)  // movz x0, #0 (fd = 0, stdin)
+    em32(0x910003E1)  // mov x1, sp (buf = sp)
+    em32(0xD2800022)  // movz x2, #1 (count = 1)
+    if TARGET_OS == 2 {
+        emit_imm64_reg_a64(16, 3)  // macOS SYS_read = 3 (via x16, svc #0x80)
+    } else {
+        em32(0xD2800000 | ((63 & 0xFFFF) << 5) | 8)  // Linux arm64 SYS_read = 63 (x8)
+    }
+    emit_syscall_a64()
+    // x0 = bytes_read (<=0 on EOF/error)
+    em32(0xF100001F)  // cmp x0, #0
+    let eof_patch = CL
+    em32(0x5400000D)  // b.le eof
+    em32(0x394003E0)  // ldrb w0, [sp] (zero-extends into x0)
+    let done_patch = CL
+    em32(0x14000000)  // b done
+    let eof_target = CL
+    emit_imm64_reg_a64(0, -1)  // x0 = -1
+    let done_target = CL
+    patch_branch_a64(eof_patch, eof_target)
+    patch_branch_a64(done_patch, done_target)
+    em32(0x910043FF)  // add sp, sp, #16
+}
+
+// ARM64 read_line() -- read one line from stdin (fd=0) into a fresh mmap buffer,
+// stripping a trailing '\n' and null-terminating. Twin of emit_read_line_x86.
+fn emit_read_line_a64() with Mut, Panic {
+    // mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0)
+    em32(0xD2800000)  // movz x0, #0 (NULL)
+    emit_imm64_reg_a64(1, 4096)  // x1 = 4096
+    em32(0xD2800062)  // movz x2, #3 (PROT_READ|PROT_WRITE)
+    if TARGET_OS == 2 {
+        emit_imm64_reg_a64(3, 0x1002)  // MAP_PRIVATE|MAP_ANON (Darwin)
+    } else {
+        em32(0xD2800000 | ((0x22 & 0xFFFF) << 5) | 3)  // MAP_PRIVATE|MAP_ANON (Linux)
+    }
+    emit_imm64_reg_a64(4, -1)  // fd = -1
+    em32(0xD2800005)  // movz x5, #0 (offset)
+    if TARGET_OS == 2 {
+        emit_imm64_reg_a64(16, 197)  // macOS SYS_mmap
+    } else {
+        em32(0xD2800000 | ((222 & 0xFFFF) << 5) | 8)  // Linux arm64 SYS_mmap
+    }
+    emit_syscall_a64()
+    // x0 = buf. Keep it on the stack (16-byte slot) across the read syscall.
+    emit_push_a64()
+    // read(0, buf, 4095) -- leave room for '\0'
+    em32(0xAA0003E1)  // mov x1, x0 (buf)
+    em32(0xD2800000)  // movz x0, #0 (fd = 0, stdin)
+    emit_imm64_reg_a64(2, 4095)
+    if TARGET_OS == 2 {
+        emit_imm64_reg_a64(16, 3)  // macOS SYS_read
+    } else {
+        em32(0xD2800000 | ((63 & 0xFFFF) << 5) | 8)  // Linux arm64 SYS_read
+    }
+    emit_syscall_a64()
+    // x0 = bytes_read (<=0 on EOF/error; still null-terminate at buf[0] in that case)
+    em32(0xF100001F)  // cmp x0, #0
+    let strip_skip_patch = CL
+    em32(0x5400000D)  // b.le null_terminate (skip the newline-strip probe)
+    // Strip a trailing '\n' (10) if present: byte at buf[bytes_read - 1]
+    em32(0xF94003E1)  // ldr x1, [sp] (buf, without popping)
+    em32(0x8B000021)  // add x1, x1, x0 (buf + bytes_read)
+    em32(0xD1000421)  // sub x1, x1, #1 (address of the last byte)
+    em32(0x39400022)  // ldrb w2, [x1] (zero-extends into x2)
+    em32(0xF100285F)  // cmp x2, #10 (arithmetic re-checked: imm12=10,Rn=2,Rd=31)
+    let no_strip_patch = CL
+    em32(0x54000001)  // b.ne no_strip
+    em32(0xD1000400)  // sub x0, x0, #1 (drop the trailing newline)
+    let no_strip_target = CL
+    patch_branch_a64(no_strip_patch, no_strip_target)
+    let null_terminate_target = CL
+    patch_branch_a64(strip_skip_patch, null_terminate_target)
+    // Null-terminate buf[bytes_read]
+    em32(0xF94003E1)  // ldr x1, [sp] (buf, without popping)
+    em32(0x8B000021)  // add x1, x1, x0
+    em32(0x3900003F)  // strb wzr, [x1]
+    emit_pop_x0_a64()  // return buf
+}
+
 fn emit_read_file_a64() with Mut, Panic {
     // x0 = path (C string pointer)
     emit_push_a64()
@@ -37802,6 +37891,26 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 }
                 EXPR_IS_F64 = 0
                 EXPR_TY = 5
+                EXPR_TY_HASH = 0
+                return
+            }
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "read_byte") {
+                if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
+                EP = EP + 1
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_read_byte_a64()
+                EXPR_IS_F64 = 0
+                EXPR_TY = 1
+                EXPR_TY_HASH = 0
+                return
+            }
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "read_line") {
+                if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
+                EP = EP + 1
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_read_line_a64()
+                EXPR_IS_F64 = 0
+                EXPR_TY = 3
                 EXPR_TY_HASH = 0
                 return
             }
