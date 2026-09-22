@@ -250,3 +250,32 @@ changes above and one CI-efficiency issue, all fixed the same day:
 All three fixes re-verified against the same fresh build; the full 18-stage
 KL-15a loop (`v0e510` now excluded, covered once by KL-8) re-ran green
 sequentially under `bash -eo pipefail`.
+
+## Second review pass (2026-09-22, same day)
+
+A second automated review pass found three more gaps, all fixed the same day:
+
+- `v0e4` was listed in the KL-15a `ci.yml` loop alongside `v0e41`, but
+  `v0e41` already invokes the complete `v0e4` gate internally
+  (`madaros_f128_f256_v0e41_fail_closed_lower_gate.sh:63-64`) and requires
+  its PASS — running both duplicated `v0e4`'s seed/language checks. Removed
+  `v0e4` from the loop; `v0e41` alone provides both stages' coverage.
+- A leftover comment in `v0e55`'s gate script still described the old
+  `1.0 += 1.0` / 2.0 receipt from before the anti-f64 `tiny` fix above.
+  Updated to match the actual `1.0 += tiny` assertion.
+- **The `&![f128; N]` (exclusive/mutable reference) half of the
+  `lower_type_expr_is_ref_like` fix had no dedicated regression witness** —
+  the wired v0e57 coverage only exercised `&[f128; N]` (immutable). Since
+  `lower_type_expr_is_ref_like` is true for both `TypeReference` and
+  `TypeRefMut`, and mutable references additionally require the write to be
+  caller-visible, this was a real verification gap, not just a nit. Added
+  `mut_ref_array.sio` (`double_first(a: &![f128; 2])` doing a bare
+  `a[0] = a[0] + a[0]`) to the v0e57 gate as a new witness
+  (`madaros_run_mut_ref_array_element_rw`) and confirmed it: (a) passes on
+  the fixed build with the correct doubled value visible in the caller, and
+  (b) SIGSEGVs (rc=139) on the pre-fix build — genuinely regression-catching,
+  not just coverage theater.
+
+All three re-verified; the full 17-stage KL-15a loop (`v0e4` also now
+excluded, covered by `v0e41`) re-ran green sequentially under
+`bash -eo pipefail`.

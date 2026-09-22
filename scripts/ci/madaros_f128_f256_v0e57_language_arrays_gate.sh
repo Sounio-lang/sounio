@@ -18,8 +18,10 @@
 #     lower element-wise through the f128 value path (never the f64
 #     array-literal classifier); repeat fills ALL N slots (null handle ≠ 0.0)
 #   - stores: `a[i] = 2.0` is binary128, `a[i] = y` / `a[i] = b[j]` copy
-#   - `&[f128; N]` params, by-value `[f128; N]` params (slot copy, no aliasing),
-#     `let zs = xs` copies (no aliasing), comparisons over elements
+#   - `&[f128; N]` / `&![f128; N]` params, by-value `[f128; N]` params (slot
+#     copy, no aliasing), `let zs = xs` copies (no aliasing), comparisons over
+#     elements; a bare `a[i] = expr` write through a `&![f128; N]` param is
+#     visible to the caller (mut_ref_array witness)
 #   - struct field `arr: [f128; N]`: literal init, read, store through `q.arr[i]`
 #   - DCE: a `[f128; N]` type anywhere (let / param / field) marks the softfloat
 #     desugar targets even when the program has no scalar f128 (array_only probe)
@@ -183,6 +185,34 @@ fn main() -> i32 with IO, Mut, Panic, Div {
 }
 EOF
 
+# Exclusive/mutable reference: `&![f128; N]` takes the same param-binding path
+# as `&[f128; N]` (both are TypeReference-family, both hit
+# lower_type_expr_is_ref_like), so a fix scoped to only `&` and not `&!` would
+# leave this half unguarded. Reads AND a caller-visible write through a bare
+# `a[0] = expr` (not `(*a)[0]`) on a `&![f128; N]` param -- confirmed against
+# a pre-fix build: SIGSEGV (rc=139) without this witness's coverage.
+cat >"$TMP_DIR/mut_ref_array.sio" <<'EOF'
+use math::softfloat_f128::{f128_from_limbs, f128_to_lo, f128_to_hi}
+use math::wide_float::{print_limb_hex16}
+
+fn double_first(a: &![f128; 2]) with Mut, Panic, Div, IO {
+    a[0] = a[0] + a[0]
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    var xs: [f128; 2] = [f128_from_limbs(0, 4611404543450677248), f128_from_limbs(0, 4611686018427387904)]
+    double_first(&!xs)
+    print("wire_mut_ref_double=")
+    print_limb_hex16(f128_to_lo(xs[0]))
+    print(":")
+    print_limb_hex16(f128_to_hi(xs[0]))
+    println("")
+    if f128_to_hi(xs[0]) != 4611686018427387904 || f128_to_lo(xs[0]) != 0 { return 1 }
+    if f128_to_hi(xs[1]) != 4611686018427387904 { return 2 }
+    return 0
+}
+EOF
+
 # True when the log contains ANY of the `@@`-separated fixed strings.
 log_has_any() {
   local log="$1" wants="$2" w
@@ -221,6 +251,17 @@ if [[ -x "$SOUC" ]]; then
   else
     note_fail "madaros_run_array_only_dce_trigger rc=$ao_rc"
     tail -30 "$TMP_DIR/array_only.run.log" >&2 || true
+  fi
+
+  set +e
+  "$SOUC" run "$TMP_DIR/mut_ref_array.sio" >"$TMP_DIR/mut_ref_array.run.log" 2>&1
+  mr_rc=$?
+  set -e
+  if [[ "$mr_rc" -eq 0 ]] && grep -Fq 'wire_mut_ref_double=0000000000000000:4000000000000000' "$TMP_DIR/mut_ref_array.run.log"; then
+    note_pass "madaros_run_mut_ref_array_element_rw"
+  else
+    note_fail "madaros_run_mut_ref_array_element_rw rc=$mr_rc"
+    tail -30 "$TMP_DIR/mut_ref_array.run.log" >&2 || true
   fi
 
   set +e

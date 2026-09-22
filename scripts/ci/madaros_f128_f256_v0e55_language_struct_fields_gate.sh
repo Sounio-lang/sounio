@@ -186,8 +186,13 @@ if [[ -x "$SOUC" ]]; then
   done
 
   # KL-8: compound assignment on a plain f128 local now compiles and runs,
-  # computing the real softfloat sum -- 1.0 += 1.0 must be exactly binary128
-  # 2.0 (0000000000000000:4000000000000000), never f64 bits and never 0.
+  # computing the real softfloat sum -- 1.0 += tiny must give the exact
+  # anti-f64 limbs (00002f3942192484:3fff000000000000), matching v0e4's own
+  # wire_1+tiny receipt for the identical computation. Never f64 bits, never
+  # a rounded-away-to-1.0 result (which is what an f64-widen-then-narrow
+  # cheat would produce, since 1.0+1.0=2.0 alone can't distinguish real
+  # binary128 arithmetic from that cheat -- see the lang_compound.sio
+  # heredoc above).
   set +e
   "$SOUC" run "$TMP_DIR/lang_compound.sio" >"$TMP_DIR/lang_compound.run.log" 2>&1
   lc_rc=$?
