@@ -15,6 +15,12 @@
 // this test probe sqrt_approx's accuracy directly through the public checked API
 // (kin_sigma and sqrt_approx are both private) rather than needing exact propagated
 // numbers.
+//
+// The normalization loop itself has a termination hazard: x = +inf divided by 4
+// stays +inf, so `while m >= 4.0 { m = m / 4.0 }` never exits on it. Reachable through
+// existing public callers -- crn_result_to_audit squares caller-provided finite values,
+// so epistemic_part = 1e308 overflows `total` to +inf before it reaches sqrt_approx.
+// sqrt_approx now returns non-finite input as-is, before the normalization loop.
 
 use chemistry::kinetics::*
 
@@ -48,6 +54,17 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     // 20 Newton iterations on an argument in [1, 4) converge far tighter than this; the
     // bound only needs to rule out the ~9500x (1e-20) / ~1e43x (1e-100) failure mode.
     if !(worst <= 1.0e-6) { fail = fail + 1; println("FAIL: sqrt_approx is not accurate across the tested range") }
+
+    // ---- +inf must not hang the normalization loop -------------------------------------------
+    // The //@ timeout above is the actual control here: a regression would time out, not fail an
+    // assertion. Reproduces the reviewer-cited reachability path exactly: crn_result_to_audit
+    // squares its epistemic/intrinsic/structural parts, so a large enough finite input overflows
+    // `total` to +inf before sqrt_approx ever sees it.
+    let audit = crn_result_to_audit(1.0, 0.1, 1.0e308, 0.0, 0.0, 1, 0)
+    print("crn_result_to_audit with an overflowing part: gum_uc=") println(audit.gum_uc)
+    // sqrt(+inf) = +inf: `x > 0.0` is false for both NaN and a laundered 0, so this also catches
+    // a regression that turns the hang into a silently-wrong finite/zero answer instead.
+    if !(audit.gum_uc > 1.0e300) { fail = fail + 1; println("FAIL: sqrt_approx(+inf) did not report +inf") }
 
     if fail == 0 { println("KIN SIGMA SMALL VARIANCE PASS") }
     fail
