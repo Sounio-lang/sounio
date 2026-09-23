@@ -13568,10 +13568,24 @@ impl Lowerer {
     // Phase 3.2: Lookup struct field index without needing struct name
     // Used when we don't know the struct type at the call site
     fn field_idx_from_name_simple(self, n: Name) -> i64 with Mut, Panic, Div {
-        // Try numeric field access first (.0, .1, .2, ...)
-        let first_byte = n.buf[0] as i64
-        if n.len == 1 && first_byte >= 48 && first_byte <= 57 {
-            return first_byte - 48
+        // Try numeric field access first (.0, .1, .2, ..., .15, ...). Tuple-let
+        // desugaring turns `let (_, ..., v10) = f()` into a temporary tuple plus
+        // `let v10 = __tup.10` (#1502), so a tuple slot name can be more than one
+        // decimal digit. This used to check `n.len == 1`, which only recognised
+        // slots 0-9; a two-digit slot name (slot 10+) fell through the
+        // struct-field-name scan below (no struct has a field literally named
+        // "10"), then to the `(n.buf[0] as i64) % 64` legacy hash fallback,
+        // which returns a bogus index derived from the first digit character
+        // (e.g. "10" -> '1' (49) % 64 = 49) instead of 10. That wrong index read
+        // whatever memory happened to sit at word offset 49 of the tuple's
+        // storage: a wrong value for a scalar f64 slot, and a garbage/null
+        // pointer for an `[f64; N]` array slot -- segfaulting when the caller
+        // then indexed into it. lower_name_tuple_index already does the general
+        // decimal parse (and rejects non-numeric names); reuse it here so every
+        // tuple slot, not just single-digit ones, resolves to its real index.
+        let tuple_idx = lower_name_tuple_index(n)
+        if tuple_idx >= 0 {
+            return tuple_idx
         }
         // The synthetic "Knowledge" layout (ir_register_knowledge_layout) is
         // preseeded as entry 0, before any user struct is registered, and its
