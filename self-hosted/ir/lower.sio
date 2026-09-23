@@ -16894,7 +16894,21 @@ impl Lowerer {
         match s.expr {
             Some(rhs_ident_pre) => {
                 if (*rhs_ident_pre).kind == ExprKind::ExprIdent {
+                    // A source that is BOTH ref-typed AND array_copy_word_scalar must
+                    // NOT propagate is_ref. V0-E.5.7 forces a value-copy of every
+                    // `&[f128; N]` param regardless of the `&` annotation
+                    // (lower_fn_params_ref: param_word_scalar is true for any f128
+                    // array, ref or not), materializing a REAL GC array handle in
+                    // the param's own register via emit_fixed_array_value_copy --
+                    // not a caller address. That local is simultaneously is_ref=1
+                    // (from the `&` in its declared type) and array_copy_word_scalar=1
+                    // (from the forced copy); the copy is what actually describes its
+                    // register's contents. Propagating is_ref to `zs` in `let zs = a`
+                    // would route zs[i] through the ref-array/deref path (label_id=1)
+                    // onto a register that holds a handle, not an address --
+                    // corrupting the read/write instead of indexing the array.
                     rhs_ident_is_ref = lo.lookup_local_is_ref((*rhs_ident_pre).name)
+                        && !lo.lookup_local_array_copy_word_scalar((*rhs_ident_pre).name)
                 }
             }
             _ => {}

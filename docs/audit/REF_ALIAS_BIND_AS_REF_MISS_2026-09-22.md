@@ -109,13 +109,17 @@ that base was an unannotated bare-identifier alias:
   type" — see the comment above `bind_as_ref` in `lower_let_stmt_finalize_ref`).
   Sounio has no nested-fn-declaration form separate from closures, so this
   covers the full "nested function" surface.
-- **Why this was newly reachable for f128 but not new:** PR #2615 fixed a
-  *different* bug where `a[i]` accessed **directly** (not through an alias)
-  SIGSEGV'd for `a: &[f128;N]` params. That fix makes this alias bug
-  observable for f128 — previously the program crashed on `a[0]` before ever
-  reaching `let zs = a; zs[0]`. For every other element type (unaffected by
-  the SIGSEGV bug) this alias bug was already silently returning wrong data
-  with no crash and no diagnostic, with no known trigger date.
+- **Relationship to PR #2615's SIGSEGV fix:** PR #2615 fixes a *different*
+  bug where `a[i]` accessed **directly** (not through an alias) SIGSEGV'd for
+  `a: &[f128;N]` params. On the base this PR is built from (`origin/main` at
+  `e6cc1e4bf1`), that direct-access SIGSEGV is **still present** — confirmed
+  empirically (see **f128 exclusion** below) — so PR #2615 has not landed on
+  this base yet. Once it does, `let zs = a; zs[0]` for `a: &[f128;N]` should
+  reach the alias path and become observable exactly as described in the
+  original report: for every element type *unaffected* by that SIGSEGV, this
+  alias bug was already silently returning wrong data with no crash and no
+  diagnostic, with no known trigger date. `&[f128;N]` itself is a documented
+  exception to that general shape — see below.
 
 ## Fix
 
@@ -141,6 +145,58 @@ in `lower_let_stmt_after_expr_ref` *before* its `bind_local(s.name, ...)`
 call, and threading that captured `bool` into `lower_let_stmt_finalize_ref`
 as a parameter instead of re-querying after the rebind.
 
+**`&[f128;N]` exclusion (post-review):** a second Copilot finding on the same
+commit caught a distinct hazard: V0-E.5.7 force-copies every `&[f128;N]` /
+`&![f128;N]` param into a fresh, real GC array handle regardless of the `&`
+annotation (`lower_fn_params_ref`: `param_word_scalar` is true for any f128
+array type, ref or not — `array_copy_word_scalar[a] = 1`), while `a` is
+*simultaneously* stamped `is_ref = 1` from its declared reference type. For
+this one case, `a`'s own local-stack `is_ref` bit does **not** describe what
+`a`'s register holds (a value-copied handle, not a caller address) — the
+`array_copy_word_scalar` bit is what actually governs it. Propagating
+`is_ref` to `zs` in `let zs = a` would route `zs[i]` through the
+ref-array/deref path (`label_id = 1`) onto a register holding a handle, not
+an address.
+
+Fixed by excluding sources that are both `is_ref` and `array_copy_word_scalar`
+from the alias propagation: `rhs_ident_is_ref` in
+`lower_let_stmt_after_expr_ref` is now
+`lo.lookup_local_is_ref(name) && !lo.lookup_local_array_copy_word_scalar(name)`.
+
+This exclusion is mechanically necessary but **not sufficient** for correct
+*values* through `let zs = a; zs[i]` on `&[f128;N]` — empirical testing
+(minimal probes, not checked in) found:
+
+- Direct, non-aliased `a[0] + a[1] + a[2]` for `a: &[f128;3]` **already
+  SIGSEGVs on this PR's unmodified base** (confirms the PR #2615 relationship
+  above; out of scope here).
+- With the exclusion applied, `let zs = a` (the bind alone, no indexing)
+  no longer crashes — confirming the exclusion is doing its job.
+- `zs[i]` **still SIGSEGVs** after the exclusion, from a second, deeper,
+  separate gap: `lower_let_stmt_after_expr_ref`'s own word-scalar re-copy for
+  the alias (`fixed_array_len >= 0 && fixed_array_word_scalar` →
+  `emit_fixed_array_value_copy` again) produces a local that is
+  `array_copy_word_scalar = 1` and `array_elem_wide_bits = 128` with
+  `is_ref = 0` — a combination that, before this fix, only ever arose
+  together with `is_ref = 1` on the original ref param, and appears to be
+  unhandled by whatever `zs[i]` indexing path is reached with `is_ref = 0`.
+  This reaches into `&[f128;N]` support's own machinery in a way that is
+  outside this PR's scope (a bare-identifier alias bug fix) to chase down
+  and fix blindly — doing so without the same exhaustive verification this
+  PR received would risk a *new* miscompile in an actively-developed feature
+  area, which is exactly the failure mode this whole investigation exists to
+  avoid repeating.
+
+**Net effect:** the exclusion is still the correct and necessary fix for the
+`is_ref` propagation specifically (it removes one confirmed way `zs[i]`
+could misread `a`'s value), but a fully correct `let zs = a; zs[i]` for
+`&[f128;N]` remains blocked on the pre-existing direct-access bug (and,
+per the above, possibly an additional array-copy/wide-bits interaction) —
+neither of which this PR introduces or can responsibly resolve as a side
+effect. Tracked as follow-up work, likely intersecting with PR #2615's
+territory. No regression test for this exact scenario is included for that
+reason — see **Regression coverage** below for what *is* covered and why.
+
 ## Regression coverage
 
 `tests/run-pass/ref_alias_bind_as_ref.sio` (`//@ requires: madaros` — the fix
@@ -156,6 +212,12 @@ through a bare-identifier alias with no explicit type annotation:
 5. read through a same-name shadowing alias (`let a = a`) of an immutable ref
    array param — the case that motivated the capture-before-bind correction
    above
+
+None of these five sources are `array_copy_word_scalar` (that bit is
+currently only forced for f128-element arrays), so the `&[f128;N]` exclusion
+above is a no-op for all of them — re-verified after adding it: all five
+still pass unchanged. The exclusion itself has no positive-value regression
+test, for the reasons given above.
 
 Wired into CI as `scripts/ci/madaros_ref_alias_bind_as_ref_gate.sh`, added to
 the `madaros-witness-gate` job in `.github/workflows/ci.yml` right after
@@ -196,12 +258,23 @@ elf: 125073689 bytes (bss=4388777192)
 `MADAROS_RAW_BIN=<that ELF> bash scripts/ci/madaros_ref_alias_bind_as_ref_gate.sh`:
 
 ```
-compiler_sha256=d9a882254b8ba4ff8e1fa2a069514d4006f6d777e4c9a7285cfa6080ad30d512
+compiler_sha256=a0542301c5c441f2c03f6e6c5098875544c58c826042555acbaa69e6d9c5233b
 source_sha256=59bac88375f614223e5694ee0574f0c085f8f21db29d3063e76c81efc0da30de
 ref_alias_bind_as_ref: PASS
 PASS: read/write through a bare-identifier alias of a &T / &!T / &![T;N] param
 stays reference-typed (IndexGet/Set + FieldGet/Set)
 ```
+
+Re-verified a third time from a fresh build after adding the `&[f128;N]`
+exclusion (`compiler_sha256` above is that build). Also ran, against that
+same build, with `ulimit -s unlimited` (stack size is a separate, known
+confound for several unrelated f128 gates on this codebase — see
+`ulimit -s 1048576` guards throughout `.github/workflows/ci.yml`'s Madaros
+jobs) three targeted probes (not checked in — see **`&[f128;N]` exclusion**
+above for what they showed): the alias *bind* `let zs = a` alone no longer
+crashes; `zs[i]` still does, from a separate pre-existing gap; direct
+`a[i]` (no alias) already crashes on this unmodified base independent of
+this PR.
 
 All five cases in `tests/run-pass/ref_alias_bind_as_ref.sio` (read/write
 through a fixed-array-ref alias, read/write through a struct-ref alias, and
