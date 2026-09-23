@@ -32,11 +32,13 @@ it recorded whether a document is current canon or lineage.
 
 > **For every path under `docs/research/`, `authority` is not measured. It is
 > `ACTIVE_RESEARCH_DOCS.has(relPath) ? 'repo_only' : 'historical'`, and
-> `ACTIVE_RESEARCH_DOCS` is a Set of three path literals. The CI checker enforces
-> the field and requires the auto-inserted lineage status note. A research page
-> that claims to be current (`repo_only`) without membership of that three-item
-> whitelist is a gate failure. The gate is green when almost every research
-> finding declares it is historical lineage.**
+> `ACTIVE_RESEARCH_DOCS` *was* a Set of three path literals when this rung was
+> first written (2026-07-31); it has since grown to **six** — see the Updates
+> below, where the contract now checks against `WHITELIST_SIZE = 6`. The CI
+> checker enforces the field and requires the auto-inserted lineage status
+> note. A research page that claims to be current (`repo_only`) without
+> membership of that whitelist is a gate failure. The gate is green when almost
+> every research finding declares it is historical lineage.**
 
 Verdict: `SELF_FALSIFYING_R25_VERDICT RESEARCH_AUTHORITY_IS_PATH_DEFAULT_HISTORICAL__GATE_REJECTS_CURRENT`.
 
