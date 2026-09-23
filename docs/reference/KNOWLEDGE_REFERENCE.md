@@ -29,12 +29,14 @@ build `{ val, variance, confidence }`. A W3C PROV-DM export module exists at
 `stdlib/epistemic/prov.sio`, but its types and constructors are currently
 private and are **not** part of the public/user-facing API, so provenance
 cannot be attached or queried through it yet. Shared-source covariance is
-tracked internally in `stdlib/epistemic/affine.sio`.
+tracked by the separate public `epistemic::affine` API (`stdlib/epistemic/affine.sio`),
+a distinct surface not covered here.
 
-## Two epistemic surfaces
+## Two scalar value surfaces
 
-Sounio exposes two distinct epistemic representations; do not treat one as a
-replacement for the other:
+Sounio exposes two distinct scalar epistemic value types; do not treat one as a
+replacement for the other. Other representations exist for specialized needs —
+notably the public `epistemic::affine` source-tracking API (see below).
 
 - **Stdlib `Epistemic` / `ep_*` API (this document).** The user-facing value
   type `Epistemic { pub val, pub variance, pub confidence }` and the free
@@ -48,6 +50,12 @@ replacement for the other:
   The standard-library index (`docs/reference/STDLIB_REFERENCE.md`) still routes
   `Knowledge<T>` lookups here. Treat `Knowledge<T>` as a distinct, lower-level
   surface rather than an alias for `Epistemic`.
+
+These are the two scalar surfaces for a single value with uncertainty. For
+shared-source covariance tracking, use the separate public `epistemic::affine`
+API (`af_measured` / `af_add` / …, `stdlib/epistemic/affine.sio`, exercised by
+`examples/vancomycin_auc_affine.sio`); it is a distinct, supported surface not
+covered by this `Epistemic` reference.
 
 ## Constructors
 
@@ -67,7 +75,9 @@ Guidelines:
 - `val` is the nominal estimate.
 - `variance` stores squared uncertainty (std = `ep_std(&e)`); accessors are `ep_val`, `ep_variance`, `ep_std`, `ep_confidence`.
 - `confidence` (0..1000) should be interpreted consistently across a workflow.
-- `Epistemic` carries no provenance field, and the constructors do not record a source. The `prov` module is not yet a public API (its types/ctors are private), so provenance cannot be attached through `epistemic::prov` today; shared-source covariance is tracked internally in `stdlib/epistemic/affine.sio`.
+- `Epistemic` carries no provenance field, and the constructors do not record a source. The `prov` module is not yet a public API (its types/ctors are private), so provenance cannot be attached through `epistemic::prov` today; shared-source covariance is
+tracked by the separate public `epistemic::affine` API (`stdlib/epistemic/affine.sio`),
+a distinct surface not covered here.
 
 ## Arithmetic and Propagation
 
