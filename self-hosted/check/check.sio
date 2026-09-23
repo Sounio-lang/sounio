@@ -353,6 +353,13 @@ pub struct Checker {
     // than a wrong effect set. -1 disables the write outright.
     pub current_sig_id: i64,
     pub current_sig_name: Name,
+    // True while checking a CLOSURE body. In that scope effects are INFERRED
+    // (spec §7.2.1, "concrete-authoritative Callee EOIO items") rather than
+    // treated as an E035 obligation: the closure has no FnSig to look up yet,
+    // and the inferred set is captured by checker_check_closure_expr_inplace
+    // and published onto the closure's FnSig. A named fn body does NOT set this,
+    // so its missing effects still fail E035 (effect_missing and friends).
+    pub in_closure_body: bool,
     pub multitest_count: i64,
     pub multitest_corrected: bool,
     pub last_literal_int: i64,
@@ -1384,6 +1391,7 @@ pub fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
         // function's effects.
         current_sig_id: 0 - 1,
         current_sig_name: empty_name(),
+        in_closure_body: false,
         multitest_count: 0,
         multitest_corrected: false,
         last_literal_int: 0,
@@ -1494,6 +1502,7 @@ pub fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
     (*raw).current_effect_count = 0
     (*raw).current_sig_id = 0 - 1
     (*raw).current_sig_name = empty_name()
+    (*raw).in_closure_body = false
     (*raw).multitest_count = 0
     (*raw).multitest_corrected = false
     (*raw).last_literal_int = 0
@@ -1605,6 +1614,7 @@ fn checker_store_from_value(dst: *mut Checker, src: Checker) with Mut, Panic, Di
     (*dst).current_effect_count = src.current_effect_count
     (*dst).current_sig_id = src.current_sig_id
     (*dst).current_sig_name = src.current_sig_name
+    (*dst).in_closure_body = src.in_closure_body
     (*dst).multitest_count = src.multitest_count
     (*dst).multitest_corrected = src.multitest_corrected
     (*dst).last_literal_int = src.last_literal_int
@@ -9259,7 +9269,14 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
     }
 
     // THE FIX: body checked in place (was the by-value c.check_opt_expr recursion).
+    // Effects inside a closure BODY are inferred (§7.2.1): raise the flag so
+    // check_callee_effects widens current_effects instead of firing E035. The
+    // widened set is captured into inferred_effects below and published onto the
+    // closure's FnSig. A named fn body never sets this, so E035 stays in force there.
+    let saved_in_closure = (*c).in_closure_body
+    (*c).in_closure_body = true
     let body_ty = checker_check_opt_expr_inplace(c, e.closure_body)
+    (*c).in_closure_body = saved_in_closure
 
     let inferred_ret_ty = if ret_ty.kind == TypeKind::TyUnknown {
         body_ty
@@ -11284,6 +11301,18 @@ fn checker_check_callee_effects_named_inplace(c: *mut Checker, span: Span, calle
         return
     }
     let missing_pair = find_missing_effects(callee_effects, callee_effect_count, (*c).current_effects, (*c).current_effect_count)
+    // Closure-body inference (§7.2.1): a closure has no FnSig to look up yet, so
+    // a missing callee effect is ACCUMULATED into current_effects (which
+    // checker_check_closure_expr_inplace later publishes onto the closure's own
+    // FnSig) rather than reported as E035. No write-back here — the closure body
+    // operates with current_sig_id still pointing at the ENCLOSING named fn, so a
+    // write-back would widen the wrong signature. This is the scoped form of the
+    // SOUNIO_EFFECT_INFER experiment: inference is on by construction for closures,
+    // while named fns keep their explicit-declaration E035 (effect_missing &c.).
+    if (*c).in_closure_body {
+        checker_widen_current_effects_inplace(c, missing_pair.0, missing_pair.1)
+        return
+    }
     if checker_effect_inference_enabled() {
         checker_widen_current_effects_inplace(c, missing_pair.0, missing_pair.1)
         // STEP 2: publish the inferred set into this function's own signature, so that ITS callers
