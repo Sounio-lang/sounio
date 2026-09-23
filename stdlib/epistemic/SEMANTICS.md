@@ -274,6 +274,11 @@ let bmi = ep_div(&mass, &ep_square(&height))
 // ep_confidence(&bmi) = min(ep_confidence(&mass), ep_confidence(&ep_square(&height))) * 97/100
 // = min(900, 882) * 97/100 = 855  (ep_square drops height 900→882; ep_div drops that →855)
 // confidence never increases, but decay arithmetic multiplies — it does not simply keep the minimum
+
+// Anchor: this exact free-function division path is exercised by the
+// `//@ run-pass` selftest in `stdlib/epistemic/knowledge.sio`, which calls
+// `ep_div` (the `q = ep_div(&x, &y)` quotient check). The `ep_gum_covariance`
+// test cited above only exercises the `*_cov` forms, not plain `ep_div`.
 ```
 
 ### Interval Enclosure (intended, not shipped)
