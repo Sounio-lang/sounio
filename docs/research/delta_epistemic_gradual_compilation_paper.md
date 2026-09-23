@@ -19,9 +19,12 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.delta
 > surface today — see `docs/compiler/KNOWN_LIMITATIONS.md`. What ships now is
 > `Epistemic { val: f64, variance: f64, confidence: i64 }` in
 > `stdlib/epistemic/knowledge.sio`: `ep_measured(val, std_dev)` stores
-> confidence 900, `ep_certain(val)` stores 1000, and `ep_add` / `ep_div` /
-> `ep_val` / `ep_std` propagate by the GUM delta method, anchored by
-> `tests/run-pass/ep_gum_covariance.sio`. The confidence scale already agrees:
+> confidence 900, `ep_certain(val)` stores 1000; the read-only accessors
+> `ep_val` (returns `e.val`) and `ep_std` (returns `sqrt(e.variance)`) do
+> **not** propagate uncertainty, while the arithmetic ops `ep_add` /
+> `ep_div` / `ep_mul` / `ep_sub` and their `*_cov` covariance variants do —
+> `tests/run-pass/ep_gum_covariance.sio` anchors the covariance-aware
+> arithmetic variants. The confidence scale already agrees:
 > the paper's 0–1000 confidence is the scale the shipped type uses.
 
 **Draft — POPL 2027 submission | Numbers updated 2026-04-21 | DOUBLE-BLIND VERSION**

@@ -63,10 +63,13 @@ SYNC = "scripts/docs/sync_governance_metadata.mjs"
 # rna_cayley_dickson_confirmatory_preregistration_2026-08-09.md was
 # whitelisted (docs/audit/BRANCH_AUDIT_2026-08-15.md); grew to 5 on
 # 2026-08-28 when cd-tower-automorphism-freeze.md was whitelisted in the
-# same change that added it. Bump this deliberately when the whitelist
-# legitimately changes size -- do not let this constant silently drift out
-# of sync with governance_registry.mjs.
-WHITELIST_SIZE = 5
+# same change that added it; grew to 6 on 2026-09-22 when
+# docs/research/delta_epistemic_gradual_compilation_paper.md was
+# reclassified from historical lineage to the design target (PR #2648).
+# Bump this deliberately when the whitelist legitimately changes size --
+# do not let this constant silently drift out of sync with
+# governance_registry.mjs.
+WHITELIST_SIZE = 6
 
 SUBJECT = "docs/research/self_falsifying_compilation_line_r24_2026-07-31.md"
 FARM_COPY = ["docs", "examples", "paper", "spec", "README.md"]
