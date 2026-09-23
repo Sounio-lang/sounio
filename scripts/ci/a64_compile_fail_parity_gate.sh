@@ -142,7 +142,8 @@ while IFS= read -r f; do
     req="$(sed -n 's|^//@[[:space:]]*requires:[[:space:]]*\([A-Za-z_][A-Za-z_0-9]*\).*|\1|p' "$f" | head -1)"
     case "$req" in
         "")               printf '%s\n' "$f" >> "$WORK_DIR/in_scope.txt" ;;
-        gpu|llvm)         printf '%s\n' "$f" >> "$WORK_DIR/in_scope.txt" ;;
+        gpu|llvm|science|qualification)
+                          printf '%s\n' "$f" >> "$WORK_DIR/in_scope.txt" ;;
         "$ENGINE")        printf '%s\n' "$f" >> "$WORK_DIR/in_scope.txt" ;;
         madaros|lean_single)
                           printf '%s\t%s\n' "$(basename "$f" .sio)" "$req" >> "$WORK_DIR/excluded.txt" ;;
@@ -151,7 +152,7 @@ while IFS= read -r f; do
 done < <(find tests/compile-fail -name '*.sio' | LC_ALL=C sort)
 
 if [[ -n "$unknown_requires" ]]; then
-    echo "--- unrecognised '//@ requires:' values (expected: gpu|llvm|madaros|lean_single) ---"
+    echo "--- unrecognised '//@ requires:' values (expected: gpu|llvm|madaros|lean_single|science|qualification) ---"
     printf '%s\n' $unknown_requires
     echo "A64_COMPILE_FAIL_PARITY_GATE=FAIL (unknown requires would silently re-admit the wrong engine)"
     exit 1

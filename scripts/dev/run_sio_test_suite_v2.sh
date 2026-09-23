@@ -16,7 +16,7 @@
 #   //@ error-pattern: X      — stderr/stdout must contain X (compile-fail only)
 #   //@ known-failure: REASON — documented accepted failure
 #   //@ skip-if: CONDITION    — conditional skip (e.g., skip-if: no-gpu)
-#   //@ requires: FEATURE     — feature dependency (gpu|llvm|madaros|lean_single|slow)
+#   //@ requires: FEATURE     — feature dependency (gpu|llvm|madaros|lean_single|slow|science|qualification)
 #   //@ flaky                 — known flaky test
 #   //@ timeout: SECONDS      — override default timeout
 #
@@ -473,13 +473,24 @@ run_test() {
             # is set; the nightly slow-lane job sets it, with a much larger
             # job timeout budget.
             slow) [[ -z "${SOUNIO_SLOW_TESTS_AVAILABLE:-}" ]] && { echo "{\"status\":\"skip\",\"reason\":\"requires:slow\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"; return; } ;;
+            # `requires: science` / `requires: qualification` — groundwork for the
+            # CI-vs-Qualification split (Sounio CI Fabric Phase 1): recognized
+            # values with no consuming workflow yet, so SOUNIO_SCIENCE_AVAILABLE
+            # and SOUNIO_QUALIFICATION_AVAILABLE are never set today and every
+            # test carrying either tag is always skipped. No test is retagged by
+            # this change. Adding the values here first (rather than only when a
+            # Qualification workflow exists to set the env var) means a test can
+            # be tagged in isolation without tripping the anti-vacuous-guard
+            # unknown-value failure below.
+            science) [[ -z "${SOUNIO_SCIENCE_AVAILABLE:-}" ]] && { echo "{\"status\":\"skip\",\"reason\":\"requires:science\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"; return; } ;;
+            qualification) [[ -z "${SOUNIO_QUALIFICATION_AVAILABLE:-}" ]] && { echo "{\"status\":\"skip\",\"reason\":\"requires:qualification\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"; return; } ;;
             # An unrecognized requires value must not fall through silently: a typo
             # (e.g. `requires: madros`) would otherwise run the test against
             # whatever engine is present instead of being gated as intended, with
             # the annotation asserting nothing -- indistinguishable from the
             # vacuous-match defect this PR exists to remove.
             *)
-                echo "{\"status\":\"fail\",\"category\":\"fail\",\"name\":\"$basename\",\"output\":\"unknown requires: $requires (expected: gpu|llvm|madaros|lean_single|slow)\",\"idx\":$idx}" > "$output_file"
+                echo "{\"status\":\"fail\",\"category\":\"fail\",\"name\":\"$basename\",\"output\":\"unknown requires: $requires (expected: gpu|llvm|madaros|lean_single|slow|science|qualification)\",\"idx\":$idx}" > "$output_file"
                 return
                 ;;
         esac
