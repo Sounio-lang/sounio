@@ -3,14 +3,16 @@
 > **Checked surface vs. intended semantics.** The shipped type is
 > `Epistemic { val: f64, variance: f64, confidence: i64 }` in
 > `stdlib/epistemic/knowledge.sio`, with the free functions `ep_measured`,
-> `ep_val`, `ep_std`, `ep_add`, `ep_mul`, `ep_div`, `ep_merge`, and
-> `ep_is_credible` (anchor: `tests/run-pass/ep_gum_covariance.sio`). The
+> `ep_val`, `ep_std`, `ep_add`, `ep_mul`, `ep_merge`, and
+> `ep_is_credible` (anchor: `tests/run-pass/ep_gum_covariance.sio`); `ep_div`
+> is exercised by the `//@ run-pass` selftest in
+> `stdlib/epistemic/knowledge.sio` (the quotient check `ep_div(&x, &y)`). The
 > `Knowledge<T>` generic, `Knowledge::interval`, `.with_conf`, `.boost`, and
 > `.unwrap` used in the formal rules below describe intended semantics and are
 > not on the checked public surface — see `docs/compiler/KNOWN_LIMITATIONS.md`.
 > The examples at the bottom use the shipped API.
 
-This document defines the formal semantics and invariants for Sounio epistemic types. These invariants are non-negotiable and enforced by the type system and runtime.
+This document defines the formal semantics and invariants for Sounio epistemic types. Today the compiler and runtime enforce only the `Epistemic` behavior identified in the checked-surface note above; the `Knowledge<T>` formal rules below describe **intended semantics** and are **not** currently enforced — see `docs/compiler/KNOWN_LIMITATIONS.md`.
 
 ---
 

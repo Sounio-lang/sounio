@@ -238,16 +238,20 @@ fn process_measurement_unchecked(value: Epistemic) -> i64 {
 
 ### Preserve the Uncertainty Channel
 ```sio
-use epistemic::knowledge::{Epistemic, ep_measured, ep_val, ep_std, ep_scale}
+use epistemic::knowledge::{Epistemic, ep_measured, ep_val, ep_std, ep_scale, ep_new, ep_confidence}
 
 // Good - scaling keeps value and variance together.
 fn calibrate(raw: Epistemic) -> Epistemic {
     ep_scale(&raw, 1.05)
 }
 
-// Also good - rebuild explicitly when the std scales differently.
+// Also good - rebuild explicitly, carrying the original confidence through.
+// ep_measured would force confidence=900 and discard/raise the input's
+// reliability, contradicting "preserve the epistemic channel"; use ep_new
+// (val, variance, confidence) to keep the original confidence.
 fn calibrate_rescaled(raw: Epistemic) -> Epistemic with Mut, Div, Panic {
-    ep_measured(ep_val(&raw) * 1.05, ep_std(&raw) * 1.05)
+    let s = ep_std(&raw) * 1.05
+    ep_new(ep_val(&raw) * 1.05, s * s, ep_confidence(&raw))
 }
 
 // Bad - dropping to a bare f64 discards the uncertainty entirely.
@@ -256,7 +260,7 @@ fn calibrate_lossy(raw: Epistemic) -> f64 {
 }
 ```
 
-Provenance is not a field of `Epistemic`. Provenance bookkeeping lives in `stdlib/epistemic/prov.sio`; shared-source covariance tracking lives in `stdlib/epistemic/affine.sio` (anchor: `tests/run-pass/affine_shared_source_add.sio`).
+Provenance is not a field of `Epistemic`. Provenance bookkeeping lives in `stdlib/epistemic/prov.sio` (private API, not a public tracked-provenance surface); shared-source covariance tracking lives in `stdlib/epistemic/affine.sio` (anchor: `tests/run-pass/affine_shared_source_add.sio`).
 
 ---
 
@@ -324,37 +328,36 @@ fn process() -> Result {
 
 ## Units of Measure
 
-### Always Carry Dimensions Explicitly
+### Prefer Compiler-Checked Native Unit Annotations
+
+```sio
+// Primary path: native unit spellings are checked at COMPILE time, so
+// dimensionally inconsistent arithmetic is rejected before the program runs.
+// tests/run-pass/unit_same_add.sio accepts `mg`; tests/compile-fail/
+// unit_mismatch_add.sio rejects `mg + m`. Derived units are also supported
+// (tests/frontend/unit_derived_velocity_decl_current_source.sio).
+let dose: mg = 500.0
+// let bad = dose + length_m   // ERROR: `mg + m` is a unit mismatch, rejected
+//                              // at compile time (tests/compile-fail/unit_mismatch_add.sio)
+```
+
+### Use `Quantity` for Runtime Dimensions + Uncertainty Together
+
 ```sio
 use units::lib::{quantity_new, quantity_div, dim_mass, dim_time}
 
-// Good - value, uncertainty, and dimension travel together.
-// Unit spellings such as `mg` are implemented and tested
-// (tests/run-pass/unit_same_add.sio). For dimensional arithmetic use
-// stdlib/units/lib::Quantity with dim_*() dimensions.
+// Good - value, dimension, AND uncertainty travel together. Prefer this only
+// when you need the dimension and the uncertainty carried at runtime; the
+// native annotations above are statically checked and are the safer default.
 let dose = quantity_new(0.5, 0.01, dim_mass())
 let interval = quantity_new(2.0, 0.0, dim_time())
-let rate = quantity_div(dose, interval)
+let rate = quantity_div(dose, interval)   // derives the result dimension
 
-// Bad - bare numbers lose both the dimension and the uncertainty
-let dose_raw = 500.0
-let volume_raw = 250.0
-```
-
-### Let the Library Check Dimensions
-```sio
-use units::lib::{quantity_new, quantity_div, quantity_add, dim_length, dim_time}
-
-// Good - quantity_div derives the result dimension
-let distance = quantity_new(100.0, 0.0, dim_length())
-let time = quantity_new(10.0, 0.0, dim_time())
-let velocity = quantity_div(distance, time)
-
-// quantity_add panics when the dimensions differ
+// quantity_add panics at runtime when the dimensions differ
 // let invalid = quantity_add(distance, time)
 ```
 
-Anchor: `examples/units/dimensional_report.sio` and `tests/stdlib/units/test_units_stdlib.sio`. The `unit` keyword spelling exists (e.g. `unit Clearance = L / h`); domain quantities are also `Quantity` values built from `dim_*()` dimensions.
+Anchor: `examples/units/dimensional_report.sio` and `tests/stdlib/units/test_units_stdlib.sio`. The `unit` keyword spelling exists (e.g. `unit Clearance = L / h`); domain quantities are also `Quantity` values built from `dim_*()` dimensions. Native unit spellings such as `mg` are compiler-checked — prefer them for dimensional safety, and reach for `Quantity` only when a value needs runtime dimensions **and** uncertainty together.
 
 ---
 

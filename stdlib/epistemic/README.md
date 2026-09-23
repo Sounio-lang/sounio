@@ -10,7 +10,7 @@ The `epistemic` module provides first-class uncertainty quantification for Souni
 - **Variance**: uncertainty of the value (`variance: f64`, σ²)
 - **Confidence**: reliability of the estimate (`confidence: i64`, 0..1000; `ep_measured` stores 900)
 
-Provenance is not a field of `Epistemic`. Shared-source covariance tracking lives in `stdlib/epistemic/affine.sio` (anchor: `tests/run-pass/affine_shared_source_add.sio`); provenance bookkeeping is in `stdlib/epistemic/prov.sio`.
+Provenance is not a field of `Epistemic`. Shared-source covariance tracking lives in `stdlib/epistemic/affine.sio` (anchor: `tests/run-pass/affine_shared_source_add.sio`); provenance bookkeeping is in `stdlib/epistemic/prov.sio` (private API — not a public tracked-provenance surface).
 
 ## Modules
 
@@ -26,7 +26,8 @@ let volume = ep_measured(10.0, 0.01)
 
 // Arithmetic propagates variance by the GUM delta method (uncorrelated).
 let concentration = ep_div(&dose, &volume)
-// ep_val(&concentration) = 50.0, ep_std(&concentration) = 2.5, confidence = 873 (900 × 97/100 via ep_div)
+// ep_val(&concentration) = 50.0, ep_std(&concentration) ≈ 2.5005 (quotient rule:
+// sqrt(25²/10² + 500²·0.01²/10⁴), not exactly 2.5), confidence = 873 (900 × 97/100 via ep_div)
 
 // Confidence gate: the threshold is an integer on the 0..1000 scale.
 if ep_is_credible(&concentration, 800) {
@@ -88,23 +89,23 @@ let u95 = gum_u95(r)                 // expanded uncertainty at 95%
 
 Anchor: `tests/stdlib/epistemic/test_gum_stdlib.sio`. Also available: `gum_type_b`, `gum_type_b_triangular`, `gum_type_b_expanded`, `gum_with_sensitivity`, `gum_combine3`, `gum_dof`, `gum_k95`, `gum_u99`.
 
-### `active.sio` — Active Inference
+### `active.sio` — Active Inference (NOT currently on the checked surface)
 
-```sio
-use epistemic::knowledge::{ep_measured}
-use epistemic::active::{exploration_priority, ucb_select}
+> **Not runnable / not shippable.** `stdlib/epistemic/active.sio` does not
+> compile cleanly under the committed `bin/souc` (it has parse errors), and no
+> test calls `exploration_priority` or `ucb_select`. The only anchor under this
+> module, `tests/stdlib/epistemic/test_active_stdlib.sio`, pins
+> `precision`, `coefficient_of_variation`, `relative_uncertainty`,
+> `expected_info_gain`, and `prediction_error`. Treat `exploration_priority`,
+> `ucb_select`, `expected_free_energy(current, expected_posterior_var,
+> expected_reward, reward_weight)`, and `update_belief(prior, observation,
+> observation_variance)` as **unavailable** until the module is reconciled and
+> directly tested.
 
-let drug_a = ep_measured(0.65, 0.10)
-let drug_b = ep_measured(0.60, 0.02)
-
-// Index (usize) of the value with the most to learn (highest variance).
-let priority = exploration_priority(&[drug_a, drug_b])
-
-// Upper-confidence-bound selection; returns Option<usize>.
-let chosen = ucb_select(&[drug_a, drug_b], 1.0)
-```
-
-Anchor: `tests/stdlib/epistemic/test_active_stdlib.sio`, which pins `precision`, `coefficient_of_variation`, `relative_uncertainty`, `expected_info_gain`, and `prediction_error`. `exploration_priority`, `ucb_select`, `expected_free_energy(current, expected_posterior_var, expected_reward, reward_weight)`, and `update_belief(prior, observation, observation_variance)` exist in the module but are not exercised by that test.
+> **Selection is not "by variance alone".** `exploration_priority` calls
+> `exploration_score`, which combines variance with a confidence penalty and an
+> importance term, so the returned index need not be the maximum-variance item.
+> Do not document it as a pure highest-variance selector.
 
 ### `meta.sio` — Meta-Analysis (no run-pass anchor)
 
@@ -133,7 +134,7 @@ Fusion/gates: ep_merge, ep_is_credible, ep_gate
 
 ## Units
 
-Unit spellings such as `mg` are implemented and tested (tests/run-pass/unit_same_add.sio). The generic `Knowledge<mg>` / `500.0_mg` legacy epistemic form is not part of the checked `epistemic::knowledge` surface; dimensional values use `stdlib/units/lib.sio` (`Quantity`, `quantity_new`, `dim_mass()`, `dim_time()`, `quantity_div`); see `examples/units/dimensional_report.sio`.
+Unit spellings such as `mg` are implemented and tested (tests/run-pass/unit_same_add.sio), and native unit annotations are compiler-checked: `tests/run-pass/unit_same_add.sio` accepts `mg`, while `tests/compile-fail/unit_mismatch_add.sio` rejects `mg + m` at compile time. The generic `Knowledge<mg>` / `500.0_mg` legacy epistemic form is not part of the checked `epistemic::knowledge` surface. Prefer the compiler-checked native annotations for dimensional safety; reach for `stdlib/units/lib.sio` (`Quantity`, `quantity_new`, `dim_mass()`, `dim_time()`, `quantity_div`) only for values that need runtime dimensions **and** uncertainty carried together — see `examples/units/dimensional_report.sio`.
 
 ## Design Principles
 
