@@ -17,9 +17,11 @@ Common questions about Sounio and epistemic computing.
 > covariance-aware GUM), anchored by
 > `tests/stdlib/epistemic/test_knowledge_madaros_import_e2e.sio` and
 > `tests/run-pass/ep_gum_covariance.sio`. The legacy
-> `epistemic::lib` surface (`epistemic_std`, `add_epistemic`,
-> `mul_epistemic`, `fuse_measurements`) is not exercised by `tests/run-pass/`
-> and is not part of the checked artifact. `with_confidence` operators and
+> `epistemic::lib` surface (`epistemic_std`, `add_epistemic`, `mul_epistemic`,
+> `fuse_measurements`) is exercised by
+> `tests/stdlib/epistemic/test_core_e2e.sio` (a `//@ run-pass` test collected by
+> `scripts/dev/run_sio_test_suite.sh`) but is a legacy surface separate from the
+> canonical `epistemic::knowledge` API. `with_confidence` operators and
 > units-as-type-parameters are aspirational in source and absent from the
 > checked public surface — see `docs/compiler/KNOWN_LIMITATIONS.md`.
 
@@ -135,11 +137,7 @@ surfaces.
 
 ### What is "epistemic computing"?
 
-Computing that explicitly represents **what we know** and **how well we know it**. Every value carries:
-- The value itself
-- Uncertainty (measurement error)
-- Confidence level (statistical confidence)
-- Provenance (where it came from)
+Computing that explicitly represents **what we know** and **how well we know it**. The shipped `Epistemic` value carries a point estimate, its variance, and an integer confidence score (see the Epistemic Types section). The broader paradigm also tracks provenance (where data came from); the current `Epistemic` struct does not expose a provenance field — `stdlib/epistemic/prov.sio` is a separate, private model (no `pub` symbols).
 
 ### Do I have to use Epistemic everywhere?
 

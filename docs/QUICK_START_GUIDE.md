@@ -15,9 +15,11 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.quick-start-gu
 > covariance-aware GUM), anchored by
 > `tests/stdlib/epistemic/test_knowledge_madaros_import_e2e.sio` and
 > `tests/run-pass/ep_gum_covariance.sio`. The legacy
-> `epistemic::lib` surface (`epistemic_std`, `add_epistemic`,
-> `mul_epistemic`, `fuse_measurements`) is not exercised by `tests/run-pass/`
-> and is not part of the checked artifact. `with_confidence` operators and
+> `epistemic::lib` surface (`epistemic_std`, `add_epistemic`, `mul_epistemic`,
+> `fuse_measurements`) is exercised by
+> `tests/stdlib/epistemic/test_core_e2e.sio` (a `//@ run-pass` test collected by
+> `scripts/dev/run_sio_test_suite.sh`) but is a legacy surface separate from the
+> canonical `epistemic::knowledge` API. `with_confidence` operators and
 > units-as-type-parameters are aspirational in source and absent from the
 > checked public surface — see `docs/compiler/KNOWN_LIMITATIONS.md`.
 
@@ -159,8 +161,9 @@ fn analyze_experiment(measurements: [Epistemic; 8]) -> Epistemic with IO, Div, P
 > Note: `fuse_measurements` (legacy `stdlib/epistemic/lib.sio`) becomes
 > `ep_merge` (canonical `knowledge.sio`); `Epistemic<f64>` is replaced by the
 > non-generic `Epistemic` from `knowledge.sio` (struct fields `val`, `variance`,
-> `confidence`). `len()` is not in the checked stdlib surface — use a fixed
-> length in this illustrative snippet, or `.size()` on a vector.
+> `confidence`). `len()` is not a free stdlib function, but arrays and vectors
+> expose a checked `.len()` method; this illustrative snippet instead uses a
+> fixed-length `[Epistemic; 8]` array with an explicit `1..8` loop for clarity.
 
 ### Next Steps
 
@@ -168,7 +171,7 @@ fn analyze_experiment(measurements: [Epistemic; 8]) -> Epistemic with IO, Div, P
 ```bash
 cd examples/epistemic
 ../../bin/souc run core_demo.sio
-# Note: core_demo.sio uses the legacy stdlib::epistemic::lib surface
+# Note: core_demo.sio uses the legacy epistemic::lib surface
 # (epistemic_std, add_epistemic); for canonical patterns see
 # ../units/dimensional_report.sio and tests/run-pass/ep_gum_covariance.sio.
 ```
