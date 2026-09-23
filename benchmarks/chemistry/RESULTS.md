@@ -280,6 +280,23 @@ on both sides, Sounio, the Python replica and Cantera agree to
 **8.9e-13 … 1.2e-11** — at the floor set by CVODE's own `rtol = 1e-12`, and
 about five orders of magnitude better than the figure the README publishes.
 
+> **Corrected 2026-09-23, a reviewer finding.** This table is an isolated
+> substitution — `R_cal` alone, changed inside `examples/chemistry/h2_probe2.sio`
+> and re-run, historically, before the molar-volume alignment of #2382 landed
+> in the committed tree. It is **not** the same measurement as section 7.7's
+> "total residual" (2.074e-11, H2O), which comes from `rep_tolerance.py` /
+> `rep_resolution.py --dir <aligned tree>` against the fully-committed,
+> both-constants-aligned code — a different producer, a different commit
+> state, months apart in this document's own history. The two numbers were
+> presented as though comparable; they are each real, but they are not the
+> same experiment, and their ~2x difference (9.28e-12 here vs 2.074e-11 there,
+> both nominally "H2O, aligned") is not a discrepancy needing resolution — it
+> is consistent with, and additional evidence for, section 7.7's own finding
+> that the oracle's floor at this scale varies by up to 11x under
+> perturbations of one part per million. Presenting one number as "the"
+> aligned residual without naming which producer measured it, as this section
+> did, is exactly the defect section 6 catalogues.
+
 This is the same root cause as the 1.843e-11 Kc floor in section 3.1 (there it
 was `R_SI = 8.314462618` against Cantera's `8.31446261815324`). Two independent
 truncated gas constants, two residual floors, both fully accounted for.
@@ -1793,7 +1810,7 @@ a residual measured against that setting is agreement or noise.
 python3 benchmarks/chemistry/rep_resolution.py
 ```
 
-Ten species, a fresh `gas` object per run, t = 1e-4 s:
+Eight species (the H/O checkpoint set), a fresh `gas` object per run, t = 1e-4 s:
 
 | comparison | worst rel | on |
 |---|---|---|
@@ -1803,6 +1820,21 @@ Ten species, a fresh `gas` object per run, t = 1e-4 s:
 
 **The oracle's own answer at `rtol=1e-12` is uncertain at the 1.473e-11
 level.**
+
+> **Corrected 2026-09-23, a reviewer finding.** This section previously said
+> "ten species" -- wrong, checked against the producer: `rep_resolution.py`'s
+> own `REPORT` list is eight species (H2, H, O, O2, OH, H2O, HO2, H2O2), the
+> H/O checkpoint set used throughout this document. There is no ten-species
+> run anywhere in this section. Separately: this 1.473e-11 figure and the
+> 1.416e-11 floor quoted below in the dt-bisection are **two independent
+> invocations** of the same script, not the same measurement re-quoted -- this
+> run is a bare `rep_resolution.py` call at the current working state, the
+> other is `rep_resolution.py --dir <aligned tree>` inside the bisection. They
+> differ by 4%, which is not a discrepancy to resolve; it **is** the finding
+> this document states explicitly two sections on ("the floor is not even a
+> number... ranges over [3.730e-12, 4.142e-11]... with no monotone trend").
+> Quoting either alone as *the* oracle floor, without the other or the spread,
+> is the error a reviewer correctly caught.
 
 ### The consequence, stated against this document's own headline
 

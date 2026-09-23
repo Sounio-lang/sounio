@@ -512,6 +512,20 @@ both fully accounted for.
 > eight figures are *below* the oracle's own measured floor (§4.5) and are
 > therefore unresolvable. They are reported as measured.
 
+> **[W] Corrected 2026-09-23, a reviewer finding.** Table 5 is an isolated
+> substitution — `R_cal` alone, changed inside a reconstructed probe and
+> re-run, historically, before the molar-volume alignment landed in the
+> committed tree. It is **not** the same measurement as §4.5/Table 8's "total
+> residual" (2.074 × 10⁻¹¹, H2O), which comes from a later run against the
+> fully-committed, both-constants-aligned code — a different producer, a
+> different commit state. Both numbers are real; they are not the same
+> experiment, and their difference (9.28 × 10⁻¹² here vs 2.074 × 10⁻¹¹ there,
+> both nominally "H2O, aligned") is not a discrepancy to resolve — it is
+> consistent with, and additional evidence for, §4.5's own finding that the
+> oracle's floor at this scale varies by up to 11× under perturbations of one
+> part per million. Citing either number alone as *the* aligned residual,
+> without naming its producer, is the defect §6 catalogues.
+
 ### 4.3 It is not the integrator — falsified at the operating step
 
 The natural alternative explanation is fixed-step RK4 versus CVODE. It is
@@ -589,10 +603,20 @@ published figure to all 16 digits.
 CVODE's own `rtol = 10⁻¹²`". That framing is retired here. The floor was never
 measured; it is not a property of the tolerance alone.
 
-Measured, ten species, fresh `gas` object per run (`rep_resolution.py`): Cantera
-at `rtol = 10⁻¹²` against `10⁻¹³` differs by **1.473 × 10⁻¹¹** (H2O);
-`10⁻¹³` against `10⁻¹⁴` by 5.839 × 10⁻¹²; `10⁻¹²` against `10⁻¹⁴` by
-2.057 × 10⁻¹¹.
+Measured, eight species (the H/O checkpoint set), fresh `gas` object per run
+(`rep_resolution.py`): Cantera at `rtol = 10⁻¹²` against `10⁻¹³` differs by
+**1.473 × 10⁻¹¹** (H2O); `10⁻¹³` against `10⁻¹⁴` by 5.839 × 10⁻¹²;
+`10⁻¹²` against `10⁻¹⁴` by 2.057 × 10⁻¹¹.
+
+> **[W] Corrected 2026-09-23.** This paragraph previously said "ten species" —
+> wrong, checked against the producer: `rep_resolution.py`'s own species list
+> is the eight-member H/O checkpoint set. Separately, this 1.473 × 10⁻¹¹
+> figure and the 1.416 × 10⁻¹¹ floor in §4.5's own decomposition table below
+> are **two independent invocations** of the same script — this one a bare
+> call at the working state, the other `--dir <aligned tree>` inside the
+> dt-bisection — not the same measurement re-quoted. They differ by 4%, which
+> is not a discrepancy: it is the next paragraph's finding, restated a section
+> early.
 
 And the floor is not even a number. Perturbing the initial density by
 δ ∈ [−10⁻⁶, +10⁻⁶] over ten states, fresh `gas` each (`rep_floor_spread.py`),
