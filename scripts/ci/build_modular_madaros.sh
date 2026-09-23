@@ -24,6 +24,12 @@
 #                                no extra lean_single derivation.
 #   SOUNIO_STDLIB_PATH         — forwarded to the seed compiler
 #   SOUNIO_BUILD_LOCK          — override the global build lock path
+#   SOUNIO_MADAROS_SEED_ELF_OUT — if set, copy the resolved/derived seed ELF here
+#                                 once it is ready (before the main.sio build).
+#                                 Lets a caller (e.g. scripts/ci/ensure_madaros_build.sh)
+#                                 record the seed's identity without duplicating the
+#                                 derivation logic above. Unset by default: zero
+#                                 behavior change for existing callers.
 
 set -euo pipefail
 
@@ -141,6 +147,12 @@ else
         exit 1
     fi
     chmod +x "$SEED"
+fi
+
+if [[ -n "${SOUNIO_MADAROS_SEED_ELF_OUT:-}" ]]; then
+    cp "$SEED" "$SOUNIO_MADAROS_SEED_ELF_OUT"
+    chmod +x "$SOUNIO_MADAROS_SEED_ELF_OUT"
+    echo "→ copied seed ELF to SOUNIO_MADAROS_SEED_ELF_OUT=$SOUNIO_MADAROS_SEED_ELF_OUT"
 fi
 
 echo "Building Madaros (modular compiler):"
