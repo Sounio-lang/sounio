@@ -10,7 +10,7 @@ The `epistemic` module provides first-class uncertainty quantification for Souni
 - **Variance**: uncertainty of the value (`variance: f64`, σ²)
 - **Confidence**: reliability of the estimate (`confidence: i64`, 0..1000; `ep_measured` stores 900)
 
-Provenance is not a field of `Epistemic`. Source tracking lives in `stdlib/epistemic/provenance.sio` and `stdlib/epistemic/affine` (anchor: `tests/run-pass/affine_shared_source_add.sio`).
+Provenance is not a field of `Epistemic`. Shared-source covariance tracking lives in `stdlib/epistemic/affine.sio` (anchor: `tests/run-pass/affine_shared_source_add.sio`); provenance bookkeeping is in `stdlib/epistemic/prov.sio`.
 
 ## Modules
 
@@ -26,10 +26,10 @@ let volume = ep_measured(10.0, 0.01)
 
 // Arithmetic propagates variance by the GUM delta method (uncorrelated).
 let concentration = ep_div(&dose, &volume)
-// ep_val(&concentration) = 50.0, ep_std(&concentration) = 2.5
+// ep_val(&concentration) = 50.0, ep_std(&concentration) = 2.5, confidence = 873 (900 × 97/100 via ep_div)
 
 // Confidence gate: the threshold is an integer on the 0..1000 scale.
-if ep_is_credible(&concentration, 900) {
+if ep_is_credible(&concentration, 800) {
     // proceed
 }
 ```
@@ -97,14 +97,14 @@ use epistemic::active::{exploration_priority, ucb_select}
 let drug_a = ep_measured(0.65, 0.10)
 let drug_b = ep_measured(0.60, 0.02)
 
-// Index of the value with the most to learn (highest variance).
+// Index (usize) of the value with the most to learn (highest variance).
 let priority = exploration_priority(&[drug_a, drug_b])
 
 // Upper-confidence-bound selection; returns Option<usize>.
 let chosen = ucb_select(&[drug_a, drug_b], 1.0)
 ```
 
-Anchor: `tests/stdlib/epistemic/test_active_stdlib.sio`, which pins `precision`, `coefficient_of_variation`, `relative_uncertainty`, `expected_info_gain`, and `prediction_error`. `expected_free_energy(current, expected_posterior_var, expected_reward, reward_weight)` and `update_belief(prior, observation, observation_variance)` exist in the module but are not exercised by that test.
+Anchor: `tests/stdlib/epistemic/test_active_stdlib.sio`, which pins `precision`, `coefficient_of_variation`, `relative_uncertainty`, `expected_info_gain`, and `prediction_error`. `exploration_priority`, `ucb_select`, `expected_free_energy(current, expected_posterior_var, expected_reward, reward_weight)`, and `update_belief(prior, observation, observation_variance)` exist in the module but are not exercised by that test.
 
 ### `meta.sio` — Meta-Analysis (no run-pass anchor)
 
@@ -133,14 +133,14 @@ Fusion/gates: ep_merge, ep_is_credible, ep_gate
 
 ## Units
 
-Units-as-type-parameters (`Knowledge<mg>`, `500.0_mg`) are not on the checked surface. Dimensional values use `stdlib/units/lib.sio` (`Quantity`, `quantity_new`, `dim_mass()`, `dim_time()`, `quantity_div`); see `examples/units/dimensional_report.sio`.
+Unit spellings such as `mg` are implemented and tested (tests/run-pass/unit_same_add.sio). The generic `Knowledge<mg>` / `500.0_mg` legacy epistemic form is not part of the checked `epistemic::knowledge` surface; dimensional values use `stdlib/units/lib.sio` (`Quantity`, `quantity_new`, `dim_mass()`, `dim_time()`, `quantity_div`); see `examples/units/dimensional_report.sio`.
 
 ## Design Principles
 
 1. **Variance over error bars**: σ² is stored because variance is additive.
 2. **Confidence is an integer 0..1000** on the checked `Epistemic` surface, not a distribution.
-3. **Provenance is tracked separately** (`provenance.sio`, `affine`), not as a field of `Epistemic`.
-4. **Confidence only degrades**: `ep_add` and friends keep the minimum of the inputs' confidence.
+3. **Provenance is tracked separately** (`stdlib/epistemic/prov.sio`, `stdlib/epistemic/affine.sio`), not as a field of `Epistemic`.
+4. **Confidence decays on arithmetic**: `ep_add`/`ep_sub` keep `min × 99/100`, `ep_mul` `× 98/100`, `ep_div` `× 97/100` (integer math); `ep_scale`/`ep_shift` preserve it. `ep_merge` averages the two inputs (`(a + b)/2`), so it can raise confidence relative to the lower input.
 
 ## References
 

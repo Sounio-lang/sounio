@@ -56,15 +56,17 @@ Anchor: `tests/stdlib/epistemic/test_knowledge_madaros_import_e2e.sio`.
 ```sio
 use epistemic::knowledge::{ep_measured, ep_certain, ep_add, ep_confidence}
 
-pub fn main() {
+pub fn main() with Panic {
     // ep_certain stores confidence 1000; ep_measured stores 900.
     let exact = ep_certain(10.0)
     let noisy = ep_measured(2.0, 0.05)
 
-    // Combination keeps the lower confidence — it never increases.
+    // Combination applies operation-specific decay to the lower input
+    // confidence: ep_add/ep_sub multiply by 99/100, ep_mul by 98/100,
+    // ep_div by 97/100. It never increases.
     let result = ep_add(&exact, &noisy)
     assert(ep_confidence(&result) <= ep_confidence(&exact))
-    assert(ep_confidence(&result) == 900)
+    assert(ep_confidence(&result) == 891)
 }
 ```
 
@@ -85,7 +87,7 @@ pub fn main() with Mut, Div, Panic {
 }
 ```
 
-`Epistemic` has no `provenance` field. Source tracking lives in `stdlib/epistemic/provenance.sio` and `stdlib/epistemic/affine` (anchor: `tests/run-pass/affine_shared_source_add.sio`).
+`Epistemic` has no `provenance` field. Shared-source covariance tracking lives in `stdlib/epistemic/affine.sio` (anchor: `tests/run-pass/affine_shared_source_add.sio`). Provenance bookkeeping is in `stdlib/epistemic/prov.sio`.
 
 ---
 

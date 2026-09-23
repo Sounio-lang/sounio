@@ -121,6 +121,7 @@ fn CalculateDoseAdjustment() { }
 
 ```sio
 // Good
+use epistemic::knowledge::{Epistemic}
 struct PatientData { }
 enum ResultStatus { }
 struct Concentration { value: Epistemic }
@@ -211,7 +212,8 @@ use epistemic::knowledge::{ep_measured}
 
 // Good - explicit uncertainty (val, std_dev). Variance is stored as
 // std_dev^2 and confidence defaults to 900/1000. Provenance is not a
-// field of Epistemic; it lives in stdlib/epistemic/provenance.sio.
+// field of Epistemic; provenance bookkeeping lives in stdlib/epistemic/prov.sio
+// and covariance tracking in stdlib/epistemic/affine.sio.
 let measurement = ep_measured(42.0, 0.5)
 
 // Bad - raw value loses uncertainty
@@ -254,7 +256,7 @@ fn calibrate_lossy(raw: Epistemic) -> f64 {
 }
 ```
 
-Provenance is not a field of `Epistemic`. Record the source of a value in `stdlib/epistemic/provenance.sio`; source-tracked ownership lives in `stdlib/epistemic/affine` (anchor: `tests/run-pass/affine_shared_source_add.sio`).
+Provenance is not a field of `Epistemic`. Provenance bookkeeping lives in `stdlib/epistemic/prov.sio`; shared-source covariance tracking lives in `stdlib/epistemic/affine.sio` (anchor: `tests/run-pass/affine_shared_source_add.sio`).
 
 ---
 
@@ -327,8 +329,9 @@ fn process() -> Result {
 use units::lib::{quantity_new, quantity_div, dim_mass, dim_time}
 
 // Good - value, uncertainty, and dimension travel together.
-// Units-as-type-parameters (let dose: mg = ...) are not on the checked
-// surface; see docs/compiler/KNOWN_LIMITATIONS.md.
+// Unit spellings such as `mg` are implemented and tested
+// (tests/run-pass/unit_same_add.sio). For dimensional arithmetic use
+// stdlib/units/lib::Quantity with dim_*() dimensions.
 let dose = quantity_new(0.5, 0.01, dim_mass())
 let interval = quantity_new(2.0, 0.0, dim_time())
 let rate = quantity_div(dose, interval)
@@ -351,7 +354,7 @@ let velocity = quantity_div(distance, time)
 // let invalid = quantity_add(distance, time)
 ```
 
-Anchor: `examples/units/dimensional_report.sio` and `tests/stdlib/units/test_units_stdlib.sio`. There is no `type Clearance = L/h` spelling; domain quantities are `Quantity` values built from `dim_*()` dimensions.
+Anchor: `examples/units/dimensional_report.sio` and `tests/stdlib/units/test_units_stdlib.sio`. The `unit` keyword spelling exists (e.g. `unit Clearance = L / h`); domain quantities are also `Quantity` values built from `dim_*()` dimensions.
 
 ---
 
@@ -385,10 +388,9 @@ use epistemic::knowledge::{Epistemic, ep_div}
 /// # Returns
 /// Predicted concentration with propagated uncertainty.
 /// Units travel separately as stdlib/units/lib.sio Quantity values;
-/// units-as-type-parameters are not on the checked surface.
+/// unit spellings such as `mg` are implemented and tested.
 fn predict_concentration(
     dose: Epistemic,
-    clearance: Epistemic,
     volume: Epistemic,
 ) -> Epistemic with Div, Panic {
     ep_div(&dose, &volume)

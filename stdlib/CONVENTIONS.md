@@ -61,7 +61,7 @@ pub fn compute_mean(data: &[Epistemic]) -> Epistemic
 
 - **Todo resultado numérico**: Retornar `Epistemic` (`stdlib/epistemic/knowledge.sio`) ou `GUMResult` ([`gum.sio`](epistemic/gum.sio)).
 - **Propagação**: Incerteza propaga pelas funções livres `ep_add`, `ep_sub`, `ep_mul`, `ep_div` (método GUM delta, entradas não correlacionadas). Não há sobrecarga de `+`/`*` para `Epistemic` na superfície checada.
-- **Confidence**: `i64` na escala 0..1000. Combinações preservam o mínimo das confidences de entrada — nunca aumenta.
+- **Confidence**: `i64` na escala 0..1000. Combinações aplicam decaimento operação-específico à menor confidence de entrada: `ep_add`/`ep_sub` multiplicam por 99/100, `ep_mul` por 98/100, `ep_div` por 97/100 (nunca aumenta). `ep_scale`/`ep_shift` preservam; `ep_merge` faz a média das duas confidences (`(a + b)/2`).
 
 Exemplo mínimo em todo `pub fn` numérico:
 
@@ -84,7 +84,7 @@ Exemplo de test inline:
 ```sio
 use epistemic::knowledge::{ep_certain, ep_val, ep_confidence}
 
-fn test_compute_mean() {
+fn test_compute_mean() with Panic {
     let data = [ep_certain(1.0), ep_certain(3.0)]
     let mean = compute_mean(&data)
     assert(ep_val(&mean) == 2.0)

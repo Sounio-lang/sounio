@@ -269,8 +269,9 @@ let height = ep_measured(1.75, 0.01)
 // u_rel(BMI)^2 = u_rel(mass)^2 + 4*u_rel(height)^2, via the GUM delta method
 let bmi = ep_div(&mass, &ep_square(&height))
 
-// ep_confidence(&bmi) = min(ep_confidence(&mass), ep_confidence(&height))
-// confidence cannot increase through propagation
+// ep_confidence(&bmi) = min(ep_confidence(&mass), ep_confidence(&ep_square(&height))) * 97/100
+// = min(900, 882) * 97/100 = 855  (ep_square drops height 900→882; ep_div drops that →855)
+// confidence never increases, but decay arithmetic multiplies — it does not simply keep the minimum
 ```
 
 ### Interval Enclosure (intended, not shipped)
