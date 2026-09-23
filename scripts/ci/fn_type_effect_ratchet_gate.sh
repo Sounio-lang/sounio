@@ -238,7 +238,29 @@ strip_noise() {
 # broke ordinary direct return-type chains outright. Checked first and
 # unconditionally: a ">" preceded by "-" is never a closer and never a
 # terminator, regardless of depth or stack state.
+#
+# Copilot follow-up (#2570): every anchor and every recursive "fn(" search
+# required NO whitespace between "fn" and "(" -- a hardcoded 3-character
+# span, baked into fn_pos arithmetic in several places. self-hosted/parser/
+# types.sio's own lexer skips whitespace before parse_fn_type expects "(",
+# so `f: fn (i64) -> i64` is equally valid source and was invisible to every
+# one of those checks. skip_ws replaces the fixed "+2" offsets with an
+# actual scan past any whitespace/newlines between "fn" and "(", and the
+# "fn[ \t\n]*\(" regexes used for nested-type discovery (count_fn_parens,
+# scan_entry_for_fn_types) tolerate the same gap. The TOP-LEVEL anchor
+# could not just widen its own regex the same way, because it used to
+# compute fn_pos by subtracting a fixed 3 from the match's end
+# (`mstart + mlen - 3`) -- correct only when the match is exactly ":fn("
+# with no extra characters. Replaced with an explicit scan instead: find
+# each ":", skip whitespace, check for "fn", skip whitespace again, check
+# for "(" -- using match()''s own RSTART/RLENGTH only to locate candidate
+# colons quickly, never to back-compute a fixed-width span.
 AWK_SCAN='
+function skip_ws(line, p,    n) {
+    n = length(line)
+    while (p <= n && substr(line, p, 1) ~ /[ \t\n]/) { p++ }
+    return p
+}
 function step_open_or_other_close(c, prevc, depth, stack, pred) {
     if (c == "(" || c == "[" || c == "{") {
         depth++
@@ -321,7 +343,7 @@ function scan_tail(line, tail_start,    i, n, c, prevc, depth, stack, pred, r) {
 }
 function count_fn_parens(str,    tmp) {
     tmp = " " str
-    return gsub(/[^A-Za-z0-9_]fn\(/, "@", tmp)
+    return gsub(/[^A-Za-z0-9_]fn[ \t\n]*\(/, "@", tmp)
 }
 function count_with_clauses(str,    tmp) {
     tmp = " " str
@@ -336,11 +358,17 @@ function count_with_clauses(str,    tmp) {
 # generic (`Vec<fn() -> i64>`) wrapping a fn-type parameter. Scans the WHOLE
 # entry text for "fn(" at ANY position (word-bounded -- not part of a longer
 # identifier) instead of only its first token, recursing into
-# classify_fn_type_at at each one found.
+# classify_fn_type_at at each one found. Copilot follow-up (#2570): "fn(" was
+# a fixed 3-character literal, requiring no whitespace between "fn" and "(" --
+# self-hosted/parser/types.sio own lexer skips whitespace before
+# parse_fn_type expects "(", so `fn (i64)` is equally valid; tolerated here
+# too (RSTART still correctly locates "f" of "fn" regardless of how much
+# whitespace the match consumes afterward, so no other arithmetic here needs
+# to change).
 function scan_entry_for_fn_types(line, entry_start, entry_end, at_eof,    seg, pos_in_seg, abs_match_start, prevc, mstart, mlen) {
     seg = substr(line, entry_start, entry_end - entry_start)
     pos_in_seg = 1
-    while (pos_in_seg <= length(seg) && match(substr(seg, pos_in_seg), /fn\(/)) {
+    while (pos_in_seg <= length(seg) && match(substr(seg, pos_in_seg), /fn[ \t\n]*\(/)) {
         # RSTART/RLENGTH are awk globals set by match() -- save them before
         # the recursive classify_fn_type_at call below runs its own match()
         # calls internally and overwrites them out from under this loop
@@ -355,8 +383,8 @@ function scan_entry_for_fn_types(line, entry_start, entry_end, at_eof,    seg, p
         pos_in_seg = pos_in_seg + (mstart - 1) + mlen
     }
 }
-function classify_fn_type_at(line, fn_pos, at_eof,    open_pos, close_pos, after, hit, hit_tail, fn_layers, with_n, bare_layers, k, tail_start, tail_end, entry_start, i, n, c, prevc, depth, stack, pred, r) {
-    open_pos = fn_pos + 2
+function classify_fn_type_at(line, fn_pos, at_eof,    open_pos, close_pos, after, rest, hit, hit_tail, fn_layers, with_n, bare_layers, k, tail_start, tail_end, entry_start, i, n, c, prevc, depth, stack, pred, r) {
+    open_pos = skip_ws(line, fn_pos + 2)
     close_pos = match_close_paren(line, open_pos)
     # Copilot follow-up (#2570): a genuine `n + 1` from match_close_paren
     # (see its own comment) means "ran off the end of the searchable text
@@ -370,7 +398,8 @@ function classify_fn_type_at(line, fn_pos, at_eof,    open_pos, close_pos, after
     # below), so `n + 1` here really is the honest last word.
     if (!at_eof && close_pos > length(line)) { return -1 }
     after = close_pos + 1
-    if (match(substr(line, after), /^[ \t\n]*->/)) {
+    rest = substr(line, after)
+    if (match(rest, /^[ \t\n]*->/)) {
         tail_start = after + RLENGTH
         tail_end = scan_tail(line, tail_start)
         # Copilot follow-up (#2570): deliberately NOT deferring here the way
@@ -412,6 +441,19 @@ function classify_fn_type_at(line, fn_pos, at_eof,    open_pos, close_pos, after
         # once per match.
         bare_layers = fn_layers - with_n
         for (k = 0; k < bare_layers; k++) { print hit }
+    } else if (!at_eof && match(rest, /^[ \t\n]*$/)) {
+        # Copilot follow-up (#2570): a valid bare type formatted with the
+        # arrow on its OWN line (`f: fn()\n -> i64`) closed its parameter
+        # list within bounds (the close_pos check above passed), but nothing
+        # follows the close paren in what has been read SO FAR except
+        # whitespace/newlines -- genuinely inconclusive, not "no arrow",
+        # since an arrow could still be the very next non-whitespace token
+        # once a further line is read. Only when `rest` is ENTIRELY
+        # whitespace is this ambiguous; any other non-arrow content
+        # immediately following (a comma, a closing paren, "= unsafe {") is
+        # conclusive -- see the case above this one for why those must NOT
+        # defer.
+        return -1
     } else {
         tail_end = close_pos + 1
     }
@@ -479,13 +521,28 @@ function classify_fn_type_at(line, fn_pos, at_eof,    open_pos, close_pos, after
     } else {
         pos = 1
     }
-    while (pos <= length(line) && match(substr(line, pos), /:[ \t\n]*fn\(/)) {
-        mstart = pos + RSTART - 1
-        mlen = RLENGTH
-        fn_pos = mstart + mlen - 3
-        result = classify_fn_type_at(line, fn_pos, 0)
-        if (result == -1) { pending = substr(line, fn_pos); next }
-        pos = result
+    # Copilot follow-up (#2570): used to match ":[ \t\n]*fn\(" as one regex
+    # and compute fn_pos by subtracting a fixed 3 from the match end
+    # (mstart + mlen - 3) -- correct only when the match is exactly ":fn("
+    # with no extra characters, which broke the moment "fn" and "(" could
+    # have whitespace between them (see skip_ws above). Finds each ":" via
+    # match() (fast, still lets the awk regex engine do the coarse search),
+    # then does the fine-grained "is this really followed by fn(" check with
+    # explicit skip_ws-based position arithmetic instead of trying to fold
+    # it all into one regex match length.
+    while (pos <= length(line) && match(substr(line, pos), /:/)) {
+        colon_pos = pos + RSTART - 1
+        p = skip_ws(line, colon_pos + 1)
+        if (substr(line, p, 2) == "fn") {
+            p2 = skip_ws(line, p + 2)
+            if (substr(line, p2, 1) == "(") {
+                result = classify_fn_type_at(line, p, 0)
+                if (result == -1) { pending = substr(line, p); next }
+                pos = result
+                continue
+            }
+        }
+        pos = colon_pos + 1
     }
 }
 END {
@@ -797,6 +854,50 @@ selftest() {
   if [ "$n18" = "2" ]; then
     echo "  ok   POSITIVO 18: tipo-funcao aninhado em generico (wrapper) produz 2 hits"
   else echo "  FALHA POSITIVO 18: esperava 2 hits (externo + aninhado em generico), obteve $n18"; rc=1; fi
+  # POSITIVE control 19 (#2570): the arrow on its own line, AFTER the
+  # parameter list's closing paren (`f: fn()` on one physical line, `-> i64`
+  # on the next). The multiline fix two commits ago only deferred on
+  # close_pos (the parameter list itself spanning lines); once close_pos
+  # resolved within bounds, the arrow-check ran immediately against
+  # whatever came right after on the SAME accumulated buffer, and if
+  # nothing but trailing whitespace was there yet, concluded "no arrow" --
+  # arrow-less, out of scope -- instead of "not yet known, might still be on
+  # a line not read yet". A genuinely bare type formatted this way bypassed
+  # the ratchet.
+  printf 'fn use_it(f: fn()\n -> i64) -> f64 { 0.0 }\n' > "$tmp/pos19.sio"
+  if bare_hits_of "$tmp/pos19.sio" | grep -q .; then
+    echo "  ok   POSITIVO 19: seta em linha propria apos o fecha-parenteses e nu"
+  else echo "  FALHA POSITIVO 19: seta em linha propria nao detectada como nu"; rc=1; fi
+  # NEGATIVE control 19 (#2570): companion -- same split, but the type
+  # carries its own effects, also split across the arrow-and-after line.
+  printf 'fn use_it(f: fn()\n -> i64 with IO) -> f64 { 0.0 }\n' > "$tmp/neg19.sio"
+  if bare_hits_of "$tmp/neg19.sio" | grep -q .; then
+    echo "  FALHA NEGATIVO 19: seta em linha propria com efeito proprio contada como nu"; rc=1
+  else echo "  ok   NEGATIVO 19: seta em linha propria com efeito proprio nao conta como nu"; fi
+  # POSITIVE control 20 (#2570): whitespace between "fn" and "(" itself
+  # (`f: fn (i64) -> i64`). self-hosted/parser/types.sio's own lexer skips
+  # whitespace before parse_fn_type expects "(", so this is equally valid
+  # source; every "fn(" search in this scanner previously required the two
+  # characters adjacent with nothing between them.
+  printf 'fn use_it(f: fn (i64) -> i64) -> f64 { 0.0 }\n' > "$tmp/pos20.sio"
+  if bare_hits_of "$tmp/pos20.sio" | grep -q .; then
+    echo "  ok   POSITIVO 20: espaco entre fn e ( e nu"
+  else echo "  FALHA POSITIVO 20: espaco entre fn e ( nao detectado como nu"; rc=1; fi
+  # NEGATIVE control 20 (#2570): companion -- same spacing, with effects.
+  printf 'fn use_it(f: fn (i64) -> i64 with IO) -> f64 { 0.0 }\n' > "$tmp/neg20.sio"
+  if bare_hits_of "$tmp/neg20.sio" | grep -q .; then
+    echo "  FALHA NEGATIVO 20: espaco entre fn e ( com efeito proprio contado como nu"; rc=1
+  else echo "  ok   NEGATIVO 20: espaco entre fn e ( com efeito proprio nao conta como nu"; fi
+  # POSITIVE control 21 (#2570): a nested fn-type parameter (per POSITIVO 16)
+  # where the NESTED "fn" ALSO has whitespace before its own "(" -- pins
+  # that scan_entry_for_fn_types' widened search composes correctly with
+  # the wrapped-type recursion from two commits ago, not just the top-level
+  # anchor.
+  printf 'fn use_it(f: fn((fn () -> i64, i64)) -> i64) -> f64 { 0.0 }\n' > "$tmp/pos21.sio"
+  n21=$(bare_hits_of "$tmp/pos21.sio" | wc -l | tr -d ' ')
+  if [ "$n21" = "2" ]; then
+    echo "  ok   POSITIVO 21: fn aninhado com espaco antes do ( produz 2 hits"
+  else echo "  FALHA POSITIVO 21: esperava 2 hits, obteve $n21"; rc=1; fi
   rm -rf "$tmp"
   echo "falhas: $rc"
   return $rc
