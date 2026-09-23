@@ -14084,6 +14084,18 @@ impl Lowerer {
                     return false
                 }
                 if (*base_expr).kind == ExprKind::ExprFieldAccess {
+                    // In-place `t.K[i]` / `f().K[i]`, no intervening `let` to carry
+                    // the array-elem-float bind: check the tuple-array-slot table
+                    // (#2570 review follow-up) BEFORE the struct-field classifier
+                    // below, which knows named struct fields, not numeric tuple
+                    // indices, and would answer this "no" for either base kind by
+                    // falling through to field_array_elem_is_float_by_name_simple
+                    // on a field literally named "0" -- not a struct-field bypass
+                    // (that always fails safe, closed), but a table-consultation
+                    // bypass that reads the array's f64 bits as an integer instead.
+                    if self.expr_is_tuple_slot_f64_array_ref(&(*base_expr)) {
+                        return true
+                    }
                     return self.field_array_elem_is_float_for_base_ref(&(*base_expr).left, (*base_expr).name)
                 }
                 if (*base_expr).kind == ExprKind::ExprUnary && (*base_expr).un_op == UnaryOp::OpDeref {
@@ -15580,6 +15592,15 @@ impl Lowerer {
 
     fn lower_program_items_ref(self, items: &Option<Box<ItemList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         fo_xfer_global_reset()
+        // The single-shot streaming-native path (module_native_streaming.sio's
+        // compile_multimodule_native_maybe_streaming -> here, no separate summary
+        // phase) was the one top-level lowering entry that never populated the
+        // f64-array tuple table: every other reachable entry goes through
+        // fo_preregister_program_items_multipass or lowerer_lower_program_items_mut,
+        // both of which already call this. Idempotent (lower_fn_tuple_f64_arrays_collect
+        // skips a fn whose mask is already recorded), so this is safe even for
+        // callers that already collected via an earlier phase in the same compile.
+        lower_fn_tuple_f64_arrays_collect(items)
         var lo = self
         lowerer_fo_preregister_pure_fns_multipass_mut(&! lo, items)
         var current = items
@@ -17112,8 +17133,14 @@ impl Lowerer {
         }
     }
 
-    // `let ov = __tupN.K` where slot K of the tuple local is an f64 array (bit
-    // 32+K of its mask, recorded from the callee's declared return type).
+    // `let ov = __tupN.K` (desugared tuple local, bit 32+K of its combined mask)
+    // OR `f().K` (K read straight off the callee's declared return type, no
+    // intervening binding) where slot K is an f64 array. Review follow-up
+    // (#2570): the ExprIdent-only version left `let x = pair().0` -- a direct
+    // projection off the call, base_expr.kind == ExprCall, no desugared temp --
+    // unmarked, the same bits-as-i64 read this table exists to prevent.
+    // opt_base_tuple_float_mask_ref (the scalar sibling) already handles both
+    // base kinds; this mirrors it for the array half.
     fn expr_is_tuple_slot_f64_array_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
         if (*e).kind != ExprKind::ExprFieldAccess {
             return false
@@ -17124,6 +17151,16 @@ impl Lowerer {
         }
         match (*e).left {
             Some(base_expr) => {
+                if (*base_expr).kind == ExprKind::ExprCall {
+                    match (*base_expr).left {
+                        Some(callee_expr) => {
+                            let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
+                            let arr_bits = lower_fn_tuple_f64_array_mask(callee_name)
+                            return (arr_bits >> (slot as i32)) % 2 == 1
+                        }
+                        _ => return false,
+                    }
+                }
                 if (*base_expr).kind != ExprKind::ExprIdent {
                     return false
                 }

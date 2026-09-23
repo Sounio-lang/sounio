@@ -217,4 +217,4 @@ grep -Fq "function \`wide\` returns a tuple with an \`[f64; N]\` in slot ${SLOT_
   fail "slot-${SLOT_MAX} diagnostic was missing or changed"
 }
 
-echo "[madaros-f64-lowering] PASS: one shared Madaros ELF passed dereference, global f64, direct capacity, imported capacity, imported wide-call, f64-array tuple table capacity (${TUPLE_CAP} ok, ${TUPLE_OVER} rejected) and slot limit (slot $((SLOT_MAX - 1)) ok, slot ${SLOT_MAX} rejected) gates"
+echo "[madaros-f64-lowering] PASS: one shared Madaros ELF passed dereference, global f64, direct capacity, imported capacity, imported wide-call, f64-array tuple table capacity (${TUPLE_CAP} ok, ${TUPLE_OVER} rejected), and slot limit (slot $((SLOT_MAX - 1)) ok, slot ${SLOT_MAX} rejected)"
