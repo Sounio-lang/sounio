@@ -365,7 +365,26 @@ function count_with_clauses(str,    tmp) {
 # too (RSTART still correctly locates "f" of "fn" regardless of how much
 # whitespace the match consumes afterward, so no other arithmetic here needs
 # to change).
-function scan_entry_for_fn_types(line, entry_start, entry_end, at_eof,    seg, pos_in_seg, abs_match_start, prevc, mstart, mlen) {
+#
+# Copilot follow-up (#2570): advancing past just the matched "fn(" token
+# double-counted a chained return type used AS a parameter.
+# `f: fn(fn() -> fn() -> i64) -> i64` has an entry whose own text is
+# "fn() -> fn() -> i64" -- a 2-layer direct chain. classify_fn_type_at,
+# called on the entry FIRST "fn(", already walks and counts the WHOLE
+# chain internally via fn_layers/with_n (both of its layers, correctly, two
+# hits). But this loop then kept searching from just past that first match,
+# found the SAME chain second "fn(" again as if it were an unrelated
+# sibling entry, and classified it a second time -- three hits for what
+# classify_fn_type_at own arithmetic had already fully accounted for in
+# two, four total against the correct three (the entry own outer type
+# plus its two chain layers). Resume the search from `result` -- the
+# position classify_fn_type_at itself reports its own span ends at -- not
+# from just past the matched token, so a chain nested this way is walked
+# exactly once. A GENUINE sibling "fn(" (two different fn-type elements of
+# a wrapped tuple, e.g. `(fn() -> i64, fn() -> f64)`) still starts strictly
+# after where the first one own span ended, so it is still found the
+# normal way.
+function scan_entry_for_fn_types(line, entry_start, entry_end, at_eof,    seg, pos_in_seg, abs_match_start, prevc, mstart, mlen, result) {
     seg = substr(line, entry_start, entry_end - entry_start)
     pos_in_seg = 1
     while (pos_in_seg <= length(seg) && match(substr(seg, pos_in_seg), /fn[ \t\n]*\(/)) {
@@ -379,8 +398,16 @@ function scan_entry_for_fn_types(line, entry_start, entry_end, at_eof,    seg, p
         mlen = RLENGTH
         abs_match_start = entry_start + (pos_in_seg - 1) + mstart - 1
         if (abs_match_start > 1) { prevc = substr(line, abs_match_start - 1, 1) } else { prevc = "" }
-        if (prevc !~ /[A-Za-z0-9_]/) { classify_fn_type_at(line, abs_match_start, at_eof) }
-        pos_in_seg = pos_in_seg + (mstart - 1) + mlen
+        if (prevc !~ /[A-Za-z0-9_]/) {
+            result = classify_fn_type_at(line, abs_match_start, at_eof)
+            if (result != -1 && result > abs_match_start) {
+                pos_in_seg = result - entry_start + 1
+            } else {
+                pos_in_seg = pos_in_seg + (mstart - 1) + mlen
+            }
+        } else {
+            pos_in_seg = pos_in_seg + (mstart - 1) + mlen
+        }
     }
 }
 function classify_fn_type_at(line, fn_pos, at_eof,    open_pos, close_pos, after, rest, hit, hit_tail, fn_layers, with_n, bare_layers, k, tail_start, tail_end, entry_start, i, n, c, prevc, depth, stack, pred, r) {
@@ -898,6 +925,35 @@ selftest() {
   if [ "$n21" = "2" ]; then
     echo "  ok   POSITIVO 21: fn aninhado com espaco antes do ( produz 2 hits"
   else echo "  FALHA POSITIVO 21: esperava 2 hits, obteve $n21"; rc=1; fi
+  # NEGATIVE control 22 (#2570): a chained return type used AS A PARAMETER
+  # (`f: fn(fn() -> fn() -> i64) -> i64`). classify_fn_type_at, called on the
+  # entry's first "fn(", already walks and counts the whole 2-layer chain
+  # internally via fn_layers/with_n (both layers, correctly). Advancing
+  # scan_entry_for_fn_types past just the matched "fn(" token instead of past
+  # what classify_fn_type_at itself already consumed found the SAME chain's
+  # second "fn(" again as an apparently-independent sibling and classified it
+  # a second time: four hits (outer=1, chain=2, spurious re-classification=1)
+  # against the correct three (outer=1, chain=2) -- which could spuriously
+  # raise the frozen count and block a valid, unrelated change. Named
+  # NEGATIVE (not POSITIVE) because the assertion here is an exact hit
+  # COUNT, matching the convention POSITIVO/NEGATIVO 13 already established
+  # for that shape of check.
+  printf 'fn use_it(f: fn(fn() -> fn() -> i64) -> i64) -> f64 { 0.0 }\n' > "$tmp/neg22.sio"
+  n22=$(bare_hits_of "$tmp/neg22.sio" | wc -l | tr -d ' ')
+  if [ "$n22" = "3" ]; then
+    echo "  ok   NEGATIVO 22: cadeia aninhada como parametro produz 3 hits (nao 4)"
+  else echo "  FALHA NEGATIVO 22: esperava 3 hits (externo + 2 camadas), obteve $n22"; rc=1; fi
+  # POSITIVE control 22 (#2570): companion, confirming the fix does not
+  # over-correct into UNDER-counting -- TWO genuinely DIFFERENT sibling
+  # fn-type elements inside one wrapped tuple entry
+  # (`(fn() -> i64, fn() -> f64)`) must still both be found independently;
+  # only advancing PAST what classify_fn_type_at already consumed for the
+  # FIRST one, not skipping the rest of the entry outright.
+  printf 'fn use_it(f: fn((fn() -> i64, fn() -> f64)) -> i64) -> f64 { 0.0 }\n' > "$tmp/pos22.sio"
+  n22b=$(bare_hits_of "$tmp/pos22.sio" | wc -l | tr -d ' ')
+  if [ "$n22b" = "3" ]; then
+    echo "  ok   POSITIVO 22: dois irmaos genuinos em uma tupla produzem 3 hits"
+  else echo "  FALHA POSITIVO 22: esperava 3 hits (externo + 2 irmaos), obteve $n22b"; rc=1; fi
   rm -rf "$tmp"
   echo "falhas: $rc"
   return $rc
