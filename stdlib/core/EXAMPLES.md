@@ -102,7 +102,7 @@ pub fn main() with Div, Panic {
 }
 ```
 
-`Result<Knowledge<f64>, ()>` and `a / b` on epistemic values are not on the checked surface. Confidence degrades through `ep_div` itself: the result's confidence is the minimum of the inputs' confidence scaled by `97 / 100` (it never increases under division). Anchor: `stdlib/epistemic/knowledge.sio` — `ep_div` (around lines 177-186) computes `confidence: ep_clamp_conf(ep_min_conf(a.confidence, b.confidence) * 97 / 100)`, which is the exact factor that enforces the 97% degradation claim.
+`Result<Knowledge<f64>, ()>` and `a / b` on epistemic values are not on the checked surface. Confidence degrades through `ep_div` itself: the result's confidence is the minimum of the inputs' confidence scaled by `97 / 100` (it never increases under division). Anchor: `stdlib/epistemic/knowledge.sio` — `ep_div` (around lines 177-186) computes `confidence: ep_clamp_conf(ep_min_conf(a.confidence, b.confidence) * 97 / 100)`, i.e. division retains 97% of the inputs' minimum confidence (a 3% degradation per operation; confidence never increases).
 
 ## 5. Integer Utilities
 
