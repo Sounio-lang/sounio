@@ -417,9 +417,13 @@ print("sqrt(x) = ", ep_val(&sqrt_x), " ± ", ep_std(&sqrt_x))
 > `solver.sio`, `solvers.sio`, and `pbpk3_stable.sio` — that provide RK4, RK45,
 > Tsit5, BDF, epistemic integration, and PBPK sources. Note: `stdlib/ode/lib.sio`
 > itself only re-exports the epistemic PK-fit functions (`epistemic_pk_fit`,
-> `epistemic_pkpd_fit`); import the RK4/Tsit5/BDF solvers from their defining
-> submodules (e.g. `ode::rk4`, `ode::tsit5`, `ode::bdf`), not from `lib.sio` as a
-> solver entry point. The shipped
+> `epistemic_pkpd_fit`); import the solvers from their defining submodules, not
+> from `lib.sio` as a solver entry point: the RK4 solver lives in `ode::rk4`
+> (`rk4_step`, `rk4_integrate`), and the adaptive (RK45) and BDF wrappers live in
+> `ode::solver` (`solve_rk45_exp_decay`, `solve_bdf1_exp_decay`,
+> `default_options`). Note that `ode::tsit5` only exports its test `main` and
+> `ode::bdf` exports no public functions, so do not import solvers from
+> `ode::tsit5` or `ode::bdf`. The shipped
 > source-tracked uncertainty propagation
 > lives in `stdlib/epistemic/affine` (anchor: `tests/run-pass/affine_shared_source_add.sio`,
 > `affine_product_delta.sio`).
