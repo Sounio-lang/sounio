@@ -110,6 +110,7 @@ let PFI_SK_MAX: i64 = 256
 let PFI_R_SHADOWED: i64 = 1    // a local/param/pattern spelled like it, or a value use in a slot that cannot be rewritten
 let PFI_R_NAME: i64 = 2        // the generated name is already an existing symbol, or would be too long
 let PFI_R_EXPORTED: i64 = 3    // pub(crate)/pub(super)/pub(in ..): importers spell this name
+let PFI_R_GEN_SHADOWED: i64 = 4 // the name THIS entry would be given is itself already a local/param/pattern here
 
 // Census PREFILTER: distinct-module count per name hash (open addressing). Hash
 // only -- see the header: it may over-merge, so it can only nominate candidates.
@@ -429,6 +430,35 @@ fn pfi_table_find_name(n: Name) -> i64 with Mut, Panic, Div {
     0 - 1
 }
 
+// Reconstruct table slot `idx`'s ORIGINAL (pre-rename) name from its stored bytes.
+fn pfi_table_name(idx: i64) -> Name with Mut, Panic, Div {
+    var n = Name { buf: [0; 384], len: PFI_T_LEN[idx as usize] }
+    let base = idx * 384
+    var k: i64 = 0
+    while k < n.len {
+        n.buf[k as usize] = PFI_T_BUF[(base + k) as usize]
+        k = k + 1
+    }
+    n
+}
+
+// Is `n` the name some OTHER table entry would be renamed TO in this module
+// (PFI_CUR_MOD)? Every entry currently in the table belongs to the module being
+// scanned (pfi_build_table resets PFI_T_COUNT to 0 per module), so mangling each
+// entry's own stored name against PFI_CUR_MOD is exactly the spelling a rewritten
+// call site would get. See pfi_note_binder for why this matters.
+fn pfi_table_find_generated_name(n: Name) -> i64 with Mut, Panic, Div, Alloc {
+    if PFI_T_COUNT <= 0 { return 0 - 1 }
+    if n.len <= 0 { return 0 - 1 }
+    var i: i64 = 0
+    while i < PFI_T_COUNT {
+        let gen = pfi_mangle(pfi_table_name(i), PFI_CUR_MOD)
+        if gen.len > 0 && name_eq(gen, n) { return i }
+        i = i + 1
+    }
+    0 - 1
+}
+
 fn pfi_table_add(programs: &! [Program; 256], count: i64, n: Name, mod_idx: i64, vis_kind: i64) with Mut, Panic, Div, Alloc {
     if pfi_table_find_name(n) >= 0 { return }
     if PFI_T_COUNT >= PFI_T_MAX {
@@ -553,9 +583,26 @@ fn pfi_note_unsafe_name(n: Name) with Mut, Panic, Div {
     }
 }
 
-// A local binding spelled like a colliding private fn.
-fn pfi_note_binder(n: Name) with Mut, Panic, Div {
+// A local binding spelled like a colliding private fn's ORIGINAL name, or like
+// the GENERATED name some other entry in THIS module's table would be given.
+// The second check matters because check.sio resolves a bare identifier against
+// env (local bindings) BEFORE fn_sigs (checker_check_ident_expr_inplace,
+// self-hosted/check/check.sio): if this module also binds a local, parameter or
+// pattern spelled exactly like some entry's prospective mangled name (e.g. a
+// parameter literally named `helper__m1` in the same module that is about to
+// rename a private `helper` TO `helper__m1`), a rewritten call `helper__m1()`
+// would resolve to THAT BINDING in its scope instead of the renamed function --
+// the rename would silently redirect the call, or checker's env-first lookup
+// would report it as the wrong kind of value.
+fn pfi_note_binder(n: Name) with Mut, Panic, Div, Alloc {
     pfi_note_unsafe_name(n)
+    let gi = pfi_table_find_generated_name(n)
+    if gi >= 0 {
+        if PFI_T_UNSAFE[gi as usize] == 0 {
+            PFI_T_UNSAFE[gi as usize] = 1
+            PFI_T_REASON[gi as usize] = PFI_R_GEN_SHADOWED
+        }
+    }
 }
 
 // The identifier is a bare Ident / single-segment Path.
@@ -569,7 +616,7 @@ fn pfi_note_embedded_value(e: Expr) with Mut, Panic, Div {
     }
 }
 
-fn pfi_pattern(p: Pattern) with Mut, Panic, Div {
+fn pfi_pattern(p: Pattern) with Mut, Panic, Div, Alloc {
     if p.kind == PatternKind::PatBinding {
         pfi_note_binder(p.name)
     }
@@ -943,6 +990,16 @@ fn pfi_error_unresolved(slot: i64, other_mod: i64) with IO, Mut, Panic, Div, All
         }
         print("`) is already an existing\n")
         print("  symbol, or does not fit.\n")
+    } else if why == PFI_R_GEN_SHADOWED {
+        print("  the name it would be given (`")
+        let gen2 = pfi_mangle(pfi_sk_name(slot), PFI_SK_MOD[slot as usize])
+        if gen2.len > 0 {
+            pfi_print_name(gen2)
+        } else {
+            print("<too long>")
+        }
+        print("`) is itself already used\n")
+        print("  as a local, parameter or pattern binding in that module.\n")
     } else {
         print("  a local, parameter or pattern uses that name, or the fn is used as a\n")
         print("  value in a match arm or struct-literal field.\n")

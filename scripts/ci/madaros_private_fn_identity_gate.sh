@@ -29,6 +29,9 @@
 #   capacity  70 colliding private fns in one module (the old fixed table held 64)
 #   skip      a shape the pass cannot prove safe is skipped -- and that is only
 #             accepted because the other module was renamed and no collision remains
+#   genshadow  the same, but the parameter shadows the GENERATED name
+#             (`helper__m1`) rather than the original one -- pre-fix this was
+#             renamed anyway and crashed during lowering instead of refusing
 #   unresolved  the same shape in EVERY colliding module: the compile must be
 #             REFUSED with error[private_fn_identity], not emitted with a warning
 #   restricted  two pub(crate) fns of one name: exported, so unrenamable -> REFUSED
@@ -176,6 +179,20 @@ if grep -Fq "error[private_fn_identity]" "$WORK/skip.log"; then
   fail "skip: refused a compile whose collision was fully resolved"
 fi
 echo "$TAG PASS(skip): unprovable rename skipped; no collision remains, so it compiles"
+
+# --- genshadow: a parameter shadows the GENERATED name, not the original ----
+# skip (above) catches a parameter spelled like the ORIGINAL name. This
+# catches a parameter spelled like the name the pass would GENERATE
+# (`helper__m1`): renaming module 1's `helper` to `helper__m1` would make its
+# own call site resolve to that parameter instead, silently. Pre-fix this was
+# renamed anyway and crashed during lowering instead of being refused.
+compile_and_run genshadow "$FIX/genshadow/main.sio"
+expect_output genshadow "$FIX/genshadow/expected.txt"
+expect_log genshadow "private_fn_identity: left 1 fn(s) unrenamed; no collision remains" "the skipped-rename note"
+if grep -Fq "error[private_fn_identity]" "$WORK/genshadow.log"; then
+  fail "genshadow: refused a compile whose collision was fully resolved"
+fi
+echo "$TAG PASS(genshadow): a generated-name shadow is skipped, not renamed into a crash"
 
 # --- exact identity, symbol reservation, capacity -----------------------------
 compile_and_run hashcoll "$FIX/hashcoll/main.sio"
