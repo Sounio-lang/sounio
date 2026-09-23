@@ -87,9 +87,13 @@ def iter_job_blocks(lines: list[str]) -> list[tuple[str, int, list[str]]]:
         if not in_jobs:
             continue
         if line and not line.startswith(" "):
-            # Dedent to column 0 outside `jobs:` -- top-level key, e.g. a new
-            # `concurrency:`/`env:` section after the jobs map (not expected in
-            # this repo's layout, but end the scan defensively either way).
+            # A column-0 COMMENT is not a dedent -- YAML comments carry no
+            # indentation semantics, so `# separator` between two jobs must
+            # not end the scan and hide every job after it. Only a real
+            # column-0 KEY (a new top-level section after the jobs map) ends
+            # the scan.
+            if line.lstrip().startswith("#"):
+                continue
             break
 
         m = _JOB_KEY_RE.match(line)
@@ -132,13 +136,97 @@ def job_is_self_hosted_ish(block: list[str], body_indent: int) -> bool:
     return False
 
 
+_CANONICAL_GUARD_CLAUSES = {
+    "github.event_name != 'pull_request'",
+    'github.event_name != "pull_request"',
+    GUARD_SUBSTRING.replace("head.repo.full_name", "github.event.pull_request.head.repo.full_name"),
+}
+
+
+def _split_top_level(expr: str, sep: str) -> list[str]:
+    """Split expr on sep, but only where paren/bracket depth is 0 -- so a
+    `sep` hiding inside a parenthesized sub-expression does not split it."""
+    parts: list[str] = []
+    depth = 0
+    buf: list[str] = []
+    i = 0
+    n = len(expr)
+    while i < n:
+        c = expr[i]
+        if c in "([":
+            depth += 1
+            buf.append(c)
+            i += 1
+        elif c in ")]":
+            depth -= 1
+            buf.append(c)
+            i += 1
+        elif depth == 0 and expr[i:i + len(sep)] == sep:
+            parts.append("".join(buf))
+            buf = []
+            i += len(sep)
+        else:
+            buf.append(c)
+            i += 1
+    parts.append("".join(buf))
+    return parts
+
+
+def _strip_outer_parens(s: str) -> str:
+    s = s.strip()
+    while s.startswith("(") and s.endswith(")"):
+        depth = 0
+        spans_whole = True
+        for i, c in enumerate(s):
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+                if depth == 0 and i != len(s) - 1:
+                    spans_whole = False
+                    break
+        if not spans_whole:
+            break
+        s = s[1:-1].strip()
+    return s
+
+
+def _normalize(s: str) -> str:
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _is_restricting_clause(clause: str) -> bool:
+    """A single &&-level clause actually restricts execution to same-repo
+    pull_request events -- not merely a clause that MENTIONS the guard text
+    somewhere it could be bypassed by an ||. Accepts: the bare
+    `github.event_name != 'pull_request'` check; the bare same-repo compare;
+    or an OR of exactly those two (the documented canonical guard) -- and
+    ONLY when that OR is the clause's entire content, so
+    `guard || vars.ENABLE == '1'` (a real bypass: true whenever the OTHER
+    side is true, regardless of repo origin) is correctly rejected."""
+    normalized = _normalize(_strip_outer_parens(clause))
+    if normalized in _CANONICAL_GUARD_CLAUSES:
+        return True
+    or_parts = [_normalize(_strip_outer_parens(p)) for p in _split_top_level(normalized, "||")]
+    return len(or_parts) == 2 and all(p in _CANONICAL_GUARD_CLAUSES for p in or_parts)
+
+
 def job_has_guard(block: list[str], body_indent: int) -> bool:
     for line in block:
         ind = indent_of(line)
-        if ind == body_indent and re.match(r"^\s*if:\s*(.*)$", line):
-            if GUARD_SUBSTRING in line:
-                return True
-            if "github.event_name != 'pull_request'" in line or 'github.event_name != "pull_request"' in line:
+        m = ind == body_indent and re.match(r"^\s*if:\s*(.*)$", line)
+        if not m:
+            continue
+        value = m.group(1)
+        # The guard must be its own top-level &&-clause: `guard && rest` (or
+        # `rest && guard`) restricts every path through the condition. A
+        # guard merely present somewhere inside an ||-clause with unrelated
+        # terms does not -- `A || vars.ENABLE == '1'` is true whenever EITHER
+        # side is true, so embedding the guard there is not a restriction at
+        # all. Splitting on top-level && and checking each clause in
+        # isolation is what tells the two apart.
+        for clause in _split_top_level(value, "&&"):
+            if _is_restricting_clause(clause):
                 return True
     return False
 

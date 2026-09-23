@@ -156,6 +156,39 @@ jobs:
             - run: echo hi
 EOF
 
+    # POSITIVE 4: a column-0 comment between jobs is not a dedent -- the
+    # unguarded job after it must still be reached and flagged.
+    cat > "$tmp/positive_comment_between_jobs.yml" <<'EOF'
+on:
+  pull_request:
+jobs:
+  safe:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo hi
+# separator
+  danger:
+    runs-on: [self-hosted, gpu, cuda]
+    steps:
+      - run: echo hi
+EOF
+
+    # POSITIVE 5: the guard text present, but only inside an || with an
+    # unrelated term -- `guard || vars.ENABLE == '1'` is true whenever EITHER
+    # side is true, so it does NOT restrict to same-repo pull_request events.
+    # Must still flag: presence of the guard text is not the same as the
+    # guard actually gating anything.
+    cat > "$tmp/positive_or_bypass.yml" <<'EOF'
+on:
+  pull_request:
+jobs:
+  danger:
+    runs-on: [self-hosted, gpu, cuda]
+    if: github.event.pull_request.head.repo.full_name == github.repository || vars.ENABLE == '1'
+    steps:
+      - run: echo hi
+EOF
+
     local out
     out="$(python3 "$SCANNER" "$tmp"/*.yml || true)"
 
@@ -173,6 +206,16 @@ EOF
         echo "  ok   POSITIVE: a 4-space-indented jobs map is flagged"
     else
         echo "  FAIL POSITIVE: a 4-space-indented jobs map was NOT flagged"; rc=1
+    fi
+    if grep -q 'positive_comment_between_jobs.yml:danger' <<<"$out"; then
+        echo "  ok   POSITIVE: a job after a column-0 comment is flagged"
+    else
+        echo "  FAIL POSITIVE: a job after a column-0 comment was NOT flagged"; rc=1
+    fi
+    if grep -q 'positive_or_bypass.yml:danger' <<<"$out"; then
+        echo "  ok   POSITIVE: guard-text-inside-an-|| bypass is still flagged"
+    else
+        echo "  FAIL POSITIVE: guard-text-inside-an-|| bypass was NOT flagged"; rc=1
     fi
     for job in "negative_guarded.yml:safe" "negative_no_pr_trigger.yml:dispatch_only" \
                "negative_pull_request_target.yml:automation" "negative_gh_hosted.yml:ordinary"; do
@@ -210,7 +253,13 @@ selftest >/dev/null 2>&1 || {
     exit 2
 }
 
-violations="$(run_real || true)"
+# No `|| true`: the scanner communicates violations via stdout, not its exit
+# code (main() returns 0 whether it found violations or none) -- the only way
+# run_real exits nonzero is a genuine scanner crash (a malformed/unreadable
+# workflow file, a bug). Swallowing that here would make a crash read as "no
+# violations found", the exact fail-open this gate exists to prevent. Let
+# `set -e` propagate it as a hard failure instead.
+violations="$(run_real)"
 if [[ -n "$violations" ]]; then
     echo "CHECK_SELF_HOSTED_RUNNER_FORK_EXPOSURE_FAIL: unguarded self-hosted runner(s) reachable from fork PRs:" >&2
     echo "$violations" | sed 's/^/  /' >&2
