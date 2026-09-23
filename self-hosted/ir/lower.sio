@@ -6395,6 +6395,25 @@ fn lower_opt_type_tuple_float_mask(opt: &Option<Box<TypeExpr>>) -> i64 with Mut,
     }
 }
 
+// Array-slot counterpart of lower_opt_type_tuple_float_mask, mirroring its
+// annotated-type-first pattern for tuple_arr_mask: an explicitly typed tuple
+// literal local (`let t: ([f64; 2], i64) = (a, 0)`) has a declared TYPE to
+// read the array mask off directly. expr_result_tuple_arr_mask_ref only
+// covers a CALL initialiser (lower_fn_tuple_f64_array_mask keys off a
+// function's declared return type, and tuple literals have no such
+// tracking), so without this an annotated tuple-literal local's array slots
+// stayed unmarked and a later `let x = t.0; x[0] * 2.0` still corrupted the
+// f64 bits via the integer path.
+fn lower_opt_type_tuple_arr_mask(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(te) => {
+            if (*te).kind != TypeExprKind::TypeTuple { return 0 }
+            lower_type_list_arr_mask(&(*te).type_args, 0)
+        }
+        None => 0,
+    }
+}
+
 // returns_float classification for a declared return type: 1 = scalar f64, 2 = an
 // f64 array (`[f64; N]`), 1024+mask = a tuple with f64 element(s), 0 = other. The `2` lets a caller's `let r = mk()` (mk
 // returning an f64 array) flag `r` as a float-element local, so `r[i]` reads
@@ -17586,15 +17605,24 @@ impl Lowerer {
         }
         // Array-slot counterpart: which slots of a tuple-typed local are
         // `[f64; N]` arrays, tracked in its own mask (tuple_arr_mask) rather
-        // than packed into the high bits of tuple_float_mask.
-        match s.expr {
-            Some(expr_box_tup_arr) => {
-                let init_tuple_arr_mask = lo.expr_result_tuple_arr_mask_ref(&(*expr_box_tup_arr))
-                if init_tuple_arr_mask != 0 {
-                    lo = lo.bind_local_tuple_arr_mask(s.name, init_tuple_arr_mask)
+        // than packed into the high bits of tuple_float_mask. Annotated type
+        // first (covers a tuple LITERAL initialiser, which has no declared
+        // CALL-return-type tracking), falling back to the initialiser
+        // expression's own mask (covers a CALL initialiser with no
+        // annotation) -- same precedence as the scalar mask above.
+        let annotated_tuple_arr_mask = lower_opt_type_tuple_arr_mask(&s.ty)
+        if annotated_tuple_arr_mask != 0 {
+            lo = lo.bind_local_tuple_arr_mask(s.name, annotated_tuple_arr_mask)
+        } else {
+            match s.expr {
+                Some(expr_box_tup_arr) => {
+                    let init_tuple_arr_mask = lo.expr_result_tuple_arr_mask_ref(&(*expr_box_tup_arr))
+                    if init_tuple_arr_mask != 0 {
+                        lo = lo.bind_local_tuple_arr_mask(s.name, init_tuple_arr_mask)
+                    }
                 }
+                _ => {}
             }
-            _ => {}
         }
         if lower_opt_type_is_f64(&s.ty) {
             lo = lo.bind_local_scalar_kind(s.name, 2)
