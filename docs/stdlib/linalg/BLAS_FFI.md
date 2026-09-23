@@ -141,16 +141,16 @@ let rc = blas_dgemm_rowmajor(
 //
 // IMPORTANT — seed-projection limitation (verified against
 // stdlib/linalg/blas_ffi.sio:128-143): blas_dgesvd_approx seeds power
-// iteration with the ALL-ONES vector v = [1, 1, ...] (normalised), so the
-// input must NOT annihilate that seed. Concretely, A·[1, 1] must be
-// NONZERO — i.e. NO ROW OF A MAY SUM TO ZERO. A nonzero matrix whose
-// rows sum to zero (e.g. [[1, -1], [-1, 1]], where A·[1, 1] = [0, 0])
-// annihilates the all-ones seed; then ||A'A·v|| = 0 and the Newton
-// square-root step `sigma = 0.5 * (sigma + norm / sigma)`
-// (blas_ffi.sio:183) evaluates 0/0 → NaN, collapsing the iterate to 0.
-// An all-zero matrix is likewise unsafe. Pass a SEED-SAFE matrix: the
-// 2x2 below (rows sum to 4 and 3, so A·[1, 1] = [4, 3] ≠ 0) is stored
-// row-major in the fixed 256-element buffer.
+// iteration with the all-ones vector, so it converges to the singular
+// value along the all-ones direction — the singular value whose
+// right-singular vector has the largest projection onto [1, 1]. For
+// [[3, 1], [1, 2]] this is the dominant singular value (s[0] ~ 3.618).
+// It is NOT guaranteed to return the global maximum singular value for
+// arbitrary inputs: e.g. for [[2, -1], [-1, 2]] the all-ones seed is the
+// eigenvector for value 1, so the routine returns 1, not the true
+// maximum of 3. Treat the result as seed-direction-dependent, and avoid
+// inputs whose dominant right-singular vector is orthogonal to [1, 1]
+// (which makes the iterate collapse to 0/0 NaN).
 var a_svd: [f64; 256] = [0.0; 256]  // 2x2 input, row-major in the 256 buffer
 a_svd[0] = 3.0   // row 0, col 0
 a_svd[1] = 1.0   // row 0, col 1
