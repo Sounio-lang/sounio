@@ -236,7 +236,7 @@ use plot::epistemic::{epistemic_time_series, ConfidenceBandStyle};
 let series = EpistemicTimeSeries { ... }; // com Knowledge ou Epistemic values
 
 epistemic_time_series(
-    &mut ctx,
+    &!ctx,
     &series,
     EpistemicPlotConfig {
         show_confidence_decay: true,
@@ -294,7 +294,7 @@ fn main() with IO, Mut {
     
     let data = ...; // Knowledge ou f64 + uncertainty
     
-    epistemic::time_series(&mut target, &data, EpistemicConfig { ... });
+    epistemic::time_series(&!target, &data, EpistemicConfig { ... });
     
     let png = target.finish().to_png();   // ou via FFI por enquanto
     // salvar png

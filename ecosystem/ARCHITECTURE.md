@@ -113,7 +113,7 @@ from .numpy_integration import (
 
 #### API Python:
 
-> **Not the shipped surface.** There is no `sounio.Knowledge`, `epistemic_array`, or `sounio.run` binding in the checked artifact, and the embedded snippet uses `Knowledge[f64]`, `epistemic_mean`, and `epistemic_std`, which are not the Sounio API. The checked epistemic surface is `Epistemic` with `ep_measured`, `ep_val`, `ep_std`, and `ep_div` from `stdlib/epistemic/knowledge.sio`. The sketch below is the intended binding shape only.
+> **Partial surface.** `sounio.Knowledge` IS bound in the checked artifact (`ecosystem/sounio-py/python/sounio/__init__.py:43-50`), and the runner is exposed as `run_sio` (with the convenience `run_code` wrapper) at line 54 — only `epistemic_array` and the exact `sounio.run` name are absent. The embedded snippet's Python `sounio.Knowledge(...)` call matches the package, but its inline Sounio code uses `Knowledge[f64]`, `epistemic_mean`, and `epistemic_std`, which are not the Sounio language API. The checked epistemic surface is `Epistemic` with `ep_measured`, `ep_val`, `ep_std`, and `ep_div` from `stdlib/epistemic/knowledge.sio`. The sketch below is the intended binding shape only.
 
 ```python
 import sounio
