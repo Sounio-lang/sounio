@@ -1872,11 +1872,15 @@ The aligned-regime residual **section 6.3 instance (3) reports** is
 
 This retires the framing used earlier in this file and in
 `benchmarks/chemistry/README.md`, where the aligned figures (8.9e-13 … 1.2e-11)
-were called agreement "at the floor of CVODE's own `rtol = 1e-12`". Two of
-those figures are **below** the measured floor of 1.473e-11 — which does not
-make the agreement better than the floor, it makes those particular numbers
-unresolvable. They are reported here as measured and must not be read as
-resolution.
+were called agreement "at the floor of CVODE's own `rtol = 1e-12`".
+**Recomputed 2026-09-23 rather than trusted:** all eight of those figures sit
+below the single-state floor of 1.473e-11 — the largest, H2O2 at 1.220e-11,
+still under it. Three of the eight — H2, O2, HO2 at 1.082e-12, 8.952e-13,
+1.246e-12 — sit below even the lowest floor value §7.7's ensemble sweep ever
+measured (3.730e-12), so those three are unresolvable against any floor value
+this document reports, not only the typical one. None of the eight is
+citable as agreement better than the floor; all are reported here as
+measured and must not be read as resolution.
 
 What survives, and it is the result that matters, is unaffected: the
 **published-regime** gap of 2.660e-06 is 180,000× the oracle's resolution, so

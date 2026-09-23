@@ -58,10 +58,11 @@ submechanism, attributed in the source documentation to fixed-step RK4 versus
 CVODE, is shown here to be one rounded activation-energy gas constant: aligning
 `R_cal` from the CHEMKIN-conventional 1.9872041 to Cantera's own
 8.31446261815324/4.184 = 1.9872042586408316 improves every species by 155,031×
-to 295,899× in an isolated substitution experiment — two of those eight
-post-alignment figures sit below the oracle's own measured floor and are
-therefore unresolvable, reported as measured rather than as resolution
-**[B]**. The truncation hypothesis is falsified directly rather than by
+to 295,899× in an isolated substitution experiment — all eight post-alignment
+figures sit below the oracle's single-state floor, and three of them sit
+below the lowest floor value measured anywhere in its ensemble sweep, so none
+is citable as resolution, only as measured **[B]**. The truncation hypothesis
+is falsified directly rather than by
 extrapolation: halving the step at the operating point moves the deviation by a
 ratio of 1.000 on all eight species, and the replica's self-convergence there is
 2.7 × 10⁻¹⁵ to 2.2 × 10⁻¹⁴, eight orders below the gap. After alignment the
@@ -559,9 +560,15 @@ cause as the 1.843 × 10⁻¹¹ Kc floor of §3.6, where the truncated constant 
 `R_SI` instead: two independent truncated gas constants, two residual floors,
 both fully accounted for.
 
-> **[B] The right-hand column must not be read as resolution.** Two of those
-> eight figures are *below* the oracle's own measured floor (§4.5) and are
-> therefore unresolvable. They are reported as measured.
+> **[B] The right-hand column must not be read as resolution.** Recomputed
+> 2026-09-23 rather than trusted: **all eight** of these figures sit below
+> the oracle's *single-state* floor of 1.473 × 10⁻¹¹ (§4.5) — the largest,
+> H2O2 at 1.220 × 10⁻¹¹, still under it. Three of the eight — H2, O2, HO2 at
+> 1.082 × 10⁻¹², 8.952 × 10⁻¹³, 1.246 × 10⁻¹² — sit below even the *lowest*
+> value the ensemble sweep of §4.5 ever measured for that floor
+> (3.730 × 10⁻¹²), meaning those three are unresolvable against any floor
+> value this document reports, not only the typical one. None of these eight
+> numbers should be read as resolution.
 
 > **[W] Corrected 2026-09-23, a reviewer finding.** Table 5 is an isolated
 > substitution — `R_cal` alone, changed inside a reconstructed probe and
