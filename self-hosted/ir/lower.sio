@@ -1751,6 +1751,36 @@ fn lower_epistemic_contest_index_from_ref(epistemic: &IrEpistemicSection) -> Box
     index
 }
 
+// Stack-economy: the four big fixed-count accumulator arrays used to be INLINE
+// fields of Lowerer (~25KB of the ~26KB struct), so EVERY by-value
+// `(Lowerer, i64)` hop in the block/stmt/expr recursion copied them again.
+// Measured (core.3195050, kl16x-compiled Madaros, 8MB default stack): ~27 live
+// hop levels x ~27.8KB = ~748KB of hop tower = the SIGSEGV that made every
+// `madaros run` die after "lower_array: bodies_begin", recoverable only with
+// `ulimit -s unlimited`. Boxing them behind ONE pointer shrinks the hop
+// payload to ~1.2KB. Share-through-Box semantics already governs
+// locals/fo_bind/module (see the (*lo.fo_bind) reads) — zero behavioural
+// delta; mirrors the #1649 "REUSE the Box" precedent.
+struct LowerBigArrays {
+    array_elem_float_regs: [i64; 512],
+    variance_base_regs: [i64; 1024],
+    variance_value_regs: [i64; 1024],
+    so_bind_hess: [i64; 576],
+}
+
+fn empty_lower_big_arrays() -> LowerBigArrays with Mut {
+    LowerBigArrays {
+        array_elem_float_regs: [IR_INVALID_REG; 512],
+        variance_base_regs: [IR_INVALID_REG; 1024],
+        variance_value_regs: [IR_INVALID_REG; 1024],
+        so_bind_hess: [-1; 576],
+    }
+}
+
+fn lowerer_box_empty_big_arrays() -> Box<LowerBigArrays> with Alloc, Mut {
+    Box::new(empty_lower_big_arrays())
+}
+
 struct Lowerer {
     module: Box<IrModule>,
     epistemic_contests: Box<LowerEpistemicContestIndex>,
@@ -1771,10 +1801,8 @@ struct Lowerer {
     // Frontend-owned global element types. BSS byte size cannot distinguish
     // `[f64; N]` from `[i64; N]`, so this survives summary -> body lowering.
     global_types: Box<LowerGlobalTypeTable>,
-    array_elem_float_regs: [i64; 512],
+    big: Box<LowerBigArrays>,
     array_elem_float_reg_count: i64,
-    variance_base_regs: [i64; 1024],
-    variance_value_regs: [i64; 1024],
     variance_base_reg_count: i64,
     // Sprint 28: Debug-mode witness enforcement
     debug_mode: bool,
@@ -1804,7 +1832,6 @@ struct Lowerer {
     // rows so a local carries its Hessian exactly as it carries its gradient.
     so_enabled: bool,
     so_expr_hess: [i64; 36],
-    so_bind_hess: [i64; 576],
     // Inter-procedural FO: pure-fn transfer table (survives across function lowers).
     // kind: 0=none 1=id(p0) 2=scale(lit*p0) 3=add(p0+p1) 4=mul(p0*p1) 5=fwd(g)
     fo_xfer_count: i64,
@@ -2088,10 +2115,8 @@ fn lowerer_new() -> Lowerer with Alloc, Mut, Panic, Div {
         enum_variants: enum_variants,
         struct_layouts: struct_layouts,
         global_types: global_types,
-        array_elem_float_regs: [IR_INVALID_REG; 512],
+        big: lowerer_box_empty_big_arrays(),
         array_elem_float_reg_count: 0,
-        variance_base_regs: [IR_INVALID_REG; 1024],
-        variance_value_regs: [IR_INVALID_REG; 1024],
         variance_base_reg_count: 0,
         debug_mode: false,
         probe_mode: false,
@@ -2107,7 +2132,6 @@ fn lowerer_new() -> Lowerer with Alloc, Mut, Panic, Div {
         fo_bind: Box::new(empty_lower_fo_bind_table()),
         so_enabled: false,
         so_expr_hess: [-1; 36],
-        so_bind_hess: [-1; 576],
         fo_xfer_count: 0,
         fo_xfer_kind: [0; 64],
         fo_xfer_lit: [0.0; 64],
@@ -2661,10 +2685,8 @@ fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEp
         enum_variants: enum_variants,
         struct_layouts: struct_layouts,
         global_types: global_types,
-        array_elem_float_regs: [IR_INVALID_REG; 512],
+        big: lowerer_box_empty_big_arrays(),
         array_elem_float_reg_count: 0,
-        variance_base_regs: [IR_INVALID_REG; 1024],
-        variance_value_regs: [IR_INVALID_REG; 1024],
         variance_base_reg_count: 0,
         debug_mode: false,
         probe_mode: summary.probe_mode,
@@ -2680,7 +2702,6 @@ fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEp
         fo_bind: Box::new(empty_lower_fo_bind_table()),
         so_enabled: false,
         so_expr_hess: [-1; 36],
-        so_bind_hess: [-1; 576],
         fo_xfer_count: 0,
         fo_xfer_kind: [0; 64],
         fo_xfer_lit: [0.0; 64],
@@ -2724,10 +2745,8 @@ fn lowerer_new_from_program_summary_owned(summary: IrProgramSummary, epistemic: 
         enum_variants: summary.enum_variants,
         struct_layouts: summary.struct_layouts,
         global_types: summary.global_types,
-        array_elem_float_regs: [IR_INVALID_REG; 512],
+        big: lowerer_box_empty_big_arrays(),
         array_elem_float_reg_count: 0,
-        variance_base_regs: [IR_INVALID_REG; 1024],
-        variance_value_regs: [IR_INVALID_REG; 1024],
         variance_base_reg_count: 0,
         debug_mode: false,
         probe_mode: summary.probe_mode,
@@ -2743,7 +2762,6 @@ fn lowerer_new_from_program_summary_owned(summary: IrProgramSummary, epistemic: 
         fo_bind: Box::new(empty_lower_fo_bind_table()),
         so_enabled: false,
         so_expr_hess: [-1; 36],
-        so_bind_hess: [-1; 576],
         fo_xfer_count: 0,
         fo_xfer_kind: [0; 64],
         fo_xfer_lit: [0.0; 64],
@@ -2791,10 +2809,8 @@ fn lowerer_from_acc_module(module: Box<IrModule>) -> Lowerer with Alloc, Mut, Pa
         enum_variants: enum_variants,
         struct_layouts: struct_layouts,
         global_types: global_types,
-        array_elem_float_regs: [IR_INVALID_REG; 512],
+        big: lowerer_box_empty_big_arrays(),
         array_elem_float_reg_count: 0,
-        variance_base_regs: [IR_INVALID_REG; 1024],
-        variance_value_regs: [IR_INVALID_REG; 1024],
         variance_base_reg_count: 0,
         debug_mode: false,
         probe_mode: false,
@@ -2810,7 +2826,6 @@ fn lowerer_from_acc_module(module: Box<IrModule>) -> Lowerer with Alloc, Mut, Pa
         fo_bind: Box::new(empty_lower_fo_bind_table()),
         so_enabled: false,
         so_expr_hess: [-1; 36],
-        so_bind_hess: [-1; 576],
         fo_xfer_count: 0,
         fo_xfer_kind: [0; 64],
         fo_xfer_lit: [0.0; 64],
@@ -10524,16 +10539,16 @@ impl Lowerer {
         }
         var i: i64 = 0
         while i < lo.variance_base_reg_count {
-            if lo.variance_base_regs[i as usize] == base_reg {
-                lo.variance_value_regs[i as usize] = variance_reg
+            if (*lo.big).variance_base_regs[i as usize] == base_reg {
+                (*lo.big).variance_value_regs[i as usize] = variance_reg
                 return lo
             }
             i = i + 1
         }
         if lo.variance_base_reg_count < 1024 {
             let idx = lo.variance_base_reg_count
-            lo.variance_base_regs[idx as usize] = base_reg
-            lo.variance_value_regs[idx as usize] = variance_reg
+            (*lo.big).variance_base_regs[idx as usize] = base_reg
+            (*lo.big).variance_value_regs[idx as usize] = variance_reg
             lo.variance_base_reg_count = idx + 1
         }
         // #1706 NOTE: past this wall a variance binding is silently DROPPED and the
@@ -10613,8 +10628,8 @@ impl Lowerer {
     fn lookup_variance_for_base_reg(self, base_reg: i64) -> i64 with Mut, Panic, Div {
         var i: i64 = 0
         while i < self.variance_base_reg_count {
-            if self.variance_base_regs[i as usize] == base_reg {
-                return self.variance_value_regs[i as usize]
+            if (*self.big).variance_base_regs[i as usize] == base_reg {
+                return (*self.big).variance_value_regs[i as usize]
             }
             i = i + 1
         }
@@ -11128,7 +11143,7 @@ impl Lowerer {
         }
         var i: i64 = 0
         while i < 36 {
-            lo.so_bind_hess[(row * 36 + i) as usize] = lo.so_expr_hess[i as usize]
+            (*lo.big).so_bind_hess[(row * 36 + i) as usize] = lo.so_expr_hess[i as usize]
             i = i + 1
         }
         lo
@@ -11151,7 +11166,7 @@ impl Lowerer {
         }
         var j: i64 = 0
         while j < 36 {
-            lo.so_expr_hess[j as usize] = lo.so_bind_hess[(row * 36 + j) as usize]
+            lo.so_expr_hess[j as usize] = (*lo.big).so_bind_hess[(row * 36 + j) as usize]
             j = j + 1
         }
         lo
@@ -13862,13 +13877,13 @@ impl Lowerer {
         }
         var i: i64 = 0
         while i < lo.array_elem_float_reg_count {
-            if lo.array_elem_float_regs[i as usize] == reg {
+            if (*lo.big).array_elem_float_regs[i as usize] == reg {
                 return lo
             }
             i = i + 1
         }
         if lo.array_elem_float_reg_count < 512 {
-            lo.array_elem_float_regs[lo.array_elem_float_reg_count as usize] = reg
+            (*lo.big).array_elem_float_regs[lo.array_elem_float_reg_count as usize] = reg
             lo.array_elem_float_reg_count = lo.array_elem_float_reg_count + 1
         }
         lo
@@ -13880,7 +13895,7 @@ impl Lowerer {
         }
         var i: i64 = 0
         while i < self.array_elem_float_reg_count {
-            if self.array_elem_float_regs[i as usize] == reg {
+            if (*self.big).array_elem_float_regs[i as usize] == reg {
                 return true
             }
             i = i + 1
@@ -18496,6 +18511,34 @@ impl Lowerer {
             Some(rhs_for_arr_chain) => lo.expr_ident_is_array_returning_fn_ref(&(*rhs_for_arr_chain)),
             _ => false,
         }
+        // Captured BEFORE bind_local(s.name, ...) below rebinds `s.name` to a
+        // fresh (non-ref) slot. Same-name shadowing (`let a = a`) means a
+        // post-bind lookup_local_is_ref(rhs name) would find that fresh slot
+        // instead of the outer one it's meant to read, since lookup searches
+        // newest-first — silently losing is_ref on the shadowing form.
+        var rhs_ident_is_ref = false
+        match s.expr {
+            Some(rhs_ident_pre) => {
+                if (*rhs_ident_pre).kind == ExprKind::ExprIdent {
+                    // A source that is BOTH ref-typed AND array_copy_word_scalar must
+                    // NOT propagate is_ref. V0-E.5.7 forces a value-copy of every
+                    // `&[f128; N]` param regardless of the `&` annotation
+                    // (lower_fn_params_ref: param_word_scalar is true for any f128
+                    // array, ref or not), materializing a REAL GC array handle in
+                    // the param's own register via emit_fixed_array_value_copy --
+                    // not a caller address. That local is simultaneously is_ref=1
+                    // (from the `&` in its declared type) and array_copy_word_scalar=1
+                    // (from the forced copy); the copy is what actually describes its
+                    // register's contents. Propagating is_ref to `zs` in `let zs = a`
+                    // would route zs[i] through the ref-array/deref path (label_id=1)
+                    // onto a register that holds a handle, not an address --
+                    // corrupting the read/write instead of indexing the array.
+                    rhs_ident_is_ref = lo.lookup_local_is_ref((*rhs_ident_pre).name)
+                        && !lo.lookup_local_array_copy_word_scalar((*rhs_ident_pre).name)
+                }
+            }
+            _ => {}
+        }
         var fixed_array_len = lower_opt_type_fixed_array_len(&s.ty)
         var fixed_array_word_scalar = lower_opt_type_fixed_array_word_scalar(&s.ty)
         var rhs_array_elem_is_float = false
@@ -18637,7 +18680,7 @@ impl Lowerer {
             _ => {}
         }
         lo = lo.bind_local(s.name, bind_reg, is_mut)
-        lo.lower_let_stmt_finalize_ref(s, is_mut, reg, fixed_array_len, fixed_array_word_scalar, rhs_array_elem_is_float, pre_bind_tuple_mask, pre_bind_arr_chain)
+        lo.lower_let_stmt_finalize_ref(s, is_mut, reg, fixed_array_len, fixed_array_word_scalar, rhs_array_elem_is_float, rhs_ident_is_ref, pre_bind_tuple_mask, pre_bind_arr_chain)
     }
 
     fn lower_let_stmt_finalize_ref(
@@ -18648,6 +18691,7 @@ impl Lowerer {
         fixed_array_len: i64,
         fixed_array_word_scalar: bool,
         rhs_array_elem_is_float: bool,
+        rhs_ident_is_ref: bool,
         pre_bind_tuple_mask: i64,
         pre_bind_arr_chain: bool
     ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
@@ -18662,6 +18706,23 @@ impl Lowerer {
                 Some(rhs_ref) => {
                     if (*rhs_ref).kind == ExprKind::ExprUnary {
                         if (*rhs_ref).un_op == UnaryOp::OpRef || (*rhs_ref).un_op == UnaryOp::OpRefMut {
+                            bind_as_ref = true
+                        }
+                    } else if (*rhs_ref).kind == ExprKind::ExprIdent {
+                        // `let zs = a` where `a` is itself already a reference-typed
+                        // local/param (unannotated bare-identifier alias). Without this,
+                        // `zs` loses the is_ref bit that every lookup_local_is_ref call
+                        // site (IndexGet/Set, FieldGet/Set, .len(), &self auto-ref,
+                        // for-in-array, struct_local_is_value_copyable, …) depends on to
+                        // route through the ref-array/deref path instead of treating the
+                        // address as an ordinary GC handle.
+                        //
+                        // rhs_ident_is_ref was captured by the caller BEFORE s.name was
+                        // rebound (bind_local above), so same-name shadowing (`let a = a`)
+                        // still reads the OUTER `a` here instead of the fresh (non-ref)
+                        // slot bind_local just created for the new `a` — lookup_local_is_ref
+                        // on (*rhs_ref).name at this point would find that fresh slot first.
+                        if rhs_ident_is_ref {
                             bind_as_ref = true
                         }
                     }
