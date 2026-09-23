@@ -955,6 +955,11 @@ pub fn native_v2_legalize_summary_from_machine(func: MachineFunction) -> NativeV
                 out.legal_instr_count = out.legal_instr_count + 4
             }
         } else if instr.opcode == MIR_OP_PSEUDO_UNARY {
+            let s1 = machine_instr_src1_value(instr)
+            let s1f = if s1 >= 0 && s1 < MIR_MAX_FLOAT_SLOTS { is_float_slot[s1 as usize] } else { 0 }
+            if s1f == 1 && machine_instr_dst_value(instr) >= 0 && machine_instr_dst_value(instr) < MIR_MAX_FLOAT_SLOTS {
+                is_float_slot[machine_instr_dst_value(instr) as usize] = 1
+            }
             if machine_instr_un_op(instr) == UnaryOp::OpRef || machine_instr_un_op(instr) == UnaryOp::OpRefMut {
                 out.legal_instr_count = out.legal_instr_count + 2
             } else {
@@ -1095,6 +1100,11 @@ pub fn native_v2_legalize_ir_summary_ref(func: &IrFunction) -> NativeV2LegalizeS
                 out.legal_instr_count = out.legal_instr_count + 4
             }
         } else if instr.op == IrOpcode::IrUnaryOp {
+            let s1 = instr.src1
+            let s1f = if s1 >= 0 && s1 < MIR_MAX_FLOAT_SLOTS { is_float_slot[s1 as usize] } else { 0 }
+            if s1f == 1 && instr.dst >= 0 && instr.dst < MIR_MAX_FLOAT_SLOTS {
+                is_float_slot[instr.dst as usize] = 1
+            }
             if instr.un_op == UnaryOp::OpRef || instr.un_op == UnaryOp::OpRefMut {
                 out.legal_instr_count = out.legal_instr_count + 2
             } else {
@@ -1260,15 +1270,28 @@ pub fn native_v2_lower_legal_function_from_ir_ref(func: &IrFunction, out: &! Mac
                 native_v2_emit_legal_instr_mut(out, native_v2_make_store_stack(machine_instr_dst_value(instr), lhs))
             }
         } else if instr.opcode == MIR_OP_PSEUDO_UNARY {
+            let src_slot = machine_instr_src1_value(instr)
+            let dst_slot = machine_instr_dst_value(instr)
+            let src_is_float = if src_slot >= 0 && src_slot < MIR_MAX_FLOAT_SLOTS { (*out).is_float_slot[src_slot as usize] } else { 0 }
             let temp = (*out).temp_count
             (*out).temp_count = temp + 1
-            if machine_instr_un_op(instr) == UnaryOp::OpRef || machine_instr_un_op(instr) == UnaryOp::OpRefMut {
-                native_v2_emit_legal_instr_mut(out, native_v2_make_lea_stack(temp, machine_instr_src1_value(instr)))
-            } else {
-                native_v2_emit_legal_instr_mut(out, native_v2_make_load_stack(temp, machine_instr_src1_value(instr)))
-                native_v2_emit_legal_instr_mut(out, native_v2_make_unary(temp, temp, machine_instr_un_op(instr)))
+            if src_is_float == 1 && temp >= 0 && temp < MIR_MAX_FLOAT_SLOTS {
+                (*out).is_float_slot[temp as usize] = 1
             }
-            native_v2_emit_legal_instr_mut(out, native_v2_make_store_stack(machine_instr_dst_value(instr), temp))
+            if src_is_float == 1 && dst_slot >= 0 && dst_slot < MIR_MAX_FLOAT_SLOTS {
+                (*out).is_float_slot[dst_slot as usize] = 1
+            }
+            if machine_instr_un_op(instr) == UnaryOp::OpRef || machine_instr_un_op(instr) == UnaryOp::OpRefMut {
+                native_v2_emit_legal_instr_mut(out, native_v2_make_lea_stack(temp, src_slot))
+            } else {
+                native_v2_emit_legal_instr_mut(out, native_v2_make_load_stack(temp, src_slot))
+                var un_mi = native_v2_make_unary(temp, temp, machine_instr_un_op(instr))
+                if src_is_float == 1 {
+                    un_mi.aux = machine_operand_imm64(1)
+                }
+                native_v2_emit_legal_instr_mut(out, un_mi)
+            }
+            native_v2_emit_legal_instr_mut(out, native_v2_make_store_stack(dst_slot, temp))
         } else if instr.opcode == MIR_OP_PSEUDO_CALL {
             if machine_instr_call_arg_count(instr) > 6 {
                 (*out).supported = false
@@ -1454,15 +1477,28 @@ pub fn native_v2_legalize_function(func: MachineFunction) -> MachineFunction wit
                 out = _emit_legal_byval(out, native_v2_make_store_stack(machine_instr_dst_value(instr), lhs))
             }
         } else if instr.opcode == MIR_OP_PSEUDO_UNARY {
+            let src_slot = machine_instr_src1_value(instr)
+            let dst_slot = machine_instr_dst_value(instr)
+            let src_is_float = if src_slot >= 0 && src_slot < MIR_MAX_FLOAT_SLOTS { out.is_float_slot[src_slot as usize] } else { 0 }
             let temp = out.temp_count
             out.temp_count = temp + 1
-            if machine_instr_un_op(instr) == UnaryOp::OpRef || machine_instr_un_op(instr) == UnaryOp::OpRefMut {
-                out = _emit_legal_byval(out, native_v2_make_lea_stack(temp, machine_instr_src1_value(instr)))
-            } else {
-                out = _emit_legal_byval(out, native_v2_make_load_stack(temp, machine_instr_src1_value(instr)))
-                out = _emit_legal_byval(out, native_v2_make_unary(temp, temp, machine_instr_un_op(instr)))
+            if src_is_float == 1 && temp >= 0 && temp < MIR_MAX_FLOAT_SLOTS {
+                out.is_float_slot[temp as usize] = 1
             }
-            out = _emit_legal_byval(out, native_v2_make_store_stack(machine_instr_dst_value(instr), temp))
+            if src_is_float == 1 && dst_slot >= 0 && dst_slot < MIR_MAX_FLOAT_SLOTS {
+                out.is_float_slot[dst_slot as usize] = 1
+            }
+            if machine_instr_un_op(instr) == UnaryOp::OpRef || machine_instr_un_op(instr) == UnaryOp::OpRefMut {
+                out = _emit_legal_byval(out, native_v2_make_lea_stack(temp, src_slot))
+            } else {
+                out = _emit_legal_byval(out, native_v2_make_load_stack(temp, src_slot))
+                var un_mi = native_v2_make_unary(temp, temp, machine_instr_un_op(instr))
+                if src_is_float == 1 {
+                    un_mi.aux = machine_operand_imm64(1)
+                }
+                out = _emit_legal_byval(out, un_mi)
+            }
+            out = _emit_legal_byval(out, native_v2_make_store_stack(dst_slot, temp))
         } else if instr.opcode == MIR_OP_PSEUDO_CALL {
             if machine_instr_call_arg_count(instr) > 6 {
                 out.supported = false
