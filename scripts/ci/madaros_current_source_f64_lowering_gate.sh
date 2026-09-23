@@ -217,4 +217,66 @@ grep -Fq "function \`wide\` returns a tuple with an \`[f64; N]\` in slot ${SLOT_
   fail "slot-${SLOT_MAX} diagnostic was missing or changed"
 }
 
-echo "[madaros-f64-lowering] PASS: one shared Madaros ELF passed dereference, global f64, direct capacity, imported capacity, imported wide-call, f64-array tuple table capacity (${TUPLE_CAP} ok, ${TUPLE_OVER} rejected), and slot limit (slot $((SLOT_MAX - 1)) ok, slot ${SLOT_MAX} rejected)"
+
+# f64-array tuple table coverage for IMPL METHODS (#2570 review follow-up).
+# lower_fn_tuple_f64_arrays_collect only ever walked top-level ItemFn entries;
+# an impl method returning a tuple with an [f64; N] slot is lowered as a
+# mangled `Type_method` free function (lower_impl_methods_ref) but the
+# prepass never reached it, so the table had no entry under that mangled
+# name -- every method-result read of the array slot took the integer path.
+# expr_is_tuple_slot_f64_array_ref and expr_result_tuple_float_mask_ref (the
+# let-binding side) also only recognized an ExprCall base, not
+# ExprMethodCall. Two shapes, matching the direct-projection witness above:
+#   A  `recv.pair().0[0]`            direct projection off the method call
+#   B  `let t = recv.pair(); t.0[0]` in-place index through a local bound
+#                                     from the method call's result
+IMPLM_DIR="$WORK/tuple-impl-method"
+mkdir -p "$IMPLM_DIR"
+cat > "$IMPLM_DIR/main.sio" <<'SOUNIO'
+struct Pairer {
+    scale: f64,
+}
+
+impl Pairer {
+    fn pair(self) -> ([f64; 2], i64) with Mut, Panic {
+        var a: [f64; 2] = [0.0; 2]
+        a[0] = self.scale
+        (a, 9)
+    }
+}
+
+fn main() -> i32 with IO, Mut, Panic {
+    var bad: i32 = 0
+    let recv = Pairer { scale: 1.5 }
+    let da: f64 = recv.pair().0[0] * 2.0
+    if da != 3.0 { bad = bad + 1 }
+    let t = recv.pair()
+    let db: f64 = t.0[0] * 2.0
+    if db != 3.0 { bad = bad + 2 }
+    if bad == 0 {
+        println("TUPLE_F64_ARRAY_IMPL_METHOD_OK")
+        return 0
+    }
+    bad
+}
+SOUNIO
+IMPLM_OUT="$IMPLM_DIR/main.elf"
+set +e
+MADAROS_RAW_BIN="$MADAROS_ELF" "$ROOT_DIR/bin/madaros" compile "$IMPLM_DIR/main.sio" -o "$IMPLM_OUT" >"$IMPLM_DIR/compile.log" 2>&1
+implm_compile_rc=$?
+set -e
+if [[ "$implm_compile_rc" -ne 0 ]]; then
+  tail -n 40 "$IMPLM_DIR/compile.log" >&2
+  fail "impl-method f64-array-tuple witness did not compile rc=$implm_compile_rc"
+fi
+[[ -e "$IMPLM_OUT" ]] || fail "impl-method f64-array-tuple witness produced no output artifact"
+chmod +x "$IMPLM_OUT"
+set +e
+IMPLM_RUN_OUT="$("$IMPLM_OUT" 2>&1)"
+implm_run_rc=$?
+set -e
+if [[ "$implm_run_rc" -ne 0 ]] || [[ "$IMPLM_RUN_OUT" != "TUPLE_F64_ARRAY_IMPL_METHOD_OK" ]]; then
+  fail "impl-method f64-array-tuple witness ran rc=$implm_run_rc out=[$IMPLM_RUN_OUT]: a method returning an f64-array tuple was read as integer bits"
+fi
+
+echo "[madaros-f64-lowering] PASS: one shared Madaros ELF passed dereference, global f64, direct capacity, imported capacity, imported wide-call, f64-array tuple table capacity (${TUPLE_CAP} ok, ${TUPLE_OVER} rejected), slot limit (slot $((SLOT_MAX - 1)) ok, slot ${SLOT_MAX} rejected), and impl-method tuple coverage"

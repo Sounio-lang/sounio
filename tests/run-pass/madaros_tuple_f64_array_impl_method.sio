@@ -1,0 +1,46 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: TUPLE_F64_ARRAY_IMPL_METHOD PASS
+//
+// Review follow-up (#2570). lower_fn_tuple_f64_arrays_collect only ever
+// walked top-level ItemFn entries -- an impl method returning a tuple with an
+// [f64; N] slot is lowered as a mangled free function (`Type_method`, see
+// lower_impl_methods_ref) but the prepass never reached it, so the table had
+// no entry under that mangled name and every method-result read of the array
+// slot took the integer path. expr_is_tuple_slot_f64_array_ref also only
+// recognized an ExprCall base, not ExprMethodCall, so even a correctly
+// collected mask would not have been consulted for a method call's result.
+//
+//   A  `recv.pair().0[0]`               direct projection off a method call
+//   B  `let t = recv.pair(); t.0[0]`    in-place index through a local bound
+//                                        to the method call's result
+struct Pairer {
+    scale: f64,
+}
+
+impl Pairer {
+    fn pair(self) -> ([f64; 2], i64) with Mut, Panic {
+        var a: [f64; 2] = [0.0; 2]
+        a[0] = self.scale
+        (a, 9)
+    }
+}
+
+fn main() -> i32 with IO, Mut, Panic {
+    var bad: i32 = 0
+    let recv = Pairer { scale: 1.5 }
+
+    // A: direct projection off the method call, no tuple-local binding.
+    let da: f64 = recv.pair().0[0] * 2.0
+    if da != 3.0 { bad = bad + 1 }
+
+    // B: in-place index through an ExprIdent tuple-local bound from a method call.
+    let t = recv.pair()
+    let db: f64 = t.0[0] * 2.0
+    if db != 3.0 { bad = bad + 2 }
+
+    if bad == 0 {
+        println("TUPLE_F64_ARRAY_IMPL_METHOD PASS")
+    }
+    bad
+}
