@@ -11,7 +11,15 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.stdlib.linalg.
 
 ## Overview
 
-Sounio's linalg module includes FFI bindings to optimized BLAS libraries (OpenBLAS, MKL, ATLAS) for high-performance linear algebra operations.
+Sounio's linalg module exposes BLAS-shaped APIs (`blas_dgemm_rowmajor`,
+`blas_dgesvd_approx`) that are **currently implemented in pure Sounio**. The
+optimized-library (OpenBLAS/MKL/ATLAS) FFI path is planned but not yet wired:
+`blas_available()`, `dgemm_available()`, and `dgesvd_available()` all return
+`false`, so every call runs the pure-Sounio implementation.
+
+> **Source-verified status.** Per `stdlib/linalg/blas_ffi.sio`, no BLAS/LAPACK
+> library is loaded today. The speedup, automatic-detection, and installation
+> sections below describe the *intended* FFI path, not the current build.
 
 ## Performance Results
 
@@ -24,11 +32,14 @@ Sounio's linalg module includes FFI bindings to optimized BLAS libraries (OpenBL
 
 **Target:** <2x NumPy (which also uses BLAS internally)
 
+These figures are **design targets** for the planned BLAS path; the current
+pure-Sounio build does not reach them.
+
 ## Features
 
-- **Automatic library detection**: Tries `libblas.so`, `libopenblas.so`, `libmkl_rt.so`, `libatlas.so`
-- **Smart dispatch**: Uses BLAS for deterministic matrices, pure-Sounio GUM propagation for epistemic
-- **Fallback support**: Pure-Sounio implementations when BLAS is unavailable
+- **Automatic library detection (planned)**: Will probe `libblas.so`, `libopenblas.so`, `libmkl_rt.so`, `libatlas.so`; currently inactive (`blas_available()` returns `false`).
+- **Smart dispatch (planned)**: Will route deterministic matrices to BLAS and epistemic matrices to pure-Sounio GUM; today every call uses the pure-Sounio path.
+- **Always pure-Sounio today**: With the FFI probe disabled, the pure-Sounio implementation is what actually runs.
 - **SVD via power iteration**: `blas_dgesvd_approx` is a pure-Sounio rank-1
   approximation of the dominant singular value (no LAPACK/FFI linkage;
   `dgesvd_available()` currently always returns false)
@@ -38,7 +49,7 @@ Sounio's linalg module includes FFI bindings to optimized BLAS libraries (OpenBL
 ### Check BLAS Availability
 
 ```sio
-use linalg::blas_ffi::{blas_available, dgemm_available, dgesvd_available};
+use linalg::blas_ffi::{blas_available, dgemm_available, dgesvd_available}
 
 if blas_available() {
     println("BLAS acceleration enabled");
@@ -54,21 +65,21 @@ if dgesvd_available() {
 ### Deterministic Matrices (BLAS Path)
 
 ```sio
-use linalg::epistemic_matrix::EpistemicMatrix;
+use linalg::epistemic_matrix::EpistemicMatrix
 
 // Create deterministic matrices (no uncertainty)
 let a = EpistemicMatrix::zeros(256, 256);
 let b = EpistemicMatrix::zeros(256, 256);
 // ... fill matrices with values ...
 
-// This uses BLAS DGEMM internally (40x faster)
+// Runs the pure-Sounio DGEMM today (the BLAS FFI path is planned, not yet wired).
 let c = a.matmul(&b);
 ```
 
 ### Epistemic Matrices (Pure-Sounio GUM)
 
 ```sio
-use linalg::epistemic_matrix::EpistemicMatrix;
+use linalg::epistemic_matrix::EpistemicMatrix
 
 // Create epistemic matrices (with uncertainty)
 let a = EpistemicMatrix::zeros(256, 256)
@@ -91,7 +102,7 @@ println("C[0,0] = " + str(c.get_val(0,0)) + " ± " + str(c.get_unc(0,0)));
 ### Direct BLAS Calls
 
 ```sio
-use linalg::blas_ffi::{blas_dgemm_rowmajor, blas_dgesvd_approx};
+use linalg::blas_ffi::{blas_dgemm_rowmajor, blas_dgesvd_approx}
 
 // Direct DGEMM call. Mutable borrows are `&!`; semicolons are not used.
 // Buffers are fixed 256-element arrays, so keep m*n, k*n, m*k <= 256.
@@ -123,6 +134,9 @@ let info = blas_dgesvd_approx(&a, m, n, &!s, 32)
 ```
 
 ## Installation
+
+> Installing a BLAS library is only useful once the FFI path is wired; the
+> current pure-Sounio build ignores it.
 
 ### Ubuntu/Debian
 
@@ -168,9 +182,9 @@ brew install openblas
 ┌─────────────────────────────────────────────────────────┐
 │                    blas_ffi.sio                          │
 │  ┌─────────────────────────────────────────────────────┐│
-│  │ blas_dgemm_rowmajor()  → libblas.so!dgemm_          ││
+│  │ blas_dgemm_rowmajor()  → pure-Sounio GEMM (no BLAS) ││
 │  │ blas_dgesvd_approx()   → pure-Sounio (no BLAS)      ││
-│  │ blas_available()       → dlopen() check             ││
+│  │ blas_available()       → returns false (FFI unwired)││
 │  └─────────────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────────┘
                           │
@@ -187,6 +201,8 @@ brew install openblas
 
 NumPy also uses BLAS internally via `numpy.dot()` and `@` operator. Our target is to be within 2x of NumPy performance:
 
+These ratios are **targets** for the planned FFI path; the current pure-Sounio build is slower.
+
 | Matrix Size | Sounio BLAS | NumPy | Ratio |
 |-------------|-------------|-------|-------|
 | 256x256 | 3ms | 2ms | 1.5x |
@@ -199,7 +215,7 @@ The small overhead comes from FFI call overhead and Sounio's runtime checks.
 
 | File | Description |
 |------|-------------|
-| [`blas_ffi.sio`](../../../stdlib/linalg/blas_ffi.sio) | FFI bindings to BLAS/LAPACK |
+| [`blas_ffi.sio`](../../../stdlib/linalg/blas_ffi.sio) | Pure-Sounio BLAS-shaped API (BLAS/LAPACK FFI planned) |
 | [`blas_fallback.sio`](../../../stdlib/linalg/blas_fallback.sio) | Pure-Sounio fallback implementations |
 | [`epistemic_matrix.sio`](../../../stdlib/linalg/epistemic_matrix.sio) | EpistemicMatrix with BLAS dispatch |
 | [`blas_ffi_test.sio`](../../../tests/stdlib/linalg/blas_ffi_test.sio) | Integration tests |
