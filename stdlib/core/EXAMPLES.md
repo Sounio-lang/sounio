@@ -60,7 +60,7 @@ numeric helpers `FloatOption` / `IntOption` (`float_some`, `float_none`,
 `float_option_is_some`, `float_option_unwrap`) — these are not exported, so
 they cannot be `use`d as a `core::option` API.
 
-There is no `Option<Epistemic>`. Carry uncertainty with `Epistemic` directly
+There is no dedicated `Option<Epistemic>` helper in `stdlib/core`; since `Option<T>` is generic, you may wrap an `Epistemic` directly (the stdlib returns `Option<&Epistemic>`, e.g. `most_uncertain` in `stdlib/epistemic/active.sio`). Carry uncertainty with `Epistemic` directly
 (`ep_measured(42.0, 0.1)`), and optionality with the built-in generic
 `Option<T>` (or, within `stdlib/core`, the module-internal `FloatOption`) separately.
 

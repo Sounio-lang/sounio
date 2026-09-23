@@ -35,7 +35,7 @@ These names — `new_tape`, `tape_new_var`, `tape_last_var`, `tape_mul`,
 cannot be imported. The tape module is internal; `epistemic_dual`
 (e.g. `edual_new` / `edual_mul`) is the public AD surface. By contrast,
 `grad.sio` exports only the `Dual` struct — its gradient functions
-(`grad`, `jacobian`, `hessian_diag`) and the `dual.sio` forward-mode arithmetic
+(`grad_rosenbrock`, `jacobian_polar_to_cart`, `hessian_diag_rosenbrock`) and the `dual.sio` forward-mode arithmetic
 (`dual_var`, `dual_mul`, …) are private and cannot be imported, so `grad` is
 not a usable public gradient API.
 
