@@ -131,6 +131,18 @@ jobs:
       - run: echo hi
 EOF
 
+    # NEGATIVE 5: `on: pull_request_target` as a bare inline scalar (not
+    # bracketed) -- same out-of-scope risk class as NEGATIVE 3, exercised
+    # through the inline-scalar code path instead of the block-form one.
+    cat > "$tmp/negative_inline_scalar_target.yml" <<'EOF'
+on: pull_request_target
+jobs:
+  automation:
+    runs-on: [self-hosted, gpu, cuda]
+    steps:
+      - run: echo hi
+EOF
+
     # POSITIVE 2: `pull_request: {}` (explicit empty mapping) is YAML-equivalent
     # to bare `pull_request:` -- must still flag an unguarded self-hosted job.
     cat > "$tmp/positive_empty_mapping_trigger.yml" <<'EOF'
@@ -189,6 +201,34 @@ jobs:
       - run: echo hi
 EOF
 
+    # POSITIVE 6: `on: pull_request` as a bare scalar on the `on:` line itself
+    # (no block, no brackets) -- a form the outer `on:` matcher used to miss
+    # entirely (it required either nothing or a `[...]` after `on:`), so this
+    # workflow's trigger was invisible to the scanner and an unguarded
+    # self-hosted job under it went unflagged.
+    cat > "$tmp/positive_inline_scalar_trigger.yml" <<'EOF'
+on: pull_request
+jobs:
+  danger:
+    runs-on: [self-hosted, gpu, cuda]
+    steps:
+      - run: echo hi
+EOF
+
+    # POSITIVE 7: `on: [pull_request, pull_request_target]` -- a combined
+    # inline list where `pull_request` is still fork-reachable. The naive
+    # `"pull_request_target" not in line` check used to disqualify this
+    # whole line just because pull_request_target ALSO appeared in it,
+    # missing the bare pull_request that was also present.
+    cat > "$tmp/positive_inline_combined_trigger.yml" <<'EOF'
+on: [pull_request, pull_request_target]
+jobs:
+  danger:
+    runs-on: [self-hosted, gpu, cuda]
+    steps:
+      - run: echo hi
+EOF
+
     local out
     out="$(python3 "$SCANNER" "$tmp"/*.yml || true)"
 
@@ -217,8 +257,19 @@ EOF
     else
         echo "  FAIL POSITIVE: guard-text-inside-an-|| bypass was NOT flagged"; rc=1
     fi
+    if grep -q 'positive_inline_scalar_trigger.yml:danger' <<<"$out"; then
+        echo "  ok   POSITIVE: bare scalar 'on: pull_request' trigger is flagged"
+    else
+        echo "  FAIL POSITIVE: bare scalar 'on: pull_request' trigger was NOT flagged"; rc=1
+    fi
+    if grep -q 'positive_inline_combined_trigger.yml:danger' <<<"$out"; then
+        echo "  ok   POSITIVE: 'on: [pull_request, pull_request_target]' is flagged"
+    else
+        echo "  FAIL POSITIVE: 'on: [pull_request, pull_request_target]' was NOT flagged"; rc=1
+    fi
     for job in "negative_guarded.yml:safe" "negative_no_pr_trigger.yml:dispatch_only" \
-               "negative_pull_request_target.yml:automation" "negative_gh_hosted.yml:ordinary"; do
+               "negative_pull_request_target.yml:automation" "negative_gh_hosted.yml:ordinary" \
+               "negative_inline_scalar_target.yml:automation"; do
         if grep -q "$job" <<<"$out"; then
             echo "  FAIL NEGATIVE: $job was flagged but should not have been"; rc=1
         else

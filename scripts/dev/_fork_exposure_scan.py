@@ -33,17 +33,37 @@ def indent_of(line: str) -> int:
     return len(line) - len(line.lstrip(" "))
 
 
+_ON_LINE_RE = re.compile(r"^on:\s*(.*)$")
+
+
 def has_bare_pull_request_trigger(lines: list[str]) -> bool:
     """True if the workflow's `on:` section names `pull_request` (fork-reachable),
     as opposed to only `pull_request_target` (a separate, out-of-scope risk class --
     see docs/ops/fork_pr_self_hosted_runner_policy.md)."""
     in_on = False
     for line in lines:
-        if re.match(r"^on:\s*(\[.*\])?\s*$", line):
+        m = _ON_LINE_RE.match(line)
+        if m:
+            rest = m.group(1).strip()
+            if rest:
+                # Everything GitHub Actions allows on the `on:` line itself
+                # without a following block: a bracketed list
+                # (`on: [push, pull_request]`) or a single bare scalar
+                # (`on: pull_request`). Both are just text at this point --
+                # scan it directly for a standalone `pull_request` token.
+                # BARE_PULL_REQUEST_INLINE_RE's trailing \b already refuses
+                # to match inside `pull_request_target` (no word boundary
+                # between "t" and the following "_"), so a combined list
+                # like `[pull_request, pull_request_target]` is still
+                # correctly flagged for the `pull_request` it also names --
+                # unlike a bare `"pull_request_target" not in line` check,
+                # which would wrongly disqualify the whole line.
+                if BARE_PULL_REQUEST_INLINE_RE.search(rest):
+                    return True
+                # Inline form has no continuation block to scan.
+                in_on = False
+                continue
             in_on = True
-            # Bracket/inline form: `on: [push, pull_request]`.
-            if BARE_PULL_REQUEST_INLINE_RE.search(line) and "pull_request_target" not in line:
-                return True
             continue
         if in_on:
             if line and not line.startswith(" ") and not line.startswith("#"):
