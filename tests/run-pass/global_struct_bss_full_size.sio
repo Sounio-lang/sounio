@@ -1,0 +1,62 @@
+//@ run-pass
+//@ requires: lean_single
+//@ description: a struct-typed global must reserve its full size in .bss, not 8 bytes
+//
+// lean_single's gl_add() sized every non-array global as 8 bytes, ignoring the
+// struct size the registration pass passed as esiz. Later bss allocations (the
+// next global, the call-argument shadow buffers) then landed inside the struct:
+// two adjacent struct globals aliased, and any call that staged an argument
+// zeroed interior array elements of a global arena.
+
+struct Pair { a: i64, b: i64, c: i64, d: i64 }
+struct Arena { lf: [i64; 64], count: i64 }
+
+var P1: Pair = Pair { a: 0, b: 0, c: 0, d: 0 }
+var P2: Pair = Pair { a: 0, b: 0, c: 0, d: 0 }
+var ARENA: Arena = Arena { lf: [-1; 64], count: 0 }
+var TAIL: [i64; 64] = [-2; 64]
+
+fn ident(x: i64) -> i64 { return x }
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    var bad = 0
+
+    P1.a = 11
+    P1.b = 12
+    P1.c = 13
+    P1.d = 14
+    P2.a = 21
+    P2.b = 22
+    P2.c = 23
+    P2.d = 24
+    if P1.a != 11 || P1.b != 12 || P1.c != 13 || P1.d != 14 { bad = bad + 1 }
+    if P2.a != 21 || P2.b != 22 || P2.c != 23 || P2.d != 24 { bad = bad + 1 }
+
+    var i = 0
+    while i < 64 {
+        ARENA.lf[i] = 1000 + i
+        TAIL[i] = 2000 + i
+        i = i + 1
+    }
+    ARENA.count = 64
+
+    let z = ident(5)
+    println(1.5)
+    if z != 5 { bad = bad + 1 }
+
+    i = 0
+    while i < 64 {
+        if ARENA.lf[i] != 1000 + i { bad = bad + 1 }
+        if TAIL[i] != 2000 + i { bad = bad + 1 }
+        i = i + 1
+    }
+    if ARENA.count != 64 { bad = bad + 1 }
+
+    if bad != 0 {
+        print("global struct storage overlap, violations: ")
+        println(bad)
+        return 1
+    }
+    println("GLOBAL_STRUCT_BSS_FULL_SIZE_OK")
+    return 0
+}
