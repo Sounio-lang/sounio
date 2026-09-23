@@ -51,7 +51,14 @@ PAT_TYPE=':[[:space:]]*fn\([^)]*\)[[:space:]]*->'
 # balanced-delimiter scan (scan_tail below) that tracks paren depth
 # character-by-character and stops at the first `,` or `)` seen at depth 0 --
 # correct for any nesting depth, not just zero or one.
-withpat='with[[:space:]]+[A-Za-z]'
+#
+# Copilot follow-up (#2570): the with-clause detection regex used to be
+# passed into awk as a `-v` runtime string (withpat). Now that "does the tail
+# contain a with-clause" isn't even the right question (see the AWK_SCAN
+# comment below), the detection regex lives directly inside
+# count_with_clauses as a lexical regex literal -- consistent with keeping
+# PAT_TYPE itself out of the `-v` path -- so there is no longer a bash-side
+# `withpat` variable to pass through.
 
 strip_noise() {
   # drop // line comments and "..." string literals before matching, so a
@@ -97,6 +104,26 @@ strip_noise() {
 # paren the same way. PAT_TYPE is spliced into the program text below at
 # script-construction time (bash string concatenation, not a `-v` value), so
 # it becomes a real lexical regex literal rather than a runtime string.
+# Copilot follow-up (#2570): "does the captured tail contain a with-clause
+# anywhere" is not the same question as "does the OUTER function type have
+# its own with-clause". parse_fn_type (self-hosted/parser/types.sio:908-966)
+# parses a return type by recursing into parse_type FIRST and only checks for
+# a trailing `with` AFTER that recursive call returns -- so for
+# `fn() -> fn() -> i64 with IO`, the INNER `fn() -> i64` is parsed (and
+# claims the trailing `with IO` as ITS OWN effects) before the OUTER
+# `fn() -> ...` ever gets to check for a with-clause of its own, and by then
+# the tokens are already consumed. The outer type is genuinely bare here,
+# but the old check (`hit !~ withpat`) saw "with IO" anywhere in the tail and
+# called the whole thing non-bare, undercounting a real violation.
+#
+# The grammar's actual binding rule, worked out from that recursion order:
+# consecutive `with` clauses in a return-type chain bind innermost-first --
+# the Nth with-clause (counting from the left) binds to the Nth-from-the-
+# inside function-type layer. So the OUTER (1st) layer has its own
+# with-clause if and only if there are AT LEAST AS MANY with-clauses as
+# total layers (1 for the outer own match, plus one more per nested `fn(`
+# found in the tail). count_fn_parens / count_with_clauses below count each
+# via gsub, and the outer is bare iff with_n < fn_layers.
 AWK_SCAN='
 function scan_tail(line, tail_start,    i, n, c, depth) {
     depth = 0
@@ -118,6 +145,14 @@ function scan_tail(line, tail_start,    i, n, c, depth) {
     }
     return n + 1
 }
+function count_fn_parens(str,    tmp) {
+    tmp = " " str
+    return gsub(/[^A-Za-z0-9_]fn\(/, "@", tmp)
+}
+function count_with_clauses(str,    tmp) {
+    tmp = " " str
+    return gsub(/[^A-Za-z0-9_]with[ \t]+[A-Za-z]/, "@", tmp)
+}
 {
     line = $0
     pos = 1
@@ -126,8 +161,11 @@ function scan_tail(line, tail_start,    i, n, c, depth) {
         matchlen = RLENGTH
         tail_start = start + matchlen
         tail_end = scan_tail(line, tail_start)
+        hit_tail = substr(line, tail_start, tail_end - tail_start)
         hit = substr(line, start, tail_end - start)
-        if (hit !~ withpat) { print hit }
+        fn_layers = 1 + count_fn_parens(hit_tail)
+        with_n = count_with_clauses(hit_tail)
+        if (with_n < fn_layers) { print hit }
         pos = start + matchlen
     }
 }
@@ -140,7 +178,7 @@ enumerate() {
     | grep -vE '\.sio\.old$' \
     | while IFS= read -r f; do
         [ -f "$f" ] || continue
-        strip_noise "$f" | awk -v withpat="$withpat" "$AWK_SCAN" | while IFS= read -r hit; do
+        strip_noise "$f" | awk "$AWK_SCAN" | while IFS= read -r hit; do
           # a bare function type is one whose text carries no `with` clause
           printf '%s\t%s\n' "$f" "$hit"
         done
@@ -153,7 +191,7 @@ enumerate() {
 # a control checking "is this reported as bare" and enumerate() can never
 # disagree about what bare means.
 bare_hits_of() {
-  strip_noise "$1" | awk -v withpat="$withpat" "$AWK_SCAN"
+  strip_noise "$1" | awk "$AWK_SCAN"
 }
 
 selftest() {
@@ -219,6 +257,32 @@ selftest() {
   if bare_hits_of "$tmp/neg7.sio" | grep -q .; then
     echo "  FALHA NEGATIVO 7: tipo-funcao com retorno generico e efeitos contado como nu"; rc=1
   else echo "  ok   NEGATIVO 7: tipo com retorno generico e efeitos nao conta como nu"; fi
+  # POSITIVE control 8 (#2570): a function type whose RETURN is itself a
+  # function type carrying the only with-clause in the chain must still be
+  # reported as bare -- parse_fn_type (self-hosted/parser/types.sio:908-966)
+  # parses the return type (recursing into the nested `fn() -> i64`) BEFORE
+  # checking for its own trailing `with`, so `with IO` in
+  # `fn() -> fn() -> i64 with IO` is consumed by the INNER fn-type's own
+  # with-check, and the OUTER `fn() -> ...` never sees a with-clause at all.
+  # The old check (`hit !~ withpat`, "does the tail contain 'with' ANYWHERE")
+  # saw "with IO" and wrongly called the whole thing non-bare, undercounting
+  # a real bare outer function type. This is the control that would have
+  # caught it.
+  printf 'fn use_it(f: fn() -> fn() -> i64 with IO) -> f64 with Mut, Panic { 0.0 }\n' > "$tmp/pos8.sio"
+  if bare_hits_of "$tmp/pos8.sio" | grep -q .; then
+    echo "  ok   POSITIVO 8: tipo-funcao externo com retorno-de-funcao-com-efeitos e nu"
+  else echo "  FALHA POSITIVO 8: tipo-funcao externo nu nao detectado (efeito do retorno atribuido ao externo)"; rc=1; fi
+  # NEGATIVE control 8 (#2570): companion to POSITIVE 8 -- the grammar also
+  # allows STACKED with-clauses, one per nesting level, consumed
+  # innermost-first as parse_fn_type's recursion unwinds. With two
+  # consecutive with-clauses for two layers, the OUTER layer DOES get its
+  # own ("with Panic", the second one) and must not be reported as bare.
+  # Without this control, "always call it bare whenever a nested fn( is
+  # present" would pass POSITIVE 8 while still being wrong.
+  printf 'fn use_it(f: fn() -> fn() -> i64 with IO with Panic) -> f64 { 0.0 }\n' > "$tmp/neg8.sio"
+  if bare_hits_of "$tmp/neg8.sio" | grep -q .; then
+    echo "  FALHA NEGATIVO 8: tipo-funcao externo COM efeito proprio (with empilhado) contado como nu"; rc=1
+  else echo "  ok   NEGATIVO 8: tipo-funcao externo com with empilhado nao conta como nu"; fi
   rm -rf "$tmp"
   echo "falhas: $rc"
   return $rc
