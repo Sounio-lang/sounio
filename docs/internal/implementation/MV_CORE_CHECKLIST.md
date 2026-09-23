@@ -11,9 +11,9 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.imple
 
 > **This document has been consolidated.** The MVSC checklist now lives at
 > [`docs/implementation/MV_CORE_CHECKLIST.md`](../../implementation/MV_CORE_CHECKLIST.md);
-> the canonical version is the source of truth and is kept current for the
-> `maintainers` audience. The internal copy at this path was a near-exact
-> duplicate and has been collapsed into this redirect stub.
+> the canonical version at that path is the source of truth. The internal copy at
+> this path was a near-exact duplicate and has been collapsed into this redirect
+> stub.
 >
 > This stub remains in place to preserve the topic-registry entry
 > (`repo.docs.internal.implementation.mv-core-checklist`) so any inbound
