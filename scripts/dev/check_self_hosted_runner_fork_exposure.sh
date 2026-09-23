@@ -229,6 +229,39 @@ jobs:
       - run: echo hi
 EOF
 
+    # POSITIVE 8: `on:  # triggers` -- a comment-only remainder on the `on:`
+    # line itself, with the real trigger in the following block. Treating
+    # any nonempty remainder as an inline value (POSITIVE 6/7's fix) searched
+    # "# triggers" for a pull_request token, found none, and never scanned
+    # the block below that actually names pull_request.
+    cat > "$tmp/positive_on_comment_only_remainder.yml" <<'EOF'
+on:  # triggers
+  pull_request:
+jobs:
+  danger:
+    runs-on: [self-hosted, gpu, cuda]
+    steps:
+      - run: echo hi
+EOF
+
+    # POSITIVE 9: `runs-on:  # see below` -- same comment-only-remainder shape,
+    # on the job's runs-on: line instead of the workflow's on: line. The real
+    # self-hosted list is the following block, but a nonempty (comment) value
+    # on the runs-on: line itself used to read as neither self-hosted-ish nor
+    # the empty-value block-list signal, so job_is_self_hosted_ish returned
+    # False without ever looking at the list.
+    cat > "$tmp/positive_runs_on_comment_only_remainder.yml" <<'EOF'
+on:
+  pull_request:
+jobs:
+  danger:
+    runs-on:  # see below
+      - self-hosted
+      - gpu
+    steps:
+      - run: echo hi
+EOF
+
     local out
     out="$(python3 "$SCANNER" "$tmp"/*.yml || true)"
 
@@ -266,6 +299,16 @@ EOF
         echo "  ok   POSITIVE: 'on: [pull_request, pull_request_target]' is flagged"
     else
         echo "  FAIL POSITIVE: 'on: [pull_request, pull_request_target]' was NOT flagged"; rc=1
+    fi
+    if grep -q 'positive_on_comment_only_remainder.yml:danger' <<<"$out"; then
+        echo "  ok   POSITIVE: 'on:  # comment' with the real trigger in the block below is flagged"
+    else
+        echo "  FAIL POSITIVE: 'on:  # comment' with the real trigger in the block below was NOT flagged"; rc=1
+    fi
+    if grep -q 'positive_runs_on_comment_only_remainder.yml:danger' <<<"$out"; then
+        echo "  ok   POSITIVE: 'runs-on:  # comment' with a block list below is flagged"
+    else
+        echo "  FAIL POSITIVE: 'runs-on:  # comment' with a block list below was NOT flagged"; rc=1
     fi
     for job in "negative_guarded.yml:safe" "negative_no_pr_trigger.yml:dispatch_only" \
                "negative_pull_request_target.yml:automation" "negative_gh_hosted.yml:ordinary" \

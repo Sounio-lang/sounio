@@ -45,7 +45,13 @@ def has_bare_pull_request_trigger(lines: list[str]) -> bool:
         m = _ON_LINE_RE.match(line)
         if m:
             rest = m.group(1).strip()
-            if rest:
+            # A comment-only remainder (`on:  # triggers`) is YAML-equivalent
+            # to a bare `on:` -- the real trigger value is in the following
+            # block, not on this line. Without this check `rest` was truthy
+            # (non-empty string), so the branch below searched "# triggers"
+            # for a pull_request token, found none, and set in_on = False --
+            # never scanning the block that actually names pull_request.
+            if rest and not rest.startswith("#"):
                 # Everything GitHub Actions allows on the `on:` line itself
                 # without a following block: a bracketed list
                 # (`on: [push, pull_request]`) or a single bare scalar
@@ -143,7 +149,10 @@ def job_is_self_hosted_ish(block: list[str], body_indent: int) -> bool:
             value = re.match(r"^\s*runs-on:\s*(.*)$", line).group(1)
             if SELF_HOSTED_RE.search(value) or RUNNER_VAR_RE.search(value):
                 return True
-            if value == "":
+            # Same comment-only-remainder case as has_bare_pull_request_trigger
+            # above: `runs-on:  # see below` is YAML-equivalent to a bare
+            # `runs-on:` followed by a block list, not a value of "# see below".
+            if value == "" or value.strip().startswith("#"):
                 collecting = True
                 continue
             return False
