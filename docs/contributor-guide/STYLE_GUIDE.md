@@ -385,7 +385,6 @@ use epistemic::knowledge::{Epistemic, ep_div}
 ///
 /// # Parameters
 /// - `dose`: administered dose with measurement uncertainty
-/// - `clearance`: drug clearance rate
 /// - `volume`: volume of distribution
 ///
 /// # Returns

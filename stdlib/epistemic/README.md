@@ -35,7 +35,7 @@ if ep_is_credible(&concentration, 800) {
 }
 ```
 
-The method form is equivalent under Madaros multi-module (anchor: `tests/run-pass/madaros_knowledge_method_form.sio`): `Epistemic::measured(500.0, 25.0)`, `dose.div(&volume)`, `concentration.val()`, `concentration.std()`.
+The method form is equivalent under Madaros multi-module (anchor: `tests/run-pass/madaros_knowledge_method_form.sio`, which exercises `measured`, `val`, `std`, `add`, and `certain`): `Epistemic::measured(500.0, 25.0)`, `concentration.val()`, `concentration.std()`. Method-form division (`dose.div(&volume)`) is defined but not covered by that anchor.
 
 `prob_gt`, `ci95`, and a provenance string argument on `measured` are not on the checked surface.
 
@@ -140,7 +140,7 @@ Unit spellings such as `mg` are implemented and tested (tests/run-pass/unit_same
 
 1. **Variance over error bars**: σ² is stored because variance is additive.
 2. **Confidence is an integer 0..1000** on the checked `Epistemic` surface, not a distribution.
-3. **Provenance is tracked separately** (`stdlib/epistemic/prov.sio`, `stdlib/epistemic/affine.sio`), not as a field of `Epistemic`.
+3. **Provenance is tracked separately**: `stdlib/epistemic/prov.sio` (private API) holds provenance bookkeeping, and `stdlib/epistemic/affine.sio` tracks integer-labelled shared noise sources so covariance propagates — neither is a field of `Epistemic`.
 4. **Confidence decays on arithmetic**: `ep_add`/`ep_sub` keep `min × 99/100`, `ep_mul` `× 98/100`, `ep_div` `× 97/100` (integer math); `ep_scale`/`ep_shift` preserve it. `ep_merge` averages the two inputs (`(a + b)/2`), so it can raise confidence relative to the lower input.
 
 ## References

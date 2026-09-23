@@ -3,10 +3,11 @@
 > **Checked surface vs. intended semantics.** The shipped type is
 > `Epistemic { val: f64, variance: f64, confidence: i64 }` in
 > `stdlib/epistemic/knowledge.sio`, with the free functions `ep_measured`,
-> `ep_val`, `ep_std`, `ep_add`, `ep_mul`, `ep_merge`, and
-> `ep_is_credible` (anchor: `tests/run-pass/ep_gum_covariance.sio`); `ep_div`
-> is exercised by the `//@ run-pass` selftest in
-> `stdlib/epistemic/knowledge.sio` (the quotient check `ep_div(&x, &y)`). The
+> `ep_measured`, `ep_val`, `ep_std`, `ep_add`, `ep_sub`, `ep_mul`, `ep_div`,
+> `ep_merge`, and `ep_is_credible` are exercised by the `//@ run-pass` selftest
+> in `stdlib/epistemic/knowledge.sio`. The covariance-aware forms
+> (`ep_add_cov`, `ep_sub_cov`, `ep_mul_cov`, `ep_div_cov`) are pinned separately
+> by `tests/run-pass/ep_gum_covariance.sio`. The
 > `Knowledge<T>` generic, `Knowledge::interval`, `.with_conf`, `.boost`, and
 > `.unwrap` used in the formal rules below describe intended semantics and are
 > not on the checked public surface — see `docs/compiler/KNOWN_LIMITATIONS.md`.
