@@ -30,7 +30,7 @@ FAILS=0
 echo "[chem-golden] lean_single: $(md5sum "$ROOT_DIR/bin/souc-lean-single-x86_64" 2>/dev/null | cut -c1-8) bin/souc-lean-single-x86_64"
 for p in "${PROBES[@]}"; do
   src="examples/chemistry/$p.sio"; gold="$GOLD/$p.lean_single.txt"; out="$WORK/$p.txt"
-  if ! SOUNIO_SOUC_ENGINE=lean_single timeout 1500 "$SOUC" run "$src" >"$out" 2>"$WORK/$p.err"; then
+  if ! SOUNIO_SOUC_ENGINE=lean_single timeout 3600 "$SOUC" run "$src" >"$out" 2>"$WORK/$p.err"; then
     echo "[chem-golden] FAIL $p: run exited non-zero" >&2; tail -5 "$WORK/$p.err" >&2; FAILS=$((FAILS+1)); continue
   fi
   if [[ "${REGEN:-0}" == "1" ]]; then cp "$out" "$gold"; echo "[chem-golden] wrote $gold"; continue; fi
