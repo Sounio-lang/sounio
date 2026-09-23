@@ -1,0 +1,70 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: LOCAL_SHADOW_GLOBAL_PRECEDENCE PASS
+//
+// Copilot follow-up (#2570). Two classifiers resolve a bare ExprIdent by
+// checking the local table and falling through to a GLOBAL-scoped lookup
+// (a BSS global's scalar kind, or a top-level function's tuple-array mask)
+// whenever the local check came back "zero" -- conflating "this name is not
+// a local" with "this name IS a local, and its classification happens to be
+// zero / unclassified". When a local shadows a same-named global of a
+// DIFFERENT classification, the global's answer leaked through instead of
+// the local's, corrupting the value the local's initializer actually
+// produced. Fixed by gating the global fallback on `self.lookup_local(name)
+// < 0` (genuinely not a local) instead of on the local's classification
+// being zero.
+//
+//   A  expr_result_is_float_ref: `var x: f64` (module BSS) then
+//      `let x: i64 = 7; let xs = [x; 2]` -- xs's repeat value is the LOCAL
+//      i64 `x` (scalar_kind 1, not 2), but the old code fell through to the
+//      BSS global `x`'s kind (2, float) the moment the local check failed,
+//      marking xs's elements float and lowering the integer repeat value
+//      through the f64 path. Reproduced standalone before this fix:
+//      println(xs[0]) printed 0.000000, not 7.
+//   B  expr_result_tuple_float_mask_ref (the ExprIdent alias branch, not the
+//      ExprCall branches fixed in 01275b1706/6090c24e57): `let f = int_pair`
+//      binds LOCAL f to a mask of 0 (int_pair returns an all-integer tuple,
+//      genuinely zero, not "unclassified"). `let h = f` then re-aliases h to
+//      THAT local f -- but the old code treated f's stored mask of 0 as
+//      "f is not a local", fell through to a DIFFERENT top-level function
+//      also named `f` (an unrelated f64-array-returning fn), and bound h to
+//      the WRONG, nonzero mask. `h()` still calls int_pair (the actual
+//      local alias), so t.0[0] read an all-integer array through the f64
+//      path. Reproduced standalone before this fix: printed 0.000000, not
+//      42.
+var x: f64 = 3.5
+
+fn int_pair() -> ([i64; 2], i64) with Mut, Panic {
+    var a: [i64; 2] = [0; 2]
+    a[0] = 42
+    (a, 1)
+}
+
+// Unrelated top-level function, deliberately named `f` -- the shadow target
+// for case B's local `f`. Its tuple-array shape (`[f64; 2]`) must differ
+// from int_pair's (`[i64; 2]`) so the corruption is observable.
+fn f() -> ([f64; 2], f64) with Mut, Panic {
+    var a: [f64; 2] = [0.0; 2]
+    a[0] = 999.0
+    (a, 1.0)
+}
+
+fn main() -> i32 with IO, Mut, Panic {
+    var bad: i32 = 0
+
+    // A: local i64 `x` shadows the module-level f64 `x`.
+    let x: i64 = 7
+    let xs = [x; 2]
+    if xs[0] != 7 { bad = bad + 1 }
+
+    // B: local `f` (aliasing int_pair, mask 0) shadows the top-level `f`.
+    let f = int_pair
+    let h = f
+    let t = h()
+    if t.0[0] != 42 { bad = bad + 2 }
+
+    if bad == 0 {
+        println("LOCAL_SHADOW_GLOBAL_PRECEDENCE PASS")
+    }
+    bad
+}

@@ -14653,8 +14653,17 @@ impl Lowerer {
             return true
         }
         if (*e).kind == ExprKind::ExprIdent {
-            if self.lookup_local_scalar_kind((*e).name) == 2 {
-                return true
+            // Copilot follow-up (#2570): scalar_kind != 2 does not mean
+            // "not a local" -- an i64 local (kind 1) shadowing a same-named
+            // f64 BSS global fell through to the global check below and
+            // came back true, so `var x: f64 = ...; let x: i64 = 7; let xs
+            // = [x; 2]` marked xs's elements float and lowered the integer
+            // repeat value through the f64 path. Any local's classification
+            // is authoritative the moment `(*e).name` resolves to a local
+            // at all; the BSS fallback may only run for a name that names
+            // no local.
+            if self.lookup_local((*e).name) >= 0 {
+                return self.lookup_local_scalar_kind((*e).name) == 2
             }
             // Module-level `var G: f64` is a BSS slot, not a local with scalar_kind=2.
             // Without this fallback, `print(G)` stays on the char* printer and SEGVs
@@ -17216,10 +17225,18 @@ impl Lowerer {
         //     ExprCall fallback below and in expr_is_tuple_slot_f64_array_ref
         //     both check the local's stored mask first so `f()` /`f().K`
         //     see it.
+        //
+        // Copilot follow-up (#2570): a stored mask of 0 does not mean "not a
+        // local" -- a fn-pointer PARAMETER `f` returning an integer-array
+        // tuple is a local with mask 0, and `let h = f` must alias to THAT
+        // parameter's identity (mask 0), not fall through to a same-named
+        // global `f` with a different, nonzero mask. Same local-vs-global
+        // precedence fix as the ExprCall branch below: gate on whether
+        // `(*e).name` resolves to a local AT ALL (self.lookup_local >= 0),
+        // not on whether its stored mask happens to be nonzero.
         if (*e).kind == ExprKind::ExprIdent {
-            let local_mask = self.lookup_local_tuple_float_mask((*e).name)
-            if local_mask != 0 {
-                return local_mask
+            if self.lookup_local((*e).name) >= 0 {
+                return self.lookup_local_tuple_float_mask((*e).name)
             }
             return self.lower_named_fn_tuple_mask_ref((*e).name)
         }
