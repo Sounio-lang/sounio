@@ -14846,6 +14846,34 @@ impl Lowerer {
                         }
                         _ => 0,
                     }
+                } else if (*base_expr).kind == ExprKind::ExprMethodCall {
+                    // `recv.pair().1` with no intervening binding: the array-
+                    // slot sibling (expr_is_tuple_slot_f64_array_ref) already
+                    // resolves an ExprMethodCall base through
+                    // lower_method_recv_type + ir_mangle_method_name; this
+                    // scalar-projection path never had that branch at all
+                    // (fell straight to the `else { 0 }` below), so
+                    // `recv.pair().1` on a method returning `([f64; 2], f64)`
+                    // read the f64 scalar at slot 1 through the integer path.
+                    // Mirror the array sibling: mangle the receiver's
+                    // resolved struct type + method name and read the
+                    // combined mask off that mangled function's encoded
+                    // return code, same as the ExprCall branch above does for
+                    // a bare callee name. An unresolved receiver fails closed
+                    // to mask 0, same as the array sibling.
+                    let tname = self.lower_method_recv_type(&(*base_expr).left)
+                    if tname.len <= 0 {
+                        return 0
+                    }
+                    let mangled = ir_mangle_method_name(tname, (*base_expr).name)
+                    let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, mangled)
+                    if fn_id >= 0 && fn_id < self.module.fn_count {
+                        let code = ir_fn_get(&(*self.module), fn_id as usize).returns_float
+                        if code >= 1024 {
+                            return code - 1024
+                        }
+                    }
+                    0
                 } else {
                     0
                 }

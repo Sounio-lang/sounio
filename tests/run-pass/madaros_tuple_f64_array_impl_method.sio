@@ -81,6 +81,23 @@
 //                                                     a local
 //   G  `let g = pair_free; g(1.25).0[0]`              same alias/shadow,
 //                                                       direct projection
+//
+// Copilot follow-up (#2570): opt_base_tuple_float_mask_ref -- the SCALAR
+// sibling of expr_is_tuple_slot_f64_array_ref, consulted by
+// expr_result_is_float_ref for a direct `X.K` scalar projection -- handled
+// only ExprIdent and ExprCall bases and had no ExprMethodCall case at all
+// (fell straight to `else { 0 }`), even though the array-slot sibling
+// already resolved an ExprMethodCall base via lower_method_recv_type +
+// ir_mangle_method_name (cases A-D above). `recv.pair2().1` on a method
+// returning a MIXED tuple therefore always read mask 0 for the scalar slot
+// and the f64 was read through the integer path. Case H pins a direct
+// scalar projection straight off a method call, no intervening let --
+// pair2 (unlike pair, whose second slot is i64) returns `([f64; 2], f64)`
+// so the corruption is observable on the scalar half specifically.
+//
+//   H  `recv.pair2().1 * 2.0`   direct scalar projection off a method call
+//                                returning a mixed tuple, no intervening
+//                                binding
 fn g(scale: f64) -> ([f64; 2], f64) with Mut, Panic {
     var a: [f64; 2] = [0.0; 2]
     a[0] = 999.0
@@ -96,6 +113,12 @@ impl Pairer {
         var a: [f64; 2] = [0.0; 2]
         a[0] = self.scale
         (a, 9)
+    }
+
+    fn pair2(self) -> ([f64; 2], f64) with Mut, Panic {
+        var a: [f64; 2] = [0.0; 2]
+        a[0] = self.scale
+        (a, self.scale + 1.0)
     }
 }
 
@@ -150,6 +173,11 @@ fn main() -> i32 with IO, Mut, Panic {
     // G: same alias, direct projection off the indirect call.
     let dg: f64 = g(1.25).0[0] * 2.0
     if dg != 2.5 { bad = bad + 64 }
+
+    // H: direct scalar projection off a method call returning a mixed
+    // tuple, no intervening let.
+    let dh: f64 = recv.pair2().1 * 2.0
+    if dh != 5.0 { bad = bad + 128 }
 
     if bad == 0 {
         println("TUPLE_F64_ARRAY_IMPL_METHOD PASS")
