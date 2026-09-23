@@ -56,8 +56,9 @@ Important context:
 
 - This repository was recovered from VM `sounio-dev-01`.
 - The recovery was based on tarball import, then Git re-attachment.
-- The historical safe base branch is:
-  - `integration/sounio-dev-ready-base`
+- `main` is the canonical branch as of 2026-09-22 (see `CLAUDE.md` §3). The
+  historical safe base branch during the recovery period was
+  `integration/sounio-dev-ready-base`, now deprecated.
 - The current checked-out branch is the operational truth for this session.
 - Older Claude/Codex artifacts may still reference the VM-era path:
   - `/home/demetrios/RustroverProjects/sounio`
@@ -65,7 +66,11 @@ Important context:
   - `/workspace/sounio`
 
 Do not treat stale VM paths as the current execution surface.
-Preserve recovery state and avoid destructive "align with main" workflows unless explicitly requested.
+Preserve recovery state and avoid destructive git history rewrites. Aligning
+work with `main` is no longer something to avoid by default -- it is the
+canonical branch as of 2026-09-22 (see `CLAUDE.md` §3); this line used to
+warn against unrequested "align with main" workflows back when `main` and
+`integration/sounio-dev-ready-base` were unreconciled siblings.
 
 ---
 
