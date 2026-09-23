@@ -33,8 +33,11 @@ let dx = get_grad(tape, x)    // dy/dx = 2x = 6
 These names — `new_tape`, `tape_new_var`, `tape_last_var`, `tape_mul`,
 `backward`, `get_grad`, and the `Var` type — are private to `tape.sio` and
 cannot be imported. The tape module is internal; `epistemic_dual`
-(e.g. `edual_new` / `edual_mul`) and `grad` (the public `Dual` type) expose the
-public AD surface.
+(e.g. `edual_new` / `edual_mul`) is the public AD surface. By contrast,
+`grad.sio` exports only the `Dual` struct — its gradient functions
+(`grad`, `jacobian`, `hessian_diag`) and the `dual.sio` forward-mode arithmetic
+(`dual_var`, `dual_mul`, …) are private and cannot be imported, so `grad` is
+not a usable public gradient API.
 
 More in [`TAPE_IMPLEMENTATION.md`](./TAPE_IMPLEMENTATION.md). For uncertainty-aware gradients, `stdlib/autodiff/epistemic_dual.sio` builds values with `edual_new(val, dot, unc, unc_dot)` and `edual_mul` — there is no `EpistemicDual::new` and no `Knowledge::measured`.
 
@@ -54,7 +57,7 @@ See [`VALIDATION_REPORT.md`](../../benchmarks/stdlib_validation/VALIDATION_REPOR
 | [`dual`](./dual.sio) | Forward-mode AD with dual numbers |
 | [`epistemic_dual`](./epistemic_dual.sio) | Dual numbers with uncertainty |
 | [`linear_ad`](./linear_ad.sio) | Linear AD for Jacobians |
-| [`grad`](./grad.sio) | High-level gradient API |
+| [`grad`](./grad.sio) | `Dual` struct only (gradient fns internal) |
 | [`differentiable`](./differentiable.sio) | Differentiable function traits |
 
 ## Tape Implementation Details

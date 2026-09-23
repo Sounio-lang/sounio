@@ -1,7 +1,7 @@
 # Core Examples
 
 > **Checked surface.** Sounio has a checked built-in generic `Option<T>` (with
-> `Some` / `None`) and `Result<T>`, so general optionality and error handling use
+> `Some` / `None`) and `Result<T, E>`, so general optionality and error handling use
 > those. `stdlib/core` additionally provides concrete *numeric* helpers that
 > mirror them: `IntResult` / `FloatResult` (`int_ok`, `float_ok`,
 > `float_result_is_ok`, `float_result_unwrap`) are exported from
