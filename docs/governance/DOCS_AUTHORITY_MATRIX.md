@@ -321,6 +321,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.madaros-print-int-dispatch-2026-06-20 | repo_only | docs/audit/MADAROS_PRINT_INT_DISPATCH_2026-06-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-print-negative-f64-2026-07-14 | repo_only | docs/audit/MADAROS_PRINT_NEGATIVE_F64_2026-07-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-println-bool-scalarkind-segv-2026-08-17 | repo_only | docs/audit/MADAROS_PRINTLN_BOOL_SCALARKIND_SEGV_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.madaros-private-fn-identity-2026-09-21 | repo_only | docs/audit/MADAROS_PRIVATE_FN_IDENTITY_2026-09-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-production-readiness-plan-2026-06-21 | repo_only | docs/audit/MADAROS_PRODUCTION_READINESS_PLAN_2026-06-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-propagate-monte-carlo-fnptr-2026-08-06 | repo_only | docs/audit/MADAROS_PROPAGATE_MONTE_CARLO_FNPTR_2026-08-06.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-propagate-monte-carlo-fnptr-2026-08-23 | repo_only | docs/audit/MADAROS_PROPAGATE_MONTE_CARLO_FNPTR_2026-08-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
