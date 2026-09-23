@@ -185,14 +185,18 @@ def clause_v3(whitelist: set[str]) -> bool:
         f"{non_whitelist_historical}/{len(research) - len(whitelist)}"
     )
     # Nearly all research is historical; lineage note is present; whitelist is tiny.
+    # The 6 (not 5) bound tracks the reclassification of
+    # docs/research/delta_epistemic_gradual_compilation_paper.md from historical
+    # lineage to the design target (PR #2648), which moves one more research doc
+    # out of the historical bucket.
     hist = auth_census.get("historical", 0)
     ok = (
         len(research) > 100
-        and hist >= len(research) - 5  # allow dual/repo_only few
+        and hist >= len(research) - 6  # allow dual/repo_only few
         and note_missing == 0
         and note_hist == hist
         and len(whitelist) == WHITELIST_SIZE
-        and non_whitelist_historical >= len(research) - 5
+        and non_whitelist_historical >= len(research) - 6
     )
     print(f"V3_CORPUS_IS_LINEAGE_DEFAULT {'PASS' if ok else 'FAIL'}")
     print()
