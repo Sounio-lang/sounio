@@ -1,0 +1,174 @@
+#!/usr/bin/env bash
+# Refuse any workflow job that combines a self-hosted (or runner-pool) label
+# with a bare `pull_request:` trigger and no same-repo-origin guard.
+#
+# WHY THIS EXISTS
+#
+# `pull_request` runs against the MERGE of a fork's proposed changes; a
+# self-hosted runner executing that code has whatever access the runner's
+# environment carries -- for this repo, potentially a path into the project's
+# own Kubernetes/Slurm cluster. GitHub's own guidance is explicit that
+# self-hosted runners on a repo reachable by fork PRs must not run untrusted
+# code unguarded. No such guard existed anywhere in this repo before this
+# gate: a live instance was found and fixed in the same PR that adds this
+# script (.github/workflows/gpu-research.yml's `validate-on-gpu` job had
+# `runs-on: [self-hosted, gpu, cuda]` under a bare `pull_request:` trigger,
+# gated only by an on/off repo variable -- no repo-origin check at all).
+#
+# WHAT COUNTS AS "SELF-HOSTED-ISH"
+#
+# A job's `runs-on:` mentioning the literal `self-hosted`, or a `${{ vars.* }}`
+# expression whose variable name contains RUNNER (the kaxi-ptxas-accept /
+# ci-fabric-pool-smoke pattern: `${{ vars.SOME_RUNNER_LABELS || 'ubuntu-latest' }}`).
+# The latter is flagged even though today's instances all default safely to a
+# GH-hosted label and are workflow_dispatch-only (no pull_request trigger at
+# all) -- the point is to catch it BEFORE a future edit adds a pull_request
+# trigger to such a job without also adding the guard.
+#
+# WHAT COUNTS AS GUARDED
+#
+# The job's own `if:` (checked in full, spanning `run:`/`env:` blocks is not
+# needed -- only the job-level `if:` line(s) matter) contains the substring
+# `head.repo.full_name == github.repository`. This is a text scan of the
+# workflow YAML, not a full parse -- the same idiom
+# scripts/ci/impact_ci_selftest.sh already uses to check ci-decision's needs
+# list against evaluate_ci_decision.py's required map.
+#
+# `pull_request_target` is a related but separate risk class (it runs with
+# base-repo secrets against a fork's code by design) and is deliberately out
+# of scope here -- see docs/ops/fork_pr_self_hosted_runner_policy.md.
+#
+# Usage:
+#   bash scripts/dev/check_self_hosted_runner_fork_exposure.sh              # check the real tree
+#   bash scripts/dev/check_self_hosted_runner_fork_exposure.sh --selftest   # positive/negative fixtures
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SCANNER="$ROOT_DIR/scripts/dev/_fork_exposure_scan.py"
+
+run_real() {
+    python3 "$SCANNER" "$ROOT_DIR"/.github/workflows/*.yml
+}
+
+selftest() {
+    local tmp rc=0
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' RETURN
+
+    # POSITIVE: self-hosted job, bare pull_request trigger, no guard -- must flag.
+    cat > "$tmp/positive.yml" <<'EOF'
+on:
+  pull_request:
+jobs:
+  danger:
+    runs-on: [self-hosted, gpu, cuda]
+    if: vars.SOME_FLAG == '1'
+    steps:
+      - run: echo hi
+EOF
+
+    # NEGATIVE 1: same shape, but guarded -- must NOT flag.
+    cat > "$tmp/negative_guarded.yml" <<'EOF'
+on:
+  pull_request:
+jobs:
+  safe:
+    runs-on: [self-hosted, gpu, cuda]
+    if: vars.SOME_FLAG == '1' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    steps:
+      - run: echo hi
+EOF
+
+    # NEGATIVE 2: self-hosted, but the workflow has no pull_request trigger at
+    # all (workflow_dispatch only) -- must NOT flag.
+    cat > "$tmp/negative_no_pr_trigger.yml" <<'EOF'
+on:
+  workflow_dispatch:
+jobs:
+  dispatch_only:
+    runs-on: [self-hosted, linux, kaxi-slurm]
+    steps:
+      - run: echo hi
+EOF
+
+    # NEGATIVE 3: pull_request_target is a separate, out-of-scope risk class.
+    cat > "$tmp/negative_pull_request_target.yml" <<'EOF'
+on:
+  pull_request_target:
+jobs:
+  automation:
+    runs-on: [self-hosted, gpu, cuda]
+    steps:
+      - run: echo hi
+EOF
+
+    # NEGATIVE 4: GH-hosted runner, bare pull_request trigger -- must NOT flag
+    # (this is the overwhelmingly common shape in the repo).
+    cat > "$tmp/negative_gh_hosted.yml" <<'EOF'
+on:
+  pull_request:
+jobs:
+  ordinary:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo hi
+EOF
+
+    local out
+    out="$(python3 "$SCANNER" "$tmp"/*.yml || true)"
+
+    if grep -q 'positive.yml:danger' <<<"$out"; then
+        echo "  ok   POSITIVE: unguarded self-hosted job under pull_request is flagged"
+    else
+        echo "  FAIL POSITIVE: unguarded self-hosted job under pull_request was NOT flagged"; rc=1
+    fi
+    for job in "negative_guarded.yml:safe" "negative_no_pr_trigger.yml:dispatch_only" \
+               "negative_pull_request_target.yml:automation" "negative_gh_hosted.yml:ordinary"; do
+        if grep -q "$job" <<<"$out"; then
+            echo "  FAIL NEGATIVE: $job was flagged but should not have been"; rc=1
+        else
+            echo "  ok   NEGATIVE: $job correctly not flagged"
+        fi
+    done
+
+    # Anti-vacuity: the scanner must actually find jobs in the real tree, or a
+    # broken scanner (matches nothing, ever) would pass everything silently.
+    local real_job_count
+    real_job_count="$(python3 "$SCANNER" --count-jobs "$ROOT_DIR"/.github/workflows/*.yml)"
+    if [[ "$real_job_count" -lt 20 ]]; then
+        echo "  FAIL NEGATIVE: only $real_job_count jobs found across the real workflow tree -- scanner is dead"; rc=1
+    else
+        echo "  ok   NEGATIVE: scanner finds $real_job_count jobs across the real workflow tree"
+    fi
+
+    echo "failures: $rc"
+    return $rc
+}
+
+if [[ "${1:-}" == "--selftest" ]]; then
+    selftest
+    exit $?
+fi
+
+selftest >/dev/null 2>&1 || {
+    echo "ABORT: the gate's own controls fail -- its verdict would be noise, not evidence." >&2
+    selftest
+    exit 2
+}
+
+violations="$(run_real || true)"
+if [[ -n "$violations" ]]; then
+    echo "CHECK_SELF_HOSTED_RUNNER_FORK_EXPOSURE_FAIL: unguarded self-hosted runner(s) reachable from fork PRs:" >&2
+    echo "$violations" | sed 's/^/  /' >&2
+    echo "" >&2
+    echo "Each job above combines a self-hosted/runner-pool label with a bare" >&2
+    echo "pull_request: trigger and no same-repo-origin guard. Add:" >&2
+    echo "  (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)" >&2
+    echo "to the job's if:, or move it off self-hosted infrastructure, or remove" >&2
+    echo "the pull_request trigger. See docs/ops/fork_pr_self_hosted_runner_policy.md." >&2
+    exit 1
+fi
+
+echo "CHECK_SELF_HOSTED_RUNNER_FORK_EXPOSURE_OK: no unguarded self-hosted runner reachable from fork PRs"
