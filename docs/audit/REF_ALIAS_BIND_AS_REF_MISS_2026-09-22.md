@@ -196,13 +196,15 @@ elf: 125073689 bytes (bss=4388777192)
 `MADAROS_RAW_BIN=<that ELF> bash scripts/ci/madaros_ref_alias_bind_as_ref_gate.sh`:
 
 ```
-compiler_sha256=d6a5599f639ddb1904592f015fb14ee37061688a440b8a374cbe6a0680ec149b
-source_sha256=efe736946a7ad990e94379ad255334864010821365e2fea787f3aa80e319967b
+compiler_sha256=d9a882254b8ba4ff8e1fa2a069514d4006f6d777e4c9a7285cfa6080ad30d512
+source_sha256=59bac88375f614223e5694ee0574f0c085f8f21db29d3063e76c81efc0da30de
 ref_alias_bind_as_ref: PASS
 PASS: read/write through a bare-identifier alias of a &T / &!T / &![T;N] param
 stays reference-typed (IndexGet/Set + FieldGet/Set)
 ```
 
-All four cases in `tests/run-pass/ref_alias_bind_as_ref.sio` (read/write
-through a fixed-array-ref alias, read/write through a struct-ref alias) pass
-against a Madaros build compiled from the fixed source.
+All five cases in `tests/run-pass/ref_alias_bind_as_ref.sio` (read/write
+through a fixed-array-ref alias, read/write through a struct-ref alias, and
+read through a same-name shadowing alias) pass against a Madaros build
+compiled from the fixed source — re-verified after the capture-before-bind
+correction above.
