@@ -319,7 +319,7 @@ fn record_coverage(file: string, line: i64, function: string) {
 
 ### Pattern 1: Table-Driven Tests
 ```sio
-use epistemic::knowledge::{ep_measured, ep_certain, ep_add, ep_val, ep_std, ep_confidence}
+use epistemic::knowledge::{Epistemic, ep_measured, ep_certain, ep_add, ep_val, ep_std, ep_confidence}
 
 struct AddCase {
     name: string,

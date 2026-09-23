@@ -29,7 +29,9 @@ Sounio's linalg module includes FFI bindings to optimized BLAS libraries (OpenBL
 - **Automatic library detection**: Tries `libblas.so`, `libopenblas.so`, `libmkl_rt.so`, `libatlas.so`
 - **Smart dispatch**: Uses BLAS for deterministic matrices, pure-Sounio GUM propagation for epistemic
 - **Fallback support**: Pure-Sounio implementations when BLAS is unavailable
-- **SVD via LAPACK**: DGESVD for singular value decomposition
+- **SVD via power iteration**: `blas_dgesvd_approx` is a pure-Sounio rank-1
+  approximation of the dominant singular value (no LAPACK/FFI linkage;
+  `dgesvd_available()` currently always returns false)
 
 ## Usage
 
@@ -167,7 +169,7 @@ brew install openblas
 │                    blas_ffi.sio                          │
 │  ┌─────────────────────────────────────────────────────┐│
 │  │ blas_dgemm_rowmajor()  → libblas.so!dgemm_          ││
-│  │ blas_dgesvd_approx()   → libblas.so!dgesvd_         ││
+│  │ blas_dgesvd_approx()   → pure-Sounio (no BLAS)      ││
 │  │ blas_available()       → dlopen() check             ││
 │  └─────────────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────────┘
