@@ -15,7 +15,9 @@ Automatic differentiation: tape-based reverse-mode, dual numbers for forward-mod
 
 `stdlib/autodiff/tape.sio` is free functions over a by-value `Tape`, not
 `Tape::new()` / `push_var()` / `grad()` methods. Each operation returns the
-updated tape:
+updated tape. **These names are internal to `tape.sio` (none are exported):**
+the sketch below is implementation-internal pseudocode, not a public API to
+import from user code:
 
 ```sio
 var tape = new_tape()
@@ -27,6 +29,12 @@ tape = backward(tape, y)
 
 let dx = get_grad(tape, x)    // dy/dx = 2x = 6
 ```
+
+These names — `new_tape`, `tape_new_var`, `tape_last_var`, `tape_mul`,
+`backward`, `get_grad`, and the `Var` type — are private to `tape.sio` and
+cannot be imported. The tape module is internal; `epistemic_dual`
+(e.g. `edual_new` / `edual_mul`) and `grad` (the public `Dual` type) expose the
+public AD surface.
 
 More in [`TAPE_IMPLEMENTATION.md`](./TAPE_IMPLEMENTATION.md). For uncertainty-aware gradients, `stdlib/autodiff/epistemic_dual.sio` builds values with `edual_new(val, dot, unc, unc_dot)` and `edual_mul` — there is no `EpistemicDual::new` and no `Knowledge::measured`.
 

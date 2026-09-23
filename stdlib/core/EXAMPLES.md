@@ -1,13 +1,16 @@
 # Core Examples
 
-> **Checked surface.** `stdlib/core` has no generic `Option<T>` or `Result<T>`
-> and no `match` on them. Optional values are `IntOption` / `FloatOption`
-> (`int_some`, `float_some`, `int_option_is_some`, `float_option_unwrap`) and
-> fallible values are `IntResult` / `FloatResult` (`int_ok`, `float_ok`,
-> `float_result_is_ok`, `float_result_unwrap`) in `stdlib/core/option.sio` and
-> `stdlib/core/result.sio`. There is no `Knowledge` type here; uncertain values
-> are `Epistemic` from `stdlib/epistemic/knowledge.sio` (`ep_measured`,
-> `ep_div`, `ep_val`).
+> **Checked surface.** Sounio has a checked built-in generic `Option<T>` (with
+> `Some` / `None`) and `Result<T>`, so general optionality and error handling use
+> those. `stdlib/core` additionally provides concrete *numeric* helpers that
+> mirror them: `IntResult` / `FloatResult` (`int_ok`, `float_ok`,
+> `float_result_is_ok`, `float_result_unwrap`) are exported from
+> `stdlib/core/result.sio`, while `IntOption` / `FloatOption`
+> (`int_some`, `float_some`, `int_option_is_some`, `float_option_unwrap`) are
+> *module-internal* — `stdlib/core/option.sio` does not export them, so they are
+> shown for reference rather than as an importable `core::option` API. There is
+> no `Knowledge` type here; uncertain values are `Epistemic` from
+> `stdlib/epistemic/knowledge.sio` (`ep_measured`, `ep_div`, `ep_val`).
 
 ## 1. Prelude Utilities
 
@@ -33,20 +36,33 @@ pub fn main() {
 ## 2. Optional Values
 
 ```sio
-use core::option::{float_some, float_none, float_option_is_some, float_option_unwrap}
-
 pub fn main() with Panic {
-    let opt = float_some(42.0)
-    assert(float_option_is_some(&opt))
-    assert(float_option_unwrap(&opt) == 42.0)
+    // The built-in generic Option<T> is the externally usable optionality API.
+    var opt: Option<f64> = Some(42.0)
+    var present: bool = false
+    if let Some(v) = opt {
+        assert(v == 42.0)
+        present = true
+    }
+    assert(present)
 
-    let missing = float_none()
-    assert(!float_option_is_some(&missing))
+    let missing: Option<f64> = None
+    var is_none: bool = true
+    if let Some(_) = missing {
+        is_none = false
+    }
+    assert(is_none)
 }
 ```
 
+For reference, `stdlib/core/option.sio` also defines module-internal concrete
+numeric helpers `FloatOption` / `IntOption` (`float_some`, `float_none`,
+`float_option_is_some`, `float_option_unwrap`) — these are not exported, so
+they cannot be `use`d as a `core::option` API.
+
 There is no `Option<Epistemic>`. Carry uncertainty with `Epistemic` directly
-(`ep_measured(42.0, 0.1)`), and optionality with `FloatOption` separately.
+(`ep_measured(42.0, 0.1)`), and optionality with the built-in generic
+`Option<T>` (or, within `stdlib/core`, the module-internal `FloatOption`) separately.
 
 ## 3. Result Error Handling
 
@@ -70,7 +86,9 @@ use epistemic::knowledge::{ep_measured, ep_div, ep_val}
 
 pub fn main() with Div, Panic {
     // ep_measured(val, std_dev). ep_div propagates variance by the GUM delta
-    // method and panics on a zero divisor (the Div, Panic effects).
+    // method via direct floating-point division (the Div, Panic effects are
+    // declared on the general AD surface; a zero divisor yields IEEE
+    // infinity/NaN rather than a panic).
     let x = ep_measured(10.0, 0.1)
     let y = ep_measured(2.0, 0.05)
 
@@ -79,7 +97,7 @@ pub fn main() with Div, Panic {
 }
 ```
 
-`Result<Knowledge<f64>, ()>` and `a / b` on epistemic values are not on the checked surface. Confidence degrades through `ep_div` itself: the result keeps the minimum of the inputs' confidence. Anchor: `tests/stdlib/epistemic/test_knowledge_madaros_import_e2e.sio`.
+`Result<Knowledge<f64>, ()>` and `a / b` on epistemic values are not on the checked surface. Confidence degrades through `ep_div` itself: the result's confidence is the minimum of the inputs' confidence scaled by `97 / 100` (it never increases under division). Anchor: `tests/stdlib/epistemic/test_knowledge_madaros_import_e2e.sio`.
 
 ## 5. Integer Utilities
 
