@@ -17179,9 +17179,49 @@ impl Lowerer {
         }
     }
 
+    // Combined mask a function named `name` would give its result if called
+    // right now: scalar bits 0..31 from its declared returns_float encoding,
+    // array bits 32+ from the separate lower_fn_tuple_f64_arrays_collect
+    // prepass. Shared by the direct-call lookup below and the indirect-call
+    // alias fallback (Copilot follow-up, #2570) so both read one definition
+    // of "what does calling this name produce".
+    fn lower_named_fn_tuple_mask_ref(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, name)
+        var scalar_mask: i64 = 0
+        if fn_id >= 0 && fn_id < self.module.fn_count {
+            let code = ir_fn_get(&(*self.module), fn_id as usize).returns_float
+            if code >= 1024 {
+                scalar_mask = code - 1024
+            }
+        }
+        scalar_mask + lower_fn_tuple_f64_array_mask(name) * 4294967296
+    }
+
     fn expr_result_tuple_float_mask_ref(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
         if (*e).kind == ExprKind::ExprTupleLit {
             return self.expr_list_tuple_float_mask_ref(&(*e).args, 0)
+        }
+        // Copilot follow-up (#2570): `let f = pair` -- a bare reference to a
+        // function, not a call. Two cases share this branch because they are
+        // indistinguishable from the callee_name computed at lowering time:
+        //   - `f` is itself a LOCAL already carrying a tuple mask (`let u =
+        //     t` copying a real tuple-array-slotted local) -- propagate it.
+        //   - `f` names no local but a real top-level function -- `f` is a
+        //     function-identity ALIAS, so resolve and store the mask
+        //     CALLING it would give, under f's own name
+        //     (bind_local_tuple_float_mask, the same per-local storage a
+        //     real tuple's mask lives in; safe to share because the two
+        //     consumers never overlap -- a tuple value is read through field
+        //     access, an aliased function only through a later call). The
+        //     ExprCall fallback below and in expr_is_tuple_slot_f64_array_ref
+        //     both check the local's stored mask first so `f()` /`f().K`
+        //     see it.
+        if (*e).kind == ExprKind::ExprIdent {
+            let local_mask = self.lookup_local_tuple_float_mask((*e).name)
+            if local_mask != 0 {
+                return local_mask
+            }
+            return self.lower_named_fn_tuple_mask_ref((*e).name)
         }
         // `let t = recv.method()`: a method call is lowered to a mangled
         // `Type_method` free function (lower_impl_methods_ref), so its combined
@@ -17217,15 +17257,20 @@ impl Lowerer {
         match (*e).left {
             Some(callee_expr) => {
                 let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
-                let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
-                var scalar_mask: i64 = 0
-                if fn_id >= 0 && fn_id < self.module.fn_count {
-                    let code = ir_fn_get(&(*self.module), fn_id as usize).returns_float
-                    if code >= 1024 {
-                        scalar_mask = code - 1024
-                    }
+                let named_mask = self.lower_named_fn_tuple_mask_ref(callee_name)
+                if named_mask != 0 {
+                    return named_mask
                 }
-                scalar_mask + lower_fn_tuple_f64_array_mask(callee_name) * 4294967296
+                // Copilot follow-up (#2570): `let f = pair; let t = f()`.
+                // callee_name above is the LOCAL's own name "f", which names
+                // no real function, so lower_named_fn_tuple_mask_ref is
+                // always 0 for it. The alias branch at the top of this
+                // function resolved `pair`'s mask when `f` was bound and
+                // stored it under `f` itself; read it back here.
+                if (*callee_expr).kind == ExprKind::ExprIdent {
+                    return self.lookup_local_tuple_float_mask((*callee_expr).name)
+                }
+                0
             }
             _ => 0,
         }
@@ -17254,7 +17299,25 @@ impl Lowerer {
                         Some(callee_expr) => {
                             let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
                             let arr_bits = lower_fn_tuple_f64_array_mask(callee_name)
-                            return (arr_bits >> (slot as i32)) % 2 == 1
+                            if arr_bits != 0 {
+                                return (arr_bits >> (slot as i32)) % 2 == 1
+                            }
+                            // Copilot follow-up (#2570): `let f = pair;
+                            // f().K` / `f().K[i]` -- same indirect-call alias
+                            // fallback as expr_result_tuple_float_mask_ref's
+                            // ExprCall branch. callee_name above is the
+                            // LOCAL's own name, not `pair`, so the direct
+                            // lookup is always 0 for it; the alias mask
+                            // lower_let_stmt_type_metadata_ref stored under
+                            // the local's own name carries the array bits in
+                            // the same bit-32+ encoding this function reads
+                            // everywhere else.
+                            if (*callee_expr).kind == ExprKind::ExprIdent {
+                                let alias_mask = self.lookup_local_tuple_float_mask((*callee_expr).name)
+                                let alias_arr_bits = alias_mask / 4294967296
+                                return (alias_arr_bits >> (slot as i32)) % 2 == 1
+                            }
+                            return false
                         }
                         _ => return false,
                     }
