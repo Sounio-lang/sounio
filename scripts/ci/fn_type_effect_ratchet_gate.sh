@@ -670,8 +670,36 @@ function classify_fn_type_at(line, fn_pos, at_eof,    open_pos, close_pos, after
 # top-level case is not. match_close_bracket (below) finds the matching
 # closer for the wrapper the same way match_close_paren does for a "fn(",
 # then scan_entry_for_fn_types searches the WHOLE span between the brackets
-# for any nested "fn(" the normal way -- see the driver below for how this
-# is invoked, and why it does NOT use the pending/deferral mechanism.
+# for any nested "fn(" the normal way.
+#
+# Deliberately SAME-LINE ONLY, no pending/deferral. Copilot follow-up
+# (#2570): tried enabling deferral here on the theory that strip_noise
+# (stripping `//` comments and "..." string literals before this scanner
+# ever runs) already removes the ordinary-text triggers a blanket ":"
+# followed by "(" / "[" could misfire on. That theory was WRONG, confirmed
+# by actually enabling it and re-running the real corpus (not assumed):
+# the run hung, bisected by prefix-truncating files down to the exact
+# triggering line -- self-hosted/native/codegen_x86_linux.sio:483, a STRING
+# LITERAL containing an escaped quote, `"\":["`. The strip_noise regex
+# itself, `s/"[^"]*"//g`, does not understand `\"` as an escaped quote
+# inside a string (POSIX BRE/ERE has no lookbehind, and this is a plain
+# substitution, not a real lexer): it matches from the literal opening
+# quote to the FIRST quote character it finds AT ALL -- the escaped one --
+# stripping only `"\"` and leaving that literal own `:[` content and
+# trailing `"` behind as if they were ordinary code. The result has a
+# genuine, permanent `:[` with no matching `]` anywhere in the rest of the
+# file (it never was a real bracket), so `pending` grew for the remainder
+# of the file and never cleared -- exactly the failure mode this
+# same-line-only design was already built to avoid, just from a different
+# and more surprising source than plain "comments/strings" as originally
+# assumed. This escaped-quote gap in strip_noise is real and could be fixed
+# separately (a job for a proper escape-aware regex, e.g.
+# a two-branch alternation of "non-quote-non-backslash" and
+# "backslash-anything", under -E), but that is its own change to a function
+# several existing selftest controls already depend on, and is not needed
+# to fix THIS finding safely -- same-line-only already fails closed against
+# the corruption either way (no match found on this line, so nothing is
+# reported, rather than hanging).
 # Copilot follow-up (#2570): this whole scanner was line-local -- `line = $0`
 # reset fresh every record, so `f: fn(` on one physical line followed by
 # `i64` and `) -> i64` on the next two never resolved at all: match_close_paren
@@ -695,10 +723,8 @@ function classify_fn_type_at(line, fn_pos, at_eof,    open_pos, close_pos, after
     if (pending != "") {
         # `pending` always starts exactly at a "fn(" already confirmed to
         # follow a `:` on an earlier line, so retry it directly rather than
-        # re-running the `:...fn(` anchor search (which would fail here --
-        # the `:` that justified this match is no longer in `pending`). The
-        # separate "(" / "[" wrapper case below never defers -- see its own
-        # comment -- so it never populates `pending` at all.
+        # re-running the `:...` anchor search (which would fail here -- the
+        # `:` that justified this match is no longer in `pending`).
         result = classify_fn_type_at(line, 1, 0)
         if (result == -1) { pending = line; next }
         pending = ""
@@ -735,26 +761,11 @@ function classify_fn_type_at(line, fn_pos, at_eof,    open_pos, close_pos, after
             # a bare fn-type nested inside one of these wrappers bypassed the
             # ratchet silently. match_close_bracket finds the matching closer
             # for the wrapper, then scan_entry_for_fn_types searches the
-            # WHOLE span between the brackets for any nested "fn(" the
-            # normal way.
-            #
-            # Deliberately SAME-LINE ONLY, no pending/deferral -- unlike
-            # ": fn(", which is specific enough that it essentially never
-            # appears outside a genuine type position, a bare ":" followed by
-            # "(" or "[" is common in ordinary text this scanner also walks
-            # (comments, string literals, doc examples): an unmatched
-            # opener there (e.g. a comment reading "note: (see below") would
-            # defer via `pending`, and if its closer never legitimately
-            # appears, EVERY subsequent line gets prepended to an
-            # ever-growing `pending` and re-scanned from its start --
-            # exactly the whole-file-buffering blowup this scanner was
-            # measured and rejected for elsewhere (~9s just to concatenate
-            # lower.sio). Measured: enabling deferral here made a real-corpus
-            # run hang past a 120s timeout (vs. the ~35s baseline). A
-            # wrapper whose closing bracket is not on this same line is
-            # simply not classified -- a known, narrow gap (a multi-line
-            # tuple/array-wrapped fn-type parameter), safer than the
-            # alternative.
+            # WHOLE span between the brackets for any nested "fn(" the normal
+            # way. Deliberately SAME-LINE ONLY (see the comment above
+            # match_close_bracket for why deferring this across lines is
+            # unsafe): if the closer is not on this line, this declaration
+            # is skipped rather than carried into `pending`.
             close_pos = match_close_bracket(line, p, substr(line, p, 1))
             if (close_pos <= length(line)) {
                 scan_entry_for_fn_types(line, p + 1, close_pos, 0)
@@ -772,10 +783,8 @@ function classify_fn_type_at(line, fn_pos, at_eof,    open_pos, close_pos, after
             # WITHIN an outer fn(...) parameter list, selftest 18) -- the
             # gap was only ever in getting here from the top level. Skips
             # the identifier, tolerates whitespace before "<" the same way
-            # the spaced-generic-return-type fix does, and matches the
-            # generic close via match_close_bracket("<", ...). Same
-            # same-line-only, no-deferral rule as the tuple/array wrappers,
-            # for the identical reason.
+            # the spaced-generic-return-type fix does. Same-line-only, same
+            # reasoning as the tuple/array branch just above.
             gp = p
             while (gp <= length(line) && substr(line, gp, 1) ~ /[A-Za-z0-9_]/) { gp++ }
             gp = skip_ws(line, gp)
