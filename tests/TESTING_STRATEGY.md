@@ -24,7 +24,7 @@
 **Template:**
 ```sio
 // tests/unit/epistemic/add_test.sio
-use epistemic::knowledge::{ep_measured, ep_add, ep_val, ep_std, ep_confidence}
+use epistemic::knowledge::{ep_measured, ep_add, ep_val, ep_variance, ep_confidence}
 
 fn test_ep_add_basic() -> bool {
     // Setup: ep_measured(val, std_dev) stores variance = std_dev^2,
