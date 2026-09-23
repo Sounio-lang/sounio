@@ -257,7 +257,13 @@ fi
 # --format junit with no filter) so it also covers local/manual runs.
 #
 # Regenerate: SOUNIO_VACUOUS_BASELINE_REFRESH=1 bash scripts/run_sio_test_suite.sh
-VACUOUS_BASELINE_FILE="$ROOT_DIR/tests/vacuous_expect_baseline.txt"
+#
+# SOUNIO_VACUOUS_BASELINE_FILE overrides the path (e.g. /dev/null to disable
+# tolerance entirely). Same escape-hatch shape as SOUNIO_TEST_KNOWN_FAILURES_FILE
+# above -- a caller that wants every vacuous-annotation failure to be a real,
+# unabsorbed failure (this baseline is calibrated for lean_single specifically)
+# sets it to /dev/null rather than editing the checked-in baseline.
+VACUOUS_BASELINE_FILE="${SOUNIO_VACUOUS_BASELINE_FILE:-$ROOT_DIR/tests/vacuous_expect_baseline.txt}"
 VACUOUS_REFRESH="${SOUNIO_VACUOUS_BASELINE_REFRESH:-0}"
 declare -A VACUOUS_BASELINE_MAP=()
 if [[ "$VACUOUS_REFRESH" != "1" && -f "$VACUOUS_BASELINE_FILE" ]]; then

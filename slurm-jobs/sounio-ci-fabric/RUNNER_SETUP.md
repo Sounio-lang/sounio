@@ -85,8 +85,10 @@ guard that gate requires, or the gate refuses the build.
 3. Build and push a runner image. The kaxi lane's
    `slurm-jobs/kaxi-ptxas-accept/runner/Dockerfile.kaxi-runner` is a usable
    starting point; this pool does not need its `kubectl`/`build-essential`
-   additions unless a future job submits Slurm work from it (see the RBAC
-   file's own note on why the RBAC is granted anyway). Tag and reference it in
+   additions unless a future job submits Slurm work from it (see
+   `runner/ci-fabric-rbac.yaml`'s own note on why it ships as a bare
+   ServiceAccount with no Role/RoleBinding, and no API access at all, until
+   that need is real). Tag and reference it in
    `runner/ci-fabric-deployment.yaml`'s `image:` field.
 4. Fill in the `nodeAffinity` block per the warning above.
 5. Apply the Deployment:
