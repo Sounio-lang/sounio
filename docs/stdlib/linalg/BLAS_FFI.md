@@ -170,11 +170,11 @@ brew install openblas
 │                    EpistemicMatrix                       │
 │  ┌─────────────────────────────────────────────────────┐│
 │  │ matmul()                                            ││
-│  │  ├─ is_deterministic()?                             ││
-│  │  │   ├─ YES + BLAS available → matmul_blas()        ││
-│  │  │   │                              └─> DGEMM FFI   ││
-│  │  │   └─ NO or no BLAS → matmul_gum()                ││
-│  │  │                       └─> Pure-Sounio GUM        ││
+│  │ └─ inline pure-Sounio GUM loop (no dispatch)        ││
+│  │    EpistemicMatrix::matmul always runs GUM          ││
+│  │    is_deterministic()/blas_available() not called   ││
+│  │    (BLAS dispatch is planned, not yet wired)        ││
+│  │    → pure-Sounio uncertainty propagation            ││
 │  └─────────────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────────┘
                           │

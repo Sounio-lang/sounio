@@ -26,7 +26,7 @@
 // tests/unit/epistemic/add_test.sio
 use epistemic::knowledge::{ep_measured, ep_add, ep_val, ep_std, ep_confidence}
 
-fn test_ep_add_basic() -> bool with Mut, Div, Panic {
+fn test_ep_add_basic() -> bool {
     // Setup: ep_measured(val, std_dev) stores variance = std_dev^2,
     // confidence = 900.
     let a = ep_measured(10.0, 0.5)
@@ -36,11 +36,13 @@ fn test_ep_add_basic() -> bool with Mut, Div, Panic {
     let result = ep_add(&a, &b)
 
     // Verify: value adds, variances add, confidence is min(a,b) * 99/100.
+    // Use the pure ep_variance accessor (not the effectful ep_std) so this
+    // registered test fits the pure fn() -> bool registry slot.
     let value_ok = abs(ep_val(&result) - 30.0) < 0.0001
-    let std_ok = abs(ep_std(&result) - 0.583) < 0.001
+    let variance_ok = abs(ep_variance(&result) - 0.34) < 0.001
     let confidence_ok = ep_confidence(&result) == 891
 
-    return value_ok && std_ok && confidence_ok
+    return value_ok && variance_ok && confidence_ok
 }
 
 fn test_ep_add_edge_cases() -> bool {
