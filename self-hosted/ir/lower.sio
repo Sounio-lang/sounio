@@ -64,6 +64,14 @@ struct LowerLocalStack {
     // Tuple-typed local: bit k set iff element k of the tuple is f64. 0 = not a
     // tuple / no float elements. See lower_opt_type_tuple_float_mask (issue #1502).
     tuple_float_mask: Box<LowerLocalI64Slots>,
+    // Tuple-typed local: bit k set iff element k of the tuple is an `[f64; N]`
+    // ARRAY (as opposed to a scalar f64). 0 = no array slots. Kept as its OWN
+    // i64 slot table rather than packed into the high bits of tuple_float_mask:
+    // both masks independently need up to 32 usable bits (matching the existing
+    // #1502 scalar mask's `bit < 32` cap), and packing array bits into bits
+    // 32-63 of one i64 pushes array slot 31 onto the sign bit of the combined
+    // value, corrupting it. See lower_fn_tuple_f64_array_mask.
+    tuple_arr_mask: Box<LowerLocalI64Slots>,
     // Layout index for an aggregate element carried by a local: tuple slot-0
     // fixed arrays and Seq<T> share this slot because those shapes are disjoint.
     tuple0_array_elem_layout: Box<LowerLocalI64Slots>,
@@ -136,6 +144,7 @@ fn empty_lower_local_stack() -> LowerLocalStack with Alloc, Mut {
         is_ref: lowerer_box_local_i64_slots(0),
         scalar_kind: lowerer_box_local_i64_slots(0),
         tuple_float_mask: lowerer_box_local_i64_slots(0),
+        tuple_arr_mask: lowerer_box_local_i64_slots(0),
         tuple0_array_elem_layout: lowerer_box_local_i64_slots(-1),
         tuple_struct_layout: lowerer_box_local_i64_slots(-1),
         tuple_struct_slot: lowerer_box_local_i64_slots(-1),
@@ -773,11 +782,19 @@ pub fn lower_fn_tuple_arr_reset() with Mut {
     LOWER_FN_TUPLE_ARR_COUNT = 0
 }
 
+// Cap at 32 slots (bit < 32), matching the scalar f64 tuple mask's own cap
+// (lower_type_list_float_mask / expr_list_tuple_float_mask_ref, both `bit <
+// 32`). This mask now lives in its own dedicated i64 (tuple_arr_mask /
+// LOWER_FN_TUPLE_ARR_MASK) rather than being packed into the high half of a
+// combined value shared with the scalar mask, so slot 31 (bit 31, value
+// 2^31) no longer collides with any sign bit -- it was previously dropped by
+// an `if bit < 31` guard specifically to avoid landing on bit 63 of a
+// `scalar_mask + array_mask * 2^32` packed i64. See expr_result_tuple_arr_mask_ref.
 fn lower_type_list_f64_array_mask(opt: &Option<Box<TypeExprList>>, bit: i64) -> i64 with Mut, Panic, Div {
     match *opt {
         Some(list) => {
             var m: i64 = 0
-            if bit < 31 {
+            if bit < 32 {
                 if lower_type_expr_is_array_of_f64(&(*list).head) {
                     m = 1 << (bit as i32)
                 }
@@ -8921,6 +8938,7 @@ impl Lowerer {
                 // Callers that know a positive kind (for-IV int, float local) re-bind.
                 (*(*stk).scalar_kind).values[idx as usize] = 0
                 (*(*stk).tuple_float_mask).values[idx as usize] = 0
+                (*(*stk).tuple_arr_mask).values[idx as usize] = 0
                 (*(*stk).tuple0_array_elem_layout).values[idx as usize] = 0 - 1
                 (*(*stk).tuple_struct_layout).values[idx as usize] = 0 - 1
                 (*(*stk).tuple_struct_slot).values[idx as usize] = 0 - 1
@@ -8997,6 +9015,25 @@ impl Lowerer {
         lo
     }
 
+    // Array-slot counterpart of bind_local_tuple_float_mask: records which
+    // slots of a tuple-typed local are `[f64; N]` arrays, in its own table
+    // instead of the high bits of tuple_float_mask (see tuple_arr_mask field).
+    fn bind_local_tuple_arr_mask(self, name: Name, mask: i64) -> Lowerer with Mut, Alloc, Panic, Div {
+        var lo = self
+        if mask == 0 { return lo }
+        var stk = *lo.locals
+        var i = stk.count - 1
+        while i >= 0 {
+            if (*stk.depths).values[i as usize] <= lo.scope_depth && ir_name_eq((*stk.names).values[i as usize], name) {
+                (*stk.tuple_arr_mask).values[i as usize] = mask
+                lo.locals = Box::new(stk)
+                return lo
+            }
+            i = i - 1
+        }
+        lo
+    }
+
     fn bind_local_tuple_struct(self, name: Name, layout_idx: i64, slot: i64) -> Lowerer with Mut, Alloc, Panic, Div {
         var lo = self
         if layout_idx < 0 { return lo }
@@ -9037,6 +9074,18 @@ impl Lowerer {
         while i >= 0 {
             if (*(*self.locals).depths).values[i as usize] <= self.scope_depth && ir_name_eq((*(*self.locals).names).values[i as usize], name) {
                 return (*(*self.locals).tuple_float_mask).values[i as usize]
+            }
+            i = i - 1
+        }
+        0
+    }
+
+    // Array-slot counterpart of lookup_local_tuple_float_mask.
+    fn lookup_local_tuple_arr_mask(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*(*self.locals).depths).values[i as usize] <= self.scope_depth && ir_name_eq((*(*self.locals).names).values[i as usize], name) {
+                return (*(*self.locals).tuple_arr_mask).values[i as usize]
             }
             i = i - 1
         }
@@ -14452,7 +14501,13 @@ impl Lowerer {
             // an f64 slot was misclassified as integer. Consult the tuple mask first.
             let tuple_idx = lower_name_tuple_index((*e).name)
             if tuple_idx >= 0 {
-                // Low 32 bits only: bits 32+ flag f64-ARRAY slots (handles, not floats).
+                // opt_base_tuple_float_mask_ref / tuple_float_mask are scalar-f64-only
+                // (f64-ARRAY slots live in their own tuple_arr_mask -- see
+                // expr_is_tuple_slot_f64_array_ref). The `& 4294967295` here is now
+                // belt-and-suspenders: it was load-bearing when array bits were
+                // packed into bits 32-63 of this same value; kept so a future
+                // caller of opt_base_tuple_float_mask_ref that returns >32 bits
+                // (e.g. a raw returns_float code) still can't leak into this check.
                 let tuple_mask = self.opt_base_tuple_float_mask_ref(&(*e).left) & 4294967295
                 if tuple_mask != 0 {
                     return (tuple_mask >> (tuple_idx as i32)) % 2 == 1
@@ -16910,6 +16965,15 @@ impl Lowerer {
         }
     }
 
+    // #1502: per-slot SCALAR-f64 mask of a tuple-producing initialiser -- either
+    // a call whose declared return type is a tuple (encoded 1024+mask by
+    // lower_opt_return_float_code) or a literal tuple, whose element expressions
+    // are classified directly. The `[f64; N]` ARRAY-slot mask for a call is a
+    // separate value; see expr_result_tuple_arr_mask_ref. The two used to be
+    // packed into one combined i64 (scalar in bits 0-31, array in bits 32-63),
+    // which forced array slot 31 to be dropped to avoid corrupting the sign bit
+    // (bit 63) of the combined value -- see that function's history for the bug
+    // this split fixes.
     fn expr_result_tuple_float_mask_ref(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
         if (*e).kind == ExprKind::ExprTupleLit {
             return self.expr_list_tuple_float_mask_ref(&(*e).args, 0)
@@ -16928,20 +16992,41 @@ impl Lowerer {
                         scalar_mask = code - 1024
                     }
                 }
-                scalar_mask + lower_fn_tuple_f64_array_mask(callee_name) * 4294967296
+                scalar_mask
             }
             _ => 0,
         }
     }
 
-    // `let ov = __tupN.K` where slot K of the tuple local is an f64 array (bit
-    // 32+K of its mask, recorded from the callee's declared return type).
+    // Array-slot counterpart of expr_result_tuple_float_mask_ref: per-slot mask
+    // of which slots of a tuple-producing CALL's declared return type are
+    // `[f64; N]` arrays. Tuple literals have no declared-array-return tracking
+    // (mirrors the pre-split behaviour, which only ever populated array bits
+    // from lower_fn_tuple_f64_array_mask on the call path). Returned as its own
+    // i64 -- see tuple_arr_mask -- instead of shifted into high bits of a value
+    // shared with the scalar mask.
+    fn expr_result_tuple_arr_mask_ref(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+        if (*e).kind != ExprKind::ExprCall {
+            return 0
+        }
+        match (*e).left {
+            Some(callee_expr) => {
+                let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
+                lower_fn_tuple_f64_array_mask(callee_name)
+            }
+            _ => 0,
+        }
+    }
+
+    // `let ov = __tupN.K` where slot K of the tuple local is an f64 array (bit K
+    // of its OWN mask, recorded from the callee's declared return type -- see
+    // tuple_arr_mask / lookup_local_tuple_arr_mask).
     fn expr_is_tuple_slot_f64_array_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
         if (*e).kind != ExprKind::ExprFieldAccess {
             return false
         }
         let slot = lower_name_tuple_index((*e).name)
-        if slot < 0 || slot >= 31 {
+        if slot < 0 || slot >= 32 {
             return false
         }
         match (*e).left {
@@ -16949,7 +17034,7 @@ impl Lowerer {
                 if (*base_expr).kind != ExprKind::ExprIdent {
                     return false
                 }
-                let arr_bits = self.lookup_local_tuple_float_mask((*base_expr).name) / 4294967296
+                let arr_bits = self.lookup_local_tuple_arr_mask((*base_expr).name)
                 (arr_bits >> (slot as i32)) % 2 == 1
             }
             None => false,
@@ -17405,6 +17490,18 @@ impl Lowerer {
                 }
                 _ => {}
             }
+        }
+        // Array-slot counterpart: which slots of a tuple-typed local are
+        // `[f64; N]` arrays, tracked in its own mask (tuple_arr_mask) rather
+        // than packed into the high bits of tuple_float_mask.
+        match s.expr {
+            Some(expr_box_tup_arr) => {
+                let init_tuple_arr_mask = lo.expr_result_tuple_arr_mask_ref(&(*expr_box_tup_arr))
+                if init_tuple_arr_mask != 0 {
+                    lo = lo.bind_local_tuple_arr_mask(s.name, init_tuple_arr_mask)
+                }
+            }
+            _ => {}
         }
         if lower_opt_type_is_f64(&s.ty) {
             lo = lo.bind_local_scalar_kind(s.name, 2)
