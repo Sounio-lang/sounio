@@ -153,7 +153,7 @@ fi
 # The cap AND the first fn past it: t<CAP> is the (CAP+1)th, so it is the one
 # whose entry did not fit. Naming it proves the sticky fault state carried the
 # name through the reset, not just a bare flag.
-grep -Fq "more than ${TUPLE_CAP} functions return a tuple with an \`[f64; N]\` slot, starting at \`t${TUPLE_CAP}\`" "$TUPLE_DIR/over_cap.log" || {
+grep -Fq "more than ${TUPLE_CAP} functions need f64-array tuple-slot metadata (their own tuple return, or a returned function's), starting at \`t${TUPLE_CAP}\`" "$TUPLE_DIR/over_cap.log" || {
   tail -n 40 "$TUPLE_DIR/over_cap.log" >&2
   fail "${TUPLE_OVER}-tuple-fn capacity diagnostic was missing or changed"
 }
@@ -212,7 +212,7 @@ fi
 if [[ -e "$TOO_FAR_OUT" ]]; then
   fail "slot-${SLOT_MAX} rejection left an output artifact: $TOO_FAR_OUT"
 fi
-grep -Fq "function \`wide\` returns a tuple with an \`[f64; N]\` in slot ${SLOT_MAX} or later" "$SLOT_DIR/too_far.log" || {
+grep -Fq "function \`wide\`'s f64-array tuple metadata (its own return, or a returned function's) needs slot ${SLOT_MAX} or later" "$SLOT_DIR/too_far.log" || {
   tail -n 40 "$SLOT_DIR/too_far.log" >&2
   fail "slot-${SLOT_MAX} diagnostic was missing or changed"
 }
