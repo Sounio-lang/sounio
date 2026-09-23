@@ -1872,8 +1872,19 @@ pub fn spec_append_item_lists(a: Option<Box<ItemList>>, b: Option<Box<ItemList>>
 // cap affordable, which is what makes the refusal below affordable too.
 //
 // The table is a power of two so the probe wraps by mask, and 0 stays the empty
-// sentinel — ast_name_hash returns |hash| and insert rejects 0, so no live name
-// can be confused with an empty slot.
+// sentinel. STORED/COMPARED KEY IS h+1, NOT h: ast_name_hash's own clamp
+// (`if hash < 0 { 0 - hash } else { hash }`) makes every real hash >= 0, so a
+// legitimate name CAN hash to exactly 0 (confirmed: "fZOXITBAFRX_E" does, both
+// via this compiler's own ast_name_hash and independently in Python). An
+// earlier version used `h == 0` as a shortcut meaning "nothing to mark" --
+// indistinguishable from the empty-slot sentinel `marks[slot] == 0` this table
+// already relies on, so a hash-0-named function's call site could never be
+// marked reachable and spec_dce_filter_items deleted its still-called FnDef
+// outright. Shifting the stored/compared key by 1 keeps every real hash's slot
+// representation >= 1, so 0 stays an unambiguous "truly empty" sentinel for
+// any hash value, including 0 itself. Same fix as pfi_census_note/
+// pfi_census_mods in private_fn_identity.sio, for the identical bug class in a
+// different hash table.
 let SPEC_DCE_SLOTS: i64 = 16384
 let SPEC_DCE_SLOT_MASK: i64 = 16383
 // 50% load. Past this the probe lengths stop being constant and, more to the
@@ -1884,9 +1895,7 @@ let SPEC_DCE_MAX: i64 = 8192
 let SPEC_DCE_MAX_ROUNDS: i64 = 64
 
 fn spec_dce_hash_find(marks: &[i64; 16384], count: i64, h: i64) -> bool with Mut, Panic, Div {
-    if h == 0 {
-        return false
-    }
+    let key = h + 1
     var slot = h % SPEC_DCE_SLOTS
     var probes: i64 = 0
     while probes < SPEC_DCE_SLOTS {
@@ -1894,7 +1903,7 @@ fn spec_dce_hash_find(marks: &[i64; 16384], count: i64, h: i64) -> bool with Mut
         if cur == 0 {
             return false
         }
-        if cur == h {
+        if cur == key {
             return true
         }
         slot = (slot + 1) % SPEC_DCE_SLOTS
@@ -1904,9 +1913,7 @@ fn spec_dce_hash_find(marks: &[i64; 16384], count: i64, h: i64) -> bool with Mut
 }
 
 fn spec_dce_hash_insert(marks: &! [i64; 16384], count: &! i64, h: i64) -> bool with Mut, Panic, Div {
-    if h == 0 {
-        return false
-    }
+    let key = h + 1
     if *count >= SPEC_DCE_MAX {
         // Do NOT insert and do NOT pretend this was a no-op: the caller reads
         // *count against SPEC_DCE_MAX and abandons filtering entirely. Silence
@@ -1917,11 +1924,11 @@ fn spec_dce_hash_insert(marks: &! [i64; 16384], count: &! i64, h: i64) -> bool w
     var probes: i64 = 0
     while probes < SPEC_DCE_SLOTS {
         let cur = marks[slot as usize]
-        if cur == h {
+        if cur == key {
             return false
         }
         if cur == 0 {
-            marks[slot as usize] = h
+            marks[slot as usize] = key
             *count = *count + 1
             return true
         }
