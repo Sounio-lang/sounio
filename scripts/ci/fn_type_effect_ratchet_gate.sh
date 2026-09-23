@@ -192,60 +192,98 @@ strip_noise() {
 # function-type parameter, classified by recursing into this SAME function.
 # That recursion is what visits `register_test`'s inner `fn() -> TestResult`
 # independently, and continues to whatever depth further nesting occurs at.
+#
+# Copilot follow-up (#2570): "push `<` only when preceded by an identifier
+# character" was itself still a formatting heuristic, and Sounio does not
+# require whitespace around a refinement's own comparison operators
+# (self-hosted/parser/types.sio:697-705 tokenizes them independently of
+# whitespace). `{x:i64|x<0}` (no spaces at all) has an identifier ("x")
+# directly before its comparison "<" too, so the old heuristic pushed it as
+# a generic opener exactly as it once pushed `x < 0`'s spaced version --
+# same corruption, same undercount, just reachable without a space. No
+# purely LOCAL character-shape rule (spacing, or anything else about the
+# one or two characters immediately around "<") can distinguish these,
+# because the two spellings are locally identical; what differs is
+# GRAMMATICAL CONTEXT -- whether we are past the "|" that starts a
+# refinement's predicate. So `pred[depth]` tracks that directly: pushing a
+# new bracket inherits its enclosing level's predicate state, a literal "|"
+# seen while the current bracket is "{" marks that level as predicate mode,
+# and once in predicate mode a bare "<" is left alone unconditionally --
+# not a question of what precedes it at all, because inside an active
+# predicate every "<"/">" is a comparison, full stop. Factored the
+# open/other-close handling out of match_close_paren, scan_tail and the
+# parameter-list walker into one shared step_open_or_other_close, so this
+# fix (and any future one to this exact logic) lives in a single place
+# instead of three independently-drifting copies.
 AWK_SCAN='
-function match_close_paren(line, open_pos,    i, n, c, depth, stack) {
+function step_open_or_other_close(c, prevc, depth, stack, pred) {
+    if (c == "(" || c == "[" || c == "{") {
+        depth++
+        stack[depth] = c
+        pred[depth] = pred[depth - 1]
+        return depth
+    }
+    if (c == "<") {
+        if (pred[depth] != 1 && prevc ~ /[A-Za-z0-9_]/) {
+            depth++
+            stack[depth] = "<"
+            pred[depth] = pred[depth - 1]
+        }
+        return depth
+    }
+    if (c == "|") {
+        if (depth > 0 && stack[depth] == "{") { pred[depth] = 1 }
+        return depth
+    }
+    if (c == ">") {
+        if (depth > 0 && stack[depth] == "<") { return depth - 1 }
+        return depth
+    }
+    if (c == "]") {
+        if (depth > 0 && stack[depth] == "[") { return depth - 1 }
+        return depth
+    }
+    if (c == "}") {
+        if (depth > 0 && stack[depth] == "{") { return depth - 1 }
+        return depth
+    }
+    return depth
+}
+function match_close_paren(line, open_pos,    i, n, c, prevc, depth, stack, pred) {
     depth = 1
     stack[1] = "("
+    pred[1] = 0
+    prevc = ""
     n = length(line)
     i = open_pos + 1
     while (i <= n) {
         c = substr(line, i, 1)
-        if (c == "<") {
-            if (i > 1 && substr(line, i - 1, 1) ~ /[A-Za-z0-9_]/) { depth++; stack[depth] = "<" }
-        } else if (c == "(" || c == "[" || c == "{") {
-            depth++
-            stack[depth] = c
-        } else if (c == ")") {
+        if (c == ")") {
             if (stack[depth] == "(") { depth--; if (depth == 0) { return i } }
-        } else if (c == ">") {
-            if (depth > 0 && stack[depth] == "<") { depth-- }
-        } else if (c == "]") {
-            if (depth > 0 && stack[depth] == "[") { depth-- }
-        } else if (c == "}") {
-            if (depth > 0 && stack[depth] == "{") { depth-- }
+        } else {
+            depth = step_open_or_other_close(c, prevc, depth, stack, pred)
         }
+        prevc = c
         i++
     }
     return n + 1
 }
-function scan_tail(line, tail_start,    i, n, c, prev, depth, stack) {
+function scan_tail(line, tail_start,    i, n, c, prevc, depth, stack, pred) {
     depth = 0
-    prev = ""
+    prevc = ""
     n = length(line)
     i = tail_start
     while (i <= n) {
         c = substr(line, i, 1)
-        if (c == "<") {
-            if (prev ~ /[A-Za-z0-9_]/) {
-                depth++
-                stack[depth] = c
-            }
-        } else if (c == "(" || c == "[" || c == "{") {
-            depth++
-            stack[depth] = c
-        } else if (c == ")") {
+        if (c == ")") {
             if (depth == 0) { return i }
             if (stack[depth] == "(") { depth-- }
-        } else if (c == ">") {
-            if (depth > 0 && stack[depth] == "<") { depth-- }
-        } else if (c == "]") {
-            if (depth > 0 && stack[depth] == "[") { depth-- }
-        } else if (c == "}") {
-            if (depth > 0 && stack[depth] == "{") { depth-- }
         } else if (c == "," && depth == 0) {
             return i
+        } else {
+            depth = step_open_or_other_close(c, prevc, depth, stack, pred)
         }
-        prev = c
+        prevc = c
         i++
     }
     return n + 1
@@ -258,7 +296,7 @@ function count_with_clauses(str,    tmp) {
     tmp = " " str
     return gsub(/[^A-Za-z0-9_]with[ \t]+[A-Za-z]/, "@", tmp)
 }
-function classify_fn_type_at(line, fn_pos,    open_pos, close_pos, after, hit, hit_tail, fn_layers, with_n, bare_layers, k, tail_start, tail_end, entry_start, i, n, c, depth, stack, entry, trimmed) {
+function classify_fn_type_at(line, fn_pos,    open_pos, close_pos, after, hit, hit_tail, fn_layers, with_n, bare_layers, k, tail_start, tail_end, entry_start, i, n, c, prevc, depth, stack, pred, entry, trimmed) {
     open_pos = fn_pos + 2
     close_pos = match_close_paren(line, open_pos)
     after = close_pos + 1
@@ -289,6 +327,7 @@ function classify_fn_type_at(line, fn_pos,    open_pos, close_pos, after, hit, h
     entry_start = open_pos + 1
     i = entry_start
     depth = 0
+    prevc = ""
     n = close_pos
     while (i < n) {
         c = substr(line, i, 1)
@@ -298,20 +337,12 @@ function classify_fn_type_at(line, fn_pos,    open_pos, close_pos, after, hit, h
             sub(/^[ \t]+/, "", trimmed)
             if (trimmed ~ /^fn\(/) { classify_fn_type_at(line, entry_start + (length(entry) - length(trimmed))) }
             entry_start = i + 1
-        } else if (c == "<") {
-            if (i > entry_start && substr(line, i - 1, 1) ~ /[A-Za-z0-9_]/) { depth++; stack[depth] = "<" }
-        } else if (c == "(" || c == "[" || c == "{") {
-            depth++
-            stack[depth] = c
         } else if (c == ")") {
             if (depth > 0 && stack[depth] == "(") { depth-- }
-        } else if (c == ">") {
-            if (depth > 0 && stack[depth] == "<") { depth-- }
-        } else if (c == "]") {
-            if (depth > 0 && stack[depth] == "[") { depth-- }
-        } else if (c == "}") {
-            if (depth > 0 && stack[depth] == "{") { depth-- }
+        } else {
+            depth = step_open_or_other_close(c, prevc, depth, stack, pred)
         }
+        prevc = c
         i++
     }
     entry = substr(line, entry_start, n - entry_start)
@@ -546,6 +577,27 @@ selftest() {
   if [ "$n13b" = "3" ]; then
     echo "  ok   NEGATIVO 13: tres camadas nuas produzem tres hits"
   else echo "  FALHA NEGATIVO 13: esperava 3 hits para tres camadas nuas, obteve $n13b"; rc=1; fi
+  # POSITIVE control 14 (#2570): a WHITESPACE-FREE refinement comparison
+  # (`{x:i64|x<0}`, no spaces anywhere). Sounio tokenizes refinement
+  # operators independently of whitespace
+  # (self-hosted/parser/types.sio:697-705), so this is equally valid source
+  # to POSITIVO 11's spaced version -- but the old "push '<' only when
+  # preceded by an identifier character" heuristic saw "x" directly before
+  # "<" here too (spacing was never actually what made POSITIVO 11 safe;
+  # the heuristic just happened to also reject the unspaced form as a side
+  # effect of requiring a space specifically). Now disambiguated by
+  # predicate context (pred[depth]) instead of spacing at all, so this must
+  # pass identically to POSITIVO 11.
+  printf 'fn use_it(f: fn() -> ({x:i64|x<0}, f64)) -> f64 with IO { 0.0 }\n' > "$tmp/pos14.sio"
+  if bare_hits_of "$tmp/pos14.sio" | grep -q .; then
+    echo "  ok   POSITIVO 14: refinamento sem espacos (comparacao <) e nu"
+  else echo "  FALHA POSITIVO 14: refinamento sem espacos nao detectado como nu"; rc=1; fi
+  # NEGATIVE control 14 (#2570): companion -- same whitespace-free
+  # refinement, but the fn-type parameter DOES carry its own effects.
+  printf 'fn use_it(f: fn() -> ({x:i64|x<0}, f64) with Mut) -> f64 { 0.0 }\n' > "$tmp/neg14.sio"
+  if bare_hits_of "$tmp/neg14.sio" | grep -q .; then
+    echo "  FALHA NEGATIVO 14: refinamento sem espacos e efeito proprio contado como nu"; rc=1
+  else echo "  ok   NEGATIVO 14: refinamento sem espacos e efeito proprio nao conta como nu"; fi
   rm -rf "$tmp"
   echo "falhas: $rc"
   return $rc
