@@ -14755,11 +14755,28 @@ impl Lowerer {
                     return self.lookup_local_tuple_float_mask((*base_expr).name)
                 }
                 // `mk().1` with no intervening binding: take the mask straight off
-                // the callee's encoded return code.
+                // the callee's encoded return code. Copilot follow-up (#2570):
+                // same local-vs-global precedence fix as
+                // expr_result_tuple_float_mask_ref's ExprCall branch and
+                // expr_is_tuple_slot_f64_array_ref's ExprCall-base branch --
+                // this SIBLING function (the scalar-projection path,
+                // `f().1 * 2.0` for a function-pointer local `f`) never got
+                // it: `callee_name` here is the LOCAL's own name, which the
+                // named-function table has no entry for, so
+                // `f: fn() -> (i64, f64)` correctly recorded a scalar mask on
+                // `f` (5181b66b03 / 1c6554dc7a) but this reader never
+                // consulted it, still reading `f().1`'s f64 bits as an
+                // integer. Check local existence first, same as the other
+                // two sites; the caller already masks the result to bits
+                // 0..31 (`& 4294967295`) so returning the local's full
+                // combined mask here, unfiltered, is safe.
                 if (*base_expr).kind == ExprKind::ExprCall {
                     match (*base_expr).left {
                         Some(callee_expr) => {
                             let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
+                            if self.lookup_local(callee_name) >= 0 {
+                                return self.lookup_local_tuple_float_mask(callee_name)
+                            }
                             let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
                             if fn_id >= 0 && fn_id < self.module.fn_count {
                                 let code = ir_fn_get(&(*self.module), fn_id as usize).returns_float
