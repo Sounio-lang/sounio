@@ -31,6 +31,24 @@ private and are **not** part of the public/user-facing API, so provenance
 cannot be attached or queried through it yet. Shared-source covariance is
 tracked internally in `stdlib/epistemic/affine.sio`.
 
+## Two epistemic surfaces
+
+Sounio exposes two distinct epistemic representations; do not treat one as a
+replacement for the other:
+
+- **Stdlib `Epistemic` / `ep_*` API (this document).** The user-facing value
+  type `Epistemic { pub val, pub variance, pub confidence }` and the free
+  functions `ep_measured` / `ep_certain` / `ep_new` / `ep_add` / … described
+  below. Prefer this surface for new code.
+- **Language-level `Knowledge<T>` / `measure` intrinsic.** A separate compiler
+  intrinsic retained by the self-hosted checker and exercised by older
+  run-pass tests. `measure(value: T, uncertainty: f64) -> Knowledge<T>`
+  (`self-hosted/check/check.sio:1054`) builds a `Knowledge<T>`, whose nominal
+  value is read via `.value` (see `tests/run-pass/variance_of_measure_sum.sio`).
+  The standard-library index (`docs/reference/STDLIB_REFERENCE.md`) still routes
+  `Knowledge<T>` lookups here. Treat `Knowledge<T>` as a distinct, lower-level
+  surface rather than an alias for `Epistemic`.
+
 ## Constructors
 
 Use the `ep_measured(val, std_dev)` / `ep_certain(val)` / `ep_new(val, variance, confidence)`
@@ -94,7 +112,7 @@ fn main() with IO {
 Guidelines:
 - If a function performs I/O, include `with IO`.
 - If GPU kernels or device operations are used, include `with GPU`.
-- `ep_std`/`ep_div`/`ep_merge` may require `Div`/`Mut`/`Panic`; keep pure uncertainty transformations effect-free when possible.
+- The effect requirements differ per function and are exact: `ep_std` declares `with Mut, Div, Panic`; `ep_div` and `ep_merge` declare `with Div, Panic`. Include precisely the effects each function declares — do not add `Mut` to `ep_div`/`ep_merge`, and do not omit `Mut` from `ep_std`. Keep other uncertainty transforms effect-free when possible.
 
 ## Related References
 
