@@ -148,11 +148,20 @@ sweeps and overstates a law's domain by more than a decade.
 
 It measures rather than reads. Each number carries the command that produced it
 and the commit at which that command was run, and a committed auditor
-(`audit_provenance.py`, §8.3) exits non-zero when a section reports
-high-precision numbers without naming a producer that exists in the released
-tree. That auditor was written after — and because — a published table in this
-very work turned out to have been measured from a working copy that was never
-committed (§6, instance 10, third row).
+(`audit_provenance.py`, §8.3) exits non-zero — **FAIL** — when a section's own
+command block names a file that is not in the released tree, is placeholder
+prose rather than a runnable command, or names no file at all. **[W] Corrected
+2026-09-23, a reviewer finding.** A section that reports numbers but carries no
+command block of its own — because it relies on a command given earlier in the
+document — is counted separately as **INHERIT** and does not fail the
+auditor's exit code; that case still needs a reader to locate the inherited
+command, which the auditor cannot verify automatically. The auditor's actual
+coverage is therefore narrower than "exits non-zero whenever a section lacks a
+producer in the tree" states: it catches a *wrong* or *absent-from-tree*
+producer, not the weaker case of *no producer stated at all*. That auditor was
+written after — and because — a published table in this very work turned out
+to have been measured from a working copy that was never committed (§6,
+instance 10, third row).
 
 ### 1.4 Contributions
 
