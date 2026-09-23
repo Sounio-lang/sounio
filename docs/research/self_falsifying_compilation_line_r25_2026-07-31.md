@@ -72,7 +72,7 @@ Measured 2026-07-31; the contract re-measures on every run.
 |---|---|---|
 | `V1_WHITELIST_IS_THREE` | `ACTIVE_RESEARCH_DOCS` at :32 has exactly six path literals, all under `docs/research/` (grew three → four on 2026-08-15, four → five on 2026-08-28 via `cd-tower-automorphism-freeze.md`, five → six on 2026-09-22 via this paper in PR #2648) | currency is a six-name list |
 | `V2_DEFAULT_IS_HISTORICAL` | path rule :396 (`ACTIVE_RESEARCH_DOCS.has(relPath) ? 'repo_only' : 'historical'`) is ternary on that Set → `repo_only` / `historical` | default is lineage |
-| `V3_CORPUS_IS_LINEAGE_DEFAULT` | 320 research topics: historical 317, repo_only 2, dual 1; 317/317 historical pages carry the lineage note; all 317 non-whitelist paths are historical | almost everything is lineage by default |
+| `V3_CORPUS_IS_LINEAGE_DEFAULT` | **2026-07-31 measured baseline** (now historical): 320 research topics — historical 317, repo_only 2, dual 1; 317/317 historical pages carried the lineage note; all 317 non-whitelist paths were historical. The contract re-measures these live on every run; the current registry has 444 research topics (438 historical, 5 repo_only, 1 dual), so this row is a fixed snapshot, not the live count | almost everything is lineage by default |
 | `V4_GATE_REJECTS_CURRENT` | hermetic synced farm; unmodified → rc=0; R24's page given `authority: repo_only` → rc=1 with `expected "historical"` | claiming currency fails |
 
 **Update 2026-08-15**: `ACTIVE_RESEARCH_DOCS` grew from three paths to four
@@ -104,8 +104,10 @@ than a bare literal, so the next legitimate whitelist change updates one
 constant. The clause IDs keep their rung-continuity labels
 (`V1_WHITELIST_IS_THREE`) even though the count is now 6 — they are labels, not
 live assertions of the number three. The corpus counts in `V3` are re-measured
-on every run (they are not a fixed 2026-07-31 snapshot), so the only durable
-claim the spec makes about the contract is the six-entry whitelist baseline.
+live on every run; the table above records the 2026-07-31 baseline as a fixed
+historical snapshot (the current registry is 444 topics: 438 historical, 5
+repo_only, 1 dual), so the only durable, version-independent claim the spec
+makes about the contract is the six-entry whitelist baseline.
 
 ## 4. Why this rung belongs to this line
 
