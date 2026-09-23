@@ -3420,3 +3420,4 @@ notes: |
   or parser/instantiation tracking), not in check.sio's current_impl_type/method lookup.
   Subagent analysis not yet delivered; will report once available. No PR opened — the campaign is
   fully documented as DONE; A2 residual is a separate engineering problem, not a missing handoff item.
+- 2026-09-23T01:45Z lane=phase1 agent=cherry-1 branch=feat/madaros-phase1-effects-inference-20260923 base=045474a1c — Madaros Phase 1: effects inference + sandbox codegen. Worktree: /Users/demetriosagourakis/dev/sounio-worktrees/madaros-phase1. Baseline incorporada: fix/effects-sandbox-baseline. Terreno: self-hosted/check/effects.sio+effects_row.sio, self-hosted/effects/, stdlib/compiler/effects/sandbox.sio. Testes-âncora: closure_effect_infer(_auto), effect_superset_ok, effect_chain_propagation, effects_sandbox_handlers, effects_sandbox_integration.
