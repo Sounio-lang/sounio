@@ -39,7 +39,7 @@ concentration = dose / volume  # What's the error?
 
 #### After (Sounio):
 ```sio
-use epistemic::knowledge::{ep_measured, ep_add}
+use epistemic::knowledge::{ep_measured, ep_div}
 
 // Uncertainty is tracked automatically; std-dev form (ep_measured stores variance = std^2).
 let dose = ep_measured(500.0, 2.5)  // 500, σ=2.5, default confidence 900/1000

@@ -276,7 +276,7 @@ Yes. Performance comparable to Rust/C++:
 
 Minimal:
 - `Epistemic` is `val: f64` + `variance: f64` + `confidence: i64` (24 bytes total). See `stdlib/epistemic/knowledge.sio`.
-- Propagation adds a small, operation-dependent overhead per operation (three extra `f64` fields plus a handful of GUM δ-method arithmetic ops); the exact cost depends on the operation mix and the compiler path.
+- Propagation adds a small, operation-dependent overhead per operation: relative to a raw `f64`, `Epistemic` carries one extra `f64` variance field and one `i64` confidence field, plus a handful of GUM δ-method arithmetic ops; the exact cost depends on the operation mix and the compiler path.
 - GPU kernels can vectorize uncertainty calculations
 
 ### When should I use GPU acceleration?
@@ -328,13 +328,13 @@ Yes, via PyO3 bindings (experimental — not part of the checked public artifact
 ```python
 import sounio
 
-# Experimental PyO3 binding shape: sounio.Knowledge(value, epsilon, provenance),
-# where epsilon is the standard uncertainty (k=1). This mirrors the Sounio
-# Epistemic (value, variance = epsilon**2, integer confidence) but is a
-# standalone prototype API, not the canonical stdlib surface.
-e1 = sounio.Knowledge(10.0, epsilon=0.5)
-e2 = sounio.Knowledge(5.0,  epsilon=0.2)
-print(f"Result: {e1.value} ± {e1.epsilon}")
+# Experimental PyO3 binding shape: sounio.Knowledge(value, uncertainty, confidence, unit, prov),
+# where uncertainty is the standard uncertainty (k=1, sigma) and confidence is an f64 in [0,1]
+# (NOT the stdlib's integer 0..1000 score). This is a standalone prototype API, not the
+# canonical stdlib surface (which uses integer confidence 0..1000 and variance = sigma**2).
+e1 = sounio.Knowledge(10.0, uncertainty=0.5, confidence=0.95)
+e2 = sounio.Knowledge(5.0,  uncertainty=0.2, confidence=0.95)
+print(f"Result: {e1.value} ± {e1.uncertainty} (conf {e1.confidence})")
 ```
 
 ### Can I use Rust crates?

@@ -34,7 +34,7 @@ A programming language feature that allows modeling side effects (I/O, state, ex
 **AUC (Area Under the Curve)**
 In pharmacokinetics, the integral of drug concentration over time. A key measure of drug exposure.
 
-> Dimensions: in the checked surface, AUC is `Quantity { value, uncertainty, dim: dim_mass() × dim_length()^(-3) × dim_time()^(1) }` (concentration × time). Unit spellings such as `mg`, `mL`, and `unit Clearance = L/h` are implemented and tested (`tests/run-pass/unit_same_add.sio`); the runtime `Quantity` form is the complementary representation.
+> Dimensions: in the checked surface, AUC is `Quantity { value, uncertainty, dim: dim_mass() × dim_length()^(-3) × dim_time()^(1) }` (concentration × time). Unit spellings such as `mg` and `mL` are implemented and tested (`tests/run-pass/unit_same_add.sio`); the `unit Clearance = L/h` declaration syntax exists but is not yet covered by a run-pass fixture. The runtime `Quantity` form is the complementary representation.
 
 ---
 
@@ -170,7 +170,7 @@ Statistical technique using repeated random sampling. Supported in `stdlib.monte
 ## O
 
 **ODE (Ordinary Differential Equation)**
-Equation involving derivatives of a function. Common in scientific modeling. Sounio ships `stdlib::ode` with RK4, RK45, Tsit5, BDF, epistemic integration, and PBPK sources (`stdlib/ode/solver.sio`). For source-tracked uncertainty propagation see `stdlib/epistemic/affine` and the `physics::mechanics` module (`kinetic_energy_q`, `hookean_force_q`, etc.).
+Equation involving derivatives of a function. Common in scientific modeling. Sounio ships `stdlib::ode` with RK4, RK45, Tsit5, BDF, epistemic integration, and PBPK sources (`stdlib/ode/solver.sio`). For source-tracked uncertainty propagation see `stdlib/epistemic/affine` (anchor: `tests/run-pass/affine_shared_source_add.sio`).
 
 **Ownership**
 System ensuring memory safety by tracking which part of code "owns" each value. Sounio uses affine/linear types instead of Rust's borrow checker.
@@ -256,10 +256,11 @@ let velocity = quantity_div(distance, time)
 ```
 
 > Units-as-type spellings (`let distance: m = 100.0`, `fn f(x: kg) -> N`) and
-> derived units (`f64<m/s>`, `mg`, `mL`, `unit Clearance = L/h`) ARE part of the
-> checked surface and are tested (`tests/run-pass/unit_same_add.sio`). The
-> runtime `Quantity` + `quantity_new(val, unc, dim_*())` form is the
-> complementary representation for dimensions computed at runtime.
+> derived unit spellings (`f64<m/s>`, `mg`, `mL`) ARE part of the checked surface
+> and are tested (`tests/run-pass/unit_same_add.sio`); the `unit Clearance = L/h`
+> and `mg*h/L` derived-declaration syntax exists but is not yet covered by a
+> run-pass fixture. The runtime `Quantity` + `quantity_new(val, unc, dim_*())`
+> form is the complementary representation for dimensions computed at runtime.
 
 ---
 

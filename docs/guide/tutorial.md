@@ -333,18 +333,19 @@ let invalid = quantity_add(distance, time)  // runtime panic, not a compile-time
 
 ### Custom Units (Quantity form)
 
-> `mg`, `mL`, `mg*h/L`, and `L/h` ARE supported as unit spellings and `unit`
-> declarations in the checked surface (`tests/run-pass/unit_same_add.sio`;
-> `unit Clearance = L/h`). The runtime `Quantity` with `dim_*()` dimensions
+> `mg` and `mL` ARE supported as unit spellings and `unit` declarations in the
+> checked surface (`tests/run-pass/unit_same_add.sio`). The `unit Clearance = L/h`
+> and `mg*h/L` derived-declaration syntax exists but is not yet covered by a
+> run-pass fixture. The runtime `Quantity` with `dim_*()` dimensions
 > (`stdlib/units/lib.sio`) is the complementary representation.
 
 ```sio
 use units::lib::*;
 
-let dose    = quantity_new(500.0, 0.0, dim_mass())
-let volume  = quantity_new(250.0, 0.0, UnitDim {
+let dose    = quantity_new(0.0005, 0.0, dim_mass())              // 500 mg = 5e-4 kg
+let volume  = quantity_new(2.5e-4, 0.0, UnitDim {
     mass: 0, length: 3, time: 0, temperature: 0, amount: 0, current: 0, luminosity: 0,
-})
+})                                                                 // 250 mL = 2.5e-4 m^3
 let concentration = quantity_div(dose, volume)
 
 // Units in function signatures — pass Quantity directly.
@@ -409,9 +410,7 @@ print("sqrt(x) = ", ep_val(&sqrt_x), " ± ", ep_std(&sqrt_x))
 > provides RK4, RK45, Tsit5, BDF, epistemic integration, and PBPK sources
 > (`stdlib/ode/solver.sio`). The shipped source-tracked uncertainty propagation
 > lives in `stdlib/epistemic/affine` (anchor: `tests/run-pass/affine_shared_source_add.sio`,
-> `affine_product_delta.sio`). For closed-form physics, see
-> `stdlib/physics/mechanics` (`kinetic_energy_q`, `hookean_force_q`, etc.,
-> exercised in `tests/stdlib/physics/test_mechanics_e2e.sio`).
+> `affine_product_delta.sio`).
 
 ### Linear Algebra
 
@@ -465,7 +464,7 @@ fn sqrt(x: Positive) -> f64 {
 > `linear_ad` module of `stdlib/autodiff/linear_ad.sio`.
 
 ```sio
-struct FileHandle {
+linear struct FileHandle {
     fd: i32
 }
 
@@ -496,11 +495,21 @@ kernel fn vector_add(n: i64, a: &[f64], b: &[f64], c: &![f64])
     }
 }
 
-// Host-side dispatch (canonical pattern, examples/gpu.sio):
-let grid = (16, 1, 1)
-let block = (64, 1, 1)
-perform GPU.launch(vector_add, grid, block)(n, a, b, c)
-perform GPU.sync()
+// Host-side dispatch (canonical pattern, tests/run-pass/gpu_launch_vec_slices.sio):
+// reference params are launched as &a, &b, and &!c (exclusive output).
+fn main() -> i32 with IO, Mut, Panic, GPU, Div {
+    let n: i64 = 64
+    let grid = (1, 1, 1)
+    let block = (64, 1, 1)
+
+    var a: [f64; 64] = [0.0; 64]
+    var b: [f64; 64] = [0.0; 64]
+    var c: [f64; 64] = [0.0; 64]
+
+    perform GPU.launch(vector_add, grid, block)(n, &a, &b, &!c)
+    perform GPU.sync()
+    0
+}
 ```
 
 ### Generic Programming
