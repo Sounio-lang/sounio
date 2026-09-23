@@ -40,17 +40,64 @@ PAT_TYPE=':[[:space:]]*fn\([^)]*\)[[:space:]]*->'
 # comma-free type. A TUPLE return type (`fn() -> ([f64; 2], i64) with Mut,
 # Panic`) breaks that assumption -- the tuple's own internal comma truncates
 # the capture before it ever reaches `with`, so an EFFECT-BEARING tuple-
-# returning fn-type parameter was misreported as bare, and there was no way
-# to write one that this gate would recognize as non-bare. One level of
-# balanced `(...)` (a tuple, not a tuple of tuples) is tolerated before the
-# real terminator, covering the case that actually occurs in this tree today.
-PAT_TYPE_TAIL='(\([^()]*\)|[^,)])*'
+# returning fn-type parameter was misreported as bare. A first fix tolerated
+# one level of balanced `(...)`, but tuple elements recursively call
+# parse_type (self-hosted/parser/types.sio:865-889), so a NESTED tuple return
+# (`fn() -> ((i64, i64), f64) with Mut`) is equally valid source and the
+# one-level ERE truncated at the first inner `)` just the same -- there is no
+# fixed nesting depth an ERE can bound, since POSIX ERE cannot express
+# arbitrary balanced delimiters at all (that needs a context-free grammar,
+# not a regular one). Copilot follow-up: replaced the ERE tail with an actual
+# balanced-delimiter scan (scan_tail below) that tracks paren depth
+# character-by-character and stops at the first `,` or `)` seen at depth 0 --
+# correct for any nesting depth, not just zero or one.
+withpat='with[[:space:]]+[A-Za-z]'
 
 strip_noise() {
   # drop // line comments and "..." string literals before matching, so a
   # function type written inside prose or a message is not counted.
   sed -e 's|//.*$||' -e 's/"[^"]*"//g' "$1"
 }
+
+# Copilot follow-up (#2570): scan forward from just after a matched `... ->`
+# tracking paren depth, so a tuple return type of ANY nesting depth is
+# consumed correctly instead of truncating at the first `)` or `,`. Ends at
+# the first `,` or unbalanced `)` seen at depth 0 -- that is either the next
+# parameter in the enclosing list, or the enclosing parameter list's own
+# closing paren, neither of which belongs to the function type itself.
+AWK_SCAN='
+function scan_tail(line, tail_start,    i, n, c, depth) {
+    depth = 0
+    n = length(line)
+    i = tail_start
+    while (i <= n) {
+        c = substr(line, i, 1)
+        if (c == "(") {
+            depth++
+        } else if (c == ")") {
+            if (depth == 0) { return i }
+            depth--
+        } else if (c == "," && depth == 0) {
+            return i
+        }
+        i++
+    }
+    return n + 1
+}
+{
+    line = $0
+    pos = 1
+    while (pos <= length(line) && match(substr(line, pos), pat)) {
+        start = pos + RSTART - 1
+        matchlen = RLENGTH
+        tail_start = start + matchlen
+        tail_end = scan_tail(line, tail_start)
+        hit = substr(line, start, tail_end - start)
+        if (hit !~ withpat) { print hit }
+        pos = start + matchlen
+    }
+}
+'
 
 enumerate() {
   git ls-files -z '*.sio' \
@@ -59,11 +106,20 @@ enumerate() {
     | grep -vE '\.sio\.old$' \
     | while IFS= read -r f; do
         [ -f "$f" ] || continue
-        strip_noise "$f" | grep -oE "${PAT_TYPE}${PAT_TYPE_TAIL}" | while IFS= read -r hit; do
+        strip_noise "$f" | awk -v pat="$PAT_TYPE" -v withpat="$withpat" "$AWK_SCAN" | while IFS= read -r hit; do
           # a bare function type is one whose text carries no `with` clause
-          printf '%s' "$hit" | grep -qE '\bwith[[:space:]]+[A-Za-z]' || printf '%s\t%s\n' "$f" "$hit"
+          printf '%s\t%s\n' "$f" "$hit"
         done
       done
+}
+
+# Copilot follow-up (#2570): shared by the positive/negative-3/5/6 selftest
+# controls below and by enumerate() itself -- runs the same balanced scan and
+# returns only the BARE hits (the awk script already filters on withpat), so
+# a control checking "is this reported as bare" and enumerate() can never
+# disagree about what bare means.
+bare_hits_of() {
+  strip_noise "$1" | awk -v pat="$PAT_TYPE" -v withpat="$withpat" "$AWK_SCAN"
 }
 
 selftest() {
@@ -71,7 +127,7 @@ selftest() {
   tmp="$(mktemp -d)"
   # POSITIVE control: a bare function type must be seen.
   printf 'fn deriv(f: fn(f64) -> f64, x: f64) -> f64 with Div { 0.0 }\n' > "$tmp/pos.sio"
-  if strip_noise "$tmp/pos.sio" | grep -oE "${PAT_TYPE}${PAT_TYPE_TAIL}" | grep -q .; then
+  if bare_hits_of "$tmp/pos.sio" | grep -q .; then
     echo "  ok   POSITIVO: tipo-funcao nu e detectado"
   else echo "  FALHA POSITIVO: nao detectou um tipo-funcao nu"; rc=1; fi
   # NEGATIVE control 1: a function DECLARATION must not be counted as a type.
@@ -87,8 +143,7 @@ selftest() {
   # NEGATIVE control 3: a function type that DOES carry effects must not be
   # reported as bare — otherwise the ratchet can never be lowered.
   printf 'fn m(f: fn(f64) -> f64 with Div, x: f64) -> f64 { 0.0 }\n' > "$tmp/neg3.sio"
-  if strip_noise "$tmp/neg3.sio" | grep -oE "${PAT_TYPE}${PAT_TYPE_TAIL}" \
-       | grep -qvE '\bwith[[:space:]]+[A-Za-z]'; then
+  if bare_hits_of "$tmp/neg3.sio" | grep -q .; then
     echo "  FALHA NEGATIVO 3: tipo-funcao COM efeitos contado como nu"; rc=1
   else echo "  ok   NEGATIVO 3: tipo com efeitos nao conta como nu"; fi
   # NEGATIVE control 4: a function type in RETURN position must not be counted,
@@ -104,10 +159,21 @@ selftest() {
   # recognized as non-bare at all. This is the control that would have
   # caught it.
   printf 'fn use_it(f: fn() -> ([f64; 2], i64) with Mut, Panic) -> f64 with Mut, Panic { 0.0 }\n' > "$tmp/neg5.sio"
-  if strip_noise "$tmp/neg5.sio" | grep -oE "${PAT_TYPE}${PAT_TYPE_TAIL}" \
-       | grep -qvE '\bwith[[:space:]]+[A-Za-z]'; then
+  if bare_hits_of "$tmp/neg5.sio" | grep -q .; then
     echo "  FALHA NEGATIVO 5: tipo-funcao com retorno tupla e efeitos contado como nu"; rc=1
   else echo "  ok   NEGATIVO 5: tipo com retorno tupla e efeitos nao conta como nu"; fi
+  # NEGATIVE control 6 (#2570): a NESTED-tuple-returning fn-type parameter
+  # that DOES carry effects must not be reported as bare either -- tuple
+  # elements recursively call parse_type (self-hosted/parser/types.sio:
+  # 865-889), so `((i64, i64), f64)` is equally valid source, and the
+  # one-level-paren ERE this gate used to have truncated at the first inner
+  # `)` just as it once truncated at the first inner `,`. This is the
+  # control that would have caught it; only the balanced-delimiter scan
+  # (scan_tail, not any fixed nesting-depth ERE) can pass it for every depth.
+  printf 'fn use_it(f: fn() -> ((i64, i64), f64) with Mut, Panic) -> f64 with Mut, Panic { 0.0 }\n' > "$tmp/neg6.sio"
+  if bare_hits_of "$tmp/neg6.sio" | grep -q .; then
+    echo "  FALHA NEGATIVO 6: tipo-funcao com retorno tupla ANINHADA e efeitos contado como nu"; rc=1
+  else echo "  ok   NEGATIVO 6: tipo com retorno tupla aninhada e efeitos nao conta como nu"; fi
   rm -rf "$tmp"
   echo "falhas: $rc"
   return $rc
