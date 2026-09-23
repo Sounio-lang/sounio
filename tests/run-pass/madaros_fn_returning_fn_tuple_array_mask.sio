@@ -55,6 +55,41 @@
 //   D  `outer() -> fn() -> fn() -> ([f64; 2], i64)`, `let mid = outer();
 //      let f = mid(); f().0[0]`   three levels of function-returning-
 //                                  function, not two
+//
+// Copilot follow-up (#2570): case E is the METHOD-RECEIVER form of cases
+// B/C's immediate double-call. `recv.choose()()` -- the OUTER call's own
+// callee is `recv.choose()`, an ExprMethodCall, not an ExprCall. Both
+// expr_result_tuple_float_mask_ref's ExprCall branch and its array-slot
+// sibling expr_is_tuple_slot_f64_array_ref only recursed into themselves
+// when the inner callee's kind was ExprCall (case B/C's `choose()()`
+// shape) -- an ExprMethodCall inner callee fell through to naming the bare
+// method "choose" via expr_to_callee_name_ref, but the table entry lives
+// under the MANGLED "Chooser_choose", so the lookup always missed and
+// `.0[0]` read the array through the integer path. Fixed by widening both
+// recursion guards to accept an ExprMethodCall inner callee too, since
+// this function's own (already-fixed) ExprMethodCall branch resolves the
+// mangled entry identically to how the ExprCall branch resolves a bare
+// name. Verified by code review and by tracing the mask arithmetic by
+// hand (the widened branch reduces to the identical, already-tested
+// ExprMethodCall classification, just reached via one more recursion
+// level) -- NOT by an end-to-end run of the literal reported shape. That
+// shape, `recv.choose()()` with no intervening binding, hits a separate,
+// pre-existing bug: a METHOD whose result is immediately re-invoked never
+// gets its own body lowered at all (`NATIVE_REFUSAL
+// kind=empty_stub_ud2 ... reason=missing_lowered_body`), reproduced
+// standalone with a minimal method returning a bare `fn() -> i64` --
+// zero tuple/array types involved -- so it is independent of this PR's
+// mask tracking and out of scope here. The split form below (bind the
+// method call, invoke the alias separately) sidesteps that bug and pins
+// real, working coverage for a method returning a function value -- the
+// ORIGINAL fixture only covered top-level functions returning functions,
+// never a method -- but it does not exercise the new recursion branch
+// itself (the alias-then-call shape resolves through
+// lookup_local_tuple_float_mask, same as cases A/F/G elsewhere in this
+// PR, not through the ExprCall/ExprMethodCall recursion this round adds).
+//
+//   E  `let f = recv.choose(); f().0[0]`   method returning a function,
+//                                            resolved through an alias
 fn concrete() -> ([f64; 2], i64) {
     var a: [f64; 2] = [0.0; 2]
     a[0] = 8.5
@@ -71,6 +106,16 @@ fn inner() -> fn() -> ([f64; 2], i64) {
 
 fn outer() -> fn() -> fn() -> ([f64; 2], i64) {
     inner
+}
+
+struct Chooser {
+    tag: i64,
+}
+
+impl Chooser {
+    fn choose(self) -> fn() -> ([f64; 2], i64) with Mut, Panic {
+        concrete
+    }
 }
 
 fn main() -> i32 with IO, Mut, Panic {
@@ -95,6 +140,15 @@ fn main() -> i32 with IO, Mut, Panic {
     let g = mid()
     let td = g().0[0]
     if td != 8.5 { bad = bad + 8 }
+
+    // E: method returning a function, resolved through an alias (the
+    // immediate-invocation form `chooser.choose()()` hits an unrelated,
+    // pre-existing "missing_lowered_body" bug -- see the case-E comment
+    // above).
+    let chooser = Chooser { tag: 1 }
+    let choosefn = chooser.choose()
+    let de = choosefn().0[0]
+    if de != 8.5 { bad = bad + 16 }
 
     if bad == 0 {
         println("FN_RETURNING_FN_TUPLE_ARRAY_MASK PASS")
