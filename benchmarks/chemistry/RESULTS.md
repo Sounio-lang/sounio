@@ -289,7 +289,8 @@ about five orders of magnitude better than the figure the README publishes.
 > "total residual" (2.074e-11, H2O), which comes from `rep_tolerance.py` /
 > `rep_resolution.py --dir <aligned tree>` against the fully-committed,
 > both-constants-aligned code — a different producer, a different commit
-> state, months apart in this document's own history. The two numbers were
+> state, roughly three weeks apart by this document's own dated record
+> (base pass 2026-09-01, this correction 2026-09-23). The two numbers were
 > presented as though comparable; they are each real, but they are not the
 > same experiment, and their ~2x difference (9.28e-12 here vs 2.074e-11 there,
 > both nominally "H2O, aligned") is not a discrepancy needing resolution — it
