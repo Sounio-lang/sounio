@@ -30,6 +30,9 @@ def main() -> int:
 
     required = {
         "contracts": True,
+        "madaros-build": any(
+            truthy(impact.get(key)) for key in ("compiler", "runtime", "stdlib", "tests", "full")
+        ),
         "native-selfhost-linux-x86_64": any(
             truthy(impact.get(key)) for key in ("compiler", "runtime", "stdlib", "tests", "full")
         ),
@@ -39,6 +42,9 @@ def main() -> int:
         ),
         "native-selfhost-macos-arm64": truthy(impact.get("compiler")) or truthy(impact.get("full")),
         "full-test-suite": any(truthy(impact.get(key)) for key in ("compiler", "runtime", "stdlib", "tests", "full")),
+        "full-test-suite-madaros": any(
+            truthy(impact.get(key)) for key in ("compiler", "runtime", "stdlib", "tests", "full")
+        ),
         "madaros-witness-gate": any(
             truthy(impact.get(key)) for key in ("compiler", "runtime", "stdlib", "tests", "full")
         ),

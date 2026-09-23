@@ -64,6 +64,13 @@ jobs:
           node-version: '22'
       - name: Workflow script references
         run: bash scripts/dev/check_workflow_script_refs.sh
+      # A self-hosted/runner-pool job reachable from a fork's pull_request with
+      # no same-repo-origin guard is a code-execution path into whatever this
+      # environment can reach. Found live in gpu-research.yml's validate-on-gpu
+      # job (fixed in the same change that added this gate); see
+      # docs/ops/fork_pr_self_hosted_runner_policy.md.
+      - name: Self-hosted runner fork exposure
+        run: bash scripts/dev/check_self_hosted_runner_fork_exposure.sh
       # The docs claimed "Cranelift JIT enabled" and named a JIT profile artifact
       # that is tracked nowhere. `souc info` prints `[-] Cranelift JIT` and the
       # binary exports no Cranelift symbol. A doc may not claim a backend the
@@ -724,6 +731,44 @@ jobs:
       - name: Self-falsifying compilation line (R6 corpus sweep, nightly)
         run: bash scripts/ci/self_falsifying_compilation_line_r6_gate.sh
 
+  madaros-build:
+    name: Madaros Build (once)
+    needs: impact
+    # Same selection as the three jobs below that used to each build Madaros
+    # from source independently within this one run
+    # (madaros-current-source-deref-f64, madaros-witness-gate, gate-wave-0):
+    # they now all consume THIS job's artifact via scripts/ci/ensure_madaros_build.sh
+    # instead of rebuilding. See docs/ops -- Sounio CI Fabric Phase 1.
+    if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.runtime == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      # Best-effort, content-addressed cache: a HIT here only saves the build
+      # below (still independently verified against the manifest by
+      # scripts/ci/verify_madaros_build_manifest.sh, which every call to
+      # ensure_madaros_build.sh below runs before trusting anything already on
+      # disk); a MISS is the ordinary from-source build path, unchanged. Every
+      # input that can change the build's OUTPUT or its RECIPE is hashed -- see
+      # scripts/ci/write_madaros_build_manifest.sh's toolchain_digest, which
+      # recomputes an equivalent digest independently at verify time so a
+      # mistake in this key expression cannot silently serve a stale build.
+      - name: Restore cached Madaros build
+        uses: actions/cache@v4
+        with:
+          path: artifacts/self-hosted/madaros-build-cache
+          key: madaros-build-v1-${{ runner.os }}-${{ hashFiles('self-hosted/**', 'stdlib/**', 'bin/souc-linux-x86_64', 'bin/souc-lean-single-x86_64', 'bin/souc', 'scripts/ci/build_modular_madaros.sh', 'scripts/dev/souc-build-lock.sh') }}
+      - name: Ensure verified Madaros build
+        env:
+          SOUNIO_EXPECTED_SOURCE_SHA: ${{ github.sha }}
+        run: bash scripts/ci/ensure_madaros_build.sh artifacts/self-hosted/madaros-build-cache/madaros
+      - name: Upload Madaros build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: madaros-build-v1
+          path: artifacts/self-hosted/madaros-build-cache
+          retention-days: 1
+
   native-selfhost-linux-x86_64:
     name: Native Self-Host (Linux x86_64)
     needs: impact
@@ -827,12 +872,17 @@ jobs:
 
   madaros-current-source-deref-f64:
     name: Madaros Current-Source f64 Lowering
-    needs: impact
+    needs: [impact, madaros-build]
     # `stdlib` is here for a measured reason: 7 files in main.sio's own import
     # closure live under stdlib/compiler/ontology/ and classify as stdlib, not
     # compiler. A PR that makes stdlib/compiler/ontology/store.sio unparseable
     # breaks the compiler's closure and, without this, runs none of these gates.
-    if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true'
+    # always(): this job self-heals if madaros-build failed or was skipped --
+    # scripts/ci/ensure_madaros_build.sh falls back to building from source on
+    # a missing/unverified artifact, so a failed producer must not skip this
+    # consumer outright (the implicit needs-failure skip GitHub Actions would
+    # otherwise apply).
+    if: always() && (needs.impact.outputs.compiler == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true')
     runs-on: ubuntu-24.04
     # 15 held a full Madaros build plus four sub-gates; the self-parse sweep adds
     # ~20 s. The extra headroom is so a slow run reads as slow, not as a hang.
@@ -883,8 +933,37 @@ jobs:
           sudo mkswap /mnt/swapfile-gen2
           sudo swapon /mnt/swapfile-gen2
           echo "--- after"; free -m; swapon --show
-      - name: Build Madaros once and run current-source f64 lowering gates
+      # Consumes madaros-build's artifact when available; falls back to
+      # building from source (today's exact behavior) on a miss. Note this
+      # does NOT remove the swap headroom above -- that budget is for the
+      # separate "Madaros compiles Madaros" self-compile further down in this
+      # job (the gen2 rung), which reuses whatever ELF is placed here and runs
+      # regardless of whether it was just built or downloaded.
+      - name: Download cached Madaros build
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: madaros-build-v1
+          path: /tmp/madaros-build-cache
+      - name: Ensure verified Madaros build
+        env:
+          SOUNIO_EXPECTED_SOURCE_SHA: ${{ github.sha }}
+        run: bash scripts/ci/ensure_madaros_build.sh /tmp/madaros-build-cache/madaros
+      - name: Run current-source f64 lowering gates against the cached build
+        env:
+          SOUNIO_MADAROS_F64_LOWERING_GATE_BIN: /tmp/madaros-build-cache/madaros
         run: bash scripts/ci/madaros_current_source_f64_lowering_gate.sh
+      # Every later step in this job hardcodes
+      # /tmp/sounio-madaros-current-source-f64-lowering/madaros (the gate
+      # script's own WORK/madaros path, only populated when it does its own
+      # build). SOUNIO_MADAROS_F64_LOWERING_GATE_BIN above made it skip that
+      # build and use the cached ELF directly for its four sub-gates instead,
+      # so WORK/madaros was never created; place the same cached ELF there so
+      # every downstream step keeps working unmodified.
+      - name: Place cached Madaros at the gate's expected ELF path
+        run: |
+          cp /tmp/madaros-build-cache/madaros /tmp/sounio-madaros-current-source-f64-lowering/madaros
+          chmod +x /tmp/sounio-madaros-current-source-f64-lowering/madaros
       - name: Madaros IR function table stays heap-backed
         env:
           MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
@@ -1088,6 +1167,10 @@ jobs:
     # The full compiler/test suite routinely exceeds the former 15-minute cap.
     # Let it produce a completed result so CI Decision can evaluate the suite.
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@v4
       - name: Download native compiler artifact
@@ -1095,13 +1178,29 @@ jobs:
         with:
           name: native-compiler-linux-x86_64
           path: /tmp
-      - name: Run full test suite
+      # Balanced by historical per-test time (tests/ci_shard_timing.json,
+      # refreshed nightly by shard-timing-refresh.yml); a test missing from
+      # the corpus gets the corpus's own median weight, so the partition is
+      # always complete -- correct on day one, just not time-balanced until
+      # the corpus has real data. Deterministic: the same corpus + test list +
+      # shard count always produces the same partition, computed independently
+      # by each matrix leg (no coordinator job, no extra artifact hop).
+      - name: Plan this shard
+        run: |
+          bash scripts/dev/run_sio_test_suite_v2.sh --list-tests > /tmp/all-tests.txt
+          wc -l < /tmp/all-tests.txt
+          python3 scripts/ci/plan_test_shards.py plan \
+            --corpus tests/ci_shard_timing.json \
+            --all-tests /tmp/all-tests.txt \
+            --shards 4 --index ${{ matrix.shard }} \
+            --out /tmp/shard-${{ matrix.shard }}.txt
+      - name: Run full test suite (shard ${{ matrix.shard }})
         env:
           SOUNIO_TEST_SOUC_BIN: /tmp/souc-stage2
           SOUNIO_TEST_JOBS: 4
         run: |
           chmod +x /tmp/souc-stage2
-          bash scripts/run_sio_test_suite.sh --format junit --jobs 4
+          bash scripts/run_sio_test_suite.sh --test-list /tmp/shard-${{ matrix.shard }}.txt --format junit --jobs 4
       # Numeric accuracy is not something the run-pass harness above can
       # measure: a transcendental that quietly degrades from 212 bits of
       # mantissa to 106 still exits 0 on every identity test. This replays the
@@ -1116,7 +1215,12 @@ jobs:
       # at it silently compiles a file named "compile". bin/souc resolves the
       # repo default engine instead. Measured 2026-09-02: the two engines return
       # an identical corpus, so nothing is lost by using the default.
+      #
+      # Runs once (shard 0 only): it is a standalone accuracy replay, not part
+      # of the sharded suite -- running it on every shard would waste four legs
+      # of CI for identical output.
       - name: qd128 transcendental accuracy (mpmath corpus replay)
+        if: matrix.shard == 0
         env:
           SOUNIO_STDLIB_PATH: ${{ github.workspace }}/stdlib
         run: bash scripts/ci/qd128_transcendental_accuracy_gate.sh
@@ -1124,8 +1228,52 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results
+          name: test-results-${{ matrix.shard }}
           path: test-results.xml
+          retention-days: 30
+
+  full-test-suite-madaros:
+    name: Full Test Suite (Madaros)
+    runs-on: ubuntu-24.04
+    needs: [impact, madaros-build]
+    # This is the fix for CLAUDE.md operating principle #16: the job above
+    # (Full Test Suite) tests only the lean_single seed and never sets
+    # SOUNIO_MADAROS_AVAILABLE, so all `//@ requires: madaros` tests (the
+    # large majority of the suite's requires:-tagged corpus) were silently
+    # skipped there. This job exercises them against the once-built Madaros
+    # artifact instead. It does NOT replace Full Test Suite above -- that job
+    # keeps certifying the separately load-bearing lean_single fixed point
+    # (e.g. refinement-type subtyping, which only lean_single evaluates; see
+    # the `requires: lean_single` arm in scripts/dev/run_sio_test_suite_v2.sh).
+    # always(): self-heals via scripts/ci/ensure_madaros_build.sh if
+    # madaros-build failed or was skipped.
+    if: always() && (needs.impact.outputs.compiler == 'true' || needs.impact.outputs.runtime == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true')
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download cached Madaros build
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: madaros-build-v1
+          path: /tmp/madaros-build-cache
+      - name: Ensure verified Madaros build
+        env:
+          SOUNIO_EXPECTED_SOURCE_SHA: ${{ github.sha }}
+        run: bash scripts/ci/ensure_madaros_build.sh /tmp/madaros-build-cache/madaros
+      - name: Run full test suite against Madaros
+        env:
+          SOUNIO_TEST_SOUC_BIN: /tmp/madaros-build-cache/madaros
+          SOUNIO_MADAROS_AVAILABLE: "1"
+          SOUNIO_TEST_JOBS: 4
+          SOUNIO_TEST_JUNIT_FILE: ${{ github.workspace }}/test-results-madaros.xml
+        run: bash scripts/run_sio_test_suite.sh --format junit --jobs 4
+      - name: Upload Madaros test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-madaros
+          path: test-results-madaros.xml
           retention-days: 30
 
   slow-lane:
@@ -1174,17 +1322,29 @@ jobs:
 
   madaros-witness-gate:
     name: Madaros Witness Gate
-    needs: impact
-    if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.runtime == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true'
+    needs: [impact, madaros-build]
+    # always(): self-heals via scripts/ci/ensure_madaros_build.sh if
+    # madaros-build failed or was skipped -- see the same note on
+    # madaros-current-source-deref-f64 above.
+    if: always() && (needs.impact.outputs.compiler == 'true' || needs.impact.outputs.runtime == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true')
     runs-on: ubuntu-24.04
     # Raised from 20 with the sabotage gate: it rebuilds each declared witness.
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - name: Build Madaros from this PR's own source
+      - name: Download cached Madaros build
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: madaros-build-v1
+          path: /tmp/madaros-build-cache
+      - name: Ensure verified Madaros build
+        env:
+          SOUNIO_EXPECTED_SOURCE_SHA: ${{ github.sha }}
         run: |
-          ulimit -s 1048576 2>/dev/null || true
-          bash scripts/ci/build_modular_madaros.sh /tmp/madaros-ci.elf
+          bash scripts/ci/ensure_madaros_build.sh /tmp/madaros-build-cache/madaros
+          cp /tmp/madaros-build-cache/madaros /tmp/madaros-ci.elf
+          chmod +x /tmp/madaros-ci.elf
       - name: Imported Seq lowering against the fresh build
         env:
           MADAROS_RAW_BIN: /tmp/madaros-ci.elf
@@ -1403,16 +1563,28 @@ jobs:
 
   gate-wave-0:
     name: Gate Wave 0
-    needs: impact
-    if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.runtime == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true'
+    needs: [impact, madaros-build]
+    # always(): self-heals via scripts/ci/ensure_madaros_build.sh if
+    # madaros-build failed or was skipped -- see the same note on
+    # madaros-current-source-deref-f64 above.
+    if: always() && (needs.impact.outputs.compiler == 'true' || needs.impact.outputs.runtime == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true')
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - name: Build Madaros from this PR's own source
+      - name: Download cached Madaros build
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: madaros-build-v1
+          path: /tmp/madaros-build-cache
+      - name: Ensure verified Madaros build
+        env:
+          SOUNIO_EXPECTED_SOURCE_SHA: ${{ github.sha }}
         run: |
-          ulimit -s 1048576 2>/dev/null || true
-          bash scripts/ci/build_modular_madaros.sh /tmp/madaros-wave0.elf
+          bash scripts/ci/ensure_madaros_build.sh /tmp/madaros-build-cache/madaros
+          cp /tmp/madaros-build-cache/madaros /tmp/madaros-wave0.elf
+          chmod +x /tmp/madaros-wave0.elf
       # First four of the 472 gate scripts that no workflow named (frozen count:
       # scripts/ci/gate_workflow_reference.frozen). Picked from the PASS
       # bucket of a from-source gate sweep, for the incident each one would
@@ -1580,11 +1752,13 @@ jobs:
     needs:
       - impact
       - contracts
+      - madaros-build
       - native-selfhost-linux-x86_64
       - source-bootstrap-selfhost-linux-x86_64
       - madaros-current-source-deref-f64
       - native-selfhost-macos-arm64
       - full-test-suite
+      - full-test-suite-madaros
       - madaros-witness-gate
       - gate-wave-0
       - sounio-lint

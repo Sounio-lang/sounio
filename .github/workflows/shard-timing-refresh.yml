@@ -1,0 +1,81 @@
+name: Shard Timing Refresh
+
+# Keeps tests/ci_shard_timing.json current so full-test-suite's matrix shards
+# (.github/workflows/ci.yml) stay balanced by measured per-test time rather
+# than drifting to the bootstrap fallback (the corpus's own median weight for
+# every test it has never seen). Nightly, not per-push: this runs the FULL
+# unsharded suite once specifically to get one clean, complete JUnit report
+# to refresh from -- a sharded run's four partial reports would each measure
+# only a quarter of the corpus per PR. The commit-back mirrors
+# madaros-prebuilt-refresh.yml's pattern (bot identity, [skip ci], rebase +
+# push retry loop).
+#
+# Uses the committed bin/souc-lean-single-x86_64 directly rather than a fresh
+# from-source native self-host build: this workflow measures WALL-CLOCK TIME
+# PER TEST, which is stable across builds of the same engine family, not
+# compiler correctness -- a from-source build (as native-selfhost-linux-x86_64
+# does for full-test-suite itself) would cost several extra minutes here for
+# no benefit to what this workflow actually produces.
+
+on:
+  schedule:
+    - cron: '15 7 * * *'   # nightly, offset from ci.yml's 03:23 UTC and
+                            # release-gate.yml's 04:00 UTC crons
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: shard-timing-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    name: Refresh tests/ci_shard_timing.json
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Run full unsharded suite for one clean timing corpus
+        env:
+          SOUNIO_TEST_SOUC_BIN: ${{ github.workspace }}/bin/souc-lean-single-x86_64
+          SOUNIO_TEST_JOBS: 4
+        run: bash scripts/run_sio_test_suite.sh --format junit --jobs 4
+
+      - name: Refresh the shard timing corpus
+        run: python3 scripts/ci/plan_test_shards.py refresh --corpus tests/ci_shard_timing.json --junit test-results.xml
+
+      - name: Commit and push if the corpus changed
+        run: |
+          if git diff --quiet -- tests/ci_shard_timing.json; then
+            echo "tests/ci_shard_timing.json is unchanged -- nothing to commit."
+            exit 0
+          fi
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add tests/ci_shard_timing.json
+          git commit -m "ci: refresh shard timing corpus [skip ci]
+
+          Auto-refreshed from a full unsharded suite run against
+          bin/souc-lean-single-x86_64. Keeps full-test-suite's matrix shards
+          (.github/workflows/ci.yml) balanced by measured per-test time."
+
+          # Land on the latest main (it may have advanced during the run).
+          # The corpus is a generated artifact, so a rebase is normally clean.
+          for attempt in 1 2 3; do
+            git fetch origin main
+            if git rebase origin/main && git push origin HEAD:main; then
+              echo "Refreshed shard timing corpus pushed to main (attempt ${attempt})."
+              exit 0
+            fi
+            git rebase --abort 2>/dev/null || true
+            echo "push attempt ${attempt} failed; retrying after fetch…" >&2
+            sleep 5
+          done
+          echo "ERROR: could not push refreshed shard timing corpus after 3 attempts." >&2
+          exit 1
