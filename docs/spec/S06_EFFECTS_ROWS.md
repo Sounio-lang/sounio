@@ -52,9 +52,11 @@ abstract over the effects of its argument. The second is untouched by the
 correction above: **no effect variable occurs in live source.** The one apparent
 instance, `fn(T, U) -> V with E`, is the parser comment quoted above.
 
-`scripts/ci/fn_type_effect_ratchet_gate.sh` freezes the bare count at 216. It
-does not implement 6.0; it stops the gap from widening while 6.0 is
-unimplemented.
+`scripts/ci/fn_type_effect_ratchet_gate.sh` freezes the bare count at 214 (down
+from 216 at the time of the ruling above -- the ratchet has moved since;
+`scripts/ci/fn_type_effect_ratchet.frozen` is the live, derived source of
+truth for the current count, not this document). It does not implement 6.0;
+it stops the gap from widening while 6.0 is unimplemented.
 
 ## 6.1 What runs
 

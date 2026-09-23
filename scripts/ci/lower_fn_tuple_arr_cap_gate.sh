@@ -73,8 +73,21 @@ check() {
 # Positive control FIRST. A checker that has never failed has measured
 # nothing: if the sabotaged copy passes, this gate inspects nothing and must
 # not be allowed to report green on the real file.
+#
+# Copilot follow-up (#2570): this used to hard-code the extent to sabotage
+# (4096 -> 4097). A future, correctly synchronized cap raise changes that
+# literal in the real file -- at which point the hard-coded sed finds
+# nothing to replace, the "sabotaged" copy comes out byte-identical to the
+# real (now-valid) file, check() on it PASSES, and this control reports
+# CONTROL_FAIL on a change that did nothing wrong. That would block the
+# exact synchronized update this gate exists to allow. Derive the extent to
+# sabotage from the source instead of a literal, so the control still fires
+# no matter what the cap currently is.
+current_hash_n=$(sed -nE 's/^var LOWER_FN_TUPLE_ARR_HASH: \[i64; ([0-9]+)\].*$/\1/p' "$LOWER")
+require_nonempty "$current_hash_n" "LOWER_FN_TUPLE_ARR_HASH extent not found in $LOWER -- cannot derive a sabotage target"
+sabotaged_hash_n=$(( current_hash_n + 1 ))
 SAB=$(mktemp); trap 'rm -f "$SAB"' EXIT
-sed 's/^var LOWER_FN_TUPLE_ARR_HASH: \[i64; 4096\]/var LOWER_FN_TUPLE_ARR_HASH: [i64; 4097]/' "$LOWER" | gate_write_artifact "$SAB"
+sed "s/^var LOWER_FN_TUPLE_ARR_HASH: \[i64; ${current_hash_n}\]/var LOWER_FN_TUPLE_ARR_HASH: [i64; ${sabotaged_hash_n}]/" "$LOWER" | gate_write_artifact "$SAB"
 if ( check "$SAB" ) >/dev/null 2>&1; then
   echo "CONTROL_FAIL: the sabotaged extent passed. This gate inspects nothing."
   printf '{"status":"fail","reason":"positive control did not fire","metrics":{"total":6,"passed":0,"failed":1,"not_run":0}}\n' | gate_write_artifact "$ART"
