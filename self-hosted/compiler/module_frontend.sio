@@ -16,6 +16,7 @@ use native::codegen_x86_linux::{compile_native_v2_preview_to_file, native_resolv
 use check::knowledge_context::{knowledge_context_validate_items, knowledge_context_validate_items_values_only}
 use resolve::mod::{resolve_modules}
 use module_parse::{extract_imports_from_ast, file_exists, file_path_to_module_path, load_module_file}
+use private_fn_identity::{private_fn_identity_apply}
 use check::specializer::{specialize_generics, spec_last_instantiated, spec_mono_marker_count, spec_append_item_lists, spec_dce_unreachable_item_fns, spec_dce_mark_across_programs, spec_dce_filter_with_global_marks, spec_dce_live_item_fns, spec_report_any_specializer_failure, spec_program_mentions_f128}
 
 // Multi-module parse accumulates every module's GLOBAL_VAR_INIT_* side-table
@@ -6229,6 +6230,23 @@ fn module_frontend_specialized_typecheck(programs: &! [Program; 256], count: i64
     (true, verdict)
 }
 
+// Same-named PRIVATE fns in different modules are one function to the merged IR
+// (identity is the unqualified name; first-loaded wins). Give each a
+// module-qualified name BEFORE the specializer merge, the typechecker, DCE, FO
+// preregistration and lowering key on names, so both pipelines see unique ones.
+// In place; no programs[] writeback. Returns false when the pass REFUSED (a
+// collision it cannot resolve, or a capacity it exhausted): the diagnostic is
+// already printed and the caller must stop rather than emit an executable in
+// which two functions share one body. See private_fn_identity.sio and
+// docs/audit/MADAROS_PRIVATE_FN_IDENTITY_2026-09-21.md.
+fn module_frontend_private_fn_identity_ok(
+    programs: &! [Program; 256],
+    count: i64
+) -> bool with IO, Mut, Panic, Div, Alloc {
+    let renamed = private_fn_identity_apply(programs, count)
+    renamed >= 0 - 1
+}
+
 // WP-A3 full prepare: merge → specialize → typecheck, and when a generic was
 // actually monomorphized, emit a monomorphized item list for single-module IR
 // lower (specializer design intent; see specializer.sio multi-module lane
@@ -6393,6 +6411,10 @@ fn module_frontend_merge_imported_box(
 ) -> ModuleFrontendLowerDirectBoxResult with IO, Mut, Div, Panic, Alloc {
     if loaded <= 0 {
         return module_frontend_lower_direct_box_error("no_modules_loaded")
+    }
+
+    if !module_frontend_private_fn_identity_ok(programs, loaded) {
+        return module_frontend_lower_direct_box_error("private_fn_identity_unresolved")
     }
 
     // Neither branch below (module_frontend_lower_specialized_items_box, nor its
@@ -6718,6 +6740,12 @@ pub fn module_frontend_compile_imported_to_file(
     print("imported_compile: loaded ")
     print_int(loaded)
     print(" modules\n")
+
+    if !module_frontend_private_fn_identity_ok(&! programs, loaded) {
+        print("Same-named private functions could not be disambiguated\n")
+        module_frontend_global_init_compile_end()
+        return 1
+    }
 
     // Same gap as module_frontend_merge_imported_box, fixed the same way: neither
     // the specialized-collapse branch below nor its ordinary fallback resets or
