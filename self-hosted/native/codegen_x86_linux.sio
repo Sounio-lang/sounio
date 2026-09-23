@@ -1815,20 +1815,10 @@ fn nc_emit_unimplemented_extern_trap_into(nc: &! NativeCompiler) with Mut, Panic
 // KL-14b/c/d: names resolved via DT_NEEDED + GOT (not ffi_* builtins).
 // Cap is the dyn ELF emitter's unique-symbol table (see native_v2_dynlink_*).
 fn name_is_dynlink_extern(n: Name) -> bool with Mut, Panic, Div {
-    if name_eq(n, make_name("kl14b_add")) { return true }
-    if name_eq(n, make_name("kl14c_add")) { return true }
-    if name_eq(n, make_name("kl14c_mul")) { return true }
-    if name_eq(n, make_name("kl14c_neg")) { return true }
-    if name_eq(n, make_name("kl14d_a")) { return true }
-    if name_eq(n, make_name("kl14d_b")) { return true }
-    if name_eq(n, make_name("ZSTD_compress")) { return true }
-    if name_eq(n, make_name("ZSTD_decompress")) { return true }
-    if name_eq(n, make_name("ZSTD_isError")) { return true }
-    if name_eq(n, make_name("dlopen")) { return true }
-    if name_eq(n, make_name("dlsym")) { return true }
-    if name_eq(n, make_name("dlclose")) { return true }
-    if name_eq(n, make_name("dlerror")) { return true }
-    false
+    // Single source of truth: a name is a dynlink extern iff it maps to a
+    // library in the dynlink table below. The former parallel name whitelist
+    // (which duplicated this list) was removed in the LibraryId Phase 1 work.
+    native_v2_dynlink_lib_id_for_name(n.buf, n.len) > 0
 }
 
 fn native_v2_align8(x: i64) -> i64 {
@@ -1845,8 +1835,8 @@ fn native_v2_name_buf_eq(a_buf: [i8; 384], a_len: i64, b_buf: [i8; 384], b_len: 
     true
 }
 
-fn native_v2_dynlink_max_symbols() -> i64 { 8 }
-fn native_v2_dynlink_max_libs() -> i64 { 4 }
+fn native_v2_dynlink_max_symbols() -> i64 { 256 }
+fn native_v2_dynlink_max_libs() -> i64 { 32 }
 
 // Stable lib id for a dynlink symbol name. 0 = unknown / not dynlink.
 fn native_v2_dynlink_lib_id_for_name(sym_buf: [i8; 384], sym_len: i64) -> i64 with Mut, Panic, Div {
@@ -1862,6 +1852,8 @@ fn native_v2_dynlink_lib_id_for_name(sym_buf: [i8; 384], sym_len: i64) -> i64 wi
     if native_v2_name_buf_eq(sym_buf, sym_len, n_da.buf, n_da.len) { return 3 }
     let n_db = make_name("kl14d_b")
     if native_v2_name_buf_eq(sym_buf, sym_len, n_db.buf, n_db.len) { return 4 }
+    let n_da2 = make_name("kl14d_align_test")
+    if native_v2_name_buf_eq(sym_buf, sym_len, n_da2.buf, n_da2.len) { return 7 }
     let n_zc = make_name("ZSTD_compress")
     if native_v2_name_buf_eq(sym_buf, sym_len, n_zc.buf, n_zc.len) { return 5 }
     let n_zd = make_name("ZSTD_decompress")
@@ -1893,6 +1885,7 @@ fn native_v2_dynlink_soname_for_lib_id(lib_id: i64) -> string {
     if lib_id == 4 { return "libkl14d_b.so" }
     if lib_id == 5 { return "libzstd.so.1" }
     if lib_id == 6 { return "libdl.so.2" }
+    if lib_id == 7 { return "libkl14d_align.so" }
     "libkl14b_probe.so"
 }
 
@@ -1938,7 +1931,7 @@ fn native_v2_dynlink_unique_count(nc: &NativeCompiler) -> i64 {
 
 // Unique DT_NEEDED lib count (order = first appearance of a lib via symbols).
 fn native_v2_dynlink_unique_lib_count(nc: &NativeCompiler) -> i64 with Mut, Panic, Div {
-    var libs: [i64; 4] = [0; 4]
+    var libs: [i64; 32] = [0; 32]
     var n: i64 = 0
     var i: i64 = 0
     while i < (*nc).extern_relocs.count {
@@ -12655,11 +12648,59 @@ fn native_v2_write_min_elf64_to_file(output_path: string, nc: &! NativeCompiler,
     let dyn_base: i64 = data_len
     let n_syms = native_v2_dynlink_unique_count(nc)
     let n_libs = native_v2_dynlink_unique_lib_count(nc)
+    // A dynlink extern was dropped because ExternRelocTable was full: the ELF
+    // would ship with an unresolved symbol. Refuse with its own code (26), not
+    // 22/23, so it is distinguishable from the cap refusals above.
+    if (*nc).extern_relocs.overflow { return 26 }
     if needs_dyn && (n_syms <= 0 || n_syms > native_v2_dynlink_max_symbols()) { return 22 }
-    if needs_dyn && (n_libs <= 0 || n_libs > native_v2_dynlink_max_libs()) { return 23 }
+    // rc=27, not 23: 23 is the rodata-overflow refusal at the end of this same
+    // function, so a lib-cap failure and a rodata failure were indistinguishable
+    // to the caller. Distinct code per distinct cause.
+    if needs_dyn && (n_libs <= 0 || n_libs > native_v2_dynlink_max_libs()) { return 27 }
     let dynstr_rel: i64 = dyn_base + 0
-    // Cap covers up to 4 sonames + 8 symbol names (KL-14d).
-    let dynstr_len: i64 = 256
+    // Dynstr is sized from the actual unique soname + symbol name need
+    // (the former fixed 4-soname/8-symbol/256-byte caps are removed).
+    var dynstr_need: i64 = 1
+    var ds_lib_ids: [i64; 32] = [0; 32]
+    var ds_n_libs: i64 = 0
+    var ds_i: i64 = 0
+    while ds_i < (*nc).extern_relocs.count {
+        let ds_er = (*nc).extern_relocs.entries[ds_i as usize]
+        let ds_lid = native_v2_dynlink_lib_id_for_name(ds_er.sym_buf, ds_er.sym_len)
+        if ds_lid > 0 {
+            var ds_seen = false
+            var ds_j: i64 = 0
+            while ds_j < ds_n_libs {
+                if ds_lib_ids[ds_j as usize] == ds_lid { ds_seen = true }
+                ds_j = ds_j + 1
+            }
+            if !ds_seen {
+                if ds_n_libs >= native_v2_dynlink_max_libs() { return 25 }
+                ds_lib_ids[ds_n_libs as usize] = ds_lid
+                ds_n_libs = ds_n_libs + 1
+                let ds_son = native_v2_dynlink_soname_for_lib_id(ds_lid)
+                dynstr_need = dynstr_need + str_len(ds_son) + 1
+            }
+        }
+        ds_i = ds_i + 1
+    }
+    var ds_sym_i: i64 = 0
+    while ds_sym_i < (*nc).extern_relocs.count {
+        let ds_er2 = (*nc).extern_relocs.entries[ds_sym_i as usize]
+        var ds_seen2 = false
+        var ds_k: i64 = 0
+        while ds_k < ds_sym_i {
+            let ds_prev = (*nc).extern_relocs.entries[ds_k as usize]
+            if native_v2_name_buf_eq(ds_er2.sym_buf, ds_er2.sym_len, ds_prev.sym_buf, ds_prev.sym_len) {
+                ds_seen2 = true
+            }
+            ds_k = ds_k + 1
+        }
+        if !ds_seen2 { dynstr_need = dynstr_need + ds_er2.sym_len + 1 }
+        ds_sym_i = ds_sym_i + 1
+    }
+    let dynstr_len: i64 = native_v2_align8(dynstr_need) + 16
+    if (dyn_base + dynstr_len) >= nc_elf_capacity_bytes() { return 24 }
     let dynsym_rel: i64 = native_v2_align8(dynstr_rel + dynstr_len)
     let dynsym_entsize: i64 = 24
     let dynsym_count: i64 = if needs_dyn { n_syms + 1 } else { 0 }
@@ -12840,8 +12881,8 @@ fn native_v2_build_elf_image_into(nc: &! NativeCompiler, base_addr: i64, entry_o
         var str_cursor: i64 = 1
 
         // Collect unique lib ids in first-appearance order; write sonames into dynstr.
-        var lib_ids: [i64; 4] = [0; 4]
-        var lib_str_off: [i64; 4] = [0; 4]
+        var lib_ids: [i64; 32] = [0; 32]
+        var lib_str_off: [i64; 32] = [0; 32]
         var n_libs_w: i64 = 0
         var ri_lib: i64 = 0
         while ri_lib < (*nc).extern_relocs.count {

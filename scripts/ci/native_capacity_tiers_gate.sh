@@ -31,6 +31,12 @@
 #   7. the ELF LOAD BASE ADDRESS 0x400000 (4194304) was NOT rewritten as a capacity.
 #      It numerically collides with the retired 4 MiB ELF tier and must stay a
 #      plain literal argument — this clause is the regression guard for that trap.
+#  10. the dynlink tiers (symbol cap / DT_NEEDED lib cap / ExternRelocTable) are
+#      pinned to their accessors and the ExternRelocTable is fail-closed with its
+#      own rc=26. History: dynlink was hard-capped at 8 symbols / 4 libs with a
+#      coupled 256-byte dynstr and a SILENT ExternRelocTable drop at 128 (bound
+#      duplicated in lower_ir.sio), so raising the codegen caps alone would have
+#      moved the silent cliff rather than removing it.
 #   9. NC_BIG_RODATA (flat rodata: string/constant data) is fail-closed with its
 #      own rc=23. History: append sites bound-checked the write but never set an
 #      overflow flag, so self-hosted/compiler/main.sio silently truncated string
@@ -55,6 +61,9 @@ ELF_BASE_ADDR=4194304      # 0x400000 — load address, NOT a capacity
 EXPECT_LABEL=16384         # NC_V2_LABEL_* x3     16,384 labels/patches per fn
                            # (must stay >= IR_MAX_INSTRS — see clause 8)
 EXPECT_RODATA=2097152      # NC_BIG_RODATA         2 MiB (rc=23, clause 9)
+EXPECT_DYN_SYMS=256        # dynlink symbol cap    (clause 10)
+EXPECT_DYN_LIBS=32         # dynlink DT_NEEDED cap (clause 10)
+EXPECT_EXTERN_RELOC=512    # ExternRelocTable      (rc=26, clause 10)
 
 if ! command -v python3 >/dev/null 2>&1; then
   printf 'NATIVE_CAPACITY_TIERS_FAIL reason=python3_missing\n' >&2
@@ -69,7 +78,8 @@ fi
 # one in the middle silently rotates every tier that follows it.
 python3 "$CHECKER" "$ROOT" \
   "$EXPECT_CODE" "$EXPECT_RELOC" "$EXPECT_ELF" "$EXPECT_LEGACY_ELF" "$ELF_BASE_ADDR" \
-  "$EXPECT_LABEL" "$EXPECT_RODATA"
+  "$EXPECT_LABEL" "$EXPECT_RODATA" \
+  "$EXPECT_DYN_SYMS" "$EXPECT_DYN_LIBS" "$EXPECT_EXTERN_RELOC"
 
 head_sha="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || printf not_available)"
 tree_sha="$(git -C "$ROOT" rev-parse 'HEAD^{tree}' 2>/dev/null || printf not_available)"
@@ -84,5 +94,5 @@ fi
 
 printf '%s\n' \
   'NATIVE_CAPACITY_TIERS_BOUNDARY declaration_accessor_coherence=proved fail_closed_rc=proved runtime_emission=not_claimed elf_base_addr=preserved'
-printf 'NATIVE_CAPACITY_TIERS_PASS code=%s reloc=%s elf=%s legacy_elf=%s rodata=%s head=%s tree=%s worktree=%s\n' \
-  "$EXPECT_CODE" "$EXPECT_RELOC" "$EXPECT_ELF" "$EXPECT_LEGACY_ELF" "$EXPECT_RODATA" "$head_sha" "$tree_sha" "$worktree_state"
+printf 'NATIVE_CAPACITY_TIERS_PASS code=%s reloc=%s elf=%s legacy_elf=%s rodata=%s dyn_syms=%s dyn_libs=%s extern_reloc=%s head=%s tree=%s worktree=%s\n' \
+  "$EXPECT_CODE" "$EXPECT_RELOC" "$EXPECT_ELF" "$EXPECT_LEGACY_ELF" "$EXPECT_RODATA" "$EXPECT_DYN_SYMS" "$EXPECT_DYN_LIBS" "$EXPECT_EXTERN_RELOC" "$head_sha" "$tree_sha" "$worktree_state"
