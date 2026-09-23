@@ -38,7 +38,7 @@ CLAUSES:
                                   checker rejects (expected "historical").
 
 WHAT THIS DOES NOT MEASURE. Whether historical is a useful label for some pages.
-Whether the three whitelist entries deserve repo_only. Only: the field is not a
+Whether the six whitelist entries deserve repo_only. Only: the field is not a
 measurement of currency, and the gate enforces the path default.
 """
 

@@ -15,16 +15,21 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.delta
 > design, so it is a current `repo_only` document. Three distinct surfaces
 > must not be conflated:
 >
-> 1. **The built-in `Knowledge<T>` language surface ships today.** The generic
->    `Knowledge<T>`, the `measure(...)` primitive, `.value` extraction gated by
->    the `with Epistemic` effect, and confidence/epsilon refinement predicates
->    (`Knowledge[f64, ε >= 0.82]`) are on the checked public surface and are
->    pinned by the current fixtures `knowledge_value_with_epistemic.sio`,
->    `knowledge_value_requires_epistemic.sio`, and
->    `kl5_epsilon_confidence_boundary_ok.sio` (plus `measure`-exercising
->    fixtures such as `seq_knowledge_nested_generic.sio` and
->    `gum_correlated.sio`). The paper's `confidence(k) ≥ 950` notation maps
->    onto this shipped epsilon/confidence refinement capability.
+> 1. **The built-in `Knowledge<T>` language surface ships today** — and an
+>    unqualified "shipped" claim must hold on both `madaros` and `lean_single`
+>    per `docs/compiler/KNOWN_LIMITATIONS.md`, so the engine scope is stated
+>    per fixture below. The generic `Knowledge<T>`, the `measure(...)` primitive,
+>    `.value` extraction gated by the `with Epistemic` effect, and
+>    confidence/epsilon refinement predicates (`Knowledge[f64, ε >= 0.82]`) are
+>    on the checked public surface. They are exercised **cross-engine** (both
+>    `madaros` and `lean_single` pass) by `knowledge_value_requires_epistemic.sio`
+>    and `kl5_epsilon_confidence_boundary_ok.sio`; the same built-in surface is
+>    exercised on `lean_single` only by `knowledge_value_with_epistemic.sio` and
+>    `seq_knowledge_nested_generic.sio` (marked LEAN-ONLY in
+>    `tests/engine_parity_baseline.txt`), and `gum_correlated.sio` currently
+>    DIVERGES between the two engines (also recorded in that baseline). The
+>    paper's `confidence(k) ≥ 950` notation maps onto this shipped
+>    epsilon/confidence refinement capability.
 > 2. **A separate shipped stdlib API:** `Epistemic { val: f64, variance: f64,
 >    confidence: i64 }` in `stdlib/epistemic/knowledge.sio` is a *distinct*,
 >    simpler flat-struct surface — **not** the same type as the built-in
@@ -38,8 +43,15 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.delta
 >    `Knowledge<T>` runtime layout, `Knowledge::exact`, units-as-type-parameters
 >    (`Knowledge<mg>`), and the two-byte `66 90` guard marker described in
 >    §6.3 are still aspirational — see `docs/compiler/KNOWN_LIMITATIONS.md`.
->    The 0–1000 confidence scale, however, is shared by both shipped surfaces
->    above.
+>    The two shipped surfaces do **not** share a single confidence scale: the
+>    built-in `Knowledge<T>` carries a *fractional* confidence as an epsilon
+>    predicate on `[0,1]` (e.g. `ε=0.90` in `kl5_epsilon_confidence_boundary_ok.sio`),
+>    while the stdlib `Epistemic` carries an *integer* `confidence: i64` on the
+>    `0–1000` scale (`ep_certain` stores `1000`, `ep_measured` stores `900` in
+>    `stdlib/epistemic/knowledge.sio`). The paper's integer `confidence(k) ≥ 950`
+>    notation maps onto the stdlib's `0–1000` integer scale and is a
+>    design-target aspiration for the built-in's fractional epsilon — the two
+>    representations are distinct and are not silently interchangeable.
 
 **Draft — POPL 2027 submission | Numbers updated 2026-04-21 | DOUBLE-BLIND VERSION**
 
@@ -873,7 +885,7 @@ The marker is prefix-aligned. A post-mortem coverage tool counts markers by scan
 
 ## Appendix C — the rapamycin model in Sounio
 
-The full source of the rapamycin PBPK model fits on a single page. Reproduced here with uncertainty annotations. This is target-design notation: `measure`, `Knowledge::exact`, and `Knowledge<mg>` are not constructors in the current compiler. The shipped zero-variance constructor is `ep_certain(val)`, and a measured value is `ep_measured(val, std_dev)`.
+The full source of the rapamycin PBPK model fits on a single page. Reproduced here with uncertainty annotations. The listing mixes two distinct surfaces — keep them apart. `measure(...)` **is** a shipped built-in: it constructs the built-in `Knowledge<T>` (see `tests/run-pass/gum_correlated.sio:13`, `let k: Knowledge<f64> = measure(1.75, uncertainty: 0.01)`). `Knowledge::exact` and the units-as-type-parameters form `Knowledge<mg>` are **not** constructors in the current compiler — they remain design-target (§6.3, `KNOWN_LIMITATIONS.md`). The listing's zero-variance / measured values, however, are written with the *separate* shipped stdlib `Epistemic` API: `ep_certain(val)` and `ep_measured(val, std_dev)` construct `Epistemic { val, variance, confidence: i64 }` (`stdlib/epistemic/knowledge.sio`), which is a different type from the built-in `Knowledge<T>` and is **not** a replacement for `measure(...)`. A faithful shipped version would build the uncertain parameters with `measure(...)` (built-in) and only reach for `ep_certain`/`ep_measured` where the stdlib `Epistemic` struct is intended.
 
 ```sio
 // rapamycin PBPK — three compartment, three uncertain parameters

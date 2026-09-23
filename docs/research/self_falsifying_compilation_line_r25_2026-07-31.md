@@ -49,11 +49,14 @@ while declaring `Status: EXECUTABLE`. The defect is not described at arm's lengt
 
 ```
 scripts/docs/governance_registry.mjs:32   const ACTIVE_RESEARCH_DOCS = new Set([
+                                            'docs/research/delta_epistemic_gradual_compilation_paper.md',
                                             'docs/research/RESEARCH_VALIDATION_SUMMARY.md',
                                             'docs/research/epistemic_algebra_review.md',
                                             'docs/research/vancomycin-uncertainty.md',
+                                            'docs/research/rna_cayley_dickson_confirmatory_preregistration_2026-08-09.md',
+                                            'docs/research/cd-tower-automorphism-freeze.md',
                                           ]);
-scripts/docs/governance_registry.mjs:392  authority: ACTIVE_RESEARCH_DOCS.has(relPath)
+scripts/docs/governance_registry.mjs:396  authority: ACTIVE_RESEARCH_DOCS.has(relPath)
                                             ? 'repo_only' : 'historical',
 ```
 
@@ -67,8 +70,8 @@ Measured 2026-07-31; the contract re-measures on every run.
 
 | clause | | |
 |---|---|---|
-| `V1_WHITELIST_IS_THREE` | `ACTIVE_RESEARCH_DOCS` at :32 has exactly six path literals, all under `docs/research/` (grew three → four on 2026-08-15, four → six on 2026-09-22) | currency is a six-name list |
-| `V2_DEFAULT_IS_HISTORICAL` | path rule :387–392 is ternary on that Set → `repo_only` / `historical` | default is lineage |
+| `V1_WHITELIST_IS_THREE` | `ACTIVE_RESEARCH_DOCS` at :32 has exactly six path literals, all under `docs/research/` (grew three → four on 2026-08-15, four → five on 2026-08-28 via `cd-tower-automorphism-freeze.md`, five → six on 2026-09-22 via this paper in PR #2648) | currency is a six-name list |
+| `V2_DEFAULT_IS_HISTORICAL` | path rule :396 (`ACTIVE_RESEARCH_DOCS.has(relPath) ? 'repo_only' : 'historical'`) is ternary on that Set → `repo_only` / `historical` | default is lineage |
 | `V3_CORPUS_IS_LINEAGE_DEFAULT` | 320 research topics: historical 317, repo_only 2, dual 1; 317/317 historical pages carry the lineage note; all 317 non-whitelist paths are historical | almost everything is lineage by default |
 | `V4_GATE_REJECTS_CURRENT` | hermetic synced farm; unmodified → rc=0; R24's page given `authority: repo_only` → rc=1 with `expected "historical"` | claiming currency fails |
 
@@ -83,7 +86,15 @@ which of several `== 3` checks needs to move. The clause ID keeps the name
 `V1_WHITELIST_IS_THREE` for rung continuity even though the count is now 4 --
 it is a label, not a live assertion of the number three.
 
-**Update 2026-09-22**: `ACTIVE_RESEARCH_DOCS` grew from four paths to six when
+**Update 2026-08-28**: `ACTIVE_RESEARCH_DOCS` grew from four paths to five when
+`docs/research/cd-tower-automorphism-freeze.md` was whitelisted in the same
+change that introduced it. `V1_WHITELIST_IS_THREE` and `V3_CORPUS_IS_LINEAGE_DEFAULT`
+check against the `WHITELIST_SIZE` named constant rather than a bare literal, so
+the next legitimate whitelist change updates one constant. The clause ID keeps
+the rung-continuity label `V1_WHITELIST_IS_THREE` even though the count is now 5
+— it is a label, not a live assertion of the number three.
+
+**Update 2026-09-22**: `ACTIVE_RESEARCH_DOCS` grew from five paths to six when
 `docs/research/delta_epistemic_gradual_compilation_paper.md` was reclassified
 from historical lineage to the design target in PR #2648 (the paper is the
 direction Sounio is being built toward, not retired work). The contract's
