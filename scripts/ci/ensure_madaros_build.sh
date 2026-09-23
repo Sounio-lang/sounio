@@ -27,6 +27,12 @@ OUT="${1:-$ROOT_DIR/artifacts/self-hosted/madaros}"
 MANIFEST="${OUT}-manifest.json"
 
 if [[ -f "$OUT" && -f "$MANIFEST" ]] && bash "$ROOT_DIR/scripts/ci/verify_madaros_build_manifest.sh" "$OUT" "$MANIFEST"; then
+    # actions/upload-artifact + actions/download-artifact (and actions/cache
+    # restores of files saved that way) do not reliably preserve the
+    # executable bit, so a verified-but-non-executable OUT is not a
+    # hypothetical here -- restore it unconditionally before handing the
+    # path to any caller that will exec it.
+    chmod +x "$OUT"
     echo "ensure_madaros_build: reusing verified Madaros build: $OUT"
     exit 0
 fi

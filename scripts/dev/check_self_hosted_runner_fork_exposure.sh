@@ -48,8 +48,23 @@ cd "$ROOT_DIR"
 
 SCANNER="$ROOT_DIR/scripts/dev/_fork_exposure_scan.py"
 
+# GitHub Actions loads both .yml and .yaml from .github/workflows/; scanning
+# only *.yml would let an unguarded self-hosted job in a .yaml-suffixed
+# workflow bypass this gate entirely. nullglob so a (today hypothetical)
+# absence of one extension doesn't pass a literal unmatched glob pattern
+# through to python3 as a nonexistent path.
+real_workflow_files() {
+    local files=()
+    shopt -s nullglob
+    files=("$ROOT_DIR"/.github/workflows/*.yml "$ROOT_DIR"/.github/workflows/*.yaml)
+    shopt -u nullglob
+    printf '%s\n' "${files[@]}"
+}
+
 run_real() {
-    python3 "$SCANNER" "$ROOT_DIR"/.github/workflows/*.yml
+    local files=()
+    mapfile -t files < <(real_workflow_files)
+    python3 "$SCANNER" "${files[@]}"
 }
 
 selftest() {
@@ -116,6 +131,31 @@ jobs:
       - run: echo hi
 EOF
 
+    # POSITIVE 2: `pull_request: {}` (explicit empty mapping) is YAML-equivalent
+    # to bare `pull_request:` -- must still flag an unguarded self-hosted job.
+    cat > "$tmp/positive_empty_mapping_trigger.yml" <<'EOF'
+on:
+  pull_request: {}
+jobs:
+  danger:
+    runs-on: [self-hosted, gpu, cuda]
+    steps:
+      - run: echo hi
+EOF
+
+    # POSITIVE 3: a 4-space-indented jobs map (nonstandard for this repo, but
+    # valid YAML) -- the job-key indent is detected, not hardcoded to 2, so
+    # this must still flag an unguarded self-hosted job.
+    cat > "$tmp/positive_four_space_indent.yml" <<'EOF'
+on:
+  pull_request:
+jobs:
+    danger:
+        runs-on: [self-hosted, gpu, cuda]
+        steps:
+            - run: echo hi
+EOF
+
     local out
     out="$(python3 "$SCANNER" "$tmp"/*.yml || true)"
 
@@ -123,6 +163,16 @@ EOF
         echo "  ok   POSITIVE: unguarded self-hosted job under pull_request is flagged"
     else
         echo "  FAIL POSITIVE: unguarded self-hosted job under pull_request was NOT flagged"; rc=1
+    fi
+    if grep -q 'positive_empty_mapping_trigger.yml:danger' <<<"$out"; then
+        echo "  ok   POSITIVE: pull_request: {} (empty mapping) trigger is flagged"
+    else
+        echo "  FAIL POSITIVE: pull_request: {} (empty mapping) trigger was NOT flagged"; rc=1
+    fi
+    if grep -q 'positive_four_space_indent.yml:danger' <<<"$out"; then
+        echo "  ok   POSITIVE: a 4-space-indented jobs map is flagged"
+    else
+        echo "  FAIL POSITIVE: a 4-space-indented jobs map was NOT flagged"; rc=1
     fi
     for job in "negative_guarded.yml:safe" "negative_no_pr_trigger.yml:dispatch_only" \
                "negative_pull_request_target.yml:automation" "negative_gh_hosted.yml:ordinary"; do
@@ -136,7 +186,9 @@ EOF
     # Anti-vacuity: the scanner must actually find jobs in the real tree, or a
     # broken scanner (matches nothing, ever) would pass everything silently.
     local real_job_count
-    real_job_count="$(python3 "$SCANNER" --count-jobs "$ROOT_DIR"/.github/workflows/*.yml)"
+    local real_files=()
+    mapfile -t real_files < <(real_workflow_files)
+    real_job_count="$(python3 "$SCANNER" --count-jobs "${real_files[@]}")"
     if [[ "$real_job_count" -lt 20 ]]; then
         echo "  FAIL NEGATIVE: only $real_job_count jobs found across the real workflow tree -- scanner is dead"; rc=1
     else

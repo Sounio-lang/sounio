@@ -21,7 +21,11 @@ import sys
 SELF_HOSTED_RE = re.compile(r"self-hosted")
 RUNNER_VAR_RE = re.compile(r"vars\.[A-Za-z0-9_]*RUNNER[A-Za-z0-9_]*", re.IGNORECASE)
 GUARD_SUBSTRING = "head.repo.full_name == github.repository"
-BARE_PULL_REQUEST_BLOCK_RE = re.compile(r"^  pull_request:\s*$")
+# Indent-width-agnostic (some leading whitespace, not a specific count): a
+# `pull_request:` key nested under `on:` at any indentation, bare or as an
+# explicit empty mapping (`pull_request: {}` is YAML-equivalent to bare
+# `pull_request:` -- both mean "trigger on all default activity types").
+BARE_PULL_REQUEST_BLOCK_RE = re.compile(r"^\s+pull_request:\s*(\{\s*\})?\s*$")
 BARE_PULL_REQUEST_INLINE_RE = re.compile(r"(?<!_target)\bpull_request\b")
 
 
@@ -53,11 +57,26 @@ def has_bare_pull_request_trigger(lines: list[str]) -> bool:
     return False
 
 
+_JOB_KEY_RE = re.compile(r"^(\s+)([A-Za-z0-9_.-]+):\s*$")
+
+
 def iter_job_blocks(lines: list[str]) -> list[tuple[str, int, list[str]]]:
-    """Return (job_name, job_body_indent, block_lines) for each job under `jobs:`."""
+    """Return (job_name, job_body_indent, block_lines) for each job under `jobs:`.
+
+    The job-key indent width is detected from the FIRST job key seen under
+    `jobs:`, not hardcoded to 2 spaces -- a workflow whose jobs map is
+    consistently indented some other (nonzero) width is still scanned
+    correctly, not silently skipped. Job body fields (runs-on:, if:, ...) are
+    one further indent step inward from the job key -- but that step's WIDTH
+    is not assumed to be 2 either (a file consistently indented some other
+    width throughout would put them at job_indent + 4, not + 2). Each job's
+    own body indent is instead captured from the first non-blank line inside
+    its block, so detection tracks whatever width that file actually uses.
+    """
     in_jobs = False
+    job_indent: int | None = None
     job_name = None
-    job_body_indent = None
+    job_body_indent: int | None = None
     block: list[str] = []
     yield_blocks: list[tuple[str, int, list[str]]] = []
 
@@ -72,16 +91,20 @@ def iter_job_blocks(lines: list[str]) -> list[tuple[str, int, list[str]]]:
             # `concurrency:`/`env:` section after the jobs map (not expected in
             # this repo's layout, but end the scan defensively either way).
             break
-        # A job key is a 2-space-indented `name:` line.
-        m = re.match(r"^  ([A-Za-z0-9_.-]+):\s*$", line)
-        if m:
+
+        m = _JOB_KEY_RE.match(line)
+        if m and (job_indent is None or len(m.group(1)) == job_indent):
+            if job_indent is None:
+                job_indent = len(m.group(1))
             if job_name is not None:
                 yield_blocks.append((job_name, job_body_indent, block[:]))
-            job_name = m.group(1)
-            job_body_indent = 4
+            job_name = m.group(2)
+            job_body_indent = None
             block = []
             continue
         if job_name is not None:
+            if job_body_indent is None and line.strip():
+                job_body_indent = indent_of(line)
             block.append(line)
     if job_name is not None:
         yield_blocks.append((job_name, job_body_indent, block[:]))

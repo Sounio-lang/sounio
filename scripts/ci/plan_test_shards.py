@@ -110,10 +110,21 @@ def cmd_refresh(args: argparse.Namespace) -> int:
         if not name or time_s is None:
             continue
         try:
-            corpus[f"{name}.sio"] = float(time_s)
-            n_seen += 1
+            t = float(time_s)
         except ValueError:
             continue
+        # The harness records elapsed time via `date +%s` before/after (see
+        # scripts/dev/run_sio_test_suite_v2.sh), i.e. whole seconds only --
+        # any test finishing in under a second (the common case for
+        # compile-fail/typecheck fixtures) reaches this code as exactly 0.0.
+        # A 0 weight contributes nothing to an LPT shard's running load, so
+        # every such test ties for "lightest shard" and piles onto whichever
+        # index wins that tie first -- unbalancing real wall-clock time even
+        # though the *measured* weights all look equal. Floor at 1s: a
+        # deliberate overestimate for a sub-second test, not a precise one,
+        # but it restores LPT's actual load-balancing property.
+        corpus[f"{name}.sio"] = t if t > 0 else 1.0
+        n_seen += 1
 
     if n_seen == 0:
         print(f"plan_test_shards: refresh: {args.junit} has no usable <testcase> entries -- refusing to write an unchanged/empty corpus", file=sys.stderr)

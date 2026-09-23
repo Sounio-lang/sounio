@@ -104,9 +104,12 @@ guard that gate requires, or the gate refuses the build.
 
 ## Teardown
 
-Same posture as the kaxi lane's own notes: the runner carries repo-scoped
-Actions access and namespaced `pods/exec` in `slurm-pilot` only. Treat the PAT
-and the pod as sensitive -- anyone who can dispatch workflows against this
-repo can, once this pool is live, exec in the `slurm-pilot` login pod through
-it. Revoke the PAT and delete the Deployment/ServiceAccount/Role/RoleBinding
-together; do not leave the RBAC applied with no runner using it.
+Unlike the kaxi lane, this pool's ServiceAccount carries no Role/RoleBinding
+(see `runner/ci-fabric-rbac.yaml`'s own note on why pods/exec is not granted
+pre-emptively) -- so anyone who can dispatch workflows against this repo
+gains repo-scoped Actions access to the runner, but not a bridge into the
+cluster through it. Treat the PAT as sensitive regardless. Revoke it and
+delete the Deployment/ServiceAccount together; do not leave either applied
+with nothing using it. If a later change adds a Role/RoleBinding for a
+Slurm-submitting job, this note's blast-radius statement no longer holds --
+update it then.

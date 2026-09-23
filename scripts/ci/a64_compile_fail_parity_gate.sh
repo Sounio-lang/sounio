@@ -142,10 +142,18 @@ while IFS= read -r f; do
     req="$(sed -n 's|^//@[[:space:]]*requires:[[:space:]]*\([A-Za-z_][A-Za-z_0-9]*\).*|\1|p' "$f" | head -1)"
     case "$req" in
         "")               printf '%s\n' "$f" >> "$WORK_DIR/in_scope.txt" ;;
-        gpu|llvm|science|qualification)
-                          printf '%s\n' "$f" >> "$WORK_DIR/in_scope.txt" ;;
+        gpu|llvm)         printf '%s\n' "$f" >> "$WORK_DIR/in_scope.txt" ;;
         "$ENGINE")        printf '%s\n' "$f" >> "$WORK_DIR/in_scope.txt" ;;
         madaros|lean_single)
+                          printf '%s\t%s\n' "$(basename "$f" .sio)" "$req" >> "$WORK_DIR/excluded.txt" ;;
+        # science/qualification are dormant lanes (scripts/dev/run_sio_test_suite_v2.sh):
+        # recognized but always-skip until a consuming workflow sets
+        # SOUNIO_SCIENCE_AVAILABLE/SOUNIO_QUALIFICATION_AVAILABLE. Excluding
+        # them here (not in_scope, unlike the engine-agnostic gpu|llvm arm)
+        # keeps this engine-parity gate from compiling them directly and
+        # silently activating a Qualification-tagged fixture the moment
+        # someone adds one, before that workflow exists.
+        science|qualification)
                           printf '%s\t%s\n' "$(basename "$f" .sio)" "$req" >> "$WORK_DIR/excluded.txt" ;;
         *)                unknown_requires="$unknown_requires $f:$req" ;;
     esac
