@@ -15,7 +15,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.quick-start-gu
 > covariance-aware GUM), anchored by
 > `tests/stdlib/epistemic/test_knowledge_madaros_import_e2e.sio` and
 > `tests/run-pass/ep_gum_covariance.sio`. The legacy
-> `stdlib::epistemic::lib` surface (`epistemic_std`, `add_epistemic`,
+> `epistemic::lib` surface (`epistemic_std`, `add_epistemic`,
 > `mul_epistemic`, `fuse_measurements`) is not exercised by `tests/run-pass/`
 > and is not part of the checked artifact. `with_confidence` operators and
 > units-as-type-parameters are aspirational in source and absent from the

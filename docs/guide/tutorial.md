@@ -17,7 +17,7 @@ A step-by-step guide to learning Sounio, the language for epistemic computing.
 > covariance-aware GUM), anchored by
 > `tests/stdlib/epistemic/test_knowledge_madaros_import_e2e.sio` and
 > `tests/run-pass/ep_gum_covariance.sio`. The legacy
-> `stdlib::epistemic::lib` surface (`epistemic_std`, `add_epistemic`,
+> `epistemic::lib` surface (`epistemic_std`, `add_epistemic`,
 > `mul_epistemic`, `fuse_measurements`) is not exercised by `tests/run-pass/`
 > and is not part of the checked artifact. `with_confidence` operators and
 > units-as-type-parameters are aspirational in source and absent from the
@@ -173,8 +173,8 @@ let mass = ep_measured(10.5, 0.2)   // val=10.5, std_dev=0.2, confidence=900/100
 print("Mass: ", ep_val(&mass), " ± ", ep_std(&mass), " kg")
 print("Confidence: ", ep_confidence(&mass), "/1000  (", ep_confidence(&mass) / 10, "%)")
 
-// Note: the source/instrument lives in stdlib/epistemic/prov.sio,
-// not as a field of Epistemic.
+// Note: provenance is a separate, private model in `stdlib/epistemic/prov.sio`
+// (it declares no `pub` symbols), not a field of `Epistemic`.
 ```
 
 ### Automatic Propagation
@@ -231,8 +231,10 @@ print("Result: ", ep_val(&result))
 
 > Note: the `Source` struct with `instrument` / `calibration_date` / `operator`
 > fields, and `result.provenance.instrument`, are **not** in the checked
-> surface. Provenance is tracked separately in `stdlib/epistemic/prov.sio`;
-> `Epistemic` itself carries only `val`, `variance`, and `confidence`.
+> surface. A standalone provenance model exists in `stdlib/epistemic/prov.sio`
+> (private — it declares no `pub` symbols — so it cannot be imported as a
+> user-facing module); `Epistemic` itself carries only `val`, `variance`, and
+> `confidence`.
 
 ---
 
