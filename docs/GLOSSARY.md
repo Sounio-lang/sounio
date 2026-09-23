@@ -17,8 +17,9 @@ Definitions of key terms in epistemic computing and the Sounio language.
 > covariance-aware GUM), anchored by
 > `tests/stdlib/epistemic/test_knowledge_madaros_import_e2e.sio` and
 > `tests/run-pass/ep_gum_covariance.sio`. The legacy
-> `stdlib::epistemic::lib` surface (`epistemic_std`, `add_epistemic`,
-> `mul_epistemic`, `fuse_measurements`) is not exercised by `tests/run-pass/`
+> `epistemic::lib` surface (`epistemic_std`, `add_epistemic`, `mul_epistemic`,
+> `fuse_measurements`), imported in `tests/stdlib/epistemic/test_core_e2e.sio`,
+> is not exercised by `tests/run-pass/`
 > and is not part of the checked artifact. `with_confidence` operators and
 > units-as-type-parameters are aspirational in source and absent from the
 > checked public surface — see `docs/compiler/KNOWN_LIMITATIONS.md`.
@@ -143,14 +144,14 @@ Construction: `ep_measured(val, std_dev)` stores `variance = std_dev^2` and `con
 
 Arithmetic (free-fn form, portable across engines; see `tests/stdlib/epistemic/test_knowledge_madaros_import_e2e.sio`): `ep_add` / `ep_sub` / `ep_mul` / `ep_div` / `ep_scale` / `ep_shift` apply GUM δ-method, **uncorrelated** (covariance-aware variants `ep_add_cov` / `ep_sub_cov` / `ep_mul_cov` / `ep_div_cov` take a numeric covariance; see `tests/run-pass/ep_gum_covariance.sio`). Merge via `ep_merge` (inverse-variance weighted).
 
-`provenance` is **not** a field of `Epistemic`; it is tracked separately in `stdlib/epistemic/prov.sio`.
+`provenance` is **not** a field of `Epistemic`, and there is **no public provenance API** in the checked surface — `stdlib/epistemic/prov.sio` is a private/internal PROV model (it declares no `pub` symbols), so it cannot be imported as a user-facing module.
 
 ---
 
 ## L
 
 **Linear Type**
-A type that must be used exactly once. Useful for resources like file handles that must be properly closed. Sounio enforces linear use at check time: a `linear struct` must be consumed on every path (the checker emits `E039` for use-after-consumption and `E040` for an unconsumed linear value). The source-level `linear` keyword on a struct is part of the checked surface — see `tests/run-pass/linear_balanced_branches.sio`. The shipped source-tracked ownership semantics also live in `stdlib/epistemic/affine`; see `tests/run-pass/affine_shared_source_add.sio`.
+A type that must be used exactly once. Useful for resources like file handles that must be properly closed. Sounio enforces linear use at check time: a `linear struct` must be consumed on every path (the checker emits `E039` for use-after-consumption and `E040` for an unconsumed linear value). The source-level `linear` keyword on a struct is part of the checked surface — see `tests/run-pass/linear_balanced_branches.sio`.
 
 ---
 

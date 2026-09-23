@@ -366,7 +366,7 @@ let distance_cm_equiv = convert_m_to_cm(distance_m)   // 100000.0
 
 let temp_c = 25.0
 let temp_k = convert_celsius_to_kelvin(temp_c)        // 298.15
-let temp_f_equiv = convert_kelvin_to_celsius(temp_k)  // 25.0
+let temp_c_equiv = convert_kelvin_to_celsius(temp_k)  // 25.0 (round-trip back to °C)
 ```
 
 > `convert(value)` is not in the checked surface. The shipped conversions are
@@ -417,8 +417,8 @@ print("sqrt(x) = ", ep_val(&sqrt_x), " ± ", ep_std(&sqrt_x))
 > **Source-tracked surface.** `stdlib::linalg` is present (`matrix.sio`,
 > `vector.sio`, `eigen.sio`, `factorize.sio`) with host-side matrix/vector and
 > eigendecomposition APIs. GPU-accelerated matrix primitives also live in
-> `stdlib/gpu/clifford_kernel.sio` and the clifford-kernel helpers
-> (`cl_gpu_mul_batch`, `sed_f3_batch`, `cd_gpu_count_tk`); see
+> `stdlib/gpu/clifford_kernel.sio` (`cl_gpu_mul_batch`, `cd_gpu_count_tk`) and
+> `stdlib/gpu/sedenion_kernels.sio` (`sed_f3_batch`); see
 > `examples/gpu/vec_add.sio` and `examples/gpu.sio` for the canonical kernel
 > surface.
 
@@ -458,10 +458,8 @@ fn sqrt(x: Positive) -> f64 {
 > directly, and shipped runtime code uses linear structs extensively. The
 > `linear` keyword enforces single-use ownership at check time (the checker emits
 > `E039` for use-after-consumption and `E040` for an unconsumed linear value).
-> The source-tracked ownership semantics also live in `stdlib/epistemic/affine`
-> (anchor: `tests/run-pass/affine_shared_source_add.sio`). For file handle
-> ownership in source, see `stdlib/coordination/fleet_transaction.sio` and the
-> `linear_ad` module of `stdlib/autodiff/linear_ad.sio`.
+> For file handle ownership in source, see `stdlib/coordination/fleet_transaction.sio`
+> and the `linear_ad` module of `stdlib/autodiff/linear_ad.sio`.
 
 ```sio
 linear struct FileHandle {
@@ -481,8 +479,8 @@ close(file)
 ### GPU Computing
 
 ```sio
-use gpu::*   // exports Clifford/sedenion GPU helpers (e.g. cl_gpu_mul_batch, sed_f3_batch)
-// kernel fn, gpu_thread_id_x, and perform GPU.{launch,sync} are compiler surfaces, not gpu::* exports
+use gpu::lib::*   // re-exports Clifford/sedenion GPU helpers (e.g. cl_gpu_mul_batch, sed_f3_batch)
+// kernel fn, gpu_thread_id_x, and perform GPU.{launch,sync} are compiler surfaces, not gpu::lib::* exports
 
 // Mark the function as a GPU kernel; effect `GPU` declares GPU execution.
 kernel fn vector_add(n: i64, a: &[f64], b: &[f64], c: &![f64])

@@ -152,8 +152,10 @@ let angle = 90.0  // degrees
 
 // Scientific measurement - uncertain (canonical free-fn form)
 let temperature = ep_measured(37.2, 0.1)
-// Note: ep_measured stores variance = std^2; the source/instrument lives in
-// stdlib/epistemic/prov.sio, not as a field of Epistemic.
+// Note: ep_measured stores variance = std^2; Epistemic has no provenance field,
+// and provenance is NOT part of the checked public surface — stdlib/epistemic/prov.sio
+// is a private/internal PROV model (no `pub` symbols) and cannot be imported as a
+// user-facing module.
 ```
 
 ### How is uncertainty propagated?
