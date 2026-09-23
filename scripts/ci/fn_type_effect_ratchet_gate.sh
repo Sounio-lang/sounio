@@ -125,8 +125,9 @@ strip_noise() {
 # found in the tail). count_fn_parens / count_with_clauses below count each
 # via gsub, and the outer is bare iff with_n < fn_layers.
 AWK_SCAN='
-function scan_tail(line, tail_start,    i, n, c, depth) {
+function scan_tail(line, tail_start,    i, n, c, prev, depth) {
     depth = 0
+    prev = ""
     n = length(line)
     i = tail_start
     while (i <= n) {
@@ -136,11 +137,25 @@ function scan_tail(line, tail_start,    i, n, c, depth) {
         } else if (c == ")") {
             if (depth == 0) { return i }
             depth--
-        } else if (c == ">" || c == "]" || c == "}") {
+        } else if (c == ">") {
+            # Copilot follow-up (#2570): a bare ">" is ambiguous -- it closes
+            # a generic (`Result<i64, Error>`) OR it is just the second
+            # character of the OWN "->" arrow of a nested return type
+            # (`fn() -> (fn() -> i64 with IO, f64) with Mut`), which opens
+            # and closes nothing. Since Sounio types never use "<"/">" as
+            # comparison operators, the only source of an ARROW-flavoured
+            # ">" here is literally "-" immediately before it; skip closing
+            # depth for that case so an inner arrow can no longer masquerade
+            # as the close of the outer tuple/generic it is nested inside,
+            # which used to drop depth to 0 early and let the following
+            # comma terminate the scan before the outer with-clause.
+            if (prev != "-" && depth > 0) { depth-- }
+        } else if (c == "]" || c == "}") {
             if (depth > 0) { depth-- }
         } else if (c == "," && depth == 0) {
             return i
         }
+        prev = c
         i++
     }
     return n + 1
@@ -283,6 +298,20 @@ selftest() {
   if bare_hits_of "$tmp/neg8.sio" | grep -q .; then
     echo "  FALHA NEGATIVO 8: tipo-funcao externo COM efeito proprio (with empilhado) contado como nu"; rc=1
   else echo "  ok   NEGATIVO 8: tipo-funcao externo com with empilhado nao conta como nu"; fi
+  # NEGATIVE control 9 (#2570): a nested function type INSIDE A TUPLE, where
+  # the nested type's own "->" arrow sits at nonzero depth (inside the
+  # tuple's paren). scan_tail used to treat any bare ">" as a generic closer
+  # regardless of context, so the inner arrow's own ">" dropped depth back to
+  # the tuple's enclosing level early, and the tuple's internal comma (still
+  # meant to be protected by the tuple's still-open paren) then terminated
+  # the scan before the OUTER "with Mut" was ever seen -- an effect-bearing
+  # outer type falsely reported as bare. Fixed by not treating a ">"
+  # immediately preceded by "-" (i.e. part of an arrow, not a generic close)
+  # as a depth-closing character.
+  printf 'fn use_it(f: fn() -> (fn() -> i64 with IO, f64) with Mut) -> f64 { 0.0 }\n' > "$tmp/neg9.sio"
+  if bare_hits_of "$tmp/neg9.sio" | grep -q .; then
+    echo "  FALHA NEGATIVO 9: tipo-funcao aninhada em tupla com efeito proprio contada como nu"; rc=1
+  else echo "  ok   NEGATIVO 9: tipo-funcao aninhada em tupla com efeito proprio nao conta como nu"; fi
   rm -rf "$tmp"
   echo "falhas: $rc"
   return $rc
