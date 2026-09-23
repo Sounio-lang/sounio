@@ -16885,6 +16885,20 @@ impl Lowerer {
 
     fn lower_let_stmt_after_expr_ref(self, s: &Stmt, is_mut: bool, reg: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
+        // Captured BEFORE bind_local(s.name, ...) below rebinds `s.name` to a
+        // fresh (non-ref) slot. Same-name shadowing (`let a = a`) means a
+        // post-bind lookup_local_is_ref(rhs name) would find that fresh slot
+        // instead of the outer one it's meant to read, since lookup searches
+        // newest-first — silently losing is_ref on the shadowing form.
+        var rhs_ident_is_ref = false
+        match s.expr {
+            Some(rhs_ident_pre) => {
+                if (*rhs_ident_pre).kind == ExprKind::ExprIdent {
+                    rhs_ident_is_ref = lo.lookup_local_is_ref((*rhs_ident_pre).name)
+                }
+            }
+            _ => {}
+        }
         var fixed_array_len = lower_opt_type_fixed_array_len(&s.ty)
         var fixed_array_word_scalar = lower_opt_type_fixed_array_word_scalar(&s.ty)
         var rhs_array_elem_is_float = false
@@ -17026,7 +17040,7 @@ impl Lowerer {
             _ => {}
         }
         lo = lo.bind_local(s.name, bind_reg, is_mut)
-        lo.lower_let_stmt_finalize_ref(s, is_mut, reg, fixed_array_len, fixed_array_word_scalar, rhs_array_elem_is_float)
+        lo.lower_let_stmt_finalize_ref(s, is_mut, reg, fixed_array_len, fixed_array_word_scalar, rhs_array_elem_is_float, rhs_ident_is_ref)
     }
 
     fn lower_let_stmt_finalize_ref(
@@ -17036,7 +17050,8 @@ impl Lowerer {
         reg: i64,
         fixed_array_len: i64,
         fixed_array_word_scalar: bool,
-        rhs_array_elem_is_float: bool
+        rhs_array_elem_is_float: bool,
+        rhs_ident_is_ref: bool
     ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         // Ref-typed locals (annotated &T / &!T, or RHS is & / &! expr) must be marked
@@ -17059,7 +17074,13 @@ impl Lowerer {
                         // for-in-array, struct_local_is_value_copyable, …) depends on to
                         // route through the ref-array/deref path instead of treating the
                         // address as an ordinary GC handle.
-                        if lo.lookup_local_is_ref((*rhs_ref).name) {
+                        //
+                        // rhs_ident_is_ref was captured by the caller BEFORE s.name was
+                        // rebound (bind_local above), so same-name shadowing (`let a = a`)
+                        // still reads the OUTER `a` here instead of the fresh (non-ref)
+                        // slot bind_local just created for the new `a` — lookup_local_is_ref
+                        // on (*rhs_ref).name at this point would find that fresh slot first.
+                        if rhs_ident_is_ref {
                             bind_as_ref = true
                         }
                     }

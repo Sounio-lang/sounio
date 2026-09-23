@@ -70,9 +70,11 @@ reading (or writing) through the wrong indirection level.
 
 ### Every `lookup_local_is_ref` consumer this reaches
 
-All nine call sites in `self-hosted/ir/lower.sio` read `is_ref` off the
-*base* identifier of an expression, so every one of them silently
-mis-lowered when that base was an unannotated bare-identifier alias:
+`grep -c lookup_local_is_ref self-hosted/ir/lower.sio` finds 11 consumer call
+sites as of this fix (excluding the function's own definition and the fix's
+capture call — see **Fix** below). Each reads `is_ref` off the *base*
+identifier of an expression, so every one of them silently mis-lowered when
+that base was an unannotated bare-identifier alias:
 
 | Site (pre-fix) | What breaks |
 |---|---|
@@ -81,6 +83,8 @@ mis-lowered when that base was an unannotated bare-identifier alias:
 | field-get path in the field-access lowering fn | `zs.field` read on an aliased struct pointer |
 | field-store path in `lower_assign_stmt_ref` | `zs.field = v` write on an aliased struct pointer |
 | `lower_expr_as_array_handle_ref` | passing `zs` as a GC-array-handle builtin arg (`str_from_bytes`, `write_file`) |
+| `lower_first_arg_is_ref_like_ref` | packing `zs` as a first call argument before a C `char*` builtin (KL-14a) |
+| `lower_seq_recv_base_ref` | `zs.len()` / `zs.get(i)` etc. on an aliased `&Seq<T>` receiver |
 | `.len()` receiver check | `zs.len()` on an aliased array/slice |
 | `&self` auto-ref receiver check | `zs.method()` where the callee's first param is `&self` |
 | `lower_for_in_array_ref` | `for v in zs { ... }` — silently falls through to the plain local-array desugar instead of correctly refusing/handling the ref case |
@@ -117,24 +121,41 @@ mis-lowered when that base was an unannotated bare-identifier alias:
 
 `self-hosted/ir/lower.sio`, `lower_let_stmt_finalize_ref`: added a third
 branch to the `bind_as_ref` computation — a bare-identifier RHS that is
-itself already reference-typed (`lo.lookup_local_is_ref((*rhs_ref).name)`)
-now also sets `bind_as_ref = true`. This reuses the existing `bind_local_ref`
-mechanism (a simple flag set on the local-stack slot; see the exclusion
-comment above `struct_local_is_value_copyable` — "`is_ref` — `&T` / `&!T`
-locals: aliasing is what a reference MEANS") — no new representation, no new
-call sites, and every consumer above now sees the correct bit without
-further changes.
+itself already reference-typed now also sets `bind_as_ref = true`. This
+reuses the existing `bind_local_ref` mechanism (a simple flag set on the
+local-stack slot; see the exclusion comment above
+`struct_local_is_value_copyable` — "`is_ref` — `&T` / `&!T` locals: aliasing
+is what a reference MEANS") — no new representation, no new call sites, and
+every consumer above now sees the correct bit without further changes.
+
+**Same-name shadowing correction (post-review):** the first version of this
+fix queried `lookup_local_is_ref` on the RHS name from *inside*
+`lower_let_stmt_finalize_ref`, which runs after `lower_let_stmt_after_expr_ref`
+has already called `bind_local(s.name, ...)` to create the destination's own
+local-stack slot. `lookup_local_is_ref` searches newest-first, so for
+same-name shadowing (`let a = a`) that query found the just-created
+destination slot (always `is_ref = 0` at that point) instead of the outer,
+still-in-scope `a` it needed to read — silently losing `is_ref` on exactly
+the shadowing form. Fixed by capturing the RHS identifier's `is_ref` status
+in `lower_let_stmt_after_expr_ref` *before* its `bind_local(s.name, ...)`
+call, and threading that captured `bool` into `lower_let_stmt_finalize_ref`
+as a parameter instead of re-querying after the rebind.
 
 ## Regression coverage
 
-`tests/run-pass/ref_alias_bind_as_ref.sio` — covers, all through a
-bare-identifier alias with no explicit type annotation:
+`tests/run-pass/ref_alias_bind_as_ref.sio` (`//@ requires: madaros` — the fix
+lives only in the self-hosted Madaros compiler, not the lean_single
+bootstrap that builds the default suite's stage2 binary) — covers, all
+through a bare-identifier alias with no explicit type annotation:
 
 1. read through an alias of an immutable ref array param (`&[i64;2]`, the
    reported repro)
 2. write through an alias of a mutable ref array param (`&![i64;3]`)
 3. read through an alias of a non-array struct reference (`&Pair`)
 4. write through an alias of a mutable struct reference (`&!Pair`)
+5. read through a same-name shadowing alias (`let a = a`) of an immutable ref
+   array param — the case that motivated the capture-before-bind correction
+   above
 
 Wired into CI as `scripts/ci/madaros_ref_alias_bind_as_ref_gate.sh`, added to
 the `madaros-witness-gate` job in `.github/workflows/ci.yml` right after
