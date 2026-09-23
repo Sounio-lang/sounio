@@ -78,7 +78,7 @@ constants survive to lower time. Four consequences:
   previous bare-name *resolution* -- as an attribution knob and as the gate's control. It
   does not restore the table's contents to origin/main: the impl-method exclusion above is
   an independent behavioural change, is not disabled by this switch, and is tracked
-  separately. Keeping the two deltas on separate switches is deliberate; one switch for
+  separately (#2661). Keeping the two deltas on separate switches is deliberate; one switch for
   both would be a more complete rollback but could no longer attribute a regression to
   either change.
 

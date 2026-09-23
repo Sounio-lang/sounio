@@ -37,5 +37,5 @@ bare-name *resolution*) must reproduce the defect on `basic`, `fold`, `globals`,
 and `shadow`, and must not print the ambiguity warning -- so a green run cannot be a
 program that never collided. The switch does not restore the table's contents to
 origin/main: the independent exclusion of impl methods from the pure-fn constant-fold
-table remains active under it, and is tracked separately. None of the fixtures above uses
+table remains active under it, and is tracked separately (#2661). None of the fixtures above uses
 an impl method, so the positive control is unaffected.
