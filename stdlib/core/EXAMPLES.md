@@ -12,16 +12,13 @@
 > no `Knowledge` type here; uncertain values are `Epistemic` from
 > `stdlib/epistemic/knowledge.sio` (`ep_measured`, `ep_div`, `ep_val`).
 
-## 1. Prelude Utilities
+## 1. Comparison & Numeric Utilities
 
 ```sio
-use core::prelude::*;
+use cmp::lib::{min_f64, max_f64, clamp_f64}
 
 pub fn main() {
-    // Numeric utilities
-    let a = abs_f64(-3.14)
-    assert(a == 3.14)
-
+    // Numeric utilities (public helpers exported from cmp::lib)
     let b = min_f64(1.0, 2.0)
     assert(b == 1.0)
 
@@ -38,18 +35,26 @@ pub fn main() {
 ```sio
 pub fn main() with Panic {
     // The built-in generic Option<T> is the externally usable optionality API.
+    // Use the exhaustive `match` form (if let is not on the checked Madaros
+    // surface; it is lean_single-only, Gen 23+).
     var opt: Option<f64> = Some(42.0)
     var present: bool = false
-    if let Some(v) = opt {
-        assert(v == 42.0)
-        present = true
+    match opt {
+        Some(v) => {
+            assert(v == 42.0)
+            present = true
+        },
+        None => {},
     }
     assert(present)
 
     let missing: Option<f64> = None
     var is_none: bool = true
-    if let Some(_) = missing {
-        is_none = false
+    match missing {
+        Some(_) => {
+            is_none = false
+        },
+        None => {},
     }
     assert(is_none)
 }
@@ -97,19 +102,23 @@ pub fn main() with Div, Panic {
 }
 ```
 
-`Result<Knowledge<f64>, ()>` and `a / b` on epistemic values are not on the checked surface. Confidence degrades through `ep_div` itself: the result's confidence is the minimum of the inputs' confidence scaled by `97 / 100` (it never increases under division). Anchor: `tests/stdlib/epistemic/test_knowledge_madaros_import_e2e.sio`.
+`Result<Knowledge<f64>, ()>` and `a / b` on epistemic values are not on the checked surface. Confidence degrades through `ep_div` itself: the result's confidence is the minimum of the inputs' confidence scaled by `97 / 100` (it never increases under division). Anchor: `stdlib/epistemic/knowledge.sio` — `ep_div` (around lines 177-186) computes `confidence: ep_clamp_conf(ep_min_conf(a.confidence, b.confidence) * 97 / 100)`, which is the exact factor that enforces the 97% degradation claim.
 
 ## 5. Integer Utilities
 
 ```sio
-use core::prelude::*;
+use cmp::lib::{min_i64, max_i64, clamp_i64}
 
 pub fn main() {
-    let x = abs_i64(-10)
-    assert(x == 10)
+    // Integer helpers (public helpers exported from cmp::lib)
+    let x = min_i64(3, 7)
+    assert(x == 3)
 
-    let y = clamp_i64(15, 0, 10)
-    assert(y == 10)
+    let y = max_i64(3, 7)
+    assert(y == 7)
+
+    let z = clamp_i64(15, 0, 10)
+    assert(z == 10)
 }
 ```
 
