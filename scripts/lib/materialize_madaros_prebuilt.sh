@@ -43,14 +43,36 @@ _sounio_madaros_sha256() {
   fi
 }
 
+_sounio_madaros_secfrac_to_ns() {
+  # "1790198627.380043698" -> "1790198627380043698" (pure-integer nanoseconds
+  # since epoch, as a string -- avoids bash's lack of floating point and stays
+  # well inside 64-bit integer range for any real timestamp).
+  local v="$1" sec frac
+  [[ "$v" =~ ^[0-9]+(\.[0-9]*)?$ ]] || return 1
+  sec="${v%%.*}"
+  frac="${v#*.}"
+  [[ "$v" == "$frac" ]] && frac=""
+  frac="${frac}000000000"
+  printf '%s%s\n' "$sec" "${frac:0:9}"
+}
+
 _sounio_madaros_stat_inode_mtime_ctime() {
-  # Get inode, mtime, and ctime in a cross-platform way (GNU vs BSD stat).
+  # Get inode plus sub-second (nanosecond) mtime and ctime, cross-platform.
   # ctime (change time) is more reliable than mtime for detecting modifications.
-  # GNU stat: stat -c '%i %Y %Z' (inode, mtime, ctime - all seconds since epoch)
-  # BSD stat: stat -f '%i %m %c' (inode, mtime, ctime - all as seconds)
-  if stat -c '%i %Y %Z' "$1" 2>/dev/null; then
-    return 0
-  elif stat -f '%i %m %c' "$1" 2>/dev/null; then
+  # Whole-second resolution is not enough here: two writes landing in the same
+  # wall-clock second would be indistinguishable by a seconds-only stamp. Sub-
+  # second identity (nanoseconds) makes a same-timestamp collision between an
+  # install and an unrelated rewrite practically impossible, with no need for
+  # a time-since-write skew heuristic.
+  #   GNU stat:  stat -c '%i %.9Y %.9Z'  (inode, mtime, ctime, each seconds.nanoseconds)
+  #   BSD stat:  stat -f '%i %Fm %Fc'    (same, BSD's %F modifier adds the fraction)
+  local out inode mfrac cfrac mns cns
+  if out="$(stat -c '%i %.9Y %.9Z' "$1" 2>/dev/null)" || out="$(stat -f '%i %Fm %Fc' "$1" 2>/dev/null)"; then
+    read -r inode mfrac cfrac <<<"$out"
+    [[ "$inode" =~ ^[0-9]+$ ]] || return 1
+    mns="$(_sounio_madaros_secfrac_to_ns "$mfrac")" || return 1
+    cns="$(_sounio_madaros_secfrac_to_ns "$cfrac")" || return 1
+    echo "$inode $mns $cns"
     return 0
   fi
   return 1
@@ -87,15 +109,15 @@ sounio_materialize_madaros_prebuilt() {
     return 78
   fi
 
-  local size="" inode="" mtime="" ctime=""
+  local size="" inode="" mtime="" ctime="" have_subsec=0
   if [[ -f "$elf" ]]; then
     size="$(wc -c < "$elf" 2>/dev/null | tr -d ' ')" || size=""
-    # Get inode, mtime, and ctime to detect file replacements and modifications.
-    # ctime (change time) is more reliable than mtime for detecting file changes.
-    # Even with metadata match, verify hash to catch same-second in-place rewrites.
+    # Get inode plus nanosecond mtime/ctime to detect file replacements and
+    # modifications. ctime (change time) is more reliable than mtime for
+    # detecting file changes.
     local stat_out
-    stat_out="$(_sounio_madaros_stat_inode_mtime_ctime "$elf")" || stat_out=""
-    if [[ -n "$stat_out" ]]; then
+    if stat_out="$(_sounio_madaros_stat_inode_mtime_ctime "$elf")"; then
+      have_subsec=1
       inode="${stat_out%% *}"
       local rest="${stat_out#* }"
       mtime="${rest%% *}"
@@ -103,20 +125,16 @@ sounio_materialize_madaros_prebuilt() {
     fi
   fi
 
-  # Metadata cache fast path: trust the cache when metadata matches, UNLESS the
-  # ELF's ctime is within SOUNIO_MADAROS_PREBUILT_CTIME_SKEW seconds of now
-  # (default 2). ctime has whole-second resolution, so an in-place rewrite that
-  # preserves inode and size and lands in the same wall-clock second as a prior
-  # stamp would otherwise be trusted unverified. Falling through to full
-  # verification for a just-touched file closes that gap at negligible cost:
-  # invocations against a file untouched for more than a couple of seconds --
-  # the overwhelming majority, hundreds per test suite -- still take the fast
-  # path with no extra hashing.
-  local now skew="${SOUNIO_MADAROS_PREBUILT_CTIME_SKEW:-2}"
-  now="$(date +%s 2>/dev/null || echo 0)"
-  if [[ $verify -eq 0 && -x "$elf" && -f "$stamp" && -n "$size" && -n "$inode" && -n "$ctime" ]] \
-     && [[ "$(cat "$stamp" 2>/dev/null)" == "$want $size $inode $mtime $ctime" ]] \
-     && (( now - ctime >= skew )); then
+  # Metadata cache fast path: trust the cache only when nanosecond-resolution
+  # inode/size/mtime/ctime all match the recorded stamp exactly. A same-second,
+  # same-inode, same-size in-place rewrite would be invisible to a seconds-only
+  # stamp; at nanosecond resolution a rewrite reproducing the install's exact
+  # timestamp is not a plausible collision, so no time-since-write skew is
+  # needed. On a platform or filesystem where sub-second stat data is
+  # unavailable (have_subsec=0), the fast path is skipped outright and every
+  # invocation falls through to a full hash verification.
+  if [[ $verify -eq 0 && $have_subsec -eq 1 && -x "$elf" && -f "$stamp" && -n "$size" && -n "$inode" ]] \
+     && [[ "$(cat "$stamp" 2>/dev/null)" == "$want $size $inode $mtime $ctime" ]]; then
     return 0
   fi
 
