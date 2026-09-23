@@ -139,9 +139,18 @@ let rc = blas_dgemm_rowmajor(
 // zero-initialized placeholder values (the wrapper explicitly zeroes s[1..p]).
 // Do not read s[1..p] as computed singular values; full SVD is not implemented.
 //
-// IMPORTANT: the power iteration needs a NONZERO input. An all-zero matrix
-// leaves the iterate at zero and yields sigma = 0 (degenerate / NaN), so pass a
-// real matrix. The 2x2 below is stored row-major in the fixed 256-element buffer.
+// IMPORTANT — seed-projection limitation (verified against
+// stdlib/linalg/blas_ffi.sio:128-143): blas_dgesvd_approx seeds power
+// iteration with the ALL-ONES vector v = [1, 1, ...] (normalised), so the
+// input must NOT annihilate that seed. Concretely, A·[1, 1] must be
+// NONZERO — i.e. NO ROW OF A MAY SUM TO ZERO. A nonzero matrix whose
+// rows sum to zero (e.g. [[1, -1], [-1, 1]], where A·[1, 1] = [0, 0])
+// annihilates the all-ones seed; then ||A'A·v|| = 0 and the Newton
+// square-root step `sigma = 0.5 * (sigma + norm / sigma)`
+// (blas_ffi.sio:183) evaluates 0/0 → NaN, collapsing the iterate to 0.
+// An all-zero matrix is likewise unsafe. Pass a SEED-SAFE matrix: the
+// 2x2 below (rows sum to 4 and 3, so A·[1, 1] = [4, 3] ≠ 0) is stored
+// row-major in the fixed 256-element buffer.
 var a_svd: [f64; 256] = [0.0; 256]  // 2x2 input, row-major in the 256 buffer
 a_svd[0] = 3.0   // row 0, col 0
 a_svd[1] = 1.0   // row 0, col 1
@@ -187,30 +196,32 @@ brew install openblas
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                    EpistemicMatrix                       │
+│                    EpistemicMatrix                      │
 │  ┌─────────────────────────────────────────────────────┐│
-│  │ matmul()                                            ││
-│  │ └─ inline pure-Sounio GUM loop (no dispatch)        ││
-│  │    EpistemicMatrix::matmul always runs GUM          ││
-│  │    is_deterministic()/blas_available() not called   ││
-│  │    (BLAS dispatch is planned, not yet wired)        ││
-│  │    → pure-Sounio uncertainty propagation            ││
+│  │matmul()                                             ││
+│  │└─ inline pure-Sounio GUM loop (no dispatch)         ││
+│  │   EpistemicMatrix::matmul always runs GUM           ││
+│  │   is_deterministic()/blas_available() not called    ││
+│  │   (BLAS dispatch is planned, not yet wired)         ││
+│  │   → pure-Sounio uncertainty propagation             ││
 │  └─────────────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────────┘
                           │
                           ▼
 ┌─────────────────────────────────────────────────────────┐
-│                    blas_ffi.sio                          │
+│                    blas_ffi.sio                         │
 │  ┌─────────────────────────────────────────────────────┐│
-│  │ blas_dgemm_rowmajor()  → pure-Sounio GEMM (no BLAS) ││
-│  │ blas_dgesvd_approx()   → pure-Sounio (no BLAS)      ││
-│  │ blas_available()       → returns false (FFI unwired)││
+│  │blas_dgemm_rowmajor()  → pure-Sounio GEMM (no BLAS)  ││
+│  │blas_dgesvd_approx()   → pure-Sounio (no BLAS)       ││
+│  │blas_available()       → returns false (FFI unwired) ││
 │  └─────────────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────────┘
-                          │
-                          ▼
+
 ┌─────────────────────────────────────────────────────────┐
-│              System BLAS Library                         │
+│  (planned) System BLAS Library — NOT loaded by the      │
+│  current pure-Sounio build (blas_available() == false); │
+│  drawn DISCONNECTED: no edge wires this box to the      │
+│  pure-Sounio module above — no BLAS/LAPACK linked.      │
 │  libblas.so → libopenblas.so.0 → OpenBLAS runtime       │
 │  or libmkl_rt.so → Intel MKL runtime                    │
 │  or libatlas.so → ATLAS runtime                         │
@@ -244,3 +255,5 @@ The small overhead in those targets is projected to come from FFI call overhead 
 ## License
 
 MIT / Apache-2.0 (same as Sounio)
+
+
