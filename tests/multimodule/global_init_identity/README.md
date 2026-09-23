@@ -32,7 +32,10 @@ extra words were stored into the NEXT global's slot.
 | `shadow`    | a module that defines `helper` itself (later in the file, or effectful) must NOT adopt another module's importable `helper` |
 | `ambiguous` | two modules define the same global, a third names it: reported, not folded |
 
-Controls (`SOUNIO_DISABLE_GLOBAL_INIT_MODULE_SCOPE=1`, which restores the old bare-name
-table) must reproduce the defect on `basic`, `fold`, `globals`, `import` and `shadow`, and
-must not print the ambiguity warning -- so a green run cannot be a program that never
-collided.
+Controls (`SOUNIO_DISABLE_GLOBAL_INIT_MODULE_SCOPE=1`, which restores the previous
+bare-name *resolution*) must reproduce the defect on `basic`, `fold`, `globals`, `import`
+and `shadow`, and must not print the ambiguity warning -- so a green run cannot be a
+program that never collided. The switch does not restore the table's contents to
+origin/main: the independent exclusion of impl methods from the pure-fn constant-fold
+table remains active under it, and is tracked separately. None of the fixtures above uses
+an impl method, so the positive control is unaffected.

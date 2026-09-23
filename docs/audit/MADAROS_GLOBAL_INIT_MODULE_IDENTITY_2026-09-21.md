@@ -74,8 +74,13 @@ constants survive to lower time. Four consequences:
   first module that recorded the name. With one defining module that is the whole table,
   as before; with two it no longer concatenates them.
 * Impl methods are no longer recorded (a bare `name()` cannot reach one).
-* `SOUNIO_DISABLE_GLOBAL_INIT_MODULE_SCOPE=1` keeps every module at serial 0 -- the old
-  bare-name table, bit for bit -- as an attribution knob and as the gate's control.
+* `SOUNIO_DISABLE_GLOBAL_INIT_MODULE_SCOPE=1` keeps every module at serial 0, restoring the
+  previous bare-name *resolution* -- as an attribution knob and as the gate's control. It
+  does not restore the table's contents to origin/main: the impl-method exclusion above is
+  an independent behavioural change, is not disabled by this switch, and is tracked
+  separately. Keeping the two deltas on separate switches is deliberate; one switch for
+  both would be a more complete rollback but could no longer attribute a regression to
+  either change.
 
 ## claims_not_made
 
