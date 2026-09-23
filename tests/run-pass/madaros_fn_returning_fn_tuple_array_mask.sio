@@ -37,6 +37,24 @@
 //                                  double-call, no intervening binding
 //   C  `let t = choose()(); t.0[0]`   in-place index through a tuple-local
 //                                      bound from an immediate double-call
+//
+// Copilot follow-up (#2570): case D pins that function types are recursive
+// by GRAMMAR (parse_fn_type parses its own return with parse_type), so
+// `fn() -> fn() -> ([f64; 2], i64)` (cases A-C) is only ONE level of
+// nesting -- `fn() -> fn() -> fn() -> (...)` and deeper are equally valid
+// and were NOT handled: the collector's TypeFn branch and the two
+// parameter-side type-level helpers all unwrapped exactly one `.inner`
+// layer before giving up, so a chain three levels deep recorded no table
+// entry at all. Fixed by making the resolution genuinely recursive
+// (lower_type_expr_deep_f64_array_mask /
+// lower_type_expr_deep_has_unmarkable_f64_array for the collector;
+// lower_type_expr_tuple_combined_mask / lower_type_expr_fn_return_has_
+// unmarkable_f64_array for parameter types) instead of special-casing one
+// layer.
+//
+//   D  `outer() -> fn() -> fn() -> ([f64; 2], i64)`, `let mid = outer();
+//      let f = mid(); f().0[0]`   three levels of function-returning-
+//                                  function, not two
 fn concrete() -> ([f64; 2], i64) {
     var a: [f64; 2] = [0.0; 2]
     a[0] = 8.5
@@ -45,6 +63,14 @@ fn concrete() -> ([f64; 2], i64) {
 
 fn choose() -> fn() -> ([f64; 2], i64) {
     concrete
+}
+
+fn inner() -> fn() -> ([f64; 2], i64) {
+    concrete
+}
+
+fn outer() -> fn() -> fn() -> ([f64; 2], i64) {
+    inner
 }
 
 fn main() -> i32 with IO, Mut, Panic {
@@ -63,6 +89,12 @@ fn main() -> i32 with IO, Mut, Panic {
     // double-call.
     let tc = choose()()
     if tc.0[0] != 8.5 { bad = bad + 4 }
+
+    // D: three levels of function-returning-function.
+    let mid = outer()
+    let g = mid()
+    let td = g().0[0]
+    if td != 8.5 { bad = bad + 8 }
 
     if bad == 0 {
         println("FN_RETURNING_FN_TUPLE_ARRAY_MASK PASS")

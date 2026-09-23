@@ -1028,6 +1028,39 @@ fn lower_fn_tuple_arr_insert(name: Name, mask: i64) with Mut, Panic, Div, Alloc 
     }
 }
 
+// Array-only counterpart of lower_type_expr_tuple_combined_mask, for the
+// named-function collector below: LOWER_FN_TUPLE_ARR_MASK holds array bits
+// ONLY (the scalar half lives separately, in returns_float), so this cannot
+// reuse the combined-mask helper directly -- storing a combined value into
+// an array-only slot would double up the shift every reader already applies
+// (`* 4294967296`). Copilot follow-up (#2570): recurses through nested
+// TypeFn layers the same way, so `fn() -> fn() -> ([f64; 2], i64)` and
+// deeper chains are found, not just one "function returning a function"
+// layer.
+fn lower_type_expr_deep_f64_array_mask(te: &TypeExpr) -> i64 with Mut, Panic, Div {
+    if (*te).kind == TypeExprKind::TypeFn {
+        match (*te).inner {
+            Some(inner) => return lower_type_expr_deep_f64_array_mask(&(*inner)),
+            None => return 0,
+        }
+    }
+    if (*te).kind != TypeExprKind::TypeTuple { return 0 }
+    lower_type_list_f64_array_mask(&(*te).type_args, 0)
+}
+
+// Array-only counterpart of lower_type_expr_fn_return_has_unmarkable_f64_array,
+// same reason and same recursion, for the collector's fail-closed check.
+fn lower_type_expr_deep_has_unmarkable_f64_array(te: &TypeExpr) -> bool with Mut, Panic, Div {
+    if (*te).kind == TypeExprKind::TypeFn {
+        match (*te).inner {
+            Some(inner) => return lower_type_expr_deep_has_unmarkable_f64_array(&(*inner)),
+            None => return false,
+        }
+    }
+    if (*te).kind != TypeExprKind::TypeTuple { return false }
+    lower_type_list_has_unmarkable_f64_array(&(*te).type_args, 0)
+}
+
 fn lower_fn_tuple_f64_arrays_collect_one(name: Name, rt_opt_ref: &Option<Box<TypeExpr>>) with Mut, Panic, Div, Alloc {
     match *rt_opt_ref {
         Some(rt) => {
@@ -1060,18 +1093,19 @@ fn lower_fn_tuple_f64_arrays_collect_one(name: Name, rt_opt_ref: &Option<Box<Typ
                 // for a plain direct call to choose()). The reviewer's own
                 // example (`i64` in the non-array slot) does not need it; a
                 // second-order f64 SCALAR slot remains a known, narrower gap.
-                match (*rt).inner {
-                    Some(inner) => {
-                        if (*inner).kind == TypeExprKind::TypeTuple {
-                            let fn_ret_mask = lower_type_list_f64_array_mask(&(*inner).type_args, 0)
-                            if lower_type_list_has_unmarkable_f64_array(&(*inner).type_args, 0) {
-                                lower_fn_tuple_arr_fault(4, name)
-                            }
-                            lower_fn_tuple_arr_insert(name, fn_ret_mask)
-                        }
-                    }
-                    None => {}
+                //
+                // Copilot follow-up: was a single `.inner` unwrap checking only
+                // ONE layer (`inner.kind == TypeTuple`), missing
+                // `fn() -> fn() -> (tuple)` and deeper -- function types are
+                // recursive by grammar, so `inner` can itself be another TypeFn.
+                // lower_type_expr_deep_f64_array_mask /
+                // lower_type_expr_deep_has_unmarkable_f64_array follow the
+                // chain to whatever tuple eventually sits at the bottom.
+                if lower_type_expr_deep_has_unmarkable_f64_array(&(*rt)) {
+                    lower_fn_tuple_arr_fault(4, name)
                 }
+                let fn_ret_mask = lower_type_expr_deep_f64_array_mask(&(*rt))
+                lower_fn_tuple_arr_insert(name, fn_ret_mask)
             }
         }
         None => {}
@@ -6706,7 +6740,23 @@ fn lower_type_list_tuple_combined_mask(opt: &Option<Box<TypeExprList>>, bit: i64
     }
 }
 
+// Copilot follow-up (#2570): function types are recursive by grammar
+// (parse_fn_type parses its own return type with parse_type), so
+// `fn() -> fn() -> ([f64; 2], i64)` has ANOTHER TypeFn at .inner, not
+// directly the tuple -- a single unwrap only peeled one "function returning
+// a function" layer and silently found nothing for two or more. Follow the
+// TypeFn.inner chain until a tuple (or the chain ends) instead of special-
+// casing exactly one layer. lower_type_expr_fn_return_tuple_mask calls this
+// on its own first .inner, so this recursion is what makes it -- and every
+// caller through it -- handle arbitrarily deep chains, with no other change
+// needed there.
 fn lower_type_expr_tuple_combined_mask(te: &TypeExpr) -> i64 with Mut, Panic, Div {
+    if (*te).kind == TypeExprKind::TypeFn {
+        match (*te).inner {
+            Some(inner) => return lower_type_expr_tuple_combined_mask(&(*inner)),
+            None => return 0,
+        }
+    }
     if (*te).kind != TypeExprKind::TypeTuple { return 0 }
     lower_type_list_tuple_combined_mask(&(*te).type_args, 0)
 }
@@ -6742,10 +6792,18 @@ fn lower_opt_type_fn_return_tuple_mask(opt: &Option<Box<TypeExpr>>) -> i64 with 
 // fail closed via lower_fn_tuple_arr_fault(4, ...) rather than let the
 // parameter through with a mask that quietly omits it. Reuses the existing
 // checker rather than duplicating its logic.
+//
+// Copilot follow-up: recurses through nested TypeFn layers (`fn() -> fn() ->
+// ... -> (tuple)`) the same way lower_type_expr_tuple_combined_mask does --
+// when the immediate return is itself a fn type, that IS the next `te` to
+// check, so this calls itself on `ret` rather than special-casing one layer.
 fn lower_type_expr_fn_return_has_unmarkable_f64_array(te: &TypeExpr) -> bool with Mut, Panic, Div {
     if (*te).kind != TypeExprKind::TypeFn { return false }
     match (*te).inner {
         Some(ret) => {
+            if (*ret).kind == TypeExprKind::TypeFn {
+                return lower_type_expr_fn_return_has_unmarkable_f64_array(&(*ret))
+            }
             if (*ret).kind != TypeExprKind::TypeTuple { return false }
             lower_type_list_has_unmarkable_f64_array(&(*ret).type_args, 0)
         }
