@@ -66,6 +66,33 @@ printf '%s\n' "${selected[@]}" >"$test_list"
 echo "KNOWN_FAILURE_MADAROS_RECHECK_START count=${#selected[@]} compiler=$MADAROS_BIN"
 printf 'test=%s\n' "${selected[@]}"
 
+# `//@ compile-fail` files need a check the harness-based XPAS pass below
+# cannot make: for these, the harness's own `//@ error-pattern:` text match
+# folds TWO different outcomes into the same `xfail` bucket --
+#   (a) Madaros still correctly REJECTS, but with different wording than the
+#       pinned pattern (today's actual state for at least one file here), and
+#   (b) Madaros WRONGLY ACCEPTS the invalid program (a real regression) --
+# because a wrong-acceptance also ends with the harness's own
+# "expected typecheck failure but passed" -> exit_code forced to 1 -> same
+# xfail path as (a). SOUNIO_XPAS_FATAL only fires on XPAS (exit_code 0), so
+# it cannot tell (a) from (b) and would stay green through (b). Recheck
+# compiler rejection directly, bypassing the harness's pattern-match layer
+# entirely: a compile-fail file must still exit nonzero from `check`, full
+# stop, regardless of what the emitted diagnostic text says.
+compile_fail_regressions=""
+for f in "${selected[@]}"; do
+  grep -qE '^//@[[:space:]]*compile-fail' "$ROOT_DIR/$f" || continue
+  if "$MADAROS_BIN" check "$ROOT_DIR/$f" >/dev/null 2>&1; then
+    compile_fail_regressions="${compile_fail_regressions}${f}
+"
+  fi
+done
+if [[ -n "$compile_fail_regressions" ]]; then
+  echo "KNOWN_FAILURE_MADAROS_RECHECK_COMPILE_FAIL_REGRESSION:" >&2
+  printf '%s' "$compile_fail_regressions" >&2
+  fail "compile_fail_now_accepted (Madaros wrongly accepted a //@ compile-fail file that a known-failure annotation was masking as xfail)"
+fi
+
 # ulimit is the caller's problem (the f64 job already raises the stack).
 SOUNIO_MADAROS_AVAILABLE=1 \
 SOUNIO_XPAS_FATAL=1 \

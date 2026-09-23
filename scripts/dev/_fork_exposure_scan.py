@@ -83,7 +83,12 @@ def has_bare_pull_request_trigger(lines: list[str]) -> bool:
     return False
 
 
-_JOB_KEY_RE = re.compile(r"^(\s+)([A-Za-z0-9_.-]+):\s*$")
+# YAML allows a mapping key to be quoted (`"danger":` / `'danger':`), not
+# just bare (`danger:`). The unquoted-only pattern let a quoted job key sail
+# past unrecognized -- iter_job_blocks never opened a block for it, so
+# job_is_self_hosted_ish never saw its runs-on:/if: lines at all, regardless
+# of how dangerous they were.
+_JOB_KEY_RE = re.compile(r"""^(\s+)(?:"([^"]+)"|'([^']+)'|([A-Za-z0-9_.-]+)):\s*$""")
 
 
 def iter_job_blocks(lines: list[str]) -> list[tuple[str, int, list[str]]]:
@@ -128,7 +133,7 @@ def iter_job_blocks(lines: list[str]) -> list[tuple[str, int, list[str]]]:
                 job_indent = len(m.group(1))
             if job_name is not None:
                 yield_blocks.append((job_name, job_body_indent, block[:]))
-            job_name = m.group(2)
+            job_name = m.group(2) or m.group(3) or m.group(4)
             job_body_indent = None
             block = []
             continue

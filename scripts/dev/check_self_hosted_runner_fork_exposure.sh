@@ -262,6 +262,20 @@ jobs:
       - run: echo hi
 EOF
 
+    # POSITIVE 10: a quoted job key (`"danger":`) -- valid YAML, but
+    # _JOB_KEY_RE only matched bare unquoted keys, so iter_job_blocks never
+    # opened a block for this job and job_is_self_hosted_ish never saw its
+    # runs-on: line at all.
+    cat > "$tmp/positive_quoted_job_key.yml" <<'EOF'
+on:
+  pull_request:
+jobs:
+  "danger":
+    runs-on: [self-hosted, gpu, cuda]
+    steps:
+      - run: echo hi
+EOF
+
     local out
     out="$(python3 "$SCANNER" "$tmp"/*.yml || true)"
 
@@ -309,6 +323,11 @@ EOF
         echo "  ok   POSITIVE: 'runs-on:  # comment' with a block list below is flagged"
     else
         echo "  FAIL POSITIVE: 'runs-on:  # comment' with a block list below was NOT flagged"; rc=1
+    fi
+    if grep -q 'positive_quoted_job_key.yml:danger' <<<"$out"; then
+        echo "  ok   POSITIVE: a quoted job key (\"danger\":) is flagged"
+    else
+        echo "  FAIL POSITIVE: a quoted job key (\"danger\":) was NOT flagged"; rc=1
     fi
     for job in "negative_guarded.yml:safe" "negative_no_pr_trigger.yml:dispatch_only" \
                "negative_pull_request_target.yml:automation" "negative_gh_hosted.yml:ordinary" \
