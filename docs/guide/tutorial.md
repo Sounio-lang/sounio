@@ -17,11 +17,13 @@ A step-by-step guide to learning Sounio, the language for epistemic computing.
 > covariance-aware GUM), anchored by
 > `tests/stdlib/epistemic/test_knowledge_madaros_import_e2e.sio` and
 > `tests/run-pass/ep_gum_covariance.sio`. The legacy
-> `epistemic::lib` surface (`epistemic_std`, `add_epistemic`, `mul_epistemic`,
-> `fuse_measurements`) is exercised by
+> `epistemic::lib` surface (`epistemic_std`, `add_epistemic`) is exercised by
 > `tests/stdlib/epistemic/test_core_e2e.sio` (a `//@ run-pass` test collected by
 > `scripts/dev/run_sio_test_suite.sh`) but is a legacy surface separate from the
-> canonical `epistemic::knowledge` API. `with_confidence` operators and
+> canonical `epistemic::knowledge` API. `mul_epistemic` and `fuse_measurements`
+> are part of `epistemic::lib` but are not exercised by that test
+> (`fuse_measurements` is private; `mul_epistemic` is public but untested).
+> `with_confidence` operators and
 > units-as-type-parameters are aspirational in source and absent from the
 > checked public surface — see `docs/compiler/KNOWN_LIMITATIONS.md`.
 
@@ -410,10 +412,14 @@ print("sqrt(x) = ", ep_val(&sqrt_x), " ± ", ep_std(&sqrt_x))
 
 ### ODE Solvers
 
-> **Source-tracked surface.** `stdlib::ode` is present in the repository
-> (aggregated in `stdlib/ode/lib.sio`; submodules include `rk4.sio`, `tsit5.sio`,
-> `bdf.sio`, `epistemic.sio`, and `pbpk3_stable.sio`) and provides RK4, RK45,
-> Tsit5, BDF, epistemic integration, and PBPK sources. The shipped
+> **Source-tracked surface.** `stdlib::ode` is present in the repository as a
+> set of submodules — `rk4.sio`, `tsit5.sio`, `bdf.sio`, `epistemic.sio`,
+> `solver.sio`, `solvers.sio`, and `pbpk3_stable.sio` — that provide RK4, RK45,
+> Tsit5, BDF, epistemic integration, and PBPK sources. Note: `stdlib/ode/lib.sio`
+> itself only re-exports the epistemic PK-fit functions (`epistemic_pk_fit`,
+> `epistemic_pkpd_fit`); import the RK4/Tsit5/BDF solvers from their defining
+> submodules (e.g. `ode::rk4`, `ode::tsit5`, `ode::bdf`), not from `lib.sio` as a
+> solver entry point. The shipped
 > source-tracked uncertainty propagation
 > lives in `stdlib/epistemic/affine` (anchor: `tests/run-pass/affine_shared_source_add.sio`,
 > `affine_product_delta.sio`).

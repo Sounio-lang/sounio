@@ -17,10 +17,13 @@ Definitions of key terms in epistemic computing and the Sounio language.
 > covariance-aware GUM), anchored by
 > `tests/stdlib/epistemic/test_knowledge_madaros_import_e2e.sio` and
 > `tests/run-pass/ep_gum_covariance.sio`. The legacy
-> `epistemic::lib` surface (`epistemic_std`, `add_epistemic`, `mul_epistemic`,
-> `fuse_measurements`), imported in `tests/stdlib/epistemic/test_core_e2e.sio`
-> (a `//@ run-pass` test collected by `scripts/dev/run_sio_test_suite.sh`), is a
-> legacy surface separate from the canonical `epistemic::knowledge` API. `with_confidence` operators and
+> `epistemic::lib` surface (`epistemic_std`, `add_epistemic`), imported in
+> `tests/stdlib/epistemic/test_core_e2e.sio` (a `//@ run-pass` test collected by
+> `scripts/dev/run_sio_test_suite.sh`), is a legacy surface separate from the
+> canonical `epistemic::knowledge` API. `mul_epistemic` and `fuse_measurements`
+> are part of `epistemic::lib` but are not exercised by that test
+> (`fuse_measurements` is private; `mul_epistemic` is public but untested).
+> `with_confidence` operators and
 > units-as-type-parameters are aspirational in source and absent from the
 > checked public surface — see `docs/compiler/KNOWN_LIMITATIONS.md`.
 
@@ -171,7 +174,7 @@ Statistical technique using repeated random sampling. Supported in `stdlib.monte
 ## O
 
 **ODE (Ordinary Differential Equation)**
-Equation involving derivatives of a function. Common in scientific modeling. Sounio ships `stdlib::ode` (aggregated in `stdlib/ode/lib.sio`; submodules include `rk4.sio`, `tsit5.sio`, `bdf.sio`, `epistemic.sio`, and `pbpk3_stable.sio`) with RK4, RK45, Tsit5, BDF, epistemic integration, and PBPK sources. For source-tracked uncertainty propagation see `stdlib/epistemic/affine` (anchor: `tests/run-pass/affine_shared_source_add.sio`).
+Equation involving derivatives of a function. Common in scientific modeling. Sounio ships `stdlib::ode` as a set of submodules — `rk4.sio`, `tsit5.sio`, `bdf.sio`, `epistemic.sio`, `solver.sio`, `solvers.sio`, and `pbpk3_stable.sio` — providing RK4, RK45, Tsit5, BDF, epistemic integration, and PBPK sources. Note: `stdlib/ode/lib.sio` itself only re-exports the epistemic PK-fit functions (`epistemic_pk_fit`, `epistemic_pkpd_fit`); import the RK4/Tsit5/BDF solvers from their defining submodules (e.g. `ode::rk4`, `ode::tsit5`, `ode::bdf`), not from `lib.sio` as a solver entry point. For source-tracked uncertainty propagation see `stdlib/epistemic/affine` (anchor: `tests/run-pass/affine_shared_source_add.sio`).
 
 **Ownership**
 System ensuring memory safety by tracking which part of code "owns" each value. Sounio uses affine/linear types instead of Rust's borrow checker.

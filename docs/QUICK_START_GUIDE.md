@@ -15,11 +15,13 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.quick-start-gu
 > covariance-aware GUM), anchored by
 > `tests/stdlib/epistemic/test_knowledge_madaros_import_e2e.sio` and
 > `tests/run-pass/ep_gum_covariance.sio`. The legacy
-> `epistemic::lib` surface (`epistemic_std`, `add_epistemic`, `mul_epistemic`,
-> `fuse_measurements`) is exercised by
+> `epistemic::lib` surface (`epistemic_std`, `add_epistemic`) is exercised by
 > `tests/stdlib/epistemic/test_core_e2e.sio` (a `//@ run-pass` test collected by
 > `scripts/dev/run_sio_test_suite.sh`) but is a legacy surface separate from the
-> canonical `epistemic::knowledge` API. `with_confidence` operators and
+> canonical `epistemic::knowledge` API. `mul_epistemic` and `fuse_measurements`
+> are part of `epistemic::lib` but are not exercised by that test
+> (`fuse_measurements` is private; `mul_epistemic` is public but untested).
+> `with_confidence` operators and
 > units-as-type-parameters are aspirational in source and absent from the
 > checked public surface — see `docs/compiler/KNOWN_LIMITATIONS.md`.
 
