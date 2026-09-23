@@ -38,7 +38,7 @@ A programming language feature that allows modeling side effects (I/O, state, ex
 **AUC (Area Under the Curve)**
 In pharmacokinetics, the integral of drug concentration over time. A key measure of drug exposure.
 
-> Dimensions: in the checked surface, AUC is `Quantity { value, uncertainty, dim: dim_mass() × dim_length()^(-3) × dim_time()^(1) }` (concentration × time). Unit spellings such as `mg` and `mL` are implemented and tested (`tests/run-pass/unit_same_add.sio`); the `unit Clearance = L/h` declaration syntax exists but is not yet covered by a run-pass fixture. The runtime `Quantity` form is the complementary representation.
+> Dimensions: in the checked surface, AUC is `Quantity { value, uncertainty, dim: dim_mass() × dim_length()^(-3) × dim_time()^(1) }` (concentration × time). Unit spellings such as `mg` are implemented and tested (`tests/run-pass/unit_same_add.sio`, which declares and uses only `mg`); `mL` is declared in `stdlib/units/pharmacological.sio`. The `unit Clearance = L/h` declaration syntax exists but is not yet covered by a run-pass fixture. The runtime `Quantity` form is the complementary representation.
 
 ---
 
@@ -259,9 +259,10 @@ let velocity = quantity_div(distance, time)
 // Convert: convert_m_to_cm(value), convert_celsius_to_kelvin(value), etc.
 ```
 
-> Units-as-type spellings (`let distance: m = 100.0`, `fn f(x: kg) -> N`) and
-> derived unit spellings (`f64<m/s>`, `mg`, `mL`) ARE part of the checked surface
-> and are tested (`tests/run-pass/unit_same_add.sio`); the `unit Clearance = L/h`
+> Units-as-type spellings (`let distance: m = 100.0`, `unit N; fn f(x: kg) -> N`) and
+> derived unit spellings (`f64<m/s>`, `mg`) ARE part of the checked surface
+> and `mg` is tested in `tests/run-pass/unit_same_add.sio`; `mL` is declared in
+> `stdlib/units/pharmacological.sio`. The `unit Clearance = L/h`
 > and `mg*h/L` derived-declaration syntax exists but is not yet covered by a
 > run-pass fixture. The runtime `Quantity` + `quantity_new(val, unc, dim_*())`
 > form is the complementary representation for dimensions computed at runtime.

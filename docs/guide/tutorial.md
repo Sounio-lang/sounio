@@ -315,7 +315,7 @@ Sounio has first-class support for physical units, preventing dimensional errors
 
 ### Basic Units (Quantity form)
 
-> Units-as-type spellings (`let distance: m = 100.0`, `fn f(x: kg) -> N`) and
+> Units-as-type spellings (`let distance: m = 100.0`, `unit N; fn f(x: kg) -> N`) and
 > derived units (`f64<m/s>`) ARE part of the checked surface and are exercised by
 > current-source tests (`tests/frontend/unit_derived_velocity_decl_current_source.sio`,
 > `tests/frontend/unit_f64_unit_expr_velocity_current_source.sio`). The runtime
@@ -339,8 +339,9 @@ let invalid = quantity_add(distance, time)  // runtime panic, not a compile-time
 
 ### Custom Units (Quantity form)
 
-> `mg` and `mL` ARE supported as unit spellings and `unit` declarations in the
-> checked surface (`tests/run-pass/unit_same_add.sio`). The `unit Clearance = L/h`
+> `mg` is supported as a unit spelling and tested in `tests/run-pass/unit_same_add.sio`
+> (which declares and uses only `mg`); `mL` is declared in `stdlib/units/pharmacological.sio`.
+> The `unit Clearance = L/h`
 > and `mg*h/L` derived-declaration syntax exists but is not yet covered by a
 > run-pass fixture. The runtime `Quantity` with `dim_*()` dimensions
 > (`stdlib/units/lib.sio`) is the complementary representation.
@@ -478,7 +479,8 @@ fn sqrt(x: Positive) -> f64 {
 > `linear` keyword enforces single-use ownership at check time (the checker emits
 > `E039` for use-after-consumption and `E040` for an unconsumed linear value).
 > For file handle ownership in source, see `stdlib/coordination/fleet_transaction.sio`
-> and the `linear_ad` module of `stdlib/autodiff/linear_ad.sio`.
+> (which uses `linear struct`); for a minimal linear-struct field-access example, see
+> `tests/run-pass/linear_struct_field_access.sio`.
 
 ```sio
 linear struct FileHandle {
