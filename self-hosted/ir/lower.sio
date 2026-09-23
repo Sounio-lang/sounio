@@ -692,6 +692,35 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
         print_int(IR_LOWER_HARD_ERROR_LIMIT - 1)
         print(". Refused rather\n")
         print("         than lower that array's elements as integers.\n")
+    } else if IR_LOWER_HARD_ERROR_REASON == 5 {
+        // Copilot follow-up (#2570): LOWER_FN_ARR_CHAIN's own cap fault --
+        // worded separately from reason 3 because this table tracks a
+        // different fact (which names, when called once, return an
+        // array-returning function), not tuple-slot metadata.
+        print("  cause: more than ")
+        print_int(IR_LOWER_HARD_ERROR_LIMIT)
+        print(" functions return an array-returning function (`fn() ->")
+        print(" [f64; N]`), starting at `")
+        ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
+        print("`;\n")
+        print("         recording more would need a bigger LOWER_FN_TUPLE_ARR_CAP\n")
+        print("         (LOWER_FN_ARR_CHAIN reuses it). Refused rather than lower\n")
+        print("         an indirect call through one of those functions as an integer.\n")
+    } else if IR_LOWER_HARD_ERROR_REASON == 6 {
+        // Copilot follow-up (#2570): a function whose return type is a
+        // TypeFn chain TWO OR MORE layers deep before reaching [f64; N]
+        // (`fn() -> fn() -> [f64; N]` and beyond) -- LOWER_FN_ARR_CHAIN only
+        // ever represents the exactly-one-layer shape (see
+        // lower_fn_arr_chain_collect_one for why arbitrary depth is unsafe
+        // to propagate here), so a deeper chain is refused instead of
+        // silently leaving every intermediate call in it unclassified.
+        print("  cause: function `")
+        ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
+        print("` returns a function chain more than one call deep before\n")
+        print("         reaching `[f64; N]` (`fn() -> fn() -> ... -> [f64; N]`);\n")
+        print("         LOWER_FN_ARR_CHAIN only represents a chain exactly one call\n")
+        print("         deep. Refused rather than lower an intermediate call in that\n")
+        print("         chain as an integer.\n")
     } else {
         print("  cause: lowering raised a hard error and recorded no detail — if this\n")
         print("         prints, a NEW raise site was added without recording its reason.\n")
@@ -1297,14 +1326,21 @@ fn lower_fn_name_is_arr_chain(name: Name) -> bool with Mut, Panic, Div {
     false
 }
 
-// Cap-checked, no-dup insert. Past the cap, this simply stops recording new
-// names (falls back to the pre-this-fix behaviour of "not classified" for
-// the overflow ones) rather than hard-fault-aborting the compile: unlike
-// LOWER_FN_TUPLE_ARR_*'s mask, silently not recording a name here cannot
-// corrupt an already-emitted value -- it only means the classification this
-// round adds does not yet reach that one name, no worse than before this
-// fix existed. Reaching this cap in practice would mean 4096+ distinct
-// functions returning `fn() -> [f64; N]` in one program.
+// Cap-checked, no-dup insert. Copilot follow-up (#2570): past the cap, this
+// USED TO simply stop recording new names, falling back to "not classified"
+// for the overflow ones -- the same silent-miscompile shape
+// LOWER_FN_TUPLE_ARR_* already refuses to allow: a name past the cap gets no
+// entry, `expr_ident_is_array_returning_fn_ref` and
+// `expr_result_is_f64_array_ref` then find nothing for it, and `let f =
+// choose(); (f(), 1).0[0]` (choose being the 4097th+ such function) lowers
+// the array through the integer path in a program that still compiles
+// clean. Reusing "no worse than before this fix existed" as a justification
+// stopped holding the moment this classification became something callers
+// rely on working. Fails closed instead, via the SAME sticky-fault/hard-
+// error plumbing LOWER_FN_TUPLE_ARR_* already uses (lower_fn_tuple_arr_fault,
+// reason 5 -- a new reason code, since 3/4 are worded specifically about
+// tuple-slot metadata, not array-chain classification; see
+// lower_hard_error_report).
 fn lower_fn_arr_chain_insert(name: Name) with Mut, Panic, Div, Alloc {
     if lower_fn_name_is_arr_chain(name) {
         return
@@ -1314,6 +1350,8 @@ fn lower_fn_arr_chain_insert(name: Name) with Mut, Panic, Div, Alloc {
         LOWER_FN_ARR_CHAIN_HASH[slot as usize] = fo_name_hash(name)
         lower_fn_arr_chain_name_store(slot, name)
         LOWER_FN_ARR_CHAIN_COUNT = slot + 1
+    } else {
+        lower_fn_tuple_arr_fault(5, name)
     }
 }
 
@@ -1331,11 +1369,28 @@ fn lower_fn_arr_chain_insert(name: Name) with Mut, Panic, Div, Alloc {
 // misclassified as the array when it actually still returns another
 // function. lower_type_expr_fn_returns_array_of_f64 checks exactly one
 // TypeFn layer for the same reason it does at parameter-binding time.
+//
+// Copilot follow-up (#2570): a chain DEEPER than one layer
+// (`outer() -> fn() -> fn() -> [f64; N]`) used to fall through here doing
+// nothing at all -- outer's name never got a LOWER_FN_ARR_CHAIN entry, so
+// `let mid = outer(); let f = mid(); let a = f(); a[0] * 2.0` silently
+// lowered the eventual array through the integer path in a program that
+// still compiled clean, the exact silent-miscompile shape this whole table
+// exists to prevent. Tracking the actual remaining call depth so a chain
+// like this could be classified correctly would need real per-name depth
+// state, not the single-layer boolean this table deliberately is (see the
+// comment above); refusing instead needs only detecting the shape.
+// lower_type_expr_fn_return_eventually_array_of_f64 walks the SAME chain
+// looking for an eventual `[f64; N]` at ANY depth, so this branch fires
+// exactly when a chain involves array-returning functions but is NOT the
+// one-layer shape the table can safely represent.
 fn lower_fn_arr_chain_collect_one(name: Name, rt_opt_ref: &Option<Box<TypeExpr>>) with Mut, Panic, Div, Alloc {
     match *rt_opt_ref {
         Some(rt) => {
             if lower_type_expr_fn_returns_array_of_f64(&(*rt)) {
                 lower_fn_arr_chain_insert(name)
+            } else if lower_type_expr_fn_return_eventually_array_of_f64(&(*rt)) {
+                lower_fn_tuple_arr_fault(6, name)
             }
         }
         None => {}
@@ -6531,6 +6586,29 @@ fn lower_type_expr_fn_returns_array_of_f64(te: &TypeExpr) -> bool with Mut, Pani
     if (*te).kind != TypeExprKind::TypeFn { return false }
     match (*te).inner {
         Some(ret) => lower_type_expr_is_array_of_f64(&(*ret)),
+        None => false,
+    }
+}
+
+// Copilot follow-up (#2570): true iff `te` is a TypeFn chain that EVENTUALLY
+// reaches `[f64; N]` at ANY depth (one layer, matched already by
+// lower_type_expr_fn_returns_array_of_f64 above, or deeper --
+// `fn() -> fn() -> [f64; N]` and beyond). Used ONLY to detect the deeper
+// case for a fail-closed check in lower_fn_arr_chain_collect_one:
+// LOWER_FN_ARR_CHAIN deliberately records ONLY the exactly-one-layer shape
+// (see that function's own comment for why arbitrary-depth propagation is
+// unsafe for a plain function call, unlike a tuple's `.K` projection), so a
+// NAMED function whose chain is deeper than that must be refused rather
+// than silently left unclassified -- the same "no worse than before" logic
+// that used to excuse a silent cap-overflow drop stops holding once this
+// classification is something callers rely on working.
+fn lower_type_expr_fn_return_eventually_array_of_f64(te: &TypeExpr) -> bool with Mut, Panic, Div {
+    if (*te).kind != TypeExprKind::TypeFn { return false }
+    match (*te).inner {
+        Some(inner) => {
+            if lower_type_expr_is_array_of_f64(&(*inner)) { return true }
+            lower_type_expr_fn_return_eventually_array_of_f64(&(*inner))
+        }
         None => false,
     }
 }
@@ -17925,6 +18003,25 @@ impl Lowerer {
                 }
                 _ => return false,
             }
+        }
+        // Copilot follow-up (#2570): `let f = receiver.choose_arr()` -- the
+        // collector already records an impl method under its MANGLED name
+        // (`Type_method`, see lower_fn_arr_chain_collect_one's call site in
+        // lower_fn_tuple_f64_arrays_collect_impl_methods), but this function
+        // only ever checked ExprIdent/ExprCall, so a method-call RHS fell
+        // through to the final `false` and `f` never got fn_ptr_ret_array
+        // set even when the method genuinely returns `fn() -> [f64; N]`.
+        // Resolve the receiver through lower_method_recv_type, the same
+        // helper the tuple-mask readers already use for this exact shape
+        // (see expr_result_tuple_float_mask_ref's own ExprMethodCall
+        // branch), then mangle and look up the same way.
+        if (*e).kind == ExprKind::ExprMethodCall {
+            let tname = self.lower_method_recv_type(&(*e).left)
+            if tname.len <= 0 {
+                return false
+            }
+            let mangled = ir_mangle_method_name(tname, (*e).name)
+            return lower_fn_name_is_arr_chain(mangled)
         }
         false
     }
