@@ -2,8 +2,8 @@
 topic_id: website.docs.epistemic
 authority: dual
 audience: users
-last_validated: 2026-03-07
-validated_by: A3
+last_validated: 2026-09-21
+validated_by: Claude
 source_of_truth: docs/governance/topic-registry.v1.json#website.docs.epistemic
 -->
 
@@ -23,10 +23,13 @@ pub struct Epistemic {
 }
 ```
 
-There is no `provenance` field on `Epistemic`. Source and transformation
-provenance are tracked separately via `epistemic::prov`
-(`stdlib/epistemic/prov.sio`); shared-source covariance is tracked in
-`stdlib/epistemic/affine.sio`.
+There is no `provenance` field on `Epistemic`, and the constructors above
+(`ep_measured`, `ep_certain`, `ep_new`) do not record a source — they only
+build `{ val, variance, confidence }`. A W3C PROV-DM export module exists at
+`stdlib/epistemic/prov.sio`, but its types and constructors are currently
+private and are **not** part of the public/user-facing API, so provenance
+cannot be attached or queried through it yet. Shared-source covariance is
+tracked internally in `stdlib/epistemic/affine.sio`.
 
 ## Constructors
 
@@ -39,14 +42,14 @@ confidence at 900/1000; `ep_certain` sets `variance = 0.0` with confidence 1000.
 use epistemic::knowledge::{ep_measured, ep_val, ep_std}
 
 let mass = ep_measured(70.0, 0.2)   // val=70.0, variance=0.04, confidence=900/1000
-let dose = ep_measured(500.0, 2.5)  // provenance bookkeeping lives in stdlib/epistemic/prov.sio
+let dose = ep_measured(500.0, 2.5)  // builds { val, variance, confidence }; source provenance is not recorded
 ```
 
 Guidelines:
 - `val` is the nominal estimate.
 - `variance` stores squared uncertainty (std = `ep_std(&e)`); accessors are `ep_val`, `ep_variance`, `ep_std`, `ep_confidence`.
 - `confidence` (0..1000) should be interpreted consistently across a workflow.
-- Source/transformation provenance is tracked separately via `epistemic::prov`; shared-source covariance is tracked in `stdlib/epistemic/affine.sio`.
+- `Epistemic` carries no provenance field, and the constructors do not record a source. The `prov` module is not yet a public API (its types/ctors are private), so provenance cannot be attached through `epistemic::prov` today; shared-source covariance is tracked internally in `stdlib/epistemic/affine.sio`.
 
 ## Arithmetic and Propagation
 
@@ -66,8 +69,8 @@ use epistemic::knowledge::{ep_measured, ep_add, ep_val, ep_std}
 
 let x = ep_measured(10.0, 0.5)
 let y = ep_measured(20.0, 0.3)
-// Canonical free-fn arithmetic; the `*` scalar operator is not part of the
-// checked surface -- use ep_add() (uncorrelated quadrature).
+// Canonical free-fn arithmetic; the `+` scalar operator is not part of the
+// checked surface -- use ep_add() for `x + y` (uncorrelated quadrature).
 let z = ep_add(&x, &y)
 ```
 
@@ -76,7 +79,7 @@ let z = ep_add(&x, &y)
 Effect annotations make side effects explicit and composable with epistemic computation.
 
 ```sio
-use epistemic::knowledge::ep_val
+use epistemic::knowledge::{Epistemic, ep_val}
 
 fn read_sensor() -> Epistemic with IO {
     // IO effect declared explicitly
