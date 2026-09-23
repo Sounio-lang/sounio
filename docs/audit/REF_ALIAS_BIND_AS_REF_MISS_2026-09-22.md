@@ -2,7 +2,7 @@
 topic_id: repo.docs.audit.ref-alias-bind-as-ref-miss-2026-09-22
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
+last_validated: 2026-09-23
 validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.ref-alias-bind-as-ref-miss-2026-09-22
 -->
