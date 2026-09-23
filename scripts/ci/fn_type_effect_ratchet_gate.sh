@@ -294,17 +294,49 @@ function count_fn_parens(str,    tmp) {
 }
 function count_with_clauses(str,    tmp) {
     tmp = " " str
-    return gsub(/[^A-Za-z0-9_]with[ \t]+[A-Za-z]/, "@", tmp)
+    return gsub(/[^A-Za-z0-9_]with[ \t\n]+[A-Za-z]/, "@", tmp)
 }
-function classify_fn_type_at(line, fn_pos,    open_pos, close_pos, after, hit, hit_tail, fn_layers, with_n, bare_layers, k, tail_start, tail_end, entry_start, i, n, c, prevc, depth, stack, pred, entry, trimmed) {
+function classify_fn_type_at(line, fn_pos, at_eof,    open_pos, close_pos, after, hit, hit_tail, fn_layers, with_n, bare_layers, k, tail_start, tail_end, entry_start, i, n, c, prevc, depth, stack, pred, entry, trimmed) {
     open_pos = fn_pos + 2
     close_pos = match_close_paren(line, open_pos)
+    # Copilot follow-up (#2570): a genuine `n + 1` from match_close_paren
+    # (see its own comment) means "ran off the end of the searchable text
+    # without finding a match" -- for THIS caller, "the searchable text" is
+    # only the current line/buffer, not the whole file, so that could mean
+    # either a truly malformed type OR a valid one whose closing paren is on
+    # a LATER line not read yet (`f: fn(\n  i64\n) -> i64`). -1 tells the
+    # caller "not yet resolvable, try again with more text" instead of
+    # silently treating it as arrow-less and out of scope -- unless at_eof
+    # is set, meaning there IS no more text coming (see the END block
+    # below), so `n + 1` here really is the honest last word.
+    if (!at_eof && close_pos > length(line)) { return -1 }
     after = close_pos + 1
-    if (match(substr(line, after), /^[ \t]*->/)) {
+    if (match(substr(line, after), /^[ \t\n]*->/)) {
         tail_start = after + RLENGTH
         tail_end = scan_tail(line, tail_start)
+        # Copilot follow-up (#2570): deliberately NOT deferring here the way
+        # close_pos above does. Measured on the live corpus: `let sin_fn:
+        # fn(c_double) -> c_double = unsafe { match ... }` (examples/ffi_demo.sio)
+        # -- after the return type, " = unsafe {" is the LET-BINDING own
+        # initializer, not more type syntax, but its "{" still looks like an
+        # opener to step_open_or_other_close (which cannot tell a
+        # refinement "{" from an unrelated code block one), so deferring here
+        # tried to bracket-match through the ENTIRE unsafe block -- a match
+        # expression, further nested braces, string literals -- as if it
+        # were part of the type, corrupting the hit. A parameter LIST can
+        # only ever contain type syntax, so deferring on close_pos above is
+        # unambiguous; text after "->" can be followed by anything (an
+        # initializer, a statement, literally the rest of the file), so
+        # treating "ran off the end of what is on hand so far" as genuinely
+        # the end here -- same as this scanner always did before the
+        # multiline fix -- is the safe reading unless a future, narrower
+        # finding shows otherwise.
         hit_tail = substr(line, tail_start, tail_end - tail_start)
         hit = substr(line, fn_pos, tail_end - fn_pos)
+        # A hit assembled across multiple physical lines still carries their
+        # newlines; enumerate() and bare_hits_of() both expect one hit per
+        # OUTPUT line, so collapse them to spaces before printing.
+        gsub(/\n/, " ", hit)
         fn_layers = 1 + count_fn_parens(hit_tail)
         with_n = count_with_clauses(hit_tail)
         # Copilot follow-up (#2570): `fn_layers - with_n` is not just "is
@@ -334,8 +366,14 @@ function classify_fn_type_at(line, fn_pos,    open_pos, close_pos, after, hit, h
         if (c == "," && depth == 0) {
             entry = substr(line, entry_start, i - entry_start)
             trimmed = entry
-            sub(/^[ \t]+/, "", trimmed)
-            if (trimmed ~ /^fn\(/) { classify_fn_type_at(line, entry_start + (length(entry) - length(trimmed))) }
+            sub(/^[ \t\n]+/, "", trimmed)
+            # A nested entry is, by construction, entirely within [entry_start,
+            # close_pos) -- a span already confirmed present in `line` (close_pos
+            # itself passed the bound check above, or at_eof waived it). Its own
+            # match_close_paren therefore cannot legitimately need more text than
+            # `line` already has; -1 here can only mean malformed input, so it is
+            # silently skipped rather than propagated.
+            if (trimmed ~ /^fn\(/) { classify_fn_type_at(line, entry_start + (length(entry) - length(trimmed)), at_eof) }
             entry_start = i + 1
         } else if (c == ")") {
             if (depth > 0 && stack[depth] == "(") { depth-- }
@@ -347,18 +385,60 @@ function classify_fn_type_at(line, fn_pos,    open_pos, close_pos, after, hit, h
     }
     entry = substr(line, entry_start, n - entry_start)
     trimmed = entry
-    sub(/^[ \t]+/, "", trimmed)
-    if (trimmed ~ /^fn\(/) { classify_fn_type_at(line, entry_start + (length(entry) - length(trimmed))) }
+    sub(/^[ \t\n]+/, "", trimmed)
+    if (trimmed ~ /^fn\(/) { classify_fn_type_at(line, entry_start + (length(entry) - length(trimmed)), at_eof) }
     return tail_end
 }
+# Copilot follow-up (#2570): this whole scanner was line-local -- `line = $0`
+# reset fresh every record, so `f: fn(` on one physical line followed by
+# `i64` and `) -> i64` on the next two never resolved at all: match_close_paren
+# ran off the end of the FIRST line, classify_fn_type_at (before this fix)
+# had no way to say "wait, there might be more" and just treated it as
+# arrow-less, letting a genuinely bare multiline type bypass the ratchet
+# silently. Buffering the WHOLE FILE per awk record (`buf = buf $0 "\n"`)
+# was tried and measured: ~9s just to concatenate lower.sio (26k lines) in
+# this repo awk, before any scanning even starts -- unusable across the
+# whole corpus. Instead, only ever carry over `pending`: normally empty (no
+# cost for the overwhelming majority of single-line declarations), and only
+# ever holds the tail of an in-progress multiline match, bounded by how many
+# lines that ONE declaration actually spans, not by file size (measured:
+# lower.sio drops back to ~0.03s with this scoped carry-over).
 {
-    line = $0
-    pos = 1
-    while (pos <= length(line) && match(substr(line, pos), /:[ \t]*fn\(/)) {
+    if (pending != "") {
+        line = pending "\n" $0
+    } else {
+        line = $0
+    }
+    if (pending != "") {
+        # `pending` always starts exactly at a "fn(" already confirmed to
+        # follow a `:` on an earlier line, so retry it directly rather than
+        # re-running the `:...fn(` anchor search (which would fail here --
+        # the `:` that justified this match is no longer in `pending`).
+        result = classify_fn_type_at(line, 1, 0)
+        if (result == -1) { pending = line; next }
+        pending = ""
+        pos = result
+    } else {
+        pos = 1
+    }
+    while (pos <= length(line) && match(substr(line, pos), /:[ \t\n]*fn\(/)) {
         mstart = pos + RSTART - 1
         mlen = RLENGTH
         fn_pos = mstart + mlen - 3
-        pos = classify_fn_type_at(line, fn_pos)
+        result = classify_fn_type_at(line, fn_pos, 0)
+        if (result == -1) { pending = substr(line, fn_pos); next }
+        pos = result
+    }
+}
+END {
+    # Whatever is left in `pending` ran off the end of every line this file
+    # had -- there really is no more text coming now, so finalize it with
+    # at_eof=1, which is exactly the non-deferring behavior this scanner
+    # always had before this fix (an `n + 1` sentinel simply means "runs to
+    # the end of the searchable text", the correct reading once that text is
+    # truly exhausted).
+    if (pending != "") {
+        classify_fn_type_at(pending, 1, 1)
     }
 }
 '
@@ -598,6 +678,25 @@ selftest() {
   if bare_hits_of "$tmp/neg14.sio" | grep -q .; then
     echo "  FALHA NEGATIVO 14: refinamento sem espacos e efeito proprio contado como nu"; rc=1
   else echo "  ok   NEGATIVO 14: refinamento sem espacos e efeito proprio nao conta como nu"; fi
+  # POSITIVE control 15 (#2570): a function type whose OWN parameter list
+  # spans multiple physical lines (`f: fn(` / `i64` / `) -> i64`). This
+  # scanner used to reset `line = $0` fresh every record, so
+  # match_close_paren ran off the end of the FIRST line without ever
+  # finding the closing paren, and the type was silently treated as
+  # arrow-less (out of scope) rather than the bare violation it actually
+  # is -- a genuinely bare multiline function type could bypass the ratchet
+  # entirely. Pins that the deferred cross-line matching (the `pending`
+  # carry-over) resolves it.
+  printf 'fn use_it(f: fn(\ni64\n) -> i64) -> f64 { 0.0 }\n' > "$tmp/pos15.sio"
+  if bare_hits_of "$tmp/pos15.sio" | grep -q .; then
+    echo "  ok   POSITIVO 15: tipo-funcao multilinha e nu"
+  else echo "  FALHA POSITIVO 15: tipo-funcao multilinha nao detectado como nu"; rc=1; fi
+  # NEGATIVE control 15 (#2570): companion -- same multiline shape, but the
+  # type DOES carry its own effects, also spread across the lines.
+  printf 'fn use_it(f: fn(\ni64\n) -> i64 with IO) -> f64 { 0.0 }\n' > "$tmp/neg15.sio"
+  if bare_hits_of "$tmp/neg15.sio" | grep -q .; then
+    echo "  FALHA NEGATIVO 15: tipo-funcao multilinha com efeito proprio contado como nu"; rc=1
+  else echo "  ok   NEGATIVO 15: tipo-funcao multilinha com efeito proprio nao conta como nu"; fi
   rm -rf "$tmp"
   echo "falhas: $rc"
   return $rc
