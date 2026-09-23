@@ -134,7 +134,10 @@ header — not a contiguous C string. KL-14a packs at the call site via
 `str_from_bytes(handle, N)` then calls `ffi_system` with the packed `char*`;
 the `string` binding is unchanged. Pin:
 `tests/run-pass/ffi_system_array_arg.sio` (no longer `//@ known-failure`).
-Dynamic linking remains open as KL-14b.
+Dynamic linking residual is KL-14d for arbitrary `-l` / multi-`DT_NEEDED` /
+libzstd / `dlopen`. KL-14b (2026-09-15) closes a one-symbol MVP:
+`kl14b_add` via `PT_INTERP`+`PT_DYNAMIC`+`DT_NEEDED`+GOT. KL-14c generalises
+to N unique GOT/`GLOB_DAT` symbols from one controlled `.so`.
 
 ## Impact if unaddressed
 

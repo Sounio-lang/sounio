@@ -10,7 +10,7 @@ See [examples/chemistry/kinetics_demo.sio](examples/chemistry/kinetics_demo.sio)
 
 - General CRN: build Nu with matnm_new + sets, compute_rates_general (stoich orders), simulate_general_crn (RK4 + mass action)
 - Big 5+rxn, enzyme MM, extended metabolic via general or specific
-- pbpk_full_metabolic (multi-met + EState sys5 + general path)
+- pbpk_full_metabolic (multi-met with first-order clearance, EState sys6, exact-solution check)
 - Arrhenius Ea~103kJ, metabolic k=0.05/0.02 etc + unc
 
 Example general build:
