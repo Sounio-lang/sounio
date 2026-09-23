@@ -108,6 +108,32 @@ fn use_it_plain_array(f: fn() -> [f64; 2] with Mut, Panic) -> f64 with Mut, Pani
     t.0[0] * 2.0
 }
 
+// Copilot follow-up (#2570): case F pins `let f = choose_arr()` where
+// choose_arr's OWN declared return is `fn() -> [f64; N]` (one level down,
+// not a tuple) -- expr_ident_is_array_returning_fn_ref only ever handled a
+// bare ExprIdent alias (`let f = make_plain_array`, case E's argument
+// shape), so this ExprCall-initializer shape fell through to `false` and
+// `f`'s own fn_ptr_ret_array classification was never set, even though the
+// array-slot sibling on the tuple-returning side (lower_named_fn_tuple_
+// mask_ref) already handles the analogous `let f = choose(); f()` shape for
+// a TUPLE return. Fixed via a new small LOWER_FN_ARR_CHAIN table (populated
+// by lower_fn_arr_chain_collect_one, alongside the existing tuple-array
+// prepass) recording which NAMED functions return `fn() -> [f64; N]`
+// directly, consulted here for an ExprCall initializer whose callee is a
+// named function (not a local -- a local callee's array-returning-ness is
+// already handled by expr_result_is_f64_array_ref/bind_local_array_elem_float
+// instead, since calling it produces the array value itself, not another
+// function).
+fn concrete_arr2() -> [f64; 2] {
+    var a: [f64; 2] = [0.0; 2]
+    a[0] = 1.5
+    a
+}
+
+fn choose_arr() -> fn() -> [f64; 2] {
+    concrete_arr2
+}
+
 fn main() -> i32 with IO, Mut, Panic {
     var bad: i32 = 0
 
@@ -138,6 +164,15 @@ fn main() -> i32 with IO, Mut, Panic {
     // inside the callee.
     let re = use_it_plain_array(make_plain_array)
     if re != 5.0 { bad = bad + 16 }
+
+    // F: `let f = choose_arr()` where choose_arr returns `fn() -> [f64; N]`
+    // directly (one level, not a tuple) -- propagating the array-returning
+    // classification onto `f` through a CALL initializer, not just a bare
+    // identity alias.
+    let f = choose_arr()
+    let tf = (f(), 1)
+    let rf = tf.0[0] * 2.0
+    if rf != 3.0 { bad = bad + 32 }
 
     if bad == 0 {
         println("FN_PTR_PARAM_TUPLE_ARRAY_MASK PASS")

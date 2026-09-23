@@ -1223,6 +1223,125 @@ fn lower_fn_tuple_f64_arrays_collect_one(name: Name, rt_opt_ref: &Option<Box<Typ
     }
 }
 
+// Copilot follow-up (#2570): a NAMED function whose own declared return type
+// is `fn() -> [f64; N]` (a PLAIN array return one level down, not a tuple --
+// `choose: fn() -> fn() -> [f64; N]`) needs its own small classification, so
+// `let f = choose(); f()` can mark `f` as array-returning. This is NOT the
+// same question the LOWER_FN_TUPLE_ARR_* table above answers (that table is
+// specifically about an eventual TUPLE with f64/array slots, keyed the same
+// way, but its base case bails out -- returns 0 / false -- the moment the
+// chain's leaf is not a TypeTuple; a plain array leaf is never even looked
+// at, let alone inserted).
+//
+// A dedicated boolean-only table (name -> "yes, calling this produces an
+// array-returning function"), not a bit-packed mask: there is no "unmarkable
+// slot" concept here to fail closed on -- one name is either in the set or
+// it is not, so no LOWER_FN_TUPLE_ARR_MAX_SLOTS-style cap on VALUE
+// representability applies, only the ordinary table-size cap on how many
+// DISTINCT NAMES it can hold (reuses LOWER_FN_TUPLE_ARR_CAP/NAME_STRIDE's
+// literals for sizing, not the table itself -- a separate name/hash/count
+// triple, so an entry here can never collide with or overwrite a
+// LOWER_FN_TUPLE_ARR_* entry for the same name).
+var LOWER_FN_ARR_CHAIN_COUNT: i64 = 0
+var LOWER_FN_ARR_CHAIN_HASH: [i64; 4096] = [0; 4096]
+var LOWER_FN_ARR_CHAIN_NAME_BUF: [i8; 1572864]
+var LOWER_FN_ARR_CHAIN_NAME_LEN: [i64; 4096] = [0; 4096]
+
+pub fn lower_fn_arr_chain_reset() with Mut {
+    LOWER_FN_ARR_CHAIN_COUNT = 0
+}
+
+fn lower_fn_arr_chain_name_store(slot: i64, n: Name) with Mut, Panic, Div {
+    let base = slot * LOWER_FN_TUPLE_ARR_NAME_STRIDE
+    var nlen = n.len
+    if nlen > LOWER_FN_TUPLE_ARR_NAME_STRIDE {
+        nlen = LOWER_FN_TUPLE_ARR_NAME_STRIDE
+    }
+    var i: i64 = 0
+    while i < nlen {
+        LOWER_FN_ARR_CHAIN_NAME_BUF[(base + i) as usize] = n.buf[i as usize]
+        i = i + 1
+    }
+    LOWER_FN_ARR_CHAIN_NAME_LEN[slot as usize] = nlen
+}
+
+fn lower_fn_arr_chain_name_eq(slot: i64, n: Name) -> bool with Mut, Panic, Div {
+    if LOWER_FN_ARR_CHAIN_NAME_LEN[slot as usize] != n.len {
+        return false
+    }
+    let base = slot * LOWER_FN_TUPLE_ARR_NAME_STRIDE
+    var i: i64 = 0
+    while i < n.len && i < LOWER_FN_TUPLE_ARR_NAME_STRIDE {
+        if LOWER_FN_ARR_CHAIN_NAME_BUF[(base + i) as usize] != n.buf[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// True iff `name`, when called once, produces an array-returning function
+// value (i.e. `name()` has declared type `fn() -> [f64; N]`).
+fn lower_fn_name_is_arr_chain(name: Name) -> bool with Mut, Panic, Div {
+    if name.len <= 0 {
+        return false
+    }
+    let h = fo_name_hash(name)
+    var i: i64 = 0
+    while i < LOWER_FN_ARR_CHAIN_COUNT {
+        if LOWER_FN_ARR_CHAIN_HASH[i as usize] == h && lower_fn_arr_chain_name_eq(i, name) {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+// Cap-checked, no-dup insert. Past the cap, this simply stops recording new
+// names (falls back to the pre-this-fix behaviour of "not classified" for
+// the overflow ones) rather than hard-fault-aborting the compile: unlike
+// LOWER_FN_TUPLE_ARR_*'s mask, silently not recording a name here cannot
+// corrupt an already-emitted value -- it only means the classification this
+// round adds does not yet reach that one name, no worse than before this
+// fix existed. Reaching this cap in practice would mean 4096+ distinct
+// functions returning `fn() -> [f64; N]` in one program.
+fn lower_fn_arr_chain_insert(name: Name) with Mut, Panic, Div, Alloc {
+    if lower_fn_name_is_arr_chain(name) {
+        return
+    }
+    if LOWER_FN_ARR_CHAIN_COUNT < LOWER_FN_TUPLE_ARR_CAP {
+        let slot = LOWER_FN_ARR_CHAIN_COUNT
+        LOWER_FN_ARR_CHAIN_HASH[slot as usize] = fo_name_hash(name)
+        lower_fn_arr_chain_name_store(slot, name)
+        LOWER_FN_ARR_CHAIN_COUNT = slot + 1
+    }
+}
+
+// Companion to lower_fn_tuple_f64_arrays_collect_one, run over the exact same
+// per-function return types (see both call sites below) -- classifies a
+// function whose return is directly `fn() -> [f64; N]` (one level, matching
+// what `let f = name()` binds `f` to) into LOWER_FN_ARR_CHAIN. Deliberately
+// NOT recursive the way lower_type_expr_deep_f64_array_mask is: `f`'s own
+// classification here means "f(), called ONCE, is the array" -- an
+// intermediate function-valued local from a deeper chain (`let mid =
+// outer3()` where outer3 needs two more calls) is handled by nothing here on
+// purpose, since propagating a not-yet-accurate answer through a plain
+// function call (unlike a tuple's `.K` projection, which the type checker
+// forbids on a still-function-typed value) would let `mid()` be
+// misclassified as the array when it actually still returns another
+// function. lower_type_expr_fn_returns_array_of_f64 checks exactly one
+// TypeFn layer for the same reason it does at parameter-binding time.
+fn lower_fn_arr_chain_collect_one(name: Name, rt_opt_ref: &Option<Box<TypeExpr>>) with Mut, Panic, Div, Alloc {
+    match *rt_opt_ref {
+        Some(rt) => {
+            if lower_type_expr_fn_returns_array_of_f64(&(*rt)) {
+                lower_fn_arr_chain_insert(name)
+            }
+        }
+        None => {}
+    }
+}
+
 // Review follow-up (#2570): impl methods are lowered as mangled free functions
 // (`Type_method`, see lower_impl_methods_ref) but this prepass only ever
 // walked ItemFn at the top level, so a method returning a tuple with an
@@ -1245,6 +1364,7 @@ fn lower_fn_tuple_f64_arrays_collect_impl_methods(type_name: Name, methods: &Opt
                         Some(fd) => {
                             let mangled = ir_mangle_method_name(type_name, method_ref.name)
                             lower_fn_tuple_f64_arrays_collect_one(mangled, &(*fd).return_type)
+                            lower_fn_arr_chain_collect_one(mangled, &(*fd).return_type)
                         }
                         None => {}
                     }
@@ -1267,6 +1387,7 @@ fn lower_fn_tuple_f64_arrays_collect(items: &Option<Box<ItemList>>) with Mut, Pa
                     match *fd_opt_ref {
                         Some(fd) => {
                             lower_fn_tuple_f64_arrays_collect_one(item_ref.name, &(*fd).return_type)
+                            lower_fn_arr_chain_collect_one(item_ref.name, &(*fd).return_type)
                         }
                         None => {}
                     }
@@ -16968,6 +17089,19 @@ impl Lowerer {
                             lower_fn_tuple_arr_fault(4, (*list).head.name)
                         }
                         (*(*locals).tuple_float_mask).values[idx as usize] = lower_type_expr_tuple_combined_mask(&(*list).head.ty)
+                        // Copilot follow-up (#2570): explicit write, always --
+                        // same slot-reuse reason as tuple_float_mask just
+                        // above. This binder (lower_fn_params_ref, the
+                        // summary-owned caller of lower_fn_params) never
+                        // touched fn_ptr_ret_array at all, so a parameter
+                        // declared `f: fn() -> [f64; N]` read as false here
+                        // (or, worse, inherited a stale true left by an
+                        // unrelated earlier function's local at this same
+                        // index) even though the path-A binder
+                        // (lowerer_bind_local_mut) already sets it correctly
+                        // -- `f()[i]` could still take the integer path in
+                        // any function lowered through this path instead.
+                        (*(*locals).fn_ptr_ret_array).values[idx as usize] = if lower_type_expr_fn_returns_array_of_f64(&(*list).head.ty) { 1 } else { 0 }
                         (*locals).count = idx + 1
                     } else {
                         lo = lo.report_error_at(10813)
@@ -17720,25 +17854,62 @@ impl Lowerer {
         false
     }
 
-    // Copilot follow-up (#2570): true iff `e` is a bare identity reference
-    // (an ExprIdent, not a call) naming something that, when CALLED, returns
-    // an f64 array -- a local already so classified (itself possibly an
-    // alias-of-an-alias, via lookup_local_fn_ptr_ret_array), or a named
-    // top-level function whose declared return is `[f64; N]`. Used at a
-    // LET-statement binding site (`let f = make_array`) to propagate the
-    // classification onto the new local, the same way lower_named_fn_tuple_
-    // mask_ref's ExprIdent branch propagates a tuple mask for the same
-    // identity-alias shape.
+    // Copilot follow-up (#2570): true iff `e`'s VALUE is itself a function
+    // that, when CALLED ONCE MORE, returns an f64 array -- either
+    //   - a bare identity reference (ExprIdent, not a call): a local
+    //     already so classified (itself possibly an alias-of-an-alias, via
+    //     lookup_local_fn_ptr_ret_array), or a named top-level function
+    //     whose declared return is DIRECTLY `[f64; N]`; or
+    //   - a call to a NAMED function (ExprCall on an ExprIdent callee, not
+    //     itself a local) whose OWN declared return is `fn() -> [f64; N]`
+    //     -- `choose: fn() -> fn() -> [f64; N]`, `let f = choose()`. A call
+    //     through a LOCAL callee is deliberately excluded: if that local is
+    //     itself array-returning (fn_ptr_ret_array), calling it produces the
+    //     ARRAY directly, not another array-returning function, and that
+    //     shape is already covered by expr_result_is_f64_array_ref /
+    //     bind_local_array_elem_float -- propagating fn_ptr_ret_array here
+    //     too would misclassify the array VALUE as a function.
+    // Used at a LET-statement binding site (`let f = make_array` or `let f =
+    // choose()`) to propagate the classification onto the new local, the
+    // same way lower_named_fn_tuple_mask_ref's ExprIdent branch propagates a
+    // tuple mask for the identity-alias shape.
+    //
+    // Deliberately NOT recursive through a LOCAL-to-LOCAL call chain (`let
+    // mid = outer3(); let g = mid()` where outer3 needs two more calls):
+    // unlike the tuple mask (whose "eventual" value is never itself
+    // projected until the type checker knows it truly is the tuple, so
+    // propagating it unchanged through every intermediate hop is sound), a
+    // plain function CALL is always syntactically valid regardless of how
+    // many chain layers remain, so blindly propagating "eventually
+    // array-returning" onto an intermediate function-valued local would
+    // misclassify `mid()` (which still returns another function) as the
+    // array itself. See lower_fn_arr_chain_collect_one's own comment for the
+    // same reasoning on the write side.
     fn expr_ident_is_array_returning_fn_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
-        if (*e).kind != ExprKind::ExprIdent {
+        if (*e).kind == ExprKind::ExprIdent {
+            if self.lookup_local((*e).name) >= 0 {
+                return self.lookup_local_fn_ptr_ret_array((*e).name)
+            }
+            let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, (*e).name)
+            if fn_id >= 0 && fn_id < self.module.fn_count {
+                return ir_fn_get(&(*self.module), fn_id as usize).returns_float == 2
+            }
             return false
         }
-        if self.lookup_local((*e).name) >= 0 {
-            return self.lookup_local_fn_ptr_ret_array((*e).name)
-        }
-        let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, (*e).name)
-        if fn_id >= 0 && fn_id < self.module.fn_count {
-            return ir_fn_get(&(*self.module), fn_id as usize).returns_float == 2
+        if (*e).kind == ExprKind::ExprCall {
+            match (*e).left {
+                Some(callee_expr) => {
+                    if (*callee_expr).kind != ExprKind::ExprIdent {
+                        return false
+                    }
+                    let callee_name = (*callee_expr).name
+                    if self.lookup_local(callee_name) >= 0 {
+                        return false
+                    }
+                    return lower_fn_name_is_arr_chain(callee_name)
+                }
+                _ => return false,
+            }
         }
         false
     }
