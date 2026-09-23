@@ -2114,11 +2114,21 @@ Truncation measured at one instant says nothing about the integrator elsewhere
 on the trajectory. `|c(dt=1e-8) − c(dt=5e-9)| / |c|`, worst over the eight
 reported species:
 
-| t (s) | worst | on | regime |
+> **Corrected 2026-09-23, a reviewer finding.** This table is measured entirely
+> in the **published** regime, matching that column of the two-column table in
+> §7.3. Its own "regime" column names the *trajectory phase*, not the
+> constant-alignment regime -- the same word used for two different things.
+> That collision is why this table's checkpoint figure (2.222e-14, H2O2,
+> published) and section 7.7's truncation-bound figure (3.465e-14, H2O2,
+> **aligned**) read as the same quantity disagreeing. They are the same
+> functional at the same checkpoint, in two different constant regimes, both
+> correct.
+
+| t (s) | worst | on | trajectory phase |
 |---|---|---|---|
 | 1.00e-06 | **1.608e-11** | H2O | early induction |
 | 1.00e-05 | 7.330e-14 | O | induction |
-| **1.00e-04** | **2.222e-14** | H2O2 | **the pre-front checkpoint** |
+| **1.00e-04** | **2.222e-14** | H2O2 | **the pre-front checkpoint (published regime)** |
 | 1.20e-04 | 8.508e-14 | HO2 | approaching the front |
 | 1.30e-04 | 2.088e-13 | HO2 | into the front |
 

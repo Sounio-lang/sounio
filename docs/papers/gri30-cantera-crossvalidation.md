@@ -53,7 +53,10 @@ submechanism, attributed in the source documentation to fixed-step RK4 versus
 CVODE, is shown here to be one rounded activation-energy gas constant: aligning
 `R_cal` from the CHEMKIN-conventional 1.9872041 to Cantera's own
 8.31446261815324/4.184 = 1.9872042586408316 improves every species by 155,031×
-to 295,899×. The truncation hypothesis is falsified directly rather than by
+to 295,899× in an isolated substitution experiment — two of those eight
+post-alignment figures sit below the oracle's own measured floor and are
+therefore unresolvable, reported as measured rather than as resolution
+**[B]**. The truncation hypothesis is falsified directly rather than by
 extrapolation: halving the step at the operating point moves the deviation by a
 ratio of 1.000 on all eight species, and the replica's self-convergence there is
 2.7 × 10⁻¹⁵ to 2.2 × 10⁻¹⁴, eight orders below the gap. After alignment the
@@ -100,7 +103,15 @@ one over to the other.
 
 Four statements about this system were in circulation before the measurements
 reported here, and are quoted in their original form because their wording is
-part of the finding:
+part of the finding. **Their source, stated rather than left implicit:** the
+task dispatch that commissioned this cross-validation work, issued by the
+project's operator to a prior working session. That dispatch is not a tracked
+repository artefact — no commit, path or URL identifies it, and none is
+invented here to look like one. §3.2 records the same absence for the
+`reac − nu` code commit itself, which the same investigation found does not
+exist under any ref; claims (A)–(D) are of a different kind — testimony about
+what was asked, not a lost code state — and are sourced no further than that
+for the same reason: the source is outside this repository's history.
 
 - **(A)** "majors within 0.2–2 %, radicals ~3 %, H2O2 ~16 %", attributed to
   fixed-step RK4 versus CVODE;
@@ -699,11 +710,22 @@ improve this replica, it degrades it.
 worst over the eight reported species; to be plotted log–log from these five
 measured points. No plot file forms part of the record.
 
-| t (s) | worst | on | regime |
+> **[W] Corrected 2026-09-23, a reviewer finding.** The table below is measured
+> entirely in the **published** regime, matching the row it is drawn from in
+> the two-column published/aligned table of §4.3. Its own "regime" column
+> names the *trajectory phase* (induction, pre-front, front), not the
+> constant-alignment regime — the same word doing two jobs. That collision is
+> why this table's checkpoint figure (2.222 × 10⁻¹⁴, H2O2, published) and
+> Table 8's truncation-bound figure (3.465 × 10⁻¹⁴, H2O2, **aligned** — its
+> own title says so) look like the same quantity measured twice
+> inconsistently. They are the same functional at the same checkpoint in two
+> different constant regimes, both correct, neither a re-quote of the other.
+
+| t (s) | worst | on | trajectory phase |
 |---|---|---|---|
 | 1.00e-06 | **1.608e-11** | H2O | early induction |
 | 1.00e-05 | 7.330e-14 | O | induction |
-| **1.00e-04** | **2.222e-14** | H2O2 | **the pre-front checkpoint** |
+| **1.00e-04** | **2.222e-14** | H2O2 | **the pre-front checkpoint (published regime)** |
 | 1.20e-04 | 8.508e-14 | HO2 | approaching the front |
 | 1.30e-04 | 2.088e-13 | HO2 | into the front |
 
@@ -865,6 +887,24 @@ correlation structure; they do not certify that any particular program's declare
 graph matches the world. Nor does the development verify the floating-point
 numerics of the integrator: it is exact arithmetic over `Int`, and the numerical
 agreement is the business of §3–§5.
+
+**A scope this manuscript states once here rather than at every occurrence:**
+the theorem's algebraic model — N contributions of *equal* uncertainty, all
+correlated at ρ = +1 — is the mechanism §4.7 and §5.2 identify with the
+**quiescent, pre-chain-branching regime**, and Tables 9 and 10 measure it
+there: fixed T = 10⁻⁶ s, before §5.2's own finding that the Jacobian terms
+`2·J_ii·v_i·dt` and `Σ_k(J_ik·dt)²·v_k` take over past ≈ 10⁻⁵ s. Neither the
+theorem nor the quiescent-regime tables say anything about band behaviour at
+the chain-branching checkpoint (t = 10⁻⁴ s) that §3–§4's parity claims use —
+that is a different quantity, not measured here. What §5.4's "implementation
+right, reference wrong" claim rests on, and what *does* generalise beyond the
+quiescent window, is architectural rather than numerical: the replicas add an
+independent quadrature term at *every* step regardless of what regime that
+step is in, which is unsound whenever steps are correlated, not only in the
+window where this document happens to measure its magnitude. The theorem
+formalises the magnitude in the window it was measured; the soundness
+argument is not confined to that window, and the two should not be read as
+the same claim.
 
 ---
 
