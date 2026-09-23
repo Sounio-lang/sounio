@@ -2,7 +2,87 @@
 // Test emit_mov_reg_imm32 and emit_mov_reg_imm64 with extended registers R8..R15 (REX.B)
 //@ requires: madaros
 //@ expect-stdout: 42
-fn main() -> i64 with IO {
-    print_int(42)
+
+struct CodeBuffer {
+    bytes: [i8; 128],
+    len: i64,
+}
+
+fn byte_u8(b: i8) -> i64 {
+    let x = b as i64
+    if x < 0 { x + 256 } else { x }
+}
+
+fn emit_byte(buf: CodeBuffer, b: i64) -> CodeBuffer with Mut {
+    var c = buf
+    c.bytes[c.len as usize] = b as i8
+    c.len = c.len + 1
+    c
+}
+
+fn modrm_rm_imm(dst: i64) -> i64 {
+    192 + dst
+}
+
+fn emit_u32_le(buf: CodeBuffer, val: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, val & 255)
+    b = emit_byte(b, (val / 256) & 255)
+    b = emit_byte(b, (val / 65536) & 255)
+    b = emit_byte(b, (val / 16777216) & 255)
+    b
+}
+
+fn emit_u64_le(buf: CodeBuffer, val: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_u32_le(b, val & 4294967295)
+    b = emit_u32_le(b, (val / 4294967296) & 4294967295)
+    b
+}
+
+fn test_emit_mov_reg_imm32(buf: CodeBuffer, reg: i64, val: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    if reg >= 8 {
+        b = emit_byte(b, 0x49)
+    } else {
+        b = emit_byte(b, 0x48)
+    }
+    b = emit_byte(b, 0xc7)
+    b = emit_byte(b, modrm_rm_imm(reg & 7))
+    b = emit_u32_le(b, val)
+    b
+}
+
+fn test_emit_mov_reg_imm64(buf: CodeBuffer, reg: i64, val: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    if reg >= 8 {
+        b = emit_byte(b, 0x49)
+    } else {
+        b = emit_byte(b, 0x48)
+    }
+    b = emit_byte(b, 0xb8 + (reg & 7))
+    b = emit_u64_le(b, val)
+    b
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    var b32 = CodeBuffer { bytes: [0; 128], len: 0 }
+    // R8 is register 8: REX.B prefix 0x49, opcode 0xc7, modrm 0xc0 (192 + 0)
+    b32 = test_emit_mov_reg_imm32(b32, 8, 123)
+    let pfx32 = byte_u8(b32.bytes[0])
+    let op32 = byte_u8(b32.bytes[1])
+    let rm32 = byte_u8(b32.bytes[2])
+
+    var b64 = CodeBuffer { bytes: [0; 128], len: 0 }
+    // R15 is register 15: REX.B prefix 0x49, opcode 0xb8 + 7 = 0xbf
+    b64 = test_emit_mov_reg_imm64(b64, 15, 42)
+    let pfx64 = byte_u8(b64.bytes[0])
+    let op64 = byte_u8(b64.bytes[1])
+
+    if pfx32 == 0x49 && op32 == 0xC7 && rm32 == 0xC0 && pfx64 == 0x49 && op64 == 0xBF {
+        print_int(42)
+    } else {
+        print_int(-1)
+    }
     0
 }
