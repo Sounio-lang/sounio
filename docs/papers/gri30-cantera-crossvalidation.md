@@ -68,9 +68,10 @@ ratio of 1.000 on all eight species, and the replica's self-convergence there is
 residual is 2.074 × 10⁻¹¹, but the oracle's own resolution, measured over an
 ensemble of initial states perturbed by one part per million, spans 3.730 ×
 10⁻¹² to 4.142 × 10⁻¹¹ — so the residual lies inside the instrument's noise band
-and is reported as a bound, not as agreement **[B]**. Separately, the project's
-most-cited numerical claim ("majors 0.2–2 %, radicals ~3 %, H2O2 ~16 %") is
-shown to be the per-species error profile of a historical reverse-rate defect,
+and is reported as a bound, not as agreement **[B]**. Separately, this
+project's most-repeated numerical claim ("majors 0.2–2 %, radicals ~3 %,
+H2O2 ~16 %" — no citation count is claimed for it) is shown to be the
+per-species error profile of a historical reverse-rate defect,
 reproduced here at 0.21 % / 0.18 % / 3.44 % / 16.17 %, mislabelled as a parity
 table **[W]**. A second result concerns uncertainty composition: the Python and
 C++23 replicas give an uncertainty band that scales as √dt (ratio 1.9999–2.0084
@@ -83,7 +84,16 @@ defect had less resolution than the defect, and the reading was then attributed
 to the object rather than to the instrument.
 
 **Keywords:** combustion kinetics; GRI-Mech 3.0; Cantera; cross-validation;
-uncertainty quantification; GUM; measurement resolution; reproducibility.
+uncertainty quantification; JCGM combination law; measurement resolution;
+reproducibility.
+
+> **[W] Corrected 2026-09-23, a reviewer finding.** This keyword line
+> previously read "GUM" — a term the body never once uses, defines, or
+> connects to anything. What §5.5 actually contains is narrower and precise:
+> theorems about which *combination law* (additive vs. quadrature) JCGM
+> eq. 13 licenses under a given correlation structure, not a full GUM
+> uncertainty budget with a stated coverage factor or expanded uncertainty.
+> The keyword now names what is there.
 
 ---
 
@@ -198,6 +208,15 @@ the RK4 stability limit there because of `NNH ⇌ N2 + H`.
 | Cantera 3.2.0 | CVODE, `rtol = 10⁻¹²`, `atol = 10⁻²²` | oracle for the trajectory |
 | Gragg–Bulirsch–Stoer in Sounio (`examples/chemistry/gbs_oracle.sio`) | modified midpoint + Richardson extrapolation in h² | second integrator, added 2026-09-02 (§4.6) |
 
+"Independent" for the C++23 cross-check means independent **code**, written
+from the protocol description rather than copied — it shares the same RK4
+formula, step, mechanism JSON and (deliberately, in §5) the same
+per-step-independent quadrature construction as the Python replica. Its role
+is a bug check on the replica's own arithmetic (§5.1's "reproduces the
+Python replica's deterministic checkpoint to all 17 printed digits" licenses
+using it that way), not an epistemically independent method for the band
+claims of §5 — GBS is the only integrator here built by a different method.
+
 The C++23 cross-check reproduces the Python replica's deterministic checkpoint
 **to all 17 printed digits on all 8 species** (H2: `1.45202682104479838e-07`
 against `1.4520268210447984e-07`), which is what licenses its use as an arbiter
@@ -263,9 +282,16 @@ its regime:
 
 The two changes were measured **factorially**, not jointly. Under TDY
 initialisation the molar-volume constant contributes **exactly zero** to the
-parity gap: `R_cal` is the entire effect. The molar-volume change is therefore
-justified on its own terms — it removes a truncated constant — and not by an
-improvement it does not produce.
+*parity gap* — the trajectory-endpoint comparison of §4: `R_cal` is the entire
+effect there. The molar-volume change is therefore justified on its own
+terms — it removes a truncated constant — and not by a parity improvement it
+does not produce. This is a distinct claim from the realised initial
+pressure (§2.4, Table on p. TDY/TPX), which **does** change with the
+molar-volume alignment (101325.576758 → 101325.124717 Pa) and remains a
+valid identifying value precisely because it is a different quantity than
+parity — §6 instance (7)'s signature is built on the initial-*concentration*
+deviation, not on parity, so its usefulness as a provenance marker is
+unaffected by parity's insensitivity to this constant.
 
 One caveat is carried explicitly and is **not** closed by this work: whether
 GRI-Mech 3.0's published rate parameters were themselves regressed under this or
@@ -460,17 +486,26 @@ code, so no magnitude is claimed for the shipped artefacts.
 (Absolute concentrations for all three implementations are in the measurement
 record, §1.2.)
 
-| species | Sounio vs replica | Sounio vs Cantera (as-shipped, TPX) | Sounio vs Cantera (documented, TDY) |
+| species | Sounio vs replica (display precision — see below) | Sounio vs Cantera (as-shipped, TPX) | Sounio vs Cantera (documented, TDY) |
 |---|---|---|---|
-| H2 | 3.305e-12 | 1.739e-06 | 2.854e-07 |
-| H | 4.573e-11 | 3.851e-05 | 2.365e-06 |
-| O | 3.467e-11 | 3.922e-05 | **2.660e-06** |
-| O2 | 1.091e-11 | 2.435e-06 | 2.387e-07 |
-| OH | 2.639e-10 | 3.808e-05 | 2.624e-06 |
-| H2O | 3.427e-11 | 3.911e-05 | 2.400e-06 |
-| HO2 | 1.004e-11 | 8.918e-06 | 2.247e-07 |
-| H2O2 | 4.890e-12 | 3.705e-05 | 1.891e-06 |
-| **range** | 3.3e-12 … 2.6e-10 (print-limited) | 1.7e-06 … 3.9e-05 | **2.2e-07 … 2.7e-06** |
+| H2 | ~~3.305e-12~~ → 1.823e-16 | 1.739e-06 | 2.854e-07 |
+| H | ~~4.573e-11~~ → 2.368e-15 | 3.851e-05 | 2.365e-06 |
+| O | ~~3.467e-11~~ → 4.271e-15 | 3.922e-05 | **2.660e-06** |
+| O2 | ~~1.091e-11~~ → 1.789e-16 | 2.435e-06 | 2.387e-07 |
+| OH | ~~2.639e-10~~ → 4.559e-15 | 3.808e-05 | 2.624e-06 |
+| H2O | ~~3.427e-11~~ → 2.949e-15 | 3.911e-05 | 2.400e-06 |
+| HO2 | ~~1.004e-11~~ → 1.895e-16 | 8.918e-06 | 2.247e-07 |
+| H2O2 | ~~4.890e-12~~ → 3.884e-15 | 3.705e-05 | 1.891e-06 |
+| **range** | ~~3.3e-12 … 2.6e-10~~ → **1.789e-16 … 4.559e-15** | 1.7e-06 … 3.9e-05 | **2.2e-07 … 2.7e-06** |
+
+> **[W] Corrected 2026-09-23, a reviewer finding.** The struck-through values
+> are the raw print-resolution figures the original demo emitted; a reader
+> quoting them alone, without the paragraph that follows this table, would
+> cite a retracted number. The arrow gives each species' actual value at full
+> precision, transcribed from the 16-digit reprint in the measurement record
+> (`RESULTS.md` §1.3), not re-derived here. This column is otherwise the same
+> measurement as bullet 1 below, tabulated per species rather than as a
+> range.
 
 Replica-vs-Cantera is identical to Sounio-vs-Cantera to three significant
 figures in every cell, because Sounio and the replica agree about 10⁴× more
@@ -976,7 +1011,11 @@ which at 1500 K in the induction period is 6–15 orders below the forward one
 1.452024295 × 10⁻⁷ at 10⁻⁴ relative tolerance. The molar-volume shorthand moved
 the module by 1.740 × 10⁻⁶ — **1.7 % of the tolerance**. The gate could not have
 failed on it. After alignment the same gate sits at 0.14 % of tolerance, 12.4×
-tighter, and now has room to see a regression of this size.
+tighter, and now has room to see a regression of *this size* — a shift on the
+order of 10⁻⁶. It remains roughly seven orders looser than the 10⁻¹¹-scale
+residual §4 treats as the object of interest; 12.4× tighter is a real
+improvement in headroom for constant-sized regressions, not a claim that the
+gate resolves the scientific residual this manuscript reports.
 
 **(3) A shared initialisation hides an initial-state error.** Under TDY both
 sides are built from the *same* total concentration, so an error in it cancels
@@ -1246,6 +1285,17 @@ the correct implementation as the defective one.
   −34 % d[HO2]/dt figure (§3.5); the exponent of the step-refinement growth, 2.1×
   to 6.6× per halving where systematic accumulation predicts 2× (§4.6); the
   location of the minimum of the total-error curve, bracketed but not pinned.
+- **Step-invariance is reported as ratios, not magnitudes, on the H/O
+  problem.** Table 10 shows the Sounio band's ratio under a factor-4 step
+  change is 1.000000 ± 10⁻⁶, against the replicas' 1.9999–2.0084 — but a ratio
+  alone cannot exclude an implementation that dropped a persistent-parameter
+  term entirely: H2 and O2 are ratio-1 in *every* table here (Tables 9 and 10
+  alike) because their band is dominated by the 1 % initial-condition seed,
+  which is step-invariant regardless of whether persistent-parameter UQ is
+  computed at all. `test_g30_epistemic_step_invariance`'s own tolerance
+  (10⁻²) is not tight enough to rule this out either. What would: band
+  *widths*, not ratios, for all eight species against a finite-difference or
+  GBS-referee magnitude at one dt. Not measured here.
 - **One benchmark is deliberately left divergent.** `flame1d_replica.py` keeps
   the truncated `R = 8.314462618`, because it is a different benchmark with its
   own published reference values, and aligning it would move those numbers by an
@@ -1469,10 +1519,95 @@ not that the method misbehaves.
 
 ### Appendix D — statements of the 15 Lean theorems
 
-With the measured `#print axioms` output for each; see §5.5 for the table and
-the principal statements. Built under `leanprover/lean4:v4.33.0` (commit
-`d8b18978322de05a8f3dba51ef03cf5461676c17`); 15 theorems, zero `sorry`,
-reproduced by the standalone command in §8.2.
+Transcribed from `formal/SounioIndepComposition.lean` (snapshot v1.0.3), not
+re-derived; each carries its Lean signature and the file's own docstring
+gloss. §5.5 gives the axiom table; this appendix gives the statements
+themselves, which that section names but does not reproduce. Built under
+`leanprover/lean4:v4.33.0` (commit `d8b18978322de05a8f3dba51ef03cf5461676c17`);
+15 theorems, zero `sorry`, reproduced by the standalone command in §8.2.
+
+Three definitions the statements are built on: `varGeneral v₁ v₂ cov :=
+v₁ + v₂ + 2·cov` (JCGM eq. 13, the general combination law, in variance form);
+`varQuadrature v₁ v₂ := v₁ + v₂` (JCGM eq. 10, the independence-only law);
+`varAdditive v₁ v₂ p := v₁ + v₂ + 2·p`, with `p` the product `u₁·u₂` kept as
+an atom so no square root is constructed.
+
+**§1 — quadrature is exactly the independence law.**
+
+1. `quadrature_iff_zero_covariance (v₁ v₂ cov : Int) : varQuadrature v₁ v₂ =
+   varGeneral v₁ v₂ cov ↔ cov = 0` — quadrature agrees with the general law
+   precisely when the covariance vanishes; it is the ρ = 0 case, not an
+   approximation that is usually fine.
+2. `quadrature_sound_of_independent (v₁ v₂ cov : Int) (h : cov = 0) :
+   varQuadrature v₁ v₂ = varGeneral v₁ v₂ cov` — restated in the direction a
+   compiler needs: given independence, the tight bound is sound, the only
+   hypothesis under which it is.
+
+**§2 — with positive covariance, quadrature is unsound.**
+
+3. `quadrature_understates_of_positive_covariance (v₁ v₂ cov : Int) (h : 0 <
+   cov) : varQuadrature v₁ v₂ < varGeneral v₁ v₂ cov` — positively correlated
+   inputs make quadrature report a strictly smaller variance than the truth,
+   a bound tighter than the truth being the unsound direction.
+4. `quadrature_sound_iff_nonpositive_covariance (v₁ v₂ cov : Int) :
+   varGeneral v₁ v₂ cov ≤ varQuadrature v₁ v₂ ↔ cov ≤ 0` — the converse:
+   quadrature is sound exactly when the covariance is non-positive, so
+   assuming independence without proof buys the tight bound on an unchecked
+   premise.
+
+**§3 — the additive bound is never wrong, only wide.**
+
+5. `additive_sound (v₁ v₂ cov p : Int) (hcs : cov ≤ p) : varGeneral v₁ v₂
+   cov ≤ varAdditive v₁ v₂ p` — with `p = u₁·u₂`, Cauchy–Schwarz (`cov ≤ p`,
+   i.e. ρ ≤ 1) makes the additive bound sound for every admissible
+   correlation.
+6. `additive_tight_at_unit_correlation (v₁ v₂ p : Int) : varGeneral v₁ v₂
+   p = varAdditive v₁ v₂ p` — the additive bound is tight at ρ = +1, hence
+   the least sound upper bound available without an independence proof.
+7. `quadrature_below_additive (v₁ v₂ p : Int) (hp : 0 ≤ p) : varQuadrature
+   v₁ v₂ ≤ varAdditive v₁ v₂ p` — quadrature sits below the additive bound
+   whenever `u₁·u₂` is non-negative, so swapping the default from quadrature
+   to additive can only widen a reported band, never narrow it.
+
+**§4 — the N-step accumulation law, the bridge to measurement.** Two further
+definitions: `varQuadN n u := n·u²` (N equal-uncertainty contributions
+combined in quadrature); `varCorrN n u := (n·u)²` (the same N contributions
+fully correlated, ρ = +1, so the uncertainties add).
+
+8. `quadrature_understates_correlated_sum (n : Nat) (u : Int) : varCorrN n
+   u = n · varQuadN n u` — **the underestimation law**: for N fully-correlated
+   contributions the true variance is exactly N times the quadrature
+   variance, so the true uncertainty is √N times the quadrature uncertainty.
+   With N = T/dt this is the √(T/dt) law of §5.2; read along dt it is the
+   √dt dependence of §5.1.
+9. `accumulation_agrees_at_one_step (u : Int) : varCorrN 1 u = varQuadN 1
+   u` — the degenerate reading that makes the law easy to miss: at N = 1 the
+   two agree exactly, so a single composition is no evidence that repeated
+   composition is sound.
+
+**§5 — d-separation: the collider row.** `Junction` is `chain | fork |
+collider` (Pearl's classification of how two edges meet at a middle node);
+`active : Junction → Bool → Bool` gives whether a path through that junction
+is unblocked as a function of whether the middle node is conditioned on:
+chain and fork return `!conditioned`, collider returns `conditioned` — the
+inversion is the whole content of d-separation (Berkson 1946).
+
+10. `chain_blocked_by_conditioning : active .chain true = false`
+11. `fork_blocked_by_conditioning : active .fork true = false` — conditioning
+    on the middle node blocks a chain or a fork.
+12. `collider_blocked_marginally : active .collider false = false` — a
+    collider path is already blocked without conditioning.
+13. `collider_opened_by_conditioning : active .collider true = true` — **the
+    discriminating case**: conditioning on a collider opens the path, the
+    one row a reachability check with a blocklist gets wrong.
+14. `collider_inverts_the_others (b : Bool) : active .collider b = !(active
+    .chain b)` — the inversion stated as the asymmetry itself: at every
+    junction the collider is active exactly when the other two are not.
+15. `conditioning_not_monotone : ∃ j : Junction, active j false = false ∧
+    active j true = true` — conditioning is therefore not monotone in the
+    blocking direction: there is a junction where adding to the conditioning
+    set turns a blocked path active, which is unsound for any implementation
+    whose search only ever removes edges as the conditioning set grows.
 
 ### Appendix E — the nine sections remediated by the provenance audit
 
