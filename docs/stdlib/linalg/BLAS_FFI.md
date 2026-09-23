@@ -67,12 +67,14 @@ if dgesvd_available() {
 ```sio
 use linalg::epistemic_matrix::EpistemicMatrix
 
-// Create deterministic matrices (no uncertainty)
-let a = EpistemicMatrix::zeros(256, 256);
-let b = EpistemicMatrix::zeros(256, 256);
+// Create deterministic matrices (no uncertainty). The fixed 256-element
+// backing store holds at most a 16x16 matrix (16*16 = 256 elements total).
+let a = EpistemicMatrix::zeros(16, 16);
+let b = EpistemicMatrix::zeros(16, 16);
 // ... fill matrices with values ...
 
-// Runs the pure-Sounio DGEMM today (the BLAS FFI path is planned, not yet wired).
+// `matmul` is an inline pure-Sounio GUM loop (see epistemic_matrix.sio):
+// it does NOT call blas_dgemm_rowmajor. The BLAS FFI path is planned, not wired.
 let c = a.matmul(&b);
 ```
 
@@ -81,18 +83,20 @@ let c = a.matmul(&b);
 ```sio
 use linalg::epistemic_matrix::EpistemicMatrix
 
-// Create epistemic matrices (with uncertainty)
-let a = EpistemicMatrix::zeros(256, 256)
+// Create epistemic matrices (with uncertainty). Max dimension is 16x16
+// (256 elements total fit the fixed backing store).
+let a = EpistemicMatrix::zeros(16, 16)
     .uncertainty(0.01)
     .confidence(0.95);
 // ... fill with set() ...
 
-let b = EpistemicMatrix::zeros(256, 256)
+let b = EpistemicMatrix::zeros(16, 16)
     .uncertainty(0.02)
     .confidence(0.90);
 // ... fill with set() ...
 
-// This uses pure-Sounio (uncertainty must be propagated via GUM)
+// `matmul` runs as an inline pure-Sounio GUM loop (see epistemic_matrix.sio);
+// the BLAS FFI path is not wired, so uncertainty is propagated via GUM.
 let c = a.matmul(&b);
 
 // Result has propagated uncertainty
@@ -128,15 +132,25 @@ let rc = blas_dgemm_rowmajor(
 // Direct dominant-singular-value call (approximate power iteration).
 // blas_dgesvd_approx writes only the largest singular value into `s`
 // (no `u`/`vt` outputs); `iters` is the power-iteration step count.
-var s: [f64; 16] = [0.0; 16]  // output buffer
 
 // blas_dgesvd_approx is a rank-1 power-iteration approximation: it computes
 // ONLY the dominant (largest) singular value and writes it to s[0]. The
 // remaining entries are NOT computed singular values — they stay at the
 // zero-initialized placeholder values (the wrapper explicitly zeroes s[1..p]).
 // Do not read s[1..p] as computed singular values; full SVD is not implemented.
+//
+// IMPORTANT: the power iteration needs a NONZERO input. An all-zero matrix
+// leaves the iterate at zero and yields sigma = 0 (degenerate / NaN), so pass a
+// real matrix. The 2x2 below is stored row-major in the fixed 256-element buffer.
+var a_svd: [f64; 256] = [0.0; 256]  // 2x2 input, row-major in the 256 buffer
+a_svd[0] = 3.0   // row 0, col 0
+a_svd[1] = 1.0   // row 0, col 1
+a_svd[2] = 1.0   // row 1, col 0
+a_svd[3] = 2.0   // row 1, col 1
 
-let info = blas_dgesvd_approx(&a, m, n, &!s, 32)
+var s: [f64; 16] = [0.0; 16]  // output buffer
+let info = blas_dgesvd_approx(&a_svd, 2, 2, &!s, 32)
+// s[0] ~ 3.618 (dominant singular value of [[3,1],[1,2]]); s[1] is a placeholder.
 ```
 
 ## Installation
