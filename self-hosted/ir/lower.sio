@@ -4539,6 +4539,14 @@ fn lowerer_bind_local_mut(
         (*(*locals_box).is_global).values[idx as usize] = 0
         (*(*locals_box).is_ref).values[idx as usize] = 0
         (*(*locals_box).scalar_kind).values[idx as usize] = 0
+        // Copilot review (PR #2516): the locals stack is REUSED across
+        // functions (count is reset, arrays are not, same as box_inner_layout
+        // below), so a stale tuple_float_mask/tuple_arr_mask from an earlier
+        // function's tuple local left this slot's array bit set and a later,
+        // unrelated tuple param at the same slot inherited it -- classifying
+        // a plain f64 slot as an f64-ARRAY. Explicit 0, mirroring bind_local.
+        (*(*locals_box).tuple_float_mask).values[idx as usize] = 0
+        (*(*locals_box).tuple_arr_mask).values[idx as usize] = 0
         // Post-#2084: tuple0_array_elem_layout was added on main to track when a
         // tuple slot-0 is a fixed array, which gates the aggregate-shallow-copy path.
         (*(*locals_box).tuple0_array_elem_layout).values[idx as usize] = 0 - 1
@@ -4623,6 +4631,34 @@ fn lowerer_mark_local_array_elem_wide_bits_mut(
     while i >= 0 {
         if (*(*locals_box).depths).values[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*locals_box).names).values[i as usize], name) {
             (*(*locals_box).array_elem_wide_bits).values[i as usize] = bits
+            (*lo).locals = locals_box
+            return
+        }
+        i = i - 1
+    }
+}
+
+// Copilot review (PR #2516): lowerer_bind_local_mut (the *mut param binder
+// used above) has no TypeExpr parameter to populate tuple_float_mask /
+// tuple_arr_mask from directly, and leaves both untouched -- which, on this
+// REUSED locals stack (count resets per function, arrays don't), lets a
+// stale array bit from an earlier function's tuple local misclassify a
+// same-slot tuple param here as holding an f64 array. Mirrors the direct
+// parameter binder's (lower_fn_params_ref) population: always writes both
+// masks, 0 when the param type is not itself TypeTuple, so a stale value
+// can never survive a rebind at this slot.
+fn lowerer_mark_local_tuple_masks_mut(
+    lo: &! Lowerer,
+    name: Name,
+    float_mask: i64,
+    arr_mask: i64
+) with Mut, Alloc, Panic, Div {
+    var locals_box = (*lo).locals
+    var i = (*locals_box).count - 1
+    while i >= 0 {
+        if (*(*locals_box).depths).values[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*locals_box).names).values[i as usize], name) {
+            (*(*locals_box).tuple_float_mask).values[i as usize] = float_mask
+            (*(*locals_box).tuple_arr_mask).values[i as usize] = arr_mask
             (*lo).locals = locals_box
             return
         }
@@ -4943,6 +4979,9 @@ fn lowerer_lower_fn_params_mut(
                 }
 
                 lowerer_bind_local_mut(lo, (*list).head.name, param_value_reg, (*list).head.is_self_mut)
+                let param_tuple_float_mask = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_float_mask(&(*list).head.ty.type_args, 0) } else { 0 }
+                let param_tuple_arr_mask = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_arr_mask(&(*list).head.ty.type_args, 0) } else { 0 }
+                lowerer_mark_local_tuple_masks_mut(lo, (*list).head.name, param_tuple_float_mask, param_tuple_arr_mask)
                 let param_elem_wide_bits = lower_type_expr_array_elem_wide_bits(&(*list).head.ty)
                 if param_elem_wide_bits > 0 {
                     // V0-E.5.7: `[f128; N]` / `&[f128; N]` param — element reads are
@@ -6320,6 +6359,27 @@ fn lower_type_list_float_mask(opt: &Option<Box<TypeExprList>>, bit: i64) -> i64 
                 }
             }
             m + lower_type_list_float_mask(&(*list).tail, bit + 1)
+        }
+        None => 0,
+    }
+}
+
+// Array-slot counterpart of lower_type_list_float_mask / lower_opt_type_tuple_float_mask:
+// bit k set iff element k of a declared tuple TYPE is a `[f64; N]` array, so a
+// tuple-typed PARAMETER's slots can be classified from its signature alone
+// (no lowered initialiser expression to read, unlike a `let` binding). Own
+// mask, same reasoning as tuple_arr_mask itself: packing into high bits of
+// the scalar mask corrupts slot 31.
+fn lower_type_list_arr_mask(opt: &Option<Box<TypeExprList>>, bit: i64) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(list) => {
+            var m: i64 = 0
+            if bit < 32 {
+                if lower_type_expr_is_array_of_f64(&(*list).head) {
+                    m = 1 << (bit as i32)
+                }
+            }
+            m + lower_type_list_arr_mask(&(*list).tail, bit + 1)
         }
         None => 0,
     }
@@ -16184,6 +16244,17 @@ impl Lowerer {
                         // Findings 11 (#2084): stamp is_unsigned_int=1 when the param is u8/u16/u32/u64/usize.
                         (*(*locals).is_unsigned_int).values[idx as usize] = if lower_type_expr_is_unsigned_int(&(*list).head.ty) { 1 } else { 0 }
                         (*(*locals).is_ref).values[idx as usize] = if lower_type_expr_is_ref_like(&(*list).head.ty) { 1 } else { 0 }
+                        // Copilot review (PR #2516): a tuple-typed PARAMETER (e.g.
+                        // fn f(t: (f64, [f64; 8]))) needs the same per-slot masks a
+                        // `let`-bound tuple local gets from its initialiser (see
+                        // lower_let_stmt_ref / #1502), or `t.1[j]` inside the fn body
+                        // reads the array bits as an integer. Explicit 0 in the
+                        // non-tuple case too: the locals stack is REUSED across
+                        // functions (count resets, arrays don't), so a stale mask
+                        // from an earlier function's tuple local at this slot must
+                        // not leak into this param.
+                        (*(*locals).tuple_float_mask).values[idx as usize] = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_float_mask(&(*list).head.ty.type_args, 0) } else { 0 }
+                        (*(*locals).tuple_arr_mask).values[idx as usize] = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_arr_mask(&(*list).head.ty.type_args, 0) } else { 0 }
                         (*(*locals).box_inner_layout).values[idx as usize] = if lower_type_expr_is_box(&(*list).head.ty) { lower_struct_layout_index_of(&(*lo.struct_layouts), lower_box_inner_type_name(&(*list).head.ty)) } else { 0 - 1 }
                         if lower_type_expr_is_box(&(*list).head.ty) && str_eq(read_env("SOUNIO_BOX_TRACE"), "1") {
                             print("boxtrace: WRITE-B ")
