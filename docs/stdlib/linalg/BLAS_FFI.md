@@ -139,18 +139,16 @@ let rc = blas_dgemm_rowmajor(
 // zero-initialized placeholder values (the wrapper explicitly zeroes s[1..p]).
 // Do not read s[1..p] as computed singular values; full SVD is not implemented.
 //
-// IMPORTANT — seed-projection limitation (verified against
-// stdlib/linalg/blas_ffi.sio:128-143): blas_dgesvd_approx seeds power
-// iteration with the all-ones vector, so it converges to the singular
-// value along the all-ones direction — the singular value whose
-// right-singular vector has the largest projection onto [1, 1]. For
-// [[3, 1], [1, 2]] this is the dominant singular value (s[0] ~ 3.618).
-// It is NOT guaranteed to return the global maximum singular value for
-// arbitrary inputs: e.g. for [[2, -1], [-1, 2]] the all-ones seed is the
-// eigenvector for value 1, so the routine returns 1, not the true
-// maximum of 3. Treat the result as seed-direction-dependent, and avoid
-// inputs whose dominant right-singular vector is orthogonal to [1, 1]
-// (which makes the iterate collapse to 0/0 NaN).
+// blas_dgesvd_approx seeds power iteration with the all-ones vector and
+// converges to the largest singular value among those whose right-singular
+// vector has a non-zero projection onto that seed — not necessarily the
+// global maximum. If the seed is orthogonal to every singular mode
+// (equivalently, lies in the matrix's nullspace, e.g. [[1,-1],[-1,1]]
+// whose all-ones seed maps to [0,0]), the iterate collapses to 0/0 NaN.
+// For [[3,1],[1,2]] the dominant mode has a strong [1,1] component, so the
+// routine returns ~3.618. For [[2,-1],[-1,2]] the dominant mode's vector
+// [1,-1] is orthogonal to [1,1], so the routine returns the next mode, 1,
+// not the maximum of 3. Treat the result as seed-direction-dependent.
 var a_svd: [f64; 256] = [0.0; 256]  // 2x2 input, row-major in the 256 buffer
 a_svd[0] = 3.0   // row 0, col 0
 a_svd[1] = 1.0   // row 0, col 1
