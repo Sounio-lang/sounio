@@ -52,12 +52,41 @@
 // alias is resolved once at the `let g = pair_free` binding site and stored
 // under g's own name, then read back by both consumers.
 //
+// A top-level function is ALSO named `g`, on purpose, so the alias binding
+// at `let g = pair_free` shadows a REAL same-named global rather than a
+// name that simply does not exist. Copilot follow-up: the first version of
+// this fix checked the named-function table before checking whether
+// callee_name was a local, backwards from actual call lowering
+// (self.lookup_local(callee_name) >= 0 checked BEFORE the named path,
+// lower.sio:21168-21223) -- with that ordering, `g()` executes the LOCAL
+// alias (pair_free's body -- confirmed by manual repro: it returns the
+// caller's own f64 argument, not the top-level g's distinct hard-coded
+// value) while the mask lookup used whichever the checker-visible name
+// resolved first, so a top-level `g` with a DIFFERENT tuple-array shape
+// than pair_free silently re-corrupted the read even though F/G's own
+// alias resolution (fixed in 01275b1706) was otherwise working. Kept
+// same-shaped with pair_free here so the arithmetic below still
+// type-checks (the type checker itself binds `g(...)`'s argument and
+// result types to the GLOBAL `g`, not the local alias, so a differently
+// shaped global makes `v.0[0] * 2.0` a checker error, not a lowering one --
+// the mask-divergence half of this was verified with a standalone,
+// differently-shaped repro instead: it printed the caller's argument's IEEE
+// bit pattern as an integer under the old ordering, the argument's own
+// value under the fixed one).
+//
 //   F  `let g = pair_free; let v = g(4.5); v.0[0]`   indirect call through
-//                                                     an alias, in-place
-//                                                     index through a local
-//   G  `let g = pair_free; g(1.25).0[0]`              indirect call through
-//                                                      an alias, direct
-//                                                      projection
+//                                                     an alias that shadows
+//                                                     a same-named global,
+//                                                     in-place index through
+//                                                     a local
+//   G  `let g = pair_free; g(1.25).0[0]`              same alias/shadow,
+//                                                       direct projection
+fn g(scale: f64) -> ([f64; 2], f64) with Mut, Panic {
+    var a: [f64; 2] = [0.0; 2]
+    a[0] = 999.0
+    (a, 1.0)
+}
+
 struct Pairer {
     scale: f64,
 }
