@@ -17508,6 +17508,22 @@ impl Lowerer {
         }
         match (*e).left {
             Some(callee_expr) => {
+                // Copilot follow-up (#2570): `choose()()` -- an immediate
+                // call through a call's own result. callee_expr here is
+                // itself an ExprCall (`choose()`), which
+                // expr_to_callee_name_ref cannot name (it only handles
+                // ExprIdent and ExprMethodCall callees), so callee_name below
+                // would come back empty and both the local and named lookups
+                // always miss. But applying THIS SAME function recursively to
+                // the inner call `choose()` already computes exactly what is
+                // needed: by construction (the TypeFn branch of
+                // lower_fn_tuple_f64_arrays_collect_one, #2570), "the mask
+                // calling choose's result gives" is precisely
+                // choose()'s own combined mask under this function. Recurse
+                // one level before falling to the name-based paths below.
+                if (*callee_expr).kind == ExprKind::ExprCall {
+                    return self.expr_result_tuple_float_mask_ref(&(*callee_expr))
+                }
                 let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
                 // Copilot follow-up (#2570): a local shadows a same-named
                 // top-level function at the actual call site --
@@ -17553,6 +17569,20 @@ impl Lowerer {
                 if (*base_expr).kind == ExprKind::ExprCall {
                     match (*base_expr).left {
                         Some(callee_expr) => {
+                            // Copilot follow-up (#2570): `choose()().0[i]` --
+                            // same immediate-call-through-a-call's-result
+                            // shape as expr_result_tuple_float_mask_ref's
+                            // ExprCall branch. callee_expr here is the OUTER
+                            // call's callee, i.e. the inner call `choose()`
+                            // itself; recurse into
+                            // expr_result_tuple_float_mask_ref on it (which
+                            // already resolves through the TypeFn-branch
+                            // table entry) rather than trying to name it.
+                            if (*callee_expr).kind == ExprKind::ExprCall {
+                                let inner_mask = self.expr_result_tuple_float_mask_ref(&(*callee_expr))
+                                let inner_arr_bits = inner_mask / 4294967296
+                                return (inner_arr_bits >> (slot as i32)) % 2 == 1
+                            }
                             let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
                             // Copilot follow-up (#2570): same local-shadows-
                             // global precedence fix as

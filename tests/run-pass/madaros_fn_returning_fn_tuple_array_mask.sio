@@ -22,6 +22,21 @@
 //
 //   `fn choose() -> fn() -> ([f64; 2], i64) { concrete }`
 //   `let f = choose(); let t = f(); t.0[0]`
+//
+// Copilot follow-up (#2570): case A above only exercises the ALIASED form
+// (`let f = choose(); f()`, where `f` is a plain ExprIdent). Cases B/C pin
+// the IMMEDIATE-invocation shape `choose()()`, where the outer call's own
+// callee is itself an ExprCall, not a name -- `expr_to_callee_name_ref`
+// only names an ExprIdent or ExprMethodCall callee, so it returned empty
+// for the inner `choose()`, and both the local and named-table lookups
+// always missed regardless of case A's fix. Resolved by recursing into
+// expr_result_tuple_float_mask_ref on the inner call, which already
+// resolves through the same TypeFn-branch table entry case A relies on.
+//
+//   B  `choose()().0[0]`          direct projection off an immediate
+//                                  double-call, no intervening binding
+//   C  `let t = choose()(); t.0[0]`   in-place index through a tuple-local
+//                                      bound from an immediate double-call
 fn concrete() -> ([f64; 2], i64) {
     var a: [f64; 2] = [0.0; 2]
     a[0] = 8.5
@@ -38,6 +53,16 @@ fn main() -> i32 with IO, Mut, Panic {
     let f = choose()
     let t = f()
     if t.0[0] != 8.5 { bad = bad + 1 }
+
+    // B: direct projection off an immediate double-call, no intervening
+    // binding.
+    let db = choose()().0[0]
+    if db != 8.5 { bad = bad + 2 }
+
+    // C: in-place index through a tuple-local bound from an immediate
+    // double-call.
+    let tc = choose()()
+    if tc.0[0] != 8.5 { bad = bad + 4 }
 
     if bad == 0 {
         println("FN_RETURNING_FN_TUPLE_ARRAY_MASK PASS")
