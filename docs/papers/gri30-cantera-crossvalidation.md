@@ -113,10 +113,16 @@ the object, and whatever the oracle cannot resolve is invisible in both.
 
 In the work reported here, Cantera 3.2.0 with CVODE is the oracle for the
 *trajectory*, and two independent replicas (Python and C++23) are diagnostics.
-For the *uncertainty band*, §5 shows that the designation has to be reversed:
-the replicas are wrong and the implementation under test is right. A single
-project therefore contains both orientations, and the reader should not carry
-one over to the other.
+For the *uncertainty band*, §5 shows that the designation has to be reversed
+for the replicas' **accumulation rule**: their per-step-independent quadrature
+is architecturally wrong for a persistent parameter. **[W] Corrected
+2026-09-23, a reviewer finding.** That does not license reversing the
+designation wholesale to "the implementation under test is right" — the
+evidence for the Sounio module is ratio-only (step-invariance under a
+factor-4 dt change) and does not establish its band's *magnitude*, per §7.5's
+own Threats to Validity note. A single project therefore contains both
+orientations *and* a partial one, and the reader should not carry any of them
+over to the others.
 
 ### 1.2 The claims in circulation
 
@@ -188,7 +194,8 @@ The results are presented as a descent through the instrument, each section
 moving the defect one layer inward: §3 treats a defect in the *object* found by
 an external oracle; §4 a defect in the *convention constants* shared by object
 and oracle; §5 a defect in the *oracle itself*, where the replica's accumulation
-rule is wrong and the implementation under test is right. §6 then treats the
+rule is shown architecturally wrong, though the implementation under test's
+band magnitude is not thereby validated (§7.5). §6 then treats the
 instruments, which is where the generalisable content of the work lies.
 
 ---
@@ -808,7 +815,7 @@ this protocol at a shorter horizon inherits a much weaker bound.
 
 ---
 
-## 5. Uncertainty-band scaling: the implementation is right and its oracle is wrong
+## 5. Uncertainty-band scaling: the oracle's accumulation rule is wrong
 
 ### 5.1 Scaling in dt
 
@@ -1310,7 +1317,10 @@ band, the Python replica was the *de facto* oracle — the reference implementat
 against which the Sounio module's step-invariance would have been judged — and it
 is wrong, demonstrably and for a derivable reason, machine-checked in §5.5. A
 reviewer who carried the first orientation into the second would have reported
-the correct implementation as the defective one.
+the Sounio module as defective for a property — step-invariance — that its
+derivation shows the reference implementation itself lacks; whether the
+Sounio module's band is otherwise correct, magnitude included, is a separate
+question §7.5 leaves open.
 
 ### 7.5 Threats to validity
 

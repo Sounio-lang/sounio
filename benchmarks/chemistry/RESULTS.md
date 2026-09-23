@@ -693,13 +693,13 @@ no dangling objects. They exist only as references in the preprint.
 **Corrected 2026-09-23, a reviewer finding.** The table above (`in worktree:
 no`, captured 2026-09-01) is no longer current: all six names now exist in
 the worktree as committed reconstructions, each header-marked as such and
-distinct from the unrecoverable originals — see section 4's own account at
-line 1711 ("are reconstructions") and section 6.3's summary at line 2271
-("Four reconstructed `.sio` probes and two reconstructed `.py` probes now
-exist and all check and run clean, but they reproduce the *protocols*, not
-the originals"). `audit_provenance.py` finds a producer present for sections
-citing these six files, which is correct for what a reader would actually
-run, not evidence that the original measurements were recovered.
+distinct from the unrecoverable originals — see section 7.2's own account
+("are reconstructions") and section 8's summary table ("Four reconstructed
+`.sio` probes and two reconstructed `.py` probes now exist and all check and
+run clean, but they reproduce the *protocols*, not the originals").
+`audit_provenance.py` finds a producer present for sections citing these six
+files, which is correct for what a reader would actually run, not evidence
+that the original measurements were recovered.
 
 See section 6 for what was reconstructed in their place, and how it is marked.
 
