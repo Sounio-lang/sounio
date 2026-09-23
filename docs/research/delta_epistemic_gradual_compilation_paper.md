@@ -9,23 +9,37 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.delta
 
 # Epistemic Gradual Compilation: A Self-Hosted Compiler that Applies its Type System to its Own Source
 
-> **Design target, not the shipped surface.** This paper is the direction
-> Sounio is being built toward. It was previously filed as `historical`, which
-> made it read as retired lineage; it is the design, so it is a current
-> `repo_only` document. The `Knowledge<T>` generic, the `Epistemic` effect that
-> gates `.value`, the refinement predicates (`confidence(k) ≥ 950`),
-> `Knowledge::exact`, units-as-type-parameters (`Knowledge<mg>`), and the
-> two-byte guard marker described below are **not** on the checked public
-> surface today — see `docs/compiler/KNOWN_LIMITATIONS.md`. What ships now is
-> `Epistemic { val: f64, variance: f64, confidence: i64 }` in
-> `stdlib/epistemic/knowledge.sio`: `ep_measured(val, std_dev)` stores
-> confidence 900, `ep_certain(val)` stores 1000; the read-only accessors
-> `ep_val` (returns `e.val`) and `ep_std` (returns `sqrt(e.variance)`) do
-> **not** propagate uncertainty, while the arithmetic ops `ep_add` /
-> `ep_div` / `ep_mul` / `ep_sub` and their `*_cov` covariance variants do —
-> `tests/run-pass/ep_gum_covariance.sio` anchors the covariance-aware
-> arithmetic variants. The confidence scale already agrees:
-> the paper's 0–1000 confidence is the scale the shipped type uses.
+> **Design target, not the shipped surface — but three layers, kept separate.**
+> This paper is the direction Sounio is being built toward. It was previously
+> filed as `historical`, which made it read as retired lineage; it is the
+> design, so it is a current `repo_only` document. Three distinct surfaces
+> must not be conflated:
+>
+> 1. **The built-in `Knowledge<T>` language surface ships today.** The generic
+>    `Knowledge<T>`, the `measure(...)` primitive, `.value` extraction gated by
+>    the `with Epistemic` effect, and confidence/epsilon refinement predicates
+>    (`Knowledge[f64, ε >= 0.82]`) are on the checked public surface and are
+>    pinned by the current fixtures `knowledge_value_with_epistemic.sio`,
+>    `knowledge_value_requires_epistemic.sio`, and
+>    `kl5_epsilon_confidence_boundary_ok.sio` (plus `measure`-exercising
+>    fixtures such as `seq_knowledge_nested_generic.sio` and
+>    `gum_correlated.sio`). The paper's `confidence(k) ≥ 950` notation maps
+>    onto this shipped epsilon/confidence refinement capability.
+> 2. **A separate shipped stdlib API:** `Epistemic { val: f64, variance: f64,
+>    confidence: i64 }` in `stdlib/epistemic/knowledge.sio` is a *distinct*,
+>    simpler flat-struct surface — **not** the same type as the built-in
+>    `Knowledge<T>`. Here `ep_measured(val, std_dev)` stores confidence 900 and
+>    `ep_certain(val)` stores 1000; the read-only accessors `ep_val` (returns
+>    `e.val`) and `ep_std` (returns `sqrt(e.variance)`) do **not** propagate
+>    uncertainty, while the arithmetic ops `ep_add` / `ep_div` / `ep_mul` /
+>    `ep_sub` and their `*_cov` covariance variants do — `tests/run-pass/
+>    ep_gum_covariance.sio` anchors the covariance-aware arithmetic variants.
+> 3. **What remains a design target (not shipped):** the paper's ten-word
+>    `Knowledge<T>` runtime layout, `Knowledge::exact`, units-as-type-parameters
+>    (`Knowledge<mg>`), and the two-byte `66 90` guard marker described in
+>    §6.3 are still aspirational — see `docs/compiler/KNOWN_LIMITATIONS.md`.
+>    The 0–1000 confidence scale, however, is shared by both shipped surfaces
+>    above.
 
 **Draft — POPL 2027 submission | Numbers updated 2026-04-21 | DOUBLE-BLIND VERSION**
 
