@@ -78,6 +78,7 @@ From repo root (self-hosted compiler, `bin/souc`):
 - `bin/souc check examples/hello.sio` (or `run`/`build` via the same CLI) to
   exercise parse → typecheck → (optionally) run end-to-end.
 
-- Keep `tests/run-pass` and `tests/compile-fail` runnable via the harness the
-  project uses — validated through the registered `scripts/ci/*` gates, not a
-  `compiler/` Cargo workspace (the retired Rust/Cranelift runner is gone).
+- Keep `tests/run-pass` and `tests/compile-fail` runnable via the canonical
+  harness `scripts/run_sio_test_suite.sh` (some targeted `scripts/ci/*` gates
+  wrap it) — not a `compiler/` Cargo workspace (the retired Rust/Cranelift
+  runner is gone).

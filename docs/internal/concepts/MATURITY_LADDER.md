@@ -13,8 +13,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 > registry live at [`docs/compiler/MATURITY.md`](../../compiler/MATURITY.md).
 > That page presents tiers — `Production` (registry: `claim_level=stable`,
 > `closure_status=closed`) and `Validated Research` (registry:
-> `claim_level=validated_research`, `closure_status=closed`; the named gate is
-> recorded separately in `evidence_kind`/`evidence_ref`) — that mirror the
+> `claim_level=validated_research`, `closure_status=closed`; supporting evidence
+> is recorded in `evidence_kind`/`evidence_ref`) — that mirror the
 > public-claim registry's `claim_level`/`closure_status` columns. This page is
 > complementary: it describes the measurement rules and the five-state ladder used
 > to assess a kind's internal evidence state. This ladder does not itself decide
