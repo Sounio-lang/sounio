@@ -139,17 +139,42 @@ strip_noise() {
 # parameters on one line): pushing on "(", "<", "[", "{", and popping a
 # closer ONLY when it matches what is actually on top of the stack. A ">"
 # (or any other closer) that does not match the top -- an arrow's ">", a
-# refinement's comparison ">", a comparison's "<" would be the mirror case
-# were it ever reported -- is left alone: neither opens nor closes anything,
-# exactly like any other ordinary character in the text.
+# refinement's comparison ">" -- is left alone: neither opens nor closes
+# anything, exactly like any other ordinary character in the text.
+#
+# Copilot follow-up (#2570): the mirror case predicted above -- a
+# refinement's own LESS-THAN comparison (`{x: i64 | x < 0}`) -- pushed a
+# spurious "<" the same way an unmatched "(" would corrupt the stack: with
+# that "<" on top, the refinement's own "}" no longer matches (top is now
+# "<", not "{"), so neither the spurious "<" nor the real "{" ever pop, and
+# depth never returns to 0 for the rest of the scan -- the tail then runs
+# past its real terminator entirely, potentially consuming a "with" clause
+# that belongs to a DIFFERENT, unrelated enclosing declaration and reporting
+# a genuinely bare type as non-bare (undercounting, the opposite direction
+# from every earlier finding here). Unlike ")"/">"/"]"/"}", an opening "<"
+# has no stack to consult -- there is nothing yet to disambiguate it
+# against. What distinguishes a generic's opening "<" from a comparison's is
+# local text shape instead: this codebase always writes a generic tight
+# against its type name (`Result<`, `Vec<`, no space), while a comparison is
+# always written with a space on both sides (`x < 0`, matching the `x > 0`
+# shape Copilot's own earlier example already used). Only push "<" when the
+# character immediately before it is an identifier character; a "<"
+# preceded by anything else (whitespace, punctuation, start of the tail) is
+# left alone, same as any other ordinary character.
 AWK_SCAN='
-function scan_tail(line, tail_start,    i, n, c, depth, stack) {
+function scan_tail(line, tail_start,    i, n, c, prev, depth, stack) {
     depth = 0
+    prev = ""
     n = length(line)
     i = tail_start
     while (i <= n) {
         c = substr(line, i, 1)
-        if (c == "(" || c == "<" || c == "[" || c == "{") {
+        if (c == "<") {
+            if (prev ~ /[A-Za-z0-9_]/) {
+                depth++
+                stack[depth] = c
+            }
+        } else if (c == "(" || c == "[" || c == "{") {
             depth++
             stack[depth] = c
         } else if (c == ")") {
@@ -164,6 +189,7 @@ function scan_tail(line, tail_start,    i, n, c, depth, stack) {
         } else if (c == "," && depth == 0) {
             return i
         }
+        prev = c
         i++
     }
     return n + 1
@@ -336,6 +362,33 @@ selftest() {
   if bare_hits_of "$tmp/neg10.sio" | grep -q .; then
     echo "  FALHA NEGATIVO 10: tipo-funcao com refinamento em tupla e efeito proprio contada como nu"; rc=1
   else echo "  ok   NEGATIVO 10: tipo-funcao com refinamento em tupla e efeito proprio nao conta como nu"; fi
+  # POSITIVE control 11 (#2570): the mirror of control 10 -- a refinement's
+  # own LESS-THAN comparison (`{x: i64 | x < 0}`), not a generic open. Before
+  # this fix, ANY bare "<" was pushed onto the stack unconditionally, so this
+  # comparison's "<" landed on top of the stack right where the refinement's
+  # own "{" should be; when the refinement's real "}" arrived, it no longer
+  # matched the (wrong) top of the stack and neither delimiter ever popped --
+  # depth never returned to 0 for the rest of the line, so the scan ran past
+  # its real terminator and could consume an unrelated ENCLOSING
+  # declaration's own with-clause from later on the same line, reporting a
+  # genuinely bare parameter type as non-bare (undercounting a real
+  # violation -- the opposite direction from every earlier finding here, but
+  # the same root cause: an opening delimiter pushed without checking
+  # whether it is really an opener in context). This is the control that
+  # would have caught it.
+  printf 'fn use_it(f: fn() -> ({x: i64 | x < 0}, f64)) -> f64 with IO { 0.0 }\n' > "$tmp/pos11.sio"
+  if bare_hits_of "$tmp/pos11.sio" | grep -q .; then
+    echo "  ok   POSITIVO 11: tipo-funcao com refinamento (comparacao <) em tupla e nu"
+  else echo "  FALHA POSITIVO 11: tipo-funcao nu nao detectado (< de comparacao tratado como generico)"; rc=1; fi
+  # NEGATIVE control 11 (#2570): companion to POSITIVE 11 -- the SAME
+  # refinement-with-less-than shape, but this time the fn-type parameter
+  # DOES carry its own effects. Without this control, "never push '<' at
+  # all" would also pass POSITIVE 11 while breaking every actual generic
+  # (NEGATIVO 7) at the same time.
+  printf 'fn use_it(f: fn() -> ({x: i64 | x < 0}, f64) with Mut) -> f64 { 0.0 }\n' > "$tmp/neg11.sio"
+  if bare_hits_of "$tmp/neg11.sio" | grep -q .; then
+    echo "  FALHA NEGATIVO 11: tipo-funcao com refinamento (comparacao <) e efeito proprio contada como nu"; rc=1
+  else echo "  ok   NEGATIVO 11: tipo-funcao com refinamento (comparacao <) e efeito proprio nao conta como nu"; fi
   rm -rf "$tmp"
   echo "falhas: $rc"
   return $rc
