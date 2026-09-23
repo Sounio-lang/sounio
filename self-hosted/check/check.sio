@@ -4595,12 +4595,125 @@ fn checker_bind_import_mutable_unknown_inplace(c: *mut Checker, name: Name) with
     checker_bind_import_unknown_with_mutability_inplace(c, name, true)
 }
 
-fn checker_collect_import_item_list_inplace(c: *mut Checker, opt: Option<Box<ImportItemList> >) with Mut, Panic, Div {
+// Names brought in by `use module::{name}` while collecting one module.
+// A second import of the same bare name is an ambiguity, not a silent
+// first-match. Code 14 is already "array indices must be integers", so
+// this diagnostic is E180. Reset at the start of each item-collect.
+var USER_IMPORT_N: i64 = 0
+var USER_IMPORT_LEN: [i64; 256] = [0; 256]
+var USER_IMPORT_AMBIG: [i64; 256] = [0; 256]
+var USER_IMPORT_MOD: [i64; 256] = [0; 256]
+var USER_IMPORT_BYTES: [i8; 32768] = [0; 32768]
+
+fn user_import_reset() with Mut {
+    USER_IMPORT_N = 0
+}
+
+fn user_import_slot_eq(slot: i64, name: Name, module_id: i64) -> bool with Mut, Panic {
+    if USER_IMPORT_MOD[slot as usize] != module_id { return false }
+    if USER_IMPORT_LEN[slot as usize] != name.len { return false }
+    var n = name.len
+    if n > 128 { n = 128 }
+    var i: i64 = 0
+    let base = slot * 128
+    while i < n {
+        if USER_IMPORT_BYTES[(base + i) as usize] != name.buf[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+// Forget one module's import rows. The visibility-context driver collects
+// the same program more than once in one process, so a note must not leak
+// into the next pass: the second pass would see AMBIG=2 and invent an E180.
+fn user_import_drop_module(module_id: i64) with Mut, Panic {
+    var s: i64 = 0
+    while s < USER_IMPORT_N {
+        if USER_IMPORT_MOD[s as usize] == module_id {
+            USER_IMPORT_MOD[s as usize] = 0 - 1
+            USER_IMPORT_AMBIG[s as usize] = 0
+        }
+        s = s + 1
+    }
+}
+
+fn user_import_note(name: Name, module_id: i64) -> i64 with Mut, Panic {
+    if name.len <= 0 { return 0 }
+    var s: i64 = 0
+    while s < USER_IMPORT_N {
+        if USER_IMPORT_MOD[s as usize] == module_id && USER_IMPORT_AMBIG[s as usize] == 2 && user_import_slot_eq(s, name, module_id) {
+            return 2
+        }
+        if USER_IMPORT_MOD[s as usize] == module_id && user_import_slot_eq(s, name, module_id) {
+            USER_IMPORT_AMBIG[s as usize] = 2
+            return 2
+        }
+        s = s + 1
+    }
+    // Reuse a slot dropped by user_import_drop_module before growing.
+    var dead: i64 = 0 - 1
+    s = 0
+    while s < USER_IMPORT_N {
+        if USER_IMPORT_MOD[s as usize] == (0 - 1) {
+            dead = s
+            break
+        }
+        s = s + 1
+    }
+    if dead < 0 && USER_IMPORT_N >= 256 { return 1 }
+    let slot = if dead < 0 { USER_IMPORT_N } else { dead }
+    if dead < 0 {
+        USER_IMPORT_N = slot + 1
+    }
+    USER_IMPORT_LEN[slot as usize] = name.len
+    USER_IMPORT_MOD[slot as usize] = module_id
+    USER_IMPORT_AMBIG[slot as usize] = 1
+    var n = name.len
+    if n > 128 { n = 128 }
+    var i: i64 = 0
+    let base = slot * 128
+    while i < n {
+        USER_IMPORT_BYTES[(base + i) as usize] = name.buf[i as usize]
+        i = i + 1
+    }
+    1
+}
+
+fn user_import_is_once(name: Name, module_id: i64) -> bool with Mut, Panic {
+    var s: i64 = 0
+    while s < USER_IMPORT_N {
+        if USER_IMPORT_AMBIG[s as usize] == 1 && user_import_slot_eq(s, name, module_id) { return true }
+        s = s + 1
+    }
+    false
+}
+
+fn user_import_is_ambig(name: Name, module_id: i64) -> bool with Mut, Panic {
+    var s: i64 = 0
+    while s < USER_IMPORT_N {
+        if USER_IMPORT_AMBIG[s as usize] == 2 && user_import_slot_eq(s, name, module_id) { return true }
+        s = s + 1
+    }
+    false
+}
+
+fn checker_report_ambiguous_import_inplace(c: *mut Checker, span: Span, name: Name) with Mut, IO, Panic, Div, Alloc {
+    checker_report_error_at_inplace(c, span, 180, 0, 0, 0)
+    print("   = name ")
+    e035_print_ident(name)
+    print("\n")
+}
+
+fn checker_collect_import_item_list_inplace(c: *mut Checker, opt: Option<Box<ImportItemList> >, span: Span) with Mut, Panic, Div, IO, Alloc {
     var cursor = opt
     while true {
         match cursor {
             Some(node) => {
-                checker_bind_import_unknown_inplace(c, (*node).head)
+                let imported = (*node).head
+                if user_import_note(imported, (*c).current_module_id) == 2 {
+                    checker_report_ambiguous_import_inplace(c, span, imported)
+                }
+                checker_bind_import_unknown_inplace(c, imported)
                 cursor = (*node).tail
             }
             None => break
@@ -4657,7 +4770,7 @@ fn checker_collect_known_module_backing_imports_inplace(c: *mut Checker, path: A
 }
 
 fn checker_collect_use_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Div, Alloc {
-    checker_collect_import_item_list_inplace(c, item.use_items)
+    checker_collect_import_item_list_inplace(c, item.use_items, item.span)
     // Path-form named import `use module::symbol` (no braces, no glob): the
     // parser leaves the symbol as the last path segment with use_items=None.
     // Bind that last segment so visibility preflight does not E137 it when the
@@ -4667,6 +4780,9 @@ fn checker_collect_use_item_inplace(c: *mut Checker, item: Item) with Mut, Panic
     if !item.use_glob && item.use_items == None && item.use_path.seg_count >= 2 {
         let last = checker_copy_string_list_tail_to_name(item.use_path.segments)
         if !name_is_empty(last) {
+            if user_import_note(last, (*c).current_module_id) == 2 {
+                checker_report_ambiguous_import_inplace(c, item.span, last)
+            }
             checker_bind_import_unknown_inplace(c, last)
         }
     }
@@ -5924,6 +6040,9 @@ fn checker_collect_type_alias_inplace(c: *mut Checker, name: Name, ty_opt: Optio
 }
 
 pub fn checker_collect_items_inplace(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
+    // Each (re)collection of a module starts its import table fresh; a
+    // module collected twice in one process must not trip its own note.
+    user_import_drop_module((*c).current_module_id)
     // Stash the program items so the deep call-arg compat path can resolve
     // ontology subclass relations by name (E009 subsumption). Single shallow
     // pointer write — persists where deep ontology_kernel mutation does not.
@@ -10752,7 +10871,19 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
     match e.left {
         Some(callee_expr) => {
             if (*callee_expr).kind == ExprKind::ExprIdent {
-                direct_sig_id = checker_fn_sigs_find_inplace(c, (*callee_expr).name)
+                let callee_name = (*callee_expr).name
+                if user_import_is_ambig(callee_name, (*c).current_module_id) {
+                    checker_report_ambiguous_import_inplace(c, e.span, callee_name)
+                    return ty_error()
+                }
+                // A foreign public fn is not in scope just because it was
+                // collected. Same-module wins. A single `use` names the one
+                // imported candidate. Anything else must not be picked by
+                // collection order (main.sio of the #1702 corpus: E137).
+                direct_sig_id = fn_sig_table_find_in_module((*c).fn_sigs, callee_name, (*c).current_module_id)
+                if direct_sig_id < 0 && user_import_is_once(callee_name, (*c).current_module_id) {
+                    direct_sig_id = fn_sig_table_find_one_public((*c).fn_sigs, callee_name)
+                }
             } else if (*callee_expr).kind == ExprKind::ExprPath && (*callee_expr).path.seg_count >= 2 {
                 let path_type_name = checker_copy_string_list_to_name((*callee_expr).path.segments)
                 let path_method_name = checker_copy_string_list_tail_to_name((*callee_expr).path.segments)
@@ -10870,6 +11001,27 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
         let ns_result = checker_propagate_call_result_ns_inplace(c, effective_return_type, ns_proj_d.0)
         (*c).last_call_arg_ns = outer_arg_ns_d
         return ns_result
+    }
+    // Ident callee that is neither local nor a single explicit import.
+    // Do not fall through to the global public table: that picks a
+    // same-named pub fn by collection order (the #1702 main.sio case).
+    if direct_sig_id < 0 {
+        match e.left {
+            Some(missed) => {
+                if (*missed).kind == ExprKind::ExprIdent {
+                    // Runtime builtins (println, read_file, ...) are bound in
+                    // env with TyUnknown and have no fn sig, so direct_sig_id
+                    // is -1 for them. Only a name that is neither locally
+                    // defined, nor a single import, nor env-bound, nor a
+                    // math-phantom is genuinely undeclared here.
+                    if !name_is_unimplemented_native_math((*missed).name) && !(*c).env.has_binding((*missed).name) {
+                        checker_report_undeclared_inplace(c, e.span, (*missed).name)
+                        return ty_error()
+                    }
+                }
+            }
+            None => {}
+        }
     }
     // Callee via the *mut spine, matched locally so the call path does not pass
     // Option<Box<Expr>> through another *mut helper boundary.
@@ -11728,6 +11880,10 @@ fn checker_ontology_boundary_check_call_arg_contract_inplace(c: *mut Checker, ar
 // linear-consume in place; returns only the TypeEntry (no 164KB self SRET — the by-value
 // arm's `(c2, ident_ty)` return was the last bridge before crash in 165 deeply-nested cases).
 fn checker_check_ident_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
+    if user_import_is_ambig(e.name, (*c).current_module_id) {
+        checker_report_ambiguous_import_inplace(c, e.span, e.name)
+        return ty_error()
+    }
     if !(*c).env.has_binding(e.name) {
         // Functions are not bound in env (collect keeps them in fn_sigs only) — resolve a bare
         // function reference via the chunked fn_sigs before reporting E137.
@@ -16832,6 +16988,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     // silent saturation to the unknown noise-set handle.
     else if code == 178 { print("noise-source capacity exceeded: this checker run has issued more independent measurement sources than the noise-symbol domain can represent, so correlation between them can no longer be tracked") }
     else if code == 179 { print("noise-set interning table exhausted: too many distinct source-sets in one checker run, so correlation between the values that carry them can no longer be tracked") }
+    else if code == 180 { print("name is imported from more than one module") }
     else if code == 221 { print("this math function is bound for typechecking but the native backend cannot emit it; the call would compile and then die on an illegal instruction at run time") }
     else if code == 244 { print("Knowledge provenance boundary mismatch: the argument's provenance cannot satisfy the parameter's requirement (trusted classes: Source, Literature, Measured)") }
     else if code == 245 { print("arithmetic between two Knowledge<T> values is not supported by this compiler; the operation typechecks but has no lowering, so it would produce a wrong value or crash at runtime") }
@@ -17129,6 +17286,9 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
         print("\n   =       constants that must move with it: ns_source_cap() (ns_words()*64),")
         print("\n   =       the [i64; N] widths of NoiseSetTable.pos/neg (ns_cap()*ns_words()),")
         print("\n   =       ns_table_bytes(), and the literal in ns_table_alloc().\n")
+    }
+    else if code == 180 {
+        print("   |\n   = help: a bare name imported from two modules is ambiguous; pick one with `as` or qualify the path\n")
     }
     else if code == 179 {
         print("   |\n   = help: the noise-symbol interning table holds 4096 distinct source-sets")

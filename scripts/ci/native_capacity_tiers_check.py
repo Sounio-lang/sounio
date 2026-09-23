@@ -18,6 +18,8 @@ SOURCES = [
     ("cgx", "self-hosted/native/codegen_x86_linux.sio"),
     ("cg", "self-hosted/native/codegen.sio"),
     ("ir", "self-hosted/ir/ir.sio"),
+    ("reloc", "self-hosted/native/reloc.sio"),
+    ("ldir", "self-hosted/native/lower_ir.sio"),
 ]
 
 
@@ -54,6 +56,9 @@ def main():
     base_addr = int(sys.argv[6])
     exp_label = int(sys.argv[7])
     exp_rodata = int(sys.argv[8])
+    exp_dyn_syms = int(sys.argv[9])
+    exp_dyn_libs = int(sys.argv[10])
+    exp_extern_reloc = int(sys.argv[11])
 
     loaded = []
     for _key, rel in SOURCES:
@@ -61,7 +66,7 @@ def main():
         if not path.is_file():
             fail("source_missing_%s" % rel.replace("/", "_"))
         loaded.append(path.read_text(encoding="utf-8"))
-    encode, frame, cgx, cg, irsrc = loaded
+    encode, frame, cgx, cg, irsrc, reloc, ldir = loaded
 
     # Tier 1: NC_BIG_CODE. Declarations stay literals; bound checks use the
     # accessor. Pinned together so a half-applied bump cannot ship.
@@ -283,10 +288,74 @@ def main():
         if not arg_form.search(line):
             fail("elf_base_addr_unexpected_form")
 
+    # -- 10. dynlink tiers: symbol/lib caps and the ExternRelocTable ------
+    # History: the dynlink emitter hard-capped at 8 symbols / 4 libraries with
+    # a coupled 256-byte dynstr literal, so a program with more than 4 DT_NEEDED
+    # libraries was REFUSED (rc=22/23) rather than miscompiled -- a hard wall,
+    # not a silent one, but the same class of un-pinned literal. ExternRelocTable
+    # was [ExternReloc; 128] with a SILENT drop (no sentinel), and the bound was
+    # duplicated in lower_ir.sio, so raising the codegen caps alone would have
+    # just moved the silent cliff to 128. Both are now pinned here.
+    sym_acc = only(accessor("native_v2_dynlink_max_symbols", ""), cgx,
+                   "native_v2_dynlink_max_symbols_accessor")
+    lib_acc = only(accessor("native_v2_dynlink_max_libs", ""), cgx,
+                   "native_v2_dynlink_max_libs_accessor")
+    if int(sym_acc.group(1)) != exp_dyn_syms:
+        fail("dynlink_max_symbols_expected_%d_got_%s" % (exp_dyn_syms, sym_acc.group(1)))
+    if int(lib_acc.group(1)) != exp_dyn_libs:
+        fail("dynlink_max_libs_expected_%d_got_%s" % (exp_dyn_libs, lib_acc.group(1)))
+    # Every lib-tracking array declaration must agree with max_libs().
+    lib_decls = re.findall(
+        r"^\s*var (?:libs|lib_ids|lib_str_off|ds_lib_ids): \[i64; ([0-9]+)\] = \[0; ([0-9]+)\]$",
+        cgx, re.MULTILINE)
+    if len(lib_decls) < 4:
+        fail("dynlink_lib_array_decl_count_%d" % len(lib_decls))
+    vals = set(int(v) for pair in lib_decls for v in pair)
+    vals.add(int(lib_acc.group(1)))
+    if vals != set([exp_dyn_libs]):
+        fail("dynlink_lib_array_tier_expected_%d_got_%s" % (exp_dyn_libs, sorted(vals)))
+    # No surviving literal bound against the retired dynlink caps. \b before
+    # the identifier so `seen < 4` is not mistaken for a cap check.
+    for lit in (4, 8):
+        for line in cgx.splitlines():
+            if re.search(r"\bn(?:_libs_w|_libs)?\s*[<>]=?\s*%d\b" % lit, line):
+                fail("stray_dynlink_literal_bound_%d" % lit)
+    # ExternRelocTable: declaration matches accessor, and it is fail-closed.
+    er_tier = only(r"^\s*pub entries: \[ExternReloc; ([0-9]+)\],?$", reloc,
+                            "extern_reloc_decl")
+    er_acc = only(r"^pub fn extern_reloc_table_capacity\(\) -> i64 \%s ([0-9]+) \%s$"
+                  % (LB, RB), reloc, "extern_reloc_capacity_accessor")
+    vals = set([int(er_tier.group(1)), int(er_acc.group(1))])
+    if vals != set([exp_extern_reloc]):
+        fail("extern_reloc_tier_expected_%d_got_%s" % (exp_extern_reloc, sorted(vals)))
+    if not re.search(r"pub overflow: bool,", reloc):
+        fail("extern_reloc_overflow_field_missing")
+    if not re.search(r"out\.overflow = false", reloc):
+        fail("extern_reloc_overflow_not_initialised")
+    er_body = only(r"^pub fn add_extern_reloc\(.*?\n\%s$" % RB, reloc,
+                   "add_extern_reloc", re.MULTILINE | re.DOTALL).group(0)
+    if "extern_reloc_table_capacity()" not in er_body:
+        fail("add_extern_reloc_not_using_accessor")
+    if not re.search(r"\%s\s*else\s*\%s(?:.|\n)*?\(\*table\)\.overflow = true" % (RB, LB), er_body):
+        fail("add_extern_reloc_missing_sentinel")
+    # lower_ir.sio duplicate guard must use the accessor and flag overflow.
+    if not re.search(r"if er_idx < extern_reloc_table_capacity\(\) \%s" % LB, ldir):
+        fail("lower_ir_duplicate_bound_not_using_accessor")
+    if not re.search(r"c\.extern_relocs\.overflow = true", ldir):
+        fail("lower_ir_missing_sentinel")
+    rc26 = r"if \(\*nc\)\.extern_relocs\.overflow \%s return 26 \%s" % (LB, RB)
+    if not re.search(rc26, cgx):
+        fail("rc26_extern_reloc_overflow_check_missing")
+    # Distinct rc for the lib-cap refusal (27), so it cannot be confused with
+    # the rodata-overflow refusal (23) later in the same writer function.
+    if not re.search(r"n_libs > native_v2_dynlink_max_libs\(\)\) \%s return 27 \%s" % (LB, RB), cgx):
+        fail("rc27_lib_cap_refusal_missing")
+
     print("NATIVE_CAPACITY_TIERS_CHECK "
-          "code=%d reloc=%d elf=%d legacy_elf=%d label=%d rodata=%d base_addr_literals=%d "
-          "fail_closed=rc19/rc20/rc21/rc22/rc23 coherent=pass"
-          % (exp_code, exp_reloc, exp_elf, exp_legacy_elf, exp_label, exp_rodata, len(occ)))
+          "code=%d reloc=%d elf=%d legacy_elf=%d label=%d rodata=%d dyn_syms=%d dyn_libs=%d extern_reloc=%d base_addr_literals=%d "
+          "fail_closed=rc19/rc20/rc21/rc22/rc23/rc26 coherent=pass"
+          % (exp_code, exp_reloc, exp_elf, exp_legacy_elf, exp_label, exp_rodata,
+             exp_dyn_syms, exp_dyn_libs, exp_extern_reloc, len(occ)))
 
 
 if __name__ == "__main__":

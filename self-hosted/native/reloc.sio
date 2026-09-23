@@ -331,9 +331,19 @@ pub struct ExternReloc {
 }
 
 pub struct ExternRelocTable {
-    pub entries: [ExternReloc; 128],
+    pub entries: [ExternReloc; 512],
     pub count: i64,
+    // Set when add_extern_reloc is called with the table already full. Same
+    // contract as RelocationTable.overflow above and NativeCompiler.reloc_overflow:
+    // without it the drop is invisible and the ELF ships with an unresolved
+    // dynlink symbol. The declaration above must stay a literal; every bound
+    // check calls extern_reloc_table_capacity() instead of repeating 512.
+    pub overflow: bool,
 }
+
+// Single source of truth for the ExternRelocTable bound, same contract as
+// reloc_table_capacity() above and nc_flat_reloc_capacity() in frame.sio.
+pub fn extern_reloc_table_capacity() -> i64 { 512 }
 
 pub fn extern_reloc_empty_entry() -> ExternReloc {
     ExternReloc { offset: 0, sym_buf: [0; 384], sym_len: 0 }
@@ -342,13 +352,16 @@ pub fn extern_reloc_empty_entry() -> ExternReloc {
 pub fn extern_reloc_table_new() -> ExternRelocTable with Mut {
     var out: ExternRelocTable
     out.count = 0
+    out.overflow = false
     out
 }
 
 pub fn add_extern_reloc(table: &! ExternRelocTable, offset: i64, name_buf: [i8; 384], name_len: i64) with Mut, Panic {
-    if (*table).count < 128 {
+    if (*table).count < extern_reloc_table_capacity() {
         let idx = (*table).count
         (*table).entries[idx as usize] = ExternReloc { offset: offset, sym_buf: name_buf, sym_len: name_len }
         (*table).count = idx + 1
+    } else {
+        (*table).overflow = true
     }
 }
