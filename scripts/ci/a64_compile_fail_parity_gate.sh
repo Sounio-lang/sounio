@@ -142,16 +142,30 @@ while IFS= read -r f; do
     req="$(sed -n 's|^//@[[:space:]]*requires:[[:space:]]*\([A-Za-z_][A-Za-z_0-9]*\).*|\1|p' "$f" | head -1)"
     case "$req" in
         "")               printf '%s\n' "$f" >> "$WORK_DIR/in_scope.txt" ;;
-        gpu|llvm)         printf '%s\n' "$f" >> "$WORK_DIR/in_scope.txt" ;;
+        # `slow` (scripts/dev/run_sio_test_suite_v2.sh:473-481) is engine-agnostic
+        # like gpu|llvm below -- it marks execution TIME (nightly slow-lane only),
+        # not an engine choice, so it belongs in the same arm rather than the
+        # excluded one: excluding it here would make this gate silently skip a
+        # legitimately-tagged compile-fail fixture instead of compiling it.
+        gpu|llvm|slow)    printf '%s\n' "$f" >> "$WORK_DIR/in_scope.txt" ;;
         "$ENGINE")        printf '%s\n' "$f" >> "$WORK_DIR/in_scope.txt" ;;
         madaros|lean_single)
+                          printf '%s\t%s\n' "$(basename "$f" .sio)" "$req" >> "$WORK_DIR/excluded.txt" ;;
+        # science/qualification are dormant lanes (scripts/dev/run_sio_test_suite_v2.sh):
+        # recognized but always-skip until a consuming workflow sets
+        # SOUNIO_SCIENCE_AVAILABLE/SOUNIO_QUALIFICATION_AVAILABLE. Excluding
+        # them here (not in_scope, unlike the engine-agnostic gpu|llvm arm)
+        # keeps this engine-parity gate from compiling them directly and
+        # silently activating a Qualification-tagged fixture the moment
+        # someone adds one, before that workflow exists.
+        science|qualification)
                           printf '%s\t%s\n' "$(basename "$f" .sio)" "$req" >> "$WORK_DIR/excluded.txt" ;;
         *)                unknown_requires="$unknown_requires $f:$req" ;;
     esac
 done < <(find tests/compile-fail -name '*.sio' | LC_ALL=C sort)
 
 if [[ -n "$unknown_requires" ]]; then
-    echo "--- unrecognised '//@ requires:' values (expected: gpu|llvm|madaros|lean_single) ---"
+    echo "--- unrecognised '//@ requires:' values (expected: gpu|llvm|slow|madaros|lean_single|science|qualification) ---"
     printf '%s\n' $unknown_requires
     echo "A64_COMPILE_FAIL_PARITY_GATE=FAIL (unknown requires would silently re-admit the wrong engine)"
     exit 1

@@ -1,0 +1,118 @@
+# Self-hosted GitHub Actions runner for the first Sounio CI Fabric pool.
+#
+# NOT DEPLOYED. This is groundwork for a human operator (see RUNNER_SETUP.md)
+# -- nothing in this repository applies it, and no repo variable currently
+# points a workflow at its label. The dormant smoke workflow that would use it
+# is .github/workflows/ci-fabric-pool-smoke.yml.
+#
+# Modeled directly on slurm-jobs/kaxi-ptxas-accept/runner/kaxi-ci-runner.yaml.
+# Same shape, same caveats: a plain Deployment (the myoung34/github-runner
+# community image), not GitHub's own Actions Runner Controller (ARC) -- no
+# runner-scale-set autoscaling, no ephemeral-per-job pods, no webhook-driven
+# scale-to-zero. This is intentionally the smallest possible first pool, not a
+# production topology; see RUNNER_SETUP.md for what changes before it is one.
+#
+# ── DO NOT DEPLOY THIS NEAR THE t560 CONTROL-PLANE NODE ──────────────────────
+# t560 (cpuops-t560-proxmox) runs etcd + kube-apiserver for this cluster.
+# scripts/dev/souc-build-remote.sh refuses to schedule heavy Slurm work there
+# by name-matching *t560* in its target node; this Deployment has no such
+# protection because Kubernetes scheduling decisions are not expressed in a
+# workload's own manifest. There is also circumstantial evidence (matching
+# core counts) that the interactive workspace pod already shares a node with
+# t560 -- see CLAUDE.md's "Concurrency discipline" section on the 2026-05-29
+# CPU-saturation eviction. Before deploying this, an operator must pin
+# placement explicitly (fill in the nodeAffinity/nodeSelector below, or an
+# equivalent taint/toleration scheme) and confirm with the cluster admin that
+# it lands away from any control-plane node. This file cannot enforce that
+# from a committed manifest -- a hardcoded node name here would go stale the
+# next time the cluster's topology changes, which is worse than no rule. See
+# RUNNER_SETUP.md.
+#
+# Prereqs (same three steps as kaxi's, spelled out in RUNNER_SETUP.md):
+#   1. kubectl apply -f runner/ci-fabric-rbac.yaml
+#   2. kubectl -n slurm-pilot create secret generic ci-fabric-runner-gh \
+#        --from-literal=ACCESS_TOKEN='<github-pat-that-can-manage-runners>'
+#   3. Build/push the image from slurm-jobs/kaxi-ptxas-accept/runner/Dockerfile.kaxi-runner
+#      (or a trimmed variant -- this pool does not need the kubectl/build-essential
+#      additions that image carries for the Slurm/GPU lane) and set `image:` below.
+#
+# Apply (only once the above is done AND placement is pinned):
+#   kubectl apply -f slurm-jobs/sounio-ci-fabric/runner/ci-fabric-deployment.yaml
+#   kubectl -n slurm-pilot logs deploy/ci-fabric-runner -f   # watch it register
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ci-fabric-runner
+  namespace: slurm-pilot
+  labels:
+    app: ci-fabric-runner
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ci-fabric-runner
+  template:
+    metadata:
+      labels:
+        app: ci-fabric-runner
+    spec:
+      serviceAccountName: ci-fabric-runner   # ambient in-cluster kubeconfig
+      # This pool needs no Kubernetes API access at all (see runner/ci-fabric-rbac.yaml
+      # -- ServiceAccount only, no Role/RoleBinding). The default ServiceAccount
+      # token would still be mounted into every job pod regardless of that, handing
+      # ordinary CI steps a live cluster bearer token that would silently inherit
+      # any permissions bound to this account later. Disable automount until a real
+      # Slurm-submitting lane needs its own dedicated, separately-bound account.
+      automountServiceAccountToken: false
+      # affinity:
+      #   nodeAffinity:
+      #     requiredDuringSchedulingIgnoredDuringExecution:
+      #       nodeSelectorTerms:
+      #         - matchExpressions:
+      #             - key: kubernetes.io/hostname
+      #               operator: NotIn
+      #               values: ["REPLACE_ME_WITH_THE_CONTROL_PLANE_NODE_NAME"]
+      containers:
+        - name: runner
+          image: REPLACE_ME/ci-fabric-runner:1
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: REPO_URL
+              value: "https://github.com/Sounio-lang/sounio"
+            - name: ACCESS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: ci-fabric-runner-gh
+                  key: ACCESS_TOKEN
+            - name: RUNNER_NAME
+              value: "ci-fabric-runner"
+            - name: LABELS
+              value: "self-hosted,linux,x64,ci-fabric"   # set repo var SOUNIO_CI_FABRIC_RUNNER_LABELS=ci-fabric
+            - name: RUNNER_SCOPE
+              value: "repo"
+            - name: RUNNER_WORKDIR
+              value: "/tmp/runner-work"
+            - name: DISABLE_AUTO_UPDATE
+              value: "true"
+            # myoung34/github-runner defaults this to false, leaving
+            # ACCESS_TOKEN (a runner-management PAT) and the other
+            # registration variables above in the runner process
+            # environment -- inherited by every job step that lands on this
+            # pool. Requires an image build that supports post-registration
+            # env cleanup (the entrypoint unsets these once the runner has
+            # registered); verify that before relying on it.
+            - name: UNSET_CONFIG_VARS
+              value: "true"
+          resources:
+            requests:
+              cpu: "4"
+              memory: "8Gi"
+            limits:
+              cpu: "8"
+              memory: "16Gi"
+          volumeMounts:
+            - name: work
+              mountPath: /tmp/runner-work
+      volumes:
+        - name: work
+          emptyDir: {}

@@ -68,10 +68,31 @@ jobs:
           echo "NEGATIVE_CONTROL_PASS"
           tail -20 /tmp/corr_neg.log
 
-      - name: Build current-source Madaros (E221 lives in the checker)
-        run: bash scripts/ci/build_modular_madaros.sh artifacts/self-hosted/madaros
+      # Restore-only, best-effort: this workflow runs as a separate GitHub
+      # Actions *run* from ci.yml's madaros-build job, so the two cannot share
+      # an artifact via actions/upload-artifact (single-run scope only) -- only
+      # actions/cache reaches across workflow files. A miss (races ci.yml's own
+      # write, or a different impact selection) falls straight through to the
+      # from-source build below, unchanged from today's behavior. Deliberately
+      # restore-only (not the read+write action) so this workflow never races
+      # ci.yml's own cache write for the same key.
+      # Key MUST match ci.yml's madaros-build job's key exactly (including
+      # github.sha -- GitHub Actions cache keys are immutable on an exact hit,
+      # so omitting the commit sha would let a stale entry from an earlier
+      # commit with the same hashFiles() value permanently occupy this slot;
+      # see ci.yml's own comment on this step for the full failure mode).
+      - name: Restore cached Madaros build
+        uses: actions/cache/restore@v4
+        with:
+          path: artifacts/self-hosted/madaros-build-cache
+          key: madaros-build-v1-${{ runner.os }}-${{ github.sha }}-${{ hashFiles('self-hosted/**', 'stdlib/**', 'bin/souc-linux-x86_64', 'bin/souc-lean-single-x86_64', 'bin/souc', 'scripts/ci/build_modular_madaros.sh', 'scripts/dev/souc-build-lock.sh') }}
+
+      - name: Ensure verified Madaros build (E221 lives in the checker)
+        env:
+          SOUNIO_EXPECTED_SOURCE_SHA: ${{ github.sha }}
+        run: bash scripts/ci/ensure_madaros_build.sh artifacts/self-hosted/madaros-build-cache/madaros
 
       - name: R6 acceptance controls
         env:
-          MADAROS_RAW_BIN: ${{ github.workspace }}/artifacts/self-hosted/madaros
+          MADAROS_RAW_BIN: ${{ github.workspace }}/artifacts/self-hosted/madaros-build-cache/madaros
         run: bash scripts/ci/correlated_effect_gate.sh

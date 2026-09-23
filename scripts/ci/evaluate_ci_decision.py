@@ -30,6 +30,22 @@ def main() -> int:
 
     required = {
         "contracts": True,
+        # madaros-build is intentionally NOT gated here (and not in
+        # ci-decision's own `needs:` in ci.yml either -- kept in lockstep by
+        # the consistency check in impact_ci_selftest.sh). It is a pure
+        # build-once optimization (upload-artifact within this run,
+        # actions/cache across workflow files); every one of its consumers
+        # (madaros-witness-gate, gate-wave-0, madaros-current-source-deref-f64,
+        # full-test-suite-madaros) runs `if: always()` and self-heals via
+        # scripts/ci/ensure_madaros_build.sh, which falls back to building
+        # from source on any missing/unverified artifact. Requiring
+        # madaros-build's OWN result to be `success` would fail the PR on a
+        # pure cache/upload-artifact flake (e.g. a transient publish failure
+        # after a successful compile) even when every consumer independently
+        # rebuilt-or-reused, verified, and passed. A producer failure that
+        # reflects a REAL source break still surfaces: the identical
+        # from-source build the producer attempted also fails inside each
+        # (required) consumer's own self-heal attempt.
         "native-selfhost-linux-x86_64": any(
             truthy(impact.get(key)) for key in ("compiler", "runtime", "stdlib", "tests", "full")
         ),
@@ -39,6 +55,9 @@ def main() -> int:
         ),
         "native-selfhost-macos-arm64": truthy(impact.get("compiler")) or truthy(impact.get("full")),
         "full-test-suite": any(truthy(impact.get(key)) for key in ("compiler", "runtime", "stdlib", "tests", "full")),
+        "full-test-suite-madaros": any(
+            truthy(impact.get(key)) for key in ("compiler", "runtime", "stdlib", "tests", "full")
+        ),
         "madaros-witness-gate": any(
             truthy(impact.get(key)) for key in ("compiler", "runtime", "stdlib", "tests", "full")
         ),
