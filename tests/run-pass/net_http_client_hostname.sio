@@ -1,0 +1,123 @@
+//@ run-pass
+//@ requires: madaros
+//
+// Fork()-based loopback test for stdlib/net/http_client.sio's http_get,
+// exercising the HOSTNAME (DNS) code path specifically.
+//
+// tests/run-pass/net_http_client_localhost.sio already covers http_get
+// against the numeric-IP passthrough path ("127.0.0.1"), and
+// tests/run-pass/net_dns_resolve.sio already proves resolve_ipv4("localhost")
+// resolves correctly in isolation -- but neither commits coverage of
+// http_get's INTEGRATION with resolve_ipv4 (the `is_numeric_ip == false`
+// branch in http_get that calls into dns.sio). This test closes that gap:
+// it drives http_get with the literal host string "localhost" (not an IP),
+// forcing http_get down the resolve_ipv4 branch end to end.
+//
+// Runs on its own port (18095) distinct from net_http_client_localhost.sio's
+// 18092/18093 to avoid TIME_WAIT collisions between test files that may run
+// close together in time.
+//
+// See tests/run-pass/net_http_client_localhost.sio for the linear-typing
+// destructure-before-fork workaround this test also relies on (Finding 9 of
+// docs/audit/TLS_PREREQ_WIDE_INT_AND_RAW_BUFFERS_2026-08-23.md).
+
+use net::socket::*
+use net::http_client::*
+
+fn reap_child(pid: i64) with IO {
+    if pid > 0 {
+        syscall6(62, pid, 9, 0, 0, 0, 0)   // kill(pid, SIGKILL)
+        syscall6(61, pid, 0, 0, 0, 0, 0)   // wait4(pid, ...) -- blocks until reaped
+    }
+}
+
+fn write_str(buf: &RawBuf, offset: i64, s: string) -> i64 with IO {
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        rawbuf_set(buf, offset + i, str_char_at(s, i))
+        i = i + 1
+    }
+    offset + n
+}
+
+fn main() -> i64 with IO {
+    let server_ip = rawbuf_new(16)
+    rawbuf_set(&server_ip, 0, 127)
+    rawbuf_set(&server_ip, 1, 0)
+    rawbuf_set(&server_ip, 2, 0)
+    rawbuf_set(&server_ip, 3, 1)
+
+    let (listener, listen_err) = tcp_listen(&server_ip, 18095, 1)
+    let TcpSocket { fd: listener_fd } = listener
+
+    let pid = syscall6(57, 0, 0, 0, 0, 0, 0)   // fork()
+    if pid == 0 {
+        // Child: accept one connection, drain the request, send a fixed
+        // response, then exit. Never falls through to parent-only code.
+        let child_listener = TcpSocket { fd: listener_fd }
+        let (child_listener2, conn, accept_err) = tcp_accept(child_listener)
+        tcp_close(child_listener2)
+
+        let drain_buf = rawbuf_new(4096)
+        let (conn2, _drained) = tcp_recv(conn, &drain_buf, 4096)
+
+        let response = rawbuf_new(64)
+        var off: i64 = 0
+        off = write_str(&response, off, "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello")
+        let (conn3, _sent) = tcp_send(conn2, &response, off)
+        tcp_close(conn3)
+
+        syscall6(231, 0, 0, 0, 0, 0, 0)   // exit_group(0)
+        return 0
+    }
+
+    // Parent: close its own copy of the listening socket (the child owns
+    // the one that matters), then drive http_get with "localhost" as the
+    // host argument -- this is the DNS/hostname branch, not the numeric-IP
+    // passthrough.
+    let parent_listener = TcpSocket { fd: listener_fd }
+    tcp_close(parent_listener)
+
+    let host = rawbuf_new(16)
+    rawbuf_set(&host, 0, 108)  // 'l'
+    rawbuf_set(&host, 1, 111)  // 'o'
+    rawbuf_set(&host, 2, 99)   // 'c'
+    rawbuf_set(&host, 3, 97)   // 'a'
+    rawbuf_set(&host, 4, 108)  // 'l'
+    rawbuf_set(&host, 5, 104)  // 'h'
+    rawbuf_set(&host, 6, 111)  // 'o'
+    rawbuf_set(&host, 7, 115)  // 's'
+    rawbuf_set(&host, 8, 116)  // 't'
+
+    let path = rawbuf_new(4)
+    rawbuf_set(&path, 0, 47)   // '/'
+
+    let response = http_get(&host, 9, 18095, &path, 1)
+
+    reap_child(pid)
+
+    if listen_err != 0 {
+        print_int(1)
+        return 1
+    }
+    if response.ok != true {
+        print_int(2)
+        return 1
+    }
+    if response.status != 200 {
+        print_int(3)
+        return 1
+    }
+    if response.body_len != 5 {
+        print_int(4)
+        return 1
+    }
+    if rawbuf_get(&response.body, 0) != 104 {   // 'h'
+        print_int(5)
+        return 1
+    }
+
+    print_int(0)
+    return 0
+}

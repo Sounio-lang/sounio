@@ -80,65 +80,186 @@ fn sci_pow10(n: i32) -> f64 with Mut, Div, Panic {
 // Measurement struct
 // ============================================================================
 
-struct Measurement {
-    value: f64,
-    uncertainty: f64,
-    unit_code: i32,
+pub struct Measurement {
+    pub value: f64,
+    pub uncertainty: f64,
+    pub unit_code: i32,
 }
 
 // ============================================================================
 // Constructor
 // ============================================================================
 
-fn measurement_new(val: f64, unc: f64, unit: i32) -> Measurement {
+pub fn measurement_new(val: f64, unc: f64, unit: i32) -> Measurement {
     let u = if unc < 0.0 { 0.0 - unc } else { unc }
     Measurement { value: val, uncertainty: u, unit_code: unit }
 }
 
 // ============================================================================
 // GUM uncertainty propagation: sum rule
-// u_combined = sqrt(u1^2 + u2^2)   (independent sources, GUM §4.3.2)
+//
+// 🚨 O comentário anterior dizia "(independent sources, GUM §4.3.2)" e a função não exigia
+// nada — enunciava a pré-condição e a ignorava. A lei completa é o §5.2:
+//     u_c = sqrt(u1² + u2² + 2·rho·u1·u2)
+// Quadratura é ela em rho = 0; a soma aditiva é ela em rho = 1 (Cauchy–Schwarz).
 // ============================================================================
 
-fn propagate_sum(u1: f64, u2: f64) -> f64 with Mut, Div, Panic {
-    sci_sqrt(u1 * u1 + u2 * u2)
+pub fn propagate_sum_rho(u1: f64, u2: f64, rho: f64) -> f64 with Mut, Div, Panic {
+    let s = u1 * u1 + u2 * u2 + 2.0 * rho * u1 * u2
+    if s <= 0.0 { 0.0 } else { sci_sqrt(s) }
+}
+
+// Independência PROVADA (rho = 0), com o nome dizendo o que se assume.
+pub fn propagate_sum_independent(u1: f64, u2: f64) -> f64 with Mut, Div, Panic {
+    propagate_sum_rho(u1, u2, 0.0)
+}
+
+// Pior caso incondicional: soma das contribuições absolutas.
+//
+// Isto é equivalente a propagate_sum_rho(u1, u2, 1.0) quando os sinais de
+// sensibilidade de u1 e u2 coincidem (p.ex. adição) -- mas ao contrário
+// daquela forma, esta não depende de ninguém ter aplicado o sinal cruzado
+// certo. Para y = f(a, b) com sensibilidades de sinais opostos (p.ex.
+// subtração, c1 = 1, c2 = -1), plugar rho = +1 direto na quadratura dá
+// sqrt(u1² + u2² - 2u1u2) = |u1 - u2|, que pode chegar a 0 mesmo quando o
+// pior caso real é u1 + u2. u1 e u2 são incertezas padrão (>= 0 por
+// construção), então a soma absoluta É o limite de Cauchy-Schwarz correto,
+// sem depender de convenção de sinal alguma.
+pub fn propagate_worst_case(u1: f64, u2: f64) -> f64 with Mut, Div, Panic {
+    sci_abs(u1) + sci_abs(u2)
+}
+
+// Sem rho declarado: pior caso. Quem quiser quadratura passa a ter de pedi-la pelo nome.
+pub fn propagate_sum(u1: f64, u2: f64) -> f64 with Mut, Div, Panic {
+    propagate_worst_case(u1, u2)
 }
 
 // ============================================================================
-// GUM uncertainty propagation: product rule
-// u_combined = |v1*v2| * sqrt((u1/v1)^2 + (u2/v2)^2)
-// (GUM §4.3.4 for multiplicative models)
+// GUM uncertainty propagation: product rule (absolute form)
+// For y = v1*v2, the LPU sensitivities are dy/dv1 = v2, dy/dv2 = v1, so
+//   u_c^2 = (v2*u1)^2 + (v1*u2)^2 + 2*rho*(v2*u1)*(v1*u2)
+// (GUM §5.1/§5.2). This is the absolute form, not the relative
+// (u_c/|v1*v2|)^2 = (u1/v1)^2+(u2/v2)^2+2*rho*(u1/v1)*(u2/v2) form used by an
+// earlier version of this function.
+//
+// 🚨 xai/grok-4.6 math-review (2026-09-22, see .claude/llm_offload_log.md) on
+// the first cut of this function found two real bugs in the relative form:
+// (1) it built the cross term from |v1| and |v2| separately, which throws
+// away the sign of v1*v2 -- GUM's cross term is 2*rho*u1*u2/(v1*v2), which
+// flips sign when v1*v2 < 0, but rv1*rv2 = u1*u2/(|v1|*|v2|) can't ever be
+// negative. counter-example: v=(1,-1), u=(1,1), rho=0.5 gave sqrt(3) here
+// where the true u_c is 1. (2) it returned 0 whenever |v1*v2| < 1e-300, but
+// the true LPU is finite there (e.g. v=(0,1), u=(0.1,0) -> u_c=0.1), so the
+// relative form is singular exactly where the absolute form is not.
+// Switching to the absolute form (a = v2*u1, b = v1*u2) fixes both: it is
+// literally propagate_sum_rho's formula with (a, b) in place of (u1, u2),
+// carries the sign of v1*v2 through a*b automatically, and is smooth at
+// v1=0 or v2=0.
 // ============================================================================
 
-fn propagate_product(v1: f64, u1: f64, v2: f64, u2: f64) -> f64 with Mut, Div, Panic {
-    let product = sci_abs(v1 * v2)
-    if product < 1.0e-300 { return 0.0 }
-    let rv1 = if sci_abs(v1) > 1.0e-300 { u1 / sci_abs(v1) } else { 0.0 }
-    let rv2 = if sci_abs(v2) > 1.0e-300 { u2 / sci_abs(v2) } else { 0.0 }
-    product * sci_sqrt(rv1 * rv1 + rv2 * rv2)
+pub fn propagate_product_rho(v1: f64, u1: f64, v2: f64, u2: f64, rho: f64) -> f64 with Mut, Div, Panic {
+    let a = v2 * u1
+    let b = v1 * u2
+    let s = a * a + b * b + 2.0 * rho * a * b
+    if s <= 0.0 { 0.0 } else { sci_sqrt(s) }
+}
+
+// Independência PROVADA (rho = 0). Preserva o nome historicamente usado por
+// chamadores existentes (era `propagate_product`).
+pub fn propagate_product_independent(v1: f64, u1: f64, v2: f64, u2: f64) -> f64 with Mut, Div, Panic {
+    propagate_product_rho(v1, u1, v2, u2, 0.0)
+}
+
+// Pior caso incondicional: |v2*u1| + |v1*u2|. Mesma razão de existir que
+// propagate_worst_case tem para a soma -- plugar rho=+1 direto na forma acima
+// só dá o pior caso quando v2*u1 e v1*u2 têm o MESMO sinal (i.e. v1 e v2 com o
+// mesmo sinal); quando v1*v2 < 0, rho=+1 dá |v2*u1 + v1*u2|, que pode ser bem
+// menor que o pior caso real |v2*u1| + |v1*u2| (mesma assimetria da
+// subtração, agora no produto). Correto por construção, sem depender de
+// nenhuma convenção de sinal.
+pub fn propagate_product_worst_case(v1: f64, u1: f64, v2: f64, u2: f64) -> f64 {
+    sci_abs(v2 * u1) + sci_abs(v1 * u2)
+}
+
+// Sem rho declarado: pior caso.
+pub fn propagate_product(v1: f64, u1: f64, v2: f64, u2: f64) -> f64 {
+    propagate_product_worst_case(v1, u1, v2, u2)
 }
 
 // ============================================================================
 // Arithmetic with uncertainty
 // ============================================================================
 
-fn measurement_add(a: &Measurement, b: &Measurement) -> Measurement with Mut, Div, Panic {
+// 🚨 `measurement_add` e `measurement_sub` combinavam as incertezas em QUADRATURA sem nenhuma
+// checagem — e são os call-sites reais desta biblioteca, o que a soma de medidas de fato usa.
+// A biblioteca NÃO PODE saber se duas medidas são independentes: dois sensores no mesmo trilho,
+// duas leituras do mesmo instrumento à mesma temperatura, ou duas grandezas ligadas pela hora do
+// dia são correlacionadas, e ali a quadratura publica um limite mais apertado que a verdade.
+//
+// O padrão passa a ser o pior caso; independência e ρ conhecido se pedem pelo nome.
+
+pub fn measurement_add_rho(a: &Measurement, b: &Measurement, rho: f64) -> Measurement with Mut, Div, Panic {
     Measurement {
         value: a.value + b.value,
-        uncertainty: propagate_sum(a.uncertainty, b.uncertainty),
+        uncertainty: propagate_sum_rho(a.uncertainty, b.uncertainty, rho),
         unit_code: a.unit_code,
     }
 }
 
-fn measurement_sub(a: &Measurement, b: &Measurement) -> Measurement with Mut, Div, Panic {
+// Independência DECLARADA pelo chamador (ρ = 0). Grepável.
+pub fn measurement_add_independent(a: &Measurement, b: &Measurement) -> Measurement with Mut, Div, Panic {
+    measurement_add_rho(a, b, 0.0)
+}
+
+pub fn measurement_add(a: &Measurement, b: &Measurement) -> Measurement with Mut, Div, Panic {
+    measurement_add_rho(a, b, 1.0)
+}
+
+// Na SUBTRAÇÃO o sinal de ρ se inverte: para y = a − b, o termo cruzado do GUM entra com
+// −2ρ·u_a·u_b (ρ aqui é a correlação FÍSICA real entre os erros de a e b -- não um valor
+// com o sinal já pré-aplicado pelo chamador; esta função aplica o sinal internamente).
+// Logo o pior caso da subtração é ρ = −1, não ρ = +1 — e usar +1 aqui seria conservador
+// por acidente e frouxo no caso que importa: um chamador que (erradamente) assumisse que
+// ρ = 1 é sempre o pior caso, como é para measurement_add, obteria aqui
+// sqrt(u_a² + u_b² − 2u_au_b) = |u_a − u_b|, que pode chegar a 0 quando o pior caso real
+// é u_a + u_b. Por isso measurement_sub (sem ρ declarado) não passa por aqui com um ρ
+// mágico: usa propagate_worst_case diretamente, que é correto por construção.
+pub fn measurement_sub_rho(a: &Measurement, b: &Measurement, rho: f64) -> Measurement with Mut, Div, Panic {
     Measurement {
         value: a.value - b.value,
-        uncertainty: propagate_sum(a.uncertainty, b.uncertainty),
+        uncertainty: propagate_sum_rho(a.uncertainty, b.uncertainty, 0.0 - rho),
         unit_code: a.unit_code,
     }
 }
 
-fn measurement_mul(a: &Measurement, b: &Measurement) -> Measurement with Mut, Div, Panic {
+pub fn measurement_sub_independent(a: &Measurement, b: &Measurement) -> Measurement with Mut, Div, Panic {
+    measurement_sub_rho(a, b, 0.0)
+}
+
+// Sem rho declarado: pior caso, calculado diretamente pela soma das contribuições
+// absolutas (propagate_worst_case) em vez de rotear por measurement_sub_rho com um
+// rho = -1 "mágico" -- assim o resultado não depende de ninguém lembrar corretamente
+// da inversão de sinal da subtração.
+pub fn measurement_sub(a: &Measurement, b: &Measurement) -> Measurement with Mut, Div, Panic {
+    Measurement {
+        value: a.value - b.value,
+        uncertainty: propagate_worst_case(a.uncertainty, b.uncertainty),
+        unit_code: a.unit_code,
+    }
+}
+
+// Independência PROVADA (rho = 0). Grepável, mesmo padrão de measurement_add_independent.
+pub fn measurement_mul_independent(a: &Measurement, b: &Measurement) -> Measurement with Mut, Div, Panic {
+    Measurement {
+        value: a.value * b.value,
+        uncertainty: propagate_product_independent(a.value, a.uncertainty, b.value, b.uncertainty),
+        unit_code: a.unit_code,
+    }
+}
+
+// Sem rho declarado: pior caso (propagate_product agora usa rho = 1 por padrão,
+// não mais independência incondicional -- ver comentário acima de propagate_product_rho).
+pub fn measurement_mul(a: &Measurement, b: &Measurement) -> Measurement with Mut, Div, Panic {
     Measurement {
         value: a.value * b.value,
         uncertainty: propagate_product(a.value, a.uncertainty, b.value, b.uncertainty),
@@ -146,16 +267,31 @@ fn measurement_mul(a: &Measurement, b: &Measurement) -> Measurement with Mut, Di
     }
 }
 
-fn measurement_div(a: &Measurement, b: &Measurement) -> Measurement with Mut, Div, Panic {
+// Independência PROVADA (rho = 0). d(a/b) = (1/b)*da - (a/b^2)*db, então
+// u_c^2 = (u_a/b)^2 + (a*u_b/b^2)^2 sob independência -- equivalente à forma
+// relativa |a/b| * sqrt((u_a/a)^2 + (u_b/b)^2) quando a != 0.
+pub fn measurement_div_independent(a: &Measurement, b: &Measurement) -> Measurement with Mut, Div, Panic {
     let val = if sci_abs(b.value) > 1.0e-300 { a.value / b.value } else { 0.0 }
-    // For division a/b: relative uncertainty same as multiplication
-    let u = propagate_product(a.value, a.uncertainty, b.value, b.uncertainty)
-    let abs_val = sci_abs(val)
-    // u_result = |a/b| * sqrt((ua/a)^2 + (ub/b)^2) already computed in propagate_product
-    // but we need to correct: propagate_product gives |a*b| * ...; we need |a/b| * ...
     let rv_a = if sci_abs(a.value) > 1.0e-300 { a.uncertainty / sci_abs(a.value) } else { 0.0 }
     let rv_b = if sci_abs(b.value) > 1.0e-300 { b.uncertainty / sci_abs(b.value) } else { 0.0 }
-    let u_div = abs_val * sci_sqrt(rv_a * rv_a + rv_b * rv_b)
+    let u_div = sci_abs(val) * sci_sqrt(rv_a * rv_a + rv_b * rv_b)
+    Measurement {
+        value: val,
+        uncertainty: u_div,
+        unit_code: a.unit_code,
+    }
+}
+
+// Sem rho declarado: pior caso, mesmo padrão de measurement_mul. Antes esta
+// função computava `propagate_product(...)` num `let u` nunca usado (código
+// morto, achado pela revisão matemática) e devolvia a quadratura independente
+// de qualquer forma -- inconsistente com a documentação desta biblioteca, que
+// diz que o padrão sem testemunha é o pior caso.
+pub fn measurement_div(a: &Measurement, b: &Measurement) -> Measurement with Mut, Div, Panic {
+    let val = if sci_abs(b.value) > 1.0e-300 { a.value / b.value } else { 0.0 }
+    let rv_a = if sci_abs(a.value) > 1.0e-300 { a.uncertainty / sci_abs(a.value) } else { 0.0 }
+    let rv_b = if sci_abs(b.value) > 1.0e-300 { b.uncertainty / sci_abs(b.value) } else { 0.0 }
+    let u_div = sci_abs(val) * (rv_a + rv_b)
     Measurement {
         value: val,
         uncertainty: u_div,
@@ -168,7 +304,7 @@ fn measurement_div(a: &Measurement, b: &Measurement) -> Measurement with Mut, Di
 // Returns 0 if value is zero
 // ============================================================================
 
-fn measurement_relative_error(m: &Measurement) -> f64 with Mut, Div, Panic {
+pub fn measurement_relative_error(m: &Measurement) -> f64 with Mut, Div, Panic {
     let av = sci_abs(m.value)
     if av < 1.0e-300 { return 0.0 }
     (m.uncertainty / av) * 100.0
@@ -185,7 +321,7 @@ fn measurement_relative_error(m: &Measurement) -> f64 with Mut, Div, Panic {
 // representation is consumed (up to 15 for f64).
 // ============================================================================
 
-fn significant_figures(x: f64) -> i32 with Mut, Div, Panic {
+pub fn significant_figures(x: f64) -> i32 with Mut, Div, Panic {
     let ax = sci_abs(x)
     if ax < 1.0e-300 { return 1 }
     // exponent = floor(log10(ax))
@@ -211,7 +347,7 @@ fn significant_figures(x: f64) -> i32 with Mut, Div, Panic {
 // E.g., val=3.14159, unc=0.01 -> 3.14
 // ============================================================================
 
-fn round_to_uncertainty(val: f64, unc: f64) -> f64 with Mut, Div, Panic {
+pub fn round_to_uncertainty(val: f64, unc: f64) -> f64 with Mut, Div, Panic {
     let au = sci_abs(unc)
     if au < 1.0e-300 { return val }
     // exponent of uncertainty leading digit
@@ -238,7 +374,7 @@ fn round_to_uncertainty(val: f64, unc: f64) -> f64 with Mut, Div, Panic {
 // u_mean = 1 / sqrt(sum(w_i))
 // ============================================================================
 
-fn weighted_mean(
+pub fn weighted_mean(
     values: &[f64; 64],
     uncertainties: &[f64; 64],
     n: i32,

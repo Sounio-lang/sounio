@@ -1,0 +1,83 @@
+//@ run-pass
+//@ requires: madaros
+
+// Regression lock for a defect found while reconciling this branch's own
+// Finding 24 fix (self-hosted/ir/lower.sio, commits 88f91fae6/80be7c083)
+// with main's independent fix for the same underlying bug (01258e2b4,
+// "stop the synthetic Knowledge layout shadowing user field names").
+//
+// main's fix defers the synthetic `Knowledge` layout to LAST in the
+// name-only fallback scan (field_idx_from_name/field_idx_from_name_simple),
+// so a user struct's own field always wins over Knowledge. That closes the
+// specific symptom it was built for -- but it does NOT resolve ambiguity
+// between two DIFFERENT user structs that happen to share a field name at
+// DIFFERENT indices. It takes the first non-Knowledge match in table-
+// registration order, which is only safe when every struct sharing that
+// field name places it at the same index.
+//
+// `RdnEntry`/`ExtensionEntry` both have `oid` at index 0 and `value` at
+// index 3 -- index-compatible, so the name-only fallback is (coincidentally)
+// safe for them either way. `GeneralName`'s layout is genuinely different:
+// `tag@0, value@1, value_len@2, oid@3, oid_len@4, directory_name@5`. A
+// GeneralName array-element field access that reaches the name-only
+// fallback (rather than this branch's struct-type-aware resolution) would
+// resolve `value` to RdnEntry/ExtensionEntry's index 3 instead of
+// GeneralName's own index 1 -- landing on GeneralName's own `oid` field's
+// slot, corrupting it, and via the same mechanism corrupting `tag` too.
+//
+// Empirically confirmed during the reconciliation (2026-08-24): a build
+// with ONLY main's fix applied (no struct-type-aware resolution) read
+// GeneralName.tag back as garbage (1666, not 7) for exactly this pattern.
+// This branch's field_idx_for_array_index_base/array_index_base_elem_
+// struct_type resolve the array's actual element struct type first, so
+// they never reach the ambiguous fallback for a bare local array of a
+// known struct type -- this test exists to make sure that stays true.
+
+use x509::cert::*
+
+fn main() -> i64 with IO {
+    var gn_list: [GeneralName; 32] = [
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+        general_name_zero(), general_name_zero(), general_name_zero(), general_name_zero(),
+    ]
+    var oid_buf: [u8; 20] = [0; 20]
+    oid_buf[0] = 0x55
+    var val_buf: [u8; 253] = [0; 253]
+    val_buf[0] = 0xAA
+
+    gn_list[0].tag = 7
+    gn_list[0].oid = oid_buf
+    gn_list[0].oid_len = 1
+    gn_list[0].value = val_buf
+    gn_list[0].value_len = 1
+
+    if gn_list[0].tag != 7 {
+        print_int(1)
+        return 1
+    }
+    if (gn_list[0].oid[0] as i64) != 0x55 {
+        print_int(2)
+        return 1
+    }
+    if gn_list[0].oid_len != 1 {
+        print_int(3)
+        return 1
+    }
+    if (gn_list[0].value[0] as i64) != 0xAA {
+        print_int(4)
+        return 1
+    }
+    if gn_list[0].value_len != 1 {
+        print_int(5)
+        return 1
+    }
+
+    println("x509_generalname_field_index_ambiguity: GeneralName's own field layout resolved correctly, not confused with RdnEntry/ExtensionEntry's")
+    return 0
+}

@@ -1,0 +1,144 @@
+// stdlib/hash/sha1.sio
+use hash::word32::*
+use net::socket::*
+
+// Every "u32" constant/word in this file is stored as an i64 in
+// 0..4294967295 -- see word32.sio for why (Finding 13: native u32
+// arithmetic does not wrap mod 2^32 on Madaros).
+const SHA1_H0: i64 = 1732584193
+const SHA1_H1: i64 = 4023233417
+const SHA1_H2: i64 = 2562383102
+const SHA1_H3: i64 = 271733878
+const SHA1_H4: i64 = 3285377520
+
+const SHA1_K0: i64 = 1518500249
+const SHA1_K1: i64 = 1859775393
+const SHA1_K2: i64 = 2400959708
+const SHA1_K3: i64 = 3395469782
+
+// Returns the byte at absolute offset `i` of the padded message: the real
+// message for i<len, the 0x80 marker at i==len, zero padding, then the
+// big-endian 64-bit original bit-length in the last 8 bytes.
+fn sha1_padded_byte(buf: &RawBuf, len: i64, padded_len: i64, i: i64) -> i64 with IO {
+    if i < len {
+        rawbuf_get(buf, i)
+    } else if i == len {
+        128
+    } else if i < padded_len - 8 {
+        0
+    } else {
+        // len is bounded far below 2^61 in this project (every caller's
+        // input is at most a few tens of KB), so len*8 fits comfortably in
+        // i64 with room to spare -- not implicated by Finding 11, which is
+        // u64-specific, and len is always non-negative so `>>` behaves as
+        // a logical shift here regardless of signed/unsigned semantics.
+        let bit_len = len * 8
+        let byte_index_from_end = padded_len - i
+        let shift_amount = (byte_index_from_end - 1) * 8
+        (bit_len >> shift_amount) & 255
+    }
+}
+
+pub fn sha1(buf: &RawBuf, len: i64) -> [u8; 20] with IO {
+    var h0 = SHA1_H0
+    var h1 = SHA1_H1
+    var h2 = SHA1_H2
+    var h3 = SHA1_H3
+    var h4 = SHA1_H4
+
+    // Padded length: smallest multiple of 64 that fits len bytes + 1 (0x80)
+    // + 8 (length field). Plain i64 division on a small, non-negative
+    // value -- not implicated by Finding 11 (u64-specific).
+    let padded_len: i64 = ((len + 9 + 63) / 64) * 64
+
+    var block_start: i64 = 0
+    while block_start < padded_len {
+        var w: [i64; 80] = [0; 80]
+        var t: i64 = 0
+        while t < 16 {
+            let base = block_start + t * 4
+            let b0 = sha1_padded_byte(buf, len, padded_len, base)
+            let b1 = sha1_padded_byte(buf, len, padded_len, base + 1)
+            let b2 = sha1_padded_byte(buf, len, padded_len, base + 2)
+            let b3 = sha1_padded_byte(buf, len, padded_len, base + 3)
+            w[t as usize] = (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+            t = t + 1
+        }
+        t = 16
+        while t < 80 {
+            let x = xor32(xor32(w[(t - 3) as usize], w[(t - 8) as usize]), xor32(w[(t - 14) as usize], w[(t - 16) as usize]))
+            w[t as usize] = rotl32(x, 1)
+            t = t + 1
+        }
+
+        var a = h0
+        var b = h1
+        var c = h2
+        var d = h3
+        var e = h4
+
+        t = 0
+        while t < 80 {
+            var f: i64 = 0
+            var k: i64 = 0
+            if t < 20 {
+                f = or32(and32(b, c), and32(not32(b), d))
+                k = SHA1_K0
+            } else if t < 40 {
+                f = xor32(xor32(b, c), d)
+                k = SHA1_K1
+            } else if t < 60 {
+                f = or32(or32(and32(b, c), and32(b, d)), and32(c, d))
+                k = SHA1_K2
+            } else {
+                f = xor32(xor32(b, c), d)
+                k = SHA1_K3
+            }
+            let temp = add32(add32(add32(add32(rotl32(a, 5), f), e), k), w[t as usize])
+            e = d
+            d = c
+            c = rotl32(b, 30)
+            b = a
+            a = temp
+            t = t + 1
+        }
+
+        h0 = add32(h0, a)
+        h1 = add32(h1, b)
+        h2 = add32(h2, c)
+        h3 = add32(h3, d)
+        h4 = add32(h4, e)
+
+        block_start = block_start + 64
+    }
+
+    // NOTE: `(x as u8)` on Madaros was measured (2026-08-23, this task) to
+    // NOT truncate to the low 8 bits when x > 255 -- the cast silently
+    // passes the wider value through, and reading the array element back
+    // later returns an accumulated multi-byte garbage value instead of a
+    // single byte. Repro: `(3661210606 >> 16) as u8` reads back as 55865
+    // (0xDA39), not 57 (0x39). Explicit `& 255` before every `as u8` here
+    // works around it -- confirmed by the same repro with masking added.
+    var out: [u8; 20] = [0; 20]
+    out[0] = (shr32(h0, 24) & 255) as u8
+    out[1] = (shr32(h0, 16) & 255) as u8
+    out[2] = (shr32(h0, 8) & 255) as u8
+    out[3] = (h0 & 255) as u8
+    out[4] = (shr32(h1, 24) & 255) as u8
+    out[5] = (shr32(h1, 16) & 255) as u8
+    out[6] = (shr32(h1, 8) & 255) as u8
+    out[7] = (h1 & 255) as u8
+    out[8] = (shr32(h2, 24) & 255) as u8
+    out[9] = (shr32(h2, 16) & 255) as u8
+    out[10] = (shr32(h2, 8) & 255) as u8
+    out[11] = (h2 & 255) as u8
+    out[12] = (shr32(h3, 24) & 255) as u8
+    out[13] = (shr32(h3, 16) & 255) as u8
+    out[14] = (shr32(h3, 8) & 255) as u8
+    out[15] = (h3 & 255) as u8
+    out[16] = (shr32(h4, 24) & 255) as u8
+    out[17] = (shr32(h4, 16) & 255) as u8
+    out[18] = (shr32(h4, 8) & 255) as u8
+    out[19] = (h4 & 255) as u8
+    out
+}

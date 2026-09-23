@@ -44,18 +44,18 @@ fn nifti_error_from_code(code: i64) -> NiftiError {
 }
 
 struct NiftiHeader {
-    version: NiftiVersion,
-    endian: NiftiEndian,
-    sizeof_hdr: i64,
-    datatype: i64,
-    bitpix: i64,
-    nx: i64,
-    ny: i64,
-    nz: i64,
-    nt: i64,
-    vox_offset: i64,
-    qform_code: i64,
-    sform_code: i64,
+    pub version: NiftiVersion,
+    pub endian: NiftiEndian,
+    pub sizeof_hdr: i64,
+    pub datatype: i64,
+    pub bitpix: i64,
+    pub nx: i64,
+    pub ny: i64,
+    pub nz: i64,
+    pub nt: i64,
+    pub vox_offset: i64,
+    pub qform_code: i64,
+    pub sform_code: i64,
 }
 
 fn nifti_header_new() -> NiftiHeader {
@@ -81,18 +81,18 @@ fn nifti_header_new() -> NiftiHeader {
 
 // Bounded image payload for deterministic CI fixtures.
 struct NiftiImage {
-    nx: i64,
-    ny: i64,
-    nz: i64,
-    nt: i64,
-    nvox_3d: i64,
-    nvox_total: i64,
-    dx: f64,
-    dy: f64,
-    dz: f64,
-    tr: f64,
-    xform: [[f64; 4]; 4],
-    data: [f64; 4096],
+    pub nx: i64,
+    pub ny: i64,
+    pub nz: i64,
+    pub nt: i64,
+    pub nvox_3d: i64,
+    pub nvox_total: i64,
+    pub dx: f64,
+    pub dy: f64,
+    pub dz: f64,
+    pub tr: f64,
+    pub xform: [[f64; 4]; 4],
+    pub data: [f64; 4096],
 }
 
 fn nifti_image_new() -> NiftiImage {
@@ -129,8 +129,8 @@ fn nifti_create(nx: i64, ny: i64, nz: i64) -> NiftiImage {
 
 // Runtime-safe file ingestion buffer. `len` tracks valid bytes in `data`.
 struct NiftiFileBuffer {
-    data: [u8; 65536],
-    len: i64,
+    pub data: [u8; 65536],
+    pub len: i64,
 }
 
 fn nifti_file_buffer_new() -> NiftiFileBuffer {
@@ -148,6 +148,26 @@ fn nifti_str_byte_u8(src: [i8; 0], idx: i64) -> i64 {
     if raw < 0 { raw + 256 } else { raw }
 }
 
+// 🚨 Acessor de byte com limite EXPLÍCITO, e não `src.len()`.
+//
+// `read_file` devolve um ponteiro terminado em NUL sobre um buffer que JÁ CONTÉM o arquivo
+// inteiro — o `read` leu tudo, o NUL só marca o fim para consumidores de texto. Mas `.len()` é
+// `strlen`, então num binário ele para no primeiro zero. Na fixture NIfTI de 384 bytes isso
+// acontece no offset 2: `read_file(...).len()` devolvia **2**, e todo byte a partir daí lia 0.
+//
+// Consequência: a pista NIfTI nativa NUNCA conseguiu ler um arquivo real. Ficou escondido porque
+// o único teste que a exercitava chamava `run_fmri_pipeline_gate`, que não existia, e o
+// compilador devolvia 0 em silêncio. Cadeia inteira revelada pelo E201 (28/29-ago-2026).
+//
+// O limite correto vem de `file_size(path)`, que é syscall `stat` e não se importa com NUL.
+fn nifti_byte_at(src: [i8; 0], idx: i64, limit: i64) -> i64 {
+    if idx < 0 || idx >= limit {
+        return 0
+    }
+    let raw = src[idx as usize] as i64
+    if raw < 0 { raw + 256 } else { raw }
+}
+
 fn nifti_read_file_buffer_into(path: string, out: &!NiftiFileBuffer) -> i64 with Panic, Div, Mut, Div, Mut, Panic, IO {
     let size = file_size(path)
     if size <= 0 {
@@ -158,15 +178,29 @@ fn nifti_read_file_buffer_into(path: string, out: &!NiftiFileBuffer) -> i64 with
     }
 
     let raw = read_file(path)
-    let raw_len = raw.len() as i64
-    if raw_len < size {
+    // ⚠️ NÃO usar `raw.len()` aqui: é strlen, e num binário ele para no primeiro NUL — na
+    // fixture NIfTI isso é o offset 2, e a checagem abaixo rejeitava TODO arquivo binário como
+    // truncado. O tamanho verdadeiro veio de `file_size` (stat) e está em `size`.
+    //
+    // 🚨 Mas `size` é de um `stat` feito ANTES do `read_file`. Entre as duas chamadas o
+    // arquivo pode encolher (outro processo truncando, um symlink trocado, uma leitura
+    // parcial) e `raw` conter menos bytes de verdade do que `size` promete -- indexar até
+    // `size` nesse caso lê além do buffer que `read_file` de fato devolveu. Sem uma
+    // contagem de bytes-lidos própria (ver docs/E201_NOME_DESCONHECIDO.md item 3: esta
+    // pista nativa nunca foi bem-tipada -- `read_file` devolve `string`, os acessores
+    // querem bytes -- é defeito de compilador, fora de escopo aqui), a mitigação
+    // disponível no stdlib é re-checar o tamanho DEPOIS da leitura e nunca copiar além
+    // do menor dos dois: se o arquivo encolheu entre as duas chamadas, o limite cai
+    // junto, em vez de continuar prometendo o tamanho antigo.
+    let size_after = file_size(path)
+    let effective_size = if size_after < size { size_after } else { size }
+    if effective_size <= 0 {
         return nifti_error_code(NiftiError::TruncatedFile)
     }
-
-    out.len = size
+    out.len = effective_size
     var i: i64 = 0
-    while i < size {
-        out.data[i as usize] = nifti_str_byte_u8(raw, i) as u8
+    while i < effective_size {
+        out.data[i as usize] = nifti_byte_at(raw, i, effective_size) as u8
         i = i + 1
     }
     0
@@ -437,7 +471,7 @@ fn nifti_parse_header(bytes: &[u8]) -> Result<NiftiHeader, NiftiError> {
     Ok(header)
 }
 
-fn nifti_parse_header_buffer_into(buf: &NiftiFileBuffer, out: &!NiftiHeader) -> i64 {
+fn nifti_parse_header_buffer_into(buf: &NiftiFileBuffer, out: &!NiftiHeader) -> i64 with Mut {
     if buf.len < 352 {
         return nifti_error_code(NiftiError::TruncatedFile)
     }
@@ -517,7 +551,7 @@ fn nifti_parse_header_buffer_into(buf: &NiftiFileBuffer, out: &!NiftiHeader) -> 
     0
 }
 
-fn nifti_parse_header_buffer(buf: &NiftiFileBuffer) -> Result<NiftiHeader, NiftiError> {
+fn nifti_parse_header_buffer(buf: &NiftiFileBuffer) -> Result<NiftiHeader, NiftiError> with Mut {
     var out = nifti_header_new()
     let code = nifti_parse_header_buffer_into(buf, &!out)
     if code == 0 {
