@@ -15,7 +15,7 @@
 # measured 2026-09-03, when main's ir/lower.sio and codegen_x86_linux.sio
 # changes merged in and all five probes matched byte for byte, with the ELF's
 # md5 unchanged. The md5 is printed below for exactly that reason: it says
-# which compiler produced the goldens, so a green run cannot be mistaken as
+# which compiler produced the goldens, so a green run cannot be mistaken for
 # evidence about a compiler the run never used.
 #
 # WHY THIS IS PARALLEL, WHY THE PER-PROBE TIMEOUTS LOOK THE WAY THEY DO, AND
