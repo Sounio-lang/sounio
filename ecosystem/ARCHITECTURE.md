@@ -113,33 +113,33 @@ from .numpy_integration import (
 
 #### API Python:
 
-> **Partial surface.** `sounio.Knowledge` IS bound in the checked artifact (`ecosystem/sounio-py/python/sounio/__init__.py:43-50`), and the runner is exposed as `run_sio` (with the convenience `run_code` wrapper) at line 54 — only `epistemic_array` and the exact `sounio.run` name are absent. The embedded snippet's Python `sounio.Knowledge(...)` call matches the package, but its inline Sounio code uses `Knowledge[f64]`, `epistemic_mean`, and `epistemic_std`, which are not the Sounio language API. The checked epistemic surface is `Epistemic` with `ep_measured`, `ep_val`, `ep_std`, and `ep_div` from `stdlib/epistemic/knowledge.sio`. The sketch below is the intended binding shape only.
+> **Partial surface.** `sounio.Knowledge` IS bound in the checked artifact (`ecosystem/sounio-py/python/sounio/__init__.py:43-50`, via the native `_sounio_native` extension, falling back to the pure-Python `_knowledge` module), and the runner is exposed as `run_sio` (with the `run_code` convenience wrapper) at line 54. NOT bound: `epistemic_array` and the exact `sounio.run` name (only `run_sio`/`run_code` exist). Note the field-name drift between this sketch and the package: the constructors take `uncertainty`/`unit`/`confidence`, **not** `epsilon`/`units` — the native `Knowledge(value, uncertainty=0.0, confidence=1.0, unit="", prov="")` accepts `prov` (and exposes `epsilon` only as a post-construction property alias for `uncertainty`), while the pure-Python fallback `Knowledge(value, uncertainty=0.0, confidence=1.0, unit="", source="direct", provenance=None)` uses `source`/`provenance` instead of `prov`. The runner also performs **no** Python→Sounio value marshalling: `run_sio` (= module `run`) has signature `(source, *args, optimize=False, capture=True)` and rejects a `data=` keyword, and `run_code(code, timeout=30, **kwargs)` merely shells out to `souc run` on a temp file with no value marshalling. The inline Sounio code below uses `Knowledge[f64]`, `epistemic_mean`, and `epistemic_std`, which are **not** the Sounio language API; the checked epistemic surface is `Epistemic` with `ep_measured`, `ep_val`, `ep_std`, and `ep_div` from `stdlib/epistemic/knowledge.sio`. The sketch is the intended binding shape only.
 
 ```python
 import sounio
 import numpy as np
 
-# Criar valores epistêmicos
-temp = sounio.Knowledge(36.5, epsilon=0.1, 
-                       provenance="thermometer",
-                       units="°C")
+# Criar valores epistêmicos (native Knowledge ctor: value, uncertainty,
+# confidence, unit, prov; the pure-Python fallback uses source/provenance)
+temp = sounio.Knowledge(36.5, uncertainty=0.1,
+                        unit="°C", prov="thermometer")
 
-# Arrays epistêmicos
-data = np.random.normal(0, 1, 100)
-epistemic_data = sounio.epistemic_array(data, epsilon=0.05)
+# NOTE: sounio.epistemic_array is NOT bound; there is no array helper yet.
+data = [sounio.Knowledge(v, uncertainty=0.05, unit="°C")
+        for v in np.random.normal(0, 1, 100)]
 
-# Executar código Sounio
-result = sounio.run("""
+# Executar código Sounio (run_sio takes (source, *args); no data= injection)
+result = sounio.run_sio("""
     fn analyze(data: Knowledge[f64]) -> Knowledge[f64] {
         let mean = epistemic_mean(data)
         let std = epistemic_std(data)
         mean / std  // Coefficient of variation
     }
-""", data=epistemic_data)
+""")
 
-print(f"Result: {result.value} ± {result.epsilon}")
+print(f"Result: {result.value} ± {result.uncertainty}")
 print(f"Confidence: {result.confidence:.1%}")
-print(f"Provenance: {result.provenance}")
+print(f"Provenance: {result.prov}")
 ```
 
 ### 3. sounio-jupyter: Kernel Jupyter
