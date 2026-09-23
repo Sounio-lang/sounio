@@ -324,10 +324,15 @@ esac
 # The committed Madaros prebuilt is stored compressed. Generate
 # bin/madaros-linux-x86_64 from it (verified against the tracked sha256, exit 78
 # on a mismatch) before resolving; see scripts/lib/materialize_madaros_prebuilt.sh.
-# Skip this when a higher-priority override (MADAROS_RAW_BIN, SOUNIO_MADAROS_BIN,
-# or a local artifacts/self-hosted/madaros) already resolves -- _resolve_madaros()
-# below picks one of those ahead of the committed prebuilt, so a corrupted or
-# missing prebuilt must not abort a run that was never going to use it.
+# Always attempt this -- even when a higher-priority override (MADAROS_RAW_BIN,
+# SOUNIO_MADAROS_BIN, or a local artifacts/self-hosted/madaros) is present, so
+# that _madaros_provenance_kind() below has a materialized bin/madaros-linux-x86_64
+# to `cmp` a byte-identical override against and correctly report it as
+# "committed" rather than misreporting it as a local build. Only tolerate a
+# materialization FAILURE (a corrupted or missing prebuilt) when a higher-
+# priority override is present: that run was never going to use the prebuilt
+# ELF itself, only (optionally) compare against it, so it must not abort --
+# resolution just proceeds without a committed comparison file.
 _madaros_higher_priority_override_present() {
   local cand
   for cand in "${MADAROS_RAW_BIN:-}" "${SOUNIO_MADAROS_BIN:-}" "$ROOT_DIR/artifacts/self-hosted/madaros"; do
@@ -335,9 +340,11 @@ _madaros_higher_priority_override_present() {
   done
   return 1
 }
-if [[ -f "$ROOT_DIR/scripts/lib/materialize_madaros_prebuilt.sh" ]] \
-   && ! _madaros_higher_priority_override_present; then
-  bash "$ROOT_DIR/scripts/lib/materialize_madaros_prebuilt.sh" || exit $?
+if [[ -f "$ROOT_DIR/scripts/lib/materialize_madaros_prebuilt.sh" ]]; then
+  if ! bash "$ROOT_DIR/scripts/lib/materialize_madaros_prebuilt.sh"; then
+    _mat_rc=$?
+    _madaros_higher_priority_override_present || exit "$_mat_rc"
+  fi
 fi
 
 # 3) Default: Madaros (via bin/madaros, which maps the souc verbs to the raw ELF).
