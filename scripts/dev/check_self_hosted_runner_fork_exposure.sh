@@ -276,6 +276,48 @@ jobs:
       - run: echo hi
 EOF
 
+    # POSITIVE 11: `runs-on: [gpu, cuda]` -- custom labels with no literal
+    # "self-hosted" token and no RUNNER-named variable. GitHub-hosted runners
+    # don't carry arbitrary custom labels, so a runner satisfying BOTH "gpu"
+    # and "cuda" can only be a self-hosted/custom-labeled one -- but the old
+    # detector only recognized the literal "self-hosted" string.
+    cat > "$tmp/positive_custom_labels_no_self_hosted_token.yml" <<'EOF'
+on:
+  pull_request:
+jobs:
+  danger:
+    runs-on: [gpu, cuda]
+    steps:
+      - run: echo hi
+EOF
+
+    # POSITIVE 12: `pull_request: {types: [opened]}` -- a non-empty inline
+    # event-type configuration. The old block-trigger regex only matched an
+    # EMPTY value (bare or `{}`), so this fork-reachable trigger (still
+    # `pull_request`, just scoped to specific activity types) was invisible.
+    cat > "$tmp/positive_pull_request_typed_inline_map.yml" <<'EOF'
+on:
+  pull_request: {types: [opened]}
+jobs:
+  danger:
+    runs-on: [self-hosted, gpu, cuda]
+    steps:
+      - run: echo hi
+EOF
+
+    # NEGATIVE 6: ordinary GitHub-hosted labels (a bracket list, not just a
+    # bare scalar) -- must NOT flag. Proves POSITIVE 11's fail-closed check
+    # doesn't over-fire on the real tree's own shapes (ubuntu-24.04, macos-15).
+    cat > "$tmp/negative_gh_hosted_list.yml" <<'EOF'
+on:
+  pull_request:
+jobs:
+  ordinary:
+    runs-on: [ubuntu-24.04]
+    steps:
+      - run: echo hi
+EOF
+
     local out
     out="$(python3 "$SCANNER" "$tmp"/*.yml || true)"
 
@@ -329,9 +371,19 @@ EOF
     else
         echo "  FAIL POSITIVE: a quoted job key (\"danger\":) was NOT flagged"; rc=1
     fi
+    if grep -q 'positive_custom_labels_no_self_hosted_token.yml:danger' <<<"$out"; then
+        echo "  ok   POSITIVE: custom labels [gpu, cuda] with no 'self-hosted' token are flagged"
+    else
+        echo "  FAIL POSITIVE: custom labels [gpu, cuda] with no 'self-hosted' token were NOT flagged"; rc=1
+    fi
+    if grep -q 'positive_pull_request_typed_inline_map.yml:danger' <<<"$out"; then
+        echo "  ok   POSITIVE: 'pull_request: {types: [opened]}' is flagged"
+    else
+        echo "  FAIL POSITIVE: 'pull_request: {types: [opened]}' was NOT flagged"; rc=1
+    fi
     for job in "negative_guarded.yml:safe" "negative_no_pr_trigger.yml:dispatch_only" \
                "negative_pull_request_target.yml:automation" "negative_gh_hosted.yml:ordinary" \
-               "negative_inline_scalar_target.yml:automation"; do
+               "negative_inline_scalar_target.yml:automation" "negative_gh_hosted_list.yml:ordinary"; do
         if grep -q "$job" <<<"$out"; then
             echo "  FAIL NEGATIVE: $job was flagged but should not have been"; rc=1
         else

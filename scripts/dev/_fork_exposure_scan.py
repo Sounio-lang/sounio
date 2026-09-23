@@ -20,12 +20,25 @@ import sys
 
 SELF_HOSTED_RE = re.compile(r"self-hosted")
 RUNNER_VAR_RE = re.compile(r"vars\.[A-Za-z0-9_]*RUNNER[A-Za-z0-9_]*", re.IGNORECASE)
+# A self-hosted (or custom-labeled) runner can be selected without the
+# literal token "self-hosted" at all: `runs-on: [gpu, cuda]` requires a
+# runner carrying BOTH custom labels, and no GitHub-hosted runner carries
+# them. Fail-closed on the labels GitHub Actions actually documents as
+# hosted (https://docs.github.com/actions/using-github-hosted-runners) --
+# anything else (a custom label, an unrecognized `${{ }}` expression) is
+# treated as self-hosted-ish rather than silently trusted.
+_GH_HOSTED_LABEL_RE = re.compile(
+    r"^(ubuntu-(latest|\d{2}\.\d{2})|windows-(latest|\d{4})|macos-(latest|1[0-9]))$"
+)
 GUARD_SUBSTRING = "head.repo.full_name == github.repository"
 # Indent-width-agnostic (some leading whitespace, not a specific count): a
-# `pull_request:` key nested under `on:` at any indentation, bare or as an
-# explicit empty mapping (`pull_request: {}` is YAML-equivalent to bare
-# `pull_request:` -- both mean "trigger on all default activity types").
-BARE_PULL_REQUEST_BLOCK_RE = re.compile(r"^\s+pull_request:\s*(\{\s*\})?\s*$")
+# `pull_request:` key nested under `on:` at any indentation. Matches
+# regardless of what follows the colon -- bare, an empty mapping
+# (`pull_request: {}`), or a non-empty inline event-type configuration
+# (`pull_request: {types: [opened]}`) are all fork-reachable the same way;
+# only the key's PRESENCE decides that, not its value. `pull_request_target:`
+# never matches (the colon isn't immediately after "pull_request" there).
+BARE_PULL_REQUEST_BLOCK_RE = re.compile(r"^\s+pull_request:.*$")
 BARE_PULL_REQUEST_INLINE_RE = re.compile(r"(?<!_target)\bpull_request\b")
 
 
@@ -146,6 +159,25 @@ def iter_job_blocks(lines: list[str]) -> list[tuple[str, int, list[str]]]:
     return yield_blocks
 
 
+def _label_is_gh_hosted(label: str) -> bool:
+    label = label.strip().strip("'\"")
+    return bool(label) and bool(_GH_HOSTED_LABEL_RE.match(label))
+
+
+def _runs_on_value_is_gh_hosted(value: str) -> bool:
+    """True only if EVERY label in a bracket-list or bare-scalar `runs-on:`
+    value is a recognized GitHub-hosted label. An expression (anything
+    containing `${{`) is not statically resolvable here and is treated as
+    NOT known-safe -- RUNNER_VAR_RE already catches the `vars.*RUNNER*`
+    shape used everywhere in this repo today; anything else fails closed."""
+    value = value.strip()
+    if not value or "${{" in value:
+        return False
+    inner = value[1:-1] if value.startswith("[") and value.endswith("]") else value
+    labels = [tok for tok in inner.split(",") if tok.strip()]
+    return bool(labels) and all(_label_is_gh_hosted(tok) for tok in labels)
+
+
 def job_is_self_hosted_ish(block: list[str], body_indent: int) -> bool:
     collecting = False
     for line in block:
@@ -160,10 +192,13 @@ def job_is_self_hosted_ish(block: list[str], body_indent: int) -> bool:
             if value == "" or value.strip().startswith("#"):
                 collecting = True
                 continue
-            return False
+            return not _runs_on_value_is_gh_hosted(value)
         if collecting:
             if ind > body_indent and line.strip().startswith("-"):
                 if SELF_HOSTED_RE.search(line) or RUNNER_VAR_RE.search(line):
+                    return True
+                label = line.strip()[1:].strip()
+                if not _label_is_gh_hosted(label):
                     return True
                 continue
             collecting = False

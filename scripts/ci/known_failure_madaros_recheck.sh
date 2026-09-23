@@ -82,7 +82,7 @@ printf 'test=%s\n' "${selected[@]}"
 compile_fail_regressions=""
 for f in "${selected[@]}"; do
   grep -qE '^//@[[:space:]]*compile-fail' "$ROOT_DIR/$f" || continue
-  if "$MADAROS_BIN" check "$ROOT_DIR/$f" >/dev/null 2>&1; then
+  if "$MADAROS_BIN" --check "$ROOT_DIR/$f" >/dev/null 2>&1; then
     compile_fail_regressions="${compile_fail_regressions}${f}
 "
   fi
