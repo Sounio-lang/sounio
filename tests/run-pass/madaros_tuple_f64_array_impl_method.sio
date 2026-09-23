@@ -98,6 +98,42 @@
 //   H  `recv.pair2().1 * 2.0`   direct scalar projection off a method call
 //                                returning a mixed tuple, no intervening
 //                                binding
+//
+// Copilot follow-up (#2570): case E above already pins a MISSING-array-bit
+// bug for a fn-typed initializer's own mixed-tuple RETURN TYPE. It does not
+// cover a bare tuple annotation whose initializer is a tuple LITERAL, not a
+// call -- lower_opt_type_tuple_float_mask (the function that reads a bare
+// TypeTuple annotation) only ever derived the SCALAR half, and for a tuple
+// literal there is no callee return type for expr_result_tuple_float_mask_ref
+// to fall back on either, so `let t: ([f64; 2], i64) = (a, 1)` left slot 0's
+// array bit at 0 from BOTH sides at once. Fixed by switching the annotation
+// side to lower_opt_type_tuple_combined_mask (the Option-wrapped sibling of
+// lower_type_expr_tuple_combined_mask, the general function already used for
+// a fn-typed annotation's return type) instead of widening the scalar-only
+// helper itself, since that helper is also used -- deliberately scalar-only
+// there -- for a NAMED function's own returns_float encoding.
+//
+//   I  `let a = [2.5, 0.0]; let t: ([f64; 2], i64) = (a, 1); t.0[0] * 2.0`
+//                                        explicit tuple annotation, tuple-
+//                                        literal initializer with an
+//                                        array-local element
+//
+// Copilot follow-up (#2570): companion to I, on the INITIALIZER side rather
+// than the annotation side -- expr_list_tuple_float_mask_ref (consulted for
+// ANY tuple-literal initializer, annotated or not) only ever called
+// expr_result_is_float_ref (the SCALAR classifier) per element, with no
+// array-half counterpart at all, so `(a, 1)` where `a` is an f64-array local
+// always contributed mask 0 regardless of annotation. Fixed by also
+// consulting the same array classifiers lower_let_stmt_type_metadata_ref's
+// own array-local logic already uses (array_literal_elems_are_float_ref,
+// expr_result_is_f64_array_ref, expr_is_tuple_slot_f64_array_ref, and a
+// bare-local lookup via lookup_local_array_elem_float), via a new shared
+// expr_is_f64_array_value_ref helper.
+//
+//   J  `let a = [3.5, 0.0]; let t = (a, 1); let x = t.0; x[0] * 2.0`
+//                                        UNANNOTATED tuple literal, in-place
+//                                        index through a local bound from
+//                                        the tuple's own array-slot field
 fn g(scale: f64) -> ([f64; 2], f64) with Mut, Panic {
     var a: [f64; 2] = [0.0; 2]
     a[0] = 999.0
@@ -178,6 +214,22 @@ fn main() -> i32 with IO, Mut, Panic {
     // tuple, no intervening let.
     let dh: f64 = recv.pair2().1 * 2.0
     if dh != 5.0 { bad = bad + 128 }
+
+    // I: explicit tuple annotation, tuple-literal initializer with an
+    // array-local element -- the annotation's own array bit.
+    let arr_i = [2.5, 0.0]
+    let ti: ([f64; 2], i64) = (arr_i, 1)
+    let di: f64 = ti.0[0] * 2.0
+    if di != 5.0 { bad = bad + 256 }
+
+    // J: unannotated tuple literal, in-place index through a local bound
+    // from the tuple's own array-slot field -- the initializer's own array
+    // bit, with no annotation to fall back on at all.
+    let arr_j = [3.5, 0.0]
+    let tj = (arr_j, 1)
+    let xj = tj.0
+    let dj: f64 = xj[0] * 2.0
+    if dj != 7.0 { bad = bad + 512 }
 
     if bad == 0 {
         println("TUPLE_F64_ARRAY_IMPL_METHOD PASS")

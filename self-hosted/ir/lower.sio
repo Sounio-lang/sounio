@@ -6772,14 +6772,26 @@ fn lower_type_expr_fn_return_tuple_mask(te: &TypeExpr) -> i64 with Mut, Panic, D
     }
 }
 
-// Option-wrapping sibling for a LOCAL's own type annotation (`s.ty`), e.g.
-// `let f: fn() -> ([f64; 2], i64) = someAlias`. Copilot follow-up (#2570):
-// paired with lower_opt_type_tuple_float_mask in the annotated_tuple_mask
-// computation below so an explicit function-typed annotation is ALSO
-// consulted, not only a bare tuple annotation.
-fn lower_opt_type_fn_return_tuple_mask(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
+// Option-wrapping sibling for lower_type_expr_tuple_combined_mask -- the
+// general combined-mask function that already handles BOTH a bare TypeTuple
+// (direct) and a TypeFn (recursing into .inner) in one place, so this ALSO
+// covers what a since-removed lower_opt_type_fn_return_tuple_mask used to
+// (an explicit function-typed LOCAL annotation, e.g.
+// `let f: fn() -> ([f64; 2], i64) = someAlias`).
+//
+// Copilot follow-up (#2570): `lower_opt_type_tuple_float_mask` only ever
+// reads the SCALAR half of a bare tuple annotation, by design where it is
+// ALSO used (lower_opt_return_float_code: a NAMED function's returns_float
+// field is deliberately scalar-only there, with the array half tracked
+// separately by the LOWER_FN_TUPLE_ARR_* table -- adding array bits to that
+// shared function would double up with that table for every other caller).
+// A LOCAL's own tuple_float_mask has no such separate table; it is one
+// combined value, so its annotation needs the array half too. This wrapper
+// is what lower_let_stmt_type_metadata_ref's annotated_tuple_mask uses
+// instead of widening lower_opt_type_tuple_float_mask itself.
+fn lower_opt_type_tuple_combined_mask(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
     match *opt {
-        Some(te) => lower_type_expr_fn_return_tuple_mask(&(*te)),
+        Some(te) => lower_type_expr_tuple_combined_mask(&(*te)),
         None => 0,
     }
 }
@@ -17490,10 +17502,44 @@ impl Lowerer {
         false
     }
 
+    // Copilot follow-up (#2570): true iff `e`'s runtime value is an f64 array,
+    // by any of the ways this file already classifies one elsewhere --
+    // reused here rather than duplicated so a tuple-literal element gets the
+    // exact same answer lower_let_stmt_type_metadata_ref's own array
+    // classification (lines above array_literal_elems_are_float_ref) would
+    // give the same expression in a different context.
+    fn expr_is_f64_array_value_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if self.array_literal_elems_are_float_ref(e) {
+            return true
+        }
+        if self.expr_result_is_f64_array_ref(e) {
+            return true
+        }
+        if self.expr_is_tuple_slot_f64_array_ref(e) {
+            return true
+        }
+        if (*e).kind == ExprKind::ExprIdent {
+            return self.lookup_local_array_elem_float((*e).name)
+        }
+        false
+    }
+
     // #1502: per-slot float mask of a tuple-producing initialiser -- either a call
     // whose declared return type is a tuple (encoded 1024+mask by
     // lower_opt_return_float_code) or a literal tuple, whose element expressions are
     // classified directly.
+    //
+    // Copilot follow-up (#2570): only ever set the SCALAR bit (`self.
+    // expr_result_is_float_ref`), with no array-half counterpart at all --
+    // `let a = [1.5, 0.0]; let t: ([f64; 2], i64) = (a, 1)` left slot 0's
+    // array bit at 0 regardless of the explicit tuple annotation, because
+    // this function is what expr_result_tuple_float_mask_ref's ExprTupleLit
+    // branch delegates to for `t`'s initializer, and it had no way to name
+    // an array-valued element at all. `t.0[0]` then read `a`'s f64 bits
+    // through the integer path. Mirrors lower_type_list_tuple_combined_mask
+    // (the TYPE-annotation-side sibling that already does both halves):
+    // scalar bit first, array bit (bounded by LOWER_FN_TUPLE_ARR_MAX_SLOTS,
+    // same overflow guard) only when the element is not itself f64-scalar.
     fn expr_list_tuple_float_mask_ref(self, opt: &Option<Box<ExprList>>, bit: i64) -> i64 with Mut, Panic, Div, Alloc {
         match *opt {
             Some(list) => {
@@ -17501,6 +17547,8 @@ impl Lowerer {
                 if bit < 32 {
                     if self.expr_result_is_float_ref(&(*list).head) {
                         m = 1 << (bit as i32)
+                    } else if bit < LOWER_FN_TUPLE_ARR_MAX_SLOTS && self.expr_is_f64_array_value_ref(&(*list).head) {
+                        m = (1 << (bit as i32)) * 4294967296
                     }
                 }
                 m + self.expr_list_tuple_float_mask_ref(&(*list).tail, bit + 1)
@@ -18233,7 +18281,22 @@ impl Lowerer {
         // annotation's half winning over the initializer's when the
         // annotation supplies that half at all (matches the existing scalar-
         // half precedent, now applied symmetrically to the array half too).
-        let annotated_tuple_mask = lower_opt_type_tuple_float_mask(&s.ty) + lower_opt_type_fn_return_tuple_mask(&s.ty)
+        //
+        // Copilot follow-up (#2570): a BARE tuple annotation had the exact
+        // scalar-only gap described two paragraphs up STILL live even after
+        // that fix -- `let t: ([f64; 2], i64) = (a, 1)` (a tuple LITERAL
+        // initializer, not a call) has an annotation whose array half
+        // lower_opt_type_tuple_float_mask can never see, and (separately)
+        // an initializer whose array half expr_list_tuple_float_mask_ref
+        // could not see either, until its own fix above. Switched to
+        // lower_opt_type_tuple_combined_mask, the Option-wrapped sibling of
+        // lower_type_expr_tuple_combined_mask -- the general function that
+        // already gives both halves for either a bare TypeTuple OR a TypeFn
+        // (recursing into .inner) in one place, so this ALSO subsumes
+        // lower_opt_type_fn_return_tuple_mask's own contribution; the split-
+        // halves merge below is unaffected; only where annotated_tuple_mask
+        // itself comes from changed.
+        let annotated_tuple_mask = lower_opt_type_tuple_combined_mask(&s.ty)
         let annotated_scalar_bits = annotated_tuple_mask % 4294967296
         let annotated_array_bits = annotated_tuple_mask - annotated_scalar_bits
         var combined_tuple_mask = annotated_tuple_mask
