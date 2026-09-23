@@ -32,6 +32,26 @@
 //      local alias), so t.0[0] read an all-integer array through the f64
 //      path. Reproduced standalone before this fix: printed 0.000000, not
 //      42.
+//
+// Copilot follow-up (#2570): cases C/D are a SELF-shadowing variant of B --
+// the RHS names the SAME identifier the `let` is about to bind
+// (`let pair = pair`), not a different local. lower_let_stmt_after_expr_ref
+// calls bind_local(s.name, ...) BEFORE lower_let_stmt_type_metadata_ref's
+// tuple-mask pass runs over that same s.expr, so by the time
+// expr_result_tuple_float_mask_ref looked up the RHS identifier, it was
+// already looking at the fresh (mask-0) local being created for THIS
+// statement, not the top-level function the RHS actually named when it was
+// lowered. Fixed by computing the RHS's tuple mask in
+// lower_let_stmt_after_expr_ref, before this statement's own bind_local
+// call touches the locals stack at all, and threading it through instead of
+// recomputing it after binding.
+//
+//   C  `let selfref = selfref; selfref(4)`   bare self-reference: the
+//                                              function-identity alias case
+//                                              (B) with RHS name == LHS name
+//   D  `let pairfn = pairfn()`                direct self-shadowed call: the
+//                                              destination is bound from
+//                                              calling the SAME name
 var x: f64 = 3.5
 
 fn int_pair() -> ([i64; 2], i64) with Mut, Panic {
@@ -49,6 +69,18 @@ fn f() -> ([f64; 2], f64) with Mut, Panic {
     (a, 1.0)
 }
 
+fn selfref(scale: i64) -> ([f64; 2], f64) with Mut, Panic {
+    var a: [f64; 2] = [0.0; 2]
+    a[0] = scale as f64
+    (a, 1.0)
+}
+
+fn pairfn() -> ([f64; 2], f64) with Mut, Panic {
+    var a: [f64; 2] = [0.0; 2]
+    a[0] = 6.5
+    (a, 1.0)
+}
+
 fn main() -> i32 with IO, Mut, Panic {
     var bad: i32 = 0
 
@@ -62,6 +94,18 @@ fn main() -> i32 with IO, Mut, Panic {
     let h = f
     let t = h()
     if t.0[0] != 42 { bad = bad + 2 }
+
+    // C: bare self-reference -- RHS `selfref` names the top-level function
+    // at lowering time, but by metadata time `selfref` is already the fresh
+    // local being bound.
+    let selfref = selfref
+    let tc = selfref(4)
+    if tc.0[0] != 4.0 { bad = bad + 4 }
+
+    // D: direct self-shadowed call -- the destination `pairfn` is bound
+    // from calling the top-level function of the same name.
+    let pairfn = pairfn()
+    if pairfn.0[0] != 6.5 { bad = bad + 8 }
 
     if bad == 0 {
         println("LOCAL_SHADOW_GLOBAL_PRECEDENCE PASS")
