@@ -199,7 +199,7 @@ adiabatic constant-volume integration is used for the ignition-delay anchors of
 For the full mechanism the step is dt = 2 × 10⁻⁹ s; dt = 10⁻⁸ s lies outside
 the RK4 stability limit there because of `NNH ⇌ N2 + H`.
 
-### 2.2 The four implementations
+### 2.2 The five implementations
 
 | implementation | integrator | role |
 |---|---|---|
@@ -1499,9 +1499,19 @@ Logged in `.claude/llm_offload_log.md`.
 
 ### Appendix A — per-reaction exponents under the three forms
 
-The full 29-reaction table of correct and `reac − nu` exponents, of which
-§3.1 gives `H + HO2 ⇌ O2 + H2` as the worked case. Producer:
-`benchmarks/chemistry/rep_traj_bug.py`.
+**[W] Corrected 2026-09-23, a reviewer finding.** This appendix previously
+promised "the full 29-reaction table of correct and `reac − nu` exponents"
+without including it — a table it did not contain cannot be called full, and
+a reader had no way to inspect or reproduce the claimed per-reaction values
+from the manuscript alone. `benchmarks/chemistry/rep_traj_bug.py` does not
+itself print a per-reaction exponent table (it prints per-species deviations
+under the three forms, §2.3–§2.5 of its own output); the 29-reaction exponent
+table this appendix pointed to is not a committed artefact. §3.1's worked
+case (`H + HO2 ⇌ O2 + H2`) remains the one exponent comparison this document
+actually derives and shows. Reproducing the full per-reaction table would
+require a dedicated script against `stdlib/chemistry/gri30_full.sio`'s
+mechanism data, which does not yet exist — until it does, this appendix is a
+pointer to that gap, not a table.
 
 ### Appendix B — tolerance ladders and the ten perturbed states
 
@@ -1624,9 +1634,21 @@ inversion is the whole content of d-separation (Berkson 1946).
     set turns a blocked path active, which is unsound for any implementation
     whose search only ever removes edges as the conditioning set grows.
 
-### Appendix E — the nine sections remediated by the provenance audit
+### Appendix E — the sections remediated by the provenance audit
 
-Per §7.6 and §8.3, with the producer supplied for each.
+**[W] Corrected 2026-09-23, a reviewer finding.** This appendix previously
+implied it contained the nine-section list §7.6 refers to ("with the producer
+supplied for each") without actually including a list, mapping, or per-section
+producer — an appendix that names no entries cannot substantiate which nine
+sections were found or what fixed each one. `audit_provenance.py`
+(§8.3), run against the current tree, reports 0 FAIL — every section it
+checks now names a producer present in the released tree — but the tool has
+no mode that lists which sections historically failed before remediation, so
+that specific nine-item history is not reconstructable from this document or
+its producers as they stand. §7.6's aggregate count (**nine**, found and all
+remediated) is what this document can actually support; this appendix is a
+cross-reference to that claim and to the reproducible command below, not an
+itemized list.
 
 ### Appendix F — the step-refinement anomaly (moved from §4.6)
 

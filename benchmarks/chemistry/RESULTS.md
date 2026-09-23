@@ -279,8 +279,10 @@ a relative difference of **7.983e-08**, sitting inside `exp(-Ea/(R·T))`.
 
 **The entire published parity gap is one rounded constant.** With the same R
 on both sides, Sounio, the Python replica and Cantera agree to
-**8.9e-13 … 1.2e-11** — at the floor set by CVODE's own `rtol = 1e-12`, and
-about five orders of magnitude better than the figure the README publishes.
+**8.9e-13 … 1.2e-11** — about five orders of magnitude better than the figure
+the README publishes. This is *not* "at the floor": the note directly below
+retires that framing (all eight figures sit below the oracle's own measured
+floor and are not citable as resolution).
 
 > **Corrected 2026-09-23, a reviewer finding.** This table is an isolated
 > substitution — `R_cal` alone, changed inside `examples/chemistry/h2_probe2.sio`
