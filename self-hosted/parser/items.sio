@@ -1003,6 +1003,8 @@ fn items_reverse_item_list_loop(
 // name.len read back as 0x0100000000000000, E017 on the wrapper body, or a
 // native-checker segfault. Only scalar flags survive in globals here.)
 var EXTERN_BLOCK_ACTIVE: i64 = 0
+var CURRENT_DYNLINK_IDENTITY: [i8; 256] = [0; 256]
+var CURRENT_DYNLINK_IDENTITY_LEN: i64 = 0
 var EXTERN_BLOCK_VIS_KIND: i64 = 0
 
 fn ffi_name_path(name: Name, span: Span) -> Expr with Mut, Panic {
@@ -1858,8 +1860,10 @@ impl Parser {
 
         while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
             let field_start = p.current_span()
+            var field_is_pub = false
             if parser_peek(p) == TokenKind::Pub {
                 p = p.advance()
+                field_is_pub = true
             }
             let field_name = p.current_name()
             p = p.expect_ident()
@@ -1868,7 +1872,7 @@ impl Parser {
             p = pair.0
             let field_ty = pair.1
 
-            let field = FieldDef { name: field_name, ty: field_ty, span: p.span_from(field_start) }
+            let field = FieldDef { name: field_name, ty: field_ty, is_pub: field_is_pub, span: p.span_from(field_start) }
 
             rev_fields_opt = Some(Box::new(FieldDefList { head: field, tail: rev_fields_opt }))
 
@@ -1963,8 +1967,10 @@ impl Parser {
                 p = p.advance()  // skip {
                 var rev_fields: Option<Box<FieldDefList>> = None
                 while parser_peek(p) != TokenKind::RBrace && parser_peek(p) != TokenKind::Eof {
+                    var field_is_pub = false
                     if parser_peek(p) == TokenKind::Pub {
                         p = p.advance()
+                        field_is_pub = true
                     }
                     let f_name = p.current_name()
                     p = p.expect_ident()
@@ -1973,7 +1979,7 @@ impl Parser {
                     p = ty_pair.0
                     let f_ty = ty_pair.1
                     let f_span = p.span_from(v_start)
-                    let fdef = FieldDef { name: f_name, ty: f_ty, span: f_span }
+                    let fdef = FieldDef { name: f_name, ty: f_ty, is_pub: field_is_pub, span: f_span }
                     rev_fields = Some(Box::new(FieldDefList { head: fdef, tail: rev_fields }))
                     if parser_peek(p) == TokenKind::Comma {
                         p = p.advance()
@@ -4412,6 +4418,40 @@ impl Parser {
         let start = self.current_span()
         var p = self.advance()  // skip 'extern'
         if parser_peek(p) == TokenKind::StringLit { p = p.advance() }
+        // Optional library association: from "library_name" (byte-identity model for Fase 2/A+B)
+        var lib_identity_buf: [i8; 256] = [0; 256]
+        var lib_identity_len: i64 = 0
+        if parser_peek(p) == TokenKind::Ident {
+            let potential_from = p.current_name()
+            if potential_from.len == 4
+                && potential_from.buf[0] == (102 as i8)  // 'f'
+                && potential_from.buf[1] == (114 as i8)  // 'r'
+                && potential_from.buf[2] == (111 as i8)  // 'o'
+                && potential_from.buf[3] == (109 as i8)  // 'm'
+            {
+                p = p.advance()  // consume 'from'
+                if parser_peek(p) == TokenKind::StringLit {
+                    p = p.advance()  // consume library name string
+                    let lib_name = p.current_name()
+                    let raw_str = lib_name.buf
+                    let raw_len = lib_name.len
+                    var copy_len: i64 = 0
+                    if raw_len > 255 { copy_len = 255 } else { copy_len = raw_len }
+                    var k: i64 = 0
+                    while k < copy_len {
+                        lib_identity_buf[k as usize] = raw_str[k as usize]
+                        k = k + 1
+                    }
+                    lib_identity_len = copy_len
+                        CURRENT_DYNLINK_IDENTITY_LEN = copy_len
+                        var g_idx: i64 = 0
+                        while g_idx < copy_len {
+                            CURRENT_DYNLINK_IDENTITY[g_idx as usize] = lib_identity_buf[g_idx as usize]
+                            g_idx = g_idx + 1
+                        }
+                }
+            }
+        }
         if parser_peek(p) == TokenKind::LBrace {
             // Re-entrant brace form: consume '{', arm the block state, and
             // return the FIRST declaration's wrapper via the shared
@@ -4808,9 +4848,9 @@ fn parser_name_is_metrics(name: Name) -> bool with Panic, Div {
 }
 
 pub fn copy_string_list_to_name(seg: StringList) -> Name with Mut, Panic, Div {
-    var n = Name { buf: [0; 128], len: seg.head_len }
+    var n = Name { buf: [0; 384], len: seg.head_len }
     var i: i64 = 0
-    while i < seg.head_len && i < 128 {
+    while i < seg.head_len && i < 384 {
         n.buf[i] = seg.head_buf[i]
         i = i + 1
     }
@@ -4840,7 +4880,7 @@ fn name_eq_str(n: Name, s: [i8; 64], slen: i64) -> bool with Mut, Panic, Div {
 }
 
 fn make_short_name(s: [i8; 64], slen: i64) -> Name with Mut, Panic, Div {
-    var out = Name { buf: [0; 128], len: 0 }
+    var out = Name { buf: [0; 384], len: 0 }
     var i: i64 = 0
     while i < slen && i < 64 && i < 128 {
         out.buf[i as usize] = s[i as usize]

@@ -73,13 +73,13 @@ fn main() -> i32 {
 Knowledge<T> operations for epistemic optimization testing:
 ```sio
 fn main() -> i32 {
-    let measurement1 = Knowledge::new(10.0, 0.5, 0.95, "sensor_a")
-    let measurement2 = Knowledge::new(20.0, 0.3, 0.90, "sensor_b")
+    let measurement1 = Epistemic { val: 10.0, variance: 0.5*0.5, confidence: (0.95*1000.0) as i64 }
+    let measurement2 = Epistemic { val: 20.0, variance: 0.3*0.3, confidence: (0.90*1000.0) as i64 }
     
     let combined = measurement1 + measurement2
-    let processed = combined * Knowledge::new(2.0, 0.1, 0.98, "calibration")
+    let processed = combined * Epistemic { val: 2.0, variance: 0.1*0.1, confidence: (0.98*1000.0) as i64 }
     
-    println("Final value: {} ± {}", processed.value, processed.uncertainty)
+    println("Final value: {} ± {}", ep_val(&processed), ep_std(&processed))
     0
 }
 ```
@@ -88,16 +88,16 @@ fn main() -> i32 {
 Complex epistemic data processing:
 ```sio
 fn process_measurements(data: Knowledge<f64>[]) -> Knowledge<f64> {
-    let mut total = Knowledge::new(0.0, 0.0, 1.0, "accumulator")
+    var total = Epistemic { val: 0.0, variance: 0.0*0.0, confidence: (1.0*1000.0) as i64 }
     
     for measurement in data {
         total = total + measurement
         if measurement.confidence > 0.9 {
-            total = total + measurement * Knowledge::new(0.1, 0.01, 0.95, "bonus")
+            total = total + measurement * Epistemic { val: 0.1, variance: 0.01*0.01, confidence: (0.95*1000.0) as i64 }
         }
     }
     
-    total / Knowledge::new(data.len() as f64, 0.0, 1.0, "normalization")
+    total / Epistemic { val: data.len() as f64, variance: 0.0, confidence: 1000 }
 }
 ```
 
@@ -105,18 +105,13 @@ fn process_measurements(data: Knowledge<f64>[]) -> Knowledge<f64> {
 Real-world scientific computing patterns:
 ```sio
 fn simulate_particle_system(num_particles: i32, iterations: i32) -> Knowledge<f64> {
-    let mut total_energy = Knowledge::new(0.0, 0.0, 1.0, "initial_energy")
+    var total_energy = Epistemic { val: 0.0, variance: 0.0*0.0, confidence: (1.0*1000.0) as i64 }
     
     for i in 0..num_particles {
-        let particle_energy = Knowledge::new(i as f64 * 0.1, 0.05, 0.9, format("particle_{}", i))
+        let particle_energy = Epistemic { val: i as f64 * 0.1, variance: 0.05*0.05, confidence: 900 }
         
         for j in 0..iterations {
-            let delta_energy = Knowledge::new(
-                (j as f64 * 0.01).sin(),
-                0.02,
-                0.85,
-                format("iteration_{}", j)
-            )
+            let delta_energy = Epistemic { val: (j as f64 * 0.01).sin(), variance: 0.02*0.02, confidence: 850 }
             total_energy = total_energy + particle_energy + delta_energy
         }
     }
@@ -130,18 +125,13 @@ Challenging optimization scenarios:
 ```sio
 fn fibonacci_optimized(n: i32) -> Knowledge<i32> {
     if n <= 1 {
-        return Knowledge::new(n, 0, 1, "base_case")
+        return Epistemic { val: n as f64, variance: 0.0, confidence: 1000 }
     }
     
     let fib_n_1 = fibonacci_optimized(n - 1)
     let fib_n_2 = fibonacci_optimized(n - 2)
     
-    Knowledge::new(
-        fib_n_1.value + fib_n_2.value,
-        fib_n_1.uncertainty + fib_n_2.uncertainty,
-        min(fib_n_1.confidence, fib_n_2.confidence),
-        "recursive_calculation"
-    )
+    Epistemic { val: fib_n_1.val + fib_n_2.val, variance: (ep_variance(&fib_n_1) + ep_variance(&fib_n_2)) * (ep_variance(&fib_n_1) + ep_variance(&fib_n_2)), confidence: (min(ep_confidence(&fib_n_1), ep_confidence(&fib_n_2)) * 1000.0) as i64 }
 }
 ```
 
@@ -305,7 +295,7 @@ Add new test programs to `BenchmarkPrograms`:
 pub custom_test: &'static str = r#"
 fn custom_algorithm(n: i32) -> Knowledge<i32> {
     // Your custom test code here
-    Knowledge::new(n, 1.0, 0.95, "custom")
+    Epistemic { val: n, variance: 1.0, confidence: 950 }
 }
 "#,
 ```

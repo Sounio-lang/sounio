@@ -28,7 +28,7 @@ pub struct CodeBuffer {
 // emitters (which emit into a copy of nc) append to the same global at the shared
 // offset, so no persist/call-site changes are needed. Accessed INLINE only —
 // never via a returning helper (miscompiles under the seed).
-pub var NC_BIG_CODE: [i8; 8388608] = [0; 8388608]
+pub var NC_BIG_CODE: [i8; 134217728] = [0; 134217728]
 
 // Single source of truth for the NC_BIG_CODE bound. The DECLARATION above must
 // stay a literal (Sounio array sizes are not expressions), but every bound CHECK
@@ -37,7 +37,7 @@ pub var NC_BIG_CODE: [i8; 8388608] = [0; 8388608]
 // native::frame, nc_elf_capacity_bytes() in native::codegen_x86_linux.
 // Declaration/accessor coherence is pinned by
 // scripts/ci/native_capacity_tiers_gate.sh.
-pub fn nc_code_capacity_bytes() -> i64 { 8388608 }
+pub fn nc_code_capacity_bytes() -> i64 { 134217728 }
 
 // Materialise NC_BIG_CODE into fixed arrays expected by legacy macho/pe assemblers
 // that still take by-value `[i8; N]`. Linux ELF writers read NC_BIG_CODE directly.
@@ -71,6 +71,14 @@ pub fn code_buffer_new() -> CodeBuffer {
     var out: CodeBuffer
     out.len = 0
     out
+}
+
+// Read materialized Linux native-v2 code without exposing the vestigial
+// CodeBuffer.bytes stub to byte-level backend gates.
+pub fn code_buffer_read_byte(buf: CodeBuffer, idx: i64) -> i64 with Mut, Panic, Div {
+    if idx < 0 || idx >= buf.len || idx >= nc_code_capacity_bytes() { return -1 }
+    let x = NC_BIG_CODE[idx as usize] as i64
+    if x < 0 { x + 256 } else { x }
 }
 
 pub fn low8(x: i64) -> i64 with Mut, Panic, Div {
@@ -2098,6 +2106,40 @@ pub fn emit_setbe_al(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
     b = emit_byte(b, 0x0F)
     b = emit_byte(b, 0x96)
     b = emit_byte(b, 0xC0)
+    b
+}
+
+// SETPO cl — set cl if parity odd (PF=0), i.e. ucomisd operands are ordered
+pub fn emit_setpo_cl(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x0F)
+    b = emit_byte(b, 0x9B)
+    b = emit_byte(b, 0xC1)
+    b
+}
+
+// SETPE cl — set cl if parity even (PF=1), i.e. ucomisd operands are unordered
+pub fn emit_setpe_cl(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x0F)
+    b = emit_byte(b, 0x9A)
+    b = emit_byte(b, 0xC1)
+    b
+}
+
+// AND al, cl — mask ordered compare result (SETcc does not clobber flags)
+pub fn emit_and_al_cl(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x22)
+    b = emit_byte(b, 0xC1)
+    b
+}
+
+// OR al, cl — fold unordered into !=
+pub fn emit_or_al_cl(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x0A)
+    b = emit_byte(b, 0xC1)
     b
 }
 

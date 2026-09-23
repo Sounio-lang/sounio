@@ -28,6 +28,15 @@
 # meaningless ones. Undeclared witnesses are counted as UNVERIFIED and written
 # to the artifact. That count is the number this gate exists to move.
 #
+# Merge Conflicts and Derived Artefacts (#2391)
+# ---------------------------------------------
+# artifacts/gates/witness_declares_its_sabotage.json is a derived artefact.
+# When concurrent branches add witnesses, the cardinality and corpus digest
+# will conflict on merge. NEVER resolve the conflict by picking HEAD or main:
+# always re-derive via:
+#   SOUNIO_WITNESS_SABOTAGE_CENSUS_ONLY=1 bash scripts/ci/witness_declares_its_sabotage_gate.sh
+#
+# Usage:
 #   SOUNIO_WITNESS_SABOTAGE_MADAROS=/path/to/madaros   # required
 #   SOUNIO_WITNESS_SABOTAGE_CENSUS_ONLY=1              # skip the builds
 set -uo pipefail
@@ -44,6 +53,7 @@ sab_env_for() {
     hessian-chain)    echo "SOUNIO_SABOTAGE_HESSIAN_CHAIN" ;;
     correlate-rho)    echo "SOUNIO_SABOTAGE_CORRELATE_RHO" ;;
     wide-mul)         echo "SOUNIO_WIDE_MUL_SABOTAGE" ;;
+    ieee-f64-special) echo "SOUNIO_SABOTAGE_IEEE_F64_SPECIAL" ;;
     *)                echo "" ;;
   esac
 }
@@ -52,16 +62,64 @@ ART_DIR="$ROOT_DIR/artifacts/gates"
 mkdir -p "$ART_DIR"
 ART="$ART_DIR/witness_declares_its_sabotage.json"
 
-mapfile -t ALL_WITNESSES < <(find tests/run-pass -name '*.sio' -type f | sort)
+# Prefer tracked witnesses so Finder "foo 2.sio" duplicates cannot inflate the
+# census. Fall back to find(1) for temp-tree selftests that are not a git worktree.
+mapfile -t ALL_WITNESSES < <(
+  tracked=""
+  if git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    tracked="$(git -C "$ROOT_DIR" ls-files 'tests/run-pass/*.sio' | LC_ALL=C sort || true)"
+  fi
+  if [[ -n "$tracked" ]]; then
+    printf '%s\n' "$tracked"
+  else
+    find tests/run-pass -name '*.sio' -type f | LC_ALL=C sort
+  fi
+)
+
+# Map declared witnesses quickly without spawning thousands of separate subshells.
+declare -A DECL_MAP=()
+while IFS=: read -r file match; do
+  [[ -z "$file" ]] && continue
+  tok="$(awk '{print $NF}' <<<"$match")"
+  DECL_MAP["$file"]="$tok"
+done < <(grep -r -m1 -E '^//@ sabotage:[[:space:]]*[a-z0-9-]+' tests/run-pass 2>/dev/null || true)
+
 declared=(); undeclared=()
 for w in "${ALL_WITNESSES[@]}"; do
-  tok="$(grep -m1 -oE '^//@ sabotage:[[:space:]]*[a-z0-9-]+' "$w" 2>/dev/null | awk '{print $NF}')"
-  if [[ -n "$tok" ]]; then declared+=("$w|$tok"); else undeclared+=("$w"); fi
+  if [[ -n "${DECL_MAP["$w"]:-}" ]]; then
+    declared+=("$w|${DECL_MAP["$w"]}")
+  else
+    undeclared+=("$w")
+  fi
 done
 
 total_w=${#ALL_WITNESSES[@]}
 n_decl=${#declared[@]}
 n_undecl=${#undeclared[@]}
+
+# Corpus identity digest: SHA-256 over sorted "path + content-hash" pairs.
+#
+# #2391 landed this as a digest of the sorted PATHS alone, which fixes
+# cardinality and naming but not identity: rewriting a witness's body while
+# keeping its filename leaves the digest unchanged. That is precisely the
+# "corpus swap with cardinality preserved" case this census is meant to make
+# impossible, so the content hash is folded in here. The digest necessarily
+# changes value when this line lands — it is a different, stronger claim, and
+# the pinned value in scripts/ci/fixtures/measured_claims.tsv is re-derived in
+# the same commit.
+# One hasher invocation over the whole (already sorted) list: its output is
+# "<content-hash>  <path>" per line, so the inner digest covers content AND
+# naming AND ordering in a single pass. Hashing file-by-file in a shell loop
+# would spawn ~1900 processes here and cost seconds per gate run.
+corpus_sha="$(
+  { sha256sum "${ALL_WITNESSES[@]}" 2>/dev/null || shasum -a 256 "${ALL_WITNESSES[@]}"; } \
+    | (sha256sum 2>/dev/null || shasum -a 256) | awk '{print $1}'
+)"
+
+# Per-class counts of run-pass directives (#2391).
+n_check_only="$(grep -r -m1 -l '^//@ check-only' tests/run-pass 2>/dev/null | wc -l | tr -d ' ')"
+n_known_fail="$(grep -r -m1 -l '^//@ known-failure' tests/run-pass 2>/dev/null | wc -l | tr -d ' ')"
+n_req_madaros="$(grep -r -m1 -l '^//@ requires:[[:space:]]*madaros' tests/run-pass 2>/dev/null | wc -l | tr -d ' ')"
 
 # Non-vacuity, and it is not a formality.
 #
@@ -83,9 +141,9 @@ if [[ "${SOUNIO_WITNESS_SABOTAGE_CENSUS_ONLY:-0}" == "1" ]]; then
   # passed=0, not_run=total. Census mode executes nothing, and an artifact that
   # reports passes it did not observe is the exact defect this gate exists to
   # find -- it was written that way first, and caught in review of its own JSON.
-  printf '{"status":"pass","mode":"census","metrics":{"total":%d,"declared":%d,"unverified":%d,"passed":0,"failed":0,"not_run":%d}}\n' \
-    "$total_w" "$n_decl" "$n_undecl" "$total_w" | gate_write_artifact "$ART"
-  echo "witness_declares_its_sabotage: census only -- $n_decl declared, $n_undecl unverified, of $total_w"
+  printf '{"_comment":"Derived artifact: on merge conflict re-derive with SOUNIO_WITNESS_SABOTAGE_CENSUS_ONLY=1 bash scripts/ci/witness_declares_its_sabotage_gate.sh, never resolve by side","status":"pass","mode":"census","corpus_sha256":"%s","metrics":{"total":%d,"declared":%d,"unverified":%d,"passed":0,"failed":0,"not_run":%d},"classes":{"check_only":%d,"known_failure":%d,"requires_madaros":%d}}\n' \
+    "$corpus_sha" "$total_w" "$n_decl" "$n_undecl" "$total_w" "$n_check_only" "$n_known_fail" "$n_req_madaros" | gate_write_artifact "$ART"
+  echo "witness_declares_its_sabotage: census only -- $n_decl declared, $n_undecl unverified, of $total_w (corpus_sha256=$corpus_sha)"
   gate_pass "census written to $ART"
   exit 0
 fi
@@ -265,9 +323,10 @@ if [[ $((failed - broken)) -ne 0 ]] || [[ $broken -gt ${SOUNIO_WITNESS_UNJUDGEAB
    || [[ $((d_crash + d_timeout + d_misattributed)) -gt ${SOUNIO_WITNESS_UNCLEAN_CEILING:-0} ]]; then
   status=fail
 fi
-printf '{"status":"%s","mode":"full","metrics":{"total":%d,"declared":%d,"unverified":%d,"unjudgeable":%d,"passed":%d,"failed":%d,"not_run":%d},"deaths":{"run":%d,"compile_refused":%d,"crash":%d,"timeout":%d,"misattributed":%d}}\n' \
-  "$status" "$total_w" "$n_decl" "$n_undecl" "$broken" "$passed" "$((failed - broken))" "$n_undecl" \
-  "$d_run" "$d_compile" "$d_crash" "$d_timeout" "$d_misattributed" | gate_write_artifact "$ART"
+printf '{"_comment":"Derived artifact: on merge conflict re-derive with SOUNIO_WITNESS_SABOTAGE_CENSUS_ONLY=1 bash scripts/ci/witness_declares_its_sabotage_gate.sh, never resolve by side","status":"%s","mode":"full","corpus_sha256":"%s","metrics":{"total":%d,"declared":%d,"unverified":%d,"unjudgeable":%d,"passed":%d,"failed":%d,"not_run":%d},"deaths":{"run":%d,"compile_refused":%d,"crash":%d,"timeout":%d,"misattributed":%d},"classes":{"check_only":%d,"known_failure":%d,"requires_madaros":%d}}\n' \
+  "$status" "$corpus_sha" "$total_w" "$n_decl" "$n_undecl" "$broken" "$passed" "$((failed - broken))" "$n_undecl" \
+  "$d_run" "$d_compile" "$d_crash" "$d_timeout" "$d_misattributed" \
+  "$n_check_only" "$n_known_fail" "$n_req_madaros" | gate_write_artifact "$ART"
 
 echo "witness_declares_its_sabotage: status=$status declared=$n_decl passed=$passed failed=$failed unverified=$n_undecl of=$total_w"
 echo "  deaths: run=$d_run compile-refused=$d_compile crash=$d_crash timeout=$d_timeout misattributed=$d_misattributed | unjudgeable=$broken (ceiling $UNJUDGEABLE_CEILING)"

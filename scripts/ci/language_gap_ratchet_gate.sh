@@ -27,29 +27,50 @@ rc() { "$@" >/dev/null 2>&1; echo $?; }
 UNITS=tests/known-gaps/units
 NUM=tests/known-gaps/numerics
 
-# #2387 -- f128 is f64 on lean_single (53 halvings until 1+e == 1); refused by Madaros
+# #2387 -- CLOSED on lean_single: binary128 (113 halvings until 1+e == 1).
+# Madaros still refuses at parse (E249 / V0-A). The ratchet stays red in both
+# directions: lean must keep 113, Madaros must keep refusing.
 h=$(lean run examples/numerics/f128_is_f64_probe.sio 2>/dev/null | tail -1 | tr -d '[:space:]')
-expect "f128 halvings on lean_single (f64 would be 53, binary128 113)" "53" "$h"
+expect "f128 halvings on lean_single (f64 would be 53, binary128 113)" "113" "$h"
+# KL-9 -- f256 stays refused fail-closed on lean_single (no f64 greenwash).
+expect "f256 refused by lean_single" "1" "$([[ $(rc lean check tests/compile-fail/f256_refused_on_lean_single.sio) -ne 0 ]] && echo 1 || echo 0)"
 expect "f128 refused by Madaros check (exit != 0)" "1" "$([[ $(rc mad check examples/numerics/f128_is_f64_probe.sio) -ne 0 ]] && echo 1 || echo 0)"
 
-# #2388 (1) -- derived unit annotations do not parse on either engine
-expect "derived unit annotation refused by lean_single" "1" "$([[ $(rc lean check $UNITS/derived_unit_annotation_unparsed.sio) -ne 0 ]] && echo 1 || echo 0)"
-expect "derived unit annotation refused by Madaros" "1" "$([[ $(rc mad check $UNITS/derived_unit_annotation_unparsed.sio) -ne 0 ]] && echo 1 || echo 0)"
+# #2388 (1) / KL-13b — CLOSED: bare derived unit annotations (mol/cm3) parse.
+# Witnesses moved to tests/run-pass + compile-fail; known-gap fixture deleted.
+# Madaros accept needs a current-source ELF (committed bin/madaros-linux-x86_64
+# lags self-hosted/). Assert lean here; Madaros is smoked after modular rebuild
+# and pinned by Current-Source self-parse + the refuse line below.
+expect "derived unit annotation accepted by lean_single" "0" "$(rc lean check tests/run-pass/unit_derived_annotation_mol_per_cm3.sio)"
+if [[ "${SOUNIO_RATCHET_REQUIRE_MADAROS_ACCEPT:-0}" == "1" ]]; then
+  expect "derived unit annotation accepted by Madaros" "0" "$(rc mad check tests/run-pass/unit_derived_annotation_mol_per_cm3.sio)"
+else
+  echo "[ratchet] skip derived unit annotation accepted by Madaros (set SOUNIO_RATCHET_REQUIRE_MADAROS_ACCEPT=1 when bin/madaros is current-source)"
+fi
+expect "derived annotation additive refuse (lean_single)" "1" "$([[ $(rc lean check tests/compile-fail/unit_derived_annotation_refuse_add.sio) -ne 0 ]] && echo 1 || echo 0)"
+expect "derived annotation additive refuse (Madaros)" "1" "$([[ $(rc mad check tests/compile-fail/unit_derived_annotation_refuse_add.sio) -ne 0 ]] && echo 1 || echo 0)"
 # control: a direct mol + K mismatch IS caught (if this flips, units are off entirely)
 expect "control: direct unit mismatch caught by lean_single" "1" "$([[ $(rc lean check $UNITS/direct_unit_mismatch_is_caught.sio) -ne 0 ]] && echo 1 || echo 0)"
-# #2388 (2),(3) -- lean_single accepts a dimensionless quotient + K, and K into an f64 parameter
-expect "quotient loses dimension (lean_single accepts)" "0" "$(rc lean check $UNITS/derived_unit_dropped_by_inference.sio)"
-expect "unit lost at call boundary (lean_single accepts)" "0" "$(rc lean check $UNITS/unit_lost_at_call_boundary.sio)"
+# #2388 (2) -- CLOSED 2026-09-05. A quotient used to lose its dimension, so
+# (mol/cm3) + K compiled. lean_single now says `error: unit dimension mismatch`
+# and exits non-zero, on BOTH targets. What closed it is the dimension carried
+# through `*` and `/` (dim_add / dim_sub at the multiplicative site) plus the
+# additive dimension check, which this branch mirrored into the arm64 pass and
+# which the refreshed seed now ships. The rung moves up: a gap that closed is
+# progress, and the ratchet is red in both directions, so this line is what
+# stops it reopening.
+expect "quotient keeps its dimension (lean_single refuses)" "1" "$([[ $(rc lean check tests/compile-fail/unit_quotient_keeps_dimension.sio) -ne 0 ]] && echo 1 || echo 0)"
+# #2388 (3) / KL-13 partial — CLOSED: unit-typed args no longer enter bare f64
+# parameters on lean_single (or Madaros). Explicit `as f64` remains the escape.
+# Witness moved to tests/compile-fail/; cast escape in run-pass.
+expect "unit lost at call boundary (lean_single refuses)" "1" "$([[ $(rc lean check tests/compile-fail/unit_lost_at_call_boundary.sio) -ne 0 ]] && echo 1 || echo 0)"
+expect "unit lost at call boundary (Madaros refuses)" "1" "$([[ $(rc mad check tests/compile-fail/unit_lost_at_call_boundary.sio) -ne 0 ]] && echo 1 || echo 0)"
+expect "explicit cast strips unit brand (lean_single)" "0" "$(rc lean check tests/run-pass/unit_call_cast_strips_brand.sio)"
 
-# IEEE special values -- NaN compares as ordered on both engines
-for e in lean mad; do
-  got=$($e run $NUM/nan_compare_is_not_ieee.sio 2>/dev/null | grep -E '^[01]$' | tr '\n' ' ' | sed 's/ $//')
-  expect "nan ==,!=,< on $e (IEEE would be '0 1 0')" "1 0 1" "$got"
-done
-# println(inf): lean_single never returns (timeout 20s -> 124); Madaros prints 2^63
-expect "println(inf) hangs on lean_single" "124" "$(timeout 20 env SOUNIO_SOUC_ENGINE=lean_single "$SOUC" run $NUM/print_inf_never_returns.sio >/dev/null 2>&1; echo $?)"
-expect "println(inf) on Madaros" "9223372036854775808.000000" "$(timeout 60 "$SOUC" run $NUM/print_inf_never_returns.sio 2>/dev/null | sed -n '/^START$/{n;p;}')"
-expect "println(nan) on Madaros" "-9223372036854775808.000000" "$(timeout 60 "$SOUC" run $NUM/print_nan_is_garbage.sio 2>/dev/null | sed -n '/^START$/{n;p;}')"
+# #2389 / KL-2 — CLOSED 2026-09-11. IEEE f64 compares are PF-aware on both
+# engines; print_f64 / println emit "inf" and "nan". Witnesses moved to
+# tests/run-pass/ieee_f64_*.sio; pinned by madaros_ieee_f64_special_values_gate.sh.
+
 
 echo "[ratchet] $((N-FAILS))/$N witnesses hold the measured gap"
 [[ $FAILS -eq 0 ]]

@@ -10,12 +10,11 @@
 // while hessian_of(sin(x)) was a confident 0.0 -- a shipped builtin
 // returning a plausible wrong answer for every transcendental.
 //
-// The composite rows are as load-bearing as the exact ones: with a compound
-// argument the rule is REFUSED and must read exactly 0.0. Skipping the
-// computation is not enough -- so_expr_hess then still holds the argument's
-// own Hessian and hessian_of reports it as the outer expression's, which
-// made hessian_of(exp(x*x)) read 2.0: H(x*x) wearing the wrong name, and
-// far harder to catch than a zero. Refusal has to clear.
+// Composite arguments used to be REFUSED because the f'(g)*H(g) term
+// read s_g² where H_g belonged. The slot held the right register; feeding
+// it through so_mul_or_none (Lowerer by value) made the multiply see a
+// leftover s_g². The chain rule is now emitted in place:
+//   H(f(g)) = f''(g)·s_g² + f'(g)·H(g)
 
 fn abs_f(x: f64) -> f64 {
     if x < 0.0 { 0.0 - x } else { x }
@@ -32,25 +31,31 @@ fn main() -> i64 with Mut, Panic, Div, Alloc, Epistemic, IO {
     let h_exp  = hessian_of(exp(x), 0, 0)         // exp(0.5)
     let h_e2x  = hessian_of(exp(2.0 * x), 0, 0)   // 4*exp(1), linear inner
 
-    // refused: compound argument, must be exactly zero
-    let r_exx  = hessian_of(exp(x * x), 0, 0)
-    let r_esin = hessian_of(exp(sin(x)), 0, 0)
-    let r_ssin = hessian_of(sin(sin(x)), 0, 0)
+    // composite: f''(g)*s_g^2 + f'(g)*H_g  (x = 0.5)
+    let h_exx  = hessian_of(exp(x * x), 0, 0)     // 3*exp(0.25)
+    let h_exxx = hessian_of(exp(x * x * x), 0, 0) // 3.5625*exp(0.125)
+    let h_esin = hessian_of(exp(sin(x)), 0, 0)
+    let h_ssin = hessian_of(sin(sin(x)), 0, 0)
 
     print("h_poly="); print_f64(h_poly); print("\n")
     print("h_sin=");  print_f64(h_sin);  print("\n")
     print("h_cos=");  print_f64(h_cos);  print("\n")
     print("h_exp=");  print_f64(h_exp);  print("\n")
     print("h_e2x=");  print_f64(h_e2x);  print("\n")
+    print("h_exx=");  print_f64(h_exx);  print("\n")
+    print("h_exxx="); print_f64(h_exxx); print("\n")
+    print("h_esin="); print_f64(h_esin); print("\n")
+    print("h_ssin="); print_f64(h_ssin); print("\n")
 
     let ok = abs_f(h_poly - 2.0) < 1.0e-12
         && abs_f(h_sin - (0.0 - 0.479425538604203)) < 1.0e-9
         && abs_f(h_cos - (0.0 - 0.8775825618903728)) < 1.0e-9
         && abs_f(h_exp - 1.6487212707001282) < 1.0e-9
         && abs_f(h_e2x - 10.87312731383618) < 1.0e-8
-        && r_exx == 0.0
-        && r_esin == 0.0
-        && r_ssin == 0.0
+        && abs_f(h_exx - 3.852076250063224) < 1.0e-8
+        && abs_f(h_exxx - 4.036841364050569) < 1.0e-8
+        && abs_f(h_esin - 0.46956439926573407) < 1.0e-8
+        && abs_f(h_ssin - (0.0 - 0.7806224073194925)) < 1.0e-8
     if ok {
         print("MADAROS_HESSIAN_TRANSCENDENTAL_PASS\n")
     } else {

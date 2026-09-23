@@ -9,7 +9,7 @@ use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, parser_peek_ahead
 use parser::exprs::{parse_expr_entry}
 
 fn type_path_structural_count(list: &StringList, remaining: i64) -> i64 with Mut {
-    if remaining <= 0 || (*list).head_len <= 0 || (*list).head_len > 128 {
+    if remaining <= 0 || (*list).head_len <= 0 || (*list).head_len > 384 {
         return -1
     }
     match (*list).tail {
@@ -21,26 +21,12 @@ fn type_path_structural_count(list: &StringList, remaining: i64) -> i64 with Mut
     }
 }
 
+// V0-B (docs/architecture/F128_F256_LADDER.md): f128/f256 type spellings are
+// accepted through parse + check. Arithmetic/casts remain rejected later in
+// the checker (E248 / binary_result_type). This helper is kept as a no-op so
+// call sites stay stable and a future hard-refuse can be restored in one place.
 fn parser_reject_reserved_wide_float_path(mut_p: Parser, path: &AstPath, span: Span) -> Parser with Mut, IO {
-    if (*path).seg_count != 1 || (*path).segments.head_len != 4 { return mut_p }
-    let buf = (*path).segments.head_buf
-    if buf[0] != 102 as i8 { return mut_p }
-    let is_f128 = buf[1] == 49 as i8 && buf[2] == 50 as i8 && buf[3] == 56 as i8
-    let is_f256 = buf[1] == 50 as i8 && buf[2] == 53 as i8 && buf[3] == 54 as i8
-    if !is_f128 && !is_f256 { return mut_p }
-    var p = mut_p
-    p.had_error = true
-    p.error_count = p.error_count + 1
-    print("error[E249]")
-    if span.start > 0 || span.end > 0 {
-        print(" at ")
-        print_int(span.start)
-        print("..")
-        print_int(span.end)
-    }
-    print(": f128/f256 is reserved for compiler-owned format identity; source values are unavailable in V0-A\n")
-    print("   = note: parser marks this source invalid before checker, IR, SOIR, ABI, or native lowering\n")
-    p
+    mut_p
 }
 
 fn report_unknown_knowledge_component(mut_p: Parser, span: Span) -> Parser with Mut, IO {
@@ -254,7 +240,7 @@ impl Parser {
         p = pair.0
         let inner_ty = pair.1
         let span = p.span_from(start)
-        var opt_name = Name { buf: [0; 128], len: 6 }
+        var opt_name = Name { buf: [0; 384], len: 6 }
         opt_name.buf[0] = 79 as i8
         opt_name.buf[1] = 112 as i8
         opt_name.buf[2] = 116 as i8
@@ -342,7 +328,7 @@ impl Parser {
             let p1_end: i64 = if p1.pos < p1.token_count { PT_END[p1.pos as usize] } else { start.end }
             let span = Span { file_id: start.file_id, start: start.start, end: p1_end }
             let p2 = parser_reject_reserved_wide_float_path(p1, &path, span)
-            (p2, TypeExpr {
+            var unit_ty = TypeExpr {
                 kind: TypeExprKind::TypeNamed,
                 span: span,
                 path: path,
@@ -352,8 +338,65 @@ impl Parser {
                 effects: None,
                 knowledge_info: None,
                 refinement_info: None,
-            })
+            }
+            // KL-13b: bare derived unit annotations `mol/cm3`, `cal/mol/K`.
+            // Same TypeReference=/ TypeRefMut=* encoding as parse_unit_item.
+            // Do NOT chain after numeric/bool primitives — that steals the `/`
+            // from casts like `x as f64 / 100.0` (self-parse of pkg/lock.sio).
+            var p_unit = p2
+            if type_path_allows_unit_chain(path) {
+                while parser_peek(p_unit) == TokenKind::Slash || parser_peek(p_unit) == TokenKind::Star {
+                    let op = parser_peek(p_unit)
+                    p_unit = p_unit.advance()
+                    let rhs_pair = p_unit.parse_named_type_atom()
+                    p_unit = rhs_pair.0
+                    let rhs_ty = rhs_pair.1
+                    let unit_kind = if op == TokenKind::Slash {
+                        TypeExprKind::TypeReference
+                    } else {
+                        TypeExprKind::TypeRefMut
+                    }
+                    let op_span = p_unit.span_from(start)
+                    unit_ty = TypeExpr {
+                        kind: unit_kind,
+                        span: op_span,
+                        path: empty_path(),
+                        type_args: Some(Box::new(TypeExprList {
+                            head: unit_ty,
+                            tail: None,
+                        })),
+                        inner: Some(Box::new(rhs_ty)),
+                        array_size: None,
+                        effects: None,
+                        knowledge_info: None,
+                        refinement_info: None,
+                    }
+                }
+            }
+            (p_unit, unit_ty)
         }
+    }
+
+    // Named type without trailing `/` `*` unit-expr chains (used as RHS of those chains).
+    fn parse_named_type_atom(self) -> (Parser, TypeExpr) with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        let pair = self.parse_type_path()
+        let p1 = pair.0
+        let path = pair.1
+        let p1_end: i64 = if p1.pos < p1.token_count { PT_END[p1.pos as usize] } else { start.end }
+        let span = Span { file_id: start.file_id, start: start.start, end: p1_end }
+        let p2 = parser_reject_reserved_wide_float_path(p1, &path, span)
+        (p2, TypeExpr {
+            kind: TypeExprKind::TypeNamed,
+            span: span,
+            path: path,
+            type_args: None,
+            inner: None,
+            array_size: None,
+            effects: None,
+            knowledge_info: None,
+            refinement_info: None,
+        })
     }
 
     // ============================================================
@@ -367,7 +410,7 @@ impl Parser {
         let name = self.current_name()
         (*out).head_len = name.len
         var byte_i: i64 = 0
-        while byte_i < 128 {
+        while byte_i < 384 {
             (*out).head_buf[byte_i as usize] = name.buf[byte_i as usize]
             byte_i = byte_i + 1
         }
@@ -379,7 +422,7 @@ impl Parser {
             if next_k == TokenKind::Ident || tk_is_keyword(next_k) {
                 p = p.advance()
                 var next = Box::new(StringList {
-                    head_buf: [0; 128],
+                    head_buf: [0; 384],
                     head_len: 0,
                     tail: None,
                 })
@@ -532,6 +575,8 @@ impl Parser {
         let pair = p.parse_type()
         p = pair.0
         let first_ty = pair.1
+        // Unit chains inside args (`f64<m/s>`) come from parse_named_type on
+        // non-primitive heads; do not re-scan `/` here (casts use parse_type too).
         var rev_list = TypeExprList { head: first_ty, tail: None }
 
         while parser_peek(p) == TokenKind::Comma {
@@ -628,7 +673,23 @@ impl Parser {
             p = p.advance()
         }
 
-        var pred_op: i64 = 5
+        // 0 means UNRECOGNISED, not equality. This defaulted to 5 -- the
+        // code for `==` -- so a predicate whose operator this parser does
+        // not handle silently became an equality, and since the literal
+        // scan below then found no IntLit either, it became `n == 0`.
+        //
+        // Measured on `{ n: i32 | n * 2 < 200 }`: the parser consumes `n`,
+        // meets `*`, matches nothing, keeps the default, and the checker
+        // afterwards rejects every argument except 0. Probed at 0, 1, 2, 3,
+        // 42, 99, 100, 101, 200 and 500 -- only 0 passes. That is
+        // tests/run-pass/refinement_nested_arithmetic, and it fails the same
+        // way on the committed baseline.
+        //
+        // An unrepresentable predicate reported as a plausible one is worse
+        // than reporting nothing: `n == 0` is evaluable, so every downstream
+        // check believes it and no amount of three-state reasoning in the
+        // checker can recover what the parser threw away here.
+        var pred_op: i64 = 0
         let op = parser_peek(p)
         if op == TokenKind::Gt {
             pred_op = 1
@@ -911,12 +972,13 @@ impl Parser {
     fn parse_effect_list(self) -> (Parser, EffectList) with Mut, IO, Panic, Div, Alloc {
         var p = self.advance()  // skip 'with'
         let first_name = p.current_name()
-        let first_eff = EffectRef { name_buf: [0; 64], name_len: first_name.len, payload: 0 - 1 }
+        let first_eff = EffectRef { name_buf: [0; 64], name_len: first_name.len, payload: 0, has_payload: false }
         var first = copy_name_to_effect(first_name, first_eff)
         p = p.advance()  // skip effect name
         let fpay = p.parse_effect_payload()
         p = fpay.0
         first.payload = fpay.1
+        first.has_payload = fpay.2
 
         var rev_list = EffectList { head: first, tail: None }
 
@@ -928,28 +990,29 @@ impl Parser {
             }
             p = p.advance()  // skip ,
             let eff_name = p.current_name()
-            let eff = EffectRef { name_buf: [0; 64], name_len: eff_name.len, payload: 0 - 1 }
+            let eff = EffectRef { name_buf: [0; 64], name_len: eff_name.len, payload: 0, has_payload: false }
             var e = copy_name_to_effect(eff_name, eff)
             p = p.advance()  // skip effect name
             let npay = p.parse_effect_payload()
             p = npay.0
             e.payload = npay.1
+            e.has_payload = npay.2
             rev_list = EffectList { head: e, tail: Some(Box::new(rev_list)) }
         }
 
         (p, reverse_effect_list(rev_list))
     }
 
-    // Returns the parser and the payload of a parameterised effect, or -1 when the
-    // effect carries none. Balanced-paren skipping is kept for payload shapes this
+    // Returns the parser, payload, and whether a payload was present. Balanced-paren
+    // skipping is kept for payload shapes this
     // does not yet model; what is new is that a single integer literal is now
     // RETAINED. It used to be counted and thrown away, which made Epistemic(950)
     // and Epistemic(400) the same effect.
-    fn parse_effect_payload(self) -> (Parser, i64) with Mut, IO, Panic, Div, Alloc {
+    fn parse_effect_payload(self) -> (Parser, i64, bool) with Mut, IO, Panic, Div, Alloc {
         var p = self
-        var value: i64 = 0 - 1
+        var value: i64 = 0
         if parser_peek(p) != TokenKind::LParen {
-            return (p, value)
+            return (p, value, false)
         }
         if parser_peek_ahead(p, 1) == TokenKind::IntLit && parser_peek_ahead(p, 2) == TokenKind::RParen {
             p = p.advance()
@@ -957,7 +1020,14 @@ impl Parser {
             value = tok.int_value
             p = p.advance()
             p = p.advance()
-            return (p, value)
+            return (p, value, true)
+        }
+        if parser_peek_ahead(p, 1) == TokenKind::Minus {
+            p.had_error = true
+            p.error_count = p.error_count + 1
+            if p.error_count <= 20 {
+                print("parse error: effect payload must be a non-negative integer literal\n")
+            }
         }
 
         var depth: i64 = 0
@@ -970,14 +1040,14 @@ impl Parser {
                 depth = depth - 1
                 p = p.advance()
                 if depth == 0 {
-                    return (p, value)
+                    return (p, value, false)
                 }
             } else {
                 p = p.advance()
             }
         }
 
-        (p, value)
+        (p, value, false)
     }
 
     // ============================================================
@@ -1666,6 +1736,78 @@ impl Parser {
 // ============================================================
 // Linked-list helpers for type parsing
 // ============================================================
+
+// Primitive type names must not absorb a following `/` or `*` as a unit chain:
+// expression casts write `x as f64 / 100.0`, and the `/` belongs to the expr.
+fn type_path_allows_unit_chain(path: AstPath) -> bool {
+    if path.seg_count != 1 {
+        return false
+    }
+    let seg = path.segments
+    let n = seg.head_len
+    // i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 usize isize
+    // f32 f64 f128 f256 bool char str string
+    if n == 2 {
+        let a = seg.head_buf[0] as i64
+        let b = seg.head_buf[1] as i64
+        if a == 105 && (b == 56) { return false } // i8
+        if a == 117 && (b == 56) { return false } // u8
+        return true
+    }
+    if n == 3 {
+        let a = seg.head_buf[0] as i64
+        let b = seg.head_buf[1] as i64
+        let c = seg.head_buf[2] as i64
+        if a == 105 && b == 49 && c == 54 { return false } // i16
+        if a == 105 && b == 51 && c == 50 { return false } // i32
+        if a == 105 && b == 54 && c == 52 { return false } // i64
+        if a == 117 && b == 49 && c == 54 { return false } // u16
+        if a == 117 && b == 51 && c == 50 { return false } // u32
+        if a == 117 && b == 54 && c == 52 { return false } // u64
+        if a == 102 && b == 51 && c == 50 { return false } // f32
+        if a == 102 && b == 54 && c == 52 { return false } // f64
+        if a == 115 && b == 116 && c == 114 { return false } // str
+        return true
+    }
+    if n == 4 {
+        let a = seg.head_buf[0] as i64
+        let b = seg.head_buf[1] as i64
+        let c = seg.head_buf[2] as i64
+        let d = seg.head_buf[3] as i64
+        if a == 105 && b == 49 && c == 50 && d == 56 { return false } // i128
+        if a == 117 && b == 49 && c == 50 && d == 56 { return false } // u128
+        if a == 102 && b == 49 && c == 50 && d == 56 { return false } // f128
+        if a == 102 && b == 50 && c == 53 && d == 54 { return false } // f256
+        if a == 98 && b == 111 && c == 111 && d == 108 { return false } // bool
+        if a == 99 && b == 104 && c == 97 && d == 114 { return false } // char
+        return true
+    }
+    if n == 5 {
+        // usize isize
+        let a = seg.head_buf[0] as i64
+        if (a == 117 || a == 105)
+            && seg.head_buf[1] as i64 == 115
+            && seg.head_buf[2] as i64 == 105
+            && seg.head_buf[3] as i64 == 122
+            && seg.head_buf[4] as i64 == 101 {
+            return false
+        }
+        return true
+    }
+    if n == 6 {
+        // string
+        if seg.head_buf[0] as i64 == 115
+            && seg.head_buf[1] as i64 == 116
+            && seg.head_buf[2] as i64 == 114
+            && seg.head_buf[3] as i64 == 105
+            && seg.head_buf[4] as i64 == 110
+            && seg.head_buf[5] as i64 == 103 {
+            return false
+        }
+        return true
+    }
+    true
+}
 
 // Single-segment path spelled exactly "IndepKnowledge". Compared byte by byte,
 // like path_first_is_kaxi in exprs.sio — the parser has no interned symbols at

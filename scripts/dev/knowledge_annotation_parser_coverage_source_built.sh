@@ -7,12 +7,34 @@
 # behaviour of the source" claim is grounded in two independent
 # compilers.
 #
-# Scope: this script tests only the wrapper-bracket probes introduced
-# alongside it (intervention_*, validated_bracket_derived). It does not
-# retest the audit's bracket-form `Knowledge` probes — those are
-# handled by the original pin. The angle-form probes (angle_source,
-# angle_literature, angle_input) belong to a different audit addendum
-# and are not exercised here.
+# Scope (post-2026-09-01 extension):
+#
+#   1. Wrapper bracket closure (PR #2108): Intervention[f64, ...],
+#      Validated[f64, Derived> — the bracket form is not a live
+#      surface on the wrapper side; source-built must refuse these
+#      identically to the shipped ELF.
+#
+#   2. Wrapper angle positive control: Intervention<f64, Derived> —
+#      the angle form must check OK on the source-built ELF.
+#
+#   3. Angle-form Knowledge closure (this extension):
+#        knowledge_angle_derived.sio   check OK
+#        angle_input.sio               check OK (post-PR #2229;
+#                                      Input is a lexer keyword; the
+#                                      audit addendum from PR #2102
+#                                      claimed parse-fail, which is
+#                                      now stale.)
+#        angle_source.sio              parse fail (Source is an Ident;
+#                                      angle path is loud — E241 + the
+#                                      angle component loop refuse it.)
+#        angle_literature.sio          parse fail (same as Source.)
+#
+#   This script does NOT retest bracket-form Knowledge probes
+#   (source.sio, literature.sio, int_skip.sio, typo_ident.sio,
+#   derived_eps.sio). Those are exercised by the shipped pin's
+#   dynamic mode and the Madaros Witness Gate; including them here
+#   would double the work without adding an ELF/source cross-check
+#   the shipped pin already performs.
 #
 # Usage:
 #   bash scripts/dev/knowledge_annotation_parser_coverage_source_built.sh /path/to/source-built-madaros
@@ -83,6 +105,59 @@ for name in "${sb_pass[@]}"; do
     :
   else
     pin_fail "source-built pass-probe $name: expected check OK"
+    tail -5 /tmp/kcov_sb_check.out >&2
+  fi
+done
+
+# Angle-form Knowledge — the source-current clock for `Knowledge<T>` in
+# angle syntax. The shipped pin's dynamic mode tests bracket-form
+# Knowledge probes only; this section is the matching angle-form half.
+#
+# Expected matrix (current main, post-PR #2229):
+#
+#   knowledge_angle_derived    Knowledge<f64, Derived>     check OK
+#   angle_input                Knowledge<f64, Input>      check OK
+#     — Input became a lexer keyword under PR #2229 (commit 1adec5e731).
+#       The audit addendum from PR #2102 still calls angle_input a
+#       parse-fail probe; that is now stale. The probe files were
+#       added in this branch; the empirical post-#2229 outcome is
+#       check OK, identical on shipped bin/souc and on a freshly
+#       rebuilt source-built Madaros.
+#   angle_source               Knowledge<f64, Source>     parse fail
+#   angle_literature           Knowledge<f64, Literature> parse fail
+#     — Source and Literature are still Ident epsilon-sinks in the
+#       bracket path, but the angle path (parse_knowledge_type's
+#       comma-component loop) refuses an unknown component before
+#       the sink can swallow it. This is the empirical discriminator
+#       the audit addendum names "angle form is loud, bracket form
+#       is silent".
+#
+# If any of these flip on the source-built ELF, either the parser
+# changed (the audit must be re-read) or the source-built ELF drifted
+# from main (the build pipeline has a problem).
+sb_angle_fail=(angle_source angle_literature)
+for name in "${sb_angle_fail[@]}"; do
+  f="$PROBE_DIR/${name}.sio"
+  if [[ ! -f "$f" ]]; then
+    pin_fail "missing source-built angle-fail probe $f"
+    continue
+  fi
+  if check_one "$f"; then
+    pin_fail "source-built angle-fail-probe $name: expected parse/check failure, got check OK"
+  fi
+done
+
+sb_angle_pass=(knowledge_angle_derived angle_input)
+for name in "${sb_angle_pass[@]}"; do
+  f="$PROBE_DIR/${name}.sio"
+  if [[ ! -f "$f" ]]; then
+    pin_fail "missing source-built angle-pass probe $f"
+    continue
+  fi
+  if check_one "$f"; then
+    :
+  else
+    pin_fail "source-built angle-pass-probe $name: expected check OK"
     tail -5 /tmp/kcov_sb_check.out >&2
   fi
 done

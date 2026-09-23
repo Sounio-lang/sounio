@@ -9,9 +9,12 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.dimensio
 
 # Dispatch: the dimensional type system cannot express the GRI-Mech constants (2026-09-02)
 
-**Status:** measured, not fixed. Issue [#2388](https://github.com/Sounio-lang/sounio/issues/2388); related [#2387](https://github.com/Sounio-lang/sounio/issues/2387) (`f128`). Filed under the forensic dispatch protocol
-(`CLAUDE.md` §8): evidence and minimal reproductions first, no ad-hoc patch to
-`self-hosted/`.
+**Status:** CLOSED 2026-09-14 (KL-13 + KL-13b). Repro 2 closed 2026-09-05;
+Repro 3 closed 2026-09-13; Repro 1 closed 2026-09-14. Issue
+[#2388](https://github.com/Sounio-lang/sounio/issues/2388); related
+[#2387](https://github.com/Sounio-lang/sounio/issues/2387) (`f128`). Filed
+under the forensic dispatch protocol (`CLAUDE.md` §8): evidence and minimal
+reproductions first, no ad-hoc patch to `self-hosted/`.
 
 **Why it matters.** `benchmarks/chemistry/RESULTS.md` §6.3 (6) records a
 convention constant — `R_cal = 1.9872041` against `8.31446261815324/4.184` —
@@ -96,3 +99,69 @@ annotations that the checker does not read.
 Madaros and accepted by lean_single **as f64** — the halving count until
 `1+ε == 1` is 53, not 113. `CLAUDE.md` §13 states the opposite engine split
 and is stale. Recorded in `docs/compiler/KNOWN_LIMITATIONS.md`.
+
+---
+
+## Correction, 2026-09-13 — Repro 3 is closed (KL-13 partial)
+
+`unit_lost_at_call_boundary.sio` now fails `souc check` on lean_single and
+Madaros with `unit mismatch in call argument`. Moved to
+`tests/compile-fail/unit_lost_at_call_boundary.sio`. Explicit `as f64` remains
+green (`tests/run-pass/unit_call_cast_strips_brand.sio`).
+
+What closed it is item **3** of this document's "What would close it" list —
+unit-typed arguments into bare `f64` parameters are refused unless cast.
+lean_single: `unit_call_arg_mismatch` treats `param_dim == 0 && expr_dim != 0`
+as a mismatch. Madaros: `check_call_arg_unit_boundary` refuses
+`provided.unit_id >= 0 && expected.unit_id < 0`.
+
+---
+
+## Correction, 2026-09-14 — Repro 1 is closed (KL-13b)
+
+Bare derived unit annotations (`mol/cm3`, `cal/mol`) parse on both engines.
+`unit velocity = m / s` registers the composed dimension on Madaros (ItemUnit
+collect on the `*mut` spine + `collect_unit_decl` honours `type_alias_ty`).
+Witnesses: `tests/run-pass/unit_derived_annotation_mol_per_cm3.sio`,
+`tests/compile-fail/unit_derived_annotation_refuse_add.sio`. The known-gap
+fixture is deleted; the language-gap ratchet expects accept + additive refuse.
+
+---
+
+## Correction, 2026-09-05 — Repro 2 is closed
+
+`derived_unit_dropped_by_inference.sio` no longer passes, and has moved out of
+`tests/known-gaps/` to `tests/compile-fail/unit_quotient_keeps_dimension.sio`,
+where the a64 parity gate walks it with the rest of the corpus.
+On both targets, lean_single now reports
+
+```
+error: unit dimension mismatch at <main>:8
+typecheck: failed
+```
+
+so `(mol/cm3) + K` is refused and the quotient keeps its dimension.
+
+What closed it is item **2** of this document's own "What would close it" list --
+dimension propagation through `*` and `/` in inference, not only through `+`/`-`
+between annotated bindings. `dim_add` / `dim_sub` at the multiplicative site now
+compose the dimension of a derived quantity, and the additive check compares it.
+The arm64 pass carried neither and now carries both, which is why the refusal
+holds on `--target aarch64-linux` as well.
+
+Items **1** and **3** are untouched. Derived unit types (`A/B`, `A·B`, `A^n`) are
+still not in the grammar, and a `K` argument still enters an `f64` parameter
+unchecked -- Repro 3, which this document calls the decisive one, still passes:
+
+```
+[ratchet] ok   unit lost at call boundary (lean_single accepts): 0
+```
+
+So the conclusion about `stdlib/chemistry/gri30_h2.sio` stands: instance (6) is
+still not a compile error, and re-typing the kinetic path is still compiler work
+rather than a probe port.
+
+scripts/ci/language_gap_ratchet_gate.sh now asserts the refusal, so the closure
+cannot silently reopen: the ratchet is red in both directions. The test suite
+holds it a second way, as a compile-fail case that must be refused on both
+targets.

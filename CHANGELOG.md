@@ -588,7 +588,7 @@ foundational systems are robust.
 - Unit definition parsing correctly handles quotient expressions
 
 ### Known Limitations
-See `compiler/docs/KNOWN_LIMITATIONS.md` for current language limitations and
+See `docs/compiler/KNOWN_LIMITATIONS.md` for current language limitations and
 planned features for future releases.
 
 ---
@@ -822,7 +822,7 @@ Special thanks to:
 ## Resources
 
 - **Documentation**: [docs/MINIMUM_VIABLE_SOUNIO.md](docs/MINIMUM_VIABLE_SOUNIO.md)
-- **Syntax Reference**: [docs/LLM_PROGRAMMING_GUIDE.md](docs/LLM_PROGRAMMING_GUIDE.md)
+- **Syntax Reference**: [docs/guide/LLM_PROGRAMMING_GUIDE.md](docs/guide/LLM_PROGRAMMING_GUIDE.md)
 - **Research Papers**: [docs/RESEARCH_PAPERS.md](docs/RESEARCH_PAPERS.md)
 - **GitHub**: [github.com/demetrios/sounio](https://github.com/demetrios/sounio)
 - **Community**: [discord.gg/sounio](https://discord.gg/sounio)

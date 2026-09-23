@@ -1,0 +1,175 @@
+//@ run-pass
+//!
+//! First Sounio semantic-authority executable for Pireus graph identity.
+//! It admits producer and namespace authority before reading any input graph.
+//! No result count or digest in this file predates this execution.
+
+use hardware::pireus::model::pireus_v0_store
+use hardware::pireus::target_profile::pireus_v01_store
+use hardware::pireus::execution_engine::pireus_execution_engine_store
+use hardware::pireus::xed_import::{
+    pireus_xed_load, pireus_xed_parse, pireus_xed_inventory_store,
+    PIREUS_XED_OK,
+}
+use hardware::pireus::aarchmrs_import::{
+    pireus_aarchmrs_import_chunks, pireus_aarchmrs_inventory_store,
+    PIREUS_AARCHMRS_OK,
+}
+use hardware::pireus::ptx_import::{
+    pireus_ptx_import_chunks, pireus_ptx_inventory_store,
+    PIREUS_PTX_OK,
+}
+use hardware::pireus::apple_metal_import::{
+    pireus_apple_metal_import, pireus_apple_metal_inventory_store,
+    PIREUS_APPLE_OK,
+}
+use hardware::pireus::graph_identity::{
+    PireusDigest,
+    pireus_graph_identity_admit,
+    pireus_graph_identity_compose,
+    pireus_graph_identity_results_equal,
+    pireus_graph_identity_matches_frozen_semantics,
+}
+
+fn yes(value: bool) -> i64 { if value { 1 } else { 0 } }
+
+fn print_hex_word(word: i64) with IO, Mut {
+    var shift: i64 = 28
+    while shift >= 0 {
+        let nibble = (word >> shift) & 15
+        if nibble < 10 { print_char(48 + nibble) }
+        else { print_char(87 + nibble) }
+        shift = shift - 4
+    }
+}
+
+fn print_digest(digest: &PireusDigest) with IO, Mut {
+    var i: i64 = 0
+    while i < 8 {
+        print_hex_word(digest.words[i])
+        i = i + 1
+    }
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc, Epistemic {
+    if arg_count() != 4 {
+        print("usage: pireus_graph_identity_composition <xed-file> <aarchmrs-chunk-prefix> <ptx-chunk-prefix> <mtlgpufamily.json>\n")
+        return 2
+    }
+
+    // This is intentionally first: graph authority exists before graph input.
+    let admission = pireus_graph_identity_admit()
+    var failures: i64 = 0
+    if !admission.valid { failures = failures + 1 }
+
+    var xed_corpus = pireus_xed_load(get_arg(0))
+    let xed_inventory = pireus_xed_parse(&xed_corpus, true)
+    let arm_inventory = pireus_aarchmrs_import_chunks(get_arg(1))
+    let ptx_inventory = pireus_ptx_import_chunks(get_arg(2))
+    let apple_inventory = pireus_apple_metal_import(get_arg(3))
+    if xed_inventory.error != PIREUS_XED_OK ||
+        !xed_inventory.digest_match ||
+        arm_inventory.error != PIREUS_AARCHMRS_OK ||
+        !arm_inventory.digest_match ||
+        ptx_inventory.error != PIREUS_PTX_OK ||
+        !ptx_inventory.digest_match ||
+        apple_inventory.error != PIREUS_APPLE_OK ||
+        !apple_inventory.digest_match {
+        failures = failures + 1
+    }
+
+    var model_store = pireus_v0_store()
+    var target_store = pireus_v01_store()
+    var execution_store = pireus_execution_engine_store()
+    var xed_store = pireus_xed_inventory_store(&xed_inventory)
+    var arm_store = pireus_aarchmrs_inventory_store(&arm_inventory)
+    var ptx_store = pireus_ptx_inventory_store(&ptx_inventory)
+    var apple_store = pireus_apple_metal_inventory_store(&apple_inventory)
+
+    let forward = pireus_graph_identity_compose(&admission,
+        &model_store, &target_store, &execution_store, &xed_store,
+        &arm_store, &ptx_store, &apple_store, false)
+    let reverse = pireus_graph_identity_compose(&admission,
+        &model_store, &target_store, &execution_store, &xed_store,
+        &arm_store, &ptx_store, &apple_store, true)
+    let order_stable = pireus_graph_identity_results_equal(&forward, &reverse)
+    let frozen_match = pireus_graph_identity_matches_frozen_semantics(&forward)
+    if forward.error != 0 || reverse.error != 0 ||
+        !forward.all_parent_closures_verified ||
+        !reverse.all_parent_closures_verified || !order_stable ||
+        forward.negatives.passed != forward.negatives.total || !frozen_match {
+        failures = failures + 1
+    }
+
+    print("SOUNIO_AUTHORITY schema=pireus-graph-identity-composition.v0 role=SEMANTIC_AUTHORITY stage=SOUNIO_EXECUTABLE\n")
+    print("PIREUS_GRAPH_ADMISSION producers="); print_int(admission.producer_count)
+    print(" namespaces="); print_int(admission.namespace_count)
+    print(" valid="); print_int(yes(admission.valid)); print("\n")
+    print("PIREUS_GRAPH_INPUTS xed_digest="); print_int(yes(xed_inventory.digest_match))
+    print(" aarchmrs_digest="); print_int(yes(arm_inventory.digest_match))
+    print(" ptx_digest="); print_int(yes(ptx_inventory.digest_match))
+    print(" apple_digest="); print_int(yes(apple_inventory.digest_match)); print("\n")
+    print("PIREUS_GRAPH_COMPOSITION term_refs="); print_int(forward.term_reference_count)
+    print(" canonical_triples="); print_int(forward.canonical_triple_count)
+    print(" occurrences="); print_int(forward.occurrence_count)
+    print(" inherited_occurrences="); print_int(forward.inherited_occurrence_count)
+    print(" duplicate_canonicals="); print_int(forward.duplicate_canonical_count); print("\n")
+    print("PIREUS_GRAPH_COLLISIONS keys="); print_int(forward.collision_key_count)
+    print(" owner_pairs="); print_int(forward.collision_pair_count)
+    print(" derived_7033xx_keys="); print_int(forward.derived_collision_key_count); print("\n")
+    var collision_index: i64 = 0
+    while collision_index < forward.collisions.pair_count &&
+        collision_index < 64 {
+        print("PIREUS_GRAPH_COLLISION index="); print_int(collision_index)
+        print(" local="); print_int(forward.collisions.local_ids[collision_index])
+        print(" sort="); print_int(forward.collisions.term_sorts[collision_index])
+        print(" owner_a="); print_int(forward.collisions.owner_a[collision_index])
+        print(" owner_b="); print_int(forward.collisions.owner_b[collision_index])
+        print(" lifted_a="); print_int(forward.collisions.lifted_a[collision_index])
+        print(" lifted_b="); print_int(forward.collisions.lifted_b[collision_index]); print("\n")
+        collision_index = collision_index + 1
+    }
+    print("PIREUS_GRAPH_QUERIES canonical_targets="); print_int(forward.canonical_target_count)
+    print(" target_occurrences="); print_int(forward.target_occurrence_count)
+    print(" profile_join="); print_int(forward.profile_join_count)
+    print(" apple_blueprint_links="); print_int(forward.apple_blueprint_link_count); print("\n")
+    print("PIREUS_GRAPH_ORDER forward_reverse_equal="); print_int(yes(order_stable))
+    print(" parent_closures="); print_int(yes(forward.all_parent_closures_verified)); print("\n")
+    print("PIREUS_GRAPH_NEGATIVE registry missing_producer="); print_int(yes(forward.negatives.missing_producer))
+    print(" missing_hash="); print_int(yes(forward.negatives.missing_hash))
+    print(" duplicate_producer="); print_int(yes(forward.negatives.duplicate_producer))
+    print(" duplicate_namespace="); print_int(yes(forward.negatives.duplicate_namespace))
+    print(" overlap="); print_int(yes(forward.negatives.overlapping_namespace)); print("\n")
+    print("PIREUS_GRAPH_NEGATIVE dependency missing_parent="); print_int(yes(forward.negatives.missing_parent))
+    print(" cyclic_parent="); print_int(yes(forward.negatives.cyclic_parent))
+    print(" reordered_parent="); print_int(yes(forward.negatives.reordered_parent))
+    print(" hash_mismatch="); print_int(yes(forward.negatives.parent_hash_mismatch))
+    print(" closure_change="); print_int(yes(forward.negatives.changed_parent_closure)); print("\n")
+    print("PIREUS_GRAPH_NEGATIVE identity unregistered_iri="); print_int(yes(forward.negatives.unregistered_iri))
+    print(" owned_as_shared="); print_int(yes(forward.negatives.owned_claimed_shared))
+    print(" foreign_rebound="); print_int(yes(forward.negatives.foreign_rebound))
+    print(" incompatible_lift="); print_int(yes(forward.negatives.incompatible_lifted_meaning))
+    print(" double_mapping="); print_int(yes(forward.negatives.double_local_mapping)); print("\n")
+    print("PIREUS_GRAPH_NEGATIVE sort iri_literal_swap="); print_int(yes(forward.negatives.iri_literal_sort_swap))
+    print(" query_binding_swap="); print_int(yes(forward.negatives.query_binding_sort_swap))
+    print(" literal_owner="); print_int(yes(forward.negatives.missing_literal_owner))
+    print(" literal_bits="); print_int(yes(forward.negatives.literal_value_bits_loss)); print("\n")
+    print("PIREUS_GRAPH_NEGATIVE completeness overflow="); print_int(yes(forward.negatives.lift_overflow))
+    print(" capacity="); print_int(yes(forward.negatives.capacity_exhaustion))
+    print(" inherited_inflation="); print_int(yes(forward.negatives.inherited_query_inflation))
+    print(" occurrence_loss="); print_int(yes(forward.negatives.occurrence_loss))
+    print(" declaration_only="); print_int(yes(forward.negatives.declaration_only_census))
+    print(" provenance_loss="); print_int(yes(forward.negatives.provenance_loss))
+    print(" local_promotion="); print_int(yes(forward.negatives.local_query_promotion)); print("\n")
+    print("PIREUS_GRAPH_NEGATIVE_SUMMARY passed="); print_int(forward.negatives.passed)
+    print(" total="); print_int(forward.negatives.total); print("\n")
+    print("PIREUS_GRAPH_DIGEST registry="); print_digest(&forward.registry_digest); print("\n")
+    print("PIREUS_GRAPH_DIGEST dependency="); print_digest(&forward.dependency_digest); print("\n")
+    print("PIREUS_GRAPH_DIGEST lifted_graph="); print_digest(&forward.lifted_graph_digest); print("\n")
+    print("PIREUS_GRAPH_DIGEST occurrence="); print_digest(&forward.occurrence_digest); print("\n")
+    print("PIREUS_GRAPH_DIGEST collision="); print_digest(&forward.collision_digest); print("\n")
+    print("PIREUS_GRAPH_DIGEST provenance="); print_digest(&forward.provenance_digest); print("\n")
+    print("PIREUS_GRAPH_BOUNDARY instruction_equivalences=0 processor_observations=0 capability_inheritance=0 lowering_choices=0 performance_claims=0 parity_open=0 claim_ready=0\n")
+    print("PIREUS_GRAPH_SUMMARY failures="); print_int(failures); print("\n")
+    if failures == 0 { 0 } else { 1 }
+}

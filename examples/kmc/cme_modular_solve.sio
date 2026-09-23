@@ -1,0 +1,355 @@
+// examples/kmc/cme_modular_solve.sio
+//
+// M3a: THE EXACT SOLVE WITHOUT THE INTERMEDIATE BLOW-UP.
+//
+// WHAT THE PREVIOUS MILESTONE MEASURED, and why it redirected this one.
+//
+// Solving pi Q = 0 by Gaussian elimination over rationals is exact and dies
+// early. Measured on a ring of N sites with i64 rationals:
+//
+//     N=2   4 states    largest denominator            32
+//     N=3   8 states    largest denominator           805
+//     N=4  16 states    largest denominator   521 561 915
+//     N=5  32 states    SIGFPE -- a denominator wrapped to zero
+//
+// Roughly a squaring per site. The first reading of that was "we need
+// multi-limb integers", and it was wrong. The ANSWER is tiny: the stationary
+// probabilities of this system have denominator 4^N -- 256 at N=4, 4096 at
+// N=6. It is the INTERMEDIATE values that explode, and they explode because
+// fractions accumulate common factors that elimination never gets to cancel
+// until the end.
+//
+// Arithmetic modulo a prime has no intermediates to explode. Every value is
+// smaller than p by construction, every division is a modular inverse, and
+// the result is the exact answer reduced mod p. Recovering the rational from
+// that residue is the classical rational-reconstruction problem, solvable
+// whenever the modulus exceeds twice the product of the numerator and
+// denominator bounds -- here about 2 * 4^N * 4^N, which for N=6 is 3.4e7
+// against a prime near 2.1e9. One prime is enough. No CRT, no big integers.
+//
+// The correction matters because it moves the binding constraint: the limit
+// is now O(n^3) time in the state count, not integer capacity. That is a
+// different engineering problem with different answers -- sparsity and
+// symmetry reduction rather than wider arithmetic.
+//
+// WHAT IS CHECKED, and why each check is here.
+//
+//   The prime is VERIFIED PRIME by trial division at run time rather than
+//   trusted from a table. A composite modulus silently breaks modular
+//   inversion and would produce a plausible wrong answer.
+//
+//   The reconstructed rationals are compared against the closed form
+//   Bernoulli(1/4) at EVERY state, as rational equality. The previous
+//   milestone's failure mode was a wrapped value that still looked like a
+//   probability; the defence is the same here.
+//
+//   The modulus bound is checked explicitly: if the reconstruction needs a
+//   larger modulus than the prime provides, the run says so rather than
+//   returning whatever the lattice algorithm happened to land on.
+
+use math::rational::*
+
+fn abs_i(x: i64) -> i64 { if x < 0 { 0 - x } else { x } }
+
+// --- modular arithmetic ----------------------------------------------------
+
+fn is_prime(n: i64) -> bool with Mut, Div, Panic {
+    if n < 2 { return false }
+    if n - (n / 2) * 2 == 0 { return n == 2 }
+    var d: i64 = 3
+    while d * d <= n {
+        if n - (n / d) * d == 0 { return false }
+        d = d + 2
+    }
+    true
+}
+
+fn mod_norm(a: i64, p: i64) -> i64 with Mut, Div, Panic {
+    var x = a - (a / p) * p
+    if x < 0 { x = x + p }
+    x
+}
+
+fn mod_add(a: i64, b: i64, p: i64) -> i64 with Mut, Div, Panic { mod_norm(a + b, p) }
+fn mod_sub(a: i64, b: i64, p: i64) -> i64 with Mut, Div, Panic { mod_norm(a - b, p) }
+fn mod_mul(a: i64, b: i64, p: i64) -> i64 with Mut, Div, Panic { mod_norm(a * b, p) }
+
+// Extended Euclid, returning the inverse of a modulo p. p must be prime and a
+// must not be divisible by p; both are guaranteed by the caller.
+fn mod_inv(a: i64, p: i64) -> i64 with Mut, Div, Panic {
+    var r0 = mod_norm(a, p)
+    var r1 = p
+    var s0: i64 = 1
+    var s1: i64 = 0
+    while r1 != 0 {
+        let q = r0 / r1
+        let r2 = r0 - q * r1
+        let s2 = s0 - q * s1
+        r0 = r1
+        r1 = r2
+        s0 = s1
+        s1 = s2
+    }
+    mod_norm(s0, p)
+}
+
+// --- rational reconstruction ----------------------------------------------
+//
+// Given r = n/d mod m, recover (n, d) with |n|, d <= bound. The half-extended
+// Euclidean algorithm on (m, r) produces exactly that pair: run it until the
+// remainder drops below the bound, and the matching coefficient is the
+// denominator. Returns den = 0 when no such pair exists within the bound,
+// which is the signal that the modulus is too small rather than a licence to
+// return the closest thing found.
+fn rat_reconstruct(r: i64, m: i64, bound: i64, out: &![i64; 2]) with Mut, Div, Panic {
+    var r0 = m
+    var r1 = mod_norm(r, m)
+    var t0: i64 = 0
+    var t1: i64 = 1
+    while r1 > bound {
+        if r1 == 0 {
+            out[0] = 0
+            out[1] = 0
+            return
+        }
+        let q = r0 / r1
+        let r2 = r0 - q * r1
+        let t2 = t0 - q * t1
+        r0 = r1
+        r1 = r2
+        t0 = t1
+        t1 = t2
+    }
+    let den = abs_i(t1)
+    if den == 0 || den > bound {
+        out[0] = 0
+        out[1] = 0
+        return
+    }
+    var num = r1
+    if t1 < 0 { num = 0 - num }
+    out[0] = num
+    out[1] = den
+}
+
+// --- lattice ---------------------------------------------------------------
+
+fn site_bit(i: i64) -> i64 with Mut, Div, Panic {
+    var b: i64 = 1
+    var k: i64 = 0
+    while k < i { b = b * 2  k = k + 1 }
+    b
+}
+
+fn is_occ(s: i64, i: i64) -> bool with Mut, Div, Panic {
+    let b = site_bit(i)
+    (s / b) - ((s / b) / 2) * 2 == 1
+}
+
+fn popcount_n(s: i64, n: i64) -> i64 with Mut, Div, Panic {
+    var c: i64 = 0
+    var i: i64 = 0
+    while i < n { if is_occ(s, i) { c = c + 1 }  i = i + 1 }
+    c
+}
+
+fn pow2(n: i64) -> i64 with Mut, Div, Panic {
+    var b: i64 = 1
+    var k: i64 = 0
+    while k < n { b = b * 2  k = k + 1 }
+    b
+}
+
+fn ipow(b: i64, e: i64) -> i64 with Mut, Div, Panic {
+    var acc: i64 = 1
+    var i: i64 = 0
+    while i < e { acc = acc * b  i = i + 1 }
+    acc
+}
+
+// --- the solve -------------------------------------------------------------
+//
+// The generator entries are integers here (k_ads = 1, k_des = 3), so nothing
+// has to be cleared before reduction mod p. out carries, per state, the
+// reconstructed numerator and denominator.
+//
+// report[0] = 1.0 if the modular elimination succeeded
+// report[1] = 1.0 if every state reconstructed within the bound
+// report[2] = 1.0 if every state matched the closed form exactly
+// report[3] = the bound used
+fn solve_mod(n_sites: i64, p: i64, num_out: &![i64; 64], den_out: &![i64; 64],
+             report: &![f64; 8]) with Mut, Div, Panic {
+    let ns = pow2(n_sites)
+    let w = ns + 1
+    var a: [i64; 4160] = [0; 4160]
+
+    // Q^T, built directly mod p, with the last equation replaced by the
+    // normalisation sum(pi) = 1.
+    var s: i64 = 0
+    while s < ns {
+        var site: i64 = 0
+        while site < n_sites {
+            if is_occ(s, site) {
+                let t = s - site_bit(site)
+                // Q[s][t] += k_des ; row t of Q^T gets column s
+                a[(t * w + s) as usize] = mod_add(a[(t * w + s) as usize], 3, p)
+                a[(s * w + s) as usize] = mod_sub(a[(s * w + s) as usize], 3, p)
+            } else {
+                let t = s + site_bit(site)
+                a[(t * w + s) as usize] = mod_add(a[(t * w + s) as usize], 1, p)
+                a[(s * w + s) as usize] = mod_sub(a[(s * w + s) as usize], 1, p)
+            }
+            site = site + 1
+        }
+        s = s + 1
+    }
+    var c0: i64 = 0
+    while c0 < ns {
+        a[((ns - 1) * w + c0) as usize] = 1
+        c0 = c0 + 1
+    }
+    a[((ns - 1) * w + ns) as usize] = 1
+
+    var ok = true
+    var col: i64 = 0
+    while col < ns {
+        var piv: i64 = 0 - 1
+        var r1 = col
+        while r1 < ns {
+            if piv < 0 {
+                if a[(r1 * w + col) as usize] != 0 { piv = r1 }
+            }
+            r1 = r1 + 1
+        }
+        if piv < 0 { ok = false  col = ns }
+        else {
+            if piv != col {
+                var sc: i64 = 0
+                while sc < w {
+                    let tmp = a[(col * w + sc) as usize]
+                    a[(col * w + sc) as usize] = a[(piv * w + sc) as usize]
+                    a[(piv * w + sc) as usize] = tmp
+                    sc = sc + 1
+                }
+            }
+            let inv = mod_inv(a[(col * w + col) as usize], p)
+            var sc2 = col
+            while sc2 < w {
+                a[(col * w + sc2) as usize] = mod_mul(a[(col * w + sc2) as usize], inv, p)
+                sc2 = sc2 + 1
+            }
+            var r2: i64 = 0
+            while r2 < ns {
+                if r2 != col {
+                    let f = a[(r2 * w + col) as usize]
+                    if f != 0 {
+                        var c3 = col
+                        while c3 < w {
+                            let sub = mod_mul(f, a[(col * w + c3) as usize], p)
+                            a[(r2 * w + c3) as usize] = mod_sub(a[(r2 * w + c3) as usize], sub, p)
+                            c3 = c3 + 1
+                        }
+                    }
+                }
+                r2 = r2 + 1
+            }
+            col = col + 1
+        }
+    }
+
+    report[0] = if ok { 1.0 } else { 0.0 }
+    if !ok {
+        report[1] = 0.0
+        report[2] = 0.0
+        return
+    }
+
+    // Reconstruction bound: the true denominator is 4^N and numerators are
+    // smaller, so a bound of 4^N suffices and 2*bound^2 < p is the condition
+    // for uniqueness. Both are reported rather than assumed.
+    let bound = ipow(4, n_sites)
+    report[3] = bound as f64
+
+    var all_rec = true
+    var pair: [i64; 2] = [0; 2]
+    var k: i64 = 0
+    while k < ns {
+        rat_reconstruct(a[(k * w + ns) as usize], p, bound, &! pair)
+        if pair[1] == 0 { all_rec = false }
+        num_out[k as usize] = pair[0]
+        den_out[k as usize] = pair[1]
+        k = k + 1
+    }
+    report[1] = if all_rec { 1.0 } else { 0.0 }
+
+    // Closed form: pi(s) = 1^occ * 3^(N-occ) / 4^N.
+    var all_eq = all_rec
+    if all_rec {
+        var s2: i64 = 0
+        while s2 < ns {
+            let occ = popcount_n(s2, n_sites)
+            let en = ipow(3, n_sites - occ)
+            let ed = ipow(4, n_sites)
+            let g = gcd_pos(en, ed)
+            let want_n = en / g
+            let want_d = ed / g
+            if num_out[s2 as usize] != want_n || den_out[s2 as usize] != want_d {
+                all_eq = false
+            }
+            s2 = s2 + 1
+        }
+    }
+    report[2] = if all_eq { 1.0 } else { 0.0 }
+}
+
+fn gcd_pos(a: i64, b: i64) -> i64 with Mut, Div, Panic {
+    var x = abs_i(a)
+    var y = abs_i(b)
+    while y != 0 {
+        let t = x - (x / y) * y
+        x = y
+        y = t
+    }
+    if x == 0 { 1 } else { x }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("EXACT CME BY MODULAR ELIMINATION AND RATIONAL RECONSTRUCTION")
+    println("ring of N sites, k_ads=1 k_des=3, closed form Bernoulli(1/4)")
+    println("")
+
+    let p: i64 = 2147483647
+    print("modulus ") print(p) print("  verified prime at run time: ")
+    let pr = is_prime(p)
+    if pr { println("yes") } else { println("NO -- refusing to continue") }
+    if !pr { return 1 }
+    println("")
+    println("  N  states  eliminated  reconstructed  closed-form  2*bound^2 < p")
+
+    var num_out: [i64; 64] = [0; 64]
+    var den_out: [i64; 64] = [0; 64]
+    var report: [f64; 8] = [0.0; 8]
+
+    var all_good = true
+    var n: i64 = 2
+    while n <= 6 {
+        solve_mod(n, p, &! num_out, &! den_out, &! report)
+        let bound = report[3] as i64
+        let fits = bound < 46340 && 2 * bound * bound < p
+        print("  ") print(n)
+        print("  ") print(pow2(n))
+        if pow2(n) < 10 { print("  ") } else { print(" ") }
+        print("     ")
+        if report[0] > 0.5 { print("yes         ") } else { print("NO          ") }
+        if report[1] > 0.5 { print("yes            ") } else { print("NO             ") }
+        if report[2] > 0.5 { print("match        ") } else { print("MISMATCH     ") }
+        if fits { println("yes") } else { println("NO") }
+        if report[0] < 0.5 || report[1] < 0.5 || report[2] < 0.5 || !fits { all_good = false }
+        n = n + 1
+    }
+    println("")
+    println("N=5 and N=6 are where the rational solver died with SIGFPE.")
+    println("")
+    if all_good { println("M3A_MODULAR_OK") } else { println("M3A_MODULAR_FAILED") }
+    0
+}

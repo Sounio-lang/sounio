@@ -24,7 +24,8 @@
 # WHAT WOULD KILL THIS GATE. It compares committed text against a command. If a
 # claim_cmd silently returns empty -- file renamed, JSON key gone -- an
 # unguarded gate would compare "" to "" and pass. Both sides are therefore
-# required non-empty and numeric, and the selftest drives that path directly.
+# required non-empty and strictly formatted (numeric or SHA-256 digest), and
+# the selftest drives that path directly.
 set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -51,8 +52,8 @@ run_side() {  # run_side <label> <id> <cmd>
     echo "      A gate that compares two empty strings passes while checking nothing." >&2
     return 1
   fi
-  if [[ ! "$out" =~ ^-?[0-9]+$ ]]; then
-    echo "  $2: $1 command produced a non-number: '$out'" >&2
+  if [[ ! "$out" =~ ^-?[0-9]+$ && ! "$out" =~ ^[0-9a-fA-F]{64}$ ]]; then
+    echo "  $2: $1 command produced neither a number nor a sha256 digest: '$out'" >&2
     echo "      cmd: $3" >&2
     return 1
   fi

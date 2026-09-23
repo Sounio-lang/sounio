@@ -160,6 +160,48 @@ compiler_sha256="$(sha256sum "$MADAROS_BIN" | cut -d' ' -f1)"
 echo "MADAROS_CHANGED_TESTS_START count=${#selected[@]} event=$EVENT_NAME compiler=$MADAROS_BIN compiler_sha256=$compiler_sha256"
 printf 'test=%s\n' "${selected[@]}"
 
+# KL-14b/c pins are dynlinked ELFs. The Witness gates build their probes;
+# the generic harness only does `souc run`, so stage the .so here whenever
+# those pins are in the changed set.
+for path in "${selected[@]}"; do
+  if [[ "$path" == "tests/run-pass/kl14b_dynlink_one_symbol.sio" ]]; then
+    gcc -shared -fPIC -O0 -o "$work_dir/libkl14b_probe.so" \
+      "$ROOT_DIR/tests/fixtures/kl14b/kl14b_probe.c"
+    export LD_LIBRARY_PATH="$work_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    echo "MADAROS_CHANGED_TESTS_DYNLINK probe=$work_dir/libkl14b_probe.so"
+  fi
+  if [[ "$path" == "tests/run-pass/kl14c_dynlink_n_symbols.sio" ]]; then
+    gcc -shared -fPIC -O0 -o "$work_dir/libkl14c_probe.so" \
+      "$ROOT_DIR/tests/fixtures/kl14c/kl14c_probe.c"
+    export LD_LIBRARY_PATH="$work_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    echo "MADAROS_CHANGED_TESTS_DYNLINK probe=$work_dir/libkl14c_probe.so"
+  fi
+  if [[ "$path" == "tests/run-pass/kl14d_multi_needed.sio" ]]; then
+    gcc -shared -fPIC -O0 -o "$work_dir/libkl14d_a.so" \
+      "$ROOT_DIR/tests/fixtures/kl14d/lib_a.c"
+    gcc -shared -fPIC -O0 -o "$work_dir/libkl14d_b.so" \
+      "$ROOT_DIR/tests/fixtures/kl14d/lib_b.c"
+    export LD_LIBRARY_PATH="$work_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    echo "MADAROS_CHANGED_TESTS_DYNLINK probes=$work_dir/libkl14d_{a,b}.so"
+  fi
+  # kl14d_zstd_e2e.sio needs system libzstd.so.1 (DT_NEEDED); no probe staging.
+  if [[ "$path" == "tests/run-pass/kl14d_zstd_e2e.sio" ]]; then
+    if ! ldconfig -p 2>/dev/null | grep -q 'libzstd\.so\.1' \
+      && [[ ! -e /usr/lib/x86_64-linux-gnu/libzstd.so.1 ]] \
+      && [[ ! -e /lib/x86_64-linux-gnu/libzstd.so.1 ]]; then
+      echo "MADAROS_CHANGED_TESTS_DYNLINK: libzstd.so.1 missing for kl14d_zstd_e2e" >&2
+      exit 2
+    fi
+    echo "MADAROS_CHANGED_TESTS_DYNLINK system=libzstd.so.1"
+  fi
+  if [[ "$path" == "tests/run-pass/kl14d_dlopen.sio" ]]; then
+    gcc -shared -fPIC -O0 -o "$work_dir/libkl14d_dl.so" \
+      "$ROOT_DIR/tests/fixtures/kl14d/lib_dl.c"
+    export LD_LIBRARY_PATH="$work_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    echo "MADAROS_CHANGED_TESTS_DYNLINK probe=$work_dir/libkl14d_dl.so"
+  fi
+done
+
 SOUNIO_MADAROS_AVAILABLE=1 \
 SOUNIO_SOUC_RAW_MODE=modular \
 SOUNIO_TEST_SOUC_BIN="$MADAROS_BIN" \

@@ -273,10 +273,10 @@ pub fn nc_v2_label_capacity() -> i64 { 16384 }
 // so they live off-stack here (BSS, demand-paged). flat_reloc_count stays a scalar
 // in NativeCompiler and indexes these. Accessed INLINE only (never a returning
 // helper — that miscompiles under the seed).
-pub var NC_FLAT_RELOC_OFFSETS: [i64; 131072] = [0; 131072]
-pub var NC_FLAT_RELOC_KIND_CODES: [i64; 131072] = [0; 131072]
-pub var NC_FLAT_RELOC_IS_FUNCTIONS: [i64; 131072] = [0; 131072]
-pub var NC_FLAT_RELOC_TARGET_INDICES: [i64; 131072] = [0; 131072]
+pub var NC_FLAT_RELOC_OFFSETS: [i64; 2097152] = [0; 2097152]
+pub var NC_FLAT_RELOC_KIND_CODES: [i64; 2097152] = [0; 2097152]
+pub var NC_FLAT_RELOC_IS_FUNCTIONS: [i64; 2097152] = [0; 2097152]
+pub var NC_FLAT_RELOC_TARGET_INDICES: [i64; 2097152] = [0; 2097152]
 
 // Single source of truth for the NC_FLAT_RELOC_* bound. The four DECLARATIONS
 // above must stay literals (Sounio array sizes are not expressions); every bound
@@ -285,16 +285,27 @@ pub var NC_FLAT_RELOC_TARGET_INDICES: [i64; 131072] = [0; 131072]
 // NativeCompiler.reloc_overflow and compile_native_v2_preview_to_file returns
 // rc=20 (distinct from the code-buffer rc=19). Pinned by
 // scripts/ci/native_capacity_tiers_gate.sh.
-pub fn nc_flat_reloc_capacity() -> i64 { 131072 }
+pub fn nc_flat_reloc_capacity() -> i64 { 2097152 }
 
 // Flat .rodata payload storage (string literals et al). Moved off the
 // NativeCompiler struct for the same reason as NC_FLAT_RELOC_* above:
 // keeping it in the struct capped .rodata at 8192 bytes (struct-copy cost
 // forbids growth), which silently truncated every literal past the cap —
 // programs with more than ~8KB of string data (e.g. the pure LSP server)
-// miscompiled. 256KB, accessed INLINE only; flat_rodata_len stays in the
-// struct as the cursor.
-pub var NC_BIG_RODATA: [i8; 262144] = [0; 262144]
+// miscompiled. The 256 KiB bump this comment used to describe had the exact
+// same defect at a new scale: append sites bound-checked the write but never
+// set a fail-closed flag, so self-hosted/compiler/main.sio (measured
+// 2026-09-03: needs 963,478 bytes at 13,140 functions) silently truncated
+// past 256 KiB with no error — the ELF still wrote and still ran (badly:
+// pointers into the never-written tail read stale/zero BSS). Raised to 2 MiB
+// with real headroom and a real rc=23 refusal (compile_native_v2_preview_to_file).
+// Accessed INLINE only; flat_rodata_len stays in the struct as the cursor.
+pub var NC_BIG_RODATA: [i8; 2097152] = [0; 2097152]
+
+// Single source of truth for the NC_BIG_RODATA bound. The DECLARATION above
+// must stay a literal (Sounio array sizes are not expressions); every bound
+// CHECK calls this accessor. Pinned by scripts/ci/native_capacity_tiers_gate.sh.
+pub fn nc_flat_rodata_capacity() -> i64 { 2097152 }
 
 // Runtime metadata is also emitted into .data.  Keeping that payload in the
 // inline StringTable truncated stack maps after 8 KiB, even though the compiler
@@ -311,11 +322,31 @@ pub fn nc_flat_data_capacity() -> i64 { 262144 }
 pub struct NativeCompiler {
     pub code: CodeBuffer,
     pub code_overflow: bool,
+    // Total bytes nc_emit_byte was ever asked to emit, counted unconditionally
+    // (including bytes dropped once code_overflow latches). Equals code.len
+    // while under capacity; keeps counting past it, so on overflow this is the
+    // true total code size the module needed -- the number a capacity bump
+    // must be sized against, not a guess.
+    pub code_overflow_bytes_attempted: i64,
+    // Total bytes ever attempted into the flat rodata buffer (NC_BIG_RODATA),
+    // counted unconditionally -- including bytes silently dropped once
+    // flat_rodata_len saturates at nc_flat_rodata_capacity(). Unlike
+    // code_overflow/reloc_overflow, the append sites here (native_v2_rodata_
+    // append_updated_tail, native_v2_rodata_append_byte_into) bound-check the
+    // write but do NOT set a fail-closed flag or refuse -- they just stop
+    // writing, silently truncating string/constant data with no error. This
+    // counter is what makes that overflow detectable at all.
+    pub rodata_overflow_bytes_attempted: i64,
     // Set when nc_add_flat_reloc is asked to record a relocation past
     // nc_flat_reloc_capacity(). Mirrors code_overflow: the emitter drops the
     // entry, so the ELF would ship unpatched call/rodata sites (jump to garbage
     // -> SIGSEGV). Checked beside code_overflow before the ELF is written.
     pub reloc_overflow: bool,
+    // Total relocations nc_add_flat_reloc was ever asked to record, counted
+    // unconditionally (including ones dropped once reloc_overflow latches).
+    // Same pattern as code_overflow_bytes_attempted above: on overflow this is
+    // the true count a capacity bump must be sized against.
+    pub reloc_overflow_count_attempted: i64,
     // Set when nc_define_label / nc_add_label_patch is asked to record a label or
     // a jump patch past nc_v2_label_capacity(). Mirrors reloc_overflow: the
     // emitter drops the entry, so the ELF would ship a jz/jmp whose rel32 operand
@@ -435,7 +466,10 @@ pub fn compiler_new() -> NativeCompiler with Mut {
     var out: NativeCompiler
     out.code = code_buffer_new()
     out.code_overflow = false
+    out.code_overflow_bytes_attempted = 0
+    out.rodata_overflow_bytes_attempted = 0
     out.reloc_overflow = false
+    out.reloc_overflow_count_attempted = 0
     out.label_overflow = false
     NC_V2_LABEL_OVERFLOW_FN = -1
     out.relocs = reloc_table_new()

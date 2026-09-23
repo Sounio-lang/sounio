@@ -83,6 +83,39 @@ pub fn int_widths_compatible(a: TypeEntry, b: TypeEntry) -> bool with Panic, Div
     fa == int_width_family(b.kind)
 }
 
+// Keep call/return compatibility aligned with lean_single's Knowledge ty_eq.
+// The required annotation chooses confidence-floor, exact, or error-bound
+// ordering; the provided mode only blocks confidence values from silently
+// flowing into an error-bound requirement.
+fn compat_epsilon_subsumes(a: TypeEntry, b: TypeEntry) -> bool {
+    if a.knowledge_epsilon > 1.0 || b.knowledge_epsilon > 1.0 {
+        return false
+    }
+    if b.knowledge_epsilon_mode == 3 {
+        if a.knowledge_epsilon_mode == 3 { return true }
+        return a.knowledge_epsilon_mode == 0 && a.knowledge_epsilon < 0.0
+    }
+    if b.knowledge_epsilon_mode == 2 {
+        if a.knowledge_epsilon_mode == 3 || a.knowledge_epsilon < 0.0 || b.knowledge_epsilon < 0.0 {
+            return false
+        }
+        return a.knowledge_epsilon >= b.knowledge_epsilon
+    }
+    if b.knowledge_epsilon_mode == 1 {
+        if a.knowledge_epsilon_mode == 3 || a.knowledge_epsilon < 0.0 || b.knowledge_epsilon < 0.0 {
+            return false
+        }
+        return a.knowledge_epsilon == b.knowledge_epsilon
+    }
+    if b.knowledge_epsilon < 0.0 {
+        return true
+    }
+    if a.knowledge_epsilon_mode == 2 || a.knowledge_epsilon_mode == 3 || a.knowledge_epsilon < 0.0 {
+        return false
+    }
+    a.knowledge_epsilon <= b.knowledge_epsilon
+}
+
 pub fn types_compatible(a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
     // Wildcard types: compatible with anything (check BOTH sides)
     if a.kind == TypeKind::TyError || b.kind == TypeKind::TyError {
@@ -92,6 +125,16 @@ pub fn types_compatible(a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div
         return true
     }
     if a.kind == TypeKind::TyUnknown || b.kind == TypeKind::TyUnknown {
+        return true
+    }
+
+    // DsepProof: compatible ONLY with itself, and deliberately checked before
+    // the primitive/struct rules below. It carries no payload to compare --
+    // its opacity comes entirely from there being no OTHER way to produce a
+    // TypeEntry of this kind, so kind equality alone is the whole rule. No
+    // rule anywhere may make this compatible with TyI64 or anything else;
+    // that is the property indep_dsep's signature depends on.
+    if a.kind == TypeKind::TyDsepProof && b.kind == TypeKind::TyDsepProof {
         return true
     }
 
@@ -214,7 +257,9 @@ pub fn types_compatible(a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div
         return types_compatible_inner(a.inner, b.inner)
     }
     if a.kind == TypeKind::TyRawPtr && b.kind == TypeKind::TyRawPtr {
-        if a.name.buf[0] != b.name.buf[0] {
+        // Directional coercion: a mutable pointer may satisfy a const-pointer
+        // destination, but const must never acquire mutability.
+        if a.name.buf[0] == 0 && b.name.buf[0] != 0 {
             return false
         }
         return types_compatible_inner(a.inner, b.inner)
@@ -236,21 +281,13 @@ pub fn types_compatible(a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div
         return a.fn_sig_id == b.fn_sig_id
     }
 
-    // Knowledge types: inner type must be compatible + epsilon subsumption
-    // Knowledge<T, ε1> is compatible with Knowledge<T, ε2> if ε1 <= ε2
-    // (tighter bound satisfies looser requirement)
-    // Negative epsilon (-1.0) means unspecified — always compatible
+    // Knowledge types: inner type must be compatible + operator-aware epsilon
+    // subsumption. An unspecified requirement accepts any well-formed wrapper.
     if a.kind == TypeKind::TyKnowledge && b.kind == TypeKind::TyKnowledge {
         if !types_compatible_inner(a.inner, b.inner) {
             return false
         }
-        // If either epsilon is unspecified, accept
-        if a.knowledge_epsilon < 0.0 || b.knowledge_epsilon < 0.0 {
-            return true
-        }
-        // a is the provided value, b is the expected type
-        // a.epsilon must be <= b.epsilon (tighter bound ok)
-        return a.knowledge_epsilon <= b.knowledge_epsilon
+        return compat_epsilon_subsumes(a, b)
     }
 
     if a.kind == TypeKind::TyModel && b.kind == TypeKind::TyModel {
@@ -441,20 +478,14 @@ pub fn types_compatible(a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div
         if !types_compatible_inner(a.inner, b.inner) {
             return false
         }
-        if a.knowledge_epsilon < 0.0 || b.knowledge_epsilon < 0.0 {
-            return true
-        }
-        return a.knowledge_epsilon <= b.knowledge_epsilon
+        return compat_epsilon_subsumes(a, b)
     }
 
     if a.kind == TypeKind::TyCounterfactual && b.kind == TypeKind::TyCounterfactual {
         if !types_compatible_inner(a.inner, b.inner) {
             return false
         }
-        if a.knowledge_epsilon < 0.0 || b.knowledge_epsilon < 0.0 {
-            return true
-        }
-        return a.knowledge_epsilon <= b.knowledge_epsilon
+        return compat_epsilon_subsumes(a, b)
     }
 
     if a.kind == TypeKind::TyValidated && b.kind == TypeKind::TyValidated {
@@ -464,10 +495,7 @@ pub fn types_compatible(a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div
         if a.epistemic_meta_id >= 0 && b.epistemic_meta_id >= 0 && a.epistemic_meta_id != b.epistemic_meta_id {
             return false
         }
-        if a.knowledge_epsilon < 0.0 || b.knowledge_epsilon < 0.0 {
-            return true
-        }
-        return a.knowledge_epsilon <= b.knowledge_epsilon
+        return compat_epsilon_subsumes(a, b)
     }
 
     if a.kind == TypeKind::TyAdmissible && b.kind == TypeKind::TyAdmissible {
@@ -879,10 +907,34 @@ pub fn is_float_type(ty: TypeEntry) -> bool {
     ty.kind == TypeKind::TyF32 || ty.kind == TypeKind::TyF64
 }
 
-// Wide-float identity exists before its value semantics. Keep these types out
-// of is_numeric_type until operations, status, and rounding are implemented.
+// Wide-float format identity (TyF128/TyF256). Value ops are admitted for
+// same-format arithmetic/comparison as of V0-E.2 (see wide_float_binary_result_type).
 pub fn is_wide_float_type(ty: TypeEntry) -> bool {
     ty.kind == TypeKind::TyF128 || ty.kind == TypeKind::TyF256
+}
+
+pub fn wide_float_binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc {
+    // Mixed f128/f256 or wide↔narrow stays rejected (no implicit conversion).
+    if !is_wide_float_type(left) || !is_wide_float_type(right) {
+        return ty_error()
+    }
+    if !types_compatible(left, right) {
+        return ty_error()
+    }
+    match op {
+        BinaryOp::OpAdd => left
+        BinaryOp::OpSub => left
+        BinaryOp::OpMul => left
+        BinaryOp::OpDiv => left
+        BinaryOp::OpRem => left
+        BinaryOp::OpEq => ty_bool()
+        BinaryOp::OpNe => ty_bool()
+        BinaryOp::OpLt => ty_bool()
+        BinaryOp::OpLe => ty_bool()
+        BinaryOp::OpGt => ty_bool()
+        BinaryOp::OpGe => ty_bool()
+        _ => ty_error()
+    }
 }
 
 pub fn f128_f256_compatibility_probe_code() -> i64 with Mut, Panic, Div, Alloc {
@@ -894,9 +946,20 @@ pub fn f128_f256_compatibility_probe_code() -> i64 with Mut, Panic, Div, Alloc {
     if types_compatible(t128, t256) || types_compatible(t256, t128) { return 42 }
     if types_compatible(t128, f64) || types_compatible(f64, t128) { return 43 }
     if types_compatible(t256, f64) || types_compatible(f64, t256) { return 44 }
+    // Still not in the generic is_numeric_type set — ops go through the
+    // wide_float_* dispatch (keeps f64/f32 numeric paths distinct).
     if is_numeric_type(t128) || is_numeric_type(t256) { return 45 }
     if is_float_type(t128) || is_float_type(t256) { return 46 }
     if !is_wide_float_type(t128) || !is_wide_float_type(t256) { return 47 }
+    // V0-E.2: same-format add typechecks; cross-format stays error.
+    let add128 = wide_float_binary_result_type(BinaryOp::OpAdd, t128, t128)
+    if add128.kind != TypeKind::TyF128 { return 48 }
+    let add256 = wide_float_binary_result_type(BinaryOp::OpAdd, t256, t256)
+    if add256.kind != TypeKind::TyF256 { return 49 }
+    let mixed = wide_float_binary_result_type(BinaryOp::OpAdd, t128, t256)
+    if mixed.kind != TypeKind::TyError { return 50 }
+    let cmp = wide_float_binary_result_type(BinaryOp::OpLt, t128, t128)
+    if cmp.kind != TypeKind::TyBool { return 51 }
     0
 }
 
@@ -924,6 +987,36 @@ pub fn is_primitive_receiver_type(ty: TypeEntry) -> bool {
 // Binary operator result types
 // ============================================================
 
+// Numeric compatibility with the unit brand set aside.
+//
+// types_compatible requires two TyF64 that BOTH carry a unit to carry the
+// SAME unit. That rule is right for assignment and for a call boundary; it
+// is wrong for arithmetic, and it made `distance / time` -- metres over
+// seconds, the most ordinary derived quantity in science -- an E004 "these
+// types cannot be combined with this operator" before any unit logic could
+// run. Division of unlike units is the point of having units.
+//
+// Unit policy for arithmetic belongs in ONE place, check_binary_units /
+// checker_finish_binary_units_inplace, which knows the difference between
+// addition (same dimension AND same scale required) and division (any two
+// dimensions, producing a third). This helper keeps binary_result_type to
+// the question it should be answering: are these the same KIND of number.
+pub fn compat_numeric_ignoring_units(a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
+    // Written without ty_with_unit on purpose: this file declares no imports
+    // (its header calls it "standalone functions that don't need Checker
+    // state"), so reaching into types.sio from here is a dependency it does
+    // not otherwise have. Units live only on the float kinds, so answering
+    // the float cases directly is both sufficient and self-contained.
+    if a.kind == TypeKind::TyF64 && b.kind == TypeKind::TyF64 {
+        return true
+    }
+    if a.kind == TypeKind::TyF32 && b.kind == TypeKind::TyF32 {
+        return true
+    }
+    types_compatible(a, b)
+}
+
+
 pub fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc {
     // If either side is error/unknown/never, propagate
     if is_error_or_unknown(left) {
@@ -933,7 +1026,7 @@ pub fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> Ty
         return right
     }
     if is_wide_float_type(left) || is_wide_float_type(right) {
-        return ty_error()
+        return wide_float_binary_result_type(op, left, right)
     }
 
     // Feature B: Invariant<T,G> arithmetic/comparison resolves on the inner T (an
@@ -972,7 +1065,7 @@ pub fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> Ty
     match op {
         // Arithmetic: both numeric, result = left type
         BinaryOp::OpAdd => {
-            if is_numeric_type(left) && types_compatible(left, right) {
+            if is_numeric_type(left) && compat_numeric_ignoring_units(left, right) {
                 left
             } else if left.kind == TypeKind::TyString && right.kind == TypeKind::TyString {
                 ty_string()
@@ -983,7 +1076,7 @@ pub fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> Ty
             }
         }
         BinaryOp::OpSub => {
-            if is_numeric_type(left) && types_compatible(left, right) {
+            if is_numeric_type(left) && compat_numeric_ignoring_units(left, right) {
                 left
             } else if compat_is_hyper_type(left) && compat_is_hyper_type(right) {
                 hyper_binary_result_type(left, right)
@@ -992,7 +1085,7 @@ pub fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> Ty
             }
         }
         BinaryOp::OpMul => {
-            if is_numeric_type(left) && types_compatible(left, right) {
+            if is_numeric_type(left) && compat_numeric_ignoring_units(left, right) {
                 left
             } else if compat_is_hyper_type(left) && compat_is_hyper_type(right) {
                 hyper_binary_result_type(left, right)
@@ -1001,7 +1094,7 @@ pub fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> Ty
             }
         }
         BinaryOp::OpDiv => {
-            if is_numeric_type(left) && types_compatible(left, right) {
+            if is_numeric_type(left) && compat_numeric_ignoring_units(left, right) {
                 left
             } else if compat_is_hyper_type(left) && compat_is_hyper_type(right) {
                 hyper_division_result_type(left, right)
@@ -1010,51 +1103,55 @@ pub fn binary_result_type(op: BinaryOp, left: TypeEntry, right: TypeEntry) -> Ty
             }
         }
         BinaryOp::OpRem => {
-            if is_numeric_type(left) && types_compatible(left, right) {
+            if is_numeric_type(left) && compat_numeric_ignoring_units(left, right) {
                 left
             } else {
                 ty_error()
             }
         }
 
-        // Comparison: both same type, result = bool
+        // Comparison: both same type, result = bool. Units are set aside here
+        // for the same reason as arithmetic -- check_binary_units decides
+        // whether two branded quantities may be compared, and it can say
+        // WHICH dimensions clashed, where an E004 here could only say the
+        // types did not combine.
         BinaryOp::OpEq => {
-            if types_compatible(left, right) {
+            if compat_numeric_ignoring_units(left, right) {
                 ty_bool()
             } else {
                 ty_error()
             }
         }
         BinaryOp::OpNe => {
-            if types_compatible(left, right) {
+            if compat_numeric_ignoring_units(left, right) {
                 ty_bool()
             } else {
                 ty_error()
             }
         }
         BinaryOp::OpLt => {
-            if is_numeric_type(left) && types_compatible(left, right) {
+            if is_numeric_type(left) && compat_numeric_ignoring_units(left, right) {
                 ty_bool()
             } else {
                 ty_error()
             }
         }
         BinaryOp::OpLe => {
-            if is_numeric_type(left) && types_compatible(left, right) {
+            if is_numeric_type(left) && compat_numeric_ignoring_units(left, right) {
                 ty_bool()
             } else {
                 ty_error()
             }
         }
         BinaryOp::OpGt => {
-            if is_numeric_type(left) && types_compatible(left, right) {
+            if is_numeric_type(left) && compat_numeric_ignoring_units(left, right) {
                 ty_bool()
             } else {
                 ty_error()
             }
         }
         BinaryOp::OpGe => {
-            if is_numeric_type(left) && types_compatible(left, right) {
+            if is_numeric_type(left) && compat_numeric_ignoring_units(left, right) {
                 ty_bool()
             } else {
                 ty_error()
@@ -1172,7 +1269,10 @@ pub fn unary_result_type(op: UnaryOp, operand: TypeEntry) -> TypeEntry with Allo
         return operand
     }
     if is_wide_float_type(operand) {
-        return ty_error()
+        match op {
+            UnaryOp::OpNeg => return operand
+            _ => return ty_error()
+        }
     }
 
     match op {
@@ -1186,6 +1286,13 @@ pub fn unary_result_type(op: UnaryOp, operand: TypeEntry) -> TypeEntry with Allo
         UnaryOp::OpNot => {
             if is_bool_type(operand) {
                 ty_bool()
+            } else {
+                ty_error()
+            }
+        }
+        UnaryOp::OpBitNot => {
+            if is_integer_type(operand) {
+                operand
             } else {
                 ty_error()
             }
@@ -1425,6 +1532,15 @@ pub fn name_matches_str22(n: Name, a: i64, b: i64, c: i64, d: i64, e: i64, f: i6
 // "i8" = [105, 56]
 pub fn name_is_i8(n: Name) -> bool with Panic, Div {
     name_matches_str2(n, 105, 56)
+}
+
+// "DsepProof" — the discharged-d-separation credential. Recognised generically
+// wherever a type name is scanned, exactly like i8/i32/... above, but NOT a
+// declared struct anywhere: nothing in any struct table resolves this name, so
+// no `DsepProof { ... }` literal exists to write. Producible only where the
+// checker stamps it directly onto a `d_separated(A, B | Z)` expression.
+pub fn name_is_dsep_proof(n: Name) -> bool with Panic, Div {
+    name_matches_str9(n, 68, 115, 101, 112, 80, 114, 111, 111, 102)
 }
 
 // "i32" = [105, 51, 50]

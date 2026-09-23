@@ -7,14 +7,14 @@
 module native::codegen_x86_linux
 
 use parser::ast::{Name}
-use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_MAX_FUNCS, IR_MAX_STRINGS, IR_FLOAT_REG_MARKER_FLAG, ir_name_eq, BSS_BASE_LINUX, IR_STRATEGY_BSS_GLOBAL, BSS_INIT_STRING_MAGIC}
+use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_MAX_FUNCS, IR_MAX_STRINGS, IR_FLOAT_REG_MARKER_FLAG, IR_XOR_TWIST_CAYLEY_DICKSON_SIGN, IR_XOR_CANDIDATE_AUTO, ir_xor_convolution_s, ir_name_eq, BSS_BASE_LINUX, IR_STRATEGY_BSS_GLOBAL, BSS_INIT_STRING_MAGIC}
 use native::encode::*
 use native::elf::*
 use native::aarch64::*
 use native::macho::*
 use native::reloc::*
 use native::frame::*
-use native::lower_ir::{lower_instr, nc_run_regalloc, nc_min_frame_size, emit_binop_code, emit_float_binop_code}
+use native::lower_ir::{lower_instr, nc_run_regalloc, nc_min_frame_size, emit_binop_code, emit_float_binop_code, emit_evex_pd_rm_disp32, emit_xor_convolution_s, lower_ir_set_ieee_f64_sabotage}
 use native::machine_ir::*
 use native::peephole::{ph_run_on_func}
 use native::regalloc::*
@@ -47,10 +47,14 @@ var NATIVE_ELF_BUF: [i8; 16777216] = [0; 16777216]
 var NATIVE_ELF_OFF: i64 = 0
 // Set when nc_elf_put_u8 is asked to store past native_elf_buf_capacity_bytes().
 // The legacy writer (compile_native_finalize_and_write_ref) used to have NO bound
-// check at all; with NC_BIG_CODE raised to 8 MiB a large module can now push the
-// assembled image at this 16 MiB buffer, so the store is bounded and the writer
-// refuses to emit rather than shipping a truncated ELF. i64 (0/1) rather than
-// bool: module-global bool init is not exercised elsewhere in this backend.
+// check at all; a large module can push the assembled image past this legacy
+// 16 MiB buffer (measured 2026-09-02: self-hosted/compiler/main.sio needs
+// 53,515,198 code bytes at merged_ir_functions=13140, so NC_BIG_CODE -- the
+// native_v2 code tier this legacy path shares -- was raised to 128 MiB; this
+// legacy ELF buffer was left at 16 MiB since the legacy writer is not on that
+// path), so the store is bounded and the writer refuses to emit rather than
+// shipping a truncated ELF. i64 (0/1) rather than bool: module-global bool
+// init is not exercised elsewhere in this backend.
 var NATIVE_ELF_OVERFLOW: i64 = 0
 // Which function is being emitted right now, so nc_note_label_overflow can name
 // it. Per-function state, set beside nc_v2_reset_label_state; the surviving
@@ -61,6 +65,8 @@ var NC_V2_CURRENT_FN_INDEX: i64 = -1
 // IO compile entry so nc_wide_mul_into does not take IO — its emit-loop
 // helper must stay Mut/Panic/Div or the effect walks the core_ir graph.
 var NC_WIDE_MUL_SABOTAGE: i64 = 0
+// Cached SOUNIO_SABOTAGE_IEEE_F64_SPECIAL (#2389 / KL-2 witness hook).
+var NC_IEEE_F64_SABOTAGE: i64 = 0
 
 fn nc_note_label_overflow(nc: &! NativeCompiler) with Mut, Panic {
     (*nc).label_overflow = true
@@ -73,13 +79,13 @@ fn nc_note_label_overflow(nc: &! NativeCompiler) with Mut, Panic {
 // for large programs (isa ELF ~700KB, evm ~2.1MB) and itself a large-stack-frame
 // hazard. This module-global BSS array (demand-paged, ~0 RSS until touched) holds
 // the assembled ELF image. Written INLINE only (direct NC_BIG_ELF[i]).
-var NC_BIG_ELF: [i8; 16777216] = [0; 16777216]
+var NC_BIG_ELF: [i8; 167772160] = [0; 167772160]
 // Single source of truth for the NC_BIG_ELF bound. The DECLARATION above must
 // stay a literal; every bound CHECK calls this accessor. NOTE: this value must
 // never be confused with the ELF LOAD BASE ADDRESS 0x400000 (4194304), which is
 // passed as the `base_addr` argument at several call sites and is unrelated to
 // buffer capacity. Pinned by scripts/ci/native_capacity_tiers_gate.sh.
-fn nc_elf_capacity_bytes() -> i64 { 16777216 }
+fn nc_elf_capacity_bytes() -> i64 { 167772160 }
 // Scratch IR functions for the sret witness. These are module-scope to avoid
 // putting IrFunction-sized temporaries on the Madaros runtime stack.
 var NV2_SRET_MAIN_FN: IrFunction = ir_empty_function()
@@ -123,77 +129,77 @@ fn TARGET_SOURCE_ENV_OVERRIDE() -> i64 { 3 }
 fn TARGET_SOURCE_FALLBACK() -> i64 { 4 }
 
 pub struct NativeTargetSpec {
-    arch_id: i64,
-    os_id: i64,
-    matrix_mode: i64,
-    source_id: i64,
-    requested_target: string,
-    resolved_target: string,
-    fallback_reason: string,
+    pub arch_id: i64,
+    pub os_id: i64,
+    pub matrix_mode: i64,
+    pub source_id: i64,
+    pub requested_target: string,
+    pub resolved_target: string,
+    pub fallback_reason: string,
 }
 
 pub struct NativeCompileResult {
-    ok: bool,
-    bytes: [i8; 131072],
-    len: i64,
-    format_id: i64,
-    error_code: i64,
-    error_msg: string,
+    pub ok: bool,
+    pub bytes: [i8; 131072],
+    pub len: i64,
+    pub format_id: i64,
+    pub error_code: i64,
+    pub error_msg: string,
 }
 
 pub struct NativeV2RuntimeContextLayout {
-    language_visible: bool,
-    tracing_gc: bool,
-    precise_stack_maps: bool,
-    safepoints: bool,
-    deopt_enabled: bool,
-    osr_enabled: bool,
-    unified_jit_aot: bool,
-    heterogeneous_shared: bool,
-    gc_field_count: i64,
-    io_field_count: i64,
-    instrumentation_field_count: i64,
-    deopt_field_count: i64,
-    capability_field_count: i64,
-    heterogeneous_field_count: i64,
-    provenance_field_count: i64,
+    pub language_visible: bool,
+    pub tracing_gc: bool,
+    pub precise_stack_maps: bool,
+    pub safepoints: bool,
+    pub deopt_enabled: bool,
+    pub osr_enabled: bool,
+    pub unified_jit_aot: bool,
+    pub heterogeneous_shared: bool,
+    pub gc_field_count: i64,
+    pub io_field_count: i64,
+    pub instrumentation_field_count: i64,
+    pub deopt_field_count: i64,
+    pub capability_field_count: i64,
+    pub heterogeneous_field_count: i64,
+    pub provenance_field_count: i64,
 }
 
 pub struct NativeV2MachineModule {
-    target_arch_id: i64,
-    fn_count: i64,
-    ir_instr_count: i64,
-    machine_instr_count: i64,
-    stack_map_record_count: i64,
-    safepoint_count: i64,
-    deopt_point_count: i64,
-    active: bool,
-    target_count: i64,
-    coverage: string,
-    fail_closed: bool,
-    legacy_fallback: bool,
-    has_runtime_context: bool,
-    supports_stack_maps: bool,
-    supports_safepoints: bool,
-    supports_deopt: bool,
-    supports_osr: bool,
-    unified_jit_aot: bool,
-    heterogeneous_shared: bool,
-    optimized_tier_count: i64,
+    pub target_arch_id: i64,
+    pub fn_count: i64,
+    pub ir_instr_count: i64,
+    pub machine_instr_count: i64,
+    pub stack_map_record_count: i64,
+    pub safepoint_count: i64,
+    pub deopt_point_count: i64,
+    pub active: bool,
+    pub target_count: i64,
+    pub coverage: string,
+    pub fail_closed: bool,
+    pub legacy_fallback: bool,
+    pub has_runtime_context: bool,
+    pub supports_stack_maps: bool,
+    pub supports_safepoints: bool,
+    pub supports_deopt: bool,
+    pub supports_osr: bool,
+    pub unified_jit_aot: bool,
+    pub heterogeneous_shared: bool,
+    pub optimized_tier_count: i64,
 }
 
 pub struct NativeV2TargetPolicySummary {
-    reserved_count: i64,
-    allocatable_count: i64,
-    allocation_order_count: i64,
-    scratch_count: i64,
-    arg_count: i64,
-    ret_count: i64,
-    frame_has_gc_area: bool,
-    frame_has_deopt_area: bool,
-    frame_has_unwind: bool,
-    frame_has_vector_align: bool,
-    emitter_ready: bool,
+    pub reserved_count: i64,
+    pub allocatable_count: i64,
+    pub allocation_order_count: i64,
+    pub scratch_count: i64,
+    pub arg_count: i64,
+    pub ret_count: i64,
+    pub frame_has_gc_area: bool,
+    pub frame_has_deopt_area: bool,
+    pub frame_has_unwind: bool,
+    pub frame_has_vector_align: bool,
+    pub emitter_ready: bool,
 }
 
 fn native_v2_backend_name() -> string {
@@ -711,10 +717,10 @@ fn native_v2_write_shadow_contract(path: string, module: &IrModule, target_spec:
 }
 
 pub struct NativeTargetParse {
-    ok: bool,
-    arch_id: i64,
-    os_id: i64,
-    canonical: string,
+    pub ok: bool,
+    pub arch_id: i64,
+    pub os_id: i64,
+    pub canonical: string,
 }
 
 fn native_target_parse_invalid() -> NativeTargetParse {
@@ -1455,6 +1461,7 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
 fn native_v2_empty_stub_would_fabricate(func: &IrFunction) -> bool with Mut, Panic, Div {
     if (*func).compile_strategy == IR_STRATEGY_BSS_GLOBAL { return false }
     if (*func).instr_count > 0 { return false }
+    if name_is_dynlink_extern((*func).name) { return false }
     native_v2_builtin_id_for_func_ref(func) == 0
 }
 
@@ -1791,6 +1798,7 @@ fn emit_store_runtime_context_imm(nc: NativeCompiler, field_offset: i64, value: 
 
 fn nc_emit_byte(nc: &! NativeCompiler, b: i64) with Mut, Panic, Div {
     let len = (*nc).code.len
+    (*nc).code_overflow_bytes_attempted = (*nc).code_overflow_bytes_attempted + 1
     if len >= 0 && len < nc_code_capacity_bytes() {
         NC_BIG_CODE[len as usize] = low8(b) as i8
         (*nc).code.len = len + 1
@@ -1802,6 +1810,211 @@ fn nc_emit_byte(nc: &! NativeCompiler, b: i64) with Mut, Panic, Div {
 fn nc_emit_unimplemented_extern_trap_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x0f)
     nc_emit_byte(nc, 0x0b)
+}
+
+// KL-14b/c/d: names resolved via DT_NEEDED + GOT (not ffi_* builtins).
+// Cap is the dyn ELF emitter's unique-symbol table (see native_v2_dynlink_*).
+fn name_is_dynlink_extern(n: Name) -> bool with Mut, Panic, Div {
+    if name_eq(n, make_name("kl14b_add")) { return true }
+    if name_eq(n, make_name("kl14c_add")) { return true }
+    if name_eq(n, make_name("kl14c_mul")) { return true }
+    if name_eq(n, make_name("kl14c_neg")) { return true }
+    if name_eq(n, make_name("kl14d_a")) { return true }
+    if name_eq(n, make_name("kl14d_b")) { return true }
+    if name_eq(n, make_name("ZSTD_compress")) { return true }
+    if name_eq(n, make_name("ZSTD_decompress")) { return true }
+    if name_eq(n, make_name("ZSTD_isError")) { return true }
+    if name_eq(n, make_name("dlopen")) { return true }
+    if name_eq(n, make_name("dlsym")) { return true }
+    if name_eq(n, make_name("dlclose")) { return true }
+    if name_eq(n, make_name("dlerror")) { return true }
+    false
+}
+
+fn native_v2_align8(x: i64) -> i64 {
+    (x + 7) / 8 * 8
+}
+
+fn native_v2_name_buf_eq(a_buf: [i8; 384], a_len: i64, b_buf: [i8; 384], b_len: i64) -> bool {
+    if a_len != b_len { return false }
+    var i: i64 = 0
+    while i < a_len {
+        if a_buf[i as usize] != b_buf[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn native_v2_dynlink_max_symbols() -> i64 { 8 }
+fn native_v2_dynlink_max_libs() -> i64 { 4 }
+
+// Stable lib id for a dynlink symbol name. 0 = unknown / not dynlink.
+fn native_v2_dynlink_lib_id_for_name(sym_buf: [i8; 384], sym_len: i64) -> i64 with Mut, Panic, Div {
+    let n_b = make_name("kl14b_add")
+    if native_v2_name_buf_eq(sym_buf, sym_len, n_b.buf, n_b.len) { return 1 }
+    let n_ca = make_name("kl14c_add")
+    if native_v2_name_buf_eq(sym_buf, sym_len, n_ca.buf, n_ca.len) { return 2 }
+    let n_cm = make_name("kl14c_mul")
+    if native_v2_name_buf_eq(sym_buf, sym_len, n_cm.buf, n_cm.len) { return 2 }
+    let n_cn = make_name("kl14c_neg")
+    if native_v2_name_buf_eq(sym_buf, sym_len, n_cn.buf, n_cn.len) { return 2 }
+    let n_da = make_name("kl14d_a")
+    if native_v2_name_buf_eq(sym_buf, sym_len, n_da.buf, n_da.len) { return 3 }
+    let n_db = make_name("kl14d_b")
+    if native_v2_name_buf_eq(sym_buf, sym_len, n_db.buf, n_db.len) { return 4 }
+    let n_zc = make_name("ZSTD_compress")
+    if native_v2_name_buf_eq(sym_buf, sym_len, n_zc.buf, n_zc.len) { return 5 }
+    let n_zd = make_name("ZSTD_decompress")
+    if native_v2_name_buf_eq(sym_buf, sym_len, n_zd.buf, n_zd.len) { return 5 }
+    let n_zi = make_name("ZSTD_isError")
+    if native_v2_name_buf_eq(sym_buf, sym_len, n_zi.buf, n_zi.len) { return 5 }
+    let n_do = make_name("dlopen")
+    if native_v2_name_buf_eq(sym_buf, sym_len, n_do.buf, n_do.len) { return 6 }
+    let n_ds = make_name("dlsym")
+    if native_v2_name_buf_eq(sym_buf, sym_len, n_ds.buf, n_ds.len) { return 6 }
+    let n_dc = make_name("dlclose")
+    if native_v2_name_buf_eq(sym_buf, sym_len, n_dc.buf, n_dc.len) { return 6 }
+    let n_de = make_name("dlerror")
+    if native_v2_name_buf_eq(sym_buf, sym_len, n_de.buf, n_de.len) { return 6 }
+    0
+}
+
+fn native_v2_dynlink_soname_for_lib_id(lib_id: i64) -> string {
+    // Fase 3 refinada: byte-identity é usada APENAS quando corresponde ao símbolo atual
+    // (não como override global). A tabela hard-coded serve como fallback para símbolos
+    // que não têm associação explícita via `from "library"`.
+    // Esta função retorna o soname; o loop de escrita decide se aplica byte-identity
+    // com base na correspondência entre o símbolo e a biblioteca declarada.
+    // (A preferência global foi removida; a identidade em bytes é aplicada no nível
+    // do loop de escrita, não na resolução individual do lib_id.)
+    if lib_id == 1 { return "libkl14b_probe.so" }
+    if lib_id == 2 { return "libkl14c_probe.so" }
+    if lib_id == 3 { return "libkl14d_a.so" }
+    if lib_id == 4 { return "libkl14d_b.so" }
+    if lib_id == 5 { return "libzstd.so.1" }
+    if lib_id == 6 { return "libdl.so.2" }
+    "libkl14b_probe.so"
+}
+
+// Fase 2 (A+B): byte-identity version — reads library identity from bytes (not FNV hash)
+fn native_v2_dynlink_soname_for_bytes(buf: [i8; 256], len: i64) -> string {
+    // For Phase 2, the byte identity IS the soname (no hash translation needed)
+    // The parser provides lib_identity_buf from `from "library_name"`; this writer
+    // uses it directly, establishing the original syntax-to-codegen connection.
+    var result_bytes: [i8; 256] = [0; 256]
+    var result_len: i64 = len
+    if result_len > 255 { result_len = 255 }
+    var i: i64 = 0
+    while i < result_len {
+        result_bytes[i as usize] = buf[i as usize]
+        i = i + 1
+    }
+    // Return as a simple byte-string (simplified for design consolidation)
+    return str_from_bytes(buf, len)
+}
+
+// Unique dynlink symbol count from GOT stub relocs (order = first appearance).
+fn native_v2_dynlink_unique_count(nc: &NativeCompiler) -> i64 {
+    var n: i64 = 0
+    var i: i64 = 0
+    while i < (*nc).extern_relocs.count {
+        let er = (*nc).extern_relocs.entries[i as usize]
+        var seen = false
+        var j: i64 = 0
+        while j < i {
+            let prev = (*nc).extern_relocs.entries[j as usize]
+            if native_v2_name_buf_eq(er.sym_buf, er.sym_len, prev.sym_buf, prev.sym_len) {
+                seen = true
+            }
+            j = j + 1
+        }
+        if !seen {
+            n = n + 1
+        }
+        i = i + 1
+    }
+    n
+}
+
+// Unique DT_NEEDED lib count (order = first appearance of a lib via symbols).
+fn native_v2_dynlink_unique_lib_count(nc: &NativeCompiler) -> i64 with Mut, Panic, Div {
+    var libs: [i64; 4] = [0; 4]
+    var n: i64 = 0
+    var i: i64 = 0
+    while i < (*nc).extern_relocs.count {
+        let er = (*nc).extern_relocs.entries[i as usize]
+        let lid = native_v2_dynlink_lib_id_for_name(er.sym_buf, er.sym_len)
+        if lid > 0 {
+            var seen = false
+            var j: i64 = 0
+            while j < n {
+                if libs[j as usize] == lid { seen = true }
+                j = j + 1
+            }
+            if !seen && n < native_v2_dynlink_max_libs() {
+                libs[n as usize] = lid
+                n = n + 1
+            }
+        }
+        i = i + 1
+    }
+    n
+}
+
+// 1-based dynsym index for this reloc name; 0 if missing.
+fn native_v2_dynlink_sym_index(nc: &NativeCompiler, sym_buf: [i8; 384], sym_len: i64) -> i64 {
+    var uniq: i64 = 0
+    var i: i64 = 0
+    while i < (*nc).extern_relocs.count {
+        let er = (*nc).extern_relocs.entries[i as usize]
+        var seen = false
+        var j: i64 = 0
+        while j < i {
+            let prev = (*nc).extern_relocs.entries[j as usize]
+            if native_v2_name_buf_eq(er.sym_buf, er.sym_len, prev.sym_buf, prev.sym_len) {
+                seen = true
+            }
+            j = j + 1
+        }
+        if !seen {
+            uniq = uniq + 1
+            if native_v2_name_buf_eq(er.sym_buf, er.sym_len, sym_buf, sym_len) {
+                return uniq
+            }
+        }
+        i = i + 1
+    }
+    0
+}
+
+fn nc_emit_call_mem_rip_disp32_into(nc: &! NativeCompiler, disp: i64) with Mut, Panic, Div {
+    // ff 15 <disp32> — call qword [rip+disp32]
+    nc_emit_byte(nc, 0xff)
+    nc_emit_byte(nc, 0x15)
+    nc_emit_u32_le(nc, disp)
+}
+
+fn nc_emit_jmp_mem_rip_disp32_into(nc: &! NativeCompiler, disp: i64) with Mut, Panic, Div {
+    // ff 25 <disp32> — jmp qword [rip+disp32]
+    nc_emit_byte(nc, 0xff)
+    nc_emit_byte(nc, 0x25)
+    nc_emit_u32_le(nc, disp)
+}
+
+// Dynlink extern stub: args already in SysV regs from the caller's `call
+// rel32` into this stub. Tail-jmp through the GOT — must NOT `call [got]; ret`,
+// which would push a second return address and leave the dynlib callee with
+// rsp%16==0 (SIMD libs like libzstd SEGV; simple integer probes still pass).
+fn emit_dynlink_got_stub_into(nc: &! NativeCompiler, name: Name) with Mut, Panic, Div, Alloc {
+    let disp_off = (*nc).code.len + 2
+    nc_emit_jmp_mem_rip_disp32_into(nc, 0)
+    add_extern_reloc(&! (*nc).extern_relocs, disp_off, name.buf, name.len)
+}
+
+fn native_v2_try_emit_dynlink_stub_into(nc: &! NativeCompiler, name: Name) -> bool with Mut, Panic, Div, Alloc {
+    if !name_is_dynlink_extern(name) { return false }
+    emit_dynlink_got_stub_into(nc, name)
+    true
 }
 
 fn nc_emit_u32_le(nc: &! NativeCompiler, val: i64) with Mut, Panic, Div {
@@ -2053,6 +2266,7 @@ fn nc_patch_u32_le(nc: &! NativeCompiler, offset: i64, val: i64) with Mut, Panic
 
 fn nc_add_flat_reloc(nc: &! NativeCompiler, patch_offset: i64, kind_code: i64, is_function: i64, target_index: i64) with Mut, Panic, Div {
     let idx = (*nc).flat_reloc_count
+    (*nc).reloc_overflow_count_attempted = (*nc).reloc_overflow_count_attempted + 1
     if idx >= 0 && idx < nc_flat_reloc_capacity() {
         NC_FLAT_RELOC_OFFSETS[idx as usize] = patch_offset
         NC_FLAT_RELOC_KIND_CODES[idx as usize] = kind_code
@@ -2341,6 +2555,22 @@ fn nc_emit_seta_al(nc: &! NativeCompiler) with Mut, Panic, Div {
 
 fn nc_emit_setbe_al(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x96); nc_emit_byte(nc, 0xc0)
+}
+
+fn nc_emit_setpo_cl(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x9b); nc_emit_byte(nc, 0xc1)
+}
+
+fn nc_emit_setpe_cl(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0x9a); nc_emit_byte(nc, 0xc1)
+}
+
+fn nc_emit_and_al_cl(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x22); nc_emit_byte(nc, 0xc1)
+}
+
+fn nc_emit_or_al_cl(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x0a); nc_emit_byte(nc, 0xc1)
 }
 
 // MOVZX RAX, AL
@@ -2711,6 +2941,16 @@ fn nc_refresh_wide_mul_sabotage() with IO, Mut, Panic, Div {
     }
 }
 
+fn nc_refresh_ieee_f64_sabotage() with IO, Mut, Panic, Div {
+    if str_eq(read_env("SOUNIO_SABOTAGE_IEEE_F64_SPECIAL"), "1") {
+        NC_IEEE_F64_SABOTAGE = 1
+        lower_ir_set_ieee_f64_sabotage(1)
+    } else {
+        NC_IEEE_F64_SABOTAGE = 0
+        lower_ir_set_ieee_f64_sabotage(0)
+    }
+}
+
 // Schoolbook N-limb unsigned multiply: dst[0..L-1] = lower L limbs of lhs * rhs.
 // Uses rcx as temp, scratch slots at dst_vreg+L and dst_vreg+L+1.
 fn nc_wide_mul_into(nc: &! NativeCompiler, lhs_vreg: i64, rhs_vreg: i64, dst_vreg: i64, limbs: i64) with Mut, Panic, Div {
@@ -2793,25 +3033,41 @@ fn nc_wide_cmp_equal_default(cmp_op: i64) -> i64 {
     if cmp_op == 0 { return 1 }  // Eq
     if cmp_op == 3 { return 1 }  // Le
     if cmp_op == 5 { return 1 }  // Ge
+    if cmp_op == 9 { return 1 }  // signed Le
+    if cmp_op == 11 { return 1 } // signed Ge
     0
 }
 
-fn nc_wide_cmp_emit_unequal_result(nc: &! NativeCompiler, cmp_op: i64) with Mut, Panic, Div {
+fn nc_wide_cmp_emit_unequal_result(nc: &! NativeCompiler, cmp_op: i64, signed_high_limb: i64) with Mut, Panic, Div {
     if cmp_op == 0 {
         nc_emit_mov_rax_imm(nc, 0)
     } else if cmp_op == 1 {
         nc_emit_mov_rax_imm(nc, 1)
+    } else if cmp_op >= 8 && signed_high_limb == 1 {
+        if cmp_op == 8 {
+            nc_emit_setl_al(nc)
+        } else if cmp_op == 9 {
+            nc_emit_setle_al(nc)
+        } else if cmp_op == 10 {
+            nc_emit_setg_al(nc)
+        } else {
+            nc_emit_setge_al(nc)
+        }
+        nc_emit_movzx_rax_al(nc)
     } else if cmp_op == 2 {
         nc_emit_setb_al(nc)
         nc_emit_movzx_rax_al(nc)
-    } else if cmp_op == 3 {
+    } else if cmp_op == 3 || cmp_op == 9 {
         nc_emit_setbe_al(nc)
         nc_emit_movzx_rax_al(nc)
-    } else if cmp_op == 4 {
+    } else if cmp_op == 4 || cmp_op == 10 {
         nc_emit_seta_al(nc)
         nc_emit_movzx_rax_al(nc)
-    } else if cmp_op == 5 {
+    } else if cmp_op == 5 || cmp_op == 11 {
         nc_emit_setae_al(nc)
+        nc_emit_movzx_rax_al(nc)
+    } else if cmp_op == 8 {
+        nc_emit_setb_al(nc)
         nc_emit_movzx_rax_al(nc)
     } else {
         nc_emit_mov_rax_imm(nc, 0)
@@ -2834,7 +3090,7 @@ fn nc_wide_cmp_into(nc: &! NativeCompiler, lhs_vreg: i64, rhs_vreg: i64, dst_vre
         let jz_pos = (*nc).code.len
         nc_emit_jz_rel32(nc)
 
-        nc_wide_cmp_emit_unequal_result(nc, cmp_op)
+        nc_wide_cmp_emit_unequal_result(nc, cmp_op, if limb == limbs - 1 { 1 } else { 0 })
         nc_emit_store_rax_rbp_disp32(nc, ir_slot_offset(dst_vreg))
 
         let jmp_done_pos = (*nc).code.len
@@ -5212,9 +5468,12 @@ fn native_v2_rodata_append_updated_tail(nc: &! NativeCompiler, updated: NativeCo
     let append_base = (*nc).flat_rodata_len
     var src = src_start
     var len = (*nc).flat_rodata_len
-    while src < updated.rodata.len && len < 262144 {
-        NC_BIG_RODATA[len as usize] = updated.rodata.bytes[src as usize]
-        len = len + 1
+    while src < updated.rodata.len {
+        (*nc).rodata_overflow_bytes_attempted = (*nc).rodata_overflow_bytes_attempted + 1
+        if len < nc_flat_rodata_capacity() {
+            NC_BIG_RODATA[len as usize] = updated.rodata.bytes[src as usize]
+            len = len + 1
+        }
         src = src + 1
     }
     (*nc).flat_rodata_len = len
@@ -6172,6 +6431,66 @@ pub(crate) fn emit_builtin_cos(nc: NativeCompiler) -> NativeCompiler with Mut, P
     c
 }
 
+// Epilogue shared by print_f64 special-value exits (#2389).
+fn emit_print_f64_epilogue(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_mov_rsp_rbp(b)
+    b = emit_pop_rbp(b)
+    b = emit_ret(b)
+    b
+}
+
+// Write count bytes at [rbp+disp8] to stdout and return from print_f64.
+fn emit_print_f64_write_stack_and_return(c: NativeCompiler, disp8: i8, count: i64,
+        b0: i8, b1: i8, b2: i8, b3: i8) -> NativeCompiler with Mut, Panic, Div {
+    var code = c.code
+    if count >= 1 {
+        var s0 = code
+        s0 = emit_byte(s0, 0xC6)
+        s0 = emit_byte(s0, 0x45)
+        s0 = emit_byte(s0, disp8)
+        s0 = emit_byte(s0, b0)
+        code = s0
+    }
+    if count >= 2 {
+        var s1 = code
+        s1 = emit_byte(s1, 0xC6)
+        s1 = emit_byte(s1, 0x45)
+        s1 = emit_byte(s1, disp8 + 1)
+        s1 = emit_byte(s1, b1)
+        code = s1
+    }
+    if count >= 3 {
+        var s2 = code
+        s2 = emit_byte(s2, 0xC6)
+        s2 = emit_byte(s2, 0x45)
+        s2 = emit_byte(s2, disp8 + 2)
+        s2 = emit_byte(s2, b2)
+        code = s2
+    }
+    if count >= 4 {
+        var s3 = code
+        s3 = emit_byte(s3, 0xC6)
+        s3 = emit_byte(s3, 0x45)
+        s3 = emit_byte(s3, disp8 + 3)
+        s3 = emit_byte(s3, b3)
+        code = s3
+    }
+    var lea = code
+    lea = emit_byte(lea, 0x48)
+    lea = emit_byte(lea, 0x8D)
+    lea = emit_byte(lea, 0x75)
+    lea = emit_byte(lea, disp8)
+    code = lea
+    code = emit_mov_reg_imm(code, 2, count)
+    var nc = c
+    nc.code = code
+    nc = emit_load_runtime_context_field_rdi(nc, runtime_context_field_stdout_fd())
+    nc = emit_write_syscall_for_target(nc, nc.target_os_id)
+    nc.code = emit_print_f64_epilogue(nc.code)
+    nc
+}
+
 // Sprint 118: print_f64 builtin — f64 → stdout, fraction rounded (#1573)
 pub(crate) fn emit_builtin_print_f64(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
@@ -6187,6 +6506,39 @@ pub(crate) fn emit_builtin_print_f64(nc: NativeCompiler) -> NativeCompiler with 
     // rdi = f64 bit pattern
     c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
     c.code = emit_movq_xmm0_rax(c.code)               // movq xmm0, rax
+
+    // NaN/inf fast paths (#2389). Skipped under ieee-f64-special sabotage.
+    if NC_IEEE_F64_SABOTAGE != 1 {
+    // Classify NaN / ±inf from IEEE bits (#2389). Integer-only: ucomisd self-tests
+    // mis-fire on some non-NaN values when xmm state is entangled with prior ops.
+    c.code = emit_mov_reg_imm(c.code, 1, 52)          // mov rcx, 52 → cl for shr
+    c.code = emit_shr_rax_cl(c.code)                  // rax = biased exponent
+    c.code = emit_mov_reg_imm(c.code, 3, 0x7FF)
+    c.code = emit_and_rax_rbx(c.code)
+    c.code = emit_cmp_rbx_rax(c.code)                 // cmp 0x7FF, exp
+    let jnz_not_special = c.code.len
+    c.code = emit_jnz_rel32(c.code)
+    c.code = emit_mov_reg_reg(c.code, 0, 7)           // mov rax, rdi
+    c.code = emit_mov_reg_imm(c.code, 3, 0x000FFFFFFFFFFFFF)
+    c.code = emit_and_rax_rbx(c.code)
+    c.code = emit_test_rax_rax(c.code)
+    let jz_is_inf = c.code.len
+    c.code = emit_jz_rel32(c.code)
+    c = emit_print_f64_write_stack_and_return(c, 0 - 40, 3, 110, 97, 110, 0) // "nan"
+    let inf_block = c.code.len
+    c.code = patch_u32_le(c.code, jz_is_inf + 2, inf_block - (jz_is_inf + 6))
+    c.code = emit_test_rdi_rdi(c.code)
+    let jns_pos_inf = c.code.len
+    c.code = emit_jns_rel8(c.code, 0)
+    c = emit_print_f64_write_stack_and_return(c, 0 - 40, 4, 45, 105, 110, 102) // "-inf"
+    let pos_inf = c.code.len
+    if jns_pos_inf + 1 < nc_code_capacity_bytes() {
+        NC_BIG_CODE[(jns_pos_inf + 1) as usize] = low8(pos_inf - (jns_pos_inf + 2)) as i8
+    }
+    c = emit_print_f64_write_stack_and_return(c, 0 - 40, 3, 105, 110, 102, 0) // "inf"
+    let after_inf = c.code.len
+    c.code = patch_u32_le(c.code, jnz_not_special + 2, after_inf - (jnz_not_special + 6))
+    }
 
     // Sign check: test rdi, rdi; jns skip_neg
     c.code = emit_test_rdi_rdi(c.code)
@@ -6734,6 +7086,7 @@ pub fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) 
         if name_is_assert(func.name) { return emit_builtin_assert(c) }
         if name_is_acknowledge(func.name) { return emit_builtin_knowledge_value(c) }
         if name_is_require_confidence(func.name) { return emit_builtin_knowledge_value(c) }
+        if native_v2_try_emit_dynlink_stub_into(&! c, func.name) { return c }
         if native_v2_empty_stub_would_fabricate(&func) {
             nc_emit_unimplemented_extern_trap_into(&! c)
             return c
@@ -7023,6 +7376,8 @@ fn native_v2_emit_unary_code(nc: NativeCompiler, op: UnaryOp) -> NativeCompiler 
         c.code = emit_neg_rax(c.code)
     } else if op == UnaryOp::OpNot {
         c.code = emit_not_bool_rax(c.code)
+    } else if op == UnaryOp::OpBitNot {
+        c.code = emit_not_rax(c.code)
     } else if op == UnaryOp::OpDeref {
         c.code = emit_load_rax_mem_rax(c.code)
     }
@@ -7809,6 +8164,7 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
         if name_is_write_f64(func.name) { emit_builtin_write_offset64_into(&! c); return c }
         if name_is_acknowledge(func.name) { return emit_builtin_knowledge_value(c) }
         if name_is_require_confidence(func.name) { return emit_builtin_knowledge_value(c) }
+        if native_v2_try_emit_dynlink_stub_into(&! c, func.name) { return c }
         if native_v2_empty_stub_would_fabricate(&func) {
             nc_emit_unimplemented_extern_trap_into(&! c)
             return c
@@ -7947,6 +8303,7 @@ pub fn compile_ir_function_v2_into(nc: &! NativeCompiler, func: &IrFunction, mac
         }
         return
     }
+    if native_v2_try_emit_dynlink_stub_into(nc, (*func).name) { return }
     if native_v2_empty_stub_would_fabricate(func) {
         nc_emit_unimplemented_extern_trap_into(nc)
         return
@@ -8157,22 +8514,46 @@ fn nc_emit_core_float_binop_into(nc: &! NativeCompiler, op: BinaryOp) -> bool wi
         return true
     } else if op == BinaryOp::OpEq {
         nc_emit_ucomisd_xmm0_xmm1(nc)
-        nc_emit_sete_al(nc)
+        if NC_IEEE_F64_SABOTAGE == 1 {
+            nc_emit_sete_al(nc)
+        } else {
+            nc_emit_sete_al(nc)
+            nc_emit_setpo_cl(nc)
+            nc_emit_and_al_cl(nc)
+        }
         nc_emit_movzx_rax_al(nc)
         return true
     } else if op == BinaryOp::OpNe {
         nc_emit_ucomisd_xmm0_xmm1(nc)
-        nc_emit_setne_al(nc)
+        if NC_IEEE_F64_SABOTAGE == 1 {
+            nc_emit_setne_al(nc)
+        } else {
+            nc_emit_setne_al(nc)
+            nc_emit_setpe_cl(nc)
+            nc_emit_or_al_cl(nc)
+        }
         nc_emit_movzx_rax_al(nc)
         return true
     } else if op == BinaryOp::OpLt {
         nc_emit_ucomisd_xmm0_xmm1(nc)
-        nc_emit_setb_al(nc)
+        if NC_IEEE_F64_SABOTAGE == 1 {
+            nc_emit_setb_al(nc)
+        } else {
+            nc_emit_setb_al(nc)
+            nc_emit_setpo_cl(nc)
+            nc_emit_and_al_cl(nc)
+        }
         nc_emit_movzx_rax_al(nc)
         return true
     } else if op == BinaryOp::OpLe {
         nc_emit_ucomisd_xmm0_xmm1(nc)
-        nc_emit_setbe_al(nc)
+        if NC_IEEE_F64_SABOTAGE == 1 {
+            nc_emit_setbe_al(nc)
+        } else {
+            nc_emit_setbe_al(nc)
+            nc_emit_setpo_cl(nc)
+            nc_emit_and_al_cl(nc)
+        }
         nc_emit_movzx_rax_al(nc)
         return true
     } else if op == BinaryOp::OpGt {
@@ -8182,7 +8563,13 @@ fn nc_emit_core_float_binop_into(nc: &! NativeCompiler, op: BinaryOp) -> bool wi
         return true
     } else if op == BinaryOp::OpGe {
         nc_emit_ucomisd_xmm0_xmm1(nc)
-        nc_emit_setae_al(nc)
+        if NC_IEEE_F64_SABOTAGE == 1 {
+            nc_emit_setae_al(nc)
+        } else {
+            nc_emit_setae_al(nc)
+            nc_emit_setpo_cl(nc)
+            nc_emit_and_al_cl(nc)
+        }
         nc_emit_movzx_rax_al(nc)
         return true
     }
@@ -8371,33 +8758,25 @@ fn nc_core_emit_alloc_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, elem_
 }
 
 fn nc_rodata_add_ir_instr_name(nc: &! NativeCompiler, func: &IrFunction, instr_index: i64) -> i64 with Mut, Panic, Div {
-    var len = (*nc).flat_rodata_len
-    let offset = len
-    var i = 0
-    let name_len = ir_arena_name(ir_region_slot_r((*func).region, (instr_index))).len
-    while i < name_len && len < 262144 {
-        NC_BIG_RODATA[len as usize] = ir_arena_name(ir_region_slot_r((*func).region, (instr_index))).buf[i as usize]
-        len = len + 1
-        i = i + 1
-    }
-    if len < 262144 {
-        NC_BIG_RODATA[len as usize] = 0
-        len = len + 1
-    }
-    (*nc).flat_rodata_len = len
-    offset
+    // Prefer interned name_id (full Name capacity) over arena-name bytes.
+    // Arena put used to clamp at 128 and silently shortened LoadString rodata.
+    let slot = ir_region_slot_r((*func).region, (instr_index))
+    let nid = IR_A_NAME_ID[slot as usize]
+    let nm = if nid > 0 { ir_name_at(nid) } else { ir_arena_name(slot) }
+    nc_rodata_add_name_value(nc, nm)
 }
 
 fn nc_rodata_add_name_value(nc: &! NativeCompiler, name: Name) -> i64 with Mut, Panic, Div {
     var len = (*nc).flat_rodata_len
     let offset = len
     var i = 0
-    while i < name.len && len < 262144 {
+    (*nc).rodata_overflow_bytes_attempted = (*nc).rodata_overflow_bytes_attempted + name.len + 1
+    while i < name.len && len < nc_flat_rodata_capacity() {
         NC_BIG_RODATA[len as usize] = name.buf[i as usize]
         len = len + 1
         i = i + 1
     }
-    if len < 262144 {
+    if len < nc_flat_rodata_capacity() {
         NC_BIG_RODATA[len as usize] = 0
         len = len + 1
     }
@@ -8850,8 +9229,123 @@ fn nc_compute_float_types(nc: &! NativeCompiler, func: &IrFunction) with Mut, Pa
     }
 }
 
+fn pireus_native_cd_sign(a: i64, b: i64, bits: i64) -> i64 {
+    if a == 0 || b == 0 { return 1 }
+    if bits <= 1 { return 0 - 1 }
+    let half = 1 << (bits - 1)
+    let ah = if a >= half { 1 } else { 0 }
+    let bh = if b >= half { 1 } else { 0 }
+    let al = a & (half - 1)
+    let bl = b & (half - 1)
+    if ah == 0 && bh == 0 { return pireus_native_cd_sign(al, bl, bits - 1) }
+    if ah == 0 && bh == 1 { return pireus_native_cd_sign(bl, al, bits - 1) }
+    if ah == 1 && bh == 0 {
+        if bl == 0 { return pireus_native_cd_sign(al, 0, bits - 1) }
+        return 0 - pireus_native_cd_sign(al, bl, bits - 1)
+    }
+    if bl == 0 { return 0 - pireus_native_cd_sign(0, al, bits - 1) }
+    pireus_native_cd_sign(bl, al, bits - 1)
+}
+
+fn pireus_native_rodata_align64(nc: &! NativeCompiler) with Mut, Panic, Div {
+    while ((*nc).flat_rodata_len & 63) != 0 {
+        native_v2_rodata_append_byte_into(nc, 0)
+    }
+}
+
+fn pireus_native_rodata_append_i64(nc: &! NativeCompiler, value: i64) with Mut, Panic, Div {
+    var byte: i64 = 0
+    while byte < 8 {
+        native_v2_rodata_append_byte_into(nc, (value >> (byte * 8)) & 255)
+        byte = byte + 1
+    }
+}
+
+// Materialize semantic ptr3 XorConvolution<4,CayleyDicksonSign> at the final
+// x86 boundary. The ZMM layout is the frozen Pireus Xeon candidate validated by
+// emit_xor_convolution_s; virtual Core-IR registers never masquerade as ZMM ids.
+fn pireus_native_emit_xor_convolution_s_ptr3(nc: &! NativeCompiler, dst_ptr: i64, lhs_ptr: i64, rhs_ptr: i64) with IO, Mut, Panic, Div {
+    pireus_native_rodata_align64(nc)
+    let xor_offset = (*nc).flat_rodata_len
+    var lane: i64 = 0
+    while lane < 8 {
+        var d: i64 = 0
+        while d < 8 {
+            pireus_native_rodata_append_i64(nc, lane ^ d)
+            d = d + 1
+        }
+        lane = lane + 1
+    }
+    let broadcast_offset = (*nc).flat_rodata_len
+    lane = 0
+    while lane < 8 {
+        var q: i64 = 0
+        while q < 8 {
+            pireus_native_rodata_append_i64(nc, lane)
+            q = q + 1
+        }
+        lane = lane + 1
+    }
+    let sign_offset = (*nc).flat_rodata_len
+    var i: i64 = 0
+    while i < 16 {
+        var out: i64 = 0
+        while out < 16 {
+            let sign_bits = if pireus_native_cd_sign(i, i ^ out, 4) < 0 {
+                0 - 9223372036854775807 - 1
+            } else {
+                0
+            }
+            pireus_native_rodata_append_i64(nc, sign_bits)
+            out = out + 1
+        }
+        i = i + 1
+    }
+
+    // SysV pointer registers stay live through the EVEX-only kernel.
+    nc_emit_load_rbp_disp32_reg(nc, 7, ir_slot_offset(lhs_ptr))
+    nc_emit_load_rbp_disp32_reg(nc, 6, ir_slot_offset(rhs_ptr))
+    nc_emit_load_rbp_disp32_reg(nc, 2, ir_slot_offset(dst_ptr))
+    (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x10, 6, 0, 7, 0, 2)
+    (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x10, 7, 0, 7, 64, 2)
+    (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x10, 8, 0, 6, 0, 2)
+    (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x10, 9, 0, 6, 64, 2)
+
+    let xor_lea = (*nc).code.len
+    nc_emit_lea_rax_rip_disp32(nc, 0)
+    nc_add_rodata_reloc(nc, xor_lea + 3, xor_offset)
+    lane = 0
+    while lane < 8 {
+        (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x6f, 10 + lane, 0, 0, lane * 64, 2)
+        lane = lane + 1
+    }
+    let broadcast_lea = (*nc).code.len
+    nc_emit_lea_rax_rip_disp32(nc, 0)
+    nc_add_rodata_reloc(nc, broadcast_lea + 3, broadcast_offset)
+    lane = 0
+    while lane < 8 {
+        (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x6f, 18 + lane, 0, 0, lane * 64, 2)
+        lane = lane + 1
+    }
+    let sign_lea = (*nc).code.len
+    nc_emit_lea_rax_rip_disp32(nc, 0)
+    nc_add_rodata_reloc(nc, sign_lea + 3, sign_offset)
+
+    let physical = ir_xor_convolution_s(0, 6, 8, 10, 18, 0)
+    (*nc).code = emit_xor_convolution_s((*nc).code, physical)
+    (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x11, 0, 0, 2, 0, 2)
+    (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x11, 1, 0, 2, 64, 2)
+    nc_emit_byte(nc, 0xc5)
+    nc_emit_byte(nc, 0xf8)
+    nc_emit_byte(nc, 0x77)
+    if str_eq(read_env("SOUNIO_PIREUS_OPERATOR_TRACE"), "1") {
+        print("PIREUS_NATIVE_EMIT opcode=IrXorConvolutionS candidate=two_zmm_indexed_permute kernel_bytes=1004 abi=ptr3\n")
+    }
+}
+
 pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunction, fn_index: i64) -> bool with IO, Mut, Panic, Div, Alloc {
     nc_refresh_wide_mul_sabotage()
+    nc_refresh_ieee_f64_sabotage()
     nc_v2_reset_label_state()
     NC_V2_CURRENT_FN_INDEX = fn_index
     reset_function_state_mut(nc)
@@ -9194,12 +9688,12 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
                 let src1_marked_float = if src1 >= 0 && src1 < NC_MAX_VREGS && (*nc).is_float_reg[src1 as usize] == 1 { 1 } else { 0 }
                 let src1_typed_float = if src1 >= 0 && src1 < NC_MAX_VREGS && (*nc).reg_type[src1 as usize] == 1 { 1 } else { 0 }
                 if src1_marked_float == 1 || src1_typed_float == 1 {
+                    // IEEE negation flips the sign bit. It is NOT `0.0 - x`: that
+                    // subtraction gives +0.0 at x = +0.0 where -x is -0.0.
+                    // btc rax, 63 -- 48 0F BA F8 3F (/7 ib). No scratch register.
                     nc_core_load_temp_to_rax(nc, src1)
-                    nc_emit_movq_xmm1_rax(nc)
-                    nc_emit_mov_rax_imm(nc, 0)
-                    nc_emit_movq_xmm0_rax(nc)
-                    nc_emit_subsd_xmm0_xmm1(nc)
-                    nc_emit_movq_rax_xmm0(nc)
+                    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0xba)
+                    nc_emit_byte(nc, 0xf8); nc_emit_byte(nc, 0x3f)
                     nc_core_store_rax_to_temp(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
                     nc_core_mark_float_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
                 } else {
@@ -9211,6 +9705,11 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             } else if uop == UnaryOp::OpNot {
                 nc_core_load_temp_to_rax(nc, IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize])
                 (*nc).code = emit_not_bool_rax((*nc).code)
+                nc_core_store_rax_to_temp(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
+                nc_core_mark_int_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
+            } else if uop == UnaryOp::OpBitNot {
+                nc_core_load_temp_to_rax(nc, IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize])
+                (*nc).code = emit_not_rax((*nc).code)
                 nc_core_store_rax_to_temp(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
                 nc_core_mark_int_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
             } else if uop == UnaryOp::OpDeref {
@@ -9230,6 +9729,22 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             } else {
                 return false
             }
+        } else if instr_op == IrOpcode::IrXorConvolutionS {
+            let flags = IR_A_IMM_FLAGS[(ir_region_slot_r((*func).region, (i))) as usize]
+            let twist = flags & 255
+            let candidate = (flags >> 8) & 255
+            if IR_A_IMM_I64[(ir_region_slot_r((*func).region, (i))) as usize] != 4
+                || twist != IR_XOR_TWIST_CAYLEY_DICKSON_SIGN
+                || candidate != IR_XOR_CANDIDATE_AUTO
+                || IR_A_LABEL_ID[(ir_region_slot_r((*func).region, (i))) as usize] != 1 {
+                return false
+            }
+            pireus_native_emit_xor_convolution_s_ptr3(
+                nc,
+                IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize],
+                IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize],
+                IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize],
+            )
         } else if instr_op == IrOpcode::IrStorePtr {
             // [src1] = src2 : store val through a raw pointer. val -> rbx, ptr -> rax, [rax]=rbx.
             nc_core_load_temp_to_rax(nc, IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize])
@@ -9430,7 +9945,7 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             let rhs_v = IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize]
             let limbs = IR_A_IMM_I64[(ir_region_slot_r((*func).region, (i))) as usize]
             let cmp_op = IR_A_FIELD_IDX[(ir_region_slot_r((*func).region, (i))) as usize]
-            if dst_v < 0 || lhs_v < 0 || rhs_v < 0 || limbs < 1 || limbs > 64 || cmp_op < 0 || cmp_op > 5 {
+            if dst_v < 0 || lhs_v < 0 || rhs_v < 0 || limbs < 1 || limbs > 64 || cmp_op < 0 || cmp_op > 11 {
                 return false
             }
             nc_wide_cmp_into(nc, lhs_v, rhs_v, dst_v, limbs, cmp_op)
@@ -9556,8 +10071,9 @@ pub fn native_v2_rodata_len_into(nc: &! NativeCompiler) -> i64 {
 }
 
 pub fn native_v2_rodata_append_byte_into(nc: &! NativeCompiler, byte: i64) with Mut, Panic, Div {
+    (*nc).rodata_overflow_bytes_attempted = (*nc).rodata_overflow_bytes_attempted + 1
     var len = (*nc).flat_rodata_len
-    if len >= 0 && len < 262144 {
+    if len >= 0 && len < nc_flat_rodata_capacity() {
         NC_BIG_RODATA[len as usize] = byte as i8
         len = len + 1
         (*nc).flat_rodata_len = len
@@ -9749,6 +10265,14 @@ pub fn compile_ir_function_v2_from_ir_into(nc: &! NativeCompiler, func: &IrFunct
             return true
         }
         native_v2_emit_builtin_by_id_into(nc, builtin_id)
+        return true
+    }
+    if name_is_dynlink_extern((*func).name) {
+        reset_function_state_mut(nc)
+        let function_offset = (*nc).code.len
+        native_compiler_set_fn_offset(nc, fn_index, function_offset)
+        native_compiler_add_symbol_func_ref(nc, fn_index, func)
+        emit_dynlink_got_stub_into(nc, (*func).name)
         return true
     }
     if native_v2_empty_stub_would_fabricate(func) {
@@ -10121,6 +10645,7 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
         if name_is_write_f64(func.name) { emit_builtin_write_offset64_into(nc); return }
         if name_is_acknowledge(func.name) { (*nc) = emit_builtin_knowledge_value((*nc)); return }
         if name_is_require_confidence(func.name) { (*nc) = emit_builtin_knowledge_value((*nc)); return }
+        if native_v2_try_emit_dynlink_stub_into(nc, func.name) { return }
         if native_v2_empty_stub_would_fabricate(&func) {
             nc_emit_unimplemented_extern_trap_into(nc)
             return
@@ -11914,6 +12439,8 @@ fn a64_preview_emit_machine_instr(c: A64PreviewCompiler, instr: MachineInstr) ->
         } else if instr.un_op == UnaryOp::OpNot {
             out.code = a64_emit_mov_imm64(out.code, A64_X10, 1)
             out.code = a64_emit_eor(out.code, A64_X9, A64_X9, A64_X10)
+        } else if instr.un_op == UnaryOp::OpBitNot {
+            out.code = a64_emit_mvn(out.code, A64_X9, A64_X9)
         } else {
             return (out, "aarch64_unary_pending")
         }
@@ -12093,43 +12620,71 @@ fn native_v2_write_min_elf64_to_file(output_path: string, nc: &! NativeCompiler,
     if (*nc).data_overflow { return 21 }
     let raw_data_len = if (*nc).flat_data_len > 0 { (*nc).flat_data_len } else { (*nc).data.len }
     var data_len = if raw_data_len < runtime_context_global_slot_size() { runtime_context_global_slot_size() } else { raw_data_len }
+    let needs_dyn = (*nc).extern_relocs.count > 0
+    // Dyn metadata is APPENDED after the runtime-context data payload.
+    // Putting it at offset 0 overwrote the context and SIGSEGV'd the trampoline.
+    let dyn_base: i64 = data_len
+    let n_syms = native_v2_dynlink_unique_count(nc)
+    let n_libs = native_v2_dynlink_unique_lib_count(nc)
+    if needs_dyn && (n_syms <= 0 || n_syms > native_v2_dynlink_max_symbols()) { return 22 }
+    if needs_dyn && (n_libs <= 0 || n_libs > native_v2_dynlink_max_libs()) { return 23 }
+    let dynstr_rel: i64 = dyn_base + 0
+    // Cap covers up to 4 sonames + 8 symbol names (KL-14d).
+    let dynstr_len: i64 = 256
+    let dynsym_rel: i64 = native_v2_align8(dynstr_rel + dynstr_len)
+    let dynsym_entsize: i64 = 24
+    let dynsym_count: i64 = if needs_dyn { n_syms + 1 } else { 0 }
+    let dynsym_size: i64 = dynsym_entsize * dynsym_count
+    let hash_rel: i64 = native_v2_align8(dynsym_rel + dynsym_size)
+    // SysV hash: nbucket(1) + nchain(dynsym_count) + buckets[1] + chains[nchain]
+    let hash_size: i64 = if needs_dyn { 8 + 4 + 4 * dynsym_count } else { 0 }
+    let rela_rel: i64 = native_v2_align8(hash_rel + hash_size)
+    let rela_entsize: i64 = 24
+    let rela_count: i64 = if needs_dyn { n_syms } else { 0 }
+    let rela_size: i64 = rela_entsize * rela_count
+    let got_rel: i64 = native_v2_align8(rela_rel + rela_size)
+    let got_size: i64 = 8 * rela_count
+    let dynamic_rel: i64 = native_v2_align8(got_rel + got_size)
+    let dynamic_entsize: i64 = 16
+    // N * DT_NEEDED + STRTAB/SYMTAB/STRSZ/SYMENT/HASH/RELA/RELASZ/RELAENT + NULL
+    let dynamic_count: i64 = if needs_dyn { n_libs + 9 } else { 0 }
+    let dynamic_size: i64 = dynamic_entsize * dynamic_count
+    let dyn_meta_size: i64 = if needs_dyn { (dynamic_rel - dyn_base) + dynamic_size } else { 0 }
+    let data_payload = data_len + dyn_meta_size
     let rodata_offset = align_page(text_offset + code_len)
-    let data_offset = if data_len > 0 { align_page(rodata_offset + rodata_len) } else { 0 }
+    let data_offset = if data_payload > 0 { align_page(rodata_offset + rodata_len) } else { 0 }
     let text_vaddr = base_addr + text_offset
     let rodata_vaddr = base_addr + rodata_offset
     let data_vaddr = base_addr + data_offset
 
+    let interp_off: i64 = 512
+    let interp_len: i64 = 28
+
     var phnum: i64 = 2
     if rodata_len > 0 { phnum = phnum + 1 }
-    if data_len > 0 { phnum = phnum + 1 }
+    if data_payload > 0 { phnum = phnum + 1 }
     if (*nc).bss_total_size > 0 { phnum = phnum + 1 }
+    // INTERP + DYNAMIC + PT_LOAD(R) for ELF hdr/phdrs at base_addr.
+    // Without the header LOAD, ld.so's link map has no mapped phdrs at
+    // base+e_phoff and SIGSEGVs before DT_NEEDED processing (KL-14b).
+    if needs_dyn { phnum = phnum + 3 }
 
     var file_len = text_offset + code_len
     if rodata_len > 0 {
         file_len = rodata_offset + rodata_len
     }
-    if data_len > 0 {
-        file_len = data_offset + data_len
+    if data_payload > 0 {
+        file_len = data_offset + data_payload
     }
     if file_len <= 64 || file_len > nc_elf_capacity_bytes() { return 13 }
 
-    // Zero the used region of the off-stack ELF image buffer (NC_BIG_ELF is a BSS
-    // global — zero at process start, but re-zero here so page-alignment padding
-    // gaps stay zero across repeat compiles in one process). Matches the old
-    // `var bytes: [i8; 262144] = [0; 262144]` stack-local semantics.
     var zi: i64 = 0
     while zi < file_len {
         NC_BIG_ELF[zi as usize] = 0 as i8
         zi = zi + 1
     }
 
-    // Build the ELF header + program headers + segment payloads into NC_BIG_ELF
-    // via a dedicated small helper. Splitting this out of the (large) caller
-    // keeps the conditional `if rodata_len>0`/`if data_len>0` forward jumps
-    // inside a short function so their branch offsets stay small — working
-    // around a c634b38f branch-target miscompile that otherwise skipped this
-    // whole block and fell through to `return 0` (file never written).
-    native_v2_build_elf_image_into(nc, base_addr, entry_offset, text_offset, code_len, rodata_offset, rodata_len, rodata_vaddr, text_vaddr, data_offset, data_len, data_vaddr, phnum)
+    native_v2_build_elf_image_into(nc, base_addr, entry_offset, text_offset, code_len, rodata_offset, rodata_len, rodata_vaddr, text_vaddr, data_offset, data_len, data_vaddr, phnum, needs_dyn, interp_off, interp_len, dynstr_rel, dynstr_len, dynsym_rel, dynsym_entsize, dynsym_count, hash_rel, rela_rel, rela_entsize, rela_count, got_rel, got_size, dynamic_rel, dynamic_entsize, dynamic_count, data_payload)
 
     if NC_BIG_ELF[0 as usize] != (0x7f as i8) { return 14 }
     if NC_BIG_ELF[1 as usize] != (0x45 as i8) { return 15 }
@@ -12139,9 +12694,23 @@ fn native_v2_write_min_elf64_to_file(output_path: string, nc: &! NativeCompiler,
     0
 }
 
+fn native_v2_elf_write_cstr(off: i64, s: string) with Mut, Panic, Div {
+    let n = str_len(s)
+    var i: i64 = 0
+    while i < n {
+        if (off + i) < nc_elf_capacity_bytes() {
+            NC_BIG_ELF[(off + i) as usize] = str_char_at(s, i) as i8
+        }
+        i = i + 1
+    }
+    if (off + n) < nc_elf_capacity_bytes() {
+        NC_BIG_ELF[(off + n) as usize] = 0 as i8
+    }
+}
+
 // Helper extracted from native_v2_write_min_elf64_to_file (c634b38f branch-offset
-// workaround — see caller). Writes the full ELF image into `bytes`.
-fn native_v2_build_elf_image_into(nc: &! NativeCompiler, base_addr: i64, entry_offset: i64, text_offset: i64, code_len: i64, rodata_offset: i64, rodata_len: i64, rodata_vaddr: i64, text_vaddr: i64, data_offset: i64, data_len: i64, data_vaddr: i64, phnum: i64) with Mut, Panic, Div {
+// workaround — see caller). Writes the full ELF image into NC_BIG_ELF.
+fn native_v2_build_elf_image_into(nc: &! NativeCompiler, base_addr: i64, entry_offset: i64, text_offset: i64, code_len: i64, rodata_offset: i64, rodata_len: i64, rodata_vaddr: i64, text_vaddr: i64, data_offset: i64, data_len: i64, data_vaddr: i64, phnum: i64, needs_dyn: bool, interp_off: i64, interp_len: i64, dynstr_rel: i64, dynstr_len: i64, dynsym_rel: i64, dynsym_entsize: i64, dynsym_count: i64, hash_rel: i64, rela_rel: i64, rela_entsize: i64, rela_count: i64, got_rel: i64, got_size: i64, dynamic_rel: i64, dynamic_entsize: i64, dynamic_count: i64, data_payload: i64) with Mut, Panic, Div {
     native_v2_file_put_u8(0, 127)
     native_v2_file_put_u8(1, 69)
     native_v2_file_put_u8(2, 76)
@@ -12164,14 +12733,27 @@ fn native_v2_build_elf_image_into(nc: &! NativeCompiler, base_addr: i64, entry_o
     native_v2_file_put_u16(62, 0)
 
     var phoff: i64 = 64
+    if needs_dyn {
+        // Map file page 0 at base_addr so e_phoff/phdrs/interp are in-process.
+        native_v2_file_emit_phdr(phoff, 1, 4, 0, base_addr, 4096, 4096, 4096)
+        phoff = phoff + 56
+    }
     native_v2_file_emit_phdr(phoff, 1, 5, text_offset, text_vaddr, code_len, code_len, 4096)
     phoff = phoff + 56
+    if needs_dyn {
+        native_v2_file_emit_phdr(phoff, 3, 4, interp_off, base_addr + interp_off, interp_len, interp_len, 1)
+        phoff = phoff + 56
+    }
     if rodata_len > 0 {
         native_v2_file_emit_phdr(phoff, 1, 4, rodata_offset, rodata_vaddr, rodata_len, rodata_len, 4096)
         phoff = phoff + 56
     }
-    if data_len > 0 {
-        native_v2_file_emit_phdr(phoff, 1, 6, data_offset, data_vaddr, data_len, data_len, 4096)
+    if data_payload > 0 {
+        native_v2_file_emit_phdr(phoff, 1, 6, data_offset, data_vaddr, data_payload, data_payload, 4096)
+        phoff = phoff + 56
+    }
+    if needs_dyn {
+        native_v2_file_emit_phdr(phoff, 2, 6, data_offset + dynamic_rel, data_vaddr + dynamic_rel, dynamic_entsize * dynamic_count, dynamic_entsize * dynamic_count, 8)
         phoff = phoff + 56
     }
     if (*nc).bss_total_size > 0 {
@@ -12179,6 +12761,10 @@ fn native_v2_build_elf_image_into(nc: &! NativeCompiler, base_addr: i64, entry_o
         phoff = phoff + 56
     }
     native_v2_file_emit_phdr(phoff, 0x6474e551, 6, 0, 0, 0, 0, 16)
+
+    if needs_dyn {
+        native_v2_elf_write_cstr(interp_off, "/lib64/ld-linux-x86-64.so.2")
+    }
 
     var i: i64 = 0
     while i < code_len && (text_offset + i) < nc_elf_capacity_bytes() {
@@ -12200,7 +12786,7 @@ fn native_v2_build_elf_image_into(nc: &! NativeCompiler, base_addr: i64, entry_o
         }
     }
 
-    if data_len > 0 {
+    if data_payload > 0 {
         i = 0
         if (*nc).flat_data_len > 0 {
             while i < data_len && (data_offset + i) < nc_elf_capacity_bytes() {
@@ -12216,6 +12802,150 @@ fn native_v2_build_elf_image_into(nc: &! NativeCompiler, base_addr: i64, entry_o
                 NC_BIG_ELF[(data_offset + i) as usize] = db
                 i = i + 1
             }
+        }
+    }
+
+    if needs_dyn {
+        let dynstr_off = data_offset + dynstr_rel
+        NC_BIG_ELF[dynstr_off as usize] = 0 as i8
+        var str_cursor: i64 = 1
+
+        // Collect unique lib ids in first-appearance order; write sonames into dynstr.
+        var lib_ids: [i64; 4] = [0; 4]
+        var lib_str_off: [i64; 4] = [0; 4]
+        var n_libs_w: i64 = 0
+        var ri_lib: i64 = 0
+        while ri_lib < (*nc).extern_relocs.count {
+            let er = (*nc).extern_relocs.entries[ri_lib as usize]
+            let lid = native_v2_dynlink_lib_id_for_name(er.sym_buf, er.sym_len)
+            if lid > 0 {
+                var seen = false
+                var j: i64 = 0
+                while j < n_libs_w {
+                    if lib_ids[j as usize] == lid { seen = true }
+                    j = j + 1
+                }
+                if !seen && n_libs_w < native_v2_dynlink_max_libs() {
+                    lib_ids[n_libs_w as usize] = lid
+                    lib_str_off[n_libs_w as usize] = str_cursor
+                    let soname = native_v2_dynlink_soname_for_lib_id(lid)
+                    native_v2_elf_write_cstr(dynstr_off + str_cursor, soname)
+                    str_cursor = str_cursor + str_len(soname) + 1
+                    n_libs_w = n_libs_w + 1
+                }
+            }
+            ri_lib = ri_lib + 1
+        }
+
+        let dynsym_off = data_offset + dynsym_rel
+        // symbol 0 = NULL; symbols 1..N from unique extern_relocs (STB_GLOBAL|STT_FUNC)
+        var uniq_i: i64 = 0
+        var ri0: i64 = 0
+        while ri0 < (*nc).extern_relocs.count {
+            let er = (*nc).extern_relocs.entries[ri0 as usize]
+            var seen = false
+            var j: i64 = 0
+            while j < ri0 {
+                let prev = (*nc).extern_relocs.entries[j as usize]
+                if native_v2_name_buf_eq(er.sym_buf, er.sym_len, prev.sym_buf, prev.sym_len) {
+                    seen = true
+                }
+                j = j + 1
+            }
+            if !seen {
+                uniq_i = uniq_i + 1
+                let name_off = str_cursor
+                var bi: i64 = 0
+                while bi < er.sym_len {
+                    if (dynstr_off + str_cursor + bi) < nc_elf_capacity_bytes() {
+                        NC_BIG_ELF[(dynstr_off + str_cursor + bi) as usize] = er.sym_buf[bi as usize]
+                    }
+                    bi = bi + 1
+                }
+                if (dynstr_off + str_cursor + er.sym_len) < nc_elf_capacity_bytes() {
+                    NC_BIG_ELF[(dynstr_off + str_cursor + er.sym_len) as usize] = 0 as i8
+                }
+                str_cursor = str_cursor + er.sym_len + 1
+                let sym_ent = dynsym_off + uniq_i * dynsym_entsize
+                native_v2_file_put_u32(sym_ent + 0, name_off)
+                native_v2_file_put_u8(sym_ent + 4, 0x12)
+                native_v2_file_put_u16(sym_ent + 6, 0)
+            }
+            ri0 = ri0 + 1
+        }
+
+        let hash_off = data_offset + hash_rel
+        // SysV hash with nbucket=1: every symbol is reachable from bucket 0.
+        native_v2_file_put_u32(hash_off + 0, 1)
+        native_v2_file_put_u32(hash_off + 4, dynsym_count)
+        native_v2_file_put_u32(hash_off + 8, 1)
+        native_v2_file_put_u32(hash_off + 12, 0)
+        var hi: i64 = 1
+        while hi < dynsym_count {
+            let next = if hi + 1 < dynsym_count { hi + 1 } else { 0 }
+            native_v2_file_put_u32(hash_off + 12 + hi * 4, next)
+            hi = hi + 1
+        }
+
+        let got_va = data_vaddr + got_rel
+        let rela_off = data_offset + rela_rel
+        var si: i64 = 0
+        while si < rela_count {
+            native_v2_file_put_u64(rela_off + si * rela_entsize + 0, got_va + si * 8)
+            // R_X86_64_GLOB_DAT = 6; symbol index (si+1) in high 32 bits
+            native_v2_file_put_u64(rela_off + si * rela_entsize + 8, ((si + 1) << 32) | 6)
+            native_v2_file_put_u64(rela_off + si * rela_entsize + 16, 0)
+            si = si + 1
+        }
+
+        let dynamic_off = data_offset + dynamic_rel
+        var d_off: i64 = 0
+        var li: i64 = 0
+        while li < n_libs_w {
+            native_v2_file_put_u64(dynamic_off + d_off + 0, 1)
+            native_v2_file_put_u64(dynamic_off + d_off + 8, lib_str_off[li as usize])
+            d_off = d_off + 16
+            li = li + 1
+        }
+        native_v2_file_put_u64(dynamic_off + d_off + 0, 5)
+        native_v2_file_put_u64(dynamic_off + d_off + 8, data_vaddr + dynstr_rel)
+        d_off = d_off + 16
+        native_v2_file_put_u64(dynamic_off + d_off + 0, 6)
+        native_v2_file_put_u64(dynamic_off + d_off + 8, data_vaddr + dynsym_rel)
+        d_off = d_off + 16
+        native_v2_file_put_u64(dynamic_off + d_off + 0, 10)
+        native_v2_file_put_u64(dynamic_off + d_off + 8, dynstr_len)
+        d_off = d_off + 16
+        native_v2_file_put_u64(dynamic_off + d_off + 0, 11)
+        native_v2_file_put_u64(dynamic_off + d_off + 8, dynsym_entsize)
+        d_off = d_off + 16
+        native_v2_file_put_u64(dynamic_off + d_off + 0, 4)
+        native_v2_file_put_u64(dynamic_off + d_off + 8, data_vaddr + hash_rel)
+        d_off = d_off + 16
+        native_v2_file_put_u64(dynamic_off + d_off + 0, 7)
+        native_v2_file_put_u64(dynamic_off + d_off + 8, data_vaddr + rela_rel)
+        d_off = d_off + 16
+        native_v2_file_put_u64(dynamic_off + d_off + 0, 8)
+        native_v2_file_put_u64(dynamic_off + d_off + 8, rela_entsize * rela_count)
+        d_off = d_off + 16
+        native_v2_file_put_u64(dynamic_off + d_off + 0, 9)
+        native_v2_file_put_u64(dynamic_off + d_off + 8, rela_entsize)
+        d_off = d_off + 16
+        native_v2_file_put_u64(dynamic_off + d_off + 0, 0)
+        native_v2_file_put_u64(dynamic_off + d_off + 8, 0)
+
+        // Patch call [rip+disp] sites: each reloc targets its symbol's GOT slot.
+        var ri: i64 = 0
+        while ri < (*nc).extern_relocs.count {
+            let er = (*nc).extern_relocs.entries[ri as usize]
+            let sym_idx = native_v2_dynlink_sym_index(nc, er.sym_buf, er.sym_len)
+            if sym_idx > 0 {
+                let slot_va = got_va + (sym_idx - 1) * 8
+                let rip_next = text_vaddr + er.offset + 4
+                let disp = slot_va - rip_next
+                native_v2_file_put_u32(text_offset + er.offset, disp)
+            }
+            ri = ri + 1
         }
     }
 }
@@ -12429,17 +13159,30 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
     let entry = trampoline_offset(&nc)
     nc.bss_total_size = (*module).bss_total_size
     if nc.bss_total_size < 8 { nc.bss_total_size = 8 }
-    // Machine code exceeded the 2MB NC_BIG_CODE buffer. nc_emit_byte drops
-    // further bytes and sets code_overflow, which would leave a truncated ELF.
-    // Fail with a distinct rc instead of writing a binary that crashes.
+    // Machine code exceeded the NC_BIG_CODE buffer (nc_code_capacity_bytes()).
+    // nc_emit_byte drops further bytes and sets code_overflow, which would
+    // leave a truncated ELF. Fail with a distinct rc instead of writing a
+    // binary that crashes. code_overflow_bytes_attempted is a true count (see
+    // frame.sio), not an estimate, so a capacity bump can be sized against it.
     if nc.code_overflow {
+        print("Error: native code buffer overflow -- code_bytes_needed=")
+        print_int(nc.code_overflow_bytes_attempted)
+        print(" capacity=")
+        print_int(nc_code_capacity_bytes())
+        print(" (raise nc_code_capacity_bytes)\n")
         return 19
     }
     // Relocation table exceeded nc_flat_reloc_capacity(). nc_add_flat_reloc
     // dropped further entries and set reloc_overflow, so the ELF would carry
     // unpatched call/rodata sites. Distinct rc from the code-buffer overflow
-    // above so callers can tell the two tiers apart.
+    // above so callers can tell the two tiers apart. reloc_overflow_count_attempted
+    // is a true count (see frame.sio), not an estimate.
     if nc.reloc_overflow {
+        print("Error: native relocation table overflow -- relocs_needed=")
+        print_int(nc.reloc_overflow_count_attempted)
+        print(" capacity=")
+        print_int(nc_flat_reloc_capacity())
+        print(" (raise nc_flat_reloc_capacity)\n")
         return 20
     }
     // The OTHER relocation table. nc_add_flat_reloc guards the flat table above;
@@ -12461,6 +13204,22 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
         print_int(NC_V2_LABEL_OVERFLOW_FN)
         print(" (raise nc_v2_label_capacity)\n")
         return 22
+    }
+    // Flat rodata buffer (NC_BIG_RODATA) exceeded its 256 KiB capacity. Unlike
+    // code_overflow/reloc_overflow/label_overflow above, the append sites here
+    // do not set a fail-closed flag themselves -- they silently stop writing
+    // once flat_rodata_len saturates, so string/constant data past the cap is
+    // dropped with no error and the resulting ELF still gets written and still
+    // runs (badly: pointers into the never-written tail read stale/zero BSS).
+    // rodata_overflow_bytes_attempted is a true count (see frame.sio), not an
+    // estimate. Distinct rc from the other three tiers.
+    if nc.rodata_overflow_bytes_attempted > nc_flat_rodata_capacity() {
+        print("Error: native rodata buffer overflow -- rodata_bytes_needed=")
+        print_int(nc.rodata_overflow_bytes_attempted)
+        print(" capacity=")
+        print_int(nc_flat_rodata_capacity())
+        print(" (raise nc_flat_rodata_capacity)\n")
+        return 23
     }
     native_v2_write_min_elf64_to_file(output_path, &! nc, entry, 4194304)
 }

@@ -84,6 +84,25 @@ if ! RAW_SOUC="$(_resolve_raw_elf)"; then
   exit 127
 fi
 
+# Madaros's own type-checker/lowerer needs a large stack for real
+# multi-module programs (deep recursion during typecheck/lowering); the
+# default 8 MiB shell stack ulimit segfaults (rc=139) partway through
+# lowering a program with even one cross-module import (reproduced
+# directly: bare `raw_elf src -o out` on a trivial two-file `use mod::fn`
+# program crashes under the default ulimit and compiles cleanly once the
+# stack limit is raised — see self-hosted/compiler/module_frontend.sio's
+# `lower_array: seed_begin` trace, where it dies). bin/madaros already
+# raises this before invoking its own raw ELF (MADAROS_STACK_KB, default
+# 524288 KiB) — this wrapper must do the same, since CI and the test
+# harness invoke the raw ELF directly through it, bypassing bin/madaros
+# entirely.
+MADAROS_STACK_KB="${MADAROS_STACK_KB:-524288}"
+if [[ "$MADAROS_STACK_KB" == "0" ]]; then
+  ulimit -s unlimited 2>/dev/null || true
+else
+  ulimit -s "$MADAROS_STACK_KB" 2>/dev/null || true
+fi
+
 _detect_raw_mode() {
   if [[ -n "${SOUNIO_SOUC_RAW_MODE:-}" ]]; then
     echo "$SOUNIO_SOUC_RAW_MODE"

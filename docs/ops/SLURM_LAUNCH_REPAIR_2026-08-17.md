@@ -220,3 +220,60 @@ A recipe that only “worked” without a demonstrated fail would not identify t
 - **`sbatch` was not repaired.** Controller-side user-env retrieval for `openvscode-server` remains broken. Only an admin can fix that. This PR documents the failure and routes traffic to `srun`.
 - Releasing historical held jobs 9635–9668 (left for owners; `scancel` if desired).
 - GPU partition smoke (cpu-ops was sufficient to prove launch; GPU adds gres, same env rules).
+
+---
+
+## Correction, 2026-09-04 — `cpu-ops` no longer launches, and the failure is silent
+
+Everything above about the **shape** of the working recipe still holds: absolute
+`/bin/bash`, `--chdir=/tmp`, `--export=NONE`, and `srun` rather than `sbatch`.
+The **partition** named as proven does not.
+
+`slurm.conf` sets `Prolog=prolog-90-dcgm.sh` cluster-wide. `cpu-ops`
+(`cpuops-t560-proxmox`) has no GPU, the DCGM prolog fails there, and the job
+comes back:
+
+```text
+JobState=CANCELLED Reason=Prolog
+```
+
+`srun` is never told. It sits in `Waiting for resource configuration` and
+prints nothing until it is killed:
+
+```text
+srun: JobId=11624 returned by the controller
+srun: Waiting for resource configuration
+srun: debug:  Waited 38.600000 sec and still waiting: next sleep for 6.500000 sec
+```
+
+Read from the outside that looks like a mute or hung `srun`, and it cost about
+an hour to attribute. It is a cancelled job, and `scontrol show job <id>` says
+so immediately. **Check `scontrol show job` before concluding anything about
+`srun` itself.**
+
+**Use `gpu-orangefs`**, where the DCGM prolog has a GPU and succeeds. That is
+also where the arm64 nodes live (`gpuorangefs-multi-spark-3c59`,
+`gpuorangefs-multi-spark-8e54`; features `arm64`, `gb10`), so it is the route
+for running aarch64 artefacts:
+
+```bash
+srun --partition=gpu-orangefs --constraint=arm64 --nodes=1 --ntasks=1 \
+     --time=00:05:00 --chdir=/tmp \
+     --export=NONE,PATH=/usr/bin:/bin:/usr/local/bin,TMPDIR=/tmp,HOME=/tmp \
+     --bcast=/tmp/prog.elf /path/to/prog.elf
+```
+
+**`/orangefs` is not mounted on the workspace host, and not on the arm64 node
+either.** The August receipt recorded `orangefs_visible=yes` on
+`cpuops-t560-proxmox`; that does not generalise. Anything that stages inputs to
+OrangeFS from here — including `refresh_lean_seed.sh --stage` — fails on the
+precondition. `srun --bcast` carries the binary instead and needs no shared
+filesystem.
+
+Wrapped, with both controls, in `scripts/dev/a64_run.sh`.
+
+**Why this matters beyond launching jobs.** Running the emitted aarch64 code,
+rather than only compiling it, immediately found `emit_heap_realloc_a64`
+destroying the pointer it was handed — every aarch64 `heap_realloc` segfaulted,
+and disassembly had passed the instruction because it was valid, just in the
+wrong place.

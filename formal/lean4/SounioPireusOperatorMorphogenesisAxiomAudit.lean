@@ -1,0 +1,17 @@
+/- Axiom audit for every exported Pireus Operator Morphogenesis v12 theorem. -/
+import SounioPireusOperatorMorphogenesis
+
+open SounioPireusOperatorMorphogenesis
+
+#print axioms actTable_involutive
+#print axioms list_index_complement_separates_every_prior_row
+#print axioms mixed_nonempty_phase_extension_vanishes_on_both_axes
+#print axioms paired_archive_is_closed_under_c2
+#print axioms transported_separator_sound
+#print axioms formal_parity_summary_matches_frozen_sounio
+#print axioms formal_parity_is_bound_to_frozen_sounio_hashes
+#print axioms interior_codec_is_a_225_cell_bijection
+#print axioms mixed_nonempty_anf_mobius_matrix_is_self_inverse
+#print axioms c2_involution_and_orbit_accounting_complete
+#print axioms orbit_insertion_accounting_is_96_plus_2_times_16
+#print axioms executable_certificate_scope_does_not_promote_classification
