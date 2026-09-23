@@ -84,6 +84,11 @@ struct LowerLocalStack {
     box_inner_layout: Box<LowerLocalI64Slots>,
     // 1 when local/param is fn(...) -> f64 (or f32); drives IrCallIndirect float markers.
     fn_ptr_ret_float: Box<LowerLocalI64Slots>,
+    // -1 unknown; 0 = Knowledge<int> (value is i64, not f64); 1 = Knowledge<f64>.
+    // The synthetic Knowledge layout hard-codes value.is_float=1, which is right
+    // for f64 but silently bit-casts the i64 payload of Knowledge<i64> into an
+    // f64 compare/mul. This records the inner scalar kind from the annotation.
+    kn_value_float: Box<LowerLocalI64Slots>,
     count: i64,
 }
 
@@ -143,6 +148,7 @@ fn empty_lower_local_stack() -> LowerLocalStack with Alloc, Mut {
         closure_fn_id: lowerer_box_local_i64_slots(-1),
         box_inner_layout: lowerer_box_local_i64_slots(-1),
         fn_ptr_ret_float: lowerer_box_local_i64_slots(0),
+        kn_value_float: lowerer_box_local_i64_slots(0 - 1),
         count: 0,
     }
 }
@@ -4453,6 +4459,7 @@ fn lowerer_bind_local_mut(
         // function's Box param leaks into an unrelated local rebound at the
         // same slot and turns its plain field access into a phantom Box deref.
         (*(*locals_box).box_inner_layout).values[idx as usize] = 0 - 1
+        (*(*locals_box).kn_value_float).values[idx as usize] = 0 - 1
         (*locals_box).count = idx + 1
         (*lo).locals = locals_box
     } else {
@@ -4528,6 +4535,20 @@ fn lowerer_mark_local_array_elem_wide_bits_mut(
     while i >= 0 {
         if (*(*locals_box).depths).values[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*locals_box).names).values[i as usize], name) {
             (*(*locals_box).array_elem_wide_bits).values[i as usize] = bits
+            (*lo).locals = locals_box
+            return
+        }
+        i = i - 1
+    }
+}
+
+
+fn lowerer_bind_kn_value_float_mut(lo: &! Lowerer, name: Name, flag: i64) with Mut, Alloc, Panic, Div {
+    var locals_box = (*lo).locals
+    var i = (*locals_box).count - 1
+    while i >= 0 {
+        if (*(*locals_box).depths).values[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*locals_box).names).values[i as usize], name) {
+            (*(*locals_box).kn_value_float).values[i as usize] = flag
             (*lo).locals = locals_box
             return
         }
@@ -13770,7 +13791,31 @@ impl Lowerer {
         }
     }
 
+    fn field_base_kn_value_float_ref(self, base_opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div, Alloc {
+        match *base_opt {
+            Some(be) => {
+                if (*be).kind == ExprKind::ExprIdent {
+                    var i = (*self.locals).count - 1
+                    while i >= 0 {
+                        if (*(*self.locals).depths).values[i as usize] <= self.scope_depth
+                            && ir_name_eq((*(*self.locals).names).values[i as usize], (*be).name) {
+                            return (*(*self.locals).kn_value_float).values[i as usize]
+                        }
+                        i = i - 1
+                    }
+                }
+            }
+            _ => {}
+        }
+        0 - 1
+    }
+
     fn field_is_float_for_base_ref(self, base_opt: &Option<Box<Expr>>, field_name: Name) -> bool with Mut, Panic, Div, Alloc {
+        if ir_name_eq(field_name, make_name("value")) {
+            let kn = self.field_base_kn_value_float_ref(base_opt)
+            if kn == 0 { return false }
+            if kn == 1 { return true }
+        }
         match *base_opt {
             Some(base_expr) => {
                 let type_name = self.expr_receiver_struct_type_ref(&(*base_expr))
@@ -14432,6 +14477,11 @@ impl Lowerer {
             // whatever a same-named f64 field elsewhere says.
             if self.lower_field_is_f128_ref(&(*e).left, (*e).name) {
                 return false
+            }
+            if ir_name_eq((*e).name, make_name("value")) {
+                let kn = self.field_base_kn_value_float_ref(&(*e).left)
+                if kn == 0 { return false }
+                if kn == 1 { return true }
             }
             if self.field_is_float_for_base_ref(&(*e).left, (*e).name) || self.field_is_float_by_name_simple((*e).name) {
                 return true
@@ -17587,6 +17637,21 @@ impl Lowerer {
             Some(ann_ty) => {
                 if (*ann_ty).kind == TypeExprKind::TypeKnowledge {
                     lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"))
+                    // #2504: Knowledge<T>.value float-ness follows T. The synthetic
+                    // layout hard-codes value.is_float=1 (correct for f64). Record the
+                    // inner kind so `.value` on Knowledge<i64> lowers as i64, not the
+                    // f64 bit-cast that made `v == 42` false while `v + 0` and
+                    // `print_int(v)` read the raw i64 correctly.
+                    match (*ann_ty).knowledge_info {
+                        Some(ki) => {
+                            if lower_type_expr_is_f64(&(*(*ki).inner_type)) {
+                                lowerer_bind_kn_value_float_mut(lo, s.name, 1)
+                            } else if lower_type_expr_is_integer(&(*(*ki).inner_type)) {
+                                lowerer_bind_kn_value_float_mut(lo, s.name, 0)
+                            }
+                        }
+                        None => {}
+                    }
                 }
             }
             _ => {}
@@ -22024,6 +22089,11 @@ impl Lowerer {
         // Tuple desugar: let __tup = f(); let a = __tup.0 — float-element base
         // means .0/.1 are f64 even without a struct layout entry.
         var field_is_float = lo1.field_is_float_for_base_ref(&e.left, e.name) || lo1.field_is_float_by_name_simple(e.name)
+        if ir_name_eq(e.name, make_name("value")) {
+            let kn0 = lo1.field_base_kn_value_float_ref(&e.left)
+            if kn0 == 0 { field_is_float = false }
+            if kn0 == 1 { field_is_float = true }
+        }
         match e.left {
             Some(be) => {
                 if (*be).kind == ExprKind::ExprIdent {
