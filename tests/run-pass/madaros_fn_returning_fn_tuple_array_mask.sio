@@ -90,10 +90,36 @@
 //
 //   E  `let f = recv.choose(); f().0[0]`   method returning a function,
 //                                            resolved through an alias
+// Copilot follow-up (#2570): cases A-E above only ever put an i64 in the
+// tuple's non-array slot, so they never exercised the SCALAR half of a
+// second-order tuple return. lower_fn_tuple_f64_arrays_collect_one's TypeFn
+// branch derived the array half only (LOWER_FN_TUPLE_ARR_MASK), leaving no
+// home at all for an f64 SCALAR slot at that same second order -- choose2's
+// OWN returns_float classification is for a FUNCTION-typed return, not a
+// tuple, so it never gets the 1024+mask scalar encoding either. `let f =
+// choose2(); f().1 * 2.0` therefore read the f64 scalar at slot 1 through the
+// integer path even though slot 0's array half (already covered by cases
+// A-E) was correct. Fixed by a new LOWER_FN_TUPLE_ARR_SCALAR table, written
+// and read alongside LOWER_FN_TUPLE_ARR_MASK at the same slot
+// (lower_type_expr_deep_scalar_mask mirrors lower_type_expr_deep_f64_array_mask).
+//
+//   F  `let f = choose2(); f().0[0]` and `f().1 * 2.0` -- array half and
+//      scalar half off the SAME second-order call, pinning both live
+//      alongside each other rather than one clobbering the other.
 fn concrete() -> ([f64; 2], i64) {
     var a: [f64; 2] = [0.0; 2]
     a[0] = 8.5
     (a, 1)
+}
+
+fn concrete2() -> ([f64; 2], f64) {
+    var a: [f64; 2] = [0.0; 2]
+    a[0] = 6.5
+    (a, 3.25)
+}
+
+fn choose2() -> fn() -> ([f64; 2], f64) {
+    concrete2
 }
 
 fn choose() -> fn() -> ([f64; 2], i64) {
@@ -149,6 +175,15 @@ fn main() -> i32 with IO, Mut, Panic {
     let choosefn = chooser.choose()
     let de = choosefn().0[0]
     if de != 8.5 { bad = bad + 16 }
+
+    // F: array half and scalar half off the SAME second-order tuple return,
+    // pinning that the new scalar table does not clobber the existing
+    // array-mask table (or vice versa).
+    let f2 = choose2()
+    let df_arr = f2().0[0]
+    if df_arr != 6.5 { bad = bad + 32 }
+    let df_scalar = f2().1 * 2.0
+    if df_scalar != 6.5 { bad = bad + 64 }
 
     if bad == 0 {
         println("FN_RETURNING_FN_TUPLE_ARRAY_MASK PASS")

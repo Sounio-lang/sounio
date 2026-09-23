@@ -43,6 +43,32 @@
 // this reader kept returning 0 and the f64 scalar at slot 1 read through the
 // integer path even after case A's array fix landed. Same fix, same local
 // existence check.
+//
+// Copilot follow-up (#2570): cases A/B above only exercise a function-VALUED
+// parameter (`f: fn() -> (...)`) -- both parameter-binding call sites used
+// lower_type_expr_fn_return_tuple_mask, which explicitly `return 0` for
+// anything but a TypeFn, so a parameter declared with a DIRECT tuple type
+// (`t: ([f64; 2], i64)`, no `fn` wrapper at all) got tuple_float_mask 0 --
+// BOTH halves lost, not just the array bit -- and every projection off it
+// read through the integer path. Fixed by switching both call sites to the
+// already-general lower_type_expr_tuple_combined_mask /
+// lower_type_expr_deep_has_unmarkable_f64_array, which handle a bare
+// TypeTuple directly as well as a TypeFn chain. Cases C/D below add
+// dedicated coverage for this direct-tuple-parameter shape.
+//
+//   C  `t.0[0] * 2.0` on a direct tuple-typed parameter -- array half,
+//      direct projection, no intervening let.
+//   D  `let x = t; x.1 * 2.0` on a direct tuple-typed parameter -- scalar
+//      half, in-place index through a local bound from the parameter.
+fn use_direct_tuple(t: ([f64; 2], i64)) -> f64 with Mut, Panic {
+    t.0[0] * 2.0
+}
+
+fn use_direct_tuple_scalar(t: (i64, f64)) -> f64 with Mut, Panic {
+    let x = t
+    x.1 * 2.0
+}
+
 fn concrete() -> ([f64; 2], i64) with Mut, Panic {
     var a: [f64; 2] = [0.0; 2]
     a[0] = 9.5
@@ -74,6 +100,18 @@ fn main() -> i32 with IO, Mut, Panic {
     // no intervening let-binding.
     let rb = use_it_scalar(provide_scalar)
     if rb != 9.5 { bad = bad + 2 }
+
+    // C: array-half projection, direct, on a DIRECT tuple-typed parameter
+    // (no fn wrapper).
+    var a: [f64; 2] = [0.0; 2]
+    a[0] = 3.5
+    let rc = use_direct_tuple((a, 1))
+    if rc != 7.0 { bad = bad + 4 }
+
+    // D: scalar-half projection, in-place through a local, on a DIRECT
+    // tuple-typed parameter.
+    let rd = use_direct_tuple_scalar((1, 6.25))
+    if rd != 12.5 { bad = bad + 8 }
 
     if bad == 0 {
         println("FN_PTR_PARAM_TUPLE_ARRAY_MASK PASS")

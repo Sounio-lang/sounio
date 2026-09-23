@@ -2,28 +2,36 @@
 # LOWER_FN_TUPLE_ARR physical-extent / logical-cap coherence (#2570).
 #
 # self-hosted/ir/lower.sio's f64-array-tuple table has a logical admission
-# guard (`LOWER_FN_TUPLE_ARR_COUNT < LOWER_FN_TUPLE_ARR_CAP`) and four
-# physical storage arrays (HASH, MASK, NAME_BUF, NAME_LEN) that must be able
-# to hold at least CAP entries. Sizing those four off LOWER_FN_TUPLE_ARR_CAP
-# directly (`[i64; LOWER_FN_TUPLE_ARR_CAP]`) was tried and reverted: a global
-# array sized by a non-literal expression silently under-allocates at this
-# scale on the current bootstrap compiler -- measured as a SIGSEGV writing
-# the last index of an isolated 384*4096-byte global sized the same way,
-# while a small-scale version of the identical pattern ran clean. Array
-# lengths in this file must stay literal integers.
+# guard (`LOWER_FN_TUPLE_ARR_COUNT < LOWER_FN_TUPLE_ARR_CAP`) and five
+# physical storage arrays (HASH, MASK, SCALAR, NAME_BUF, NAME_LEN) that must
+# be able to hold at least CAP entries. Sizing those five off
+# LOWER_FN_TUPLE_ARR_CAP directly (`[i64; LOWER_FN_TUPLE_ARR_CAP]`) was tried
+# and reverted: a global array sized by a non-literal expression silently
+# under-allocates at this scale on the current bootstrap compiler -- measured
+# as a SIGSEGV writing the last index of an isolated 384*4096-byte global
+# sized the same way, while a small-scale version of the identical pattern
+# ran clean. Array lengths in this file must stay literal integers.
 #
-# That leaves the four extents and the two constants as six independent
+# That leaves the five extents and the two constants as seven independent
 # literals a human has to keep in sync by hand. A Copilot review on this PR
 # caught exactly the failure mode: bump LOWER_FN_TUPLE_ARR_CAP (which is
 # what the "would need a bigger LOWER_FN_TUPLE_ARR_CAP" refusal message in
-# the same file invites) without also bumping the four storage arrays, and
-# the guard admits slots the physical arrays cannot hold -- an out-of-bounds
+# the same file invites) without also bumping the storage arrays, and the
+# guard admits slots the physical arrays cannot hold -- an out-of-bounds
 # write that `souc check` cannot see, because every literal involved is
 # independently well-typed.
 #
+# Copilot follow-up (#2570): LOWER_FN_TUPLE_ARR_SCALAR (the second-order,
+# TypeFn-chain tuple-return scalar-mask table added alongside MASK) is
+# written and read at the exact same slot index as MASK, by the exact same
+# lower_fn_tuple_arr_insert call -- an under-sized SCALAR array would be an
+# out-of-bounds write the moment a slot MASK could legally reach is written,
+# the identical failure mode this gate already exists to catch for the other
+# four extents.
+#
 # This gate is the substitute for a compile-time check the language cannot
-# express here: it parses the six literals back out of source and asserts
-# HASH == MASK == NAME_LEN == CAP and NAME_BUF == STRIDE * CAP.
+# express here: it parses the seven literals back out of source and asserts
+# HASH == MASK == SCALAR == NAME_LEN == CAP and NAME_BUF == STRIDE * CAP.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/gate_assert.sh"
@@ -57,11 +65,12 @@ check() {
   # extra match ahead of the real extent. Anchoring the capture group to
   # exactly the text between "; " and "]" (or "= " and end of line) sidesteps
   # that instead of relying on which match happens to sort last.
-  local cap stride hash_n mask_n namebuf_n namelen_n
+  local cap stride hash_n mask_n scalar_n namebuf_n namelen_n
   cap=$(sed -nE 's/^let LOWER_FN_TUPLE_ARR_CAP: i64 = ([0-9]+)$/\1/p' "$file")
   stride=$(sed -nE 's/^let LOWER_FN_TUPLE_ARR_NAME_STRIDE: i64 = ([0-9]+)$/\1/p' "$file")
   hash_n=$(sed -nE 's/^var LOWER_FN_TUPLE_ARR_HASH: \[i64; ([0-9]+)\].*$/\1/p' "$file")
   mask_n=$(sed -nE 's/^var LOWER_FN_TUPLE_ARR_MASK: \[i64; ([0-9]+)\].*$/\1/p' "$file")
+  scalar_n=$(sed -nE 's/^var LOWER_FN_TUPLE_ARR_SCALAR: \[i64; ([0-9]+)\].*$/\1/p' "$file")
   namebuf_n=$(sed -nE 's/^var LOWER_FN_TUPLE_ARR_NAME_BUF: \[i8; ([0-9]+)\].*$/\1/p' "$file")
   namelen_n=$(sed -nE 's/^var LOWER_FN_TUPLE_ARR_NAME_LEN: \[i64; ([0-9]+)\].*$/\1/p' "$file")
 
@@ -69,16 +78,18 @@ check() {
   require_nonempty "$stride" "LOWER_FN_TUPLE_ARR_NAME_STRIDE not found in $file"
   require_nonempty "$hash_n" "LOWER_FN_TUPLE_ARR_HASH extent not found in $file"
   require_nonempty "$mask_n" "LOWER_FN_TUPLE_ARR_MASK extent not found in $file"
+  require_nonempty "$scalar_n" "LOWER_FN_TUPLE_ARR_SCALAR extent not found in $file"
   require_nonempty "$namebuf_n" "LOWER_FN_TUPLE_ARR_NAME_BUF extent not found in $file"
   require_nonempty "$namelen_n" "LOWER_FN_TUPLE_ARR_NAME_LEN extent not found in $file"
 
   [[ "$hash_n" == "$cap" ]] || gate_fail "LOWER_FN_TUPLE_ARR_HASH extent ($hash_n) != LOWER_FN_TUPLE_ARR_CAP ($cap)"
   [[ "$mask_n" == "$cap" ]] || gate_fail "LOWER_FN_TUPLE_ARR_MASK extent ($mask_n) != LOWER_FN_TUPLE_ARR_CAP ($cap)"
+  [[ "$scalar_n" == "$cap" ]] || gate_fail "LOWER_FN_TUPLE_ARR_SCALAR extent ($scalar_n) != LOWER_FN_TUPLE_ARR_CAP ($cap)"
   [[ "$namelen_n" == "$cap" ]] || gate_fail "LOWER_FN_TUPLE_ARR_NAME_LEN extent ($namelen_n) != LOWER_FN_TUPLE_ARR_CAP ($cap)"
   local expect_namebuf=$(( stride * cap ))
   [[ "$namebuf_n" == "$expect_namebuf" ]] || gate_fail "LOWER_FN_TUPLE_ARR_NAME_BUF extent ($namebuf_n) != NAME_STRIDE * CAP ($expect_namebuf)"
 
-  printf '%s %s %s %s %s %s' "$cap" "$stride" "$hash_n" "$mask_n" "$namebuf_n" "$namelen_n"
+  printf '%s %s %s %s %s %s %s' "$cap" "$stride" "$hash_n" "$mask_n" "$scalar_n" "$namebuf_n" "$namelen_n"
 }
 
 # Positive control FIRST. A checker that has never failed has measured
@@ -101,13 +112,13 @@ SAB=$(mktemp); trap 'rm -f "$SAB"' EXIT
 sed "s/^var LOWER_FN_TUPLE_ARR_HASH: \[i64; ${current_hash_n}\]/var LOWER_FN_TUPLE_ARR_HASH: [i64; ${sabotaged_hash_n}]/" "$LOWER" | gate_write_artifact "$SAB"
 if ( check "$SAB" ) >/dev/null 2>&1; then
   echo "CONTROL_FAIL: the sabotaged extent passed. This gate inspects nothing."
-  printf '{"status":"fail","reason":"positive control did not fire","metrics":{"total":6,"passed":0,"failed":1,"not_run":0}}\n' | gate_write_artifact "$ART"
+  printf '{"status":"fail","reason":"positive control did not fire","metrics":{"total":7,"passed":0,"failed":1,"not_run":0}}\n' | gate_write_artifact "$ART"
   exit 1
 fi
 echo "control: sabotaged LOWER_FN_TUPLE_ARR_HASH extent rejected, as required"
 
 vals="$(check "$LOWER")"
-read -r cap stride hash_n mask_n namebuf_n namelen_n <<<"$vals"
-echo "LOWER_FN_TUPLE_ARR_CAP_OK: cap=$cap stride=$stride hash=$hash_n mask=$mask_n namebuf=$namebuf_n namelen=$namelen_n"
-printf '{"status":"pass","metrics":{"cap":%s,"stride":%s,"hash":%s,"mask":%s,"namebuf":%s,"namelen":%s,"total":6,"passed":6,"failed":0,"not_run":0}}\n' \
-  "$cap" "$stride" "$hash_n" "$mask_n" "$namebuf_n" "$namelen_n" | gate_write_artifact "$ART"
+read -r cap stride hash_n mask_n scalar_n namebuf_n namelen_n <<<"$vals"
+echo "LOWER_FN_TUPLE_ARR_CAP_OK: cap=$cap stride=$stride hash=$hash_n mask=$mask_n scalar=$scalar_n namebuf=$namebuf_n namelen=$namelen_n"
+printf '{"status":"pass","metrics":{"cap":%s,"stride":%s,"hash":%s,"mask":%s,"scalar":%s,"namebuf":%s,"namelen":%s,"total":7,"passed":7,"failed":0,"not_run":0}}\n' \
+  "$cap" "$stride" "$hash_n" "$mask_n" "$scalar_n" "$namebuf_n" "$namelen_n" | gate_write_artifact "$ART"

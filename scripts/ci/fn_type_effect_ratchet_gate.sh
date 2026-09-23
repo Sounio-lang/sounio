@@ -255,6 +255,24 @@ strip_noise() {
 # each ":", skip whitespace, check for "fn", skip whitespace again, check
 # for "(" -- using match()''s own RSTART/RLENGTH only to locate candidate
 # colons quickly, never to back-compute a fixed-width span.
+# Copilot follow-up (#2570): the "<" branch below only ever pushed a
+# generic-open when the LITERAL immediately-preceding character was an
+# identifier character -- but whitespace between a type name and its
+# generic opener is lexically insignificant (self-hosted/parser/types.sio
+# skips it the same way it skips whitespace everywhere else), so
+# `Result <i64, Error>` is equally valid source. With a space there, prevc
+# held " " at the "<", the push never happened, and the later ">" then hit
+# the depth-0 case and was treated as "we have left this scope" -- exactly
+# the same class of false terminator step_open_or_other_close was already
+# built to avoid for genuinely unmatched closers. Fixed at the tracking
+# site, not the check: every prevc update (match_close_paren, scan_tail,
+# and the parameter-list entry-walker) now skips whitespace instead of
+# overwriting prevc with it, so prevc always holds the last NON-whitespace
+# character seen, matching what the "<" and the arrow ("-" before ">")
+# checks actually care about. Safe for the arrow check too: a genuine "->"
+# arrow is a single adjacent two-character token in valid Sounio source --
+# nothing legitimate ever separates "-" from ">" with whitespace -- so
+# widening prevc to "last non-whitespace" cannot misfire there.
 AWK_SCAN='
 function skip_ws(line, p,    n) {
     n = length(line)
@@ -314,7 +332,7 @@ function match_close_paren(line, open_pos,    i, n, c, prevc, depth, stack, pred
             if (r == -1) { return i }
             depth = r
         }
-        prevc = c
+        if (c !~ /[ \t\n]/) { prevc = c }
         i++
     }
     return n + 1
@@ -336,7 +354,7 @@ function scan_tail(line, tail_start,    i, n, c, prevc, depth, stack, pred, r) {
             if (r == -1) { return i }
             depth = r
         }
-        prevc = c
+        if (c !~ /[ \t\n]/) { prevc = c }
         i++
     }
     return n + 1
@@ -517,10 +535,10 @@ function classify_fn_type_at(line, fn_pos, at_eof,    open_pos, close_pos, after
             # can only mean malformed input (nothing legitimate enclosing
             # THIS span could still be open) -- skip it rather than treat it
             # as ending the walk early.
-            if (r == -1) { prevc = c; i++; continue }
+            if (r == -1) { if (c !~ /[ \t\n]/) { prevc = c }; i++; continue }
             depth = r
         }
-        prevc = c
+        if (c !~ /[ \t\n]/) { prevc = c }
         i++
     }
     scan_entry_for_fn_types(line, entry_start, n, at_eof)
@@ -990,6 +1008,25 @@ selftest() {
   if bare_hits_of "$tmp/ffi23.sio" | grep -q .; then
     echo "  ok   REGRESSAO 23: bloco unsafe nao fechado continua nao-diferido (fim de linha 1)"
   else echo "  FALHA REGRESSAO 23: bloco unsafe nao fechado parou de ser detectado"; rc=1; fi
+  # NEGATIVE control 24 (#2570): whitespace between a generic type name and
+  # its "<" is lexically insignificant (self-hosted/parser/types.sio skips
+  # it), so `Result <i64, Error>` is equally valid source as `Result<i64,
+  # Error>`. Before this fix, prevc held " " (not an identifier char) right
+  # at the "<", so it was never pushed as a generic-open -- the later ">"
+  # then hit the depth-0 case and was treated as "we have left this scope",
+  # so the generic comma wrongly terminated the tail before "with IO" and
+  # this was miscounted as bare.
+  printf 'fn use_it(f: fn() -> Result <i64, Error> with IO) -> f64 { 0.0 }\n' > "$tmp/neg24.sio"
+  if bare_hits_of "$tmp/neg24.sio" | grep -q .; then
+    echo "  FALHA NEGATIVO 24: tipo com retorno generico espacado e efeito proprio contado como nu"; rc=1
+  else echo "  ok   NEGATIVO 24: tipo com retorno generico espacado e efeito proprio nao conta como nu"; fi
+  # POSITIVE control 24: companion -- same spaced generic, but genuinely bare
+  # (no with-clause), pinning that the fix does not just unconditionally
+  # suppress every spaced-generic return type.
+  printf 'fn use_it(f: fn() -> Result <i64, Error>) -> f64 { 0.0 }\n' > "$tmp/pos24.sio"
+  if bare_hits_of "$tmp/pos24.sio" | grep -q .; then
+    echo "  ok   POSITIVO 24: tipo com retorno generico espacado e nu e detectado"
+  else echo "  FALHA POSITIVO 24: tipo com retorno generico espacado nu nao detectado"; rc=1; fi
   rm -rf "$tmp"
   echo "falhas: $rc"
   return $rc
