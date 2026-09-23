@@ -89,12 +89,17 @@ println("C[0,0] = " + str(c.get_val(0,0)) + " ± " + str(c.get_unc(0,0)));
 ### Direct BLAS Calls
 
 ```sio
-use linalg::blas_ffi::{blas_dgemm_rowmajor, blas_svd_rowmajor};
+use linalg::blas_ffi::{blas_dgemm_rowmajor, blas_dgesvd_approx};
 
 // Direct DGEMM call. Mutable borrows are `&!`; semicolons are not used.
-let m = 256
-let n = 256
-let k = 256
+// Buffers are fixed 256-element arrays, so keep m*n, k*n, m*k <= 256.
+let a: [f64; 256] = [0.0; 256]  // matrix A (m x k)
+let b: [f64; 256] = [0.0; 256]  // matrix B (k x n)
+var c: [f64; 256] = [0.0; 256]  // matrix C (m x n), output
+
+let m = 16
+let n = 16
+let k = 16
 let alpha = 1.0
 let beta = 0.0
 
@@ -107,12 +112,12 @@ let rc = blas_dgemm_rowmajor(
     &!c  // matrix C (m x n), output
 )
 
-// Direct SVD call
-var s: [f64; 256] = [0.0; 256]  // singular values
-var u: [f64; 65536] = [0.0; 65536]  // left singular vectors
-var vt: [f64; 65536] = [0.0; 65536]  // right singular vectors
+// Direct dominant-singular-value call (approximate power iteration).
+// blas_dgesvd_approx writes only the largest singular value into `s`
+// (no `u`/`vt` outputs); `iters` is the power-iteration step count.
+var s: [f64; 16] = [0.0; 16]  // singular values (min(m,n) values)
 
-let info = blas_svd_rowmajor(m, n, &!a, &!s, &!u, &!vt)
+let info = blas_dgesvd_approx(&a, m, n, &!s, 32)
 ```
 
 ## Installation
@@ -162,7 +167,7 @@ brew install openblas
 │                    blas_ffi.sio                          │
 │  ┌─────────────────────────────────────────────────────┐│
 │  │ blas_dgemm_rowmajor()  → libblas.so!dgemm_          ││
-│  │ blas_svd_rowmajor()    → libblas.so!dgesvd_         ││
+│  │ blas_dgesvd_approx()   → libblas.so!dgesvd_         ││
 │  │ blas_available()       → dlopen() check             ││
 │  └─────────────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────────┘

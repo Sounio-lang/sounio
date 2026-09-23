@@ -3,8 +3,9 @@
 > **Canonical epistemic API.** Examples below use `epistemic::knowledge`
 > (`ep_measured`, `ep_add`, `ep_val`, `ep_std`, `ep_confidence`), anchored by
 > `tests/stdlib/epistemic/test_knowledge_madaros_import_e2e.sio`. Confidence is
-> an `i64` on the 0..1000 scale, and `ep_add` keeps the minimum of the inputs'
-> confidence. The legacy `epistemic_std` / `add_epistemic` names and
+> an `i64` on the 0..1000 scale, and `ep_add` takes the minimum of the inputs'
+> confidence and decays it by 99/100 (clamped to 0..1000) — it does not preserve
+> it. The legacy `epistemic_std` / `add_epistemic` names and
 > `.value` / `.uncertainty` fields are not the checked surface.
 
 ## Philosophy
@@ -34,10 +35,10 @@ fn test_ep_add_basic() -> bool with Mut, Div, Panic {
     // Execute
     let result = ep_add(&a, &b)
 
-    // Verify: value adds, variances add, confidence is the minimum.
+    // Verify: value adds, variances add, confidence is min(a,b) * 99/100.
     let value_ok = abs(ep_val(&result) - 30.0) < 0.0001
     let std_ok = abs(ep_std(&result) - 0.583) < 0.001
-    let confidence_ok = ep_confidence(&result) == 900
+    let confidence_ok = ep_confidence(&result) == 891
 
     return value_ok && std_ok && confidence_ok
 }
@@ -229,12 +230,12 @@ Requirements:
 1. Test normal cases: positive numbers, negative numbers, zero
 2. Test edge cases: very large numbers, very small numbers, equal values
 3. Test error conditions: NaN, infinity (if applicable)
-4. Verify properties: commutativity, variance growth, confidence is the minimum
+4. Verify properties: commutativity, variance growth, confidence decays to min * 99/100
 
 Expected behavior:
 - ep_val(&result) = ep_val(&a) + ep_val(&b)
 - ep_variance(&result) = ep_variance(&a) + ep_variance(&b)
-- ep_confidence(&result) = min(ep_confidence(&a), ep_confidence(&b))
+- ep_confidence(&result) = min(ep_confidence(&a), ep_confidence(&b)) * 99 / 100 (clamped to 0..1000)
 
 Generate test code in Sounio.
 ```
@@ -320,23 +321,43 @@ fn record_coverage(file: string, line: i64, function: string) {
 ```sio
 use epistemic::knowledge::{ep_measured, ep_certain, ep_add, ep_val, ep_std, ep_confidence}
 
+struct AddCase {
+    name: string,
+    a: Epistemic,
+    b: Epistemic,
+    exp_val: f64,
+    exp_std: f64,
+    exp_conf: i64,
+}
+
 fn test_ep_add_table() -> bool with Mut, Div, Panic {
-    // Rows: (a, b, expected value, expected std, expected confidence).
     // ep_measured stores confidence 900; ep_certain stores 1000.
-    let a1 = ep_measured(1.0, 0.1)
-    let b1 = ep_measured(2.0, 0.2)
-    let a2 = ep_certain(0.0)
-    let b2 = ep_measured(5.0, 0.5)
+    // ep_add takes min(a,b).confidence * 99 / 100 (clamped to 0..1000).
+    let cases: [AddCase; 2] = [
+        AddCase {
+            name: "measured+measured",
+            a: ep_measured(1.0, 0.1),
+            b: ep_measured(2.0, 0.2),
+            exp_val: 3.0,
+            exp_std: 0.224,
+            exp_conf: 891,
+        },
+        AddCase {
+            name: "certain+measured",
+            a: ep_certain(0.0),
+            b: ep_measured(5.0, 0.5),
+            exp_val: 5.0,
+            exp_std: 0.5,
+            exp_conf: 891,
+        },
+    ]
 
-    let r1 = ep_add(&a1, &b1)
-    if abs(ep_val(&r1) - 3.0) >= 0.0001 { return false }
-    if abs(ep_std(&r1) - 0.224) >= 0.001 { return false }
-    if ep_confidence(&r1) != 900 { return false }
-
-    let r2 = ep_add(&a2, &b2)
-    if abs(ep_val(&r2) - 5.0) >= 0.0001 { return false }
-    if abs(ep_std(&r2) - 0.5) >= 0.001 { return false }
-    if ep_confidence(&r2) != 900 { return false }
+    for c in cases {
+        let r = ep_add(&c.a, &c.b)
+        if abs(ep_val(&r) - c.exp_val) >= 0.0001 { return false }
+        if abs(ep_std(&r) - c.exp_std) >= 0.001 { return false }
+        if ep_confidence(&r) != c.exp_conf { return false }
+    }
 
     return true
 }

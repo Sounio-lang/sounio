@@ -1,12 +1,13 @@
 # Autodiff Examples
 
-> **Checked surface.** `stdlib/autodiff/tape.sio` exposes free functions
-> (`new_tape`, `tape_new_var`, `tape_mul`, `tape_add`, `backward`), not the
-> `Tape::new()` / `push_var()` / `grad()` methods shown below, and
-> `EpistemicDual::new` plus `Knowledge::measured` do not exist —
-> `stdlib/autodiff/epistemic_dual.sio` builds values with `edual_new(val, dot, unc, unc_dot)`
-> and `edual_mul`. The blocks below are the intended shape, not the checked
-> surface. The working form is in `stdlib/autodiff/TAPE_IMPLEMENTATION.md`.
+> **Private implementation shape.** In `stdlib/autodiff/tape.sio`, `Tape`,
+> `new_tape`, `tape_new_var`, `tape_mul`, `tape_add`, and `backward` are all
+> private (`struct`/`fn`, not `pub`), so they are **not** part of the checked
+> public surface. `EpistemicDual::new` and `Knowledge::measured` likewise do
+> not exist — `stdlib/autodiff/epistemic_dual.sio` builds values with
+> `edual_new(val, dot, unc, unc_dot)` and `edual_mul`. The blocks below are the
+> intended shape only, not an importable API. The working form is in
+> `stdlib/autodiff/TAPE_IMPLEMENTATION.md`.
 
 ## 1. Tape-Based Reverse-Mode AD
 
