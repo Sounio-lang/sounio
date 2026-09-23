@@ -71,7 +71,11 @@ ecolumn_push(&!col, ep_measured(9.9, 0.1))
 
 let mean = ecolumn_mean(&col)
 let std = ecolumn_std(&col)
-print("Mean: {} +/- {}\n", ep_val(&mean), ep_val(&std))
+print("Mean: ")
+print_f64(ep_val(&mean))
+print(" +/- ")
+print_f64(ep_val(&std))
+print("\n")
 ```
 
 `epistemic_mean`, `epistemic_std(&col)`, and `epistemic_confidence_interval` are not in the module. The checked functions are `ecolumn_mean`, `ecolumn_std`, `ecolumn_sum`, and `ecolumn_correlation` in `stdlib/dataframe/pure/epistemic.sio`. There is no confidence-interval helper.
