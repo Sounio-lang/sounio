@@ -995,6 +995,24 @@ fn lower_fn_tuple_f64_array_mask(name: Name) -> i64 with Mut, Panic, Div {
 // factored out so a plain fn (name = its own name) and an impl method (name =
 // its mangled `Type_method`, see the ItemImpl arm below) go through the exact
 // same fault/insert rules.
+// Cap-checked, no-dup insert of `mask` under `name` -- reason-3 fault if the
+// cap is exceeded. Factored out of lower_fn_tuple_f64_arrays_collect_one so
+// the TypeFn branch added below (Copilot follow-up, #2570) can share the
+// exact same insert/fault behaviour instead of a second hand-copy of it.
+fn lower_fn_tuple_arr_insert(name: Name, mask: i64) with Mut, Panic, Div, Alloc {
+    if mask != 0 && lower_fn_tuple_f64_array_mask(name) == 0 {
+        if LOWER_FN_TUPLE_ARR_COUNT < LOWER_FN_TUPLE_ARR_CAP {
+            let slot = LOWER_FN_TUPLE_ARR_COUNT
+            LOWER_FN_TUPLE_ARR_HASH[slot as usize] = fo_name_hash(name)
+            LOWER_FN_TUPLE_ARR_MASK[slot as usize] = mask
+            lower_fn_tuple_arr_name_store(slot, name)
+            LOWER_FN_TUPLE_ARR_COUNT = slot + 1
+        } else {
+            lower_fn_tuple_arr_fault(3, name)
+        }
+    }
+}
+
 fn lower_fn_tuple_f64_arrays_collect_one(name: Name, rt_opt_ref: &Option<Box<TypeExpr>>) with Mut, Panic, Div, Alloc {
     match *rt_opt_ref {
         Some(rt) => {
@@ -1005,16 +1023,39 @@ fn lower_fn_tuple_f64_arrays_collect_one(name: Name, rt_opt_ref: &Option<Box<Typ
                 if lower_type_list_has_unmarkable_f64_array(&(*rt).type_args, 0) {
                     lower_fn_tuple_arr_fault(4, name)
                 }
-                if mask != 0 && lower_fn_tuple_f64_array_mask(name) == 0 {
-                    if LOWER_FN_TUPLE_ARR_COUNT < LOWER_FN_TUPLE_ARR_CAP {
-                        let slot = LOWER_FN_TUPLE_ARR_COUNT
-                        LOWER_FN_TUPLE_ARR_HASH[slot as usize] = fo_name_hash(name)
-                        LOWER_FN_TUPLE_ARR_MASK[slot as usize] = mask
-                        lower_fn_tuple_arr_name_store(slot, name)
-                        LOWER_FN_TUPLE_ARR_COUNT = slot + 1
-                    } else {
-                        lower_fn_tuple_arr_fault(3, name)
+                lower_fn_tuple_arr_insert(name, mask)
+            } else if (*rt).kind == TypeExprKind::TypeFn {
+                // Copilot follow-up (#2570): `fn choose() -> fn() -> ([f64; 2],
+                // i64)` -- choose's OWN return is a FUNCTION, not a tuple, so the
+                // branch above never applies to it. But `let f = choose();
+                // f().0[0]` needs to know that the function VALUE choose hands
+                // back returns a tuple with an array slot -- store that INNER
+                // mask under choose's own name, reusing the identical table
+                // lookup every consumer already uses
+                // (lower_named_fn_tuple_mask_ref, lower_fn_tuple_f64_array_mask).
+                // Safe to share: a function's declared return type is Tuple or
+                // Fn, never both, so a name's slot in this table is never
+                // ambiguous between "I return this tuple" and "I return a
+                // function that returns this tuple".
+                //
+                // Array half only -- the scalar half of a second-order tuple
+                // return has no home yet (returns_float's 1024+mask encoding is
+                // choose's OWN classification, read by other unrelated
+                // consumers, and repurposing it here would change what THEY see
+                // for a plain direct call to choose()). The reviewer's own
+                // example (`i64` in the non-array slot) does not need it; a
+                // second-order f64 SCALAR slot remains a known, narrower gap.
+                match (*rt).inner {
+                    Some(inner) => {
+                        if (*inner).kind == TypeExprKind::TypeTuple {
+                            let fn_ret_mask = lower_type_list_f64_array_mask(&(*inner).type_args, 0)
+                            if lower_type_list_has_unmarkable_f64_array(&(*inner).type_args, 0) {
+                                lower_fn_tuple_arr_fault(4, name)
+                            }
+                            lower_fn_tuple_arr_insert(name, fn_ret_mask)
+                        }
                     }
+                    None => {}
                 }
             }
         }
@@ -5261,7 +5302,14 @@ fn lowerer_lower_fn_params_mut(
                 // Derived straight from the parameter's declared type since
                 // there is no concrete function name to key the
                 // lower_fn_tuple_f64_arrays_collect prepass by -- see
-                // lower_type_expr_fn_return_tuple_mask.
+                // lower_type_expr_fn_return_tuple_mask. Same fail-closed rule
+                // as that prepass for a slot the mask cannot represent
+                // (LOWER_FN_TUPLE_ARR_MAX_SLOTS or later): refuse rather than
+                // let the parameter through with a mask that silently omits
+                // the array.
+                if lower_type_expr_fn_return_has_unmarkable_f64_array(&(*list).head.ty) {
+                    lower_fn_tuple_arr_fault(4, (*list).head.name)
+                }
                 let param_fn_tuple_mask = lower_type_expr_fn_return_tuple_mask(&(*list).head.ty)
                 if param_fn_tuple_mask != 0 {
                     lowerer_mark_local_tuple_float_mask_mut(lo, (*list).head.name, param_fn_tuple_mask)
@@ -6618,6 +6666,14 @@ fn lower_opt_type_tuple_float_mask(opt: &Option<Box<TypeExpr>>) -> i64 with Mut,
 // has no name to key that prepass by -- the whole point is genericity over
 // whichever concrete function the caller passes -- so it needs both halves
 // derived directly from ITS OWN declared type here instead.
+//
+// Copilot follow-up: the array branch is bounded by LOWER_FN_TUPLE_ARR_MAX_SLOTS
+// (31), NOT plain `bit < 32` like the scalar branch above it -- slot 31's array
+// bit would land on bit 63 of the combined i64 (array_bits * 4294967296), the
+// SIGN bit, overflowing exactly the way the comment on
+// LOWER_FN_TUPLE_ARR_MAX_SLOTS's declaration already warns about for the
+// named-function collector this mirrors. The scalar branch has no such
+// ceiling; only the array half needs it.
 fn lower_type_list_tuple_combined_mask(opt: &Option<Box<TypeExprList>>, bit: i64) -> i64 with Mut, Panic, Div {
     match *opt {
         Some(list) => {
@@ -6625,7 +6681,7 @@ fn lower_type_list_tuple_combined_mask(opt: &Option<Box<TypeExprList>>, bit: i64
             if bit < 32 {
                 if lower_type_expr_is_f64(&(*list).head) {
                     m = 1 << (bit as i32)
-                } else if lower_type_expr_is_array_of_f64(&(*list).head) {
+                } else if bit < LOWER_FN_TUPLE_ARR_MAX_SLOTS && lower_type_expr_is_array_of_f64(&(*list).head) {
                     m = (1 << (bit as i32)) * 4294967296
                 }
             }
@@ -6648,6 +6704,37 @@ fn lower_type_expr_fn_return_tuple_mask(te: &TypeExpr) -> i64 with Mut, Panic, D
     match (*te).inner {
         Some(ret) => lower_type_expr_tuple_combined_mask(&(*ret)),
         None => 0,
+    }
+}
+
+// Option-wrapping sibling for a LOCAL's own type annotation (`s.ty`), e.g.
+// `let f: fn() -> ([f64; 2], i64) = someAlias`. Copilot follow-up (#2570):
+// paired with lower_opt_type_tuple_float_mask in the annotated_tuple_mask
+// computation below so an explicit function-typed annotation is ALSO
+// consulted, not only a bare tuple annotation.
+fn lower_opt_type_fn_return_tuple_mask(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(te) => lower_type_expr_fn_return_tuple_mask(&(*te)),
+        None => 0,
+    }
+}
+
+// Copilot follow-up (#2570): companion to lower_type_expr_fn_return_tuple_mask,
+// same silent-truncation risk lower_type_list_has_unmarkable_f64_array exists
+// to catch for the named-function collector -- an `[f64; N]` at slot
+// LOWER_FN_TUPLE_ARR_MAX_SLOTS or later cannot be represented by the mask at
+// all (the mask above already refuses to set that bit, silently) and MUST
+// fail closed via lower_fn_tuple_arr_fault(4, ...) rather than let the
+// parameter through with a mask that quietly omits it. Reuses the existing
+// checker rather than duplicating its logic.
+fn lower_type_expr_fn_return_has_unmarkable_f64_array(te: &TypeExpr) -> bool with Mut, Panic, Div {
+    if (*te).kind != TypeExprKind::TypeFn { return false }
+    match (*te).inner {
+        Some(ret) => {
+            if (*ret).kind != TypeExprKind::TypeTuple { return false }
+            lower_type_list_has_unmarkable_f64_array(&(*ret).type_args, 0)
+        }
+        None => false,
     }
 }
 
@@ -16532,6 +16619,11 @@ impl Lowerer {
                         // index. lower_type_expr_fn_return_tuple_mask returns
                         // 0 for every non-fn-tuple-returning param type, so
                         // this is also the zero-init every other param needs.
+                        // Same fail-closed rule as the named-function
+                        // collector for a slot the mask cannot represent.
+                        if lower_type_expr_fn_return_has_unmarkable_f64_array(&(*list).head.ty) {
+                            lower_fn_tuple_arr_fault(4, (*list).head.name)
+                        }
                         (*(*locals).tuple_float_mask).values[idx as usize] = lower_type_expr_fn_return_tuple_mask(&(*list).head.ty)
                         (*locals).count = idx + 1
                     } else {
@@ -17949,7 +18041,15 @@ impl Lowerer {
         // pair()` needs this computed BEFORE s.name was bound as a local, or
         // the lookup below sees its own not-yet-initialized local instead of
         // the top-level function of the same name.
-        let annotated_tuple_mask = lower_opt_type_tuple_float_mask(&s.ty)
+        //
+        // Copilot follow-up (#2570): `let f: fn() -> ([f64; 2], i64) =
+        // someAlias` -- an EXPLICIT function-typed annotation, not a bare
+        // tuple one. lower_opt_type_tuple_float_mask alone only recognizes
+        // `s.ty` being directly TypeTuple; lower_opt_type_fn_return_tuple_mask
+        // covers TypeFn instead, reading its declared return's tuple mask the
+        // same way parameter binding does. The two are mutually exclusive (a
+        // type is never both), so summing them is safe.
+        let annotated_tuple_mask = lower_opt_type_tuple_float_mask(&s.ty) + lower_opt_type_fn_return_tuple_mask(&s.ty)
         var combined_tuple_mask = annotated_tuple_mask
         let init_scalar_bits = pre_bind_tuple_mask % 4294967296
         let init_array_bits = pre_bind_tuple_mask - init_scalar_bits

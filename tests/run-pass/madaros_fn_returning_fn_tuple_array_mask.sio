@@ -1,0 +1,46 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: FN_RETURNING_FN_TUPLE_ARRAY_MASK PASS
+//
+// Copilot follow-up (#2570). `fn choose() -> fn() -> ([f64; 2], i64)` --
+// choose's OWN declared return is a FUNCTION, not a tuple, so
+// lower_fn_tuple_f64_arrays_collect_one's existing TypeTuple branch never
+// applied to it and no table entry was ever recorded under choose's name.
+// `let f = choose(); f().0[0]` needs to know that the function VALUE choose
+// hands back returns a tuple with an array slot: expr_result_tuple_float_mask_ref's
+// ExprCall branch resolves `choose` via lower_named_fn_tuple_mask_ref, which
+// reads that same table -- empty for choose, so `f` was bound with mask 0
+// and the later indirect call read the f64 array through the integer path.
+// Reproduced standalone before this fix: printed the caller's own IEEE bit
+// pattern as an integer instead of the float itself.
+//
+// Fixed by extending the collector with a TypeFn branch: when a function's
+// declared return type is itself `fn() -> (tuple)`, store the INNER tuple's
+// array mask under the OUTER function's own name -- reusing the identical
+// table every consumer already reads, safe because a function's return type
+// is Tuple or Fn, never both.
+//
+//   `fn choose() -> fn() -> ([f64; 2], i64) { concrete }`
+//   `let f = choose(); let t = f(); t.0[0]`
+fn concrete() -> ([f64; 2], i64) {
+    var a: [f64; 2] = [0.0; 2]
+    a[0] = 8.5
+    (a, 1)
+}
+
+fn choose() -> fn() -> ([f64; 2], i64) {
+    concrete
+}
+
+fn main() -> i32 with IO, Mut, Panic {
+    var bad: i32 = 0
+
+    let f = choose()
+    let t = f()
+    if t.0[0] != 8.5 { bad = bad + 1 }
+
+    if bad == 0 {
+        println("FN_RETURNING_FN_TUPLE_ARRAY_MASK PASS")
+    }
+    bad
+}
