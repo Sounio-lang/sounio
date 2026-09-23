@@ -69,9 +69,10 @@ strip_noise() {
 # Copilot follow-up (#2570): scan forward from just after a matched `... ->`
 # tracking delimiter depth, so a tuple return type of ANY nesting depth is
 # consumed correctly instead of truncating at the first `)` or `,`. Ends at
-# the first `,` or unbalanced `)` seen at depth 0 -- that is either the next
-# parameter in the enclosing list, or the enclosing parameter list's own
-# closing paren, neither of which belongs to the function type itself.
+# an unbalanced `)` seen at depth 0, or a depth-0 `,` that genuinely starts
+# the next sibling parameter (see comma_starts_new_parameter below -- NOT
+# every depth-0 comma qualifies, since a "with" clause's own effect list is
+# itself comma-separated and does not end the declared type).
 #
 # Copilot follow-up (#2570): depth tracked only `(`/`)`. A multi-argument
 # GENERIC return type (`Result<i64, Error>` -- tuple-typed generics
@@ -357,8 +358,20 @@ function match_close_paren(line, open_pos,    i, n, c, prevc, depth, stack, pred
 # no-op -- never popped -- corrupting depth for the rest of the scan and
 # leaving the array real "]" unrecognized (stack[depth] was still "(", not
 # "[").
+#
+# Copilot follow-up (#2570): "<" is also a supported open_char now, for a
+# top-level NAMED generic wrapper (`Vec<fn() -> i64>`). The arrow check
+# (a ">" immediately preceded by "-" is never a closer) has to be its OWN
+# unconditional FIRST check here too, the same way step_open_or_other_close
+# already gives it one: when close_char is ">", a plain "if (c ==
+# close_char)" would otherwise treat the arrow inside "fn() -> i64" as the
+# generic closing ">" and return one character too early -- the exact
+# "Vec<fn() -> i64>" bug already hard-won once for step_open_or_other_close
+# itself (see its own comment), now needing the identical guard here
+# because this function intercepts the outer closer BEFORE delegating
+# anything else to that function.
 function match_close_bracket(line, open_pos, open_char,    close_char, i, n, c, prevc, depth, stack, pred, r) {
-    if (open_char == "[") { close_char = "]" } else { close_char = ")" }
+    if (open_char == "[") { close_char = "]" } else if (open_char == "<") { close_char = ">" } else { close_char = ")" }
     depth = 1
     stack[1] = open_char
     pred[1] = 0
@@ -367,7 +380,9 @@ function match_close_bracket(line, open_pos, open_char,    close_char, i, n, c, 
     i = open_pos + 1
     while (i <= n) {
         c = substr(line, i, 1)
-        if (c == close_char) {
+        if (c == ">" && prevc == "-") {
+            # inert arrow, never a closer regardless of what open_char is
+        } else if (c == close_char) {
             if (stack[depth] == open_char) { depth--; if (depth == 0) { return i } }
         } else if (c == ")") {
             if (stack[depth] == "(") { depth--; if (depth == 0) { return i } }
@@ -381,18 +396,73 @@ function match_close_bracket(line, open_pos, open_char,    close_char, i, n, c, 
     }
     return n + 1
 }
-function scan_tail(line, tail_start,    i, n, c, prevc, depth, stack, pred, r) {
+# Copilot follow-up (#2570): a depth-0 comma after "with" is NOT always the
+# end of the declared type -- an effects list is itself comma-separated
+# (`with IO, Mut`), and a fn-type nested as a return type carries its OWN
+# "with" clause independently of whatever effects clause encloses it
+# (`fn() -> fn() -> i64 with IO, Mut with Panic`: the INNER "with IO, Mut"
+# and the OUTER "with Panic" are two separate clauses, neither one a
+# sibling-parameter separator). scan_tail used to terminate on EVERY
+# depth-0 comma unconditionally, so it stopped right after "IO", never
+# reaching "Mut with Panic" -- count_with_clauses then saw only one "with"
+# for what is actually two effectful layers, misreporting a bare hit.
+#
+# Distinguishes a genuine sibling DECLARATION parameter (`, x: i64` -- an
+# identifier followed by ":") from another effect name in the SAME or a
+# later with-clause (`, Mut`, `, Mut with Panic` -- an identifier NOT
+# followed by ":") by peeking past the comma: skip whitespace, skip one
+# identifier, skip whitespace again, and check for ":".
+#
+# Copilot follow-up (#2570): gated on `seen_with` (only applied to a comma
+# AFTER a "with" has actually been seen in THIS tail scan) after a real
+# corpus run caught the naive "check every depth-0 comma" version
+# regressing a genuinely different shape: a nested fn-type used as ONE
+# BARE-TYPE entry inside the OWN parameter list of an OUTER fn-type (no "with"
+# anywhere at all) is followed by a SIBLING bare type with no colon either
+# (`fn(A, fn() -> TestResult, TestMetadata)` -- TestMetadata has no colon,
+# it is a type, not a "name: type" declaration parameter). Without the
+# `seen_with` gate, the colon-lookahead alone could not tell that comma
+# apart from an effect-list continuation and swallowed "TestMetadata)" into
+# the tail. Gating on `seen_with` restores the original (correct)
+# behavior for that case -- terminate on the very first depth-0 comma, no
+# "with" ever having been seen -- while still applying the colon-lookahead
+# once inside a genuine effects list, where it correctly tells "another
+# effect name" apart from "a real declaration parameter with a colon"
+# (the `with IO, Mut, x: i64` sibling-after-effects shape, NEGATIVO 28).
+function comma_starts_new_parameter(line, comma_pos,    p, n) {
+    n = length(line)
+    p = skip_ws(line, comma_pos + 1)
+    if (p > n || substr(line, p, 1) !~ /[A-Za-z_]/) { return 1 }
+    while (p <= n && substr(line, p, 1) ~ /[A-Za-z0-9_]/) { p++ }
+    p = skip_ws(line, p)
+    return (p <= n && substr(line, p, 1) == ":")
+}
+function scan_tail(line, tail_start,    i, n, c, prevc, depth, stack, pred, r, seen_with) {
     depth = 0
     prevc = ""
+    seen_with = 0
     n = length(line)
     i = tail_start
     while (i <= n) {
         c = substr(line, i, 1)
+        # Copilot follow-up (#2570): the word-boundary check before "with"
+        # must look at the RAW immediately-preceding character
+        # (substr(line, i-1, 1)), not `prevc` -- `prevc` deliberately skips
+        # whitespace (tracks the last NON-whitespace character, the
+        # established convention this whole scanner already relies on
+        # elsewhere), so for "i64 with" it holds "4" (alnum) right at the
+        # "w" of "with", even though a real whitespace character sits
+        # directly between them. Checking `prevc` here always misfired on
+        # exactly the common case (a space before "with"), so this
+        # detection never actually armed and the fix silently did nothing.
+        if (!seen_with && (i == tail_start || substr(line, i - 1, 1) !~ /[A-Za-z0-9_]/) && substr(line, i, 4) == "with" && substr(line, i + 4, 1) ~ /[ \t\n]/) {
+            seen_with = 1
+        }
         if (c == ")") {
             if (depth == 0) { return i }
             if (stack[depth] == "(") { depth-- }
         } else if (c == "," && depth == 0) {
-            return i
+            if (!seen_with || comma_starts_new_parameter(line, i)) { return i }
         } else {
             r = step_open_or_other_close(c, prevc, depth, stack, pred)
             if (r == -1) { return i }
@@ -690,6 +760,32 @@ function classify_fn_type_at(line, fn_pos, at_eof,    open_pos, close_pos, after
                 scan_entry_for_fn_types(line, p + 1, close_pos, 0)
                 pos = close_pos + 1
                 continue
+            }
+        } else if (substr(line, p, 1) ~ /[A-Za-z_]/) {
+            # Copilot follow-up (#2570): a declared type that wraps a
+            # function type in a NAMED GENERIC (`f: Vec<fn() -> i64>`) is
+            # a third wrapper shape alongside the tuple/array ones just
+            # above -- the token right after ":" is an identifier, not
+            # "fn"/"("/"[", so this fell through untouched too.
+            # scan_entry_for_fn_types can already find a generic-wrapped
+            # fn-type once reached (it already handles this shape from
+            # WITHIN an outer fn(...) parameter list, selftest 18) -- the
+            # gap was only ever in getting here from the top level. Skips
+            # the identifier, tolerates whitespace before "<" the same way
+            # the spaced-generic-return-type fix does, and matches the
+            # generic close via match_close_bracket("<", ...). Same
+            # same-line-only, no-deferral rule as the tuple/array wrappers,
+            # for the identical reason.
+            gp = p
+            while (gp <= length(line) && substr(line, gp, 1) ~ /[A-Za-z0-9_]/) { gp++ }
+            gp = skip_ws(line, gp)
+            if (substr(line, gp, 1) == "<") {
+                close_pos = match_close_bracket(line, gp, "<")
+                if (close_pos <= length(line)) {
+                    scan_entry_for_fn_types(line, gp + 1, close_pos, 0)
+                    pos = close_pos + 1
+                    continue
+                }
             }
         }
         pos = colon_pos + 1
@@ -1149,6 +1245,59 @@ selftest() {
   if bare_hits_of "$tmp/neg26.sio" | grep -q .; then
     echo "  FALHA NEGATIVO 26: tipo-funcao envolto em array com efeito proprio contado como nu"; rc=1
   else echo "  ok   NEGATIVO 26: tipo-funcao envolto em array com efeito proprio nao conta como nu"; fi
+  # NEGATIVE control 27 (#2570): a NESTED fn-type return whose OWN effects
+  # list has MULTIPLE comma-separated effects, followed by the outer
+  # fn-type's own effects list -- `fn() -> fn() -> i64 with IO, Mut with
+  # Panic`. scan_tail used to terminate at the first depth-0 comma
+  # unconditionally, stopping right after "IO" and never reaching "Mut with
+  # Panic": count_with_clauses then saw only one "with" for what is
+  # genuinely two effectful layers (inner "with IO, Mut", outer "with
+  # Panic"), misreporting a bare hit. Neither layer is actually bare.
+  printf 'fn use_it(f: fn() -> fn() -> i64 with IO, Mut with Panic) -> f64 { 0.0 }\n' > "$tmp/neg27.sio"
+  if bare_hits_of "$tmp/neg27.sio" | grep -q .; then
+    echo "  FALHA NEGATIVO 27: retorno aninhado com lista de efeitos multipla contado como nu"; rc=1
+  else echo "  ok   NEGATIVO 27: retorno aninhado com lista de efeitos multipla nao conta como nu"; fi
+  # NEGATIVE control 28: companion -- a genuine SIBLING parameter after a
+  # multi-effect with-clause must still correctly end the declared type
+  # there (comma_starts_new_parameter's "ident:" lookahead), not swallow the
+  # sibling parameter into the scan.
+  printf 'fn use_it(f: fn() -> i64 with IO, Mut, x: i64) -> f64 with Div { 0.0 }\n' > "$tmp/neg28.sio"
+  if bare_hits_of "$tmp/neg28.sio" | grep -q .; then
+    echo "  FALHA NEGATIVO 28: parametro irmao apos lista de efeitos multipla contado como nu"; rc=1
+  else echo "  ok   NEGATIVO 28: parametro irmao apos lista de efeitos multipla nao conta como nu"; fi
+  # POSITIVE control 27: companion -- the same multi-effect nested shape,
+  # but the OUTER layer is genuinely bare (no with-clause of its own), so
+  # exactly the outer layer must still be flagged.
+  printf 'fn use_it(f: fn() -> fn() -> i64 with IO, Mut) -> f64 { 0.0 }\n' > "$tmp/pos27.sio"
+  n27=$(bare_hits_of "$tmp/pos27.sio" | wc -l | tr -d ' ')
+  if [ "$n27" = "1" ]; then
+    echo "  ok   POSITIVO 27: apenas a camada externa nua e detectada quando a interna tem lista de efeitos multipla"
+  else echo "  FALHA POSITIVO 27: esperava 1 hit (so a camada externa), obteve $n27"; rc=1; fi
+  # POSITIVE control 29 (#2570): a TOP-LEVEL parameter whose declared type
+  # wraps a function type in a NAMED GENERIC -- `f: Vec<fn() -> i64>` --
+  # was invisible to the top-level scanner: the token right after ":" is an
+  # identifier ("Vec"), not "fn"/"("/"[", so this never reached
+  # scan_entry_for_fn_types at all, even though that function already finds
+  # a generic-wrapped fn-type once reached from WITHIN an outer fn(...)
+  # parameter list (selftest 18). This is a genuinely TOP-LEVEL wrapper, not
+  # nested inside another fn-type, unlike POSITIVO 18.
+  printf 'fn use_it(f: Vec<fn() -> i64>) -> f64 { 0.0 }\n' > "$tmp/pos29.sio"
+  if bare_hits_of "$tmp/pos29.sio" | grep -q .; then
+    echo "  ok   POSITIVO 29: tipo-funcao envolto em generico nomeado no nivel superior e nu e detectado"
+  else echo "  FALHA POSITIVO 29: tipo-funcao envolto em generico nomeado no nivel superior nu nao detectado"; rc=1; fi
+  # NEGATIVE control 29: companion -- same top-level named-generic wrapper,
+  # but the nested fn-type carries its own effects clause.
+  printf 'fn use_it(f: Vec<fn() -> i64 with Div>) -> f64 { 0.0 }\n' > "$tmp/neg29.sio"
+  if bare_hits_of "$tmp/neg29.sio" | grep -q .; then
+    echo "  FALHA NEGATIVO 29: tipo-funcao envolto em generico nomeado com efeito proprio contado como nu"; rc=1
+  else echo "  ok   NEGATIVO 29: tipo-funcao envolto em generico nomeado com efeito proprio nao conta como nu"; fi
+  # POSITIVE control 30: the spaced-generic form (identifier, whitespace,
+  # then "<") at the top level, mirroring the tolerance POSITIVO 24 already
+  # pins for a spaced generic RETURN type.
+  printf 'fn use_it(f: Vec <fn() -> i64>) -> f64 { 0.0 }\n' > "$tmp/pos30.sio"
+  if bare_hits_of "$tmp/pos30.sio" | grep -q .; then
+    echo "  ok   POSITIVO 30: generico nomeado espacado no nivel superior e nu e detectado"
+  else echo "  FALHA POSITIVO 30: generico nomeado espacado no nivel superior nu nao detectado"; rc=1; fi
   rm -rf "$tmp"
   echo "falhas: $rc"
   return $rc
