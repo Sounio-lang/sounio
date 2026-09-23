@@ -1128,8 +1128,32 @@ fn lower_fn_tuple_arr_has(name: Name) -> bool with Mut, Panic, Div {
 // `if mask != 0` gate skipped it entirely. The TypeTuple branch keeps
 // passing 0 for scalar_mask -- that case's scalar half lives in its own
 // returns_float code instead, as before.
+//
+// Copilot follow-up (#2570): the nonzero-only gate on the insert itself
+// (`if (mask != 0 || scalar_mask != 0) && ...`) broke the first-loaded-wins
+// identity this table documents above LOWER_FN_TUPLE_ARR_HASH: an
+// all-integer tuple-returning `helper` (mask 0, scalar_mask 0, e.g.
+// `fn helper() -> (Lowerer, i64)`, a common shape in this very file) left
+// no row at all, so a LATER same-named `helper` with a genuine f64 slot
+// inserted a fresh, unguarded positive entry -- the table then described the
+// SECOND declaration's layout for calls that still run the FIRST body.
+// Dropped the nonzero gate entirely: every name that reaches this function
+// (only Tuple- or Fn-returning declarations, both call sites in
+// lower_fn_tuple_f64_arrays_collect_one -- every OTHER return-type kind
+// never calls this at all) now reserves its slot the first time it is seen,
+// masks 0 and all, so a later duplicate's positive masks can never sneak
+// past `lower_fn_tuple_arr_has`. Readers are unaffected: `mask 0` and
+// `not found` already returned the identical 0 to every caller before this
+// change, so a zero-masked reservation changes no lookup's answer, only
+// which name occupies a slot. This does widen the population that consumes
+// the cap -- every Tuple/Fn-returning name now takes a slot instead of only
+// the f64-bearing ones -- but that population is still a small fraction of
+// this file's own ~11,000 functions (157 tuple-returning declarations in
+// lower.sio alone, measured via `grep -c`, none close to the existing
+// 4096-entry cap), unlike an unconditional reservation across every
+// function regardless of return-type shape would have been.
 fn lower_fn_tuple_arr_insert(name: Name, mask: i64, scalar_mask: i64) with Mut, Panic, Div, Alloc {
-    if (mask != 0 || scalar_mask != 0) && !lower_fn_tuple_arr_has(name) {
+    if !lower_fn_tuple_arr_has(name) {
         if LOWER_FN_TUPLE_ARR_COUNT < LOWER_FN_TUPLE_ARR_CAP {
             let slot = LOWER_FN_TUPLE_ARR_COUNT
             LOWER_FN_TUPLE_ARR_HASH[slot as usize] = fo_name_hash(name)

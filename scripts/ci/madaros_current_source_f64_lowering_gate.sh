@@ -153,7 +153,16 @@ fi
 # The cap AND the first fn past it: t<CAP> is the (CAP+1)th, so it is the one
 # whose entry did not fit. Naming it proves the sticky fault state carried the
 # name through the reset, not just a bare flag.
-grep -Fq "more than ${TUPLE_CAP} functions need f64-array tuple-slot metadata (their own tuple return, or a returned function's), starting at \`t${TUPLE_CAP}\`" "$TUPLE_DIR/over_cap.log" || {
+#
+# Copilot follow-up (#2570): lower.sio's reason-3 message was reworded from
+# "f64-array tuple-slot metadata" to "scalar/f64-array tuple-slot metadata"
+# once LOWER_FN_TUPLE_ARR_SCALAR started sharing this same cap (a scalar-only
+# f64 tuple slot can now trigger this fault too, not just an array one) --
+# this gate's expected substring was not updated to match, so a real,
+# correctly-worded cap rejection failed this gate as if the diagnostic had
+# silently changed. Matches the wording actually printed by
+# lower_fn_tuple_arr_fault reason 3 today.
+grep -Fq "more than ${TUPLE_CAP} functions need scalar/f64-array tuple-slot metadata (their own tuple return, or a returned function's), starting at \`t${TUPLE_CAP}\`" "$TUPLE_DIR/over_cap.log" || {
   tail -n 40 "$TUPLE_DIR/over_cap.log" >&2
   fail "${TUPLE_OVER}-tuple-fn capacity diagnostic was missing or changed"
 }
