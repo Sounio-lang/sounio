@@ -894,9 +894,24 @@ a spurious √dt dependence. **A band that changes when you change the step size
 reporting the integrator, not the chemistry.**
 
 This is the one place in this work where the oracle designation inverts: **the
-implementation under test is right and its reference implementation is wrong.** A
-reviewer taking the replica as ground truth and the √dt scaling as a physical
-result would have drawn the opposite conclusion.
+implementation under test's architecture is right — independent quadrature is
+not applied to a persistent parameter — and its reference implementation's is
+wrong.** A reviewer taking the replica as ground truth and the √dt scaling as a
+physical result would have drawn the opposite conclusion.
+
+**[W] Corrected 2026-09-23, a reviewer finding.** "The implementation under
+test is right" overstated what §7.5's own Threats to Validity note qualifies:
+the evidence here is ratio-only (step-invariance under a factor-4 dt change),
+which cannot exclude that Sounio's module simply dropped the
+persistent-parameter term rather than computing it correctly — H2 and O2 are
+ratio-1 in every table *regardless* of whether persistent-parameter UQ is
+computed at all, because their band is dominated by the step-invariant
+initial-condition seed. Absolute band *widths* against a finite-difference or
+GBS-referee magnitude are not measured here. What this section establishes is
+narrower and still true: the replica's per-step-independent quadrature is
+architecturally wrong for a persistent parameter, which the derivation above
+proves directly rather than by comparison. Whether the Sounio band's
+*magnitude* is also right is not yet shown.
 
 ### 5.5 The measured law is a theorem
 
@@ -1454,12 +1469,21 @@ difference is the audit working, not a defect.
 
 - Six probe artefacts referenced by the original preprint
   (`h2_precision_probe.sio`, `h2_probe2.sio`, `full_probe.sio`, `band_sweep.sio`,
-  `rep_prodfix.py`, `rep_1atm.py`) were **never committed to the repository**:
-  an object scan finds no blob under those names in any tree reachable from any
-  ref, and there are no stashes, worktrees or dangling objects. The wording to
-  be used for them, verbatim: *reconstructed from the described protocol on
-  2026-09-01; the original artefacts were not recoverable from the repository
-  history.* The reconstructions reproduce the **protocols**, not the originals.
+  `rep_prodfix.py`, `rep_1atm.py`) were **never committed to the repository**
+  in their original, preprint-cited form: an object scan of the repository's
+  history finds no blob matching the original content under those names in
+  any tree reachable from any ref, and there are no stashes, worktrees or
+  dangling objects. **[W] Corrected 2026-09-23, a reviewer finding.** That is
+  not the same as the names being absent from the *current* tree: all six now
+  exist at those same paths as committed reconstructions, each carrying a
+  header stating verbatim that it is a reconstruction, not the original, and
+  citing this section. `audit_provenance.py` therefore finds a producer
+  present for sections that cite these six files — correctly, since the
+  reconstruction is what a reader would actually run — which does not mean
+  the *original* measurement is recovered. The wording to be used for the
+  distinction: *reconstructed from the described protocol on 2026-09-01; the
+  original artefacts were not recoverable from the repository history.* The
+  reconstructions reproduce the **protocols**, not the originals.
 - `flame1d_replica.py` and `stdlib/constants/physical.sio` are upstream-only
   (§7.5), so any command citing them must be run against the upstream tree, not
   an unpacked snapshot. This is recorded explicitly because a section citing
@@ -1489,8 +1513,20 @@ development. All numerical results reported here were produced by executing the
 named commands and were transcribed from their output; no value was generated,
 interpolated, or carried forward by a language model. The author is responsible
 for the design of the measurements, for every claim made from them, and for the
-decisions recorded in §2.5 and §7.5. Repository-level disclosure is maintained in
-`AI_DISCLOSURE.md`.
+decisions recorded in §2.5 and §7.5.
+
+**[W] Corrected 2026-09-23, a reviewer finding.** This section previously
+pointed to a root-level `AI_DISCLOSURE.md` as where repository-level
+disclosure "is maintained." Verified: no such file exists in this repository
+— only artefact-specific disclosures under `tools/lsp/AI_DISCLOSURE.md` and
+`tools/mcp/AI_DISCLOSURE.md`, neither of which covers this manuscript.
+`CLAUDE.md` §9 directs that papers and external submissions "update
+`AI_DISCLOSURE.md` per artefact," which presupposes a repository-level file
+this repository does not yet have. Creating that file is a repository-wide
+governance decision outside this manuscript fix's scope; this disclosure is
+recorded here, in full, as the paper's own AI-disclosure statement, with the
+gap flagged rather than papered over with a citation to a file that does not
+exist.
 
 The 2026-09-23 revision additionally used a second, independent language model
 (xAI Grok 4.6) as an adversarial reviewer against the 2026-09-22 manuscript

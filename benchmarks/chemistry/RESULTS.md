@@ -684,10 +684,22 @@ git stash list; git worktree list; git fsck --dangling
 described protocol on 2026-09-01; the original artefacts were not recoverable
 from the repository history.*
 
-**None is recoverable.** They were never committed to this repository — the
-object scan finds no blob under any of those names in any tree reachable from
-any ref, and there are no stashes, no other worktrees and no dangling objects.
-They exist only as references in the preprint.
+**None of the originals is recoverable.** They were never committed to this
+repository in their original, preprint-cited form — the object scan above
+finds no blob matching that original content under any of those names in any
+tree reachable from any ref, and there are no stashes, no other worktrees and
+no dangling objects. They exist only as references in the preprint.
+
+**Corrected 2026-09-23, a reviewer finding.** The table above (`in worktree:
+no`, captured 2026-09-01) is no longer current: all six names now exist in
+the worktree as committed reconstructions, each header-marked as such and
+distinct from the unrecoverable originals — see section 4's own account at
+line 1711 ("are reconstructions") and section 6.3's summary at line 2271
+("Four reconstructed `.sio` probes and two reconstructed `.py` probes now
+exist and all check and run clean, but they reproduce the *protocols*, not
+the originals"). `audit_provenance.py` finds a producer present for sections
+citing these six files, which is correct for what a reader would actually
+run, not evidence that the original measurements were recovered.
 
 See section 6 for what was reconstructed in their place, and how it is marked.
 
