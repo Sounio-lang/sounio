@@ -161,7 +161,63 @@ strip_noise() {
 # character immediately before it is an identifier character; a "<"
 # preceded by anything else (whitespace, punctuation, start of the tail) is
 # left alone, same as any other ordinary character.
+#
+# Copilot follow-up (#2570): every fix above sharpened scan_tail, the part
+# that runs AFTER a match is found -- but PAT_TYPE itself, the part that
+# FINDS a match, has the exact same "naive `[^)]*`" flaw scan_tail's tail
+# once had. `register_test: fn(&!TestRunner, string, fn() -> TestResult,
+# TestMetadata)` (an existing line, tools/test-framework/src/lib.sio:390) has
+# a NESTED fn-type PARAMETER, not just a nested return type: PAT_TYPE's own
+# `fn\([^)]*\)` stops at the FIRST `)` -- the INNER `fn()`'s own closing
+# paren -- so it reads "fn(&!TestRunner, string, fn()" as if that whole span
+# were the OUTER type's parameter list, then finds " -> TestResult" right
+# after and treats THAT as the outer's return type. The result is one
+# garbled hit that is neither the real outer type (which has no arrow at all
+# -- itself bare, but for a different reason) nor the real inner one
+# (`fn() -> TestResult`, independently bare), and a NESTED fn-type parameter
+# is never visited on its own terms: whether IT carries an effects clause
+# has no bearing on whether it gets counted, so adding one there cannot
+# raise the ratchet, and removing one cannot lower it.
+#
+# Fixed by replacing PAT_TYPE-as-a-single-regex-match with a genuine
+# recursive descent: `match_close_paren` finds the TRUE matching `)` for a
+# given `(` via the same stack-matching scan_tail already uses (so it is
+# just as correct against arrows, refinements and generics nested inside).
+# `classify_fn_type_at`, given the position of an `fn(`, bracket-matches its
+# own parameter list, checks for its OWN arrow/effects via scan_tail (same
+# scope PAT_TYPE always had: no arrow at all is not counted here, matching
+# its existing "return position" exclusion rather than silently widening
+# what "bare" means), and then walks that parameter list splitting on its
+# own depth-0 commas -- any entry that starts with "fn(" is a nested
+# function-type parameter, classified by recursing into this SAME function.
+# That recursion is what visits `register_test`'s inner `fn() -> TestResult`
+# independently, and continues to whatever depth further nesting occurs at.
 AWK_SCAN='
+function match_close_paren(line, open_pos,    i, n, c, depth, stack) {
+    depth = 1
+    stack[1] = "("
+    n = length(line)
+    i = open_pos + 1
+    while (i <= n) {
+        c = substr(line, i, 1)
+        if (c == "<") {
+            if (i > 1 && substr(line, i - 1, 1) ~ /[A-Za-z0-9_]/) { depth++; stack[depth] = "<" }
+        } else if (c == "(" || c == "[" || c == "{") {
+            depth++
+            stack[depth] = c
+        } else if (c == ")") {
+            if (stack[depth] == "(") { depth--; if (depth == 0) { return i } }
+        } else if (c == ">") {
+            if (depth > 0 && stack[depth] == "<") { depth-- }
+        } else if (c == "]") {
+            if (depth > 0 && stack[depth] == "[") { depth-- }
+        } else if (c == "}") {
+            if (depth > 0 && stack[depth] == "{") { depth-- }
+        }
+        i++
+    }
+    return n + 1
+}
 function scan_tail(line, tail_start,    i, n, c, prev, depth, stack) {
     depth = 0
     prev = ""
@@ -202,20 +258,63 @@ function count_with_clauses(str,    tmp) {
     tmp = " " str
     return gsub(/[^A-Za-z0-9_]with[ \t]+[A-Za-z]/, "@", tmp)
 }
-{
-    line = $0
-    pos = 1
-    while (pos <= length(line) && match(substr(line, pos), /'"$PAT_TYPE"'/)) {
-        start = pos + RSTART - 1
-        matchlen = RLENGTH
-        tail_start = start + matchlen
+function classify_fn_type_at(line, fn_pos,    open_pos, close_pos, after, hit, hit_tail, fn_layers, with_n, tail_start, tail_end, entry_start, i, n, c, depth, stack, entry, trimmed) {
+    open_pos = fn_pos + 2
+    close_pos = match_close_paren(line, open_pos)
+    after = close_pos + 1
+    if (match(substr(line, after), /^[ \t]*->/)) {
+        tail_start = after + RLENGTH
         tail_end = scan_tail(line, tail_start)
         hit_tail = substr(line, tail_start, tail_end - tail_start)
-        hit = substr(line, start, tail_end - start)
+        hit = substr(line, fn_pos, tail_end - fn_pos)
         fn_layers = 1 + count_fn_parens(hit_tail)
         with_n = count_with_clauses(hit_tail)
         if (with_n < fn_layers) { print hit }
-        pos = start + matchlen
+    } else {
+        tail_end = close_pos + 1
+    }
+    entry_start = open_pos + 1
+    i = entry_start
+    depth = 0
+    n = close_pos
+    while (i < n) {
+        c = substr(line, i, 1)
+        if (c == "," && depth == 0) {
+            entry = substr(line, entry_start, i - entry_start)
+            trimmed = entry
+            sub(/^[ \t]+/, "", trimmed)
+            if (trimmed ~ /^fn\(/) { classify_fn_type_at(line, entry_start + (length(entry) - length(trimmed))) }
+            entry_start = i + 1
+        } else if (c == "<") {
+            if (i > entry_start && substr(line, i - 1, 1) ~ /[A-Za-z0-9_]/) { depth++; stack[depth] = "<" }
+        } else if (c == "(" || c == "[" || c == "{") {
+            depth++
+            stack[depth] = c
+        } else if (c == ")") {
+            if (depth > 0 && stack[depth] == "(") { depth-- }
+        } else if (c == ">") {
+            if (depth > 0 && stack[depth] == "<") { depth-- }
+        } else if (c == "]") {
+            if (depth > 0 && stack[depth] == "[") { depth-- }
+        } else if (c == "}") {
+            if (depth > 0 && stack[depth] == "{") { depth-- }
+        }
+        i++
+    }
+    entry = substr(line, entry_start, n - entry_start)
+    trimmed = entry
+    sub(/^[ \t]+/, "", trimmed)
+    if (trimmed ~ /^fn\(/) { classify_fn_type_at(line, entry_start + (length(entry) - length(trimmed))) }
+    return tail_end
+}
+{
+    line = $0
+    pos = 1
+    while (pos <= length(line) && match(substr(line, pos), /:[ \t]*fn\(/)) {
+        mstart = pos + RSTART - 1
+        mlen = RLENGTH
+        fn_pos = mstart + mlen - 3
+        pos = classify_fn_type_at(line, fn_pos)
     }
 }
 '
@@ -389,6 +488,30 @@ selftest() {
   if bare_hits_of "$tmp/neg11.sio" | grep -q .; then
     echo "  FALHA NEGATIVO 11: tipo-funcao com refinamento (comparacao <) e efeito proprio contada como nu"; rc=1
   else echo "  ok   NEGATIVO 11: tipo-funcao com refinamento (comparacao <) e efeito proprio nao conta como nu"; fi
+  # POSITIVE control 12 (#2570): a NESTED fn-type PARAMETER (not a nested
+  # RETURN type -- the earlier findings), pinning the exact reported live
+  # case (tools/test-framework/src/lib.sio:390): `register_test: fn(...,
+  # fn() -> TestResult, ...)`. PAT_TYPE's own `fn\([^)]*\)` stopped at the
+  # FIRST `)` -- the inner fn()'s own closing paren -- so this used to
+  # produce one garbled hit spanning neither the real outer type (which has
+  # no arrow at all, so is out of this gate's scope the same way any
+  # arrow-less parameter type already is) nor the real inner one, and the
+  # inner `fn() -> TestResult` was never visited on its own terms at all.
+  # Confirms classify_fn_type_at's recursion into the parameter list finds
+  # it independently.
+  printf 'fn use_it(register_test: fn(i64, string, fn() -> TestResult, TestMetadata)) -> f64 { 0.0 }\n' > "$tmp/pos12.sio"
+  if bare_hits_of "$tmp/pos12.sio" | grep -q "TestResult"; then
+    echo "  ok   POSITIVO 12: parametro fn-type aninhado (nao retorno) e nu"
+  else echo "  FALHA POSITIVO 12: tipo-funcao aninhado como PARAMETRO nao detectado"; rc=1; fi
+  # NEGATIVE control 12 (#2570): companion to POSITIVE 12 -- the same nested
+  # PARAMETER shape, but the nested type carries its own effects clause.
+  # Without this control, "count every entry inside a parameter list as
+  # bare, unconditionally" would also pass POSITIVE 12 while never being
+  # able to lower the ratchet by adding effects to a nested parameter.
+  printf 'fn use_it(register_test: fn(i64, string, fn() -> TestResult with IO, TestMetadata)) -> f64 { 0.0 }\n' > "$tmp/neg12.sio"
+  if bare_hits_of "$tmp/neg12.sio" | grep -q "TestResult"; then
+    echo "  FALHA NEGATIVO 12: parametro fn-type aninhado COM efeito proprio contado como nu"; rc=1
+  else echo "  ok   NEGATIVO 12: parametro fn-type aninhado com efeito proprio nao conta como nu"; fi
   rm -rf "$tmp"
   echo "falhas: $rc"
   return $rc
