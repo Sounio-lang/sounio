@@ -360,7 +360,7 @@ User Source Code
 
 ## References
 
-- **FFI Specification**: [Runtime FFI Guide](./RUNTIME_FFI.md)
-- **Bytecode Spec**: [Bytecode Format](./BYTECODE_SPEC.md)
-- **Self-Hosting Plan**: [Original Plan](../crates/souc/src/compiler_loader.rs) (comments)
-- **Validation Tests**: [Test Suite](../crates/souc/tests/self_hosting_validation.rs)
+- **FFI Specification**: Runtime FFI Guide
+- **Bytecode Spec**: Bytecode Format
+- **Self-Hosting Plan**: Original Plan (in `crates/souc/src/compiler_loader.rs`, since removed)
+- **Validation Tests**: Test Suite
