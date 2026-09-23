@@ -153,7 +153,7 @@ let angle = 90.0  // degrees
 // Scientific measurement - uncertain (canonical free-fn form)
 let temperature = ep_measured(37.2, 0.1)
 // Note: ep_measured stores variance = std^2; the source/instrument lives in
-// stdlib/epistemic/provenance.sio, not as a field of Epistemic.
+// stdlib/epistemic/prov.sio, not as a field of Epistemic.
 ```
 
 ### How is uncertainty propagated?
@@ -188,7 +188,7 @@ let count: i32 = 5  // Counting objects - no uncertainty
 
 ### Can I compare Epistemic values?
 
-Yes, but comparisons are probabilistic:
+Yes — compare the point values directly, and gate on confidence separately:
 ```sio
 use epistemic::knowledge::{Epistemic, ep_val, ep_is_credible}
 
@@ -198,8 +198,10 @@ let b = Epistemic { val: 12.0, variance: 1.0, confidence: 900 }
 // Deterministic comparison (point values).
 if ep_val(&a) < ep_val(&b) { }
 
-// Combined credibility gate (canonical equivalent of "with_confidence 0.95"):
-// 95% threshold = integer 950 on the 0..1000 scale.
+// Combined credibility gate: require both values to carry at least 0.95
+// (950/1000) confidence. ep_is_credible compares each value's integer
+// confidence score against the threshold; it does not compute the probability
+// that a < b.
 if ep_is_credible(&a, 950) && ep_is_credible(&b, 950) {
     // proceed with the comparison as a measured assertion
 }
@@ -274,7 +276,7 @@ Yes. Performance comparable to Rust/C++:
 
 Minimal:
 - `Epistemic` is `val: f64` + `variance: f64` + `confidence: i64` (24 bytes total). See `stdlib/epistemic/knowledge.sio`.
-- Propagation adds ~2–5% overhead vs raw arithmetic (GUM δ-method)
+- Propagation adds a small, operation-dependent overhead per operation (three extra `f64` fields plus a handful of GUM δ-method arithmetic ops); the exact cost depends on the operation mix and the compiler path.
 - GPU kernels can vectorize uncertainty calculations
 
 ### When should I use GPU acceleration?
@@ -322,16 +324,17 @@ fn main() {
 
 ### Can I call Sounio from Python?
 
-Yes, via PyO3 bindings (experimental):
+Yes, via PyO3 bindings (experimental — not part of the checked public artifact):
 ```python
-# Prototype PyO3 bindings are not part of the checked public artifact.
 import sounio
 
-# Canonical stdlib struct shape: Epistemic { val, std_dev, ... }.
-e1 = sounio.Epistemic(10.0, std_dev=0.5)
-e2 = sounio.Epistemic(5.0,  std_dev=0.2)
-print(f"Result: {e1.val} ± {e1.std_dev}")
-# (operator overloading and named-arg construction are prototype-only)
+# Experimental PyO3 binding shape: sounio.Knowledge(value, epsilon, provenance),
+# where epsilon is the standard uncertainty (k=1). This mirrors the Sounio
+# Epistemic (value, variance = epsilon**2, integer confidence) but is a
+# standalone prototype API, not the canonical stdlib surface.
+e1 = sounio.Knowledge(10.0, epsilon=0.5)
+e2 = sounio.Knowledge(5.0,  epsilon=0.2)
+print(f"Result: {e1.value} ± {e1.epsilon}")
 ```
 
 ### Can I use Rust crates?

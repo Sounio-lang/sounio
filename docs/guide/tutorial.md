@@ -173,7 +173,7 @@ let mass = ep_measured(10.5, 0.2)   // val=10.5, std_dev=0.2, confidence=900/100
 print("Mass: ", ep_val(&mass), " ± ", ep_std(&mass), " kg")
 print("Confidence: ", ep_confidence(&mass), "/1000  (", ep_confidence(&mass) / 10, "%)")
 
-// Note: the source/instrument lives in stdlib/epistemic/provenance.sio,
+// Note: the source/instrument lives in stdlib/epistemic/prov.sio,
 // not as a field of Epistemic.
 ```
 
@@ -190,8 +190,8 @@ let width  = Epistemic { val: 3.0, variance: 0.0025, confidence: 900 }
 
 // Area = length * width (GUM delta method via ep_mul, uncorrelated).
 let area = ep_mul(&length, &width)
-// Var(area) = w^2 * Var(L) + l^2 * Var(W) + Var(L)*Var(W)
-//         = 9 * 0.01    + 25 * 0.0025   + 0.01 * 0.0025
+// Var(area) = w^2 * Var(L) + l^2 * Var(W)   (GUM delta, uncorrelated: no Var(L)·Var(W) term)
+//         = 9 * 0.01    + 25 * 0.0025
 //         ≈ 0.1525,  sigma ≈ 0.39
 print("Area: ", ep_val(&area), " ± ", ep_std(&area))
 ```
@@ -220,18 +220,18 @@ fn administer_drug(dose: Epistemic) with IO {
 ### Provenance Tracking
 
 ```sio
-use epistemic::knowledge::{Epistemic, ep_mul, ep_val}
+use epistemic::knowledge::{Epistemic, ep_mul, ep_val, ep_scale}
 
 let measurement1 = Epistemic { val: 100.0, variance: 25.0, confidence: 900 }
 
-// Scalar arithmetic on an Epistemic takes the bare value (use epistemic fns for variance propagation).
-let result = measurement1 * 2.0
-print("Result: ", ep_val(measurement1) * 2.0)
+// Scale an Epistemic by a scalar with ep_scale (propagates variance via GUM δ-method).
+let result = ep_scale(&measurement1, 2.0)
+print("Result: ", ep_val(&result))
 ```
 
 > Note: the `Source` struct with `instrument` / `calibration_date` / `operator`
 > fields, and `result.provenance.instrument`, are **not** in the checked
-> surface. Provenance is tracked separately in `stdlib/epistemic/provenance.sio`;
+> surface. Provenance is tracked separately in `stdlib/epistemic/prov.sio`;
 > `Epistemic` itself carries only `val`, `variance`, and `confidence`.
 
 ---
@@ -309,9 +309,11 @@ Sounio has first-class support for physical units, preventing dimensional errors
 
 ### Basic Units (Quantity form)
 
-> Units-as-type-spellets (`let distance: m = 100.0`, `fn f(x: kg) -> N`) are
-> **aspirational**. The checked surface is `Quantity` + `dim_*()` constructors
-> from `stdlib/units/lib.sio`; see `tests/stdlib/units/test_units_stdlib.sio`.
+> Units-as-type spellings (`let distance: m = 100.0`, `fn f(x: kg) -> N`) and
+> derived units (`f64<m/s>`) ARE part of the checked surface and are exercised by
+> current-source tests (`tests/frontend/unit_derived_velocity_decl_current_source.sio`,
+> `tests/frontend/unit_f64_unit_expr_velocity_current_source.sio`). The runtime
+> `Quantity` + `dim_*()` form is the complementary representation.
 
 ```sio
 use units::lib::*   // dim_mass, dim_length, dim_time, quantity_new, quantity_div, ...
@@ -320,26 +322,29 @@ let distance = quantity_new(100.0, 0.0, dim_length())  // meters
 let time     = quantity_new(10.0,  0.0, dim_time())     // seconds
 let velocity = quantity_div(distance, time)
 
-// Compile-time unit checking (via dim_eq / quantity_is_compatible).
+// Runtime unit compatibility (checked by quantity_add via assert(dim_eq) /
+// quantity_is_compatible).
 let mass  = quantity_new(5.0, 0.0, dim_mass())
 let force = quantity_mul(mass, quantity_new(9.8, 0.0, dim_acceleration()))
 
-// Dimension mismatch:
-let invalid = quantity_add(distance, time)
-// quantity_is_compatible(distance, time) == false
+// Dimension mismatch panics at runtime inside quantity_add (assert dim_eq):
+let invalid = quantity_add(distance, time)  // runtime panic, not a compile-time error
 ```
 
 ### Custom Units (Quantity form)
 
-> `mg`, `mL`, `mg*h/L`, `L/h` as type-spellets are **aspirational**. The
-> checked surface is `Quantity` with `dim_*()` dimensions
-> (`stdlib/units/lib.sio`).
+> `mg`, `mL`, `mg*h/L`, and `L/h` ARE supported as unit spellings and `unit`
+> declarations in the checked surface (`tests/run-pass/unit_same_add.sio`;
+> `unit Clearance = L/h`). The runtime `Quantity` with `dim_*()` dimensions
+> (`stdlib/units/lib.sio`) is the complementary representation.
 
 ```sio
 use units::lib::*;
 
-let dose         = quantity_new(500.0, 0.0, dim_mass())
-let volume       = quantity_new(250.0, 0.0, dim_volume())
+let dose    = quantity_new(500.0, 0.0, dim_mass())
+let volume  = quantity_new(250.0, 0.0, UnitDim {
+    mass: 0, length: 3, time: 0, temperature: 0, amount: 0, current: 0, luminosity: 0,
+})
 let concentration = quantity_div(dose, volume)
 
 // Units in function signatures — pass Quantity directly.
@@ -377,6 +382,7 @@ let temp_f_equiv = convert_kelvin_to_celsius(temp_k)  // 25.0
 use epistemic::knowledge::{
     Epistemic, ep_measured, ep_add, ep_mul, ep_sqrt_ep, ep_val, ep_std
 }
+use epistemic::propagate::{exp}
 
 // Measurements with uncertainty (canonical free-fn form).
 let x = ep_measured(10.0, 0.5)
@@ -384,23 +390,24 @@ let y = ep_measured(5.0,  0.2)
 
 // All operations propagate uncertainty via GUM delta method.
 let sum      = ep_add(&x, &y)                  // Var(sum) = Var(x)+Var(y)  (uncorrelated)
-let product  = ep_mul(&x, &y)                  // Var(prod) = y^2 Var(x) + x^2 Var(y) + ...
+let product  = ep_mul(&x, &y)                  // Var(prod) = y^2 Var(x) + x^2 Var(y)  (uncorrelated)
 let sqrt_x   = ep_sqrt_ep(&x)                 // Var(sqrt(x)) = Var(x)/(4 x)
-let exp_val  = /* std::lib/epistemic/propagate.sio::ep_exp */ f64::exp(ep_val(&x))
+let exp_val  = exp(x)                          // Epistemic -> Epistemic via GUM delta propagation
 
 print("sqrt(x) = ", ep_val(&sqrt_x), " ± ", ep_std(&sqrt_x))
 ```
 
 > Note: `Knowledge::new(...)` is aspirational; the canonical constructor is
 > `Epistemic { val, variance, confidence }` (`tests/run-pass/ep_gum_covariance.sio`)
-> or `ep_measured(val, std_dev)`. `sqrt`/`exp` are provided as `ep_sqrt_ep` and
-> `exp` on bare `f64`; `sqrt` is not a free fn on `Epistemic`.
+> or `ep_measured(val, std_dev)`. Epistemic-aware `sqrt`/`exp` are provided as
+> `ep_sqrt_ep` (in `epistemic::knowledge`) and `exp` (in `epistemic::propagate`);
+> there is no `f64::exp` builtin and no scalar `*` operator on `Epistemic`.
 
 ### ODE Solvers
 
-> **Aspirational surface — not in the checked artifact.** `stdlib::ode` is not
-> present in `git ls-files stdlib/ode*` and is tracked in
-> `docs/compiler/KNOWN_LIMITATIONS.md`. The shipped source-tracked propagation
+> **Source-tracked surface.** `stdlib::ode` is present in the repository and
+> provides RK4, RK45, Tsit5, BDF, epistemic integration, and PBPK sources
+> (`stdlib/ode/solver.sio`). The shipped source-tracked uncertainty propagation
 > lives in `stdlib/epistemic/affine` (anchor: `tests/run-pass/affine_shared_source_add.sio`,
 > `affine_product_delta.sio`). For closed-form physics, see
 > `stdlib/physics/mechanics` (`kinetic_energy_q`, `hookean_force_q`, etc.,
@@ -408,20 +415,22 @@ print("sqrt(x) = ", ep_val(&sqrt_x), " ± ", ep_std(&sqrt_x))
 
 ### Linear Algebra
 
-> **Aspirational surface — not in the checked artifact.** `stdlib::linalg` is
-> not present in `git ls-files stdlib/linalg*`. The shipped GPU/back-end matrix
-> primitives are in `stdlib/gpu/clifford_kernel.sio` and the clifford-kernel
-> helpers (`cl_gpu_mul_batch`, `sed_f3_batch`, `cd_gpu_count_tk`); see
+> **Source-tracked surface.** `stdlib::linalg` is present (`matrix.sio`,
+> `vector.sio`, `eigen.sio`, `factorize.sio`) with host-side matrix/vector and
+> eigendecomposition APIs. GPU-accelerated matrix primitives also live in
+> `stdlib/gpu/clifford_kernel.sio` and the clifford-kernel helpers
+> (`cl_gpu_mul_batch`, `sed_f3_batch`, `cd_gpu_count_tk`); see
 > `examples/gpu/vec_add.sio` and `examples/gpu.sio` for the canonical kernel
 > surface.
 
 ### Signal Processing
 
-> **Aspirational surface — not in the checked artifact.** `stdlib::signal`
-> is not present in `git ls-files stdlib/signal*`. The shipped GPU FFT lives in
-> `stdlib/gpu/fft.sio`. For host-side numeric transforms of epistemic values,
-> use `ep_sqrt_ep`, `ep_square`, `ep_merge`, and `ep_*_cov` from
-> `epistemic::knowledge` (anchor: `tests/run-pass/ep_gum_covariance.sio`).
+> **Source-tracked surface.** `stdlib::signal` is present and
+> `stdlib/signal/lib.sio` publicly re-exports FFT construction, forward/inverse
+> transforms, magnitude, phase, power spectrum, and epistemic FFT APIs. The
+> shipped GPU FFT also lives in `stdlib/gpu/fft.sio`. For host-side numeric
+> transforms of epistemic values, use `ep_sqrt_ep`, `ep_square`, `ep_merge`, and
+> `ep_*_cov` from `epistemic::knowledge` (anchor: `tests/run-pass/ep_gum_covariance.sio`).
 
 ---
 
@@ -445,13 +454,15 @@ fn sqrt(x: Positive) -> f64 {
 
 ### Linear Types
 
-> **Aspirational syntax.** `linear struct FileHandle { … }` is not in the
-> checked source surface. The shipped source-tracked ownership semantics live in
-> `stdlib/epistemic/affine` (anchor: `tests/run-pass/affine_shared_source_add.sio`).
-> The `linear` keyword on a `struct` is not part of the checked artifact and is
-> tracked in `docs/compiler/KNOWN_LIMITATIONS.md`. For file handle ownership in
-> source, see `stdlib/coordination/fleet_transaction.sio` and the `linear_ad`
-> module of `stdlib/autodiff/linear_ad.sio`.
+> **Checked surface.** `linear struct FileHandle { … }` is part of the checked
+> source surface — `tests/run-pass/linear_balanced_branches.sio` uses it
+> directly, and shipped runtime code uses linear structs extensively. The
+> `linear` keyword enforces single-use ownership at check time (the checker emits
+> `E039` for use-after-consumption and `E040` for an unconsumed linear value).
+> The source-tracked ownership semantics also live in `stdlib/epistemic/affine`
+> (anchor: `tests/run-pass/affine_shared_source_add.sio`). For file handle
+> ownership in source, see `stdlib/coordination/fleet_transaction.sio` and the
+> `linear_ad` module of `stdlib/autodiff/linear_ad.sio`.
 
 ```sio
 struct FileHandle {
@@ -464,14 +475,15 @@ fn close(handle: FileHandle) {
 
 let file = open("data.txt")
 close(file)
-// Source-tracked ownership is unenforced in source; the compiler emits E249
-// for access-after-move at the IR level.
+// Source-tracked ownership is enforced at check time; the compiler emits E039
+// for use-after-consumption (and E040 if a linear value is left unconsumed).
 ```
 
 ### GPU Computing
 
 ```sio
-use gpu::*   // exports kernel fn marker, gpu_thread_id_x, perform GPU.{launch,sync}
+use gpu::*   // exports Clifford/sedenion GPU helpers (e.g. cl_gpu_mul_batch, sed_f3_batch)
+// kernel fn, gpu_thread_id_x, and perform GPU.{launch,sync} are compiler surfaces, not gpu::* exports
 
 // Mark the function as a GPU kernel; effect `GPU` declares GPU execution.
 kernel fn vector_add(n: i64, a: &[f64], b: &[f64], c: &![f64])
@@ -484,10 +496,10 @@ kernel fn vector_add(n: i64, a: &[f64], b: &[f64], c: &![f64])
     }
 }
 
-// Host-side dispatch (canonical pattern):
-perform GPU.launch(vector_add)
-    on (grid: [n], block: [64])
-    with (args: (n, a, b, c))
+// Host-side dispatch (canonical pattern, examples/gpu.sio):
+let grid = (16, 1, 1)
+let block = (64, 1, 1)
+perform GPU.launch(vector_add, grid, block)(n, a, b, c)
 perform GPU.sync()
 ```
 

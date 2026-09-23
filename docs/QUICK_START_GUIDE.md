@@ -44,7 +44,7 @@ use epistemic::knowledge::{ep_measured, ep_add}
 // Uncertainty is tracked automatically; std-dev form (ep_measured stores variance = std^2).
 let dose = ep_measured(500.0, 2.5)  // 500, σ=2.5, default confidence 900/1000
 let volume = ep_measured(50.0, 0.2)  // 50, σ=0.2, default confidence 900/1000
-let concentration = ep_add(&dose, &volume)  // GUM δ-method, uncorrelated
+let concentration = ep_div(&dose, &volume)  // GUM δ-method: concentration = dose / volume
 ```
 
 ### Your First Sounio Program
@@ -64,7 +64,7 @@ use epistemic::knowledge::{
     ep_measured, ep_val, ep_std, ep_confidence, ep_mul
 }
 
-fn main() -> i32 {
+fn main() -> i32 with IO, Mut, Div, Panic {
     // Every measurement knows its uncertainty (canonical free-fn form).
     let temperature = ep_measured(25.5, 0.3)
     let pressure = ep_measured(101.3, 0.5)
@@ -106,7 +106,7 @@ When you add/multiply/divide measurements:
 
 #### 3. Confidence Gates
 ```sio
-use epistemic::knowledge::{ep_is_credible}
+use epistemic::knowledge::{ep_is_credible, ep_confidence}
 
 // Only proceed if we are confident enough (integer threshold 950 ≈ 95%).
 if ep_is_credible(&concentration, 950) {
@@ -124,7 +124,7 @@ if ep_is_credible(&concentration, 950) {
 use epistemic::knowledge::{Epistemic, ep_div, ep_is_credible, ep_confidence}
 
 // Simple PK model with uncertainty (canonical Epistemic; see Quantity for units).
-fn calculate_auc(dose: Epistemic, clearance: Epistemic) -> Epistemic {
+fn calculate_auc(dose: Epistemic, clearance: Epistemic) -> Epistemic with IO, Div, Panic {
     // AUC = Dose / Clearance (with GUM variance propagation).
     let auc = ep_div(&dose, &clearance)
 
@@ -138,7 +138,7 @@ fn calculate_auc(dose: Epistemic, clearance: Epistemic) -> Epistemic {
 
 > **Units-as-type-parameters** (`Epistemic<mg>`, `Epistemic<L/h>`) are **not**
 > in the checked surface. The dimensional story lives in `stdlib/units/lib.sio`
-> via `Quantity { val, uncertainty, dim: UnitDim }` and `dim_mass()`,
+> via `Quantity { value, uncertainty, dim: UnitDim }` and `dim_mass()`,
 > `dim_length()`, `dim_time()`. See `tests/stdlib/units/test_units_stdlib.sio`
 > for the canonical shape.
 
@@ -147,7 +147,7 @@ fn calculate_auc(dose: Epistemic, clearance: Epistemic) -> Epistemic {
 use epistemic::knowledge::{Epistemic, ep_merge}
 
 // Inverse-variance-weighted fusion of multiple measurements (reduces σ).
-fn analyze_experiment(measurements: [Epistemic; 8]) -> Epistemic {
+fn analyze_experiment(measurements: [Epistemic; 8]) -> Epistemic with IO, Div, Panic {
     var result = measurements[0]
     for i in 1..8 {
         result = ep_merge(&result, &measurements[i])

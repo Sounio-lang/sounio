@@ -34,7 +34,7 @@ A programming language feature that allows modeling side effects (I/O, state, ex
 **AUC (Area Under the Curve)**
 In pharmacokinetics, the integral of drug concentration over time. A key measure of drug exposure.
 
-> Dimensions: in the checked surface, AUC is `Quantity { val, uncertainty, dim: dim_mass() × dim_length()^(-3) × dim_time()^(-1) }` from `stdlib/units/lib.sio`. Units-as-type-spellets (`mg*h/L`) are aspirational — see `docs/compiler/KNOWN_LIMITATIONS.md`.
+> Dimensions: in the checked surface, AUC is `Quantity { value, uncertainty, dim: dim_mass() × dim_length()^(-3) × dim_time()^(1) }` (concentration × time). Unit spellings such as `mg`, `mL`, and `unit Clearance = L/h` are implemented and tested (`tests/run-pass/unit_same_add.sio`); the runtime `Quantity` form is the complementary representation.
 
 ---
 
@@ -54,7 +54,7 @@ Type checking algorithm that combines type synthesis (bottom-up) and type checki
 Rate at which a drug is removed from the body. Typical unit: `L/h`.
 
 **Confidence Interval**
-Range within which the true value lies with a stated probability (e.g., 95%). Tracked in `Epistemic.confidence` (integer 0..1000; e.g. 950 ≈ 95%).
+Range within which the true value lies with a stated probability (e.g., 95%). In Sounio, `Epistemic.confidence` is an integer *credibility score* (0..1000; 950 ≈ 0.95) carried alongside the value — it is a point rating, not a stored interval bound or coverage probability. Gate on it with `ep_is_credible(&e, 950)`, and build interval bounds yourself from `ep_val(&e)` and `ep_std(&e)`.
 
 **Confidence Gate**
 Conditional execution based on epistemic confidence:
@@ -143,14 +143,14 @@ Construction: `ep_measured(val, std_dev)` stores `variance = std_dev^2` and `con
 
 Arithmetic (free-fn form, portable across engines; see `tests/stdlib/epistemic/test_knowledge_madaros_import_e2e.sio`): `ep_add` / `ep_sub` / `ep_mul` / `ep_div` / `ep_scale` / `ep_shift` apply GUM δ-method, **uncorrelated** (covariance-aware variants `ep_add_cov` / `ep_sub_cov` / `ep_mul_cov` / `ep_div_cov` take a numeric covariance; see `tests/run-pass/ep_gum_covariance.sio`). Merge via `ep_merge` (inverse-variance weighted).
 
-`provenance` is **not** a field of `Epistemic`; it is tracked separately in `stdlib/epistemic/provenance.sio`.
+`provenance` is **not** a field of `Epistemic`; it is tracked separately in `stdlib/epistemic/prov.sio`.
 
 ---
 
 ## L
 
 **Linear Type**
-A type that must be used exactly once. Useful for resources like file handles that must be properly closed. Sounio uses linear/affine ownership, but the source-level `linear` keyword on a struct is **not** in the checked public surface (it is in `stdlib/compiler/linear/modality.sio` as an IR constant). The shipped source-tracked ownership semantics live in `stdlib/epistemic/affine`; see `tests/run-pass/affine_shared_source_add.sio`.
+A type that must be used exactly once. Useful for resources like file handles that must be properly closed. Sounio enforces linear use at check time: a `linear struct` must be consumed on every path (the checker emits `E039` for use-after-consumption and `E040` for an unconsumed linear value). The source-level `linear` keyword on a struct is part of the checked surface — see `tests/run-pass/linear_balanced_branches.sio`. The shipped source-tracked ownership semantics also live in `stdlib/epistemic/affine`; see `tests/run-pass/affine_shared_source_add.sio`.
 
 ---
 
@@ -170,7 +170,7 @@ Statistical technique using repeated random sampling. Supported in `stdlib.monte
 ## O
 
 **ODE (Ordinary Differential Equation)**
-Equation involving derivatives of a function. Common in scientific modeling. ODE integrators are *not* part of the checked public surface; `stdlib::ode` is not present in `git ls-files stdlib/ode*`. For source-tracked propagation see `stdlib/epistemic/affine` and the `physics::mechanics` module (`kinetic_energy_q`, `hookean_force_q`, etc.).
+Equation involving derivatives of a function. Common in scientific modeling. Sounio ships `stdlib::ode` with RK4, RK45, Tsit5, BDF, epistemic integration, and PBPK sources (`stdlib/ode/solver.sio`). For source-tracked uncertainty propagation see `stdlib/epistemic/affine` and the `physics::mechanics` module (`kinetic_energy_q`, `hookean_force_q`, etc.).
 
 **Ownership**
 System ensuring memory safety by tracking which part of code "owns" each value. Sounio uses affine/linear types instead of Rust's borrow checker.
@@ -245,7 +245,7 @@ Breakdown of contributors to total uncertainty. Can be tracked via provenance me
 See [Propagation](#p).
 
 **Units of Measure**
-Physical dimensions (meters, kilograms, seconds) tracked in the type system via `Quantity` and `dim_*()` constructors from `stdlib/units/lib.sio`:
+Physical dimensions (meters, kilograms, seconds) carried at runtime by `Quantity` values and built with `dim_*()` constructors from `stdlib/units/lib.sio` (compatibility is checked by `dim_eq`/`quantity_is_compatible`, asserted inside `quantity_add`):
 ```sio
 use units::lib::*   // dim_mass, dim_length, dim_time, quantity_new, quantity_div, ...
 
@@ -255,9 +255,11 @@ let velocity = quantity_div(distance, time)
 // Convert: convert_m_to_cm(value), convert_celsius_to_kelvin(value), etc.
 ```
 
-> Units-as-type-spellets (`let distance: m = 100.0`, `fn f(x: kg) -> N`) are
-> **aspirational** in source. The checked surface is `Quantity` +
-> `quantity_new(val, unc, dim_*())`. See `tests/stdlib/units/test_units_stdlib.sio`.
+> Units-as-type spellings (`let distance: m = 100.0`, `fn f(x: kg) -> N`) and
+> derived units (`f64<m/s>`, `mg`, `mL`, `unit Clearance = L/h`) ARE part of the
+> checked surface and are tested (`tests/run-pass/unit_same_add.sio`). The
+> runtime `Quantity` + `quantity_new(val, unc, dim_*())` form is the
+> complementary representation for dimensions computed at runtime.
 
 ---
 
