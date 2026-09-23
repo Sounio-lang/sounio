@@ -35,6 +35,16 @@ OUT="${GATE_ARTIFACT:-artifacts/gates/fn_type_effect_ratchet.json}"
 # types. Parameter position is anchored by the `:` that introduces the
 # annotation, so the capture cannot reach the outer clause.
 PAT_TYPE=':[[:space:]]*fn\([^)]*\)[[:space:]]*->'
+# Copilot follow-up (#2570): the return-type tail used to stop at the first
+# `,` or `)`, on the assumption that a fn-type's return type is a simple,
+# comma-free type. A TUPLE return type (`fn() -> ([f64; 2], i64) with Mut,
+# Panic`) breaks that assumption -- the tuple's own internal comma truncates
+# the capture before it ever reaches `with`, so an EFFECT-BEARING tuple-
+# returning fn-type parameter was misreported as bare, and there was no way
+# to write one that this gate would recognize as non-bare. One level of
+# balanced `(...)` (a tuple, not a tuple of tuples) is tolerated before the
+# real terminator, covering the case that actually occurs in this tree today.
+PAT_TYPE_TAIL='(\([^()]*\)|[^,)])*'
 
 strip_noise() {
   # drop // line comments and "..." string literals before matching, so a
@@ -49,7 +59,7 @@ enumerate() {
     | grep -vE '\.sio\.old$' \
     | while IFS= read -r f; do
         [ -f "$f" ] || continue
-        strip_noise "$f" | grep -oE "${PAT_TYPE}[^,)]*" | while IFS= read -r hit; do
+        strip_noise "$f" | grep -oE "${PAT_TYPE}${PAT_TYPE_TAIL}" | while IFS= read -r hit; do
           # a bare function type is one whose text carries no `with` clause
           printf '%s' "$hit" | grep -qE '\bwith[[:space:]]+[A-Za-z]' || printf '%s\t%s\n' "$f" "$hit"
         done
@@ -61,7 +71,7 @@ selftest() {
   tmp="$(mktemp -d)"
   # POSITIVE control: a bare function type must be seen.
   printf 'fn deriv(f: fn(f64) -> f64, x: f64) -> f64 with Div { 0.0 }\n' > "$tmp/pos.sio"
-  if strip_noise "$tmp/pos.sio" | grep -oE "${PAT_TYPE}[^,)]*" | grep -q .; then
+  if strip_noise "$tmp/pos.sio" | grep -oE "${PAT_TYPE}${PAT_TYPE_TAIL}" | grep -q .; then
     echo "  ok   POSITIVO: tipo-funcao nu e detectado"
   else echo "  FALHA POSITIVO: nao detectou um tipo-funcao nu"; rc=1; fi
   # NEGATIVE control 1: a function DECLARATION must not be counted as a type.
@@ -77,7 +87,7 @@ selftest() {
   # NEGATIVE control 3: a function type that DOES carry effects must not be
   # reported as bare — otherwise the ratchet can never be lowered.
   printf 'fn m(f: fn(f64) -> f64 with Div, x: f64) -> f64 { 0.0 }\n' > "$tmp/neg3.sio"
-  if strip_noise "$tmp/neg3.sio" | grep -oE "${PAT_TYPE}[^,)]*" \
+  if strip_noise "$tmp/neg3.sio" | grep -oE "${PAT_TYPE}${PAT_TYPE_TAIL}" \
        | grep -qvE '\bwith[[:space:]]+[A-Za-z]'; then
     echo "  FALHA NEGATIVO 3: tipo-funcao COM efeitos contado como nu"; rc=1
   else echo "  ok   NEGATIVO 3: tipo com efeitos nao conta como nu"; fi
@@ -87,6 +97,17 @@ selftest() {
   if strip_noise "$tmp/neg4.sio" | grep -oE "${PAT_TYPE}" | grep -q .; then
     echo "  FALHA NEGATIVO 4: contou um tipo-funcao em posicao de RETORNO"; rc=1
   else echo "  ok   NEGATIVO 4: posicao de retorno nao conta"; fi
+  # NEGATIVE control 5 (#2570): a TUPLE-returning fn-type parameter that DOES
+  # carry effects must not be reported as bare either -- the tuple's own
+  # internal comma used to truncate the capture before it ever reached
+  # `with`, so an effect-bearing tuple-returning fn-type had no way to be
+  # recognized as non-bare at all. This is the control that would have
+  # caught it.
+  printf 'fn use_it(f: fn() -> ([f64; 2], i64) with Mut, Panic) -> f64 with Mut, Panic { 0.0 }\n' > "$tmp/neg5.sio"
+  if strip_noise "$tmp/neg5.sio" | grep -oE "${PAT_TYPE}${PAT_TYPE_TAIL}" \
+       | grep -qvE '\bwith[[:space:]]+[A-Za-z]'; then
+    echo "  FALHA NEGATIVO 5: tipo-funcao com retorno tupla e efeitos contado como nu"; rc=1
+  else echo "  ok   NEGATIVO 5: tipo com retorno tupla e efeitos nao conta como nu"; fi
   rm -rf "$tmp"
   echo "falhas: $rc"
   return $rc
