@@ -258,7 +258,7 @@ function count_with_clauses(str,    tmp) {
     tmp = " " str
     return gsub(/[^A-Za-z0-9_]with[ \t]+[A-Za-z]/, "@", tmp)
 }
-function classify_fn_type_at(line, fn_pos,    open_pos, close_pos, after, hit, hit_tail, fn_layers, with_n, tail_start, tail_end, entry_start, i, n, c, depth, stack, entry, trimmed) {
+function classify_fn_type_at(line, fn_pos,    open_pos, close_pos, after, hit, hit_tail, fn_layers, with_n, bare_layers, k, tail_start, tail_end, entry_start, i, n, c, depth, stack, entry, trimmed) {
     open_pos = fn_pos + 2
     close_pos = match_close_paren(line, open_pos)
     after = close_pos + 1
@@ -269,7 +269,20 @@ function classify_fn_type_at(line, fn_pos,    open_pos, close_pos, after, hit, h
         hit = substr(line, fn_pos, tail_end - fn_pos)
         fn_layers = 1 + count_fn_parens(hit_tail)
         with_n = count_with_clauses(hit_tail)
-        if (with_n < fn_layers) { print hit }
+        # Copilot follow-up (#2570): `fn_layers - with_n` is not just "is
+        # the outer layer bare" -- it is literally the COUNT of bare layers
+        # in this chain, by the same innermost-first with-clause binding
+        # worked out earlier: the innermost with_n layers each get one of
+        # the with-clauses, leaving exactly fn_layers - with_n outer layers
+        # with none. `fn() -> fn() -> i64` (two layers, no with-clauses at
+        # all) is TWO distinct bare function types, not one -- printing the
+        # hit only once (whenever with_n < fn_layers was true at all)
+        # undercounted every chain with more than one bare layer, and
+        # adding a THIRD bare layer to an existing bare chain could never
+        # raise the ratchet. Emit the hit once per bare layer instead of
+        # once per match.
+        bare_layers = fn_layers - with_n
+        for (k = 0; k < bare_layers; k++) { print hit }
     } else {
         tail_end = close_pos + 1
     }
@@ -512,6 +525,27 @@ selftest() {
   if bare_hits_of "$tmp/neg12.sio" | grep -q "TestResult"; then
     echo "  FALHA NEGATIVO 12: parametro fn-type aninhado COM efeito proprio contado como nu"; rc=1
   else echo "  ok   NEGATIVO 12: parametro fn-type aninhado com efeito proprio nao conta como nu"; fi
+  # POSITIVE control 13 (#2570): `fn_layers - with_n` is a COUNT of bare
+  # layers, not a yes/no question -- `fn() -> fn() -> i64` (two layers, no
+  # with-clauses at all) is TWO distinct bare function types, but the gate
+  # used to print the hit at most ONCE per match regardless of how many
+  # layers were actually bare, so adding a third bare returned-function
+  # layer to an existing bare annotation could never raise the ratchet.
+  # Pins the exact COUNT (2), not just presence, matching Copilot's report.
+  printf 'fn use_it(f: fn() -> fn() -> i64) -> f64 { 0.0 }\n' > "$tmp/pos13.sio"
+  n13=$(bare_hits_of "$tmp/pos13.sio" | wc -l | tr -d ' ')
+  if [ "$n13" = "2" ]; then
+    echo "  ok   POSITIVO 13: duas camadas nuas produzem dois hits (nao um)"
+  else echo "  FALHA POSITIVO 13: esperava 2 hits para duas camadas nuas, obteve $n13"; rc=1; fi
+  # NEGATIVE control 13 (#2570): companion to POSITIVE 13 -- three levels
+  # deep, no with-clauses anywhere, must produce exactly THREE hits. Without
+  # this control, "always print exactly 2 regardless of fn_layers" would
+  # also pass POSITIVE 13.
+  printf 'fn use_it(f: fn() -> fn() -> fn() -> i64) -> f64 { 0.0 }\n' > "$tmp/neg13.sio"
+  n13b=$(bare_hits_of "$tmp/neg13.sio" | wc -l | tr -d ' ')
+  if [ "$n13b" = "3" ]; then
+    echo "  ok   NEGATIVO 13: tres camadas nuas produzem tres hits"
+  else echo "  FALHA NEGATIVO 13: esperava 3 hits para tres camadas nuas, obteve $n13b"; rc=1; fi
   rm -rf "$tmp"
   echo "falhas: $rc"
   return $rc
