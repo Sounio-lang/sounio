@@ -17,9 +17,9 @@ This document is the JOSS-facing API reference for Sounio's epistemic value mode
 
 ```sio
 pub struct Epistemic {
-    val: f64,
-    variance: f64,
-    confidence: i64,   // 0..1000 (permille); higher = more trustworthy
+    pub val: f64,
+    pub variance: f64,
+    pub confidence: i64,   // 0..1000 (permille); higher = more trustworthy
 }
 ```
 
