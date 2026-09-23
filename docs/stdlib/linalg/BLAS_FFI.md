@@ -128,7 +128,13 @@ let rc = blas_dgemm_rowmajor(
 // Direct dominant-singular-value call (approximate power iteration).
 // blas_dgesvd_approx writes only the largest singular value into `s`
 // (no `u`/`vt` outputs); `iters` is the power-iteration step count.
-var s: [f64; 16] = [0.0; 16]  // singular values (min(m,n) values)
+var s: [f64; 16] = [0.0; 16]  // output buffer
+
+// blas_dgesvd_approx is a rank-1 power-iteration approximation: it computes
+// ONLY the dominant (largest) singular value and writes it to s[0]. The
+// remaining entries are NOT computed singular values — they stay at the
+// zero-initialized placeholder values (the wrapper explicitly zeroes s[1..p]).
+// Do not read s[1..p] as computed singular values; full SVD is not implemented.
 
 let info = blas_dgesvd_approx(&a, m, n, &!s, 32)
 ```
@@ -209,7 +215,7 @@ These ratios are **targets** for the planned FFI path; the current pure-Sounio b
 | 512x512 | 20ms | 15ms | 1.3x |
 | 1024x1024 | 150ms | 120ms | 1.25x |
 
-The small overhead comes from FFI call overhead and Sounio's runtime checks.
+The small overhead in those targets is projected to come from FFI call overhead and Sounio's runtime checks once the FFI path is wired — it is not a measured result of the current pure-Sounio build, which performs no FFI calls.
 
 ## Files
 
@@ -217,7 +223,7 @@ The small overhead comes from FFI call overhead and Sounio's runtime checks.
 |------|-------------|
 | [`blas_ffi.sio`](../../../stdlib/linalg/blas_ffi.sio) | Pure-Sounio BLAS-shaped API (BLAS/LAPACK FFI planned) |
 | [`blas_fallback.sio`](../../../stdlib/linalg/blas_fallback.sio) | Pure-Sounio fallback implementations |
-| [`epistemic_matrix.sio`](../../../stdlib/linalg/epistemic_matrix.sio) | EpistemicMatrix with BLAS dispatch |
+| [`epistemic_matrix.sio`](../../../stdlib/linalg/epistemic_matrix.sio) | EpistemicMatrix with pure-Sounio GUM-only matmul (no BLAS dispatch yet) |
 | [`blas_ffi_test.sio`](../../../tests/stdlib/linalg/blas_ffi_test.sio) | Integration tests |
 | [`blas_benchmark.sio`](../../../tests/stdlib/linalg/blas_benchmark.sio) | Performance benchmarks |
 

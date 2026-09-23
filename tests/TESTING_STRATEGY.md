@@ -46,7 +46,40 @@ fn test_ep_add_basic() -> bool {
 }
 
 fn test_ep_add_edge_cases() -> bool {
-    // Test zero, negative, large numbers, etc.
+    // Edge case 1: a zero-valued, zero-uncertainty operand adds nothing to the
+    // value (only the other operand's contribution) and leaves the variance at
+    // the other operand's; confidence still decays to min * 99/100 (891).
+    let a = ep_measured(0.0, 0.0)
+    let b = ep_measured(5.0, 2.0)
+    let z = ep_add(&a, &b)
+    let zero_ok = abs(ep_val(&z) - 5.0) < 0.0001 &&
+                  abs(ep_variance(&z) - 4.0) < 0.001 &&
+                  ep_confidence(&z) == 891
+
+    // Edge case 2: negative operands still ADD (never subtract); variances add.
+    let c = ep_measured(-10.0, 1.0)
+    let d = ep_measured(3.0, 0.0)
+    let n = ep_add(&c, &d)
+    let neg_ok = abs(ep_val(&n) - (-7.0)) < 0.0001 &&
+                 abs(ep_variance(&n) - 1.0) < 0.001
+
+    // Edge case 3: large-magnitude operands preserve value additivity within
+    // f64 range; variances still add.
+    let e = ep_measured(1.0e15, 1.0)
+    let f = ep_measured(1.0e15, 1.0)
+    let g = ep_add(&e, &f)
+    let large_ok = abs(ep_val(&g) - 2.0e15) < 1.0e9 &&
+                   abs(ep_variance(&g) - 2.0) < 0.001
+
+    // Edge case 4: equal operands are commutation-independent; confidence still
+    // decays to min * 99/100 (891), not preserved.
+    let h = ep_measured(7.0, 0.2)
+    let i = ep_measured(7.0, 0.2)
+    let same = ep_add(&h, &i)
+    let equal_ok = abs(ep_val(&same) - 14.0) < 0.0001 &&
+                   ep_confidence(&same) == 891
+
+    return zero_ok && neg_ok && large_ok && equal_ok
 }
 ```
 
