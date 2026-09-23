@@ -89,7 +89,11 @@ guard that gate requires, or the gate refuses the build.
    `runner/ci-fabric-rbac.yaml`'s own note on why it ships as a bare
    ServiceAccount with no Role/RoleBinding, and no API access at all, until
    that need is real). Tag and reference it in
-   `runner/ci-fabric-deployment.yaml`'s `image:` field.
+   `runner/ci-fabric-deployment.yaml`'s `image:` field. Confirm the built
+   `myoung34/github-runner` version honours `UNSET_CONFIG_VARS=true` (set in
+   the Deployment) -- without it, `ACCESS_TOKEN` and the other registration
+   variables stay readable from every job's process environment for as long
+   as the runner pod lives.
 4. Fill in the `nodeAffinity` block per the warning above.
 5. Apply the Deployment:
    ```bash

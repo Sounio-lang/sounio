@@ -27,8 +27,32 @@ RUNNER_VAR_RE = re.compile(r"vars\.[A-Za-z0-9_]*RUNNER[A-Za-z0-9_]*", re.IGNOREC
 # hosted (https://docs.github.com/actions/using-github-hosted-runners) --
 # anything else (a custom label, an unrecognized `${{ }}` expression) is
 # treated as self-hosted-ish rather than silently trusted.
-_GH_HOSTED_LABEL_RE = re.compile(
-    r"^(ubuntu-(latest|\d{2}\.\d{2})|windows-(latest|\d{4})|macos-(latest|1[0-9]))$"
+#
+# This must be an explicit, maintained SET of real hosted labels, not a
+# shape-matching pattern: a regex like `windows-\d{4}` also matches
+# `windows-9999`, which is not a label GitHub has ever issued -- a
+# custom/self-hosted runner registered under that label would silently pass
+# as "known safe". Update this set when GitHub ships a new hosted image
+# version; anything not listed here fails closed as self-hosted-ish.
+_GH_HOSTED_LABELS = frozenset(
+    {
+        "ubuntu-latest",
+        "ubuntu-24.04",
+        "ubuntu-22.04",
+        "ubuntu-20.04",
+        "windows-latest",
+        "windows-2025",
+        "windows-2022",
+        "windows-2019",
+        "macos-latest",
+        "macos-15",
+        "macos-15-large",
+        "macos-14",
+        "macos-14-large",
+        "macos-13",
+        "macos-13-large",
+        "macos-12",
+    }
 )
 GUARD_SUBSTRING = "head.repo.full_name == github.repository"
 # Indent-width-agnostic (some leading whitespace, not a specific count): a
@@ -46,7 +70,12 @@ def indent_of(line: str) -> int:
     return len(line) - len(line.lstrip(" "))
 
 
-_ON_LINE_RE = re.compile(r"^on:\s*(.*)$")
+# YAML permits the `on` mapping key to be quoted (`"on":` / `'on':`) -- a
+# common convention precisely because unquoted `on` is a YAML 1.1 boolean
+# literal. A scanner that only recognized the bare form never entered the
+# trigger block of a workflow written that way, so a `pull_request:` nested
+# under `"on":` was invisible to has_bare_pull_request_trigger below.
+_ON_LINE_RE = re.compile(r"""^(?:on|"on"|'on'):\s*(.*)$""")
 
 
 def has_bare_pull_request_trigger(lines: list[str]) -> bool:
@@ -161,7 +190,7 @@ def iter_job_blocks(lines: list[str]) -> list[tuple[str, int, list[str]]]:
 
 def _label_is_gh_hosted(label: str) -> bool:
     label = label.strip().strip("'\"")
-    return bool(label) and bool(_GH_HOSTED_LABEL_RE.match(label))
+    return label in _GH_HOSTED_LABELS
 
 
 def _runs_on_value_is_gh_hosted(value: str) -> bool:

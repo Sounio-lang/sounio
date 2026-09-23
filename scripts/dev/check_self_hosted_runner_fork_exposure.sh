@@ -318,6 +318,34 @@ jobs:
       - run: echo hi
 EOF
 
+    # POSITIVE 13: `runs-on: [windows-9999]` -- a label that SHAPES like a
+    # real hosted one (`windows-\d{4}`) but was never issued by GitHub. The
+    # old regex-based check matched it as known-safe; the explicit allowlist
+    # of real labels must fail closed on it instead.
+    cat > "$tmp/positive_fake_shaped_hosted_label.yml" <<'EOF'
+on:
+  pull_request:
+jobs:
+  danger:
+    runs-on: [windows-9999]
+    steps:
+      - run: echo hi
+EOF
+
+    # POSITIVE 14: `"on":` (quoted mapping key) -- valid, common YAML (quoting
+    # avoids the YAML 1.1 `on` => boolean-true ambiguity). The old _ON_LINE_RE
+    # only matched the bare unquoted key, so this workflow's whole trigger
+    # block, and the unguarded self-hosted job under it, was invisible.
+    cat > "$tmp/positive_quoted_on_key.yml" <<'EOF'
+"on":
+  pull_request:
+jobs:
+  danger:
+    runs-on: [self-hosted, gpu]
+    steps:
+      - run: echo hi
+EOF
+
     local out
     out="$(python3 "$SCANNER" "$tmp"/*.yml || true)"
 
@@ -380,6 +408,16 @@ EOF
         echo "  ok   POSITIVE: 'pull_request: {types: [opened]}' is flagged"
     else
         echo "  FAIL POSITIVE: 'pull_request: {types: [opened]}' was NOT flagged"; rc=1
+    fi
+    if grep -q 'positive_fake_shaped_hosted_label.yml:danger' <<<"$out"; then
+        echo "  ok   POSITIVE: 'windows-9999' (shape-matches but not a real hosted label) is flagged"
+    else
+        echo "  FAIL POSITIVE: 'windows-9999' was NOT flagged"; rc=1
+    fi
+    if grep -q 'positive_quoted_on_key.yml:danger' <<<"$out"; then
+        echo "  ok   POSITIVE: quoted '\"on\":' trigger key is flagged"
+    else
+        echo "  FAIL POSITIVE: quoted '\"on\":' trigger key was NOT flagged"; rc=1
     fi
     for job in "negative_guarded.yml:safe" "negative_no_pr_trigger.yml:dispatch_only" \
                "negative_pull_request_target.yml:automation" "negative_gh_hosted.yml:ordinary" \
