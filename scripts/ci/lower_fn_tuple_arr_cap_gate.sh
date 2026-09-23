@@ -27,6 +27,17 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/gate_assert.sh"
+# Copilot follow-up (#2570): gate_write_artifact (called below at the
+# positive control and both final writes) is defined in gate_artifact.sh,
+# not gate_assert.sh. It happened to still be available here because
+# gate_assert.sh itself sources gate_artifact.sh transitively -- but every
+# other gate that calls gate_write_artifact sources it directly rather than
+# relying on that, and for good reason: it is an implementation detail of
+# gate_assert.sh, not a documented contract, and would silently break this
+# gate under `set -euo pipefail` ("command not found") if a future refactor
+# of gate_assert.sh ever dropped it. Source it directly, matching the
+# convention every other artifact-writing gate already follows.
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/gate_artifact.sh"
 gate_name "lower_fn_tuple_arr_cap"
 
 LOWER=self-hosted/ir/lower.sio
