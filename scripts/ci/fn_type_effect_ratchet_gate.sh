@@ -215,6 +215,29 @@ strip_noise() {
 # parameter-list walker into one shared step_open_or_other_close, so this
 # fix (and any future one to this exact logic) lives in a single place
 # instead of three independently-drifting copies.
+#
+# Copilot follow-up (#2570): an unmatched ")" at depth 0 has always meant
+# "we have left the scope this scan was searching" (match_close_paren and
+# scan_tail both handle it directly, as their own terminator). "]"/">"/"}"
+# never got that same treatment -- at depth 0 they were silent no-ops -- so a
+# NESTED fn-type wrapped inside an array or generic parameter
+# (`f: fn([fn() -> i64; 3]) -> i64`, `f: fn(Vec<fn() -> i64>) -> i64`) had no
+# way to signal "this is where MY enclosing array/generic ends" when its own
+# return-type scan reached that enclosing "]"/">" : scan_tail just kept
+# going, silently absorbing whatever followed as if it were still part of
+# the nested type's own return type. step_open_or_other_close now returns
+# -1 for exactly that case (a closer with nothing of its own kind open to
+# match) -- the same "we have left this scope" signal a depth-0 ")" already
+# gives -- and every caller checks for it exactly the way match_close_paren
+# already checked for ")".
+#
+# ">" needs one more guard beyond that: it is also the second character of
+# every "->" arrow, and unlike ")"/"]"/"}", an arrow's ">" can legitimately
+# occur at depth 0 constantly (`fn() -> i64` has one on every plain,
+# non-generic function type) -- treating THOSE as "we have left this scope"
+# broke ordinary direct return-type chains outright. Checked first and
+# unconditionally: a ">" preceded by "-" is never a closer and never a
+# terminator, regardless of depth or stack state.
 AWK_SCAN='
 function step_open_or_other_close(c, prevc, depth, stack, pred) {
     if (c == "(" || c == "[" || c == "{") {
@@ -236,20 +259,24 @@ function step_open_or_other_close(c, prevc, depth, stack, pred) {
         return depth
     }
     if (c == ">") {
+        if (prevc == "-") { return depth }
         if (depth > 0 && stack[depth] == "<") { return depth - 1 }
+        if (depth == 0) { return -1 }
         return depth
     }
     if (c == "]") {
         if (depth > 0 && stack[depth] == "[") { return depth - 1 }
+        if (depth == 0) { return -1 }
         return depth
     }
     if (c == "}") {
         if (depth > 0 && stack[depth] == "{") { return depth - 1 }
+        if (depth == 0) { return -1 }
         return depth
     }
     return depth
 }
-function match_close_paren(line, open_pos,    i, n, c, prevc, depth, stack, pred) {
+function match_close_paren(line, open_pos,    i, n, c, prevc, depth, stack, pred, r) {
     depth = 1
     stack[1] = "("
     pred[1] = 0
@@ -261,14 +288,16 @@ function match_close_paren(line, open_pos,    i, n, c, prevc, depth, stack, pred
         if (c == ")") {
             if (stack[depth] == "(") { depth--; if (depth == 0) { return i } }
         } else {
-            depth = step_open_or_other_close(c, prevc, depth, stack, pred)
+            r = step_open_or_other_close(c, prevc, depth, stack, pred)
+            if (r == -1) { return i }
+            depth = r
         }
         prevc = c
         i++
     }
     return n + 1
 }
-function scan_tail(line, tail_start,    i, n, c, prevc, depth, stack, pred) {
+function scan_tail(line, tail_start,    i, n, c, prevc, depth, stack, pred, r) {
     depth = 0
     prevc = ""
     n = length(line)
@@ -281,7 +310,9 @@ function scan_tail(line, tail_start,    i, n, c, prevc, depth, stack, pred) {
         } else if (c == "," && depth == 0) {
             return i
         } else {
-            depth = step_open_or_other_close(c, prevc, depth, stack, pred)
+            r = step_open_or_other_close(c, prevc, depth, stack, pred)
+            if (r == -1) { return i }
+            depth = r
         }
         prevc = c
         i++
@@ -296,7 +327,35 @@ function count_with_clauses(str,    tmp) {
     tmp = " " str
     return gsub(/[^A-Za-z0-9_]with[ \t\n]+[A-Za-z]/, "@", tmp)
 }
-function classify_fn_type_at(line, fn_pos, at_eof,    open_pos, close_pos, after, hit, hit_tail, fn_layers, with_n, bare_layers, k, tail_start, tail_end, entry_start, i, n, c, prevc, depth, stack, pred, entry, trimmed) {
+# Copilot follow-up (#2570): the entry-walker used to check only whether a
+# parameter-list ENTRY, after trimming leading whitespace, itself STARTS
+# with "fn(" -- so `f: fn((fn() -> i64, i64)) -> i64` (a tuple-wrapped
+# nested fn-type parameter) was missed entirely: the entry text is
+# "(fn() -> i64, i64)", which does not start with "fn(", even though it
+# contains one. The same hole applies to an array (`[fn() -> i64; 3]`) or a
+# generic (`Vec<fn() -> i64>`) wrapping a fn-type parameter. Scans the WHOLE
+# entry text for "fn(" at ANY position (word-bounded -- not part of a longer
+# identifier) instead of only its first token, recursing into
+# classify_fn_type_at at each one found.
+function scan_entry_for_fn_types(line, entry_start, entry_end, at_eof,    seg, pos_in_seg, abs_match_start, prevc, mstart, mlen) {
+    seg = substr(line, entry_start, entry_end - entry_start)
+    pos_in_seg = 1
+    while (pos_in_seg <= length(seg) && match(substr(seg, pos_in_seg), /fn\(/)) {
+        # RSTART/RLENGTH are awk globals set by match() -- save them before
+        # the recursive classify_fn_type_at call below runs its own match()
+        # calls internally and overwrites them out from under this loop
+        # (measured: without this, pos_in_seg advanced by whatever the LAST
+        # nested match() call happened to leave behind, not this loop own
+        # match, re-finding and re-classifying the same "fn(" repeatedly).
+        mstart = RSTART
+        mlen = RLENGTH
+        abs_match_start = entry_start + (pos_in_seg - 1) + mstart - 1
+        if (abs_match_start > 1) { prevc = substr(line, abs_match_start - 1, 1) } else { prevc = "" }
+        if (prevc !~ /[A-Za-z0-9_]/) { classify_fn_type_at(line, abs_match_start, at_eof) }
+        pos_in_seg = pos_in_seg + (mstart - 1) + mlen
+    }
+}
+function classify_fn_type_at(line, fn_pos, at_eof,    open_pos, close_pos, after, hit, hit_tail, fn_layers, with_n, bare_layers, k, tail_start, tail_end, entry_start, i, n, c, prevc, depth, stack, pred, r) {
     open_pos = fn_pos + 2
     close_pos = match_close_paren(line, open_pos)
     # Copilot follow-up (#2570): a genuine `n + 1` from match_close_paren
@@ -364,29 +423,28 @@ function classify_fn_type_at(line, fn_pos, at_eof,    open_pos, close_pos, after
     while (i < n) {
         c = substr(line, i, 1)
         if (c == "," && depth == 0) {
-            entry = substr(line, entry_start, i - entry_start)
-            trimmed = entry
-            sub(/^[ \t\n]+/, "", trimmed)
             # A nested entry is, by construction, entirely within [entry_start,
             # close_pos) -- a span already confirmed present in `line` (close_pos
             # itself passed the bound check above, or at_eof waived it). Its own
             # match_close_paren therefore cannot legitimately need more text than
-            # `line` already has; -1 here can only mean malformed input, so it is
-            # silently skipped rather than propagated.
-            if (trimmed ~ /^fn\(/) { classify_fn_type_at(line, entry_start + (length(entry) - length(trimmed)), at_eof) }
+            # `line` already has.
+            scan_entry_for_fn_types(line, entry_start, i, at_eof)
             entry_start = i + 1
         } else if (c == ")") {
             if (depth > 0 && stack[depth] == "(") { depth-- }
         } else {
-            depth = step_open_or_other_close(c, prevc, depth, stack, pred)
+            r = step_open_or_other_close(c, prevc, depth, stack, pred)
+            # An unmatched closer inside an already-bounded parameter list
+            # can only mean malformed input (nothing legitimate enclosing
+            # THIS span could still be open) -- skip it rather than treat it
+            # as ending the walk early.
+            if (r == -1) { prevc = c; i++; continue }
+            depth = r
         }
         prevc = c
         i++
     }
-    entry = substr(line, entry_start, n - entry_start)
-    trimmed = entry
-    sub(/^[ \t\n]+/, "", trimmed)
-    if (trimmed ~ /^fn\(/) { classify_fn_type_at(line, entry_start + (length(entry) - length(trimmed)), at_eof) }
+    scan_entry_for_fn_types(line, entry_start, n, at_eof)
     return tail_end
 }
 # Copilot follow-up (#2570): this whole scanner was line-local -- `line = $0`
@@ -697,6 +755,48 @@ selftest() {
   if bare_hits_of "$tmp/neg15.sio" | grep -q .; then
     echo "  FALHA NEGATIVO 15: tipo-funcao multilinha com efeito proprio contado como nu"; rc=1
   else echo "  ok   NEGATIVO 15: tipo-funcao multilinha com efeito proprio nao conta como nu"; fi
+  # POSITIVE control 16 (#2570): a nested fn-type PARAMETER wrapped inside a
+  # TUPLE (`f: fn((fn() -> i64, i64)) -> i64`) -- the entry text is
+  # "(fn() -> i64, i64)", which does not itself START with "fn(", so the old
+  # entry-walker (checking only the entry's first token) missed the inner
+  # type entirely. Pins the exact COUNT: TWO distinct bare function types
+  # (the outer AND the inner), not one.
+  printf 'fn use_it(f: fn((fn() -> i64, i64)) -> i64) -> f64 { 0.0 }\n' > "$tmp/pos16.sio"
+  n16=$(bare_hits_of "$tmp/pos16.sio" | wc -l | tr -d ' ')
+  if [ "$n16" = "2" ]; then
+    echo "  ok   POSITIVO 16: tipo-funcao aninhado em tupla (wrapper) produz 2 hits"
+  else echo "  FALHA POSITIVO 16: esperava 2 hits (externo + aninhado em tupla), obteve $n16"; rc=1; fi
+  # NEGATIVE control 16 (#2570): companion -- same wrapped-tuple shape, but
+  # the INNER type carries its own effects. Only the outer should count (1
+  # hit), pinning that the recursion resolves the inner type's own
+  # arrow/with independently, not by inheriting the outer's classification.
+  printf 'fn use_it(f: fn((fn() -> i64 with IO, i64)) -> i64) -> f64 { 0.0 }\n' > "$tmp/neg16.sio"
+  n16b=$(bare_hits_of "$tmp/neg16.sio" | wc -l | tr -d ' ')
+  if [ "$n16b" = "1" ]; then
+    echo "  ok   NEGATIVO 16: apenas o tipo externo conta quando o aninhado tem efeito proprio"
+  else echo "  FALHA NEGATIVO 16: esperava 1 hit (so o externo), obteve $n16b"; rc=1; fi
+  # POSITIVE control 17 (#2570): same hole, wrapped in an ARRAY
+  # (`[fn() -> i64; 3]`) instead of a tuple.
+  printf 'fn use_it(f: fn([fn() -> i64; 3]) -> i64) -> f64 { 0.0 }\n' > "$tmp/pos17.sio"
+  n17=$(bare_hits_of "$tmp/pos17.sio" | wc -l | tr -d ' ')
+  if [ "$n17" = "2" ]; then
+    echo "  ok   POSITIVO 17: tipo-funcao aninhado em array (wrapper) produz 2 hits"
+  else echo "  FALHA POSITIVO 17: esperava 2 hits (externo + aninhado em array), obteve $n17"; rc=1; fi
+  # POSITIVE control 18 (#2570): same hole, wrapped in a GENERIC
+  # (`Vec<fn() -> i64>`). This is also the control that would have caught a
+  # SEPARATE bug found while building this fix: the nested type's own return
+  # arrow (`-> i64`) sits at depth 1 relative to the OUTER generic's "<" (a
+  # generic wrapping a fn-type puts an arrow INSIDE an open "<...>" for the
+  # first time anywhere in this corpus's test shapes) -- treating that
+  # arrow's ">" as closing the generic (matching stack[depth]=="<" the same
+  # way a REAL generic-closing ">" would) closed "Vec<" one character early,
+  # at the wrong ">". Fixed by checking "preceded by -" FIRST, before the
+  # stack-match, so an arrow's ">" is inert regardless of stack state.
+  printf 'fn use_it(f: fn(Vec<fn() -> i64>) -> i64) -> f64 { 0.0 }\n' > "$tmp/pos18.sio"
+  n18=$(bare_hits_of "$tmp/pos18.sio" | wc -l | tr -d ' ')
+  if [ "$n18" = "2" ]; then
+    echo "  ok   POSITIVO 18: tipo-funcao aninhado em generico (wrapper) produz 2 hits"
+  else echo "  FALHA POSITIVO 18: esperava 2 hits (externo + aninhado em generico), obteve $n18"; rc=1; fi
   rm -rf "$tmp"
   echo "falhas: $rc"
   return $rc
