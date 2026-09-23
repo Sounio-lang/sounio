@@ -17168,32 +17168,26 @@ impl Lowerer {
         // ExprCall` guard below entirely, leaving `t`'s bound mask at 0 --
         // `t.0[i]` on a method-returned f64-array tuple then read the array's
         // bits as an integer, same failure mode the ExprCall case exists to
-        // prevent. Same fail-closed shape as expr_is_tuple_slot_f64_array_ref's
-        // ExprMethodCall arm: only a plain local receiver whose struct type is
-        // statically known here resolves; anything else keeps mask 0.
+        // prevent. Copilot follow-up: resolve the receiver through
+        // lower_method_recv_type, the same helper actual call lowering uses
+        // (e.g. line 14682), instead of only handling a plain local ident --
+        // that also covers field, dereference, chained-method and
+        // associated-call receivers. Unresolved receivers keep mask 0.
         if (*e).kind == ExprKind::ExprMethodCall {
-            match (*e).left {
-                Some(recv) => {
-                    if (*recv).kind != ExprKind::ExprIdent {
-                        return 0
-                    }
-                    let tname = self.lookup_local_struct_type((*recv).name)
-                    if tname.len <= 0 {
-                        return 0
-                    }
-                    let mangled = ir_mangle_method_name(tname, (*e).name)
-                    let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, mangled)
-                    var scalar_mask: i64 = 0
-                    if fn_id >= 0 && fn_id < self.module.fn_count {
-                        let code = ir_fn_get(&(*self.module), fn_id as usize).returns_float
-                        if code >= 1024 {
-                            scalar_mask = code - 1024
-                        }
-                    }
-                    return scalar_mask + lower_fn_tuple_f64_array_mask(mangled) * 4294967296
-                }
-                _ => return 0,
+            let tname = self.lower_method_recv_type(&(*e).left)
+            if tname.len <= 0 {
+                return 0
             }
+            let mangled = ir_mangle_method_name(tname, (*e).name)
+            let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, mangled)
+            var scalar_mask: i64 = 0
+            if fn_id >= 0 && fn_id < self.module.fn_count {
+                let code = ir_fn_get(&(*self.module), fn_id as usize).returns_float
+                if code >= 1024 {
+                    scalar_mask = code - 1024
+                }
+            }
+            return scalar_mask + lower_fn_tuple_f64_array_mask(mangled) * 4294967296
         }
         if (*e).kind != ExprKind::ExprCall {
             return 0
@@ -17246,28 +17240,22 @@ impl Lowerer {
                 // `recv.method().K` / `recv.method().K[i]`, no intervening `let`.
                 // Method calls resolve to a mangled `Type_method` free function
                 // (lower_impl_methods_ref), not the bare method name the table
-                // is otherwise keyed by -- mangle the same way, and only for a
-                // plain local receiver whose struct type this pass can actually
-                // name (matches the existing ctor-path precedent at fo_ctor
-                // resolution: an unknown or non-ExprIdent receiver fails closed,
-                // same integer-path fallback as before this method-call case
-                // existed, never a wrong mask borrowed from an unrelated name).
+                // is otherwise keyed by -- mangle the same way. Copilot
+                // follow-up: resolve the receiver through lower_method_recv_type,
+                // the same helper actual call lowering uses (e.g. line 14682),
+                // instead of only a plain local ident -- that also covers field,
+                // dereference, chained-method and associated-call receivers. An
+                // unresolved receiver still fails closed to mask 0, same as
+                // before this method-call case existed, never a wrong mask
+                // borrowed from an unrelated name.
                 if (*base_expr).kind == ExprKind::ExprMethodCall {
-                    match (*base_expr).left {
-                        Some(recv) => {
-                            if (*recv).kind != ExprKind::ExprIdent {
-                                return false
-                            }
-                            let tname = self.lookup_local_struct_type((*recv).name)
-                            if tname.len <= 0 {
-                                return false
-                            }
-                            let mangled = ir_mangle_method_name(tname, (*base_expr).name)
-                            let arr_bits = lower_fn_tuple_f64_array_mask(mangled)
-                            return (arr_bits >> (slot as i32)) % 2 == 1
-                        }
-                        _ => return false,
+                    let tname = self.lower_method_recv_type(&(*base_expr).left)
+                    if tname.len <= 0 {
+                        return false
                     }
+                    let mangled = ir_mangle_method_name(tname, (*base_expr).name)
+                    let arr_bits = lower_fn_tuple_f64_array_mask(mangled)
+                    return (arr_bits >> (slot as i32)) % 2 == 1
                 }
                 if (*base_expr).kind != ExprKind::ExprIdent {
                     return false
