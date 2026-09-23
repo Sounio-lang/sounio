@@ -17840,6 +17840,21 @@ impl Lowerer {
         }
         match (*e).left {
             Some(callee_expr) => {
+                // Copilot follow-up (#2570): `choose_arr()()` -- an
+                // immediate call through a call's own result, same shape
+                // expr_result_tuple_float_mask_ref's ExprCall branch already
+                // recurses for. callee_expr here is itself the inner call
+                // (`choose_arr()`), which expr_to_callee_name_ref cannot
+                // name (it only handles ExprIdent and ExprMethodCall
+                // callees), so callee_name came back empty and both lookups
+                // below always missed, reading the resulting `[f64; N]`
+                // through the integer path. expr_ident_is_array_returning_
+                // fn_ref applied to the inner call answers exactly "does
+                // calling THIS ONE MORE TIME give the array" -- precisely
+                // what the outer call here does.
+                if (*callee_expr).kind == ExprKind::ExprCall {
+                    return self.expr_ident_is_array_returning_fn_ref(&(*callee_expr))
+                }
                 let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
                 if self.lookup_local(callee_name) >= 0 {
                     return self.lookup_local_fn_ptr_ret_array(callee_name)
@@ -18294,6 +18309,22 @@ impl Lowerer {
             Some(rhs_for_tuple_mask) => lo.expr_result_tuple_float_mask_ref(&(*rhs_for_tuple_mask)),
             _ => 0,
         }
+        // Copilot follow-up (#2570): same self-shadowing trap as
+        // pre_bind_tuple_mask just above, for the array-chain classification
+        // added later in this file -- `let choose_arr = choose_arr()` binds
+        // `s.name` as a local (via bind_local below) BEFORE
+        // lower_let_stmt_type_metadata_ref's own array-chain check ever
+        // runs, so by the time it looked up "choose_arr" there, the freshly
+        // created (not-yet-classified) local shadowed the top-level function
+        // of the same name and expr_ident_is_array_returning_fn_ref's own
+        // local-vs-global precedence check (correctly-but-uselessly) read
+        // that fresh local instead of the function the RHS actually called.
+        // Computed HERE, before bind_local touches the locals stack at all,
+        // for the same reason and via the same mechanism.
+        let pre_bind_arr_chain = match s.expr {
+            Some(rhs_for_arr_chain) => lo.expr_ident_is_array_returning_fn_ref(&(*rhs_for_arr_chain)),
+            _ => false,
+        }
         var fixed_array_len = lower_opt_type_fixed_array_len(&s.ty)
         var fixed_array_word_scalar = lower_opt_type_fixed_array_word_scalar(&s.ty)
         var rhs_array_elem_is_float = false
@@ -18435,7 +18466,7 @@ impl Lowerer {
             _ => {}
         }
         lo = lo.bind_local(s.name, bind_reg, is_mut)
-        lo.lower_let_stmt_finalize_ref(s, is_mut, reg, fixed_array_len, fixed_array_word_scalar, rhs_array_elem_is_float, pre_bind_tuple_mask)
+        lo.lower_let_stmt_finalize_ref(s, is_mut, reg, fixed_array_len, fixed_array_word_scalar, rhs_array_elem_is_float, pre_bind_tuple_mask, pre_bind_arr_chain)
     }
 
     fn lower_let_stmt_finalize_ref(
@@ -18446,7 +18477,8 @@ impl Lowerer {
         fixed_array_len: i64,
         fixed_array_word_scalar: bool,
         rhs_array_elem_is_float: bool,
-        pre_bind_tuple_mask: i64
+        pre_bind_tuple_mask: i64,
+        pre_bind_arr_chain: bool
     ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         // Ref-typed locals (annotated &T / &!T, or RHS is & / &! expr) must be marked
@@ -18612,7 +18644,7 @@ impl Lowerer {
             lo = lo.alloc_variance_slot_for_local(s.name)
             lo = lo.fo_alloc_sens_slots_for_local(s.name)
         }
-        lo.lower_let_stmt_type_metadata_ref(s, reg, rhs_array_elem_is_float, pre_bind_tuple_mask)
+        lo.lower_let_stmt_type_metadata_ref(s, reg, rhs_array_elem_is_float, pre_bind_tuple_mask, pre_bind_arr_chain)
     }
 
     // `[r0, r1, r2]` whose elements are f64 LOCALS (or calls, fields, indexes the
@@ -18646,7 +18678,8 @@ impl Lowerer {
         s: &Stmt,
         reg: i64,
         rhs_array_elem_is_float: bool,
-        pre_bind_tuple_mask: i64
+        pre_bind_tuple_mask: i64,
+        pre_bind_arr_chain: bool
     ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         // V0-E.5.7: `let r: &[f128; N] = &xs` — a reference to an f128 array (the
@@ -18685,13 +18718,18 @@ impl Lowerer {
         // array_ref / lookup_local_fn_ptr_ret_array is consulted -- resolves
         // correctly instead of finding no per-local metadata at all for a
         // local function-pointer's array-returning-ness.
-        match s.expr {
-            Some(expr_box_alias) => {
-                if lo.expr_ident_is_array_returning_fn_ref(&(*expr_box_alias)) {
-                    lo = lo.bind_local_fn_ptr_ret_array(s.name)
-                }
-            }
-            _ => {}
+        //
+        // Copilot follow-up (#2570): uses the PRE-COMPUTED pre_bind_arr_chain
+        // (from lower_let_stmt_after_expr_ref, before bind_local touched the
+        // locals stack), not a fresh expr_ident_is_array_returning_fn_ref
+        // call here -- this function runs AFTER s.name was already bound as
+        // a local, so `let choose_arr = choose_arr()` (a local shadowing a
+        // same-named global) would otherwise have this local-vs-global check
+        // see its own not-yet-classified local instead of the top-level
+        // function the RHS actually called, same self-shadowing trap
+        // pre_bind_tuple_mask exists to avoid for the tuple case.
+        if pre_bind_arr_chain {
+            lo = lo.bind_local_fn_ptr_ret_array(s.name)
         }
         // #1502: record which slots of a tuple-typed local are f64. Copilot
         // follow-up (#2570): lower_opt_type_tuple_float_mask only ever reads

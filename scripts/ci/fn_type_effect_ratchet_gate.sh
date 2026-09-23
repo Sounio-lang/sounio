@@ -337,6 +337,50 @@ function match_close_paren(line, open_pos,    i, n, c, prevc, depth, stack, pred
     }
     return n + 1
 }
+# Copilot follow-up (#2570): general counterpart of match_close_paren, for a
+# top-level colon whose type starts with "(" or "[" directly -- a tuple or
+# array type wrapping a function type, e.g. `f: (fn() -> i64, i64)`. Same
+# structure as match_close_paren (seed the stack with the ALREADY-CONSUMED
+# opener, walk from open_pos+1, close only on the matching closer), just
+# parameterized by which opener/closer pair this call is matching instead of
+# hard-coding "(" / ")".
+#
+# ")" needs its OWN explicit branch here, separate from step_open_or_other_
+# close, the same way match_close_paren and scan_tail both give it one:
+# step_open_or_other_close never handles ")" at all -- by design, since
+# EVERY existing caller already intercepts ")" itself before delegating
+# anything else to it. When the outer bracket THIS matcher is closing is
+# "[" (not "("), a plain delegation of ")" here fell through step_open_or_
+# other_close catch-all `return depth` unchanged: a nested "(" (from a
+# "fn(" found by scan_entry_for_fn_types inside this span) got pushed
+# correctly via that same delegation, but its matching ")" was silently a
+# no-op -- never popped -- corrupting depth for the rest of the scan and
+# leaving the array real "]" unrecognized (stack[depth] was still "(", not
+# "[").
+function match_close_bracket(line, open_pos, open_char,    close_char, i, n, c, prevc, depth, stack, pred, r) {
+    if (open_char == "[") { close_char = "]" } else { close_char = ")" }
+    depth = 1
+    stack[1] = open_char
+    pred[1] = 0
+    prevc = ""
+    n = length(line)
+    i = open_pos + 1
+    while (i <= n) {
+        c = substr(line, i, 1)
+        if (c == close_char) {
+            if (stack[depth] == open_char) { depth--; if (depth == 0) { return i } }
+        } else if (c == ")") {
+            if (stack[depth] == "(") { depth--; if (depth == 0) { return i } }
+        } else {
+            r = step_open_or_other_close(c, prevc, depth, stack, pred)
+            if (r == -1) { return i }
+            depth = r
+        }
+        if (c !~ /[ \t\n]/) { prevc = c }
+        i++
+    }
+    return n + 1
+}
 function scan_tail(line, tail_start,    i, n, c, prevc, depth, stack, pred, r) {
     depth = 0
     prevc = ""
@@ -544,6 +588,20 @@ function classify_fn_type_at(line, fn_pos, at_eof,    open_pos, close_pos, after
     scan_entry_for_fn_types(line, entry_start, n, at_eof)
     return tail_end
 }
+# Copilot follow-up (#2570): the top-level driver below only ever entered
+# classify_fn_type_at when the token right after a ":" was literally "fn" --
+# so a parameter whose declared type WRAPS a function type one level out,
+# `f: (fn() -> i64, i64)` (a tuple) or `f: [fn() -> i64; 3]` (an array), was
+# invisible: the token right after the COLON here is "(" / "[", not "fn",
+# and the scanner moved straight on to the next ":" without ever looking
+# INSIDE the wrapper. The entry-walker used by classify_fn_type_at itself
+# (scan_entry_for_fn_types) already handles exactly this shape -- but only
+# when reached from WITHIN an outer fn(...) own parameter list, which this
+# top-level case is not. match_close_bracket (below) finds the matching
+# closer for the wrapper the same way match_close_paren does for a "fn(",
+# then scan_entry_for_fn_types searches the WHOLE span between the brackets
+# for any nested "fn(" the normal way -- see the driver below for how this
+# is invoked, and why it does NOT use the pending/deferral mechanism.
 # Copilot follow-up (#2570): this whole scanner was line-local -- `line = $0`
 # reset fresh every record, so `f: fn(` on one physical line followed by
 # `i64` and `) -> i64` on the next two never resolved at all: match_close_paren
@@ -568,7 +626,9 @@ function classify_fn_type_at(line, fn_pos, at_eof,    open_pos, close_pos, after
         # `pending` always starts exactly at a "fn(" already confirmed to
         # follow a `:` on an earlier line, so retry it directly rather than
         # re-running the `:...fn(` anchor search (which would fail here --
-        # the `:` that justified this match is no longer in `pending`).
+        # the `:` that justified this match is no longer in `pending`). The
+        # separate "(" / "[" wrapper case below never defers -- see its own
+        # comment -- so it never populates `pending` at all.
         result = classify_fn_type_at(line, 1, 0)
         if (result == -1) { pending = line; next }
         pending = ""
@@ -594,6 +654,41 @@ function classify_fn_type_at(line, fn_pos, at_eof,    open_pos, close_pos, after
                 result = classify_fn_type_at(line, p, 0)
                 if (result == -1) { pending = substr(line, p); next }
                 pos = result
+                continue
+            }
+        } else if (substr(line, p, 1) == "(" || substr(line, p, 1) == "[") {
+            # Copilot follow-up (#2570): a declared type that WRAPS a
+            # function type one level out -- `f: (fn() -> i64, i64)` (tuple)
+            # or `f: [fn() -> i64; 3]` (array) -- never reaches the "fn"
+            # branch above (the token right after ":" is the wrapper opener,
+            # not "fn"), so classify_fn_type_at was never invoked at all and
+            # a bare fn-type nested inside one of these wrappers bypassed the
+            # ratchet silently. match_close_bracket finds the matching closer
+            # for the wrapper, then scan_entry_for_fn_types searches the
+            # WHOLE span between the brackets for any nested "fn(" the
+            # normal way.
+            #
+            # Deliberately SAME-LINE ONLY, no pending/deferral -- unlike
+            # ": fn(", which is specific enough that it essentially never
+            # appears outside a genuine type position, a bare ":" followed by
+            # "(" or "[" is common in ordinary text this scanner also walks
+            # (comments, string literals, doc examples): an unmatched
+            # opener there (e.g. a comment reading "note: (see below") would
+            # defer via `pending`, and if its closer never legitimately
+            # appears, EVERY subsequent line gets prepended to an
+            # ever-growing `pending` and re-scanned from its start --
+            # exactly the whole-file-buffering blowup this scanner was
+            # measured and rejected for elsewhere (~9s just to concatenate
+            # lower.sio). Measured: enabling deferral here made a real-corpus
+            # run hang past a 120s timeout (vs. the ~35s baseline). A
+            # wrapper whose closing bracket is not on this same line is
+            # simply not classified -- a known, narrow gap (a multi-line
+            # tuple/array-wrapped fn-type parameter), safer than the
+            # alternative.
+            close_pos = match_close_bracket(line, p, substr(line, p, 1))
+            if (close_pos <= length(line)) {
+                scan_entry_for_fn_types(line, p + 1, close_pos, 0)
+                pos = close_pos + 1
                 continue
             }
         }
@@ -1027,6 +1122,33 @@ selftest() {
   if bare_hits_of "$tmp/pos24.sio" | grep -q .; then
     echo "  ok   POSITIVO 24: tipo com retorno generico espacado e nu e detectado"
   else echo "  FALHA POSITIVO 24: tipo com retorno generico espacado nu nao detectado"; rc=1; fi
+  # POSITIVE control 25 (#2570): a TOP-LEVEL parameter whose declared type
+  # WRAPS a function type one level out in a TUPLE -- `f: (fn() -> i64,
+  # i64)` -- was invisible to the old scanner entirely: the token right
+  # after ":" is "(" , not "fn", so classify_fn_type_at was never even
+  # reached for it.
+  printf 'fn use_it(f: (fn() -> i64, i64)) -> f64 { 0.0 }\n' > "$tmp/pos25.sio"
+  if bare_hits_of "$tmp/pos25.sio" | grep -q .; then
+    echo "  ok   POSITIVO 25: tipo-funcao envolto em tupla no nivel superior e nu e detectado"
+  else echo "  FALHA POSITIVO 25: tipo-funcao envolto em tupla no nivel superior nu nao detectado"; rc=1; fi
+  # NEGATIVE control 25: companion -- same tuple-wrapped shape, but the
+  # nested fn-type carries its own effects clause, pinning that the fix does
+  # not just unconditionally flag every tuple-wrapped fn-type.
+  printf 'fn use_it(f: (fn() -> i64 with Div, i64)) -> f64 { 0.0 }\n' > "$tmp/neg25.sio"
+  if bare_hits_of "$tmp/neg25.sio" | grep -q .; then
+    echo "  FALHA NEGATIVO 25: tipo-funcao envolto em tupla com efeito proprio contado como nu"; rc=1
+  else echo "  ok   NEGATIVO 25: tipo-funcao envolto em tupla com efeito proprio nao conta como nu"; fi
+  # POSITIVE control 26: same hole, wrapped in an ARRAY (`[fn() -> i64; 3]`)
+  # at the top level instead of a tuple.
+  printf 'fn use_it(f: [fn() -> i64; 3]) -> f64 { 0.0 }\n' > "$tmp/pos26.sio"
+  if bare_hits_of "$tmp/pos26.sio" | grep -q .; then
+    echo "  ok   POSITIVO 26: tipo-funcao envolto em array no nivel superior e nu e detectado"
+  else echo "  FALHA POSITIVO 26: tipo-funcao envolto em array no nivel superior nu nao detectado"; rc=1; fi
+  # NEGATIVE control 26: companion for the array-wrapped shape.
+  printf 'fn use_it(f: [fn() -> i64 with Div; 3]) -> f64 { 0.0 }\n' > "$tmp/neg26.sio"
+  if bare_hits_of "$tmp/neg26.sio" | grep -q .; then
+    echo "  FALHA NEGATIVO 26: tipo-funcao envolto em array com efeito proprio contado como nu"; rc=1
+  else echo "  ok   NEGATIVO 26: tipo-funcao envolto em array com efeito proprio nao conta como nu"; fi
   rm -rf "$tmp"
   echo "falhas: $rc"
   return $rc

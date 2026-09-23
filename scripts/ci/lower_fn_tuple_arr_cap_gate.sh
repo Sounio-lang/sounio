@@ -29,9 +29,21 @@
 # the identical failure mode this gate already exists to catch for the other
 # four extents.
 #
+# Copilot follow-up (#2570): LOWER_FN_ARR_CHAIN_{HASH,NAME_BUF,NAME_LEN} (the
+# separate array-chain-returning-function table added alongside
+# LOWER_FN_TUPLE_ARR_*) reuse LOWER_FN_TUPLE_ARR_CAP and
+# LOWER_FN_TUPLE_ARR_NAME_STRIDE for their own insertion guard and name
+# storage, but are their OWN three physical arrays -- this gate checked only
+# the five LOWER_FN_TUPLE_ARR_* ones, so a future synchronized cap raise
+# could update every LOWER_FN_TUPLE_ARR_* extent, pass this gate, and still
+# leave the three LOWER_FN_ARR_CHAIN_* arrays at their old (now too small)
+# size, since nothing here was reading them at all. Checked the same way,
+# against the same CAP and STRIDE.
+#
 # This gate is the substitute for a compile-time check the language cannot
-# express here: it parses the seven literals back out of source and asserts
-# HASH == MASK == SCALAR == NAME_LEN == CAP and NAME_BUF == STRIDE * CAP.
+# express here: it parses the ten literals back out of source and asserts
+# HASH == MASK == SCALAR == NAME_LEN == CHAIN_HASH == CHAIN_NAME_LEN == CAP
+# and NAME_BUF == CHAIN_NAME_BUF == STRIDE * CAP.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/gate_assert.sh"
@@ -52,7 +64,7 @@ LOWER=self-hosted/ir/lower.sio
 ART=artifacts/gates/lower_fn_tuple_arr_cap.v1.json
 mkdir -p "$(dirname "$ART")"
 
-# check <file> -- fails (exit 1) unless the six literals agree. Run inside a
+# check <file> -- fails (exit 1) unless the ten literals agree. Run inside a
 # subshell by callers that need a sabotaged copy to fail without killing the
 # gate itself: gate_fail below calls `exit`, which only unwinds the subshell.
 check() {
@@ -66,6 +78,7 @@ check() {
   # exactly the text between "; " and "]" (or "= " and end of line) sidesteps
   # that instead of relying on which match happens to sort last.
   local cap stride hash_n mask_n scalar_n namebuf_n namelen_n
+  local chain_hash_n chain_namebuf_n chain_namelen_n
   cap=$(sed -nE 's/^let LOWER_FN_TUPLE_ARR_CAP: i64 = ([0-9]+)$/\1/p' "$file")
   stride=$(sed -nE 's/^let LOWER_FN_TUPLE_ARR_NAME_STRIDE: i64 = ([0-9]+)$/\1/p' "$file")
   hash_n=$(sed -nE 's/^var LOWER_FN_TUPLE_ARR_HASH: \[i64; ([0-9]+)\].*$/\1/p' "$file")
@@ -73,6 +86,9 @@ check() {
   scalar_n=$(sed -nE 's/^var LOWER_FN_TUPLE_ARR_SCALAR: \[i64; ([0-9]+)\].*$/\1/p' "$file")
   namebuf_n=$(sed -nE 's/^var LOWER_FN_TUPLE_ARR_NAME_BUF: \[i8; ([0-9]+)\].*$/\1/p' "$file")
   namelen_n=$(sed -nE 's/^var LOWER_FN_TUPLE_ARR_NAME_LEN: \[i64; ([0-9]+)\].*$/\1/p' "$file")
+  chain_hash_n=$(sed -nE 's/^var LOWER_FN_ARR_CHAIN_HASH: \[i64; ([0-9]+)\].*$/\1/p' "$file")
+  chain_namebuf_n=$(sed -nE 's/^var LOWER_FN_ARR_CHAIN_NAME_BUF: \[i8; ([0-9]+)\].*$/\1/p' "$file")
+  chain_namelen_n=$(sed -nE 's/^var LOWER_FN_ARR_CHAIN_NAME_LEN: \[i64; ([0-9]+)\].*$/\1/p' "$file")
 
   require_nonempty "$cap" "LOWER_FN_TUPLE_ARR_CAP not found in $file"
   require_nonempty "$stride" "LOWER_FN_TUPLE_ARR_NAME_STRIDE not found in $file"
@@ -81,15 +97,21 @@ check() {
   require_nonempty "$scalar_n" "LOWER_FN_TUPLE_ARR_SCALAR extent not found in $file"
   require_nonempty "$namebuf_n" "LOWER_FN_TUPLE_ARR_NAME_BUF extent not found in $file"
   require_nonempty "$namelen_n" "LOWER_FN_TUPLE_ARR_NAME_LEN extent not found in $file"
+  require_nonempty "$chain_hash_n" "LOWER_FN_ARR_CHAIN_HASH extent not found in $file"
+  require_nonempty "$chain_namebuf_n" "LOWER_FN_ARR_CHAIN_NAME_BUF extent not found in $file"
+  require_nonempty "$chain_namelen_n" "LOWER_FN_ARR_CHAIN_NAME_LEN extent not found in $file"
 
   [[ "$hash_n" == "$cap" ]] || gate_fail "LOWER_FN_TUPLE_ARR_HASH extent ($hash_n) != LOWER_FN_TUPLE_ARR_CAP ($cap)"
   [[ "$mask_n" == "$cap" ]] || gate_fail "LOWER_FN_TUPLE_ARR_MASK extent ($mask_n) != LOWER_FN_TUPLE_ARR_CAP ($cap)"
   [[ "$scalar_n" == "$cap" ]] || gate_fail "LOWER_FN_TUPLE_ARR_SCALAR extent ($scalar_n) != LOWER_FN_TUPLE_ARR_CAP ($cap)"
   [[ "$namelen_n" == "$cap" ]] || gate_fail "LOWER_FN_TUPLE_ARR_NAME_LEN extent ($namelen_n) != LOWER_FN_TUPLE_ARR_CAP ($cap)"
+  [[ "$chain_hash_n" == "$cap" ]] || gate_fail "LOWER_FN_ARR_CHAIN_HASH extent ($chain_hash_n) != LOWER_FN_TUPLE_ARR_CAP ($cap)"
+  [[ "$chain_namelen_n" == "$cap" ]] || gate_fail "LOWER_FN_ARR_CHAIN_NAME_LEN extent ($chain_namelen_n) != LOWER_FN_TUPLE_ARR_CAP ($cap)"
   local expect_namebuf=$(( stride * cap ))
   [[ "$namebuf_n" == "$expect_namebuf" ]] || gate_fail "LOWER_FN_TUPLE_ARR_NAME_BUF extent ($namebuf_n) != NAME_STRIDE * CAP ($expect_namebuf)"
+  [[ "$chain_namebuf_n" == "$expect_namebuf" ]] || gate_fail "LOWER_FN_ARR_CHAIN_NAME_BUF extent ($chain_namebuf_n) != NAME_STRIDE * CAP ($expect_namebuf)"
 
-  printf '%s %s %s %s %s %s %s' "$cap" "$stride" "$hash_n" "$mask_n" "$scalar_n" "$namebuf_n" "$namelen_n"
+  printf '%s %s %s %s %s %s %s %s %s %s' "$cap" "$stride" "$hash_n" "$mask_n" "$scalar_n" "$namebuf_n" "$namelen_n" "$chain_hash_n" "$chain_namebuf_n" "$chain_namelen_n"
 }
 
 # Positive control FIRST. A checker that has never failed has measured
@@ -112,13 +134,13 @@ SAB=$(mktemp); trap 'rm -f "$SAB"' EXIT
 sed "s/^var LOWER_FN_TUPLE_ARR_HASH: \[i64; ${current_hash_n}\]/var LOWER_FN_TUPLE_ARR_HASH: [i64; ${sabotaged_hash_n}]/" "$LOWER" | gate_write_artifact "$SAB"
 if ( check "$SAB" ) >/dev/null 2>&1; then
   echo "CONTROL_FAIL: the sabotaged extent passed. This gate inspects nothing."
-  printf '{"status":"fail","reason":"positive control did not fire","metrics":{"total":7,"passed":0,"failed":1,"not_run":0}}\n' | gate_write_artifact "$ART"
+  printf '{"status":"fail","reason":"positive control did not fire","metrics":{"total":10,"passed":0,"failed":1,"not_run":0}}\n' | gate_write_artifact "$ART"
   exit 1
 fi
 echo "control: sabotaged LOWER_FN_TUPLE_ARR_HASH extent rejected, as required"
 
 vals="$(check "$LOWER")"
-read -r cap stride hash_n mask_n scalar_n namebuf_n namelen_n <<<"$vals"
-echo "LOWER_FN_TUPLE_ARR_CAP_OK: cap=$cap stride=$stride hash=$hash_n mask=$mask_n scalar=$scalar_n namebuf=$namebuf_n namelen=$namelen_n"
-printf '{"status":"pass","metrics":{"cap":%s,"stride":%s,"hash":%s,"mask":%s,"scalar":%s,"namebuf":%s,"namelen":%s,"total":7,"passed":7,"failed":0,"not_run":0}}\n' \
-  "$cap" "$stride" "$hash_n" "$mask_n" "$scalar_n" "$namebuf_n" "$namelen_n" | gate_write_artifact "$ART"
+read -r cap stride hash_n mask_n scalar_n namebuf_n namelen_n chain_hash_n chain_namebuf_n chain_namelen_n <<<"$vals"
+echo "LOWER_FN_TUPLE_ARR_CAP_OK: cap=$cap stride=$stride hash=$hash_n mask=$mask_n scalar=$scalar_n namebuf=$namebuf_n namelen=$namelen_n chain_hash=$chain_hash_n chain_namebuf=$chain_namebuf_n chain_namelen=$chain_namelen_n"
+printf '{"status":"pass","metrics":{"cap":%s,"stride":%s,"hash":%s,"mask":%s,"scalar":%s,"namebuf":%s,"namelen":%s,"chain_hash":%s,"chain_namebuf":%s,"chain_namelen":%s,"total":10,"passed":10,"failed":0,"not_run":0}}\n' \
+  "$cap" "$stride" "$hash_n" "$mask_n" "$scalar_n" "$namebuf_n" "$namelen_n" "$chain_hash_n" "$chain_namebuf_n" "$chain_namelen_n" | gate_write_artifact "$ART"
