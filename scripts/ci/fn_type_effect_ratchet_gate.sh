@@ -429,24 +429,34 @@ function classify_fn_type_at(line, fn_pos, at_eof,    open_pos, close_pos, after
     if (match(rest, /^[ \t\n]*->/)) {
         tail_start = after + RLENGTH
         tail_end = scan_tail(line, tail_start)
-        # Copilot follow-up (#2570): deliberately NOT deferring here the way
-        # close_pos above does. Measured on the live corpus: `let sin_fn:
-        # fn(c_double) -> c_double = unsafe { match ... }` (examples/ffi_demo.sio)
-        # -- after the return type, " = unsafe {" is the LET-BINDING own
-        # initializer, not more type syntax, but its "{" still looks like an
-        # opener to step_open_or_other_close (which cannot tell a
-        # refinement "{" from an unrelated code block one), so deferring here
-        # tried to bracket-match through the ENTIRE unsafe block -- a match
-        # expression, further nested braces, string literals -- as if it
-        # were part of the type, corrupting the hit. A parameter LIST can
-        # only ever contain type syntax, so deferring on close_pos above is
-        # unambiguous; text after "->" can be followed by anything (an
-        # initializer, a statement, literally the rest of the file), so
-        # treating "ran off the end of what is on hand so far" as genuinely
-        # the end here -- same as this scanner always did before the
-        # multiline fix -- is the safe reading unless a future, narrower
-        # finding shows otherwise.
         hit_tail = substr(line, tail_start, tail_end - tail_start)
+        # Copilot follow-up (#2570): deliberately not ALWAYS deferring here
+        # the way close_pos above does -- but the narrower finding predicted
+        # in an earlier version of this comment did arrive: `f: fn() ->` on
+        # one physical line, `(i64, i64) with Mut` on the next (self-hosted/
+        # parser/types.sio:935-951 parses the return type and effects as
+        # tokens across whitespace, so this is equally valid source). There,
+        # tail_start already points past the very end of `line` (nothing at
+        # all followed the arrow yet), scan_tail returns immediately, and
+        # hit_tail is empty -- genuinely no information yet, not "there is
+        # real content and it happens not to close". Measured on the live
+        # corpus separately: `let sin_fn: fn(c_double) -> c_double = unsafe {
+        # match ... }` (examples/ffi_demo.sio) -- after the return type,
+        # " = unsafe {" is the LET-BINDING own initializer, not more type
+        # syntax, but its "{" still looks like an opener to
+        # step_open_or_other_close (which cannot tell a refinement "{" from
+        # an unrelated code block one), so deferring UNCONDITIONALLY here
+        # tried to bracket-match through the ENTIRE unsafe block as if it
+        # were part of the type, corrupting the hit. hit_tail there is
+        # "c_double = unsafe {" -- real, substantial, non-whitespace content
+        # -- which is exactly what distinguishes the two: defer only when
+        # hit_tail, after running off the end, is ENTIRELY whitespace (truly
+        # nothing seen yet); anything else means real content was found and
+        # simply does not close within what has been read so far, which
+        # must NOT defer, for the same reason ffi_demo.sio must not.
+        if (!at_eof && tail_end > length(line) && match(hit_tail, /^[ \t\n]*$/)) {
+            return -1
+        }
         hit = substr(line, fn_pos, tail_end - fn_pos)
         # A hit assembled across multiple physical lines still carries their
         # newlines; enumerate() and bare_hits_of() both expect one hit per
@@ -954,6 +964,32 @@ selftest() {
   if [ "$n22b" = "3" ]; then
     echo "  ok   POSITIVO 22: dois irmaos genuinos em uma tupla produzem 3 hits"
   else echo "  FALHA POSITIVO 22: esperava 3 hits (externo + 2 irmaos), obteve $n22b"; rc=1; fi
+  # POSITIVE control 23 (#2570): the arrow itself resolves within bounds
+  # (`f: fn() ->` on one physical line), but the RETURN TYPE text -- not
+  # just the arrow -- starts on the next line (`(i64, i64) with Mut`).
+  # self-hosted/parser/types.sio:935-951 parses the return type and effects
+  # as tokens across whitespace, so this is equally valid source. Before
+  # this fix, scan_tail ran off the end of line 1 immediately (nothing at
+  # all followed the arrow there) and the type was finalized as bare from
+  # an empty hit_tail, never reaching line 2's "with Mut" at all -- a false
+  # ratchet violation, not an undercount.
+  printf 'fn use_it(f: fn() ->\n(i64, i64) with Mut) -> f64 { 0.0 }\n' > "$tmp/pos23.sio"
+  if bare_hits_of "$tmp/pos23.sio" | grep -q .; then
+    echo "  FALHA POSITIVO 23: tipo com retorno multilinha e efeito proprio contado como nu"; rc=1
+  else echo "  ok   POSITIVO 23: tipo com retorno multilinha e efeito proprio nao conta como nu"; fi
+  # NEGATIVE control 23 (#2570): companion -- same split, but genuinely bare
+  # (no with-clause anywhere), pinning that this defers to find the true
+  # end rather than becoming unconditionally non-bare.
+  printf 'fn use_it(f: fn() ->\n(i64, i64)) -> f64 { 0.0 }\n' > "$tmp/neg23.sio"
+  if bare_hits_of "$tmp/neg23.sio" | grep -q .; then
+    echo "  ok   NEGATIVO 23: tipo com retorno multilinha genuinamente nu e detectado"
+  else echo "  FALHA NEGATIVO 23: tipo com retorno multilinha nu nao detectado"; rc=1; fi
+  # Regression guard, same shape as the earlier ffi_demo.sio control: real,
+  # substantial content that simply never closes must still NOT defer.
+  printf 'let sin_fn: fn(c_double) -> c_double = unsafe {\n' > "$tmp/ffi23.sio"
+  if bare_hits_of "$tmp/ffi23.sio" | grep -q .; then
+    echo "  ok   REGRESSAO 23: bloco unsafe nao fechado continua nao-diferido (fim de linha 1)"
+  else echo "  FALHA REGRESSAO 23: bloco unsafe nao fechado parou de ser detectado"; rc=1; fi
   rm -rf "$tmp"
   echo "falhas: $rc"
   return $rc
