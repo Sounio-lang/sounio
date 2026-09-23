@@ -11,12 +11,14 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 
 > **See also:** the canonical maturity tiers reconciled against the public-claim
 > registry live at [`docs/compiler/MATURITY.md`](../../compiler/MATURITY.md).
-> That page presents tiers — `Production` (registry: `stable`/`closed`) and
-> `Validated Research` (registry: `validated_research`/`closed-with-named-gate`) —
-> that mirror the public-claim registry's `claim_level`/`closure_status` columns.
-> This page is complementary: it describes the measurement rules and the
-> five-state ladder used to assess a kind's internal evidence state. This ladder
-> does not itself decide those registry tiers.
+> That page presents tiers — `Production` (registry: `claim_level=stable`,
+> `closure_status=closed`) and `Validated Research` (registry:
+> `claim_level=validated_research`, `closure_status=closed`; the named gate is
+> recorded separately in `evidence_kind`/`evidence_ref`) — that mirror the
+> public-claim registry's `claim_level`/`closure_status` columns. This page is
+> complementary: it describes the measurement rules and the five-state ladder used
+> to assess a kind's internal evidence state. This ladder does not itself decide
+> those registry tiers.
 
 The evidence progression in `FOUNDER_INTENT.md` and `docs/internal/garden/README.md`
 is `Garden -> Hypothesis -> Executable -> Claim-ready`. This document adds the

@@ -2,8 +2,8 @@
 topic_id: repo.docs.implementation.mv-core-checklist
 authority: repo_only
 audience: maintainers
-last_validated: 2026-03-07
-validated_by: A7
+last_validated: 2026-09-22
+validated_by: Claude
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.implementation.mv-core-checklist
 -->
 
@@ -47,8 +47,11 @@ Backed by `stdlib/epistemic/SEMANTICS.md` invariants:
 ### 5) MIR + One Backend Path
 - SSA validity checks for MIR (dominance/phi sanity) run in debug/test builds.
 - At least one reliable execution path:
-  - Either interpreter for core constructs, or
-  - Cranelift path for a small subset (enough to run `tests/run-pass` style programs).
+  - The interpreter for core constructs, and/or
+  - The native Linux x86-64 backend (self-hosted Madaros; emits x86-64 ELF with
+    the epistemic runtime). `tests/run-pass` style programs run on this path.
+- There is no Cranelift/JIT backend — the retired Rust Cranelift runner is gone;
+  the default compiler is self-hosted Madaros.
 - Optimization passes are effect-aware and conservative around memory and calls.
 
 ### 6) Tests That Prove “Realness”
@@ -71,9 +74,10 @@ Backed by `stdlib/epistemic/SEMANTICS.md` invariants:
 
 ## Fast Validation Loop
 
-From `compiler/`:
-- `cargo test` (compiler unit/integration tests)
-- `cargo run -- check examples/hello.sio` (or a canonical minimal example)
+From repo root (self-hosted compiler, `bin/souc`):
+- `bin/souc check examples/hello.sio` (or `run`/`build` via the same CLI) to
+  exercise parse → typecheck → (optionally) run end-to-end.
 
-From repo root:
-- Keep `tests/run-pass` and `tests/compile-fail` runnable via the harness the project uses.
+- Keep `tests/run-pass` and `tests/compile-fail` runnable via the harness the
+  project uses — validated through the registered `scripts/ci/*` gates, not a
+  `compiler/` Cargo workspace (the retired Rust/Cranelift runner is gone).
