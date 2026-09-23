@@ -78,27 +78,58 @@ else
   PROBES=("${DEFAULT_PROBES[@]}")
 fi
 
-# Seconds. Override per probe with SOUNIO_CHEM_TIMEOUT_<PROBE_UPPERCASE>=N if a
-# future probe needs more; unknown probes fall back to 1500 (the original,
-# adequate for the two cheap probes this gate started with).
+# FAIL CLOSED, not just on a probe mismatch -- on having no probes to run at
+# all. `-n "${SOUNIO_CHEM_PROBES:-}"` is true for a whitespace-only value
+# (" "), and `read -a` on whitespace-only input splits to a ZERO-element
+# array: PROBES=() reaches the loop below, the loop body never runs, FAILS
+# stays 0, and the gate printed "all 0 probes match" and exited 0 -- a golden
+# check that verified nothing, reporting success. A CI config value is part
+# of this gate's evidence contract (it decides what got measured), so an
+# input that produces no selection must be as loud as a probe that diverges.
+if [[ ${#PROBES[@]} -eq 0 ]]; then
+  echo "[chem-golden] FAIL: SOUNIO_CHEM_PROBES selected zero probes (raw value: '${SOUNIO_CHEM_PROBES:-}')" >&2
+  exit 1
+fi
+
+# Seconds. Override per probe with SOUNIO_CHEM_TIMEOUT_<PROBE_UPPERCASE>=N --
+# for ANY probe, not just rep_adiabatic_bug (a prior version only wired the
+# override through for that one entry, so the documented knob was a no-op for
+# the four probes this gate actually runs by default; unknown probes fall
+# back to 1500, the original, adequate for the two cheap probes this gate
+# started with).
 # rep_adiabatic_bug's own ceiling is a hang detector for the rare manual run,
 # not a target: ~26.2h measured, so 172800s (48h, ~1.8x margin) here. Nothing
 # automated ever reaches this entry -- see SOUNIO_CHEM_PROBES above.
 declare -A PROBE_TIMEOUT_S=(
   [rep_traj_bug]=900
   [rep_stagnation]=1200
-  [rep_adiabatic_bug]="${SOUNIO_CHEM_TIMEOUT_REP_ADIABATIC_BUG:-172800}"
+  [rep_adiabatic_bug]=172800
   [gbs_oracle]=4800
   [h2_ignition_uq_demo]=6600
 )
 
+# probe_timeout_s <probe> -> the effective timeout: SOUNIO_CHEM_TIMEOUT_<P>
+# uppercased (with any non-[A-Za-z0-9_] char, i.e. none expected in a probe
+# name, mapped to _) if set, else PROBE_TIMEOUT_S[<probe>], else 1500.
+probe_timeout_s() {
+  local p="$1" var
+  var="SOUNIO_CHEM_TIMEOUT_${p^^}"
+  var="${var//[^A-Za-z0-9_]/_}"
+  if [[ -n "${!var:-}" ]]; then
+    printf '%s' "${!var}"
+  else
+    printf '%s' "${PROBE_TIMEOUT_S[$p]:-1500}"
+  fi
+}
+
 FAILS=0
 echo "[chem-golden] lean_single: $(md5sum "$ROOT_DIR/bin/souc-lean-single-x86_64" 2>/dev/null | cut -c1-8) bin/souc-lean-single-x86_64"
+echo "[chem-golden] probes: ${PROBES[*]}"
 
 declare -A PID
 for p in "${PROBES[@]}"; do
   src="examples/chemistry/$p.sio"
-  t="${PROBE_TIMEOUT_S[$p]:-1500}"
+  t="$(probe_timeout_s "$p")"
   (
     SOUNIO_SOUC_ENGINE=lean_single timeout "$t" "$SOUC" run "$src" >"$WORK/$p.txt" 2>"$WORK/$p.err"
     echo $? >"$WORK/$p.rc"
@@ -138,5 +169,20 @@ for p in "${PROBES[@]}"; do
     FAILS=$((FAILS + 1))
   fi
 done
-[[ $FAILS -eq 0 ]] && echo "[chem-golden] all ${#PROBES[@]} probes match" || echo "[chem-golden] $FAILS probe(s) diverge" >&2
+# Defense in depth alongside the empty-selection check above: this is what
+# actually ran, measured independently of PROBES (a `.rc` file only exists if
+# the probe's subshell reached its `echo $? >"$WORK/$p.rc"` line), so a
+# regression that reintroduces a zero-probe run some other way -- not
+# necessarily through SOUNIO_CHEM_PROBES -- is still caught here rather than
+# read as "0 probes, 0 fails, green".
+EXECUTED=0
+for p in "${PROBES[@]}"; do
+  [[ -f "$WORK/$p.rc" ]] && EXECUTED=$((EXECUTED + 1))
+done
+if [[ $EXECUTED -eq 0 ]]; then
+  echo "[chem-golden] FAIL: 0 of ${#PROBES[@]} selected probe(s) actually executed" >&2
+  exit 1
+fi
+
+[[ $FAILS -eq 0 ]] && echo "[chem-golden] all ${#PROBES[@]} probes match ($EXECUTED executed)" || echo "[chem-golden] $FAILS probe(s) diverge ($EXECUTED executed)" >&2
 [[ $FAILS -eq 0 ]]
