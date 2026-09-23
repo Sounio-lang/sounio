@@ -13,7 +13,7 @@ Read before Kimi starts a Sounio task:
 Current operational notes:
 
 - Active workspace: `/workspace/sounio`.
-- Safe branch: `integration/sounio-dev-ready-base`.
+- Safe branch: `main` (canonical since 2026-09-22; `integration/sounio-dev-ready-base` is deprecated, see `CLAUDE.md` §3).
 - During orchestration setup, a local modification was observed in
   `self-hosted/compiler/lean_single.sio`. Verify current `git status` before
   touching it; if modified, do not overwrite it unless the user explicitly
