@@ -1303,6 +1303,17 @@ cancels and the comparison is blind to it:
 | aligned | TDY | 101325.124717 | **2.032e-11** |
 | aligned | TPX | 101325.000000 | 9.055e-06 |
 
+> **Corrected 2026-09-23, a reviewer finding.** This 2.032e-11 is a byproduct
+> print of `gri30_h2_cantera_parity.py` itself, measured incidentally to the
+> initialization comparison this table makes -- not the dedicated
+> `rep_tolerance.py`/`rep_resolution.py` bisection of section 7.3/7.7, whose
+> figure for the identical nominal quantity (aligned, TDY, replica vs Cantera)
+> is 2.074e-11. A third producer, a third value, for the same reason as the
+> Table 5/Table 8 pair above: this section 6.3 does not name which producer
+> measured its own figure, and neither did section 7.5 below before this
+> correction. Treat 2.032e-11 as this table's own measurement, not as a
+> restatement of the document's headline residual.
+
 Aligning `R_cgs` moves the TDY column **not at all** — 2.660e-06 before and
 after. Under TPX, which does not share `mtot`, the same change is worth
 3.922e-05 → 6.576e-06. The protocol choice, not the constant, decided what the
@@ -1838,9 +1849,19 @@ level.**
 
 ### The consequence, stated against this document's own headline
 
-The aligned-regime residual this document reports is **2.032e-11**. The oracle's
-resolution at the tolerance used to measure it is **1.473e-11**. The ratio is
-**1.38**.
+> **Corrected 2026-09-23, a reviewer finding.** "The aligned-regime residual
+> this document reports" is imprecise: 2.032e-11 is section 6.3 instance (3)'s
+> figure, a byproduct of `gri30_h2_cantera_parity.py`'s own initialization
+> comparison. Section 7.7 below measures the same nominal quantity with the
+> dedicated `rep_tolerance.py`/`rep_resolution.py` bisection and gets
+> 2.074e-11. The argument in this subsection -- that the residual sits at,
+> not below, the oracle's resolution -- holds under either figure (1.38 here,
+> 1.46 there); neither number is singled out as *the* headline value anywhere
+> past this correction.
+
+The aligned-regime residual **section 6.3 instance (3) reports** is
+**2.032e-11**. The oracle's resolution at the tolerance used to measure it is
+**1.473e-11**. The ratio is **1.38**.
 
 > **Therefore 2.032e-11 is not citable as agreement.** It is an *upper bound on
 > the disagreement*, bounded below by the instrument. Two integrators that
