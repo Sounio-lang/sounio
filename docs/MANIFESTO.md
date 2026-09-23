@@ -57,8 +57,10 @@ let concentration_f64: f64 = 5.23  // mg/L... but really?
 
 // Right: acknowledging uncertainty (canonical free-fn form).
 let concentration = ep_measured(5.23, 0.15)  // val=5.23 mg/L, std=0.15, conf=900/1000
-// Note: unit-as-spellet (mg/L) is aspirational in source; the dimensional
-// counterpart is stdlib/units/lib::Quantity with dim_mass()/dim_volume().
+// Note: unit spellings such as `mg` are implemented and tested
+// (tests/run-pass/unit_same_add.sio); for dimensional arithmetic use
+// stdlib/units/lib::Quantity with dim_mass()/dim_length()/dim_time()
+// (there is no dim_volume — compose it from those).
 ```
 
 Sounio makes this explicit. When you declare a value, you must consider: *how well do I actually know this?*
@@ -73,7 +75,7 @@ use epistemic::knowledge::{Epistemic}
 // Canonical struct-literal form (variance = std^2, confidence integer 0..1000).
 let clearance = Epistemic { val: 10.5, variance: 1.44, confidence: 950 }
 
-// Provenance is tracked separately in stdlib/epistemic/provenance.sio;
+// Provenance is tracked separately in stdlib/epistemic/prov.sio;
 // the Source { origin, timestamp, method, confidence } struct above is
 // not in the checked public surface — see docs/compiler/KNOWN_LIMITATIONS.md.
 ```
@@ -81,9 +83,9 @@ let clearance = Epistemic { val: 10.5, variance: 1.44, confidence: 950 }
 > Note: every value carries provenance in Sounio. The lineage of your data is
 > as important as the data itself. The `Epistemic` confidence field encodes
 > statistical confidence; physical provenance lives in
-> `stdlib/epistemic/provenance.sio`.
+> `stdlib/epistemic/prov.sio`.
 
-Every `Knowledge<T>` carries its provenance. The lineage of your data is as important as the data itself.
+Every `Epistemic` carries its provenance. The lineage of your data is as important as the data itself.
 
 ### 3. Uncertainty Propagates Automatically
 
@@ -105,9 +107,9 @@ let density = ep_div(&mass, &volume)
 > Note: `let .* = Knowledge::new(...)` named-arg calls are not in the checked
 > surface. Use `Epistemic { val, variance, confidence }` struct literals (as in
 > `tests/run-pass/ep_gum_covariance.sio`) or `ep_measured(val, std_dev)` free
-> fn. Units-as-spellets (`g`, `mL`) are aspirational; the dimensional
-> counterpart is `stdlib/units/lib::Quantity` + `dim_*()`.
-```
+> fn. Unit spellings such as `mg` are implemented and tested
+> (tests/run-pass/unit_same_add.sio); for dimensional arithmetic use
+> `stdlib/units/lib::Quantity` with `dim_*()`.
 
 You write the physics. The compiler handles the statistics.
 

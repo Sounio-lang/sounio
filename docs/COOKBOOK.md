@@ -366,10 +366,7 @@ fn gum_mul(a: KnowledgeF64, b: KnowledgeF64) -> KnowledgeF64 {
 Source: `tests/run-pass/closure_linear.sio`
 
 ```sio
-// Note: the `linear` struct-modifier keyword is NOT in the checked public surface;
-// see docs/compiler/KNOWN_LIMITATIONS.md. Source-tracked ownership lives in
-// stdlib/epistemic/affine (anchor: tests/run-pass/affine_shared_source_add.sio).
-struct FileHandle { fd: i32 }
+linear struct FileHandle { fd: i32 }
 
 fn open_file(path: &str) -> FileHandle with IO {
     FileHandle { fd: 0 }

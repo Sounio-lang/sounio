@@ -92,10 +92,7 @@ let (x, (y, z)) = (10, (20, 30))      // nested
 struct Point { x: f64, y: f64 }
 let p = Point { x: 1.0, y: 2.0 }
 
-// Note: the `linear` struct-modifier keyword is NOT in the checked public surface;
-// see docs/compiler/KNOWN_LIMITATIONS.md. Source-tracked ownership lives in
-// stdlib/epistemic/affine (anchor: tests/run-pass/affine_shared_source_add.sio).
-struct Handle { fd: i32 }       // linear types
+linear struct Handle { fd: i32 }       // linear types
 ```
 
 ### Enums
