@@ -2,10 +2,12 @@
 
 > **Checked surface vs. intended semantics.** The shipped type is
 > `Epistemic { val: f64, variance: f64, confidence: i64 }` in
-> `stdlib/epistemic/knowledge.sio`, with the free functions `ep_measured`,
-> `ep_measured`, `ep_val`, `ep_std`, `ep_add`, `ep_sub`, `ep_mul`, `ep_div`,
-> `ep_merge`, and `ep_is_credible` are exercised by the `//@ run-pass` selftest
-> in `stdlib/epistemic/knowledge.sio`. The covariance-aware forms
+> `stdlib/epistemic/knowledge.sio`. The `ep_measured` constructor is exercised
+> by the importing tests `tests/stdlib/epistemic/test_knowledge_madaros_import_e2e.sio`
+> and `tests/stdlib/epistemic/test_knowledge_stdlib.sio`. The free functions
+> `ep_val`, `ep_std`, `ep_add`, `ep_sub`, `ep_mul`, `ep_div`, `ep_merge`, and
+> `ep_is_credible` are exercised by the `//@ run-pass` selftest in
+> `stdlib/epistemic/knowledge.sio`. The covariance-aware forms
 > (`ep_add_cov`, `ep_sub_cov`, `ep_mul_cov`, `ep_div_cov`) are pinned separately
 > by `tests/run-pass/ep_gum_covariance.sio`. The
 > `Knowledge<T>` generic, `Knowledge::interval`, `.with_conf`, `.boost`, and
