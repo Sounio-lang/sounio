@@ -1,0 +1,54 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: FN_PTR_PARAM_TUPLE_ARRAY_MASK PASS
+//
+// Copilot follow-up (#2570). A function-VALUED parameter (`f: fn() ->
+// ([f64; 2], i64)`) has no name of its own to key the
+// lower_fn_tuple_f64_arrays_collect prepass by -- that table is keyed by
+// FUNCTION NAME, and the whole point of a function pointer is genericity
+// over whichever concrete function the caller passes. Neither
+// parameter-binding path (the by-value "path-A" binder via
+// lowerer_bind_local_mut, nor the summary-owned lower_fn_params_ref) ever
+// derived or wrote tuple_float_mask for such a parameter, so a local bound
+// to a tuple-returning function pointer kept mask 0 -- or, since
+// lowerer_bind_local_mut never zero-initialized this field for a REUSED
+// slot either, potentially inherited stale metadata an unrelated earlier
+// function's local happened to leave at the same slot index.
+//
+// Fixed by deriving the combined mask directly from the parameter's own
+// declared type (lower_type_expr_fn_return_tuple_mask, reading
+// TypeFn.inner) at both binding sites, and explicitly zero-initializing the
+// field on the by-value path so a reused slot's stale value cannot leak in
+// (matching the existing box_inner_layout precedent for the same reuse
+// concern).
+//
+//   `fn use_it(f: fn() -> ([f64; 2], i64)) -> f64 { let t = f(); t.0[0] }`
+//   called as `use_it(concrete)` -- no explicit `with` effects clause on
+//   either function or the fn-type parameter: a mismatched effect set gives
+//   the parameter and the argument DIFFERENT internal function-type ids
+//   (E009 "argument type does not match parameter"), an unrelated,
+//   pre-existing checker limitation this fixture works around by leaving
+//   effects off, matching the style of the passing tests/run-pass/
+//   closure_fn_ref.sio.
+fn concrete() -> ([f64; 2], i64) {
+    var a: [f64; 2] = [0.0; 2]
+    a[0] = 9.5
+    (a, 1)
+}
+
+fn use_it(f: fn() -> ([f64; 2], i64)) -> f64 {
+    let t = f()
+    t.0[0] * 2.0
+}
+
+fn main() -> i32 with IO, Mut, Panic {
+    var bad: i32 = 0
+
+    let r = use_it(concrete)
+    if r != 19.0 { bad = bad + 1 }
+
+    if bad == 0 {
+        println("FN_PTR_PARAM_TUPLE_ARRAY_MASK PASS")
+    }
+    bad
+}

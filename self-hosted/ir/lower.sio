@@ -4769,6 +4769,17 @@ fn lowerer_bind_local_mut(
         (*(*locals_box).is_global).values[idx as usize] = 0
         (*(*locals_box).is_ref).values[idx as usize] = 0
         (*(*locals_box).scalar_kind).values[idx as usize] = 0
+        // Copilot follow-up (#2570): explicit 0, for the same reason
+        // box_inner_layout below gets an explicit -1 -- the locals stack is
+        // REUSED across functions, and neither of these two fields was ever
+        // reset on this path. A function-valued parameter left tuple_float_mask
+        // (or fn_ptr_ret_float, mutated separately by
+        // lowerer_mark_local_fn_ptr_ret_float_mut) carrying whatever an
+        // unrelated earlier function's local happened to leave at this same
+        // slot index, misclassifying an f64-array tuple read (or a plain f64
+        // indirect-call result) as an integer, or vice versa.
+        (*(*locals_box).tuple_float_mask).values[idx as usize] = 0
+        (*(*locals_box).fn_ptr_ret_float).values[idx as usize] = 0
         // Post-#2084: tuple0_array_elem_layout was added on main to track when a
         // tuple slot-0 is a fixed array, which gates the aggregate-shallow-copy path.
         (*(*locals_box).tuple0_array_elem_layout).values[idx as usize] = 0 - 1
@@ -4904,6 +4915,28 @@ fn lowerer_mark_local_fn_ptr_ret_float_mut(
     while i >= 0 {
         if (*(*locals_box).depths).values[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*locals_box).names).values[i as usize], name) {
             (*(*locals_box).fn_ptr_ret_float).values[i as usize] = 1
+            (*lo).locals = locals_box
+            return
+        }
+        i = i - 1
+    }
+}
+
+// Copilot follow-up (#2570): *mut analogue of bind_local_tuple_float_mask,
+// for a function-VALUED parameter (`f: fn() -> ([f64; 2], i64)`) on the
+// path-A binder (lowerer_bind_local_mut), which never sets this field at
+// all -- see lower_type_expr_fn_return_tuple_mask for how the mask is
+// derived directly from the parameter's own declared type.
+fn lowerer_mark_local_tuple_float_mask_mut(
+    lo: &! Lowerer,
+    name: Name,
+    mask: i64
+) with Mut, Alloc, Panic, Div {
+    var locals_box = (*lo).locals
+    var i = (*locals_box).count - 1
+    while i >= 0 {
+        if (*(*locals_box).depths).values[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*locals_box).names).values[i as usize], name) {
+            (*(*locals_box).tuple_float_mask).values[i as usize] = mask
             (*lo).locals = locals_box
             return
         }
@@ -5220,6 +5253,18 @@ fn lowerer_lower_fn_params_mut(
                     // println(b) does not route the bool value through the char*
                     // printer. This is the load-bearing param path (path-A).
                     lowerer_mark_local_scalar_kind_mut(lo, (*list).head.name, 1)
+                }
+                // Copilot follow-up (#2570): independent of the scalar_kind
+                // chain above -- a function-VALUED parameter whose return type
+                // is a tuple with f64/array elements (`f: fn() -> ([f64; 2],
+                // i64)`) needs its OWN combined tuple mask, not scalar_kind.
+                // Derived straight from the parameter's declared type since
+                // there is no concrete function name to key the
+                // lower_fn_tuple_f64_arrays_collect prepass by -- see
+                // lower_type_expr_fn_return_tuple_mask.
+                let param_fn_tuple_mask = lower_type_expr_fn_return_tuple_mask(&(*list).head.ty)
+                if param_fn_tuple_mask != 0 {
+                    lowerer_mark_local_tuple_float_mask_mut(lo, (*list).head.name, param_fn_tuple_mask)
                 }
                 if lower_type_expr_is_ref_like(&(*list).head.ty) {
                     lowerer_mark_local_ref_mut(lo, (*list).head.name)
@@ -6560,6 +6605,48 @@ fn lower_opt_type_tuple_float_mask(opt: &Option<Box<TypeExpr>>) -> i64 with Mut,
             if (*te).kind != TypeExprKind::TypeTuple { return 0 }
             lower_type_list_float_mask(&(*te).type_args, 0)
         }
+        None => 0,
+    }
+}
+
+// Copilot follow-up (#2570): the SCALAR-only lower_type_list_float_mask above
+// has no way to name a slot k typed `[f64; N]` -- that's the ARRAY half
+// (bits 32+, encoded as array_bits * 4294967296 everywhere else in this
+// table), and every OTHER producer of it derives it from a function's
+// return type via the separate lower_fn_tuple_f64_arrays_collect prepass,
+// keyed by function NAME. A function-VALUED parameter (`f: fn() -> (...)`)
+// has no name to key that prepass by -- the whole point is genericity over
+// whichever concrete function the caller passes -- so it needs both halves
+// derived directly from ITS OWN declared type here instead.
+fn lower_type_list_tuple_combined_mask(opt: &Option<Box<TypeExprList>>, bit: i64) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(list) => {
+            var m: i64 = 0
+            if bit < 32 {
+                if lower_type_expr_is_f64(&(*list).head) {
+                    m = 1 << (bit as i32)
+                } else if lower_type_expr_is_array_of_f64(&(*list).head) {
+                    m = (1 << (bit as i32)) * 4294967296
+                }
+            }
+            m + lower_type_list_tuple_combined_mask(&(*list).tail, bit + 1)
+        }
+        None => 0,
+    }
+}
+
+fn lower_type_expr_tuple_combined_mask(te: &TypeExpr) -> i64 with Mut, Panic, Div {
+    if (*te).kind != TypeExprKind::TypeTuple { return 0 }
+    lower_type_list_tuple_combined_mask(&(*te).type_args, 0)
+}
+
+// The combined scalar+array tuple mask a function-VALUED parameter's return
+// type carries, e.g. `f: fn() -> ([f64; 2], i64)`. 0 for a non-fn type, a
+// fn type that doesn't return a tuple, or a fn type with no declared return.
+fn lower_type_expr_fn_return_tuple_mask(te: &TypeExpr) -> i64 with Mut, Panic, Div {
+    if (*te).kind != TypeExprKind::TypeFn { return 0 }
+    match (*te).inner {
+        Some(ret) => lower_type_expr_tuple_combined_mask(&(*ret)),
         None => 0,
     }
 }
@@ -16433,6 +16520,19 @@ impl Lowerer {
                         } else {
                             0
                         }
+                        // Copilot follow-up (#2570): explicit write, always --
+                        // this slot may be REUSED from an earlier function's
+                        // local (count resets between functions, the backing
+                        // arrays do not), and this path never touched
+                        // tuple_float_mask at all, so a function-valued
+                        // parameter here either kept mask 0 unconditionally
+                        // (a plain fn-pointer's f64-array tuple return
+                        // misclassified as integer) or, worse, inherited
+                        // whatever an unrelated prior local left at this same
+                        // index. lower_type_expr_fn_return_tuple_mask returns
+                        // 0 for every non-fn-tuple-returning param type, so
+                        // this is also the zero-init every other param needs.
+                        (*(*locals).tuple_float_mask).values[idx as usize] = lower_type_expr_fn_return_tuple_mask(&(*list).head.ty)
                         (*locals).count = idx + 1
                     } else {
                         lo = lo.report_error_at(10813)
