@@ -78,8 +78,11 @@ table **[W]**. A second result concerns uncertainty composition: the Python and
 C++23 replicas give an uncertainty band that scales as √dt (ratio 1.9999–2.0084
 under a factor 4 in step), while the Sounio native band is step-invariant
 (0.999999–1.000001); the √N understatement law behind that contrast is
-machine-checked in Lean 4 (15 theorems, zero `sorry`), and here the
-implementation is right and its oracle is wrong. The organising finding is
+machine-checked in Lean 4 (15 theorems, zero `sorry`), and here the replicas'
+per-step-independent quadrature is shown architecturally wrong for a
+persistent parameter — the evidence is ratio-only, so it does not by itself
+establish that the Sounio band's magnitude is correct **[W]**. The organising
+finding is
 methodological: in ten separate instances the instrument built to detect a
 defect had less resolution than the defect, and the reading was then attributed
 to the object rather than to the instrument.
