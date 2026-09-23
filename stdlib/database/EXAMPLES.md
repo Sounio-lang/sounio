@@ -12,6 +12,7 @@
 ```sio
 use database::pure::engine
 use database::pure::types
+use str::lib::*
 
 var db = in_memory_db_new()
 
@@ -27,7 +28,11 @@ assert(i1 == 1 && i2 == 1)
 // Read a cell back (row 0, column 0 = id; column 1 = price).
 let id = engine_get_cell(&db, "products", 0, 0)
 let price = engine_get_cell(&db, "products", 0, 1)
-println("product {} costs {} cents", id, price)
+let _m0 = str_cat(&str_from_literal("product "), &str_from_i64(id))
+let _m1 = str_cat(&_m0, &str_from_literal(" costs "))
+let _m2 = str_cat(&_m1, &str_from_i64(price))
+let _m3 = str_cat(&_m2, &str_from_literal(" cents"))
+println(str_to_string(_m3))
 
 // Count rows in the table.
 let count = engine_table_row_count(&db, "products")
@@ -38,6 +43,7 @@ assert(count == 2)
 
 ```sio
 use database::pure::engine
+use str::lib::*
 
 var db = in_memory_db_new()
 
@@ -57,7 +63,9 @@ while i < n {
     total = total + engine_get_cell(&db, "orders", i, 0)
     i = i + 1
 }
-println("total amount = {} cents", total)  // 45000
+let _t0 = str_cat(&str_from_literal("total amount = "), &str_from_i64(total))
+let _t1 = str_cat(&_t0, &str_from_literal(" cents"))
+println(str_to_string(_t1))  // 45000
 ```
 
 ## 3. Table Operations
