@@ -18002,6 +18002,30 @@ impl Lowerer {
     // shadowing a same-named array-returning global); only consult the
     // named-function table when callee_name is not a local.
     fn expr_result_is_f64_array_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        // Copilot follow-up (#2570): `let t = (receiver.make_array(), 1)` --
+        // a direct array-returning METHOD call, not a plain ExprCall, hit
+        // the `!= ExprCall` guard just below and returned false, losing the
+        // array-slot bit for a tuple element built straight from a method
+        // call's result (the method tuple-return and method-returning-
+        // function cases added elsewhere in this file only cover a method
+        // that itself returns a TUPLE or a function, not a bare array).
+        // Resolve the receiver through lower_method_recv_type, the same
+        // helper expr_result_tuple_float_mask_ref's own ExprMethodCall
+        // branch already uses for this exact shape, mangle to the method's
+        // Type_method table entry, and check its declared return the same
+        // way the plain-ExprCall branch below checks a top-level function's.
+        if (*e).kind == ExprKind::ExprMethodCall {
+            let tname = self.lower_method_recv_type(&(*e).left)
+            if tname.len <= 0 {
+                return false
+            }
+            let mangled = ir_mangle_method_name(tname, (*e).name)
+            let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, mangled)
+            if fn_id >= 0 && fn_id < self.module.fn_count {
+                return ir_fn_get(&(*self.module), fn_id as usize).returns_float == 2
+            }
+            return false
+        }
         if (*e).kind != ExprKind::ExprCall {
             return false
         }
