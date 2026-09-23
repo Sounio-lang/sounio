@@ -60,11 +60,43 @@ strip_noise() {
 }
 
 # Copilot follow-up (#2570): scan forward from just after a matched `... ->`
-# tracking paren depth, so a tuple return type of ANY nesting depth is
+# tracking delimiter depth, so a tuple return type of ANY nesting depth is
 # consumed correctly instead of truncating at the first `)` or `,`. Ends at
 # the first `,` or unbalanced `)` seen at depth 0 -- that is either the next
 # parameter in the enclosing list, or the enclosing parameter list's own
 # closing paren, neither of which belongs to the function type itself.
+#
+# Copilot follow-up (#2570): depth tracked only `(`/`)`. A multi-argument
+# GENERIC return type (`Result<i64, Error>` -- tuple-typed generics
+# recursively call parse_type_args, self-hosted/parser/types.sio:307-309) has
+# its own internal comma inside `<...>`, at PAREN depth 0, so an
+# effect-bearing `fn() -> Result<i64, Error> with IO` parameter was
+# truncated at the generic's comma before ever reaching `with` -- the exact
+# same failure mode the paren fix addressed, one delimiter kind over. Track
+# `<`/`>`, `[`/`]` and `{`/`}` in the SAME depth counter as `(`/`)` (this
+# gate only needs "are we nested inside some bracket construct right now",
+# not which kind opened it) so a comma or `)` is terminal only once every
+# kind of nesting has closed. The enclosing parameter list's own closing
+# paren is always literally `)` regardless of what else is nested inside it,
+# so only `)` at depth 0 (not `>`/`]`/`}`) is treated as that terminator; a
+# stray `>`/`]`/`}` at depth 0 is defensive dead code for malformed input
+# and is ignored rather than going negative.
+#
+# Copilot follow-up (#2570): PAT_TYPE's `\(`/`\)` used to be passed in via
+# `awk -v pat="$PAT_TYPE"`. Escape processing of a `-v` value's backslash
+# sequences is implementation-defined for a sequence awk doesn't recognise
+# (`\(` is not a C-style escape) -- this repo's local mawk keeps the
+# backslash, but CI's awk strips it, silently turning `fn\([^)]*\)` into
+# `fn([^)]*)`, an ERE GROUP rather than literal parens, which no longer
+# requires literal "(" ")" characters at all and broke the positive control
+# (measured: CI's awk emitted "escape sequence `\(` treated as plain `(`"
+# and the ratchet aborted outright). A regex LITERAL written directly in the
+# awk program text (delimited by `/.../`, not a runtime string) is parsed by
+# the awk lexer's regex-constant rules, which do not have this ambiguity --
+# every conformant awk treats `\(` inside a `/.../` literal as a literal
+# paren the same way. PAT_TYPE is spliced into the program text below at
+# script-construction time (bash string concatenation, not a `-v` value), so
+# it becomes a real lexical regex literal rather than a runtime string.
 AWK_SCAN='
 function scan_tail(line, tail_start,    i, n, c, depth) {
     depth = 0
@@ -72,11 +104,13 @@ function scan_tail(line, tail_start,    i, n, c, depth) {
     i = tail_start
     while (i <= n) {
         c = substr(line, i, 1)
-        if (c == "(") {
+        if (c == "(" || c == "<" || c == "[" || c == "{") {
             depth++
         } else if (c == ")") {
             if (depth == 0) { return i }
             depth--
+        } else if (c == ">" || c == "]" || c == "}") {
+            if (depth > 0) { depth-- }
         } else if (c == "," && depth == 0) {
             return i
         }
@@ -87,7 +121,7 @@ function scan_tail(line, tail_start,    i, n, c, depth) {
 {
     line = $0
     pos = 1
-    while (pos <= length(line) && match(substr(line, pos), pat)) {
+    while (pos <= length(line) && match(substr(line, pos), /'"$PAT_TYPE"'/)) {
         start = pos + RSTART - 1
         matchlen = RLENGTH
         tail_start = start + matchlen
@@ -106,20 +140,20 @@ enumerate() {
     | grep -vE '\.sio\.old$' \
     | while IFS= read -r f; do
         [ -f "$f" ] || continue
-        strip_noise "$f" | awk -v pat="$PAT_TYPE" -v withpat="$withpat" "$AWK_SCAN" | while IFS= read -r hit; do
+        strip_noise "$f" | awk -v withpat="$withpat" "$AWK_SCAN" | while IFS= read -r hit; do
           # a bare function type is one whose text carries no `with` clause
           printf '%s\t%s\n' "$f" "$hit"
         done
       done
 }
 
-# Copilot follow-up (#2570): shared by the positive/negative-3/5/6 selftest
+# Copilot follow-up (#2570): shared by the positive/negative-3/5/6/7 selftest
 # controls below and by enumerate() itself -- runs the same balanced scan and
 # returns only the BARE hits (the awk script already filters on withpat), so
 # a control checking "is this reported as bare" and enumerate() can never
 # disagree about what bare means.
 bare_hits_of() {
-  strip_noise "$1" | awk -v pat="$PAT_TYPE" -v withpat="$withpat" "$AWK_SCAN"
+  strip_noise "$1" | awk -v withpat="$withpat" "$AWK_SCAN"
 }
 
 selftest() {
@@ -174,6 +208,17 @@ selftest() {
   if bare_hits_of "$tmp/neg6.sio" | grep -q .; then
     echo "  FALHA NEGATIVO 6: tipo-funcao com retorno tupla ANINHADA e efeitos contado como nu"; rc=1
   else echo "  ok   NEGATIVO 6: tipo com retorno tupla aninhada e efeitos nao conta como nu"; fi
+  # NEGATIVE control 7 (#2570): a multi-argument GENERIC return type that
+  # DOES carry effects must not be reported as bare either -- tuple-typed
+  # generics recursively call parse_type_args
+  # (self-hosted/parser/types.sio:307-309), so `Result<i64, Error>` is
+  # equally valid source, and depth tracking that only knew about `(`/`)`
+  # truncated at the generic's own internal comma, inside `<...>`, before
+  # ever reaching `with`. This is the control that would have caught it.
+  printf 'fn use_it(f: fn() -> Result<i64, Error> with IO) -> f64 with Mut, Panic { 0.0 }\n' > "$tmp/neg7.sio"
+  if bare_hits_of "$tmp/neg7.sio" | grep -q .; then
+    echo "  FALHA NEGATIVO 7: tipo-funcao com retorno generico e efeitos contado como nu"; rc=1
+  else echo "  ok   NEGATIVO 7: tipo com retorno generico e efeitos nao conta como nu"; fi
   rm -rf "$tmp"
   echo "falhas: $rc"
   return $rc
