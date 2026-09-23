@@ -661,20 +661,28 @@ published figure to all 16 digits.
 CVODE's own `rtol = 10⁻¹²`". That framing is retired here. The floor was never
 measured; it is not a property of the tolerance alone.
 
-Measured, eight species (the H/O checkpoint set), fresh `gas` object per run
+Measured, ten species, fresh `gas` object per run
 (`rep_resolution.py`): Cantera at `rtol = 10⁻¹²` against `10⁻¹³` differs by
 **1.473 × 10⁻¹¹** (H2O); `10⁻¹³` against `10⁻¹⁴` by 5.839 × 10⁻¹²;
 `10⁻¹²` against `10⁻¹⁴` by 2.057 × 10⁻¹¹.
 
-> **[W] Corrected 2026-09-23.** This paragraph previously said "ten species" —
-> wrong, checked against the producer: `rep_resolution.py`'s own species list
-> is the eight-member H/O checkpoint set. Separately, this 1.473 × 10⁻¹¹
+> **[W] Corrected 2026-09-23, twice.** This paragraph originally said "ten
+> species," which a first pass changed to "eight species (the H/O checkpoint
+> set)" on the mistaken belief that `rep_resolution.py`'s eight-member
+> `REPORT` list was what fed these three comparisons. Re-checked against the
+> producer's actual call: `worst(runs[a], runs[b], ALL10)`
+> (`rep_resolution.py:120,124`, `ALL10 = REPORT + ["N2", "AR"]`) — the
+> oracle-resolution figures in this paragraph are measured over **all ten**
+> species, and "ten species" was correct the first time. `REPORT` (eight
+> species) is what the *separate* step-bisection further down in the same
+> script iterates over; conflating the two producer-internal species lists is
+> what caused this. Separately, the underlying point about this 1.473 × 10⁻¹¹
 > figure and the 1.416 × 10⁻¹¹ floor in §4.5's own decomposition table below
-> are **two independent invocations** of the same script — this one a bare
-> call at the working state, the other `--dir <aligned tree>` inside the
-> dt-bisection — not the same measurement re-quoted. They differ by 4%, which
-> is not a discrepancy: it is the next paragraph's finding, restated a section
-> early.
+> still holds: they are **two independent invocations** of the same script —
+> this one a bare call at the working state, the other `--dir <aligned tree>`
+> inside the dt-bisection — not the same measurement re-quoted. They differ by
+> 4%, which is not a discrepancy: it is the next paragraph's finding, restated
+> a section early.
 
 And the floor is not even a number. Perturbing the initial density by
 δ ∈ [−10⁻⁶, +10⁻⁶] over ten states, fresh `gas` each (`rep_floor_spread.py`),

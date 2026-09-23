@@ -26,10 +26,12 @@ was not performed, the row says so.
 verifications made after the base pass are marked **inline, at the point they
 apply**, each carrying its own date and command — 2026-09-01 through
 2026-09-03 for the reverse-rate defect, the regime corrections and the
-instrument-hid-the-defect instances, and **2026-09-22** for the reviewer-driven
-fixes to the reproduction commands and the Lean verification of §6.2. A number
-without an inline date is the base pass; a number with one is dated as it
-carries, not silently as of 2026-09-01.
+instrument-hid-the-defect instances, **2026-09-22** for the reviewer-driven
+fixes to the reproduction commands and the Lean verification of §6.2, and
+**2026-09-23** for the xAI-offload-driven residual-attribution and
+species-count corrections in §7.5 and §7.7. A number without an inline date is
+the base pass; a number with one is dated as it carries, not silently as of
+2026-09-01.
 
 Environment: Linux x86-64, Python 3.11, `cantera 3.2.0`, `numpy 2.4.6`,
 `g++ (Ubuntu 13.3.0) -std=c++23 -O2`. Sounio compiler: the committed ELF
@@ -1821,7 +1823,7 @@ a residual measured against that setting is agreement or noise.
 python3 benchmarks/chemistry/rep_resolution.py
 ```
 
-Eight species (the H/O checkpoint set), a fresh `gas` object per run, t = 1e-4 s:
+Ten species, a fresh `gas` object per run, t = 1e-4 s:
 
 | comparison | worst rel | on |
 |---|---|---|
@@ -1832,11 +1834,17 @@ Eight species (the H/O checkpoint set), a fresh `gas` object per run, t = 1e-4 s
 **The oracle's own answer at `rtol=1e-12` is uncertain at the 1.473e-11
 level.**
 
-> **Corrected 2026-09-23, a reviewer finding.** This section previously said
-> "ten species" -- wrong, checked against the producer: `rep_resolution.py`'s
-> own `REPORT` list is eight species (H2, H, O, O2, OH, H2O, HO2, H2O2), the
-> H/O checkpoint set used throughout this document. There is no ten-species
-> run anywhere in this section. Separately: this 1.473e-11 figure and the
+> **Corrected 2026-09-23, twice.** This section originally said "ten
+> species," which a first correction changed to "eight species (the H/O
+> checkpoint set)" on the mistaken belief that `rep_resolution.py`'s
+> eight-member `REPORT` list fed these three comparisons. Re-checked against
+> the producer's actual call: `worst(runs[a], runs[b], ALL10)`
+> (`rep_resolution.py:120,124`, `ALL10 = REPORT + ["N2", "AR"]`) -- the three
+> comparisons above are measured over **all ten** species, and "ten species"
+> was correct originally. `REPORT` (eight species) is what the script's
+> *separate* step-bisection section iterates over; conflating the two
+> producer-internal species lists is what caused the wrong correction.
+> Separately, the underlying point still holds: this 1.473e-11 figure and the
 > 1.416e-11 floor quoted below in the dt-bisection are **two independent
 > invocations** of the same script, not the same measurement re-quoted -- this
 > run is a bare `rep_resolution.py` call at the current working state, the
@@ -1845,7 +1853,7 @@ level.**
 > this document states explicitly two sections on ("the floor is not even a
 > number... ranges over [3.730e-12, 4.142e-11]... with no monotone trend").
 > Quoting either alone as *the* oracle floor, without the other or the spread,
-> is the error a reviewer correctly caught.
+> is the error a reviewer correctly caught -- twice, in opposite directions.
 
 ### The consequence, stated against this document's own headline
 
