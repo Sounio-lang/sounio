@@ -1,19 +1,57 @@
 <!-- docs:meta
 topic_id: repo.docs.research.delta-epistemic-gradual-compilation-paper
-authority: historical
+authority: repo_only
 audience: researchers
-last_validated: 2026-03-07
-validated_by: A6
+last_validated: 2026-09-22
+validated_by: Claude
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.delta-epistemic-gradual-compilation-paper
 -->
 
-
-<!-- docs:status-note:start -->
-> Docs status: `historical`
-> This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
-<!-- docs:status-note:end -->
-
 # Epistemic Gradual Compilation: A Self-Hosted Compiler that Applies its Type System to its Own Source
+
+> **Design target, not the shipped surface — but three layers, kept separate.**
+> This paper is the direction Sounio is being built toward. It was previously
+> filed as `historical`, which made it read as retired lineage; it is the
+> design, so it is a current `repo_only` document. Three distinct surfaces
+> must not be conflated:
+>
+> 1. **The built-in `Knowledge<T>` language surface ships today** — and an
+>    unqualified "shipped" claim must hold on both `madaros` and `lean_single`
+>    per `docs/compiler/KNOWN_LIMITATIONS.md`, so the engine scope is stated
+>    per fixture below. The generic `Knowledge<T>`, the `measure(...)` primitive,
+>    `.value` extraction gated by the `with Epistemic` effect, and
+>    confidence/epsilon refinement predicates (`Knowledge[f64, ε >= 0.82]`) are
+>    on the checked public surface. They are exercised **cross-engine** (both
+>    `madaros` and `lean_single` pass) by `knowledge_value_requires_epistemic.sio`
+>    and `kl5_epsilon_confidence_boundary_ok.sio`; the same built-in surface is
+>    exercised on `lean_single` only by `knowledge_value_with_epistemic.sio` and
+>    `seq_knowledge_nested_generic.sio` (marked LEAN-ONLY in
+>    `tests/engine_parity_baseline.txt`), and `gum_correlated.sio` currently
+>    DIVERGES between the two engines (also recorded in that baseline). The
+>    paper's `confidence(k) ≥ 950` notation maps onto this shipped
+>    epsilon/confidence refinement capability.
+> 2. **A separate shipped stdlib API:** `Epistemic { val: f64, variance: f64,
+>    confidence: i64 }` in `stdlib/epistemic/knowledge.sio` is a *distinct*,
+>    simpler flat-struct surface — **not** the same type as the built-in
+>    `Knowledge<T>`. Here `ep_measured(val, std_dev)` stores confidence 900 and
+>    `ep_certain(val)` stores 1000; the read-only accessors `ep_val` (returns
+>    `e.val`) and `ep_std` (returns `sqrt(e.variance)`) do **not** propagate
+>    uncertainty, while the arithmetic ops `ep_add` / `ep_div` / `ep_mul` /
+>    `ep_sub` and their `*_cov` covariance variants do — `tests/run-pass/
+>    ep_gum_covariance.sio` anchors the covariance-aware arithmetic variants.
+> 3. **What remains a design target (not shipped):** the paper's ten-word
+>    `Knowledge<T>` runtime layout, `Knowledge::exact`, units-as-type-parameters
+>    (`Knowledge<mg>`), and the two-byte `66 90` guard marker described in
+>    §6.3 are still aspirational — see `docs/compiler/KNOWN_LIMITATIONS.md`.
+>    The two shipped surfaces do **not** share a single confidence scale: the
+>    built-in `Knowledge<T>` carries a *fractional* confidence as an epsilon
+>    predicate on `[0,1]` (e.g. `ε=0.90` in `kl5_epsilon_confidence_boundary_ok.sio`),
+>    while the stdlib `Epistemic` carries an *integer* `confidence: i64` on the
+>    `0–1000` scale (`ep_certain` stores `1000`, `ep_measured` stores `900` in
+>    `stdlib/epistemic/knowledge.sio`). The paper's integer `confidence(k) ≥ 950`
+>    notation maps onto the stdlib's `0–1000` integer scale and is a
+>    design-target aspiration for the built-in's fractional epsilon — the two
+>    representations are distinct and are not silently interchangeable.
 
 **Draft — POPL 2027 submission | Numbers updated 2026-04-21 | DOUBLE-BLIND VERSION**
 
@@ -23,7 +61,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.research.delta
 
 ## Abstract
 
-We present **epistemic gradual compilation**, a novel compile-time discipline that unifies Koka-style algebraic effects, Vazou-style refinement types, and ISO/JCGM 100 (GUM) uncertainty arithmetic in a single typed programming language, Sounio. The central object is `Knowledge<T>`, a typed wrapper carrying (i) an estimated value, (ii) a GUM-propagated variance with per-source budget channels, (iii) a 0-1000 discrete confidence, and (iv) a provenance pointer with a validity-window interval. Accessing the raw value requires the algebraic effect `with Epistemic`, enforced at compile time; composition respects the GUM §5 linearization rule; callers that cannot discharge a confidence refinement predicate either fail type-checking or emit a two-byte NOP guard marker (`66 90`) in the native code stream.
+We present **epistemic gradual compilation**, a novel compile-time discipline that unifies Koka-style algebraic effects, Vazou-style refinement types, and ISO/JCGM 100 (GUM) uncertainty arithmetic in a single typed programming language, Sounio. The central object is `Knowledge<T>`, a typed wrapper carrying (i) an estimated value, (ii) a GUM-propagated variance with per-source budget channels, (iii) a confidence qualifier — the *shipped* built-in carries a fractional epsilon predicate on `[0,1]` (e.g. `ε ≥ 0.82`), while this paper's design notation uses a `0–1000` discrete scale — and (iv) a provenance pointer with a validity-window interval. Accessing the raw value requires the algebraic effect `with Epistemic`, enforced at compile time; composition respects the GUM §5 linearization rule; callers that cannot discharge a confidence refinement predicate either fail type-checking or emit a two-byte NOP guard marker (`66 90`) in the native code stream.
 
 Because Sounio is self-hosted — the compiler (`lean_single.sio`) is written in Sounio — we apply this discipline to the compiler's own source. Across eight bootstrap generations we track a monotonically rising *compile-time confidence* from 26% (literals only) to **100%** (full cross-function confidence propagation). At the current generation, all 15,636 call sites are verified direct calls with zero runtime overhead; zero guarded calls remain, yielding **0 bytes** of epistemic guard cost on the 1.25 MB binary. Generations 2 and 3 are bit-identical (md5 `54327028`), confirming a fixed-point under the compiler's own discipline.
 
@@ -847,7 +885,7 @@ The marker is prefix-aligned. A post-mortem coverage tool counts markers by scan
 
 ## Appendix C — the rapamycin model in Sounio
 
-The full source of the rapamycin PBPK model fits on a single page. Reproduced here with uncertainty annotations:
+The full source of the rapamycin PBPK model fits on a single page. Reproduced here with uncertainty annotations. The listing mixes two distinct surfaces — keep them apart. `measure(...)` **is** a shipped built-in: it constructs the built-in `Knowledge<T>` (see `tests/run-pass/gum_correlated.sio:13`, `let k: Knowledge<f64> = measure(1.75, uncertainty: 0.01)`). `Knowledge::exact` and the units-as-type-parameters form `Knowledge<mg>` are **not** constructors in the current compiler — they remain design-target (§6.3, `KNOWN_LIMITATIONS.md`). The listing's zero-variance / measured values, however, are written with the *separate* shipped stdlib `Epistemic` API: `ep_certain(val)` and `ep_measured(val, std_dev)` construct `Epistemic { val, variance, confidence: i64 }` (`stdlib/epistemic/knowledge.sio`), which is a different type from the built-in `Knowledge<T>` and is **not** a replacement for `measure(...)`. A faithful shipped version would build the uncertain parameters with `measure(...)` (built-in) and only reach for `ep_certain`/`ep_measured` where the stdlib `Epistemic` struct is intended.
 
 ```sio
 // rapamycin PBPK — three compartment, three uncertain parameters
