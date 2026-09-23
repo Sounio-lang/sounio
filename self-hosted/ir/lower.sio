@@ -18019,22 +18019,16 @@ impl Lowerer {
         }
         // #1502: record which slots of a tuple-typed local are f64. Copilot
         // follow-up (#2570): lower_opt_type_tuple_float_mask only ever reads
-        // the SCALAR half off the annotation (bits 0..31, one per f64-typed
-        // slot) -- it has no way to see an `[f64; N]` slot's array half
-        // (bits 32+, only ever produced by expr_result_tuple_float_mask_ref
+        // the SCALAR half off a bare tuple annotation (bits 0..31, one per
+        // f64-typed slot) -- it has no way to see an `[f64; N]` slot's array
+        // half (bits 32+, only ever produced by expr_result_tuple_float_mask_ref
         // from the initializer). Treating the two sources as alternatives --
         // annotated tuple_mask if nonzero, initializer's otherwise -- meant an
         // explicitly typed mixed tuple like `let t: ([f64; 2], f64) = pair()`
         // took the annotated branch for its nonzero scalar bit (slot 1) and
         // never called expr_result_tuple_float_mask_ref at all, dropping
         // every array bit the initializer would have contributed: `t.0[0]`
-        // on the `[f64; 2]` slot still read through the integer path. The two
-        // halves are independent bit ranges by construction (every producer
-        // in this file builds them as `scalar_bits + array_bits *
-        // 4294967296`), so they merge by addition without conflict: the
-        // annotation's scalar bits win when present (it is the more
-        // authoritative source for that half), and the initializer's array
-        // bits are always folded in.
+        // on the `[f64; 2]` slot still read through the integer path.
         //
         // pre_bind_tuple_mask (not a fresh expr_result_tuple_float_mask_ref
         // call here) -- see lower_let_stmt_after_expr_ref: `let pair =
@@ -18044,17 +18038,28 @@ impl Lowerer {
         //
         // Copilot follow-up (#2570): `let f: fn() -> ([f64; 2], i64) =
         // someAlias` -- an EXPLICIT function-typed annotation, not a bare
-        // tuple one. lower_opt_type_tuple_float_mask alone only recognizes
-        // `s.ty` being directly TypeTuple; lower_opt_type_fn_return_tuple_mask
-        // covers TypeFn instead, reading its declared return's tuple mask the
-        // same way parameter binding does. The two are mutually exclusive (a
-        // type is never both), so summing them is safe.
+        // tuple one. Unlike lower_opt_type_tuple_float_mask,
+        // lower_opt_type_fn_return_tuple_mask returns a COMBINED mask (both
+        // halves), which broke the "annotation never has array bits, so the
+        // initializer's array half can always be added unconditionally"
+        // invariant the merge below relied on: for a fn-typed annotation that
+        // already sets the array bit for slot 0, unconditionally adding the
+        // initializer's (identical) array bit carried it into bit 33 --
+        // slot 1 -- instead, corrupting the mask instead of merely being
+        // redundant. Split BOTH halves out and merge each independently, the
+        // annotation's half winning over the initializer's when the
+        // annotation supplies that half at all (matches the existing scalar-
+        // half precedent, now applied symmetrically to the array half too).
         let annotated_tuple_mask = lower_opt_type_tuple_float_mask(&s.ty) + lower_opt_type_fn_return_tuple_mask(&s.ty)
+        let annotated_scalar_bits = annotated_tuple_mask % 4294967296
+        let annotated_array_bits = annotated_tuple_mask - annotated_scalar_bits
         var combined_tuple_mask = annotated_tuple_mask
         let init_scalar_bits = pre_bind_tuple_mask % 4294967296
         let init_array_bits = pre_bind_tuple_mask - init_scalar_bits
-        combined_tuple_mask = combined_tuple_mask + init_array_bits
-        if annotated_tuple_mask == 0 {
+        if annotated_array_bits == 0 {
+            combined_tuple_mask = combined_tuple_mask + init_array_bits
+        }
+        if annotated_scalar_bits == 0 {
             combined_tuple_mask = combined_tuple_mask + init_scalar_bits
         }
         if combined_tuple_mask != 0 {
