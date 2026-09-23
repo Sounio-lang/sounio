@@ -124,38 +124,46 @@ strip_noise() {
 # total layers (1 for the outer own match, plus one more per nested `fn(`
 # found in the tail). count_fn_parens / count_with_clauses below count each
 # via gsub, and the outer is bare iff with_n < fn_layers.
+# Copilot follow-up (#2570): tried disambiguating a bare ">" by checking
+# whether the PRECEDING character was "-" (an arrow, not a generic close).
+# That assumed "Sounio types never use \"<\"/\">\" as comparison operators" --
+# false: a REFINEMENT return type (`{x: i64 | x > 0}`) uses ">" as an actual
+# comparison inside the refinement's own `{...}`, not preceded by "-" and not
+# a generic close either. A single-character lookback cannot distinguish
+# every source of a bare ">"; what CAN is checking whether there is an
+# actually-open "<" for it to close. Replaced the single combined depth
+# counter with a genuine STACK of open-delimiter characters (`stack[depth]`,
+# a local array -- awk gives every extra function parameter, arrays
+# included, fresh call-local storage, so no state leaks between the
+# separate scan_tail calls enumerate() makes for multiple fn-typed
+# parameters on one line): pushing on "(", "<", "[", "{", and popping a
+# closer ONLY when it matches what is actually on top of the stack. A ">"
+# (or any other closer) that does not match the top -- an arrow's ">", a
+# refinement's comparison ">", a comparison's "<" would be the mirror case
+# were it ever reported -- is left alone: neither opens nor closes anything,
+# exactly like any other ordinary character in the text.
 AWK_SCAN='
-function scan_tail(line, tail_start,    i, n, c, prev, depth) {
+function scan_tail(line, tail_start,    i, n, c, depth, stack) {
     depth = 0
-    prev = ""
     n = length(line)
     i = tail_start
     while (i <= n) {
         c = substr(line, i, 1)
         if (c == "(" || c == "<" || c == "[" || c == "{") {
             depth++
+            stack[depth] = c
         } else if (c == ")") {
             if (depth == 0) { return i }
-            depth--
+            if (stack[depth] == "(") { depth-- }
         } else if (c == ">") {
-            # Copilot follow-up (#2570): a bare ">" is ambiguous -- it closes
-            # a generic (`Result<i64, Error>`) OR it is just the second
-            # character of the OWN "->" arrow of a nested return type
-            # (`fn() -> (fn() -> i64 with IO, f64) with Mut`), which opens
-            # and closes nothing. Since Sounio types never use "<"/">" as
-            # comparison operators, the only source of an ARROW-flavoured
-            # ">" here is literally "-" immediately before it; skip closing
-            # depth for that case so an inner arrow can no longer masquerade
-            # as the close of the outer tuple/generic it is nested inside,
-            # which used to drop depth to 0 early and let the following
-            # comma terminate the scan before the outer with-clause.
-            if (prev != "-" && depth > 0) { depth-- }
-        } else if (c == "]" || c == "}") {
-            if (depth > 0) { depth-- }
+            if (depth > 0 && stack[depth] == "<") { depth-- }
+        } else if (c == "]") {
+            if (depth > 0 && stack[depth] == "[") { depth-- }
+        } else if (c == "}") {
+            if (depth > 0 && stack[depth] == "{") { depth-- }
         } else if (c == "," && depth == 0) {
             return i
         }
-        prev = c
         i++
     }
     return n + 1
@@ -305,13 +313,29 @@ selftest() {
   # the tuple's enclosing level early, and the tuple's internal comma (still
   # meant to be protected by the tuple's still-open paren) then terminated
   # the scan before the OUTER "with Mut" was ever seen -- an effect-bearing
-  # outer type falsely reported as bare. Fixed by not treating a ">"
-  # immediately preceded by "-" (i.e. part of an arrow, not a generic close)
-  # as a depth-closing character.
+  # outer type falsely reported as bare. Fixed (then, and still, after the
+  # stack-based rewrite below) by not letting a ">" that does not correspond
+  # to an actually-open "<" close anything.
   printf 'fn use_it(f: fn() -> (fn() -> i64 with IO, f64) with Mut) -> f64 { 0.0 }\n' > "$tmp/neg9.sio"
   if bare_hits_of "$tmp/neg9.sio" | grep -q .; then
     echo "  FALHA NEGATIVO 9: tipo-funcao aninhada em tupla com efeito proprio contada como nu"; rc=1
   else echo "  ok   NEGATIVO 9: tipo-funcao aninhada em tupla com efeito proprio nao conta como nu"; fi
+  # NEGATIVE control 10 (#2570): a REFINEMENT return type INSIDE A TUPLE,
+  # where the refinement's own predicate uses ">" as an actual comparison
+  # (`{x: i64 | x > 0}`), not an arrow. The single-character "preceded by -"
+  # heuristic control 9's fix relied on does not cover this: the comparison
+  # ">" is not preceded by "-" either, so it was STILL misread as a generic
+  # close, dropping depth from the tuple's paren back to 0 one character
+  # early (at the refinement's own closing "}", which then ALSO closed
+  # nothing since depth was already wrongly at 0) -- again letting the
+  # tuple's internal comma terminate the scan before the outer "with Mut".
+  # This is the control that forced the fix from a single-character lookback
+  # to genuine stack-based delimiter matching (scan_tail's `stack[depth]`):
+  # a ">" only closes something when the top of the stack is actually "<".
+  printf 'fn use_it(f: fn() -> ({x: i64 | x > 0}, f64) with Mut) -> f64 { 0.0 }\n' > "$tmp/neg10.sio"
+  if bare_hits_of "$tmp/neg10.sio" | grep -q .; then
+    echo "  FALHA NEGATIVO 10: tipo-funcao com refinamento em tupla e efeito proprio contada como nu"; rc=1
+  else echo "  ok   NEGATIVO 10: tipo-funcao com refinamento em tupla e efeito proprio nao conta como nu"; fi
   rm -rf "$tmp"
   echo "falhas: $rc"
   return $rc
