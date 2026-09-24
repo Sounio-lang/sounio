@@ -1,12 +1,5 @@
-// tests/run-pass/hyper_octonion_silicon_exec.cpp
-//
-// Direct Hardware AVX-512 Execution Oracle for Sounio Octonion Multiplication
-// Validated on Intel Xeon Gold 6148 AVX-512 silicon (31 instructions / 186 bytes).
-//
-// Complies with ADR 009 (verified foreign reference oracle in C++23).
-// Bit-exact verification against Lean 4 #eval and composition algebra axioms.
-
 #include <iostream>
+#include <fstream>
 #include <vector>
 #include <array>
 #include <cstdint>
@@ -14,49 +7,28 @@
 #include <cstring>
 #include <sys/mman.h>
 
-// Bit manipulation helpers matching native/lower_ir.sio
-constexpr int tho_bit(int val, int n) noexcept { return (val >> n) & 1; }
-constexpr int tho_inv(int b) noexcept { return b == 0 ? 1 : 0; }
-constexpr int tho_lo3(int id) noexcept { return id & 7; }
-
-// Fixed P1 byte: bit 6 (X_inv) dynamically encodes bit 4 of src2_id for EVEX reg-reg
-constexpr int tho_p1_fixed(int dst, int src2, int map) noexcept {
-    int r_inv  = tho_inv(tho_bit(dst, 3));
-    int x_inv  = tho_inv(tho_bit(src2, 4)); // bit 4 of src2 (r/m)
-    int b_inv  = tho_inv(tho_bit(src2, 3));
-    int rp_inv = tho_inv(tho_bit(dst, 4));
-    return (r_inv << 7) | (x_inv << 6) | (b_inv << 5) | (rp_inv << 4) | (map & 0xF);
-}
-
-constexpr int tho_p2_pd(int src1) noexcept {
-    int vvvv_inv = (0 - src1 - 1) & 0xF;
-    return 0x80 | (vvvv_inv << 3) | 0x4 | 0x1;
-}
-
-constexpr int tho_p3_vl_full(int src1, int vl, int mask_k, int z_bit) noexcept {
-    int vp_inv = tho_inv(tho_bit(src1, 4));
-    return ((z_bit & 1) << 7) | ((vl & 3) << 5) | (vp_inv << 3) | (mask_k & 7);
-}
-
-int emit_evex_pd_rr_full(uint8_t* buf, int pos, int map, int opcode, int dst, int src1, int src2, int vl, int mask_k, int z_bit) noexcept {
-    buf[pos++] = 0x62;
-    buf[pos++] = static_cast<uint8_t>(tho_p1_fixed(dst, src2, map));
-    buf[pos++] = static_cast<uint8_t>(tho_p2_pd(src1));
-    buf[pos++] = static_cast<uint8_t>(tho_p3_vl_full(src1, vl, mask_k, z_bit));
-    buf[pos++] = static_cast<uint8_t>(opcode);
-    buf[pos++] = static_cast<uint8_t>(0xC0 | (tho_lo3(dst) << 3) | tho_lo3(src2));
-    return pos;
-}
-
+// Function signature: void f(const double* a, const double* b, double* out, const void* ctrl_table)
 using FanoExecFn = void (*)(const double* a, const double* b, double* out, const void* ctrl_table);
 
-int main() {
+int main(int argc, char** argv) {
+    const char* kernel_bin_path = (argc > 1) ? argv[1] : "/workspace/sounio/tests/run-pass/fano_raw_kernel.bin";
+    std::ifstream bin_file(kernel_bin_path, std::ios::binary);
+    if (!bin_file) {
+        std::cerr << "Error: cannot open raw kernel binary file at " << kernel_bin_path << "\n";
+        return 1;
+    }
+
+    std::vector<uint8_t> kernel_bytes((std::istreambuf_iterator<char>(bin_file)),
+                                       std::istreambuf_iterator<char>());
+    assert(kernel_bytes.size() == 186);
+
     constexpr size_t code_size = 4096;
     auto* code = static_cast<uint8_t*>(mmap(nullptr, code_size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0));
     assert(code != MAP_FAILED);
 
     int pos = 0;
 
+    // Harness prolog:
     // Load a into zmm0: vmovupd zmm0, [rdi]
     code[pos++] = 0x62; code[pos++] = 0xF1; code[pos++] = 0xFD; code[pos++] = 0x48; code[pos++] = 0x10; code[pos++] = 0x07;
 
@@ -69,53 +41,29 @@ int main() {
         int zmm_reg = ctrl_base + k;
         int disp = k * 64;
         code[pos++] = 0x62;
-        int r_inv  = tho_inv(tho_bit(zmm_reg, 3));
+        int r_inv  = ((zmm_reg >> 3) & 1) ? 0 : 1;
         int x_inv  = 1;
-        int b_inv  = tho_inv(tho_bit(1, 3));
-        int rp_inv = tho_inv(tho_bit(zmm_reg, 4));
+        int b_inv  = 1;
+        int rp_inv = ((zmm_reg >> 4) & 1) ? 0 : 1;
         code[pos++] = static_cast<uint8_t>((r_inv << 7) | (x_inv << 6) | (b_inv << 5) | (rp_inv << 4) | 1);
         code[pos++] = 0xFD;
-        code[pos++] = static_cast<uint8_t>(tho_p3_vl_full(0, 2, 0, 0));
+        code[pos++] = static_cast<uint8_t>(((2 & 3) << 5) | (1 << 3));
         code[pos++] = 0x10;
-        code[pos++] = static_cast<uint8_t>(0x80 | (tho_lo3(zmm_reg) << 3) | 0x01);
+        code[pos++] = static_cast<uint8_t>(0x80 | ((zmm_reg & 7) << 3) | 0x01);
         code[pos++] = static_cast<uint8_t>(disp & 0xFF);
         code[pos++] = static_cast<uint8_t>((disp >> 8) & 0xFF);
         code[pos++] = static_cast<uint8_t>((disp >> 16) & 0xFF);
         code[pos++] = static_cast<uint8_t>((disp >> 24) & 0xFF);
     }
 
-    // --- EXACT 186-BYTE KERNEL FROM lower_ir.sio:1650 ---
-    int kernel_start = pos;
-    constexpr int za = 0;
-    constexpr int zb_in = 1;
-    constexpr int dst = 2;
-    constexpr int t_bj = dst + 2; // 4
-    constexpr int t_aj = dst + 4; // 6
-    constexpr int accum = dst + 6; // 8
-    constexpr int vl = 2;
+    // --- INJECT THE EXACT 186-BYTE KERNEL READ FROM DISK ---
+    std::memcpy(code + pos, kernel_bytes.data(), kernel_bytes.size());
+    pos += kernel_bytes.size();
 
-    // Column 0: identity perm, all-positive — VBROADCASTSD + VMULPD
-    pos = emit_evex_pd_rr_full(code, pos, 2, 0x19, t_bj, 0, zb_in, vl, 0, 0);
-    pos = emit_evex_pd_rr_full(code, pos, 1, 0x59, accum, za, t_bj, vl, 0, 0);
-
-    // Columns 1-7: VPERMPD_b + VPERMPD_a + VXORPD_sign + VFMADD231PD
-    for (int j = 0; j < 7; ++j) {
-        pos = emit_evex_pd_rr_full(code, pos, 2, 0x16, t_bj, ctrl_base + j, zb_in, vl, 0, 0);
-        pos = emit_evex_pd_rr_full(code, pos, 2, 0x16, t_aj, ctrl_base + 7 + j, za, vl, 0, 0);
-        pos = emit_evex_pd_rr_full(code, pos, 1, 0x57, t_aj, t_aj, ctrl_base + 14 + j, vl, 0, 0);
-        pos = emit_evex_pd_rr_full(code, pos, 2, 0xB8, accum, t_aj, t_bj, vl, 0, 0);
-    }
-
-    // Final store: VMOVAPD dst, accum
-    pos = emit_evex_pd_rr_full(code, pos, 1, 0x28, dst, 0, accum, vl, 0, 0);
-
-    int kernel_len = pos - kernel_start;
-    assert(kernel_len == 186);
-
-    // Store dst (zmm2) to [rdx]:
+    // Store dst (zmm2) to [rdx]: vmovupd [rdx], zmm2
     code[pos++] = 0x62; code[pos++] = 0xF1; code[pos++] = 0xFD; code[pos++] = 0x48; code[pos++] = 0x11; code[pos++] = 0x12;
 
-    // ret
+    // ret (0xC3)
     code[pos++] = 0xC3;
 
     alignas(64) uint64_t ctrl_data[21][8];
@@ -159,7 +107,7 @@ int main() {
 
     auto fn = reinterpret_cast<FanoExecFn>(code);
 
-    std::cout << "Kernel byte length: " << kernel_len << " instructions: 31\n";
+    std::cout << "Loaded " << kernel_bytes.size() << " raw EVEX bytes from " << kernel_bin_path << "\n";
 
     // --- TEST 1: e6 * e4 on silicon ---
     alignas(64) const double e6[8] = {0, 0, 0, 0, 0, 0, 1, 0};
@@ -221,6 +169,6 @@ int main() {
     std::cout << "TEST 5 (Right alternativity on silicon): match = " << (std::memcmp(ba_a, b_aa, sizeof(ba_a)) == 0) << "\n";
     assert(std::memcmp(ba_a, b_aa, sizeof(ba_a)) == 0);
 
-    std::cout << "\nALL 5 HARDWARE SILICON TESTS PASSED WITH ZERO ULP DRIFT IN C++23!\n";
+    std::cout << "\nALL 5 HARDWARE SILICON TESTS PASSED FROM FILE-LOADED BYTES IN C++23!\n";
     return 0;
 }
