@@ -823,6 +823,29 @@ fn avx_vmulpd_zmm_bcast(e: Avx512Emitter, dst: Avx512Reg, src1: Avx512Reg, base:
 // Each FMA instruction is 6 bytes (EVEX rr form).
 // ============================================================================
 
+// KNOWN BUG (found in PR #2667 review, comment 4098692995, confirmed by
+// independent re-derivation from the documented VPERMPD semantics --
+// EVEX.512 VPERMPD's imm8 is a *within-256-bit-lane* selector applied
+// identically to both halves: for source element index i in {0,1,2,3}, the
+// low 256-bit lane of the destination selects source element i and the high
+// 256-bit lane selects source element (4+i). The broadcast setup below calls
+// `avx_vpermpd_zmm(out, a4, a, 0x00)` intending "broadcast a[4]", but 0x00
+// selects element 0 in the low lane -- so a4's low lane (the only lane this
+// function's FMA chain actually reads) holds a[0], not a[4]. The same holds
+// for a5/a6/a7 vs a1/a2/a3, and b4..b7 vs b0..b3: components 4-7 silently
+// alias components 0-3 in the lane that matters, so the "octonion product"
+// this function emits is not actually a function of a[4..7]/b[4..7] at all.
+// Separately, r1..r7 (zmm4..zmm10) are computed but never packed into a
+// single result register before return -- only zmm2 (r0) is meaningful to a
+// caller reading one register. This function has never been called from any
+// production codegen path (grep confirms its only callers are its own test
+// functions below), so no compiled program is affected, but it must not be
+// treated as a validated octonion kernel. Fixing it correctly needs a new
+// EVEX instruction (vextractf64x4 or vshuff64x2, to genuinely move the high
+// 256-bit half of a/b into lane-0-reachable position before broadcasting)
+// plus a register-pack step plus real hardware execution verification
+// against known octonion products -- scoped out of this PR as a dedicated
+// follow-up; see the spawned task for AVX-512 codegen work.
 fn avx512_octonion_mul(e: Avx512Emitter) -> Avx512Emitter with Mut, Panic, Div {
     var out = e
     // Register assignments:
@@ -1649,6 +1672,17 @@ let AVX_OP_VFNMADD231PD: i64 = 0xBC
 // operands -- so a single flipped sign or swapped operand anywhere in the
 // octonion product (the exact bug class this PR's review was about) fails
 // this test instead of silently producing a wrong result.
+//
+// SCOPE NOTE: this only checks that the FMA/mul instruction stream matches
+// what avx512_octonion_mul's own comments say it should be -- it is a
+// regression net for the sign-table dataflow (the a_i/b_j operand and
+// add-vs-subtract choice per instruction), not a numerical/execution
+// validation of the whole kernel. See the KNOWN BUG comment on
+// avx512_octonion_mul above: the broadcast setup feeding a4..a7/b4..b7 has a
+// separate, confirmed bug (VPERMPD's imm8 is a within-256-bit-lane selector,
+// so components 4-7 alias 0-3 in the lane this function actually reads), and
+// r1..r7 are never packed into one result register. This test cannot catch
+// either of those -- they are upstream of the instructions decoded here.
 fn test_avx_octonion_mul_instruction_table() -> bool with Mut, Panic, Div {
     var e = avx_emitter_new()
     e = avx512_octonion_mul(e)
