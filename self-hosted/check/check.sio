@@ -8404,7 +8404,18 @@ fn checker_check_array_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
                     first_ty = elem_ty
                     have_first = true
                 } else {
-                    if !types_compatible(elem_ty, first_ty) {
+                    // Array-literal element unification is a join site, exactly like
+                    // if/else and match-arm joins: types_compatible's TyKnowledge branch
+                    // only compares inner type + epsilon, so `[Knowledge<T,Valid(60),
+                    // Measured>, Knowledge<T,Valid(10),Computed>]` passed silently and the
+                    // array was typed by whichever element happened to be first. Require
+                    // MUTUAL four-axis subsumption when both are epistemic.
+                    var elem_ok = types_compatible(elem_ty, first_ty)
+                    if elem_ok && is_epistemic_type(elem_ty) && is_epistemic_type(first_ty) {
+                        elem_ok = checker_knowledge_subsumes(c, elem_ty, first_ty)
+                            && checker_knowledge_subsumes(c, first_ty, elem_ty)
+                    }
+                    if !elem_ok {
                         checker_report_mismatch_inplace(c, (*list).head.span, 20, first_ty, elem_ty)
                     }
                 }
@@ -9431,7 +9442,14 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
         ret_ty
     }
     if ret_ty.kind != TypeKind::TyUnknown {
-        if !checker_types_compatible_inplace(c, body_ty, ret_ty) {
+        // Closure declared-return-type check needs the same authoritative four-axis
+        // enforcement as a named function's return -- checker_types_compatible_inplace
+        // never inspects validity/provenance for equal-inner Knowledge<T>.
+        var closure_ret_ok = checker_types_compatible_inplace(c, body_ty, ret_ty)
+        if is_epistemic_type(ret_ty) && is_epistemic_type(body_ty) {
+            closure_ret_ok = checker_knowledge_subsumes(c, body_ty, ret_ty)
+        }
+        if !closure_ret_ok {
             checker_report_mismatch_inplace(c, e.span, 8, ret_ty, body_ty)
         }
     }
@@ -11984,6 +12002,17 @@ fn checker_check_cast_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
                 || target_ty.kind == TypeKind::TyValidated
             if src_is_epistemic && !tgt_is_epistemic {
                 checker_report_error_at_inplace(c, e.span, 171, 0, 0, 0)
+            } else if src_is_epistemic && tgt_is_epistemic {
+                // `as` between two epistemic wrappers was a bare-metal escape hatch: it
+                // returned target_ty with NO axis check at all, so `x as Knowledge<T,
+                // Valid(9999), Measured>` let a cast silently claim stronger ontology/
+                // epsilon/validity/provenance than the source value ever earned --
+                // bypassing every let/return/call boundary check this PR added. Route it
+                // through the exact same call-boundary predicates a function argument
+                // gets (src "provided", target "expected"), so a cast can only narrow to
+                // a target the source value actually subsumes.
+                checker_check_call_arg_knowledge_boundary_inplace(c, src_ty, target_ty, e.span)
+                checker_ontology_boundary_check_call_arg_contract_inplace(c, src_ty, target_ty, e.span)
             }
             if src_ty.unit_id >= 0 && target_ty.unit_id >= 0 {
                 let src_dim = (*c).units.get_dim(src_ty.unit_id)
@@ -29614,7 +29643,15 @@ impl Checker {
                 let pair = self.check_expr((*list).head)
                 var c = pair.0
                 let elem_ty = pair.1
-                if !types_compatible(elem_ty, expected) {
+                // Mirrors the *mut spine's array-literal join fix: mutual four-axis
+                // subsumption when both are epistemic, not just types_compatible's
+                // inner-type+epsilon-only TyKnowledge case.
+                var elem_ok = types_compatible(elem_ty, expected)
+                if elem_ok && is_epistemic_type(elem_ty) && is_epistemic_type(expected) {
+                    elem_ok = check_return_expr_knowledge_subsumes(c.ontology_items, elem_ty, expected)
+                        && check_return_expr_knowledge_subsumes(c.ontology_items, expected, elem_ty)
+                }
+                if !elem_ok {
                     c = c.report_mismatch((*list).head.span, 20, expected, elem_ty)
                 }
                 let rest = c.check_array_rest((*list).tail, expected)
@@ -29722,6 +29759,12 @@ impl Checker {
                     || target_ty.kind == TypeKind::TyValidated
                 if src_is_epistemic && !tgt_is_epistemic {
                     c = c.report_error_at(e.span, 171, 0, 0, 0)
+                } else if src_is_epistemic && tgt_is_epistemic {
+                    // Mirrors the *mut spine's cast fix: route an epistemic-to-epistemic
+                    // `as` through the same call-boundary predicates an argument gets,
+                    // instead of returning target_ty with no axis check at all.
+                    c = c.check_call_arg_knowledge_boundary(src_ty, target_ty, e.span)
+                    c = c.check_call_arg_ontology_boundary(src_ty, target_ty, e.span)
                 }
                 // Unit conversion check: if both are unit-typed, dimensions must be compatible
                 if src_ty.unit_id >= 0 && target_ty.unit_id >= 0 {
