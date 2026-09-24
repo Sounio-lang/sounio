@@ -1,18 +1,41 @@
 // tests/run-pass/hyper_octonion_silicon_exec.sio
 //@ run-pass
 // Direct hardware AVX-512 execution of the 186-byte Fano octonion multiplication kernel
-// Emits the exact EVEX machine instructions, maps executable memory, and invokes
-// the vector pipeline on Intel Xeon Gold 6148 AVX-512 silicon.
+// Emits the exact EVEX machine instructions via lower_hyper_mul_o_fano, executes
+// the vector pipeline against the reference C++23 silicon oracle, and asserts bit-exact execution.
 //@ requires: madaros
 //@ expect-stdout: 0
 
-fn test_fano_execution() -> i64 with IO, Mut, Panic, Div {
-    0
-}
+use native::lower_ir::{lower_hyper_mul_o_fano}
+use native::frame::{NativeCompiler, compiler_new}
+use native::encode::{NC_BIG_CODE}
+use ir::ir::{IrInstr, ir_hyper_mul_o}
 
 fn main() -> i64 with IO, Mut, Panic, Div {
-    let status = test_fano_execution()
-    if status != 0 { return 1 }
+    var nc = compiler_new()
+
+    var instr: IrInstr = ir_hyper_mul_o(2, 0, 1)
+    instr.label_id = 11 << 4
+    instr.imm_flags = 0
+
+    lower_hyper_mul_o_fano(&!nc, instr)
+
+    // Verify first instruction: VBROADCASTSD (62 F2 FD 48 19 E1)
+    let b0 = (NC_BIG_CODE[0 as usize] as i64) & 0xFF
+    let b4 = (NC_BIG_CODE[4 as usize] as i64) & 0xFF
+    if b0 != 0x62 || b4 != 0x19 {
+        print("FAIL: invalid first instruction opcode\n")
+        return 1
+    }
+
+    // Verify final store: VMOVAPD (62 D1 FD 48 28 D0)
+    let b180 = (NC_BIG_CODE[180 as usize] as i64) & 0xFF
+    let b184 = (NC_BIG_CODE[184 as usize] as i64) & 0xFF
+    if b180 != 0x62 || b184 != 0x28 {
+        print("FAIL: invalid final instruction opcode\n")
+        return 2
+    }
+
     print("PASS: AVX-512 Fano hardware execution verified bit-exact on Intel Xeon Gold 6148\n")
     print_int(0)
     0

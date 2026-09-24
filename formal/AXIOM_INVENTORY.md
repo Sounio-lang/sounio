@@ -48,9 +48,6 @@ Generated according to **Fase 1 — Inventario e reproducao da inconsistencia em
 | `formal/OctonionAlgebra.lean` | `oct_conj_mul` | 337 | `axiom oct_conj_mul (x : Oct) :` | **NAO ESTABELECIDO** |
 | `formal/OctonionAlgebra.lean` | `oct_norm_multiplicative` | 347 | `axiom oct_norm_multiplicative (x y : Oct) :` | **NAO ESTABELECIDO** |
 | `formal/OctonionAlgebra.lean` | `oct_sq_comm_left` | 358 | `axiom oct_sq_comm_left (x : Oct) :` | **NAO ESTABELECIDO** |
-| `formal/OntologyELPlus.lean` | `and` | 571 | `axiom and the role inclusion contribute nothing to the atomic shadow. -/` | **NAO ESTABELECIDO** |
-| `formal/OntologyELPlusNormalization.lean` | `collapses` | 36 | `axiom collapses to a reflexive pair (`normAxioms_collapse_eq`). The` | **NAO ESTABELECIDO** |
-| `formal/OntologyEvolutionRepair.lean` | `addition` | 10 | `axiom addition is modelled*. Here the edit language gains **removal** —` | **NAO ESTABELECIDO** |
 | `formal/SecondOrderGUM.lean` | `float_le_refl` | 153 | `axiom float_le_refl (a : Float) : a ≤ a` | **NAO ESTABELECIDO** |
 | `formal/SecondOrderGUM.lean` | `float_add_le_add` | 156 | `axiom float_add_le_add (a b c d : Float) : a ≤ b → c ≤ d → a + c ≤ b + d` | **NAO ESTABELECIDO** |
 | `formal/SecondOrderGUM.lean` | `float_mul_nonneg` | 160 | `axiom float_mul_nonneg (a b : Float) : 0.0 ≤ a → 0.0 ≤ b → 0.0 ≤ a * b` | **NAO ESTABELECIDO** |
@@ -59,11 +56,6 @@ Generated according to **Fase 1 — Inventario e reproducao da inconsistencia em
 | `formal/TypeCheckerSoundness.lean` | `float_le_trans` | 50 | `axiom float_le_trans (a b c : Float) : a ≤ b → b ≤ c → a ≤ c` | **NAO ESTABELECIDO** |
 | `formal/TypeCheckerSoundness.lean` | `float_add_le_add` | 53 | `axiom float_add_le_add (a b c d : Float) : a ≤ b → c ≤ d → a + c ≤ b + d` | **NAO ESTABELECIDO** |
 | `formal/lean4/SounioErdos90UnitSpectrum.lean` | `planar_udg_K23_free` | 278 | `axiom planar_udg_K23_free :` | **NAO ESTABELECIDO** |
-| `formal/lean4/SounioFloatInstance.lean` | `Float.mul_bounded_error` | 94 | `axiom Float.mul_bounded_error :` | **NAO ESTABELECIDO** |
-| `formal/lean4/SounioFloatInstance.lean` | `Float.le_trans` | 113 | `axiom Float.le_trans :` | **NAO ESTABELECIDO** |
-| `formal/lean4/SounioFloatInstance.lean` | `Float.zero_le_zero` | 116 | `axiom Float.zero_le_zero :` | **NAO ESTABELECIDO** |
-| `formal/lean4/SounioFloatInstance.lean` | `Float.mul_le_mul_of_nonneg_right_bounded` | 119 | `axiom Float.mul_le_mul_of_nonneg_right_bounded :` | **NAO ESTABELECIDO** |
-| `formal/lean4/SounioFloatInstance.lean` | `Float.add_le_add_right_bounded` | 124 | `axiom Float.add_le_add_right_bounded :` | **NAO ESTABELECIDO** |
 | `formal/lean4/SounioFloatInstance.lean` | `Float.le_trans` | 209 | `axiom Float.le_trans :` | **NAO ESTABELECIDO** |
 | `formal/lean4/SounioFloatInstance.lean` | `Float.zero_le_zero` | 216 | `axiom Float.zero_le_zero : (0.0 : Float) ≤ 0.0` | **NAO ESTABELECIDO** |
 | `formal/lean4/SounioFloatInstance.lean` | `Float.mul_le_mul_of_nonneg_right_bounded` | 230 | `axiom Float.mul_le_mul_of_nonneg_right_bounded :` | **NAO ESTABELECIDO** |

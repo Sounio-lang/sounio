@@ -1,115 +1,65 @@
 // tests/run-pass/hyper_octonion_kernel_exec.sio
 //@ run-pass
-// Deterministic in-memory JIT execution of the AVX-512 Fano Octonion kernel
-// Emits the exact 186-byte EVEX pipeline (VBROADCASTSD, VMULPD, VPERMPD, VXORPD, VFMADD231PD)
+// Deterministic in-memory verification of the production AVX-512 Fano Octonion kernel
+// Emits the exact 186-byte EVEX pipeline via native::lower_ir::lower_hyper_mul_o_fano
 // and validates each instruction opcode and byte offset bit-exact.
 //@ requires: madaros
 //@ expect-stdout: 0
 
-struct CodeBuf {
-    bytes: [i8; 256],
-    pos: i64,
-}
-
-fn buf_new() -> CodeBuf {
-    CodeBuf {
-        bytes: [0 as i8; 256],
-        pos: 0,
-    }
-}
-
-fn emit_byte_local(buf: CodeBuf, b: i64) -> CodeBuf {
-    var out = buf
-    if out.pos < 256 {
-        out.bytes[out.pos as usize] = b as i8
-        out.pos = out.pos + 1
-    }
-    out
-}
-
-fn evex_bit(val: i64, n: i64) -> i64 { (val >> n) & 1 }
-fn evex_inv(b: i64) -> i64 { if b == 0 { 1 } else { 0 } }
-fn evex_lo3(id: i64) -> i64 { id & 7 }
-
-// Fixed P1 byte: bit 6 (X_inv) dynamically encodes bit 4 of src2_id for EVEX reg-reg
-fn evex_p1_fixed(dst: i64, src2: i64, map: i64) -> i64 {
-    let r_inv  = evex_inv(evex_bit(dst, 3))
-    let x_inv  = evex_inv(evex_bit(src2, 4))
-    let b_inv  = evex_inv(evex_bit(src2, 3))
-    let rp_inv = evex_inv(evex_bit(dst, 4))
-    (r_inv << 7) | (x_inv << 6) | (b_inv << 5) | (rp_inv << 4) | (map & 0xF)
-}
-
-fn evex_p2_pd(src1: i64) -> i64 {
-    let vvvv_inv = (0 - src1 - 1) & 0xF
-    0x80 | (vvvv_inv << 3) | 0x4 | 0x1
-}
-
-fn evex_p3_vl_full(src1: i64, vl: i64, mask_k: i64, z_bit: i64) -> i64 {
-    let vp_inv = evex_inv(evex_bit(src1, 4))
-    ((z_bit & 1) << 7) | ((vl & 3) << 5) | (vp_inv << 3) | (mask_k & 7)
-}
-
-fn emit_evex_rr_fixed(buf: CodeBuf, map: i64, opcode: i64, dst: i64, src1: i64, src2: i64, vl: i64) -> CodeBuf {
-    var b = buf
-    b = emit_byte_local(b, 0x62)
-    b = emit_byte_local(b, evex_p1_fixed(dst, src2, map))
-    b = emit_byte_local(b, evex_p2_pd(src1))
-    b = emit_byte_local(b, evex_p3_vl_full(src1, vl, 0, 0))
-    b = emit_byte_local(b, opcode)
-    b = emit_byte_local(b, 0xC0 | (evex_lo3(dst) << 3) | evex_lo3(src2))
-    b
-}
+use native::lower_ir::{lower_hyper_mul_o_fano}
+use native::frame::{NativeCompiler, compiler_new}
+use native::encode::{NC_BIG_CODE}
+use ir::ir::{IrInstr, ir_hyper_mul_o}
 
 fn main() -> i64 with IO, Mut, Panic, Div {
-    var buf = buf_new()
+    var nc = compiler_new()
 
-    let za        = 0
-    let zb_in     = 1
-    let dst       = 2
-    let t_bj      = 4
-    let t_aj      = 6
-    let accum     = 8
-    let ctrl_base = 11
-    let vl        = 2   // 512-bit ZMM
+    // Synthetic IrInstr matching standard non-overlapping register layout
+    var instr: IrInstr = ir_hyper_mul_o(2, 0, 1)
+    instr.label_id = 11 << 4
+    instr.imm_flags = 0
 
-    // Column 0: identity perm, all-positive — VBROADCASTSD + VMULPD
-    buf = emit_evex_rr_fixed(buf, 2, 0x19, t_bj, 0, zb_in, vl)
-    buf = emit_evex_rr_fixed(buf, 1, 0x59, accum, za, t_bj, vl)
+    lower_hyper_mul_o_fano(&!nc, instr)
 
-    // Columns 1-7: VPERMPD_b + VPERMPD_a + VXORPD_sign + VFMADD231PD
-    var col = 0
-    while col < 7 {
-        buf = emit_evex_rr_fixed(buf, 2, 0x16, t_bj, ctrl_base + col, zb_in, vl)
-        buf = emit_evex_rr_fixed(buf, 2, 0x16, t_aj, ctrl_base + 7 + col, za, vl)
-        buf = emit_evex_rr_fixed(buf, 1, 0x57, t_aj, t_aj, ctrl_base + 14 + col, vl)
-        buf = emit_evex_rr_fixed(buf, 2, 0xB8, accum, t_aj, t_bj, vl)
-        col = col + 1
-    }
-
-    // Final store: VMOVAPD dst, accum
-    buf = emit_evex_rr_fixed(buf, 1, 0x28, dst, 0, accum, vl)
-
-    if buf.pos != 186 {
-        return 1
+    // Verify all 31 instructions (186 bytes = 31 * 6 bytes)
+    // Every single instruction must begin with EVEX prefix 0x62
+    var instr_idx = 0
+    while instr_idx < 31 {
+        let b0 = (NC_BIG_CODE[(instr_idx * 6) as usize] as i64) & 0xFF
+        if b0 != 0x62 {
+            return 100 + instr_idx
+        }
+        instr_idx = instr_idx + 1
     }
 
     // 1. Instruction 0: VBROADCASTSD (opcode 0x19)
-    if (buf.bytes[0] as i64) != 0x62 { return 2 }
-    if (buf.bytes[4] as i64) != 0x19 { return 3 }
+    let op0 = (NC_BIG_CODE[4 as usize] as i64) & 0xFF
+    if op0 != 0x19 { return 2 }
 
     // 2. Instruction 1: VMULPD (opcode 0x59)
-    if (buf.bytes[6] as i64) != 0x62 { return 4 }
-    if (buf.bytes[10] as i64) != 0x59 { return 5 }
+    let op1 = (NC_BIG_CODE[10 as usize] as i64) & 0xFF
+    if op1 != 0x59 { return 3 }
 
-    // 3. Instruction 5: VFMADD231PD (column 1 FMA, opcode 0xB8)
-    if (buf.bytes[30] as i64) != 0x62 { return 6 }
-    let b34 = (buf.bytes[34] as i64) & 0xFF
-    if b34 != 0xB8 { return 7 }
+    // 3. Instructions 2..29: 7 columns of (VPERMPD_b: 0x16, VPERMPD_a: 0x16, VXORPD: 0x57, VFMADD231PD: 0xB8)
+    var col = 0
+    while col < 7 {
+        let base = 12 + col * 24
+        let op_permb = (NC_BIG_CODE[(base + 4) as usize] as i64) & 0xFF
+        let op_perma = (NC_BIG_CODE[(base + 10) as usize] as i64) & 0xFF
+        let op_xor   = (NC_BIG_CODE[(base + 16) as usize] as i64) & 0xFF
+        let op_fma   = (NC_BIG_CODE[(base + 22) as usize] as i64) & 0xFF
+
+        if op_permb != 0x16 { return 10 + col }
+        if op_perma != 0x16 { return 20 + col }
+        if op_xor   != 0x57 { return 30 + col }
+        if op_fma   != 0xB8 { return 40 + col }
+
+        col = col + 1
+    }
 
     // 4. Instruction 30: VMOVAPD dst, accum (opcode 0x28)
-    if (buf.bytes[180] as i64) != 0x62 { return 8 }
-    if (buf.bytes[184] as i64) != 0x28 { return 9 }
+    let op30 = (NC_BIG_CODE[184 as usize] as i64) & 0xFF
+    if op30 != 0x28 { return 4 }
 
     print_int(0)
     0
