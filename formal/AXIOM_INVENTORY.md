@@ -35,19 +35,19 @@ Generated according to **Fase 1 — Inventario e reproducao da inconsistencia em
 | `formal/HessianAD.lean` | `float_add_comm_ax` | 555 | `axiom float_add_comm_ax (a b : Float) : a + b = b + a` | **NAO ESTABELECIDO** |
 | `formal/HessianAD.lean` | `float_mul_comm_ax` | 558 | `axiom float_mul_comm_ax (a b : Float) : a * b = b * a` | **NAO ESTABELECIDO** |
 | `formal/NonAssocHessian.lean` | `decidable_fano` | 259 | `axiom decidable_fano :` | **NAO ESTABELECIDO** |
-| `formal/OctonionAlgebra.lean` | `oct_left_alternative` | 287 | `axiom oct_left_alternative (x y : Oct) :` | **NAO ESTABELECIDO** |
-| `formal/OctonionAlgebra.lean` | `oct_right_alternative` | 291 | `axiom oct_right_alternative (x y : Oct) :` | **NAO ESTABELECIDO** |
-| `formal/OctonionAlgebra.lean` | `oct_flexibility` | 299 | `axiom oct_flexibility (x y : Oct) :` | **NAO ESTABELECIDO** |
-| `formal/OctonionAlgebra.lean` | `oct_moufang_left` | 307 | `axiom oct_moufang_left (x y z : Oct) :` | **NAO ESTABELECIDO** |
-| `formal/OctonionAlgebra.lean` | `oct_moufang_right` | 311 | `axiom oct_moufang_right (x y z : Oct) :` | **NAO ESTABELECIDO** |
-| `formal/OctonionAlgebra.lean` | `oct_moufang_middle` | 315 | `axiom oct_moufang_middle (x y z : Oct) :` | **NAO ESTABELECIDO** |
-| `formal/OctonionAlgebra.lean` | `oct_scalar_comm` | 323 | `axiom oct_scalar_comm (n : Int) (x y : Oct) :` | **NAO ESTABELECIDO** |
-| `formal/OctonionAlgebra.lean` | `oct_scalar_comm_right` | 327 | `axiom oct_scalar_comm_right (n : Int) (x y : Oct) :` | **NAO ESTABELECIDO** |
-| `formal/OctonionAlgebra.lean` | `oct_conj_antimultiplicative` | 335 | `axiom oct_conj_antimultiplicative (x y : Oct) :` | **NAO ESTABELECIDO** |
-| `formal/OctonionAlgebra.lean` | `oct_mul_conj` | 348 | `axiom oct_mul_conj (x : Oct) :` | **NAO ESTABELECIDO** |
-| `formal/OctonionAlgebra.lean` | `oct_conj_mul` | 352 | `axiom oct_conj_mul (x : Oct) :` | **NAO ESTABELECIDO** |
-| `formal/OctonionAlgebra.lean` | `oct_norm_multiplicative` | 362 | `axiom oct_norm_multiplicative (x y : Oct) :` | **NAO ESTABELECIDO** |
-| `formal/OctonionAlgebra.lean` | `oct_sq_comm_left` | 373 | `axiom oct_sq_comm_left (x : Oct) :` | **NAO ESTABELECIDO** |
+| `formal/OctonionAlgebra.lean` | `oct_left_alternative` | 272 | `axiom oct_left_alternative (x y : Oct) :` | **NAO ESTABELECIDO** |
+| `formal/OctonionAlgebra.lean` | `oct_right_alternative` | 276 | `axiom oct_right_alternative (x y : Oct) :` | **NAO ESTABELECIDO** |
+| `formal/OctonionAlgebra.lean` | `oct_flexibility` | 284 | `axiom oct_flexibility (x y : Oct) :` | **NAO ESTABELECIDO** |
+| `formal/OctonionAlgebra.lean` | `oct_moufang_left` | 292 | `axiom oct_moufang_left (x y z : Oct) :` | **NAO ESTABELECIDO** |
+| `formal/OctonionAlgebra.lean` | `oct_moufang_right` | 296 | `axiom oct_moufang_right (x y z : Oct) :` | **NAO ESTABELECIDO** |
+| `formal/OctonionAlgebra.lean` | `oct_moufang_middle` | 300 | `axiom oct_moufang_middle (x y z : Oct) :` | **NAO ESTABELECIDO** |
+| `formal/OctonionAlgebra.lean` | `oct_scalar_comm` | 308 | `axiom oct_scalar_comm (n : Int) (x y : Oct) :` | **NAO ESTABELECIDO** |
+| `formal/OctonionAlgebra.lean` | `oct_scalar_comm_right` | 312 | `axiom oct_scalar_comm_right (n : Int) (x y : Oct) :` | **NAO ESTABELECIDO** |
+| `formal/OctonionAlgebra.lean` | `oct_conj_antimultiplicative` | 320 | `axiom oct_conj_antimultiplicative (x y : Oct) :` | **NAO ESTABELECIDO** |
+| `formal/OctonionAlgebra.lean` | `oct_mul_conj` | 333 | `axiom oct_mul_conj (x : Oct) :` | **NAO ESTABELECIDO** |
+| `formal/OctonionAlgebra.lean` | `oct_conj_mul` | 337 | `axiom oct_conj_mul (x : Oct) :` | **NAO ESTABELECIDO** |
+| `formal/OctonionAlgebra.lean` | `oct_norm_multiplicative` | 347 | `axiom oct_norm_multiplicative (x y : Oct) :` | **NAO ESTABELECIDO** |
+| `formal/OctonionAlgebra.lean` | `oct_sq_comm_left` | 358 | `axiom oct_sq_comm_left (x : Oct) :` | **NAO ESTABELECIDO** |
 | `formal/OntologyELPlus.lean` | `and` | 571 | `axiom and the role inclusion contribute nothing to the atomic shadow. -/` | **NAO ESTABELECIDO** |
 | `formal/OntologyELPlusNormalization.lean` | `collapses` | 36 | `axiom collapses to a reflexive pair (`normAxioms_collapse_eq`). The` | **NAO ESTABELECIDO** |
 | `formal/OntologyEvolutionRepair.lean` | `addition` | 10 | `axiom addition is modelled*. Here the edit language gains **removal** —` | **NAO ESTABELECIDO** |

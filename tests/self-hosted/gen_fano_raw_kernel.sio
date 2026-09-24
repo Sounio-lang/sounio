@@ -1,0 +1,62 @@
+// tests/self-hosted/gen_fano_raw_kernel.sio
+//@ run-pass
+// Provenance generator: invokes the authoritative production lowering engine
+// `native::lower_ir::lower_hyper_mul_o_fano` with a synthetic IrInstr {dst=2, src1=0, src2=1, label_id=(11 << 4)}
+// and emits the exact 186-byte EVEX pipeline directly to tests/run-pass/fano_raw_kernel.bin.
+// The raw image is consumed directly by tests/run-pass/hyper_octonion_silicon_exec.cpp on AVX-512 silicon.
+//@ requires: madaros
+//@ expect-stdout: 0
+
+use native::encode::{NC_BIG_CODE}
+use native::frame::{NativeCompiler, compiler_new}
+use native::lower_ir::{lower_hyper_mul_o_fano}
+use ir::ir::{IrInstr, ir_hyper_mul_o}
+use io::trace::{io_write_bytes_to_file}
+
+fn hex_digit(v: i64) -> i64 {
+    if v < 10 { 48 + v } else { 87 + v }
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    var nc = compiler_new()
+
+    // Synthetic IrInstr matching the standard non-overlapping register layout:
+    //   dst = 2 (working registers [dst, dst+6] = [2, 8])
+    //   src1 = 0 (operand a)
+    //   src2 = 1 (operand b)
+    //   label_id = 11 << 4 (ctrl_base = 11, constant registers [ctrl_base, ctrl_base+20] = [11, 31])
+    var instr: IrInstr = ir_hyper_mul_o(2, 0, 1)
+    instr.label_id = 11 << 4
+    instr.imm_flags = 0
+
+    lower_hyper_mul_o_fano(&!nc, instr)
+
+    let n = 186
+    var buf: [i8; 65536] = [0; 65536]
+    var i = 0
+    while i < n {
+        buf[i as usize] = NC_BIG_CODE[i as usize]
+        i = i + 1
+    }
+
+    // Direct write to canonical repository artifact
+    let ok = io_write_bytes_to_file("tests/run-pass/fano_raw_kernel.bin", buf, n)
+    if !ok {
+        print("FAIL: could not write tests/run-pass/fano_raw_kernel.bin\n")
+        return 1
+    }
+
+    // Hex output for CI verification and provenance trace
+    print("RAW_KERNEL_HEX:")
+    i = 0
+    while i < n {
+        let byte = (NC_BIG_CODE[i as usize] as i64) & 0xFF
+        print_char(hex_digit((byte >> 4) & 0xF))
+        print_char(hex_digit(byte & 0xF))
+        i = i + 1
+    }
+    print_char(10)
+
+    print_int(0)
+    0
+}
