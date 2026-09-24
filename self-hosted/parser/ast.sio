@@ -1515,16 +1515,41 @@ pub fn ast_path_prefix_name(path: AstPath, upto_inclusive: i64) -> Name with Mut
 // `use a::b;` supports both `b::f()` and `a::b::f()`), not independent
 // segments -- this helper builds that joined text for both registration
 // (all suffixes of the `use` path) and lookup (the call's full qualifier).
+// Round 9 (review comment 4098353679): each path SEGMENT can itself be up to
+// 384 bytes (Name's own capacity), so joining two or more segments with "::"
+// can exceed 384 bytes long before this function's own truncating writes to
+// `result.buf` would suggest -- a joined path was silently cut to a 384-byte
+// PREFIX, so two genuinely DIFFERENT overlong qualifiers sharing the same
+// first 384 bytes became IDENTICAL as far as every registry keyed by this
+// function's return value is concerned (all three `use`-qualifier registries,
+// plus the shared named-item-terminal registry below). That let a bogus path
+// inherit a real import's signature/rewriting, or a real module's entry
+// silently answer for an unrelated named-item marker.
+//
+// Track the UNTRUNCATED length separately from the capped `result.len`; if
+// they ever diverge, the join would have truncated, so return empty_name()
+// (len 0) instead of the truncated bytes. Every caller of this function
+// already treats len<=0 as "does not match anything" (checker_use_module_known
+// / lower_use_module_known / spec_use_module_known / spec_item_module_lookup
+// / lower_named_item_terminal_known all reject `n.len <= 0` immediately), so
+// this fails CLOSED -- an overlong qualifier can never register a false
+// collision-prone shorthand and can never match one either, rather than
+// silently trusting a truncated prefix as exact identity.
 pub fn ast_path_range_name(path: AstPath, from_inclusive: i64, upto_inclusive: i64) -> Name with Mut, Panic, Div {
     var result = Name { buf: [0; 384], len: 0 }
+    var natural_len: i64 = 0
     var k: i64 = from_inclusive
     while k <= upto_inclusive && k < path.seg_count {
         let seg = ast_string_list_nth_name(path.segments, k)
-        if k > from_inclusive && result.len + 2 < 384 {
-            result.buf[result.len as usize] = 58
-            result.buf[(result.len + 1) as usize] = 58
-            result.len = result.len + 2
+        if k > from_inclusive {
+            natural_len = natural_len + 2
+            if result.len + 2 < 384 {
+                result.buf[result.len as usize] = 58
+                result.buf[(result.len + 1) as usize] = 58
+                result.len = result.len + 2
+            }
         }
+        natural_len = natural_len + seg.len
         var i: i64 = 0
         while i < seg.len && result.len < 384 {
             result.buf[result.len as usize] = seg.buf[i as usize]
@@ -1532,6 +1557,9 @@ pub fn ast_path_range_name(path: AstPath, from_inclusive: i64, upto_inclusive: i
             i = i + 1
         }
         k = k + 1
+    }
+    if natural_len != result.len {
+        return Name { buf: [0; 384], len: 0 }
     }
     result
 }

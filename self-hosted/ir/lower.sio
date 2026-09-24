@@ -853,6 +853,33 @@ pub fn lower_set_current_module_id(module_id: i64) with Mut {
 fn lower_effective_current_module_id() -> i64 with Mut {
     if LOWER_CURRENT_MODULE_ID < 0 { 0 } else { LOWER_CURRENT_MODULE_ID }
 }
+
+// Round 9 (review comment 4098353609): module_frontend_lower_specialized_items_box
+// passes a MERGED, all-modules item list to module_frontend_lower_program_items_
+// box_traced_with_externs with module_index=0 (a specialized/monomorphized program
+// has no single "module" of its own -- see that function's own comment). That
+// value flows straight into lower_set_current_module_id, so
+// lowerer_lower_program_bodies_mut's own recollection
+// (lower_use_modules_collect(items, lower_effective_current_module_id())) re-notes
+// EVERY dependency module's `use` paths under module id 0 -- module 0 (the seed)
+// can then borrow a qualifier only some OTHER, unrelated module actually
+// imported, exactly the cross-module leak the per-module registry exists to
+// prevent, and because W044 is a non-fatal warning this can surface as lowering
+// silently resolving to a real but wrong function, not merely a rejected
+// diagnostic. Unlike the OTHER (genuinely single-module) callers of
+// lowerer_lower_program_bodies_mut, this recollection is neither a no-op resend
+// (the module ids it would write are simply wrong) nor necessary (the specialized
+// path's items were already fully preregistered per-module before specialization
+// ran, in module_frontend.sio's ordinary preregister loop). Set for the
+// duration of ONE such call (module_frontend_lower_specialized_items_box), never
+// durable, never cleared by lower_use_module_reset() (that call always precedes
+// this one within the same compile, so clearing it there would be a no-op either
+// way -- kept simple as its own flag instead of overloading the reset).
+var LOWER_SKIP_USE_RECOLLECT_FOR_MERGED: bool = false
+
+pub fn lower_set_skip_use_recollect_for_merged(skip: bool) with Mut {
+    LOWER_SKIP_USE_RECOLLECT_FOR_MERGED = skip
+}
 // Durable: NOT cleared by lower_hard_error_reset(), which fo_preregister_program_items_multipass
 // (via lowerer_new()) calls once per loaded module -- immediately after this table might be
 // filled, on the very same call path, before any compile-boundary check ever sees the flag.
@@ -1010,23 +1037,46 @@ pub fn lower_use_modules_collect(items: &Option<Box<ItemList>>, module_id: i64) 
                     // accepting a mix of segments from different imports.
                     //
                     // This cannot exclude a path-form NAMED import's terminal
-                    // (`use a::b::specific_fn;`) here: the AST gives no way to
-                    // tell that shape apart from a genuine whole-module import
-                    // (`use a::b;`) -- both are `use_glob=false,
-                    // use_items=None, seg_count>=2`, syntactically identical.
-                    // Registering the terminal regardless is what review
-                    // comment 4090734484 (round 5) flagged: `use
+                    // (`use a::b::specific_fn;`) here by shape alone: the AST
+                    // gives no way to tell that apart from a genuine
+                    // whole-module import (`use a::b;`) -- both are
+                    // `use_glob=false, use_items=None, seg_count>=2`,
+                    // syntactically identical. `use
                     // epistemic::propagate::monte_carlo;` is real
                     // (tests/stdlib/epistemic/test_stiff_ode_knightian_mc.sio),
-                    // `monte_carlo` is a function, not a module -- but the fix
-                    // belongs at callee_path_module_stripped_name below, via
-                    // lower_named_item_terminal_known (the authoritative
-                    // file-resolution registry, not a name-collision guess).
-                    var s: i64 = 0
-                    while s < item_ref.use_path.seg_count {
-                        let suffix = ast_path_range_name(item_ref.use_path, s, item_ref.use_path.seg_count - 1)
-                        lower_use_module_note(module_id, suffix)
-                        s = s + 1
+                    // `monte_carlo` is a function, not a module.
+                    //
+                    // Round 9 (review comment 4098353722, and the collision it
+                    // reopened): registering suffixes here regardless and
+                    // relying SOLELY on callee_path_module_stripped_name's
+                    // separate lower_named_item_terminal_known exclusion does
+                    // not work for a call spelled with just the BARE terminal
+                    // (`monte_carlo::something()`), because that registry is
+                    // keyed by the FULL `use` path text, not the bare form a
+                    // short call actually asks for -- and registering the bare
+                    // terminal there too was tried and reverted: it collided
+                    // with an UNRELATED module elsewhere in the compilation
+                    // whose own bare-terminal qualifier happens to share the
+                    // same text (round 7's own
+                    // uses_named_tc_c.sio/uses_real_tc_c_module.sio fixture
+                    // exists specifically to catch this). Fixed at the SOURCE
+                    // instead: skip suffix registration for this `use` path
+                    // ENTIRELY when lower_named_item_terminal_known already
+                    // confirms the full path is a named item, not a module --
+                    // it was never a legitimate module-qualifier candidate in
+                    // the first place (a named-item import brings its target
+                    // into scope as a bare, unqualified name), so not
+                    // registering any of its suffixes here removes the false
+                    // module-shaped entry instead of trying to filter it back
+                    // out later, and a genuinely unrelated real module's own
+                    // identical-text suffix is never put at risk.
+                    if !lower_named_item_terminal_known(ast_path_range_name(item_ref.use_path, 0, item_ref.use_path.seg_count - 1)) {
+                        var s: i64 = 0
+                        while s < item_ref.use_path.seg_count {
+                            let suffix = ast_path_range_name(item_ref.use_path, s, item_ref.use_path.seg_count - 1)
+                            lower_use_module_note(module_id, suffix)
+                            s = s + 1
+                        }
                     }
                 }
                 current = &(*list).tail
@@ -2688,7 +2738,14 @@ fn lowerer_lower_program_bodies_mut(
     // body is being lowered right now, so this recollection stamps the same
     // module id its earlier, authoritative preregister pass used -- it is a
     // genuine no-op resend, not a fresh (and possibly wrongly-id'd) entry.
-    lower_use_modules_collect(items, lower_effective_current_module_id())
+    //
+    // EXCEPT for the one caller (module_frontend_lower_specialized_items_box)
+    // where `items` is a MERGED, all-modules list and lower_effective_current_
+    // module_id() is NOT this list's real per-item module -- see
+    // LOWER_SKIP_USE_RECOLLECT_FOR_MERGED's own comment.
+    if !LOWER_SKIP_USE_RECOLLECT_FOR_MERGED {
+        lower_use_modules_collect(items, lower_effective_current_module_id())
+    }
     // Keep the multi-module FO table: the frontend may have pre-registered
     // imported helpers before entering this module.
     lowerer_fo_preregister_pure_fns_multipass_mut(lo, items)

@@ -4799,13 +4799,34 @@ fn checker_string_list_nth_name(sl: StringList, k: i64) -> Name with Mut, Panic,
 // (`use a::b::specific_fn;`) here: the AST gives no way to tell that shape
 // apart from a genuine whole-module import (`use a::b;`) where the last
 // segment really is the module -- both are `use_glob=false, use_items=None,
-// seg_count>=2`, syntactically identical (see checker_collect_use_item_inplace's
-// own long-standing comment on this exact ambiguity). Registering the
-// terminal here regardless is fine: checker_path_qualifier_all_modules_known
-// below settles that ambiguity authoritatively via
-// lower_named_item_terminal_known (see its own comment in lower.sio), not by
-// guessing from this registry's contents.
+// seg_count>=2`, syntactically identical.
+//
+// Round 9 (review comment 4098353722, and the collision it reopened): an
+// earlier version of this comment said registering the terminal regardless
+// was fine because checker_path_qualifier_all_modules_known separately
+// excludes it via lower_named_item_terminal_known -- but that registry is
+// keyed by the FULL `use` path text (module_frontend.sio's real
+// file-resolution outcome), while a call can legitimately use just the BARE
+// terminal as its qualifier (`f::g()`, not only `a::b::f::g()`), so that
+// separate check could never see the bare form to exclude it. Registering
+// the bare terminal there too was tried and reverted: it collided with an
+// UNRELATED module elsewhere in the same compilation whose own bare-terminal
+// qualifier happens to share the same text (round 7's own dep_chain/
+// named_item_module_collision fixture exists specifically to catch this).
+// Fixed at the SOURCE instead: skip suffix registration for this `use` path
+// ENTIRELY when the full path is already known to resolve as a named item,
+// not a module (lower_named_item_terminal_known -- populated before this
+// runs, per its own comment). A named-item import brings its target into
+// scope as a bare, unqualified name (`use a::b::f;` then calling `f(..)`,
+// never `f::something(..)`), so it was never a legitimate module-qualifier
+// candidate at all; not registering any of its suffixes here removes the
+// false module-shaped entry instead of trying to filter it back out later,
+// so a genuinely unrelated real module's own identical-text suffix is never
+// put at risk.
 fn checker_use_module_note_path(module_id: i64, path: AstPath) with Mut, Panic, Div {
+    if lower_named_item_terminal_known(ast_path_range_name(path, 0, path.seg_count - 1)) {
+        return
+    }
     var s: i64 = 0
     while s < path.seg_count {
         checker_use_module_note(module_id, ast_path_range_name(path, s, path.seg_count - 1))

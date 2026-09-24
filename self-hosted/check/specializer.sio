@@ -426,17 +426,36 @@ fn spec_item_module_note(module_id: i64, n: Name) with Mut, Panic, Div {
     SPEC_ITEM_MODULE_COUNT = idx + 1
 }
 
-// Records the name of every top-level fn (bare or impl method) declared
-// directly in `items`, under `module_id`. Impl methods are named by their
-// OWN (unmangled) name here, same as spec_finish_fn_item sees them via
-// spec_finalize_method_items -- consistent with the lookup site.
+// Round 9 (review comment 4098353536): a name-only registry cannot recover
+// module ownership for every item kind check_items_verdict_boot4_with_module_map
+// (check/mod.sio) walks. `ItemUse` has NO name at all (empty), so it fell
+// through to "leave current_module_id at whatever the PRECEDING item set it
+// to" -- meaning a dependency module's own leading `use` declarations got
+// registered under whichever OTHER module happened to be checked right
+// before them, defeating the per-module qualifier check the whole point of
+// that function is to provide. `ItemStruct`/`ItemEnum` were ALSO uncovered
+// (this function only ever recorded ItemFn / impl-method names). Fixed by
+// registering every named kind AND, for `ItemUse` specifically (which has no
+// name to key on), the item's own full joined `use` path text via
+// spec_item_module_note_by_path -- consistent with the lookup site in
+// check/mod.sio, which now checks `it.kind == ItemUse` and looks up the same
+// joined text instead of `it.name` for that one kind.
+//
+// Residual scope, same class as the documented "generic template body" gap:
+// a MONOMORPHIZED generic struct instance (e.g. `GBig__i64`, synthesized
+// during specialization) has no entry here (it never existed in the
+// PRE-specialization `programs[]` this collector walks), so its lookup falls
+// back to the preceding item's module -- not a regression, since that is
+// exactly today's behaviour for every item kind before this fix.
 fn spec_item_module_collect(items: Option<Box<ItemList>>, module_id: i64) with Mut, Panic, Div {
     match items {
         None => {}
         Some(list) => {
             let it = (*list).head
-            if it.kind == ItemKind::ItemFn {
+            if it.kind == ItemKind::ItemFn || it.kind == ItemKind::ItemStruct || it.kind == ItemKind::ItemEnum {
                 spec_item_module_note(module_id, it.name)
+            } else if it.kind == ItemKind::ItemUse {
+                spec_item_module_note(module_id, ast_path_range_name(it.use_path, 0, it.use_path.seg_count - 1))
             } else if it.kind == ItemKind::ItemImpl {
                 match it.impl_def {
                     Some(id) => {
@@ -556,24 +575,39 @@ fn spec_use_module_note(module_id: i64, n: Name) with Mut, Panic, Div {
 // segments from different imports.
 //
 // This cannot exclude a path-form NAMED import's terminal
-// (`use a::b::specific_fn;`) here: the AST gives no way to tell that shape
-// apart from a genuine whole-module import (`use a::b;`), where the last
-// segment really is the module -- both are `use_glob=false, use_items=None,
-// seg_count>=2`, syntactically identical. Registering the terminal here
-// regardless is fine: spec_path_qualifier_all_modules_known below settles
-// that ambiguity authoritatively via lower_named_item_terminal_known (see its
-// own comment in parser/ast.sio), not by guessing from this registry's
-// contents.
+// (`use a::b::specific_fn;`) here by shape alone: the AST gives no way to
+// tell that apart from a genuine whole-module import (`use a::b;`), where the
+// last segment really is the module -- both are `use_glob=false,
+// use_items=None, seg_count>=2`, syntactically identical.
+//
+// Round 9 (review comment 4098353722, and the collision it reopened):
+// registering suffixes here regardless and relying SOLELY on
+// spec_path_qualifier_all_modules_known's separate
+// lower_named_item_terminal_known exclusion does not work for a call spelled
+// with just the BARE terminal, because that registry is keyed by the FULL
+// `use` path text, not the bare form a short call actually asks for -- and
+// registering the bare terminal there too was tried and reverted: it
+// collided with an UNRELATED module elsewhere in the compilation whose own
+// bare-terminal qualifier happens to share the same text (round 7's own
+// uses_named_tc_c.sio/uses_real_tc_c_module.sio fixture exists specifically
+// to catch this). Fixed at the SOURCE instead: skip suffix registration for
+// this `use` path ENTIRELY when lower_named_item_terminal_known already
+// confirms the full path is a named item, not a module -- it was never a
+// legitimate module-qualifier candidate in the first place, so not
+// registering any of its suffixes here removes the false module-shaped entry
+// instead of trying to filter it back out later.
 fn spec_use_modules_collect(items: Option<Box<ItemList>>, module_id: i64) with Mut, Panic, Div {
     match items {
         None => {}
         Some(list) => {
             let it = (*list).head
             if it.kind == ItemKind::ItemUse {
-                var s: i64 = 0
-                while s < it.use_path.seg_count {
-                    spec_use_module_note(module_id, ast_path_range_name(it.use_path, s, it.use_path.seg_count - 1))
-                    s = s + 1
+                if !lower_named_item_terminal_known(ast_path_range_name(it.use_path, 0, it.use_path.seg_count - 1)) {
+                    var s: i64 = 0
+                    while s < it.use_path.seg_count {
+                        spec_use_module_note(module_id, ast_path_range_name(it.use_path, s, it.use_path.seg_count - 1))
+                        s = s + 1
+                    }
                 }
             }
             spec_use_modules_collect((*list).tail, module_id)
