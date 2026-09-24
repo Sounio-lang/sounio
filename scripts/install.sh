@@ -93,13 +93,21 @@ case "$TARGET" in
     ;;
   *) echo "error: unrecognised --target $TARGET" >&2; exit 2;;
 esac
+# Prefer a current-source artifact if present; only materialize the compressed
+# prebuilt if we need to fall back to it.
 MADAROS_ART_BIN="$ROOT_DIR/artifacts/self-hosted/madaros"
 MADAROS_PREBUILT_BIN="$ROOT_DIR/bin/madaros-linux-x86_64"
 MADAROS_SHIP_BIN=""
 if [[ -x "$MADAROS_ART_BIN" ]]; then
   MADAROS_SHIP_BIN="$MADAROS_ART_BIN"
-elif [[ "$TARGET" == "x86_64" && -x "$MADAROS_PREBUILT_BIN" ]]; then
-  MADAROS_SHIP_BIN="$MADAROS_PREBUILT_BIN"
+elif [[ "$TARGET" == "x86_64" ]]; then
+  # Materialize the compressed prebuilt only if we need it (no current artifact).
+  if [[ -f "$ROOT_DIR/scripts/lib/materialize_madaros_prebuilt.sh" ]]; then
+    bash "$ROOT_DIR/scripts/lib/materialize_madaros_prebuilt.sh" || exit $?
+  fi
+  if [[ -x "$MADAROS_PREBUILT_BIN" ]]; then
+    MADAROS_SHIP_BIN="$MADAROS_PREBUILT_BIN"
+  fi
 fi
 
 if [[ ! -x "$ART_BIN" ]]; then

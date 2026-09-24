@@ -4833,11 +4833,33 @@ fn lowerer_lower_fn_params_mut(
                 // F128Bits handles (immutable objects: every f128 op allocates a
                 // fresh one), so the element-wise slot copy that keeps a by-value
                 // `[i64; N]` param from aliasing the caller's array is exactly right
-                // for it too. `&[f128; N]` is TypeReference → len -1 → no copy.
+                // for it too.
+                //
+                // `&[f128; N]` must NOT take this copy path: KL-14a
+                // (lower_type_expr_fixed_array_len_ref, self-hosted/ir/lower.sio
+                // ~:3261) made param_array_len peel one `&`/`&!` so `&[i8; N]` FFI
+                // params get a known extent -- so param_array_len is no longer -1
+                // for a reference param, contrary to what this comment used to say.
+                // preg for a reference param holds the ADDRESS of the caller's slot
+                // (native-v2 OpRef is LEA of that slot; see the comment above
+                // fn lower_name_is_handle_buf_builtin for the fuller
+                // explanation -- no line number, this file's line numbers
+                // shift too often for a numeric ref to stay accurate), not
+                // the array
+                // handle itself, so emit_fixed_array_value_copy on it resolves an
+                // unrelated address as a bogus handle -- SIGSEGV, or on a resolvable
+                // address silently wrong data (both measured: the array_only DCE
+                // trigger and the language_f128_arrays witness in
+                // scripts/ci/madaros_f128_f256_v0e57_language_arrays_gate.sh). Only a
+                // BY-VALUE `[f128; N]` legitimately wants the slot copy; a reference
+                // param is bound straight to preg below and reads through the
+                // is_ref / label_id=1 "ref array" path instead (lower_index_expr_ref,
+                // lower_field_expr_ref).
+                let param_is_ref = lower_type_expr_is_ref_like(&(*list).head.ty)
                 let param_word_scalar = lower_type_expr_fixed_array_word_scalar_ref(&(*list).head.ty)
-                    || lower_type_expr_is_array_of_f128(&(*list).head.ty)
+                    || (lower_type_expr_is_array_of_f128(&(*list).head.ty) && !param_is_ref)
                 var param_value_reg = preg
-                if param_array_len >= 0 && param_word_scalar {
+                if param_array_len >= 0 && param_word_scalar && !param_is_ref {
                     let copy_pair = (*lo).emit_fixed_array_value_copy(
                         preg,
                         param_array_len,
@@ -16003,11 +16025,18 @@ impl Lowerer {
 
                     let param_array_len = lower_type_expr_fixed_array_len_ref(&(*list).head.ty)
                     // V0-E.5.7: see path A — a by-value `[f128; N]` param copies its
-                    // handle slots so it cannot alias the caller's array.
+                    // handle slots so it cannot alias the caller's array. `&[f128; N]`
+                    // must NOT: since KL-14a, param_array_len peels one `&`/`&!` (so
+                    // `&[i8; N]` FFI params get a known extent) and is no longer -1 for
+                    // a reference param, so this copy must be excluded explicitly or it
+                    // treats preg -- the ADDRESS of the caller's slot for a reference
+                    // param, not the array handle -- as a handle to copy from. Same
+                    // root cause and fix as path A above.
+                    let ref_param_is_ref = lower_type_expr_is_ref_like(&(*list).head.ty)
                     let param_word_scalar = lower_type_expr_fixed_array_word_scalar_ref(&(*list).head.ty)
-                        || lower_type_expr_is_array_of_f128(&(*list).head.ty)
+                        || (lower_type_expr_is_array_of_f128(&(*list).head.ty) && !ref_param_is_ref)
                     var param_value_reg = preg
-                    if param_array_len >= 0 && param_word_scalar {
+                    if param_array_len >= 0 && param_word_scalar && !ref_param_is_ref {
                         lo.current_func = current_func
                         let copy_pair = lo.emit_fixed_array_value_copy(
                             preg,
@@ -16900,6 +16929,34 @@ impl Lowerer {
 
     fn lower_let_stmt_after_expr_ref(self, s: &Stmt, is_mut: bool, reg: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
+        // Captured BEFORE bind_local(s.name, ...) below rebinds `s.name` to a
+        // fresh (non-ref) slot. Same-name shadowing (`let a = a`) means a
+        // post-bind lookup_local_is_ref(rhs name) would find that fresh slot
+        // instead of the outer one it's meant to read, since lookup searches
+        // newest-first — silently losing is_ref on the shadowing form.
+        var rhs_ident_is_ref = false
+        match s.expr {
+            Some(rhs_ident_pre) => {
+                if (*rhs_ident_pre).kind == ExprKind::ExprIdent {
+                    // A source that is BOTH ref-typed AND array_copy_word_scalar must
+                    // NOT propagate is_ref. V0-E.5.7 forces a value-copy of every
+                    // `&[f128; N]` param regardless of the `&` annotation
+                    // (lower_fn_params_ref: param_word_scalar is true for any f128
+                    // array, ref or not), materializing a REAL GC array handle in
+                    // the param's own register via emit_fixed_array_value_copy --
+                    // not a caller address. That local is simultaneously is_ref=1
+                    // (from the `&` in its declared type) and array_copy_word_scalar=1
+                    // (from the forced copy); the copy is what actually describes its
+                    // register's contents. Propagating is_ref to `zs` in `let zs = a`
+                    // would route zs[i] through the ref-array/deref path (label_id=1)
+                    // onto a register that holds a handle, not an address --
+                    // corrupting the read/write instead of indexing the array.
+                    rhs_ident_is_ref = lo.lookup_local_is_ref((*rhs_ident_pre).name)
+                        && !lo.lookup_local_array_copy_word_scalar((*rhs_ident_pre).name)
+                }
+            }
+            _ => {}
+        }
         var fixed_array_len = lower_opt_type_fixed_array_len(&s.ty)
         var fixed_array_word_scalar = lower_opt_type_fixed_array_word_scalar(&s.ty)
         var rhs_array_elem_is_float = false
@@ -17041,7 +17098,7 @@ impl Lowerer {
             _ => {}
         }
         lo = lo.bind_local(s.name, bind_reg, is_mut)
-        lo.lower_let_stmt_finalize_ref(s, is_mut, reg, fixed_array_len, fixed_array_word_scalar, rhs_array_elem_is_float)
+        lo.lower_let_stmt_finalize_ref(s, is_mut, reg, fixed_array_len, fixed_array_word_scalar, rhs_array_elem_is_float, rhs_ident_is_ref)
     }
 
     fn lower_let_stmt_finalize_ref(
@@ -17051,7 +17108,8 @@ impl Lowerer {
         reg: i64,
         fixed_array_len: i64,
         fixed_array_word_scalar: bool,
-        rhs_array_elem_is_float: bool
+        rhs_array_elem_is_float: bool,
+        rhs_ident_is_ref: bool
     ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         // Ref-typed locals (annotated &T / &!T, or RHS is & / &! expr) must be marked
@@ -17064,6 +17122,23 @@ impl Lowerer {
                 Some(rhs_ref) => {
                     if (*rhs_ref).kind == ExprKind::ExprUnary {
                         if (*rhs_ref).un_op == UnaryOp::OpRef || (*rhs_ref).un_op == UnaryOp::OpRefMut {
+                            bind_as_ref = true
+                        }
+                    } else if (*rhs_ref).kind == ExprKind::ExprIdent {
+                        // `let zs = a` where `a` is itself already a reference-typed
+                        // local/param (unannotated bare-identifier alias). Without this,
+                        // `zs` loses the is_ref bit that every lookup_local_is_ref call
+                        // site (IndexGet/Set, FieldGet/Set, .len(), &self auto-ref,
+                        // for-in-array, struct_local_is_value_copyable, …) depends on to
+                        // route through the ref-array/deref path instead of treating the
+                        // address as an ordinary GC handle.
+                        //
+                        // rhs_ident_is_ref was captured by the caller BEFORE s.name was
+                        // rebound (bind_local above), so same-name shadowing (`let a = a`)
+                        // still reads the OUTER `a` here instead of the fresh (non-ref)
+                        // slot bind_local just created for the new `a` — lookup_local_is_ref
+                        // on (*rhs_ref).name at this point would find that fresh slot first.
+                        if rhs_ident_is_ref {
                             bind_as_ref = true
                         }
                     }
