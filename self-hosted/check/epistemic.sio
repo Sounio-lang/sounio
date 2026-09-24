@@ -282,56 +282,63 @@ pub fn knowledge_metadata_is_valid(validity_opt: Option<Box<ValidityCondition>>)
     }
 }
 
-// Structural hash of a ValidWhile(expr) predicate, for canonical (not
-// occurrence/span) identity: two DIFFERENT AST nodes with the same shape and
-// content -- e.g. the same `ValidWhile(true)` annotation written once on a
-// parameter and again, separately, on that function's return type -- hash to
-// the SAME id, while two nodes with different shapes or content (even if one
-// is a subexpression of the other) hash differently with overwhelming
-// probability. Covers the expression shapes that actually occur in a
-// validity predicate position (literals, identifiers, binary/unary
-// comparisons, field access).
+// Canonical STRUCTURAL identity for a ValidWhile(expr) predicate, via real
+// hash-consing with collision resolution -- not hash equality alone.
 //
-// UNKNOWN PROPAGATION. An unrecognized subexpression (e.g. a call) must
-// poison the WHOLE predicate's identity, not just contribute a fixed
-// sentinel value that then gets folded into further mixing: if it only
-// contributed a fixed value, two DIFFERENT unsupported subexpressions (say
-// `is_open()` vs `is_safe()`) would each hash to that same fixed value at
-// the leaf, and the surrounding combination could then produce the SAME
-// combined hash for two genuinely different predicates. Each recursive call
-// therefore returns (hash, is_known); any unknown child makes the WHOLE
-// subtree unknown, propagated all the way to the root with no further
-// mixing, so struct_hash_expr's caller sees one unambiguous "not
-// comparable" outcome regardless of what specifically was unsupported or
-// where in the tree it occurred -- the required invariant is "unsupported
-// implies never subsumes anything, including itself under a different
-// source occurrence", not merely "unsupported gets *a* sentinel".
-fn struct_hash_combine(seed: i64, part: i64) -> i64 {
-    // FNV-1a-shaped mix, kept in i64 (wrapping is fine -- this is an
-    // identity fingerprint, not a cryptographic hash).
-    (seed * 1000003) ^ part
-}
+// WHY NOT JUST A HASH (even a wide, unmasked one). Every earlier attempt at
+// this (span identity, then a masked hash, then an unmasked 64-bit hash) was
+// eventually shown to have a concrete collision: two genuinely different
+// predicates producing the same identity value, because ANY fixed-width
+// mixing function can map different inputs to the same output (e.g. the
+// XOR-based mixer here treated int literals as `seed ^ int_val`, so
+// `0 == 1` and `0 != 16741452142216` mixed identically once XORed against
+// the same running seed). No amount of re-mixing removes this in general --
+// only comparing the actual structure does.
+//
+// THE FIX. Every recognized predicate is serialized into a canonical
+// preorder token sequence (tag, then payload, then children recursively).
+// Two predicates are the SAME iff their token sequences are IDENTICAL,
+// compared token-for-token -- not via any hash of the sequence. The token
+// sequences themselves are the identity; a hash is not part of the
+// comparison, so no mixing function's collisions can affect it. This is
+// standard hash-consing (an intern table keyed by real equality, storing a
+// small index as the "hash-consed" identity) with the "hash" part dropped
+// entirely in favor of the equality check it would only have approximated.
+//
+// UNKNOWN PROPAGATION (unchanged in spirit from the earlier hash version):
+// an unrecognized subexpression (a call, ...) makes the WHOLE predicate
+// "not comparable" -- serialization aborts and no id is produced, so this
+// predicate never subsumes anything, including itself under a different
+// source occurrence.
+//
+// IDENTIFIERS ARE NOT INTERNED BY SPELLING. ValidWhile(flag) used to intern
+// the NAME "flag", so two ValidWhile(flag) annotations referring to
+// DIFFERENT bindings (different parameters, or a shadowed local) with the
+// same spelling were wrongly treated as the same predicate -- this checker
+// has no per-binding symbol/slot id readily available at this pure,
+// Checker-free call site to disambiguate them correctly. Until real
+// binding-identity tracking is threaded through, any bare identifier
+// reference inside a ValidWhile predicate is conservatively treated as
+// unsupported (serialization aborts), the same fail-closed treatment as any
+// other unrecognized shape -- consistent with every other "not sure, so
+// reject rather than risk a false match" choice in this file. String
+// literal CONTENT has no such binding-identity question (a string literal
+// is just data, not a reference), so it is still interned and compared
+// by content.
+//
+// STORAGE SHAPE. Flat i8/i64 array globals initialized with `[0; N]`, the
+// SAME proven-safe shape used by the string-content intern table below --
+// NOT an array of Expr/Name structs. A `[T; N]` global with a struct-literal
+// array-repeat initializer is not supported by every stage of this
+// self-hosted compiler's own bootstrap (it broke the "Correlated effect" CI
+// build once already with "missing field in struct literal", even though
+// the identical shape works fine as a LOCAL struct-literal repeat elsewhere
+// in this codebase).
 
-// Exact (collision-checked) identity for the string/identifier CONTENT that
-// appears inside a ValidWhile predicate. ast_name_hash is DJB2-shaped and has
-// known short-string collisions -- e.g. "Az" and "BY" both hash to 5862176 --
-// so using it directly as identity let ValidWhile(Az) and ValidWhile(BY) be
-// wrongly treated as the same predicate; no amount of downstream mixing or
-// bit-masking can repair a collision that already happened at this leaf.
-// This append-only table interns each DISTINCT name by BYTE-FOR-BYTE
-// comparison, never by hash, and returns its index: two different names can
-// never receive the same index, and the same name always gets the same
-// index, for the lifetime of one checker run.
-//
-// STORAGE SHAPE: a flat i8 byte buffer + a parallel length array, NOT an
-// array of Name structs -- a `[Name; N]` global with a struct-literal repeat
-// initializer is not supported by every stage of this self-hosted compiler's
-// own bootstrap (it broke the "Correlated effect" CI build with "missing
-// field in struct literal", even though the identical shape works fine as a
-// LOCAL struct-literal repeat elsewhere in this codebase). Plain i8/i64
-// array globals initialized with `[0; N]` are the proven-safe shape (see
-// GLOBAL_VAR_INIT_VALUES in parser/ast.sio), so every table in this file
-// uses that shape.
+// String CONTENT interning (ExprStringLit payloads only -- see above for
+// why identifiers are not interned this way). Exact byte-for-byte identity,
+// never hash-based, so two different strings can never receive the same
+// index and the same string always gets the same index.
 pub var VALIDWHILE_INTERN_BUF: [i8; 196608] = [0; 196608]  // 512 slots * 384 bytes
 pub var VALIDWHILE_INTERN_LENS: [i64; 512] = [0; 512]
 pub var VALIDWHILE_INTERN_COUNT: i64 = 0
@@ -371,95 +378,18 @@ fn validwhile_intern_name_exact(n: Name) -> (i64, bool) with Mut, Panic, Div {
         VALIDWHILE_INTERN_COUNT = VALIDWHILE_INTERN_COUNT + 1
         return (slot, true)
     }
-    // Table exhausted (512 distinct names referenced across every ValidWhile
-    // predicate in one compilation -- not a realistic corpus, but this must
-    // still fail closed rather than silently degrade to hash-based identity):
-    // report unknown, same as an unsupported expression shape, so this
-    // predicate never subsumes anything, including itself under a different
-    // source occurrence.
+    // Table exhausted (512 distinct string-literal contents referenced
+    // across every ValidWhile predicate in one compilation -- not a
+    // realistic corpus, but this must still fail closed): report unknown.
     (0, false)
 }
 
-fn struct_hash_expr(opt: Option<Box<Expr>>) -> (i64, bool) with Mut, Panic, Div {
-    match opt {
-        None => (17, true)
-        Some(e) => {
-            let ek = (*e).kind
-            if ek == ExprKind::ExprIntLit {
-                (struct_hash_combine(101, (*e).int_val), true)
-            } else if ek == ExprKind::ExprFloatLit {
-                // Hash the exact IEEE-754 bit pattern, not a truncating `as i64`
-                // cast -- truncation collapsed every float literal with the same
-                // integer part (1.1 and 1.9 both truncate to 1) to the same hash,
-                // so ValidWhile(x > 1.1) and ValidWhile(x > 1.9) were wrongly
-                // treated as the same predicate.
-                (struct_hash_combine(102, f64_to_bits((*e).float_val)), true)
-            } else if ek == ExprKind::ExprBoolTrue {
-                (103, true)
-            } else if ek == ExprKind::ExprBoolFalse {
-                (104, true)
-            } else if ek == ExprKind::ExprStringLit {
-                // (*e).name is the raw token text including surrounding quotes;
-                // strip them so the identity reflects the string's actual
-                // content. Interned exactly (not just hashed) for the same
-                // collision reason as ExprIdent below.
-                let interned = validwhile_intern_name_exact(ast_string_lit_payload((*e).name))
-                if !interned.1 {
-                    (STRUCT_HASH_UNKNOWN, false)
-                } else {
-                    (struct_hash_combine(105, interned.0), true)
-                }
-            } else if ek == ExprKind::ExprCharLit {
-                (struct_hash_combine(106, (*e).int_val), true)
-            } else if ek == ExprKind::ExprIdent {
-                // Exact (collision-checked) identity, not ast_name_hash directly
-                // -- see validwhile_intern_name_exact's doc comment.
-                let interned = validwhile_intern_name_exact((*e).name)
-                if !interned.1 {
-                    (STRUCT_HASH_UNKNOWN, false)
-                } else {
-                    (struct_hash_combine(107, interned.0), true)
-                }
-            } else if ek == ExprKind::ExprBinary {
-                let op_tag = binary_op_hash_tag((*e).bin_op)
-                let lpair = struct_hash_expr((*e).left)
-                let rpair = struct_hash_expr((*e).right)
-                if op_tag == BINARY_OP_HASH_TAG_UNKNOWN || !lpair.1 || !rpair.1 {
-                    (STRUCT_HASH_UNKNOWN, false)
-                } else {
-                    (struct_hash_combine(struct_hash_combine(struct_hash_combine(108, op_tag), lpair.0), rpair.0), true)
-                }
-            } else if ek == ExprKind::ExprUnary {
-                let op_tag = unary_op_hash_tag((*e).un_op)
-                let lpair = struct_hash_expr((*e).left)
-                if op_tag == UNARY_OP_HASH_TAG_UNKNOWN || !lpair.1 {
-                    (STRUCT_HASH_UNKNOWN, false)
-                } else {
-                    (struct_hash_combine(struct_hash_combine(109, op_tag), lpair.0), true)
-                }
-            } else if ek == ExprKind::ExprFieldAccess {
-                let base_pair = struct_hash_expr((*e).left)
-                let field_interned = validwhile_intern_name_exact((*e).name)
-                if !base_pair.1 || !field_interned.1 {
-                    (STRUCT_HASH_UNKNOWN, false)
-                } else {
-                    (struct_hash_combine(struct_hash_combine(110, field_interned.0), base_pair.0), true)
-                }
-            } else {
-                (STRUCT_HASH_UNKNOWN, false)
-            }
-        }
-    }
-}
-
-const STRUCT_HASH_UNKNOWN: i64 = 0 - 1
 const BINARY_OP_HASH_TAG_UNKNOWN: i64 = 0 - 1
 const UNARY_OP_HASH_TAG_UNKNOWN: i64 = 0 - 1
 
 // Distinct tag per operator VARIANT (every BinaryOp case, not a shared
-// fallback bucket) so `a & b` and `a | b` hash differently even though both
-// are ExprBinary with the same operand structure -- collapsing unlisted
-// operators to one shared tag made distinct operators collide.
+// fallback bucket) so `a & b` and `a | b` serialize differently even though
+// both are ExprBinary with the same operand structure.
 fn binary_op_hash_tag(op: BinaryOp) -> i64 {
     match op {
         BinaryOp::OpAdd => 1
@@ -500,69 +430,179 @@ fn unary_op_hash_tag(op: UnaryOp) -> i64 {
     }
 }
 
-// Derive a canonical predicate-identity number for a ValidWhile(expr)
-// condition from the expression's STRUCTURE (see struct_hash_expr), not its
-// source occurrence. 0.0 is reserved for "not comparable" (an unrecognized
-// expression shape anywhere in the tree, or no expression at all) and is
-// never produced for a fully-recognized shape, since validity_subsumes
-// rejects id 0.0 outright rather than treating two unidentified predicates
-// as equal.
-//
-// STORAGE. The raw i64 structural hash is NOT stored as-is, and is NOT
-// truncated/masked either. Two earlier attempts at this both had real bugs:
-//   1. Converting the full 64-bit hash directly to f64 (TypeEntry.
-//      knowledge_validity_value's type) silently loses precision once the
-//      magnitude exceeds 2^53, so two DIFFERENT hashes could collide once
-//      rounded to the nearest representable f64.
-//   2. Masking to 48 bits before the f64 conversion fixed the precision
-//      loss but introduced a DETERMINISTIC collision of its own: every
-//      later mixing step preserves equality mod 2^48, so e.g.
-//      ValidWhile(0==0) and ValidWhile(0==281474976710656) (281474976710656
-//      == 2^48) hash identically post-mask even though they are genuinely
-//      different predicates -- not a probabilistic birthday-bound risk, a
-//      guaranteed collision for that specific pair.
-// Instead, the full UNTRUNCATED 64-bit hash is interned by EXACT i64
-// equality (no masking, no precision loss) in an out-of-band table, and the
-// small TABLE INDEX -- not the hash -- is what gets stored as pred_id. An
-// index is always < 512, comfortably inside f64's exact-integer range, so
-// storing it loses nothing, and two different hashes can never collapse
-// into the same index the way two different hashes could collapse into the
-// same masked value.
-pub var VALIDWHILE_HASH_TABLE: [i64; 512] = [0; 512]
-pub var VALIDWHILE_HASH_TABLE_COUNT: i64 = 0
+// Scratch buffer for the canonical preorder token serialization of ONE
+// predicate expression at a time (reset before each use). Global, matching
+// this file's established single-threaded-checker-run state pattern.
+pub var VALIDWHILE_SCRATCH: [i64; 512] = [0; 512]
+pub var VALIDWHILE_SCRATCH_LEN: i64 = 0
 
-fn validwhile_intern_hash_exact(h: i64) -> (i64, bool) {
+fn validwhile_emit(tag: i64) -> bool {
+    if VALIDWHILE_SCRATCH_LEN >= 512 {
+        return false
+    }
+    VALIDWHILE_SCRATCH[VALIDWHILE_SCRATCH_LEN as usize] = tag
+    VALIDWHILE_SCRATCH_LEN = VALIDWHILE_SCRATCH_LEN + 1
+    true
+}
+
+// Serializes `opt` as a preorder token sequence into VALIDWHILE_SCRATCH,
+// starting at the CURRENT VALIDWHILE_SCRATCH_LEN (caller resets it to 0 for
+// a fresh top-level predicate). Returns false (aborting -- the partial
+// scratch content must not be trusted) for any unrecognized shape, a bare
+// identifier reference (see the binding-identity note above), or scratch
+// exhaustion.
+fn struct_serialize_expr(opt: Option<Box<Expr>>) -> bool with Mut, Panic, Div {
+    match opt {
+        None => validwhile_emit(1)
+        Some(e) => {
+            let ek = (*e).kind
+            if ek == ExprKind::ExprIntLit {
+                validwhile_emit(2) && validwhile_emit((*e).int_val)
+            } else if ek == ExprKind::ExprFloatLit {
+                // Exact IEEE-754 bit pattern, not a truncating `as i64` cast --
+                // truncation collapsed every float literal with the same integer
+                // part (1.1 and 1.9 both truncate to 1) to the same token.
+                validwhile_emit(3) && validwhile_emit(f64_to_bits((*e).float_val))
+            } else if ek == ExprKind::ExprBoolTrue {
+                validwhile_emit(4)
+            } else if ek == ExprKind::ExprBoolFalse {
+                validwhile_emit(5)
+            } else if ek == ExprKind::ExprStringLit {
+                // (*e).name is the raw token text including surrounding quotes;
+                // strip them so identity reflects the string's actual content.
+                let interned = validwhile_intern_name_exact(ast_string_lit_payload((*e).name))
+                interned.1 && validwhile_emit(6) && validwhile_emit(interned.0)
+            } else if ek == ExprKind::ExprCharLit {
+                validwhile_emit(7) && validwhile_emit((*e).int_val)
+            } else if ek == ExprKind::ExprIdent {
+                // Bare identifier: NOT interned by spelling -- see the
+                // binding-identity note above. Conservatively unsupported until
+                // real per-binding identity is available here.
+                false
+            } else if ek == ExprKind::ExprBinary {
+                let op_tag = binary_op_hash_tag((*e).bin_op)
+                if op_tag == BINARY_OP_HASH_TAG_UNKNOWN {
+                    false
+                } else if !(validwhile_emit(8) && validwhile_emit(op_tag)) {
+                    false
+                } else if !struct_serialize_expr((*e).left) {
+                    false
+                } else {
+                    struct_serialize_expr((*e).right)
+                }
+            } else if ek == ExprKind::ExprUnary {
+                let op_tag = unary_op_hash_tag((*e).un_op)
+                if op_tag == UNARY_OP_HASH_TAG_UNKNOWN {
+                    false
+                } else if !(validwhile_emit(9) && validwhile_emit(op_tag)) {
+                    false
+                } else {
+                    struct_serialize_expr((*e).left)
+                }
+            } else if ek == ExprKind::ExprFieldAccess {
+                // The base expression is serialized recursively (so
+                // `a.b.field` differs from `x.field`); the field NAME is
+                // interned by content the same way a string literal is --
+                // it is a fixed syntactic label, not a binding reference.
+                let field_interned = validwhile_intern_name_exact((*e).name)
+                if !field_interned.1 {
+                    false
+                } else if !(validwhile_emit(10) && validwhile_emit(field_interned.0)) {
+                    false
+                } else {
+                    struct_serialize_expr((*e).left)
+                }
+            } else {
+                false
+            }
+        }
+    }
+}
+
+// Hash-consing table: each slot holds the LENGTH and the offset into the
+// flat token buffer for one previously-seen predicate's canonical
+// serialization. Lookup/insert compares the ACTUAL token sequences
+// (validwhile_struct_seq_matches), never a hash of them.
+pub var VALIDWHILE_STRUCT_BUF: [i64; 16384] = [0; 16384]
+pub var VALIDWHILE_STRUCT_BUF_USED: i64 = 0
+pub var VALIDWHILE_STRUCT_OFFSETS: [i64; 512] = [0; 512]
+pub var VALIDWHILE_STRUCT_LENS: [i64; 512] = [0; 512]
+pub var VALIDWHILE_STRUCT_COUNT: i64 = 0
+
+fn validwhile_struct_seq_matches(slot: i64, len: i64) -> bool {
+    if VALIDWHILE_STRUCT_LENS[slot as usize] != len {
+        return false
+    }
+    let off = VALIDWHILE_STRUCT_OFFSETS[slot as usize]
     var i: i64 = 0
-    while i < VALIDWHILE_HASH_TABLE_COUNT {
-        if VALIDWHILE_HASH_TABLE[i as usize] == h {
+    while i < len {
+        if VALIDWHILE_STRUCT_BUF[(off + i) as usize] != VALIDWHILE_SCRATCH[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// Interns the token sequence currently sitting in VALIDWHILE_SCRATCH[0..len)
+// by EXACT sequence comparison against every previously-interned predicate,
+// and returns its (small, stable) index.
+fn validwhile_intern_struct_exact(len: i64) -> (i64, bool) {
+    var i: i64 = 0
+    while i < VALIDWHILE_STRUCT_COUNT {
+        if validwhile_struct_seq_matches(i, len) {
             return (i, true)
         }
         i = i + 1
     }
-    if VALIDWHILE_HASH_TABLE_COUNT < 512 {
-        VALIDWHILE_HASH_TABLE[VALIDWHILE_HASH_TABLE_COUNT as usize] = h
-        VALIDWHILE_HASH_TABLE_COUNT = VALIDWHILE_HASH_TABLE_COUNT + 1
-        return (VALIDWHILE_HASH_TABLE_COUNT - 1, true)
+    if VALIDWHILE_STRUCT_COUNT < 512 && VALIDWHILE_STRUCT_BUF_USED + len <= 16384 {
+        let slot = VALIDWHILE_STRUCT_COUNT
+        let off = VALIDWHILE_STRUCT_BUF_USED
+        var j: i64 = 0
+        while j < len {
+            VALIDWHILE_STRUCT_BUF[(off + j) as usize] = VALIDWHILE_SCRATCH[j as usize]
+            j = j + 1
+        }
+        VALIDWHILE_STRUCT_OFFSETS[slot as usize] = off
+        VALIDWHILE_STRUCT_LENS[slot as usize] = len
+        VALIDWHILE_STRUCT_BUF_USED = VALIDWHILE_STRUCT_BUF_USED + len
+        VALIDWHILE_STRUCT_COUNT = VALIDWHILE_STRUCT_COUNT + 1
+        return (slot, true)
     }
-    // Table exhausted (512 distinct ValidWhile predicate SHAPES in one
-    // compilation): fail closed, same as every other exhaustion case in this
-    // file, rather than falling back to a lossy encoding.
+    // Table or token-buffer exhausted: fail closed, same as every other
+    // exhaustion case in this file, rather than falling back to a lossy
+    // encoding.
     (0, false)
 }
 
+// Derive a canonical predicate-identity number for a ValidWhile(expr)
+// condition from its REAL STRUCTURE, via hash-consing with exact sequence
+// comparison (see the block comment above) -- not from any hash value,
+// truncated or not. 0.0 is reserved for "not comparable" (an unrecognized
+// expression shape or a bare identifier reference anywhere in the tree, or
+// no expression at all) and is never produced for a fully-serializable
+// shape, since validity_subsumes rejects id 0.0 outright rather than
+// treating two unidentified predicates as equal.
+//
+// STORAGE. The intern table INDEX -- never a hash of any width -- is what
+// gets stored as pred_id (TypeEntry.knowledge_validity_value, an f64). An
+// index is always < 512, comfortably inside f64's exact-integer range, so
+// storing it loses nothing, and two structurally different predicates can
+// never collapse into the same index the way two different hashes could
+// always, in principle, collide.
 fn validity_while_pred_id(opt: Option<Box<Expr>>) -> f64 with Mut, Panic, Div {
-    let pair = struct_hash_expr(opt)
-    if !pair.1 {
+    VALIDWHILE_SCRATCH_LEN = 0
+    if !struct_serialize_expr(opt) {
+        return 0.0
+    }
+    let len = VALIDWHILE_SCRATCH_LEN
+    let interned = validwhile_intern_struct_exact(len)
+    if !interned.1 {
         0.0
     } else {
-        let interned = validwhile_intern_hash_exact(pair.0)
-        if !interned.1 {
-            0.0
-        } else {
-            // Never let a legitimate id land exactly on 0.0 (0.0 is the
-            // "not comparable" sentinel); indices start at 0, so shift by 1.
-            (interned.0 + 1) as f64
-        }
+        // Never let a legitimate id land exactly on 0.0 (0.0 is the "not
+        // comparable" sentinel); indices start at 0, so shift by 1.
+        (interned.0 + 1) as f64
     }
 }
 
