@@ -1762,42 +1762,60 @@ pub fn lower_hyper_mul_o_fano(nc: &! NativeCompiler, instr: IrInstr) with Mut, P
     let t_bj      = instr.dst + 2
     let t_aj      = instr.dst + 4
     let accum     = instr.dst + 6
+
+    // Guard 1: ZMM bounds check (AVX-512 has 32 registers: zmm0..zmm31)
+    if ctrl_base + 20 > 31 {
+        // Exceeds available ZMM constant window
+        return ()
+    }
+
+    // Guard 2: Non-overlapping ranges between constant table and working registers
+    // Working registers span [dst, dst+6]
+    let dst_end = dst + 6
+    let ctrl_end = ctrl_base + 20
+    if (ctrl_base <= dst_end && ctrl_end >= dst) ||
+       (ctrl_base <= za && ctrl_end >= za) ||
+       (ctrl_base <= zb_in && ctrl_end >= zb_in) {
+        // Register overlap collision detected
+        return ()
+    }
+
     // Column 0: identity perm, all-positive — init accum
     //   VBROADCASTSD t_bj, zb_in[0]   (broadcast lane 0 of b to all 8 lanes)
     c.code = emit_vbroadcastsd(c.code, t_bj, zb_in, vl, 0, 0)
     //   VMULPD accum, za, t_bj         (accum = a × b[0])
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x59, accum, za, t_bj, vl, 0, 0)
-    // Column 1: perm=[1,0,3,2,5,4,7,6], neg={0,3,5,6}
+    // Column 1: perm=[1,0,3,2,5,4,7,6], neg={0,3,5,6} (FANO_PERM_1, FANO_SIGN_MASK_1)
     c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bj, ctrl_base + 0,  zb_in, vl, 0, 0)
     c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_aj, ctrl_base + 7,  za,    vl, 0, 0)
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, t_aj, t_aj, ctrl_base + 14,  vl, 0, 0)
     c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_aj, t_bj,    vl, 0, 0)
-    // Column 2: perm=[2,3,0,1,6,7,4,5], neg={0,1,6,7}
+    // Column 2: perm=[2,3,0,1,6,7,4,5], neg={0,1,6,7} (FANO_PERM_2, FANO_SIGN_MASK_2)
     c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bj, ctrl_base + 1,  zb_in, vl, 0, 0)
     c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_aj, ctrl_base + 8,  za,    vl, 0, 0)
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, t_aj, t_aj, ctrl_base + 15,  vl, 0, 0)
     c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_aj, t_bj,    vl, 0, 0)
-    // Column 3: perm=[3,2,1,0,7,6,5,4], neg={0,2,5,7}
+    // Column 3: perm=[3,2,1,0,7,6,5,4], neg={0,2,5,7} (FANO_PERM_3, FANO_SIGN_MASK_3)
     c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bj, ctrl_base + 2,  zb_in, vl, 0, 0)
     c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_aj, ctrl_base + 9,  za,    vl, 0, 0)
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, t_aj, t_aj, ctrl_base + 16,  vl, 0, 0)
     c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_aj, t_bj,    vl, 0, 0)
-    // Column 4: perm=[4,5,6,7,0,1,2,3], neg={0,1,2,3}
+    // Column 4: perm=[4,5,6,7,0,1,2,3], neg={0,1,2,3} (FANO_PERM_4, FANO_SIGN_MASK_4)
     c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bj, ctrl_base + 3,  zb_in, vl, 0, 0)
     c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_aj, ctrl_base + 10, za,    vl, 0, 0)
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, t_aj, t_aj, ctrl_base + 17,  vl, 0, 0)
     c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_aj, t_bj,    vl, 0, 0)
-    // Column 5: perm=[5,4,7,6,1,0,3,2], neg={0,2,4,6}
+    // Column 5: perm=[5,4,7,6,1,0,3,2], neg={0,2,4,6} (FANO_PERM_5, FANO_SIGN_MASK_5)
     c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bj, ctrl_base + 4,  zb_in, vl, 0, 0)
     c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_aj, ctrl_base + 11, za,    vl, 0, 0)
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, t_aj, t_aj, ctrl_base + 18,  vl, 0, 0)
     c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_aj, t_bj,    vl, 0, 0)
-    // Column 6: perm=[6,7,4,5,2,3,0,1], neg={0,3,4,7}
+    // Column 6: perm=[6,7,4,5,2,3,0,1], neg={0,3,4,7} (FANO_PERM_6, FANO_SIGN_MASK_6)
     c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bj, ctrl_base + 5,  zb_in, vl, 0, 0)
     c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_aj, ctrl_base + 12, za,    vl, 0, 0)
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, t_aj, t_aj, ctrl_base + 19,  vl, 0, 0)
     c.code = emit_evex_pd_rr_full(c.code, 2, 0xB8, accum, t_aj, t_bj,    vl, 0, 0)
-    // Column 7: perm=[7,6,5,4,3,2,1,0], neg={0,1,4,5}
+    // Column 7: perm=[7,6,5,4,3,2,1,0], neg={0,1,4,5} (FANO_PERM_7, FANO_SIGN_MASK_7)
     c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_bj, ctrl_base + 6,  zb_in, vl, 0, 0)
     c.code = emit_evex_pd_rr_full(c.code, 2, 0x16, t_aj, ctrl_base + 13, za,    vl, 0, 0)
     c.code = emit_evex_pd_rr_full(c.code, 1, 0x57, t_aj, t_aj, ctrl_base + 20,  vl, 0, 0)
