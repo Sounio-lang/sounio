@@ -201,25 +201,47 @@ pub fn check_validated_type(checker: Checker, info: KnowledgeTypeInfo) -> (Check
     (c, ty)
 }
 
-pub fn knowledge_validity_expr_non_negative(opt: Option<Box<Expr>>) -> bool {
+// `kind` distinguishes what SHAPE of literal is actually valid for this
+// ValidityCondition: Valid(seconds) is a DURATION and must be a numeric
+// literal; ValidUntil(date) is a deadline and must be a date STRING. Without
+// this distinction, Valid("2026-01-01") was wrongly accepted as a
+// 20260101-second numeric duration (a string literal read by
+// knowledge_validity_expr_to_f64 as an ISO date, not as a duration -- its
+// digits reinterpreted as seconds), and ValidUntil(30.0) was wrongly
+// accepted as timestamp 30 (a bare number is not a date in this domain's
+// YYYYMMDD.0 timestamp encoding, and satisfies almost every ValidUntil
+// requirement immediately). Each validity kind now only accepts the literal
+// shape that is actually meaningful for it.
+pub fn knowledge_validity_expr_non_negative(opt: Option<Box<Expr>>, kind: AstValidityKind) -> bool {
     match opt {
         Some(e) => {
-            if (*e).kind == ExprKind::ExprIntLit {
-                return (*e).int_val >= 0
+            if kind == AstValidityKind::ValidDuration {
+                if (*e).kind == ExprKind::ExprIntLit {
+                    return (*e).int_val >= 0
+                }
+                if (*e).kind == ExprKind::ExprFloatLit {
+                    return (*e).float_val >= 0.0
+                }
+                // A duration is a plain number of seconds, not a date string or
+                // any other expression shape.
+                return false
             }
-            if (*e).kind == ExprKind::ExprFloatLit {
-                return (*e).float_val >= 0.0
-            }
-            if (*e).kind == ExprKind::ExprStringLit {
-                // A ValidUntil string is a date literal, not an arbitrary payload:
-                // it must actually parse. parse_iso_date_to_f64 returns 0.0 both
-                // for "the epoch" and for "this did not parse" -- 0.0 is not a
-                // meaningful ValidUntil timestamp in this domain (no fixture uses
-                // year 0), so treating it as parse failure and rejecting here is
-                // sound and closes the hole where a malformed literal like
-                // "9999-99-99x" silently became a permissive (or, worse, an
-                // effectively ALWAYS) bound instead of a type error.
-                return parse_iso_date_to_f64((*e).name) > 0.0
+            if kind == AstValidityKind::ValidUntilTime {
+                if (*e).kind == ExprKind::ExprStringLit {
+                    // A ValidUntil string is a date literal, not an arbitrary
+                    // payload: it must actually parse. parse_iso_date_to_f64
+                    // returns 0.0 both for "the epoch" and for "this did not
+                    // parse" -- 0.0 is not a meaningful ValidUntil timestamp in
+                    // this domain (no fixture uses year 0), so treating it as
+                    // parse failure and rejecting here is sound and closes the
+                    // hole where a malformed literal like "9999-99-99x" silently
+                    // became a permissive (or, worse, an effectively ALWAYS)
+                    // bound instead of a type error.
+                    return parse_iso_date_to_f64((*e).name) > 0.0
+                }
+                // A deadline is a date string, not a bare number or any other
+                // expression shape.
+                return false
             }
             // Any other expression shape (identifier, binary op, call, ...) is not a
             // Valid(seconds)/ValidUntil(date) LITERAL and must be rejected here, not
@@ -231,7 +253,7 @@ pub fn knowledge_validity_expr_non_negative(opt: Option<Box<Expr>>) -> bool {
             // dated value satisfies. This check does NOT apply to ValidWhile(expr) --
             // that condition is genuinely an arbitrary predicate, not a value to
             // convert to f64; see knowledge_metadata_is_valid, which only calls this
-            // for the two kinds that actually require a numeric literal.
+            // for the two kinds that actually require a literal.
             false
         }
         None => false
@@ -249,7 +271,7 @@ pub fn knowledge_metadata_is_valid(validity_opt: Option<Box<ValidityCondition>>)
             if (*vc).kind == AstValidityKind::ValidWhileCond {
                 return true
             }
-            knowledge_validity_expr_non_negative((*vc).expr)
+            knowledge_validity_expr_non_negative((*vc).expr, (*vc).kind)
         }
         None => true
     }
@@ -263,60 +285,91 @@ pub fn knowledge_metadata_is_valid(validity_opt: Option<Box<ValidityCondition>>)
 // is a subexpression of the other) hash differently with overwhelming
 // probability. Covers the expression shapes that actually occur in a
 // validity predicate position (literals, identifiers, binary/unary
-// comparisons, field access); anything else falls through to
-// STRUCT_HASH_UNKNOWN, a sentinel this function never mixes into a
-// recursive combination, so an unrecognized subexpression cannot make two
-// otherwise-different predicates collide, and validity_subsumes (which
-// rejects id 0.0 outright) never treats two unrecognized predicates as
-// equal to each other.
-const STRUCT_HASH_UNKNOWN: i64 = 0 - 1
-
+// comparisons, field access).
+//
+// UNKNOWN PROPAGATION. An unrecognized subexpression (e.g. a call) must
+// poison the WHOLE predicate's identity, not just contribute a fixed
+// sentinel value that then gets folded into further mixing: if it only
+// contributed a fixed value, two DIFFERENT unsupported subexpressions (say
+// `is_open()` vs `is_safe()`) would each hash to that same fixed value at
+// the leaf, and the surrounding combination could then produce the SAME
+// combined hash for two genuinely different predicates. Each recursive call
+// therefore returns (hash, is_known); any unknown child makes the WHOLE
+// subtree unknown, propagated all the way to the root with no further
+// mixing, so struct_hash_expr's caller sees one unambiguous "not
+// comparable" outcome regardless of what specifically was unsupported or
+// where in the tree it occurred -- the required invariant is "unsupported
+// implies never subsumes anything, including itself under a different
+// source occurrence", not merely "unsupported gets *a* sentinel".
 fn struct_hash_combine(seed: i64, part: i64) -> i64 {
     // FNV-1a-shaped mix, kept in i64 (wrapping is fine -- this is an
     // identity fingerprint, not a cryptographic hash).
     (seed * 1000003) ^ part
 }
 
-fn struct_hash_expr(opt: Option<Box<Expr>>) -> i64 with Div {
+fn struct_hash_expr(opt: Option<Box<Expr>>) -> (i64, bool) with Mut, Panic, Div {
     match opt {
-        None => 17
+        None => (17, true)
         Some(e) => {
             let ek = (*e).kind
             if ek == ExprKind::ExprIntLit {
-                struct_hash_combine(101, (*e).int_val)
+                (struct_hash_combine(101, (*e).int_val), true)
             } else if ek == ExprKind::ExprFloatLit {
-                struct_hash_combine(102, (*e).float_val as i64)
+                // Hash the exact IEEE-754 bit pattern, not a truncating `as i64`
+                // cast -- truncation collapsed every float literal with the same
+                // integer part (1.1 and 1.9 both truncate to 1) to the same hash,
+                // so ValidWhile(x > 1.1) and ValidWhile(x > 1.9) were wrongly
+                // treated as the same predicate.
+                (struct_hash_combine(102, f64_to_bits((*e).float_val)), true)
             } else if ek == ExprKind::ExprBoolTrue {
-                103
+                (103, true)
             } else if ek == ExprKind::ExprBoolFalse {
-                104
+                (104, true)
             } else if ek == ExprKind::ExprStringLit {
-                struct_hash_combine(105, ast_name_hash((*e).name))
+                (struct_hash_combine(105, ast_name_hash((*e).name)), true)
             } else if ek == ExprKind::ExprCharLit {
-                struct_hash_combine(106, (*e).int_val)
+                (struct_hash_combine(106, (*e).int_val), true)
             } else if ek == ExprKind::ExprIdent {
-                struct_hash_combine(107, ast_name_hash((*e).name))
+                (struct_hash_combine(107, ast_name_hash((*e).name)), true)
             } else if ek == ExprKind::ExprBinary {
                 let op_tag = binary_op_hash_tag((*e).bin_op)
-                let lh = struct_hash_expr((*e).left)
-                let rh = struct_hash_expr((*e).right)
-                struct_hash_combine(struct_hash_combine(struct_hash_combine(108, op_tag), lh), rh)
+                let lpair = struct_hash_expr((*e).left)
+                let rpair = struct_hash_expr((*e).right)
+                if op_tag == BINARY_OP_HASH_TAG_UNKNOWN || !lpair.1 || !rpair.1 {
+                    (STRUCT_HASH_UNKNOWN, false)
+                } else {
+                    (struct_hash_combine(struct_hash_combine(struct_hash_combine(108, op_tag), lpair.0), rpair.0), true)
+                }
             } else if ek == ExprKind::ExprUnary {
                 let op_tag = unary_op_hash_tag((*e).un_op)
-                let lh = struct_hash_expr((*e).left)
-                struct_hash_combine(struct_hash_combine(109, op_tag), lh)
+                let lpair = struct_hash_expr((*e).left)
+                if op_tag == UNARY_OP_HASH_TAG_UNKNOWN || !lpair.1 {
+                    (STRUCT_HASH_UNKNOWN, false)
+                } else {
+                    (struct_hash_combine(struct_hash_combine(109, op_tag), lpair.0), true)
+                }
             } else if ek == ExprKind::ExprFieldAccess {
-                let base_h = struct_hash_expr((*e).left)
-                struct_hash_combine(struct_hash_combine(110, ast_name_hash((*e).name)), base_h)
+                let base_pair = struct_hash_expr((*e).left)
+                if !base_pair.1 {
+                    (STRUCT_HASH_UNKNOWN, false)
+                } else {
+                    (struct_hash_combine(struct_hash_combine(110, ast_name_hash((*e).name)), base_pair.0), true)
+                }
             } else {
-                STRUCT_HASH_UNKNOWN
+                (STRUCT_HASH_UNKNOWN, false)
             }
         }
     }
 }
 
-// Distinct small tags per operator so `a + b` and `a - b` hash differently
-// even though both are ExprBinary with the same operand structure.
+const STRUCT_HASH_UNKNOWN: i64 = 0 - 1
+const BINARY_OP_HASH_TAG_UNKNOWN: i64 = 0 - 1
+const UNARY_OP_HASH_TAG_UNKNOWN: i64 = 0 - 1
+
+// Distinct tag per operator VARIANT (every BinaryOp case, not a shared
+// fallback bucket) so `a & b` and `a | b` hash differently even though both
+// are ExprBinary with the same operand structure -- collapsing unlisted
+// operators to one shared tag made distinct operators collide.
 fn binary_op_hash_tag(op: BinaryOp) -> i64 {
     match op {
         BinaryOp::OpAdd => 1
@@ -332,7 +385,17 @@ fn binary_op_hash_tag(op: BinaryOp) -> i64 {
         BinaryOp::OpGe => 11
         BinaryOp::OpAnd => 12
         BinaryOp::OpOr => 13
-        _ => 0 - 100
+        BinaryOp::OpBitAnd => 14
+        BinaryOp::OpBitOr => 15
+        BinaryOp::OpBitXor => 16
+        BinaryOp::OpShl => 17
+        BinaryOp::OpShr => 18
+        BinaryOp::OpConcat => 19
+        BinaryOp::OpRange => 20
+        BinaryOp::OpRangeInclusive => 21
+        BinaryOp::OpUDiv => 22
+        BinaryOp::OpURem => 23
+        BinaryOp::OpUShr => 24
     }
 }
 
@@ -340,31 +403,53 @@ fn unary_op_hash_tag(op: UnaryOp) -> i64 {
     match op {
         UnaryOp::OpNeg => 1
         UnaryOp::OpNot => 2
-        _ => 0 - 100
+        UnaryOp::OpRef => 3
+        UnaryOp::OpRefMut => 4
+        UnaryOp::OpDeref => 5
+        UnaryOp::OpBitNot => 6
     }
 }
 
 // Derive a canonical predicate-identity number for a ValidWhile(expr)
 // condition from the expression's STRUCTURE (see struct_hash_expr), not its
 // source occurrence. 0.0 is reserved for "not comparable" (an unrecognized
-// expression shape, or no expression at all) and is never produced for a
-// recognized shape, since validity_subsumes rejects id 0.0 outright rather
-// than treating two unidentified predicates as equal.
-fn validity_while_pred_id(opt: Option<Box<Expr>>) -> f64 with Div {
-    let h = struct_hash_expr(opt)
-    if h == STRUCT_HASH_UNKNOWN {
+// expression shape anywhere in the tree, or no expression at all) and is
+// never produced for a fully-recognized shape, since validity_subsumes
+// rejects id 0.0 outright rather than treating two unidentified predicates
+// as equal.
+//
+// STORAGE. The raw i64 structural hash is NOT stored as-is: converting an
+// arbitrary i64 to f64 (TypeEntry.knowledge_validity_value's type) silently
+// loses precision once the magnitude exceeds 2^53, so two DIFFERENT hashes
+// could collide once rounded to the nearest representable f64 -- exactly
+// the kind of bug this identity scheme exists to prevent, just moved into
+// the storage layer instead of the hash function. Masking to 48 bits before
+// the f64 conversion keeps every value inside f64's exactly-representable
+// integer range (2^53), so the stored id round-trips losslessly: no value
+// this function can produce is ever altered by being stored as f64. (A
+// 48-bit hash still carries far more entropy than any realistic ValidWhile
+// predicate corpus needs; the tiny residual collision probability inherent
+// to ANY fixed-width structural hash -- shared by ast_name_hash elsewhere
+// in this checker -- is an accepted, unavoidable property of hash-based
+// identity, not the precision-loss bug being fixed here.)
+const STRUCT_HASH_STORAGE_MASK: i64 = (1 << 48) - 1
+
+fn validity_while_pred_id(opt: Option<Box<Expr>>) -> f64 with Mut, Panic, Div {
+    let pair = struct_hash_expr(opt)
+    if !pair.1 {
         0.0
     } else {
+        let masked = pair.0 & STRUCT_HASH_STORAGE_MASK
         // Never let a legitimate structural hash land exactly on 0.0.
-        let hf = h as f64
+        let hf = masked as f64
         if hf == 0.0 { 1.0 } else { hf }
     }
 }
 
-pub fn validity_from_ast(opt: Option<Box<ValidityCondition>>) -> Validity with Div {
+pub fn validity_from_ast(opt: Option<Box<ValidityCondition>>) -> Validity with Mut, Panic, Div {
     match opt {
         Some(vc) => {
-            let value = if knowledge_validity_expr_non_negative((*vc).expr) {
+            let value = if knowledge_validity_expr_non_negative((*vc).expr, (*vc).kind) {
                 knowledge_validity_expr_to_f64((*vc).expr)
             } else {
                 0.0
@@ -536,7 +621,7 @@ pub fn provenance_from_ast(opt: Option<Box<AstProvenanceKind>>) -> Provenance {
     }
 }
 
-pub fn knowledge_meta_from_type_info(info: KnowledgeTypeInfo) -> KnowledgeMeta with Div {
+pub fn knowledge_meta_from_type_info(info: KnowledgeTypeInfo) -> KnowledgeMeta with Mut, Panic, Div {
     let base_eps = match info.epsilon {
         Some(eb) => (*eb).value
         None => -1.0
