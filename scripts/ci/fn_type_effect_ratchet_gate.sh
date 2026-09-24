@@ -744,7 +744,21 @@ function classify_fn_type_at(line, fn_pos, at_eof,    open_pos, close_pos, after
     while (pos <= length(line) && match(substr(line, pos), /:/)) {
         colon_pos = pos + RSTART - 1
         p = skip_ws(line, colon_pos + 1)
-        if (substr(line, p, 2) == "fn") {
+        # Copilot follow-up (#2570): a bare `substr(line, p, 2) == "fn"`
+        # check also matches the first two characters of any LONGER
+        # identifier starting with "fn" -- `f: fnBox<fn() -> i64>` enters
+        # this branch on "fnBox", fails the inner "(" check at p2 two lines
+        # down (the next real token is "B", not "("), and then falls
+        # through the whole if/else-if chain doing NOTHING, since a
+        # top-level `if` already committed to this branch -- the identifier/
+        # named-generic branch below (which correctly unwraps `fnBox<...>`
+        # via scan_entry_for_fn_types, same as `Vec<fn() -> i64>`) is never
+        # reached, and the nested bare `fn() -> i64` bypasses the ratchet
+        # silently. Require a token boundary: the "fn" match only counts as
+        # the keyword when the next character is not itself an identifier
+        # continuation character, so "fnBox" and similar fall through to the
+        # generic-scanning branch instead.
+        if (substr(line, p, 2) == "fn" && substr(line, p + 2, 1) !~ /[A-Za-z0-9_]/) {
             p2 = skip_ws(line, p + 2)
             if (substr(line, p2, 1) == "(") {
                 result = classify_fn_type_at(line, p, 0)
@@ -1307,6 +1321,28 @@ selftest() {
   if bare_hits_of "$tmp/pos30.sio" | grep -q .; then
     echo "  ok   POSITIVO 30: generico nomeado espacado no nivel superior e nu e detectado"
   else echo "  FALHA POSITIVO 30: generico nomeado espacado no nivel superior nu nao detectado"; rc=1; fi
+  # POSITIVE control 31 (review follow-up, #2570): a named generic whose
+  # OWN name starts with "fn" -- `f: fnBox<fn() -> i64>` -- was invisible
+  # to the top-level scanner for a reason distinct from POSITIVO 29's gap:
+  # `substr(line, p, 2) == "fn"` matched the first two characters of
+  # "fnBox" too, routing into the bare-fn-type branch; that branch's own
+  # "(" check then failed (the next real token is "B", not "("), and the
+  # if/else-if chain had already committed, so it fell through doing
+  # nothing instead of reaching the named-generic branch below it (the one
+  # POSITIVO 29 exercises) that would have correctly unwrapped "fnBox<...>"
+  # the same way it unwraps "Vec<...>". Fixed by requiring a token boundary
+  # after "fn" (the next character must not itself be an identifier
+  # continuation character) before treating it as the keyword.
+  printf 'fn use_it(f: fnBox<fn() -> i64>) -> f64 { 0.0 }\n' > "$tmp/pos31.sio"
+  if bare_hits_of "$tmp/pos31.sio" | grep -q .; then
+    echo "  ok   POSITIVO 31: generico nomeado iniciando com fn no nivel superior e nu e detectado"
+  else echo "  FALHA POSITIVO 31: generico nomeado iniciando com fn no nivel superior nu nao detectado"; rc=1; fi
+  # NEGATIVE control 31: companion -- same "fn"-prefixed generic name, but
+  # the nested fn-type carries its own effects clause.
+  printf 'fn use_it(f: fnBox<fn() -> i64 with Div>) -> f64 { 0.0 }\n' > "$tmp/neg31.sio"
+  if bare_hits_of "$tmp/neg31.sio" | grep -q .; then
+    echo "  FALHA NEGATIVO 31: generico nomeado iniciando com fn com efeito proprio contado como nu"; rc=1
+  else echo "  ok   NEGATIVO 31: generico nomeado iniciando com fn com efeito proprio nao conta como nu"; fi
   rm -rf "$tmp"
   echo "falhas: $rc"
   return $rc
