@@ -4665,19 +4665,36 @@ var CHECKER_USE_MODULE_BUF: [i8; 393216] = [0; 393216]
 // registry fills, a later real module's qualified calls fall back to
 // checker_path_qualifier_all_modules_known returning false -- direct_sig_id
 // stays negative, only W044 (a warning) fires, and `check` can report success
-// on a call whose argument/effect/visibility checks never ran. Durable across
-// checker_use_module_reset() (mirrors LOWER_USE_MODULE_OVERFLOWED's own
-// "survive the next reset" contract) so a later reset cannot quietly clear
-// evidence that this compile already under-checked something.
+// on a call whose argument/effect/visibility checks never ran.
+//
+// Review comment 4089849683 (round 4): this flag and its
+// OVERFLOW_REPORTED sibling below are process-global, and checker_init_in_place
+// (the only caller of checker_use_module_reset -- once per fresh Checker/
+// compile) used to reset only CHECKER_USE_MODULE_COUNT, not these. So a
+// process that runs a SECOND, separate compile after an earlier one already
+// overflowed inherited both flags already set: OVERFLOWED already true is
+// harmless on its own, but OVERFLOW_REPORTED already true made
+// checker_report_use_module_overflow_inplace return before ever touching
+// the new Checker's had_error, so the second compile's overflow silently
+// stopped short of failing loudly -- the same class of bug as round 1
+// finding D (a registry surviving past the compile boundary it belongs to,
+// just failing OPEN here instead of losing data). Both are now reset
+// alongside the count in checker_use_module_reset, so every fresh
+// Checker/compile starts with clean overflow-tracking state, not just an
+// empty module table.
 var CHECKER_USE_MODULE_OVERFLOWED: bool = false
 // Guards checker_report_use_module_overflow_inplace to at most one diagnostic
-// per compile (re-printing at every subsequent `use` item once the registry
-// is already full would just be noise). A plain global, not a Checker field,
-// so no struct-literal construction site of Checker needs updating.
+// per COMPILE (re-printing at every subsequent `use` item once the registry
+// is already full within the SAME compile would just be noise) -- reset
+// alongside CHECKER_USE_MODULE_OVERFLOWED, not durable past it. A plain
+// global, not a Checker field, so no struct-literal construction site of
+// Checker needs updating.
 var CHECKER_USE_MODULE_OVERFLOW_REPORTED: bool = false
 
 fn checker_use_module_reset() with Mut {
     CHECKER_USE_MODULE_COUNT = 0
+    CHECKER_USE_MODULE_OVERFLOWED = false
+    CHECKER_USE_MODULE_OVERFLOW_REPORTED = false
 }
 
 fn checker_use_module_known(n: Name) -> bool with Mut, Panic, Div {
@@ -4791,7 +4808,7 @@ fn checker_collect_known_module_backing_imports_inplace(c: *mut Checker, path: A
     }
 }
 
-fn checker_collect_use_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Div, Alloc {
+fn checker_collect_use_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Div, Alloc, IO {
     checker_collect_import_item_list_inplace(c, item.use_items)
     // Path-form named import `use module::symbol` (no braces, no glob): the
     // parser leaves the symbol as the last path segment with use_items=None.
