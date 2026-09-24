@@ -1,55 +1,71 @@
 # database — Examples
 
+> **Fixed-capacity engine.** `database::pure::engine` is an in-memory engine
+> over `InMemoryDB` (4 tables, 16 rows/table, 4 `i64` columns/row). It exposes
+> only `engine_create_table`, `engine_drop_table`, `engine_insert_row`,
+> `engine_get_cell`, and `engine_table_row_count` — there is **no** SQL string
+> API such as `engine_execute_sql`. Mutating calls take a `&!` borrow; reads take
+> `&`. Aggregate/query logic is written in Sounio by reading cells back.
+
 ## 1. In-Memory Database
 
 ```sio
 use database::pure::engine
 use database::pure::types
+use str::lib::*
 
-let mut db = in_memory_db_new()
+var db = in_memory_db_new()
 
-let create = "CREATE TABLE products (id INTEGER, name TEXT, price REAL)".to_string()
-engine_execute_sql(&mut db, create)
+// Create a 2-column table (InMemoryDB stores fixed i64 columns v0, v1).
+let create_rc = engine_create_table(&!db, "products")
+assert(create_rc == 1)
 
-let insert = "INSERT INTO products VALUES (1, 'Widget', 29.99)".to_string()
-engine_execute_sql(&mut db, insert)
+// Insert rows (v0 = id, v1 = price in cents).
+let i1 = engine_insert_row(&!db, "products", 1, 2999)
+let i2 = engine_insert_row(&!db, "products", 2, 4999)
+assert(i1 == 1 && i2 == 1)
 
-let insert2 = "INSERT INTO products VALUES (2, 'Gadget', 49.99)".to_string()
-engine_execute_sql(&mut db, insert2)
+// Read a cell back (row 0, column 0 = id; column 1 = price).
+let id = engine_get_cell(&db, "products", 0, 0)
+let price = engine_get_cell(&db, "products", 0, 1)
+let _m0 = str_cat(&str_from_literal("product "), &str_from_i64(id))
+let _m1 = str_cat(&_m0, &str_from_literal(" costs "))
+let _m2 = str_cat(&_m1, &str_from_i64(price))
+let _m3 = str_cat(&_m2, &str_from_literal(" cents"))
+println(str_to_string(_m3))
 
-let select = "SELECT name, price FROM products WHERE price < 40".to_string()
-let result = engine_execute_sql(&mut db, select)
-
-match result {
-    Ok(qr) => match qr.result {
-        Result::Rows(rs) => {
-            print("Found {} products\n", rs.row_count)
-        }
-        _ => {}
-    }
-    Err(e) => print("Error: {:?}\n", e)
-}
+// Count rows in the table.
+let count = engine_table_row_count(&db, "products")
+assert(count == 2)
 ```
 
 ## 2. Aggregations
 
 ```sio
 use database::pure::engine
+use str::lib::*
 
-let mut db = in_memory_db_new()
+var db = in_memory_db_new()
 
-let create = "CREATE TABLE orders (customer TEXT, amount REAL)".to_string()
-engine_execute_sql(&mut db, create)
+let create_rc = engine_create_table(&!db, "orders")
+assert(create_rc == 1)
 
-let i1 = "INSERT INTO orders VALUES ('Alice', 100.0)".to_string()
-let i2 = "INSERT INTO orders VALUES ('Alice', 150.0)".to_string()
-let i3 = "INSERT INTO orders VALUES ('Bob', 200.0)".to_string()
-engine_execute_sql(&mut db, i1)
-engine_execute_sql(&mut db, i2)
-engine_execute_sql(&mut db, i3)
+// Insert (v0 = amount in cents): Alice 10000, Alice 15000, Bob 20000.
+engine_insert_row(&!db, "orders", 10000, 0)
+engine_insert_row(&!db, "orders", 15000, 0)
+engine_insert_row(&!db, "orders", 20000, 0)
 
-let select = "SELECT customer, SUM(amount) FROM orders GROUP BY customer".to_string()
-let result = engine_execute_sql(&mut db, select)
+// The fixed-capacity engine has no SQL, so aggregate by reading cells in Sounio.
+let n = engine_table_row_count(&db, "orders")
+var total: i64 = 0
+var i = 0
+while i < n {
+    total = total + engine_get_cell(&db, "orders", i, 0)
+    i = i + 1
+}
+let _t0 = str_cat(&str_from_literal("total amount = "), &str_from_i64(total))
+let _t1 = str_cat(&_t0, &str_from_literal(" cents"))
+println(str_to_string(_t1))  // 45000
 ```
 
 ## 3. Table Operations
@@ -58,20 +74,19 @@ let result = engine_execute_sql(&mut db, select)
 use database::pure::engine
 use database::pure::types
 
-let mut db = in_memory_db_new()
+var db = in_memory_db_new()
 
-let create = "CREATE TABLE users (id INTEGER, name TEXT)".to_string()
-engine_execute_sql(&mut db, create)
+let create_rc = engine_create_table(&!db, "users")
+assert(create_rc == 1)
 
-let insert = "INSERT INTO users VALUES (1, 'Alice')".to_string()
-engine_execute_sql(&mut db, insert)
+let ins = engine_insert_row(&!db, "users", 1, 0)
+assert(ins == 1)
 
-let tables = engine_list_tables(&db)
-assert_eq!(tables.len(), 1)
+// Count rows in the table.
+let count = engine_table_row_count(&db, "users")
+assert(count == 1)
 
-let desc = engine_describe_table(&db, "users")
-match desc {
-    Ok(t) => assert_eq!(t.name, "users"),
-    Err(_) => assert!(false),
-}
+// Read a cell back.
+let id = engine_get_cell(&db, "users", 0, 0)
+assert(id == 1)
 ```
