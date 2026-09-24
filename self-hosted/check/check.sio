@@ -6940,13 +6940,17 @@ fn checker_check_return_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
     match e.left {
         Some(val_expr) => {
             // `return expr` must get the same four-axis epistemic enforcement as the
-            // bare-`return` arm below: checker_contextual_expr_compatible ignores
-            // validity/provenance entirely, so without this OR a Knowledge<T> return
-            // value that only differs on validity/provenance from current_return_type
-            // was silently accepted here (E246/E244 never fired on an explicit
-            // `return expr`, only on bare `return`).
-            let ret_expr_ok = checker_contextual_expr_compatible(*val_expr, val_ty, (*c).current_return_type)
-                || (is_epistemic_type((*c).current_return_type) && is_epistemic_type(val_ty) && checker_knowledge_subsumes(c, val_ty, (*c).current_return_type))
+            // bare-`return` arm below. Four-axis subsumption is AUTHORITATIVE for
+            // epistemic return types -- checked unconditionally, not as a fallback
+            // ORed in behind checker_contextual_expr_compatible. That helper ignores
+            // validity/provenance and treats same-inner-type Knowledge<T> as already
+            // compatible, so an `||` fallback would short-circuit before the subsumption
+            // check ever ran for the (common) equal-inner-type case, silently accepting
+            // a shorter validity window or weaker provenance on `return expr`.
+            var ret_expr_ok = checker_contextual_expr_compatible(*val_expr, val_ty, (*c).current_return_type)
+            if is_epistemic_type((*c).current_return_type) && is_epistemic_type(val_ty) {
+                ret_expr_ok = checker_knowledge_subsumes(c, val_ty, (*c).current_return_type)
+            }
             if !ret_expr_ok {
                 checker_report_mismatch_inplace(c, e.span, 8, (*c).current_return_type, val_ty)
             }
@@ -6980,8 +6984,10 @@ fn checker_check_return_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
             }
         }
         None => {
-            let ret_ok = checker_types_compatible_inplace(c, val_ty, (*c).current_return_type)
-                || (is_epistemic_type((*c).current_return_type) && is_epistemic_type(val_ty) && checker_knowledge_subsumes(c, val_ty, (*c).current_return_type))
+            var ret_ok = checker_types_compatible_inplace(c, val_ty, (*c).current_return_type)
+            if is_epistemic_type((*c).current_return_type) && is_epistemic_type(val_ty) {
+                ret_ok = checker_knowledge_subsumes(c, val_ty, (*c).current_return_type)
+            }
             if !ret_ok {
                 checker_report_mismatch_inplace(c, e.span, 8, (*c).current_return_type, val_ty)
             }
@@ -9130,6 +9136,16 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                                 if vdate > 0.0 {
                                     k_struct_result.knowledge_validity_kind = 2 // VALIDITY_KIND_UNTIL_TIME
                                     k_struct_result.knowledge_validity_value = vdate
+                                } else {
+                                    // parse_iso_date_to_f64 returned 0.0: the literal did NOT
+                                    // parse as a well-formed YYYY-MM-DD date (wrong length, bad
+                                    // separators, or an out-of-range month/day). Do NOT silently
+                                    // leave validity at its default ALWAYS -- that is even MORE
+                                    // permissive than a bogus-but-present until-time, and it is
+                                    // exactly the "parse failure encoded as a usable bound" this
+                                    // is meant to close. A malformed ValidUntil literal is a real
+                                    // type error (E054), not a quietly-ignored field.
+                                    checker_report_error_at_inplace(c, e.span, 54, 0, 0, 0)
                                 }
                             } else if fval.kind == ExprKind::ExprIntLit {
                                 k_struct_result.knowledge_validity_kind = 1 // VALIDITY_KIND_DURATION
@@ -11748,7 +11764,7 @@ fn checker_check_call_arg_knowledge_boundary_inplace(c: *mut Checker, arg_ty: Ty
         } else if !provenance_subsumes(knowledge_meta_provenance(pmeta2), knowledge_meta_provenance(rmeta2)) {
             checker_report_error_at_inplace(c, call_span, 244, 0, 0, 0)
         } else if !validity_subsumes(knowledge_meta_validity(pmeta2), knowledge_meta_validity(rmeta2)) {
-            checker_report_error_at_inplace(c, call_span, 246, 0, 0, 0)
+            checker_report_error_at_inplace(c, call_span, 263, 0, 0, 0)
         } else {
             checker_report_error_at_inplace(c, call_span, 36, 0, 0, 0) // E036: epsilon bound violation
         }
@@ -12280,10 +12296,15 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
                 init_context_ok = checker_types_compatible_inplace(c, init_ty, ann_ty)
             }
         }
-        if !init_context_ok && is_epistemic_type(ann_ty) && is_epistemic_type(init_ty) {
-            init_context_ok = checker_knowledge_subsumes(c, init_ty, ann_ty)
-        }
-        if !init_context_ok && is_epistemic_type(ann_ty) && is_epistemic_type(init_ty) {
+        // Four-axis subsumption is AUTHORITATIVE for epistemic annotations, not a
+        // fallback gated behind contextual compatibility failing. Same-inner-type
+        // Knowledge<T> values already compare structurally compatible above (via
+        // checker_contextual_expr_compatible / checker_types_compatible_inplace),
+        // which never inspects validity or provenance -- so gating the subsumption
+        // check on init_context_ok already being false meant a typed `let` with
+        // equal inner types could accept a shorter validity window or weaker
+        // provenance and the four-axis check would simply never run.
+        if is_epistemic_type(ann_ty) && is_epistemic_type(init_ty) {
             init_context_ok = checker_knowledge_subsumes(c, init_ty, ann_ty)
         }
         if !init_context_ok && !int_lit_narrow && !enum_int_ok {
@@ -16935,7 +16956,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 179 { print("noise-set interning table exhausted: too many distinct source-sets in one checker run, so correlation between the values that carry them can no longer be tracked") }
     else if code == 221 { print("this math function is bound for typechecking but the native backend cannot emit it; the call would compile and then die on an illegal instruction at run time") }
     else if code == 244 { print("Knowledge provenance boundary mismatch: the argument's provenance cannot satisfy the parameter's requirement (trusted classes: Source, Literature, Measured)") }
-    else if code == 246 { print("Temporal validity window mismatch: the argument's validity window cannot satisfy the parameter's requirement") }
+    else if code == 263 { print("Temporal validity window mismatch: the argument's validity window cannot satisfy the parameter's requirement") }
     else if code == 245 { print("arithmetic between two Knowledge<T> values is not supported by this compiler; the operation typechecks but has no lowering, so it would produce a wrong value or crash at runtime") }
     else if code == 200 { print("Forgettable type requires ZD effect: exact annihilation is only possible via zero-divisor algebra (sedenions). Division algebras cannot satisfy this guarantee. Add `with ZD` to your function signature.") }
     else if code == 201 { print("ExactlyPrivate<T> requires ZD effect: exact data-contribution removal is only possible via sedenion annihilation. Differential privacy (epsilon-bounded) does not suffice. Add `with ZD` to your function signature.") }
@@ -19110,6 +19131,18 @@ fn checker_call_arg_types_compatible_inplace(c: *mut Checker, arg_expr: Expr, ar
     if unit_verdict >= 0 {
         return unit_verdict == 1
     }
+    // Four-axis epistemic subsumption is AUTHORITATIVE, checked BEFORE the generic
+    // compatibility calls below -- not as a fallback reached only when they already
+    // failed. checker_types_compatible_inplace / checker_contextual_expr_compatible
+    // treat same-inner-type Knowledge<T> as compatible without ever inspecting
+    // validity or provenance, so gating the subsumption check behind their failure
+    // meant it never ran for the (common) equal-inner-type case, silently accepting
+    // a shorter validity window or weaker provenance at a call argument.
+    let arg_epi_ty = call_ref_inner_or_self(arg_ty)
+    let param_epi_ty = call_ref_inner_or_self(param_ty)
+    if is_epistemic_type(arg_epi_ty) && is_epistemic_type(param_epi_ty) {
+        return checker_knowledge_subsumes(c, arg_epi_ty, param_epi_ty)
+    }
     if checker_types_compatible_inplace(c, arg_ty, param_ty) {
         return true
     }
@@ -19130,16 +19163,13 @@ fn checker_call_arg_types_compatible_inplace(c: *mut Checker, arg_expr: Expr, ar
         return checker_types_compatible_inplace(c, arg_ty, call_ref_inner_or_self(param_ty))
     }
     // Ontology subsumption: a subclass argument satisfies a parent-class parameter.
+    // (The epistemic case is handled authoritatively above, before the generic
+    // compatibility checks -- this ontology walk covers plain, non-epistemic
+    // TyNamed subclass arguments.)
     let exp_ty = call_ref_inner_or_self(param_ty)
     let got_ty = call_ref_inner_or_self(arg_ty)
     if !name_is_empty(got_ty.name) && !name_is_empty(exp_ty.name) && !name_eq(got_ty.name, exp_ty.name) {
         if checker_onto_name_subclass_walk((*c).ontology_items, got_ty.name, exp_ty.name, 0) {
-            return true
-        }
-    }
-    // Directional epistemic subsumption at expected position (arg -> param)
-    if is_epistemic_type(exp_ty) && is_epistemic_type(got_ty) {
-        if checker_knowledge_subsumes(c, got_ty, exp_ty) {
             return true
         }
     }
@@ -20399,13 +20429,17 @@ fn checker_contextual_expr_compatible(expr: Expr, actual_ty: TypeEntry, expected
 // expression is not directly available here. Use the checker's last_literal_kind to detect
 // that the final expression was an integer literal, so `fn f() -> i32 { 0 }` checks OK.
 fn checker_fn_body_return_compatible_inplace(c: *mut Checker, body_ty: TypeEntry, return_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc, IO {
+    // Four-axis epistemic subsumption is AUTHORITATIVE for epistemic return types,
+    // checked BEFORE the generic structural check below -- not as a fallback reached
+    // only when that check already failed. checker_types_compatible_inplace treats
+    // same-inner-type Knowledge<T> as compatible without inspecting validity or
+    // provenance, so an early `return true` there would short-circuit before
+    // subsumption ever ran for the equal-inner-type case.
+    if is_epistemic_type(return_ty) && is_epistemic_type(body_ty) {
+        return checker_knowledge_subsumes(c, body_ty, return_ty)
+    }
     if checker_types_compatible_inplace(c, body_ty, return_ty) {
         return true
-    }
-    if is_epistemic_type(return_ty) && is_epistemic_type(body_ty) {
-        if checker_knowledge_subsumes(c, body_ty, return_ty) {
-            return true
-        }
     }
     let int_lit_narrow = (*c).last_literal_kind == 1
         && body_ty.kind == TypeKind::TyI64
@@ -24375,8 +24409,15 @@ impl Checker {
                     let ret_enum = sig2.return_type.kind == TypeKind::TyNamed && enum_table_find(c.enums, sig2.return_type.name) >= 0
                     let enum_int_ok = (body_enum && is_numeric_type(sig2.return_type))
                         || (is_numeric_type(body_ty) && ret_enum)
-                    if !c.types_compatible_structural(body_ty, sig2.return_type)
-                        && !int_lit_narrow && !enum_int_ok {
+                    // Implicit-tail return: four-axis epistemic subsumption is
+                    // AUTHORITATIVE, not a fallback -- types_compatible_structural
+                    // treats same-inner-type Knowledge<T> as compatible without ever
+                    // inspecting validity/provenance.
+                    var body_ret_ok = c.types_compatible_structural(body_ty, sig2.return_type)
+                    if is_epistemic_type(sig2.return_type) && is_epistemic_type(body_ty) {
+                        body_ret_ok = check_return_expr_knowledge_subsumes(c.ontology_items, body_ty, sig2.return_type)
+                    }
+                    if !body_ret_ok && !int_lit_narrow && !enum_int_ok {
                         c = c.report_mismatch((*fd).span, 8, sig2.return_type, body_ty)
                     }
                 }
@@ -24490,7 +24531,13 @@ impl Checker {
                 let body_ty = pair.1
                 if sig_id >= 0 {
                     let sig2 = fn_sig_table_get(c.fn_sigs, sig_id)
-                    if !c.types_compatible_structural(body_ty, sig2.return_type) {
+                    // Implicit-tail return: four-axis epistemic subsumption is
+                    // AUTHORITATIVE, not a fallback -- see the sibling check above.
+                    var body_ret_ok2 = c.types_compatible_structural(body_ty, sig2.return_type)
+                    if is_epistemic_type(sig2.return_type) && is_epistemic_type(body_ty) {
+                        body_ret_ok2 = check_return_expr_knowledge_subsumes(c.ontology_items, body_ty, sig2.return_type)
+                    }
+                    if !body_ret_ok2 {
                         c = c.report_mismatch((*fd).span, 8, sig2.return_type, body_ty)
                     }
                 }
@@ -28620,7 +28667,7 @@ impl Checker {
         } else if !prov_ok {
             self.report_error_at(call_span, 244, 0, 0, 0)
         } else if !val_ok {
-            self.report_error_at(call_span, 246, 0, 0, 0)
+            self.report_error_at(call_span, 263, 0, 0, 0)
         } else {
             self.report_error_at(call_span, 36, 0, 0, 0)
         }
@@ -29103,10 +29150,16 @@ impl Checker {
         let pair = self.check_opt_expr(e.left)
         var c = pair.0
         let val_ty = pair.1
+        // Four-axis epistemic subsumption is AUTHORITATIVE for epistemic return types,
+        // not a fallback gated behind the generic compatibility check already failing:
+        // same-inner-type Knowledge<T> passes checker_contextual_expr_compatible /
+        // types_compatible_structural without ever inspecting validity or provenance,
+        // so gating the subsumption call on `!ret_ok` meant it never ran for the
+        // (common) equal-inner-type case.
         match e.left {
             Some(val_expr) => {
                 var ret_ok = checker_contextual_expr_compatible(*val_expr, val_ty, c.current_return_type)
-                if !ret_ok && is_epistemic_type(c.current_return_type) && is_epistemic_type(val_ty) && val_ty.kind == c.current_return_type.kind {
+                if is_epistemic_type(c.current_return_type) && is_epistemic_type(val_ty) && val_ty.kind == c.current_return_type.kind {
                     ret_ok = check_return_expr_knowledge_subsumes(c.ontology_items, val_ty, c.current_return_type)
                 }
                 if !ret_ok {
@@ -29115,7 +29168,7 @@ impl Checker {
             }
             None => {
                 var ret_ok = c.types_compatible_structural(val_ty, c.current_return_type)
-                if !ret_ok && is_epistemic_type(c.current_return_type) && is_epistemic_type(val_ty) && val_ty.kind == c.current_return_type.kind {
+                if is_epistemic_type(c.current_return_type) && is_epistemic_type(val_ty) && val_ty.kind == c.current_return_type.kind {
                     ret_ok = check_return_expr_knowledge_subsumes(c.ontology_items, val_ty, c.current_return_type)
                 }
                 if !ret_ok {
@@ -29594,9 +29647,15 @@ impl Checker {
             ret_ty
         }
 
-        // Check body type against return type if annotated
+        // Check body type against return type if annotated. Four-axis epistemic
+        // subsumption is AUTHORITATIVE here too, not a fallback -- see the
+        // implicit-tail-return sites above.
         if ret_ty.kind != TypeKind::TyUnknown {
-            if !c.types_compatible_structural(body_ty, ret_ty) {
+            var body_ret_ok3 = c.types_compatible_structural(body_ty, ret_ty)
+            if is_epistemic_type(ret_ty) && is_epistemic_type(body_ty) {
+                body_ret_ok3 = check_return_expr_knowledge_subsumes(c.ontology_items, body_ty, ret_ty)
+            }
+            if !body_ret_ok3 {
                 c = c.report_mismatch(e.span, 8, ret_ty, body_ty)
             }
         }
