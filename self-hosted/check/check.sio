@@ -2225,11 +2225,42 @@ fn checker_lower_named_type_with_args_mut(c: *mut Checker, path: AstPath, type_a
     checker_lower_named_type_mut(c, path)
 }
 
+// ValidWhile(expr) predicates were accepted without ever being resolved or
+// type-checked as boolean: an undeclared identifier or a non-bool expression
+// (e.g. ValidWhile(42)) was silently persisted as an "enforceable" predicate.
+// Type-check the expression in its declaration scope (this checker's current
+// env) and reject it -- E054, same code as the other validity-metadata
+// parse errors -- unless it resolves and type-checks to bool. An expression
+// that already failed to resolve (ty_error()/ty_unknown()) does not ALSO get
+// this diagnostic -- checker_check_expr_inplace already reported the real
+// cause (e.g. E137 undeclared identifier) at the identifier itself.
+fn checker_check_validwhile_predicate_inplace(c: *mut Checker, validity_opt: Option<Box<ValidityCondition> >) with Mut, Panic, Div, Alloc, IO {
+    match validity_opt {
+        Some(vc) => {
+            if (*vc).kind == AstValidityKind::ValidWhileCond {
+                match (*vc).expr {
+                    Some(pred_expr) => {
+                        let pred_ty = checker_check_expr_inplace(c, *pred_expr)
+                        if !is_error_or_unknown(pred_ty) && !is_bool_type(pred_ty) {
+                            checker_report_error_at_inplace(c, (*pred_expr).span, 54, 0, 0, 0)
+                        }
+                    }
+                    None => {
+                        checker_note_type_error_mut(c)
+                    }
+                }
+            }
+        }
+        None => {}
+    }
+}
+
 fn checker_lower_knowledge_type_mut(c: *mut Checker, opt: Option<Box<KnowledgeTypeInfo> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(info_box) => {
             let info = *info_box
             let inner_ty = checker_lower_type_expr_mut(c, *info.inner_type)
+            checker_check_validwhile_predicate_inplace(c, info.validity)
             if !knowledge_metadata_is_valid(info.validity) {
                 checker_note_type_error_mut(c)
             }
@@ -8946,6 +8977,16 @@ fn knowledge_struct_lit_apply_fields(base: TypeEntry, fields: Option<Box<StructF
                     } else if fval.kind == ExprKind::ExprFloatLit {
                         result.knowledge_validity_kind = 1 // VALIDITY_KIND_DURATION
                         result.knowledge_validity_value = fval.float_val
+                    } else {
+                        // Any other expression shape (identifier, call, ...) is not a
+                        // supported `validity:` literal. Silently ignoring it left
+                        // knowledge_validity_kind at its -1 default, reconstructed by
+                        // knowledge_meta_from_ty as ALWAYS -- so `Knowledge { validity:
+                        // deadline, .. }` satisfied every temporal requirement instead
+                        // of being rejected. Same fix shape as the malformed-ValidUntil-
+                        // string case just above: a real type error, not a promotion to
+                        // the strongest possible validity.
+                        parse_error = true
                     }
                 } else if name_eq(fname, make_name("epsilon")) {
                     if fval.kind == ExprKind::ExprFloatLit {

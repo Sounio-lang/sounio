@@ -45,6 +45,32 @@ pub fn check_knowledge_type(checker: Checker, info: KnowledgeTypeInfo) -> (Check
     var c = pair.0
     let inner_ty = pair.1
 
+    // ValidWhile(expr) predicates must resolve and type-check to bool in this
+    // checker's current declaration scope -- see the *mut twin,
+    // checker_check_validwhile_predicate_inplace, for the full rationale. An
+    // undeclared identifier or a non-bool expression (ValidWhile(42)) is
+    // rejected instead of silently persisted as an enforceable predicate.
+    match info.validity {
+        Some(vc) => {
+            if (*vc).kind == AstValidityKind::ValidWhileCond {
+                match (*vc).expr {
+                    Some(pred_expr) => {
+                        let pred_pair = c.check_expr(*pred_expr)
+                        c = pred_pair.0
+                        let pred_ty = pred_pair.1
+                        if !is_error_or_unknown(pred_ty) && !is_bool_type(pred_ty) {
+                            c = c.report_error_at((*pred_expr).span, 54, 0, 0, 0)
+                        }
+                    }
+                    None => {
+                        c = c.report_error_at(Span { file_id: 0, start: 0, end: 0 }, 54, 0, 0, 0)
+                    }
+                }
+            }
+        }
+        None => {}
+    }
+
     // Validate metadata constraints that we can prove at type-check time.
     // (TypeEntry does not yet persist full validity/provenance metadata.)
     if !knowledge_metadata_is_valid(info.validity) {
@@ -371,9 +397,17 @@ fn to_iso_digit(b: i8) -> i64 {
 // ValidUntil literal, not a full calendar library, but it must still reject
 // month 00/13+ and day 00/32+ (and 30/31 on short months) rather than accept
 // anything that merely looks numeric.
-fn iso_days_in_month(month: i64) -> i64 {
+fn iso_is_leap_year(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+// `year` is needed ONLY to resolve February's limit (28 vs 29) correctly --
+// every other month's length is year-independent. Accepting Feb 29 for every
+// year (not just leap years) let a malformed date like "2025-02-29" become a
+// usable temporal bound.
+fn iso_days_in_month(month: i64, year: i64) -> i64 {
     if month == 1 { return 31 }
-    if month == 2 { return 29 }  // permissive on leap-year day 29, still rejects 30/31
+    if month == 2 { return if iso_is_leap_year(year) { 29 } else { 28 } }
     if month == 3 { return 31 }
     if month == 4 { return 30 }
     if month == 5 { return 31 }
@@ -418,7 +452,7 @@ pub fn parse_iso_date_to_f64(name: Name) -> f64 {
     if month < 1 || month > 12 {
         return 0.0
     }
-    if day < 1 || day > iso_days_in_month(month) {
+    if day < 1 || day > iso_days_in_month(month, year) {
         return 0.0
     }
     (year * 10000 + month * 100 + day) as f64
@@ -619,6 +653,12 @@ const VALIDITY_KIND_ALWAYS: i64 = 0
 const VALIDITY_KIND_DURATION: i64 = 1
 const VALIDITY_KIND_UNTIL_TIME: i64 = 2
 const VALIDITY_KIND_WHILE_COND: i64 = 3
+// Result of intersecting two validity constraints that are genuinely
+// incomparable without a real conjunction representation (e.g. two DIFFERENT
+// ValidWhile predicates, or a duration mixed with an until-time). Never
+// matches any required kind in validity_subsumes -- see there -- so it fails
+// closed rather than arbitrarily standing in for either input constraint.
+const VALIDITY_KIND_UNSATISFIABLE: i64 = 4
 
 // Validity metadata for knowledge temporal bounds.
 // pred_id identifies a ValidWhile(expr) predicate: two Validity values of kind
@@ -689,6 +729,17 @@ pub fn validity_while_pred(pred_id: f64) -> Validity {
     }
 }
 
+// Result of intersecting two incomparable validity constraints -- see
+// VALIDITY_KIND_UNSATISFIABLE.
+pub fn validity_unsatisfiable() -> Validity {
+    Validity {
+        kind: VALIDITY_KIND_UNSATISFIABLE,
+        duration_sec: 0.0,
+        until_timestamp: 0.0,
+        pred_id: 0.0
+    }
+}
+
 // Check if validity has expired based on current time
 pub fn validity_is_expired(validity: Validity, current_time: f64) -> bool {
     match validity.kind {
@@ -700,36 +751,38 @@ pub fn validity_is_expired(validity: Validity, current_time: f64) -> bool {
 }
 
 // Get a conservative validity that combines two validity constraints
+// The intersection is the more restrictive of the two constraints -- but ONLY
+// when they are actually comparable. This function cannot represent a true
+// conjunction ("valid for 10s AND while cond(x)"), so for two constraints of
+// different non-ALWAYS kinds (or two DIFFERENT ValidWhile predicates), there
+// is no single Validity value that is sound to return: picking either operand
+// silently drops the other's constraint, and doing so was non-commutative
+// (swapping operand order changed the result) on top of being unsound (e.g.
+// `a + b` typed valid under b's ValidWhile condition even when a's failed).
+// Those cases fail closed to VALIDITY_KIND_UNSATISFIABLE instead, which
+// validity_subsumes never treats as subsuming or subsumed by anything.
 pub fn validity_intersect(a: Validity, b: Validity) -> Validity {
-    // The intersection is the more restrictive of the two
-    match a.kind {
-        VALIDITY_KIND_ALWAYS => b,
-        VALIDITY_KIND_DURATION => {
-            match b.kind {
-                VALIDITY_KIND_ALWAYS => a,
-                VALIDITY_KIND_DURATION => {
-                    if a.duration_sec < b.duration_sec { a } else { b }
-                }
-                VALIDITY_KIND_UNTIL_TIME => b,
-                VALIDITY_KIND_WHILE_COND => b
-            }
-        }
-        VALIDITY_KIND_UNTIL_TIME => {
-            match b.kind {
-                VALIDITY_KIND_ALWAYS => a,
-                VALIDITY_KIND_UNTIL_TIME => {
-                    if a.until_timestamp < b.until_timestamp { a } else { b }
-                }
-                _ => a
-            }
-        }
-        VALIDITY_KIND_WHILE_COND => {
-            match b.kind {
-                VALIDITY_KIND_ALWAYS => a,
-                _ => b
-            }
-        }
+    if a.kind == VALIDITY_KIND_ALWAYS {
+        return b
     }
+    if b.kind == VALIDITY_KIND_ALWAYS {
+        return a
+    }
+    if a.kind == VALIDITY_KIND_DURATION && b.kind == VALIDITY_KIND_DURATION {
+        return if a.duration_sec < b.duration_sec { a } else { b }
+    }
+    if a.kind == VALIDITY_KIND_UNTIL_TIME && b.kind == VALIDITY_KIND_UNTIL_TIME {
+        return if a.until_timestamp < b.until_timestamp { a } else { b }
+    }
+    if a.kind == VALIDITY_KIND_WHILE_COND && b.kind == VALIDITY_KIND_WHILE_COND {
+        if a.pred_id != 0.0 && a.pred_id == b.pred_id {
+            return a
+        }
+        return validity_unsatisfiable()
+    }
+    // Mixed kinds (DURATION vs UNTIL_TIME, DURATION vs WHILE_COND, UNTIL_TIME vs
+    // WHILE_COND, in either order) -- genuinely incomparable.
+    validity_unsatisfiable()
 }
 
 // ============================================================
@@ -766,6 +819,13 @@ pub fn validity_from_type_entry(ty: TypeEntry) -> Validity {
         validity_until(ty.knowledge_validity_value)
     } else if ty.knowledge_validity_kind == VALIDITY_KIND_WHILE_COND {
         validity_while_pred(ty.knowledge_validity_value)
+    } else if ty.knowledge_validity_kind == VALIDITY_KIND_UNSATISFIABLE {
+        // Must NOT fall through to the ALWAYS default below -- that is exactly
+        // the "incomparable constraint silently becomes the strongest possible
+        // validity" bug validity_intersect's UNSATISFIABLE result exists to
+        // prevent. A binary result whose operand validities could not be
+        // intersected stays unsatisfiable through this TypeEntry round-trip too.
+        validity_unsatisfiable()
     } else {
         validity_always()
     }
