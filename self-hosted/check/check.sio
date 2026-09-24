@@ -8847,8 +8847,15 @@ fn checker_check_match_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                 } else {
                     // Remaining arm: compare against the first arm's type (check_remaining_arms,
                     // code 18, span = this arm's span == (*list).head.span, expected = result_ty,
-                    // got = arm_ty).
-                    if !checker_types_compatible_inplace(c, arm_ty, result_ty) {
+                    // got = arm_ty). Same join-metadata-symmetry gap as the if/else join: require
+                    // MUTUAL four-axis subsumption when both are epistemic, not just
+                    // types_compatible's inner-type+epsilon-only TyKnowledge branch.
+                    var arm_ok = checker_types_compatible_inplace(c, arm_ty, result_ty)
+                    if arm_ok && is_epistemic_type(arm_ty) && is_epistemic_type(result_ty) {
+                        arm_ok = checker_knowledge_subsumes(c, arm_ty, result_ty)
+                            && checker_knowledge_subsumes(c, result_ty, arm_ty)
+                    }
+                    if !arm_ok {
                         checker_report_mismatch_inplace(c, arm.span, 18, result_ty, arm_ty)
                     }
                     // N2 CFG join (codex ruling 2026-08-23, closes the missing-
@@ -8902,6 +8909,61 @@ fn checker_check_match_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
 // count mismatch returns ty_named(struct_name) (NOT ty_error — the outer by-value wraps it so);
 // generic-with-zero-type-params (args_list None edge, 16680) returns ty_error(); both generic
 // passes check each field expr (faithful to the by-value double-check); no expr_depth mgmt.
+// Shared between checker_check_struct_lit_inplace (*mut) and
+// check_knowledge_struct_lit (by-value): parses the `validity:`/`epsilon:`
+// fields of a `Knowledge { value: .., validity: .., epsilon: .. }` struct
+// literal into `base` and returns the updated TypeEntry plus whether a
+// malformed ValidUntil string literal was seen (caller reports E054 -- kept
+// out of this pure helper so each spine can use its own error-reporting
+// idiom, *mut vs by-value). Pulled out so the by-value spine cannot silently
+// diverge from the *mut spine and drop these fields again (it used to return
+// a bare ty_knowledge with no validity/epsilon parsing at all, so
+// knowledge_meta_from_ty reconstructed every by-value-routed literal as
+// ALWAYS-valid regardless of what `validity:` said).
+fn knowledge_struct_lit_apply_fields(base: TypeEntry, fields: Option<Box<StructFieldList> >) -> (TypeEntry, bool) {
+    var result = base
+    var parse_error = false
+    var cur_f = fields
+    while true {
+        match cur_f {
+            Some(flist) => {
+                let fname = (*flist).head.name
+                let fval = (*flist).head.value
+                if name_eq(fname, make_name("validity")) {
+                    if fval.kind == ExprKind::ExprStringLit {
+                        let vdate = parse_iso_date_to_f64(fval.name)
+                        if vdate > 0.0 {
+                            result.knowledge_validity_kind = 2 // VALIDITY_KIND_UNTIL_TIME
+                            result.knowledge_validity_value = vdate
+                        } else {
+                            // Malformed ValidUntil literal: a real type error (E054), not a
+                            // quietly-ignored field left at the default ALWAYS.
+                            parse_error = true
+                        }
+                    } else if fval.kind == ExprKind::ExprIntLit {
+                        result.knowledge_validity_kind = 1 // VALIDITY_KIND_DURATION
+                        result.knowledge_validity_value = fval.int_val as f64
+                    } else if fval.kind == ExprKind::ExprFloatLit {
+                        result.knowledge_validity_kind = 1 // VALIDITY_KIND_DURATION
+                        result.knowledge_validity_value = fval.float_val
+                    }
+                } else if name_eq(fname, make_name("epsilon")) {
+                    if fval.kind == ExprKind::ExprFloatLit {
+                        result.knowledge_epsilon = fval.float_val
+                    }
+                }
+                // `provenance:` is intentionally NOT read here -- see the long comment at
+                // its original site (checker_check_struct_lit_inplace): it is a
+                // user-controlled free-text label, not the type-level provenance category,
+                // and deriving the category from it was a trust-escalation bug.
+                cur_f = (*flist).tail
+            }
+            None => break
+        }
+    }
+    (result, parse_error)
+}
+
 fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let struct_name = checker_copy_string_list_to_name(e.path.segments)
     let struct_idx = struct_table_find((*c).structs, struct_name)
@@ -9003,7 +9065,11 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                                             }
                                             let field_ty = field_info_list_find(mono_si.fields, (*list).head.name)
                                             let val_init_ty = checker_check_expr_inplace(c, (*list).head.value)
-                                            if !checker_contextual_expr_compatible((*list).head.value, val_init_ty, field_ty) {
+                                            var field_init_ok = checker_contextual_expr_compatible((*list).head.value, val_init_ty, field_ty)
+                                            if is_epistemic_type(field_ty) && is_epistemic_type(val_init_ty) {
+                                                field_init_ok = checker_knowledge_subsumes(c, val_init_ty, field_ty)
+                                            }
+                                            if !field_init_ok {
                                                 checker_report_mismatch_inplace(c, (*list).head.value.span, 16, field_ty, val_init_ty)
                                             }
                                         }
@@ -9042,7 +9108,11 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                             }
                             let field_ty = field_info_list_find(si.fields, (*list).head.name)
                             let init_ty = checker_check_expr_inplace(c, (*list).head.value)
-                            if !checker_contextual_expr_compatible((*list).head.value, init_ty, field_ty) {
+                            var field_init_ok = checker_contextual_expr_compatible((*list).head.value, init_ty, field_ty)
+                            if is_epistemic_type(field_ty) && is_epistemic_type(init_ty) {
+                                field_init_ok = checker_knowledge_subsumes(c, init_ty, field_ty)
+                            }
+                            if !field_init_ok {
                                 checker_report_mismatch_inplace(c, (*list).head.value.span, 16, field_ty, init_ty)
                             }
                         }
@@ -9145,64 +9215,12 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
             } else {
                 k_struct_result.noise_set_id = ns_empty()
             }
-            // Parse validity and provenance fields if present in struct literal:
-            var cur_f = e.fields
-            while true {
-                match cur_f {
-                    Some(flist) => {
-                        let fname = (*flist).head.name
-                        let fval = (*flist).head.value
-                        if name_eq(fname, make_name("validity")) {
-                            if fval.kind == ExprKind::ExprStringLit {
-                                let vdate = parse_iso_date_to_f64(fval.name)
-                                if vdate > 0.0 {
-                                    k_struct_result.knowledge_validity_kind = 2 // VALIDITY_KIND_UNTIL_TIME
-                                    k_struct_result.knowledge_validity_value = vdate
-                                } else {
-                                    // parse_iso_date_to_f64 returned 0.0: the literal did NOT
-                                    // parse as a well-formed YYYY-MM-DD date (wrong length, bad
-                                    // separators, or an out-of-range month/day). Do NOT silently
-                                    // leave validity at its default ALWAYS -- that is even MORE
-                                    // permissive than a bogus-but-present until-time, and it is
-                                    // exactly the "parse failure encoded as a usable bound" this
-                                    // is meant to close. A malformed ValidUntil literal is a real
-                                    // type error (E054), not a quietly-ignored field.
-                                    checker_report_error_at_inplace(c, e.span, 54, 0, 0, 0)
-                                }
-                            } else if fval.kind == ExprKind::ExprIntLit {
-                                k_struct_result.knowledge_validity_kind = 1 // VALIDITY_KIND_DURATION
-                                k_struct_result.knowledge_validity_value = fval.int_val as f64
-                            } else if fval.kind == ExprKind::ExprFloatLit {
-                                k_struct_result.knowledge_validity_kind = 1 // VALIDITY_KIND_DURATION
-                                k_struct_result.knowledge_validity_value = fval.float_val
-                            }
-                        } else if name_eq(fname, make_name("epsilon")) {
-                            if fval.kind == ExprKind::ExprFloatLit {
-                                k_struct_result.knowledge_epsilon = fval.float_val
-                            }
-                        } else if name_eq(fname, make_name("provenance")) {
-                            // The `provenance` FIELD on a Knowledge struct literal is an
-                            // arbitrary, user-controlled source LABEL (free text such as
-                            // "deterministic_recurrence" in tests/audit/
-                            // knowledge_provenance_boundary_silence.sio), not the
-                            // type-level provenance CATEGORY. The category comes from the
-                            // `Knowledge[T, eps, Category]` type annotation (see the
-                            // annotation-provenance wiring above at k_struct_result's type
-                            // context), which owns knowledge_provenance_kind separately.
-                            //
-                            // Deriving the category from this string's CONTENT was a trust
-                            // escalation: writing `provenance: "measure"` or `"source"` as
-                            // a label made the literal's type-level provenance
-                            // Measured/Source-trusted with no real trusted constructor
-                            // behind it, letting it satisfy a Measured/trusted parameter
-                            // it never earned. This field is intentionally NOT read for
-                            // classification; knowledge_provenance_kind stays whatever the
-                            // type annotation already set (or -1/DERIVED if none did).
-                        }
-                        cur_f = (*flist).tail
-                    }
-                    None => break
-                }
+            // Parse validity/epsilon fields if present in struct literal (shared with
+            // the by-value twin, check_knowledge_struct_lit, via this pure helper).
+            let parsed = knowledge_struct_lit_apply_fields(k_struct_result, e.fields)
+            k_struct_result = parsed.0
+            if parsed.1 {
+                checker_report_error_at_inplace(c, e.span, 54, 0, 0, 0)
             }
             checker_ns_trace_emit("knowledge_struct_lit", k_struct_result.noise_set_id)
             return k_struct_result
@@ -9237,7 +9255,11 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                             } else {
                                 let field_ty = field_info_list_find(vfields, (*list).head.name)
                                 let init_ty = checker_check_expr_inplace(c, (*list).head.value)
-                                if !checker_contextual_expr_compatible((*list).head.value, init_ty, field_ty) {
+                                var field_init_ok = checker_contextual_expr_compatible((*list).head.value, init_ty, field_ty)
+                                if is_epistemic_type(field_ty) && is_epistemic_type(init_ty) {
+                                    field_init_ok = checker_knowledge_subsumes(c, init_ty, field_ty)
+                                }
+                                if !field_init_ok {
                                     checker_report_mismatch_inplace(c, (*list).head.value.span, 16, field_ty, init_ty)
                                 }
                             }
@@ -11853,10 +11875,16 @@ fn checker_ontology_boundary_check_call_arg_contract_inplace(c: *mut Checker, ar
         checker_report_error_at_inplace(c, call_span, 150, 0, 0, 0)
         return
     }
-    if (*c).ontology_inference_query_subclass(prov_check_ty.ontology_id, exp_check_ty.ontology_id) {
+    // Call the kernel predicates directly instead of the (*c).ontology_inference_query_*
+    // by-value-receiver wrapper methods -- those take `self: Checker` and copy the whole
+    // multi-megabyte Checker in and out on every call from this *mut function, reintroducing
+    // exactly the stack-smash risk the *mut rewrite exists to avoid. The wrappers are one-line
+    // passthroughs to ontology_kernel_is_subclass/ontology_kernel_is_disjoint, so call those
+    // directly off the pointer-backed checker's ontology_kernel field.
+    if ontology_kernel_is_subclass((*c).ontology_kernel, prov_check_ty.ontology_id, exp_check_ty.ontology_id) {
         return
     }
-    if (*c).ontology_inference_query_disjoint(prov_check_ty.ontology_id, exp_check_ty.ontology_id) {
+    if ontology_kernel_is_disjoint((*c).ontology_kernel, prov_check_ty.ontology_id, exp_check_ty.ontology_id) {
         checker_report_error_at_inplace(c, call_span, 151, 0, 0, 0)
         return
     }
@@ -12409,6 +12437,15 @@ fn checker_check_var_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
             None => {
                 init_context_ok = checker_types_compatible_inplace(c, init_ty, ann_ty)
             }
+        }
+        // Four-axis subsumption is AUTHORITATIVE for epistemic `var` annotations too --
+        // same laundering pattern as `let` (checker_check_let_stmt_inplace) and simple
+        // assignment: the generic checks above never inspect validity/provenance for
+        // equal-inner Knowledge<T>, so `var w: Knowledge<T, Valid(30), Measured> =
+        // stale_computed` would otherwise pass here and then bind_ty gets replaced by
+        // the (unverified) stronger annotation below.
+        if is_epistemic_type(ann_ty) && is_epistemic_type(init_ty) {
+            init_context_ok = checker_knowledge_subsumes(c, init_ty, ann_ty)
         }
         if !init_context_ok && !int_lit_narrow {
             checker_report_mismatch_inplace(c, s.span, 1, ann_ty, init_ty)
@@ -24683,7 +24720,13 @@ impl Checker {
             let int_lit_narrow = c.last_literal_kind == 1
                 && init_ty.kind == TypeKind::TyI64
                 && (ann_ty.kind == TypeKind::TyI32 || ann_ty.kind == TypeKind::TyI8)
-            if !c.types_compatible_structural(init_ty, ann_ty) && !int_lit_narrow {
+            var init_ok = c.types_compatible_structural(init_ty, ann_ty)
+            // Four-axis subsumption is AUTHORITATIVE for epistemic let/var annotations
+            // in the by-value spine too -- mirrors the *mut spine, not a fallback.
+            if is_epistemic_type(ann_ty) && is_epistemic_type(init_ty) {
+                init_ok = check_return_expr_knowledge_subsumes(c.ontology_items, init_ty, ann_ty)
+            }
+            if !init_ok && !int_lit_narrow {
                 c = c.report_mismatch(s.span, 1, ann_ty, init_ty)
             }
             if ann_ty.kind == init_ty.kind
@@ -24747,7 +24790,13 @@ impl Checker {
             let int_lit_narrow = c.last_literal_kind == 1
                 && init_ty.kind == TypeKind::TyI64
                 && (ann_ty.kind == TypeKind::TyI32 || ann_ty.kind == TypeKind::TyI8)
-            if !c.types_compatible_structural(init_ty, ann_ty) && !int_lit_narrow {
+            var init_ok = c.types_compatible_structural(init_ty, ann_ty)
+            // Four-axis subsumption is AUTHORITATIVE for epistemic let/var annotations
+            // in the by-value spine too -- mirrors the *mut spine, not a fallback.
+            if is_epistemic_type(ann_ty) && is_epistemic_type(init_ty) {
+                init_ok = check_return_expr_knowledge_subsumes(c.ontology_items, init_ty, ann_ty)
+            }
+            if !init_ok && !int_lit_narrow {
                 c = c.report_mismatch(s.span, 1, ann_ty, init_ty)
             }
             if ann_ty.kind == init_ty.kind
@@ -29034,7 +29083,14 @@ impl Checker {
                 let pair = self.check_match_arm((*list).head, scrut_ty)
                 var c = pair.0
                 let arm_ty = pair.1
-                if !c.types_compatible_structural(arm_ty, expected_ty) {
+                // Mirrors the *mut spine's match-arm join fix: require mutual
+                // four-axis subsumption when both are epistemic.
+                var arm_ok = c.types_compatible_structural(arm_ty, expected_ty)
+                if arm_ok && is_epistemic_type(arm_ty) && is_epistemic_type(expected_ty) {
+                    arm_ok = check_return_expr_knowledge_subsumes(c.ontology_items, arm_ty, expected_ty)
+                        && check_return_expr_knowledge_subsumes(c.ontology_items, expected_ty, arm_ty)
+                }
+                if !arm_ok {
                     c = c.report_mismatch((*list).head.span, 18, expected_ty, arm_ty)
                 }
                 c.check_remaining_arms((*list).tail, scrut_ty, expected_ty)
@@ -29303,7 +29359,23 @@ impl Checker {
             c = c.report_error_at(e.span, 12, 0, 0, 0)
             return (c, ty_error())
         }
-        (c, ty_knowledge(value_ty, 0.0 - 1.0))
+        // Share validity/epsilon field parsing with the *mut spine
+        // (knowledge_struct_lit_apply_fields) -- this used to return a bare
+        // ty_knowledge here, silently dropping `validity:`/`epsilon:` fields, so
+        // knowledge_meta_from_ty reconstructed every by-value-routed Knowledge
+        // struct literal as ALWAYS-valid regardless of what was written.
+        var base = ty_knowledge(value_ty, 0.0 - 1.0)
+        if is_knowledge_type(value_ty) {
+            base.noise_set_id = value_ty.noise_set_id
+        } else {
+            base.noise_set_id = ns_empty()
+        }
+        let parsed = knowledge_struct_lit_apply_fields(base, e.fields)
+        var result = parsed.0
+        if parsed.1 {
+            c = c.report_error_at(e.span, 54, 0, 0, 0)
+        }
+        (c, result)
     }
 
     fn check_generic_struct_lit(self, e: Expr, tmpl: StructInfo) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
@@ -29414,7 +29486,11 @@ impl Checker {
                 let pair = c.check_expr((*list).head.value)
                 c = pair.0
                 let init_ty = pair.1
-                if !checker_contextual_expr_compatible((*list).head.value, init_ty, field_ty) {
+                var field_init_ok = checker_contextual_expr_compatible((*list).head.value, init_ty, field_ty)
+                if is_epistemic_type(field_ty) && is_epistemic_type(init_ty) {
+                    field_init_ok = check_return_expr_knowledge_subsumes(c.ontology_items, init_ty, field_ty)
+                }
+                if !field_init_ok {
                     c = c.report_mismatch((*list).head.value.span, 16, field_ty, init_ty)
                 }
                 c.check_struct_field_inits_with_type((*list).tail, si)

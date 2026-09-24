@@ -195,7 +195,18 @@ pub fn knowledge_validity_expr_non_negative(opt: Option<Box<Expr>>) -> bool {
                 // effectively ALWAYS) bound instead of a type error.
                 return parse_iso_date_to_f64((*e).name) > 0.0
             }
-            true
+            // Any other expression shape (identifier, binary op, call, ...) is not a
+            // Valid(seconds)/ValidUntil(date) LITERAL and must be rejected here, not
+            // silently accepted as "true". knowledge_validity_expr_to_f64 has no idea
+            // how to evaluate an arbitrary expression and converts anything it does
+            // not recognize to 0.0 -- accepting it here let a nonliteral duration/
+            // until-time bound (e.g. `ValidUntil(deadline)` for an identifier
+            // `deadline`) silently become a required timestamp of 0, which every
+            // dated value satisfies. This check does NOT apply to ValidWhile(expr) --
+            // that condition is genuinely an arbitrary predicate, not a value to
+            // convert to f64; see knowledge_metadata_is_valid, which only calls this
+            // for the two kinds that actually require a numeric literal.
+            false
         }
         None => false
     }
@@ -203,36 +214,128 @@ pub fn knowledge_validity_expr_non_negative(opt: Option<Box<Expr>>) -> bool {
 
 pub fn knowledge_metadata_is_valid(validity_opt: Option<Box<ValidityCondition>>) -> bool {
     match validity_opt {
-        Some(vc) => knowledge_validity_expr_non_negative((*vc).expr)
+        Some(vc) => {
+            // ValidWhile(expr) predicates are arbitrary boolean expressions, not
+            // numeric literals -- knowledge_validity_expr_non_negative's literal-only
+            // rule does not apply to them (it exists to keep Valid(seconds) /
+            // ValidUntil(date) from silently accepting a nonliteral expression that
+            // knowledge_validity_expr_to_f64 would otherwise convert to 0.0).
+            if (*vc).kind == AstValidityKind::ValidWhileCond {
+                return true
+            }
+            knowledge_validity_expr_non_negative((*vc).expr)
+        }
         None => true
     }
 }
 
-// Derive a nonzero predicate-identity number for a ValidWhile(expr) condition
-// from the expression's source span. Two occurrences of "the same" predicate
-// (literally the same AST node, e.g. re-checked at two call sites against one
-// declared parameter) share a span and therefore an id; two DIFFERENT
-// predicate expressions -- even if textually similar -- get different spans
-// and therefore different ids. This is a conservative identity: it never
-// equates two distinct predicates, which is the soundness property
-// validity_subsumes needs, at the cost of not recognizing two syntactically
-// identical-but-separately-written predicates as "the same" (a real
-// structural/interned-expr hash would recognize that too, but this needs no
-// new interning infrastructure and cannot be unsound in the exploitable
-// direction). 0.0 is reserved for "unidentified" and never produced here
-// (start is always >= 0, and file_id is offset by a large constant so a
-// legitimate id can never collide with the 0.0 sentinel).
-fn validity_while_pred_id(opt: Option<Box<Expr>>) -> f64 {
+// Structural hash of a ValidWhile(expr) predicate, for canonical (not
+// occurrence/span) identity: two DIFFERENT AST nodes with the same shape and
+// content -- e.g. the same `ValidWhile(true)` annotation written once on a
+// parameter and again, separately, on that function's return type -- hash to
+// the SAME id, while two nodes with different shapes or content (even if one
+// is a subexpression of the other) hash differently with overwhelming
+// probability. Covers the expression shapes that actually occur in a
+// validity predicate position (literals, identifiers, binary/unary
+// comparisons, field access); anything else falls through to
+// STRUCT_HASH_UNKNOWN, a sentinel this function never mixes into a
+// recursive combination, so an unrecognized subexpression cannot make two
+// otherwise-different predicates collide, and validity_subsumes (which
+// rejects id 0.0 outright) never treats two unrecognized predicates as
+// equal to each other.
+const STRUCT_HASH_UNKNOWN: i64 = 0 - 1
+
+fn struct_hash_combine(seed: i64, part: i64) -> i64 {
+    // FNV-1a-shaped mix, kept in i64 (wrapping is fine -- this is an
+    // identity fingerprint, not a cryptographic hash).
+    (seed * 1000003) ^ part
+}
+
+fn struct_hash_expr(opt: Option<Box<Expr>>) -> i64 with Div {
     match opt {
+        None => 17
         Some(e) => {
-            let span = (*e).span
-            (1.0 + (span.file_id as f64)) * 1000000000.0 + (span.start as f64) * 100000.0 + (span.end as f64)
+            let ek = (*e).kind
+            if ek == ExprKind::ExprIntLit {
+                struct_hash_combine(101, (*e).int_val)
+            } else if ek == ExprKind::ExprFloatLit {
+                struct_hash_combine(102, (*e).float_val as i64)
+            } else if ek == ExprKind::ExprBoolTrue {
+                103
+            } else if ek == ExprKind::ExprBoolFalse {
+                104
+            } else if ek == ExprKind::ExprStringLit {
+                struct_hash_combine(105, ast_name_hash((*e).name))
+            } else if ek == ExprKind::ExprCharLit {
+                struct_hash_combine(106, (*e).int_val)
+            } else if ek == ExprKind::ExprIdent {
+                struct_hash_combine(107, ast_name_hash((*e).name))
+            } else if ek == ExprKind::ExprBinary {
+                let op_tag = binary_op_hash_tag((*e).bin_op)
+                let lh = struct_hash_expr((*e).left)
+                let rh = struct_hash_expr((*e).right)
+                struct_hash_combine(struct_hash_combine(struct_hash_combine(108, op_tag), lh), rh)
+            } else if ek == ExprKind::ExprUnary {
+                let op_tag = unary_op_hash_tag((*e).un_op)
+                let lh = struct_hash_expr((*e).left)
+                struct_hash_combine(struct_hash_combine(109, op_tag), lh)
+            } else if ek == ExprKind::ExprFieldAccess {
+                let base_h = struct_hash_expr((*e).left)
+                struct_hash_combine(struct_hash_combine(110, ast_name_hash((*e).name)), base_h)
+            } else {
+                STRUCT_HASH_UNKNOWN
+            }
         }
-        None => 0.0
     }
 }
 
-pub fn validity_from_ast(opt: Option<Box<ValidityCondition>>) -> Validity {
+// Distinct small tags per operator so `a + b` and `a - b` hash differently
+// even though both are ExprBinary with the same operand structure.
+fn binary_op_hash_tag(op: BinaryOp) -> i64 {
+    match op {
+        BinaryOp::OpAdd => 1
+        BinaryOp::OpSub => 2
+        BinaryOp::OpMul => 3
+        BinaryOp::OpDiv => 4
+        BinaryOp::OpRem => 5
+        BinaryOp::OpEq => 6
+        BinaryOp::OpNe => 7
+        BinaryOp::OpLt => 8
+        BinaryOp::OpLe => 9
+        BinaryOp::OpGt => 10
+        BinaryOp::OpGe => 11
+        BinaryOp::OpAnd => 12
+        BinaryOp::OpOr => 13
+        _ => 0 - 100
+    }
+}
+
+fn unary_op_hash_tag(op: UnaryOp) -> i64 {
+    match op {
+        UnaryOp::OpNeg => 1
+        UnaryOp::OpNot => 2
+        _ => 0 - 100
+    }
+}
+
+// Derive a canonical predicate-identity number for a ValidWhile(expr)
+// condition from the expression's STRUCTURE (see struct_hash_expr), not its
+// source occurrence. 0.0 is reserved for "not comparable" (an unrecognized
+// expression shape, or no expression at all) and is never produced for a
+// recognized shape, since validity_subsumes rejects id 0.0 outright rather
+// than treating two unidentified predicates as equal.
+fn validity_while_pred_id(opt: Option<Box<Expr>>) -> f64 with Div {
+    let h = struct_hash_expr(opt)
+    if h == STRUCT_HASH_UNKNOWN {
+        0.0
+    } else {
+        // Never let a legitimate structural hash land exactly on 0.0.
+        let hf = h as f64
+        if hf == 0.0 { 1.0 } else { hf }
+    }
+}
+
+pub fn validity_from_ast(opt: Option<Box<ValidityCondition>>) -> Validity with Div {
     match opt {
         Some(vc) => {
             let value = if knowledge_validity_expr_non_negative((*vc).expr) {
@@ -399,7 +502,7 @@ pub fn provenance_from_ast(opt: Option<Box<AstProvenanceKind>>) -> Provenance {
     }
 }
 
-pub fn knowledge_meta_from_type_info(info: KnowledgeTypeInfo) -> KnowledgeMeta {
+pub fn knowledge_meta_from_type_info(info: KnowledgeTypeInfo) -> KnowledgeMeta with Div {
     let base_eps = match info.epsilon {
         Some(eb) => (*eb).value
         None => -1.0
@@ -652,6 +755,22 @@ pub fn knowledge_meta_default(epsilon: f64) -> KnowledgeMeta {
 
 // Create metadata from type entry
 // Extracts epsilon from Knowledge types, uses defaults otherwise
+// Reconstruct a Validity from a TypeEntry's persisted knowledge_validity_kind/
+// value payload. Shared by knowledge_meta_from_ty and knowledge_binary_result
+// (see the latter for why a binary result must NOT just fall through to
+// validity_always() when it hasn't set these fields).
+pub fn validity_from_type_entry(ty: TypeEntry) -> Validity {
+    if ty.knowledge_validity_kind == VALIDITY_KIND_DURATION {
+        validity_duration(ty.knowledge_validity_value)
+    } else if ty.knowledge_validity_kind == VALIDITY_KIND_UNTIL_TIME {
+        validity_until(ty.knowledge_validity_value)
+    } else if ty.knowledge_validity_kind == VALIDITY_KIND_WHILE_COND {
+        validity_while_pred(ty.knowledge_validity_value)
+    } else {
+        validity_always()
+    }
+}
+
 pub fn knowledge_meta_from_ty(ty: TypeEntry) -> KnowledgeMeta with Mut, Panic, Div, Alloc {
     match ty.kind {
         TypeKind::TyKnowledge => {
@@ -660,15 +779,7 @@ pub fn knowledge_meta_from_ty(ty: TypeEntry) -> KnowledgeMeta with Mut, Panic, D
             // DERIVED. -1 (absent: intrinsics, binary results) maps to
             // DERIVED — which is what a computed value honestly is.
             let prov_kind = if ty.knowledge_provenance_kind >= 0 { ty.knowledge_provenance_kind } else { PROVENANCE_KIND_DERIVED }
-            let val_obj = if ty.knowledge_validity_kind == VALIDITY_KIND_DURATION {
-                validity_duration(ty.knowledge_validity_value)
-            } else if ty.knowledge_validity_kind == VALIDITY_KIND_UNTIL_TIME {
-                validity_until(ty.knowledge_validity_value)
-            } else if ty.knowledge_validity_kind == VALIDITY_KIND_WHILE_COND {
-                validity_while_pred(ty.knowledge_validity_value)
-            } else {
-                validity_always()
-            }
+            let val_obj = validity_from_type_entry(ty)
             KnowledgeMeta {
                 epsilon: eps,
                 validity: val_obj,
@@ -1071,6 +1182,28 @@ pub fn knowledge_binary_result(op: BinaryOp, left_ty: TypeEntry, right_ty: TypeE
                 // For arithmetic operations, result is Knowledge with combined epsilon
                 // Inner type is the same as input inner types (assuming they match)
                 var result = ty_knowledge(left_inner, result_epsilon)
+                // Propagate validity CONSERVATIVELY: intersect (take the more
+                // restrictive of) the operands' validity windows instead of leaving
+                // the result at ty_knowledge's default (knowledge_validity_kind = -1,
+                // which knowledge_meta_from_ty reads as ALWAYS -- the WEAKEST/most
+                // permissive validity). Without this, `x - x` on an
+                // x: Knowledge<T, Valid(10), _> silently became ALWAYS-valid and
+                // could pass a Valid(30) return/argument check the actual operand
+                // never satisfied. A non-Knowledge operand (a bare literal/constant)
+                // contributes validity_always() -- it never expires on its own, so it
+                // is the identity element for the intersection, same as noise_set_id's
+                // empty-set treatment above.
+                let left_validity = if left_is_knowledge { validity_from_type_entry(left_ty) } else { validity_always() }
+                let right_validity = if right_is_knowledge { validity_from_type_entry(right_ty) } else { validity_always() }
+                let result_validity = validity_intersect(left_validity, right_validity)
+                result.knowledge_validity_kind = result_validity.kind
+                result.knowledge_validity_value = if result_validity.kind == VALIDITY_KIND_DURATION {
+                    result_validity.duration_sec
+                } else if result_validity.kind == VALIDITY_KIND_WHILE_COND {
+                    result_validity.pred_id
+                } else {
+                    result_validity.until_timestamp
+                }
                 // N2 (REQ-3): union the two operands' noise-symbol sets. A
                 // non-Knowledge operand (e.g. a plain literal added to a
                 // measured value) contributes the empty set -- it carries no
