@@ -7895,15 +7895,34 @@ fn load_multimodule_ir_to_box_traced(main_path: string, trace: &! LoadMultimodul
     // Copilot review (PR #2516): the no-use and single-import branches below
     // both reach body lowering through load_multimodule_lower_program_traced
     // -> lower_program_bodies_from_summary_flat_with_epistemic_ref ->
-    // lower_program_bodies_ref, none of which reset or populated
-    // LOWER_FN_TUPLE_ARR_* on this entry point. Reset + collect once here,
-    // before either branch runs, per the "once per compilation, before
-    // collecting modules" contract at lower_fn_tuple_arr_reset's declaration
-    // -- otherwise a second compile in the same process could see the first
-    // compile's masks leak forward, and this compile's own tuple-array
-    // f64 slots would stay unclassified.
+    // lower_program_bodies_ref, none of which reset LOWER_FN_TUPLE_ARR_* on
+    // this entry point. Reset once here, before either branch runs, per the
+    // "once per compilation, before collecting modules" contract at
+    // lower_fn_tuple_arr_reset's declaration -- otherwise a second compile
+    // in the same process could see the first compile's masks leak forward.
+    //
+    // Copilot review (PR #2516), round 11 finding 1: this used to ALSO
+    // collect right here, from main_prog.items -- but at this point in the
+    // function that is the RAW, pre-specialization item list; both
+    // single-module branches below reassign main_prog.items =
+    // specialize_generics(main_prog.items) immediately afterward, and the
+    // multi-module branch further down never uses this collection at all
+    // (it lowers a separately-merged/specialized item list via
+    // module_frontend_lower_specialized_items_box, which does its own
+    // reset and relies on body lowering to self-collect). Collecting the
+    // RAW list here meant every unused generic template that
+    // spec_finalize_items later drops as dead code still got a
+    // LOWER_FN_TUPLE_ARR_* entry -- wasting capacity (up to the 16384 cap)
+    // on functions that never exist post-specialization, which could push
+    // out real live functions once the table filled up: the same capacity-
+    // truncation class of bug fixed at the other preregistration sites.
+    // lower_program_bodies_ref already collects the FINAL (specialized)
+    // item list on its own, through lowerer_fo_preregister_pure_fns_
+    // multipass_mut -- called from load_multimodule_lower_program_traced
+    // for both single-module branches below -- so this raw-list collection
+    // was redundant as well as wasteful. Removed; the reset above is
+    // retained (still correct and required at this compile boundary).
     lower_fn_tuple_arr_reset()
-    lower_fn_tuple_f64_arrays_collect(&main_prog.items)
 
     if !module_frontend_file_maybe_has_use(main_path) {
         trace.resolved_modules = 1

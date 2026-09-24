@@ -17346,6 +17346,26 @@ impl Lowerer {
     // needed for tuple-literal slots like `(obj.mk_arr(), 0)` where the slot
     // itself is a single [f64; N] array, not a tuple.
     fn expr_result_is_f64_array_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        // Copilot review (PR #2516), round 11 finding 2: round 10's
+        // ExprIf/ExprMatch/ExprBlock propagation below recurses into each
+        // arm/block-tail through THIS function, but this function only ever
+        // recognised ExprMethodCall/ExprCall results -- so `(if cond { xs }
+        // else { ys }, 0)`, where each arm's tail is just an already-known
+        // f64-array LOCAL (ExprIdent), or `(if cond { [x; 2] } else { ys },
+        // 0)`, where an arm is a direct array literal, both fell through to
+        // `false` for that arm. tuple_lit_slot_is_f64_array_ref already
+        // classifies exactly these two forms at its own top level (array
+        // literal via array_literal_elems_are_float_ref, ExprIdent via
+        // lookup_local_array_elem_float) -- checking them here too, before
+        // the call/method-call/control-flow arms below, means a recursive
+        // call from a block tail sees the same answer a top-level slot
+        // would.
+        if self.array_literal_elems_are_float_ref(e) {
+            return true
+        }
+        if (*e).kind == ExprKind::ExprIdent {
+            return self.lookup_local_array_elem_float((*e).name)
+        }
         if (*e).kind == ExprKind::ExprMethodCall {
             let recv_type = self.lower_method_recv_type(&(*e).left)
             let call_name = if recv_type.len > 0 {
