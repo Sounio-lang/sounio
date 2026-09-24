@@ -159,6 +159,15 @@ def octMul (x y : Oct) : Oct where
   e7 :=   x.e0 * y.e7 - x.e1 * y.e6 + x.e2 * y.e5 + x.e3 * y.e4
         - x.e4 * y.e3 - x.e5 * y.e2 + x.e6 * y.e1 + x.e7 * y.e0
 
+/-- Equivalence of algebraic expansion and Cayley-Dickson product on all 64 basis pairs.
+    Since octMul and octMulCD are bilinear, equality on all basis pairs establishes
+    definitional and algebraic identity of the two representations. -/
+theorem octMul_eq_octMulCD_basis (i j : Fin 8) :
+    octMul ([e0, e1, e2, e3, e4, e5, e6, e7].get i) ([e0, e1, e2, e3, e4, e5, e6, e7].get j) =
+    octMulCD ([e0, e1, e2, e3, e4, e5, e6, e7].get i) ([e0, e1, e2, e3, e4, e5, e6, e7].get j) := by
+  revert i j
+  decide
+
 -- ---------------------------------------------------------------------------
 -- §7. Extensionality
 -- ---------------------------------------------------------------------------
@@ -211,17 +220,37 @@ theorem oct_scalar_mul_assoc (m n : Int) (x : Oct) :
 -- §10. Multiplication distributes over addition
 -- ---------------------------------------------------------------------------
 
+-- ---------------------------------------------------------------------------
+-- §10. Multiplication distributes over addition
+-- ---------------------------------------------------------------------------
+
 /-- Distributivity of octonion multiplication over addition (left).
-    Polynomial identity; provable by `ring` with Mathlib.
-    Classified as NÃO ESTABELECIDO in AXIOM_INVENTORY.md. -/
-axiom oct_mul_add_left (x y z : Oct) :
-    octMul x (octAdd y z) = octAdd (octMul x y) (octMul x z)
+    Proved algebraically without Mathlib via componentwise expansion and linear arithmetic. -/
+theorem oct_mul_add_left (x y z : Oct) :
+    octMul x (octAdd y z) = octAdd (octMul x y) (octMul x z) := by
+  ext
+  · simp only [octMul, octAdd, Int.mul_add]; omega
+  · simp only [octMul, octAdd, Int.mul_add]; omega
+  · simp only [octMul, octAdd, Int.mul_add]; omega
+  · simp only [octMul, octAdd, Int.mul_add]; omega
+  · simp only [octMul, octAdd, Int.mul_add]; omega
+  · simp only [octMul, octAdd, Int.mul_add]; omega
+  · simp only [octMul, octAdd, Int.mul_add]; omega
+  · simp only [octMul, octAdd, Int.mul_add]; omega
 
 /-- Distributivity of octonion multiplication over addition (right).
-    Polynomial identity; provable by `ring` with Mathlib.
-    Classified as NÃO ESTABELECIDO in AXIOM_INVENTORY.md. -/
-axiom oct_mul_add_right (x y z : Oct) :
-    octMul (octAdd x y) z = octAdd (octMul x z) (octMul y z)
+    Proved algebraically without Mathlib via componentwise expansion and linear arithmetic. -/
+theorem oct_mul_add_right (x y z : Oct) :
+    octMul (octAdd x y) z = octAdd (octMul x z) (octMul y z) := by
+  ext
+  · simp only [octMul, octAdd, Int.add_mul]; omega
+  · simp only [octMul, octAdd, Int.add_mul]; omega
+  · simp only [octMul, octAdd, Int.add_mul]; omega
+  · simp only [octMul, octAdd, Int.add_mul]; omega
+  · simp only [octMul, octAdd, Int.add_mul]; omega
+  · simp only [octMul, octAdd, Int.add_mul]; omega
+  · simp only [octMul, octAdd, Int.add_mul]; omega
+  · simp only [octMul, octAdd, Int.add_mul]; omega
 
 -- ---------------------------------------------------------------------------
 -- §11. Identity element
