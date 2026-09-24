@@ -549,7 +549,7 @@ pub fn lower_note_error(site: i64, n: Name) with Mut {
 }
 var IR_LOWER_HARD_ERROR_LIMIT: i64 = 0
 
-pub fn lower_hard_error_pending() -> bool { IR_LOWER_HARD_ERROR != 0 || LOWER_USE_MODULE_OVERFLOWED }
+pub fn lower_hard_error_pending() -> bool { IR_LOWER_HARD_ERROR != 0 || LOWER_USE_MODULE_OVERFLOWED || LOWER_IMPL_METHOD_OVERFLOWED }
 
 // Print what the flag knows, or say plainly that it knows nothing — never
 // silence. Called by the consumers that used to print a bare "ir_summary_failed".
@@ -624,6 +624,14 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
         print("         silently -- reported here because the transient hard-error state may\n")
         print("         have been reset by a later module's lowerer_new().\n")
     }
+    if LOWER_IMPL_METHOD_OVERFLOWED {
+        print("  cause: more than 4096 distinct mangled impl-method names in this compilation;\n")
+        print("         the impl-method registry (LOWER_IMPL_METHOD_HASH) dropped the rest. A\n")
+        print("         lowercase-typed method past this point can lose its \"this is a real\n")
+        print("         method\" evidence and be stripped to a bare free-fn name -- reported here\n")
+        print("         because the transient hard-error state may have been reset by a later\n")
+        print("         module's lowerer_new().\n")
+    }
     if IR_LOWER_HARD_ERROR == 0 {
         return
     }
@@ -638,6 +646,13 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
         print("         qualified-call registry (LOWER_USE_MODULE_HASH) dropped the rest.\n")
         print("         Any `mod::f(..)` naming a module past this point falls back to the\n")
         print("         mangled `mod_f` stub this gate exists to prevent, silently.\n")
+    } else if IR_LOWER_HARD_ERROR_REASON == 4 {
+        print("  cause: more than ")
+        print_int(IR_LOWER_HARD_ERROR_LIMIT)
+        print(" distinct mangled impl-method names in this compilation; the impl-method\n")
+        print("         registry (LOWER_IMPL_METHOD_HASH) dropped the rest. A lowercase-typed\n")
+        print("         method past this point can lose its \"this is a real method\" evidence\n")
+        print("         and be stripped to a bare free-fn name, silently.\n")
     } else if IR_LOWER_HARD_ERROR_NEEDED > 0 {
         print("  cause: function `")
         ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
@@ -673,7 +688,7 @@ pub fn lower_hard_error_reset() with Mut {
 // success on a module-registry overflow that IR_LOWER_HARD_ERROR alone
 // cannot see, since lowerer_new() resets it per module while the overflow
 // flag is deliberately durable across that reset.
-pub fn lower_had_error_with_hard(v: bool) -> bool { v || IR_LOWER_HARD_ERROR != 0 || LOWER_USE_MODULE_OVERFLOWED }
+pub fn lower_had_error_with_hard(v: bool) -> bool { v || IR_LOWER_HARD_ERROR != 0 || LOWER_USE_MODULE_OVERFLOWED || LOWER_IMPL_METHOD_OVERFLOWED }
 fn lower_ok_without_hard(v: bool) -> bool { !lower_had_error_with_hard(v) }
 var FO_XFER_COUNT: i64 = 0
 var FO_XFER_KIND: [i64; 64] = [0; 64]
@@ -794,6 +809,7 @@ pub fn lower_use_module_reset() with Mut {
     LOWER_USE_MODULE_COUNT = 0
     LOWER_USE_MODULE_OVERFLOWED = false
     LOWER_IMPL_METHOD_COUNT = 0
+    LOWER_IMPL_METHOD_OVERFLOWED = false
 }
 // fo_name_hash is a djb2 variant with real collisions (e.g. "aar" and "ac0"
 // both hash to 193485948) and only hashes a name's first 64 bytes -- but hash
@@ -7605,6 +7621,23 @@ var LOWER_IMPL_METHOD_COUNT: i64 = 0
 var LOWER_IMPL_METHOD_HASH: [i64; 4096] = [0; 4096]
 var LOWER_IMPL_METHOD_LEN: [i64; 4096] = [0; 4096]
 var LOWER_IMPL_METHOD_BUF: [i8; 1572864] = [0; 1572864]
+// Review comment 4089532660 (round 3, finding B): unlike LOWER_USE_MODULE_
+// OVERFLOWED (this registry's sibling, declared near line 793), overflow
+// here used to silently continue instead of refusing. That is NOT a safe
+// best-effort fallback: this registry is what lets callee_path_module_
+// stripped_name tell a real lowercase-typed impl method apart from an
+// unrelated top-level free fn that collides with the mangled name (round 1
+// finding B). A dropped entry past capacity means a later `Type_method`
+// entry silently loses its "this really is a method" evidence, and
+// callee_path_module_stripped_name can strip it to the bare method name --
+// a wrong call or a body-less stub, the exact failure class this whole PR
+// exists to fix. Like LOWER_USE_MODULE_OVERFLOWED, this is cleared by
+// lower_use_module_reset() (the once-per-whole-compile top-level boundary)
+// but NOT by lower_hard_error_reset() (called per loaded module via
+// lowerer_new(), mid-compile) -- durable across the latter so the
+// transient IR_LOWER_HARD_ERROR state it also sets cannot be silently lost
+// to a later module's reset before a barrier site ever reports it.
+var LOWER_IMPL_METHOD_OVERFLOWED: bool = false
 
 pub fn lower_impl_method_known(n: Name) -> bool with Mut, Panic, Div {
     if n.len <= 0 || n.len > LOWER_IMPL_METHOD_SEG_MAX {
@@ -7639,11 +7672,21 @@ fn lower_impl_method_note(n: Name) with Mut, Panic, Div {
     if lower_impl_method_known(n) {
         return
     }
-    // Best-effort: an overflow here only widens the set of two-segment
-    // lowercase-rooted paths callee_path_module_stripped_name treats as
-    // module-qualified free-fn calls rather than lowercase-type methods,
-    // which is the existing (safe, positive-evidence) fallback behavior.
     if LOWER_IMPL_METHOD_COUNT >= 4096 {
+        // Refuse (review comment 4089532660 / finding B), matching
+        // lower_use_module_note's own overflow refusal just above in this
+        // file: silently continuing here would let a later real impl
+        // method's mangled name get treated as "not a method" (no
+        // registry evidence for it), and callee_path_module_stripped_name
+        // strip it to a bare free-fn name -- a wrong call or a body-less
+        // stub. The durable flag survives lower_hard_error_reset() the same
+        // way LOWER_USE_MODULE_OVERFLOWED does.
+        LOWER_IMPL_METHOD_OVERFLOWED = true
+        if IR_LOWER_HARD_ERROR == 0 {
+            IR_LOWER_HARD_ERROR = 1
+            IR_LOWER_HARD_ERROR_REASON = 4
+            IR_LOWER_HARD_ERROR_LIMIT = 4096
+        }
         return
     }
     let idx = LOWER_IMPL_METHOD_COUNT

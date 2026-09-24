@@ -4659,6 +4659,22 @@ var CHECKER_USE_MODULE_COUNT: i64 = 0
 var CHECKER_USE_MODULE_HASH: [i64; 1024] = [0; 1024]
 var CHECKER_USE_MODULE_LEN: [i64; 1024] = [0; 1024]
 var CHECKER_USE_MODULE_BUF: [i8; 393216] = [0; 393216]
+// Review comment 4089532579 (round 3, finding A): silently dropping an entry
+// past capacity here fails OPEN, not closed. A `souc check`-only caller never
+// runs the lowerer's own overflow refusal (IR_LOWER_HARD_ERROR), so once this
+// registry fills, a later real module's qualified calls fall back to
+// checker_path_qualifier_all_modules_known returning false -- direct_sig_id
+// stays negative, only W044 (a warning) fires, and `check` can report success
+// on a call whose argument/effect/visibility checks never ran. Durable across
+// checker_use_module_reset() (mirrors LOWER_USE_MODULE_OVERFLOWED's own
+// "survive the next reset" contract) so a later reset cannot quietly clear
+// evidence that this compile already under-checked something.
+var CHECKER_USE_MODULE_OVERFLOWED: bool = false
+// Guards checker_report_use_module_overflow_inplace to at most one diagnostic
+// per compile (re-printing at every subsequent `use` item once the registry
+// is already full would just be noise). A plain global, not a Checker field,
+// so no struct-literal construction site of Checker needs updating.
+var CHECKER_USE_MODULE_OVERFLOW_REPORTED: bool = false
 
 fn checker_use_module_reset() with Mut {
     CHECKER_USE_MODULE_COUNT = 0
@@ -4703,6 +4719,7 @@ fn checker_use_module_note(n: Name) with Mut, Panic, Div {
         return
     }
     if CHECKER_USE_MODULE_COUNT >= 1024 {
+        CHECKER_USE_MODULE_OVERFLOWED = true
         return
     }
     let idx = CHECKER_USE_MODULE_COUNT
@@ -4790,6 +4807,34 @@ fn checker_collect_use_item_inplace(c: *mut Checker, item: Item) with Mut, Panic
     }
     checker_collect_known_module_backing_imports_inplace(c, item.use_path)
     checker_use_module_note_path(item.use_path)
+    if CHECKER_USE_MODULE_OVERFLOWED {
+        checker_report_use_module_overflow_inplace(c, item.span)
+    }
+}
+
+// Review comment 4089532579 (round 3, finding A): propagate
+// CHECKER_USE_MODULE_OVERFLOWED as a hard checker error instead of letting it
+// only degrade later W044 handling silently. Reported at most once per
+// module-registration site that observes it (CHECKER_USE_MODULE_OVERFLOWED
+// itself stays set/durable, matching the lowerer's own overflow flag, so a
+// later reset within the same compile cannot un-flag an already-broken
+// registry -- but re-printing the same diagnostic at every subsequent `use`
+// item once the registry is already full would just be noise).
+fn checker_report_use_module_overflow_inplace(c: *mut Checker, span: Span) with Mut, IO, Panic, Div, Alloc {
+    if CHECKER_USE_MODULE_OVERFLOW_REPORTED {
+        return
+    }
+    CHECKER_USE_MODULE_OVERFLOW_REPORTED = true
+    (*c).error_count = (*c).error_count + 1
+    (*c).had_error = true
+    print("error[E-USE-MOD-CAP] at ")
+    print_int(span.start)
+    print("..")
+    print_int(span.end)
+    print(": module-qualified-call registry is full (1024 distinct lowercase `use` segments)\n")
+    print("   = note: later module-qualified calls cannot be fully checked (argument/effect/")
+    print("visibility checks are skipped, only an unresolved-path warning fires) -- refusing")
+    print(" rather than silently under-checking the rest of this compile\n")
 }
 
 fn checker_collect_runtime_builtins_inplace(c: *mut Checker) with Mut, Panic, Div {
