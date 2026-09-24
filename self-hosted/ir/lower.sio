@@ -815,6 +815,23 @@ var LOWER_FN_TUPLE_ARR_HASH: [i64; 16384] = [0; 16384]
 var LOWER_FN_TUPLE_ARR_HASH2: [i64; 16384] = [0; 16384]
 var LOWER_FN_TUPLE_ARR_MASK: [i64; 16384] = [0; 16384]
 
+// Copilot review (PR #2516): lookup used to be a linear scan over up to
+// IR_MAX_FUNCS dense entries, and every insertion during collection ALSO
+// does a lookup (to dedup), making full collection O(n^2) -- about 134M
+// comparisons at capacity, and worse when a caller collected the same list
+// twice (since fixed separately in this same round). This open-addressing
+// index mirrors self-hosted/intern.sio's StringInterner.hash_table exactly
+// (DJB2-family hash, linear probing, sized well above the dense capacity to
+// keep load factor low, -1 = empty sentinel): LOWER_FN_TUPLE_ARR_SLOT maps a
+// hash-derived bucket to the DENSE index in HASH/HASH2/MASK above, turning
+// both lookup and the insert-time dedup check into O(1) amortized instead of
+// O(n). Sized to 2x IR_MAX_FUNCS (32768, a power of two so `& (SIZE-1)` can
+// replace `%`) for a <=0.5 load factor at full capacity, same margin the
+// interner uses (INTERN_HASH_TABLE_SIZE = 2x INTERN_MAX_STRINGS).
+let LOWER_FN_TUPLE_ARR_SLOT_SIZE: i64 = 32768
+let LOWER_FN_TUPLE_ARR_SLOT_MASK: i64 = 32767
+var LOWER_FN_TUPLE_ARR_SLOT: [i64; 32768] = [-1; 32768]
+
 // The table above is a global, process-lifetime side table with no per-entry
 // invalidation: line ~807 refuses to overwrite an existing nonzero mask for a
 // name, and nothing removes an entry for a function that stops returning an
@@ -827,6 +844,17 @@ var LOWER_FN_TUPLE_ARR_MASK: [i64; 16384] = [0; 16384]
 // compilation.
 pub fn lower_fn_tuple_arr_reset() with Mut {
     LOWER_FN_TUPLE_ARR_COUNT = 0
+    // Clear the open-addressing index too, not just the dense count: a stale
+    // LOWER_FN_TUPLE_ARR_SLOT entry points at a dense index that a later
+    // collect() in the SAME process (after this reset) will overwrite with a
+    // DIFFERENT name's hash/hash2/mask, and leaving the slot occupied would
+    // both mask new insertions behind it during probing and let old,
+    // uncleared entries answer lookups with recycled-but-stale data.
+    var i: i64 = 0
+    while i < LOWER_FN_TUPLE_ARR_SLOT_SIZE {
+        LOWER_FN_TUPLE_ARR_SLOT[i as usize] = -1
+        i = i + 1
+    }
 }
 
 // Cap at 32 slots (bit < 32), matching the scalar f64 tuple mask's own cap
@@ -863,20 +891,48 @@ fn lower_type_list_f64_array_mask(opt: &Option<Box<TypeExprList>>, bit: i64) -> 
 // stored Name + ir_name_eq (the natural choice, mirroring
 // lowerer_lookup_fn_id_by_name_ref, but it triggered a reproducible miscompile
 // specific to this self-hosted toolchain when tried here).
+//
+// Copilot review (PR #2516), performance finding: this used to be a linear
+// scan over LOWER_FN_TUPLE_ARR_COUNT dense entries, and the insert-time dedup
+// check called it too, making full collection O(n^2) (~134M comparisons at
+// IR_MAX_FUNCS capacity). Both the lookup here and the insert dedup check in
+// lower_fn_tuple_f64_arrays_collect_one now go through
+// lower_fn_tuple_arr_slot_find, an open-addressed index lookup (see
+// LOWER_FN_TUPLE_ARR_SLOT's declaration) -- O(1) amortized instead of O(n).
 fn lower_fn_tuple_f64_array_mask(name: Name) -> i64 with Mut, Panic, Div {
     if name.len <= 0 {
         return 0
     }
-    let h = fo_name_hash(name)
-    let h2 = fo_name_hash2(name)
-    var i: i64 = 0
-    while i < LOWER_FN_TUPLE_ARR_COUNT {
-        if LOWER_FN_TUPLE_ARR_HASH[i as usize] == h && LOWER_FN_TUPLE_ARR_HASH2[i as usize] == h2 {
-            return LOWER_FN_TUPLE_ARR_MASK[i as usize]
-        }
-        i = i + 1
+    let idx = lower_fn_tuple_arr_slot_find(fo_name_hash(name), fo_name_hash2(name))
+    if idx < 0 {
+        return 0
     }
-    0
+    LOWER_FN_TUPLE_ARR_MASK[idx as usize]
+}
+
+// Open-addressed index lookup shared by lower_fn_tuple_f64_array_mask (query)
+// and lower_fn_tuple_f64_arrays_collect_one (insert-time dedup check): probes
+// LOWER_FN_TUPLE_ARR_SLOT from the primary hash's bucket, verifying BOTH
+// hashes (not just the bucket hash) against the dense entry each occupied
+// slot points at, same collision-safety contract as before -- just O(1)
+// amortized via linear probing (mirrors self-hosted/intern.sio's
+// StringInterner hash table) instead of an O(n) scan. Returns the dense
+// index into LOWER_FN_TUPLE_ARR_HASH/HASH2/MASK, or -1 if not present.
+fn lower_fn_tuple_arr_slot_find(h: i64, h2: i64) -> i64 with Mut, Panic, Div {
+    var slot = h & LOWER_FN_TUPLE_ARR_SLOT_MASK
+    var probes: i64 = 0
+    while probes < LOWER_FN_TUPLE_ARR_SLOT_SIZE {
+        let idx = LOWER_FN_TUPLE_ARR_SLOT[slot as usize]
+        if idx < 0 {
+            return -1
+        }
+        if LOWER_FN_TUPLE_ARR_HASH[idx as usize] == h && LOWER_FN_TUPLE_ARR_HASH2[idx as usize] == h2 {
+            return idx
+        }
+        slot = (slot + 1) & LOWER_FN_TUPLE_ARR_SLOT_MASK
+        probes = probes + 1
+    }
+    -1
 }
 
 // Shared by both the top-level free-fn walk below and the ItemImpl method
@@ -899,11 +955,32 @@ fn lower_fn_tuple_f64_arrays_collect_one(name: Name, fd_opt_ref: &Option<Box<FnD
                         // declare (ir.sio:20 clamps fn_count there too), so this
                         // guard is a defensive bound rather than a real truncation
                         // point -- see the LOWER_FN_TUPLE_ARR_COUNT declaration.
-                        if mask != 0 && LOWER_FN_TUPLE_ARR_COUNT < IR_MAX_FUNCS && lower_fn_tuple_f64_array_mask(name) == 0 {
-                            LOWER_FN_TUPLE_ARR_HASH[LOWER_FN_TUPLE_ARR_COUNT as usize] = fo_name_hash(name)
-                            LOWER_FN_TUPLE_ARR_HASH2[LOWER_FN_TUPLE_ARR_COUNT as usize] = fo_name_hash2(name)
-                            LOWER_FN_TUPLE_ARR_MASK[LOWER_FN_TUPLE_ARR_COUNT as usize] = mask
-                            LOWER_FN_TUPLE_ARR_COUNT = LOWER_FN_TUPLE_ARR_COUNT + 1
+                        if mask != 0 && LOWER_FN_TUPLE_ARR_COUNT < IR_MAX_FUNCS {
+                            let h = fo_name_hash(name)
+                            let h2 = fo_name_hash2(name)
+                            if lower_fn_tuple_arr_slot_find(h, h2) < 0 {
+                                let idx = LOWER_FN_TUPLE_ARR_COUNT
+                                LOWER_FN_TUPLE_ARR_HASH[idx as usize] = h
+                                LOWER_FN_TUPLE_ARR_HASH2[idx as usize] = h2
+                                LOWER_FN_TUPLE_ARR_MASK[idx as usize] = mask
+                                LOWER_FN_TUPLE_ARR_COUNT = idx + 1
+                                // Insert into the open-addressed index: probe from
+                                // the primary hash's bucket to the first empty slot
+                                // (guaranteed to exist -- load factor stays <= 0.5
+                                // at IR_MAX_FUNCS entries against a 2x-sized table).
+                                var slot = h & LOWER_FN_TUPLE_ARR_SLOT_MASK
+                                var placed = false
+                                var probes: i64 = 0
+                                while !placed && probes < LOWER_FN_TUPLE_ARR_SLOT_SIZE {
+                                    if LOWER_FN_TUPLE_ARR_SLOT[slot as usize] < 0 {
+                                        LOWER_FN_TUPLE_ARR_SLOT[slot as usize] = idx
+                                        placed = true
+                                    } else {
+                                        slot = (slot + 1) & LOWER_FN_TUPLE_ARR_SLOT_MASK
+                                        probes = probes + 1
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -5711,7 +5788,14 @@ fn lowerer_fo_preregister_pure_fns_multipass_mut(
 pub fn fo_preregister_program_items_multipass(
     items: &Option<Box<ItemList>>
 ) with Mut, Panic, Div, Alloc, IO {
-    lower_fn_tuple_f64_arrays_collect(items)
+    // Copilot review (PR #2516): lowerer_fo_preregister_pure_fns_multipass_mut
+    // (below) now collects the tuple-array table itself, so this call used to
+    // collect the SAME item list a second time immediately before delegating
+    // -- doubling the O(n) collection pass for every caller of this public
+    // wrapper. Removed; the collector's own dedup guard made this redundant
+    // rather than wrong, but redundant collection over up to IR_MAX_FUNCS
+    // items is exactly the pathological-compile-time risk this review round
+    // flagged.
     var lo = lowerer_new()
     lowerer_fo_preregister_pure_fns_multipass_mut(&! lo, items)
 }
@@ -5722,7 +5806,9 @@ fn lowerer_lower_program_items_mut(
 ) with Mut, Panic, Div, Alloc, IO {
     fo_xfer_global_reset()
     lower_fn_tuple_arr_reset()
-    lower_fn_tuple_f64_arrays_collect(&items)
+    // Copilot review (PR #2516): same duplicate-collection removal as
+    // fo_preregister_program_items_multipass above -- multipass_mut collects
+    // this exact item list itself now.
     // Pre-register FO transfers so reverse-order pure helpers expand nested calls.
     lowerer_fo_preregister_pure_fns_multipass_mut(lo, &items)
     var current = items
@@ -15685,7 +15771,10 @@ impl Lowerer {
         // took effect when an earlier, unrelated module-frontend preflight happened
         // to populate the table as a side effect first.
         lower_fn_tuple_arr_reset()
-        lower_fn_tuple_f64_arrays_collect(items)
+        // Copilot review (PR #2516): removed the explicit collect() call that
+        // used to be here -- lowerer_fo_preregister_pure_fns_multipass_mut
+        // (below) collects this same item list itself now, so this was a
+        // redundant second O(n) pass over up to IR_MAX_FUNCS items.
         var lo = self
         lowerer_fo_preregister_pure_fns_multipass_mut(&! lo, items)
         var current = items
@@ -17179,7 +17268,27 @@ impl Lowerer {
     // (returns_float == 2, set by lower_opt_return_float_code). Used so `let r = mk()`
     // flags `r` as a float-element local — otherwise `r[i]` reads classify as integer
     // and get cvtsi2sd-corrupted in arithmetic/comparisons.
+    //
+    // Copilot review (PR #2516), finding C: also handles ExprMethodCall
+    // (`obj.mk_arr()`), resolving the mangled impl-method name the same way
+    // expr_result_tuple_arr_mask_ref's ExprMethodCall branch does, so a
+    // plain (non-tuple) f64-array-returning method is recognised here too --
+    // needed for tuple-literal slots like `(obj.mk_arr(), 0)` where the slot
+    // itself is a single [f64; N] array, not a tuple.
     fn expr_result_is_f64_array_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprMethodCall {
+            let recv_type = self.lower_method_recv_type(&(*e).left)
+            let call_name = if recv_type.len > 0 {
+                ir_mangle_method_name(recv_type, (*e).name)
+            } else {
+                (*e).name
+            }
+            let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, call_name)
+            if fn_id >= 0 && fn_id < self.module.fn_count {
+                return ir_fn_get(&(*self.module), fn_id as usize).returns_float == 2
+            }
+            return false
+        }
         if (*e).kind != ExprKind::ExprCall {
             return false
         }
@@ -17248,19 +17357,41 @@ impl Lowerer {
         }
     }
 
+    // Copilot review (PR #2516), finding C: a tuple LITERAL's slot is an f64
+    // array not only when the slot expression IS an array literal
+    // (array_literal_elems_are_float_ref), but also when it's an ExprIdent
+    // referring to a local already known to hold one (`let xs = mk_arr();
+    // (xs, 0)`), or an ExprCall/ExprMethodCall whose OWN return type is a
+    // plain [f64; N] array (`(mk_arr(), 0)` -- note mk_arr returns a single
+    // array here, not a tuple, so this is the SCALAR array-return check
+    // (expr_result_is_f64_array_ref), not the tuple-slot mask machinery).
+    // Without this, both forms fell through to `false` and `a[0]` on the
+    // destructured slot took the integer path.
+    fn tuple_lit_slot_is_f64_array_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if self.array_literal_elems_are_float_ref(e) {
+            return true
+        }
+        if (*e).kind == ExprKind::ExprIdent {
+            return self.lookup_local_array_elem_float((*e).name)
+        }
+        if (*e).kind == ExprKind::ExprCall || (*e).kind == ExprKind::ExprMethodCall {
+            return self.expr_result_is_f64_array_ref(e)
+        }
+        false
+    }
+
     // Element-wise counterpart of expr_list_tuple_float_mask_ref for a tuple
     // LITERAL's f64-ARRAY slots: `let (a, b) = ([x; 2], [y; 2])` has no callee
     // return type to consult (there is no function here), so each slot's mask
-    // bit is derived directly from its own sub-expression via the same
-    // per-element classifier array literals use elsewhere
-    // (array_literal_elems_are_float_ref, which itself covers both `[x, y]`
-    // and `[x; N]` shapes and is local-aware).
+    // bit is derived directly from its own sub-expression via
+    // tuple_lit_slot_is_f64_array_ref above (array literals, f64-array
+    // locals, and f64-array-returning calls/method calls).
     fn expr_list_tuple_f64_array_mask_ref(self, opt: &Option<Box<ExprList>>, bit: i64) -> i64 with Mut, Panic, Div, Alloc {
         match *opt {
             Some(list) => {
                 var m: i64 = 0
                 if bit < 32 {
-                    if self.array_literal_elems_are_float_ref(&(*list).head) {
+                    if self.tuple_lit_slot_is_f64_array_ref(&(*list).head) {
                         m = 1 << (bit as i32)
                     }
                 }
