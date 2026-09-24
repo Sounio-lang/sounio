@@ -6,10 +6,12 @@ workflow execute this gate, at any call depth, by following real
 invocations (bash/sh/source), not comments and not inventory globs.
 
 Positive control (must be non-zero on this repo): at least one gate is
-reachable (ci.yml names several) AND at least one named leftover is not
-(madaros_f128_f256_ladder_gate.sh). A census that reports 0 leftovers,
-or 0 reachable, has not measured. The 2026-08-18 named three plus the
-F2 bitcast/sitofp boundary gate are wired.
+reachable (ci.yml names several) AND at least one entry of
+NAMED_DIRECT_ORPHANS below is not (e.g. mli_s3_bit_identity_gate.sh). A
+census that reports 0 leftovers, or 0 reachable, has not measured. The
+2026-08-18 named three plus the F2 bitcast/sitofp boundary gate are wired;
+madaros_f128_f256_ladder_gate.sh and two of its own stage scripts were
+removed from the tuple on 2026-09-22 -- see the comment at its definition.
 
 Usage:
   python3 scripts/dev/ci_gate_workflow_reachability.py
@@ -74,10 +76,33 @@ INVENTORY_MARKERS = (
 # Remaining forgotten leftovers after the 2026-08-18 named-three landing
 # plus the F2 bitcast/sitofp boundary wire. Wiring one of these without
 # removing it here is a REFUTE, not a silent pass.
+#
+# 2026-09-22: dropped madaros_f128_f256_ladder_gate.sh,
+# madaros_f128_f256_v0c_wire_gate.sh, and madaros_f128_f256_v0d_softfloat_gate.sh
+# from this tuple -- they were already stale here, not newly resolved by that
+# date's PR. ci.yml has invoked `bash scripts/ci/madaros_f128_f256_ladder_gate.sh
+# --stage v0f5` since d043729a45 (2026-09-16, KL-15a's introduction), which
+# already made the dispatcher itself workflow-reachable; this instrument's BFS
+# then transitively finds every `exec bash
+# .../madaros_f128_f256_v0{c,d}_..._gate.sh` line inside the dispatcher's own
+# source, regardless of which `--stage` value any given ci.yml call site
+# actually passes at runtime. That is by design (see the module docstring:
+# "at any call depth, by following real invocations") and was already true
+# the moment the dispatcher was first wired in -- these three simply should
+# have been removed from this tuple then.
+#
+# IMPORTANT: "workflow-reachable" here is a call-graph claim -- some exec
+# path in the dispatcher's source COULD reach this script -- not a claim
+# that any workflow run actually passes the `--stage` value that reaches it.
+# In particular, `madaros_f128_f256_v0c_wire_gate.sh` (V0-C) being
+# workflow-reachable under this census does NOT mean CI ever runs
+# `--stage v0c`: it deliberately never does (V0-C's external-corpus-consuming
+# codec was never built; see docs/architecture/F128_F256_LADDER.md §V0-C and
+# docs/audit/MADAROS_F128_LADDER_5STAGE_TRIAGE_2026-09-22.md for the current,
+# authoritative statement of which `--stage` values are actually exercised).
+# This census measures reachability, not exercised coverage; it is not the
+# source of truth for the latter.
 NAMED_DIRECT_ORPHANS = (
-    "madaros_f128_f256_ladder_gate.sh",
-    "madaros_f128_f256_v0c_wire_gate.sh",
-    "madaros_f128_f256_v0d_softfloat_gate.sh",
     "madaros_print_f64_negative_gate.sh",
     "mli_s3_bit_identity_gate.sh",
     "stdlib_source_byte_ceiling_gate.sh",
