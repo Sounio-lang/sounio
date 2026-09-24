@@ -2262,7 +2262,13 @@ fn checker_lower_knowledge_type_mut(c: *mut Checker, opt: Option<Box<KnowledgeTy
             ty.knowledge_provenance_kind = prov.kind
             let val_cond = meta.validity
             ty.knowledge_validity_kind = val_cond.kind
-            ty.knowledge_validity_value = if val_cond.kind == 1 { val_cond.duration_sec } else { val_cond.until_timestamp }
+            ty.knowledge_validity_value = if val_cond.kind == 1 {
+                val_cond.duration_sec
+            } else if val_cond.kind == 3 {
+                val_cond.pred_id
+            } else {
+                val_cond.until_timestamp
+            }
 
             ty
         }
@@ -8157,7 +8163,23 @@ fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut
             // one decrement and leave ns_branch_depth permanently elevated.
             let else_ty = checker_check_expr_inplace(c, *else_e)
             (*c).refine_cond_env = saved_cond_env
-            if !checker_types_compatible_inplace(c, then_ty, else_ty) {
+            var branches_ok = checker_types_compatible_inplace(c, then_ty, else_ty)
+            // Join-site metadata symmetry: checker_types_compatible_inplace delegates
+            // to types_compatible, whose TyKnowledge branch (compat.sio, deliberately
+            // import-free) only compares inner type + epsilon -- it never inspects
+            // validity or provenance. So `if c { Knowledge<Parent,Valid(60),Measured> }
+            // else { Knowledge<Parent,Valid(10),Computed> }` passed this check even
+            // with IDENTICAL ontology, and checker_check_if_expr_inplace always
+            // returns then_ty, silently mistyping the join as the (possibly stronger)
+            // then-branch's metadata. Require MUTUAL four-axis subsumption (both
+            // directions) whenever both branches are epistemic, so the join is only
+            // accepted when validity/provenance genuinely agree, not merely when one
+            // side happens to be directionally weaker.
+            if branches_ok && is_epistemic_type(then_ty) && is_epistemic_type(else_ty) {
+                branches_ok = checker_knowledge_subsumes(c, then_ty, else_ty)
+                    && checker_knowledge_subsumes(c, else_ty, then_ty)
+            }
+            if !branches_ok {
                 checker_report_mismatch_inplace(c, e.span, 7, then_ty, else_ty)
             }
             checker_merge_if_branches_inplace(c)
@@ -10011,6 +10033,14 @@ fn checker_check_measure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
         }
     }
     checker_ns_trace_emit("measure", result.noise_set_id)
+    // measure(v, uncertainty) is THE trusted-instrument constructor: its result is
+    // provenance Measured by construction, not the DERIVED default that
+    // knowledge_meta_from_ty falls back to when knowledge_provenance_kind is unset
+    // (-1). Without this, four-axis subsumption being authoritative (rather than a
+    // fallback) started rejecting the common `let a: Knowledge[f64, Measured] =
+    // measure(...)` binding shape, since Derived cannot satisfy a trusted Measured
+    // requirement.
+    result.knowledge_provenance_kind = PROVENANCE_KIND_MEASURED
     result
 }
 
@@ -12494,14 +12524,28 @@ fn checker_check_assign_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with
             }
         }
     } else {
+        // Four-axis epistemic subsumption is AUTHORITATIVE for plain `=` assignment
+        // too, same as let/return/call -- not a fallback. Without this, `x = other`
+        // could silently downgrade a variable declared Knowledge<T, Valid(30.0),
+        // Measured> to Knowledge<T, Valid(10.0), Computed> for equal inner T, since
+        // checker_contextual_expr_compatible / checker_types_compatible_inplace never
+        // inspect validity or provenance.
         match s.expr {
             Some(val_expr) => {
-                if !checker_contextual_expr_compatible(*val_expr, val_ty, target_ty) {
+                var assign_ok = checker_contextual_expr_compatible(*val_expr, val_ty, target_ty)
+                if is_epistemic_type(target_ty) && is_epistemic_type(val_ty) {
+                    assign_ok = checker_knowledge_subsumes(c, val_ty, target_ty)
+                }
+                if !assign_ok {
                     checker_report_mismatch_inplace(c, s.span, 2, target_ty, val_ty)
                 }
             }
             None => {
-                if !checker_types_compatible_inplace(c, target_ty, val_ty) {
+                var assign_ok = checker_types_compatible_inplace(c, target_ty, val_ty)
+                if is_epistemic_type(target_ty) && is_epistemic_type(val_ty) {
+                    assign_ok = checker_knowledge_subsumes(c, val_ty, target_ty)
+                }
+                if !assign_ok {
                     checker_report_mismatch_inplace(c, s.span, 2, target_ty, val_ty)
                 }
             }
@@ -24812,15 +24856,26 @@ impl Checker {
                 }
             }
         } else {
-            // Simple assignment: check compatibility
+            // Simple assignment: check compatibility. Four-axis epistemic subsumption
+            // is AUTHORITATIVE here too (mirrors checker_check_assign_stmt_inplace) --
+            // not a fallback -- so a downgrade via reassignment for equal inner T is
+            // rejected the same way a downgrade via `let`/`return`/call already is.
             match s.expr {
                 Some(val_expr) => {
-                    if !checker_contextual_expr_compatible(*val_expr, val_ty, target_ty) {
+                    var assign_ok = checker_contextual_expr_compatible(*val_expr, val_ty, target_ty)
+                    if is_epistemic_type(target_ty) && is_epistemic_type(val_ty) {
+                        assign_ok = check_return_expr_knowledge_subsumes(c.ontology_items, val_ty, target_ty)
+                    }
+                    if !assign_ok {
                         c = c.report_mismatch(s.span, 2, target_ty, val_ty)
                     }
                 }
                 None => {
-                    if !c.types_compatible_structural(target_ty, val_ty) {
+                    var assign_ok = c.types_compatible_structural(target_ty, val_ty)
+                    if is_epistemic_type(target_ty) && is_epistemic_type(val_ty) {
+                        assign_ok = check_return_expr_knowledge_subsumes(c.ontology_items, val_ty, target_ty)
+                    }
+                    if !assign_ok {
                         c = c.report_mismatch(s.span, 2, target_ty, val_ty)
                     }
                 }
@@ -28310,7 +28365,14 @@ impl Checker {
         let v_pair = self.check_opt_expr(first_arg)
         let c = v_pair.0
         let v_ty = v_pair.1
-        (c, ty_knowledge(v_ty, 0.0 - 1.0))
+        // measure() is the trusted-instrument constructor: Measured provenance by
+        // construction, not the DERIVED default knowledge_meta_from_ty falls back to
+        // when knowledge_provenance_kind is unset. Mirrors the *mut twin
+        // (checker_check_measure_expr_inplace) -- without this, authoritative
+        // four-axis subsumption rejects `let a: Knowledge[f64, Measured] = measure(...)`.
+        var result = ty_knowledge(v_ty, 0.0 - 1.0)
+        result.knowledge_provenance_kind = PROVENANCE_KIND_MEASURED
+        (c, result)
     }
 
     fn check_knowledge_ctor_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
@@ -28899,7 +28961,16 @@ impl Checker {
                 let else_ty = else_pair.1
                 // Restore after else branch
                 c.refine_cond_env = saved_cond_env
-                if !c.types_compatible_structural(then_ty, else_ty) {
+                // Join-site metadata symmetry -- mirrors checker_check_if_expr_inplace:
+                // require mutual four-axis subsumption when both branches are
+                // epistemic, since types_compatible_structural's TyKnowledge case
+                // only compares inner type + epsilon.
+                var branches_ok2 = c.types_compatible_structural(then_ty, else_ty)
+                if branches_ok2 && is_epistemic_type(then_ty) && is_epistemic_type(else_ty) {
+                    branches_ok2 = check_return_expr_knowledge_subsumes(c.ontology_items, then_ty, else_ty)
+                        && check_return_expr_knowledge_subsumes(c.ontology_items, else_ty, then_ty)
+                }
+                if !branches_ok2 {
                     c = c.report_mismatch(e.span, 7, then_ty, else_ty)
                 }
                 (c, then_ty)

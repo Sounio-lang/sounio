@@ -84,7 +84,13 @@ pub fn check_knowledge_type(checker: Checker, info: KnowledgeTypeInfo) -> (Check
     ty.knowledge_provenance_kind = prov.kind
     let val_cond = meta.validity
     ty.knowledge_validity_kind = val_cond.kind
-    ty.knowledge_validity_value = if val_cond.kind == VALIDITY_KIND_DURATION { val_cond.duration_sec } else { val_cond.until_timestamp }
+    ty.knowledge_validity_value = if val_cond.kind == VALIDITY_KIND_DURATION {
+        val_cond.duration_sec
+    } else if val_cond.kind == VALIDITY_KIND_WHILE_COND {
+        val_cond.pred_id
+    } else {
+        val_cond.until_timestamp
+    }
     (c, ty)
 }
 
@@ -202,6 +208,30 @@ pub fn knowledge_metadata_is_valid(validity_opt: Option<Box<ValidityCondition>>)
     }
 }
 
+// Derive a nonzero predicate-identity number for a ValidWhile(expr) condition
+// from the expression's source span. Two occurrences of "the same" predicate
+// (literally the same AST node, e.g. re-checked at two call sites against one
+// declared parameter) share a span and therefore an id; two DIFFERENT
+// predicate expressions -- even if textually similar -- get different spans
+// and therefore different ids. This is a conservative identity: it never
+// equates two distinct predicates, which is the soundness property
+// validity_subsumes needs, at the cost of not recognizing two syntactically
+// identical-but-separately-written predicates as "the same" (a real
+// structural/interned-expr hash would recognize that too, but this needs no
+// new interning infrastructure and cannot be unsound in the exploitable
+// direction). 0.0 is reserved for "unidentified" and never produced here
+// (start is always >= 0, and file_id is offset by a large constant so a
+// legitimate id can never collide with the 0.0 sentinel).
+fn validity_while_pred_id(opt: Option<Box<Expr>>) -> f64 {
+    match opt {
+        Some(e) => {
+            let span = (*e).span
+            (1.0 + (span.file_id as f64)) * 1000000000.0 + (span.start as f64) * 100000.0 + (span.end as f64)
+        }
+        None => 0.0
+    }
+}
+
 pub fn validity_from_ast(opt: Option<Box<ValidityCondition>>) -> Validity {
     match opt {
         Some(vc) => {
@@ -217,7 +247,7 @@ pub fn validity_from_ast(opt: Option<Box<ValidityCondition>>) -> Validity {
                 return validity_until(value)
             }
             if (*vc).kind == AstValidityKind::ValidWhileCond {
-                return validity_while()
+                return validity_while_pred(validity_while_pred_id((*vc).expr))
             }
             validity_always()
         }
@@ -487,11 +517,16 @@ const VALIDITY_KIND_DURATION: i64 = 1
 const VALIDITY_KIND_UNTIL_TIME: i64 = 2
 const VALIDITY_KIND_WHILE_COND: i64 = 3
 
-// Validity metadata for knowledge temporal bounds
+// Validity metadata for knowledge temporal bounds.
+// pred_id identifies a ValidWhile(expr) predicate: two Validity values of kind
+// WHILE_COND are the SAME condition only when pred_id matches. It is not used
+// by DURATION/UNTIL_TIME/ALWAYS (0.0 there -- ignored, since their kind alone
+// already fully determines the bound).
 pub struct Validity {
     pub kind: i64,
     pub duration_sec: f64,
-    pub until_timestamp: f64
+    pub until_timestamp: f64,
+    pub pred_id: f64
 }
 
 // Create always-valid validity (no expiration)
@@ -499,7 +534,8 @@ pub fn validity_always() -> Validity {
     Validity {
         kind: VALIDITY_KIND_ALWAYS,
         duration_sec: 0.0,
-        until_timestamp: 0.0
+        until_timestamp: 0.0,
+        pred_id: 0.0
     }
 }
 
@@ -508,7 +544,8 @@ pub fn validity_duration(seconds: f64) -> Validity {
     Validity {
         kind: VALIDITY_KIND_DURATION,
         duration_sec: seconds,
-        until_timestamp: 0.0
+        until_timestamp: 0.0,
+        pred_id: 0.0
     }
 }
 
@@ -517,16 +554,35 @@ pub fn validity_until(timestamp: f64) -> Validity {
     Validity {
         kind: VALIDITY_KIND_UNTIL_TIME,
         duration_sec: 0.0,
-        until_timestamp: timestamp
+        until_timestamp: timestamp,
+        pred_id: 0.0
     }
 }
 
-// Create condition-based validity
+// Create condition-based validity with NO identity (unknown/unidentified
+// predicate). Kept for callers that have no expr to derive an id from;
+// validity_subsumes conservatively rejects two WHILE_COND values unless both
+// carry the SAME nonzero pred_id, so this constructor's result subsumes
+// nothing but itself-by-reference (never treated as matching another
+// ValidWhile by accident).
 pub fn validity_while() -> Validity {
     Validity {
         kind: VALIDITY_KIND_WHILE_COND,
         duration_sec: 0.0,
-        until_timestamp: 0.0
+        until_timestamp: 0.0,
+        pred_id: 0.0
+    }
+}
+
+// Create condition-based validity carrying the predicate's identity (derived
+// from its source span -- see validity_from_ast). Two ValidWhile annotations
+// are the same condition, for subsumption purposes, only when this matches.
+pub fn validity_while_pred(pred_id: f64) -> Validity {
+    Validity {
+        kind: VALIDITY_KIND_WHILE_COND,
+        duration_sec: 0.0,
+        until_timestamp: 0.0,
+        pred_id: pred_id
     }
 }
 
@@ -609,7 +665,7 @@ pub fn knowledge_meta_from_ty(ty: TypeEntry) -> KnowledgeMeta with Mut, Panic, D
             } else if ty.knowledge_validity_kind == VALIDITY_KIND_UNTIL_TIME {
                 validity_until(ty.knowledge_validity_value)
             } else if ty.knowledge_validity_kind == VALIDITY_KIND_WHILE_COND {
-                validity_while()
+                validity_while_pred(ty.knowledge_validity_value)
             } else {
                 validity_always()
             }
@@ -859,7 +915,21 @@ pub fn validity_subsumes(provided: Validity, required: Validity) -> bool {
         return false
     }
     if required.kind == VALIDITY_KIND_WHILE_COND {
-        return provided.kind == VALIDITY_KIND_ALWAYS || provided.kind == VALIDITY_KIND_WHILE_COND
+        if provided.kind == VALIDITY_KIND_ALWAYS {
+            return true
+        }
+        // A ValidWhile(a) provided value subsumes a ValidWhile(b) requirement only
+        // when they are PROVABLY the same predicate -- matching pred_id (derived
+        // from the annotation's source span; see validity_from_ast). Two distinct,
+        // unrelated ValidWhile conditions must NOT be treated as interchangeable
+        // just because both happen to be "some" condition. pred_id == 0.0 means
+        // "no identity was recorded" (e.g. validity_while()'s bare default), which
+        // is conservatively rejected -- it must not accidentally match another
+        // unidentified 0.0 predicate.
+        if provided.kind == VALIDITY_KIND_WHILE_COND {
+            return provided.pred_id != 0.0 && provided.pred_id == required.pred_id
+        }
+        return false
     }
     false
 }
