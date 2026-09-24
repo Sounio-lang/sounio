@@ -1167,6 +1167,27 @@ fn lower_fn_tuple_arr_insert(name: Name, mask: i64, scalar_mask: i64) with Mut, 
     }
 }
 
+// Review follow-up (#2570): true iff `te`'s TypeFn chain eventually reaches
+// a TypeTuple leaf, regardless of what that tuple's own mask works out to
+// (even an all-integer `(i64, i64)` counts). Distinguishes "this chain's
+// mask is 0 because the leaf is a plain [f64; N] array (or anything else
+// non-tuple)" from "this chain's mask is 0 because the leaf IS a tuple with
+// no float/array slots" -- lower_fn_tuple_f64_arrays_collect_one needs that
+// distinction to decide whether skipping the insert is safe (see its own
+// comment): a tuple leaf, even a mask-0 one, still needs its row reserved
+// so a LATER same-named chain reaching a DIFFERENT (nonzero-mask) tuple
+// cannot insert a positive mask under an identity the merged IR's
+// first-loaded-wins call dispatch never actually executes.
+fn lower_type_expr_deep_is_tuple(te: &TypeExpr) -> bool with Mut, Panic, Div {
+    if (*te).kind == TypeExprKind::TypeFn {
+        match (*te).inner {
+            Some(inner) => return lower_type_expr_deep_is_tuple(&(*inner)),
+            None => return false,
+        }
+    }
+    (*te).kind == TypeExprKind::TypeTuple
+}
+
 // Array-only counterpart of lower_type_expr_tuple_combined_mask, for the
 // named-function collector below: LOWER_FN_TUPLE_ARR_MASK holds array bits
 // ONLY (the scalar half lives separately, in returns_float), so this cannot
@@ -1294,12 +1315,31 @@ fn lower_fn_tuple_f64_arrays_collect_one(name: Name, rt_opt_ref: &Option<Box<Typ
                 // the two tables filled in lockstep, and this table's own
                 // reason-3 cap fault (checked first, on this exact insert)
                 // always fired before LOWER_FN_ARR_CHAIN's reason-5 could --
-                // making reason 5 unreachable in practice. A mask-0 entry is
-                // also unobservable: lower_fn_tuple_f64_array_mask/
-                // lower_fn_tuple_f64_scalar_mask already return 0 on a
-                // lookup MISS, identically to a mask-0 HIT, for every
-                // consumer. Skip the insert when there is nothing to record.
-                if fn_ret_mask != 0 || fn_ret_scalar_mask != 0 {
+                // making reason 5 unreachable in practice.
+                //
+                // Review follow-up (#2570): gating this on `mask != 0 ||
+                // scalar_mask != 0` instead (the first version of this fix)
+                // reopened the exact first-loaded-wins bug this table exists
+                // to prevent, for a TUPLE leaf whose OWN slots just happen
+                // to be all-integer: `helper() -> fn() -> (i64, i64)` also
+                // gives mask 0, but its leaf IS a tuple, so this table's row
+                // must still be reserved under `helper` -- skipping the
+                // insert let a LATER same-named `helper() -> fn() ->
+                // ([f64; 2], i64)` see no existing entry and insert ITS
+                // positive mask instead, even though the merged IR's
+                // first-loaded-wins call dispatch still runs the FIRST
+                // (int-returning) body. A mask-0 entry is unobservable to
+                // every READER (lower_fn_tuple_f64_array_mask/_scalar_mask
+                // already return 0 on a lookup MISS, identically to a
+                // mask-0 HIT) -- but the row's mere EXISTENCE is what
+                // dedup (lower_fn_tuple_arr_has, consulted by every insert)
+                // depends on, and that must track the true first-loaded
+                // identity independent of mask value. Gate on
+                // lower_type_expr_deep_is_tuple instead: skip only when the
+                // leaf isn't a tuple AT ALL, the one case with no identity
+                // to protect (LOWER_FN_ARR_CHAIN tracks that name under its
+                // own, separate, correctly-ordered dedup instead).
+                if lower_type_expr_deep_is_tuple(&(*rt)) {
                     lower_fn_tuple_arr_insert(name, fn_ret_mask, fn_ret_scalar_mask)
                 }
             }
