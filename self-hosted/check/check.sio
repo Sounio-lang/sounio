@@ -11660,7 +11660,19 @@ fn checker_check_call_arg_knowledge_boundary_inplace(c: *mut Checker, arg_ty: Ty
        knowledge_meta_epsilon(knowledge_meta_from_ty(expected_ty)) < 0.0 {
         return
     }
-    if !knowledge_call_boundary_compatible(provided_ty, expected_ty) {
+    let exp_in = knowledge_inner(expected_ty)
+    let got_in = knowledge_inner(provided_ty)
+    let is_onto_subclass = if !name_is_empty(got_in.name) && !name_is_empty(exp_in.name) && !name_eq(got_in.name, exp_in.name) {
+        checker_onto_name_subclass_walk((*c).ontology_items, got_in.name, exp_in.name, 0)
+    } else {
+        false
+    }
+    let compatible = if is_onto_subclass {
+        compat_epsilon_subsumes(provided_ty, expected_ty)
+    } else {
+        knowledge_call_boundary_compatible(provided_ty, expected_ty)
+    }
+    if !compatible {
         // Name the failing slot: a refusal is evidence for the cause it
         // names. Epsilon keeps E036 (it predates this); a provenance-leg
         // failure is E244. (The validity leg is payload-flattened until the
@@ -11714,13 +11726,10 @@ fn checker_check_call_arg_unit_boundary_inplace(c: *mut Checker, arg_ty: TypeEnt
 
 fn checker_ontology_boundary_check_call_arg_contract_inplace(c: *mut Checker, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) with Mut, Panic, Div, Alloc, IO {
     // Cheap guard hoisted from check_call_arg_ontology_boundary's own early-out: the boundary
-    // is a no-op unless the PARAM type carries an ontology contract. Without this guard the
-    // by-value `(*c).check_call_arg_ontology_boundary(...)` call copies the 8MB Checker as
-    // `self` on EVERY user-fn call arg (even `id(5)`) — the stack smash that crashed the
-    // modular checker. The other four arg-boundary checks are already true *mut; this one
-    // was missed. Behaviour-identical: the by-value method returns self in exactly these cases.
+    // is a no-op unless the PARAM type carries an ontology contract (either directly or wrapped in Knowledge/Epistemic).
     let expected_ty = call_ref_inner_or_self(param_ty)
-    if expected_ty.ontology_id < 0 || is_error_or_unknown(expected_ty) {
+    let exp_check_ty = if is_epistemic_type(expected_ty) { knowledge_inner(expected_ty) } else { expected_ty }
+    if exp_check_ty.ontology_id < 0 || is_error_or_unknown(exp_check_ty) {
         return
     }
     let t = (*c).check_call_arg_ontology_boundary(arg_ty, param_ty, call_span)
@@ -18835,6 +18844,16 @@ fn checker_types_compatible_inplace(c: *mut Checker, a: TypeEntry, b: TypeEntry)
     if types_compatible(a, b) {
         return true
     }
+    // Ontology covariance in epistemic types: Knowledge<SubClass> is compatible with Knowledge<SuperClass>
+    if is_epistemic_type(a) && is_epistemic_type(b) && a.kind == b.kind {
+        let a_in = knowledge_inner(a)
+        let b_in = knowledge_inner(b)
+        if !name_is_empty(a_in.name) && !name_is_empty(b_in.name) && !name_eq(a_in.name, b_in.name) {
+            if checker_onto_name_subclass_walk((*c).ontology_items, a_in.name, b_in.name, 0) {
+                return compat_epsilon_subsumes(a, b)
+            }
+        }
+    }
     checker_fn_types_structurally_compatible_inplace(c, a, b)
 }
 
@@ -18941,11 +18960,21 @@ fn checker_call_arg_types_compatible_inplace(c: *mut Checker, arg_expr: Expr, ar
         return checker_types_compatible_inplace(c, arg_ty, call_ref_inner_or_self(param_ty))
     }
     // Ontology subsumption: a subclass argument satisfies a parent-class parameter.
+    // Also applies covariantly inside epistemic wrappers (Knowledge<SubClass> satisfies Knowledge<ParentClass>).
     let exp_ty = call_ref_inner_or_self(param_ty)
     let got_ty = call_ref_inner_or_self(arg_ty)
     if !name_is_empty(got_ty.name) && !name_is_empty(exp_ty.name) && !name_eq(got_ty.name, exp_ty.name) {
         if checker_onto_name_subclass_walk((*c).ontology_items, got_ty.name, exp_ty.name, 0) {
             return true
+        }
+    }
+    if is_epistemic_type(exp_ty) && is_epistemic_type(got_ty) && exp_ty.kind == got_ty.kind {
+        let exp_in = knowledge_inner(exp_ty)
+        let got_in = knowledge_inner(got_ty)
+        if !name_is_empty(got_in.name) && !name_is_empty(exp_in.name) && !name_eq(got_in.name, exp_in.name) {
+            if checker_onto_name_subclass_walk((*c).ontology_items, got_in.name, exp_in.name, 0) {
+                return compat_epsilon_subsumes(got_ty, exp_ty)
+            }
         }
     }
     false
@@ -28430,23 +28459,25 @@ impl Checker {
 
     fn check_call_arg_ontology_boundary(self, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) -> Checker with Mut, Panic, Div, Alloc, IO {
         let expected_ty = call_ref_inner_or_self(param_ty)
-        if expected_ty.ontology_id < 0 || is_error_or_unknown(expected_ty) {
+        let exp_ont = if is_epistemic_type(expected_ty) { knowledge_inner(expected_ty) } else { expected_ty }
+        if exp_ont.ontology_id < 0 || is_error_or_unknown(exp_ont) {
             return self
         }
         let provided_ty = call_ref_inner_or_self(arg_ty)
         if is_error_or_unknown(provided_ty) {
             return self
         }
-        if provided_ty.ontology_id < 0 {
+        let prov_ont = if is_epistemic_type(provided_ty) { knowledge_inner(provided_ty) } else { provided_ty }
+        if prov_ont.ontology_id < 0 {
             // Non-ontology value passed where ontology type expected
             return self.report_error_at(call_span, 150, 0, 0, 0)
         }
         // Check subsumption: provided must be subclass of expected
-        if self.ontology_inference_query_subclass(provided_ty.ontology_id, expected_ty.ontology_id) {
+        if self.ontology_inference_query_subclass(prov_ont.ontology_id, exp_ont.ontology_id) {
             return self
         }
         // Check disjointness for better error
-        if self.ontology_inference_query_disjoint(provided_ty.ontology_id, expected_ty.ontology_id) {
+        if self.ontology_inference_query_disjoint(prov_ont.ontology_id, exp_ont.ontology_id) {
             return self.report_error_at(call_span, 151, 0, 0, 0)
         }
         self.report_error_at(call_span, 152, 0, 0, 0)
