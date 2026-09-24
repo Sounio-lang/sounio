@@ -6,9 +6,22 @@
 # `souc run` or even --probe-native-streaming, which both go through the
 # FLAT helper's different lane) had no direct, scriptable coverage. This
 # gate drives it through the --probe-filtered-body-lower CLI flag added in
-# main.sio for exactly this purpose and asserts that the destructured f64
-# array actually got classified as float THROUGH THAT LANE (a nonzero
-# float_reg_marks count for `main`), not just that lowering didn't error.
+# main.sio for exactly this purpose.
+#
+# Round 6, finding 4 (Copilot again): the original version of this gate
+# asserted `float_reg_marks > 0` for fn=main as proof the collector fired.
+# That is not airtight -- the fixture's own ordinary f64 literals (2.0, 0.5,
+# ...) each call emit_f64_const, which ALSO emits ir_mark_float_reg, so the
+# assertion stayed positive even with the collector call removed entirely
+# (confirmed below by actually removing it and re-running this gate before
+# trusting the fix). This now asserts `tuple_arr_mask=3` for fn=pair
+# instead: lower_fn_tuple_f64_array_mask(pair) is a direct query of
+# LOWER_FN_TUPLE_ARR_MASK, populated ONLY by
+# lower_fn_tuple_f64_arrays_collect (called at the top of
+# lower_program_bodies_filtered_ref) -- not by any literal in the source --
+# so a nonzero mask here is specific evidence the collector ran through
+# this exact lane, not a body-wide instruction count that any float
+# arithmetic would also satisfy.
 
 set -euo pipefail
 
@@ -53,15 +66,18 @@ if [[ "$probe_rc" != "0" ]]; then
   fail "--probe-filtered-body-lower exited rc=$probe_rc"
 fi
 
-grep -Eq '^probe_filtered_body_lower: body_ok fn=main instrs=[0-9]+ float_reg_marks=[0-9]+$' "$WORK/probe.log" || {
+MASK_LINE="$(grep -E '^probe_filtered_body_lower: body_ok fn=pair .*tuple_arr_mask=[0-9]+$' "$WORK/probe.log" || true)"
+if [[ -z "$MASK_LINE" ]]; then
   cat "$WORK/probe.log" >&2
-  fail "missing body_ok line for fn=main"
-}
-
-marks="$(grep -E '^probe_filtered_body_lower: body_ok fn=main ' "$WORK/probe.log" | grep -oE 'float_reg_marks=[0-9]+' | cut -d= -f2)"
-[[ -n "$marks" && "$marks" -gt 0 ]] || {
+  fail "missing body_ok line with tuple_arr_mask for fn=pair"
+fi
+MASK="${MASK_LINE##*tuple_arr_mask=}"
+# `pair` returns ([f64;2], [f64;2]) -- both tuple slots are f64 arrays, so
+# the correct mask is 3 (bits 0 and 1). 0 is exactly what an unwired
+# collector (the round-3 regression this gate guards) would leave behind.
+if [[ "$MASK" != "3" ]]; then
   cat "$WORK/probe.log" >&2
-  fail "float_reg_marks=$marks for fn=main -- lower_program_bodies_filtered_ref did not mark the destructured f64 array as float"
-}
+  fail "fn=pair has tuple_arr_mask=$MASK, expected 3 -- lower_program_bodies_filtered_ref did not populate the tuple-array table for its own item list"
+fi
 
-echo "[madaros-tuple-arr-filtered-body-lower] PASS: lower_program_bodies_filtered_ref marked $marks float register(s) for fn=main"
+echo "[madaros-tuple-arr-filtered-body-lower] PASS: lower_program_bodies_filtered_ref populated tuple_arr_mask=$MASK for fn=pair"

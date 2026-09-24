@@ -899,7 +899,14 @@ fn lower_type_list_f64_array_mask(opt: &Option<Box<TypeExprList>>, bit: i64) -> 
 // lower_fn_tuple_f64_arrays_collect_one now go through
 // lower_fn_tuple_arr_slot_find, an open-addressed index lookup (see
 // LOWER_FN_TUPLE_ARR_SLOT's declaration) -- O(1) amortized instead of O(n).
-fn lower_fn_tuple_f64_array_mask(name: Name) -> i64 with Mut, Panic, Div {
+// Marked pub (round 6 of the PR #2516 review, finding 3): a new CLI probe in
+// compiler/main.sio (--probe-tuple-arr-capacity) needs to query this table
+// directly, bypassing the normal compile pipeline's DCE filtering, so that
+// a capacity-boundary gate can populate LOWER_FN_TUPLE_ARR_* with every
+// generated function -- not just the ones reachable from `main` -- and
+// still verify a specific late entry. Same treatment as round 5's fix to
+// lower_program_function_body_from_summary_with_epistemic_ref.
+pub fn lower_fn_tuple_f64_array_mask(name: Name) -> i64 with Mut, Panic, Div {
     if name.len <= 0 {
         return 0
     }
@@ -17377,6 +17384,15 @@ impl Lowerer {
         if (*e).kind == ExprKind::ExprCall || (*e).kind == ExprKind::ExprMethodCall {
             return self.expr_result_is_f64_array_ref(e)
         }
+        // Copilot review (PR #2516), round 6 finding 1: a tuple-literal slot
+        // backed by an f64-array STRUCT FIELD (`(holder.values, 0)`) arrives
+        // here as ExprFieldAccess, which fell through to `false` even though
+        // field_array_elem_is_float_for_base_ref already resolves exactly
+        // this shape elsewhere in this file (struct-typed base -> declared
+        // field layout, with the by-name fallback for an unknown base type).
+        if (*e).kind == ExprKind::ExprFieldAccess {
+            return self.field_array_elem_is_float_for_base_ref(&(*e).left, (*e).name)
+        }
         false
     }
 
@@ -17446,6 +17462,23 @@ impl Lowerer {
         }
         if (*e).kind == ExprKind::ExprMatch {
             return self.match_arms_tuple_arr_mask_ref(&(*e).arms)
+        }
+        // Copilot review (PR #2516), round 6 finding 2: a BRACED match arm
+        // (`0 => { pair1() }`) or any other bare block expression arrives
+        // here as ExprBlock, not as the tail expression directly -- without
+        // this, match_arms_tuple_arr_mask_ref called expr_result_tuple_arr_
+        // mask_ref(&arm.body) on the ExprBlock itself, which fell through to
+        // `return 0` below (an ExprBlock is not an ExprCall), so every
+        // braced arm contributed mask 0 regardless of what it evaluated to.
+        // Delegates to the same block-tail helper the ExprIf case above
+        // already uses for its `then` branch (expr_result_is_float_ref has
+        // the identical gap fixed for the scalar case: its own ExprIf
+        // handling reaches block tails via opt_block_tail_is_float_ref, but
+        // an ExprBlock passed to IT directly has the same hole -- out of
+        // scope here since round 6 findings 1/2 are both about the tuple
+        // array-mask classifier specifically).
+        if (*e).kind == ExprKind::ExprBlock {
+            return self.opt_block_tail_tuple_arr_mask_ref(&(*e).block)
         }
         if (*e).kind != ExprKind::ExprCall {
             return 0

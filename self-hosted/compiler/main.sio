@@ -61,6 +61,7 @@ use ir::opt_strategy::{ir_opt_apply_strategy, ir_opt_find_return_vreg, ir_opt_ma
 use ir::lower::{ir_patch_validated_calls, lower_program_to_ir, lower_program_to_ir_with_epistemic, lower_program_to_ir_probe_summary_ref, lower_program_to_ir_probe_summary_box_ref, lower_program_to_ir_summary_box_probe_with_epistemic_ref, lower_program_function_body_from_summary_with_epistemic_ref, lower_program_to_ir_summary_flat_with_epistemic_ref, lower_program_function_body_from_summary_flat_with_epistemic_ref, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_to_ir_summary_with_epistemic}
 use ir::lower::{lower_program_to_ir_with_epistemic_ref, lower_program_to_ir_ordered_with_epistemic_boxed_trace_ref, lower_monolithic_public_probe_trace_set}
 use ir::lower::{lower_program_function_body_from_program_with_epistemic_ref}
+use ir::lower::{lower_fn_tuple_arr_reset, lower_fn_tuple_f64_arrays_collect, lower_fn_tuple_f64_array_mask}
 use ir::normalize::*
 use ir::const_prop::{cp_check_load_imm, cp_empty_instrs, cp_make_test_func, cp_optimize_function}
 use ir::dce::{dce_check_nop, dce_empty_instrs, dce_make_test_func, dce_optimize_function}
@@ -3801,6 +3802,7 @@ fn print_help() with IO {
     println("  --probe-load-ir-trace <source.sio>  Probe traced IR lowering path with stage counters")
     println("  --probe-native-streaming <source.sio>  Probe summary/body/native-v2 status for the single-module streaming path")
     println("  --probe-filtered-body-lower <source.sio>  Probe the non-flat lower_program_bodies_filtered_ref lane, one function at a time")
+    println("  --probe-tuple-arr-capacity <source.sio> <fn_name>  Collect LOWER_FN_TUPLE_ARR_* directly from raw parsed items (bypasses DCE) and report one function's mask")
     println("  --probe-ir-callsite <source.sio> <caller_fn> <callee_fn>  Probe lowered callsite hidden-arg behavior")
     println("  --probe-ir-opt-strategy <source.sio>  Probe ir_opt_apply_strategy() on instrumented IR fns")
     println("  --probe-wasm-dispatch <source.sio> [out.wasm]  Probe wasm dispatch marker path")
@@ -9784,15 +9786,68 @@ fn run_probe_filtered_body_lower(args: ArgList, flag_index: i64) with IO, Mut, P
             }
             ii = ii + 1
         }
+        // Copilot review (PR #2516), round 6 finding 4: float_reg_marks alone
+        // is not proof the tuple-array COLLECTOR fired through this lane --
+        // any ordinary f64 literal in the body also emits ir_mark_float_reg,
+        // so that count stays positive even if the collector call inside
+        // lower_program_bodies_filtered_ref were removed entirely. Query
+        // LOWER_FN_TUPLE_ARR_* directly for THIS function's own declared
+        // tuple-array-return mask instead: lower_fn_tuple_f64_arrays_collect
+        // (called at the top of lower_program_bodies_filtered_ref, which the
+        // call above just went through) is what would have populated this
+        // entry, so a nonzero mask here is airtight evidence specific to the
+        // fix, not a body-wide literal count.
+        let tuple_arr_mask = lower_fn_tuple_f64_array_mask(fn_name)
         print("probe_filtered_body_lower: body_ok fn=")
         compiler_manifest_print_name(fn_name)
         print(" instrs=")
         print_int(body_result.func.instr_count)
         print(" float_reg_marks=")
         print_int(float_reg_marks)
+        print(" tuple_arr_mask=")
+        print_int(tuple_arr_mask)
         print("\n")
         fi = fi + 1
     }
+}
+
+// --probe-tuple-arr-capacity <file.sio> <fn_name>: Copilot review
+// (PR #2516), finding 3 on the sixth review round. The generated capacity
+// witness in madaros_tuple_arr_capacity_boundary_gate.sh declares 4097
+// tuple-array-returning functions, but round 5's own finding-A fix
+// (filtering the collector's input through spec_dce_filter_with_global_
+// marks) means only functions REACHABLE from `main` ever reach
+// lower_fn_tuple_f64_arrays_collect through the normal compile pipeline --
+// so a witness where only the LAST function is called gets DCE'd down to
+// one collected entry, and the gate silently stopped testing the boundary
+// it claims to. This probe calls the collector directly on the raw,
+// un-DCE'd parsed item list (bypassing the whole module_frontend pipeline,
+// DCE included), then reports the requested function's tuple-array mask --
+// so the gate can populate the table with every generated function
+// regardless of reachability, matching what it was meant to test.
+fn run_probe_tuple_arr_capacity(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 2 >= args.len {
+        panic("probe_tuple_arr_capacity: expected <source.sio> <fn_name>")
+    }
+    let source_path = arg_list_get(args, flag_index + 1)
+    let fn_name_str = arg_list_get(args, flag_index + 2)
+    let program = load_module_file(source_path)
+    let parse_errors = parser_last_error_count()
+    if parse_errors > 0 {
+        print("probe_tuple_arr_capacity: parser_errors=")
+        print_int(parse_errors)
+        print("\n")
+        panic("probe_tuple_arr_capacity parse failed")
+    }
+    lower_fn_tuple_arr_reset()
+    lower_fn_tuple_f64_arrays_collect(&program.items)
+    let target = make_name(fn_name_str)
+    let mask = lower_fn_tuple_f64_array_mask(target)
+    print("probe_tuple_arr_capacity: fn=")
+    print(fn_name_str)
+    print(" mask=")
+    print_int(mask)
+    print("\n")
 }
 
 // ============================================================================
@@ -29125,6 +29180,9 @@ fn main() with IO, Mut, Panic, Div, Alloc {
             return
         } else if mode == "--probe-filtered-body-lower" || starts_with(mode, "--probe-filtered-body") {
             run_probe_filtered_body_lower(args, arg_idx)
+            return
+        } else if mode == "--probe-tuple-arr-capacity" || starts_with(mode, "--probe-tuple-arr-cap") {
+            run_probe_tuple_arr_capacity(args, arg_idx)
             return
         } else if mode == "--probe-load-ir" || starts_with(mode, "--probe-load") {
             run_probe_load_ir(args, arg_idx)

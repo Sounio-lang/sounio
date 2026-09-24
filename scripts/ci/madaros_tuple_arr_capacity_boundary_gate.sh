@@ -6,12 +6,27 @@
 # 1's bug) and so cannot detect a regression back to it. This gate GENERATES
 # (at run time, never checked in -- same pattern as
 # madaros_imported_capacity_gate.sh) a program with 4097 distinct
-# tuple-of-f64-arrays-returning functions and destructures the LAST one
+# tuple-of-f64-arrays-returning functions and verifies the LAST one
 # (index 4096, i.e. the 4097th collected), the one entry the old 4096-cap
-# would have silently dropped. If LOWER_FN_TUPLE_ARR_* ever truncates again
-# at 4096 entries, that function's mask reverts to 0, its destructured
-# arrays fall back to the integer path, and the arithmetic below reads the
-# wrong values.
+# would have silently dropped.
+#
+# Round 6, finding 3 (Copilot again): the FIRST version of this gate called
+# only tarr4096 from `main` and compiled the program through the normal
+# `madaros run` pipeline. Round 5's own finding-A fix -- filtering the
+# collector's input through spec_dce_filter_with_global_marks before
+# preregistration -- means the other 4096 generated-but-unreachable
+# functions never reach lower_fn_tuple_f64_arrays_collect at all under that
+# pipeline: DCE prunes them first, so the gate only ever populated ONE
+# table entry and could not have caught a regression back to the old
+# 4096-entry cap. Making all 4097 functions genuinely reachable from `main`
+# risks a different capacity wall (IR_MAX_INSTRS, ~16384, via 4097 call
+# sites in one function body), so instead this uses the
+# --probe-tuple-arr-capacity CLI flag (compiler/main.sio), which calls
+# lower_fn_tuple_f64_arrays_collect directly on the RAW, un-DCE'd parsed
+# item list -- bypassing the whole module_frontend pipeline, DCE included --
+# and reports one function's resulting mask. That populates the table with
+# every one of the 4097 generated functions, matching what this gate always
+# meant to test.
 
 set -euo pipefail
 
@@ -19,6 +34,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 KEEP_WORK="${SOUNIO_MADAROS_TUPLE_ARR_CAP_GATE_KEEP:-0}"
 N=4097
 LAST=$((N - 1))
+TARGET_FN="tarr${LAST}"
 
 fail() {
   echo "[madaros-tuple-arr-capacity-boundary] FAIL: $*" >&2
@@ -50,49 +66,45 @@ fi
 
 # Every function is DISTINCT (not a fixed handful repeated), so this also
 # exercises the round-2 collision-safety fix (two independent hashes) at
-# scale, not just the raw entry count.
+# scale, not just the raw entry count. None of these need to be reachable
+# from `main` -- the probe collects straight off the parsed item list.
 for i in $(seq 0 "$LAST"); do
   printf 'fn tarr%s() -> ([f64; 2], [f64; 2]) with Mut, Panic { var a: [f64; 2] = [0.0; 2]; var b: [f64; 2] = [0.0; 2]; a[0] = %s.0; b[0] = 1.0; (a, b) }\n' \
     "$i" "$i" >>"$SRC"
 done
-
-{
-  echo 'fn main() -> i32 with IO, Mut, Panic {'
-  echo "    let (oa, ob) = tarr${LAST}()"
-  echo '    let s0: f64 = oa[0] * 2.0'
-  echo '    let s1: f64 = 2.0 * ob[0]'
-  echo "    if s0 == $((LAST * 2)).0 && s1 == 2.0 {"
-  echo '        println("TUPLE_ARR_CAPACITY_BOUNDARY PASS")'
-  echo '        return 0'
-  echo '    }'
-  echo '    1'
-  echo '}'
-} >>"$SRC"
+echo 'fn main() -> i32 with IO { 0 }' >>"$SRC"
 
 set +e
 RUN_LOG="$WORK/run.log"
 STACK_KB="${SOUNIO_MADAROS_TUPLE_ARR_CAP_GATE_STACK_KB:-524288}"
 (
-  # Same treatment as madaros_imported_capacity_gate.sh: the raw ELF SEGVs
-  # (rc=139) on a program this size (4097 functions) under the shell's
-  # default stack limit.
   if [[ "$STACK_KB" == "0" ]]; then
     ulimit -s unlimited 2>/dev/null || true
   else
     ulimit -s "$STACK_KB" 2>/dev/null || true
   fi
-  exec timeout 300 "$MADAROS_ELF" run "$SRC"
+  exec timeout 300 "$MADAROS_ELF" --probe-tuple-arr-capacity "$SRC" "$TARGET_FN"
 ) >"$RUN_LOG" 2>&1
 run_rc=$?
 set -e
 
 if [[ "$run_rc" != "0" ]]; then
   tail -n 60 "$RUN_LOG" >&2
-  fail "run exited rc=$run_rc for a $N-function tuple-array capacity witness"
+  fail "--probe-tuple-arr-capacity exited rc=$run_rc for a $N-function tuple-array capacity witness"
 fi
-grep -Fxq 'TUPLE_ARR_CAPACITY_BOUNDARY PASS' "$RUN_LOG" || {
-  tail -n 60 "$RUN_LOG" >&2
-  fail "exact PASS marker missing -- entry $LAST (past the old 4096-entry cap) did not classify as an f64 array"
-}
 
-echo "[madaros-tuple-arr-capacity-boundary] PASS: entry $LAST of $N distinct tuple-array-returning functions still classified correctly"
+MASK_LINE="$(grep -E "^probe_tuple_arr_capacity: fn=${TARGET_FN} mask=[0-9]+\$" "$RUN_LOG" || true)"
+if [[ -z "$MASK_LINE" ]]; then
+  tail -n 60 "$RUN_LOG" >&2
+  fail "missing probe_tuple_arr_capacity output line for fn=$TARGET_FN"
+fi
+MASK="${MASK_LINE##*mask=}"
+# Both tuple slots are [f64; 2] arrays -> mask should be 3 (bits 0 and 1).
+# 0 is exactly what the old 4096-entry cap would have silently left behind
+# for the 4097th collected name.
+if [[ "$MASK" != "3" ]]; then
+  tail -n 60 "$RUN_LOG" >&2
+  fail "fn=$TARGET_FN (entry $LAST of $N, past the old 4096-entry cap) has mask=$MASK, expected 3 -- its tuple-array metadata was dropped"
+fi
+
+echo "[madaros-tuple-arr-capacity-boundary] PASS: entry $LAST of $N distinct tuple-array-returning functions has mask=$MASK (correctly classified past the old 4096-entry cap)"
