@@ -4,14 +4,14 @@ authority: repo_only
 audience: users
 last_validated: 2026-08-29
 validated_by: codex
-source_of_truth: stdlib/hardware/pireus/operator_genome.sio
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.concepts.pireus-operator-genome
 -->
 
 # Pireus Operator Genome
 
 Concept-ID: `SOUNIO-PIREUS-OPERATOR-GENOME`
 
-Status: `PARITY_OPEN` (Lean/Koka/C++ parity permitted, not executed)
+Status: garden (Lean/Koka/C++ parity permitted, not executed)
 
 Semantic-Lane-ID: `pireus-operator-genome-v3-20260829`
 

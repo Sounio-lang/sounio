@@ -4,12 +4,12 @@ authority: repo_only
 audience: users
 last_validated: 2026-08-29
 validated_by: codex
-source_of_truth: stdlib/hardware/pireus/cubic_operator_forge.sio
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.concepts.pireus-cubic-operator-forge
 -->
 
 # Pireus Cubic Operator Forge
 
-Status: `PARITY_OPEN` (generation frozen; no parity implementation executed)
+Status: garden (generation frozen; no parity implementation executed)
 
 Concept-ID: `SOUNIO-PIREUS-CUBIC-OPERATOR-FORGE`
 
