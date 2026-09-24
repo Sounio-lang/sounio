@@ -5757,6 +5757,20 @@ fn lowerer_lower_fn_params_mut(
                     // per-local classification at all, so an indirect call
                     // through it read the array through the integer path.
                     lowerer_mark_local_fn_ptr_ret_array_mut(lo, (*list).head.name)
+                } else if lower_type_expr_fn_return_eventually_array_of_f64(&(*list).head.ty) {
+                    // Review follow-up (#2570): a function-VALUED parameter
+                    // whose chain is deeper than one layer (`f: fn() -> fn()
+                    // -> [f64; N]`) fell through every branch above with no
+                    // classification at all -- fn_ptr_ret_array only marks
+                    // the exactly-one-layer shape (like LOWER_FN_ARR_CHAIN
+                    // itself), and `let g = f(); let a = g(); a[0]` does not
+                    // propagate through a local-to-local call either (see
+                    // expr_ident_is_array_returning_fn_ref's own comment for
+                    // why), so `a[0]` silently read through the integer
+                    // path. lower_fn_arr_chain_collect_one refuses this same
+                    // shape for a NAMED function via reason 6; a parameter
+                    // of the identical shape needs the identical refusal.
+                    lower_fn_tuple_arr_fault(6, (*list).head.name)
                 } else if lower_type_expr_is_integer(&(*list).head.ty) {
                     lowerer_mark_local_scalar_kind_mut(lo, (*list).head.name, 1)
                 } else if lower_type_expr_is_bool(&(*list).head.ty) {
@@ -17286,6 +17300,17 @@ impl Lowerer {
                         // (lowerer_bind_local_mut) already sets it correctly
                         // -- `f()[i]` could still take the integer path in
                         // any function lowered through this path instead.
+                        //
+                        // Review follow-up (#2570): same gap as path-A's own
+                        // fn_ptr_ret_array branch -- a chain deeper than one
+                        // layer (`f: fn() -> fn() -> [f64; N]`) left this
+                        // write at 0 with no fault at all, silently
+                        // unclassified rather than refused. Fail closed the
+                        // same way path-A now does, matching the named-
+                        // function collector's reason 6.
+                        if !lower_type_expr_fn_returns_array_of_f64(&(*list).head.ty) && lower_type_expr_fn_return_eventually_array_of_f64(&(*list).head.ty) {
+                            lower_fn_tuple_arr_fault(6, (*list).head.name)
+                        }
                         (*(*locals).fn_ptr_ret_array).values[idx as usize] = if lower_type_expr_fn_returns_array_of_f64(&(*list).head.ty) { 1 } else { 0 }
                         (*locals).count = idx + 1
                     } else {

@@ -415,4 +415,59 @@ grep -Fq "function \`deep_outer\` returns a function chain more than one call de
   fail "two-layer array-chain diagnostic was missing or changed"
 }
 
-echo "[madaros-f64-lowering] PASS: one shared Madaros ELF passed dereference, global f64, direct capacity, imported capacity, imported wide-call, f64-array tuple table capacity (${TUPLE_CAP} ok, ${TUPLE_OVER} rejected), slot limit (slot $((SLOT_MAX - 1)) ok, slot ${SLOT_MAX} rejected), impl-method tuple coverage, array-chain table capacity (${TUPLE_CAP} ok, ${TUPLE_OVER} rejected), and array-chain depth refusal"
+# Array-chain depth refusal for a function-POINTER PARAMETER (Copilot review
+# follow-up, #2570), companion to CHAIN_DEPTH_DIR above which only covers a
+# NAMED function's own return type. lower_type_expr_fn_returns_array_of_f64
+# (the one-layer predicate consulted at parameter-binding time, both in the
+# path-A per-local binder and the path-B summary-array binder) is false for
+# `f: fn() -> fn() -> [f64; N]`, and neither binder had a fail-closed branch
+# for "one layer failed but the chain eventually reaches an array anyway" --
+# a parameter of this shape fell through with no classification, and
+# `let g = f(); let a = g(); a[0]` does not propagate through a local-to-
+# local call either (see expr_ident_is_array_returning_fn_ref's own
+# comment), so `a[0]` silently read through the integer path. Fixed by
+# raising the SAME reason-6 fault the named-function collector already
+# raises for this shape, at both parameter-binding call sites.
+CHAIN_DEPTH_PARAM_DIR="$WORK/arr-chain-depth-param"
+mkdir -p "$CHAIN_DEPTH_PARAM_DIR"
+cat > "$CHAIN_DEPTH_PARAM_DIR/main.sio" <<'SOUNIO'
+fn deep_inner() -> [f64; 2] {
+    var a: [f64; 2] = [0.0; 2]
+    a[0] = 1.5
+    a
+}
+
+fn deep_mid() -> fn() -> [f64; 2] {
+    deep_inner
+}
+
+fn take_deep(f: fn() -> fn() -> [f64; 2]) -> i32 with IO, Mut, Panic {
+    0
+}
+
+fn main() -> i32 with IO, Mut, Panic {
+    take_deep(deep_mid)
+}
+SOUNIO
+CHAIN_DEPTH_PARAM_OUT="$CHAIN_DEPTH_PARAM_DIR/main.elf"
+set +e
+MADAROS_RAW_BIN="$MADAROS_ELF" "$ROOT_DIR/bin/madaros" compile "$CHAIN_DEPTH_PARAM_DIR/main.sio" -o "$CHAIN_DEPTH_PARAM_OUT" >"$CHAIN_DEPTH_PARAM_DIR/compile.log" 2>&1
+chain_depth_param_rc=$?
+set -e
+if [[ "$chain_depth_param_rc" -eq 0 ]]; then
+  tail -n 40 "$CHAIN_DEPTH_PARAM_DIR/compile.log" >&2
+  fail "two-layer array-chain function-pointer PARAMETER witness compiled clean: a deep chain parameter is being silently misclassified again"
+fi
+if [[ "$chain_depth_param_rc" -ge 128 ]]; then
+  tail -n 40 "$CHAIN_DEPTH_PARAM_DIR/compile.log" >&2
+  fail "two-layer array-chain parameter witness terminated by signal rc=$chain_depth_param_rc"
+fi
+if [[ -e "$CHAIN_DEPTH_PARAM_OUT" ]]; then
+  fail "two-layer array-chain parameter rejection left an output artifact: $CHAIN_DEPTH_PARAM_OUT"
+fi
+grep -Fq "function \`f\` returns a function chain more than one call deep before" "$CHAIN_DEPTH_PARAM_DIR/compile.log" || {
+  tail -n 40 "$CHAIN_DEPTH_PARAM_DIR/compile.log" >&2
+  fail "two-layer array-chain parameter diagnostic was missing or changed"
+}
+
+echo "[madaros-f64-lowering] PASS: one shared Madaros ELF passed dereference, global f64, direct capacity, imported capacity, imported wide-call, f64-array tuple table capacity (${TUPLE_CAP} ok, ${TUPLE_OVER} rejected), slot limit (slot $((SLOT_MAX - 1)) ok, slot ${SLOT_MAX} rejected), impl-method tuple coverage, array-chain table capacity (${TUPLE_CAP} ok, ${TUPLE_OVER} rejected), array-chain depth refusal (named function and function-pointer parameter)"
