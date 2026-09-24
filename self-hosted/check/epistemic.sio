@@ -236,8 +236,13 @@ pub fn knowledge_validity_expr_non_negative(opt: Option<Box<Expr>>, kind: AstVal
                     // parse failure and rejecting here is sound and closes the
                     // hole where a malformed literal like "9999-99-99x" silently
                     // became a permissive (or, worse, an effectively ALWAYS)
-                    // bound instead of a type error.
-                    return parse_iso_date_to_f64((*e).name) > 0.0
+                    // bound instead of a type error. (*e).name is the RAW token
+                    // text INCLUDING the surrounding quote bytes -- must strip
+                    // them via ast_string_lit_payload first, or a well-formed
+                    // 10-byte date like "2026-01-01" arrives here as 12 bytes
+                    // and fails parse_iso_date_to_f64's exact-length check,
+                    // rejecting every valid ISO date literal.
+                    return parse_iso_date_to_f64(ast_string_lit_payload((*e).name)) > 0.0
                 }
                 // A deadline is a date string, not a bare number or any other
                 // expression shape.
@@ -307,6 +312,41 @@ fn struct_hash_combine(seed: i64, part: i64) -> i64 {
     (seed * 1000003) ^ part
 }
 
+// Exact (collision-checked) identity for the string/identifier CONTENT that
+// appears inside a ValidWhile predicate. ast_name_hash is DJB2-shaped and has
+// known short-string collisions -- e.g. "Az" and "BY" both hash to 5862176 --
+// so using it directly as identity let ValidWhile(Az) and ValidWhile(BY) be
+// wrongly treated as the same predicate; no amount of downstream mixing or
+// bit-masking can repair a collision that already happened at this leaf.
+// This append-only table interns each DISTINCT name by BYTE-FOR-BYTE
+// comparison (name_eq), never by hash, and returns its index: two different
+// names can never receive the same index, and the same name always gets the
+// same index, for the lifetime of one checker run.
+pub var VALIDWHILE_INTERN_NAMES: [Name; 512] = [Name { buf: [0; 384], len: 0 }; 512]
+pub var VALIDWHILE_INTERN_COUNT: i64 = 0
+
+fn validwhile_intern_name_exact(n: Name) -> (i64, bool) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < VALIDWHILE_INTERN_COUNT {
+        if name_eq(VALIDWHILE_INTERN_NAMES[i as usize], n) {
+            return (i, true)
+        }
+        i = i + 1
+    }
+    if VALIDWHILE_INTERN_COUNT < 512 {
+        VALIDWHILE_INTERN_NAMES[VALIDWHILE_INTERN_COUNT as usize] = n
+        VALIDWHILE_INTERN_COUNT = VALIDWHILE_INTERN_COUNT + 1
+        return (VALIDWHILE_INTERN_COUNT - 1, true)
+    }
+    // Table exhausted (512 distinct names referenced across every ValidWhile
+    // predicate in one compilation -- not a realistic corpus, but this must
+    // still fail closed rather than silently degrade to hash-based identity):
+    // report unknown, same as an unsupported expression shape, so this
+    // predicate never subsumes anything, including itself under a different
+    // source occurrence.
+    (0, false)
+}
+
 fn struct_hash_expr(opt: Option<Box<Expr>>) -> (i64, bool) with Mut, Panic, Div {
     match opt {
         None => (17, true)
@@ -326,11 +366,27 @@ fn struct_hash_expr(opt: Option<Box<Expr>>) -> (i64, bool) with Mut, Panic, Div 
             } else if ek == ExprKind::ExprBoolFalse {
                 (104, true)
             } else if ek == ExprKind::ExprStringLit {
-                (struct_hash_combine(105, ast_name_hash((*e).name)), true)
+                // (*e).name is the raw token text including surrounding quotes;
+                // strip them so the identity reflects the string's actual
+                // content. Interned exactly (not just hashed) for the same
+                // collision reason as ExprIdent below.
+                let interned = validwhile_intern_name_exact(ast_string_lit_payload((*e).name))
+                if !interned.1 {
+                    (STRUCT_HASH_UNKNOWN, false)
+                } else {
+                    (struct_hash_combine(105, interned.0), true)
+                }
             } else if ek == ExprKind::ExprCharLit {
                 (struct_hash_combine(106, (*e).int_val), true)
             } else if ek == ExprKind::ExprIdent {
-                (struct_hash_combine(107, ast_name_hash((*e).name)), true)
+                // Exact (collision-checked) identity, not ast_name_hash directly
+                // -- see validwhile_intern_name_exact's doc comment.
+                let interned = validwhile_intern_name_exact((*e).name)
+                if !interned.1 {
+                    (STRUCT_HASH_UNKNOWN, false)
+                } else {
+                    (struct_hash_combine(107, interned.0), true)
+                }
             } else if ek == ExprKind::ExprBinary {
                 let op_tag = binary_op_hash_tag((*e).bin_op)
                 let lpair = struct_hash_expr((*e).left)
@@ -350,10 +406,11 @@ fn struct_hash_expr(opt: Option<Box<Expr>>) -> (i64, bool) with Mut, Panic, Div 
                 }
             } else if ek == ExprKind::ExprFieldAccess {
                 let base_pair = struct_hash_expr((*e).left)
-                if !base_pair.1 {
+                let field_interned = validwhile_intern_name_exact((*e).name)
+                if !base_pair.1 || !field_interned.1 {
                     (STRUCT_HASH_UNKNOWN, false)
                 } else {
-                    (struct_hash_combine(struct_hash_combine(110, ast_name_hash((*e).name)), base_pair.0), true)
+                    (struct_hash_combine(struct_hash_combine(110, field_interned.0), base_pair.0), true)
                 }
             } else {
                 (STRUCT_HASH_UNKNOWN, false)
@@ -551,7 +608,9 @@ pub fn knowledge_validity_expr_to_f64(opt: Option<Box<Expr>>) -> f64 {
             } else if (*e).kind == ExprKind::ExprFloatLit {
                 (*e).float_val
             } else if (*e).kind == ExprKind::ExprStringLit {
-                parse_iso_date_to_f64((*e).name)
+                // Same quote-stripping fix as knowledge_validity_expr_non_negative --
+                // (*e).name is the raw token text including surrounding quotes.
+                parse_iso_date_to_f64(ast_string_lit_payload((*e).name))
             } else {
                 0.0
             }
