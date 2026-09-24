@@ -934,6 +934,22 @@ pub fn lower_use_modules_collect(items: &Option<Box<ItemList>>) with Mut, Panic,
             Some(list) => {
                 let item_ref = &(*list).head
                 if item_ref.kind == ItemKind::ItemUse {
+                    // Records every segment as a POSITIVE-EVIDENCE candidate
+                    // module name. This cannot exclude a path-form NAMED
+                    // import's terminal (`use a::b::specific_fn;`) here: the
+                    // AST gives no way to tell that shape apart from a
+                    // genuine whole-module import (`use a::b;`) -- both are
+                    // `use_glob=false, use_items=None, seg_count>=2`,
+                    // syntactically identical. Registering the terminal
+                    // regardless is what review comment 4090734484 (round 5)
+                    // flagged: `use epistemic::propagate::monte_carlo;` is
+                    // real (tests/stdlib/epistemic/test_stiff_ode_knightian_mc.sio),
+                    // `monte_carlo` is a function, not a module -- but the fix
+                    // belongs at callee_path_module_stripped_name below,
+                    // where the full-program fn table is guaranteed complete
+                    // (body lowering runs after every module's preregister
+                    // pass) and can settle the ambiguity semantically:
+                    // exclude a segment that also names a real fn.
                     var k: i64 = 0
                     while k < item_ref.use_path.seg_count {
                         let use_seg = lower_string_list_nth_name(item_ref.use_path.segments, k)
@@ -19183,7 +19199,21 @@ impl Lowerer {
             // Their uppercase spelling is still enough to stop module-prefix
             // stripping, so `af_mod::AfNum::quad` retains `AfNum_quad`.
             let c0 = if seg.len > 0 { (seg.buf[0] as i64) & 255 } else { 0 }
-            if !lower_use_module_known(seg) || self.callee_segment_names_type(seg) || (c0 >= 65 && c0 <= 90) {
+            // A segment that ALSO names a real top-level free function is not
+            // trustworthy positive evidence of a module (review comment
+            // 4090734484, round 5): lower_use_module_note cannot tell a
+            // path-form named-item import's terminal (`use a::b::specific_fn;`,
+            // where `specific_fn` is a function) apart from a genuine
+            // whole-module import (`use a::b;`) at registration time -- both
+            // are the same AST shape -- so it registers both. This is the
+            // semantic tie-breaker, checked against the full-program fn
+            // table (guaranteed complete: body lowering runs after every
+            // module's own preregister pass). `monte_carlo` (a real
+            // function, tests/stdlib/epistemic/test_stiff_ode_knightian_mc.sio's
+            // `use epistemic::propagate::monte_carlo;`) fails this and so is
+            // no longer trusted as a qualifier.
+            let seg_names_free_fn = lowerer_lookup_fn_id_by_name_ref(&self, seg) >= 0
+            if !lower_use_module_known(seg) || self.callee_segment_names_type(seg) || seg_names_free_fn || (c0 >= 65 && c0 <= 90) {
                 break
             }
             k = k + 1

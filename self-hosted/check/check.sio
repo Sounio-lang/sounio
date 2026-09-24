@@ -4762,6 +4762,22 @@ fn checker_string_list_nth_name(sl: StringList, k: i64) -> Name with Mut, Panic,
     }
 }
 
+// Records every segment of a `use` path as a POSITIVE-EVIDENCE candidate
+// module name. This cannot exclude a path-form NAMED import's terminal
+// (`use a::b::specific_fn;`) here: the AST gives no way to tell that shape
+// apart from a genuine whole-module import (`use a::b;`) where the last
+// segment really is the module -- both are `use_glob=false, use_items=None,
+// seg_count>=2`, syntactically identical (see checker_collect_use_item_inplace's
+// own long-standing comment on this exact ambiguity). Registering the
+// terminal here regardless is what review comments 4090734423 / 4090734484
+// (round 5) flagged: `use epistemic::propagate::monte_carlo;` is real
+// (tests/stdlib/epistemic/test_stiff_ode_knightian_mc.sio), `monte_carlo`
+// is a function, not a module -- but the FIX belongs at the point a
+// qualifier is actually validated (checker_path_qualifier_all_modules_known
+// below), where the full-program function-signature table is guaranteed
+// complete (this runs during check.sio's body-CHECK pass, after ALL
+// modules' collect passes finish) and can settle the ambiguity semantically:
+// exclude a segment that ALSO resolves to a real top-level function.
 fn checker_use_module_note_path(path: AstPath) with Mut, Panic, Div {
     var k: i64 = 0
     while k < path.seg_count {
@@ -4774,13 +4790,32 @@ fn checker_use_module_note_path(path: AstPath) with Mut, Panic, Div {
 // module for `path` to be treated as a qualified free-fn call rather than
 // (say) an unresolvable/invented namespace. Fewer than 2 segments means
 // there is no qualifier to validate.
-fn checker_path_qualifier_all_modules_known(path: AstPath) -> bool with Mut, Panic, Div {
+fn checker_path_qualifier_all_modules_known(c: *mut Checker, path: AstPath) -> bool with Mut, Panic, Div, Alloc, IO {
     if path.seg_count < 2 {
         return false
     }
     var k: i64 = 0
     while k < path.seg_count - 1 {
-        if !checker_use_module_known(checker_string_list_nth_name(path.segments, k)) {
+        let seg = checker_string_list_nth_name(path.segments, k)
+        if !checker_use_module_known(seg) {
+            return false
+        }
+        // A segment that ALSO resolves to a real top-level free function is
+        // not trustworthy positive evidence of a module (review comments
+        // 4090734423 / 4090734484, round 5): checker_use_module_note_path
+        // cannot tell a path-form named-item import's terminal
+        // (`use a::b::specific_fn;`, where `specific_fn` is a function) apart
+        // from a genuine whole-module import (`use a::b;`) at registration
+        // time -- both are the same AST shape -- so it registers both. This
+        // is the semantic tie-breaker: `checker_fn_sigs_find_inplace` reads
+        // the full-program signature table, guaranteed complete here (this
+        // runs during the body-CHECK pass, after every module's own collect
+        // pass has already finished). `monte_carlo` (a real function,
+        // tests/stdlib/epistemic/test_stiff_ode_knightian_mc.sio's
+        // `use epistemic::propagate::monte_carlo;`) fails this and so is no
+        // longer trusted as a qualifier; `tc_c` (a real module with no
+        // same-named function anywhere) passes it and stays trusted.
+        if checker_fn_sigs_find_inplace(c, seg) >= 0 {
             return false
         }
         k = k + 1
@@ -11008,7 +11043,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
                             // LOWER_USE_MODULE_HASH performs) before trusting
                             // the bare-name match.
                             let free_fn_sig_id = checker_fn_sigs_find_inplace(c, path_method_name)
-                            if free_fn_sig_id < 0 || !checker_path_qualifier_all_modules_known((*callee_expr).path) {
+                            if free_fn_sig_id < 0 || !checker_path_qualifier_all_modules_known(c, (*callee_expr).path) {
                                 checker_report_warning_at_mut(c, e.span, 44, 0, 0, 0)
                             } else {
                                 direct_sig_id = free_fn_sig_id
