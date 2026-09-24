@@ -1586,6 +1586,196 @@ fn test_avx_octonion_mul_starts_xor() -> bool with Mut, Panic, Div {
     avx_check_byte(e, 4, 0x57)
 }
 
+// ----------------------------------------------------------------------------
+// Decode helpers for the octonion-multiply sign/operand regression below.
+// These invert avx_encode_evex_b1/b2/b3 (see their doc comments above) to
+// recover (opcode, dst, src1/vvvv, src2/rm) from an emitted 6-byte EVEX
+// register-direct instruction at byte offset `base` in the buffer.
+// ----------------------------------------------------------------------------
+
+fn avx_decode_evex_opcode(e: Avx512Emitter, base: i64) -> i64 with Div, Panic {
+    avx_read_byte(e, base + 4)
+}
+
+// dst = ModRM.reg (3 bits) | R (inverted P0 bit7, bit3) | R' (inverted P0 bit4, bit4)
+fn avx_decode_evex_dst(e: Avx512Emitter, base: i64) -> i64 with Div, Panic {
+    let b1 = avx_read_byte(e, base + 1)
+    let modrm = avx_read_byte(e, base + 5)
+    let reg_field = (modrm >> 3) & 7
+    let r_bit3 = avx_invert_bit((b1 >> 7) & 1)
+    let rp_bit4 = avx_invert_bit((b1 >> 4) & 1)
+    reg_field | (r_bit3 << 3) | (rp_bit4 << 4)
+}
+
+// src1 (vvvv) = inverted 4-bit vvvv field (P2 bits 3-6) | V' (inverted P3 bit3, bit4)
+fn avx_decode_evex_src1(e: Avx512Emitter, base: i64) -> i64 with Div, Panic {
+    let b2 = avx_read_byte(e, base + 2)
+    let b3 = avx_read_byte(e, base + 3)
+    let vvvv = ((b2 >> 3) & 15) ^ 15
+    let vp_bit4 = avx_invert_bit((b3 >> 3) & 1)
+    vvvv | (vp_bit4 << 4)
+}
+
+// src2 (register-direct r/m) = ModRM.rm (3 bits) | B (inverted P0 bit5, bit3)
+// | X (inverted P0 bit6, bit4) -- EVEX repurposes X as the r/m register's 5th
+// bit for register-direct operands (see avx_emit_evex_rr's src2 X-bit fix).
+fn avx_decode_evex_src2(e: Avx512Emitter, base: i64) -> i64 with Div, Panic {
+    let b1 = avx_read_byte(e, base + 1)
+    let modrm = avx_read_byte(e, base + 5)
+    let rm_field = modrm & 7
+    let b_bit3 = avx_invert_bit((b1 >> 5) & 1)
+    let x_bit4 = avx_invert_bit((b1 >> 6) & 1)
+    rm_field | (b_bit3 << 3) | (x_bit4 << 4)
+}
+
+fn avx_octonion_expect(e: Avx512Emitter, base: i64, opcode: i64, dst: i64, src1: i64, src2: i64) -> bool with Div, Panic {
+    if avx_decode_evex_opcode(e, base) != opcode { return false }
+    if avx_decode_evex_dst(e, base) != dst { return false }
+    if avx_decode_evex_src1(e, base) != src1 { return false }
+    if avx_decode_evex_src2(e, base) != src2 { return false }
+    true
+}
+
+let AVX_OP_VMULPD: i64 = 0x59
+let AVX_OP_VFMADD231PD: i64 = 0xB8
+let AVX_OP_VFNMADD231PD: i64 = 0xBC
+
+// T39b: Octonion multiply's 64 arithmetic instructions (8 rows x (1 vmulpd +
+// 7 vfmadd231pd/vfnmadd231pd)) match the exact operand order and +/- sign
+// documented in avx512_octonion_mul's own per-row comments above. Unlike
+// T38/T39 (which only check total kernel length and the leading vxorpd),
+// this decodes every one of the 64 EVEX instructions and checks its opcode
+// (vfmadd231pd = add, vfnmadd231pd = subtract), destination, and both
+// operands -- so a single flipped sign or swapped operand anywhere in the
+// octonion product (the exact bug class this PR's review was about) fails
+// this test instead of silently producing a wrong result.
+fn test_avx_octonion_mul_instruction_table() -> bool with Mut, Panic, Div {
+    var e = avx_emitter_new()
+    e = avx512_octonion_mul(e)
+
+    // a0..a7 = zmm16..23, b0..b7 = zmm24..31 (see avx512_octonion_mul).
+    let a0 = 16
+    let a1 = 17
+    let a2 = 18
+    let a3 = 19
+    let a4 = 20
+    let a5 = 21
+    let a6 = 22
+    let a7 = 23
+    let b0 = 24
+    let b1 = 25
+    let b2 = 26
+    let b3 = 27
+    let b4 = 28
+    let b5 = 29
+    let b6 = 30
+    let b7 = 31
+
+    // Result registers: r0=zmm2, r1=zmm4, r2=zmm5, r3=zmm6, r4=zmm7, r5=zmm8,
+    // r6=zmm9, r7=zmm10 (see the `let r3 = avx_reg_zmm(6)` etc. above).
+    let dst0 = 2
+    let dst1 = 4
+    let dst2 = 5
+    let dst3 = 6
+    let dst4 = 7
+    let dst5 = 8
+    let dst6 = 9
+    let dst7 = 10
+
+    // Arithmetic instructions start after 1 vxorpd (6 bytes) + 16 vpermpd
+    // (7 bytes each = 112), i.e. byte offset 118; each is 6 bytes.
+    let base0: i64 = 118
+
+    // r0 = a0*b0 - a1*b1 - a2*b2 - a3*b3 - a4*b4 - a5*b5 - a6*b6 - a7*b7
+    if avx_octonion_expect(e, base0 + 0 * 6, AVX_OP_VMULPD, dst0, a0, b0) == false { return false }
+    if avx_octonion_expect(e, base0 + 1 * 6, AVX_OP_VFNMADD231PD, dst0, a1, b1) == false { return false }
+    if avx_octonion_expect(e, base0 + 2 * 6, AVX_OP_VFNMADD231PD, dst0, a2, b2) == false { return false }
+    if avx_octonion_expect(e, base0 + 3 * 6, AVX_OP_VFNMADD231PD, dst0, a3, b3) == false { return false }
+    if avx_octonion_expect(e, base0 + 4 * 6, AVX_OP_VFNMADD231PD, dst0, a4, b4) == false { return false }
+    if avx_octonion_expect(e, base0 + 5 * 6, AVX_OP_VFNMADD231PD, dst0, a5, b5) == false { return false }
+    if avx_octonion_expect(e, base0 + 6 * 6, AVX_OP_VFNMADD231PD, dst0, a6, b6) == false { return false }
+    if avx_octonion_expect(e, base0 + 7 * 6, AVX_OP_VFNMADD231PD, dst0, a7, b7) == false { return false }
+
+    let base1 = base0 + 8 * 6
+    // r1 = a0*b1 + a1*b0 + a2*b3 - a3*b2 + a4*b5 - a5*b4 - a6*b7 + a7*b6
+    if avx_octonion_expect(e, base1 + 0 * 6, AVX_OP_VMULPD, dst1, a0, b1) == false { return false }
+    if avx_octonion_expect(e, base1 + 1 * 6, AVX_OP_VFMADD231PD, dst1, a1, b0) == false { return false }
+    if avx_octonion_expect(e, base1 + 2 * 6, AVX_OP_VFMADD231PD, dst1, a2, b3) == false { return false }
+    if avx_octonion_expect(e, base1 + 3 * 6, AVX_OP_VFNMADD231PD, dst1, a3, b2) == false { return false }
+    if avx_octonion_expect(e, base1 + 4 * 6, AVX_OP_VFMADD231PD, dst1, a4, b5) == false { return false }
+    if avx_octonion_expect(e, base1 + 5 * 6, AVX_OP_VFNMADD231PD, dst1, a5, b4) == false { return false }
+    if avx_octonion_expect(e, base1 + 6 * 6, AVX_OP_VFNMADD231PD, dst1, a6, b7) == false { return false }
+    if avx_octonion_expect(e, base1 + 7 * 6, AVX_OP_VFMADD231PD, dst1, a7, b6) == false { return false }
+
+    let base2 = base1 + 8 * 6
+    // r2 = a0*b2 - a1*b3 + a2*b0 + a3*b1 + a4*b6 + a5*b7 - a6*b4 - a7*b5
+    if avx_octonion_expect(e, base2 + 0 * 6, AVX_OP_VMULPD, dst2, a0, b2) == false { return false }
+    if avx_octonion_expect(e, base2 + 1 * 6, AVX_OP_VFNMADD231PD, dst2, a1, b3) == false { return false }
+    if avx_octonion_expect(e, base2 + 2 * 6, AVX_OP_VFMADD231PD, dst2, a2, b0) == false { return false }
+    if avx_octonion_expect(e, base2 + 3 * 6, AVX_OP_VFMADD231PD, dst2, a3, b1) == false { return false }
+    if avx_octonion_expect(e, base2 + 4 * 6, AVX_OP_VFMADD231PD, dst2, a4, b6) == false { return false }
+    if avx_octonion_expect(e, base2 + 5 * 6, AVX_OP_VFMADD231PD, dst2, a5, b7) == false { return false }
+    if avx_octonion_expect(e, base2 + 6 * 6, AVX_OP_VFNMADD231PD, dst2, a6, b4) == false { return false }
+    if avx_octonion_expect(e, base2 + 7 * 6, AVX_OP_VFNMADD231PD, dst2, a7, b5) == false { return false }
+
+    let base3 = base2 + 8 * 6
+    // r3 = a0*b3 + a1*b2 - a2*b1 + a3*b0 + a4*b7 - a5*b6 + a6*b5 - a7*b4
+    if avx_octonion_expect(e, base3 + 0 * 6, AVX_OP_VMULPD, dst3, a0, b3) == false { return false }
+    if avx_octonion_expect(e, base3 + 1 * 6, AVX_OP_VFMADD231PD, dst3, a1, b2) == false { return false }
+    if avx_octonion_expect(e, base3 + 2 * 6, AVX_OP_VFNMADD231PD, dst3, a2, b1) == false { return false }
+    if avx_octonion_expect(e, base3 + 3 * 6, AVX_OP_VFMADD231PD, dst3, a3, b0) == false { return false }
+    if avx_octonion_expect(e, base3 + 4 * 6, AVX_OP_VFMADD231PD, dst3, a4, b7) == false { return false }
+    if avx_octonion_expect(e, base3 + 5 * 6, AVX_OP_VFNMADD231PD, dst3, a5, b6) == false { return false }
+    if avx_octonion_expect(e, base3 + 6 * 6, AVX_OP_VFMADD231PD, dst3, a6, b5) == false { return false }
+    if avx_octonion_expect(e, base3 + 7 * 6, AVX_OP_VFNMADD231PD, dst3, a7, b4) == false { return false }
+
+    let base4 = base3 + 8 * 6
+    // r4 = a0*b4 - a1*b5 - a2*b6 - a3*b7 + a4*b0 + a5*b1 + a6*b2 + a7*b3
+    if avx_octonion_expect(e, base4 + 0 * 6, AVX_OP_VMULPD, dst4, a0, b4) == false { return false }
+    if avx_octonion_expect(e, base4 + 1 * 6, AVX_OP_VFNMADD231PD, dst4, a1, b5) == false { return false }
+    if avx_octonion_expect(e, base4 + 2 * 6, AVX_OP_VFNMADD231PD, dst4, a2, b6) == false { return false }
+    if avx_octonion_expect(e, base4 + 3 * 6, AVX_OP_VFNMADD231PD, dst4, a3, b7) == false { return false }
+    if avx_octonion_expect(e, base4 + 4 * 6, AVX_OP_VFMADD231PD, dst4, a4, b0) == false { return false }
+    if avx_octonion_expect(e, base4 + 5 * 6, AVX_OP_VFMADD231PD, dst4, a5, b1) == false { return false }
+    if avx_octonion_expect(e, base4 + 6 * 6, AVX_OP_VFMADD231PD, dst4, a6, b2) == false { return false }
+    if avx_octonion_expect(e, base4 + 7 * 6, AVX_OP_VFMADD231PD, dst4, a7, b3) == false { return false }
+
+    let base5 = base4 + 8 * 6
+    // r5 = a0*b5 + a1*b4 - a2*b7 + a3*b6 - a4*b1 + a5*b0 - a6*b3 + a7*b2
+    if avx_octonion_expect(e, base5 + 0 * 6, AVX_OP_VMULPD, dst5, a0, b5) == false { return false }
+    if avx_octonion_expect(e, base5 + 1 * 6, AVX_OP_VFMADD231PD, dst5, a1, b4) == false { return false }
+    if avx_octonion_expect(e, base5 + 2 * 6, AVX_OP_VFNMADD231PD, dst5, a2, b7) == false { return false }
+    if avx_octonion_expect(e, base5 + 3 * 6, AVX_OP_VFMADD231PD, dst5, a3, b6) == false { return false }
+    if avx_octonion_expect(e, base5 + 4 * 6, AVX_OP_VFNMADD231PD, dst5, a4, b1) == false { return false }
+    if avx_octonion_expect(e, base5 + 5 * 6, AVX_OP_VFMADD231PD, dst5, a5, b0) == false { return false }
+    if avx_octonion_expect(e, base5 + 6 * 6, AVX_OP_VFNMADD231PD, dst5, a6, b3) == false { return false }
+    if avx_octonion_expect(e, base5 + 7 * 6, AVX_OP_VFMADD231PD, dst5, a7, b2) == false { return false }
+
+    let base6 = base5 + 8 * 6
+    // r6 = a0*b6 + a1*b7 + a2*b4 - a3*b5 - a4*b2 + a5*b3 + a6*b0 - a7*b1
+    if avx_octonion_expect(e, base6 + 0 * 6, AVX_OP_VMULPD, dst6, a0, b6) == false { return false }
+    if avx_octonion_expect(e, base6 + 1 * 6, AVX_OP_VFMADD231PD, dst6, a1, b7) == false { return false }
+    if avx_octonion_expect(e, base6 + 2 * 6, AVX_OP_VFMADD231PD, dst6, a2, b4) == false { return false }
+    if avx_octonion_expect(e, base6 + 3 * 6, AVX_OP_VFNMADD231PD, dst6, a3, b5) == false { return false }
+    if avx_octonion_expect(e, base6 + 4 * 6, AVX_OP_VFNMADD231PD, dst6, a4, b2) == false { return false }
+    if avx_octonion_expect(e, base6 + 5 * 6, AVX_OP_VFMADD231PD, dst6, a5, b3) == false { return false }
+    if avx_octonion_expect(e, base6 + 6 * 6, AVX_OP_VFMADD231PD, dst6, a6, b0) == false { return false }
+    if avx_octonion_expect(e, base6 + 7 * 6, AVX_OP_VFNMADD231PD, dst6, a7, b1) == false { return false }
+
+    let base7 = base6 + 8 * 6
+    // r7 = a0*b7 - a1*b6 + a2*b5 + a3*b4 - a4*b3 - a5*b2 + a6*b1 + a7*b0
+    if avx_octonion_expect(e, base7 + 0 * 6, AVX_OP_VMULPD, dst7, a0, b7) == false { return false }
+    if avx_octonion_expect(e, base7 + 1 * 6, AVX_OP_VFNMADD231PD, dst7, a1, b6) == false { return false }
+    if avx_octonion_expect(e, base7 + 2 * 6, AVX_OP_VFMADD231PD, dst7, a2, b5) == false { return false }
+    if avx_octonion_expect(e, base7 + 3 * 6, AVX_OP_VFMADD231PD, dst7, a3, b4) == false { return false }
+    if avx_octonion_expect(e, base7 + 4 * 6, AVX_OP_VFNMADD231PD, dst7, a4, b3) == false { return false }
+    if avx_octonion_expect(e, base7 + 5 * 6, AVX_OP_VFNMADD231PD, dst7, a5, b2) == false { return false }
+    if avx_octonion_expect(e, base7 + 6 * 6, AVX_OP_VFMADD231PD, dst7, a6, b1) == false { return false }
+    if avx_octonion_expect(e, base7 + 7 * 6, AVX_OP_VFMADD231PD, dst7, a7, b0) == false { return false }
+
+    true
+}
+
 // T40: Quaternion multiply emits instructions
 fn test_avx_quat_mul_length() -> bool with Mut, Panic, Div {
     var e = avx_emitter_new()
@@ -1920,7 +2110,7 @@ fn test_avx_vmovapd_rr_length() -> bool with Mut, Panic, Div {
 
 pub fn run_avx512_tests() -> i32 with IO, Mut, Panic, Div {
     var passed: i64 = 0
-    let total: i64 = 71
+    let total: i64 = 72
 
     print("=== AVX-512 Instruction Emitter Tests ===\n")
 
@@ -1963,6 +2153,7 @@ pub fn run_avx512_tests() -> i32 with IO, Mut, Panic, Div {
     if test_avx_vmovapd_store_opcode() { passed = passed + 1; print("  T37 OK (vmovapd store opcode)\n") } else { print("  FAIL: T37 vmovapd store opcode\n") }
     if test_avx_octonion_mul_length() { passed = passed + 1; print("  T38 OK (octonion mul length)\n") } else { print("  FAIL: T38 octonion mul length\n") }
     if test_avx_octonion_mul_starts_xor() { passed = passed + 1; print("  T39 OK (octonion mul starts xor)\n") } else { print("  FAIL: T39 octonion mul starts xor\n") }
+    if test_avx_octonion_mul_instruction_table() { passed = passed + 1; print("  T39b OK (octonion mul instruction table)\n") } else { print("  FAIL: T39b octonion mul instruction table\n") }
     if test_avx_quat_mul_length() { passed = passed + 1; print("  T40 OK (quat mul length)\n") } else { print("  FAIL: T40 quat mul length\n") }
     if test_avx_quat_conj_length() { passed = passed + 1; print("  T41 OK (quat conj length)\n") } else { print("  FAIL: T41 quat conj length\n") }
     if test_avx_rounding_mode_encoding() { passed = passed + 1; print("  T42 OK (rounding mode encoding)\n") } else { print("  FAIL: T42 rounding mode encoding\n") }
