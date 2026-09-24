@@ -793,23 +793,50 @@ var LOWER_USE_MODULE_OVERFLOWED: bool = false
 pub fn lower_use_module_reset() with Mut {
     LOWER_USE_MODULE_COUNT = 0
     LOWER_USE_MODULE_OVERFLOWED = false
+    LOWER_IMPL_METHOD_COUNT = 0
 }
 // fo_name_hash is a djb2 variant with real collisions (e.g. "aar" and "ac0"
 // both hash to 193485948) and only covers a name's first 64 bytes. Hash
-// alone is not identity: store the full Name alongside it and compare
-// equality (ir_name_eq, as the IR name pool does) after a hash match, so a
-// colliding non-module segment is never mistaken for an imported module.
-var LOWER_USE_MODULE_NAME: [Name; 1024] = [ir_empty_name(); 1024]
+// alone is not identity: store the full segment text alongside it and
+// compare bytes after a hash match, so a colliding non-module segment is
+// never mistaken for an imported module.
+//
+// Stored as a flat scalar byte buffer (LOWER_USE_MODULE_BUF/LEN), NOT
+// `[Name; 1024]` (a 392-byte struct array): a `[Name; 1024]` global here was
+// observed to corrupt on both read and write (hash stayed correct, but the
+// stored len/buf came back as unrelated stack-address-shaped garbage) even
+// after eliminating every by-value Name copy at the call sites -- reproduced
+// on this branch's own base commit (692e709), independent of any of the 4
+// review findings, so this is a pre-existing miscompilation in this
+// compiler's own codegen for large-struct global array elements, not
+// something introduced by this PR. A module segment name is always a short
+// identifier; MODULE_SEG_MAX bytes is generous headroom. Scalar (i8/i64)
+// global arrays are the pattern already proven reliable throughout this file
+// (LOWER_USE_MODULE_HASH itself, LOWER_ENUM_VARIANT_PTRS, FN_PARAM_NAME_OFF, …).
+let LOWER_USE_MODULE_SEG_MAX: i64 = 64
+var LOWER_USE_MODULE_LEN: [i64; 1024] = [0; 1024]
+var LOWER_USE_MODULE_BUF: [i8; 65536] = [0; 65536]
 
 fn lower_use_module_known(n: Name) -> bool with Mut, Panic, Div {
-    if n.len <= 0 {
+    if n.len <= 0 || n.len > LOWER_USE_MODULE_SEG_MAX {
         return false
     }
     let h = fo_name_hash(n)
     var i: i64 = 0
     while i < LOWER_USE_MODULE_COUNT {
-        if LOWER_USE_MODULE_HASH[i as usize] == h && ir_name_eq(LOWER_USE_MODULE_NAME[i as usize], n) {
-            return true
+        if LOWER_USE_MODULE_HASH[i as usize] == h && LOWER_USE_MODULE_LEN[i as usize] == n.len {
+            let base = i * LOWER_USE_MODULE_SEG_MAX
+            var eq = true
+            var j: i64 = 0
+            while j < n.len {
+                if LOWER_USE_MODULE_BUF[(base + j) as usize] != n.buf[j as usize] {
+                    eq = false
+                }
+                j = j + 1
+            }
+            if eq {
+                return true
+            }
         }
         i = i + 1
     }
@@ -817,7 +844,7 @@ fn lower_use_module_known(n: Name) -> bool with Mut, Panic, Div {
 }
 
 fn lower_use_module_note(n: Name) with Mut, Panic, Div {
-    if n.len <= 0 {
+    if n.len <= 0 || n.len > LOWER_USE_MODULE_SEG_MAX {
         return
     }
     let c0 = (n.buf[0] as i64) & 255
@@ -843,8 +870,15 @@ fn lower_use_module_note(n: Name) with Mut, Panic, Div {
         }
         return
     }
-    LOWER_USE_MODULE_HASH[LOWER_USE_MODULE_COUNT as usize] = fo_name_hash(n)
-    LOWER_USE_MODULE_NAME[LOWER_USE_MODULE_COUNT as usize] = n
+    let use_idx = LOWER_USE_MODULE_COUNT
+    LOWER_USE_MODULE_HASH[use_idx as usize] = fo_name_hash(n)
+    let use_base = use_idx * LOWER_USE_MODULE_SEG_MAX
+    var use_ci: i64 = 0
+    while use_ci < n.len {
+        LOWER_USE_MODULE_BUF[(use_base + use_ci) as usize] = n.buf[use_ci as usize]
+        use_ci = use_ci + 1
+    }
+    LOWER_USE_MODULE_LEN[use_idx as usize] = n.len
     LOWER_USE_MODULE_COUNT = LOWER_USE_MODULE_COUNT + 1
 }
 
@@ -865,6 +899,11 @@ fn lower_string_list_nth_name(sl: StringList, k: i64) -> Name with Mut, Panic, D
 // item; noting `f` is harmless because a call spelled `f::g` still has to pass
 // the call-site type checks.
 pub fn lower_use_modules_collect(items: &Option<Box<ItemList>>) with Mut, Panic, Div, Alloc {
+    // Same every-module-before-body-lowering timing this function already
+    // provides for LOWER_USE_MODULE_HASH: populate the impl-method registry
+    // here too so callee_path_module_stripped_name always sees a complete
+    // set before any call site is resolved.
+    lower_impl_methods_collect(items)
     var current = items
     while true {
         match *current {
@@ -873,7 +912,8 @@ pub fn lower_use_modules_collect(items: &Option<Box<ItemList>>) with Mut, Panic,
                 if item_ref.kind == ItemKind::ItemUse {
                     var k: i64 = 0
                     while k < item_ref.use_path.seg_count {
-                        lower_use_module_note(lower_string_list_nth_name(item_ref.use_path.segments, k))
+                        let use_seg = lower_string_list_nth_name(item_ref.use_path.segments, k)
+                        lower_use_module_note(use_seg)
                         k = k + 1
                     }
                 }
@@ -2509,6 +2549,23 @@ fn lowerer_lower_program_bodies_mut(
     lo: &! Lowerer,
     items: &Option<Box<ItemList>>
 ) with Mut, Panic, Div, Alloc, IO {
+    // This is the seed/main module's real body-lowering entry (called once,
+    // with the seed program's own DCE-filtered items, from
+    // lower_program_bodies_from_summary_with_epistemic_boxed_owned). Like
+    // lower_program_items_ref (see its #2516 comment), this path never
+    // re-established LOWER_USE_MODULE_HASH/LOWER_IMPL_METHOD_HASH for the
+    // items it is about to lower calls against -- it only relied on whatever
+    // state an earlier, unrelated pass happened to leave behind. Observed on
+    // this branch's own base commit (692e709), independent of any of the 4
+    // review findings: by the time this function ran, LOWER_USE_MODULE_HASH's
+    // entry count was correct but individual entries' Name content had gone
+    // stale/corrupt, so `af_mod::AfNum::quad(..)` fell through to the legacy
+    // first+last mangle and produced a body-less `af_mod_quad` ud2 stub
+    // (SIGILL) instead of `AfNum_quad`. Freshly re-collecting from `items`
+    // immediately before body lowering, right where the resolver actually
+    // reads it, removes the dependency on that stale residual state.
+    lower_use_module_reset()
+    lower_use_modules_collect(items)
     // Keep the multi-module FO table: the frontend may have pre-registered
     // imported helpers before entering this module.
     lowerer_fo_preregister_pure_fns_multipass_mut(lo, items)
@@ -7503,6 +7560,124 @@ pub fn lower_program_has_captured_closure_value_misuse_ref(prog: &Program) -> bo
     false
 }
 
+// Authoritative registry of mangled impl-method names (Type_method), populated
+// once per program from every ItemImpl's methods (see lower_impl_methods_collect,
+// called alongside lower_use_modules_collect -- same every-module-before-body-
+// lowering timing). This exists because `lowerer_lookup_fn_id_by_name_ref` only
+// answers "does ANY fn with this exact mangled name exist", which cannot tell a
+// real impl method from an unrelated top-level free fn that happens to be
+// spelled identically to a mangled name (e.g. `use m; m::f(..)` colliding with
+// an unrelated top-level `fn m_f(..)`). callee_path_module_stripped_name uses
+// this instead of a bare existence check to decide whether a lowercase-rooted
+// two-segment path is really `Type::method` or a module-qualified free fn.
+//
+// Stored as a flat scalar byte buffer (LOWER_IMPL_METHOD_BUF/LEN), NOT
+// `[Name; 4096]` (a 392-byte struct array) -- same reasoning as
+// LOWER_USE_MODULE_HASH's sibling registry just above: a `[Name; N]` global
+// array was observed to corrupt on both read and write in this compiler's
+// own codegen (hash stayed correct, stored len/buf came back as unrelated
+// stack-address-shaped garbage), reproduced on this branch's own base commit
+// (692e709), independent of any of the 4 review findings. Scalar (i8/i64)
+// global arrays are the pattern already proven reliable throughout this file.
+// A mangled `Type_method` name is well under IMPL_METHOD_SEG_MAX bytes.
+let LOWER_IMPL_METHOD_SEG_MAX: i64 = 128
+var LOWER_IMPL_METHOD_COUNT: i64 = 0
+var LOWER_IMPL_METHOD_HASH: [i64; 4096] = [0; 4096]
+var LOWER_IMPL_METHOD_LEN: [i64; 4096] = [0; 4096]
+var LOWER_IMPL_METHOD_BUF: [i8; 524288] = [0; 524288]
+
+pub fn lower_impl_method_known(n: Name) -> bool with Mut, Panic, Div {
+    if n.len <= 0 || n.len > LOWER_IMPL_METHOD_SEG_MAX {
+        return false
+    }
+    let h = fo_name_hash(n)
+    var i: i64 = 0
+    while i < LOWER_IMPL_METHOD_COUNT {
+        if LOWER_IMPL_METHOD_HASH[i as usize] == h && LOWER_IMPL_METHOD_LEN[i as usize] == n.len {
+            let base = i * LOWER_IMPL_METHOD_SEG_MAX
+            var eq = true
+            var j: i64 = 0
+            while j < n.len {
+                if LOWER_IMPL_METHOD_BUF[(base + j) as usize] != n.buf[j as usize] {
+                    eq = false
+                }
+                j = j + 1
+            }
+            if eq {
+                return true
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn lower_impl_method_note(n: Name) with Mut, Panic, Div {
+    if n.len <= 0 || n.len > LOWER_IMPL_METHOD_SEG_MAX {
+        return
+    }
+    if lower_impl_method_known(n) {
+        return
+    }
+    // Best-effort: an overflow here only widens the set of two-segment
+    // lowercase-rooted paths callee_path_module_stripped_name treats as
+    // module-qualified free-fn calls rather than lowercase-type methods,
+    // which is the existing (safe, positive-evidence) fallback behavior.
+    if LOWER_IMPL_METHOD_COUNT >= 4096 {
+        return
+    }
+    let idx = LOWER_IMPL_METHOD_COUNT
+    LOWER_IMPL_METHOD_HASH[idx as usize] = fo_name_hash(n)
+    let base = idx * LOWER_IMPL_METHOD_SEG_MAX
+    var ci: i64 = 0
+    while ci < n.len {
+        LOWER_IMPL_METHOD_BUF[(base + ci) as usize] = n.buf[ci as usize]
+        ci = ci + 1
+    }
+    LOWER_IMPL_METHOD_LEN[idx as usize] = n.len
+    LOWER_IMPL_METHOD_COUNT = idx + 1
+}
+
+fn lower_impl_methods_collect_list(type_name: Name, methods: &Option<Box<ItemList>>) with Mut, Panic, Div, Alloc {
+    var current = methods
+    while true {
+        match *current {
+            Some(list) => {
+                let head = &(*list).head
+                if head.kind == ItemKind::ItemFn {
+                    lower_impl_method_note(ir_mangle_method_name(type_name, head.name))
+                }
+                current = &(*list).tail
+            }
+            _ => break
+        }
+    }
+}
+
+// Record every method of every ItemImpl, mangled the same way the real
+// lowering passes mangle them (ir_mangle_method_name). Called alongside
+// lower_use_modules_collect so the registry is complete before any call
+// site resolution (callee_path_module_stripped_name) runs.
+pub fn lower_impl_methods_collect(items: &Option<Box<ItemList>>) with Mut, Panic, Div, Alloc {
+    var current = items
+    while true {
+        match *current {
+            Some(list) => {
+                let item_ref = &(*list).head
+                if item_ref.kind == ItemKind::ItemImpl {
+                    match item_ref.impl_def {
+                        Some(id) => {
+                            lower_impl_methods_collect_list(item_ref.name, &(*id).methods)
+                        }
+                        None => {}
+                    }
+                }
+                current = &(*list).tail
+            }
+            _ => break
+        }
+    }
+}
 
 impl Lowerer {
     fn current_fn_compile_strategy(self) -> i64 with Mut, Panic, Div {
@@ -13084,20 +13259,18 @@ impl Lowerer {
         if (*expr).kind != ExprKind::ExprCall { return 0 - 1 }
         match (*expr).left {
             Some(callee_expr) => {
-                var callee_name = ir_empty_name()
-                if (*callee_expr).kind == ExprKind::ExprIdent {
-                    callee_name = (*callee_expr).name
-                } else if (*callee_expr).kind == ExprKind::ExprPath {
-                    let first = ir_path_first_name((*callee_expr).path)
-                    let last = ir_path_last_name((*callee_expr).path)
-                    if first.len > 0 && last.len > 0 && !ir_name_eq(first, last) {
-                        callee_name = ir_mangle_method_name(first, last)
-                    } else {
-                        callee_name = first
-                    }
-                } else {
+                if (*callee_expr).kind != ExprKind::ExprIdent && (*callee_expr).kind != ExprKind::ExprPath {
                     return 0 - 1
                 }
+                // Resolve through the same module-qualified-path-aware
+                // resolver the emitted call target uses (expr_to_callee_name_ref
+                // / callee_path_module_stripped_name), not a separate
+                // first/last reconstruction -- otherwise `mod::make_array()`
+                // looks up `make_array`'s metadata under the plain name while
+                // the actual call target was correctly resolved, and a
+                // module-qualified call to a fixed-array-returning free fn
+                // loses its declared array length.
+                let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
                 let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
                 if fn_id >= 0 && fn_id < self.module.fn_count {
                     return ir_fn_get(&(*self.module), fn_id as usize).return_fixed_array_len
@@ -13116,20 +13289,12 @@ impl Lowerer {
         if (*expr).kind != ExprKind::ExprCall { return 0 - 1 }
         match (*expr).left {
             Some(callee_expr) => {
-                var callee_name = ir_empty_name()
-                if (*callee_expr).kind == ExprKind::ExprIdent {
-                    callee_name = (*callee_expr).name
-                } else if (*callee_expr).kind == ExprKind::ExprPath {
-                    let first = ir_path_first_name((*callee_expr).path)
-                    let last = ir_path_last_name((*callee_expr).path)
-                    if first.len > 0 && last.len > 0 && !ir_name_eq(first, last) {
-                        callee_name = ir_mangle_method_name(first, last)
-                    } else {
-                        callee_name = first
-                    }
-                } else {
+                if (*callee_expr).kind != ExprKind::ExprIdent && (*callee_expr).kind != ExprKind::ExprPath {
                     return 0 - 1
                 }
+                // Same resolver as the emitted call target -- see
+                // expr_call_return_fixed_array_len_ref.
+                let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
                 lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
             }
             None => 0 - 1,
@@ -13140,20 +13305,15 @@ impl Lowerer {
         if (*expr).kind != ExprKind::ExprCall { return ir_empty_name() }
         match (*expr).left {
             Some(callee_expr) => {
-                var callee_name = ir_empty_name()
-                if (*callee_expr).kind == ExprKind::ExprIdent {
-                    callee_name = (*callee_expr).name
-                } else if (*callee_expr).kind == ExprKind::ExprPath {
-                    let first = ir_path_first_name((*callee_expr).path)
-                    let last = ir_path_last_name((*callee_expr).path)
-                    if first.len > 0 && last.len > 0 && !ir_name_eq(first, last) {
-                        callee_name = ir_mangle_method_name(first, last)
-                    } else {
-                        callee_name = first
-                    }
-                } else {
+                if (*callee_expr).kind != ExprKind::ExprIdent && (*callee_expr).kind != ExprKind::ExprPath {
                     return ir_empty_name()
                 }
+                // Same resolver as the emitted call target -- see
+                // expr_call_return_fixed_array_len_ref. Without this, a
+                // module-qualified call to a struct-returning free fn (e.g.
+                // `mod::make_struct()`) lost the return layout needed by
+                // later indexing or field access.
+                let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
                 let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
                 self.return_struct_name_for_fn_id(fn_id)
             }
@@ -13165,20 +13325,12 @@ impl Lowerer {
         if (*expr).kind != ExprKind::ExprCall { return ir_empty_name() }
         match (*expr).left {
             Some(callee_expr) => {
-                var callee_name = ir_empty_name()
-                if (*callee_expr).kind == ExprKind::ExprIdent {
-                    callee_name = (*callee_expr).name
-                } else if (*callee_expr).kind == ExprKind::ExprPath {
-                    let first = ir_path_first_name((*callee_expr).path)
-                    let last = ir_path_last_name((*callee_expr).path)
-                    if first.len > 0 && last.len > 0 && !ir_name_eq(first, last) {
-                        callee_name = ir_mangle_method_name(first, last)
-                    } else {
-                        callee_name = first
-                    }
-                } else {
+                if (*callee_expr).kind != ExprKind::ExprIdent && (*callee_expr).kind != ExprKind::ExprPath {
                     return ir_empty_name()
                 }
+                // Same resolver as the emitted call target -- see
+                // expr_call_return_fixed_array_len_ref.
+                let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
                 let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
                 self.return_tuple0_array_elem_struct_name_for_fn_id(fn_id)
             }
@@ -18934,8 +19086,14 @@ impl Lowerer {
         let remaining = p.seg_count - k
         if remaining == 1 {
             // An impl method whose lowercase type is spelled like a module keeps
-            // the mangled name that already has a body.
-            if k == 1 && lowerer_lookup_fn_id_by_name_ref(&self, ir_mangle_method_name(lower_string_list_nth_name(p.segments, 0), last)) >= 0 {
+            // the mangled name that already has a body. Checked against the
+            // LOWER_IMPL_METHOD_HASH registry (populated from every ItemImpl's
+            // methods, see lower_impl_methods_collect) rather than a bare
+            // "does any fn with this mangled name exist" lookup -- the latter
+            // cannot distinguish a real impl method from an unrelated top-level
+            // free fn that happens to be spelled identically (e.g. `use m;
+            // m::f(..)` colliding with an unrelated top-level `fn m_f(..)`).
+            if k == 1 && lower_impl_method_known(ir_mangle_method_name(lower_string_list_nth_name(p.segments, 0), last)) {
                 return ir_empty_name()
             }
             return last
