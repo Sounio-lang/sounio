@@ -17366,6 +17366,26 @@ impl Lowerer {
         if (*e).kind == ExprKind::ExprIdent {
             return self.lookup_local_array_elem_float((*e).name)
         }
+        // Copilot review (PR #2516), round 12 finding: the ExprIf/ExprMatch/
+        // ExprBlock recursion (below) re-enters THIS function for each
+        // arm/block-tail, but this function had no ExprFieldAccess arm --
+        // so `(if cond { left.values } else { right.values }, 0)` (a
+        // struct-field array) and `(if cond { pair().0 } else { pair2().0
+        // }, 0)` (a numeric tuple-slot extraction) both fell through to
+        // `false` for every arm, even though tuple_lit_slot_is_f64_array_ref
+        // already classifies both of these exact ExprFieldAccess shapes
+        // when they appear directly (not wrapped in control flow) --
+        // numeric tuple-slot names via expr_is_tuple_slot_f64_array_ref,
+        // struct-field names via field_array_elem_is_float_for_base_ref.
+        // Delegate to that same dispatch here rather than duplicating it,
+        // exactly as tuple_lit_slot_is_f64_array_ref itself delegates BACK
+        // to this function for ExprCall/ExprMethodCall/control-flow slots.
+        if (*e).kind == ExprKind::ExprFieldAccess {
+            if lower_name_tuple_index((*e).name) >= 0 {
+                return self.expr_is_tuple_slot_f64_array_ref(e)
+            }
+            return self.field_array_elem_is_float_for_base_ref(&(*e).left, (*e).name)
+        }
         if (*e).kind == ExprKind::ExprMethodCall {
             let recv_type = self.lower_method_recv_type(&(*e).left)
             let call_name = if recv_type.len > 0 {
