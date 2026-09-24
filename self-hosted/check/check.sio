@@ -4654,10 +4654,30 @@ fn checker_path_first_two_eq(path: AstPath, first: string, second: string) -> bo
 // storage, same reasoning as the lowerer's sibling registry (a `[Name; N]`
 // struct-array global was observed to be corrupted by this compiler's own
 // codegen).
+// Review comment 4090966164 (round 6, finding A): this registry used to be
+// ONE GLOBAL set, membership meaning "some module, somewhere in this whole
+// compilation, imported this segment" rather than "the module CURRENTLY
+// being checked imported this segment". A module could therefore call
+// through a qualifier that only a DIFFERENT, unrelated module had `use`d --
+// module B `use`s `dep_chain_leaf`, and module A (which never `use`s it at
+// all) could still call `dep_chain_leaf::leaf_add(..)` and have it accepted,
+// since the segment was globally known. Independent segments from unrelated
+// imports across different modules could likewise recombine into paths that
+// were never actually declared anywhere. Fixed by keying every entry with
+// the registering module's id (CHECKER_USE_MODULE_MODULE_ID, parallel to
+// HASH/LEN/BUF) and requiring an exact module-id match at lookup, not just a
+// name match -- `checker_use_module_known` now takes the caller's
+// `(*c).current_module_id` and only matches entries THAT SAME module
+// registered. current_module_id is already tracked correctly across both
+// the collect pass (Pass 1) and the check pass (Pass 2) in
+// check_modules_verdict_boot4_with_visibility (self-hosted/check/mod.sio),
+// so no new module-identity plumbing was needed -- just applying the id
+// that already existed.
 let CHECKER_USE_MODULE_SEG_MAX: i64 = 384
 var CHECKER_USE_MODULE_COUNT: i64 = 0
 var CHECKER_USE_MODULE_HASH: [i64; 1024] = [0; 1024]
 var CHECKER_USE_MODULE_LEN: [i64; 1024] = [0; 1024]
+var CHECKER_USE_MODULE_MODULE_ID: [i64; 1024] = [0 - 1; 1024]
 var CHECKER_USE_MODULE_BUF: [i8; 393216] = [0; 393216]
 // Review comment 4089532579 (round 3, finding A): silently dropping an entry
 // past capacity here fails OPEN, not closed. A `souc check`-only caller never
@@ -4697,14 +4717,14 @@ fn checker_use_module_reset() with Mut {
     CHECKER_USE_MODULE_OVERFLOW_REPORTED = false
 }
 
-fn checker_use_module_known(n: Name) -> bool with Mut, Panic, Div {
+fn checker_use_module_known(module_id: i64, n: Name) -> bool with Mut, Panic, Div {
     if n.len <= 0 || n.len > CHECKER_USE_MODULE_SEG_MAX {
         return false
     }
     let h = ast_name_hash(n)
     var i: i64 = 0
     while i < CHECKER_USE_MODULE_COUNT {
-        if CHECKER_USE_MODULE_HASH[i as usize] == h && CHECKER_USE_MODULE_LEN[i as usize] == n.len {
+        if CHECKER_USE_MODULE_MODULE_ID[i as usize] == module_id && CHECKER_USE_MODULE_HASH[i as usize] == h && CHECKER_USE_MODULE_LEN[i as usize] == n.len {
             let base = i * CHECKER_USE_MODULE_SEG_MAX
             var eq = true
             var j: i64 = 0
@@ -4723,7 +4743,7 @@ fn checker_use_module_known(n: Name) -> bool with Mut, Panic, Div {
     false
 }
 
-fn checker_use_module_note(n: Name) with Mut, Panic, Div {
+fn checker_use_module_note(module_id: i64, n: Name) with Mut, Panic, Div {
     if n.len <= 0 || n.len > CHECKER_USE_MODULE_SEG_MAX {
         return
     }
@@ -4732,7 +4752,7 @@ fn checker_use_module_note(n: Name) with Mut, Panic, Div {
     if c0 >= 65 && c0 <= 90 {
         return
     }
-    if checker_use_module_known(n) {
+    if checker_use_module_known(module_id, n) {
         return
     }
     if CHECKER_USE_MODULE_COUNT >= 1024 {
@@ -4740,6 +4760,7 @@ fn checker_use_module_note(n: Name) with Mut, Panic, Div {
         return
     }
     let idx = CHECKER_USE_MODULE_COUNT
+    CHECKER_USE_MODULE_MODULE_ID[idx as usize] = module_id
     CHECKER_USE_MODULE_HASH[idx as usize] = ast_name_hash(n)
     let base = idx * CHECKER_USE_MODULE_SEG_MAX
     var ci: i64 = 0
@@ -4762,34 +4783,37 @@ fn checker_string_list_nth_name(sl: StringList, k: i64) -> Name with Mut, Panic,
     }
 }
 
-// Records every segment of a `use` path as a POSITIVE-EVIDENCE candidate
+// Records every segment of a `use` path, scoped to `module_id` (the
+// registering module -- round 6 finding A), as a POSITIVE-EVIDENCE candidate
 // module name. This cannot exclude a path-form NAMED import's terminal
 // (`use a::b::specific_fn;`) here: the AST gives no way to tell that shape
 // apart from a genuine whole-module import (`use a::b;`) where the last
 // segment really is the module -- both are `use_glob=false, use_items=None,
 // seg_count>=2`, syntactically identical (see checker_collect_use_item_inplace's
 // own long-standing comment on this exact ambiguity). Registering the
-// terminal here regardless is what review comments 4090734423 / 4090734484
-// (round 5) flagged: `use epistemic::propagate::monte_carlo;` is real
-// (tests/stdlib/epistemic/test_stiff_ode_knightian_mc.sio), `monte_carlo`
-// is a function, not a module -- but the FIX belongs at the point a
-// qualifier is actually validated (checker_path_qualifier_all_modules_known
-// below), where the full-program function-signature table is guaranteed
-// complete (this runs during check.sio's body-CHECK pass, after ALL
-// modules' collect passes finish) and can settle the ambiguity semantically:
-// exclude a segment that ALSO resolves to a real top-level function.
-fn checker_use_module_note_path(path: AstPath) with Mut, Panic, Div {
+// terminal here regardless is fine: checker_path_qualifier_all_modules_known
+// below settles that ambiguity authoritatively via
+// lower_named_item_terminal_known (see its own comment in lower.sio), not by
+// guessing from this registry's contents.
+fn checker_use_module_note_path(module_id: i64, path: AstPath) with Mut, Panic, Div {
     var k: i64 = 0
     while k < path.seg_count {
-        checker_use_module_note(checker_string_list_nth_name(path.segments, k))
+        checker_use_module_note(module_id, checker_string_list_nth_name(path.segments, k))
         k = k + 1
     }
 }
 
 // Every segment of `path` except the last must be a known `use`-declared
-// module for `path` to be treated as a qualified free-fn call rather than
-// (say) an unresolvable/invented namespace. Fewer than 2 segments means
-// there is no qualifier to validate.
+// module OF THE MODULE CURRENTLY BEING CHECKED (`(*c).current_module_id`,
+// round 6 finding A -- previously this checked global registry membership,
+// so a module could call through a qualifier only a DIFFERENT module had
+// `use`d), and NOT authoritatively known to be a named item's terminal
+// (round 6 finding C -- see lower_named_item_terminal_known's own comment
+// for why this replaced round 5's unsound "does this name also resolve as
+// some unrelated top-level function" heuristic, which wrongly rejected a
+// real module qualifier that happened to share a name with an unrelated
+// function elsewhere in the program). Fewer than 2 segments means there is
+// no qualifier to validate.
 fn checker_path_qualifier_all_modules_known(c: *mut Checker, path: AstPath) -> bool with Mut, Panic, Div, Alloc, IO {
     if path.seg_count < 2 {
         return false
@@ -4797,25 +4821,7 @@ fn checker_path_qualifier_all_modules_known(c: *mut Checker, path: AstPath) -> b
     var k: i64 = 0
     while k < path.seg_count - 1 {
         let seg = checker_string_list_nth_name(path.segments, k)
-        if !checker_use_module_known(seg) {
-            return false
-        }
-        // A segment that ALSO resolves to a real top-level free function is
-        // not trustworthy positive evidence of a module (review comments
-        // 4090734423 / 4090734484, round 5): checker_use_module_note_path
-        // cannot tell a path-form named-item import's terminal
-        // (`use a::b::specific_fn;`, where `specific_fn` is a function) apart
-        // from a genuine whole-module import (`use a::b;`) at registration
-        // time -- both are the same AST shape -- so it registers both. This
-        // is the semantic tie-breaker: `checker_fn_sigs_find_inplace` reads
-        // the full-program signature table, guaranteed complete here (this
-        // runs during the body-CHECK pass, after every module's own collect
-        // pass has already finished). `monte_carlo` (a real function,
-        // tests/stdlib/epistemic/test_stiff_ode_knightian_mc.sio's
-        // `use epistemic::propagate::monte_carlo;`) fails this and so is no
-        // longer trusted as a qualifier; `tc_c` (a real module with no
-        // same-named function anywhere) passes it and stays trusted.
-        if checker_fn_sigs_find_inplace(c, seg) >= 0 {
+        if !checker_use_module_known((*c).current_module_id, seg) || lower_named_item_terminal_known(seg) {
             return false
         }
         k = k + 1
@@ -4858,7 +4864,7 @@ fn checker_collect_use_item_inplace(c: *mut Checker, item: Item) with Mut, Panic
         }
     }
     checker_collect_known_module_backing_imports_inplace(c, item.use_path)
-    checker_use_module_note_path(item.use_path)
+    checker_use_module_note_path((*c).current_module_id, item.use_path)
     if CHECKER_USE_MODULE_OVERFLOWED {
         checker_report_use_module_overflow_inplace(c, item.span)
     }

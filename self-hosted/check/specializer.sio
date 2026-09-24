@@ -305,97 +305,24 @@ fn spec_use_module_reset() with Mut {
     SPEC_USE_MODULE_COUNT = 0
 }
 
-// Top-level free-fn names, collected once per specialize_generics() call
-// (same timing/lifetime as SPEC_USE_MODULE_HASH). Used only to disambiguate
-// a `use` path segment that could be either a module or a path-form named
-// import's terminal (see spec_use_modules_collect's comment) -- this pass
-// runs before type checking, so it has no signature table like check.sio's
-// to query instead. Same flat-scalar-buffer storage as every other registry
-// in this file.
-let SPEC_KNOWN_FN_SEG_MAX: i64 = 384
-var SPEC_KNOWN_FN_COUNT: i64 = 0
-var SPEC_KNOWN_FN_HASH: [i64; 4096] = [0; 4096]
-var SPEC_KNOWN_FN_LEN: [i64; 4096] = [0; 4096]
-var SPEC_KNOWN_FN_BUF: [i8; 1572864] = [0; 1572864]
-
-fn spec_known_fn_reset() with Mut {
-    SPEC_KNOWN_FN_COUNT = 0
-}
-
-fn spec_known_fn_known(n: Name) -> bool with Mut, Panic, Div {
-    if n.len <= 0 || n.len > SPEC_KNOWN_FN_SEG_MAX {
-        return false
-    }
-    let h = ast_name_hash(n)
-    var i: i64 = 0
-    while i < SPEC_KNOWN_FN_COUNT {
-        if SPEC_KNOWN_FN_HASH[i as usize] == h && SPEC_KNOWN_FN_LEN[i as usize] == n.len {
-            let base = i * SPEC_KNOWN_FN_SEG_MAX
-            var eq = true
-            var j: i64 = 0
-            while j < n.len {
-                if SPEC_KNOWN_FN_BUF[(base + j) as usize] != n.buf[j as usize] {
-                    eq = false
-                }
-                j = j + 1
-            }
-            if eq {
-                return true
-            }
-        }
-        i = i + 1
-    }
-    false
-}
-
-fn spec_known_fn_note(n: Name) with Mut, Panic, Div {
-    if n.len <= 0 || n.len > SPEC_KNOWN_FN_SEG_MAX {
-        return
-    }
-    if spec_known_fn_known(n) {
-        return
-    }
-    if SPEC_KNOWN_FN_COUNT >= 4096 {
-        // Best-effort: an overflow here only means a real function past this
-        // cap cannot disqualify a same-named `use` path segment from being
-        // trusted as a module, i.e. it widens the (already-accepted, positive-
-        // evidence) set of segments spec_path_qualifier_all_modules_known
-        // trusts -- unlike SPEC_USE_MODULE_HASH/LOWER_IMPL_METHOD_HASH's own
-        // overflow, dropping an entry here cannot make a VALID qualified call
-        // get rejected, only (rarely) let an invalid one slip through the way
-        // it always did before this round's fix. Refusing the whole compile
-        // over that would be a worse tradeoff than the registries whose
-        // overflow this deliberately does NOT mirror.
-        return
-    }
-    let idx = SPEC_KNOWN_FN_COUNT
-    SPEC_KNOWN_FN_HASH[idx as usize] = ast_name_hash(n)
-    let base = idx * SPEC_KNOWN_FN_SEG_MAX
-    var ci: i64 = 0
-    while ci < n.len {
-        SPEC_KNOWN_FN_BUF[(base + ci) as usize] = n.buf[ci as usize]
-        ci = ci + 1
-    }
-    SPEC_KNOWN_FN_LEN[idx as usize] = n.len
-    SPEC_KNOWN_FN_COUNT = idx + 1
-}
-
-// Collects every top-level ItemFn name (plain functions only; impl methods
-// are mangled Type_method and never collide with a bare `use` segment, so
-// they are not relevant here) across the full merged `items` this pass
-// already receives.
-fn spec_known_fns_collect(items: Option<Box<ItemList>>) with Mut, Panic, Div {
-    match items {
-        None => {}
-        Some(list) => {
-            let it = (*list).head
-            if it.kind == ItemKind::ItemFn {
-                spec_known_fn_note(it.name)
-            }
-            spec_known_fns_collect((*list).tail)
-        }
-    }
-}
+// Round 5 (comment 4090734423) added SPEC_KNOWN_FN_HASH here -- a specializer-
+// local registry of top-level free-fn names, used only to disambiguate a
+// `use` path segment that could be either a module or a path-form named
+// import's terminal (see spec_use_modules_collect's comment), since this
+// pass runs before type checking and has no signature table like check.sio's
+// to query instead. Round 6 found two problems with it: comment 4090966230
+// (finding B) -- its overflow silently dropped entries instead of refusing,
+// reopening the exact namespace-erasure bug it exists to prevent; and
+// comment 4090966282 (finding C, on lower.sio's identical heuristic, which
+// applies equally here) -- "does this name ALSO resolve as some unrelated
+// top-level function" is unsound the other way too: a genuine module whose
+// name happens to coincide with an unrelated function elsewhere in the
+// program was wrongly excluded. Both are fixed by deleting SPEC_KNOWN_FN_HASH
+// entirely and using parser::ast's lower_named_item_terminal_known instead
+// (see its own comment there): an AUTHORITATIVE registry, populated from
+// module_frontend.sio's real file-resolution outcome for this exact
+// question, not a name-collision guess -- so there is no overflow-prone
+// duplicate table to maintain here, and no false-positive exclusion risk.
 
 fn spec_use_module_known(n: Name) -> bool with Mut, Panic, Div {
     if n.len <= 0 || n.len > SPEC_USE_MODULE_SEG_MAX {
@@ -466,18 +393,10 @@ fn spec_use_module_note(n: Name) with Mut, Panic, Div {
 // apart from a genuine whole-module import (`use a::b;`), where the last
 // segment really is the module -- both are `use_glob=false, use_items=None,
 // seg_count>=2`, syntactically identical. Registering the terminal here
-// regardless is what review comment 4090734423 (round 5) flagged:
-// `use epistemic::propagate::monte_carlo;` is real
-// (tests/stdlib/epistemic/test_stiff_ode_knightian_mc.sio), `monte_carlo`
-// is a function, not a module -- but the fix belongs at the point a
-// qualifier is actually validated (spec_path_qualifier_all_modules_known
-// below), using spec_known_fns_collect's registry (populated over the SAME
-// full merged `items` this pass already receives) to settle the ambiguity
-// semantically: exclude a segment that also names a real top-level
-// function. Mirrors check.sio's checker_path_qualifier_all_modules_known,
-// which does the same thing against its own (post-typecheck) signature
-// table -- this pass runs pre-typecheck and has no such table, hence its
-// own small function-name registry.
+// regardless is fine: spec_path_qualifier_all_modules_known below settles
+// that ambiguity authoritatively via lower_named_item_terminal_known (see
+// its own comment in lower.sio), not by guessing from this registry's
+// contents.
 fn spec_use_modules_collect(items: Option<Box<ItemList>>) with Mut, Panic, Div {
     match items {
         None => {}
@@ -496,10 +415,10 @@ fn spec_use_modules_collect(items: Option<Box<ItemList>>) with Mut, Panic, Div {
 }
 
 // Every segment of `path` except the last must be a known `use`-declared
-// module, and NOT also a known top-level free-fn name (see
-// spec_use_modules_collect's comment), for `path` to be treated as a
-// qualified free-fn call. Empty (a bare identifier) or single-segment paths
-// have no qualifier to check.
+// module, and NOT authoritatively known to be a named item's terminal (see
+// lower_named_item_terminal_known's comment in lower.sio), for `path` to be
+// treated as a qualified free-fn call. Empty (a bare identifier) or
+// single-segment paths have no qualifier to check.
 fn spec_path_qualifier_all_modules_known(path: AstPath) -> bool with Mut, Panic, Div {
     if path.seg_count < 2 {
         return false
@@ -507,7 +426,7 @@ fn spec_path_qualifier_all_modules_known(path: AstPath) -> bool with Mut, Panic,
     var k: i64 = 0
     while k < path.seg_count - 1 {
         let seg = spec_string_list_nth_name(path.segments, k)
-        if !spec_use_module_known(seg) || spec_known_fn_known(seg) {
+        if !spec_use_module_known(seg) || lower_named_item_terminal_known(seg) {
             return false
         }
         k = k + 1
@@ -2038,8 +1957,6 @@ pub fn specialize_generics(items: Option<Box<ItemList>>) -> Option<Box<ItemList>
     // check.sio's (specialize_generics runs before type checking).
     spec_use_module_reset()
     spec_use_modules_collect(items)
-    spec_known_fn_reset()
-    spec_known_fns_collect(items)
     let known = spec_collect_known_names(items, SpecKnownNames { names: [empty_name(); 32], count: 0 })
     spec_collect_generic_fns(items, known)
     spec_collect_generic_methods(items, known)

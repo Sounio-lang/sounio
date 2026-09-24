@@ -795,6 +795,24 @@ fn fo_name_hash(n: Name) -> i64 with Mut, Panic, Div {
 // POSITIVE evidence only: a segment counts as a module when a `use` names it,
 // it starts lowercase, and at the call site it is not a known struct or enum.
 // Everything else keeps the Type::method mangling.
+//
+// KNOWN SCOPING GAP (review comment 4090966164, round 6 finding A): this
+// registry is a single GLOBAL set across every loaded module, not scoped to
+// "did the CURRENT module actually `use` this" -- check.sio's sibling
+// CHECKER_USE_MODULE_HASH was fixed to be per-module-scoped (keyed by
+// current_module_id) this round, but this one was not, for two reasons: (1)
+// unlike check.sio, nothing in the lowering pipeline currently threads a
+// stable "which module's body is this callee_path_module_stripped_name call
+// happening inside" identity down to where the registry is queried, and
+// building that plumbing safely was judged out of scope for this round's
+// time budget; (2) in the pipeline's normal compile path, check.sio's
+// (now-correct) validation always runs before lowering and would already
+// reject a call using a module qualifier the calling module never imported
+// -- so an invalid program never reaches this looser check in the first
+// place. This remains a real gap for any path that could reach body
+// lowering without going through check.sio's validation first; if one is
+// found, this registry needs the same per-module-id keying
+// CHECKER_USE_MODULE_HASH received.
 var LOWER_USE_MODULE_COUNT: i64 = 0
 var LOWER_USE_MODULE_HASH: [i64; 1024] = [0; 1024]
 // Durable: NOT cleared by lower_hard_error_reset(), which fo_preregister_program_items_multipass
@@ -810,6 +828,8 @@ pub fn lower_use_module_reset() with Mut {
     LOWER_USE_MODULE_OVERFLOWED = false
     LOWER_IMPL_METHOD_COUNT = 0
     LOWER_IMPL_METHOD_OVERFLOWED = false
+    // LOWER_NAMED_ITEM_TERMINAL_* (parser::ast) is deliberately NOT reset
+    // anywhere in this file -- see its own comment there for why.
 }
 // fo_name_hash is a djb2 variant with real collisions (e.g. "aar" and "ac0"
 // both hash to 193485948) and only hashes a name's first 64 bytes -- but hash
@@ -19199,21 +19219,24 @@ impl Lowerer {
             // Their uppercase spelling is still enough to stop module-prefix
             // stripping, so `af_mod::AfNum::quad` retains `AfNum_quad`.
             let c0 = if seg.len > 0 { (seg.buf[0] as i64) & 255 } else { 0 }
-            // A segment that ALSO names a real top-level free function is not
-            // trustworthy positive evidence of a module (review comment
-            // 4090734484, round 5): lower_use_module_note cannot tell a
-            // path-form named-item import's terminal (`use a::b::specific_fn;`,
-            // where `specific_fn` is a function) apart from a genuine
-            // whole-module import (`use a::b;`) at registration time -- both
-            // are the same AST shape -- so it registers both. This is the
-            // semantic tie-breaker, checked against the full-program fn
-            // table (guaranteed complete: body lowering runs after every
-            // module's own preregister pass). `monte_carlo` (a real
-            // function, tests/stdlib/epistemic/test_stiff_ode_knightian_mc.sio's
-            // `use epistemic::propagate::monte_carlo;`) fails this and so is
-            // no longer trusted as a qualifier.
-            let seg_names_free_fn = lowerer_lookup_fn_id_by_name_ref(&self, seg) >= 0
-            if !lower_use_module_known(seg) || self.callee_segment_names_type(seg) || seg_names_free_fn || (c0 >= 65 && c0 <= 90) {
+            // lower_use_module_note cannot tell a path-form named-item
+            // import's terminal (`use a::b::specific_fn;`, where
+            // `specific_fn` is a function) apart from a genuine whole-module
+            // import (`use a::b;`) at registration time -- both are the same
+            // AST shape -- so it registers both. lower_named_item_terminal_known
+            // is the authoritative tie-breaker: it is populated from
+            // module_frontend.sio's real file-resolution outcome for this
+            // exact question (see its own comment), not a name-collision
+            // guess. round 5 (comment 4090734484) used
+            // `lowerer_lookup_fn_id_by_name_ref(&self, seg) >= 0` here instead
+            // -- "does this name ALSO resolve as some real function" -- which
+            // review comment 4090966282 (round 6, finding C) correctly flagged
+            // as unsound the other way: a genuine module whose name happens to
+            // coincide with an unrelated top-level function elsewhere in the
+            // program (e.g. `use testmod::tc_c;` alongside an unrelated
+            // top-level `fn tc_c(..)`) was wrongly excluded too, breaking the
+            // real module's own qualified calls.
+            if !lower_use_module_known(seg) || self.callee_segment_names_type(seg) || lower_named_item_terminal_known(seg) || (c0 >= 65 && c0 <= 90) {
                 break
             }
             k = k + 1

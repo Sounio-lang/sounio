@@ -1455,6 +1455,114 @@ pub fn ast_name_hash(n: Name) -> i64 with Div {
     if hash < 0 { 0 - hash } else { hash }
 }
 
+// Authoritative (not heuristic) registry of names KNOWN to be the terminal
+// item of a path-form NAMED import (`use a::b::specific_fn;`), as opposed to
+// a whole-module import's terminal (`use a::b;`) -- the two are otherwise
+// syntactically identical. Populated from module_frontend.sio's
+// resolve_import_file_path, the SAME logic that already, authoritatively,
+// decides this exact question for real when loading dependency files: it
+// tries the FULL `use` path as a file first, and only drops the last segment
+// and retries as the PARENT file when that first attempt misses. A name only
+// ever lands here when that fallback branch is the one that actually
+// resolved -- i.e. the name is confirmed (by real file resolution, not name
+// collision with an unrelated declaration) to be a named item, not a module.
+//
+// Lives here (parser::ast), not in ir::lower where it was first added,
+// because ir::lower already imports check::specializer
+// (spec_dce_filter_with_global_marks / spec_dce_global_marks_ready), and
+// check::specializer needs to read this same registry -- putting it in
+// ir::lower would make that a circular import. parser::ast is the common,
+// import-nothing-back base every one of check::check / check::specializer /
+// ir::lower / compiler::module_frontend already depends on.
+//
+// Deliberately a GLOBAL set, not per-module: resolution is a pure function
+// of the path text against the fixed module search roots, so a given `use`
+// path resolves identically regardless of which module writes it. Also
+// deliberately never reset during a compile (no `_reset` function): it is
+// populated ONCE, very early, during module_frontend.sio's dependency-file
+// resolution -- which runs before any check/lower/specializer pass, and
+// before those passes' own per-compile-boundary registry resets -- from real
+// filesystem outcomes that do not change for the rest of this process.
+// Resetting it on the same cadence as e.g. LOWER_USE_MODULE_HASH would wipe
+// this data out before the qualifier-validation code that needs it ever
+// runs.
+//
+// Review history: round 5 (comments 4090734423/4090734484) tried "does this
+// name ALSO resolve as some real top-level function" as the disambiguator,
+// in both check.sio and ir::lower (and specializer.sio built its own small
+// copy of a function-name registry for the same purpose, pre-typecheck).
+// Round 6 (comments 4090966164/4090966230/4090966282) found that heuristic
+// unsound in the OTHER direction (finding C): a genuine module whose name
+// happens to coincide with an unrelated top-level function elsewhere in the
+// program was wrongly excluded too, breaking the real module's own qualified
+// calls. This registry has no such false positives, because it is never
+// guessing from a name collision -- it is exactly the answer
+// module_frontend.sio itself already computed when it decided which file to
+// load, so all three of check.sio / ir::lower / specializer.sio now query
+// this ONE authoritative source instead of each re-deriving their own guess.
+var AST_NAMED_ITEM_TERMINAL_COUNT: i64 = 0
+var AST_NAMED_ITEM_TERMINAL_HASH: [i64; 4096] = [0; 4096]
+var AST_NAMED_ITEM_TERMINAL_LEN: [i64; 4096] = [0; 4096]
+var AST_NAMED_ITEM_TERMINAL_BUF: [i8; 1572864] = [0; 1572864]
+
+pub fn lower_named_item_terminal_known(n: Name) -> bool with Mut, Panic, Div {
+    if n.len <= 0 || n.len > 384 {
+        return false
+    }
+    let h = ast_name_hash(n)
+    var i: i64 = 0
+    while i < AST_NAMED_ITEM_TERMINAL_COUNT {
+        if AST_NAMED_ITEM_TERMINAL_HASH[i as usize] == h && AST_NAMED_ITEM_TERMINAL_LEN[i as usize] == n.len {
+            let base = i * 384
+            var eq = true
+            var j: i64 = 0
+            while j < n.len {
+                if AST_NAMED_ITEM_TERMINAL_BUF[(base + j) as usize] != n.buf[j as usize] {
+                    eq = false
+                }
+                j = j + 1
+            }
+            if eq {
+                return true
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+pub fn lower_named_item_terminal_note(n: Name) with Mut, Panic, Div {
+    if n.len <= 0 || n.len > 384 {
+        return
+    }
+    if lower_named_item_terminal_known(n) {
+        return
+    }
+    if AST_NAMED_ITEM_TERMINAL_COUNT >= 4096 {
+        // Best-effort: an overflow here only means a real named-item import's
+        // terminal past this cap cannot be positively confirmed as "not a
+        // module", i.e. it widens the set of segments the (still
+        // per-registration, positive-evidence) module registries trust --
+        // exactly round 5's pre-fix behavior for whichever names overflow,
+        // not a new failure mode. Unlike LOWER_USE_MODULE_HASH/
+        // LOWER_IMPL_METHOD_HASH/CHECKER_USE_MODULE_HASH's own overflow,
+        // dropping an entry here can only let an already-narrow,
+        // already-accepted false positive through; it cannot make a
+        // genuinely valid qualified call fail.
+        return
+    }
+    let idx = AST_NAMED_ITEM_TERMINAL_COUNT
+    AST_NAMED_ITEM_TERMINAL_HASH[idx as usize] = ast_name_hash(n)
+    let base = idx * 384
+    var ci: i64 = 0
+    while ci < n.len {
+        AST_NAMED_ITEM_TERMINAL_BUF[(base + ci) as usize] = n.buf[ci as usize]
+        ci = ci + 1
+    }
+    AST_NAMED_ITEM_TERMINAL_LEN[idx as usize] = n.len
+    AST_NAMED_ITEM_TERMINAL_COUNT = idx + 1
+}
+
 pub fn ast_reset_global_var_inits() with Mut {
     GLOBAL_VAR_INIT_COUNT = 0
 }
