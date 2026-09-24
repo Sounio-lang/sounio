@@ -319,24 +319,57 @@ fn struct_hash_combine(seed: i64, part: i64) -> i64 {
 // wrongly treated as the same predicate; no amount of downstream mixing or
 // bit-masking can repair a collision that already happened at this leaf.
 // This append-only table interns each DISTINCT name by BYTE-FOR-BYTE
-// comparison (name_eq), never by hash, and returns its index: two different
-// names can never receive the same index, and the same name always gets the
-// same index, for the lifetime of one checker run.
-pub var VALIDWHILE_INTERN_NAMES: [Name; 512] = [Name { buf: [0; 384], len: 0 }; 512]
+// comparison, never by hash, and returns its index: two different names can
+// never receive the same index, and the same name always gets the same
+// index, for the lifetime of one checker run.
+//
+// STORAGE SHAPE: a flat i8 byte buffer + a parallel length array, NOT an
+// array of Name structs -- a `[Name; N]` global with a struct-literal repeat
+// initializer is not supported by every stage of this self-hosted compiler's
+// own bootstrap (it broke the "Correlated effect" CI build with "missing
+// field in struct literal", even though the identical shape works fine as a
+// LOCAL struct-literal repeat elsewhere in this codebase). Plain i8/i64
+// array globals initialized with `[0; N]` are the proven-safe shape (see
+// GLOBAL_VAR_INIT_VALUES in parser/ast.sio), so every table in this file
+// uses that shape.
+pub var VALIDWHILE_INTERN_BUF: [i8; 196608] = [0; 196608]  // 512 slots * 384 bytes
+pub var VALIDWHILE_INTERN_LENS: [i64; 512] = [0; 512]
 pub var VALIDWHILE_INTERN_COUNT: i64 = 0
+
+fn validwhile_intern_slot_matches(n: Name, slot: i64) -> bool {
+    if VALIDWHILE_INTERN_LENS[slot as usize] != n.len {
+        return false
+    }
+    let base = slot * 384
+    var i: i64 = 0
+    while i < n.len {
+        if VALIDWHILE_INTERN_BUF[(base + i) as usize] != n.buf[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
 
 fn validwhile_intern_name_exact(n: Name) -> (i64, bool) with Mut, Panic, Div {
     var i: i64 = 0
     while i < VALIDWHILE_INTERN_COUNT {
-        if name_eq(VALIDWHILE_INTERN_NAMES[i as usize], n) {
+        if validwhile_intern_slot_matches(n, i) {
             return (i, true)
         }
         i = i + 1
     }
     if VALIDWHILE_INTERN_COUNT < 512 {
-        VALIDWHILE_INTERN_NAMES[VALIDWHILE_INTERN_COUNT as usize] = n
+        let slot = VALIDWHILE_INTERN_COUNT
+        let base = slot * 384
+        var j: i64 = 0
+        while j < n.len && j < 384 {
+            VALIDWHILE_INTERN_BUF[(base + j) as usize] = n.buf[j as usize]
+            j = j + 1
+        }
+        VALIDWHILE_INTERN_LENS[slot as usize] = n.len
         VALIDWHILE_INTERN_COUNT = VALIDWHILE_INTERN_COUNT + 1
-        return (VALIDWHILE_INTERN_COUNT - 1, true)
+        return (slot, true)
     }
     // Table exhausted (512 distinct names referenced across every ValidWhile
     // predicate in one compilation -- not a realistic corpus, but this must
@@ -475,31 +508,61 @@ fn unary_op_hash_tag(op: UnaryOp) -> i64 {
 // rejects id 0.0 outright rather than treating two unidentified predicates
 // as equal.
 //
-// STORAGE. The raw i64 structural hash is NOT stored as-is: converting an
-// arbitrary i64 to f64 (TypeEntry.knowledge_validity_value's type) silently
-// loses precision once the magnitude exceeds 2^53, so two DIFFERENT hashes
-// could collide once rounded to the nearest representable f64 -- exactly
-// the kind of bug this identity scheme exists to prevent, just moved into
-// the storage layer instead of the hash function. Masking to 48 bits before
-// the f64 conversion keeps every value inside f64's exactly-representable
-// integer range (2^53), so the stored id round-trips losslessly: no value
-// this function can produce is ever altered by being stored as f64. (A
-// 48-bit hash still carries far more entropy than any realistic ValidWhile
-// predicate corpus needs; the tiny residual collision probability inherent
-// to ANY fixed-width structural hash -- shared by ast_name_hash elsewhere
-// in this checker -- is an accepted, unavoidable property of hash-based
-// identity, not the precision-loss bug being fixed here.)
-const STRUCT_HASH_STORAGE_MASK: i64 = (1 << 48) - 1
+// STORAGE. The raw i64 structural hash is NOT stored as-is, and is NOT
+// truncated/masked either. Two earlier attempts at this both had real bugs:
+//   1. Converting the full 64-bit hash directly to f64 (TypeEntry.
+//      knowledge_validity_value's type) silently loses precision once the
+//      magnitude exceeds 2^53, so two DIFFERENT hashes could collide once
+//      rounded to the nearest representable f64.
+//   2. Masking to 48 bits before the f64 conversion fixed the precision
+//      loss but introduced a DETERMINISTIC collision of its own: every
+//      later mixing step preserves equality mod 2^48, so e.g.
+//      ValidWhile(0==0) and ValidWhile(0==281474976710656) (281474976710656
+//      == 2^48) hash identically post-mask even though they are genuinely
+//      different predicates -- not a probabilistic birthday-bound risk, a
+//      guaranteed collision for that specific pair.
+// Instead, the full UNTRUNCATED 64-bit hash is interned by EXACT i64
+// equality (no masking, no precision loss) in an out-of-band table, and the
+// small TABLE INDEX -- not the hash -- is what gets stored as pred_id. An
+// index is always < 512, comfortably inside f64's exact-integer range, so
+// storing it loses nothing, and two different hashes can never collapse
+// into the same index the way two different hashes could collapse into the
+// same masked value.
+pub var VALIDWHILE_HASH_TABLE: [i64; 512] = [0; 512]
+pub var VALIDWHILE_HASH_TABLE_COUNT: i64 = 0
+
+fn validwhile_intern_hash_exact(h: i64) -> (i64, bool) {
+    var i: i64 = 0
+    while i < VALIDWHILE_HASH_TABLE_COUNT {
+        if VALIDWHILE_HASH_TABLE[i as usize] == h {
+            return (i, true)
+        }
+        i = i + 1
+    }
+    if VALIDWHILE_HASH_TABLE_COUNT < 512 {
+        VALIDWHILE_HASH_TABLE[VALIDWHILE_HASH_TABLE_COUNT as usize] = h
+        VALIDWHILE_HASH_TABLE_COUNT = VALIDWHILE_HASH_TABLE_COUNT + 1
+        return (VALIDWHILE_HASH_TABLE_COUNT - 1, true)
+    }
+    // Table exhausted (512 distinct ValidWhile predicate SHAPES in one
+    // compilation): fail closed, same as every other exhaustion case in this
+    // file, rather than falling back to a lossy encoding.
+    (0, false)
+}
 
 fn validity_while_pred_id(opt: Option<Box<Expr>>) -> f64 with Mut, Panic, Div {
     let pair = struct_hash_expr(opt)
     if !pair.1 {
         0.0
     } else {
-        let masked = pair.0 & STRUCT_HASH_STORAGE_MASK
-        // Never let a legitimate structural hash land exactly on 0.0.
-        let hf = masked as f64
-        if hf == 0.0 { 1.0 } else { hf }
+        let interned = validwhile_intern_hash_exact(pair.0)
+        if !interned.1 {
+            0.0
+        } else {
+            // Never let a legitimate id land exactly on 0.0 (0.0 is the
+            // "not comparable" sentinel); indices start at 0, so shift by 1.
+            (interned.0 + 1) as f64
+        }
     }
 }
 
