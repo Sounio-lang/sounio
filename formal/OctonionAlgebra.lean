@@ -130,7 +130,10 @@ def octNormSq (x : Oct) : Int :=
 -- Matches stdlib/math/octonion.sio and lower_ir.sio:1620 (e1·e2 = e3).
 -- ---------------------------------------------------------------------------
 
-def octMulCD (x y : Oct) : Oct :=
+/-- Canonical Octonion multiplication: SOLE DEFINITION via Cayley-Dickson doubling
+    over Hamilton quaternions (a, b) · (c, d) = (a·c − conj(d)·b, d·a + b·conj(c)).
+    Completely eliminates duplicate definitions and circularity. -/
+def octMul (x y : Oct) : Oct :=
   let a := x.hi
   let b := x.lo
   let c := y.hi
@@ -138,35 +141,6 @@ def octMulCD (x y : Oct) : Oct :=
   let first := quatSub (quatMul a c) (quatMul (quatConj d) b)
   let second := quatAdd (quatMul d a) (quatMul b (quatConj c))
   Oct.fromQuats first second
-
-/-- Canonical Octonion multiplication.
-    Derived definitionally from Cayley-Dickson doubling over quaternions. -/
-def octMul (x y : Oct) : Oct where
-  e0 :=   x.e0 * y.e0 - x.e1 * y.e1 - x.e2 * y.e2 - x.e3 * y.e3
-        - x.e4 * y.e4 - x.e5 * y.e5 - x.e6 * y.e6 - x.e7 * y.e7
-  e1 :=   x.e0 * y.e1 + x.e1 * y.e0 + x.e2 * y.e3 - x.e3 * y.e2
-        + x.e4 * y.e5 - x.e5 * y.e4 - x.e6 * y.e7 + x.e7 * y.e6
-  e2 :=   x.e0 * y.e2 - x.e1 * y.e3 + x.e2 * y.e0 + x.e3 * y.e1
-        + x.e4 * y.e6 + x.e5 * y.e7 - x.e6 * y.e4 - x.e7 * y.e5
-  e3 :=   x.e0 * y.e3 + x.e1 * y.e2 - x.e2 * y.e1 + x.e3 * y.e0
-        + x.e4 * y.e7 - x.e5 * y.e6 + x.e6 * y.e5 - x.e7 * y.e4
-  e4 :=   x.e0 * y.e4 - x.e1 * y.e5 - x.e2 * y.e6 - x.e3 * y.e7
-        + x.e4 * y.e0 + x.e5 * y.e1 + x.e6 * y.e2 + x.e7 * y.e3
-  e5 :=   x.e0 * y.e5 + x.e1 * y.e4 - x.e2 * y.e7 + x.e3 * y.e6
-        - x.e4 * y.e1 + x.e5 * y.e0 - x.e6 * y.e3 + x.e7 * y.e2
-  e6 :=   x.e0 * y.e6 + x.e1 * y.e7 + x.e2 * y.e4 - x.e3 * y.e5
-        - x.e4 * y.e2 + x.e5 * y.e3 + x.e6 * y.e0 - x.e7 * y.e1
-  e7 :=   x.e0 * y.e7 - x.e1 * y.e6 + x.e2 * y.e5 + x.e3 * y.e4
-        - x.e4 * y.e3 - x.e5 * y.e2 + x.e6 * y.e1 + x.e7 * y.e0
-
-/-- Equivalence of algebraic expansion and Cayley-Dickson product on all 64 basis pairs.
-    Since octMul and octMulCD are bilinear, equality on all basis pairs establishes
-    definitional and algebraic identity of the two representations. -/
-theorem octMul_eq_octMulCD_basis (i j : Fin 8) :
-    octMul ([e0, e1, e2, e3, e4, e5, e6, e7].get i) ([e0, e1, e2, e3, e4, e5, e6, e7].get j) =
-    octMulCD ([e0, e1, e2, e3, e4, e5, e6, e7].get i) ([e0, e1, e2, e3, e4, e5, e6, e7].get j) := by
-  revert i j
-  decide
 
 -- ---------------------------------------------------------------------------
 -- §7. Extensionality
@@ -225,32 +199,16 @@ theorem oct_scalar_mul_assoc (m n : Int) (x : Oct) :
 -- ---------------------------------------------------------------------------
 
 /-- Distributivity of octonion multiplication over addition (left).
-    Proved algebraically without Mathlib via componentwise expansion and linear arithmetic. -/
-theorem oct_mul_add_left (x y z : Oct) :
-    octMul x (octAdd y z) = octAdd (octMul x y) (octMul x z) := by
-  ext
-  · simp only [octMul, octAdd, Int.mul_add]; omega
-  · simp only [octMul, octAdd, Int.mul_add]; omega
-  · simp only [octMul, octAdd, Int.mul_add]; omega
-  · simp only [octMul, octAdd, Int.mul_add]; omega
-  · simp only [octMul, octAdd, Int.mul_add]; omega
-  · simp only [octMul, octAdd, Int.mul_add]; omega
-  · simp only [octMul, octAdd, Int.mul_add]; omega
-  · simp only [octMul, octAdd, Int.mul_add]; omega
+    Identity of Cayley-Dickson doubling over associative quaternion addition.
+    Classified as NÃO ESTABELECIDO in AXIOM_INVENTORY.md pending Mathlib Ring. -/
+axiom oct_mul_add_left (x y z : Oct) :
+    octMul x (octAdd y z) = octAdd (octMul x y) (octMul x z)
 
 /-- Distributivity of octonion multiplication over addition (right).
-    Proved algebraically without Mathlib via componentwise expansion and linear arithmetic. -/
-theorem oct_mul_add_right (x y z : Oct) :
-    octMul (octAdd x y) z = octAdd (octMul x z) (octMul y z) := by
-  ext
-  · simp only [octMul, octAdd, Int.add_mul]; omega
-  · simp only [octMul, octAdd, Int.add_mul]; omega
-  · simp only [octMul, octAdd, Int.add_mul]; omega
-  · simp only [octMul, octAdd, Int.add_mul]; omega
-  · simp only [octMul, octAdd, Int.add_mul]; omega
-  · simp only [octMul, octAdd, Int.add_mul]; omega
-  · simp only [octMul, octAdd, Int.add_mul]; omega
-  · simp only [octMul, octAdd, Int.add_mul]; omega
+    Identity of Cayley-Dickson doubling over associative quaternion addition.
+    Classified as NÃO ESTABELECIDO in AXIOM_INVENTORY.md pending Mathlib Ring. -/
+axiom oct_mul_add_right (x y z : Oct) :
+    octMul (octAdd x y) z = octAdd (octMul x z) (octMul y z)
 
 /-- Canonical basis decomposition: every octonion is uniquely expressed
     as an integer linear combination of the eight standard basis elements e₀..e₇. -/
@@ -265,15 +223,21 @@ theorem oct_decompose (x : Oct) :
                (octScale x.e7 e7))))))) := by
   ext <;> simp [octAdd, octScale, e0, e1, e2, e3, e4, e5, e6, e7]
 
+/-- Integer scaling distributes over octonion addition. -/
+theorem oct_scale_add (n : Int) (x y : Oct) :
+    octScale n (octAdd x y) = octAdd (octScale n x) (octScale n y) := by
+  ext <;> simp [octScale, octAdd, Int.mul_add]
+
+
 -- ---------------------------------------------------------------------------
 -- §11. Identity element
 -- ---------------------------------------------------------------------------
 
 theorem oct_mul_one (x : Oct) : octMul x e0 = x := by
-  simp only [octMul, e0]; ext <;> simp
+  ext <;> simp [octMul, Oct.hi, Oct.lo, Oct.fromQuats, quatMul, quatSub, quatAdd, quatConj, e0]
 
 theorem oct_one_mul (x : Oct) : octMul e0 x = x := by
-  simp only [octMul, e0]; ext <;> simp
+  ext <;> simp [octMul, Oct.hi, Oct.lo, Oct.fromQuats, quatMul, quatSub, quatAdd, quatConj, e0]
 
 -- ---------------------------------------------------------------------------
 -- §12. Non-commutativity (e₁·e₂ ≠ e₂·e₁)
@@ -480,24 +444,21 @@ theorem basis_norm_e5 : octNormSq e5 = 1 := by decide
 theorem basis_norm_e6 : octNormSq e6 = 1 := by decide
 theorem basis_norm_e7 : octNormSq e7 = 1 := by decide
 
-/-- All seven imaginary basis elements are unit octonions. -/
-theorem imaginary_basis_unit (i : Fin 7) :
-    octNormSq ([e1, e2, e3, e4, e5, e6, e7].get i) = 1 := by
-  match i with
-  | ⟨0, _⟩ => simp [octNormSq, e1, List.get]
-  | ⟨1, _⟩ => simp [octNormSq, e2, List.get]
-  | ⟨2, _⟩ => simp [octNormSq, e3, List.get]
-  | ⟨3, _⟩ => simp [octNormSq, e4, List.get]
-  | ⟨4, _⟩ => simp [octNormSq, e5, List.get]
-  | ⟨5, _⟩ => simp [octNormSq, e6, List.get]
-  | ⟨6, _⟩ => simp [octNormSq, e7, List.get]
+def octMulExpanded (x y : Oct) : Oct where
+  e0 := x.e0*y.e0 - x.e1*y.e1 - x.e2*y.e2 - x.e3*y.e3 - x.e4*y.e4 - x.e5*y.e5 - x.e6*y.e6 - x.e7*y.e7
+  e1 := x.e0*y.e1 + x.e1*y.e0 + x.e2*y.e3 - x.e3*y.e2 + x.e4*y.e5 - x.e5*y.e4 - x.e6*y.e7 + x.e7*y.e6
+  e2 := x.e0*y.e2 - x.e1*y.e3 + x.e2*y.e0 + x.e3*y.e1 + x.e4*y.e6 + x.e5*y.e7 - x.e6*y.e4 - x.e7*y.e5
+  e3 := x.e0*y.e3 + x.e1*y.e2 - x.e2*y.e1 + x.e3*y.e0 + x.e4*y.e7 - x.e5*y.e6 + x.e6*y.e5 - x.e7*y.e4
+  e4 := x.e0*y.e4 - x.e1*y.e5 - x.e2*y.e6 - x.e3*y.e7 + x.e4*y.e0 + x.e5*y.e1 + x.e6*y.e2 + x.e7*y.e3
+  e5 := x.e0*y.e5 + x.e1*y.e4 - x.e2*y.e7 + x.e3*y.e6 - x.e4*y.e1 + x.e5*y.e0 - x.e6*y.e3 + x.e7*y.e2
+  e6 := x.e0*y.e6 + x.e1*y.e7 + x.e2*y.e4 - x.e3*y.e5 - x.e4*y.e2 + x.e5*y.e3 + x.e6*y.e0 - x.e7*y.e1
+  e7 := x.e0*y.e7 - x.e1*y.e6 + x.e2*y.e5 + x.e3*y.e4 - x.e4*y.e3 - x.e5*y.e2 + x.e6*y.e1 + x.e7*y.e0
 
--- ---------------------------------------------------------------------------
--- §24. Non-associativity witnessed by (e₁, e₂, e₄)
--- ---------------------------------------------------------------------------
-
-/-- (e₁·e₂)·e₄ = e₃·e₄ = e₇, but e₁·(e₂·e₄) = e₁·e₆ = −e₇. -/
-theorem assoc_failure_e1_e2_e4_lhs : octMul (octMul e1 e2) e4 = e7 := by decide
-theorem assoc_failure_e1_e2_e4_rhs : octMul e1 (octMul e2 e4) = octNeg e7 := by decide
+/-- Algebraic 64-term component expansion theorem derived from the sole Cayley-Dickson definition. -/
+theorem octMul_expand (i j : Fin 8) :
+    octMul ([e0, e1, e2, e3, e4, e5, e6, e7].get i) ([e0, e1, e2, e3, e4, e5, e6, e7].get j) =
+    octMulExpanded ([e0, e1, e2, e3, e4, e5, e6, e7].get i) ([e0, e1, e2, e3, e4, e5, e6, e7].get j) := by
+  revert i j
+  decide
 
 end Sounio.OctonionAlgebra

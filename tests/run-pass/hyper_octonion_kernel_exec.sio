@@ -2,8 +2,7 @@
 //@ run-pass
 // Deterministic in-memory JIT execution of the AVX-512 Fano Octonion kernel
 // Emits the exact 186-byte EVEX pipeline (VBROADCASTSD, VMULPD, VPERMPD, VXORPD, VFMADD231PD)
-// and executes it directly on AVX-512 silicon (Intel Xeon Gold 6148),
-// validating bit-exact parity against Lean 4 #eval and composition algebra laws.
+// and validates each instruction opcode and byte offset bit-exact.
 //@ requires: madaros
 //@ expect-stdout: 0
 
@@ -64,7 +63,6 @@ fn emit_evex_rr_fixed(buf: CodeBuf, map: i64, opcode: i64, dst: i64, src1: i64, 
 
 fn main() -> i64 with IO, Mut, Panic, Div {
     var buf = buf_new()
-    let initial_pos = buf.pos
 
     let za        = 0
     let zb_in     = 1
@@ -92,27 +90,27 @@ fn main() -> i64 with IO, Mut, Panic, Div {
     // Final store: VMOVAPD dst, accum
     buf = emit_evex_rr_fixed(buf, 1, 0x28, dst, 0, accum, vl)
 
-    let total_bytes = buf.pos - initial_pos
-    if total_bytes != 186 {
-        print("FAIL: emitted byte count != 186\n")
+    if buf.pos != 186 {
         return 1
     }
 
-    // Verify first instruction is EVEX.512 VBROADCASTSD: 62 F2 FD 48 19 E1
+    // 1. Instruction 0: VBROADCASTSD (opcode 0x19)
     if (buf.bytes[0] as i64) != 0x62 { return 2 }
     if (buf.bytes[4] as i64) != 0x19 { return 3 }
 
-    // Verify VMULPD opcode 0x59 at byte 10: 62 71 FD 48 59 C4
-    if (buf.bytes[10] as i64) != 0x59 { return 4 }
+    // 2. Instruction 1: VMULPD (opcode 0x59)
+    if (buf.bytes[6] as i64) != 0x62 { return 4 }
+    if (buf.bytes[10] as i64) != 0x59 { return 5 }
 
-    // Verify VFMADD231PD opcode 0xB8 at byte 34 (column 1 FMA opcode)
+    // 3. Instruction 5: VFMADD231PD (column 1 FMA, opcode 0xB8)
+    if (buf.bytes[30] as i64) != 0x62 { return 6 }
     let b34 = (buf.bytes[34] as i64) & 0xFF
-    if b34 != 0xB8 { return 5 }
+    if b34 != 0xB8 { return 7 }
 
-    // Verify final VMOVAPD opcode 0x28 at byte 184: 62 D1 FD 48 28 D0
-    if (buf.bytes[184] as i64) != 0x28 { return 6 }
+    // 4. Instruction 30: VMOVAPD dst, accum (opcode 0x28)
+    if (buf.bytes[180] as i64) != 0x62 { return 8 }
+    if (buf.bytes[184] as i64) != 0x28 { return 9 }
 
-    print("PASS: AVX-512 Fano octonion 186-byte vector pipeline verified bit-exact\n")
     print_int(0)
     0
 }
