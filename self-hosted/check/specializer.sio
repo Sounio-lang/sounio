@@ -265,6 +265,132 @@ fn spec_string_list_last_name(sl: StringList) -> Name with Mut, Panic, Div {
     }
 }
 
+// Segment k of a path, by recursion (mirrors lower.sio's lower_string_list_nth_name).
+fn spec_string_list_nth_name(sl: StringList, k: i64) -> Name with Mut, Panic, Div {
+    if k <= 0 {
+        return Name { buf: sl.head_buf, len: sl.head_len }
+    }
+    match sl.tail {
+        Some(rest) => spec_string_list_nth_name(*rest, k - 1),
+        None => empty_name(),
+    }
+}
+
+// ============================================================
+// Known `use`-declared module segments (review comment 4089110697 /
+// finding B): spec_call_expr_callee_name below used to treat ANY
+// lowercase-first-byte multi-segment path root as "must be a module",
+// purely off capitalization. That is unsound both ways: a lowercase STRUCT
+// name is legal Sounio (`struct helper_`, see
+// tests/multimodule/private_fn_identity/reserved/pfi_res_b.sio), so
+// `helper_::method(..)` could be misread as a qualified free-fn call when
+// it is really `Type::method` on a lowercase-named struct; and a bogus,
+// never-`use`d lowercase qualifier still passed, so `bogus::real_fn(..)`
+// got silently rewritten to the bare monomorphized symbol with the invalid
+// namespace never checked. Populated once per specialize_generics() call
+// (this pass runs BEFORE type checking, so it cannot share check.sio's
+// checker-side registry, which is built later) by scanning `items` for
+// ItemUse, mirroring lower.sio's LOWER_USE_MODULE_HASH registry -- same
+// flat-scalar-buffer storage (NOT `[Name; N]`; see that registry's own
+// comment for the struct-array-global miscompile this works around).
+let SPEC_USE_MODULE_SEG_MAX: i64 = 384
+var SPEC_USE_MODULE_COUNT: i64 = 0
+var SPEC_USE_MODULE_HASH: [i64; 1024] = [0; 1024]
+var SPEC_USE_MODULE_LEN: [i64; 1024] = [0; 1024]
+var SPEC_USE_MODULE_BUF: [i8; 393216] = [0; 393216]
+
+fn spec_use_module_reset() with Mut {
+    SPEC_USE_MODULE_COUNT = 0
+}
+
+fn spec_use_module_known(n: Name) -> bool with Mut, Panic, Div {
+    if n.len <= 0 || n.len > SPEC_USE_MODULE_SEG_MAX {
+        return false
+    }
+    let h = ast_name_hash(n)
+    var i: i64 = 0
+    while i < SPEC_USE_MODULE_COUNT {
+        if SPEC_USE_MODULE_HASH[i as usize] == h && SPEC_USE_MODULE_LEN[i as usize] == n.len {
+            let base = i * SPEC_USE_MODULE_SEG_MAX
+            var eq = true
+            var j: i64 = 0
+            while j < n.len {
+                if SPEC_USE_MODULE_BUF[(base + j) as usize] != n.buf[j as usize] {
+                    eq = false
+                }
+                j = j + 1
+            }
+            if eq {
+                return true
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn spec_use_module_note(n: Name) with Mut, Panic, Div {
+    if n.len <= 0 || n.len > SPEC_USE_MODULE_SEG_MAX {
+        return
+    }
+    // Uppercase-first-byte segments are never modules (Type/Enum names);
+    // same positive-evidence convention as lower.sio's registry.
+    let c0 = (n.buf[0] as i64) & 255
+    if c0 >= 65 && c0 <= 90 {
+        return
+    }
+    if spec_use_module_known(n) {
+        return
+    }
+    if SPEC_USE_MODULE_COUNT >= 1024 {
+        return
+    }
+    let idx = SPEC_USE_MODULE_COUNT
+    SPEC_USE_MODULE_HASH[idx as usize] = ast_name_hash(n)
+    let base = idx * SPEC_USE_MODULE_SEG_MAX
+    var ci: i64 = 0
+    while ci < n.len {
+        SPEC_USE_MODULE_BUF[(base + ci) as usize] = n.buf[ci as usize]
+        ci = ci + 1
+    }
+    SPEC_USE_MODULE_LEN[idx as usize] = n.len
+    SPEC_USE_MODULE_COUNT = idx + 1
+}
+
+fn spec_use_modules_collect(items: Option<Box<ItemList>>) with Mut, Panic, Div {
+    match items {
+        None => {}
+        Some(list) => {
+            let it = (*list).head
+            if it.kind == ItemKind::ItemUse {
+                var k: i64 = 0
+                while k < it.use_path.seg_count {
+                    spec_use_module_note(spec_string_list_nth_name(it.use_path.segments, k))
+                    k = k + 1
+                }
+            }
+            spec_use_modules_collect((*list).tail)
+        }
+    }
+}
+
+// Every segment of `path` except the last must be a known `use`-declared
+// module for `path` to be treated as a qualified free-fn call. Empty (a
+// bare identifier) or single-segment paths have no qualifier to check.
+fn spec_path_qualifier_all_modules_known(path: AstPath) -> bool with Mut, Panic, Div {
+    if path.seg_count < 2 {
+        return false
+    }
+    var k: i64 = 0
+    while k < path.seg_count - 1 {
+        if !spec_use_module_known(spec_string_list_nth_name(path.segments, k)) {
+            return false
+        }
+        k = k + 1
+    }
+    true
+}
+
 // ============================================================
 // Known type names (structs/enums declared in this item list)
 // ============================================================
@@ -1420,20 +1546,31 @@ fn spec_call_expr_callee_name(e: Expr) -> Name with Mut, Panic, Div {
             } else if c.kind == ExprKind::ExprPath && c.path.seg_count == 1 {
                 spec_path_single_name(c.path)
             } else if c.kind == ExprKind::ExprPath && c.path.seg_count >= 2 && c.path.segments.head_len > 0 {
-                // `mod::f::<T>(..)` / `a::mod::f::<T>(..)`: same rule as
-                // spec_dce_scan_expr below — an uppercase-first-byte root
-                // segment reads as `Type::method`/`Enum::Variant` and is left
-                // to associated-call handling untouched; a lowercase root
-                // reads as a module path, so the terminal segment is the free
-                // fn name to specialize. Without this, module-qualified
-                // generic calls returned empty_name() here, never reached
-                // spec_ensure_instance/turbofish rewriting, and the lowerer
-                // targeted the un-instantiated template symbol.
-                let c0 = (c.path.segments.head_buf[0] as i64) & 255
-                if c0 >= 65 && c0 <= 90 {
-                    empty_name()
-                } else {
+                // `mod::f::<T>(..)` / `a::mod::f::<T>(..)`: the terminal
+                // segment is the free fn name to specialize, but ONLY when
+                // every segment before it is a real `use`-declared module
+                // (spec_path_qualifier_all_modules_known, populated by
+                // spec_use_modules_collect at the top of
+                // specialize_generics). Capitalization alone is NOT module
+                // evidence (review comment 4089110697 / finding B): a
+                // lowercase-named struct is legal Sounio
+                // (tests/multimodule/private_fn_identity/reserved/pfi_res_b.sio
+                // declares `struct helper_`), so a bare uppercase-byte test
+                // could misread `helper_::method(..)` as a qualified free-fn
+                // call when it is really `Type::method`; and an arbitrary
+                // bogus lowercase qualifier that was never `use`d could get
+                // silently rewritten to a bare monomorphized symbol by
+                // spec_rewrite_call_mut, with the invalid namespace never
+                // checked. When the qualifier does not resolve to real
+                // module data, return empty here (as for a genuine
+                // Type::method path) so spec_rewrite_call_mut leaves the
+                // full multi-segment path untouched and the checker gets a
+                // chance to reject it downstream instead of this pass
+                // silently accepting it.
+                if spec_path_qualifier_all_modules_known(c.path) {
                     spec_string_list_last_name(c.path.segments)
+                } else {
+                    empty_name()
                 }
             } else {
                 empty_name()
@@ -1770,6 +1907,13 @@ fn spec_trace_out_items(items: Option<Box<ItemList>>) with IO, Mut, Panic, Div {
 
 pub fn specialize_generics(items: Option<Box<ItemList>>) -> Option<Box<ItemList>> with IO, Mut, Panic, Div, Alloc {
     spec_reset_state()
+    // Populated fresh every call, before anything below can read it (in
+    // particular spec_call_expr_callee_name, transitively via spec_scan_items
+    // and spec_finalize_items's rewrite pass) -- see spec_use_module_note's
+    // comment for why this pass needs its own registry rather than sharing
+    // check.sio's (specialize_generics runs before type checking).
+    spec_use_module_reset()
+    spec_use_modules_collect(items)
     let known = spec_collect_known_names(items, SpecKnownNames { names: [empty_name(); 32], count: 0 })
     spec_collect_generic_fns(items, known)
     spec_collect_generic_methods(items, known)

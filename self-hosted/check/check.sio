@@ -1428,6 +1428,11 @@ pub fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
 }
 
 pub fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
+    // Fresh per Checker instance -- every entry point that allocates one
+    // (check_modules_verdict_boot4_with_visibility et al.) calls this once
+    // before its own collect-items pass, so this is the correct, single
+    // reset point for CHECKER_USE_MODULE_HASH (see its own comment).
+    checker_use_module_reset()
     (*raw).env = type_env_new()
     (*raw).borrows = borrow_env_new()
     (*raw).units = register_builtin_units(unit_registry_new())
@@ -4636,6 +4641,119 @@ fn checker_path_first_two_eq(path: AstPath, first: string, second: string) -> bo
     }
 }
 
+// ============================================================
+// Known `use`-declared module segments (review comment 4089110672 /
+// finding A). Mirrors lower.sio's LOWER_USE_MODULE_HASH: the lowerer
+// already refuses to strip a qualifier that isn't a real registered module,
+// but until this registry existed the checker had no equivalent, so
+// `mod::f(..)` bound direct_sig_id to ANY free fn named `f` in the whole
+// program regardless of whether `mod` was ever really `use`d -- accepting
+// `bogus::real_pub_fn(..)` at typecheck while the lowerer (which DOES
+// validate the qualifier) fell through to its legacy mangled-stub path and
+// emitted a body-less `bogus_real_pub_fn` call (SIGILL). Flat-scalar-buffer
+// storage, same reasoning as the lowerer's sibling registry (a `[Name; N]`
+// struct-array global was observed to be corrupted by this compiler's own
+// codegen).
+let CHECKER_USE_MODULE_SEG_MAX: i64 = 384
+var CHECKER_USE_MODULE_COUNT: i64 = 0
+var CHECKER_USE_MODULE_HASH: [i64; 1024] = [0; 1024]
+var CHECKER_USE_MODULE_LEN: [i64; 1024] = [0; 1024]
+var CHECKER_USE_MODULE_BUF: [i8; 393216] = [0; 393216]
+
+fn checker_use_module_reset() with Mut {
+    CHECKER_USE_MODULE_COUNT = 0
+}
+
+fn checker_use_module_known(n: Name) -> bool with Mut, Panic, Div {
+    if n.len <= 0 || n.len > CHECKER_USE_MODULE_SEG_MAX {
+        return false
+    }
+    let h = ast_name_hash(n)
+    var i: i64 = 0
+    while i < CHECKER_USE_MODULE_COUNT {
+        if CHECKER_USE_MODULE_HASH[i as usize] == h && CHECKER_USE_MODULE_LEN[i as usize] == n.len {
+            let base = i * CHECKER_USE_MODULE_SEG_MAX
+            var eq = true
+            var j: i64 = 0
+            while j < n.len {
+                if CHECKER_USE_MODULE_BUF[(base + j) as usize] != n.buf[j as usize] {
+                    eq = false
+                }
+                j = j + 1
+            }
+            if eq {
+                return true
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn checker_use_module_note(n: Name) with Mut, Panic, Div {
+    if n.len <= 0 || n.len > CHECKER_USE_MODULE_SEG_MAX {
+        return
+    }
+    // Uppercase-first-byte segments are never modules (Type/Enum names).
+    let c0 = (n.buf[0] as i64) & 255
+    if c0 >= 65 && c0 <= 90 {
+        return
+    }
+    if checker_use_module_known(n) {
+        return
+    }
+    if CHECKER_USE_MODULE_COUNT >= 1024 {
+        return
+    }
+    let idx = CHECKER_USE_MODULE_COUNT
+    CHECKER_USE_MODULE_HASH[idx as usize] = ast_name_hash(n)
+    let base = idx * CHECKER_USE_MODULE_SEG_MAX
+    var ci: i64 = 0
+    while ci < n.len {
+        CHECKER_USE_MODULE_BUF[(base + ci) as usize] = n.buf[ci as usize]
+        ci = ci + 1
+    }
+    CHECKER_USE_MODULE_LEN[idx as usize] = n.len
+    CHECKER_USE_MODULE_COUNT = idx + 1
+}
+
+// Segment k of a path, by recursion (mirrors lower.sio's lower_string_list_nth_name).
+fn checker_string_list_nth_name(sl: StringList, k: i64) -> Name with Mut, Panic, Div {
+    if k <= 0 {
+        return Name { buf: sl.head_buf, len: sl.head_len }
+    }
+    match sl.tail {
+        Some(rest) => checker_string_list_nth_name(*rest, k - 1),
+        None => empty_name(),
+    }
+}
+
+fn checker_use_module_note_path(path: AstPath) with Mut, Panic, Div {
+    var k: i64 = 0
+    while k < path.seg_count {
+        checker_use_module_note(checker_string_list_nth_name(path.segments, k))
+        k = k + 1
+    }
+}
+
+// Every segment of `path` except the last must be a known `use`-declared
+// module for `path` to be treated as a qualified free-fn call rather than
+// (say) an unresolvable/invented namespace. Fewer than 2 segments means
+// there is no qualifier to validate.
+fn checker_path_qualifier_all_modules_known(path: AstPath) -> bool with Mut, Panic, Div {
+    if path.seg_count < 2 {
+        return false
+    }
+    var k: i64 = 0
+    while k < path.seg_count - 1 {
+        if !checker_use_module_known(checker_string_list_nth_name(path.segments, k)) {
+            return false
+        }
+        k = k + 1
+    }
+    true
+}
+
 fn checker_collect_known_module_backing_imports_inplace(c: *mut Checker, path: AstPath) with Mut, Panic, Div {
     // The boot4/raw checker currently type-checks modules with a shared symbol
     // table but without a full import namespace. Keep the stopgap narrow:
@@ -4671,6 +4789,7 @@ fn checker_collect_use_item_inplace(c: *mut Checker, item: Item) with Mut, Panic
         }
     }
     checker_collect_known_module_backing_imports_inplace(c, item.use_path)
+    checker_use_module_note_path(item.use_path)
 }
 
 fn checker_collect_runtime_builtins_inplace(c: *mut Checker) with Mut, Panic, Div {
@@ -10808,8 +10927,26 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
                             // W044, leaving direct_sig_id at -1 so `mod::f(..)`
                             // with the wrong argument types, or a call to a
                             // private `mod::private_fn()`, compiled unchecked.
+                            //
+                            // The terminal name resolving to SOME free fn
+                            // signature is not enough on its own (review
+                            // comment 4089110672 / finding A): that lookup is
+                            // by bare name across the WHOLE program, so
+                            // `bogus_module::pubf(..)` bound a real `pubf`'s
+                            // signature here even though `bogus_module` was
+                            // never `use`d anywhere -- typechecking clean while
+                            // the lowerer, which DOES validate the qualifier
+                            // against its own module registry, fell through to
+                            // its legacy mangled-stub path and emitted a
+                            // body-less `bogus_module_pubf` call (SIGILL).
+                            // checker_path_qualifier_all_modules_known
+                            // confirms every segment before the terminal name
+                            // is a real `use`-declared module (the SAME
+                            // positive-evidence check the lowerer's
+                            // LOWER_USE_MODULE_HASH performs) before trusting
+                            // the bare-name match.
                             let free_fn_sig_id = checker_fn_sigs_find_inplace(c, path_method_name)
-                            if free_fn_sig_id < 0 {
+                            if free_fn_sig_id < 0 || !checker_path_qualifier_all_modules_known((*callee_expr).path) {
                                 checker_report_warning_at_mut(c, e.span, 44, 0, 0, 0)
                             } else {
                                 direct_sig_id = free_fn_sig_id

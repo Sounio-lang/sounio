@@ -796,10 +796,19 @@ pub fn lower_use_module_reset() with Mut {
     LOWER_IMPL_METHOD_COUNT = 0
 }
 // fo_name_hash is a djb2 variant with real collisions (e.g. "aar" and "ac0"
-// both hash to 193485948) and only covers a name's first 64 bytes. Hash
-// alone is not identity: store the full segment text alongside it and
-// compare bytes after a hash match, so a colliding non-module segment is
-// never mistaken for an imported module.
+// both hash to 193485948) and only hashes a name's first 64 bytes -- but hash
+// alone is never identity here regardless: the full segment text is stored
+// alongside it and compared byte-for-byte after a hash match (below), so a
+// truncated-hash collision cannot be mistaken for a real module match. That
+// full-length compare is also why MODULE_SEG_MAX must cover every byte `Name`
+// can hold (384, matching `Name.buf: [i8; 384]` in parser/ast.sio) rather than
+// some shorter cap: a shorter cap made `lower_use_module_note`/`known` refuse
+// (silently, not an error) any module segment longer than the cap, so a real
+// `use` of a >cap-byte module still parsed/checked but its qualified calls
+// fell back to the mangled body-less stub -- the same SIGILL class of bug
+// this registry exists to prevent, just for long identifiers instead of
+// missing ones. Reported by review (comment 4089110718) against an earlier,
+// shorter (64-byte) cap on this same registry.
 //
 // Stored as a flat scalar byte buffer (LOWER_USE_MODULE_BUF/LEN), NOT
 // `[Name; 1024]` (a 392-byte struct array): a `[Name; 1024]` global here was
@@ -809,13 +818,12 @@ pub fn lower_use_module_reset() with Mut {
 // on this branch's own base commit (692e709), independent of any of the 4
 // review findings, so this is a pre-existing miscompilation in this
 // compiler's own codegen for large-struct global array elements, not
-// something introduced by this PR. A module segment name is always a short
-// identifier; MODULE_SEG_MAX bytes is generous headroom. Scalar (i8/i64)
-// global arrays are the pattern already proven reliable throughout this file
-// (LOWER_USE_MODULE_HASH itself, LOWER_ENUM_VARIANT_PTRS, FN_PARAM_NAME_OFF, …).
-let LOWER_USE_MODULE_SEG_MAX: i64 = 64
+// something introduced by this PR. Scalar (i8/i64) global arrays are the
+// pattern already proven reliable throughout this file (LOWER_USE_MODULE_HASH
+// itself, LOWER_ENUM_VARIANT_PTRS, FN_PARAM_NAME_OFF, …).
+let LOWER_USE_MODULE_SEG_MAX: i64 = 384
 var LOWER_USE_MODULE_LEN: [i64; 1024] = [0; 1024]
-var LOWER_USE_MODULE_BUF: [i8; 65536] = [0; 65536]
+var LOWER_USE_MODULE_BUF: [i8; 393216] = [0; 393216]
 
 fn lower_use_module_known(n: Name) -> bool with Mut, Panic, Div {
     if n.len <= 0 || n.len > LOWER_USE_MODULE_SEG_MAX {
@@ -2551,20 +2559,25 @@ fn lowerer_lower_program_bodies_mut(
 ) with Mut, Panic, Div, Alloc, IO {
     // This is the seed/main module's real body-lowering entry (called once,
     // with the seed program's own DCE-filtered items, from
-    // lower_program_bodies_from_summary_with_epistemic_boxed_owned). Like
-    // lower_program_items_ref (see its #2516 comment), this path never
-    // re-established LOWER_USE_MODULE_HASH/LOWER_IMPL_METHOD_HASH for the
-    // items it is about to lower calls against -- it only relied on whatever
-    // state an earlier, unrelated pass happened to leave behind. Observed on
-    // this branch's own base commit (692e709), independent of any of the 4
-    // review findings: by the time this function ran, LOWER_USE_MODULE_HASH's
-    // entry count was correct but individual entries' Name content had gone
-    // stale/corrupt, so `af_mod::AfNum::quad(..)` fell through to the legacy
-    // first+last mangle and produced a body-less `af_mod_quad` ud2 stub
-    // (SIGILL) instead of `AfNum_quad`. Freshly re-collecting from `items`
-    // immediately before body lowering, right where the resolver actually
-    // reads it, removes the dependency on that stale residual state.
-    lower_use_module_reset()
+    // lower_program_bodies_from_summary_with_epistemic_boxed_owned). An
+    // earlier version of this call site reset LOWER_USE_MODULE_HASH /
+    // LOWER_IMPL_METHOD_HASH here before recollecting -- wrong, and reported
+    // by review (comment 4089110737): the ordinary multi-module path already
+    // builds the registry across the WHOLE module graph, every loaded
+    // program in turn, at module_frontend.sio's `while fo_pi < loaded {
+    // fo_preregister_program_items_multipass(&prog.items) }` loop, before
+    // this function ever runs. Resetting here threw that away and rebuilt it
+    // from ONLY the seed's own items, so a qualified call inside a
+    // DEPENDENCY module -- reached via lower_dep_program_items_into_acc_with_
+    // externs, which never recollects its own `use` paths -- whose module
+    // prefix the seed itself never `use`s lost its registry entry and fell
+    // back to a mangled `mod_f` stub. It also cleared a durable overflow flag
+    // the combined module graph may have legitimately raised. Only
+    // ACCUMULATE from `items` here (lower_use_module_note is idempotent, so
+    // recollecting the seed's own already-registered segments is harmless);
+    // never reset -- that stays owned by the top-level compile-boundary call
+    // sites (module_frontend.sio, lowerer_new()/fo_preregister_program_items_
+    // multipass's callers) that already do it once per compile.
     lower_use_modules_collect(items)
     // Keep the multi-module FO table: the frontend may have pre-registered
     // imported helpers before entering this module.
@@ -7579,12 +7592,19 @@ pub fn lower_program_has_captured_closure_value_misuse_ref(prog: &Program) -> bo
 // stack-address-shaped garbage), reproduced on this branch's own base commit
 // (692e709), independent of any of the 4 review findings. Scalar (i8/i64)
 // global arrays are the pattern already proven reliable throughout this file.
-// A mangled `Type_method` name is well under IMPL_METHOD_SEG_MAX bytes.
-let LOWER_IMPL_METHOD_SEG_MAX: i64 = 128
+//
+// SEG_MAX is 384, matching `Name.buf: [i8; 384]` (parser/ast.sio) and the
+// output cap `ir_mangle_method_name` itself enforces -- not a shorter,
+// arbitrary cap. A shorter cap made `lower_impl_method_note`/`known` silently
+// refuse any mangled name longer than the cap, so a real impl method with a
+// long enough Type_method name lost its "this is a real method" registration
+// -- the same class of bug review comment 4089110718 reported against
+// LOWER_USE_MODULE_SEG_MAX's earlier 64-byte cap.
+let LOWER_IMPL_METHOD_SEG_MAX: i64 = 384
 var LOWER_IMPL_METHOD_COUNT: i64 = 0
 var LOWER_IMPL_METHOD_HASH: [i64; 4096] = [0; 4096]
 var LOWER_IMPL_METHOD_LEN: [i64; 4096] = [0; 4096]
-var LOWER_IMPL_METHOD_BUF: [i8; 524288] = [0; 524288]
+var LOWER_IMPL_METHOD_BUF: [i8; 1572864] = [0; 1572864]
 
 pub fn lower_impl_method_known(n: Name) -> bool with Mut, Panic, Div {
     if n.len <= 0 || n.len > LOWER_IMPL_METHOD_SEG_MAX {
