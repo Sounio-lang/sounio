@@ -222,8 +222,34 @@ fn to_iso_digit(b: i8) -> i64 {
     (b as i64) - 48
 }
 
+// Days in each Gregorian month, 1-indexed at [1]; [0] is unused. February is
+// always treated as 28 here -- this is a coarse well-formedness check for a
+// ValidUntil literal, not a full calendar library, but it must still reject
+// month 00/13+ and day 00/32+ (and 30/31 on short months) rather than accept
+// anything that merely looks numeric.
+fn iso_days_in_month(month: i64) -> i64 {
+    if month == 1 { return 31 }
+    if month == 2 { return 29 }  // permissive on leap-year day 29, still rejects 30/31
+    if month == 3 { return 31 }
+    if month == 4 { return 30 }
+    if month == 5 { return 31 }
+    if month == 6 { return 30 }
+    if month == 7 { return 31 }
+    if month == 8 { return 31 }
+    if month == 9 { return 30 }
+    if month == 10 { return 31 }
+    if month == 11 { return 30 }
+    if month == 12 { return 31 }
+    0
+}
+
 pub fn parse_iso_date_to_f64(name: Name) -> f64 {
-    if name.len < 10 {
+    // Exactly 10 bytes: YYYY-MM-DD. A longer buffer (trailing garbage such as
+    // "9999-99-99x") must be rejected, not silently truncated to its first
+    // 10 bytes -- ValidUntil is a subsumption bound, and a malformed literal
+    // that parses to a large ordered timestamp would silently satisfy every
+    // earlier deadline.
+    if name.len != 10 {
         return 0.0
     }
     let b = name.buf
@@ -245,6 +271,12 @@ pub fn parse_iso_date_to_f64(name: Name) -> f64 {
     let year = to_iso_digit(b[0]) * 1000 + to_iso_digit(b[1]) * 100 + to_iso_digit(b[2]) * 10 + to_iso_digit(b[3])
     let month = to_iso_digit(b[5]) * 10 + to_iso_digit(b[6])
     let day = to_iso_digit(b[8]) * 10 + to_iso_digit(b[9])
+    if month < 1 || month > 12 {
+        return 0.0
+    }
+    if day < 1 || day > iso_days_in_month(month) {
+        return 0.0
+    }
     (year * 10000 + month * 100 + day) as f64
 }
 
@@ -355,7 +387,7 @@ pub fn is_validated_type(ty: TypeEntry) -> bool {
 }
 
 pub fn is_epistemic_type(ty: TypeEntry) -> bool {
-    ty.kind == TypeKind::TyKnowledge || ty.kind == TypeKind::TyIntervention || ty.kind == TypeKind::TyCounterfactual || ty.kind == TypeKind::TyValidated
+    ty.kind == TypeKind::TyKnowledge || ty.kind == TypeKind::TyIntervention || ty.kind == TypeKind::TyCounterfactual || ty.kind == TypeKind::TyValidated || ty.kind == TypeKind::TyEpistemic
 }
 
 pub fn knowledge_inner(ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc {
@@ -750,6 +782,20 @@ pub fn knowledge_compatible(ty_a: TypeEntry, ty_b: TypeEntry) -> bool with Mut, 
 pub fn types_equal(a: TypeEntry, b: TypeEntry) -> bool {
     if a.kind != b.kind {
         false
+    } else if a.kind == TypeKind::TyNamed {
+        // Named leaf types (e.g. ontology-tagged domain types like ChEBI
+        // classes) are only equal when both the identifier AND the ontology
+        // class agree -- two distinct TyNamed leaves with different names or
+        // different ontology_id previously fell through to the (None, None)
+        // structural-equality arm below and compared equal regardless of
+        // identity, letting an invalid substitution through in let/return
+        // contexts that only ever call this canonical predicate.
+        name_eq(a.name, b.name) && a.ontology_id == b.ontology_id &&
+        (match (a.inner, b.inner) {
+            (Some(inner_a), Some(inner_b)) => types_equal(*inner_a, *inner_b),
+            (None, None) => true,
+            _ => false
+        })
     } else {
         match (a.inner, b.inner) {
             (Some(inner_a), Some(inner_b)) => types_equal(*inner_a, *inner_b),

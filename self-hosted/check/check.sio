@@ -6939,7 +6939,15 @@ fn checker_check_return_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
     let val_ty = checker_check_opt_expr_inplace(c, e.left)
     match e.left {
         Some(val_expr) => {
-            if !checker_contextual_expr_compatible(*val_expr, val_ty, (*c).current_return_type) {
+            // `return expr` must get the same four-axis epistemic enforcement as the
+            // bare-`return` arm below: checker_contextual_expr_compatible ignores
+            // validity/provenance entirely, so without this OR a Knowledge<T> return
+            // value that only differs on validity/provenance from current_return_type
+            // was silently accepted here (E246/E244 never fired on an explicit
+            // `return expr`, only on bare `return`).
+            let ret_expr_ok = checker_contextual_expr_compatible(*val_expr, val_ty, (*c).current_return_type)
+                || (is_epistemic_type((*c).current_return_type) && is_epistemic_type(val_ty) && checker_knowledge_subsumes(c, val_ty, (*c).current_return_type))
+            if !ret_expr_ok {
                 checker_report_mismatch_inplace(c, e.span, 8, (*c).current_return_type, val_ty)
             }
             // A refinement must hold at the RETURN too, not only at a binding.
@@ -9135,19 +9143,23 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                                 k_struct_result.knowledge_epsilon = fval.float_val
                             }
                         } else if name_eq(fname, make_name("provenance")) {
-                            if fval.kind == ExprKind::ExprStringLit {
-                                if name_matches_str6(fval.name, 115, 111, 117, 114, 99, 101) { // "source"
-                                    k_struct_result.knowledge_provenance_kind = 1
-                                } else if name_matches_str8(fval.name, 99, 111, 109, 112, 117, 116, 101, 100) { // "computed"
-                                    k_struct_result.knowledge_provenance_kind = 2
-                                } else if name_matches_str7(fval.name, 109, 101, 97, 115, 117, 114, 101) { // "measure"
-                                    k_struct_result.knowledge_provenance_kind = 4
-                                } else if name_matches_str5(fval.name, 105, 110, 112, 117, 116) { // "input"
-                                    k_struct_result.knowledge_provenance_kind = 5
-                                } else {
-                                    k_struct_result.knowledge_provenance_kind = 0 // derived
-                                }
-                            }
+                            // The `provenance` FIELD on a Knowledge struct literal is an
+                            // arbitrary, user-controlled source LABEL (free text such as
+                            // "deterministic_recurrence" in tests/audit/
+                            // knowledge_provenance_boundary_silence.sio), not the
+                            // type-level provenance CATEGORY. The category comes from the
+                            // `Knowledge[T, eps, Category]` type annotation (see the
+                            // annotation-provenance wiring above at k_struct_result's type
+                            // context), which owns knowledge_provenance_kind separately.
+                            //
+                            // Deriving the category from this string's CONTENT was a trust
+                            // escalation: writing `provenance: "measure"` or `"source"` as
+                            // a label made the literal's type-level provenance
+                            // Measured/Source-trusted with no real trusted constructor
+                            // behind it, letting it satisfy a Measured/trusted parameter
+                            // it never earned. This field is intentionally NOT read for
+                            // classification; knowledge_provenance_kind stays whatever the
+                            // type annotation already set (or -1/DERIVED if none did).
                         }
                         cur_f = (*flist).tail
                     }
@@ -11713,9 +11725,27 @@ fn checker_check_call_arg_knowledge_boundary_inplace(c: *mut Checker, arg_ty: Ty
     }
     if !checker_knowledge_subsumes(c, provided_ty, expected_ty) {
         // Name the failing slot: a refusal is evidence for the cause it names.
+        // Classify the ontology axis FIRST -- checker_ontology_boundary_check_call_arg_contract_inplace
+        // is invoked separately at every one of this function's call sites and owns E150/E151/E152
+        // for ontology-only failures. Without this check, an ontology-only mismatch (provenance and
+        // validity both satisfied) fell through to the `else` arm below and reported a wrong E036
+        // ("epsilon bound violation") in addition to the ontology check's own diagnostic --
+        // confusing double/wrong errors naming the wrong axis as the cause.
+        let p_inner_ont = knowledge_inner(provided_ty)
+        let r_inner_ont = knowledge_inner(expected_ty)
+        let onto_ok = if types_equal(p_inner_ont, r_inner_ont) {
+            true
+        } else if !name_is_empty(p_inner_ont.name) && !name_is_empty(r_inner_ont.name) {
+            checker_onto_name_subclass_walk((*c).ontology_items, p_inner_ont.name, r_inner_ont.name, 0)
+        } else {
+            false
+        }
         let pmeta2 = knowledge_meta_from_ty(provided_ty)
         let rmeta2 = knowledge_meta_from_ty(expected_ty)
-        if !provenance_subsumes(knowledge_meta_provenance(pmeta2), knowledge_meta_provenance(rmeta2)) {
+        if !onto_ok {
+            // Ontology mismatch: defer to the ontology boundary check for the actual
+            // E150/E151/E152 diagnostic naming this axis. Do not also report here.
+        } else if !provenance_subsumes(knowledge_meta_provenance(pmeta2), knowledge_meta_provenance(rmeta2)) {
             checker_report_error_at_inplace(c, call_span, 244, 0, 0, 0)
         } else if !validity_subsumes(knowledge_meta_validity(pmeta2), knowledge_meta_validity(rmeta2)) {
             checker_report_error_at_inplace(c, call_span, 246, 0, 0, 0)
@@ -11774,20 +11804,17 @@ fn checker_ontology_boundary_check_call_arg_contract_inplace(c: *mut Checker, ar
         return
     }
     if prov_check_ty.ontology_id < 0 {
-        let t150 = (*c).report_error_at(call_span, 150, 0, 0, 0)
-        checker_store_from_value(c, t150)
+        checker_report_error_at_inplace(c, call_span, 150, 0, 0, 0)
         return
     }
     if (*c).ontology_inference_query_subclass(prov_check_ty.ontology_id, exp_check_ty.ontology_id) {
         return
     }
     if (*c).ontology_inference_query_disjoint(prov_check_ty.ontology_id, exp_check_ty.ontology_id) {
-        let t151 = (*c).report_error_at(call_span, 151, 0, 0, 0)
-        checker_store_from_value(c, t151)
+        checker_report_error_at_inplace(c, call_span, 151, 0, 0, 0)
         return
     }
-    let t152 = (*c).report_error_at(call_span, 152, 0, 0, 0)
-    checker_store_from_value(c, t152)
+    checker_report_error_at_inplace(c, call_span, 152, 0, 0, 0)
 }
 
 
@@ -18899,6 +18926,49 @@ fn checker_fn_types_structurally_compatible_inplace(c: *mut Checker, a: TypeEntr
         return false
     }
     checker_types_compatible_table_deep((*c).fn_sigs, a, b, 0)
+}
+
+// Free-function (no *mut Checker, no by-value Checker) twin of checker_knowledge_subsumes
+// for call sites in the by-value Checker spine that only have `self.ontology_items` in
+// scope (e.g. check_return_expr). Same four-axis rule: Ontology && Epsilon && Validity &&
+// Provenance. Kept separate from checker_knowledge_subsumes (which needs *mut Checker only
+// for its `with Mut` effect signature parity, not for any actual mutation) so neither spine
+// has to thread a Checker handle through for a pure predicate.
+fn check_return_expr_knowledge_subsumes(ontology_items: Option<Box<ItemList> >, provided: TypeEntry, required: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
+    if !is_epistemic_type(provided) || !is_epistemic_type(required) {
+        return false
+    }
+    if provided.kind != required.kind {
+        return false
+    }
+    let p_inner = knowledge_inner(provided)
+    let r_inner = knowledge_inner(required)
+    let onto_ok = if types_equal(p_inner, r_inner) {
+        true
+    } else if !name_is_empty(p_inner.name) && !name_is_empty(r_inner.name) {
+        checker_onto_name_subclass_walk(ontology_items, p_inner.name, r_inner.name, 0)
+    } else {
+        false
+    }
+    if !onto_ok {
+        return false
+    }
+    let pmeta = knowledge_meta_from_ty(provided)
+    let rmeta = knowledge_meta_from_ty(required)
+    let eps_ok = epsilon_subsumes_call_boundary(
+        knowledge_meta_epsilon(pmeta),
+        provided.knowledge_epsilon_mode,
+        knowledge_meta_epsilon(rmeta),
+        required.knowledge_epsilon_mode
+    )
+    if !eps_ok {
+        return false
+    }
+    let val_ok = validity_subsumes(knowledge_meta_validity(pmeta), knowledge_meta_validity(rmeta))
+    if !val_ok {
+        return false
+    }
+    provenance_subsumes(knowledge_meta_provenance(pmeta), knowledge_meta_provenance(rmeta))
 }
 
 // Centralized epistemic knowledge subsumption:
@@ -28540,16 +28610,19 @@ impl Checker {
         let prov_ok = provenance_subsumes(knowledge_meta_provenance(pm), knowledge_meta_provenance(rm))
         if onto_ok && eps_ok && val_ok && prov_ok {
             self
+        } else if !onto_ok {
+            // Ontology mismatch: defer to check_call_arg_ontology_boundary (called
+            // separately at every call site of this function) for the actual
+            // E150/E151/E152 diagnostic naming this axis. Reporting here too would
+            // produce the wrong ("E036 epsilon") diagnostic alongside the right one --
+            // mirrors checker_check_call_arg_knowledge_boundary_inplace's *mut twin.
+            self
+        } else if !prov_ok {
+            self.report_error_at(call_span, 244, 0, 0, 0)
+        } else if !val_ok {
+            self.report_error_at(call_span, 246, 0, 0, 0)
         } else {
-            if !prov_ok {
-                self.report_error_at(call_span, 244, 0, 0, 0)
-            } else if !val_ok {
-                self.report_error_at(call_span, 246, 0, 0, 0)
-            } else if !eps_ok {
-                self.report_error_at(call_span, 36, 0, 0, 0)
-            } else {
-                self.report_error_at(call_span, 9, 0, 0, 0)
-            }
+            self.report_error_at(call_span, 36, 0, 0, 0)
         }
     }
 
@@ -29032,12 +29105,20 @@ impl Checker {
         let val_ty = pair.1
         match e.left {
             Some(val_expr) => {
-                if !checker_contextual_expr_compatible(*val_expr, val_ty, c.current_return_type) {
+                var ret_ok = checker_contextual_expr_compatible(*val_expr, val_ty, c.current_return_type)
+                if !ret_ok && is_epistemic_type(c.current_return_type) && is_epistemic_type(val_ty) && val_ty.kind == c.current_return_type.kind {
+                    ret_ok = check_return_expr_knowledge_subsumes(c.ontology_items, val_ty, c.current_return_type)
+                }
+                if !ret_ok {
                     c = c.report_mismatch(e.span, 8, c.current_return_type, val_ty)
                 }
             }
             None => {
-                if !c.types_compatible_structural(val_ty, c.current_return_type) {
+                var ret_ok = c.types_compatible_structural(val_ty, c.current_return_type)
+                if !ret_ok && is_epistemic_type(c.current_return_type) && is_epistemic_type(val_ty) && val_ty.kind == c.current_return_type.kind {
+                    ret_ok = check_return_expr_knowledge_subsumes(c.ontology_items, val_ty, c.current_return_type)
+                }
+                if !ret_ok {
                     c = c.report_mismatch(e.span, 8, c.current_return_type, val_ty)
                 }
             }
