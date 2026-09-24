@@ -1,4 +1,4 @@
-# ADR 010: Boundary and Scope of Mathlib in Sounio Formal Verification
+# ADR 011: Boundary and Scope of Mathlib in Sounio Formal Verification
 
 - **Status:** Accepted
 - **Date:** 2026-09-24

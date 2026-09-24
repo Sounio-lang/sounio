@@ -252,6 +252,19 @@ theorem oct_mul_add_right (x y z : Oct) :
   · simp only [octMul, octAdd, Int.add_mul]; omega
   · simp only [octMul, octAdd, Int.add_mul]; omega
 
+/-- Canonical basis decomposition: every octonion is uniquely expressed
+    as an integer linear combination of the eight standard basis elements e₀..e₇. -/
+theorem oct_decompose (x : Oct) :
+    x = octAdd (octScale x.e0 e0)
+       (octAdd (octScale x.e1 e1)
+       (octAdd (octScale x.e2 e2)
+       (octAdd (octScale x.e3 e3)
+       (octAdd (octScale x.e4 e4)
+       (octAdd (octScale x.e5 e5)
+       (octAdd (octScale x.e6 e6)
+               (octScale x.e7 e7))))))) := by
+  ext <;> simp [octAdd, octScale, e0, e1, e2, e3, e4, e5, e6, e7]
+
 -- ---------------------------------------------------------------------------
 -- §11. Identity element
 -- ---------------------------------------------------------------------------
