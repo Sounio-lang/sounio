@@ -1,0 +1,57 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: TUPLE_ARR_HASH_LONG_NAME_COLLISION PASS
+//
+// Copilot review (PR #2516) finding #1 on the second review round:
+// fo_name_hash/fo_name_hash2 (self-hosted/ir/lower.sio) used to cap their
+// rolling hash at the first 64 bytes of the name, even though `Name.buf` is
+// `[i8; 384]` and the parser accepts identifiers that long. Two function
+// names sharing a 64-byte-plus common prefix but differing only AFTER byte
+// 64 therefore hashed identically in BOTH LOWER_FN_TUPLE_ARR_HASH and
+// LOWER_FN_TUPLE_ARR_HASH2, so `lower_fn_tuple_f64_array_mask` could return
+// one function's array-slot mask for a DIFFERENT function sharing that
+// truncated prefix -- exactly the bits-as-i64 (or, here, the mirror-image
+// bits-as-f64) corruption this whole side table exists to prevent, just
+// reached via a long-name collision instead of a short-name one.
+//
+// The two names below share a 64-byte prefix and differ only in their last
+// two characters ("aa" vs "bb"). `..aa` returns a tuple of two f64 arrays
+// (mask = 3, both slots arrays). `..bb` returns a tuple whose slot 0 is a
+// plain [i64; 2] array and whose slot 1 is an [f64; 2] array (mask = 2, only
+// slot 1 an array). If the hash were still truncated at 64 bytes, both names
+// would collide in the table and `..bb`'s lookup could pick up `..aa`'s
+// mask (3) instead of its own (2), wrongly marking `..bb`'s INTEGER slot 0
+// as an f64 array too -- so reading its plain i64 elements would misread
+// the raw bits as f64 (the mirror image of the original kinetics bug, same
+// root cause: a stale/wrong mask from an unrelated function).
+fn nabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijkaa() -> ([f64; 2], [f64; 2]) with Mut, Panic {
+    var a: [f64; 2] = [0.0; 2]
+    var b: [f64; 2] = [0.0; 2]
+    a[0] = 1.5
+    b[0] = 0.25
+    (a, b)
+}
+
+fn nabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijkbb() -> ([i64; 2], [f64; 2]) with Mut, Panic {
+    var ints: [i64; 2] = [0; 2]
+    var floats: [f64; 2] = [0.0; 2]
+    ints[0] = 7
+    floats[0] = 0.25
+    (ints, floats)
+}
+
+fn main() -> i32 with IO, Mut, Panic {
+    let (oa, ob) = nabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijkaa()
+    let s0: f64 = oa[0] * 2.0
+    let s1: f64 = 2.0 * ob[0]
+
+    let (ib, fb) = nabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijkbb()
+    let v = ib[0] * 2
+    let fv: f64 = fb[0] * 2.0
+
+    if s0 == 3.0 && s1 == 0.5 && v == 14 && fv == 0.5 {
+        println("TUPLE_ARR_HASH_LONG_NAME_COLLISION PASS")
+        return 0
+    }
+    1
+}
