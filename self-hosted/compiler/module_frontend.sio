@@ -3,7 +3,7 @@
 // Multimodule frontend and IR-loading lane split from module_loader.sio.
 // Keeps frontend probes off the native/wasm/optimizer/thin-link backend surface.
 
-use parser::ast::{AstPath, empty_path, Item, ItemKind, ItemList, Name, ParamList, Program, StringList, make_name, ast_reset_global_var_inits, GLOBAL_VAR_INIT_SUPPRESS_RESET, lower_named_item_terminal_note}
+use parser::ast::{AstPath, empty_path, Item, ItemKind, ItemList, Name, ParamList, Program, StringList, make_name, ast_reset_global_var_inits, GLOBAL_VAR_INIT_SUPPRESS_RESET, lower_named_item_terminal_note, ast_path_prefix_name}
 use parser::mod::{count_items}
 use parser::parser::{parser_last_error_count, parser_reset_last_errors}
 use ir::ir::*
@@ -11,13 +11,13 @@ use ir::opt_cleanup::{OcpCleanupModuleReceipt, opt_cleanup_module_inplace, OCP_S
 use io::env::{read_env}
 use io::trace::{io_trace_i64_string}
 use check::mod::{check_items_verdict_boot4, check_items_verdict_boot4_with_ontocache_sidecar, check_modules_verdict_boot4, check_program_epistemic_into, check_program_with_artifacts, checker_to_ir_epistemic_into, checker_apply_ir_metadata, checker_apply_ir_ontology_parameter_links_from_items}
-use ir::lower::{lower_hard_error_report, lower_program_to_ir_trace, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_bodies_from_summary_flat_with_epistemic_ref, lower_program_bodies_from_summary_with_epistemic_boxed_owned, lower_dep_program_items_into_acc_with_externs, lower_hard_error_reset, lower_hard_error_pending, ir_instr_census_report, fo_preregister_program_items_multipass, fo_xfer_global_reset, lower_use_module_reset}
+use ir::lower::{lower_hard_error_report, lower_program_to_ir_trace, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_bodies_from_summary_flat_with_epistemic_ref, lower_program_bodies_from_summary_with_epistemic_boxed_owned, lower_dep_program_items_into_acc_with_externs, lower_hard_error_reset, lower_hard_error_pending, ir_instr_census_report, fo_preregister_program_items_multipass, fo_xfer_global_reset, lower_use_module_reset, lower_set_current_module_id}
 use native::codegen_x86_linux::{compile_native_v2_preview_to_file, native_resolve_target, native_v2_builtin_id_for_name, native_v2_builtin_returns_float}
 use check::knowledge_context::{knowledge_context_validate_items, knowledge_context_validate_items_values_only}
 use resolve::mod::{resolve_modules}
 use module_parse::{extract_imports_from_ast, file_exists, file_path_to_module_path, load_module_file}
 use private_fn_identity::{private_fn_identity_apply}
-use check::specializer::{specialize_generics, spec_last_instantiated, spec_mono_marker_count, spec_append_item_lists, spec_dce_unreachable_item_fns, spec_dce_mark_across_programs, spec_dce_filter_with_global_marks, spec_dce_live_item_fns, spec_report_any_specializer_failure, spec_program_mentions_f128}
+use check::specializer::{specialize_generics, specialize_generics_multi, spec_last_instantiated, spec_mono_marker_count, spec_append_item_lists, spec_dce_unreachable_item_fns, spec_dce_mark_across_programs, spec_dce_filter_with_global_marks, spec_dce_live_item_fns, spec_report_any_specializer_failure, spec_program_mentions_f128}
 
 // Multi-module parse accumulates every module's GLOBAL_VAR_INIT_* side-table
 // entries so imported f64/i64 BSS constants survive to lower time. Without
@@ -766,7 +766,7 @@ fn resolve_import_file_path(path: AstPath, cur_dir: string) -> string with IO, M
                 // not a module of its own. Record it so check.sio/lower.sio/
                 // specializer.sio can use this instead of guessing from
                 // incidental name collisions with unrelated declarations.
-                lower_named_item_terminal_note(ir_path_last_name(path))
+                lower_named_item_terminal_note(ast_path_prefix_name(path, path.seg_count - 1))
                 return parent_resolved
             }
         }
@@ -5137,6 +5137,9 @@ fn module_frontend_lower_program_box_traced_with_epistemic(
     trace.summary_seeded_modules = trace.summary_seeded_modules + 1
     trace.last_stage = "lower_bodies"
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_begin\n") }
+    // See LOWER_CURRENT_MODULE_ID's comment in ir/lower.sio: scope
+    // module-qualified-call resolution to this module's own `use` entries.
+    lower_set_current_module_id(module_index)
     // Consume summary Box: reuse its IrModule for body lower (no second empty).
     let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_owned(
         program,
@@ -5210,6 +5213,9 @@ fn module_frontend_lower_program_items_box_traced(
     trace.summary_seeded_modules = trace.summary_seeded_modules + 1
     trace.last_stage = "lower_bodies"
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_begin\n") }
+    // See LOWER_CURRENT_MODULE_ID's comment in ir/lower.sio: scope
+    // module-qualified-call resolution to this module's own `use` entries.
+    lower_set_current_module_id(module_index)
     // Consume summary Box: reuse its IrModule for body lower (no second empty).
     let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_owned(
         &program,
@@ -5271,6 +5277,9 @@ fn module_frontend_lower_program_box_traced_with_externs(
     trace.summary_seeded_modules = trace.summary_seeded_modules + 1
     trace.last_stage = "lower_bodies"
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_begin\n") }
+    // See LOWER_CURRENT_MODULE_ID's comment in ir/lower.sio: scope
+    // module-qualified-call resolution to this module's own `use` entries.
+    lower_set_current_module_id(module_index)
     // Consume summary Box: reuse its IrModule for body lower (no second empty).
     let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_owned(
         program,
@@ -5333,6 +5342,14 @@ fn module_frontend_lower_program_items_box_traced_with_externs(
     trace.summary_seeded_modules = trace.summary_seeded_modules + 1
     trace.last_stage = "lower_bodies"
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_begin\n") }
+    // module_index is this module's own loaded-program index (0 for the
+    // seed, i for a dependency lowered via this same shared function) --
+    // the same id fo_preregister_program_items_multipass stamped this
+    // module's `use` entries with. Set it as the current module before
+    // lowering bodies so callee_path_module_stripped_name's qualifier
+    // lookups are scoped to what THIS module actually imported. See
+    // LOWER_CURRENT_MODULE_ID's comment in ir/lower.sio.
+    lower_set_current_module_id(module_index)
     // Consume summary Box: reuse its IrModule for body lower (no second empty).
     let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_owned(
         &program,
@@ -5584,7 +5601,7 @@ fn module_frontend_lower_single_program_array_direct_box(
     fo_xfer_global_reset()
     lower_use_module_reset()
     let program = (*programs)[0]
-    fo_preregister_program_items_multipass(&program.items)
+    fo_preregister_program_items_multipass(&program.items, 0)
     print("lower_array: seed_begin\n")
     let seed_items = spec_dce_filter_with_global_marks(program.items)
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_begin\n") }
@@ -5682,7 +5699,7 @@ fn module_frontend_lower_programs_array_direct_box_multi(
     var fo_pi: i64 = 0
     while fo_pi < loaded {
         var prog = (*programs)[fo_pi as usize]
-        fo_preregister_program_items_multipass(&prog.items)
+        fo_preregister_program_items_multipass(&prog.items, fo_pi)
         fo_pi = fo_pi + 1
     }
     print("lower_array: seed_begin\n")
@@ -6141,6 +6158,9 @@ fn module_frontend_lower_program_full_traced(
     trace.summary_seeded_modules = trace.summary_seeded_modules + 1
     trace.last_stage = "lower_bodies"
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_begin\n") }
+    // See LOWER_CURRENT_MODULE_ID's comment in ir/lower.sio: scope
+    // module-qualified-call resolution to this module's own `use` entries.
+    lower_set_current_module_id(module_index)
     // Consume summary Box: reuse its IrModule for body lower (no second empty).
     let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_owned(
         &program,
@@ -6224,7 +6244,7 @@ fn module_frontend_specialized_typecheck(programs: &! [Program; 256], count: i64
     if count <= 0 {
         return (false, 0)
     }
-    let specialized = specialize_generics(module_frontend_merge_program_items(programs, count))
+    let specialized = specialize_generics_multi(module_frontend_merge_program_items(programs, count), programs, count)
     // i64 mono-marker gate — not bare `if !bool` (CI-seed fragile).
     let mono_n: i64 = spec_mono_marker_count()
     if mono_n <= 0 {
@@ -6294,7 +6314,7 @@ fn module_frontend_specialized_prepare(
     // spine, which would leave body lower seeing only main with live clones
     // stripped (measured: body_fn_count 4 but only main body-lowered → ZD FAIL
     // / SEGV on empty mono stubs).
-    let specialized_tc = specialize_generics(module_frontend_merge_program_items(programs, count))
+    let specialized_tc = specialize_generics_multi(module_frontend_merge_program_items(programs, count), programs, count)
     // Seed-safe i64 mono markers. Leave specialized_items_out as None when
     // mono_n==0 so Option occupancy stays the sole collapse arm.
     let mono_n: i64 = spec_mono_marker_count()
@@ -6314,7 +6334,7 @@ fn module_frontend_specialized_prepare(
     // Monomorphized + retained non-generic items from every module live in
     // one list under same-name mono. Multi-mod template body lower SEGV'd on
     // cd_add_exact / trait-method array loops (Wave12 residual).
-    let specialized_raw = specialize_generics(module_frontend_merge_program_items(programs, count))
+    let specialized_raw = specialize_generics_multi(module_frontend_merge_program_items(programs, count), programs, count)
     let mono_n2: i64 = spec_mono_marker_count()
     if mono_n2 <= 0 {
         return 0
@@ -6440,7 +6460,7 @@ fn module_frontend_merge_imported_box(
     var merge_fo_pi: i64 = 0
     while merge_fo_pi < loaded {
         var merge_prog = (*programs)[merge_fo_pi as usize]
-        fo_preregister_program_items_multipass(&merge_prog.items)
+        fo_preregister_program_items_multipass(&merge_prog.items, merge_fo_pi)
         merge_fo_pi = merge_fo_pi + 1
     }
 
@@ -6768,7 +6788,7 @@ pub fn module_frontend_compile_imported_to_file(
     var compile_fo_pi: i64 = 0
     while compile_fo_pi < loaded {
         var compile_prog = programs[compile_fo_pi as usize]
-        fo_preregister_program_items_multipass(&compile_prog.items)
+        fo_preregister_program_items_multipass(&compile_prog.items, compile_fo_pi)
         compile_fo_pi = compile_fo_pi + 1
     }
 

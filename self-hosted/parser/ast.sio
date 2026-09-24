@@ -1455,6 +1455,50 @@ pub fn ast_name_hash(n: Name) -> i64 with Div {
     if hash < 0 { 0 - hash } else { hash }
 }
 
+// Segment k of `sl`, by recursion (mirrors the identical nth-segment helper
+// each of check.sio / ir::lower / specializer.sio already has locally).
+fn ast_string_list_nth_name(sl: StringList, k: i64) -> Name with Mut, Panic, Div {
+    if k <= 0 {
+        return Name { buf: sl.head_buf, len: sl.head_len }
+    }
+    match sl.tail {
+        Some(rest) => ast_string_list_nth_name(*rest, k - 1),
+        None => Name { buf: [0; 384], len: 0 },
+    }
+}
+
+// Joins segments 0..=upto_inclusive of `path` into one synthetic Name using
+// "::" as separator (e.g. segments 0..1 of `q::x::something` -> "q::x").
+// Used as the key for lower_named_item_terminal_known/_note below: review
+// comment 4091287602 (round 7) found that keying that registry by the BARE
+// TERMINAL SEGMENT ALONE conflated unrelated `use` paths that happen to
+// share a terminal name -- `use p::x;` (x a named function) in one module
+// and `use q::x;` (x a real module) in another both resolve their `x`
+// differently, but a terminal-only key made whichever got recorded first
+// answer for BOTH, everywhere, for the rest of the process. Keying by the
+// FULL prefix path text instead (this function) disambiguates them: "p::x"
+// and "q::x" are different keys, so each keeps its own correct answer.
+pub fn ast_path_prefix_name(path: AstPath, upto_inclusive: i64) -> Name with Mut, Panic, Div {
+    var result = Name { buf: [0; 384], len: 0 }
+    var k: i64 = 0
+    while k <= upto_inclusive && k < path.seg_count {
+        let seg = ast_string_list_nth_name(path.segments, k)
+        if k > 0 && result.len + 2 < 384 {
+            result.buf[result.len as usize] = 58
+            result.buf[(result.len + 1) as usize] = 58
+            result.len = result.len + 2
+        }
+        var i: i64 = 0
+        while i < seg.len && result.len < 384 {
+            result.buf[result.len as usize] = seg.buf[i as usize]
+            result.len = result.len + 1
+            i = i + 1
+        }
+        k = k + 1
+    }
+    result
+}
+
 // Authoritative (not heuristic) registry of names KNOWN to be the terminal
 // item of a path-form NAMED import (`use a::b::specific_fn;`), as opposed to
 // a whole-module import's terminal (`use a::b;`) -- the two are otherwise

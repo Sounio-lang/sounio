@@ -796,25 +796,63 @@ fn fo_name_hash(n: Name) -> i64 with Mut, Panic, Div {
 // it starts lowercase, and at the call site it is not a known struct or enum.
 // Everything else keeps the Type::method mangling.
 //
-// KNOWN SCOPING GAP (review comment 4090966164, round 6 finding A): this
-// registry is a single GLOBAL set across every loaded module, not scoped to
-// "did the CURRENT module actually `use` this" -- check.sio's sibling
-// CHECKER_USE_MODULE_HASH was fixed to be per-module-scoped (keyed by
-// current_module_id) this round, but this one was not, for two reasons: (1)
-// unlike check.sio, nothing in the lowering pipeline currently threads a
-// stable "which module's body is this callee_path_module_stripped_name call
-// happening inside" identity down to where the registry is queried, and
-// building that plumbing safely was judged out of scope for this round's
-// time budget; (2) in the pipeline's normal compile path, check.sio's
-// (now-correct) validation always runs before lowering and would already
-// reject a call using a module qualifier the calling module never imported
-// -- so an invalid program never reaches this looser check in the first
-// place. This remains a real gap for any path that could reach body
-// lowering without going through check.sio's validation first; if one is
-// found, this registry needs the same per-module-id keying
-// CHECKER_USE_MODULE_HASH received.
+// FIXED (review 5301534901, round 7 finding A's sibling gap; the round-6
+// comment below described this as a KNOWN, deliberately deferred SCOPING
+// GAP -- kept verbatim below for history): this registry used to be a
+// single GLOBAL set across every loaded module, not scoped to "did the
+// CURRENT module actually `use` this". check.sio's CHECKER_USE_MODULE_HASH
+// was per-module-scoped in round 6, and specializer.sio's sibling
+// SPEC_USE_MODULE_HASH in round 7 (finding A) -- but round 6 reasoned this
+// one could stay unscoped because "check.sio's validation always runs
+// before lowering and would already reject an invalid qualifier via W044".
+// Round 7's finding A review comment pointed out that reasoning does not
+// actually hold: W044 is a WARNING, not a hard compile error (by long-
+// standing design, since it fires on pre-existing broken code elsewhere in
+// this codebase too) -- so a program whose qualifier check.sio only
+// *warned* about still proceeds to body lowering, where this registry, if
+// left globally scoped, could independently (and silently) resolve the
+// same illegitimately-borrowed qualifier to an unrelated module's real
+// function and emit a genuine miscompilation, with no diagnostic at all.
+// That is strictly worse than check.sio's non-fatal warning and entirely
+// bypasses it. Fixed the same way as SPEC_USE_MODULE_HASH: every entry is
+// now stamped with the registering module's id (LOWER_USE_MODULE_MODULE_ID,
+// parallel to HASH/LEN/BUF) and lookup requires an exact match against
+// LOWER_CURRENT_MODULE_ID, which the three body-lowering entry points that
+// can resolve a module-qualified call (module_frontend.sio's
+// module_frontend_lower_program_items_box_traced_with_externs, this file's
+// lower_dep_program_items_into_acc_with_externs, and the single-module
+// direct-box path, which relies on the -1-means-0 fallback below since it
+// never lowers more than module 0) now set via lower_set_current_module_id
+// before lowering that module's own bodies. The ACCUMULATION timing itself
+// (every loaded module's `use` paths collected up front, before any body is
+// lowered -- see lower_use_modules_collect's own comment) is unchanged;
+// only the id each entry is stamped with, and the id required at lookup,
+// are new.
 var LOWER_USE_MODULE_COUNT: i64 = 0
 var LOWER_USE_MODULE_HASH: [i64; 1024] = [0; 1024]
+var LOWER_USE_MODULE_MODULE_ID: [i64; 1024] = [0 - 1; 1024]
+
+// The module id callee_path_module_stripped_name's qualifier lookup checks
+// registry entries against. -1 (the default) means "unscoped": the single-
+// module direct-box path never calls lower_set_current_module_id, and
+// lower_use_module_known/note both fall back to module id 0 when this is
+// negative, so that path's own (always module-0) entries still match
+// without any special-cased fallback branch. The three multi-module body-
+// lowering entry points listed above set this explicitly to the id of
+// whichever module's own items are currently being lowered, for the
+// duration of that module's body lowering.
+var LOWER_CURRENT_MODULE_ID: i64 = 0 - 1
+
+// Sets LOWER_CURRENT_MODULE_ID from module_frontend.sio, which owns the
+// loop indices that know which loaded module is about to have its body
+// lowered; lower.sio's own body-lowering entry points call this directly.
+pub fn lower_set_current_module_id(module_id: i64) with Mut {
+    LOWER_CURRENT_MODULE_ID = module_id
+}
+
+fn lower_effective_current_module_id() -> i64 with Mut {
+    if LOWER_CURRENT_MODULE_ID < 0 { 0 } else { LOWER_CURRENT_MODULE_ID }
+}
 // Durable: NOT cleared by lower_hard_error_reset(), which fo_preregister_program_items_multipass
 // (via lowerer_new()) calls once per loaded module -- immediately after this table might be
 // filled, on the very same call path, before any compile-boundary check ever sees the flag.
@@ -828,6 +866,7 @@ pub fn lower_use_module_reset() with Mut {
     LOWER_USE_MODULE_OVERFLOWED = false
     LOWER_IMPL_METHOD_COUNT = 0
     LOWER_IMPL_METHOD_OVERFLOWED = false
+    LOWER_CURRENT_MODULE_ID = 0 - 1
     // LOWER_NAMED_ITEM_TERMINAL_* (parser::ast) is deliberately NOT reset
     // anywhere in this file -- see its own comment there for why.
 }
@@ -861,14 +900,14 @@ let LOWER_USE_MODULE_SEG_MAX: i64 = 384
 var LOWER_USE_MODULE_LEN: [i64; 1024] = [0; 1024]
 var LOWER_USE_MODULE_BUF: [i8; 393216] = [0; 393216]
 
-fn lower_use_module_known(n: Name) -> bool with Mut, Panic, Div {
+fn lower_use_module_known(module_id: i64, n: Name) -> bool with Mut, Panic, Div {
     if n.len <= 0 || n.len > LOWER_USE_MODULE_SEG_MAX {
         return false
     }
     let h = fo_name_hash(n)
     var i: i64 = 0
     while i < LOWER_USE_MODULE_COUNT {
-        if LOWER_USE_MODULE_HASH[i as usize] == h && LOWER_USE_MODULE_LEN[i as usize] == n.len {
+        if LOWER_USE_MODULE_MODULE_ID[i as usize] == module_id && LOWER_USE_MODULE_HASH[i as usize] == h && LOWER_USE_MODULE_LEN[i as usize] == n.len {
             let base = i * LOWER_USE_MODULE_SEG_MAX
             var eq = true
             var j: i64 = 0
@@ -887,7 +926,7 @@ fn lower_use_module_known(n: Name) -> bool with Mut, Panic, Div {
     false
 }
 
-fn lower_use_module_note(n: Name) with Mut, Panic, Div {
+fn lower_use_module_note(module_id: i64, n: Name) with Mut, Panic, Div {
     if n.len <= 0 || n.len > LOWER_USE_MODULE_SEG_MAX {
         return
     }
@@ -895,7 +934,7 @@ fn lower_use_module_note(n: Name) with Mut, Panic, Div {
     if c0 >= 65 && c0 <= 90 {
         return
     }
-    if lower_use_module_known(n) {
+    if lower_use_module_known(module_id, n) {
         return
     }
     if LOWER_USE_MODULE_COUNT >= 1024 {
@@ -915,6 +954,7 @@ fn lower_use_module_note(n: Name) with Mut, Panic, Div {
         return
     }
     let use_idx = LOWER_USE_MODULE_COUNT
+    LOWER_USE_MODULE_MODULE_ID[use_idx as usize] = module_id
     LOWER_USE_MODULE_HASH[use_idx as usize] = fo_name_hash(n)
     let use_base = use_idx * LOWER_USE_MODULE_SEG_MAX
     var use_ci: i64 = 0
@@ -942,7 +982,7 @@ fn lower_string_list_nth_name(sl: StringList, k: i64) -> Name with Mut, Panic, D
 // `use a::b::{x}` the path is `a::b`, all modules. `use a::f;` may name an
 // item; noting `f` is harmless because a call spelled `f::g` still has to pass
 // the call-site type checks.
-pub fn lower_use_modules_collect(items: &Option<Box<ItemList>>) with Mut, Panic, Div, Alloc {
+pub fn lower_use_modules_collect(items: &Option<Box<ItemList>>, module_id: i64) with Mut, Panic, Div, Alloc {
     // Same every-module-before-body-lowering timing this function already
     // provides for LOWER_USE_MODULE_HASH: populate the impl-method registry
     // here too so callee_path_module_stripped_name always sees a complete
@@ -973,7 +1013,7 @@ pub fn lower_use_modules_collect(items: &Option<Box<ItemList>>) with Mut, Panic,
                     var k: i64 = 0
                     while k < item_ref.use_path.seg_count {
                         let use_seg = lower_string_list_nth_name(item_ref.use_path.segments, k)
-                        lower_use_module_note(use_seg)
+                        lower_use_module_note(module_id, use_seg)
                         k = k + 1
                     }
                 }
@@ -2629,8 +2669,14 @@ fn lowerer_lower_program_bodies_mut(
     // recollecting the seed's own already-registered segments is harmless);
     // never reset -- that stays owned by the top-level compile-boundary call
     // sites (module_frontend.sio, lowerer_new()/fo_preregister_program_items_
-    // multipass's callers) that already do it once per compile.
-    lower_use_modules_collect(items)
+    // multipass's callers) that already do it once per compile. Uses
+    // lower_effective_current_module_id() (not a hardcoded 0): the caller
+    // (module_frontend.sio / lower_dep_program_items_into_acc_with_externs)
+    // has already called lower_set_current_module_id for whichever module's
+    // body is being lowered right now, so this recollection stamps the same
+    // module id its earlier, authoritative preregister pass used -- it is a
+    // genuine no-op resend, not a fresh (and possibly wrongly-id'd) entry.
+    lower_use_modules_collect(items, lower_effective_current_module_id())
     // Keep the multi-module FO table: the frontend may have pre-registered
     // imported helpers before entering this module.
     lowerer_fo_preregister_pure_fns_multipass_mut(lo, items)
@@ -5711,11 +5757,15 @@ fn lowerer_fo_preregister_pure_fns_multipass_mut(
 // FO_XFER is global — call once per loaded module *before* seed body lower so
 // imported helpers (e.g. epistemic::fo::fo_add2) FO-transfer into user main.
 pub fn fo_preregister_program_items_multipass(
-    items: &Option<Box<ItemList>>
+    items: &Option<Box<ItemList>>,
+    module_id: i64
 ) with Mut, Panic, Div, Alloc, IO {
     // Same every-module-before-body-lowering timing that module-qualified
-    // calls need: see LOWER_USE_MODULE_HASH.
-    lower_use_modules_collect(items)
+    // calls need: see LOWER_USE_MODULE_HASH. module_id is the caller's own
+    // loop index over the loaded module array (0 for a single-module
+    // compile), stamped onto every entry this call registers so a later
+    // per-module lookup (LOWER_CURRENT_MODULE_ID) can tell them apart.
+    lower_use_modules_collect(items, module_id)
     var lo = lowerer_new()
     lowerer_fo_preregister_pure_fns_multipass_mut(&! lo, items)
 }
@@ -5726,7 +5776,10 @@ fn lowerer_lower_program_items_mut(
 ) with Mut, Panic, Div, Alloc, IO {
     fo_xfer_global_reset()
     lower_use_module_reset()
-    lower_use_modules_collect(&items)
+    // Single-module entry point -- only ever one module's items here, so
+    // module id 0 (matching lower_effective_current_module_id's own
+    // unscoped-default convention) is always correct.
+    lower_use_modules_collect(&items, 0)
     // Pre-register FO transfers so reverse-order pure helpers expand nested calls.
     lowerer_fo_preregister_pure_fns_multipass_mut(lo, &items)
     var current = items
@@ -15711,9 +15764,10 @@ impl Lowerer {
         // This ref-based path (production streaming) never called lower_use_modules_collect
         // at all -- module-qualified calls only resolved on it if an earlier, unrelated
         // preflight happened to populate the registry as a side effect first. Same gap class
-        // as the sibling f64-tuple-array table in #2516.
+        // as the sibling f64-tuple-array table in #2516. Only ever one
+        // module's items on this path, so module id 0 always matches.
         lower_use_module_reset()
-        lower_use_modules_collect(items)
+        lower_use_modules_collect(items, 0)
         var lo = self
         lowerer_fo_preregister_pure_fns_multipass_mut(&! lo, items)
         var current = items
@@ -19213,6 +19267,7 @@ impl Lowerer {
             return ir_empty_name()
         }
         var k: i64 = 0
+        let module_id = lower_effective_current_module_id()
         while k < p.seg_count - 1 {
             let seg = lower_string_list_nth_name(p.segments, k)
             // Imported types are not guaranteed to have reached struct_layouts yet.
@@ -19236,7 +19291,7 @@ impl Lowerer {
             // program (e.g. `use testmod::tc_c;` alongside an unrelated
             // top-level `fn tc_c(..)`) was wrongly excluded too, breaking the
             // real module's own qualified calls.
-            if !lower_use_module_known(seg) || self.callee_segment_names_type(seg) || lower_named_item_terminal_known(seg) || (c0 >= 65 && c0 <= 90) {
+            if !lower_use_module_known(module_id, seg) || self.callee_segment_names_type(seg) || lower_named_item_terminal_known(ast_path_prefix_name(p, k)) || (c0 >= 65 && c0 <= 90) {
                 break
             }
             k = k + 1
@@ -25343,6 +25398,13 @@ pub fn lower_dep_program_items_into_acc_with_externs(
     }
     lowerer_preseed_dep_items_into_acc_mut(&! lo, items, ir_empty_name())
     // DEDUP body lower: skip main + existing bodies; fill stubs and new names.
+    // self_index is this dependency module's own loaded-program index (the
+    // same id fo_preregister_program_items_multipass stamped its `use`
+    // entries with) -- set it as the current module before lowering this
+    // module's own bodies, so callee_path_module_stripped_name's qualifier
+    // lookups are scoped to what THIS module actually imported, not the
+    // whole loaded module graph. See LOWER_CURRENT_MODULE_ID's comment.
+    lower_set_current_module_id(self_index)
     lowerer_lower_program_bodies_dedup_mut(&! lo, items)
     // Residual closeout: re-attempt any ItemImpl methods still at ic=0.
     lowerer_force_fill_impl_methods_mut(&! lo, items)
