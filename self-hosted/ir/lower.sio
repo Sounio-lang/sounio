@@ -16104,6 +16104,16 @@ impl Lowerer {
     }
 
     fn lower_program_bodies_filtered_ref(self, items: &Option<Box<ItemList>>, target_name: Name) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        // Copilot review (PR #2516): this streaming single-function lowering
+        // lane (lower_program_function_body_from_* -> ... -> here) never went
+        // through lowerer_fo_preregister_pure_fns_multipass_mut (the shared
+        // multipass function an earlier round of this review wired the
+        // collector into), so it never populated LOWER_FN_TUPLE_ARR_* at all --
+        // an isolated streaming body for a function returning a tuple of f64
+        // arrays started with no mask and fell back to the integer-element
+        // path. Collect over the full item set available at this entry point
+        // (idempotent per name, like every other call site).
+        lower_fn_tuple_f64_arrays_collect(items)
         var lo = self
         var current: Option<Box<ItemList> > = *items
         while true {
@@ -17318,10 +17328,20 @@ impl Lowerer {
                 var arr_bits: i64 = 0
                 if (*base_expr).kind == ExprKind::ExprIdent {
                     arr_bits = self.lookup_local_tuple_arr_mask((*base_expr).name)
-                } else if (*base_expr).kind == ExprKind::ExprCall {
-                    arr_bits = self.expr_result_tuple_arr_mask_ref(&(*base_expr))
                 } else {
-                    return false
+                    // Copilot review (PR #2516): this used to special-case only
+                    // ExprCall and fall through to `false` for everything else,
+                    // so `p.pair().0` (base is ExprMethodCall) and
+                    // `([x; 2], [y; 2]).0` (base is ExprTupleLit) never got
+                    // array-slot metadata even though expr_result_tuple_arr_mask_ref
+                    // already knows how to classify both of those base kinds (it
+                    // was extended for exactly this in an earlier round of this
+                    // same review). Delegate every non-identifier base to it
+                    // instead of re-special-casing each kind here; it already
+                    // returns 0 (never an array slot) for any kind it doesn't
+                    // recognise, so this is a strict superset of the old
+                    // ExprCall-only behaviour.
+                    arr_bits = self.expr_result_tuple_arr_mask_ref(&(*base_expr))
                 }
                 (arr_bits >> (slot as i32)) % 2 == 1
             }
