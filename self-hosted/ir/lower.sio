@@ -14351,6 +14351,38 @@ impl Lowerer {
         if (*expr).kind == ExprKind::ExprIdent {
             return self.lookup_local_struct_type((*expr).name)
         }
+        // Copilot review (PR #2516), round 10 finding 1: this resolver had no
+        // arm for a CALL/METHOD-CALL owner, so `make_float_holder().values`
+        // (owner is an ExprCall) fell through every arm below to
+        // ir_empty_name() -- indistinguishable from a genuinely unresolvable
+        // owner. field_array_elem_is_float_for_base_ref's round-9 fix (return
+        // false on an unresolved owner, to stop guessing by field name)
+        // therefore also swallowed this LEGITIMATE case: a valid f64-array
+        // struct field reached through a call's declared return type.
+        // expr_call_return_struct_name_ref and return_struct_name_for_fn_id
+        // already resolve a plain call's / a method's declared return struct
+        // type elsewhere in this file (float-holder/tuple-slot machinery) --
+        // reuse both here so this receiver-type resolver, used by every
+        // field-access-classification caller, gains the same answer.
+        if (*expr).kind == ExprKind::ExprCall {
+            let rn = self.expr_call_return_struct_name_ref(expr)
+            if rn.len > 0 {
+                return rn
+            }
+        }
+        if (*expr).kind == ExprKind::ExprMethodCall {
+            let recv_type = self.lower_method_recv_type(&(*expr).left)
+            let call_name = if recv_type.len > 0 {
+                ir_mangle_method_name(recv_type, (*expr).name)
+            } else {
+                (*expr).name
+            }
+            let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, call_name)
+            let rn = self.return_struct_name_for_fn_id(fn_id)
+            if rn.len > 0 {
+                return rn
+            }
+        }
         if (*expr).kind == ExprKind::ExprIndex {
             match (*expr).left {
                 Some(indexed) => {
@@ -17327,6 +17359,26 @@ impl Lowerer {
             }
             return false
         }
+        // Copilot review (PR #2516), round 10 finding 2: this single-array
+        // classifier (used for a tuple LITERAL slot that's itself a plain
+        // f64 array, e.g. the `mk_a()` in `(mk_a(), 0)`) had no ExprIf/
+        // ExprMatch/ExprBlock arm, so `(if cond { mk_a() } else { mk_b() }, 0)`
+        // fell straight through to `false` even when both arms return
+        // [f64;N] -- mirrors expr_result_tuple_arr_mask_ref's identical gap,
+        // fixed for the TUPLE-valued case in round 6/7 finding 2. Same OR-
+        // across-arms philosophy: post-typecheck, every arm of an if/match/
+        // block-tail bound to one slot agrees on its exact array-or-not
+        // type, so ORing only ever adds `true` from an arm this classifier
+        // recognises -- it cannot introduce a wrong `true`.
+        if (*e).kind == ExprKind::ExprIf {
+            return self.opt_block_tail_is_f64_array_ref(&(*e).block) || self.opt_expr_result_is_f64_array_ref(&(*e).else_expr)
+        }
+        if (*e).kind == ExprKind::ExprMatch {
+            return self.match_arms_is_f64_array_ref(&(*e).arms)
+        }
+        if (*e).kind == ExprKind::ExprBlock {
+            return self.opt_block_tail_is_f64_array_ref(&(*e).block)
+        }
         if (*e).kind != ExprKind::ExprCall {
             return false
         }
@@ -17341,6 +17393,54 @@ impl Lowerer {
             _ => {}
         }
         false
+    }
+
+    fn opt_expr_result_is_f64_array_ref(self, opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(e) => self.expr_result_is_f64_array_ref(&(*e)),
+            _ => false,
+        }
+    }
+
+    fn opt_block_tail_is_f64_array_ref(self, blk_opt: &Option<Box<Block>>) -> bool with Mut, Panic, Div, Alloc {
+        match *blk_opt {
+            Some(blk) => self.block_tail_is_f64_array_ref(&(*blk)),
+            _ => false,
+        }
+    }
+
+    // Same shape as block_tail_tuple_arr_mask_ref: a block's value is its
+    // trailing expression statement.
+    fn block_tail_is_f64_array_ref(self, blk: &Block) -> bool with Mut, Panic, Div, Alloc {
+        var current = &(*blk).stmts
+        var result: bool = false
+        while true {
+            match *current {
+                Some(list) => {
+                    let stmt_ref = &(*list).head
+                    if stmt_ref.kind == StmtKind::StmtExpr {
+                        result = self.opt_expr_result_is_f64_array_ref(&stmt_ref.expr)
+                    } else {
+                        result = false
+                    }
+                    current = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        result
+    }
+
+    // ORs the single-array classification across every `match` arm's body
+    // (see expr_result_is_f64_array_ref's ExprIf case for why OR is safe).
+    fn match_arms_is_f64_array_ref(self, arms_opt: &Option<Box<MatchArmList>>) -> bool with Mut, Panic, Div, Alloc {
+        match *arms_opt {
+            Some(list) => {
+                let arm = &(*list).head
+                self.expr_result_is_f64_array_ref(&arm.body) || self.match_arms_is_f64_array_ref(&(*list).tail)
+            }
+            _ => false,
+        }
     }
 
     // #1502: per-slot float mask of a tuple-producing initialiser -- either a call
@@ -17412,7 +17512,13 @@ impl Lowerer {
         if (*e).kind == ExprKind::ExprIdent {
             return self.lookup_local_array_elem_float((*e).name)
         }
-        if (*e).kind == ExprKind::ExprCall || (*e).kind == ExprKind::ExprMethodCall {
+        // Copilot review (PR #2516), round 10 finding 2: ExprIf/ExprMatch/
+        // ExprBlock added alongside ExprCall/ExprMethodCall here so a tuple-
+        // literal slot produced through control flow (`(if cond { mk_a() }
+        // else { mk_b() }, 0)`) reaches expr_result_is_f64_array_ref's own
+        // now-added control-flow propagation instead of falling straight to
+        // `false` below.
+        if (*e).kind == ExprKind::ExprCall || (*e).kind == ExprKind::ExprMethodCall || (*e).kind == ExprKind::ExprIf || (*e).kind == ExprKind::ExprMatch || (*e).kind == ExprKind::ExprBlock {
             return self.expr_result_is_f64_array_ref(e)
         }
         if (*e).kind == ExprKind::ExprFieldAccess {
