@@ -14071,23 +14071,6 @@ impl Lowerer {
         false
     }
 
-    fn field_array_elem_is_float_by_name_simple(self, field_name: Name) -> bool with Mut, Panic, Div {
-        var si: i64 = 0
-        while si < (*self.struct_layouts).count {
-            var fi: i64 = 0
-            while fi < (*self.struct_layouts).entries[si as usize].field_count {
-                if ir_name_eq(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].name_id), field_name) {
-                    if (*self.struct_layouts).entries[si as usize].fields[fi as usize].is_float == 2 {
-                        return true
-                    }
-                }
-                fi = fi + 1
-            }
-            si = si + 1
-        }
-        false
-    }
-
     // Pointer-class lookup for a field OF A KNOWN STRUCT TYPE. Deliberately type-aware: a
     // by-NAME scan over every registered struct answers with the FIRST field of that name, so
     // two structs sharing a field name but differing in pointer-ness get the wrong answer.
@@ -14209,9 +14192,28 @@ impl Lowerer {
                     // marks i64 component loads as float (field_array_float=1).
                     return self.field_array_elem_is_float_for_struct(type_name, field_name)
                 }
-                self.field_array_elem_is_float_by_name_simple(field_name)
+                // Copilot review (PR #2516), round 9: this used to fall back to
+                // field_array_elem_is_float_by_name_simple (ANY registered
+                // struct with a field of this name) whenever expr_receiver_
+                // struct_type_ref couldn't resolve the owner -- which it never
+                // could for an ExprCall/ExprMethodCall owner (`make_int_holder()
+                // .values`, no arm for it there), only for ExprIdent/ExprIndex/
+                // deref chains. That by-name scan can match an UNRELATED
+                // struct's same-named field and misclassify a genuine integer
+                // array as f64 -- the exact class of bug this file's sibling
+                // predicate, field_is_float_for_base_ref just above, was
+                // already written to avoid by returning false outright on an
+                // unresolved owner type rather than guessing by name. Building
+                // real call/method return-type resolution here would still
+                // leave the "genuinely unresolvable owner" case (e.g. an
+                // opaque/generic return) with the same unsound guess, so drop
+                // the by-name fallback entirely and match the sibling's
+                // conservative default: unresolved owner type -> not a float
+                // array. field_array_elem_is_float_by_name_simple is now
+                // unused and removed with this change.
+                false
             }
-            _ => self.field_array_elem_is_float_by_name_simple(field_name),
+            _ => false,
         }
     }
 
@@ -25261,6 +25263,18 @@ fn lower_program_to_ir_ref(prog: &Program) -> IrLowerResult with Mut, Panic, Div
 }
 
 pub fn lower_program_to_ir(prog: Program) -> IrLowerResult with Mut, Panic, Div, Alloc, IO {
+    // Copilot review (PR #2516): this public entry point's body-lowering
+    // path (lower_program_to_ir_ref -> ... -> lower_program_bodies_ref)
+    // collects into the process-global tuple-array-mask table but never
+    // reset it first, unlike the other top-level compile entry points in
+    // module_frontend.sio and main.sio's --probe-tuple-arr-capacity. Since
+    // collection dedupes by name, run_ir_verify_pipeline (main.sio:565,596)
+    // calling lower_program_to_ir twice in one process -- once per input
+    // file -- let a name collision (e.g. both inputs define `pair`, one
+    // with an f64-array tuple slot, one with a different mask) leak the
+    // first call's mask into the second call's lowering. Reset here, once
+    // per call to this public API, before any collection happens.
+    lower_fn_tuple_arr_reset()
     lower_monolithic_public_probe_boundary("public_call_entry")
     lower_program_to_ir_ref(&prog)
 }
