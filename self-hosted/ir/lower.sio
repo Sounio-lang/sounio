@@ -5094,11 +5094,33 @@ fn lowerer_lower_fn_params_mut(
                 // F128Bits handles (immutable objects: every f128 op allocates a
                 // fresh one), so the element-wise slot copy that keeps a by-value
                 // `[i64; N]` param from aliasing the caller's array is exactly right
-                // for it too. `&[f128; N]` is TypeReference → len -1 → no copy.
+                // for it too.
+                //
+                // `&[f128; N]` must NOT take this copy path: KL-14a
+                // (lower_type_expr_fixed_array_len_ref, self-hosted/ir/lower.sio
+                // ~:3261) made param_array_len peel one `&`/`&!` so `&[i8; N]` FFI
+                // params get a known extent -- so param_array_len is no longer -1
+                // for a reference param, contrary to what this comment used to say.
+                // preg for a reference param holds the ADDRESS of the caller's slot
+                // (native-v2 OpRef is LEA of that slot; see the comment above
+                // fn lower_name_is_handle_buf_builtin for the fuller
+                // explanation -- no line number, this file's line numbers
+                // shift too often for a numeric ref to stay accurate), not
+                // the array
+                // handle itself, so emit_fixed_array_value_copy on it resolves an
+                // unrelated address as a bogus handle -- SIGSEGV, or on a resolvable
+                // address silently wrong data (both measured: the array_only DCE
+                // trigger and the language_f128_arrays witness in
+                // scripts/ci/madaros_f128_f256_v0e57_language_arrays_gate.sh). Only a
+                // BY-VALUE `[f128; N]` legitimately wants the slot copy; a reference
+                // param is bound straight to preg below and reads through the
+                // is_ref / label_id=1 "ref array" path instead (lower_index_expr_ref,
+                // lower_field_expr_ref).
+                let param_is_ref = lower_type_expr_is_ref_like(&(*list).head.ty)
                 let param_word_scalar = lower_type_expr_fixed_array_word_scalar_ref(&(*list).head.ty)
-                    || lower_type_expr_is_array_of_f128(&(*list).head.ty)
+                    || (lower_type_expr_is_array_of_f128(&(*list).head.ty) && !param_is_ref)
                 var param_value_reg = preg
-                if param_array_len >= 0 && param_word_scalar {
+                if param_array_len >= 0 && param_word_scalar && !param_is_ref {
                     let copy_pair = (*lo).emit_fixed_array_value_copy(
                         preg,
                         param_array_len,
@@ -16404,11 +16426,18 @@ impl Lowerer {
 
                     let param_array_len = lower_type_expr_fixed_array_len_ref(&(*list).head.ty)
                     // V0-E.5.7: see path A — a by-value `[f128; N]` param copies its
-                    // handle slots so it cannot alias the caller's array.
+                    // handle slots so it cannot alias the caller's array. `&[f128; N]`
+                    // must NOT: since KL-14a, param_array_len peels one `&`/`&!` (so
+                    // `&[i8; N]` FFI params get a known extent) and is no longer -1 for
+                    // a reference param, so this copy must be excluded explicitly or it
+                    // treats preg -- the ADDRESS of the caller's slot for a reference
+                    // param, not the array handle -- as a handle to copy from. Same
+                    // root cause and fix as path A above.
+                    let ref_param_is_ref = lower_type_expr_is_ref_like(&(*list).head.ty)
                     let param_word_scalar = lower_type_expr_fixed_array_word_scalar_ref(&(*list).head.ty)
-                        || lower_type_expr_is_array_of_f128(&(*list).head.ty)
+                        || (lower_type_expr_is_array_of_f128(&(*list).head.ty) && !ref_param_is_ref)
                     var param_value_reg = preg
-                    if param_array_len >= 0 && param_word_scalar {
+                    if param_array_len >= 0 && param_word_scalar && !ref_param_is_ref {
                         lo.current_func = current_func
                         let copy_pair = lo.emit_fixed_array_value_copy(
                             preg,

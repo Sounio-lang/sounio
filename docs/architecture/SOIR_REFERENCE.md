@@ -280,6 +280,6 @@ Offset    Hex                                          ASCII
 
 ## Further Reading
 
-- [RUSTLESS_CUTOVER.md](RUSTLESS_CUTOVER.md) - Complete documentation
-- [DEVELOPER_WORKFLOW.md](DEVELOPER_WORKFLOW.md) - Daily workflow guide
+- [RUSTLESS_CUTOVER.md](../implementation/RUSTLESS_CUTOVER.md) - Complete documentation
+- [DEVELOPER_WORKFLOW.md](../contributor-guide/DEVELOPER_WORKFLOW.md) - Daily workflow guide
 - `self-hosted/ir/serialize.sio` - Reference implementation
