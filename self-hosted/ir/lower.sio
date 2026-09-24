@@ -17427,6 +17427,26 @@ impl Lowerer {
             }
             return lower_fn_tuple_f64_array_mask(call_name)
         }
+        // Copilot review (PR #2516): this returned 0 for every conditional,
+        // so `let (a, b) = if cond { pair1() } else { pair2() }` lost the
+        // array-slot mask entirely and `a[0]` fell back to the integer path,
+        // even though both arms of an if/match a tuple gets bound from must
+        // agree on their exact tuple type post-typecheck (a [f64;N] slot in
+        // one arm cannot pair with, say, an i64 slot in the other). ORs the
+        // per-slot bits from every arm rather than trusting a single one:
+        // type agreement guarantees any bit a given arm's classifier DOES
+        // recognise is correct, so ORing only ever adds bits a less-complete
+        // arm expression failed to resolve on its own -- it cannot introduce
+        // a wrong one. Mirrors expr_result_is_float_ref's own ExprIf case
+        // (opt_block_tail_is_float_ref || opt_expr_result_is_float_ref),
+        // which uses the same "either arm is enough" OR philosophy for the
+        // scalar case.
+        if (*e).kind == ExprKind::ExprIf {
+            return self.opt_block_tail_tuple_arr_mask_ref(&(*e).block) | self.opt_expr_result_tuple_arr_mask_ref(&(*e).else_expr)
+        }
+        if (*e).kind == ExprKind::ExprMatch {
+            return self.match_arms_tuple_arr_mask_ref(&(*e).arms)
+        }
         if (*e).kind != ExprKind::ExprCall {
             return 0
         }
@@ -17434,6 +17454,56 @@ impl Lowerer {
             Some(callee_expr) => {
                 let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
                 lower_fn_tuple_f64_array_mask(callee_name)
+            }
+            _ => 0,
+        }
+    }
+
+    fn opt_expr_result_tuple_arr_mask_ref(self, opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(e) => self.expr_result_tuple_arr_mask_ref(&(*e)),
+            _ => 0,
+        }
+    }
+
+    fn opt_block_tail_tuple_arr_mask_ref(self, blk_opt: &Option<Box<Block>>) -> i64 with Mut, Panic, Div, Alloc {
+        match *blk_opt {
+            Some(blk) => self.block_tail_tuple_arr_mask_ref(&(*blk)),
+            _ => 0,
+        }
+    }
+
+    // Same shape as block_tail_is_float_ref: a block's value is its trailing
+    // expression statement, so an if-arm's `{ ...; pair() }` is classified by
+    // that last statement, not the block as a whole.
+    fn block_tail_tuple_arr_mask_ref(self, blk: &Block) -> i64 with Mut, Panic, Div, Alloc {
+        var current = &(*blk).stmts
+        var result: i64 = 0
+        while true {
+            match *current {
+                Some(list) => {
+                    let stmt_ref = &(*list).head
+                    if stmt_ref.kind == StmtKind::StmtExpr {
+                        result = self.opt_expr_result_tuple_arr_mask_ref(&stmt_ref.expr)
+                    } else {
+                        result = 0
+                    }
+                    current = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        result
+    }
+
+    // ORs the per-slot array-slot mask across every `match` arm's body (see
+    // expr_result_tuple_arr_mask_ref's ExprIf case for why OR is safe here:
+    // all arms share the same tuple type post-typecheck).
+    fn match_arms_tuple_arr_mask_ref(self, arms_opt: &Option<Box<MatchArmList>>) -> i64 with Mut, Panic, Div, Alloc {
+        match *arms_opt {
+            Some(list) => {
+                let arm = &(*list).head
+                self.expr_result_tuple_arr_mask_ref(&arm.body) | self.match_arms_tuple_arr_mask_ref(&(*list).tail)
             }
             _ => 0,
         }
@@ -25365,7 +25435,19 @@ pub fn lower_program_to_ir_probe_summary(prog: Program) -> IrLowerResult with Mu
     lower_program_to_ir_probe_summary_ref(&prog)
 }
 
-fn lower_program_function_body_from_summary_with_epistemic_ref(
+// Marked pub (was private, default visibility -- no stated reason to keep it
+// module-internal, and several sibling `_ref` helpers in this file are
+// already pub directly, e.g. lower_program_to_ir_summary_box_with_epistemic_ref,
+// lower_program_bodies_from_summary_flat_with_epistemic_ref): CI's gen1
+// self-typecheck of compiler/main.sio (madaros_fixed_point_gate.sh) failed
+// with E175 "function is private in its defining module" once
+// compiler::main's --probe-filtered-body-lower (finding D, round 4 of the
+// PR #2516 review) started calling this across the module boundary. The
+// owned-by-value pub wrapper right below (lower_program_function_body_from_
+// summary_with_epistemic) does not fit that probe's loop, which reuses one
+// `program`/`summary` by reference across every function in the summary
+// rather than re-deriving them per call.
+pub fn lower_program_function_body_from_summary_with_epistemic_ref(
     prog: &Program,
     summary: &IrProgramSummary,
     epistemic: IrEpistemicSection,
