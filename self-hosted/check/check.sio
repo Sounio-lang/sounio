@@ -2260,6 +2260,10 @@ fn checker_lower_knowledge_type_mut(c: *mut Checker, opt: Option<Box<KnowledgeTy
             ty.knowledge_epsilon_mode = eps_mode
             let prov = meta.provenance
             ty.knowledge_provenance_kind = prov.kind
+            let val_cond = meta.validity
+            ty.knowledge_validity_kind = val_cond.kind
+            ty.knowledge_validity_value = if val_cond.kind == 1 { val_cond.duration_sec } else { val_cond.until_timestamp }
+
             ty
         }
         None => {
@@ -6968,7 +6972,9 @@ fn checker_check_return_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
             }
         }
         None => {
-            if !checker_types_compatible_inplace(c, val_ty, (*c).current_return_type) {
+            let ret_ok = checker_types_compatible_inplace(c, val_ty, (*c).current_return_type)
+                || (is_epistemic_type((*c).current_return_type) && is_epistemic_type(val_ty) && checker_knowledge_subsumes(c, val_ty, (*c).current_return_type))
+            if !ret_ok {
                 checker_report_mismatch_inplace(c, e.span, 8, (*c).current_return_type, val_ty)
             }
         }
@@ -9102,6 +9108,51 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                 k_struct_result.noise_set_id = value_ty.noise_set_id
             } else {
                 k_struct_result.noise_set_id = ns_empty()
+            }
+            // Parse validity and provenance fields if present in struct literal:
+            var cur_f = e.fields
+            while true {
+                match cur_f {
+                    Some(flist) => {
+                        let fname = (*flist).head.name
+                        let fval = (*flist).head.value
+                        if name_eq(fname, make_name("validity")) {
+                            if fval.kind == ExprKind::ExprStringLit {
+                                let vdate = parse_iso_date_to_f64(fval.name)
+                                if vdate > 0.0 {
+                                    k_struct_result.knowledge_validity_kind = 2 // VALIDITY_KIND_UNTIL_TIME
+                                    k_struct_result.knowledge_validity_value = vdate
+                                }
+                            } else if fval.kind == ExprKind::ExprIntLit {
+                                k_struct_result.knowledge_validity_kind = 1 // VALIDITY_KIND_DURATION
+                                k_struct_result.knowledge_validity_value = fval.int_val as f64
+                            } else if fval.kind == ExprKind::ExprFloatLit {
+                                k_struct_result.knowledge_validity_kind = 1 // VALIDITY_KIND_DURATION
+                                k_struct_result.knowledge_validity_value = fval.float_val
+                            }
+                        } else if name_eq(fname, make_name("epsilon")) {
+                            if fval.kind == ExprKind::ExprFloatLit {
+                                k_struct_result.knowledge_epsilon = fval.float_val
+                            }
+                        } else if name_eq(fname, make_name("provenance")) {
+                            if fval.kind == ExprKind::ExprStringLit {
+                                if name_matches_str6(fval.name, 115, 111, 117, 114, 99, 101) { // "source"
+                                    k_struct_result.knowledge_provenance_kind = 1
+                                } else if name_matches_str8(fval.name, 99, 111, 109, 112, 117, 116, 101, 100) { // "computed"
+                                    k_struct_result.knowledge_provenance_kind = 2
+                                } else if name_matches_str7(fval.name, 109, 101, 97, 115, 117, 114, 101) { // "measure"
+                                    k_struct_result.knowledge_provenance_kind = 4
+                                } else if name_matches_str5(fval.name, 105, 110, 112, 117, 116) { // "input"
+                                    k_struct_result.knowledge_provenance_kind = 5
+                                } else {
+                                    k_struct_result.knowledge_provenance_kind = 0 // derived
+                                }
+                            }
+                        }
+                        cur_f = (*flist).tail
+                    }
+                    None => break
+                }
             }
             checker_ns_trace_emit("knowledge_struct_lit", k_struct_result.noise_set_id)
             return k_struct_result
@@ -11660,37 +11711,16 @@ fn checker_check_call_arg_knowledge_boundary_inplace(c: *mut Checker, arg_ty: Ty
        knowledge_meta_epsilon(knowledge_meta_from_ty(expected_ty)) < 0.0 {
         return
     }
-    let exp_in = knowledge_inner(expected_ty)
-    let got_in = knowledge_inner(provided_ty)
-    let is_onto_subclass = if !name_is_empty(got_in.name) && !name_is_empty(exp_in.name) && !name_eq(got_in.name, exp_in.name) {
-        checker_onto_name_subclass_walk((*c).ontology_items, got_in.name, exp_in.name, 0)
-    } else {
-        false
-    }
-    let pmeta = knowledge_meta_from_ty(provided_ty)
-    let rmeta = knowledge_meta_from_ty(expected_ty)
-    let compatible = if is_onto_subclass {
-        epsilon_subsumes_call_boundary(
-            knowledge_meta_epsilon(pmeta),
-            provided_ty.knowledge_epsilon_mode,
-            knowledge_meta_epsilon(rmeta),
-            expected_ty.knowledge_epsilon_mode
-        ) && validity_subsumes(knowledge_meta_validity(pmeta), knowledge_meta_validity(rmeta))
-          && provenance_subsumes(knowledge_meta_provenance(pmeta), knowledge_meta_provenance(rmeta))
-    } else {
-        knowledge_call_boundary_compatible(provided_ty, expected_ty)
-    }
-    if !compatible {
-        // Name the failing slot: a refusal is evidence for the cause it
-        // names. Epsilon keeps E036 (it predates this); a provenance-leg
-        // failure is E244. (The validity leg is payload-flattened until the
-        // date-parser slice of SOUNIO-KNOWLEDGE-BOUNDARY-PROVENANCE lands.)
+    if !checker_knowledge_subsumes(c, provided_ty, expected_ty) {
+        // Name the failing slot: a refusal is evidence for the cause it names.
         let pmeta2 = knowledge_meta_from_ty(provided_ty)
         let rmeta2 = knowledge_meta_from_ty(expected_ty)
         if !provenance_subsumes(knowledge_meta_provenance(pmeta2), knowledge_meta_provenance(rmeta2)) {
             checker_report_error_at_inplace(c, call_span, 244, 0, 0, 0)
+        } else if !validity_subsumes(knowledge_meta_validity(pmeta2), knowledge_meta_validity(rmeta2)) {
+            checker_report_error_at_inplace(c, call_span, 246, 0, 0, 0)
         } else {
-            checker_report_error_at_inplace(c, call_span, 36, 0, 0, 0)
+            checker_report_error_at_inplace(c, call_span, 36, 0, 0, 0) // E036: epsilon bound violation
         }
     }
 }
@@ -11733,15 +11763,31 @@ fn checker_check_call_arg_unit_boundary_inplace(c: *mut Checker, arg_ty: TypeEnt
 }
 
 fn checker_ontology_boundary_check_call_arg_contract_inplace(c: *mut Checker, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) with Mut, Panic, Div, Alloc, IO {
-    // Cheap guard hoisted from check_call_arg_ontology_boundary's own early-out: the boundary
-    // is a no-op unless the PARAM type carries an ontology contract (either directly or wrapped in Knowledge/Epistemic).
     let expected_ty = call_ref_inner_or_self(param_ty)
     let exp_check_ty = if is_epistemic_type(expected_ty) { knowledge_inner(expected_ty) } else { expected_ty }
+    let provided_ty = call_ref_inner_or_self(arg_ty)
+    let prov_check_ty = if is_epistemic_type(provided_ty) { knowledge_inner(provided_ty) } else { provided_ty }
     if exp_check_ty.ontology_id < 0 || is_error_or_unknown(exp_check_ty) {
         return
     }
-    let t = (*c).check_call_arg_ontology_boundary(arg_ty, param_ty, call_span)
-    checker_store_from_value(c, t)
+    if is_error_or_unknown(prov_check_ty) {
+        return
+    }
+    if prov_check_ty.ontology_id < 0 {
+        let t150 = (*c).report_error_at(call_span, 150, 0, 0, 0)
+        checker_store_from_value(c, t150)
+        return
+    }
+    if (*c).ontology_inference_query_subclass(prov_check_ty.ontology_id, exp_check_ty.ontology_id) {
+        return
+    }
+    if (*c).ontology_inference_query_disjoint(prov_check_ty.ontology_id, exp_check_ty.ontology_id) {
+        let t151 = (*c).report_error_at(call_span, 151, 0, 0, 0)
+        checker_store_from_value(c, t151)
+        return
+    }
+    let t152 = (*c).report_error_at(call_span, 152, 0, 0, 0)
+    checker_store_from_value(c, t152)
 }
 
 
@@ -12206,6 +12252,12 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
             None => {
                 init_context_ok = checker_types_compatible_inplace(c, init_ty, ann_ty)
             }
+        }
+        if !init_context_ok && is_epistemic_type(ann_ty) && is_epistemic_type(init_ty) {
+            init_context_ok = checker_knowledge_subsumes(c, init_ty, ann_ty)
+        }
+        if !init_context_ok && is_epistemic_type(ann_ty) && is_epistemic_type(init_ty) {
+            init_context_ok = checker_knowledge_subsumes(c, init_ty, ann_ty)
         }
         if !init_context_ok && !int_lit_narrow && !enum_int_ok {
             checker_report_mismatch_inplace(c, s.span, 1, ann_ty, init_ty)
@@ -16856,6 +16908,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 179 { print("noise-set interning table exhausted: too many distinct source-sets in one checker run, so correlation between the values that carry them can no longer be tracked") }
     else if code == 221 { print("this math function is bound for typechecking but the native backend cannot emit it; the call would compile and then die on an illegal instruction at run time") }
     else if code == 244 { print("Knowledge provenance boundary mismatch: the argument's provenance cannot satisfy the parameter's requirement (trusted classes: Source, Literature, Measured)") }
+    else if code == 246 { print("Temporal validity window mismatch: the argument's validity window cannot satisfy the parameter's requirement") }
     else if code == 245 { print("arithmetic between two Knowledge<T> values is not supported by this compiler; the operation typechecks but has no lowering, so it would produce a wrong value or crash at runtime") }
     else if code == 200 { print("Forgettable type requires ZD effect: exact annihilation is only possible via zero-divisor algebra (sedenions). Division algebras cannot satisfy this guarantee. Add `with ZD` to your function signature.") }
     else if code == 201 { print("ExactlyPrivate<T> requires ZD effect: exact data-contribution removal is only possible via sedenion annihilation. Differential privacy (epsilon-bounded) does not suffice. Add `with ZD` to your function signature.") }
@@ -18848,24 +18901,58 @@ fn checker_fn_types_structurally_compatible_inplace(c: *mut Checker, a: TypeEntr
     checker_types_compatible_table_deep((*c).fn_sigs, a, b, 0)
 }
 
+// Centralized epistemic knowledge subsumption:
+// Knowledge<A> satisfies Knowledge<B> iff:
+// 1. Ontology(A) <= Ontology(B) (by identity or subclass walk)
+// 2. Epsilon(A) satisfies Epsilon(B)
+// 3. Validity(A) satisfies Validity(B)
+// 4. Provenance(A) satisfies Provenance(B)
+fn checker_knowledge_subsumes(c: *mut Checker, provided: TypeEntry, required: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
+    if !is_epistemic_type(provided) || !is_epistemic_type(required) {
+        return false
+    }
+    if provided.kind != required.kind {
+        return false
+    }
+    let p_inner = knowledge_inner(provided)
+    let r_inner = knowledge_inner(required)
+
+    // Check ontology / inner type compatibility
+    let onto_ok = if types_equal(p_inner, r_inner) {
+        true
+    } else if !name_is_empty(p_inner.name) && !name_is_empty(r_inner.name) {
+        checker_onto_name_subclass_walk((*c).ontology_items, p_inner.name, r_inner.name, 0)
+    } else {
+        false
+    }
+    if !onto_ok {
+        return false
+    }
+
+    let pmeta = knowledge_meta_from_ty(provided)
+    let rmeta = knowledge_meta_from_ty(required)
+
+    let eps_ok = epsilon_subsumes_call_boundary(
+        knowledge_meta_epsilon(pmeta),
+        provided.knowledge_epsilon_mode,
+        knowledge_meta_epsilon(rmeta),
+        required.knowledge_epsilon_mode
+    )
+    if !eps_ok {
+        return false
+    }
+
+    let val_ok = validity_subsumes(knowledge_meta_validity(pmeta), knowledge_meta_validity(rmeta))
+    if !val_ok {
+        return false
+    }
+
+    provenance_subsumes(knowledge_meta_provenance(pmeta), knowledge_meta_provenance(rmeta))
+}
+
 fn checker_types_compatible_inplace(c: *mut Checker, a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Alloc, IO {
     if types_compatible(a, b) {
         return true
-    }
-    // Ontology covariance in epistemic types: Knowledge<SubClass> is compatible with Knowledge<SuperClass>
-    // Preserves epsilon, validity, and provenance contracts simultaneously.
-    if is_epistemic_type(a) && is_epistemic_type(b) && a.kind == b.kind {
-        let a_in = knowledge_inner(a)
-        let b_in = knowledge_inner(b)
-        if !name_is_empty(a_in.name) && !name_is_empty(b_in.name) && !name_eq(a_in.name, b_in.name) {
-            if checker_onto_name_subclass_walk((*c).ontology_items, a_in.name, b_in.name, 0) {
-                let pmeta = knowledge_meta_from_ty(a)
-                let rmeta = knowledge_meta_from_ty(b)
-                return compat_epsilon_subsumes(a, b)
-                    && validity_subsumes(knowledge_meta_validity(pmeta), knowledge_meta_validity(rmeta))
-                    && provenance_subsumes(knowledge_meta_provenance(pmeta), knowledge_meta_provenance(rmeta))
-            }
-        }
     }
     checker_fn_types_structurally_compatible_inplace(c, a, b)
 }
@@ -18973,7 +19060,6 @@ fn checker_call_arg_types_compatible_inplace(c: *mut Checker, arg_expr: Expr, ar
         return checker_types_compatible_inplace(c, arg_ty, call_ref_inner_or_self(param_ty))
     }
     // Ontology subsumption: a subclass argument satisfies a parent-class parameter.
-    // Also applies covariantly inside epistemic wrappers (Knowledge<SubClass> satisfies Knowledge<ParentClass>).
     let exp_ty = call_ref_inner_or_self(param_ty)
     let got_ty = call_ref_inner_or_self(arg_ty)
     if !name_is_empty(got_ty.name) && !name_is_empty(exp_ty.name) && !name_eq(got_ty.name, exp_ty.name) {
@@ -18981,17 +19067,10 @@ fn checker_call_arg_types_compatible_inplace(c: *mut Checker, arg_expr: Expr, ar
             return true
         }
     }
-    if is_epistemic_type(exp_ty) && is_epistemic_type(got_ty) && exp_ty.kind == got_ty.kind {
-        let exp_in = knowledge_inner(exp_ty)
-        let got_in = knowledge_inner(got_ty)
-        if !name_is_empty(got_in.name) && !name_is_empty(exp_in.name) && !name_eq(got_in.name, exp_in.name) {
-            if checker_onto_name_subclass_walk((*c).ontology_items, got_in.name, exp_in.name, 0) {
-                let pmeta = knowledge_meta_from_ty(got_ty)
-                let rmeta = knowledge_meta_from_ty(exp_ty)
-                return compat_epsilon_subsumes(got_ty, exp_ty)
-                    && validity_subsumes(knowledge_meta_validity(pmeta), knowledge_meta_validity(rmeta))
-                    && provenance_subsumes(knowledge_meta_provenance(pmeta), knowledge_meta_provenance(rmeta))
-            }
+    // Directional epistemic subsumption at expected position (arg -> param)
+    if is_epistemic_type(exp_ty) && is_epistemic_type(got_ty) {
+        if checker_knowledge_subsumes(c, got_ty, exp_ty) {
+            return true
         }
     }
     false
@@ -20252,6 +20331,11 @@ fn checker_contextual_expr_compatible(expr: Expr, actual_ty: TypeEntry, expected
 fn checker_fn_body_return_compatible_inplace(c: *mut Checker, body_ty: TypeEntry, return_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc, IO {
     if checker_types_compatible_inplace(c, body_ty, return_ty) {
         return true
+    }
+    if is_epistemic_type(return_ty) && is_epistemic_type(body_ty) {
+        if checker_knowledge_subsumes(c, body_ty, return_ty) {
+            return true
+        }
     }
     let int_lit_narrow = (*c).last_literal_kind == 1
         && body_ty.kind == TypeKind::TyI64
@@ -28435,18 +28519,36 @@ impl Checker {
            knowledge_meta_epsilon(knowledge_meta_from_ty(expected_ty)) < 0.0 {
             return self
         }
-        if knowledge_call_boundary_compatible(provided_ty, expected_ty) {
+        let p_in = knowledge_inner(provided_ty)
+        let r_in = knowledge_inner(expected_ty)
+        let onto_ok = if types_equal(p_in, r_in) {
+            true
+        } else if !name_is_empty(p_in.name) && !name_is_empty(r_in.name) {
+            checker_onto_name_subclass_walk(self.ontology_items, p_in.name, r_in.name, 0)
+        } else {
+            false
+        }
+        let pm = knowledge_meta_from_ty(provided_ty)
+        let rm = knowledge_meta_from_ty(expected_ty)
+        let eps_ok = epsilon_subsumes_call_boundary(
+            knowledge_meta_epsilon(pm),
+            provided_ty.knowledge_epsilon_mode,
+            knowledge_meta_epsilon(rm),
+            expected_ty.knowledge_epsilon_mode
+        )
+        let val_ok = validity_subsumes(knowledge_meta_validity(pm), knowledge_meta_validity(rm))
+        let prov_ok = provenance_subsumes(knowledge_meta_provenance(pm), knowledge_meta_provenance(rm))
+        if onto_ok && eps_ok && val_ok && prov_ok {
             self
         } else {
-            // Mirror of the in-place site: name the failing slot (E244 for
-            // provenance, E036 otherwise). Both copies carry the rule — the
-            // codebase's twin-drift history says so.
-            let pm = knowledge_meta_from_ty(provided_ty)
-            let rm = knowledge_meta_from_ty(expected_ty)
-            if !provenance_subsumes(knowledge_meta_provenance(pm), knowledge_meta_provenance(rm)) {
+            if !prov_ok {
                 self.report_error_at(call_span, 244, 0, 0, 0)
-            } else {
+            } else if !val_ok {
+                self.report_error_at(call_span, 246, 0, 0, 0)
+            } else if !eps_ok {
                 self.report_error_at(call_span, 36, 0, 0, 0)
+            } else {
+                self.report_error_at(call_span, 9, 0, 0, 0)
             }
         }
     }
@@ -28509,7 +28611,39 @@ impl Checker {
     }
 
     fn call_arg_types_compatible_structural(self, arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
-        checker_call_arg_types_compatible_table(self.fn_sigs, arg_expr, arg_ty, param_ty)
+        if checker_call_arg_types_compatible_table(self.fn_sigs, arg_expr, arg_ty, param_ty) {
+            return true
+        }
+        let exp_ty = call_ref_inner_or_self(param_ty)
+        let got_ty = call_ref_inner_or_self(arg_ty)
+        if !name_is_empty(got_ty.name) && !name_is_empty(exp_ty.name) && !name_eq(got_ty.name, exp_ty.name) {
+            if checker_onto_name_subclass_walk(self.ontology_items, got_ty.name, exp_ty.name, 0) {
+                return true
+            }
+        }
+        if is_epistemic_type(exp_ty) && is_epistemic_type(got_ty) && exp_ty.kind == got_ty.kind {
+            let p_in = knowledge_inner(got_ty)
+            let r_in = knowledge_inner(exp_ty)
+            let onto_ok = if types_equal(p_in, r_in) {
+                true
+            } else if !name_is_empty(p_in.name) && !name_is_empty(r_in.name) {
+                checker_onto_name_subclass_walk(self.ontology_items, p_in.name, r_in.name, 0)
+            } else {
+                false
+            }
+            if onto_ok {
+                let pm = knowledge_meta_from_ty(got_ty)
+                let rm = knowledge_meta_from_ty(exp_ty)
+                return epsilon_subsumes_call_boundary(
+                    knowledge_meta_epsilon(pm),
+                    got_ty.knowledge_epsilon_mode,
+                    knowledge_meta_epsilon(rm),
+                    exp_ty.knowledge_epsilon_mode
+                ) && validity_subsumes(knowledge_meta_validity(pm), knowledge_meta_validity(rm))
+                  && provenance_subsumes(knowledge_meta_provenance(pm), knowledge_meta_provenance(rm))
+            }
+        }
+        false
     }
 
     fn check_call_args_inner(self, args: Option<Box<ExprList> >, params: Option<Box<FnParamList> >, idx: i64, expected_count: i64, call_span: Span) -> Checker with Mut, Panic, Div, Alloc, IO {

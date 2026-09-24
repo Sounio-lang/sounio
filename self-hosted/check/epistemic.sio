@@ -82,6 +82,9 @@ pub fn check_knowledge_type(checker: Checker, info: KnowledgeTypeInfo) -> (Check
     ty.knowledge_epsilon_mode = eps_mode
     let prov = meta.provenance
     ty.knowledge_provenance_kind = prov.kind
+    let val_cond = meta.validity
+    ty.knowledge_validity_kind = val_cond.kind
+    ty.knowledge_validity_value = if val_cond.kind == VALIDITY_KIND_DURATION { val_cond.duration_sec } else { val_cond.until_timestamp }
     (c, ty)
 }
 
@@ -211,6 +214,40 @@ pub fn validity_from_ast(opt: Option<Box<ValidityCondition>>) -> Validity {
     }
 }
 
+fn is_iso_digit(b: i8) -> bool {
+    b >= (48 as i8) && b <= (57 as i8)
+}
+
+fn to_iso_digit(b: i8) -> i64 {
+    (b as i64) - 48
+}
+
+pub fn parse_iso_date_to_f64(name: Name) -> f64 {
+    if name.len < 10 {
+        return 0.0
+    }
+    let b = name.buf
+    if !is_iso_digit(b[0]) || !is_iso_digit(b[1]) || !is_iso_digit(b[2]) || !is_iso_digit(b[3]) {
+        return 0.0
+    }
+    if b[4] != (45 as i8) {
+        return 0.0
+    }
+    if !is_iso_digit(b[5]) || !is_iso_digit(b[6]) {
+        return 0.0
+    }
+    if b[7] != (45 as i8) {
+        return 0.0
+    }
+    if !is_iso_digit(b[8]) || !is_iso_digit(b[9]) {
+        return 0.0
+    }
+    let year = to_iso_digit(b[0]) * 1000 + to_iso_digit(b[1]) * 100 + to_iso_digit(b[2]) * 10 + to_iso_digit(b[3])
+    let month = to_iso_digit(b[5]) * 10 + to_iso_digit(b[6])
+    let day = to_iso_digit(b[8]) * 10 + to_iso_digit(b[9])
+    (year * 10000 + month * 100 + day) as f64
+}
+
 pub fn knowledge_validity_expr_to_f64(opt: Option<Box<Expr>>) -> f64 {
     match opt {
         Some(e) => {
@@ -218,6 +255,8 @@ pub fn knowledge_validity_expr_to_f64(opt: Option<Box<Expr>>) -> f64 {
                 (*e).int_val as f64
             } else if (*e).kind == ExprKind::ExprFloatLit {
                 (*e).float_val
+            } else if (*e).kind == ExprKind::ExprStringLit {
+                parse_iso_date_to_f64((*e).name)
             } else {
                 0.0
             }
@@ -522,9 +561,18 @@ pub fn knowledge_meta_from_ty(ty: TypeEntry) -> KnowledgeMeta with Mut, Panic, D
             // DERIVED. -1 (absent: intrinsics, binary results) maps to
             // DERIVED — which is what a computed value honestly is.
             let prov_kind = if ty.knowledge_provenance_kind >= 0 { ty.knowledge_provenance_kind } else { PROVENANCE_KIND_DERIVED }
+            let val_obj = if ty.knowledge_validity_kind == VALIDITY_KIND_DURATION {
+                validity_duration(ty.knowledge_validity_value)
+            } else if ty.knowledge_validity_kind == VALIDITY_KIND_UNTIL_TIME {
+                validity_until(ty.knowledge_validity_value)
+            } else if ty.knowledge_validity_kind == VALIDITY_KIND_WHILE_COND {
+                validity_while()
+            } else {
+                validity_always()
+            }
             KnowledgeMeta {
                 epsilon: eps,
-                validity: validity_always(),
+                validity: val_obj,
                 provenance: provenance_new(prov_kind)
             }
         }
