@@ -199,16 +199,24 @@ theorem oct_scalar_mul_assoc (m n : Int) (x : Oct) :
 -- ---------------------------------------------------------------------------
 
 /-- Distributivity of octonion multiplication over addition (left).
-    Identity of Cayley-Dickson doubling over associative quaternion addition.
-    Classified as NÃO ESTABELECIDO in AXIOM_INVENTORY.md pending Mathlib Ring. -/
-axiom oct_mul_add_left (x y z : Oct) :
-    octMul x (octAdd y z) = octAdd (octMul x y) (octMul x z)
+    Formally proved without Mathlib from the Cayley-Dickson definition. -/
+theorem oct_mul_add_left (x y z : Oct) :
+    octMul x (octAdd y z) = octAdd (octMul x y) (octMul x z) := by
+  ext
+  all_goals
+    simp only [octMul, quatMul, quatAdd, quatSub, quatConj, Oct.hi, Oct.lo, Oct.fromQuats, octAdd,
+               Int.mul_add, Int.add_mul, Int.neg_mul, Int.mul_neg, Int.sub_eq_add_neg, Int.neg_add]
+    omega
 
 /-- Distributivity of octonion multiplication over addition (right).
-    Identity of Cayley-Dickson doubling over associative quaternion addition.
-    Classified as NÃO ESTABELECIDO in AXIOM_INVENTORY.md pending Mathlib Ring. -/
-axiom oct_mul_add_right (x y z : Oct) :
-    octMul (octAdd x y) z = octAdd (octMul x z) (octMul y z)
+    Formally proved without Mathlib from the Cayley-Dickson definition. -/
+theorem oct_mul_add_right (x y z : Oct) :
+    octMul (octAdd x y) z = octAdd (octMul x z) (octMul y z) := by
+  ext
+  all_goals
+    simp only [octMul, quatMul, quatAdd, quatSub, quatConj, Oct.hi, Oct.lo, Oct.fromQuats, octAdd,
+               Int.mul_add, Int.add_mul, Int.neg_mul, Int.mul_neg, Int.sub_eq_add_neg, Int.neg_add]
+    omega
 
 /-- Canonical basis decomposition: every octonion is uniquely expressed
     as an integer linear combination of the eight standard basis elements e₀..e₇. -/
