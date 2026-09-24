@@ -1,6 +1,15 @@
+<!-- docs:meta
+topic_id: repo.docs.decisions.adr-012-hyper-native-v2-bridge
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.decisions.adr-012-hyper-native-v2-bridge
+-->
+
 # ADR 012: Bridge IrHyperMulO to native-v2 Backend Pipeline
 
-- **Status:** Proposed
+- **Status:** experimental
 - **Date:** 2026-09-24
 - **Context:**
   The Sounio front-end and typechecker parse, type-check, and lower hypercomplex expressions (e.g. `pa: &Hyper<Octonion, f64>`, `a * b` with effect `with NonAssoc`) into high-level IR nodes (`IrOpcode::IrHyperMulO`). Furthermore, the mathematical lowering logic for IrHyperMulO exists in `self-hosted/native/lower_ir.sio:1640` (`lower_hyper_mul_o_fano`) producing an optimal 31-instruction / 186-byte single-ZMM AVX-512 Fano sequence that has been proven mathematically sound and validated bit-exact in hardware silicon.
