@@ -12,6 +12,7 @@ use ir::ir::*
 use parser::ast::*
 use check::check::*
 use check::defs::*
+use check::specializer::{spec_item_module_lookup, spec_item_module_populated}
 use check::types::{TypeEntry, TypeEntryList, TypeKind}
 use check::ontology_side_table_cache::{
     ontology_side_table_cache_disjoint_verdict,
@@ -568,6 +569,105 @@ pub fn check_items_verdict_boot4_with_module_path(items: Option<Box<ItemList>>, 
     let recorded = (*checker_ptr).error_count
     let noted = (*checker_ptr).had_error
     if had_error == 1 || recorded > 0 || noted {
+        heap_free(checker_ptr as i64)
+        return 1
+    }
+    heap_free(checker_ptr as i64)
+    if check_items_ontology_verdict(items) != 0 {
+        return 1
+    }
+    0
+}
+
+// Wraps one Item in a singleton ItemList so it can be fed through
+// checker_collect_items_mut / checker_check_items_mut one at a time -- see
+// check_items_verdict_boot4_with_module_map's own comment for why.
+fn check_mod_singleton_item_list(it: Item) -> Option<Box<ItemList>> with Alloc {
+    Some(Box::new(ItemList { head: it, tail: None }))
+}
+
+// run_check_mode's "WP-A3 specialized multi-module typecheck": whenever
+// ANY generic gets instantiated anywhere in a multi-module `check`, main.sio
+// merges every module's items into one flat list, runs specialize_generics_multi
+// over it, and used to hand the result straight to check_items_verdict_boot4,
+// which allocates ONE Checker and never touches its current_module_id after
+// checker_init_in_place sets it to 0 (checker_collect_items_mut /
+// checker_check_items_mut walk the WHOLE flat list in one call). That field is
+// exactly what checker_path_qualifier_all_modules_known (round 6 finding A)
+// and every defining_module_id-keyed visibility check key off of -- so under
+// THIS specific entry point, every module's qualified-call / visibility check
+// was silently comparing against module 0 for every item, regardless of which
+// module actually declared it. check_modules_verdict_boot4_with_visibility
+// (the ordinary, non-generic multi-module path) gets this right by iterating
+// `programs[i]` one at a time and setting current_module_id = i before each
+// module's own collect/check pass -- but it cannot be reused here because it
+// takes PRE-specialization per-module item lists, and specialization can only
+// run once, over the merged whole (cross-module generics need every module's
+// templates visible together).
+//
+// Fixed by iterating the POST-specialization flat list one ITEM at a time
+// instead, looking up each item's ORIGINAL declaring module via
+// spec_item_module_lookup (check::specializer's registry, mapping a
+// fn/impl-method's own name to the module index that declared it -- built
+// from the PRE-specialization `programs[]`, so names are still what they were
+// when specialize_generics_multi ran just before this function is called,
+// which is always true of every call site: run_check_mode is the only
+// caller). A name with no registry entry (a newly synthesized "__sp_..."
+// multi-instance specialization symbol, or this table's own capacity limit)
+// falls back to leaving current_module_id at whatever the PREVIOUS item set
+// it to -- the same "generic template body" residual gap
+// specialize_generics_multi's own comment already documents as unresolved,
+// not something this function makes any worse.
+//
+// Two passes (collect all items, THEN check all bodies), matching
+// check_modules_verdict_boot4_with_visibility's own structure, because a
+// call can legitimately reference a signature declared later in item order.
+pub fn check_items_verdict_boot4_with_module_map(items: Option<Box<ItemList>>, module_path: AstPath) -> i64 with Mut, Panic, Div, Alloc, IO {
+    if !spec_item_module_populated() {
+        return check_items_verdict_boot4_with_module_path(items, module_path)
+    }
+    let checker_ptr = check_mod_alloc_checker()
+    checker_init_in_place(checker_ptr)
+    (*checker_ptr).current_module = module_path
+    (*checker_ptr).crate_root = module_path
+
+    var cur = items
+    while true {
+        match cur {
+            Some(list) => {
+                let it = (*list).head
+                let owner = spec_item_module_lookup(it.name)
+                if owner >= 0 {
+                    (*checker_ptr).current_module_id = owner
+                }
+                checker_collect_items_mut(checker_ptr, check_mod_singleton_item_list(it))
+                cur = (*list).tail
+            }
+            None => break
+        }
+    }
+
+    var chk = items
+    while true {
+        match chk {
+            Some(list) => {
+                let it = (*list).head
+                let owner = spec_item_module_lookup(it.name)
+                if owner >= 0 {
+                    (*checker_ptr).current_module_id = owner
+                }
+                checker_check_items_mut(checker_ptr, check_mod_singleton_item_list(it))
+                chk = (*list).tail
+            }
+            None => break
+        }
+    }
+    checker_verify_dsep_claims_mut(checker_ptr)
+    checker_flush_unemitted_type_errors_mut(checker_ptr)
+
+    let recorded = (*checker_ptr).error_count
+    let noted = (*checker_ptr).had_error
+    if noted || recorded > 0 {
         heap_free(checker_ptr as i64)
         return 1
     }

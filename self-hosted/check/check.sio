@@ -1657,7 +1657,7 @@ fn checker_note_type_error_mut(c: *mut Checker) with Mut {
 // Emit a fallback diagnostic when had_error was recorded without printing.
 // Boot4/modular path uses checker_check_items_inplace which notes errors via
 // checker_note_type_error_mut without emitting; this closes the silent gap.
-fn checker_flush_unemitted_type_errors_mut(c: *mut Checker) with Mut, IO {
+pub fn checker_flush_unemitted_type_errors_mut(c: *mut Checker) with Mut, IO {
     if (*c).had_error && !(*c).diag_emitted {
         print("error[E000]: type checking failed\n")
         (*c).diag_emitted = true
@@ -4783,9 +4783,19 @@ fn checker_string_list_nth_name(sl: StringList, k: i64) -> Name with Mut, Panic,
     }
 }
 
-// Records every segment of a `use` path, scoped to `module_id` (the
-// registering module -- round 6 finding A), as a POSITIVE-EVIDENCE candidate
-// module name. This cannot exclude a path-form NAMED import's terminal
+// Records every SUFFIX of a `use` path (the full path, and every shorter
+// suffix ending at the same terminal -- e.g. for `use a::b::c;`: "a::b::c",
+// "b::c", "c"), scoped to `module_id` (the registering module -- round 6
+// finding A), as a POSITIVE-EVIDENCE candidate qualifier string. Suffixes,
+// not individual segments (round 8, comment 4096338764): recording each
+// segment independently let unrelated imports' segments be recombined into
+// a qualifier that was never actually imported together -- see
+// ast_path_range_name's own comment for the exact bug. Registering complete
+// suffix TEXT still supports both call forms a single `use a::b;` allows
+// (`b::f()` via the "b" suffix, `a::b::f()` via the "a::b" suffix) without
+// accepting `a::(something else)::f()`.
+//
+// This cannot exclude a path-form NAMED import's terminal
 // (`use a::b::specific_fn;`) here: the AST gives no way to tell that shape
 // apart from a genuine whole-module import (`use a::b;`) where the last
 // segment really is the module -- both are `use_glob=false, use_items=None,
@@ -4796,37 +4806,48 @@ fn checker_string_list_nth_name(sl: StringList, k: i64) -> Name with Mut, Panic,
 // lower_named_item_terminal_known (see its own comment in lower.sio), not by
 // guessing from this registry's contents.
 fn checker_use_module_note_path(module_id: i64, path: AstPath) with Mut, Panic, Div {
-    var k: i64 = 0
-    while k < path.seg_count {
-        checker_use_module_note(module_id, checker_string_list_nth_name(path.segments, k))
-        k = k + 1
+    var s: i64 = 0
+    while s < path.seg_count {
+        checker_use_module_note(module_id, ast_path_range_name(path, s, path.seg_count - 1))
+        s = s + 1
     }
 }
 
-// Every segment of `path` except the last must be a known `use`-declared
-// module OF THE MODULE CURRENTLY BEING CHECKED (`(*c).current_module_id`,
-// round 6 finding A -- previously this checked global registry membership,
-// so a module could call through a qualifier only a DIFFERENT module had
-// `use`d), and NOT authoritatively known to be a named item's terminal
-// (round 6 finding C -- see lower_named_item_terminal_known's own comment
-// for why this replaced round 5's unsound "does this name also resolve as
-// some unrelated top-level function" heuristic, which wrongly rejected a
-// real module qualifier that happened to share a name with an unrelated
-// function elsewhere in the program). Fewer than 2 segments means there is
-// no qualifier to validate.
+// The COMPLETE qualifier (every segment of `path` except the last, joined as
+// one string) must exactly match a known `use`-declared suffix path OF THE
+// MODULE CURRENTLY BEING CHECKED (`(*c).current_module_id`, round 6 finding A
+// -- previously this checked global registry membership, so a module could
+// call through a qualifier only a DIFFERENT module had `use`d), and no
+// accumulated prefix of it may be authoritatively known to be a named item's
+// terminal (round 6 finding C -- see lower_named_item_terminal_known's own
+// comment for why this replaced round 5's unsound "does this name also
+// resolve as some unrelated top-level function" heuristic, which wrongly
+// rejected a real module qualifier that happened to share a name with an
+// unrelated function elsewhere in the program). Fewer than 2 segments means
+// there is no qualifier to validate.
+//
+// Round 8 (comment 4096338764): this used to check each qualifier segment
+// INDEPENDENTLY against the per-module registry, so a module with both
+// `use math::dd64;` and `use testmod::tc_c;` accepted the bogus recombined
+// qualifier `math::tc_c` (`math` and `tc_c` were each independently
+// "known", even though "math::tc_c" together was never imported). The
+// registry now stores complete suffix TEXT (see checker_use_module_note_path
+// and ast_path_range_name's own comments), so this checks the qualifier as
+// ONE joined string against ONE registered suffix, which cannot be
+// satisfied by mixing segments from two unrelated imports.
 fn checker_path_qualifier_all_modules_known(c: *mut Checker, path: AstPath) -> bool with Mut, Panic, Div, Alloc, IO {
     if path.seg_count < 2 {
         return false
     }
     var k: i64 = 0
     while k < path.seg_count - 1 {
-        let seg = checker_string_list_nth_name(path.segments, k)
-        if !checker_use_module_known((*c).current_module_id, seg) || lower_named_item_terminal_known(ast_path_prefix_name(path, k)) {
+        if lower_named_item_terminal_known(ast_path_prefix_name(path, k)) {
             return false
         }
         k = k + 1
     }
-    true
+    let qualifier = ast_path_range_name(path, 0, path.seg_count - 2)
+    checker_use_module_known((*c).current_module_id, qualifier)
 }
 
 fn checker_collect_known_module_backing_imports_inplace(c: *mut Checker, path: AstPath) with Mut, Panic, Div {

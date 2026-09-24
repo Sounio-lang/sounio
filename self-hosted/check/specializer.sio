@@ -330,6 +330,135 @@ fn spec_use_module_reset() with Mut {
     SPEC_CURRENT_MODULE_ID = 0 - 1
 }
 
+// Maps each top-level item's own name to the module it was declared in.
+// Populated by specialize_generics_multi's per-module loop (mirrors
+// SPEC_USE_MODULE_HASH's storage exactly), consulted by spec_finish_fn_item
+// to set SPEC_CURRENT_MODULE_ID correctly before rewriting THAT item's own
+// body -- fixing a gap SPEC_CURRENT_MODULE_ID's per-module SCAN scoping
+// (round 7) did not cover.
+//
+// The scan phase (spec_scan_items, correctly per-module scoped) only
+// DISCOVERS which generic templates need instantiating and votes on their
+// type args; it never rewrites call sites. The actual call-site REWRITE
+// happens later, in spec_finalize_items -> spec_finish_fn_item ->
+// spec_subst_block -> spec_rewrite_call_mut -> spec_call_expr_callee_name
+// (same qualifier-check code the scan phase uses) -- over the MERGED item
+// list, AFTER specialize_generics_multi has already reset
+// SPEC_CURRENT_MODULE_ID to -1. Every ordinary (non-generic) item goes
+// through this path too (spec_finalize_items's final branch calls
+// spec_finish_fn_item(it, it.name) for every ItemFn, generic or not), so
+// this was not a narrow "generic template body" edge case: EVERY call in
+// EVERY item was re-validated at rewrite time against module id -1's
+// fallback (module 0, i.e. whichever module happens to occupy `programs[0]`)
+// instead of the item's own declaring module. A module with no matching
+// `use` of its own could therefore have its illegitimate qualified call
+// legitimized by borrowing module 0's imports, exactly the class of bug
+// round 7 (finding A) fixed for the SCAN phase but left open here for the
+// REWRITE phase -- caught only once a regression test exercised it (a call
+// in an ordinary `fn main`, not inside a generic template).
+let SPEC_ITEM_MODULE_SEG_MAX: i64 = 384
+var SPEC_ITEM_MODULE_COUNT: i64 = 0
+var SPEC_ITEM_MODULE_HASH: [i64; 4096] = [0; 4096]
+var SPEC_ITEM_MODULE_LEN: [i64; 4096] = [0; 4096]
+var SPEC_ITEM_MODULE_ID: [i64; 4096] = [0 - 1; 4096]
+var SPEC_ITEM_MODULE_BUF: [i8; 1572864] = [0; 1572864]
+
+fn spec_item_module_reset() with Mut {
+    SPEC_ITEM_MODULE_COUNT = 0
+}
+
+pub fn spec_item_module_populated() -> bool with Mut {
+    SPEC_ITEM_MODULE_COUNT > 0
+}
+
+// pub: also consulted by check::mod's check_items_verdict_boot4_with_module_map
+// (see its own comment) to attribute a top-level item to its declaring module
+// when checking the WP-A3 specialized-merged item list, where
+// Checker.current_module_id would otherwise never leave its init value of 0
+// -- this table is already populated by specialize_generics_multi, which
+// always runs immediately before that verdict function in run_check_mode.
+pub fn spec_item_module_lookup(n: Name) -> i64 with Mut, Panic, Div {
+    if n.len <= 0 || n.len > SPEC_ITEM_MODULE_SEG_MAX {
+        return 0 - 1
+    }
+    let h = ast_name_hash(n)
+    var i: i64 = 0
+    while i < SPEC_ITEM_MODULE_COUNT {
+        if SPEC_ITEM_MODULE_HASH[i as usize] == h && SPEC_ITEM_MODULE_LEN[i as usize] == n.len {
+            let base = i * SPEC_ITEM_MODULE_SEG_MAX
+            var eq = true
+            var j: i64 = 0
+            while j < n.len {
+                if SPEC_ITEM_MODULE_BUF[(base + j) as usize] != n.buf[j as usize] {
+                    eq = false
+                }
+                j = j + 1
+            }
+            if eq {
+                return SPEC_ITEM_MODULE_ID[i as usize]
+            }
+        }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn spec_item_module_note(module_id: i64, n: Name) with Mut, Panic, Div {
+    if n.len <= 0 || n.len > SPEC_ITEM_MODULE_SEG_MAX {
+        return
+    }
+    if spec_item_module_lookup(n) >= 0 {
+        return
+    }
+    if SPEC_ITEM_MODULE_COUNT >= 4096 {
+        return
+    }
+    let idx = SPEC_ITEM_MODULE_COUNT
+    SPEC_ITEM_MODULE_HASH[idx as usize] = ast_name_hash(n)
+    let base = idx * SPEC_ITEM_MODULE_SEG_MAX
+    var ci: i64 = 0
+    while ci < n.len {
+        SPEC_ITEM_MODULE_BUF[(base + ci) as usize] = n.buf[ci as usize]
+        ci = ci + 1
+    }
+    SPEC_ITEM_MODULE_LEN[idx as usize] = n.len
+    SPEC_ITEM_MODULE_ID[idx as usize] = module_id
+    SPEC_ITEM_MODULE_COUNT = idx + 1
+}
+
+// Records the name of every top-level fn (bare or impl method) declared
+// directly in `items`, under `module_id`. Impl methods are named by their
+// OWN (unmangled) name here, same as spec_finish_fn_item sees them via
+// spec_finalize_method_items -- consistent with the lookup site.
+fn spec_item_module_collect(items: Option<Box<ItemList>>, module_id: i64) with Mut, Panic, Div {
+    match items {
+        None => {}
+        Some(list) => {
+            let it = (*list).head
+            if it.kind == ItemKind::ItemFn {
+                spec_item_module_note(module_id, it.name)
+            } else if it.kind == ItemKind::ItemImpl {
+                match it.impl_def {
+                    Some(id) => {
+                        var m = (*id).methods
+                        while true {
+                            match m {
+                                Some(ml) => {
+                                    spec_item_module_note(module_id, (*ml).head.name)
+                                    m = (*ml).tail
+                                }
+                                None => break
+                            }
+                        }
+                    }
+                    None => {}
+                }
+            }
+            spec_item_module_collect((*list).tail, module_id)
+        }
+    }
+}
+
 // Round 5 (comment 4090734423) added SPEC_KNOWN_FN_HASH here -- a specializer-
 // local registry of top-level free-fn names, used only to disambiguate a
 // `use` path segment that could be either a module or a path-form named
@@ -413,26 +542,38 @@ fn spec_use_module_note(module_id: i64, n: Name) with Mut, Panic, Div {
     SPEC_USE_MODULE_COUNT = idx + 1
 }
 
-// Records every segment of a `use` path, scoped to `module_id`, as a
-// POSITIVE-EVIDENCE candidate module name. This cannot exclude a path-form
-// NAMED import's terminal (`use a::b::specific_fn;`) here: the AST gives no
-// way to tell that shape apart from a genuine whole-module import
-// (`use a::b;`), where the last segment really is the module -- both are
-// `use_glob=false, use_items=None, seg_count>=2`, syntactically identical.
-// Registering the terminal here regardless is fine:
-// spec_path_qualifier_all_modules_known below settles that ambiguity
-// authoritatively via lower_named_item_terminal_known (see its own comment
-// in parser/ast.sio), not by guessing from this registry's contents.
+// Records every SUFFIX of a `use` path (the full path, and every shorter
+// suffix ending at the same terminal -- e.g. for `use a::b::c;`: "a::b::c",
+// "b::c", "c") scoped to `module_id`, as a POSITIVE-EVIDENCE candidate
+// qualifier string. Suffixes, not individual segments (round 8, review
+// comment 4096338764, extended here from check.sio for the same bug):
+// recording each segment independently let spec_path_qualifier_all_modules_known
+// accept a qualifier recombined from two unrelated `use` paths that happen to
+// share a segment name (e.g. `math::tc_c` when only `math::dd64` and
+// `testmod::tc_c` were ever imported). Registering complete suffix TEXT still
+// supports both call forms a single `use a::b;` allows (`b::f()` via the "b"
+// suffix, `a::b::f()` via the "a::b" suffix) without accepting a mix of
+// segments from different imports.
+//
+// This cannot exclude a path-form NAMED import's terminal
+// (`use a::b::specific_fn;`) here: the AST gives no way to tell that shape
+// apart from a genuine whole-module import (`use a::b;`), where the last
+// segment really is the module -- both are `use_glob=false, use_items=None,
+// seg_count>=2`, syntactically identical. Registering the terminal here
+// regardless is fine: spec_path_qualifier_all_modules_known below settles
+// that ambiguity authoritatively via lower_named_item_terminal_known (see its
+// own comment in parser/ast.sio), not by guessing from this registry's
+// contents.
 fn spec_use_modules_collect(items: Option<Box<ItemList>>, module_id: i64) with Mut, Panic, Div {
     match items {
         None => {}
         Some(list) => {
             let it = (*list).head
             if it.kind == ItemKind::ItemUse {
-                var k: i64 = 0
-                while k < it.use_path.seg_count {
-                    spec_use_module_note(module_id, spec_string_list_nth_name(it.use_path.segments, k))
-                    k = k + 1
+                var s: i64 = 0
+                while s < it.use_path.seg_count {
+                    spec_use_module_note(module_id, ast_path_range_name(it.use_path, s, it.use_path.seg_count - 1))
+                    s = s + 1
                 }
             }
             spec_use_modules_collect((*list).tail, module_id)
@@ -440,13 +581,22 @@ fn spec_use_modules_collect(items: Option<Box<ItemList>>, module_id: i64) with M
     }
 }
 
-// Every segment of `path` except the last must be a known `use`-declared
-// module OF THE MODULE CURRENTLY BEING SCANNED (SPEC_CURRENT_MODULE_ID --
-// round 7 finding A; -1/unscoped means single-module, module id 0), and NOT
-// authoritatively known to be a named item's terminal (see
-// lower_named_item_terminal_known's comment in parser/ast.sio), for `path`
-// to be treated as a qualified free-fn call. Empty (a bare identifier) or
+// The COMPLETE qualifier (every segment of `path` except the last, joined as
+// one string) must exactly match a known `use`-declared suffix path OF THE
+// MODULE CURRENTLY BEING SCANNED (SPEC_CURRENT_MODULE_ID -- round 7 finding
+// A; -1/unscoped means single-module, module id 0), and no accumulated prefix
+// of it may be authoritatively known to be a named item's terminal (see
+// lower_named_item_terminal_known's comment in parser/ast.sio), for `path` to
+// be treated as a qualified free-fn call. Empty (a bare identifier) or
 // single-segment paths have no qualifier to check.
+//
+// Round 8 (comment 4096338764): this used to check each qualifier segment
+// INDEPENDENTLY against the per-module registry, so a module with both
+// `use math::dd64;` and `use testmod::tc_c;` accepted the bogus recombined
+// qualifier `math::tc_c`. The registry now stores complete suffix TEXT (see
+// spec_use_modules_collect's own comment), so this checks the qualifier as
+// ONE joined string against ONE registered suffix, which cannot be satisfied
+// by mixing segments from two unrelated imports.
 fn spec_path_qualifier_all_modules_known(path: AstPath) -> bool with Mut, Panic, Div {
     if path.seg_count < 2 {
         return false
@@ -454,13 +604,13 @@ fn spec_path_qualifier_all_modules_known(path: AstPath) -> bool with Mut, Panic,
     let module_id = if SPEC_CURRENT_MODULE_ID < 0 { 0 } else { SPEC_CURRENT_MODULE_ID }
     var k: i64 = 0
     while k < path.seg_count - 1 {
-        let seg = spec_string_list_nth_name(path.segments, k)
-        if !spec_use_module_known(module_id, seg) || lower_named_item_terminal_known(ast_path_prefix_name(path, k)) {
+        if lower_named_item_terminal_known(ast_path_prefix_name(path, k)) {
             return false
         }
         k = k + 1
     }
-    true
+    let qualifier = ast_path_range_name(path, 0, path.seg_count - 2)
+    spec_use_module_known(module_id, qualifier)
 }
 
 // ============================================================
@@ -1844,6 +1994,27 @@ fn spec_extra_items_to_list() -> Option<Box<ItemList>> with Mut, Panic, Div, All
 
 fn spec_finish_fn_item(it: Item, symbol: Name) -> Item with Mut, Panic, Div, Alloc {
     if !SPEC_FN_MULTI { return it }
+    // This runs for EVERY ordinary (non-generic-template) item too, not
+    // only generic ones -- spec_finalize_items's final branch calls
+    // spec_finish_fn_item(it, it.name) unconditionally -- so it is exactly
+    // where a module-qualified call inside an ORDINARY function's body gets
+    // rewritten by spec_subst_block -> spec_rewrite_call_mut ->
+    // spec_call_expr_callee_name, over the MERGED item list, after
+    // specialize_generics_multi has already reset SPEC_CURRENT_MODULE_ID to
+    // -1. Restore the item's OWN declaring module (SPEC_ITEM_MODULE_HASH,
+    // populated per-module before this pass runs -- see its own comment)
+    // for the duration of its own substitution, so a qualified call here is
+    // validated against the module that actually wrote it, not whichever
+    // module happens to occupy `programs[0]`. An empty registry (the
+    // single-module specialize_generics() path, which never populates it)
+    // leaves SPEC_CURRENT_MODULE_ID untouched, matching that path's existing
+    // -1-means-module-0 convention.
+    if SPEC_ITEM_MODULE_COUNT > 0 {
+        let owner = spec_item_module_lookup(it.name)
+        if owner >= 0 {
+            SPEC_CURRENT_MODULE_ID = owner
+        }
+    }
     match it.fn_def {
         None => it
         Some(fd) => {
@@ -2007,8 +2178,13 @@ pub fn specialize_generics(items: Option<Box<ItemList>>) -> Option<Box<ItemList>
     // check.sio's (specialize_generics runs before type checking). Single
     // module here, so module id 0 throughout (matches
     // spec_path_qualifier_all_modules_known's SPEC_CURRENT_MODULE_ID<0
-    // default).
+    // default). SPEC_ITEM_MODULE_* is reset (not populated -- single-module
+    // callers have nothing to disambiguate) so a stale multi-module registry
+    // from an earlier compile in this process cannot leak into this one; see
+    // spec_finish_fn_item's own comment for why an empty registry here is a
+    // deliberate no-op, not a gap.
     spec_use_module_reset()
+    spec_item_module_reset()
     spec_use_modules_collect(items, 0)
     let known = spec_collect_known_names(items, SpecKnownNames { names: [empty_name(); 32], count: 0 })
     spec_collect_generic_fns(items, known)
@@ -2065,9 +2241,11 @@ pub fn specialize_generics(items: Option<Box<ItemList>>) -> Option<Box<ItemList>
 pub fn specialize_generics_multi(items: Option<Box<ItemList>>, programs: &! [Program; 256], count: i64) -> Option<Box<ItemList>> with IO, Mut, Panic, Div, Alloc {
     spec_reset_state()
     spec_use_module_reset()
+    spec_item_module_reset()
     var i: i64 = 0
     while i < count {
         spec_use_modules_collect((*programs)[i as usize].items, i)
+        spec_item_module_collect((*programs)[i as usize].items, i)
         i = i + 1
     }
     let known = spec_collect_known_names(items, SpecKnownNames { names: [empty_name(); 32], count: 0 })

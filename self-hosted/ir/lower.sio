@@ -994,27 +994,39 @@ pub fn lower_use_modules_collect(items: &Option<Box<ItemList>>, module_id: i64) 
             Some(list) => {
                 let item_ref = &(*list).head
                 if item_ref.kind == ItemKind::ItemUse {
-                    // Records every segment as a POSITIVE-EVIDENCE candidate
-                    // module name. This cannot exclude a path-form NAMED
-                    // import's terminal (`use a::b::specific_fn;`) here: the
-                    // AST gives no way to tell that shape apart from a
-                    // genuine whole-module import (`use a::b;`) -- both are
-                    // `use_glob=false, use_items=None, seg_count>=2`,
-                    // syntactically identical. Registering the terminal
-                    // regardless is what review comment 4090734484 (round 5)
-                    // flagged: `use epistemic::propagate::monte_carlo;` is
-                    // real (tests/stdlib/epistemic/test_stiff_ode_knightian_mc.sio),
+                    // Records every SUFFIX of the `use` path (the full path,
+                    // and every shorter suffix ending at the same terminal --
+                    // e.g. for `use a::b::c;`: "a::b::c", "b::c", "c") as a
+                    // POSITIVE-EVIDENCE candidate qualifier string. Suffixes,
+                    // not individual segments (round 8, review comment
+                    // 4096338764): recording each segment independently let
+                    // callee_path_module_stripped_name accept a qualifier
+                    // recombined from two unrelated `use` paths that happen to
+                    // share a segment name (e.g. `math::tc_c` when only
+                    // `math::dd64` and `testmod::tc_c` were ever imported).
+                    // Registering complete suffix TEXT still supports both
+                    // call forms a single `use a::b;` allows (`b::f()` via the
+                    // "b" suffix, `a::b::f()` via the "a::b" suffix) without
+                    // accepting a mix of segments from different imports.
+                    //
+                    // This cannot exclude a path-form NAMED import's terminal
+                    // (`use a::b::specific_fn;`) here: the AST gives no way to
+                    // tell that shape apart from a genuine whole-module import
+                    // (`use a::b;`) -- both are `use_glob=false,
+                    // use_items=None, seg_count>=2`, syntactically identical.
+                    // Registering the terminal regardless is what review
+                    // comment 4090734484 (round 5) flagged: `use
+                    // epistemic::propagate::monte_carlo;` is real
+                    // (tests/stdlib/epistemic/test_stiff_ode_knightian_mc.sio),
                     // `monte_carlo` is a function, not a module -- but the fix
-                    // belongs at callee_path_module_stripped_name below,
-                    // where the full-program fn table is guaranteed complete
-                    // (body lowering runs after every module's preregister
-                    // pass) and can settle the ambiguity semantically:
-                    // exclude a segment that also names a real fn.
-                    var k: i64 = 0
-                    while k < item_ref.use_path.seg_count {
-                        let use_seg = lower_string_list_nth_name(item_ref.use_path.segments, k)
-                        lower_use_module_note(module_id, use_seg)
-                        k = k + 1
+                    // belongs at callee_path_module_stripped_name below, via
+                    // lower_named_item_terminal_known (the authoritative
+                    // file-resolution registry, not a name-collision guess).
+                    var s: i64 = 0
+                    while s < item_ref.use_path.seg_count {
+                        let suffix = ast_path_range_name(item_ref.use_path, s, item_ref.use_path.seg_count - 1)
+                        lower_use_module_note(module_id, suffix)
+                        s = s + 1
                     }
                 }
                 current = &(*list).tail
@@ -19291,39 +19303,68 @@ impl Lowerer {
     // `mod::f`, `a::mod::f`, `mod::Type::method`: drop the leading segments that
     // name a module (LOWER_USE_MODULE_HASH) and are not a struct/enum known here.
     // Empty when nothing was dropped, so the caller keeps Type::method mangling.
+    //
+    // Round 8 (review comment 4096338764, extended here from check.sio to the
+    // lowerer for the same bug class): this used to grow `k` one segment at a
+    // time, accepting segment `k` whenever IT ALONE was independently
+    // registered as a known module -- so a module with both `use math::dd64;`
+    // and `use testmod::tc_c;` would strip the bogus call `math::tc_c::f()`
+    // down to `tc_c_f`/`f`, since `math` and `tc_c` were each independently
+    // "known" even though "math::tc_c" together was never imported. Fixed by
+    // searching qualifier LENGTHS longest-first and requiring the FULL
+    // candidate qualifier (all `cand` segments joined into one string) to
+    // exactly match a registered `use`-path suffix (see
+    // lower_use_modules_collect's own comment) -- the qualifier can no longer
+    // be satisfied by mixing segments from two unrelated imports.
     fn callee_path_module_stripped_name(self, p: AstPath) -> Name with Mut, Panic, Div, Alloc {
         if p.seg_count < 2 || LOWER_USE_MODULE_COUNT <= 0 {
             return ir_empty_name()
         }
-        var k: i64 = 0
         let module_id = lower_effective_current_module_id()
-        while k < p.seg_count - 1 {
-            let seg = lower_string_list_nth_name(p.segments, k)
-            // Imported types are not guaranteed to have reached struct_layouts yet.
-            // Their uppercase spelling is still enough to stop module-prefix
-            // stripping, so `af_mod::AfNum::quad` retains `AfNum_quad`.
-            let c0 = if seg.len > 0 { (seg.buf[0] as i64) & 255 } else { 0 }
-            // lower_use_module_note cannot tell a path-form named-item
-            // import's terminal (`use a::b::specific_fn;`, where
-            // `specific_fn` is a function) apart from a genuine whole-module
-            // import (`use a::b;`) at registration time -- both are the same
-            // AST shape -- so it registers both. lower_named_item_terminal_known
-            // is the authoritative tie-breaker: it is populated from
-            // module_frontend.sio's real file-resolution outcome for this
-            // exact question (see its own comment), not a name-collision
-            // guess. round 5 (comment 4090734484) used
-            // `lowerer_lookup_fn_id_by_name_ref(&self, seg) >= 0` here instead
-            // -- "does this name ALSO resolve as some real function" -- which
-            // review comment 4090966282 (round 6, finding C) correctly flagged
-            // as unsound the other way: a genuine module whose name happens to
-            // coincide with an unrelated top-level function elsewhere in the
-            // program (e.g. `use testmod::tc_c;` alongside an unrelated
-            // top-level `fn tc_c(..)`) was wrongly excluded too, breaking the
-            // real module's own qualified calls.
-            if !lower_use_module_known(module_id, seg) || self.callee_segment_names_type(seg) || lower_named_item_terminal_known(ast_path_prefix_name(p, k)) || (c0 >= 65 && c0 <= 90) {
-                break
+        var k: i64 = 0
+        var cand: i64 = p.seg_count - 1
+        while cand >= 1 {
+            var segs_ok = true
+            var j: i64 = 0
+            while j < cand {
+                let seg = lower_string_list_nth_name(p.segments, j)
+                // Imported types are not guaranteed to have reached
+                // struct_layouts yet. Their uppercase spelling is still
+                // enough to stop module-prefix stripping, so
+                // `af_mod::AfNum::quad` retains `AfNum_quad`.
+                let c0 = if seg.len > 0 { (seg.buf[0] as i64) & 255 } else { 0 }
+                if self.callee_segment_names_type(seg) || (c0 >= 65 && c0 <= 90) || lower_named_item_terminal_known(ast_path_prefix_name(p, j)) {
+                    segs_ok = false
+                }
+                j = j + 1
             }
-            k = k + 1
+            if segs_ok {
+                // lower_use_module_note cannot tell a path-form named-item
+                // import's terminal (`use a::b::specific_fn;`, where
+                // `specific_fn` is a function) apart from a genuine
+                // whole-module import (`use a::b;`) at registration time --
+                // both are the same AST shape -- so it registers both.
+                // lower_named_item_terminal_known (checked per-segment above)
+                // is the authoritative tie-breaker: it is populated from
+                // module_frontend.sio's real file-resolution outcome for this
+                // exact question (see its own comment), not a name-collision
+                // guess. round 5 (comment 4090734484) used
+                // `lowerer_lookup_fn_id_by_name_ref(&self, seg) >= 0` here
+                // instead -- "does this name ALSO resolve as some real
+                // function" -- which review comment 4090966282 (round 6,
+                // finding C) correctly flagged as unsound the other way: a
+                // genuine module whose name happens to coincide with an
+                // unrelated top-level function elsewhere in the program
+                // (e.g. `use testmod::tc_c;` alongside an unrelated
+                // top-level `fn tc_c(..)`) was wrongly excluded too, breaking
+                // the real module's own qualified calls.
+                let qualifier = ast_path_range_name(p, 0, cand - 1)
+                if lower_use_module_known(module_id, qualifier) {
+                    k = cand
+                    break
+                }
+            }
+            cand = cand - 1
         }
         if k == 0 {
             return ir_empty_name()
