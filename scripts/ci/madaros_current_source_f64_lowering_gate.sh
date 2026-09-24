@@ -288,4 +288,131 @@ if [[ "$implm_run_rc" -ne 0 ]] || [[ "$IMPLM_RUN_OUT" != "TUPLE_F64_ARRAY_IMPL_M
   fail "impl-method f64-array-tuple witness ran rc=$implm_run_rc out=[$IMPLM_RUN_OUT]: a method returning an f64-array tuple was read as integer bits"
 fi
 
-echo "[madaros-f64-lowering] PASS: one shared Madaros ELF passed dereference, global f64, direct capacity, imported capacity, imported wide-call, f64-array tuple table capacity (${TUPLE_CAP} ok, ${TUPLE_OVER} rejected), slot limit (slot $((SLOT_MAX - 1)) ok, slot ${SLOT_MAX} rejected), and impl-method tuple coverage"
+# LOWER_FN_ARR_CHAIN table capacity (lower_fn_tuple_arr_fault reason 5).
+#
+# Review follow-up (#2570): past LOWER_FN_ARR_CHAIN_COUNT's cap (shared with
+# LOWER_FN_TUPLE_ARR_CAP), lower_fn_arr_chain_insert fails closed via reason 5
+# -- the array-chain sibling of the tuple table's reason-3 cap fault above,
+# added by this PR but never exercised by any fixture: a regression that
+# dropped LOWER_FN_ARR_CHAIN entries, or lost its sticky hard error, would
+# stay green. Same two-arm shape as the tuple-table capacity witness above.
+#   CAP     one-layer array-chain fns   must compile and run, INCLUDING the
+#                                       last slot (the boundary entry)
+#   CAP+1   one-layer array-chain fns   must be rejected, naming the cap and
+#                                       the fn
+CHAIN_DIR="$WORK/arr-chain-capacity"
+mkdir -p "$CHAIN_DIR"
+
+# $1 = number of one-layer array-chain fns (`cK() -> fn() -> [f64; 2]`, each
+# returning `innerK`), $2 = output source.
+gen_chain_fns() {
+  local n="$1" out="$2" i
+  : >"$out"
+  for i in $(seq 0 "$((n - 1))"); do
+    printf 'fn inner%s() -> [f64; 2] {\n  var a: [f64; 2] = [0.0; 2]\n  a[0] = 1.5\n  a\n}\nfn c%s() -> fn() -> [f64; 2] {\n  inner%s\n}\n' "$i" "$i" "$i" >>"$out"
+  done
+  printf 'fn main() -> i32 with IO, Mut, Panic {\n  let f = c%s()\n  let a = f()\n  let d: f64 = a[0] * 2.0\n  if d == 3.0 {\n    return 0\n  }\n  1\n}\n' "$((n - 1))" >>"$out"
+}
+
+CHAIN_AT_SRC="$CHAIN_DIR/at_cap.sio"
+CHAIN_AT_OUT="$CHAIN_DIR/at_cap.elf"
+gen_chain_fns "$TUPLE_CAP" "$CHAIN_AT_SRC"
+set +e
+MADAROS_RAW_BIN="$MADAROS_ELF" "$ROOT_DIR/bin/madaros" compile "$CHAIN_AT_SRC" -o "$CHAIN_AT_OUT" >"$CHAIN_DIR/at_cap.log" 2>&1
+chain_at_rc=$?
+set -e
+if [[ "$chain_at_rc" -ne 0 ]]; then
+  tail -n 40 "$CHAIN_DIR/at_cap.log" >&2
+  fail "${TUPLE_CAP}-array-chain-fn boundary witness did not compile rc=$chain_at_rc"
+fi
+[[ -e "$CHAIN_AT_OUT" ]] || fail "${TUPLE_CAP}-array-chain-fn boundary witness produced no output artifact"
+chmod +x "$CHAIN_AT_OUT"
+set +e
+"$CHAIN_AT_OUT" >"$CHAIN_DIR/at_cap.run.log" 2>&1
+chain_at_run_rc=$?
+set -e
+# Exit 1 here means c<CAP-1>, the LAST recorded array-chain entry, was not
+# classified: `let f = c()` never got fn_ptr_ret_array set, so `f()`'s
+# result read its f64 bits as an integer.
+if [[ "$chain_at_run_rc" -ne 0 ]]; then
+  cat "$CHAIN_DIR/at_cap.run.log" >&2
+  fail "${TUPLE_CAP}-array-chain-fn witness ran rc=$chain_at_run_rc: the LAST array-chain entry was not classified"
+fi
+
+CHAIN_OVER_SRC="$CHAIN_DIR/over_cap.sio"
+CHAIN_OVER_OUT="$CHAIN_DIR/over_cap.elf"
+gen_chain_fns "$TUPLE_OVER" "$CHAIN_OVER_SRC"
+set +e
+MADAROS_RAW_BIN="$MADAROS_ELF" "$ROOT_DIR/bin/madaros" compile "$CHAIN_OVER_SRC" -o "$CHAIN_OVER_OUT" >"$CHAIN_DIR/over_cap.log" 2>&1
+chain_over_rc=$?
+set -e
+if [[ "$chain_over_rc" -eq 0 ]]; then
+  tail -n 40 "$CHAIN_DIR/over_cap.log" >&2
+  fail "${TUPLE_OVER}-array-chain-fn witness compiled clean: the array-chain table dropped its metadata silently again"
+fi
+if [[ "$chain_over_rc" -ge 128 ]]; then
+  tail -n 40 "$CHAIN_DIR/over_cap.log" >&2
+  fail "${TUPLE_OVER}-array-chain-fn witness terminated by signal rc=$chain_over_rc"
+fi
+if [[ -e "$CHAIN_OVER_OUT" ]]; then
+  fail "${TUPLE_OVER}-array-chain-fn capacity rejection left an output artifact: $CHAIN_OVER_OUT"
+fi
+# c<CAP> is the (CAP+1)th array-chain fn, so it is the one whose entry did
+# not fit. Naming it proves the sticky fault state carried the name through
+# the reset, not just a bare flag -- same rationale as reason 3's check above.
+grep -Fq "more than ${TUPLE_CAP} functions return an array-returning function (\`fn() -> [f64; N]\`), starting at \`c${TUPLE_CAP}\`" "$CHAIN_DIR/over_cap.log" || {
+  tail -n 40 "$CHAIN_DIR/over_cap.log" >&2
+  fail "${TUPLE_OVER}-array-chain-fn capacity diagnostic was missing or changed"
+}
+
+# Array-chain depth refusal (lower_fn_tuple_arr_fault reason 6): a function
+# whose return type is a TypeFn chain MORE than one layer deep before
+# reaching `[f64; N]` cannot be represented by LOWER_FN_ARR_CHAIN's
+# exactly-one-layer shape and must be refused outright, independent of the
+# cap above. Also added by this PR with no fixture. The prepass that raises
+# this walks every top-level fn's declared return type unconditionally (the
+# same one gen_chain_fns above exercises), so merely DECLARING the two-layer
+# function is enough to trip it -- main's body does not need to call it.
+CHAIN_DEPTH_DIR="$WORK/arr-chain-depth"
+mkdir -p "$CHAIN_DEPTH_DIR"
+cat > "$CHAIN_DEPTH_DIR/main.sio" <<'SOUNIO'
+fn deep_inner() -> [f64; 2] {
+    var a: [f64; 2] = [0.0; 2]
+    a[0] = 1.5
+    a
+}
+
+fn deep_mid() -> fn() -> [f64; 2] {
+    deep_inner
+}
+
+fn deep_outer() -> fn() -> fn() -> [f64; 2] {
+    deep_mid
+}
+
+fn main() -> i32 with IO, Mut, Panic {
+    0
+}
+SOUNIO
+CHAIN_DEPTH_OUT="$CHAIN_DEPTH_DIR/main.elf"
+set +e
+MADAROS_RAW_BIN="$MADAROS_ELF" "$ROOT_DIR/bin/madaros" compile "$CHAIN_DEPTH_DIR/main.sio" -o "$CHAIN_DEPTH_OUT" >"$CHAIN_DEPTH_DIR/compile.log" 2>&1
+chain_depth_rc=$?
+set -e
+if [[ "$chain_depth_rc" -eq 0 ]]; then
+  tail -n 40 "$CHAIN_DEPTH_DIR/compile.log" >&2
+  fail "two-layer array-chain witness compiled clean: a chain deeper than one call is being silently misclassified again"
+fi
+if [[ "$chain_depth_rc" -ge 128 ]]; then
+  tail -n 40 "$CHAIN_DEPTH_DIR/compile.log" >&2
+  fail "two-layer array-chain witness terminated by signal rc=$chain_depth_rc"
+fi
+if [[ -e "$CHAIN_DEPTH_OUT" ]]; then
+  fail "two-layer array-chain rejection left an output artifact: $CHAIN_DEPTH_OUT"
+fi
+grep -Fq "function \`deep_outer\` returns a function chain more than one call deep before" "$CHAIN_DEPTH_DIR/compile.log" || {
+  tail -n 40 "$CHAIN_DEPTH_DIR/compile.log" >&2
+  fail "two-layer array-chain diagnostic was missing or changed"
+}
+
+echo "[madaros-f64-lowering] PASS: one shared Madaros ELF passed dereference, global f64, direct capacity, imported capacity, imported wide-call, f64-array tuple table capacity (${TUPLE_CAP} ok, ${TUPLE_OVER} rejected), slot limit (slot $((SLOT_MAX - 1)) ok, slot ${SLOT_MAX} rejected), impl-method tuple coverage, array-chain table capacity (${TUPLE_CAP} ok, ${TUPLE_OVER} rejected), and array-chain depth refusal"
