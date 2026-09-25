@@ -29,6 +29,9 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
+# Content-addressed cache for both stages (scripts/dev/madaros-cache.sh).
+# shellcheck source=../dev/madaros-cache.sh
+source "$ROOT_DIR/scripts/dev/madaros-cache.sh"
 
 OUT="${1:-$ROOT_DIR/artifacts/self-hosted/madaros}"
 if [[ "$OUT" == -* ]]; then
@@ -135,7 +138,11 @@ else
     echo "  lean src:      $LEAN_SRC"
     echo "  gen seed:      $SEED"
     # One generation is sufficient — it carries the current source's features.
-    scripts/dev/souc-build-lock.sh "$BOOTSTRAP_ELF" "$LEAN_SRC" "$SEED"
+    SEED_KEY="$(madaros_seed_key "$BOOTSTRAP_ELF" "$LEAN_SRC")"
+    if ! madaros_cache_get seed "$SEED_KEY" "$SEED"; then
+        scripts/dev/souc-build-lock.sh "$BOOTSTRAP_ELF" "$LEAN_SRC" "$SEED"
+        madaros_cache_put seed "$SEED_KEY" "$SEED"
+    fi
     if [[ ! -s "$SEED" ]]; then
         echo "error: seed derivation produced no output: $SEED" >&2
         exit 1
@@ -148,8 +155,16 @@ echo "  seed:  $SEED"
 echo "  src:   $SRC"
 echo "  out:   $OUT"
 
-# Serialize heavy build via the global workspace lock.
-scripts/dev/souc-build-lock.sh "$SEED" "$SRC" "$OUT"
+# Serialize heavy build via the global workspace lock — unless this exact
+# (seed, tree) pair was already built on this pod, in which case the artifact is
+# copied out in seconds and the lock is never touched.
+BUILD_KEY="$(madaros_build_key "$SEED")"
+echo "  key:   $BUILD_KEY"
+if ! madaros_cache_get madaros "$BUILD_KEY" "$OUT"; then
+    scripts/dev/souc-build-lock.sh "$SEED" "$SRC" "$OUT"
+    madaros_cache_put madaros "$BUILD_KEY" "$OUT"
+    madaros_cache_prune
+fi
 
 if [[ ! -s "$OUT" ]]; then
     echo "error: modular compiler build produced no output: $OUT" >&2
