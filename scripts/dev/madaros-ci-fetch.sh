@@ -13,14 +13,18 @@ REF="${1:?ref (branch or sha)}"
 OUT="${2:-artifacts/self-hosted/madaros}"
 WF="madaros-prebuilt-refresh.yml"
 
+# A workflow_dispatch run reports the branch the workflow FILE came from
+# (main), not the `ref` input, so runs cannot be matched on headBranch. Take the
+# first workflow_dispatch run created at or after this dispatch.
+SINCE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 gh workflow run "$WF" -f "ref=$REF" >/dev/null
-echo "→ dispatched $WF for $REF; waiting for the run to appear..."
+echo "→ dispatched $WF for $REF at $SINCE; waiting for the run to appear..."
 sleep 8
 RUN_ID=""
 for _ in $(seq 1 20); do
-  RUN_ID="$(gh run list --workflow "$WF" --event workflow_dispatch --limit 5 \
-            --json databaseId,headBranch,status,createdAt \
-            --jq "[.[] | select(.headBranch==\"$REF\")] | sort_by(.createdAt) | last | .databaseId // empty")"
+  RUN_ID="$(gh run list --workflow "$WF" --event workflow_dispatch --limit 20 \
+            --json databaseId,createdAt \
+            --jq "[.[] | select(.createdAt >= \"$SINCE\")] | sort_by(.createdAt) | first | .databaseId // empty")"
   [[ -n "$RUN_ID" ]] && break
   sleep 5
 done
