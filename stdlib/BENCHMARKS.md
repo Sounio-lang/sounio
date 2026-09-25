@@ -58,7 +58,7 @@ Siga [`CONVENTIONS.md`](CONVENTIONS.md) para benchmarks por módulo.
 
 ### Justificativa
 
-Tipos epistêmicos ([`Knowledge<T>`](epistemic/knowledge.sio), [`GUMUncertainty`](epistemic/gum.sio)) propagam incerteza automaticamente. O overhead aceitável é 20% para garantir que a segurança epistêmica não comprometa viabilidade em produção.
+Tipos epistêmicos ([`Epistemic`](epistemic/knowledge.sio), [`GUMUncertainty`](epistemic/gum.sio)) propagam incerteza automaticamente. O overhead aceitável é 20% para garantir que a segurança epistêmica não comprometa viabilidade em produção.
 
 ### Como Medir
 

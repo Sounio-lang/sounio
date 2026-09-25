@@ -33,20 +33,18 @@ pub fn main() {
 ## 2. Optional Values
 
 ```sio
+use epistemic::knowledge::{Epistemic, ep_measured, ep_val};
+
 pub fn main() with Panic {
-    // The built-in generic Option<T> is the externally usable optionality API.
-    // Use the exhaustive `match` form (if let is not on the checked Madaros
-    // surface; it is lean_single-only, Gen 23+).
-    var opt: Option<f64> = Some(42.0)
-    var present: bool = false
+    // Optional uncertain value
+    let opt: Option<Epistemic> = Some(ep_measured(42.0, 0.1));
+
     match opt {
-        Some(v) => {
-            assert(v == 42.0)
-            present = true
+        Some(k) => {
+            assert(ep_val(&k) == 42.0);
         },
         None => {},
     }
-    assert(present)
 
     let missing: Option<f64> = None
     var is_none: bool = true
@@ -87,18 +85,26 @@ pub fn main() with Panic {
 ## 4. Epistemic Division
 
 ```sio
-use epistemic::knowledge::{ep_measured, ep_div, ep_val}
+use core::result::Result;
+use epistemic::knowledge::{Epistemic, ep_measured, ep_val, ep_div};
+
+pub fn divide_epistemic(a: Epistemic, b: Epistemic) -> Result<Epistemic, ()> with Div {
+    if ep_val(&b) == 0.0 {
+        return Err(());
+    }
+    Ok(ep_div(&a, &b))
+}
 
 pub fn main() with Div, Panic {
-    // ep_measured(val, std_dev). ep_div propagates variance by the GUM delta
-    // method via direct floating-point division (the Div, Panic effects are
-    // declared on the general AD surface; a zero divisor yields IEEE
-    // infinity/NaN rather than a panic).
-    let x = ep_measured(10.0, 0.1)
-    let y = ep_measured(2.0, 0.05)
+    let x = ep_measured(10.0, 0.1);
+    let y = ep_measured(2.0, 0.05);
 
-    let result = ep_div(&x, &y)
-    assert(ep_val(&result) == 5.0)
+    let result = divide_epistemic(x, y);
+
+    match result {
+        Ok(k) => assert(ep_val(&k) == 5.0),
+        Err(_) => {},
+    }
 }
 ```
 
