@@ -47,9 +47,23 @@ def main(path: str) -> int:
         # guard, four times, while the declaration said something else.
         print("  DIVERGES: a bound check uses a literal instead of reloc_table_capacity()")
         problems += 1
-    field = len(OVERFLOW_FIELD.findall(text))
+    # The file now carries a SECOND overflow (ExternRelocTable, dynlink fail-
+    # closed). Its field is `pub overflow: bool` too, and its fresh-table init
+    # `out.overflow = false` is textually identical, so count file-wide and the
+    # field==1 / init==1 checks broke. Scope the FIELD to the RelocationTable
+    # struct and the INIT to reloc_table_new(); the SET pattern (t.overflow=true
+    # vs (*table).overflow=true) already distinguishes the two tables.
+    struct_block = ""
+    m = re.search(r"pub struct RelocationTable \{(.*?)\n\}", text, re.DOTALL)
+    if m:
+        struct_block = m.group(0)
+    init_block = ""
+    m2 = re.search(r"fn reloc_table_new\(\) -> RelocationTable with Mut \{(.*?)\n\}", text, re.DOTALL)
+    if m2:
+        init_block = m2.group(0)
+    field = len(OVERFLOW_FIELD.findall(struct_block))
     sets = len(OVERFLOW_SET.findall(text))
-    init = len(OVERFLOW_INIT.findall(text))
+    init = len(OVERFLOW_INIT.findall(init_block))
     print(f"  overflow field      {field}")
     print(f"  guards recording it {sets} of {accessor_guards}")
     print(f"  initialised         {init}")
