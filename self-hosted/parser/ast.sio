@@ -1672,14 +1672,35 @@ pub fn ast_name_join_sep(a: Name, b: Name) -> Name with Mut, Panic, Div {
 // applied without enough care. Left as an accepted, documented residual gap
 // instead.
 //
-// Also deliberately never reset during a compile (no `_reset` function): it is
-// populated ONCE, very early, during module_frontend.sio's dependency-file
+// Populated ONCE, very early, during module_frontend.sio's dependency-file
 // resolution -- which runs before any check/lower/specializer pass, and
 // before those passes' own per-compile-boundary registry resets -- from real
-// filesystem outcomes that do not change for the rest of this process.
-// Resetting it on the same cadence as e.g. LOWER_USE_MODULE_HASH would wipe
-// this data out before the qualifier-validation code that needs it ever
-// runs.
+// filesystem outcomes that do not change for the rest of THAT compile.
+// Resetting it on the same cadence as e.g. LOWER_USE_MODULE_HASH -- mid
+// dependency-resolution, before the qualifier-validation code that needs it
+// ever runs -- would wipe this data out too early and is never done that
+// way; ast_named_item_terminal_reset (below) instead runs once, at the
+// START of a compile, alongside every sibling registry's own reset.
+//
+// Copilot review (PR #2515), round 3 (comment 4109067513): a previous
+// version of this comment argued the registry never needed a reset function
+// at all, on the assumption that it is populated once per PROCESS -- true
+// only if a process ever runs one compile. Every other durable overflow
+// flag in this file (AST_PATH_RANGE_NAME_OVERFLOWED) and in ir/lower.sio
+// (LOWER_USE_MODULE_OVERFLOWED, IR_LOWER_HARD_ERROR, LOWER_FN_TUPLE_ARR_*)
+// was fixed earlier in this same review for exactly the opposite case: a
+// process that compiles more than one program (an LSP, or any CLI path
+// that loads several files) left an EARLIER compile's overflow durable
+// across a LATER, unrelated compile's own preflight. This registry has the
+// identical shape -- AST_NAMED_ITEM_TERMINAL_OVERFLOWED feeds
+// lower_hard_error_pending()/compiler_visibility_preflight exactly like
+// those siblings -- so it has the identical bug: once any compile in a
+// process fills 4096 entries, every later compile in that process is
+// refused, even one with no named imports of its own. Reset the count,
+// flag, and table at the same top-level compile boundaries those siblings
+// already reset at (module_frontend_global_init_compile_begin,
+// bridge_lower_single_module_box), before dependency resolution
+// repopulates them for the new compile.
 //
 // Review history: round 5 (comments 4090734423/4090734484) tried "does this
 // name ALSO resolve as some real top-level function" as the disambiguator,
@@ -1698,13 +1719,26 @@ var AST_NAMED_ITEM_TERMINAL_COUNT: i64 = 0
 var AST_NAMED_ITEM_TERMINAL_HASH: [i64; 4096] = [0; 4096]
 var AST_NAMED_ITEM_TERMINAL_LEN: [i64; 4096] = [0; 4096]
 var AST_NAMED_ITEM_TERMINAL_BUF: [i8; 1572864] = [0; 1572864]
-// Durable (this whole registry is never reset -- see its own comment), read
-// by ir/lower.sio's lower_hard_error_pending()/lower_hard_error_report() so
-// an overflow here refuses the binary instead of silently degrading. See
+// Read by ir/lower.sio's lower_hard_error_pending()/lower_hard_error_report()
+// so an overflow here refuses the binary instead of silently degrading. See
 // lower_named_item_terminal_note's own comment.
 var AST_NAMED_ITEM_TERMINAL_OVERFLOWED: bool = false
 
 pub fn ast_named_item_terminal_overflowed() -> bool { AST_NAMED_ITEM_TERMINAL_OVERFLOWED }
+
+// Copilot review (PR #2515), round 3: reset at the top of a compile, NOT
+// mid dependency-resolution -- see the registry's own comment for why this
+// exists at all now (a process compiling more than one program left an
+// earlier compile's overflow durable across a later, unrelated one). The
+// dense HASH/LEN/BUF arrays are not cleared, only COUNT and OVERFLOWED:
+// every reader already bounds its scan by COUNT (lower_named_item_terminal_known's
+// own `while i < AST_NAMED_ITEM_TERMINAL_COUNT`), so entries past the reset
+// COUNT are simply unreachable stale data, the same convention every
+// sibling reset in this file/ir::lower.sio already uses.
+pub fn ast_named_item_terminal_reset() with Mut {
+    AST_NAMED_ITEM_TERMINAL_COUNT = 0
+    AST_NAMED_ITEM_TERMINAL_OVERFLOWED = false
+}
 
 pub fn lower_named_item_terminal_known(n: Name) -> bool with Mut, Panic, Div {
     if n.len <= 0 || n.len > 384 {
