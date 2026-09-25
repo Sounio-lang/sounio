@@ -761,22 +761,6 @@ fn fo_name_hash(n: Name) -> i64 with Mut, Panic, Div {
     h + n.len
 }
 
-// Second, independently-seeded rolling hash (different seed and multiplier
-// from fo_name_hash, and folds in the byte POSITION so a transposition like
-// "ab"/"bA" that happens to still collide on fo_name_hash's multiplier is
-// very unlikely to also collide here) -- see LOWER_FN_TUPLE_ARR_HASH2. Capped
-// at 384 bytes to match Name.buf's actual capacity, same as fo_name_hash
-// above.
-fn fo_name_hash2(n: Name) -> i64 with Mut, Panic, Div {
-    var h: i64 = 1099511628211
-    var i: i64 = 0
-    while i < n.len && i < 384 {
-        let b = (n.buf[i as usize] as i64) & 255
-        h = (h * 131) + b + (i * 257)
-        i = i + 1
-    }
-    h + n.len * 97
-}
 
 // Tuple-return slots that are f64 ARRAYS, per fn name: bit k set when slot k of
 // the declared return type is `[f64; N]`.
@@ -797,23 +781,43 @@ fn fo_name_hash2(n: Name) -> i64 with Mut, Panic, Div {
 // prevent -- so truncation had to be replaced with a table that cannot
 // overflow before IR_MAX_FUNCS does, rather than with a loud failure.
 var LOWER_FN_TUPLE_ARR_COUNT: i64 = 0
+// `h` (from fo_name_hash below) selects the open-addressed bucket only --
+// see LOWER_FN_TUPLE_ARR_NAME_ID's own comment for the exact-identity check
+// a probe actually verifies against. An earlier round of this review used a
+// SECOND independently-seeded hash here instead of an exact check
+// (h == LOWER_FN_TUPLE_ARR_HASH[idx] && h2 == LOWER_FN_TUPLE_ARR_HASH2[idx]),
+// astronomically unlikely to false-positive but not provably exact; that
+// second array is gone now that LOWER_FN_TUPLE_ARR_NAME_ID (below) verifies
+// exactly instead. This table does not instead store the full Name directly
+// (a [Name; 16384] global, i.e. a table of a 392-byte struct rather than a
+// plain i64, was tried and is not used here: it triggered a reproducible
+// miscompile specific to this self-hosted toolchain -- ir_name_eq against a
+// value read back from a large global struct array spuriously returned
+// false for genuinely-equal Names in this exact call context, confirmed by
+// isolating it with `bin/madaros run` against a minimal `let (a,b)=f();
+// a[0]*2.0` repro and bisecting hash-only vs hash+ir_name_eq lookups
+// against two otherwise-identical builds).
 var LOWER_FN_TUPLE_ARR_HASH: [i64; 16384] = [0; 16384]
-// Second, independently-seeded rolling hash (see fo_name_hash2 below) used
-// ALONGSIDE LOWER_FN_TUPLE_ARR_HASH as a collision-safety check -- see
-// lower_fn_tuple_f64_array_mask for why a single hash was not enough and why
-// this table does not instead store the full Name (a [Name; 16384] global,
-// i.e. a table of a 392-byte struct rather than a plain i64, was tried and
-// is not used here: it triggered a reproducible miscompile specific to this
-// self-hosted toolchain -- ir_name_eq against a value read back from a large
-// global struct array spuriously returned false for genuinely-equal Names
-// in this exact call context, confirmed by isolating it with `bin/madaros
-// run` against a minimal `let (a,b)=f(); a[0]*2.0` repro and bisecting hash-
-// only vs hash+ir_name_eq lookups against two otherwise-identical builds).
-// Two independent hashes matching is calculable-astronomically less likely
-// to false-positive than one, while staying on the i64-array-at-this-scale
-// path this file already uses safely in FO_CTOR_FN_HASH and elsewhere.
-var LOWER_FN_TUPLE_ARR_HASH2: [i64; 16384] = [0; 16384]
 var LOWER_FN_TUPLE_ARR_MASK: [i64; 16384] = [0; 16384]
+// Copilot review (PR #2516), round 11: two independent hashes matching is
+// astronomically unlikely but still not EXACT identity -- a genuine
+// collision between two valid identifiers would alias function A's mask
+// onto function B, reintroducing the corruption this table exists to
+// prevent. Storing the full Name directly here was already tried and
+// reverted (see LOWER_FN_TUPLE_ARR_HASH2's own comment: a [Name; 16384]
+// global triggered a reproducible miscompile in this exact toolchain). This
+// stores the PLAIN i64 interned name id from ir_intern_name (ir.sio) --
+// the same i64-array-at-this-scale shape as HASH/MASK above, not the
+// [Name; N] shape that broke -- and ir_intern_name's own pool already does
+// exact byte-for-byte comparison on every intern (ir_name_pool_eq), so two
+// different names can never collide onto the same id (only a pool overflow
+// can produce a false 0==0, the same "no name" sentinel ir_intern_name
+// already uses, and is limited to the pool's own generous IR_NAME_POOL_MAX
+// capacity, not this table's 16384). `h` (fo_name_hash) still selects the
+// open-addressed bucket (kept for distribution -- nid is a sequential pool
+// index, a poor hash), but LOWER_FN_TUPLE_ARR_NAME_ID is now what a probe
+// verifies against for identity, not a second hash.
+var LOWER_FN_TUPLE_ARR_NAME_ID: [i64; 16384] = [0; 16384]
 
 // Copilot review (PR #2516): lookup used to be a linear scan over up to
 // IR_MAX_FUNCS dense entries, and every insertion during collection ALSO
@@ -823,7 +827,7 @@ var LOWER_FN_TUPLE_ARR_MASK: [i64; 16384] = [0; 16384]
 // index mirrors self-hosted/intern.sio's StringInterner.hash_table exactly
 // (DJB2-family hash, linear probing, sized well above the dense capacity to
 // keep load factor low, -1 = empty sentinel): LOWER_FN_TUPLE_ARR_SLOT maps a
-// hash-derived bucket to the DENSE index in HASH/HASH2/MASK above, turning
+// hash-derived bucket to the DENSE index in HASH/MASK/NAME_ID above, turning
 // both lookup and the insert-time dedup check into O(1) amortized instead of
 // O(n). Sized to 2x IR_MAX_FUNCS (32768, a power of two so `& (SIZE-1)` can
 // replace `%`) for a <=0.5 load factor at full capacity, same margin the
@@ -847,7 +851,7 @@ pub fn lower_fn_tuple_arr_reset() with Mut {
     // Clear the open-addressing index too, not just the dense count: a stale
     // LOWER_FN_TUPLE_ARR_SLOT entry points at a dense index that a later
     // collect() in the SAME process (after this reset) will overwrite with a
-    // DIFFERENT name's hash/hash2/mask, and leaving the slot occupied would
+    // DIFFERENT name's hash/mask/name_id, and leaving the slot occupied would
     // both mask new insertions behind it during probing and let old,
     // uncleared entries answer lookups with recycled-but-stale data.
     var i: i64 = 0
@@ -883,14 +887,15 @@ fn lower_type_list_f64_array_mask(opt: &Option<Box<TypeExprList>>, bit: i64) -> 
 // Copilot review (PR #2516): `fo_name_hash` alone is not collision-free (e.g.
 // "ab" and "bA" hash equal), so a single-hash match could return function A's
 // mask for function B's name and reintroduce the bits-as-i64 corruption this
-// table exists to prevent. Every candidate is now verified against a SECOND,
-// independently-seeded hash (fo_name_hash2, different seed/multiplier and
-// folds in byte position) before its mask is trusted, requiring both to
-// collide simultaneously for a false match -- see LOWER_FN_TUPLE_ARR_HASH2's
-// declaration for why this table verifies with a second hash rather than a
-// stored Name + ir_name_eq (the natural choice, mirroring
-// lowerer_lookup_fn_id_by_name_ref, but it triggered a reproducible miscompile
-// specific to this self-hosted toolchain when tried here).
+// table exists to prevent. An earlier round verified candidates against a
+// SECOND independently-seeded hash instead, astronomically unlikely to
+// false-positive but not provably exact; every candidate is now verified
+// against the EXACT interned name id from ir_intern_name (ir.sio) instead --
+// see LOWER_FN_TUPLE_ARR_NAME_ID's declaration for why this table verifies
+// exact identity via that pooled id rather than a directly-stored Name +
+// ir_name_eq (the natural choice, mirroring lowerer_lookup_fn_id_by_name_ref,
+// but it triggered a reproducible miscompile specific to this self-hosted
+// toolchain when tried here).
 //
 // Copilot review (PR #2516), performance finding: this used to be a linear
 // scan over LOWER_FN_TUPLE_ARR_COUNT dense entries, and the insert-time dedup
@@ -910,7 +915,18 @@ pub fn lower_fn_tuple_f64_array_mask(name: Name) -> i64 with Mut, Panic, Div {
     if name.len <= 0 {
         return 0
     }
-    let idx = lower_fn_tuple_arr_slot_find(fo_name_hash(name), fo_name_hash2(name))
+    // Copilot review (PR #2516), round 11: nid=0 means either an empty name
+    // (already excluded above) or the interner's pool overflowed for this
+    // name (ir_intern_name's own "could not allocate" sentinel) -- in
+    // either case there is no exact identity to verify against, so answer
+    // "unknown" (mask 0, the same conservative fallback an unresolved owner
+    // already gets) rather than risk a false match against another
+    // overflowed name that also reads back nid=0.
+    let nid = ir_intern_name(name)
+    if nid <= 0 {
+        return 0
+    }
+    let idx = lower_fn_tuple_arr_slot_find(fo_name_hash(name), nid)
     if idx < 0 {
         return 0
     }
@@ -919,13 +935,17 @@ pub fn lower_fn_tuple_f64_array_mask(name: Name) -> i64 with Mut, Panic, Div {
 
 // Open-addressed index lookup shared by lower_fn_tuple_f64_array_mask (query)
 // and lower_fn_tuple_f64_arrays_collect_one (insert-time dedup check): probes
-// LOWER_FN_TUPLE_ARR_SLOT from the primary hash's bucket, verifying BOTH
-// hashes (not just the bucket hash) against the dense entry each occupied
-// slot points at, same collision-safety contract as before -- just O(1)
+// LOWER_FN_TUPLE_ARR_SLOT from `h`'s bucket (kept for distribution -- `nid`
+// is a sequential pool index, a poor hash) but verifies EXACT identity via
+// `nid`, the interned name id from ir_intern_name (ir.sio) -- ir_intern_name's
+// own pool already does exact byte-for-byte comparison on every intern, so
+// two different names can never produce the same nid (see
+// LOWER_FN_TUPLE_ARR_NAME_ID's own comment for why this replaced the
+// two-hash collision check an earlier round of this review added). O(1)
 // amortized via linear probing (mirrors self-hosted/intern.sio's
 // StringInterner hash table) instead of an O(n) scan. Returns the dense
-// index into LOWER_FN_TUPLE_ARR_HASH/HASH2/MASK, or -1 if not present.
-fn lower_fn_tuple_arr_slot_find(h: i64, h2: i64) -> i64 with Mut, Panic, Div {
+// index into LOWER_FN_TUPLE_ARR_HASH/MASK/NAME_ID, or -1 if not present.
+fn lower_fn_tuple_arr_slot_find(h: i64, nid: i64) -> i64 with Mut, Panic, Div {
     var slot = h & LOWER_FN_TUPLE_ARR_SLOT_MASK
     var probes: i64 = 0
     while probes < LOWER_FN_TUPLE_ARR_SLOT_SIZE {
@@ -933,7 +953,7 @@ fn lower_fn_tuple_arr_slot_find(h: i64, h2: i64) -> i64 with Mut, Panic, Div {
         if idx < 0 {
             return -1
         }
-        if LOWER_FN_TUPLE_ARR_HASH[idx as usize] == h && LOWER_FN_TUPLE_ARR_HASH2[idx as usize] == h2 {
+        if LOWER_FN_TUPLE_ARR_NAME_ID[idx as usize] == nid {
             return idx
         }
         slot = (slot + 1) & LOWER_FN_TUPLE_ARR_SLOT_MASK
@@ -962,13 +982,17 @@ fn lower_fn_tuple_f64_arrays_collect_one(name: Name, fd_opt_ref: &Option<Box<FnD
                         // declare (ir.sio:20 clamps fn_count there too), so this
                         // guard is a defensive bound rather than a real truncation
                         // point -- see the LOWER_FN_TUPLE_ARR_COUNT declaration.
-                        if mask != 0 && LOWER_FN_TUPLE_ARR_COUNT < IR_MAX_FUNCS {
+                        // nid<=0: pool overflow for this name (see
+                        // lower_fn_tuple_f64_array_mask's own comment) --
+                        // skip the insert rather than risk two overflowed
+                        // names aliasing onto the same nid=0 identity.
+                        let nid = ir_intern_name(name)
+                        if mask != 0 && nid > 0 && LOWER_FN_TUPLE_ARR_COUNT < IR_MAX_FUNCS {
                             let h = fo_name_hash(name)
-                            let h2 = fo_name_hash2(name)
-                            if lower_fn_tuple_arr_slot_find(h, h2) < 0 {
+                            if lower_fn_tuple_arr_slot_find(h, nid) < 0 {
                                 let idx = LOWER_FN_TUPLE_ARR_COUNT
                                 LOWER_FN_TUPLE_ARR_HASH[idx as usize] = h
-                                LOWER_FN_TUPLE_ARR_HASH2[idx as usize] = h2
+                                LOWER_FN_TUPLE_ARR_NAME_ID[idx as usize] = nid
                                 LOWER_FN_TUPLE_ARR_MASK[idx as usize] = mask
                                 LOWER_FN_TUPLE_ARR_COUNT = idx + 1
                                 // Insert into the open-addressed index: probe from
@@ -14381,6 +14405,52 @@ impl Lowerer {
         if (*expr).kind == ExprKind::ExprIdent {
             return self.lookup_local_struct_type((*expr).name)
         }
+        // Copilot review (PR #2516), round 11: this resolver had no arm for
+        // ExprStructLit/ExprIf/ExprMatch/ExprBlock owners, so
+        // `(Holder { ... }).values` or `(if cond { left } else { right }).values`
+        // fell through to ir_empty_name() -- the same "unresolved owner"
+        // signal field_array_elem_is_float_for_base_ref's round-9 fix
+        // (correctly) treats as "not float, don't guess", so these
+        // LEGITIMATE f64-array fields were misclassified as integer and
+        // their elements corrupted in arithmetic. A struct literal names its
+        // own type directly (ir_path_first_name, same extraction
+        // fo_ctor_register_body already uses for ExprStructLit elsewhere in
+        // this file); if/match/block owners recurse into their trailing
+        // expression, since a well-typed if/match's arms and a block's tail
+        // all share the owner expression's own type.
+        if (*expr).kind == ExprKind::ExprStructLit {
+            return ir_path_first_name((*expr).path)
+        }
+        if (*expr).kind == ExprKind::ExprBlock {
+            return self.opt_block_tail_struct_type_ref(&(*expr).block)
+        }
+        if (*expr).kind == ExprKind::ExprIf {
+            let then_ty = self.opt_block_tail_struct_type_ref(&(*expr).block)
+            if then_ty.len > 0 {
+                return then_ty
+            }
+            match (*expr).else_expr {
+                Some(else_e) => {
+                    return self.expr_receiver_struct_type_ref(&(*else_e))
+                }
+                _ => {}
+            }
+        }
+        if (*expr).kind == ExprKind::ExprMatch {
+            var arm_cursor = &(*expr).arms
+            while true {
+                match *arm_cursor {
+                    Some(list) => {
+                        let body_ty = self.expr_receiver_struct_type_ref(&(*list).head.body)
+                        if body_ty.len > 0 {
+                            return body_ty
+                        }
+                        arm_cursor = &(*list).tail
+                    }
+                    _ => break
+                }
+            }
+        }
         // Copilot review (PR #2516), round 10 finding 1: this resolver had no
         // arm for a CALL/METHOD-CALL owner, so `make_float_holder().values`
         // (owner is an ExprCall) fell through every arm below to
@@ -14512,6 +14582,43 @@ impl Lowerer {
             }
         }
         ir_empty_name()
+    }
+
+    // Struct type of a block's trailing expression, for expr_receiver_struct_type_ref's
+    // ExprBlock/ExprIf arms -- mirrors opt_block_tail_method_fn_id/block_tail_method_fn_id's
+    // own shape, but resolving a struct type instead of a method fn id.
+    fn block_tail_struct_type_ref(self, blk: &Block) -> Name with Mut, Panic, Div, Alloc {
+        var current = &(*blk).stmts
+        var result = ir_empty_name()
+        while true {
+            match *current {
+                Some(list) => {
+                    let stmt_ref = &(*list).head
+                    if stmt_ref.kind == StmtKind::StmtExpr {
+                        result = self.opt_expr_struct_type_ref(&stmt_ref.expr)
+                    } else {
+                        result = ir_empty_name()
+                    }
+                    current = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        result
+    }
+
+    fn opt_block_tail_struct_type_ref(self, blk_opt: &Option<Box<Block>>) -> Name with Mut, Panic, Div, Alloc {
+        match *blk_opt {
+            Some(blk) => self.block_tail_struct_type_ref(&(*blk)),
+            _ => ir_empty_name(),
+        }
+    }
+
+    fn opt_expr_struct_type_ref(self, e_opt: &Option<Box<Expr>>) -> Name with Mut, Panic, Div, Alloc {
+        match *e_opt {
+            Some(e) => self.expr_receiver_struct_type_ref(&(*e)),
+            _ => ir_empty_name(),
+        }
     }
 
     fn index_base_elem_struct_type_ref(self, base_opt: &Option<Box<Expr>>) -> Name with Mut, Panic, Div, Alloc {
@@ -26035,12 +26142,29 @@ pub fn lower_program_bodies_from_summary_flat_with_epistemic_ref(
     }
 }
 
+// Copilot review (PR #2516): lower_program_bodies_filtered_ref (reached via
+// the _ref variant below) collects into the process-global
+// LOWER_FN_TUPLE_ARR_* table with no reset boundary of its own -- callers
+// that drive a per-function loop against ONE program (main.sio's
+// run_probe_filtered_body_lower, streaming_body_lower_smoke.sio) reset once
+// themselves, before that loop, since each call's collect() re-scans and
+// must keep accumulating across sibling functions in the SAME program.
+// This OWNED wrapper is different: module_loader.sio's thin-link path
+// (thin_build_compiled_unit) calls it repeatedly for potentially DIFFERENT
+// modules across one process -- a same-named function in a later module
+// could otherwise inherit an earlier module's stale mask, exactly like the
+// lower_program_to_ir leak fixed elsewhere in this PR. Reset here, once per
+// call: since collect() always re-scans the FULL `prog.items` this specific
+// call was given, resetting immediately before delegating reproduces
+// identical results for repeated same-program calls (safe, just redundant
+// work) while correctly isolating different programs from each other.
 pub fn lower_program_function_body_from_summary_with_epistemic(
     prog: Program,
     summary: IrProgramSummary,
     epistemic: IrEpistemicSection,
     fn_name: Name
 ) -> IrFunctionBodyResult with Mut, Panic, Div, Alloc, IO {
+    lower_fn_tuple_arr_reset()
     lower_program_function_body_from_summary_with_epistemic_ref(&prog, &summary, epistemic, fn_name)
 }
 

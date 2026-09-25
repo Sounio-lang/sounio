@@ -61,6 +61,7 @@ use ir::opt_strategy::{ir_opt_apply_strategy, ir_opt_find_return_vreg, ir_opt_ma
 use ir::lower::{ir_patch_validated_calls, lower_program_to_ir, lower_program_to_ir_with_epistemic, lower_program_to_ir_probe_summary_ref, lower_program_to_ir_probe_summary_box_ref, lower_program_to_ir_summary_box_probe_with_epistemic_ref, lower_program_function_body_from_summary_with_epistemic_ref, lower_program_to_ir_summary_flat_with_epistemic_ref, lower_program_function_body_from_summary_flat_with_epistemic_ref, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_to_ir_summary_with_epistemic}
 use ir::lower::{lower_program_to_ir_with_epistemic_ref, lower_program_to_ir_ordered_with_epistemic_boxed_trace_ref, lower_monolithic_public_probe_trace_set}
 use ir::lower::{lower_program_function_body_from_program_with_epistemic_ref}
+use ir::lower::{lower_program_function_body_from_summary_with_epistemic}
 use ir::lower::{lower_fn_tuple_arr_reset, lower_fn_tuple_f64_arrays_collect, lower_fn_tuple_f64_array_mask}
 use ir::normalize::*
 use ir::const_prop::{cp_check_load_imm, cp_empty_instrs, cp_make_test_func, cp_optimize_function}
@@ -9835,18 +9836,21 @@ fn run_probe_filtered_body_lower(args: ArgList, flag_index: i64) with IO, Mut, P
 }
 
 // --probe-filtered-body-reset-boundary <file_a.sio> <file_b.sio> <fn_name>:
-// Copilot review (PR #2516): mirrors --probe-tuple-arr-reset-boundary above,
-// but for lower_program_function_body_from_summary_with_epistemic_ref /
-// lower_program_bodies_filtered_ref specifically -- the streaming
-// single-function lane run_probe_filtered_body_lower drives, which
-// --probe-tuple-arr-reset-boundary's own lower_program_to_ir call never
-// reaches. Lowers `fn_name` from file A through this exact lane, reports its
-// mask, then does the same for file B in the SAME process -- with the fix
-// (lower_fn_tuple_arr_reset() at the top of run_probe_filtered_body_lower,
-// once per program before its per-function loop), each file's mask reflects
-// its OWN shape for fn_name; without it, file B's reported mask would
-// incorrectly equal file A's, exactly like the lower_program_to_ir bug this
-// mirrors.
+// Copilot review (PR #2516), round 2 (comment 4108896586): the first version
+// of this probe called the _ref variant with a MANUAL lower_fn_tuple_arr_reset()
+// before each invocation -- proving the manual-reset pattern
+// run_probe_filtered_body_lower uses, but NOT the actual production path
+// (module_loader.sio's thin-link, which calls the OWNED-by-value
+// lower_program_function_body_from_summary_with_epistemic repeatedly for
+// potentially different modules with no reset of its own). Fixed at the
+// owned wrapper itself (self-hosted/ir/lower.sio): it now resets
+// unconditionally before delegating to the _ref variant, so callers like
+// thin-link don't need to reset themselves. This probe now calls that OWNED
+// wrapper directly, with NO manual reset here, so it actually exercises
+// the wrapper's own automatic reset -- lowers `fn_name` from file A, reports
+// its mask, then does the same for file B in the SAME process with no reset
+// call in between; with the fix, each file's mask reflects its own shape for
+// fn_name, exactly like the lower_program_to_ir bug this mirrors.
 fn run_probe_filtered_body_reset_boundary(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
     if flag_index + 3 >= args.len {
         panic("probe_filtered_body_reset_boundary: expected <file_a.sio> <file_b.sio> <fn_name>")
@@ -9868,8 +9872,7 @@ fn run_probe_filtered_body_reset_boundary(args: ArgList, flag_index: i64) with I
     if summary_a.had_error {
         panic("probe_filtered_body_reset_boundary: summary failed for file_a")
     }
-    lower_fn_tuple_arr_reset()
-    let body_a = lower_program_function_body_from_summary_with_epistemic_ref(&prog_a, &summary_a.summary, epistemic_a, target)
+    let body_a = lower_program_function_body_from_summary_with_epistemic(prog_a, summary_a.summary, epistemic_a, target)
     if body_a.had_error {
         panic("probe_filtered_body_reset_boundary: body lowering failed for file_a")
     }
@@ -9891,8 +9894,7 @@ fn run_probe_filtered_body_reset_boundary(args: ArgList, flag_index: i64) with I
     if summary_b.had_error {
         panic("probe_filtered_body_reset_boundary: summary failed for file_b")
     }
-    lower_fn_tuple_arr_reset()
-    let body_b = lower_program_function_body_from_summary_with_epistemic_ref(&prog_b, &summary_b.summary, epistemic_b, target)
+    let body_b = lower_program_function_body_from_summary_with_epistemic(prog_b, summary_b.summary, epistemic_b, target)
     if body_b.had_error {
         panic("probe_filtered_body_reset_boundary: body lowering failed for file_b")
     }
