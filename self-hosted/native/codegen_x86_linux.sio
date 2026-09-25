@@ -7370,10 +7370,14 @@ fn native_compiler_add_symbol_func_ref(nc: &! NativeCompiler, fn_index: i64, fun
     }
 }
 
-fn native_v2_emit_unary_code(nc: NativeCompiler, op: UnaryOp) -> NativeCompiler with Mut, Panic, Div {
+fn native_v2_emit_unary_code(nc: NativeCompiler, op: UnaryOp, is_float: bool) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
     if op == UnaryOp::OpNeg {
-        c.code = emit_neg_rax(c.code)
+        if is_float {
+            c.code = emit_btc_rax_63(c.code)
+        } else {
+            c.code = emit_neg_rax(c.code)
+        }
     } else if op == UnaryOp::OpNot {
         c.code = emit_not_bool_rax(c.code)
     } else if op == UnaryOp::OpBitNot {
@@ -7442,7 +7446,11 @@ fn native_v2_emit_machine_instr(nc: NativeCompiler, instr: MachineInstr) -> Nati
 
     if instr.opcode == MIR_OP_UNARY {
         c = native_v2_load_temp_to_rax(c, instr.src1.value)
-        c = native_v2_emit_unary_code(c, instr.un_op)
+        let is_float = if instr.aux.value == 1 || (instr.src1.value >= 0 && instr.src1.value < NC_MAX_VREGS && c.is_float_reg[instr.src1.value as usize] == 1) { true } else { false }
+        c = native_v2_emit_unary_code(c, instr.un_op, is_float)
+        if is_float && instr.dst.value >= 0 && instr.dst.value < NC_MAX_VREGS {
+            c.is_float_reg[instr.dst.value as usize] = 1
+        }
         return native_v2_store_rax_to_temp(c, instr.dst.value)
     }
 
@@ -7794,6 +7802,13 @@ fn native_v2_emit_machine_function(nc: NativeCompiler, func: MachineFunction, fn
 }
 
 fn native_v2_emit_machine_function_mut(nc: &! NativeCompiler, func: MachineFunction, fn_index: i64, fn_offset: i64) with Mut, Panic, Div {
+    var fi: i64 = 0
+    while fi < MIR_MAX_FLOAT_SLOTS && fi < NC_MAX_VREGS {
+        if func.is_float_slot[fi as usize] == 1 {
+            (*nc).is_float_reg[fi as usize] = 1
+        }
+        fi = fi + 1
+    }
     var i: i64 = 0
     while i < func.blocks[0].instr_count {
         let instr = func.blocks[0].instrs[i as usize]
@@ -7807,6 +7822,13 @@ fn native_v2_emit_machine_function_mut(nc: &! NativeCompiler, func: MachineFunct
 }
 
 fn native_v2_emit_machine_function_ref_mut(nc: &! NativeCompiler, func: &MachineFunction, fn_index: i64, fn_offset: i64) with Mut, Panic, Div {
+    var fi: i64 = 0
+    while fi < MIR_MAX_FLOAT_SLOTS && fi < NC_MAX_VREGS {
+        if (*func).is_float_slot[fi as usize] == 1 {
+            (*nc).is_float_reg[fi as usize] = 1
+        }
+        fi = fi + 1
+    }
     var i: i64 = 0
     while i < (*func).blocks[0].instr_count {
         let instr = (*func).blocks[0].instrs[i as usize]
@@ -10661,6 +10683,13 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
 
     (*nc).code = emit_prologue_with_preg_mask((*nc).code, frame_size, preg_mask)
     spill_ir_params_mut(nc, func)
+    var fi_sched: i64 = 0
+    while fi_sched < MIR_MAX_FLOAT_SLOTS && fi_sched < NC_MAX_VREGS {
+        if machine_func.is_float_slot[fi_sched as usize] == 1 {
+            (*nc).is_float_reg[fi_sched as usize] = 1
+        }
+        fi_sched = fi_sched + 1
+    }
     if !native_v2_scheduler_enabled() {
         native_v2_emit_machine_function_mut(nc, machine_func, fn_index, function_offset)
     } else {
