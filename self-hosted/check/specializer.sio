@@ -357,9 +357,6 @@ fn spec_use_module_reset() with Mut {
 // REWRITE phase -- caught only once a regression test exercised it (a call
 // in an ordinary `fn main`, not inside a generic template).
 let SPEC_ITEM_MODULE_SEG_MAX: i64 = 384
-// Never a real module id (those are always >= 0); marks a name that two
-// DIFFERENT modules both declared (see spec_item_module_note's own comment).
-let SPEC_ITEM_MODULE_ID_AMBIGUOUS: i64 = 0 - 2
 var SPEC_ITEM_MODULE_COUNT: i64 = 0
 var SPEC_ITEM_MODULE_HASH: [i64; 4096] = [0; 4096]
 var SPEC_ITEM_MODULE_LEN: [i64; 4096] = [0; 4096]
@@ -406,56 +403,43 @@ pub fn spec_item_module_lookup(n: Name) -> i64 with Mut, Panic, Div {
     0 - 1
 }
 
-// Round 10 (review comment 4099549051): first-match "already registered,
-// skip" could not represent two DIFFERENT modules genuinely declaring an
-// item with the same text (two modules with the same bare `use` path, or two
-// impls with a same-named method) -- the second occurrence was silently
-// discarded, and check_items_verdict_boot4_with_module_map /
-// lowerer_lower_program_bodies_mut's per-item lookup then attributed BOTH
-// occurrences to the FIRST module, running the second's own imports/
-// visibility checks under someone else's module id. This registry is keyed
-// by TEXT alone (see its own top-level comment) and cannot hold true
-// per-occurrence provenance without a deeper redesign; short of that, fail
-// CLOSED on the collision instead of silently picking one: if this name is
-// already registered under a DIFFERENT module id, mark it AMBIGUOUS
-// (SPEC_ITEM_MODULE_ID_AMBIGUOUS, a sentinel no real module id ever equals)
-// rather than keeping either module's id. spec_item_module_lookup then
-// returns that sentinel, and every consumer (check/mod.sio,
-// lowerer_lower_program_bodies_mut) already treats any negative id as "owner
-// unknown, fail closed" per finding 3's own fix -- so an ambiguous item's own
-// body correctly loses access to EITHER module's imports, rather than
-// incorrectly keeping the first's.
+// Round 10 (review comment 4099549051) tried marking a text collision
+// AMBIGUOUS (a sentinel treated as "owner unknown, fail closed" everywhere)
+// instead of silently keeping the first module's id. Round 11 (review
+// comment 4100285057) found that fix itself unsound for the OVERWHELMINGLY
+// common case: the SAME `use` path (e.g. `use parser::ast::*;`) legitimately
+// appears in MANY modules in any real codebase (this compiler's own source
+// among them), and a same-named PRIVATE fn/impl-method in two unrelated
+// modules is equally ordinary Sounio -- neither is a rare edge case, so
+// marking EVERY such pair ambiguous zeroed out BOTH modules' own item
+// attribution for what is routine, correct code, not just the occasional
+// genuine collision.
+//
+// This registry is keyed by TEXT alone (see its own top-level comment) and
+// cannot hold true per-occurrence provenance without a deeper redesign (e.g.
+// stamping a module id onto Item itself at load time, before merging) that
+// is out of scope here. Between the two available text-keyed approximations,
+// "keep the first match" strictly dominates "mark ambiguous": at least the
+// FIRST module to declare a given text still gets correctly attributed,
+// where "ambiguous" guarantees NEITHER colliding module does. A LATER module
+// sharing that same text still silently inherits the first's id when this
+// registry is looked up for one of ITS OWN items during the per-item walk
+// (check/mod.sio's check_items_verdict_boot4_with_module_map,
+// lowerer_lower_program_bodies_mut, spec_finish_fn_item) -- a known,
+// accepted imprecision of this text-keyed approximation, not something this
+// round claims to fully close.
 fn spec_item_module_note(module_id: i64, n: Name) with Mut, Panic, Div {
     if n.len <= 0 || n.len > SPEC_ITEM_MODULE_SEG_MAX {
         return
     }
-    let h = ast_name_hash(n)
-    var i: i64 = 0
-    while i < SPEC_ITEM_MODULE_COUNT {
-        if SPEC_ITEM_MODULE_HASH[i as usize] == h && SPEC_ITEM_MODULE_LEN[i as usize] == n.len {
-            let base = i * SPEC_ITEM_MODULE_SEG_MAX
-            var eq = true
-            var j: i64 = 0
-            while j < n.len {
-                if SPEC_ITEM_MODULE_BUF[(base + j) as usize] != n.buf[j as usize] {
-                    eq = false
-                }
-                j = j + 1
-            }
-            if eq {
-                if SPEC_ITEM_MODULE_ID[i as usize] != module_id {
-                    SPEC_ITEM_MODULE_ID[i as usize] = SPEC_ITEM_MODULE_ID_AMBIGUOUS
-                }
-                return
-            }
-        }
-        i = i + 1
+    if spec_item_module_lookup(n) >= 0 {
+        return
     }
     if SPEC_ITEM_MODULE_COUNT >= 4096 {
         return
     }
     let idx = SPEC_ITEM_MODULE_COUNT
-    SPEC_ITEM_MODULE_HASH[idx as usize] = h
+    SPEC_ITEM_MODULE_HASH[idx as usize] = ast_name_hash(n)
     let base = idx * SPEC_ITEM_MODULE_SEG_MAX
     var ci: i64 = 0
     while ci < n.len {
@@ -2107,11 +2091,20 @@ fn spec_finish_fn_item(it: Item, symbol: Name) -> Item with Mut, Panic, Div, All
     // single-module specialize_generics() path, which never populates it)
     // leaves SPEC_CURRENT_MODULE_ID untouched, matching that path's existing
     // -1-means-module-0 convention.
+    //
+    // Round 11 (review comment 4100285088): guarding the assignment on
+    // `owner >= 0` left SPEC_CURRENT_MODULE_ID at whatever the PRECEDING
+    // item selected when THIS item's own owner could not be found (a
+    // synthesized instance symbol, a capacity miss, or now an ambiguous
+    // collision -- see spec_item_module_note's own comment) -- silently
+    // reinstating the exact "inherit stale traversal state" bug finding 2
+    // (comment 4099548914, check/mod.sio) already fixed for the checker's
+    // own per-item walk. Always assign: owner is -1 (never a real module id)
+    // when unmapped, so this item's own substitution correctly finds nothing
+    // in the per-module registries rather than borrowing the previous item's
+    // module.
     if SPEC_ITEM_MODULE_COUNT > 0 {
-        let owner = spec_item_module_lookup(it.name)
-        if owner >= 0 {
-            SPEC_CURRENT_MODULE_ID = owner
-        }
+        SPEC_CURRENT_MODULE_ID = spec_item_module_lookup(it.name)
     }
     match it.fn_def {
         None => it
