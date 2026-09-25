@@ -12,7 +12,9 @@ usage() {
 Usage: classify_ci_impact.sh [path ...]
 
 With explicit paths, classifies those paths. Without paths, reads the changed
-paths from CI_BASE_SHA..CI_HEAD_SHA. Non-pull-request events select the full CI.
+paths from CI_BASE_SHA..CI_HEAD_SHA. pull_request and merge_group events are
+classified by that diff; every other event (push, schedule, dispatch) selects
+the full CI.
 Writes key=value rows to stdout and, when set, GITHUB_OUTPUT.
 USAGE
 }
