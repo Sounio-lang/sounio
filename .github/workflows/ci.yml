@@ -843,7 +843,11 @@ jobs:
     # compiler. A PR that makes stdlib/compiler/ontology/store.sio unparseable
     # breaks the compiler's closure and, without this, runs none of these gates.
     if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true'
-    runs-on: ubuntu-24.04
+    # The DARWIN runner pool (infra/ci-runners/) when the repository variable
+    # SOUNIO_CI_RUNNER names it AND the code is this repository's own -- a fork
+    # PR never runs on cluster hardware. Delete the variable to fall back to
+    # GitHub-hosted runners at once, without a commit.
+    runs-on: ${{ (vars.SOUNIO_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && vars.SOUNIO_CI_RUNNER || 'ubuntu-24.04' }}
     # 15 held a full Madaros build plus four sub-gates; the self-parse sweep adds
     # ~20 s. The extra headroom is so a slow run reads as slow, not as a hang.
     # Raised again to 35 here because this branch adds three more sub-gates to
@@ -872,13 +876,25 @@ jobs:
       # and the fixed-point receipt are keyed on the exact bytes they depend on,
       # so a restored entry that does not match is simply a miss.
       SOUNIO_MADAROS_CACHE: /tmp/sounio-madaros-cache
-      SOUNIO_MADAROS_CACHE_KEEP: 1
+      SOUNIO_MADAROS_CACHE_KEEP: ${{ (vars.SOUNIO_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '16' || '1' }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Provision toolchain (DARWIN runner)
+        if: runner.environment == 'self-hosted'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends gcc libc6-dev python3 file util-linux xz-utils make >/dev/null
+      - name: Use the shared DARWIN Madaros cache
+        if: runner.environment == 'self-hosted'
+        run: |
+          mkdir -p "$SOUNIO_MADAROS_CACHE_SHARED"
+          ln -sfn "$SOUNIO_MADAROS_CACHE_SHARED" /tmp/sounio-madaros-cache
+          ls /tmp/sounio-madaros-cache/ || true
       - name: Restore content-addressed Madaros cache
         id: madaros-cache
+        if: runner.environment == 'github-hosted'
         uses: actions/cache/restore@v4
         with:
           path: /tmp/sounio-madaros-cache
@@ -900,6 +916,7 @@ jobs:
       # a headroom measure, not a correctness claim. Printed before/after so a
       # future reader can see the actual numbers in the log.
       - name: Add swap headroom for the gen2 self-compile (peak RSS 18.4 GB vs 16 GB RAM)
+        if: runner.environment == 'github-hosted'
         run: |
           echo "--- before"; free -m; swapon --show; df -h /mnt
           sudo fallocate -l 16G /mnt/swapfile-gen2
@@ -1063,7 +1080,7 @@ jobs:
       # gap (see the plan doc for the full finding).
       - name: Check whether the Madaros cache has entries to save
         id: madaros-cache-has
-        if: always() && steps.madaros-cache.outputs.cache-hit != 'true'
+        if: always() && runner.environment == 'github-hosted' && steps.madaros-cache.outputs.cache-hit != 'true'
         run: |
           if [ -n "$(ls -A /tmp/sounio-madaros-cache/madaros /tmp/sounio-madaros-cache/fixed-point 2>/dev/null)" ]; then
             echo "entries=true" >> "$GITHUB_OUTPUT"
