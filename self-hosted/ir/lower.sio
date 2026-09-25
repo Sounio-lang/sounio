@@ -7936,7 +7936,12 @@ impl Lowerer {
         let dst_reg = pair_dst.1
         lo = lo.emit(ir_alloc(dst_reg, lo.aggregate_storage_bytes(slot_count)))
         var i: i64 = 0
-        while i < slot_count && i < 64 {
+        // Bound must track struct_layout_slot_count's own cap (128, the
+        // registry's actual field capacity) -- this used to stop at 64,
+        // silently truncating the copy (fields 64-127 kept their old/zero
+        // value) for any struct slot_count allocation already widened past
+        // 64 elsewhere. Found via PR #2667 review, comment 4104667818.
+        while i < slot_count && i < 128 {
             let fname = lo.struct_layout_field_name_at(type_name, i)
             let pair_slot = lo.fresh_reg()
             lo = pair_slot.0
@@ -7950,7 +7955,12 @@ impl Lowerer {
 
     // #1479: ONE lookup shared by every per-field query the deep copy makes.
     //
-    // Returns `layout_entry_index * 64 + field_entry_index` for the entry that
+    // Returns `layout_entry_index * 128 + field_entry_index` (128 = the field
+    // scan bound / registry capacity above, not just a base large enough for
+    // this to be a bijection -- a base of 64 previously let field_entry_index
+    // values >= 64 collide with the next layout_entry_index's low field
+    // indices, corrupting struct_layout_pos_* lookups for wide structs; fixed
+    // alongside PR #2667 review comment 4104667818) for the entry that
     // registers slot `slot_index` of `type_name`, or -1 when absent.
     //
     // Why one position instead of three independent scans: a struct type can be
@@ -7971,7 +7981,7 @@ impl Lowerer {
                 let fc = (*self.struct_layouts).entries[si as usize].field_count
                 while fi < fc && fi < 128 {
                     if (*self.struct_layouts).entries[si as usize].fields[fi as usize].index == slot_index {
-                        return si * 64 + fi
+                        return si * 128 + fi
                     }
                     fi = fi + 1
                 }
@@ -8010,8 +8020,8 @@ impl Lowerer {
 
     fn struct_layout_pos_field_name(self, pos: i64) -> Name with Mut, Panic, Div, Alloc {
         if pos < 0 { return ir_empty_name() }
-        let si = pos / 64
-        let fi = pos - si * 64
+        let si = pos / 128
+        let fi = pos - si * 128
         if si >= (*self.struct_layouts).count { return ir_empty_name() }
         // Ported onto main's interned-name representation (was `.name: Name`).
         // NOTE: leaving this as `.name` type-checked and BUILT anyway -- that is #1494
@@ -8022,24 +8032,24 @@ impl Lowerer {
 
     fn struct_layout_pos_array_len(self, pos: i64) -> i64 with Mut, Panic, Div, Alloc {
         if pos < 0 { return 0 }
-        let si = pos / 64
-        let fi = pos - si * 64
+        let si = pos / 128
+        let fi = pos - si * 128
         if si >= (*self.struct_layouts).count { return 0 }
         (*self.struct_layouts).entries[si as usize].fields[fi as usize].word_scalar_array_len
     }
 
     fn struct_layout_pos_is_float(self, pos: i64) -> i64 with Mut, Panic, Div, Alloc {
         if pos < 0 { return 0 }
-        let si = pos / 64
-        let fi = pos - si * 64
+        let si = pos / 128
+        let fi = pos - si * 128
         if si >= (*self.struct_layouts).count { return 0 }
         (*self.struct_layouts).entries[si as usize].fields[fi as usize].is_float
     }
 
     fn struct_layout_pos_named_type(self, pos: i64) -> Name with Mut, Panic, Div, Alloc {
         if pos < 0 { return ir_empty_name() }
-        let si = pos / 64
-        let fi = pos - si * 64
+        let si = pos / 128
+        let fi = pos - si * 128
         if si >= (*self.struct_layouts).count { return ir_empty_name() }
         // Ported onto main's interned-name representation: the layout now stores an
         // id, and `ir_name_at` is main's existing id -> Name reverse.
@@ -8110,7 +8120,12 @@ impl Lowerer {
     fn struct_deep_copy_cost(self, type_name: Name, slot_count: i64, depth: i64) -> i64 with Mut, Panic, Div, Alloc {
         var total: i64 = 1
         var i: i64 = 0
-        while i < slot_count && i < 64 {
+        // Bound must track emit_struct_value_copy_deep's own loop below (and
+        // struct_layout_slot_count's 128-field cap) -- an under-estimate here
+        // would let the actual emitter overrun IR_MAX_INSTRS (see the doc
+        // comment above), so this was the more dangerous of the two stale-64
+        // instances fixed alongside comment 4104667818.
+        while i < slot_count && i < 128 {
             total = total + 2
             let pos = self.struct_layout_field_pos(type_name, i)
             let arr_len = self.struct_layout_pos_array_len(pos)
@@ -8159,7 +8174,9 @@ impl Lowerer {
         let dst_reg = pair_dst.1
         lo = lo.emit(ir_alloc(dst_reg, lo.aggregate_storage_bytes(slot_count)))
         var i: i64 = 0
-        while i < slot_count && i < 64 {
+        // Same stale-64 cap as emit_struct_value_copy above (comment 4104667818):
+        // widened to 128 to match struct_layout_slot_count's actual capacity.
+        while i < slot_count && i < 128 {
             let pos = lo.struct_layout_field_pos(type_name, i)
             let fname = lo.struct_layout_pos_field_name(pos)
             let pair_slot = lo.fresh_reg()
@@ -17231,7 +17248,7 @@ impl Lowerer {
                     let dst_reg = lo.lookup_local(s.name)
                     if src_reg >= 0 && dst_reg >= 0 && src_reg != dst_reg {
                         var fi: i64 = 0
-                        while fi < 64 {
+                        while fi < 128 {  // matches the struct layout registry's 128-field capacity (see struct_layout_slot_count); was 64, silently dropping variance metadata for fields 64-127
                             let sv = lo.lookup_variance_for_field(src_reg, fi)
                             if sv >= 0 {
                                 lo = lo.bind_variance_for_field(dst_reg, fi, sv)
@@ -17289,7 +17306,7 @@ impl Lowerer {
                     let dst_reg = lo.lookup_local(s.name)
                     if src_reg >= 0 && dst_reg >= 0 && src_reg != dst_reg {
                         var fi: i64 = 0
-                        while fi < 64 {
+                        while fi < 128 {  // matches the struct layout registry's 128-field capacity (see struct_layout_slot_count); was 64, silently dropping variance metadata for fields 64-127
                             let sv = lo.lookup_variance_for_field(src_reg, fi)
                             if sv >= 0 {
                                 lo = lo.bind_variance_for_field(dst_reg, fi, sv)
