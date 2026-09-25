@@ -3802,6 +3802,7 @@ fn print_help() with IO {
     println("  --probe-load-ir-trace <source.sio>  Probe traced IR lowering path with stage counters")
     println("  --probe-native-streaming <source.sio>  Probe summary/body/native-v2 status for the single-module streaming path")
     println("  --probe-filtered-body-lower <source.sio>  Probe the non-flat lower_program_bodies_filtered_ref lane, one function at a time")
+    println("  --probe-filtered-body-reset-boundary <file_a.sio> <file_b.sio> <fn_name>  Lower fn_name through lower_program_function_body_from_summary_with_epistemic_ref for two different inputs in one process and report its mask after each, to catch a reset-boundary leak between them")
     println("  --probe-tuple-arr-capacity <source.sio> <fn_name>  Collect LOWER_FN_TUPLE_ARR_* directly from raw parsed items (bypasses DCE) and report one function's mask")
     println("  --probe-tuple-arr-reset-boundary <file_a.sio> <file_b.sio> <fn_name>  Call lower_program_to_ir on two different inputs in one process and report fn_name's mask after each, to catch a reset-boundary leak between them")
     println("  --probe-ir-callsite <source.sio> <caller_fn> <callee_fn>  Probe lowered callsite hidden-arg behavior")
@@ -9746,6 +9747,27 @@ fn run_probe_filtered_body_lower(args: ArgList, flag_index: i64) with IO, Mut, P
     }
     print("probe_filtered_body_lower: summary_ok\n")
 
+    // Copilot review (PR #2516): lower_program_bodies_filtered_ref (reached
+    // by every per-function call below, via
+    // lower_program_function_body_from_summary_with_epistemic_ref) collects
+    // into the same process-global LOWER_FN_TUPLE_ARR_* table as
+    // lower_program_to_ir, whose own leak this same review already fixed by
+    // resetting once per compile (lower_fn_tuple_arr_reset, top of
+    // lower_program_to_ir). This probe's per-function loop below cannot put
+    // that reset inside the shared library call itself: it calls
+    // lower_program_function_body_from_summary_with_epistemic_ref once PER
+    // FUNCTION in this program, and each call's collect() must keep
+    // accumulating (idempotent by name) across that whole loop, not wipe
+    // sibling functions' entries collected by an earlier iteration. Reset
+    // exactly once here instead, at THIS probe's real compile boundary --
+    // before the per-function loop starts, after this program's own summary
+    // is built -- mirroring lower_program_to_ir's own boundary. Without
+    // this, a second program run through this same probe binary in one
+    // process (see --probe-filtered-body-reset-boundary below) would let a
+    // same-named function's mask from the FIRST program leak into the
+    // second, exactly like the lower_program_to_ir bug this mirrors.
+    lower_fn_tuple_arr_reset()
+
     let summary_module = &(*summary_result.summary.module)
     let summary_fn_count = (*summary_module).fn_count
     print("probe_filtered_body_lower: fn_count=")
@@ -9810,6 +9832,75 @@ fn run_probe_filtered_body_lower(args: ArgList, flag_index: i64) with IO, Mut, P
         print("\n")
         fi = fi + 1
     }
+}
+
+// --probe-filtered-body-reset-boundary <file_a.sio> <file_b.sio> <fn_name>:
+// Copilot review (PR #2516): mirrors --probe-tuple-arr-reset-boundary above,
+// but for lower_program_function_body_from_summary_with_epistemic_ref /
+// lower_program_bodies_filtered_ref specifically -- the streaming
+// single-function lane run_probe_filtered_body_lower drives, which
+// --probe-tuple-arr-reset-boundary's own lower_program_to_ir call never
+// reaches. Lowers `fn_name` from file A through this exact lane, reports its
+// mask, then does the same for file B in the SAME process -- with the fix
+// (lower_fn_tuple_arr_reset() at the top of run_probe_filtered_body_lower,
+// once per program before its per-function loop), each file's mask reflects
+// its OWN shape for fn_name; without it, file B's reported mask would
+// incorrectly equal file A's, exactly like the lower_program_to_ir bug this
+// mirrors.
+fn run_probe_filtered_body_reset_boundary(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 3 >= args.len {
+        panic("probe_filtered_body_reset_boundary: expected <file_a.sio> <file_b.sio> <fn_name>")
+    }
+    let path_a = arg_list_get(args, flag_index + 1)
+    let path_b = arg_list_get(args, flag_index + 2)
+    let fn_name_str = arg_list_get(args, flag_index + 3)
+    let target = make_name(fn_name_str)
+
+    let prog_a = load_module_file(path_a)
+    if parser_last_error_count() > 0 {
+        panic("probe_filtered_body_reset_boundary: parse failed for file_a")
+    }
+    var epistemic_a = ir_empty_epistemic_section()
+    if !check_program_epistemic_into(prog_a, &! epistemic_a) {
+        panic("probe_filtered_body_reset_boundary: typecheck failed for file_a")
+    }
+    let summary_a = lower_program_to_ir_summary_with_epistemic(prog_a, epistemic_a)
+    if summary_a.had_error {
+        panic("probe_filtered_body_reset_boundary: summary failed for file_a")
+    }
+    lower_fn_tuple_arr_reset()
+    let body_a = lower_program_function_body_from_summary_with_epistemic_ref(&prog_a, &summary_a.summary, epistemic_a, target)
+    if body_a.had_error {
+        panic("probe_filtered_body_reset_boundary: body lowering failed for file_a")
+    }
+    print("probe_filtered_body_reset_boundary: after_a fn=")
+    print(fn_name_str)
+    print(" mask=")
+    print_int(lower_fn_tuple_f64_array_mask(target))
+    print("\n")
+
+    let prog_b = load_module_file(path_b)
+    if parser_last_error_count() > 0 {
+        panic("probe_filtered_body_reset_boundary: parse failed for file_b")
+    }
+    var epistemic_b = ir_empty_epistemic_section()
+    if !check_program_epistemic_into(prog_b, &! epistemic_b) {
+        panic("probe_filtered_body_reset_boundary: typecheck failed for file_b")
+    }
+    let summary_b = lower_program_to_ir_summary_with_epistemic(prog_b, epistemic_b)
+    if summary_b.had_error {
+        panic("probe_filtered_body_reset_boundary: summary failed for file_b")
+    }
+    lower_fn_tuple_arr_reset()
+    let body_b = lower_program_function_body_from_summary_with_epistemic_ref(&prog_b, &summary_b.summary, epistemic_b, target)
+    if body_b.had_error {
+        panic("probe_filtered_body_reset_boundary: body lowering failed for file_b")
+    }
+    print("probe_filtered_body_reset_boundary: after_b fn=")
+    print(fn_name_str)
+    print(" mask=")
+    print_int(lower_fn_tuple_f64_array_mask(target))
+    print("\n")
 }
 
 // --probe-tuple-arr-capacity <file.sio> <fn_name>: Copilot review
@@ -29230,6 +29321,12 @@ fn main() with IO, Mut, Panic, Div, Alloc {
             return
         } else if mode == "--probe-native-streaming" || starts_with(mode, "--probe-native-stream") {
             run_probe_native_streaming(args, arg_idx)
+            return
+        } else if mode == "--probe-filtered-body-reset-boundary" {
+            // Must be checked before the "--probe-filtered-body" prefix
+            // match below (--probe-filtered-body-lower's own fallback),
+            // which would otherwise swallow this flag too.
+            run_probe_filtered_body_reset_boundary(args, arg_idx)
             return
         } else if mode == "--probe-filtered-body-lower" || starts_with(mode, "--probe-filtered-body") {
             run_probe_filtered_body_lower(args, arg_idx)

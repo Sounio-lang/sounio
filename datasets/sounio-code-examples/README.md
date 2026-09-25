@@ -30,9 +30,9 @@ Instruction/completion dataset for **Sounio**, a self-hosted systems + scientifi
 
 ## Contents
 
-- `train.jsonl`: 2454 examples
+- `train.jsonl`: 2450 examples
 - `validation.jsonl`: 273 examples
-- Total: 2727 examples extracted from `tests/run-pass` and `tests/compile-fail`
+- Total: 2723 examples extracted from `tests/run-pass` and `tests/compile-fail`
 
 Each record contains:
 
