@@ -364,14 +364,25 @@ var SPEC_ITEM_MODULE_COUNT: i64 = 0
 // merged IR functions) -- the fixed-point gate immediately failed with
 // "item->module ownership registry overflowed" on a real, entirely valid
 // compilation. Copilot's own finding said as much: "even though this
-// compiler otherwise supports more than 4096 items". Sized to IR_MAX_FUNCS
-// (16384, ir/ir.sio) to match the real ceiling, same as this codebase's
-// other per-function tables, instead of just refusing loudly at a capacity
-// too small for its own source.
-var SPEC_ITEM_MODULE_HASH: [i64; 16384] = [0; 16384]
-var SPEC_ITEM_MODULE_LEN: [i64; 16384] = [0; 16384]
-var SPEC_ITEM_MODULE_ID: [i64; 16384] = [0 - 1; 16384]
-var SPEC_ITEM_MODULE_BUF: [i8; 6291456] = [0; 6291456]
+// compiler otherwise supports more than 4096 items".
+//
+// First correction sized this to IR_MAX_FUNCS (16384, ir/ir.sio) exactly --
+// still too small: scripts/ci/madaros_imported_capacity_gate.sh's own
+// boundary witness deliberately compiles a program at IR_MAX_FUNCS - 1
+// FUNCTIONS split across two modules, to test THAT gate's own diagnostic.
+// This registry counts every ItemFn/ItemStruct/ItemEnum/ItemUse/impl-method
+// (spec_item_module_collect), a STRICT SUPERSET of "functions" -- the same
+// witness's `use` declarations and any non-fn items push its real item count
+// past IR_MAX_FUNCS even though its FUNCTION count alone stays under it, so
+// sizing to IR_MAX_FUNCS exactly still overflowed on CI (the fixed-point
+// gate passed locally because this compiler's OWN source has comparatively
+// few non-fn items relative to its fn count; the imported-capacity gate's
+// synthetic witness does not). Doubled to give real headroom for the
+// non-function items IR_MAX_FUNCS's own ceiling was never counting.
+var SPEC_ITEM_MODULE_HASH: [i64; 32768] = [0; 32768]
+var SPEC_ITEM_MODULE_LEN: [i64; 32768] = [0; 32768]
+var SPEC_ITEM_MODULE_ID: [i64; 32768] = [0 - 1; 32768]
+var SPEC_ITEM_MODULE_BUF: [i8; 12582912] = [0; 12582912]
 // Round 13 (review comment 4103152059): exhausting this table used to just
 // silently drop new entries while spec_item_module_populated() stayed true
 // (COUNT > 0 from the entries that DID fit) -- so every item past the cap
@@ -481,7 +492,7 @@ fn spec_item_module_note(module_id: i64, n: Name) with Mut, Panic, Div {
     if spec_item_module_lookup(n) >= 0 {
         return
     }
-    if SPEC_ITEM_MODULE_COUNT >= 16384 {
+    if SPEC_ITEM_MODULE_COUNT >= 32768 {
         SPEC_ITEM_MODULE_OVERFLOWED = true
         return
     }
@@ -2157,6 +2168,24 @@ fn spec_finish_fn_item(it: Item, symbol: Name) -> Item with Mut, Panic, Div, All
     // module.
     if SPEC_ITEM_MODULE_COUNT > 0 {
         SPEC_CURRENT_MODULE_ID = spec_item_module_lookup(it.name)
+        // Round 12 (review comment 4106485514): this restores the template's
+        // owner module ONLY for the duration of the substitution call just
+        // below -- the returned item is then renamed to `symbol` (a mangled
+        // `__sp_...` multi-instance name), but the registry above is still
+        // keyed by `it.name`, the ORIGINAL template name. A later per-item
+        // walk over the FINALIZED item list (check_items_verdict_boot4_with_module_map,
+        // lowerer_lower_program_bodies_mut) looks the clone up by its new
+        // `symbol` name, which was never registered, so it gets
+        // SPEC_ITEM_MODULE_NOT_FOUND and any module-qualified free call still
+        // in the clone's body fails qualifier lookup and lowers to a mangled
+        // stub -- for a clone that legitimately belongs to a real module.
+        // Register the emitted symbol under the SAME owner here so the later
+        // walk can find it under either name; a no-op when symbol == it.name
+        // or when the owner is unresolved (spec_item_module_note skips
+        // n.len<=0 and already-known names on its own).
+        if SPEC_CURRENT_MODULE_ID >= 0 {
+            spec_item_module_note(SPEC_CURRENT_MODULE_ID, symbol)
+        }
     }
     match it.fn_def {
         None => it

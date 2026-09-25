@@ -4834,6 +4834,44 @@ fn checker_use_module_note_path(module_id: i64, path: AstPath) with Mut, Panic, 
     }
 }
 
+// Round 14 (review comment 4105262460): a BRACE import (`use a::b::{Type};`)
+// only ever runs `path` ("a::b") through checker_use_module_note_path above
+// -- the braced names themselves (`Type`) are a separate ImportItemList, so
+// the combined suffix "b::Type" (what round 13's associated-fn check,
+// directly below this function, requires for `b::Type::method()` to
+// typecheck) was never registered, even though `use a::b::{Type};` legitimately
+// brings `Type` into scope reachable exactly that way. That silently reset a
+// VALID resolved call's signature back to -1 whenever the receiver type came
+// from a brace import specifically (glob and path-form imports of the type
+// were unaffected, since the type's OWN `use` path already IS the combined
+// suffix there). Register "<suffix>::<braced name>" for every suffix of
+// `path`, for every name in the braced list, mirroring
+// checker_use_module_note_path's own suffix loop but anchored on the item
+// name instead of `path`'s own last segment.
+fn checker_use_module_note_braced_items(module_id: i64, path: AstPath, items: Option<Box<ImportItemList> >) with Mut, Panic, Div {
+    if path.seg_count <= 0 {
+        return
+    }
+    var cursor = items
+    while true {
+        match cursor {
+            Some(node) => {
+                let item_name = (*node).head
+                if !lower_named_item_terminal_known(item_name) {
+                    var s: i64 = 0
+                    while s < path.seg_count {
+                        let prefix = ast_path_range_name(path, s, path.seg_count - 1)
+                        checker_use_module_note(module_id, ast_name_join_sep(prefix, item_name))
+                        s = s + 1
+                    }
+                }
+                cursor = (*node).tail
+            }
+            None => break
+        }
+    }
+}
+
 // The COMPLETE qualifier (every segment of `path` except the last, joined as
 // one string) must exactly match a known `use`-declared suffix path OF THE
 // MODULE CURRENTLY BEING CHECKED (`(*c).current_module_id`, round 6 finding A
@@ -4907,6 +4945,7 @@ fn checker_collect_use_item_inplace(c: *mut Checker, item: Item) with Mut, Panic
     }
     checker_collect_known_module_backing_imports_inplace(c, item.use_path)
     checker_use_module_note_path((*c).current_module_id, item.use_path)
+    checker_use_module_note_braced_items((*c).current_module_id, item.use_path, item.use_items)
     if CHECKER_USE_MODULE_OVERFLOWED {
         checker_report_use_module_overflow_inplace(c, item.span)
     }

@@ -1518,6 +1518,28 @@ fn ast_string_list_nth_name(sl: StringList, k: i64) -> Name with Mut, Panic, Div
 // this fails CLOSED -- an overlong qualifier can never register a false
 // collision-prone shorthand and can never match one either, rather than
 // silently trusting a truncated prefix as exact identity.
+// Round 14 (review comment 4105262394): returning empty_name() on truncation
+// above only fails closed for REJECTION -- every consumer treats an empty
+// qualifier as "not registered", so an overlong qualifier can never falsely
+// MATCH. But for a genuinely long, otherwise-valid qualifier that only
+// exceeds 384 bytes because of its own legitimate length, that same empty
+// result is indistinguishable from "no qualifier was ever written here at
+// all": checker_path_qualifier_all_modules_known's caller falls through to
+// the non-fatal W044 warning path, and the lowerer's callee_path_module_stripped_name
+// falls through to the legacy first/last-segment mangled stub -- silently
+// reproducing the body-less-stub/SIGILL failure this whole qualifier
+// machinery exists to prevent, for a call that was never actually invalid.
+// Name's 384-byte buffer is a hard, unavoidable ceiling (every registry is
+// keyed by Name), so representing the full untruncated identity here is not
+// an option; instead, set this durable flag so the truncation is escalated
+// into a genuine compile-time hard refusal (folded into
+// lower_hard_error_pending() / compiler_visibility_preflight, same as the
+// other registry-overflow flags) rather than silently degrading to the
+// legacy unsafe behavior.
+var AST_PATH_RANGE_NAME_OVERFLOWED: bool = false
+
+pub fn ast_path_range_name_overflowed() -> bool { AST_PATH_RANGE_NAME_OVERFLOWED }
+
 pub fn ast_path_range_name(path: AstPath, from_inclusive: i64, upto_inclusive: i64) -> Name with Mut, Panic, Div {
     var result = Name { buf: [0; 384], len: 0 }
     var natural_len: i64 = 0
@@ -1542,6 +1564,7 @@ pub fn ast_path_range_name(path: AstPath, from_inclusive: i64, upto_inclusive: i
         k = k + 1
     }
     if natural_len != result.len {
+        AST_PATH_RANGE_NAME_OVERFLOWED = true
         return Name { buf: [0; 384], len: 0 }
     }
     result
@@ -1557,6 +1580,40 @@ pub fn ast_path_range_name(path: AstPath, from_inclusive: i64, upto_inclusive: i
 // duplicating, so both helpers share one fail-closed implementation.
 pub fn ast_path_prefix_name(path: AstPath, upto_inclusive: i64) -> Name with Mut, Panic, Div {
     ast_path_range_name(path, 0, upto_inclusive)
+}
+
+// Round 14 (review comment 4105262460): join two Names with "::" using the
+// same fail-closed truncation discipline as ast_path_range_name above,
+// tracking natural_len separately and returning empty_name() on overflow
+// instead of a silently truncated prefix. Needed to register a brace
+// import's (`use a::b::{Type};`) combined "a::b::Type" suffix, where `a::b`
+// is a joined AstPath and `Type` is a separate item name never itself part
+// of that path (see checker_use_module_note_path's caller in check.sio).
+pub fn ast_name_join_sep(a: Name, b: Name) -> Name with Mut, Panic, Div {
+    var result = Name { buf: [0; 384], len: 0 }
+    var natural_len: i64 = a.len + 2 + b.len
+    var i: i64 = 0
+    while i < a.len && result.len < 384 {
+        result.buf[result.len as usize] = a.buf[i as usize]
+        result.len = result.len + 1
+        i = i + 1
+    }
+    if result.len + 2 < 384 {
+        result.buf[result.len as usize] = 58
+        result.buf[(result.len + 1) as usize] = 58
+        result.len = result.len + 2
+    }
+    var j: i64 = 0
+    while j < b.len && result.len < 384 {
+        result.buf[result.len as usize] = b.buf[j as usize]
+        result.len = result.len + 1
+        j = j + 1
+    }
+    if natural_len != result.len {
+        AST_PATH_RANGE_NAME_OVERFLOWED = true
+        return Name { buf: [0; 384], len: 0 }
+    }
+    result
 }
 
 // Authoritative (not heuristic) registry of names KNOWN to be the terminal

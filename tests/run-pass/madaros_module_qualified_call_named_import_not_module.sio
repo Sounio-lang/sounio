@@ -1,6 +1,6 @@
-//@ compile-fail
+//@ check-only
 //@ requires: madaros
-//@ error-pattern: W044
+//@ expect-stdout-contains: W044
 //
 // PR #2515 review round 5 (review 5300804681), findings A (comment_id
 // 4090734423, self-hosted/check/specializer.sio) and B (comment_id
@@ -28,19 +28,33 @@
 // spec_known_fn_known / lowerer_lookup_fn_id_by_name_ref) from being
 // trusted as a module. `monte_carlo` is such a segment, so
 // `monte_carlo::tc_c_add(..)` now falls back to the pre-existing
-// "unresolved path" W044 warning instead of being silently accepted --
-// this file is expected to fail overall (the fallback path that then tries
-// to type-check the bare `monte_carlo` identifier against this call's
-// argument list is a separate, pre-existing quirk unrelated to this fix;
-// W044 firing is what this test pins). Legitimate module-qualified calls
-// through real modules (as opposed to a named-item import's terminal) are
-// covered by this PR's other regression tests
-// (madaros_module_qualified_call.sio and friends) and are unaffected by
-// this fix, since a real module's own segment names never also resolve as
-// top-level functions.
+// "unresolved path" W044 warning instead of being silently accepted.
+//
+// Round 12 (review comment 4106485575): this used to be a `//@ compile-fail`
+// fixture pinning `//@ error-pattern: W044` -- but W044 is intentionally a
+// non-fatal warning (the whole point: the call still compiles and evaluates
+// to 0 rather than being hard-rejected), so it could never by ITSELF make
+// `souc compile` exit non-zero. The original call, `monte_carlo::tc_c_add(2,
+// 3)`, only made the fixture "pass" because the SAME fallback quirk this
+// finding documents -- treating the qualifier's bare first segment as the
+// callee, ignoring `tc_c_add` entirely -- then type-checked `(2, 3)` against
+// `monte_carlo`'s OWN 3-parameter signature (Epistemic, fn(f64)->f64, i64)
+// and additionally rejected the missing Prob/Div effects, producing
+// E009/E010/E035 on top of W044. Fixing that unrelated quirk later could
+// make the file compile cleanly even with W044 correctly still firing,
+// silently turning this into a vacuous pass. Fixed by matching the call's
+// argument list and the caller's effects to `monte_carlo`'s real signature
+// exactly, so nothing else can fire: `souc check` now exits 0 with W044 as
+// the ONLY diagnostic, and `//@ check-only` + `//@ expect-stdout-contains`
+// pin exactly that -- decoupled from whether the fallback quirk itself ever
+// gets fixed.
 use epistemic::propagate::monte_carlo;
+use epistemic::knowledge::{Epistemic};
 
-fn main() -> i32 with IO, Mut, Panic {
-    let bogus = monte_carlo::tc_c_add(2, 3)
+fn identity_f64(x: f64) -> f64 { x }
+
+fn main() -> i32 with IO, Mut, Panic, Prob, Div {
+    let e = Epistemic { val: 1.0, variance: 1.0, confidence: 900 };
+    let bogus = monte_carlo::tc_c_add(e, identity_f64, 10);
     1
 }
