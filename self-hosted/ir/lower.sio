@@ -26149,22 +26149,34 @@ pub fn lower_program_bodies_from_summary_flat_with_epistemic_ref(
 // run_probe_filtered_body_lower, streaming_body_lower_smoke.sio) reset once
 // themselves, before that loop, since each call's collect() re-scans and
 // must keep accumulating across sibling functions in the SAME program.
-// This OWNED wrapper is different: module_loader.sio's thin-link path
-// (thin_build_compiled_unit) calls it repeatedly for potentially DIFFERENT
-// modules across one process -- a same-named function in a later module
-// could otherwise inherit an earlier module's stale mask, exactly like the
-// lower_program_to_ir leak fixed elsewhere in this PR. Reset here, once per
-// call: since collect() always re-scans the FULL `prog.items` this specific
-// call was given, resetting immediately before delegating reproduces
-// identical results for repeated same-program calls (safe, just redundant
-// work) while correctly isolating different programs from each other.
+//
+// Round 2 (Copilot review, comment 4109134765): this OWNED wrapper used to
+// reset unconditionally on EVERY call, reasoning that module_loader.sio's
+// thin-link path (thin_build_compiled_unit) calls it repeatedly for
+// potentially DIFFERENT modules across one process. That reasoning missed
+// that thin_build_compiled_unit calls this wrapper MULTIPLE TIMES within
+// the SAME compiled unit too -- once per local function (its `owner_prog`
+// loop) and once per SELECTED imported callee (its separate-`prog` loop) --
+// and each call's collect() only ever scans the `items` of the ONE `prog`
+// it was given, never the other program's. Resetting on every call
+// therefore wiped an imported callee's own tuple-array mask (collected
+// while lowering THAT callee's own body, from ITS OWN prog) before the
+// OWNER's body got lowered and needed to classify its call to that same
+// callee -- an imported function returning `([f64; N], ...)` silently lost
+// its mask and still lowered through the integer path. This wrapper no
+// longer resets at all: thin_build_compiled_unit now resets once and
+// collects every program relevant to the WHOLE unit (owner + every
+// import_map callee) up front, before any body in the unit is lowered, so
+// no per-call reset is needed or correct here. Callers with a narrower,
+// single-program scope (main.sio's --probe-filtered-body-reset-boundary)
+// reset explicitly themselves, same as the _ref variant's callers already
+// do.
 pub fn lower_program_function_body_from_summary_with_epistemic(
     prog: Program,
     summary: IrProgramSummary,
     epistemic: IrEpistemicSection,
     fn_name: Name
 ) -> IrFunctionBodyResult with Mut, Panic, Div, Alloc, IO {
-    lower_fn_tuple_arr_reset()
     lower_program_function_body_from_summary_with_epistemic_ref(&prog, &summary, epistemic, fn_name)
 }
 

@@ -23,6 +23,7 @@ use compiler::ontology::cache::{ontology_default_home, ontology_default_mode, on
 use ir::lower::{IrProgramSummary, IrProgramSummaryResult, IrProgramSummaryBoxResult, IrProgramSummaryFlat, IrProgramSummaryFlatResult, IrFunctionBodyResult, IrLowerBoxResult, lower_program_to_ir_trace, lower_program_to_ir_probe_summary, lower_program_to_ir_probe_summary_box_ref, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_with_epistemic, lower_program_function_body_from_summary_with_epistemic, ir_empty_program_summary}
 use ir::lower::{lower_program_to_ir_with_epistemic_ref, lower_program_to_ir_ordered_boxed_trace, lower_program_to_ir_ordered_with_epistemic_boxed_trace_ref, lower_program_to_ir_with_epistemic_boxed_trace_ref}
 use ir::lower::{lower_program_function_body_from_program_with_epistemic_ref}
+use ir::lower::{lower_fn_tuple_arr_reset, lower_fn_tuple_f64_arrays_collect}
 use ir::serialize::{serialize_ir_module, deserialize_ir_module}
 use ir::inline::{inl_run_pass}
 use ir::opt_cleanup::{opt_cleanup_module}
@@ -2825,6 +2826,31 @@ fn thin_build_compiled_unit(
     print_int(module_idx)
     print("\n")
     let owner_prog = load_module_file(graph.nodes[module_idx as usize].file_path)
+    // Copilot review (PR #2516), round 2 (comment 4109134765): the owned
+    // lower_program_function_body_from_summary_with_epistemic wrapper this
+    // unit calls below (once per local function, once per selected
+    // imported callee) no longer resets LOWER_FN_TUPLE_ARR_* itself -- see
+    // its own comment in ir/lower.sio for why a per-call reset there
+    // silently discarded an imported callee's own tuple-array mask before
+    // the OWNER's body (which calls that callee) got lowered. This IS the
+    // unit's reset/collection boundary instead: reset once, then collect
+    // every program this unit can reach -- the owner AND every module
+    // import_map references, regardless of which imports end up selected
+    // below -- before any body in this unit is lowered. A same-named
+    // function in the NEXT unit (a later call to this same function, for a
+    // different module_idx) still can't inherit a stale mask from THIS
+    // one, since the next call resets again before collecting its own set.
+    lower_fn_tuple_arr_reset()
+    lower_fn_tuple_f64_arrays_collect(&owner_prog.items)
+    var tac_i: i64 = 0
+    while tac_i < import_map.count {
+        let tac_callee_module = import_map.module_indices[tac_i as usize]
+        if tac_callee_module >= 0 && tac_callee_module < graph.count {
+            let tac_callee_prog = load_module_file(graph.nodes[tac_callee_module as usize].file_path)
+            lower_fn_tuple_f64_arrays_collect(&tac_callee_prog.items)
+        }
+        tac_i = tac_i + 1
+    }
     let owner_summary_pair = lower_program_to_ir_summary_with_epistemic(owner_prog, ir_empty_epistemic_section())
     if owner_summary_pair.had_error {
         return (false, thin_empty_compiled_unit(), ir_empty_module(), 0, 0, 0, 0, 0)
