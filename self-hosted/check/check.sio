@@ -11028,6 +11028,30 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
                 // Prefer semantic match (kind+name) then name-only self_type_name.
                 let recv_ty = ty_named(path_type_name)
                 direct_sig_id = fn_sig_table_find_method_semantic((*c).fn_sigs, recv_ty, path_method_name)
+                // Round 10 (review comment 4099548863): for a path LONGER than
+                // 2 segments (e.g. `bogus::AfNum::quad(..)`), the match above
+                // only ever looks at the PENULTIMATE segment ("AfNum") to find
+                // the type -- everything before it ("bogus") was never
+                // validated. A real `AfNum::quad` match set direct_sig_id >= 0,
+                // which skips the qualifier-validation block below entirely
+                // (it is gated on direct_sig_id < 0), so an unimported leading
+                // module segment was silently accepted while the lowerer,
+                // which cannot strip an unregistered "bogus" prefix, targeted
+                // the wrong mangled stub -- the same check-success/body-less-
+                // stub mismatch this whole qualifier-validation machinery
+                // exists to prevent. Validate every leading segment (all
+                // segments before the penultimate Type name) the same way a
+                // qualified free-fn call's segments are validated: the joined
+                // text must exactly match a `use`-declared suffix path of the
+                // CURRENT module. Reject the associated-fn match (fall through
+                // to the normal path below, which W044s or fails properly on
+                // an unmatched qualifier) when it does not.
+                if direct_sig_id >= 0 && (*callee_expr).path.seg_count > 2 {
+                    let assoc_prefix = ast_path_range_name((*callee_expr).path, 0, (*callee_expr).path.seg_count - 3)
+                    if !checker_use_module_known((*c).current_module_id, assoc_prefix) {
+                        direct_sig_id = -1
+                    }
+                }
                 // W044. The fallthrough documented just above is also what lets an
                 // associated-function call whose target resolves to NOTHING be accepted
                 // silently, evaluating to 0 and propagating that 0 as a pointer. The plain

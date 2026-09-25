@@ -5,7 +5,7 @@ module ir::lower
 use parser::ast::*
 use ir::ir::*
 use ir::numeric_payload::{ir_wide_compile_pool_reset, ir_wide_compile_pool_intern_low}
-use check::specializer::{spec_dce_filter_with_global_marks, spec_dce_global_marks_ready}
+use check::specializer::{spec_dce_filter_with_global_marks, spec_dce_global_marks_ready, spec_item_module_lookup, spec_item_module_populated}
 use io::trace::*
 use io::env::{read_env}
 
@@ -549,7 +549,7 @@ pub fn lower_note_error(site: i64, n: Name) with Mut {
 }
 var IR_LOWER_HARD_ERROR_LIMIT: i64 = 0
 
-pub fn lower_hard_error_pending() -> bool { IR_LOWER_HARD_ERROR != 0 || LOWER_USE_MODULE_OVERFLOWED || LOWER_IMPL_METHOD_OVERFLOWED }
+pub fn lower_hard_error_pending() -> bool { IR_LOWER_HARD_ERROR != 0 || LOWER_USE_MODULE_OVERFLOWED || LOWER_IMPL_METHOD_OVERFLOWED || ast_named_item_terminal_overflowed() }
 
 // Print what the flag knows, or say plainly that it knows nothing — never
 // silence. Called by the consumers that used to print a bare "ir_summary_failed".
@@ -631,6 +631,17 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
         print("         method\" evidence and be stripped to a bare free-fn name -- reported here\n")
         print("         because the transient hard-error state may have been reset by a later\n")
         print("         module's lowerer_new().\n")
+    }
+    if ast_named_item_terminal_overflowed() {
+        print("  cause: more than 4096 distinct named-item import terminals in this compilation\n")
+        print("         (or a prior compilation in this same process -- this registry is never\n")
+        print("         reset); the shared registry (AST_NAMED_ITEM_TERMINAL_HASH, parser/ast.sio)\n")
+        print("         dropped the rest. Since round 9, the module-qualifier registries skip\n")
+        print("         registering a `use` path's suffixes entirely when this registry confirms\n")
+        print("         it names an item, not a module -- a dropped entry past this cap means\n")
+        print("         that suffix falls back into the module registries as if it were a real\n")
+        print("         module, reopening the namespace-erasure class this registry exists to\n")
+        print("         prevent for whichever names overflow.\n")
     }
     if IR_LOWER_HARD_ERROR == 0 {
         return
@@ -2749,6 +2760,30 @@ fn lowerer_lower_program_bodies_mut(
     // Keep the multi-module FO table: the frontend may have pre-registered
     // imported helpers before entering this module.
     lowerer_fo_preregister_pure_fns_multipass_mut(lo, items)
+    // Round 10 (review comment 4099548955): skipping the recollection above
+    // (LOWER_SKIP_USE_RECOLLECT_FOR_MERGED) stops module 0 from WRONGLY
+    // gaining every dependency's imports, but on its own it does NOT fix the
+    // underlying problem for the one caller that sets that flag
+    // (module_frontend_lower_specialized_items_box): `items` there is a
+    // MERGED, all-modules list, and LOWER_CURRENT_MODULE_ID stays fixed at 0
+    // (module_frontend_lower_program_items_box_traced_with_externs's own
+    // lower_set_current_module_id(module_index) call, module_index=0) for
+    // the WHOLE body-lowering pass below -- so a qualified call inside a
+    // DEPENDENCY's own body now looks itself up under module 0, which
+    // (correctly, per the skip above) does not have that dependency's
+    // imports, and falls back to the mangled stub this machinery exists to
+    // prevent. Attribute each item's body to its real declaring module the
+    // same way check_items_verdict_boot4_with_module_map does (check/mod.sio)
+    // -- via check::specializer's item->module registry, reusable here since
+    // this file already imports from that module -- for the duration of
+    // lowering just that one item's body. Fails CLOSED to -1 (never a real
+    // module id, see LOWER_CURRENT_MODULE_ID's own comment) when the
+    // registry has no entry, same reasoning as check/mod.sio's own fix.
+    // Only engaged for the merged-list caller: every other (genuinely
+    // single-module) caller already has the right LOWER_CURRENT_MODULE_ID
+    // set once for its own whole items list, and per-item overriding it here
+    // would be wrong for those.
+    let attribute_per_item = LOWER_SKIP_USE_RECOLLECT_FOR_MERGED && spec_item_module_populated()
     var current = items
     var item_count: i64 = 0
     while true {
@@ -2760,6 +2795,9 @@ fn lowerer_lower_program_bodies_mut(
                 item_count = item_count + 1
                 if item_count > IR_MAX_FUNCS { return }
                 if kind == ItemKind::ItemFn {
+                    if attribute_per_item {
+                        lower_set_current_module_id(spec_item_module_lookup(name))
+                    }
                     if lower_body_diag_enabled() {
                         lower_body_trace_append("body_list_fn name=" + str_from_bytes(name.buf, name.len))
                     }
@@ -2771,7 +2809,22 @@ fn lowerer_lower_program_bodies_mut(
                 } else if kind == ItemKind::ItemImpl {
                     let impl_def_ref = &head.impl_def
                     match *impl_def_ref {
-                        Some(id) => { lowerer_lower_impl_methods_mut(lo, name, (*id).methods) }
+                        Some(id) => {
+                            // spec_item_module_collect registers each impl
+                            // METHOD under its own (unmangled) name, not the
+                            // impl block's own `name` (the TYPE it is for) --
+                            // an impl block has no name of its own in that
+                            // registry. All methods in one impl block share a
+                            // declaring module, so look ownership up via the
+                            // first method's name instead.
+                            if attribute_per_item {
+                                match (*id).methods {
+                                    Some(ml) => { lower_set_current_module_id(spec_item_module_lookup((*ml).head.name)) }
+                                    None => { lower_set_current_module_id(0 - 1) }
+                                }
+                            }
+                            lowerer_lower_impl_methods_mut(lo, name, (*id).methods)
+                        }
                         None => {}
                     }
                 }

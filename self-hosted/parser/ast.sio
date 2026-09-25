@@ -1478,25 +1478,16 @@ fn ast_string_list_nth_name(sl: StringList, k: i64) -> Name with Mut, Panic, Div
 // answer for BOTH, everywhere, for the rest of the process. Keying by the
 // FULL prefix path text instead (this function) disambiguates them: "p::x"
 // and "q::x" are different keys, so each keeps its own correct answer.
+// Round 10 (review comment 4099548981): this used to duplicate
+// ast_path_range_name's join loop with its OWN silent-truncation bug (fixed
+// there in round 9, comment 4098353679, but not here) -- resolve_import_file_path
+// stores named-item evidence keyed by this function's result, so two distinct
+// overlong import paths sharing the same first 384 bytes collided and could
+// suppress a real module or legitimize a bogus qualifier, exactly the same
+// failure class ast_path_range_name's own fix closed. Delegate instead of
+// duplicating, so both helpers share one fail-closed implementation.
 pub fn ast_path_prefix_name(path: AstPath, upto_inclusive: i64) -> Name with Mut, Panic, Div {
-    var result = Name { buf: [0; 384], len: 0 }
-    var k: i64 = 0
-    while k <= upto_inclusive && k < path.seg_count {
-        let seg = ast_string_list_nth_name(path.segments, k)
-        if k > 0 && result.len + 2 < 384 {
-            result.buf[result.len as usize] = 58
-            result.buf[(result.len + 1) as usize] = 58
-            result.len = result.len + 2
-        }
-        var i: i64 = 0
-        while i < seg.len && result.len < 384 {
-            result.buf[result.len as usize] = seg.buf[i as usize]
-            result.len = result.len + 1
-            i = i + 1
-        }
-        k = k + 1
-    }
-    result
+    ast_path_range_name(path, 0, upto_inclusive)
 }
 
 // Segments [from_inclusive, upto_inclusive] of `path` joined with "::" (both
@@ -1613,6 +1604,13 @@ var AST_NAMED_ITEM_TERMINAL_COUNT: i64 = 0
 var AST_NAMED_ITEM_TERMINAL_HASH: [i64; 4096] = [0; 4096]
 var AST_NAMED_ITEM_TERMINAL_LEN: [i64; 4096] = [0; 4096]
 var AST_NAMED_ITEM_TERMINAL_BUF: [i8; 1572864] = [0; 1572864]
+// Durable (this whole registry is never reset -- see its own comment), read
+// by ir/lower.sio's lower_hard_error_pending()/lower_hard_error_report() so
+// an overflow here refuses the binary instead of silently degrading. See
+// lower_named_item_terminal_note's own comment.
+var AST_NAMED_ITEM_TERMINAL_OVERFLOWED: bool = false
+
+pub fn ast_named_item_terminal_overflowed() -> bool { AST_NAMED_ITEM_TERMINAL_OVERFLOWED }
 
 pub fn lower_named_item_terminal_known(n: Name) -> bool with Mut, Panic, Div {
     if n.len <= 0 || n.len > 384 {
@@ -1648,16 +1646,23 @@ pub fn lower_named_item_terminal_note(n: Name) with Mut, Panic, Div {
         return
     }
     if AST_NAMED_ITEM_TERMINAL_COUNT >= 4096 {
-        // Best-effort: an overflow here only means a real named-item import's
-        // terminal past this cap cannot be positively confirmed as "not a
-        // module", i.e. it widens the set of segments the (still
-        // per-registration, positive-evidence) module registries trust --
-        // exactly round 5's pre-fix behavior for whichever names overflow,
-        // not a new failure mode. Unlike LOWER_USE_MODULE_HASH/
-        // LOWER_IMPL_METHOD_HASH/CHECKER_USE_MODULE_HASH's own overflow,
-        // dropping an entry here can only let an already-narrow,
-        // already-accepted false positive through; it cannot make a
-        // genuinely valid qualified call fail.
+        // Round 10 (review comment 4099549017): the comment this replaces
+        // argued a dropped entry here only WIDENS the set of segments the
+        // module registries trust, "not a new failure mode" -- but round 9's
+        // finding 4 fix (checker_use_module_note_path / lower_use_modules_collect
+        // / spec_use_modules_collect) now SKIPS suffix registration entirely
+        // for any `use` path this registry confirms is a named item, not a
+        // module. A dropped entry past this cap is therefore no longer
+        // "widen a positive-evidence set" -- it is "the one signal that keeps
+        // a named import's own suffixes OUT of the module registries goes
+        // missing", which lets exactly the round-7 namespace-erasure class
+        // back in for whichever names overflow. This table is also never
+        // reset (see its own top-level comment), so the cap is cumulative
+        // across every compilation in one process, not just one. Refuse
+        // loudly instead: set the durable overflow flag folded into
+        // lower_hard_error_pending()/lower_hard_error_report() (ir/lower.sio),
+        // matching every sibling registry's own overflow handling.
+        AST_NAMED_ITEM_TERMINAL_OVERFLOWED = true
         return
     }
     let idx = AST_NAMED_ITEM_TERMINAL_COUNT
