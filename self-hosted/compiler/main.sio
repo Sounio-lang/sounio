@@ -23,7 +23,7 @@ use check::units::*
 use check::env::*
 use check::traits::*
 use check::mod::{check_program, check_program_epistemic_into, check_items_verdict_boot4, check_items_verdict_boot4_with_module_map, check_modules_verdict_boot4_with_visibility}
-use check::specializer::{specialize_generics, specialize_generics_multi, spec_last_instantiated, spec_append_item_lists, spec_report_any_specializer_failure}
+use check::specializer::{specialize_generics, specialize_generics_multi, spec_last_instantiated, spec_append_item_lists, spec_report_any_specializer_failure, spec_item_module_overflowed}
 use check::ownership::*
 use check::lint::*
 use check::layout::*
@@ -2204,7 +2204,11 @@ fn compiler_visibility_preflight(source_path: string) -> bool with IO, Mut, Pani
         // than 4096 named imports could report success after entries were
         // dropped, letting the module registries treat later named imports
         // as module qualifiers. Fold the same flag into this verdict too.
-        return !(spec_report_any_specializer_failure() || single_verdict != 0 || ast_named_item_terminal_overflowed())
+        // Round 13 (review comment 4103152059): same reasoning for
+        // spec_item_module_overflowed() (check::specializer) -- its own
+        // overflow also only reached ir/lower.sio's hard-error mechanism,
+        // never this check-only verdict.
+        return !(spec_report_any_specializer_failure() || single_verdict != 0 || ast_named_item_terminal_overflowed() || spec_item_module_overflowed())
     }
 
     print("run_check_mode: about to check ")
@@ -2264,11 +2268,15 @@ fn compiler_visibility_preflight(source_path: string) -> bool with IO, Mut, Pani
         print(" module(s); the diagnostics above name the offending declarations\n")
     }
     // Round 12 (review comment 4100990481): see the single-module return
-    // above -- this multi-module verdict has the same gap.
+    // above -- this multi-module verdict has the same gap. Round 13
+    // (comment 4103152059) added spec_item_module_overflowed() alongside it.
     if ast_named_item_terminal_overflowed() {
         print("run_check_mode: named-item-terminal registry overflowed; qualified-call checking is incomplete for whichever names dropped past the cap\n")
     }
-    !(spec_report_any_specializer_failure() || verdict != 0 || ast_named_item_terminal_overflowed())
+    if spec_item_module_overflowed() {
+        print("run_check_mode: item->module ownership registry overflowed; module attribution is incomplete for whichever items dropped past the cap\n")
+    }
+    !(spec_report_any_specializer_failure() || verdict != 0 || ast_named_item_terminal_overflowed() || spec_item_module_overflowed())
 }
 
 fn run_science_boundary_closure_report(

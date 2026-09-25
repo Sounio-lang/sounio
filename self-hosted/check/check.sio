@@ -11039,16 +11039,35 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
                 // which cannot strip an unregistered "bogus" prefix, targeted
                 // the wrong mangled stub -- the same check-success/body-less-
                 // stub mismatch this whole qualifier-validation machinery
-                // exists to prevent. Validate every leading segment (all
-                // segments before the penultimate Type name) the same way a
-                // qualified free-fn call's segments are validated: the joined
-                // text must exactly match a `use`-declared suffix path of the
-                // CURRENT module. Reject the associated-fn match (fall through
-                // to the normal path below, which W044s or fails properly on
-                // an unmatched qualifier) when it does not.
+                // exists to prevent.
+                //
+                // Round 13 (review comment 4103152006): that first fix only
+                // checked the prefix BEFORE the type name was itself a known
+                // module suffix -- it never checked that the prefix and the
+                // TYPE NAME TOGETHER form one real, actually-`use`d path. Two
+                // separately legitimate imports (`use testmod::tc_c;` and
+                // `use af_mod::AfNum;`, say) each register their own real
+                // suffixes ("tc_c", "AfNum", ...), so `tc_c::AfNum::quad()`
+                // passed: "tc_c" alone was a known suffix, and the semantic
+                // method lookup found a real `AfNum::quad` globally, by name,
+                // with no check that `AfNum` is actually reachable AS "tc_c::
+                // AfNum" specifically. fn_sig_table_find_method_semantic has
+                // no per-import provenance to check that against directly,
+                // but checker_use_module_known already does, for exactly this
+                // shape: check the qualifier INCLUDING the type name as ONE
+                // combined suffix ("tc_c::AfNum", not just "tc_c" alone)
+                // against the current module's registered `use`-suffixes --
+                // the same exact-full-qualifier-match principle the
+                // qualified-free-fn path already relies on (round 8). This
+                // combined text can only be a registered suffix if `AfNum`
+                // was genuinely imported reachable through THAT prefix (e.g.
+                // `use tc_c::AfNum;`, or `use some::tc_c::AfNum;`, which
+                // registers "some::tc_c::AfNum" and "tc_c::AfNum" as
+                // suffixes) -- two independently-real but unrelated imports
+                // sharing no such combined suffix correctly fail to match.
                 if direct_sig_id >= 0 && (*callee_expr).path.seg_count > 2 {
-                    let assoc_prefix = ast_path_range_name((*callee_expr).path, 0, (*callee_expr).path.seg_count - 3)
-                    if !checker_use_module_known((*c).current_module_id, assoc_prefix) {
+                    let assoc_qualifier = ast_path_range_name((*callee_expr).path, 0, (*callee_expr).path.seg_count - 2)
+                    if !checker_use_module_known((*c).current_module_id, assoc_qualifier) {
                         direct_sig_id = -1
                     }
                 }

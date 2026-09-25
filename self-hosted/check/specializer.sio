@@ -358,13 +358,41 @@ fn spec_use_module_reset() with Mut {
 // in an ordinary `fn main`, not inside a generic template).
 let SPEC_ITEM_MODULE_SEG_MAX: i64 = 384
 var SPEC_ITEM_MODULE_COUNT: i64 = 0
-var SPEC_ITEM_MODULE_HASH: [i64; 4096] = [0; 4096]
-var SPEC_ITEM_MODULE_LEN: [i64; 4096] = [0; 4096]
-var SPEC_ITEM_MODULE_ID: [i64; 4096] = [0 - 1; 4096]
-var SPEC_ITEM_MODULE_BUF: [i8; 1572864] = [0; 1572864]
+// Round 13 (review comment 4103152059, verified the hard way): sized to
+// 4096 with just a hard-refuse on overflow broke this compiler's OWN
+// self-hosting build (self-hosted/compiler/main.sio typechecks 13000+
+// merged IR functions) -- the fixed-point gate immediately failed with
+// "item->module ownership registry overflowed" on a real, entirely valid
+// compilation. Copilot's own finding said as much: "even though this
+// compiler otherwise supports more than 4096 items". Sized to IR_MAX_FUNCS
+// (16384, ir/ir.sio) to match the real ceiling, same as this codebase's
+// other per-function tables, instead of just refusing loudly at a capacity
+// too small for its own source.
+var SPEC_ITEM_MODULE_HASH: [i64; 16384] = [0; 16384]
+var SPEC_ITEM_MODULE_LEN: [i64; 16384] = [0; 16384]
+var SPEC_ITEM_MODULE_ID: [i64; 16384] = [0 - 1; 16384]
+var SPEC_ITEM_MODULE_BUF: [i8; 6291456] = [0; 6291456]
+// Round 13 (review comment 4103152059): exhausting this table used to just
+// silently drop new entries while spec_item_module_populated() stayed true
+// (COUNT > 0 from the entries that DID fit) -- so every item past the cap
+// was assigned SPEC_ITEM_MODULE_NOT_FOUND during rewrite/check/lowering, and
+// its own body lost access to its own module's imports, even though this
+// compiler otherwise supports far more than 4096 items (IR_MAX_FUNCS is
+// 16384). Round 12's fail-closed fix (comment 4100990400) made this SAFE
+// (no longer exploitable), but a large, entirely valid compilation could
+// still have its own legitimate qualified calls silently break past this
+// cap. Refuse loudly instead, folded into the same
+// lower_hard_error_pending()/lower_had_error_with_hard() mechanism (ir/lower.sio)
+// and compiler_visibility_preflight's check-only verdict (compiler/main.sio,
+// round 12 comment 4100990481's own fix) every sibling registry's overflow
+// already uses.
+var SPEC_ITEM_MODULE_OVERFLOWED: bool = false
+
+pub fn spec_item_module_overflowed() -> bool { SPEC_ITEM_MODULE_OVERFLOWED }
 
 fn spec_item_module_reset() with Mut {
     SPEC_ITEM_MODULE_COUNT = 0
+    SPEC_ITEM_MODULE_OVERFLOWED = false
 }
 
 pub fn spec_item_module_populated() -> bool with Mut {
@@ -453,7 +481,8 @@ fn spec_item_module_note(module_id: i64, n: Name) with Mut, Panic, Div {
     if spec_item_module_lookup(n) >= 0 {
         return
     }
-    if SPEC_ITEM_MODULE_COUNT >= 4096 {
+    if SPEC_ITEM_MODULE_COUNT >= 16384 {
+        SPEC_ITEM_MODULE_OVERFLOWED = true
         return
     }
     let idx = SPEC_ITEM_MODULE_COUNT
