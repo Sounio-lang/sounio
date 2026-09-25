@@ -79,10 +79,14 @@ madaros_cache_get() {
         rm -rf "$dir"
         return 1
     fi
-    mkdir -p "$(dirname "$out")"
-    cp --reflink=auto -f "$dir/artifact" "$out"
-    chmod +x "$out"
-    touch "$dir"   # LRU marker
+    mkdir -p "$(dirname "$out")" || return 1
+    if ! cp --reflink=auto -f "$dir/artifact" "$out" || ! chmod +x "$out" ||
+       [[ "$(_mc_sha "$out")" != "$(cut -c1-64 "$dir/artifact.sha256")" ]]; then
+        echo "[madaros-cache] copy of $stage/$key to $out failed -- treating as a miss" >&2
+        rm -f "$out"
+        return 1
+    fi
+    touch "$dir" 2>/dev/null || true   # LRU marker
     echo "[madaros-cache] HIT $stage/$key (built $(cat "$dir/built" 2>/dev/null || echo '?'))" >&2
     return 0
 }
@@ -92,6 +96,10 @@ madaros_cache_put() {
     local stage="$1" key="$2" art="$3"
     [[ -s "$art" ]] || return 0
     madaros_cache_usable || return 0
+    if [[ "${SOUNIO_MADAROS_CACHE_READONLY:-0}" == "1" ]]; then
+        echo "[madaros-cache] read-only: not storing $stage/$key" >&2
+        return 0
+    fi
     local base; base="$(madaros_cache_dir)/$stage"
     local tmp; tmp="$(mktemp -d "$base/.tmp.XXXXXX")"
     cp --reflink=auto -f "$art" "$tmp/artifact"
@@ -112,9 +120,13 @@ madaros_cache_prune() {
     local stage keep
     for stage in seed:4 madaros:8 fixed-point:8; do
         keep="${SOUNIO_MADAROS_CACHE_KEEP:-${stage#*:}}"; stage="${stage%%:*}"
+        # Measured 2026-09-25 in CI: with an empty stage directory `grep -v`
+        # matched nothing and exited 1, and under the caller's pipefail that
+        # killed build_modular_madaros.sh right after a successful build.
         ( cd "$base/$stage" 2>/dev/null || exit 0
-          ls -1t | grep -v '^\.' | tail -n +$((keep+1)) | xargs -r rm -rf )
+          { ls -1t | grep -v '^\.' || true; } | tail -n +$((keep+1)) | xargs -r rm -rf ) || true
     done
+    return 0
 }
 
 # The tree key hashes <root>/stdlib. A build pointed at another stdlib would be
@@ -123,4 +135,25 @@ madaros_cache_usable() {
     local root; root="$(_mc_root)"
     [[ -z "${SOUNIO_STDLIB_PATH:-}" ]] && return 0
     [[ "$(realpath -m "$SOUNIO_STDLIB_PATH")" == "$(realpath -m "$root/stdlib")" ]]
+}
+
+# madaros_cache_build_locked <stage> <key> <out> <build command...>
+# Hit -> copy out, no lock. Miss -> take the global build lock, look again
+# (another build may have stored the same key while this one waited), and only
+# then build and store. Returns the build command's status.
+madaros_cache_build_locked() {
+    local stage="$1" key="$2" out="$3"; shift 3
+    madaros_cache_get "$stage" "$key" "$out" && return 0
+    local lib; lib="$(_mc_root)/scripts/dev/madaros-cache.sh"
+    "$(_mc_root)/scripts/dev/souc-build-lock.sh" bash -c '
+        lib="$1"; stage="$2"; key="$3"; out="$4"; shift 4
+        # shellcheck source=/dev/null
+        source "$lib"
+        if madaros_cache_get "$stage" "$key" "$out"; then
+            echo "[madaros-cache] stored by a concurrent build while waiting for the lock" >&2
+            exit 0
+        fi
+        "$@" || exit $?
+        madaros_cache_put "$stage" "$key" "$out"
+    ' _ "$lib" "$stage" "$key" "$out" "$@"
 }

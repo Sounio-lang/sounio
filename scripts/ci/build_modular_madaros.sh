@@ -139,10 +139,7 @@ else
     echo "  gen seed:      $SEED"
     # One generation is sufficient — it carries the current source's features.
     SEED_KEY="$(madaros_seed_key "$BOOTSTRAP_ELF" "$LEAN_SRC")"
-    if ! madaros_cache_get seed "$SEED_KEY" "$SEED"; then
-        scripts/dev/souc-build-lock.sh "$BOOTSTRAP_ELF" "$LEAN_SRC" "$SEED"
-        madaros_cache_put seed "$SEED_KEY" "$SEED"
-    fi
+    madaros_cache_build_locked seed "$SEED_KEY" "$SEED" "$BOOTSTRAP_ELF" "$LEAN_SRC" "$SEED"
     if [[ ! -s "$SEED" ]]; then
         echo "error: seed derivation produced no output: $SEED" >&2
         exit 1
@@ -160,11 +157,8 @@ echo "  out:   $OUT"
 # copied out in seconds and the lock is never touched.
 BUILD_KEY="$(madaros_build_key "$SEED")"
 echo "  key:   $BUILD_KEY"
-if ! madaros_cache_get madaros "$BUILD_KEY" "$OUT"; then
-    scripts/dev/souc-build-lock.sh "$SEED" "$SRC" "$OUT"
-    madaros_cache_put madaros "$BUILD_KEY" "$OUT"
-    madaros_cache_prune
-fi
+madaros_cache_build_locked madaros "$BUILD_KEY" "$OUT" "$SEED" "$SRC" "$OUT"
+madaros_cache_prune
 
 if [[ ! -s "$OUT" ]]; then
     echo "error: modular compiler build produced no output: $OUT" >&2
