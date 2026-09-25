@@ -1,0 +1,131 @@
+module check::nominal_field_resolution_receipt_shadow_probe
+
+use module_parse::{load_module_file}
+use parser::ast::*
+use parser::parser::{mk_expr}
+use lexer::span::{Span}
+use check::check::*
+
+fn receipt_target_tail_expr(program: Program) -> Expr with Mut, Panic, Div, Alloc {
+    var target = mk_expr(ExprKind::ExprIntLit, Span::dummy())
+    var items = program.items
+    while true {
+        match items {
+            Some(list) => {
+                match (*list).head.fn_def {
+                    Some(fd) => {
+                        var stmts = (*fd).body.stmts
+                        while true {
+                            match stmts {
+                                Some(stmt_list) => {
+                                    match (*stmt_list).head.expr {
+                                        Some(expr) => { target = *expr }
+                                        None => {}
+                                    }
+                                    stmts = (*stmt_list).tail
+                                }
+                                None => break
+                            }
+                        }
+                    }
+                    None => {}
+                }
+                items = (*list).tail
+            }
+            None => break
+        }
+    }
+    target
+}
+
+fn receipt_run_snapshot(
+    programs: &! [Program; 256],
+    count: i64,
+    target_module: i64,
+    expected_owner_module: i64,
+    expected_parent: i64,
+) -> i64 with IO, Mut, Panic, Div, Alloc {
+    let target = receipt_target_tail_expr((*programs)[target_module as usize])
+    let shadow = nominal_field_resolution_shadow_alloc()
+    var snapshot = nominal_field_resolution_invalid_snapshot_id()
+    var receipt = nominal_field_resolution_invalid_receipt_id()
+    var verdict: i64 = -1
+    let status = nominal_field_resolution_check_modules_snapshot(
+        programs,
+        count,
+        false,
+        target_module,
+        &target,
+        shadow,
+        &! snapshot,
+        &! receipt,
+        &! verdict,
+    )
+    if status != NOMINAL_FIELD_RECEIPT_OK { return 100 - status }
+    if verdict != 0 { return 120 }
+    if nominal_field_resolution_receipt_ready_mask(shadow, &snapshot, &receipt) != NOMINAL_FIELD_RECEIPT_NOMINAL_READY { return 121 }
+    if nominal_field_resolution_receipt_field_ordinal(shadow, &snapshot, &receipt) != 1 { return 122 }
+    if nominal_field_resolution_receipt_owner_module(shadow, &snapshot, &receipt) != expected_owner_module { return 123 }
+    if nominal_field_resolution_receipt_callee_module(shadow, &snapshot, &receipt) != expected_owner_module { return 124 }
+    // Tokens only prove within-snapshot provenance liveness. They are assigned
+    // by checker traversal and are deliberately not compared across AB/BA.
+    if nominal_field_resolution_receipt_root_observation_token(shadow, &snapshot, &receipt) <= 0 ||
+       nominal_field_resolution_receipt_owner_type_observation_token(shadow, &snapshot, &receipt) <= 0 ||
+       nominal_field_resolution_receipt_field_observation_token(shadow, &snapshot, &receipt) <= 0 ||
+       nominal_field_resolution_receipt_result_type_observation_token(shadow, &snapshot, &receipt) <= 0 { return 125 }
+    let parent = nominal_field_resolution_receipt_parent_slot(shadow, &snapshot, &receipt)
+    if expected_parent == 0 && parent != -1 { return 126 }
+    if expected_parent == 1 && parent < 0 { return 127 }
+    if nominal_field_resolution_receipt_binder_status(shadow, &snapshot, &receipt) != NOMINAL_FIELD_RECEIPT_ERR_TARGET_LAYOUT_MISSING { return 128 }
+    if nominal_field_resolution_snapshot_receipt(shadow, &snapshot, &! receipt) != NOMINAL_FIELD_RECEIPT_ERR_INVALID_RECEIPT { return 129 }
+
+    var overlapping_snapshot = nominal_field_resolution_invalid_snapshot_id()
+    if nominal_field_resolution_snapshot_begin(shadow, target_module, &target, &! overlapping_snapshot) != NOMINAL_FIELD_RECEIPT_ERR_INVALID_SNAPSHOT { return 130 }
+
+    let old_snapshot = snapshot
+    let old_receipt = receipt
+    if nominal_field_resolution_snapshot_reset(shadow, &snapshot) != NOMINAL_FIELD_RECEIPT_OK { return 131 }
+    if nominal_field_resolution_receipt_ready_mask(shadow, &old_snapshot, &old_receipt) != -1 { return 132 }
+    var next_snapshot = nominal_field_resolution_invalid_snapshot_id()
+    if nominal_field_resolution_snapshot_begin(shadow, target_module, &target, &! next_snapshot) != NOMINAL_FIELD_RECEIPT_OK { return 133 }
+    if nominal_field_resolution_receipt_ready_mask(shadow, &next_snapshot, &old_receipt) != -1 { return 134 }
+    nominal_field_resolution_shadow_free(shadow)
+    0
+}
+
+pub fn nominal_field_resolution_receipt_shadow_probe() -> i64 with IO, Mut, Panic, Div, Alloc {
+    var single: [Program; 256] = [Program { module_path: empty_path(), items: None }; 256]
+
+    single[0] = load_module_file("tests/native-v2/place_ir_legacy_nominal_collision_witness.sio")
+    let direct_ab = receipt_run_snapshot(&! single, 1, 0, 0, 0)
+    if direct_ab != 0 { return direct_ab }
+
+    single[0] = load_module_file("tests/native-v2/place_ir_legacy_nominal_collision_swapped_witness.sio")
+    let direct_ba = receipt_run_snapshot(&! single, 1, 0, 0, 0)
+    if direct_ba != 0 { return direct_ba }
+
+    single[0] = load_module_file("tests/native-v2/nominal_field_resolution_local_witness.sio")
+    let local = receipt_run_snapshot(&! single, 1, 0, 0, 0)
+    if local != 0 { return local }
+
+    single[0] = load_module_file("tests/native-v2/nominal_field_resolution_nested_witness.sio")
+    let nested = receipt_run_snapshot(&! single, 1, 0, 0, 1)
+    if nested != 0 { return nested }
+
+    var imported_ab: [Program; 256] = [Program { module_path: empty_path(), items: None }; 256]
+    imported_ab[0] = load_module_file("tests/native-v2/place_canonical_binding_shadow_modules/a/mod.sio")
+    imported_ab[1] = load_module_file("tests/native-v2/place_canonical_binding_shadow_modules/b/mod.sio")
+    imported_ab[2] = load_module_file("tests/native-v2/place_canonical_binding_shadow_modules/import_ab.sio")
+    let import_ab = receipt_run_snapshot(&! imported_ab, 3, 2, 1, 0)
+    if import_ab != 0 { return import_ab }
+
+    var imported_ba: [Program; 256] = [Program { module_path: empty_path(), items: None }; 256]
+    imported_ba[0] = load_module_file("tests/native-v2/place_canonical_binding_shadow_modules/b/mod.sio")
+    imported_ba[1] = load_module_file("tests/native-v2/place_canonical_binding_shadow_modules/a/mod.sio")
+    imported_ba[2] = load_module_file("tests/native-v2/place_canonical_binding_shadow_modules/import_ba.sio")
+    let import_ba = receipt_run_snapshot(&! imported_ba, 3, 2, 0, 0)
+    if import_ba != 0 { return import_ba }
+
+    print_int(42)
+    0
+}
