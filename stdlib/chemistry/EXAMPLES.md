@@ -175,10 +175,10 @@ See full_budget_export and test_regulatory_provenance.
 - Rhea placeholder for reactions (full when bundle expands).
 - Bundle directives: `//@ ontology-bundle: "stdlib/data/data/ontology/bundles/chebi.dontology"` on files.
 - Ontology FULLY integrated for EVERY single compound across the entire stdlib:
-  BigCRN: H(CHEBI:49637), O2(15379), OH(29191), O(25805), H2(18276), H2O(15377 - full typed Knowledge<CHEBI_15377>)
+  BigCRN: H(CHEBI:49637), O2(15379), OH(29191), O(25805), H2(18276), H2O(15377 - full typed Epistemic)
   Metabolic/PBPK: Drug/M1/M2 (6931 etc.)
   Enzyme: E/S/ES/P
-  All sims/tests/validate/benches now use the map, assert ChEBI IDs, attach provenance, and use Knowledge<CHEBI_15377> for water compound in every relevant test.
+  All sims/tests/validate/benches now use the map, assert ChEBI IDs, attach provenance, and use Epistemic for water compound in every relevant test.
   Rhea placeholder + full expanded GO (metabolic, glycolytic, oxphos, redox). Bundle directives active.
 - Deep usage in BigCRN, general CRN, PBPK, etc. + attach for provenance.
 - Tests call `test_chemistry_full_ontology` (LIT+REAL PASS with species+GO+Knowledge).
@@ -210,7 +210,7 @@ Foi adicionada a função `kinetics::super_chemical_showcase()` que monta um **c
 - Ontologia ChEBI para **cada composto individual** (H, O2, OH, O, H2, H2O, Drug, M1, M2...)
 - Ensembles estrutural + fracionário
 - Componente estocástico (LNA + efeitos Prob)
-- Inferência Bayesiana com `Observe` + `Knowledge<CHEBI_15377>`
+- Inferência Bayesiana com `Observe` + `Epistemic`
 - Auditoria regulatória completa com breakdown de contribuições GUM
 - **Gráficos renderizados nativos**:
   - `epi_plot::error_bar_chart` (orçamento GUM com barras de erro + cores de confiança)
@@ -229,7 +229,7 @@ Em Python/Julia/Rust você normalmente precisa juntar:
 - Matplotlib/Plotly separado para gráficos
 
 Em Sounio tudo isso é **de primeira classe na linguagem**:
-- `Knowledge<CHEBI_15377>` é um tipo verificável
+- `Epistemic` é um tipo verificável
 - Efeitos `Observe`/`Prob` permitem mudar a semântica do modelo sem reescrever
 - GUM é propagado nativamente dentro das leis de taxa e estequiometria
 - Gráficos são renderizados diretamente (sem matplotlib)
