@@ -1,0 +1,1318 @@
+// Resolver-owned, off-default authority for qualified nominal identities.
+//
+// Paths are exact resolution keys. They are never identities: live handles are
+// minted only after a Program declaration is registered in this snapshot.
+
+module resolve::definition_registry_shadow
+
+use parser::ast::*
+
+pub let DEFINITION_REGISTRY_SHADOW_MODULE_CAPACITY: i64 = 4
+pub let DEFINITION_REGISTRY_SHADOW_NOMINAL_CAPACITY: i64 = 8
+pub let DEFINITION_REGISTRY_SHADOW_FIELD_CAPACITY: i64 = 16
+pub let DEFINITION_REGISTRY_SHADOW_IMPORT_CAPACITY: i64 = 8
+pub let DEFINITION_REGISTRY_SHADOW_RECEIPT_CAPACITY: i64 = 8
+pub let DEFINITION_REGISTRY_SHADOW_PATH_SEGMENT_CAPACITY: i64 = 4
+
+pub let DEFINITION_REGISTRY_SHADOW_OK: i64 = 0
+pub let DEFINITION_REGISTRY_SHADOW_ERR_STATE: i64 = -1
+pub let DEFINITION_REGISTRY_SHADOW_ERR_INVALID_ID: i64 = -2
+pub let DEFINITION_REGISTRY_SHADOW_ERR_CAPACITY: i64 = -3
+pub let DEFINITION_REGISTRY_SHADOW_ERR_PATH_CAPACITY: i64 = -4
+pub let DEFINITION_REGISTRY_SHADOW_ERR_MISSING_MODULE_AUTHORITY: i64 = -5
+pub let DEFINITION_REGISTRY_SHADOW_ERR_DUPLICATE_MODULE_PATH: i64 = -6
+pub let DEFINITION_REGISTRY_SHADOW_ERR_DUPLICATE_DECLARATION: i64 = -7
+pub let DEFINITION_REGISTRY_SHADOW_ERR_UNRESOLVED: i64 = -8
+pub let DEFINITION_REGISTRY_SHADOW_ERR_AMBIGUOUS: i64 = -9
+pub let DEFINITION_REGISTRY_SHADOW_ERR_NOT_NAMED: i64 = -10
+pub let DEFINITION_REGISTRY_SHADOW_ERR_OUTPUT_LIVE: i64 = -11
+
+let DRS_STATE_EMPTY: i64 = 0
+let DRS_STATE_BUILDING: i64 = 1
+let DRS_STATE_SEALED: i64 = 2
+let DRS_SLOT_FREE: i64 = 0
+let DRS_SLOT_LIVE: i64 = 1
+let DRS_IMPORT_MODULE: i64 = 1
+let DRS_IMPORT_GLOB: i64 = 2
+let DRS_IMPORT_SELECTIVE: i64 = 3
+
+pub struct DefinitionRegistryShadowModuleDefId {
+    registry_identity: i64,
+    snapshot_generation: i64,
+    slot: i64,
+    generation: i64,
+}
+
+pub struct DefinitionRegistryShadowNominalTypeDefId {
+    registry_identity: i64,
+    snapshot_generation: i64,
+    slot: i64,
+    generation: i64,
+}
+
+pub struct DefinitionRegistryShadowFieldDefId {
+    registry_identity: i64,
+    snapshot_generation: i64,
+    slot: i64,
+    generation: i64,
+}
+
+pub struct DefinitionRegistryShadowTypeExprBindingReceipt {
+    registry_identity: i64,
+    snapshot_generation: i64,
+    slot: i64,
+    generation: i64,
+}
+
+var DRS_REGISTRY_IDENTITY: i64 = 0
+var DRS_NEXT_REGISTRY_IDENTITY: i64 = 1
+var DRS_SNAPSHOT_GENERATION: i64 = 0
+var DRS_STATE: i64 = DRS_STATE_EMPTY
+
+var DRS_MODULE_STATE: [i64; 4] = [0; 4]
+var DRS_MODULE_GENERATION: [i64; 4] = [1; 4]
+var DRS_MODULE_DECLS_INDEXED: [i64; 4] = [0; 4]
+var DRS_MODULE_IMPORTS_INDEXED: [i64; 4] = [0; 4]
+var DRS_MODULE_PATH_SEG_COUNT: [i64; 4] = [0; 4]
+var DRS_MODULE_PATH_SEG_LEN: [i64; 16] = [0; 16]
+var DRS_MODULE_PATH_BYTES: [i8; 2048] = [0; 2048]
+
+var DRS_NOMINAL_STATE: [i64; 8] = [0; 8]
+var DRS_NOMINAL_GENERATION: [i64; 8] = [1; 8]
+var DRS_NOMINAL_OWNER_SLOT: [i64; 8] = [-1; 8]
+var DRS_NOMINAL_OWNER_GENERATION: [i64; 8] = [0; 8]
+var DRS_NOMINAL_IS_PUBLIC: [i64; 8] = [0; 8]
+var DRS_NOMINAL_NAME_LEN: [i64; 8] = [0; 8]
+var DRS_NOMINAL_NAME_BYTES: [i8; 1024] = [0; 1024]
+
+var DRS_FIELD_STATE: [i64; 16] = [0; 16]
+var DRS_FIELD_GENERATION: [i64; 16] = [1; 16]
+var DRS_FIELD_OWNER_SLOT: [i64; 16] = [-1; 16]
+var DRS_FIELD_OWNER_GENERATION: [i64; 16] = [0; 16]
+var DRS_FIELD_NAME_LEN: [i64; 16] = [0; 16]
+var DRS_FIELD_NAME_BYTES: [i8; 2048] = [0; 2048]
+// Declaration order is retained as payload for later layout work. It never
+// selects a field and is not part of FieldDefId identity.
+var DRS_FIELD_DECLARED_ORDINAL: [i64; 16] = [-1; 16]
+var DRS_FIELD_TYPE_SEG_COUNT: [i64; 16] = [0; 16]
+var DRS_FIELD_TYPE_SEG_LEN: [i64; 64] = [0; 64]
+var DRS_FIELD_TYPE_BYTES: [i8; 8192] = [0; 8192]
+
+var DRS_IMPORT_STATE: [i64; 8] = [0; 8]
+var DRS_IMPORT_SOURCE_SLOT: [i64; 8] = [-1; 8]
+var DRS_IMPORT_SOURCE_GENERATION: [i64; 8] = [0; 8]
+var DRS_IMPORT_TARGET_SLOT: [i64; 8] = [-1; 8]
+var DRS_IMPORT_TARGET_GENERATION: [i64; 8] = [0; 8]
+var DRS_IMPORT_MODE: [i64; 8] = [0; 8]
+var DRS_IMPORT_NAME_LEN: [i64; 8] = [0; 8]
+var DRS_IMPORT_NAME_BYTES: [i8; 1024] = [0; 1024]
+
+var DRS_RECEIPT_STATE: [i64; 8] = [0; 8]
+var DRS_RECEIPT_GENERATION: [i64; 8] = [1; 8]
+var DRS_RECEIPT_SOURCE_MODULE_SLOT: [i64; 8] = [-1; 8]
+var DRS_RECEIPT_SOURCE_MODULE_GENERATION: [i64; 8] = [0; 8]
+var DRS_RECEIPT_SOURCE_FIELD_SLOT: [i64; 8] = [-1; 8]
+var DRS_RECEIPT_SOURCE_FIELD_GENERATION: [i64; 8] = [0; 8]
+var DRS_RECEIPT_TARGET_NOMINAL_SLOT: [i64; 8] = [-1; 8]
+var DRS_RECEIPT_TARGET_NOMINAL_GENERATION: [i64; 8] = [0; 8]
+
+pub fn definition_registry_shadow_invalid_module_def_id() -> DefinitionRegistryShadowModuleDefId {
+    DefinitionRegistryShadowModuleDefId { registry_identity: 0, snapshot_generation: 0, slot: -1, generation: 0 }
+}
+
+pub fn definition_registry_shadow_invalid_nominal_type_def_id() -> DefinitionRegistryShadowNominalTypeDefId {
+    DefinitionRegistryShadowNominalTypeDefId { registry_identity: 0, snapshot_generation: 0, slot: -1, generation: 0 }
+}
+
+pub fn definition_registry_shadow_invalid_field_def_id() -> DefinitionRegistryShadowFieldDefId {
+    DefinitionRegistryShadowFieldDefId { registry_identity: 0, snapshot_generation: 0, slot: -1, generation: 0 }
+}
+
+pub fn definition_registry_shadow_invalid_binding_receipt() -> DefinitionRegistryShadowTypeExprBindingReceipt {
+    DefinitionRegistryShadowTypeExprBindingReceipt { registry_identity: 0, snapshot_generation: 0, slot: -1, generation: 0 }
+}
+
+fn drs_module_id_is_clear(id: &DefinitionRegistryShadowModuleDefId) -> bool {
+    (*id).registry_identity == 0 && (*id).snapshot_generation == 0 && (*id).slot == -1 && (*id).generation == 0
+}
+
+fn drs_nominal_id_is_clear(id: &DefinitionRegistryShadowNominalTypeDefId) -> bool {
+    (*id).registry_identity == 0 && (*id).snapshot_generation == 0 && (*id).slot == -1 && (*id).generation == 0
+}
+
+fn drs_field_id_is_clear(id: &DefinitionRegistryShadowFieldDefId) -> bool {
+    (*id).registry_identity == 0 && (*id).snapshot_generation == 0 && (*id).slot == -1 && (*id).generation == 0
+}
+
+fn drs_receipt_is_clear(id: &DefinitionRegistryShadowTypeExprBindingReceipt) -> bool {
+    (*id).registry_identity == 0 && (*id).snapshot_generation == 0 && (*id).slot == -1 && (*id).generation == 0
+}
+
+pub fn definition_registry_shadow_clear_module_def_id(id: &! DefinitionRegistryShadowModuleDefId) with Mut {
+    (*id).registry_identity = 0
+    (*id).snapshot_generation = 0
+    (*id).slot = -1
+    (*id).generation = 0
+}
+
+pub fn definition_registry_shadow_clear_nominal_type_def_id(id: &! DefinitionRegistryShadowNominalTypeDefId) with Mut {
+    (*id).registry_identity = 0
+    (*id).snapshot_generation = 0
+    (*id).slot = -1
+    (*id).generation = 0
+}
+
+pub fn definition_registry_shadow_clear_field_def_id(id: &! DefinitionRegistryShadowFieldDefId) with Mut {
+    (*id).registry_identity = 0
+    (*id).snapshot_generation = 0
+    (*id).slot = -1
+    (*id).generation = 0
+}
+
+pub fn definition_registry_shadow_clear_binding_receipt(id: &! DefinitionRegistryShadowTypeExprBindingReceipt) with Mut {
+    (*id).registry_identity = 0
+    (*id).snapshot_generation = 0
+    (*id).slot = -1
+    (*id).generation = 0
+}
+
+fn drs_segment_name(segment: &StringList) -> Name with Mut, Panic, Div {
+    var name = empty_name()
+    name.len = (*segment).head_len
+    var i: i64 = 0
+    while i < (*segment).head_len && i < 128 {
+        name.buf[i as usize] = (*segment).head_buf[i as usize]
+        i = i + 1
+    }
+    name
+}
+
+fn drs_path_segment(path: &AstPath, target: i64) -> Name with Mut, Panic, Div, Alloc {
+    drs_path_segment_loop(&(*path).segments, target, 0)
+}
+
+fn drs_path_segment_loop(list: &StringList, target: i64, current: i64) -> Name with Mut, Panic, Div, Alloc {
+    if current == target { return drs_segment_name(list) }
+    match (*list).tail {
+        Some(rest) => drs_path_segment_loop(&(*rest), target, current + 1)
+        None => empty_name()
+    }
+}
+
+fn drs_path_is_storable(path: &AstPath) -> bool with Mut, Panic, Div, Alloc {
+    if (*path).seg_count <= 0 { return false }
+    if (*path).seg_count > DEFINITION_REGISTRY_SHADOW_PATH_SEGMENT_CAPACITY { return false }
+    var segment: i64 = 0
+    while segment < (*path).seg_count {
+        let name = drs_path_segment(path, segment)
+        if name.len <= 0 || name.len > 128 { return false }
+        segment = segment + 1
+    }
+    true
+}
+
+fn drs_store_module_path(slot: i64, path: &AstPath) with Mut, Panic, Div, Alloc {
+    DRS_MODULE_PATH_SEG_COUNT[slot as usize] = (*path).seg_count
+    var segment: i64 = 0
+    while segment < (*path).seg_count {
+        let name = drs_path_segment(path, segment)
+        let cell = slot * 4 + segment
+        DRS_MODULE_PATH_SEG_LEN[cell as usize] = name.len
+        var byte: i64 = 0
+        while byte < name.len {
+            DRS_MODULE_PATH_BYTES[(cell * 128 + byte) as usize] = name.buf[byte as usize]
+            byte = byte + 1
+        }
+        segment = segment + 1
+    }
+}
+
+fn drs_module_path_matches(slot: i64, path: &AstPath) -> bool with Mut, Panic, Div, Alloc {
+    if DRS_MODULE_PATH_SEG_COUNT[slot as usize] != (*path).seg_count { return false }
+    var segment: i64 = 0
+    while segment < (*path).seg_count {
+        let name = drs_path_segment(path, segment)
+        let cell = slot * 4 + segment
+        if DRS_MODULE_PATH_SEG_LEN[cell as usize] != name.len { return false }
+        var byte: i64 = 0
+        while byte < name.len {
+            if DRS_MODULE_PATH_BYTES[(cell * 128 + byte) as usize] != name.buf[byte as usize] { return false }
+            byte = byte + 1
+        }
+        segment = segment + 1
+    }
+    true
+}
+
+fn drs_clear_snapshot() with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < 4 {
+        DRS_MODULE_STATE[i as usize] = DRS_SLOT_FREE
+        DRS_MODULE_GENERATION[i as usize] = DRS_MODULE_GENERATION[i as usize] + 1
+        DRS_MODULE_DECLS_INDEXED[i as usize] = 0
+        DRS_MODULE_IMPORTS_INDEXED[i as usize] = 0
+        DRS_MODULE_PATH_SEG_COUNT[i as usize] = 0
+        i = i + 1
+    }
+    i = 0
+    while i < 8 {
+        DRS_NOMINAL_STATE[i as usize] = DRS_SLOT_FREE
+        DRS_NOMINAL_GENERATION[i as usize] = DRS_NOMINAL_GENERATION[i as usize] + 1
+        DRS_NOMINAL_OWNER_SLOT[i as usize] = -1
+        DRS_NOMINAL_OWNER_GENERATION[i as usize] = 0
+        DRS_IMPORT_STATE[i as usize] = DRS_SLOT_FREE
+        DRS_RECEIPT_STATE[i as usize] = DRS_SLOT_FREE
+        DRS_RECEIPT_GENERATION[i as usize] = DRS_RECEIPT_GENERATION[i as usize] + 1
+        i = i + 1
+    }
+    i = 0
+    while i < 16 {
+        DRS_FIELD_STATE[i as usize] = DRS_SLOT_FREE
+        DRS_FIELD_GENERATION[i as usize] = DRS_FIELD_GENERATION[i as usize] + 1
+        DRS_FIELD_OWNER_SLOT[i as usize] = -1
+        DRS_FIELD_OWNER_GENERATION[i as usize] = 0
+        DRS_FIELD_DECLARED_ORDINAL[i as usize] = -1
+        DRS_FIELD_TYPE_SEG_COUNT[i as usize] = 0
+        i = i + 1
+    }
+}
+
+pub fn definition_registry_shadow_begin() -> i64 with Mut, Panic, Div {
+    if DRS_STATE != DRS_STATE_EMPTY { return DEFINITION_REGISTRY_SHADOW_ERR_STATE }
+    drs_clear_snapshot()
+    DRS_REGISTRY_IDENTITY = DRS_NEXT_REGISTRY_IDENTITY
+    DRS_NEXT_REGISTRY_IDENTITY = DRS_NEXT_REGISTRY_IDENTITY + 1
+    DRS_SNAPSHOT_GENERATION = DRS_SNAPSHOT_GENERATION + 1
+    DRS_STATE = DRS_STATE_BUILDING
+    DEFINITION_REGISTRY_SHADOW_OK
+}
+
+pub fn definition_registry_shadow_reset() -> i64 with Mut, Panic, Div {
+    if DRS_STATE == DRS_STATE_EMPTY || DRS_REGISTRY_IDENTITY <= 0 {
+        return DEFINITION_REGISTRY_SHADOW_ERR_STATE
+    }
+    drs_clear_snapshot()
+    DRS_SNAPSHOT_GENERATION = DRS_SNAPSHOT_GENERATION + 1
+    DRS_STATE = DRS_STATE_BUILDING
+    DEFINITION_REGISTRY_SHADOW_OK
+}
+
+pub fn definition_registry_shadow_release() -> i64 with Mut, Panic, Div {
+    if DRS_STATE == DRS_STATE_EMPTY { return DEFINITION_REGISTRY_SHADOW_ERR_STATE }
+    drs_clear_snapshot()
+    DRS_REGISTRY_IDENTITY = 0
+    DRS_STATE = DRS_STATE_EMPTY
+    DEFINITION_REGISTRY_SHADOW_OK
+}
+
+pub fn definition_registry_shadow_module_is_live(id: &DefinitionRegistryShadowModuleDefId) -> bool with Panic, Div {
+    let slot = (*id).slot
+    DRS_STATE != DRS_STATE_EMPTY &&
+        (*id).registry_identity == DRS_REGISTRY_IDENTITY &&
+        (*id).snapshot_generation == DRS_SNAPSHOT_GENERATION &&
+        slot >= 0 && slot < 4 &&
+        DRS_MODULE_STATE[slot as usize] == DRS_SLOT_LIVE &&
+        DRS_MODULE_GENERATION[slot as usize] == (*id).generation
+}
+
+pub fn definition_registry_shadow_register_resolved_module_declaration(
+    path: &AstPath,
+    out: &! DefinitionRegistryShadowModuleDefId,
+) -> i64 with Mut, Panic, Div, Alloc {
+    if DRS_STATE != DRS_STATE_BUILDING { return DEFINITION_REGISTRY_SHADOW_ERR_STATE }
+    if !drs_module_id_is_clear(out) { return DEFINITION_REGISTRY_SHADOW_ERR_OUTPUT_LIVE }
+    if (*path).seg_count <= 0 { return DEFINITION_REGISTRY_SHADOW_ERR_MISSING_MODULE_AUTHORITY }
+    if !drs_path_is_storable(path) { return DEFINITION_REGISTRY_SHADOW_ERR_PATH_CAPACITY }
+    var slot: i64 = 0
+    while slot < 4 {
+        if DRS_MODULE_STATE[slot as usize] == DRS_SLOT_LIVE && drs_module_path_matches(slot, path) {
+            return DEFINITION_REGISTRY_SHADOW_ERR_DUPLICATE_MODULE_PATH
+        }
+        slot = slot + 1
+    }
+    slot = 0
+    while slot < 4 {
+        if DRS_MODULE_STATE[slot as usize] != DRS_SLOT_LIVE {
+            DRS_MODULE_STATE[slot as usize] = DRS_SLOT_LIVE
+            drs_store_module_path(slot, path)
+            (*out).registry_identity = DRS_REGISTRY_IDENTITY
+            (*out).snapshot_generation = DRS_SNAPSHOT_GENERATION
+            (*out).slot = slot
+            (*out).generation = DRS_MODULE_GENERATION[slot as usize]
+            return DEFINITION_REGISTRY_SHADOW_OK
+        }
+        slot = slot + 1
+    }
+    DEFINITION_REGISTRY_SHADOW_ERR_CAPACITY
+}
+
+pub fn definition_registry_shadow_register_module(
+    program: &Program,
+    out: &! DefinitionRegistryShadowModuleDefId,
+) -> i64 with Mut, Panic, Div, Alloc {
+    definition_registry_shadow_register_resolved_module_declaration(&(*program).module_path, out)
+}
+
+fn drs_nominal_name_matches(slot: i64, name: Name) -> bool with Panic, Div {
+    if DRS_NOMINAL_NAME_LEN[slot as usize] != name.len { return false }
+    var i: i64 = 0
+    while i < name.len {
+        if DRS_NOMINAL_NAME_BYTES[(slot * 128 + i) as usize] != name.buf[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn drs_field_name_matches(slot: i64, name: Name) -> bool with Panic, Div {
+    if DRS_FIELD_NAME_LEN[slot as usize] != name.len { return false }
+    var i: i64 = 0
+    while i < name.len {
+        if DRS_FIELD_NAME_BYTES[(slot * 128 + i) as usize] != name.buf[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn drs_import_name_matches(slot: i64, field_slot: i64) -> bool with Panic, Div {
+    if DRS_FIELD_TYPE_SEG_COUNT[field_slot as usize] <= 0 { return false }
+    let segment = DRS_FIELD_TYPE_SEG_COUNT[field_slot as usize] - 1
+    let cell = field_slot * 4 + segment
+    if DRS_IMPORT_NAME_LEN[slot as usize] != DRS_FIELD_TYPE_SEG_LEN[cell as usize] { return false }
+    var i: i64 = 0
+    while i < DRS_IMPORT_NAME_LEN[slot as usize] {
+        if DRS_IMPORT_NAME_BYTES[(slot * 128 + i) as usize] !=
+           DRS_FIELD_TYPE_BYTES[(cell * 128 + i) as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn drs_nominal_name_matches_field_type_tail(nominal_slot: i64, field_slot: i64) -> bool with Panic, Div {
+    if DRS_FIELD_TYPE_SEG_COUNT[field_slot as usize] <= 0 { return false }
+    let segment = DRS_FIELD_TYPE_SEG_COUNT[field_slot as usize] - 1
+    let cell = field_slot * 4 + segment
+    if DRS_NOMINAL_NAME_LEN[nominal_slot as usize] != DRS_FIELD_TYPE_SEG_LEN[cell as usize] { return false }
+    var i: i64 = 0
+    while i < DRS_NOMINAL_NAME_LEN[nominal_slot as usize] {
+        if DRS_NOMINAL_NAME_BYTES[(nominal_slot * 128 + i) as usize] !=
+           DRS_FIELD_TYPE_BYTES[(cell * 128 + i) as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn drs_store_nominal_name(slot: i64, name: Name) with Mut, Panic, Div {
+    DRS_NOMINAL_NAME_LEN[slot as usize] = name.len
+    var i: i64 = 0
+    while i < name.len {
+        DRS_NOMINAL_NAME_BYTES[(slot * 128 + i) as usize] = name.buf[i as usize]
+        i = i + 1
+    }
+}
+
+fn drs_store_field_name(slot: i64, name: Name) with Mut, Panic, Div {
+    DRS_FIELD_NAME_LEN[slot as usize] = name.len
+    var i: i64 = 0
+    while i < name.len {
+        DRS_FIELD_NAME_BYTES[(slot * 128 + i) as usize] = name.buf[i as usize]
+        i = i + 1
+    }
+}
+
+fn drs_store_import_name(slot: i64, name: Name) with Mut, Panic, Div {
+    DRS_IMPORT_NAME_LEN[slot as usize] = name.len
+    var i: i64 = 0
+    while i < name.len {
+        DRS_IMPORT_NAME_BYTES[(slot * 128 + i) as usize] = name.buf[i as usize]
+        i = i + 1
+    }
+}
+
+fn drs_store_resolved_field_type_path(slot: i64, path: &AstPath) -> i64 with Mut, Panic, Div, Alloc {
+    if !drs_path_is_storable(path) { return DEFINITION_REGISTRY_SHADOW_ERR_PATH_CAPACITY }
+    DRS_FIELD_TYPE_SEG_COUNT[slot as usize] = (*path).seg_count
+    var segment: i64 = 0
+    while segment < (*path).seg_count {
+        let name = drs_path_segment(path, segment)
+        let cell = slot * 4 + segment
+        DRS_FIELD_TYPE_SEG_LEN[cell as usize] = name.len
+        var byte: i64 = 0
+        while byte < name.len {
+            DRS_FIELD_TYPE_BYTES[(cell * 128 + byte) as usize] = name.buf[byte as usize]
+            byte = byte + 1
+        }
+        segment = segment + 1
+    }
+    DEFINITION_REGISTRY_SHADOW_OK
+}
+
+fn drs_store_field_type_path(slot: i64, ty: &TypeExpr) -> i64 with Mut, Panic, Div, Alloc {
+    match (*ty).kind {
+        TypeExprKind::TypeNamed => drs_store_resolved_field_type_path(slot, &(*ty).path)
+        _ => {
+            DRS_FIELD_TYPE_SEG_COUNT[slot as usize] = 0
+            DEFINITION_REGISTRY_SHADOW_OK
+        }
+    }
+}
+
+pub fn definition_registry_shadow_nominal_is_live(id: &DefinitionRegistryShadowNominalTypeDefId) -> bool with Panic, Div {
+    let slot = (*id).slot
+    DRS_STATE != DRS_STATE_EMPTY &&
+        (*id).registry_identity == DRS_REGISTRY_IDENTITY &&
+        (*id).snapshot_generation == DRS_SNAPSHOT_GENERATION &&
+        slot >= 0 && slot < 8 &&
+        DRS_NOMINAL_STATE[slot as usize] == DRS_SLOT_LIVE &&
+        DRS_NOMINAL_GENERATION[slot as usize] == (*id).generation
+}
+
+pub fn definition_registry_shadow_field_is_live(id: &DefinitionRegistryShadowFieldDefId) -> bool with Panic, Div {
+    let slot = (*id).slot
+    DRS_STATE != DRS_STATE_EMPTY &&
+        (*id).registry_identity == DRS_REGISTRY_IDENTITY &&
+        (*id).snapshot_generation == DRS_SNAPSHOT_GENERATION &&
+        slot >= 0 && slot < 16 &&
+        DRS_FIELD_STATE[slot as usize] == DRS_SLOT_LIVE &&
+        DRS_FIELD_GENERATION[slot as usize] == (*id).generation
+}
+
+pub fn definition_registry_shadow_binding_is_live(
+    id: &DefinitionRegistryShadowTypeExprBindingReceipt,
+) -> bool with Panic, Div {
+    let slot = (*id).slot
+    DRS_STATE == DRS_STATE_SEALED &&
+        (*id).registry_identity == DRS_REGISTRY_IDENTITY &&
+        (*id).snapshot_generation == DRS_SNAPSHOT_GENERATION &&
+        slot >= 0 && slot < 8 &&
+        DRS_RECEIPT_STATE[slot as usize] == DRS_SLOT_LIVE &&
+        DRS_RECEIPT_GENERATION[slot as usize] == (*id).generation
+}
+
+pub fn definition_registry_shadow_find_module(
+    path: &AstPath,
+    out: &! DefinitionRegistryShadowModuleDefId,
+) -> i64 with Mut, Panic, Div, Alloc {
+    if DRS_STATE == DRS_STATE_EMPTY { return DEFINITION_REGISTRY_SHADOW_ERR_STATE }
+    if !drs_module_id_is_clear(out) { return DEFINITION_REGISTRY_SHADOW_ERR_OUTPUT_LIVE }
+    if !drs_path_is_storable(path) { return DEFINITION_REGISTRY_SHADOW_ERR_PATH_CAPACITY }
+    var found: i64 = -1
+    var slot: i64 = 0
+    while slot < 4 {
+        if DRS_MODULE_STATE[slot as usize] == DRS_SLOT_LIVE && drs_module_path_matches(slot, path) {
+            if found >= 0 { return DEFINITION_REGISTRY_SHADOW_ERR_AMBIGUOUS }
+            found = slot
+        }
+        slot = slot + 1
+    }
+    if found < 0 { return DEFINITION_REGISTRY_SHADOW_ERR_UNRESOLVED }
+    (*out).registry_identity = DRS_REGISTRY_IDENTITY
+    (*out).snapshot_generation = DRS_SNAPSHOT_GENERATION
+    (*out).slot = found
+    (*out).generation = DRS_MODULE_GENERATION[found as usize]
+    DEFINITION_REGISTRY_SHADOW_OK
+}
+
+pub fn definition_registry_shadow_register_resolved_nominal_declaration(
+    module: &DefinitionRegistryShadowModuleDefId,
+    name: Name,
+    is_public: bool,
+    out: &! DefinitionRegistryShadowNominalTypeDefId,
+) -> i64 with Mut, Panic, Div {
+    if DRS_STATE != DRS_STATE_BUILDING || !definition_registry_shadow_module_is_live(module) {
+        return DEFINITION_REGISTRY_SHADOW_ERR_STATE
+    }
+    if !drs_nominal_id_is_clear(out) { return DEFINITION_REGISTRY_SHADOW_ERR_OUTPUT_LIVE }
+    let module_slot = (*module).slot
+    if DRS_MODULE_DECLS_INDEXED[module_slot as usize] != 0 { return DEFINITION_REGISTRY_SHADOW_ERR_STATE }
+    if name_is_empty(name) || name.len > 128 { return DEFINITION_REGISTRY_SHADOW_ERR_INVALID_ID }
+    if drs_find_nominal_slot(module_slot, name) != -1 { return DEFINITION_REGISTRY_SHADOW_ERR_DUPLICATE_DECLARATION }
+    var slot: i64 = 0
+    while slot < 8 {
+        if DRS_NOMINAL_STATE[slot as usize] != DRS_SLOT_LIVE {
+            DRS_NOMINAL_STATE[slot as usize] = DRS_SLOT_LIVE
+            DRS_NOMINAL_OWNER_SLOT[slot as usize] = module_slot
+            DRS_NOMINAL_OWNER_GENERATION[slot as usize] = (*module).generation
+            DRS_NOMINAL_IS_PUBLIC[slot as usize] = if is_public { 1 } else { 0 }
+            drs_store_nominal_name(slot, name)
+            (*out).registry_identity = DRS_REGISTRY_IDENTITY
+            (*out).snapshot_generation = DRS_SNAPSHOT_GENERATION
+            (*out).slot = slot
+            (*out).generation = DRS_NOMINAL_GENERATION[slot as usize]
+            return DEFINITION_REGISTRY_SHADOW_OK
+        }
+        slot = slot + 1
+    }
+    DEFINITION_REGISTRY_SHADOW_ERR_CAPACITY
+}
+
+pub fn definition_registry_shadow_register_resolved_field_declaration(
+    nominal: &DefinitionRegistryShadowNominalTypeDefId,
+    name: Name,
+    declared_ordinal: i64,
+    type_path: &AstPath,
+    out: &! DefinitionRegistryShadowFieldDefId,
+) -> i64 with Mut, Panic, Div, Alloc {
+    if DRS_STATE != DRS_STATE_BUILDING || !definition_registry_shadow_nominal_is_live(nominal) {
+        return DEFINITION_REGISTRY_SHADOW_ERR_STATE
+    }
+    if !drs_field_id_is_clear(out) { return DEFINITION_REGISTRY_SHADOW_ERR_OUTPUT_LIVE }
+    let nominal_slot = (*nominal).slot
+    let module_slot = DRS_NOMINAL_OWNER_SLOT[nominal_slot as usize]
+    if module_slot < 0 || DRS_MODULE_DECLS_INDEXED[module_slot as usize] != 0 {
+        return DEFINITION_REGISTRY_SHADOW_ERR_STATE
+    }
+    if name_is_empty(name) || name.len > 128 || declared_ordinal < 0 {
+        return DEFINITION_REGISTRY_SHADOW_ERR_INVALID_ID
+    }
+    var scan: i64 = 0
+    while scan < 16 {
+        if DRS_FIELD_STATE[scan as usize] == DRS_SLOT_LIVE &&
+           DRS_FIELD_OWNER_SLOT[scan as usize] == nominal_slot && drs_field_name_matches(scan, name) {
+            return DEFINITION_REGISTRY_SHADOW_ERR_DUPLICATE_DECLARATION
+        }
+        scan = scan + 1
+    }
+    var slot: i64 = 0
+    while slot < 16 {
+        if DRS_FIELD_STATE[slot as usize] != DRS_SLOT_LIVE {
+            let path_status = drs_store_resolved_field_type_path(slot, type_path)
+            if path_status != 0 { return path_status }
+            DRS_FIELD_STATE[slot as usize] = DRS_SLOT_LIVE
+            DRS_FIELD_OWNER_SLOT[slot as usize] = nominal_slot
+            DRS_FIELD_OWNER_GENERATION[slot as usize] = (*nominal).generation
+            DRS_FIELD_DECLARED_ORDINAL[slot as usize] = declared_ordinal
+            drs_store_field_name(slot, name)
+            (*out).registry_identity = DRS_REGISTRY_IDENTITY
+            (*out).snapshot_generation = DRS_SNAPSHOT_GENERATION
+            (*out).slot = slot
+            (*out).generation = DRS_FIELD_GENERATION[slot as usize]
+            return DEFINITION_REGISTRY_SHADOW_OK
+        }
+        slot = slot + 1
+    }
+    DEFINITION_REGISTRY_SHADOW_ERR_CAPACITY
+}
+
+pub fn definition_registry_shadow_finish_resolved_declarations(
+    module: &DefinitionRegistryShadowModuleDefId,
+) -> i64 with Mut, Panic, Div {
+    if DRS_STATE != DRS_STATE_BUILDING || !definition_registry_shadow_module_is_live(module) {
+        return DEFINITION_REGISTRY_SHADOW_ERR_STATE
+    }
+    let slot = (*module).slot
+    if DRS_MODULE_DECLS_INDEXED[slot as usize] != 0 { return DEFINITION_REGISTRY_SHADOW_ERR_STATE }
+    DRS_MODULE_DECLS_INDEXED[slot as usize] = 1
+    DEFINITION_REGISTRY_SHADOW_OK
+}
+
+pub fn definition_registry_shadow_abort_resolved_declarations(
+    module: &DefinitionRegistryShadowModuleDefId,
+) -> i64 with Mut, Panic, Div {
+    if DRS_STATE != DRS_STATE_BUILDING || !definition_registry_shadow_module_is_live(module) {
+        return DEFINITION_REGISTRY_SHADOW_ERR_STATE
+    }
+    let slot = (*module).slot
+    if DRS_MODULE_DECLS_INDEXED[slot as usize] != 0 { return DEFINITION_REGISTRY_SHADOW_ERR_STATE }
+    drs_rollback_module_declarations(slot)
+    DEFINITION_REGISTRY_SHADOW_OK
+}
+
+pub fn definition_registry_shadow_register_resolved_module_import(
+    source: &DefinitionRegistryShadowModuleDefId,
+    target: &DefinitionRegistryShadowModuleDefId,
+) -> i64 with Mut, Panic, Div {
+    if !definition_registry_shadow_module_is_live(source) || !definition_registry_shadow_module_is_live(target) {
+        return DEFINITION_REGISTRY_SHADOW_ERR_INVALID_ID
+    }
+    drs_add_import_record((*source).slot, (*target).slot, DRS_IMPORT_MODULE, empty_name())
+}
+
+pub fn definition_registry_shadow_register_resolved_glob_import(
+    source: &DefinitionRegistryShadowModuleDefId,
+    target: &DefinitionRegistryShadowModuleDefId,
+) -> i64 with Mut, Panic, Div {
+    if !definition_registry_shadow_module_is_live(source) || !definition_registry_shadow_module_is_live(target) {
+        return DEFINITION_REGISTRY_SHADOW_ERR_INVALID_ID
+    }
+    drs_add_import_record((*source).slot, (*target).slot, DRS_IMPORT_GLOB, empty_name())
+}
+
+pub fn definition_registry_shadow_finish_resolved_imports(
+    module: &DefinitionRegistryShadowModuleDefId,
+) -> i64 with Mut, Panic, Div {
+    if DRS_STATE != DRS_STATE_BUILDING || !definition_registry_shadow_module_is_live(module) {
+        return DEFINITION_REGISTRY_SHADOW_ERR_STATE
+    }
+    let slot = (*module).slot
+    if DRS_MODULE_DECLS_INDEXED[slot as usize] == 0 || DRS_MODULE_IMPORTS_INDEXED[slot as usize] != 0 {
+        return DEFINITION_REGISTRY_SHADOW_ERR_STATE
+    }
+    DRS_MODULE_IMPORTS_INDEXED[slot as usize] = 1
+    DEFINITION_REGISTRY_SHADOW_OK
+}
+
+fn drs_find_nominal_slot(module_slot: i64, name: Name) -> i64 with Panic, Div {
+    var found: i64 = -1
+    var slot: i64 = 0
+    while slot < 8 {
+        if DRS_NOMINAL_STATE[slot as usize] == DRS_SLOT_LIVE &&
+           DRS_NOMINAL_OWNER_SLOT[slot as usize] == module_slot &&
+           DRS_NOMINAL_OWNER_GENERATION[slot as usize] == DRS_MODULE_GENERATION[module_slot as usize] &&
+           drs_nominal_name_matches(slot, name) {
+            if found >= 0 { return -2 }
+            found = slot
+        }
+        slot = slot + 1
+    }
+    found
+}
+
+pub fn definition_registry_shadow_find_nominal(
+    module: &DefinitionRegistryShadowModuleDefId,
+    name: Name,
+    out: &! DefinitionRegistryShadowNominalTypeDefId,
+) -> i64 with Mut, Panic, Div {
+    if !definition_registry_shadow_module_is_live(module) { return DEFINITION_REGISTRY_SHADOW_ERR_INVALID_ID }
+    if !drs_nominal_id_is_clear(out) { return DEFINITION_REGISTRY_SHADOW_ERR_OUTPUT_LIVE }
+    let found = drs_find_nominal_slot((*module).slot, name)
+    if found == -2 { return DEFINITION_REGISTRY_SHADOW_ERR_AMBIGUOUS }
+    if found < 0 { return DEFINITION_REGISTRY_SHADOW_ERR_UNRESOLVED }
+    (*out).registry_identity = DRS_REGISTRY_IDENTITY
+    (*out).snapshot_generation = DRS_SNAPSHOT_GENERATION
+    (*out).slot = found
+    (*out).generation = DRS_NOMINAL_GENERATION[found as usize]
+    DEFINITION_REGISTRY_SHADOW_OK
+}
+
+pub fn definition_registry_shadow_find_field(
+    nominal: &DefinitionRegistryShadowNominalTypeDefId,
+    name: Name,
+    out: &! DefinitionRegistryShadowFieldDefId,
+) -> i64 with Mut, Panic, Div {
+    if !definition_registry_shadow_nominal_is_live(nominal) { return DEFINITION_REGISTRY_SHADOW_ERR_INVALID_ID }
+    if !drs_field_id_is_clear(out) { return DEFINITION_REGISTRY_SHADOW_ERR_OUTPUT_LIVE }
+    var found: i64 = -1
+    var slot: i64 = 0
+    while slot < 16 {
+        if DRS_FIELD_STATE[slot as usize] == DRS_SLOT_LIVE &&
+           DRS_FIELD_OWNER_SLOT[slot as usize] == (*nominal).slot &&
+           DRS_FIELD_OWNER_GENERATION[slot as usize] == (*nominal).generation &&
+           drs_field_name_matches(slot, name) {
+            if found >= 0 { return DEFINITION_REGISTRY_SHADOW_ERR_AMBIGUOUS }
+            found = slot
+        }
+        slot = slot + 1
+    }
+    if found < 0 { return DEFINITION_REGISTRY_SHADOW_ERR_UNRESOLVED }
+    (*out).registry_identity = DRS_REGISTRY_IDENTITY
+    (*out).snapshot_generation = DRS_SNAPSHOT_GENERATION
+    (*out).slot = found
+    (*out).generation = DRS_FIELD_GENERATION[found as usize]
+    DEFINITION_REGISTRY_SHADOW_OK
+}
+
+fn drs_add_field(
+    nominal_slot: i64,
+    field: &FieldDef,
+    declared_ordinal: i64,
+) -> i64 with Mut, Panic, Div, Alloc {
+    if name_is_empty((*field).name) || (*field).name.len > 128 {
+        return DEFINITION_REGISTRY_SHADOW_ERR_INVALID_ID
+    }
+    var scan: i64 = 0
+    while scan < 16 {
+        if DRS_FIELD_STATE[scan as usize] == DRS_SLOT_LIVE &&
+           DRS_FIELD_OWNER_SLOT[scan as usize] == nominal_slot &&
+           drs_field_name_matches(scan, (*field).name) {
+            return DEFINITION_REGISTRY_SHADOW_ERR_DUPLICATE_DECLARATION
+        }
+        scan = scan + 1
+    }
+    var slot: i64 = 0
+    while slot < 16 {
+        if DRS_FIELD_STATE[slot as usize] != DRS_SLOT_LIVE {
+            let path_status = drs_store_field_type_path(slot, &(*field).ty)
+            if path_status != DEFINITION_REGISTRY_SHADOW_OK { return path_status }
+            DRS_FIELD_STATE[slot as usize] = DRS_SLOT_LIVE
+            DRS_FIELD_OWNER_SLOT[slot as usize] = nominal_slot
+            DRS_FIELD_OWNER_GENERATION[slot as usize] = DRS_NOMINAL_GENERATION[nominal_slot as usize]
+            DRS_FIELD_DECLARED_ORDINAL[slot as usize] = declared_ordinal
+            drs_store_field_name(slot, (*field).name)
+            return DEFINITION_REGISTRY_SHADOW_OK
+        }
+        slot = slot + 1
+    }
+    DEFINITION_REGISTRY_SHADOW_ERR_CAPACITY
+}
+
+fn drs_add_fields(
+    nominal_slot: i64,
+    fields: Option<Box<FieldDefList>>,
+    ordinal: i64,
+) -> i64 with Mut, Panic, Div, Alloc {
+    match fields {
+        None => DEFINITION_REGISTRY_SHADOW_OK
+        Some(list) => {
+            let status = drs_add_field(nominal_slot, &(*list).head, ordinal)
+            if status != DEFINITION_REGISTRY_SHADOW_OK { return status }
+            drs_add_fields(nominal_slot, (*list).tail, ordinal + 1)
+        }
+    }
+}
+
+fn drs_add_struct(module_slot: i64, item: &Item) -> i64 with Mut, Panic, Div, Alloc {
+    match (*item).struct_def {
+        None => DEFINITION_REGISTRY_SHADOW_ERR_INVALID_ID
+        Some(definition) => {
+            let nominal_name = (*definition).name
+            if name_is_empty(nominal_name) || nominal_name.len > 128 || !name_eq((*item).name, nominal_name) {
+                return DEFINITION_REGISTRY_SHADOW_ERR_INVALID_ID
+            }
+            let duplicate = drs_find_nominal_slot(module_slot, nominal_name)
+            if duplicate >= 0 || duplicate == -2 {
+                return DEFINITION_REGISTRY_SHADOW_ERR_DUPLICATE_DECLARATION
+            }
+            var slot: i64 = 0
+            while slot < 8 {
+                if DRS_NOMINAL_STATE[slot as usize] != DRS_SLOT_LIVE {
+                    DRS_NOMINAL_STATE[slot as usize] = DRS_SLOT_LIVE
+                    DRS_NOMINAL_OWNER_SLOT[slot as usize] = module_slot
+                    DRS_NOMINAL_OWNER_GENERATION[slot as usize] = DRS_MODULE_GENERATION[module_slot as usize]
+                    DRS_NOMINAL_IS_PUBLIC[slot as usize] = if visibility_is_pub((*item).visibility) { 1 } else { 0 }
+                    drs_store_nominal_name(slot, nominal_name)
+                    let field_status = drs_add_fields(slot, (*definition).fields, 0)
+                    if field_status != DEFINITION_REGISTRY_SHADOW_OK {
+                        DRS_NOMINAL_STATE[slot as usize] = DRS_SLOT_FREE
+                        return field_status
+                    }
+                    return DEFINITION_REGISTRY_SHADOW_OK
+                }
+                slot = slot + 1
+            }
+            DEFINITION_REGISTRY_SHADOW_ERR_CAPACITY
+        }
+    }
+}
+
+fn drs_index_declaration_items(module_slot: i64, items: Option<Box<ItemList>>) -> i64 with Mut, Panic, Div, Alloc {
+    match items {
+        None => DEFINITION_REGISTRY_SHADOW_OK
+        Some(list) => {
+            let status = match (*list).head.kind {
+                ItemKind::ItemStruct => drs_add_struct(module_slot, &(*list).head)
+                _ => DEFINITION_REGISTRY_SHADOW_OK
+            }
+            if status != DEFINITION_REGISTRY_SHADOW_OK { return status }
+            drs_index_declaration_items(module_slot, (*list).tail)
+        }
+    }
+}
+
+fn drs_rollback_module_declarations(module_slot: i64) with Mut, Panic, Div {
+    var field_slot: i64 = 0
+    while field_slot < 16 {
+        let nominal_slot = DRS_FIELD_OWNER_SLOT[field_slot as usize]
+        if nominal_slot >= 0 && nominal_slot < 8 &&
+           DRS_NOMINAL_OWNER_SLOT[nominal_slot as usize] == module_slot {
+            DRS_FIELD_STATE[field_slot as usize] = DRS_SLOT_FREE
+            DRS_FIELD_GENERATION[field_slot as usize] = DRS_FIELD_GENERATION[field_slot as usize] + 1
+            DRS_FIELD_OWNER_SLOT[field_slot as usize] = -1
+            DRS_FIELD_OWNER_GENERATION[field_slot as usize] = 0
+            DRS_FIELD_NAME_LEN[field_slot as usize] = 0
+            DRS_FIELD_DECLARED_ORDINAL[field_slot as usize] = -1
+            DRS_FIELD_TYPE_SEG_COUNT[field_slot as usize] = 0
+        }
+        field_slot = field_slot + 1
+    }
+    var nominal_slot: i64 = 0
+    while nominal_slot < 8 {
+        if DRS_NOMINAL_OWNER_SLOT[nominal_slot as usize] == module_slot {
+            DRS_NOMINAL_STATE[nominal_slot as usize] = DRS_SLOT_FREE
+            DRS_NOMINAL_GENERATION[nominal_slot as usize] = DRS_NOMINAL_GENERATION[nominal_slot as usize] + 1
+            DRS_NOMINAL_OWNER_SLOT[nominal_slot as usize] = -1
+            DRS_NOMINAL_OWNER_GENERATION[nominal_slot as usize] = 0
+            DRS_NOMINAL_IS_PUBLIC[nominal_slot as usize] = 0
+            DRS_NOMINAL_NAME_LEN[nominal_slot as usize] = 0
+        }
+        nominal_slot = nominal_slot + 1
+    }
+}
+
+pub fn definition_registry_shadow_index_module_declarations(
+    module: &DefinitionRegistryShadowModuleDefId,
+    program: &Program,
+) -> i64 with Mut, Panic, Div, Alloc {
+    if DRS_STATE != DRS_STATE_BUILDING { return DEFINITION_REGISTRY_SHADOW_ERR_STATE }
+    if !definition_registry_shadow_module_is_live(module) { return DEFINITION_REGISTRY_SHADOW_ERR_INVALID_ID }
+    let slot = (*module).slot
+    if DRS_MODULE_DECLS_INDEXED[slot as usize] != 0 { return DEFINITION_REGISTRY_SHADOW_ERR_STATE }
+    if !drs_module_path_matches(slot, &(*program).module_path) {
+        return DEFINITION_REGISTRY_SHADOW_ERR_MISSING_MODULE_AUTHORITY
+    }
+    let status = drs_index_declaration_items(slot, (*program).items)
+    if status == DEFINITION_REGISTRY_SHADOW_OK {
+        DRS_MODULE_DECLS_INDEXED[slot as usize] = 1
+    } else {
+        drs_rollback_module_declarations(slot)
+    }
+    status
+}
+
+fn drs_add_import_record(source_slot: i64, target_slot: i64, mode: i64, name: Name) -> i64 with Mut, Panic, Div {
+    var slot: i64 = 0
+    while slot < 8 {
+        if DRS_IMPORT_STATE[slot as usize] != DRS_SLOT_LIVE {
+            DRS_IMPORT_STATE[slot as usize] = DRS_SLOT_LIVE
+            DRS_IMPORT_SOURCE_SLOT[slot as usize] = source_slot
+            DRS_IMPORT_SOURCE_GENERATION[slot as usize] = DRS_MODULE_GENERATION[source_slot as usize]
+            DRS_IMPORT_TARGET_SLOT[slot as usize] = target_slot
+            DRS_IMPORT_TARGET_GENERATION[slot as usize] = DRS_MODULE_GENERATION[target_slot as usize]
+            DRS_IMPORT_MODE[slot as usize] = mode
+            drs_store_import_name(slot, name)
+            return DEFINITION_REGISTRY_SHADOW_OK
+        }
+        slot = slot + 1
+    }
+    DEFINITION_REGISTRY_SHADOW_ERR_CAPACITY
+}
+
+fn drs_add_selective_imports(
+    source_slot: i64,
+    target_slot: i64,
+    items: Option<Box<ImportItemList>>,
+) -> i64 with Mut, Panic, Div, Alloc {
+    match items {
+        None => DEFINITION_REGISTRY_SHADOW_OK
+        Some(list) => {
+            let status = drs_add_import_record(source_slot, target_slot, DRS_IMPORT_SELECTIVE, (*list).head)
+            if status != DEFINITION_REGISTRY_SHADOW_OK { return status }
+            drs_add_selective_imports(source_slot, target_slot, (*list).tail)
+        }
+    }
+}
+
+fn drs_index_use(source_slot: i64, item: &Item) -> i64 with Mut, Panic, Div, Alloc {
+    var target = definition_registry_shadow_invalid_module_def_id()
+    let target_status = definition_registry_shadow_find_module(&(*item).use_path, &! target)
+    if target_status != DEFINITION_REGISTRY_SHADOW_OK { return target_status }
+    if (*item).use_glob {
+        return drs_add_import_record(source_slot, target.slot, DRS_IMPORT_GLOB, empty_name())
+    }
+    match (*item).use_items {
+        Some(items) => drs_add_selective_imports(source_slot, target.slot, Some(items))
+        None => drs_add_import_record(source_slot, target.slot, DRS_IMPORT_MODULE, empty_name())
+    }
+}
+
+fn drs_index_import_items(source_slot: i64, items: Option<Box<ItemList>>) -> i64 with Mut, Panic, Div, Alloc {
+    match items {
+        None => DEFINITION_REGISTRY_SHADOW_OK
+        Some(list) => {
+            let status = match (*list).head.kind {
+                ItemKind::ItemUse => drs_index_use(source_slot, &(*list).head)
+                _ => DEFINITION_REGISTRY_SHADOW_OK
+            }
+            if status != DEFINITION_REGISTRY_SHADOW_OK { return status }
+            drs_index_import_items(source_slot, (*list).tail)
+        }
+    }
+}
+
+fn drs_rollback_module_imports(source_slot: i64) with Mut, Panic, Div {
+    var slot: i64 = 0
+    while slot < 8 {
+        if DRS_IMPORT_SOURCE_SLOT[slot as usize] == source_slot {
+            DRS_IMPORT_STATE[slot as usize] = DRS_SLOT_FREE
+            DRS_IMPORT_SOURCE_SLOT[slot as usize] = -1
+            DRS_IMPORT_SOURCE_GENERATION[slot as usize] = 0
+            DRS_IMPORT_TARGET_SLOT[slot as usize] = -1
+            DRS_IMPORT_TARGET_GENERATION[slot as usize] = 0
+            DRS_IMPORT_MODE[slot as usize] = 0
+            DRS_IMPORT_NAME_LEN[slot as usize] = 0
+        }
+        slot = slot + 1
+    }
+}
+
+pub fn definition_registry_shadow_index_module_imports(
+    module: &DefinitionRegistryShadowModuleDefId,
+    program: &Program,
+) -> i64 with Mut, Panic, Div, Alloc {
+    if DRS_STATE != DRS_STATE_BUILDING { return DEFINITION_REGISTRY_SHADOW_ERR_STATE }
+    if !definition_registry_shadow_module_is_live(module) { return DEFINITION_REGISTRY_SHADOW_ERR_INVALID_ID }
+    let slot = (*module).slot
+    if DRS_MODULE_DECLS_INDEXED[slot as usize] == 0 || DRS_MODULE_IMPORTS_INDEXED[slot as usize] != 0 {
+        return DEFINITION_REGISTRY_SHADOW_ERR_STATE
+    }
+    if !drs_module_path_matches(slot, &(*program).module_path) {
+        return DEFINITION_REGISTRY_SHADOW_ERR_MISSING_MODULE_AUTHORITY
+    }
+    let status = drs_index_import_items(slot, (*program).items)
+    if status == DEFINITION_REGISTRY_SHADOW_OK {
+        DRS_MODULE_IMPORTS_INDEXED[slot as usize] = 1
+    } else {
+        drs_rollback_module_imports(slot)
+    }
+    status
+}
+
+pub fn definition_registry_shadow_seal() -> i64 with Mut, Panic, Div {
+    if DRS_STATE != DRS_STATE_BUILDING { return DEFINITION_REGISTRY_SHADOW_ERR_STATE }
+    var live_count: i64 = 0
+    var slot: i64 = 0
+    while slot < 4 {
+        if DRS_MODULE_STATE[slot as usize] == DRS_SLOT_LIVE {
+            live_count = live_count + 1
+            if DRS_MODULE_DECLS_INDEXED[slot as usize] == 0 || DRS_MODULE_IMPORTS_INDEXED[slot as usize] == 0 {
+                return DEFINITION_REGISTRY_SHADOW_ERR_STATE
+            }
+        }
+        slot = slot + 1
+    }
+    if live_count == 0 { return DEFINITION_REGISTRY_SHADOW_ERR_MISSING_MODULE_AUTHORITY }
+    DRS_STATE = DRS_STATE_SEALED
+    DEFINITION_REGISTRY_SHADOW_OK
+}
+
+fn drs_module_path_matches_field_prefix(module_slot: i64, field_slot: i64) -> bool with Panic, Div {
+    let type_segments = DRS_FIELD_TYPE_SEG_COUNT[field_slot as usize]
+    if type_segments <= 1 { return false }
+    if DRS_MODULE_PATH_SEG_COUNT[module_slot as usize] != type_segments - 1 { return false }
+    var segment: i64 = 0
+    while segment < type_segments - 1 {
+        let module_cell = module_slot * 4 + segment
+        let field_cell = field_slot * 4 + segment
+        if DRS_MODULE_PATH_SEG_LEN[module_cell as usize] != DRS_FIELD_TYPE_SEG_LEN[field_cell as usize] {
+            return false
+        }
+        var byte: i64 = 0
+        while byte < DRS_MODULE_PATH_SEG_LEN[module_cell as usize] {
+            if DRS_MODULE_PATH_BYTES[(module_cell * 128 + byte) as usize] !=
+               DRS_FIELD_TYPE_BYTES[(field_cell * 128 + byte) as usize] { return false }
+            byte = byte + 1
+        }
+        segment = segment + 1
+    }
+    true
+}
+
+fn drs_module_has_import(source_slot: i64, target_slot: i64) -> bool with Panic, Div {
+    var slot: i64 = 0
+    while slot < 8 {
+        if DRS_IMPORT_STATE[slot as usize] == DRS_SLOT_LIVE &&
+           DRS_IMPORT_SOURCE_SLOT[slot as usize] == source_slot &&
+           DRS_IMPORT_SOURCE_GENERATION[slot as usize] == DRS_MODULE_GENERATION[source_slot as usize] &&
+           DRS_IMPORT_TARGET_SLOT[slot as usize] == target_slot &&
+           DRS_IMPORT_TARGET_GENERATION[slot as usize] == DRS_MODULE_GENERATION[target_slot as usize] {
+            return true
+        }
+        slot = slot + 1
+    }
+    false
+}
+
+fn drs_merge_candidate(found: i64, candidate: i64) -> i64 {
+    if candidate < 0 { return found }
+    if found < 0 { return candidate }
+    if found == candidate { return found }
+    -2
+}
+
+fn drs_find_unqualified_nominal(source_slot: i64, field_slot: i64) -> i64 with Panic, Div {
+    var found: i64 = -1
+    var nominal_slot: i64 = 0
+    while nominal_slot < 8 {
+        if DRS_NOMINAL_STATE[nominal_slot as usize] == DRS_SLOT_LIVE &&
+           DRS_NOMINAL_OWNER_SLOT[nominal_slot as usize] == source_slot &&
+           drs_nominal_name_matches_field_type_tail(nominal_slot, field_slot) {
+            found = drs_merge_candidate(found, nominal_slot)
+            if found == -2 { return found }
+        }
+        nominal_slot = nominal_slot + 1
+    }
+
+    var import_slot: i64 = 0
+    while import_slot < 8 {
+        if DRS_IMPORT_STATE[import_slot as usize] == DRS_SLOT_LIVE &&
+           DRS_IMPORT_SOURCE_SLOT[import_slot as usize] == source_slot &&
+           DRS_IMPORT_SOURCE_GENERATION[import_slot as usize] == DRS_MODULE_GENERATION[source_slot as usize] {
+            let mode = DRS_IMPORT_MODE[import_slot as usize]
+            let selects_name = mode == DRS_IMPORT_GLOB ||
+                (mode == DRS_IMPORT_SELECTIVE && drs_import_name_matches(import_slot, field_slot))
+            if selects_name {
+                let target_slot = DRS_IMPORT_TARGET_SLOT[import_slot as usize]
+                if target_slot >= 0 && target_slot < 4 &&
+                   DRS_MODULE_STATE[target_slot as usize] == DRS_SLOT_LIVE &&
+                   DRS_IMPORT_TARGET_GENERATION[import_slot as usize] == DRS_MODULE_GENERATION[target_slot as usize] {
+                    nominal_slot = 0
+                    while nominal_slot < 8 {
+                        if DRS_NOMINAL_STATE[nominal_slot as usize] == DRS_SLOT_LIVE &&
+                           DRS_NOMINAL_OWNER_SLOT[nominal_slot as usize] == target_slot &&
+                           DRS_NOMINAL_IS_PUBLIC[nominal_slot as usize] == 1 &&
+                           drs_nominal_name_matches_field_type_tail(nominal_slot, field_slot) {
+                            found = drs_merge_candidate(found, nominal_slot)
+                            if found == -2 { return found }
+                        }
+                        nominal_slot = nominal_slot + 1
+                    }
+                }
+            }
+        }
+        import_slot = import_slot + 1
+    }
+    found
+}
+
+fn drs_find_qualified_nominal(source_slot: i64, field_slot: i64) -> i64 with Panic, Div {
+    var target_module: i64 = -1
+    var module_slot: i64 = 0
+    while module_slot < 4 {
+        if DRS_MODULE_STATE[module_slot as usize] == DRS_SLOT_LIVE &&
+           drs_module_path_matches_field_prefix(module_slot, field_slot) {
+            if target_module >= 0 { return -2 }
+            target_module = module_slot
+        }
+        module_slot = module_slot + 1
+    }
+    if target_module < 0 { return -1 }
+    if target_module != source_slot && !drs_module_has_import(source_slot, target_module) { return -1 }
+
+    var found: i64 = -1
+    var nominal_slot: i64 = 0
+    while nominal_slot < 8 {
+        if DRS_NOMINAL_STATE[nominal_slot as usize] == DRS_SLOT_LIVE &&
+           DRS_NOMINAL_OWNER_SLOT[nominal_slot as usize] == target_module &&
+           (target_module == source_slot || DRS_NOMINAL_IS_PUBLIC[nominal_slot as usize] == 1) &&
+           drs_nominal_name_matches_field_type_tail(nominal_slot, field_slot) {
+            found = drs_merge_candidate(found, nominal_slot)
+            if found == -2 { return found }
+        }
+        nominal_slot = nominal_slot + 1
+    }
+    found
+}
+
+pub fn definition_registry_shadow_bind_field_type_expr(
+    field: &DefinitionRegistryShadowFieldDefId,
+    out: &! DefinitionRegistryShadowTypeExprBindingReceipt,
+) -> i64 with Mut, Panic, Div {
+    if DRS_STATE != DRS_STATE_SEALED { return DEFINITION_REGISTRY_SHADOW_ERR_STATE }
+    if !definition_registry_shadow_field_is_live(field) { return DEFINITION_REGISTRY_SHADOW_ERR_INVALID_ID }
+    if !drs_receipt_is_clear(out) { return DEFINITION_REGISTRY_SHADOW_ERR_OUTPUT_LIVE }
+    let field_slot = (*field).slot
+    let type_segments = DRS_FIELD_TYPE_SEG_COUNT[field_slot as usize]
+    if type_segments <= 0 { return DEFINITION_REGISTRY_SHADOW_ERR_NOT_NAMED }
+    let nominal_owner = DRS_FIELD_OWNER_SLOT[field_slot as usize]
+    if nominal_owner < 0 || nominal_owner >= 8 || DRS_NOMINAL_STATE[nominal_owner as usize] != DRS_SLOT_LIVE {
+        return DEFINITION_REGISTRY_SHADOW_ERR_INVALID_ID
+    }
+    let source_module = DRS_NOMINAL_OWNER_SLOT[nominal_owner as usize]
+    let target = if type_segments == 1 {
+        drs_find_unqualified_nominal(source_module, field_slot)
+    } else {
+        drs_find_qualified_nominal(source_module, field_slot)
+    }
+    if target == -2 { return DEFINITION_REGISTRY_SHADOW_ERR_AMBIGUOUS }
+    if target < 0 { return DEFINITION_REGISTRY_SHADOW_ERR_UNRESOLVED }
+
+    var receipt_slot: i64 = 0
+    while receipt_slot < 8 {
+        if DRS_RECEIPT_STATE[receipt_slot as usize] != DRS_SLOT_LIVE {
+            DRS_RECEIPT_STATE[receipt_slot as usize] = DRS_SLOT_LIVE
+            DRS_RECEIPT_SOURCE_MODULE_SLOT[receipt_slot as usize] = source_module
+            DRS_RECEIPT_SOURCE_MODULE_GENERATION[receipt_slot as usize] = DRS_MODULE_GENERATION[source_module as usize]
+            DRS_RECEIPT_SOURCE_FIELD_SLOT[receipt_slot as usize] = field_slot
+            DRS_RECEIPT_SOURCE_FIELD_GENERATION[receipt_slot as usize] = DRS_FIELD_GENERATION[field_slot as usize]
+            DRS_RECEIPT_TARGET_NOMINAL_SLOT[receipt_slot as usize] = target
+            DRS_RECEIPT_TARGET_NOMINAL_GENERATION[receipt_slot as usize] = DRS_NOMINAL_GENERATION[target as usize]
+            (*out).registry_identity = DRS_REGISTRY_IDENTITY
+            (*out).snapshot_generation = DRS_SNAPSHOT_GENERATION
+            (*out).slot = receipt_slot
+            (*out).generation = DRS_RECEIPT_GENERATION[receipt_slot as usize]
+            return DEFINITION_REGISTRY_SHADOW_OK
+        }
+        receipt_slot = receipt_slot + 1
+    }
+    DEFINITION_REGISTRY_SHADOW_ERR_CAPACITY
+}
+
+pub fn definition_registry_shadow_binding_target(
+    receipt: &DefinitionRegistryShadowTypeExprBindingReceipt,
+    out: &! DefinitionRegistryShadowNominalTypeDefId,
+) -> i64 with Mut, Panic, Div {
+    if !definition_registry_shadow_binding_is_live(receipt) { return DEFINITION_REGISTRY_SHADOW_ERR_INVALID_ID }
+    if !drs_nominal_id_is_clear(out) { return DEFINITION_REGISTRY_SHADOW_ERR_OUTPUT_LIVE }
+    let receipt_slot = (*receipt).slot
+    let target = DRS_RECEIPT_TARGET_NOMINAL_SLOT[receipt_slot as usize]
+    if target < 0 || target >= 8 || DRS_NOMINAL_STATE[target as usize] != DRS_SLOT_LIVE ||
+       DRS_RECEIPT_TARGET_NOMINAL_GENERATION[receipt_slot as usize] != DRS_NOMINAL_GENERATION[target as usize] {
+        return DEFINITION_REGISTRY_SHADOW_ERR_INVALID_ID
+    }
+    (*out).registry_identity = DRS_REGISTRY_IDENTITY
+    (*out).snapshot_generation = DRS_SNAPSHOT_GENERATION
+    (*out).slot = target
+    (*out).generation = DRS_NOMINAL_GENERATION[target as usize]
+    DEFINITION_REGISTRY_SHADOW_OK
+}
+
+pub fn definition_registry_shadow_nominal_owner(
+    nominal: &DefinitionRegistryShadowNominalTypeDefId,
+    out: &! DefinitionRegistryShadowModuleDefId,
+) -> i64 with Mut, Panic, Div {
+    if !definition_registry_shadow_nominal_is_live(nominal) { return DEFINITION_REGISTRY_SHADOW_ERR_INVALID_ID }
+    if !drs_module_id_is_clear(out) { return DEFINITION_REGISTRY_SHADOW_ERR_OUTPUT_LIVE }
+    let module_slot = DRS_NOMINAL_OWNER_SLOT[(*nominal).slot as usize]
+    if module_slot < 0 || module_slot >= 4 || DRS_MODULE_STATE[module_slot as usize] != DRS_SLOT_LIVE {
+        return DEFINITION_REGISTRY_SHADOW_ERR_INVALID_ID
+    }
+    (*out).registry_identity = DRS_REGISTRY_IDENTITY
+    (*out).snapshot_generation = DRS_SNAPSHOT_GENERATION
+    (*out).slot = module_slot
+    (*out).generation = DRS_MODULE_GENERATION[module_slot as usize]
+    DEFINITION_REGISTRY_SHADOW_OK
+}
+
+pub fn definition_registry_shadow_field_owner(
+    field: &DefinitionRegistryShadowFieldDefId,
+    out: &! DefinitionRegistryShadowNominalTypeDefId,
+) -> i64 with Mut, Panic, Div {
+    if !definition_registry_shadow_field_is_live(field) { return DEFINITION_REGISTRY_SHADOW_ERR_INVALID_ID }
+    if !drs_nominal_id_is_clear(out) { return DEFINITION_REGISTRY_SHADOW_ERR_OUTPUT_LIVE }
+    let nominal_slot = DRS_FIELD_OWNER_SLOT[(*field).slot as usize]
+    if nominal_slot < 0 || nominal_slot >= 8 || DRS_NOMINAL_STATE[nominal_slot as usize] != DRS_SLOT_LIVE {
+        return DEFINITION_REGISTRY_SHADOW_ERR_INVALID_ID
+    }
+    (*out).registry_identity = DRS_REGISTRY_IDENTITY
+    (*out).snapshot_generation = DRS_SNAPSHOT_GENERATION
+    (*out).slot = nominal_slot
+    (*out).generation = DRS_NOMINAL_GENERATION[nominal_slot as usize]
+    DEFINITION_REGISTRY_SHADOW_OK
+}
+
+pub fn definition_registry_shadow_field_declared_ordinal(
+    field: &DefinitionRegistryShadowFieldDefId,
+) -> i64 with Panic, Div {
+    if !definition_registry_shadow_field_is_live(field) { return -1 }
+    DRS_FIELD_DECLARED_ORDINAL[(*field).slot as usize]
+}
+
+pub fn definition_registry_shadow_module_matches_path(
+    module: &DefinitionRegistryShadowModuleDefId,
+    path: &AstPath,
+) -> bool with Mut, Panic, Div, Alloc {
+    definition_registry_shadow_module_is_live(module) && drs_module_path_matches((*module).slot, path)
+}
+
+pub fn definition_registry_shadow_nominal_matches_declaration(
+    nominal: &DefinitionRegistryShadowNominalTypeDefId,
+    module_path: &AstPath,
+    name: Name,
+) -> bool with Mut, Panic, Div, Alloc {
+    if !definition_registry_shadow_nominal_is_live(nominal) { return false }
+    let nominal_slot = (*nominal).slot
+    let module_slot = DRS_NOMINAL_OWNER_SLOT[nominal_slot as usize]
+    module_slot >= 0 && module_slot < 4 &&
+        drs_module_path_matches(module_slot, module_path) &&
+        drs_nominal_name_matches(nominal_slot, name)
+}
+
+pub fn definition_registry_shadow_field_matches_declaration(
+    field: &DefinitionRegistryShadowFieldDefId,
+    module_path: &AstPath,
+    nominal_name: Name,
+    field_name: Name,
+) -> bool with Mut, Panic, Div, Alloc {
+    if !definition_registry_shadow_field_is_live(field) { return false }
+    let field_slot = (*field).slot
+    let nominal_slot = DRS_FIELD_OWNER_SLOT[field_slot as usize]
+    if nominal_slot < 0 || nominal_slot >= 8 { return false }
+    let module_slot = DRS_NOMINAL_OWNER_SLOT[nominal_slot as usize]
+    module_slot >= 0 && module_slot < 4 &&
+        drs_module_path_matches(module_slot, module_path) &&
+        drs_nominal_name_matches(nominal_slot, nominal_name) &&
+        drs_field_name_matches(field_slot, field_name)
+}
+
+pub fn definition_registry_shadow_binding_matches_declaration(
+    receipt: &DefinitionRegistryShadowTypeExprBindingReceipt,
+    module_path: &AstPath,
+    nominal_name: Name,
+) -> bool with Mut, Panic, Div, Alloc {
+    if !definition_registry_shadow_binding_is_live(receipt) { return false }
+    let target = DRS_RECEIPT_TARGET_NOMINAL_SLOT[(*receipt).slot as usize]
+    if target < 0 || target >= 8 || DRS_NOMINAL_STATE[target as usize] != DRS_SLOT_LIVE { return false }
+    let module_slot = DRS_NOMINAL_OWNER_SLOT[target as usize]
+    module_slot >= 0 && module_slot < 4 &&
+        drs_module_path_matches(module_slot, module_path) &&
+        drs_nominal_name_matches(target, nominal_name)
+}
+
+pub fn definition_registry_shadow_nominal_ids_equal(
+    a: &DefinitionRegistryShadowNominalTypeDefId,
+    b: &DefinitionRegistryShadowNominalTypeDefId,
+) -> bool with Panic, Div {
+    definition_registry_shadow_nominal_is_live(a) && definition_registry_shadow_nominal_is_live(b) &&
+        (*a).registry_identity == (*b).registry_identity &&
+        (*a).snapshot_generation == (*b).snapshot_generation &&
+        (*a).slot == (*b).slot && (*a).generation == (*b).generation
+}
+
+pub fn definition_registry_shadow_field_ids_equal(
+    a: &DefinitionRegistryShadowFieldDefId,
+    b: &DefinitionRegistryShadowFieldDefId,
+) -> bool with Panic, Div {
+    definition_registry_shadow_field_is_live(a) && definition_registry_shadow_field_is_live(b) &&
+        (*a).registry_identity == (*b).registry_identity &&
+        (*a).snapshot_generation == (*b).snapshot_generation &&
+        (*a).slot == (*b).slot && (*a).generation == (*b).generation
+}
+
+pub fn definition_registry_shadow_module_same_slot_new_generation(
+    stale: &DefinitionRegistryShadowModuleDefId,
+    current: &DefinitionRegistryShadowModuleDefId,
+) -> bool {
+    (*stale).registry_identity == (*current).registry_identity &&
+        (*stale).slot == (*current).slot &&
+        (*stale).snapshot_generation != (*current).snapshot_generation &&
+        (*stale).generation != (*current).generation
+}
+
+pub fn definition_registry_shadow_module_live_count() -> i64 with Panic, Div {
+    var count: i64 = 0
+    var slot: i64 = 0
+    while slot < 4 {
+        if DRS_MODULE_STATE[slot as usize] == DRS_SLOT_LIVE { count = count + 1 }
+        slot = slot + 1
+    }
+    count
+}
+
+pub fn definition_registry_shadow_nominal_live_count() -> i64 with Panic, Div {
+    var count: i64 = 0
+    var slot: i64 = 0
+    while slot < 8 {
+        if DRS_NOMINAL_STATE[slot as usize] == DRS_SLOT_LIVE { count = count + 1 }
+        slot = slot + 1
+    }
+    count
+}
+
+pub fn definition_registry_shadow_field_live_count() -> i64 with Panic, Div {
+    var count: i64 = 0
+    var slot: i64 = 0
+    while slot < 16 {
+        if DRS_FIELD_STATE[slot as usize] == DRS_SLOT_LIVE { count = count + 1 }
+        slot = slot + 1
+    }
+    count
+}
+
+pub fn definition_registry_shadow_receipt_live_count() -> i64 with Panic, Div {
+    var count: i64 = 0
+    var slot: i64 = 0
+    while slot < 8 {
+        if DRS_RECEIPT_STATE[slot as usize] == DRS_SLOT_LIVE { count = count + 1 }
+        slot = slot + 1
+    }
+    count
+}
