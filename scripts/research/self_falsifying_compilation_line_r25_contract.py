@@ -38,7 +38,7 @@ CLAUSES:
                                   checker rejects (expected "historical").
 
 WHAT THIS DOES NOT MEASURE. Whether historical is a useful label for some pages.
-Whether the six whitelist entries deserve repo_only. Only: the field is not a
+Whether the three whitelist entries deserve repo_only. Only: the field is not a
 measurement of currency, and the gate enforces the path default.
 """
 
@@ -63,13 +63,10 @@ SYNC = "scripts/docs/sync_governance_metadata.mjs"
 # rna_cayley_dickson_confirmatory_preregistration_2026-08-09.md was
 # whitelisted (docs/audit/BRANCH_AUDIT_2026-08-15.md); grew to 5 on
 # 2026-08-28 when cd-tower-automorphism-freeze.md was whitelisted in the
-# same change that added it; grew to 6 on 2026-09-22 when
-# docs/research/delta_epistemic_gradual_compilation_paper.md was
-# reclassified from historical lineage to the design target (PR #2648).
-# Bump this deliberately when the whitelist legitimately changes size --
-# do not let this constant silently drift out of sync with
-# governance_registry.mjs.
-WHITELIST_SIZE = 6
+# same change that added it. Bump this deliberately when the whitelist
+# legitimately changes size -- do not let this constant silently drift out
+# of sync with governance_registry.mjs.
+WHITELIST_SIZE = 5
 
 SUBJECT = "docs/research/self_falsifying_compilation_line_r24_2026-07-31.md"
 FARM_COPY = ["docs", "examples", "paper", "spec", "README.md"]
@@ -185,18 +182,14 @@ def clause_v3(whitelist: set[str]) -> bool:
         f"{non_whitelist_historical}/{len(research) - len(whitelist)}"
     )
     # Nearly all research is historical; lineage note is present; whitelist is tiny.
-    # The 6 (not 5) bound tracks the reclassification of
-    # docs/research/delta_epistemic_gradual_compilation_paper.md from historical
-    # lineage to the design target (PR #2648), which moves one more research doc
-    # out of the historical bucket.
     hist = auth_census.get("historical", 0)
     ok = (
         len(research) > 100
-        and hist >= len(research) - 6  # allow dual/repo_only few
+        and hist >= len(research) - 5  # allow dual/repo_only few
         and note_missing == 0
         and note_hist == hist
         and len(whitelist) == WHITELIST_SIZE
-        and non_whitelist_historical >= len(research) - 6
+        and non_whitelist_historical >= len(research) - 5
     )
     print(f"V3_CORPUS_IS_LINEAGE_DEFAULT {'PASS' if ok else 'FAIL'}")
     print()

@@ -9,22 +9,6 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.quick-start-gu
 
 # Sounio Quick Start Guide
 
-> **Canonical epistemic API.** The checked public surface for epistemic values
-> is `epistemic::knowledge` (free-fn form: `ep_measured`, `ep_val`, `ep_std`,
-> `ep_add`, `ep_mul`, `ep_div`, `ep_merge`, `ep_is_credible`, `ep_*_cov` for
-> covariance-aware GUM), anchored by
-> `tests/stdlib/epistemic/test_knowledge_madaros_import_e2e.sio` and
-> `tests/run-pass/ep_gum_covariance.sio`. The legacy
-> `epistemic::lib` surface (`epistemic_std`, `add_epistemic`) is exercised by
-> `tests/stdlib/epistemic/test_core_e2e.sio` (a `//@ run-pass` test collected by
-> `scripts/dev/run_sio_test_suite.sh`) but is a legacy surface separate from the
-> canonical `epistemic::knowledge` API. `mul_epistemic` and `fuse_measurements`
-> are part of `epistemic::lib` but are not exercised by that test
-> (`fuse_measurements` is private; `mul_epistemic` is public but untested).
-> `with_confidence` operators and
-> units-as-type-parameters are aspirational in source and absent from the
-> checked public surface — see `docs/compiler/KNOWN_LIMITATIONS.md`.
-
 > **Other guides**: [LLM Quick Start](guide/SOUNIO_QUICK_START.md) (for AI assistants) | [General Getting Started](guide/getting-started.md) | [Conservative contract](guide/MINIMUM_VIABLE_SOUNIO.md)
 
 ## For Scientists & Domain Experts (Non-Programmers)
@@ -43,12 +27,10 @@ concentration = dose / volume  # What's the error?
 
 #### After (Sounio):
 ```sio
-use epistemic::knowledge::{ep_measured, ep_div}
-
-// Uncertainty is tracked automatically; std-dev form (ep_measured stores variance = std^2).
-let dose = ep_measured(500.0, 2.5)  // 500, σ=2.5, default confidence 900/1000
-let volume = ep_measured(50.0, 0.2)  // 50, σ=0.2, default confidence 900/1000
-let concentration = ep_div(&dose, &volume)  // GUM δ-method: concentration = dose / volume
+// Uncertainty is tracked automatically
+let dose = epistemic_std(500.0, 2.5, 0.95)  // 500mg ± 2.5mg, 95% confidence
+let volume = epistemic_std(50.0, 0.2, 0.90)  // 50mL ± 0.2mL, 90% confidence
+let concentration = add_epistemic(dose, volume)  // Error automatically calculated!
 ```
 
 ### Your First Sounio Program
@@ -64,28 +46,19 @@ bin/souc info
 
 2. **Create `hello_uncertainty.sio`**:
 ```sio
-use epistemic::knowledge::{
-    ep_measured, ep_val, ep_std, ep_confidence, ep_mul
-}
-
-fn main() -> i32 with IO, Mut, Div, Panic {
-    // Every measurement knows its uncertainty (canonical free-fn form).
-    let temperature = ep_measured(25.5, 0.3)
-    let pressure = ep_measured(101.3, 0.5)
-
-    // Multiplication propagates variance (GUM δ-method, uncorrelated).
-    let combined = ep_mul(&temperature, &pressure)
-
-    println("Temperature: {} ± {} (conf {}/1000)",
-            ep_val(&temperature), ep_std(&temperature),
-            ep_confidence(&temperature))
-    println("Pressure: {} ± {} (conf {}/1000)",
-            ep_val(&pressure), ep_std(&pressure),
-            ep_confidence(&pressure))
-    println("Combined: {} ± {} (conf {}/1000)",
-            ep_val(&combined), ep_std(&combined),
-            ep_confidence(&combined))
-
+fn main() -> i32 {
+    // Every measurement knows its uncertainty
+    let temperature = epistemic_std(25.5, 0.3, 0.95)
+    let pressure = epistemic_std(101.3, 0.5, 0.90)
+    
+    // Calculations propagate uncertainty automatically
+    let combined = mul_epistemic(temperature, pressure)
+    
+    println("Temperature: {} ± {}", temperature.value, temperature.uncertainty)
+    println("Pressure: {} ± {}", pressure.value, pressure.uncertainty)
+    println("Combined: {} ± {} ({}% confidence)", 
+            combined.value, combined.uncertainty, combined.confidence * 100.0)
+    
     0
 }
 ```
@@ -110,13 +83,11 @@ When you add/multiply/divide measurements:
 
 #### 3. Confidence Gates
 ```sio
-use epistemic::knowledge::{ep_is_credible, ep_confidence}
-
-// Only proceed if we are confident enough (integer threshold 950 ≈ 95%).
-if ep_is_credible(&concentration, 950) {
+// Only proceed if we're confident enough
+if concentration.confidence > 0.95 {
     administer_drug(concentration)
 } else {
-    println("Warning: Low confidence (current: {}/1000)", ep_confidence(&concentration))
+    println("Warning: Low confidence ({})", concentration.confidence)
     request_more_measurements()
 }
 ```
@@ -125,47 +96,32 @@ if ep_is_credible(&concentration, 950) {
 
 #### Pharmacokinetics Example:
 ```sio
-use epistemic::knowledge::{Epistemic, ep_div, ep_is_credible, ep_confidence}
-
-// Simple PK model with uncertainty (canonical Epistemic; see Quantity for units).
-fn calculate_auc(dose: Epistemic, clearance: Epistemic) -> Epistemic with IO, Div, Panic {
-    // AUC = Dose / Clearance (with GUM variance propagation).
-    let auc = ep_div(&dose, &clearance)
-
-    if !ep_is_credible(&auc, 800) {
-        println("Warning: AUC low confidence ({}/1000)", ep_confidence(&auc))
+// Simple PK model with uncertainty
+fn calculate_auc(dose: Epistemic<mg>, clearance: Epistemic<L/h>) -> Epistemic<mg*h/L> {
+    // AUC = Dose / Clearance (with uncertainty propagation)
+    let auc = div_epistemic(dose, clearance)
+    
+    // Check if result is reliable enough
+    if auc.confidence < 0.80 {
+        println("Warning: AUC confidence only {}%", auc.confidence * 100)
     }
-
+    
     return auc
 }
 ```
 
-> **Units-as-type-parameters** (`Epistemic<mg>`, `Epistemic<L/h>`) are **not**
-> in the checked surface. The dimensional story lives in `stdlib/units/lib.sio`
-> via `Quantity { value, uncertainty, dim: UnitDim }` and `dim_mass()`,
-> `dim_length()`, `dim_time()`. See `tests/stdlib/units/test_units_stdlib.sio`
-> for the canonical shape.
-
 #### Experimental Data Analysis:
 ```sio
-use epistemic::knowledge::{Epistemic, ep_merge}
-
-// Inverse-variance-weighted fusion of multiple measurements (reduces σ).
-fn analyze_experiment(measurements: [Epistemic; 8]) -> Epistemic with IO, Div, Panic {
+fn analyze_experiment(measurements: [Epistemic<f64>]) -> Epistemic<f64> {
+    // Fuse multiple measurements (reduces uncertainty!)
     var result = measurements[0]
-    for i in 1..8 {
-        result = ep_merge(&result, &measurements[i])
+    for i in 1..len(measurements) {
+        result = fuse_measurements(result, measurements[i])
     }
+    
     return result
 }
 ```
-
-> Note: `fuse_measurements` (legacy `stdlib/epistemic/lib.sio`) becomes
-> `ep_merge` (canonical `knowledge.sio`); `Epistemic<f64>` is replaced by the
-> non-generic `Epistemic` from `knowledge.sio` (struct fields `val`, `variance`,
-> `confidence`). `len()` is not a free stdlib function, but arrays and vectors
-> expose a checked `.len()` method; this illustrative snippet instead uses a
-> fixed-length `[Epistemic; 8]` array with an explicit `1..8` loop for clarity.
 
 ### Next Steps
 
@@ -173,9 +129,6 @@ fn analyze_experiment(measurements: [Epistemic; 8]) -> Epistemic with IO, Div, P
 ```bash
 cd examples/epistemic
 ../../bin/souc run core_demo.sio
-# Note: core_demo.sio uses the legacy epistemic::lib surface
-# (epistemic_std, add_epistemic); for canonical patterns see
-# ../units/dimensional_report.sio and tests/run-pass/ep_gum_covariance.sio.
 ```
 
 2. **Explore your domain**:

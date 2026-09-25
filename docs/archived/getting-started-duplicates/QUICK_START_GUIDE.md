@@ -15,7 +15,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.archived.getti
 
 # Sounio Quick Start Guide
 
-> **Other guides**: [LLM Quick Start](../../guide/SOUNIO_QUICK_START.md) (for AI assistants) | [General Getting Started](../../guide/getting-started.md) | [Conservative contract](../../guide/MINIMUM_VIABLE_SOUNIO.md)
+> **Other guides**: [LLM Quick Start](guide/SOUNIO_QUICK_START.md) (for AI assistants) | [General Getting Started](guide/getting-started.md) | [Conservative contract](guide/MINIMUM_VIABLE_SOUNIO.md)
 
 ## For Scientists & Domain Experts (Non-Programmers)
 
@@ -34,9 +34,9 @@ concentration = dose / volume  # What's the error?
 #### After (Sounio):
 ```sio
 // Uncertainty is tracked automatically
-let dose = ep_std(500.0, 2.5, 0.95)  // 500mg ± 2.5mg, 95% confidence
-let volume = ep_std(50.0, 0.2, 0.90)  // 50mL ± 0.2mL, 90% confidence
-let concentration = ep_add(dose, volume)  // Error automatically calculated!
+let dose = epistemic_std(500.0, 2.5, 0.95)  // 500mg ± 2.5mg, 95% confidence
+let volume = epistemic_std(50.0, 0.2, 0.90)  // 50mL ± 0.2mL, 90% confidence
+let concentration = add_epistemic(dose, volume)  // Error automatically calculated!
 ```
 
 ### Your First Sounio Program
@@ -54,11 +54,11 @@ cd sounio
 ```sio
 fn main() -> i32 {
     // Every measurement knows its uncertainty
-    let temperature = ep_std(25.5, 0.3, 0.95)
-    let pressure = ep_std(101.3, 0.5, 0.90)
+    let temperature = epistemic_std(25.5, 0.3, 0.95)
+    let pressure = epistemic_std(101.3, 0.5, 0.90)
     
     // Calculations propagate uncertainty automatically
-    let combined = ep_mul(temperature, pressure)
+    let combined = mul_epistemic(temperature, pressure)
     
     println("Temperature: {} ± {}", temperature.value, temperature.uncertainty)
     println("Pressure: {} ± {}", pressure.value, pressure.uncertainty)
@@ -105,7 +105,7 @@ if concentration.confidence > 0.95 {
 // Simple PK model with uncertainty
 fn calculate_auc(dose: Epistemic<mg>, clearance: Epistemic<L/h>) -> Epistemic<mg*h/L> {
     // AUC = Dose / Clearance (with uncertainty propagation)
-    let auc = ep_div(dose, clearance)
+    let auc = div_epistemic(dose, clearance)
     
     // Check if result is reliable enough
     if auc.confidence < 0.80 {
@@ -122,7 +122,7 @@ fn analyze_experiment(measurements: [Epistemic<f64>]) -> Epistemic<f64> {
     // Fuse multiple measurements (reduces uncertainty!)
     var result = measurements[0]
     for i in 1..len(measurements) {
-        result = ep_merge(result, measurements[i])
+        result = fuse_measurements(result, measurements[i])
     }
     
     return result

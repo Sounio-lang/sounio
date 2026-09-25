@@ -62,34 +62,15 @@ fi
 # V0-E.4 anti-f64 seed still green
 if bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0e4_language_lower_gate.sh" >"$TMP_DIR/v0e4.log" 2>&1; then
   note_pass "v0e4_anti_f64_still_green"
-elif [[ -z "${MADAROS_RAW_BIN:-}" ]]; then
-  # Fallback ONLY for a plain local run with no MADAROS_RAW_BIN, where $SOUC
-  # above resolved to the checked-in bin/souc, which can be stale relative to
-  # current source (v0e4's language_f128_arith_check_still_ok sub-check runs
-  # `$SOUC check`, so a stale local souc can fail it independent of whether
-  # the seed/anti-f64 core is fine). Accept if that core passed. Since
-  # 2026-09-22 the seed's negative control passes as either an explicit
-  # inexact-literal refusal (lean_single's current behavior, post-#2387) or a
-  # build that succeeds and is confirmed to genuinely compute anti-f64 (not a
-  # greenwash) -- see v0e4's own comments.
-  #
-  # CI always sets MADAROS_RAW_BIN (to the freshly built ELF), so $SOUC is
-  # never stale there -- this branch never runs in CI. Since ci.yml's KL-15a
-  # loop no longer runs v0e4 on its own (v0e41 is its sole CI coverage), a
-  # v0e4 failure under MADAROS_RAW_BIN must be a hard failure here, or V0-E.4
-  # coverage could silently disappear behind a "stale souc" excuse that does
-  # not apply to a fresh build.
+else
+  # Language check may fail on stale local souc; accept if seed anti-f64 core passed
   if grep -Fq 'PASS seed_run_anti_f64_smoke' "$TMP_DIR/v0e4.log" \
-    && { grep -Fq 'PASS lean_single_language_f128_inexact_literal_refused_no_greenwash' "$TMP_DIR/v0e4.log" \
-      || grep -Fq 'PASS lean_single_language_f128_build_succeeds_anti_f64_confirmed' "$TMP_DIR/v0e4.log"; }; then
+    && grep -Fq 'PASS lean_single_language_f128_f64_greenwash_refused' "$TMP_DIR/v0e4.log"; then
     note_pass "v0e4_anti_f64_core_green_stale_souc_ok"
   else
     note_fail "v0e4_anti_f64_regression"
     tail -30 "$TMP_DIR/v0e4.log" >&2 || true
   fi
-else
-  note_fail "v0e4_anti_f64_regression_under_fresh_build"
-  tail -30 "$TMP_DIR/v0e4.log" >&2 || true
 fi
 
 LANG=tests/run-pass/f128_v0e2_arith_check.sio

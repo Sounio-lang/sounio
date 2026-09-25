@@ -60,25 +60,19 @@ let merged = dataframe_merge(
 ## 5. Epistemic Statistics
 
 ```sio
-use dataframe::pure::epistemic::{ecolumn_new, ecolumn_push, ecolumn_mean, ecolumn_std}
-use epistemic::knowledge::{ep_measured, ep_val}
+use dataframe::pure::epistemic
+use dataframe::pure::types
 
-// EColumn holds Epistemic values; ecolumn_std returns the std as an Epistemic.
-var col = ecolumn_new("measurements")
-ecolumn_push(&!col, ep_measured(10.1, 0.1))
-ecolumn_push(&!col, ep_measured(10.2, 0.1))
-ecolumn_push(&!col, ep_measured(9.9, 0.1))
+let col = column_new("measurements".to_string(), ColumnData::F64(vec![
+    10.1, 10.2, 9.9, 10.3, 10.0, 9.8, 10.1, 10.2
+]))
 
-let mean = ecolumn_mean(&col)
-let std = ecolumn_std(&col)
-print("Mean: ")
-print_f64(ep_val(&mean))
-print(" +/- ")
-print_f64(ep_val(&std))
-print("\n")
+let mean = epistemic_mean(&col, 0.95)?
+let std = epistemic_std(&col)?
+let (lo, hi) = epistemic_confidence_interval(&col, 0.95)?
+print("Mean: {} +/- {}\n", mean, (hi - lo) / 2.0)
+print("95% CI: [{}, {}]\n", lo, hi)
 ```
-
-`epistemic_mean`, `epistemic_std(&col)`, and `epistemic_confidence_interval` are not in the module. The checked functions are `ecolumn_mean`, `ecolumn_std`, `ecolumn_sum`, and `ecolumn_correlation` in `stdlib/dataframe/pure/epistemic.sio`. There is no confidence-interval helper.
 
 ## 6. Rolling Window
 

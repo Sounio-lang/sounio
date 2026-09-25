@@ -20,7 +20,7 @@ Snapshot date: 2026-04-23
 This bibliography is the first operational pass for the conversational extension of the O-SSM program.
 
 It is organized around the review axes defined in:
-- [octonion_conversation_literature_review_framework.md](octonion_conversation_literature_review_framework.md)
+- [octonion_conversation_literature_review_framework.md](/workspace/sounio/docs/research/octonion_conversation_literature_review_framework.md:1)
 
 The point is not completeness. The point is to build a **claim-safe map** of the surrounding field.
 

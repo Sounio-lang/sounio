@@ -226,10 +226,10 @@ bash scripts/ci/sounio_validation.sh validate 2>&1 | tee debug.log
 
 ## 📚 Additional Resources
 
-- [Sounio Language Guide](guide/getting-started.md)
-- [LSP Implementation](../scripts/lsp-integration/README.md) (the modules themselves live in `self-hosted/lsp/`)
+- [Sounio Language Guide](docs/guide/getting-started.md)
+- [LSP Implementation](scripts/lsp-integration/README.md) (the modules themselves live in `self-hosted/lsp/`)
 - CI/CD wiring - see `scripts/ci/sounio_validation.sh` and `.gitlab-ci.yml`; there is no separate CI/CD best-practices document
-- [Contributing Guidelines](../CONTRIBUTING.md)
+- [Contributing Guidelines](CONTRIBUTING.md)
 
 ---
 

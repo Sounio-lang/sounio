@@ -276,7 +276,6 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.madaros-enum-variant-sigsegv-2026-06-20 | repo_only | docs/audit/MADAROS_ENUM_VARIANT_SIGSEGV_2026-06-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-epistemic-payload-gate-2026-08-20 | repo_only | docs/audit/MADAROS_EPISTEMIC_PAYLOAD_GATE_2026-08-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-extern-c-builtin-port-dispatch-2026-08-16 | repo_only | docs/audit/MADAROS_EXTERN_C_BUILTIN_PORT_DISPATCH_2026-08-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.audit.madaros-f128-ladder-5stage-triage-2026-09-22 | repo_only | docs/audit/MADAROS_F128_LADDER_5STAGE_TRIAGE_2026-09-22.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-f64-bitcast-sitofp-boundary-2026-08-17 | repo_only | docs/audit/MADAROS_F64_BITCAST_SITOFP_BOUNDARY_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-f64-unary-neg-signed-zero-dispatch-2026-09-14 | repo_only | docs/audit/MADAROS_F64_UNARY_NEG_SIGNED_ZERO_DISPATCH_2026-09-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-field-if-i64-2026-07-26 | repo_only | docs/audit/MADAROS_FIELD_IF_I64_2026-07-26.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -322,7 +321,6 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.madaros-print-int-dispatch-2026-06-20 | repo_only | docs/audit/MADAROS_PRINT_INT_DISPATCH_2026-06-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-print-negative-f64-2026-07-14 | repo_only | docs/audit/MADAROS_PRINT_NEGATIVE_F64_2026-07-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-println-bool-scalarkind-segv-2026-08-17 | repo_only | docs/audit/MADAROS_PRINTLN_BOOL_SCALARKIND_SEGV_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.audit.madaros-private-fn-identity-2026-09-21 | repo_only | docs/audit/MADAROS_PRIVATE_FN_IDENTITY_2026-09-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-production-readiness-plan-2026-06-21 | repo_only | docs/audit/MADAROS_PRODUCTION_READINESS_PLAN_2026-06-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-propagate-monte-carlo-fnptr-2026-08-06 | repo_only | docs/audit/MADAROS_PROPAGATE_MONTE_CARLO_FNPTR_2026-08-06.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-propagate-monte-carlo-fnptr-2026-08-23 | repo_only | docs/audit/MADAROS_PROPAGATE_MONTE_CARLO_FNPTR_2026-08-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -421,7 +419,6 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.readme | repo_only | docs/audit/README.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.rebracket-assoc-gates-audit-2026-08-19 | repo_only | docs/audit/REBRACKET_ASSOC_GATES_AUDIT_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.rebracket-assoc-gates-census-2026-08-19 | repo_only | docs/audit/REBRACKET_ASSOC_GATES_CENSUS_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.audit.ref-alias-bind-as-ref-miss-2026-09-22 | repo_only | docs/audit/REF_ALIAS_BIND_AS_REF_MISS_2026-09-22.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.refinement-div-discharge-2026-08-19 | repo_only | docs/audit/REFINEMENT_DIV_DISCHARGE_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.runtime-context-unwritten-fields-census-2026-08-18 | repo_only | docs/audit/RUNTIME_CONTEXT_UNWRITTEN_FIELDS_CENSUS_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.runtime-gc-capability-honesty-2026-08-18 | repo_only | docs/audit/RUNTIME_GC_CAPABILITY_HONESTY_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -1056,7 +1053,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.research.composition-failure-field | historical | docs/research/composition-failure-field.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.cpc2026-orc-group-preregistration-2026-07-11 | historical | docs/research/cpc2026_orc_group_preregistration_2026-07-11.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.cpc2026-yale-evidence-dossier-2026-07-11 | historical | docs/research/cpc2026_yale_evidence_dossier_2026-07-11.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.research.delta-epistemic-gradual-compilation-paper | repo_only | docs/research/delta_epistemic_gradual_compilation_paper.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.research.delta-epistemic-gradual-compilation-paper | historical | docs/research/delta_epistemic_gradual_compilation_paper.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.dyadic-non-reduction-spec-2026-07-14 | historical | docs/research/dyadic_non_reduction_spec_2026-07-14.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.dyadic-relational-associator-ontology-spec-2026-07-14 | historical | docs/research/dyadic_relational_associator_ontology_spec_2026-07-14.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.research.e-series-semantic-germ-spec-2026-07-26 | historical | docs/research/e_series_semantic_germ_spec_2026-07-26.md | - | A6 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |

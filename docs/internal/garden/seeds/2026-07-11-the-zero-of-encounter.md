@@ -87,6 +87,9 @@ clinical detail belongs in this seed.
 - [`stdlib/epistemic/zero_event.sio`](../../../../stdlib/epistemic/zero_event.sio)
   now provides private receipt constructors, evidence flags, accessors, and an
   explicit typed discharge to an ordinary `f64` surface.
+- [`tests/known_failures/zero_provenance_native_v2_probe.sio`](../../../../tests/known_failures/zero_provenance_native_v2_probe.sio)
+  constructs five surface-zero paths and checks that their provenance remains
+  distinguishable.
 - [`scripts/ci/zero_provenance_witness_gate.sh`](../../../../scripts/ci/zero_provenance_witness_gate.sh)
   checks the witness with Madaros and executes it explicitly through
   `lean_single`, without hiding the engine split.

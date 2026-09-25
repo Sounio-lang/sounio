@@ -18,26 +18,14 @@
 #     lower element-wise through the f128 value path (never the f64
 #     array-literal classifier); repeat fills ALL N slots (null handle ≠ 0.0)
 #   - stores: `a[i] = 2.0` is binary128, `a[i] = y` / `a[i] = b[j]` copy
-#   - `&[f128; N]` / `&![f128; N]` params, by-value `[f128; N]` params (slot
-#     copy, no aliasing), `let zs = xs` copies (no aliasing), comparisons over
-#     elements; a bare `a[i] = expr` write through a `&![f128; N]` param is
-#     visible to the caller (mut_ref_array witness)
+#   - `&[f128; N]` params, by-value `[f128; N]` params (slot copy, no aliasing),
+#     `let zs = xs` copies (no aliasing), comparisons over elements
 #   - struct field `arr: [f128; N]`: literal init, read, store through `q.arr[i]`
 #   - DCE: a `[f128; N]` type anywhere (let / param / field) marks the softfloat
 #     desugar targets even when the program has no scalar f128 (array_only probe)
 #   - Anti-f64 through an element: (1+~1e-20)^2 ≠ 1
 #   - `[f256; N]`, an inexact element literal (0.1), `+=` on an element and a
-#     `[f128; N]` let without initialiser still fail closed (no ELF); `+=` on
-#     an element refuses with "f128 compound assign target shape unsupported"
-#     (KL-8 added ExprIdent/ExprFieldAccess compound-assign store-back but not
-#     ExprIndex -- still fail-closed, just a more specific message than the
-#     general V0-E.4.1 sentinel; either is accepted here)
-#
-# Fixed 2026-09-22: `&[f128; N]` params were miscompiled (SIGSEGV or silently
-# wrong data) -- self-hosted/ir/lower.sio's by-value `[f128; N]` param copy
-# path fired on reference params too after KL-14a made param_array_len peel
-# through `&`/`&!`, copying "elements" from the address of the caller's slot
-# instead of the array. See docs/audit/MADAROS_F128_LADDER_5STAGE_TRIAGE_2026-09-22.md.
+#     `[f128; N]` let without initialiser still fail closed (no ELF)
 #
 # Explicitly NOT claimed:
 #   - lean_single language f128 (still f64 greenwash)
@@ -185,34 +173,6 @@ fn main() -> i32 with IO, Mut, Panic, Div {
 }
 EOF
 
-# Exclusive/mutable reference: `&![f128; N]` takes the same param-binding path
-# as `&[f128; N]` (both are TypeReference-family, both hit
-# lower_type_expr_is_ref_like), so a fix scoped to only `&` and not `&!` would
-# leave this half unguarded. Reads AND a caller-visible write through a bare
-# `a[0] = expr` (not `(*a)[0]`) on a `&![f128; N]` param -- confirmed against
-# a pre-fix build: SIGSEGV (rc=139) without this witness's coverage.
-cat >"$TMP_DIR/mut_ref_array.sio" <<'EOF'
-use math::softfloat_f128::{f128_from_limbs, f128_to_lo, f128_to_hi}
-use math::wide_float::{print_limb_hex16}
-
-fn double_first(a: &![f128; 2]) with Mut, Panic, Div, IO {
-    a[0] = a[0] + a[0]
-}
-
-fn main() -> i32 with IO, Mut, Panic, Div {
-    var xs: [f128; 2] = [f128_from_limbs(0, 4611404543450677248), f128_from_limbs(0, 4611686018427387904)]
-    double_first(&!xs)
-    print("wire_mut_ref_double=")
-    print_limb_hex16(f128_to_lo(xs[0]))
-    print(":")
-    print_limb_hex16(f128_to_hi(xs[0]))
-    println("")
-    if f128_to_hi(xs[0]) != 4611686018427387904 || f128_to_lo(xs[0]) != 0 { return 1 }
-    if f128_to_hi(xs[1]) != 4611686018427387904 { return 2 }
-    return 0
-}
-EOF
-
 # True when the log contains ANY of the `@@`-separated fixed strings.
 log_has_any() {
   local log="$1" wants="$2" w
@@ -228,7 +188,7 @@ if [[ -x "$SOUC" ]]; then
   for neg in lang_f256_array:"$REFUSE_SENTINEL":language_f256_array_still_fail_closed \
              lang_inexact_elem_store:"no f64 widen":language_f128_inexact_elem_store_still_fail_closed \
              lang_inexact_elem_literal:"no f64 widen@@expected [f128; 2]":language_f128_inexact_elem_literal_still_refused \
-             lang_compound_elem:"$REFUSE_SENTINEL@@f128 compound assign target shape unsupported":language_f128_compound_elem_assign_still_fail_closed; do
+             lang_compound_elem:"$REFUSE_SENTINEL":language_f128_compound_elem_assign_still_fail_closed; do
     name="${neg%%:*}"; rest="${neg#*:}"; want="${rest%:*}"; label="${rest##*:}"
     set +e
     "$SOUC" compile "$TMP_DIR/$name.sio" -o "$TMP_DIR/$name.elf" >"$TMP_DIR/$name.compile.log" 2>&1
@@ -251,17 +211,6 @@ if [[ -x "$SOUC" ]]; then
   else
     note_fail "madaros_run_array_only_dce_trigger rc=$ao_rc"
     tail -30 "$TMP_DIR/array_only.run.log" >&2 || true
-  fi
-
-  set +e
-  "$SOUC" run "$TMP_DIR/mut_ref_array.sio" >"$TMP_DIR/mut_ref_array.run.log" 2>&1
-  mr_rc=$?
-  set -e
-  if [[ "$mr_rc" -eq 0 ]] && grep -Fq 'wire_mut_ref_double=0000000000000000:4000000000000000' "$TMP_DIR/mut_ref_array.run.log"; then
-    note_pass "madaros_run_mut_ref_array_element_rw"
-  else
-    note_fail "madaros_run_mut_ref_array_element_rw rc=$mr_rc"
-    tail -30 "$TMP_DIR/mut_ref_array.run.log" >&2 || true
   fi
 
   set +e

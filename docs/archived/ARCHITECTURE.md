@@ -15,7 +15,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.archived.archi
 
 > Status note: this page describes an older Rust-first architecture map. For the
 > current contributor-facing compiler map, start with
-> [COMPILER_ARCHITECTURE_OVERVIEW.md](../compiler/COMPILER_ARCHITECTURE_OVERVIEW.md).
+> [COMPILER_ARCHITECTURE_OVERVIEW.md](COMPILER_ARCHITECTURE_OVERVIEW.md).
 
 # Sounio Compiler Architecture
 
@@ -152,7 +152,7 @@ sounio/
 
 ## Key Components
 
-### Lexer (`src/lexer/` — historical Rust source tree, removed on `main`)
+### Lexer ([src/lexer/](../../crates/souc/src/lexer/))
 
 **Purpose**: Convert source text into tokens
 
@@ -168,7 +168,7 @@ sounio/
 // Output: [LET, IDENT("x"), EQ, INT_LIT(42)]
 ```
 
-### Parser (`src/parser/` — historical Rust source tree, removed on `main`)
+### Parser ([src/parser/](../../crates/souc/src/parser/))
 
 **Purpose**: Build Abstract Syntax Tree from tokens
 
@@ -182,7 +182,7 @@ sounio/
 
 **Error Recovery**: Synchronization on statement boundaries
 
-### Type Checker (`src/check/`, `src/types/` — historical Rust source tree, removed on `main`)
+### Type Checker ([src/check/](../../crates/souc/src/check/), [src/types/](../../crates/souc/src/types/))
 
 **Purpose**: Verify type correctness, infer types
 
@@ -202,7 +202,7 @@ sounio/
 - `types/inference.rs` - Type inference
 - `types/unification.rs` - Unification algorithm
 
-### Effect System (`src/effects/` — historical Rust source tree, removed on `main`)
+### Effect System ([src/effects/](../../crates/souc/src/effects/))
 
 **Purpose**: Track computational side effects
 
@@ -462,10 +462,10 @@ Executable
 
 ### Resources
 
-- **Technical Report**: [TECHNICAL_REPORT.md](../compiler/TECHNICAL_REPORT.md)
-- **Known Limitations**: [KNOWN_LIMITATIONS.md](../compiler/KNOWN_LIMITATIONS.md)
-- **Debugging Guide**: [DEBUGGING_GUIDE.md](../compiler/DEBUGGING_GUIDE.md)
-- **Style Guide**: [STYLE_GUIDE.md](../contributor-guide/STYLE_GUIDE.md)
+- **Technical Report**: [TECHNICAL_REPORT.md](TECHNICAL_REPORT.md)
+- **Known Limitations**: [KNOWN_LIMITATIONS.md](KNOWN_LIMITATIONS.md)
+- **Debugging Guide**: [DEBUGGING_GUIDE.md](DEBUGGING_GUIDE.md)
+- **Style Guide**: [../STYLE_GUIDE.md](../STYLE_GUIDE.md)
 
 ---
 
@@ -525,4 +525,4 @@ Executable
 
 ---
 
-*For detailed technical information, see [TECHNICAL_REPORT.md](../compiler/TECHNICAL_REPORT.md).*
+*For detailed technical information, see [TECHNICAL_REPORT.md](TECHNICAL_REPORT.md).*

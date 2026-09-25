@@ -30,7 +30,7 @@ mapfile -t REFS < <(
   workflow_script_refs \
     | sed -E 's#^.+:##' \
     | sed -E 's#^[[:space:]]+##' \
-    | sed -E 's#[\"\047),:;.]+$##' \
+    | sed -E 's#[\"\047),:;]+$##' \
     | sort -u
 )
 

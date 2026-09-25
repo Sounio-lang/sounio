@@ -63,10 +63,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.architects-gui
 **Good:** "Create a type system that tracks uncertainty with the following properties:
 1. Every value has: value, uncertainty, confidence
 2. Operations propagate uncertainty using GUM rules
-3. Confidence decays under arithmetic (ep_add/ep_sub ×99/100, ep_mul ×98/100,
-   ep_div ×97/100) but ep_merge averages the two inputs' confidence and
-   ep_scale/ep_shift preserve it
-4. Provide these specific functions: ep_add, ep_mul, ep_merge (stdlib/epistemic/knowledge.sio)"
+3. Confidence decreases with each operation
+4. Provide these specific functions: add_epistemic, mul_epistemic, fuse_measurements"
 
 **Template for AI prompts:**
 ```
@@ -132,7 +130,7 @@ Example usage:
 
 #### Day 1-5: Research & Design
 - Read GUM documentation
-- Design the Epistemic type (val, variance, confidence)
+- Design Knowledge<T> type
 - Specify propagation rules
 - Create test cases
 

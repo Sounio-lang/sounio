@@ -28,13 +28,13 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.archived.lsp-l
 
 | Módulo | Linhas | Funcionalidade | Status |
 |--------|--------|----------------|--------|
-| [`protocol.sio`](../../self-hosted/lsp/protocol.sio) | 1,176 | JSON-RPC, tipos base | ✅ Completo |
-| [`completions.sio`](../../self-hosted/lsp/completions.sio) | 2,798 | Auto-complete context-aware | ✅ Completo |
-| [`hover.sio`](../../self-hosted/lsp/hover.sio) | 3,913 | Type-on-hover, docs, signatures | ✅ Completo |
-| [`diagnostics.sio`](../../self-hosted/lsp/diagnostics.sio) | 1,203 | Erros/warnings/hints | ✅ Completo |
-| [`code_actions.sio`](../../self-hosted/lsp/code_actions.sio) | 1,275 | Quick fixes, refactorings | ✅ Completo |
-| [`goto_def.sio`](../../self-hosted/lsp/goto_def.sio) | 2,777 | Go to definition, references | ✅ Completo |
-| [`rename.sio`](../../self-hosted/lsp/rename.sio) | 1,542 | Rename symbol | ✅ Completo |
+| [`protocol.sio`](../self-hosted/lsp/protocol.sio) | 1,176 | JSON-RPC, tipos base | ✅ Completo |
+| [`completions.sio`](../self-hosted/lsp/completions.sio) | 2,798 | Auto-complete context-aware | ✅ Completo |
+| [`hover.sio`](../self-hosted/lsp/hover.sio) | 3,913 | Type-on-hover, docs, signatures | ✅ Completo |
+| [`diagnostics.sio`](../self-hosted/lsp/diagnostics.sio) | 1,203 | Erros/warnings/hints | ✅ Completo |
+| [`code_actions.sio`](../self-hosted/lsp/code_actions.sio) | 1,275 | Quick fixes, refactorings | ✅ Completo |
+| [`goto_def.sio`](../self-hosted/lsp/goto_def.sio) | 2,777 | Go to definition, references | ✅ Completo |
+| [`rename.sio`](../self-hosted/lsp/rename.sio) | 1,542 | Rename symbol | ✅ Completo |
 
 ### 1.2 Capacidades Atuais
 
@@ -542,16 +542,16 @@ See Also: parse_expr, tokenize
 
 ### 4.3 Integração com docs/
 
-O LSP deve consumir a documentação em [`docs/`](../README.md):
+O LSP deve consumir a documentação em [`docs/`](../docs/):
 
 | Documentação | Uso no LSP |
 |--------------|------------|
 | [`spec/LANGUAGE_SPECIFICATION.md`](../spec/LANGUAGE_SPECIFICATION.md) | Validação de sintaxe |
-| [`docs/reference/STDLIB_REFERENCE.md`](../stdlib/STDLIB_REFERENCE.md) | Completions de stdlib |
-| [`docs/reference/KNOWLEDGE_REFERENCE.md`](../reference/KNOWLEDGE_REFERENCE.md) | Contexto epistêmico |
-| [`docs/guide/tutorial.md`](../guide/tutorial.md) | Exemplos para LLM |
-| [`docs/compiler/EFFECT_SYSTEM_ARCHITECTURE.md`](../compiler/EFFECT_SYSTEM_ARCHITECTURE.md) | Documentação de efeitos |
-| [`docs/compiler/UNIT_RUNTIME_CHECKING.md`](../compiler/UNIT_RUNTIME_CHECKING.md) | Documentação de unidades |
+| [`docs/reference/STDLIB_REFERENCE.md`](../docs/stdlib/STDLIB_REFERENCE.md) | Completions de stdlib |
+| [`docs/reference/KNOWLEDGE_REFERENCE.md`](../docs/reference/KNOWLEDGE_REFERENCE.md) | Contexto epistêmico |
+| [`docs/guide/tutorial.md`](../docs/guide/tutorial.md) | Exemplos para LLM |
+| [`docs/compiler/EFFECT_SYSTEM_ARCHITECTURE.md`](../docs/compiler/EFFECT_SYSTEM_ARCHITECTURE.md) | Documentação de efeitos |
+| [`docs/compiler/UNIT_RUNTIME_CHECKING.md`](../docs/compiler/UNIT_RUNTIME_CHECKING.md) | Documentação de unidades |
 
 ---
 
@@ -2115,5 +2115,5 @@ fn project_export_dot(graph: LspDependencyGraph) -> string with Mut {
 
 - [LSP Specification 3.17](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/)
 - [`spec/LANGUAGE_SPECIFICATION.md`](../spec/LANGUAGE_SPECIFICATION.md)
-- [`docs/compiler/EFFECT_SYSTEM_ARCHITECTURE.md`](../compiler/EFFECT_SYSTEM_ARCHITECTURE.md)
-- [`docs/reference/KNOWLEDGE_REFERENCE.md`](../reference/KNOWLEDGE_REFERENCE.md)
+- [`docs/compiler/EFFECT_SYSTEM_ARCHITECTURE.md`](../docs/compiler/EFFECT_SYSTEM_ARCHITECTURE.md)
+- [`docs/reference/KNOWLEDGE_REFERENCE.md`](../docs/reference/KNOWLEDGE_REFERENCE.md)

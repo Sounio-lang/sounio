@@ -30,8 +30,6 @@ const ACTIVE_FEATURE_DOCS = new Set([
 ]);
 
 const ACTIVE_RESEARCH_DOCS = new Set([
-  // The design target for the language, not retired lineage.
-  'docs/research/delta_epistemic_gradual_compilation_paper.md',
   'docs/research/RESEARCH_VALIDATION_SUMMARY.md',
   'docs/research/epistemic_algebra_review.md',
   'docs/research/vancomycin-uncertainty.md',

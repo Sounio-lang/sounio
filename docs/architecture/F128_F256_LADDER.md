@@ -113,23 +113,6 @@ PASS f128_f256_v0c_wire limbs=8 order=lsw-first payloads=4 wire_bytes=272 roundt
 - Semantic-Lane-ID: `WS-G-V0C-WIRE-LIMB-POOLS`.
 - Ties into `docs/architecture/SOIR_REFERENCE.md` and native-v2 SRET/ABI.
 
-**Status (2026-09-22):** gate red by design, not a regression. The three
-scaffold probes above are green (positive control fires), and the external
-corpus (`tests/vectors/f128_f256_v0c/wire_f{128,256}.jsonl`) passes its
-integrity oracle, but nothing yet maps each corpus row through the
-limb/wire codec end to end — `scripts/ci/madaros_f128_f256_v0c_wire_gate.sh`
-has asserted this failure since its introduction (`dd3b68ef9b`, #1775,
-2026-08-17: "gate FAILs today because no codec consumer maps those 31+24
-encodings through the limb/wire path"). The corpus-consuming codec
-(`self-hosted/compiler/f128_f256_v0c_wire_corpus_probe.sio`,
-`tests/run-pass/f128_v0c_wire_corpus_smoke.sio`,
-`scripts/dev/ws_g_v0c_codec_corpus_runner.py`) has never existed anywhere in
-this repo's history — a deferred milestone, tracked in
-`tests/vectors/f128_f256_v0c/V0C_GATE_CONSUMPTION.md`, not something that
-regressed. `scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0c` is
-deliberately left out of the CI wiring in `.github/workflows/ci.yml`'s
-`madaros-witness-gate` job until that consumer is built.
-
 ### V0-D: Softfloat Arithmetic (Compiler-Owned Limb Routines)
 
 **Goal**: Implement `add`/`sub`/`mul`/`div`/`cmp` (and `sqrt`, `fma` if natural) as compiler-owned routines operating on limb pools. Constant folding where possible. Rounded vs exact semantics defined. No user `+`/`-` surface yet (still compile-fail for source ops); used internally for constant evaluation and future `MeasuredF256`.

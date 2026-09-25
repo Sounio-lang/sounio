@@ -72,19 +72,9 @@ fi
 #     claiming HEAD would be exactly the lie this whole gate exists to catch.
 #   otherwise -> HEAD, which is the build-and-commit flow the weekly refresh
 #     workflow uses.
-#
-# The prebuilt is committed compressed (bin/madaros-linux-x86_64.gz plus
-# bin/madaros-linux-x86_64.sha256) and its ELF path is generated and untracked.
-# Provenance then follows the tracked .sha256, which changes exactly when the ELF
-# does; the .gz bytes can differ between gzip versions for the same ELF.
-tracked="$rel"
-if ! git ls-files --error-unmatch "$rel" >/dev/null 2>&1 \
-   && git ls-files --error-unmatch "$rel.gz" >/dev/null 2>&1; then
-  tracked="$rel.sha256"
-fi
-if git ls-files --error-unmatch "$tracked" >/dev/null 2>&1 && git diff --quiet HEAD -- "$tracked" 2>/dev/null; then
-  commit="$(git log -1 --format=%H -- "$tracked" 2>/dev/null)"
-  origin="the commit that last changed $tracked"
+if git ls-files --error-unmatch "$rel" >/dev/null 2>&1 && git diff --quiet HEAD -- "$rel" 2>/dev/null; then
+  commit="$(git log -1 --format=%H -- "$rel" 2>/dev/null)"
+  origin="the commit that last changed $rel"
 else
   commit="$(git rev-parse HEAD 2>/dev/null)"
   origin="HEAD at build time"

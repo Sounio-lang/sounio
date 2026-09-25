@@ -272,6 +272,9 @@ uninstall script: every result says `effect=NONE`, and the unchanged frame
 two-node pre-install service and restart-policy snapshot and replay evidence
 exist. A material decommission dispatcher remains deliberately absent.
 
+The full draft semantic contract is
+[`spark-pair-reversible-decommission.md`](../../concepts/spark-pair-reversible-decommission.md).
+
 ## Pireus Restore Capsule v1
 
 The next prerequisite now has its own effect-free Sounio surface. Frame `9027`

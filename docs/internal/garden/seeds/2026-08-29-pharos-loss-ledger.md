@@ -66,7 +66,7 @@ deliverable.
 
 ## Connections
 
-- [`FOUNDER_INTENT.md`](../../../../FOUNDER_INTENT.md) — the recurring question
+- [`FOUNDER_INTENT.md`](../../../FOUNDER_INTENT.md) — the recurring question
   and the erasure list this seed turns inward; also the evidence-label ladder
   this seed is subordinate to.
 - [`stdlib/eisa/core_v2.sio`](../../../../stdlib/eisa/core_v2.sio) — the
