@@ -76,10 +76,17 @@ if [[ -z "${_MADAROS_FP_INNER:-}" && -n "${SOUNIO_MADAROS_CACHE:-}" && -x "${MAD
       echo "fixed-point-v1"
       sha256sum "$MADAROS_BIN" | cut -c1-64
       madaros_tree_key
+      # The gate, every scripts/lib helper it sources or runs (including the
+      # gen2/gen3 comparator compare_executable_payloads.sh) and the IR
+      # capacity probe it consults.
       sha256sum "$ROOT_DIR/scripts/ci/madaros_fixed_point_gate.sh" \
-                "$ROOT_DIR/scripts/lib/gate_assert.sh" \
-                "$ROOT_DIR/scripts/lib/souc_invoke.sh" | cut -c1-64
-      echo "src=${SOUNIO_MADAROS_FP_SRC:-self-hosted/compiler/main.sio}"
+                "$ROOT_DIR/scripts/ci/madaros_ir_capacity_probe.sh" \
+                "$ROOT_DIR"/scripts/lib/*.sh | cut -c1-64
+      # The source compiled, by content: SOUNIO_MADAROS_FP_SRC may point
+      # outside the self-hosted/ + stdlib/ tree key.
+      _fp_src="${SOUNIO_MADAROS_FP_SRC:-self-hosted/compiler/main.sio}"
+      echo "src=$_fp_src"
+      sha256sum "$ROOT_DIR/$_fp_src" 2>/dev/null | cut -c1-64 || echo "src-missing"
       echo "expect=${SOUNIO_MADAROS_FP_EXPECT:-run}"
       echo "min_into_acc_done=${SOUNIO_MADAROS_FP_MIN_INTO_ACC_DONE:-40}"
     } | sha256sum | cut -c1-64
