@@ -9,7 +9,7 @@
 - Expanded Bayesian (Observe + multi EState data posterior sampling, ident score, tied to structural ensemble)
 - Regulatory provenance (RegulatoryAudit struct + full_budget_export with contribs, lit, mode)
 - Scale: general matnm networks + stochastic with 50+ steps, enzyme 3-rxn, structural ensembles; benches exercise larger sims vs lit tols.
-- Real ChEBI ontology (FULL): complete species map for BigCRN (all 6 ChEBI), GO reactions (oxidation-reduction), bundle directives, explicit Knowledge<CHEBI_xxx> demos, provenance in all mechanisms, tests with FULL PASS.
+- Real ChEBI ontology (FULL): complete species map for BigCRN (all 6 ChEBI), GO reactions (oxidation-reduction), bundle directives, explicit Epistemic demos, provenance in all mechanisms, tests with FULL PASS.
 - Coupling: CRN + real equilibrium::solve_ab_c_equil modulation
 - Benches: bench_crn_kernel + deep real:
   - bench_structural_ensemble (multiple plausible Nu + probs, EState total var, lit routes)
