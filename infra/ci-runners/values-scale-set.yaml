@@ -1,0 +1,64 @@
+# Helm values for oci://ghcr.io/actions/actions-runner-controller-charts/gha-runner-scale-set
+# Workflows select these runners with `runs-on: sounio-ci`.
+# The GitHub App secret `sounio-ci-github-app` (keys github_app_id,
+# github_app_installation_id, github_app_private_key) is created by the operator
+# by hand in namespace arc-runners -- it is deliberately not scripted here.
+githubConfigUrl: https://github.com/Sounio-lang/sounio
+githubConfigSecret: sounio-ci-github-app
+runnerScaleSetName: sounio-ci
+minRunners: 1            # one warm runner: no pod start-up on the first job
+maxRunners: 4
+
+template:
+  spec:
+    automountServiceAccountToken: false   # job code gets no Kubernetes credentials
+    securityContext:
+      fsGroup: 1001                       # runner uid in ghcr.io/actions/actions-runner
+    affinity:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: kubernetes.io/hostname
+                  operator: In
+                  values: [r770-proxmox, dl380-proxmox]
+        preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
+                - key: kubernetes.io/hostname
+                  operator: In
+                  values: [r770-proxmox]
+    tolerations:
+      - key: sounio.dev/pool
+        operator: Equal
+        value: gpu-batch
+        effect: NoSchedule
+      - key: sounio.dev/compute
+        operator: Equal
+        value: heavy
+        effect: NoSchedule
+    containers:
+      - name: runner
+        image: ghcr.io/actions/actions-runner:latest
+        command: ["/home/runner/run.sh"]
+        env:
+          - name: SOUNIO_MADAROS_CACHE_SHARED
+            value: /cache/madaros
+        resources:
+          # A Madaros self-compile is one core and peaks at 18.4 GB RSS; the
+          # test suite runs --jobs 4. Hard limits keep CI from ever saturating
+          # a node the way the 2026-05-29 build stampede did.
+          requests:
+            cpu: "4"
+            memory: 24Gi
+          limits:
+            cpu: "8"
+            memory: 48Gi
+        volumeMounts:
+          - name: madaros-cache
+            mountPath: /cache
+    volumes:
+      - name: madaros-cache
+        persistentVolumeClaim:
+          claimName: sounio-ci-cache
