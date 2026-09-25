@@ -57,7 +57,7 @@ Source (.sio)
 
 ### 1.1 The Quat Type in the Type System
 
-**Location**: [compiler/src/types/core.rs](../../compiler/src/types/core.rs)
+**Location**: `compiler/src/types/core.rs` (historical Rust source tree, removed on `main`)
 
 The `Quat` type is a first-class citizen in Sounio's type system:
 
@@ -128,7 +128,7 @@ The Scientific IR (SIR) performs domain-specific optimizations:
 
 ### 2.1 C ABI Functions
 
-**Location**: [compiler/src/backend/native/quat_runtime.rs](../../compiler/src/backend/native/quat_runtime.rs)
+**Location**: `compiler/src/backend/native/quat_runtime.rs` (historical Rust source tree, removed on `main`)
 
 All quaternion operations expose C-compatible functions for calling from assembly:
 
@@ -162,7 +162,7 @@ pub extern "C" fn sounio_quat_conj(q: *const f32, out: *mut f32) {
 
 ### 2.2 SIMD Dispatch Architecture
 
-**Location**: [compiler/src/backend/native/quat_simd_dispatch.rs](../../compiler/src/backend/native/quat_simd_dispatch.rs)
+**Location**: `compiler/src/backend/native/quat_simd_dispatch.rs` (historical Rust source tree, removed on `main`)
 
 Runtime detection selects the optimal implementation:
 
@@ -201,7 +201,7 @@ pub fn detect_simd_level() -> SimdLevel {
 
 ### 2.3 AVX2 Implementation
 
-**Location**: [compiler/src/backend/native/quat_simd_avx2.rs](../../compiler/src/backend/native/quat_simd_avx2.rs)
+**Location**: `compiler/src/backend/native/quat_simd_avx2.rs` (historical Rust source tree, removed on `main`)
 
 Processes 2 quaternions per iteration:
 
@@ -243,7 +243,7 @@ unsafe fn hamilton_product_avx2(a: __m256, b: __m256) -> __m256 {
 
 ### 2.4 INT8 Runtime
 
-**Location**: [compiler/src/backend/native/quat_runtime_i8.rs](../../compiler/src/backend/native/quat_runtime_i8.rs)
+**Location**: `compiler/src/backend/native/quat_runtime_i8.rs` (historical Rust source tree, removed on `main`)
 
 Per-quaternion symmetric quantization:
 
@@ -278,7 +278,7 @@ impl QuatI8 {
 
 ### 3.1 PTX Generation
 
-**Location**: [compiler/src/codegen/gpu/qnn_kernels.rs](../../compiler/src/codegen/gpu/qnn_kernels.rs)
+**Location**: `compiler/src/codegen/gpu/qnn_kernels.rs` (historical Rust source tree, removed on `main`)
 
 Kernel configuration structure:
 
@@ -421,7 +421,7 @@ For `y = q₁ ⊗ q₂`:
 ∂L/∂q₂ = q₁* ⊗ ∂L/∂y     (left-multiply by conjugate)
 ```
 
-**Location**: [compiler/src/codegen/gpu/quat_kernels_backward.rs](../../compiler/src/codegen/gpu/quat_kernels_backward.rs)
+**Location**: `compiler/src/codegen/gpu/quat_kernels_backward.rs` (historical Rust source tree, removed on `main`)
 
 ```rust
 fn hamilton_product_backward(
