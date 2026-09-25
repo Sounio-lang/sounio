@@ -61,6 +61,48 @@ set -uo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
+# ── receipt reuse ─────────────────────────────────────────────────────────────
+# gen2 and gen3 are two full self-compiles (~40 min in CI, in swap). Their
+# outcome is a function of: the gen1 bytes, the source tree, this gate and its
+# libraries, and the ratchet parameters. When SOUNIO_MADAROS_CACHE is set and a
+# GREEN run with exactly that key exists, its full log is replayed and the gate
+# exits 0 without recompiling. A red run is never stored -- it always reruns.
+# Opt out per run with SOUNIO_MADAROS_NOCACHE=1.
+if [[ -z "${_MADAROS_FP_INNER:-}" && -n "${SOUNIO_MADAROS_CACHE:-}" && -x "${MADAROS_BIN:-}" ]]; then
+  # shellcheck source=../dev/madaros-cache.sh
+  source "$ROOT_DIR/scripts/dev/madaros-cache.sh"
+  _fp_key="$(
+    {
+      echo "fixed-point-v1"
+      sha256sum "$MADAROS_BIN" | cut -c1-64
+      madaros_tree_key
+      sha256sum "$ROOT_DIR/scripts/ci/madaros_fixed_point_gate.sh" \
+                "$ROOT_DIR/scripts/lib/gate_assert.sh" \
+                "$ROOT_DIR/scripts/lib/souc_invoke.sh" | cut -c1-64
+      echo "src=${SOUNIO_MADAROS_FP_SRC:-self-hosted/compiler/main.sio}"
+      echo "expect=${SOUNIO_MADAROS_FP_EXPECT:-run}"
+      echo "min_into_acc_done=${SOUNIO_MADAROS_FP_MIN_INTO_ACC_DONE:-40}"
+    } | sha256sum | cut -c1-64
+  )"
+  _fp_log="$(mktemp)"
+  if madaros_cache_get fixed-point "$_fp_key" "$_fp_log"; then
+    echo "[madaros_fixed_point] REPLAY of a green run with identical key $_fp_key"
+    echo "[madaros_fixed_point] (gen1 sha, source tree, gate scripts and ratchet all equal; recorded log follows)"
+    cat "$_fp_log"
+    rm -f "$_fp_log"
+    exit 0
+  fi
+  echo "[madaros_fixed_point] no green receipt for key $_fp_key -- running the gate"
+  _MADAROS_FP_INNER=1 bash "$ROOT_DIR/scripts/ci/madaros_fixed_point_gate.sh" "$@" 2>&1 | tee "$_fp_log"
+  _fp_rc=${PIPESTATUS[0]}
+  if [[ "$_fp_rc" -eq 0 ]]; then
+    madaros_cache_put fixed-point "$_fp_key" "$_fp_log"
+    madaros_cache_prune
+  fi
+  rm -f "$_fp_log"
+  exit "$_fp_rc"
+fi
+
 . "$ROOT_DIR/scripts/lib/gate_assert.sh"
 . "$ROOT_DIR/scripts/lib/souc_invoke.sh"
 gate_name "madaros_fixed_point"
