@@ -35,6 +35,14 @@ fi
 
 LOCK="${SOUNIO_BUILD_LOCK:-/tmp/sounio-souc-build.lock}"
 
+# Counting semaphore. SOUNIO_BUILD_SLOTS=N allows N heavy builds at once; each
+# build pins ONE core, so N=4 on the 64-core pod keeps load ~4 from builds, far
+# below the ~153 that tripped the liveness probe. Default 1 = the old mutex.
+# Slot i is the file $LOCK.i; a caller tries each slot non-blocking and, if all
+# are busy, blocks on one chosen at random (spreads wakeups across slots).
+SLOTS="${SOUNIO_BUILD_SLOTS:-1}"
+if ! [[ "$SLOTS" =~ ^[1-9][0-9]*$ ]]; then SLOTS=1; fi
+
 if ! command -v flock >/dev/null 2>&1; then
   if ! command -v python3 >/dev/null 2>&1; then
     echo "error: build locking requires flock(1) or python3 with fcntl support" >&2
@@ -43,10 +51,28 @@ if ! command -v flock >/dev/null 2>&1; then
   exec python3 "$(dirname "$0")/souc_build_lock.py" "$LOCK" "$@"
 fi
 
-exec 9>"$LOCK"
-if ! flock -n 9; then
-  echo "[souc-build-lock] another heavy build holds the lock; waiting..." >&2
-  flock 9
+if [[ "$SLOTS" -eq 1 ]]; then
+  exec 9>"$LOCK"
+  if ! flock -n 9; then
+    echo "[souc-build-lock] another heavy build holds the lock; waiting..." >&2
+    flock 9
+  fi
+  echo "[souc-build-lock] acquired ($LOCK); running: $*" >&2
+  exec "$@"
 fi
-echo "[souc-build-lock] acquired ($LOCK); running: $*" >&2
+
+got=""
+for ((i=1; i<=SLOTS; i++)); do
+  exec 9>"$LOCK.$i"
+  if flock -n 9; then got="$LOCK.$i"; break; fi
+  exec 9>&-
+done
+if [[ -z "$got" ]]; then
+  i=$(( (RANDOM % SLOTS) + 1 ))
+  echo "[souc-build-lock] all $SLOTS build slots busy; waiting on slot $i..." >&2
+  exec 9>"$LOCK.$i"
+  flock 9
+  got="$LOCK.$i"
+fi
+echo "[souc-build-lock] acquired $got (slots=$SLOTS); running: $*" >&2
 exec "$@"
