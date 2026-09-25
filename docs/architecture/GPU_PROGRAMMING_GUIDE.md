@@ -9,7 +9,9 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.architecture.g
 
 # GPU Programming Guide
 
-Sounio GPU computing is a first-class part of the language. Kernels are declared with the `kernel fn` syntax, type-checked with the same bidirectional inference as the rest of the language, and lowered through a dedicated GPU IR pipeline (HLIR → GpuKernelIr) to three backends: PTX (CUDA), Metal (MSL), and SPIR-V (Vulkan/OpenCL). Epistemic uncertainty — `Knowledge<T>` and GUM-compliant shadow registers — propagates transparently through kernel execution.
+> **Checked public API.** The checked GPU surface uses `kernel fn` with `with GPU` effect, `gpu_thread_id_x()` / `gpu_thread_id_y()` / `gpu_thread_id_z()` builtin functions, and scalar types (`f64`, `i64`). Canonical examples: `examples/gpu/vec_add.sio`, `examples/gpu.sio`. `Knowledge<T>` generic syntax and `gpu.thread_id.x` (dot-accessor form) referenced below describe compiler-internal representations and are not part of the checked public surface. Epistemic values on GPU use the `Epistemic` struct from `stdlib/epistemic/knowledge.sio` — see `docs/compiler/KNOWN_LIMITATIONS.md` for aspirational features.
+
+Sounio GPU computing is a first-class part of the language. Kernels are declared with the `kernel fn` syntax, type-checked with the same bidirectional inference as the rest of the language, and lowered through a dedicated GPU IR pipeline (HLIR → GpuKernelIr) to three backends: PTX (CUDA), Metal (MSL), and SPIR-V (Vulkan/OpenCL). Epistemic uncertainty propagates through kernel execution via the `Epistemic` type.
 
 **Pipeline:**
 
