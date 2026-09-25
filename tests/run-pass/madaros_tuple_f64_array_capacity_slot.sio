@@ -14,13 +14,24 @@
 // functions do not actually cross the OLD 4096-entry boundary, so it passed
 // even under the pre-round-2 table and cannot detect a regression back to
 // it. It is kept as a cheap multi-entry sanity check (many distinct names,
-// exercising the round-2 dual-hash collision-safety fix at a small scale,
-// and that the LAST one registered still classifies correctly), but the
-// REAL >4096-entry boundary is exercised by
-// scripts/ci/madaros_tuple_arr_capacity_boundary_gate.sh, which generates a
-// 4097-function witness at run time (impractical to hand-write or check in
-// as a .sio fixture) and destructures entry 4096 -- the exact entry the old
-// cap would have silently dropped.
+// exercising the collision-safety fix at a small scale, and that the LAST
+// one registered still classifies correctly), but the REAL >4096-entry
+// boundary is exercised by scripts/ci/madaros_tuple_arr_capacity_boundary_gate.sh,
+// which generates a 4097-function witness at run time (impractical to
+// hand-write or check in as a .sio fixture) and destructures entry 4096 --
+// the exact entry the old cap would have silently dropped.
+//
+// Copilot review (PR #2516), "Strengthen filler_63 test" finding
+// (comment 4106112896): the original final check here was
+// `acc = last.0[0]; ... acc == 63.0` -- a plain assignment, not arithmetic.
+// A plain read-then-store preserves the raw IEEE bit pattern of 63.0 even
+// under the BROKEN integer-element path (cvtsi2sd never runs, the bits are
+// just copied through untouched), so this assertion passed regardless of
+// whether filler_63 was actually classified as an f64-array tuple return --
+// exactly the masking behaviour this whole PR exists to catch. Multiplying
+// by 2.0 forces the classification to matter: under the broken path, the
+// i64 bit pattern of 63.0 gets converted (cvtsi2sd) as if it were an
+// integer, producing a wildly different value, not 126.0.
 fn filler_0() -> ([f64; 2], [f64; 2]) with Mut, Panic {
     var a: [f64; 2] = [0.0; 2]
     var b: [f64; 2] = [0.0; 2]
@@ -419,8 +430,8 @@ fn main() -> i32 with IO, Mut, Panic {
     var acc: f64 = 0.0
     var k: i64 = 0
     let last = filler_63()
-    acc = last.0[0]
-    if s0 == 3.0 && s1 == 0.5 && acc == 63.0 {
+    acc = last.0[0] * 2.0
+    if s0 == 3.0 && s1 == 0.5 && acc == 126.0 {
         println("TUPLE_F64_ARRAY_CAPACITY_SLOT PASS")
         return 0
     }
