@@ -4848,6 +4848,26 @@ fn checker_use_module_note_path(module_id: i64, path: AstPath) with Mut, Panic, 
 // `path`, for every name in the braced list, mirroring
 // checker_use_module_note_path's own suffix loop but anchored on the item
 // name instead of `path`'s own last segment.
+//
+// Round 15 (review comment 4106649041): the first version of this function
+// registered a combined suffix for EVERY braced item unconditionally --
+// `lower_named_item_terminal_known` only carries evidence for FULL path-form
+// imports (`use a::b::f;`, populated from module_frontend.sio's real file
+// resolution against the WHOLE path), so querying it with just the bare
+// braced NAME (`f` alone, no path) never matches and never excludes
+// anything. `use a::b::{f};` where `f` is a FUNCTION (not a type) therefore
+// still registered "b::f" as a trusted qualifier suffix, so a bogus
+// `b::f::g()` could pass round 13's combined-suffix gate for any real
+// top-level `g` -- exactly the qualifier-evidence-from-a-non-module class
+// this whole registry exists to exclude, just reached through braces
+// instead of a bare path. There is no cross-module struct/enum table
+// available yet at `use`-collection time to authoritatively ask "is `f` a
+// type", so this uses the SAME convention checker_use_module_note already
+// relies on one line below (uppercase-first-byte = type/struct/enum,
+// lowercase-first-byte = module/fn/value, per this codebase's own PascalCase
+// vs snake_case naming rule): only an UPPERCASE braced name -- a type this
+// combined-suffix check is actually for -- gets registered; a lowercase
+// (function/value) braced import contributes no qualifier evidence at all.
 fn checker_use_module_note_braced_items(module_id: i64, path: AstPath, items: Option<Box<ImportItemList> >) with Mut, Panic, Div {
     if path.seg_count <= 0 {
         return
@@ -4857,7 +4877,8 @@ fn checker_use_module_note_braced_items(module_id: i64, path: AstPath, items: Op
         match cursor {
             Some(node) => {
                 let item_name = (*node).head
-                if !lower_named_item_terminal_known(item_name) {
+                let c0 = if item_name.len > 0 { (item_name.buf[0] as i64) & 255 } else { 0 }
+                if c0 >= 65 && c0 <= 90 && !lower_named_item_terminal_known(item_name) {
                     var s: i64 = 0
                     while s < path.seg_count {
                         let prefix = ast_path_range_name(path, s, path.seg_count - 1)
