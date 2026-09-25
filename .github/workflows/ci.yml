@@ -876,6 +876,10 @@ jobs:
       # and the fixed-point receipt are keyed on the exact bytes they depend on,
       # so a restored entry that does not match is simply a miss.
       SOUNIO_MADAROS_CACHE: /tmp/sounio-madaros-cache
+      # Pull-request code may read the cache but never write it: an entry is keyed
+      # by content, so a PR able to store one could plant a binary under the key
+      # the next main or merge-queue run will look up. Trusted events write.
+      SOUNIO_MADAROS_CACHE_READONLY: ${{ github.event_name == 'pull_request' && '1' || '0' }}
       SOUNIO_MADAROS_CACHE_KEEP: ${{ (vars.SOUNIO_CI_RUNNER != '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '16' || '1' }}
     steps:
       - uses: actions/checkout@v4
@@ -900,6 +904,9 @@ jobs:
           path: /tmp/sounio-madaros-cache
           key: madaros-cache-v1-${{ hashFiles('self-hosted/**', 'stdlib/**', 'bin/souc-linux-x86_64', 'bin/souc-lean-single-x86_64', 'scripts/lib/**', 'scripts/ci/build_modular_madaros.sh', 'scripts/ci/madaros_fixed_point_gate.sh', 'scripts/dev/madaros-cache.sh') }}
           restore-keys: madaros-cache-v1-
+      - name: Mark the restored cache state
+        if: runner.environment == 'github-hosted'
+        run: touch /tmp/sounio-madaros-cache.stamp
       - name: Materialize the committed Madaros prebuilt
         run: bash scripts/lib/materialize_madaros_prebuilt.sh
       # The gen2 self-compile ("Madaros compiles Madaros" below) is memory-bound,
@@ -1082,7 +1089,9 @@ jobs:
         id: madaros-cache-has
         if: always() && runner.environment == 'github-hosted' && steps.madaros-cache.outputs.cache-hit != 'true'
         run: |
-          if [ -n "$(ls -A /tmp/sounio-madaros-cache/madaros /tmp/sounio-madaros-cache/fixed-point 2>/dev/null)" ]; then
+          # Only entries stored by THIS run: re-saving what was just restored (e.g.
+            # after a failed build) would pin a stale snapshot under a new key.
+            if [ -n "$(find /tmp/sounio-madaros-cache/madaros /tmp/sounio-madaros-cache/fixed-point /tmp/sounio-madaros-cache/seed -mindepth 1 -maxdepth 1 -newer /tmp/sounio-madaros-cache.stamp ! -name '.tmp.*' 2>/dev/null)" ]; then
             echo "entries=true" >> "$GITHUB_OUTPUT"
           fi
       - name: Save content-addressed Madaros cache
