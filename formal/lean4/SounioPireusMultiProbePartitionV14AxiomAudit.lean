@@ -1,0 +1,18 @@
+import SounioPireusMultiProbePartitionV14
+
+open SounioPireusMultiProbePartitionV14
+
+#print axioms partition_dimension_exact
+#print axioms block_start_zero
+#print axioms block_end_last
+#print axioms block_contiguous_adjacency
+#print axioms block_bounds_step
+#print axioms block_start_strict_mono
+#print axioms positive_witness_block_63
+#print axioms negative_witness_block_63_mismatch
+#print axioms serialize_domain_injective
+#print axioms blocks_disjoint
+#print axioms block_cover_exists
+#print axioms exact_cover_partition
+#print axioms all_32_classes_v14_certified
+#print axioms multiprobe_v14_closed_without_claim_promotion

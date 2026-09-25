@@ -791,3 +791,9 @@ lean_lib «SounioCatalysisKinetics» where
 -- quasi-equilibrium limit. Backs stdlib/chemistry/surface.sio.
 @[default_target]
 lean_lib «SounioSurfaceKinetics» where
+
+@[default_target]
+lean_lib «SounioPireusMultiProbePartitionV14» where
+
+@[default_target]
+lean_lib «SounioPireusMultiProbePartitionV14AxiomAudit» where
