@@ -377,9 +377,27 @@ pub fn spec_item_module_populated() -> bool with Mut {
 // Checker.current_module_id would otherwise never leave its init value of 0
 // -- this table is already populated by specialize_generics_multi, which
 // always runs immediately before that verdict function in run_check_mode.
+//
+// Round 12 (review comment 4100990400): "not found" used to return -1 -- the
+// SAME value SPEC_CURRENT_MODULE_ID/LOWER_CURRENT_MODULE_ID default to for a
+// genuinely single-module compile, which spec_path_qualifier_all_modules_known
+// and lower_effective_current_module_id() both treat as "assume module 0"
+// (a deliberate convenience so a single-module compile needs no special
+// casing). Assigning a lookup MISS straight into those globals therefore did
+// NOT fail closed as intended (round 10 findings 2/3/4/7): it silently fell
+// back to module 0's own registrations, letting an unmapped item (a capacity
+// miss, or a synthesized instance symbol) borrow module 0's imports during
+// rewriting/lowering instead of correctly matching nothing. Return
+// SPEC_ITEM_MODULE_NOT_FOUND (-2) instead, a value distinct from the -1
+// "unset, assume module 0" convention, so callers assigning this result
+// directly into SPEC_CURRENT_MODULE_ID/LOWER_CURRENT_MODULE_ID correctly
+// fail closed -- see those two fallback functions' own comments for the
+// matching exact-(-1)-only fix.
+let SPEC_ITEM_MODULE_NOT_FOUND: i64 = 0 - 2
+
 pub fn spec_item_module_lookup(n: Name) -> i64 with Mut, Panic, Div {
     if n.len <= 0 || n.len > SPEC_ITEM_MODULE_SEG_MAX {
-        return 0 - 1
+        return SPEC_ITEM_MODULE_NOT_FOUND
     }
     let h = ast_name_hash(n)
     var i: i64 = 0
@@ -400,7 +418,7 @@ pub fn spec_item_module_lookup(n: Name) -> i64 with Mut, Panic, Div {
         }
         i = i + 1
     }
-    0 - 1
+    SPEC_ITEM_MODULE_NOT_FOUND
 }
 
 // Round 10 (review comment 4099549051) tried marking a text collision
@@ -660,7 +678,12 @@ fn spec_path_qualifier_all_modules_known(path: AstPath) -> bool with Mut, Panic,
     if path.seg_count < 2 {
         return false
     }
-    let module_id = if SPEC_CURRENT_MODULE_ID < 0 { 0 } else { SPEC_CURRENT_MODULE_ID }
+    // Round 12 (review comment 4100990400): exact match on -1 (the genuine
+    // "unset, single-module compile" default), not "any negative value" --
+    // spec_item_module_lookup's "not found" result is a DIFFERENT sentinel
+    // (SPEC_ITEM_MODULE_NOT_FOUND, -2) precisely so a fail-closed assignment
+    // from that lookup does not get reinterpreted as "assume module 0" here.
+    let module_id = if SPEC_CURRENT_MODULE_ID == 0 - 1 { 0 } else { SPEC_CURRENT_MODULE_ID }
     var k: i64 = 0
     while k < path.seg_count - 1 {
         if lower_named_item_terminal_known(ast_path_prefix_name(path, k)) {
