@@ -1,51 +1,54 @@
-# Runner pods execute repository code. They may reach GitHub (to fetch the job,
-# report results, download actions and artifacts) and the Ubuntu archive (to
-# provision gcc/python3), and nothing else: not the LAN, not Ceph, not Proxmox,
-# not the Kubernetes API, not other pods. Ingress is denied entirely.
-# Requires Cilium with the L7 DNS proxy (cluster: v1.19.4, enable-l7-proxy=true).
-apiVersion: cilium.io/v2
-kind: CiliumNetworkPolicy
+# Runner pods execute repository code. They may resolve names through the
+# cluster DNS and open 80/443 to the PUBLIC internet (GitHub, the Ubuntu
+# archive); every private range is excluded, so they cannot reach the LAN, the
+# nodes or their kubelets, the Kubernetes API, Ceph, Proxmox or any other pod.
+# Ingress is denied entirely.
+#
+# Why plain NetworkPolicy and not a Cilium toFQDNs allowlist (GitHub-only):
+# measured 2026-09-25, a CiliumNetworkPolicy with L7 DNS rules made every
+# lookup from this namespace fail (curl rc=6), both when selecting the CoreDNS
+# pods and when adding the kube-dns ClusterIP (this cluster runs Cilium next to
+# kube-proxy: kube-proxy-replacement=false, bpf-lb-sock=false). This shape is
+# the one pireus-ci already runs with. Narrowing egress to GitHub hostnames is
+# a follow-up that needs the Cilium DNS proxy working first.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
 metadata:
-  name: ci-runner-egress-allowlist
+  name: ci-runner-egress
   namespace: arc-runners
 spec:
-  endpointSelector: {}
-  enableDefaultDeny:
-    ingress: true
-    egress: true
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress: []
   egress:
-    - toEndpoints:
-        - matchLabels:
-            k8s:io.kubernetes.pod.namespace: kube-system
-            k8s-app: kube-dns
-      toPorts:
-        - ports:
-            - port: "53"
-              protocol: ANY
-          rules:
-            dns:
-              - matchPattern: "*"
-    - toFQDNs:
-        - matchName: github.com
-        - matchName: api.github.com
-        - matchName: codeload.github.com
-        - matchName: ghcr.io
-        - matchPattern: "*.github.com"
-        - matchPattern: "*.githubusercontent.com"
-        - matchPattern: "*.actions.githubusercontent.com"
-        - matchPattern: "*.githubapp.com"
-        - matchPattern: "*.blob.core.windows.net"
-      toPorts:
-        - ports:
-            - port: "443"
-              protocol: TCP
-    - toFQDNs:
-        - matchName: archive.ubuntu.com
-        - matchName: security.ubuntu.com
-        - matchPattern: "*.archive.ubuntu.com"
-      toPorts:
-        - ports:
-            - port: "80"
-              protocol: TCP
-            - port: "443"
-              protocol: TCP
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+    - ports:
+        - port: 443
+          protocol: TCP
+        - port: 80
+          protocol: TCP
+      to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 0.0.0.0/8
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 198.18.0.0/15
+              - 224.0.0.0/4
+              - 240.0.0.0/4
