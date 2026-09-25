@@ -65,9 +65,11 @@ fi
 [[ -x "$MADAROS_ELF" ]] || fail "Madaros is missing or not executable: $MADAROS_ELF"
 
 # Every function is DISTINCT (not a fixed handful repeated), so this also
-# exercises the round-2 collision-safety fix (two independent hashes) at
-# scale, not just the raw entry count. None of these need to be reachable
-# from `main` -- the probe collects straight off the parsed item list.
+# exercises the collision-safety fix -- exact interned-name identity via
+# ir_intern_name, not a hash comparison (self-hosted/ir/lower.sio, see
+# LOWER_FN_TUPLE_ARR_NAME_ID's own comment) -- at scale, not just the raw
+# entry count. None of these need to be reachable from `main` -- the probe
+# collects straight off the parsed item list.
 for i in $(seq 0 "$LAST"); do
   printf 'fn tarr%s() -> ([f64; 2], [f64; 2]) with Mut, Panic { var a: [f64; 2] = [0.0; 2]; var b: [f64; 2] = [0.0; 2]; a[0] = %s.0; b[0] = 1.0; (a, b) }\n' \
     "$i" "$i" >>"$SRC"
