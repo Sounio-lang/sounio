@@ -15,16 +15,19 @@ WF="madaros-prebuilt-refresh.yml"
 
 # A workflow_dispatch run reports the branch the workflow FILE came from
 # (main), not the `ref` input, so runs cannot be matched on headBranch. Take the
-# first workflow_dispatch run created at or after this dispatch.
+# first workflow_dispatch run created at or after this dispatch whose run-name
+# names this ref.
 SINCE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 gh workflow run "$WF" -f "ref=$REF" >/dev/null
 echo "→ dispatched $WF for $REF at $SINCE; waiting for the run to appear..."
 sleep 8
 RUN_ID=""
 for _ in $(seq 1 20); do
+  # run-name in the workflow is "Madaros prebuilt refresh (<ref>)", so a
+  # concurrent dispatch for another ref cannot be picked up.
   RUN_ID="$(gh run list --workflow "$WF" --event workflow_dispatch --limit 20 \
-            --json databaseId,createdAt \
-            --jq "[.[] | select(.createdAt >= \"$SINCE\")] | sort_by(.createdAt) | first | .databaseId // empty")"
+            --json databaseId,createdAt,displayTitle \
+            --jq "[.[] | select(.createdAt >= \"$SINCE\" and .displayTitle == \"Madaros prebuilt refresh ($REF)\")] | sort_by(.createdAt) | first | .databaseId // empty")"
   [[ -n "$RUN_ID" ]] && break
   sleep 5
 done
