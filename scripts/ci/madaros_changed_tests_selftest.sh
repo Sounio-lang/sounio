@@ -37,6 +37,29 @@ if grep -Fq 'MADAROS_CHANGED_TESTS_STACK' <<<"$non_pr_selected"; then
   exit 1
 fi
 
+# merge_group is diff-selected like pull_request. With an empty queued diff it
+# must select nothing -- the old code fell through to the fixed non-PR sample
+# (array_repeat_i8_binding.sio) -- and without a base SHA it must refuse.
+mq_head="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+mq_selected="$(
+  CI_EVENT_NAME=merge_group CI_BASE_SHA="$mq_head" CI_HEAD_SHA="$mq_head" \
+  SOUNIO_MADAROS_CHANGED_TESTS_STACK_KB=0 \
+    "$GATE" --select-only
+)"
+if grep -Fq 'array_repeat_i8_binding.sio' <<<"$mq_selected"; then
+  echo 'madaros-changed-tests: merge_group fell through to the non-PR sample' >&2
+  exit 1
+fi
+set +e
+mq_nobase="$(CI_EVENT_NAME=merge_group CI_BASE_SHA= "$GATE" --select-only 2>&1)"
+mq_nobase_rc=$?
+set -e
+if [[ "$mq_nobase_rc" == "0" ]]; then
+  echo 'madaros-changed-tests: accepted a merge_group without a base SHA' >&2
+  exit 1
+fi
+grep -Fxq 'MADAROS_CHANGED_TESTS_FAIL reason=missing_merge_group_base_sha' <<<"$mq_nobase"
+
 skip="$(
   (
     ulimit -S -s 8192
