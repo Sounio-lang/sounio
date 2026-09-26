@@ -97,15 +97,27 @@ fn pbpk28_organ_average_ref(s: &PBPKState28, p: PBPKParams28, i: i32) -> f64 wit
 // sink_organ outside 1..13 or cl_sink == 0.0 means no sink: every added term
 // is then an exact ±0.0 and the step is bit-identical to the sink-free kernel.
 //
+// Input route: `rel_mid` enters blood (input_organ outside 1..13, the default)
+// or the vascular space of organ k = input_organ. Routing oral absorption into
+// the liver (k = 1) is the portal-vein first pass: absorbed drug meets the
+// hepatic sink before it reaches the systemic blood, so hepatic availability
+// F_H = Q/(Q + X) and oral CL/F = X emerge from the solve instead of being
+// imposed (well-stirred at quasi-steady; X = cl_sink · C_avg,k/C_v,k is the
+// sink's clearance referenced to the organ's venous concentration). In the CN
+// step the input adds dt·rel_mid/V_v,k to that organ's explicit side; the mass
+// identity above is unchanged. Blood input adds exactly the same expression as
+// before, and every organ not receiving input adds +0.0.
+//
 // Madaros multimodule native workarounds (same audit note):
 // 1. Do not return a freshly rebuilt `PBPKState28` from the Schur frame —
 //    caller's field load SIGSEGVs. In-place mut + thin by-value wrapper below.
 // 2. Do not reconstruct with a second dynamic-index loop over local `a_v`/`b_v`
 //    in this same frame — use `pbpk28_cn_apply_schur` instead.
-pub fn pbpk28_full_cn_step_sink_mut(
+pub fn pbpk28_full_cn_step_routed_mut(
     state: &!PBPKState28,
     p: PBPKParams28,
     rel_mid: f64,
+    input_organ: i32,
     dt: f64,
     sink_organ: i32,
     cl_sink: f64
@@ -118,6 +130,8 @@ pub fn pbpk28_full_cn_step_sink_mut(
     let vb = p.v_ref[0]
     let has_sink = sink_organ >= 1 && sink_organ < 14 && cl_sink > 0.0
     let sink_avg_old = if has_sink { pbpk28_organ_average_ref(state, p, sink_organ) } else { 0.0 }
+    let routed = input_organ >= 1 && input_organ < 14
+    let rel_blood = if routed { 0.0 } else { rel_mid }
 
     // Big-S = h · (Σ Q + CL) / V_b — diagonal of the blood row.
     var sum_q = 0.0
@@ -129,7 +143,7 @@ pub fn pbpk28_full_cn_step_sink_mut(
     let big_s = h * (sum_q + p.cl_central) / vb
 
     let cb_old = (*state).cv[0]
-    var rhs0 = (1.0 - big_s) * cb_old + dt * rel_mid / vb
+    var rhs0 = (1.0 - big_s) * cb_old + dt * rel_blood / vb
 
     // Per-organ Schur-complement coefficients.
     var sum_beta_a = 0.0
@@ -150,6 +164,8 @@ pub fn pbpk28_full_cn_step_sink_mut(
         let qi = p.q[i]
         // h·k_s for the sink organ, exactly 0.0 elsewhere (see header).
         let hks = if has_sink && i == sink_organ { h * cl_sink / vi } else { 0.0 }
+        // dt·rel_mid/V_v for the input organ, exactly 0.0 elsewhere.
+        let gin = if routed && i == input_organ { dt * rel_mid / vv } else { 0.0 }
 
         let beta  = h * qi / vb
         let gamma = h * qi / vv
@@ -161,7 +177,7 @@ pub fn pbpk28_full_cn_step_sink_mut(
 
         rhs0 = rhs0 + beta * (*state).cv[i]
 
-        let rhs_v = gamma * cb_old + (1.0 - h * (qi + ps) / vv - hks) * (*state).cv[i] + qq * (*state).ct[i]
+        let rhs_v = gamma * cb_old + (1.0 - h * (qi + ps) / vv - hks) * (*state).cv[i] + qq * (*state).ct[i] + gin
         let rhs_t = rr * (*state).cv[i] + (1.0 - h * ps / (vt * kp) - hks) * (*state).ct[i]
 
         let av = (sb * rhs_v + qq * rhs_t) / det
@@ -185,6 +201,18 @@ pub fn pbpk28_full_cn_step_sink_mut(
     if !has_sink { return 0.0 }
     let sink_avg_new = pbpk28_organ_average_ref(state, p, sink_organ)
     return h * cl_sink * (sink_avg_old + sink_avg_new)
+}
+
+// Blood-input step with an optional organ sink (see the routed form above).
+pub fn pbpk28_full_cn_step_sink_mut(
+    state: &!PBPKState28,
+    p: PBPKParams28,
+    rel_mid: f64,
+    dt: f64,
+    sink_organ: i32,
+    cl_sink: f64
+) -> f64 with Mut, Div {
+    return pbpk28_full_cn_step_routed_mut(state, p, rel_mid, 0, dt, sink_organ, cl_sink)
 }
 
 // Sink-free step (the original kernel): identical to the sink form with no

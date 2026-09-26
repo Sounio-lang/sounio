@@ -1,0 +1,120 @@
+//@ run-pass
+//@ expect-stdout-contains: PBPK28_PORTAL_FIRST_PASS_PASS
+//
+// Organ-routed input in the PBPK28 CN step (pbpk28_full_cn_step_routed_mut):
+// a constant infusion into the liver vascular space (portal vein) against one
+// into blood, with a first-order sink on the liver. At steady state the CN map's
+// fixed point is the ODE's, so the well-stirred identities hold exactly (up to
+// convergence + rounding; tolerance 1e-9 relative):
+//
+//   X     = sink flux / C_v,liver          (sink clearance, venous-referenced)
+//   CL_H  = CL_sys − CL_central = Q·X/(Q + X)      (blood infusion)
+//   F_H   = C_b,portal · CL_sys / R = Q/(Q + X)    (portal infusion)
+//   CL/F  = R / C_b,portal = CL_sys / F_H
+//   R     = sink flux + CL_central · C_b          (mass balance, both routes)
+//
+// Parameters: venlafaxine parent profile, renal CL 4 L/h on blood, liver sink
+// 96 L/h / κ with κ = f + (1 − f)·Kp the liver's equilibrium C_avg/C_v.
+// Finally the blood route with no sink is checked bit-identical to
+// pbpk28_full_cn_step.
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::tsit5_pbpk28::*
+
+fn pf_rel(a: f64, b: f64) -> f64 {
+    let d = if a > b { a - b } else { b - a }
+    let m = if b < 0.0 { 0.0 - b } else { b }
+    return d / m
+}
+
+fn fmt_6(x: f64) -> i64 { return (x * 1000000.0) as i64 }
+
+fn main() with Mut, Div, IO {
+    var pp = pbpk28_params_venlafaxine_parent()
+    pp.cl_central = 4.0
+    let f_liv = pp.vasc_frac[1]
+    let kappa = f_liv + (1.0 - f_liv) * pp.kp[1]
+    let cl_sink = 96.0 / kappa
+    let q = pp.q[1]
+    let dt = 0.05
+    let r = 1.0
+
+    // Blood infusion.
+    var sb = pbpk28_state_zero()
+    var fb = 0.0
+    var k = 0
+    while k < 8000 {
+        fb = pbpk28_full_cn_step_routed_mut(&!sb, pp, r, 0, dt, 1, cl_sink) / dt
+        k = k + 1
+    }
+    // Portal infusion.
+    var sp = pbpk28_state_zero()
+    var fp = 0.0
+    k = 0
+    while k < 8000 {
+        fp = pbpk28_full_cn_step_routed_mut(&!sp, pp, r, 1, dt, 1, cl_sink) / dt
+        k = k + 1
+    }
+
+    let x_b = fb / sb.cv[1]
+    let x_p = fp / sp.cv[1]
+    let cl_sys = r / sb.cv[0]
+    let cl_h = cl_sys - pp.cl_central
+    let f_h = sp.cv[0] * cl_sys / r
+    let cl_f = r / sp.cv[0]
+    print("X*1e6="); println(fmt_6(x_b))
+    print("CL_sys*1e6="); println(fmt_6(cl_sys))
+    print("F_H*1e6="); println(fmt_6(f_h))
+    print("CL/F*1e6="); println(fmt_6(cl_f))
+
+    let tol = 1.0e-9
+    if !(pf_rel(x_p, x_b) < tol) {
+        println("FAIL: sink clearance X differs between routes")
+        return
+    }
+    if !(pf_rel(cl_h, q * x_b / (q + x_b)) < tol) {
+        println("FAIL: systemic hepatic CL is not well-stirred Q X/(Q+X)")
+        return
+    }
+    if !(pf_rel(f_h, q / (q + x_b)) < tol) {
+        println("FAIL: portal first-pass availability is not Q/(Q+X)")
+        return
+    }
+    if !(pf_rel(cl_f, cl_sys / f_h) < tol) {
+        println("FAIL: CL/F != CL_sys / F_H")
+        return
+    }
+    if !(pf_rel(fb + pp.cl_central * sb.cv[0], r) < tol && pf_rel(fp + pp.cl_central * sp.cv[0], r) < tol) {
+        println("FAIL: steady-state mass balance")
+        return
+    }
+    if !(f_h > 0.0 && f_h < 1.0) {
+        println("FAIL: F_H outside (0, 1)")
+        return
+    }
+
+    let p0 = pbpk28_params_venlafaxine_parent()
+    var s1 = pbpk28_state_zero()
+    var s2 = pbpk28_state_zero()
+    var j = 0
+    while j < 20 {
+        var rel = 0.0
+        if j < 6 { rel = 5.0 }
+        let removed = pbpk28_full_cn_step_routed_mut(&!s1, p0, rel, 0, 0.5, 0, 0.0)
+        s2 = pbpk28_full_cn_step(s2, p0, rel, 0.5)
+        if removed != 0.0 {
+            println("FAIL: sink-free routed step reported removed mass")
+            return
+        }
+        var i = 0
+        while i < 14 {
+            if s1.cv[i] != s2.cv[i] || s1.ct[i] != s2.ct[i] {
+                println("FAIL: blood-route step differs from pbpk28_full_cn_step")
+                return
+            }
+            i = i + 1
+        }
+        j = j + 1
+    }
+    println("PBPK28_PORTAL_FIRST_PASS_PASS")
+}
