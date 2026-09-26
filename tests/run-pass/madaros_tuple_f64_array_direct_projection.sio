@@ -1,0 +1,51 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: TUPLE_F64_ARRAY_DIRECT_PROJECTION PASS
+//
+// Review follow-up (#2570). expr_is_tuple_slot_f64_array_ref -- the check behind
+// #1502's per-slot f64-array metadata -- only recognized the DESUGARED tuple-local
+// form: `let t = pair(); ... t.0 ...`, base_expr.kind == ExprIdent. Three related
+// shapes never reached it and read the array's f64 bits as an integer:
+//
+//   A  `let x = pair().0`        direct projection, base_expr.kind == ExprCall,
+//                                 no intervening tuple-local binding at all
+//   B  `let t = pair(); t.0[i]`  in-place index on a field access whose base IS
+//                                 an ExprIdent tuple-local, but index_base_elem_is_
+//                                 float_ref's ExprFieldAccess branch never consulted
+//                                 the tuple-slot table -- only the struct-field one
+//   C  `pair().0[i]`             in-place index AND a direct-call base, both gaps
+//                                 stacked in the same expression
+//
+// A is the one the review named; B was found while fixing it (index_base_elem_
+// is_float_ref's ExprFieldAccess branch always delegated to the struct-only
+// classifier, regardless of what kind of base the field access had) and would
+// still miscompile even after A alone was fixed.
+fn pair() -> ([f64; 2], i64) with Mut, Panic {
+    var a: [f64; 2] = [0.0; 2]
+    a[0] = 1.5
+    (a, 9)
+}
+
+fn main() -> i32 with IO, Mut, Panic {
+    var bad: i32 = 0
+
+    // A: direct projection, no tuple-local binding.
+    let x = pair().0
+    let da: f64 = x[0] * 2.0
+    if da != 3.0 { bad = bad + 1 }
+
+    // B: in-place index through an ExprIdent tuple-local, no separate binding
+    // of the projected array itself.
+    let t = pair()
+    let db: f64 = t.0[0] * 2.0
+    if db != 3.0 { bad = bad + 2 }
+
+    // C: in-place index directly on the call.
+    let dc: f64 = pair().0[0] * 2.0
+    if dc != 3.0 { bad = bad + 4 }
+
+    if bad == 0 {
+        println("TUPLE_F64_ARRAY_DIRECT_PROJECTION PASS")
+    }
+    bad
+}
