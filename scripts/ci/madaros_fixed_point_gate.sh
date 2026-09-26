@@ -89,7 +89,9 @@ if [[ -z "${_MADAROS_FP_INNER:-}" && -n "${SOUNIO_MADAROS_CACHE:-}" && -x "${MAD
       # outside the self-hosted/ + stdlib/ tree key.
       _fp_src="${SOUNIO_MADAROS_FP_SRC:-self-hosted/compiler/main.sio}"
       echo "src=$_fp_src"
-      sha256sum "$ROOT_DIR/$_fp_src" 2>/dev/null | cut -c1-64 || echo "src-missing"
+      # Absolute paths are used as given; relative ones resolve from ROOT_DIR.
+      if [[ "$_fp_src" == /* ]]; then _fp_src_path="$_fp_src"; else _fp_src_path="$ROOT_DIR/$_fp_src"; fi
+      if [[ -f "$_fp_src_path" ]]; then sha256sum "$_fp_src_path" | cut -c1-64; else echo "src-missing"; fi
       echo "expect=${SOUNIO_MADAROS_FP_EXPECT:-run}"
       echo "min_into_acc_done=${SOUNIO_MADAROS_FP_MIN_INTO_ACC_DONE:-40}"
     } | sha256sum | cut -c1-64
