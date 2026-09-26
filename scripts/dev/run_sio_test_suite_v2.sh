@@ -142,6 +142,59 @@ if [[ "$(head -c 2 "$SOUC_BIN" 2>/dev/null)" != "#!" ]]; then
     unset _NATIVE_WRAPPER
 fi
 
+# Determine once whether the binary that will actually run tests identifies
+# as Madaros or lean_single -- used by `//@ requires: lean_single` below.
+# Probed directly against the FINAL, resolved $SOUC_BIN rather than
+# inferred from which env var chose it, so it is correct for any
+# resolution path: bare bin/souc, SOUNIO_TEST_SOUC_BIN pointed at any
+# script or raw ELF (including bin/souc itself, or an explicit Madaros
+# wrapper), or SOUNIO_SOUC_ENGINE forcing an engine (Copilot review,
+# sounio-lang/sounio#2694: a prior version of the lean_single arm below
+# inferred "not Madaros" from SOUNIO_TEST_SOUC_BIN merely being set,
+# which a caller explicitly pointing it at Madaros would have defeated).
+# Both interfaces answer `--version` safely and distinguishably: bin/souc
+# and the subcommand wrapper handle it directly (Madaros prints
+# "Madaros vX.Y.Z"); a raw ELF (lean_single or Madaros) prints its own
+# banner/usage for an unrecognized flag, and the native wrapper passes
+# unrecognized flags straight through to the raw ELF as positional args
+# rather than erroring.
+#
+# Anchored to the start of a line, not a bare substring match (Copilot
+# review, sounio-lang/sounio#2694): bin/souc's own "Madaros not built"
+# fallback path prints `souc: Madaros raw ELF not found ... falling back to
+# the legacy lean_single engine` to stderr before actually execing
+# lean_single -- a plain `grep -q "Madaros"` on the merged 2>&1 stream
+# matches THAT line and misreports lean_single as Madaros. The real
+# identity banner is always `Madaros vX.Y.Z ...` at the very start of a
+# line; the fallback notice always starts with `souc:`.
+#
+# Tri-state, fail-closed (Copilot review, same PR): treating every
+# non-Madaros `--version` result as "definitely lean_single" is itself
+# wrong for a third interface neither of the two comments above accounts
+# for -- a project-supplied wrapper-style SOUNIO_TEST_SOUC_BIN (e.g. the
+# kind scripts/ci/build_ontology_validation_souc.sh generates) that has no
+# `--version` arm at all: its `run` subcommand can still delegate to a
+# Madaros FALLBACK_SOUC underneath, but its `--version` output matches
+# neither the Madaros banner nor lean_single's raw-ELF `Usage: mini_native`
+# line, so defaulting to "not Madaros" would run a `requires: lean_single`
+# fixture on that Madaros fallback instead of skipping it. Recognize
+# lean_single by ITS OWN identity marker too, and treat "matched neither"
+# as unknown -- gated the same as Madaros (skip), not the same as
+# lean_single (run), so an unrecognized engine fails closed rather than
+# silently running tests it may not support.
+SOUNIO_RESOLVED_ENGINE_PROBE="$("$SOUC_BIN" --version 2>&1 || true)"
+SOUNIO_RESOLVED_IS_MADAROS=0
+SOUNIO_RESOLVED_IS_LEAN_SINGLE=0
+# Here-string form, not `echo ... | grep -q`: under pipefail, grep -q exits
+# at its first match and closes the pipe, and the still-flushing echo can
+# fail the pipeline -- a present match then reads as absent (scripts/ci/
+# sigpipe_hygiene_gate.sh, guarding exactly this shape in this file).
+if grep -qE '^Madaros v[0-9]' <<<"$SOUNIO_RESOLVED_ENGINE_PROBE"; then
+    SOUNIO_RESOLVED_IS_MADAROS=1
+elif grep -qE '^Usage: mini_native' <<<"$SOUNIO_RESOLVED_ENGINE_PROBE"; then
+    SOUNIO_RESOLVED_IS_LEAN_SINGLE=1
+fi
+
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
 
 # Parse arguments
@@ -450,16 +503,51 @@ run_test() {
             # predicate should have spoken. Without this arm such a test would
             # fail on the Madaros job for a reason unrelated to what it asserts.
             lean_single)
-                # Gated on what will ACTUALLY run, not on a declaration. The
-                # madaros arm above trusts SOUNIO_MADAROS_AVAILABLE, which is a
-                # statement of intent; a local checkout with a built Madaros and
-                # that variable unset runs Madaros anyway, and the test would
-                # then fail with "missing error: ..." as though the compiler were
-                # wrong instead of the test being inapplicable. Second clause is
-                # bin/souc's own rule, restated once: it picks Madaros when a
-                # local artifact exists and no explicit engine was handed in.
-                if [[ -n "${SOUNIO_MADAROS_AVAILABLE:-}" ]] \
-                   || { [[ -z "${SOUNIO_TEST_SOUC_BIN:-}" ]] && [[ -x "$ROOT_DIR/artifacts/self-hosted/madaros" ]]; }; then
+                # Gated on what will ACTUALLY run, not on a declaration or on
+                # which env var chose it. Two iterations of trying to infer
+                # this from env vars each missed a real case (CLAUDE.md
+                # operating principle 13; both measured directly, not assumed,
+                # via Copilot review on sounio-lang/sounio#2694):
+                #   1. Checking only for a LOCAL artifacts/self-hosted/madaros
+                #      build missed bin/souc's default arm, which materializes
+                #      and runs the COMMITTED bin/madaros-linux-x86_64.gz
+                #      prebuilt (tracked in every checkout) whenever no
+                #      explicit engine/override is given -- reproduced: a bare
+                #      `bash scripts/run_sio_test_suite.sh` hard-failed
+                #      seq_epistemic.sio, seq_knowledge_uncertain.sio, and
+                #      this PR's test_kinetics_fixed_regressions.sio on
+                #      Madaros's multimodule thin-link error instead of
+                #      skipping them.
+                #   2. Trusting any explicit SOUNIO_TEST_SOUC_BIN as "not
+                #      Madaros" missed a caller pointing it AT Madaros (e.g.
+                #      SOUNIO_TEST_SOUC_BIN=bin/souc, or an explicit Madaros
+                #      wrapper) -- that binary IS what runs, unconditionally,
+                #      no local-build or engine-var check involved.
+                # SOUNIO_RESOLVED_IS_MADAROS (computed once above, by asking
+                # the actual, final $SOUC_BIN what it is via `--version`,
+                # not by asking which env var picked it) is correct for
+                # every resolution path at once, so this arm no longer needs
+                # to enumerate them -- and, per Copilot review on
+                # sounio-lang/sounio#2694, must not be OR'd with
+                # SOUNIO_MADAROS_AVAILABLE (a statement of INTENT for the
+                # `requires: madaros` arm above, not of what actually
+                # resolved): a Madaros-capable environment that explicitly
+                # runs `SOUNIO_TEST_SOUC_BIN=/tmp/souc-stage2` (lean_single)
+                # would still have SOUNIO_MADAROS_AVAILABLE set, and the OR
+                # would skip a lean_single test on the exact run that most
+                # needs to exercise it. Gate solely on the probed identity --
+                # and, per a later round of the same review, fail CLOSED
+                # (skip) when the probe positively identified neither engine
+                # (SOUNIO_RESOLVED_IS_LEAN_SINGLE also 0), rather than
+                # defaulting an unrecognized `--version` result to "must be
+                # lean_single": a wrapper-style SOUNIO_TEST_SOUC_BIN with no
+                # `--version` arm (e.g. the kind
+                # scripts/ci/build_ontology_validation_souc.sh generates)
+                # can still delegate its `run` subcommand to a Madaros
+                # fallback underneath, so treating "unrecognized" as safe to
+                # run risked the exact multimodule failure this annotation
+                # exists to avoid, just one interface removed.
+                if [[ "${SOUNIO_RESOLVED_IS_MADAROS:-0}" == "1" ]] || [[ "${SOUNIO_RESOLVED_IS_LEAN_SINGLE:-0}" != "1" ]]; then
                     echo "{\"status\":\"skip\",\"reason\":\"requires:lean_single\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"
                     return
                 fi
@@ -810,7 +898,7 @@ if [[ "$LIST_TESTS" == "1" ]]; then
     exit 0
 fi
 
-export SOUC_BIN ROOT_DIR FILTER TEST_TMP SOUNIO_STDLIB_PATH CI SOUNIO_GPU_AVAILABLE SOUNIO_LLVM_AVAILABLE
+export SOUC_BIN ROOT_DIR FILTER TEST_TMP SOUNIO_STDLIB_PATH CI SOUNIO_GPU_AVAILABLE SOUNIO_LLVM_AVAILABLE SOUNIO_RESOLVED_IS_MADAROS SOUNIO_RESOLVED_IS_LEAN_SINGLE
 
 # Header
 echo "=== Sounio Test Suite ==="

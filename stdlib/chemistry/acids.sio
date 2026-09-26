@@ -6,19 +6,38 @@ module chemistry::acids
 // FULL ChEBI ontology (real acetic acid CHEBI:15366 etc. for provenance in pH/titration)
 use chemistry::ontology;
 
-fn abs_f64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
-fn check_near(a: f64, b: f64, tol: f64) -> bool { abs_f64(a - b) < tol }
+// Named acids_* rather than the generic abs_f64/check_near/sqrt_approx/
+// ln_approx/log10_approx used elsewhere in stdlib/chemistry: on a Madaros
+// built before self-hosted/compiler/private_fn_identity.sio landed
+// (2026-09-21, docs/audit/MADAROS_PRIVATE_FN_IDENTITY_2026-09-21.md), those
+// bare names collided across modules (acids, equilibrium, stoichiometry,
+// thermochem all declare their own) and which module's copy a caller
+// actually got depended on IMPORT ORDER rather than which module defines
+// the caller -- e.g. ph(1e-3, uh) returned 3.0 when
+// `use chemistry::acids::*` preceded `use chemistry::equilibrium::*`, and
+// 2.119756 (wrong; equilibrium's bare ln_approx has no range-reduction)
+// with the import order reversed, with no error or warning either way.
+// private_fn_identity_apply now renames colliding private definitions
+// before lowering, so a Madaros BUILT FROM CURRENT SOURCE gets this right
+// even with the bare names (verified: `make build-madaros` then the same
+// two-import-order repro both give 3.0). The committed, shipped
+// bin/madaros-linux-x86_64 this repo ships predates that fix and still
+// segfaults on it. Prefixing every helper here is therefore not closing an
+// open compiler defect -- it is not relying on which Madaros build a
+// caller happens to be running.
+fn acids_abs_f64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn acids_check_near(a: f64, b: f64, tol: f64) -> bool { acids_abs_f64(a - b) < tol }
 
-fn sqrt_approx(x: f64) -> f64 with Mut, Div, Panic {
+fn acids_sqrt_approx(x: f64) -> f64 with Mut, Div, Panic {
     if x <= 0.0 { return 0.0; }
     var y = x; var i=0; while i<20 { y = 0.5*(y + x/y); i=i+1; } y
 }
 
 // ln via the artanh series ln(x) = 2*artanh((x-1)/(x+1)). That series only converges
 // usefully for x near 1, so we FIRST range-reduce by powers of 10 into [1/sqrt(10), sqrt(10)]
-// and add back k*ln(10). Without the reduction, ln_approx(x) — and hence pH(h) — was badly
+// and add back k*ln(10). Without the reduction, acids_ln_approx(x) — and hence pH(h) — was badly
 // wrong for [H+] far from 1 (e.g. pH(1e-7) returned ~2.15 instead of 7).
-fn ln_approx(x: f64) -> f64 with Mut, Div, Panic {
+fn acids_ln_approx(x: f64) -> f64 with Mut, Div, Panic {
     if x <= 0.0 { return 0.0; }
     let ln10: f64 = 2.302585092994046   // fixed f64 approximation of ln(10)
     let sqrt10: f64 = 3.1622776601683795
@@ -37,22 +56,22 @@ fn ln_approx(x: f64) -> f64 with Mut, Div, Panic {
     k * ln10 + 2.0 * sum
 }
 
-fn log10_approx(x: f64) -> f64 with Mut, Div, Panic {
-    ln_approx(x) / 2.302585092994046   // divide by the same fixed f64 ln(10) constant
+fn acids_log10_approx(x: f64) -> f64 with Mut, Div, Panic {
+    acids_ln_approx(x) / 2.302585092994046   // divide by the same fixed f64 ln(10) constant
 }
 
 // pH with GUM
 pub fn ph(h: f64, uh: f64) -> (f64, f64) with Mut, Div, Panic {
     if h <= 0.0 { return (14.0, 0.0); }
-    let p = 0.0 - log10_approx(h);
-    let up = uh / (h * ln_approx(10.0));
+    let p = 0.0 - acids_log10_approx(h);
+    let up = uh / (h * acids_ln_approx(10.0));
     (p, up)
 }
 
 // Real Henderson-Hasselbalch with unc
 pub fn henderson_hasselbalch(pka: f64, upka: f64, ratio: f64, ur: f64) -> (f64, f64) with Mut, Div, Panic {
-    let p = pka + log10_approx(ratio);
-    let up = upka + ur / (ratio * ln_approx(10.0));
+    let p = pka + acids_log10_approx(ratio);
+    let up = upka + ur / (ratio * acids_ln_approx(10.0));
     (p, up)
 }
 
@@ -63,10 +82,10 @@ pub fn titration_ph(vol_acid: f64, conc_acid: f64, vol_base: f64, conc_base: f64
     let excess = moles_base - moles_acid;
     if excess > 0.0 {
         let oh = excess / (vol_acid + vol_base);
-        return 14.0 + log10_approx(oh); // pH = 14 - pOH = 14 + log10([OH-])
+        return 14.0 + acids_log10_approx(oh); // pH = 14 - pOH = 14 + log10([OH-])
     } else if excess < 0.0 {
         let h = (0.0 - excess) / (vol_acid + vol_base);
-        return 0.0 - log10_approx(h);
+        return 0.0 - acids_log10_approx(h);
     }
     7.0
 }
@@ -89,45 +108,45 @@ pub fn calibrate(x: &[f64; 5], y: &[f64; 5], ux: f64, uy: f64) -> (f64, f64, f64
     let inter = (sy - slope * sx) / n;
     // GUM for slope unc ~ uy / sqrt( sum (x - meanx)^2 )
     let varx = (sxx / n) - (sx/n)*(sx/n);
-    let uslope = uy / sqrt_approx(n * varx * 5.0); // rough
-    let uinter = uy * sqrt_approx( (1.0/n) + (sx*sx)/(n*n*varx) );
+    let uslope = uy / acids_sqrt_approx(n * varx * 5.0); // rough
+    let uinter = uy * acids_sqrt_approx( (1.0/n) + (sx*sx)/(n*n*varx) );
     (slope, uslope, inter, uinter)
 }
 
 // Tests
 pub fn test_ph() -> bool with Mut, Div, Panic {
     let (p, up) = ph(1.0e-3, 1e-5);
-    check_near(p, 3.0, 0.1) && up > 0.0
+    acids_check_near(p, 3.0, 0.1) && up > 0.0
 }
 
 pub fn test_hh() -> bool with Mut, Div, Panic {
     let (p, _) = henderson_hasselbalch(4.76, 0.01, 1.0, 0.05);
-    check_near(p, 4.76, 0.05)
+    acids_check_near(p, 4.76, 0.05)
 }
 
 pub fn test_titration() -> bool with Mut, Div, Panic {
     let ph = titration_ph(0.1, 0.1, 0.05, 0.1);
-    check_near(ph, 1.0, 1.0) // rough
+    acids_check_near(ph, 1.0, 1.0) // rough
 }
 
 pub fn test_calib() -> bool with Mut, Div, Panic {
     let xs: [f64; 5] = [0.0,1.0,2.0,3.0,4.0];
     let ys: [f64; 5] = [0.1,1.1,2.0,3.1,4.0];
     let (sl, _, inter, _) = calibrate(&xs, &ys, 0.0, 0.1);
-    check_near(sl, 1.0, 0.1)
+    acids_check_near(sl, 1.0, 0.1)
 }
 
 // Phase 4: Biochem MM enzyme with epistemic
 pub fn mm_rate(vmax: f64, uv: f64, km: f64, uk: f64, s: f64, us: f64) -> (f64, f64) with Mut, Div, Panic {
     if km + s == 0.0 { return (0.0, 0.0); }
     let r = vmax * s / (km + s);
-    let ur = abs_f64(r) * (uv / abs_f64(vmax) + uk / abs_f64(km + s) + us / abs_f64(s) ); // rough
+    let ur = acids_abs_f64(r) * (uv / acids_abs_f64(vmax) + uk / acids_abs_f64(km + s) + us / acids_abs_f64(s) ); // rough
     (r, ur)
 }
 
 pub fn test_mm() -> bool with Mut, Div, Panic {
     let (r, ur) = mm_rate(10.0, 0.1, 1.0, 0.05, 1.0, 0.05);
-    check_near(r, 5.0, 0.5) && ur > 0.0
+    acids_check_near(r, 5.0, 0.5) && ur > 0.0
 }
 
 fn main() -> i32 with Mut, Div, Panic, IO {

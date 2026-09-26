@@ -377,12 +377,12 @@ does the caprock seal an 800 m column?
 | analysis | result |
 | --- | --- |
 | GUM at θ = 25° (standard practice) | P_c = 8.46 ± 4.27 MPa — one number, ignorance hidden |
-| MC per θ scenario | reliability 66.5 % (θ=10°) … 59.4 % (θ=25°) … 46.8 % (θ=40°) |
-| **p-box on reliability** | **[46.8 %, 66.5 %] — the 19.7-point width IS the ignorance** |
-| **value of information** | measuring θ to ±5° collapses the width 19.7 → 5.7 pp |
+| MC per θ scenario | reliability 65.6 % (θ=10°) … 60.0 % (θ=25°) … 46.7 % (θ=40°) |
+| **p-box on reliability** | **[46.7 %, 65.6 %] — the 18.9-point width IS the ignorance** |
+| **value of information** | measuring θ to ±5° collapses the width 18.9 → 6.4 pp |
 
 The closing statement is a research-management argument, not just physics:
-*the ~20-point gap is pure epistemic ignorance about wettability — one ±5°
+*the ~19-point gap is pure epistemic ignorance about wettability — one ±5°
 contact-angle campaign cuts it ~3x. That is the experiment to fund next.*
 For the author of a review that says "wettability data for H2 is scarce and
 conflicting", this prices exactly that gap.
@@ -405,14 +405,14 @@ bounds, in one deterministic run on the default engine:
 - **Corner-exact p-boxes**: P_c is strictly decreasing in θ, so the interval
   corners are exact bounds — and the run *verifies the monotonicity
   numerically before relying on it*.
-- **Robustness receipts**: MC convergence (N=1k/10k/50k: 60.5 → 58.5 →
-  58.1 %) and seed invariance (58.10 vs 58.20 %) printed by the run itself.
+- **Robustness receipts**: MC convergence (N=1k/10k/50k: 58.7 → 57.9 →
+  58.3 %) and seed invariance (58.25 vs 58.09 %) printed by the run itself.
 
 | formation | seal p-box (800 m) | verdict |
 | --- | --- | --- |
-| anhydrite (evaporite) | [99.4 %, 99.7 %] | robust seal — the review's favorite |
-| shale | [42.4 %, 66.6 %] | **indeterminate — 24 pp of pure ignorance** |
-| mudstone | [14.9 %, 29.3 %] | fails the 800 m column at these throats |
+| anhydrite (evaporite) | [99.5 %, 99.7 %] | robust seal — the review's favorite |
+| shale | [42.2 %, 66.4 %] | **indeterminate — 24 pp of pure ignorance** |
+| mudstone | [14.9 %, 29.5 %] | fails the 800 m column at these throats |
 
 Diffusion: intact caprock holds for 8 000–800 000 yr; micro-fracturing
 (D_eff ~ 1e-7) collapses τ to 13–80 yr — below the design life. The closing
@@ -432,14 +432,15 @@ and in which order? Two parts, both validated against independent oracles:
    Monte Carlo Saltelli/Jansen total-order estimators (N = 10 000, two
    independent sample matrices). Result: pore-throat spread carries ~98 %
    of the aleatory variance; IFT only ~2 %.
-2. **Value-of-information sequencing**: baseline shale p-box [42.4 %, 66.6 %]
-   (width 24.3 pp). Option A — measure θ to ±7.5°: width halves to 12.0 pp.
+2. **Value-of-information sequencing**: baseline shale p-box [42.2 %, 66.4 %]
+   (width 24.2 pp). Option A — measure θ to ±7.5°: width halves to 11.7 pp.
    Option B — image pore throats (σ_log r halved): mid reliability rises
-   58 → 66 %, **but the p-box WIDENS to 44.3 pp**.
+   ~58 → 65.5 %, **but the p-box WIDENS to 43.7 pp**.
 
 The non-commutative insight: with less aleatory noise the answer becomes
 *more* sensitive to the unknown wettability, so reducing the "wrong"
-uncertainty first backfires epistemically. Correct order: **measure θ first,
+uncertainty first backfires epistemically (width 24.2 → 11.7 pp measuring θ,
+vs 24.2 → 43.7 pp imaging pores). Correct order: **measure θ first,
 then image the pores.** That is a research-portfolio argument no
 point-estimate workflow can even express.
 

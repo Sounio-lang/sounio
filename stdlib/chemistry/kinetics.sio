@@ -18,6 +18,7 @@ use special::caputo::*;  // for fractional deep item (Caputo + epistemic)
 // Enables Knowledge<CHEBI_xxx>, refinement by ontology class, provenance in epistemic CRN.
 // FULL ontology integration (reexported from chemistry::ontology using real ChEBI typed bridge)
 use chemistry::ontology::*;
+use eisa::format::is_finite_f64;
 
 // Real terminal graphs and statistics (Sounio native, no external libs)
 use plot::epistemic::*;
@@ -762,9 +763,25 @@ pub fn test_pbpk_bridge() -> bool with Mut, Div, Panic {
 
 // PBPK28 metabolic CRN with full ontology (ChEBI + GO + Rhea from expanded map)
 pub fn pbpk_metabolic_crn_with_ontology(drug_idx: i64, init_conc: f64, t: f64) -> (f64, f64, IRI) with Mut, Div, Panic {
-    // use pbpk28 map + cyp GO + rhea
-    let mech_pbpk28: string = "pbpk28";
-    let chebi = species_to_chebi_iri(drug_idx, "pbpk28");
+    // Copilot review on sounio-lang/sounio#2694: this used to call
+    // species_to_chebi_iri(drug_idx, "pbpk28"), which is a DIFFERENT map --
+    // 0=water/1=drug/2=m1/3=m2 are generic pipeline-stage slots there, and
+    // only indices 4-7 name actual drugs. `drug_idx` here means "which
+    // drug", matching this file's own established PBPK28 convention
+    // (knowledge_pbpk_drug_conc: drug_idx==0 -> rapamycin; the dedicated
+    // pbpk28_drug_enzyme_chebi_map() below, index 0 = rapamycin). Passing
+    // drug_idx=0 under the old body silently returned water's IRI attached
+    // to a real drug-concentration simulation. Fixed to use the dedicated
+    // drug map so index 0 means rapamycin here too, not water.
+    //
+    // Out-of-range drug_idx (Copilot review, sounio-lang/sounio#2694): this
+    // is `pub fn`, so any caller can pass an out-of-range index; directly
+    // indexing the 8-entry drug_map would panic where the old
+    // species_to_chebi_iri path instead had a fallback IRI
+    // (iri_new(100000 + species_idx)) for every index. Preserve that
+    // fallback behavior for out-of-range indices here too.
+    let drug_map = pbpk28_drug_enzyme_chebi_map();
+    let chebi = if drug_idx >= 0 && drug_idx < 8 { drug_map[drug_idx] } else { iri_new(100000 + drug_idx) };
     let go = cyp3a4_metabolism_iri();
     let rhea = rhea_cyp3a4_oxidation();
     // simple demo decay using bridge + attach
@@ -774,6 +791,8 @@ pub fn pbpk_metabolic_crn_with_ontology(drug_idx: i64, init_conc: f64, t: f64) -
 }
 
 pub fn test_pbpk_metabolic_crn_ontology() -> bool with Mut, Div, Panic {
+    // pbpk28_drug_enzyme_chebi_map() index 0 = rapamycin (9168), matching
+    // this file's established drug_idx convention (knowledge_pbpk_drug_conc).
     let (c, u, iri) = pbpk_metabolic_crn_with_ontology(0, 1.0, 24.0);  // rapamycin idx 0
     let _k: CHEBI_15377 = chebi_water();
     c > 0.0 && u >= 0.0 && iri.id == 9168
@@ -813,7 +832,12 @@ pub fn test_richer_metabolic() -> bool with Mut, Div, Panic {
     let d_chebi = drug_chebi();
     let m1_chebi = m1_chebi();
     let _k_h2o: CHEBI_15377 = chebi_water();
-    check_near(out[2], 0.4, 0.2) && out[1] > 0.0 && d_chebi.id > 0 && m1_chebi.id > 0   // M2 product appears
+    // D->M1 (k1=0.05), M1->M2 (k2=0.02), M1 cleared (k3=0.01); analytic linear-chain
+    // solution at t=24 (dt=0.2, steps=120): M1(24)=0.463895, M2(24)=0.156607
+    // (independently verified: scipy odeint and a matching pure-Python RK4 both
+    // agree to 6 digits). The 0.4 target belongs to M1 (out[1]), not M2 (out[2]) --
+    // checking out[2] against it compared the wrong species.
+    check_near(out[1], 0.4, 0.2) && out[2] > 0.0 && d_chebi.id > 0 && m1_chebi.id > 0   // M2 product appears
 }
 
 // ============== SUPER MIX: 1.General CRN + 2.Richer Mechs + 3.Bench/Coupling + 4.PBPK Depth ==============
@@ -886,6 +910,91 @@ pub fn simulate_general_crn(init: &[f64; 8], ks: &[f64; 8], nu: MatNM, nsp: i64,
         t = t + dt; s = s + 1;
     }
     [y[0], y[1], y[2], y[3], y[4], y[5], y[6], y[7]]
+}
+
+// Like simulate_general_crn, but records `species_idx`'s concentration at
+// each of 4 given step counts (checkpoint_steps) instead of returning only
+// the final state. Added for simulate_bayesian_posterior_crn's
+// concentration-time trajectory fit (see its own header comment): fitting a
+// rate constant to several measurements taken AT DIFFERENT TIMES needs the
+// simulated trajectory at those same times, not just one shared endpoint.
+//
+// CONTRACT, now validated at runtime (panics on violation, Copilot review
+// sounio-lang/sounio#2694 -- a previous version left this as an unchecked
+// precondition; a first version of test_bayesian_permutation_invariant, now
+// test_bayesian_checkpoint_mismatch_sensitivity, found the actual failure
+// mode by permuting checkpoint_steps and getting silent zero-corruption
+// instead of an error): checkpoint_steps must be non-decreasing (repeats
+// are valid and intentionally used by bayesian_identifiability_crn to model
+// repeat measurements at one timepoint), checkpoint_steps[0] must be > 0
+// (a checkpoint of exactly 0 can never be reached -- the loop only tests
+// `s == checkpoint_steps[cp]` AFTER incrementing s past 0), and
+// checkpoint_steps[3] is the TOTAL number of RK4 steps to run (the loop
+// runs exactly that many steps, then detects each checkpoint by
+// `s == checkpoint_steps[cp]` as the step counter climbs through it,
+// advancing cp forward only).
+pub fn simulate_general_crn_checkpoints(init: &[f64; 8], ks: &[f64; 8], nu: MatNM, nsp: i64, nrxn: i64, dt: f64, checkpoint_steps: &[i64; 4], species_idx: i64) -> [f64; 4] with Mut, Div, Panic {
+    // VALIDATED (Copilot review, sounio-lang/sounio#2694): reproduced both
+    // failure modes directly before adding this guard -- checkpoint_steps[0]
+    // == 0 is unreachable (the loop below only tests `s == checkpoint_steps[cp]`
+    // AFTER incrementing s past 0, so a checkpoint of 0 can never match) and
+    // an out-of-order array silently stops early, both leaving the affected
+    // slot(s) at their zero-initialized default -- indistinguishable from a
+    // genuine near-zero concentration. Non-decreasing (>=), not strictly
+    // ascending, is the real contract: bayesian_identifiability_crn
+    // intentionally passes repeated checkpoints ([T,T,T,T]) to model
+    // repeat measurements at one timepoint.
+    if checkpoint_steps[0] <= 0 {
+        panic("simulate_general_crn_checkpoints: checkpoint_steps[0] must be > 0 (a checkpoint of 0 can never be reached by this stepper)")
+    }
+    var cpi: i64 = 1;
+    while cpi < 4 {
+        if checkpoint_steps[cpi] < checkpoint_steps[cpi - 1] {
+            panic("simulate_general_crn_checkpoints: checkpoint_steps must be non-decreasing")
+        }
+        cpi = cpi + 1;
+    }
+    // VALIDATED (Copilot review, sounio-lang/sounio#2694, "previously
+    // missed" round): general_dc only ever writes dc[i] for i < nsp (it
+    // reads the reaction-stoichiometry product's first nsp rows and
+    // leaves the rest at their [f64;8] zero-initialized default), so a
+    // species_idx >= nsp is never written by any RK4 step -- `y[species_idx]`
+    // stays exactly 0.0 for the whole run, silently reporting zero-padding
+    // as a real simulated concentration at every checkpoint. Same
+    // zero-corruption class as the checkpoint_steps guards above.
+    if species_idx < 0 || species_idx >= nsp {
+        panic("simulate_general_crn_checkpoints: species_idx must be in [0, nsp) -- an out-of-range index reads never-updated zero padding, not a real concentration")
+    }
+    var y: [f64; 64] = [0.0; 64];
+    var i = 0; while i < nsp { y[i] = init[i]; i = i + 1; }
+    var out: [f64; 4] = [0.0; 4];
+    var cp: i64 = 0;
+    var s: i64 = 0;
+    let total_steps = checkpoint_steps[3];
+    while s < total_steps {
+        let c8: [f64; 8] = [y[0],y[1],y[2],y[3],y[4],y[5],y[6],y[7]];
+        let r1 = compute_rates_general(&c8, ks, nu, nrxn);
+        let k1 = general_dc(nu, &r1, nsp);
+        var y2: [f64; 8] = [0.0; 8]; var ii=0; while ii<nsp { y2[ii] = y[ii] + 0.5*dt*k1[ii]; ii=ii+1; }
+        let r2 = compute_rates_general(&y2, ks, nu, nrxn);
+        let k2 = general_dc(nu, &r2, nsp);
+        var y3: [f64; 8] = [0.0; 8]; ii=0; while ii<nsp { y3[ii] = y[ii] + 0.5*dt*k2[ii]; ii=ii+1; }
+        let r3 = compute_rates_general(&y3, ks, nu, nrxn);
+        let k3 = general_dc(nu, &r3, nsp);
+        var y4: [f64; 8] = [0.0; 8]; ii=0; while ii<nsp { y4[ii] = y[ii] + dt*k3[ii]; ii=ii+1; }
+        let r4 = compute_rates_general(&y4, ks, nu, nrxn);
+        let k4 = general_dc(nu, &r4, nsp);
+        ii = 0; while ii < nsp {
+            y[ii] = y[ii] + (dt/6.0) * (k1[ii] + 2.0*k2[ii] + 2.0*k3[ii] + k4[ii]);
+            ii = ii + 1;
+        }
+        s = s + 1;
+        while cp < 4 && s == checkpoint_steps[cp] {
+            out[cp] = y[species_idx];
+            cp = cp + 1;
+        }
+    }
+    out
 }
 
 pub fn test_general_crn() -> bool with Mut, Div, Panic {
@@ -1095,8 +1204,14 @@ pub fn fractional_crn_decay(c0: f64, uc0: f64, lambda: f64, ul: f64, t: f64, ut:
 
 pub fn test_fractional_caputo_epistemic() -> bool with Mut, Div, Panic {
     let (v, u) = fractional_crn_decay(1.0, 0.05, 0.1, 0.01, 10.0, 0.1, 0.8); // alpha=0.8 lit-like
-    // Lit validation (fractional PK/chem papers e.g. Mtshali 2023, Ahmad 2025): for alpha=0.8, decay slower than integer order, v~0.3-0.4 at t=10 for k=0.1
-    check_near(v, 0.35, 0.1) && u > 0.01
+    // v = E_0.8(-0.1 * 10^0.8) = E_0.8(-0.630957...), the Mittag-Leffler function
+    // this module's own mittag_leffler_e_alpha implements. Independently computed
+    // (Python power series, gamma-function terms, converges cleanly since |z|<1):
+    // v = 0.533673. That IS slower decay than the integer-order exp(-1)=0.367879
+    // the comment below already argues for -- the 0.3-0.4 guess just undershot how
+    // much slower. Target corrected to the derived value and check_near
+    // tolerance tightened accordingly (was looser around the old 0.35 guess).
+    check_near(v, 0.5337, 0.02) && u > 0.01
 }
 
 // Etapa 2 real integration: fractional in CRN context (build trajectory, apply Caputo L1 for anomalous kinetics)
@@ -1131,7 +1246,12 @@ pub fn test_epistemic_pinn_crn() -> bool with Mut, Div, Panic {
         let k_d2 = dual_var(k + 0.001);
         let sim_d = exp_approx(0.0 - k_d2.val * 10.0);
         let dloss_dk = 2.0 * (sim - data_v) * ( (exp_approx(0.0 - (k+0.001)*10.0) - sim) / 0.001 );
-        k = k - 0.1 * dloss_dk;  // gradient step
+        // lr=0.1 was too large for this loss landscape: gradients here run
+        // ~0.4-0.7 in magnitude, so lr=0.1 makes k overshoot every step and
+        // oscillate (0.12 -> 0.080 -> 0.153 -> 0.088 -> 0.128 -> 0.078 after 5
+        // iters, never converging). lr=0.05 converges cleanly to k=0.099995
+        // (independently verified in Python, identical loop).
+        k = k - 0.05 * dloss_dk;  // gradient step
         uk = uk * 0.9; // unc reduces
         i = i + 1;
     }
@@ -1234,10 +1354,21 @@ pub fn validate_against_literature() -> bool with Mut, Div, Panic, Prob, Observe
     let big = simulate_big_crn(&lit_big_crn_init, 0.01, 100);
     let lit_h2o = 0.18; let tol_h2o = 0.05;
     let pass_h2o = check_near(big[5], lit_h2o, tol_h2o) && big[5] > 0.1;
-    // Check ontology for every single compound in the sim
+    // Check ontology for every single compound in the sim. Extract every
+    // scalar from chebi_map IMMEDIATELY -- before any other call that
+    // returns a heap-allocated value gets a chance to run. lean_single
+    // aliases a returned array/struct-array across such calls (the same
+    // caveat demos/hydrogen/uhs_brine_calcite.sio documents as E6):
+    // extracting these scalars right before the later print block, rather
+    // than right here, still read all six as 0 -- the intervening
+    // big_crn_species_chebi(5) call below was enough to clobber chebi_map's
+    // backing storage even though the extraction itself had no print calls
+    // between it and the read.
     let chebi_map = full_big_crn_chebi_map();
-    let all_chebi_ok = chebi_map[0].id == 49637 && chebi_map[1].id == 15379 && chebi_map[2].id == 29191 &&
-                       chebi_map[3].id == 25805 && chebi_map[4].id == 18276 && chebi_map[5].id == 15377;
+    let cm0 = chebi_map[0].id; let cm1 = chebi_map[1].id; let cm2 = chebi_map[2].id;
+    let cm3 = chebi_map[3].id; let cm4 = chebi_map[4].id; let cm5 = chebi_map[5].id;
+    let all_chebi_ok = cm0 == 49637 && cm1 == 15379 && cm2 == 29191 &&
+                       cm3 == 25805 && cm4 == 18276 && cm5 == 15377;
     let h2o_chebi = big_crn_species_chebi(5);
     let lit_big_crn_u: [f64; 8] = [0.03;8];
     // OUT-OF-BOUNDS READ, FIXED 2026-09-09. `big` is the [f64; 6] returned by
@@ -1254,28 +1385,43 @@ pub fn validate_against_literature() -> bool with Mut, Div, Panic, Prob, Observe
     let (w_v, w_u, w_iri) = attach_chebi_to_crn_output(&big8, &lit_big_crn_u, "big_crn");
     // FULL Knowledge<CHEBI_15377> for the lit water in this test
     let _k_water: CHEBI_15377 = chebi_water();
-    println("H2O2 H2O lit={} act={} tol={} {} | ChEBI_iri={} (water CHEBI_15377) {} | Knowledge<CHEBI_15377> demo | all_compounds_ontology={}", lit_h2o, big[5], tol_h2o, if pass_h2o { "LIT PASS" } else { "LIT FAIL" }, h2o_chebi.id, if h2o_chebi.id == 15377 { "ONTOLOGY PASS" } else { "" }, if all_chebi_ok { "ALL PASS" } else { "FAIL" });
-    // FULL: list ChEBI for every compound
-    println("COMPOUNDS ChEBI: H={} O2={} OH={} O={} H2={} H2O={}", chebi_map[0].id, chebi_map[1].id, chebi_map[2].id, chebi_map[3].id, chebi_map[4].id, chebi_map[5].id);
+    // println("...", a, b, c) does NOT interpolate: Sounio's println takes exactly
+    // one argument and dispatches print_int/print_f64/print on it; every extra
+    // argument here used to be silently computed and discarded, and the literal
+    // "{}" printed as-is. Every println below in this function is split into a
+    // print/println chain instead, one value per call, so the numbers this
+    // section is named for actually appear in its output.
+    print("H2O2 H2O lit="); print(lit_h2o); print(" act="); print(big[5]); print(" tol="); print(tol_h2o);
+    print(" "); print(if pass_h2o { "LIT PASS" } else { "LIT FAIL" });
+    print(" | ChEBI_iri="); print(h2o_chebi.id); print(" (water CHEBI_15377) "); print(if h2o_chebi.id == 15377 { "ONTOLOGY PASS" } else { "" });
+    print(" | Knowledge<CHEBI_15377> demo | all_compounds_ontology="); println(if all_chebi_ok { "ALL PASS" } else { "FAIL" });
+    // FULL: list ChEBI for every compound (cm0..cm5 extracted above, before
+    // big_crn_species_chebi(5) and this function's own print calls).
+    print("COMPOUNDS ChEBI: H="); print(cm0); print(" O2="); print(cm1);
+    print(" OH="); print(cm2); print(" O="); print(cm3);
+    print(" H2="); print(cm4); print(" H2O="); println(cm5);
     if !pass_h2o || !all_chebi_ok { ok = false; }
 
     // PBPK: deliberately no literature check (see the header comment); the submodel is
     // illustrative, so it is excluded from this function's verdict.
     let pbpk = simulate_pbpk_gut_liver_kidney(1.0, 0.05, 24.0);
-    println("PBPK M1 = {}: illustrative model, no literature target (not part of the LIT verdict)", pbpk.0[1]);
+    print("PBPK M1 = "); print(pbpk.0[1]); println(": illustrative model, no literature target (not part of the LIT verdict)");
 
-    // Fractional alpha=0.8 vs Sopasakis/Mtshali (v=0.35 tol 0.05)
+    // Fractional alpha=0.8: v = E_0.8(-0.630957) = 0.533673 (see the derivation in
+    // test_fractional_caputo_epistemic; this is the identical call, same result).
     let frac = fractional_crn_decay(1.0, 0.05, 0.1, 0.01, 10.0, 0.1, 0.8);
-    let lit_frac = 0.35; let tol_frac = 0.05;
+    let lit_frac = 0.5337; let tol_frac = 0.02;
     let pass_frac = check_near(frac.0, lit_frac, tol_frac);
-    println("FRAC v@10a0.8 lit={} act={} tol={} {}", lit_frac, frac.0, tol_frac, if pass_frac { "LIT PASS" } else { "LIT FAIL" });
+    print("FRAC v@10a0.8 lit="); print(lit_frac); print(" act="); print(frac.0); print(" tol="); print(tol_frac);
+    print(" "); println(if pass_frac { "LIT PASS" } else { "LIT FAIL" });
     if !pass_frac { ok = false; }
 
     // PINN k vs SciML true 0.1 (tol 0.01)
     let pinnk = bench_epistemic_pinn_crn(5);
     let lit_k = 0.1; let tol_k = 0.01;
     let pass_k = check_near(pinnk, lit_k, tol_k);
-    println("PINN k lit={} act={} tol={} {}", lit_k, pinnk, tol_k, if pass_k { "LIT PASS" } else { "LIT FAIL" });
+    print("PINN k lit="); print(lit_k); print(" act="); print(pinnk); print(" tol="); print(tol_k);
+    print(" "); println(if pass_k { "LIT PASS" } else { "LIT FAIL" });
     if !pass_k { ok = false; }
 
     // Epistemic GUM report + budget (enhanced, more GUM)
@@ -1288,9 +1434,12 @@ pub fn validate_against_literature() -> bool with Mut, Div, Panic, Prob, Observe
     let u_combined = sqrt_approx(u_e_state*u_e_state + u_ensemble*u_ensemble + u_frac*u_frac);
     let k = 2.0;
     let u_expanded = k * u_combined;
-    println("GUM BUDGET PBPK M1 (illustrative model, no literature target): std u_c={} (EState+ensemble+frac), expanded U={} (k={})", u_combined, u_expanded, k);
+    print("GUM BUDGET PBPK M1 (illustrative model, no literature target): std u_c="); print(u_combined);
+    print(" (EState+ensemble+frac), expanded U="); print(u_expanded); print(" (k="); print(k); println(")");
     // Budget style: contributions
-    println("GUM contributions: EState {:.1}%, Ensemble {:.1}%, Frac {:.1}%", (u_e_state/u_combined)*100.0, (u_ensemble/u_combined)*100.0, (u_frac/u_combined)*100.0);
+    print("GUM contributions: EState "); print((u_e_state/u_combined)*100.0);
+    print("%, Ensemble "); print((u_ensemble/u_combined)*100.0);
+    print("%, Frac "); print((u_frac/u_combined)*100.0); println("%");
 
     // Additional GUM for other items (more reports)
     let (frac_v, frac_u) = frac;
@@ -1298,7 +1447,9 @@ pub fn validate_against_literature() -> bool with Mut, Div, Panic, Prob, Observe
     println("GUM for FRAC: combined with param unc from Caputo alpha (epistemic budget style) LIT GUM PASS");
 
     let big_u_approx = 0.03; // from J in big
-    println("GUM for H2O2: u={} (Jacobian delta in crn_big_jacobian) LIT GUM PASS");
+    // big_u_approx was computed but never actually passed to println below --
+    // the "{}" printed literally and the value was silently dropped. Fixed.
+    print("GUM for H2O2: u="); print(big_u_approx); println(" (Jacobian delta in crn_big_jacobian) LIT GUM PASS");
 
     // For PINN and ensemble, add GUM
     let (pinn_v, pinn_u) = (pinnk, 0.01); // approx
@@ -1331,7 +1482,8 @@ pub fn validate_against_literature() -> bool with Mut, Div, Panic, Prob, Observe
     );
     let lit_fe = 0.0201; let tol_fe = 0.005;  // independent RK4+ML replication (structural ensemble now respects nu)
     let pass_fe = check_near(fe_ov[2], lit_fe, tol_fe);
-    println("FRAC ENSEMBLE product lit={} act={} tol={} {}", lit_fe, fe_ov[2], tol_fe, if pass_fe { "LIT PASS" } else { "LIT FAIL" });
+    print("FRAC ENSEMBLE product lit="); print(lit_fe); print(" act="); print(fe_ov[2]); print(" tol="); print(tol_fe);
+    print(" "); println(if pass_fe { "LIT PASS" } else { "LIT FAIL" });
     if !pass_fe { ok = false; }
     // GUM for it
     gum_report(fe_ov[2], fe_ou[2]);
@@ -1341,27 +1493,37 @@ pub fn validate_against_literature() -> bool with Mut, Div, Panic, Prob, Observe
     let (st_v, st_u) = simulate_stochastic_decay(1.0, 0.02, 0.2, 3.0, 25);
     let lit_st_mean = 0.5488; let tol_st = 0.15;
     let pass_st = check_near(st_v, lit_st_mean, tol_st) && st_u > 0.01;
-    println("STOCH DECAY mean lit={} act={} tol={} {} | u={} (intrinsic+LNA+epist) LIT GUM PASS", lit_st_mean, st_v, tol_st, if pass_st { "LIT PASS" } else { "LIT FAIL" }, st_u);
+    print("STOCH DECAY mean lit="); print(lit_st_mean); print(" act="); print(st_v); print(" tol="); print(tol_st);
+    print(" "); print(if pass_st { "LIT PASS" } else { "LIT FAIL" });
+    print(" | u="); print(st_u); println(" (intrinsic+LNA+epist) LIT GUM PASS");
     if !pass_st { ok = false; }
     gum_report(st_v, st_u);
     println("GUM for STOCH: combined epistemic + intrinsic (LNA from propensities) LIT GUM PASS");
 
-    // Bayesian LIT (fuller sampling + ident)
-    let datas: [f64; 4] = [0.55, 0.40, 0.30, 0.22];
-    let dus: [f64; 4] = [0.03, 0.04, 0.03, 0.05];
+    // Bayesian LIT (fuller sampling + ident): concentration-time fit of the
+    // elimination rate k0 for species 0 (dC0/dt = -k0*C0). data/dus are a
+    // real RK4 run of simulate_general_crn_checkpoints at k_true=0.12,
+    // dt=0.2, checkpoints [6,12,19,25] -- cross-checked against the
+    // closed-form exp(-k*t) to 6 digits in Python before being written here
+    // (see simulate_bayesian_posterior_crn's header for why species 0).
+    let datas: [f64; 4] = [0.865888, 0.749762, 0.633814, 0.548812];
+    let dus: [f64; 4] = [0.03, 0.03, 0.03, 0.03];
+    let bayes_cp: [i64; 4] = [6, 12, 19, 25];
     var nu_b = matnm_new(3 as i64, 2 as i64);
     nu_b = matnm_set(nu_b, 0 as i64, 0 as i64, -1.0); nu_b = matnm_set(nu_b, 1 as i64, 0 as i64, 1.0);
     nu_b = matnm_set(nu_b, 1 as i64, 1 as i64, -1.0); nu_b = matnm_set(nu_b, 2 as i64, 1 as i64, 1.0);
     let bayes_lit_initv: [f64; 8] = [1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
-    let (bk, bu, bid) = simulate_bayesian_posterior_crn(&bayes_lit_initv, &datas, &dus, 0.1, 0.02, nu_b, 3, 2, 0.2, 25, 8);
-    let lit_bk = 0.11; let tol_b = 0.08;
+    let (bk, bu, bid) = simulate_bayesian_posterior_crn(&bayes_lit_initv, &datas, &dus, 0.1, 0.02, nu_b, 3, 2, 0.2, &bayes_cp, 8);
+    let lit_bk = 0.12; let tol_b = 0.08;
     let pass_b = check_near(bk, lit_bk, tol_b) && bid > 1.0;
-    println("BAYES post_k lit={} act={} ident={} {}", lit_bk, bk, bid, if pass_b { "LIT PASS" } else { "LIT FAIL" });
+    print("BAYES post_k lit="); print(lit_bk); print(" act="); print(bk); print(" ident="); print(bid);
+    print(" "); println(if pass_b { "LIT PASS" } else { "LIT FAIL" });
     if !pass_b { ok = false; }
 
     // Regulatory audit expanded in LIT (using crn_result_to_audit for bayes result)
     let audit = crn_result_to_audit(bk, bu, bu*0.6, bu*0.3, bu*0.1, 4, 2);
-    println("REG AUDIT for BAYES: model={} u_c={} U={} ident_tied LIT PROV PASS", audit.model_id, audit.gum_uc, audit.expanded_u);
+    print("REG AUDIT for BAYES: model="); print(audit.model_id); print(" u_c="); print(audit.gum_uc);
+    print(" U="); print(audit.expanded_u); println(" ident_tied LIT PROV PASS");
 
     // GUM for bayes post
     gum_report(bk, bu);
@@ -1530,7 +1692,9 @@ pub fn bench_epistemic_pinn_crn(iters: i64) -> f64 with Mut, Div, Panic {
     var i = 0; while i < iters {
         let sim = exp_approx(0.0 - k * 10.0);
         let dloss_dk = 2.0 * (sim - 0.3679) * ( (exp_approx(0.0 - (k+0.001)*10.0) - sim) / 0.001 );
-        k = k - 0.1 * dloss_dk;
+        // same lr fix as test_epistemic_pinn_crn's identical loop -- 0.1 oscillates,
+        // 0.05 converges.
+        k = k - 0.05 * dloss_dk;
         uk = uk * 0.9;
         i = i + 1;
     }
@@ -1806,7 +1970,8 @@ pub fn test_sounio_epistemic_general() -> bool with Mut, Div, Panic {
 // GUM report (per JCGM 100 law of propagation, combined standard unc + expanded)
 pub fn gum_report(y: f64, uy: f64) with IO {
     let k = 2.0; // coverage for ~95%
-    println("GUM report: y = {} , u(y) = {} (std), U = {} (expanded k={})", y, uy, k*uy, k);
+    print("GUM report: y = "); print(y); print(" , u(y) = "); print(uy);
+    print(" (std), U = "); print(k*uy); print(" (expanded k="); print(k); println(")");
 }
 
 // === Regulatory provenance (Phase 6) ===
@@ -1828,9 +1993,10 @@ pub fn full_budget_export(y: f64, uy: f64, contribs: &[f64; 4], lit_count: i64, 
     let k = 2.0;
     let u_exp = k * uy;
     println("=== REGULATORY AUDIT ===");
-    println("model_id={} gum_u_c={} expanded_U={}(k={})", 42, uy, u_exp, k);
-    println("contrib %: epistemic {:.1} intrinsic {:.1} structural {:.1} other {:.1}", contribs[0]*100.0, contribs[1]*100.0, contribs[2]*100.0, contribs[3]*100.0);
-    println("lit_refs={} effect_mode={}", lit_count, mode);
+    print("model_id="); print(42); print(" gum_u_c="); print(uy); print(" expanded_U="); print(u_exp); print("(k="); print(k); println(")");
+    print("contrib %: epistemic "); print(contribs[0]*100.0); print(" intrinsic "); print(contribs[1]*100.0);
+    print(" structural "); print(contribs[2]*100.0); print(" other "); println(contribs[3]*100.0);
+    print("lit_refs="); print(lit_count); print(" effect_mode="); println(mode);
     println("REG PROVENANCE EXPORT COMPLETE");
     RegulatoryAudit {
         model_id: 42,
@@ -1897,13 +2063,19 @@ pub fn super_chemical_showcase() -> bool with Mut, Div, Panic, IO, Observe, Prob
     let o2    = o2_chebi();
     let drug  = drug_chebi();
     let m1    = m1_chebi();
-    println("H2O  = CHEBI:{} | O2 = CHEBI:{} | Drug = CHEBI:{} | M1 = CHEBI:{}", h2o.id, o2.id, drug.id, m1.id);
+    print("H2O  = CHEBI:"); print(h2o.id); print(" | O2 = CHEBI:"); print(o2.id);
+    print(" | Drug = CHEBI:"); print(drug.id); print(" | M1 = CHEBI:"); println(m1.id);
     println("→ ChEBI grounding para CADA composto.\n");
 
     // 2. Run ensembles
     println("=== 2. CENÁRIO INTEGRADO (structural + fractional + stochastic) ===");
-    let data_points: [f64; 4] = [0.52, 0.38, 0.27, 0.19];
-    let data_us: [f64; 4]     = [0.04, 0.035, 0.03, 0.025];
+    // Concentration-time fit, same model as the other Bayesian call sites
+    // (see simulate_bayesian_posterior_crn's header): RK4 run at
+    // k_true=0.12, dt=0.25, checkpoints [9,17,26,35], cross-checked against
+    // exp(-k*t) in Python before being written here.
+    let data_points: [f64; 4] = [0.763379, 0.600496, 0.458406, 0.349938];
+    let data_us: [f64; 4]     = [0.03, 0.03, 0.03, 0.03];
+    let showcase_bayes_cp: [i64; 4] = [9, 17, 26, 35];
 
     var nu1 = matnm_new(3 as i64, 2 as i64); nu1 = matnm_set(nu1, 0 as i64, 0 as i64, -1.0); nu1 = matnm_set(nu1, 1 as i64, 0 as i64, 1.0); nu1 = matnm_set(nu1, 1 as i64, 1 as i64, -1.0); nu1 = matnm_set(nu1, 2 as i64, 1 as i64, 1.0);
     var nu2 = matnm_new(3 as i64, 2 as i64); nu2 = matnm_set(nu2, 0 as i64, 0 as i64, -1.0); nu2 = matnm_set(nu2, 1 as i64, 0 as i64, 1.0); nu2 = matnm_set(nu2, 0 as i64, 1 as i64, -0.4); nu2 = matnm_set(nu2, 2 as i64, 1 as i64, 0.4);
@@ -1919,13 +2091,13 @@ pub fn super_chemical_showcase() -> bool with Mut, Div, Panic, IO, Observe, Prob
         &demo_ens_ks, &demo_ens_uks,
         &nus, &probs, 0.82, 3, 2, 0.25, 40, 2
     );
-    println("Ensemble M1 @24h = {} ± {}", ens_v[1], ens_u[1]);
+    print("Ensemble M1 @24h = "); print(ens_v[1]); print(" ± "); println(ens_u[1]);
 
     let (stoch_v, stoch_u) = simulate_stochastic_decay(1.0, 0.03, 0.07, 24.0, 60);
 
     // 3. Bayesian + Observe
     let demo_bayes_initv: [f64; 8] = [1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
-    let (post_k, post_u, ident) = bayesian_structural_posterior(&demo_bayes_initv, &data_points, &data_us, &nus, &probs, 2, 3, 2, 0.25, 35);
+    let (post_k, post_u, ident) = bayesian_structural_posterior(&demo_bayes_initv, &data_points, &data_us, &nus, &probs, 2, 3, 2, 0.25, &showcase_bayes_cp);
     let _kw: CHEBI_15377 = chebi_water();
 
     // 4. REAL STATISTICS (native computation)
@@ -1937,7 +2109,8 @@ pub fn super_chemical_showcase() -> bool with Mut, Div, Panic, IO, Observe, Prob
     }
     let mean = sum / (n as f64);
     let variance = (sumsq / (n as f64)) - mean*mean;
-    println("Mean = {} | Std = {} | Var = {} | Identifiability = {}", mean, sqrt_approx(variance), variance, ident);
+    print("Mean = "); print(mean); print(" | Std = "); print(sqrt_approx(variance));
+    print(" | Var = "); print(variance); print(" | Identifiability = "); println(ident);
 
     // 5. GRÁFICOS REAIS renderizados (usando o plot nativo da stdlib)
     println("\n=== GRÁFICOS REAIS (renderizados via stdlib/plot) ===");
@@ -1970,7 +2143,7 @@ pub fn super_chemical_showcase() -> bool with Mut, Div, Panic, IO, Observe, Prob
     // 6. Regulatory + Differential
     let audit = crn_result_to_audit(ens_v[1], ens_u[1], ens_u[1]*0.65, ens_u[1]*0.22, ens_u[1]*0.13, 4, 1);
     println("\n=== AUDITORIA REGULATÓRIA ===");
-    println("u_c = {} | U(k=2) = {} | model={}", audit.gum_uc, audit.expanded_u, audit.model_id);
+    print("u_c = "); print(audit.gum_uc); print(" | U(k=2) = "); print(audit.expanded_u); print(" | model="); println(audit.model_id);
 
     println("\n╔════════════════════════════════════════════════════════════════════════════╗");
     println("║  DIFERENCIAL: Gráficos + Estatísticas NATIVOS (sem matplotlib, sem glue)   ║");
@@ -2287,13 +2460,16 @@ pub fn test_bench_stochastic() -> bool with Mut, Div, Panic, Prob {
 
 // Scale element (Phase 6 parallel): larger network sim + more samples for bayes scale
 pub fn bench_scale_bayes_samples(n_samples: i64) -> f64 with Mut, Div, Panic, Observe, IO {
-    let datas: [f64; 4] = [0.55, 0.40, 0.30, 0.22];
-    let dus: [f64; 4] = [0.03, 0.04, 0.03, 0.05];
+    // Same concentration-time model as validate_against_literature's Bayesian
+    // block: RK4 run at k_true=0.12, dt=0.2, checkpoints [10,20,30,40].
+    let datas: [f64; 4] = [0.786628, 0.618783, 0.486752, 0.382893];
+    let dus: [f64; 4] = [0.03, 0.03, 0.03, 0.03];
+    let bsb_cp: [i64; 4] = [10, 20, 30, 40];
     var nu = matnm_new(3 as i64, 2 as i64);
     nu = matnm_set(nu, 0 as i64, 0 as i64, -1.0); nu = matnm_set(nu, 1 as i64, 0 as i64, 1.0);
     nu = matnm_set(nu, 1 as i64, 1 as i64, -1.0); nu = matnm_set(nu, 2 as i64, 1 as i64, 1.0);
     let bench_scale_initv: [f64; 8] = [1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
-    let (_, pu, id) = simulate_bayesian_posterior_crn(&bench_scale_initv, &datas, &dus, 0.1, 0.02, nu, 3, 2, 0.2, 40, n_samples);
+    let (_, pu, id) = simulate_bayesian_posterior_crn(&bench_scale_initv, &datas, &dus, 0.1, 0.02, nu, 3, 2, 0.2, &bsb_cp, n_samples);
     // scale metric: smaller post_u + high ident with larger n
     pu + (if id > 2.0 { 0.0 } else { 0.1 })
 }
@@ -2311,13 +2487,74 @@ pub fn test_bench_scale() -> bool with Mut, Div, Panic, Observe, IO {
 // Real lit-backed for identifiability in CRN inference (arXiv etc.).
 // All with GUM propagation, effects, check_near.
 
-fn likelihood_weight(sim: f64, data: f64, data_u: f64) -> f64 with Mut, Div, Panic, Observe {
-    // "observe" the mismatch; weight from gaussian lik
-    let _obs = observe_conc(sim);  // use effect for modeling observation process
-    let resid = sim - data;
-    let var = data_u * data_u;
-    if var <= 0.0 { return 0.0; }
-    exp_approx(0.0 - 0.5 * resid * resid / var)
+// THE REAL ROOT CAUSE, found chasing why fixing the two bugs below still did
+// not change simulate_bayesian_posterior_crn's output: this function (now
+// removed, replaced by log_gaussian_term below) bound its local variance to
+// a `let` binding literally named `var` -- `let var = data_u * data_u`. `var`
+// is the mutable-declaration keyword. Standalone, Madaros correctly REFUSES
+// that as a reserved identifier; under `SOUNIO_SOUC_ENGINE=lean_single`
+// (which is what this file's test suite actually runs under), it compiles,
+// but `if var <= 0.0 { ... }` then takes the true branch UNCONDITIONALLY,
+// for every input, every time -- confirmed with a 6-line standalone repro
+// (`let var = x*x; if var <= 0.0 { return -999.0 } var` returns -999.0 for
+// x=4.0 AND x=0.04 under lean_single; Madaros refuses the file outright).
+// likelihood_weight's `if var <= 0.0 { return 0.0; }` therefore always fired,
+// so it returned 0.0 for every call regardless of sim/data/data_u -- which
+// alone was already sufficient to zero every importance weight and trigger
+// the `sum_w <= 0.0` fallback below, independent of the indexing bug and the
+// multiplicative-underflow concern documented at the call site (both still
+// real, still fixed, just not the reason nothing changed when they were).
+// This is a lean_single defect, not a stdlib bug this file can close; the
+// fix here is simply not naming a variable `var`.
+// STANDARDIZED-RESIDUAL FORM (Copilot review, sounio-lang/sounio#2694): the
+// previous body computed `variance = data_u * data_u` and `resid * resid`
+// separately before dividing. A positive, finite, but very tight data_u
+// (e.g. 1e-200) squares to exactly 0.0 in f64 (1e-200^2 = 1e-400, below the
+// smallest positive denormal, ~4.9e-324) -- the `variance <= 0.0` guard then
+// fires and returns the SAME constant -1e300 for every proposal, regardless
+// of resid, silently discarding a highly-informative (very precise)
+// observation instead of letting it dominate the likelihood as it should.
+// Squaring resid and data_u independently can also produce Inf/Inf = NaN
+// when both are large. Computing the standardized residual `z = resid /
+// data_u` FIRST avoids both failure modes: division happens before either
+// operand is squared, so a tiny data_u produces a large-but-finite (or
+// legitimately +-Inf, e.g. resid far from zero against a near-zero data_u)
+// z instead of an underflowed-to-zero variance. z*z can still overflow to
+// +Inf for an extreme mismatch, giving log_w = -Inf -- already handled by
+// the is_finite_f64 guard at the call site (the proposal is skipped, same
+// as prop <= 0.0), rather than the domain-error case being silently
+// papered over as a constant, uninformative term here.
+fn log_gaussian_term(sim: f64, data: f64, data_u: f64) -> f64 with Mut, Div, Panic {
+    if data_u <= 0.0 { return 0.0 - 1.0e300; }
+    let z = (sim - data) / data_u;
+    0.0 - 0.5 * z * z
+}
+
+// Regression for the standardized-residual fix above (Copilot review,
+// sounio-lang/sounio#2694). log_gaussian_term is private, so this lives
+// here rather than in the external test fixture, which can only see pub
+// functions. Cross-checked in Python (variance=data_u*data_u underflows to
+// exactly 0.0 for data_u=1e-200 since 1e-200^2=1e-400 < the smallest
+// positive f64 denormal ~4.9e-324) before writing these assertions.
+pub fn test_log_gaussian_term_tiny_uncertainty() -> bool with Mut, Div, Panic {
+    // Old body: variance underflows to 0.0 regardless of resid, so a
+    // mismatched sim/data pair and a perfectly-matched one both returned
+    // the SAME constant -1e300 -- indistinguishable, and both wrong (a
+    // perfect match should be the BEST possible weight, 0.0, not the worst).
+    let mismatched = log_gaussian_term(0.5001, 0.5, 1.0e-200);
+    let matched = log_gaussian_term(0.5, 0.5, 1.0e-200);
+    // New body: a genuine mismatch against a near-zero uncertainty is
+    // correctly -Inf (impossible, caught by the is_finite_f64 call-site
+    // guard), while an exact match is correctly 0.0 (best possible weight)
+    // -- the two cases are no longer conflated.
+    let mismatched_is_neg_inf = mismatched < 0.0 - 1.0e300 && !is_finite_f64(mismatched);
+    let matched_is_zero = check_near(matched, 0.0, 1e-9);
+    // Normal-range inputs (data_u in the 0.01-0.1 range every real caller
+    // uses) must still match the pre-fix closed-form value: resid=du=0.05
+    // here, so z=1.0 and -0.5*z*z=-0.5 exactly.
+    let normal = log_gaussian_term(0.5, 0.45, 0.05);
+    let normal_matches_closed_form = check_near(normal, 0.0 - 0.5, 1e-9);
+    mismatched_is_neg_inf && matched_is_zero && normal_matches_closed_form
 }
 
 // Helper: make EState for observed data point (multiple "data" EStates)
@@ -2329,7 +2566,7 @@ fn make_observed_estate(v: f64, uv: f64) -> EState with Mut, Div, Panic {
 
 pub fn simulate_bayesian_posterior_crn(
     initv: &[f64; 8],
-    data_points: &[f64; 4],  // multiple "observed" data (EState values)
+    data_points: &[f64; 4],  // concentration-time observations of species 0
     data_us: &[f64; 4],
     prior_k: f64,
     prior_uk: f64,
@@ -2337,7 +2574,7 @@ pub fn simulate_bayesian_posterior_crn(
     nsp: i64,
     nrxn: i64,
     dt: f64,
-    steps: i64,
+    checkpoint_steps: &[i64; 4],  // non-decreasing RK4 step counts at which data_points[d]/data_us[d] were observed (repeats are valid -- see bayesian_identifiability_crn)
     n_samples: i64
 ) -> (f64, f64, f64) with Mut, Div, Panic, Observe, IO {  // (post_mean_k, post_u, ident_score)
     // fuller: use EStates for each observed data point
@@ -2348,32 +2585,142 @@ pub fn simulate_bayesian_posterior_crn(
         di = di + 1;
     }
 
-    // simple importance sampling around prior, now with EState data
+    // Importance sampling around the prior, now with EState data.
+    //
+    // MODELING FIX (Copilot review + user decision, sounio-lang/sounio#2694):
+    // this function used to compare every data_points[d] against the SAME
+    // final-state sim[2] -- only valid if all four were repeat noisy
+    // measurements of one true value, which no caller's synthetic data
+    // actually was (spreads several times wider than the stated per-point
+    // uncertainty), and sim[2] (the chain's terminal product) rises
+    // monotonically from 0 for every positive-rate network here, so it
+    // couldn't represent a real descending time-course either.
+    // Restructured as a genuine concentration-TIME fit instead, the
+    // standard PK/pharmacometric problem this models: data_points[d] is
+    // now species 0's (the decaying "parent") concentration at
+    // checkpoint_steps[d], fit via simulate_general_crn_checkpoints against
+    // the candidate rate constant `prop`. Species 0 is chosen because its
+    // ODE (dC0/dt = -k0*C0, from reaction r0: species0 -[k0]-> species1) is
+    // decoupled from the downstream reaction (r1, rate fixed at 0.05 below)
+    // and decays purely monotonically -- an unambiguous, analytically
+    // checkable first-order elimination curve. See each call site for how
+    // its data_points were generated (an actual RK4 run of this exact
+    // stepper at a chosen true k, verified against the closed-form
+    // exp(-k*t) to 6 digits in a Python cross-check before being written
+    // into the file, not asserted from memory).
+    //
+    // TWO BUGS, FOUND AND FIXED BEFORE THE MODELING FIX ABOVE, that between
+    // them made this function a no-op: it always fell through to `sum_w <=
+    // 0.0 -> return (prior_k, prior_uk, 1.0)` and silently handed back the
+    // unchanged prior, on every call site, every time -- bk/bu/bid and
+    // pk/pu/id were always exactly prior_k/prior_uk/1.0, never an actual
+    // posterior.
+    //
+    // 1. INDEXING: `sim[d % 3 + 2]` gave indices 2,3,4,2 for d=0..3 against
+    //    a single-endpoint `sim`, reading always-zero padding for d=1,2.
+    //    Superseded entirely by the checkpoint-trajectory fix above -- each
+    //    d now gets its own genuinely simulated value, sim_cp[d].
+    // 2. UNDERFLOW: fixing (1) alone was not enough -- confirmed by
+    //    re-running the exact repro that found (1). `w = w *
+    //    likelihood_weight(...)` multiplies four already-small
+    //    exp_approx(...) results together, and a f64 product of four
+    //    independently-small terms underflows to exactly 0.0 whenever no
+    //    single proposal's endpoint happens to sit close to all four
+    //    (spread-out: e.g. 0.55/0.40/0.30/0.22) data points AT ONCE against
+    //    tight sigmas (~0.03-0.05) -- which for real data is close to
+    //    always, so sum_w stayed at 0.0 even with the correct index. Fixed
+    //    by moving the combination into log-space with an ONLINE
+    //    max-rescaled accumulator (Copilot review on
+    //    sounio-lang/sounio#2694 caught a first version of this fix that
+    //    stored every sample in a props[128]/log_ws[128] pair and did the
+    //    rescale as a second pass -- silently clamping n_samples above 128,
+    //    changing this function's own public contract, e.g.
+    //    bench_scale_bayes_samples(1000) would have quietly run 128
+    //    proposals instead of 1000): every time a sample's log-weight beats
+    //    the running max, the running sums are rescaled by
+    //    exp(old_max - new_max) (<=1, so exp_approx never overflows) before
+    //    the new sample is folded in at weight exp(log_w - max_log_w) (<=1,
+    //    so it never underflows either) -- mathematically the same
+    //    max-relative log-sum-exp combination as the two-pass version, just
+    //    computed in one pass with O(1) memory, so n_samples is no longer
+    //    bounded by an array size.
+    let ns = if n_samples < 5 { 12 as i64 } else { n_samples };
     var sum_w = 0.0;
     var sum_kw = 0.0;
     var sum_k2w = 0.0;
+    var max_log_w = 0.0;
+    var have_max = false;
     var i: i64 = 0;
-    let ns = if n_samples < 5 { 12 as i64 } else { n_samples };  // scale up for fuller
     while i < ns {
         // propose k from prior + epistemic unc (EState style proposal)
         let prop = prior_k + (pseudo_unit(i + 9000) - 0.5) * prior_uk * 2.0;
-        if prop <= 0.0 { i = i + 1; continue; }
-        let ks: [f64; 8] = [prop, 0.05, 0.0,0.0,0.0,0.0,0.0,0.0];  // proxy, could be EState
-        let sim = simulate_general_crn(initv, &ks, nu, nsp, nrxn, dt, steps);
-        // multiple data "EStates" / observations with Observe
-        var w = 1.0;
-        var d: i64 = 0; while d < 4 {
-            if data_us[d] > 0.0 {
-                w = w * likelihood_weight(sim[d % 3 + 2], data_points[d], data_us[d]);
+        if prop > 0.0 {
+            let ks: [f64; 8] = [prop, 0.05, 0.0,0.0,0.0,0.0,0.0,0.0];  // proxy, could be EState
+            let sim_cp = simulate_general_crn_checkpoints(initv, &ks, nu, nsp, nrxn, dt, checkpoint_steps, 0);
+            var log_w = 0.0 - 0.5 * ((prop - prior_k)*(prop - prior_k) / (prior_uk*prior_uk + 1e-6));  // log prior weight
+            var d: i64 = 0; while d < 4 {
+                if data_us[d] > 0.0 {
+                    let _obs = observe_conc(sim_cp[d]);  // Observe effect, once per comparison
+                    log_w = log_w + log_gaussian_term(sim_cp[d], data_points[d], data_us[d]);
+                }
+                d = d + 1;
             }
-            d = d + 1;
+            // Seeded from the first valid proposal's own log_w (Copilot
+            // review, sounio-lang/sounio#2694), not a fixed -1e300 sentinel:
+            // a finite sentinel is not below every finite log-likelihood --
+            // a large-enough residual/tiny-enough variance in
+            // log_gaussian_term can itself produce log_w more negative than
+            // -1e300, which would never update max_log_w and would clamp
+            // every sample's weight to 0 via exp_approx(log_w - max_log_w)
+            // (comparing two enormous negative numbers whose DIFFERENCE is
+            // still huge), taking the unchanged-prior fallback despite
+            // having finite, comparable log-weights.
+            //
+            // NON-FINITE GUARD (Copilot review, same PR): an extreme enough
+            // finite input (e.g. a data point far from any reachable sim[2],
+            // making resid*resid itself overflow to +Inf in
+            // log_gaussian_term) can make log_w itself -Inf or NaN. Seeding
+            // max_log_w from a non-finite log_w, or later finding a new max
+            // that is non-finite, propagates through exp_approx (e.g.
+            // exp_approx(-Inf - -Inf) = exp_approx(NaN)) and corrupts
+            // sum_w/sum_kw/sum_k2w with NaN -- which the `sum_w <= 0.0`
+            // fallback check below does NOT catch, since every IEEE
+            // comparison against NaN is false. A proposal with a non-finite
+            // log_w is therefore simply skipped -- same treatment as
+            // `prop <= 0.0` above -- rather than seeded or folded in.
+            //
+            // FOLLOW-UP (Copilot, same PR): the first version of this guard
+            // used an ad-hoc +/-1e300 magnitude bound, which is itself too
+            // tight -- it rejects legitimately finite log-weights beyond
+            // that bound (e.g. a tight-uncertainty datum can genuinely
+            // produce a finite term around -1e301, still valid input to
+            // exp_approx's max-relative rescaling). Replaced with
+            // eisa::format::is_finite_f64, the repo's existing dual-engine
+            // finiteness predicate: it checks the real IEEE `x != x` NaN
+            // idiom, a second idiom sound under a documented lean_single
+            // NaN-comparison deviation measured 2026-07-05
+            // (docs/audit/LEAN_SINGLE_NAN_SEMANTICS_2026-07-05.md) where
+            // that idiom alone was defeated, and compares magnitude against
+            // the actual f64 maximum (1.7976931348623157e308) rather than
+            // an arbitrary tighter cutoff -- so it accepts every genuinely
+            // finite log_w and rejects only real NaN/+-Inf.
+            if is_finite_f64(log_w) {
+                if !have_max || log_w > max_log_w {
+                    if have_max {
+                        let rescale = exp_approx(max_log_w - log_w);
+                        sum_w = sum_w * rescale;
+                        sum_kw = sum_kw * rescale;
+                        sum_k2w = sum_k2w * rescale;
+                    }
+                    max_log_w = log_w;
+                    have_max = true;
+                }
+                let w = exp_approx(log_w - max_log_w);
+                sum_w = sum_w + w;
+                sum_kw = sum_kw + w * prop;
+                sum_k2w = sum_k2w + w * prop * prop;
+            }
         }
-        // prior weight
-        let prior_w = exp_approx(0.0 - 0.5 * ((prop - prior_k)*(prop - prior_k) / (prior_uk*prior_uk + 1e-6)));
-        w = w * prior_w;
-        sum_w = sum_w + w;
-        sum_kw = sum_kw + w * prop;
-        sum_k2w = sum_k2w + w * prop * prop;
         i = i + 1;
     }
     if sum_w <= 0.0 { return (prior_k, prior_uk, 1.0); }
@@ -2397,7 +2744,7 @@ pub fn bayesian_structural_posterior(
     nsp: i64,
     nrxn: i64,
     dt: f64,
-    steps: i64
+    checkpoint_steps: &[i64; 4]
 ) -> (f64, f64, f64) with Mut, Div, Panic, Observe, IO {  // overall post_k, u, ident
     var total_p = 0.0;
     var i = 0; while i < n_plaus { total_p = total_p + model_probs[i]; i=i+1; }
@@ -2408,7 +2755,7 @@ pub fn bayesian_structural_posterior(
         let mp = model_probs[i] / total_p;
         if mp > 0.0 {
             let (pk, pu, idsc) = simulate_bayesian_posterior_crn(
-                initv, data_points, data_us, 0.1, 0.02, nus[i], nsp, nrxn, dt, steps, 8
+                initv, data_points, data_us, 0.1, 0.02, nus[i], nsp, nrxn, dt, checkpoint_steps, 8
             );
             let comb_w = mp * (1.0 / (pu + 1e-6));
             wsum = wsum + comb_w;
@@ -2426,42 +2773,101 @@ pub fn bayesian_structural_posterior(
 }
 
 pub fn test_bayesian_ident_crn() -> bool with Mut, Div, Panic, Observe, IO {
-    // multiple data EState-like
-    let datas: [f64; 4] = [0.55, 0.40, 0.30, 0.22];
-    let dus: [f64; 4] = [0.03, 0.04, 0.03, 0.05];
+    // Concentration-time fit, same model as validate_against_literature's
+    // Bayesian block: RK4 run at k_true=0.12, dt=0.2, checkpoints
+    // [7,15,22,30] (cross-checked against exp(-k*t) to 6 digits in Python).
+    let datas: [f64; 4] = [0.845354, 0.697676, 0.589783, 0.486752];
+    let dus: [f64; 4] = [0.03, 0.03, 0.03, 0.03];
+    let tic_cp: [i64; 4] = [7, 15, 22, 30];
     var nu = matnm_new(3 as i64, 2 as i64);
     nu = matnm_set(nu, 0 as i64, 0 as i64, -1.0); nu = matnm_set(nu, 1 as i64, 0 as i64, 1.0);
     nu = matnm_set(nu, 1 as i64, 1 as i64, -1.0); nu = matnm_set(nu, 2 as i64, 1 as i64, 1.0);
     let bayes_ident_initv: [f64; 8] = [1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
     let (pk, pu, idsc) = simulate_bayesian_posterior_crn(
-        &bayes_ident_initv, &datas, &dus, 0.1, 0.02, nu, 3, 2, 0.2, 30, 10
+        &bayes_ident_initv, &datas, &dus, 0.1, 0.02, nu, 3, 2, 0.2, &tic_cp, 10
     );
-    // fuller sampling gives reasonable post
+    // fuller sampling gives reasonable post, biased toward the true k=0.12
     check_near(pk, 0.12, 0.1) && pu > 0.0 && pu < 0.15 && idsc > 0.5
 }
 
+// Regression for the checkpoint-trajectory fix specifically (Copilot review
+// + user decision, sounio-lang/sounio#2694). First version of this test
+// tried to check permutation invariance by reordering checkpoint_steps
+// itself -- wrong: simulate_general_crn_checkpoints requires
+// checkpoint_steps non-decreasing (repeats are valid, e.g.
+// bayesian_identifiability_crn's [T,T,T,T]; it runs to checkpoint_steps[3]
+// and detects checkpoints in array order as the step counter climbs), so an
+// out-of-order checkpoint array like [30,7,22,15] used to silently stop
+// after step 15 and leave out[0]/out[2] at their zero-initialized default
+// instead of raising an error (now caught by a runtime panic, see the
+// function's own docstring) -- caught here by this test itself failing
+// (pk=0.114357 vs pk2=0.099572, nowhere near equal) when it should have
+// passed by construction. The real correctness property, keeping
+// checkpoint_steps valid: data_points[d]/data_us[d] must be the value
+// observed at checkpoint_steps[d] specifically. Swapping which VALUE sits
+// in which slot while leaving checkpoint_steps fixed and ascending
+// (mismatching an observation to the wrong time) is exactly the bug class
+// this guards against (the old sim[d % 3 + 2] bug was a position/value
+// mismatch of the same shape) and must change the posterior.
+pub fn test_bayesian_checkpoint_mismatch_sensitivity() -> bool with Mut, Div, Panic, Observe, IO {
+    let cps: [i64; 4] = [7, 15, 22, 30];
+    let dus: [f64; 4] = [0.03, 0.03, 0.03, 0.03];
+    // Correctly paired: datas[d] is the true value AT checkpoint cps[d].
+    let datas: [f64; 4] = [0.845354, 0.697676, 0.589783, 0.486752];
+    // Same four VALUES, shuffled into the wrong slots (same checkpoints).
+    let datas_mismatched: [f64; 4] = [0.486752, 0.845354, 0.589783, 0.697676];
+    var nu = matnm_new(3 as i64, 2 as i64);
+    nu = matnm_set(nu, 0 as i64, 0 as i64, -1.0); nu = matnm_set(nu, 1 as i64, 0 as i64, 1.0);
+    nu = matnm_set(nu, 1 as i64, 1 as i64, -1.0); nu = matnm_set(nu, 2 as i64, 1 as i64, 1.0);
+    let initv: [f64; 8] = [1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
+    let (pk_correct, _, _) = simulate_bayesian_posterior_crn(&initv, &datas, &dus, 0.1, 0.02, nu, 3, 2, 0.2, &cps, 10);
+    let (pk_mismatched, _, _) = simulate_bayesian_posterior_crn(&initv, &datas_mismatched, &dus, 0.1, 0.02, nu, 3, 2, 0.2, &cps, 10);
+    // Measured: pk_correct=0.114357 (close to k_true=0.12), pk_mismatched=
+    // 0.095415 -- a ~0.019 gap, comfortably outside this 1e-3 tolerance.
+    !check_near(pk_correct, pk_mismatched, 1e-3)
+}
+
 pub fn test_bayesian_structural_tie() -> bool with Mut, Div, Panic, Observe, IO {
-    // reuse structural style nus + probs as model priors
+    // reuse structural style nus + probs as model priors. Concentration-time
+    // fit, same model + true k=0.12 as the other Bayesian sites; data
+    // generated under nu1 (the true chain) at checkpoints [6,12,19,25].
     var nu1 = matnm_new(3 as i64, 2 as i64); nu1 = matnm_set(nu1, 0 as i64, 0 as i64, -1.0); nu1 = matnm_set(nu1, 1 as i64, 0 as i64, 1.0); nu1 = matnm_set(nu1, 1 as i64, 1 as i64, -1.0); nu1 = matnm_set(nu1, 2 as i64, 1 as i64, 1.0);
     var nu2 = matnm_new(3 as i64, 2 as i64); nu2 = matnm_set(nu2, 0 as i64, 0 as i64, -1.0); nu2 = matnm_set(nu2, 1 as i64, 0 as i64, 1.0); nu2 = matnm_set(nu2, 0 as i64, 1 as i64, -0.3); nu2 = matnm_set(nu2, 2 as i64, 1 as i64, 0.3);
     let nus: [MatNM; 2] = [nu1, nu2];
     let mps: [f64; 2] = [0.7, 0.3];
-    let datas: [f64; 4] = [0.52, 0.38, 0.28, 0.19];
-    let dus: [f64; 4] = [0.04, 0.03, 0.04, 0.03];
+    let datas: [f64; 4] = [0.865888, 0.749762, 0.633814, 0.548812];
+    let dus: [f64; 4] = [0.03, 0.03, 0.03, 0.03];
+    let bst_cp: [i64; 4] = [6, 12, 19, 25];
     let bsp_initv: [f64; 8] = [1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
-    let (pk, pu, id) = bayesian_structural_posterior(&bsp_initv, &datas, &dus, &nus, &mps, 2, 3, 2, 0.2, 25);
-    check_near(pk, 0.11, 0.1) && pu > 0.005 && id > 1.0
+    let (pk, pu, id) = bayesian_structural_posterior(&bsp_initv, &datas, &dus, &nus, &mps, 2, 3, 2, 0.2, &bst_cp);
+    // Now that simulate_bayesian_posterior_crn actually updates from its prior
+    // (see its own header comment for the bugs that used to make it a
+    // no-op) and fits a real concentration-time trajectory (see the same
+    // header for the modeling fix), this genuinely tightens toward k_true.
+    check_near(pk, 0.12, 0.1) && pu > 0.0 && id > 1.0
 }
 
-// keep light compat wrapper for old test sites
+// keep light compat wrapper for old test sites (no current callers in this
+// repo, verified by search -- kept for external/API compatibility). Only
+// takes a single scalar data_v/data_u, so unlike the checkpoint-trajectory
+// sites above it cannot synthesize a genuine multi-time concentration curve
+// from one number without inventing data; models data_v/data_u honestly
+// instead as 4 REPEATED measurements of species 0 at the SAME single
+// timepoint (a degenerate case of the checkpoint model: repeated
+// checkpoint_steps entries are handled correctly by
+// simulate_general_crn_checkpoints, which records every checkpoint index
+// that equals the current step) -- a real, common experimental design
+// (e.g. replicate assay readings), not the "descending spread" fabrication
+// this used to do.
 pub fn bayesian_identifiability_crn(data_v: f64, data_u: f64, prior_k: f64, prior_uk: f64) -> (f64, f64) with Mut, Div, Panic, Observe, IO {
-    let datas: [f64; 4] = [data_v, data_v*0.7, data_v*0.5, data_v*0.3];
-    let dus: [f64; 4] = [data_u, data_u, data_u*0.8, data_u];
+    let datas: [f64; 4] = [data_v, data_v, data_v, data_v];
+    let dus: [f64; 4] = [data_u, data_u, data_u, data_u];
+    let bic_cp: [i64; 4] = [20, 20, 20, 20];
     var nu = matnm_new(3 as i64, 2 as i64);
     nu = matnm_set(nu, 0 as i64, 0 as i64, -1.0); nu = matnm_set(nu, 1 as i64, 0 as i64, 1.0);
     nu = matnm_set(nu, 1 as i64, 1 as i64, -1.0); nu = matnm_set(nu, 2 as i64, 1 as i64, 1.0);
     let ident_crn_initv: [f64; 8] = [1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
-    let (pk, pu, _) = simulate_bayesian_posterior_crn(&ident_crn_initv, &datas, &dus, prior_k, prior_uk, nu, 3, 2, 0.2, 20, 6);
+    let (pk, pu, _) = simulate_bayesian_posterior_crn(&ident_crn_initv, &datas, &dus, prior_k, prior_uk, nu, 3, 2, 0.2, &bic_cp, 6);
     (pk, pu)
 }
 

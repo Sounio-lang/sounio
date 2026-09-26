@@ -1,0 +1,83 @@
+//@ run-pass
+//@ requires: lean_single
+//@ expect-stdout-contains: FRAC v@10a0.8 lit=0.533700 act=0.533673 tol=0.020000 LIT PASS
+//@ expect-stdout-contains: PINN k lit=0.100000 act=0.099995 tol=0.010000 LIT PASS
+// tests/stdlib/chemistry/test_kinetics_fixed_regressions.sio
+//
+// stdlib/chemistry/kinetics.sio has its own self-test suite in its main(),
+// but that file is a library -- the harness never runs it directly, so the
+// nine real defects fixed there (wrong test indices/expectations, a PINN
+// learning-rate bug, and a three-layered Bayesian bug: a lean_single
+// `let var` keyword collision, an indexing bug, and multiplicative-underflow
+// importance-sampling weights) had no runnable regression coverage and
+// could all have silently reverted. `requires: lean_single` because
+// kinetics.sio hits this repo's documented multimodule native-link
+// limitation under default Madaros (verified: `souc check` is clean,
+// `souc run` fails at multimodule thin-link) -- the same reason
+// test_kinetics_core.sio and test_pbpk_ontology.sio stay check-only. This
+// fixture calls exactly the named tests those fixes correspond to and
+// asserts they still pass. It does not
+// include test_more_pbpk_submodels, validate_against_literature, or
+// bench_stochastic: those three remain real, uninvestigated discrepancies
+// against illustrative/uncalibrated literature targets (documented in
+// kinetics.sio itself and in .claude/llm_offload_log.md), not bugs this
+// fixture can assert a "correct" value for without fabricating one. Calls
+// both test_epistemic_pinn_crn and test_bench_pinn: they wrap two separately
+// duplicated copies of the same PINN training loop (kinetics.sio:1590-1602
+// is bench_epistemic_pinn_crn's copy), and covering only one left the other
+// free to regress invisibly (Copilot review, sounio-lang/sounio#2694).
+// Also calls test_bayesian_checkpoint_mismatch_sensitivity: Copilot found
+// (same PR) that test_bayesian_ident_crn/test_bayesian_structural_tie's
+// tolerances are wide enough that a deterministic mirror of the OLD
+// sim[d % 3 + 2] indexing bug still passed both. The user then decided
+// (same PR) to also resolve the deeper modeling gap those tolerances were
+// covering for: simulate_bayesian_posterior_crn now fits a real
+// concentration-time trajectory (per-checkpoint simulation) rather than
+// comparing every observation to the same final-state value --
+// test_bayesian_checkpoint_mismatch_sensitivity is the regression check
+// specifically targeted at THAT fix (see its own header comment in
+// kinetics.sio for why a naive permutation-invariance version of this test
+// doesn't work here, and what it caught when tried). Also calls
+// test_log_gaussian_term_tiny_uncertainty (kinetics.sio, next to
+// log_gaussian_term itself, since that helper is private and this fixture
+// can only see pub functions): Copilot found a further bug in the same
+// review round -- the OLD body squared data_u and resid separately, so a
+// legitimately tight-but-positive data_u (e.g. 1e-200) squared to exactly
+// 0.0 in f64 and made log_gaussian_term return the SAME constant -1e300
+// regardless of resid, conflating "perfect match against a very precise
+// measurement" with "impossible mismatch against the same measurement".
+// Fixed by computing the standardized residual (resid/data_u) before
+// squaring. main() also calls validate_against_literature
+// for its PRINTED output only (its boolean return is ignored, and stays out
+// of the pass/fail count) -- Copilot review, sounio-lang/sounio#2694: this
+// fixture's boolean-only assertions don't exercise the ~20 multi-argument
+// println("...{}...", ...) rewrites (b28e33b8) at all; the two
+// expect-stdout-contains lines above pin exact rendered fragments from that
+// rewrite (the fractional-decay and PINN-k literature lines), so a
+// reintroduced Rust-macro-style println (which silently drops every
+// argument and leaves the literal "{}" in the string) fails this test even
+// though validate_against_literature's own verdict is already known-FAIL
+// for an unrelated reason (the H2O2 literature target).
+
+use chemistry::kinetics::*
+
+fn assert_all() -> i32 with IO, Mut, Div, Panic, Prob, Observe {
+    var fail: i32 = 0
+    if !test_richer_metabolic() { fail = fail + 1; println("FAIL richer_metabolic") }
+    if !test_fractional_caputo_epistemic() { fail = fail + 1; println("FAIL fractional_caputo_epistemic") }
+    if !test_pbpk_metabolic_crn_ontology() { fail = fail + 1; println("FAIL pbpk_metabolic_crn_ontology") }
+    if !test_epistemic_pinn_crn() { fail = fail + 1; println("FAIL epistemic_pinn_crn") }
+    if !test_bench_pinn() { fail = fail + 1; println("FAIL bench_pinn") }
+    if !test_bayesian_ident_crn() { fail = fail + 1; println("FAIL bayesian_ident_crn") }
+    if !test_bayesian_structural_tie() { fail = fail + 1; println("FAIL bayesian_structural_tie") }
+    if !test_bayesian_checkpoint_mismatch_sensitivity() { fail = fail + 1; println("FAIL bayesian_checkpoint_mismatch_sensitivity") }
+    if !test_log_gaussian_term_tiny_uncertainty() { fail = fail + 1; println("FAIL log_gaussian_term_tiny_uncertainty") }
+    // Printed output only -- boolean intentionally discarded, see header.
+    let _ = validate_against_literature();
+    if fail == 0 { println("KINETICS_FIXED_REGRESSIONS_OK") }
+    fail
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic, Prob, Observe {
+    assert_all()
+}
