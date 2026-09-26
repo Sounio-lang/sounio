@@ -18,6 +18,7 @@ use special::caputo::*;  // for fractional deep item (Caputo + epistemic)
 // Enables Knowledge<CHEBI_xxx>, refinement by ontology class, provenance in epistemic CRN.
 // FULL ontology integration (reexported from chemistry::ontology using real ChEBI typed bridge)
 use chemistry::ontology::*;
+use eisa::format::is_finite_f64;
 
 // Real terminal graphs and statistics (Sounio native, no external libs)
 use plot::epistemic::*;
@@ -2544,13 +2545,26 @@ pub fn simulate_bayesian_posterior_crn(
             // exp_approx(-Inf - -Inf) = exp_approx(NaN)) and corrupts
             // sum_w/sum_kw/sum_k2w with NaN -- which the `sum_w <= 0.0`
             // fallback check below does NOT catch, since every IEEE
-            // comparison against NaN is false. Verified empirically (not
-            // assumed) that this engine's `==`/`>` on f64 follow ordinary
-            // IEEE 754 semantics, not folded away by any rewrite: nan==nan
-            // is false, nan > -1e300 is false. A proposal with a non-finite
+            // comparison against NaN is false. A proposal with a non-finite
             // log_w is therefore simply skipped -- same treatment as
             // `prop <= 0.0` above -- rather than seeded or folded in.
-            if log_w == log_w && log_w > (0.0 - 1.0e300) && log_w < 1.0e300 {
+            //
+            // FOLLOW-UP (Copilot, same PR): the first version of this guard
+            // used an ad-hoc +/-1e300 magnitude bound, which is itself too
+            // tight -- it rejects legitimately finite log-weights beyond
+            // that bound (e.g. a tight-uncertainty datum can genuinely
+            // produce a finite term around -1e301, still valid input to
+            // exp_approx's max-relative rescaling). Replaced with
+            // eisa::format::is_finite_f64, the repo's existing dual-engine
+            // finiteness predicate: it checks the real IEEE `x != x` NaN
+            // idiom, a second idiom sound under a documented lean_single
+            // NaN-comparison deviation measured 2026-07-05
+            // (docs/audit/LEAN_SINGLE_NAN_SEMANTICS_2026-07-05.md) where
+            // that idiom alone was defeated, and compares magnitude against
+            // the actual f64 maximum (1.7976931348623157e308) rather than
+            // an arbitrary tighter cutoff -- so it accepts every genuinely
+            // finite log_w and rejects only real NaN/+-Inf.
+            if is_finite_f64(log_w) {
                 if !have_max || log_w > max_log_w {
                     if have_max {
                         let rescale = exp_approx(max_log_w - log_w);
