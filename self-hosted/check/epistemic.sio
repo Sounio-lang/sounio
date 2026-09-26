@@ -45,6 +45,32 @@ pub fn check_knowledge_type(checker: Checker, info: KnowledgeTypeInfo) -> (Check
     var c = pair.0
     let inner_ty = pair.1
 
+    // ValidWhile(expr) predicates must resolve and type-check to bool in this
+    // checker's current declaration scope -- see the *mut twin,
+    // checker_check_validwhile_predicate_inplace, for the full rationale. An
+    // undeclared identifier or a non-bool expression (ValidWhile(42)) is
+    // rejected instead of silently persisted as an enforceable predicate.
+    match info.validity {
+        Some(vc) => {
+            if (*vc).kind == AstValidityKind::ValidWhileCond {
+                match (*vc).expr {
+                    Some(pred_expr) => {
+                        let pred_pair = c.check_expr(*pred_expr)
+                        c = pred_pair.0
+                        let pred_ty = pred_pair.1
+                        if !is_error_or_unknown(pred_ty) && !is_bool_type(pred_ty) {
+                            c = c.report_error_at((*pred_expr).span, 54, 0, 0, 0)
+                        }
+                    }
+                    None => {
+                        c = c.report_error_at(Span { file_id: 0, start: 0, end: 0 }, 54, 0, 0, 0)
+                    }
+                }
+            }
+        }
+        None => {}
+    }
+
     // Validate metadata constraints that we can prove at type-check time.
     // (TypeEntry does not yet persist full validity/provenance metadata.)
     if !knowledge_metadata_is_valid(info.validity) {
@@ -82,6 +108,15 @@ pub fn check_knowledge_type(checker: Checker, info: KnowledgeTypeInfo) -> (Check
     ty.knowledge_epsilon_mode = eps_mode
     let prov = meta.provenance
     ty.knowledge_provenance_kind = prov.kind
+    let val_cond = meta.validity
+    ty.knowledge_validity_kind = val_cond.kind
+    ty.knowledge_validity_value = if val_cond.kind == VALIDITY_KIND_DURATION {
+        val_cond.duration_sec
+    } else if val_cond.kind == VALIDITY_KIND_WHILE_COND {
+        val_cond.pred_id
+    } else {
+        val_cond.until_timestamp
+    }
     (c, ty)
 }
 
@@ -166,16 +201,65 @@ pub fn check_validated_type(checker: Checker, info: KnowledgeTypeInfo) -> (Check
     (c, ty)
 }
 
-pub fn knowledge_validity_expr_non_negative(opt: Option<Box<Expr>>) -> bool {
+// `kind` distinguishes what SHAPE of literal is actually valid for this
+// ValidityCondition: Valid(seconds) is a DURATION and must be a numeric
+// literal; ValidUntil(date) is a deadline and must be a date STRING. Without
+// this distinction, Valid("2026-01-01") was wrongly accepted as a
+// 20260101-second numeric duration (a string literal read by
+// knowledge_validity_expr_to_f64 as an ISO date, not as a duration -- its
+// digits reinterpreted as seconds), and ValidUntil(30.0) was wrongly
+// accepted as timestamp 30 (a bare number is not a date in this domain's
+// YYYYMMDD.0 timestamp encoding, and satisfies almost every ValidUntil
+// requirement immediately). Each validity kind now only accepts the literal
+// shape that is actually meaningful for it.
+pub fn knowledge_validity_expr_non_negative(opt: Option<Box<Expr>>, kind: AstValidityKind) -> bool {
     match opt {
         Some(e) => {
-            if (*e).kind == ExprKind::ExprIntLit {
-                return (*e).int_val >= 0
+            if kind == AstValidityKind::ValidDuration {
+                if (*e).kind == ExprKind::ExprIntLit {
+                    return (*e).int_val >= 0
+                }
+                if (*e).kind == ExprKind::ExprFloatLit {
+                    return (*e).float_val >= 0.0
+                }
+                // A duration is a plain number of seconds, not a date string or
+                // any other expression shape.
+                return false
             }
-            if (*e).kind == ExprKind::ExprFloatLit {
-                return (*e).float_val >= 0.0
+            if kind == AstValidityKind::ValidUntilTime {
+                if (*e).kind == ExprKind::ExprStringLit {
+                    // A ValidUntil string is a date literal, not an arbitrary
+                    // payload: it must actually parse. parse_iso_date_to_f64
+                    // returns 0.0 both for "the epoch" and for "this did not
+                    // parse" -- 0.0 is not a meaningful ValidUntil timestamp in
+                    // this domain (no fixture uses year 0), so treating it as
+                    // parse failure and rejecting here is sound and closes the
+                    // hole where a malformed literal like "9999-99-99x" silently
+                    // became a permissive (or, worse, an effectively ALWAYS)
+                    // bound instead of a type error. (*e).name is the RAW token
+                    // text INCLUDING the surrounding quote bytes -- must strip
+                    // them via ast_string_lit_payload first, or a well-formed
+                    // 10-byte date like "2026-01-01" arrives here as 12 bytes
+                    // and fails parse_iso_date_to_f64's exact-length check,
+                    // rejecting every valid ISO date literal.
+                    return parse_iso_date_to_f64(ast_string_lit_payload((*e).name)) > 0.0
+                }
+                // A deadline is a date string, not a bare number or any other
+                // expression shape.
+                return false
             }
-            true
+            // Any other expression shape (identifier, binary op, call, ...) is not a
+            // Valid(seconds)/ValidUntil(date) LITERAL and must be rejected here, not
+            // silently accepted as "true". knowledge_validity_expr_to_f64 has no idea
+            // how to evaluate an arbitrary expression and converts anything it does
+            // not recognize to 0.0 -- accepting it here let a nonliteral duration/
+            // until-time bound (e.g. `ValidUntil(deadline)` for an identifier
+            // `deadline`) silently become a required timestamp of 0, which every
+            // dated value satisfies. This check does NOT apply to ValidWhile(expr) --
+            // that condition is genuinely an arbitrary predicate, not a value to
+            // convert to f64; see knowledge_metadata_is_valid, which only calls this
+            // for the two kinds that actually require a literal.
+            false
         }
         None => false
     }
@@ -183,15 +267,349 @@ pub fn knowledge_validity_expr_non_negative(opt: Option<Box<Expr>>) -> bool {
 
 pub fn knowledge_metadata_is_valid(validity_opt: Option<Box<ValidityCondition>>) -> bool {
     match validity_opt {
-        Some(vc) => knowledge_validity_expr_non_negative((*vc).expr)
+        Some(vc) => {
+            // ValidWhile(expr) predicates are arbitrary boolean expressions, not
+            // numeric literals -- knowledge_validity_expr_non_negative's literal-only
+            // rule does not apply to them (it exists to keep Valid(seconds) /
+            // ValidUntil(date) from silently accepting a nonliteral expression that
+            // knowledge_validity_expr_to_f64 would otherwise convert to 0.0).
+            if (*vc).kind == AstValidityKind::ValidWhileCond {
+                return true
+            }
+            knowledge_validity_expr_non_negative((*vc).expr, (*vc).kind)
+        }
         None => true
     }
 }
 
-pub fn validity_from_ast(opt: Option<Box<ValidityCondition>>) -> Validity {
+// Canonical STRUCTURAL identity for a ValidWhile(expr) predicate, via real
+// hash-consing with collision resolution -- not hash equality alone.
+//
+// WHY NOT JUST A HASH (even a wide, unmasked one). Every earlier attempt at
+// this (span identity, then a masked hash, then an unmasked 64-bit hash) was
+// eventually shown to have a concrete collision: two genuinely different
+// predicates producing the same identity value, because ANY fixed-width
+// mixing function can map different inputs to the same output (e.g. the
+// XOR-based mixer here treated int literals as `seed ^ int_val`, so
+// `0 == 1` and `0 != 16741452142216` mixed identically once XORed against
+// the same running seed). No amount of re-mixing removes this in general --
+// only comparing the actual structure does.
+//
+// THE FIX. Every recognized predicate is serialized into a canonical
+// preorder token sequence (tag, then payload, then children recursively).
+// Two predicates are the SAME iff their token sequences are IDENTICAL,
+// compared token-for-token -- not via any hash of the sequence. The token
+// sequences themselves are the identity; a hash is not part of the
+// comparison, so no mixing function's collisions can affect it. This is
+// standard hash-consing (an intern table keyed by real equality, storing a
+// small index as the "hash-consed" identity) with the "hash" part dropped
+// entirely in favor of the equality check it would only have approximated.
+//
+// UNKNOWN PROPAGATION (unchanged in spirit from the earlier hash version):
+// an unrecognized subexpression (a call, ...) makes the WHOLE predicate
+// "not comparable" -- serialization aborts and no id is produced, so this
+// predicate never subsumes anything, including itself under a different
+// source occurrence.
+//
+// IDENTIFIERS ARE NOT INTERNED BY SPELLING. ValidWhile(flag) used to intern
+// the NAME "flag", so two ValidWhile(flag) annotations referring to
+// DIFFERENT bindings (different parameters, or a shadowed local) with the
+// same spelling were wrongly treated as the same predicate -- this checker
+// has no per-binding symbol/slot id readily available at this pure,
+// Checker-free call site to disambiguate them correctly. Until real
+// binding-identity tracking is threaded through, any bare identifier
+// reference inside a ValidWhile predicate is conservatively treated as
+// unsupported (serialization aborts), the same fail-closed treatment as any
+// other unrecognized shape -- consistent with every other "not sure, so
+// reject rather than risk a false match" choice in this file. String
+// literal CONTENT has no such binding-identity question (a string literal
+// is just data, not a reference), so it is still interned and compared
+// by content.
+//
+// STORAGE SHAPE. Flat i8/i64 array globals initialized with `[0; N]`, the
+// SAME proven-safe shape used by the string-content intern table below --
+// NOT an array of Expr/Name structs. A `[T; N]` global with a struct-literal
+// array-repeat initializer is not supported by every stage of this
+// self-hosted compiler's own bootstrap (it broke the "Correlated effect" CI
+// build once already with "missing field in struct literal", even though
+// the identical shape works fine as a LOCAL struct-literal repeat elsewhere
+// in this codebase).
+
+// String CONTENT interning (ExprStringLit payloads only -- see above for
+// why identifiers are not interned this way). Exact byte-for-byte identity,
+// never hash-based, so two different strings can never receive the same
+// index and the same string always gets the same index.
+pub var VALIDWHILE_INTERN_BUF: [i8; 196608] = [0; 196608]  // 512 slots * 384 bytes
+pub var VALIDWHILE_INTERN_LENS: [i64; 512] = [0; 512]
+pub var VALIDWHILE_INTERN_COUNT: i64 = 0
+
+fn validwhile_intern_slot_matches(n: Name, slot: i64) -> bool {
+    if VALIDWHILE_INTERN_LENS[slot as usize] != n.len {
+        return false
+    }
+    let base = slot * 384
+    var i: i64 = 0
+    while i < n.len {
+        if VALIDWHILE_INTERN_BUF[(base + i) as usize] != n.buf[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn validwhile_intern_name_exact(n: Name) -> (i64, bool) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < VALIDWHILE_INTERN_COUNT {
+        if validwhile_intern_slot_matches(n, i) {
+            return (i, true)
+        }
+        i = i + 1
+    }
+    if VALIDWHILE_INTERN_COUNT < 512 {
+        let slot = VALIDWHILE_INTERN_COUNT
+        let base = slot * 384
+        var j: i64 = 0
+        while j < n.len && j < 384 {
+            VALIDWHILE_INTERN_BUF[(base + j) as usize] = n.buf[j as usize]
+            j = j + 1
+        }
+        VALIDWHILE_INTERN_LENS[slot as usize] = n.len
+        VALIDWHILE_INTERN_COUNT = VALIDWHILE_INTERN_COUNT + 1
+        return (slot, true)
+    }
+    // Table exhausted (512 distinct string-literal contents referenced
+    // across every ValidWhile predicate in one compilation -- not a
+    // realistic corpus, but this must still fail closed): report unknown.
+    (0, false)
+}
+
+const BINARY_OP_HASH_TAG_UNKNOWN: i64 = 0 - 1
+const UNARY_OP_HASH_TAG_UNKNOWN: i64 = 0 - 1
+
+// Distinct tag per operator VARIANT (every BinaryOp case, not a shared
+// fallback bucket) so `a & b` and `a | b` serialize differently even though
+// both are ExprBinary with the same operand structure.
+fn binary_op_hash_tag(op: BinaryOp) -> i64 {
+    match op {
+        BinaryOp::OpAdd => 1
+        BinaryOp::OpSub => 2
+        BinaryOp::OpMul => 3
+        BinaryOp::OpDiv => 4
+        BinaryOp::OpRem => 5
+        BinaryOp::OpEq => 6
+        BinaryOp::OpNe => 7
+        BinaryOp::OpLt => 8
+        BinaryOp::OpLe => 9
+        BinaryOp::OpGt => 10
+        BinaryOp::OpGe => 11
+        BinaryOp::OpAnd => 12
+        BinaryOp::OpOr => 13
+        BinaryOp::OpBitAnd => 14
+        BinaryOp::OpBitOr => 15
+        BinaryOp::OpBitXor => 16
+        BinaryOp::OpShl => 17
+        BinaryOp::OpShr => 18
+        BinaryOp::OpConcat => 19
+        BinaryOp::OpRange => 20
+        BinaryOp::OpRangeInclusive => 21
+        BinaryOp::OpUDiv => 22
+        BinaryOp::OpURem => 23
+        BinaryOp::OpUShr => 24
+    }
+}
+
+fn unary_op_hash_tag(op: UnaryOp) -> i64 {
+    match op {
+        UnaryOp::OpNeg => 1
+        UnaryOp::OpNot => 2
+        UnaryOp::OpRef => 3
+        UnaryOp::OpRefMut => 4
+        UnaryOp::OpDeref => 5
+        UnaryOp::OpBitNot => 6
+    }
+}
+
+// Scratch buffer for the canonical preorder token serialization of ONE
+// predicate expression at a time (reset before each use). Global, matching
+// this file's established single-threaded-checker-run state pattern.
+pub var VALIDWHILE_SCRATCH: [i64; 512] = [0; 512]
+pub var VALIDWHILE_SCRATCH_LEN: i64 = 0
+
+fn validwhile_emit(tag: i64) -> bool with Mut {
+    if VALIDWHILE_SCRATCH_LEN >= 512 {
+        return false
+    }
+    VALIDWHILE_SCRATCH[VALIDWHILE_SCRATCH_LEN as usize] = tag
+    VALIDWHILE_SCRATCH_LEN = VALIDWHILE_SCRATCH_LEN + 1
+    true
+}
+
+// Serializes `opt` as a preorder token sequence into VALIDWHILE_SCRATCH,
+// starting at the CURRENT VALIDWHILE_SCRATCH_LEN (caller resets it to 0 for
+// a fresh top-level predicate). Returns false (aborting -- the partial
+// scratch content must not be trusted) for any unrecognized shape, a bare
+// identifier reference (see the binding-identity note above), or scratch
+// exhaustion.
+fn struct_serialize_expr(opt: Option<Box<Expr>>) -> bool with Mut, Panic, Div {
+    match opt {
+        None => validwhile_emit(1)
+        Some(e) => {
+            let ek = (*e).kind
+            if ek == ExprKind::ExprIntLit {
+                validwhile_emit(2) && validwhile_emit((*e).int_val)
+            } else if ek == ExprKind::ExprFloatLit {
+                // Exact IEEE-754 bit pattern, not a truncating `as i64` cast --
+                // truncation collapsed every float literal with the same integer
+                // part (1.1 and 1.9 both truncate to 1) to the same token.
+                validwhile_emit(3) && validwhile_emit(f64_to_bits((*e).float_val))
+            } else if ek == ExprKind::ExprBoolTrue {
+                validwhile_emit(4)
+            } else if ek == ExprKind::ExprBoolFalse {
+                validwhile_emit(5)
+            } else if ek == ExprKind::ExprStringLit {
+                // (*e).name is the raw token text including surrounding quotes;
+                // strip them so identity reflects the string's actual content.
+                let interned = validwhile_intern_name_exact(ast_string_lit_payload((*e).name))
+                interned.1 && validwhile_emit(6) && validwhile_emit(interned.0)
+            } else if ek == ExprKind::ExprCharLit {
+                validwhile_emit(7) && validwhile_emit((*e).int_val)
+            } else if ek == ExprKind::ExprIdent {
+                // Bare identifier: NOT interned by spelling -- see the
+                // binding-identity note above. Conservatively unsupported until
+                // real per-binding identity is available here.
+                false
+            } else if ek == ExprKind::ExprBinary {
+                let op_tag = binary_op_hash_tag((*e).bin_op)
+                if op_tag == BINARY_OP_HASH_TAG_UNKNOWN {
+                    false
+                } else if !(validwhile_emit(8) && validwhile_emit(op_tag)) {
+                    false
+                } else if !struct_serialize_expr((*e).left) {
+                    false
+                } else {
+                    struct_serialize_expr((*e).right)
+                }
+            } else if ek == ExprKind::ExprUnary {
+                let op_tag = unary_op_hash_tag((*e).un_op)
+                if op_tag == UNARY_OP_HASH_TAG_UNKNOWN {
+                    false
+                } else if !(validwhile_emit(9) && validwhile_emit(op_tag)) {
+                    false
+                } else {
+                    struct_serialize_expr((*e).left)
+                }
+            } else if ek == ExprKind::ExprFieldAccess {
+                // The base expression is serialized recursively (so
+                // `a.b.field` differs from `x.field`); the field NAME is
+                // interned by content the same way a string literal is --
+                // it is a fixed syntactic label, not a binding reference.
+                let field_interned = validwhile_intern_name_exact((*e).name)
+                if !field_interned.1 {
+                    false
+                } else if !(validwhile_emit(10) && validwhile_emit(field_interned.0)) {
+                    false
+                } else {
+                    struct_serialize_expr((*e).left)
+                }
+            } else {
+                false
+            }
+        }
+    }
+}
+
+// Hash-consing table: each slot holds the LENGTH and the offset into the
+// flat token buffer for one previously-seen predicate's canonical
+// serialization. Lookup/insert compares the ACTUAL token sequences
+// (validwhile_struct_seq_matches), never a hash of them.
+pub var VALIDWHILE_STRUCT_BUF: [i64; 16384] = [0; 16384]
+pub var VALIDWHILE_STRUCT_BUF_USED: i64 = 0
+pub var VALIDWHILE_STRUCT_OFFSETS: [i64; 512] = [0; 512]
+pub var VALIDWHILE_STRUCT_LENS: [i64; 512] = [0; 512]
+pub var VALIDWHILE_STRUCT_COUNT: i64 = 0
+
+fn validwhile_struct_seq_matches(slot: i64, len: i64) -> bool {
+    if VALIDWHILE_STRUCT_LENS[slot as usize] != len {
+        return false
+    }
+    let off = VALIDWHILE_STRUCT_OFFSETS[slot as usize]
+    var i: i64 = 0
+    while i < len {
+        if VALIDWHILE_STRUCT_BUF[(off + i) as usize] != VALIDWHILE_SCRATCH[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+// Interns the token sequence currently sitting in VALIDWHILE_SCRATCH[0..len)
+// by EXACT sequence comparison against every previously-interned predicate,
+// and returns its (small, stable) index.
+fn validwhile_intern_struct_exact(len: i64) -> (i64, bool) with Mut {
+    var i: i64 = 0
+    while i < VALIDWHILE_STRUCT_COUNT {
+        if validwhile_struct_seq_matches(i, len) {
+            return (i, true)
+        }
+        i = i + 1
+    }
+    if VALIDWHILE_STRUCT_COUNT < 512 && VALIDWHILE_STRUCT_BUF_USED + len <= 16384 {
+        let slot = VALIDWHILE_STRUCT_COUNT
+        let off = VALIDWHILE_STRUCT_BUF_USED
+        var j: i64 = 0
+        while j < len {
+            VALIDWHILE_STRUCT_BUF[(off + j) as usize] = VALIDWHILE_SCRATCH[j as usize]
+            j = j + 1
+        }
+        VALIDWHILE_STRUCT_OFFSETS[slot as usize] = off
+        VALIDWHILE_STRUCT_LENS[slot as usize] = len
+        VALIDWHILE_STRUCT_BUF_USED = VALIDWHILE_STRUCT_BUF_USED + len
+        VALIDWHILE_STRUCT_COUNT = VALIDWHILE_STRUCT_COUNT + 1
+        return (slot, true)
+    }
+    // Table or token-buffer exhausted: fail closed, same as every other
+    // exhaustion case in this file, rather than falling back to a lossy
+    // encoding.
+    (0, false)
+}
+
+// Derive a canonical predicate-identity number for a ValidWhile(expr)
+// condition from its REAL STRUCTURE, via hash-consing with exact sequence
+// comparison (see the block comment above) -- not from any hash value,
+// truncated or not. 0.0 is reserved for "not comparable" (an unrecognized
+// expression shape or a bare identifier reference anywhere in the tree, or
+// no expression at all) and is never produced for a fully-serializable
+// shape, since validity_subsumes rejects id 0.0 outright rather than
+// treating two unidentified predicates as equal.
+//
+// STORAGE. The intern table INDEX -- never a hash of any width -- is what
+// gets stored as pred_id (TypeEntry.knowledge_validity_value, an f64). An
+// index is always < 512, comfortably inside f64's exact-integer range, so
+// storing it loses nothing, and two structurally different predicates can
+// never collapse into the same index the way two different hashes could
+// always, in principle, collide.
+fn validity_while_pred_id(opt: Option<Box<Expr>>) -> f64 with Mut, Panic, Div {
+    VALIDWHILE_SCRATCH_LEN = 0
+    if !struct_serialize_expr(opt) {
+        return 0.0
+    }
+    let len = VALIDWHILE_SCRATCH_LEN
+    let interned = validwhile_intern_struct_exact(len)
+    if !interned.1 {
+        0.0
+    } else {
+        // Never let a legitimate id land exactly on 0.0 (0.0 is the "not
+        // comparable" sentinel); indices start at 0, so shift by 1.
+        (interned.0 + 1) as f64
+    }
+}
+
+pub fn validity_from_ast(opt: Option<Box<ValidityCondition>>) -> Validity with Mut, Panic, Div {
     match opt {
         Some(vc) => {
-            let value = if knowledge_validity_expr_non_negative((*vc).expr) {
+            let value = if knowledge_validity_expr_non_negative((*vc).expr, (*vc).kind) {
                 knowledge_validity_expr_to_f64((*vc).expr)
             } else {
                 0.0
@@ -203,12 +621,86 @@ pub fn validity_from_ast(opt: Option<Box<ValidityCondition>>) -> Validity {
                 return validity_until(value)
             }
             if (*vc).kind == AstValidityKind::ValidWhileCond {
-                return validity_while()
+                return validity_while_pred(validity_while_pred_id((*vc).expr))
             }
             validity_always()
         }
         None => validity_always()
     }
+}
+
+fn is_iso_digit(b: i8) -> bool {
+    b >= (48 as i8) && b <= (57 as i8)
+}
+
+fn to_iso_digit(b: i8) -> i64 {
+    (b as i64) - 48
+}
+
+// Days in each Gregorian month, 1-indexed at [1]; [0] is unused. February is
+// always treated as 28 here -- this is a coarse well-formedness check for a
+// ValidUntil literal, not a full calendar library, but it must still reject
+// month 00/13+ and day 00/32+ (and 30/31 on short months) rather than accept
+// anything that merely looks numeric.
+fn iso_is_leap_year(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+}
+
+// `year` is needed ONLY to resolve February's limit (28 vs 29) correctly --
+// every other month's length is year-independent. Accepting Feb 29 for every
+// year (not just leap years) let a malformed date like "2025-02-29" become a
+// usable temporal bound.
+fn iso_days_in_month(month: i64, year: i64) -> i64 {
+    if month == 1 { return 31 }
+    if month == 2 { return if iso_is_leap_year(year) { 29 } else { 28 } }
+    if month == 3 { return 31 }
+    if month == 4 { return 30 }
+    if month == 5 { return 31 }
+    if month == 6 { return 30 }
+    if month == 7 { return 31 }
+    if month == 8 { return 31 }
+    if month == 9 { return 30 }
+    if month == 10 { return 31 }
+    if month == 11 { return 30 }
+    if month == 12 { return 31 }
+    0
+}
+
+pub fn parse_iso_date_to_f64(name: Name) -> f64 {
+    // Exactly 10 bytes: YYYY-MM-DD. A longer buffer (trailing garbage such as
+    // "9999-99-99x") must be rejected, not silently truncated to its first
+    // 10 bytes -- ValidUntil is a subsumption bound, and a malformed literal
+    // that parses to a large ordered timestamp would silently satisfy every
+    // earlier deadline.
+    if name.len != 10 {
+        return 0.0
+    }
+    let b = name.buf
+    if !is_iso_digit(b[0]) || !is_iso_digit(b[1]) || !is_iso_digit(b[2]) || !is_iso_digit(b[3]) {
+        return 0.0
+    }
+    if b[4] != (45 as i8) {
+        return 0.0
+    }
+    if !is_iso_digit(b[5]) || !is_iso_digit(b[6]) {
+        return 0.0
+    }
+    if b[7] != (45 as i8) {
+        return 0.0
+    }
+    if !is_iso_digit(b[8]) || !is_iso_digit(b[9]) {
+        return 0.0
+    }
+    let year = to_iso_digit(b[0]) * 1000 + to_iso_digit(b[1]) * 100 + to_iso_digit(b[2]) * 10 + to_iso_digit(b[3])
+    let month = to_iso_digit(b[5]) * 10 + to_iso_digit(b[6])
+    let day = to_iso_digit(b[8]) * 10 + to_iso_digit(b[9])
+    if month < 1 || month > 12 {
+        return 0.0
+    }
+    if day < 1 || day > iso_days_in_month(month, year) {
+        return 0.0
+    }
+    (year * 10000 + month * 100 + day) as f64
 }
 
 pub fn knowledge_validity_expr_to_f64(opt: Option<Box<Expr>>) -> f64 {
@@ -218,6 +710,10 @@ pub fn knowledge_validity_expr_to_f64(opt: Option<Box<Expr>>) -> f64 {
                 (*e).int_val as f64
             } else if (*e).kind == ExprKind::ExprFloatLit {
                 (*e).float_val
+            } else if (*e).kind == ExprKind::ExprStringLit {
+                // Same quote-stripping fix as knowledge_validity_expr_non_negative --
+                // (*e).name is the raw token text including surrounding quotes.
+                parse_iso_date_to_f64(ast_string_lit_payload((*e).name))
             } else {
                 0.0
             }
@@ -287,7 +783,7 @@ pub fn provenance_from_ast(opt: Option<Box<AstProvenanceKind>>) -> Provenance {
     }
 }
 
-pub fn knowledge_meta_from_type_info(info: KnowledgeTypeInfo) -> KnowledgeMeta {
+pub fn knowledge_meta_from_type_info(info: KnowledgeTypeInfo) -> KnowledgeMeta with Mut, Panic, Div {
     let base_eps = match info.epsilon {
         Some(eb) => (*eb).value
         None => -1.0
@@ -316,7 +812,7 @@ pub fn is_validated_type(ty: TypeEntry) -> bool {
 }
 
 pub fn is_epistemic_type(ty: TypeEntry) -> bool {
-    ty.kind == TypeKind::TyKnowledge || ty.kind == TypeKind::TyIntervention || ty.kind == TypeKind::TyCounterfactual || ty.kind == TypeKind::TyValidated
+    ty.kind == TypeKind::TyKnowledge || ty.kind == TypeKind::TyIntervention || ty.kind == TypeKind::TyCounterfactual || ty.kind == TypeKind::TyValidated || ty.kind == TypeKind::TyEpistemic
 }
 
 pub fn knowledge_inner(ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc {
@@ -404,12 +900,23 @@ const VALIDITY_KIND_ALWAYS: i64 = 0
 const VALIDITY_KIND_DURATION: i64 = 1
 const VALIDITY_KIND_UNTIL_TIME: i64 = 2
 const VALIDITY_KIND_WHILE_COND: i64 = 3
+// Result of intersecting two validity constraints that are genuinely
+// incomparable without a real conjunction representation (e.g. two DIFFERENT
+// ValidWhile predicates, or a duration mixed with an until-time). Never
+// matches any required kind in validity_subsumes -- see there -- so it fails
+// closed rather than arbitrarily standing in for either input constraint.
+const VALIDITY_KIND_UNSATISFIABLE: i64 = 4
 
-// Validity metadata for knowledge temporal bounds
+// Validity metadata for knowledge temporal bounds.
+// pred_id identifies a ValidWhile(expr) predicate: two Validity values of kind
+// WHILE_COND are the SAME condition only when pred_id matches. It is not used
+// by DURATION/UNTIL_TIME/ALWAYS (0.0 there -- ignored, since their kind alone
+// already fully determines the bound).
 pub struct Validity {
     pub kind: i64,
     pub duration_sec: f64,
-    pub until_timestamp: f64
+    pub until_timestamp: f64,
+    pub pred_id: f64
 }
 
 // Create always-valid validity (no expiration)
@@ -417,7 +924,8 @@ pub fn validity_always() -> Validity {
     Validity {
         kind: VALIDITY_KIND_ALWAYS,
         duration_sec: 0.0,
-        until_timestamp: 0.0
+        until_timestamp: 0.0,
+        pred_id: 0.0
     }
 }
 
@@ -426,7 +934,8 @@ pub fn validity_duration(seconds: f64) -> Validity {
     Validity {
         kind: VALIDITY_KIND_DURATION,
         duration_sec: seconds,
-        until_timestamp: 0.0
+        until_timestamp: 0.0,
+        pred_id: 0.0
     }
 }
 
@@ -435,16 +944,46 @@ pub fn validity_until(timestamp: f64) -> Validity {
     Validity {
         kind: VALIDITY_KIND_UNTIL_TIME,
         duration_sec: 0.0,
-        until_timestamp: timestamp
+        until_timestamp: timestamp,
+        pred_id: 0.0
     }
 }
 
-// Create condition-based validity
+// Create condition-based validity with NO identity (unknown/unidentified
+// predicate). Kept for callers that have no expr to derive an id from;
+// validity_subsumes conservatively rejects two WHILE_COND values unless both
+// carry the SAME nonzero pred_id, so this constructor's result subsumes
+// nothing but itself-by-reference (never treated as matching another
+// ValidWhile by accident).
 pub fn validity_while() -> Validity {
     Validity {
         kind: VALIDITY_KIND_WHILE_COND,
         duration_sec: 0.0,
-        until_timestamp: 0.0
+        until_timestamp: 0.0,
+        pred_id: 0.0
+    }
+}
+
+// Create condition-based validity carrying the predicate's identity (derived
+// from its source span -- see validity_from_ast). Two ValidWhile annotations
+// are the same condition, for subsumption purposes, only when this matches.
+pub fn validity_while_pred(pred_id: f64) -> Validity {
+    Validity {
+        kind: VALIDITY_KIND_WHILE_COND,
+        duration_sec: 0.0,
+        until_timestamp: 0.0,
+        pred_id: pred_id
+    }
+}
+
+// Result of intersecting two incomparable validity constraints -- see
+// VALIDITY_KIND_UNSATISFIABLE.
+pub fn validity_unsatisfiable() -> Validity {
+    Validity {
+        kind: VALIDITY_KIND_UNSATISFIABLE,
+        duration_sec: 0.0,
+        until_timestamp: 0.0,
+        pred_id: 0.0
     }
 }
 
@@ -459,36 +998,38 @@ pub fn validity_is_expired(validity: Validity, current_time: f64) -> bool {
 }
 
 // Get a conservative validity that combines two validity constraints
+// The intersection is the more restrictive of the two constraints -- but ONLY
+// when they are actually comparable. This function cannot represent a true
+// conjunction ("valid for 10s AND while cond(x)"), so for two constraints of
+// different non-ALWAYS kinds (or two DIFFERENT ValidWhile predicates), there
+// is no single Validity value that is sound to return: picking either operand
+// silently drops the other's constraint, and doing so was non-commutative
+// (swapping operand order changed the result) on top of being unsound (e.g.
+// `a + b` typed valid under b's ValidWhile condition even when a's failed).
+// Those cases fail closed to VALIDITY_KIND_UNSATISFIABLE instead, which
+// validity_subsumes never treats as subsuming or subsumed by anything.
 pub fn validity_intersect(a: Validity, b: Validity) -> Validity {
-    // The intersection is the more restrictive of the two
-    match a.kind {
-        VALIDITY_KIND_ALWAYS => b,
-        VALIDITY_KIND_DURATION => {
-            match b.kind {
-                VALIDITY_KIND_ALWAYS => a,
-                VALIDITY_KIND_DURATION => {
-                    if a.duration_sec < b.duration_sec { a } else { b }
-                }
-                VALIDITY_KIND_UNTIL_TIME => b,
-                VALIDITY_KIND_WHILE_COND => b
-            }
-        }
-        VALIDITY_KIND_UNTIL_TIME => {
-            match b.kind {
-                VALIDITY_KIND_ALWAYS => a,
-                VALIDITY_KIND_UNTIL_TIME => {
-                    if a.until_timestamp < b.until_timestamp { a } else { b }
-                }
-                _ => a
-            }
-        }
-        VALIDITY_KIND_WHILE_COND => {
-            match b.kind {
-                VALIDITY_KIND_ALWAYS => a,
-                _ => b
-            }
-        }
+    if a.kind == VALIDITY_KIND_ALWAYS {
+        return b
     }
+    if b.kind == VALIDITY_KIND_ALWAYS {
+        return a
+    }
+    if a.kind == VALIDITY_KIND_DURATION && b.kind == VALIDITY_KIND_DURATION {
+        return if a.duration_sec < b.duration_sec { a } else { b }
+    }
+    if a.kind == VALIDITY_KIND_UNTIL_TIME && b.kind == VALIDITY_KIND_UNTIL_TIME {
+        return if a.until_timestamp < b.until_timestamp { a } else { b }
+    }
+    if a.kind == VALIDITY_KIND_WHILE_COND && b.kind == VALIDITY_KIND_WHILE_COND {
+        if a.pred_id != 0.0 && a.pred_id == b.pred_id {
+            return a
+        }
+        return validity_unsatisfiable()
+    }
+    // Mixed kinds (DURATION vs UNTIL_TIME, DURATION vs WHILE_COND, UNTIL_TIME vs
+    // WHILE_COND, in either order) -- genuinely incomparable.
+    validity_unsatisfiable()
 }
 
 // ============================================================
@@ -514,6 +1055,29 @@ pub fn knowledge_meta_default(epsilon: f64) -> KnowledgeMeta {
 
 // Create metadata from type entry
 // Extracts epsilon from Knowledge types, uses defaults otherwise
+// Reconstruct a Validity from a TypeEntry's persisted knowledge_validity_kind/
+// value payload. Shared by knowledge_meta_from_ty and knowledge_binary_result
+// (see the latter for why a binary result must NOT just fall through to
+// validity_always() when it hasn't set these fields).
+pub fn validity_from_type_entry(ty: TypeEntry) -> Validity {
+    if ty.knowledge_validity_kind == VALIDITY_KIND_DURATION {
+        validity_duration(ty.knowledge_validity_value)
+    } else if ty.knowledge_validity_kind == VALIDITY_KIND_UNTIL_TIME {
+        validity_until(ty.knowledge_validity_value)
+    } else if ty.knowledge_validity_kind == VALIDITY_KIND_WHILE_COND {
+        validity_while_pred(ty.knowledge_validity_value)
+    } else if ty.knowledge_validity_kind == VALIDITY_KIND_UNSATISFIABLE {
+        // Must NOT fall through to the ALWAYS default below -- that is exactly
+        // the "incomparable constraint silently becomes the strongest possible
+        // validity" bug validity_intersect's UNSATISFIABLE result exists to
+        // prevent. A binary result whose operand validities could not be
+        // intersected stays unsatisfiable through this TypeEntry round-trip too.
+        validity_unsatisfiable()
+    } else {
+        validity_always()
+    }
+}
+
 pub fn knowledge_meta_from_ty(ty: TypeEntry) -> KnowledgeMeta with Mut, Panic, Div, Alloc {
     match ty.kind {
         TypeKind::TyKnowledge => {
@@ -522,9 +1086,10 @@ pub fn knowledge_meta_from_ty(ty: TypeEntry) -> KnowledgeMeta with Mut, Panic, D
             // DERIVED. -1 (absent: intrinsics, binary results) maps to
             // DERIVED — which is what a computed value honestly is.
             let prov_kind = if ty.knowledge_provenance_kind >= 0 { ty.knowledge_provenance_kind } else { PROVENANCE_KIND_DERIVED }
+            let val_obj = validity_from_type_entry(ty)
             KnowledgeMeta {
                 epsilon: eps,
-                validity: validity_always(),
+                validity: val_obj,
                 provenance: provenance_new(prov_kind)
             }
         }
@@ -699,9 +1264,23 @@ pub fn knowledge_compatible(ty_a: TypeEntry, ty_b: TypeEntry) -> bool with Mut, 
 }
 
 // Check type equality (structural)
-pub fn types_equal(a: TypeEntry, b: TypeEntry) -> bool {
+pub fn types_equal(a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div {
     if a.kind != b.kind {
         false
+    } else if a.kind == TypeKind::TyNamed {
+        // Named leaf types (e.g. ontology-tagged domain types like ChEBI
+        // classes) are only equal when both the identifier AND the ontology
+        // class agree -- two distinct TyNamed leaves with different names or
+        // different ontology_id previously fell through to the (None, None)
+        // structural-equality arm below and compared equal regardless of
+        // identity, letting an invalid substitution through in let/return
+        // contexts that only ever call this canonical predicate.
+        name_eq(a.name, b.name) && a.ontology_id == b.ontology_id &&
+        (match (a.inner, b.inner) {
+            (Some(inner_a), Some(inner_b)) => types_equal(*inner_a, *inner_b),
+            (None, None) => true,
+            _ => false
+        })
     } else {
         match (a.inner, b.inner) {
             (Some(inner_a), Some(inner_b)) => types_equal(*inner_a, *inner_b),
@@ -754,7 +1333,21 @@ pub fn validity_subsumes(provided: Validity, required: Validity) -> bool {
         return false
     }
     if required.kind == VALIDITY_KIND_WHILE_COND {
-        return provided.kind == VALIDITY_KIND_ALWAYS || provided.kind == VALIDITY_KIND_WHILE_COND
+        if provided.kind == VALIDITY_KIND_ALWAYS {
+            return true
+        }
+        // A ValidWhile(a) provided value subsumes a ValidWhile(b) requirement only
+        // when they are PROVABLY the same predicate -- matching pred_id (derived
+        // from the annotation's source span; see validity_from_ast). Two distinct,
+        // unrelated ValidWhile conditions must NOT be treated as interchangeable
+        // just because both happen to be "some" condition. pred_id == 0.0 means
+        // "no identity was recorded" (e.g. validity_while()'s bare default), which
+        // is conservatively rejected -- it must not accidentally match another
+        // unidentified 0.0 predicate.
+        if provided.kind == VALIDITY_KIND_WHILE_COND {
+            return provided.pred_id != 0.0 && provided.pred_id == required.pred_id
+        }
+        return false
     }
     false
 }
@@ -896,6 +1489,28 @@ pub fn knowledge_binary_result(op: BinaryOp, left_ty: TypeEntry, right_ty: TypeE
                 // For arithmetic operations, result is Knowledge with combined epsilon
                 // Inner type is the same as input inner types (assuming they match)
                 var result = ty_knowledge(left_inner, result_epsilon)
+                // Propagate validity CONSERVATIVELY: intersect (take the more
+                // restrictive of) the operands' validity windows instead of leaving
+                // the result at ty_knowledge's default (knowledge_validity_kind = -1,
+                // which knowledge_meta_from_ty reads as ALWAYS -- the WEAKEST/most
+                // permissive validity). Without this, `x - x` on an
+                // x: Knowledge<T, Valid(10), _> silently became ALWAYS-valid and
+                // could pass a Valid(30) return/argument check the actual operand
+                // never satisfied. A non-Knowledge operand (a bare literal/constant)
+                // contributes validity_always() -- it never expires on its own, so it
+                // is the identity element for the intersection, same as noise_set_id's
+                // empty-set treatment above.
+                let left_validity = if left_is_knowledge { validity_from_type_entry(left_ty) } else { validity_always() }
+                let right_validity = if right_is_knowledge { validity_from_type_entry(right_ty) } else { validity_always() }
+                let result_validity = validity_intersect(left_validity, right_validity)
+                result.knowledge_validity_kind = result_validity.kind
+                result.knowledge_validity_value = if result_validity.kind == VALIDITY_KIND_DURATION {
+                    result_validity.duration_sec
+                } else if result_validity.kind == VALIDITY_KIND_WHILE_COND {
+                    result_validity.pred_id
+                } else {
+                    result_validity.until_timestamp
+                }
                 // N2 (REQ-3): union the two operands' noise-symbol sets. A
                 // non-Knowledge operand (e.g. a plain literal added to a
                 // measured value) contributes the empty set -- it carries no

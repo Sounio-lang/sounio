@@ -2225,17 +2225,58 @@ fn checker_lower_named_type_with_args_mut(c: *mut Checker, path: AstPath, type_a
     checker_lower_named_type_mut(c, path)
 }
 
+// ValidWhile(expr) predicates were accepted without ever being resolved or
+// type-checked as boolean: an undeclared identifier or a non-bool expression
+// (e.g. ValidWhile(42)) was silently persisted as an "enforceable" predicate.
+// Type-check the expression in its declaration scope (this checker's current
+// env) and reject it -- E054, same code as the other validity-metadata
+// parse errors -- unless it resolves and type-checks to bool. An expression
+// that already failed to resolve (ty_error()/ty_unknown()) does not ALSO get
+// this diagnostic -- checker_check_expr_inplace already reported the real
+// cause (e.g. E137 undeclared identifier) at the identifier itself.
+fn checker_check_validwhile_predicate_inplace(c: *mut Checker, validity_opt: Option<Box<ValidityCondition> >) with Mut, Panic, Div, Alloc, IO {
+    match validity_opt {
+        Some(vc) => {
+            if (*vc).kind == AstValidityKind::ValidWhileCond {
+                match (*vc).expr {
+                    Some(pred_expr) => {
+                        let pred_ty = checker_check_expr_inplace(c, *pred_expr)
+                        if !is_error_or_unknown(pred_ty) && !is_bool_type(pred_ty) {
+                            checker_report_error_at_inplace(c, (*pred_expr).span, 54, 0, 0, 0)
+                        }
+                    }
+                    None => {
+                        checker_note_type_error_mut(c)
+                    }
+                }
+            }
+        }
+        None => {}
+    }
+}
+
 fn checker_lower_knowledge_type_mut(c: *mut Checker, opt: Option<Box<KnowledgeTypeInfo> >) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     match opt {
         Some(info_box) => {
             let info = *info_box
             let inner_ty = checker_lower_type_expr_mut(c, *info.inner_type)
+            checker_check_validwhile_predicate_inplace(c, info.validity)
             if !knowledge_metadata_is_valid(info.validity) {
-                checker_note_type_error_mut(c)
+                // checker_note_type_error_mut alone only increments the error
+                // counter -- it never PRINTS a diagnostic, so this path fell
+                // through to checker_flush_unemitted_type_errors_mut's generic
+                // fallback E000 instead of the E054 the by-value twin
+                // (check_knowledge_type) emits for the identical failure. A
+                // compile-fail fixture asserting the real "invalid Knowledge
+                // metadata constraint" text could not match on this (Madaros)
+                // path. KnowledgeTypeInfo carries no span of its own; match
+                // check_knowledge_type's zero-span fallback for this
+                // whole-annotation-level diagnostic.
+                checker_report_error_at_inplace(c, Span { file_id: 0, start: 0, end: 0 }, 54, 0, 0, 0)
             }
             let meta = knowledge_meta_from_type_info(info)
             if !knowledge_meta_is_valid(meta) {
-                checker_note_type_error_mut(c)
+                checker_report_error_at_inplace(c, Span { file_id: 0, start: 0, end: 0 }, 54, 0, 0, 0)
             }
             var eps_val: f64 = -1.0
             var eps_mode: i64 = 0
@@ -2260,6 +2301,16 @@ fn checker_lower_knowledge_type_mut(c: *mut Checker, opt: Option<Box<KnowledgeTy
             ty.knowledge_epsilon_mode = eps_mode
             let prov = meta.provenance
             ty.knowledge_provenance_kind = prov.kind
+            let val_cond = meta.validity
+            ty.knowledge_validity_kind = val_cond.kind
+            ty.knowledge_validity_value = if val_cond.kind == 1 {
+                val_cond.duration_sec
+            } else if val_cond.kind == 3 {
+                val_cond.pred_id
+            } else {
+                val_cond.until_timestamp
+            }
+
             ty
         }
         None => {
@@ -6935,7 +6986,19 @@ fn checker_check_return_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
     let val_ty = checker_check_opt_expr_inplace(c, e.left)
     match e.left {
         Some(val_expr) => {
-            if !checker_contextual_expr_compatible(*val_expr, val_ty, (*c).current_return_type) {
+            // `return expr` must get the same four-axis epistemic enforcement as the
+            // bare-`return` arm below. Four-axis subsumption is AUTHORITATIVE for
+            // epistemic return types -- checked unconditionally, not as a fallback
+            // ORed in behind checker_contextual_expr_compatible. That helper ignores
+            // validity/provenance and treats same-inner-type Knowledge<T> as already
+            // compatible, so an `||` fallback would short-circuit before the subsumption
+            // check ever ran for the (common) equal-inner-type case, silently accepting
+            // a shorter validity window or weaker provenance on `return expr`.
+            var ret_expr_ok = checker_contextual_expr_compatible(*val_expr, val_ty, (*c).current_return_type)
+            if is_epistemic_type((*c).current_return_type) && is_epistemic_type(val_ty) {
+                ret_expr_ok = checker_knowledge_subsumes(c, val_ty, (*c).current_return_type)
+            }
+            if !ret_expr_ok {
                 checker_report_mismatch_inplace(c, e.span, 8, (*c).current_return_type, val_ty)
             }
             // A refinement must hold at the RETURN too, not only at a binding.
@@ -6968,7 +7031,11 @@ fn checker_check_return_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with
             }
         }
         None => {
-            if !checker_types_compatible_inplace(c, val_ty, (*c).current_return_type) {
+            var ret_ok = checker_types_compatible_inplace(c, val_ty, (*c).current_return_type)
+            if is_epistemic_type((*c).current_return_type) && is_epistemic_type(val_ty) {
+                ret_ok = checker_knowledge_subsumes(c, val_ty, (*c).current_return_type)
+            }
+            if !ret_ok {
                 checker_report_mismatch_inplace(c, e.span, 8, (*c).current_return_type, val_ty)
             }
         }
@@ -8137,7 +8204,23 @@ fn checker_check_if_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut
             // one decrement and leave ns_branch_depth permanently elevated.
             let else_ty = checker_check_expr_inplace(c, *else_e)
             (*c).refine_cond_env = saved_cond_env
-            if !checker_types_compatible_inplace(c, then_ty, else_ty) {
+            var branches_ok = checker_types_compatible_inplace(c, then_ty, else_ty)
+            // Join-site metadata symmetry: checker_types_compatible_inplace delegates
+            // to types_compatible, whose TyKnowledge branch (compat.sio, deliberately
+            // import-free) only compares inner type + epsilon -- it never inspects
+            // validity or provenance. So `if c { Knowledge<Parent,Valid(60),Measured> }
+            // else { Knowledge<Parent,Valid(10),Computed> }` passed this check even
+            // with IDENTICAL ontology, and checker_check_if_expr_inplace always
+            // returns then_ty, silently mistyping the join as the (possibly stronger)
+            // then-branch's metadata. Require MUTUAL four-axis subsumption (both
+            // directions) whenever both branches are epistemic, so the join is only
+            // accepted when validity/provenance genuinely agree, not merely when one
+            // side happens to be directionally weaker.
+            if branches_ok && is_epistemic_type(then_ty) && is_epistemic_type(else_ty) {
+                branches_ok = checker_knowledge_subsumes(c, then_ty, else_ty)
+                    && checker_knowledge_subsumes(c, else_ty, then_ty)
+            }
+            if !branches_ok {
                 checker_report_mismatch_inplace(c, e.span, 7, then_ty, else_ty)
             }
             checker_merge_if_branches_inplace(c)
@@ -8331,7 +8414,18 @@ fn checker_check_array_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
                     first_ty = elem_ty
                     have_first = true
                 } else {
-                    if !types_compatible(elem_ty, first_ty) {
+                    // Array-literal element unification is a join site, exactly like
+                    // if/else and match-arm joins: types_compatible's TyKnowledge branch
+                    // only compares inner type + epsilon, so `[Knowledge<T,Valid(60),
+                    // Measured>, Knowledge<T,Valid(10),Computed>]` passed silently and the
+                    // array was typed by whichever element happened to be first. Require
+                    // MUTUAL four-axis subsumption when both are epistemic.
+                    var elem_ok = types_compatible(elem_ty, first_ty)
+                    if elem_ok && is_epistemic_type(elem_ty) && is_epistemic_type(first_ty) {
+                        elem_ok = checker_knowledge_subsumes(c, elem_ty, first_ty)
+                            && checker_knowledge_subsumes(c, first_ty, elem_ty)
+                    }
+                    if !elem_ok {
                         checker_report_mismatch_inplace(c, (*list).head.span, 20, first_ty, elem_ty)
                     }
                 }
@@ -8805,8 +8899,15 @@ fn checker_check_match_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                 } else {
                     // Remaining arm: compare against the first arm's type (check_remaining_arms,
                     // code 18, span = this arm's span == (*list).head.span, expected = result_ty,
-                    // got = arm_ty).
-                    if !checker_types_compatible_inplace(c, arm_ty, result_ty) {
+                    // got = arm_ty). Same join-metadata-symmetry gap as the if/else join: require
+                    // MUTUAL four-axis subsumption when both are epistemic, not just
+                    // types_compatible's inner-type+epsilon-only TyKnowledge branch.
+                    var arm_ok = checker_types_compatible_inplace(c, arm_ty, result_ty)
+                    if arm_ok && is_epistemic_type(arm_ty) && is_epistemic_type(result_ty) {
+                        arm_ok = checker_knowledge_subsumes(c, arm_ty, result_ty)
+                            && checker_knowledge_subsumes(c, result_ty, arm_ty)
+                    }
+                    if !arm_ok {
                         checker_report_mismatch_inplace(c, arm.span, 18, result_ty, arm_ty)
                     }
                     // N2 CFG join (codex ruling 2026-08-23, closes the missing-
@@ -8860,6 +8961,74 @@ fn checker_check_match_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
 // count mismatch returns ty_named(struct_name) (NOT ty_error — the outer by-value wraps it so);
 // generic-with-zero-type-params (args_list None edge, 16680) returns ty_error(); both generic
 // passes check each field expr (faithful to the by-value double-check); no expr_depth mgmt.
+// Shared between checker_check_struct_lit_inplace (*mut) and
+// check_knowledge_struct_lit (by-value): parses the `validity:`/`epsilon:`
+// fields of a `Knowledge { value: .., validity: .., epsilon: .. }` struct
+// literal into `base` and returns the updated TypeEntry plus whether a
+// malformed ValidUntil string literal was seen (caller reports E054 -- kept
+// out of this pure helper so each spine can use its own error-reporting
+// idiom, *mut vs by-value). Pulled out so the by-value spine cannot silently
+// diverge from the *mut spine and drop these fields again (it used to return
+// a bare ty_knowledge with no validity/epsilon parsing at all, so
+// knowledge_meta_from_ty reconstructed every by-value-routed literal as
+// ALWAYS-valid regardless of what `validity:` said).
+fn knowledge_struct_lit_apply_fields(base: TypeEntry, fields: Option<Box<StructFieldList> >) -> (TypeEntry, bool) with Mut, Panic, Div {
+    var result = base
+    var parse_error = false
+    var cur_f = fields
+    while true {
+        match cur_f {
+            Some(flist) => {
+                let fname = (*flist).head.name
+                let fval = (*flist).head.value
+                if name_eq(fname, make_name("validity")) {
+                    if fval.kind == ExprKind::ExprStringLit {
+                        // fval.name is the raw token text including surrounding
+                        // quotes -- strip them first, same fix as
+                        // knowledge_validity_expr_non_negative.
+                        let vdate = parse_iso_date_to_f64(ast_string_lit_payload(fval.name))
+                        if vdate > 0.0 {
+                            result.knowledge_validity_kind = 2 // VALIDITY_KIND_UNTIL_TIME
+                            result.knowledge_validity_value = vdate
+                        } else {
+                            // Malformed ValidUntil literal: a real type error (E054), not a
+                            // quietly-ignored field left at the default ALWAYS.
+                            parse_error = true
+                        }
+                    } else if fval.kind == ExprKind::ExprIntLit {
+                        result.knowledge_validity_kind = 1 // VALIDITY_KIND_DURATION
+                        result.knowledge_validity_value = fval.int_val as f64
+                    } else if fval.kind == ExprKind::ExprFloatLit {
+                        result.knowledge_validity_kind = 1 // VALIDITY_KIND_DURATION
+                        result.knowledge_validity_value = fval.float_val
+                    } else {
+                        // Any other expression shape (identifier, call, ...) is not a
+                        // supported `validity:` literal. Silently ignoring it left
+                        // knowledge_validity_kind at its -1 default, reconstructed by
+                        // knowledge_meta_from_ty as ALWAYS -- so `Knowledge { validity:
+                        // deadline, .. }` satisfied every temporal requirement instead
+                        // of being rejected. Same fix shape as the malformed-ValidUntil-
+                        // string case just above: a real type error, not a promotion to
+                        // the strongest possible validity.
+                        parse_error = true
+                    }
+                } else if name_eq(fname, make_name("epsilon")) {
+                    if fval.kind == ExprKind::ExprFloatLit {
+                        result.knowledge_epsilon = fval.float_val
+                    }
+                }
+                // `provenance:` is intentionally NOT read here -- see the long comment at
+                // its original site (checker_check_struct_lit_inplace): it is a
+                // user-controlled free-text label, not the type-level provenance category,
+                // and deriving the category from it was a trust-escalation bug.
+                cur_f = (*flist).tail
+            }
+            None => break
+        }
+    }
+    (result, parse_error)
+}
+
 fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     let struct_name = checker_copy_string_list_to_name(e.path.segments)
     let struct_idx = struct_table_find((*c).structs, struct_name)
@@ -8961,7 +9130,11 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                                             }
                                             let field_ty = field_info_list_find(mono_si.fields, (*list).head.name)
                                             let val_init_ty = checker_check_expr_inplace(c, (*list).head.value)
-                                            if !checker_contextual_expr_compatible((*list).head.value, val_init_ty, field_ty) {
+                                            var field_init_ok = checker_contextual_expr_compatible((*list).head.value, val_init_ty, field_ty)
+                                            if is_epistemic_type(field_ty) && is_epistemic_type(val_init_ty) {
+                                                field_init_ok = checker_knowledge_subsumes(c, val_init_ty, field_ty)
+                                            }
+                                            if !field_init_ok {
                                                 checker_report_mismatch_inplace(c, (*list).head.value.span, 16, field_ty, val_init_ty)
                                             }
                                         }
@@ -9000,7 +9173,11 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                             }
                             let field_ty = field_info_list_find(si.fields, (*list).head.name)
                             let init_ty = checker_check_expr_inplace(c, (*list).head.value)
-                            if !checker_contextual_expr_compatible((*list).head.value, init_ty, field_ty) {
+                            var field_init_ok = checker_contextual_expr_compatible((*list).head.value, init_ty, field_ty)
+                            if is_epistemic_type(field_ty) && is_epistemic_type(init_ty) {
+                                field_init_ok = checker_knowledge_subsumes(c, init_ty, field_ty)
+                            }
+                            if !field_init_ok {
                                 checker_report_mismatch_inplace(c, (*list).head.value.span, 16, field_ty, init_ty)
                             }
                         }
@@ -9103,6 +9280,13 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
             } else {
                 k_struct_result.noise_set_id = ns_empty()
             }
+            // Parse validity/epsilon fields if present in struct literal (shared with
+            // the by-value twin, check_knowledge_struct_lit, via this pure helper).
+            let parsed = knowledge_struct_lit_apply_fields(k_struct_result, e.fields)
+            k_struct_result = parsed.0
+            if parsed.1 {
+                checker_report_error_at_inplace(c, e.span, 54, 0, 0, 0)
+            }
             checker_ns_trace_emit("knowledge_struct_lit", k_struct_result.noise_set_id)
             return k_struct_result
         }
@@ -9136,7 +9320,11 @@ fn checker_check_struct_lit_inplace(c: *mut Checker, e: Expr) -> TypeEntry with 
                             } else {
                                 let field_ty = field_info_list_find(vfields, (*list).head.name)
                                 let init_ty = checker_check_expr_inplace(c, (*list).head.value)
-                                if !checker_contextual_expr_compatible((*list).head.value, init_ty, field_ty) {
+                                var field_init_ok = checker_contextual_expr_compatible((*list).head.value, init_ty, field_ty)
+                                if is_epistemic_type(field_ty) && is_epistemic_type(init_ty) {
+                                    field_init_ok = checker_knowledge_subsumes(c, init_ty, field_ty)
+                                }
+                                if !field_init_ok {
                                     checker_report_mismatch_inplace(c, (*list).head.value.span, 16, field_ty, init_ty)
                                 }
                             }
@@ -9267,7 +9455,14 @@ fn checker_check_closure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
         ret_ty
     }
     if ret_ty.kind != TypeKind::TyUnknown {
-        if !checker_types_compatible_inplace(c, body_ty, ret_ty) {
+        // Closure declared-return-type check needs the same authoritative four-axis
+        // enforcement as a named function's return -- checker_types_compatible_inplace
+        // never inspects validity/provenance for equal-inner Knowledge<T>.
+        var closure_ret_ok = checker_types_compatible_inplace(c, body_ty, ret_ty)
+        if is_epistemic_type(ret_ty) && is_epistemic_type(body_ty) {
+            closure_ret_ok = checker_knowledge_subsumes(c, body_ty, ret_ty)
+        }
+        if !closure_ret_ok {
             checker_report_mismatch_inplace(c, e.span, 8, ret_ty, body_ty)
         }
     }
@@ -9932,6 +10127,14 @@ fn checker_check_measure_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry wit
         }
     }
     checker_ns_trace_emit("measure", result.noise_set_id)
+    // measure(v, uncertainty) is THE trusted-instrument constructor: its result is
+    // provenance Measured by construction, not the DERIVED default that
+    // knowledge_meta_from_ty falls back to when knowledge_provenance_kind is unset
+    // (-1). Without this, four-axis subsumption being authoritative (rather than a
+    // fallback) started rejecting the common `let a: Knowledge[f64, Measured] =
+    // measure(...)` binding shape, since Derived cannot satisfy a trusted Measured
+    // requirement.
+    result.knowledge_provenance_kind = PROVENANCE_KIND_MEASURED
     result
 }
 
@@ -11660,17 +11863,34 @@ fn checker_check_call_arg_knowledge_boundary_inplace(c: *mut Checker, arg_ty: Ty
        knowledge_meta_epsilon(knowledge_meta_from_ty(expected_ty)) < 0.0 {
         return
     }
-    if !knowledge_call_boundary_compatible(provided_ty, expected_ty) {
-        // Name the failing slot: a refusal is evidence for the cause it
-        // names. Epsilon keeps E036 (it predates this); a provenance-leg
-        // failure is E244. (The validity leg is payload-flattened until the
-        // date-parser slice of SOUNIO-KNOWLEDGE-BOUNDARY-PROVENANCE lands.)
+    if !checker_knowledge_subsumes(c, provided_ty, expected_ty) {
+        // Name the failing slot: a refusal is evidence for the cause it names.
+        // Classify the ontology axis FIRST -- checker_ontology_boundary_check_call_arg_contract_inplace
+        // is invoked separately at every one of this function's call sites and owns E150/E151/E152
+        // for ontology-only failures. Without this check, an ontology-only mismatch (provenance and
+        // validity both satisfied) fell through to the `else` arm below and reported a wrong E036
+        // ("epsilon bound violation") in addition to the ontology check's own diagnostic --
+        // confusing double/wrong errors naming the wrong axis as the cause.
+        let p_inner_ont = knowledge_inner(provided_ty)
+        let r_inner_ont = knowledge_inner(expected_ty)
+        let onto_ok = if types_equal(p_inner_ont, r_inner_ont) {
+            true
+        } else if !name_is_empty(p_inner_ont.name) && !name_is_empty(r_inner_ont.name) {
+            checker_onto_name_subclass_walk((*c).ontology_items, p_inner_ont.name, r_inner_ont.name, 0)
+        } else {
+            false
+        }
         let pmeta2 = knowledge_meta_from_ty(provided_ty)
         let rmeta2 = knowledge_meta_from_ty(expected_ty)
-        if !provenance_subsumes(knowledge_meta_provenance(pmeta2), knowledge_meta_provenance(rmeta2)) {
+        if !onto_ok {
+            // Ontology mismatch: defer to the ontology boundary check for the actual
+            // E150/E151/E152 diagnostic naming this axis. Do not also report here.
+        } else if !provenance_subsumes(knowledge_meta_provenance(pmeta2), knowledge_meta_provenance(rmeta2)) {
             checker_report_error_at_inplace(c, call_span, 244, 0, 0, 0)
+        } else if !validity_subsumes(knowledge_meta_validity(pmeta2), knowledge_meta_validity(rmeta2)) {
+            checker_report_error_at_inplace(c, call_span, 263, 0, 0, 0)
         } else {
-            checker_report_error_at_inplace(c, call_span, 36, 0, 0, 0)
+            checker_report_error_at_inplace(c, call_span, 36, 0, 0, 0) // E036: epsilon bound violation
         }
     }
 }
@@ -11713,18 +11933,34 @@ fn checker_check_call_arg_unit_boundary_inplace(c: *mut Checker, arg_ty: TypeEnt
 }
 
 fn checker_ontology_boundary_check_call_arg_contract_inplace(c: *mut Checker, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) with Mut, Panic, Div, Alloc, IO {
-    // Cheap guard hoisted from check_call_arg_ontology_boundary's own early-out: the boundary
-    // is a no-op unless the PARAM type carries an ontology contract. Without this guard the
-    // by-value `(*c).check_call_arg_ontology_boundary(...)` call copies the 8MB Checker as
-    // `self` on EVERY user-fn call arg (even `id(5)`) — the stack smash that crashed the
-    // modular checker. The other four arg-boundary checks are already true *mut; this one
-    // was missed. Behaviour-identical: the by-value method returns self in exactly these cases.
     let expected_ty = call_ref_inner_or_self(param_ty)
-    if expected_ty.ontology_id < 0 || is_error_or_unknown(expected_ty) {
+    let exp_check_ty = if is_epistemic_type(expected_ty) { knowledge_inner(expected_ty) } else { expected_ty }
+    let provided_ty = call_ref_inner_or_self(arg_ty)
+    let prov_check_ty = if is_epistemic_type(provided_ty) { knowledge_inner(provided_ty) } else { provided_ty }
+    if exp_check_ty.ontology_id < 0 || is_error_or_unknown(exp_check_ty) {
         return
     }
-    let t = (*c).check_call_arg_ontology_boundary(arg_ty, param_ty, call_span)
-    checker_store_from_value(c, t)
+    if is_error_or_unknown(prov_check_ty) {
+        return
+    }
+    if prov_check_ty.ontology_id < 0 {
+        checker_report_error_at_inplace(c, call_span, 150, 0, 0, 0)
+        return
+    }
+    // Call the kernel predicates directly instead of the (*c).ontology_inference_query_*
+    // by-value-receiver wrapper methods -- those take `self: Checker` and copy the whole
+    // multi-megabyte Checker in and out on every call from this *mut function, reintroducing
+    // exactly the stack-smash risk the *mut rewrite exists to avoid. The wrappers are one-line
+    // passthroughs to ontology_kernel_is_subclass/ontology_kernel_is_disjoint, so call those
+    // directly off the pointer-backed checker's ontology_kernel field.
+    if ontology_kernel_is_subclass((*c).ontology_kernel, prov_check_ty.ontology_id, exp_check_ty.ontology_id) {
+        return
+    }
+    if ontology_kernel_is_disjoint((*c).ontology_kernel, prov_check_ty.ontology_id, exp_check_ty.ontology_id) {
+        checker_report_error_at_inplace(c, call_span, 151, 0, 0, 0)
+        return
+    }
+    checker_report_error_at_inplace(c, call_span, 152, 0, 0, 0)
 }
 
 
@@ -11779,6 +12015,17 @@ fn checker_check_cast_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
                 || target_ty.kind == TypeKind::TyValidated
             if src_is_epistemic && !tgt_is_epistemic {
                 checker_report_error_at_inplace(c, e.span, 171, 0, 0, 0)
+            } else if src_is_epistemic && tgt_is_epistemic {
+                // `as` between two epistemic wrappers was a bare-metal escape hatch: it
+                // returned target_ty with NO axis check at all, so `x as Knowledge<T,
+                // Valid(9999), Measured>` let a cast silently claim stronger ontology/
+                // epsilon/validity/provenance than the source value ever earned --
+                // bypassing every let/return/call boundary check this PR added. Route it
+                // through the exact same call-boundary predicates a function argument
+                // gets (src "provided", target "expected"), so a cast can only narrow to
+                // a target the source value actually subsumes.
+                checker_check_call_arg_knowledge_boundary_inplace(c, src_ty, target_ty, e.span)
+                checker_ontology_boundary_check_call_arg_contract_inplace(c, src_ty, target_ty, e.span)
             }
             if src_ty.unit_id >= 0 && target_ty.unit_id >= 0 {
                 let src_dim = (*c).units.get_dim(src_ty.unit_id)
@@ -12190,6 +12437,17 @@ fn checker_check_let_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
                 init_context_ok = checker_types_compatible_inplace(c, init_ty, ann_ty)
             }
         }
+        // Four-axis subsumption is AUTHORITATIVE for epistemic annotations, not a
+        // fallback gated behind contextual compatibility failing. Same-inner-type
+        // Knowledge<T> values already compare structurally compatible above (via
+        // checker_contextual_expr_compatible / checker_types_compatible_inplace),
+        // which never inspects validity or provenance -- so gating the subsumption
+        // check on init_context_ok already being false meant a typed `let` with
+        // equal inner types could accept a shorter validity window or weaker
+        // provenance and the four-axis check would simply never run.
+        if is_epistemic_type(ann_ty) && is_epistemic_type(init_ty) {
+            init_context_ok = checker_knowledge_subsumes(c, init_ty, ann_ty)
+        }
         if !init_context_ok && !int_lit_narrow && !enum_int_ok {
             checker_report_mismatch_inplace(c, s.span, 1, ann_ty, init_ty)
         }
@@ -12262,6 +12520,15 @@ fn checker_check_var_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with Mu
             None => {
                 init_context_ok = checker_types_compatible_inplace(c, init_ty, ann_ty)
             }
+        }
+        // Four-axis subsumption is AUTHORITATIVE for epistemic `var` annotations too --
+        // same laundering pattern as `let` (checker_check_let_stmt_inplace) and simple
+        // assignment: the generic checks above never inspect validity/provenance for
+        // equal-inner Knowledge<T>, so `var w: Knowledge<T, Valid(30), Measured> =
+        // stale_computed` would otherwise pass here and then bind_ty gets replaced by
+        // the (unverified) stronger annotation below.
+        if is_epistemic_type(ann_ty) && is_epistemic_type(init_ty) {
+            init_context_ok = checker_knowledge_subsumes(c, init_ty, ann_ty)
         }
         if !init_context_ok && !int_lit_narrow {
             checker_report_mismatch_inplace(c, s.span, 1, ann_ty, init_ty)
@@ -12377,14 +12644,28 @@ fn checker_check_assign_stmt_inplace(c: *mut Checker, s: Stmt) -> TypeEntry with
             }
         }
     } else {
+        // Four-axis epistemic subsumption is AUTHORITATIVE for plain `=` assignment
+        // too, same as let/return/call -- not a fallback. Without this, `x = other`
+        // could silently downgrade a variable declared Knowledge<T, Valid(30.0),
+        // Measured> to Knowledge<T, Valid(10.0), Computed> for equal inner T, since
+        // checker_contextual_expr_compatible / checker_types_compatible_inplace never
+        // inspect validity or provenance.
         match s.expr {
             Some(val_expr) => {
-                if !checker_contextual_expr_compatible(*val_expr, val_ty, target_ty) {
+                var assign_ok = checker_contextual_expr_compatible(*val_expr, val_ty, target_ty)
+                if is_epistemic_type(target_ty) && is_epistemic_type(val_ty) {
+                    assign_ok = checker_knowledge_subsumes(c, val_ty, target_ty)
+                }
+                if !assign_ok {
                     checker_report_mismatch_inplace(c, s.span, 2, target_ty, val_ty)
                 }
             }
             None => {
-                if !checker_types_compatible_inplace(c, target_ty, val_ty) {
+                var assign_ok = checker_types_compatible_inplace(c, target_ty, val_ty)
+                if is_epistemic_type(target_ty) && is_epistemic_type(val_ty) {
+                    assign_ok = checker_knowledge_subsumes(c, val_ty, target_ty)
+                }
+                if !assign_ok {
                     checker_report_mismatch_inplace(c, s.span, 2, target_ty, val_ty)
                 }
             }
@@ -16839,6 +17120,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 179 { print("noise-set interning table exhausted: too many distinct source-sets in one checker run, so correlation between the values that carry them can no longer be tracked") }
     else if code == 221 { print("this math function is bound for typechecking but the native backend cannot emit it; the call would compile and then die on an illegal instruction at run time") }
     else if code == 244 { print("Knowledge provenance boundary mismatch: the argument's provenance cannot satisfy the parameter's requirement (trusted classes: Source, Literature, Measured)") }
+    else if code == 263 { print("Temporal validity window mismatch: the provided value's validity window cannot satisfy the required type's validity constraint") }
     else if code == 245 { print("arithmetic between two Knowledge<T> values is not supported by this compiler; the operation typechecks but has no lowering, so it would produce a wrong value or crash at runtime") }
     else if code == 200 { print("Forgettable type requires ZD effect: exact annihilation is only possible via zero-divisor algebra (sedenions). Division algebras cannot satisfy this guarantee. Add `with ZD` to your function signature.") }
     else if code == 201 { print("ExactlyPrivate<T> requires ZD effect: exact data-contribution removal is only possible via sedenion annihilation. Differential privacy (epsilon-bounded) does not suffice. Add `with ZD` to your function signature.") }
@@ -18831,6 +19113,118 @@ fn checker_fn_types_structurally_compatible_inplace(c: *mut Checker, a: TypeEntr
     checker_types_compatible_table_deep((*c).fn_sigs, a, b, 0)
 }
 
+// Free-function (no *mut Checker, no by-value Checker) twin of checker_knowledge_subsumes
+// for call sites in the by-value Checker spine that only have `self.ontology_items` in
+// scope (e.g. check_return_expr). Same four-axis rule: Ontology && Epsilon && Validity &&
+// Provenance. Kept separate from checker_knowledge_subsumes (which needs *mut Checker only
+// for its `with Mut` effect signature parity, not for any actual mutation) so neither spine
+// has to thread a Checker handle through for a pure predicate.
+fn check_return_expr_knowledge_subsumes(ontology_items: Option<Box<ItemList> >, provided: TypeEntry, required: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
+    if !is_epistemic_type(provided) || !is_epistemic_type(required) {
+        return false
+    }
+    if provided.kind != required.kind {
+        return false
+    }
+    // TyValidated carries a validation-manifest identity in epistemic_meta_id
+    // (which manifest the value was checked against) that the four covariance
+    // axes below say nothing about -- compat.sio's types_compatible enforces
+    // this identity separately (a Validated value checked against manifest A
+    // must not satisfy a requirement for manifest B, even with identical
+    // ontology/epsilon/validity/provenance). Preserve that invariant here too,
+    // or this authoritative path would silently accept what the generic
+    // compatibility path still correctly rejects.
+    if required.kind == TypeKind::TyValidated
+        && provided.epistemic_meta_id >= 0 && required.epistemic_meta_id >= 0
+        && provided.epistemic_meta_id != required.epistemic_meta_id {
+        return false
+    }
+    let p_inner = knowledge_inner(provided)
+    let r_inner = knowledge_inner(required)
+    let onto_ok = if types_equal(p_inner, r_inner) {
+        true
+    } else if !name_is_empty(p_inner.name) && !name_is_empty(r_inner.name) {
+        checker_onto_name_subclass_walk(ontology_items, p_inner.name, r_inner.name, 0)
+    } else {
+        false
+    }
+    if !onto_ok {
+        return false
+    }
+    let pmeta = knowledge_meta_from_ty(provided)
+    let rmeta = knowledge_meta_from_ty(required)
+    let eps_ok = epsilon_subsumes_call_boundary(
+        knowledge_meta_epsilon(pmeta),
+        provided.knowledge_epsilon_mode,
+        knowledge_meta_epsilon(rmeta),
+        required.knowledge_epsilon_mode
+    )
+    if !eps_ok {
+        return false
+    }
+    let val_ok = validity_subsumes(knowledge_meta_validity(pmeta), knowledge_meta_validity(rmeta))
+    if !val_ok {
+        return false
+    }
+    provenance_subsumes(knowledge_meta_provenance(pmeta), knowledge_meta_provenance(rmeta))
+}
+
+// Centralized epistemic knowledge subsumption:
+// Knowledge<A> satisfies Knowledge<B> iff:
+// 1. Ontology(A) <= Ontology(B) (by identity or subclass walk)
+// 2. Epsilon(A) satisfies Epsilon(B)
+// 3. Validity(A) satisfies Validity(B)
+// 4. Provenance(A) satisfies Provenance(B)
+fn checker_knowledge_subsumes(c: *mut Checker, provided: TypeEntry, required: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
+    if !is_epistemic_type(provided) || !is_epistemic_type(required) {
+        return false
+    }
+    if provided.kind != required.kind {
+        return false
+    }
+    // Same TyValidated manifest-identity preservation as the by-value twin,
+    // check_return_expr_knowledge_subsumes -- see its comment for why.
+    if required.kind == TypeKind::TyValidated
+        && provided.epistemic_meta_id >= 0 && required.epistemic_meta_id >= 0
+        && provided.epistemic_meta_id != required.epistemic_meta_id {
+        return false
+    }
+    let p_inner = knowledge_inner(provided)
+    let r_inner = knowledge_inner(required)
+
+    // Check ontology / inner type compatibility
+    let onto_ok = if types_equal(p_inner, r_inner) {
+        true
+    } else if !name_is_empty(p_inner.name) && !name_is_empty(r_inner.name) {
+        checker_onto_name_subclass_walk((*c).ontology_items, p_inner.name, r_inner.name, 0)
+    } else {
+        false
+    }
+    if !onto_ok {
+        return false
+    }
+
+    let pmeta = knowledge_meta_from_ty(provided)
+    let rmeta = knowledge_meta_from_ty(required)
+
+    let eps_ok = epsilon_subsumes_call_boundary(
+        knowledge_meta_epsilon(pmeta),
+        provided.knowledge_epsilon_mode,
+        knowledge_meta_epsilon(rmeta),
+        required.knowledge_epsilon_mode
+    )
+    if !eps_ok {
+        return false
+    }
+
+    let val_ok = validity_subsumes(knowledge_meta_validity(pmeta), knowledge_meta_validity(rmeta))
+    if !val_ok {
+        return false
+    }
+
+    provenance_subsumes(knowledge_meta_provenance(pmeta), knowledge_meta_provenance(rmeta))
+}
+
 fn checker_types_compatible_inplace(c: *mut Checker, a: TypeEntry, b: TypeEntry) -> bool with Mut, Panic, Div, Alloc, IO {
     if types_compatible(a, b) {
         return true
@@ -18921,6 +19315,18 @@ fn checker_call_arg_types_compatible_inplace(c: *mut Checker, arg_expr: Expr, ar
     if unit_verdict >= 0 {
         return unit_verdict == 1
     }
+    // Four-axis epistemic subsumption is AUTHORITATIVE, checked BEFORE the generic
+    // compatibility calls below -- not as a fallback reached only when they already
+    // failed. checker_types_compatible_inplace / checker_contextual_expr_compatible
+    // treat same-inner-type Knowledge<T> as compatible without ever inspecting
+    // validity or provenance, so gating the subsumption check behind their failure
+    // meant it never ran for the (common) equal-inner-type case, silently accepting
+    // a shorter validity window or weaker provenance at a call argument.
+    let arg_epi_ty = call_ref_inner_or_self(arg_ty)
+    let param_epi_ty = call_ref_inner_or_self(param_ty)
+    if is_epistemic_type(arg_epi_ty) && is_epistemic_type(param_epi_ty) {
+        return checker_knowledge_subsumes(c, arg_epi_ty, param_epi_ty)
+    }
     if checker_types_compatible_inplace(c, arg_ty, param_ty) {
         return true
     }
@@ -18941,6 +19347,9 @@ fn checker_call_arg_types_compatible_inplace(c: *mut Checker, arg_expr: Expr, ar
         return checker_types_compatible_inplace(c, arg_ty, call_ref_inner_or_self(param_ty))
     }
     // Ontology subsumption: a subclass argument satisfies a parent-class parameter.
+    // (The epistemic case is handled authoritatively above, before the generic
+    // compatibility checks -- this ontology walk covers plain, non-epistemic
+    // TyNamed subclass arguments.)
     let exp_ty = call_ref_inner_or_self(param_ty)
     let got_ty = call_ref_inner_or_self(arg_ty)
     if !name_is_empty(got_ty.name) && !name_is_empty(exp_ty.name) && !name_eq(got_ty.name, exp_ty.name) {
@@ -20204,6 +20613,15 @@ fn checker_contextual_expr_compatible(expr: Expr, actual_ty: TypeEntry, expected
 // expression is not directly available here. Use the checker's last_literal_kind to detect
 // that the final expression was an integer literal, so `fn f() -> i32 { 0 }` checks OK.
 fn checker_fn_body_return_compatible_inplace(c: *mut Checker, body_ty: TypeEntry, return_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc, IO {
+    // Four-axis epistemic subsumption is AUTHORITATIVE for epistemic return types,
+    // checked BEFORE the generic structural check below -- not as a fallback reached
+    // only when that check already failed. checker_types_compatible_inplace treats
+    // same-inner-type Knowledge<T> as compatible without inspecting validity or
+    // provenance, so an early `return true` there would short-circuit before
+    // subsumption ever ran for the equal-inner-type case.
+    if is_epistemic_type(return_ty) && is_epistemic_type(body_ty) {
+        return checker_knowledge_subsumes(c, body_ty, return_ty)
+    }
     if checker_types_compatible_inplace(c, body_ty, return_ty) {
         return true
     }
@@ -24175,8 +24593,15 @@ impl Checker {
                     let ret_enum = sig2.return_type.kind == TypeKind::TyNamed && enum_table_find(c.enums, sig2.return_type.name) >= 0
                     let enum_int_ok = (body_enum && is_numeric_type(sig2.return_type))
                         || (is_numeric_type(body_ty) && ret_enum)
-                    if !c.types_compatible_structural(body_ty, sig2.return_type)
-                        && !int_lit_narrow && !enum_int_ok {
+                    // Implicit-tail return: four-axis epistemic subsumption is
+                    // AUTHORITATIVE, not a fallback -- types_compatible_structural
+                    // treats same-inner-type Knowledge<T> as compatible without ever
+                    // inspecting validity/provenance.
+                    var body_ret_ok = c.types_compatible_structural(body_ty, sig2.return_type)
+                    if is_epistemic_type(sig2.return_type) && is_epistemic_type(body_ty) {
+                        body_ret_ok = check_return_expr_knowledge_subsumes(c.ontology_items, body_ty, sig2.return_type)
+                    }
+                    if !body_ret_ok && !int_lit_narrow && !enum_int_ok {
                         c = c.report_mismatch((*fd).span, 8, sig2.return_type, body_ty)
                     }
                 }
@@ -24290,7 +24715,13 @@ impl Checker {
                 let body_ty = pair.1
                 if sig_id >= 0 {
                     let sig2 = fn_sig_table_get(c.fn_sigs, sig_id)
-                    if !c.types_compatible_structural(body_ty, sig2.return_type) {
+                    // Implicit-tail return: four-axis epistemic subsumption is
+                    // AUTHORITATIVE, not a fallback -- see the sibling check above.
+                    var body_ret_ok2 = c.types_compatible_structural(body_ty, sig2.return_type)
+                    if is_epistemic_type(sig2.return_type) && is_epistemic_type(body_ty) {
+                        body_ret_ok2 = check_return_expr_knowledge_subsumes(c.ontology_items, body_ty, sig2.return_type)
+                    }
+                    if !body_ret_ok2 {
                         c = c.report_mismatch((*fd).span, 8, sig2.return_type, body_ty)
                     }
                 }
@@ -24392,7 +24823,13 @@ impl Checker {
             let int_lit_narrow = c.last_literal_kind == 1
                 && init_ty.kind == TypeKind::TyI64
                 && (ann_ty.kind == TypeKind::TyI32 || ann_ty.kind == TypeKind::TyI8)
-            if !c.types_compatible_structural(init_ty, ann_ty) && !int_lit_narrow {
+            var init_ok = c.types_compatible_structural(init_ty, ann_ty)
+            // Four-axis subsumption is AUTHORITATIVE for epistemic let/var annotations
+            // in the by-value spine too -- mirrors the *mut spine, not a fallback.
+            if is_epistemic_type(ann_ty) && is_epistemic_type(init_ty) {
+                init_ok = check_return_expr_knowledge_subsumes(c.ontology_items, init_ty, ann_ty)
+            }
+            if !init_ok && !int_lit_narrow {
                 c = c.report_mismatch(s.span, 1, ann_ty, init_ty)
             }
             if ann_ty.kind == init_ty.kind
@@ -24456,7 +24893,13 @@ impl Checker {
             let int_lit_narrow = c.last_literal_kind == 1
                 && init_ty.kind == TypeKind::TyI64
                 && (ann_ty.kind == TypeKind::TyI32 || ann_ty.kind == TypeKind::TyI8)
-            if !c.types_compatible_structural(init_ty, ann_ty) && !int_lit_narrow {
+            var init_ok = c.types_compatible_structural(init_ty, ann_ty)
+            // Four-axis subsumption is AUTHORITATIVE for epistemic let/var annotations
+            // in the by-value spine too -- mirrors the *mut spine, not a fallback.
+            if is_epistemic_type(ann_ty) && is_epistemic_type(init_ty) {
+                init_ok = check_return_expr_knowledge_subsumes(c.ontology_items, init_ty, ann_ty)
+            }
+            if !init_ok && !int_lit_narrow {
                 c = c.report_mismatch(s.span, 1, ann_ty, init_ty)
             }
             if ann_ty.kind == init_ty.kind
@@ -24565,15 +25008,26 @@ impl Checker {
                 }
             }
         } else {
-            // Simple assignment: check compatibility
+            // Simple assignment: check compatibility. Four-axis epistemic subsumption
+            // is AUTHORITATIVE here too (mirrors checker_check_assign_stmt_inplace) --
+            // not a fallback -- so a downgrade via reassignment for equal inner T is
+            // rejected the same way a downgrade via `let`/`return`/call already is.
             match s.expr {
                 Some(val_expr) => {
-                    if !checker_contextual_expr_compatible(*val_expr, val_ty, target_ty) {
+                    var assign_ok = checker_contextual_expr_compatible(*val_expr, val_ty, target_ty)
+                    if is_epistemic_type(target_ty) && is_epistemic_type(val_ty) {
+                        assign_ok = check_return_expr_knowledge_subsumes(c.ontology_items, val_ty, target_ty)
+                    }
+                    if !assign_ok {
                         c = c.report_mismatch(s.span, 2, target_ty, val_ty)
                     }
                 }
                 None => {
-                    if !c.types_compatible_structural(target_ty, val_ty) {
+                    var assign_ok = c.types_compatible_structural(target_ty, val_ty)
+                    if is_epistemic_type(target_ty) && is_epistemic_type(val_ty) {
+                        assign_ok = check_return_expr_knowledge_subsumes(c.ontology_items, val_ty, target_ty)
+                    }
+                    if !assign_ok {
                         c = c.report_mismatch(s.span, 2, target_ty, val_ty)
                     }
                 }
@@ -28063,7 +28517,14 @@ impl Checker {
         let v_pair = self.check_opt_expr(first_arg)
         let c = v_pair.0
         let v_ty = v_pair.1
-        (c, ty_knowledge(v_ty, 0.0 - 1.0))
+        // measure() is the trusted-instrument constructor: Measured provenance by
+        // construction, not the DERIVED default knowledge_meta_from_ty falls back to
+        // when knowledge_provenance_kind is unset. Mirrors the *mut twin
+        // (checker_check_measure_expr_inplace) -- without this, authoritative
+        // four-axis subsumption rejects `let a: Knowledge[f64, Measured] = measure(...)`.
+        var result = ty_knowledge(v_ty, 0.0 - 1.0)
+        result.knowledge_provenance_kind = PROVENANCE_KIND_MEASURED
+        (c, result)
     }
 
     fn check_knowledge_ctor_expr(self, e: Expr) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
@@ -28389,19 +28850,40 @@ impl Checker {
            knowledge_meta_epsilon(knowledge_meta_from_ty(expected_ty)) < 0.0 {
             return self
         }
-        if knowledge_call_boundary_compatible(provided_ty, expected_ty) {
-            self
+        let p_in = knowledge_inner(provided_ty)
+        let r_in = knowledge_inner(expected_ty)
+        let onto_ok = if types_equal(p_in, r_in) {
+            true
+        } else if !name_is_empty(p_in.name) && !name_is_empty(r_in.name) {
+            checker_onto_name_subclass_walk(self.ontology_items, p_in.name, r_in.name, 0)
         } else {
-            // Mirror of the in-place site: name the failing slot (E244 for
-            // provenance, E036 otherwise). Both copies carry the rule — the
-            // codebase's twin-drift history says so.
-            let pm = knowledge_meta_from_ty(provided_ty)
-            let rm = knowledge_meta_from_ty(expected_ty)
-            if !provenance_subsumes(knowledge_meta_provenance(pm), knowledge_meta_provenance(rm)) {
-                self.report_error_at(call_span, 244, 0, 0, 0)
-            } else {
-                self.report_error_at(call_span, 36, 0, 0, 0)
-            }
+            false
+        }
+        let pm = knowledge_meta_from_ty(provided_ty)
+        let rm = knowledge_meta_from_ty(expected_ty)
+        let eps_ok = epsilon_subsumes_call_boundary(
+            knowledge_meta_epsilon(pm),
+            provided_ty.knowledge_epsilon_mode,
+            knowledge_meta_epsilon(rm),
+            expected_ty.knowledge_epsilon_mode
+        )
+        let val_ok = validity_subsumes(knowledge_meta_validity(pm), knowledge_meta_validity(rm))
+        let prov_ok = provenance_subsumes(knowledge_meta_provenance(pm), knowledge_meta_provenance(rm))
+        if onto_ok && eps_ok && val_ok && prov_ok {
+            self
+        } else if !onto_ok {
+            // Ontology mismatch: defer to check_call_arg_ontology_boundary (called
+            // separately at every call site of this function) for the actual
+            // E150/E151/E152 diagnostic naming this axis. Reporting here too would
+            // produce the wrong ("E036 epsilon") diagnostic alongside the right one --
+            // mirrors checker_check_call_arg_knowledge_boundary_inplace's *mut twin.
+            self
+        } else if !prov_ok {
+            self.report_error_at(call_span, 244, 0, 0, 0)
+        } else if !val_ok {
+            self.report_error_at(call_span, 263, 0, 0, 0)
+        } else {
+            self.report_error_at(call_span, 36, 0, 0, 0)
         }
     }
 
@@ -28430,23 +28912,25 @@ impl Checker {
 
     fn check_call_arg_ontology_boundary(self, arg_ty: TypeEntry, param_ty: TypeEntry, call_span: Span) -> Checker with Mut, Panic, Div, Alloc, IO {
         let expected_ty = call_ref_inner_or_self(param_ty)
-        if expected_ty.ontology_id < 0 || is_error_or_unknown(expected_ty) {
+        let exp_ont = if is_epistemic_type(expected_ty) { knowledge_inner(expected_ty) } else { expected_ty }
+        if exp_ont.ontology_id < 0 || is_error_or_unknown(exp_ont) {
             return self
         }
         let provided_ty = call_ref_inner_or_self(arg_ty)
         if is_error_or_unknown(provided_ty) {
             return self
         }
-        if provided_ty.ontology_id < 0 {
+        let prov_ont = if is_epistemic_type(provided_ty) { knowledge_inner(provided_ty) } else { provided_ty }
+        if prov_ont.ontology_id < 0 {
             // Non-ontology value passed where ontology type expected
             return self.report_error_at(call_span, 150, 0, 0, 0)
         }
         // Check subsumption: provided must be subclass of expected
-        if self.ontology_inference_query_subclass(provided_ty.ontology_id, expected_ty.ontology_id) {
+        if self.ontology_inference_query_subclass(prov_ont.ontology_id, exp_ont.ontology_id) {
             return self
         }
         // Check disjointness for better error
-        if self.ontology_inference_query_disjoint(provided_ty.ontology_id, expected_ty.ontology_id) {
+        if self.ontology_inference_query_disjoint(prov_ont.ontology_id, exp_ont.ontology_id) {
             return self.report_error_at(call_span, 151, 0, 0, 0)
         }
         self.report_error_at(call_span, 152, 0, 0, 0)
@@ -28461,7 +28945,39 @@ impl Checker {
     }
 
     fn call_arg_types_compatible_structural(self, arg_expr: Expr, arg_ty: TypeEntry, param_ty: TypeEntry) -> bool with Mut, Panic, Div, Alloc {
-        checker_call_arg_types_compatible_table(self.fn_sigs, arg_expr, arg_ty, param_ty)
+        if checker_call_arg_types_compatible_table(self.fn_sigs, arg_expr, arg_ty, param_ty) {
+            return true
+        }
+        let exp_ty = call_ref_inner_or_self(param_ty)
+        let got_ty = call_ref_inner_or_self(arg_ty)
+        if !name_is_empty(got_ty.name) && !name_is_empty(exp_ty.name) && !name_eq(got_ty.name, exp_ty.name) {
+            if checker_onto_name_subclass_walk(self.ontology_items, got_ty.name, exp_ty.name, 0) {
+                return true
+            }
+        }
+        if is_epistemic_type(exp_ty) && is_epistemic_type(got_ty) && exp_ty.kind == got_ty.kind {
+            let p_in = knowledge_inner(got_ty)
+            let r_in = knowledge_inner(exp_ty)
+            let onto_ok = if types_equal(p_in, r_in) {
+                true
+            } else if !name_is_empty(p_in.name) && !name_is_empty(r_in.name) {
+                checker_onto_name_subclass_walk(self.ontology_items, p_in.name, r_in.name, 0)
+            } else {
+                false
+            }
+            if onto_ok {
+                let pm = knowledge_meta_from_ty(got_ty)
+                let rm = knowledge_meta_from_ty(exp_ty)
+                return epsilon_subsumes_call_boundary(
+                    knowledge_meta_epsilon(pm),
+                    got_ty.knowledge_epsilon_mode,
+                    knowledge_meta_epsilon(rm),
+                    exp_ty.knowledge_epsilon_mode
+                ) && validity_subsumes(knowledge_meta_validity(pm), knowledge_meta_validity(rm))
+                  && provenance_subsumes(knowledge_meta_provenance(pm), knowledge_meta_provenance(rm))
+            }
+        }
+        false
     }
 
     fn check_call_args_inner(self, args: Option<Box<ExprList> >, params: Option<Box<FnParamList> >, idx: i64, expected_count: i64, call_span: Span) -> Checker with Mut, Panic, Div, Alloc, IO {
@@ -28597,7 +29113,16 @@ impl Checker {
                 let else_ty = else_pair.1
                 // Restore after else branch
                 c.refine_cond_env = saved_cond_env
-                if !c.types_compatible_structural(then_ty, else_ty) {
+                // Join-site metadata symmetry -- mirrors checker_check_if_expr_inplace:
+                // require mutual four-axis subsumption when both branches are
+                // epistemic, since types_compatible_structural's TyKnowledge case
+                // only compares inner type + epsilon.
+                var branches_ok2 = c.types_compatible_structural(then_ty, else_ty)
+                if branches_ok2 && is_epistemic_type(then_ty) && is_epistemic_type(else_ty) {
+                    branches_ok2 = check_return_expr_knowledge_subsumes(c.ontology_items, then_ty, else_ty)
+                        && check_return_expr_knowledge_subsumes(c.ontology_items, else_ty, then_ty)
+                }
+                if !branches_ok2 {
                     c = c.report_mismatch(e.span, 7, then_ty, else_ty)
                 }
                 (c, then_ty)
@@ -28661,7 +29186,14 @@ impl Checker {
                 let pair = self.check_match_arm((*list).head, scrut_ty)
                 var c = pair.0
                 let arm_ty = pair.1
-                if !c.types_compatible_structural(arm_ty, expected_ty) {
+                // Mirrors the *mut spine's match-arm join fix: require mutual
+                // four-axis subsumption when both are epistemic.
+                var arm_ok = c.types_compatible_structural(arm_ty, expected_ty)
+                if arm_ok && is_epistemic_type(arm_ty) && is_epistemic_type(expected_ty) {
+                    arm_ok = check_return_expr_knowledge_subsumes(c.ontology_items, arm_ty, expected_ty)
+                        && check_return_expr_knowledge_subsumes(c.ontology_items, expected_ty, arm_ty)
+                }
+                if !arm_ok {
                     c = c.report_mismatch((*list).head.span, 18, expected_ty, arm_ty)
                 }
                 c.check_remaining_arms((*list).tail, scrut_ty, expected_ty)
@@ -28848,14 +29380,28 @@ impl Checker {
         let pair = self.check_opt_expr(e.left)
         var c = pair.0
         let val_ty = pair.1
+        // Four-axis epistemic subsumption is AUTHORITATIVE for epistemic return types,
+        // not a fallback gated behind the generic compatibility check already failing:
+        // same-inner-type Knowledge<T> passes checker_contextual_expr_compatible /
+        // types_compatible_structural without ever inspecting validity or provenance,
+        // so gating the subsumption call on `!ret_ok` meant it never ran for the
+        // (common) equal-inner-type case.
         match e.left {
             Some(val_expr) => {
-                if !checker_contextual_expr_compatible(*val_expr, val_ty, c.current_return_type) {
+                var ret_ok = checker_contextual_expr_compatible(*val_expr, val_ty, c.current_return_type)
+                if is_epistemic_type(c.current_return_type) && is_epistemic_type(val_ty) && val_ty.kind == c.current_return_type.kind {
+                    ret_ok = check_return_expr_knowledge_subsumes(c.ontology_items, val_ty, c.current_return_type)
+                }
+                if !ret_ok {
                     c = c.report_mismatch(e.span, 8, c.current_return_type, val_ty)
                 }
             }
             None => {
-                if !c.types_compatible_structural(val_ty, c.current_return_type) {
+                var ret_ok = c.types_compatible_structural(val_ty, c.current_return_type)
+                if is_epistemic_type(c.current_return_type) && is_epistemic_type(val_ty) && val_ty.kind == c.current_return_type.kind {
+                    ret_ok = check_return_expr_knowledge_subsumes(c.ontology_items, val_ty, c.current_return_type)
+                }
+                if !ret_ok {
                     c = c.report_mismatch(e.span, 8, c.current_return_type, val_ty)
                 }
             }
@@ -28916,7 +29462,23 @@ impl Checker {
             c = c.report_error_at(e.span, 12, 0, 0, 0)
             return (c, ty_error())
         }
-        (c, ty_knowledge(value_ty, 0.0 - 1.0))
+        // Share validity/epsilon field parsing with the *mut spine
+        // (knowledge_struct_lit_apply_fields) -- this used to return a bare
+        // ty_knowledge here, silently dropping `validity:`/`epsilon:` fields, so
+        // knowledge_meta_from_ty reconstructed every by-value-routed Knowledge
+        // struct literal as ALWAYS-valid regardless of what was written.
+        var base = ty_knowledge(value_ty, 0.0 - 1.0)
+        if is_knowledge_type(value_ty) {
+            base.noise_set_id = value_ty.noise_set_id
+        } else {
+            base.noise_set_id = ns_empty()
+        }
+        let parsed = knowledge_struct_lit_apply_fields(base, e.fields)
+        var result = parsed.0
+        if parsed.1 {
+            c = c.report_error_at(e.span, 54, 0, 0, 0)
+        }
+        (c, result)
     }
 
     fn check_generic_struct_lit(self, e: Expr, tmpl: StructInfo) -> (Checker, TypeEntry) with Mut, Panic, Div, Alloc, IO {
@@ -29027,7 +29589,11 @@ impl Checker {
                 let pair = c.check_expr((*list).head.value)
                 c = pair.0
                 let init_ty = pair.1
-                if !checker_contextual_expr_compatible((*list).head.value, init_ty, field_ty) {
+                var field_init_ok = checker_contextual_expr_compatible((*list).head.value, init_ty, field_ty)
+                if is_epistemic_type(field_ty) && is_epistemic_type(init_ty) {
+                    field_init_ok = check_return_expr_knowledge_subsumes(c.ontology_items, init_ty, field_ty)
+                }
+                if !field_init_ok {
                     c = c.report_mismatch((*list).head.value.span, 16, field_ty, init_ty)
                 }
                 c.check_struct_field_inits_with_type((*list).tail, si)
@@ -29110,7 +29676,15 @@ impl Checker {
                 let pair = self.check_expr((*list).head)
                 var c = pair.0
                 let elem_ty = pair.1
-                if !types_compatible(elem_ty, expected) {
+                // Mirrors the *mut spine's array-literal join fix: mutual four-axis
+                // subsumption when both are epistemic, not just types_compatible's
+                // inner-type+epsilon-only TyKnowledge case.
+                var elem_ok = types_compatible(elem_ty, expected)
+                if elem_ok && is_epistemic_type(elem_ty) && is_epistemic_type(expected) {
+                    elem_ok = check_return_expr_knowledge_subsumes(c.ontology_items, elem_ty, expected)
+                        && check_return_expr_knowledge_subsumes(c.ontology_items, expected, elem_ty)
+                }
+                if !elem_ok {
                     c = c.report_mismatch((*list).head.span, 20, expected, elem_ty)
                 }
                 let rest = c.check_array_rest((*list).tail, expected)
@@ -29218,6 +29792,12 @@ impl Checker {
                     || target_ty.kind == TypeKind::TyValidated
                 if src_is_epistemic && !tgt_is_epistemic {
                     c = c.report_error_at(e.span, 171, 0, 0, 0)
+                } else if src_is_epistemic && tgt_is_epistemic {
+                    // Mirrors the *mut spine's cast fix: route an epistemic-to-epistemic
+                    // `as` through the same call-boundary predicates an argument gets,
+                    // instead of returning target_ty with no axis check at all.
+                    c = c.check_call_arg_knowledge_boundary(src_ty, target_ty, e.span)
+                    c = c.check_call_arg_ontology_boundary(src_ty, target_ty, e.span)
                 }
                 // Unit conversion check: if both are unit-typed, dimensions must be compatible
                 if src_ty.unit_id >= 0 && target_ty.unit_id >= 0 {
@@ -29331,9 +29911,15 @@ impl Checker {
             ret_ty
         }
 
-        // Check body type against return type if annotated
+        // Check body type against return type if annotated. Four-axis epistemic
+        // subsumption is AUTHORITATIVE here too, not a fallback -- see the
+        // implicit-tail-return sites above.
         if ret_ty.kind != TypeKind::TyUnknown {
-            if !c.types_compatible_structural(body_ty, ret_ty) {
+            var body_ret_ok3 = c.types_compatible_structural(body_ty, ret_ty)
+            if is_epistemic_type(ret_ty) && is_epistemic_type(body_ty) {
+                body_ret_ok3 = check_return_expr_knowledge_subsumes(c.ontology_items, body_ty, ret_ty)
+            }
+            if !body_ret_ok3 {
                 c = c.report_mismatch(e.span, 8, ret_ty, body_ty)
             }
         }
