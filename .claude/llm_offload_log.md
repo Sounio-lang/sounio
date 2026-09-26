@@ -1,6 +1,6 @@
 # LLM offload log
 
-## 2026-09-26T19:10Z — Claude (session_01RMzxzzsE5JNGEqnnkUs9Yo) — M1, PBPK28 portal/hepatic-sink kernel
+## 2026-09-26T18:34Z — Claude (session_01RMzxzzsE5JNGEqnnkUs9Yo) — M1, PBPK28 portal/hepatic-sink kernel
 
 | 2026-09-26 | — | math-review | pbpk28_hepatic.sio, darwin_pbpk28_hepatic_gates.sio (CN step with portal topology + interstitial metabolic sink; extended-clearance-model steady-state identities) | WAIVED | No offload provider configured in this container (`bin/llm-offload --status`: keys file not found). Independent verification by exact closed-form gates plus sabotage controls; narrative below. |
 
@@ -38,7 +38,7 @@ infusion C_b = R/X, hence F_H = Q_L/(Q_L + X) emerges.
 
 **Flagged for re-review** once a provider is configured.
 
-## 2026-09-26T21:30Z — Claude (session_01RMzxzzsE5JNGEqnnkUs9Yo) — M1, PBPK28 θ-step (Rannacher start-up support)
+## 2026-09-26T19:05Z — Claude (session_01RMzxzzsE5JNGEqnnkUs9Yo) — M1, PBPK28 θ-step (Rannacher start-up support)
 
 | 2026-09-26 | — | math-review | pbpk28_hepatic.sio θ-scheme step + θ-weighted elimination accounting; darwin_pbpk28_hepatic_gates.sio VT | WAIVED | No offload provider configured (`bin/llm-offload --status`). Verified by exact reduction and mass-balance gates, below. |
 
@@ -53,7 +53,7 @@ into sign-alternating oscillation and the negativity clamp creates mass
 θ = 1 with a 10 mg bolus at dt = 0.02 conserves mass (M + E − D) to 1e-12 with
 θ-consistent elimination accounting. Both engines. Flagged for re-review.
 
-## 2026-09-26T23:30Z — Claude (session_01RMzxzzsE5JNGEqnnkUs9Yo) — M1, PBPK28 multi-drug coupling driver + allocation-free kernel steps
+## 2026-09-26T20:16Z — Claude (session_01RMzxzzsE5JNGEqnnkUs9Yo) — M1, PBPK28 multi-drug coupling driver + allocation-free kernel steps
 
 | 2026-09-26 | — | math-review | ddi/multidrug28.sio (competitive multi-inhibitor factor, Lie / predictor-corrector / iterated coupling, Rannacher start-up, θ-consistent AUC, clamp accounting); pbpk28_hepatic.sio *_ws steps; darwin_pbpk28_multidrug_gates.sio M/V3/V4/V5/V6 | WAIVED (orthogonal) + same-provider adversarial review | `bin/llm-offload --status`: no provider configured. An independent adversarial review was run by a separate Claude agent (different model, read-only, own probes); it is NOT an orthogonal-provider review. Flagged for re-review once a provider is configured. |
 
@@ -105,9 +105,9 @@ SOUNIO_STDLIB_PATH and resolves `stdlib/` relative to the cwd; lean_single
 `souc run` exits 1 silently on a compile error. An early "identical" diff in
 this work compared old code with old code because of it and was discarded.
 
-## 2026-09-27T00:30Z — Claude (session_01RMzxzzsE5JNGEqnnkUs9Yo) — M1, PBPK28 closed-form calibration (ECM inverse, asymmetric gut wall)
+## 2026-09-26T20:36Z — Claude (session_01RMzxzzsE5JNGEqnnkUs9Yo) — M1, PBPK28 closed-form calibration (ECM inverse, asymmetric gut wall)
 
-| 2026-09-27 | — | math-review | pbpk28_calibration.sio (liver ECM inverse; gut-wall (PS_g, fu_g·CLint_g) from (F_G, E_sys)); darwin_pbpk28_calibration_gates.sio C0-C3 | WAIVED | No offload provider configured (`bin/llm-offload --status`). Verified by exact round trips on the dynamic model and sabotage controls, below. |
+| 2026-09-26 | — | math-review | pbpk28_calibration.sio (liver ECM inverse; gut-wall (PS_g, fu_g·CLint_g) from (F_G, E_sys)); darwin_pbpk28_calibration_gates.sio C0-C3 | WAIVED | No offload provider configured (`bin/llm-offload --status`). Verified by exact round trips on the dynamic model and sabotage controls, below. |
 
 **Trigger**: new hand-derived PK identities used to calibrate drug profiles:
 (1) inverse of the extended clearance model, fu·CLint = X·PS/(PS − X) with
@@ -126,3 +126,7 @@ C1 IV AUC = D/(CL_H + CL_c) to 1e-11; C2 F_G and E_sys recovered on the dynamic
 model to < 1e-12; C3 F = F_G·F_H to 1.8e-11. Sabotages: liver inverse replaced
 by the forward form -> C0, C1, C3 FAIL; gut inverse a/(1 − a) -> C0, C2, C3
 FAIL. Flagged for re-review once a provider is configured.
+
+_Timestamps of the four PBPK28 entries above corrected on 2026-09-26 to the
+commit times of 0eea0ba6, 829e0753, bdf495a8 and f4ae82c3; the first versions
+carried estimated, future-dated times (review of sounio-lang/sounio#2695)._
