@@ -69,6 +69,12 @@ struct SpecGfNode {
     tp_h2: i64,
     tp_h3: i64,
     fd: Option<Box<FnDef>>,
+    // Copilot review (PR #2515), private-access follow-up: the template
+    // item's own visibility, so a monomorphized instance can inherit it
+    // instead of spec_make_fn_item hardcoding visibility_private() for
+    // every clone regardless of the template being `pub`. See
+    // spec_make_fn_item's own comment.
+    visibility: Visibility,
 }
 
 // Generic STRUCT template node (StructDef carries real type_params, so no
@@ -81,6 +87,9 @@ struct SpecStNode {
     tp_h2: i64,
     tp_h3: i64,
     sd: Option<Box<StructDef>>,
+    // Same reason as SpecGfNode's own field -- see spec_make_struct_item's
+    // own comment.
+    visibility: Visibility,
 }
 
 // Substitution context: the ACTIVE type-param set during one clone's
@@ -888,6 +897,12 @@ fn spec_generic_table_fd(slot: i64) -> Option<Box<FnDef>> with Mut, Panic, Div {
     (*p).fd
 }
 
+fn spec_generic_table_visibility(slot: i64) -> Visibility with Mut, Panic, Div {
+    if slot < 0 || slot >= SPEC_GF_COUNT { return visibility_private() }
+    let p = SPEC_GF_PTRS[slot as usize] as *mut SpecGfNode
+    (*p).visibility
+}
+
 fn spec_tp_hash_at(buf: SpecNameBuf, i: i64) -> i64 with Mut, Panic, Div {
     if i < buf.count && i < 4 {
         return ast_name_hash(buf.names[i as usize])
@@ -970,6 +985,12 @@ fn spec_struct_table_sd(slot: i64) -> Option<Box<StructDef>> with Mut, Panic, Di
     (*p).sd
 }
 
+fn spec_struct_table_visibility(slot: i64) -> Visibility with Mut, Panic, Div {
+    if slot < 0 || slot >= SPEC_ST_COUNT { return visibility_private() }
+    let p = SPEC_ST_PTRS[slot as usize] as *mut SpecStNode
+    (*p).visibility
+}
+
 fn spec_struct_tp_count_of(opt: Option<Box<TypeParamDefList>>) -> i64 with Mut, Panic, Div {
     match opt {
         None => 0
@@ -1014,6 +1035,7 @@ fn spec_collect_generic_structs(items: Option<Box<ItemList>>) with Mut, Panic, D
                                 (*p).tp_h2 = spec_struct_tp_hash_of((*sd_box).type_params, 2)
                                 (*p).tp_h3 = spec_struct_tp_hash_of((*sd_box).type_params, 3)
                                 (*p).sd = it.struct_def
+                                (*p).visibility = it.visibility
                                 SPEC_ST_PTRS[slot as usize] = p as i64
                                 SPEC_ST_COUNT = SPEC_ST_COUNT + 1
                             }
@@ -1049,6 +1071,7 @@ fn spec_collect_generic_fns(items: Option<Box<ItemList>>, known: SpecKnownNames)
                                 (*p).tp_h2 = spec_tp_hash_at(tp, 2)
                                 (*p).tp_h3 = spec_tp_hash_at(tp, 3)
                                 (*p).fd = it.fn_def
+                                (*p).visibility = it.visibility
                                 SPEC_GF_PTRS[slot as usize] = p as i64
                                 SPEC_GF_NEEDED[slot as usize] = false
                                 SPEC_GF_COUNT = SPEC_GF_COUNT + 1
@@ -1099,6 +1122,7 @@ fn spec_collect_generic_method_items(methods: Option<Box<ItemList>>, known: Spec
                                 (*p).tp_h2 = spec_tp_hash_at(tp, 2)
                                 (*p).tp_h3 = spec_tp_hash_at(tp, 3)
                                 (*p).fd = it.fn_def
+                                (*p).visibility = it.visibility
                                 SPEC_GF_PTRS[slot as usize] = p as i64
                                 SPEC_GF_IS_METHOD[slot as usize] = true
                                 SPEC_GF_NEEDED[slot as usize] = false
@@ -1710,9 +1734,21 @@ fn spec_subst_field_list_opt(opt: Option<Box<FieldDefList>>, ctx: i64, targs: Op
     }
 }
 
-fn spec_make_struct_item(name: Name, sd: StructDef) -> Item with Mut, Panic, Div, Alloc {
+// `visibility` comes from the ORIGINAL template item (SpecStNode.visibility,
+// set when the template was first collected) -- not hardcoded here anymore.
+// Copilot review (PR #2515), private-access follow-up: this used to always
+// stamp visibility_private() on every monomorphized struct instance, so a
+// `pub struct S<F> { ... }`'s clone `S__i64` silently became PRIVATE
+// regardless of the template's own visibility -- invisible under the
+// OLD path-based visibility fallback (which granted access anyway via
+// ast_path_eq(empty, empty) on the specialized checking path), but a
+// real correctness bug once that fallback was tightened to deny on a
+// genuine module-id mismatch: a caller in a DIFFERENT module reading a
+// pub generic struct's own pub-ness through its monomorphized clone would
+// incorrectly get E176/E259 for a type it was always allowed to use.
+fn spec_make_struct_item(name: Name, sd: StructDef, visibility: Visibility) -> Item with Mut, Panic, Div, Alloc {
     Item {
-        kind: ItemKind::ItemStruct, span: sd.span, visibility: visibility_private(), name: name, fn_def: None,
+        kind: ItemKind::ItemStruct, span: sd.span, visibility: visibility, name: name, fn_def: None,
         struct_def: Some(Box::new(sd)), enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None,
         acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None,
         transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None,
@@ -1756,7 +1792,7 @@ fn spec_get_or_create_struct_instance(st_idx: i64, base: Name, targs: Option<Box
             (*sp).sd.type_params = None
             let st_ctx = spec_ctx_from_struct_slot(st_idx)
             (*sp).sd.fields = spec_subst_field_list_opt((*sp).sd.fields, st_ctx, targs)
-            spec_extra_push_item(spec_make_struct_item((*sp).sd.name, (*sp).sd))
+            spec_extra_push_item(spec_make_struct_item((*sp).sd.name, (*sp).sd, spec_struct_table_visibility(st_idx)))
         }
     }
     mangled
@@ -1786,9 +1822,22 @@ fn spec_emitted_push(n: Name) -> bool with Mut, Panic, Div {
     false
 }
 
-fn spec_make_fn_item(name: Name, fd: FnDef) -> Item with Mut, Panic, Div, Alloc {
+// `visibility` comes from the ORIGINAL template item (SpecGfNode.visibility,
+// set when the template was first collected) -- not hardcoded here anymore.
+// Copilot review (PR #2515), private-access follow-up: this used to always
+// stamp visibility_private() on every monomorphized function instance, so
+// a `pub fn f<T>(...)`'s clone `__sp_f...` silently became PRIVATE
+// regardless of the template's own visibility. That was invisible under
+// the OLD path-based visibility fallback (which granted access anyway via
+// ast_path_eq(empty, empty) on the specialized checking path), but became
+// a real correctness bug once that fallback was tightened to deny on a
+// genuine module-id mismatch: calling a pub generic function through its
+// monomorphized clone from a DIFFERENT module produced a spurious E175 --
+// exactly what broke tests/run-pass/madaros_module_qualified_generic_call.sio
+// (testmod::gen_big::gbig_basis::<i64>(..), a pub fn, read back as private).
+fn spec_make_fn_item(name: Name, fd: FnDef, visibility: Visibility) -> Item with Mut, Panic, Div, Alloc {
     Item {
-        kind: ItemKind::ItemFn, span: fd.span, visibility: visibility_private(), name: name, fn_def: Some(Box::new(fd)),
+        kind: ItemKind::ItemFn, span: fd.span, visibility: visibility, name: name, fn_def: Some(Box::new(fd)),
         struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None,
         acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None,
         transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None,
@@ -1871,7 +1920,7 @@ fn spec_ensure_instance(base_name: Name, targs: Option<Box<TypeExprList>>) with 
             spec_scan_block((*fp).fd.body)
             SPEC_CURRENT_MODULE_ID = caller_module_id
             let np = heap_alloc(16384) as *mut SpecItemNode
-            (*np).it = spec_make_fn_item((*fp).fd.name, (*fp).fd)
+            (*np).it = spec_make_fn_item((*fp).fd.name, (*fp).fd, spec_generic_table_visibility(gt_idx))
             (*np).next = 0
             (*ip).clone_ptr = np as i64
             SPEC_GF_CLONE_PTR[gt_idx as usize] = np as i64

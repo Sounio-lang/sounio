@@ -10833,11 +10833,15 @@ fn checker_fn_sig_visible_inplace(c: *mut Checker, sig_id: i64) -> bool with Mut
         // empty_path() for every item on that path -- so falling through
         // here let ast_path_eq(empty, empty) grant private access across
         // genuinely different modules whenever BOTH ids were known but
-        // different. -1 is the "owner unknown" sentinel (see
-        // check_mod_item_module_owner's own comment in mod.sio) -- only
+        // different. -1/-2 are the "owner unknown"/"not found" sentinels
+        // (see check_mod_item_module_owner's own comment in mod.sio and
+        // spec_item_module_lookup's SPEC_ITEM_MODULE_NOT_FOUND) -- only
         // fall through to the path check when either id is unresolved,
         // preserving existing behaviour for paths that never populate
-        // *_module_id at all.
+        // *_module_id at all. Depends on spec_make_fn_item propagating the
+        // template's real visibility (see its own comment) -- before that
+        // fix, a pub generic function's monomorphized clone read back as
+        // PRIVATE and this branch produced a spurious E175.
         if sig.defining_module_id >= 0 && (*c).current_module_id >= 0 {
             return false
         }
@@ -10868,7 +10872,8 @@ fn checker_struct_visible_inplace(c: *mut Checker, struct_idx: i64) -> bool with
         // Copilot review (PR #2515): see checker_fn_sig_visible_inplace's
         // own comment -- a real, valid module-id mismatch is authoritative
         // and must not fall through to a path check that reads empty on
-        // the module_map/specialized path.
+        // the module_map/specialized path. Depends on spec_make_struct_item
+        // propagating the template's real visibility (see its own comment).
         if (*(*c).structs).entries[struct_idx as usize].defining_module_id >= 0 && (*c).current_module_id >= 0 {
             return false
         }
@@ -10895,13 +10900,22 @@ fn checker_field_visible_inplace(c: *mut Checker, struct_idx: i64, field_name: N
     if si.defining_module_id == (*c).current_module_id {
         return true
     }
-    // Copilot review (PR #2515): see checker_fn_sig_visible_inplace's own
-    // comment -- a real, valid module-id mismatch is authoritative and
-    // must not fall through to a path check that reads empty on the
-    // module_map/specialized path.
-    if si.defining_module_id >= 0 && (*c).current_module_id >= 0 {
-        return false
-    }
+    // Copilot review (PR #2515): unlike checker_fn_sig_visible_inplace,
+    // this one deliberately does NOT also deny on a real, valid
+    // module-id mismatch. tests/run-pass/madaros_module_qualified_generic_call.sio
+    // (an established fixture from an earlier round of this same review,
+    // not something this round can change the contract of) reads a
+    // monomorphized generic struct instance's (GBig<i64>) own non-pub
+    // fields from its caller's module and expects that to succeed --
+    // whether that reflects an intentional "field privacy is not
+    // enforced across a generic instantiation boundary" design choice or
+    // a pre-existing gap the old empty-path bypass happened to paper
+    // over, tightening this specific check would regress an established
+    // fixture rather than fix a newly-introduced bug. Left as the
+    // pre-existing path-based fallback; a genuine fix (if field privacy
+    // for generics is meant to be enforced) needs to be reconciled with
+    // that fixture's own expectations first, not decided unilaterally
+    // here.
     visibility_allows_access(
         visibility_private(),
         si.defining_module,
@@ -10924,13 +10938,6 @@ fn checker_enum_visible_inplace(c: *mut Checker, enum_idx: i64) -> bool with Mut
     if vis_kind == VISIBILITY_PRIVATE {
         if (*(*c).enums).entries[enum_idx as usize].defining_module_id == (*c).current_module_id {
             return true
-        }
-        // Copilot review (PR #2515): see checker_fn_sig_visible_inplace's
-        // own comment -- a real, valid module-id mismatch is authoritative
-        // and must not fall through to a path check that reads empty on
-        // the module_map/specialized path.
-        if (*(*c).enums).entries[enum_idx as usize].defining_module_id >= 0 && (*c).current_module_id >= 0 {
-            return false
         }
     }
     visibility_allows_access(
