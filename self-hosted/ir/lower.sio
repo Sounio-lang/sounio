@@ -8226,6 +8226,62 @@ impl Lowerer {
         (lo, dst_reg)
     }
 
+    // Budget the deep copy BEFORE emitting any of it. `emit` turns an overrun
+    // past IR_MAX_INSTRS into a lowering error, so a struct whose aggregate
+    // fields will not fit degrades to the #1475 flat copy -- strictly the
+    // previous behaviour -- instead of breaking a build the user did not ask us
+    // to break.
+    fn emit_struct_value_copy_budgeted(self, src_reg: i64, type_name: Name, slot_count: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let deep_cost = self.struct_deep_copy_cost(type_name, slot_count, 0)
+        let deep_room = IR_MAX_INSTRS - self.struct_deep_copy_instr_headroom() - self.current_func.instr_count
+        if deep_cost <= deep_room {
+            self.emit_struct_value_copy_deep(src_reg, type_name, slot_count, 0)
+        } else {
+            self.emit_struct_value_copy(src_reg, type_name, slot_count)
+        }
+    }
+
+    // Value of the aggregate local `name` (currently in `reg`) as a STORED
+    // value: a fresh deep copy for a word-scalar fixed array or a value-copyable
+    // struct, `reg` unchanged for everything else.
+    //
+    // `let y = x` has copied since #1475/#1479, but assignment stored the source
+    // HANDLE: `z = x`, `*dst = x`, `o.f = x` and `a[i] = x` all left the
+    // destination sharing x's storage, so a later in-place write through either
+    // name showed through the other -- scalar fields included, not only array
+    // fields (docs/audit/MADAROS_STRUCT_REASSIGN_ARRAY_ALIAS_DISPATCH_2026-09-26.md).
+    //
+    // The copy is FRESH, not written into the destination's existing storage.
+    // Writing in place would cost no handle, but it is correct only while the
+    // destination owns its storage alone, and Madaros still binds shared storage
+    // on other paths (`let v = *p`, `let v = o.f`, a struct literal fed a local
+    // aggregate, E232). An in-place copy through such a destination would write
+    // into the other owner -- a new miscompile in place of the old one. A fresh
+    // copy only ever rebinds the destination. Its cost is 1 + k handles per
+    // executed assignment against the never-reclaimed handle table; running out
+    // exits 182 rather than printing a wrong number.
+    //
+    // Same carve-outs as the let path: arrays whose elements are not word
+    // scalars (`[Struct; N]`), Box, Knowledge, reference locals and BSS globals
+    // keep the handle.
+    fn emit_ident_aggregate_value_copy(self, name: Name, reg: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if self.lookup_local(name) < 0 { return (self, reg) }
+        if self.lookup_local_is_global(name) { return (self, reg) }
+        let arr_len = self.lookup_local_fixed_array_len(name)
+        if arr_len >= 0 {
+            if self.lookup_local_array_copy_word_scalar(name) {
+                let elem_is_float = self.lookup_local_array_elem_float(name)
+                return self.emit_fixed_array_value_copy(reg, arr_len, elem_is_float)
+            }
+            return (self, reg)
+        }
+        let st_name = self.lookup_local_struct_type(name)
+        if !self.struct_local_is_value_copyable(name, st_name) { return (self, reg) }
+        let slot_count = self.struct_layout_slot_count(st_name)
+        if slot_count <= 0 { return (self, reg) }
+        self.emit_struct_value_copy_budgeted(reg, st_name, slot_count)
+    }
+
     // Whether `var y = x` on struct-typed local `x` may be value-copied.
     //
     // Excluded, each for a distinct reason:
@@ -17132,18 +17188,7 @@ impl Lowerer {
                         // the #1475 carve-out for `[Struct;N]` LOCALS.
                         let st_name = lo.lookup_local_struct_type((*rhs_ident).name)
                         let slot_count = lo.struct_layout_slot_count(st_name)
-                        // Budget the deep copy BEFORE emitting any of it. `emit` turns an
-                        // overrun past IR_MAX_INSTRS into a lowering error, so a struct
-                        // whose aggregate fields will not fit degrades to the #1475 flat
-                        // copy — strictly the previous behaviour — instead of breaking a
-                        // build the user did not ask us to break.
-                        let deep_cost = lo.struct_deep_copy_cost(st_name, slot_count, 0)
-                        let deep_room = IR_MAX_INSTRS - lo.struct_deep_copy_instr_headroom() - lo.current_func.instr_count
-                        let struct_copy_pair = if deep_cost <= deep_room {
-                            lo.emit_struct_value_copy_deep(reg, st_name, slot_count, 0)
-                        } else {
-                            lo.emit_struct_value_copy(reg, st_name, slot_count)
-                        }
+                        let struct_copy_pair = lo.emit_struct_value_copy_budgeted(reg, st_name, slot_count)
                         lo = struct_copy_pair.0
                         bind_reg = struct_copy_pair.1
                     } else {
@@ -18130,7 +18175,22 @@ impl Lowerer {
             self.lower_opt_expr_ref(&s.expr)
         }
         var lo = pair_rhs.0
-        let rhs = pair_rhs.1
+        var rhs = pair_rhs.1
+        // An aggregate stored from a named local is stored BY VALUE, as `let`
+        // binds it (see emit_ident_aggregate_value_copy). f128 slots copied their
+        // limbs above.
+        if !target_is_f128 {
+            match s.expr {
+                Some(rhs_agg) => {
+                    if (*rhs_agg).kind == ExprKind::ExprIdent {
+                        let agg_pair = lo.emit_ident_aggregate_value_copy((*rhs_agg).name, rhs)
+                        lo = agg_pair.0
+                        rhs = agg_pair.1
+                    }
+                }
+                _ => {}
+            }
+        }
         var rhs_variance: i64 = -1
         var rhs_is_float: bool = false
         match s.expr {
