@@ -6264,6 +6264,28 @@ fn checker_collect_type_alias_inplace(c: *mut Checker, name: Name, ty_opt: Optio
     }
 }
 
+// Copilot review (PR #2515), comment 4110379088: check_items_verdict_boot4_with_module_map
+// (check/mod.sio) must collect each specialized-merged item with its own
+// current_module_id stamped first (see that function's own comment), so it
+// cannot call checker_collect_items_inplace once over the whole list --
+// but that function also re-runs checker_collect_runtime_builtins_inplace
+// AND reassigns ontology_items on every call, so invoking it once PER ITEM
+// re-scans the growing, already-populated environment for ~30 builtin
+// binds on every one of the compiler's own 13k+ items -- O(items^2) work
+// that is pure waste, since the builtins never change mid-collection and
+// ontology_items is unconditionally restored to the full list right after
+// that loop anyway. These two wrappers let that call site collect ONE
+// item's declarations without either side effect: initialize builtins
+// once before the loop, then collect each item directly through this
+// wrapper instead of round-tripping through checker_collect_items_inplace.
+pub fn checker_collect_runtime_builtins_once_mut(c: *mut Checker) with Mut, Panic, Div {
+    checker_collect_runtime_builtins_inplace(c)
+}
+
+pub fn checker_collect_item_only_mut(c: *mut Checker, item: Item) with Mut, Panic, Div, Alloc, IO {
+    checker_collect_item_inplace(c, item)
+}
+
 pub fn checker_collect_items_inplace(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
     // Stash the program items so the deep call-arg compat path can resolve
     // ontology subclass relations by name (E009 subsumption). Single shallow
@@ -11265,6 +11287,34 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
                             // positive-evidence check the lowerer's
                             // LOWER_USE_MODULE_HASH performs) before trusting
                             // the bare-name match.
+                            // Copilot review (PR #2515), comment 4110379040: this
+                            // combines two independent whole-program facts --
+                            // "qualifier is SOME known use import" and "SOME
+                            // global fn named path_method_name exists" -- without
+                            // ever checking that the specific fn found is the one
+                            // the qualifier's target module actually declares. With
+                            // both `use testmod::tc_c;` and `use testmod::
+                            // dep_chain_leaf;` imported, `tc_c::leaf_add(..)` binds
+                            // to `dep_chain_leaf::leaf_add` if a same-named
+                            // `leaf_add` exists there. checker_use_module_known's
+                            // registry only proves a qualifier text was `use`d by
+                            // the current module (round 3, comment 4089110672); it
+                            // was never extended to resolve a qualifier to its
+                            // target module id (there is no "declaring module's
+                            // qualifier segment -> target module id" table anywhere
+                            // in this checker, nor in specializer.sio's identical
+                            // gap at spec_call_expr_callee_name or ir/lower.sio's
+                            // at callee_path_module_stripped_name). Closing this
+                            // for real needs that resolution table built once at
+                            // import time and threaded through all three call
+                            // sites and both multi-module loading pipelines
+                            // (module_loader.sio and module_frontend.sio) -- a
+                            // genuine architectural addition out of scope for this
+                            // round, left as a known, accepted gap rather than a
+                            // partial fix risking a new regression in an already
+                            // heavily-revised area (see this PR's specializer.sio/
+                            // parser/ast.sio module-provenance comments for the
+                            // same scoping judgment on a related finding).
                             let free_fn_sig_id = checker_fn_sigs_find_inplace(c, path_method_name)
                             if free_fn_sig_id < 0 || !checker_path_qualifier_all_modules_known(c, (*callee_expr).path) {
                                 checker_report_warning_at_mut(c, e.span, 44, 0, 0, 0)
