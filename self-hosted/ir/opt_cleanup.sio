@@ -17,6 +17,7 @@
 module ir::opt_cleanup
 
 use ir::ir::*
+use ir::effects::*
 use ir::normalize::*
 use parser::ast::*
 use ir::egraph::*
@@ -8993,13 +8994,15 @@ pub(crate) fn ocp_sink_loads(func: IrFunction) -> IrFunction with Mut, Div, Pani
             let cur = ir_arena_load(ir_region_slot_r(result.region, (i)))
             let nxt = ir_arena_load(ir_region_slot_r(result.region, ((i + 1))))
             if cur.op == IrOpcode::IrLoadImm && nxt.op != IrOpcode::IrLoadImm
-                    && nxt.op != IrOpcode::IrNop && nxt.op != IrOpcode::IrLabel
-                    && nxt.op != IrOpcode::IrJump && nxt.op != IrOpcode::IrBranchTrue
-                    && nxt.op != IrOpcode::IrBranchFalse && nxt.op != IrOpcode::IrReturn
-                    && nxt.op != IrOpcode::IrCall {
-                // Check next doesn't use our dst
-                let d = cur.dst
-                if nxt.src1 != d && nxt.src2 != d && nxt.dst != d {
+                    && nxt.op != IrOpcode::IrNop {
+                // Was: an inline opcode list plus `nxt.src1 != d && nxt.src2 != d`.
+                // That guard misses the third register IrIndexSet parks in
+                // imm_i64 (#1682 class), the flat call-arg pool of
+                // IrCallExtern/IrCallIndirect (not excluded by the old list),
+                // and the FMA accumulator. ir::effects owns the answer now.
+                let cur_at = ir_region_slot_r(result.region, (i))
+                let nxt_at = ir_region_slot_r(result.region, ((i + 1)))
+                if ir_effect_swap_ok(cur_at, nxt_at) {
                     // Swap -- as one exchange, so the arguments travel with the
                     // instructions instead of being read from an overwritten slot.
                     ir_arena_swap_slots(ir_region_slot_w(result.region, (i)), ir_region_slot_w(result.region, ((i + 1))))
