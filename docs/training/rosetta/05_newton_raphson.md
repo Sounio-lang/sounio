@@ -79,7 +79,7 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     print("Root of sin near 3.0: ")
     print(root)
     println("")
-    0
+    return 0
 }
 ```
 
