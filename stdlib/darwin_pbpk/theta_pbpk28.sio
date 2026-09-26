@@ -1,0 +1,529 @@
+// stdlib/darwin_pbpk/theta_pbpk28.sio — clamp-free θ-method PBPK28 step,
+// Rannacher start-up, and an exact mass ledger
+//
+// Why this module exists
+// ----------------------
+// `pbpk28_full_cn_step` (tsit5_pbpk28.sio) is Crank–Nicolson: A-stable, not
+// L-stable. Its amplification factor R(z) = (1 − z)/(1 + z) tends to −1 as
+// z = (dt/2)·λ grows, and the PBPK28 vascular↔interstitial exchange blocks are
+// very stiff ((Q+PS)/V_v up to ~4·10⁴ /h). After a non-smooth event — an IV
+// bolus, or an input switching on from a zero state — those modes ring with
+// alternating sign and drive compartments negative. The kernel's
+// `if c < 0 { 0 }` floors then add mass that was never dosed: 50 mg in a closed
+// system becomes 89.1 mg after 8 steps at dt = 0.5 h
+// (docs/audit/PBPK28_CN_RANNACHER_MASS_BALANCE_2026-09-26.md).
+//
+// That kernel is left untouched: its parity gates and golden outputs depend
+// on it bit for bit. This module is the corrected path for consumers that
+// step at production dt.
+//
+// The θ-method
+// ------------
+// For the linear system ẋ = A·x + b (blood row + 13 × 2×2 organ blocks,
+// arrow-shaped), one θ-step of length dt is
+//     (I − θ·dt·A)·x_{n+1} = (I + (1−θ)·dt·A)·x_n + dt·b
+// θ = 1/2 is Crank–Nicolson (the published kernel's algebra); θ = 1 is
+// backward Euler (L-stable, R(∞) = 0). The implicit solve is the same
+// per-organ Schur elimination as `pbpk28_full_cn_step_mut` with the implicit
+// weight h_i = θ·dt and the explicit weight h_e = (1−θ)·dt in place of the
+// shared h = dt/2.
+//
+// No negativity floor. Under the volume weights W every Q- and PS-coupling
+// column of A telescopes, leaving only the blood elimination and the organ
+// sink, so ANY θ-step conserves
+//     M_{n+1} = M_n + dt·rel − cl_central·dt·(θ·C_b,n+1 + (1−θ)·C_b,n)
+//                              − cl_sink·dt·(θ·C_avg,k,n+1 + (1−θ)·C_avg,k,n)
+// to rounding. A floor is a non-conservative projection and breaks that
+// identity; it is therefore absent here. Any negative concentration the step
+// produces is BOOKED in the ledger (`min_conc`, `neg_mass`) so a gate can fail
+// loudly on it instead of silently repairing it.
+//
+// Rannacher start-up (Rannacher 1984; Giles & Carter 2006)
+// --------------------------------------------------------
+// Right after a dosing event, replace the CN step by two backward-Euler half
+// steps. Backward Euler damps the stiff modes the non-smooth data excites
+// (R → 0 instead of −1); CN then carries the smooth remainder at second order.
+// The caller decides which steps are start-up steps (`startup = true` for the
+// `pbpk28_rannacher_startup_steps()` steps after each bolus / input switch-on).
+// After the start-up the step is plain CN again, so a stiff mode re-excited
+// away from any dosing event (e.g. by a strong organ sink on a smooth tail)
+// rings again: use the L-stable TR-BDF2 step below for such problems.
+//
+// Quadrature: the ledger accumulates ∫C dt with the method's OWN weights
+// (dt·(θ·C_{n+1} + (1−θ)·C_n)). For CN that is the trapezoid; for a
+// backward-Euler half step it is the right-endpoint rule. Using the trapezoid
+// across a backward-Euler sub-step would break M(T) + CL·AUC = Dose.
+//
+// Madaros multimodule native workarounds carried over from tsit5_pbpk28.sio
+// (docs/audit/MADAROS_IMPORTED_PBPK28_CN_SIGSEGV_2026-08-16.md): state is
+// advanced in place through `&!`, and every second loop over a local
+// `[f64; 14]` lives in its own function behind a `&[f64; 14]` parameter.
+//
+// Literature (cited from the author's knowledge; verify before quoting):
+//   Rannacher R. Finite element solution of diffusion problems with irregular
+//     data. Numer. Math. 43 (1984) 309–327.
+//   Giles MB, Carter R. Convergence analysis of Crank–Nicolson and Rannacher
+//     time-marching. J. Comput. Finance 9(4) (2006) 89–112.
+//   Shampine LF. Conservation laws and the numerical solution of ODEs.
+//     Comput. Math. Appl. 12B (1986) 1287–1296.
+
+use darwin_pbpk::core::pbpk28_params::*
+
+// Running mass account for one PBPK28 state advanced by the steps below.
+// Every flow is integrated with the stepping method's own quadrature, so
+//     pbpk28_total_mass(state) + eliminated + sink_removed − administered
+// equals the initial body mass to rounding (`pbpk28_ledger_residual`).
+pub struct PBPK28Ledger {
+    pub administered: f64,       // Σ dt·rel_mid into blood (mg)
+    pub eliminated:   f64,       // cl_central · ∫C_b dt (mg)
+    pub sink_removed: f64,       // cl_sink · ∫C_avg,k dt (mg), organ sink
+    pub auc:          [f64; 14], // ∫C_avg,i dt (mg·h/L); i = 0 is blood
+    pub min_conc:     f64,       // most negative concentration after any step (≤ 0)
+    pub neg_mass:     f64,       // largest Σ V·min(C, 0) magnitude after any step (mg)
+    pub steps:        i32,       // θ sub-steps taken
+}
+
+pub fn pbpk28_ledger_zero() -> PBPK28Ledger {
+    PBPK28Ledger {
+        administered: 0.0,
+        eliminated:   0.0,
+        sink_removed: 0.0,
+        auc:          [0.0; 14],
+        min_conc:     0.0,
+        neg_mass:     0.0,
+        steps:        0,
+    }
+}
+
+// Organ-average concentrations C_avg,i = (V_v·C_v + V_t·C_t)/V_i into `*out`
+// (blood: C_v[0]). Same volumes as `pbpk28_organ_average` / `pbpk28_total_mass`.
+fn p28t_organ_avgs(s: &PBPKState28, p: PBPKParams28, out: &![f64; 14]) with Mut, Div {
+    (*out)[0] = (*s).cv[0]
+    var i: i32 = 1
+    while i < 14 {
+        let vi = p.v_ref[i]
+        let vf = p.vasc_frac[i]
+        let vv = vi * vf
+        let vt = vi * (1.0 - vf)
+        (*out)[i] = (vv * (*s).cv[i] + vt * (*s).ct[i]) / vi
+        i = i + 1
+    }
+}
+
+// Reconstruct the new state from the Schur coefficients. No floor: see header.
+fn p28t_apply_schur(
+    state: &!PBPKState28,
+    cb_new: f64,
+    a_v: &[f64; 14],
+    b_v: &[f64; 14],
+    a_t: &[f64; 14],
+    b_t: &[f64; 14]
+) with Mut, Div {
+    (*state).cv[0] = cb_new
+    var i: i32 = 1
+    while i < 14 {
+        (*state).cv[i] = (*a_v)[i] + (*b_v)[i] * cb_new
+        (*state).ct[i] = (*a_t)[i] + (*b_t)[i] * cb_new
+        i = i + 1
+    }
+}
+
+// Add w · C_avg to every organ AUC and the matching elimination / organ-sink
+// mass to the ledger. `w` is one quadrature weight times the step length.
+// Returns the sink mass booked (0.0 when sink_organ is outside 1..13).
+fn p28t_accum(
+    ledger: &!PBPK28Ledger,
+    avgs: &[f64; 14],
+    w: f64,
+    cl_central: f64,
+    sink_organ: i32,
+    cl_sink: f64
+) -> f64 with Mut {
+    var i: i32 = 0
+    while i < 14 {
+        (*ledger).auc[i] = (*ledger).auc[i] + w * (*avgs)[i]
+        i = i + 1
+    }
+    (*ledger).eliminated = (*ledger).eliminated + cl_central * (w * (*avgs)[0])
+    var sink = 0.0
+    if sink_organ >= 1 && sink_organ < 14 {
+        sink = cl_sink * (w * (*avgs)[sink_organ])
+    }
+    (*ledger).sink_removed = (*ledger).sink_removed + sink
+    return sink
+}
+
+// Book any negative concentration in `*state` (no repair: see header).
+fn p28t_negativity(ledger: &!PBPK28Ledger, state: &PBPKState28, p: PBPKParams28) with Mut {
+    var neg = 0.0
+    var cmin = (*ledger).min_conc
+    let cb = (*state).cv[0]
+    if cb < 0.0 {
+        neg = neg + p.v_ref[0] * cb
+        if cb < cmin { cmin = cb }
+    }
+    var i: i32 = 1
+    while i < 14 {
+        let vi = p.v_ref[i]
+        let vf = p.vasc_frac[i]
+        let cv = (*state).cv[i]
+        let ct = (*state).ct[i]
+        if cv < 0.0 {
+            neg = neg + vi * vf * cv
+            if cv < cmin { cmin = cv }
+        }
+        if ct < 0.0 {
+            neg = neg + vi * (1.0 - vf) * ct
+            if ct < cmin { cmin = ct }
+        }
+        i = i + 1
+    }
+    (*ledger).min_conc = cmin
+    let neg_abs = 0.0 - neg
+    if neg_abs > (*ledger).neg_mass { (*ledger).neg_mass = neg_abs }
+}
+
+// One clamp-free θ-step with an optional first-order organ sink
+// (flux = cl_sink · C_avg,k on organ k = sink_organ ∈ 1..13; any other
+// sink_organ, or cl_sink ≤ 0, means no sink). The sink enters organ k's 2×2
+// block with rate k_s = cl_sink / V_k on both C_v,k and C_t,k: implicit
+// diagonal +θ·dt·k_s, explicit diagonal −(1−θ)·dt·k_s. Advances `*state`,
+// books the step into `*ledger`, and returns the sink mass (mg) removed over
+// the step.
+pub fn pbpk28_theta_step_sink_mut(
+    state: &!PBPKState28,
+    p: PBPKParams28,
+    rel_mid: f64,
+    dt: f64,
+    theta: f64,
+    sink_organ: i32,
+    cl_sink: f64,
+    ledger: &!PBPK28Ledger
+) -> f64 with Mut, Div {
+    var old_avg: [f64; 14] = [0.0; 14]
+    p28t_organ_avgs(state, p, &!old_avg)
+
+    var a_v: [f64; 14] = [0.0; 14]
+    var b_v: [f64; 14] = [0.0; 14]
+    var a_t: [f64; 14] = [0.0; 14]
+    var b_t: [f64; 14] = [0.0; 14]
+    let hi = theta * dt
+    let he = (1.0 - theta) * dt
+    let vb = p.v_ref[0]
+    let has_sink = sink_organ >= 1 && sink_organ < 14 && cl_sink > 0.0
+
+    var sum_q = 0.0
+    var i: i32 = 1
+    while i < 14 {
+        sum_q = sum_q + p.q[i]
+        i = i + 1
+    }
+    // Blood-row out-rate (Σ Q + CL)/V_b.
+    let k0 = (sum_q + p.cl_central) / vb
+    let big_s = hi * k0
+
+    let cb_old = (*state).cv[0]
+    var rhs0 = (1.0 - he * k0) * cb_old + dt * rel_mid / vb
+
+    var sum_beta_a = 0.0
+    var sum_beta_b = 0.0
+
+    i = 1
+    while i < 14 {
+        let vi = p.v_ref[i]
+        let vf = p.vasc_frac[i]
+        let vv_raw = vi * vf
+        let vt_raw = vi * (1.0 - vf)
+        // Same degenerate-volume floor as the CN kernel (parity-gate case 2).
+        let vv = if vv_raw < 1.0e-30 { 1.0e-30 } else { vv_raw }
+        let vt = if vt_raw < 1.0e-30 { 1.0e-30 } else { vt_raw }
+        let kp = p.kp[i]
+        let ps = p.ps[i]
+        let qi = p.q[i]
+        let ks = if has_sink && i == sink_organ { cl_sink / vi } else { 0.0 }
+
+        let kv  = (qi + ps) / vv      // vascular out-rate
+        let kvt = ps / (vv * kp)      // tissue → vascular
+        let ktv = ps / vt             // vascular → tissue
+        let kt  = ps / (vt * kp)      // tissue out-rate
+
+        let beta_i  = hi * qi / vb
+        let gamma_i = hi * qi / vv
+        let pp  = 1.0 + hi * (kv + ks)
+        let qq  = hi * kvt
+        let rr  = hi * ktv
+        let sb  = 1.0 + hi * (kt + ks)
+        let det = pp * sb - qq * rr
+
+        let cv_old = (*state).cv[i]
+        let ct_old = (*state).ct[i]
+        rhs0 = rhs0 + (he * qi / vb) * cv_old
+
+        let rhs_v = (he * qi / vv) * cb_old + (1.0 - he * (kv + ks)) * cv_old + (he * kvt) * ct_old
+        let rhs_t = (he * ktv) * cv_old + (1.0 - he * (kt + ks)) * ct_old
+
+        let av = (sb * rhs_v + qq * rhs_t) / det
+        let bv = (sb * gamma_i) / det
+        a_v[i] = av
+        b_v[i] = bv
+        a_t[i] = (rr * rhs_v + pp * rhs_t) / det
+        b_t[i] = (rr * gamma_i) / det
+
+        sum_beta_a = sum_beta_a + beta_i * av
+        sum_beta_b = sum_beta_b + beta_i * bv
+        i = i + 1
+    }
+
+    let cb_new = (rhs0 + sum_beta_a) / ((1.0 + big_s) - sum_beta_b)
+    p28t_apply_schur(state, cb_new, &a_v, &b_v, &a_t, &b_t)
+
+    // Book with the θ-method's own quadrature: dt·((1−θ)·C_n + θ·C_{n+1}).
+    var new_avg: [f64; 14] = [0.0; 14]
+    p28t_organ_avgs(state, p, &!new_avg)
+    let sink_org = if has_sink { sink_organ } else { 0 }
+    let s_old = p28t_accum(ledger, &old_avg, he, p.cl_central, sink_org, cl_sink)
+    let s_new = p28t_accum(ledger, &new_avg, hi, p.cl_central, sink_org, cl_sink)
+    p28t_negativity(ledger, state, p)
+    (*ledger).administered = (*ledger).administered + dt * rel_mid
+    (*ledger).steps = (*ledger).steps + 1
+    return s_old + s_new
+}
+
+// Sink-free θ-step.
+pub fn pbpk28_theta_step_mut(
+    state: &!PBPKState28,
+    p: PBPKParams28,
+    rel_mid: f64,
+    dt: f64,
+    theta: f64,
+    ledger: &!PBPK28Ledger
+) with Mut, Div {
+    let _none = pbpk28_theta_step_sink_mut(state, p, rel_mid, dt, theta, 0, 0.0, ledger)
+}
+
+// One step of length dt under Rannacher time-marching: two backward-Euler half
+// steps when `startup` (a step right after a dosing event), otherwise one
+// clamp-free CN step. `rel_mid` is held over the whole step either way, so the
+// administered mass is dt·rel_mid in both branches. Returns the organ-sink
+// mass removed over the step.
+pub fn pbpk28_rannacher_step_sink_mut(
+    state: &!PBPKState28,
+    p: PBPKParams28,
+    rel_mid: f64,
+    dt: f64,
+    startup: bool,
+    sink_organ: i32,
+    cl_sink: f64,
+    ledger: &!PBPK28Ledger
+) -> f64 with Mut, Div {
+    if startup {
+        let half = 0.5 * dt
+        let s1 = pbpk28_theta_step_sink_mut(state, p, rel_mid, half, 1.0, sink_organ, cl_sink, ledger)
+        let s2 = pbpk28_theta_step_sink_mut(state, p, rel_mid, half, 1.0, sink_organ, cl_sink, ledger)
+        return s1 + s2
+    }
+    return pbpk28_theta_step_sink_mut(state, p, rel_mid, dt, 0.5, sink_organ, cl_sink, ledger)
+}
+
+// Sink-free Rannacher step.
+pub fn pbpk28_rannacher_step_mut(
+    state: &!PBPKState28,
+    p: PBPKParams28,
+    rel_mid: f64,
+    dt: f64,
+    startup: bool,
+    ledger: &!PBPK28Ledger
+) with Mut, Div {
+    let _none = pbpk28_rannacher_step_sink_mut(state, p, rel_mid, dt, startup, 0, 0.0, ledger)
+}
+
+// Number of steps after a dosing event that take the backward-Euler start-up
+// (Giles & Carter 2006: two CN steps → four half steps). Measured on the
+// rapamycin 5 mg bolus at dt = 0.5 h: one start-up step leaves a booked
+// negative mass of 2.7e-5 mg, two leave 3.1e-10 mg
+// (docs/audit/repro/pbpk28_rannacher_consumers_probe.sio).
+pub fn pbpk28_rannacher_startup_steps() -> i32 { return 2 }
+
+// ─── TR-BDF2 (Bank et al. 1985; Hosea & Shampine 1996) ─────────────────────
+// L-stable (R(∞) = 0) and second-order throughout, for problems where stiff
+// modes are re-excited away from any dosing event — e.g. an organ sink with
+// θ·dt·k_s ≫ 1 on a smooth decaying tail, where Rannacher's plain-CN
+// continuation rings again. γ = 2 − √2, so both stages share the implicit
+// weight γ·dt/2 = d·dt:
+//   stage 1 (trapezoid over γ·dt):  x_γ = θ-step(x_n; θ = 1/2, length γ·dt)
+//   stage 2 (BDF2):  (I − d·dt·A)·x_{n+1} = a·x_γ − (a−1)·x_n + d·dt·b
+//                    = θ-step(a·x_γ − (a−1)·x_n; θ = 1, length d·dt)
+// with d = (1−γ)/(2−γ) = 1 − 1/√2 and a = 1/(γ(2−γ)) = (1 + √2)/2.
+// Its mass identity carries the b-weights (w, w, d), w = 1/(2(2−γ)) = 1/(2√2):
+//   M_{n+1} = M_n + dt·rel − dt·(w·c(x_n) + w·c(x_γ) + d·c(x_{n+1})),
+// c(x) = cl_central·C_b + cl_sink·C_avg,k. The ledger is booked with exactly
+// those weights; the stage-internal bookings go to a scratch ledger that is
+// discarded.
+fn p28t_trbdf2_gamma() -> f64 { return 0.5857864376269049 }   // 2 − √2
+fn p28t_trbdf2_d() -> f64 { return 0.2928932188134524 }       // 1 − 1/√2
+fn p28t_trbdf2_w() -> f64 { return 0.3535533905932738 }       // 1/(2√2)
+fn p28t_trbdf2_a() -> f64 { return 1.2071067811865475 }       // (1 + √2)/2
+
+fn p28t_save(state: &PBPKState28, xv: &![f64; 14], xt: &![f64; 14]) with Mut {
+    var i: i32 = 0
+    while i < 14 {
+        (*xv)[i] = (*state).cv[i]
+        (*xt)[i] = (*state).ct[i]
+        i = i + 1
+    }
+}
+
+// *state ← a·(*state) − (a−1)·x_n
+fn p28t_bdf2_combine(state: &!PBPKState28, xv: &[f64; 14], xt: &[f64; 14], a: f64) with Mut {
+    let am1 = a - 1.0
+    var i: i32 = 0
+    while i < 14 {
+        (*state).cv[i] = a * (*state).cv[i] - am1 * (*xv)[i]
+        (*state).ct[i] = a * (*state).ct[i] - am1 * (*xt)[i]
+        i = i + 1
+    }
+}
+
+// One TR-BDF2 step of length dt with an optional organ sink (same sink
+// convention as `pbpk28_theta_step_sink_mut`). `rel_mid` is held over the
+// step. Returns the sink mass (mg) removed over the step.
+pub fn pbpk28_trbdf2_step_sink_mut(
+    state: &!PBPKState28,
+    p: PBPKParams28,
+    rel_mid: f64,
+    dt: f64,
+    sink_organ: i32,
+    cl_sink: f64,
+    ledger: &!PBPK28Ledger
+) -> f64 with Mut, Div {
+    let gamma = p28t_trbdf2_gamma()
+    let d = p28t_trbdf2_d()
+    let w = p28t_trbdf2_w()
+    var old_avg: [f64; 14] = [0.0; 14]
+    p28t_organ_avgs(state, p, &!old_avg)
+    var xn_v: [f64; 14] = [0.0; 14]
+    var xn_t: [f64; 14] = [0.0; 14]
+    p28t_save(state, &!xn_v, &!xn_t)
+
+    var scratch = pbpk28_ledger_zero()
+    let _s1 = pbpk28_theta_step_sink_mut(state, p, rel_mid, gamma * dt, 0.5, sink_organ, cl_sink, &!scratch)
+    var mid_avg: [f64; 14] = [0.0; 14]
+    p28t_organ_avgs(state, p, &!mid_avg)
+    p28t_bdf2_combine(state, &xn_v, &xn_t, p28t_trbdf2_a())
+    let _s2 = pbpk28_theta_step_sink_mut(state, p, rel_mid, d * dt, 1.0, sink_organ, cl_sink, &!scratch)
+    var new_avg: [f64; 14] = [0.0; 14]
+    p28t_organ_avgs(state, p, &!new_avg)
+
+    let has_sink = sink_organ >= 1 && sink_organ < 14 && cl_sink > 0.0
+    let sink_org = if has_sink { sink_organ } else { 0 }
+    let k0 = p28t_accum(ledger, &old_avg, w * dt, p.cl_central, sink_org, cl_sink)
+    let k1 = p28t_accum(ledger, &mid_avg, w * dt, p.cl_central, sink_org, cl_sink)
+    let k2 = p28t_accum(ledger, &new_avg, d * dt, p.cl_central, sink_org, cl_sink)
+    // Negativity is booked on the returned state x_{n+1} only. The stage x_γ
+    // is internal: right after a bolus its CN stage rings negative, and the
+    // quadrature carries that exactly (the identity above still holds), but
+    // it is not a state any caller sees.
+    p28t_negativity(ledger, state, p)
+    (*ledger).administered = (*ledger).administered + dt * rel_mid
+    (*ledger).steps = (*ledger).steps + scratch.steps
+    return k0 + k1 + k2
+}
+
+// Sink-free TR-BDF2 step.
+pub fn pbpk28_trbdf2_step_mut(
+    state: &!PBPKState28,
+    p: PBPKParams28,
+    rel_mid: f64,
+    dt: f64,
+    ledger: &!PBPK28Ledger
+) with Mut, Div {
+    let _none = pbpk28_trbdf2_step_sink_mut(state, p, rel_mid, dt, 0, 0.0, ledger)
+}
+
+// Mass-balance residual (mg): body now + everything that left − everything
+// that entered − body at the start. Zero to rounding for any sequence of
+// θ / Rannacher / TR-BDF2 steps booked into `ledger`.
+pub fn pbpk28_ledger_residual(ledger: PBPK28Ledger, s: PBPKState28, p: PBPKParams28, m0: f64) -> f64 with Mut {
+    let body = pbpk28_total_mass(s, p)
+    return body + ledger.eliminated + ledger.sink_removed - ledger.administered - m0
+}
+
+// ─── Gate bounds ────────────────────────────────────────────────────────────
+// Relative bound on |residual| / scale after `steps` sub-steps. The identity
+// is exact in real arithmetic, so only rounding remains; the budget is ~4.5
+// ulp of 1.0 per sub-step (steps·1e-15), floored at 1e-12 for the O(30)-term
+// mass sums themselves. This is a heuristic rounding budget, not a proven
+// floating-point error bound (the Schur solve's conditioning grows with
+// dt·(Q+PS)/V_v, up to ~2·10⁴ at dt = 0.5 h). Measured residuals sit 3–30×
+// below it on both engines; a real conservation defect is 10⁹× above it.
+// Never widen it to admit an observed failure.
+pub fn pbpk28_mass_tol_rel(steps: i32) -> f64 {
+    let t = (steps as f64) * 1.0e-15
+    if t > 1.0e-12 { return t }
+    return 1.0e-12
+}
+
+// Booked negative mass (mg) a run may carry and still count as clean: half
+// the last digit of a 6-decimal mg print. No second-order linear method is
+// positivity-preserving at these dt (Bolley & Crouzeix 1978), so this is a
+// resolution bound, not a rounding bound; the ledger records the real value.
+pub fn pbpk28_neg_mass_bound_mg() -> f64 { return 5.0e-7 }
+
+// Mass-balance gate: residual within `pbpk28_mass_tol_rel(steps)`·scale and no
+// negativity above `pbpk28_neg_mass_bound_mg()`. `scale` is the mass the run
+// handled (dose, or administered mass for a depot).
+pub fn pbpk28_mass_gate_ok(ledger: PBPK28Ledger, s: PBPKState28, p: PBPKParams28, m0: f64, scale: f64) -> bool with Mut {
+    let r = pbpk28_ledger_residual(ledger, s, p, m0)
+    let ra = if r < 0.0 { 0.0 - r } else { r }
+    return ra <= pbpk28_mass_tol_rel(ledger.steps) * scale && ledger.neg_mass <= pbpk28_neg_mass_bound_mg()
+}
+
+// Print the gate's inputs (scaled so they read on both engines' fixed-point
+// print) and return its verdict. `m0` is the initial body mass and the scale.
+pub fn pbpk28_mass_gate_report(ledger: PBPK28Ledger, s: PBPKState28, p: PBPKParams28, m0: f64) -> bool with IO, Mut {
+    let r = pbpk28_ledger_residual(ledger, s, p, m0)
+    let ra = if r < 0.0 { 0.0 - r } else { r }
+    print("  sub-steps: ")
+    println(ledger.steps)
+    print("  |M(T) + eliminated - administered - M(0)| / M(0) x 1e12: ")
+    println(ra / m0 * 1.0e12)
+    print("  bound x 1e12: ")
+    println(pbpk28_mass_tol_rel(ledger.steps) * 1.0e12)
+    print("  booked negative mass (mg) x 1e12: ")
+    println(ledger.neg_mass * 1.0e12)
+    return pbpk28_mass_gate_ok(ledger, s, p, m0, m0)
+}
+
+// ─── Bolus-IV run ───────────────────────────────────────────────────────────
+// Shared by the dissertation GUM / Hessian / cumulant / MC / Sobol layers:
+// `dose_mg` into blood at t = 0 (the dosing event), Rannacher start-up, fixed
+// dt with the last step clipped to t_end. `*st` must be a zero state. Returns
+// false — the caller treats the run as failed — on a non-finite or runaway
+// (|C_b| > 1e12 mg/L) blood value, on more than `max_steps` steps, or when the
+// booked negative mass exceeds `pbpk28_neg_mass_bound_mg()` (fail loudly
+// instead of flooring). State and ledger are left where the run stopped.
+pub fn pbpk28_bolus_run_mut(
+    p: PBPKParams28,
+    dose_mg: f64,
+    dt: f64,
+    t_end: f64,
+    max_steps: i32,
+    st: &!PBPKState28,
+    led: &!PBPK28Ledger
+) -> bool with Mut, Div {
+    (*st).cv[0] = dose_mg / p.v_ref[0]
+    let n_start = pbpk28_rannacher_startup_steps()
+    var t = 0.0
+    var k: i32 = 0
+    while t < t_end {
+        if k > max_steps { return false }
+        let dt_use = if t + dt > t_end { t_end - t } else { dt }
+        pbpk28_rannacher_step_mut(st, p, 0.0, dt_use, k < n_start, led)
+        let cb = (*st).cv[0]
+        if cb != cb { return false }
+        if cb > 1.0e12 || cb < -1.0e12 { return false }
+        t = t + dt_use
+        k = k + 1
+    }
+    return (*led).neg_mass <= pbpk28_neg_mass_bound_mg()
+}
