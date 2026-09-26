@@ -11,7 +11,7 @@ use ir::opt_cleanup::{OcpCleanupModuleReceipt, opt_cleanup_module_inplace, OCP_S
 use io::env::{read_env}
 use io::trace::{io_trace_i64_string}
 use check::mod::{check_items_verdict_boot4, check_items_verdict_boot4_with_ontocache_sidecar, check_modules_verdict_boot4, check_program_epistemic_into, check_program_with_artifacts, checker_to_ir_epistemic_into, checker_apply_ir_metadata, checker_apply_ir_ontology_parameter_links_from_items}
-use ir::lower::{lower_hard_error_report, lower_program_to_ir_trace, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_bodies_from_summary_flat_with_epistemic_ref, lower_program_bodies_from_summary_with_epistemic_boxed_owned, lower_dep_program_items_into_acc_with_externs, lower_hard_error_reset, lower_hard_error_pending, ir_instr_census_report, fo_preregister_program_items_multipass, fo_xfer_global_reset}
+use ir::lower::{lower_hard_error_report, lower_program_to_ir_trace, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_bodies_from_summary_flat_with_epistemic_ref, lower_program_bodies_from_summary_with_epistemic_boxed_owned, lower_dep_program_items_into_acc_with_externs, lower_hard_error_reset, lower_hard_error_pending, ir_instr_census_report, fo_preregister_program_items_multipass, fo_xfer_global_reset, lower_fn_tuple_arr_reset, lower_fn_tuple_f64_arrays_collect}
 use native::codegen_x86_linux::{compile_native_v2_preview_to_file, native_resolve_target, native_v2_builtin_id_for_name, native_v2_builtin_returns_float}
 use check::knowledge_context::{knowledge_context_validate_items, knowledge_context_validate_items_values_only}
 use resolve::mod::{resolve_modules}
@@ -5579,10 +5579,18 @@ fn module_frontend_lower_single_program_array_direct_box(
     }
 
     fo_xfer_global_reset()
+    lower_fn_tuple_arr_reset()
     let program = (*programs)[0]
-    fo_preregister_program_items_multipass(&program.items)
-    print("lower_array: seed_begin\n")
+    // Copilot review (PR #2516): same class of bug as the multi-mod lane
+    // below -- this preregistered from RAW program.items (dead code included)
+    // while the lowering two lines down filters via
+    // spec_dce_filter_with_global_marks first. Filter before preregistering
+    // too, so the tuple-array collector inside
+    // fo_preregister_program_items_multipass can't exhaust
+    // LOWER_FN_TUPLE_ARR_* on dead functions before a live one is considered.
     let seed_items = spec_dce_filter_with_global_marks(program.items)
+    fo_preregister_program_items_multipass(&seed_items)
+    print("lower_array: seed_begin\n")
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_begin\n") }
     if module_frontend_ir_slot_capacity_exceeded(&seed_items) {
         trace.last_stage = "lower_summary_error"
@@ -5674,10 +5682,22 @@ fn module_frontend_lower_programs_array_direct_box_multi(
     // that reads as Option::None (measured: fo_prereg none=1). Whole-Program
     // by-value load then &prog.items is the proven A14-safe pattern.
     fo_xfer_global_reset()
+    lower_fn_tuple_arr_reset()
+    // Copilot review (PR #2516): this fed RAW prog.items (including dead code
+    // not yet pruned) to fo_preregister_program_items_multipass, which is
+    // also where lower_fn_tuple_f64_arrays_collect runs. A program with more
+    // than IR_MAX_FUNCS dead tuple-array-returning functions could exhaust
+    // LOWER_FN_TUPLE_ARR_* before any LIVE function was even considered,
+    // silently dropping metadata for code that survives DCE and actually
+    // gets lowered a few lines below via spec_dce_filter_with_global_marks
+    // (seed_items). Filter here too, with the same helper, so preregistration
+    // -- pure-fn-transfer AND the tuple-array collector -- only ever sees the
+    // item set that will actually be lowered.
     var fo_pi: i64 = 0
     while fo_pi < loaded {
         var prog = (*programs)[fo_pi as usize]
-        fo_preregister_program_items_multipass(&prog.items)
+        let live_items = spec_dce_filter_with_global_marks(prog.items)
+        fo_preregister_program_items_multipass(&live_items)
         fo_pi = fo_pi + 1
     }
     print("lower_array: seed_begin\n")
@@ -6073,6 +6093,20 @@ pub fn bridge_lower_single_module_box(main_path: string, trace: &! LoadMultimodu
     trace.last_stage = "load_main"
     trace.last_module_index = 0
     let program = load_module_file(main_path)
+    // Copilot review (PR #2516): this direct single-module entry point never
+    // ran the pre-pass every other lowering lane runs before summary/body
+    // lowering (module_frontend_lower_single_program_array_direct_box /
+    // lowerer_lower_program_items_mut both reset then collect). Without it
+    // LOWER_FN_TUPLE_ARR_* started empty (or stale from a prior compile in
+    // the same process), so `let (ov, ou) = f()` on this path could not
+    // classify an `[f64; N]` tuple-return slot as an array. Calls the
+    // collector directly rather than fo_preregister_program_items_multipass
+    // (which the other lanes use): that also runs FO pure-fn-transfer
+    // preregistration, an unrelated behavior change this, the single most
+    // common (zero-import) compile lane, should not pick up as a side effect
+    // of a tuple-array-mask fix.
+    lower_fn_tuple_arr_reset()
+    lower_fn_tuple_f64_arrays_collect(&program.items)
     let parse_errors = parser_last_error_count()
     if parse_errors > 0 {
         trace.last_stage = "parse_error"
@@ -6358,6 +6392,15 @@ fn module_frontend_lower_specialized_items_box(
     program_count: i64,
     trace: &! LoadMultimoduleIrTrace
 ) -> ModuleFrontendLowerDirectBoxResult with IO, Mut, Panic, Div, Alloc {
+    // Copilot review (PR #2516): this reaches lower_fn_tuple_f64_arrays_collect
+    // eventually (via module_frontend_lower_program_items_box_traced_with_externs
+    // -> body lowering -> lowerer_fo_preregister_pure_fns_multipass_mut), but
+    // never reset the table first, unlike the other top-level compile entry
+    // points (module_frontend_lower_single_program_array_direct_box,
+    // load_multimodule_ir_to_box_traced). Without this reset, a second
+    // specialized compile in the same process could see a prior program's
+    // stale mask survive for a function of the same name here.
+    lower_fn_tuple_arr_reset()
     print("lower_specialized: begin\n")
     // program_count stays at the original loaded module count so extern
     // lookup still sees sibling modules; the ITEMS being lowered are the
@@ -7863,6 +7906,38 @@ fn load_multimodule_ir_to_box_traced(main_path: string, trace: &! LoadMultimodul
     trace.loaded_modules = 1
     trace.last_stage = "load_main"
     trace.last_module_index = 0
+
+    // Copilot review (PR #2516): the no-use and single-import branches below
+    // both reach body lowering through load_multimodule_lower_program_traced
+    // -> lower_program_bodies_from_summary_flat_with_epistemic_ref ->
+    // lower_program_bodies_ref, none of which reset LOWER_FN_TUPLE_ARR_* on
+    // this entry point. Reset once here, before either branch runs, per the
+    // "once per compilation, before collecting modules" contract at
+    // lower_fn_tuple_arr_reset's declaration -- otherwise a second compile
+    // in the same process could see the first compile's masks leak forward.
+    //
+    // Copilot review (PR #2516), round 11 finding 1: this used to ALSO
+    // collect right here, from main_prog.items -- but at this point in the
+    // function that is the RAW, pre-specialization item list; both
+    // single-module branches below reassign main_prog.items =
+    // specialize_generics(main_prog.items) immediately afterward, and the
+    // multi-module branch further down never uses this collection at all
+    // (it lowers a separately-merged/specialized item list via
+    // module_frontend_lower_specialized_items_box, which does its own
+    // reset and relies on body lowering to self-collect). Collecting the
+    // RAW list here meant every unused generic template that
+    // spec_finalize_items later drops as dead code still got a
+    // LOWER_FN_TUPLE_ARR_* entry -- wasting capacity (up to the 16384 cap)
+    // on functions that never exist post-specialization, which could push
+    // out real live functions once the table filled up: the same capacity-
+    // truncation class of bug fixed at the other preregistration sites.
+    // lower_program_bodies_ref already collects the FINAL (specialized)
+    // item list on its own, through lowerer_fo_preregister_pure_fns_
+    // multipass_mut -- called from load_multimodule_lower_program_traced
+    // for both single-module branches below -- so this raw-list collection
+    // was redundant as well as wasteful. Removed; the reset above is
+    // retained (still correct and required at this compile boundary).
+    lower_fn_tuple_arr_reset()
 
     if !module_frontend_file_maybe_has_use(main_path) {
         trace.resolved_modules = 1

@@ -58,9 +58,11 @@ use frontend_callsite_probe::{run_frontend_callsite_probe}
 use claim_executor::{claim_executor_verify}
 use parser::parser::{parser_last_error_count}
 use ir::opt_strategy::{ir_opt_apply_strategy, ir_opt_find_return_vreg, ir_opt_max_label, ir_opt_max_vreg}
-use ir::lower::{ir_patch_validated_calls, lower_program_to_ir, lower_program_to_ir_with_epistemic, lower_program_to_ir_probe_summary_ref, lower_program_to_ir_probe_summary_box_ref, lower_program_to_ir_summary_box_probe_with_epistemic_ref, lower_program_function_body_from_summary_with_epistemic_ref, lower_program_to_ir_summary_flat_with_epistemic_ref, lower_program_function_body_from_summary_flat_with_epistemic_ref, lower_program_to_ir_summary_flat_owned_with_epistemic_ref}
+use ir::lower::{ir_patch_validated_calls, lower_program_to_ir, lower_program_to_ir_with_epistemic, lower_program_to_ir_probe_summary_ref, lower_program_to_ir_probe_summary_box_ref, lower_program_to_ir_summary_box_probe_with_epistemic_ref, lower_program_function_body_from_summary_with_epistemic_ref, lower_program_to_ir_summary_flat_with_epistemic_ref, lower_program_function_body_from_summary_flat_with_epistemic_ref, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_to_ir_summary_with_epistemic}
 use ir::lower::{lower_program_to_ir_with_epistemic_ref, lower_program_to_ir_ordered_with_epistemic_boxed_trace_ref, lower_monolithic_public_probe_trace_set}
 use ir::lower::{lower_program_function_body_from_program_with_epistemic_ref}
+use ir::lower::{lower_program_function_body_from_summary_with_epistemic}
+use ir::lower::{lower_fn_tuple_arr_reset, lower_fn_tuple_f64_arrays_collect, lower_fn_tuple_f64_array_mask}
 use ir::normalize::*
 use ir::const_prop::{cp_check_load_imm, cp_empty_instrs, cp_make_test_func, cp_optimize_function}
 use ir::dce::{dce_check_nop, dce_empty_instrs, dce_make_test_func, dce_optimize_function}
@@ -3800,6 +3802,10 @@ fn print_help() with IO {
     println("  --probe-load-ir <source.sio>  Probe parse/resolve/typecheck/IR lowering path")
     println("  --probe-load-ir-trace <source.sio>  Probe traced IR lowering path with stage counters")
     println("  --probe-native-streaming <source.sio>  Probe summary/body/native-v2 status for the single-module streaming path")
+    println("  --probe-filtered-body-lower <source.sio>  Probe the non-flat lower_program_bodies_filtered_ref lane, one function at a time")
+    println("  --probe-filtered-body-reset-boundary <file_a.sio> <file_b.sio> <fn_name>  Lower fn_name through lower_program_function_body_from_summary_with_epistemic_ref for two different inputs in one process and report its mask after each, to catch a reset-boundary leak between them")
+    println("  --probe-tuple-arr-capacity <source.sio> <fn_name>  Collect LOWER_FN_TUPLE_ARR_* directly from raw parsed items (bypasses DCE) and report one function's mask")
+    println("  --probe-tuple-arr-reset-boundary <file_a.sio> <file_b.sio> <fn_name>  Call lower_program_to_ir on two different inputs in one process and report fn_name's mask after each, to catch a reset-boundary leak between them")
     println("  --probe-ir-callsite <source.sio> <caller_fn> <callee_fn>  Probe lowered callsite hidden-arg behavior")
     println("  --probe-ir-opt-strategy <source.sio>  Probe ir_opt_apply_strategy() on instrumented IR fns")
     println("  --probe-wasm-dispatch <source.sio> [out.wasm]  Probe wasm dispatch marker path")
@@ -9686,6 +9692,309 @@ fn run_probe_native_streaming(args: ArgList, flag_index: i64) with IO, Mut, Pani
     print(stream_pair.1.error_msg)
     print(" len=")
     print_int(stream_pair.1.len)
+    print("\n")
+}
+
+// --probe-filtered-body-lower <file.sio>: Copilot review (PR #2516), finding
+// D on the fourth review round of the madaros-f64-array-element-kind PR.
+// run_probe_native_streaming above calls
+// lower_program_function_body_from_summary_FLAT_with_epistemic_ref, which
+// delegates to lower_program_bodies_ref -- a DIFFERENT lane from
+// lower_program_bodies_filtered_ref (the streaming single-function lane an
+// earlier round of that same review wired the tuple-array collector into).
+// Only the NON-flat lower_program_function_body_from_summary_with_
+// epistemic_ref reaches lower_program_bodies_filtered_ref, and nothing else
+// callable from the CLI drove it directly. This probe does, one function at
+// a time, and reports how many float-register marker instructions
+// (ir_mark_float_reg emits an IrNop with dst set to the marked register; an
+// ordinary IrNop's dst stays IR_INVALID_REG/-1) each body got -- direct,
+// scriptable evidence that a tuple-array-returning callee's destructured
+// array actually got classified as float THROUGH THIS SPECIFIC LANE, not
+// just that lowering completed without error.
+fn run_probe_filtered_body_lower(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 1 >= args.len {
+        panic("probe_filtered_body_lower: missing source file argument")
+    }
+    let source_path = arg_list_get(args, flag_index + 1)
+    let program = load_module_file(source_path)
+    let parse_errors = parser_last_error_count()
+    if parse_errors > 0 {
+        print("probe_filtered_body_lower: parser_errors=")
+        print_int(parse_errors)
+        print("\n")
+        panic("probe_filtered_body_lower parse failed")
+    }
+
+    let imports = extract_imports_from_ast(program)
+    print("probe_filtered_body_lower: imports=")
+    print_int(imports.count)
+    print("\n")
+    if imports.count > 0 {
+        print("probe_filtered_body_lower: fallback_imports\n")
+        return
+    }
+
+    var epistemic = ir_empty_epistemic_section()
+    print("probe_filtered_body_lower: typecheck_begin\n")
+    if !check_program_epistemic_into(program, &! epistemic) {
+        panic("probe_filtered_body_lower type check failed")
+    }
+    print("probe_filtered_body_lower: typecheck_ok\n")
+
+    print("probe_filtered_body_lower: summary_begin\n")
+    let summary_result = lower_program_to_ir_summary_with_epistemic(program, epistemic)
+    if summary_result.had_error {
+        panic("probe_filtered_body_lower summary failed")
+    }
+    print("probe_filtered_body_lower: summary_ok\n")
+
+    // Copilot review (PR #2516): lower_program_bodies_filtered_ref (reached
+    // by every per-function call below, via
+    // lower_program_function_body_from_summary_with_epistemic_ref) collects
+    // into the same process-global LOWER_FN_TUPLE_ARR_* table as
+    // lower_program_to_ir, whose own leak this same review already fixed by
+    // resetting once per compile (lower_fn_tuple_arr_reset, top of
+    // lower_program_to_ir). This probe's per-function loop below cannot put
+    // that reset inside the shared library call itself: it calls
+    // lower_program_function_body_from_summary_with_epistemic_ref once PER
+    // FUNCTION in this program, and each call's collect() must keep
+    // accumulating (idempotent by name) across that whole loop, not wipe
+    // sibling functions' entries collected by an earlier iteration. Reset
+    // exactly once here instead, at THIS probe's real compile boundary --
+    // before the per-function loop starts, after this program's own summary
+    // is built -- mirroring lower_program_to_ir's own boundary. Without
+    // this, a second program run through this same probe binary in one
+    // process (see --probe-filtered-body-reset-boundary below) would let a
+    // same-named function's mask from the FIRST program leak into the
+    // second, exactly like the lower_program_to_ir bug this mirrors.
+    lower_fn_tuple_arr_reset()
+
+    let summary_module = &(*summary_result.summary.module)
+    let summary_fn_count = (*summary_module).fn_count
+    print("probe_filtered_body_lower: fn_count=")
+    print_int(summary_fn_count)
+    print("\n")
+
+    var fi: i64 = 0
+    while fi < summary_fn_count {
+        let fn_name = ir_fn_get(summary_module, fi as usize).name
+        print("probe_filtered_body_lower: body_begin fn=")
+        compiler_manifest_print_name(fn_name)
+        print("\n")
+        // This is the NON-flat variant: it lowers `fn_name`'s body through
+        // Lowerer.lower_program_bodies_filtered_ref, not the flat helper.
+        let body_result = lower_program_function_body_from_summary_with_epistemic_ref(
+            &program,
+            &summary_result.summary,
+            epistemic,
+            fn_name
+        )
+        if body_result.had_error {
+            print("probe_filtered_body_lower: body_error fn=")
+            compiler_manifest_print_name(fn_name)
+            print("\n")
+            panic("probe_filtered_body_lower body lowering failed")
+        }
+        // Direct arena-table read (IR_A_OP/IR_A_DST via ir_region_slot_r), the
+        // same low-level accessor pattern used elsewhere in this codebase for
+        // post-lowering instruction inspection (e.g. IR_A_OP[(ir_region_slot_r(...))
+        // as usize] in ir/const_prop.sio's test helpers).
+        var float_reg_marks: i64 = 0
+        var ii: i64 = 0
+        while ii < body_result.func.instr_count {
+            let slot = ir_region_slot_r(body_result.func.region, ii)
+            let op = IR_A_OP[slot as usize] as IrOpcode
+            let dst = IR_A_DST[slot as usize]
+            if op == IrOpcode::IrNop && dst >= 0 {
+                float_reg_marks = float_reg_marks + 1
+            }
+            ii = ii + 1
+        }
+        // Copilot review (PR #2516), round 6 finding 4: float_reg_marks alone
+        // is not proof the tuple-array COLLECTOR fired through this lane --
+        // any ordinary f64 literal in the body also emits ir_mark_float_reg,
+        // so that count stays positive even if the collector call inside
+        // lower_program_bodies_filtered_ref were removed entirely. Query
+        // LOWER_FN_TUPLE_ARR_* directly for THIS function's own declared
+        // tuple-array-return mask instead: lower_fn_tuple_f64_arrays_collect
+        // (called at the top of lower_program_bodies_filtered_ref, which the
+        // call above just went through) is what would have populated this
+        // entry, so a nonzero mask here is airtight evidence specific to the
+        // fix, not a body-wide literal count.
+        let tuple_arr_mask = lower_fn_tuple_f64_array_mask(fn_name)
+        print("probe_filtered_body_lower: body_ok fn=")
+        compiler_manifest_print_name(fn_name)
+        print(" instrs=")
+        print_int(body_result.func.instr_count)
+        print(" float_reg_marks=")
+        print_int(float_reg_marks)
+        print(" tuple_arr_mask=")
+        print_int(tuple_arr_mask)
+        print("\n")
+        fi = fi + 1
+    }
+}
+
+// --probe-filtered-body-reset-boundary <file_a.sio> <file_b.sio> <fn_name>:
+// Copilot review (PR #2516), round 2 (comment 4108896586): the first version
+// of this probe called the _ref variant with a MANUAL lower_fn_tuple_arr_reset()
+// before each invocation. Round 3 (comment 4109134765) found that making the
+// OWNED wrapper reset unconditionally on every call -- what this probe was
+// changed to test instead -- broke thin-link's actual multi-call-per-unit
+// usage (an imported callee's own mask, collected on an earlier call in the
+// SAME unit, must survive to when the OWNER's body that calls it gets
+// lowered). The wrapper no longer resets itself at all (see its own comment
+// in ir/lower.sio); module_loader.sio's thin_build_compiled_unit now resets
+// once and collects every program the WHOLE unit can reach up front instead.
+// This probe's own scope is narrower (two independent single-file programs,
+// no cross-file calls between them), so it goes back to resetting manually
+// before each call, same shape as --probe-tuple-arr-reset-boundary above --
+// proving file A's and file B's masks stay independent when the CALLER
+// resets at its own correct boundary, whatever that boundary is.
+fn run_probe_filtered_body_reset_boundary(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 3 >= args.len {
+        panic("probe_filtered_body_reset_boundary: expected <file_a.sio> <file_b.sio> <fn_name>")
+    }
+    let path_a = arg_list_get(args, flag_index + 1)
+    let path_b = arg_list_get(args, flag_index + 2)
+    let fn_name_str = arg_list_get(args, flag_index + 3)
+    let target = make_name(fn_name_str)
+
+    let prog_a = load_module_file(path_a)
+    if parser_last_error_count() > 0 {
+        panic("probe_filtered_body_reset_boundary: parse failed for file_a")
+    }
+    var epistemic_a = ir_empty_epistemic_section()
+    if !check_program_epistemic_into(prog_a, &! epistemic_a) {
+        panic("probe_filtered_body_reset_boundary: typecheck failed for file_a")
+    }
+    let summary_a = lower_program_to_ir_summary_with_epistemic(prog_a, epistemic_a)
+    if summary_a.had_error {
+        panic("probe_filtered_body_reset_boundary: summary failed for file_a")
+    }
+    lower_fn_tuple_arr_reset()
+    let body_a = lower_program_function_body_from_summary_with_epistemic(prog_a, summary_a.summary, epistemic_a, target)
+    if body_a.had_error {
+        panic("probe_filtered_body_reset_boundary: body lowering failed for file_a")
+    }
+    print("probe_filtered_body_reset_boundary: after_a fn=")
+    print(fn_name_str)
+    print(" mask=")
+    print_int(lower_fn_tuple_f64_array_mask(target))
+    print("\n")
+
+    let prog_b = load_module_file(path_b)
+    if parser_last_error_count() > 0 {
+        panic("probe_filtered_body_reset_boundary: parse failed for file_b")
+    }
+    var epistemic_b = ir_empty_epistemic_section()
+    if !check_program_epistemic_into(prog_b, &! epistemic_b) {
+        panic("probe_filtered_body_reset_boundary: typecheck failed for file_b")
+    }
+    let summary_b = lower_program_to_ir_summary_with_epistemic(prog_b, epistemic_b)
+    if summary_b.had_error {
+        panic("probe_filtered_body_reset_boundary: summary failed for file_b")
+    }
+    lower_fn_tuple_arr_reset()
+    let body_b = lower_program_function_body_from_summary_with_epistemic(prog_b, summary_b.summary, epistemic_b, target)
+    if body_b.had_error {
+        panic("probe_filtered_body_reset_boundary: body lowering failed for file_b")
+    }
+    print("probe_filtered_body_reset_boundary: after_b fn=")
+    print(fn_name_str)
+    print(" mask=")
+    print_int(lower_fn_tuple_f64_array_mask(target))
+    print("\n")
+}
+
+// --probe-tuple-arr-capacity <file.sio> <fn_name>: Copilot review
+// (PR #2516), finding 3 on the sixth review round. The generated capacity
+// witness in madaros_tuple_arr_capacity_boundary_gate.sh declares 4097
+// tuple-array-returning functions, but round 5's own finding-A fix
+// (filtering the collector's input through spec_dce_filter_with_global_
+// marks) means only functions REACHABLE from `main` ever reach
+// lower_fn_tuple_f64_arrays_collect through the normal compile pipeline --
+// so a witness where only the LAST function is called gets DCE'd down to
+// one collected entry, and the gate silently stopped testing the boundary
+// it claims to. This probe calls the collector directly on the raw,
+// un-DCE'd parsed item list (bypassing the whole module_frontend pipeline,
+// DCE included), then reports the requested function's tuple-array mask --
+// so the gate can populate the table with every generated function
+// regardless of reachability, matching what it was meant to test.
+fn run_probe_tuple_arr_capacity(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 2 >= args.len {
+        panic("probe_tuple_arr_capacity: expected <source.sio> <fn_name>")
+    }
+    let source_path = arg_list_get(args, flag_index + 1)
+    let fn_name_str = arg_list_get(args, flag_index + 2)
+    let program = load_module_file(source_path)
+    let parse_errors = parser_last_error_count()
+    if parse_errors > 0 {
+        print("probe_tuple_arr_capacity: parser_errors=")
+        print_int(parse_errors)
+        print("\n")
+        panic("probe_tuple_arr_capacity parse failed")
+    }
+    lower_fn_tuple_arr_reset()
+    lower_fn_tuple_f64_arrays_collect(&program.items)
+    let target = make_name(fn_name_str)
+    let mask = lower_fn_tuple_f64_array_mask(target)
+    print("probe_tuple_arr_capacity: fn=")
+    print(fn_name_str)
+    print(" mask=")
+    print_int(mask)
+    print("\n")
+}
+
+// --probe-tuple-arr-reset-boundary <file_a.sio> <file_b.sio> <fn_name>:
+// Copilot review (PR #2516), finding 1 on the ninth review round. The
+// public lower_program_to_ir entry point (self-hosted/ir/lower.sio) collects
+// into the process-global tuple-array-mask table but, before this round's
+// fix, never reset it first -- unlike every other top-level compile entry
+// point (module_frontend.sio's four call sites, this file's
+// run_probe_tuple_arr_capacity above). Collection dedupes by name, so two
+// back-to-back lower_program_to_ir calls in one process for two DIFFERENT
+// inputs that both define a function with the same name (here, `fn_name`)
+// let the second call's lowering silently reuse the first call's mask if it
+// differs. This probe reproduces exactly that shape: lower file A, print
+// fn_name's mask, lower file B, print fn_name's mask again -- with the fix,
+// the two masks reflect each file's OWN shape for fn_name; without it, B's
+// reported mask would incorrectly equal A's.
+fn run_probe_tuple_arr_reset_boundary(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 3 >= args.len {
+        panic("probe_tuple_arr_reset_boundary: expected <file_a.sio> <file_b.sio> <fn_name>")
+    }
+    let path_a = arg_list_get(args, flag_index + 1)
+    let path_b = arg_list_get(args, flag_index + 2)
+    let fn_name_str = arg_list_get(args, flag_index + 3)
+    let target = make_name(fn_name_str)
+
+    let prog_a = load_module_file(path_a)
+    if parser_last_error_count() > 0 {
+        panic("probe_tuple_arr_reset_boundary: parse failed for file_a")
+    }
+    let low_a = lower_program_to_ir(prog_a)
+    if low_a.had_error {
+        panic("probe_tuple_arr_reset_boundary: lower failed for file_a")
+    }
+    print("probe_tuple_arr_reset_boundary: after_a fn=")
+    print(fn_name_str)
+    print(" mask=")
+    print_int(lower_fn_tuple_f64_array_mask(target))
+    print("\n")
+
+    let prog_b = load_module_file(path_b)
+    if parser_last_error_count() > 0 {
+        panic("probe_tuple_arr_reset_boundary: parse failed for file_b")
+    }
+    let low_b = lower_program_to_ir(prog_b)
+    if low_b.had_error {
+        panic("probe_tuple_arr_reset_boundary: lower failed for file_b")
+    }
+    print("probe_tuple_arr_reset_boundary: after_b fn=")
+    print(fn_name_str)
+    print(" mask=")
+    print_int(lower_fn_tuple_f64_array_mask(target))
     print("\n")
 }
 
@@ -29016,6 +29325,21 @@ fn main() with IO, Mut, Panic, Div, Alloc {
             return
         } else if mode == "--probe-native-streaming" || starts_with(mode, "--probe-native-stream") {
             run_probe_native_streaming(args, arg_idx)
+            return
+        } else if mode == "--probe-filtered-body-reset-boundary" {
+            // Must be checked before the "--probe-filtered-body" prefix
+            // match below (--probe-filtered-body-lower's own fallback),
+            // which would otherwise swallow this flag too.
+            run_probe_filtered_body_reset_boundary(args, arg_idx)
+            return
+        } else if mode == "--probe-filtered-body-lower" || starts_with(mode, "--probe-filtered-body") {
+            run_probe_filtered_body_lower(args, arg_idx)
+            return
+        } else if mode == "--probe-tuple-arr-capacity" || starts_with(mode, "--probe-tuple-arr-cap") {
+            run_probe_tuple_arr_capacity(args, arg_idx)
+            return
+        } else if mode == "--probe-tuple-arr-reset-boundary" || starts_with(mode, "--probe-tuple-arr-reset") {
+            run_probe_tuple_arr_reset_boundary(args, arg_idx)
             return
         } else if mode == "--probe-load-ir" || starts_with(mode, "--probe-load") {
             run_probe_load_ir(args, arg_idx)

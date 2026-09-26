@@ -64,6 +64,14 @@ struct LowerLocalStack {
     // Tuple-typed local: bit k set iff element k of the tuple is f64. 0 = not a
     // tuple / no float elements. See lower_opt_type_tuple_float_mask (issue #1502).
     tuple_float_mask: Box<LowerLocalI64Slots>,
+    // Tuple-typed local: bit k set iff element k of the tuple is an `[f64; N]`
+    // ARRAY (as opposed to a scalar f64). 0 = no array slots. Kept as its OWN
+    // i64 slot table rather than packed into the high bits of tuple_float_mask:
+    // both masks independently need up to 32 usable bits (matching the existing
+    // #1502 scalar mask's `bit < 32` cap), and packing array bits into bits
+    // 32-63 of one i64 pushes array slot 31 onto the sign bit of the combined
+    // value, corrupting it. See lower_fn_tuple_f64_array_mask.
+    tuple_arr_mask: Box<LowerLocalI64Slots>,
     // Layout index for an aggregate element carried by a local: tuple slot-0
     // fixed arrays and Seq<T> share this slot because those shapes are disjoint.
     tuple0_array_elem_layout: Box<LowerLocalI64Slots>,
@@ -136,6 +144,7 @@ fn empty_lower_local_stack() -> LowerLocalStack with Alloc, Mut {
         is_ref: lowerer_box_local_i64_slots(0),
         scalar_kind: lowerer_box_local_i64_slots(0),
         tuple_float_mask: lowerer_box_local_i64_slots(0),
+        tuple_arr_mask: lowerer_box_local_i64_slots(0),
         tuple0_array_elem_layout: lowerer_box_local_i64_slots(-1),
         tuple_struct_layout: lowerer_box_local_i64_slots(-1),
         tuple_struct_slot: lowerer_box_local_i64_slots(-1),
@@ -734,15 +743,360 @@ fn fo_cov_rho_get(i: i64, j: i64) -> f64 with Mut, Panic, Div {
 }
 var FO_XFER_FWD_HASH: [i64; 64] = [0; 64]
 
+// Copilot review (PR #2516): the byte cap here must match Name.buf's actual
+// capacity (parser/ast.sio: `buf: [i8; 384]`), not an arbitrary smaller
+// bound -- identifiers up to 384 bytes are accepted by the parser, and
+// capping the hash at 64 bytes meant two same-length names sharing a 64-byte
+// prefix but differing only after byte 64 hashed identically, silently
+// colliding in every fo_name_hash-keyed table (FO_XFER, FO_CTOR, and
+// LOWER_FN_TUPLE_ARR_HASH among them).
 fn fo_name_hash(n: Name) -> i64 with Mut, Panic, Div {
     var h: i64 = 5381
     var i: i64 = 0
-    while i < n.len && i < 64 {
+    while i < n.len && i < 384 {
         let b = (n.buf[i as usize] as i64) & 255
         h = h * 33 + b
         i = i + 1
     }
     h + n.len
+}
+
+
+// Tuple-return slots that are f64 ARRAYS, per fn name: bit k set when slot k of
+// the declared return type is `[f64; N]`.
+//
+// `let (ov, ou) = f()` desugars to `let __tupN = f()` + `let ov = __tupN.0`. The
+// #1502 tuple mask only records SCALAR f64 slots and returns_float is 0 for
+// `([f64; 8], [f64; 8])`, so `ov` was never marked as an f64-element array and
+// `p * ov[j]` converted the element's f64 BITS as an i64 (kinetics
+// structural_ensemble under Madaros). Kept out of returns_float on purpose: that
+// code is read by codegen, the optimizer and the IR serializer, where a new
+// nonzero value for these tuples would change behaviour.
+// Sized to IR_MAX_FUNCS (ir.sio:35), not an arbitrary smaller cap: Copilot
+// review (PR #2516) found the previous `[i64; 4096]` sizing silently dropped
+// tuple-array metadata for any function past entry 4096 in a program with
+// more than 4096 top-level fns, even though the IR itself accepts up to
+// IR_MAX_FUNCS. A dropped entry reverts that function's tuple-array slots to
+// the integer path -- the exact corruption this whole side table exists to
+// prevent -- so truncation had to be replaced with a table that cannot
+// overflow before IR_MAX_FUNCS does, rather than with a loud failure.
+var LOWER_FN_TUPLE_ARR_COUNT: i64 = 0
+// `h` (from fo_name_hash below) selects the open-addressed bucket only --
+// see LOWER_FN_TUPLE_ARR_NAME_ID's own comment for the exact-identity check
+// a probe actually verifies against. An earlier round of this review used a
+// SECOND independently-seeded hash here instead of an exact check
+// (h == LOWER_FN_TUPLE_ARR_HASH[idx] && h2 == LOWER_FN_TUPLE_ARR_HASH2[idx]),
+// astronomically unlikely to false-positive but not provably exact; that
+// second array is gone now that LOWER_FN_TUPLE_ARR_NAME_ID (below) verifies
+// exactly instead. This table does not instead store the full Name directly
+// (a [Name; 16384] global, i.e. a table of a 392-byte struct rather than a
+// plain i64, was tried and is not used here: it triggered a reproducible
+// miscompile specific to this self-hosted toolchain -- ir_name_eq against a
+// value read back from a large global struct array spuriously returned
+// false for genuinely-equal Names in this exact call context, confirmed by
+// isolating it with `bin/madaros run` against a minimal `let (a,b)=f();
+// a[0]*2.0` repro and bisecting hash-only vs hash+ir_name_eq lookups
+// against two otherwise-identical builds).
+var LOWER_FN_TUPLE_ARR_HASH: [i64; 16384] = [0; 16384]
+var LOWER_FN_TUPLE_ARR_MASK: [i64; 16384] = [0; 16384]
+// Copilot review (PR #2516), round 11: two independent hashes matching is
+// astronomically unlikely but still not EXACT identity -- a genuine
+// collision between two valid identifiers would alias function A's mask
+// onto function B, reintroducing the corruption this table exists to
+// prevent. Storing the full Name directly here was already tried and
+// reverted (see LOWER_FN_TUPLE_ARR_HASH2's own comment: a [Name; 16384]
+// global triggered a reproducible miscompile in this exact toolchain). This
+// stores the PLAIN i64 interned name id from ir_intern_name (ir.sio) --
+// the same i64-array-at-this-scale shape as HASH/MASK above, not the
+// [Name; N] shape that broke -- and ir_intern_name's own pool already does
+// exact byte-for-byte comparison on every intern (ir_name_pool_eq), so two
+// different names can never collide onto the same id (only a pool overflow
+// can produce a false 0==0, the same "no name" sentinel ir_intern_name
+// already uses, and is limited to the pool's own generous IR_NAME_POOL_MAX
+// capacity, not this table's 16384). `h` (fo_name_hash) still selects the
+// open-addressed bucket (kept for distribution -- nid is a sequential pool
+// index, a poor hash), but LOWER_FN_TUPLE_ARR_NAME_ID is now what a probe
+// verifies against for identity, not a second hash.
+var LOWER_FN_TUPLE_ARR_NAME_ID: [i64; 16384] = [0; 16384]
+
+// Copilot review (PR #2516): lookup used to be a linear scan over up to
+// IR_MAX_FUNCS dense entries, and every insertion during collection ALSO
+// does a lookup (to dedup), making full collection O(n^2) -- about 134M
+// comparisons at capacity, and worse when a caller collected the same list
+// twice (since fixed separately in this same round). This open-addressing
+// index mirrors self-hosted/intern.sio's StringInterner.hash_table exactly
+// (DJB2-family hash, linear probing, sized well above the dense capacity to
+// keep load factor low, -1 = empty sentinel): LOWER_FN_TUPLE_ARR_SLOT maps a
+// hash-derived bucket to the DENSE index in HASH/MASK/NAME_ID above, turning
+// both lookup and the insert-time dedup check into O(1) amortized instead of
+// O(n). Sized to 2x IR_MAX_FUNCS (32768, a power of two so `& (SIZE-1)` can
+// replace `%`) for a <=0.5 load factor at full capacity, same margin the
+// interner uses (INTERN_HASH_TABLE_SIZE = 2x INTERN_MAX_STRINGS).
+let LOWER_FN_TUPLE_ARR_SLOT_SIZE: i64 = 32768
+let LOWER_FN_TUPLE_ARR_SLOT_MASK: i64 = 32767
+var LOWER_FN_TUPLE_ARR_SLOT: [i64; 32768] = [-1; 32768]
+
+// The table above is a global, process-lifetime side table with no per-entry
+// invalidation: line ~807 refuses to overwrite an existing nonzero mask for a
+// name, and nothing removes an entry for a function that stops returning an
+// f64-array tuple. A second frontend load in the same process (LSP, or any
+// caller compiling more than one program per process) would otherwise see the
+// FIRST program's masks bleed into the second. Call this once per
+// compilation, alongside fo_xfer_global_reset(), before collecting modules —
+// not once per module, since fo_preregister_program_items_multipass calls the
+// collector once per loaded module and must keep accumulating within one
+// compilation.
+pub fn lower_fn_tuple_arr_reset() with Mut {
+    LOWER_FN_TUPLE_ARR_COUNT = 0
+    // Clear the open-addressing index too, not just the dense count: a stale
+    // LOWER_FN_TUPLE_ARR_SLOT entry points at a dense index that a later
+    // collect() in the SAME process (after this reset) will overwrite with a
+    // DIFFERENT name's hash/mask/name_id, and leaving the slot occupied would
+    // both mask new insertions behind it during probing and let old,
+    // uncleared entries answer lookups with recycled-but-stale data.
+    var i: i64 = 0
+    while i < LOWER_FN_TUPLE_ARR_SLOT_SIZE {
+        LOWER_FN_TUPLE_ARR_SLOT[i as usize] = -1
+        i = i + 1
+    }
+}
+
+// Cap at 32 slots (bit < 32), matching the scalar f64 tuple mask's own cap
+// (lower_type_list_float_mask / expr_list_tuple_float_mask_ref, both `bit <
+// 32`). This mask now lives in its own dedicated i64 (tuple_arr_mask /
+// LOWER_FN_TUPLE_ARR_MASK) rather than being packed into the high half of a
+// combined value shared with the scalar mask, so slot 31 (bit 31, value
+// 2^31) no longer collides with any sign bit -- it was previously dropped by
+// an `if bit < 31` guard specifically to avoid landing on bit 63 of a
+// `scalar_mask + array_mask * 2^32` packed i64. See expr_result_tuple_arr_mask_ref.
+fn lower_type_list_f64_array_mask(opt: &Option<Box<TypeExprList>>, bit: i64) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(list) => {
+            var m: i64 = 0
+            if bit < 32 {
+                if lower_type_expr_is_array_of_f64(&(*list).head) {
+                    m = 1 << (bit as i32)
+                }
+            }
+            m + lower_type_list_f64_array_mask(&(*list).tail, bit + 1)
+        }
+        None => 0,
+    }
+}
+
+// Copilot review (PR #2516): `fo_name_hash` alone is not collision-free (e.g.
+// "ab" and "bA" hash equal), so a single-hash match could return function A's
+// mask for function B's name and reintroduce the bits-as-i64 corruption this
+// table exists to prevent. An earlier round verified candidates against a
+// SECOND independently-seeded hash instead, astronomically unlikely to
+// false-positive but not provably exact; every candidate is now verified
+// against the EXACT interned name id from ir_intern_name (ir.sio) instead --
+// see LOWER_FN_TUPLE_ARR_NAME_ID's declaration for why this table verifies
+// exact identity via that pooled id rather than a directly-stored Name +
+// ir_name_eq (the natural choice, mirroring lowerer_lookup_fn_id_by_name_ref,
+// but it triggered a reproducible miscompile specific to this self-hosted
+// toolchain when tried here).
+//
+// Copilot review (PR #2516), performance finding: this used to be a linear
+// scan over LOWER_FN_TUPLE_ARR_COUNT dense entries, and the insert-time dedup
+// check called it too, making full collection O(n^2) (~134M comparisons at
+// IR_MAX_FUNCS capacity). Both the lookup here and the insert dedup check in
+// lower_fn_tuple_f64_arrays_collect_one now go through
+// lower_fn_tuple_arr_slot_find, an open-addressed index lookup (see
+// LOWER_FN_TUPLE_ARR_SLOT's declaration) -- O(1) amortized instead of O(n).
+// Marked pub (round 6 of the PR #2516 review, finding 3): a new CLI probe in
+// compiler/main.sio (--probe-tuple-arr-capacity) needs to query this table
+// directly, bypassing the normal compile pipeline's DCE filtering, so that
+// a capacity-boundary gate can populate LOWER_FN_TUPLE_ARR_* with every
+// generated function -- not just the ones reachable from `main` -- and
+// still verify a specific late entry. Same treatment as round 5's fix to
+// lower_program_function_body_from_summary_with_epistemic_ref.
+pub fn lower_fn_tuple_f64_array_mask(name: Name) -> i64 with Mut, Panic, Div {
+    if name.len <= 0 {
+        return 0
+    }
+    // Copilot review (PR #2516), round 11: nid=0 means either an empty name
+    // (already excluded above) or the interner's pool overflowed for this
+    // name (ir_intern_name's own "could not allocate" sentinel) -- in
+    // either case there is no exact identity to verify against, so answer
+    // "unknown" (mask 0, the same conservative fallback an unresolved owner
+    // already gets) rather than risk a false match against another
+    // overflowed name that also reads back nid=0.
+    let nid = ir_intern_name(name)
+    if nid <= 0 {
+        return 0
+    }
+    let idx = lower_fn_tuple_arr_slot_find(fo_name_hash(name), nid)
+    if idx < 0 {
+        return 0
+    }
+    LOWER_FN_TUPLE_ARR_MASK[idx as usize]
+}
+
+// Open-addressed index lookup shared by lower_fn_tuple_f64_array_mask (query)
+// and lower_fn_tuple_f64_arrays_collect_one (insert-time dedup check): probes
+// LOWER_FN_TUPLE_ARR_SLOT from `h`'s bucket (kept for distribution -- `nid`
+// is a sequential pool index, a poor hash) but verifies EXACT identity via
+// `nid`, the interned name id from ir_intern_name (ir.sio) -- ir_intern_name's
+// own pool already does exact byte-for-byte comparison on every intern, so
+// two different names can never produce the same nid (see
+// LOWER_FN_TUPLE_ARR_NAME_ID's own comment for why this replaced the
+// two-hash collision check an earlier round of this review added). O(1)
+// amortized via linear probing (mirrors self-hosted/intern.sio's
+// StringInterner hash table) instead of an O(n) scan. Returns the dense
+// index into LOWER_FN_TUPLE_ARR_HASH/MASK/NAME_ID, or -1 if not present.
+fn lower_fn_tuple_arr_slot_find(h: i64, nid: i64) -> i64 with Mut, Panic, Div {
+    var slot = h & LOWER_FN_TUPLE_ARR_SLOT_MASK
+    var probes: i64 = 0
+    while probes < LOWER_FN_TUPLE_ARR_SLOT_SIZE {
+        let idx = LOWER_FN_TUPLE_ARR_SLOT[slot as usize]
+        if idx < 0 {
+            return -1
+        }
+        if LOWER_FN_TUPLE_ARR_NAME_ID[idx as usize] == nid {
+            return idx
+        }
+        slot = (slot + 1) & LOWER_FN_TUPLE_ARR_SLOT_MASK
+        probes = probes + 1
+    }
+    -1
+}
+
+// Shared by both the top-level free-fn walk below and the ItemImpl method
+// walk (Copilot review (PR #2516), finding #5's ExprMethodCall half): a
+// method-call tuple producer like `obj.pair()` resolves through
+// expr_result_tuple_arr_mask_ref to the mangled name
+// (ir_mangle_method_name(recv_type, method_name)), so an impl method whose
+// return type is a tuple of f64 arrays must be collected under THAT mangled
+// name or the lookup at destructure time always misses and returns 0.
+// Copilot review (PR #2516), comment 4110477187: `force` lets
+// lower_fn_tuple_f64_arrays_collect_owner_priority (below) register an
+// owner's own tuple-returning fn even when mask==0 (an all-non-f64-array
+// tuple), which the ordinary `mask != 0` guard below otherwise treats as
+// "nothing to record" -- see that function's own comment for why an
+// owner's own mask==0 declaration must still occupy this name's slot.
+// Every other caller (lower_fn_tuple_f64_arrays_collect, unchanged) keeps
+// passing force=false, so this adds no behavior change anywhere else.
+fn lower_fn_tuple_f64_arrays_collect_one(name: Name, fd_opt_ref: &Option<Box<FnDef>>, force: bool) with Mut, Panic, Div, Alloc {
+    match *fd_opt_ref {
+        Some(fd) => {
+            let rt_opt_ref: &Option<Box<TypeExpr>> = &(*fd).return_type
+            match *rt_opt_ref {
+                Some(rt) => {
+                    if (*rt).kind == TypeExprKind::TypeTuple {
+                        let mask = lower_type_list_f64_array_mask(&(*rt).type_args, 0)
+                        // Table is sized to IR_MAX_FUNCS (ir.sio:35), the hard
+                        // ceiling on the number of functions any program can
+                        // declare (ir.sio:20 clamps fn_count there too), so this
+                        // guard is a defensive bound rather than a real truncation
+                        // point -- see the LOWER_FN_TUPLE_ARR_COUNT declaration.
+                        // nid<=0: pool overflow for this name (see
+                        // lower_fn_tuple_f64_array_mask's own comment) --
+                        // skip the insert rather than risk two overflowed
+                        // names aliasing onto the same nid=0 identity.
+                        let nid = ir_intern_name(name)
+                        if (mask != 0 || force) && nid > 0 && LOWER_FN_TUPLE_ARR_COUNT < IR_MAX_FUNCS {
+                            let h = fo_name_hash(name)
+                            if lower_fn_tuple_arr_slot_find(h, nid) < 0 {
+                                let idx = LOWER_FN_TUPLE_ARR_COUNT
+                                LOWER_FN_TUPLE_ARR_HASH[idx as usize] = h
+                                LOWER_FN_TUPLE_ARR_NAME_ID[idx as usize] = nid
+                                LOWER_FN_TUPLE_ARR_MASK[idx as usize] = mask
+                                LOWER_FN_TUPLE_ARR_COUNT = idx + 1
+                                // Insert into the open-addressed index: probe from
+                                // the primary hash's bucket to the first empty slot
+                                // (guaranteed to exist -- load factor stays <= 0.5
+                                // at IR_MAX_FUNCS entries against a 2x-sized table).
+                                var slot = h & LOWER_FN_TUPLE_ARR_SLOT_MASK
+                                var placed = false
+                                var probes: i64 = 0
+                                while !placed && probes < LOWER_FN_TUPLE_ARR_SLOT_SIZE {
+                                    if LOWER_FN_TUPLE_ARR_SLOT[slot as usize] < 0 {
+                                        LOWER_FN_TUPLE_ARR_SLOT[slot as usize] = idx
+                                        placed = true
+                                    } else {
+                                        slot = (slot + 1) & LOWER_FN_TUPLE_ARR_SLOT_MASK
+                                        probes = probes + 1
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
+        None => {}
+    }
+}
+
+fn lower_fn_tuple_f64_arrays_collect_walk(items: &Option<Box<ItemList>>, force: bool) with Mut, Panic, Div, Alloc {
+    var current = items
+    while true {
+        match *current {
+            Some(list) => {
+                let item_ref = &(*list).head
+                if item_ref.kind == ItemKind::ItemFn {
+                    let fd_opt_ref: &Option<Box<FnDef>> = &item_ref.fn_def
+                    lower_fn_tuple_f64_arrays_collect_one(item_ref.name, fd_opt_ref, force)
+                } else if item_ref.kind == ItemKind::ItemImpl {
+                    let id_opt_ref: &Option<Box<ImplDef>> = &item_ref.impl_def
+                    match *id_opt_ref {
+                        Some(id) => {
+                            var mcur = &(*id).methods
+                            while true {
+                                match *mcur {
+                                    Some(mlist) => {
+                                        let mhead = &(*mlist).head
+                                        if mhead.kind == ItemKind::ItemFn {
+                                            let mangled = ir_mangle_method_name(item_ref.name, mhead.name)
+                                            let mfd_opt_ref: &Option<Box<FnDef>> = &mhead.fn_def
+                                            lower_fn_tuple_f64_arrays_collect_one(mangled, mfd_opt_ref, force)
+                                        }
+                                        mcur = &(*mlist).tail
+                                    }
+                                    _ => break
+                                }
+                            }
+                        }
+                        None => {}
+                    }
+                }
+                current = &(*list).tail
+            }
+            _ => break
+        }
+    }
+}
+
+pub fn lower_fn_tuple_f64_arrays_collect(items: &Option<Box<ItemList>>) with Mut, Panic, Div, Alloc {
+    lower_fn_tuple_f64_arrays_collect_walk(items, false)
+}
+
+// Copilot review (PR #2516), comment 4110477187: thin_build_compiled_unit
+// (module_loader.sio) collects the owner program's own items AND every
+// imported callee module's items into this one process-global, name-only
+// table before lowering the owner's body. Because lower_fn_tuple_f64_arrays_
+// collect_one skips mask==0 (an all-non-f64-array tuple, the common case)
+// entirely, an owner-local `pair` returning `([i64;2],[i64;2])` left no
+// entry -- so an unrelated PRIVATE `pair` in any imported module that DOES
+// return an f64-array tuple could insert under the same bare name first,
+// and the owner's own lowering of `pair().0` would then read that
+// unrelated import's mask instead of its own. Call this INSTEAD of the
+// ordinary collector for the owner's own item list, before collecting any
+// imported callee: forcing the insert even at mask==0 gives the owner's
+// own declaration an authoritative slot for its own name, so a later,
+// unrelated import can never overwrite it (lower_fn_tuple_f64_arrays_
+// collect_one's insert is already "only if not yet present" -- this just
+// makes owner's own mask==0 count as "present" instead of "nothing to
+// record"). Residual, unclosed scope: two DIFFERENT imported callees (an
+// owner calls one, not the other, but neither IS the owner) sharing a bare
+// name with different masks can still collide with each other -- closing
+// that needs the same qualifier/module resolution this PR's sibling
+// review (PR #2515, comments 4110379040/54/72) already documented as a
+// genuine architectural addition out of scope for a contained fix.
+pub fn lower_fn_tuple_f64_arrays_collect_owner_priority(items: &Option<Box<ItemList>>) with Mut, Panic, Div, Alloc {
+    lower_fn_tuple_f64_arrays_collect_walk(items, true)
 }
 
 fn fo_ctor_path_fold(acc: i64, name_hash: i64) -> i64 with Mut, Panic, Div {
@@ -4444,6 +4798,14 @@ fn lowerer_bind_local_mut(
         (*(*locals_box).is_global).values[idx as usize] = 0
         (*(*locals_box).is_ref).values[idx as usize] = 0
         (*(*locals_box).scalar_kind).values[idx as usize] = 0
+        // Copilot review (PR #2516): the locals stack is REUSED across
+        // functions (count is reset, arrays are not, same as box_inner_layout
+        // below), so a stale tuple_float_mask/tuple_arr_mask from an earlier
+        // function's tuple local left this slot's array bit set and a later,
+        // unrelated tuple param at the same slot inherited it -- classifying
+        // a plain f64 slot as an f64-ARRAY. Explicit 0, mirroring bind_local.
+        (*(*locals_box).tuple_float_mask).values[idx as usize] = 0
+        (*(*locals_box).tuple_arr_mask).values[idx as usize] = 0
         // Post-#2084: tuple0_array_elem_layout was added on main to track when a
         // tuple slot-0 is a fixed array, which gates the aggregate-shallow-copy path.
         (*(*locals_box).tuple0_array_elem_layout).values[idx as usize] = 0 - 1
@@ -4528,6 +4890,34 @@ fn lowerer_mark_local_array_elem_wide_bits_mut(
     while i >= 0 {
         if (*(*locals_box).depths).values[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*locals_box).names).values[i as usize], name) {
             (*(*locals_box).array_elem_wide_bits).values[i as usize] = bits
+            (*lo).locals = locals_box
+            return
+        }
+        i = i - 1
+    }
+}
+
+// Copilot review (PR #2516): lowerer_bind_local_mut (the *mut param binder
+// used above) has no TypeExpr parameter to populate tuple_float_mask /
+// tuple_arr_mask from directly, and leaves both untouched -- which, on this
+// REUSED locals stack (count resets per function, arrays don't), lets a
+// stale array bit from an earlier function's tuple local misclassify a
+// same-slot tuple param here as holding an f64 array. Mirrors the direct
+// parameter binder's (lower_fn_params_ref) population: always writes both
+// masks, 0 when the param type is not itself TypeTuple, so a stale value
+// can never survive a rebind at this slot.
+fn lowerer_mark_local_tuple_masks_mut(
+    lo: &! Lowerer,
+    name: Name,
+    float_mask: i64,
+    arr_mask: i64
+) with Mut, Alloc, Panic, Div {
+    var locals_box = (*lo).locals
+    var i = (*locals_box).count - 1
+    while i >= 0 {
+        if (*(*locals_box).depths).values[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*locals_box).names).values[i as usize], name) {
+            (*(*locals_box).tuple_float_mask).values[i as usize] = float_mask
+            (*(*locals_box).tuple_arr_mask).values[i as usize] = arr_mask
             (*lo).locals = locals_box
             return
         }
@@ -4870,6 +5260,9 @@ fn lowerer_lower_fn_params_mut(
                 }
 
                 lowerer_bind_local_mut(lo, (*list).head.name, param_value_reg, (*list).head.is_self_mut)
+                let param_tuple_float_mask = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_float_mask(&(*list).head.ty.type_args, 0) } else { 0 }
+                let param_tuple_arr_mask = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_arr_mask(&(*list).head.ty.type_args, 0) } else { 0 }
+                lowerer_mark_local_tuple_masks_mut(lo, (*list).head.name, param_tuple_float_mask, param_tuple_arr_mask)
                 let param_elem_wide_bits = lower_type_expr_array_elem_wide_bits(&(*list).head.ty)
                 if param_elem_wide_bits > 0 {
                     // V0-E.5.7: `[f128; N]` / `&[f128; N]` param — element reads are
@@ -5460,6 +5853,18 @@ fn lowerer_fo_preregister_pure_fns_multipass_mut(
     lo: &! Lowerer,
     items: &Option<Box<ItemList>>
 ) with Mut, Panic, Div, Alloc, IO {
+    // Copilot review (PR #2516): fo_preregister_program_items_multipass (the
+    // public wrapper) calls the tuple-array collector before delegating here,
+    // but lower_program_bodies_ref and the other lowering lanes that call this
+    // function directly (lowerer_lower_program_bodies_dedup_mut,
+    // lowerer_lower_program_bodies_mut) did not, so bodies lowered through
+    // those paths depended on some earlier, unrelated pass having populated
+    // LOWER_FN_TUPLE_ARR_* as a side effect. Collecting here instead of at
+    // every call site covers all of them uniformly; the collector itself is
+    // idempotent per name (lower_fn_tuple_f64_arrays_collect only inserts when
+    // the existing mask is 0), so calling it again on an already-collected
+    // item list is a no-op.
+    lower_fn_tuple_f64_arrays_collect(items)
     // 4 passes: reverse-order chains of depth 3 close by pass 4.
     var pass: i64 = 0
     while pass < 4 {
@@ -5474,6 +5879,14 @@ fn lowerer_fo_preregister_pure_fns_multipass_mut(
 pub fn fo_preregister_program_items_multipass(
     items: &Option<Box<ItemList>>
 ) with Mut, Panic, Div, Alloc, IO {
+    // Copilot review (PR #2516): lowerer_fo_preregister_pure_fns_multipass_mut
+    // (below) now collects the tuple-array table itself, so this call used to
+    // collect the SAME item list a second time immediately before delegating
+    // -- doubling the O(n) collection pass for every caller of this public
+    // wrapper. Removed; the collector's own dedup guard made this redundant
+    // rather than wrong, but redundant collection over up to IR_MAX_FUNCS
+    // items is exactly the pathological-compile-time risk this review round
+    // flagged.
     var lo = lowerer_new()
     lowerer_fo_preregister_pure_fns_multipass_mut(&! lo, items)
 }
@@ -5483,6 +5896,10 @@ fn lowerer_lower_program_items_mut(
     items: Option<Box<ItemList>>
 ) with Mut, Panic, Div, Alloc, IO {
     fo_xfer_global_reset()
+    lower_fn_tuple_arr_reset()
+    // Copilot review (PR #2516): same duplicate-collection removal as
+    // fo_preregister_program_items_multipass above -- multipass_mut collects
+    // this exact item list itself now.
     // Pre-register FO transfers so reverse-order pure helpers expand nested calls.
     lowerer_fo_preregister_pure_fns_multipass_mut(lo, &items)
     var current = items
@@ -6249,11 +6666,51 @@ fn lower_type_list_float_mask(opt: &Option<Box<TypeExprList>>, bit: i64) -> i64 
     }
 }
 
+// Array-slot counterpart of lower_type_list_float_mask / lower_opt_type_tuple_float_mask:
+// bit k set iff element k of a declared tuple TYPE is a `[f64; N]` array, so a
+// tuple-typed PARAMETER's slots can be classified from its signature alone
+// (no lowered initialiser expression to read, unlike a `let` binding). Own
+// mask, same reasoning as tuple_arr_mask itself: packing into high bits of
+// the scalar mask corrupts slot 31.
+fn lower_type_list_arr_mask(opt: &Option<Box<TypeExprList>>, bit: i64) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(list) => {
+            var m: i64 = 0
+            if bit < 32 {
+                if lower_type_expr_is_array_of_f64(&(*list).head) {
+                    m = 1 << (bit as i32)
+                }
+            }
+            m + lower_type_list_arr_mask(&(*list).tail, bit + 1)
+        }
+        None => 0,
+    }
+}
+
 fn lower_opt_type_tuple_float_mask(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
     match *opt {
         Some(te) => {
             if (*te).kind != TypeExprKind::TypeTuple { return 0 }
             lower_type_list_float_mask(&(*te).type_args, 0)
+        }
+        None => 0,
+    }
+}
+
+// Array-slot counterpart of lower_opt_type_tuple_float_mask, mirroring its
+// annotated-type-first pattern for tuple_arr_mask: an explicitly typed tuple
+// literal local (`let t: ([f64; 2], i64) = (a, 0)`) has a declared TYPE to
+// read the array mask off directly. expr_result_tuple_arr_mask_ref only
+// covers a CALL initialiser (lower_fn_tuple_f64_array_mask keys off a
+// function's declared return type, and tuple literals have no such
+// tracking), so without this an annotated tuple-literal local's array slots
+// stayed unmarked and a later `let x = t.0; x[0] * 2.0` still corrupted the
+// f64 bits via the integer path.
+fn lower_opt_type_tuple_arr_mask(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(te) => {
+            if (*te).kind != TypeExprKind::TypeTuple { return 0 }
+            lower_type_list_arr_mask(&(*te).type_args, 0)
         }
         None => 0,
     }
@@ -8391,7 +8848,18 @@ impl Lowerer {
         let left_opt: Option<Box<Expr>> = e.left
         match left_opt {
             Some(value_expr) => {
-                let elem_is_float = lower_expr_has_float_source_ref(&(*value_expr))
+                // Copilot review (PR #2516): lower_array_literal_expr_ref routes
+                // `Some(_)` repeat literals here without ever calling the
+                // local-aware classifier, so this used the free-fn
+                // lower_expr_has_float_source_ref, which only sees float
+                // literals/casts/binary subtrees of those -- not an f64 LOCAL.
+                // `([x; 2])[0] * 2.0` with `x: f64` therefore stayed on the
+                // integer path. array_literal_elems_are_float_ref is the same
+                // classifier lower_array_literal_expr_ref's non-repeat branch
+                // already uses (it OR's this free fn with the local-aware
+                // self.expr_result_is_float_ref on the repeat element), so route
+                // through it here too instead of re-deriving a narrower check.
+                let elem_is_float = self.array_literal_elems_are_float_ref(e)
                 // Aggregate literals must be re-materialised per slot, otherwise
                 // every element aliases one object. repeat_count <= 0 keeps the
                 // legacy path so the value expression is still lowered exactly
@@ -8892,6 +9360,7 @@ impl Lowerer {
                 // Callers that know a positive kind (for-IV int, float local) re-bind.
                 (*(*stk).scalar_kind).values[idx as usize] = 0
                 (*(*stk).tuple_float_mask).values[idx as usize] = 0
+                (*(*stk).tuple_arr_mask).values[idx as usize] = 0
                 (*(*stk).tuple0_array_elem_layout).values[idx as usize] = 0 - 1
                 (*(*stk).tuple_struct_layout).values[idx as usize] = 0 - 1
                 (*(*stk).tuple_struct_slot).values[idx as usize] = 0 - 1
@@ -8968,6 +9437,25 @@ impl Lowerer {
         lo
     }
 
+    // Array-slot counterpart of bind_local_tuple_float_mask: records which
+    // slots of a tuple-typed local are `[f64; N]` arrays, in its own table
+    // instead of the high bits of tuple_float_mask (see tuple_arr_mask field).
+    fn bind_local_tuple_arr_mask(self, name: Name, mask: i64) -> Lowerer with Mut, Alloc, Panic, Div {
+        var lo = self
+        if mask == 0 { return lo }
+        var stk = *lo.locals
+        var i = stk.count - 1
+        while i >= 0 {
+            if (*stk.depths).values[i as usize] <= lo.scope_depth && ir_name_eq((*stk.names).values[i as usize], name) {
+                (*stk.tuple_arr_mask).values[i as usize] = mask
+                lo.locals = Box::new(stk)
+                return lo
+            }
+            i = i - 1
+        }
+        lo
+    }
+
     fn bind_local_tuple_struct(self, name: Name, layout_idx: i64, slot: i64) -> Lowerer with Mut, Alloc, Panic, Div {
         var lo = self
         if layout_idx < 0 { return lo }
@@ -9008,6 +9496,18 @@ impl Lowerer {
         while i >= 0 {
             if (*(*self.locals).depths).values[i as usize] <= self.scope_depth && ir_name_eq((*(*self.locals).names).values[i as usize], name) {
                 return (*(*self.locals).tuple_float_mask).values[i as usize]
+            }
+            i = i - 1
+        }
+        0
+    }
+
+    // Array-slot counterpart of lookup_local_tuple_float_mask.
+    fn lookup_local_tuple_arr_mask(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*(*self.locals).depths).values[i as usize] <= self.scope_depth && ir_name_eq((*(*self.locals).names).values[i as usize], name) {
+                return (*(*self.locals).tuple_arr_mask).values[i as usize]
             }
             i = i - 1
         }
@@ -13430,10 +13930,24 @@ impl Lowerer {
     // Phase 3.2: Lookup struct field index without needing struct name
     // Used when we don't know the struct type at the call site
     fn field_idx_from_name_simple(self, n: Name) -> i64 with Mut, Panic, Div {
-        // Try numeric field access first (.0, .1, .2, ...)
-        let first_byte = n.buf[0] as i64
-        if n.len == 1 && first_byte >= 48 && first_byte <= 57 {
-            return first_byte - 48
+        // Try numeric field access first (.0, .1, .2, ..., .15, ...). Tuple-let
+        // desugaring turns `let (_, ..., v10) = f()` into a temporary tuple plus
+        // `let v10 = __tup.10` (#1502), so a tuple slot name can be more than one
+        // decimal digit. This used to check `n.len == 1`, which only recognised
+        // slots 0-9; a two-digit slot name (slot 10+) fell through the
+        // struct-field-name scan below (no struct has a field literally named
+        // "10"), then to the `(n.buf[0] as i64) % 64` legacy hash fallback,
+        // which returns a bogus index derived from the first digit character
+        // (e.g. "10" -> '1' (49) % 64 = 49) instead of 10. That wrong index read
+        // whatever memory happened to sit at word offset 49 of the tuple's
+        // storage: a wrong value for a scalar f64 slot, and a garbage/null
+        // pointer for an `[f64; N]` array slot -- segfaulting when the caller
+        // then indexed into it. lower_name_tuple_index already does the general
+        // decimal parse (and rejects non-numeric names); reuse it here so every
+        // tuple slot, not just single-digit ones, resolves to its real index.
+        let tuple_idx = lower_name_tuple_index(n)
+        if tuple_idx >= 0 {
+            return tuple_idx
         }
         // The synthetic "Knowledge" layout (ir_register_knowledge_layout) is
         // preseeded as entry 0, before any user struct is registered, and its
@@ -13671,23 +14185,6 @@ impl Lowerer {
         false
     }
 
-    fn field_array_elem_is_float_by_name_simple(self, field_name: Name) -> bool with Mut, Panic, Div {
-        var si: i64 = 0
-        while si < (*self.struct_layouts).count {
-            var fi: i64 = 0
-            while fi < (*self.struct_layouts).entries[si as usize].field_count {
-                if ir_name_eq(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].name_id), field_name) {
-                    if (*self.struct_layouts).entries[si as usize].fields[fi as usize].is_float == 2 {
-                        return true
-                    }
-                }
-                fi = fi + 1
-            }
-            si = si + 1
-        }
-        false
-    }
-
     // Pointer-class lookup for a field OF A KNOWN STRUCT TYPE. Deliberately type-aware: a
     // by-NAME scan over every registered struct answers with the FIRST field of that name, so
     // two structs sharing a field name but differing in pointer-ness get the wrong answer.
@@ -13809,9 +14306,28 @@ impl Lowerer {
                     // marks i64 component loads as float (field_array_float=1).
                     return self.field_array_elem_is_float_for_struct(type_name, field_name)
                 }
-                self.field_array_elem_is_float_by_name_simple(field_name)
+                // Copilot review (PR #2516), round 9: this used to fall back to
+                // field_array_elem_is_float_by_name_simple (ANY registered
+                // struct with a field of this name) whenever expr_receiver_
+                // struct_type_ref couldn't resolve the owner -- which it never
+                // could for an ExprCall/ExprMethodCall owner (`make_int_holder()
+                // .values`, no arm for it there), only for ExprIdent/ExprIndex/
+                // deref chains. That by-name scan can match an UNRELATED
+                // struct's same-named field and misclassify a genuine integer
+                // array as f64 -- the exact class of bug this file's sibling
+                // predicate, field_is_float_for_base_ref just above, was
+                // already written to avoid by returning false outright on an
+                // unresolved owner type rather than guessing by name. Building
+                // real call/method return-type resolution here would still
+                // leave the "genuinely unresolvable owner" case (e.g. an
+                // opaque/generic return) with the same unsound guess, so drop
+                // the by-name fallback entirely and match the sibling's
+                // conservative default: unresolved owner type -> not a float
+                // array. field_array_elem_is_float_by_name_simple is now
+                // unused and removed with this change.
+                false
             }
-            _ => self.field_array_elem_is_float_by_name_simple(field_name),
+            _ => false,
         }
     }
 
@@ -13870,6 +14386,23 @@ impl Lowerer {
                     return false
                 }
                 if (*base_expr).kind == ExprKind::ExprFieldAccess {
+                    // Copilot review (PR #2516), "Previously missed" finding:
+                    // this branch used to send EVERY ExprFieldAccess straight
+                    // to field_array_elem_is_float_for_base_ref, treating a
+                    // numeric tuple-slot name (`.0` in `pair().0[0]` /
+                    // `t.0[0]`) the same as a real struct field name. A
+                    // tuple-returning call/local has no struct owner type,
+                    // so that lookup always missed and fell back to `false`
+                    // -- the integer element path, cvtsi2sd-ing the f64 bit
+                    // pattern of the array's real values. Numeric field
+                    // names must be checked as a tuple slot FIRST, via the
+                    // same expr_is_tuple_slot_f64_array_ref the tuple-literal
+                    // classifier already uses (it returns false immediately
+                    // for any non-numeric field name via lower_name_tuple_index,
+                    // so real struct field access below is unaffected).
+                    if self.expr_is_tuple_slot_f64_array_ref(&(*base_expr)) {
+                        return true
+                    }
                     return self.field_array_elem_is_float_for_base_ref(&(*base_expr).left, (*base_expr).name)
                 }
                 if (*base_expr).kind == ExprKind::ExprUnary && (*base_expr).un_op == UnaryOp::OpDeref {
@@ -13926,6 +14459,84 @@ impl Lowerer {
     fn expr_receiver_struct_type_ref(self, expr: &Expr) -> Name with Mut, Panic, Div, Alloc {
         if (*expr).kind == ExprKind::ExprIdent {
             return self.lookup_local_struct_type((*expr).name)
+        }
+        // Copilot review (PR #2516), round 11: this resolver had no arm for
+        // ExprStructLit/ExprIf/ExprMatch/ExprBlock owners, so
+        // `(Holder { ... }).values` or `(if cond { left } else { right }).values`
+        // fell through to ir_empty_name() -- the same "unresolved owner"
+        // signal field_array_elem_is_float_for_base_ref's round-9 fix
+        // (correctly) treats as "not float, don't guess", so these
+        // LEGITIMATE f64-array fields were misclassified as integer and
+        // their elements corrupted in arithmetic. A struct literal names its
+        // own type directly (ir_path_first_name, same extraction
+        // fo_ctor_register_body already uses for ExprStructLit elsewhere in
+        // this file); if/match/block owners recurse into their trailing
+        // expression, since a well-typed if/match's arms and a block's tail
+        // all share the owner expression's own type.
+        if (*expr).kind == ExprKind::ExprStructLit {
+            return ir_path_first_name((*expr).path)
+        }
+        if (*expr).kind == ExprKind::ExprBlock {
+            return self.opt_block_tail_struct_type_ref(&(*expr).block)
+        }
+        if (*expr).kind == ExprKind::ExprIf {
+            let then_ty = self.opt_block_tail_struct_type_ref(&(*expr).block)
+            if then_ty.len > 0 {
+                return then_ty
+            }
+            match (*expr).else_expr {
+                Some(else_e) => {
+                    return self.expr_receiver_struct_type_ref(&(*else_e))
+                }
+                _ => {}
+            }
+        }
+        if (*expr).kind == ExprKind::ExprMatch {
+            var arm_cursor = &(*expr).arms
+            while true {
+                match *arm_cursor {
+                    Some(list) => {
+                        let body_ty = self.expr_receiver_struct_type_ref(&(*list).head.body)
+                        if body_ty.len > 0 {
+                            return body_ty
+                        }
+                        arm_cursor = &(*list).tail
+                    }
+                    _ => break
+                }
+            }
+        }
+        // Copilot review (PR #2516), round 10 finding 1: this resolver had no
+        // arm for a CALL/METHOD-CALL owner, so `make_float_holder().values`
+        // (owner is an ExprCall) fell through every arm below to
+        // ir_empty_name() -- indistinguishable from a genuinely unresolvable
+        // owner. field_array_elem_is_float_for_base_ref's round-9 fix (return
+        // false on an unresolved owner, to stop guessing by field name)
+        // therefore also swallowed this LEGITIMATE case: a valid f64-array
+        // struct field reached through a call's declared return type.
+        // expr_call_return_struct_name_ref and return_struct_name_for_fn_id
+        // already resolve a plain call's / a method's declared return struct
+        // type elsewhere in this file (float-holder/tuple-slot machinery) --
+        // reuse both here so this receiver-type resolver, used by every
+        // field-access-classification caller, gains the same answer.
+        if (*expr).kind == ExprKind::ExprCall {
+            let rn = self.expr_call_return_struct_name_ref(expr)
+            if rn.len > 0 {
+                return rn
+            }
+        }
+        if (*expr).kind == ExprKind::ExprMethodCall {
+            let recv_type = self.lower_method_recv_type(&(*expr).left)
+            let call_name = if recv_type.len > 0 {
+                ir_mangle_method_name(recv_type, (*expr).name)
+            } else {
+                (*expr).name
+            }
+            let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, call_name)
+            let rn = self.return_struct_name_for_fn_id(fn_id)
+            if rn.len > 0 {
+                return rn
+            }
         }
         if (*expr).kind == ExprKind::ExprIndex {
             match (*expr).left {
@@ -14026,6 +14637,43 @@ impl Lowerer {
             }
         }
         ir_empty_name()
+    }
+
+    // Struct type of a block's trailing expression, for expr_receiver_struct_type_ref's
+    // ExprBlock/ExprIf arms -- mirrors opt_block_tail_method_fn_id/block_tail_method_fn_id's
+    // own shape, but resolving a struct type instead of a method fn id.
+    fn block_tail_struct_type_ref(self, blk: &Block) -> Name with Mut, Panic, Div, Alloc {
+        var current = &(*blk).stmts
+        var result = ir_empty_name()
+        while true {
+            match *current {
+                Some(list) => {
+                    let stmt_ref = &(*list).head
+                    if stmt_ref.kind == StmtKind::StmtExpr {
+                        result = self.opt_expr_struct_type_ref(&stmt_ref.expr)
+                    } else {
+                        result = ir_empty_name()
+                    }
+                    current = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        result
+    }
+
+    fn opt_block_tail_struct_type_ref(self, blk_opt: &Option<Box<Block>>) -> Name with Mut, Panic, Div, Alloc {
+        match *blk_opt {
+            Some(blk) => self.block_tail_struct_type_ref(&(*blk)),
+            _ => ir_empty_name(),
+        }
+    }
+
+    fn opt_expr_struct_type_ref(self, e_opt: &Option<Box<Expr>>) -> Name with Mut, Panic, Div, Alloc {
+        match *e_opt {
+            Some(e) => self.expr_receiver_struct_type_ref(&(*e)),
+            _ => ir_empty_name(),
+        }
     }
 
     fn index_base_elem_struct_type_ref(self, base_opt: &Option<Box<Expr>>) -> Name with Mut, Panic, Div, Alloc {
@@ -14423,7 +15071,14 @@ impl Lowerer {
             // an f64 slot was misclassified as integer. Consult the tuple mask first.
             let tuple_idx = lower_name_tuple_index((*e).name)
             if tuple_idx >= 0 {
-                let tuple_mask = self.opt_base_tuple_float_mask_ref(&(*e).left)
+                // opt_base_tuple_float_mask_ref / tuple_float_mask are scalar-f64-only
+                // (f64-ARRAY slots live in their own tuple_arr_mask -- see
+                // expr_is_tuple_slot_f64_array_ref). The `& 4294967295` here is now
+                // belt-and-suspenders: it was load-bearing when array bits were
+                // packed into bits 32-63 of this same value; kept so a future
+                // caller of opt_base_tuple_float_mask_ref that returns >32 bits
+                // (e.g. a raw returns_float code) still can't leak into this check.
+                let tuple_mask = self.opt_base_tuple_float_mask_ref(&(*e).left) & 4294967295
                 if tuple_mask != 0 {
                     return (tuple_mask >> (tuple_idx as i32)) % 2 == 1
                 }
@@ -15365,6 +16020,16 @@ impl Lowerer {
 
     fn lower_program_items_ref(self, items: &Option<Box<ItemList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         fo_xfer_global_reset()
+        // This ref-based path (production streaming: module_native_streaming.sio ->
+        // lower_program_to_ir_ordered_with_epistemic_boxed_trace_ref -> here) never
+        // called the tuple-array collector, so the f64-array-tuple-return fix only
+        // took effect when an earlier, unrelated module-frontend preflight happened
+        // to populate the table as a side effect first.
+        lower_fn_tuple_arr_reset()
+        // Copilot review (PR #2516): removed the explicit collect() call that
+        // used to be here -- lowerer_fo_preregister_pure_fns_multipass_mut
+        // (below) collects this same item list itself now, so this was a
+        // redundant second O(n) pass over up to IR_MAX_FUNCS items.
         var lo = self
         lowerer_fo_preregister_pure_fns_multipass_mut(&! lo, items)
         var current = items
@@ -15783,6 +16448,16 @@ impl Lowerer {
     }
 
     fn lower_program_bodies_filtered_ref(self, items: &Option<Box<ItemList>>, target_name: Name) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        // Copilot review (PR #2516): this streaming single-function lowering
+        // lane (lower_program_function_body_from_* -> ... -> here) never went
+        // through lowerer_fo_preregister_pure_fns_multipass_mut (the shared
+        // multipass function an earlier round of this review wired the
+        // collector into), so it never populated LOWER_FN_TUPLE_ARR_* at all --
+        // an isolated streaming body for a function returning a tuple of f64
+        // arrays started with no mask and fell back to the integer-element
+        // path. Collect over the full item set available at this entry point
+        // (idempotent per name, like every other call site).
+        lower_fn_tuple_f64_arrays_collect(items)
         var lo = self
         var current: Option<Box<ItemList> > = *items
         while true {
@@ -16099,6 +16774,17 @@ impl Lowerer {
                         // Findings 11 (#2084): stamp is_unsigned_int=1 when the param is u8/u16/u32/u64/usize.
                         (*(*locals).is_unsigned_int).values[idx as usize] = if lower_type_expr_is_unsigned_int(&(*list).head.ty) { 1 } else { 0 }
                         (*(*locals).is_ref).values[idx as usize] = if lower_type_expr_is_ref_like(&(*list).head.ty) { 1 } else { 0 }
+                        // Copilot review (PR #2516): a tuple-typed PARAMETER (e.g.
+                        // fn f(t: (f64, [f64; 8]))) needs the same per-slot masks a
+                        // `let`-bound tuple local gets from its initialiser (see
+                        // lower_let_stmt_ref / #1502), or `t.1[j]` inside the fn body
+                        // reads the array bits as an integer. Explicit 0 in the
+                        // non-tuple case too: the locals stack is REUSED across
+                        // functions (count resets, arrays don't), so a stale mask
+                        // from an earlier function's tuple local at this slot must
+                        // not leak into this param.
+                        (*(*locals).tuple_float_mask).values[idx as usize] = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_float_mask(&(*list).head.ty.type_args, 0) } else { 0 }
+                        (*(*locals).tuple_arr_mask).values[idx as usize] = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_arr_mask(&(*list).head.ty.type_args, 0) } else { 0 }
                         (*(*locals).box_inner_layout).values[idx as usize] = if lower_type_expr_is_box(&(*list).head.ty) { lower_struct_layout_index_of(&(*lo.struct_layouts), lower_box_inner_type_name(&(*list).head.ty)) } else { 0 - 1 }
                         if lower_type_expr_is_box(&(*list).head.ty) && str_eq(read_env("SOUNIO_BOX_TRACE"), "1") {
                             print("boxtrace: WRITE-B ")
@@ -16844,7 +17530,87 @@ impl Lowerer {
     // (returns_float == 2, set by lower_opt_return_float_code). Used so `let r = mk()`
     // flags `r` as a float-element local — otherwise `r[i]` reads classify as integer
     // and get cvtsi2sd-corrupted in arithmetic/comparisons.
+    //
+    // Copilot review (PR #2516), finding C: also handles ExprMethodCall
+    // (`obj.mk_arr()`), resolving the mangled impl-method name the same way
+    // expr_result_tuple_arr_mask_ref's ExprMethodCall branch does, so a
+    // plain (non-tuple) f64-array-returning method is recognised here too --
+    // needed for tuple-literal slots like `(obj.mk_arr(), 0)` where the slot
+    // itself is a single [f64; N] array, not a tuple.
     fn expr_result_is_f64_array_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        // Copilot review (PR #2516), round 11 finding 2: round 10's
+        // ExprIf/ExprMatch/ExprBlock propagation below recurses into each
+        // arm/block-tail through THIS function, but this function only ever
+        // recognised ExprMethodCall/ExprCall results -- so `(if cond { xs }
+        // else { ys }, 0)`, where each arm's tail is just an already-known
+        // f64-array LOCAL (ExprIdent), or `(if cond { [x; 2] } else { ys },
+        // 0)`, where an arm is a direct array literal, both fell through to
+        // `false` for that arm. tuple_lit_slot_is_f64_array_ref already
+        // classifies exactly these two forms at its own top level (array
+        // literal via array_literal_elems_are_float_ref, ExprIdent via
+        // lookup_local_array_elem_float) -- checking them here too, before
+        // the call/method-call/control-flow arms below, means a recursive
+        // call from a block tail sees the same answer a top-level slot
+        // would.
+        if self.array_literal_elems_are_float_ref(e) {
+            return true
+        }
+        if (*e).kind == ExprKind::ExprIdent {
+            return self.lookup_local_array_elem_float((*e).name)
+        }
+        // Copilot review (PR #2516), round 12 finding: the ExprIf/ExprMatch/
+        // ExprBlock recursion (below) re-enters THIS function for each
+        // arm/block-tail, but this function had no ExprFieldAccess arm --
+        // so `(if cond { left.values } else { right.values }, 0)` (a
+        // struct-field array) and `(if cond { pair().0 } else { pair2().0
+        // }, 0)` (a numeric tuple-slot extraction) both fell through to
+        // `false` for every arm, even though tuple_lit_slot_is_f64_array_ref
+        // already classifies both of these exact ExprFieldAccess shapes
+        // when they appear directly (not wrapped in control flow) --
+        // numeric tuple-slot names via expr_is_tuple_slot_f64_array_ref,
+        // struct-field names via field_array_elem_is_float_for_base_ref.
+        // Delegate to that same dispatch here rather than duplicating it,
+        // exactly as tuple_lit_slot_is_f64_array_ref itself delegates BACK
+        // to this function for ExprCall/ExprMethodCall/control-flow slots.
+        if (*e).kind == ExprKind::ExprFieldAccess {
+            if lower_name_tuple_index((*e).name) >= 0 {
+                return self.expr_is_tuple_slot_f64_array_ref(e)
+            }
+            return self.field_array_elem_is_float_for_base_ref(&(*e).left, (*e).name)
+        }
+        if (*e).kind == ExprKind::ExprMethodCall {
+            let recv_type = self.lower_method_recv_type(&(*e).left)
+            let call_name = if recv_type.len > 0 {
+                ir_mangle_method_name(recv_type, (*e).name)
+            } else {
+                (*e).name
+            }
+            let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, call_name)
+            if fn_id >= 0 && fn_id < self.module.fn_count {
+                return ir_fn_get(&(*self.module), fn_id as usize).returns_float == 2
+            }
+            return false
+        }
+        // Copilot review (PR #2516), round 10 finding 2: this single-array
+        // classifier (used for a tuple LITERAL slot that's itself a plain
+        // f64 array, e.g. the `mk_a()` in `(mk_a(), 0)`) had no ExprIf/
+        // ExprMatch/ExprBlock arm, so `(if cond { mk_a() } else { mk_b() }, 0)`
+        // fell straight through to `false` even when both arms return
+        // [f64;N] -- mirrors expr_result_tuple_arr_mask_ref's identical gap,
+        // fixed for the TUPLE-valued case in round 6/7 finding 2. Same OR-
+        // across-arms philosophy: post-typecheck, every arm of an if/match/
+        // block-tail bound to one slot agrees on its exact array-or-not
+        // type, so ORing only ever adds `true` from an arm this classifier
+        // recognises -- it cannot introduce a wrong `true`.
+        if (*e).kind == ExprKind::ExprIf {
+            return self.opt_block_tail_is_f64_array_ref(&(*e).block) || self.opt_expr_result_is_f64_array_ref(&(*e).else_expr)
+        }
+        if (*e).kind == ExprKind::ExprMatch {
+            return self.match_arms_is_f64_array_ref(&(*e).arms)
+        }
+        if (*e).kind == ExprKind::ExprBlock {
+            return self.opt_block_tail_is_f64_array_ref(&(*e).block)
+        }
         if (*e).kind != ExprKind::ExprCall {
             return false
         }
@@ -16859,6 +17625,54 @@ impl Lowerer {
             _ => {}
         }
         false
+    }
+
+    fn opt_expr_result_is_f64_array_ref(self, opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(e) => self.expr_result_is_f64_array_ref(&(*e)),
+            _ => false,
+        }
+    }
+
+    fn opt_block_tail_is_f64_array_ref(self, blk_opt: &Option<Box<Block>>) -> bool with Mut, Panic, Div, Alloc {
+        match *blk_opt {
+            Some(blk) => self.block_tail_is_f64_array_ref(&(*blk)),
+            _ => false,
+        }
+    }
+
+    // Same shape as block_tail_tuple_arr_mask_ref: a block's value is its
+    // trailing expression statement.
+    fn block_tail_is_f64_array_ref(self, blk: &Block) -> bool with Mut, Panic, Div, Alloc {
+        var current = &(*blk).stmts
+        var result: bool = false
+        while true {
+            match *current {
+                Some(list) => {
+                    let stmt_ref = &(*list).head
+                    if stmt_ref.kind == StmtKind::StmtExpr {
+                        result = self.opt_expr_result_is_f64_array_ref(&stmt_ref.expr)
+                    } else {
+                        result = false
+                    }
+                    current = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        result
+    }
+
+    // ORs the single-array classification across every `match` arm's body
+    // (see expr_result_is_f64_array_ref's ExprIf case for why OR is safe).
+    fn match_arms_is_f64_array_ref(self, arms_opt: &Option<Box<MatchArmList>>) -> bool with Mut, Panic, Div, Alloc {
+        match *arms_opt {
+            Some(list) => {
+                let arm = &(*list).head
+                self.expr_result_is_f64_array_ref(&arm.body) || self.match_arms_is_f64_array_ref(&(*list).tail)
+            }
+            _ => false,
+        }
     }
 
     // #1502: per-slot float mask of a tuple-producing initialiser -- either a call
@@ -16880,6 +17694,15 @@ impl Lowerer {
         }
     }
 
+    // #1502: per-slot SCALAR-f64 mask of a tuple-producing initialiser -- either
+    // a call whose declared return type is a tuple (encoded 1024+mask by
+    // lower_opt_return_float_code) or a literal tuple, whose element expressions
+    // are classified directly. The `[f64; N]` ARRAY-slot mask for a call is a
+    // separate value; see expr_result_tuple_arr_mask_ref. The two used to be
+    // packed into one combined i64 (scalar in bits 0-31, array in bits 32-63),
+    // which forced array slot 31 to be dropped to avoid corrupting the sign bit
+    // (bit 63) of the combined value -- see that function's history for the bug
+    // this split fixes.
     fn expr_result_tuple_float_mask_ref(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
         if (*e).kind == ExprKind::ExprTupleLit {
             return self.expr_list_tuple_float_mask_ref(&(*e).args, 0)
@@ -16891,15 +17714,269 @@ impl Lowerer {
             Some(callee_expr) => {
                 let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
                 let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
+                var scalar_mask: i64 = 0
                 if fn_id >= 0 && fn_id < self.module.fn_count {
                     let code = ir_fn_get(&(*self.module), fn_id as usize).returns_float
                     if code >= 1024 {
-                        return code - 1024
+                        scalar_mask = code - 1024
                     }
                 }
-                0
+                scalar_mask
             }
             _ => 0,
+        }
+    }
+
+    // Copilot review (PR #2516), finding C: a tuple LITERAL's slot is an f64
+    // array not only when the slot expression IS an array literal
+    // (array_literal_elems_are_float_ref), but also when it's an ExprIdent
+    // referring to a local already known to hold one (`let xs = mk_arr();
+    // (xs, 0)`), or an ExprCall/ExprMethodCall whose OWN return type is a
+    // plain [f64; N] array (`(mk_arr(), 0)` -- note mk_arr returns a single
+    // array here, not a tuple, so this is the SCALAR array-return check
+    // (expr_result_is_f64_array_ref), not the tuple-slot mask machinery).
+    // Without this, both forms fell through to `false` and `a[0]` on the
+    // destructured slot took the integer path.
+    fn tuple_lit_slot_is_f64_array_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if self.array_literal_elems_are_float_ref(e) {
+            return true
+        }
+        if (*e).kind == ExprKind::ExprIdent {
+            return self.lookup_local_array_elem_float((*e).name)
+        }
+        // Copilot review (PR #2516), round 10 finding 2: ExprIf/ExprMatch/
+        // ExprBlock added alongside ExprCall/ExprMethodCall here so a tuple-
+        // literal slot produced through control flow (`(if cond { mk_a() }
+        // else { mk_b() }, 0)`) reaches expr_result_is_f64_array_ref's own
+        // now-added control-flow propagation instead of falling straight to
+        // `false` below.
+        if (*e).kind == ExprKind::ExprCall || (*e).kind == ExprKind::ExprMethodCall || (*e).kind == ExprKind::ExprIf || (*e).kind == ExprKind::ExprMatch || (*e).kind == ExprKind::ExprBlock {
+            return self.expr_result_is_f64_array_ref(e)
+        }
+        if (*e).kind == ExprKind::ExprFieldAccess {
+            // Copilot review (PR #2516), round 8 finding 1: ExprFieldAccess is
+            // how BOTH a struct field access (`holder.values`) AND a nested
+            // tuple-slot extraction (`pair().0`) are represented -- the round-6
+            // fix below only ever tried the struct-field lookup, so a numeric
+            // field name like "0" simply matched no struct field and fell
+            // through to false, even though pair()'s slot 0 being an f64
+            // array is exactly what expr_is_tuple_slot_f64_array_ref already
+            // classifies. A tuple-slot name (lower_name_tuple_index >= 0)
+            // can never also be a real struct field name, so check tuple-slot
+            // extraction FIRST and use its answer outright rather than
+            // falling through to the struct-field path for it.
+            if lower_name_tuple_index((*e).name) >= 0 {
+                return self.expr_is_tuple_slot_f64_array_ref(e)
+            }
+            // Copilot review (PR #2516), round 6 finding 1: a tuple-literal slot
+            // backed by an f64-array STRUCT FIELD (`(holder.values, 0)`) arrives
+            // here as ExprFieldAccess, which fell through to `false` even though
+            // field_array_elem_is_float_for_base_ref already resolves exactly
+            // this shape elsewhere in this file (struct-typed base -> declared
+            // field layout, with the by-name fallback for an unknown base type).
+            return self.field_array_elem_is_float_for_base_ref(&(*e).left, (*e).name)
+        }
+        false
+    }
+
+    // Element-wise counterpart of expr_list_tuple_float_mask_ref for a tuple
+    // LITERAL's f64-ARRAY slots: `let (a, b) = ([x; 2], [y; 2])` has no callee
+    // return type to consult (there is no function here), so each slot's mask
+    // bit is derived directly from its own sub-expression via
+    // tuple_lit_slot_is_f64_array_ref above (array literals, f64-array
+    // locals, and f64-array-returning calls/method calls).
+    fn expr_list_tuple_f64_array_mask_ref(self, opt: &Option<Box<ExprList>>, bit: i64) -> i64 with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(list) => {
+                var m: i64 = 0
+                if bit < 32 {
+                    if self.tuple_lit_slot_is_f64_array_ref(&(*list).head) {
+                        m = 1 << (bit as i32)
+                    }
+                }
+                m + self.expr_list_tuple_f64_array_mask_ref(&(*list).tail, bit + 1)
+            }
+            _ => 0,
+        }
+    }
+
+    // Array-slot counterpart of expr_result_tuple_float_mask_ref: per-slot mask
+    // of which slots of a tuple-producing expression are `[f64; N]` arrays.
+    //
+    // Copilot review (PR #2516): restricting this to ExprCall left two other
+    // valid tuple producers unclassified -- `let (a, b) = ([x], [y])`
+    // (ExprTupleLit) and `let (a, b) = obj.pair()` (ExprMethodCall) -- both
+    // silently kept their destructured arrays on the integer path. Tuple
+    // literals derive the mask directly from their element sub-expressions
+    // (expr_list_tuple_f64_array_mask_ref) since there is no callee return
+    // type to consult; method calls resolve the mangled impl-method name the
+    // same way expr_result_is_float_ref's ExprMethodCall branch does
+    // (self.lower_method_recv_type + ir_mangle_method_name) and look it up in
+    // the same per-fn declared-array-return table the ExprCall branch uses.
+    fn expr_result_tuple_arr_mask_ref(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprTupleLit {
+            return self.expr_list_tuple_f64_array_mask_ref(&(*e).args, 0)
+        }
+        // Copilot review (PR #2516), round 7 finding 1: an unannotated tuple
+        // ALIAS -- `let t = pair(); let u = t` -- has `u`'s initializer as a
+        // plain ExprIdent naming `t`. Without this case, `u`'s own mask got
+        // bound as 0 regardless of `t`'s already-tracked mask (this function
+        // runs at BIND time for `u`, computing the mask that gets attached to
+        // the new local), so a later `u.0` / `let (a, n) = u` fell back to
+        // the integer path even though `t.0` classified correctly. Propagate
+        // the aliased local's own tracked mask, the same lookup
+        // expr_is_tuple_slot_f64_array_ref already uses for a direct
+        // identifier base on a field access -- this closes the matching gap
+        // at the BINDING step instead.
+        if (*e).kind == ExprKind::ExprIdent {
+            return self.lookup_local_tuple_arr_mask((*e).name)
+        }
+        if (*e).kind == ExprKind::ExprMethodCall {
+            let recv_type = self.lower_method_recv_type(&(*e).left)
+            let call_name = if recv_type.len > 0 {
+                ir_mangle_method_name(recv_type, (*e).name)
+            } else {
+                (*e).name
+            }
+            return lower_fn_tuple_f64_array_mask(call_name)
+        }
+        // Copilot review (PR #2516): this returned 0 for every conditional,
+        // so `let (a, b) = if cond { pair1() } else { pair2() }` lost the
+        // array-slot mask entirely and `a[0]` fell back to the integer path,
+        // even though both arms of an if/match a tuple gets bound from must
+        // agree on their exact tuple type post-typecheck (a [f64;N] slot in
+        // one arm cannot pair with, say, an i64 slot in the other). ORs the
+        // per-slot bits from every arm rather than trusting a single one:
+        // type agreement guarantees any bit a given arm's classifier DOES
+        // recognise is correct, so ORing only ever adds bits a less-complete
+        // arm expression failed to resolve on its own -- it cannot introduce
+        // a wrong one. Mirrors expr_result_is_float_ref's own ExprIf case
+        // (opt_block_tail_is_float_ref || opt_expr_result_is_float_ref),
+        // which uses the same "either arm is enough" OR philosophy for the
+        // scalar case.
+        if (*e).kind == ExprKind::ExprIf {
+            return self.opt_block_tail_tuple_arr_mask_ref(&(*e).block) | self.opt_expr_result_tuple_arr_mask_ref(&(*e).else_expr)
+        }
+        if (*e).kind == ExprKind::ExprMatch {
+            return self.match_arms_tuple_arr_mask_ref(&(*e).arms)
+        }
+        // Copilot review (PR #2516), round 6 finding 2: a BRACED match arm
+        // (`0 => { pair1() }`) or any other bare block expression arrives
+        // here as ExprBlock, not as the tail expression directly -- without
+        // this, match_arms_tuple_arr_mask_ref called expr_result_tuple_arr_
+        // mask_ref(&arm.body) on the ExprBlock itself, which fell through to
+        // `return 0` below (an ExprBlock is not an ExprCall), so every
+        // braced arm contributed mask 0 regardless of what it evaluated to.
+        // Delegates to the same block-tail helper the ExprIf case above
+        // already uses for its `then` branch (expr_result_is_float_ref has
+        // the identical gap fixed for the scalar case: its own ExprIf
+        // handling reaches block tails via opt_block_tail_is_float_ref, but
+        // an ExprBlock passed to IT directly has the same hole -- out of
+        // scope here since round 6 findings 1/2 are both about the tuple
+        // array-mask classifier specifically).
+        if (*e).kind == ExprKind::ExprBlock {
+            return self.opt_block_tail_tuple_arr_mask_ref(&(*e).block)
+        }
+        if (*e).kind != ExprKind::ExprCall {
+            return 0
+        }
+        match (*e).left {
+            Some(callee_expr) => {
+                let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
+                lower_fn_tuple_f64_array_mask(callee_name)
+            }
+            _ => 0,
+        }
+    }
+
+    fn opt_expr_result_tuple_arr_mask_ref(self, opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(e) => self.expr_result_tuple_arr_mask_ref(&(*e)),
+            _ => 0,
+        }
+    }
+
+    fn opt_block_tail_tuple_arr_mask_ref(self, blk_opt: &Option<Box<Block>>) -> i64 with Mut, Panic, Div, Alloc {
+        match *blk_opt {
+            Some(blk) => self.block_tail_tuple_arr_mask_ref(&(*blk)),
+            _ => 0,
+        }
+    }
+
+    // Same shape as block_tail_is_float_ref: a block's value is its trailing
+    // expression statement, so an if-arm's `{ ...; pair() }` is classified by
+    // that last statement, not the block as a whole.
+    fn block_tail_tuple_arr_mask_ref(self, blk: &Block) -> i64 with Mut, Panic, Div, Alloc {
+        var current = &(*blk).stmts
+        var result: i64 = 0
+        while true {
+            match *current {
+                Some(list) => {
+                    let stmt_ref = &(*list).head
+                    if stmt_ref.kind == StmtKind::StmtExpr {
+                        result = self.opt_expr_result_tuple_arr_mask_ref(&stmt_ref.expr)
+                    } else {
+                        result = 0
+                    }
+                    current = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        result
+    }
+
+    // ORs the per-slot array-slot mask across every `match` arm's body (see
+    // expr_result_tuple_arr_mask_ref's ExprIf case for why OR is safe here:
+    // all arms share the same tuple type post-typecheck).
+    fn match_arms_tuple_arr_mask_ref(self, arms_opt: &Option<Box<MatchArmList>>) -> i64 with Mut, Panic, Div, Alloc {
+        match *arms_opt {
+            Some(list) => {
+                let arm = &(*list).head
+                self.expr_result_tuple_arr_mask_ref(&arm.body) | self.match_arms_tuple_arr_mask_ref(&(*list).tail)
+            }
+            _ => 0,
+        }
+    }
+
+    // `let ov = __tupN.K` where slot K of the tuple local is an f64 array (bit K
+    // of its OWN mask, recorded from the callee's declared return type -- see
+    // tuple_arr_mask / lookup_local_tuple_arr_mask). Mirrors
+    // opt_base_tuple_float_mask_ref's coverage: `base.K` is resolved either
+    // from the local table (base is a bound identifier) or, for `mk().K` with
+    // no intervening binding, straight off the call's declared array mask via
+    // expr_result_tuple_arr_mask_ref.
+    fn expr_is_tuple_slot_f64_array_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).kind != ExprKind::ExprFieldAccess {
+            return false
+        }
+        let slot = lower_name_tuple_index((*e).name)
+        if slot < 0 || slot >= 32 {
+            return false
+        }
+        match (*e).left {
+            Some(base_expr) => {
+                var arr_bits: i64 = 0
+                if (*base_expr).kind == ExprKind::ExprIdent {
+                    arr_bits = self.lookup_local_tuple_arr_mask((*base_expr).name)
+                } else {
+                    // Copilot review (PR #2516): this used to special-case only
+                    // ExprCall and fall through to `false` for everything else,
+                    // so `p.pair().0` (base is ExprMethodCall) and
+                    // `([x; 2], [y; 2]).0` (base is ExprTupleLit) never got
+                    // array-slot metadata even though expr_result_tuple_arr_mask_ref
+                    // already knows how to classify both of those base kinds (it
+                    // was extended for exactly this in an earlier round of this
+                    // same review). Delegate every non-identifier base to it
+                    // instead of re-special-casing each kind here; it already
+                    // returns 0 (never an array slot) for any kind it doesn't
+                    // recognise, so this is a strict superset of the old
+                    // ExprCall-only behaviour.
+                    arr_bits = self.expr_result_tuple_arr_mask_ref(&(*base_expr))
+                }
+                (arr_bits >> (slot as i32)) % 2 == 1
+            }
+            None => false,
         }
     }
 
@@ -17377,6 +18454,32 @@ impl Lowerer {
         lo.lower_let_stmt_type_metadata_ref(s, reg, rhs_array_elem_is_float)
     }
 
+    // `[r0, r1, r2]` whose elements are f64 LOCALS (or calls, fields, indexes the
+    // classifier positively reports as f64). lower_expr_is_f64_array_literal_ref is
+    // a free fn that only sees float literals, casts and binary subtrees of them, so
+    // an array built from computed f64 locals was an integer array and every
+    // `rates[k]` used in arithmetic converted the f64 BITS as an i64: kinetics
+    // test_stoich_matrix read dc[0] = -9.18e18 instead of -0.2 under Madaros.
+    // f64 array literals are homogeneous after typecheck, so the first element is
+    // representative, as in the free fn.
+    fn array_literal_elems_are_float_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if lower_expr_is_f64_array_literal_ref(e) {
+            return true
+        }
+        if (*e).kind != ExprKind::ExprArrayLit {
+            return false
+        }
+        match (*e).left {
+            Some(repeat_expr) => self.expr_result_is_float_ref(&(*repeat_expr)),
+            None => {
+                match (*e).args {
+                    Some(args) => self.expr_result_is_float_ref(&(*args).head),
+                    None => false,
+                }
+            }
+        }
+    }
+
     fn lower_let_stmt_type_metadata_ref(
         self,
         s: &Stmt,
@@ -17397,9 +18500,11 @@ impl Lowerer {
         } else {
             match s.expr {
                 Some(expr_box_arr) => {
-                    if lower_expr_is_f64_array_literal_ref(&(*expr_box_arr)) {
+                    if lo.array_literal_elems_are_float_ref(&(*expr_box_arr)) {
                         lo = lo.bind_local_array_elem_float(s.name)
                     } else if lo.expr_result_is_f64_array_ref(&(*expr_box_arr)) {
+                        lo = lo.bind_local_array_elem_float(s.name)
+                    } else if lo.expr_is_tuple_slot_f64_array_ref(&(*expr_box_arr)) {
                         lo = lo.bind_local_array_elem_float(s.name)
                     } else if rhs_array_elem_is_float {
                         lo = lo.bind_local_array_elem_float(s.name)
@@ -17418,6 +18523,27 @@ impl Lowerer {
                     let init_tuple_mask = lo.expr_result_tuple_float_mask_ref(&(*expr_box_tup))
                     if init_tuple_mask != 0 {
                         lo = lo.bind_local_tuple_float_mask(s.name, init_tuple_mask)
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Array-slot counterpart: which slots of a tuple-typed local are
+        // `[f64; N]` arrays, tracked in its own mask (tuple_arr_mask) rather
+        // than packed into the high bits of tuple_float_mask. Annotated type
+        // first (covers a tuple LITERAL initialiser, which has no declared
+        // CALL-return-type tracking), falling back to the initialiser
+        // expression's own mask (covers a CALL initialiser with no
+        // annotation) -- same precedence as the scalar mask above.
+        let annotated_tuple_arr_mask = lower_opt_type_tuple_arr_mask(&s.ty)
+        if annotated_tuple_arr_mask != 0 {
+            lo = lo.bind_local_tuple_arr_mask(s.name, annotated_tuple_arr_mask)
+        } else {
+            match s.expr {
+                Some(expr_box_tup_arr) => {
+                    let init_tuple_arr_mask = lo.expr_result_tuple_arr_mask_ref(&(*expr_box_tup_arr))
+                    if init_tuple_arr_mask != 0 {
+                        lo = lo.bind_local_tuple_arr_mask(s.name, init_tuple_arr_mask)
                     }
                 }
                 _ => {}
@@ -22234,7 +23360,7 @@ impl Lowerer {
         match e.left {
             Some(_) => self.lower_array_repeat_literal_ref(e),
             None => {
-                let elem_is_float = lower_expr_is_f64_array_literal_ref(e)
+                let elem_is_float = self.array_literal_elems_are_float_ref(e)
                 let pair_dst = self.fresh_reg()
                 var lo = pair_dst.0
                 let dst = pair_dst.1
@@ -24556,6 +25682,18 @@ fn lower_program_to_ir_ref(prog: &Program) -> IrLowerResult with Mut, Panic, Div
 }
 
 pub fn lower_program_to_ir(prog: Program) -> IrLowerResult with Mut, Panic, Div, Alloc, IO {
+    // Copilot review (PR #2516): this public entry point's body-lowering
+    // path (lower_program_to_ir_ref -> ... -> lower_program_bodies_ref)
+    // collects into the process-global tuple-array-mask table but never
+    // reset it first, unlike the other top-level compile entry points in
+    // module_frontend.sio and main.sio's --probe-tuple-arr-capacity. Since
+    // collection dedupes by name, run_ir_verify_pipeline (main.sio:565,596)
+    // calling lower_program_to_ir twice in one process -- once per input
+    // file -- let a name collision (e.g. both inputs define `pair`, one
+    // with an f64-array tuple slot, one with a different mask) leak the
+    // first call's mask into the second call's lowering. Reset here, once
+    // per call to this public API, before any collection happens.
+    lower_fn_tuple_arr_reset()
     lower_monolithic_public_probe_boundary("public_call_entry")
     lower_program_to_ir_ref(&prog)
 }
@@ -24791,7 +25929,19 @@ pub fn lower_program_to_ir_probe_summary(prog: Program) -> IrLowerResult with Mu
     lower_program_to_ir_probe_summary_ref(&prog)
 }
 
-fn lower_program_function_body_from_summary_with_epistemic_ref(
+// Marked pub (was private, default visibility -- no stated reason to keep it
+// module-internal, and several sibling `_ref` helpers in this file are
+// already pub directly, e.g. lower_program_to_ir_summary_box_with_epistemic_ref,
+// lower_program_bodies_from_summary_flat_with_epistemic_ref): CI's gen1
+// self-typecheck of compiler/main.sio (madaros_fixed_point_gate.sh) failed
+// with E175 "function is private in its defining module" once
+// compiler::main's --probe-filtered-body-lower (finding D, round 4 of the
+// PR #2516 review) started calling this across the module boundary. The
+// owned-by-value pub wrapper right below (lower_program_function_body_from_
+// summary_with_epistemic) does not fit that probe's loop, which reuses one
+// `program`/`summary` by reference across every function in the summary
+// rather than re-deriving them per call.
+pub fn lower_program_function_body_from_summary_with_epistemic_ref(
     prog: &Program,
     summary: &IrProgramSummary,
     epistemic: IrEpistemicSection,
@@ -25047,6 +26197,47 @@ pub fn lower_program_bodies_from_summary_flat_with_epistemic_ref(
     }
 }
 
+// Copilot review (PR #2516): lower_program_bodies_filtered_ref (reached via
+// the _ref variant below) collects into the process-global
+// LOWER_FN_TUPLE_ARR_* table with no reset boundary of its own. A caller
+// that drives a per-function loop against ONE program must reset once
+// itself, before that loop, since each call's collect() re-scans and must
+// keep accumulating across sibling functions in the SAME program --
+// main.sio's run_probe_filtered_body_lower does exactly this.
+//
+// Copilot review (PR #2516), round 3 (comment 4109402799): this comment
+// used to also name streaming_body_lower_smoke.sio as a caller that
+// "resets once itself" -- it does not: it never imports or calls
+// lower_fn_tuple_arr_reset at all. It gets away with that because it has
+// its own `fn main` (self-hosted/compiler/streaming_body_lower_smoke.sio)
+// and makes exactly ONE lowering call in that process's entire lifetime,
+// so there is nothing for a stale mask to leak FROM -- not because it
+// participates in the reset contract described above. A future caller
+// that copied "streaming_body_lower_smoke.sio resets once" as a pattern,
+// while actually making more than one call or sharing a process with
+// other lowering, would silently inherit this table's leak bugs.
+//
+// Round 2 (Copilot review, comment 4109134765): this OWNED wrapper used to
+// reset unconditionally on EVERY call, reasoning that module_loader.sio's
+// thin-link path (thin_build_compiled_unit) calls it repeatedly for
+// potentially DIFFERENT modules across one process. That reasoning missed
+// that thin_build_compiled_unit calls this wrapper MULTIPLE TIMES within
+// the SAME compiled unit too -- once per local function (its `owner_prog`
+// loop) and once per SELECTED imported callee (its separate-`prog` loop) --
+// and each call's collect() only ever scans the `items` of the ONE `prog`
+// it was given, never the other program's. Resetting on every call
+// therefore wiped an imported callee's own tuple-array mask (collected
+// while lowering THAT callee's own body, from ITS OWN prog) before the
+// OWNER's body got lowered and needed to classify its call to that same
+// callee -- an imported function returning `([f64; N], ...)` silently lost
+// its mask and still lowered through the integer path. This wrapper no
+// longer resets at all: thin_build_compiled_unit now resets once and
+// collects every program relevant to the WHOLE unit (owner + every
+// import_map callee) up front, before any body in the unit is lowered, so
+// no per-call reset is needed or correct here. Callers with a narrower,
+// single-program scope (main.sio's --probe-filtered-body-reset-boundary)
+// reset explicitly themselves, same as the _ref variant's callers already
+// do.
 pub fn lower_program_function_body_from_summary_with_epistemic(
     prog: Program,
     summary: IrProgramSummary,

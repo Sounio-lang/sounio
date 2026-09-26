@@ -1,0 +1,55 @@
+//@ run-pass
+//@ requires: lean_single
+//@ expect-stdout: TUPLE_LAST_SLOT_ARRAY PASS
+//
+// Regression for the f64-array/scalar tuple-mask packing bug: the #1502
+// scalar-f64 tuple mask already caps a tracked tuple return at 32 slots
+// (bit < 32, one packed i64). lower_fn_tuple_f64_array_mask used to
+// piggyback its own [f64; N]-array-slot bits on the HIGH 32 bits of that
+// SAME combined i64 (`scalar_mask + array_mask * 2^32`), which pushes array
+// slot 31 onto bit 63 -- the sign bit -- of the combined value. To dodge
+// that corruption, lower_type_list_f64_array_mask used to silently drop
+// slot 31's array-ness (`if bit < 31`), one slot short of the scalar side's
+// own cap.
+//
+// NOTE on the tuple this test actually uses: the *design* cap for both
+// masks is 32 slots (see self-hosted/ir/lower.sio), but the compiler's tuple
+// LITERAL checker (self-hosted/check/check.sio, check_tuple_elems) has its
+// own, unrelated, pre-existing ceiling of 16 elements -- `[TypeEntry; 16]`
+// plus `if count < 16 { .. } else { done = true }` -- which rejects (E008,
+// tuple-literal/declared-type mismatch) any attempt to return a tuple
+// literal with more than 16 elements. That makes slot 31 (and every slot
+// past 15) unconstructible by any currently-compilable Sounio program,
+// regardless of this fix. This test therefore exercises the LAST slot that
+// is actually reachable today -- index 15 of a 16-element tuple -- to prove
+// the split representation (tuple_arr_mask, its own i64, independent of the
+// scalar tuple_float_mask) still classifies a last-slot f64 array correctly
+// after the refactor. It does not (and currently cannot) reproduce the
+// original sign-bit corruption directly, since that required an
+// unreachable slot 31; see the lower.sio comments on tuple_arr_mask /
+// lower_type_list_f64_array_mask for the representation fix itself.
+fn pair16() -> (f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, f64, [f64; 2]) with Mut, Panic {
+    var arr: [f64; 2] = [0.0; 2]
+    arr[0] = 1.5
+    arr[1] = 0.25
+    (0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, arr)
+}
+
+fn main() -> i32 with IO, Mut, Panic {
+    let (_, _, _, _, _, _, _, _, _, _, _, _, _, _, _, a15) = pair16()
+    // Plain pass-through read stays correct even under the old bug (it hid
+    // the corruption); arithmetic is what surfaces the cvtsi2sd conversion.
+    let d0: f64 = a15[0] * 2.0
+    let d1: f64 = 2.0 * a15[1]
+    var acc: f64 = 0.0
+    var j: i64 = 0
+    while j < 2 {
+        acc = acc + 0.5 * a15[j]
+        j = j + 1
+    }
+    if d0 == 3.0 && d1 == 0.5 && acc == 0.875 {
+        println("TUPLE_LAST_SLOT_ARRAY PASS")
+        return 0
+    }
+    1
+}
