@@ -647,11 +647,15 @@ export function degenerateParams(base, { eps = 1e-3, psScale = 1e4 } = {}) {
 // Third canonical drug. Two coupled PBPK28 compartments: parent (venlafaxine)
 // and active metabolite ODV (O-desmethylvenlafaxine), bridged by hepatic CYP2D6
 // formation. Oral XR input is gated by a Korsmeyer-Peppas erodible matrix.
-// Formation is a first-order liver sink solved inside the parent CN step, as in
-// stdlib scenarios/venlafaxine_xr.sio (3c0bbc50c): CL_form·dt/V_liver is ~12 at
-// NM and dt = 0.5 h, so an explicit post-step subtraction saturates to "empty
-// the liver" every step. Readout: steady-state C_avg ODV/parent blood ratio
-// (runVenlafaxineSteadyState), as vfx_ss_odv_parent_ratio (bba219013).
+// Formation is a first-order liver sink solved inside the parent CN step:
+// CL_form·dt/V_liver is ~12 at NM and dt = 0.5 h, so an explicit post-step
+// subtraction saturates to "empty the liver" every step. Readout: steady-state
+// C_avg ODV/parent blood ratio (runVenlafaxineSteadyState).
+// The stdlib counterparts (pbpk28_full_cn_step_sink_mut 07baf94bc, scenario
+// 3c0bbc50c, vfx_ss_odv_parent_ratio bba219013) are on branch
+// claude/elegant-borg-a14bdf, NOT on main: main's scenarios/venlafaxine_xr.sio
+// still uses the explicit sink. This port and the Sounio parity ref check each
+// other and the closed form; they do not establish parity with main's stdlib.
 //
 // Bit-compatible companion to tests/run-pass/dissertation_pbpk28_parity_ref_venlafaxine.sio.
 // The matrix transcendentals (merLnUnit/merExp/merPow) and absorption (merExpNeg)
@@ -870,6 +874,14 @@ export function runVenlafaxineScenario(sampleTimes, { dt = 0.5, pheno = 2 } = {}
 // The gut pool is not in P: both AUCs are linear in the interval's actual input
 // U, so U cancels in the ratio and the closed form does not depend on it.
 // `certified` fails closed unless AUC_parent > err_parent (interval denominator).
+// CYP2D6 phenotype enum: 0 = PM, 1 = IM, 2 = NM, 3 = UM. Checked as a number,
+// not with `in`, which would accept inherited keys such as 'toString'.
+function vfxCheckPheno(pheno) {
+  if (!(Number.isInteger(pheno) && pheno >= 0 && pheno <= 3)) {
+    throw new RangeError(`pheno must be an integer 0..3 (PM, IM, NM, UM), got ${String(pheno)}`);
+  }
+}
+
 function vfxStateAbsDiffMass(aCv, aCt, bCv, bCt) {
   let total = V_REF[0] * Math.abs(aCv[0] - bCv[0]);
   for (let i = 1; i < N; i++) {
@@ -881,15 +893,20 @@ function vfxStateAbsDiffMass(aCv, aCt, bCv, bCt) {
 
 export function runVenlafaxineSteadyState({ dt = 0.5, pheno = 2, nDoses = 10, tau = 24.0 } = {}) {
   // Regimen guards: the audit needs a finite positive step, at least one dose,
-  // and an interval of whole steps (otherwise the audited window is not tau).
+  // an interval of whole steps (otherwise the audited window is not tau), and a
+  // total step count that is a safe integer (so every loop bound is finite).
   if (!(Number.isFinite(dt) && dt > 0)) throw new RangeError(`dt must be finite and > 0, got ${dt}`);
   if (!(Number.isFinite(tau) && tau > 0)) throw new RangeError(`tau must be finite and > 0, got ${tau}`);
-  if (!(Number.isInteger(nDoses) && nDoses >= 1)) throw new RangeError(`nDoses must be an integer >= 1, got ${nDoses}`);
-  if (!(pheno in VFX_CL_FORM_SCALE)) throw new RangeError(`pheno must be 0..3, got ${pheno}`);
+  if (!(Number.isSafeInteger(nDoses) && nDoses >= 1)) throw new RangeError(`nDoses must be a safe integer >= 1, got ${nDoses}`);
+  vfxCheckPheno(pheno);
   const stepsExact = tau / dt;
   const stepsPerTau = Math.round(stepsExact);
-  if (stepsPerTau < 1 || Math.abs(stepsExact - stepsPerTau) > 1e-9 * stepsPerTau) {
+  if (!Number.isSafeInteger(stepsPerTau) || stepsPerTau < 1
+      || Math.abs(stepsExact - stepsPerTau) > 1e-9 * stepsPerTau) {
     throw new RangeError(`tau/dt must be a whole number of steps, got ${tau}/${dt} = ${stepsExact}`);
+  }
+  if (!Number.isSafeInteger(nDoses * stepsPerTau)) {
+    throw new RangeError(`nDoses·tau/dt = ${nDoses}·${stepsPerTau} steps is not a safe integer`);
   }
   const rel = VFX_MATRIX_GOHEL2008;
   const clFormScale = VFX_CL_FORM_SCALE[pheno];
@@ -948,6 +965,7 @@ export function runVenlafaxineSteadyState({ dt = 0.5, pheno = 2, nDoses = 10, ta
 // liver 2×2 balance with the sink, ODV has no sink, so
 //   ratio = (CL_form / CL_odv) · C_avg/C_b,  C_avg/C_b = φ·Q / (Q + CL_form·φ).
 export function vfxSsRatioClosedForm(pheno = 2) {
+  vfxCheckPheno(pheno);
   const li = VFX_LIVER;
   const clf = VFX_CL_FORM_ODV_NM * VFX_CL_FORM_SCALE[pheno];
   const v = V_REF[li], vv = v * VASC_FRAC[li], vt = v * (1.0 - VASC_FRAC[li]);
