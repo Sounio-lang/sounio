@@ -231,8 +231,13 @@ verification instead, at each step:
    review**: the first version of `test_bayesian_permutation_invariant`
    permuted `checkpoint_steps` directly (e.g. to `[30,7,22,15]`), silently
    violating a precondition of `simulate_general_crn_checkpoints`
-   (checkpoint_steps must be strictly ascending, since the loop runs to
-   `checkpoint_steps[3]` and detects checkpoints in array order) -- the
+   (checkpoint_steps must be non-decreasing -- repeats are valid and used
+   intentionally by `bayesian_identifiability_crn`'s `[T,T,T,T]`; the loop
+   runs to `checkpoint_steps[3]` and detects checkpoints in array order.
+   Corrected here 2026-09-26 -- an earlier draft of this entry said
+   "strictly ascending", which was already stale by the time this
+   precondition became a runtime-enforced panic in commit `5ba6fd1f`) --
+   the
    loop stops after 15 steps and never reaches the checkpoints that would
    have come later in a correctly-ordered array, silently leaving those
    slots at their zero-initialized default instead of erroring. Caught
@@ -355,4 +360,52 @@ verification instead:
    and re-confirmed `PASS`.
 
 **Flagged for re-review**: per policy, alongside the five entries above,
+once a provider is configured in a session that has one.
+
+## 2026-09-26T15:55Z — Claude (session_01RMzxzzsE5JNGEqnnkUs9Yo) — M1, k_from_delta_g RSS combination fix (PR sounio-lang/sounio#2694)
+
+| 2026-09-26 | — | math-review | equilibrium.sio (k_from_delta_g's combined uncertainty changed from an absolute-value sum of its two independent sensitivity terms to their root-sum-square, the correct GUM combination rule) | WAIVED | No offload provider configured in this container, same as the six entries above. Independent Python cross-check of abs-sum vs. RSS on the reviewer's own numbers; full narrative below. |
+
+**Trigger**: the sign fix in the entry immediately above this one (WAIVED,
+2026-09-26T15:45Z) was itself flagged as still mathematically wrong by the
+next Copilot review round: `dg` and `t` are independent inputs, so their
+GUM combined standard uncertainty must be the root-sum-square (RSS) of the
+two sensitivity contributions, not their sum by absolute magnitude. An
+absolute-value sum overstates the combined uncertainty whenever both
+contributions are nonzero.
+
+**Attempted**: `bin/llm-offload --status` — no provider reachable in this
+container, same as every prior entry in this log.
+
+**Outcome**: WAIVED for lack of a reachable provider. Independent
+verification instead:
+
+1. **Reproduced the reviewer's exact numbers in Python**: for `dg=-5000,
+   udg=100, t=300, ut=5` (using this stdlib's own gas constant,
+   `stdlib/constants/physical.sio:233`, `8.31446261815324`, not the
+   textbook-rounded `8.314`), the abs-sum formula gives `uk=0.545656` and
+   the RSS formula gives `uk=0.387363` — matching the reviewer's cited
+   value to 6 decimal digits, confirming both the claim and the exact
+   constant in use.
+2. **Fixed** by computing the two sensitivity terms (`term_dg`, `term_t`)
+   separately and combining them as
+   `sqrt(term_dg^2 + term_t^2)` instead of `term_dg + term_t`, using this
+   file's existing `equilibrium_sqrt_approx` (Newton-Raphson, already used
+   elsewhere in the same file for a GUM combination in
+   `solve_ab_c_equil`).
+3. **Confirmed the two combination rules coincide whenever at most one
+   term is nonzero** — which is exactly why the PREVIOUS entry's own
+   regression test (`test_k_dg_negative_uncertainty_sign`, `udg=0.0`)
+   didn't catch this: with `udg=0`, `term_dg=0` and RSS/abs-sum both
+   reduce to `|term_t|`. This is why the new regression below uses a
+   `udg != 0` input specifically.
+4. **Regression test added**: `test_k_dg_rss_combination` in
+   `equilibrium.sio`, asserting the exact RSS value (`0.387363`, not just
+   `uk > 0`, per the reviewer's own suggestion), wired into `main()` and
+   into `tests/stdlib/chemistry/test_equilibrium_acids.sio`. Verified as a
+   real control: temporarily reverted to the abs-sum formula and confirmed
+   the fixture fails (`FAIL k_dg_rss_combination`); restored the fix and
+   re-confirmed `PASS`.
+
+**Flagged for re-review**: per policy, alongside the six entries above,
 once a provider is configured in a session that has one.
