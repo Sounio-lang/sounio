@@ -24,15 +24,25 @@
 //
 // HOW FAR OUT OF DOMAIN rapamycin is, measured 2026-09-26 rather than implied
 // by "overestimates". At logP = 7.0, P = 1e7 and the lipid term dominates.
-// Like for like, both as Kp (total tissue : total plasma), fu = 0.08:
-//   this function returns      1702.31 (blood) .. 588278.57 (adipose)
-//   rr_rapamycin_kp_literature   0.08  (brain) ..      10.00 (lung)
-// Compared TISSUE BY TISSUE, the overprediction spans a factor of 1642.5 to
-// 1960928.6, i.e. 3.2 to 6.3 ORDERS of magnitude -- not a modest bias.
+// Like for like, both as Kp (total tissue : total plasma), fu = 0.08 -- and
+// these are printed by main() rather than transcribed:
+//   this function returns      1976.05 (blood) .. 682880.01 (adipose)
+//   rr_rapamycin_kp_literature    0.08 (brain)  ..     10.00 (lung)
+// Compared TISSUE BY TISSUE, the overprediction spans a factor of 1906.68 to
+// 2276266.71, i.e. 3.3 to 6.4 ORDERS of magnitude -- not a modest bias.
 // Nothing may read `RRResult.kp` for rapamycin and call it a prediction.
-// (An earlier version of this note compared Kpu against total-plasma
-// literature Kp and quoted the literature floor as 1 rather than 0.08; both
-// are corrected here.)
+//
+// Two earlier versions of this note were wrong and are recorded rather than
+// quietly replaced, because each was wrong for a different reason:
+//   (1) the first compared Kpu against total-plasma literature Kp and gave the
+//       literature floor as 1 rather than 0.08 -- a mismatched-basis comparison;
+//   (2) the second was like-for-like but quoted 1702.31 .. 588278.57 and
+//       "1642.5 to 1960928.6", which were the outputs of the module's OWN
+//       broken rr_pow10 (effective P = 8.61e6 instead of 1e7, 13.9% low), so it
+//       conflated model error with a numerical error in the helper. Both were
+//       found in review by copilot-pull-request-reviewer. The figures above are
+//       measured on the corrected helpers, whose accuracy is itself gated
+//       (T9-T11).
 //
 // ERRATUM CHECKED (2026-09-26). Rodgers & Rowland published a correction to
 // the 2006 paper: J Pharm Sci 96(11):3153-3154, Nov 2007,
@@ -116,36 +126,126 @@
 // MATH HELPERS
 // ============================================================================
 
-fn rr_sqrt(x: f64) -> f64 with Mut, Div {
+// All three helpers below were replaced on 2026-09-26. The previous versions
+// were fixed-iteration-count series about a single point, and their error was
+// large enough to corrupt the module's own published figures -- MEASURED, not
+// suspected, with a 60-line repro (scratchpad rrexp/probe.sio, probe2.sio):
+//
+//   rr_sqrt, 12 Newton steps from y = x:
+//     sqrt(1e13)  gave 2441407615.333099 for 3162277.660168   -- 772x high
+//     sqrt(1e30)  gave 9223372036854775808.0 for 1e15         -- saturated
+//     sqrt(1e6)   gave 1000.553871 for 1000.0                 -- 0.055% high
+//     sqrt(2.0)   was correct; small arguments were fine, which is why nothing
+//     noticed: from y = x the iteration needs about 0.5*log2(x) HALVINGS before
+//     Newton's quadratic phase begins, so 12 steps cover x up to ~1e7 and
+//     nothing beyond. kp_unc_raw for rapamycin takes sqrt of ~2.4e12, squarely
+//     in the broken regime, and T2 only asserted "> 0".
+//   rr_exp, 20-term Taylor about 0 (caught in review by copilot-pull-request-reviewer):
+//     rr_pow10(-3) gave 0.007281 for 0.001                    -- 7.28x high
+//     rr_pow10(7)  gave 8614669.529655 for 1e7                -- 13.9% low
+//     rr_pow10(2)  gave 99.999998 for 100.0
+//     The series is alternating for x < 0 and its terms peak near n = |x|, so
+//     truncating at 20 is meaningless once |x| approaches 20. logP 7 gives
+//     x = 16.118 and logP -3 gives x = -6.908; both land there.
+//
+// Every figure this module prints depends on these, so the corrected versions
+// are gated by properties that need no external reference values: T9-T11.
+
+// sqrt(x) by exponent reduction plus Newton. Write x = m*4^k with m in [1, 4),
+// so sqrt(x) = sqrt(m)*2^k; Newton on [1, 4) from y0 = (1 + m)/2 reaches full
+// binary64 precision in about 5 steps (8 are taken), and the 2^k rescaling is
+// exact. Both reduction loops are bounded by ~540 iterations across the whole
+// binary64 range.
+fn rr_sqrt(x: f64) -> f64 with Mut, Div, Panic {
     if x <= 0.0 { return 0.0 }
-    var y = x
+    // `x <= MAX` is false for +Inf AND for NaN, so this one negated test closes
+    // both, and closes the reduction loops below, which would not terminate on
+    // an infinity. A finite x passes it.
+    if !(x <= 1.7976931348623157e308) { panic("rr_sqrt: argument is +Inf or NaN") }
+    var m = x
+    var k: i64 = 0
+    while m >= 4.0 {
+        m = m * 0.25
+        k = k + 1
+    }
+    while m < 1.0 {
+        m = m * 4.0
+        k = k - 1
+    }
+    var y = (1.0 + m) * 0.5
     var i = 0
-    while i < 12 { y = (y + x / y) * 0.5; i = i + 1 }
-    y
+    while i < 8 {
+        y = (y + m / y) * 0.5
+        i = i + 1
+    }
+    var res = y
+    let n = if k < 0 { 0 - k } else { k }
+    var j: i64 = 0
+    while j < n {
+        if k < 0 { res = res * 0.5 } else { res = res * 2.0 }
+        j = j + 1
+    }
+    res
 }
 
 fn rr_abs(x: f64) -> f64 {
     if x < 0.0 { 0.0 - x } else { x }
 }
 
-// exp(x) — Taylor series, matches ppcr_neural_net_demo pattern
+// exp(x) by range reduction: x = k*ln2 + r with |r| <= ln2/2 = 0.3466, so
+// exp(x) = 2^k * exp(r). The Taylor series is then evaluated only where it
+// converges fast -- 14 terms leave a truncation error below 1e-19 relative --
+// and the 2^k rescaling is exact in binary64.
 fn rr_exp(x: f64) -> f64 with Mut, Div, Panic {
-    if x > 20.0 { return rr_exp(x - 10.0) * rr_exp(10.0) }
-    if x < 0.0 - 20.0 { return 0.0 }
+    // Negated, so NaN is refused rather than silently carried.
+    if !(x <= 709.7827128933841) { panic("rr_exp: argument overflows binary64 or is NaN") }
+    if x < 0.0 - 745.2 { return 0.0 }
+    let ln2 = 0.6931471805599453
+    let inv_ln2 = 1.4426950408889634
+    let kf = x * inv_ln2
+    // Nearest integer. The f64 -> i64 cast truncates toward zero (verified:
+    // 2.7 -> 2, -2.7 -> -2), so the half-offset must follow the sign.
+    let k = (if kf < 0.0 { kf - 0.5 } else { kf + 0.5 }) as i64
+    let r = x - (k as f64) * ln2
     var sum = 1.0
     var term = 1.0
     var i = 1
-    while i <= 20 {
-        term = term * x / (i as f64)
+    while i <= 14 {
+        term = term * r / (i as f64)
         sum = sum + term
         i = i + 1
     }
-    sum
+    var res = sum
+    let m = if k < 0 { 0 - k } else { k }
+    var j: i64 = 0
+    while j < m {
+        if k < 0 { res = res * 0.5 } else { res = res * 2.0 }
+        j = j + 1
+    }
+    res
 }
 
-// 10^x = exp(x * ln(10))
+// 10^x, split as 10^n * 10^f with n the nearest integer and |f| <= 0.5. Every
+// power 10^0 .. 10^22 is exactly representable in binary64, so an INTEGRAL logP
+// -- which is what the rapamycin profile and the T6 gate both use -- comes out
+// exact: 10^7 is 1e7 and 10^-3 is the correctly rounded 0.001, rather than the
+// 8.61e6 and 0.00728 the old path returned. Beyond 10^22 the multiplication
+// chain rounds, accumulating about |n|*eps relative, which for the |x| <= 10
+// this module is ever called with is not reached at all.
 fn rr_pow10(x: f64) -> f64 with Mut, Div, Panic {
-    rr_exp(x * 2.302585092994046)
+    if !(x <= 308.0 && x >= 0.0 - 323.0) { panic("rr_pow10: argument out of binary64 range or NaN") }
+    let n = (if x < 0.0 { x - 0.5 } else { x + 0.5 }) as i64
+    let f = x - (n as f64)
+    var pw = 1.0
+    let m = if n < 0 { 0 - n } else { n }
+    var j: i64 = 0
+    while j < m {
+        pw = pw * 10.0
+        j = j + 1
+    }
+    let frac = rr_exp(f * 2.302585092994046)
+    if n < 0 { return frac / pw }
+    return frac * pw
 }
 
 // ============================================================================
@@ -488,6 +588,77 @@ pub fn rr_check_logsens_fu_invariant() -> i32 with Mut, Div, Panic {
     ok
 }
 
+// NUMERIC-HELPER GATES. These assert identities the helpers must satisfy, so
+// they need no reference constants from outside the file: a wrong helper cannot
+// satisfy an identity it does not respect. Each returns a count of the cases
+// that hold.
+
+// sqrt: rr_sqrt(x)^2 must return x. Tolerance 1e-14 relative is derived, not
+// observed: the reduction is exact (multiplications by 4 and 2), Newton is
+// self-correcting to about 1 ulp, and squaring adds one rounding -- a few eps,
+// where eps = 2.22e-16. The OLD helper fails this by 772x at 1e13 and by 9.2e3x
+// at 1e30, so the gate is what would have caught it.
+pub fn rr_check_sqrt() -> i32 with Mut, Div, Panic {
+    var ok = 0
+    var i = 0
+    // x = 10^(2i - 12), i.e. 1e-12 .. 1e16 -- spans the range kp_unc_raw uses.
+    while i < 15 {
+        let x = rr_pow10((2 * i - 12) as f64)
+        let r = rr_sqrt(x)
+        let back = r * r
+        if rr_abs(back - x) <= 1.0e-14 * x { ok = ok + 1 }
+        i = i + 1
+    }
+    ok
+}
+
+// pow10: three identities, each checked at 5 arguments.
+//   (a) 10^x * 10^-x = 1
+//   (b) 10^a * 10^b = 10^(a+b)
+//   (c) 10^n is the exact integral power for integral n
+// Tolerance 1e-14 relative, derived as above: each side is at most one reduced
+// exp (<= 2 ulp) times an exact power chain of length <= 10.
+pub fn rr_check_pow10() -> i32 with Mut, Div, Panic {
+    var ok = 0
+    var i = 0
+    while i < 5 {
+        let x = 1.3 + 1.7 * (i as f64)
+        // (a)
+        let prod = rr_pow10(x) * rr_pow10(0.0 - x)
+        if rr_abs(prod - 1.0) <= 1.0e-14 { ok = ok + 1 }
+        // (b)
+        let lhs = rr_pow10(x) * rr_pow10(0.7)
+        let rhs = rr_pow10(x + 0.7)
+        if rr_abs(lhs - rhs) <= 1.0e-14 * rhs { ok = ok + 1 }
+        // (c) integral powers, built here by repeated multiplication
+        var want = 1.0
+        var j = 0
+        while j < i { want = want * 10.0
+            j = j + 1 }
+        if rr_pow10(i as f64) == want { ok = ok + 1 }
+        i = i + 1
+    }
+    ok
+}
+
+// ABSOLUTE-SCALE gate on Kp, which is what T6's `<= 1` could not give. At
+// logP = -3 the lipid factor is exactly 1e-3, so Kp must equal
+// fu*(fw_e + fw_i + 1e-3*(fn_l + 0.3*fn_ph)) organ by organ. The 1e-3 here is
+// written as a literal and does NOT go through rr_pow10, so this pins the power
+// path too: the old 20-term Taylor returned 0.007281 for 10^-3 and fails this
+// 14/14. Tolerance 1e-12 relative covers the handful of roundings on each side.
+pub fn rr_check_kp_absolute() -> i32 with Mut, Div, Panic {
+    let r = rr_neutral(0.0 - 3.0, 0.5, 0.1, 0.005)
+    var ok = 0
+    var i = 0
+    while i < 14 {
+        let want = 0.5 * (rr_fw_e(i) + rr_fw_i(i) + 0.001 * (rr_fn_l(i) + 0.3 * rr_fn_ph(i)))
+        if rr_abs(r.kp[i] - want) <= 1.0e-12 * want { ok = ok + 1 }
+        i = i + 1
+    }
+    ok
+}
+
 // ============================================================================
 // RAPAMYCIN LITERATURE Kp VALUES (matching tsit5_pbpk14 ordering)
 // ============================================================================
@@ -562,6 +733,11 @@ struct DrugPropertiesRR {
 //     GUM path is unchanged by the conversion fix)
 // T8: volume-fraction feasibility of the composition table itself -- no organ
 //     other than the known adipose row may sum above 1.0
+// T9:  rr_sqrt(x)^2 == x across 1e-12..1e16 (the old helper was 772x out at 1e13)
+// T10: rr_pow10 identities incl. exact integral powers (the old helper gave
+//      0.007281 for 1e-3 and 8.61e6 for 1e7)
+// T11: absolute Kp at logP = -3 against the closed form, the check T6's bound
+//      was too loose to be
 
 fn main() -> i32 with IO, Mut, Div, Panic {
     let rr = rr_rapamycin()
@@ -683,6 +859,41 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         failed = failed + 1
     }
 
+    // T9-T11: the numeric helpers. Every figure this module prints goes through
+    //         rr_pow10 and rr_sqrt, so these come before any claim about Kp.
+    let sq = rr_check_sqrt()
+    if sq == 15 {
+        println("T9 PASS: rr_sqrt(x)^2 == x at 15/15 magnitudes (1e-12..1e16)")
+        passed = passed + 1
+    } else {
+        print("T9 FAIL: rr_sqrt round trip breaks at ")
+        print(15 - sq)
+        println("/15 magnitudes")
+        failed = failed + 1
+    }
+
+    let pw = rr_check_pow10()
+    if pw == 15 {
+        println("T10 PASS: rr_pow10 identities hold 15/15 (inverse, product, integral)")
+        passed = passed + 1
+    } else {
+        print("T10 FAIL: ")
+        print(15 - pw)
+        println("/15 rr_pow10 identity checks fail")
+        failed = failed + 1
+    }
+
+    let abs_ok = rr_check_kp_absolute()
+    if abs_ok == 14 {
+        println("T11 PASS: absolute Kp at logP = -3 matches the closed form 14/14")
+        passed = passed + 1
+    } else {
+        print("T11 FAIL: absolute Kp wrong in ")
+        print(14 - abs_ok)
+        println("/14 organs at logP = -3")
+        failed = failed + 1
+    }
+
     // T4: Scaled GUM uncertainties non-zero for literature Kp
     var scaled_ok = 0
     var j = 0
@@ -714,6 +925,36 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     println("")
     print("  [NOTE] R-R raw Kp overestimates logP>4 drugs by design")
     println("")
+
+    // The out-of-domain figures quoted in the header, printed by the module
+    // itself so they are its output and not a transcription. Like for like:
+    // both sides are Kp (total tissue : total plasma) at fu = 0.08.
+    var kp_lo = rr.kp[0]
+    var kp_hi = rr.kp[0]
+    var ratio_lo = rr.kp[0] / kp_lit[0]
+    var ratio_hi = ratio_lo
+    var t = 0
+    while t < 14 {
+        if rr.kp[t] < kp_lo { kp_lo = rr.kp[t] }
+        if rr.kp[t] > kp_hi { kp_hi = rr.kp[t] }
+        let rt = rr.kp[t] / kp_lit[t]
+        if rt < ratio_lo { ratio_lo = rt }
+        if rt > ratio_hi { ratio_hi = rt }
+        t = t + 1
+    }
+    print("  Kp range          ")
+    print(kp_lo)
+    print(" .. ")
+    println(kp_hi)
+    print("  literature range  ")
+    print(kp_lit[3])
+    print(" .. ")
+    println(kp_lit[5])
+    print("  tissue-matched overprediction  ")
+    print(ratio_lo)
+    print("x .. ")
+    print(ratio_hi)
+    println("x")
     print("  log_sens_adipose=")
     print(rr.log_sens[7])
     print("  log_sens_liver=")
