@@ -1,0 +1,74 @@
+//@ run-pass
+//@ requires: madaros
+//@ timeout: 120
+//@ expect-stdout: SS_AUC_QUADRATURE_OK
+// Regression for the steady-state runner's AUC_tau (PR #2698). It used to be
+// a 16-point trapezoid over the checkpoints (tau/15 = 1.6 h apart); it is now
+// accumulated over every accepted solver step.
+//
+// The reference is independent of the runner's quadrature: dose 1 is
+// integrated here with a fixed step, the same operator-split oral input and
+// a trapezoid on that fine grid. The split input makes it first-order in dt
+// (measured: 0.005 h -> 0.0025 h moves it by 404 ppm), so the reference is
+// the Richardson extrapolation 2*ref(h/2) - ref(h) with h = 0.005 h.
+//
+// Measured against that reference on Madaros: new runner +3.1e-4, old
+// 16-point runner -7.4e-3. The 2e-3 bound sits ~6x above the first and
+// ~3.7x below the second, so it fails if the checkpoint trapezoid returns.
+
+use darwin_pbpk::absorption::*
+use darwin_pbpk::bbb::bbb_rapamycin::{bbb_rapamycin_params}
+use darwin_pbpk::drugs::rapamycin::{rapamycin_mean_params}
+use darwin_pbpk::scenarios::steady_state_runner::*
+use darwin_pbpk::tsit5_pbpk14::*
+
+// Blood AUC over [0, tau] for one oral dose from a zero state, fixed step.
+fn fixed_step_blood_auc(sys_prm: PBPKParams14, abs_prm: AbsorptionParams, dose: f64, tau: f64, n: i64) -> f64 with Mut, Div, Panic {
+    let dt = tau / (n as f64)
+    var sys_st = pbpk_state_zero()
+    var abs_st = absorption_state_with_dose(dose)
+    var auc: f64 = 0.0
+    var i: i64 = 0
+    while i < n {
+        let t = (i as f64) * dt
+        let before = abs_st.released_cum
+        let abs_next = absorption_step(abs_st, t, dt, abs_prm)
+        let rel = abs_next.released_cum - before
+        var st_in = sys_st
+        if rel > 0.0 {
+            st_in.blood = st_in.blood + absorption_mass_to_blood_delta(rel, sys_prm.v_blood)
+        }
+        let res = tsit5_step_pbpk(st_in, t, dt, sys_prm)
+        auc = auc + 0.5 * dt * (st_in.blood + res.state_new.blood)
+        sys_st = res.state_new
+        abs_st = abs_next
+        i = i + 1
+    }
+    auc
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let sys_prm = rapamycin_mean_params()
+    let bbb_prm = bbb_rapamycin_params()
+    let abs_prm = rapamycin_absorption_params()
+    let regimen = rapamycin_qd_regimen(1)
+
+    let r = run_oral_multidose(sys_prm, bbb_prm, abs_prm, regimen, 0.02)
+    if r.success == false { return 1 }
+
+    // rapamycin_qd_regimen is 2 mg every 24 h; DosingRegimen's fields are
+    // private, so the values are restated here.
+    let dose_mg = 2.0
+    let tau_h = 24.0
+    // Same unbound-plasma convention as the runner: fu_plasma * blood AUC.
+    let coarse = fixed_step_blood_auc(sys_prm, abs_prm, dose_mg, tau_h, 4800)
+    let fine = fixed_step_blood_auc(sys_prm, abs_prm, dose_mg, tau_h, 9600)
+    let reference = bbb_prm.fu_plasma * (2.0 * fine - coarse)
+
+    let d = (r.auc_tau_per_dose[0] - reference) / reference
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    if ad > 0.002 { return 2 }
+
+    println("SS_AUC_QUADRATURE_OK")
+    0
+}
