@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { writeSync } from 'node:fs';
-import { buildGovernedTopicRegistry, readRegistryFile } from '../../scripts/docs/governance_registry.mjs';
+import { access } from 'node:fs/promises';
+import { buildGovernedTopicRegistry, LOCALES } from '../../scripts/docs/governance_registry.mjs';
 
 const repoRoot = path.resolve(process.cwd(), '..');
 
@@ -14,40 +15,36 @@ function fail(errors) {
   process.exitCode = 1;
 }
 
-function compareByTopicId(topics) {
-  return new Map(topics.map((topic) => [topic.topic_id, topic]));
+async function pathExists(absPath) {
+  try {
+    await access(absPath);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
-const expectedRegistry = await buildGovernedTopicRegistry(repoRoot);
-const actualRegistry = await readRegistryFile(repoRoot);
+// Generate-then-validate: do not compare against the checked-in registry.
+// That serialisation races every concurrent PR that adds a website doc.
+// The generated topic list is the scan of website/src/content/docs; we
+// still refuse missing locale pages and broken website_paths.
+const registry = await buildGovernedTopicRegistry(repoRoot);
 const errors = [];
 
-const expectedDocsTopics = expectedRegistry.topics.filter((topic) => topic.collection === 'docs');
-const actualDocsTopics = actualRegistry.topics.filter((topic) => topic.collection === 'docs');
-const expectedById = compareByTopicId(expectedDocsTopics);
-const actualById = compareByTopicId(actualDocsTopics);
-
-for (const topic of expectedDocsTopics) {
-  const actual = actualById.get(topic.topic_id);
-  if (!actual) {
-    errors.push(`Missing docs topic in checked-in registry: ${topic.topic_id}`);
-    continue;
-  }
-
-  if (actual.website_slug !== topic.website_slug) {
-    errors.push(`Website slug drift for ${topic.topic_id}: expected ${topic.website_slug}, found ${actual.website_slug}`);
-  }
-
-  for (const [locale, status] of Object.entries(topic.locale_status)) {
-    if (actual.locale_status?.[locale] !== status) {
-      errors.push(`Locale status drift for ${topic.topic_id} ${locale}: expected ${status}, found ${actual.locale_status?.[locale]}`);
+for (const topic of registry.topics.filter((entry) => entry.collection === 'docs')) {
+  for (const [locale, relPath] of Object.entries(topic.website_paths ?? {})) {
+    if (!(await pathExists(path.join(repoRoot, relPath)))) {
+      errors.push(`Missing website content path from registry: ${relPath}`);
+    }
+    if (topic.locale_status?.[locale] !== 'present') {
+      errors.push(`${relPath} exists but registry locale status for ${locale} is ${topic.locale_status?.[locale]}`);
     }
   }
-}
 
-for (const topic of actualDocsTopics) {
-  if (!expectedById.has(topic.topic_id)) {
-    errors.push(`Orphan docs topic in checked-in registry: ${topic.topic_id}`);
+  for (const locale of LOCALES) {
+    if (locale !== 'en' && topic.locale_status?.[locale] !== 'present') {
+      errors.push(`Docs topic ${topic.topic_id} is missing localized coverage for ${locale}`);
+    }
   }
 }
 
