@@ -1,6 +1,6 @@
 # Venlafaxine CYP2D6 PGx — structural audit of the parent → ODV model
 
-Date: 2026-09-26 · Branch: `claude/determined-kilby-3fc1ca` · Status: **findings +
+Date: 2026-09-26 · Branch: `claude/pbpk28-cn-portal-routing` · Status: **findings +
 proposal; no scenario or drug parameter has been changed.** The scenario lane
 (`stdlib/darwin_pbpk/scenarios/venlafaxine_xr.sio`) is owned by other sessions and
 the parameters are dissertation-facing, so every change below is an operator
@@ -24,20 +24,26 @@ Three causes, each measured:
    joint effect of causes 1–3; the F double count alone gives 100/0.45 ≈ 222.
 2. **There is no portal first pass.** Absorbed drug enters systemic blood, so
    hepatic formation is flow-limited: CL_H = Q·X/(Q+X) ≤ Q_liver = 90 L/h. For an
-   oral drug the literature ratio is set by the intrinsic clearance X, not by
-   Q·X/(Q+X). This flow limit is what compresses UM toward NM.
+   oral drug the ratio is linear in the formation intrinsic clearance X_form
+   (§3), with no saturating Q·X/(Q+X) term. That flow limit is what compresses UM
+   toward NM.
 3. **The sink is referenced to the wrong concentration.** The sink acts on the
    liver's average concentration C_avg. For Kp = 4.2, C_avg ≈ κ·C_v with
    κ = f + (1−f)·Kp = 3.528. The effective venous-referenced clearance is
    therefore 3.5× the literature value (43 L/h behaves as 152 L/h).
 
 The measured correction adds portal input (new kernel capability, §4), sinks
-referenced to venous concentration, Lessard's clearance split, and the true
-systemic ODV clearance. Ratios become **0.279 / 1.269 / 3.589 / 9.361**, within
-about ±12% of the targets for every phenotype, and the model also reproduces
-observations it was not fitted to (§5). How the literature clearances resolve
-into intrinsic clearances moves the absolute values by about 20% (§5.2): UM
-spans 7.7–9.4 across every admissible resolution, against 2.5 today.
+referenced to venous concentration, Lessard's clearance split, and a
+*calibrated* ODV clearance (§3). Ratios become **0.279 / 1.269 / 3.589 / 9.361**,
+within about ±12% of the targets for every phenotype. How the literature
+clearances resolve into intrinsic clearances moves the absolute values by about
+20% (§5.2): UM spans 7.7–9.4 across the variants, against 2.5 today.
+
+The absolute NM value is **not** identified by the cited abstracts. The one direct
+observation, AUC_ODV/AUC_V = 2–3 in healthy EMs (Klamerus 1992), sits below
+config C (3.59) and brackets variant E (2.87). The ODV systemic clearance is the
+open parameter (§3, P5). What is robust is the structure: with portal input the
+ratio grows linearly with CYP2D6 activity; without it, it saturates.
 
 ## 2. Literature audit (PubMed-verified, 2026-09-26)
 
@@ -50,12 +56,15 @@ spans 7.7–9.4 across every admissible resolution, against 2.5 today.
 | F = 0.45 ("Wang 2022") | Patat A et al. 1998, J Clin Pharmacol 38:256-67, doi:10.1002/j.1552-4604.1998.tb04423.x | Absolute bioavailability 40–45% (IR and XR alike). |
 | — | Troy SM et al. 1996, J Clin Pharmacol 36:175-81, doi:10.1002/j.1552-4604.1996.tb04183.x | Venlafaxine renal CL 0.053 L/h/kg ≈ 3.7 L/h. |
 
-The EM target of 3.45 is nevertheless **defensible from clearances alone.** For an
-oral dose, AUC_ODV/AUC_V = (CL/F)_V / CL_ODV,app. That gives 100/26.6 = 3.76 from
-Lessard 1999 and Klamerus 1996, and 1.3/0.4 = 3.25 from the label's apparent
-clearances. The patient median of 1.8 in Shams 2006 is a mixed, phenoconverted
-population (Preskorn 2013, J Clin Psychiatry 74:614: 24% phenoconversion to PM),
-not an EM reference.
+The **direct** literature anchor for the EM ratio is Klamerus 1992: ODV AUC is
+2–3× venlafaxine AUC in healthy young men. If CL_ODV,app is the parent dose over
+AUC_ODV, then AUC_ODV/AUC_V = (CL/F)_V/CL_ODV,app by definition. That gives
+100/26.6 = 3.76 (Lessard 1999, Klamerus 1996) or 1.3/0.4 = 3.25 (label apparent
+clearances). Those figures come from different studies and depend on how each
+defined "apparent" ODV clearance, so they are weaker than the direct 2–3. The
+code's 3.45 lies just above that range. The patient median of 1.8 in Shams 2006
+is a mixed, phenoconverted population (Preskorn 2013, J Clin Psychiatry 74:614:
+24% phenoconversion to PM), not an EM reference.
 
 ## 3. Pharmacology (well-stirred liver, oral dose)
 
@@ -70,32 +79,54 @@ values. In general, with renal clearance CL_R on the systemic side:
     CL/F = X/F_abs + CL_R/(F_abs·F_H)
 
 Solving this together with F = F_abs·F_H = 0.45 (Patat 1998), CL/F = 100 and
-CL_R = 4 (Lessard 1999), and Q = 90 gives the self-consistent X_hep ≈ 75 L/h,
-F_H ≈ 0.54 and F_abs ≈ 0.83 (§5.2, variant E). Configuration C below uses the
-simpler F_abs = 1 reading, X_hep = 100 − 4 = 96, split as:
+CL_R = 4 (Lessard 1999), and Q = 90 gives the self-consistent X_hep = 75.3 L/h,
+F_H = 0.544 and F_abs = 0.827 (§5.2, variant E). With F_abs = 1 the same
+equation gives X_hep = 96·90/94 = 91.9 L/h.
+
+Configuration C below is a simpler, **approximate** reading. It takes
+X_hep = 100 − 4 = 96, which is 4% above the F_abs = 1 solution (infinite-PS
+CL/F would be 104.3; finite PS brings the realised value to 95.7). It is split
+as:
 
 - X_form = 43 L/h (CYP2D6 → ODV);
-- X_other,2D6 = 100 − 43 − 17 = 40 L/h (not recovered as O-desmethylated
-  metabolites). This takes the 2 L/h of O-desmethylation that survives quinidine
-  as incomplete inhibition, i.e. inside the 43 L/h CYP2D6 term. The alternative
-  reading (41 s + 2 | 42 s + 11) is tested in §5.2 and contradicted by PM data;
-- X_non-2D6 = 17 − 4 = 13 L/h;
+- X_other,2D6 = 40 L/h (not recovered as O-desmethylated metabolites);
+- X_non-2D6 = 13 L/h;
 - renal CL = 4 L/h, systemic.
 
-For oral dosing the ODV/V AUC ratio then equals fm·(CL/F)/CL_ODV, with fm = X_form/X
-the formation fraction. **It contains no Q**, so it scales linearly with X_form,
-which is what CYP2D6 phenotype changes. When the input bypasses the liver (the
-current model), the ratio follows Q·X/(Q+X) and saturates at Q.
+Read consistently, the "incomplete inhibition" interpretation of the 2 L/h of
+O-desmethylation that survives quinidine gives 43 s │ 42 s + 11. The 2 L/h is
+inside the CYP2D6 term, so it must leave the quinidine-resistant 17. C's
+40 s + 13 therefore holds 2 L/h in the non-scalable floor: NM is unaffected, and
+PM's total X is about 2(1 − s) L/h high. The alternative reading, 41 s + 2 │
+42 s + 11 (the residual is CYP2D6-independent), is variant D in §5.2.
+
+**Oral ratio.** For the well-stirred liver with infinite PS, F_abs = 1, formed ODV
+fully available and renal clearance on blood, the exact result is
+
+    AUC_ODV/AUC_V = X_form·(1 + CL_R/Q)/CL_ODV
+
+(derivation: formed = D·(X_form/X)·[(1−F_H) + F_H·CL_H/(CL_H+CL_R)] and
+AUC_V = D·F_H/(CL_H+CL_R), with F_H = Q/(Q+X)). It is linear in X_form, which is
+what CYP2D6 phenotype changes, and has no saturating Q·X/(Q+X) term. The only Q
+dependence is the (1 + CL_R/Q) factor. When the input bypasses the liver (the
+current model), the ratio follows Q·X/(Q+X) and saturates at Q. Finite PS makes
+the model mildly nonlinear: config C's UM/NM is 9.361/3.589 = 2.61, against
+s_UM = 2.99.
 
 In PBPK28 the sink flux is cl_sink·C_avg. At equilibrium C_avg = κ·C_v, so the
 venous-referenced clearance is X = κ·cl_sink, and a literature X enters the kernel
-as cl_sink = X/κ. Finite PS lowers the realised value a little: X_eff = 87.8 L/h
-for X = 96 L/h, because C_t/(Kp·C_v) = 0.909 under the sink.
+as cl_sink = X/κ. Finite PS lowers the realised value: under the sink,
+C_t/(Kp·C_v) = 0.909, so X_eff/X = [f + 0.909·(κ − f)]/κ = 0.914 and
+X_eff = 87.8 L/h for X = 96 L/h.
 
-The true systemic ODV clearance is CL_ODV = fm·CL_ODV,app, where CL_ODV,app is the
-dose-normalised apparent value. This gives 0.43 × 26.6 = 11.4 L/h with Klamerus
-1996 (0.38 L/h/kg), or 0.43 × 28 = 12.0 L/h with the label's 0.4 L/h/kg. The
-model currently uses the apparent value, 28 L/h.
+**ODV clearance: a calibration, not a measurement.** The model uses 28 L/h
+(0.4 L/h/kg), an apparent value. Configs C/E use CL_ODV = 0.43 × 26.6 = 11.4 L/h:
+here 0.43 = X_form/(X_hep + CL_R) = 43/100, and 26.6 L/h is Klamerus 1996's
+0.38 L/h/kg. That choice forces the NM ratio toward (CL/F)_V/CL_ODV,app by
+construction, so it is **not** a measured systemic clearance. The standard
+conversion is CL = F_ODV·(CL/F)_ODV, and it needs ODV's own bioavailability.
+Alternatively, calibrate CL_ODV so that the NM ratio matches the direct Klamerus
+1992 observation of 2–3. The cited abstracts identify neither; see P5.
 
 ## 4. New kernel capability (this branch)
 
@@ -144,17 +175,20 @@ cross-check between two kernels and two independent implementations.
   target ratios. Config C tracks the targets because its ratio is nearly
   proportional to X_form (0.279/3.589 = 0.078 vs s_PM = 0.072). This shows the
   structure *can* express the scale; config A cannot.
-- **Consistency, not independence — NM ratio:** 3.589 follows from Lessard 1999
-  and Klamerus 1996 clearances with no ratio target used. It is the same identity
-  (CL/F)_V/CL_ODV,app that justifies 3.45 in §2, so it shows the model honours
-  that identity; it is not a separate observation.
+- **Not independent — NM ratio:** 3.589 follows from the ODV-clearance
+  calibration of §3, which is built to reproduce (CL/F)_V/CL_ODV,app. It is above
+  the direct Klamerus 1992 range (2–3); variant E (2.87) is inside it.
 - **Independent 1 — EM/PM oral CL/F:** 95.7/23.5 = **4.07**. Lessard 1999: PM oral
   clearance "more than fourfold less". The PM arm of Lessard was not used.
-- **Independent 2 — bioavailability:** F = 0.45 (Patat 1998) with the emergent
-  F_H = 0.506 implies F_abs = 0.89, a physically admissible value (≤ 1). Under
-  config A the question cannot even be posed.
-- **Independent 3 — PM ratio discriminates the clearance split** (§5.2):
-  Shams 2006 reports PM < 0.3.
+- **Independent 2 — bioavailability:** in the self-consistent solve (variant E),
+  F = 0.45 (Patat 1998), CL/F = 100 and CL_R = 4 give F_H = 0.544 and
+  F_abs = 0.827, a physically admissible value (≤ 1). Config C's 0.45/0.506 =
+  0.89 is not a check, because that F_H was produced under F_abs = 1. Under
+  config A the question cannot be posed.
+- **Conditional — PM ratio vs the clearance split** (§5.2): Shams 2006 reports
+  PM < 0.3. This discriminates the split only given the PM scale s = 0.25/3.45,
+  which comes from the unverified targets. As s → 0, variant D's 2 L/h floor
+  alone gives ≈ 2/11.4 = 0.18 < 0.3.
 - **Prediction (untested here):** F_oral(PM)/F_oral(NM) = 0.828/0.506 = 1.64, a
   higher PM bioavailability that follows from first pass.
 
@@ -164,20 +198,18 @@ Same probe with the variant configurations (sources in the probe header):
 
 | Variant | PM | IM | NM | UM | NM oral CL/F (F_abs = 1) |
 |---|---|---|---|---|---|
-| C: split 43 s │ 40 s + 13; ODV 0.38 L/h/kg | 0.279 | 1.269 | 3.589 | 9.361 | 95.7 |
+| C: split 43 s │ 40 s + 13 (approximate, §3); ODV 0.38 L/h/kg | 0.279 | 1.269 | 3.589 | 9.361 | 95.7 |
 | D: split 41 s + 2 │ 42 s + 11 (quinidine residual CYP2D6-independent) | **0.445** | 1.385 | 3.589 | 9.071 | 95.7 |
 | E: C with every X × 75.3/96 (self-consistent F, CL/F, CL_R, Q) | 0.219 | 1.003 | 2.868 | 7.671 | 77.3 (÷ F_abs 0.83 = 93) |
 | F: C with ODV 0.40 L/h/kg (label) | 0.265 | 1.205 | 3.410 | 8.893 | 95.7 |
 | A: current model | 0.346 | 1.126 | 1.912 | 2.501 | 246 |
 
-- **D is contradicted by independent data:** PM 0.445 against Shams 2006's
-  PM < 0.3. The 2 L/h residual under quinidine behaves as incomplete CYP2D6
-  inhibition.
-- **E is the rigorous resolution.** It lowers every absolute ratio by about 20%;
-  NM 2.87 lies between the clearance-identity values 3.25–3.76 and the patient
-  median 1.8.
-- **Robust across all variants:** the phenotype span (UM/PM ≈ 33–35 vs 7.2 today)
-  and UM ≥ 7.7.
+- **D vs Shams is conditional:** PM 0.445 against Shams 2006's PM < 0.3, given
+  s_PM = 0.0725 (see §5).
+- **E is the self-consistent resolution.** It lowers every absolute ratio by
+  about 20%; NM 2.87 lies inside the direct Klamerus 1992 range of 2–3.
+- **Robust across all variants:** UM ≥ 7.7 and UM/PM ≥ 20 (C 33.6, D 20.4,
+  E 35.0, F 33.6), against 7.2 today.
 
 ## 6. Other findings
 
@@ -202,12 +234,12 @@ Same probe with the variant configurations (sources in the probe header):
 |---|---|---|---|
 | P1 | Correct citations (Lessard 1999; Shams 2006); flag the 3.45 / 0.25 / 10.3 provenance as unverified or source it | `pgx/cyp2d6_venlafaxine.sio`, `drugs/venlafaxine.sio`, scenario header | pgx/drugs: free; scenario: competent-mcclintock |
 | P2 | Route oral absorption to the liver (`input_organ = 1`) | scenario; TR-BDF2 step needs the same input term | modest-heisenberg (theta kernel), scenario lane |
-| P3 | All hepatic clearance in the liver sink, venous-referenced: cl_sink = X_hep/κ with formed = removed·X_form/X_hep; renal 4 L/h on blood. Resolve X_hep from {F, CL/F, CL_R, Q, PS} (variant E), not by reading CL/F as X; split 43 s │ 40 s + 13 in proportion | scenario + `drugs/venlafaxine.sio` | scenario lane |
-| P4 | Gut factor F → F_abs (≈ 0.89 implied); F_H emerges | scenario | scenario lane |
-| P5 | ODV systemic CL 28 → fm × apparent (11.4 L/h with Klamerus 1996, 12.0 with the label); fm from the resolved model | `drugs/venlafaxine.sio` | free |
+| P3 | All hepatic clearance in the liver sink, venous-referenced: cl_sink = X_hep/κ with formed = removed·X_form/X_hep; renal 4 L/h on blood. Resolve X_hep from {F, CL/F, CL_R, Q, PS} (variant E), not by reading CL/F as X; use the consistent split 43 s │ 42 s + 11 (or D's reading, stated) | scenario + `drugs/venlafaxine.sio` | scenario lane |
+| P4 | Gut factor F → F_abs (0.827 in the self-consistent solve); F_H emerges | scenario | scenario lane |
+| P5 | ODV clearance 28 L/h is apparent, so replace it. Preferred: ODV's own systemic CL, i.e. F_ODV × (CL/F)_ODV from desvenlafaxine PK (to be sourced). Otherwise: calibrate so the NM ratio matches Klamerus 1992's 2–3, stated as a calibration. fm × apparent (11.4) is a calibration to (CL/F)_V/CL_ODV,app, not a measurement | `drugs/venlafaxine.sio` | free |
 | P6 | Recalibrate Kp for Vss (venlafaxine ~200–320 L, ODV ~170 L) against the t½ values | `core/pbpk28_params.sio` | needs its own dispatch |
 
-P2–P5 together are config C. P6 is independent of the ratios.
+P2–P5 together are config C / variant E. P6 is independent of the ratios.
 
 ## 8. Review
 
@@ -218,8 +250,26 @@ P2–P5 together are config C. P6 is independent of the ratios.
   variant E), the NM ratio relabelled as consistency (§5), the alternative
   clearance split (variant D), the 0.38 vs 0.40 L/h/kg ODV clearance (variant F),
   and the 246 L/h attribution (§1).
-- `-t review -p deepseek` could not run: the workspace DeepSeek key is rejected
-  ("Authentication Fails", 2026-09-26).
+- Re-reviewed on the canonical route: `bin/llm-offload -t math-review` (default
+  fan-out) from branch `chore/llm-offload-llmgateway-grok47`, Grok 4.7 (gateway
+  timed out at 900 s; answered via xAI direct), 2026-09-26. Confirmed: the
+  well-stirred block and the renal/F_abs form of CL/F, κ, the portal fixed
+  point, variant E (X = 75.31, F_H = 0.544, F_abs = 0.827), the table
+  relations, the clamp-bias arithmetic, V_z, and the systemic-input compression
+  mechanism. Corrected here:
+  - the exact oral ratio X_form(1 + CL_R/Q)/CL_ODV, replacing fm·(CL/F)/CL_ODV;
+  - the ODV clearance is a calibration, not "true systemic";
+  - config C's X = 96 is approximate (91.9 at F_abs = 1);
+  - UM/PM is ≥ 20 with D, not 33–35;
+  - the consistent incomplete-inhibition split is 43 s │ 42 s + 11;
+  - F_abs is 0.827, not 0.89;
+  - the X_eff/X arithmetic, and fm = 43/100;
+  - D vs Shams is conditional on s;
+  - the direct Klamerus 1992 anchor of 2–3 is added.
+- The second vendor leg (Kimi K3 via the gateway) returned nothing: an upstream
+  502, then a 900 s timeout. zai is rate-limited (1313), the on-prem `local` leg
+  is down, and the DeepSeek direct key is rejected. **This document has had a
+  single-vendor review.**
 
 ## 9. Reproduction
 
