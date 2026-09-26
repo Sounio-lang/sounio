@@ -752,7 +752,10 @@ awk -F'\t' '
 #   10  parent PBPK28 (14 organs)          Node ↔ Sounio, cavg, <1% RMSE
 #   11  ODV PBPK28 (14 organs)             Node ↔ Sounio, cavg, <1% RMSE
 #   12  Korsmeyer-Peppas matrix release    Node ↔ Sounio  (biomaterial bridge, R8)
-#   13  ODV/parent total-mass ratio (NM)   Node ↔ Sounio  (PD-equivalent readout, R7)
+#   13  steady-state C_avg ODV/parent (NM) Node ↔ Sounio  (PD-equivalent readout, R7)
+#       blood AUC ratio over the 10th interval of 75 mg XR q24h, at dt = 0.5 and
+#       0.25 h; engines agree within the threshold AND each engine's closed-form
+#       steady state lies inside the error interval certified on its own run.
 #   +   mass conservation: parent+ODV ≤ F·released, release monotone non-decreasing
 # Numerical parity runs at the NM phenotype (R7); PM/IM/UM scaling is verified by
 # tests/run-pass/darwin_venlafaxine_xr_pgx_smoke.sio, not here (keeps the gate lean).
@@ -827,16 +830,33 @@ join -t"$(printf '\t')" -1 1 -2 1 \
         else { printf "VENLAFAXINE_MATRIX_RELEASE_PARITY_FAIL %.4f%% RMSE\n",pct; exit 1 } }'
 
 echo
-echo "[pbpk28-parity:case13] venlafaxine ODV/parent total-mass ratio (NM)"
-join -t"$(printf '\t')" -1 1 -2 1 \
-  <(awk -F= '/^VRATIO\|t=/{t=$2} /^VRATIO\|nm=/{print t"\t"$2}' "$VFX_SIO_LOG"  | sort) \
-  <(awk -F= '/^VRATIO\|t=/{t=$2} /^VRATIO\|nm=/{print t"\t"$2}' "$VFX_NODE_LOG" | sort) \
+echo "[pbpk28-parity:case13] venlafaxine steady-state C_avg ODV/parent ratio (NM, 75 mg XR q24h)"
+# The ratio replaces the total-body mass ratio M_ODV/M_parent, which does not
+# converge under dt refinement once parent mass decays (the formation sink is now
+# implicit on both engines). Per dt: VSS|ratio and VSS|cf must agree between the
+# engines, and VSS|certified=1 on both (closed form inside the run's certified
+# [lo, hi]; the bound is measured on the run, not a chosen tolerance).
+vfx_ss_tsv() {  # $1=log → dt<TAB>ratio<TAB>cf<TAB>certified<TAB>rel_err_cf_e12<TAB>rel_halfwidth_e12
+  awk -F= '
+    /^VSS\|dt=/            { dt=$2; next }
+    /^VSS\|ratio=/         { r=$2; next }
+    /^VSS\|cf=/            { cf=$2; next }
+    /^VSS\|rel_err_cf_e12=/ { re=$2; next }
+    /^VSS\|rel_halfwidth_e12=/ { hw=$2; next }
+    /^VSS\|certified=/     { print dt"\t"r"\t"cf"\t"$2"\t"re"\t"hw }
+  ' "$1" | sort
+}
+join -t"$(printf '\t')" -1 1 -2 1 <(vfx_ss_tsv "$VFX_SIO_LOG") <(vfx_ss_tsv "$VFX_NODE_LOG") \
   | awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" '
-      {d=($2+0)-($3+0); SS+=d*d; NN++; if(($2+0)>PK)PK=$2+0}
-      END{ if(NN==0){print "VENLAFAXINE_RATIO_PARITY_FAIL no rows"; exit 1}
-        rmse=sqrt(SS/NN); pct=(PK>0)?100*rmse/PK:0;
-        if(pct<THR+0) printf "VENLAFAXINE_RATIO_PARITY_PASS %d/%d samples within %s%% RMSE (NM ODV/parent, peak=%.4g)\n",NN,NN,THR,PK;
-        else { printf "VENLAFAXINE_RATIO_PARITY_FAIL %.4f%% RMSE\n",pct; exit 1 } }'
+      BEGIN{ printf "%-9s %-10s %-10s %-10s %-22s %-19s %s\n","dt","ratio_sio","ratio_node","cf","rel_err_cf(sio,x1e12)","rel_hw(sio,x1e12)","certified(sio,node)" }
+      { n++; dr=100*(($2+0)-($7+0))/($7+0); if(dr<0)dr=-dr;
+        dc=100*(($3+0)-($8+0))/($8+0); if(dc<0)dc=-dc;
+        printf "%-9s %-10s %-10s %-10s %-22s %-19s %s,%s\n",$1,$2,$7,$3,$5,$6,$4,$9;
+        if(dr>=THR+0 || dc>=THR+0){bad++; printf "  FAIL: dt=%s engines differ (ratio %.4f%%, cf %.4f%%)\n",$1,dr,dc}
+        if(($4+0)!=1 || ($9+0)!=1){bad++; printf "  FAIL: dt=%s closed form outside a certified interval\n",$1} }
+      END{ if(n!=2){printf "VENLAFAXINE_SS_RATIO_PARITY_FAIL expected 2 dt rows, got %d\n",n; exit 1}
+        if(bad>0){printf "VENLAFAXINE_SS_RATIO_PARITY_FAIL\n"; exit 1}
+        printf "VENLAFAXINE_SS_RATIO_PARITY_PASS %d/%d dt within %s%% and closed form certified on both engines\n",n,n,THR }'
 
 echo
 # Conservation: body burden (parent + ODV) can never exceed the drug the matrix
@@ -859,7 +879,7 @@ awk -F= '
 ' "$VFX_SIO_LOG"
 
 echo
-echo "[pbpk28-parity] venlafaxine XR canonical: parent + ODV + matrix + ratio all within ${RMSE_THRESHOLD_PCT}% RMSE (3rd canonical drug)"
+echo "[pbpk28-parity] venlafaxine XR canonical: parent + ODV + matrix within ${RMSE_THRESHOLD_PCT}% RMSE, steady-state ratio certified (3rd canonical drug)"
 
 # ════════════════════════════════════════════════════════════════════════════
 # Cases 14-16: Haloperidol (CASO II) canonical parity — PBPK14 + BBB + D2.
