@@ -279,9 +279,12 @@ follow, each an atomic change:
 
 ### Census
 
-Scope: the 27 files in `tests/stdlib/darwin_pbpk/` plus the 11 `examples/`
-that import `darwin_pbpk`, 38 targets in total. Madaros built from source,
-md5 `5764851f`.
+Scope: the 27 files then in `tests/stdlib/darwin_pbpk/` plus 11 `examples/`
+matched by `git grep 'darwin_pbpk::'`, 38 targets in total. Ten of those
+examples import `darwin_pbpk`. The eleventh, `examples/clinical/ddi_elplus_demo.sio`,
+only mentions it in a comment; it was checked and run like the others, which
+is harmless but means the scope was 27 PBPK tests, 10 PBPK examples and one
+non-PBPK example. Madaros built from source, md5 `5764851f`.
 
 The first census was taken with F-A already applied. Before F-A the E137s
 were measured per test only (see the tables above).
@@ -445,7 +448,8 @@ Operator decision: make the Tsit5 helpers `pub` and rewrite the demo.
   `success`, `t_final >= t_end`), not a fitted number. The old comment's
   "expect ~25–30% elimination" was wrong: the measured value is 71.591962%.
 - Census with both changes (Madaros md5 `5764851f`):
-  - `check` rc=0 on **38/38** targets.
+  - `check` rc=0 on **38/38** targets (the same 38 as above; this
+    predates the regression fixture described below).
   - `run`: 24 byte-identical with lean_single (up from 22), 2 steady-state
     demos differing by the literal rounding explained above, and 12
     `rc=182`. No regressions.
@@ -470,8 +474,16 @@ Verified on Madaros:
 
 That failure is now replayable in CI. `run_oral_multidose_cfg` takes the ODE
 config, and `run_oral_multidose` wraps it with `tight_ode_config()`, so its
-behaviour is unchanged. `tests/stdlib/darwin_pbpk/test_steady_state_failure.sio`
+behaviour is unchanged. `tests/run-pass/darwin_pbpk_steady_state_failure.sio`
 forces one step of at most 1e-3 h per checkpoint and asserts
 `success == false`, `n_doses_run == 0` and `reached_ss == false`. As a
 control, the default config completes all three doses with
 `success == true`. `ssr_print_report` now flags a failed report.
+
+The fixture was first added under `tests/stdlib/darwin_pbpk/`. It was moved to
+`tests/run-pass/` with `//@ requires: madaros` because
+`scripts/ci/madaros_changed_tests_gate.sh` selects only changed
+`tests/run-pass/*.sio` files carrying that annotation. Only there does it run
+on the current-source Madaros that CI builds, rather than solely under the
+lean_single full suite.
+
