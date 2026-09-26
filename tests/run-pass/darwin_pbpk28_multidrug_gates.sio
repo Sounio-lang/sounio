@@ -1,0 +1,400 @@
+//@ run-pass
+//@ expect-stdout-contains: PBPK28_MULTIDRUG_GATES_PASS
+//@ timeout: 180
+
+// Gates for stdlib/darwin_pbpk/ddi/multidrug28.sio (dynamic multi-drug driver).
+//
+// M   Mass balance per drug under NONLINEAR coupling (two drugs, mutual CYP3A4
+//     competition at liver and gut, oral + IV dosing, central clearance):
+//       body + lumen + unabsorbed + eliminated = administered, to 1e-10,
+//     and the mass added by the kernel's negativity clamp stays at round-off:
+//     md_clamped <= n_steps · 27 · eps · dose (27 state entries per drug, each
+//     pushed below zero by at most ~eps times the mass scale per step once the
+//     true value is ~0). Oscillation clamping, which appears at larger dt (M's
+//     own scenario at dt = 0.05: 3e-10 relative), exceeds it; round-off in the
+//     deep terminal phase does not (V3 over 300 h: 1.3e-12 mg against a bound
+//     of 3.6e-10). A first version required exactly zero and failed V3 on that
+//     round-off; the bound replaced it before commit, derived, not fitted.
+//
+// V3  Static limit, exact. With a constant external inhibitor load L the factor
+//     f = 1/(1+L) is constant and the system is linear. Integrating it to
+//     infinity (portal routing; sinks k_L in liver tissue, k_g in gut tissue;
+//     central clearance CL_c):
+//       AUC_b = (D_iv + F_H · F_G · D_gut) / CL_sys
+//       X_L = k_L·PS_L/(PS_L/Kp_L + k_L),  F_H = Q_L/(Q_L + X_L)
+//       a   = (PS_g/Kp_g)/(PS_g/Kp_g + k_g), X_g = PS_g·k_g/(PS_g/Kp_g + k_g)
+//       F_G = a · Q_g/(Q_g + X_g)
+//       CL_sys = CL_c + Q_L·X_L/(Q_L + X_L) + F_H · Q_g·X_g/(Q_g + X_g)
+//     with k = f·CLint·fu/K_p and D_gut = fa·D_oral. The last CL_sys term is gut
+//     metabolism of SYSTEMIC drug (blood -> gut -> portal -> liver), which the
+//     static well-stirred module (ddi/cyp3a_competitive.sio) does not have; its
+//     AUCR is printed for context, not gated. Because CN is the trapezoidal rule,
+//     summing the steps gives A·AUC_trap = -(delivered mass) exactly for constant
+//     A, so the discrete AUC equals the continuous one for ANY dt: the gate error
+//     is truncation (residual mass at t_end) plus round-off only; the clamp
+//     must stay at round-off (bound as in M). Q_g here is the whole gut blood flow
+//     (q[8] = 55 L/h), not villous flow, and PS_g is large, so F_G is nearly
+//     flow-limited: a kernel-identity fixture, not a gut-physiology claim.
+//
+// V4  Enzyme-site concentration convention, exact. The perpetrator has no
+//     CLint, only central clearance CL_p, and is held at steady state by an IV
+//     infusion R; every sink-free organ then has C_v = C_b = R/CL_p and
+//     C_t = K_p·C_b, so the unbound site concentrations are known in closed
+//     form: C_u,L = fu_p·C_b, C_u,g = fu_gut,p·C_b, and the victim's factors are
+//     f_L = 1/(1 + C_u,L/Ki), f_g = 1/(1 + C_u,g/Ki) (different, because
+//     fu_p != fu_gut,p). The victim, which carries its own Ki so that
+//     self-inhibition would show, is dosed orally at 120 h and its AUC must
+//     equal the V3 closed form with site-specific f_L, f_g to 1e-9 (the
+//     perpetrator's distance from steady state, ~1e-10, times a factor
+//     sensitivity <= 1, plus V3's truncation). V3 alone cannot see the site
+//     convention (its load is a constant). Adversarial review 2026-09-26,
+//     sabotages of md_factors that pass M, V3, V5 and V6 but fail V4: gut-site
+//     inhibition dropped (rel err 0.76), self-inhibition included (4.3e-4),
+//     fu omitted (0.54), fu·C_t·K_p instead of fu·C_t/K_p (3.4).
+//
+// V5  Convergence order of the COUPLING, isolated from transport error. A plain
+//     self-convergence ratio mixes the O(dt^2) CN transport error with the
+//     coupling error. Instead each scheme is compared with the coupling
+//     iterated to its fixed point (midpoint-coefficient CN coupling, see the
+//     driver header) at the SAME dt with the SAME transport discretization, so
+//     the transport error cancels exactly:
+//       D_Lie(dt) = AUC_Lie - AUC_iter = O(dt)    -> D(dt)/D(dt/2) ~ 2
+//       D_PC(dt)  = AUC_PC  - AUC_iter = O(dt^2)  -> D(dt)/D(dt/2) ~ 4
+//     Fixture: physiological transport (rapamycin profile, s = 1), victim ka
+//     1.5, perpetrator ka 0.2, mutual Ki 0.2, perpetrator dose 10 mg, victim AUC
+//     0..4 h. How small dt must be before the ratios settle is set by the
+//     strength of the interaction nonlinearity, not by transport stiffness:
+//     with the perpetrator at 100 mg (C_u/Ki ~ 20) D_PC changes sign near
+//     dt = 0.03 h and the PC ratios settle only below dt ~ 0.003 h (3.54, 3.78,
+//     3.89 at 0.0025 -> 0.000625), whereas backward-Euler transport or a 100x
+//     smaller lung PS leave them unchanged (adversarial review 2026-09-26; an
+//     earlier version of this gate blamed CN order reduction and verified on a
+//     transport scaled by 0.01 -- that diagnosis was wrong).
+//     V5a (order vs the iterated reference) at dt = 0.02, 0.01, 0.005: the
+//     finest ratio must lie inside the theoretical band (Lie [1.7, 2.3], PC
+//     [3.5, 4.5]) and be closer to the formal value than the coarser one; the
+//     reference must agree with 16 sweeps to 1e-12.
+//     V5c (the fixed point is second order). V5a cannot tell whether the fixed
+//     point itself is second order: closing the coupling at the end-of-step
+//     factor f* instead of (f_n + f*)/2 still passes V5a. V5c requires the PC
+//     scheme (the default) to SELF-converge at second order, transport and
+//     coupling together: (A(dt)-A(dt/2))/(A(dt/2)-A(dt/4)) at dt = 0.01,
+//     0.005, 0.0025, 0.00125 (measured 3.58, 3.77; same band and trend rule).
+//     V5b (strong inhibition, perpetrator 100 mg, dt = 0.02 h, pre-asymptotic).
+//     No order is claimed; regression guard for the accuracy claim in the
+//     driver docs: the PC coupling error is at least ten times smaller than
+//     Lie's (measured ~1e3 times).
+//
+// V6  Controls (by construction; they check plumbing, not conventions -- see V4).
+//     (a) A co-administered CYP3A4 substrate that is NOT an inhibitor
+//     (Ki unset) leaves the victim BIT-IDENTICAL to the victim alone. (b) The same
+//     with Ki = 1e300. (c) Two identical drugs, identical doses, mutual Ki:
+//     bit-identical trajectories (symmetry).
+//
+// Transport parameters are the rapamycin PBPK28 profile with synthetic CLint and
+// Ki values: kernel/driver correctness fixtures, not drug claims.
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::pbpk28_hepatic::*
+use darwin_pbpk::ddi::multidrug28::*
+use darwin_pbpk::ddi::cyp3a_competitive::*
+
+fn g_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn e12(x: f64) -> i64 { return (x * 1000000000000.0) as i64 }
+
+// Round-off bound on the mass the negativity clamp may add (see header, M).
+fn clamp_bound(t_end: f64, dt: f64, dose: f64) -> f64 with Div {
+    return (t_end / dt) * 27.0 * 2.220446049250313e-16 * dose
+}
+
+// Victim fixture: liver + gut CYP3A4 substrate.
+fn add_victim(md: &!MultiDrug28, cl_c: f64) -> i32 with Mut, Panic {
+    var p = pbpk28_params_rapamycin()
+    p.cl_central = cl_c
+    let i = md_add_drug(md, p, 0.1, 0.95, 1.5)
+    md_set_fu_site(md, i, md_site_gut(), 1.0)
+    md_set_clint(md, i, md_site_liver(), md_cyp3a4(), 200.0)
+    md_set_clint(md, i, md_site_gut(), md_cyp3a4(), 30.0)
+    return i
+}
+
+// Same fixture with a chosen absorption rate constant.
+fn add_victim_ka(md: &!MultiDrug28, cl_c: f64, ka: f64) -> i32 with Mut, Panic {
+    var p = pbpk28_params_rapamycin()
+    p.cl_central = cl_c
+    let i = md_add_drug(md, p, 0.1, 0.95, ka)
+    md_set_fu_site(md, i, md_site_gut(), 1.0)
+    md_set_clint(md, i, md_site_liver(), md_cyp3a4(), 200.0)
+    md_set_clint(md, i, md_site_gut(), md_cyp3a4(), 30.0)
+    return i
+}
+
+// M ---------------------------------------------------------------------------
+fn gate_mass() -> bool with Mut, Div, Panic, IO {
+    var md = md_new(true)
+    let a = add_victim(&!md, 1.5)
+    let b = add_victim(&!md, 0.5)
+    md_set_ki(&!md, a, md_cyp3a4(), 0.02)
+    md_set_ki(&!md, b, md_cyp3a4(), 0.005)
+    md_dose_oral(&!md, a, 5.0)
+    md_set_iv_rate(&!md, a, 0.3)
+    md_dose_oral(&!md, b, 100.0)
+    md_dose_iv_bolus(&!md, b, 10.0)
+    md_run_to(&!md, 48.0, 0.02)
+    let ra = md_mass_residual(&md, a)
+    let rb = md_mass_residual(&md, b)
+    print("M residual A (x1e12) = ") println(e12(ra))
+    print("M residual B (x1e12) = ") println(e12(rb))
+    print("M victim factor at 48 h (liver, 3A4) = ") println(md_factor_now(&md, a, md_site_liver(), md_cyp3a4()))
+    let cl = md_clamped(&md, a) + md_clamped(&md, b)
+    print("M mass added by the negativity clamp (mg) = ") println(cl)
+    let cl_ok = md_clamped(&md, a) <= clamp_bound(48.0, 0.02, md.dose_in[a]) && md_clamped(&md, b) <= clamp_bound(48.0, 0.02, md.dose_in[b])
+    return ra < 1.0e-10 && rb < 1.0e-10 && cl_ok
+}
+
+// V3 --------------------------------------------------------------------------
+fn closed_auc(f: f64, cl_c: f64, d_iv: f64, d_oral: f64) -> f64 with Div {
+    let p = pbpk28_params_rapamycin()
+    let fa = 0.95
+    let k_l = f * 200.0 * 0.1 / p.kp[1]
+    let k_g = f * 30.0 * 1.0 / p.kp[8]
+    let ql = p.q[1]
+    let qg = p.q[8]
+    let x_l = k_l * p.ps[1] / (p.ps[1] / p.kp[1] + k_l)
+    let a = (p.ps[8] / p.kp[8]) / (p.ps[8] / p.kp[8] + k_g)
+    let x_g = p.ps[8] * k_g / (p.ps[8] / p.kp[8] + k_g)
+    let fh = ql / (ql + x_l)
+    let fg = a * qg / (qg + x_g)
+    let cl_sys = cl_c + ql * x_l / (ql + x_l) + fh * qg * x_g / (qg + x_g)
+    return (d_iv + fh * fg * fa * d_oral) / cl_sys
+}
+
+fn run_auc(load: f64, cl_c: f64, d_iv: f64, d_oral: f64, t_end: f64, dt: f64) -> (f64, f64, f64) with Mut, Div, Panic {
+    var md = md_new(true)
+    let v = add_victim(&!md, cl_c)
+    md_set_ext_load(&!md, md_site_liver(), md_cyp3a4(), load)
+    md_set_ext_load(&!md, md_site_gut(), md_cyp3a4(), load)
+    if d_oral > 0.0 { md_dose_oral(&!md, v, d_oral) }
+    if d_iv > 0.0 { md_dose_iv_bolus(&!md, v, d_iv) }
+    md_run_to(&!md, t_end, dt)
+    let left = (md_body_mass(&md, v) + md.lumen[v]) / md.dose_in[v]
+    return (md.auc_b[v], left, md_clamped(&md, v))
+}
+
+fn gate_v3() -> bool with Mut, Div, Panic, IO {
+    let cl_c = 1.5
+    let load = 8.0
+    let f = 1.0 / (1.0 + load)
+    let t_end = 300.0
+    let dt = 0.02
+
+    let (po0, left_po0, cl_po0) = run_auc(0.0, cl_c, 0.0, 1.0, t_end, dt)
+    let (poi, left_poi, cl_poi) = run_auc(load, cl_c, 0.0, 1.0, t_end, dt)
+    let (iv0, left_iv0, cl_iv0) = run_auc(0.0, cl_c, 1.0, 0.0, t_end, dt)
+    let (ivi, left_ivi, cl_ivi) = run_auc(load, cl_c, 1.0, 0.0, t_end, dt)
+
+    let c_po0 = closed_auc(1.0, cl_c, 0.0, 1.0)
+    let c_poi = closed_auc(f, cl_c, 0.0, 1.0)
+    let c_iv0 = closed_auc(1.0, cl_c, 1.0, 0.0)
+    let c_ivi = closed_auc(f, cl_c, 1.0, 0.0)
+
+    let e1 = g_abs(po0 - c_po0) / c_po0
+    let e2 = g_abs(poi - c_poi) / c_poi
+    let e3 = g_abs(iv0 - c_iv0) / c_iv0
+    let e4 = g_abs(ivi - c_ivi) / c_ivi
+    let worst_left = left_po0 + left_poi + left_iv0 + left_ivi
+
+    // Static well-stirred module with the same CLint/fu/flows (context only).
+    let p = pbpk28_params_rapamycin()
+    let sub = Cyp3aSubstrate { qh: p.q[1], qg: p.q[8], fu: 0.1, fu_gut: 1.0, fa: 0.95, clint_h: 200.0, clint_g: 30.0 }
+    let static_aucr = cyp3a_aucr(sub, f)
+
+    print("V3 oral AUCR dynamic = ") println(poi / po0)
+    print("V3 oral AUCR closed form = ") println(c_poi / c_po0)
+    print("V3 IV AUCR dynamic = ") println(ivi / iv0)
+    print("V3 IV AUCR closed form = ") println(c_ivi / c_iv0)
+    print("V3 oral AUCR static well-stirred module (context, not gated) = ") println(static_aucr)
+    print("V3 worst rel AUC error (x1e12) = ")
+    var worst = e1
+    if e2 > worst { worst = e2 }
+    if e3 > worst { worst = e3 }
+    if e4 > worst { worst = e4 }
+    println(e12(worst))
+    print("V3 residual mass fraction at t_end (x1e12) = ") println(e12(worst_left))
+    let clamped = cl_po0 + cl_poi + cl_iv0 + cl_ivi
+    print("V3 mass added by the negativity clamp (mg) = ") println(clamped)
+    return worst < 1.0e-9 && worst_left < 1.0e-12 && clamped <= 4.0 * clamp_bound(t_end, dt, 1.0)
+}
+
+// V4 --------------------------------------------------------------------------
+// V3 closed form with separate liver and gut factors.
+fn closed_auc_sites(f_l: f64, f_g: f64, cl_c: f64, d_oral: f64) -> f64 with Div {
+    let p = pbpk28_params_rapamycin()
+    let fa = 0.95
+    let k_l = f_l * 200.0 * 0.1 / p.kp[1]
+    let k_g = f_g * 30.0 * 1.0 / p.kp[8]
+    let ql = p.q[1]
+    let qg = p.q[8]
+    let x_l = k_l * p.ps[1] / (p.ps[1] / p.kp[1] + k_l)
+    let a = (p.ps[8] / p.kp[8]) / (p.ps[8] / p.kp[8] + k_g)
+    let x_g = p.ps[8] * k_g / (p.ps[8] / p.kp[8] + k_g)
+    let fh = ql / (ql + x_l)
+    let fg = a * qg / (qg + x_g)
+    let cl_sys = cl_c + ql * x_l / (ql + x_l) + fh * qg * x_g / (qg + x_g)
+    return fh * fg * fa * d_oral / cl_sys
+}
+
+fn gate_v4() -> bool with Mut, Div, Panic, IO {
+    var md = md_new(true)
+    let v = add_victim(&!md, 1.5)
+    md_set_ki(&!md, v, md_cyp3a4(), 1.0)
+    var pp = pbpk28_params_rapamycin()
+    let cl_p = 10.0
+    pp.cl_central = cl_p
+    let fu_p = 0.3
+    let fu_gut_p = 1.0
+    let x = md_add_drug(&!md, pp, fu_p, 1.0, 1.0)
+    md_set_fu_site(&!md, x, md_site_gut(), fu_gut_p)
+    let ki = 0.05
+    md_set_ki(&!md, x, md_cyp3a4(), ki)
+    let rate = 5.0
+    md_set_iv_rate(&!md, x, rate)
+    md_run_to(&!md, 120.0, 0.02)
+    let cb = rate / cl_p
+    let ss_err = g_abs(md.cv[x * 14] - cb) / cb
+    let f_l = 1.0 / (1.0 + fu_p * cb / ki)
+    let f_g = 1.0 / (1.0 + fu_gut_p * cb / ki)
+    print("V4 perpetrator C_b vs R/CL at 120 h (rel x1e12) = ") println(e12(ss_err))
+    print("V4 victim factors liver, gut: driver ") print(md_factor_now(&md, v, md_site_liver(), md_cyp3a4())) print("  ") print(md_factor_now(&md, v, md_site_gut(), md_cyp3a4()))
+    print("  closed ") print(f_l) print("  ") println(f_g)
+    md_dose_oral(&!md, v, 1.0)
+    let auc0 = md.auc_b[v]
+    md_run_to(&!md, 420.0, 0.02)
+    let auc = md.auc_b[v] - auc0
+    let closed = closed_auc_sites(f_l, f_g, 1.5, 1.0)
+    let base = closed_auc_sites(1.0, 1.0, 1.5, 1.0)
+    let err = g_abs(auc - closed) / closed
+    let left = md_body_mass(&md, v) + md.lumen[v]
+    let clamped = md_clamped(&md, v) + md_clamped(&md, x)
+    print("V4 victim oral AUCR dynamic, closed form = ") print(auc / base) print("  ") println(closed / base)
+    print("V4 victim AUC rel error (x1e12) = ") println(e12(err))
+    print("V4 victim residual mass at t_end (x1e12) = ") println(e12(left))
+    print("V4 mass added by the negativity clamp (mg) = ") println(clamped)
+    let cl_ok = md_clamped(&md, v) <= clamp_bound(420.0, 0.02, 1.0) && md_clamped(&md, x) <= clamp_bound(420.0, 0.02, md.dose_in[x])
+    return ss_err < 1.0e-9 && err < 1.0e-9 && left < 1.0e-12 && cl_ok
+}
+
+// V5 --------------------------------------------------------------------------
+fn coupled_victim_auc(dt: f64, iters: i32, dose_b: f64) -> f64 with Mut, Div, Panic {
+    var md = md_new(true)
+    md.iters = iters
+    let a = add_victim_ka(&!md, 1.5, 1.5)
+    let b = add_victim_ka(&!md, 0.5, 0.2)
+    md_set_ki(&!md, a, md_cyp3a4(), 0.2)
+    md_set_ki(&!md, b, md_cyp3a4(), 0.2)
+    md_dose_oral(&!md, a, 5.0)
+    md_dose_oral(&!md, b, dose_b)
+    md_run_to(&!md, 4.0, dt)
+    return md.auc_b[a]
+}
+
+fn e_sci(x: f64) -> i64 { return (x * 1.0e15) as i64 }
+
+// Returns (ratio coarse pair, ratio fine pair) of D = |AUC_scheme - AUC_iterated|.
+fn coupling_ratios(iters: i32, h: f64, r0: f64, r1: f64, r2: f64) -> (f64, f64) with Mut, Div, Panic, IO {
+    let d0 = g_abs(coupled_victim_auc(h, iters, 10.0) - r0)
+    let d1 = g_abs(coupled_victim_auc(0.5 * h, iters, 10.0) - r1)
+    let d2 = g_abs(coupled_victim_auc(0.25 * h, iters, 10.0) - r2)
+    print("    D(dt), D(dt/2), D(dt/4) (x1e15) = ") print(e_sci(d0)) print("  ") print(e_sci(d1)) print("  ") println(e_sci(d2))
+    return (d0 / d1, d1 / d2)
+}
+
+fn gate_v5() -> bool with Mut, Div, Panic, IO {
+    let h = 0.02
+    let r0 = coupled_victim_auc(h, 12, 10.0)
+    let r1 = coupled_victim_auc(0.5 * h, 12, 10.0)
+    let r2 = coupled_victim_auc(0.25 * h, 12, 10.0)
+    let conv = g_abs(coupled_victim_auc(0.25 * h, 16, 10.0) - r2) / r2
+    print("V5a iterated reference converged (12 vs 16 sweeps, rel x1e15) = ") println(e_sci(conv))
+    println("V5a Lie vs iterated:")
+    let (l_c, l_f) = coupling_ratios(0, h, r0, r1, r2)
+    print("V5a Lie ratios coarse, fine (expect -> 2, order 1) = ") print(l_c) print("  ") println(l_f)
+    println("V5a predictor-corrector vs iterated:")
+    let (p_c, p_f) = coupling_ratios(1, h, r0, r1, r2)
+    print("V5a PC ratios coarse, fine (expect -> 4, order 2) = ") print(p_c) print("  ") println(p_f)
+    let lie_ok = l_f > 1.7 && l_f < 2.3 && g_abs(l_f - 2.0) < g_abs(l_c - 2.0)
+    let pc_ok = p_f > 3.5 && p_f < 4.5 && g_abs(p_f - 4.0) < g_abs(p_c - 4.0)
+
+    // V5c: self-convergence of the default PC scheme.
+    let a0 = coupled_victim_auc(0.01, 1, 10.0)
+    let a1 = coupled_victim_auc(0.005, 1, 10.0)
+    let a2 = coupled_victim_auc(0.0025, 1, 10.0)
+    let a3 = coupled_victim_auc(0.00125, 1, 10.0)
+    let q_c = (a0 - a1) / (a1 - a2)
+    let q_f = (a1 - a2) / (a2 - a3)
+    print("V5c PC self-convergence ratios coarse, fine (expect -> 4) = ") print(q_c) print("  ") println(q_f)
+    let self_ok = q_f > 3.5 && q_f < 4.5 && g_abs(q_f - 4.0) < g_abs(q_c - 4.0)
+
+    // V5b: strong inhibition at the production step.
+    let rp = coupled_victim_auc(0.02, 12, 100.0)
+    let dpc = g_abs(coupled_victim_auc(0.02, 1, 100.0) - rp)
+    let dlie = g_abs(coupled_victim_auc(0.02, 0, 100.0) - rp)
+    print("V5b strong inhibition, dt = 0.02: D_PC, D_Lie (x1e15) = ") print(e_sci(dpc)) print("  ") println(e_sci(dlie))
+    let strong_ok = dpc < 0.1 * dlie
+    return conv < 1.0e-12 && lie_ok && pc_ok && self_ok && strong_ok
+}
+
+// V6 --------------------------------------------------------------------------
+fn victim_run(with_b: bool, ki_b: f64) -> (f64, f64, f64) with Mut, Div, Panic {
+    var md = md_new(true)
+    let a = add_victim(&!md, 1.5)
+    md_dose_oral(&!md, a, 5.0)
+    if with_b {
+        let b = add_victim(&!md, 0.5)
+        if ki_b > 0.0 { md_set_ki(&!md, b, md_cyp3a4(), ki_b) }
+        md_dose_oral(&!md, b, 100.0)
+    }
+    md_run_to(&!md, 24.0, 0.05)
+    return (md.auc_b[a], md.cv[a * 14], md.ct[a * 14 + 1])
+}
+
+fn gate_v6() -> bool with Mut, Div, Panic, IO {
+    let (s_auc, s_cb, s_ctl) = victim_run(false, 0.0)
+    let (n_auc, n_cb, n_ctl) = victim_run(true, 0.0)
+    let (h_auc, h_cb, h_ctl) = victim_run(true, 1.0e300)
+    let ok_a = s_auc == n_auc && s_cb == n_cb && s_ctl == n_ctl
+    let ok_b = s_auc == h_auc && s_cb == h_cb && s_ctl == h_ctl
+
+    var md = md_new(true)
+    let x = add_victim(&!md, 1.5)
+    let y = add_victim(&!md, 1.5)
+    md_set_ki(&!md, x, md_cyp3a4(), 0.02)
+    md_set_ki(&!md, y, md_cyp3a4(), 0.02)
+    md_dose_oral(&!md, x, 20.0)
+    md_dose_oral(&!md, y, 20.0)
+    md_run_to(&!md, 24.0, 0.05)
+    let ok_c = md.auc_b[x] == md.auc_b[y] && md.cv[x * 14] == md.cv[y * 14] && md.ct[x * 14 + 1] == md.ct[y * 14 + 1]
+
+    if ok_a { println("V6a non-inhibitor co-drug: victim bit-identical") } else { println("V6a FAIL: non-inhibitor co-drug changed the victim") }
+    if ok_b { println("V6b Ki=1e300 co-drug: victim bit-identical") } else { println("V6b FAIL: Ki=1e300 changed the victim") }
+    if ok_c { println("V6c identical drugs: trajectories bit-identical") } else { println("V6c FAIL: symmetric pair diverged") }
+    return ok_a && ok_b && ok_c
+}
+
+fn main() -> i32 with Mut, Div, Panic, IO {
+    let m = gate_mass()
+    let v3 = gate_v3()
+    let v4 = gate_v4()
+    let v5 = gate_v5()
+    let v6 = gate_v6()
+    if m { println("M PASS") } else { println("M FAIL") }
+    if v3 { println("V3 PASS") } else { println("V3 FAIL") }
+    if v4 { println("V4 PASS") } else { println("V4 FAIL") }
+    if v5 { println("V5 PASS") } else { println("V5 FAIL") }
+    if v6 { println("V6 PASS") } else { println("V6 FAIL") }
+    if m && v3 && v4 && v5 && v6 {
+        println("PBPK28_MULTIDRUG_GATES_PASS")
+        return 0
+    }
+    return 1
+}

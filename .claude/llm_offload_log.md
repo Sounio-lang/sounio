@@ -52,3 +52,55 @@ into sign-alternating oscillation and the negativity clamp creates mass
 **Outcome**: WAIVED. VT gate: θ = ½ reproduces the CN step to 1e-12 relative;
 θ = 1 with a 10 mg bolus at dt = 0.02 conserves mass (M + E − D) to 1e-12 with
 θ-consistent elimination accounting. Both engines. Flagged for re-review.
+
+## 2026-09-26T23:30Z — Claude (session_01RMzxzzsE5JNGEqnnkUs9Yo) — M1, PBPK28 multi-drug coupling driver + allocation-free kernel steps
+
+| 2026-09-26 | — | math-review | ddi/multidrug28.sio (competitive multi-inhibitor factor, Lie / predictor-corrector / iterated coupling, Rannacher start-up, θ-consistent AUC, clamp accounting); pbpk28_hepatic.sio *_ws steps; darwin_pbpk28_multidrug_gates.sio M/V3/V4/V5/V6 | WAIVED (orthogonal) + same-provider adversarial review | `bin/llm-offload --status`: no provider configured. An independent adversarial review was run by a separate Claude agent (different model, read-only, own probes); it is NOT an orthogonal-provider review. Flagged for re-review once a provider is configured. |
+
+**Trigger**: new hand-derived numerics and PK mathematics: (1) competitive
+factor f = 1/(1 + L + Σ_{j≠i} C_u,j/Ki_j) with C_u from the interstitial layer
+at liver and gut; (2) coupling order claims (Lie 1, PC 2); (3) the V3 static
+closed form with gut-wall sink; (4) the V4 site-convention closed form.
+
+**Adversarial review — findings and disposition**
+- M1 (accepted, my claim was wrong): I had attributed the erratic PC ratios
+  on the physiological transport to CN order reduction by stiffness and moved
+  the order gate to a transport scaled by 0.01. The reviewer refuted it with
+  controls (backward-Euler transport and a 100x smaller lung PS leave the
+  ratios unchanged; a 10x weaker perpetrator dose gives clean order two at
+  s = 1). Reproduced here: dose 10 mg, PC 3.87 → 3.93, Lie 1.92 → 2.00;
+  dose 100 mg, PC 3.54 → 3.78 → 3.89 at dt 0.0025 → 0.000625. The
+  pre-asymptotic range is set by the interaction nonlinearity. V5 now runs on
+  the physiological transport; headers corrected.
+- M2 (accepted): the enzyme-site convention was ungated (gut-site inhibition
+  dropped and self-inhibition included both passed every gate). New V4:
+  perpetrator at infusion steady state, closed-form site concentrations,
+  victim AUC vs closed form (rel err 2.4e-11). Sabotages re-run here: gut site
+  dropped → V4 rel err 0.76 FAIL; self-inhibition → 4.3e-4 FAIL; corrector at
+  f* → V5c 1.71/1.85 FAIL.
+- M3 (accepted): the discrete AUC/mass identity holds only while the
+  negativity clamp is silent; it fires at dt >= 0.05 h. Clamped mass is now
+  accounted (PBPK28Work.clamped, md_clamped) and gated against a round-off
+  bound n_steps·27·eps·dose. A first version required exactly zero and failed
+  V3 on 1.3e-12 mg of terminal-phase round-off; the bound replaced it, derived
+  from eps and the step count (V3 bound 3.6e-10), not from the observed value;
+  the reviewer's oscillation case (3e-10 relative at dt 0.05) exceeds it.
+- M4 (accepted): the gate file died under Madaros (exit 182, handle table).
+  Kernel and driver steps made allocation-free (persistent scratch; PBPK28Work;
+  portal block writes through &! instead of returning a tuple of copies).
+- m1 (accepted): the iterated fixed point is the midpoint-coefficient CN
+  coupling, not the implicit trapezoidal rule (O(dt^3) apart); renamed.
+- m2-m4: V5c now self-converges the default PC scheme on the physiological
+  fixture (3.58, 3.77); V6 labelled controls; gut-flow fixture caveat stated.
+
+**Refactor equivalence** (allocation-free vs the reviewed implementation,
+kept as renamed reference modules in scratch): 5 scenarios (portal on/off,
+iters 0/1/12, three drugs, external load, oral + IV bolus + infusion
+start/stop): Madaros `==` on every state and accounting field, 0 mismatches;
+lean_single 2645 fingerprints (17 significant digits) identical.
+V0 bit-identity of the kernel preserved on both engines.
+
+**Measurement hazard found on the way**: lean_single ignores
+SOUNIO_STDLIB_PATH and resolves `stdlib/` relative to the cwd; lean_single
+`souc run` exits 1 silently on a compile error. An early "identical" diff in
+this work compared old code with old code because of it and was discarded.
