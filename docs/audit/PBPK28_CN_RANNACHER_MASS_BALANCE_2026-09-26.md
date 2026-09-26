@@ -12,7 +12,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.pbpk28-c
 **Date:** 2026-09-26
 **Branch:** `claude/pbpk28-cn-rannacher` (base `origin/main` @ `98315edcdb`)
 **Engines:** committed `bin/souc-lean-single-x86_64` (CI engine), and Madaros built from `98315edcdb` with `make build-madaros` (md5 `5764851f3d229372e26aac1e951c95e1`, built by the sibling session that wrote the dispatch below)
-**Companion dispatch:** the root-cause isolation, literature, and TR-BDF2 measurements are in the sibling dispatch `docs/audit/PBPK28_CN_FLOOR_CLAMP_MASS_INJECTION_DISPATCH_2026-09-26.md` (branch `audit/pbpk28-cn-floor-clamp-dispatch`). This document does not repeat that isolation. It covers the fix, the caller inventory, and the before/after numbers.
+**Companion dispatch:** the root-cause isolation, literature, and TR-BDF2 measurements are in the dispatch `docs/audit/PBPK28_CN_FLOOR_CLAMP_MASS_INJECTION_DISPATCH_2026-09-26.md` (on `main` since PR #2702, merged into this branch). This document does not repeat that isolation. It covers the fix, the caller inventory, and the before/after numbers.
 
 ## Defect, in one paragraph
 
