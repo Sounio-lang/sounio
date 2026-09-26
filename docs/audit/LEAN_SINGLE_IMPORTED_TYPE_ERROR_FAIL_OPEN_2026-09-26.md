@@ -9,9 +9,10 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.lean-sin
 
 # Dispatch: `print_i64` is declared nowhere, and lean_single's import tolerance hides it (2026-09-26)
 
-**Status:** OPEN. Dispatch only. No change to `self-hosted/` or `stdlib/`
-accompanies this document. Filed under the forensic dispatch protocol
-(`CLAUDE.md` §8) before any patch.
+**Status:** OPEN for F-B (lean_single). F-A applied, plus the E259 and E008
+follow-ups below, under the operator directive that **Madaros is the only
+compiler for PBPK** (2026-09-26). No change to `self-hosted/`. Filed under
+the forensic dispatch protocol (`CLAUDE.md` §8) before any patch.
 
 ## Claim
 
@@ -255,3 +256,76 @@ tolerance. Before any patch:
 **F-C: gate (optional).** A multimodule `//@ compile-fail` pair built from the
 reproduction above, marked `//@ requires: madaros`, to pin Madaros' correct
 rejection. Under lean_single the same pair is the witness for F-B.
+
+## Follow-up: PBPK under Madaros only (2026-09-26)
+
+Operator directive, 2026-09-26: Madaros is the only compiler for PBPK. A
+lean_single green on `darwin_pbpk` is not evidence. Three `stdlib/` commits
+follow, each an atomic change:
+
+1. **F-A.** `print_int` replaces `print_i64` at the nine sites.
+2. **E259.** 65 fields in 13 result/record structs across 9 files become
+   `pub`. This continues `b77dd4532`, whose scan skipped these files because
+   they also carried the E137. Every site was traced to its owning struct
+   through the producer's return type, and the only token added is `pub`.
+3. **E008.** In `scenarios/steady_state_runner.sio::ssr_run_one_interval`, the
+   step-rejection bailout returned the bare `OralBBBTrace` where the function
+   declares `SSIntervalResult`. The loop had been copied from `oral_bbb_run`,
+   where `return trace` is correct. lean_single accepted this for the same
+   reason as `print_i64`. The fix wraps the carried state and leaves
+   `trace.success = false` as the failure signal. `run_oral_multidose` never
+   reads `success`; that is noted here and left unchanged.
+
+### Census
+
+Scope: the 27 files in `tests/stdlib/darwin_pbpk/` plus the 11 `examples/`
+that import `darwin_pbpk`, 38 targets in total. Madaros built from source,
+md5 `5764851f`.
+
+The first census was taken with F-A already applied. Before F-A the E137s
+were measured per test only (see the tables above).
+
+| `souc check`, distinct sites | + F-A | + E259 | + E008 |
+|---|---:|---:|---:|
+| targets with rc=0 | 26 | 34 | 36 |
+| E259 | 159 | 0 | 0 |
+| E008 | 1 | 1 | 0 |
+| E175 (`test_simulation_e2e`) | 6 | 6 | 6 |
+| E137 (`tsit5_pbpk14_demo`, unrelated to `print_i64`) | 4 | 4 | 4 |
+
+`souc run` on the final tree, Madaros against lean_single. Madaros writes
+its compile log to stdout, so program output is compared from the line after
+`Written to …/main.elf`:
+
+| Outcome | Targets |
+|---|---:|
+| rc=0 on both engines, program output byte-identical | 22 |
+| rc=0 on both engines, numeric difference in the last printed digits | 2 |
+| Madaros `rc=182` (`madaros: handles full`) | 12 |
+| does not compile on Madaros | 2 |
+
+- **Numeric differences, not yet explained.**
+  `examples/dissertation_steady_state_demo.sio` prints
+  `4.000000,0.005650,…` on Madaros against `0.005649` on lean_single.
+  `examples/dissertation_steady_state_fullvd_demo.sio` prints
+  `C_max_last / C_max_first` 1.063169 against 1.063101, and
+  `AUC_last / AUC_first` 1.228366 against 1.228345: relative differences of
+  6.4e-5 and 1.7e-5. The cause has not been established; step-control
+  divergence in the adaptive integrator is a hypothesis only. Under the
+  directive the Madaros value is the one reported, but no value from these
+  two demos should be quoted until the divergence is understood.
+- **`rc=182`.** `test_bbb_gate`, `test_bbb_gum_budget`, `test_bbb_hdmr_7d`,
+  `test_bbb_pce2d_sobol`, `test_bbb_pce_vs_gum`, `test_bbb_voi`,
+  `test_des_bbb_coupled`, `test_brain_plasma_tac`,
+  `test_observed_petab_fit_e2e`, `test_pd_gum_voi`, `test_steady_state`, and
+  `examples/dissertation_scenario_gate_demo.sio`. This is the unreclaimed
+  handle table that lane `claude(sleepy-easley)` is fixing in
+  `self-hosted/native/gc.sio`. The failure is runtime, not type checking.
+- **Does not compile.** `test_simulation_e2e.sio` calls the private Butcher
+  tableau helpers `tsit5_c2()` … `tsit5_a31()` of `tsit5_pbpk14.sio` (E175).
+  Whether to make solver internals `pub` is an API decision, left to the
+  operator. `examples/darwin_pbpk/tsit5_pbpk14_demo.sio` has no `use` and
+  calls four functions (`default_pbpk_params`, `default_ode_config`,
+  `solve_pbpk14`, `pbpk_state_total_mass`) that exist nowhere in `stdlib/`.
+  It fails on both engines and needs rewriting against the real API.
+
