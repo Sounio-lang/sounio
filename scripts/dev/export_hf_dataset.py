@@ -135,15 +135,28 @@ def build_instruction(
         if not summary.endswith("."):
             summary += "."
         parts.append(summary)
+    known_failure = annotations.get("known-failure")
     if suite == "run-pass":
-        parts.append("It should compile and run successfully.")
-        if annotations.get("expect-stdout"):
-            parts.append(f"Expected stdout: {annotations['expect-stdout'][0]}")
+        # A known-failure run-pass fixture does not currently pass -- some do
+        # not even compile -- so a success claim or a stdout expectation would
+        # describe a completion the source cannot produce.
+        if not known_failure:
+            parts.append("It should compile and run successfully.")
+            if annotations.get("expect-stdout"):
+                parts.append(f"Expected stdout: {annotations['expect-stdout'][0]}")
     else:
         parts.append("It should fail to compile.")
         if annotations.get("error-pattern"):
             patterns = "; ".join(annotations["error-pattern"])
             parts.append(f"The compiler output should include: {patterns}.")
+    if known_failure:
+        note = "This is a documented known failure in the upstream test suite: it does not currently pass."
+        reason = known_failure[0].strip()
+        if reason and reason != "true":
+            if not reason.endswith("."):
+                reason += "."
+            note += f" Recorded reason: {reason}"
+        parts.append(note)
     if ignore:
         parts.append("This example is currently marked ignored in the upstream test suite.")
     return " ".join(parts).strip()
@@ -246,7 +259,7 @@ Instruction/completion dataset for **Sounio**, a self-hosted systems + scientifi
 
 Each record contains:
 
-- `instruction`: natural-language prompt derived from test annotations, descriptions, and file names
+- `instruction`: natural-language prompt derived from test annotations, descriptions, and file names; fixtures annotated `//@ known-failure` are described as documented known failures with their recorded reason, and run-pass ones carry no success claim or expected stdout
 - `completion`: the full `.sio` source file
 - `suite`: `run-pass` or `compile-fail`
 - `source_path`: original repository path
