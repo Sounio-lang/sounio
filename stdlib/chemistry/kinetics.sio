@@ -772,8 +772,15 @@ pub fn pbpk_metabolic_crn_with_ontology(drug_idx: i64, init_conc: f64, t: f64) -
     // drug_idx=0 under the old body silently returned water's IRI attached
     // to a real drug-concentration simulation. Fixed to use the dedicated
     // drug map so index 0 means rapamycin here too, not water.
+    //
+    // Out-of-range drug_idx (Copilot review, sounio-lang/sounio#2694): this
+    // is `pub fn`, so any caller can pass an out-of-range index; directly
+    // indexing the 8-entry drug_map would panic where the old
+    // species_to_chebi_iri path instead had a fallback IRI
+    // (iri_new(100000 + species_idx)) for every index. Preserve that
+    // fallback behavior for out-of-range indices here too.
     let drug_map = pbpk28_drug_enzyme_chebi_map();
-    let chebi = drug_map[drug_idx];
+    let chebi = if drug_idx >= 0 && drug_idx < 8 { drug_map[drug_idx] } else { iri_new(100000 + drug_idx) };
     let go = cyp3a4_metabolism_iri();
     let rhea = rhea_cyp3a4_oxidation();
     // simple demo decay using bridge + attach
@@ -2500,7 +2507,8 @@ pub fn simulate_bayesian_posterior_crn(
     var sum_w = 0.0;
     var sum_kw = 0.0;
     var sum_k2w = 0.0;
-    var max_log_w = 0.0 - 1.0e300;
+    var max_log_w = 0.0;
+    var have_max = false;
     var i: i64 = 0;
     while i < ns {
         // propose k from prior + epistemic unc (EState style proposal)
@@ -2516,12 +2524,25 @@ pub fn simulate_bayesian_posterior_crn(
                 }
                 d = d + 1;
             }
-            if log_w > max_log_w {
-                let rescale = exp_approx(max_log_w - log_w);
-                sum_w = sum_w * rescale;
-                sum_kw = sum_kw * rescale;
-                sum_k2w = sum_k2w * rescale;
+            // Seeded from the first valid proposal's own log_w (Copilot
+            // review, sounio-lang/sounio#2694), not a fixed -1e300 sentinel:
+            // a finite sentinel is not below every finite log-likelihood --
+            // a large-enough residual/tiny-enough variance in
+            // log_gaussian_term can itself produce log_w more negative than
+            // -1e300, which would never update max_log_w and would clamp
+            // every sample's weight to 0 via exp_approx(log_w - max_log_w)
+            // (comparing two enormous negative numbers whose DIFFERENCE is
+            // still huge), taking the unchanged-prior fallback despite
+            // having finite, comparable log-weights.
+            if !have_max || log_w > max_log_w {
+                if have_max {
+                    let rescale = exp_approx(max_log_w - log_w);
+                    sum_w = sum_w * rescale;
+                    sum_kw = sum_kw * rescale;
+                    sum_k2w = sum_k2w * rescale;
+                }
                 max_log_w = log_w;
+                have_max = true;
             }
             let w = exp_approx(log_w - max_log_w);
             sum_w = sum_w + w;

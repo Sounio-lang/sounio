@@ -145,3 +145,38 @@ math-review trigger by itself, and not something this stdlib fix can close
 in the compiler — flagged here for a forensic dispatch per CLAUDE.md's rule
 against patching self-hosted/ ad hoc, same posture as the private_fn_identity
 entry above.
+
+---
+
+## 2026-09-26T14:45Z — Claude (session_01RMzxzzsE5JNGEqnnkUs9Yo) — M1/M3, demos/hydrogen/README.md p-box and VoI numeric corrections (PR sounio-lang/sounio#2694)
+
+| 2026-09-26 | — | math-review | demos/hydrogen/README.md (caprock_seal_pbox theta-scenario reliabilities; caprock_integrity_v2 shale/mudstone p-box bounds; sobol_voi MC convergence/seed-invariance numbers and VoI sequencing widths) | WAIVED | No offload provider configured in this container, same as both entries above; independent verification instead. |
+
+**Trigger**: `demos/hydrogen/README.md` is explicitly prepared for a presentation
+to Dr. Emmanuel Stamatakis's group (NCSR Demokritos, H2Lab) — an
+external-facing artifact under `.claude/AGENT_OFFLOAD_POLICY.md` §M3 — and
+the corrections touch p-box/probability-of-failure arithmetic (§M1's
+"GUM/p-box uncertainty-propagation derivations").
+
+**Attempted**: `bin/llm-offload --status` — same result as the earlier
+entries in this log: no provider (xai, zai, or local) reachable in this
+container. No `--raw <draft> deepseek xai gemini` fan-out attempted for the
+same reason `math-review` wasn't attempted above: `--status` already shows
+nothing to fan out to.
+
+**Outcome**: WAIVED for lack of a reachable provider. The corrections
+themselves are **not** a hand-derived recomputation — they are transcription
+fixes: the underlying `.sio` files (`caprock_seal_pbox.sio`,
+`caprock_integrity_v2.sio`, `sobol_voi.sio`) were unmodified and already
+correct; the doc's prose numbers had drifted from what those files actually
+print. Verification was re-running each unmodified `.sio` file and diffing
+its stdout against the doc's claimed numbers directly, not an independent
+derivation of the underlying p-box/VoI math — so this waiver documents an
+artifact-accuracy check, not a second opinion on the probabilistic model
+itself. If the underlying p-box/VoI methodology in those `.sio` files
+changes in a future PR, that would be a fresh M1 trigger needing its own
+review attempt.
+
+**Flagged for re-review**: per policy, both this entry and the two above
+should get a real fan-out pass once a provider is configured in a session
+that has one.

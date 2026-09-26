@@ -504,8 +504,16 @@ run_test() {
                 # the actual, final $SOUC_BIN what it is via `--version`,
                 # not by asking which env var picked it) is correct for
                 # every resolution path at once, so this arm no longer needs
-                # to enumerate them.
-                if [[ -n "${SOUNIO_MADAROS_AVAILABLE:-}" ]] || [[ "${SOUNIO_RESOLVED_IS_MADAROS:-0}" == "1" ]]; then
+                # to enumerate them -- and, per Copilot review on
+                # sounio-lang/sounio#2694, must not be OR'd with
+                # SOUNIO_MADAROS_AVAILABLE (a statement of INTENT for the
+                # `requires: madaros` arm above, not of what actually
+                # resolved): a Madaros-capable environment that explicitly
+                # runs `SOUNIO_TEST_SOUC_BIN=/tmp/souc-stage2` (lean_single)
+                # would still have SOUNIO_MADAROS_AVAILABLE set, and the OR
+                # would skip a lean_single test on the exact run that most
+                # needs to exercise it. Gate solely on the probed identity.
+                if [[ "${SOUNIO_RESOLVED_IS_MADAROS:-0}" == "1" ]]; then
                     echo "{\"status\":\"skip\",\"reason\":\"requires:lean_single\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"
                     return
                 fi

@@ -136,4 +136,33 @@ expect_rc 0 "$TMP/reason_legacy.log" run_list_with_manifest "$TMP/list_reason.tx
 grep -Fq "Known failures: 1" "$TMP/reason_legacy.log" \
     || fail "legacy plain-path entry regressed"
 
+# --- 7. Mixed environment: SOUNIO_MADAROS_AVAILABLE set but the resolved
+#     compiler is actually lean_single -- `requires: lean_single` must still
+#     RUN, not skip (Copilot review, sounio-lang/sounio#2694: OR'ing
+#     SOUNIO_MADAROS_AVAILABLE, a statement of intent for the sibling
+#     `requires: madaros` arm, into this arm's skip condition made a
+#     Madaros-capable environment that explicitly selects lean_single via
+#     SOUNIO_TEST_SOUC_BIN incorrectly skip a lean_single test on the exact
+#     run meant to exercise it). Uses the real lean_single stage2 binary if
+#     this checkout has one; skips itself, loudly, rather than passing
+#     vacuously, if it doesn't.
+LEAN_SINGLE_ELF="$ROOT_DIR/bin/souc-lean-single-x86_64"
+if [[ -x "$LEAN_SINGLE_ELF" ]]; then
+    cat > "$TMP/lean_single_gate_fixture.sio" <<'SIO'
+//@ run-pass
+//@ requires: lean_single
+fn main() -> i32 with IO {
+    println("selftest_lean_single_gate_marker_7be2")
+    0
+}
+SIO
+    printf '%s\n' "$TMP/lean_single_gate_fixture.sio" > "$TMP/list_lean_single_gate.txt"
+    expect_rc 0 "$TMP/lean_single_gate.log" env SOUNIO_MADAROS_AVAILABLE=1 SOUNIO_TEST_SOUC_BIN="$LEAN_SINGLE_ELF" \
+        bash "$HARNESS" --test-list "$TMP/list_lean_single_gate.txt" --jobs 1 --verbose
+    grep -Fq "PASS  lean_single_gate_fixture.sio" "$TMP/lean_single_gate.log" \
+        || fail "requires:lean_single skipped under SOUNIO_MADAROS_AVAILABLE=1 even though the resolved compiler is lean_single"
+else
+    echo "SKIP: case 7 (mixed-environment gate) -- no lean_single ELF at $LEAN_SINGLE_ELF" >&2
+fi
+
 echo "TEST_SUITE_ANNOTATION_SELFTEST_PASS"
