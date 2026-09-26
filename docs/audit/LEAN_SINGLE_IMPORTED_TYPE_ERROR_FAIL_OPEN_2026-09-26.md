@@ -318,13 +318,17 @@ its compile log to stdout, so program output is compared from the line after
   `examples/dissertation_scenario_gate_demo.sio`. This is the unreclaimed
   handle table that lane `claude(sleepy-easley)` is fixing in
   `self-hosted/native/gc.sio`. The failure is runtime, not type checking.
-- **Does not compile.** `test_simulation_e2e.sio` calls the private Butcher
-  tableau helpers `tsit5_c2()` … `tsit5_a31()` of `tsit5_pbpk14.sio` (E175).
-  Whether to make solver internals `pub` is an API decision, left to the
-  operator. `examples/darwin_pbpk/tsit5_pbpk14_demo.sio` has no `use` and
-  calls four functions (`default_pbpk_params`, `default_ode_config`,
-  `solve_pbpk14`, `pbpk_state_total_mass`) that exist nowhere in `stdlib/`.
-  It fails on both engines and needs rewriting against the real API.
+- **Does not compile (both since fixed; see the next section).**
+  - `test_simulation_e2e.sio` calls the private Butcher tableau helpers
+    `tsit5_c2()` … `tsit5_a31()` of `tsit5_pbpk14.sio` (E175).
+  - `examples/darwin_pbpk/tsit5_pbpk14_demo.sio` has no `use` line.
+  - **Correction:** an earlier revision said the demo's four functions
+    (`default_pbpk_params`, `default_ode_config`, `solve_pbpk14`,
+    `pbpk_state_total_mass`) exist nowhere in `stdlib/`. That was wrong. All
+    four are `pub` in `tsit5_pbpk14.sio`; the search that "found nothing"
+    used `\b`, which `git grep -E` does not support. The demo's defects
+    were the missing `use`, undeclared effects on `main`, reads of
+    `PBPKSolution14`'s private fields, and a `println(value)` per label.
 
 ## Steady-state divergence: root cause (2026-09-26)
 
@@ -424,3 +428,41 @@ divergence. No other engine difference is involved in these two demos.
   (`lean_single.sio:19030`) rebuilds the value the same way, with the
   `mulsd`/`divsd` by `10.0` loop, and would need the same change.
 
+
+## Remaining PBPK targets and runner failure signal (2026-09-26)
+
+Operator decision: make the Tsit5 helpers `pub` and rewrite the demo.
+
+- `stdlib/darwin_pbpk/tsit5_pbpk14.sio`: the 41 Butcher tableau helpers
+  (`tsit5_c*`, `tsit5_a*`, `tsit5_b*`, `tsit5_e*`) and the 6 fields of
+  `PBPKSolution14` become `pub`. `stdlib/ode/tsit5_multicomp.sio` defines the
+  same 41 names privately. No module imports both, so nothing collides; the
+  census below confirms it.
+- `examples/darwin_pbpk/tsit5_pbpk14_demo.sio` was rewritten against the
+  existing API: `use` line, effects on `main`, label and value on one line.
+  Its pass condition is physical bounds only (`0 < % eliminated < 100`,
+  `success`, `t_final >= t_end`), not a fitted number. The old comment's
+  "expect ~25–30% elimination" was wrong: the measured value is 71.591962%.
+- Census with both changes (Madaros md5 `5764851f`):
+  - `check` rc=0 on **38/38** targets.
+  - `run`: 24 byte-identical with lean_single (up from 22), 2 steady-state
+    demos differing by the literal rounding explained above, and 12
+    `rc=182`. No regressions.
+
+A review of PR #2698 noted that `run_oral_multidose` ignored the
+`trace.success = false` bailout, so a failed integration still produced a
+normal-looking report. `ssr_run_one_interval` had a second silent path as
+well: exhausting `cfg.max_steps` before a checkpoint recorded the point and
+reported success. Both now fail:
+
+- The interval returns `success = false` when `t < target` after the step
+  loop. That can only happen through `nsteps >= max_steps`, because the loop
+  otherwise continues while `t < target`.
+- `SteadyStateReport` gains `success`. `run_oral_multidose` stops at the
+  first failed interval, with `n_doses_run` counting only complete intervals.
+- Both steady-state demos return 1 on a failed report.
+
+Verified on Madaros:
+- Both demos print output byte-identical to before the change.
+- With `tight_ode_config().max_steps = 1` in a scratch stdlib copy, the demo
+  prints `integration failed after 0 complete dose interval(s)` and exits 1.
