@@ -82,3 +82,65 @@ current source" are different claims, and this entry conflated them. The
 stdlib prefix rename stays: it is no longer closing an open compiler
 defect, but it does mean acids::ph() doesn't depend on which Madaros a
 caller happens to be running.
+
+---
+
+## 2026-09-26T13:45Z — Claude (session_01RMzxzzsE5JNGEqnnkUs9Yo) — M1 math-review, kinetics.sio's 9 failing self-tests (PR sounio-lang/sounio#2694)
+
+| 2026-09-26 | — | math-review | kinetics.sio (Mittag-Leffler target recomputed for test_fractional_caputo_epistemic + validate_against_literature's pass_frac; PINN training-loop learning rate re-derived; simulate_bayesian_posterior_crn's importance-sampling combination moved to log-space) | WAIVED | No offload provider configured in this container, same as the entry above. Independent Python verification for each derivation; full narrative in the commit message (b28e33b8) and in the fix comments at each site. |
+
+Same gap as the entry above (`MATH_REVIEW_PATHS` doesn't cover
+`stdlib/chemistry/*`) and same reasoning for adding the row anyway. Three
+hand-derived math corrections in this pass, each independently verified in
+Python before being written into the .sio file, not asserted from memory:
+
+1. **Mittag-Leffler value.** `fractional_decay_ml(1.0, 0.1, 10.0, 0.8)` calls
+   `mittag_leffler_e_alpha(0.8, -0.630957)`. The file's own test asserted
+   0.35; independently implemented the identical power series (gamma-function
+   terms, `sum += z^k/Γ(0.8k+1)`, converges cleanly since |z|<1) in Python:
+   0.533673. Cross-checked the qualitative claim in the neighboring comment
+   ("slower decay than integer order") against exp(-1)=0.367879: 0.533673 is
+   indeed larger (slower decay), so the DIRECTION was right and only the
+   magnitude was a guess. Both `test_fractional_caputo_epistemic` and the
+   textually-identical `pass_frac` computation inside
+   `validate_against_literature` used the same wrong 0.35 and got the same
+   fix.
+2. **PINN training-loop learning rate.** `k = k - lr * dloss_dk` starting at
+   k=0.12, target k=0.1: reimplemented the exact loop (same `exp_approx`,
+   same finite-difference gradient, same 5 iterations) in Python at lr=0.1
+   (the file's value) and at several candidates. lr=0.1 oscillates
+   (0.12/0.080/0.153/0.088/0.128/0.078, no convergence in 5 steps); lr=0.05
+   converges to k=0.099995 — the change applied. Two duplicated copies of
+   this loop existed (`test_epistemic_pinn_crn`,
+   `bench_epistemic_pinn_crn`); both fixed identically.
+3. **Bayesian importance-sampling combination.** Not a single wrong number
+   but a numerically unstable combination rule:
+   `w = w * likelihood_weight(...)` multiplying several
+   already-small Gaussian-kernel values underflows to exactly 0.0 in f64
+   once no single sampled parameter matches all of several spread-out data
+   points simultaneously against tight sigmas — confirmed by instrumenting
+   the function directly (added and then removed temporary debug prints
+   showing `sum_w=0.0` for every sample, every call) rather than inferring it
+   from the symptom alone. Replaced with the standard fix: accumulate
+   log-weights, then exponentiate once per sample relative to the batch's
+   own maximum log-weight (so the best sample never underflows, and the
+   others are correctly small relative to it). This is a numerical-methods
+   correction, not a literature-derived constant, included here because
+   `.claude/AGENT_OFFLOAD_POLICY.md` §M1 lists "GUM uncertainty-propagation
+   derivations" and this is the same class of hand-derived probabilistic
+   math.
+
+Also found and fixed in the same pass, not itself an M1 trigger but
+recorded for continuity: a `let var = ...` binding (`var` is the
+mutable-declaration keyword) in the function this same investigation was
+chasing, which made every `if var <= 0.0 {...}` comparison against it take
+the true branch unconditionally under `SOUNIO_SOUC_ENGINE=lean_single` (a
+minimal 6-line standalone repro confirms it; Madaros correctly refuses the
+same file as using a reserved identifier). This was the actual reason
+`simulate_bayesian_posterior_crn` had been silently returning its
+unmodified prior on every call, independent of the two other bugs
+(an indexing bug and the log-space fix above) layered on top of it. Not a
+math-review trigger by itself, and not something this stdlib fix can close
+in the compiler — flagged here for a forensic dispatch per CLAUDE.md's rule
+against patching self-hosted/ ad hoc, same posture as the private_fn_identity
+entry above.
