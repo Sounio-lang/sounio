@@ -90,6 +90,15 @@ struct LowerLocalStack {
     // instead of falling through to the integer path for lack of any
     // per-local array-return metadata at all.
     fn_ptr_ret_array: Box<LowerLocalI64Slots>,
+    // Copilot review follow-up (#2570): one layer BEHIND fn_ptr_ret_array --
+    // 1 when local/param is fn(...) -> fn(...) -> [f64; N] (the same
+    // exactly-one-layer shape LOWER_FN_ARR_CHAIN classifies for a NAMED
+    // function), so a bare identity alias of such a function (`let c =
+    // choose_arr`, no call) still carries "one more call gives an
+    // array-returning function" instead of losing the classification
+    // entirely for lack of any per-local state one layer up from
+    // fn_ptr_ret_array. See expr_ident_is_array_returning_fn_chain_ref.
+    fn_ptr_ret_chain: Box<LowerLocalI64Slots>,
     count: i64,
 }
 
@@ -150,6 +159,7 @@ fn empty_lower_local_stack() -> LowerLocalStack with Alloc, Mut {
         box_inner_layout: lowerer_box_local_i64_slots(-1),
         fn_ptr_ret_float: lowerer_box_local_i64_slots(0),
         fn_ptr_ret_array: lowerer_box_local_i64_slots(0),
+        fn_ptr_ret_chain: lowerer_box_local_i64_slots(0),
         count: 0,
     }
 }
@@ -5305,6 +5315,7 @@ fn lowerer_bind_local_mut(
         (*(*locals_box).tuple_float_mask).values[idx as usize] = 0
         (*(*locals_box).fn_ptr_ret_float).values[idx as usize] = 0
         (*(*locals_box).fn_ptr_ret_array).values[idx as usize] = 0
+        (*(*locals_box).fn_ptr_ret_chain).values[idx as usize] = 0
         // Post-#2084: tuple0_array_elem_layout was added on main to track when a
         // tuple slot-0 is a fixed array, which gates the aggregate-shallow-copy path.
         (*(*locals_box).tuple0_array_elem_layout).values[idx as usize] = 0 - 1
@@ -9983,6 +9994,7 @@ impl Lowerer {
                 (*(*stk).box_inner_layout).values[idx as usize] = 0 - 1
                 (*(*stk).fn_ptr_ret_float).values[idx as usize] = 0
                 (*(*stk).fn_ptr_ret_array).values[idx as usize] = 0
+                (*(*stk).fn_ptr_ret_chain).values[idx as usize] = 0
                 (*stk).count = idx + 1
             lo.locals = stk
         } else {
@@ -10022,6 +10034,30 @@ impl Lowerer {
         while i >= 0 {
             if (*(*stk).depths).values[i as usize] <= lo.scope_depth && ir_name_eq((*(*stk).names).values[i as usize], name) {
                 (*(*stk).fn_ptr_ret_array).values[i as usize] = 1
+                lo.locals = stk
+                return lo
+            }
+            i = i - 1
+        }
+        lo
+    }
+
+    // Copilot review follow-up (#2570): one-layer-up sibling of
+    // bind_local_fn_ptr_ret_array, for a bare identity alias of a function
+    // that needs exactly TWO more calls to reach `[f64; N]` (the shape
+    // LOWER_FN_ARR_CHAIN already classifies for a NAMED function, e.g. `let
+    // c = choose_arr` where choose_arr: fn() -> fn() -> [f64; N]). Marks
+    // `name` so a later single call through it (`let f = c()`) is itself
+    // recognized as "one more call gives the array" -- see
+    // expr_ident_is_array_returning_fn_ref's ExprCall branch, which reads
+    // this via lookup_local_fn_ptr_ret_chain for a local callee.
+    fn bind_local_fn_ptr_ret_chain(self, name: Name) -> Lowerer with Mut, Alloc, Panic, Div {
+        var lo = self
+        var stk = lo.locals
+        var i = (*stk).count - 1
+        while i >= 0 {
+            if (*(*stk).depths).values[i as usize] <= lo.scope_depth && ir_name_eq((*(*stk).names).values[i as usize], name) {
+                (*(*stk).fn_ptr_ret_chain).values[i as usize] = 1
                 lo.locals = stk
                 return lo
             }
@@ -10481,6 +10517,19 @@ impl Lowerer {
         while i >= 0 {
             if (*(*self.locals).depths).values[i as usize] <= self.scope_depth && ir_name_eq((*(*self.locals).names).values[i as usize], name) {
                 return (*(*self.locals).fn_ptr_ret_array).values[i as usize] == 1
+            }
+            i = i - 1
+        }
+        false
+    }
+
+    // Reader for bind_local_fn_ptr_ret_chain -- see its own comment. Copilot
+    // review follow-up (#2570).
+    fn lookup_local_fn_ptr_ret_chain(self, name: Name) -> bool with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*(*self.locals).depths).values[i as usize] <= self.scope_depth && ir_name_eq((*(*self.locals).names).values[i as usize], name) {
+                return (*(*self.locals).fn_ptr_ret_chain).values[i as usize] == 1
             }
             i = i - 1
         }
@@ -18251,8 +18300,22 @@ impl Lowerer {
                         return false
                     }
                     let callee_name = (*callee_expr).name
+                    // Copilot review follow-up (#2570): a LOCAL callee used to
+                    // return false unconditionally here, on the reasoning that
+                    // a local's own fn_ptr_ret_array means calling it gives
+                    // the ARRAY directly, not another array-returning
+                    // function (still true, and NOT what this checks now).
+                    // But `let c = choose_arr; let f = c()` has `c` as a
+                    // LOCAL carrying the one-layer-up fn_ptr_ret_chain
+                    // classification instead (bound by
+                    // expr_ident_is_array_returning_fn_chain_ref at c's own
+                    // let-binding) -- calling THAT once is exactly "one more
+                    // call gives the array", this function's own contract,
+                    // so it is answered from fn_ptr_ret_chain, not the
+                    // always-false fallback that lost `f`'s classification
+                    // entirely for this alias-before-call shape.
                     if self.lookup_local(callee_name) >= 0 {
-                        return false
+                        return self.lookup_local_fn_ptr_ret_chain(callee_name)
                     }
                     return lower_fn_name_is_arr_chain(callee_name)
                 }
@@ -18279,6 +18342,34 @@ impl Lowerer {
             return lower_fn_name_is_arr_chain(mangled)
         }
         false
+    }
+
+    // Copilot review follow-up (#2570): one-layer-up sibling of
+    // expr_ident_is_array_returning_fn_ref -- true iff `e` is a BARE
+    // identity reference (not a call) whose value needs exactly TWO more
+    // calls to reach `[f64; N]`: a local already so classified (an
+    // alias-of-an-alias, via lookup_local_fn_ptr_ret_chain), or a named
+    // top-level function LOWER_FN_ARR_CHAIN already classifies as the
+    // exactly-one-layer `fn() -> [f64; N]` shape.
+    //
+    // Only ExprIdent, deliberately: this is used at a LET-statement binding
+    // site the same way expr_ident_is_array_returning_fn_ref is, to
+    // propagate the classification onto a fresh local from a bare alias
+    // (`let c = choose_arr`). A CALL is not handled here, for the same
+    // reason expr_ident_is_array_returning_fn_ref's own ExprCall branch does
+    // not recurse through a local-to-local chain: `let mid = outer4();
+    // let c = mid()` would need real per-name depth state to classify
+    // correctly rather than this single extra layer, and a chain that deep
+    // is refused elsewhere (lower_fn_tuple_arr_fault reason 6) rather than
+    // silently misclassified.
+    fn expr_ident_is_array_returning_fn_chain_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).kind != ExprKind::ExprIdent {
+            return false
+        }
+        if self.lookup_local((*e).name) >= 0 {
+            return self.lookup_local_fn_ptr_ret_chain((*e).name)
+        }
+        lower_fn_name_is_arr_chain((*e).name)
     }
 
     // Copilot follow-up (#2570): true iff `e`'s runtime value is an f64 array,
@@ -18677,6 +18768,15 @@ impl Lowerer {
             Some(rhs_for_arr_chain) => lo.expr_ident_is_array_returning_fn_ref(&(*rhs_for_arr_chain)),
             _ => false,
         }
+        // Copilot review follow-up (#2570): one-layer-up sibling of
+        // pre_bind_arr_chain just above, same self-shadowing trap and same
+        // pre-bind timing -- `let choose_arr = choose_arr` (a bare alias
+        // shadowing the chain function of the same name) needs this
+        // computed before bind_local touches the locals stack too.
+        let pre_bind_arr_chain_deep = match s.expr {
+            Some(rhs_for_arr_chain_deep) => lo.expr_ident_is_array_returning_fn_chain_ref(&(*rhs_for_arr_chain_deep)),
+            _ => false,
+        }
         // Captured BEFORE bind_local(s.name, ...) below rebinds `s.name` to a
         // fresh (non-ref) slot. Same-name shadowing (`let a = a`) means a
         // post-bind lookup_local_is_ref(rhs name) would find that fresh slot
@@ -18898,7 +18998,7 @@ impl Lowerer {
             }
             _ => {}
         }
-        lo.lower_let_stmt_finalize_ref(s, is_mut, reg, fixed_array_len, fixed_array_word_scalar, rhs_array_elem_is_float, rhs_ident_is_ref, pre_bind_tuple_mask, pre_bind_arr_chain)
+        lo.lower_let_stmt_finalize_ref(s, is_mut, reg, fixed_array_len, fixed_array_word_scalar, rhs_array_elem_is_float, rhs_ident_is_ref, pre_bind_tuple_mask, pre_bind_arr_chain, pre_bind_arr_chain_deep)
     }
 
     fn lower_let_stmt_finalize_ref(
@@ -18911,7 +19011,8 @@ impl Lowerer {
         rhs_array_elem_is_float: bool,
         rhs_ident_is_ref: bool,
         pre_bind_tuple_mask: i64,
-        pre_bind_arr_chain: bool
+        pre_bind_arr_chain: bool,
+        pre_bind_arr_chain_deep: bool
     ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         // Ref-typed locals (annotated &T / &!T, or RHS is & / &! expr) must be marked
@@ -19094,7 +19195,7 @@ impl Lowerer {
             lo = lo.alloc_variance_slot_for_local(s.name)
             lo = lo.fo_alloc_sens_slots_for_local(s.name)
         }
-        lo.lower_let_stmt_type_metadata_ref(s, reg, rhs_array_elem_is_float, pre_bind_tuple_mask, pre_bind_arr_chain)
+        lo.lower_let_stmt_type_metadata_ref(s, reg, rhs_array_elem_is_float, pre_bind_tuple_mask, pre_bind_arr_chain, pre_bind_arr_chain_deep)
     }
 
     // `[r0, r1, r2]` whose elements are f64 LOCALS (or calls, fields, indexes the
@@ -19129,7 +19230,8 @@ impl Lowerer {
         reg: i64,
         rhs_array_elem_is_float: bool,
         pre_bind_tuple_mask: i64,
-        pre_bind_arr_chain: bool
+        pre_bind_arr_chain: bool,
+        pre_bind_arr_chain_deep: bool
     ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         // V0-E.5.7: `let r: &[f128; N] = &xs` — a reference to an f128 array (the
@@ -19180,6 +19282,17 @@ impl Lowerer {
         // pre_bind_tuple_mask exists to avoid for the tuple case.
         if pre_bind_arr_chain {
             lo = lo.bind_local_fn_ptr_ret_array(s.name)
+        }
+        // Copilot review follow-up (#2570): one-layer-up sibling of the
+        // pre_bind_arr_chain branch just above -- `let c = choose_arr`,
+        // a bare alias of a named LOWER_FN_ARR_CHAIN function (or of
+        // another local already so classified), needs exactly two more
+        // calls to reach the array, so it is marked fn_ptr_ret_chain
+        // rather than fn_ptr_ret_array. See bind_local_fn_ptr_ret_chain
+        // and expr_ident_is_array_returning_fn_ref's ExprCall branch,
+        // which reads this to classify `c()` as itself array-returning.
+        if pre_bind_arr_chain_deep {
+            lo = lo.bind_local_fn_ptr_ret_chain(s.name)
         }
         // #1502: record which slots of a tuple-typed local are f64. Copilot
         // follow-up (#2570): lower_opt_type_tuple_float_mask only ever reads

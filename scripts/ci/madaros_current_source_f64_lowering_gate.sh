@@ -470,4 +470,61 @@ grep -Fq "function \`f\` returns a function chain more than one call deep before
   fail "two-layer array-chain parameter diagnostic was missing or changed"
 }
 
-echo "[madaros-f64-lowering] PASS: one shared Madaros ELF passed dereference, global f64, direct capacity, imported capacity, imported wide-call, f64-array tuple table capacity (${TUPLE_CAP} ok, ${TUPLE_OVER} rejected), slot limit (slot $((SLOT_MAX - 1)) ok, slot ${SLOT_MAX} rejected), impl-method tuple coverage, array-chain table capacity (${TUPLE_CAP} ok, ${TUPLE_OVER} rejected), array-chain depth refusal (named function and function-pointer parameter)"
+# Bare-alias-before-call of a one-layer array-chain function (Copilot review
+# follow-up, #2570): `let c = choose_arr` (an identity alias, NOT a call) of
+# a NAMED function LOWER_FN_ARR_CHAIN already classifies (`choose_arr: fn()
+# -> fn() -> [f64; 2]`), then two calls through the alias (`c()` then
+# `f()`) to reach the array. Unlike CHAIN_DEPTH_DIR/CHAIN_DEPTH_PARAM_DIR
+# above, `choose_arr` itself is a perfectly valid, already-supported
+# one-layer chain function (calling it directly, `choose_arr()`, already
+# worked) -- refusing this shape would reject legitimate code, so the fix is
+# real propagation (fn_ptr_ret_chain), not a fail-closed fault. Before the
+# fix, `c`'s bare-alias binding had no chain classification at all (only a
+# direct `returns_float == 2` check, which this shape never satisfies), so
+# `c()` was never recognized as "one more call gives the array" and `a[0]`
+# read its f64 bits as an integer.
+CHAIN_ALIAS_DIR="$WORK/arr-chain-alias"
+mkdir -p "$CHAIN_ALIAS_DIR"
+cat > "$CHAIN_ALIAS_DIR/main.sio" <<'SOUNIO'
+fn inner_alias() -> [f64; 2] {
+    var a: [f64; 2] = [0.0; 2]
+    a[0] = 1.5
+    a
+}
+
+fn choose_arr() -> fn() -> [f64; 2] {
+    inner_alias
+}
+
+fn main() -> i32 with IO, Mut, Panic {
+    let c = choose_arr
+    let f = c()
+    let a = f()
+    let d: f64 = a[0] * 2.0
+    if d == 3.0 {
+        return 0
+    }
+    1
+}
+SOUNIO
+CHAIN_ALIAS_OUT="$CHAIN_ALIAS_DIR/main.elf"
+set +e
+MADAROS_RAW_BIN="$MADAROS_ELF" "$ROOT_DIR/bin/madaros" compile "$CHAIN_ALIAS_DIR/main.sio" -o "$CHAIN_ALIAS_OUT" >"$CHAIN_ALIAS_DIR/compile.log" 2>&1
+chain_alias_compile_rc=$?
+set -e
+if [[ "$chain_alias_compile_rc" -ne 0 ]]; then
+  tail -n 40 "$CHAIN_ALIAS_DIR/compile.log" >&2
+  fail "array-chain alias-before-call witness did not compile rc=$chain_alias_compile_rc"
+fi
+[[ -e "$CHAIN_ALIAS_OUT" ]] || fail "array-chain alias-before-call witness produced no output artifact"
+chmod +x "$CHAIN_ALIAS_OUT"
+set +e
+"$CHAIN_ALIAS_OUT" >"$CHAIN_ALIAS_DIR/run.log" 2>&1
+chain_alias_run_rc=$?
+set -e
+if [[ "$chain_alias_run_rc" -ne 0 ]]; then
+  cat "$CHAIN_ALIAS_DIR/run.log" >&2
+  fail "array-chain alias-before-call witness ran rc=$chain_alias_run_rc: a bare alias of a named array-chain function lost its classification"
+fi
+
+echo "[madaros-f64-lowering] PASS: one shared Madaros ELF passed dereference, global f64, direct capacity, imported capacity, imported wide-call, f64-array tuple table capacity (${TUPLE_CAP} ok, ${TUPLE_OVER} rejected), slot limit (slot $((SLOT_MAX - 1)) ok, slot ${SLOT_MAX} rejected), impl-method tuple coverage, array-chain table capacity (${TUPLE_CAP} ok, ${TUPLE_OVER} rejected), array-chain depth refusal (named function and function-pointer parameter), array-chain alias-before-call"
