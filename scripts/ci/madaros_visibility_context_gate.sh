@@ -197,6 +197,19 @@ expect_private_rejection private-fn-specialized-generic \
 expect_private_rejection private-struct \
   "$ROOT_DIR/tests/multimodule/visibility_struct_private_main.sio" E176 \
   'struct constructor is private in its defining module'
+# Copilot review (PR #2515), comment 4109697757: spec_get_or_create_struct_instance
+# (self-hosted/check/specializer.sio) never registered a monomorphized
+# generic struct clone's mangled symbol under its template's owner module
+# (unlike spec_finish_fn_item's equivalent registration for synthesized
+# FUNCTION symbols), so a PRIVATE generic struct's clone got the
+# not-found sentinel for its defining_module_id and
+# checker_struct_visible_inplace fell back to comparing two empty
+# AstPaths on the specialized checking path -- silently granting
+# cross-module construction. Same rationale as private-fn-specialized-generic
+# above, for structs instead of functions.
+expect_private_rejection private-struct-specialized-generic \
+  "$ROOT_DIR/tests/multimodule/visibility_struct_private_specialized_generic_main.sio" E176 \
+  'struct constructor is private in its defining module'
 expect_private_rejection private-enum \
   "$ROOT_DIR/tests/multimodule/visibility_enum_private_main.sio" E177 \
   'enum constructor is private in its defining module'
