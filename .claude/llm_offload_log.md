@@ -258,3 +258,61 @@ descending-spread fabrication.
 
 **Flagged for re-review**: per policy, alongside the three entries above,
 once a provider is configured in a session that has one.
+
+## 2026-09-26T15:30Z — Claude (session_01RMzxzzsE5JNGEqnnkUs9Yo) — M1, log_gaussian_term standardized-residual fix (PR sounio-lang/sounio#2694)
+
+| 2026-09-26 | — | math-review | kinetics.sio (log_gaussian_term rewritten to compute the standardized residual z=(sim-data)/data_u before squaring, instead of squaring data_u and resid separately) | WAIVED | No offload provider configured in this container, same as the four entries above. Independent Python cross-check of old vs. new formula on normal-range, underflow, and Inf/Inf inputs; full narrative below. |
+
+**Trigger**: Copilot review on the concentration-time model rewrite above
+found that the old body, `variance = data_u * data_u; ... resid*resid /
+variance`, underflows `variance` to exactly `0.0` for any positive but very
+tight `data_u` (e.g. `1e-200`, since `1e-200^2 = 1e-400`, below the
+smallest positive f64 denormal `~4.9e-324`) — the `variance <= 0.0` guard
+then fires and returns the same constant `-1e300` regardless of `resid`,
+conflating "this proposal exactly matches a very precise observation"
+(should be the BEST possible log-weight, `0.0`) with "this proposal is
+impossible given a very precise observation" (should be `-Inf`, correctly
+rejected). Also flagged: squaring `resid` and `data_u` independently can
+produce an `Inf/Inf = NaN` when both are large, which is worse than either
+endpoint alone since NaN is invisible to the `sum_w <= 0.0` fallback
+(every IEEE comparison against NaN is false).
+
+**Attempted**: `bin/llm-offload --status` — no provider reachable in this
+container, same as every prior entry in this log.
+
+**Outcome**: WAIVED for lack of a reachable provider. Independent
+verification instead:
+
+1. **Reproduced the underflow directly in Python** (`resid=0.5001-0.5`,
+   `data_u=1e-200`): old body returns the same `-1e300` whether `resid` is
+   `0.0` (perfect match) or `0.0001` (real mismatch); new body
+   (`z = resid/data_u`, then `-0.5*z*z`) correctly returns `-0.0` for the
+   perfect match and `-inf` for the mismatch — verified both are now
+   distinguishable, and that `-inf` is caught by the existing
+   `is_finite_f64` guard at the call site (proposal skipped, not folded
+   into the accumulator as NaN).
+2. **Reproduced the reviewer's Inf/Inf case** (`sim=1e200, data=0.0,
+   data_u=1e200`): old body computes `resid*resid = inf`,
+   `variance = inf`, `inf/inf = nan`; new body computes `z = 1.0` first
+   (finite), giving a correct finite result (`-0.5`).
+3. **Confirmed numerical equivalence on every realistic input.** For every
+   `data_u` value any current caller actually passes (`0.02`-`0.05`), the
+   new formula matches the old to floating-point noise (~1e-15 relative,
+   from reordering the division before vs. after squaring) — e.g.
+   `sim=0.5, data=0.45, data_u=0.05`: old `-0.49999999999999967`, new
+   `-0.4999999999999998`. No existing call site's numeric output changes
+   beyond last-bit rounding.
+4. **Regression test added directly in kinetics.sio**
+   (`test_log_gaussian_term_tiny_uncertainty`, next to `log_gaussian_term`
+   itself since that helper is private and the external fixture can only
+   see `pub` functions), wired into
+   `tests/stdlib/chemistry/test_kinetics_fixed_regressions.sio`. Verified
+   as a real control, not a vacuous assertion: temporarily reverted
+   `log_gaussian_term` to the old body and re-ran the fixture under the
+   exact CI mechanism (`SOUNIO_TEST_SOUC_BIN` at the lean_single stage2
+   binary) — it no longer reports `PASS` (run exits non-zero), confirming
+   the test suite does catch this regression; restored the fix and
+   re-confirmed a clean `PASS`.
+
+**Flagged for re-review**: per policy, alongside the four entries above,
+once a provider is configured in a session that has one.

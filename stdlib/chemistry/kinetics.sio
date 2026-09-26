@@ -2473,11 +2473,55 @@ pub fn test_bench_scale() -> bool with Mut, Div, Panic, Observe, IO {
 // real, still fixed, just not the reason nothing changed when they were).
 // This is a lean_single defect, not a stdlib bug this file can close; the
 // fix here is simply not naming a variable `var`.
+// STANDARDIZED-RESIDUAL FORM (Copilot review, sounio-lang/sounio#2694): the
+// previous body computed `variance = data_u * data_u` and `resid * resid`
+// separately before dividing. A positive, finite, but very tight data_u
+// (e.g. 1e-200) squares to exactly 0.0 in f64 (1e-200^2 = 1e-400, below the
+// smallest positive denormal, ~4.9e-324) -- the `variance <= 0.0` guard then
+// fires and returns the SAME constant -1e300 for every proposal, regardless
+// of resid, silently discarding a highly-informative (very precise)
+// observation instead of letting it dominate the likelihood as it should.
+// Squaring resid and data_u independently can also produce Inf/Inf = NaN
+// when both are large. Computing the standardized residual `z = resid /
+// data_u` FIRST avoids both failure modes: division happens before either
+// operand is squared, so a tiny data_u produces a large-but-finite (or
+// legitimately +-Inf, e.g. resid far from zero against a near-zero data_u)
+// z instead of an underflowed-to-zero variance. z*z can still overflow to
+// +Inf for an extreme mismatch, giving log_w = -Inf -- already handled by
+// the is_finite_f64 guard at the call site (the proposal is skipped, same
+// as prop <= 0.0), rather than the domain-error case being silently
+// papered over as a constant, uninformative term here.
 fn log_gaussian_term(sim: f64, data: f64, data_u: f64) -> f64 with Mut, Div, Panic {
-    let resid = sim - data;
-    let variance = data_u * data_u;
-    if variance <= 0.0 { return 0.0 - 1.0e300; }
-    0.0 - 0.5 * resid * resid / variance
+    if data_u <= 0.0 { return 0.0 - 1.0e300; }
+    let z = (sim - data) / data_u;
+    0.0 - 0.5 * z * z
+}
+
+// Regression for the standardized-residual fix above (Copilot review,
+// sounio-lang/sounio#2694). log_gaussian_term is private, so this lives
+// here rather than in the external test fixture, which can only see pub
+// functions. Cross-checked in Python (variance=data_u*data_u underflows to
+// exactly 0.0 for data_u=1e-200 since 1e-200^2=1e-400 < the smallest
+// positive f64 denormal ~4.9e-324) before writing these assertions.
+pub fn test_log_gaussian_term_tiny_uncertainty() -> bool with Mut, Div, Panic {
+    // Old body: variance underflows to 0.0 regardless of resid, so a
+    // mismatched sim/data pair and a perfectly-matched one both returned
+    // the SAME constant -1e300 -- indistinguishable, and both wrong (a
+    // perfect match should be the BEST possible weight, 0.0, not the worst).
+    let mismatched = log_gaussian_term(0.5001, 0.5, 1.0e-200);
+    let matched = log_gaussian_term(0.5, 0.5, 1.0e-200);
+    // New body: a genuine mismatch against a near-zero uncertainty is
+    // correctly -Inf (impossible, caught by the is_finite_f64 call-site
+    // guard), while an exact match is correctly 0.0 (best possible weight)
+    // -- the two cases are no longer conflated.
+    let mismatched_is_neg_inf = mismatched < 0.0 - 1.0e300 && !is_finite_f64(mismatched);
+    let matched_is_zero = check_near(matched, 0.0, 1e-9);
+    // Normal-range inputs (data_u in the 0.01-0.1 range every real caller
+    // uses) must still match the pre-fix closed-form value: resid=du=0.05
+    // here, so z=1.0 and -0.5*z*z=-0.5 exactly.
+    let normal = log_gaussian_term(0.5, 0.45, 0.05);
+    let normal_matches_closed_form = check_near(normal, 0.0 - 0.5, 1e-9);
+    mismatched_is_neg_inf && matched_is_zero && normal_matches_closed_form
 }
 
 // Helper: make EState for observed data point (multiple "data" EStates)
