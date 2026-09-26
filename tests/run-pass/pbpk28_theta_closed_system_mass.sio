@@ -1,0 +1,146 @@
+//@ run-pass
+//@ expect-stdout-contains: PBPK28_THETA_CLOSED_SYSTEM_MASS_PASS
+
+// Closed-system mass witness for stdlib/darwin_pbpk/theta_pbpk28.sio.
+//
+// With cl_central = 0 and no input, total body mass must stay at the dose.
+// The published CN kernel (`pbpk28_full_cn_step`) does not: its negativity
+// floors turn the sign-alternating stiff modes a bolus excites into mass —
+// venlafaxine parent, 50 mg into blood, dt = 0.5 h: 85.065244 mg after one
+// step, 89.100032 mg after eight. That kernel is left untouched for its
+// parity gates; this test pins the clamp-free replacement:
+//
+//   1. Rannacher (2 start-up steps), TR-BDF2 and plain clamp-free CN keep
+//      M_n = M_0 at every step, three drug profiles, dt ∈ {0.5, 0.1, 0.05} h.
+//   2. Rannacher and TR-BDF2 book no visible negative mass (CN alone would:
+//      it rings to −9 mg/L here, which is why it is not the production path).
+//   3. With central clearance and an organ sink (venlafaxine CYP2D6 formation
+//      clearance on the liver, CL_form·dt/V_liver ≈ 12 at dt = 0.5 h), the
+//      ledger identity M(T) + eliminated + sink_removed − administered = M(0)
+//      closes to rounding under a constant input.
+//
+// Bounds (theta_pbpk28 gate functions): |ΔM|/M_0 ≤ max(1e-12, steps·1e-15),
+// a heuristic rounding budget for an identity that is exact in real
+// arithmetic; booked negative mass ≤ 5e-7 mg, half the last digit of a
+// 6-decimal mg print.
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::theta_pbpk28::*
+
+fn t_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// method: 0 = clamp-free CN, 1 = Rannacher, 2 = TR-BDF2
+fn t_step(method: i32, st: &!PBPKState28, p: PBPKParams28, dt: f64, k: i32, led: &!PBPK28Ledger) with Mut, Div {
+    if method == 0 {
+        pbpk28_theta_step_mut(st, p, 0.0, dt, 0.5, led)
+    } else {
+        if method == 1 {
+            pbpk28_rannacher_step_mut(st, p, 0.0, dt, k < pbpk28_rannacher_startup_steps(), led)
+        } else {
+            pbpk28_trbdf2_step_mut(st, p, 0.0, dt, led)
+        }
+    }
+}
+
+// Returns 1 on failure. Prints the worst per-step drift (x 1e12).
+fn t_closed(tag: string, p0: PBPKParams28, dose: f64, dt: f64, nsteps: i32, method: i32, check_neg: bool) -> i32 with IO, Mut, Div {
+    var p = p0
+    p.cl_central = 0.0
+    var st = pbpk28_state_zero()
+    st.cv[0] = dose / p.v_ref[0]
+    let m0 = pbpk28_total_mass(st, p)
+    var led = pbpk28_ledger_zero()
+    var worst = 0.0
+    var ok = true
+    var k: i32 = 0
+    while k < nsteps {
+        t_step(method, &!st, p, dt, k, &!led)
+        let drift = t_abs(pbpk28_total_mass(st, p) - m0) / m0
+        if drift > worst { worst = drift }
+        if drift > pbpk28_mass_tol_rel(led.steps) { ok = false }
+        k = k + 1
+    }
+    if check_neg && led.neg_mass > pbpk28_neg_mass_bound_mg() { ok = false }
+    print(tag)
+    print(" method=")
+    print(method)
+    print(" dt=")
+    print(dt)
+    print(" worst|dM|/M0 x1e12=")
+    print(worst * 1.0e12)
+    print(" M_end=")
+    print(pbpk28_total_mass(st, p))
+    print(" neg_mass x1e12=")
+    println(led.neg_mass * 1.0e12)
+    if ok { return 0 }
+    println("  FAIL")
+    return 1
+}
+
+fn t_profiles(dt: f64, nsteps: i32) -> i32 with IO, Mut, Div {
+    var f: i32 = 0
+    var m: i32 = 0
+    while m < 3 {
+        // CN alone conserves mass but rings negative: gate conservation only.
+        let neg = m > 0
+        f = f + t_closed("venlafaxine_parent", pbpk28_params_venlafaxine_parent(), 50.0, dt, nsteps, m, neg)
+        f = f + t_closed("rapamycin", pbpk28_params_rapamycin(), 5.0, dt, nsteps, m, neg)
+        f = f + t_closed("semaglutide", pbpk28_params_semaglutide(), 1.0, dt, nsteps, m, neg)
+        m = m + 1
+    }
+    return f
+}
+
+// Open system: central CL + liver organ sink + constant input, 48 h.
+fn t_sink(method: i32, dt: f64) -> i32 with IO, Mut, Div {
+    let p = pbpk28_params_venlafaxine_parent()
+    var st = pbpk28_state_zero()
+    var led = pbpk28_ledger_zero()
+    let cl_form = 43.0      // NM CYP2D6 formation clearance, L/h (Klamerus 1999)
+    let rel = 3.0           // mg/h into blood
+    var t = 0.0
+    var k: i32 = 0
+    while t < 48.0 - 0.5 * dt {
+        if method == 1 {
+            let _s = pbpk28_rannacher_step_sink_mut(&!st, p, rel, dt, k < pbpk28_rannacher_startup_steps(), 1, cl_form, &!led)
+        } else {
+            let _s = pbpk28_trbdf2_step_sink_mut(&!st, p, rel, dt, 1, cl_form, &!led)
+        }
+        t = t + dt
+        k = k + 1
+    }
+    let r = pbpk28_ledger_residual(led, st, p, 0.0)
+    print("sink method=")
+    print(method)
+    print(" dt=")
+    print(dt)
+    print(" administered=")
+    print(led.administered)
+    print(" sink_removed=")
+    print(led.sink_removed)
+    print(" eliminated=")
+    print(led.eliminated)
+    print(" |res|/admin x1e12=")
+    println(t_abs(r) / led.administered * 1.0e12)
+    if t_abs(r) <= pbpk28_mass_tol_rel(led.steps) * led.administered && led.sink_removed > 0.0 {
+        return 0
+    }
+    println("  FAIL")
+    return 1
+}
+
+fn main() -> i32 with IO, Mut, Div {
+    var failed: i32 = 0
+    failed = failed + t_profiles(0.5, 8)
+    failed = failed + t_profiles(0.1, 40)
+    failed = failed + t_profiles(0.05, 80)
+    failed = failed + t_sink(1, 0.5)
+    failed = failed + t_sink(2, 0.5)
+    if failed == 0 {
+        println("PBPK28_THETA_CLOSED_SYSTEM_MASS_PASS")
+    } else {
+        print("failed=")
+        println(failed)
+    }
+    return failed
+}
