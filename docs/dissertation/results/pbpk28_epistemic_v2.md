@@ -104,19 +104,23 @@ each Kp's share of its own organ endpoint (runs/m6_epistemic_pbpk28_v2.txt, TEST
 ## §4.10.4 — Hessian-Corrected Budget (Second-Order GUM)
 
 `epistemic_pbpk28_hessian.sio`, dt = 0.1 h, 3+4-point central FD stencil. Definitions (module
-`h28_nonlinearity_ratio_*`): ρ_literal,i = |½H_ii σ_i²| / |c_i σ_i|; ρ̃_i = ½ρ_literal,i², the
-module's per-parameter second-order-to-first-order variance ratio. ρ̃ is not the same as the
-total var₂/var₁ below.
+`h28_nonlinearity_ratio_*`): ρ_literal,i = |½H_ii σ_i²| / |c_i σ_i|; ρ̃_i = ½ρ_literal,i².
+**ρ̃ is not a variance ratio.** For a normal input, the per-parameter second-order-to-first-order
+variance ratio is ½H_ii²σ_i⁴/(c_i²σ_i²) = 2ρ_literal,i² = 4ρ̃_i (last column). The module's
+earlier comments and v1 called ρ̃ that ratio, which is a factor-of-4 error (PR #2696 review). The
+editorial threshold "ρ̃ < 0.20 = weakly nonlinear" was set on ρ̃ as computed. Whether the
+dissertation should use ρ̃ or the variance ratio 2ρ² (CL_hep: 0.289, above 0.20) is the
+author's decision; it is not changed here.
 
-| Parameter | ρ_literal | ρ̃ | v1 ρ_literal / ρ̃ |
-|---|---:|---:|---|
-| CL_hepatic | **0.380000** | **0.072200** | 0.380433 / 0.072365 |
-| fu_plasma | 0.250000 | 0.031250 | 0.249911 / 0.031228 |
-| CL_renal | 0.009677 | 0.000047 | 0.009795 / 0.000048 |
-| Kp_brain | 0 (no resolvable effect) | 0 | 0.349828 / 0.061190 |
-| Kp_adipose | 0 | 0 | 0.333576 / 0.055636 |
-| Kp_kidney | 0 | 0 | 0.138407 / 0.009578 |
-| Kp_liver | 0 | 0 | 0.066835 / 0.002233 |
+| Parameter | ρ_literal | ρ̃ = ½ρ² | v1 ρ_literal / ρ̃ | variance ratio 2ρ² = 4ρ̃ |
+|---|---:|---:|---|---:|
+| CL_hepatic | **0.380000** | **0.072200** | 0.380433 / 0.072365 | 0.2888 |
+| fu_plasma | 0.250000 | 0.031250 | 0.249911 / 0.031228 | 0.1250 |
+| CL_renal | 0.009677 | 0.000047 | 0.009795 / 0.000048 | 0.0002 |
+| Kp_brain | 0 (no resolvable effect) | 0 | 0.349828 / 0.061190 | 0 |
+| Kp_adipose | 0 | 0 | 0.333576 / 0.055636 | 0 |
+| Kp_kidney | 0 | 0 | 0.138407 / 0.009578 | 0 |
+| Kp_liver | 0 | 0 | 0.066835 / 0.002233 | 0 |
 
 For AUC ∝ 1/CL_eff with CL_eff linear in CL_hep and in fu, ρ_literal equals that parameter's
 σ/μ: 0.38 for CL_hep and 0.25 for fu, as measured. The Kp rows are 0 because |c_i|σ_i lies below
@@ -135,10 +139,12 @@ were computed on the floored kernel and do not recur on the mass-conserving one.
 | ∂AUC/∂CL (analytic −Dose/CL² = −0.032518) | −0.046164 | −0.032519 |
 | H₀₀ (analytic 2·Dose/CL³ = 0.005245) | 0.007454 | 0.005245 |
 
-**§4.9 / §4.10.4 wording (regenerated).** "For CL_hepatic, ρ_literal = 0.380 (= σ/CL) and
-ρ̃ = 0.072, the largest per-parameter second-order ratio, followed by fu_plasma (ρ̃ = 0.031). The
-Kp parameters have no resolvable first-order effect on AUC_blood." v1's clause "only marginally
-ahead of Kp_brain (ρ̃ = 0.061)" is **withdrawn**.
+**§4.9 / §4.10.4 wording (regenerated).** "For CL_hepatic, ρ_literal = 0.380 (= σ/CL): its
+diagonal Hessian term adds variance equal to 2ρ² = 29% of its first-order variance (normal-input
+formula ½H²σ⁴). fu_plasma
+follows (ρ_literal = 0.250, 12.5%). The Kp parameters have no resolvable first-order effect on
+AUC_blood." Withdrawn from v1: "only marginally ahead of Kp_brain (ρ̃ = 0.061)", and any wording
+that equates ρ̃ = 0.072 with "~7% additional variance".
 
 v1's headline sentence becomes: "the second-order (Hessian) mean is **20.7%** above the
 first-order mean, and the second-order variance is **28%** larger than the first-order variance

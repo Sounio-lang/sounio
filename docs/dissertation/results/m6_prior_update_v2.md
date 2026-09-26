@@ -57,9 +57,12 @@ re-run at the base commit.
 | u_MC | **0.211790** | 0.331812 | 0.357945 | 0.549197 |
 | rel_GUM | **0.133783** | 0.231589 | 0.362543 | 0.422624 |
 | rel_Hess(LogNormal) | **0.018801** | 0.015524 | 0.175405 | 0.155073 |
-| ρ̃_normalized(CL_hep) | **0.072200** | 0.168607 | 0.072365 | 0.169 (doc) |
+| ρ̃_normalized(CL_hep) = ½ρ_literal² ¹ | **0.072200** | 0.168607 | 0.072365 | 0.169 (doc) |
 | ρ_literal(CL_hep) | **0.380000** | 0.580701 | 0.380433 | 0.581 (doc) |
 | brain/blood ratio at 24 h | 0.016454 | 0.016454 | 0.016587 | 0.016587 |
+
+¹ ρ̃ = ½ρ_literal² is not a variance ratio. CL_hep's second-order-to-first-order variance ratio is
+2ρ_literal² = 0.289 (M6) / 0.674 (legacy); see `pbpk28_epistemic_v2.md` §4.10.4.
 
 ρ_literal(CL_hep) = σ/CL exactly (0.38 and 0.5807). u_GUM matches its closed form
 Dose/CL²·√(v_CLhep + v_CLren + v_fu·CL²/fu_ref²) at CL = 12.4: 0.183456 (M6) and 0.254961

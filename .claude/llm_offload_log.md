@@ -94,3 +94,9 @@ merge that made it tracked replaced the local copy.
 
 ## 2026-09-26 — Claude (session 6620bb30) — math-review, PR #2696 review round 3 (ρ undefined sentinel; TEST 9 order gate on C_brain(24 h); 24 h capture fix)
 - xai (grok-4.6): 6/6 OK. qwen3-235b: 6/6 OK.
+
+## 2026-09-26 — Claude (session 6620bb30) — math-review, ρ̃ = ½ρ² vs variance ratio 2ρ² (PR #2696 review round 4)
+- xai (grok-4.6): 3/3 OK. qwen3-235b: 3/3 OK. The per-parameter second-order-to-first-order
+  variance ratio (normal input) is 2ρ_literal² = 4ρ̃; ρ̃ = ½ρ² as computed is not that ratio.
+  The docs and comments are corrected; the value and the [0.05, 0.20] editorial range are left for
+  the author to decide.
