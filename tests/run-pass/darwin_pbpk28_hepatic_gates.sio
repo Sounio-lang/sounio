@@ -189,7 +189,9 @@ fn gate_v2() -> bool with Mut, Div, Panic, IO {
 
 // VT --------------------------------------------------------------------------
 // θ-scheme: θ = 1/2 must agree with the CN step to round-off (same mathematics,
-// different expression shapes); θ = 1 (backward Euler) must conserve mass exactly
+// different expression shapes) in EVERY active coordinate (C_v of all organs,
+// C_t of organs 1..13; max deviation over the state scale, 1e-12); θ = 1
+// (backward Euler) must conserve mass exactly
 // after an IV bolus at a coarse dt, where CN + clamp does not.
 fn gate_vt() -> bool with Mut, Div, Panic, IO {
     var p = pbpk28_params_rapamycin()
@@ -208,7 +210,24 @@ fn gate_vt() -> bool with Mut, Div, Panic, IO {
         if step < 200 { inp.in_t[8] = 10.0 }
         s_cn = pbpk28_hepatic_cn_step(s_cn, p, hep, inp, 0.01)
         s_th = pbpk28_hepatic_theta_step(s_th, p, hep, inp, 0.01, 0.5)
-        let d = g_abs(s_cn.cv[0] - s_th.cv[0]) / (s_cn.cv[0] + 1.0e-300)
+        // Every active coordinate (C_v of all 14 organs, C_t of organs 1..13),
+        // normalised by the largest entry of the CN state at this step: a
+        // per-coordinate relative error would blow up on entries still ~0.
+        var scale = 0.0
+        var dmax = 0.0
+        var o: i32 = 0
+        while o < 14 {
+            if g_abs(s_cn.cv[o]) > scale { scale = g_abs(s_cn.cv[o]) }
+            let dv = g_abs(s_cn.cv[o] - s_th.cv[o])
+            if !(dv <= dmax) { dmax = dv }
+            if o > 0 {
+                if g_abs(s_cn.ct[o]) > scale { scale = g_abs(s_cn.ct[o]) }
+                let dt_o = g_abs(s_cn.ct[o] - s_th.ct[o])
+                if !(dt_o <= dmax) { dmax = dt_o }
+            }
+            o = o + 1
+        }
+        let d = dmax / (scale + 1.0e-300)
         if !(d <= worst_dev) { worst_dev = d }
         step = step + 1
     }
