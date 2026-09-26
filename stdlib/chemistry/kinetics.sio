@@ -2534,20 +2534,38 @@ pub fn simulate_bayesian_posterior_crn(
             // (comparing two enormous negative numbers whose DIFFERENCE is
             // still huge), taking the unchanged-prior fallback despite
             // having finite, comparable log-weights.
-            if !have_max || log_w > max_log_w {
-                if have_max {
-                    let rescale = exp_approx(max_log_w - log_w);
-                    sum_w = sum_w * rescale;
-                    sum_kw = sum_kw * rescale;
-                    sum_k2w = sum_k2w * rescale;
+            //
+            // NON-FINITE GUARD (Copilot review, same PR): an extreme enough
+            // finite input (e.g. a data point far from any reachable sim[2],
+            // making resid*resid itself overflow to +Inf in
+            // log_gaussian_term) can make log_w itself -Inf or NaN. Seeding
+            // max_log_w from a non-finite log_w, or later finding a new max
+            // that is non-finite, propagates through exp_approx (e.g.
+            // exp_approx(-Inf - -Inf) = exp_approx(NaN)) and corrupts
+            // sum_w/sum_kw/sum_k2w with NaN -- which the `sum_w <= 0.0`
+            // fallback check below does NOT catch, since every IEEE
+            // comparison against NaN is false. Verified empirically (not
+            // assumed) that this engine's `==`/`>` on f64 follow ordinary
+            // IEEE 754 semantics, not folded away by any rewrite: nan==nan
+            // is false, nan > -1e300 is false. A proposal with a non-finite
+            // log_w is therefore simply skipped -- same treatment as
+            // `prop <= 0.0` above -- rather than seeded or folded in.
+            if log_w == log_w && log_w > (0.0 - 1.0e300) && log_w < 1.0e300 {
+                if !have_max || log_w > max_log_w {
+                    if have_max {
+                        let rescale = exp_approx(max_log_w - log_w);
+                        sum_w = sum_w * rescale;
+                        sum_kw = sum_kw * rescale;
+                        sum_k2w = sum_k2w * rescale;
+                    }
+                    max_log_w = log_w;
+                    have_max = true;
                 }
-                max_log_w = log_w;
-                have_max = true;
+                let w = exp_approx(log_w - max_log_w);
+                sum_w = sum_w + w;
+                sum_kw = sum_kw + w * prop;
+                sum_k2w = sum_k2w + w * prop * prop;
             }
-            let w = exp_approx(log_w - max_log_w);
-            sum_w = sum_w + w;
-            sum_kw = sum_kw + w * prop;
-            sum_k2w = sum_k2w + w * prop * prop;
         }
         i = i + 1;
     }

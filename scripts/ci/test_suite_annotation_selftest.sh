@@ -165,4 +165,35 @@ else
     echo "SKIP: case 7 (mixed-environment gate) -- no lean_single ELF at $LEAN_SINGLE_ELF" >&2
 fi
 
+# --- 8. Unrecognized wrapper identity: `requires: lean_single` must fail
+#     CLOSED (skip), not default to "must be lean_single" (Copilot review,
+#     sounio-lang/sounio#2694: a wrapper-style SOUNIO_TEST_SOUC_BIN with no
+#     `--version` arm at all -- the kind
+#     scripts/ci/build_ontology_validation_souc.sh generates -- can still
+#     delegate `run` to a Madaros fallback underneath; the old code treated
+#     any non-Madaros `--version` output as proof of lean_single and would
+#     have run this fixture on that fallback instead of skipping it). This
+#     fake wrapper never needs to actually compile anything: the fixture is
+#     expected to be skipped before the wrapper's other subcommands are
+#     ever invoked.
+cat > "$TMP/unknown_wrapper.sh" <<'WRAPPER'
+#!/usr/bin/env bash
+echo "unknown_wrapper: unrecognized invocation: $*" >&2
+exit 1
+WRAPPER
+chmod +x "$TMP/unknown_wrapper.sh"
+cat > "$TMP/lean_single_unknown_fixture.sio" <<'SIO'
+//@ run-pass
+//@ requires: lean_single
+fn main() -> i32 with IO {
+    println("selftest_lean_single_unknown_marker_c4a1")
+    0
+}
+SIO
+printf '%s\n' "$TMP/lean_single_unknown_fixture.sio" > "$TMP/list_lean_single_unknown.txt"
+expect_rc 0 "$TMP/lean_single_unknown.log" env SOUNIO_TEST_SOUC_BIN="$TMP/unknown_wrapper.sh" \
+    bash "$HARNESS" --test-list "$TMP/list_lean_single_unknown.txt" --jobs 1 --verbose
+grep -Fq "SKIP  lean_single_unknown_fixture.sio" "$TMP/lean_single_unknown.log" \
+    || fail "requires:lean_single ran under an unrecognized wrapper identity instead of failing closed"
+
 echo "TEST_SUITE_ANNOTATION_SELFTEST_PASS"

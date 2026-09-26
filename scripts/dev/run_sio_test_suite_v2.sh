@@ -167,9 +167,28 @@ fi
 # matches THAT line and misreports lean_single as Madaros. The real
 # identity banner is always `Madaros vX.Y.Z ...` at the very start of a
 # line; the fallback notice always starts with `souc:`.
+#
+# Tri-state, fail-closed (Copilot review, same PR): treating every
+# non-Madaros `--version` result as "definitely lean_single" is itself
+# wrong for a third interface neither of the two comments above accounts
+# for -- a project-supplied wrapper-style SOUNIO_TEST_SOUC_BIN (e.g. the
+# kind scripts/ci/build_ontology_validation_souc.sh generates) that has no
+# `--version` arm at all: its `run` subcommand can still delegate to a
+# Madaros FALLBACK_SOUC underneath, but its `--version` output matches
+# neither the Madaros banner nor lean_single's raw-ELF `Usage: mini_native`
+# line, so defaulting to "not Madaros" would run a `requires: lean_single`
+# fixture on that Madaros fallback instead of skipping it. Recognize
+# lean_single by ITS OWN identity marker too, and treat "matched neither"
+# as unknown -- gated the same as Madaros (skip), not the same as
+# lean_single (run), so an unrecognized engine fails closed rather than
+# silently running tests it may not support.
+SOUNIO_RESOLVED_ENGINE_PROBE="$("$SOUC_BIN" --version 2>&1 || true)"
 SOUNIO_RESOLVED_IS_MADAROS=0
-if "$SOUC_BIN" --version 2>&1 | grep -qE '^Madaros v[0-9]'; then
+SOUNIO_RESOLVED_IS_LEAN_SINGLE=0
+if echo "$SOUNIO_RESOLVED_ENGINE_PROBE" | grep -qE '^Madaros v[0-9]'; then
     SOUNIO_RESOLVED_IS_MADAROS=1
+elif echo "$SOUNIO_RESOLVED_ENGINE_PROBE" | grep -qE '^Usage: mini_native'; then
+    SOUNIO_RESOLVED_IS_LEAN_SINGLE=1
 fi
 
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
@@ -512,8 +531,19 @@ run_test() {
                 # runs `SOUNIO_TEST_SOUC_BIN=/tmp/souc-stage2` (lean_single)
                 # would still have SOUNIO_MADAROS_AVAILABLE set, and the OR
                 # would skip a lean_single test on the exact run that most
-                # needs to exercise it. Gate solely on the probed identity.
-                if [[ "${SOUNIO_RESOLVED_IS_MADAROS:-0}" == "1" ]]; then
+                # needs to exercise it. Gate solely on the probed identity --
+                # and, per a later round of the same review, fail CLOSED
+                # (skip) when the probe positively identified neither engine
+                # (SOUNIO_RESOLVED_IS_LEAN_SINGLE also 0), rather than
+                # defaulting an unrecognized `--version` result to "must be
+                # lean_single": a wrapper-style SOUNIO_TEST_SOUC_BIN with no
+                # `--version` arm (e.g. the kind
+                # scripts/ci/build_ontology_validation_souc.sh generates)
+                # can still delegate its `run` subcommand to a Madaros
+                # fallback underneath, so treating "unrecognized" as safe to
+                # run risked the exact multimodule failure this annotation
+                # exists to avoid, just one interface removed.
+                if [[ "${SOUNIO_RESOLVED_IS_MADAROS:-0}" == "1" ]] || [[ "${SOUNIO_RESOLVED_IS_LEAN_SINGLE:-0}" != "1" ]]; then
                     echo "{\"status\":\"skip\",\"reason\":\"requires:lean_single\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"
                     return
                 fi
@@ -864,7 +894,7 @@ if [[ "$LIST_TESTS" == "1" ]]; then
     exit 0
 fi
 
-export SOUC_BIN ROOT_DIR FILTER TEST_TMP SOUNIO_STDLIB_PATH CI SOUNIO_GPU_AVAILABLE SOUNIO_LLVM_AVAILABLE SOUNIO_RESOLVED_IS_MADAROS
+export SOUC_BIN ROOT_DIR FILTER TEST_TMP SOUNIO_STDLIB_PATH CI SOUNIO_GPU_AVAILABLE SOUNIO_LLVM_AVAILABLE SOUNIO_RESOLVED_IS_MADAROS SOUNIO_RESOLVED_IS_LEAN_SINGLE
 
 # Header
 echo "=== Sounio Test Suite ==="
