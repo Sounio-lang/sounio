@@ -12,6 +12,15 @@ reasoning.
 
 ## 2026-09-26T12:15Z — Claude (session_01RMzxzzsE5JNGEqnnkUs9Yo) — M1 math-review, equilibrium.sio test fixes (PR sounio-lang/sounio#2694)
 
+| 2026-09-26 | — | math-review | equilibrium.sio, acids.sio, stoichiometry.sio, thermochem.sio, test_equilibrium_acids.sio (ΔG sign fix in test_real_delta_g; quadratic root fix in test_ab_c; cross-module private-symbol collision closed at the stdlib level) | WAIVED | No offload provider configured in this container (`bin/llm-offload --status`); verified by hand + Python instead. Full narrative below. |
+
+Note: `scripts/dev/check_offload_policy.sh`'s `MATH_REVIEW_PATHS` regex does
+not currently include `stdlib/chemistry/*`, so this row is not required by
+that gate for these specific files — added anyway, both because the
+underlying M1 policy trigger (a hand-derived math correction) applies
+regardless of which paths the automated gate happens to cover today, and to
+match this log's established row format for anyone grepping it later.
+
 **Trigger**: two hand-derived math corrections in `stdlib/chemistry/equilibrium.sio`
 (a sign flip in a ΔG↔K test input; a quadratic-equilibrium root recomputed
 from scratch), which `.claude/AGENT_OFFLOAD_POLICY.md` §M1 marks mandatory
