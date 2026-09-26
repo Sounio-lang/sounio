@@ -6278,7 +6278,12 @@ fn lower_type_list_array_float_mask(opt: &Option<Box<TypeExprList>>, bit: i64) -
     match *opt {
         Some(list) => {
             var m: i64 = 0
-            if bit < 32 {
+            // 31, not 32. The mask is packed into bits 32-62 of the returns_float
+            // code by `<< 32`, and bit 31 shifted that far lands on the i64 sign
+            // bit. The result is negative, and lower_opt_return_float_code then
+            // rejects the whole code at `code >= 1024`, dropping every slot's
+            // mask rather than one. Slot 31 is therefore not representable.
+            if bit < 31 {
                 if lower_type_expr_is_array_of_f64(&(*list).head) {
                     m = 1 << (bit as i32)
                 }
@@ -8939,6 +8944,12 @@ impl Lowerer {
                 // Callers that know a positive kind (for-IV int, float local) re-bind.
                 (*(*stk).scalar_kind).values[idx as usize] = 0
                 (*(*stk).tuple_float_mask).values[idx as usize] = 0
+                // Same reuse hazard as tuple_float_mask: lower_block_ref restores
+                // only locals.count on block exit, so a slot handed to a later
+                // binding still holds the previous tuple's array mask. Without
+                // this zeroing, `a[i]` of an integer array inherited the f64
+                // classification and lowered as a float multiply.
+                (*(*stk).tuple_array_f64_mask).values[idx as usize] = 0
                 (*(*stk).tuple0_array_elem_layout).values[idx as usize] = 0 - 1
                 (*(*stk).tuple_struct_layout).values[idx as usize] = 0 - 1
                 (*(*stk).tuple_struct_slot).values[idx as usize] = 0 - 1
@@ -17012,7 +17023,30 @@ impl Lowerer {
     // via `<< 32` -- bit k set iff slot k of the call's declared tuple return
     // type is `[f64; N]`. `code - 1024` in bits 0-31 is the scalar mask and is
     // untouched by this shift.
+    fn expr_list_tuple_array_float_mask_ref(self, opt: &Option<Box<ExprList>>, bit: i64) -> i64 with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(list) => {
+                var m: i64 = 0
+                // 31, not 32: bit 31 shifted into the high half hits the sign bit.
+                if bit < 31 {
+                    if lower_expr_is_f64_array_literal_ref(&(*list).head) {
+                        m = 1 << (bit as i32)
+                    }
+                }
+                m + self.expr_list_tuple_array_float_mask_ref(&(*list).tail, bit + 1)
+            }
+            _ => 0,
+        }
+    }
+
     fn expr_result_tuple_array_float_mask_ref(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+        // `let (a, b) = (arr, 9.0)` binds `__tup` from an ExprTupleLit, not a call.
+        // The scalar twin handles that shape; without the same arm here, `a`
+        // never receives array_elem_float and `a[0] * k` lowers as an integer
+        // multiply exactly as the call case did before this fix.
+        if (*e).kind == ExprKind::ExprTupleLit {
+            return self.expr_list_tuple_array_float_mask_ref(&(*e).args, 0)
+        }
         if (*e).kind != ExprKind::ExprCall {
             return 0
         }
