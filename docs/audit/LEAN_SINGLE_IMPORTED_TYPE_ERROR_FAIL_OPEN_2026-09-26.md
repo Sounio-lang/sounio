@@ -273,8 +273,9 @@ follow, each an atomic change:
    declares `SSIntervalResult`. The loop had been copied from `oral_bbb_run`,
    where `return trace` is correct. lean_single accepted this for the same
    reason as `print_i64`. The fix wraps the carried state and leaves
-   `trace.success = false` as the failure signal. `run_oral_multidose` never
-   reads `success`; that is noted here and left unchanged.
+   `trace.success = false` as the failure signal. At that commit
+   `run_oral_multidose` did not yet read `success`. That was fixed later in
+   this PR; see "Remaining PBPK targets and runner failure signal".
 
 ### Census
 
@@ -466,3 +467,11 @@ Verified on Madaros:
 - Both demos print output byte-identical to before the change.
 - With `tight_ode_config().max_steps = 1` in a scratch stdlib copy, the demo
   prints `integration failed after 0 complete dose interval(s)` and exits 1.
+
+That failure is now replayable in CI. `run_oral_multidose_cfg` takes the ODE
+config, and `run_oral_multidose` wraps it with `tight_ode_config()`, so its
+behaviour is unchanged. `tests/stdlib/darwin_pbpk/test_steady_state_failure.sio`
+forces one step of at most 1e-3 h per checkpoint and asserts
+`success == false`, `n_doses_run == 0` and `reached_ss == false`. As a
+control, the default config completes all three doses with
+`success == true`. `ssr_print_report` now flags a failed report.
