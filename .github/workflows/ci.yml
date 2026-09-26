@@ -838,6 +838,8 @@ jobs:
   madaros-current-source-deref-f64:
     name: Madaros Current-Source f64 Lowering
     needs: impact
+    outputs:
+      rung_outcome: ${{ steps.rung.outcome }}
     # `stdlib` is here for a measured reason: 7 files in main.sio's own import
     # closure live under stdlib/compiler/ontology/ and classify as stdlib, not
     # compiler. A PR that makes stdlib/compiler/ontology/store.sio unparseable
@@ -1013,9 +1015,19 @@ jobs:
         # sources AND on the stdlib modules it imports: main.sio uses
         # compiler::ontology (stdlib/compiler/ontology/), and self-hosted/ also
         # imports stdlib pkg, mem, hardware and random. So it runs on compiler or
-        # stdlib changes; a tests/docs-only change cannot move it. Push to main and
-        # nightly still run it (full).
-        if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.full == 'true'
+        # stdlib changes; a tests/docs-only change cannot move it.
+        #
+        # POST-MERGE ONLY (2026-09-25). Measured on PRs #2688-#2690: the rung is
+        # one gen1 self-compile of main.sio taking 56-62 min (gen3 then SIGSEGVs
+        # in ~8 s, rung `run` as recorded). On pull_request and merge_group that
+        # hour sat on the critical path of every compiler PR, twice (PR run, then
+        # queue run). It now runs on push to main, nightly and manual dispatch;
+        # a red result on main opens an issue (job fixed-point-regression-alert)
+        # instead of blocking the merge. Trade-off, stated plainly: a PR can now
+        # land that lowers into_acc_done or the rung; it is caught on the next
+        # main run, not before merge. Force it on a branch with workflow_dispatch.
+        id: rung
+        if: (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (needs.impact.outputs.compiler == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.full == 'true')
         env:
           MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
           SOUNIO_MADAROS_FP_DIR: /tmp/sounio-madaros-current-source-f64-lowering/fixed-point
@@ -1671,6 +1683,43 @@ jobs:
   # and a red R6 could not fail CI: evaluate_ci_decision.py only judges jobs it
   # is given. "Required gate skipped" had been traded for "required gate not
   # counted".
+  # The self-compile rung runs post-merge only (see its step). When it goes red
+  # on main -- or the job fails before reaching it -- open (or bump) one issue so
+  # the regression is visible without anyone watching the Actions tab.
+  # `cancelled` is deliberately NOT an alert: the concurrency group cancels a
+  # superseded main run whenever the next merge lands, and the newer run
+  # carries the verdict.
+  fixed-point-regression-alert:
+    name: Fixed-point regression alert
+    needs: madaros-current-source-deref-f64
+    if: always() && (github.event_name == 'push' || github.event_name == 'schedule') && (needs.madaros-current-source-deref-f64.outputs.rung_outcome == 'failure' || needs.madaros-current-source-deref-f64.result == 'failure')
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          RUNG: ${{ needs.madaros-current-source-deref-f64.outputs.rung_outcome }}
+          JOB: ${{ needs.madaros-current-source-deref-f64.result }}
+        with:
+          script: |
+            const title = 'Madaros self-compile gate red on main';
+            const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = `Event \`${context.eventName}\` at \`${context.sha.slice(0, 9)}\`: rung step \`${process.env.RUNG || 'not reached'}\`, job \`${process.env.JOB}\`.\n\nRun: ${run}\n\nThe ratcheted rung (scripts/ci/madaros_fixed_point_gate.sh) no longer blocks PRs; this issue is how a regression surfaces. Bisect between this commit and the last green main run.`;
+            // The label may not exist yet; create it idempotently (422 = exists).
+            try {
+              await github.rest.issues.createLabel({ ...context.repo, name: 'fixed-point-regression', color: 'b60205', description: 'Madaros self-compile rung red on main' });
+            } catch (e) {
+              if (e.status !== 422) throw e;
+            }
+            const { data: open } = await github.rest.issues.listForRepo({ ...context.repo, state: 'open', labels: 'fixed-point-regression', per_page: 5 });
+            const hit = open.find(i => i.title === title);
+            if (hit) {
+              await github.rest.issues.createComment({ ...context.repo, issue_number: hit.number, body });
+            } else {
+              await github.rest.issues.create({ ...context.repo, title, body, labels: ['fixed-point-regression'] });
+            }
+
   ci-decision:
     name: CI Decision
     if: always()
