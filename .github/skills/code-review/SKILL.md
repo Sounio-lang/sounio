@@ -18,7 +18,7 @@ When sources disagree, resolve in this order and say which level you used:
 
 The tree at a named commit. Read the code. git log -S, git blame, grep, TableGen dumps, the actual test file. Never quote an API, flag, pass name or opcode from memory — open it.
 Normative specification. LLVM LangRef (poison/undef/freeze, flags nsw/nuw/exact/nnan, memory model, volatile, atomics), the C/C++ standard drafts, the ISA manuals (Intel SDM, AMD APM, Arm ARM, RISC-V ISA + psABI), the platform ABI (SysV, AAPCS64, Windows x64), Lean 4 reference + #print axioms output.
-Project policy documents. LLVM Developer Policy, LLVM Coding Standards, Clang's diagnostic-wording rules, MLIR style guide, Sounio ADRs (docs/decisions/adr-*.md) and BRANCH_POLICY.
+Project policy documents. For LLVM/Clang/MLIR, use the current upstream developer/coding/testing guidance. For Sounio, use `AGENTS.md`, `CLAUDE.md`, accepted ADRs under `docs/decisions/`, `.claude/PARALLEL_BLOCKER_CONTRACT.md`, `.claude/AGENT_OFFLOAD_POLICY.md`, and other policy paths discovered from those canonical entrypoints rather than inventing file names.
 Observed behaviour (a run, a benchmark, a disassembly).
 Community folklore, blog posts, your own recollection. Lowest tier. Cite as "recollection — unverified".
 Grade load-bearing claims as OBSERVED (inspected file/result/receipt), ESTABLISHED (applicable normative requirement), DERIVED (conclusion from inspected code and stated premises; do not imply execution), or NOT ESTABLISHED (hypothesis/unverified report). For Sounio, these labels do not replace the E0-E4 evidence ladder or B0-B4 blocker severities in `.claude/PARALLEL_BLOCKER_CONTRACT.md`.
@@ -144,7 +144,8 @@ Generated tables (Fano, encodings) live under formal/generated/ with the generat
 Any .bin/kernel bytes checked into tests must be produced by souc from checked-in source, with the exact command recorded. A hand-reimplemented emitter that produces "the same bytes" gives the bytes no provenance and does not close an item.
 Backend reachability is verified: a lowering path that no souc run pipeline can reach is documented as unreachable in the ADR that decides its fate; it is not counted as implemented.
 7.4 Process
-Branch/worktree discipline follows the current `AGENTS.md`, `CLAUDE.md`, `bin/sounio-coord`, and blocker contract. Preserve concurrent work and avoid destructive history cleanup.
+Branch/worktree discipline follows the current `AGENTS.md`, `CLAUDE.md`, `bin/sounio-coord`, and `.claude/PARALLEL_BLOCKER_CONTRACT.md`. Preserve concurrent work and avoid destructive history cleanup.
+Apply `.claude/AGENT_OFFLOAD_POLICY.md` only at its actual triggers; record unavailable or skipped review legs honestly and do not treat model agreement alone as E4 evidence.
 Use ADRs for governed contract changes when required by current repository policy; do not invent a universal rule that every cross-layer correction needs a separately pre-merged ADR.
 Commit messages and PR descriptions in the same English register as upstream; test names state the property, not the ticket.
 8. Authoring workflow (when you write the patch)
