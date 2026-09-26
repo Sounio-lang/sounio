@@ -37,3 +37,18 @@ infusion C_b = R/X, hence F_H = Q_L/(Q_L + X) emerges.
 5. Identical results under lean_single and the default Madaros engine.
 
 **Flagged for re-review** once a provider is configured.
+
+## 2026-09-26T21:30Z — Claude (session_01RMzxzzsE5JNGEqnnkUs9Yo) — M1, PBPK28 θ-step (Rannacher start-up support)
+
+| 2026-09-26 | — | math-review | pbpk28_hepatic.sio θ-scheme step + θ-weighted elimination accounting; darwin_pbpk28_hepatic_gates.sio VT | WAIVED | No offload provider configured (`bin/llm-offload --status`). Verified by exact reduction and mass-balance gates, below. |
+
+**Trigger**: the CN step generalised to the θ-scheme (implicit weight θ·dt,
+explicit (1−θ)·dt; θ = 1 backward Euler, L-stable) so a dosing event can be
+followed by backward-Euler half steps (Rannacher 1984). Motivation measured: a
+10 mg IV bolus at dt = 0.02 h under plain CN excites the stiff exchange modes
+into sign-alternating oscillation and the negativity clamp creates mass
+(residual 1.8e-3).
+
+**Outcome**: WAIVED. VT gate: θ = ½ reproduces the CN step to 1e-12 relative;
+θ = 1 with a 10 mg bolus at dt = 0.02 conserves mass (M + E − D) to 1e-12 with
+θ-consistent elimination accounting. Both engines. Flagged for re-review.

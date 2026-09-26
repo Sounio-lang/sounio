@@ -187,14 +187,60 @@ fn gate_v2() -> bool with Mut, Div, Panic, IO {
     return err_iv < 1.0e-9 && err_po < 1.0e-9 && err_fh < 1.0e-9 && drift < 1.0e-9 && err_np < 1.0e-9 && drift_np < 1.0e-9
 }
 
+// VT --------------------------------------------------------------------------
+// θ-scheme: θ = 1/2 must agree with the CN step to round-off (same mathematics,
+// different expression shapes); θ = 1 (backward Euler) must conserve mass exactly
+// after an IV bolus at a coarse dt, where CN + clamp does not.
+fn gate_vt() -> bool with Mut, Div, Panic, IO {
+    var p = pbpk28_params_rapamycin()
+    p.cl_central = 2.0
+    var hep = pbpk28_hepatic_none()
+    hep.portal = true
+    hep.k_t[1] = pbpk28_sink_from_clint(500.0, 0.1, p.kp[1])
+    hep.k_t[8] = pbpk28_sink_from_clint(30.0, 1.0, p.kp[8])
+
+    var s_cn = pbpk28_state_zero()
+    var s_th = pbpk28_state_zero()
+    var worst_dev = 0.0
+    var step: i32 = 0
+    while step < 2000 {
+        var inp = pbpk28_input_none()
+        if step < 200 { inp.in_t[8] = 10.0 }
+        s_cn = pbpk28_hepatic_cn_step(s_cn, p, hep, inp, 0.01)
+        s_th = pbpk28_hepatic_theta_step(s_th, p, hep, inp, 0.01, 0.5)
+        let d = g_abs(s_cn.cv[0] - s_th.cv[0]) / (s_cn.cv[0] + 1.0e-300)
+        if !(d <= worst_dev) { worst_dev = d }
+        step = step + 1
+    }
+
+    var s = pbpk28_state_zero()
+    s.cv[0] = 10.0 / p.v_ref[0]
+    var elim = 0.0
+    var worst_mb = 0.0
+    step = 0
+    while step < 1200 {
+        let s1 = pbpk28_hepatic_theta_step(s, p, hep, pbpk28_input_none(), 0.02, 1.0)
+        elim = elim + pbpk28_hepatic_elim_step_theta(s, s1, p, hep, 0.02, 1.0)
+        s = s1
+        let r = g_abs(pbpk28_total_mass(s, p) + elim - 10.0) / 10.0
+        if !(r <= worst_mb) { worst_mb = r }
+        step = step + 1
+    }
+    print("VT theta=1/2 vs CN max rel dev (x1e12) = ") println(e12(worst_dev))
+    print("VT backward Euler, 10 mg bolus, dt=0.02: max mass residual (x1e12) = ") println(e12(worst_mb))
+    return worst_dev < 1.0e-12 && worst_mb < 1.0e-12
+}
+
 fn main() -> i32 with Mut, Div, Panic, IO {
     let v0 = gate_v0()
     let v1 = gate_v1()
     let v2 = gate_v2()
+    let vt = gate_vt()
     if v0 { println("V0 PASS") } else { println("V0 FAIL") }
     if v1 { println("V1 PASS") } else { println("V1 FAIL") }
     if v2 { println("V2 PASS") } else { println("V2 FAIL") }
-    if v0 && v1 && v2 {
+    if vt { println("VT PASS") } else { println("VT FAIL") }
+    if v0 && v1 && v2 && vt {
         println("PBPK28_HEPATIC_GATES_PASS")
         return 0
     }
