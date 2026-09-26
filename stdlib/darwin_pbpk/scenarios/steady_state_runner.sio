@@ -7,7 +7,9 @@
 //   C_max_ss     — peak plasma concentration in the last dosing interval
 //   C_trough_ss  — trough plasma concentration just before next dose
 //   AUC_tau_ss   — AUC over the last dosing interval
-//   t_to_90pct   — time to reach 90% of the eventual AUC_tau plateau
+//   t_to_90pct   — end of the first dosing interval whose AUC_tau reaches
+//                  90% of the last interval's AUC_tau; undefined (-1) if SS
+//                  is not reached
 //
 // Implementation: one oral_bbb_run per dose interval, carrying state
 // forward by re-seeding absorption/PBPK/BBB from the previous interval's
@@ -53,7 +55,7 @@ pub struct SteadyStateReport {
     pub c_trough_ss:   f64,
     pub auc_tau_ss:    f64,
     pub auc_icf_tau_ss: f64,
-    pub t_to_90pct_h:  f64,
+    pub t_to_90pct_h:  f64,   // hours; -1.0 if undefined (SS not reached)
     // per-dose diagnostics (max 32 doses to fit DESBBBTrace shape)
     pub c_max_per_dose:    [f64; 32],
     pub c_trough_per_dose: [f64; 32],
@@ -70,7 +72,7 @@ fn ssr_zero() -> SteadyStateReport {
         c_trough_ss: 0.0,
         auc_tau_ss: 0.0,
         auc_icf_tau_ss: 0.0,
-        t_to_90pct_h: 0.0,
+        t_to_90pct_h: 0.0 - 1.0,
         c_max_per_dose:    [0.0; 32],
         c_trough_per_dose: [0.0; 32],
         auc_tau_per_dose:  [0.0; 32],
@@ -240,10 +242,8 @@ pub fn run_oral_multidose_cfg(
     let max_n = regimen.n_doses
 
     var auc_prev: f64 = 0.0 - 1.0
-    var auc_first: f64 = 0.0
     var reached: bool = false
     var dose_of_ss: i32 = 0 - 1
-    var t_to_90: f64 = 0.0
     // Stricter SS criterion: require the relative AUC_tau change to
     // stay below `ss_thresh` for `ss_consec` consecutive doses (plus
     // minimum dose index `ss_min_dose`). 5%-once over two doses fires
@@ -273,7 +273,7 @@ pub fn run_oral_multidose_cfg(
             report.n_doses_run = dose_i
             report.reached_ss  = reached
             report.dose_of_ss  = dose_of_ss
-            report.t_to_90pct_h = t_to_90
+            report.t_to_90pct_h = 0.0 - 1.0
             return report
         }
 
@@ -295,7 +295,6 @@ pub fn run_oral_multidose_cfg(
 
         // Steady-state detection: streak of `ss_consec` consecutive
         // intervals with |ΔAUC|/AUC < ss_thresh, starting at ss_min_dose.
-        if dose_i == 0 { auc_first = tr.auc_plasma_u }
         if reached == false && auc_prev > 0.0 {
             let rel = ssr_abs_diff(tr.auc_plasma_u, auc_prev) / auc_prev
             if rel < ss_thresh && dose_i >= ss_min_dose {
@@ -310,15 +309,6 @@ pub fn run_oral_multidose_cfg(
                 report.c_trough_ss  = ctrough
                 report.auc_tau_ss   = tr.auc_plasma_u
                 report.auc_icf_tau_ss = tr.auc_icf_u
-            }
-        }
-        // 90%-to-plateau: first dose whose AUC reaches 0.9 × final AUC
-        // (we approximate "final" by the latest AUC at each point)
-        if auc_prev > 0.0 {
-            let grew = tr.auc_plasma_u - auc_first
-            let cap  = tr.auc_plasma_u - auc_first + 1.0e-12
-            if grew >= 0.9 * cap && t_to_90 <= 0.0 {
-                t_to_90 = ((dose_i + 1) as f64) * regimen.tau_h
             }
         }
         auc_prev = tr.auc_plasma_u
@@ -339,6 +329,26 @@ pub fn run_oral_multidose_cfg(
     report.n_doses_run = max_n
     report.reached_ss  = reached
     report.dose_of_ss  = dose_of_ss
+    // 90% of plateau: end of the first interval whose AUC_tau reaches 90% of
+    // the plateau. The old test compared the growth since dose 1 with itself
+    // (grew >= 0.9 * (grew + 1e-12)), so it fired at dose 2 for every drug.
+    // The plateau is the last simulated interval's AUC_tau, not the AUC at SS
+    // declaration: three successive |dAUC|/AUC < 2% steps can still leave the
+    // declared AUC ~5% below the true plateau when r = exp(-k_el tau) is near
+    // 1, which would bias t_90 early. The last interval is the best estimate
+    // available, still a lower bound on the plateau. Without a detected SS
+    // there is no plateau to take 90% of, so the value stays undefined (-1).
+    var t_to_90: f64 = 0.0 - 1.0
+    if reached {
+        let plateau = report.auc_tau_per_dose[(max_n - 1) as usize]
+        var j: i32 = 0
+        while j < max_n && t_to_90 < 0.0 {
+            if report.auc_tau_per_dose[j as usize] >= 0.9 * plateau {
+                t_to_90 = ((j + 1) as f64) * regimen.tau_h
+            }
+            j = j + 1
+        }
+    }
     report.t_to_90pct_h = t_to_90
     report
 }
@@ -360,7 +370,11 @@ pub fn ssr_print_report(r: SteadyStateReport) with IO, Mut, Panic, Div {
         // a failed run stopped early and the FAILED banner above says so.
         println("  did NOT converge to SS within regimen window")
     }
-    print("  t_to_90pct_h  = "); print_f64(r.t_to_90pct_h); println("")
+    if r.t_to_90pct_h >= 0.0 {
+        print("  t_to_90pct_h  = "); print_f64(r.t_to_90pct_h); println("")
+    } else {
+        println("  t_to_90pct_h  = undefined (steady state not reached)")
+    }
     println("")
     println("dose,C_max,C_trough,AUC_tau_total")
     var i: i32 = 0
