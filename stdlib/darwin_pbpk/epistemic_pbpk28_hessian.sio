@@ -26,6 +26,7 @@
 
 use darwin_pbpk::core::pbpk28_params::*
 use darwin_pbpk::tsit5_pbpk28::*
+use darwin_pbpk::theta_pbpk28::*
 use darwin_pbpk::epistemic_pbpk28::{EpPrior28, ep28_rapamycin_params, ep28_rapamycin_priors}
 
 // ============================================================================
@@ -80,28 +81,21 @@ fn h28_step(mean: f64, variance: f64) -> f64 with Mut, Div, Panic {
 // to be accurate; the absolute AUC trajectory is allowed to be ~0.5%
 // off from the fine-grid reference.
 
+// Bolus run at the Hessian's dt = 0.1 h: Rannacher-started clamp-free CN
+// (theta_pbpk28). Shared by h28_simulate_auc and the mass-balance gate.
+// Until 2026-09-26 this was pbpk28_full_cn_step, whose floors biased AUC_blood
+// by +52% at this dt (0.611694 vs Dose/CL = 0.403226).
+pub fn h28_simulate_ledger(prm: PBPKParams28, dose_mg: f64, t_end: f64,
+                           st: &!PBPKState28, led: &!PBPK28Ledger) -> bool with Mut, Div {
+    return pbpk28_bolus_run_mut(prm, dose_mg, 0.1, t_end, 5000, st, led)
+}
+
 fn h28_simulate_auc(prm: PBPKParams28, dose_mg: f64, t_end: f64) -> f64 with Mut, Div, Panic {
-    let dt = 0.1
     var st = pbpk28_state_zero()
-    st.cv[0] = dose_mg / prm.v_ref[0]
-
-    var t = 0.0
-    var auc = 0.0
-    var c_prev = st.cv[0]
-    var steps = 0
-
-    while t < t_end {
-        if steps > 5000 { return 0.0 }
-        let dt_use = if t + dt > t_end { t_end - t } else { dt }
-        let st_new = pbpk28_full_cn_step(st, prm, 0.0, dt_use)
-        let c_new = st_new.cv[0]
-        if !h28_finite(c_new) { return 0.0 }
-        auc = auc + 0.5 * (c_prev + c_new) * dt_use
-        c_prev = c_new
-        t = t + dt_use
-        st = st_new
-        steps = steps + 1
-    }
+    var led = pbpk28_ledger_zero()
+    if !h28_simulate_ledger(prm, dose_mg, t_end, &!st, &!led) { return 0.0 }
+    let auc = led.auc[0]
+    if !h28_finite(auc) { return 0.0 }
     return auc
 }
 
@@ -272,9 +266,26 @@ pub fn hessian_pbpk28_auc(
 // Normalised ρ̃ᵢ = |½ Hᵢᵢ σᵢ| / |cᵢ|      (dimensionless; curvature in σ-units)
 //
 // For a perfectly linear function: Hᵢᵢ = 0 → both ratios vanish.
+// A parameter whose first-order effect |cᵢ|σᵢ is below the finite-difference
+// rounding floor has no measurable effect and reports 0 (see
+// h28_first_order_resolvable): under the exact mass identity AUC_blood(0-168h)
+// = (Dose − M(168h))/CL, the four Kp columns are pure rounding (|cᵢ|σᵢ ~ 1e-13
+// against AUC_ref ~ 0.4), and their ratio of two noise terms printed as
+// ρ_literal(kp_brain) = 8.2, ρ̃ = 33.6 before this guard.
 // For AUC ~ 1/CL (convex), M6 CV(CL)=38% gives ρ_literal(CL) ≈ 0.38
 // and ρ̃(CL) ≈ 0.07. The legacy CV=58% prior gave ρ_literal≈0.58 and
 // ρ̃≈0.17. Threshold for "weakly nonlinear": ρ̃ < 0.20 per dissertation §4.9.
+
+// |cᵢ|σᵢ must exceed 1e-9·|AUC_ref| to be a measured effect. The central
+// difference of an AUC accumulated over n ≲ 1700 sub-steps carries absolute
+// rounding ~ n·ε·|AUC| ≈ 4e-13·|AUC|; with h = 0.01σ that puts the noise in
+// |cᵢ|σᵢ near 2e-11·|AUC|, 50× below this floor, while the smallest real
+// first-order effect here (cl_renal, |c|σ ≈ 4e-3 vs 4e-10) is 10⁷× above it.
+fn h28_first_order_resolvable(bud: Pbpk28HessianBudget, priors: EpPrior28, i: i32) -> bool with Mut, Div, Panic, Epistemic {
+    let c_i = bud.sensitivity[i]
+    let s_i = h28_sqrt(priors.kn[i].variance)
+    return h28_abs(c_i) * s_i > 1.0e-9 * h28_abs(bud.auc_ref)
+}
 
 pub fn h28_nonlinearity_ratio_literal(
     bud:    Pbpk28HessianBudget,
@@ -288,6 +299,7 @@ pub fn h28_nonlinearity_ratio_literal(
     let num  = 0.5 * h28_abs(h_ii) * v_i
     let den  = h28_abs(c_i) * s_i
     if den < 1.0e-30 { return 0.0 }
+    if !h28_first_order_resolvable(bud, priors, i) { return 0.0 }
     num / den
 }
 
@@ -306,6 +318,7 @@ pub fn h28_nonlinearity_ratio_normalized(
     let s_i  = h28_sqrt(v_i)
     let den  = h28_abs(c_i)
     if den < 1.0e-30 { return 0.0 }
+    if !h28_first_order_resolvable(bud, priors, i) { return 0.0 }
     let rho = 0.5 * h28_abs(h_ii) * s_i / den
     0.5 * rho * rho
 }
@@ -359,7 +372,7 @@ pub fn h28_emit_budget_csv(bud: Pbpk28HessianBudget, priors: EpPrior28) with IO,
 }
 
 // ============================================================================
-// MAIN — TEST SUITE (6 tests)
+// MAIN — TEST SUITE (7 tests)
 // ============================================================================
 
 fn h28_selftest_main() -> i32 with IO, Mut, Div, Panic, Epistemic {
@@ -473,6 +486,22 @@ fn h28_selftest_main() -> i32 with IO, Mut, Div, Panic, Epistemic {
     passed = passed + 1
     println("")
 
+    // TEST 7: Mass balance at the production dt — exact discrete identity
+    // M(T) + CL·AUC − M(0) = 0 to rounding (theta_pbpk28 gate bounds).
+    println("TEST 7: Mass balance at production dt (dt=0.1h, 5 mg bolus)")
+    var mb_st = pbpk28_state_zero()
+    var mb_led = pbpk28_ledger_zero()
+    let mb_run = h28_simulate_ledger(prm, dose_mg, t_end, &!mb_st, &!mb_led)
+    let mb_ok = mb_run && pbpk28_mass_gate_report(mb_led, mb_st, prm, dose_mg)
+    if mb_ok {
+        println("  [PASS] mass identity closes to rounding; no floor, no visible negativity")
+        passed = passed + 1
+    } else {
+        println("  FAIL: discrete mass identity violated or negative mass visible")
+        failed = failed + 1
+    }
+    println("")
+
     println("======================================================================")
     println("  HESSIAN PBPK28 — TEST SUMMARY")
     println("======================================================================")
@@ -484,7 +513,7 @@ fn h28_selftest_main() -> i32 with IO, Mut, Div, Panic, Epistemic {
     println("")
     if failed == 0 {
         println("")
-        println("  ALL 6 TESTS PASSED")
+        println("  ALL 7 TESTS PASSED")
         println("")
         println("  Second-order GUM through 28-state PBPK for rapamycin.")
         println("  Dissertation Section 4.10 Hessian stack: CONFIRMED.")
