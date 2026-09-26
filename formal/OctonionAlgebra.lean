@@ -9,11 +9,10 @@ Constructed strictly via the **Cayley-Dickson** doubling process over Hamilton q
   x = (xA, xB), y = (yA, yB) ∈ ℍ × ℍ
   xy = (xA·yA − conj(yB)·xB, yB·xA + xB·conj(yA))
 
-This construction guarantees:
-1. Exact correspondence with `stdlib/math/octonion.sio` and `lower_ir.sio:1620`.
-2. Valid composition algebra: norm multiplicativity |xy|² = |x|²|y|² holds identically.
-3. Left and right alternativity: x(xy) = (xx)y and (yx)x = y(xx).
-4. Moufang identities and Degen's eight-square identity.
+The Cayley–Dickson definition is the sole multiplication used by the proofs below.
+The current file proves distributivity, identities, basis products, and one
+norm witness. Universal alternativity, Moufang identities, conjugate laws, and
+norm multiplicativity remain explicitly marked `axiom` until proved.
 
 References:
   - Baez 2002, "The Octonions", Bull. AMS 39(2):145-205
@@ -368,12 +367,12 @@ theorem gemm_tiling_nonassoc_caveat :
   ⟨e1, e2, e4, by decide⟩
 
 theorem gemm_safe_tile_left (tile acc : Oct) :
-    octMul tile (octMul tile acc) = octMul (octMul tile tile) acc :=
-  oct_left_alternative tile acc
+    octMul tile (octMul tile acc) = octMul (octMul tile tile) acc := by
+  exact oct_left_alternative tile acc
 
 theorem gemm_safe_tile_right (tile acc : Oct) :
-    octMul (octMul acc tile) tile = octMul acc (octMul tile tile) :=
-  oct_right_alternative tile acc
+    octMul (octMul acc tile) tile = octMul acc (octMul tile tile) := by
+  exact oct_right_alternative tile acc
 
 -- ---------------------------------------------------------------------------
 -- §22. Basis multiplication (Complete 49 products of imaginary units by decide)

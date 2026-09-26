@@ -3,7 +3,6 @@
 #include <vector>
 #include <array>
 #include <cstdint>
-#include <cassert>
 #include <cstring>
 #include <sys/mman.h>
 
@@ -20,11 +19,11 @@ int main(int argc, char** argv) {
 
     std::vector<uint8_t> kernel_bytes((std::istreambuf_iterator<char>(bin_file)),
                                        std::istreambuf_iterator<char>());
-    assert(kernel_bytes.size() == 186);
+    if (kernel_bytes.size() != 186) return 2;
 
     constexpr size_t code_size = 4096;
     auto* code = static_cast<uint8_t*>(mmap(nullptr, code_size, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0));
-    assert(code != MAP_FAILED);
+    if (code == MAP_FAILED) return 3;
 
     int pos = 0;
 
@@ -117,8 +116,8 @@ int main(int argc, char** argv) {
 
     std::cout << "TEST 1 (e6 * e4 on hardware AVX-512): [";
     for (int i = 0; i < 8; ++i) std::cout << out1[i] << (i < 7 ? ", " : "]\n");
-    assert(out1[2] == -1.0);
-    for (int i = 0; i < 8; ++i) if (i != 2) assert(out1[i] == 0.0);
+    if (out1[2] != -1.0) return 1;
+    for (int i = 0; i < 8; ++i) if (i != 2 && out1[i] != 0.0) return 1;
 
     // --- TEST 2: a * b match Lean 4 #eval ---
     alignas(64) const double a[8] = {1, 2, -1, 3, 0, -2, 1, 4};
@@ -130,7 +129,7 @@ int main(int argc, char** argv) {
     for (int i = 0; i < 8; ++i) std::cout << out2[i] << (i < 7 ? ", " : "]\n");
 
     constexpr std::array<double, 8> exp2 = {2, 3, -20, -6, 1, 1, -4, 17};
-    for (int i = 0; i < 8; ++i) assert(out2[i] == exp2[i]);
+    for (int i = 0; i < 8; ++i) if (out2[i] != exp2[i]) return 1;
 
     // --- TEST 3: Norm multiplicativity on silicon ---
     double na = 0, nb = 0, nab = 0;
@@ -140,8 +139,8 @@ int main(int argc, char** argv) {
         nab += out2[i] * out2[i];
     }
     std::cout << "TEST 3 (|ab|^2 on silicon): " << nab << " == " << na << " * " << nb << " (" << na * nb << ")\n";
-    assert(nab == na * nb);
-    assert(nab == 756.0);
+    if (nab != na * nb) return 1;
+    if (nab != 756.0) return 1;
 
     // --- TEST 4: Left alternativity on silicon: a * (a * b) == (a * a) * b ---
     alignas(64) double aa[8] = {0};
@@ -154,7 +153,7 @@ int main(int argc, char** argv) {
     fn(aa, b, aa_b, ctrl_data);
 
     std::cout << "TEST 4 (Left alternativity on silicon): match = " << (std::memcmp(a_ab, aa_b, sizeof(a_ab)) == 0) << "\n";
-    assert(std::memcmp(a_ab, aa_b, sizeof(a_ab)) == 0);
+    if (std::memcmp(a_ab, aa_b, sizeof(a_ab)) != 0) return 1;
 
     // --- TEST 5: Right alternativity on silicon: (b * a) * a == b * (a * a) ---
     alignas(64) double ba[8] = {0};
@@ -167,7 +166,7 @@ int main(int argc, char** argv) {
     fn(b, aa, b_aa, ctrl_data);
 
     std::cout << "TEST 5 (Right alternativity on silicon): match = " << (std::memcmp(ba_a, b_aa, sizeof(ba_a)) == 0) << "\n";
-    assert(std::memcmp(ba_a, b_aa, sizeof(ba_a)) == 0);
+    if (std::memcmp(ba_a, b_aa, sizeof(ba_a)) != 0) return 1;
 
     std::cout << "\nALL 5 HARDWARE SILICON TESTS PASSED FROM FILE-LOADED BYTES IN C++23!\n";
     return 0;
