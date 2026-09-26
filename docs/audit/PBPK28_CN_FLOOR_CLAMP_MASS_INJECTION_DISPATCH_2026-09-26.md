@@ -354,7 +354,8 @@ What this shows:
 - **TR-BDF2 alone goes negative right after every bolus, at every tested dt.** Its
   γ-stage (a CN step of length γ·dt) rings on the jump: down to −0.72 mg/L for
   venlafaxine at dt = 0.5 h and −0.085 mg/L for rapamycin at dt = 0.05 h, from
-  C0 = 1 mg/L. At dt = 0.5 h the venlafaxine endpoint also dips (−0.081 mg/L).
+  C0 = 1 mg/L. At dt ≥ 0.1 h the venlafaxine step endpoints dip too (−0.081 and
+  −0.033 mg/L at dt = 0.5 and 0.1 h).
   This is the Bolley–Crouzeix limit in practice. (An earlier version scanned
   endpoints only and reported negatives at dt ≥ 0.1 h alone.)
 - **Method 6 had no negative entry in any of the 12 cells, its γ-stage and BE
