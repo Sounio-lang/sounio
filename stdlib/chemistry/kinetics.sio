@@ -2481,19 +2481,25 @@ pub fn simulate_bayesian_posterior_crn(
     //    (spread-out: e.g. 0.55/0.40/0.30/0.22) data points AT ONCE against
     //    tight sigmas (~0.03-0.05) -- which for real data is close to
     //    always, so sum_w stayed at 0.0 even with the correct index. Fixed
-    //    by moving the combination into log-space: log_gaussian_term sums
-    //    per sample instead of exp_approx(...) multiplying, and the whole
-    //    batch is exponentiated once, relative to its own maximum
-    //    log-weight (log_w - max_log_w <= 0.0 always, so exp_approx never
-    //    underflows the BEST sample to 0.0; that is what actually lets the
-    //    importance weights discriminate a good proposal from a bad one).
-    //    Standard numerically-stable importance-sampling/log-sum-exp
-    //    practice, not specific to this model.
-    let ns_raw = if n_samples < 5 { 12 as i64 } else { n_samples };
-    let ns = if ns_raw > 128 { 128 as i64 } else { ns_raw };  // array bound below
-    var props: [f64; 128] = [0.0; 128];
-    var log_ws: [f64; 128] = [0.0; 128];
-    var nvalid: i64 = 0;
+    //    by moving the combination into log-space with an ONLINE
+    //    max-rescaled accumulator (Copilot review on
+    //    sounio-lang/sounio#2694 caught a first version of this fix that
+    //    stored every sample in a props[128]/log_ws[128] pair and did the
+    //    rescale as a second pass -- silently clamping n_samples above 128,
+    //    changing this function's own public contract, e.g.
+    //    bench_scale_bayes_samples(1000) would have quietly run 128
+    //    proposals instead of 1000): every time a sample's log-weight beats
+    //    the running max, the running sums are rescaled by
+    //    exp(old_max - new_max) (<=1, so exp_approx never overflows) before
+    //    the new sample is folded in at weight exp(log_w - max_log_w) (<=1,
+    //    so it never underflows either) -- mathematically the same
+    //    max-relative log-sum-exp combination as the two-pass version, just
+    //    computed in one pass with O(1) memory, so n_samples is no longer
+    //    bounded by an array size.
+    let ns = if n_samples < 5 { 12 as i64 } else { n_samples };
+    var sum_w = 0.0;
+    var sum_kw = 0.0;
+    var sum_k2w = 0.0;
     var max_log_w = 0.0 - 1.0e300;
     var i: i64 = 0;
     while i < ns {
@@ -2510,23 +2516,19 @@ pub fn simulate_bayesian_posterior_crn(
                 }
                 d = d + 1;
             }
-            props[nvalid] = prop;
-            log_ws[nvalid] = log_w;
-            if log_w > max_log_w { max_log_w = log_w; }
-            nvalid = nvalid + 1;
+            if log_w > max_log_w {
+                let rescale = exp_approx(max_log_w - log_w);
+                sum_w = sum_w * rescale;
+                sum_kw = sum_kw * rescale;
+                sum_k2w = sum_k2w * rescale;
+                max_log_w = log_w;
+            }
+            let w = exp_approx(log_w - max_log_w);
+            sum_w = sum_w + w;
+            sum_kw = sum_kw + w * prop;
+            sum_k2w = sum_k2w + w * prop * prop;
         }
         i = i + 1;
-    }
-    var sum_w = 0.0;
-    var sum_kw = 0.0;
-    var sum_k2w = 0.0;
-    var j: i64 = 0;
-    while j < nvalid {
-        let w = exp_approx(log_ws[j] - max_log_w);
-        sum_w = sum_w + w;
-        sum_kw = sum_kw + w * props[j];
-        sum_k2w = sum_k2w + w * props[j] * props[j];
-        j = j + 1;
     }
     if sum_w <= 0.0 { return (prior_k, prior_uk, 1.0); }
     let post_k = sum_kw / sum_w;

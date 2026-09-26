@@ -142,6 +142,27 @@ if [[ "$(head -c 2 "$SOUC_BIN" 2>/dev/null)" != "#!" ]]; then
     unset _NATIVE_WRAPPER
 fi
 
+# Determine once whether the binary that will actually run tests identifies
+# as Madaros or lean_single -- used by `//@ requires: lean_single` below.
+# Probed directly against the FINAL, resolved $SOUC_BIN rather than
+# inferred from which env var chose it, so it is correct for any
+# resolution path: bare bin/souc, SOUNIO_TEST_SOUC_BIN pointed at any
+# script or raw ELF (including bin/souc itself, or an explicit Madaros
+# wrapper), or SOUNIO_SOUC_ENGINE forcing an engine (Copilot review,
+# sounio-lang/sounio#2694: a prior version of the lean_single arm below
+# inferred "not Madaros" from SOUNIO_TEST_SOUC_BIN merely being set,
+# which a caller explicitly pointing it at Madaros would have defeated).
+# Both interfaces answer `--version` safely and distinguishably: bin/souc
+# and the subcommand wrapper handle it directly (Madaros prints
+# "Madaros vX.Y.Z"); a raw ELF (lean_single or Madaros) prints its own
+# banner/usage for an unrecognized flag, and the native wrapper passes
+# unrecognized flags straight through to the raw ELF as positional args
+# rather than erroring.
+SOUNIO_RESOLVED_IS_MADAROS=0
+if "$SOUC_BIN" --version 2>&1 | grep -q "Madaros"; then
+    SOUNIO_RESOLVED_IS_MADAROS=1
+fi
+
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
 
 # Parse arguments
@@ -450,34 +471,32 @@ run_test() {
             # predicate should have spoken. Without this arm such a test would
             # fail on the Madaros job for a reason unrelated to what it asserts.
             lean_single)
-                # Gated on what will ACTUALLY run, not on a declaration. The
-                # madaros arm above trusts SOUNIO_MADAROS_AVAILABLE, which is a
-                # statement of intent; a local checkout with a built Madaros and
-                # that variable unset runs Madaros anyway, and the test would
-                # then fail with "missing error: ..." as though the compiler were
-                # wrong instead of the test being inapplicable.
-                #
-                # Second clause used to check only for a LOCAL
-                # artifacts/self-hosted/madaros build -- stale (CLAUDE.md
-                # operating principle 13): bin/souc's default arm
-                # (`case "${SOUNIO_SOUC_ENGINE:-madaros}" in`) materializes and
-                # runs the COMMITTED bin/madaros-linux-x86_64.gz prebuilt
-                # whenever no explicit engine or override is given, with or
-                # without a local build -- that prebuilt is tracked in every
-                # checkout, so the old check was blind to the common case
-                # (Copilot review, sounio-lang/sounio#2694; reproduced directly:
-                # a bare `bash scripts/run_sio_test_suite.sh` with no env vars
-                # ran and hard-failed seq_epistemic.sio,
-                # seq_knowledge_uncertain.sio, and this PR's
-                # test_kinetics_fixed_regressions.sio on Madaros's multimodule
-                # thin-link error instead of skipping them). Restated to match
-                # bin/souc's actual rule: Madaros runs unless SOUNIO_SOUC_ENGINE
-                # forces lean_single.
-                if [[ -n "${SOUNIO_MADAROS_AVAILABLE:-}" ]] \
-                   || { [[ -z "${SOUNIO_TEST_SOUC_BIN:-}" ]] \
-                        && [[ "${SOUNIO_SOUC_ENGINE:-madaros}" != "lean_single" ]] \
-                        && [[ "${SOUNIO_SOUC_ENGINE:-madaros}" != "lean-single" ]] \
-                        && [[ "${SOUNIO_SOUC_ENGINE:-madaros}" != "leansingle" ]]; }; then
+                # Gated on what will ACTUALLY run, not on a declaration or on
+                # which env var chose it. Two iterations of trying to infer
+                # this from env vars each missed a real case (CLAUDE.md
+                # operating principle 13; both measured directly, not assumed,
+                # via Copilot review on sounio-lang/sounio#2694):
+                #   1. Checking only for a LOCAL artifacts/self-hosted/madaros
+                #      build missed bin/souc's default arm, which materializes
+                #      and runs the COMMITTED bin/madaros-linux-x86_64.gz
+                #      prebuilt (tracked in every checkout) whenever no
+                #      explicit engine/override is given -- reproduced: a bare
+                #      `bash scripts/run_sio_test_suite.sh` hard-failed
+                #      seq_epistemic.sio, seq_knowledge_uncertain.sio, and
+                #      this PR's test_kinetics_fixed_regressions.sio on
+                #      Madaros's multimodule thin-link error instead of
+                #      skipping them.
+                #   2. Trusting any explicit SOUNIO_TEST_SOUC_BIN as "not
+                #      Madaros" missed a caller pointing it AT Madaros (e.g.
+                #      SOUNIO_TEST_SOUC_BIN=bin/souc, or an explicit Madaros
+                #      wrapper) -- that binary IS what runs, unconditionally,
+                #      no local-build or engine-var check involved.
+                # SOUNIO_RESOLVED_IS_MADAROS (computed once above, by asking
+                # the actual, final $SOUC_BIN what it is via `--version`,
+                # not by asking which env var picked it) is correct for
+                # every resolution path at once, so this arm no longer needs
+                # to enumerate them.
+                if [[ -n "${SOUNIO_MADAROS_AVAILABLE:-}" ]] || [[ "${SOUNIO_RESOLVED_IS_MADAROS:-0}" == "1" ]]; then
                     echo "{\"status\":\"skip\",\"reason\":\"requires:lean_single\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"
                     return
                 fi
@@ -828,7 +847,7 @@ if [[ "$LIST_TESTS" == "1" ]]; then
     exit 0
 fi
 
-export SOUC_BIN ROOT_DIR FILTER TEST_TMP SOUNIO_STDLIB_PATH CI SOUNIO_GPU_AVAILABLE SOUNIO_LLVM_AVAILABLE
+export SOUC_BIN ROOT_DIR FILTER TEST_TMP SOUNIO_STDLIB_PATH CI SOUNIO_GPU_AVAILABLE SOUNIO_LLVM_AVAILABLE SOUNIO_RESOLVED_IS_MADAROS
 
 # Header
 echo "=== Sounio Test Suite ==="
