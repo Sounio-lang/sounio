@@ -302,7 +302,7 @@ an existing trapezoid would replace one bias with another.
 `pbpk28_cn_fix_candidates_probe.sio`, clamp-free, each method with its own quadrature.
 The reference is CN at dt = 0.001 h.
 
-Rapamycin C_b(24 h) and C_brain(24 h), relative error / most negative state entry:
+Rapamycin C_b(24 h) and C_brain(24 h), relative error / most negative state entry (mg/L; C0 = 1). The minimum includes any saved stage that enters the quadrature, not only step endpoints:
 
 | method | dt = 0.5 | dt = 0.1 | dt = 0.05 |
 |---|---|---|---|
@@ -310,12 +310,19 @@ Rapamycin C_b(24 h) and C_brain(24 h), relative error / most negative state entr
 | 1 CN, no floors | C_b +37 741%, C_brain < 0 / −1.02 | +50%, C_brain < 0 / −0.79 | +11.0% / −0.49 |
 | 2 backward Euler | +37.0% / 0 | +6.9% / 0 | +3.4% / 0 |
 | 3 CN + Rannacher start (2 steps → 4 BE half-steps) | +0.039% / −2.0e-10 | +0.0014% / −3e-15 | +0.0003% / −5e-17 |
-| 4 TR-BDF2, γ = 2 − √2 | −0.33% / 0 | −0.013% / 0 | −0.0033% / 0 |
+| 4 TR-BDF2, γ = 2 − √2 | −0.33% / **−0.63** (γ-stage) | −0.013% / **−0.30** (γ-stage) | −0.0033% / **−0.085** (γ-stage) |
 
 Every clamp-free method (1–4) recovers AUC_blood = 0.403226 to six significant
 figures and closes the discrete mass identity to ≤ 6 × 10⁻¹³. Semaglutide is much
 less stiff; there TR-BDF2 keeps every endpoint within 1 × 10⁻⁷ relative even at
-dt = 0.5 h.
+dt = 0.5 h, but its γ-stage still dips to −0.13 mg/L on the first step.
+
+**Correction (PR review, 2026-09-26):** the first version of this table reported
+TR-BDF2's minimum as 0, because only step endpoints were scanned. TR-BDF2's first
+stage is itself a CN step of length γ·dt, so it rings on the bolus jump exactly as
+CN does; the BDF2 stage then damps it. The endpoints stay non-negative, but the
+γ-stage, which enters the AUC quadrature with weight w ≈ 0.29, goes negative at
+every tested dt.
 
 The single-bolus test above cannot tell the candidates apart under realistic dosing,
 so `pbpk28_cn_forced_dosing_probe.sio` repeats the comparison with 5 mg every 24 h
@@ -326,7 +333,8 @@ so `pbpk28_cn_forced_dosing_probe.sio` repeats the comparison with 5 mg every 24
 Rapamycin and venlafaxine parent are both run. Reference: CN at dt = 0.001 h;
 TR-BDF2 at dt = 0.001 h agrees with it to ≤ 6 × 10⁻⁷ of peak. The table gives
 the worst case over both drugs of the error at the trough before the last dose
-(t = 144 h), and in brackets the number of steps with any entry below −1e-12·C0.
+(t = 144 h), and in brackets the number of steps with any entry below −1e-12·C0,
+counting the saved stage whenever it enters the quadrature.
 
 | method | bolus, dt = 0.5 | bolus, dt = 0.1 | bolus, dt = 0.05 | depot, dt = 0.5 | depot, dt = 0.1 | depot, dt = 0.05 |
 |---|---|---|---|---|---|---|
@@ -335,7 +343,7 @@ the worst case over both drugs of the error at the trough before the last dose
 | 2 backward Euler | +53% | +9.6% | +4.7% | +41% | +7.5% | +3.7% |
 | 3 CN + Rannacher at t = 0 only | same as CN [288] | same as CN [1440] | same as CN [2677] | same as CN [202] | −0.23% | −0.014% |
 | 4 CN + Rannacher after every dose | +0.039% | −0.005% | −0.001% | **+328% [84]** | −0.095% | −0.026% |
-| 5 TR-BDF2 | −0.53% **[7]** | −0.021% **[7]** | −0.005% | +0.24% | +0.010% | +0.002% |
+| 5 TR-BDF2 | −0.53% **[14]** | −0.021% **[7]** | −0.005% **[7]** | +0.24% | +0.010% | +0.002% |
 | **6 TR-BDF2 + 2 BE half-steps after every dose** | **−0.059%** | **−0.002%** | **−0.0004%** | **−0.81%** | **−0.041%** | **−0.011%** |
 
 What this shows:
@@ -343,10 +351,14 @@ What this shows:
   equal plain CN's.
 - **Re-triggered Rannacher** is excellent for IV bolus. For the depot at dt = 0.5 h
   it goes negative and misses the venlafaxine trough by +328%.
-- **TR-BDF2 alone goes negative right after a bolus** at dt ≥ 0.1 h: venlafaxine,
-  one step per dose, down to −0.081 mg/L. This is the Bolley–Crouzeix limit showing
-  up in practice.
-- **Method 6 had no negative entry in any of the 12 cells** and the smallest worst
+- **TR-BDF2 alone goes negative right after every bolus, at every tested dt.** Its
+  γ-stage (a CN step of length γ·dt) rings on the jump: down to −0.72 mg/L for
+  venlafaxine at dt = 0.5 h and −0.085 mg/L for rapamycin at dt = 0.05 h, from
+  C0 = 1 mg/L. At dt = 0.5 h the venlafaxine endpoint also dips (−0.081 mg/L).
+  This is the Bolley–Crouzeix limit in practice. (An earlier version scanned
+  endpoints only and reported negatives at dt ≥ 0.1 h alone.)
+- **Method 6 had no negative entry in any of the 12 cells, its γ-stage and BE
+  midpoints included**, and the smallest worst
   case. Its hourly-grid error is ≤ 0.26% of peak at dt ≤ 0.1 h. At dt = 0.5 h it is
   ≤ 6.2% of peak, because no method resolves the 24 s blood transient inside a
   30-minute step.
@@ -374,7 +386,8 @@ All clamp-free arms (1–6) close M(T) + CL·AUC_quad = released(T) to ≤ 7.4 �
   solve with σ = dt/2.
 - Positivity is still not *guaranteed* (Bolley–Crouzeix), so the fix must **fail
   closed** on any entry below −tol·C0 rather than floor it. In the measured cells
-  method 6 never triggers that.
+  method 6 never triggers that, stages included. The BE restart is what makes the
+  difference: it absorbs the jump before the γ-stage's CN sub-step can ring on it.
 - The step API must know where discontinuities are. That means taking a
   "discontinuity at the start of this step" flag from the caller, which is what
   schedules doses.
