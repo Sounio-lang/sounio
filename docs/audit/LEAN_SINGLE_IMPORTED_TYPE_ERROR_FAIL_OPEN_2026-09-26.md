@@ -304,16 +304,13 @@ its compile log to stdout, so program output is compared from the line after
 | Madaros `rc=182` (`madaros: handles full`) | 12 |
 | does not compile on Madaros | 2 |
 
-- **Numeric differences, not yet explained.**
-  `examples/dissertation_steady_state_demo.sio` prints
-  `4.000000,0.005650,…` on Madaros against `0.005649` on lean_single.
-  `examples/dissertation_steady_state_fullvd_demo.sio` prints
-  `C_max_last / C_max_first` 1.063169 against 1.063101, and
-  `AUC_last / AUC_first` 1.228366 against 1.228345: relative differences of
-  6.4e-5 and 1.7e-5. The cause has not been established; step-control
-  divergence in the adaptive integrator is a hypothesis only. Under the
-  directive the Madaros value is the one reported, but no value from these
-  two demos should be quoted until the divergence is understood.
+- **Numeric differences: explained, lean_single is the one that is wrong.**
+  `dissertation_steady_state_demo` prints `4.000000,0.005650,…` on Madaros
+  against `0.005649` on lean_single. `dissertation_steady_state_fullvd_demo`
+  prints `C_max_last / C_max_first` 1.063169 against 1.063101, and
+  `AUC_last / AUC_first` 1.228366 against 1.228345. The root cause is
+  lean_single's float-literal conversion (next section). The Madaros values
+  are the ones the source as written specifies.
 - **`rc=182`.** `test_bbb_gate`, `test_bbb_gum_budget`, `test_bbb_hdmr_7d`,
   `test_bbb_pce2d_sobol`, `test_bbb_pce_vs_gum`, `test_bbb_voi`,
   `test_des_bbb_coupled`, `test_brain_plasma_tac`,
@@ -328,4 +325,102 @@ its compile log to stdout, so program output is compared from the line after
   calls four functions (`default_pbpk_params`, `default_ode_config`,
   `solve_pbpk14`, `pbpk_state_total_mass`) that exist nowhere in `stdlib/`.
   It fails on both engines and needs rewriting against the real API.
+
+## Steady-state divergence: root cause (2026-09-26)
+
+**Claim.** lean_single does not convert decimal float literals to the
+nearest `f64`. Madaros does. In the closure of the steady-state demos, 14 of
+115 distinct literals land 1–2 ulp away from the correctly rounded value
+under lean_single. With those 14 literals supplied as exact values, lean_single
+reproduces Madaros' output byte for byte.
+
+**Mechanism.** `self-hosted/compiler/lean_single.sio:13131` (float literal,
+token kind 53) does not emit the literal's bits. It emits code that rebuilds
+the value at run time:
+
+```
+cvtsi2sd(int_part) + cvtsi2sd(frac_digits) / cvtsi2sd(10^n)
+```
+
+followed by one `mulsd` or `divsd` by `10.0` per unit of the decimal exponent.
+Every step rounds. `1.0e-30`, for example, is thirty successive divisions of
+`1.0` by `10.0`.
+
+### Measurement 1: literal bits (115 literals)
+
+All distinct float literals in the 10 modules of the demos' closure
+(`absorption`, `bbb_core`, `bbb_rapamycin`, `drugs/rapamycin`,
+`epistemic_pbpk14`, `oral_rapamycin_bbb`, `steady_state_runner`,
+`tsit5_pbpk14` and the two demos). Each was printed through
+`print_int(f64_to_bits(<literal>))` on both engines and compared, as exact
+64-bit integers, with Python's correctly rounded `float()`.
+
+| Engine | Literals off the correctly rounded value |
+|---|---:|
+| Madaros (md5 `5764851f`) | 0 of 115 |
+| lean_single | 14 of 115 |
+
+The 14, with lean_single's error in ulp:
+
+| Literal | Where | ulp |
+|---|---|---:|
+| `1.0e-30` | `epistemic_pbpk14.sio:308` | +1 |
+| `1.0e-12` | `drugs/rapamycin.sio`, `epistemic_pbpk14.sio`, `steady_state_runner.sio:291` | +1 |
+| `0.0000000001` | `tsit5_pbpk14.sio:636,638` (`atol`, `dt_min`) | +2 |
+| `0.0000001` | `tsit5_pbpk14.sio:615` (`dt_min`) | +2 |
+| `0.000001`, `1.0e-6` | `tsit5_pbpk14.sio:635` (`rtol`), `epistemic_pbpk14.sio:159` | +1 |
+| `0.000009` | `drugs/rapamycin.sio:346` | −1 |
+| `0.00178001105222577714` | `tsit5_e1` | +1 |
+| `0.01515151515151515` | `tsit5_e7` | −1 |
+| `0.028269050394068383` | `tsit5_a65` | +1 |
+| `0.041` | `bbb_rapamycin.sio:42` (`v_vasc`) | −1 |
+| `0.09249506636175525` | `tsit5_a54` | −1 |
+| `0.9800255409045097` | `tsit5_c5` | −1 |
+| `1.379008574103742` | `tsit5_a74`, `tsit5_b4` | +1 |
+
+### Measurement 2: causal test
+
+In a scratch copy of `stdlib/`, not committed, each of the 21 occurrences of
+those 14 literals was replaced by an expression both engines evaluate
+exactly: `((M as f64) / (2^j as f64) / …)`, where `M < 2^53` and every divisor
+is a power of two. Printing the bits of those expressions matched the
+correctly rounded reference on both engines, for all 14.
+
+Two points about the harness:
+- lean_single resolves `stdlib/<module>` relative to the **current
+  directory** and ignores `SOUNIO_STDLIB_PATH`, so the run was made from a
+  directory whose `stdlib/` is the copy.
+- A marker injected into the copy confirmed lean_single read it. A first
+  attempt that relied on `SOUNIO_STDLIB_PATH` silently compiled the original
+  stdlib and was discarded.
+
+| Comparison | `steady_state_demo` | `steady_state_fullvd_demo` |
+|---|---|---|
+| lean_single (original) vs Madaros | differs, 1 line | differs, 3 lines |
+| **lean_single (exact literals) vs Madaros** | **identical** | **identical** |
+| Madaros (exact literals) vs Madaros | identical | identical |
+
+The last row is expected: Madaros already parses the literals exactly, so
+nothing changes for it. The literal conversion accounts for the entire
+divergence. No other engine difference is involved in these two demos.
+
+### Consequences
+
+- Under the directive the Madaros numbers stand, and they are the ones
+  faithful to the source.
+- A 1–2 ulp perturbation of constants moved the printed C_max and AUC
+  ratios by up to 6.4e-5 relative. The adaptive Tsit5 step control
+  (`rtol = 1e-6`) is the likely amplifier, because accept/reject decisions
+  near `err_norm = 1` depend on the tolerance and tableau literals. That is
+  inferred, not traced step by step. Either way, digits of these ratios
+  beyond about the fourth significant figure are below the numerical
+  resolution of the solve and should not be quoted as meaningful.
+- Any lean_single-versus-Madaros parity comparison involving decimal literals
+  can differ at the ulp level for this reason alone. Parity checks should
+  compare with a tolerance or on correctly rounded inputs.
+- Proposed fix for lean_single (not applied; it is the bootstrap seed, same
+  caution as F-B): compute the literal's correctly rounded bits at compile
+  time and emit `mov rax, imm64`. The `const` path
+  (`lean_single.sio:19030`) rebuilds the value the same way, with the
+  `mulsd`/`divsd` by `10.0` loop, and would need the same change.
 
