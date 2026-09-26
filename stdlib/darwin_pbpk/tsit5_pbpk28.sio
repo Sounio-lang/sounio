@@ -85,15 +85,19 @@ fn pbpk28_organ_average_ref(s: &PBPKState28, p: PBPKParams28, i: i32) -> f64 wit
 // k_s = cl_sink / V_k on both C_v,k and C_t,k. It enters the organ's 2×2 CN
 // block on both sides (implicit diagonal +h·k_s, explicit diagonal −h·k_s),
 // exactly as `cl_central` enters the blood row through `big_s`, so the Schur
-// closure stays exact and the flux stays cl_sink · C_avg,k in the coupled
-// solve at any cl_sink·dt/V_k — there is no demand-versus-content cap to
-// saturate. The mass it removes is the CN trapezoid
-// h·cl_sink·(C_avg,old + C_avg,new), the same quantity the discrete
-// equations subtract, so M_new = M_old + dt·rel_mid
+// closure stays exact and no demand-versus-content cap is applied — the sink
+// cannot saturate the way a capped explicit subtraction does. The mass it
+// removes is the CN trapezoid h·cl_sink·(C_avg,old + C_avg,new), the same
+// quantity the discrete equations subtract, so M_new = M_old + dt·rel_mid
 // − h·cl_central·(C_b,old + C_b,new) − returned mass holds to rounding on
-// every step where `pbpk28_cn_apply_schur` clamps no state. (CN is A-stable,
-// not positivity-preserving: when a stiff mode undershoots below zero, that
-// clamp — shared with the sink-free kernel — breaks the identity.)
+// every step where `pbpk28_cn_apply_schur` clamps no state.
+// CN is A-stable but neither L-stable nor positivity-preserving. For a lone
+// sink mode the step removes M·k_s·dt/(1 + k_s·dt/2), which tends to 2·M as
+// k_s·dt → ∞ (the state goes negative once h·k_s > 1); in the coupled organ
+// block the Q/PS exchange modes can undershoot even with h·k_s ≤ 1. A
+// negative state is then floored by `pbpk28_cn_apply_schur`, which breaks the
+// identity. The clamp-free L-stable path is `pbpk28_trbdf2_step_routed_sink_mut`
+// (theta_pbpk28.sio).
 // sink_organ outside 1..13 or cl_sink == 0.0 means no sink: every added term
 // is then an exact ±0.0 and the step is bit-identical to the sink-free kernel.
 //
@@ -101,9 +105,11 @@ fn pbpk28_organ_average_ref(s: &PBPKState28, p: PBPKParams28, i: i32) -> f64 wit
 // or the vascular space of organ k = input_organ. Routing oral absorption into
 // the liver (k = 1) is the portal-vein first pass: absorbed drug meets the
 // hepatic sink before it reaches the systemic blood, so hepatic availability
-// F_H = Q/(Q + X) and oral CL/F = X emerge from the solve instead of being
-// imposed (well-stirred at quasi-steady; X = cl_sink · C_avg,k/C_v,k is the
-// sink's clearance referenced to the organ's venous concentration). In the CN
+// F_H = Q/(Q + X) and oral CL/F = CL_sys/F_H emerge from the solve instead of
+// being imposed (well-stirred at quasi-steady; X = cl_sink · C_avg,k/C_v,k is
+// the sink's clearance referenced to the organ's venous concentration).
+// CL/F equals X only when the organ sink is the sole clearance; with blood
+// clearance it is cl_central/F_H + X. In the CN
 // step the input adds dt·rel_mid/V_v,k to that organ's explicit side; the mass
 // identity above is unchanged. Blood input adds exactly the same expression as
 // before, and every organ not receiving input adds +0.0.
