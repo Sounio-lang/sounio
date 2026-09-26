@@ -224,6 +224,15 @@ expect_private_rejection private-enum \
 expect_private_rejection private-enum-specialized-generic \
   "$ROOT_DIR/tests/multimodule/visibility_enum_private_specialized_generic_main.sio" E177 \
   'enum constructor is private in its defining module'
+# Copilot review (PR #2515), comment 4109848820: checker_field_visible_inplace
+# now denies a real module-id mismatch too, matching the fn/struct/enum
+# siblings above -- the established fixture that used to rely on the
+# empty-path bypass (madaros_module_qualified_generic_call.sio) had its
+# GBig<F> fields made pub instead, closing the access-control hole rather
+# than continuing to codify it.
+expect_private_rejection private-field-specialized-generic \
+  "$ROOT_DIR/tests/multimodule/visibility_field_private_specialized_generic_main.sio" E259 \
+  'struct field is private in its defining module'
 
 echo "[madaros-visibility-context] receipt issue=854 context_state=$single_state runtime_state=$runtime_state single_e175=$([[ "$single_state" == baseline ]] && echo 1 || echo 0) matrix_e175=$([[ "$matrix_state" == baseline ]] && echo 18 || echo 0) true_private_fn=E175 true_private_struct=E176 true_private_enum=E177"
 

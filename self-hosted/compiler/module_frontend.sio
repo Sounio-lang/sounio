@@ -745,6 +745,36 @@ fn module_frontend_resolve_ast_import_relpath(rel_path: string, cur_dir: string)
 // bare `use module::symbol` forms that are token-identical to whole-file
 // imports: when `mod/half.sio` does not exist, retry `mod.sio`.
 // Returns "" when there is no parent segment to strip.
+// Copilot review (PR #2515), comment 4109848838: the inverse of
+// module_frontend_ast_import_relpath (`::` -> `/`, plus a `.sio` suffix) --
+// needed so the source-scanner's named-import fallback below can register
+// the SAME `lower_named_item_terminal_note` evidence resolve_import_file_path
+// already does from the AST path directly. `rel_path` is a `/`-joined
+// path ending in `.sio` (e.g. "a/b/f.sio" for `use a::b::f`); this
+// reconstructs the full original qualifier text ("a::b::f") -- the whole
+// path, matching ast_path_prefix_name(path, path.seg_count - 1)'s own
+// all-segments-inclusive result, not just the parent prefix.
+fn module_frontend_relpath_to_qualifier_name(rel_path: string) -> Name with Mut, Panic, Div, Alloc {
+    let len = str_len(rel_path)
+    if len < 5 {
+        return make_name("")
+    }
+    let stem = str_slice(rel_path, 0, len - 4)
+    var qualifier: string = ""
+    var i: i64 = 0
+    let stem_len = str_len(stem)
+    while i < stem_len {
+        let ch = str_char_at(stem, i)
+        if ch == 47 {
+            qualifier = str_concat(qualifier, "::")
+        } else {
+            qualifier = str_concat(qualifier, module_frontend_import_byte_to_str(ch as i8))
+        }
+        i = i + 1
+    }
+    make_name(qualifier)
+}
+
 fn module_frontend_relpath_strip_last_segment(rel_path: string) -> string with Mut, Panic, Div {
     let len = str_len(rel_path)
     if len < 5 {
@@ -2947,6 +2977,24 @@ pub fn module_frontend_import_files_from_source(path: string) -> ImportPathList 
                             let parent_dep = module_frontend_resolve_import_relpath(parent_rel, cur_dir)
                             if file_exists(parent_dep) {
                                 dep_path = parent_dep
+                                // Copilot review (PR #2515), comment 4109848838:
+                                // this fallback branch resolves EXACTLY the
+                                // same "last segment is a named item, not a
+                                // module" case resolve_import_file_path's own
+                                // fallback does (this whole file's dependency
+                                // discovery has two lanes: this raw source
+                                // scanner, used by the real compile/run path
+                                // via module_frontend_import_files_from_source,
+                                // and the AST-based resolve_import_file_path,
+                                // used by the check-only preflight closure
+                                // walk) -- but only that OTHER lane recorded
+                                // the evidence check.sio/lower.sio/specializer.sio
+                                // all read. Without this, a real `souc build`/
+                                // `run` (not `check`) of `use a::b::f;` still
+                                // treated `a::b::f` as an unresolved module
+                                // qualifier along this lane, even after the
+                                // check-only path was fixed.
+                                lower_named_item_terminal_note(module_frontend_relpath_to_qualifier_name(rel_path))
                             }
                         }
                     }
