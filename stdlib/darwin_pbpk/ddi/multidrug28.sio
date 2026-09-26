@@ -168,6 +168,15 @@ pub fn md_new(portal: bool) -> MultiDrug28 {
 
 // Registers a drug; returns its index. fu_b is used for both sites; override the
 // gut site with md_set_fu_site (enterocyte convention fu_gut = 1.0).
+//
+// p.cl_central must carry ONLY the clearance this driver does not model as an
+// enzyme sink (renal, biliary, proteolytic, or metabolism by an enzyme outside
+// the four here). It is copied unchanged. The stock profiles do not satisfy
+// that: pbpk28_params_rapamycin()'s cl_central = 12.4 L/h IS its hepatic CYP3A4
+// clearance (core/pbpk28_params.sio), so registering that profile as it stands
+// and then calling md_set_clint for the liver counts hepatic elimination twice.
+// Set p.cl_central to the residual before registering -- the gates in
+// tests/run-pass/darwin_pbpk28_*_gates.sio all overwrite it for this reason.
 pub fn md_add_drug(md: &!MultiDrug28, p: PBPKParams28, fu_b: f64, fa: f64, ka: f64) -> i32 with Mut, Panic {
     let i = (*md).n
     if i >= MD_MAX { panic("multidrug28: more than 16 drugs") }
@@ -195,24 +204,57 @@ pub fn md_add_drug(md: &!MultiDrug28, p: PBPKParams28, fu_b: f64, fa: f64, ka: f
     return i
 }
 
+// Index validation. Every per-drug quantity is a flat array, so an index that
+// is out of range for its dimension but still inside the array silently writes
+// ANOTHER drug's slot: drug 0 with site 2 lands on drug 1's liver fraction,
+// drug 0 with enzyme 4 on drug 1's first Ki. These reject that before the write.
+fn md_check_drug(md: &MultiDrug28, drug: i32) with Panic {
+    if drug < 0 || drug >= (*md).n { panic("multidrug28: drug index is not a registered drug") }
+}
+
+fn md_check_site(site: i32) with Panic {
+    if site < 0 || site >= MD_NS { panic("multidrug28: site must be md_site_liver() or md_site_gut()") }
+}
+
+fn md_check_enz(enz: i32) with Panic {
+    if enz < 0 || enz >= MD_NE { panic("multidrug28: enzyme code out of range") }
+}
+
 pub fn md_set_fu_site(md: &!MultiDrug28, drug: i32, site: i32, fu: f64) with Mut, Panic {
+    md_check_drug(md, drug)
+    md_check_site(site)
     if !(fu > 0.0 && fu <= 1.0) { panic("multidrug28: md_set_fu_site needs 0 < fu <= 1") }
     (*md).fu_site[drug * 2 + site] = fu
 }
 
-pub fn md_set_clint(md: &!MultiDrug28, drug: i32, site: i32, enz: i32, clint_u: f64) with Mut {
+// clint_u < 0 would make the interstitial sink a mass SOURCE.
+pub fn md_set_clint(md: &!MultiDrug28, drug: i32, site: i32, enz: i32, clint_u: f64) with Mut, Panic {
+    md_check_drug(md, drug)
+    md_check_site(site)
+    md_check_enz(enz)
+    if !(clint_u >= 0.0) { panic("multidrug28: md_set_clint needs CLint_u >= 0") }
     (*md).clint[drug * 8 + site * 4 + enz] = clint_u
 }
 
-pub fn md_set_ki(md: &!MultiDrug28, drug: i32, enz: i32, ki_u: f64) with Mut {
+// Ki <= 0 stays the documented way to declare "not an inhibitor of this enzyme".
+pub fn md_set_ki(md: &!MultiDrug28, drug: i32, enz: i32, ki_u: f64) with Mut, Panic {
+    md_check_drug(md, drug)
+    md_check_enz(enz)
     (*md).ki[drug * 4 + enz] = ki_u
 }
 
-pub fn md_set_ext_load(md: &!MultiDrug28, site: i32, enz: i32, load: f64) with Mut {
+// load < 0 would raise the factor above 1 (a competitive ACTIVATOR), and
+// load <= -1 would make the denominator 1 + load zero or negative.
+pub fn md_set_ext_load(md: &!MultiDrug28, site: i32, enz: i32, load: f64) with Mut, Panic {
+    md_check_site(site)
+    md_check_enz(enz)
+    if !(load >= 0.0) { panic("multidrug28: md_set_ext_load needs load >= 0") }
     (*md).ext_load[site * 4 + enz] = load
 }
 
-pub fn md_dose_oral(md: &!MultiDrug28, drug: i32, mg: f64) with Mut {
+pub fn md_dose_oral(md: &!MultiDrug28, drug: i32, mg: f64) with Mut, Panic {
+    md_check_drug(md, drug)
+    if !(mg >= 0.0) { panic("multidrug28: md_dose_oral needs mg >= 0") }
     let fa = (*md).fa[drug]
     (*md).lumen[drug] = (*md).lumen[drug] + fa * mg
     (*md).lost[drug] = (*md).lost[drug] + (1.0 - fa) * mg
@@ -220,13 +262,18 @@ pub fn md_dose_oral(md: &!MultiDrug28, drug: i32, mg: f64) with Mut {
     (*md).pending_smooth = true
 }
 
-pub fn md_dose_iv_bolus(md: &!MultiDrug28, drug: i32, mg: f64) with Mut, Div {
+pub fn md_dose_iv_bolus(md: &!MultiDrug28, drug: i32, mg: f64) with Mut, Div, Panic {
+    md_check_drug(md, drug)
+    if !(mg >= 0.0) { panic("multidrug28: md_dose_iv_bolus needs mg >= 0") }
     (*md).cv[drug * 14] = (*md).cv[drug * 14] + mg / (*md).v_ref[drug * 14]
     (*md).dose_in[drug] = (*md).dose_in[drug] + mg
     (*md).pending_smooth = true
 }
 
-pub fn md_set_iv_rate(md: &!MultiDrug28, drug: i32, mg_per_h: f64) with Mut {
+// A negative infusion rate would remove body mass and book it as dose.
+pub fn md_set_iv_rate(md: &!MultiDrug28, drug: i32, mg_per_h: f64) with Mut, Panic {
+    md_check_drug(md, drug)
+    if !(mg_per_h >= 0.0) { panic("multidrug28: md_set_iv_rate needs mg/h >= 0") }
     (*md).iv_rate[drug] = mg_per_h
     (*md).pending_smooth = true
 }
