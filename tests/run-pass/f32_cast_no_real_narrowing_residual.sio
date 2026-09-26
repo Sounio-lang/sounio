@@ -1,0 +1,67 @@
+//@ run-pass
+//@ expect-stdout: f32_no_narrowing: PASS
+//@ description: DECLARED RESIDUAL PIN (PR #1737) -- `as f32` is a documented no-op
+//
+// ╔═══════════════════════════════════════════════════════════════════════════╗
+// ║  THIS TEST ASSERTS THE *RESIDUAL*, NOT THE CORRECT BEHAVIOR.  ON PURPOSE.  ║
+// ╚═══════════════════════════════════════════════════════════════════════════╝
+//
+// PR #1737 (commit 3d8cc0cb95) closed the value-destroying truncation: `as f32`
+// used to fall through to the float_to_int arm and (1.5 as f32) became 1.0.
+// The fix routes a float->f32 cast to the pass-through branch because the
+// backend carries f32 AS f64. Declared residual, quoted from the commit:
+//
+//     KNOWN RESIDUAL, declared not silent: `as f32` now preserves the f64 value
+//     rather than rounding to IEEE binary32. Real narrowing needs an f32
+//     representation in the backend, which does not exist. This trades a
+//     value-destroying truncation for a documented no-op, not for correctness.
+//
+// This witness pins that no-op BIT-EXACTLY, via f64_to_bits, so the residual is
+// trackable in the standard suite: today it passes because `as f32` preserves
+// every bit. The day real binary32 narrowing lands, THIS TEST GOES RED -- that
+// is the promotion signal, not an accident. Flip each expected value to the
+// "true binary32 round-trip" column in the table below (verify each against
+// CPython, don't trust this comment), update the header to say narrowing is
+// live, and delete this box.
+//
+//   value              today (no-op): f64 bits     true f32 round-trip: f64 bits
+//   16777217.0         4715268810125344768          16777216.0  = 4715268809856909312
+//   16777219.0         4715268810662215680          16777220.0  = 4715268810930651136
+//   0.1                4591870180066957722          0.10000000149011612 = 4591870180174331904
+//   3.141592653589793  4614256656552045848          3.1415927410125732  = 4614256656748904448
+//   1e300              9094988921128908188          +inf        = 9218868437227405312
+//
+// The probes are chosen so every one differs between the columns:
+//   16777217/2^24+1    -- not representable in binary32 (24-bit significand)
+//   16777219/2^24+3    -- rounds UP to even, catches round-to-nearest-even
+//   0.1                -- classic binary32/binary64 divergence, 8th digit
+//   pi                 -- fractional error in a "normal" scientific constant
+//   1e300              -- OUT of binary32 range entirely; true narrowing gives +inf,
+//                          today the value sails through untouched
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    var bad: i64 = 0
+
+    // Each line: the f64 bit pattern SURVIVES the `as f32` round-trip unchanged.
+    // Any of these going red means `as f32` started really narrowing (or broke).
+    if f64_to_bits((16777217.0 as f32) as f64) != 4715268810125344768 { bad = bad + 1 }
+    if f64_to_bits((16777219.0 as f32) as f64) != 4715268810662215680 { bad = bad + 1 }
+    if f64_to_bits((0.1 as f32) as f64) != 4591870180066957722 { bad = bad + 1 }
+    if f64_to_bits((3.141592653589793 as f32) as f64) != 4614256656552045848 { bad = bad + 1 }
+    if f64_to_bits((1e300 as f32) as f64) != 9094988921128908188 { bad = bad + 1 }
+
+    // The same no-op read through arithmetic rather than bits: 2^24+1 times one
+    // is NOT 2^24 under a no-op cast (it would be under real narrowing).
+    let big: f32 = 16777217.0 as f32
+    let roundtrip: f64 = (big as f64) * 1.0
+    if (roundtrip as i64) != 16777217 { bad = bad + 1 }
+
+    if bad != 0 {
+        print("f32_no_narrowing: RESIDUAL CHANGED ")
+        print_int(bad)
+        print("\n")
+        return 1
+    }
+    print("f32_no_narrowing: PASS\n")
+    0
+}
