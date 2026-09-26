@@ -118,9 +118,12 @@ the raise succeeded there.
 
 ## Re-measured through the wrapper
 
-The ELF is the same one, built from `98315edcdb` plus the one-line
-`pub fn vfx_scenario_init` change. Each fixture was first compiled with the raw
-ELF at 8 MiB and then run with `bin/souc run`.
+The compiler is the same ELF, built from unmodified `98315edcdb` (sha256
+`e2256828…`) before any source change. The source tree differed from
+`98315edcdb` in one input: `stdlib/darwin_pbpk/scenarios/venlafaxine_xr.sio`
+carried the one-line `pub fn vfx_scenario_init` change, which does not affect
+the ELF. Each fixture was first compiled with the raw ELF at 8 MiB and then run
+with `bin/souc run`.
 
 | fixture | raw ELF @ 8 MiB | `bin/souc run` |
 |---|---:|---|
@@ -191,7 +194,9 @@ them:
    `MADAROS_STACK_KB`, it should refuse with a named diagnostic instead of
    ignoring the `ulimit` failure. The follow-up should also verify that
    refusal under a lowered hard limit, for example
-   `ulimit -Hs 8192; bin/madaros check repro.sio`.
+   `( ulimit -Ss 8192 && ulimit -Hs 8192 && bin/madaros check repro.sio )`. The
+   soft limit is lowered first, each step gates the next, and the
+   irreversible hard-limit change stays inside the subshell.
 2. **Shrink the call-checking frame.** First confirm the attribution above by
    building with the `call_start_borrows` snapshots moved out of the recursive
    frame (heap, or one snapshot slot on the `Checker`) and re-running the
