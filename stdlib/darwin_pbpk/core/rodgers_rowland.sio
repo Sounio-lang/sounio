@@ -5,7 +5,9 @@
 // Rodgers-Rowland (2006) mechanistic tissue:plasma partition coefficient
 // prediction for neutral compounds with GUM uncertainty propagation.
 //
-// Reference: Rodgers T & Rowland M (2006) J Pharm Sci 95:1743-1764
+// Reference: Rodgers T & Rowland M (2006) J Pharm Sci 95(6):1238-1257 (doi:10.1002/jps.20502)
+// Erratum:   Rodgers T & Rowland M (2007) J Pharm Sci 96(11):3153-3154 (doi:10.1002/jps.20857)
+//            -- zwitterion equations only; does not affect this module's classes.
 //
 // SCOPE: Neutral compounds only (rapamycin is a neutral macrolide, pKa N/A).
 //
@@ -19,6 +21,50 @@
 //
 // For GUM budget purposes, the sensitivity structure from R-R is applied to
 // the literature Kp values (rapamycin.sio), consistent with JCGM 100:2008 §5.1.3.
+//
+// HOW FAR OUT OF DOMAIN rapamycin is, measured 2026-09-26 rather than implied
+// by "overestimates": at logP = 7.0, P = 1e7 and the lipid term dominates, so
+// Kpu comes out at 2e4 (blood) to 7e6 (adipose) against literature Kp of
+// 1 to 10 -- four to six ORDERS of magnitude, not a modest bias. Nothing may
+// read `RRResult.kp` for rapamycin and call it a prediction.
+//
+// ERRATUM CHECKED (2026-09-26). Rodgers & Rowland published a correction to
+// the 2006 paper: J Pharm Sci 96(11):3153-3154, Nov 2007,
+// doi:10.1002/jps.20857 (read in full). It corrects Equations 10 and 14, and
+// all derivations from them, for DI-BASIC AND DI-ACIDIC ZWITTERIONS only
+// (pipemidic acid, tetracycline, ceftazidime), plus one typo in Table 5
+// (tetracycline kidney Kpu is 10.7, not 1.06). It does NOT touch the
+// neutral / acid / very-weak-base equations, so the compound classes this
+// module implements are unaffected by it, and neither are midazolam or
+// ketoconazole. The erratum states the accuracy figures and conclusions of the
+// original paper are unchanged.
+//
+// OPEN LEAD from that erratum, NOT yet applied to the code. Its printed
+// equations carry the phospholipid term as (0.3*P + 0.7)*fNP, whereas this
+// module uses 0.3*P*fNP inside the P factor -- i.e. the module appears to be
+// missing a "+ 0.7*fNP" contribution outside the lipophilicity factor
+// (magnitude ~0.007 to 0.028 given fNP of 0.01 to 0.04). The erratum prints
+// that term only for zwitterions, so carrying it over to the neutral equation
+// would be an inference across compound classes, not a reading of the neutral
+// equation. Deliberately NOT changed until R&R 2006's own neutral/acid
+// equation (Eq 8/9) is read; recorded here so the lead is not lost.
+//
+// STILL UNRESOLVED, pending R&R 2006 itself (not in PMC; the equations and
+// Table 1 could not be retrieved, and are not reconstructed from memory here):
+//   - the extracellular-protein (albumin) term. The 2006 abstract states it is
+//     incorporated "for the other compound classes", which includes neutrals,
+//     so this implementation is missing a term the paper has.
+//   - which tissue-composition table is the paper's. This file's rr_fw_e /
+//     rr_fw_i / rr_fn_l / rr_fn_ph accessors (the ones rr_neutral calls) and
+//     core/tissue_composition.sio (which has no caller) disagree on 30 of 70
+//     values, worst at lung neutral lipid 0.0220 vs 0.0030 (7.3x). At most one
+//     of them is R&R 2006 Table 1. tissue_kidney() in this file disagrees with
+//     this file's own accessors as well.
+//   - ionisable species. This module is neutral-only, so it cannot predict Kp
+//     for midazolam (weak base, pKa 6.2) or ketoconazole (dibasic 6.51/2.94),
+//     both of which fall under the 2006 paper's scope but need its ionisation
+//     terms. R&R 2005 (pKa >= 7 bases, doi:10.1002/jps.20322) does not apply
+//     to either.
 //
 // GUM formula (JCGM 100:2008 Eq 13):
 //   u²(Kp_i) = [∂Kp_i/∂logP]² u²(logP) + [∂Kp_i/∂fu]² u²(fu)
@@ -165,8 +211,31 @@ pub struct RRScaledUnc {
 // CORE COMPUTATION — Neutral Compound R-R (Eq. 6 in Rodgers 2006)
 // ============================================================================
 // For a neutral molecule (no ionization, fu_water = 1.0):
-//   Kpu_i = fw_e_i + fw_i_i + P*(fn_L_i + 0.3*fn_P_i)   [unbound tissue:unbound plasma]
-//   Kp_i  = Kpu_i / fu_plasma                             [total tissue:total plasma]
+//   Kpu_i = fw_e_i + fw_i_i + P*(fn_L_i + 0.3*fn_P_i)
+//   Kp_i  = Kpu_i * fu_plasma
+//
+// UNITS (corrected 2026-09-26; this block previously divided by fu_plasma).
+// R&R's Kpu is the "tissue-to-plasma WATER partition coefficient" -- the title
+// and abstract of the 2006 paper say so -- i.e. TOTAL tissue concentration per
+// unit UNBOUND plasma concentration. The equation above computes exactly that:
+// tissue water contributes its volume fraction 1:1 against an unbound driving
+// concentration, and neutral lipid/phospholipid contribute P times theirs.
+// Since C_plasma,total = C_plasma,unbound / fu_p,
+//   Kp = C_tissue,total / C_plasma,total = Kpu * fu_p,
+// so the conversion MULTIPLIES by fu_plasma. Dividing was wrong by 1/fu^2
+// (156x at rapamycin's fu = 0.08) and had the wrong physical sense: it made a
+// more heavily plasma-bound drug look MORE concentrated in tissue, when
+// binding drug up in plasma must lower the tissue:plasma total ratio. The
+// module's old label for Kpu ("unbound tissue:unbound plasma") was the source
+// of the error; that quantity is not what the equation computes.
+//
+// Sensitivities follow the corrected conversion:
+//   dKp/dlogP = P*ln(10)*(fn_L + 0.3*fn_P) * fu_plasma
+//   dKp/dfu   = +Kpu = +Kp/fu_plasma      (was -Kp/fu_plasma)
+// The dimensionless log-sensitivity dln(Kp)/dlogP is INVARIANT under this
+// correction -- numerator and denominator scale together -- which is why the
+// GUM path that consumes only log_sens and literature Kp
+// (rr_scaled_uncertainty) is numerically unchanged by this fix.
 //
 // Analytical GUM sensitivities:
 //   ∂Kp/∂logP = P * ln(10) * (fn_L + 0.3*fn_P) / fu_plasma
@@ -199,13 +268,13 @@ pub fn rr_neutral(
         // Unbound tissue:unbound plasma ratio
         let kpu = fw_e + fw_i + P * lipid_c
 
-        // Total tissue:total plasma (JCGM-compatible; accounts for plasma binding)
-        let kp_i = kpu / fu_plasma
+        // Total tissue:total plasma (see the UNITS note above)
+        let kp_i = kpu * fu_plasma
         kp[i] = kp_i
 
         // GUM sensitivity coefficients (analytical)
-        let dkp_dlogP = P * ln10 * lipid_c / fu_plasma
-        let dkp_dfu   = 0.0 - kp_i / fu_plasma
+        let dkp_dlogP = P * ln10 * lipid_c * fu_plasma
+        let dkp_dfu   = kpu
 
         // Combined GUM variance (JCGM 100:2008 Eq 13)
         let var_i = dkp_dlogP * dkp_dlogP * u_logP * u_logP
@@ -340,6 +409,11 @@ struct DrugPropertiesRR {
 // T2: GUM uncertainties non-zero for all 14 compartments
 // T3: Log-sensitivities in valid range (0, ln(10)] for lipid-rich tissues
 // T4: Scaled GUM uncertainties non-zero and finite
+// T5: Kp monotonically increasing in fu_plasma (discriminates the Kpu->Kp
+//     conversion direction; T1-T4 are scale-invariant and cannot)
+// T6: a drug with no lipid affinity has Kp <= 1 (absolute-scale check)
+// T7: log-sensitivity independent of fu_plasma (justifies the claim that the
+//     GUM path is unchanged by the conversion fix)
 
 fn main() -> i32 with IO, Mut, Div, Panic {
     let rr = rr_rapamycin()
@@ -389,6 +463,74 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         passed = passed + 1
     } else {
         println("T3 FAIL: log-sensitivity out of expected range")
+        failed = failed + 1
+    }
+
+    // T5: Kp must INCREASE with fu. Kp = Kpu*fu_p and Kpu does not depend on
+    //     fu_p, so this is monotone by construction; the pre-2026-09-26 body
+    //     divided by fu_p and therefore had it backwards. Scale-invariant
+    //     checks (T1-T4) all pass under either convention, so this is the test
+    //     that discriminates.
+    let lo = rr_neutral(2.0, 0.02, 0.1, 0.005)
+    let mid = rr_neutral(2.0, 0.20, 0.1, 0.005)
+    let hi = rr_neutral(2.0, 1.00, 0.1, 0.005)
+    var mono = 0
+    var m = 0
+    while m < 14 {
+        if lo.kp[m] < mid.kp[m] && mid.kp[m] < hi.kp[m] { mono = mono + 1 }
+        m = m + 1
+    }
+    if mono == 14 {
+        println("T5 PASS: Kp increases with fu_plasma in all 14 tissues")
+        passed = passed + 1
+    } else {
+        print("T5 FAIL: Kp not monotone in fu_plasma in ")
+        print(14 - mono)
+        println("/14 tissues (conversion inverted?)")
+        failed = failed + 1
+    }
+
+    // T6: A drug with negligible lipid affinity can at most fill tissue water,
+    //     so Kp = fu_p*(fw_e + fw_i) <= fw_e + fw_i <= 1. At logP = -3,
+    //     P = 1e-3 and the lipid term is negligible. With fu_p = 0.5 the old
+    //     body returned about twice the water fraction instead of half of it.
+    let dilute = rr_neutral(0.0 - 3.0, 0.5, 0.1, 0.005)
+    var bounded = 0
+    var b = 0
+    while b < 14 {
+        if dilute.kp[b] <= 1.0 { bounded = bounded + 1 }
+        b = b + 1
+    }
+    if bounded == 14 {
+        println("T6 PASS: hydrophilic drug Kp <= 1 in all 14 tissues")
+        passed = passed + 1
+    } else {
+        print("T6 FAIL: ")
+        print(14 - bounded)
+        println("/14 tissues report Kp > 1 for a drug with no lipid affinity")
+        failed = failed + 1
+    }
+
+    // T7: the dimensionless log-sensitivity must NOT depend on fu_plasma
+    //     (numerator and denominator carry the same factor). This is what
+    //     makes rr_scaled_uncertainty -- the only consumer of this module --
+    //     numerically unaffected by the T5 correction, so it is asserted
+    //     rather than merely claimed in the header.
+    var ls_same = 0
+    var q = 0
+    while q < 14 {
+        let d = lo.log_sens[q] - hi.log_sens[q]
+        let ad = if d < 0.0 { 0.0 - d } else { d }
+        if ad <= 1.0e-12 { ls_same = ls_same + 1 }
+        q = q + 1
+    }
+    if ls_same == 14 {
+        println("T7 PASS: log-sensitivity independent of fu_plasma (14/14)")
+        passed = passed + 1
+    } else {
+        print("T7 FAIL: log-sensitivity varies with fu_plasma in ")
+        print(14 - ls_same)
+        println("/14 tissues")
         failed = failed + 1
     }
 
