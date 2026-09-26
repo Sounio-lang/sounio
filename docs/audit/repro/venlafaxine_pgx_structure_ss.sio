@@ -1,0 +1,99 @@
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::tsit5_pbpk28::*
+
+// Reproduction probe for docs/audit/VENLAFAXINE_PGX_STRUCTURE_AUDIT_2026-09-26.md
+//
+//   SOUNIO_STDLIB_PATH=$PWD/stdlib ./bin/souc run docs/audit/repro/venlafaxine_pgx_structure_ss.sio
+//   SOUNIO_SOUC_ENGINE=lean_single SOUNIO_STDLIB_PATH=$PWD/stdlib ./bin/souc run <same>
+//
+// Structural experiment by steady-state infusion (clamp-free, dt-independent):
+// under linear kinetics the single-dose AUC ratio equals the C_ss ratio for a
+// constant input through the same route.  R = 1 mg/h, 400 h, dt = 0.05 h.
+// cfg 1 (A, current), 2 (B, portal + venous-referenced Lessard X's, ODV CL 28),
+// 3 (C, B with ODV CL = 0.43 * 26.6).  Per phenotype prints the oral ratio,
+// oral CL/F (per mg entering the route; cfg 1 includes F = 0.45), systemic CL
+// (blood infusion), F_H = CL_sys/(CL/F) (cfg >= 2), and zeroed-state hits.
+// Also: an IV-bolus AUC for cfg 2 NM, to measure the transient clamp bias.
+fn f3(x: f64) -> i64 { return (x * 1000.0) as i64 }
+
+fn scale(ph: i32) -> f64 with Div {
+    if ph == 0 { return 0.25 / 3.45 }
+    if ph == 1 { return 1.16 / 3.45 }
+    if ph == 3 { return 10.3 / 3.45 }
+    return 1.0
+}
+
+// out: [C_b parent, C_b odv, zeroed hits, bolus AUC]
+fn run(cfg: i32, ph: i32, route_oral: bool, bolus: bool, out: &![f64; 4]) with Mut, Div {
+    let s = scale(ph)
+    var pp = pbpk28_params_venlafaxine_parent()
+    var op = pbpk28_params_venlafaxine_odv()
+    let f_liv = pp.vasc_frac[1]
+    let kappa = f_liv + (1.0 - f_liv) * pp.kp[1]
+    var route = 0
+    var cl_sink = 43.0 * s
+    var frac_form = 1.0
+    var fin = 1.0
+    op.cl_central = 28.0
+    pp.cl_central = 57.0
+    if cfg == 1 && route_oral { fin = 0.45 }
+    if cfg >= 2 {
+        let x_form = 43.0 * s
+        let x_hep = x_form + 40.0 * s + 13.0
+        cl_sink = x_hep / kappa
+        frac_form = x_form / x_hep
+        pp.cl_central = 4.0
+        if route_oral { route = 1 }
+    }
+    if cfg == 3 { op.cl_central = 0.43 * 26.6 }
+    let dt = 0.05
+    var par = pbpk28_state_zero()
+    var odv = pbpk28_state_zero()
+    var rate = fin * 1.0
+    if bolus { rate = 0.0 par.cv[0] = 75.0 / pp.v_ref[0] }
+    var hits = 0.0
+    var auc = 0.0
+    var k = 0
+    while k < 8000 {
+        let c0 = par.cv[0]
+        let removed = pbpk28_full_cn_step_routed_mut(&!par, pp, rate, route, dt, 1, cl_sink)
+        let _z = pbpk28_full_cn_step_sink_mut(&!odv, op, removed * frac_form / dt, dt, 0, 0.0)
+        auc = auc + 0.5 * dt * (c0 + par.cv[0])
+        var i = 0
+        while i < 14 {
+            if par.cv[i] == 0.0 || (i > 0 && par.ct[i] == 0.0) { hits = hits + 1.0 }
+            i = i + 1
+        }
+        k = k + 1
+    }
+    (*out)[0] = par.cv[0]
+    (*out)[1] = odv.cv[0]
+    (*out)[2] = hits
+    (*out)[3] = auc
+}
+
+fn main() with IO, Mut, Div {
+    var cfg = 1
+    while cfg <= 3 {
+        var ph = 0
+        while ph < 4 {
+            var o: [f64; 4] = [0.0; 4]
+            var b: [f64; 4] = [0.0; 4]
+            run(cfg, ph, true, false, &!o)
+            run(cfg, ph, false, false, &!b)
+            print("cfg="); print(cfg); print(" ph="); print(ph)
+            print(" ratio*1e3="); print(f3(o[1] / o[0]))
+            print(" CL_over_F*1e3="); print(f3(1.0 / o[0]))
+            print(" CLsys*1e3="); print(f3(1.0 / b[0]))
+            if cfg >= 2 { print(" F_H*1e3="); print(f3(o[0] / b[0])) }
+            print(" zeroed="); print((o[2] + b[2]) as i64)
+            println("")
+            ph = ph + 1
+        }
+        cfg = cfg + 1
+    }
+    var bb: [f64; 4] = [0.0; 4]
+    run(2, 2, false, true, &!bb)
+    print("bolus cfg=2 NM: D/AUC*1e3="); print(f3(75.0 / bb[3]))
+    print(" zeroed_state_hits="); println(bb[2] as i64)
+}
