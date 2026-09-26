@@ -12,10 +12,14 @@ use chemistry::ontology;
 // type to later arithmetic (lean_single checker bug) — use a fn instead of a let.
 fn r_const() -> f64 { gas_constant_approx() }
 
-fn abs_f64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
-fn check_near(a: f64, b: f64, tol: f64) -> bool { abs_f64(a - b) < tol }
+// Prefixed equilibrium_* (not the bare abs_f64/check_near/etc used by other
+// stdlib/chemistry files): see the note in acids.sio -- these names collide
+// across modules and which module's copy wins depends on import order, not
+// the caller's own module, with no diagnostic either way.
+fn equilibrium_abs_f64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn equilibrium_check_near(a: f64, b: f64, tol: f64) -> bool { equilibrium_abs_f64(a - b) < tol }
 
-fn ln_approx(x: f64) -> f64 with Mut, Div, Panic {
+fn equilibrium_ln_approx(x: f64) -> f64 with Mut, Div, Panic {
     if x <= 0.0 { return 0.0; }
     let z = (x - 1.0) / (x + 1.0);
     var sum = z; var term = z; var k = 1;
@@ -27,9 +31,9 @@ fn ln_approx(x: f64) -> f64 with Mut, Div, Panic {
     2.0 * sum
 }
 
-fn exp_approx(x: f64) -> f64 with Mut, Div, Panic {
+fn equilibrium_exp_approx(x: f64) -> f64 with Mut, Div, Panic {
     if x < -50.0 { return 0.0; }
-    if x < 0.0 { return 1.0 / exp_approx(0.0 - x); }
+    if x < 0.0 { return 1.0 / equilibrium_exp_approx(0.0 - x); }
     var sumv = 1.0; var term = 1.0; var k = 1;
     while k < 25 {
         term = term * x / (k as f64);
@@ -39,7 +43,7 @@ fn exp_approx(x: f64) -> f64 with Mut, Div, Panic {
     sumv
 }
 
-fn sqrt_approx(x: f64) -> f64 with Mut, Div, Panic {
+fn equilibrium_sqrt_approx(x: f64) -> f64 with Mut, Div, Panic {
     if x <= 0.0 { return 0.0; }
     var y = x; var i=0; while i<20 { y = 0.5*(y + x/y); i=i+1; } y
 }
@@ -48,16 +52,16 @@ fn sqrt_approx(x: f64) -> f64 with Mut, Div, Panic {
 pub fn k_from_delta_g(dg: f64, udg: f64, t: f64, ut: f64) -> (f64, f64) with Mut, Div, Panic {
     if t <= 0.0 { return (0.0, 0.0); }
     let arg = 0.0 - dg / (r_const() * t);
-    let k = exp_approx(arg);
-    let uk = abs_f64(k) * (udg / abs_f64(r_const() * t) + (dg / (r_const() * t * t)) * ut); // approx
+    let k = equilibrium_exp_approx(arg);
+    let uk = equilibrium_abs_f64(k) * (udg / equilibrium_abs_f64(r_const() * t) + (dg / (r_const() * t * t)) * ut); // approx
     (k, uk)
 }
 
 // Real deltaG from K
 pub fn delta_g_from_k(k: f64, uk: f64, t: f64, ut: f64) -> (f64, f64) with Mut, Div, Panic {
     if k <= 0.0 || t <= 0.0 { return (0.0, 0.0); }
-    let dg = 0.0 - r_const() * t * ln_approx(k);
-    let udg = abs_f64(r_const() * t * (uk / (k * abs_f64(ln_approx(k))))) + abs_f64(r_const() * ln_approx(k)) * ut;
+    let dg = 0.0 - r_const() * t * equilibrium_ln_approx(k);
+    let udg = equilibrium_abs_f64(r_const() * t * (uk / (k * equilibrium_abs_f64(equilibrium_ln_approx(k))))) + equilibrium_abs_f64(r_const() * equilibrium_ln_approx(k)) * ut;
     (dg, udg)
 }
 
@@ -67,7 +71,7 @@ pub fn solve_simple_equil(total: f64, utotal: f64, k: f64, uk: f64) -> ((f64,f64
     let b = k * total / (1.0 + k);
     let a = total - b;
     // GUM rough
-    let ub = abs_f64( (uk / (1.0+k) * total) + (k / (1.0+k) * utotal) ); // approx
+    let ub = equilibrium_abs_f64( (uk / (1.0+k) * total) + (k / (1.0+k) * utotal) ); // approx
     ((a, ub/(1.0+k) ), (b, ub))
 }
 
@@ -78,10 +82,10 @@ pub fn newton_equil_solve(guess: f64, tol: f64) -> f64 with Mut, Div, Panic {
     while i < 20 {
         let f = x*x - 0.01; // example K=0.01 for x^2 = K (total-x) or simple
         let df = 2.0 * x;
-        if abs_f64(df) < 1e-12 { break; }
+        if equilibrium_abs_f64(df) < 1e-12 { break; }
         let dx = f / df;
         x = x - dx;
-        if abs_f64(dx) < tol { break; }
+        if equilibrium_abs_f64(dx) < tol { break; }
         i = i + 1;
     }
     x
@@ -91,8 +95,8 @@ pub fn newton_equil_solve(guess: f64, tol: f64) -> f64 with Mut, Div, Panic {
 pub fn nernst(e0: f64, ue0: f64, n: i64, q: f64, uq: f64, t: f64, ut: f64) -> (f64, f64) with Mut, Div, Panic {
     if n == 0 { return (e0, ue0); }
     let rt_nf = (r_const() * t) / (n as f64 * 96485.0);
-    let e = e0 - rt_nf * ln_approx(q);
-    let ue = ue0 + abs_f64(rt_nf * (uq / (q * abs_f64(ln_approx(q))))) + abs_f64( (ln_approx(q) * r_const() / (n as f64 * 96485.0)) * ut );
+    let e = e0 - rt_nf * equilibrium_ln_approx(q);
+    let ue = ue0 + equilibrium_abs_f64(rt_nf * (uq / (q * equilibrium_abs_f64(equilibrium_ln_approx(q))))) + equilibrium_abs_f64( (equilibrium_ln_approx(q) * r_const() / (n as f64 * 96485.0)) * ut );
     (e, ue)
 }
 
@@ -104,17 +108,17 @@ pub fn test_k_dg() -> bool with Mut, Div, Panic {
 
 pub fn test_delta_g() -> bool with Mut, Div, Panic {
     let (dg, _) = delta_g_from_k(1.0, 0.0, 298.0, 0.0);
-    check_near(dg, 0.0, 10.0)
+    equilibrium_check_near(dg, 0.0, 10.0)
 }
 
 pub fn test_nernst() -> bool with Mut, Div, Panic {
     let (e, ue) = nernst(1.0, 0.01, 1, 1.0, 0.1, 298.0, 1.0);
-    check_near(e, 1.0, 0.1) && ue > 0.0
+    equilibrium_check_near(e, 1.0, 0.1) && ue > 0.0
 }
 
 pub fn test_newton_equil() -> bool with Mut, Div, Panic {
     let x = newton_equil_solve(0.1, 1e-6);
-    check_near(x, 0.1, 0.01) // for the example f
+    equilibrium_check_near(x, 0.1, 0.01) // for the example f
 }
 
 // Real solver for A + B ⇌ C , Kc = [C]/([A][B])
@@ -126,10 +130,10 @@ pub fn solve_ab_c_equil(a0: f64, ua0: f64, b0: f64, ub0: f64, k: f64, uk: f64) -
     let p = a0 * b0;
     let alpha = s + 1.0/k;
     let disc = alpha*alpha - 4.0 * p;
-    let x = (alpha - sqrt_approx(disc)) / 2.0;
+    let x = (alpha - equilibrium_sqrt_approx(disc)) / 2.0;
     // GUM rough: dx from da,db,dk
-    let dx_da = 0.5 * (1.0 - (s - 2.0*a0)/sqrt_approx(disc) ); // simplified
-    let u = abs_f64( dx_da * ua0 ) + abs_f64( (0.5 - dx_da) * ub0 ) + abs_f64( (p / (k*k * sqrt_approx(disc))) * uk );
+    let dx_da = 0.5 * (1.0 - (s - 2.0*a0)/equilibrium_sqrt_approx(disc) ); // simplified
+    let u = equilibrium_abs_f64( dx_da * ua0 ) + equilibrium_abs_f64( (0.5 - dx_da) * ub0 ) + equilibrium_abs_f64( (p / (k*k * equilibrium_sqrt_approx(disc))) * uk );
     (x, u)
 }
 
@@ -138,7 +142,7 @@ pub fn test_ab_c() -> bool with Mut, Div, Panic {
     // A + B <-> C, a0=b0=1, K=10: x/((1-x)^2)=10 -> 10x^2-21x+10=0 ->
     // x=(21-sqrt(41))/20 = 0.729844 (physical root, x<1). The prior
     // expectation of 0.45 was never the root of this equation.
-    check_near(x, 0.729844, 0.001) && ux > 0.0
+    equilibrium_check_near(x, 0.729844, 0.001) && ux > 0.0
 }
 
 // More equil speciation: simple 2-equil system e.g. H2A <-> HA + H , HA <-> A + H
@@ -154,7 +158,7 @@ pub fn solve_diprotic_speciation(total: f64, k1: f64, k2: f64, h: f64) -> (f64, 
 
 pub fn test_speciation() -> bool with Mut, Div, Panic {
     let (h2a, ha, a) = solve_diprotic_speciation(1.0, 1e-3, 1e-6, 1e-4);
-    check_near(h2a + ha + a, 1.0, 0.01)
+    equilibrium_check_near(h2a + ha + a, 1.0, 0.01)
 }
 
 // Real example: for a reaction with known deltaG ~ -5.7 kJ/mol for K~10 at
@@ -163,7 +167,7 @@ pub fn test_speciation() -> bool with Mut, Div, Panic {
 // 0.100, not 10 -- the sign, not the magnitude, was the bug.
 pub fn test_real_delta_g() -> bool with Mut, Div, Panic {
     let (k, _) = k_from_delta_g(-5700.0, 100.0, 298.0, 1.0);
-    check_near(k, 10.0, 1.0)  // real-ish
+    equilibrium_check_near(k, 10.0, 1.0)  // real-ish
 }
 
 fn main() -> i32 with Mut, Div, Panic, IO {
