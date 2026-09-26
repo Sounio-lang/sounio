@@ -30,7 +30,7 @@
 #   cohere       — Command R+ via OpenRouter (structured analysis, lit review)
 #   openrouter   — OpenRouter Auto (auto-routes to best model)
 #   minimax      — MiniMax M2.7 (Anthropic-compat, long context)
-#   all          — ALL providers (14 models)
+#   all          — ALL providers (13 models)
 #
 # Keys read from env vars (set in ~/.sounio-keys.env):
 #   LLMGATEWAY_API_KEY (canonical, https://api.llmgateway.io/v1),

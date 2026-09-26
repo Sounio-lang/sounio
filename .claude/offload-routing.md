@@ -74,7 +74,7 @@ bin/llm-offload -t expand -i docs/papers/vancomycin_pl_paper_outline.md > /tmp/d
 bin/llm-offload -t review -p deepseek -i stdlib/clinical/vancomycin_pbpk.sio
 
 # Math audit on a derivation snippet (stdin OK)
-echo "Verify dCmin/dVc < 0 for ke*tau in [0.3, 1.5]" | bin/llm-offload -t math-review -p xai
+echo "Verify dCmin/dVc < 0 for ke*tau in [0.3, 1.5]" | bin/llm-offload -t math-review   # default fan-out: Grok 4.7 + Kimi K3 + zai + local
 
 # Paraphrase a cover letter
 bin/llm-offload -t paraphrase -p qwen -i docs/papers/cover_letters/popl_cover_letter.md
@@ -87,10 +87,10 @@ Per `.claude/vancomycin_track.md`. Suggested router for the M0–M6 thrust:
 | Phase | Best for routine work | Best for review |
 |-------|-----------------------|-----------------|
 | M0 design decisions | Opus 4.7 (in-session) | `bin/llm-offload -t review -p xai` |
-| M1/M2 substrate | Opus 4.7 / Sonnet 4.6 | `-t math-review -p xai` (proved necessary — caught Vc-monotonicity bug) |
-| M3 PK math | `-t math-review -p xai` (primary) | `-p qwen` (second opinion) |
+| M1/M2 substrate | Opus 4.7 / Sonnet 4.6 | `-t math-review` default fan-out (the Grok leg caught the Vc-monotonicity bug on 2026-04-30, then run as `-p xai`) |
+| M3 PK math | `-t math-review` default fan-out (Grok 4.7 + Kimi K3) | `-p gw:<model>` or `-p qwen` (extra opinion) |
 | M4 cohort ETL | `-t scaffold -p deepseek` | `-t review -p deepseek` |
-| M4 stats | `-t math-review -p xai` | `-t review -p qwen` |
+| M4 stats | `-t math-review` default fan-out | `-t review -p qwen` |
 | M5 prose expansion | `-t expand -p gemini` | `-t review -p deepseek` |
 | M5 paper review | `bin/llm-offload --raw <draft> deepseek xai gemini` (consensus) | — |
 | M6 cover letters | `-t paraphrase -p qwen` (or minimax if key set) | — |
