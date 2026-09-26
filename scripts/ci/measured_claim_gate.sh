@@ -41,11 +41,14 @@ gate_name "measured_claim_gate"
 # here, in the mode that writes the census and runs nothing, and the two
 # witness_census_* rows below compare THAT against the tree. Committing the
 # JSON is what made Contracts red on any pull request that adds a test.
-if [[ -z "${SOUNIO_MEASURED_CLAIMS:-}" ]]; then
-  SOUNIO_WITNESS_SABOTAGE_CENSUS_ONLY=1 bash "$ROOT_DIR/scripts/ci/witness_declares_its_sabotage_gate.sh" >/dev/null \
-    || { echo "witness census could not be derived; the witness_census_* claims have nothing to read" >&2; exit 1; }
-fi
 CLAIMS="${SOUNIO_MEASURED_CLAIMS:-$ROOT_DIR/scripts/ci/fixtures/measured_claims.tsv}"
+# Derive the census whenever the claims being checked are the canonical ones,
+# even when a wrapper reached them by setting SOUNIO_MEASURED_CLAIMS to that
+# path explicitly. Skipping on any non-empty override would leave the two
+# witness_census_* rows reading a JSON that is no longer committed.
+if [[ "$CLAIMS" == "$ROOT_DIR/scripts/ci/fixtures/measured_claims.tsv" ]]; then
+  SOUNIO_WITNESS_SABOTAGE_CENSUS_ONLY=1 bash "$ROOT_DIR/scripts/ci/witness_declares_its_sabotage_gate.sh" >/dev/null || { echo "witness census could not be derived; the witness_census_* claims have nothing to read" >&2; exit 1; }
+fi
 BASELINE="${SOUNIO_MEASURED_CLAIMS_BASELINE:-$ROOT_DIR/scripts/ci/fixtures/measured_claims_baseline.txt}"
 
 require_file "$CLAIMS" "the claims table is missing — this gate checks nothing without it"
