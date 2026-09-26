@@ -40,6 +40,16 @@ The wrapper prepends a task-specific system prompt from `.claude/offload-tasks/<
 > DeepSeek-direct had an invalid key.
 > Two legs from the same vendor (e.g. Grok via the gateway plus Grok direct) count as ONE
 > opinion.
+>
+> **Verified end-to-end with the real key (2026-09-26):** the default math-review fan-out
+> returned DONE from Grok 4.7 (served as `xai/grok-4-7`) and Kimi K3 (served as
+> `novita/kimi-k3`). Both caught a planted error ("backward Euler is second-order").
+> zai and local returned ERROR and were not counted.
+> - The gateway picks the host for `kimi-k3` itself. It is the same Kimi model family,
+>   so it still counts as independent of Grok.
+> - Pinning a host (`moonshot/kimi-k3`, `xai/grok-4-7`) returns 403 "Direct provider
+>   routing is not available on coding plans". Use the canonical ids without a
+>   provider prefix.
 
 > **Previous default (2026-08-31, superseded):** `bin/llm-offload -t math-review` fans out to **xai (grok-4.6)**, **zai (Z.AI GLM-5.2)**, and the local fallback automatically — independent opinions are the standard, not opt-in. Z.AI needs `ZAI_API_KEY` (or `ZHIPU_API_KEY`); unavailable legs print a SKIPPED or ERROR notice and must not be represented as passes. The default response cap is 8,192 tokens; deep audits must opt in with `OFFLOAD_MAX_TOKENS`. Run `bin/llm-offload --status` to see loaded keys.
 
