@@ -1,0 +1,84 @@
+// stdlib/darwin_pbpk/pbpk28_calibration.sio — closed-form calibration of the
+// PBPK28 hepatic / gut-wall sinks from clinical control-arm quantities.
+//
+// Every function here inverts an exact steady-state identity of the
+// pbpk28_hepatic kernel (portal routing on, sinks k = fu·CLint/Kp on the
+// interstitial layer), so a calibrated profile reproduces its targets in the
+// dynamic model to round-off (gates: tests/run-pass/darwin_pbpk28_calibration_gates.sio).
+// All quantities are BLOOD-based (the kernel's concentrations are blood):
+// convert plasma clearances with CL_b = CL_p / (B:P) before calling.
+//
+// Liver (extended clearance model, the V2 identity of the kernel):
+//     X_L  = fu·CLint·PS/(PS + fu·CLint)      (PS -> inf: well-stirred)
+//     CL_H = Q_L·X_L/(Q_L + X_L),  F_H = Q_L/(Q_L + X_L)
+// Inverse from a hepatic blood clearance CL_H < Q_L:
+//     X_L = Q_L·CL_H/(Q_L - CL_H),  fu·CLint = X_L·PS/(PS - X_L)   (X_L < PS)
+//
+// Gut wall — first-pass ASYMMETRY. Absorbed drug enters gut tissue (where the
+// enzyme is) directly; drug arriving in arterial blood has to cross PS_g.
+// With k_g = fu_g·CLint_g/Kp_g, u = PS_g/Kp_g, q = Q_gut:
+//     a     = u/(u + k_g)                       (absorbed fraction leaving tissue)
+//     X_g   = PS_g·k_g/(u + k_g)
+//     F_G   = a·q/(q + X_g)                     (escape of the absorbed dose)
+//     E_sys = X_g/(q + X_g)                     (extraction of arterial drug per pass)
+// Inverse from (F_G, E_sys) with F_G < 1 - E_sys:
+//     X_g = q·E_sys/(1 - E_sys),  a = F_G/(1 - E_sys),
+//     PS_g = X_g/(1 - a),         fu_g·CLint_g = PS_g·(1 - a)/a
+// The two targets are distinct measurements for midazolam (Paine 1996, Clin
+// Pharmacol Ther 60:14: 0.43 ± 0.18 of the absorbed dose vs 0.08 ± 0.11 of
+// arterial drug per passage). Setting PS_g large instead would extract
+// systemic drug as strongly as absorbed drug.
+//
+// Static-limit corollary (used to explain, not to fit): under an inhibition
+// factor f on k_g with PS_g fixed, the gut AUC-ratio contribution depends on
+// the calibrated (F_G, E_sys) and f only.
+
+use darwin_pbpk::core::pbpk28_params::*
+
+// fu·CLint (L/h) of the liver sink that gives hepatic blood clearance cl_h
+// (L/h) with total liver blood flow q_l and liver PS ps_l.
+pub fn p28c_liver_fuclint(cl_h: f64, q_l: f64, ps_l: f64) -> f64 with Div, Panic {
+    if cl_h <= 0.0 || cl_h >= q_l { panic("pbpk28_calibration: need 0 < CL_H < Q_L") }
+    let x = q_l * cl_h / (q_l - cl_h)
+    if x >= ps_l { panic("pbpk28_calibration: CL_H not reachable with this liver PS (X_L >= PS)") }
+    return x * ps_l / (ps_l - x)
+}
+
+// Forward map (for checks): hepatic blood clearance from fu·CLint.
+pub fn p28c_liver_clh(fuclint: f64, q_l: f64, ps_l: f64) -> f64 with Div {
+    let x = fuclint * ps_l / (ps_l + fuclint)
+    return q_l * x / (q_l + x)
+}
+
+pub fn p28c_liver_fh(fuclint: f64, q_l: f64, ps_l: f64) -> f64 with Div {
+    let x = fuclint * ps_l / (ps_l + fuclint)
+    return q_l / (q_l + x)
+}
+
+// Gut-wall inverse: returns (PS_g, fu_g·CLint_g) in L/h for the target
+// first-pass escape f_g of the absorbed dose and per-pass extraction e_sys of
+// arterial drug, with gut blood flow q_g.
+pub fn p28c_gut_asymmetric(f_g: f64, e_sys: f64, q_g: f64) -> (f64, f64) with Div, Panic {
+    if e_sys <= 0.0 || e_sys >= 1.0 { panic("pbpk28_calibration: need 0 < E_sys < 1") }
+    if f_g <= 0.0 || f_g >= 1.0 - e_sys { panic("pbpk28_calibration: need 0 < F_G < 1 - E_sys") }
+    let x = q_g * e_sys / (1.0 - e_sys)
+    let a = f_g / (1.0 - e_sys)
+    let ps = x / (1.0 - a)
+    return (ps, ps * (1.0 - a) / a)
+}
+
+// Forward maps (for checks and for the static-limit explanation).
+pub fn p28c_gut_fg(fuclint_g: f64, ps_g: f64, kp_g: f64, q_g: f64) -> f64 with Div {
+    let u = ps_g / kp_g
+    let k = fuclint_g / kp_g
+    let a = u / (u + k)
+    let x = ps_g * k / (u + k)
+    return a * q_g / (q_g + x)
+}
+
+pub fn p28c_gut_esys(fuclint_g: f64, ps_g: f64, kp_g: f64, q_g: f64) -> f64 with Div {
+    let u = ps_g / kp_g
+    let k = fuclint_g / kp_g
+    let x = ps_g * k / (u + k)
+    return x / (q_g + x)
+}

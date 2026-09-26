@@ -1,0 +1,101 @@
+//@ run-pass
+//@ expect-stdout-contains: PBPK28_CALIBRATION_GATES_PASS
+//@ timeout: 180
+
+// Gates for stdlib/darwin_pbpk/pbpk28_calibration.sio.
+//
+// C0  Algebraic round trips: forward(inverse(target)) = target to 1e-12.
+// C1  Liver: a sink calibrated to hepatic blood clearance CL_H reproduces it in
+//     the dynamic model: IV bolus AUC = D/(CL_H + CL_c) to 1e-9 (V3's
+//     tolerance: truncation at t_end plus round-off; the clamp must stay at
+//     round-off).
+// C2  Gut asymmetry: a gut wall calibrated to (F_G, E_sys) reproduces both in
+//     the dynamic model, with no liver sink: AUC_po/AUC_iv = F_G and the
+//     systemic gut clearance Q_g·E_sys, to 1e-9.
+// C3  Both sites: AUC_po/AUC_iv = F_G·F_H with the liver and the asymmetric gut
+//     calibrated together (the portal route composes the two first passes).
+// Targets are midazolam-like (F_G 0.57, E_sys 0.08: Paine 1996; E_H 0.44:
+// Thummel 1996) on the rapamycin physiology, to exercise realistic magnitudes;
+// they are fixtures, not the midazolam profile.
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::pbpk28_calibration::*
+use darwin_pbpk::ddi::multidrug28::*
+
+fn g_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn e12(x: f64) -> i64 { return (x * 1000000000000.0) as i64 }
+fn rel(a: f64, b: f64) -> f64 with Div { return g_abs(a - b) / g_abs(b) }
+fn clamp_bound(t_end: f64, dt: f64, dose: f64) -> f64 with Div {
+    return (t_end / dt) * 27.0 * 2.220446049250313e-16 * dose
+}
+
+// One drug on the rapamycin physiology with the given sinks; returns
+// (AUC_b, clamped mass). fu_b = fu_g = 1, so fu·CLint enters as CLint.
+fn run(fuclint_l: f64, fuclint_g: f64, ps_g: f64, cl_c: f64, oral: bool) -> (f64, f64) with Mut, Div, Panic {
+    var md = md_new(true)
+    var p = pbpk28_params_rapamycin()
+    p.cl_central = cl_c
+    p.ps[8] = ps_g
+    let i = md_add_drug(&!md, p, 1.0, 1.0, 2.0)
+    md_set_clint(&!md, i, md_site_liver(), md_cyp3a4(), fuclint_l)
+    md_set_clint(&!md, i, md_site_gut(), md_cyp3a4(), fuclint_g)
+    if oral { md_dose_oral(&!md, i, 1.0) } else { md_dose_iv_bolus(&!md, i, 1.0) }
+    md_run_to(&!md, 300.0, 0.02)
+    return (md.auc_b[i], md_clamped(&md, i))
+}
+
+fn main() -> i32 with Mut, Div, Panic, IO {
+    let p = pbpk28_params_rapamycin()
+    let q_l = p.q[1]
+    let ps_l = p.ps[1]
+    let q_g = p.q[8]
+    let kp_g = p.kp[8]
+    let cl_c = 1.5
+    let bound = clamp_bound(300.0, 0.02, 1.0)
+
+    // C0
+    let e_h = 0.44
+    let cl_h = e_h * q_l
+    let fl = p28c_liver_fuclint(cl_h, q_l, ps_l)
+    let (ps_g, fg_cl) = p28c_gut_asymmetric(0.57, 0.08, q_g)
+    let c0 = rel(p28c_liver_clh(fl, q_l, ps_l), cl_h) + rel(1.0 - p28c_liver_fh(fl, q_l, ps_l), e_h) + rel(p28c_gut_fg(fg_cl, ps_g, kp_g, q_g), 0.57) + rel(p28c_gut_esys(fg_cl, ps_g, kp_g, q_g), 0.08)
+    print("C0 calibrated liver fu*CLint = ") print(fl) print(" L/h; gut PS_g = ") print(ps_g) print(" L/h, fu_g*CLint_g = ") print(fg_cl) println(" L/h")
+    print("C0 summed round-trip error (x1e12) = ") println(e12(c0))
+    let ok0 = c0 < 1.0e-12
+
+    // C1: liver only, IV
+    let (auc1, cl1) = run(fl, 0.0, p.ps[8], cl_c, false)
+    let err1 = rel(auc1, 1.0 / (cl_h + cl_c))
+    print("C1 IV AUC vs D/(CL_H + CL_c) (rel x1e12) = ") println(e12(err1))
+    let ok1 = err1 < 1.0e-9 && cl1 <= bound
+
+    // C2: gut only
+    let (po2, cp2) = run(0.0, fg_cl, ps_g, cl_c, true)
+    let (iv2, ci2) = run(0.0, fg_cl, ps_g, cl_c, false)
+    let fg_meas = po2 / iv2
+    let esys_meas = (1.0 / iv2 - cl_c) / q_g
+    print("C2 F_G measured = ") print(fg_meas) print("  E_sys measured = ") println(esys_meas)
+    let err2 = rel(fg_meas, 0.57) + rel(esys_meas, 0.08)
+    print("C2 error (rel x1e12) = ") println(e12(err2))
+    let ok2 = err2 < 1.0e-9 && cp2 <= bound && ci2 <= bound
+
+    // C3: both
+    let (po3, cp3) = run(fl, fg_cl, ps_g, cl_c, true)
+    let (iv3, ci3) = run(fl, fg_cl, ps_g, cl_c, false)
+    let f_meas = po3 / iv3
+    let f_expect = 0.57 * (1.0 - e_h)
+    print("C3 F measured = ") print(f_meas) print("  F_G*F_H = ") println(f_expect)
+    let err3 = rel(f_meas, f_expect)
+    print("C3 error (rel x1e12) = ") println(e12(err3))
+    let ok3 = err3 < 1.0e-9 && cp3 <= bound && ci3 <= bound
+
+    if ok0 { println("C0 PASS") } else { println("C0 FAIL") }
+    if ok1 { println("C1 PASS") } else { println("C1 FAIL") }
+    if ok2 { println("C2 PASS") } else { println("C2 FAIL") }
+    if ok3 { println("C3 PASS") } else { println("C3 FAIL") }
+    if ok0 && ok1 && ok2 && ok3 {
+        println("PBPK28_CALIBRATION_GATES_PASS")
+        return 0
+    }
+    return 1
+}

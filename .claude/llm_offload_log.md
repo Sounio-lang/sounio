@@ -104,3 +104,25 @@ V0 bit-identity of the kernel preserved on both engines.
 SOUNIO_STDLIB_PATH and resolves `stdlib/` relative to the cwd; lean_single
 `souc run` exits 1 silently on a compile error. An early "identical" diff in
 this work compared old code with old code because of it and was discarded.
+
+## 2026-09-27T00:30Z — Claude (session_01RMzxzzsE5JNGEqnnkUs9Yo) — M1, PBPK28 closed-form calibration (ECM inverse, asymmetric gut wall)
+
+| 2026-09-27 | — | math-review | pbpk28_calibration.sio (liver ECM inverse; gut-wall (PS_g, fu_g·CLint_g) from (F_G, E_sys)); darwin_pbpk28_calibration_gates.sio C0-C3 | WAIVED | No offload provider configured (`bin/llm-offload --status`). Verified by exact round trips on the dynamic model and sabotage controls, below. |
+
+**Trigger**: new hand-derived PK identities used to calibrate drug profiles:
+(1) inverse of the extended clearance model, fu·CLint = X·PS/(PS − X) with
+X = Q·CL_H/(Q − CL_H); (2) the gut-wall asymmetry of the kernel — absorbed drug
+enters the enzyme compartment directly, arterial drug crosses PS_g — giving
+F_G = a·q/(q + X_g), E_sys = X_g/(q + X_g) with a = u/(u + k), X_g = PS·k/(u + k),
+u = PS/Kp, and the inverse X_g = q·E_sys/(1 − E_sys), a = F_G/(1 − E_sys),
+PS_g = X_g/(1 − a), fu_g·CLint_g = PS_g(1 − a)/a (independent of Kp_g).
+Motivation measured in the literature (checked on PubMed): Paine 1996,
+doi:10.1016/S0009-9236(96)90162-9, midazolam intestinal extraction 0.43 ± 0.18
+of the absorbed dose vs 0.08 ± 0.11 of arterial drug per passage (anhepatic
+liver-transplant recipients, n = 5 + 5).
+
+**Outcome**: WAIVED. Gates, both engines: C0 algebraic round trips 0 (x1e12);
+C1 IV AUC = D/(CL_H + CL_c) to 1e-11; C2 F_G and E_sys recovered on the dynamic
+model to < 1e-12; C3 F = F_G·F_H to 1.8e-11. Sabotages: liver inverse replaced
+by the forward form -> C0, C1, C3 FAIL; gut inverse a/(1 − a) -> C0, C2, C3
+FAIL. Flagged for re-review once a provider is configured.
