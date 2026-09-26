@@ -18,6 +18,9 @@
 //      clearance on the liver, CL_form·dt/V_liver ≈ 12 at dt = 0.5 h), the
 //      ledger identity M(T) + eliminated + sink_removed − administered = M(0)
 //      closes to rounding under a constant input.
+//   4. The same with the input routed into the liver's vascular space
+//      (portal first-pass, input_organ = 1): the identity still closes, and
+//      routing through the liver raises the liver AUC over blood input.
 //
 // Bounds (theta_pbpk28 gate functions): |ΔM|/M_0 ≤ max(1e-12, steps·1e-15),
 // a heuristic rounding budget for an identity that is exact in real
@@ -129,6 +132,47 @@ fn t_sink(method: i32, dt: f64) -> i32 with IO, Mut, Div {
     return 1
 }
 
+// Input routed into organ `route` (0 = blood). Returns the liver AUC, or −1
+// when the ledger identity does not close.
+fn t_route_run(method: i32, route: i32, dt: f64) -> f64 with IO, Mut, Div {
+    let p = pbpk28_params_venlafaxine_parent()
+    var st = pbpk28_state_zero()
+    var led = pbpk28_ledger_zero()
+    let cl_form = 43.0
+    let rel = 3.0
+    var t = 0.0
+    while t < 48.0 - 0.5 * dt {
+        if method == 1 {
+            let _s = pbpk28_theta_step_routed_sink_mut(&!st, p, rel, route, dt, 1.0, 1, cl_form, &!led)
+        } else {
+            let _s = pbpk28_trbdf2_step_routed_sink_mut(&!st, p, rel, route, dt, 1, cl_form, &!led)
+        }
+        t = t + dt
+    }
+    let r = pbpk28_ledger_residual(led, st, p, 0.0)
+    print("route method=")
+    print(method)
+    print(" input_organ=")
+    print(route)
+    print(" sink_removed=")
+    print(led.sink_removed)
+    print(" auc_liver=")
+    print(led.auc[1])
+    print(" |res|/admin x1e12=")
+    println(t_abs(r) / led.administered * 1.0e12)
+    if t_abs(r) > pbpk28_mass_tol_rel(led.steps) * led.administered { return 0.0 - 1.0 }
+    if led.neg_mass > pbpk28_neg_mass_bound_mg() { return 0.0 - 1.0 }
+    return led.auc[1]
+}
+
+fn t_route(method: i32) -> i32 with IO, Mut, Div {
+    let a_blood = t_route_run(method, 0, 0.5)
+    let a_liver = t_route_run(method, 1, 0.5)
+    if a_blood >= 0.0 && a_liver > a_blood { return 0 }
+    println("  FAIL")
+    return 1
+}
+
 fn main() -> i32 with IO, Mut, Div {
     var failed: i32 = 0
     failed = failed + t_profiles(0.5, 8)
@@ -136,6 +180,8 @@ fn main() -> i32 with IO, Mut, Div {
     failed = failed + t_profiles(0.05, 80)
     failed = failed + t_sink(1, 0.5)
     failed = failed + t_sink(2, 0.5)
+    failed = failed + t_route(1)
+    failed = failed + t_route(2)
     if failed == 0 {
         println("PBPK28_THETA_CLOSED_SYSTEM_MASS_PASS")
     } else {

@@ -185,15 +185,22 @@ fn p28t_negativity(ledger: &!PBPK28Ledger, state: &PBPKState28, p: PBPKParams28)
 
 // One clamp-free θ-step with an optional first-order organ sink
 // (flux = cl_sink · C_avg,k on organ k = sink_organ ∈ 1..13; any other
-// sink_organ, or cl_sink ≤ 0, means no sink). The sink enters organ k's 2×2
-// block with rate k_s = cl_sink / V_k on both C_v,k and C_t,k: implicit
-// diagonal +θ·dt·k_s, explicit diagonal −(1−θ)·dt·k_s. Advances `*state`,
+// sink_organ, or cl_sink ≤ 0, means no sink) and an optional input route.
+// The sink enters organ k's 2×2 block with rate k_s = cl_sink / V_k on both
+// C_v,k and C_t,k: implicit diagonal +θ·dt·k_s, explicit diagonal
+// −(1−θ)·dt·k_s. The input `rel_mid` (mg/h, held over the step) enters blood
+// when `input_organ` is outside 1..13, otherwise the vascular space of organ
+// `input_organ` (e.g. the liver for portal first-pass): the forcing term
+// dt·rel_mid/V moves from the blood row to that organ's vascular row. It is
+// forcing, not a rate, so it is not θ-weighted, and 1ᵀ·W·b = rel_mid
+// wherever it lands, so the ledger identity is unchanged. Advances `*state`,
 // books the step into `*ledger`, and returns the sink mass (mg) removed over
 // the step.
-pub fn pbpk28_theta_step_sink_mut(
+pub fn pbpk28_theta_step_routed_sink_mut(
     state: &!PBPKState28,
     p: PBPKParams28,
     rel_mid: f64,
+    input_organ: i32,
     dt: f64,
     theta: f64,
     sink_organ: i32,
@@ -211,6 +218,7 @@ pub fn pbpk28_theta_step_sink_mut(
     let he = (1.0 - theta) * dt
     let vb = p.v_ref[0]
     let has_sink = sink_organ >= 1 && sink_organ < 14 && cl_sink > 0.0
+    let routed = input_organ >= 1 && input_organ < 14
 
     var sum_q = 0.0
     var i: i32 = 1
@@ -223,7 +231,9 @@ pub fn pbpk28_theta_step_sink_mut(
     let big_s = hi * k0
 
     let cb_old = (*state).cv[0]
-    var rhs0 = (1.0 - he * k0) * cb_old + dt * rel_mid / vb
+    // Unrouted: exactly the sink/input-free expression, so the wrappers below
+    // stay bit-identical to the pre-routing step.
+    var rhs0 = if routed { (1.0 - he * k0) * cb_old } else { (1.0 - he * k0) * cb_old + dt * rel_mid / vb }
 
     var sum_beta_a = 0.0
     var sum_beta_b = 0.0
@@ -259,7 +269,8 @@ pub fn pbpk28_theta_step_sink_mut(
         let ct_old = (*state).ct[i]
         rhs0 = rhs0 + (he * qi / vb) * cv_old
 
-        let rhs_v = (he * qi / vv) * cb_old + (1.0 - he * (kv + ks)) * cv_old + (he * kvt) * ct_old
+        let rhs_v0 = (he * qi / vv) * cb_old + (1.0 - he * (kv + ks)) * cv_old + (he * kvt) * ct_old
+        let rhs_v = if routed && i == input_organ { rhs_v0 + dt * rel_mid / vv } else { rhs_v0 }
         let rhs_t = (he * ktv) * cv_old + (1.0 - he * (kt + ks)) * ct_old
 
         let av = (sb * rhs_v + qq * rhs_t) / det
@@ -287,6 +298,20 @@ pub fn pbpk28_theta_step_sink_mut(
     (*ledger).administered = (*ledger).administered + dt * rel_mid
     (*ledger).steps = (*ledger).steps + 1
     return s_old + s_new
+}
+
+// θ-step with the input into blood (the original entry point).
+pub fn pbpk28_theta_step_sink_mut(
+    state: &!PBPKState28,
+    p: PBPKParams28,
+    rel_mid: f64,
+    dt: f64,
+    theta: f64,
+    sink_organ: i32,
+    cl_sink: f64,
+    ledger: &!PBPK28Ledger
+) -> f64 with Mut, Div {
+    return pbpk28_theta_step_routed_sink_mut(state, p, rel_mid, 0, dt, theta, sink_organ, cl_sink, ledger)
 }
 
 // Sink-free θ-step.
@@ -384,13 +409,15 @@ fn p28t_bdf2_combine(state: &!PBPKState28, xv: &[f64; 14], xt: &[f64; 14], a: f6
     }
 }
 
-// One TR-BDF2 step of length dt with an optional organ sink (same sink
-// convention as `pbpk28_theta_step_sink_mut`). `rel_mid` is held over the
-// step. Returns the sink mass (mg) removed over the step.
-pub fn pbpk28_trbdf2_step_sink_mut(
+// One TR-BDF2 step of length dt with an optional organ sink and input route
+// (same conventions as `pbpk28_theta_step_routed_sink_mut`). `rel_mid` is
+// held over the step and enters both stages the same way. Returns the sink
+// mass (mg) removed over the step.
+pub fn pbpk28_trbdf2_step_routed_sink_mut(
     state: &!PBPKState28,
     p: PBPKParams28,
     rel_mid: f64,
+    input_organ: i32,
     dt: f64,
     sink_organ: i32,
     cl_sink: f64,
@@ -406,11 +433,11 @@ pub fn pbpk28_trbdf2_step_sink_mut(
     p28t_save(state, &!xn_v, &!xn_t)
 
     var scratch = pbpk28_ledger_zero()
-    let _s1 = pbpk28_theta_step_sink_mut(state, p, rel_mid, gamma * dt, 0.5, sink_organ, cl_sink, &!scratch)
+    let _s1 = pbpk28_theta_step_routed_sink_mut(state, p, rel_mid, input_organ, gamma * dt, 0.5, sink_organ, cl_sink, &!scratch)
     var mid_avg: [f64; 14] = [0.0; 14]
     p28t_organ_avgs(state, p, &!mid_avg)
     p28t_bdf2_combine(state, &xn_v, &xn_t, p28t_trbdf2_a())
-    let _s2 = pbpk28_theta_step_sink_mut(state, p, rel_mid, d * dt, 1.0, sink_organ, cl_sink, &!scratch)
+    let _s2 = pbpk28_theta_step_routed_sink_mut(state, p, rel_mid, input_organ, d * dt, 1.0, sink_organ, cl_sink, &!scratch)
     var new_avg: [f64; 14] = [0.0; 14]
     p28t_organ_avgs(state, p, &!new_avg)
 
@@ -427,6 +454,19 @@ pub fn pbpk28_trbdf2_step_sink_mut(
     (*ledger).administered = (*ledger).administered + dt * rel_mid
     (*ledger).steps = (*ledger).steps + scratch.steps
     return k0 + k1 + k2
+}
+
+// TR-BDF2 step with the input into blood (the original entry point).
+pub fn pbpk28_trbdf2_step_sink_mut(
+    state: &!PBPKState28,
+    p: PBPKParams28,
+    rel_mid: f64,
+    dt: f64,
+    sink_organ: i32,
+    cl_sink: f64,
+    ledger: &!PBPK28Ledger
+) -> f64 with Mut, Div {
+    return pbpk28_trbdf2_step_routed_sink_mut(state, p, rel_mid, 0, dt, sink_organ, cl_sink, ledger)
 }
 
 // Sink-free TR-BDF2 step.
