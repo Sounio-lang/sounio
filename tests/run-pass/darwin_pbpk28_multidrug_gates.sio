@@ -91,6 +91,13 @@
 //     with Ki = 1e300. (c) Two identical drugs, identical doses, mutual Ki:
 //     bit-identical trajectories (symmetry).
 //
+// V7  md_run_to reaches targets off the dt grid exactly. From t = 0 with
+//     dt = 0.02: t_end = 0.61 must end at t == 0.61 with the state and AUC
+//     bit-identical to the explicit sequence of 30 steps of 0.02 and one of
+//     0.01 (md_step); t_end = 0.005 (below one step) must take one 0.005 step;
+//     and t_end = 0.6 on the grid must take exactly 30 steps (no extra
+//     vanishing step from accumulated round-off in t).
+//
 // Transport parameters are the rapamycin PBPK28 profile with synthetic CLint and
 // Ki values: kernel/driver correctness fixtures, not drug claims.
 
@@ -381,18 +388,67 @@ fn gate_v6() -> bool with Mut, Div, Panic, IO {
     return ok_a && ok_b && ok_c
 }
 
+// V7 --------------------------------------------------------------------------
+fn v7_setup(md: &!MultiDrug28) -> i32 with Mut, Div, Panic {
+    let i = add_victim(md, 1.5)
+    md_dose_oral(md, i, 5.0)
+    md_dose_iv_bolus(md, i, 1.0)
+    return i
+}
+
+fn gate_v7() -> bool with Mut, Div, Panic, IO {
+    var a = md_new(true)
+    let i = v7_setup(&!a)
+    md_run_to(&!a, 0.61, 0.02)
+    var b = md_new(true)
+    let j = v7_setup(&!b)
+    var k: i32 = 0
+    while k < 30 {
+        md_step(&!b, 0.02)
+        k = k + 1
+    }
+    md_step(&!b, 0.61 - b.t)
+    let same = a.auc_b[i] == b.auc_b[j] && a.cv[i * 14] == b.cv[j * 14] && a.ct[i * 14 + 1] == b.ct[j * 14 + 1] && a.lumen[i] == b.lumen[j]
+    print("V7 run_to(0.61, dt 0.02): t = ") print(a.t) print("  matches explicit 30 x 0.02 + remainder: ") println(same)
+
+    var c = md_new(true)
+    let ic = v7_setup(&!c)
+    md_run_to(&!c, 0.005, 0.02)
+    var d = md_new(true)
+    let id = v7_setup(&!d)
+    md_step(&!d, 0.005)
+    let short_ok = c.t == 0.005 && c.auc_b[ic] == d.auc_b[id]
+    print("V7 run_to(0.005, dt 0.02): t = ") print(c.t) print("  one 0.005 step: ") println(short_ok)
+
+    var e = md_new(true)
+    let ie = v7_setup(&!e)
+    md_run_to(&!e, 0.6, 0.02)
+    var f = md_new(true)
+    let jf = v7_setup(&!f)
+    k = 0
+    while k < 30 {
+        md_step(&!f, 0.02)
+        k = k + 1
+    }
+    let grid_ok = e.t == 0.6 && e.auc_b[ie] == f.auc_b[jf]
+    print("V7 run_to(0.6, dt 0.02) on the grid: exactly 30 steps: ") println(grid_ok)
+    return a.t == 0.61 && same && short_ok && grid_ok
+}
+
 fn main() -> i32 with Mut, Div, Panic, IO {
     let m = gate_mass()
     let v3 = gate_v3()
     let v4 = gate_v4()
     let v5 = gate_v5()
     let v6 = gate_v6()
+    let v7 = gate_v7()
     if m { println("M PASS") } else { println("M FAIL") }
     if v3 { println("V3 PASS") } else { println("V3 FAIL") }
     if v4 { println("V4 PASS") } else { println("V4 FAIL") }
     if v5 { println("V5 PASS") } else { println("V5 FAIL") }
     if v6 { println("V6 PASS") } else { println("V6 FAIL") }
-    if m && v3 && v4 && v5 && v6 {
+    if v7 { println("V7 PASS") } else { println("V7 FAIL") }
+    if m && v3 && v4 && v5 && v6 && v7 {
         println("PBPK28_MULTIDRUG_GATES_PASS")
         return 0
     }

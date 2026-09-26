@@ -59,8 +59,10 @@
 // (adversarial review, 2026-09-26): two-drug oral scenario 0 clamp events at
 // dt = 0.02 h, 722 at 0.05 (residual 3e-10), 964 at 0.08; 10 mg IV bolus 0 at
 // 0.02, 180 at 0.1 (1.5e-8), 352 at 1.0 (1.7e-3). The clamped mass is booked in
-// `clamped` (md_clamped) so a caller can require it to be zero; at the dt used
-// by the gates (<= 0.02 h) it is.
+// `clamped` (md_clamped). At the dt used by the gates (<= 0.02 h) it stays at
+// round-off scale, not exactly zero: deep in the terminal phase round-off
+// alone pushes near-zero entries below zero (V3: 1.3e-12 mg over 300 h); the
+// gates bound it by n_steps·27·eps·dose.
 //
 // Engine note: under the default Madaros engine every struct literal with
 // array fields, every local coefficient array and the old portal block's
@@ -477,6 +479,7 @@ fn md_substep(md: &!MultiDrug28, dt: f64, theta: f64) with Mut, Div, Panic {
 }
 
 pub fn md_step(md: &!MultiDrug28, dt: f64) with Mut, Div, Panic {
+    if !(dt > 0.0) { panic("multidrug28: md_step needs dt > 0") }
     if (*md).pending_smooth {
         md_substep(md, 0.5 * dt, 1.0)
         md_substep(md, 0.5 * dt, 1.0)
@@ -487,9 +490,22 @@ pub fn md_step(md: &!MultiDrug28, dt: f64) with Mut, Div, Panic {
     (*md).t = (*md).t + dt
 }
 
+// Advances to exactly t_end with steps of dt: the last step is shortened to
+// land on t_end, so dosing times off the dt grid are honoured. Differences
+// below tol = 1e-9·dt are accumulated round-off in t, not time to integrate: a
+// remainder within tol of dt is taken as a full dt step (so a target on the
+// grid gives exactly the md_step(dt) sequence), a remainder below tol is not
+// stepped, and t is then snapped to t_end. Calling with t_end <= t is a no-op.
 pub fn md_run_to(md: &!MultiDrug28, t_end: f64, dt: f64) with Mut, Div, Panic {
-    while (*md).t < t_end - 0.5 * dt {
-        md_step(md, dt)
+    if !(dt > 0.0) { panic("multidrug28: md_run_to needs dt > 0") }
+    let tol = 1.0e-9 * dt
+    while (*md).t < t_end - tol {
+        let rem = t_end - (*md).t
+        let h = if rem < dt - tol { rem } else { dt }
+        md_step(md, h)
+    }
+    if (*md).t > t_end - tol && (*md).t < t_end + tol {
+        (*md).t = t_end
     }
 }
 
