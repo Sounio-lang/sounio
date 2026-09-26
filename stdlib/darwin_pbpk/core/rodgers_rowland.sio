@@ -671,6 +671,35 @@ pub fn rr_check_pow10() -> i32 with Mut, Div, Panic {
     ok
 }
 
+// DERIVATIVE CONSISTENCY. `dkp_dlogP = P*ln10*lipid_c*fu` is the analytic
+// derivative of the IDEAL 10^x, so it is the derivative of the function ACTUALLY
+// EXECUTED only if rr_pow10 satisfies exp' = exp to that accuracy. The old
+// 20-term Taylor did not: the derivative of a degree-20 truncation is the
+// degree-19 one, and at logP 7 the analytic value was 19836009 against the
+// polynomial's own derivative 18510553 -- 7.16% apart, so log_sens and the raw
+// GUM uncertainty were both inconsistent with the evaluated function. Found in
+// review by copilot-pull-request-reviewer; fixed by making the power path
+// accurate rather than by returning a matching wrong derivative, and gated here.
+//
+// A central difference at h = 1e-6 has truncation error h^2*ln10^2/6, about
+// 8.8e-13 relative, so the 1e-9 bound sits comfortably above the method's own
+// error and orders below any helper defect it is meant to catch. Derived, not
+// tuned to the residual.
+pub fn rr_check_pow10_derivative() -> i32 with Mut, Div, Panic {
+    let ln10 = 2.302585092994046
+    let h = 1.0e-6
+    var ok = 0
+    var i = 0
+    while i < 5 {
+        let x = 0.0 - 3.0 + 2.5 * (i as f64)
+        let cd = (rr_pow10(x + h) - rr_pow10(x - h)) / (2.0 * h)
+        let an = rr_pow10(x) * ln10
+        if rr_abs(cd - an) <= 1.0e-9 * an { ok = ok + 1 }
+        i = i + 1
+    }
+    ok
+}
+
 // ABSOLUTE-SCALE gate on Kp, which is what T6's `<= 1` could not give. At
 // logP = -3 the lipid factor is exactly 1e-3, so Kp must equal
 // fu*(fw_e + fw_i + 1e-3*(fn_l + 0.3*fn_ph)) organ by organ. The 1e-3 here is
@@ -768,6 +797,8 @@ struct DrugPropertiesRR {
 //      0.007281 for 1e-3 and 8.61e6 for 1e7)
 // T11: absolute Kp at logP = -3 against the closed form, the check T6's bound
 //      was too loose to be
+// T12: rr_pow10 satisfies exp' = exp, so dkp_dlogP is the derivative of the
+//      function actually executed (it was 7.16% out at logP 7 before)
 
 fn main() -> i32 with IO, Mut, Div, Panic {
     let rr = rr_rapamycin()
@@ -921,6 +952,17 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         print("T11 FAIL: absolute Kp wrong in ")
         print(14 - abs_ok)
         println("/14 organs at logP = -3")
+        failed = failed + 1
+    }
+
+    let dv = rr_check_pow10_derivative()
+    if dv == 5 {
+        println("T12 PASS: rr_pow10 satisfies exp' = exp at 5/5 arguments")
+        passed = passed + 1
+    } else {
+        print("T12 FAIL: analytic dkp_dlogP disagrees with the executed function at ")
+        print(5 - dv)
+        println("/5 arguments")
         failed = failed + 1
     }
 
