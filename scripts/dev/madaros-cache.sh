@@ -80,7 +80,11 @@ madaros_env_fingerprint() {
     # under a caller's `set -o pipefail` would otherwise fail the pipeline.
     { env | LC_ALL=C sort | grep -E '^SOUNIO_[A-Z0-9_]*=' \
         | grep -vE '^SOUNIO_(MADAROS_CACHE[A-Z_]*|MADAROS_NOCACHE|STDLIB_PATH|BUILD_SLOTS|CI_RUNNER|TEST_JOBS|SLOW_TESTS_AVAILABLE|MADAROS_FP_[A-Z_]*|[A-Z0-9_]*_(BIN|DIR|KEEP|REPORT_DIR))=' \
-        || true; } | sha256sum | cut -c1-64
+        || true
+      # The native backend picks its target from HOSTTYPE/OSTYPE
+      # (self-hosted/native/codegen.sio, codegen_x86_linux.sio).
+      echo "HOSTTYPE=${HOSTTYPE:-}"; echo "OSTYPE=${OSTYPE:-}"
+    } | sha256sum | cut -c1-64
 }
 
 # Stage 1 key: bootstrap ELF bytes + lean_single.sio bytes + build env.

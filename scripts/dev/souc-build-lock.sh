@@ -38,7 +38,7 @@ LOCK="${SOUNIO_BUILD_LOCK:-/tmp/sounio-souc-build.lock}"
 # Counting semaphore. SOUNIO_BUILD_SLOTS=N allows N heavy builds at once; each
 # build pins ONE core, so N=4 on the 64-core pod keeps load ~4 from builds, far
 # below the ~153 that tripped the liveness probe. Default 1 = the old mutex.
-# Slot i is the file $LOCK.i; a caller tries each slot non-blocking and, if all
+# Slot 1 is $LOCK, slot i>1 is $LOCK.i; a caller tries each slot non-blocking and, if all
 # are busy, blocks on one chosen at random (spreads wakeups across slots).
 SLOTS="${SOUNIO_BUILD_SLOTS:-1}"
 if ! [[ "$SLOTS" =~ ^[1-9][0-9]*$ ]]; then SLOTS=1; fi
@@ -61,18 +61,22 @@ if [[ "$SLOTS" -eq 1 ]]; then
   exec "$@"
 fi
 
+# Slot 1 IS $LOCK, the file the default one-slot mode takes, so a default
+# caller and a multi-slot caller still exclude each other on it; slots 2..N
+# ($LOCK.2 ...) are the extra concurrency the multi-slot caller opted into.
+slot_path() { if [[ "$1" -eq 1 ]]; then echo "$LOCK"; else echo "$LOCK.$1"; fi; }
 got=""
 for ((i=1; i<=SLOTS; i++)); do
-  exec 9>"$LOCK.$i"
-  if flock -n 9; then got="$LOCK.$i"; break; fi
+  exec 9>"$(slot_path "$i")"
+  if flock -n 9; then got="$(slot_path "$i")"; break; fi
   exec 9>&-
 done
 if [[ -z "$got" ]]; then
   i=$(( (RANDOM % SLOTS) + 1 ))
   echo "[souc-build-lock] all $SLOTS build slots busy; waiting on slot $i..." >&2
-  exec 9>"$LOCK.$i"
+  exec 9>"$(slot_path "$i")"
   flock 9
-  got="$LOCK.$i"
+  got="$(slot_path "$i")"
 fi
 echo "[souc-build-lock] acquired $got (slots=$SLOTS); running: $*" >&2
 exec "$@"
