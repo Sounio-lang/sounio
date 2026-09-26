@@ -29,13 +29,19 @@
 //   6 = kp_adipose  (→ p.kp[7])
 //
 // Endpoints:
-//   AUC_blood  at 168h (trapezoidal, mg·h/L)
+//   AUC_blood  at 168h (method quadrature, mg·h/L)
 //   C_brain    at 24h  (point concentration, mg/L)
-//   AUC_liver  at 168h (trapezoidal, mg·h/L)
-//   AUC_kidney at 168h (trapezoidal, mg·h/L)
+//   AUC_liver  at 168h (method quadrature, mg·h/L)
+//   AUC_kidney at 168h (method quadrature, mg·h/L)
 //
-// Solver: Crank-Nicolson (A-stable, 2nd-order) via pbpk28_full_cn_step.
-//         Fixed dt=0.05h → 3360 steps for 168h.
+// Solver: clamp-free Crank-Nicolson with Rannacher start-up after the bolus
+//         (theta_pbpk28: two CN steps replaced by four backward-Euler half
+//         steps), fixed dt=0.05h → 3360 steps for 168h. AUCs come from the
+//         step ledger (each sub-step's own quadrature weights).
+//         Until 2026-09-26 this used pbpk28_full_cn_step, whose negativity
+//         floors injected 1.41 mg into the 5 mg bolus at dt=0.05h and biased
+//         AUC_blood by +28% (0.516790 vs Dose/CL = 0.403226); see
+//         docs/audit/PBPK28_CN_RANNACHER_MASS_BALANCE_2026-09-26.md.
 //
 // References: JCGM 100:2008; Ferron 1997; Lampen 1998; Schreiber 1991;
 //             Valoteau 1996; Rodgers & Rowland 2006 (∂Kp/∂fu = −Kp/fu).
@@ -44,6 +50,7 @@
 
 use darwin_pbpk::core::pbpk28_params::*
 use darwin_pbpk::tsit5_pbpk28::*
+use darwin_pbpk::theta_pbpk28::*
 // FULL PBPK28 chemical + enzymatic ontology complete (ChEBI every compound + GO/Rhea for CYP)
 // See drugs/rapamycin.sio + chemistry/ontology.sio + super_chemical_showcase for implementation.
 
@@ -85,19 +92,23 @@ fn ep28_fu_ref() -> f64 { return 0.08 }
 // ============================================================================
 
 pub struct PBPK28Metrics {
-    auc_blood:   f64,   // trapezoidal AUC(0→t_end), blood, mg·h/L
-    c_brain_24h: f64,   // C_brain at t=24h, mg/L (organ average)
-    auc_liver:   f64,   // trapezoidal AUC(0→t_end), liver avg, mg·h/L
-    auc_kidney:  f64,   // trapezoidal AUC(0→t_end), kidney avg, mg·h/L
-    mass_final:  f64,   // total body mass at t=t_end, mg
-    success:     bool,
+    auc_blood:     f64,   // AUC(0→t_end), blood, mg·h/L (method quadrature)
+    c_brain_24h:   f64,   // C_brain at t=24h, mg/L (organ average)
+    auc_liver:     f64,   // AUC(0→t_end), liver avg, mg·h/L
+    auc_kidney:    f64,   // AUC(0→t_end), kidney avg, mg·h/L
+    mass_final:    f64,   // total body mass at t=t_end, mg
+    mass_residual: f64,   // M(t_end) + CL·AUC_blood − M(0), mg (exact identity → 0)
+    neg_mass:      f64,   // largest negative-concentration mass seen, mg (booked, not floored)
+    steps:         i32,   // θ sub-steps taken
+    success:       bool,
 }
 
 fn ep28_metrics_empty() -> PBPK28Metrics {
     PBPK28Metrics {
         auc_blood: 0.0, c_brain_24h: 0.0,
         auc_liver: 0.0, auc_kidney: 0.0,
-        mass_final: 0.0, success: false,
+        mass_final: 0.0, mass_residual: 0.0, neg_mass: 0.0, steps: 0,
+        success: false,
     }
 }
 
@@ -107,51 +118,39 @@ fn ep28_finite(x: f64) -> bool {
 }
 
 // ============================================================================
-// DETERMINISTIC SIMULATION — CRANK-NICOLSON FIXED STEP
+// DETERMINISTIC SIMULATION — RANNACHER-STARTED CRANK-NICOLSON, FIXED STEP
 // ============================================================================
-// A-stable CN: even stiff PS-coupled organs (PS_liver/V_t ~ 3600/h) are
-// stable at dt=0.05h. rel_mid=0 for IV bolus (no depot release).
+// The bolus at t=0 is the only dosing event: the first
+// pbpk28_rannacher_startup_steps() steps are backward-Euler half-step pairs,
+// the rest clamp-free CN. rel_mid=0 for IV bolus (no depot release).
 
 fn ep28_simulate(prm: PBPKParams28, dose_mg: f64, t_end: f64) -> PBPK28Metrics with Mut, Div, Panic {
     ep28_simulate_dt(0.05, prm, dose_mg, t_end)
 }
 
-// Variant with explicit dt for convergence/stiffness checks (CN is 2nd-order A-stable).
+// Variant with explicit dt for convergence checks (CN is 2nd-order A-stable;
+// the start-up keeps it free of the stiff-mode ringing a bolus excites).
 fn ep28_simulate_dt(dt: f64, prm: PBPKParams28, dose_mg: f64, t_end: f64) -> PBPK28Metrics with Mut, Div, Panic {
     var st = pbpk28_state_zero()
     st.cv[0] = dose_mg / prm.v_ref[0]
+    let m0 = pbpk28_total_mass(st, prm)
+    var led = pbpk28_ledger_zero()
+    let n_start = pbpk28_rannacher_startup_steps()
 
     var t = 0.0
-    var auc_blood = 0.0
-    var auc_liver = 0.0
-    var auc_kidney = 0.0
-    var c_prev_blood = st.cv[0]
-    var c_prev_liver = 0.0
-    var c_prev_kidney = 0.0
+    var k: i32 = 0
     var c_brain_24h = 0.0
     var found_24h = false
 
     while t < t_end {
         let dt_use = if t + dt > t_end { t_end - t } else { dt }
 
-        let st_new = pbpk28_full_cn_step(st, prm, 0.0, dt_use)
+        pbpk28_rannacher_step_mut(&!st, prm, 0.0, dt_use, k < n_start, &!led)
 
-        let c_blood  = st_new.cv[0]
-        let c_liver  = pbpk28_organ_average(st_new, prm, 1)
-        let c_kidney = pbpk28_organ_average(st_new, prm, 2)
-
-        if !ep28_finite(c_blood) { return ep28_metrics_empty() }
-
-        auc_blood  = auc_blood  + 0.5 * (c_prev_blood  + c_blood)  * dt_use
-        auc_liver  = auc_liver  + 0.5 * (c_prev_liver  + c_liver)  * dt_use
-        auc_kidney = auc_kidney + 0.5 * (c_prev_kidney + c_kidney) * dt_use
-
-        c_prev_blood  = c_blood
-        c_prev_liver  = c_liver
-        c_prev_kidney = c_kidney
+        if !ep28_finite(st.cv[0]) { return ep28_metrics_empty() }
 
         t = t + dt_use
-        st = st_new
+        k = k + 1
 
         if found_24h == false && t >= 24.0 {
             c_brain_24h = pbpk28_organ_average(st, prm, 3)
@@ -159,16 +158,33 @@ fn ep28_simulate_dt(dt: f64, prm: PBPKParams28, dose_mg: f64, t_end: f64) -> PBP
         }
     }
 
-    let mass = pbpk28_total_mass(st, prm)
-
     PBPK28Metrics {
-        auc_blood:   auc_blood,
-        c_brain_24h: c_brain_24h,
-        auc_liver:   auc_liver,
-        auc_kidney:  auc_kidney,
-        mass_final:  mass,
-        success:     true,
+        auc_blood:     led.auc[0],
+        c_brain_24h:   c_brain_24h,
+        auc_liver:     led.auc[1],
+        auc_kidney:    led.auc[2],
+        mass_final:    pbpk28_total_mass(st, prm),
+        mass_residual: pbpk28_ledger_residual(led, st, prm, m0),
+        neg_mass:      led.neg_mass,
+        steps:         led.steps,
+        success:       true,
     }
+}
+
+// Mass-balance gate on the reference simulation at step `dt` (production:
+// 0.05 h): exact discrete identity to rounding, no visible negativity. Used by
+// TEST 7 below and by tests/run-pass/pbpk28_consumer_mass_balance.sio.
+pub fn ep28_mass_gate(dt: f64, prm: PBPKParams28, dose_mg: f64, t_end: f64) -> bool with IO, Mut, Div, Panic {
+    let m = ep28_simulate_dt(dt, prm, dose_mg, t_end)
+    if m.success == false { return false }
+    let r = ep28_abs(m.mass_residual) / dose_mg
+    print("  sub-steps: ")
+    println(m.steps)
+    print("  |M(T) + CL*AUC - M(0)| / M(0) x 1e12: ")
+    println(r * 1.0e12)
+    print("  booked negative mass (mg) x 1e12: ")
+    println(m.neg_mass * 1.0e12)
+    return r <= pbpk28_mass_tol_rel(m.steps) && m.neg_mass <= pbpk28_neg_mass_bound_mg()
 }
 
 // ============================================================================
@@ -316,8 +332,14 @@ pub struct EpResult28 {
     auc_kidney_mean: f64,
     auc_kidney_var:  f64,
     sensitivity:     [f64; 8],   // fractional AUC_blood variance contribution
+    kp_share_brain:  f64,        // kp_brain's share of Var(C_brain_24h)
+    kp_share_liver:  f64,        // kp_liver's share of Var(AUC_liver)
+    kp_share_kidney: f64,        // kp_kidney's share of Var(AUC_kidney)
     mass_init:       f64,
     mass_final:      f64,
+    mass_residual:   f64,   // reference run: M(T) + CL·AUC_blood − M(0), mg
+    neg_mass:        f64,   // reference run: largest negative-concentration mass, mg
+    steps:           i32,   // reference run: θ sub-steps
     success:         bool,
 }
 
@@ -329,7 +351,9 @@ fn ep28_result_empty() -> EpResult28 {
         auc_liver_mean: 0.0, auc_liver_var: 0.0,
         auc_kidney_mean: 0.0, auc_kidney_var: 0.0,
         sensitivity: s,
-        mass_init: 0.0, mass_final: 0.0, success: false,
+        kp_share_brain: 0.0, kp_share_liver: 0.0, kp_share_kidney: 0.0,
+        mass_init: 0.0, mass_final: 0.0, mass_residual: 0.0, neg_mass: 0.0, steps: 0,
+        success: false,
     }
 }
 
@@ -410,6 +434,14 @@ pub fn ep28_run(
         k = k + 1
     }
 
+    // Each organ Kp's share of its own organ endpoint's variance. AUC_blood
+    // over 0..t_end is (Dose − M(t_end))/CL under the exact mass identity, so
+    // the Kp columns carry almost nothing there; these endpoints are where a
+    // lost Kp Jacobian column (issue #1497) still shows as an exact 0.0.
+    let kp_share_brain  = if var_cb24  > 1.0e-300 { d_cb24[3]  * d_cb24[3]  * priors.kn[3].variance / var_cb24 }  else { 0.0 }
+    let kp_share_liver  = if var_auc_l > 1.0e-300 { d_auc_l[4] * d_auc_l[4] * priors.kn[4].variance / var_auc_l } else { 0.0 }
+    let kp_share_kidney = if var_auc_k > 1.0e-300 { d_auc_k[5] * d_auc_k[5] * priors.kn[5].variance / var_auc_k } else { 0.0 }
+
     // Evidence-weighted confidence
     var conf_auc = 0.0
     var c: i32 = 0
@@ -430,8 +462,14 @@ pub fn ep28_run(
         auc_kidney_mean: auc_k_ref,
         auc_kidney_var:  var_auc_k,
         sensitivity:     sensitivity,
+        kp_share_brain:  kp_share_brain,
+        kp_share_liver:  kp_share_liver,
+        kp_share_kidney: kp_share_kidney,
         mass_init:       dose_mg,
         mass_final:      ref_m.mass_final,
+        mass_residual:   ref_m.mass_residual,
+        neg_mass:        ref_m.neg_mass,
+        steps:           ref_m.steps,
         success:         true,
     }
 }
@@ -582,7 +620,7 @@ fn ep28_selftest_main() -> i32 with IO, Mut, Div, Panic, Epistemic {
     println("======================================================================")
     println("  Epistemic PBPK28 — GUM Uncertainty Propagation (first-order)")
     println("  Drug: Rapamycin (Sirolimus)")
-    println("  Kernel: Crank-Nicolson 28-state permeability-limited PBPK")
+    println("  Kernel: Rannacher-started Crank-Nicolson 28-state permeability-limited PBPK")
     println("  Method: Central-difference Jacobian (JCGM 100:2008 SS 5.1.3)")
     println("  Epistemic parameters: 7 (CL, fu, Kp_brain, Kp_liver, ...)")
     println("======================================================================")
@@ -673,12 +711,29 @@ fn ep28_selftest_main() -> i32 with IO, Mut, Div, Panic, Epistemic {
     // printed a sum of 1.000000, a max ABOVE the reference (missing mass is
     // redistributed by the normalisation), and reported 9/9 PASSED. A test that
     // cannot fail on the defect it covers is worse than no test. These can:
-    //   (a) all seven parameters carry variance > 0 and a non-zero influence on
-    //       AUC_blood (under lean_single the smallest, kp_adipose, is 3.24e-8 -
-    //       small, but not zero), so NO component may be exactly 0.0;
-    //   (b) the two dominant components are PINNED to the lean_single reference
-    //       spectrum, so redistribution of lost mass - which leaves the sum at
-    //       1.0 and only raises the max - surfaces as a magnitude failure.
+    //   (a) the three clearance-channel columns (cl_hepatic, cl_renal, fu) may
+    //       not be exactly 0.0; nor may kp_brain / kp_liver / kp_kidney's
+    //       share of their own organ endpoint's variance (C_brain_24h,
+    //       AUC_liver, AUC_kidney), where those columns carry real signal;
+    //   (b) the two dominant components are PINNED to their analytic values,
+    //       so redistribution of lost mass - which leaves the sum at 1.0 and
+    //       only raises the max - surfaces as a magnitude failure;
+    //   (c) the Kp tail of the AUC_blood spectrum must stay below 1e-12.
+    // Why the pins moved on 2026-09-26: the old references (0.697376,
+    // 0.301837, tail 5.23e-8 / 3.24e-8) were measured through
+    // pbpk28_full_cn_step, whose negativity floors injected mass and made
+    // AUC_blood depend on Kp. Under the exact mass identity of the
+    // Rannacher-started step, AUC_blood(0-168h) = (Dose − M(168h))/CL with
+    // M(168h)/Dose ~ 4e-18, so to first order
+    //   c_clh = c_clr = −Dose/CL²,  c_fu = −Dose/(CL·fu_ref)   (fu scales CL)
+    //   s_clh : s_clr : s_fu = v_clh : v_clr : v_fu·CL²/fu_ref²
+    // and the Kp columns are rounding noise: |ΔAUC| ≲ steps·ε·AUC ≈ 3e-13
+    // bounds a Kp fraction by ~1e-20. The floor artefact put them at ≥ 5e-8,
+    // so (c) at 1e-12 separates the two by four orders either way. The FD
+    // truncation of the dominant pair is O((h/CL)²) ≈ 1.4e-5, inside the
+    // unchanged 1e-4 band; the #1497 deviation (3.3e-4) stays outside it.
+    // kp_adipose has no reported endpoint where it matters, so a lost
+    // kp_adipose column is not detectable here.
     println("TEST 5: Sensitivity spectrum (per-parameter, not just the sum)")
     print("  sens[0] cl_hepatic: ")
     print_f64(ep.sensitivity[0])
@@ -724,68 +779,79 @@ fn ep28_selftest_main() -> i32 with IO, Mut, Div, Panic, Epistemic {
     // (a) STRUCTURAL: a lost Jacobian column shows up as an exact 0.0 here.
     var n_zero = 0.0
     var sz: i32 = 0
-    while sz < 7 {
+    while sz < 3 {
         if ep.sensitivity[sz] == 0.0 { n_zero = n_zero + 1.0 }
         sz = sz + 1
     }
+    if ep.kp_share_brain == 0.0 { n_zero = n_zero + 1.0 }
+    if ep.kp_share_liver == 0.0 { n_zero = n_zero + 1.0 }
+    if ep.kp_share_kidney == 0.0 { n_zero = n_zero + 1.0 }
+    print("  kp_brain share of Var(C_brain_24h): ")
+    print_f64(ep.kp_share_brain)
+    println("")
+    print("  kp_liver share of Var(AUC_liver):   ")
+    print_f64(ep.kp_share_liver)
+    println("")
+    print("  kp_kidney share of Var(AUC_kidney): ")
+    print_f64(ep.kp_share_kidney)
+    println("")
     print("  zeroed components (must be 0): ")
     print_f64(n_zero)
     println("")
 
-    // (b) MAGNITUDE: pinned against the lean_single reference spectrum.
-    // Tolerance is 1.0e-4 relative. It is not fitted to an observed failure:
-    // both engines evaluate the same deterministic f64 kernel, so the only
-    // legitimate spread is FP association, orders of magnitude below this.
-    // The #1497 deviation on sens[0] was 3.3e-4 relative, outside the band.
-    let ref_s0 = 0.697376
-    let ref_s2 = 0.301837
+    // (b) MAGNITUDE: dominant pair against its analytic value (see above).
+    // Tolerance is 1.0e-4 relative, unchanged.
+    let a_cl = prm.cl_central
+    let a_fu = ep28_fu_ref()
+    let a_v0 = priors.kn[0].variance
+    let a_v1 = priors.kn[1].variance
+    let a_v2 = priors.kn[2].variance * a_cl * a_cl / (a_fu * a_fu)
+    let ref_s0 = a_v0 / (a_v0 + a_v1 + a_v2)
+    let ref_s2 = a_v2 / (a_v0 + a_v1 + a_v2)
     let rel_s0 = ep28_abs(ep.sensitivity[0] - ref_s0) / ref_s0
     let rel_s2 = ep28_abs(ep.sensitivity[2] - ref_s2) / ref_s2
-    print("  rel dev sens[0] vs reference: ")
+    print("  analytic sens[0]: ")
+    print_f64(ref_s0)
+    println("")
+    print("  analytic sens[2]: ")
+    print_f64(ref_s2)
+    println("")
+    print("  rel dev sens[0] vs analytic: ")
     print_f64(rel_s0)
     println("")
-    print("  rel dev sens[2] vs reference: ")
+    print("  rel dev sens[2] vs analytic: ")
     print_f64(rel_s2)
     println("")
 
-    // The two smallest components sit below print_f64's fixed-notation
-    // resolution on Madaros, which prints 0.000000 where lean_single switches
-    // to 5.234690e-8. Scale them so the transcript shows a real number on both
-    // engines and "all seven non-zero" is readable rather than asserted.
-    print("  sens[3] x 1e8: ")
-    print_f64(ep.sensitivity[3] * 1.0e8)
-    println("")
-    print("  sens[6] x 1e8: ")
-    print_f64(ep.sensitivity[6] * 1.0e8)
-    println("")
-    let ref_s3 = 5.234690e-8
-    let ref_s6 = 3.240925e-8
-    let rel_s3 = ep28_abs(ep.sensitivity[3] - ref_s3) / ref_s3
-    let rel_s6 = ep28_abs(ep.sensitivity[6] - ref_s6) / ref_s6
-    print("  rel dev sens[3] vs reference: ")
-    print_f64(rel_s3)
-    println("")
-    print("  rel dev sens[6] vs reference: ")
-    print_f64(rel_s6)
+    // (c) Kp tail of the AUC_blood spectrum, scaled so both engines' fixed
+    // print shows it.
+    var tail_max = 0.0
+    var st5: i32 = 3
+    while st5 < 7 {
+        if ep.sensitivity[st5] > tail_max { tail_max = ep.sensitivity[st5] }
+        st5 = st5 + 1
+    }
+    print("  max Kp tail fraction x 1e12 (must be < 1): ")
+    print_f64(tail_max * 1.0e12)
     println("")
 
     let sum_ok = s_sum > 0.999999 && s_sum < 1.000001
     let dom_ok = s_max > 0.3
     let nz_ok  = n_zero < 0.5
-    // The two tail components carry a looser band (1.0e-3) than the dominant
-    // pair. They are ~7 orders of magnitude smaller, so their central
-    // difference has correspondingly less significance left; 1.0e-3 is still
-    // three orders inside the defect, which drives them to exactly zero.
-    let pin_ok = rel_s0 < 1.0e-4 && rel_s2 < 1.0e-4 && rel_s3 < 1.0e-3 && rel_s6 < 1.0e-3
-    if sum_ok && dom_ok && nz_ok && pin_ok {
-        println("  [PASS] all 7 components non-zero; dominant pair matches reference")
+    let pin_ok = rel_s0 < 1.0e-4 && rel_s2 < 1.0e-4
+    let tail_ok = tail_max < 1.0e-12
+    if sum_ok && dom_ok && nz_ok && pin_ok && tail_ok {
+        println("  [PASS] no lost column; dominant pair matches analytic; no Kp leak into AUC_blood")
         passed = passed + 1
     } else {
         if nz_ok == false {
             println("  FAIL: a sensitivity component is EXACTLY 0.0 (Jacobian column lost)")
         }
         if pin_ok == false {
-            println("  FAIL: dominant components deviate from the reference spectrum")
+            println("  FAIL: dominant components deviate from the analytic spectrum")
+        }
+        if tail_ok == false {
+            println("  FAIL: Kp leaks into AUC_blood (solver mass artefact?)")
         }
         if sum_ok == false || dom_ok == false {
             println("  FAIL: sensitivity fractions malformed")
@@ -822,19 +888,37 @@ fn ep28_selftest_main() -> i32 with IO, Mut, Div, Panic, Epistemic {
     }
     println("")
 
-    // TEST 7: Mass conservation
-    println("TEST 7: Mass conservation")
+    // TEST 7: Mass balance — the exact discrete identity at the production dt.
+    // Every θ-step conserves M(T) + CL·AUC_blood = M(0) in real arithmetic
+    // (theta_pbpk28 header), so only rounding remains. Bound: max(1e-12,
+    // steps·1e-15) relative to the dose, a ~4.5 ulp-per-sub-step rounding
+    // budget (pbpk28_mass_tol_rel; heuristic, see its comment). The old one-sided check (M_final < M_init) passed
+    // with 1.41 mg injected by the CN floors. Negative concentrations are not
+    // floored; their mass is booked and must stay below
+    // pbpk28_neg_mass_bound_mg() = 5e-7 mg.
+    println("TEST 7: Mass balance (exact discrete identity, production dt)")
     print("  Initial mass (mg): ")
     print_f64(ep.mass_init)
     println("")
     print("  Final mass (mg):   ")
     print_f64(ep.mass_final)
     println("")
-    if ep.mass_final >= 0.0 && ep.mass_final < ep.mass_init {
-        println("  [PASS] Mass decreases from elimination, stays non-negative")
+    let mb_tol_rel = pbpk28_mass_tol_rel(ep.steps)
+    let mb_rel = ep28_abs(ep.mass_residual) / ep.mass_init
+    print("  |M(T) + CL*AUC - M(0)| / M(0) x 1e12: ")
+    print_f64(mb_rel * 1.0e12)
+    println("")
+    print("  bound x 1e12: ")
+    print_f64(mb_tol_rel * 1.0e12)
+    println("")
+    print("  booked negative mass x 1e12 (mg): ")
+    print_f64(ep.neg_mass * 1.0e12)
+    println("")
+    if mb_rel <= mb_tol_rel && ep.neg_mass <= pbpk28_neg_mass_bound_mg() && ep.mass_final >= 0.0 {
+        println("  [PASS] mass identity closes to rounding; no floor, no visible negativity")
         passed = passed + 1
     } else {
-        println("  FAIL: mass should decrease but stay >= 0")
+        println("  FAIL: discrete mass identity violated or negative mass visible")
         failed = failed + 1
     }
     println("")
@@ -857,7 +941,9 @@ fn ep28_selftest_main() -> i32 with IO, Mut, Div, Panic, Epistemic {
     println("")
 
     // TEST 9: dt-convergence (addresses stiffness + 2nd-order CN accuracy; improves on pure path exercise)
-    // Crank-Nicolson is A-stable and 2nd-order. Halving dt should change AUC by O(dt^2).
+    // Crank-Nicolson is A-stable and 2nd-order. For AUC_blood the exact mass
+    // identity makes every dt return (Dose − M(T))/CL, so the diffs are at
+    // rounding level and the printed ratio carries no order information.
     // This numerically checks that the integrator handles stiff compartments without blow-up
     // and that first-order GUM results are not dominated by time-discretization error.
     println("TEST 9: dt-convergence (CN 2nd-order + stiffness evidence)")
@@ -885,9 +971,13 @@ fn ep28_selftest_main() -> i32 with IO, Mut, Div, Panic, Epistemic {
     // dt-conv + convergence to lit value demonstrates discr. error << GUM, bounding higher-order remainder.
     let lit_auc = 5.0 / 12.4
     let e_fine = ep28_abs(m_dt4.auc_blood - lit_auc)
+    // The production dt is gated too, at the same bound: until 2026-09-26 only
+    // the finest dt was checked, while dt=0.05 sat 0.114 (28%) above Dose/CL.
+    let e_prod = ep28_abs(m_dt1.auc_blood - lit_auc)
     print("  SOTA lit AUC (Ferron 1997): "); print_f64(lit_auc); println("  e_fine="); print_f64(e_fine); println("")
-    if e_fine < 0.01 {
-        println("  [PASS] fine dt converges to SOTA lit (Ferron); discr. controlled (CN 2nd-order A-stable)")
+    print("  e_prod (dt=0.05): "); print_f64(e_prod); println("")
+    if e_fine < 0.01 && e_prod < 0.01 {
+        println("  [PASS] production and fine dt match SOTA lit (Ferron); discr. controlled (Rannacher-started CN)")
         passed = passed + 1
     } else {
         println("  FAIL: not close to lit AUC (Ferron 1997)")
@@ -908,7 +998,7 @@ fn ep28_selftest_main() -> i32 with IO, Mut, Div, Panic, Epistemic {
         println("")
         println("  ALL 9 TESTS PASSED")
         println("")
-        println("  First-order GUM (JCGM 100:2008) + CN (A-stable 2nd-order) + invariants verified.")
+        println("  First-order GUM (JCGM 100:2008) + Rannacher-started CN + invariants verified.")
         println("  dt-convergence + h-choice bound higher-order remainder numerically.")
         println("  Dissertation Section 4.10 numerical epistemic stack: CONFIRMED.")
         println("  (Full symbolic higher-order/stiffness proof lives in formal/Lean if present.)")
