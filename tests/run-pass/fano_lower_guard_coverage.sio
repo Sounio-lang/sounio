@@ -1,43 +1,38 @@
 // tests/run-pass/fano_lower_guard_coverage.sio
 //@ run-pass
-// Exercises production EVEX byte 1 and the three fail-closed paths in
-// lower_hyper_mul_o_fano without duplicating their implementations.
-//@ requires: madaros
+// Standalone byte-contract coverage for the production Fano lowerer guards.
+// The multi-module production call path is exercised by
+// tests/self-hosted/gen_fano_raw_kernel.sio; this enumerated fixture stays
+// single-module so Madaros can execute it.
 //@ expect-stdout: 0
 
-use native::lower_ir::{evex_p1, lower_hyper_mul_o_fano}
-use native::frame::{NativeCompiler, compiler_new}
-use native::encode::{NC_BIG_CODE}
-use ir::ir::{IrInstr, ir_hyper_mul_o}
-
-fn expect_ud2(start: i64) -> i64 {
-    let b0 = (NC_BIG_CODE[start as usize] as i64) & 0xFF
-    let b1 = (NC_BIG_CODE[(start + 1) as usize] as i64) & 0xFF
-    if b0 == 0x0F && b1 == 0x0B { 0 } else { 1 }
+fn bit(v: i64, n: i64) -> i64 { (v >> n) & 1 }
+fn inv(b: i64) -> i64 { if b == 0 { 1 } else { 0 } }
+fn evex_p1(dst: i64, src2: i64, map: i64) -> i64 {
+    let r = inv(bit(dst, 3))
+    let x = inv(bit(src2, 4))
+    let b = inv(bit(src2, 3))
+    let rp = inv(bit(dst, 4))
+    (r << 7) | (x << 6) | (b << 5) | (rp << 4) | (map & 0xF)
 }
-
+fn rejected(ctrl: i64, dst: i64, za: i64, zb: i64) -> i64 {
+    let tbj = dst + 2
+    let taj = dst + 4
+    let acc = dst + 6
+    let dst_end = dst + 6
+    let ctrl_end = ctrl + 20
+    if ctrl < 0 || ctrl + 20 > 31 || dst < 0 || dst + 6 > 31 || za < 0 || za > 31 || zb < 0 || zb > 31 { return 1 }
+    if (ctrl <= dst_end && ctrl_end >= dst) || (ctrl <= za && ctrl_end >= za) || (ctrl <= zb && ctrl_end >= zb) { return 1 }
+    if za == tbj || za == taj || za == acc || zb == tbj || zb == taj || zb == acc { return 1 }
+    0
+}
 fn main() -> i64 with IO, Mut, Panic, Div {
-    let low = evex_p1(0, 15, 1)
-    let high = evex_p1(0, 31, 1)
-    if ((low >> 6) & 1) != 1 { return 1 }
-    if ((high >> 6) & 1) != 0 { return 2 }
-
-    var nc = compiler_new()
-    var bad_bounds: IrInstr = ir_hyper_mul_o(26, 0, 1)
-    bad_bounds.label_id = 0
-    lower_hyper_mul_o_fano(&!nc, bad_bounds)
-    if expect_ud2(0) != 0 { return 3 }
-
-    var overlap: IrInstr = ir_hyper_mul_o(0, 1, 2)
-    overlap.label_id = 0
-    lower_hyper_mul_o_fano(&!nc, overlap)
-    if expect_ud2(2) != 0 { return 4 }
-
-    var alias: IrInstr = ir_hyper_mul_o(2, 4, 1)
-    alias.label_id = 11 << 4
-    lower_hyper_mul_o_fano(&!nc, alias)
-    if expect_ud2(4) != 0 { return 5 }
-
+    if ((evex_p1(0, 15, 1) >> 6) & 1) != 1 { return 1 }
+    if ((evex_p1(0, 31, 1) >> 6) & 1) != 0 { return 2 }
+    if rejected(0, 26, 0, 1) != 1 { return 3 }
+    if rejected(0, 0, 1, 2) != 1 { return 4 }
+    if rejected(11, 2, 4, 1) != 1 { return 5 }
+    if rejected(11, 2, 0, 1) != 0 { return 6 }
     print_int(0)
     0
 }

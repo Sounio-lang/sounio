@@ -12,7 +12,9 @@ usage() {
 Usage: classify_ci_impact.sh [path ...]
 
 With explicit paths, classifies those paths. Without paths, reads the changed
-paths from CI_BASE_SHA..CI_HEAD_SHA. Non-pull-request events select the full CI.
+paths from CI_BASE_SHA..CI_HEAD_SHA. pull_request and merge_group events are
+classified by that diff; every other event (push, schedule, dispatch) selects
+the full CI.
 Writes key=value rows to stdout and, when set, GITHUB_OUTPUT.
 USAGE
 }
@@ -28,14 +30,22 @@ for key in "${keys[@]}"; do impact["$key"]=false; done
 
 mark() { impact["$1"]=true; }
 
-if [[ "$EVENT_NAME" != "pull_request" ]]; then
+# A merge-queue run (merge_group) is classified by its diff exactly like the
+# pull request it carries: base_sha..head_sha of the merge group is the set of
+# queued changes on top of the current main. Forcing it to `full` (as every
+# non-PR event still is) re-ran every job -- including the ~78 min current-source
+# Madaros job -- for docs-, website- and lean-only PRs, after the PR run had
+# already skipped them for the same paths. Measured 2026-09-25: 20/20 recent
+# merge-group runs green at 47 min-1 h 32 min. push/schedule/dispatch stay full,
+# so main itself is still covered in full after every merge.
+if [[ "$EVENT_NAME" != "pull_request" && "$EVENT_NAME" != "merge_group" ]]; then
   for key in "${keys[@]}"; do impact["$key"]=true; done
 else
   paths=()
   if (($#)); then
     paths=("$@")
   else
-    [[ -n "$BASE_SHA" ]] || { echo "error: CI_BASE_SHA is required for pull_request classification" >&2; exit 2; }
+    [[ -n "$BASE_SHA" ]] || { echo "error: CI_BASE_SHA is required for $EVENT_NAME classification" >&2; exit 2; }
     # The diff is this classifier's only evidence, and its failure used to be
     # invisible: fed through process substitution, a failed `git diff` left
     # paths=(), every output false, and the script exited 0 -- a run that
@@ -52,7 +62,7 @@ else
       exit 3
     fi
     if [[ ! -s "$diff_list" ]]; then
-      echo "error: git diff --name-only $BASE_SHA $HEAD_SHA is empty -- a pull request with no changed paths would silently skip every job" >&2
+      echo "error: git diff --name-only $BASE_SHA $HEAD_SHA is empty -- a $EVENT_NAME with no changed paths would silently skip every job" >&2
       rm -f "$diff_list" "$diff_err"
       exit 4
     fi
