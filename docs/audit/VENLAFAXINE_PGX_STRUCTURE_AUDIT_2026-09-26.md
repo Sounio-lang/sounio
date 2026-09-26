@@ -50,7 +50,8 @@ ratio grows linearly with CYP2D6 activity; without it, it saturates.
 | Code says | Actually | Evidence |
 |---|---|---|
 | "Klamerus 1999, Pharmacogenetics 9:435-43" (CL_form 43 L/h, CL/F 100 L/h) | **Lessard E et al. 1999**, Pharmacogenetics 9(4):435-43, PMID 10780263 | Abstract: EM oral CL 100 ± 62 L/h; metabolic clearance to O-desmethylated metabolites 43 ± 32 L/h; with quinidine these fall to 17 ± 5 and 2 ± 1 L/h; renal CL 4 ± 1 L/h; PM oral CL "more than fourfold less". Every value is an **oral** (apparent) clearance at steady state. |
-| "Kirchheiner 2006, Ther Drug Monit 28:493-502" (ratios EM 3.45, IM 1.16, PM 0.25, UM 10.3) | No such paper. The paper at 493-502 in 2006 is **Shams ME et al.**, J Clin Pharm Ther 31(5):493-502, PMID 16958828, doi:10.1111/j.1365-2710.2006.00763.x | Abstract (100 patients): median ODV/V 1.8, 10th–90th percentile 0.3–5.2; PM < 0.3; UM > 5.2; IM 1.1 ± 0.8. The values 3.45 / 0.25 / 10.3 **do not appear in the abstract; their provenance is unverified.** |
+| "Kirchheiner 2006, Ther Drug Monit 28:493-502" (ratios EM 3.45, IM 1.16, PM 0.25, UM 10.3) | No such paper. The paper at 493-502 in 2006 is **Shams ME et al.**, J Clin Pharm Ther 31(5):493-502, PMID 16958828, doi:10.1111/j.1365-2710.2006.00763.x | Abstract (100 patients): median ODV/V 1.8, 10th–90th percentile 0.3–5.2; PM < 0.3; UM > 5.2; IM 1.1 ± 0.8. The four target values are **unsourced**. A separate forensics pass (`docs/audit/VENLAFAXINE_ODV_RATIO_CITATION_FORENSICS_2026-09-26.md`, branch `claude/mystifying-goldberg-ccfc8a`) found them in no publication, CPIC 2023 or DPWG 2024; they entered the repo already carrying the bogus citation. |
+| — | Nichols AI et al. 2011, Clin Drug Investig 31(3):155-67, PMID 21288052, doi:10.2165/11586630-000000000-00000 | Venlafaxine XR 75 mg, genotyped healthy subjects: ODV:V AUC(∞) ratio **6.2 in EMs, 0.21 in PMs**; venlafaxine AUC 445% higher in PMs. |
 | Klamerus (venlafaxine PK) | Klamerus KJ et al. 1992, J Clin Pharmacol 32:716-24, PMID 1487561, doi:10.1002/j.1552-4604.1992.tb03875.x | Venlafaxine t½ 3–4 h, ODV t½ 10 h; ODV **apparent** clearance 0.21–0.66 L/h/kg; ODV AUC 2–3× venlafaxine AUC. |
 | ODV CL 28 L/h ("Wyeth label 0.4 L/h/kg") | Klamerus KJ et al. 1996, Pharmacotherapy 16:915-23, PMID 8888087 | Young adults: ODV apparent CL 0.38 L/h/kg, t½ 10.3 h. |
 | F = 0.45 ("Wang 2022") | Patat A et al. 1998, J Clin Pharmacol 38:256-67, doi:10.1002/j.1552-4604.1998.tb04423.x | Absolute bioavailability 40–45% (IR and XR alike). |
@@ -185,6 +186,15 @@ cross-check between two kernels and two independent implementations.
   F_abs = 0.827, a physically admissible value (≤ 1). Config C's 0.45/0.506 =
   0.89 is not a check, because that F_H was produced under F_abs = 1. Under
   config A the question cannot be posed.
+- **Independent 3 — the phenotype scale itself.** With portal input the ratio is
+  linear in X_form (§3), so literature ratios fix s directly. Two independent
+  sources agree: Nichols 2011 gives s_PM ≈ 0.21/6.2 = 0.034, and Lessard 1999
+  (quinidine: O-desmethylation 43 → 2 L/h) gives 2/43 = 0.047. Both are below the
+  code's s_PM = 0.25/3.45 = 0.0725, which comes from the unsourced targets.
+  Correspondingly the model's EM/PM ratio contrast (C: 3.589/0.279 = 12.9; E: 13.1)
+  is well below Nichols 2011's 6.2/0.21 = 29.5. The EM absolute ratio is not
+  pinned either: Klamerus 1992 gives 2–3 (IR, healthy men), Nichols 2011 gives
+  6.2 (XR, genotyped EMs), Shams 2006 a patient median of 1.8.
 - **Conditional — PM ratio vs the clearance split** (§5.2): Shams 2006 reports
   PM < 0.3. This discriminates the split only given the PM scale s = 0.25/3.45,
   which comes from the unverified targets. As s → 0, variant D's 2 L/h floor
@@ -232,7 +242,7 @@ Same probe with the variant configurations (sources in the probe header):
 
 | # | Change | Where | Lane |
 |---|---|---|---|
-| P1 | Correct citations (Lessard 1999; Shams 2006); flag the 3.45 / 0.25 / 10.3 provenance as unverified or source it | `pgx/cyp2d6_venlafaxine.sio`, `drugs/venlafaxine.sio`, scenario header | pgx/drugs: free; scenario: competent-mcclintock |
+| P1 | Correct citations (Lessard 1999; Shams 2006). Treat 0.25 / 1.16 / 3.45 / 10.3 as unsourced and **replace the phenotype scale s**. It should not be r/3.45; derive it from formation-clearance data: s_PM ≈ 0.03–0.05 from Nichols 2011 and Lessard 1999; IM/UM need sourcing (e.g. an activity-score model). Validate against Nichols 2011 (EM 6.2, PM 0.21), Klamerus 1992 (2–3) and the Shams 2006 bands | `pgx/cyp2d6_venlafaxine.sio`, `drugs/venlafaxine.sio`, scenario header | pgx/drugs: mystifying-goldberg / competent-mcclintock (comments already in flight); scenario: competent-mcclintock |
 | P2 | Route oral absorption to the liver (`input_organ = 1`) | scenario; TR-BDF2 step needs the same input term | modest-heisenberg (theta kernel), scenario lane |
 | P3 | All hepatic clearance in the liver sink, venous-referenced: cl_sink = X_hep/κ with formed = removed·X_form/X_hep; renal 4 L/h on blood. Resolve X_hep from {F, CL/F, CL_R, Q, PS} (variant E), not by reading CL/F as X; use the consistent split 43 s │ 42 s + 11 (or D's reading, stated) | scenario + `drugs/venlafaxine.sio` | scenario lane |
 | P4 | Gut factor F → F_abs (0.827 in the self-consistent solve); F_H emerges | scenario | scenario lane |
@@ -266,6 +276,10 @@ P2–P5 together are config C / variant E. P6 is independent of the ratios.
   - the X_eff/X arithmetic, and fm = 43/100;
   - D vs Shams is conditional on s;
   - the direct Klamerus 1992 anchor of 2–3 is added.
+- After that review, the unsourced status of the targets (forensics branch
+  above) and Nichols 2011 (PubMed-verified) were added to §2, §5 and P1. Those
+  additions are ratio arithmetic on the reviewed linear-in-X_form result; they
+  have not had a separate model review.
 - The second vendor leg (Kimi K3 via the gateway) returned nothing: an upstream
   502, then a 900 s timeout. zai is rate-limited (1313), the on-prem `local` leg
   is down, and the DeepSeek direct key is rejected. **This document has had a
