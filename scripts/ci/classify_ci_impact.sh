@@ -62,7 +62,7 @@ else
       exit 3
     fi
     if [[ ! -s "$diff_list" ]]; then
-      echo "error: git diff --name-only $BASE_SHA $HEAD_SHA is empty -- a pull request with no changed paths would silently skip every job" >&2
+      echo "error: git diff --name-only $BASE_SHA $HEAD_SHA is empty -- a $EVENT_NAME with no changed paths would silently skip every job" >&2
       rm -f "$diff_list" "$diff_err"
       exit 4
     fi
