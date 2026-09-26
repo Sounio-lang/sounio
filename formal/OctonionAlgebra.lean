@@ -2,7 +2,7 @@
 # Sounio.OctonionAlgebra — Phase 8 Formal Verification
 
 Formalisation of the octonion (𝕆) algebra underlying Sounio's
-native AVX-512 backend (`self-hosted/native/lower_ir.sio:1620`, `lower_hyper_mul_o_fano`)
+native AVX-512 backend (`self-hosted/native/lower_ir.sio:1774`, `lower_hyper_mul_o_fano`)
 and standard mathematical library (`stdlib/math/octonion.sio`).
 
 Constructed strictly via the **Cayley-Dickson** doubling process over Hamilton quaternions (ℍ):

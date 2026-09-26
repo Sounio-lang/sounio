@@ -10,7 +10,7 @@
 using FanoExecFn = void (*)(const double* a, const double* b, double* out, const void* ctrl_table);
 
 int main(int argc, char** argv) {
-    const char* kernel_bin_path = (argc > 1) ? argv[1] : "/workspace/sounio/tests/run-pass/fano_raw_kernel.bin";
+    const char* kernel_bin_path = (argc > 1) ? argv[1] : "fano_raw_kernel.bin";
     std::ifstream bin_file(kernel_bin_path, std::ios::binary);
     if (!bin_file) {
         std::cerr << "Error: cannot open raw kernel binary file at " << kernel_bin_path << "\n";
