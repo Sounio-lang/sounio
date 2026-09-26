@@ -8226,19 +8226,161 @@ impl Lowerer {
         (lo, dst_reg)
     }
 
-    // Budget the deep copy BEFORE emitting any of it. `emit` turns an overrun
-    // past IR_MAX_INSTRS into a lowering error, so a struct whose aggregate
-    // fields will not fit degrades to the #1475 flat copy -- strictly the
-    // previous behaviour -- instead of breaking a build the user did not ask us
-    // to break.
-    fn emit_struct_value_copy_budgeted(self, src_reg: i64, type_name: Name, slot_count: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
-        let deep_cost = self.struct_deep_copy_cost(type_name, slot_count, 0)
-        let deep_room = IR_MAX_INSTRS - self.struct_deep_copy_instr_headroom() - self.current_func.instr_count
-        if deep_cost <= deep_room {
-            self.emit_struct_value_copy_deep(src_reg, type_name, slot_count, 0)
-        } else {
-            self.emit_struct_value_copy(src_reg, type_name, slot_count)
+    // A by-value struct copy must be COMPLETE. The historical deep copier has a
+    // finite recursion cap to guarantee lowering terminates; silently keeping a
+    // nested handle past that cap is not legal once a binding/store promises
+    // value semantics. Detect that case before emitting any copy.
+    fn struct_value_copy_is_complete(self, type_name: Name, slot_count: i64, depth: i64) -> bool with Mut, Panic, Div, Alloc {
+        if type_name.len <= 0 || slot_count <= 0 { return false }
+        var i: i64 = 0
+        while i < slot_count && i < 128 {
+            let pos = self.struct_layout_field_pos(type_name, i)
+            let arr_len = self.struct_layout_pos_array_len(pos)
+            if arr_len <= 0 {
+                let nested_name = self.struct_layout_pos_named_type(pos)
+                let nested_slots = self.nested_struct_field_slot_count(nested_name)
+                if nested_slots > 0 {
+                    if depth >= self.struct_deep_copy_max_depth() { return false }
+                    if !self.struct_value_copy_is_complete(nested_name, nested_slots, depth + 1) { return false }
+                }
+            }
+            i = i + 1
         }
+        true
+    }
+
+    // Budget the COMPLETE value copy before emitting any of it. Falling back to
+    // a flat copy would preserve nested aggregate handles and silently alias.
+    fn emit_struct_value_copy_budgeted(self, src_reg: i64, type_name: Name, slot_count: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        if !lo.struct_value_copy_is_complete(type_name, slot_count, 0) {
+            print("error: aggregate value copy exceeds supported nesting depth; refusing shallow aliasing fallback\n")
+            lowerer_mark_hard_error(&! lo)
+            return (lo, src_reg)
+        }
+        let deep_cost = lo.struct_deep_copy_cost(type_name, slot_count, 0)
+        let deep_room = IR_MAX_INSTRS - lo.struct_deep_copy_instr_headroom() - lo.current_func.instr_count
+        if deep_cost > deep_room {
+            print("error: aggregate value copy exceeds remaining IR budget; refusing shallow aliasing fallback\n")
+            lowerer_mark_hard_error(&! lo)
+            return (lo, src_reg)
+        }
+        lo.emit_struct_value_copy_deep(src_reg, type_name, slot_count, 0)
+    }
+
+    // By-name sibling of struct_layout_field_pos for aggregate PLACE expressions.
+    fn struct_layout_field_pos_by_name(self, type_name: Name, field_name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        if type_name.len <= 0 || field_name.len <= 0 { return 0 - 1 }
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
+                var fi: i64 = 0
+                let fc = (*self.struct_layouts).entries[si as usize].field_count
+                while fi < fc && fi < 128 {
+                    if ir_name_eq(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].name_id), field_name) {
+                        return si * 128 + fi
+                    }
+                    fi = fi + 1
+                }
+                return 0 - 1
+            }
+            si = si + 1
+        }
+        0 - 1
+    }
+
+    // Named field PLACE containing a word-scalar fixed array, else -1.
+    fn aggregate_place_word_scalar_array_pos_ref(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+        if (*e).kind != ExprKind::ExprFieldAccess { return 0 - 1 }
+        if lower_name_tuple_index((*e).name) >= 0 { return 0 - 1 }
+        match (*e).left {
+            Some(owner) => {
+                let owner_st = self.expr_receiver_struct_type_ref(&(*owner))
+                let pos = self.struct_layout_field_pos_by_name(owner_st, (*e).name)
+                if pos >= 0 && self.struct_layout_pos_array_len(pos) > 0 { return pos }
+            }
+            None => {}
+        }
+        0 - 1
+    }
+
+    // Static struct type of a field/deref/index PLACE. Box, Seq and tuple forms
+    // preserve reference semantics and stay outside this value-copy path.
+    fn aggregate_place_struct_type_ref(self, e: &Expr) -> Name with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprFieldAccess {
+            if lower_name_tuple_index((*e).name) >= 0 { return ir_empty_name() }
+            match (*e).left {
+                Some(owner) => {
+                    let owner_st = self.expr_receiver_struct_type_ref(&(*owner))
+                    return self.field_named_type_for_struct(owner_st, (*e).name)
+                }
+                None => {}
+            }
+            return ir_empty_name()
+        }
+        if (*e).kind == ExprKind::ExprUnary && (*e).un_op == UnaryOp::OpDeref {
+            match (*e).left {
+                Some(operand) => {
+                    if (*operand).kind == ExprKind::ExprIdent {
+                        if ir_name_is_box(self.lookup_local_struct_type((*operand).name)) { return ir_empty_name() }
+                    } else {
+                        return ir_empty_name()
+                    }
+                }
+                None => {}
+            }
+            return self.expr_receiver_struct_type_ref(e)
+        }
+        if (*e).kind == ExprKind::ExprIndex {
+            match (*e).left {
+                Some(indexed) => {
+                    if (*indexed).kind != ExprKind::ExprIdent { return ir_empty_name() }
+                    if ir_name_eq(self.lookup_local_struct_type((*indexed).name), make_name("Seq")) { return ir_empty_name() }
+                }
+                None => {}
+            }
+            return self.expr_receiver_struct_type_ref(e)
+        }
+        ir_empty_name()
+    }
+
+    // Materialize a PLACE aggregate into fresh storage. A partially initialized
+    // aggregate slot may legitimately contain handle zero, so guard the copy.
+    fn emit_place_aggregate_value_copy_ref(self, e: &Expr, reg: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let arr_pos = self.aggregate_place_word_scalar_array_pos_ref(e)
+        let st_name = if arr_pos >= 0 { ir_empty_name() } else { self.aggregate_place_struct_type_ref(e) }
+        let slots = self.nested_struct_field_slot_count(st_name)
+        if arr_pos < 0 && slots <= 0 { return (self, reg) }
+
+        var lo = self
+        let result_pair = lo.fresh_reg()
+        lo = result_pair.0
+        let result_reg = result_pair.1
+        lo = lo.emit(ir_copy(result_reg, reg))
+        let zero_pair = lo.emit_i64_const(0)
+        lo = zero_pair.0
+        let cond_pair = lo.fresh_reg()
+        lo = cond_pair.0
+        let cond_reg = cond_pair.1
+        lo = lo.emit(ir_binop(cond_reg, reg, BinaryOp::OpNe, zero_pair.1))
+        let skip_pair = lo.fresh_label()
+        lo = skip_pair.0
+        let skip_label = skip_pair.1
+        lo = lo.emit(ir_branch_false(cond_reg, skip_label))
+
+        if arr_pos >= 0 {
+            let arr_len = lo.struct_layout_pos_array_len(arr_pos)
+            let elem_is_float = lo.struct_layout_pos_is_float(arr_pos) == 2
+            let copy_pair = lo.emit_fixed_array_value_copy(reg, arr_len, elem_is_float)
+            lo = copy_pair.0
+            lo = lo.emit(ir_copy(result_reg, copy_pair.1))
+        } else {
+            let copy_pair = lo.emit_struct_value_copy_budgeted(reg, st_name, slots)
+            lo = copy_pair.0
+            lo = lo.emit(ir_copy(result_reg, copy_pair.1))
+        }
+        lo = lo.emit(ir_label(skip_label))
+        (lo, result_reg)
     }
 
     // Value of the aggregate local `name` (currently in `reg`) as a STORED
@@ -8280,6 +8422,15 @@ impl Lowerer {
         let slot_count = self.struct_layout_slot_count(st_name)
         if slot_count <= 0 { return (self, reg) }
         self.emit_struct_value_copy_budgeted(reg, st_name, slot_count)
+    }
+
+    // One semantic entry point for aggregate source materialization. Identifier
+    // and PLACE expressions differ only in how their static type is recovered.
+    fn emit_expr_aggregate_value_copy_ref(self, e: &Expr, reg: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if (*e).kind == ExprKind::ExprIdent {
+            return self.emit_ident_aggregate_value_copy((*e).name, reg)
+        }
+        self.emit_place_aggregate_value_copy_ref(e, reg)
     }
 
     // Whether `var y = x` on struct-typed local `x` may be value-copied.
@@ -17205,6 +17356,18 @@ impl Lowerer {
                         lo = lo.emit(ir_copy(copy_reg, reg))
                         bind_reg = copy_reg
                     }
+                } else {
+                    let place_arr_pos = lo.aggregate_place_word_scalar_array_pos_ref(&(*rhs_ident))
+                    let place_copy = lo.emit_place_aggregate_value_copy_ref(&(*rhs_ident), reg)
+                    lo = place_copy.0
+                    bind_reg = place_copy.1
+                    if place_arr_pos >= 0 {
+                        fixed_array_len = lo.struct_layout_pos_array_len(place_arr_pos)
+                        fixed_array_word_scalar = true
+                        if lo.struct_layout_pos_is_float(place_arr_pos) == 2 {
+                            rhs_array_elem_is_float = true
+                        }
+                    }
                 }
             }
             _ => {}
@@ -18176,14 +18339,27 @@ impl Lowerer {
         }
         var lo = pair_rhs.0
         var rhs = pair_rhs.1
-        // An aggregate stored from a named local is stored BY VALUE, as `let`
-        // binds it (see emit_ident_aggregate_value_copy). f128 slots copied their
-        // limbs above.
+        // Aggregate assignment/store is BY VALUE independently of whether the
+        // source is a local identifier or a field/deref/index PLACE. A syntactic
+        // local self-assignment is already a no-op and must not consume a fresh
+        // monotonic handle. f128 slots copied their limbs above.
         if !target_is_f128 {
             match s.expr {
                 Some(rhs_agg) => {
+                    var same_local = false
                     if (*rhs_agg).kind == ExprKind::ExprIdent {
-                        let agg_pair = lo.emit_ident_aggregate_value_copy((*rhs_agg).name, rhs)
+                        match s.target {
+                            Some(target_agg) => {
+                                if (*target_agg).kind == ExprKind::ExprIdent
+                                    && ir_name_eq((*target_agg).name, (*rhs_agg).name) {
+                                    same_local = true
+                                }
+                            }
+                            None => {}
+                        }
+                    }
+                    if !same_local {
+                        let agg_pair = lo.emit_expr_aggregate_value_copy_ref(&(*rhs_agg), rhs)
                         lo = agg_pair.0
                         rhs = agg_pair.1
                     }
