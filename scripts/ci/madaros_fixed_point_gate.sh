@@ -73,9 +73,12 @@ if [[ -z "${_MADAROS_FP_INNER:-}" && -n "${SOUNIO_MADAROS_CACHE:-}" && -x "${MAD
   source "$ROOT_DIR/scripts/dev/madaros-cache.sh"
   _fp_key="$(
     {
-      echo "fixed-point-v1"
+      echo "fixed-point-v2"
       sha256sum "$MADAROS_BIN" | cut -c1-64
       madaros_tree_key
+      # gen2/gen3 are compiled under this environment; SOUNIO_* overrides
+      # change what they emit (see madaros_env_fingerprint).
+      madaros_env_fingerprint
       # The gate, every scripts/lib helper it sources or runs (including the
       # gen2/gen3 comparator compare_executable_payloads.sh) and the IR
       # capacity probe it consults.

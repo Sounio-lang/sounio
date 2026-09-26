@@ -66,14 +66,34 @@ madaros_tree_key() {
     )
 }
 
-# Stage 1 key: bootstrap ELF bytes + lean_single.sio bytes.
-madaros_seed_key() {  # <bootstrap-elf> <lean-src>
-    printf 'seed-v1\n%s\n%s\n' "$(_mc_sha "$1")" "$(_mc_sha "$2")" | sha256sum | cut -c1-64
+# Environment the compiler can read while it builds. Every env read in
+# self-hosted/ is a SOUNIO_* variable, and many change the emitted ELF
+# (SOUNIO_MADAROS_DEP_MERGE picks another lowering path, SOUNIO_DISABLE_MM_DCE
+# turns off cross-module DCE, SOUNIO_OCP_SKIP_* drop optimiser passes, the
+# *_SABOTAGE_* hooks miscompile on purpose). So every SOUNIO_* variable is part
+# of the key -- fail-safe: an unknown variable costs a cache miss, never a wrong
+# hit -- except pure plumbing that only names paths, pools or this cache.
+# SOUNIO_STDLIB_PATH is excluded here because madaros_cache_usable refuses the
+# cache outright when it points anywhere but this checkout.
+madaros_env_fingerprint() {
+    # `|| true`: grep exits 1 when nothing matches (the common case), which
+    # under a caller's `set -o pipefail` would otherwise fail the pipeline.
+    { env | LC_ALL=C sort | grep -E '^SOUNIO_[A-Z0-9_]*=' \
+        | grep -vE '^SOUNIO_(MADAROS_CACHE[A-Z_]*|MADAROS_NOCACHE|STDLIB_PATH|BUILD_SLOTS|CI_RUNNER|TEST_JOBS|SLOW_TESTS_AVAILABLE|MADAROS_FP_[A-Z_]*|[A-Z0-9_]*_(BIN|DIR|KEEP|REPORT_DIR))=' \
+        || true; } | sha256sum | cut -c1-64
 }
 
-# Stage 2 key: seed ELF bytes + whole tree. (main.sio is inside the tree.)
+# Stage 1 key: bootstrap ELF bytes + lean_single.sio bytes + build env.
+madaros_seed_key() {  # <bootstrap-elf> <lean-src>
+    printf 'seed-v2\n%s\n%s\n%s\n' "$(_mc_sha "$1")" "$(_mc_sha "$2")" "$(madaros_env_fingerprint)" \
+        | sha256sum | cut -c1-64
+}
+
+# Stage 2 key: seed ELF bytes + whole tree + build env. (main.sio is inside
+# the tree.)
 madaros_build_key() {  # <seed-elf>
-    printf 'madaros-v1\n%s\n%s\n' "$(_mc_sha "$1")" "$(madaros_tree_key)" | sha256sum | cut -c1-64
+    printf 'madaros-v2\n%s\n%s\n%s\n' "$(_mc_sha "$1")" "$(madaros_tree_key)" "$(madaros_env_fingerprint)" \
+        | sha256sum | cut -c1-64
 }
 
 # madaros_cache_get <stage> <key> <out>  -> 0 on verified hit (out written), 1 on miss
