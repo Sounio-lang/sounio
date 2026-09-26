@@ -36,7 +36,7 @@ Instruction/completion dataset for **Sounio**, a self-hosted systems + scientifi
 
 Each record contains:
 
-- `instruction`: natural-language prompt derived from test annotations, descriptions, and file names
+- `instruction`: natural-language prompt derived from test annotations, descriptions, and file names; fixtures annotated `//@ known-failure` are described as documented known failures with their recorded reason, and run-pass ones carry no success claim or expected stdout
 - `completion`: the full `.sio` source file
 - `suite`: `run-pass` or `compile-fail`
 - `source_path`: original repository path
