@@ -6,7 +6,8 @@
 //
 // Operator splitting per step (Lie-Trotter, same pattern as semaglutide_sc_depot):
 //   1. Matrix releases dissolved dose to gut pool
-//   2. First-order absorption (ka) from gut pool → parent blood input
+//   2. First-order absorption (ka) out of the gut pool; F of it → parent blood
+//      input, 1 − F lost presystemically (see `vfx_gut_absorb_step`)
 //   3. Parent PBPK28 TR-BDF2 step with the CYP2D6 formation sink on the liver
 //      (organ 1) inside the implicit solve → mass formed feeds ODV blood input
 //   4. ODV PBPK28 TR-BDF2 step
@@ -113,26 +114,43 @@ pub fn vfx_odv_step(
     pbpk28_trbdf2_step_mut(odv, vfx_odv_params(pheno), odv_input, dt, ledger)
 }
 
+// Gut pool after matrix dissolution: dG/dt = R(t) − ka·G. Release is applied
+// first (step 1), then the pool decays exactly over dt, G → G·e^(−ka·dt), so
+// G·(1 − e^(−ka·dt)) leaves the lumen. F is the fraction of the dose that
+// reaches the systemic parent, so F of that leaving mass is parent input and
+// the other 1 − F (incomplete absorption + presystemic first pass) leaves the
+// model. Cumulative parent input is F·(released − G) ≤ F·dose.
+pub struct VfxGutStep {
+    pub gut_mg: f64,        // pool after the step
+    pub to_parent_mg: f64,  // F · G · (1 − e^(−ka·dt))
+    pub lost_mg: f64,       // (1 − F) · G · (1 − e^(−ka·dt))
+}
+
+pub fn vfx_gut_absorb_step(gut_mg: f64, dt: f64) -> VfxGutStep with Mut, Div {
+    let frac_abs = 1.0 - mer_exp_neg(0.0 - venlafaxine_ka_abs() * dt)
+    let leave_mg = gut_mg * frac_abs
+    let to_parent = venlafaxine_f_oral_xr() * leave_mg
+    VfxGutStep {
+        gut_mg: gut_mg - leave_mg,
+        to_parent_mg: to_parent,
+        lost_mg: leave_mg - to_parent,
+    }
+}
+
 fn vfx_strang_step(
     scen: VenlafaxineXrScenario,
     rel: MatrixReleaseModel,
     t_start: f64,
     dt: f64
 ) -> VenlafaxineXrScenario with Mut, Div, Panic {
-    let f_abs = venlafaxine_f_oral_xr()
-    let ka = venlafaxine_ka_abs()
-
     // 1. Matrix dissolution → gut pool (mg)
     let rel_amt = matrix_step_amount(rel, t_start, dt)
-    var gut = scen.gut_mg + rel_amt
 
-    // 2. First-order absorption from gut pool; F applied to absorbed fraction.
-    let frac_abs = 1.0 - mer_exp_neg(0.0 - ka * dt)
-    let absorb_amt = f_abs * gut * frac_abs
-    gut = gut - absorb_amt
-    if gut < 0.0 { gut = 0.0 }
+    // 2. First-order absorption: the pool loses G·frac_abs, F of it to parent.
+    let gs = vfx_gut_absorb_step(scen.gut_mg + rel_amt, dt)
+    let gut = gs.gut_mg
 
-    let parent_input = absorb_amt / dt
+    let parent_input = gs.to_parent_mg / dt
 
     // 3. Parent transport + CYP2D6 formation sink on the liver, one implicit solve.
     var out_parent = scen.parent

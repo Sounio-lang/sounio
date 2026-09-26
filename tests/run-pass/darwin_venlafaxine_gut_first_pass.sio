@@ -1,0 +1,62 @@
+//@ run-pass
+//@ expect-stdout-contains: VENLAFAXINE_GUT_FIRST_PASS_PASS
+//
+// Venlafaxine XR gut pool: the lumen loses G·(1 − e^(−ka·dt)) per step, of
+// which F enters the parent and 1 − F is lost presystemically. Driven through
+// the scenario's own `vfx_gut_absorb_step` over the canonical 120 h run.
+//
+// The earlier step removed only F·G·(1 − e^(−ka·dt)) from the pool, so the
+// (1 − F) share stayed behind and was F-absorbed again on later steps: the
+// cumulative parent input reached the full 75 mg released instead of ≤ F·75.
+//
+// Asserted, all identities of the model (tolerance is rounding, 1e-12 mg
+// against a 75 mg dose):
+//   1. released = G_end + Σ to_parent + Σ lost      (gut mass balance)
+//   2. Σ to_parent = F · (Σ to_parent + Σ lost)     (F splits what leaves)
+//   3. Σ to_parent ≤ F · released                   (bioavailability bound)
+
+use darwin_pbpk::scenarios::venlafaxine_xr::*
+use darwin_pbpk::release::matrix_er::*
+use darwin_pbpk::drugs::venlafaxine::*
+
+fn gf_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn main() with Mut, Div, IO, Panic {
+    let rel = venlafaxine_xr_matrix_gohel2008()
+    let f = venlafaxine_f_oral_xr()
+    let dt = 0.5
+    var gut = 0.0
+    var released = 0.0
+    var to_parent = 0.0
+    var lost = 0.0
+    var t = 0.0
+    while t < 120.0 - 0.5 * dt {
+        let r = matrix_step_amount(rel, t, dt)
+        released = released + r
+        let gs = vfx_gut_absorb_step(gut + r, dt)
+        gut = gs.gut_mg
+        to_parent = to_parent + gs.to_parent_mg
+        lost = lost + gs.lost_mg
+        t = t + dt
+    }
+    println("released, gut remaining, parent input, presystemic loss (mg):")
+    println(released)
+    println(gut)
+    println(to_parent)
+    println(lost)
+
+    let tol = 1.0e-12
+    if !(gf_abs(released - (gut + to_parent + lost)) < tol) {
+        println("FAIL: gut mass balance")
+        return
+    }
+    if !(gf_abs(to_parent - f * (to_parent + lost)) < tol) {
+        println("FAIL: F split of the mass leaving the gut")
+        return
+    }
+    if !(to_parent <= f * released + tol) {
+        println("FAIL: cumulative parent input exceeds F * released")
+        return
+    }
+    println("VENLAFAXINE_GUT_FIRST_PASS_PASS")
+}
