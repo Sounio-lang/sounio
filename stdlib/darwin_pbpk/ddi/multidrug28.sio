@@ -87,6 +87,7 @@
 
 use darwin_pbpk::core::pbpk28_params::*
 use darwin_pbpk::pbpk28_hepatic::*
+use eisa::format::{is_finite_f64}
 
 const MD_MAX: i32 = 16
 const MD_NE: i32 = 4
@@ -185,7 +186,7 @@ pub fn md_add_drug(md: &!MultiDrug28, p: PBPKParams28, fu_b: f64, fa: f64, ka: f
     // amount negative, fu_b outside (0, 1] is not a fraction.
     if !(fu_b > 0.0 && fu_b <= 1.0) { panic("multidrug28: md_add_drug needs 0 < fu_b <= 1") }
     if !(fa >= 0.0 && fa <= 1.0) { panic("multidrug28: md_add_drug needs 0 <= fa <= 1") }
-    if !(ka >= 0.0) { panic("multidrug28: md_add_drug needs ka >= 0") }
+    if !(is_finite_f64(ka) && ka >= 0.0) { panic("multidrug28: md_add_drug needs a finite ka >= 0") }
     var o: i32 = 0
     while o < 14 {
         (*md).v_ref[i * 14 + o] = p.v_ref[o]
@@ -232,7 +233,7 @@ pub fn md_set_clint(md: &!MultiDrug28, drug: i32, site: i32, enz: i32, clint_u: 
     md_check_drug(md, drug)
     md_check_site(site)
     md_check_enz(enz)
-    if !(clint_u >= 0.0) { panic("multidrug28: md_set_clint needs CLint_u >= 0") }
+    if !(is_finite_f64(clint_u) && clint_u >= 0.0) { panic("multidrug28: md_set_clint needs a finite CLint_u >= 0") }
     (*md).clint[drug * 8 + site * 4 + enz] = clint_u
 }
 
@@ -248,13 +249,13 @@ pub fn md_set_ki(md: &!MultiDrug28, drug: i32, enz: i32, ki_u: f64) with Mut, Pa
 pub fn md_set_ext_load(md: &!MultiDrug28, site: i32, enz: i32, load: f64) with Mut, Panic {
     md_check_site(site)
     md_check_enz(enz)
-    if !(load >= 0.0) { panic("multidrug28: md_set_ext_load needs load >= 0") }
+    if !(is_finite_f64(load) && load >= 0.0) { panic("multidrug28: md_set_ext_load needs a finite load >= 0") }
     (*md).ext_load[site * 4 + enz] = load
 }
 
 pub fn md_dose_oral(md: &!MultiDrug28, drug: i32, mg: f64) with Mut, Panic {
     md_check_drug(md, drug)
-    if !(mg >= 0.0) { panic("multidrug28: md_dose_oral needs mg >= 0") }
+    if !(is_finite_f64(mg) && mg >= 0.0) { panic("multidrug28: md_dose_oral needs a finite mg >= 0") }
     let fa = (*md).fa[drug]
     (*md).lumen[drug] = (*md).lumen[drug] + fa * mg
     (*md).lost[drug] = (*md).lost[drug] + (1.0 - fa) * mg
@@ -264,7 +265,7 @@ pub fn md_dose_oral(md: &!MultiDrug28, drug: i32, mg: f64) with Mut, Panic {
 
 pub fn md_dose_iv_bolus(md: &!MultiDrug28, drug: i32, mg: f64) with Mut, Div, Panic {
     md_check_drug(md, drug)
-    if !(mg >= 0.0) { panic("multidrug28: md_dose_iv_bolus needs mg >= 0") }
+    if !(is_finite_f64(mg) && mg >= 0.0) { panic("multidrug28: md_dose_iv_bolus needs a finite mg >= 0") }
     (*md).cv[drug * 14] = (*md).cv[drug * 14] + mg / (*md).v_ref[drug * 14]
     (*md).dose_in[drug] = (*md).dose_in[drug] + mg
     (*md).pending_smooth = true
@@ -273,7 +274,7 @@ pub fn md_dose_iv_bolus(md: &!MultiDrug28, drug: i32, mg: f64) with Mut, Div, Pa
 // A negative infusion rate would remove body mass and book it as dose.
 pub fn md_set_iv_rate(md: &!MultiDrug28, drug: i32, mg_per_h: f64) with Mut, Panic {
     md_check_drug(md, drug)
-    if !(mg_per_h >= 0.0) { panic("multidrug28: md_set_iv_rate needs mg/h >= 0") }
+    if !(is_finite_f64(mg_per_h) && mg_per_h >= 0.0) { panic("multidrug28: md_set_iv_rate needs a finite mg/h >= 0") }
     (*md).iv_rate[drug] = mg_per_h
     (*md).pending_smooth = true
 }
@@ -305,7 +306,15 @@ pub fn md_state_of(md: &MultiDrug28, i: i32) -> PBPKState28 with Mut {
 }
 
 // exp(-y) for y >= 0: range reduction by halving, Taylor, repeated squaring.
-fn md_exp_neg(y: f64) -> f64 with Mut, Div {
+//
+// The halving loop cannot make progress for y = +Inf (halving infinity is
+// infinity), so it would spin forever. That is reachable from finite inputs:
+// ka and dt are each finite but ka·dt can overflow. exp(-y) is exactly 0.0 in
+// binary64 for y above ~746, so anything from 750 up -- including +Inf -- takes
+// the short-circuit, and every finite y below it needs at most 11 halvings.
+fn md_exp_neg(y: f64) -> f64 with Mut, Div, Panic {
+    if y >= 750.0 { return 0.0 }
+    if !(is_finite_f64(y) && y >= 0.0) { panic("multidrug28: md_exp_neg needs a finite y >= 0") }
     var z = y
     var m: i32 = 0
     while z > 0.5 {
@@ -474,7 +483,7 @@ fn md_predict(md: &!MultiDrug28, dt: f64, theta: f64) with Mut, Div, Panic {
 
 // Absorption for this step: removes the absorbed mass from each lumen and sets
 // the constant gut-tissue input rate (mg/h) per drug.
-fn md_absorb(md: &!MultiDrug28, dt: f64) with Mut, Div {
+fn md_absorb(md: &!MultiDrug28, dt: f64) with Mut, Div, Panic {
     let n = (*md).n
     var i: i32 = 0
     while i < n {
@@ -532,8 +541,24 @@ fn md_substep(md: &!MultiDrug28, dt: f64, theta: f64) with Mut, Div, Panic {
     md_advance(md, dt, theta)
 }
 
+// A step must leave every drug's blood concentration finite. A finite but
+// absurd dt still overflows the kernel's coefficients (h·Q/V and friends), and
+// Inf/Inf or Inf-Inf then yields NaN: measured 2026-09-26, dt = 1e300 returned
+// a NaN body mass with no error, and NaN spreads through the blood row on the
+// next mixing step. Checking the 16 blood entries fails that closed instead of
+// handing back a number that is not one; the deep state is reached through
+// blood, so a NaN anywhere surfaces here within a step or two.
+fn md_check_finite_blood(md: &MultiDrug28) with Mut, Panic {
+    let n = (*md).n
+    var i: i32 = 0
+    while i < n {
+        if !is_finite_f64((*md).cv[i * 14]) { panic("multidrug28: step produced a non-finite blood concentration (dt too large?)") }
+        i = i + 1
+    }
+}
+
 pub fn md_step(md: &!MultiDrug28, dt: f64) with Mut, Div, Panic {
-    if !(dt > 0.0) { panic("multidrug28: md_step needs dt > 0") }
+    if !(is_finite_f64(dt) && dt > 0.0) { panic("multidrug28: md_step needs a finite dt > 0") }
     if (*md).pending_smooth {
         md_substep(md, 0.5 * dt, 1.0)
         md_substep(md, 0.5 * dt, 1.0)
@@ -541,6 +566,7 @@ pub fn md_step(md: &!MultiDrug28, dt: f64) with Mut, Div, Panic {
     } else {
         md_substep(md, dt, 0.5)
     }
+    md_check_finite_blood(md)
     (*md).t = (*md).t + dt
 }
 
@@ -553,7 +579,8 @@ pub fn md_step(md: &!MultiDrug28, dt: f64) with Mut, Div, Panic {
 // (including NaN) is a no-op: the snap must never move the clock backwards,
 // which it would for a t_end below t but within tol.
 pub fn md_run_to(md: &!MultiDrug28, t_end: f64, dt: f64) with Mut, Div, Panic {
-    if !(dt > 0.0) { panic("multidrug28: md_run_to needs dt > 0") }
+    if !(is_finite_f64(dt) && dt > 0.0) { panic("multidrug28: md_run_to needs a finite dt > 0") }
+    if !(is_finite_f64(t_end)) { panic("multidrug28: md_run_to needs a finite t_end") }
     if !(t_end > (*md).t) { return }
     let tol = 1.0e-9 * dt
     while (*md).t < t_end - tol {
