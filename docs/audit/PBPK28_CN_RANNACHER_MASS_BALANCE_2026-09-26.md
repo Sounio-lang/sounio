@@ -161,6 +161,22 @@ Bounds (`theta_pbpk28.sio`): `|residual|/scale ≤ max(1e-12, sub_steps·1e-15)`
 - `tsit5_pbpk28.sio::pbpk28_dt_convergence_auc` has no callers and still runs the floored kernel. The kernel file is owned by another session and was left untouched by design.
 - The venlafaxine XR scenario and its parity reference: see Inventory.
 
+## LLM-offload math review record
+
+The review record lives here because `.claude/llm_offload_log.md` is gitignored (`.gitignore`: `.claude/`), so the append-only log exists only per checkout. `.claude/AGENT_OFFLOAD_POLICY.md` requires an independent second opinion for math claims, so every review input was also sent through the default fan-out (`bin/llm-offload -t math-review`), and then to other providers when legs failed. On 2026-09-26 the default fan-out's `zai` leg was refused (Fair Usage rate limit, code 1313) and its `local` leg was unreachable. `deepseek` rejected its API key and `mistral` errored on three of the four inputs. None of those failed legs is counted as a pass below.
+
+| review input (claims) | xai grok-4.6 | qwen3-235b | mistral-large |
+|---|---|---|---|
+| θ-step Schur coefficients, θ and TR-BDF2 mass identities, b-weights, Rannacher booking, gate budget, positivity (7) | 1–5, 7 OK; 6 OVERREACH (budget is heuristic, not a proven FP bound → comments reworded, threshold unchanged) | all 7 OK | error |
+| ep28 analytic sensitivity pins, FD truncation, Kp-tail ceiling, Hessian values, per-organ Kp column detector, artefact attribution (6) | all 6 OK | 1–4, 6 OK; 5 "WRONG" | error |
+| Hessian ρ analytic values, 1e-9 resolvability guard, Kp 0/0, MC u_MC re-pin (4) | all 4 OK | all 4 OK | all 4 OK; OVERREACH on wording "M(168 h)/Dose ~ 4e-18" |
+| input routing: forcing placement, mass identity, unrouted bit-identity, first-pass direction (4) | all 4 OK | all 4 OK | error |
+
+Disagreements, recorded as the policy requires:
+
+- **qwen, ep28 claim 5 ("WRONG").** Its own correction reads: "non-zero values imply column is intact". That is the claim. A *lost* Kp Jacobian column would give an exact 0.0 share, the measured shares (0.215, 0.216, 0.0054) are non-zero, and so the columns are intact. The code implements exactly this (TEST 5 (a)). This is a misreading of the claim, not a defect; no change.
+- **mistral, Hessian review (OVERREACH).** It objects that the "exact discrete mass identity" is unverifiable without solver details. The identity is exact in real arithmetic for any θ-step (θ-review claim 2, OK from xai and qwen). The value M(168 h)/Dose ≈ 4e-18 is an observation, and the code comments give it as a measured value (`~`), not as a bound. No change.
+
 ## Madaros hazard observed by a sibling session (not triggered here)
 
 Madaros built from `98315edcd` aliases arrays on whole-struct reassignment (`z = x`, `*dst = src`). Only `let y = x` and element-wise copies are safe. `theta_pbpk28.sio` never reassigns a struct. Stage saves are element-wise (`p28t_save`, `p28t_bdf2_combine`), and ledgers and states are fresh `var` initialisations. Every probe and test in this branch prints identical substantive output on both engines.
