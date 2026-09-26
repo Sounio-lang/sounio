@@ -158,8 +158,17 @@ fi
 # banner/usage for an unrecognized flag, and the native wrapper passes
 # unrecognized flags straight through to the raw ELF as positional args
 # rather than erroring.
+#
+# Anchored to the start of a line, not a bare substring match (Copilot
+# review, sounio-lang/sounio#2694): bin/souc's own "Madaros not built"
+# fallback path prints `souc: Madaros raw ELF not found ... falling back to
+# the legacy lean_single engine` to stderr before actually execing
+# lean_single -- a plain `grep -q "Madaros"` on the merged 2>&1 stream
+# matches THAT line and misreports lean_single as Madaros. The real
+# identity banner is always `Madaros vX.Y.Z ...` at the very start of a
+# line; the fallback notice always starts with `souc:`.
 SOUNIO_RESOLVED_IS_MADAROS=0
-if "$SOUC_BIN" --version 2>&1 | grep -q "Madaros"; then
+if "$SOUC_BIN" --version 2>&1 | grep -qE '^Madaros v[0-9]'; then
     SOUNIO_RESOLVED_IS_MADAROS=1
 fi
 
