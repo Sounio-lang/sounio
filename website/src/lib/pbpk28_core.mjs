@@ -897,6 +897,14 @@ export function runVenlafaxineSteadyState({ dt = 0.5, pheno = 2, nDoses = 10, ta
   // total step count that is a safe integer (so every loop bound is finite).
   if (!(Number.isFinite(dt) && dt > 0)) throw new RangeError(`dt must be finite and > 0, got ${dt}`);
   if (!(Number.isFinite(tau) && tau > 0)) throw new RangeError(`tau must be finite and > 0, got ${tau}`);
+  // Absorption uses merExpNeg(−ka·dt), a 20-term Taylor series with no range
+  // reduction (ported verbatim from the stdlib). Its remainder is bounded by
+  // |x|^20/20!, ≤ 4.2e-19 for |x| ≤ 1, below f64 resolution of e^−1; at |x| = 15
+  // the series is meaningless (dt = 24 h created ~28 000 mg·h/L of AUC from
+  // 750 mg). Require ka·dt ≤ 1, i.e. dt ≤ 1.587 h (the gate uses ≤ 0.5 h).
+  if (VFX_KA_ABS * dt > 1.0) {
+    throw new RangeError(`ka·dt must be <= 1 for the absorption series, got ${VFX_KA_ABS}·${dt} = ${VFX_KA_ABS * dt}`);
+  }
   if (!(Number.isSafeInteger(nDoses) && nDoses >= 1)) throw new RangeError(`nDoses must be a safe integer >= 1, got ${nDoses}`);
   vfxCheckPheno(pheno);
   const stepsExact = tau / dt;
