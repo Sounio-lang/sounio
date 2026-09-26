@@ -180,3 +180,81 @@ review attempt.
 **Flagged for re-review**: per policy, both this entry and the two above
 should get a real fan-out pass once a provider is configured in a session
 that has one.
+
+---
+
+## 2026-09-26T15:15Z — Claude (session_01RMzxzzsE5JNGEqnnkUs9Yo) — M1, simulate_bayesian_posterior_crn's concentration-time model rewrite (PR sounio-lang/sounio#2694)
+
+| 2026-09-26 | — | math-review | kinetics.sio (simulate_bayesian_posterior_crn/bayesian_structural_posterior/bayesian_identifiability_crn rewritten from single-endpoint comparison to a concentration-time trajectory fit; new simulate_general_crn_checkpoints; all Bayesian call sites' synthetic data regenerated) | WAIVED | No offload provider configured in this container, same as the three entries above. Independent Python cross-check of every generated dataset against the closed-form solution before writing it into the file; full narrative below. |
+
+**Trigger**: this is the deepest M1 trigger in this PR — not a value correction
+but a replacement of the underlying observation model, done at the user's
+explicit request ("entra na dissertação, quero decidir o modelo") after
+Copilot flagged (and the user was shown, via AskUserQuestion, the two
+possible fixes) that comparing every observation to the same simulated
+endpoint was not scientifically defensible for any current caller's
+synthetic data.
+
+**Attempted**: `bin/llm-offload --status` — same result as every prior entry
+in this log: no provider reachable in this container.
+
+**Outcome**: WAIVED for lack of a reachable provider. Independent
+verification instead, at each step:
+
+1. **Rate-law derivation.** Confirmed from `compute_rates_general`/
+   `general_dc` (read directly, not assumed) that reaction r0 (species0 ->
+   species1, rate k0) makes species 0's ODE `dC0/dt = -k0*C0` -- a pure,
+   analytically exact first-order decay, decoupled from the downstream
+   reaction r1 (fixed rate 0.05) since species 0 does not participate in
+   r1. This is why species 0, not species 2, is the tracked quantity in
+   the new model: it is the only species in this network whose trajectory
+   is unambiguous and independently checkable.
+2. **RK4-vs-closed-form cross-check.** Wrote a Python replica of the exact
+   RK4 stepper `simulate_general_crn_checkpoints` performs (same
+   `y_{n+1} = y_n + (dt/6)(k1+2k2+2k3+k4)` update, same rate law) and
+   confirmed it reproduces the closed-form `C0(t) = C0(0)*exp(-k0*t)` to 6
+   decimal digits at every checkpoint scheme used (dt in {0.2, 0.25}, k in
+   {0.12}, step counts up to 40) -- e.g. checkpoints [7,15,22,30] at
+   dt=0.2, k=0.12 gives RK4 (0.845354, 0.697676, 0.589783, 0.486752)
+   against the closed-form (0.845354, 0.697676, 0.589783, 0.486752),
+   identical to the printed precision. Every data_points array written
+   into every call site (validate_against_literature, test_bayesian_ident_crn,
+   test_bayesian_structural_tie, bench_scale_bayes_samples, the "SUPER
+   SHOWCASE QUÍMICO" demo) is this RK4 output, not a hand-picked or
+   guessed number.
+3. **New-function correctness.** `simulate_general_crn_checkpoints` was
+   type-checked (`souc check`, clean) and its output was diffed against
+   `simulate_general_crn`'s existing, already-tested final-state output at
+   the same total step count for a sanity check (both report the same
+   final species-0 value) before being used anywhere else.
+4. **A real bug caught by this verification process itself, not by
+   review**: the first version of `test_bayesian_permutation_invariant`
+   permuted `checkpoint_steps` directly (e.g. to `[30,7,22,15]`), silently
+   violating a precondition of `simulate_general_crn_checkpoints`
+   (checkpoint_steps must be strictly ascending, since the loop runs to
+   `checkpoint_steps[3]` and detects checkpoints in array order) -- the
+   loop stops after 15 steps and never reaches the checkpoints that would
+   have come later in a correctly-ordered array, silently leaving those
+   slots at their zero-initialized default instead of erroring. Caught
+   because the test itself then failed unexpectedly (`pk=0.114357` vs
+   `pk2=0.099572`, nowhere near the invariance the test was supposed to
+   demonstrate) -- traced to the precondition violation rather than
+   patched around with a looser tolerance. Replaced with
+   `test_bayesian_checkpoint_mismatch_sensitivity`, which keeps
+   `checkpoint_steps` fixed and ascending and instead shuffles which VALUE
+   occupies which slot -- verified to discriminate (`pk_correct=0.114357`
+   vs `pk_mismatched=0.095415`, a ~0.019 gap against a 1e-3 tolerance).
+
+Also updated `bayesian_identifiability_crn` (a "compat wrapper," verified
+via repo-wide search to have zero current callers): it takes a single
+scalar `data_v`/`data_u` pair, so it cannot synthesize a genuine multi-time
+trajectory without inventing numbers; modeled honestly instead as 4
+genuine repeat measurements of species 0 at the SAME single checkpoint
+(`[T,T,T,T]`), a real, common experimental design (e.g. replicate assay
+readings) that `simulate_general_crn_checkpoints` handles correctly by
+construction (repeated checkpoint values are detected and recorded
+identically), rather than the previous `[v, 0.7v, 0.5v, 0.3v]`
+descending-spread fabrication.
+
+**Flagged for re-review**: per policy, alongside the three entries above,
+once a provider is configured in a session that has one.

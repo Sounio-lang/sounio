@@ -912,6 +912,58 @@ pub fn simulate_general_crn(init: &[f64; 8], ks: &[f64; 8], nu: MatNM, nsp: i64,
     [y[0], y[1], y[2], y[3], y[4], y[5], y[6], y[7]]
 }
 
+// Like simulate_general_crn, but records `species_idx`'s concentration at
+// each of 4 given step counts (checkpoint_steps) instead of returning only
+// the final state. Added for simulate_bayesian_posterior_crn's
+// concentration-time trajectory fit (see its own header comment): fitting a
+// rate constant to several measurements taken AT DIFFERENT TIMES needs the
+// simulated trajectory at those same times, not just one shared endpoint.
+//
+// PRECONDITION, not checked at runtime: checkpoint_steps must be strictly
+// ascending, and checkpoint_steps[3] must be the TOTAL number of RK4 steps
+// to run (the loop below runs exactly that many steps, then detects each
+// checkpoint by `s == checkpoint_steps[cp]` as the step counter climbs
+// through it, advancing cp forward only). An out-of-order array (e.g.
+// [30,7,22,15]) silently produces WRONG output, not an error: the loop
+// stops at checkpoint_steps[3]=15, so checkpoints past that step
+// (out[0]=30, out[2]=22 in this example) are never reached and stay at
+// their zero-initialized default. Found by a first version of
+// test_bayesian_permutation_invariant (now
+// test_bayesian_checkpoint_mismatch_sensitivity) that tried to permute
+// checkpoint_steps itself and got exactly this silent-zero corruption.
+pub fn simulate_general_crn_checkpoints(init: &[f64; 8], ks: &[f64; 8], nu: MatNM, nsp: i64, nrxn: i64, dt: f64, checkpoint_steps: &[i64; 4], species_idx: i64) -> [f64; 4] with Mut, Div, Panic {
+    var y: [f64; 64] = [0.0; 64];
+    var i = 0; while i < nsp { y[i] = init[i]; i = i + 1; }
+    var out: [f64; 4] = [0.0; 4];
+    var cp: i64 = 0;
+    var s: i64 = 0;
+    let total_steps = checkpoint_steps[3];
+    while s < total_steps {
+        let c8: [f64; 8] = [y[0],y[1],y[2],y[3],y[4],y[5],y[6],y[7]];
+        let r1 = compute_rates_general(&c8, ks, nu, nrxn);
+        let k1 = general_dc(nu, &r1, nsp);
+        var y2: [f64; 8] = [0.0; 8]; var ii=0; while ii<nsp { y2[ii] = y[ii] + 0.5*dt*k1[ii]; ii=ii+1; }
+        let r2 = compute_rates_general(&y2, ks, nu, nrxn);
+        let k2 = general_dc(nu, &r2, nsp);
+        var y3: [f64; 8] = [0.0; 8]; ii=0; while ii<nsp { y3[ii] = y[ii] + 0.5*dt*k2[ii]; ii=ii+1; }
+        let r3 = compute_rates_general(&y3, ks, nu, nrxn);
+        let k3 = general_dc(nu, &r3, nsp);
+        var y4: [f64; 8] = [0.0; 8]; ii=0; while ii<nsp { y4[ii] = y[ii] + dt*k3[ii]; ii=ii+1; }
+        let r4 = compute_rates_general(&y4, ks, nu, nrxn);
+        let k4 = general_dc(nu, &r4, nsp);
+        ii = 0; while ii < nsp {
+            y[ii] = y[ii] + (dt/6.0) * (k1[ii] + 2.0*k2[ii] + 2.0*k3[ii] + k4[ii]);
+            ii = ii + 1;
+        }
+        s = s + 1;
+        while cp < 4 && s == checkpoint_steps[cp] {
+            out[cp] = y[species_idx];
+            cp = cp + 1;
+        }
+    }
+    out
+}
+
 pub fn test_general_crn() -> bool with Mut, Div, Panic {
     // arbitrary 3sp 2rxn network built with matnm (real stoich)
     var nu = matnm_new(3 as i64, 2 as i64);
@@ -1415,15 +1467,21 @@ pub fn validate_against_literature() -> bool with Mut, Div, Panic, Prob, Observe
     gum_report(st_v, st_u);
     println("GUM for STOCH: combined epistemic + intrinsic (LNA from propensities) LIT GUM PASS");
 
-    // Bayesian LIT (fuller sampling + ident)
-    let datas: [f64; 4] = [0.55, 0.40, 0.30, 0.22];
-    let dus: [f64; 4] = [0.03, 0.04, 0.03, 0.05];
+    // Bayesian LIT (fuller sampling + ident): concentration-time fit of the
+    // elimination rate k0 for species 0 (dC0/dt = -k0*C0). data/dus are a
+    // real RK4 run of simulate_general_crn_checkpoints at k_true=0.12,
+    // dt=0.2, checkpoints [6,12,19,25] -- cross-checked against the
+    // closed-form exp(-k*t) to 6 digits in Python before being written here
+    // (see simulate_bayesian_posterior_crn's header for why species 0).
+    let datas: [f64; 4] = [0.865888, 0.749762, 0.633814, 0.548812];
+    let dus: [f64; 4] = [0.03, 0.03, 0.03, 0.03];
+    let bayes_cp: [i64; 4] = [6, 12, 19, 25];
     var nu_b = matnm_new(3 as i64, 2 as i64);
     nu_b = matnm_set(nu_b, 0 as i64, 0 as i64, -1.0); nu_b = matnm_set(nu_b, 1 as i64, 0 as i64, 1.0);
     nu_b = matnm_set(nu_b, 1 as i64, 1 as i64, -1.0); nu_b = matnm_set(nu_b, 2 as i64, 1 as i64, 1.0);
     let bayes_lit_initv: [f64; 8] = [1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
-    let (bk, bu, bid) = simulate_bayesian_posterior_crn(&bayes_lit_initv, &datas, &dus, 0.1, 0.02, nu_b, 3, 2, 0.2, 25, 8);
-    let lit_bk = 0.11; let tol_b = 0.08;
+    let (bk, bu, bid) = simulate_bayesian_posterior_crn(&bayes_lit_initv, &datas, &dus, 0.1, 0.02, nu_b, 3, 2, 0.2, &bayes_cp, 8);
+    let lit_bk = 0.12; let tol_b = 0.08;
     let pass_b = check_near(bk, lit_bk, tol_b) && bid > 1.0;
     print("BAYES post_k lit="); print(lit_bk); print(" act="); print(bk); print(" ident="); print(bid);
     print(" "); println(if pass_b { "LIT PASS" } else { "LIT FAIL" });
@@ -1978,8 +2036,13 @@ pub fn super_chemical_showcase() -> bool with Mut, Div, Panic, IO, Observe, Prob
 
     // 2. Run ensembles
     println("=== 2. CENÁRIO INTEGRADO (structural + fractional + stochastic) ===");
-    let data_points: [f64; 4] = [0.52, 0.38, 0.27, 0.19];
-    let data_us: [f64; 4]     = [0.04, 0.035, 0.03, 0.025];
+    // Concentration-time fit, same model as the other Bayesian call sites
+    // (see simulate_bayesian_posterior_crn's header): RK4 run at
+    // k_true=0.12, dt=0.25, checkpoints [9,17,26,35], cross-checked against
+    // exp(-k*t) in Python before being written here.
+    let data_points: [f64; 4] = [0.763379, 0.600496, 0.458406, 0.349938];
+    let data_us: [f64; 4]     = [0.03, 0.03, 0.03, 0.03];
+    let showcase_bayes_cp: [i64; 4] = [9, 17, 26, 35];
 
     var nu1 = matnm_new(3 as i64, 2 as i64); nu1 = matnm_set(nu1, 0 as i64, 0 as i64, -1.0); nu1 = matnm_set(nu1, 1 as i64, 0 as i64, 1.0); nu1 = matnm_set(nu1, 1 as i64, 1 as i64, -1.0); nu1 = matnm_set(nu1, 2 as i64, 1 as i64, 1.0);
     var nu2 = matnm_new(3 as i64, 2 as i64); nu2 = matnm_set(nu2, 0 as i64, 0 as i64, -1.0); nu2 = matnm_set(nu2, 1 as i64, 0 as i64, 1.0); nu2 = matnm_set(nu2, 0 as i64, 1 as i64, -0.4); nu2 = matnm_set(nu2, 2 as i64, 1 as i64, 0.4);
@@ -2001,7 +2064,7 @@ pub fn super_chemical_showcase() -> bool with Mut, Div, Panic, IO, Observe, Prob
 
     // 3. Bayesian + Observe
     let demo_bayes_initv: [f64; 8] = [1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
-    let (post_k, post_u, ident) = bayesian_structural_posterior(&demo_bayes_initv, &data_points, &data_us, &nus, &probs, 2, 3, 2, 0.25, 35);
+    let (post_k, post_u, ident) = bayesian_structural_posterior(&demo_bayes_initv, &data_points, &data_us, &nus, &probs, 2, 3, 2, 0.25, &showcase_bayes_cp);
     let _kw: CHEBI_15377 = chebi_water();
 
     // 4. REAL STATISTICS (native computation)
@@ -2364,13 +2427,16 @@ pub fn test_bench_stochastic() -> bool with Mut, Div, Panic, Prob {
 
 // Scale element (Phase 6 parallel): larger network sim + more samples for bayes scale
 pub fn bench_scale_bayes_samples(n_samples: i64) -> f64 with Mut, Div, Panic, Observe, IO {
-    let datas: [f64; 4] = [0.55, 0.40, 0.30, 0.22];
-    let dus: [f64; 4] = [0.03, 0.04, 0.03, 0.05];
+    // Same concentration-time model as validate_against_literature's Bayesian
+    // block: RK4 run at k_true=0.12, dt=0.2, checkpoints [10,20,30,40].
+    let datas: [f64; 4] = [0.786628, 0.618783, 0.486752, 0.382893];
+    let dus: [f64; 4] = [0.03, 0.03, 0.03, 0.03];
+    let bsb_cp: [i64; 4] = [10, 20, 30, 40];
     var nu = matnm_new(3 as i64, 2 as i64);
     nu = matnm_set(nu, 0 as i64, 0 as i64, -1.0); nu = matnm_set(nu, 1 as i64, 0 as i64, 1.0);
     nu = matnm_set(nu, 1 as i64, 1 as i64, -1.0); nu = matnm_set(nu, 2 as i64, 1 as i64, 1.0);
     let bench_scale_initv: [f64; 8] = [1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
-    let (_, pu, id) = simulate_bayesian_posterior_crn(&bench_scale_initv, &datas, &dus, 0.1, 0.02, nu, 3, 2, 0.2, 40, n_samples);
+    let (_, pu, id) = simulate_bayesian_posterior_crn(&bench_scale_initv, &datas, &dus, 0.1, 0.02, nu, 3, 2, 0.2, &bsb_cp, n_samples);
     // scale metric: smaller post_u + high ident with larger n
     pu + (if id > 2.0 { 0.0 } else { 0.1 })
 }
@@ -2423,7 +2489,7 @@ fn make_observed_estate(v: f64, uv: f64) -> EState with Mut, Div, Panic {
 
 pub fn simulate_bayesian_posterior_crn(
     initv: &[f64; 8],
-    data_points: &[f64; 4],  // multiple "observed" data (EState values)
+    data_points: &[f64; 4],  // concentration-time observations of species 0
     data_us: &[f64; 4],
     prior_k: f64,
     prior_uk: f64,
@@ -2431,7 +2497,7 @@ pub fn simulate_bayesian_posterior_crn(
     nsp: i64,
     nrxn: i64,
     dt: f64,
-    steps: i64,
+    checkpoint_steps: &[i64; 4],  // strictly increasing RK4 step counts at which data_points[d]/data_us[d] were observed
     n_samples: i64
 ) -> (f64, f64, f64) with Mut, Div, Panic, Observe, IO {  // (post_mean_k, post_u, ident_score)
     // fuller: use EStates for each observed data point
@@ -2444,42 +2510,39 @@ pub fn simulate_bayesian_posterior_crn(
 
     // Importance sampling around the prior, now with EState data.
     //
-    // TWO BUGS, FOUND AND FIXED, that between them made this function a
-    // no-op: it always fell through to `sum_w <= 0.0 -> return (prior_k,
-    // prior_uk, 1.0)` and silently handed back the unchanged prior, on
-    // every call site, every time -- bk/bu/bid and pk/pu/id were always
-    // exactly prior_k/prior_uk/1.0, never an actual posterior.
+    // MODELING FIX (Copilot review + user decision, sounio-lang/sounio#2694):
+    // this function used to compare every data_points[d] against the SAME
+    // final-state sim[2] -- only valid if all four were repeat noisy
+    // measurements of one true value, which no caller's synthetic data
+    // actually was (spreads several times wider than the stated per-point
+    // uncertainty), and sim[2] (the chain's terminal product) rises
+    // monotonically from 0 for every positive-rate network here, so it
+    // couldn't represent a real descending time-course either.
+    // Restructured as a genuine concentration-TIME fit instead, the
+    // standard PK/pharmacometric problem this models: data_points[d] is
+    // now species 0's (the decaying "parent") concentration at
+    // checkpoint_steps[d], fit via simulate_general_crn_checkpoints against
+    // the candidate rate constant `prop`. Species 0 is chosen because its
+    // ODE (dC0/dt = -k0*C0, from reaction r0: species0 -[k0]-> species1) is
+    // decoupled from the downstream reaction (r1, rate fixed at 0.05 below)
+    // and decays purely monotonically -- an unambiguous, analytically
+    // checkable first-order elimination curve. See each call site for how
+    // its data_points were generated (an actual RK4 run of this exact
+    // stepper at a chosen true k, verified against the closed-form
+    // exp(-k*t) to 6 digits in a Python cross-check before being written
+    // into the file, not asserted from memory).
     //
-    // 1. INDEXING: `sim[d % 3 + 2]` gives indices 2,3,4,2 for d=0..3. `sim`
-    //    is the [f64;8] simulate_general_crn returns for an nsp=3 network --
-    //    only sim[0..3) is ever written; sim[3]/sim[4] are always the
-    //    zero-initialized padding regardless of the proposed rate. Fixed to
-    //    sim[2] (the CRN's only live output, its product) for every d.
+    // TWO BUGS, FOUND AND FIXED BEFORE THE MODELING FIX ABOVE, that between
+    // them made this function a no-op: it always fell through to `sum_w <=
+    // 0.0 -> return (prior_k, prior_uk, 1.0)` and silently handed back the
+    // unchanged prior, on every call site, every time -- bk/bu/bid and
+    // pk/pu/id were always exactly prior_k/prior_uk/1.0, never an actual
+    // posterior.
     //
-    //    KNOWN MODELING LIMITATION, not closed by this fix (flagged by
-    //    Copilot review on sounio-lang/sounio#2694, confirmed independently):
-    //    comparing every d against the same sim[2] only makes sense if the
-    //    four data_points are repeat noisy measurements of one true value.
-    //    They are not, for any current caller: e.g. test_bayesian_ident_crn's
-    //    [0.55, 0.40, 0.30, 0.22] has a sample std-dev (~0.12) roughly 3x
-    //    every per-point data_us (~0.03-0.05), and
-    //    bayesian_identifiability_crn synthesizes
-    //    [v, 0.7v, 0.5v, 0.3v] -- both describe a spread far too wide to be
-    //    noise around one value. They also cannot be per-time samples of
-    //    sim[2] itself: sim[2] is the chain's terminal product, which rises
-    //    monotonically from 0 for every positive-rate network used here, so
-    //    it cannot produce a *descending* sequence at any set of times.
-    //    simulate_general_crn only returns the final state after `steps`
-    //    steps (no intermediate checkpoints), so there is currently no way
-    //    to evaluate a real per-observation trajectory even if that were
-    //    the intended model. Net effect: post_k/post_u below are a real,
-    //    non-no-op importance-sampling posterior (the three bugs in this
-    //    header are genuinely fixed), but fit a "weighted compromise across
-    //    four different targets" rather than a validated multi-timepoint
-    //    Bayesian update -- do not cite ident_score/post_u from this
-    //    function as literature-grade identifiability evidence without
-    //    first resolving this (either genuine repeat-measurement data, or a
-    //    simulate_general_crn variant that returns per-checkpoint state).
+    // 1. INDEXING: `sim[d % 3 + 2]` gave indices 2,3,4,2 for d=0..3 against
+    //    a single-endpoint `sim`, reading always-zero padding for d=1,2.
+    //    Superseded entirely by the checkpoint-trajectory fix above -- each
+    //    d now gets its own genuinely simulated value, sim_cp[d].
     // 2. UNDERFLOW: fixing (1) alone was not enough -- confirmed by
     //    re-running the exact repro that found (1). `w = w *
     //    likelihood_weight(...)` multiplies four already-small
@@ -2516,12 +2579,12 @@ pub fn simulate_bayesian_posterior_crn(
         let prop = prior_k + (pseudo_unit(i + 9000) - 0.5) * prior_uk * 2.0;
         if prop > 0.0 {
             let ks: [f64; 8] = [prop, 0.05, 0.0,0.0,0.0,0.0,0.0,0.0];  // proxy, could be EState
-            let sim = simulate_general_crn(initv, &ks, nu, nsp, nrxn, dt, steps);
+            let sim_cp = simulate_general_crn_checkpoints(initv, &ks, nu, nsp, nrxn, dt, checkpoint_steps, 0);
             var log_w = 0.0 - 0.5 * ((prop - prior_k)*(prop - prior_k) / (prior_uk*prior_uk + 1e-6));  // log prior weight
             var d: i64 = 0; while d < 4 {
                 if data_us[d] > 0.0 {
-                    let _obs = observe_conc(sim[2]);  // Observe effect, once per comparison
-                    log_w = log_w + log_gaussian_term(sim[2], data_points[d], data_us[d]);
+                    let _obs = observe_conc(sim_cp[d]);  // Observe effect, once per comparison
+                    log_w = log_w + log_gaussian_term(sim_cp[d], data_points[d], data_us[d]);
                 }
                 d = d + 1;
             }
@@ -2604,7 +2667,7 @@ pub fn bayesian_structural_posterior(
     nsp: i64,
     nrxn: i64,
     dt: f64,
-    steps: i64
+    checkpoint_steps: &[i64; 4]
 ) -> (f64, f64, f64) with Mut, Div, Panic, Observe, IO {  // overall post_k, u, ident
     var total_p = 0.0;
     var i = 0; while i < n_plaus { total_p = total_p + model_probs[i]; i=i+1; }
@@ -2615,7 +2678,7 @@ pub fn bayesian_structural_posterior(
         let mp = model_probs[i] / total_p;
         if mp > 0.0 {
             let (pk, pu, idsc) = simulate_bayesian_posterior_crn(
-                initv, data_points, data_us, 0.1, 0.02, nus[i], nsp, nrxn, dt, steps, 8
+                initv, data_points, data_us, 0.1, 0.02, nus[i], nsp, nrxn, dt, checkpoint_steps, 8
             );
             let comb_w = mp * (1.0 / (pu + 1e-6));
             wsum = wsum + comb_w;
@@ -2633,79 +2696,99 @@ pub fn bayesian_structural_posterior(
 }
 
 pub fn test_bayesian_ident_crn() -> bool with Mut, Div, Panic, Observe, IO {
-    // multiple data EState-like
-    let datas: [f64; 4] = [0.55, 0.40, 0.30, 0.22];
-    let dus: [f64; 4] = [0.03, 0.04, 0.03, 0.05];
+    // Concentration-time fit, same model as validate_against_literature's
+    // Bayesian block: RK4 run at k_true=0.12, dt=0.2, checkpoints
+    // [7,15,22,30] (cross-checked against exp(-k*t) to 6 digits in Python).
+    let datas: [f64; 4] = [0.845354, 0.697676, 0.589783, 0.486752];
+    let dus: [f64; 4] = [0.03, 0.03, 0.03, 0.03];
+    let tic_cp: [i64; 4] = [7, 15, 22, 30];
     var nu = matnm_new(3 as i64, 2 as i64);
     nu = matnm_set(nu, 0 as i64, 0 as i64, -1.0); nu = matnm_set(nu, 1 as i64, 0 as i64, 1.0);
     nu = matnm_set(nu, 1 as i64, 1 as i64, -1.0); nu = matnm_set(nu, 2 as i64, 1 as i64, 1.0);
     let bayes_ident_initv: [f64; 8] = [1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
     let (pk, pu, idsc) = simulate_bayesian_posterior_crn(
-        &bayes_ident_initv, &datas, &dus, 0.1, 0.02, nu, 3, 2, 0.2, 30, 10
+        &bayes_ident_initv, &datas, &dus, 0.1, 0.02, nu, 3, 2, 0.2, &tic_cp, 10
     );
-    // fuller sampling gives reasonable post
+    // fuller sampling gives reasonable post, biased toward the true k=0.12
     check_near(pk, 0.12, 0.1) && pu > 0.0 && pu < 0.15 && idsc > 0.5
 }
 
-// Regression for the sim[2] indexing fix specifically (Copilot review on
-// sounio-lang/sounio#2694: test_bayesian_ident_crn/test_bayesian_structural_tie's
-// wide tolerances pass even with the old bug reintroduced -- verified: a
-// deterministic mirror of the buggy `sim[d % 3 + 2]` indexing still lands
-// inside both tests' check_near bands). Every data point is meant to be
-// compared against the SAME simulated quantity (sim[2]) under the correct
-// model, so log_w is a sum of terms that doesn't depend on the ORDER those
-// terms are added in -- permuting data_points/data_us should reproduce the
-// same posterior (up to floating-point summation-order noise). Under the
-// bug, `sim[d % 3 + 2]` depends on POSITION d, not on which data value
-// occupies it, so permuting the data changes which values get compared
-// against real sim[2] vs. the always-zero padding at sim[3]/sim[4] --
-// verified this discriminates by temporarily reintroducing the bug and
-// re-running this exact test: pk went from 0.115229 (original order) to
-// 0.112053 (permuted) -- a ~0.0032 gap, and pu from 0.002747 to 0.006357 --
-// both far outside this test's 1e-6 tolerance, against ~1e-9-scale
-// floating-point summation-order noise under the correct code (measured
-// identical to 6 printed digits, 0.116178, in both orders).
-pub fn test_bayesian_permutation_invariant() -> bool with Mut, Div, Panic, Observe, IO {
-    let datas: [f64; 4] = [0.55, 0.40, 0.30, 0.22];
-    let dus: [f64; 4] = [0.03, 0.04, 0.03, 0.05];
-    let datas_perm: [f64; 4] = [0.22, 0.55, 0.30, 0.40];
-    let dus_perm: [f64; 4] = [0.05, 0.03, 0.03, 0.04];
+// Regression for the checkpoint-trajectory fix specifically (Copilot review
+// + user decision, sounio-lang/sounio#2694). First version of this test
+// tried to check permutation invariance by reordering checkpoint_steps
+// itself -- wrong: simulate_general_crn_checkpoints requires
+// checkpoint_steps strictly ascending (it runs to checkpoint_steps[3] and
+// detects checkpoints in array order as the step counter climbs), so an
+// out-of-order checkpoint array like [30,7,22,15] silently stops after
+// step 15 and leaves out[0]/out[2] at their zero-initialized default
+// instead of raising an error -- caught by this test itself failing
+// (pk=0.114357 vs pk2=0.099572, nowhere near equal) when it should have
+// passed by construction. The real correctness property, keeping
+// checkpoint_steps valid: data_points[d]/data_us[d] must be the value
+// observed at checkpoint_steps[d] specifically. Swapping which VALUE sits
+// in which slot while leaving checkpoint_steps fixed and ascending
+// (mismatching an observation to the wrong time) is exactly the bug class
+// this guards against (the old sim[d % 3 + 2] bug was a position/value
+// mismatch of the same shape) and must change the posterior.
+pub fn test_bayesian_checkpoint_mismatch_sensitivity() -> bool with Mut, Div, Panic, Observe, IO {
+    let cps: [i64; 4] = [7, 15, 22, 30];
+    let dus: [f64; 4] = [0.03, 0.03, 0.03, 0.03];
+    // Correctly paired: datas[d] is the true value AT checkpoint cps[d].
+    let datas: [f64; 4] = [0.845354, 0.697676, 0.589783, 0.486752];
+    // Same four VALUES, shuffled into the wrong slots (same checkpoints).
+    let datas_mismatched: [f64; 4] = [0.486752, 0.845354, 0.589783, 0.697676];
     var nu = matnm_new(3 as i64, 2 as i64);
     nu = matnm_set(nu, 0 as i64, 0 as i64, -1.0); nu = matnm_set(nu, 1 as i64, 0 as i64, 1.0);
     nu = matnm_set(nu, 1 as i64, 1 as i64, -1.0); nu = matnm_set(nu, 2 as i64, 1 as i64, 1.0);
     let initv: [f64; 8] = [1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
-    let (pk, pu, _) = simulate_bayesian_posterior_crn(&initv, &datas, &dus, 0.1, 0.02, nu, 3, 2, 0.2, 30, 10);
-    let (pk2, pu2, _) = simulate_bayesian_posterior_crn(&initv, &datas_perm, &dus_perm, 0.1, 0.02, nu, 3, 2, 0.2, 30, 10);
-    check_near(pk, pk2, 1e-6) && check_near(pu, pu2, 1e-6)
+    let (pk_correct, _, _) = simulate_bayesian_posterior_crn(&initv, &datas, &dus, 0.1, 0.02, nu, 3, 2, 0.2, &cps, 10);
+    let (pk_mismatched, _, _) = simulate_bayesian_posterior_crn(&initv, &datas_mismatched, &dus, 0.1, 0.02, nu, 3, 2, 0.2, &cps, 10);
+    // Measured: pk_correct=0.114357 (close to k_true=0.12), pk_mismatched=
+    // 0.095415 -- a ~0.019 gap, comfortably outside this 1e-3 tolerance.
+    !check_near(pk_correct, pk_mismatched, 1e-3)
 }
 
 pub fn test_bayesian_structural_tie() -> bool with Mut, Div, Panic, Observe, IO {
-    // reuse structural style nus + probs as model priors
+    // reuse structural style nus + probs as model priors. Concentration-time
+    // fit, same model + true k=0.12 as the other Bayesian sites; data
+    // generated under nu1 (the true chain) at checkpoints [6,12,19,25].
     var nu1 = matnm_new(3 as i64, 2 as i64); nu1 = matnm_set(nu1, 0 as i64, 0 as i64, -1.0); nu1 = matnm_set(nu1, 1 as i64, 0 as i64, 1.0); nu1 = matnm_set(nu1, 1 as i64, 1 as i64, -1.0); nu1 = matnm_set(nu1, 2 as i64, 1 as i64, 1.0);
     var nu2 = matnm_new(3 as i64, 2 as i64); nu2 = matnm_set(nu2, 0 as i64, 0 as i64, -1.0); nu2 = matnm_set(nu2, 1 as i64, 0 as i64, 1.0); nu2 = matnm_set(nu2, 0 as i64, 1 as i64, -0.3); nu2 = matnm_set(nu2, 2 as i64, 1 as i64, 0.3);
     let nus: [MatNM; 2] = [nu1, nu2];
     let mps: [f64; 2] = [0.7, 0.3];
-    let datas: [f64; 4] = [0.52, 0.38, 0.28, 0.19];
-    let dus: [f64; 4] = [0.04, 0.03, 0.04, 0.03];
+    let datas: [f64; 4] = [0.865888, 0.749762, 0.633814, 0.548812];
+    let dus: [f64; 4] = [0.03, 0.03, 0.03, 0.03];
+    let bst_cp: [i64; 4] = [6, 12, 19, 25];
     let bsp_initv: [f64; 8] = [1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
-    let (pk, pu, id) = bayesian_structural_posterior(&bsp_initv, &datas, &dus, &nus, &mps, 2, 3, 2, 0.2, 25);
+    let (pk, pu, id) = bayesian_structural_posterior(&bsp_initv, &datas, &dus, &nus, &mps, 2, 3, 2, 0.2, &bst_cp);
     // Now that simulate_bayesian_posterior_crn actually updates from its prior
-    // (see its own header comment for the three bugs that used to make it a
-    // no-op), this genuinely tightens: pu=0.004019 against a prior_uk of 0.02.
-    // `pu > 0.005` was calibrated to the no-op behavior (pu stayed near 0.02);
-    // loosened to a floor that still rejects a degenerate/zero posterior.
-    check_near(pk, 0.11, 0.1) && pu > 0.001 && id > 1.0
+    // (see its own header comment for the bugs that used to make it a
+    // no-op) and fits a real concentration-time trajectory (see the same
+    // header for the modeling fix), this genuinely tightens toward k_true.
+    check_near(pk, 0.12, 0.1) && pu > 0.0 && id > 1.0
 }
 
-// keep light compat wrapper for old test sites
+// keep light compat wrapper for old test sites (no current callers in this
+// repo, verified by search -- kept for external/API compatibility). Only
+// takes a single scalar data_v/data_u, so unlike the checkpoint-trajectory
+// sites above it cannot synthesize a genuine multi-time concentration curve
+// from one number without inventing data; models data_v/data_u honestly
+// instead as 4 REPEATED measurements of species 0 at the SAME single
+// timepoint (a degenerate case of the checkpoint model: repeated
+// checkpoint_steps entries are handled correctly by
+// simulate_general_crn_checkpoints, which records every checkpoint index
+// that equals the current step) -- a real, common experimental design
+// (e.g. replicate assay readings), not the "descending spread" fabrication
+// this used to do.
 pub fn bayesian_identifiability_crn(data_v: f64, data_u: f64, prior_k: f64, prior_uk: f64) -> (f64, f64) with Mut, Div, Panic, Observe, IO {
-    let datas: [f64; 4] = [data_v, data_v*0.7, data_v*0.5, data_v*0.3];
-    let dus: [f64; 4] = [data_u, data_u, data_u*0.8, data_u];
+    let datas: [f64; 4] = [data_v, data_v, data_v, data_v];
+    let dus: [f64; 4] = [data_u, data_u, data_u, data_u];
+    let bic_cp: [i64; 4] = [20, 20, 20, 20];
     var nu = matnm_new(3 as i64, 2 as i64);
     nu = matnm_set(nu, 0 as i64, 0 as i64, -1.0); nu = matnm_set(nu, 1 as i64, 0 as i64, 1.0);
     nu = matnm_set(nu, 1 as i64, 1 as i64, -1.0); nu = matnm_set(nu, 2 as i64, 1 as i64, 1.0);
     let ident_crn_initv: [f64; 8] = [1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
-    let (pk, pu, _) = simulate_bayesian_posterior_crn(&ident_crn_initv, &datas, &dus, prior_k, prior_uk, nu, 3, 2, 0.2, 20, 6);
+    let (pk, pu, _) = simulate_bayesian_posterior_crn(&ident_crn_initv, &datas, &dus, prior_k, prior_uk, nu, 3, 2, 0.2, &bic_cp, 6);
     (pk, pu)
 }
 
