@@ -95,8 +95,11 @@ madaros_seed_key() {  # <bootstrap-elf> <lean-src>
 
 # Stage 2 key: seed ELF bytes + whole tree + build env. (main.sio is inside
 # the tree.)
-madaros_build_key() {  # <seed-elf>
-    printf 'madaros-v2\n%s\n%s\n%s\n' "$(_mc_sha "$1")" "$(madaros_tree_key)" "$(madaros_env_fingerprint)" \
+# Pass the tree key explicitly (and export it as MADAROS_CACHE_TREE_AT_KEY for
+# madaros_cache_build_locked) so the key and the store check refer to the SAME
+# tree snapshot; without it the tree is hashed here, once.
+madaros_build_key() {  # <seed-elf> [tree-key]
+    printf 'madaros-v2\n%s\n%s\n%s\n' "$(_mc_sha "$1")" "${2:-$(madaros_tree_key)}" "$(madaros_env_fingerprint)" \
         | sha256sum | cut -c1-64
 }
 
@@ -178,15 +181,20 @@ madaros_cache_build_locked() {
     local stage="$1" key="$2" out="$3"; shift 3
     madaros_cache_get "$stage" "$key" "$out" && return 0
     local lib; lib="$(_mc_root)/scripts/dev/madaros-cache.sh"
-    # Tree state at the moment the caller computed $key (keys are derived from
-    # the tree just before this call).
-    MADAROS_CACHE_TREE_AT_KEY="$(madaros_tree_key)" \
+    # Tree the key was derived from. Callers that derive the key from a tree
+    # snapshot export it as MADAROS_CACHE_TREE_AT_KEY (see madaros_build_key);
+    # otherwise fall back to hashing now, which can race a concurrent edit.
+    MADAROS_CACHE_TREE_AT_KEY="${MADAROS_CACHE_TREE_AT_KEY:-$(madaros_tree_key)}" \
     "$(_mc_root)/scripts/dev/souc-build-lock.sh" bash -c '
         lib="$1"; stage="$2"; key="$3"; out="$4"; shift 4
         # shellcheck source=/dev/null
         source "$lib"
         if madaros_cache_get "$stage" "$key" "$out"; then
             echo "[madaros-cache] stored by a concurrent build while waiting for the lock" >&2
+            # A hit is the artifact for $key, i.e. for the tree the key was
+            # derived from; say so if this worktree has moved on since.
+            [[ "$(madaros_tree_key)" == "$MADAROS_CACHE_TREE_AT_KEY" ]] \
+                || echo "[madaros-cache] note: worktree changed since $stage/$key was keyed; artifact is for the keyed tree" >&2
             exit 0
         fi
         # The key was computed before waiting for the lock; if the tree moved

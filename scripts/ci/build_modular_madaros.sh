@@ -155,9 +155,12 @@ echo "  out:   $OUT"
 # Serialize heavy build via the global workspace lock — unless this exact
 # (seed, tree) pair was already built on this pod, in which case the artifact is
 # copied out in seconds and the lock is never touched.
-BUILD_KEY="$(madaros_build_key "$SEED")"
+# One tree snapshot for both the key and the store-time check.
+TREE_KEY="$(madaros_tree_key)"
+BUILD_KEY="$(madaros_build_key "$SEED" "$TREE_KEY")"
 echo "  key:   $BUILD_KEY"
-madaros_cache_build_locked madaros "$BUILD_KEY" "$OUT" "$SEED" "$SRC" "$OUT"
+MADAROS_CACHE_TREE_AT_KEY="$TREE_KEY" \
+    madaros_cache_build_locked madaros "$BUILD_KEY" "$OUT" "$SEED" "$SRC" "$OUT"
 madaros_cache_prune
 
 if [[ ! -s "$OUT" ]]; then
