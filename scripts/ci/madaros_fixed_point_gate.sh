@@ -61,6 +61,71 @@ set -uo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
+# ── receipt reuse ─────────────────────────────────────────────────────────────
+# gen2 and gen3 are two full self-compiles (~40 min in CI, in swap). Their
+# outcome is a function of: the gen1 bytes, the source tree, this gate and its
+# libraries, and the ratchet parameters. When SOUNIO_MADAROS_CACHE is set and a
+# GREEN run with exactly that key exists, its full log is replayed and the gate
+# exits 0 without recompiling. A red run is never stored -- it always reruns.
+# Opt out per run with SOUNIO_MADAROS_NOCACHE=1.
+# Reuse is only sound when everything the compile reads is inside the hashed
+# trees: a source outside self-hosted/ + stdlib/ may import siblings the key
+# cannot see, so such runs always recompile.
+_fp_src_in_tree=1
+case "${SOUNIO_MADAROS_FP_SRC:-self-hosted/compiler/main.sio}" in
+  self-hosted/*|stdlib/*|"$ROOT_DIR"/self-hosted/*|"$ROOT_DIR"/stdlib/*) ;;
+  *) _fp_src_in_tree=0
+     if [[ -n "${SOUNIO_MADAROS_CACHE:-}" ]]; then
+       echo "[madaros_fixed_point] SOUNIO_MADAROS_FP_SRC is outside self-hosted/ and stdlib/ -- receipt reuse disabled" >&2
+     fi ;;
+esac
+if [[ -z "${_MADAROS_FP_INNER:-}" && -n "${SOUNIO_MADAROS_CACHE:-}" && -x "${MADAROS_BIN:-}" && "$_fp_src_in_tree" == 1 ]]; then
+  # shellcheck source=../dev/madaros-cache.sh
+  source "$ROOT_DIR/scripts/dev/madaros-cache.sh"
+  _fp_key="$(
+    {
+      echo "fixed-point-v2"
+      sha256sum "$MADAROS_BIN" | cut -c1-64
+      madaros_tree_key
+      # gen2/gen3 are compiled under this environment; SOUNIO_* overrides
+      # change what they emit (see madaros_env_fingerprint).
+      madaros_env_fingerprint
+      # The gate, every scripts/lib helper it sources or runs (including the
+      # gen2/gen3 comparator compare_executable_payloads.sh) and the IR
+      # capacity probe it consults.
+      sha256sum "$ROOT_DIR/scripts/ci/madaros_fixed_point_gate.sh" \
+                "$ROOT_DIR/scripts/ci/madaros_ir_capacity_probe.sh" \
+                "$ROOT_DIR"/scripts/lib/*.sh | cut -c1-64
+      # The source compiled, by content: SOUNIO_MADAROS_FP_SRC may point
+      # outside the self-hosted/ + stdlib/ tree key.
+      _fp_src="${SOUNIO_MADAROS_FP_SRC:-self-hosted/compiler/main.sio}"
+      echo "src=$_fp_src"
+      # Absolute paths are used as given; relative ones resolve from ROOT_DIR.
+      if [[ "$_fp_src" == /* ]]; then _fp_src_path="$_fp_src"; else _fp_src_path="$ROOT_DIR/$_fp_src"; fi
+      if [[ -f "$_fp_src_path" ]]; then sha256sum "$_fp_src_path" | cut -c1-64; else echo "src-missing"; fi
+      echo "expect=${SOUNIO_MADAROS_FP_EXPECT:-run}"
+      echo "min_into_acc_done=${SOUNIO_MADAROS_FP_MIN_INTO_ACC_DONE:-40}"
+    } | sha256sum | cut -c1-64
+  )"
+  _fp_log="$(mktemp)"
+  if madaros_cache_get fixed-point "$_fp_key" "$_fp_log"; then
+    echo "[madaros_fixed_point] REPLAY of a green run with identical key $_fp_key"
+    echo "[madaros_fixed_point] (gen1 sha, source tree, gate scripts and ratchet all equal; recorded log follows)"
+    cat "$_fp_log"
+    rm -f "$_fp_log"
+    exit 0
+  fi
+  echo "[madaros_fixed_point] no green receipt for key $_fp_key -- running the gate"
+  _MADAROS_FP_INNER=1 bash "$ROOT_DIR/scripts/ci/madaros_fixed_point_gate.sh" "$@" 2>&1 | tee "$_fp_log"
+  _fp_rc=${PIPESTATUS[0]}
+  if [[ "$_fp_rc" -eq 0 ]]; then
+    madaros_cache_put fixed-point "$_fp_key" "$_fp_log"
+    madaros_cache_prune
+  fi
+  rm -f "$_fp_log"
+  exit "$_fp_rc"
+fi
+
 . "$ROOT_DIR/scripts/lib/gate_assert.sh"
 . "$ROOT_DIR/scripts/lib/souc_invoke.sh"
 gate_name "madaros_fixed_point"

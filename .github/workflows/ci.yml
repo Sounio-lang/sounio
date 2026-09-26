@@ -845,7 +845,15 @@ jobs:
     # compiler. A PR that makes stdlib/compiler/ontology/store.sio unparseable
     # breaks the compiler's closure and, without this, runs none of these gates.
     if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true'
-    runs-on: ubuntu-24.04
+    # The DARWIN runner pool (infra/ci-runners/) when the repository variable
+    # SOUNIO_CI_RUNNER names it, and only for reviewed code: runs on main (push,
+    # schedule, workflow_dispatch of main) and merge_group, which starts only
+    # after a maintainer enqueues. No pull_request run and no dispatch of a
+    # feature branch touches cluster hardware or the shared writable cache: that
+    # code is unreviewed, and a read-only flag enforced by its own scripts is
+    # not a boundary. Delete the variable to fall back to
+    # GitHub-hosted runners at once, without a commit.
+    runs-on: ${{ (vars.SOUNIO_CI_RUNNER != '' && (github.event_name == 'merge_group' || (github.event_name != 'pull_request' && github.ref == 'refs/heads/main'))) && vars.SOUNIO_CI_RUNNER || 'ubuntu-24.04' }}
     # 15 held a full Madaros build plus four sub-gates; the self-parse sweep adds
     # ~20 s. The extra headroom is so a slow run reads as slow, not as a hang.
     # Raised again to 35 here because this branch adds three more sub-gates to
@@ -870,10 +878,41 @@ jobs:
     env:
       SOUNIO_MADAROS_F64_LOWERING_GATE_DIR: /tmp/sounio-madaros-current-source-f64-lowering
       SOUNIO_MADAROS_F64_LOWERING_GATE_KEEP: 1
+      # Content-addressed Madaros cache (scripts/dev/madaros-cache.sh): the build
+      # and the fixed-point receipt are keyed on the exact bytes they depend on,
+      # so a restored entry that does not match is simply a miss.
+      SOUNIO_MADAROS_CACHE: /tmp/sounio-madaros-cache
+      # Pull-request code may read the cache but never write it: an entry is keyed
+      # by content, so a PR able to store one could plant a binary under the key
+      # the next main or merge-queue run will look up. Trusted events write.
+      SOUNIO_MADAROS_CACHE_READONLY: ${{ github.event_name == 'pull_request' && '1' || '0' }}
+      SOUNIO_MADAROS_CACHE_KEEP: ${{ (vars.SOUNIO_CI_RUNNER != '' && (github.event_name == 'merge_group' || (github.event_name != 'pull_request' && github.ref == 'refs/heads/main'))) && '16' || '1' }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Provision toolchain (DARWIN runner)
+        if: runner.environment == 'self-hosted'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends gcc libc6-dev python3 file util-linux xz-utils make >/dev/null
+      - name: Use the shared DARWIN Madaros cache
+        if: runner.environment == 'self-hosted'
+        run: |
+          mkdir -p "$SOUNIO_MADAROS_CACHE_SHARED"
+          ln -sfn "$SOUNIO_MADAROS_CACHE_SHARED" /tmp/sounio-madaros-cache
+          ls /tmp/sounio-madaros-cache/ || true
+      - name: Restore content-addressed Madaros cache
+        id: madaros-cache
+        if: runner.environment == 'github-hosted'
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/sounio-madaros-cache
+          key: madaros-cache-v1-${{ hashFiles('self-hosted/**', 'stdlib/**', 'bin/souc-linux-x86_64', 'bin/souc-lean-single-x86_64', 'scripts/lib/**', 'scripts/ci/build_modular_madaros.sh', 'scripts/ci/madaros_fixed_point_gate.sh', 'scripts/dev/madaros-cache.sh') }}
+          restore-keys: madaros-cache-v1-
+      - name: Mark the restored cache state
+        if: runner.environment == 'github-hosted'
+        run: touch /tmp/sounio-madaros-cache.stamp
       - name: Materialize the committed Madaros prebuilt
         run: bash scripts/lib/materialize_madaros_prebuilt.sh
       # The gen2 self-compile ("Madaros compiles Madaros" below) is memory-bound,
@@ -890,6 +929,7 @@ jobs:
       # a headroom measure, not a correctness claim. Printed before/after so a
       # future reader can see the actual numbers in the log.
       - name: Add swap headroom for the gen2 self-compile (peak RSS 18.4 GB vs 16 GB RAM)
+        if: runner.environment == 'github-hosted'
         run: |
           echo "--- before"; free -m; swapon --show; df -h /mnt
           sudo fallocate -l 16G /mnt/swapfile-gen2
@@ -1069,6 +1109,21 @@ jobs:
       # before #1532 -- this time for an undecided reason instead of a
       # mechanical one. Wire in once a decision is made on how to handle the
       # gap (see the plan doc for the full finding).
+      - name: Check whether the Madaros cache has entries to save
+        id: madaros-cache-has
+        if: always() && runner.environment == 'github-hosted' && steps.madaros-cache.outputs.cache-hit != 'true'
+        run: |
+          # Only entries stored by THIS run: re-saving what was just restored (e.g.
+            # after a failed build) would pin a stale snapshot under a new key.
+            if [ -n "$(find /tmp/sounio-madaros-cache/madaros /tmp/sounio-madaros-cache/fixed-point /tmp/sounio-madaros-cache/seed -mindepth 1 -maxdepth 1 -newer /tmp/sounio-madaros-cache.stamp ! -name '.tmp.*' 2>/dev/null)" ]; then
+            echo "entries=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Save content-addressed Madaros cache
+        if: always() && steps.madaros-cache-has.outputs.entries == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/sounio-madaros-cache
+          key: madaros-cache-v1-${{ hashFiles('self-hosted/**', 'stdlib/**', 'bin/souc-linux-x86_64', 'bin/souc-lean-single-x86_64', 'scripts/lib/**', 'scripts/ci/build_modular_madaros.sh', 'scripts/ci/madaros_fixed_point_gate.sh', 'scripts/dev/madaros-cache.sh') }}
       - name: Upload current-source f64 lowering logs
         if: always()
         uses: actions/upload-artifact@v4
