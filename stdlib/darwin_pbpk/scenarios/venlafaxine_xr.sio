@@ -19,8 +19,12 @@
 // `pbpk28_full_cn_step_sink_mut`, the same way `cl_central` enters the blood
 // row, and the mass that step removes is exactly the mass handed to ODV.
 //
+// Readout: steady-state C_avg ODV/parent blood ratio under 75 mg XR q24h
+// (`vfx_ss_odv_parent_ratio`), with a closed-form oracle and a per-run error
+// bound — see "Steady-state ODV/parent readout" below.
+//
 // Literature anchors: Gohel 2008 (matrix), Wang 2022 (ka, F), Klamerus 1999 (CL),
-// Kirchheiner 2006 (ODV/parent ratios).
+// Shams 2006 (steady-state ODV/V serum ratio bands).
 
 use darwin_pbpk::core::pbpk28_params::*
 use darwin_pbpk::tsit5_pbpk28::*
@@ -33,6 +37,10 @@ struct VenlafaxineXrScenario {
     odv:    PBPKState28,
     gut_mg: f64,
     pheno:  i32,
+    // Fluxes of the most recent step (mg): absorbed into parent blood, and
+    // parent converted to ODV. Read by the steady-state audit.
+    last_absorbed_mg: f64,
+    last_formed_mg:   f64,
 }
 
 fn vfx_scenario_init(pheno: i32) -> VenlafaxineXrScenario {
@@ -41,6 +49,8 @@ fn vfx_scenario_init(pheno: i32) -> VenlafaxineXrScenario {
         odv:    pbpk28_state_zero(),
         gut_mg: 0.0,
         pheno:  pheno,
+        last_absorbed_mg: 0.0,
+        last_formed_mg:   0.0,
     }
 }
 
@@ -73,10 +83,13 @@ pub fn vfx_parent_step_with_formation(
     return pbpk28_full_cn_step_sink_mut(parent, pp, parent_input, dt, vfx_liver_organ(), cl_form)
 }
 
-fn vfx_strang_step(
+// One split step given the mass `released_mg` the matrix dissolves into the gut
+// over [t, t + dt] (summed over every dose on board). Records the step's
+// absorbed and formed masses in the returned scenario for the steady-state
+// audit below.
+fn vfx_step_released(
     scen: VenlafaxineXrScenario,
-    rel: MatrixReleaseModel,
-    t_start: f64,
+    released_mg: f64,
     dt: f64
 ) -> VenlafaxineXrScenario with Mut, Div, Panic {
     let op = vfx_odv_params(scen.pheno)
@@ -84,8 +97,7 @@ fn vfx_strang_step(
     let ka = venlafaxine_ka_abs()
 
     // 1. Matrix dissolution → gut pool (mg)
-    let rel_amt = matrix_step_amount(rel, t_start, dt)
-    var gut = scen.gut_mg + rel_amt
+    var gut = scen.gut_mg + released_mg
 
     // 2. First-order absorption from gut pool; F applied to absorbed fraction.
     let frac_abs = 1.0 - mer_exp_neg(0.0 - ka * dt)
@@ -108,7 +120,18 @@ fn vfx_strang_step(
         odv:    out_odv,
         gut_mg: gut,
         pheno:  scen.pheno,
+        last_absorbed_mg: absorb_amt,
+        last_formed_mg:   form_mg,
     }
+}
+
+fn vfx_strang_step(
+    scen: VenlafaxineXrScenario,
+    rel: MatrixReleaseModel,
+    t_start: f64,
+    dt: f64
+) -> VenlafaxineXrScenario with Mut, Div, Panic {
+    return vfx_step_released(scen, matrix_step_amount(rel, t_start, dt), dt)
 }
 
 // Taylor exp for negative arguments (shared pattern with semaglutide scenario).
@@ -123,18 +146,6 @@ fn mer_exp_neg(x: f64) -> f64 with Mut, Div {
         k = k + 1
     }
     return y
-}
-
-// Steady-state ODV/parent ratio (PD-equivalent readout).
-// Uses total-body mass ratio (parent vs ODV) — robust when blood Cv is near zero
-// after XR redistribution to tissues (clinical analog: AUC-weighted metabolite ratio).
-pub fn vfx_odv_parent_ratio(scen: VenlafaxineXrScenario) -> f64 with Mut, Div, Panic {
-    let pp = vfx_parent_params(scen.pheno)
-    let op = vfx_odv_params(scen.pheno)
-    let mp = pbpk28_total_mass(scen.parent, pp)
-    let mo = pbpk28_total_mass(scen.odv, op)
-    if mp < 1.0e-12 { return 0.0 }
-    return mo / mp
 }
 
 pub fn vfx_integrate_to(
@@ -153,57 +164,317 @@ pub fn vfx_integrate_to(
     return s
 }
 
+// ─── Steady-state ODV/parent readout ────────────────────────────────────────
+//
+// Readout: C_ss,avg(ODV) / C_ss,avg(parent) in blood, i.e. the ratio of blood
+// AUCs over one dosing interval at steady state of 75 mg XR q24h. It is
+// compared with steady-state TDM ODV/V serum ratios (Shams 2006, below). The
+// abstract does not state the sampling time, so that comparison treats a TDM
+// ratio as a C_avg ratio. Pointwise ratios are not interchangeable with it:
+// the model's steady-state trough ratio is ~3x larger (NM ≈ 6.3 vs 1.91), and
+// a trough readout is neither dt-converged at dt = 0.5 h (NM 6.05 / 6.08 /
+// 6.26 / 6.35 at dt = 0.5 … 0.0625 h) nor independent of the F/ka input model.
+//
+// It replaces the total-body mass ratio at t = 120 h after a single dose,
+// which divided residual masses of ~1e-12 mg and did not converge under dt
+// refinement (NM 129.8 / 222.9 / 348.3 at dt = 0.5 / 0.25 / 0.125 h).
+//
+// Why it is dt-converged. Write one split step of the joint parent+ODV state
+// x as x_{n+1} − x_n = h·A·(x_n + x_{n+1}) + dt·B·u_n + ĵ_n (h = dt/2), where
+// A is the continuous compartmental matrix, the ODV input is the formation the
+// parent step removed, and ĵ_n is what the kernel's non-negativity clamp
+// injects (zero on clamp-free steps). Summed over one interval,
+//   S = h·Σ(x_n + x_{n+1}) = (−A)⁻¹ (B·U + J − Δx),
+// with J = Σ ĵ_n and Δx = x_end − x_start. With J = 0 and Δx = 0 (exact
+// periodic steady state) S is exactly the continuous steady-state integral
+// (−A)⁻¹B·U: Crank-Nicolson plus trapezoid AUC keeps the DC gain exactly, and
+// the Lie-Trotter split drops out of the sum. The ratio then equals the closed
+// form below at every dt, and it does not depend on dose, F or ka.
+//
+// Error bound (VfxSsInterval.err_auc_*). (−A)⁻¹ ≥ 0 elementwise and mass in
+// the parent leaves either through cl_central or into ODV, so for a
+// perturbation of mass m placed in the parent, CL_c·ΔAUC_parent ≤ m and
+// CL_odv·ΔAUC_odv ≤ m; placed in ODV, CL_odv·ΔAUC_odv ≤ m. The clamp stores
+// x̃ + j (j ≥ 0) where the solve gave x̃, which enters the summed identity as
+// ĵ = (I − hA)j. Its measured per-step mass residual (parent and ODV alike)
+// is r = m(j) − h·m(A·j) ≥ m(j), because the volume-weighted mass functional
+// satisfies VᵀA ≤ 0 for a compartmental model; the extra h·j lands only on the
+// compartment clamped, at most h·r/V_b in blood. With R = Σ|r| over the
+// interval and P = Σ_k V_k·|Δx_k| (mass-weighted non-periodicity):
+//   err_parent = (R_p + P_p)/CL_c + h·R_p/V_b
+//   err_odv    = (R_p + P_p + R_o + P_o)/CL_odv + h·R_o/V_b
+// Both are measured on the same run; nothing in them is a chosen tolerance.
+// The bound is valid but conservative: at dt = 0.5 h it certifies ≤ 4.1e-7
+// relative while the measured error is ≤ 3.3e-11. P_p dominates it; it comes
+// from stiff Crank-Nicolson modes (amplification ≈ −1) still ringing, and
+// the mass/CL estimate does not exploit how little blood AUC a fast mode
+// carries.
+// P also covers whatever approach to steady state is left after the warm-up
+// doses, so the dose count is a runtime choice, not an accuracy assumption.
+
+pub struct VfxSsInterval {
+    pub auc_parent: f64,             // ∫ C_b,parent over the last interval (mg·h/L)
+    pub auc_odv: f64,                // ∫ C_b,ODV over the last interval (mg·h/L)
+    pub err_auc_parent: f64,         // certified |AUC − AUC_ss| bound (mg·h/L)
+    pub err_auc_odv: f64,
+    pub residual_mg_parent: f64,     // R_p = Σ |per-step mass-identity residual|
+    pub residual_mg_odv: f64,        // R_o
+    pub periodicity_mg_parent: f64,  // P_p = Σ V·|x_end − x_start|
+    pub periodicity_mg_odv: f64,     // P_o
+}
+
+// Mass released into the gut over [t, t + dt] by doses given at 0, τ, …, (n−1)τ.
+fn vfx_released_qtau(
+    rel: MatrixReleaseModel,
+    n_doses: i32,
+    tau: f64,
+    t: f64,
+    dt: f64
+) -> f64 with Mut, Div, Panic {
+    var amt = 0.0
+    var k: i32 = 0
+    while k < n_doses {
+        amt = amt + matrix_step_amount(rel, t - (k as f64) * tau, dt)
+        k = k + 1
+    }
+    return amt
+}
+
+// Σ_k V_k·|a_k − b_k| over blood and both sub-compartments of each organ (mg).
+fn vfx_state_abs_diff_mass(a: PBPKState28, b: PBPKState28, p: PBPKParams28) -> f64 with Mut {
+    var d = a.cv[0] - b.cv[0]
+    if d < 0.0 { d = 0.0 - d }
+    var total = p.v_ref[0] * d
+    var i: i32 = 1
+    while i < 14 {
+        let vi = p.v_ref[i]
+        let vv = vi * p.vasc_frac[i]
+        let vt = vi * (1.0 - p.vasc_frac[i])
+        var dv = a.cv[i] - b.cv[i]
+        if dv < 0.0 { dv = 0.0 - dv }
+        var dtt = a.ct[i] - b.ct[i]
+        if dtt < 0.0 { dtt = 0.0 - dtt }
+        total = total + vv * dv + vt * dtt
+        i = i + 1
+    }
+    return total
+}
+
+// Fresh element-wise copy of a state. The interval audit snapshots the state
+// with this instead of `let start = s.parent`: under Madaros (committed ELF,
+// md5 57c015c1, 2026-09-26) a `let` bound to a struct field aliases the
+// parent's storage, so after `s = f(s)` the snapshot reads the new state and
+// the non-periodicity term silently becomes 0. lean_single copies. 20-line
+// repro: let a0 = s.a; s = bump(s) → a0 shows the bumped value.
+fn vfx_state_copy(s: PBPKState28) -> PBPKState28 with Mut {
+    var c = pbpk28_state_zero()
+    var i: i32 = 0
+    while i < 14 {
+        c.cv[i] = s.cv[i]
+        c.ct[i] = s.ct[i]
+        i = i + 1
+    }
+    return c
+}
+
+// Runs n_doses of `rel` every `tau` hours and audits the interval after the
+// last dose, [(n−1)τ, nτ]. tau must be a whole number of steps.
+pub fn vfx_ss_interval(
+    pheno: i32,
+    rel: MatrixReleaseModel,
+    n_doses: i32,
+    tau: f64,
+    dt: f64
+) -> VfxSsInterval with Mut, Div, Panic {
+    let pp = vfx_parent_params(pheno)
+    let op = vfx_odv_params(pheno)
+    let h = 0.5 * dt
+    let vb = pp.v_ref[0]
+    let steps_per_tau = (tau / dt + 0.5) as i64
+    let n_warm = ((n_doses - 1) as i64) * steps_per_tau
+
+    var s = vfx_scenario_init(pheno)
+    var n: i64 = 0
+    while n < n_warm {
+        s = vfx_step_released(s, vfx_released_qtau(rel, n_doses, tau, (n as f64) * dt, dt), dt)
+        n = n + 1
+    }
+
+    let parent_start = vfx_state_copy(s.parent)
+    let odv_start = vfx_state_copy(s.odv)
+    var auc_p = 0.0
+    var auc_o = 0.0
+    var res_p = 0.0
+    var res_o = 0.0
+    let n_end = n_warm + steps_per_tau
+    while n < n_end {
+        let mp0 = pbpk28_total_mass(s.parent, pp)
+        let mo0 = pbpk28_total_mass(s.odv, op)
+        let cp0 = s.parent.cv[0]
+        let co0 = s.odv.cv[0]
+        s = vfx_step_released(s, vfx_released_qtau(rel, n_doses, tau, (n as f64) * dt, dt), dt)
+        let cp1 = s.parent.cv[0]
+        let co1 = s.odv.cv[0]
+        auc_p = auc_p + h * (cp0 + cp1)
+        auc_o = auc_o + h * (co0 + co1)
+        var rp = pbpk28_total_mass(s.parent, pp)
+            - (mp0 + s.last_absorbed_mg - h * pp.cl_central * (cp0 + cp1) - s.last_formed_mg)
+        if rp < 0.0 { rp = 0.0 - rp }
+        var ro = pbpk28_total_mass(s.odv, op)
+            - (mo0 + s.last_formed_mg - h * op.cl_central * (co0 + co1))
+        if ro < 0.0 { ro = 0.0 - ro }
+        res_p = res_p + rp
+        res_o = res_o + ro
+        n = n + 1
+    }
+
+    let per_p = vfx_state_abs_diff_mass(s.parent, parent_start, pp)
+    let per_o = vfx_state_abs_diff_mass(s.odv, odv_start, op)
+    VfxSsInterval {
+        auc_parent: auc_p,
+        auc_odv: auc_o,
+        err_auc_parent: (res_p + per_p) / pp.cl_central + h * res_p / vb,
+        err_auc_odv: (res_p + per_p + res_o + per_o) / op.cl_central + h * res_o / vb,
+        residual_mg_parent: res_p,
+        residual_mg_odv: res_o,
+        periodicity_mg_parent: per_p,
+        periodicity_mg_odv: per_o,
+    }
+}
+
+// Canonical regimen: one 75 mg XR unit (Gohel 2008 matrix) every 24 h, audited
+// over the 10th interval.
+pub fn vfx_ss_regimen_interval(pheno: i32, dt: f64) -> VfxSsInterval with Mut, Div, Panic {
+    return vfx_ss_interval(pheno, venlafaxine_xr_matrix_gohel2008(), 10, 24.0, dt)
+}
+
+pub fn vfx_ss_ratio(iv: VfxSsInterval) -> f64 with Div {
+    return iv.auc_odv / iv.auc_parent
+}
+
+// Certified interval for the exact steady-state ratio given the run's bounds.
+pub fn vfx_ss_ratio_lo(iv: VfxSsInterval) -> f64 with Div {
+    return (iv.auc_odv - iv.err_auc_odv) / (iv.auc_parent + iv.err_auc_parent)
+}
+
+pub fn vfx_ss_ratio_hi(iv: VfxSsInterval) -> f64 with Div {
+    return (iv.auc_odv + iv.err_auc_odv) / (iv.auc_parent - iv.err_auc_parent)
+}
+
+// The readout: steady-state C_avg ODV/parent blood ratio, 75 mg XR q24h.
+pub fn vfx_ss_odv_parent_ratio(pheno: i32, dt: f64) -> f64 with Mut, Div, Panic {
+    return vfx_ss_ratio(vfx_ss_regimen_interval(pheno, dt))
+}
+
+// Closed-form steady state of the same model under constant input to parent
+// blood, derived without the integrator. Organs without the sink equilibrate
+// at C_v = C_b. On the liver, with k_s = CL_form / V on both sub-compartments:
+//   tissue:   PS·(C_v − C_t/K_p) = k_s·V_t·C_t   ⇒ τ_t = C_t/C_v = PS / (PS/K_p + k_s·V_t)
+//   vascular: Q·(C_b − C_v) = k_s·(V_v·C_v + V_t·C_t)
+//   φ = C_avg/C_v = (V_v + V_t·τ_t) / V,   C_avg/C_b = φ·Q / (Q + CL_form·φ)
+// ODV has no sink, so C_b,ODV = CL_form·C_avg / CL_odv, and
+//   ratio = (CL_form / CL_odv) · C_avg/C_b.
+pub fn vfx_ss_ratio_closed_form(pheno: i32) -> f64 with Mut, Div, Panic {
+    let pp = vfx_parent_params(pheno)
+    let li = vfx_liver_organ()
+    let clf = vfx_cl_form_odv_adjusted(pheno)
+    let clo = venlafaxine_cl_odv_pgx(pheno)
+    let v = pp.v_ref[li]
+    let vv = v * pp.vasc_frac[li]
+    let vt = v * (1.0 - pp.vasc_frac[li])
+    let ks = clf / v
+    let ps = pp.ps[li]
+    let kp = pp.kp[li]
+    let q = pp.q[li]
+    let tau_t = ps / (ps / kp + ks * vt)
+    let phi = (vv + vt * tau_t) / v
+    let cavg_cb = phi * q / (q + clf * phi)
+    return (clf / clo) * cavg_cb
+}
+
+// Steady-state ODV/V serum ratio bands, Shams et al. 2006, J Clin Pharm Ther
+// 31(5):493-502, doi:10.1111/j.1365-2710.2006.00763.x (PubMed 16958828,
+// abstract), 100 patients on venlafaxine. The cohort's 10th and 90th ratio
+// percentiles, 0.3 and 5.2, were the cut-offs for genotyping: every patient
+// below 0.3 genotyped PM, every patient above 5.2 a gene-duplication UM; the
+// five *4 heterozygotes (IM) had 1.1 ± 0.8 (mean ± 1 SD, the band used); the cohort median was
+// 1.8. NM has no band of its own, so it gets the 10th-90th percentile range.
+// These are published values, not tolerances. Model concentrations are blood;
+// the reference is serum, so this treats the blood:plasma ratios of parent and
+// ODV as equal.
+pub fn vfx_ss_ratio_band_lo(pheno: i32) -> f64 {
+    if pheno == 0 { return 0.0 }
+    if pheno == 1 { return 0.3 }
+    if pheno == 3 { return 5.2 }
+    return 0.3
+}
+
+pub fn vfx_ss_ratio_band_hi(pheno: i32) -> f64 {
+    if pheno == 0 { return 0.3 }
+    if pheno == 1 { return 1.9 }
+    if pheno == 3 { return 1.0e300 }
+    return 5.2
+}
+
 // ─── Runnable validation (library self-check) ───────────────────────────────
 fn main() -> i32 with IO, Mut, Div, Panic {
     println("======================================================================")
     println("  Venlafaxine XR — matrix release → parent/ODV PBPK28 scenario")
     println("======================================================================")
 
-    let rel = venlafaxine_xr_matrix_gohel2008()
     let dt = 0.5
-    let t_end = 120.0
-
     var passed = 0
     var failed = 0
 
-    // Phenotype ordering: PM < NM < UM (Kirchheiner 2006 ODV/parent Css)
-    var scen_pm = vfx_scenario_init(0)
-    scen_pm = vfx_integrate_to(scen_pm, rel, 0.0, t_end, dt)
-    let ratio_pm = vfx_odv_parent_ratio(scen_pm)
+    // Steady-state C_avg ODV/parent ratio, 75 mg XR q24h, per phenotype.
+    var ratio: [f64; 4] = [0.0; 4]
+    var ph: i32 = 0
+    var certified = true
+    while ph < 4 {
+        let iv = vfx_ss_regimen_interval(ph, dt)
+        ratio[ph] = vfx_ss_ratio(iv)
+        let cf = vfx_ss_ratio_closed_form(ph)
+        println("phenotype (0=PM 1=IM 2=NM 3=UM), SS ratio, closed form, certified [lo, hi]:")
+        println(ph)
+        println(ratio[ph])
+        println(cf)
+        println(vfx_ss_ratio_lo(iv))
+        println(vfx_ss_ratio_hi(iv))
+        if !(vfx_ss_ratio_lo(iv) <= cf && cf <= vfx_ss_ratio_hi(iv)) { certified = false }
+        ph = ph + 1
+    }
 
-    var scen_nm = vfx_scenario_init(2)
-    scen_nm = vfx_integrate_to(scen_nm, rel, 0.0, t_end, dt)
-    let ratio_nm = vfx_odv_parent_ratio(scen_nm)
-
-    var scen_um = vfx_scenario_init(3)
-    scen_um = vfx_integrate_to(scen_um, rel, 0.0, t_end, dt)
-    let ratio_um = vfx_odv_parent_ratio(scen_um)
-
-    println("PM ratio:")
-    println(ratio_pm)
-    println("NM ratio:")
-    println(ratio_nm)
-    println("UM ratio:")
-    println(ratio_um)
-    let order_ok = ratio_pm < ratio_nm && ratio_nm < ratio_um
-    if order_ok {
-        println("  [PASS] CYP2D6 phenotype ordering PM < NM < UM")
+    if ratio[0] < ratio[1] && ratio[1] < ratio[2] && ratio[2] < ratio[3] {
+        println("  [PASS] CYP2D6 phenotype ordering PM < IM < NM < UM")
         passed = passed + 1
     } else {
-        println("  FAIL: expected PM < NM < UM ordering")
+        println("  FAIL: expected PM < IM < NM < UM ordering")
         failed = failed + 1
     }
 
-    if ratio_um > 2.0 {
-        println("  [PASS] UM ratio elevated (Kirchheiner 2006: 10.3)")
+    if certified {
+        println("  [PASS] closed-form steady state inside every run's certified interval")
         passed = passed + 1
     } else {
-        println("  FAIL: expected UM ratio > 2.0")
+        println("  FAIL: closed-form steady state outside a certified interval")
         failed = failed + 1
     }
 
-    // Matrix mass: gut + body mass bounded by released dose
-    let released = matrix_cumulative(rel, t_end)
+    // Reported, not asserted here: tests/run-pass/darwin_venlafaxine_xr_odv_ratio_literature.sio
+    ph = 0
+    while ph < 4 {
+        println("Shams 2006 band [lo, hi] and in-band (1/0):")
+        println(vfx_ss_ratio_band_lo(ph))
+        println(vfx_ss_ratio_band_hi(ph))
+        var inb: i32 = 0
+        if ratio[ph] >= vfx_ss_ratio_band_lo(ph) && ratio[ph] <= vfx_ss_ratio_band_hi(ph) { inb = 1 }
+        println(inb)
+        ph = ph + 1
+    }
+
+    // Matrix release of one unit.
+    let rel = venlafaxine_xr_matrix_gohel2008()
+    let released = matrix_cumulative(rel, 120.0)
     println("Released dose (mg):")
     println(released)
     if released > 10.0 && released <= 75.0 {
