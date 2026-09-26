@@ -125,8 +125,8 @@ Constant-time: if the routine touches secret data, no data-dependent branches, n
 Micro-architecture claims ("this avoids a port-5 bottleneck") are NOT ESTABLISHED unless a vendor document or uops.info is cited.
 7. [SOUNIO] Sounio / Madaros
 7.1 Language and layering
-Stdlib and compiler modules are written in Sounio's own syntax. Rust idioms transliterated into .sio are a BLOCK; Python anywhere in the build, tests or numerics is a BLOCK.
-Numerics, harnesses and benchmarks: per ADR-009, only C++23, F#, F*, Futhark or Koka. Julia, Python and Rust are out.
+Stdlib and compiler modules are written in Sounio's own syntax. Rust idioms transliterated into .sio are a BLOCK; Python or Rust must not be the sole authority for Sounio language or library claims.
+Per ADR-009, C++23, F#, F*, Futhark, and Koka may qualify as `verified_foreign_reference` implementations when all admission criteria are met. Python and Rust remain permitted for measurement, corroboration, bug-hunting, research harnesses, and incidental tooling, but not as claim clocks.
 Respect the Madaros layering (EISA → SOIR → HLIR → MIR → backend, plus the type system with f128/f256 and Hyper<…>/Knowledge<…>). A patch that reaches across a layer boundary needs an ADR, not a comment.
 The ir::effects module is the only authority for opcode side effects. Any table in opt_cleanup, optimize, const_prop, dce, auto_vectorize or elsewhere that classifies effects independently is a defect to be removed, not extended. Default for an unknown opcode is UNKNOWN = full barrier.
 Numeric contract: raw Hyper<…> types are bit-exact across architectures without FMA; Knowledge<…> carries rounding error as a GUM Type B component in quadrature, diagonal by default, Correlated (full Σ) inferred by the type on correlating operations, decorrelate explicit and recorded in provenance. Any kernel that violates one of these contracts is a BLOCK regardless of speed.
