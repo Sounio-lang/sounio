@@ -63,7 +63,22 @@ PAT_TYPE=':[[:space:]]*fn\([^)]*\)[[:space:]]*->'
 strip_noise() {
   # drop // line comments and "..." string literals before matching, so a
   # function type written inside prose or a message is not counted.
-  sed -e 's|//.*$||' -e 's/"[^"]*"//g' "$1"
+  #
+  # Copilot review follow-up (#2570): the string-literal regex used to be
+  # `"[^"]*"`, which does not understand `\"` as an escaped quote inside the
+  # string -- it matches from the opening quote to the FIRST quote character
+  # it finds at all, including an escaped one, and leaves everything after
+  # that (the string's real remaining content, up to its actual closing
+  # quote) as if it were ordinary source. A string literal containing `\"`
+  # followed by source-shaped text (e.g. `"\":["`, measured in
+  # self-hosted/native/codegen_x86_linux.sio) left a genuine, permanent `:[`
+  # with no matching `]` counted as real code, which could misclassify a
+  # bare function type as a false positive/negative in the scanners below.
+  # `([^"\\]|\\.)*` consumes any run of non-quote-non-backslash characters OR
+  # a backslash followed by ANY one character (an escaped quote among them),
+  # so the match only ends at a real, unescaped closing quote. `-E` for the
+  # alternation; GNU and BSD sed both support it (unlike the GNU-only `-r`).
+  sed -E -e 's|//.*$||' -e 's/"([^"\\]|\\.)*"//g' "$1"
 }
 
 # Copilot follow-up (#2570): scan forward from just after a matched `... ->`
@@ -780,6 +795,37 @@ function classify_fn_type_at(line, fn_pos, at_eof,    open_pos, close_pos, after
             # match_close_bracket for why deferring this across lines is
             # unsafe): if the closer is not on this line, this declaration
             # is skipped rather than carried into `pending`.
+            #
+            # Copilot review follow-up (#2570): tried enabling deferral here
+            # (a wpending sibling of pending) now that strip_noise is
+            # escape-aware, on the theory that the escaped-quote corruption
+            # was the only reason this was unsafe. That theory was also
+            # WRONG, confirmed on the real corpus: found a SECOND, unrelated
+            # trigger, worse than the first. A colon that is a CASE-LABEL or
+            # similar in embedded non-Sounio content (stdlib/hardware/
+            # kaxi.sio has Verilog-flavored blocks with lines like
+            # `2\x27b10: count <= count + 1\x27b1;`) is followed by an
+            # identifier and then "<=" -- a Verilog-style binary-literal
+            # case label such as `2b10: count <= count + 1b1;`
+            # (stdlib/hardware/kaxi.sio has many, minus the digit-grouping
+            # apostrophe this comment cannot spell inside a single-quoted
+            # shell string). The named-generic branch below reads that "<"
+            # as a generic open, finds no matching ">" (there is not one;
+            # "<=" is a comparison, not `Vec<...>`), and used to give up
+            # harmlessly on this same-line-only path. Deferred, it instead
+            # re-scanned the accumulating buffer from position 1 on every
+            # subsequent line for the rest of the file looking for a ">"
+            # that was never coming: O(n^2) in the number of remaining
+            # lines. Measured: turned a 47s full-corpus run into one that
+            # exceeded a 180s timeout, 8 real files affected. Unlike "fn(",
+            # a bare "<" after an identifier is common as a comparison/shift
+            # operator far outside any generic-type context, so it is a much
+            # weaker signal that deferring across lines is safe -- reverted
+            # to same-line-only for all three wrapper shapes (this one and
+            # tuple/array below were not individually the trigger here, but
+            # share the same match_close_bracket call and the same weaker-
+            # signal problem for "(" / "[" in non-type contexts this was
+            # never actually measured safe for either).
             close_pos = match_close_bracket(line, p, substr(line, p, 1))
             if (close_pos <= length(line)) {
                 scan_entry_for_fn_types(line, p + 1, close_pos, 0)
@@ -798,7 +844,13 @@ function classify_fn_type_at(line, fn_pos, at_eof,    open_pos, close_pos, after
             # gap was only ever in getting here from the top level. Skips
             # the identifier, tolerates whitespace before "<" the same way
             # the spaced-generic-return-type fix does. Same-line-only, same
-            # reasoning as the tuple/array branch just above.
+            # reasoning as the tuple/array branch just above -- including
+            # the review follow-up (#2570) that tried and reverted deferral
+            # here too: an identifier followed by "<=" (a comparison, not a
+            # generic open) is exactly as common a false trigger as the
+            # Verilog-case-label shape documented above, for the same
+            # underlying reason (a bare "<" is a weak signal outside a
+            # generic-type context).
             gp = p
             while (gp <= length(line) && substr(line, gp, 1) ~ /[A-Za-z0-9_]/) { gp++ }
             gp = skip_ws(line, gp)
@@ -1343,6 +1395,32 @@ selftest() {
   if bare_hits_of "$tmp/neg31.sio" | grep -q .; then
     echo "  FALHA NEGATIVO 31: generico nomeado iniciando com fn com efeito proprio contado como nu"; rc=1
   else echo "  ok   NEGATIVO 31: generico nomeado iniciando com fn com efeito proprio nao conta como nu"; fi
+  # REGRESSION 32 (Copilot review follow-up, #2570): the exact corpus shape
+  # (self-hosted/native/codegen_x86_linux.sio:483) that first showed the
+  # strip_noise escaped-quote gap in the field -- a string literal
+  # containing an escaped quote followed by source-shaped text
+  # (`"\":["`), between two genuinely bare function types. Before the
+  # strip_noise fix, this left a stray, unclosed `:[` counted as real
+  # source. Pins that fixing strip_noise did not disturb classification of
+  # the genuinely bare types on either side of it. Guarded by `timeout`
+  # out of caution (this scanner has a history of hangs on unclosed-bracket
+  # shapes -- see the two review follow-ups above that tried and reverted
+  # cross-line deferral for the wrapper branches) even though this specific
+  # path (no wrapper involved) was not the source of either.
+  printf 'fn before(f: fn() -> i64) -> i64 { 0 }\nlet s = "\\":["\nfn after(g: fn() -> i64) -> i64 { 0 }\n' > "$tmp/reg32.sio"
+  # export -f/AWK_SCAN are scoped to this subshell only (parens), not the
+  # calling shell -- leaking either into the rest of THIS script's own
+  # process would carry into enumerate()'s per-file subshells below and
+  # bloat every one of them with an exported copy of the whole AWK_SCAN
+  # program text.
+  n32=$(
+    export -f bare_hits_of strip_noise
+    export AWK_SCAN
+    timeout 10 bash -c 'bare_hits_of "$1"' _ "$tmp/reg32.sio" 2>/dev/null | wc -l | tr -d ' '
+  )
+  if [ "$n32" = "2" ]; then
+    echo "  ok   REGRESSAO 32: string com aspa escapada entre dois tipos nus nao trava e conta 2"
+  else echo "  FALHA REGRESSAO 32: esperava 2 hits sem travar, obteve n=$n32"; rc=1; fi
   rm -rf "$tmp"
   echo "falhas: $rc"
   return $rc
