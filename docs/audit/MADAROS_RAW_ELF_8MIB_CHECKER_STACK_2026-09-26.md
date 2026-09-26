@@ -41,9 +41,11 @@ fn main() -> i32 {
 | `bin/souc check repro.sio` | 0 |
 | `SOUNIO_SOUC_ENGINE=lean_single bin/souc check repro.sio` | 0 |
 
-The committed prebuilt `bin/madaros-linux-x86_64.gz` (sha256 `31a15e31…`,
-source `70fa3952`) gives the same results, so this is not a regression since
-2026-09-14.
+The committed prebuilt `bin/madaros-linux-x86_64.gz` (source `70fa3952`)
+gives the same results, so this is not a regression since 2026-09-14. Its
+sha256, `31a15e31…`, is the hash of the decompressed ELF
+`madaros-linux-x86_64`, as `bin/madaros-linux-x86_64.sha256` records it, not of
+the `.gz` file.
 
 ## How the reduction went
 
@@ -64,19 +66,24 @@ source `70fa3952`) gives the same results, so this is not a regression since
 ## Stack cost per nesting level
 
 This is the smallest `ulimit -s` at which `check` exits 0. It was found by
-binary search to within 16 KiB, using the raw ELF.
+binary search to within 16 KiB, using the raw ELF. Rows marked † were measured
+on this session's build (sha256 `e2256828…`). Rows marked ‡ were measured on a
+second ELF built from the same `98315edcdb` by another session (md5
+`5764851f…`), before this session's build had finished.
 
 | construct nested `d` deep in one `let` | d=2 | d=6 | per level |
 |---|---:|---:|---:|
-| free-function call `h(…)` | 5885 KiB | 12106 KiB | **~1555 KiB** |
-| method call `s.m(…)` | 5853 KiB | 11994 KiB | ~1535 KiB |
-| enum constructor `Some(…)` | 4094 KiB | 9707 KiB | ~1403 KiB |
-| block `{ … }` | 1743 KiB | 3022 KiB | ~319 KiB |
-| parentheses `( … )` | 1007 KiB | 1007 KiB | 0 |
-| binary `(… + 1.0)` (d=4 → d=8) | 4955 KiB | 5194 KiB | ~60 KiB |
+| free-function call `h(…)` † | 5885 KiB | 12106 KiB | **~1555 KiB** |
+| method call `s.m(…)` † | 5853 KiB | 11994 KiB | ~1535 KiB |
+| enum constructor `Some(…)` † | 4094 KiB | 9707 KiB | ~1403 KiB |
+| block `{ … }` † | 1743 KiB | 3022 KiB | ~319 KiB |
+| parentheses `( … )` † | 1007 KiB | 1007 KiB | 0 |
+| binary `(… + 1.0)` (d=4 → d=8) ‡ | 4955 KiB | 5194 KiB | ~60 KiB |
 
-Free-function calls, exactly (d = 0…8): 1007, 4331, 5882, 7448, 8999, 10549,
-12100, —, 15217 KiB. The cost is linear at about 1.5 MiB per level of call
+A separate ‡ series of free-function calls (d = 0…8), each value within
+16 KiB: 1007, 4331, 5882, 7448, 8999, 10549, 12100, —, 15217 KiB. It agrees
+with the † row to within the 16 KiB search resolution: 5882 against 5885 at
+d=2, and 12100 against 12106 at d=6. The cost is linear at about 1.5 MiB per level of call
 nesting, so 8 MiB is exhausted at depth 4. `tsit5_pbpk14`'s seven-deep RK stage
 sums need about 13.5 MiB.
 
