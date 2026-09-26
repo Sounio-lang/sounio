@@ -434,9 +434,20 @@ an observed failure (principle 6).
   | `store(&!w, x)` with `*dst = src` | **2** (aliases x) | 1 |
   | element-wise `(*dst).a[i] = src.a[i]` | 1 (correct) | 1 |
 
-  The probes in this dispatch avoid both aliasing forms. The forced-dosing probe
-  copies element-wise, and its remaining engine differences are one last digit of
-  a 1e9-scaled roundoff field. **Any implementation of the recommended fix that
+  Every saved stage or state in this dispatch's probes is now copied element-wise.
+  **Correction (PR review, 2026-09-26):** an earlier version of the fix-candidates
+  probe saved the Rannacher midpoint with `*xg = *x` before stepping `x`. On Madaros
+  that corrupted method 3's AUC (rapamycin dt = 0.5 h: 0.387606 against 0.403226,
+  and a mass-identity residual of 3.9e-2 instead of ~1e-13), while every state
+  metric still matched. The earlier claim that this probe agreed across engines was
+  wrong, because the residual field had been left out of the comparison. The
+  tables above were produced by lean_single, which copies correctly, so they are
+  unchanged; the lean_single output of the rewritten probes is byte-identical to
+  the one behind the tables. With element-wise copies, Madaros matches lean_single
+  on every substantive field of all three later probes, including the mass
+  residual; what remains is last-digit roundoff, printing of values that are
+  zero to roundoff, and h = 1e-4 second differences dominated by cancellation.
+  **Any implementation of the recommended fix that
   saves a stage with `mid = x` or `*mid = x` before stepping `x` in place will
   compute wrong AUCs on Madaros and correct ones on lean_single**, so CI green
   alone would not catch it (principle 16). The earlier fixes for #1479 / #1487 /
@@ -455,9 +466,9 @@ an observed failure (principle 6).
   `madaros: handles full` in the 168 000-step venlafaxine run. That is the known
   handle-lifetime wall
   (`docs/audit/MADAROS_HANDLE_TABLE_182_LIFETIME_DISPATCH_2026-08-17.md`), not this
-  defect. The other two probes ran to completion under Madaros. Their outputs match
-  lean_single in every substantive field and differ only in the last digit of
-  ~1e-13 roundoff residuals.
+  defect. The mass probe ran to completion under Madaros and matches lean_single
+  on every substantive field. The fix-candidates probe also ran to completion; see
+  the aliasing item above for the method 3 correction.
 - **Flow topology.** Σ_{i=1..13} Q_i = 750 L/h, and the lung (Q = 350 L/h, one full
   cardiac output) sits in parallel with the systemic organs. That doubles blood-row
   stiffness and total circulating flow relative to a series lung. It is a model-form
