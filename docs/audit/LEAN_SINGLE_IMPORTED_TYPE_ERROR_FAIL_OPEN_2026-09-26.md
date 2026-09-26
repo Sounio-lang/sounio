@@ -487,3 +487,27 @@ The fixture was first added under `tests/stdlib/darwin_pbpk/`. It was moved to
 on the current-source Madaros that CI builds, rather than solely under the
 lean_single full suite.
 
+
+Two more current-source Madaros guards, both selected by the same gate:
+
+- `tests/run-pass/darwin_pbpk_record_fields_madaros.sio` (`check-only`). It
+  reads all 65 fields made `pub` here, plus `SteadyStateReport.success`, from
+  outside their modules and constructs `HillEpParam`. Type-checking its
+  closure also re-covers the E137 and E008 module bodies. It is not a
+  runtime test because the BBB pipeline still hits `rc=182`.
+- `tests/run-pass/darwin_pbpk_tsit5_public_surface.sio` (run). It asserts
+  Butcher-tableau properties (row sums, `sum b = 1`, `sum e = 0`, exact FSAL
+  `b_i == a_7i`) and `nfeval == 7 * (nsteps + nreject)`. The tolerance of
+  1e-13 is derived in the file header.
+
+Sabotage, each measured through the gate:
+
+| Sabotage | Result |
+|---|---|
+| `BBBGateVerdict.admitted` made private again | check fails |
+| `print_i64` reintroduced in `bbb_gate` | check fails |
+| `tsit5_a52` off by 1e-10 | run fails with exit 4 |
+| `tsit5_b4` changed in the last digit | run fails with exit 12 (FSAL) |
+
+A 1e-15 change to `a52` passes, as designed: it is below the derived
+tolerance.
