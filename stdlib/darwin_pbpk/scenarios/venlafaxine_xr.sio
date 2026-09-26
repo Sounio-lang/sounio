@@ -194,7 +194,9 @@ pub fn vfx_integrate_to(
 // Error bound (VfxSsInterval.err_auc_*). (−A)⁻¹ ≥ 0 elementwise and mass in
 // the parent leaves either through cl_central or into ODV, so for a
 // perturbation of mass m placed in the parent, CL_c·ΔAUC_parent ≤ m and
-// CL_odv·ΔAUC_odv ≤ m; placed in ODV, CL_odv·ΔAUC_odv ≤ m. The clamp stores
+// CL_odv·ΔAUC_odv ≤ m — the fraction of it converted to ODV is at most 1 and
+// every converted unit leaves through CL_odv, so taking all of m is an upper
+// bound, not an assumption; placed in ODV, CL_odv·ΔAUC_odv ≤ m. The clamp stores
 // x̃ + j (j ≥ 0) where the solve gave x̃, which enters the summed identity as
 // ĵ = (I − hA)j. Its measured per-step mass residual (parent and ODV alike)
 // is r = m(j) − h·m(A·j) ≥ m(j), because the volume-weighted mass functional
@@ -278,7 +280,9 @@ fn vfx_state_copy(s: PBPKState28) -> PBPKState28 with Mut {
 }
 
 // Runs n_doses of `rel` every `tau` hours and audits the interval after the
-// last dose, [(n−1)τ, nτ]. tau must be a whole number of steps.
+// last dose, [(n−1)τ, nτ]. Panics unless n_doses ≥ 1, dt > 0 and tau is a
+// whole number of steps: a rounded step count would audit a window that is
+// not the dosing interval and void the periodicity term.
 pub fn vfx_ss_interval(
     pheno: i32,
     rel: MatrixReleaseModel,
@@ -290,7 +294,15 @@ pub fn vfx_ss_interval(
     let op = vfx_odv_params(pheno)
     let h = 0.5 * dt
     let vb = pp.v_ref[0]
+    if !(n_doses >= 1 && dt > 0.0 && tau >= dt) {
+        panic("vfx_ss_interval: need n_doses >= 1, dt > 0 and tau >= dt")
+    }
     let steps_per_tau = (tau / dt + 0.5) as i64
+    var off = (steps_per_tau as f64) * dt - tau
+    if off < 0.0 { off = 0.0 - off }
+    if off > 1.0e-9 * tau {
+        panic("vfx_ss_interval: tau must be a whole number of dt steps")
+    }
     let n_warm = ((n_doses - 1) as i64) * steps_per_tau
 
     var s = vfx_scenario_init(pheno)
@@ -416,6 +428,14 @@ pub fn vfx_ss_ratio_band_hi(pheno: i32) -> f64 {
     return 5.2
 }
 
+// In-band test with the published endpoint semantics: PM strictly below 0.3,
+// UM strictly above 5.2; IM and NM ranges closed.
+pub fn vfx_ss_ratio_in_band(pheno: i32, r: f64) -> bool {
+    if pheno == 0 { return r < vfx_ss_ratio_band_hi(0) }
+    if pheno == 3 { return r > vfx_ss_ratio_band_lo(3) }
+    return r >= vfx_ss_ratio_band_lo(pheno) && r <= vfx_ss_ratio_band_hi(pheno)
+}
+
 // ─── Runnable validation (library self-check) ───────────────────────────────
 fn main() -> i32 with IO, Mut, Div, Panic {
     println("======================================================================")
@@ -467,7 +487,7 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         println(vfx_ss_ratio_band_lo(ph))
         println(vfx_ss_ratio_band_hi(ph))
         var inb: i32 = 0
-        if ratio[ph] >= vfx_ss_ratio_band_lo(ph) && ratio[ph] <= vfx_ss_ratio_band_hi(ph) { inb = 1 }
+        if vfx_ss_ratio_in_band(ph, ratio[ph]) { inb = 1 }
         println(inb)
         ph = ph + 1
     }
