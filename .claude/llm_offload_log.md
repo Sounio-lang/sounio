@@ -4128,3 +4128,55 @@ This exception applies only to byte-identical archival integration. It does not 
 | 2026-09-22 | — | documentation | kinetics.sio (pbpk_max_steps comment corrected: M2/Cleared converge to a nonzero split, not zero) | WAIVED | Round 26, PR #2511. Round 25s justification for the step-count budget said the horizon cap left the state "numerically zero" -- wrong for two of the four components. Verified: pbpk_full_metabolic(1.0, 0.05, 6600.0) gives Drug=4.8e-144, M1=2.6e-86 (both effectively zero, as claimed) but M2=0.666667, Cleared=0.333333, summing to 1.0 (the conserved dose) -- exactly k2/(k2+k3) and k3/(k2+k3) with k2=0.02, k3=0.01. M2 and Cleared are cumulative sinks and never approach zero; only the transient Drug/M1 do. Reworded to say the system reaches its ASYMPTOTE by t=6600h (66 clearance time constants), not that the state vanishes: Drug/M1 are numerically zero and M2/Cleared have converged to their fixed dose-conserving split, so no further integration changes any of the four values. The step-count budget itself (20,000, a pure compute-cost bound) is unaffected; this only corrects the accompanying justification text. Documentation only, no behavior change. |
 | 2026-09-23 | — (no XAI_API_KEY/ZAI_API_KEY/LOCAL_LLM_URL in this session's environment; every leg would report SKIPPED) | math-review | tests/TESTING_STRATEGY.md (PR #2646 — GUM ep_add variance/confidence-decay claims) | WAIVED | WAIVED with rationale. The mandated three-way external fan-out (xai/zai/local) could not run: no provider credentials are configured in this session's environment, and per AGENT_OFFLOAD_POLICY.md:34,147 an unavailable leg must not be represented as a pass, so this is recorded as a WAIVED hand-check rather than verified evidence. Independent hand-check performed against the canonical source stdlib/epistemic/knowledge.sio (the definitions of record) instead: all revised claims match the implementation exactly. Confidence is the integer 0..1000 scale (ep_clamp_conf clamps to 1000; knowledge.sio:9,87-89). Decay factors: ep_add/ep_sub = min(a,b)·99/100 (141,154); ep_mul = min·98/100 and ep_square = ·98/100 (170,404); ep_div = min·97/100 (184). ep_scale (Var=c²·Var, confidence preserved, 189-194) and ep_shift (Var preserved, confidence preserved, 198-203) do NOT decay confidence — consistent with the docs' "preserve" claim. ep_merge confidence = (a.confidence+b.confidence)/2 averaged then clamped (458), and its value is inverse-variance weighted (452-457) — consistent with the docs' "averages" claim. Variance rules also match: ep_add/ep_sub sum variances; ep_mul and ep_div use the uncorrelated GUM delta method (Cov dropped, as the docs now state); ep_square = 4·val²·Var; ep_scale = c²·Var; ep_shift preserves Var; ep_merge is inverse-variance weighted. The TESTING_STRATEGY.md ep_add example (min·99/100, variances add, clamped to 0..1000) matches the canonical source. No discrepancy, no overreach, no flagged item. Caveat: this is a single-source hand verification against the canonical .sio, NOT the mandated three-way external fan-out (xai/zai/local), because no provider credentials are configured in this environment; per policy a SKIPPED leg must not be represented as a pass, so this row honestly records what was actually done. If the GUM derivation is touched again, a credentialed offload run is still owed. |
 | 2026-09-23 | — (no XAI_API_KEY/ZAI_API_KEY/LOCAL_LLM_URL in this session's environment; every leg would report SKIPPED) | math-review | docs/stdlib/linalg/BLAS_FFI.md (PR #2646 — SVD power-iteration seed-projection + GUM claims) | WAIVED | WAIVED with rationale. The mandated three-way external fan-out (xai/zai/local) could not run: no provider credentials (XAI_API_KEY/ZAI_API_KEY/LOCAL_LLM_URL) are configured in this session's environment, and per AGENT_OFFLOAD_POLICY.md:34,147 an unavailable leg must not be represented as a pass, so this is recorded as a WAIVED hand-check rather than verified evidence. blas_dgesvd_approx converges to the largest singular value with non-zero seed projection (seed = all-ones); verified [[3,1],[1,2]]->~3.618, [[2,-1],[-1,2]]->1 (dominant mode orthogonal to seed, not its max 3), nullspace seed -> 0/0 NaN. EpistemicMatrix::matmul runs the inline pure-Sounio GUM loop (epistemic_matrix.sio) and, with blas_available() == false, uncertainty is propagated via GUM — consistent with the prose. No independent math reviewer available this session; claims source-verified against stdlib/linalg/blas_ffi.sio and epistemic_matrix.sio. |
+
+## 2026-09-26T20:20Z — Claude (session 3c9c1595) — M1 math-review, PBPK28 CN floor-clamp dispatch
+
+| 2026-09-26 | xai (grok-4.6) ×2, qwen (OpenRouter Qwen 3 235B) | math-review | docs/audit/PBPK28_CN_FLOOR_CLAMP_MASS_INJECTION_DISPATCH_2026-09-26.md | PASS after fixes | Two independent providers; zai and local legs unavailable (see below), not counted as passes. |
+
+**Trigger:** the dispatch makes math claims about CN stability, the exact discrete
+mass identity, Bolley–Crouzeix positivity, TR-BDF2 quadrature weights and a
+roundoff tolerance for a dissertation-path PBPK kernel (§M1).
+
+**Legs run on the workspace (`/workspace/worktrees/claude-pbpk28-cn-mass`):**
+- `bin/llm-offload -t math-review -p xai` on draft v1. Grok 4.6 flagged two items
+  WRONG: the R(z) formula and the positivity factor. Both read h as dt; the kernel
+  defines h = dt/2 (`tsit5_pbpk28.sio:77`) and every table value already used that
+  convention. **Resolution:** the convention is now stated explicitly at both sites;
+  the math is unchanged. Two TIGHTENABLE items were accepted: the AUC identity holds
+  because CN's volume-weighted equations are the trapezoidal rule, not because the
+  ringing "compensates"; and for γ = 2 − √2 both TR-BDF2 stages share one matrix.
+- `bin/llm-offload -t math-review` (default fan-out) on draft v2. xai produced no
+  WRONG items. Accepted: the Bolley–Crouzeix OVERREACH (split into two separate
+  facts); "undamped" → "weakly damped, R ≈ −1"; the blood timescale is ≈ 24 s, not
+  minutes; stiffness is set by Q, PS and V_v, while Kp and CL act through residues;
+  "any trajectory" → "any CN trajectory"; "10 ulp" → "5 ulp".
+  **zai: ERROR** (provider code 1313, account fair-usage rate limit). **local:
+  ERROR** (litellm connection error, no `local-think` model group). Neither leg is
+  counted.
+- `-p deepseek`: **ERROR**, API key rejected as invalid. Not counted.
+- `-p qwen` on draft v3: all claims OK. One OVERREACH and one note were **not
+  accepted**, with reasons. (a) "without mentioning method linearity": the dispatch
+  already says "any *linear* one-step method". (b) "BE positivity bound 2/λ appears
+  incorrect": the dispatch states no BE bound. The 2/λ column is CN's bound, and
+  Grok independently marked it OK.
+
+**Flagged for re-review:** rerun the zai leg once the rate limit clears, and fix
+the invalid DeepSeek key in `~/.sounio-keys.env`. Raw outputs from this session:
+`/tmp/pbpk28cn/mathreview_{xai,fanout,deepseek,qwen}.txt` on the workspace
+(ephemeral).
+
+## 2026-09-26T21:05Z — Claude (session 3c9c1595) — M1 math-review, dispatch revision 2 (forced dosing, sensitivities, Hessian artefact)
+
+| 2026-09-26 | xai (grok-4.6), qwen (OpenRouter Qwen 3 235B) | math-review | docs/audit/PBPK28_CN_FLOOR_CLAMP_MASS_INJECTION_DISPATCH_2026-09-26.md (v4) | PASS after fixes | Two independent providers. |
+
+- **xai:** two items accepted. (1) "Kp/PS elasticity exactly 0" is exact for AUC(0–∞);
+  at 168 h it holds up to M(T)/Dose ≈ 6e-18. The text now says so. (2) OVERREACH on
+  "fu_plasma genuine by the same argument": resolved by citing the code. Both modules
+  scale `cl_central` linearly by (fu+δ)/fu_ref (`epistemic_pbpk28_hessian.sio:117–119`,
+  `epistemic_pbpk28.sio:203–207`), so fu's elasticities equal CL's.
+- **qwen:** three items, **not accepted**, each a misreading. "Floors preserve mass
+  conservation": the dispatch says the opposite. "TR-BDF2 guarantees positivity": the
+  dispatch says it does not, and gives the −0.081 mg/L counter-example itself.
+  "Specify two BE half-steps": already specified.
+- **zai/local/deepseek:** not rerun. Status as in the previous entry (rate limit,
+  endpoint down, invalid key).
