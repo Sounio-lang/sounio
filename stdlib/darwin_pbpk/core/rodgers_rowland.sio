@@ -60,12 +60,45 @@
 //   - the extracellular-protein (albumin) term. The 2006 abstract states it is
 //     incorporated "for the other compound classes", which includes neutrals,
 //     so this implementation is missing a term the paper has.
-//   - which tissue-composition table is the paper's. This file's rr_fw_e /
-//     rr_fw_i / rr_fn_l / rr_fn_ph accessors (the ones rr_neutral calls) and
-//     core/tissue_composition.sio (which has no caller) disagree on 30 of 70
-//     values, worst at lung neutral lipid 0.0220 vs 0.0030 (7.3x). At most one
-//     of them is R&R 2006 Table 1. tissue_kidney() in this file disagrees with
-//     this file's own accessors as well.
+//   - which tissue-composition table is the paper's. MEASURED 2026-09-26 by
+//     reading both tables out of the tree and applying only constraints they
+//     must satisfy internally -- no literature value is used below:
+//       * the two tables AGREE on the water fractions in 10 of 14 organs
+//         (differing only in blood, brain, lung, pancreas) and DISAGREE on the
+//         lipid fractions in 12 of 14 (f_nl) and 13 of 14 (f_np). The
+//         per-tissue ratio B/A spans 0.136 (lung f_nl) to 2.775 (skin f_np),
+//         in both directions, so this is not a unit or scaling difference:
+//         they are two different tables, differing essentially only in lipid.
+//       * consequence, one formula and two tables: predicted Kp moves by up to
+//         2.15x (muscle) and down to 0.22x (lung) -- a factor of 9.8 in the
+//         cross-tissue RATIO -- at logP 7.0, and to within 0.01 identically at
+//         logP 3.9, because the lipid term dominates in both regimes. The
+//         table choice is therefore worth about one order of magnitude, well
+//         below the 3.2-6.3 orders of the domain violation above but not
+//         negligible for an in-domain drug.
+//       * the ADIPOSE ROW OF THIS FILE IS INFEASIBLE: f_ew + f_iw + f_nl + f_np
+//         = 0.135 + 0.017 + 0.8530 + 0.0020 = 1.0070, which leaves negative
+//         volume for protein and solids. The excess is only 0.70%, but it sits
+//         on the one fraction that dominates every Kp this module predicts, and
+//         core/tissue_composition.sio's adipose (f_nl 0.7900) is feasible at
+//         0.9440. Gated by rr_check_volume_feasible() -> 13/14, which pins the
+//         violation instead of closing it with an invented number.
+//       * core/tissue_composition.sio's own T1, "14/14 organ compositions sum
+//         to 1.0 (mass balance)", CANNOT FAIL: its f_protein column is defined
+//         as 1 minus the other four, and the sums are 1.0000000 exactly for all
+//         14 organs. That test is not evidence for that table.
+//       * tissue_kidney() in this file contradicts this file: f_water 0.783
+//         against f_ew + f_iw = 0.692 (delta 0.091), f_ew 0.209 against the
+//         accessor's 0.273, f_np 0.0240 against 0.0120. tissue_brain()
+//         satisfies f_water = f_ew + f_iw exactly and tissue_liver() misses it
+//         by 0.017, so the identity is this file's own convention and kidney
+//         breaks it. Those legacy structs have no caller; they are left in
+//         place rather than edited, because the correct values are exactly what
+//         is unresolved here.
+//     None of this identifies which table is R&R 2006 Table 1. It narrows the
+//     question to the lipid columns and rules out the adipose row of this file
+//     on arithmetic alone. Audit script and full output:
+//     scratchpad rr_table_audit.py / rr_table_audit_2026-09-26.txt.
 //   - ionisable species. This module is neutral-only, so it cannot predict Kp
 //     for midazolam (weak base, pKa 6.2) or ketoconazole (dibasic 6.51/2.94),
 //     both of which fall under the 2006 paper's scope but need its ionisation
@@ -190,6 +223,30 @@ fn rr_fn_ph(i: i32) -> f64 {  // phospholipid fraction
     return 0.0100
 }
 
+// ----------------------------------------------------------------------------
+// VOLUME-FRACTION FEASIBILITY
+// ----------------------------------------------------------------------------
+// These are fractions of tissue volume, so every organ must satisfy
+// f_ew + f_iw + f_nl + f_np <= 1; the remainder is protein and solids. This
+// needs no literature -- it is a constraint on the table's own arithmetic.
+
+pub fn rr_volume_sum(i: i32) -> f64 {
+    rr_fw_e(i) + rr_fw_i(i) + rr_fn_l(i) + rr_fn_ph(i)
+}
+
+// How many of the 14 organs leave non-negative room for protein.
+// MEASURED 2026-09-26: 13/14. Adipose (7) sums to 1.0070. The header explains
+// why that value is not silently replaced.
+pub fn rr_check_volume_feasible() -> i32 with Mut {
+    var ok = 0
+    var i = 0
+    while i < 14 {
+        if rr_volume_sum(i) <= 1.0 { ok = ok + 1 }
+        i = i + 1
+    }
+    ok
+}
+
 // ============================================================================
 // OUTPUT STRUCTURES
 // ============================================================================
@@ -242,6 +299,32 @@ pub struct RRScaledUnc {
 // correction -- numerator and denominator scale together -- which is why the
 // GUM path that consumes only log_sens and literature Kp
 // (rr_scaled_uncertainty) is numerically unchanged by this fix.
+//
+// CONSUMERS, measured 2026-09-26: this module has NO .sio caller. The only
+// import of it anywhere in the tree is
+// tests/stdlib/darwin_pbpk/test_rodgers_rowland.sio, which takes the three
+// rr_check_* functions below; verify with
+//     grep -rn --include='*.sio' 'core::rodgers_rowland' .
+// rr_scaled_uncertainty is called only from this file's own main(). So the 156x
+// conversion error corrupted no downstream result -- not because the consumers
+// were insensitive to it, but because there are none yet.
+// examples/dissertation_hybrid_demo.sio names "literature Kp from
+// rodgers_rowland.sio" in a comment but imports nothing from here and carries
+// its own constants. Wiring this module up is future work, and whatever wires it
+// must not read RRResult.kp for rapamycin -- see the out-of-domain figures.
+//
+// A THIRD R&R-named implementation exists and is INERT:
+// examples/pbpk/darwin_pbpk_14comp.sio:222 calculate_kp_rodgers_rowland, which
+// sits inside the block comment that file opens with ("Aspirational example
+// preserved below. To restore, remove this stub and uncomment the original
+// content."), so it is not compiled and has no caller -- souc check on that
+// file passes because essentially all of it is commented out. Do not treat it
+// as a second opinion on anything here: its lipid term is
+// `1.0 + logp * lipid_fraction`, linear in logP rather than in P = 10^logP, so
+// it is not the Rodgers-Rowland model despite the name and the
+// Provenance::derived("rodgers_rowland_kp") tag it attaches, and it divides by
+// fu in the same direction as the defect this module has just lost. Recorded
+// here so a future restore of that example does not re-import both.
 //
 // Analytical GUM sensitivities:
 //   ∂Kp/∂logP = P * ln(10) * (fn_L + 0.3*fn_P) / fu_plasma
@@ -477,6 +560,8 @@ struct DrugPropertiesRR {
 // T6: a drug with no lipid affinity has Kp <= 1 (absolute-scale check)
 // T7: log-sensitivity independent of fu_plasma (justifies the claim that the
 //     GUM path is unchanged by the conversion fix)
+// T8: volume-fraction feasibility of the composition table itself -- no organ
+//     other than the known adipose row may sum above 1.0
 
 fn main() -> i32 with IO, Mut, Div, Panic {
     let rr = rr_rapamycin()
@@ -573,6 +658,28 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         print("T7 FAIL: log-sensitivity varies with fu_plasma in ")
         print(14 - ls_same)
         println("/14 tissues")
+        failed = failed + 1
+    }
+
+    // T8: the composition table must leave non-negative protein volume in every
+    //     organ. Adipose is the one known violation (1.0070, documented in the
+    //     header and deliberately not closed with an invented value), so this
+    //     passes either at 14/14 or at 13/14 WITH the violation still at
+    //     adipose -- it fails the moment a second organ, or a different one,
+    //     goes infeasible.
+    let feasible = rr_check_volume_feasible()
+    let adipose_sum = rr_volume_sum(7)
+    if feasible == 14 || (feasible == 13 && adipose_sum > 1.0) {
+        print("T8 PASS: volume fractions feasible in ")
+        print(feasible)
+        print("/14 organs (adipose sum = ")
+        print(adipose_sum)
+        println(")")
+        passed = passed + 1
+    } else {
+        print("T8 FAIL: ")
+        print(14 - feasible)
+        println("/14 organs assign negative protein volume -- not only adipose")
         failed = failed + 1
     }
 
