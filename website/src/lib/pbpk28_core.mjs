@@ -648,30 +648,112 @@ export function degenerateParams(base, { eps = 1e-3, psScale = 1e4 } = {}) {
 // and active metabolite ODV (O-desmethylvenlafaxine), bridged by hepatic CYP2D6
 // formation. Oral XR input is gated by a Korsmeyer-Peppas erodible matrix.
 //
-// Bit-compatible companion to tests/run-pass/dissertation_pbpk28_parity_ref_venlafaxine.sio.
-// The matrix transcendentals (merLnUnit/merExp/merPow) and absorption (merExpNeg)
-// are PORTED VERBATIM from the Sounio stdlib (release/matrix_er.sio, scenarios/
-// venlafaxine_xr.sio) — NOT Math.pow/Math.exp — so the two engines agree to f64.
+// Independent JS reimplementation of stdlib/darwin_pbpk/scenarios/venlafaxine_xr.sio
+// (portal first-pass model) and of the TR-BDF2 routed-sink step of
+// stdlib/darwin_pbpk/theta_pbpk28.sio. Companion of
+// tests/run-pass/dissertation_pbpk28_parity_ref_venlafaxine.sio, which drives the
+// stdlib scenario functions themselves; scripts/ci/dissertation_pbpk28_parity_gate.sh
+// cases 10-13 diff the two. Operation order follows the Sounio source so the two
+// engines agree to f64 rounding, not merely within the 1 % gate.
 //
-// Sources: Gohel 2008 (matrix n=0.65/k=0.199), Wang 2022 (F_XR=0.45, ka=0.63),
-// Klamerus 1999 (CL_parent 100, CL_form 43, CL_odv 28 L/h), Kirchheiner 2006
-// (ODV/parent Css PM 0.25 / NM 3.45 / UM 10.3 → CYP2D6 formation scaling).
+// Per step (Lie-Trotter):
+//   1. matrix release → gut pool
+//   2. the pool decays exactly, G → G·e^(−ka·dt); F_abs of the mass leaving the
+//      lumen enters the PORTAL vein (liver vascular space), 1 − F_abs never does
+//   3. parent TR-BDF2 step, input routed to the liver, all hepatic clearance a
+//      liver sink inside the implicit solve; ODV formation = removed · X_form/X
+//   4. ODV TR-BDF2 step, formed mass into blood
+// F_H = Q/(Q + X) and presystemic ODV formation emerge from step 3, so the
+// overall F_oral = F_abs·F_H is an output (0.45 at NM by construction).
+//
+// Hepatic resolution (well-stirred, portal input, CL_R on blood; see the Sounio
+// header): Dose/AUC_b = (c·X + CL_R)/F_abs, Ae_i/AUC_b = c·X_i, c = (Q + CL_R)/Q,
+// F = F_abs·Q/(Q + X). Lessard 1999 (EM CL/F 100, CL_m 43, quinidine 17, CL_R 4)
+// and Patat 1998 (F 0.45) resolve F_abs, X, X_form, X_non2D6 in closed form.
+//
+// Sources: Gohel 2008 (matrix n=0.65/k=0.199), Wang 2022 (ka 0.63), Patat 1998
+// (F 0.45), Lessard 1999 (oral clearances), Wyeth label / Klamerus 1996 (ODV
+// apparent CL 28 L/h). CYP2D6 phenotype scale = literature ODV/V ratio / 3.45
+// (provenance unverified; pgx/cyp2d6_venlafaxine.sio).
 // ════════════════════════════════════════════════════════════════════════════
 
 export const VFX_MATRIX_GOHEL2008 = Object.freeze({ totalDose: 75.0, k: 0.199, n: 0.65 });
-export const VFX_F_ORAL_XR = 0.45;
-export const VFX_KA_ABS    = 0.63;
-export const VFX_CL_FORM_ODV_NM = 43.0;   // L/h, CYP2D6 formation at NM (parity reference)
-export const VFX_CL_PARENT_CENTRAL = 57.0; // L/h = CL_oral(100) - CL_form(43), Klamerus 1999
-export const VFX_CL_ODV_CENTRAL    = 28.0; // L/h, Wyeth label
+export const VFX_F_ORAL_XR = 0.45;          // Patat 1998, F = F_abs·F_H
+export const VFX_KA_ABS    = 0.63;          // Wang 2022, h⁻¹
+export const VFX_CL_ORAL_NM = 100.0;        // Lessard 1999, EM Dose/AUC (L/h)
+export const VFX_CL_FORM_ODV_NM = 43.0;     // Lessard 1999, EM Ae(ODV)/AUC (L/h)
+export const VFX_CL_ORAL_QUINIDINE_EM = 17.0; // Lessard 1999, CYP2D6 blocked (L/h)
+export const VFX_CL_RENAL = 4.0;            // Lessard 1999 (Troy 1996 ≈ 3.7), L/h
+export const VFX_CL_ODV_APPARENT = 28.0;    // Wyeth label 0.4 L/h/kg × 70 kg, Dose/AUC_ODV
+export const VFX_LIVER = 1;                 // portal input + hepatic sink organ
 
 export const VFX_KP_PARENT = Object.freeze([1.00, 4.20, 3.50, 1.20, 2.00, 2.80, 1.80, 1.20, 2.40, 1.50, 0.80, 2.00, 1.60, 0.90]);
 export const VFX_PS_PARENT = Object.freeze([0.0, 900.0, 600.0, 120.0, 200.0, 8000.0, 250.0, 80.0, 500.0, 100.0, 40.0, 120.0, 80.0, 60.0]);
 export const VFX_KP_ODV    = Object.freeze([1.00, 3.50, 3.00, 1.00, 1.60, 2.20, 1.40, 0.90, 2.00, 1.20, 0.70, 1.60, 1.30, 0.70]);
 export const VFX_PS_ODV    = Object.freeze([0.0, 700.0, 450.0, 90.0, 150.0, 6000.0, 200.0, 60.0, 400.0, 80.0, 30.0, 100.0, 70.0, 50.0]);
 
-// CYP2D6 formation scale relative to NM (Kirchheiner 2006 ratios / 3.45). NM=1.0.
-export const VFX_CL_FORM_SCALE = Object.freeze({ 0: 0.25 / 3.45, 1: 1.16 / 3.45, 2: 1.0, 3: 10.3 / 3.45 });
+// CYP2D6 scale s = literature ODV/V ratio / NM ratio (PM, IM, NM, UM).
+const VFX_ODV_RATIO_LIT = Object.freeze([0.25, 1.16, 3.45, 10.3]);
+export function vfxCyp2d6Scale(pheno) { return VFX_ODV_RATIO_LIT[pheno] / VFX_ODV_RATIO_LIT[2]; }
+
+// EM hepatic resolution (mirrors vfx_hepatic_em). Venous-referenced, L/h.
+export function vfxHepaticEm() {
+  const q = Q[VFX_LIVER];
+  const clR = VFX_CL_RENAL;
+  const f = VFX_F_ORAL_XR;
+  const clf = VFX_CL_ORAL_NM;
+  const c = (q + clR) / q;
+  const fAbs = f * (1.0 - clR / (c * q)) / (1.0 - f * clf / (c * q));
+  const x = (fAbs * clf - clR) / c;
+  const xForm = VFX_CL_FORM_ODV_NM / c;
+  const xNon = (fAbs * VFX_CL_ORAL_QUINIDINE_EM - clR) / c;
+  return { fAbs, xForm, xOther: x - xForm - xNon, xNon2d6: xNon, c, fmOdv: VFX_CL_FORM_ODV_NM / clf };
+}
+export function vfxXHep(pheno) {
+  const h = vfxHepaticEm();
+  return h.xNon2d6 + vfxCyp2d6Scale(pheno) * (h.xForm + h.xOther);
+}
+export function vfxFormFraction(pheno) {
+  const h = vfxHepaticEm();
+  return vfxCyp2d6Scale(pheno) * h.xForm / vfxXHep(pheno);
+}
+export function vfxClOdvSystemic() { return vfxHepaticEm().fmOdv * VFX_CL_ODV_APPARENT; }
+
+// Venous-referenced clearance realised at the liver's steady state by sink
+// parameter cl (acts on C_avg,liver), and its exact inverse (positive root of
+// a·b·cl² + (a·PS/Kp + b·PS − X·b)·cl − X·PS/Kp = 0, a = V_v/V, b = V_t/V).
+export function vfxLiverXOfSink(cl) {
+  const k = VFX_LIVER;
+  const v = V_REF[k];
+  const vv = v * VASC_FRAC[k];
+  const vt = v * (1.0 - VASC_FRAC[k]);
+  const ps = VFX_PS_PARENT[k];
+  return (cl / v) * (vv + vt * ps / (ps / VFX_KP_PARENT[k] + cl * vt / v));
+}
+export function vfxLiverClSink(x) {
+  const k = VFX_LIVER;
+  const a = VASC_FRAC[k];
+  const b = 1.0 - a;
+  const ps = VFX_PS_PARENT[k];
+  const kp = VFX_KP_PARENT[k];
+  const bb = a * ps / kp + b * ps - x * b;
+  const cc = x * ps / kp;
+  return 2.0 * cc / (bb + Math.sqrt(bb * bb + 4.0 * a * b * cc));
+}
+
+// Closed-form predictions (vfx_*_predicted in the Sounio scenario).
+export function vfxOralClearancePredicted(pheno) {
+  const h = vfxHepaticEm();
+  return (h.c * vfxXHep(pheno) + VFX_CL_RENAL) / h.fAbs;
+}
+export function vfxAucRatioPredicted(pheno) {
+  const h = vfxHepaticEm();
+  return vfxCyp2d6Scale(pheno) * h.c * h.xForm / vfxClOdvSystemic();
+}
+export function vfxFOralPredicted(pheno) {
+  const q = Q[VFX_LIVER];
+  return vfxHepaticEm().fAbs * q / (q + vfxXHep(pheno));
+}
 
 // ─── Matrix transcendentals — verbatim ports of release/matrix_er.sio ────────
 function merLnUnit(x) {                       // ln(x) for x in (0,2], artanh series
@@ -712,48 +794,145 @@ export function vfxMatrixStepAmount(rel, t, dt) {
   return vfxMatrixCumulative(rel, t + dt) - vfxMatrixCumulative(rel, t);
 }
 
-// ─── Fully-coupled CN transport step — port of pbpk28_full_cn_step ───────────
-function vfxCnStep(Cv, Ct, kp, ps, clCentral, relMid, dt) {
-  const h = 0.5 * dt;
-  const vb = V_REF[0];
-  let sumQ = 0.0;
-  for (let i = 1; i < N; i++) sumQ += Q[i];
-  const bigS = h * (sumQ + clCentral) / vb;
-  const cbOld = Cv[0];
-  let rhs0 = (1.0 - bigS) * cbOld + dt * relMid / vb;
+// ─── TR-BDF2 routed-sink PBPK28 step — port of theta_pbpk28.sio ──────────────
+// State {cv, ct} (Float64Array(14)) is advanced in place. No negativity floor:
+// the θ-step conserves mass exactly, so a negative state is booked in the
+// ledger (minConc / negMass), never repaired.
+export function vfxLedgerZero() {
+  return { administered: 0.0, eliminated: 0.0, sinkRemoved: 0.0, auc: new Float64Array(N),
+           minConc: 0.0, negMass: 0.0, steps: 0 };
+}
+
+// Kernel organ averages (V_v·C_v + V_t·C_t)/V_i; blood C_v[0].
+function vfxKernelAvgs(st) {
+  const out = new Float64Array(N);
+  out[0] = st.cv[0];
+  for (let i = 1; i < N; i++) {
+    const vi = V_REF[i], vf = VASC_FRAC[i];
+    out[i] = (vi * vf * st.cv[i] + vi * (1.0 - vf) * st.ct[i]) / vi;
+  }
+  return out;
+}
+
+function vfxAccum(lg, avgs, w, clCentral, sinkOrgan, clSink) {
+  for (let i = 0; i < N; i++) lg.auc[i] = lg.auc[i] + w * avgs[i];
+  lg.eliminated = lg.eliminated + clCentral * (w * avgs[0]);
+  let sink = 0.0;
+  if (sinkOrgan >= 1 && sinkOrgan < N) sink = clSink * (w * avgs[sinkOrgan]);
+  lg.sinkRemoved = lg.sinkRemoved + sink;
+  return sink;
+}
+
+function vfxNegativity(lg, st) {
+  let neg = 0.0, cmin = lg.minConc;
+  const cb = st.cv[0];
+  if (cb < 0.0) { neg = neg + V_REF[0] * cb; if (cb < cmin) cmin = cb; }
+  for (let i = 1; i < N; i++) {
+    const vi = V_REF[i], vf = VASC_FRAC[i];
+    const cv = st.cv[i], ct = st.ct[i];
+    if (cv < 0.0) { neg = neg + vi * vf * cv; if (cv < cmin) cmin = cv; }
+    if (ct < 0.0) { neg = neg + vi * (1.0 - vf) * ct; if (ct < cmin) cmin = ct; }
+  }
+  lg.minConc = cmin;
+  const negAbs = 0.0 - neg;
+  if (negAbs > lg.negMass) lg.negMass = negAbs;
+}
+
+// One θ-step (pbpk28_theta_step_routed_sink_mut). pr = {kp, ps, clCentral}.
+function vfxThetaStep(st, pr, relMid, inputOrgan, dt, theta, sinkOrgan, clSink, lg) {
+  const oldAvg = vfxKernelAvgs(st);
   const aV = new Float64Array(N), bV = new Float64Array(N);
   const aT = new Float64Array(N), bT = new Float64Array(N);
+  const hi = theta * dt;
+  const he = (1.0 - theta) * dt;
+  const vb = V_REF[0];
+  const hasSink = sinkOrgan >= 1 && sinkOrgan < N && clSink > 0.0;
+  const routed = inputOrgan >= 1 && inputOrgan < N;
+  let sumQ = 0.0;
+  for (let i = 1; i < N; i++) sumQ = sumQ + Q[i];
+  const k0 = (sumQ + pr.clCentral) / vb;
+  const bigS = hi * k0;
+  const cbOld = st.cv[0];
+  let rhs0 = routed ? (1.0 - he * k0) * cbOld : (1.0 - he * k0) * cbOld + dt * relMid / vb;
   let sumBetaA = 0.0, sumBetaB = 0.0;
   for (let i = 1; i < N; i++) {
     const vi = V_REF[i], vf = VASC_FRAC[i];
-    const vv = Math.max(vi * vf, 1e-30), vt = Math.max(vi * (1 - vf), 1e-30);
-    const kpi = kp[i], psi = ps[i], qi = Q[i];
-    const beta = h * qi / vb, gamma = h * qi / vv;
-    const p = 1.0 + h * (qi + psi) / vv;
-    const qq = h * psi / (vv * kpi);
-    const r = h * psi / vt;
-    const sb = 1.0 + h * psi / (vt * kpi);
-    const det = p * sb - qq * r;
-    rhs0 += beta * Cv[i];
-    const rhsV = gamma * cbOld + (1.0 - h * (qi + psi) / vv) * Cv[i] + qq * Ct[i];
-    const rhsT = r * Cv[i] + (1.0 - h * psi / (vt * kpi)) * Ct[i];
-    aV[i] = (sb * rhsV + qq * rhsT) / det;
-    bV[i] = (sb * gamma) / det;
-    aT[i] = (r * rhsV + p * rhsT) / det;
-    bT[i] = (r * gamma) / det;
-    sumBetaA += beta * aV[i];
-    sumBetaB += beta * bV[i];
+    const vvRaw = vi * vf, vtRaw = vi * (1.0 - vf);
+    const vv = vvRaw < 1.0e-30 ? 1.0e-30 : vvRaw;
+    const vt = vtRaw < 1.0e-30 ? 1.0e-30 : vtRaw;
+    const kp = pr.kp[i], ps = pr.ps[i], qi = Q[i];
+    const ks = (hasSink && i === sinkOrgan) ? clSink / vi : 0.0;
+    const kv = (qi + ps) / vv;
+    const kvt = ps / (vv * kp);
+    const ktv = ps / vt;
+    const kt = ps / (vt * kp);
+    const betaI = hi * qi / vb;
+    const gammaI = hi * qi / vv;
+    const pp = 1.0 + hi * (kv + ks);
+    const qq = hi * kvt;
+    const rr = hi * ktv;
+    const sb = 1.0 + hi * (kt + ks);
+    const det = pp * sb - qq * rr;
+    const cvOld = st.cv[i], ctOld = st.ct[i];
+    rhs0 = rhs0 + (he * qi / vb) * cvOld;
+    const rhsV0 = (he * qi / vv) * cbOld + (1.0 - he * (kv + ks)) * cvOld + (he * kvt) * ctOld;
+    const rhsV = (routed && i === inputOrgan) ? rhsV0 + dt * relMid / vv : rhsV0;
+    const rhsT = (he * ktv) * cvOld + (1.0 - he * (kt + ks)) * ctOld;
+    const av = (sb * rhsV + qq * rhsT) / det;
+    const bv = (sb * gammaI) / det;
+    aV[i] = av;
+    bV[i] = bv;
+    aT[i] = (rr * rhsV + pp * rhsT) / det;
+    bT[i] = (rr * gammaI) / det;
+    sumBetaA = sumBetaA + betaI * av;
+    sumBetaB = sumBetaB + betaI * bv;
   }
   const cbNew = (rhs0 + sumBetaA) / ((1.0 + bigS) - sumBetaB);
-  const outCv = new Float64Array(N), outCt = new Float64Array(N);
-  outCv[0] = cbNew < 0 ? 0 : cbNew;
+  st.cv[0] = cbNew;
   for (let i = 1; i < N; i++) {
-    const cv = aV[i] + bV[i] * cbNew;
-    const ct = aT[i] + bT[i] * cbNew;
-    outCv[i] = cv < 0 ? 0 : cv;
-    outCt[i] = ct < 0 ? 0 : ct;
+    st.cv[i] = aV[i] + bV[i] * cbNew;
+    st.ct[i] = aT[i] + bT[i] * cbNew;
   }
-  return { cv: outCv, ct: outCt };
+  const newAvg = vfxKernelAvgs(st);
+  const sinkOrg = hasSink ? sinkOrgan : 0;
+  const sOld = vfxAccum(lg, oldAvg, he, pr.clCentral, sinkOrg, clSink);
+  const sNew = vfxAccum(lg, newAvg, hi, pr.clCentral, sinkOrg, clSink);
+  vfxNegativity(lg, st);
+  lg.administered = lg.administered + dt * relMid;
+  lg.steps = lg.steps + 1;
+  return sOld + sNew;
+}
+
+const VFX_TRBDF2_GAMMA = 0.5857864376269049;  // 2 − √2
+const VFX_TRBDF2_D     = 0.2928932188134524;  // 1 − 1/√2
+const VFX_TRBDF2_W     = 0.3535533905932738;  // 1/(2√2)
+const VFX_TRBDF2_A     = 1.2071067811865475;  // (1 + √2)/2
+
+// One TR-BDF2 step (pbpk28_trbdf2_step_routed_sink_mut): trapezoid stage over
+// γ·dt, then BDF2 as a backward-Euler θ-step of length d·dt on a·x_γ − (a−1)·x_n.
+// The ledger is booked with the b-weights (w, w, d); stage bookings are scratch.
+function vfxTrbdf2Step(st, pr, relMid, inputOrgan, dt, sinkOrgan, clSink, lg) {
+  const oldAvg = vfxKernelAvgs(st);
+  const xnV = Float64Array.from(st.cv), xnT = Float64Array.from(st.ct);
+  const scratch = vfxLedgerZero();
+  vfxThetaStep(st, pr, relMid, inputOrgan, VFX_TRBDF2_GAMMA * dt, 0.5, sinkOrgan, clSink, scratch);
+  const midAvg = vfxKernelAvgs(st);
+  const am1 = VFX_TRBDF2_A - 1.0;
+  for (let i = 0; i < N; i++) {
+    st.cv[i] = VFX_TRBDF2_A * st.cv[i] - am1 * xnV[i];
+    st.ct[i] = VFX_TRBDF2_A * st.ct[i] - am1 * xnT[i];
+  }
+  vfxThetaStep(st, pr, relMid, inputOrgan, VFX_TRBDF2_D * dt, 1.0, sinkOrgan, clSink, scratch);
+  const newAvg = vfxKernelAvgs(st);
+  const hasSink = sinkOrgan >= 1 && sinkOrgan < N && clSink > 0.0;
+  const sinkOrg = hasSink ? sinkOrgan : 0;
+  const k0 = vfxAccum(lg, oldAvg, VFX_TRBDF2_W * dt, pr.clCentral, sinkOrg, clSink);
+  const k1 = vfxAccum(lg, midAvg, VFX_TRBDF2_W * dt, pr.clCentral, sinkOrg, clSink);
+  const k2 = vfxAccum(lg, newAvg, VFX_TRBDF2_D * dt, pr.clCentral, sinkOrg, clSink);
+  vfxNegativity(lg, st);
+  lg.administered = lg.administered + dt * relMid;
+  lg.steps = lg.steps + scratch.steps;
+  return k0 + k1 + k2;
 }
 
 function vfxOrganAverage(cv, ct, i) {
@@ -770,67 +949,105 @@ function vfxTotalMass(cv, ct) {
   return total;
 }
 
-// One Lie-Trotter step: matrix → gut → ka absorption → parent CN → CYP2D6
-// liver formation (drain parent organ 1, feed ODV) → ODV CN. Mirrors
-// vfx_strang_step in scenarios/venlafaxine_xr.sio.
-function vfxStrangStep(st, rel, tStart, dt, clFormScale) {
+// Ledger residual (mg): body + eliminated + sink − administered, from zero.
+function vfxLedgerResidual(lg, st) {
+  return vfxTotalMass(st.cv, st.ct) + lg.eliminated + lg.sinkRemoved - lg.administered;
+}
+
+// Gut pool step (vfx_gut_absorb_step): release is applied first, then the pool
+// decays exactly over dt; F_abs of what leaves reaches the portal vein.
+export function vfxGutAbsorbStep(gutMg, dt) {
+  const fracAbs = 1.0 - merExpNeg(0.0 - VFX_KA_ABS * dt);
+  const leaveMg = gutMg * fracAbs;
+  const toParent = vfxHepaticEm().fAbs * leaveMg;
+  return { gutMg: gutMg - leaveMg, toParentMg: toParent, lostMg: leaveMg - toParent };
+}
+
+// One Lie-Trotter step (vfx_strang_step). Mutates `sc` in place.
+function vfxStrangStep(sc, rel, tStart, dt) {
   const relAmt = vfxMatrixStepAmount(rel, tStart, dt);
-  let gut = st.gut + relAmt;
-  const fracAbs = 1.0 - merExpNeg(-VFX_KA_ABS * dt);
-  const absorbAmt = VFX_F_ORAL_XR * gut * fracAbs;
-  gut = gut - absorbAmt;
-  if (gut < 0) gut = 0;
-  const parentInput = absorbAmt / dt;
+  sc.released = sc.released + relAmt;
+  const gs = vfxGutAbsorbStep(sc.gut + relAmt, dt);
+  sc.gut = gs.gutMg;
+  sc.portal = sc.portal + gs.toParentMg;
+  sc.lost = sc.lost + gs.lostMg;
+  const parentInput = gs.toParentMg / dt;
+  const clSink = vfxLiverClSink(vfxXHep(sc.pheno));
+  const removed = vfxTrbdf2Step(sc.parent, sc.prP, parentInput, VFX_LIVER, dt, VFX_LIVER, clSink, sc.lgP);
+  const formMg = removed * vfxFormFraction(sc.pheno);
+  vfxTrbdf2Step(sc.odv, sc.prO, formMg / dt, 0, dt, 0, 0.0, sc.lgO);
+}
 
-  const outP = vfxCnStep(st.pCv, st.pCt, VFX_KP_PARENT, VFX_PS_PARENT, VFX_CL_PARENT_CENTRAL, parentInput, dt);
+function vfxScenarioInit(pheno) {
+  return {
+    pheno,
+    parent: { cv: new Float64Array(N), ct: new Float64Array(N) },
+    odv:    { cv: new Float64Array(N), ct: new Float64Array(N) },
+    prP: { kp: VFX_KP_PARENT, ps: VFX_PS_PARENT, clCentral: VFX_CL_RENAL },
+    prO: { kp: VFX_KP_ODV, ps: VFX_PS_ODV, clCentral: vfxClOdvSystemic() },
+    lgP: vfxLedgerZero(), lgO: vfxLedgerZero(),
+    gut: 0.0, released: 0.0, portal: 0.0, lost: 0.0,
+  };
+}
 
-  const cLiver = vfxOrganAverage(outP.cv, outP.ct, 1);
-  const clForm = VFX_CL_FORM_ODV_NM * clFormScale;
-  const formMg = clForm * cLiver * dt;
-  outP.cv[1] = outP.cv[1] - formMg / V_REF[1];
-  if (outP.cv[1] < 0) outP.cv[1] = 0;
-  if (outP.cv[0] < 0) outP.cv[0] = 0;
-  const odvInput = formMg / dt;
-
-  const outO = vfxCnStep(st.oCv, st.oCt, VFX_KP_ODV, VFX_PS_ODV, VFX_CL_ODV_CENTRAL, odvInput, dt);
-  return { pCv: outP.cv, pCt: outP.ct, oCv: outO.cv, oCt: outO.ct, gut };
+// Mass account and closed-form check of a scenario state (vfx_self_check_run).
+function vfxAccount(sc) {
+  const mp = vfxTotalMass(sc.parent.cv, sc.parent.ct);
+  const mo = vfxTotalMass(sc.odv.cv, sc.odv.ct);
+  const aucP = sc.lgP.auc[0], aucO = sc.lgO.auc[0];
+  const h = vfxHepaticEm();
+  const clf = aucP > 0.0 ? sc.lgP.administered / h.fAbs / aucP : 0.0;
+  const aucRatio = aucP > 0.0 ? aucO / aucP : 0.0;
+  // Truncation bounds: after T the parent still receives F_abs·G from the gut
+  // and loses at least its renal share; all of it may still become ODV.
+  const mpLeft = mp + h.fAbs * sc.gut;
+  const tailP = aucP > 0.0 ? mpLeft / (VFX_CL_RENAL * aucP) : 0.0;
+  const tailO = aucO > 0.0 ? (mo + mpLeft) / (sc.prO.clCentral * aucO) : 0.0;
+  return {
+    pMass: mp, oMass: mo, aucP, aucO, aucRatio, clf,
+    clfPred: vfxOralClearancePredicted(sc.pheno), aucRatioPred: vfxAucRatioPredicted(sc.pheno),
+    fOralPred: vfxFOralPredicted(sc.pheno), tailP, tailO,
+    residGut: sc.released - (sc.gut + sc.portal + sc.lost),
+    residSplit: sc.portal - h.fAbs * (sc.portal + sc.lost),
+    boundSlack: h.fAbs * sc.released - sc.portal,
+    residP: vfxLedgerResidual(sc.lgP, sc.parent), residO: vfxLedgerResidual(sc.lgO, sc.odv),
+    negMass: Math.max(sc.lgP.negMass, sc.lgO.negMass),
+    steps: sc.lgP.steps, fAbs: h.fAbs,
+    gut: sc.gut, released: sc.released, portal: sc.portal, lost: sc.lost,
+    administered: sc.lgP.administered, formed: sc.lgO.administered,
+  };
 }
 
 /**
- * Integrate the venlafaxine XR scenario at NM (or a chosen CYP2D6 phenotype) and
- * sample parent + ODV organ-average trajectories at the given times. Returns a
- * record per sample with parent/ODV {cv,ct,avg}[14], cumulative matrix release,
- * and the total-body ODV/parent mass ratio. Default dt=0.5 h matches the stdlib
- * scenario; pheno default 2 = NM (the parity reference, R7).
+ * Integrate the venlafaxine XR portal scenario at a CYP2D6 phenotype (default
+ * 2 = NM, the parity reference) and sample parent + ODV organ-average
+ * trajectories. Each record carries {cv,ct,avg}[14] per drug, cumulative matrix
+ * release, the total-body ODV/parent mass ratio, and the mass/closed-form
+ * account (`vfxAccount`). Default dt = 0.5 h matches the stdlib scenario.
  */
 export function runVenlafaxineScenario(sampleTimes, { dt = 0.5, pheno = 2 } = {}) {
   const rel = VFX_MATRIX_GOHEL2008;
-  const clFormScale = VFX_CL_FORM_SCALE[pheno];
-  let st = {
-    pCv: new Float64Array(N), pCt: new Float64Array(N),
-    oCv: new Float64Array(N), oCt: new Float64Array(N), gut: 0.0,
-  };
+  const sc = vfxScenarioInit(pheno);
   const out = [];
   let t = 0.0;
   for (const target of sampleTimes) {
     while (t + 0.5 * dt < target) {
-      st = vfxStrangStep(st, rel, t, dt, clFormScale);
+      vfxStrangStep(sc, rel, t, dt);
       t += dt;
     }
     const pAvg = new Float64Array(N), oAvg = new Float64Array(N);
     for (let i = 0; i < N; i++) {
-      pAvg[i] = vfxOrganAverage(st.pCv, st.pCt, i);
-      oAvg[i] = vfxOrganAverage(st.oCv, st.oCt, i);
+      pAvg[i] = vfxOrganAverage(sc.parent.cv, sc.parent.ct, i);
+      oAvg[i] = vfxOrganAverage(sc.odv.cv, sc.odv.ct, i);
     }
-    const mp = vfxTotalMass(st.pCv, st.pCt);
-    const mo = vfxTotalMass(st.oCv, st.oCt);
+    const acc = vfxAccount(sc);
     out.push({
       t: target,
-      pCv: Float64Array.from(st.pCv), pCt: Float64Array.from(st.pCt), pAvg,
-      oCv: Float64Array.from(st.oCv), oCt: Float64Array.from(st.oCt), oAvg,
+      pCv: Float64Array.from(sc.parent.cv), pCt: Float64Array.from(sc.parent.ct), pAvg,
+      oCv: Float64Array.from(sc.odv.cv), oCt: Float64Array.from(sc.odv.ct), oAvg,
       released: vfxMatrixCumulative(rel, target),
-      ratio: mp < 1.0e-12 ? 0.0 : mo / mp,
-      pMass: mp, oMass: mo,
+      ratio: acc.pMass < 1.0e-12 ? 0.0 : acc.oMass / acc.pMass,
+      ...acc,
     });
   }
   return out;
