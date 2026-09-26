@@ -4998,13 +4998,8 @@ organized by module. Generated from source on the date shown below.
 
 ## hardware (`stdlib/hardware/`)
 
-**285 public functions** across 45 files
+**280 public functions** across 45 files
 
-- `fn hardware_publish_is_supported_op(op_kind: i64) -> bool {` — *hardware/kaxi.sio*
-- `fn hardware_publish_pack_flags(op_kind: i64) -> i64 {` — *hardware/kaxi.sio*
-- `fn hardware_publish_preview(value_bits: i64, variance_bits: i64, op_kind: i64) -> string with Alloc {` — *hardware/kaxi.sio*
-- `fn hardware_publish_counter_step(` — *hardware/kaxi.sio*
-- `fn hardware_publish_self_check() -> bool with Alloc {` — *hardware/kaxi.sio*
 - `pub fn pireus_aarchmrs_expected_sha256() -> string {` — *hardware/pireus/aarchmrs_import.sio*
 - `pub fn pireus_aarchmrs_import_chunks(prefix: string) -> PireusAarchmrsInventory` — *hardware/pireus/aarchmrs_import.sio*
 - `pub fn pireus_aarchmrs_negative_duplicate_field() -> bool` — *hardware/pireus/aarchmrs_import.sio*
@@ -14999,5 +14994,5 @@ organized by module. Generated from source on the date shown below.
 ## Summary
 
 - **124** modules with public APIs
-- **14108** total public functions
+- **14103** total public functions
 - Generated from `stdlib/` source files
