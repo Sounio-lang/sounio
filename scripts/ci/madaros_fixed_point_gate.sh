@@ -68,7 +68,18 @@ cd "$ROOT_DIR"
 # GREEN run with exactly that key exists, its full log is replayed and the gate
 # exits 0 without recompiling. A red run is never stored -- it always reruns.
 # Opt out per run with SOUNIO_MADAROS_NOCACHE=1.
-if [[ -z "${_MADAROS_FP_INNER:-}" && -n "${SOUNIO_MADAROS_CACHE:-}" && -x "${MADAROS_BIN:-}" ]]; then
+# Reuse is only sound when everything the compile reads is inside the hashed
+# trees: a source outside self-hosted/ + stdlib/ may import siblings the key
+# cannot see, so such runs always recompile.
+_fp_src_in_tree=1
+case "${SOUNIO_MADAROS_FP_SRC:-self-hosted/compiler/main.sio}" in
+  self-hosted/*|stdlib/*|"$ROOT_DIR"/self-hosted/*|"$ROOT_DIR"/stdlib/*) ;;
+  *) _fp_src_in_tree=0
+     if [[ -n "${SOUNIO_MADAROS_CACHE:-}" ]]; then
+       echo "[madaros_fixed_point] SOUNIO_MADAROS_FP_SRC is outside self-hosted/ and stdlib/ -- receipt reuse disabled" >&2
+     fi ;;
+esac
+if [[ -z "${_MADAROS_FP_INNER:-}" && -n "${SOUNIO_MADAROS_CACHE:-}" && -x "${MADAROS_BIN:-}" && "$_fp_src_in_tree" == 1 ]]; then
   # shellcheck source=../dev/madaros-cache.sh
   source "$ROOT_DIR/scripts/dev/madaros-cache.sh"
   _fp_key="$(
