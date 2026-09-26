@@ -185,9 +185,13 @@ fi
 SOUNIO_RESOLVED_ENGINE_PROBE="$("$SOUC_BIN" --version 2>&1 || true)"
 SOUNIO_RESOLVED_IS_MADAROS=0
 SOUNIO_RESOLVED_IS_LEAN_SINGLE=0
-if echo "$SOUNIO_RESOLVED_ENGINE_PROBE" | grep -qE '^Madaros v[0-9]'; then
+# Here-string form, not `echo ... | grep -q`: under pipefail, grep -q exits
+# at its first match and closes the pipe, and the still-flushing echo can
+# fail the pipeline -- a present match then reads as absent (scripts/ci/
+# sigpipe_hygiene_gate.sh, guarding exactly this shape in this file).
+if grep -qE '^Madaros v[0-9]' <<<"$SOUNIO_RESOLVED_ENGINE_PROBE"; then
     SOUNIO_RESOLVED_IS_MADAROS=1
-elif echo "$SOUNIO_RESOLVED_ENGINE_PROBE" | grep -qE '^Usage: mini_native'; then
+elif grep -qE '^Usage: mini_native' <<<"$SOUNIO_RESOLVED_ENGINE_PROBE"; then
     SOUNIO_RESOLVED_IS_LEAN_SINGLE=1
 fi
 
