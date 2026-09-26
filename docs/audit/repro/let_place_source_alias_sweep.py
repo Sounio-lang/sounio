@@ -20,14 +20,18 @@ shared storage and is not flagged.
 
 Heuristic and line-oriented. Types come from struct declarations across the
 repository, parameter and `let` annotations, struct literals, declared return
-types, and earlier field snapshots. Multi-line statements and interprocedural
-mutation are missed. Every hit must be read by hand.
+types, and earlier field snapshots, resolved per file (see SymbolTables);
+names with conflicting definitions are left unresolved, never guessed. Output
+is deterministic and ends each run with reconciled coverage counts.
+Multi-line statements and interprocedural mutation are missed. Every hit must
+be read by hand.
 
 Usage: let_place_source_alias_sweep.py <repo_root> <subdir> [<subdir> ...]
 """
 import re
 import subprocess
 import sys
+from collections import ChainMap
 
 ID = r"[A-Za-z_][A-Za-z0-9_]*"
 NON_COPYABLE = {"Box", "Knowledge", "Seq", "Option", "Vec", "String", "string"}
@@ -78,9 +82,9 @@ STRUCT_RE = re.compile(r"\b(?:pub\s+)?(?:linear\s+|affine\s+)?struct\s+(" + ID +
 FN_RE = re.compile(r"\bfn\s+(" + ID + r")\s*(?:<[^>(]*>)?\s*\(")
 
 
-def parse_structs(texts):
+def parse_structs_in(text):
     structs = {}
-    for text in texts:
+    if True:
         for m in STRUCT_RE.finditer(text):
             name = m.group(1)
             ob = m.end() - 1
@@ -96,9 +100,9 @@ def parse_structs(texts):
     return structs
 
 
-def parse_fn_returns(texts):
+def parse_fn_returns_in(text):
     rets = {}
-    for text in texts:
+    if True:
         for m in FN_RE.finditer(text):
             # find matching ')' of params
             depth, i = 0, m.end() - 1
@@ -211,20 +215,79 @@ def written_in_place(line, target):
     return False
 
 
+USE_RE = re.compile(r"^\s*(?:pub\s+)?use\s+([A-Za-z_][\w:]*?)(?:::\{([^}]*)\}|::(" + ID + r"))\s*;?\s*$", re.M)
+
+
+class SymbolTables:
+    """Struct and fn-return tables resolved PER FILE, deterministically.
+
+    Short names collide across the corpus (several `State` structs, dozens of
+    `step` fns), so a single global first-wins table would depend on file
+    order. Resolution order for a name used in file F:
+      1. a definition in F itself;
+      2. a definition in the module F imports that name from
+         (`use a::b::{X}` -> stdlib/a/b.sio or stdlib/a/b/mod.sio);
+      3. the corpus-wide definition, only if every definition of the name
+         agrees; a name with conflicting definitions is left unresolved.
+    """
+
+    def __init__(self, texts):
+        self.local_structs, self.local_rets = {}, {}
+        all_structs, all_rets = {}, {}
+        for path in sorted(texts):
+            ls = parse_structs_in(texts[path])
+            lr = parse_fn_returns_in(texts[path])
+            self.local_structs[path], self.local_rets[path] = ls, lr
+            for k, v in ls.items():
+                all_structs.setdefault(k, []).append(v)
+            for k, v in lr.items():
+                all_rets.setdefault(k, []).append(v)
+        self.global_structs = {k: v[0] for k, v in all_structs.items() if all(x == v[0] for x in v)}
+        self.global_rets = {k: v[0] for k, v in all_rets.items() if all(x == v[0] for x in v)}
+        self.ambiguous_structs = sorted(k for k in all_structs if k not in self.global_structs)
+        self.texts = texts
+
+    def _module_file(self, mod):
+        base = "stdlib/" + mod.replace("::", "/")
+        for cand in (base + ".sio", base + "/mod.sio"):
+            if cand in self.texts:
+                return cand
+        return None
+
+    def for_file(self, path):
+        imp_s, imp_r = {}, {}
+        for m in USE_RE.finditer(self.texts.get(path, "")):
+            names = [n.strip().split(" as ")[0].strip() for n in (m.group(2) or m.group(3) or "").split(",")]
+            mf = self._module_file(m.group(1))
+            if not mf:
+                continue
+            for n in names:
+                if n in self.local_structs.get(mf, {}):
+                    imp_s[n] = self.local_structs[mf][n]
+                if n in self.local_rets.get(mf, {}):
+                    imp_r[n] = self.local_rets[mf][n]
+        structs = ChainMap(self.local_structs.get(path, {}), imp_s, self.global_structs)
+        rets = ChainMap(self.local_rets.get(path, {}), imp_r, self.global_rets)
+        return structs, rets
+
+
 def sweep(root, subdirs):
     files = ls_files(root, subdirs)
     all_files = ls_files(root, ["stdlib", "self-hosted", "examples", "tests"])
     texts = {}
-    for p in set(all_files) | set(files):
+    for p in sorted(set(all_files) | set(files)):
         try:
             texts[p] = open(f"{root}/{p}", encoding="utf-8", errors="replace").read()
         except OSError:
             pass
-    structs = parse_structs(texts.values())
-    rets = parse_fn_returns(texts.values())
+    tables = SymbolTables(texts)
     rows = []
-    for p in files:
+    # Every place binding the sweep sees, by how far its type resolved.
+    counts = {"place_bindings": 0, "aggregate": 0, "scalar": 0,
+              "unresolved_root": 0, "unresolved_chain": 0}
+    for p in sorted(files):
         text = texts.get(p, "")
+        structs, rets = tables.for_file(p)
         line_starts = [0]
         for i, c in enumerate(text):
             if c == "\n":
@@ -282,13 +345,19 @@ def sweep(root, subdirs):
                     typed = typed or place_t
                 if typed:
                     env[name] = typed
-                if place_t is None or root_id is None:
-                    continue
+                if root_id is None:
+                    continue  # not a place
                 if re.match(r"^" + ID + r"$", rhs):
                     continue  # bare identifier: already copied by Madaros
+                counts["place_bindings"] += 1
+                if place_t is None:
+                    counts["unresolved_root" if root_id not in env else "unresolved_chain"] += 1
+                    continue
                 agg = aggregate_kind(place_t, structs)
                 if agg is None:
+                    counts["scalar"] += 1
                     continue
+                counts["aggregate"] += 1
                 # live range: rest of fn; widen to enclosing outermost loop head
                 start = ln + 1
                 in_loop = False
@@ -331,15 +400,22 @@ def sweep(root, subdirs):
                     "a": a_live[:4], "b": b_hits[:4], "root_byval": root_id in byval,
                     "in_loop": in_loop,
                 })
-    return rows
+    return rows, counts, tables.ambiguous_structs
 
 
 def main():
     if len(sys.argv) < 3:
         print(__doc__)
         sys.exit(2)
-    rows = sweep(sys.argv[1], sys.argv[2:])
+    rows, counts, ambiguous = sweep(sys.argv[1], sys.argv[2:])
     flagged = [r for r in rows if r["class"] != "-"]
+    c = counts
+    assert c["place_bindings"] == c["aggregate"] + c["scalar"] + c["unresolved_root"] + c["unresolved_chain"]
+    assert c["aggregate"] == len(rows)
+    print(f"place bindings: {c['place_bindings']}  = aggregate {c['aggregate']}"
+          f" + scalar {c['scalar']} + unresolved root {c['unresolved_root']}"
+          f" + unresolved field chain {c['unresolved_chain']}")
+    print(f"struct names with conflicting definitions (left unresolved): {len(ambiguous)}")
     print(f"aggregate place bindings: {len(rows)}  flagged: {len(flagged)}")
     by = {}
     for r in rows:

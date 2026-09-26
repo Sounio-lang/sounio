@@ -374,7 +374,12 @@ them.
 **Method.** `python3 docs/audit/repro/let_place_source_alias_sweep.py . stdlib`,
 over `git ls-files 'stdlib/*.sio'` at `2e8b76d31`. It reads every struct
 declaration in `stdlib/`, `self-hosted/`, `examples/` and `tests/`, and every
-declared return type. For each `fn` it resolves the static type of each
+declared return type. Names are resolved per file and deterministically: a
+definition in the same file first, then the module the file imports the name
+from with `use`, then the corpus-wide definition only when every definition of
+that name agrees. A name with conflicting definitions (416 struct names, e.g.
+the several `State` structs) is otherwise left unresolved rather than guessed.
+The output is identical under `PYTHONHASHSEED` 1, 2 and 3. For each `fn` it resolves the static type of each
 `let`/`var` whose initialiser is a place (`a.f…`, `(*p).f…`, `*p`, `xs[i]`),
 from parameter and `let` annotations, struct literals, callee return types and
 earlier place bindings. It keeps bindings whose type is a fixed array or a
@@ -391,14 +396,17 @@ A write that rebinds (`a = f(a)`, `a.f = x`) does not touch the shared storage
 and is not flagged. Inside a loop, the search starts at the loop head, because a
 back-edge makes earlier writes later.
 
-The sweep is heuristic and line-oriented. Of 1,310 place bindings in `stdlib/`,
-it resolves 1,017 to a scalar type and 79 to an aggregate. **228 (17 %) stay
-unresolved**, mostly because the root's type comes from a construct the sweep
-does not model (method returns, generic structs, multi-line statements). It
+The sweep is heuristic and line-oriented. It prints its own coverage counts,
+and they reconcile: of **2,940** place bindings in `stdlib/` (field chains,
+derefs and indexes), it resolves 2,477 to a scalar type and 93 to an aggregate.
+**370 (12.6 %) stay unresolved**: 191 whose root local has no known type and
+179 whose field chain does not resolve, mostly because a type comes from a
+construct the sweep does not model (method returns, generic structs,
+multi-line statements) or from an ambiguous name. It
 does not follow mutation into a callee except through the B-param class. Every
 flagged row was read by hand, together with its callers.
 
-**Result: 79 aggregate place bindings; 21 flagged, all class B; no class A.**
+**Result: 93 aggregate place bindings; 21 flagged, all class B; no class A.** Three flagged rows, in two functions, are wrong on Madaros today; the other 18 are not observable today.
 
 | Class | Rows | Wrong on Madaros today? |
 |---|---|---|
@@ -422,7 +430,7 @@ to compare two step sizes from one state, would see it change.
 index pair `(i, i | stride)` is read before it is written and visited once, so
 the in-place update computes the same numbers.
 
-**Handle exposure of the fix.** 29 of the 79 bindings sit inside a loop, where
+**Handle exposure of the fix.** 32 of the 93 bindings sit inside a loop, where
 the fix would add one handle per iteration for an aggregate over 16 B (the sweep
 prints them under `LOOP`). The dissertation-path ones are
 `stdlib/darwin_pbpk/simulation_real.sio:96` (`let st_next = step.state_new`,
