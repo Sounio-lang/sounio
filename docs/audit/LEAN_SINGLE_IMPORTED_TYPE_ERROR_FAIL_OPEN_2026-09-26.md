@@ -420,9 +420,21 @@ divergence. No other engine difference is involved in these two demos.
   ratios by up to 6.4e-5 relative. The adaptive Tsit5 step control
   (`rtol = 1e-6`) is the likely amplifier, because accept/reject decisions
   near `err_norm = 1` depend on the tolerance and tableau literals. That is
-  inferred, not traced step by step. Either way, digits of these ratios
-  beyond about the fourth significant figure are below the numerical
-  resolution of the solve and should not be quoted as meaningful.
+  inferred, not traced step by step.
+- **The engine gap is not the accuracy of these numbers.** Lane
+  `claude(gracious-bardeen)` reports an independent fixed-step RK4
+  reference (continuous absorption, no operator splitting) for
+  `AUC_last / AUC_first` in `dissertation_steady_state_demo`: 1.227702.
+  **Both** engines sit about 6.5e-4 away from it, roughly 31 times the
+  engine gap. They attribute this to the runner's operator-split oral bolus,
+  which is O(dt). The report is their dispatch,
+  `docs/audit/STEADY_STATE_DEMO_ENGINE_DIVERGENCE_REFERENCE_2026-09-26.md`
+  (commit `6db545723` on `claude/gracious-bardeen-155cb0`, not yet pushed).
+  It is not re-measured here. On that evidence these ratios carry about
+  three significant figures, and the engine difference is noise beneath the
+  discretisation error. That lane also reports `t_to_90pct_h`,
+  steady-state dose labelling and trapezoid-AUC defects in
+  `steady_state_runner.sio`; they are not addressed in this PR.
 - Any lean_single-versus-Madaros parity comparison involving decimal literals
   can differ at the ulp level for this reason alone. Parity checks should
   compare with a tolerance or on correctly rounded inputs.
@@ -511,3 +523,10 @@ Sabotage, each measured through the gate:
 
 A 1e-15 change to `a52` passes, as designed: it is below the derived
 tolerance.
+
+A later review also noted that a regimen outside 1..32 doses produced
+`success = true`: zero doses for `n_doses < 1`, or silent truncation to 32.
+`run_oral_multidose_cfg` now fails such a request up front with
+`success = false` and `n_doses_run = 0`. `darwin_pbpk_steady_state_failure`
+covers `n_doses` = 0, −1 and 33.
+
