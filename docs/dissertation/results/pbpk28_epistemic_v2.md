@@ -208,6 +208,14 @@ simulation output, and stands.
 | Deliverable | File | Self-tests |
 |---|---|---|
 | First-order GUM | `epistemic_pbpk28.sio` | 9/9 (TEST 5, 7, 9 re-derived 2026-09-26) |
+
+TEST 9 now gates the convergence order on C_brain(24 h), a point value that carries the
+transient discretisation error. Every AUC here is dt-independent under exact conservation, so AUCs
+cannot show order. Halving dt from 0.05 to 0.025 and 0.0125 h changes C_brain(24 h) by 1.02×10⁻¹⁰
+and 2.55×10⁻¹¹ mg/L, a ratio of 3.9998, i.e. second order. One fix was needed: the old rule
+`t ≥ 24` sampled one step late at the finer dts, because float accumulation left `t` a few ulp
+below 24. The sample is now taken at the step nearest 24 h. The production dt = 0.05 h value is
+unchanged.
 | Hessian correction | `epistemic_pbpk28_hessian.sio` | 7/7 + 3/3 dual-ρ |
 | Sobol + PCE | `validation/pbpk28_sobol_pce.sio` | 6/6 + 6/6 (structural checks; see §4.10.5) |
 | Mass-balance gates | `tests/run-pass/pbpk28_consumer_mass_balance.sio` | PASS |

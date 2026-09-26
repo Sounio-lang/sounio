@@ -152,7 +152,13 @@ fn ep28_simulate_dt(dt: f64, prm: PBPKParams28, dose_mg: f64, t_end: f64) -> PBP
         t = t + dt_use
         k = k + 1
 
-        if found_24h == false && t >= 24.0 {
+        // Capture at the step whose end is nearest 24 h. `t` is a running
+        // float sum, so after 24/dt steps it can sit a few ulp below 24.0;
+        // the old test `t >= 24.0` then sampled one step late (t = 24 + dt at
+        // dt = 0.025 and 0.0125, measured 2026-09-26), an O(dt) timing error
+        // that made C_brain(24 h) look first-order in dt. At the production
+        // dt = 0.05 both rules pick the same step.
+        if found_24h == false && t >= 24.0 - 0.5 * dt_use {
             c_brain_24h = pbpk28_organ_average(st, prm, 3)
             found_24h = true
         }
@@ -190,6 +196,12 @@ pub fn ep28_mass_gate(dt: f64, prm: PBPKParams28, dose_mg: f64, t_end: f64) -> b
     print("  booked negative mass (mg) x 1e12: ")
     println(m.neg_mass * 1.0e12)
     return r <= pbpk28_mass_tol_rel(m.steps) && m.neg_mass <= pbpk28_neg_mass_bound_mg()
+}
+
+// C_brain(24 h) (brain organ average) at step dt, for TEST 9's order check.
+fn ep28_brain24_dt(prm: PBPKParams28, dose_mg: f64, t_end: f64, dt: f64) -> f64 with Mut, Div, Panic {
+    let m = ep28_simulate_dt(dt, prm, dose_mg, t_end)
+    return m.c_brain_24h
 }
 
 // ============================================================================
@@ -945,13 +957,29 @@ fn ep28_selftest_main() -> i32 with IO, Mut, Div, Panic, Epistemic {
     }
     println("")
 
-    // TEST 9: dt-convergence (addresses stiffness + 2nd-order CN accuracy; improves on pure path exercise)
-    // Crank-Nicolson is A-stable and 2nd-order. For AUC_blood the exact mass
-    // identity makes every dt return (Dose − M(T))/CL, so the diffs are at
-    // rounding level and the printed ratio carries no order information.
-    // This numerically checks that the integrator handles stiff compartments without blow-up
-    // and that first-order GUM results are not dominated by time-discretization error.
-    println("TEST 9: dt-convergence (CN 2nd-order + stiffness evidence)")
+    // TEST 9: dt-convergence.
+    // (a) Order, on an endpoint that carries discretisation error. Every AUC
+    //     over 0..168 h is dt-independent here: a linear, exactly conservative
+    //     method booked with its own quadrature sums to -A^-1(x_N - x_0 - Σ dt·b),
+    //     so AUC diffs are rounding and say nothing about order. The point value
+    //     C_brain(24 h) does carry the transient error. Halving dt twice, a
+    //     second-order method gives a diff ratio -> 4 and a first-order one -> 2.
+    //     The gate is ratio >= 2·√2, i.e. observed order p = log2(ratio) >= 1.5,
+    //     the midpoint that separates the two. Rannacher start-up keeps CN
+    //     globally second order after the bolus (Giles & Carter 2006).
+    // (b) Production and fine dt match Dose/CL (mass identity; below).
+    println("TEST 9: dt-convergence (order on C_brain(24h); AUC vs Dose/CL)")
+    let br1 = ep28_brain24_dt(prm, dose_mg, t_end, 0.05)
+    let br2 = ep28_brain24_dt(prm, dose_mg, t_end, 0.025)
+    let br4 = ep28_brain24_dt(prm, dose_mg, t_end, 0.0125)
+    let bd1 = ep28_abs(br1 - br2)
+    let bd2 = ep28_abs(br2 - br4)
+    let b_ratio = if bd2 > 0.0 { bd1 / bd2 } else { 0.0 }
+    print("  C_brain(24h) x 1e6 at dt=0.05/0.025/0.0125: ")
+    print_f64(br1 * 1.0e6); print(" / "); print_f64(br2 * 1.0e6); print(" / "); print_f64(br4 * 1.0e6); println("")
+    print("  |diff| x 1e12, dt/2 and dt/4: "); print_f64(bd1 * 1.0e12); print(" / "); print_f64(bd2 * 1.0e12); println("")
+    print("  diff ratio (2nd order -> 4, gate >= 2.828427): "); print_f64(b_ratio); println("")
+    let order_ok = b_ratio >= 2.8284271247461903
     let m_dt1 = ep28_simulate(prm, dose_mg, t_end)           // dt=0.05
     let m_dt2 = ep28_simulate_dt(0.025, prm, dose_mg, t_end) // dt/2
     let m_dt4 = ep28_simulate_dt(0.0125, prm, dose_mg, t_end) // dt/4
@@ -970,7 +998,7 @@ fn ep28_selftest_main() -> i32 with IO, Mut, Div, Panic, Epistemic {
     print("  Knowledge<CHEBI:9168> tagged AUC at dt=0.025: "); print_f64(m_dt2.auc_blood); println(" (rapamycin)")
     print("  Knowledge<CHEBI:9168> tagged AUC at dt=0.0125: "); print_f64(m_dt4.auc_blood); println(" (rapamycin)")
     print("  rel diff (dt/2): "); print_f64(rel_diff); println("")
-    print("  diff ratio (should ~4 for order 2): "); print_f64(ratio); println("")
+    print("  AUC diff ratio (rounding only, no order information): "); print_f64(ratio); println("")
     // SOTA lit validation (Ferron 1997 + CN theory):
     // lit AUC = dose/CL = 5/12.4 ≈ 0.403226. CN is A-stable O(Δt²) (Hairer/Wanner 1996).
     // dt-conv + convergence to lit value demonstrates discr. error << GUM, bounding higher-order remainder.
@@ -981,11 +1009,12 @@ fn ep28_selftest_main() -> i32 with IO, Mut, Div, Panic, Epistemic {
     let e_prod = ep28_abs(m_dt1.auc_blood - lit_auc)
     print("  SOTA lit AUC (Ferron 1997): "); print_f64(lit_auc); println("  e_fine="); print_f64(e_fine); println("")
     print("  e_prod (dt=0.05): "); print_f64(e_prod); println("")
-    if e_fine < 0.01 && e_prod < 0.01 {
-        println("  [PASS] production and fine dt match SOTA lit (Ferron); discr. controlled (Rannacher-started CN)")
+    if e_fine < 0.01 && e_prod < 0.01 && order_ok {
+        println("  [PASS] C_brain(24h) converges at second order; production and fine dt match Dose/CL")
         passed = passed + 1
     } else {
-        println("  FAIL: not close to lit AUC (Ferron 1997)")
+        if order_ok == false { println("  FAIL: C_brain(24h) dt-halving ratio below 2*sqrt(2) (not second order)") }
+        if e_fine >= 0.01 || e_prod >= 0.01 { println("  FAIL: not close to lit AUC (Ferron 1997)") }
         failed = failed + 1
     }
     println("")
