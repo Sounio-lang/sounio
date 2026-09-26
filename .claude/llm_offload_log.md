@@ -61,3 +61,30 @@ the invalid DeepSeek key in `~/.sounio-keys.env`. Raw outputs from this session:
   "Specify two BE half-steps": already specified.
 - **zai/local/deepseek:** not rerun. Status as in the previous entry (rate limit,
   endpoint down, invalid key).
+
+## 2026-09-26T23:20Z — Claude (session 9e18db24, confident-kilby) — steady-state runner endpoints (PR #2698)
+
+| 2026-09-26 | xai (grok-4.6), qwen (OpenRouter Qwen 3 235B) | math-review | stdlib/darwin_pbpk/scenarios/steady_state_runner.sio (AUC_tau quadrature, t_to_90pct_h, dose_of_ss) | PASS after one fix | Two independent providers. |
+
+- **xai:** one item accepted and applied. The t_90 plateau was the AUC_tau at
+  steady-state declaration. Three successive |dAUC|/AUC < 2% steps leave that
+  ~5% below the true plateau when r = exp(-k_el tau) ~ 0.79, which biases t_90
+  early. It now uses the last simulated interval's AUC_tau. Also confirmed:
+  - summing trapezoids over accepted steps with the post-jump left value is the
+    consistent quadrature for the operator-split path;
+  - the old t_90 test was a tautology;
+  - the 1-based label is consistent with t_90 = (k+1) tau.
+  Noted, not changed here: bias versus continuous absorption is the splitting
+  error, O(dt), and pre-existing. Also noted: `fu_plasma * AUC_blood` is
+  unbound plasma AUC only if B:P = 1 (rapamycin model rb_ratio = 0.58).
+  That is recorded as a separate finding in
+  docs/audit/LEAN_SINGLE_IMPORTED_TYPE_ERROR_FAIL_OPEN_2026-09-26.md, not
+  fixed in this change. xai also caught an index slip in the review text
+  itself (AUC_tau,k = AUC_ss(1 - r^(k+1)) for 0-based k); the code was
+  already right.
+- **qwen:** claims 1 and 3 OK. OVERREACH on "t_90 = (k+1) tau overstates"
+  **not accepted**: interval k (0-based) ends at (k+1) tau, per xai's
+  derivation. The "continuous AUC(t)" suggestion is a different endpoint;
+  interval granularity is documented.
+- **zai/deepseek/local:** not run (rate limit, invalid key, endpoint down per
+  the earlier entries today).

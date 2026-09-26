@@ -530,3 +530,65 @@ A later review also noted that a regimen outside 1..32 doses produced
 `success = false` and `n_doses_run = 0`. `darwin_pbpk_steady_state_failure`
 covers `n_doses` = 0, −1 and 33.
 
+
+## Steady-state runner: three endpoint bugs (2026-09-26)
+
+Reported by lane `claude(gracious-bardeen)` (PR #2711). Fixed here at the
+operator's request. Each fix has its own commit and a
+`requires: madaros` regression test. Restoring the old runner makes each
+test fail on its own assertion.
+
+| Bug | Fix | Test (exit code with old runner) |
+|---|---|---|
+| `dose_of_ss` was the 0-based loop index, one row off the 1-based table | stores `dose_i + 1` | `darwin_pbpk_steady_state_endpoints` (4): `auc_tau_ss == auc_tau_per_dose[dose_of_ss - 1]` |
+| `t_to_90pct_h` tested `grew >= 0.9 * (grew + 1e-12)`, so it returned 2·tau for every drug | first interval whose AUC_tau reaches 90% of the last interval's AUC_tau; `-1` (undefined) without a detected SS | `darwin_pbpk_steady_state_failure` (10): no t_90 for a 3-dose regimen |
+| AUC_tau was a 16-point trapezoid (1.6 h spacing) | accumulated over every accepted Tsit5 step (plasma) and BBB RK4 sub-step (ISF, ICF) | `darwin_pbpk_steady_state_auc_quadrature` (2) |
+
+The AUC check uses a reference independent of the runner's quadrature. Dose
+1 is integrated inside the test with a fixed step and the same
+operator-split input. That reference is first-order in dt (0.005 h to
+0.0025 h moves it 404 ppm), so the Richardson extrapolation is used.
+Measured against it: new runner +3.1e-4, old runner −7.4e-3; the bound is 2e-3.
+A first version of this test compared the runner against itself at a tighter
+tolerance. The checkpoint trapezoid cancelled on both sides, and the whole-runner
+sabotage showed that version passing on the old code. It was replaced before
+commit.
+
+Effect on the demos (Madaros):
+
+| Quantity | Before | After |
+|---|---|---|
+| `steady_state_demo` `t_to_90pct_h` (SS not reached) | 48 | undefined |
+| `steady_state_demo` AUC_tau, dose 1 / 7 | 0.002922 / 0.013998 | 0.002945 / 0.014022 |
+| `fullvd_demo` SS dose label | #7 | #8 (same interval) |
+| `fullvd_demo` AUC_tau_ss | 0.001672 | 0.001735 (+3.8%) |
+| `fullvd_demo` `t_to_90pct_h` | 48 | 48 (now because dose 2 reaches 91.5% of the last interval) |
+| `fullvd_demo` AUC_last / AUC_first | 1.228366 | 1.218177 |
+
+The ratio falls because the old trapezoid under-read the sharper first dose
+more than the last. That moves it away from gracious-bardeen's reference
+of 1.227702, which appears to reproduce the demo's own 16-point quadrature;
+this has not been confirmed with that lane. A math review (xai, qwen;
+`.claude/llm_offload_log.md`) confirmed the quadrature and changed one
+choice: the t_90 plateau is the last interval, not the AUC at SS
+declaration, which can sit ~5% below the plateau.
+
+### Open, not fixed: blood concentration used as plasma
+
+Found during the math review and confirmed in the code; not changed here.
+`pbpk_ode` integrates **blood** concentration
+(`c_plasma = c_blood / rb_ratio`, `tsit5_pbpk14.sio:381`). Two places treat
+blood as plasma:
+
+- **Reported plasma exposure.** `steady_state_runner` stores `sys_st.blood`
+  in `trace.plasma[]` and reports `auc_plasma_u = fu_plasma * AUC(blood)`.
+- **BBB coupling.** It drives the BBB model with `c_mid`, interpolated from
+  `sys_st.blood`, while `bbb_ode(st, c_plasma, prm)` documents and uses its
+  argument as plasma.
+
+`oral_bbb_run` in `scenarios/oral_rapamycin_bbb.sio` has the same pattern.
+With `rb_ratio = 0.58` in `rapamycin_mean_params`, plasma is 1.72 × blood.
+Unless the blood/plasma equivalence is intended for this model, both the
+unbound plasma AUC and the BBB driving concentration are about 42% low.
+This affects BBB exposure and Kp,uu outputs. It needs an operator decision
+and a math review before any change.
