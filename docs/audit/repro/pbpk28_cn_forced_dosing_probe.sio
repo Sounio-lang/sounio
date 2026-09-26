@@ -1,0 +1,326 @@
+// Probe: PBPK28 transport schemes under forcing discontinuities.
+// Dispatch: docs/audit/PBPK28_CN_FLOOR_CLAMP_MASS_INJECTION_DISPATCH_2026-09-26.md
+//
+// Two dosing scenarios over 168 h, 5 mg every 24 h (7 doses):
+//   scen 1 = IV bolus into blood (a state jump at each dose)
+//   scen 2 = first-order depot, ka = 1 /h, F = 1 (a jump in the release rate at each dose)
+// Methods: 0 shipped stdlib step (CN + floors), 1 CN, 2 backward Euler,
+//   3 CN + Rannacher start-up at t = 0 only, 4 CN + Rannacher re-triggered after
+//   every dose, 5 TR-BDF2 (gamma = 2 - sqrt 2), 6 TR-BDF2 with the first step
+//   after every dose replaced by 2 BE half-steps. Methods 1..6 are clamp-free.
+// Reference: CN at dt = 0.001 h; TR-BDF2 at dt = 0.001 h is printed against it.
+// Metrics: blood concentration on the hourly grid against the reference (max error
+// / reference max), the error at the trough before the last dose (t = 144 h) and
+// at t = 168 h, the minimum state entry, the number of steps with any entry below
+// -1e-12 * C0, and the mass identity (M(T) + CL*AUC_quad - released) / released.
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::tsit5_pbpk28::*
+
+fn fx_matvec(y: &!PBPKState28, x: PBPKState28, p: PBPKParams28) with Mut, Div {
+    let vb = p.v_ref[0]
+    var inflow = 0.0
+    var sum_q = 0.0
+    var i: i32 = 1
+    while i < 14 {
+        let vi = p.v_ref[i]
+        let vv = vi * p.vasc_frac[i]
+        let vt = vi * (1.0 - p.vasc_frac[i])
+        let flux_ps = p.ps[i] * (x.cv[i] - x.ct[i] / p.kp[i])
+        (*y).cv[i] = (p.q[i] * (x.cv[0] - x.cv[i]) - flux_ps) / vv
+        (*y).ct[i] = flux_ps / vt
+        inflow = inflow + p.q[i] * x.cv[i]
+        sum_q = sum_q + p.q[i]
+        i = i + 1
+    }
+    (*y).cv[0] = (inflow - (sum_q + p.cl_central) * x.cv[0]) / vb
+}
+
+fn fx_apply(x: &!PBPKState28, x0: f64, a_v: &[f64; 14], b_v: &[f64; 14],
+            a_t: &[f64; 14], b_t: &[f64; 14]) with Mut, Div {
+    (*x).cv[0] = x0
+    var i: i32 = 1
+    while i < 14 {
+        (*x).cv[i] = (*a_v)[i] + (*b_v)[i] * x0
+        (*x).ct[i] = (*a_t)[i] + (*b_t)[i] * x0
+        i = i + 1
+    }
+}
+
+// Solve (I - hi*A) x = r exactly by the same per-organ Schur elimination.
+fn fx_solve(x: &!PBPKState28, r: PBPKState28, p: PBPKParams28, hi: f64) with Mut, Div {
+    var a_v: [f64; 14] = [0.0; 14]
+    var b_v: [f64; 14] = [0.0; 14]
+    var a_t: [f64; 14] = [0.0; 14]
+    var b_t: [f64; 14] = [0.0; 14]
+    let vb = p.v_ref[0]
+    var sum_q = 0.0
+    var i: i32 = 1
+    while i < 14 {
+        sum_q = sum_q + p.q[i]
+        i = i + 1
+    }
+    let big_s = hi * (sum_q + p.cl_central) / vb
+    var sum_beta_a = 0.0
+    var sum_beta_b = 0.0
+    i = 1
+    while i < 14 {
+        let vi = p.v_ref[i]
+        let vv = vi * p.vasc_frac[i]
+        let vt = vi * (1.0 - p.vasc_frac[i])
+        let kp = p.kp[i]
+        let ps = p.ps[i]
+        let qi = p.q[i]
+        let beta  = hi * qi / vb
+        let gamma = hi * qi / vv
+        let pp    = 1.0 + hi * (qi + ps) / vv
+        let qq    = hi * ps / (vv * kp)
+        let rr    = hi * ps / vt
+        let sb    = 1.0 + hi * ps / (vt * kp)
+        let det   = pp * sb - qq * rr
+        let av = (sb * r.cv[i] + qq * r.ct[i]) / det
+        let bv = (sb * gamma) / det
+        let at = (rr * r.cv[i] + pp * r.ct[i]) / det
+        let bt = (rr * gamma) / det
+        a_v[i] = av
+        b_v[i] = bv
+        a_t[i] = at
+        b_t[i] = bt
+        sum_beta_a = sum_beta_a + beta * av
+        sum_beta_b = sum_beta_b + beta * bv
+        i = i + 1
+    }
+    let x0 = (r.cv[0] + sum_beta_a) / ((1.0 + big_s) - sum_beta_b)
+    fx_apply(x, x0, &a_v, &b_v, &a_t, &b_t)
+}
+
+// r = c1 * x + c2 * (A x)
+fn fx_axpy(r: &!PBPKState28, c1: f64, x: PBPKState28, c2: f64, ax: PBPKState28) with Mut {
+    var i: i32 = 0
+    while i < 14 {
+        (*r).cv[i] = c1 * x.cv[i] + c2 * ax.cv[i]
+        (*r).ct[i] = c1 * x.ct[i] + c2 * ax.ct[i]
+        i = i + 1
+    }
+}
+
+
+// Source-aware steps. `rel` is the mass released into blood over the step
+// divided by dt (mg/h), held constant across the step; each method below then
+// adds exactly dt*rel of mass per step, so M(T) + CL*AUC_quad = released(T)
+// holds to roundoff for methods 1..5.
+fn fq_theta(x: &!PBPKState28, p: PBPKParams28, dt: f64, theta: f64, rel: f64) with Mut, Div {
+    var ax = pbpk28_state_zero()
+    var r = pbpk28_state_zero()
+    let xo = *x
+    fx_matvec(&!ax, xo, p)
+    fx_axpy(&!r, 1.0, xo, (1.0 - theta) * dt, ax)
+    r.cv[0] = r.cv[0] + dt * rel / p.v_ref[0]
+    fx_solve(x, r, p, theta * dt)
+}
+
+fn fq_trbdf2(x: &!PBPKState28, xg_out: &!PBPKState28, p: PBPKParams28, dt: f64, rel: f64) with Mut, Div {
+    let g = 2.0 - 1.4142135623730951
+    let d = (1.0 - g) / (2.0 - g)
+    let xo = *x
+    var ax = pbpk28_state_zero()
+    var r = pbpk28_state_zero()
+    var xg = pbpk28_state_zero()
+    fx_matvec(&!ax, xo, p)
+    fx_axpy(&!r, 1.0, xo, 0.5 * g * dt, ax)
+    r.cv[0] = r.cv[0] + g * dt * rel / p.v_ref[0]
+    fx_solve(&!xg, r, p, 0.5 * g * dt)
+    let c_g = 1.0 / (g * (2.0 - g))
+    let c_o = (1.0 - g) * (1.0 - g) / (g * (2.0 - g))
+    var i: i32 = 0
+    while i < 14 {
+        r.cv[i] = c_g * xg.cv[i] - c_o * xo.cv[i]
+        r.ct[i] = c_g * xg.ct[i] - c_o * xo.ct[i]
+        i = i + 1
+    }
+    r.cv[0] = r.cv[0] + d * dt * rel / p.v_ref[0]
+    fx_solve(x, r, p, d * dt)
+    *xg_out = xg
+}
+
+// Element-wise copy on purpose. On Madaros (98315edcd), both `xg = x` and
+// `*dst = src` on an array-holding struct share the array with the source, so a
+// later `step(&!x)` shows through xg. That silently corrupted the start-up AUC in
+// an earlier version of this probe. See the dispatch's observations.
+fn fq_store(dst: &!PBPKState28, src: PBPKState28) with Mut {
+    var i: i32 = 0
+    while i < 14 {
+        (*dst).cv[i] = src.cv[i]
+        (*dst).ct[i] = src.ct[i]
+        i = i + 1
+    }
+}
+
+fn fq_min(s: PBPKState28) -> f64 with Mut {
+    var m = s.cv[0]
+    var i: i32 = 1
+    while i < 14 {
+        if s.cv[i] < m { m = s.cv[i] }
+        if s.ct[i] < m { m = s.ct[i] }
+        i = i + 1
+    }
+    return m
+}
+
+fn fq_exp(x: f64) -> f64 with Mut, Div {
+    // Taylor series; only called with x in [-0.5, 0].
+    var term = 1.0
+    var sum = 1.0
+    var k: i32 = 1
+    while k < 30 {
+        term = term * x / (k as f64)
+        sum = sum + term
+        k = k + 1
+    }
+    return sum
+}
+
+fn fq_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn fq_run(tag: i32, scen: i32, p: PBPKParams28, dt: f64, method: i32,
+          refv: &![f64; 169], is_ref: bool) with IO, Mut, Div {
+    let dose = 5.0
+    let ka = 1.0
+    let n = ((168.0 / dt) + 0.5) as i32
+    let spd = ((24.0 / dt) + 0.5) as i32
+    let sph = ((1.0 / dt) + 0.5) as i32
+    let decay = fq_exp(0.0 - ka * dt)
+    let g = 2.0 - 1.4142135623730951
+    let w_tr = 1.0 / (2.0 * (2.0 - g))
+    let d_tr = (1.0 - g) / (2.0 - g)
+    let c0 = dose / p.v_ref[0]
+    var ref_max = 0.0
+    if !is_ref {
+        var h: i32 = 1
+        while h < 169 {
+            if (*refv)[h] > ref_max { ref_max = (*refv)[h] }
+            h = h + 1
+        }
+    }
+    var x = pbpk28_state_zero()
+    var xg = pbpk28_state_zero()
+    var depot = 0.0
+    var released = 0.0
+    var auc = 0.0
+    var mn = 0.0
+    var neg_steps: i32 = 0
+    var max_err = 0.0
+    var err144 = 0.0
+    var err168 = 0.0
+    var rk_left: i32 = 0
+    var k: i32 = 0
+    while k < n {
+        if k % spd == 0 && k / spd < 7 {
+            if scen == 1 {
+                x.cv[0] = x.cv[0] + c0
+                released = released + dose
+            } else {
+                depot = depot + dose
+            }
+            rk_left = 2
+        }
+        var rel = 0.0
+        if scen == 2 {
+            let dep_new = depot * decay
+            rel = (depot - dep_new) / dt
+            released = released + (depot - dep_new)
+            depot = dep_new
+        }
+        let xo = x
+        var wo = 0.5
+        var wg = 0.0
+        var wn = 0.5
+        var be_start = false
+        if method == 3 && k < 2 { be_start = true }
+        if method == 4 && rk_left > 0 { be_start = true }
+        if method == 6 && rk_left > 1 { be_start = true }
+        if method == 0 { pbpk28_full_cn_step_mut(&!x, p, rel, dt) }
+        if method == 1 || ((method == 3 || method == 4) && !be_start) { fq_theta(&!x, p, dt, 0.5, rel) }
+        if method == 2 {
+            fq_theta(&!x, p, dt, 1.0, rel)
+            wo = 0.0
+            wn = 1.0
+        }
+        if be_start {
+            fq_theta(&!x, p, 0.5 * dt, 1.0, rel)
+            fq_store(&!xg, x)
+            fq_theta(&!x, p, 0.5 * dt, 1.0, rel)
+            wo = 0.0
+            wg = 0.5
+            wn = 0.5
+        }
+        if method == 5 || (method == 6 && !be_start) {
+            fq_trbdf2(&!x, &!xg, p, dt, rel)
+            wo = w_tr
+            wg = w_tr
+            wn = d_tr
+        }
+        rk_left = rk_left - 1
+        auc = auc + dt * (wo * xo.cv[0] + wg * xg.cv[0] + wn * x.cv[0])
+        let m = fq_min(x)
+        if m < mn { mn = m }
+        if m < 0.0 - 1.0e-12 * c0 { neg_steps = neg_steps + 1 }
+        if (k + 1) % sph == 0 {
+            let hr = (k + 1) / sph
+            if is_ref {
+                (*refv)[hr] = x.cv[0]
+            } else {
+                let e = fq_abs(x.cv[0] - (*refv)[hr])
+                if e > max_err { max_err = e }
+                if hr == 144 { err144 = (x.cv[0] - (*refv)[hr]) / (*refv)[hr] }
+                if hr == 168 { err168 = (x.cv[0] - (*refv)[hr]) / (*refv)[hr] }
+            }
+        }
+        k = k + 1
+    }
+    let resid = (pbpk28_total_mass(x, p) + p.cl_central * auc - released) / released
+    print("FORCED|drug=")
+    print(tag)
+    print("|scen=")
+    print(scen)
+    print("|method=")
+    print(method)
+    print("|dt=")
+    print(dt)
+    print("|AUC=")
+    print(auc)
+    print("|maxerr_pct_of_peak=")
+    print(max_err / ref_max * 100.0)
+    print("|trough144_err_pct=")
+    print(err144 * 100.0)
+    print("|t168_err_pct=")
+    print(err168 * 100.0)
+    print("|min_e9=")
+    print(mn * 1.0e9)
+    print("|neg_steps=")
+    print(neg_steps)
+    print("|mass_resid_e12=")
+    println(resid * 1.0e12)
+}
+
+fn fq_scen(tag: i32, scen: i32, p: PBPKParams28) with IO, Mut, Div {
+    var refv: [f64; 169] = [0.0; 169]
+    fq_run(tag, scen, p, 0.001, 1, &!refv, true)
+    fq_run(tag, scen, p, 0.001, 5, &!refv, false)
+    var m: i32 = 0
+    while m < 7 {
+        fq_run(tag, scen, p, 0.5, m, &!refv, false)
+        fq_run(tag, scen, p, 0.1, m, &!refv, false)
+        fq_run(tag, scen, p, 0.05, m, &!refv, false)
+        m = m + 1
+    }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    // 1 = rapamycin, 3 = venlafaxine parent
+    fq_scen(1, 1, pbpk28_params_rapamycin())
+    fq_scen(1, 2, pbpk28_params_rapamycin())
+    fq_scen(3, 1, pbpk28_params_venlafaxine_parent())
+    fq_scen(3, 2, pbpk28_params_venlafaxine_parent())
+    0
+}

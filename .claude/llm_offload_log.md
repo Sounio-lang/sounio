@@ -45,3 +45,19 @@ roundoff tolerance for a dissertation-path PBPK kernel (§M1).
 the invalid DeepSeek key in `~/.sounio-keys.env`. Raw outputs from this session:
 `/tmp/pbpk28cn/mathreview_{xai,fanout,deepseek,qwen}.txt` on the workspace
 (ephemeral).
+
+## 2026-09-26T21:05Z — Claude (session 3c9c1595) — M1 math-review, dispatch revision 2 (forced dosing, sensitivities, Hessian artefact)
+
+| 2026-09-26 | xai (grok-4.6), qwen (OpenRouter Qwen 3 235B) | math-review | docs/audit/PBPK28_CN_FLOOR_CLAMP_MASS_INJECTION_DISPATCH_2026-09-26.md (v4) | PASS after fixes | Two independent providers. |
+
+- **xai:** two items accepted. (1) "Kp/PS elasticity exactly 0" is exact for AUC(0–∞);
+  at 168 h it holds up to M(T)/Dose ≈ 6e-18. The text now says so. (2) OVERREACH on
+  "fu_plasma genuine by the same argument": resolved by citing the code. Both modules
+  scale `cl_central` linearly by (fu+δ)/fu_ref (`epistemic_pbpk28_hessian.sio:117–119`,
+  `epistemic_pbpk28.sio:203–207`), so fu's elasticities equal CL's.
+- **qwen:** three items, **not accepted**, each a misreading. "Floors preserve mass
+  conservation": the dispatch says the opposite. "TR-BDF2 guarantees positivity": the
+  dispatch says it does not, and gives the −0.081 mg/L counter-example itself.
+  "Specify two BE half-steps": already specified.
+- **zai/local/deepseek:** not rerun. Status as in the previous entry (rate limit,
+  endpoint down, invalid key).

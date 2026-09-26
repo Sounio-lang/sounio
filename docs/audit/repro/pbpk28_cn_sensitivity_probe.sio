@@ -1,0 +1,264 @@
+// Probe: how the floor-clamp bias contaminates GUM sensitivity coefficients.
+// Dispatch: docs/audit/PBPK28_CN_FLOOR_CLAMP_MASS_INJECTION_DISPATCH_2026-09-26.md
+//
+// Rapamycin, 5 mg IV bolus, 0-168 h. Elasticities S = d ln y / d ln theta by
+// central finite difference with relative step h, for y in {AUC_blood,
+// AUC_liver, C_brain(24 h)} and theta in {CL, Kp_brain, Kp_liver, Kp_kidney,
+// Kp_adipose, PS_lung}.
+//
+// Analytic anchor: elimination is from blood only and complete by 168 h
+// (M(168) ~ 3e-17 mg), so the exact AUC_blood = Dose/CL. Hence S_CL = -1 and
+// every Kp or PS elasticity of AUC_blood is 0. Any other value is solver artefact.
+//
+// Arms: shipped stdlib step (CN + floors) at dt = 0.05 and 0.1 h with h = 1e-2
+// and 1e-4 (the kernel is non-smooth, so h matters); TR-BDF2 at dt = 0.05 h;
+// reference CN at dt = 0.001 h (floors never fire there). AUCs use each
+// method's own quadrature. E2_AUCb = theta^2 / y * d2y/dtheta2 (second-order
+// elasticity, central second difference); it is also exactly 0 for every Kp
+// and PS in the exact model, so the Hessian nonlinearity ratio
+// rho = |H_ii sigma / 2| / |c_i| is 0/0 there, and any finite value is artefact.
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::tsit5_pbpk28::*
+
+fn fx_matvec(y: &!PBPKState28, x: PBPKState28, p: PBPKParams28) with Mut, Div {
+    let vb = p.v_ref[0]
+    var inflow = 0.0
+    var sum_q = 0.0
+    var i: i32 = 1
+    while i < 14 {
+        let vi = p.v_ref[i]
+        let vv = vi * p.vasc_frac[i]
+        let vt = vi * (1.0 - p.vasc_frac[i])
+        let flux_ps = p.ps[i] * (x.cv[i] - x.ct[i] / p.kp[i])
+        (*y).cv[i] = (p.q[i] * (x.cv[0] - x.cv[i]) - flux_ps) / vv
+        (*y).ct[i] = flux_ps / vt
+        inflow = inflow + p.q[i] * x.cv[i]
+        sum_q = sum_q + p.q[i]
+        i = i + 1
+    }
+    (*y).cv[0] = (inflow - (sum_q + p.cl_central) * x.cv[0]) / vb
+}
+
+fn fx_apply(x: &!PBPKState28, x0: f64, a_v: &[f64; 14], b_v: &[f64; 14],
+            a_t: &[f64; 14], b_t: &[f64; 14]) with Mut, Div {
+    (*x).cv[0] = x0
+    var i: i32 = 1
+    while i < 14 {
+        (*x).cv[i] = (*a_v)[i] + (*b_v)[i] * x0
+        (*x).ct[i] = (*a_t)[i] + (*b_t)[i] * x0
+        i = i + 1
+    }
+}
+
+// Solve (I - hi*A) x = r exactly by the same per-organ Schur elimination.
+fn fx_solve(x: &!PBPKState28, r: PBPKState28, p: PBPKParams28, hi: f64) with Mut, Div {
+    var a_v: [f64; 14] = [0.0; 14]
+    var b_v: [f64; 14] = [0.0; 14]
+    var a_t: [f64; 14] = [0.0; 14]
+    var b_t: [f64; 14] = [0.0; 14]
+    let vb = p.v_ref[0]
+    var sum_q = 0.0
+    var i: i32 = 1
+    while i < 14 {
+        sum_q = sum_q + p.q[i]
+        i = i + 1
+    }
+    let big_s = hi * (sum_q + p.cl_central) / vb
+    var sum_beta_a = 0.0
+    var sum_beta_b = 0.0
+    i = 1
+    while i < 14 {
+        let vi = p.v_ref[i]
+        let vv = vi * p.vasc_frac[i]
+        let vt = vi * (1.0 - p.vasc_frac[i])
+        let kp = p.kp[i]
+        let ps = p.ps[i]
+        let qi = p.q[i]
+        let beta  = hi * qi / vb
+        let gamma = hi * qi / vv
+        let pp    = 1.0 + hi * (qi + ps) / vv
+        let qq    = hi * ps / (vv * kp)
+        let rr    = hi * ps / vt
+        let sb    = 1.0 + hi * ps / (vt * kp)
+        let det   = pp * sb - qq * rr
+        let av = (sb * r.cv[i] + qq * r.ct[i]) / det
+        let bv = (sb * gamma) / det
+        let at = (rr * r.cv[i] + pp * r.ct[i]) / det
+        let bt = (rr * gamma) / det
+        a_v[i] = av
+        b_v[i] = bv
+        a_t[i] = at
+        b_t[i] = bt
+        sum_beta_a = sum_beta_a + beta * av
+        sum_beta_b = sum_beta_b + beta * bv
+        i = i + 1
+    }
+    let x0 = (r.cv[0] + sum_beta_a) / ((1.0 + big_s) - sum_beta_b)
+    fx_apply(x, x0, &a_v, &b_v, &a_t, &b_t)
+}
+
+// r = c1 * x + c2 * (A x)
+fn fx_axpy(r: &!PBPKState28, c1: f64, x: PBPKState28, c2: f64, ax: PBPKState28) with Mut {
+    var i: i32 = 0
+    while i < 14 {
+        (*r).cv[i] = c1 * x.cv[i] + c2 * ax.cv[i]
+        (*r).ct[i] = c1 * x.ct[i] + c2 * ax.ct[i]
+        i = i + 1
+    }
+}
+
+
+// Source-aware steps. `rel` is the mass released into blood over the step
+// divided by dt (mg/h), held constant across the step; each method below then
+// adds exactly dt*rel of mass per step, so M(T) + CL*AUC_quad = released(T)
+// holds to roundoff for methods 1..5.
+fn fq_theta(x: &!PBPKState28, p: PBPKParams28, dt: f64, theta: f64, rel: f64) with Mut, Div {
+    var ax = pbpk28_state_zero()
+    var r = pbpk28_state_zero()
+    let xo = *x
+    fx_matvec(&!ax, xo, p)
+    fx_axpy(&!r, 1.0, xo, (1.0 - theta) * dt, ax)
+    r.cv[0] = r.cv[0] + dt * rel / p.v_ref[0]
+    fx_solve(x, r, p, theta * dt)
+}
+
+fn fq_trbdf2(x: &!PBPKState28, xg_out: &!PBPKState28, p: PBPKParams28, dt: f64, rel: f64) with Mut, Div {
+    let g = 2.0 - 1.4142135623730951
+    let d = (1.0 - g) / (2.0 - g)
+    let xo = *x
+    var ax = pbpk28_state_zero()
+    var r = pbpk28_state_zero()
+    var xg = pbpk28_state_zero()
+    fx_matvec(&!ax, xo, p)
+    fx_axpy(&!r, 1.0, xo, 0.5 * g * dt, ax)
+    r.cv[0] = r.cv[0] + g * dt * rel / p.v_ref[0]
+    fx_solve(&!xg, r, p, 0.5 * g * dt)
+    let c_g = 1.0 / (g * (2.0 - g))
+    let c_o = (1.0 - g) * (1.0 - g) / (g * (2.0 - g))
+    var i: i32 = 0
+    while i < 14 {
+        r.cv[i] = c_g * xg.cv[i] - c_o * xo.cv[i]
+        r.ct[i] = c_g * xg.ct[i] - c_o * xo.ct[i]
+        i = i + 1
+    }
+    r.cv[0] = r.cv[0] + d * dt * rel / p.v_ref[0]
+    fx_solve(x, r, p, d * dt)
+    *xg_out = xg
+}
+
+fn fq_min(s: PBPKState28) -> f64 with Mut {
+    var m = s.cv[0]
+    var i: i32 = 1
+    while i < 14 {
+        if s.cv[i] < m { m = s.cv[i] }
+        if s.ct[i] < m { m = s.ct[i] }
+        i = i + 1
+    }
+    return m
+}
+
+struct SbOut {
+    ab: f64,
+    al: f64,
+    cbr: f64,
+}
+
+fn sb_avg(s: PBPKState28, p: PBPKParams28, i: i32) -> f64 with Div {
+    let vi = p.v_ref[i]
+    let vv = vi * p.vasc_frac[i]
+    let vt = vi * (1.0 - p.vasc_frac[i])
+    return (vv * s.cv[i] + vt * s.ct[i]) / vi
+}
+
+fn sb_sim(p: PBPKParams28, dt: f64, method: i32) -> SbOut with Mut, Div {
+    let n = ((168.0 / dt) + 0.5) as i32
+    let n24 = ((24.0 / dt) + 0.5) as i32
+    let g = 2.0 - 1.4142135623730951
+    let w_tr = 1.0 / (2.0 * (2.0 - g))
+    let d_tr = (1.0 - g) / (2.0 - g)
+    var x = pbpk28_state_zero()
+    var xg = pbpk28_state_zero()
+    x.cv[0] = 5.0 / p.v_ref[0]
+    var ab = 0.0
+    var al = 0.0
+    var cbr = 0.0
+    var k: i32 = 0
+    while k < n {
+        let xo = x
+        var wo = 0.5
+        var wg = 0.0
+        var wn = 0.5
+        if method == 0 { pbpk28_full_cn_step_mut(&!x, p, 0.0, dt) }
+        if method == 1 { fq_theta(&!x, p, dt, 0.5, 0.0) }
+        if method == 5 {
+            fq_trbdf2(&!x, &!xg, p, dt, 0.0)
+            wo = w_tr
+            wg = w_tr
+            wn = d_tr
+        }
+        ab = ab + dt * (wo * xo.cv[0] + wg * xg.cv[0] + wn * x.cv[0])
+        al = al + dt * (wo * sb_avg(xo, p, 1) + wg * sb_avg(xg, p, 1) + wn * sb_avg(x, p, 1))
+        if k + 1 == n24 { cbr = sb_avg(x, p, 3) }
+        k = k + 1
+    }
+    SbOut { ab: ab, al: al, cbr: cbr }
+}
+
+fn sb_perturb(p: PBPKParams28, which: i32, factor: f64) -> PBPKParams28 with Mut {
+    var q = p
+    if which == 0 { q.cl_central = q.cl_central * factor }
+    if which == 1 { q.kp[3] = q.kp[3] * factor }
+    if which == 2 { q.kp[1] = q.kp[1] * factor }
+    if which == 3 { q.kp[2] = q.kp[2] * factor }
+    if which == 4 { q.kp[7] = q.kp[7] * factor }
+    if which == 5 { q.ps[5] = q.ps[5] * factor }
+    return q
+}
+
+fn sb_arm(method: i32, dt: f64, h: f64) with IO, Mut, Div {
+    let p = pbpk28_params_rapamycin()
+    let y0 = sb_sim(p, dt, method)
+    print("SENS0|method=")
+    print(method)
+    print("|dt=")
+    print(dt)
+    print("|AUCb=")
+    print(y0.ab)
+    print("|AUCl=")
+    print(y0.al)
+    print("|Cbr24_e9=")
+    println(y0.cbr * 1.0e9)
+    var w: i32 = 0
+    while w < 6 {
+        let yp = sb_sim(sb_perturb(p, w, 1.0 + h), dt, method)
+        let ym = sb_sim(sb_perturb(p, w, 1.0 - h), dt, method)
+        print("SENS|method=")
+        print(method)
+        print("|dt=")
+        print(dt)
+        print("|h=")
+        print(h * 1.0e4)
+        print("e-4|param=")
+        print(w)
+        print("|S_AUCb=")
+        print((yp.ab - ym.ab) / (2.0 * h * y0.ab))
+        print("|S_AUCl=")
+        print((yp.al - ym.al) / (2.0 * h * y0.al))
+        print("|S_Cbr24=")
+        print((yp.cbr - ym.cbr) / (2.0 * h * y0.cbr))
+        print("|E2_AUCb=")
+        println((yp.ab - 2.0 * y0.ab + ym.ab) / (h * h * y0.ab))
+        w = w + 1
+    }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    // param: 0 CL, 1 Kp_brain, 2 Kp_liver, 3 Kp_kidney, 4 Kp_adipose, 5 PS_lung
+    sb_arm(1, 0.001, 1.0e-2)
+    sb_arm(5, 0.1, 1.0e-2)
+    sb_arm(0, 0.05, 1.0e-2)
+    sb_arm(0, 0.05, 1.0e-4)
+    sb_arm(0, 0.1, 1.0e-2)
+    0
+}

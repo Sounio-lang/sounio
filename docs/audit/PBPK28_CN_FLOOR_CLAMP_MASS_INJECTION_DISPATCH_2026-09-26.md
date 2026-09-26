@@ -41,6 +41,14 @@ MC / Sobol-PCE / prior-sweep modules. The first-order GUM mean recorded in
 and the Hessian reference (`AUC_ref … 0.611694`) match, to every printed digit, the
 clamp-biased values measured here. The mass-balance value is Dose/CL = 5/12.4 = **0.403226**.
 
+The clamp also corrupts the second-order budget. The Kp rows of the recorded
+Hessian nonlinearity table (Kp_brain ρ = 0.350, Kp_adipose 0.334, Kp_kidney 0.138,
+Kp_liver 0.067) are reproduced to 2–3 digits by the shipped kernel's artefact
+derivatives. In the exact model they are 0/0. The first-order sensitivity ranking
+and CV survive approximately. Under repeated dosing, the best measured replacement
+is TR-BDF2 restarted with backward-Euler half-steps after each dose (see
+[Proposed fix](#proposed-fix-measured-not-applied)).
+
 No existing gate tests a closed system, or tests the exact discrete mass identity
 at a production step size. Every PBPK28 mass check this audit found passes under
 the defect.
@@ -78,6 +86,8 @@ Full probes, committed alongside this dispatch:
 | `docs/audit/repro/pbpk28_cn_clamp_mass_probe.sio` | Repro plus isolation. Runs the stdlib kernel, a bit-exact in-probe copy with clamps ON (also recording the pre-clamp state), and the same copy with clamps OFF. |
 | `docs/audit/repro/pbpk28_cn_clamp_blast_probe.sio` | 4 drug profiles × 5 dt values, 5 mg IV bolus, nominal CL, 168 h. Reports AUC with clamps on and off, clamp-injected mass, and the exact discrete mass identity. |
 | `docs/audit/repro/pbpk28_cn_fix_candidates_probe.sio` | The shipped kernel against four clamp-free linear schemes on all four `ep28` endpoints, rapamycin and semaglutide. |
+| `docs/audit/repro/pbpk28_cn_forced_dosing_probe.sio` | Seven candidate schemes under repeated IV bolus and repeated first-order depot dosing, rapamycin and venlafaxine parent. |
+| `docs/audit/repro/pbpk28_cn_sensitivity_probe.sio` | First- and second-order elasticities of AUC_blood, AUC_liver and C_brain(24 h), shipped kernel against the reference and TR-BDF2. |
 
 ## Isolation: the floors account for 100% of the drift
 
@@ -201,10 +211,57 @@ reference (`pbpk28_cn_fix_candidates_probe.sio`, method 0):
   does not rerun the MC.*
 - Sensitivity coefficients, variances, CV(AUC), the confidence score and the Sobol /
   PCE indices all come from finite differences or samples of the biased map. The
-  bias depends on the parameters. The stiff rates are set by Q, PS and V_v, while Kp
-  and CL change the modal residues and how much mass is left to be clipped. So the
-  derivatives are contaminated too, not merely offset. Their magnitude is
-  **not measured** in this dispatch.
+  bias depends on the parameters: Q, PS and V_v set the stiff rates, while Kp and CL
+  change the modal residues and how much mass is left to be clipped. So the
+  derivatives are contaminated too, not merely offset. Measured below.
+
+### Sensitivities and the Hessian budget (`pbpk28_cn_sensitivity_probe.sio`)
+
+**Analytic anchor.** Rapamycin elimination is from blood only and is complete by
+168 h (M(168) ≈ 3e-17 mg), so the exact AUC_blood = Dose/CL. Hence, for AUC_blood:
+- the CL elasticity is S = −1 and the second-order elasticity is
+  E2 = (θ²/y)·∂²y/∂θ² = +2;
+- every Kp and PS elasticity is exactly 0 for AUC(0–∞). At T = 168 h it holds up
+  to M(T)/Dose ≈ 6e-18, which is zero at every printed digit.
+
+The reference (CN, dt = 0.001 h) reproduces this: S_CL = −1.0001, E2_CL = 2.0002
+(the FD value for h = 1e-2), and |S|, |E2| ≤ 2.2e-9 for Kp_brain, Kp_liver, Kp_kidney,
+Kp_adipose and PS_lung. TR-BDF2 at dt = 0.1 h agrees to the same digits, with
+|S|, |E2| ≤ 2.2e-10.
+
+The shipped kernel gives, for AUC_blood (FD step h = 1e-2; at dt = 0.05, h = 1e-4
+agrees to within 0.4% in every entry, so the numbers are not FD noise):
+
+| parameter | S, dt = 0.05 (GUM) | S, dt = 0.1 (Hessian) | E2, dt = 0.1 | exact S, E2 |
+|---|---:|---:|---:|---:|
+| CL | −0.970 | −0.936 | 1.873 | −1, 2 |
+| Kp_brain | −0.0004 | 0.0015 | −0.0042 | 0, 0 |
+| Kp_liver | 0.0264 | 0.0380 | −0.0204 | 0, 0 |
+| Kp_kidney | 0.0186 | 0.0083 | −0.0092 | 0, 0 |
+| Kp_adipose | 0.0002 | 0.0019 | −0.0032 | 0, 0 |
+| PS_lung | 0.0023 | 0.0010 | −0.0020 | 0, 0 |
+
+- **First-order GUM (dt = 0.05):** the CL elasticity is 3% low, and Kp elasticities
+  that should be 0 are up to 0.026. Both are small next to CL's, so the variance
+  *ranking* and CV(AUC_blood) survive approximately. The *absolute* mean and the
+  standard uncertainty inherit the ≈ +28% level bias.
+- **Hessian budget (dt = 0.1): the Kp rows are artefacts.** The nonlinearity ratio
+  in `pbpk28_epistemic_v1.md` is ρ = |½H_iiσ_i|/|c_i| = ½·|E2/E1|·CV_i. With the
+  priors' CVs (`ep28_rapamycin_priors`: Kp CV 0.25, Kp_adipose 0.40, CL 0.38), the
+  shipped kernel's artefact derivatives reproduce the recorded table:
+  - Kp_brain: 0.343 (recorded 0.350)
+  - Kp_liver: 0.067 (0.067)
+  - Kp_kidney: 0.139 (0.138)
+  - Kp_adipose: 0.338 (0.334)
+  - CL: 0.380 (0.380)
+
+  In the exact model every Kp row is 0/0. The recorded §4.9 wording, that CL_hepatic
+  is "only marginally ahead of Kp_brain (ρ̃ = 0.061)", and the "Marginal" assessments
+  for Kp_brain and Kp_adipose describe the solver, not the pharmacology. The CL row
+  (ρ = 0.380, exact ½·2·0.38) is genuine. So is fu_plasma (0.25 = ½·2·0.25), because
+  both modules perturb fu by scaling `cl_central` linearly by (fu+δ)/fu_ref
+  (`epistemic_pbpk28_hessian.sio:117–119`, `epistemic_pbpk28.sio:203–207`). Its
+  elasticities are therefore exactly those of CL.
 
 ### Not affected
 
@@ -260,8 +317,52 @@ figures and closes the discrete mass identity to ≤ 6 × 10⁻¹³. Semaglutide
 less stiff; there TR-BDF2 keeps every endpoint within 1 × 10⁻⁷ relative even at
 dt = 0.5 h.
 
-**Recommendation:** replace the CN step with **TR-BDF2** (Bank et al. 1985;
-Hosea & Shampine 1996), and **delete the three floors**.
+The single-bolus test above cannot tell the candidates apart under realistic dosing,
+so `pbpk28_cn_forced_dosing_probe.sio` repeats the comparison with 5 mg every 24 h
+(7 doses, 168 h), in two modes:
+- IV bolus: a jump in the state at each dose;
+- first-order depot (ka = 1 h⁻¹): a jump in the release rate at each dose.
+
+Rapamycin and venlafaxine parent are both run. Reference: CN at dt = 0.001 h;
+TR-BDF2 at dt = 0.001 h agrees with it to ≤ 6 × 10⁻⁷ of peak. The table gives
+the worst case over both drugs of the error at the trough before the last dose
+(t = 144 h), and in brackets the number of steps with any entry below −1e-12·C0.
+
+| method | bolus, dt = 0.5 | bolus, dt = 0.1 | bolus, dt = 0.05 | depot, dt = 0.5 | depot, dt = 0.1 | depot, dt = 0.05 |
+|---|---|---|---|---|---|---|
+| 0 shipped CN + floors | +616% | +69% | +37% | **−100%** (trough floored to 0) | −0.24% | −0.014% |
+| 1 CN, no floors | +1.2e6% [336] | +3405% [1680] | +380% [3126] | −3312% [222] | −0.24% | −0.014% |
+| 2 backward Euler | +53% | +9.6% | +4.7% | +41% | +7.5% | +3.7% |
+| 3 CN + Rannacher at t = 0 only | same as CN [288] | same as CN [1440] | same as CN [2677] | same as CN [202] | −0.23% | −0.014% |
+| 4 CN + Rannacher after every dose | +0.039% | −0.005% | −0.001% | **+328% [84]** | −0.095% | −0.026% |
+| 5 TR-BDF2 | −0.53% **[7]** | −0.021% **[7]** | −0.005% | +0.24% | +0.010% | +0.002% |
+| **6 TR-BDF2 + 2 BE half-steps after every dose** | **−0.059%** | **−0.002%** | **−0.0004%** | **−0.81%** | **−0.041%** | **−0.011%** |
+
+What this shows:
+- **Rannacher at start-up only is worthless under repeated dosing.** Its errors
+  equal plain CN's.
+- **Re-triggered Rannacher** is excellent for IV bolus. For the depot at dt = 0.5 h
+  it goes negative and misses the venlafaxine trough by +328%.
+- **TR-BDF2 alone goes negative right after a bolus** at dt ≥ 0.1 h: venlafaxine,
+  one step per dose, down to −0.081 mg/L. This is the Bolley–Crouzeix limit showing
+  up in practice.
+- **Method 6 had no negative entry in any of the 12 cells** and the smallest worst
+  case. Its hourly-grid error is ≤ 0.26% of peak at dt ≤ 0.1 h. At dt = 0.5 h it is
+  ≤ 6.2% of peak, because no method resolves the 24 s blood transient inside a
+  30-minute step.
+- **Depot forcing is smooth, so the shipped kernel is nearly right there at
+  dt ≤ 0.1 h** (≤ 0.24%). The oral/SC-depot clinical validations at dt = 0.05 h are
+  therefore affected far less than the IV-bolus GUM / Hessian / MC / Sobol path.
+  They are not zero-risk: at dt = 0.5 h the floor zeroes the depot trough outright.
+
+All clamp-free arms (1–6) close M(T) + CL·AUC_quad = released(T) to ≤ 7.4 × 10⁻¹³.
+
+**Recommendation:**
+- replace the CN step with **TR-BDF2** (Bank et al. 1985; Hosea & Shampine 1996);
+- **restart with two backward-Euler half-steps after every discontinuity** (bolus,
+  start of a depot dose, change of infusion rate);
+- **delete the three floors**;
+- keep production dt ≤ 0.1 h wherever intra-dose shape matters.
 
 - TR-BDF2 is L-stable (R(∞) = 0), second-order, one-step, and conservative, because
   it is linear. With γ = 2 − √2, both stages solve with the **same** matrix
@@ -269,15 +370,14 @@ Hosea & Shampine 1996), and **delete the three floors**.
   denominator are therefore computed once per step, and only the right-hand side
   changes: stage 1 is a CN step of length γ·dt, and stage 2 is the BDF2 combination.
   The O(N) cost and the Madaros workaround structure (`pbpk28_cn_apply_schur`
-  crossing a function boundary) carry over.
-- In every measured cell it stayed non-negative with no floor. Bolley–Crouzeix still
-  forbids a *guarantee*, so the fix must **fail closed** on a negative entry below a
-  roundoff threshold, not floor it.
-- Rannacher start-up (method 3) is the smaller diff and is more accurate at dt = 0.5.
-  However, it must re-trigger after every dosing discontinuity (XR, oral depot, SC
-  depot, repeated doses). It also leaves roundoff-level negatives, and after start-up
-  the step is plain CN again: a weakly damped R ≈ −1 mode that any mid-run forcing
-  jump re-excites.
+  crossing a function boundary) carry over. The BE half-step is the same Schur
+  solve with σ = dt/2.
+- Positivity is still not *guaranteed* (Bolley–Crouzeix), so the fix must **fail
+  closed** on any entry below −tol·C0 rather than floor it. In the measured cells
+  method 6 never triggers that.
+- The step API must know where discontinuities are. That means taking a
+  "discontinuity at the start of this step" flag from the caller, which is what
+  schedules doses.
 - Every consumer that accumulates an AUC must switch to the method's quadrature
   weights: TR-BDF2 b-weights (w, w, d), w = 1/(2(2−γ)), d = (1−γ)/(2−γ), applied to
   (x_n, x_γ, x_{n+1}). That means the step API has to expose the stage value, or
@@ -313,10 +413,42 @@ an observed failure (principle 6).
   them in the dissertation text. Principle 6 applies: re-derive and do not patch
   numbers. The +28% / +52% / +140% column mismatch between the GUM, Hessian and MC
   layers should disappear. If it does not, that is a finding.
+- Correct the §4.9 / §4.10.4 Hessian wording in `pbpk28_epistemic_v1.md`: the Kp rows
+  and the "only marginally ahead of Kp_brain" sentence are solver artefacts (see
+  [Sensitivities and the Hessian budget](#sensitivities-and-the-hessian-budget-pbpk28_cn_sensitivity_probesio)).
 - A math-review offload for the fix commit (CLAUDE.md §10), and a clinical-pathway
   review wherever the regenerated numbers reach clinical-facing text.
 
 ## Observations deliberately not pursued
+
+- **Madaros aliases whole-struct reassignment of an array-holding struct.** This
+  is a separate compiler defect, found because the forced-dosing probe's
+  Rannacher / BE-restart AUCs disagreed between engines (rapamycin bolus
+  2.821332 → 2.711950) while every state metric matched. Minimal repro: a struct
+  `S { a: [f64; 14] }`, `bump(s: &!S)` increments `a[0]`, then:
+
+  | copy form, then `bump(&!x)` | Madaros (98315edcd) | lean_single |
+  |---|---|---|
+  | `let y = x` | 1 (correct) | 1 |
+  | `z = x` (z already declared) | **2** (aliases x) | 1 |
+  | `store(&!w, x)` with `*dst = src` | **2** (aliases x) | 1 |
+  | element-wise `(*dst).a[i] = src.a[i]` | 1 (correct) | 1 |
+
+  The probes in this dispatch avoid both aliasing forms. The forced-dosing probe
+  copies element-wise, and its remaining engine differences are one last digit of
+  a 1e9-scaled roundoff field. **Any implementation of the recommended fix that
+  saves a stage with `mid = x` or `*mid = x` before stepping `x` in place will
+  compute wrong AUCs on Madaros and correct ones on lean_single**, so CI green
+  alone would not catch it (principle 16). The earlier fixes for #1479 / #1487 /
+  #1497 cover copy-on-initialisation, which this map shows is correct; the
+  reassignment and store forms are not recorded anywhere found in `docs/audit/`.
+  They need their own dispatch in `self-hosted/`.
+- **Engine coverage of the two later probes.** Both hit the exit-182 handle wall
+  (next item) on their 168 000-step dt = 0.001 h reference arms under Madaros.
+  With those arms replaced (the forced reference at dt = 0.01 h, the sensitivity
+  reference arm dropped), both run to completion on Madaros and agree with
+  lean_single on every substantive field. The tables above are the full
+  lean_single runs.
 
 - **Madaros exit-182 on the blast probe.** Under Madaros, `pbpk28_cn_clamp_blast_probe.sio`
   printed 14 of 20 result lines, all matching lean_single, then died with
@@ -354,8 +486,11 @@ ulimit -s 524288
 artifacts/self-hosted/madaros build docs/audit/repro/pbpk28_cn_clamp_mass_probe.sio /tmp/m.elf && /tmp/m.elf
 SOUNIO_SOUC_ENGINE=lean_single ./bin/souc compile docs/audit/repro/pbpk28_cn_clamp_blast_probe.sio -o /tmp/b.elf && /tmp/b.elf
 SOUNIO_SOUC_ENGINE=lean_single ./bin/souc compile docs/audit/repro/pbpk28_cn_fix_candidates_probe.sio -o /tmp/f.elf && /tmp/f.elf
+SOUNIO_SOUC_ENGINE=lean_single ./bin/souc compile docs/audit/repro/pbpk28_cn_forced_dosing_probe.sio -o /tmp/d.elf && /tmp/d.elf
+SOUNIO_SOUC_ENGINE=lean_single ./bin/souc compile docs/audit/repro/pbpk28_cn_sensitivity_probe.sio -o /tmp/s.elf && /tmp/s.elf
 ```
 
 Unset `SOUC_BIN SOUNIO_SOUC_BIN MADAROS_RAW_BIN SOUNIO_MADAROS_BIN` first when launching
 from the workspace tmux, whose global environment points at `/workspace/sounio`.
-Wall-clock time: mass probe < 1 s; blast probe ≈ 110 s on lean_single; fix probe ≈ 60 s.
+Wall-clock time on lean_single: mass probe < 1 s, blast probe ≈ 110 s, fix probe ≈ 60 s,
+forced-dosing probe ≈ 4 min, sensitivity probe ≈ 2 min.
