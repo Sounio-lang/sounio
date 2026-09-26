@@ -6,7 +6,7 @@ history is recoverable with `git show 3944ff825^:.claude/llm_offload_log.md`._
 
 ## 2026-09-26T21:10Z — Claude — Rodgers–Rowland Kpu→Kp conversion (D5), partial audit fix
 
-| 2026-09-26 | xai/grok-4.6 [OK] | math-review | stdlib/darwin_pbpk/core/rodgers_rowland.sio (rr_neutral Kp = Kpu·fu_p, ∂Kp/∂logP, ∂Kp/∂fu; tests T5, T6); stdlib/darwin_pbpk/core/tissue_composition.sio (T1 consistency test) | PASS | All five claims [OK], no other error. Raw: workspace `/tmp/llm-offload-7U4gGQ/`. |
+| 2026-09-26 | xai/grok-4.6 [OK] (x2) + qwen/qwen3-235b [OK]; zai [ERROR 1313 rate limit], local [ERROR connection] | math-review | stdlib/darwin_pbpk/core/rodgers_rowland.sio (rr_neutral Kp = Kpu·fu_p, ∂Kp/∂logP, ∂Kp/∂fu; tests T5, T6); stdlib/darwin_pbpk/core/tissue_composition.sio (T1 consistency test) | PASS | All five claims [OK] from both vendors. Default fan-out (xai zai local) yielded only grok, so qwen was run as the independent second vendor; the kimi/LLM Gateway route is not on this workspace yet. Grok (2nd run) noted a pre-existing citation slip, not introduced here: the module cites JCGM 100:2008 Eq. 13 (correlated form) but implements the uncorrelated Eq. 10. Raw: workspace `/tmp/llm-offload-7U4gGQ/`, `/tmp/llm-offload-uZohzT/`, `/tmp/llm-offload-2a35S3/`. |
 
 **Trigger**: PK math change. `rr_neutral` computed Kp = Kpu / fu_p; with
 Kpu = C_t / C_u,p and C_u,p = fu_p·C_p,total, the tissue : total-plasma
@@ -31,7 +31,8 @@ D5 went undetected); liver f_ew 0.161 → 0.171 without adjusting f_protein → 
 
 **Not covered (open)**: the composition values and the fn_L + 0.3 fn_P form are
 unverified against the primary paper, which was not accessible; the 2006
-albumin term is absent (D4); ionisation terms for weak bases (D6). Two further
+extracellular-protein term, which for neutrals is lipoprotein (Ka_PR), not
+albumin, is absent (D4); ionisation terms for weak bases (D6). Two further
 defects found and left unfixed (out of dispatch scope): `rr_pow10(7.0)`
 returns 8614669.5 (13.9 % low; 20-term Taylor exp at x = 16.1), and `rr_sqrt`
 (12 Newton steps from y = x) returns 25764 for √1e8, so `kp_unc_raw` is wrong
