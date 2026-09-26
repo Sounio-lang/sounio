@@ -880,21 +880,39 @@ function vfxStateAbsDiffMass(aCv, aCt, bCv, bCt) {
 }
 
 export function runVenlafaxineSteadyState({ dt = 0.5, pheno = 2, nDoses = 10, tau = 24.0 } = {}) {
+  // Regimen guards: the audit needs a finite positive step, at least one dose,
+  // and an interval of whole steps (otherwise the audited window is not tau).
+  if (!(Number.isFinite(dt) && dt > 0)) throw new RangeError(`dt must be finite and > 0, got ${dt}`);
+  if (!(Number.isFinite(tau) && tau > 0)) throw new RangeError(`tau must be finite and > 0, got ${tau}`);
+  if (!(Number.isInteger(nDoses) && nDoses >= 1)) throw new RangeError(`nDoses must be an integer >= 1, got ${nDoses}`);
+  if (!(pheno in VFX_CL_FORM_SCALE)) throw new RangeError(`pheno must be 0..3, got ${pheno}`);
+  const stepsExact = tau / dt;
+  const stepsPerTau = Math.round(stepsExact);
+  if (stepsPerTau < 1 || Math.abs(stepsExact - stepsPerTau) > 1e-9 * stepsPerTau) {
+    throw new RangeError(`tau/dt must be a whole number of steps, got ${tau}/${dt} = ${stepsExact}`);
+  }
   const rel = VFX_MATRIX_GOHEL2008;
   const clFormScale = VFX_CL_FORM_SCALE[pheno];
   const h = 0.5 * dt;
   const vb = V_REF[0];
-  const stepsPerTau = Math.floor(tau / dt + 0.5);
   const nWarm = (nDoses - 1) * stepsPerTau;
-  const releasedQtau = (t) => {
+  // Mass released over step n by doses given at steps 0, S, …, (nDoses−1)·S.
+  // Each dose's clock is (n − k·S)·dt from integer steps, so a dose starts at
+  // exactly t = 0: n·dt − k·tau can land at ±1e-15 for dt not exact in binary,
+  // and the ported ln series floors the Korsmeyer-Peppas fraction at ~7.9e-3
+  // for tiny t > 0, which would release ~0.6 mg instantly and break periodicity.
+  const releasedQtau = (n) => {
     let amt = 0.0;
-    for (let k = 0; k < nDoses; k++) amt = amt + vfxMatrixStepAmount(rel, t - k * tau, dt);
+    for (let k = 0; k < nDoses; k++) {
+      const m = n - k * stepsPerTau;
+      if (m >= 0) amt = amt + vfxMatrixStepAmount(rel, m * dt, dt);
+    }
     return amt;
   };
 
   let st = vfxZeroState();
   let n = 0;
-  while (n < nWarm) { st = vfxStepReleased(st, releasedQtau(n * dt), dt, clFormScale); n++; }
+  while (n < nWarm) { st = vfxStepReleased(st, releasedQtau(n), dt, clFormScale); n++; }
 
   const p0Cv = Float64Array.from(st.pCv), p0Ct = Float64Array.from(st.pCt);
   const o0Cv = Float64Array.from(st.oCv), o0Ct = Float64Array.from(st.oCt);
@@ -903,7 +921,7 @@ export function runVenlafaxineSteadyState({ dt = 0.5, pheno = 2, nDoses = 10, ta
   while (n < nEnd) {
     const mp0 = vfxTotalMass(st.pCv, st.pCt), mo0 = vfxTotalMass(st.oCv, st.oCt);
     const cp0 = st.pCv[0], co0 = st.oCv[0];
-    st = vfxStepReleased(st, releasedQtau(n * dt), dt, clFormScale);
+    st = vfxStepReleased(st, releasedQtau(n), dt, clFormScale);
     const cp1 = st.pCv[0], co1 = st.oCv[0];
     aucP = aucP + h * (cp0 + cp1);
     aucO = aucO + h * (co0 + co1);
