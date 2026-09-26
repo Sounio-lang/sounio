@@ -1,0 +1,54 @@
+# Runner pods execute repository code. They may resolve names through the
+# cluster DNS and open 80/443 to the PUBLIC internet (GitHub, the Ubuntu
+# archive); every private range is excluded, so they cannot reach the LAN, the
+# nodes or their kubelets, the Kubernetes API, Ceph, Proxmox or any other pod.
+# Ingress is denied entirely.
+#
+# Why plain NetworkPolicy and not a Cilium toFQDNs allowlist (GitHub-only):
+# measured 2026-09-25, a CiliumNetworkPolicy with L7 DNS rules made every
+# lookup from this namespace fail (curl rc=6), both when selecting the CoreDNS
+# pods and when adding the kube-dns ClusterIP (this cluster runs Cilium next to
+# kube-proxy: kube-proxy-replacement=false, bpf-lb-sock=false). This shape is
+# the one pireus-ci already runs with. Narrowing egress to GitHub hostnames is
+# a follow-up that needs the Cilium DNS proxy working first.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: ci-runner-egress
+  namespace: arc-runners
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+      to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+    - ports:
+        - port: 443
+          protocol: TCP
+        - port: 80
+          protocol: TCP
+      to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 0.0.0.0/8
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 198.18.0.0/15
+              - 224.0.0.0/4
+              - 240.0.0.0/4
