@@ -455,11 +455,29 @@ run_test() {
                 # statement of intent; a local checkout with a built Madaros and
                 # that variable unset runs Madaros anyway, and the test would
                 # then fail with "missing error: ..." as though the compiler were
-                # wrong instead of the test being inapplicable. Second clause is
-                # bin/souc's own rule, restated once: it picks Madaros when a
-                # local artifact exists and no explicit engine was handed in.
+                # wrong instead of the test being inapplicable.
+                #
+                # Second clause used to check only for a LOCAL
+                # artifacts/self-hosted/madaros build -- stale (CLAUDE.md
+                # operating principle 13): bin/souc's default arm
+                # (`case "${SOUNIO_SOUC_ENGINE:-madaros}" in`) materializes and
+                # runs the COMMITTED bin/madaros-linux-x86_64.gz prebuilt
+                # whenever no explicit engine or override is given, with or
+                # without a local build -- that prebuilt is tracked in every
+                # checkout, so the old check was blind to the common case
+                # (Copilot review, sounio-lang/sounio#2694; reproduced directly:
+                # a bare `bash scripts/run_sio_test_suite.sh` with no env vars
+                # ran and hard-failed seq_epistemic.sio,
+                # seq_knowledge_uncertain.sio, and this PR's
+                # test_kinetics_fixed_regressions.sio on Madaros's multimodule
+                # thin-link error instead of skipping them). Restated to match
+                # bin/souc's actual rule: Madaros runs unless SOUNIO_SOUC_ENGINE
+                # forces lean_single.
                 if [[ -n "${SOUNIO_MADAROS_AVAILABLE:-}" ]] \
-                   || { [[ -z "${SOUNIO_TEST_SOUC_BIN:-}" ]] && [[ -x "$ROOT_DIR/artifacts/self-hosted/madaros" ]]; }; then
+                   || { [[ -z "${SOUNIO_TEST_SOUC_BIN:-}" ]] \
+                        && [[ "${SOUNIO_SOUC_ENGINE:-madaros}" != "lean_single" ]] \
+                        && [[ "${SOUNIO_SOUC_ENGINE:-madaros}" != "lean-single" ]] \
+                        && [[ "${SOUNIO_SOUC_ENGINE:-madaros}" != "leansingle" ]]; }; then
                     echo "{\"status\":\"skip\",\"reason\":\"requires:lean_single\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"
                     return
                 fi
