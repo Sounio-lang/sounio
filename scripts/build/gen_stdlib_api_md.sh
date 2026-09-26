@@ -108,13 +108,15 @@ HEADER
 
     for f in "${sio_files[@]}"; do
       rel="${f#${STDLIB_DIR}/}"
-      # Extract pub fn lines
+      # Extract pub fn lines. Anchor on the `pub` keyword itself: a bare
+      # substring match lets private fns named e.g. `*_publish_*` through.
+      # `pub(crate)` is not public API and stays excluded.
       while IFS= read -r line; do
         # Clean leading whitespace
         clean="${line#"${line%%[![:space:]]*}"}"
         module_fns+="- \`${clean}\` — *${rel}*"$'\n'
         ((module_count++)) || true
-      done < <(grep -E '^[[:space:]]*(pub[[:space:]]+)?fn[[:space:]]' "$f" | grep 'pub' || true)
+      done < <(grep -E '^[[:space:]]*pub[[:space:]]+fn[[:space:]]' "$f" || true)
     done
 
     if [ "$module_count" -gt 0 ]; then
