@@ -44,7 +44,10 @@ clamp-biased values measured here. The mass-balance value is Dose/CL = 5/12.4 = 
 The clamp also corrupts the second-order budget. The Kp rows of the recorded
 Hessian nonlinearity table (Kp_brain ρ = 0.350, Kp_adipose 0.334, Kp_kidney 0.138,
 Kp_liver 0.067) are reproduced to 2–3 digits by the shipped kernel's artefact
-derivatives. In the exact model they are 0/0. The first-order sensitivity ranking
+derivatives, which are of order 1e-3. Over 0–168 h the exact model's Kp derivatives
+are of order (M(168)/Dose)·λT ≈ 1e-16, below double-precision resolution, so a ρ
+built from them is numerically unresolved rather than a measure of nonlinearity.
+The first-order sensitivity ranking
 and CV survive approximately. Under repeated dosing, the best measured replacement
 is TR-BDF2 restarted with backward-Euler half-steps after each dose (see
 [Proposed fix](#proposed-fix-measured-not-applied)).
@@ -255,7 +258,16 @@ agrees to within 0.4% in every entry, so the numbers are not FD noise):
   - Kp_adipose: 0.338 (0.334)
   - CL: 0.380 (0.380)
 
-  In the exact model every Kp row is 0/0. The recorded §4.9 wording, that CL_hepatic
+  Over 0–168 h the exact model's Kp derivatives are not mathematically zero, but
+  they are bounded by the residual mass. AUC_blood = (Dose − M(168))/CL, so a Kp
+  elasticity is of order (M(168)/Dose)·λT ≈ 6e-18 × 40 ≈ 2e-16, where λT ≈ 40 is
+  the terminal decay over the horizon. That is below double-precision resolution:
+  the reference measures |S|, |E2| ≤ 2.2e-9, which is finite-difference noise. A ρ
+  formed from two such quantities is numerically unresolved and says nothing
+  about nonlinearity. The recorded ρ values of 0.07–0.35 are built from the
+  shipped kernel's artefact derivatives, which are 1e-3 to 4e-2, twelve to
+  fourteen orders of magnitude larger than anything the exact model can produce. The
+  recorded §4.9 wording, that CL_hepatic
   is "only marginally ahead of Kp_brain (ρ̃ = 0.061)", and the "Marginal" assessments
   for Kp_brain and Kp_adipose describe the solver, not the pharmacology. The CL row
   (ρ = 0.380, exact ½·2·0.38) is genuine. So is fu_plasma (0.25 = ½·2·0.25), because
