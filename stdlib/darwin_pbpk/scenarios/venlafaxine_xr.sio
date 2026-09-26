@@ -7,23 +7,46 @@
 // Operator splitting per step (Lie-Trotter, same pattern as semaglutide_sc_depot):
 //   1. Matrix releases dissolved dose to gut pool
 //   2. First-order absorption (ka) from gut pool → parent blood input
-//   3. Parent PBPK28 CN step with the CYP2D6 formation sink on the liver
+//   3. Parent PBPK28 TR-BDF2 step with the CYP2D6 formation sink on the liver
 //      (organ 1) inside the implicit solve → mass formed feeds ODV blood input
-//   4. ODV PBPK28 CN step
+//   4. ODV PBPK28 TR-BDF2 step
 //
 // The formation flux is CL_form · C_liver,avg. CL_form·dt/V_liver is ~0.9 (PM),
 // ~11.9 (NM) and ~35.7 (UM) at dt = 0.5 h, so an explicit post-step
 // subtraction cannot represent it: once the step's demand exceeds the liver
 // content it saturates to "empty the liver" (IM, NM and UM alike). The
-// sink is therefore folded into the liver's 2×2 CN block of
-// `pbpk28_full_cn_step_sink_mut`, the same way `cl_central` enters the blood
-// row, and the mass that step removes is exactly the mass handed to ODV.
+// sink is therefore folded into the liver's 2×2 block of the implicit solve,
+// the same way `cl_central` enters the blood row, and the mass that step
+// removes is exactly the mass handed to ODV.
+//
+// Transport is TR-BDF2 (`pbpk28_trbdf2_step_sink_mut`, theta_pbpk28), not the
+// floored Crank–Nicolson kernel of tsit5_pbpk28. CN is not L-stable: in the
+// stiff liver-sink and vascular modes it rings with R ≈ −1 and goes negative in
+// the decaying tail after release ends, and that kernel's `x < 0 → 0` floors
+// then add mass that was never dosed
+// (docs/audit/PBPK28_CN_FLOOR_CLAMP_MASS_INJECTION_DISPATCH_2026-09-26.md).
+// TR-BDF2 is L-stable, second order and linear, so it conserves mass exactly
+// and needs no floor; each ledger books AUC with the method's own quadrature
+// weights, so M(T) + CL·AUC_b + formed = administered holds to rounding.
+//
+// Readout: blood AUC_ODV / AUC_parent over the run. Under linear kinetics a
+// single dose's AUC(0–∞) equals the steady-state AUC over one dosing interval,
+// so this ratio is a steady-state C_avg ratio. Input enters parent blood only,
+// so it does not depend on dose, F, ka or the release profile. The run is long
+// enough that the truncated tail is O(1e-12) relative; main() prints the body
+// mass left at t_end.
+//
+// Caveat when comparing with Kirchheiner 2006 (oral Css): the (1 − F) share is
+// removed from the model at the gut step, although part of it is hepatic
+// first-pass CYP2D6 metabolism to ODV. This ratio therefore omits presystemic
+// ODV and is IV-like; it is expected to under-read an oral Css ratio, the more
+// so the larger CL_form.
 //
 // Literature anchors: Gohel 2008 (matrix), Wang 2022 (ka, F), Klamerus 1999 (CL),
 // Kirchheiner 2006 (ODV/parent ratios).
 
 use darwin_pbpk::core::pbpk28_params::*
-use darwin_pbpk::tsit5_pbpk28::*
+use darwin_pbpk::theta_pbpk28::*
 use darwin_pbpk::release::matrix_er::*
 use darwin_pbpk::drugs::venlafaxine::*
 use darwin_pbpk::pgx::cyp2d6_venlafaxine::*
@@ -33,6 +56,8 @@ struct VenlafaxineXrScenario {
     odv:    PBPKState28,
     gut_mg: f64,
     pheno:  i32,
+    lg_parent: PBPK28Ledger,   // parent: administered = gut input, sink = formed
+    lg_odv:    PBPK28Ledger,   // ODV: administered = formed
 }
 
 pub fn vfx_scenario_init(pheno: i32) -> VenlafaxineXrScenario {
@@ -41,6 +66,8 @@ pub fn vfx_scenario_init(pheno: i32) -> VenlafaxineXrScenario {
         odv:    pbpk28_state_zero(),
         gut_mg: 0.0,
         pheno:  pheno,
+        lg_parent: pbpk28_ledger_zero(),
+        lg_odv:    pbpk28_ledger_zero(),
     }
 }
 
@@ -59,18 +86,31 @@ fn vfx_odv_params(pheno: i32) -> PBPKParams28 with Mut, Div, Panic {
 // Liver organ index in PBPK28 (CYP2D6 formation site).
 fn vfx_liver_organ() -> i32 { return 1 }
 
-// Parent CN step with the CYP2D6 → ODV formation sink solved implicitly on the
-// liver. Advances `*parent` and returns the parent mass (mg) converted to ODV
-// over the step — exactly the mass the sink removed from the parent.
+// Parent TR-BDF2 step with the CYP2D6 → ODV formation sink solved implicitly
+// on the liver. Advances `*parent`, books the step into `*ledger`, and returns
+// the parent mass (mg) converted to ODV over the step — exactly the mass the
+// sink removed from the parent.
 pub fn vfx_parent_step_with_formation(
     parent: &!PBPKState28,
     pheno: i32,
     parent_input: f64,
-    dt: f64
+    dt: f64,
+    ledger: &!PBPK28Ledger
 ) -> f64 with Mut, Div, Panic {
     let pp = vfx_parent_params(pheno)
     let cl_form = vfx_cl_form_odv_adjusted(pheno)
-    return pbpk28_full_cn_step_sink_mut(parent, pp, parent_input, dt, vfx_liver_organ(), cl_form)
+    return pbpk28_trbdf2_step_sink_mut(parent, pp, parent_input, dt, vfx_liver_organ(), cl_form, ledger)
+}
+
+// ODV TR-BDF2 step (no sink; ODV leaves through cl_central only).
+pub fn vfx_odv_step(
+    odv: &!PBPKState28,
+    pheno: i32,
+    odv_input: f64,
+    dt: f64,
+    ledger: &!PBPK28Ledger
+) with Mut, Div, Panic {
+    pbpk28_trbdf2_step_mut(odv, vfx_odv_params(pheno), odv_input, dt, ledger)
 }
 
 fn vfx_strang_step(
@@ -79,7 +119,6 @@ fn vfx_strang_step(
     t_start: f64,
     dt: f64
 ) -> VenlafaxineXrScenario with Mut, Div, Panic {
-    let op = vfx_odv_params(scen.pheno)
     let f_abs = venlafaxine_f_oral_xr()
     let ka = venlafaxine_ka_abs()
 
@@ -97,17 +136,21 @@ fn vfx_strang_step(
 
     // 3. Parent transport + CYP2D6 formation sink on the liver, one implicit solve.
     var out_parent = scen.parent
-    let form_mg = vfx_parent_step_with_formation(&!out_parent, scen.pheno, parent_input, dt)
+    var lg_parent = scen.lg_parent
+    let form_mg = vfx_parent_step_with_formation(&!out_parent, scen.pheno, parent_input, dt, &!lg_parent)
 
     // 4. ODV receives exactly the parent mass converted in step 3.
-    let odv_input = form_mg / dt
-    var out_odv = pbpk28_full_cn_step(scen.odv, op, odv_input, dt)
+    var out_odv = scen.odv
+    var lg_odv = scen.lg_odv
+    vfx_odv_step(&!out_odv, scen.pheno, form_mg / dt, dt, &!lg_odv)
 
     VenlafaxineXrScenario {
         parent: out_parent,
         odv:    out_odv,
         gut_mg: gut,
         pheno:  scen.pheno,
+        lg_parent: lg_parent,
+        lg_odv:    lg_odv,
     }
 }
 
@@ -125,16 +168,42 @@ fn mer_exp_neg(x: f64) -> f64 with Mut, Div {
     return y
 }
 
-// Steady-state ODV/parent ratio (PD-equivalent readout).
-// Uses total-body mass ratio (parent vs ODV) — robust when blood Cv is near zero
-// after XR redistribution to tissues (clinical analog: AUC-weighted metabolite ratio).
-pub fn vfx_odv_parent_ratio(scen: VenlafaxineXrScenario) -> f64 with Mut, Div, Panic {
-    let pp = vfx_parent_params(scen.pheno)
-    let op = vfx_odv_params(scen.pheno)
-    let mp = pbpk28_total_mass(scen.parent, pp)
-    let mo = pbpk28_total_mass(scen.odv, op)
-    if mp < 1.0e-12 { return 0.0 }
-    return mo / mp
+// ODV/parent blood AUC ratio over the run so far (see header: equals the
+// steady-state C_ODV/C_parent under linear kinetics once the dose is cleared).
+// Both AUCs use the TR-BDF2 quadrature booked by the ledgers. Undefined before
+// any parent exposure; returns 0.0 then.
+pub fn vfx_odv_parent_auc_ratio(scen: VenlafaxineXrScenario) -> f64 with Div {
+    let auc_p = scen.lg_parent.auc[0]
+    if auc_p <= 0.0 { return 0.0 }
+    return scen.lg_odv.auc[0] / auc_p
+}
+
+// Parent administered (mg) — the gut's F-weighted input.
+pub fn vfx_parent_administered_mg(scen: VenlafaxineXrScenario) -> f64 {
+    return scen.lg_parent.administered
+}
+
+// Parent mass (mg) converted to ODV so far.
+pub fn vfx_formed_odv_mg(scen: VenlafaxineXrScenario) -> f64 {
+    return scen.lg_parent.sink_removed
+}
+
+// |parent ledger residual| + |ODV ledger residual| (mg): body + everything that
+// left − everything administered, from a zero start. Zero to rounding.
+pub fn vfx_mass_residual_mg(scen: VenlafaxineXrScenario) -> f64 with Mut, Div, Panic {
+    let rp = pbpk28_ledger_residual(scen.lg_parent, scen.parent, vfx_parent_params(scen.pheno), 0.0)
+    let ro = pbpk28_ledger_residual(scen.lg_odv, scen.odv, vfx_odv_params(scen.pheno), 0.0)
+    let ap = if rp < 0.0 { 0.0 - rp } else { rp }
+    let ao = if ro < 0.0 { 0.0 - ro } else { ro }
+    return ap + ao
+}
+
+// Largest negative mass (mg, ≥ 0) either transport step has produced. The
+// kernel does not floor; a negative state is reported here, not repaired.
+pub fn vfx_neg_mass_mg(scen: VenlafaxineXrScenario) -> f64 {
+    let a = scen.lg_parent.neg_mass
+    let b = scen.lg_odv.neg_mass
+    return if a > b { a } else { b }
 }
 
 pub fn vfx_integrate_to(
@@ -154,6 +223,32 @@ pub fn vfx_integrate_to(
 }
 
 // ─── Runnable validation (library self-check) ───────────────────────────────
+fn vfx_self_check_run(scen: VenlafaxineXrScenario) -> bool with IO, Mut, Div, Panic {
+    let admin = vfx_parent_administered_mg(scen)
+    let tol = 1.0e-12 * admin
+    let res = vfx_mass_residual_mg(scen)
+    let neg = vfx_neg_mass_mg(scen)
+    let left = pbpk28_total_mass(scen.parent, vfx_parent_params(scen.pheno))
+        + pbpk28_total_mass(scen.odv, vfx_odv_params(scen.pheno))
+    print("  pheno "); print(scen.pheno)
+    print(": administered "); print_f64(admin)
+    print(" mg, formed "); print_f64(vfx_formed_odv_mg(scen))
+    print(" mg, residual "); print_f64(res)
+    print(" mg, neg mass "); print_f64(neg)
+    print(" mg, body left "); print_f64(left)
+    println(" mg")
+    if !(res <= tol) {
+        println("  FAIL: mass identity M + CL*AUC + formed = administered")
+        return false
+    }
+    if !(neg <= tol) {
+        println("  FAIL: negative state from the transport step")
+        return false
+    }
+    println("  [PASS] mass identity and positivity")
+    return true
+}
+
 fn main() -> i32 with IO, Mut, Div, Panic {
     println("======================================================================")
     println("  Venlafaxine XR — matrix release → parent/ODV PBPK28 scenario")
@@ -166,19 +261,21 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     var passed = 0
     var failed = 0
 
-    // Phenotype ordering: PM < NM < UM (Kirchheiner 2006 ODV/parent Css)
+    // Phenotype ordering of AUC_ODV/AUC_parent: PM < NM < UM
+    // (Kirchheiner 2006 ODV/parent Css; literature 0.25 / 3.45 / 10.3)
     var scen_pm = vfx_scenario_init(0)
     scen_pm = vfx_integrate_to(scen_pm, rel, 0.0, t_end, dt)
-    let ratio_pm = vfx_odv_parent_ratio(scen_pm)
+    let ratio_pm = vfx_odv_parent_auc_ratio(scen_pm)
 
     var scen_nm = vfx_scenario_init(2)
     scen_nm = vfx_integrate_to(scen_nm, rel, 0.0, t_end, dt)
-    let ratio_nm = vfx_odv_parent_ratio(scen_nm)
+    let ratio_nm = vfx_odv_parent_auc_ratio(scen_nm)
 
     var scen_um = vfx_scenario_init(3)
     scen_um = vfx_integrate_to(scen_um, rel, 0.0, t_end, dt)
-    let ratio_um = vfx_odv_parent_ratio(scen_um)
+    let ratio_um = vfx_odv_parent_auc_ratio(scen_um)
 
+    println("AUC_ODV/AUC_parent (blood):")
     println("PM ratio:")
     println(ratio_pm)
     println("NM ratio:")
@@ -201,6 +298,13 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         println("  FAIL: expected UM ratio > 2.0")
         failed = failed + 1
     }
+
+    // Mass identity and positivity, every phenotype run. Tolerance is a
+    // roundoff bound, max(1e-12, n·1e-15) relative with n = 240 steps
+    // (PBPK28 floor-clamp dispatch), not a fitted value.
+    if vfx_self_check_run(scen_pm) { passed = passed + 1 } else { failed = failed + 1 }
+    if vfx_self_check_run(scen_nm) { passed = passed + 1 } else { failed = failed + 1 }
+    if vfx_self_check_run(scen_um) { passed = passed + 1 } else { failed = failed + 1 }
 
     // Matrix mass: gut + body mass bounded by released dose
     let released = matrix_cumulative(rel, t_end)
