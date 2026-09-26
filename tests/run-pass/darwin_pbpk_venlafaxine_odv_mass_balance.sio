@@ -1,0 +1,208 @@
+//@ run-pass
+//@ expect-stdout-contains: VFX_ODV_MASS_BALANCE_PASS
+
+// tests/run-pass/darwin_pbpk_venlafaxine_odv_mass_balance.sio
+//
+// Regression gate for the CYP2D6 formation mass-balance bug in
+// stdlib/darwin_pbpk/scenarios/venlafaxine_xr.sio step 4 (parent liver ->
+// ODV). Bug: `out_parent.cv[1] -= form_mg / v_ref[1]` divided by the TOTAL
+// liver volume but only mutated the vascular concentration, so it removed
+// just `form_mg * vasc_frac[1]` mg of actual mass from the parent while
+// handing the FULL `form_mg` to ODV -- fabricating mass every step. The
+// concentration clamp to 0.0 could additionally send an uncapped `form_mg`
+// to ODV even after the parent side had nothing left, creating mass instead
+// of erroring.
+//
+// Why this test gates the formation-step TRANSFER IDENTITY rather than a
+// whole-run dose-in/dose-out balance: measured directly (scratch probes, not
+// checked in), `pbpk28_full_cn_step` itself is NOT exactly mass-conservative
+// even with `cl_central = 0` and `rel_mid = 0` (zero sink, zero source) -- a
+// 10-organ bolus grows from 50.000000 mg to 85.065244 mg (+70%) after a
+// single 0.5 h step, and keeps drifting over subsequent steps before
+// settling. That is a separate, pre-existing defect in the shared PBPK28
+// Crank-Nicolson transport kernel (used by rapamycin and semaglutide too),
+// well outside this dispatch's scope of "the venlafaxine parent->ODV
+// formation step." A whole-run dose == parent + ODV + eliminated +
+// unabsorbed identity would fail from transport-integrator drift alone
+// regardless of the formation-step fix, and could not isolate the bug this
+// test targets.
+//
+// So this test isolates exactly the LOCAL edit step 4 makes. It first runs
+// the real scenario (vfx_integrate_to, the actual production entrypoint) up
+// to t = 4 h so the liver carries a nontrivial, physiologically-reached
+// state in BOTH layers immediately before the formation edit. The transport
+// step does NOT zero the vascular layer: measured (lean_single and Madaros,
+// scratch probe, not checked in) at t = 4 h the pre-formation liver state is
+// cv[1] = 0.095965, ct[1] = 0.392632 mg/L for IM/NM/UM (0.092795 / 0.381926
+// for PM). What empties cv[1] is the formation step itself. Pre-fix, the
+// additive decrement `cv[1] -= form_mg / v_liver` overshot and its CLAMP
+// zeroed cv[1] (pre-fix state: cv[1] 0.146448 -> 0, ct[1] 0.313264
+// untouched, only 0.055357 mg actually removed). Post-fix, whenever
+// CL_form * dt / V_liver is large enough the formation CAP binds and the
+// uniform scaling empties BOTH layers (IM/NM/UM: cv[1] = ct[1] = 0 after
+// the step). The bug only ever touched cv[1], so a state with ct[1] > 0 is
+// exactly what exercises it. It then takes ONE more step two ways:
+//
+//   - a replica: it re-derives the same absorption input (parent_input) the
+//     real step would use (matrix release + gut absorption, replicated
+//     bit-for-bit including the Taylor-series exp helper) and calls the
+//     real, public `pbpk28_full_cn_step` directly -- this is the exact
+//     production step 3 computation, giving the liver state immediately
+//     BEFORE the formation edit;
+//   - the real production call: `vfx_strang_step` (now pub for testability;
+//     no logic changed), giving the state immediately AFTER the formation
+//     edit.
+//
+// It then checks:
+//   (a) mass removed from the parent's liver compartment (organ 1, vascular
+//       + tissue layers) between those two states equals the expected
+//       formation amount -- computed independently from the same public
+//       CL_form/organ-average primitives, with the cap-at-available-mass
+//       rule the fix introduces -- to near machine precision;
+//   (b) the amount fed to the ODV transport step (recovered by replaying
+//       `pbpk28_full_cn_step` on the ODV side with the expected input and
+//       diffing against the real `vfx_strang_step` ODV output) is
+//       bit-identical to that same expected amount.
+//
+// Together (a) and (b) pin removed-from-parent == added-to-ODV == the
+// correct, capped formation mass -- the mass-balance identity the bug broke.
+// Absorption/elimination transport dynamics beyond that single edit are
+// irrelevant to this identity and are deliberately not asserted on here.
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::tsit5_pbpk28::*
+use darwin_pbpk::release::matrix_er::*
+use darwin_pbpk::drugs::venlafaxine::*
+use darwin_pbpk::pgx::cyp2d6_venlafaxine::*
+use darwin_pbpk::scenarios::venlafaxine_xr::*
+
+fn abs_f64_local(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+// Bit-for-bit copy of the private `mer_exp_neg` Taylor series in
+// scenarios/venlafaxine_xr.sio, needed to replicate step 1-2's
+// `parent_input` exactly (same shared pattern as the dissertation parity
+// ref for this scenario, which keeps its own such copy for the same
+// cross-module-visibility reason).
+fn test_exp_neg(x: f64) -> f64 with Mut, Div {
+    if x >= 0.0 { return 1.0 }
+    var y = 1.0
+    var term = 1.0
+    var k: i64 = 1
+    while k < 20 {
+        term = term * x / (k as f64)
+        y = y + term
+        k = k + 1
+    }
+    return y
+}
+
+// One phenotype's worth of the check. Returns true on PASS.
+fn check_pheno(pheno: i32) -> bool with Mut, Div, Panic, IO {
+    var pp = pbpk28_params_venlafaxine_parent()
+    pp.cl_central = venlafaxine_cl_parent_central_pgx(pheno)
+    var op = pbpk28_params_venlafaxine_odv()
+    op.cl_central = venlafaxine_cl_odv_pgx(pheno)
+
+    let dt = 0.5
+    let rel = venlafaxine_xr_matrix_gohel2008()
+    let f_abs = venlafaxine_f_oral_xr()
+    let ka = venlafaxine_ka_abs()
+
+    // Reach a nontrivial, real (production-path) liver state at t = 4 h.
+    var scen = vfx_scenario_init(pheno)
+    scen = vfx_integrate_to(scen, rel, 0.0, 4.0, dt)
+    let t_start = 4.0
+
+    // Replica of vfx_strang_step's steps 1-3 (matrix release, absorption,
+    // parent transport) -- bit-identical formulas -- to get the liver state
+    // immediately BEFORE the formation edit.
+    let rel_amt = matrix_step_amount(rel, t_start, dt)
+    var gut = scen.gut_mg + rel_amt
+    let frac_abs = 1.0 - test_exp_neg(0.0 - ka * dt)
+    let absorb_amt = f_abs * gut * frac_abs
+    gut = gut - absorb_amt
+    if gut < 0.0 { gut = 0.0 }
+    let parent_input = absorb_amt / dt
+    let out_parent_pre_formation = pbpk28_full_cn_step(scen.parent, pp, parent_input, dt)
+
+    let v_liver = pp.v_ref[1]
+    let vf_liver = pp.vasc_frac[1]
+    let vv_liver = v_liver * vf_liver
+    let vt_liver = v_liver * (1.0 - vf_liver)
+    let mass_before = vv_liver * out_parent_pre_formation.cv[1] + vt_liver * out_parent_pre_formation.ct[1]
+
+    // Expected formation transfer: same organ-average + CL_form primitives
+    // the scenario uses, with the cap-at-available-mass the fix introduces.
+    let c_liver = pbpk28_organ_average(out_parent_pre_formation, pp, 1)
+    var form_mg_expected = vfx_cl_form_odv_adjusted(pheno) * c_liver * dt
+    if form_mg_expected > mass_before { form_mg_expected = mass_before }
+    if form_mg_expected < 0.0 { form_mg_expected = 0.0 }
+
+    // Real production code path -- the actual function under test.
+    let out = vfx_strang_step(scen, rel, t_start, dt)
+    let mass_after = vv_liver * out.parent.cv[1] + vt_liver * out.parent.ct[1]
+    let removed_mg = mass_before - mass_after
+
+    // (a) parent-side transfer identity: mass actually removed from the
+    // liver by the real production call must equal the expected formation
+    // amount.
+    let denom_a = if form_mg_expected > 1.0e-9 { form_mg_expected } else { 1.0 }
+    let rel_err_a = abs_f64_local(removed_mg - form_mg_expected) / denom_a
+
+    // (b) ODV-side transfer identity: replay the ODV CN step with the
+    // expected input and diff against what the real code produced for ODV.
+    let odv_replica = pbpk28_full_cn_step(scen.odv, op, form_mg_expected / dt, dt)
+    var max_odv_diff = 0.0
+    var i: i32 = 0
+    while i < 14 {
+        let d_cv = abs_f64_local(out.odv.cv[i] - odv_replica.cv[i])
+        let d_ct = abs_f64_local(out.odv.ct[i] - odv_replica.ct[i])
+        if d_cv > max_odv_diff { max_odv_diff = d_cv }
+        if d_ct > max_odv_diff { max_odv_diff = d_ct }
+        i = i + 1
+    }
+
+    print("pheno=") print(pheno)
+    print(" mass_before_liver=") print(mass_before)
+    print(" removed_mg=") print(removed_mg)
+    print(" form_mg_expected=") print(form_mg_expected)
+    print(" rel_err_a=") print(rel_err_a)
+    print(" max_odv_state_diff=") println(max_odv_diff)
+
+    if mass_before <= 0.0 {
+        println("  FAIL: liver has no mass at t=4h -- scenario harness change broke setup")
+        return false
+    }
+    if form_mg_expected <= 0.0 {
+        println("  FAIL: expected formation is zero -- test does not exercise the bug")
+        return false
+    }
+    if rel_err_a >= 1.0e-9 {
+        println("  FAIL: parent-side removed mass != expected formation mass")
+        return false
+    }
+    if max_odv_diff >= 1.0e-9 {
+        println("  FAIL: ODV-side received state != expected-input replica")
+        return false
+    }
+    return true
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var ok = true
+    // PM, IM, NM, UM -- every CYP2D6 phenotype this scenario supports.
+    if !check_pheno(0) { ok = false }
+    if !check_pheno(1) { ok = false }
+    if !check_pheno(2) { ok = false }
+    if !check_pheno(3) { ok = false }
+
+    if ok {
+        println("VFX_ODV_MASS_BALANCE_PASS")
+    } else {
+        println("VFX_ODV_MASS_BALANCE_FAIL")
+    }
+    return if ok { 0 } else { 1 }
+}

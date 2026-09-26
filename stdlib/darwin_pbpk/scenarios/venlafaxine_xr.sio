@@ -19,14 +19,18 @@ use darwin_pbpk::release::matrix_er::*
 use darwin_pbpk::drugs::venlafaxine::*
 use darwin_pbpk::pgx::cyp2d6_venlafaxine::*
 
-struct VenlafaxineXrScenario {
-    parent: PBPKState28,
-    odv:    PBPKState28,
-    gut_mg: f64,
-    pheno:  i32,
+// pub (struct + fields + init + step) so tests/run-pass/
+// darwin_pbpk_venlafaxine_odv_mass_balance.sio can drive the real per-step
+// formation logic and inspect the resulting state directly, instead of
+// re-implementing it — visibility only, no semantic change.
+pub struct VenlafaxineXrScenario {
+    pub parent: PBPKState28,
+    pub odv:    PBPKState28,
+    pub gut_mg: f64,
+    pub pheno:  i32,
 }
 
-fn vfx_scenario_init(pheno: i32) -> VenlafaxineXrScenario {
+pub fn vfx_scenario_init(pheno: i32) -> VenlafaxineXrScenario {
     VenlafaxineXrScenario {
         parent: pbpk28_state_zero(),
         odv:    pbpk28_state_zero(),
@@ -54,7 +58,7 @@ fn vfx_formation_rate_mg_h(cb_parent: f64, pheno: i32) -> f64 with Div, Panic {
     return cl_form * cb_parent
 }
 
-fn vfx_strang_step(
+pub fn vfx_strang_step(
     scen: VenlafaxineXrScenario,
     rel: MatrixReleaseModel,
     t_start: f64,
@@ -82,11 +86,47 @@ fn vfx_strang_step(
     var out_parent = pbpk28_full_cn_step(scen.parent, pp, parent_input, dt)
 
     // 4. CYP2D6 formation at liver (organ 1): drain parent liver pool, feed ODV.
+    // c_liver = pbpk28_organ_average is the volume-weighted average of the
+    // vascular (cv) and tissue (ct) layers: (vv*cv + vt*ct) / v_liver. The
+    // prior code subtracted form_mg / v_liver (a decrement sized for the
+    // TOTAL liver volume) from cv[1] ALONE, which removes just
+    // form_mg * vasc_frac mg of actual mass (vv = v_liver * vasc_frac) while
+    // handing the full form_mg to ODV — fabricating (1 - vasc_frac) * form_mg
+    // of mass every step. Its clamp on cv[1] < 0.0 compounded this: it could
+    // zero out concentration and still send the (uncapped) form_mg to ODV,
+    // creating mass instead of erroring.
+    //
+    // Fix: cap form_mg at the mass actually present in the liver, then remove
+    // it by scaling BOTH layers' concentrations down by the same factor
+    // `1 - form_mg / liver_mass_avail` rather than subtracting an additive
+    // concentration decrement. Scaling by a factor in [0, 1] can never drive
+    // either layer negative (so no clamp, and no clamp-shortfall to lose
+    // track of), and removes exactly form_mg mg in total by construction:
+    //   vv*(cv*s) + vt*(ct*s) = s*(vv*cv + vt*ct) = s*liver_mass_avail
+    //                         = liver_mass_avail - form_mg.
+    // An additive decrement does not have this property: whenever the
+    // requested decrement exceeds a layer's concentration, that layer's clamp
+    // discards the excess, under-removing mass on the parent side while ODV
+    // still receives the full form_mg — a re-creation of the same
+    // mass-balance bug. (The transport step does not leave cv[1] at zero —
+    // measured pre-formation cv[1] ~ 0.096 mg/L at t = 4 h — it was the old
+    // clamp that zeroed it; with CL_form * dt / v_liver up to ~36 the cap
+    // above now binds for IM/NM/UM and empties both layers instead.)
     let c_liver = pbpk28_organ_average(out_parent, pp, 1)
-    let form_mg = vfx_formation_rate_mg_h(c_liver, scen.pheno) * dt
+    var form_mg = vfx_formation_rate_mg_h(c_liver, scen.pheno) * dt
     let v_liver = pp.v_ref[1]
-    out_parent.cv[1] = out_parent.cv[1] - form_mg / v_liver
-    if out_parent.cv[1] < 0.0 { out_parent.cv[1] = 0.0 }
+    let vf_liver = pp.vasc_frac[1]
+    let vv_liver = v_liver * vf_liver
+    let vt_liver = v_liver * (1.0 - vf_liver)
+    let liver_mass_avail = vv_liver * out_parent.cv[1] + vt_liver * out_parent.ct[1]
+    if form_mg > liver_mass_avail { form_mg = liver_mass_avail }
+    if form_mg < 0.0 { form_mg = 0.0 }
+    var liver_scale = 1.0
+    if liver_mass_avail > 1.0e-30 {
+        liver_scale = 1.0 - form_mg / liver_mass_avail
+    }
+    out_parent.cv[1] = out_parent.cv[1] * liver_scale
+    out_parent.ct[1] = out_parent.ct[1] * liver_scale
     if out_parent.cv[0] < 0.0 { out_parent.cv[0] = 0.0 }
     let odv_input = form_mg / dt
     var out_odv = pbpk28_full_cn_step(scen.odv, op, odv_input, dt)
