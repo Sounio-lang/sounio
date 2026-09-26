@@ -1,0 +1,262 @@
+// Candidate-fix probe for the PBPK28 transport step. No clamps anywhere.
+// Dispatch: docs/audit/PBPK28_CN_FLOOR_CLAMP_MASS_INJECTION_DISPATCH_2026-09-26.md
+// Every method below is a linear one-step method, so each preserves the
+// volume-weighted mass invariant exactly (Shampine 1986); what differs is how
+// it damps the stiff vascular/blood modes (h*lambda up to ~1e4 at dt = 0.5 h).
+//
+//   method 1 = CN (theta = 1/2)               A-stable, not L-stable
+//   method 2 = backward Euler (theta = 1)      L-stable, 1st order
+//   method 3 = CN + Rannacher start-up         first 2 steps -> 4 BE half-steps
+//   method 4 = TR-BDF2, gamma = 2 - sqrt(2)    L-stable, 2nd order
+//   method 0 = shipped stdlib pbpk28_full_cn_step (CN + floor clamps)
+//
+// AUCs are accumulated with each method's own quadrature (trapezoid for CN,
+// right-rectangle for BE, the ESDIRK b-weights (w, w, d) for TR-BDF2), which
+// makes M(T) + CL*AUC_blood = Dose an exact discrete identity for 1..4.
+//
+// Reference: method 1 at dt = 0.001 h (the shipped kernel never clamps there).
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::tsit5_pbpk28::*
+
+// y = A x (concentration units, mg/L/h); source handled by callers.
+fn fx_matvec(y: &!PBPKState28, x: PBPKState28, p: PBPKParams28) with Mut, Div {
+    let vb = p.v_ref[0]
+    var inflow = 0.0
+    var sum_q = 0.0
+    var i: i32 = 1
+    while i < 14 {
+        let vi = p.v_ref[i]
+        let vv = vi * p.vasc_frac[i]
+        let vt = vi * (1.0 - p.vasc_frac[i])
+        let flux_ps = p.ps[i] * (x.cv[i] - x.ct[i] / p.kp[i])
+        (*y).cv[i] = (p.q[i] * (x.cv[0] - x.cv[i]) - flux_ps) / vv
+        (*y).ct[i] = flux_ps / vt
+        inflow = inflow + p.q[i] * x.cv[i]
+        sum_q = sum_q + p.q[i]
+        i = i + 1
+    }
+    (*y).cv[0] = (inflow - (sum_q + p.cl_central) * x.cv[0]) / vb
+}
+
+fn fx_apply(x: &!PBPKState28, x0: f64, a_v: &[f64; 14], b_v: &[f64; 14],
+            a_t: &[f64; 14], b_t: &[f64; 14]) with Mut, Div {
+    (*x).cv[0] = x0
+    var i: i32 = 1
+    while i < 14 {
+        (*x).cv[i] = (*a_v)[i] + (*b_v)[i] * x0
+        (*x).ct[i] = (*a_t)[i] + (*b_t)[i] * x0
+        i = i + 1
+    }
+}
+
+// Solve (I - hi*A) x = r exactly by the same per-organ Schur elimination.
+fn fx_solve(x: &!PBPKState28, r: PBPKState28, p: PBPKParams28, hi: f64) with Mut, Div {
+    var a_v: [f64; 14] = [0.0; 14]
+    var b_v: [f64; 14] = [0.0; 14]
+    var a_t: [f64; 14] = [0.0; 14]
+    var b_t: [f64; 14] = [0.0; 14]
+    let vb = p.v_ref[0]
+    var sum_q = 0.0
+    var i: i32 = 1
+    while i < 14 {
+        sum_q = sum_q + p.q[i]
+        i = i + 1
+    }
+    let big_s = hi * (sum_q + p.cl_central) / vb
+    var sum_beta_a = 0.0
+    var sum_beta_b = 0.0
+    i = 1
+    while i < 14 {
+        let vi = p.v_ref[i]
+        let vv = vi * p.vasc_frac[i]
+        let vt = vi * (1.0 - p.vasc_frac[i])
+        let kp = p.kp[i]
+        let ps = p.ps[i]
+        let qi = p.q[i]
+        let beta  = hi * qi / vb
+        let gamma = hi * qi / vv
+        let pp    = 1.0 + hi * (qi + ps) / vv
+        let qq    = hi * ps / (vv * kp)
+        let rr    = hi * ps / vt
+        let sb    = 1.0 + hi * ps / (vt * kp)
+        let det   = pp * sb - qq * rr
+        let av = (sb * r.cv[i] + qq * r.ct[i]) / det
+        let bv = (sb * gamma) / det
+        let at = (rr * r.cv[i] + pp * r.ct[i]) / det
+        let bt = (rr * gamma) / det
+        a_v[i] = av
+        b_v[i] = bv
+        a_t[i] = at
+        b_t[i] = bt
+        sum_beta_a = sum_beta_a + beta * av
+        sum_beta_b = sum_beta_b + beta * bv
+        i = i + 1
+    }
+    let x0 = (r.cv[0] + sum_beta_a) / ((1.0 + big_s) - sum_beta_b)
+    fx_apply(x, x0, &a_v, &b_v, &a_t, &b_t)
+}
+
+// r = c1 * x + c2 * (A x)
+fn fx_axpy(r: &!PBPKState28, c1: f64, x: PBPKState28, c2: f64, ax: PBPKState28) with Mut {
+    var i: i32 = 0
+    while i < 14 {
+        (*r).cv[i] = c1 * x.cv[i] + c2 * ax.cv[i]
+        (*r).ct[i] = c1 * x.ct[i] + c2 * ax.ct[i]
+        i = i + 1
+    }
+}
+
+fn fx_theta_step(x: &!PBPKState28, p: PBPKParams28, dt: f64, theta: f64) with Mut, Div {
+    var ax = pbpk28_state_zero()
+    var r = pbpk28_state_zero()
+    let xo = *x
+    fx_matvec(&!ax, xo, p)
+    fx_axpy(&!r, 1.0, xo, (1.0 - theta) * dt, ax)
+    fx_solve(x, r, p, theta * dt)
+}
+
+fn fx_trbdf2_step(x: &!PBPKState28, xg_out: &!PBPKState28, p: PBPKParams28, dt: f64) with Mut, Div {
+    let g = 2.0 - 1.4142135623730951
+    let xo = *x
+    var ax = pbpk28_state_zero()
+    var r = pbpk28_state_zero()
+    var xg = pbpk28_state_zero()
+    fx_matvec(&!ax, xo, p)
+    fx_axpy(&!r, 1.0, xo, 0.5 * g * dt, ax)
+    fx_solve(&!xg, r, p, 0.5 * g * dt)
+    let c_g = 1.0 / (g * (2.0 - g))
+    let c_o = (1.0 - g) * (1.0 - g) / (g * (2.0 - g))
+    fx_axpy(&!r, c_g, xg, 0.0, xg)
+    var i: i32 = 0
+    while i < 14 {
+        r.cv[i] = r.cv[i] - c_o * xo.cv[i]
+        r.ct[i] = r.ct[i] - c_o * xo.ct[i]
+        i = i + 1
+    }
+    fx_solve(x, r, p, (1.0 - g) / (2.0 - g) * dt)
+    *xg_out = xg
+}
+
+fn fx_step(x: &!PBPKState28, xg: &!PBPKState28, p: PBPKParams28, dt: f64, method: i32, k: i32) with Mut, Div {
+    if method == 0 { pbpk28_full_cn_step_mut(x, p, 0.0, dt) }
+    if method == 1 { fx_theta_step(x, p, dt, 0.5) }
+    if method == 2 { fx_theta_step(x, p, dt, 1.0) }
+    if method == 3 {
+        if k < 2 {
+            fx_theta_step(x, p, 0.5 * dt, 1.0)
+            *xg = *x
+            fx_theta_step(x, p, 0.5 * dt, 1.0)
+        } else {
+            fx_theta_step(x, p, dt, 0.5)
+        }
+    }
+    if method == 4 { fx_trbdf2_step(x, xg, p, dt) }
+}
+
+fn fx_min(s: PBPKState28) -> f64 with Mut {
+    var m = s.cv[0]
+    var i: i32 = 1
+    while i < 14 {
+        if s.cv[i] < m { m = s.cv[i] }
+        if s.ct[i] < m { m = s.ct[i] }
+        i = i + 1
+    }
+    return m
+}
+
+fn fx_avg(s: PBPKState28, p: PBPKParams28, i: i32) -> f64 with Div {
+    let vi = p.v_ref[i]
+    let vv = vi * p.vasc_frac[i]
+    let vt = vi * (1.0 - p.vasc_frac[i])
+    return (vv * s.cv[i] + vt * s.ct[i]) / vi
+}
+
+fn fx_run(drug: i32, p: PBPKParams28, dt: f64, method: i32) with IO, Mut, Div {
+    let dose = 5.0
+    let t_end = 168.0
+    let n = ((t_end / dt) + 0.5) as i32
+    let n24 = ((24.0 / dt) + 0.5) as i32
+    let g = 2.0 - 1.4142135623730951
+    let w_tr = 1.0 / (2.0 * (2.0 - g))
+    let d_tr = (1.0 - g) / (2.0 - g)
+    var x = pbpk28_state_zero()
+    var xg = pbpk28_state_zero()
+    x.cv[0] = dose / p.v_ref[0]
+    var auc_b = 0.0
+    var auc_l = 0.0
+    var auc_k = 0.0
+    var cb24 = 0.0
+    var cbr24 = 0.0
+    var mn = 0.0
+    var k: i32 = 0
+    while k < n {
+        let xo = x
+        fx_step(&!x, &!xg, p, dt, method, k)
+        var wo = 0.5
+        var wg = 0.0
+        var wn = 0.5
+        if method == 2 {
+            wo = 0.0
+            wn = 1.0
+        }
+        if method == 3 && k < 2 {
+            wo = 0.0
+            wg = 0.5
+            wn = 0.5
+        }
+        if method == 4 {
+            wo = w_tr
+            wg = w_tr
+            wn = d_tr
+        }
+        auc_b = auc_b + dt * (wo * xo.cv[0] + wg * xg.cv[0] + wn * x.cv[0])
+        auc_l = auc_l + dt * (wo * fx_avg(xo, p, 1) + wg * fx_avg(xg, p, 1) + wn * fx_avg(x, p, 1))
+        auc_k = auc_k + dt * (wo * fx_avg(xo, p, 2) + wg * fx_avg(xg, p, 2) + wn * fx_avg(x, p, 2))
+        let m = fx_min(x)
+        if m < mn { mn = m }
+        if k + 1 == n24 {
+            cb24 = x.cv[0]
+            cbr24 = fx_avg(x, p, 3)
+        }
+        k = k + 1
+    }
+    let resid = (pbpk28_total_mass(x, p) + p.cl_central * auc_b - dose) / dose
+    print("FIX|drug=")
+    print(drug)
+    print("|method=")
+    print(method)
+    print("|dt=")
+    print(dt)
+    print("|AUCb_e6=")
+    print(auc_b * 1.0e6)
+    print("|AUCliver_e6=")
+    print(auc_l * 1.0e6)
+    print("|AUCkid_e6=")
+    print(auc_k * 1.0e6)
+    print("|Cb24_e9=")
+    print(cb24 * 1.0e9)
+    print("|Cbrain24_e9=")
+    print(cbr24 * 1.0e9)
+    print("|min_conc_e9=")
+    print(mn * 1.0e9)
+    print("|mass_resid_e12=")
+    println(resid * 1.0e12)
+}
+
+fn fx_drug(drug: i32, p: PBPKParams28) with IO, Mut, Div {
+    fx_run(drug, p, 0.001, 1)
+    var m: i32 = 0
+    while m < 5 {
+        fx_run(drug, p, 0.5, m)
+        fx_run(drug, p, 0.1, m)
+        fx_run(drug, p, 0.05, m)
+        m = m + 1
+    }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    fx_drug(1, pbpk28_params_rapamycin())
+    fx_drug(2, pbpk28_params_semaglutide())
+    0
+}
