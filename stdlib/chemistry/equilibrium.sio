@@ -57,7 +57,13 @@ pub fn k_from_delta_g(dg: f64, udg: f64, t: f64, ut: f64) -> (f64, f64) with Mut
     if t <= 0.0 { return (0.0, 0.0); }
     let arg = 0.0 - dg / (r_const() * t);
     let k = equilibrium_exp_approx(arg);
-    let uk = equilibrium_abs_f64(k) * (udg / equilibrium_abs_f64(r_const() * t) + (dg / (r_const() * t * t)) * ut); // approx
+    // Copilot review, sounio-lang/sounio#2694: the temperature-sensitivity
+    // term kept dg's sign, so a valid negative dg (any spontaneous
+    // reaction) with udg=0 and ut>0 returned a NEGATIVE standard
+    // uncertainty (reproduced: dg=-5000, udg=0, t=300, ut=5 -> uk=-0.248).
+    // GUM-style sensitivity terms must be summed by absolute magnitude, not
+    // signed value, since they can't be allowed to cancel each other out.
+    let uk = equilibrium_abs_f64(k) * (udg / equilibrium_abs_f64(r_const() * t) + equilibrium_abs_f64(dg / (r_const() * t * t)) * ut); // approx
     (k, uk)
 }
 
@@ -174,6 +180,21 @@ pub fn test_real_delta_g() -> bool with Mut, Div, Panic {
     equilibrium_check_near(k, 10.0, 1.0)  // real-ish
 }
 
+// Regression for the negative-standard-uncertainty bug (Copilot review,
+// sounio-lang/sounio#2694): the temperature-sensitivity term kept dg's own
+// sign instead of being summed by absolute magnitude, so any spontaneous
+// reaction (dg < 0, the common case) with udg=0 and ut>0 returned a
+// NEGATIVE uk -- a standard uncertainty can never be negative. Cross-checked
+// in Python before fixing: dg=-5000, udg=0, t=300, ut=5 gave uk=-0.248
+// under the old body; the fix (wrapping the sensitivity term in
+// equilibrium_abs_f64) gives uk=+0.248 for the same inputs and is
+// numerically unchanged for a positive-dg input (test_k_dg/test_real_delta_g
+// above), since the term was already positive there.
+pub fn test_k_dg_negative_uncertainty_sign() -> bool with Mut, Div, Panic {
+    let (_, uk) = k_from_delta_g(-5000.0, 0.0, 300.0, 5.0);
+    uk > 0.0
+}
+
 fn main() -> i32 with Mut, Div, Panic, IO {
     var p: i32 = 0; var f: i32 = 0;
     if test_k_dg() { p = p + 1 } else { f = f + 1; println("FAIL kdg") }
@@ -182,6 +203,7 @@ fn main() -> i32 with Mut, Div, Panic, IO {
     if test_newton_equil() { p = p + 1 } else { f = f + 1; println("FAIL newton") }
     if test_ab_c() { p = p + 1 } else { f = f + 1; println("FAIL ab c") }
     if test_real_delta_g() { p = p + 1 } else { f = f + 1; println("FAIL real delta g") }
+    if test_k_dg_negative_uncertainty_sign() { p = p + 1 } else { f = f + 1; println("FAIL k_dg negative uncertainty sign") }
     if test_speciation() { p = p + 1 } else { f = f + 1; println("FAIL speciation") }
     if f == 0 { println("EQUILIBRIUM + ELECTRO + SOLVERS REAL ALL PASS (phase3+)") } else { println("EQUIL FAILS") }
     return f

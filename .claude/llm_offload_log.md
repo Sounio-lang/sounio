@@ -316,3 +316,43 @@ verification instead:
 
 **Flagged for re-review**: per policy, alongside the four entries above,
 once a provider is configured in a session that has one.
+
+## 2026-09-26T15:45Z — Claude (session_01RMzxzzsE5JNGEqnnkUs9Yo) — M1, k_from_delta_g negative-uncertainty sign fix (PR sounio-lang/sounio#2694)
+
+| 2026-09-26 | — | math-review | equilibrium.sio (k_from_delta_g's temperature-sensitivity term wrapped in absolute value so combined standard uncertainty can no longer go negative) | WAIVED | No offload provider configured in this container, same as the five entries above. Independent Python cross-check of old vs. new formula; full narrative below. |
+
+**Trigger**: Copilot review found that `k_from_delta_g`'s GUM-style combined
+uncertainty, `uk = |k| * (udg/|RT| + (dg/(RT²))*ut)`, kept `dg`'s own sign
+on the second (temperature) sensitivity term instead of summing sensitivity
+magnitudes. For any spontaneous reaction (`dg < 0`, the common physical
+case) with `udg = 0` and `ut > 0`, this returns a negative `uk` — a
+standard uncertainty can never be negative, by definition.
+
+**Attempted**: `bin/llm-offload --status` — no provider reachable in this
+container, same as every prior entry in this log.
+
+**Outcome**: WAIVED for lack of a reachable provider. Independent
+verification instead:
+
+1. **Reproduced the sign bug directly in Python**: `k_from_delta_g(-5000.0,
+   0.0, 300.0, 5.0)` returns `uk = -0.248...` under the old body.
+2. **Fixed by wrapping the temperature term in absolute value**
+   (`equilibrium_abs_f64(dg / (r_const()*t*t)) * ut`), matching the
+   already-correct treatment of the `udg` term two operands earlier in the
+   same expression. Re-ran the same Python case: `uk = +0.248...`.
+3. **Confirmed no change for the sign this file's own tests already
+   exercise**: `test_k_dg`/`test_real_delta_g` both pass `dg < 0` through
+   `k_from_delta_g` but discard `uk` (bind it to `_`), so they never
+   exercised this term's sign either way — not a coincidental prior pass.
+   For a positive-`dg` input the fix is a no-op (the term was already
+   positive), verified numerically identical in Python.
+4. **Regression test added**: `test_k_dg_negative_uncertainty_sign` in
+   `equilibrium.sio`, wired into `main()` and into
+   `tests/stdlib/chemistry/test_equilibrium_acids.sio`. Verified as a real
+   control: temporarily reverted the fix and confirmed
+   `test_equilibrium_acids.sio` fails (`FAIL
+   k_dg_negative_uncertainty_sign`) under the live suite; restored the fix
+   and re-confirmed `PASS`.
+
+**Flagged for re-review**: per policy, alongside the five entries above,
+once a provider is configured in a session that has one.
