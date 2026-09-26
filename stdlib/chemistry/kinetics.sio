@@ -919,19 +919,41 @@ pub fn simulate_general_crn(init: &[f64; 8], ks: &[f64; 8], nu: MatNM, nsp: i64,
 // rate constant to several measurements taken AT DIFFERENT TIMES needs the
 // simulated trajectory at those same times, not just one shared endpoint.
 //
-// PRECONDITION, not checked at runtime: checkpoint_steps must be strictly
-// ascending, and checkpoint_steps[3] must be the TOTAL number of RK4 steps
-// to run (the loop below runs exactly that many steps, then detects each
-// checkpoint by `s == checkpoint_steps[cp]` as the step counter climbs
-// through it, advancing cp forward only). An out-of-order array (e.g.
-// [30,7,22,15]) silently produces WRONG output, not an error: the loop
-// stops at checkpoint_steps[3]=15, so checkpoints past that step
-// (out[0]=30, out[2]=22 in this example) are never reached and stay at
-// their zero-initialized default. Found by a first version of
-// test_bayesian_permutation_invariant (now
-// test_bayesian_checkpoint_mismatch_sensitivity) that tried to permute
-// checkpoint_steps itself and got exactly this silent-zero corruption.
+// CONTRACT, now validated at runtime (panics on violation, Copilot review
+// sounio-lang/sounio#2694 -- a previous version left this as an unchecked
+// precondition; a first version of test_bayesian_permutation_invariant, now
+// test_bayesian_checkpoint_mismatch_sensitivity, found the actual failure
+// mode by permuting checkpoint_steps and getting silent zero-corruption
+// instead of an error): checkpoint_steps must be non-decreasing (repeats
+// are valid and intentionally used by bayesian_identifiability_crn to model
+// repeat measurements at one timepoint), checkpoint_steps[0] must be > 0
+// (a checkpoint of exactly 0 can never be reached -- the loop only tests
+// `s == checkpoint_steps[cp]` AFTER incrementing s past 0), and
+// checkpoint_steps[3] is the TOTAL number of RK4 steps to run (the loop
+// runs exactly that many steps, then detects each checkpoint by
+// `s == checkpoint_steps[cp]` as the step counter climbs through it,
+// advancing cp forward only).
 pub fn simulate_general_crn_checkpoints(init: &[f64; 8], ks: &[f64; 8], nu: MatNM, nsp: i64, nrxn: i64, dt: f64, checkpoint_steps: &[i64; 4], species_idx: i64) -> [f64; 4] with Mut, Div, Panic {
+    // VALIDATED (Copilot review, sounio-lang/sounio#2694): reproduced both
+    // failure modes directly before adding this guard -- checkpoint_steps[0]
+    // == 0 is unreachable (the loop below only tests `s == checkpoint_steps[cp]`
+    // AFTER incrementing s past 0, so a checkpoint of 0 can never match) and
+    // an out-of-order array silently stops early, both leaving the affected
+    // slot(s) at their zero-initialized default -- indistinguishable from a
+    // genuine near-zero concentration. Non-decreasing (>=), not strictly
+    // ascending, is the real contract: bayesian_identifiability_crn
+    // intentionally passes repeated checkpoints ([T,T,T,T]) to model
+    // repeat measurements at one timepoint.
+    if checkpoint_steps[0] <= 0 {
+        panic("simulate_general_crn_checkpoints: checkpoint_steps[0] must be > 0 (a checkpoint of 0 can never be reached by this stepper)")
+    }
+    var cpi: i64 = 1;
+    while cpi < 4 {
+        if checkpoint_steps[cpi] < checkpoint_steps[cpi - 1] {
+            panic("simulate_general_crn_checkpoints: checkpoint_steps must be non-decreasing")
+        }
+        cpi = cpi + 1;
+    }
     var y: [f64; 64] = [0.0; 64];
     var i = 0; while i < nsp { y[i] = init[i]; i = i + 1; }
     var out: [f64; 4] = [0.0; 4];
