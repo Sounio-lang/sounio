@@ -56,8 +56,20 @@ silently: `ph(1e-3, 1e-5)` returned the correct `3.0` with
 repro kept in this session's scratchpad
 (`/tmp/claude-0/collision_repro4.sio`, ~9 lines plus the two stdlib modules).
 Fixed at the stdlib level by prefixing every colliding helper with its
-module name; the underlying compiler behavior (a private symbol apparently
-resolved across module boundaries by declaration/import order during
-multi-module lowering) is unfixed and out of scope for this PR — this is a
-stdlib workaround, not a compiler fix, and is flagged here for a forensic
-dispatch per CLAUDE.md §4/§8 ("do not patch self-hosted/ ad hoc").
+module name. **Correction, same session**: this was first written up as an
+open compiler defect needing a forensic dispatch. It is not open — Copilot's
+review on the PR pointed at `docs/audit/MADAROS_PRIVATE_FN_IDENTITY_2026-09-21.md`,
+which documents this exact stdlib/chemistry pair as the motivating example
+for `self-hosted/compiler/private_fn_identity.sio`, landed 2026-09-21 (5
+days before this session). Verified directly rather than taking the doc's
+word for it: `make build-madaros` from current source, then the same
+two-import-order repro, gives the correct `3.0` both ways. The committed,
+shipped `bin/madaros-linux-x86_64` this repo ships predates that fix and
+still segfaults on the same repro (exit 139) rather than silently picking a
+body. Lesson for this log: `bin/souc`/the committed ELF lag source
+(CLAUDE.md operating principle 15) applies to reasoning about defects, not
+just to benchmark numbers — "reproduces on the shipped binary" and "open in
+current source" are different claims, and this entry conflated them. The
+stdlib prefix rename stays: it is no longer closing an open compiler
+defect, but it does mean acids::ph() doesn't depend on which Madaros a
+caller happens to be running.
