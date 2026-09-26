@@ -1,0 +1,202 @@
+//@ run-pass
+//@ expect-stdout-contains: PBPK28_HEPATIC_GATES_PASS
+
+// Gates V0-V2 for stdlib/darwin_pbpk/pbpk28_hepatic.sio.
+//
+// V0  Reduction: with k_t = 0, in_t = 0 and portal = false the new step must be
+//     BIT-IDENTICAL to pbpk28_full_cn_step (all 27 active states, every step),
+//     including a nonzero blood input (in_b == rel_mid).
+//
+// V1  Mass balance: with portal routing, liver + gut tissue sinks, a residual
+//     central clearance and an input into gut tissue,
+//       M(t) + E(t) = D(t)
+//     to relative 1e-10, where E accumulates pbpk28_hepatic_elim_step (the same
+//     trapezoid the CN scheme integrates) and D the delivered dose. A second
+//     configuration with portal routing and NO elimination checks that the
+//     portal transport itself conserves mass.
+//
+// V2  Steady state against closed form. Elimination confined to the liver tissue
+//     layer with sink k = fu·CLint/K_p. At steady state, liver tissue gives
+//       PS (C_v - C_t/K_p) = k C_t   =>   k C_t = X · C_v,
+//       X = fu·CLint·PS / (PS + fu·CLint)           (extended clearance model;
+//                                                     PS -> inf: X -> fu·CLint)
+//     Every organ without a sink has C_v = C_b (IV) and every splanchnic organ
+//     returns its input to the liver, so:
+//       IV infusion R into blood:        q_L C_b = (q_L + X) C_v,L,  X C_v,L = R
+//                                        => C_b = R / CL_H,  CL_H = q_L X/(q_L + X)
+//       portal infusion R into gut tissue (gut: q_g (C_b - C_v,g) + R = 0):
+//                                        q_L C_b + R = (q_L + X) C_v,L, X C_v,L = R
+//                                        => C_b = R / X
+//     so C_b,portal / C_b,iv = CL_H / X = q_L/(q_L + X) = F_H emerges from the
+//     physiology instead of being imposed. The CN fixed point is the continuous steady state
+//     exactly, so the only error is residual transient plus round-off.
+//
+// The V2 parameter set is the rapamycin transport profile with CL_central = 0 and
+// a synthetic hepatic CLint: a kernel-correctness fixture, not a drug claim.
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::tsit5_pbpk28::*
+use darwin_pbpk::pbpk28_hepatic::*
+
+fn g_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn e12(x: f64) -> i64 { return (x * 1000000000000.0) as i64 }
+
+// V0 --------------------------------------------------------------------------
+fn states_differ(a: PBPKState28, b: PBPKState28) -> bool with Mut {
+    var i: i32 = 0
+    var diff = false
+    while i < 14 {
+        if a.cv[i] != b.cv[i] { diff = true }
+        if a.ct[i] != b.ct[i] { diff = true }
+        i = i + 1
+    }
+    return diff
+}
+
+fn gate_v0() -> bool with Mut, Div, Panic, IO {
+    let p = pbpk28_params_rapamycin()
+    var s_ref = pbpk28_state_zero()
+    s_ref.cv[0] = 0.01
+    var s_new = s_ref
+    let hep = pbpk28_hepatic_none()
+    let dt = 0.01
+    var step: i32 = 0
+    var mismatches: i32 = 0
+    while step < 3000 {
+        let rel = if step < 500 { 0.2 } else { 0.0 }
+        var inp = pbpk28_input_none()
+        inp.in_b = rel
+        s_ref = pbpk28_full_cn_step(s_ref, p, rel, dt)
+        s_new = pbpk28_hepatic_cn_step(s_new, p, hep, inp, dt)
+        if states_differ(s_ref, s_new) { mismatches = mismatches + 1 }
+        step = step + 1
+    }
+    print("V0 steps with any bit difference = ")
+    println(mismatches)
+    return mismatches == 0
+}
+
+// V1 --------------------------------------------------------------------------
+fn mass_balance_max_rel(p: PBPKParams28, hep: PBPK28Hepatic, gut_rate: f64, t_input: f64, t_end: f64, dt: f64) -> f64 with Mut, Div, Panic {
+    var s = pbpk28_state_zero()
+    var dose = 0.0
+    var elim = 0.0
+    var worst = 0.0
+    var t = 0.0
+    while t < t_end - 0.5 * dt {
+        var inp = pbpk28_input_none()
+        if t < t_input - 0.5 * dt { inp.in_t[8] = gut_rate }
+        let s_next = pbpk28_hepatic_cn_step(s, p, hep, inp, dt)
+        dose = dose + dt * pbpk28_input_rate(inp)
+        elim = elim + pbpk28_hepatic_elim_step(s, s_next, p, hep, dt)
+        s = s_next
+        let m = pbpk28_total_mass(s, p)
+        if dose > 0.0 {
+            let rel = g_abs(m + elim - dose) / dose
+            // NaN-propagating max: `rel > worst` is false for NaN and would let a
+            // blown-up run report a tiny error.
+            if !(rel <= worst) { worst = rel }
+        }
+        t = t + dt
+    }
+    return worst
+}
+
+fn gate_v1() -> bool with Mut, Div, Panic, IO {
+    var p = pbpk28_params_rapamycin()
+    p.cl_central = 2.0
+    var hep = pbpk28_hepatic_none()
+    hep.portal = true
+    hep.k_t[1] = pbpk28_sink_from_clint(500.0, 0.1, p.kp[1])
+    hep.k_t[8] = pbpk28_sink_from_clint(30.0, 1.0, p.kp[8])
+    let worst_sink = mass_balance_max_rel(p, hep, 10.0, 2.0, 48.0, 0.01)
+
+    var p0 = pbpk28_params_rapamycin()
+    p0.cl_central = 0.0
+    var hep0 = pbpk28_hepatic_none()
+    hep0.portal = true
+    let worst_closed = mass_balance_max_rel(p0, hep0, 10.0, 2.0, 48.0, 0.01)
+
+    print("V1 max |M+E-D|/D with sinks (x1e12) = ")
+    println(e12(worst_sink))
+    print("V1 max |M+E-D|/D portal, no elimination (x1e12) = ")
+    println(e12(worst_closed))
+    return worst_sink < 1.0e-10 && worst_closed < 1.0e-10
+}
+
+// V2 --------------------------------------------------------------------------
+// Runs a constant infusion to steady state; returns (C_b at t_end, C_b 1 h before).
+fn steady_blood(p: PBPKParams28, hep: PBPK28Hepatic, into_gut: bool, rate: f64, t_end: f64, dt: f64) -> (f64, f64) with Mut, Div, Panic {
+    var s = pbpk28_state_zero()
+    var inp = pbpk28_input_none()
+    if into_gut { inp.in_t[8] = rate } else { inp.in_b = rate }
+    var t = 0.0
+    var cb_prev = 0.0
+    while t < t_end - 0.5 * dt {
+        s = pbpk28_hepatic_cn_step(s, p, hep, inp, dt)
+        t = t + dt
+        if t < t_end - 1.0 + 0.5 * dt && t > t_end - 1.0 - 0.5 * dt { cb_prev = s.cv[0] }
+    }
+    return (s.cv[0], cb_prev)
+}
+
+fn gate_v2() -> bool with Mut, Div, Panic, IO {
+    var p = pbpk28_params_rapamycin()
+    p.cl_central = 0.0
+    let clint = 200.0
+    let fu = 0.1
+    var hep = pbpk28_hepatic_none()
+    hep.portal = true
+    hep.k_t[1] = pbpk28_sink_from_clint(clint, fu, p.kp[1])
+
+    let x = pbpk28_ecm_x(clint, fu, p.ps[1])
+    let clh = pbpk28_ecm_clh(p.q[1], x)
+    let fh = pbpk28_ecm_fh(p.q[1], x)
+    let rate = 1.0
+
+    let (cb_iv, cb_iv_prev) = steady_blood(p, hep, false, rate, 100.0, 0.01)
+    let (cb_po, cb_po_prev) = steady_blood(p, hep, true, rate, 100.0, 0.01)
+
+    let err_iv = g_abs(cb_iv - rate / clh) / (rate / clh)
+    let err_po = g_abs(cb_po - rate / x) / (rate / x)
+    let fh_emergent = cb_po / cb_iv
+    let err_fh = g_abs(fh_emergent - fh) / fh
+    let drift = g_abs(cb_iv - cb_iv_prev) / cb_iv + g_abs(cb_po - cb_po_prev) / cb_po
+
+    print("V2 X (L/h) = ") println(x)
+    print("V2 CL_H (L/h) = ") println(clh)
+    print("V2 F_H closed form = ") println(fh)
+    print("V2 F_H emergent C_b,portal/C_b,iv = ") println(fh_emergent)
+    print("V2 rel err IV C_b (x1e12) = ") println(e12(err_iv))
+    print("V2 rel err portal C_b (x1e12) = ") println(e12(err_po))
+    print("V2 rel err F_H (x1e12) = ") println(e12(err_fh))
+    print("V2 last-hour drift (x1e12) = ") println(e12(drift))
+
+    // Same liver sink WITHOUT portal routing: the sink now goes through the main
+    // organ loop instead of the liver-portal block, and with every organ drawing
+    // from blood the IV steady state is again C_b = R / CL_H.
+    var hep_np = pbpk28_hepatic_none()
+    hep_np.k_t[1] = hep.k_t[1]
+    let (cb_np, cb_np_prev) = steady_blood(p, hep_np, false, rate, 100.0, 0.01)
+    let err_np = g_abs(cb_np - rate / clh) / (rate / clh)
+    let drift_np = g_abs(cb_np - cb_np_prev) / cb_np
+    print("V2 rel err IV C_b, no portal (x1e12) = ") println(e12(err_np))
+    print("V2 last-hour drift, no portal (x1e12) = ") println(e12(drift_np))
+
+    return err_iv < 1.0e-9 && err_po < 1.0e-9 && err_fh < 1.0e-9 && drift < 1.0e-9 && err_np < 1.0e-9 && drift_np < 1.0e-9
+}
+
+fn main() -> i32 with Mut, Div, Panic, IO {
+    let v0 = gate_v0()
+    let v1 = gate_v1()
+    let v2 = gate_v2()
+    if v0 { println("V0 PASS") } else { println("V0 FAIL") }
+    if v1 { println("V1 PASS") } else { println("V1 FAIL") }
+    if v2 { println("V2 PASS") } else { println("V2 FAIL") }
+    if v0 && v1 && v2 {
+        println("PBPK28_HEPATIC_GATES_PASS")
+        return 0
+    }
+    return 1
+}
