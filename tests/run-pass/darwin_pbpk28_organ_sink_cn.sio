@@ -1,0 +1,104 @@
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::tsit5_pbpk28::*
+
+//@ run-pass
+//@ expect-stdout-contains: PBPK28_ORGAN_SINK_CN_PASS
+//
+// Organ sink inside the PBPK28 CN step (pbpk28_full_cn_step_sink_mut), on the
+// venlafaxine parent profile with the CYP2D6 formation clearance on the liver.
+// Imports only the kernel + params, in darwin_pbpk28_smoke's style, so it also
+// runs under Madaros (scenarios/venlafaxine_xr pulls in release/matrix_er,
+// which the Madaros checker currently segfaults on).
+//
+// 75 mg oral dose from a gut pool (ka = 0.63 /h), dt = 0.5 h, 48 h;
+// CL_form = 43 · r / 3.45 L/h (Klamerus 1999 NM value scaled by Kirchheiner
+// 2006 ODV/parent ratios r, as in pgx/cyp2d6_venlafaxine), CL_central = 57 L/h.
+// CL_form·dt/V_liver spans 0.87 (PM) .. 35.7 (UM). Checks:
+//   1. Per-step mass identity M_new = M_old + dt·input
+//      − h·CL_c·(C_b,old + C_b,new) − removed, on every step where no state
+//      was clamped; exact in the CN algebra, so tolerance = rounding (1e-12 mg).
+//   2. Cumulative formation strictly increases PM < IM < NM < UM (an explicit
+//      post-step sink capped at the liver content forms identical mass for
+//      IM, NM and UM at this dt).
+//   3. With no sink the step is bit-identical to pbpk28_full_cn_step.
+fn fmt_9(x: f64) -> i64 { return (x * 1000000000.0) as i64 }
+
+fn main() with Mut, Div, IO {
+    let dt = 0.5
+    let h = 0.5 * dt
+    let frac = 0.2702133 // 1 − exp(−0.63 · 0.5), literal so both engines share it
+    var pheno = 0
+    var prev_formed = 0.0 - 1.0
+    var order_ok = true
+    while pheno < 4 {
+        var r = 3.45
+        if pheno == 0 { r = 0.25 }
+        if pheno == 1 { r = 1.16 }
+        if pheno == 3 { r = 10.3 }
+        let clf = 43.0 * (r / 3.45)
+        var pp = pbpk28_params_venlafaxine_parent()
+        pp.cl_central = 57.0
+        var par = pbpk28_state_zero()
+        var gut = 75.0
+        var formed = 0.0
+        var max_res = 0.0
+        var k = 0
+        while k < 96 {
+            let ab = gut * frac
+            gut = gut - ab
+            let m0 = pbpk28_total_mass(par, pp)
+            let c0 = par.cv[0]
+            let form = pbpk28_full_cn_step_sink_mut(&!par, pp, ab / dt, dt, 1, clf)
+            let m1 = pbpk28_total_mass(par, pp)
+            formed = formed + form
+            var zeroed = par.cv[0] == 0.0
+            var i = 1
+            while i < 14 {
+                if par.cv[i] == 0.0 || par.ct[i] == 0.0 { zeroed = true }
+                i = i + 1
+            }
+            if !zeroed {
+                var res = m1 - (m0 + ab - h * pp.cl_central * (c0 + par.cv[0]) - form)
+                if res < 0.0 { res = 0.0 - res }
+                if res > max_res { max_res = res }
+            }
+            k = k + 1
+        }
+        print("pheno="); print(pheno)
+        print(" formed_mg*1e9="); print(fmt_9(formed))
+        print(" max_res_unclamped_mg*1e9="); println(fmt_9(max_res))
+        if !(formed > prev_formed) { order_ok = false }
+        if !(max_res < 1.0e-12) { order_ok = false }
+        prev_formed = formed
+        pheno = pheno + 1
+    }
+    if !order_ok {
+        println("FAIL: organ-sink identity or phenotype ordering")
+        return
+    }
+
+    let p0 = pbpk28_params_venlafaxine_parent()
+    var s1 = pbpk28_state_zero()
+    var s2 = pbpk28_state_zero()
+    var j = 0
+    while j < 20 {
+        var rel = 0.0
+        if j < 6 { rel = 5.0 }
+        let removed = pbpk28_full_cn_step_sink_mut(&!s1, p0, rel, 0.5, 0, 0.0)
+        s2 = pbpk28_full_cn_step(s2, p0, rel, 0.5)
+        if removed != 0.0 {
+            println("FAIL: sink-off step reported removed mass")
+            return
+        }
+        var i = 0
+        while i < 14 {
+            if s1.cv[i] != s2.cv[i] || s1.ct[i] != s2.ct[i] {
+                println("FAIL: sink-off step differs from pbpk28_full_cn_step")
+                return
+            }
+            i = i + 1
+        }
+        j = j + 1
+    }
+    println("PBPK28_ORGAN_SINK_CN_PASS")
+}
