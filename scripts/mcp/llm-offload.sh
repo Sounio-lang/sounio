@@ -6,7 +6,15 @@
 # Available providers:
 #   deepseek     — DeepSeek V4 Pro (reasoning; 'deepseek-coder' silently
 #                  resolved to the weaker v4-flash and is no longer a listed model)
-#   xai|grok     — Grok 4.6 (primary adversarial math/review lane)
+#   xai|grok     — Grok 4.7 (primary adversarial math/review lane). CANONICAL ROUTE:
+#                  via LLM Gateway (paid, LLMGATEWAY_API_KEY, model grok-4-7). Falls back
+#                  to xAI direct (XAI_API_KEY, model grok-4.7) when the gateway key is
+#                  absent or the gateway call fails.
+#   kimi         — Kimi K3 (Moonshot) via LLM Gateway; the independent second vendor
+#                  of the canonical math-review fan-out
+#   gw:<model>   — any LLM Gateway model id, e.g. gw:deepseek-v4-pro, gw:glm-5.3,
+#                  gw:gpt-5.5 (catalogue: curl https://api.llmgateway.io/v1/models)
+#   xai-direct   — Grok 4.7 on xAI direct only (skips the gateway)
 #   xai-fast     — Grok 4.1 Fast Reasoning (lower-latency fallback)
 #   zai|glm      — Z.AI GLM-5.2 direct (independent math/review provider)
 #   local        — a LOCAL OpenAI-compatible endpoint (Ollama/vLLM/llama.cpp/LM Studio):
@@ -25,8 +33,11 @@
 #   all          — ALL providers (13 models)
 #
 # Keys read from env vars (set in ~/.sounio-keys.env):
+#   LLMGATEWAY_API_KEY (canonical, https://api.llmgateway.io/v1),
 #   DEEPSEEK_API_KEY, XAI_API_KEY, ZAI_API_KEY or ZHIPU_API_KEY,
 #   GROQ_API_KEY, OPENROUTER_API_KEY, MINIMAX_API_KEY
+# Model / endpoint overrides: LLMGATEWAY_BASE_URL, LLMGATEWAY_GROK_MODEL (grok-4-7),
+#   LLMGATEWAY_KIMI_MODEL (kimi-k3), XAI_MODEL (grok-4.7).
 
 set -euo pipefail
 
@@ -48,6 +59,8 @@ for _keyfile in "${SOUNIO_KEYS_ENV:-}" "$HOME/.sounio-keys.env" "/workspace/.hom
 done
 
 PROMPT="$(cat "$PROMPT_FILE")"
+
+LLMGATEWAY_BASE_URL="${LLMGATEWAY_BASE_URL:-https://api.llmgateway.io/v1}"
 
 call_openai_compat() {
     local name="$1" url="$2" key="$3" model="$4" outfile="$5"
@@ -108,8 +121,42 @@ run_provider() {
             call_openai_compat "DeepSeek" "https://api.deepseek.com" "$DEEPSEEK_API_KEY" "deepseek-v4-pro" "$OUTDIR/deepseek.json"
             ;;
         xai|grok)
-            [[ -n "${XAI_API_KEY:-}" ]] && \
-            call_openai_compat "Grok 4.6" "https://api.x.ai/v1" "$XAI_API_KEY" "grok-4.6" "$OUTDIR/grok.json"
+            # Canonical (2026-09-26): Grok 4.7 through LLM Gateway; xAI direct is the
+            # fallback, so a gateway outage never silently drops the primary math leg.
+            if [[ -n "${LLMGATEWAY_API_KEY:-}" ]]; then
+                call_openai_compat "Grok 4.7 (LLM Gateway)" "$LLMGATEWAY_BASE_URL" "$LLMGATEWAY_API_KEY" "${LLMGATEWAY_GROK_MODEL:-grok-4-7}" "$OUTDIR/grok.json"
+                if [[ ! -s "$OUTDIR/grok.md" && -n "${XAI_API_KEY:-}" ]]; then
+                    mv -f "$OUTDIR/grok.json" "$OUTDIR/grok-gateway-failed.json" 2>/dev/null || true
+                    echo "  .. Grok 4.7: gateway leg failed, falling back to xAI direct"
+                    call_openai_compat "Grok 4.7 (xAI direct)" "https://api.x.ai/v1" "$XAI_API_KEY" "${XAI_MODEL:-grok-4.7}" "$OUTDIR/grok.json"
+                fi
+            elif [[ -n "${XAI_API_KEY:-}" ]]; then
+                call_openai_compat "Grok 4.7 (xAI direct)" "https://api.x.ai/v1" "$XAI_API_KEY" "${XAI_MODEL:-grok-4.7}" "$OUTDIR/grok.json"
+            else
+                echo "  <- Grok 4.7: SKIPPED (set LLMGATEWAY_API_KEY, or XAI_API_KEY for the direct route)"
+            fi
+            ;;
+        xai-direct)
+            if [[ -n "${XAI_API_KEY:-}" ]]; then
+                call_openai_compat "Grok 4.7 (xAI direct)" "https://api.x.ai/v1" "$XAI_API_KEY" "${XAI_MODEL:-grok-4.7}" "$OUTDIR/grok-direct.json"
+            else
+                echo "  <- Grok 4.7 (xAI direct): SKIPPED (set XAI_API_KEY)"
+            fi
+            ;;
+        kimi|moonshot)
+            if [[ -n "${LLMGATEWAY_API_KEY:-}" ]]; then
+                call_openai_compat "Kimi K3 (LLM Gateway)" "$LLMGATEWAY_BASE_URL" "$LLMGATEWAY_API_KEY" "${LLMGATEWAY_KIMI_MODEL:-kimi-k3}" "$OUTDIR/kimi.json"
+            else
+                echo "  <- Kimi K3: SKIPPED (set LLMGATEWAY_API_KEY)"
+            fi
+            ;;
+        gw:*)
+            local _gm="${p#gw:}"
+            if [[ -n "${LLMGATEWAY_API_KEY:-}" && -n "$_gm" ]]; then
+                call_openai_compat "LLM Gateway $_gm" "$LLMGATEWAY_BASE_URL" "$LLMGATEWAY_API_KEY" "$_gm" "$OUTDIR/gw-${_gm//[^A-Za-z0-9._-]/_}.json"
+            else
+                echo "  <- LLM Gateway ${_gm:-?}: SKIPPED (set LLMGATEWAY_API_KEY; usage gw:<model-id>)"
+            fi
             ;;
         xai-fast)
             [[ -n "${XAI_API_KEY:-}" ]] && \
@@ -195,7 +242,7 @@ expand_providers() {
     local result=()
     for p in "$@"; do
         if [[ "$p" == "all" ]]; then
-            result+=(deepseek xai zai grok-code groq gemini qwen mistral llama cohere openrouter minimax)
+            result+=(deepseek xai kimi zai grok-code groq gemini qwen mistral llama cohere openrouter minimax)
         else
             result+=("$p")
         fi
