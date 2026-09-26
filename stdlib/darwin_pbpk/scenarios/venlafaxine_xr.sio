@@ -24,7 +24,12 @@
 // bound — see "Steady-state ODV/parent readout" below.
 //
 // Literature anchors: Gohel 2008 (matrix), Wang 2022 (ka, F), Klamerus 1999 (CL),
-// Shams 2006 (steady-state ODV/V serum ratio bands).
+// Shams 2006 (steady-state ODV/V serum ratio bands, readout comparison only).
+// The CYP2D6 CL_form phenotype scaling (vfx_cl_form_odv_adjusted) still comes
+// from the ratios pgx/cyp2d6_venlafaxine.sio attributes to "Kirchheiner 2006,
+// Ther Drug Monit 28:493-502". That citation is UNRESOLVED: it is not in
+// PubMed, its pages match Shams 2006, and the Shams abstract does not contain
+// those ratios. Shams does not supply the sink scaling.
 
 use darwin_pbpk::core::pbpk28_params::*
 use darwin_pbpk::tsit5_pbpk28::*
@@ -134,16 +139,32 @@ fn vfx_strang_step(
     return vfx_step_released(scen, matrix_step_amount(rel, t_start, dt), dt)
 }
 
-// Taylor exp for negative arguments (shared pattern with semaglutide scenario).
+// Taylor exp for negative arguments (shared pattern with semaglutide scenario),
+// with range reduction. The 19-term series alone is only accurate near 0: at
+// x = −15.12 (dt = 24 h) it returns −9.2e4, which made frac_abs ≈ 9.2e4 and
+// injected millions of mg. Halve x until |x| ≤ 0.5, sum the series, then
+// square back: exp(x) = exp(x/2^m)^(2^m). For |x| ≤ 0.5 (ka·dt ≤ 0.5, i.e.
+// dt ≤ 0.79 h) no reduction happens and the result is bit-identical to the
+// unreduced series.
 fn mer_exp_neg(x: f64) -> f64 with Mut, Div {
     if x >= 0.0 { return 1.0 }
+    var r = x
+    var m: i64 = 0
+    while r < 0.0 - 0.5 {
+        r = 0.5 * r
+        m = m + 1
+    }
     var y = 1.0
     var term = 1.0
     var k: i64 = 1
     while k < 20 {
-        term = term * x / (k as f64)
+        term = term * r / (k as f64)
         y = y + term
         k = k + 1
+    }
+    while m > 0 {
+        y = y * y
+        m = m - 1
     }
     return y
 }
@@ -365,12 +386,19 @@ pub fn vfx_ss_ratio(iv: VfxSsInterval) -> f64 with Div {
 }
 
 // Certified interval for the exact steady-state ratio given the run's bounds.
+// When the error bound swallows an AUC (large dt, heavy clamping) the interval
+// is unbounded on that side rather than a quotient of negatives: at dt = 6 h
+// the parent bound exceeds the parent AUC and the naive upper end was −4.2.
 pub fn vfx_ss_ratio_lo(iv: VfxSsInterval) -> f64 with Div {
-    return (iv.auc_odv - iv.err_auc_odv) / (iv.auc_parent + iv.err_auc_parent)
+    let num = iv.auc_odv - iv.err_auc_odv
+    if num <= 0.0 { return 0.0 }
+    return num / (iv.auc_parent + iv.err_auc_parent)
 }
 
 pub fn vfx_ss_ratio_hi(iv: VfxSsInterval) -> f64 with Div {
-    return (iv.auc_odv + iv.err_auc_odv) / (iv.auc_parent - iv.err_auc_parent)
+    let den = iv.auc_parent - iv.err_auc_parent
+    if den <= 0.0 { return 1.0e300 }
+    return (iv.auc_odv + iv.err_auc_odv) / den
 }
 
 // The readout: steady-state C_avg ODV/parent blood ratio, 75 mg XR q24h.
