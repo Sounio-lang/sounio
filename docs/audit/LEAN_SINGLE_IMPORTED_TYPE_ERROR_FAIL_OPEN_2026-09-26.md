@@ -434,7 +434,8 @@ divergence. No other engine difference is involved in these two demos.
   three significant figures, and the engine difference is noise beneath the
   discretisation error. That lane also reports `t_to_90pct_h`,
   steady-state dose labelling and trapezoid-AUC defects in
-  `steady_state_runner.sio`; they are not addressed in this PR.
+  `steady_state_runner.sio`; those three were fixed later in this PR (see
+  "Steady-state runner: three endpoint bugs" below).
 - Any lean_single-versus-Madaros parity comparison involving decimal literals
   can differ at the ulp level for this reason alone. Parity checks should
   compare with a tolerance or on correctly rounded inputs.
@@ -604,3 +605,13 @@ Ratios such as AUC_last / AUC_first are scale-free and survive. Absolute
 concentrations, AUCs and Kp,uu do not. The sign correction, which the
 first version of this note missed, is from gracious-bardeen. It needs an operator decision
 and a math review before any change.
+
+A later review noted that the runner's header described `C_max_ss`,
+`C_trough_ss` and `AUC_tau_ss` as last-interval values, while the code
+freezes them at the interval where steady state is declared. The
+documentation now states the actual behaviour (declaration interval,
+`dose_of_ss`). Whether these endpoints should instead report the last
+interval is an open operator decision. It would change reported numbers
+(full-Vd AUC_tau_ss 0.001735 -> 0.001737), and the declaration can sit
+below the plateau (see the math review above).
+
