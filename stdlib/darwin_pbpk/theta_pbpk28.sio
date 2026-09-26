@@ -329,8 +329,30 @@ pub fn pbpk28_theta_step_mut(
 // One step of length dt under Rannacher time-marching: two backward-Euler half
 // steps when `startup` (a step right after a dosing event), otherwise one
 // clamp-free CN step. `rel_mid` is held over the whole step either way, so the
-// administered mass is dt·rel_mid in both branches. Returns the organ-sink
-// mass removed over the step.
+// administered mass is dt·rel_mid in both branches; `input_organ` routes it as
+// in `pbpk28_theta_step_routed_sink_mut`. Returns the organ-sink mass removed
+// over the step.
+pub fn pbpk28_rannacher_step_routed_sink_mut(
+    state: &!PBPKState28,
+    p: PBPKParams28,
+    rel_mid: f64,
+    input_organ: i32,
+    dt: f64,
+    startup: bool,
+    sink_organ: i32,
+    cl_sink: f64,
+    ledger: &!PBPK28Ledger
+) -> f64 with Mut, Div {
+    if startup {
+        let half = 0.5 * dt
+        let s1 = pbpk28_theta_step_routed_sink_mut(state, p, rel_mid, input_organ, half, 1.0, sink_organ, cl_sink, ledger)
+        let s2 = pbpk28_theta_step_routed_sink_mut(state, p, rel_mid, input_organ, half, 1.0, sink_organ, cl_sink, ledger)
+        return s1 + s2
+    }
+    return pbpk28_theta_step_routed_sink_mut(state, p, rel_mid, input_organ, dt, 0.5, sink_organ, cl_sink, ledger)
+}
+
+// Rannacher step with the input into blood (the original entry point).
 pub fn pbpk28_rannacher_step_sink_mut(
     state: &!PBPKState28,
     p: PBPKParams28,
@@ -341,13 +363,7 @@ pub fn pbpk28_rannacher_step_sink_mut(
     cl_sink: f64,
     ledger: &!PBPK28Ledger
 ) -> f64 with Mut, Div {
-    if startup {
-        let half = 0.5 * dt
-        let s1 = pbpk28_theta_step_sink_mut(state, p, rel_mid, half, 1.0, sink_organ, cl_sink, ledger)
-        let s2 = pbpk28_theta_step_sink_mut(state, p, rel_mid, half, 1.0, sink_organ, cl_sink, ledger)
-        return s1 + s2
-    }
-    return pbpk28_theta_step_sink_mut(state, p, rel_mid, dt, 0.5, sink_organ, cl_sink, ledger)
+    return pbpk28_rannacher_step_routed_sink_mut(state, p, rel_mid, 0, dt, startup, sink_organ, cl_sink, ledger)
 }
 
 // Sink-free Rannacher step.
@@ -539,7 +555,8 @@ pub fn pbpk28_mass_gate_report(ledger: PBPK28Ledger, s: PBPKState28, p: PBPKPara
 // `dose_mg` into blood at t = 0 (the dosing event), Rannacher start-up, fixed
 // dt with the last step clipped to t_end. `*st` must be a zero state. Returns
 // false — the caller treats the run as failed — on a non-finite or runaway
-// (|C_b| > 1e12 mg/L) blood value, on more than `max_steps` steps, or when the
+// (|C_b| > 1e12 mg/L) blood value, when t_end needs more than `max_steps`
+// steps, or when the
 // booked negative mass exceeds `pbpk28_neg_mass_bound_mg()` (fail loudly
 // instead of flooring). State and ledger are left where the run stopped.
 pub fn pbpk28_bolus_run_mut(
@@ -556,7 +573,7 @@ pub fn pbpk28_bolus_run_mut(
     var t = 0.0
     var k: i32 = 0
     while t < t_end {
-        if k > max_steps { return false }
+        if k >= max_steps { return false }
         let dt_use = if t + dt > t_end { t_end - t } else { dt }
         pbpk28_rannacher_step_mut(st, p, 0.0, dt_use, k < n_start, led)
         let cb = (*st).cv[0]
