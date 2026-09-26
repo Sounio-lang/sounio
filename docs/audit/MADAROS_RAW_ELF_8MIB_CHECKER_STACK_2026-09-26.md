@@ -164,8 +164,9 @@ findings below are as reported over `sounio-coord`; I have not re-measured
 them:
 
 - **E137 is correct, and lean_single is the engine that is wrong.** The
-  undeclared name is `print_i64`, which is declared nowhere; the builtin is
-  `print_int`. lean_single passes because it never fails the build on a type
+  undeclared name is `print_i64`. `bbb_gate.sio` and `bbb_voi.sio` neither
+  declare nor import it. Other, unrelated modules define their own local
+  `print_i64`, and the builtin is `print_int`. lean_single passes because it never fails the build on a type
   error inside an imported function. It compiles the call to `xor eax,eax`,
   and the integers silently drop out of the output. See
   `docs/audit/LEAN_SINGLE_IMPORTED_TYPE_ERROR_FAIL_OPEN_2026-09-26.md`
