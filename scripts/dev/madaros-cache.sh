@@ -53,8 +53,17 @@ _mc_sha() { sha256sum "$1" | cut -c1-64; }
 # checkout keys differently from its HEAD. ~2.5 s on 2.5k files.
 madaros_tree_key() {
     local root; root="$(_mc_root)"
-    ( cd "$root" && git ls-files -z -co --exclude-standard self-hosted stdlib \
-        | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-64 )
+    (
+        cd "$root" || exit 1
+        # Without git metadata (souc-build-remote.sh ships a tarball to SLURM
+        # nodes) fall back to every regular file under the two trees. The key
+        # is still a pure function of content; it just may include ignored files.
+        if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            git ls-files -z -co --exclude-standard self-hosted stdlib
+        else
+            find self-hosted stdlib -type f -print0 2>/dev/null
+        fi | sort -z | xargs -0 -r sha256sum | sha256sum | cut -c1-64
+    )
 }
 
 # Stage 1 key: bootstrap ELF bytes + lean_single.sio bytes.
@@ -145,6 +154,9 @@ madaros_cache_build_locked() {
     local stage="$1" key="$2" out="$3"; shift 3
     madaros_cache_get "$stage" "$key" "$out" && return 0
     local lib; lib="$(_mc_root)/scripts/dev/madaros-cache.sh"
+    # Tree state at the moment the caller computed $key (keys are derived from
+    # the tree just before this call).
+    MADAROS_CACHE_TREE_AT_KEY="$(madaros_tree_key)" \
     "$(_mc_root)/scripts/dev/souc-build-lock.sh" bash -c '
         lib="$1"; stage="$2"; key="$3"; out="$4"; shift 4
         # shellcheck source=/dev/null
@@ -153,7 +165,15 @@ madaros_cache_build_locked() {
             echo "[madaros-cache] stored by a concurrent build while waiting for the lock" >&2
             exit 0
         fi
+        # The key was computed before waiting for the lock; if the tree moved
+        # meanwhile (another agent editing this worktree) the output no longer
+        # corresponds to it, so it is used but not stored.
+        tree_before="$(madaros_tree_key)"
         "$@" || exit $?
-        madaros_cache_put "$stage" "$key" "$out"
+        if [[ "$(madaros_tree_key)" == "$tree_before" && "$tree_before" == "$MADAROS_CACHE_TREE_AT_KEY" ]]; then
+            madaros_cache_put "$stage" "$key" "$out"
+        else
+            echo "[madaros-cache] source tree changed since $stage/$key was computed -- not storing" >&2
+        fi
     ' _ "$lib" "$stage" "$key" "$out" "$@"
 }
