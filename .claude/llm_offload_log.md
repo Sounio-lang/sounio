@@ -45,7 +45,8 @@ within the test's own tolerance). The quadratic root for `test_ab_c`
 exactly, confirming the *function* was already correct and only the
 *test's* prior expectation (0.45) was wrong. Both fixes verified by actually
 running the module (`bin/souc run stdlib/chemistry/equilibrium.sio` →
-`EQUILIBRIUM + ELECTRO + SOLVERS REAL ALL PASS`), not just `check`ing it.
+`EQUILIBRIUM + ELECTRO + SOLVERS REAL ALL PASS (phase3+)`), not just
+`check`ing it.
 
 **Flagged for re-review**: per the policy's failure-mode table, this should
 get an orthogonal-provider pass once a provider is configured in a session
