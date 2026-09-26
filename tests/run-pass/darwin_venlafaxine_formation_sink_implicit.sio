@@ -21,12 +21,23 @@
 //   4. Formation separates every phenotype, PM < IM < NM < UM, and UM > NM
 //      is not a saturation artefact: the NM-UM gap (~14 %) is > 100× the
 //      dt = 0.5 vs 0.25 h change in cumulative formation (~3e-6 relative).
+//   5. dt-convergence against a dt-independent limit, with a derived bound.
+//      Summing the split CN steps, formed = f_m·A + CL_form·cᵀ(−A_p)⁻¹(ĵ − x_N),
+//      where A is the absorbed mass, f_m the closed-form fraction converted
+//      (vfx_formation_fraction_closed_form), ĵ = (I − hA_p)j the clamp
+//      injection (j ≥ 0) and x_N ≥ 0 the parent left at 120 h. Converted mass
+//      never exceeds the mass it came from, and the h·j part adds at most
+//      h·CL_form·m(j)/V_liver, so
+//        |formed − f_m·A| ≤ R_p·(1 + h·CL_form/V_liver) + M_end,p,
+//      with R_p = Σ |per-step parent mass residual| ≥ m(j). Asserted for every
+//      phenotype at dt = 0.5 and 0.25 h; no tolerance is chosen.
 
 use darwin_pbpk::core::pbpk28_params::*
 use darwin_pbpk::tsit5_pbpk28::*
 use darwin_pbpk::scenarios::venlafaxine_xr::*
 use darwin_pbpk::release::matrix_er::*
 use darwin_pbpk::drugs::venlafaxine::*
+use darwin_pbpk::pgx::cyp2d6_venlafaxine::*
 
 fn fs_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
 
@@ -45,6 +56,9 @@ struct FormationAudit {
     formed_clean_mg: f64,
     max_res_parent: f64,
     max_res_odv: f64,
+    absorbed_mg: f64,
+    sum_res_parent: f64,
+    m_end_parent: f64,
 }
 
 // Drives the scenario's parent step (vfx_parent_step_with_formation) with the
@@ -64,6 +78,8 @@ fn fs_run(pheno: i32, dt: f64) -> FormationAudit with Mut, Div, Panic {
     var formed_clean = 0.0
     var max_rp = 0.0
     var max_ro = 0.0
+    var absorbed = 0.0
+    var sum_rp = 0.0
     while t < 120.0 - 0.5 * dt {
         gut = gut + matrix_step_amount(rel, t, dt)
         let ab = venlafaxine_f_oral_xr() * gut * (1.0 - exp(0.0 - venlafaxine_ka_abs() * dt))
@@ -74,6 +90,8 @@ fn fs_run(pheno: i32, dt: f64) -> FormationAudit with Mut, Div, Panic {
         let form = vfx_parent_step_with_formation(&!par, pheno, ab / dt, dt)
         let mp1 = pbpk28_total_mass(par, pp)
         formed = formed + form
+        absorbed = absorbed + ab
+        sum_rp = sum_rp + fs_abs(mp1 - (mp0 + ab - h * pp.cl_central * (cp0 + par.cv[0]) - form))
         if !fs_has_zeroed_state(par) {
             formed_clean = formed_clean + form
             let rp = fs_abs(mp1 - (mp0 + ab - h * pp.cl_central * (cp0 + par.cv[0]) - form))
@@ -95,6 +113,9 @@ fn fs_run(pheno: i32, dt: f64) -> FormationAudit with Mut, Div, Panic {
         formed_clean_mg: formed_clean,
         max_res_parent: max_rp,
         max_res_odv: max_ro,
+        absorbed_mg: absorbed,
+        sum_res_parent: sum_rp,
+        m_end_parent: pbpk28_total_mass(par, pp),
     }
 }
 
@@ -115,6 +136,22 @@ fn fs_audit_ok(a: FormationAudit) -> bool with IO {
         return false
     }
     return true
+}
+
+// Claim 5: formed within the derived bound of f_m × absorbed.
+fn fs_formation_certified(a: FormationAudit, pheno: i32, dt: f64) -> bool with IO, Mut, Div, Panic {
+    let pp = pbpk28_params_venlafaxine_parent()
+    let hk = 0.5 * dt * vfx_cl_form_odv_adjusted(pheno) / pp.v_ref[1]
+    let target = vfx_formation_fraction_closed_form(pheno) * a.absorbed_mg
+    let bound = a.sum_res_parent * (1.0 + hk) + a.m_end_parent
+    println("pheno, dt, formed, f_m*absorbed, |diff|, bound (mg):")
+    println(pheno)
+    println(dt)
+    println(a.formed_mg)
+    println(target)
+    println(fs_abs(a.formed_mg - target))
+    println(bound)
+    return fs_abs(a.formed_mg - target) <= bound
 }
 
 fn main() with Mut, Div, IO, Panic {
@@ -150,6 +187,19 @@ fn main() with Mut, Div, IO, Panic {
     if !(gap > 100.0 * dt_change) {
         println("FAIL: NM/UM separation not resolved above dt error")
         return
+    }
+
+    var ph: i32 = 0
+    while ph < 4 {
+        if !fs_formation_certified(fs_run(ph, dt), ph, dt) {
+            println("FAIL: formation outside certified bound of f_m*absorbed at dt = 0.5")
+            return
+        }
+        if !fs_formation_certified(fs_run(ph, 0.5 * dt), ph, 0.5 * dt) {
+            println("FAIL: formation outside certified bound of f_m*absorbed at dt = 0.25")
+            return
+        }
+        ph = ph + 1
     }
     println("VENLAFAXINE_FORMATION_SINK_IMPLICIT_PASS")
 }
