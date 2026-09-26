@@ -66,15 +66,28 @@ def clean_comment(line: str) -> str:
 
 def parse_annotations(lines: list[str]) -> dict[str, list[str]]:
     annotations: dict[str, list[str]] = {}
+    last_key: str | None = None
     for line in lines:
         if not line.startswith("//@"):
+            last_key = None
+            continue
+        # `//@   text` (two or more spaces) continues the previous annotation's
+        # value; folding it keeps multi-line reasons whole instead of turning
+        # each wrapped fragment into a bogus key.
+        if line.startswith("//@  ") and last_key is not None:
+            text = line[3:].strip()
+            if text:
+                values = annotations[last_key]
+                values[-1] = f"{values[-1]} {text}"
             continue
         raw = line[3:].strip()
         if ":" in raw:
             key, value = raw.split(":", 1)
-            annotations.setdefault(key.strip(), []).append(value.strip())
+            last_key = key.strip()
+            annotations.setdefault(last_key, []).append(value.strip())
         else:
-            annotations.setdefault(raw.strip(), []).append("true")
+            last_key = raw.strip()
+            annotations.setdefault(last_key, []).append("true")
     return annotations
 
 
