@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# check_doc_snippets.sh -- Extract ```sio blocks from docs and check them
+# check_doc_snippets.sh -- Extract ```sio blocks from docs and website and check them
 #
-# Extracts Sounio code blocks from markdown docs, writes each to a temp file,
-# and runs `souc check` on them. Reports pass/fail counts.
+# Extracts Sounio code blocks from markdown/mdx docs and website tutorials,
+# writes each to a temp file, and runs `souc check` on them. Reports pass/fail counts.
 #
 # Usage:
 #   bash scripts/ci/check_doc_snippets.sh [--verbose]
@@ -23,7 +23,9 @@ total=0
 
 extract_snippets() {
     local md_file="$1"
+    # Handle both .md and .mdx extensions
     local base="$(basename "$md_file" .md)"
+    base="$(basename "$base" .mdx)"
     local inside=false
     local snippet_idx=0
     local buf=""
@@ -55,9 +57,17 @@ extract_snippets() {
     done < "$md_file"
 }
 
+# Extract from docs/*.md
 find "$REPO_ROOT/docs" -name '*.md' -not -path '*/archived/*' -not -path '*/internal/*' | sort | while read -r md; do
     extract_snippets "$md"
 done
+
+# Extract from website/src/content/**/*.mdx (tutorials, blog posts, showcases)
+if [ -d "$REPO_ROOT/website/src/content" ]; then
+    find "$REPO_ROOT/website/src/content" -name '*.mdx' | sort | while read -r mdx; do
+        extract_snippets "$mdx"
+    done
+fi
 
 for f in "$TMPDIR"/*.sio; do
     [ -f "$f" ] || continue
