@@ -2,7 +2,7 @@
 topic_id: repo.docs.decisions.adr-012-hyper-native-v2-bridge
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
+last_validated: 2026-09-26
 validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.decisions.adr-012-hyper-native-v2-bridge
 -->
@@ -12,7 +12,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.decisions.adr-
 - **Status:** experimental
 - **Date:** 2026-09-24
 - **Context:**
-  The Sounio front-end and typechecker parse, type-check, and lower hypercomplex expressions (e.g. `pa: &Hyper<Octonion, f64>`, `a * b` with effect `with NonAssoc`) into high-level IR nodes (`IrOpcode::IrHyperMulO`). Furthermore, the mathematical lowering logic for IrHyperMulO exists in `self-hosted/native/lower_ir.sio:1640` (`lower_hyper_mul_o_fano`) producing an optimal 31-instruction / 186-byte single-ZMM AVX-512 Fano sequence that has been proven mathematically sound and validated bit-exact in hardware silicon.
+  The Sounio front-end and typechecker parse, type-check, and lower hypercomplex expressions (e.g. `pa: &Hyper<Octonion, f64>`, `a * b` with effect `with NonAssoc`) into high-level IR nodes (`IrOpcode::IrHyperMulO`). Furthermore, the mathematical lowering logic for IrHyperMulO exists in `self-hosted/native/lower_ir.sio:1774` (`lower_hyper_mul_o_fano`) producing an optimal 31-instruction / 186-byte single-ZMM AVX-512 Fano sequence that has been proven mathematically sound and validated bit-exact in hardware silicon.
   
   However, the compiler driver that executes programs via `souc run` and `souc build` (`native-v2`, `self-hosted/native/codegen_x86_linux.sio`) currently has no handler for `IrOpcode::IrHyperMulO` (returning `rc=12` on unhandled opcode). Consequently, hypercomplex vector multiplication is not yet directly callable from ordinary source-level Sounio code in native executable ELFs.
 
