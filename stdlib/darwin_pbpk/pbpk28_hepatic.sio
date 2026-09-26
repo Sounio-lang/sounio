@@ -63,6 +63,28 @@ pub struct PBPK28Input {
     pub in_t: [f64; 14],
 }
 
+// Coefficient buffers of one step: C^{n+1} = a + b·C_b^{n+1} per organ, for the
+// vascular and interstitial layers. Callers that step many times keep one and
+// pass it to the *_ws steps: under the default Madaros engine every local
+// [f64; 14] costs a managed handle per call and the handle table is never
+// reclaimed (docs/audit/MADAROS_HANDLE_TABLE_182_LIFETIME_DISPATCH_2026-08-17.md).
+// Every entry a step reads is written by that step first, so the buffer needs no
+// reset between calls.
+// `clamped` is set by every step to the mass (mg) the negativity clamp added in
+// that step, Σ V·max(0, -c) over blood and both layers of every organ. The
+// scheme conserves mass exactly only while it is zero (see the θ-step note).
+pub struct PBPK28Work {
+    pub a_v: [f64; 14],
+    pub b_v: [f64; 14],
+    pub a_t: [f64; 14],
+    pub b_t: [f64; 14],
+    pub clamped: f64,
+}
+
+pub fn pbpk28_work_new() -> PBPK28Work {
+    PBPK28Work { a_v: [0.0; 14], b_v: [0.0; 14], a_t: [0.0; 14], b_t: [0.0; 14], clamped: 0.0 }
+}
+
 pub fn pbpk28_hepatic_none() -> PBPK28Hepatic {
     PBPK28Hepatic { k_t: [0.0; 14], portal: false }
 }
@@ -97,30 +119,49 @@ fn pbpk28_portal_sum(x: &[f64; 14], q: &[f64; 14]) -> f64 {
     return (*q)[P28H_GUT] * (*x)[P28H_GUT] + (*q)[P28H_SPLEEN] * (*x)[P28H_SPLEEN] + (*q)[P28H_PANCREAS] * (*x)[P28H_PANCREAS]
 }
 
-fn pbpk28_hepatic_apply(
+// Writes C^{n+1} = a + b·C_b^{n+1}, clamping negatives to zero, and records in
+// ws.clamped the mass the clamp added (volumes as in pbpk28_total_mass).
+fn pbpk28_hepatic_apply_ws(
     state: &!PBPKState28,
     cb_new: f64,
-    a_v: &[f64; 14],
-    b_v: &[f64; 14],
-    a_t: &[f64; 14],
-    b_t: &[f64; 14]
+    ws: &!PBPK28Work,
+    p: PBPKParams28
 ) with Mut, Div {
-    (*state).cv[0] = if cb_new < 0.0 { 0.0 } else { cb_new }
+    var added = 0.0
+    if cb_new < 0.0 {
+        (*state).cv[0] = 0.0
+        added = added - p.v_ref[0] * cb_new
+    } else {
+        (*state).cv[0] = cb_new
+    }
     var i: i32 = 1
     while i < 14 {
-        let cv = (*a_v)[i] + (*b_v)[i] * cb_new
-        let ct = (*a_t)[i] + (*b_t)[i] * cb_new
-        (*state).cv[i] = if cv < 0.0 { 0.0 } else { cv }
-        (*state).ct[i] = if ct < 0.0 { 0.0 } else { ct }
+        let cv = (*ws).a_v[i] + (*ws).b_v[i] * cb_new
+        let ct = (*ws).a_t[i] + (*ws).b_t[i] * cb_new
+        let vv = p.v_ref[i] * p.vasc_frac[i]
+        let vt = p.v_ref[i] * (1.0 - p.vasc_frac[i])
+        if cv < 0.0 {
+            (*state).cv[i] = 0.0
+            added = added - vv * cv
+        } else {
+            (*state).cv[i] = cv
+        }
+        if ct < 0.0 {
+            (*state).ct[i] = 0.0
+            added = added - vt * ct
+        } else {
+            (*state).ct[i] = ct
+        }
         i = i + 1
     }
+    (*ws).clamped = added
 }
 
 // Liver 2×2 block under portal routing. Inflow is Q_ha·C_b + Σ_s Q_s·C_v,s with
-// every C_v,s^{n+1} = a_v,s + b_v,s·C_b^{n+1}; returns (a_v, b_v, a_t, b_t) of the
-// liver as affine functions of C_b^{n+1}.
+// every C_v,s^{n+1} = a_v,s + b_v,s·C_b^{n+1}; writes the liver's (a_v, b_v, a_t,
+// b_t) as affine functions of C_b^{n+1} into ws (reads the state at t_n).
 fn pbpk28_liver_portal_block(
-    s: PBPKState28,
+    s: &PBPKState28,
     p: PBPKParams28,
     k_liver: f64,
     in_t_liver: f64,
@@ -129,8 +170,9 @@ fn pbpk28_liver_portal_block(
     portal_a: f64,
     portal_b: f64,
     h: f64,
-    dt: f64
-) -> (f64, f64, f64, f64) with Div {
+    dt: f64,
+    ws: &!PBPK28Work
+) with Mut, Div {
     let i = P28H_LIVER
     let vi = p.v_ref[i]
     let vf = p.vasc_frac[i]
@@ -148,30 +190,30 @@ fn pbpk28_liver_portal_block(
     let sb = 1.0 + h * ps / (vt * kp) + h * k_liver / vt
     let det = pp * sb - qq * rr
 
-    let inflow_old = q_ha * s.cv[0] + portal_old
-    let rhs_v = (h / vv) * (inflow_old + portal_a) + (1.0 - h * (ql + ps) / vv) * s.cv[i] + qq * s.ct[i]
+    let inflow_old = q_ha * (*s).cv[0] + portal_old
+    let rhs_v = (h / vv) * (inflow_old + portal_a) + (1.0 - h * (ql + ps) / vv) * (*s).cv[i] + qq * (*s).ct[i]
     let gamma = (h / vv) * (q_ha + portal_b)
-    let rhs_t = rr * s.cv[i] + (1.0 - h * ps / (vt * kp)) * s.ct[i] - (h * k_liver / vt) * s.ct[i] + dt * in_t_liver / vt
+    let rhs_t = rr * (*s).cv[i] + (1.0 - h * ps / (vt * kp)) * (*s).ct[i] - (h * k_liver / vt) * (*s).ct[i] + dt * in_t_liver / vt
 
     let av = (sb * rhs_v + qq * rhs_t) / det
     let bv = (sb * gamma) / det
     let at = (rr * rhs_v + pp * rhs_t) / det
     let bt = (rr * gamma) / det
-    return (av, bv, at, bt)
+    (*ws).a_v[i] = av
+    (*ws).b_v[i] = bv
+    (*ws).a_t[i] = at
+    (*ws).b_t[i] = bt
 }
 
 // One fully-coupled implicit-CN step. Writes the new state into `*state`.
-pub fn pbpk28_hepatic_cn_step_mut(
+pub fn pbpk28_hepatic_cn_step_ws(
     state: &!PBPKState28,
     p: PBPKParams28,
     hep: PBPK28Hepatic,
     inp: PBPK28Input,
-    dt: f64
+    dt: f64,
+    ws: &!PBPK28Work
 ) with Mut, Div, Panic {
-    var a_v: [f64; 14] = [0.0; 14]
-    var b_v: [f64; 14] = [0.0; 14]
-    var a_t: [f64; 14] = [0.0; 14]
-    var b_t: [f64; 14] = [0.0; 14]
     let h = 0.5 * dt
     let vb = p.v_ref[0]
     let portal = hep.portal
@@ -232,10 +274,10 @@ pub fn pbpk28_hepatic_cn_step_mut(
             let at = (rr * rhs_v + pp * rhs_t) / det
             let bt = (rr * gamma) / det
 
-            a_v[i] = av
-            b_v[i] = bv
-            a_t[i] = at
-            b_t[i] = bt
+            (*ws).a_v[i] = av
+            (*ws).b_v[i] = bv
+            (*ws).a_t[i] = at
+            (*ws).b_t[i] = bt
 
             if drains_to_blood {
                 sum_beta_a = sum_beta_a + beta * av
@@ -246,20 +288,15 @@ pub fn pbpk28_hepatic_cn_step_mut(
     }
 
     if portal {
-        let s_old = *state
-        let cv_old = s_old.cv
-        let q_arr = p.q
-        let portal_old = pbpk28_portal_sum(&cv_old, &q_arr)
-        let portal_a = pbpk28_portal_sum(&a_v, &q_arr)
-        let portal_b = pbpk28_portal_sum(&b_v, &q_arr)
-        let (lav, lbv, lat, lbt) = pbpk28_liver_portal_block(
-            s_old, p, hep.k_t[P28H_LIVER], inp.in_t[P28H_LIVER],
-            q_ha, portal_old, portal_a, portal_b, h, dt
+        let portal_old = pbpk28_portal_sum(&(*state).cv, &p.q)
+        let portal_a = pbpk28_portal_sum(&(*ws).a_v, &p.q)
+        let portal_b = pbpk28_portal_sum(&(*ws).b_v, &p.q)
+        pbpk28_liver_portal_block(
+            state, p, hep.k_t[P28H_LIVER], inp.in_t[P28H_LIVER],
+            q_ha, portal_old, portal_a, portal_b, h, dt, ws
         )
-        a_v[P28H_LIVER] = lav
-        b_v[P28H_LIVER] = lbv
-        a_t[P28H_LIVER] = lat
-        b_t[P28H_LIVER] = lbt
+        let lav = (*ws).a_v[P28H_LIVER]
+        let lbv = (*ws).b_v[P28H_LIVER]
         let beta_l = h * p.q[P28H_LIVER] / vb
         rhs0 = rhs0 + beta_l * (*state).cv[P28H_LIVER]
         sum_beta_a = sum_beta_a + beta_l * lav
@@ -267,7 +304,19 @@ pub fn pbpk28_hepatic_cn_step_mut(
     }
 
     let cb_new = (rhs0 + sum_beta_a) / ((1.0 + big_s) - sum_beta_b)
-    pbpk28_hepatic_apply(state, cb_new, &a_v, &b_v, &a_t, &b_t)
+    pbpk28_hepatic_apply_ws(state, cb_new, ws, p)
+}
+
+// Allocating convenience form: a fresh work buffer per call.
+pub fn pbpk28_hepatic_cn_step_mut(
+    state: &!PBPKState28,
+    p: PBPKParams28,
+    hep: PBPK28Hepatic,
+    inp: PBPK28Input,
+    dt: f64
+) with Mut, Div, Panic {
+    var ws = pbpk28_work_new()
+    pbpk28_hepatic_cn_step_ws(state, p, hep, inp, dt, &!ws)
 }
 
 // By-value wrapper (same shape as pbpk28_full_cn_step).
@@ -317,7 +366,7 @@ pub fn pbpk28_hepatic_elim_step(
 // CN mathematically, but only `pbpk28_hepatic_cn_step_mut` is the bit-identical
 // extension of the original kernel.)
 fn pbpk28_liver_portal_block_theta(
-    s: PBPKState28,
+    s: &PBPKState28,
     p: PBPKParams28,
     k_liver: f64,
     in_t_liver: f64,
@@ -327,8 +376,9 @@ fn pbpk28_liver_portal_block_theta(
     portal_b: f64,
     hi: f64,
     he: f64,
-    dt: f64
-) -> (f64, f64, f64, f64) with Div {
+    dt: f64,
+    ws: &!PBPK28Work
+) with Mut, Div {
     let i = P28H_LIVER
     let vi = p.v_ref[i]
     let vf = p.vasc_frac[i]
@@ -346,30 +396,30 @@ fn pbpk28_liver_portal_block_theta(
     let sb = 1.0 + hi * ps / (vt * kp) + hi * k_liver / vt
     let det = pp * sb - qq * rr
 
-    let inflow_old = q_ha * s.cv[0] + portal_old
-    let rhs_v = (he / vv) * inflow_old + (hi / vv) * portal_a + (1.0 - he * (ql + ps) / vv) * s.cv[i] + (he * ps / (vv * kp)) * s.ct[i]
+    let inflow_old = q_ha * (*s).cv[0] + portal_old
+    let rhs_v = (he / vv) * inflow_old + (hi / vv) * portal_a + (1.0 - he * (ql + ps) / vv) * (*s).cv[i] + (he * ps / (vv * kp)) * (*s).ct[i]
     let gamma = (hi / vv) * (q_ha + portal_b)
-    let rhs_t = (he * ps / vt) * s.cv[i] + (1.0 - he * ps / (vt * kp) - he * k_liver / vt) * s.ct[i] + dt * in_t_liver / vt
+    let rhs_t = (he * ps / vt) * (*s).cv[i] + (1.0 - he * ps / (vt * kp) - he * k_liver / vt) * (*s).ct[i] + dt * in_t_liver / vt
 
     let av = (sb * rhs_v + qq * rhs_t) / det
     let bv = (sb * gamma) / det
     let at = (rr * rhs_v + pp * rhs_t) / det
     let bt = (rr * gamma) / det
-    return (av, bv, at, bt)
+    (*ws).a_v[i] = av
+    (*ws).b_v[i] = bv
+    (*ws).a_t[i] = at
+    (*ws).b_t[i] = bt
 }
 
-pub fn pbpk28_hepatic_theta_step_mut(
+pub fn pbpk28_hepatic_theta_step_ws(
     state: &!PBPKState28,
     p: PBPKParams28,
     hep: PBPK28Hepatic,
     inp: PBPK28Input,
     dt: f64,
-    theta: f64
+    theta: f64,
+    ws: &!PBPK28Work
 ) with Mut, Div, Panic {
-    var a_v: [f64; 14] = [0.0; 14]
-    var b_v: [f64; 14] = [0.0; 14]
-    var a_t: [f64; 14] = [0.0; 14]
-    var b_t: [f64; 14] = [0.0; 14]
     let hi = theta * dt
     let he = (1.0 - theta) * dt
     let vb = p.v_ref[0]
@@ -431,10 +481,10 @@ pub fn pbpk28_hepatic_theta_step_mut(
             let at = (rr * rhs_v + pp * rhs_t) / det
             let bt = (rr * gamma) / det
 
-            a_v[i] = av
-            b_v[i] = bv
-            a_t[i] = at
-            b_t[i] = bt
+            (*ws).a_v[i] = av
+            (*ws).b_v[i] = bv
+            (*ws).a_t[i] = at
+            (*ws).b_t[i] = bt
 
             if drains_to_blood {
                 sum_beta_a = sum_beta_a + beta_i * av
@@ -445,29 +495,37 @@ pub fn pbpk28_hepatic_theta_step_mut(
     }
 
     if portal {
-        let s_old = *state
-        let cv_old = s_old.cv
-        let q_arr = p.q
-        let portal_old = pbpk28_portal_sum(&cv_old, &q_arr)
-        let portal_a = pbpk28_portal_sum(&a_v, &q_arr)
-        let portal_b = pbpk28_portal_sum(&b_v, &q_arr)
-        let (lav, lbv, lat, lbt) = pbpk28_liver_portal_block_theta(
-            s_old, p, hep.k_t[P28H_LIVER], inp.in_t[P28H_LIVER],
-            q_ha, portal_old, portal_a, portal_b, hi, he, dt
+        let portal_old = pbpk28_portal_sum(&(*state).cv, &p.q)
+        let portal_a = pbpk28_portal_sum(&(*ws).a_v, &p.q)
+        let portal_b = pbpk28_portal_sum(&(*ws).b_v, &p.q)
+        pbpk28_liver_portal_block_theta(
+            state, p, hep.k_t[P28H_LIVER], inp.in_t[P28H_LIVER],
+            q_ha, portal_old, portal_a, portal_b, hi, he, dt, ws
         )
-        a_v[P28H_LIVER] = lav
-        b_v[P28H_LIVER] = lbv
-        a_t[P28H_LIVER] = lat
-        b_t[P28H_LIVER] = lbt
+        let lav = (*ws).a_v[P28H_LIVER]
+        let lbv = (*ws).b_v[P28H_LIVER]
         let bl_i = hi * p.q[P28H_LIVER] / vb
         let bl_e = he * p.q[P28H_LIVER] / vb
-        rhs0 = rhs0 + bl_e * s_old.cv[P28H_LIVER]
+        rhs0 = rhs0 + bl_e * (*state).cv[P28H_LIVER]
         sum_beta_a = sum_beta_a + bl_i * lav
         sum_beta_b = sum_beta_b + bl_i * lbv
     }
 
     let cb_new = (rhs0 + sum_beta_a) / ((1.0 + s_imp) - sum_beta_b)
-    pbpk28_hepatic_apply(state, cb_new, &a_v, &b_v, &a_t, &b_t)
+    pbpk28_hepatic_apply_ws(state, cb_new, ws, p)
+}
+
+// Allocating convenience form: a fresh work buffer per call.
+pub fn pbpk28_hepatic_theta_step_mut(
+    state: &!PBPKState28,
+    p: PBPKParams28,
+    hep: PBPK28Hepatic,
+    inp: PBPK28Input,
+    dt: f64,
+    theta: f64
+) with Mut, Div, Panic {
+    var ws = pbpk28_work_new()
+    pbpk28_hepatic_theta_step_ws(state, p, hep, inp, dt, theta, &!ws)
 }
 
 pub fn pbpk28_hepatic_theta_step(
