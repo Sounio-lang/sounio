@@ -566,9 +566,13 @@ Effect on the demos (Madaros):
 | `fullvd_demo` AUC_last / AUC_first | 1.228366 | 1.218177 |
 
 The ratio falls because the old trapezoid under-read the sharper first dose
-more than the last. That moves it away from gracious-bardeen's reference
-of 1.227702, which appears to reproduce the demo's own 16-point quadrature;
-this has not been confirmed with that lane. A math review (xai, qwen;
+more than the last. gracious-bardeen's reference (PR #2711) prints both
+quadratures of an independent fixed-step RK4 run, and has confirmed this on
+the coordination bus. Its 1.227701683 applies the same 16-checkpoint
+trapezoid, so it validates only the old metric. Its trapezoid over every RK4
+step (h = 2.5e-3 h; halving h moves it 3e-7) gives 1.2181994. The fixed
+runner's 1.218177 is −1.8e-5 relative from that, consistent with the O(dt)
+split-bolus error that remains in the runner. A math review (xai, qwen;
 `.claude/llm_offload_log.md`) confirmed the quadrature and changed one
 choice: the t_90 plateau is the last interval, not the AUC at SS
 declaration, which can sit ~5% below the plateau.
@@ -587,8 +591,16 @@ blood as plasma:
   argument as plasma.
 
 `oral_bbb_run` in `scenarios/oral_rapamycin_bbb.sio` has the same pattern.
-With `rb_ratio = 0.58` in `rapamycin_mean_params`, plasma is 1.72 × blood.
-Unless the blood/plasma equivalence is intended for this model, both the
-unbound plasma AUC and the BBB driving concentration are about 42% low.
-This affects BBB exposure and Kp,uu outputs. It needs an operator decision
+The size and sign of the error depend on `rb_ratio`, since
+plasma = blood / rb:
+
+- `rapamycin_mean_params` (`rb_ratio = 0.58`): the reported unbound plasma
+  AUC and the BBB driving concentration are about 42% low (plasma is 1.72 ×
+  blood).
+- `rapamycin_fullvd_params` (`rb_ratio = 36.0`, Yatscoff 1995): they are
+  about 36 × high.
+
+Ratios such as AUC_last / AUC_first are scale-free and survive. Absolute
+concentrations, AUCs and Kp,uu do not. The sign correction, which the
+first version of this note missed, is from gracious-bardeen. It needs an operator decision
 and a math review before any change.
