@@ -1,0 +1,41 @@
+//@ check-only
+//@ requires: madaros
+//@ expect-stdout-contains: W044
+//
+// PR #2515 review round 2, finding A (comment_id 4089110672): the checker's
+// `mod::f(..)` resolution (self-hosted/check/check.sio) validated only the
+// TERMINAL name against the whole-program free-fn table, not that the
+// qualifier segment(s) actually name a real `use`-declared module. So
+// `bogus_module::pubf(..)` bound the REAL `pubf`'s signature (any free fn
+// named `pubf` anywhere in the program) and typechecked clean with NO
+// warning, while the lowerer -- which validates the qualifier against its
+// own module registry (LOWER_USE_MODULE_HASH) -- does not recognize
+// `bogus_module` and falls through to its legacy mangled-stub path,
+// emitting a call to a body-less `bogus_module_pubf` symbol.
+//
+// That body-less-stub crash (SIGILL) is a PRE-EXISTING, inherent property
+// of calling a genuinely never-`use`d, nonexistent module path -- reproduced
+// identically before and after this finding's fix, and not something this
+// fix promises to prevent (nor could it: nothing makes a call to a
+// deliberately-bogus symbol safe to execute). What the fix actually changes,
+// and what this test pins, is the CHECK-TIME behavior: `bogus_module` is
+// never `use`d anywhere in this file, so the checker must no longer bind
+// `bogus_module::tc_c_add(..)` to the real `tc_c_add`'s signature
+// (checker_path_qualifier_all_modules_known fails) and silently suppress
+// the "unresolved path" diagnostic. It must fall back to the pre-existing
+// W044 warning contract that already governs genuinely-unknown
+// `Type::method` calls -- verified here with `--check` (never executed;
+// see check-only above) so the pre-existing, unrelated runtime crash for a
+// truly-bogus call target never enters into it.
+use testmod::tc_c;
+
+fn main() -> i32 with IO, Mut, Panic {
+    let bogus: i64 = bogus_module::tc_c_add(2, 3)
+    let real: i64 = tc_c::tc_c_add(2, 3)
+    if bogus == 0 && real == 105 {
+        println("BOGUS_QUALIFIER_SAFE")
+        return 0
+    }
+    println("BOGUS_QUALIFIER_FAIL")
+    1
+}

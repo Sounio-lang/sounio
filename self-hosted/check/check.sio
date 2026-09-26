@@ -1428,6 +1428,11 @@ pub fn checker_new() -> Checker with Mut, Panic, Div, Alloc {
 }
 
 pub fn checker_init_in_place(raw: *mut Checker) with Mut, Panic, Div, Alloc {
+    // Fresh per Checker instance -- every entry point that allocates one
+    // (check_modules_verdict_boot4_with_visibility et al.) calls this once
+    // before its own collect-items pass, so this is the correct, single
+    // reset point for CHECKER_USE_MODULE_HASH (see its own comment).
+    checker_use_module_reset()
     (*raw).env = type_env_new()
     (*raw).borrows = borrow_env_new()
     (*raw).units = register_builtin_units(unit_registry_new())
@@ -1652,7 +1657,7 @@ fn checker_note_type_error_mut(c: *mut Checker) with Mut {
 // Emit a fallback diagnostic when had_error was recorded without printing.
 // Boot4/modular path uses checker_check_items_inplace which notes errors via
 // checker_note_type_error_mut without emitting; this closes the silent gap.
-fn checker_flush_unemitted_type_errors_mut(c: *mut Checker) with Mut, IO {
+pub fn checker_flush_unemitted_type_errors_mut(c: *mut Checker) with Mut, IO {
     if (*c).had_error && !(*c).diag_emitted {
         print("error[E000]: type checking failed\n")
         (*c).diag_emitted = true
@@ -4636,6 +4641,312 @@ fn checker_path_first_two_eq(path: AstPath, first: string, second: string) -> bo
     }
 }
 
+// ============================================================
+// Known `use`-declared module segments (review comment 4089110672 /
+// finding A). Mirrors lower.sio's LOWER_USE_MODULE_HASH: the lowerer
+// already refuses to strip a qualifier that isn't a real registered module,
+// but until this registry existed the checker had no equivalent, so
+// `mod::f(..)` bound direct_sig_id to ANY free fn named `f` in the whole
+// program regardless of whether `mod` was ever really `use`d -- accepting
+// `bogus::real_pub_fn(..)` at typecheck while the lowerer (which DOES
+// validate the qualifier) fell through to its legacy mangled-stub path and
+// emitted a body-less `bogus_real_pub_fn` call (SIGILL). Flat-scalar-buffer
+// storage, same reasoning as the lowerer's sibling registry (a `[Name; N]`
+// struct-array global was observed to be corrupted by this compiler's own
+// codegen).
+// Review comment 4090966164 (round 6, finding A): this registry used to be
+// ONE GLOBAL set, membership meaning "some module, somewhere in this whole
+// compilation, imported this segment" rather than "the module CURRENTLY
+// being checked imported this segment". A module could therefore call
+// through a qualifier that only a DIFFERENT, unrelated module had `use`d --
+// module B `use`s `dep_chain_leaf`, and module A (which never `use`s it at
+// all) could still call `dep_chain_leaf::leaf_add(..)` and have it accepted,
+// since the segment was globally known. Independent segments from unrelated
+// imports across different modules could likewise recombine into paths that
+// were never actually declared anywhere. Fixed by keying every entry with
+// the registering module's id (CHECKER_USE_MODULE_MODULE_ID, parallel to
+// HASH/LEN/BUF) and requiring an exact module-id match at lookup, not just a
+// name match -- `checker_use_module_known` now takes the caller's
+// `(*c).current_module_id` and only matches entries THAT SAME module
+// registered. current_module_id is already tracked correctly across both
+// the collect pass (Pass 1) and the check pass (Pass 2) in
+// check_modules_verdict_boot4_with_visibility (self-hosted/check/mod.sio),
+// so no new module-identity plumbing was needed -- just applying the id
+// that already existed.
+let CHECKER_USE_MODULE_SEG_MAX: i64 = 384
+var CHECKER_USE_MODULE_COUNT: i64 = 0
+var CHECKER_USE_MODULE_HASH: [i64; 1024] = [0; 1024]
+var CHECKER_USE_MODULE_LEN: [i64; 1024] = [0; 1024]
+var CHECKER_USE_MODULE_MODULE_ID: [i64; 1024] = [0 - 1; 1024]
+var CHECKER_USE_MODULE_BUF: [i8; 393216] = [0; 393216]
+// Review comment 4089532579 (round 3, finding A): silently dropping an entry
+// past capacity here fails OPEN, not closed. A `souc check`-only caller never
+// runs the lowerer's own overflow refusal (IR_LOWER_HARD_ERROR), so once this
+// registry fills, a later real module's qualified calls fall back to
+// checker_path_qualifier_all_modules_known returning false -- direct_sig_id
+// stays negative, only W044 (a warning) fires, and `check` can report success
+// on a call whose argument/effect/visibility checks never ran.
+//
+// Review comment 4089849683 (round 4): this flag and its
+// OVERFLOW_REPORTED sibling below are process-global, and checker_init_in_place
+// (the only caller of checker_use_module_reset -- once per fresh Checker/
+// compile) used to reset only CHECKER_USE_MODULE_COUNT, not these. So a
+// process that runs a SECOND, separate compile after an earlier one already
+// overflowed inherited both flags already set: OVERFLOWED already true is
+// harmless on its own, but OVERFLOW_REPORTED already true made
+// checker_report_use_module_overflow_inplace return before ever touching
+// the new Checker's had_error, so the second compile's overflow silently
+// stopped short of failing loudly -- the same class of bug as round 1
+// finding D (a registry surviving past the compile boundary it belongs to,
+// just failing OPEN here instead of losing data). Both are now reset
+// alongside the count in checker_use_module_reset, so every fresh
+// Checker/compile starts with clean overflow-tracking state, not just an
+// empty module table.
+var CHECKER_USE_MODULE_OVERFLOWED: bool = false
+// Guards checker_report_use_module_overflow_inplace to at most one diagnostic
+// per COMPILE (re-printing at every subsequent `use` item once the registry
+// is already full within the SAME compile would just be noise) -- reset
+// alongside CHECKER_USE_MODULE_OVERFLOWED, not durable past it. A plain
+// global, not a Checker field, so no struct-literal construction site of
+// Checker needs updating.
+var CHECKER_USE_MODULE_OVERFLOW_REPORTED: bool = false
+
+fn checker_use_module_reset() with Mut {
+    CHECKER_USE_MODULE_COUNT = 0
+    CHECKER_USE_MODULE_OVERFLOWED = false
+    CHECKER_USE_MODULE_OVERFLOW_REPORTED = false
+}
+
+fn checker_use_module_known(module_id: i64, n: Name) -> bool with Mut, Panic, Div {
+    if n.len <= 0 || n.len > CHECKER_USE_MODULE_SEG_MAX {
+        return false
+    }
+    let h = ast_name_hash(n)
+    var i: i64 = 0
+    while i < CHECKER_USE_MODULE_COUNT {
+        if CHECKER_USE_MODULE_MODULE_ID[i as usize] == module_id && CHECKER_USE_MODULE_HASH[i as usize] == h && CHECKER_USE_MODULE_LEN[i as usize] == n.len {
+            let base = i * CHECKER_USE_MODULE_SEG_MAX
+            var eq = true
+            var j: i64 = 0
+            while j < n.len {
+                if CHECKER_USE_MODULE_BUF[(base + j) as usize] != n.buf[j as usize] {
+                    eq = false
+                }
+                j = j + 1
+            }
+            if eq {
+                return true
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn checker_use_module_note(module_id: i64, n: Name) with Mut, Panic, Div {
+    if n.len <= 0 || n.len > CHECKER_USE_MODULE_SEG_MAX {
+        return
+    }
+    // Uppercase-first-byte segments are never modules (Type/Enum names).
+    let c0 = (n.buf[0] as i64) & 255
+    if c0 >= 65 && c0 <= 90 {
+        return
+    }
+    if checker_use_module_known(module_id, n) {
+        return
+    }
+    if CHECKER_USE_MODULE_COUNT >= 1024 {
+        CHECKER_USE_MODULE_OVERFLOWED = true
+        return
+    }
+    let idx = CHECKER_USE_MODULE_COUNT
+    CHECKER_USE_MODULE_MODULE_ID[idx as usize] = module_id
+    CHECKER_USE_MODULE_HASH[idx as usize] = ast_name_hash(n)
+    let base = idx * CHECKER_USE_MODULE_SEG_MAX
+    var ci: i64 = 0
+    while ci < n.len {
+        CHECKER_USE_MODULE_BUF[(base + ci) as usize] = n.buf[ci as usize]
+        ci = ci + 1
+    }
+    CHECKER_USE_MODULE_LEN[idx as usize] = n.len
+    CHECKER_USE_MODULE_COUNT = idx + 1
+}
+
+// Segment k of a path, by recursion (mirrors lower.sio's lower_string_list_nth_name).
+fn checker_string_list_nth_name(sl: StringList, k: i64) -> Name with Mut, Panic, Div {
+    if k <= 0 {
+        return Name { buf: sl.head_buf, len: sl.head_len }
+    }
+    match sl.tail {
+        Some(rest) => checker_string_list_nth_name(*rest, k - 1),
+        None => empty_name(),
+    }
+}
+
+// Records every SUFFIX of a `use` path (the full path, and every shorter
+// suffix ending at the same terminal -- e.g. for `use a::b::c;`: "a::b::c",
+// "b::c", "c"), scoped to `module_id` (the registering module -- round 6
+// finding A), as a POSITIVE-EVIDENCE candidate qualifier string. Suffixes,
+// not individual segments (round 8, comment 4096338764): recording each
+// segment independently let unrelated imports' segments be recombined into
+// a qualifier that was never actually imported together -- see
+// ast_path_range_name's own comment for the exact bug. Registering complete
+// suffix TEXT still supports both call forms a single `use a::b;` allows
+// (`b::f()` via the "b" suffix, `a::b::f()` via the "a::b" suffix) without
+// accepting `a::(something else)::f()`.
+//
+// This cannot exclude a path-form NAMED import's terminal
+// (`use a::b::specific_fn;`) here: the AST gives no way to tell that shape
+// apart from a genuine whole-module import (`use a::b;`) where the last
+// segment really is the module -- both are `use_glob=false, use_items=None,
+// seg_count>=2`, syntactically identical.
+//
+// Round 9 (review comment 4098353722, and the collision it reopened): an
+// earlier version of this comment said registering the terminal regardless
+// was fine because checker_path_qualifier_all_modules_known separately
+// excludes it via lower_named_item_terminal_known -- but that registry is
+// keyed by the FULL `use` path text (module_frontend.sio's real
+// file-resolution outcome), while a call can legitimately use just the BARE
+// terminal as its qualifier (`f::g()`, not only `a::b::f::g()`), so that
+// separate check could never see the bare form to exclude it. Registering
+// the bare terminal there too was tried and reverted: it collided with an
+// UNRELATED module elsewhere in the same compilation whose own bare-terminal
+// qualifier happens to share the same text (round 7's own dep_chain/
+// named_item_module_collision fixture exists specifically to catch this).
+// Fixed at the SOURCE instead: skip suffix registration for this `use` path
+// ENTIRELY when the full path is already known to resolve as a named item,
+// not a module (lower_named_item_terminal_known -- populated before this
+// runs, per its own comment). A named-item import brings its target into
+// scope as a bare, unqualified name (`use a::b::f;` then calling `f(..)`,
+// never `f::something(..)`), so it was never a legitimate module-qualifier
+// candidate at all; not registering any of its suffixes here removes the
+// false module-shaped entry instead of trying to filter it back out later,
+// so a genuinely unrelated real module's own identical-text suffix is never
+// put at risk.
+fn checker_use_module_note_path(module_id: i64, path: AstPath) with Mut, Panic, Div {
+    if lower_named_item_terminal_known(ast_path_range_name(path, 0, path.seg_count - 1)) {
+        return
+    }
+    var s: i64 = 0
+    while s < path.seg_count {
+        checker_use_module_note(module_id, ast_path_range_name(path, s, path.seg_count - 1))
+        s = s + 1
+    }
+}
+
+// Round 14 (review comment 4105262460): a BRACE import (`use a::b::{Type};`)
+// only ever runs `path` ("a::b") through checker_use_module_note_path above
+// -- the braced names themselves (`Type`) are a separate ImportItemList, so
+// the combined suffix "b::Type" (what round 13's associated-fn check,
+// directly below this function, requires for `b::Type::method()` to
+// typecheck) was never registered, even though `use a::b::{Type};` legitimately
+// brings `Type` into scope reachable exactly that way. That silently reset a
+// VALID resolved call's signature back to -1 whenever the receiver type came
+// from a brace import specifically (glob and path-form imports of the type
+// were unaffected, since the type's OWN `use` path already IS the combined
+// suffix there). Register "<suffix>::<braced name>" for every suffix of
+// `path`, for every name in the braced list, mirroring
+// checker_use_module_note_path's own suffix loop but anchored on the item
+// name instead of `path`'s own last segment.
+//
+// Round 15 (review comment 4106649041): the first version of this function
+// registered a combined suffix for EVERY braced item unconditionally --
+// `lower_named_item_terminal_known` only carries evidence for FULL path-form
+// imports (`use a::b::f;`, populated from module_frontend.sio's real file
+// resolution against the WHOLE path), so querying it with just the bare
+// braced NAME (`f` alone, no path) never matches and never excludes
+// anything. `use a::b::{f};` where `f` is a FUNCTION (not a type) therefore
+// still registered "b::f" as a trusted qualifier suffix, so a bogus
+// `b::f::g()` could pass round 13's combined-suffix gate for any real
+// top-level `g` -- exactly the qualifier-evidence-from-a-non-module class
+// this whole registry exists to exclude, just reached through braces
+// instead of a bare path. There is no cross-module struct/enum table
+// available yet at `use`-collection time to authoritatively ask "is `f` a
+// type", so this uses the SAME convention checker_use_module_note already
+// relies on one line below (uppercase-first-byte = type/struct/enum,
+// lowercase-first-byte = module/fn/value, per this codebase's own PascalCase
+// vs snake_case naming rule): only an UPPERCASE braced name -- a type this
+// combined-suffix check is actually for -- gets registered; a lowercase
+// (function/value) braced import contributes no qualifier evidence at all.
+//
+// PR #2515 review (comment 4108677463): this heuristic is known-unsound for
+// a LOWERCASE-named struct/enum imported by brace (`use a::b::{wrap_}`, see
+// tests/run-pass/madaros_lowercase_struct_generic_assoc_call.sio for a
+// same-file, non-`use` demonstration that a lowercase struct like `wrap_`
+// is legal Sounio) -- such an import contributes no combined-suffix
+// evidence, so `b::wrap_::make()` cannot pass the round-13 combined-suffix
+// gate below on that path alone. Left as-is rather than rushed: fixing it
+// needs real cross-module struct/enum evidence at `use`-collection time,
+// which (per the paragraph above, still accurate) does not exist yet --
+// same class of accepted residual gap as the named-item-terminal
+// resolution-context gap documented in parser/ast.sio's
+// AST_NAMED_ITEM_TERMINAL_COUNT comment, and this file's own round-5/6
+// history is a direct precedent for how a rushed heuristic fix in exactly
+// this area upgrades a narrow miss into a broader false-positive/negative
+// regression. Not exercised by any test today (the PR's own `wrap_` test is
+// single-file, with no brace import of it), so no test currently fails.
+fn checker_use_module_note_braced_items(module_id: i64, path: AstPath, items: Option<Box<ImportItemList> >) with Mut, Panic, Div {
+    if path.seg_count <= 0 {
+        return
+    }
+    var cursor = items
+    while true {
+        match cursor {
+            Some(node) => {
+                let item_name = (*node).head
+                let c0 = if item_name.len > 0 { (item_name.buf[0] as i64) & 255 } else { 0 }
+                if c0 >= 65 && c0 <= 90 && !lower_named_item_terminal_known(item_name) {
+                    var s: i64 = 0
+                    while s < path.seg_count {
+                        let prefix = ast_path_range_name(path, s, path.seg_count - 1)
+                        checker_use_module_note(module_id, ast_name_join_sep(prefix, item_name))
+                        s = s + 1
+                    }
+                }
+                cursor = (*node).tail
+            }
+            None => break
+        }
+    }
+}
+
+// The COMPLETE qualifier (every segment of `path` except the last, joined as
+// one string) must exactly match a known `use`-declared suffix path OF THE
+// MODULE CURRENTLY BEING CHECKED (`(*c).current_module_id`, round 6 finding A
+// -- previously this checked global registry membership, so a module could
+// call through a qualifier only a DIFFERENT module had `use`d), and no
+// accumulated prefix of it may be authoritatively known to be a named item's
+// terminal (round 6 finding C -- see lower_named_item_terminal_known's own
+// comment for why this replaced round 5's unsound "does this name also
+// resolve as some unrelated top-level function" heuristic, which wrongly
+// rejected a real module qualifier that happened to share a name with an
+// unrelated function elsewhere in the program). Fewer than 2 segments means
+// there is no qualifier to validate.
+//
+// Round 8 (comment 4096338764): this used to check each qualifier segment
+// INDEPENDENTLY against the per-module registry, so a module with both
+// `use math::dd64;` and `use testmod::tc_c;` accepted the bogus recombined
+// qualifier `math::tc_c` (`math` and `tc_c` were each independently
+// "known", even though "math::tc_c" together was never imported). The
+// registry now stores complete suffix TEXT (see checker_use_module_note_path
+// and ast_path_range_name's own comments), so this checks the qualifier as
+// ONE joined string against ONE registered suffix, which cannot be
+// satisfied by mixing segments from two unrelated imports.
+fn checker_path_qualifier_all_modules_known(c: *mut Checker, path: AstPath) -> bool with Mut, Panic, Div, Alloc, IO {
+    if path.seg_count < 2 {
+        return false
+    }
+    var k: i64 = 0
+    while k < path.seg_count - 1 {
+        if lower_named_item_terminal_known(ast_path_prefix_name(path, k)) {
+            return false
+        }
+        k = k + 1
+    }
+    let qualifier = ast_path_range_name(path, 0, path.seg_count - 2)
+    checker_use_module_known((*c).current_module_id, qualifier)
+}
+
 fn checker_collect_known_module_backing_imports_inplace(c: *mut Checker, path: AstPath) with Mut, Panic, Div {
     // The boot4/raw checker currently type-checks modules with a shared symbol
     // table but without a full import namespace. Keep the stopgap narrow:
@@ -4656,7 +4967,7 @@ fn checker_collect_known_module_backing_imports_inplace(c: *mut Checker, path: A
     }
 }
 
-fn checker_collect_use_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Div, Alloc {
+fn checker_collect_use_item_inplace(c: *mut Checker, item: Item) with Mut, Panic, Div, Alloc, IO {
     checker_collect_import_item_list_inplace(c, item.use_items)
     // Path-form named import `use module::symbol` (no braces, no glob): the
     // parser leaves the symbol as the last path segment with use_items=None.
@@ -4671,6 +4982,36 @@ fn checker_collect_use_item_inplace(c: *mut Checker, item: Item) with Mut, Panic
         }
     }
     checker_collect_known_module_backing_imports_inplace(c, item.use_path)
+    checker_use_module_note_path((*c).current_module_id, item.use_path)
+    checker_use_module_note_braced_items((*c).current_module_id, item.use_path, item.use_items)
+    if CHECKER_USE_MODULE_OVERFLOWED {
+        checker_report_use_module_overflow_inplace(c, item.span)
+    }
+}
+
+// Review comment 4089532579 (round 3, finding A): propagate
+// CHECKER_USE_MODULE_OVERFLOWED as a hard checker error instead of letting it
+// only degrade later W044 handling silently. Reported at most once per
+// module-registration site that observes it (CHECKER_USE_MODULE_OVERFLOWED
+// itself stays set/durable, matching the lowerer's own overflow flag, so a
+// later reset within the same compile cannot un-flag an already-broken
+// registry -- but re-printing the same diagnostic at every subsequent `use`
+// item once the registry is already full would just be noise).
+fn checker_report_use_module_overflow_inplace(c: *mut Checker, span: Span) with Mut, IO, Panic, Div, Alloc {
+    if CHECKER_USE_MODULE_OVERFLOW_REPORTED {
+        return
+    }
+    CHECKER_USE_MODULE_OVERFLOW_REPORTED = true
+    (*c).error_count = (*c).error_count + 1
+    (*c).had_error = true
+    print("error[E-USE-MOD-CAP] at ")
+    print_int(span.start)
+    print("..")
+    print_int(span.end)
+    print(": module-qualified-call registry is full (1024 distinct lowercase `use` segments)\n")
+    print("   = note: later module-qualified calls cannot be fully checked (argument/effect/")
+    print("visibility checks are skipped, only an unresolved-path warning fires) -- refusing")
+    print(" rather than silently under-checking the rest of this compile\n")
 }
 
 fn checker_collect_runtime_builtins_inplace(c: *mut Checker) with Mut, Panic, Div {
@@ -5921,6 +6262,28 @@ fn checker_collect_type_alias_inplace(c: *mut Checker, name: Name, ty_opt: Optio
         }
         None => {}
     }
+}
+
+// Copilot review (PR #2515), comment 4110379088: check_items_verdict_boot4_with_module_map
+// (check/mod.sio) must collect each specialized-merged item with its own
+// current_module_id stamped first (see that function's own comment), so it
+// cannot call checker_collect_items_inplace once over the whole list --
+// but that function also re-runs checker_collect_runtime_builtins_inplace
+// AND reassigns ontology_items on every call, so invoking it once PER ITEM
+// re-scans the growing, already-populated environment for ~30 builtin
+// binds on every one of the compiler's own 13k+ items -- O(items^2) work
+// that is pure waste, since the builtins never change mid-collection and
+// ontology_items is unconditionally restored to the full list right after
+// that loop anyway. These two wrappers let that call site collect ONE
+// item's declarations without either side effect: initialize builtins
+// once before the loop, then collect each item directly through this
+// wrapper instead of round-tripping through checker_collect_items_inplace.
+pub fn checker_collect_runtime_builtins_once_mut(c: *mut Checker) with Mut, Panic, Div {
+    checker_collect_runtime_builtins_inplace(c)
+}
+
+pub fn checker_collect_item_only_mut(c: *mut Checker, item: Item) with Mut, Panic, Div, Alloc, IO {
+    checker_collect_item_inplace(c, item)
 }
 
 pub fn checker_collect_items_inplace(c: *mut Checker, items: Option<Box<ItemList> >) with Mut, Panic, Div, Alloc, IO {
@@ -10484,6 +10847,26 @@ fn checker_fn_sig_visible_inplace(c: *mut Checker, sig_id: i64) -> bool with Mut
         if sig.defining_module_id == (*c).current_module_id {
             return true
         }
+        // Copilot review (PR #2515): a real, valid module-id mismatch is
+        // authoritative and must not fall through to the path-based check
+        // below. check_items_verdict_boot4_with_module_map (self-hosted/
+        // check/mod.sio) stamps current_module_id correctly per specialized
+        // item but never updates current_module (the PATH), which stays
+        // empty_path() for every item on that path -- so falling through
+        // here let ast_path_eq(empty, empty) grant private access across
+        // genuinely different modules whenever BOTH ids were known but
+        // different. -1/-2 are the "owner unknown"/"not found" sentinels
+        // (see check_mod_item_module_owner's own comment in mod.sio and
+        // spec_item_module_lookup's SPEC_ITEM_MODULE_NOT_FOUND) -- only
+        // fall through to the path check when either id is unresolved,
+        // preserving existing behaviour for paths that never populate
+        // *_module_id at all. Depends on spec_make_fn_item propagating the
+        // template's real visibility (see its own comment) -- before that
+        // fix, a pub generic function's monomorphized clone read back as
+        // PRIVATE and this branch produced a spurious E175.
+        if sig.defining_module_id >= 0 && (*c).current_module_id >= 0 {
+            return false
+        }
     }
     visibility_allows_access(
         sig.visibility,
@@ -10508,6 +10891,14 @@ fn checker_struct_visible_inplace(c: *mut Checker, struct_idx: i64) -> bool with
         if (*(*c).structs).entries[struct_idx as usize].defining_module_id == (*c).current_module_id {
             return true
         }
+        // Copilot review (PR #2515): see checker_fn_sig_visible_inplace's
+        // own comment -- a real, valid module-id mismatch is authoritative
+        // and must not fall through to a path check that reads empty on
+        // the module_map/specialized path. Depends on spec_make_struct_item
+        // propagating the template's real visibility (see its own comment).
+        if (*(*c).structs).entries[struct_idx as usize].defining_module_id >= 0 && (*c).current_module_id >= 0 {
+            return false
+        }
     }
     visibility_allows_access(
         (*(*c).structs).entries[struct_idx as usize].visibility,
@@ -10531,6 +10922,20 @@ fn checker_field_visible_inplace(c: *mut Checker, struct_idx: i64, field_name: N
     if si.defining_module_id == (*c).current_module_id {
         return true
     }
+    // Copilot review (PR #2515), comment 4109848820: this now matches
+    // checker_fn_sig_visible_inplace/checker_struct_visible_inplace/
+    // checker_enum_visible_inplace's identical rule -- a real, valid
+    // module-id mismatch is authoritative and must not fall through to a
+    // path check that reads empty on the module_map/specialized path.
+    // tests/run-pass/{gen_dep_summary_min,madaros_module_qualified_generic_call}.sio
+    // used to read GBig<F>'s `c`/`bits` fields as non-pub, relying on
+    // exactly the bypass this whole review is closing; both fields are
+    // now `pub` (stdlib/testmod/gen_big.sio) so this tightening does not
+    // regress them. Depends on spec_make_struct_item propagating the
+    // template's real visibility (see its own comment).
+    if si.defining_module_id >= 0 && (*c).current_module_id >= 0 {
+        return false
+    }
     visibility_allows_access(
         visibility_private(),
         si.defining_module,
@@ -10553,6 +10958,19 @@ fn checker_enum_visible_inplace(c: *mut Checker, enum_idx: i64) -> bool with Mut
     if vis_kind == VISIBILITY_PRIVATE {
         if (*(*c).enums).entries[enum_idx as usize].defining_module_id == (*c).current_module_id {
             return true
+        }
+        // Copilot review (PR #2515): see checker_fn_sig_visible_inplace's
+        // own comment -- a real, valid module-id mismatch is authoritative
+        // and must not fall through to a path check that reads empty on
+        // the module_map/specialized path. Unlike structs, generic enums
+        // are never monomorphized/cloned by the specializer (there is no
+        // spec_make_enum_item / spec_get_or_create_enum_instance) -- an
+        // enum reaching this check on the specialized path is always its
+        // ORIGINAL template item, already correctly registered by
+        // spec_item_module_collect under its own name, so this needs no
+        // analogous module-attribution fix at the specializer level.
+        if (*(*c).enums).entries[enum_idx as usize].defining_module_id >= 0 && (*c).current_module_id >= 0 {
+            return false
         }
     }
     visibility_allows_access(
@@ -10759,11 +11177,54 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             if (*callee_expr).kind == ExprKind::ExprIdent {
                 direct_sig_id = checker_fn_sigs_find_inplace(c, (*callee_expr).name)
             } else if (*callee_expr).kind == ExprKind::ExprPath && (*callee_expr).path.seg_count >= 2 {
-                let path_type_name = checker_copy_string_list_to_name((*callee_expr).path.segments)
+                let path_type_name = checker_copy_string_list_penultimate_to_name((*callee_expr).path.segments)
                 let path_method_name = checker_copy_string_list_tail_to_name((*callee_expr).path.segments)
                 // Prefer semantic match (kind+name) then name-only self_type_name.
                 let recv_ty = ty_named(path_type_name)
                 direct_sig_id = fn_sig_table_find_method_semantic((*c).fn_sigs, recv_ty, path_method_name)
+                // Round 10 (review comment 4099548863): for a path LONGER than
+                // 2 segments (e.g. `bogus::AfNum::quad(..)`), the match above
+                // only ever looks at the PENULTIMATE segment ("AfNum") to find
+                // the type -- everything before it ("bogus") was never
+                // validated. A real `AfNum::quad` match set direct_sig_id >= 0,
+                // which skips the qualifier-validation block below entirely
+                // (it is gated on direct_sig_id < 0), so an unimported leading
+                // module segment was silently accepted while the lowerer,
+                // which cannot strip an unregistered "bogus" prefix, targeted
+                // the wrong mangled stub -- the same check-success/body-less-
+                // stub mismatch this whole qualifier-validation machinery
+                // exists to prevent.
+                //
+                // Round 13 (review comment 4103152006): that first fix only
+                // checked the prefix BEFORE the type name was itself a known
+                // module suffix -- it never checked that the prefix and the
+                // TYPE NAME TOGETHER form one real, actually-`use`d path. Two
+                // separately legitimate imports (`use testmod::tc_c;` and
+                // `use af_mod::AfNum;`, say) each register their own real
+                // suffixes ("tc_c", "AfNum", ...), so `tc_c::AfNum::quad()`
+                // passed: "tc_c" alone was a known suffix, and the semantic
+                // method lookup found a real `AfNum::quad` globally, by name,
+                // with no check that `AfNum` is actually reachable AS "tc_c::
+                // AfNum" specifically. fn_sig_table_find_method_semantic has
+                // no per-import provenance to check that against directly,
+                // but checker_use_module_known already does, for exactly this
+                // shape: check the qualifier INCLUDING the type name as ONE
+                // combined suffix ("tc_c::AfNum", not just "tc_c" alone)
+                // against the current module's registered `use`-suffixes --
+                // the same exact-full-qualifier-match principle the
+                // qualified-free-fn path already relies on (round 8). This
+                // combined text can only be a registered suffix if `AfNum`
+                // was genuinely imported reachable through THAT prefix (e.g.
+                // `use tc_c::AfNum;`, or `use some::tc_c::AfNum;`, which
+                // registers "some::tc_c::AfNum" and "tc_c::AfNum" as
+                // suffixes) -- two independently-real but unrelated imports
+                // sharing no such combined suffix correctly fail to match.
+                if direct_sig_id >= 0 && (*callee_expr).path.seg_count > 2 {
+                    let assoc_qualifier = ast_path_range_name((*callee_expr).path, 0, (*callee_expr).path.seg_count - 2)
+                    if !checker_use_module_known((*c).current_module_id, assoc_qualifier) {
+                        direct_sig_id = -1
+                    }
+                }
                 // W044. The fallthrough documented just above is also what lets an
                 // associated-function call whose target resolves to NOTHING be accepted
                 // silently, evaluating to 0 and propagating that 0 as a pointer. The plain
@@ -10791,8 +11252,74 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
                 if direct_sig_id < 0 {
                     if struct_table_find((*c).structs, path_type_name) < 0 {
                         if enum_table_find((*c).enums, path_type_name) < 0 {
-                            if checker_fn_sigs_find_inplace(c, path_method_name) < 0 {
+                            // `path_type_name` is not a known struct/enum, so this
+                            // is plausibly a module-qualified free-fn call
+                            // (`mod::f(..)`, `a::mod::f(..)`) rather than
+                            // `Type::method`. `path_method_name` is always the
+                            // true terminal segment regardless of path length
+                            // (checker_copy_string_list_tail_to_name), so this
+                            // also covers the >2-segment case correctly.
+                            //
+                            // Bind direct_sig_id to the found free-fn signature
+                            // (not just check its existence) so the call falls
+                            // into the `direct_sig_id >= 0` block below and gets
+                            // full treatment: visibility, argument checking,
+                            // generics, and effects -- exactly like a bare
+                            // `f(..)` call. Previously this only suppressed
+                            // W044, leaving direct_sig_id at -1 so `mod::f(..)`
+                            // with the wrong argument types, or a call to a
+                            // private `mod::private_fn()`, compiled unchecked.
+                            //
+                            // The terminal name resolving to SOME free fn
+                            // signature is not enough on its own (review
+                            // comment 4089110672 / finding A): that lookup is
+                            // by bare name across the WHOLE program, so
+                            // `bogus_module::pubf(..)` bound a real `pubf`'s
+                            // signature here even though `bogus_module` was
+                            // never `use`d anywhere -- typechecking clean while
+                            // the lowerer, which DOES validate the qualifier
+                            // against its own module registry, fell through to
+                            // its legacy mangled-stub path and emitted a
+                            // body-less `bogus_module_pubf` call (SIGILL).
+                            // checker_path_qualifier_all_modules_known
+                            // confirms every segment before the terminal name
+                            // is a real `use`-declared module (the SAME
+                            // positive-evidence check the lowerer's
+                            // LOWER_USE_MODULE_HASH performs) before trusting
+                            // the bare-name match.
+                            // Copilot review (PR #2515), comment 4110379040: this
+                            // combines two independent whole-program facts --
+                            // "qualifier is SOME known use import" and "SOME
+                            // global fn named path_method_name exists" -- without
+                            // ever checking that the specific fn found is the one
+                            // the qualifier's target module actually declares. With
+                            // both `use testmod::tc_c;` and `use testmod::
+                            // dep_chain_leaf;` imported, `tc_c::leaf_add(..)` binds
+                            // to `dep_chain_leaf::leaf_add` if a same-named
+                            // `leaf_add` exists there. checker_use_module_known's
+                            // registry only proves a qualifier text was `use`d by
+                            // the current module (round 3, comment 4089110672); it
+                            // was never extended to resolve a qualifier to its
+                            // target module id (there is no "declaring module's
+                            // qualifier segment -> target module id" table anywhere
+                            // in this checker, nor in specializer.sio's identical
+                            // gap at spec_call_expr_callee_name or ir/lower.sio's
+                            // at callee_path_module_stripped_name). Closing this
+                            // for real needs that resolution table built once at
+                            // import time and threaded through all three call
+                            // sites and both multi-module loading pipelines
+                            // (module_loader.sio and module_frontend.sio) -- a
+                            // genuine architectural addition out of scope for this
+                            // round, left as a known, accepted gap rather than a
+                            // partial fix risking a new regression in an already
+                            // heavily-revised area (see this PR's specializer.sio/
+                            // parser/ast.sio module-provenance comments for the
+                            // same scoping judgment on a related finding).
+                            let free_fn_sig_id = checker_fn_sigs_find_inplace(c, path_method_name)
+                            if free_fn_sig_id < 0 || !checker_path_qualifier_all_modules_known(c, (*callee_expr).path) {
                                 checker_report_warning_at_mut(c, e.span, 44, 0, 0, 0)
+                            } else {
+                                direct_sig_id = free_fn_sig_id
                             }
                         }
                     }
@@ -19185,6 +19712,27 @@ fn checker_copy_string_list_to_name(seg: StringList) -> Name with Mut, Panic, Di
 fn checker_copy_string_list_tail_to_name(seg: StringList) -> Name with Mut, Panic, Div, Alloc {
     match seg.tail {
         Some(rest) => checker_copy_string_list_tail_to_name(*rest)
+        None => checker_copy_string_list_to_name(seg)
+    }
+}
+
+// Segment immediately BEFORE the last one: for `Type::method` that is `Type`
+// (same as checker_copy_string_list_to_name's segment-0 result, so 2-segment
+// paths are unchanged); for a module-qualified associated call like
+// `mod::Type::method` or `a::mod::Type::method`, segment-0 is a MODULE, not
+// the receiver type, so the old always-take-segment-0 behaviour resolved
+// `recv_ty` to a bogus `ty_named("mod")` and fn_sig_table_find_method_semantic
+// could never find the real method. The segment right before the final
+// method name is always the true receiver type, regardless of how many
+// leading module segments precede it.
+fn checker_copy_string_list_penultimate_to_name(seg: StringList) -> Name with Mut, Panic, Div, Alloc {
+    match seg.tail {
+        Some(rest) => {
+            match (*rest).tail {
+                Some(_) => checker_copy_string_list_penultimate_to_name(*rest)
+                None => checker_copy_string_list_to_name(seg)
+            }
+        }
         None => checker_copy_string_list_to_name(seg)
     }
 }

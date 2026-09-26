@@ -3,21 +3,21 @@
 // Multimodule frontend and IR-loading lane split from module_loader.sio.
 // Keeps frontend probes off the native/wasm/optimizer/thin-link backend surface.
 
-use parser::ast::{AstPath, empty_path, Item, ItemKind, ItemList, Name, ParamList, Program, StringList, make_name, ast_reset_global_var_inits, GLOBAL_VAR_INIT_SUPPRESS_RESET}
+use parser::ast::{AstPath, empty_path, Item, ItemKind, ItemList, Name, ParamList, Program, StringList, make_name, ast_reset_global_var_inits, GLOBAL_VAR_INIT_SUPPRESS_RESET, lower_named_item_terminal_note, ast_path_prefix_name, ast_path_range_name_reset, ast_named_item_terminal_reset}
 use parser::mod::{count_items}
 use parser::parser::{parser_last_error_count, parser_reset_last_errors}
 use ir::ir::*
 use ir::opt_cleanup::{OcpCleanupModuleReceipt, opt_cleanup_module_inplace, OCP_SKIP_MASK}
 use io::env::{read_env}
 use io::trace::{io_trace_i64_string}
-use check::mod::{check_items_verdict_boot4, check_items_verdict_boot4_with_ontocache_sidecar, check_modules_verdict_boot4, check_program_epistemic_into, check_program_with_artifacts, checker_to_ir_epistemic_into, checker_apply_ir_metadata, checker_apply_ir_ontology_parameter_links_from_items}
-use ir::lower::{lower_hard_error_report, lower_program_to_ir_trace, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_bodies_from_summary_flat_with_epistemic_ref, lower_program_bodies_from_summary_with_epistemic_boxed_owned, lower_dep_program_items_into_acc_with_externs, lower_hard_error_reset, lower_hard_error_pending, ir_instr_census_report, fo_preregister_program_items_multipass, fo_xfer_global_reset}
+use check::mod::{check_items_verdict_boot4, check_items_verdict_boot4_with_module_map, check_items_verdict_boot4_with_ontocache_sidecar, check_modules_verdict_boot4, check_program_epistemic_into, check_program_with_artifacts, checker_to_ir_epistemic_into, checker_apply_ir_metadata, checker_apply_ir_ontology_parameter_links_from_items}
+use ir::lower::{lower_hard_error_report, lower_program_to_ir_trace, lower_program_to_ir_with_epistemic_trace, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_bodies_from_summary_flat_with_epistemic_ref, lower_program_bodies_from_summary_with_epistemic_boxed_owned, lower_dep_program_items_into_acc_with_externs, lower_hard_error_reset, lower_hard_error_pending, ir_instr_census_report, fo_preregister_program_items_multipass, fo_xfer_global_reset, lower_use_module_reset, lower_set_current_module_id, lower_set_skip_use_recollect_for_merged}
 use native::codegen_x86_linux::{compile_native_v2_preview_to_file, native_resolve_target, native_v2_builtin_id_for_name, native_v2_builtin_returns_float}
 use check::knowledge_context::{knowledge_context_validate_items, knowledge_context_validate_items_values_only}
 use resolve::mod::{resolve_modules}
 use module_parse::{extract_imports_from_ast, file_exists, file_path_to_module_path, load_module_file}
 use private_fn_identity::{private_fn_identity_apply}
-use check::specializer::{specialize_generics, spec_last_instantiated, spec_mono_marker_count, spec_append_item_lists, spec_dce_unreachable_item_fns, spec_dce_mark_across_programs, spec_dce_filter_with_global_marks, spec_dce_live_item_fns, spec_report_any_specializer_failure, spec_program_mentions_f128}
+use check::specializer::{specialize_generics, specialize_generics_multi, spec_last_instantiated, spec_mono_marker_count, spec_append_item_lists, spec_dce_unreachable_item_fns, spec_dce_mark_across_programs, spec_dce_filter_with_global_marks, spec_dce_live_item_fns, spec_report_any_specializer_failure, spec_program_mentions_f128}
 
 // Multi-module parse accumulates every module's GLOBAL_VAR_INIT_* side-table
 // entries so imported f64/i64 BSS constants survive to lower time. Without
@@ -32,6 +32,26 @@ fn module_frontend_global_init_compile_begin() with Mut {
     // intermediate one may be discarded, which is precisely how the flag used to
     // get lost.
     lower_hard_error_reset()
+    // Copilot review (PR #2515): LOWER_USE_MODULE_OVERFLOWED is durable for the
+    // same reason IR_LOWER_HARD_ERROR is (see lower_use_module_reset's own
+    // comment), which means it is just as capable of poisoning a later,
+    // unrelated compile in the same process if nothing clears it at this
+    // boundary. This is the actual top-level compile entry for every
+    // multi-module path; reset the module registry here too.
+    lower_use_module_reset()
+    // Copilot review (PR #2515): AST_PATH_RANGE_NAME_OVERFLOWED is durable
+    // for the same reason (see ast_path_range_name_reset's own comment) --
+    // reset it at the same top-level compile boundary.
+    ast_path_range_name_reset()
+    // Copilot review (PR #2515), round 3: AST_NAMED_ITEM_TERMINAL_OVERFLOWED
+    // is durable for the identical reason -- see ast_named_item_terminal_reset's
+    // own comment. Both call sites of this function (module_frontend_
+    // compile_imported_to_file, load_multimodule_ir_to_box_traced) call it
+    // ONCE, before load_module_file starts this compile's own dependency
+    // resolution -- the only place this registry gets populated -- so
+    // resetting here cannot lose evidence a later module in the SAME
+    // compile still needs.
+    ast_named_item_terminal_reset()
     // #1649: the arena is NOT reset here. This barrier runs more than once per
     // compile (once per module load path), and resetting mid-compile wiped every
     // region that lowering had already filled -- the functions still had valid
@@ -725,6 +745,36 @@ fn module_frontend_resolve_ast_import_relpath(rel_path: string, cur_dir: string)
 // bare `use module::symbol` forms that are token-identical to whole-file
 // imports: when `mod/half.sio` does not exist, retry `mod.sio`.
 // Returns "" when there is no parent segment to strip.
+// Copilot review (PR #2515), comment 4109848838: the inverse of
+// module_frontend_ast_import_relpath (`::` -> `/`, plus a `.sio` suffix) --
+// needed so the source-scanner's named-import fallback below can register
+// the SAME `lower_named_item_terminal_note` evidence resolve_import_file_path
+// already does from the AST path directly. `rel_path` is a `/`-joined
+// path ending in `.sio` (e.g. "a/b/f.sio" for `use a::b::f`); this
+// reconstructs the full original qualifier text ("a::b::f") -- the whole
+// path, matching ast_path_prefix_name(path, path.seg_count - 1)'s own
+// all-segments-inclusive result, not just the parent prefix.
+fn module_frontend_relpath_to_qualifier_name(rel_path: string) -> Name with Mut, Panic, Div {
+    let len = str_len(rel_path)
+    if len < 5 {
+        return make_name("")
+    }
+    let stem = str_slice(rel_path, 0, len - 4)
+    var qualifier: string = ""
+    var i: i64 = 0
+    let stem_len = str_len(stem)
+    while i < stem_len {
+        let ch = str_char_at(stem, i)
+        if ch == 47 {
+            qualifier = str_concat(qualifier, "::")
+        } else {
+            qualifier = str_concat(qualifier, module_frontend_import_byte_to_str(ch as i8))
+        }
+        i = i + 1
+    }
+    make_name(qualifier)
+}
+
 fn module_frontend_relpath_strip_last_segment(rel_path: string) -> string with Mut, Panic, Div {
     let len = str_len(rel_path)
     if len < 5 {
@@ -764,6 +814,30 @@ fn resolve_import_file_path(path: AstPath, cur_dir: string) -> string with IO, M
         if str_len(parent_rel) > 0 {
             let parent_resolved = module_frontend_resolve_ast_import_relpath(parent_rel, cur_dir)
             if file_exists(parent_resolved) {
+                // THIS branch is the authoritative answer to "is `path`'s
+                // terminal segment a module, or a named item within its
+                // parent file" (review comments 4090966230/4090966282,
+                // round 6): the full path did NOT resolve as a file above,
+                // but the path with the last segment dropped DID -- so the
+                // last segment is confirmed, by real file resolution, to be
+                // a named item (function/type/etc) inside that parent file,
+                // not a module of its own. Record it so check.sio/lower.sio/
+                // specializer.sio can use this instead of guessing from
+                // incidental name collisions with unrelated declarations.
+                //
+                // Copilot review (PR #2515), comment 4109123984 (restating
+                // comment 4100990447, round 12): this note is recorded
+                // GLOBALLY by path text alone, but `cur_dir` (this
+                // function's OTHER parameter) means the same `x::y` can
+                // genuinely resolve differently depending on which
+                // directory tree is importing it -- see
+                // AST_NAMED_ITEM_TERMINAL_COUNT's own comment in
+                // parser/ast.sio for the full writeup of this known,
+                // documented, and still-open residual gap (a real fix
+                // needs the registry keyed by resolution context, e.g.
+                // `cur_dir`, a genuine architectural change deliberately
+                // not rushed here per that comment's own reasoning).
+                lower_named_item_terminal_note(ast_path_prefix_name(path, path.seg_count - 1))
                 return parent_resolved
             }
         }
@@ -2903,6 +2977,24 @@ pub fn module_frontend_import_files_from_source(path: string) -> ImportPathList 
                             let parent_dep = module_frontend_resolve_import_relpath(parent_rel, cur_dir)
                             if file_exists(parent_dep) {
                                 dep_path = parent_dep
+                                // Copilot review (PR #2515), comment 4109848838:
+                                // this fallback branch resolves EXACTLY the
+                                // same "last segment is a named item, not a
+                                // module" case resolve_import_file_path's own
+                                // fallback does (this whole file's dependency
+                                // discovery has two lanes: this raw source
+                                // scanner, used by the real compile/run path
+                                // via module_frontend_import_files_from_source,
+                                // and the AST-based resolve_import_file_path,
+                                // used by the check-only preflight closure
+                                // walk) -- but only that OTHER lane recorded
+                                // the evidence check.sio/lower.sio/specializer.sio
+                                // all read. Without this, a real `souc build`/
+                                // `run` (not `check`) of `use a::b::f;` still
+                                // treated `a::b::f` as an unresolved module
+                                // qualifier along this lane, even after the
+                                // check-only path was fixed.
+                                lower_named_item_terminal_note(module_frontend_relpath_to_qualifier_name(rel_path))
                             }
                         }
                     }
@@ -5134,6 +5226,9 @@ fn module_frontend_lower_program_box_traced_with_epistemic(
     trace.summary_seeded_modules = trace.summary_seeded_modules + 1
     trace.last_stage = "lower_bodies"
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_begin\n") }
+    // See LOWER_CURRENT_MODULE_ID's comment in ir/lower.sio: scope
+    // module-qualified-call resolution to this module's own `use` entries.
+    lower_set_current_module_id(module_index)
     // Consume summary Box: reuse its IrModule for body lower (no second empty).
     let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_owned(
         program,
@@ -5207,6 +5302,9 @@ fn module_frontend_lower_program_items_box_traced(
     trace.summary_seeded_modules = trace.summary_seeded_modules + 1
     trace.last_stage = "lower_bodies"
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_begin\n") }
+    // See LOWER_CURRENT_MODULE_ID's comment in ir/lower.sio: scope
+    // module-qualified-call resolution to this module's own `use` entries.
+    lower_set_current_module_id(module_index)
     // Consume summary Box: reuse its IrModule for body lower (no second empty).
     let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_owned(
         &program,
@@ -5268,6 +5366,9 @@ fn module_frontend_lower_program_box_traced_with_externs(
     trace.summary_seeded_modules = trace.summary_seeded_modules + 1
     trace.last_stage = "lower_bodies"
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_begin\n") }
+    // See LOWER_CURRENT_MODULE_ID's comment in ir/lower.sio: scope
+    // module-qualified-call resolution to this module's own `use` entries.
+    lower_set_current_module_id(module_index)
     // Consume summary Box: reuse its IrModule for body lower (no second empty).
     let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_owned(
         program,
@@ -5330,6 +5431,14 @@ fn module_frontend_lower_program_items_box_traced_with_externs(
     trace.summary_seeded_modules = trace.summary_seeded_modules + 1
     trace.last_stage = "lower_bodies"
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_begin\n") }
+    // module_index is this module's own loaded-program index (0 for the
+    // seed, i for a dependency lowered via this same shared function) --
+    // the same id fo_preregister_program_items_multipass stamped this
+    // module's `use` entries with. Set it as the current module before
+    // lowering bodies so callee_path_module_stripped_name's qualifier
+    // lookups are scoped to what THIS module actually imported. See
+    // LOWER_CURRENT_MODULE_ID's comment in ir/lower.sio.
+    lower_set_current_module_id(module_index)
     // Consume summary Box: reuse its IrModule for body lower (no second empty).
     let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_owned(
         &program,
@@ -5579,8 +5688,9 @@ fn module_frontend_lower_single_program_array_direct_box(
     }
 
     fo_xfer_global_reset()
+    lower_use_module_reset()
     let program = (*programs)[0]
-    fo_preregister_program_items_multipass(&program.items)
+    fo_preregister_program_items_multipass(&program.items, 0)
     print("lower_array: seed_begin\n")
     let seed_items = spec_dce_filter_with_global_marks(program.items)
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: summary_begin\n") }
@@ -5674,10 +5784,11 @@ fn module_frontend_lower_programs_array_direct_box_multi(
     // that reads as Option::None (measured: fo_prereg none=1). Whole-Program
     // by-value load then &prog.items is the proven A14-safe pattern.
     fo_xfer_global_reset()
+    lower_use_module_reset()
     var fo_pi: i64 = 0
     while fo_pi < loaded {
         var prog = (*programs)[fo_pi as usize]
-        fo_preregister_program_items_multipass(&prog.items)
+        fo_preregister_program_items_multipass(&prog.items, fo_pi)
         fo_pi = fo_pi + 1
     }
     print("lower_array: seed_begin\n")
@@ -6068,6 +6179,25 @@ pub fn bridge_lower_module_box(main_path: string, trace: &! LoadMultimoduleIrTra
 }
 
 pub fn bridge_lower_single_module_box(main_path: string, trace: &! LoadMultimoduleIrTrace) -> ModuleFrontendLowerBoxResult with IO, Mut, Div, Panic, Alloc {
+    // Copilot review (PR #2515): unlike its multi-module siblings, this entry
+    // point never runs through module_frontend_global_init_compile_begin(), so
+    // a prior compile's durable LOWER_USE_MODULE_OVERFLOWED (and IR_LOWER_HARD_ERROR)
+    // would otherwise still be set here and fail a compile whose own source never
+    // overflowed. Reset both at this top-level entry too.
+    lower_hard_error_reset()
+    lower_use_module_reset()
+    // Copilot review (PR #2515), round 2: AST_PATH_RANGE_NAME_OVERFLOWED
+    // participates in lower_had_error_with_hard alongside those two -- same
+    // durable-flag class, same gap. A prior multi-module compile in this
+    // process that hit an overlong joined path would otherwise leave this
+    // single-module entry failing on source that never overflowed. Reset
+    // here too, matching module_frontend_global_init_compile_begin's own.
+    ast_path_range_name_reset()
+    // Copilot review (PR #2515), round 3: AST_NAMED_ITEM_TERMINAL_OVERFLOWED
+    // feeds lower_hard_error_pending() the same way -- same gap, same fix,
+    // before load_module_file below starts this compile's own dependency
+    // resolution (the only place this registry gets populated).
+    ast_named_item_terminal_reset()
     trace.loaded_modules = 1
     trace.resolved_modules = 1
     trace.last_stage = "load_main"
@@ -6129,6 +6259,9 @@ fn module_frontend_lower_program_full_traced(
     trace.summary_seeded_modules = trace.summary_seeded_modules + 1
     trace.last_stage = "lower_bodies"
     if module_frontend_lower_trace_enabled() { print("module_frontend_lower: bodies_begin\n") }
+    // See LOWER_CURRENT_MODULE_ID's comment in ir/lower.sio: scope
+    // module-qualified-call resolution to this module's own `use` entries.
+    lower_set_current_module_id(module_index)
     // Consume summary Box: reuse its IrModule for body lower (no second empty).
     let body_result = lower_program_bodies_from_summary_with_epistemic_boxed_owned(
         &program,
@@ -6212,7 +6345,7 @@ fn module_frontend_specialized_typecheck(programs: &! [Program; 256], count: i64
     if count <= 0 {
         return (false, 0)
     }
-    let specialized = specialize_generics(module_frontend_merge_program_items(programs, count))
+    let specialized = specialize_generics_multi(module_frontend_merge_program_items(programs, count), programs, count)
     // i64 mono-marker gate — not bare `if !bool` (CI-seed fragile).
     let mono_n: i64 = spec_mono_marker_count()
     if mono_n <= 0 {
@@ -6225,7 +6358,15 @@ fn module_frontend_specialized_typecheck(programs: &! [Program; 256], count: i64
         print_int(mono_n)
         print("\n")
     }
-    let verdict = check_items_verdict_boot4(specialized)
+    // check_items_verdict_boot4 never varies Checker.current_module_id off its
+    // init value of 0 (see check_items_verdict_boot4_with_module_map's own
+    // comment in check/mod.sio), so every module's qualified-call / visibility
+    // check here silently compared against module 0's registrations. This is
+    // the BUILD-path twin of the same gap main.sio's run_check_mode had on the
+    // `check`-only path -- attribute each item back to its real declaring
+    // module via check::specializer's item->module registry instead (already
+    // populated by the specialize_generics_multi call just above).
+    let verdict = check_items_verdict_boot4_with_module_map(specialized, empty_path())
     (true, verdict)
 }
 
@@ -6282,7 +6423,7 @@ fn module_frontend_specialized_prepare(
     // spine, which would leave body lower seeing only main with live clones
     // stripped (measured: body_fn_count 4 but only main body-lowered → ZD FAIL
     // / SEGV on empty mono stubs).
-    let specialized_tc = specialize_generics(module_frontend_merge_program_items(programs, count))
+    let specialized_tc = specialize_generics_multi(module_frontend_merge_program_items(programs, count), programs, count)
     // Seed-safe i64 mono markers. Leave specialized_items_out as None when
     // mono_n==0 so Option occupancy stays the sole collapse arm.
     let mono_n: i64 = spec_mono_marker_count()
@@ -6296,13 +6437,16 @@ fn module_frontend_specialized_prepare(
         print_int(mono_n)
         print(" (collapse candidate)\n")
     }
-    let verdict = check_items_verdict_boot4(specialized_tc)
+    // Same fix as module_frontend_specialized_typecheck above: attribute each
+    // item back to its real declaring module instead of letting
+    // Checker.current_module_id stay stuck at 0 for the whole merged list.
+    let verdict = check_items_verdict_boot4_with_module_map(specialized_tc, empty_path())
     // Second specialize: fresh monomorphized list for IR lower, rebuilt from
     // still-intact per-module originals (merge only reads programs[i].items).
     // Monomorphized + retained non-generic items from every module live in
     // one list under same-name mono. Multi-mod template body lower SEGV'd on
     // cd_add_exact / trait-method array loops (Wave12 residual).
-    let specialized_raw = specialize_generics(module_frontend_merge_program_items(programs, count))
+    let specialized_raw = specialize_generics_multi(module_frontend_merge_program_items(programs, count), programs, count)
     let mono_n2: i64 = spec_mono_marker_count()
     if mono_n2 <= 0 {
         return 0
@@ -6361,7 +6505,15 @@ fn module_frontend_lower_specialized_items_box(
     print("lower_specialized: begin\n")
     // program_count stays at the original loaded module count so extern
     // lookup still sees sibling modules; the ITEMS being lowered are the
-    // monomorphized merge (not programs[0].items).
+    // monomorphized merge (not programs[0].items), so module_index=0 below
+    // does not name a real single module. Skip lowerer_lower_program_bodies_mut's
+    // own recollection for the duration of this one call: the merged `items`
+    // spans every loaded module, and re-noting all of it under module id 0
+    // would let module 0 borrow a qualifier only some OTHER module actually
+    // `use`d -- see LOWER_SKIP_USE_RECOLLECT_FOR_MERGED's own comment
+    // (review comment 4098353609). The merged items were already fully
+    // preregistered per-module before specialize_generics_multi ran.
+    lower_set_skip_use_recollect_for_merged(true)
     let seed_lower = module_frontend_lower_program_items_box_traced_with_externs(
         items,
         programs,
@@ -6369,6 +6521,7 @@ fn module_frontend_lower_specialized_items_box(
         0,
         trace
     )
+    lower_set_skip_use_recollect_for_merged(false)
     print("lower_specialized: done\n")
     if !seed_lower.ok {
         return module_frontend_lower_direct_box_error(seed_lower.error_msg)
@@ -6414,6 +6567,22 @@ fn module_frontend_merge_imported_box(
 
     if !module_frontend_private_fn_identity_ok(programs, loaded) {
         return module_frontend_lower_direct_box_error("private_fn_identity_unresolved")
+    }
+
+    // Neither branch below (module_frontend_lower_specialized_items_box, nor its
+    // module_frontend_lower_programs_array_direct_box fallback) resets or populates
+    // LOWER_USE_MODULE_*, unlike the sibling ordinary multi-mod entry point
+    // (module_frontend_lower_programs_array_direct_box_multi). A generic multi-module
+    // program that specializes would otherwise still mangle `mod::f()` as `mod_f`, or
+    // resolve module names a PRIOR compilation left behind. Same A14-safe copy-first
+    // pattern as the sibling entry point.
+    fo_xfer_global_reset()
+    lower_use_module_reset()
+    var merge_fo_pi: i64 = 0
+    while merge_fo_pi < loaded {
+        var merge_prog = (*programs)[merge_fo_pi as usize]
+        fo_preregister_program_items_multipass(&merge_prog.items, merge_fo_pi)
+        merge_fo_pi = merge_fo_pi + 1
     }
 
     trace.last_stage = "typecheck"
@@ -6728,6 +6897,20 @@ pub fn module_frontend_compile_imported_to_file(
         print("Same-named private functions could not be disambiguated\n")
         module_frontend_global_init_compile_end()
         return 1
+    }
+
+    // Same gap as module_frontend_merge_imported_box, fixed the same way: neither
+    // the specialized-collapse branch below nor its ordinary fallback resets or
+    // populates LOWER_USE_MODULE_* on their own. This is a separate, duplicated
+    // top-level entry point (does not call module_frontend_merge_imported_box), so
+    // needs its own copy of the setup.
+    fo_xfer_global_reset()
+    lower_use_module_reset()
+    var compile_fo_pi: i64 = 0
+    while compile_fo_pi < loaded {
+        var compile_prog = programs[compile_fo_pi as usize]
+        fo_preregister_program_items_multipass(&compile_prog.items, compile_fo_pi)
+        compile_fo_pi = compile_fo_pi + 1
     }
 
     trace.last_stage = "typecheck"

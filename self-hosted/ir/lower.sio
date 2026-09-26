@@ -5,7 +5,7 @@ module ir::lower
 use parser::ast::*
 use ir::ir::*
 use ir::numeric_payload::{ir_wide_compile_pool_reset, ir_wide_compile_pool_intern_low}
-use check::specializer::{spec_dce_filter_with_global_marks, spec_dce_global_marks_ready}
+use check::specializer::{spec_dce_filter_with_global_marks, spec_dce_global_marks_ready, spec_item_module_lookup, spec_item_module_populated, spec_item_module_overflowed}
 use io::trace::*
 use io::env::{read_env}
 
@@ -549,7 +549,7 @@ pub fn lower_note_error(site: i64, n: Name) with Mut {
 }
 var IR_LOWER_HARD_ERROR_LIMIT: i64 = 0
 
-pub fn lower_hard_error_pending() -> bool { IR_LOWER_HARD_ERROR != 0 }
+pub fn lower_hard_error_pending() -> bool { IR_LOWER_HARD_ERROR != 0 || LOWER_USE_MODULE_OVERFLOWED || LOWER_IMPL_METHOD_OVERFLOWED || ast_named_item_terminal_overflowed() || spec_item_module_overflowed() || ast_path_range_name_overflowed() }
 
 // Print what the flag knows, or say plainly that it knows nothing — never
 // silence. Called by the consumers that used to print a bare "ir_summary_failed".
@@ -616,6 +616,33 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
         }
         print("\n")
     }
+    if LOWER_USE_MODULE_OVERFLOWED {
+        print("  cause: more than 1024 distinct lowercase `use` path segments in this\n")
+        print("         compilation; the module-qualified-call registry (LOWER_USE_MODULE_HASH)\n")
+        print("         dropped the rest. Any `mod::f(..)` naming a module past this point\n")
+        print("         falls back to the mangled `mod_f` stub this gate exists to prevent,\n")
+        print("         silently -- reported here because the transient hard-error state may\n")
+        print("         have been reset by a later module's lowerer_new().\n")
+    }
+    if LOWER_IMPL_METHOD_OVERFLOWED {
+        print("  cause: more than 4096 distinct mangled impl-method names in this compilation;\n")
+        print("         the impl-method registry (LOWER_IMPL_METHOD_HASH) dropped the rest. A\n")
+        print("         lowercase-typed method past this point can lose its \"this is a real\n")
+        print("         method\" evidence and be stripped to a bare free-fn name -- reported here\n")
+        print("         because the transient hard-error state may have been reset by a later\n")
+        print("         module's lowerer_new().\n")
+    }
+    if ast_named_item_terminal_overflowed() {
+        print("  cause: more than 4096 distinct named-item import terminals in this compilation\n")
+        print("         (or a prior compilation in this same process -- this registry is never\n")
+        print("         reset); the shared registry (AST_NAMED_ITEM_TERMINAL_HASH, parser/ast.sio)\n")
+        print("         dropped the rest. Since round 9, the module-qualifier registries skip\n")
+        print("         registering a `use` path's suffixes entirely when this registry confirms\n")
+        print("         it names an item, not a module -- a dropped entry past this cap means\n")
+        print("         that suffix falls back into the module registries as if it were a real\n")
+        print("         module, reopening the namespace-erasure class this registry exists to\n")
+        print("         prevent for whichever names overflow.\n")
+    }
     if IR_LOWER_HARD_ERROR == 0 {
         return
     }
@@ -623,6 +650,20 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
         print("  cause: cannot safely lower print/println argument with unresolved scalar kind in function `")
         ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
         print("`\n")
+    } else if IR_LOWER_HARD_ERROR_REASON == 3 {
+        print("  cause: more than ")
+        print_int(IR_LOWER_HARD_ERROR_LIMIT)
+        print(" distinct lowercase `use` path segments in this compilation; the module-\n")
+        print("         qualified-call registry (LOWER_USE_MODULE_HASH) dropped the rest.\n")
+        print("         Any `mod::f(..)` naming a module past this point falls back to the\n")
+        print("         mangled `mod_f` stub this gate exists to prevent, silently.\n")
+    } else if IR_LOWER_HARD_ERROR_REASON == 4 {
+        print("  cause: more than ")
+        print_int(IR_LOWER_HARD_ERROR_LIMIT)
+        print(" distinct mangled impl-method names in this compilation; the impl-method\n")
+        print("         registry (LOWER_IMPL_METHOD_HASH) dropped the rest. A lowercase-typed\n")
+        print("         method past this point can lose its \"this is a real method\" evidence\n")
+        print("         and be stripped to a bare free-fn name, silently.\n")
     } else if IR_LOWER_HARD_ERROR_NEEDED > 0 {
         print("  cause: function `")
         ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
@@ -650,8 +691,21 @@ pub fn lower_hard_error_reset() with Mut {
 }
 
 // OR the durable flag into a value-threaded had_error. Used at every
-// IrLowerResult/IrLowerBoxResult construction site.
-pub fn lower_had_error_with_hard(v: bool) -> bool { v || IR_LOWER_HARD_ERROR != 0 }
+// IrLowerResult/IrLowerBoxResult construction site. Must track
+// lower_hard_error_pending()'s condition exactly: a caller that trusts a
+// returned had_error field instead of separately polling
+// lower_hard_error_pending() (module_frontend_merge_imported_box and the
+// public load_multimodule_ir* routes do exactly this) would otherwise see
+// success on a module-registry overflow that IR_LOWER_HARD_ERROR alone
+// cannot see, since lowerer_new() resets it per module while the overflow
+// flag is deliberately durable across that reset.
+// Round 11 (review comment 4100285133): this had drifted out of sync with
+// lower_hard_error_pending() (missing ast_named_item_terminal_overflowed()),
+// so a named-item-terminal registry overflow could still be returned as
+// successful IR by any of the many IrLowerResult/IrLowerBoxResult
+// construction sites that gate on THIS helper rather than polling the
+// separate pending flag directly.
+pub fn lower_had_error_with_hard(v: bool) -> bool { v || IR_LOWER_HARD_ERROR != 0 || LOWER_USE_MODULE_OVERFLOWED || LOWER_IMPL_METHOD_OVERFLOWED || ast_named_item_terminal_overflowed() || spec_item_module_overflowed() || ast_path_range_name_overflowed() }
 fn lower_ok_without_hard(v: bool) -> bool { !lower_had_error_with_hard(v) }
 var FO_XFER_COUNT: i64 = 0
 var FO_XFER_KIND: [i64; 64] = [0; 64]
@@ -743,6 +797,317 @@ fn fo_name_hash(n: Name) -> i64 with Mut, Panic, Div {
         i = i + 1
     }
     h + n.len
+}
+
+// Module names that appear in a `use` declaration of any loaded module.
+//
+// `use chemistry::equilibrium;` then `equilibrium::solve_ab_c_equil(..)` is a
+// call to the free fn `solve_ab_c_equil`: the function namespace is flat
+// (lean_single flattens `a::b::f` to `f` for the same reason). Without this
+// set expr_to_callee_name_ref could not tell a module prefix from a type, so it
+// mangled the call as `equilibrium_solve_ab_c_equil` -- a name with no body --
+// and native codegen emitted a ud2 stub (NATIVE_REFUSAL empty_stub_ud2, SIGILL
+// at run time) while `check` stayed green.
+//
+// POSITIVE evidence only: a segment counts as a module when a `use` names it,
+// it starts lowercase, and at the call site it is not a known struct or enum.
+// Everything else keeps the Type::method mangling.
+//
+// FIXED (review 5301534901, round 7 finding A's sibling gap; the round-6
+// comment below described this as a KNOWN, deliberately deferred SCOPING
+// GAP -- kept verbatim below for history): this registry used to be a
+// single GLOBAL set across every loaded module, not scoped to "did the
+// CURRENT module actually `use` this". check.sio's CHECKER_USE_MODULE_HASH
+// was per-module-scoped in round 6, and specializer.sio's sibling
+// SPEC_USE_MODULE_HASH in round 7 (finding A) -- but round 6 reasoned this
+// one could stay unscoped because "check.sio's validation always runs
+// before lowering and would already reject an invalid qualifier via W044".
+// Round 7's finding A review comment pointed out that reasoning does not
+// actually hold: W044 is a WARNING, not a hard compile error (by long-
+// standing design, since it fires on pre-existing broken code elsewhere in
+// this codebase too) -- so a program whose qualifier check.sio only
+// *warned* about still proceeds to body lowering, where this registry, if
+// left globally scoped, could independently (and silently) resolve the
+// same illegitimately-borrowed qualifier to an unrelated module's real
+// function and emit a genuine miscompilation, with no diagnostic at all.
+// That is strictly worse than check.sio's non-fatal warning and entirely
+// bypasses it. Fixed the same way as SPEC_USE_MODULE_HASH: every entry is
+// now stamped with the registering module's id (LOWER_USE_MODULE_MODULE_ID,
+// parallel to HASH/LEN/BUF) and lookup requires an exact match against
+// LOWER_CURRENT_MODULE_ID, which the three body-lowering entry points that
+// can resolve a module-qualified call (module_frontend.sio's
+// module_frontend_lower_program_items_box_traced_with_externs, this file's
+// lower_dep_program_items_into_acc_with_externs, and the single-module
+// direct-box path, which relies on the -1-means-0 fallback below since it
+// never lowers more than module 0) now set via lower_set_current_module_id
+// before lowering that module's own bodies. The ACCUMULATION timing itself
+// (every loaded module's `use` paths collected up front, before any body is
+// lowered -- see lower_use_modules_collect's own comment) is unchanged;
+// only the id each entry is stamped with, and the id required at lookup,
+// are new.
+var LOWER_USE_MODULE_COUNT: i64 = 0
+var LOWER_USE_MODULE_HASH: [i64; 1024] = [0; 1024]
+var LOWER_USE_MODULE_MODULE_ID: [i64; 1024] = [0 - 1; 1024]
+
+// The module id callee_path_module_stripped_name's qualifier lookup checks
+// registry entries against. -1 (the default) means "unscoped": the single-
+// module direct-box path never calls lower_set_current_module_id, and
+// lower_use_module_known/note both fall back to module id 0 when this is
+// negative, so that path's own (always module-0) entries still match
+// without any special-cased fallback branch. The three multi-module body-
+// lowering entry points listed above set this explicitly to the id of
+// whichever module's own items are currently being lowered, for the
+// duration of that module's body lowering.
+var LOWER_CURRENT_MODULE_ID: i64 = 0 - 1
+
+// Sets LOWER_CURRENT_MODULE_ID from module_frontend.sio, which owns the
+// loop indices that know which loaded module is about to have its body
+// lowered; lower.sio's own body-lowering entry points call this directly.
+pub fn lower_set_current_module_id(module_id: i64) with Mut {
+    LOWER_CURRENT_MODULE_ID = module_id
+}
+
+// Round 12 (review comment 4100990400): exact match on -1 (the genuine
+// "unset, single-module compile" default), not "any negative value" --
+// spec_item_module_lookup's "not found" result is a DIFFERENT sentinel
+// (SPEC_ITEM_MODULE_NOT_FOUND, -2, check::specializer) precisely so a
+// fail-closed assignment from that lookup (see lowerer_lower_program_bodies_mut's
+// per-item attribution) does not get silently reinterpreted as "assume
+// module 0" here.
+fn lower_effective_current_module_id() -> i64 with Mut {
+    if LOWER_CURRENT_MODULE_ID == 0 - 1 { 0 } else { LOWER_CURRENT_MODULE_ID }
+}
+
+// Round 9 (review comment 4098353609): module_frontend_lower_specialized_items_box
+// passes a MERGED, all-modules item list to module_frontend_lower_program_items_
+// box_traced_with_externs with module_index=0 (a specialized/monomorphized program
+// has no single "module" of its own -- see that function's own comment). That
+// value flows straight into lower_set_current_module_id, so
+// lowerer_lower_program_bodies_mut's own recollection
+// (lower_use_modules_collect(items, lower_effective_current_module_id())) re-notes
+// EVERY dependency module's `use` paths under module id 0 -- module 0 (the seed)
+// can then borrow a qualifier only some OTHER, unrelated module actually
+// imported, exactly the cross-module leak the per-module registry exists to
+// prevent, and because W044 is a non-fatal warning this can surface as lowering
+// silently resolving to a real but wrong function, not merely a rejected
+// diagnostic. Unlike the OTHER (genuinely single-module) callers of
+// lowerer_lower_program_bodies_mut, this recollection is neither a no-op resend
+// (the module ids it would write are simply wrong) nor necessary (the specialized
+// path's items were already fully preregistered per-module before specialization
+// ran, in module_frontend.sio's ordinary preregister loop). Set for the
+// duration of ONE such call (module_frontend_lower_specialized_items_box), never
+// durable, never cleared by lower_use_module_reset() (that call always precedes
+// this one within the same compile, so clearing it there would be a no-op either
+// way -- kept simple as its own flag instead of overloading the reset).
+var LOWER_SKIP_USE_RECOLLECT_FOR_MERGED: bool = false
+
+pub fn lower_set_skip_use_recollect_for_merged(skip: bool) with Mut {
+    LOWER_SKIP_USE_RECOLLECT_FOR_MERGED = skip
+}
+// Durable: NOT cleared by lower_hard_error_reset(), which fo_preregister_program_items_multipass
+// (via lowerer_new()) calls once per loaded module -- immediately after this table might be
+// filled, on the very same call path, before any compile-boundary check ever sees the flag.
+// Folded back into the hard-error report at the two barrier sites in module_frontend.sio via
+// lower_hard_error_pending()/lower_hard_error_report(), so it still refuses the binary rather
+// than reverting to the silent drop this gate exists to replace.
+var LOWER_USE_MODULE_OVERFLOWED: bool = false
+
+pub fn lower_use_module_reset() with Mut {
+    LOWER_USE_MODULE_COUNT = 0
+    LOWER_USE_MODULE_OVERFLOWED = false
+    LOWER_IMPL_METHOD_COUNT = 0
+    LOWER_IMPL_METHOD_OVERFLOWED = false
+    LOWER_CURRENT_MODULE_ID = 0 - 1
+    // LOWER_NAMED_ITEM_TERMINAL_* (parser::ast) is deliberately NOT reset
+    // anywhere in this file -- see its own comment there for why.
+}
+// fo_name_hash is a djb2 variant with real collisions (e.g. "aar" and "ac0"
+// both hash to 193485948) and only hashes a name's first 64 bytes -- but hash
+// alone is never identity here regardless: the full segment text is stored
+// alongside it and compared byte-for-byte after a hash match (below), so a
+// truncated-hash collision cannot be mistaken for a real module match. That
+// full-length compare is also why MODULE_SEG_MAX must cover every byte `Name`
+// can hold (384, matching `Name.buf: [i8; 384]` in parser/ast.sio) rather than
+// some shorter cap: a shorter cap made `lower_use_module_note`/`known` refuse
+// (silently, not an error) any module segment longer than the cap, so a real
+// `use` of a >cap-byte module still parsed/checked but its qualified calls
+// fell back to the mangled body-less stub -- the same SIGILL class of bug
+// this registry exists to prevent, just for long identifiers instead of
+// missing ones. Reported by review (comment 4089110718) against an earlier,
+// shorter (64-byte) cap on this same registry.
+//
+// Stored as a flat scalar byte buffer (LOWER_USE_MODULE_BUF/LEN), NOT
+// `[Name; 1024]` (a 392-byte struct array): a `[Name; 1024]` global here was
+// observed to corrupt on both read and write (hash stayed correct, but the
+// stored len/buf came back as unrelated stack-address-shaped garbage) even
+// after eliminating every by-value Name copy at the call sites -- reproduced
+// on this branch's own base commit (692e709), independent of any of the 4
+// review findings, so this is a pre-existing miscompilation in this
+// compiler's own codegen for large-struct global array elements, not
+// something introduced by this PR. Scalar (i8/i64) global arrays are the
+// pattern already proven reliable throughout this file (LOWER_USE_MODULE_HASH
+// itself, LOWER_ENUM_VARIANT_PTRS, FN_PARAM_NAME_OFF, …).
+let LOWER_USE_MODULE_SEG_MAX: i64 = 384
+var LOWER_USE_MODULE_LEN: [i64; 1024] = [0; 1024]
+var LOWER_USE_MODULE_BUF: [i8; 393216] = [0; 393216]
+
+fn lower_use_module_known(module_id: i64, n: Name) -> bool with Mut, Panic, Div {
+    if n.len <= 0 || n.len > LOWER_USE_MODULE_SEG_MAX {
+        return false
+    }
+    let h = fo_name_hash(n)
+    var i: i64 = 0
+    while i < LOWER_USE_MODULE_COUNT {
+        if LOWER_USE_MODULE_MODULE_ID[i as usize] == module_id && LOWER_USE_MODULE_HASH[i as usize] == h && LOWER_USE_MODULE_LEN[i as usize] == n.len {
+            let base = i * LOWER_USE_MODULE_SEG_MAX
+            var eq = true
+            var j: i64 = 0
+            while j < n.len {
+                if LOWER_USE_MODULE_BUF[(base + j) as usize] != n.buf[j as usize] {
+                    eq = false
+                }
+                j = j + 1
+            }
+            if eq {
+                return true
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn lower_use_module_note(module_id: i64, n: Name) with Mut, Panic, Div {
+    if n.len <= 0 || n.len > LOWER_USE_MODULE_SEG_MAX {
+        return
+    }
+    let c0 = (n.buf[0] as i64) & 255
+    if c0 >= 65 && c0 <= 90 {
+        return
+    }
+    if lower_use_module_known(module_id, n) {
+        return
+    }
+    if LOWER_USE_MODULE_COUNT >= 1024 {
+        // Silently continuing here would recreate exactly the bug this registry exists
+        // to prevent: a `mod::f(..)` call for the segment that didn't fit falls back to
+        // the mangled `mod_f` stub, but now with no diagnostic at all. Refuse instead.
+        // The durable flag survives the lower_hard_error_reset() every later module's
+        // fo_preregister_program_items_multipass -> lowerer_new() call makes; the
+        // transient fields are also set for anything that checks IR_LOWER_HARD_ERROR
+        // before that next reset happens.
+        LOWER_USE_MODULE_OVERFLOWED = true
+        if IR_LOWER_HARD_ERROR == 0 {
+            IR_LOWER_HARD_ERROR = 1
+            IR_LOWER_HARD_ERROR_REASON = 3
+            IR_LOWER_HARD_ERROR_LIMIT = 1024
+        }
+        return
+    }
+    let use_idx = LOWER_USE_MODULE_COUNT
+    LOWER_USE_MODULE_MODULE_ID[use_idx as usize] = module_id
+    LOWER_USE_MODULE_HASH[use_idx as usize] = fo_name_hash(n)
+    let use_base = use_idx * LOWER_USE_MODULE_SEG_MAX
+    var use_ci: i64 = 0
+    while use_ci < n.len {
+        LOWER_USE_MODULE_BUF[(use_base + use_ci) as usize] = n.buf[use_ci as usize]
+        use_ci = use_ci + 1
+    }
+    LOWER_USE_MODULE_LEN[use_idx as usize] = n.len
+    LOWER_USE_MODULE_COUNT = LOWER_USE_MODULE_COUNT + 1
+}
+
+// Segment k of a path, by recursion like ir_string_list_last (no by-value
+// self-reassignment of the StringList).
+fn lower_string_list_nth_name(sl: StringList, k: i64) -> Name with Mut, Panic, Div {
+    if k <= 0 {
+        return Name { buf: sl.head_buf, len: sl.head_len }
+    }
+    match sl.tail {
+        Some(rest) => lower_string_list_nth_name(*rest, k - 1),
+        _ => ir_empty_name(),
+    }
+}
+
+// Record every segment of every `use` path. For `use a::b::*` and
+// `use a::b::{x}` the path is `a::b`, all modules. `use a::f;` may name an
+// item; noting `f` is harmless because a call spelled `f::g` still has to pass
+// the call-site type checks.
+pub fn lower_use_modules_collect(items: &Option<Box<ItemList>>, module_id: i64) with Mut, Panic, Div, Alloc {
+    // Same every-module-before-body-lowering timing this function already
+    // provides for LOWER_USE_MODULE_HASH: populate the impl-method registry
+    // here too so callee_path_module_stripped_name always sees a complete
+    // set before any call site is resolved.
+    lower_impl_methods_collect(items)
+    var current = items
+    while true {
+        match *current {
+            Some(list) => {
+                let item_ref = &(*list).head
+                if item_ref.kind == ItemKind::ItemUse {
+                    // Records every SUFFIX of the `use` path (the full path,
+                    // and every shorter suffix ending at the same terminal --
+                    // e.g. for `use a::b::c;`: "a::b::c", "b::c", "c") as a
+                    // POSITIVE-EVIDENCE candidate qualifier string. Suffixes,
+                    // not individual segments (round 8, review comment
+                    // 4096338764): recording each segment independently let
+                    // callee_path_module_stripped_name accept a qualifier
+                    // recombined from two unrelated `use` paths that happen to
+                    // share a segment name (e.g. `math::tc_c` when only
+                    // `math::dd64` and `testmod::tc_c` were ever imported).
+                    // Registering complete suffix TEXT still supports both
+                    // call forms a single `use a::b;` allows (`b::f()` via the
+                    // "b" suffix, `a::b::f()` via the "a::b" suffix) without
+                    // accepting a mix of segments from different imports.
+                    //
+                    // This cannot exclude a path-form NAMED import's terminal
+                    // (`use a::b::specific_fn;`) here by shape alone: the AST
+                    // gives no way to tell that apart from a genuine
+                    // whole-module import (`use a::b;`) -- both are
+                    // `use_glob=false, use_items=None, seg_count>=2`,
+                    // syntactically identical. `use
+                    // epistemic::propagate::monte_carlo;` is real
+                    // (tests/stdlib/epistemic/test_stiff_ode_knightian_mc.sio),
+                    // `monte_carlo` is a function, not a module.
+                    //
+                    // Round 9 (review comment 4098353722, and the collision it
+                    // reopened): registering suffixes here regardless and
+                    // relying SOLELY on callee_path_module_stripped_name's
+                    // separate lower_named_item_terminal_known exclusion does
+                    // not work for a call spelled with just the BARE terminal
+                    // (`monte_carlo::something()`), because that registry is
+                    // keyed by the FULL `use` path text, not the bare form a
+                    // short call actually asks for -- and registering the bare
+                    // terminal there too was tried and reverted: it collided
+                    // with an UNRELATED module elsewhere in the compilation
+                    // whose own bare-terminal qualifier happens to share the
+                    // same text (round 7's own
+                    // uses_named_tc_c.sio/uses_real_tc_c_module.sio fixture
+                    // exists specifically to catch this). Fixed at the SOURCE
+                    // instead: skip suffix registration for this `use` path
+                    // ENTIRELY when lower_named_item_terminal_known already
+                    // confirms the full path is a named item, not a module --
+                    // it was never a legitimate module-qualifier candidate in
+                    // the first place (a named-item import brings its target
+                    // into scope as a bare, unqualified name), so not
+                    // registering any of its suffixes here removes the false
+                    // module-shaped entry instead of trying to filter it back
+                    // out later, and a genuinely unrelated real module's own
+                    // identical-text suffix is never put at risk.
+                    if !lower_named_item_terminal_known(ast_path_range_name(item_ref.use_path, 0, item_ref.use_path.seg_count - 1)) {
+                        var s: i64 = 0
+                        while s < item_ref.use_path.seg_count {
+                            let suffix = ast_path_range_name(item_ref.use_path, s, item_ref.use_path.seg_count - 1)
+                            lower_use_module_note(module_id, suffix)
+                            s = s + 1
+                        }
+                    }
+                }
+                current = &(*list).tail
+            }
+            _ => break
+        }
+    }
 }
 
 fn fo_ctor_path_fold(acc: i64, name_hash: i64) -> i64 with Mut, Panic, Div {
@@ -2370,9 +2735,68 @@ fn lowerer_lower_program_bodies_mut(
     lo: &! Lowerer,
     items: &Option<Box<ItemList>>
 ) with Mut, Panic, Div, Alloc, IO {
+    // This is the seed/main module's real body-lowering entry (called once,
+    // with the seed program's own DCE-filtered items, from
+    // lower_program_bodies_from_summary_with_epistemic_boxed_owned). An
+    // earlier version of this call site reset LOWER_USE_MODULE_HASH /
+    // LOWER_IMPL_METHOD_HASH here before recollecting -- wrong, and reported
+    // by review (comment 4089110737): the ordinary multi-module path already
+    // builds the registry across the WHOLE module graph, every loaded
+    // program in turn, at module_frontend.sio's `while fo_pi < loaded {
+    // fo_preregister_program_items_multipass(&prog.items) }` loop, before
+    // this function ever runs. Resetting here threw that away and rebuilt it
+    // from ONLY the seed's own items, so a qualified call inside a
+    // DEPENDENCY module -- reached via lower_dep_program_items_into_acc_with_
+    // externs, which never recollects its own `use` paths -- whose module
+    // prefix the seed itself never `use`s lost its registry entry and fell
+    // back to a mangled `mod_f` stub. It also cleared a durable overflow flag
+    // the combined module graph may have legitimately raised. Only
+    // ACCUMULATE from `items` here (lower_use_module_note is idempotent, so
+    // recollecting the seed's own already-registered segments is harmless);
+    // never reset -- that stays owned by the top-level compile-boundary call
+    // sites (module_frontend.sio, lowerer_new()/fo_preregister_program_items_
+    // multipass's callers) that already do it once per compile. Uses
+    // lower_effective_current_module_id() (not a hardcoded 0): the caller
+    // (module_frontend.sio / lower_dep_program_items_into_acc_with_externs)
+    // has already called lower_set_current_module_id for whichever module's
+    // body is being lowered right now, so this recollection stamps the same
+    // module id its earlier, authoritative preregister pass used -- it is a
+    // genuine no-op resend, not a fresh (and possibly wrongly-id'd) entry.
+    //
+    // EXCEPT for the one caller (module_frontend_lower_specialized_items_box)
+    // where `items` is a MERGED, all-modules list and lower_effective_current_
+    // module_id() is NOT this list's real per-item module -- see
+    // LOWER_SKIP_USE_RECOLLECT_FOR_MERGED's own comment.
+    if !LOWER_SKIP_USE_RECOLLECT_FOR_MERGED {
+        lower_use_modules_collect(items, lower_effective_current_module_id())
+    }
     // Keep the multi-module FO table: the frontend may have pre-registered
     // imported helpers before entering this module.
     lowerer_fo_preregister_pure_fns_multipass_mut(lo, items)
+    // Round 10 (review comment 4099548955): skipping the recollection above
+    // (LOWER_SKIP_USE_RECOLLECT_FOR_MERGED) stops module 0 from WRONGLY
+    // gaining every dependency's imports, but on its own it does NOT fix the
+    // underlying problem for the one caller that sets that flag
+    // (module_frontend_lower_specialized_items_box): `items` there is a
+    // MERGED, all-modules list, and LOWER_CURRENT_MODULE_ID stays fixed at 0
+    // (module_frontend_lower_program_items_box_traced_with_externs's own
+    // lower_set_current_module_id(module_index) call, module_index=0) for
+    // the WHOLE body-lowering pass below -- so a qualified call inside a
+    // DEPENDENCY's own body now looks itself up under module 0, which
+    // (correctly, per the skip above) does not have that dependency's
+    // imports, and falls back to the mangled stub this machinery exists to
+    // prevent. Attribute each item's body to its real declaring module the
+    // same way check_items_verdict_boot4_with_module_map does (check/mod.sio)
+    // -- via check::specializer's item->module registry, reusable here since
+    // this file already imports from that module -- for the duration of
+    // lowering just that one item's body. Fails CLOSED to -1 (never a real
+    // module id, see LOWER_CURRENT_MODULE_ID's own comment) when the
+    // registry has no entry, same reasoning as check/mod.sio's own fix.
+    // Only engaged for the merged-list caller: every other (genuinely
+    // single-module) caller already has the right LOWER_CURRENT_MODULE_ID
+    // set once for its own whole items list, and per-item overriding it here
+    // would be wrong for those.
+    let attribute_per_item = LOWER_SKIP_USE_RECOLLECT_FOR_MERGED && spec_item_module_populated()
     var current = items
     var item_count: i64 = 0
     while true {
@@ -2384,6 +2808,9 @@ fn lowerer_lower_program_bodies_mut(
                 item_count = item_count + 1
                 if item_count > IR_MAX_FUNCS { return }
                 if kind == ItemKind::ItemFn {
+                    if attribute_per_item {
+                        lower_set_current_module_id(spec_item_module_lookup(name))
+                    }
                     if lower_body_diag_enabled() {
                         lower_body_trace_append("body_list_fn name=" + str_from_bytes(name.buf, name.len))
                     }
@@ -2395,7 +2822,22 @@ fn lowerer_lower_program_bodies_mut(
                 } else if kind == ItemKind::ItemImpl {
                     let impl_def_ref = &head.impl_def
                     match *impl_def_ref {
-                        Some(id) => { lowerer_lower_impl_methods_mut(lo, name, (*id).methods) }
+                        Some(id) => {
+                            // spec_item_module_collect registers each impl
+                            // METHOD under its own (unmangled) name, not the
+                            // impl block's own `name` (the TYPE it is for) --
+                            // an impl block has no name of its own in that
+                            // registry. All methods in one impl block share a
+                            // declaring module, so look ownership up via the
+                            // first method's name instead.
+                            if attribute_per_item {
+                                match (*id).methods {
+                                    Some(ml) => { lower_set_current_module_id(spec_item_module_lookup((*ml).head.name)) }
+                                    None => { lower_set_current_module_id(0 - 1) }
+                                }
+                            }
+                            lowerer_lower_impl_methods_mut(lo, name, (*id).methods)
+                        }
                         None => {}
                     }
                 }
@@ -5472,8 +5914,15 @@ fn lowerer_fo_preregister_pure_fns_multipass_mut(
 // FO_XFER is global — call once per loaded module *before* seed body lower so
 // imported helpers (e.g. epistemic::fo::fo_add2) FO-transfer into user main.
 pub fn fo_preregister_program_items_multipass(
-    items: &Option<Box<ItemList>>
+    items: &Option<Box<ItemList>>,
+    module_id: i64
 ) with Mut, Panic, Div, Alloc, IO {
+    // Same every-module-before-body-lowering timing that module-qualified
+    // calls need: see LOWER_USE_MODULE_HASH. module_id is the caller's own
+    // loop index over the loaded module array (0 for a single-module
+    // compile), stamped onto every entry this call registers so a later
+    // per-module lookup (LOWER_CURRENT_MODULE_ID) can tell them apart.
+    lower_use_modules_collect(items, module_id)
     var lo = lowerer_new()
     lowerer_fo_preregister_pure_fns_multipass_mut(&! lo, items)
 }
@@ -5483,6 +5932,11 @@ fn lowerer_lower_program_items_mut(
     items: Option<Box<ItemList>>
 ) with Mut, Panic, Div, Alloc, IO {
     fo_xfer_global_reset()
+    lower_use_module_reset()
+    // Single-module entry point -- only ever one module's items here, so
+    // module id 0 (matching lower_effective_current_module_id's own
+    // unscoped-default convention) is always correct.
+    lower_use_modules_collect(&items, 0)
     // Pre-register FO transfers so reverse-order pure helpers expand nested calls.
     lowerer_fo_preregister_pure_fns_multipass_mut(lo, &items)
     var current = items
@@ -7381,6 +7835,158 @@ pub fn lower_program_has_captured_closure_value_misuse_ref(prog: &Program) -> bo
     false
 }
 
+// Authoritative registry of mangled impl-method names (Type_method), populated
+// once per program from every ItemImpl's methods (see lower_impl_methods_collect,
+// called alongside lower_use_modules_collect -- same every-module-before-body-
+// lowering timing). This exists because `lowerer_lookup_fn_id_by_name_ref` only
+// answers "does ANY fn with this exact mangled name exist", which cannot tell a
+// real impl method from an unrelated top-level free fn that happens to be
+// spelled identically to a mangled name (e.g. `use m; m::f(..)` colliding with
+// an unrelated top-level `fn m_f(..)`). callee_path_module_stripped_name uses
+// this instead of a bare existence check to decide whether a lowercase-rooted
+// two-segment path is really `Type::method` or a module-qualified free fn.
+//
+// Stored as a flat scalar byte buffer (LOWER_IMPL_METHOD_BUF/LEN), NOT
+// `[Name; 4096]` (a 392-byte struct array) -- same reasoning as
+// LOWER_USE_MODULE_HASH's sibling registry just above: a `[Name; N]` global
+// array was observed to corrupt on both read and write in this compiler's
+// own codegen (hash stayed correct, stored len/buf came back as unrelated
+// stack-address-shaped garbage), reproduced on this branch's own base commit
+// (692e709), independent of any of the 4 review findings. Scalar (i8/i64)
+// global arrays are the pattern already proven reliable throughout this file.
+//
+// SEG_MAX is 384, matching `Name.buf: [i8; 384]` (parser/ast.sio) and the
+// output cap `ir_mangle_method_name` itself enforces -- not a shorter,
+// arbitrary cap. A shorter cap made `lower_impl_method_note`/`known` silently
+// refuse any mangled name longer than the cap, so a real impl method with a
+// long enough Type_method name lost its "this is a real method" registration
+// -- the same class of bug review comment 4089110718 reported against
+// LOWER_USE_MODULE_SEG_MAX's earlier 64-byte cap.
+let LOWER_IMPL_METHOD_SEG_MAX: i64 = 384
+var LOWER_IMPL_METHOD_COUNT: i64 = 0
+var LOWER_IMPL_METHOD_HASH: [i64; 4096] = [0; 4096]
+var LOWER_IMPL_METHOD_LEN: [i64; 4096] = [0; 4096]
+var LOWER_IMPL_METHOD_BUF: [i8; 1572864] = [0; 1572864]
+// Review comment 4089532660 (round 3, finding B): unlike LOWER_USE_MODULE_
+// OVERFLOWED (this registry's sibling, declared near line 793), overflow
+// here used to silently continue instead of refusing. That is NOT a safe
+// best-effort fallback: this registry is what lets callee_path_module_
+// stripped_name tell a real lowercase-typed impl method apart from an
+// unrelated top-level free fn that collides with the mangled name (round 1
+// finding B). A dropped entry past capacity means a later `Type_method`
+// entry silently loses its "this really is a method" evidence, and
+// callee_path_module_stripped_name can strip it to the bare method name --
+// a wrong call or a body-less stub, the exact failure class this whole PR
+// exists to fix. Like LOWER_USE_MODULE_OVERFLOWED, this is cleared by
+// lower_use_module_reset() (the once-per-whole-compile top-level boundary)
+// but NOT by lower_hard_error_reset() (called per loaded module via
+// lowerer_new(), mid-compile) -- durable across the latter so the
+// transient IR_LOWER_HARD_ERROR state it also sets cannot be silently lost
+// to a later module's reset before a barrier site ever reports it.
+var LOWER_IMPL_METHOD_OVERFLOWED: bool = false
+
+pub fn lower_impl_method_known(n: Name) -> bool with Mut, Panic, Div {
+    if n.len <= 0 || n.len > LOWER_IMPL_METHOD_SEG_MAX {
+        return false
+    }
+    let h = fo_name_hash(n)
+    var i: i64 = 0
+    while i < LOWER_IMPL_METHOD_COUNT {
+        if LOWER_IMPL_METHOD_HASH[i as usize] == h && LOWER_IMPL_METHOD_LEN[i as usize] == n.len {
+            let base = i * LOWER_IMPL_METHOD_SEG_MAX
+            var eq = true
+            var j: i64 = 0
+            while j < n.len {
+                if LOWER_IMPL_METHOD_BUF[(base + j) as usize] != n.buf[j as usize] {
+                    eq = false
+                }
+                j = j + 1
+            }
+            if eq {
+                return true
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn lower_impl_method_note(n: Name) with Mut, Panic, Div {
+    if n.len <= 0 || n.len > LOWER_IMPL_METHOD_SEG_MAX {
+        return
+    }
+    if lower_impl_method_known(n) {
+        return
+    }
+    if LOWER_IMPL_METHOD_COUNT >= 4096 {
+        // Refuse (review comment 4089532660 / finding B), matching
+        // lower_use_module_note's own overflow refusal just above in this
+        // file: silently continuing here would let a later real impl
+        // method's mangled name get treated as "not a method" (no
+        // registry evidence for it), and callee_path_module_stripped_name
+        // strip it to a bare free-fn name -- a wrong call or a body-less
+        // stub. The durable flag survives lower_hard_error_reset() the same
+        // way LOWER_USE_MODULE_OVERFLOWED does.
+        LOWER_IMPL_METHOD_OVERFLOWED = true
+        if IR_LOWER_HARD_ERROR == 0 {
+            IR_LOWER_HARD_ERROR = 1
+            IR_LOWER_HARD_ERROR_REASON = 4
+            IR_LOWER_HARD_ERROR_LIMIT = 4096
+        }
+        return
+    }
+    let idx = LOWER_IMPL_METHOD_COUNT
+    LOWER_IMPL_METHOD_HASH[idx as usize] = fo_name_hash(n)
+    let base = idx * LOWER_IMPL_METHOD_SEG_MAX
+    var ci: i64 = 0
+    while ci < n.len {
+        LOWER_IMPL_METHOD_BUF[(base + ci) as usize] = n.buf[ci as usize]
+        ci = ci + 1
+    }
+    LOWER_IMPL_METHOD_LEN[idx as usize] = n.len
+    LOWER_IMPL_METHOD_COUNT = idx + 1
+}
+
+fn lower_impl_methods_collect_list(type_name: Name, methods: &Option<Box<ItemList>>) with Mut, Panic, Div, Alloc {
+    var current = methods
+    while true {
+        match *current {
+            Some(list) => {
+                let head = &(*list).head
+                if head.kind == ItemKind::ItemFn {
+                    lower_impl_method_note(ir_mangle_method_name(type_name, head.name))
+                }
+                current = &(*list).tail
+            }
+            _ => break
+        }
+    }
+}
+
+// Record every method of every ItemImpl, mangled the same way the real
+// lowering passes mangle them (ir_mangle_method_name). Called alongside
+// lower_use_modules_collect so the registry is complete before any call
+// site resolution (callee_path_module_stripped_name) runs.
+pub fn lower_impl_methods_collect(items: &Option<Box<ItemList>>) with Mut, Panic, Div, Alloc {
+    var current = items
+    while true {
+        match *current {
+            Some(list) => {
+                let item_ref = &(*list).head
+                if item_ref.kind == ItemKind::ItemImpl {
+                    match item_ref.impl_def {
+                        Some(id) => {
+                            lower_impl_methods_collect_list(item_ref.name, &(*id).methods)
+                        }
+                        None => {}
+                    }
+                }
+                current = &(*list).tail
+            }
+            _ => break
+        }
+    }
+}
 
 impl Lowerer {
     fn current_fn_compile_strategy(self) -> i64 with Mut, Panic, Div {
@@ -12992,20 +13598,18 @@ impl Lowerer {
         if (*expr).kind != ExprKind::ExprCall { return 0 - 1 }
         match (*expr).left {
             Some(callee_expr) => {
-                var callee_name = ir_empty_name()
-                if (*callee_expr).kind == ExprKind::ExprIdent {
-                    callee_name = (*callee_expr).name
-                } else if (*callee_expr).kind == ExprKind::ExprPath {
-                    let first = ir_path_first_name((*callee_expr).path)
-                    let last = ir_path_last_name((*callee_expr).path)
-                    if first.len > 0 && last.len > 0 && !ir_name_eq(first, last) {
-                        callee_name = ir_mangle_method_name(first, last)
-                    } else {
-                        callee_name = first
-                    }
-                } else {
+                if (*callee_expr).kind != ExprKind::ExprIdent && (*callee_expr).kind != ExprKind::ExprPath {
                     return 0 - 1
                 }
+                // Resolve through the same module-qualified-path-aware
+                // resolver the emitted call target uses (expr_to_callee_name_ref
+                // / callee_path_module_stripped_name), not a separate
+                // first/last reconstruction -- otherwise `mod::make_array()`
+                // looks up `make_array`'s metadata under the plain name while
+                // the actual call target was correctly resolved, and a
+                // module-qualified call to a fixed-array-returning free fn
+                // loses its declared array length.
+                let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
                 let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
                 if fn_id >= 0 && fn_id < self.module.fn_count {
                     return ir_fn_get(&(*self.module), fn_id as usize).return_fixed_array_len
@@ -13024,20 +13628,12 @@ impl Lowerer {
         if (*expr).kind != ExprKind::ExprCall { return 0 - 1 }
         match (*expr).left {
             Some(callee_expr) => {
-                var callee_name = ir_empty_name()
-                if (*callee_expr).kind == ExprKind::ExprIdent {
-                    callee_name = (*callee_expr).name
-                } else if (*callee_expr).kind == ExprKind::ExprPath {
-                    let first = ir_path_first_name((*callee_expr).path)
-                    let last = ir_path_last_name((*callee_expr).path)
-                    if first.len > 0 && last.len > 0 && !ir_name_eq(first, last) {
-                        callee_name = ir_mangle_method_name(first, last)
-                    } else {
-                        callee_name = first
-                    }
-                } else {
+                if (*callee_expr).kind != ExprKind::ExprIdent && (*callee_expr).kind != ExprKind::ExprPath {
                     return 0 - 1
                 }
+                // Same resolver as the emitted call target -- see
+                // expr_call_return_fixed_array_len_ref.
+                let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
                 lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
             }
             None => 0 - 1,
@@ -13048,20 +13644,15 @@ impl Lowerer {
         if (*expr).kind != ExprKind::ExprCall { return ir_empty_name() }
         match (*expr).left {
             Some(callee_expr) => {
-                var callee_name = ir_empty_name()
-                if (*callee_expr).kind == ExprKind::ExprIdent {
-                    callee_name = (*callee_expr).name
-                } else if (*callee_expr).kind == ExprKind::ExprPath {
-                    let first = ir_path_first_name((*callee_expr).path)
-                    let last = ir_path_last_name((*callee_expr).path)
-                    if first.len > 0 && last.len > 0 && !ir_name_eq(first, last) {
-                        callee_name = ir_mangle_method_name(first, last)
-                    } else {
-                        callee_name = first
-                    }
-                } else {
+                if (*callee_expr).kind != ExprKind::ExprIdent && (*callee_expr).kind != ExprKind::ExprPath {
                     return ir_empty_name()
                 }
+                // Same resolver as the emitted call target -- see
+                // expr_call_return_fixed_array_len_ref. Without this, a
+                // module-qualified call to a struct-returning free fn (e.g.
+                // `mod::make_struct()`) lost the return layout needed by
+                // later indexing or field access.
+                let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
                 let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
                 self.return_struct_name_for_fn_id(fn_id)
             }
@@ -13073,20 +13664,12 @@ impl Lowerer {
         if (*expr).kind != ExprKind::ExprCall { return ir_empty_name() }
         match (*expr).left {
             Some(callee_expr) => {
-                var callee_name = ir_empty_name()
-                if (*callee_expr).kind == ExprKind::ExprIdent {
-                    callee_name = (*callee_expr).name
-                } else if (*callee_expr).kind == ExprKind::ExprPath {
-                    let first = ir_path_first_name((*callee_expr).path)
-                    let last = ir_path_last_name((*callee_expr).path)
-                    if first.len > 0 && last.len > 0 && !ir_name_eq(first, last) {
-                        callee_name = ir_mangle_method_name(first, last)
-                    } else {
-                        callee_name = first
-                    }
-                } else {
+                if (*callee_expr).kind != ExprKind::ExprIdent && (*callee_expr).kind != ExprKind::ExprPath {
                     return ir_empty_name()
                 }
+                // Same resolver as the emitted call target -- see
+                // expr_call_return_fixed_array_len_ref.
+                let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
                 let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
                 self.return_tuple0_array_elem_struct_name_for_fn_id(fn_id)
             }
@@ -15365,6 +15948,13 @@ impl Lowerer {
 
     fn lower_program_items_ref(self, items: &Option<Box<ItemList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         fo_xfer_global_reset()
+        // This ref-based path (production streaming) never called lower_use_modules_collect
+        // at all -- module-qualified calls only resolved on it if an earlier, unrelated
+        // preflight happened to populate the registry as a side effect first. Same gap class
+        // as the sibling f64-tuple-array table in #2516. Only ever one
+        // module's items on this path, so module id 0 always matches.
+        lower_use_module_reset()
+        lower_use_modules_collect(items, 0)
         var lo = self
         lowerer_fo_preregister_pure_fns_multipass_mut(&! lo, items)
         var current = items
@@ -18901,10 +19491,132 @@ impl Lowerer {
         (lo, dst)
     }
 
+    fn callee_segment_names_type(self, seg: Name) -> bool with Mut, Panic, Div {
+        if lower_struct_layout_index_of(&(*self.struct_layouts), seg) >= 0 {
+            return true
+        }
+        var i: i64 = 0
+        while i < (*self.enum_variants).count {
+            if ir_name_eq((*self.enum_variants).entries[i as usize].enum_name, seg) {
+                return true
+            }
+            i = i + 1
+        }
+        false
+    }
+
+    // `mod::f`, `a::mod::f`, `mod::Type::method`: drop the leading segments that
+    // name a module (LOWER_USE_MODULE_HASH) and are not a struct/enum known here.
+    // Empty when nothing was dropped, so the caller keeps Type::method mangling.
+    //
+    // Round 8 (review comment 4096338764, extended here from check.sio to the
+    // lowerer for the same bug class): this used to grow `k` one segment at a
+    // time, accepting segment `k` whenever IT ALONE was independently
+    // registered as a known module -- so a module with both `use math::dd64;`
+    // and `use testmod::tc_c;` would strip the bogus call `math::tc_c::f()`
+    // down to `tc_c_f`/`f`, since `math` and `tc_c` were each independently
+    // "known" even though "math::tc_c" together was never imported. Fixed by
+    // searching qualifier LENGTHS longest-first and requiring the FULL
+    // candidate qualifier (all `cand` segments joined into one string) to
+    // exactly match a registered `use`-path suffix (see
+    // lower_use_modules_collect's own comment) -- the qualifier can no longer
+    // be satisfied by mixing segments from two unrelated imports.
+    fn callee_path_module_stripped_name(self, p: AstPath) -> Name with Mut, Panic, Div, Alloc {
+        if p.seg_count < 2 || LOWER_USE_MODULE_COUNT <= 0 {
+            return ir_empty_name()
+        }
+        let module_id = lower_effective_current_module_id()
+        var k: i64 = 0
+        var cand: i64 = p.seg_count - 1
+        while cand >= 1 {
+            var segs_ok = true
+            var j: i64 = 0
+            while j < cand {
+                let seg = lower_string_list_nth_name(p.segments, j)
+                // Imported types are not guaranteed to have reached
+                // struct_layouts yet. Their uppercase spelling is still
+                // enough to stop module-prefix stripping, so
+                // `af_mod::AfNum::quad` retains `AfNum_quad`.
+                let c0 = if seg.len > 0 { (seg.buf[0] as i64) & 255 } else { 0 }
+                if self.callee_segment_names_type(seg) || (c0 >= 65 && c0 <= 90) || lower_named_item_terminal_known(ast_path_prefix_name(p, j)) {
+                    segs_ok = false
+                }
+                j = j + 1
+            }
+            if segs_ok {
+                // lower_use_module_note cannot tell a path-form named-item
+                // import's terminal (`use a::b::specific_fn;`, where
+                // `specific_fn` is a function) apart from a genuine
+                // whole-module import (`use a::b;`) at registration time --
+                // both are the same AST shape -- so it registers both.
+                // lower_named_item_terminal_known (checked per-segment above)
+                // is the authoritative tie-breaker: it is populated from
+                // module_frontend.sio's real file-resolution outcome for this
+                // exact question (see its own comment), not a name-collision
+                // guess. round 5 (comment 4090734484) used
+                // `lowerer_lookup_fn_id_by_name_ref(&self, seg) >= 0` here
+                // instead -- "does this name ALSO resolve as some real
+                // function" -- which review comment 4090966282 (round 6,
+                // finding C) correctly flagged as unsound the other way: a
+                // genuine module whose name happens to coincide with an
+                // unrelated top-level function elsewhere in the program
+                // (e.g. `use testmod::tc_c;` alongside an unrelated
+                // top-level `fn tc_c(..)`) was wrongly excluded too, breaking
+                // the real module's own qualified calls.
+                // Copilot review (PR #2515), comment 4110379072: the same
+                // namespace-erasure gap as check.sio's checker_path_qualifier_
+                // all_modules_known and specializer.sio's spec_call_expr_
+                // callee_name (see their own comments) -- lower_use_module_known
+                // only proves `qualifier` is imported, not that the module it
+                // names is the one that owns `last` (the stripped bare name
+                // returned below). With `tc_c` and `dep_chain_leaf` both loaded,
+                // `tc_c::leaf_add(..)` strips to bare `leaf_add` and binds
+                // whichever module's `leaf_add` body the merged IR happens to
+                // hold, regardless of which module actually exported it under
+                // this qualifier. Needs the same qualifier -> target-module-id
+                // resolution table described there; left as the same accepted,
+                // out-of-scope gap rather than a rushed partial fix here.
+                let qualifier = ast_path_range_name(p, 0, cand - 1)
+                if lower_use_module_known(module_id, qualifier) {
+                    k = cand
+                    break
+                }
+            }
+            cand = cand - 1
+        }
+        if k == 0 {
+            return ir_empty_name()
+        }
+        let last = ir_path_last_name(p)
+        let remaining = p.seg_count - k
+        if remaining == 1 {
+            // An impl method whose lowercase type is spelled like a module keeps
+            // the mangled name that already has a body. Checked against the
+            // LOWER_IMPL_METHOD_HASH registry (populated from every ItemImpl's
+            // methods, see lower_impl_methods_collect) rather than a bare
+            // "does any fn with this mangled name exist" lookup -- the latter
+            // cannot distinguish a real impl method from an unrelated top-level
+            // free fn that happens to be spelled identically (e.g. `use m;
+            // m::f(..)` colliding with an unrelated top-level `fn m_f(..)`).
+            if k == 1 && lower_impl_method_known(ir_mangle_method_name(lower_string_list_nth_name(p.segments, 0), last)) {
+                return ir_empty_name()
+            }
+            return last
+        }
+        if remaining == 2 {
+            return ir_mangle_method_name(lower_string_list_nth_name(p.segments, k), last)
+        }
+        ir_empty_name()
+    }
+
     fn expr_to_callee_name_ref(self, e: &Expr) -> Name with Mut, Panic, Div, Alloc {
         if e.kind == ExprKind::ExprIdent {
             e.name
         } else if e.kind == ExprKind::ExprPath {
+            let module_stripped = self.callee_path_module_stripped_name(e.path)
+            if module_stripped.len > 0 {
+                return module_stripped
+            }
             // Type::method → Type_method (matches ir_mangle_method_name for impl methods).
             // Using only the first path segment mis-resolves E::of as bare "E" (body-less).
             let first = ir_path_first_name(e.path)
@@ -24974,6 +25686,13 @@ pub fn lower_dep_program_items_into_acc_with_externs(
     }
     lowerer_preseed_dep_items_into_acc_mut(&! lo, items, ir_empty_name())
     // DEDUP body lower: skip main + existing bodies; fill stubs and new names.
+    // self_index is this dependency module's own loaded-program index (the
+    // same id fo_preregister_program_items_multipass stamped its `use`
+    // entries with) -- set it as the current module before lowering this
+    // module's own bodies, so callee_path_module_stripped_name's qualifier
+    // lookups are scoped to what THIS module actually imported, not the
+    // whole loaded module graph. See LOWER_CURRENT_MODULE_ID's comment.
+    lower_set_current_module_id(self_index)
     lowerer_lower_program_bodies_dedup_mut(&! lo, items)
     // Residual closeout: re-attempt any ItemImpl methods still at ic=0.
     lowerer_force_fill_impl_methods_mut(&! lo, items)

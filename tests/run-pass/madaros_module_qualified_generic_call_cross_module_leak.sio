@@ -1,0 +1,44 @@
+//@ check-only
+//@ requires: madaros
+//@ expect-stdout-contains: W044
+//
+// PR #2515 review round 7 (review 5301534901), finding A (comment_id
+// 4091287518, self-hosted/check/specializer.sio:1959): SPEC_USE_MODULE_HASH
+// (the specializer's own "is this segment a known module" registry, distinct
+// from CHECKER_USE_MODULE_HASH which round 6 already fixed) was still
+// globally scoped across all modules on the multi-module specialize path --
+// membership meant "some module, somewhere in this compilation, imported
+// this segment", not "the module whose GENERIC call is being scanned right
+// now imported it". `spec_path_qualifier_all_modules_known` used this global
+// view to decide whether `spec_call_expr_callee_name` may rewrite a
+// module-qualified turbofish call into a monomorphized symbol -- so a
+// generic call in one module could illegitimately borrow a qualifier only
+// ever imported by a completely different module, and get silently
+// rewritten and accepted by the specializer *before* the checker ever saw
+// (and would have rejected) the call.
+//
+// stdlib/testmod/gen_big_wrapper.sio is the only module in this program that
+// `use`s testmod::gen_big; it exists purely so `gen_big` is loaded and known
+// SOMEWHERE in this compilation. THIS file never imports testmod::gen_big
+// itself -- it only imports testmod::gen_big_wrapper -- yet before the fix,
+// the generic turbofish call below (`gen_big::gbig_basis::<i64>(..)`) would
+// have been silently rewritten and accepted by the specializer, borrowing
+// gen_big_wrapper's import. specialize_generics_multi now scans each
+// module's own source AST (programs[i].items) independently
+// (SPEC_CURRENT_MODULE_ID tracks which module is currently being scanned),
+// so this file's own (empty, for `gen_big`) use-list is what gates the
+// qualifier here, and the call correctly falls back to the pre-existing
+// "unresolved path" W044 warning instead of being monomorphized.
+use testmod::gen_big_wrapper;
+
+fn main() -> i32 with IO, Mut, Panic {
+    let zero: i64 = 0
+    let one: i64 = 1
+    let leaked = gen_big::gbig_basis::<i64>(4, 3, zero, one)
+    let w = gen_big_wrapper::wrapper_touch(4, one)
+    if w == 4 {
+        println("GENERIC_CROSS_MODULE_LEAK_REJECTED")
+        return 0
+    }
+    1
+}

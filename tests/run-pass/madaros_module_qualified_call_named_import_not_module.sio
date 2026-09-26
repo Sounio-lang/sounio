@@ -1,0 +1,60 @@
+//@ check-only
+//@ requires: madaros
+//@ expect-stdout-contains: W044
+//
+// PR #2515 review round 5 (review 5300804681), findings A (comment_id
+// 4090734423, self-hosted/check/specializer.sio) and B (comment_id
+// 4090734484, self-hosted/ir/lower.sio): the `use`-tracking registries this
+// PR built (SPEC_USE_MODULE_HASH, LOWER_USE_MODULE_HASH, and
+// CHECKER_USE_MODULE_HASH) recorded EVERY segment of a `use` path as a
+// module name, including the terminal segment of a path-form NAMED import
+// like `use a::b::specific_fn;` -- where `specific_fn` is the actual
+// imported FUNCTION, not a module. `use epistemic::propagate::monte_carlo;`
+// is exactly this shape (a real import, see
+// tests/stdlib/epistemic/test_stiff_ode_knightian_mc.sio:33):
+// `monte_carlo` is a function in stdlib/epistemic/propagate.sio, not a
+// module. Recording it as a known module let `monte_carlo::tc_c_add(..)`
+// (a bogus qualified path through a nonexistent "monte_carlo" module) get
+// silently treated as valid -- checker_path_qualifier_all_modules_known
+// returned true for the qualifier, so the checker bound the call to the
+// REAL (unrelated) `tc_c_add`'s signature instead of rejecting the
+// nonsensical namespace with W044.
+//
+// The AST cannot distinguish a path-form named-item import's terminal from
+// a genuine whole-module import's terminal (both are `use_glob=false,
+// use_items=None, seg_count>=2`), so all three registries still record
+// every segment; the fix instead excludes a qualifier segment that ALSO
+// resolves to a real top-level function (checker_fn_sigs_find_inplace /
+// spec_known_fn_known / lowerer_lookup_fn_id_by_name_ref) from being
+// trusted as a module. `monte_carlo` is such a segment, so
+// `monte_carlo::tc_c_add(..)` now falls back to the pre-existing
+// "unresolved path" W044 warning instead of being silently accepted.
+//
+// Round 12 (review comment 4106485575): this used to be a `//@ compile-fail`
+// fixture pinning `//@ error-pattern: W044` -- but W044 is intentionally a
+// non-fatal warning (the whole point: the call still compiles and evaluates
+// to 0 rather than being hard-rejected), so it could never by ITSELF make
+// `souc compile` exit non-zero. The original call, `monte_carlo::tc_c_add(2,
+// 3)`, only made the fixture "pass" because the SAME fallback quirk this
+// finding documents -- treating the qualifier's bare first segment as the
+// callee, ignoring `tc_c_add` entirely -- then type-checked `(2, 3)` against
+// `monte_carlo`'s OWN 3-parameter signature (Epistemic, fn(f64)->f64, i64)
+// and additionally rejected the missing Prob/Div effects, producing
+// E009/E010/E035 on top of W044. Fixing that unrelated quirk later could
+// make the file compile cleanly even with W044 correctly still firing,
+// silently turning this into a vacuous pass. Fixed by matching the call's
+// argument list and the caller's effects to `monte_carlo`'s real signature
+// exactly, so nothing else can fire: `souc check` now exits 0 with W044 as
+// the ONLY diagnostic, and `//@ check-only` + `//@ expect-stdout-contains`
+// pin exactly that -- decoupled from whether the fallback quirk itself ever
+// gets fixed.
+use epistemic::propagate::monte_carlo;
+use epistemic::knowledge::{Epistemic};
+
+fn identity_f64(x: f64) -> f64 { x }
+
+fn main() -> i32 with IO, Mut, Panic, Prob, Div {
+    let e = Epistemic { val: 1.0, variance: 1.0, confidence: 900 };
+    let bogus = monte_carlo::tc_c_add(e, identity_f64, 10);
+    1
+}

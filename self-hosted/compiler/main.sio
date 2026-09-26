@@ -22,8 +22,8 @@ use check::refinement::*
 use check::units::*
 use check::env::*
 use check::traits::*
-use check::mod::{check_program, check_program_epistemic_into, check_items_verdict_boot4, check_modules_verdict_boot4_with_visibility}
-use check::specializer::{specialize_generics, spec_last_instantiated, spec_append_item_lists, spec_report_any_specializer_failure}
+use check::mod::{check_program, check_program_epistemic_into, check_items_verdict_boot4, check_items_verdict_boot4_with_module_map, check_modules_verdict_boot4_with_visibility}
+use check::specializer::{specialize_generics, specialize_generics_multi, spec_last_instantiated, spec_append_item_lists, spec_report_any_specializer_failure, spec_item_module_overflowed}
 use check::ownership::*
 use check::lint::*
 use check::layout::*
@@ -2135,6 +2135,22 @@ fn run_emit_lean_obligations(args: ArgList, flag_index: i64) with IO, Mut, Panic
 }
 
 fn compiler_visibility_preflight(source_path: string) -> bool with IO, Mut, Panic, Div, Alloc {
+    // Copilot review (PR #2515): AST_PATH_RANGE_NAME_OVERFLOWED and
+    // AST_NAMED_ITEM_TERMINAL_OVERFLOWED (parser/ast.sio) are durable
+    // process-global flags this function's own verdicts below fold in
+    // (ast_path_range_name_overflowed() / ast_named_item_terminal_overflowed()),
+    // but this IS `souc check`'s actual top-level compile entry --
+    // `run_check_mode` calls this directly, doing its own closure walk /
+    // specializer / checker calls, and never reaches
+    // module_frontend_global_init_compile_begin or
+    // bridge_lower_single_module_box (self-hosted/compiler/module_frontend.sio),
+    // the two places those flags already get reset. A prior `check` in the
+    // same long-lived process that hit either overflow left it durable
+    // across every LATER, unrelated `check` call, which then failed on
+    // source that never overflowed. Reset both here too, before the
+    // closure walk that first exercises them.
+    ast_path_range_name_reset()
+    ast_named_item_terminal_reset()
     var closure = ModuleClosure {
         paths: [""; 256],
         edge_callers: [""; 512],
@@ -2195,7 +2211,25 @@ fn compiler_visibility_preflight(source_path: string) -> bool with IO, Mut, Pani
             programs[0].items,
             source_path
         )
-        return !(spec_report_any_specializer_failure() || single_verdict != 0)
+        // Round 12 (review comment 4100990481): a named-item-terminal
+        // registry overflow (ast_named_item_terminal_overflowed(),
+        // parser/ast.sio) was previously only propagated through
+        // ir/lower.sio's lower_hard_error_pending(), which `souc check`
+        // never calls -- compiler_visibility_preflight runs the
+        // specializer/checker only, so a check-only compilation with more
+        // than 4096 named imports could report success after entries were
+        // dropped, letting the module registries treat later named imports
+        // as module qualifiers. Fold the same flag into this verdict too.
+        // Round 13 (review comment 4103152059): same reasoning for
+        // spec_item_module_overflowed() (check::specializer) -- its own
+        // overflow also only reached ir/lower.sio's hard-error mechanism,
+        // never this check-only verdict.
+        // Round 14 (review comment 4105262394): same reasoning for
+        // ast_path_range_name_overflowed() (parser/ast.sio) -- an overlong
+        // but otherwise-valid qualifier silently degraded to the non-fatal
+        // W044 path / legacy mangled-stub fallback instead of failing this
+        // verdict.
+        return !(spec_report_any_specializer_failure() || single_verdict != 0 || ast_named_item_terminal_overflowed() || spec_item_module_overflowed() || ast_path_range_name_overflowed())
     }
 
     print("run_check_mode: about to check ")
@@ -2216,7 +2250,7 @@ fn compiler_visibility_preflight(source_path: string) -> bool with IO, Mut, Pani
         merged = spec_append_item_lists(programs[mi as usize].items, merged)
         mi = mi - 1
     }
-    let specialized = specialize_generics(merged)
+    let specialized = specialize_generics_multi(merged, &! programs, closure.node_count)
     var verdict: i64 = 0
     if spec_last_instantiated() {
         if str_eq(read_env("SOUNIO_MM_SPEC_TRACE"), "1") {
@@ -2224,7 +2258,16 @@ fn compiler_visibility_preflight(source_path: string) -> bool with IO, Mut, Pani
             print_int(closure.node_count)
             print(" modules\n")
         }
-        verdict = check_items_verdict_boot4(specialized)
+        // check_items_verdict_boot4 allocates ONE Checker whose current_module_id
+        // never leaves 0 (see check_items_verdict_boot4_with_module_map's own
+        // comment): checker_path_qualifier_all_modules_known and every
+        // defining_module_id-keyed check silently compared every module's own
+        // items against module 0's registrations here, regardless of which
+        // module actually declared them. check_items_verdict_boot4_with_module_map
+        // fixes this by attributing each item in `specialized` back to its real
+        // declaring module via check::specializer's item->module registry
+        // (populated by the specialize_generics_multi call just above).
+        verdict = check_items_verdict_boot4_with_module_map(specialized, empty_path())
     } else {
         verdict = check_modules_verdict_boot4_with_visibility(
             &!programs,
@@ -2245,7 +2288,22 @@ fn compiler_visibility_preflight(source_path: string) -> bool with IO, Mut, Pani
         print_int(closure.node_count)
         print(" module(s); the diagnostics above name the offending declarations\n")
     }
-    !(spec_report_any_specializer_failure() || verdict != 0)
+    // Round 12 (review comment 4100990481): see the single-module return
+    // above -- this multi-module verdict has the same gap. Round 13
+    // (comment 4103152059) added spec_item_module_overflowed() alongside it.
+    if ast_named_item_terminal_overflowed() {
+        print("run_check_mode: named-item-terminal registry overflowed; qualified-call checking is incomplete for whichever names dropped past the cap\n")
+    }
+    if spec_item_module_overflowed() {
+        print("run_check_mode: item->module ownership registry overflowed; module attribution is incomplete for whichever items dropped past the cap\n")
+    }
+    // Round 14 (review comment 4105262394): see the single-module return
+    // above -- this multi-module verdict has the same gap for
+    // ast_path_range_name_overflowed().
+    if ast_path_range_name_overflowed() {
+        print("run_check_mode: a qualifier path exceeded the 384-byte Name buffer while joining; qualified-call checking is incomplete for whichever call(s) hit that overlong qualifier\n")
+    }
+    !(spec_report_any_specializer_failure() || verdict != 0 || ast_named_item_terminal_overflowed() || spec_item_module_overflowed() || ast_path_range_name_overflowed())
 }
 
 fn run_science_boundary_closure_report(
