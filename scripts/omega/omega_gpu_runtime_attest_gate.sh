@@ -93,6 +93,15 @@ BOOTSTRAP_FILES=(
   "tests/run-pass/gpu_kernel_basic.sio"
   "tests/fixtures/fmri/tiny_real_motion.tsv"
   "tests/fixtures/fmri/tiny_real_slice_nifti1.nii"
+)
+
+# Optional payload: shipped when present, never required. keys/ is gitignored,
+# so no clean checkout carries the canonical pubkey, and
+# omega_resolve_souc_bin.sh already falls back to its built-in
+# DEFAULT_CANONICAL_PUBKEY_HEX when the file is absent. Requiring it made the
+# whole gate unreachable: remote_bootstrap_sync returned 12 before contacting
+# the host at all, and the gate reported remote_bootstrap_failed.
+BOOTSTRAP_OPTIONAL_FILES=(
   "keys/bootstrap_ed25519.pub"
 )
 
@@ -112,9 +121,18 @@ remote_bootstrap_sync() {
   local -a ssh_opts=("${@:3}")
   local file
 
+  local -a send_files=()
   for file in "${BOOTSTRAP_FILES[@]}"; do
     if [[ ! -f "$ROOT_DIR/$file" ]]; then
       return 12
+    fi
+    send_files+=("$file")
+  done
+  for file in "${BOOTSTRAP_OPTIONAL_FILES[@]}"; do
+    if [[ -f "$ROOT_DIR/$file" ]]; then
+      send_files+=("$file")
+    else
+      echo "[bootstrap] optional file absent, not shipped: $file" >>"$LOG_PATH"
     fi
   done
 
@@ -122,7 +140,7 @@ remote_bootstrap_sync() {
     return 13
   fi
 
-  if ! tar -cf - -C "$ROOT_DIR" "${BOOTSTRAP_FILES[@]}" 2>>"$LOG_PATH" | ssh "${ssh_opts[@]}" "$host" "mkdir -p ${dir} && tar -xf - -C ${dir}" >>"$LOG_PATH" 2>&1; then
+  if ! tar -cf - -C "$ROOT_DIR" "${send_files[@]}" 2>>"$LOG_PATH" | ssh "${ssh_opts[@]}" "$host" "mkdir -p ${dir} && tar -xf - -C ${dir}" >>"$LOG_PATH" 2>&1; then
     return 14
   fi
 
