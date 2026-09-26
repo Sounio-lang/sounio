@@ -10,6 +10,12 @@
 //   very weak bases, neutrals and zwitterions. J Pharm Sci 95(6):1238-1257.
 //   doi:10.1002/jps.20502, PMID 16639716.
 //
+// UNVERIFIED AGAINST THE PRIMARY SOURCE (audit 2026-09-26): the composition
+// table below, the fn_L + 0.3*fn_P lipid composite, and the "Eq. 6" label have
+// not been checked against the paper, and the 2006 extracellular-protein
+// (albumin) term is absent. Do not use rr_neutral Kp values in a drug profile
+// until they are. Only the Kpu -> Kp conversion has been corrected.
+//
 // SCOPE: Neutral compounds only (rapamycin is a neutral macrolide, pKa N/A).
 //
 // VALIDATED RANGE: The R-R model was calibrated on drugs with logP < 4.
@@ -168,12 +174,16 @@ pub struct RRScaledUnc {
 // CORE COMPUTATION — Neutral Compound R-R (Eq. 6 in Rodgers 2006)
 // ============================================================================
 // For a neutral molecule (no ionization, fu_water = 1.0):
-//   Kpu_i = fw_e_i + fw_i_i + P*(fn_L_i + 0.3*fn_P_i)   [unbound tissue:unbound plasma]
-//   Kp_i  = Kpu_i / fu_plasma                             [total tissue:total plasma]
+//   Kpu_i = fw_e_i + fw_i_i + P*(fn_L_i + 0.3*fn_P_i)   [tissue : UNBOUND plasma]
+//   Kp_i  = Kpu_i * fu_plasma                             [tissue : TOTAL plasma]
 //
-// Analytical GUM sensitivities:
-//   ∂Kp/∂logP = P * ln(10) * (fn_L + 0.3*fn_P) / fu_plasma
-//   ∂Kp/∂fu   = -Kp / fu_plasma
+// Conversion: Kpu = C_t / C_u,p and C_u,p = fu_p * C_p,total, so
+//   Kp = C_t / C_p,total = Kpu * fu_p.
+// (Dividing by fu_p, as this module did before 2026-09-26, is off by 1/fu_p^2.)
+//
+// Analytical GUM sensitivities (Kpu has no fu-dependent term in this form):
+//   ∂Kp/∂logP = P * ln(10) * (fn_L + 0.3*fn_P) * fu_plasma
+//   ∂Kp/∂fu   = Kpu = Kp / fu_plasma
 //   u²(Kp) = (∂Kp/∂logP)² u²(logP) + (∂Kp/∂fu)² u²(fu)
 
 pub fn rr_neutral(
@@ -199,16 +209,16 @@ pub fn rr_neutral(
         // Lipid composite term (neutral lipid + 30% of phospholipid)
         let lipid_c = fn_l + 0.3 * fn_ph
 
-        // Unbound tissue:unbound plasma ratio
+        // Tissue : unbound plasma ratio
         let kpu = fw_e + fw_i + P * lipid_c
 
-        // Total tissue:total plasma (JCGM-compatible; accounts for plasma binding)
-        let kp_i = kpu / fu_plasma
+        // Tissue : total plasma. C_u,p = fu_p * C_p,total, so Kp = Kpu * fu_p.
+        let kp_i = kpu * fu_plasma
         kp[i] = kp_i
 
         // GUM sensitivity coefficients (analytical)
-        let dkp_dlogP = P * ln10 * lipid_c / fu_plasma
-        let dkp_dfu   = 0.0 - kp_i / fu_plasma
+        let dkp_dlogP = P * ln10 * lipid_c * fu_plasma
+        let dkp_dfu   = kpu
 
         // Combined GUM variance (JCGM 100:2008 Eq 13)
         let var_i = dkp_dlogP * dkp_dlogP * u_logP * u_logP
@@ -267,7 +277,8 @@ pub fn rr_scaled_uncertainty(
         // logP contribution: u(Kp_i) from u_logP
         let term_logP = ls * u_logP * kp_i
 
-        // fu contribution: u(Kp_i) from u_fu — ∂Kp/∂fu = -Kp/fu
+        // fu contribution: u(Kp_i) from u_fu — Kp = Kpu*fu, ∂Kp/∂fu = Kpu = Kp/fu
+        // (holds only while Kpu has no fu-dependent term; an albumin term breaks it)
         let term_fu = kp_i / fu * u_fu
 
         u_kp[i] = rr_sqrt(term_logP * term_logP + term_fu * term_fu)
@@ -343,6 +354,12 @@ struct DrugPropertiesRR {
 // T2: GUM uncertainties non-zero for all 14 compartments
 // T3: Log-sensitivities in valid range (0, ln(10)] for lipid-rich tissues
 // T4: Scaled GUM uncertainties non-zero and finite
+// T5: Kp(fu) / Kp(fu=1) == fu for every tissue. T1-T4 are invariant under a
+//     positive rescaling of Kp and so cannot see a wrong Kpu -> Kp conversion;
+//     T5 can (the pre-2026-09-26 Kpu/fu form gives a ratio of 1/fu = 12.5).
+// T6: ∂Kp/∂fu is positive and matches a central finite difference. Run at
+//     logP = 0 so every magnitude is O(1): rr_pow10(0) is exact and rr_sqrt
+//     converges there (it does not for large arguments; see audit 2026-09-26).
 
 fn main() -> i32 with IO, Mut, Div, Panic {
     let rr = rr_rapamycin()
@@ -409,6 +426,51 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         print("T4 FAIL: only ")
         print_int(scaled_ok)
         println("/14 scaled uncertainties are non-zero")
+        failed = failed + 1
+    }
+
+    // T5: Kp = Kpu * fu_p, so Kp(fu) / Kp(1) must equal fu exactly
+    let rr_fu1  = rr_neutral(7.0, 1.0, 0.0, 0.0)
+    let rr_fu08 = rr_neutral(7.0, 0.08, 0.0, 0.0)
+    var prop_ok = 0
+    var k = 0
+    while k < 14 {
+        let ratio = rr_fu08.kp[k] / rr_fu1.kp[k]
+        if rr_abs(ratio - 0.08) <= 1.0e-12 { prop_ok = prop_ok + 1 }
+        k = k + 1
+    }
+    if prop_ok == 14 {
+        println("T5 PASS: Kp(fu=0.08)/Kp(fu=1) = 0.08 in 14/14 tissues (Kp = Kpu*fu)")
+        passed = passed + 1
+    } else {
+        print("T5 FAIL: Kp not proportional to fu in ")
+        print_int(14 - prop_ok)
+        println("/14 tissues")
+        failed = failed + 1
+    }
+
+    // T6: analytic |∂Kp/∂fu| (kp_unc_raw with u_logP = 0, u_fu = 1) against a
+    //     central difference of Kp in fu; the difference must also be positive
+    let h = 1.0e-4
+    let rr_up = rr_neutral(0.0, 0.5 + h, 0.0, 0.0)
+    let rr_dn = rr_neutral(0.0, 0.5 - h, 0.0, 0.0)
+    let rr_sf = rr_neutral(0.0, 0.5, 0.0, 1.0)
+    var fd_ok = 0
+    var m = 0
+    while m < 14 {
+        let fd = (rr_up.kp[m] - rr_dn.kp[m]) / (2.0 * h)
+        if fd > 0.0 && rr_abs(fd - rr_sf.kp_unc_raw[m]) <= 1.0e-8 * fd {
+            fd_ok = fd_ok + 1
+        }
+        m = m + 1
+    }
+    if fd_ok == 14 {
+        println("T6 PASS: dKp/dfu > 0 and matches finite difference in 14/14 tissues")
+        passed = passed + 1
+    } else {
+        print("T6 FAIL: dKp/dfu sign or magnitude wrong in ")
+        print_int(14 - fd_ok)
+        println("/14 tissues")
         failed = failed + 1
     }
 
