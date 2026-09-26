@@ -24,6 +24,7 @@
 
 use darwin_pbpk::core::pbpk28_params::*
 use darwin_pbpk::tsit5_pbpk28::*
+use darwin_pbpk::theta_pbpk28::*
 use darwin_pbpk::epistemic_pbpk28::{EpPrior28, ep28_rapamycin_params, ep28_rapamycin_priors, ep28_semaglutide_params, ep28_semaglutide_priors}
 use epistemic::pce::{PCEInput, input_normal, build_bivariate_product, bivariate_sobol_x, bivariate_sobol_y, bivariate_sobol_interaction}
 use epistemic::sobol::{SaltelliResult, saltelli_run}
@@ -54,34 +55,28 @@ fn sp28_sqrt(x: f64) -> f64 with Mut, Div, Panic {
 // ============================================================================
 // MINIMAL AUC SIMULATION (for Sobol model callback — fast, dt=0.5h)
 // ============================================================================
-// Uses the same Crank-Nicolson kernel but at dt=0.5h for speed during
-// Monte-Carlo sweeps. 336 steps for 168h. Bias is ~0.5%; cancels in
-// variance ratios (Saltelli S_i is invariant to systematic bias).
+// dt=0.5h for speed during Monte-Carlo sweeps, 336 steps for 168h.
+// The "~0.5% bias" this header used to claim was measured on 2026-09-26 as
+// +140% (rapamycin) / +28% (semaglutide) at nominal parameters, from the CN
+// negativity floors. It depends on the parameters being sampled, so nothing
+// made it cancel in the variance ratios.
+
+// Bolus run at dt = 0.5 h, t_end = 168 h (336 steps): Rannacher-started
+// clamp-free CN (theta_pbpk28). Shared by sp28_auc_fast and the mass-balance
+// gate. Until 2026-09-26 this was pbpk28_full_cn_step, whose floors biased
+// AUC_blood at this dt by +140% for rapamycin (0.966553 vs Dose/CL = 0.403226)
+// and +28% for semaglutide. A run that books visible negative mass fails
+// (returns false) instead of being floored.
+pub fn sp28_simulate_ledger(prm: PBPKParams28, dose_mg: f64,
+                          st: &!PBPKState28, led: &!PBPK28Ledger) -> bool with Mut, Div {
+    return pbpk28_bolus_run_mut(prm, dose_mg, 0.5, 168.0, 1000, st, led)
+}
 
 fn sp28_auc_fast(prm: PBPKParams28, dose_mg: f64) -> f64 with Mut, Div, Panic {
-    let t_end = 168.0
-    let dt = 0.5
     var st = pbpk28_state_zero()
-    st.cv[0] = dose_mg / prm.v_ref[0]
-    var t = 0.0
-    var auc = 0.0
-    var c_prev = st.cv[0]
-    var steps = 0
-    while t < t_end {
-        if steps > 1000 { return 0.0 }
-        let dt_use = if t + dt > t_end { t_end - t } else { dt }
-        let st_new = pbpk28_full_cn_step(st, prm, 0.0, dt_use)
-        let c_new = st_new.cv[0]
-        if c_new != c_new { return 0.0 }
-        if c_new < 0.0 { return 0.0 }
-        if c_new > 1.0e12 { return 0.0 }
-        auc = auc + 0.5 * (c_prev + c_new) * dt_use
-        c_prev = c_new
-        t = t + dt_use
-        st = st_new
-        steps = steps + 1
-    }
-    return auc
+    var led = pbpk28_ledger_zero()
+    if !sp28_simulate_ledger(prm, dose_mg, &!st, &!led) { return 0.0 }
+    return led.auc[0]
 }
 
 // ============================================================================
@@ -162,7 +157,7 @@ fn sobol_model_pbpk28(x: [f64; 10]) -> f64 with Mut, Div, Panic {
 }
 
 // ============================================================================
-// MAIN — TEST SUITE (5 tests)
+// MAIN — TEST SUITE (6 tests)
 // ============================================================================
 
 fn sp28_selftest_main() -> i32 with IO, Mut, Div, Panic {
@@ -326,6 +321,22 @@ fn sp28_selftest_main() -> i32 with IO, Mut, Div, Panic {
     }
     println("")
 
+    // TEST 6: Mass balance at the production dt — exact discrete identity
+    // M(T) + CL·AUC − M(0) = 0 to rounding (theta_pbpk28 gate bounds).
+    println("TEST 6: Mass balance at production dt (rapamycin, dt=0.5h, 5 mg bolus)")
+    var mb_st = pbpk28_state_zero()
+    var mb_led = pbpk28_ledger_zero()
+    let mb_run = sp28_simulate_ledger(ep28_rapamycin_params(), 5.0, &!mb_st, &!mb_led)
+    let mb_ok = mb_run && pbpk28_mass_gate_report(mb_led, mb_st, ep28_rapamycin_params(), 5.0)
+    if mb_ok {
+        println("  [PASS] mass identity closes to rounding; no floor, no visible negativity")
+        passed = passed + 1
+    } else {
+        println("  FAIL: discrete mass identity violated or negative mass visible")
+        failed = failed + 1
+    }
+    println("")
+
     println("======================================================================")
     println("  PBPK28 SOBOL+PCE — TEST SUMMARY")
     println("======================================================================")
@@ -333,7 +344,7 @@ fn sp28_selftest_main() -> i32 with IO, Mut, Div, Panic {
     print("  Failed: "); print_f64(failed as f64); println("")
     if failed == 0 {
         println("")
-        println("  ALL 5 TESTS PASSED")
+        println("  ALL 6 TESTS PASSED")
         println("")
         println("  Sobol global sensitivity analysis complete.")
         println("  Cut-HDMR additivity confirmed (quasi-additive model).")
@@ -414,7 +425,7 @@ fn sobol_model_semaglutide(x: [f64; 10]) -> f64 with Mut, Div, Panic {
 }
 
 // ============================================================================
-// SEMAGLUTIDE SELFTEST (5 tests — full Saltelli N=512)
+// SEMAGLUTIDE SELFTEST (6 tests — full Saltelli N=512)
 // ============================================================================
 
 fn sp28_selftest_semaglutide_main() -> i32 with IO, Mut, Div, Panic {
@@ -551,6 +562,22 @@ fn sp28_selftest_semaglutide_main() -> i32 with IO, Mut, Div, Panic {
     }
     println("")
 
+    // TEST 6: Mass balance at the production dt — exact discrete identity
+    // M(T) + CL·AUC − M(0) = 0 to rounding (theta_pbpk28 gate bounds).
+    println("TEST 6: Mass balance at production dt (semaglutide, dt=0.5h, 1 mg bolus)")
+    var mb_st = pbpk28_state_zero()
+    var mb_led = pbpk28_ledger_zero()
+    let mb_run = sp28_simulate_ledger(ep28_semaglutide_params(), 1.0, &!mb_st, &!mb_led)
+    let mb_ok = mb_run && pbpk28_mass_gate_report(mb_led, mb_st, ep28_semaglutide_params(), 1.0)
+    if mb_ok {
+        println("  [PASS] mass identity closes to rounding; no floor, no visible negativity")
+        passed = passed + 1
+    } else {
+        println("  FAIL: discrete mass identity violated or negative mass visible")
+        failed = failed + 1
+    }
+    println("")
+
     println("======================================================================")
     println("  SOBOL SEMAGLUTIDE TEST SUMMARY")
     println("======================================================================")
@@ -558,7 +585,7 @@ fn sp28_selftest_semaglutide_main() -> i32 with IO, Mut, Div, Panic {
     print("  Failed: "); print_f64(failed as f64); println("")
     if failed == 0 {
         println("")
-        println("  ALL 5 SEMAGLUTIDE SOBOL TESTS PASSED")
+        println("  ALL 6 SEMAGLUTIDE SOBOL TESTS PASSED")
         println("")
         println("  Full Saltelli N=512 for semaglutide: COMPLETE")
         println("  SOBOL_PCE_SEMAGLUTIDE_FULL_PASS")
