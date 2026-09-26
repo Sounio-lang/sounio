@@ -180,6 +180,20 @@ fi
 expect_private_rejection private-fn \
   "$ROOT_DIR/tests/multimodule/visibility_fn_private_main.sio" E175 \
   'function is private in its defining module'
+# Copilot review (PR #2515): tests/multimodule/visibility_fn_private_specialized_generic_*.sio
+# (added earlier in this same review) was never wired into any CI gate --
+# the standard suite only enumerates top-level tests/run-pass and
+# tests/compile-fail fixtures, so this multimodule pair never actually ran.
+# It exercises a DIFFERENT code path than private-fn above: instantiating
+# a generic (identity::<i64>) forces check_items_verdict_boot4_with_module_map
+# (self-hosted/check/mod.sio), the specialized checking path, instead of
+# the ordinary check_modules_verdict_boot4_with_visibility -- the fix this
+# round of the review is actually about only applies on that specialized
+# path, so private-fn's own passing here would not have caught a
+# regression back to the empty-path bypass this fixture targets.
+expect_private_rejection private-fn-specialized-generic \
+  "$ROOT_DIR/tests/multimodule/visibility_fn_private_specialized_generic_main.sio" E175 \
+  'function is private in its defining module'
 expect_private_rejection private-struct \
   "$ROOT_DIR/tests/multimodule/visibility_struct_private_main.sio" E176 \
   'struct constructor is private in its defining module'
