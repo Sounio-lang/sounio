@@ -969,7 +969,15 @@ fn lower_fn_tuple_arr_slot_find(h: i64, nid: i64) -> i64 with Mut, Panic, Div {
 // (ir_mangle_method_name(recv_type, method_name)), so an impl method whose
 // return type is a tuple of f64 arrays must be collected under THAT mangled
 // name or the lookup at destructure time always misses and returns 0.
-fn lower_fn_tuple_f64_arrays_collect_one(name: Name, fd_opt_ref: &Option<Box<FnDef>>) with Mut, Panic, Div, Alloc {
+// Copilot review (PR #2516), comment 4110477187: `force` lets
+// lower_fn_tuple_f64_arrays_collect_owner_priority (below) register an
+// owner's own tuple-returning fn even when mask==0 (an all-non-f64-array
+// tuple), which the ordinary `mask != 0` guard below otherwise treats as
+// "nothing to record" -- see that function's own comment for why an
+// owner's own mask==0 declaration must still occupy this name's slot.
+// Every other caller (lower_fn_tuple_f64_arrays_collect, unchanged) keeps
+// passing force=false, so this adds no behavior change anywhere else.
+fn lower_fn_tuple_f64_arrays_collect_one(name: Name, fd_opt_ref: &Option<Box<FnDef>>, force: bool) with Mut, Panic, Div, Alloc {
     match *fd_opt_ref {
         Some(fd) => {
             let rt_opt_ref: &Option<Box<TypeExpr>> = &(*fd).return_type
@@ -987,7 +995,7 @@ fn lower_fn_tuple_f64_arrays_collect_one(name: Name, fd_opt_ref: &Option<Box<FnD
                         // skip the insert rather than risk two overflowed
                         // names aliasing onto the same nid=0 identity.
                         let nid = ir_intern_name(name)
-                        if mask != 0 && nid > 0 && LOWER_FN_TUPLE_ARR_COUNT < IR_MAX_FUNCS {
+                        if (mask != 0 || force) && nid > 0 && LOWER_FN_TUPLE_ARR_COUNT < IR_MAX_FUNCS {
                             let h = fo_name_hash(name)
                             if lower_fn_tuple_arr_slot_find(h, nid) < 0 {
                                 let idx = LOWER_FN_TUPLE_ARR_COUNT
@@ -1022,7 +1030,7 @@ fn lower_fn_tuple_f64_arrays_collect_one(name: Name, fd_opt_ref: &Option<Box<FnD
     }
 }
 
-pub fn lower_fn_tuple_f64_arrays_collect(items: &Option<Box<ItemList>>) with Mut, Panic, Div, Alloc {
+fn lower_fn_tuple_f64_arrays_collect_walk(items: &Option<Box<ItemList>>, force: bool) with Mut, Panic, Div, Alloc {
     var current = items
     while true {
         match *current {
@@ -1030,7 +1038,7 @@ pub fn lower_fn_tuple_f64_arrays_collect(items: &Option<Box<ItemList>>) with Mut
                 let item_ref = &(*list).head
                 if item_ref.kind == ItemKind::ItemFn {
                     let fd_opt_ref: &Option<Box<FnDef>> = &item_ref.fn_def
-                    lower_fn_tuple_f64_arrays_collect_one(item_ref.name, fd_opt_ref)
+                    lower_fn_tuple_f64_arrays_collect_one(item_ref.name, fd_opt_ref, force)
                 } else if item_ref.kind == ItemKind::ItemImpl {
                     let id_opt_ref: &Option<Box<ImplDef>> = &item_ref.impl_def
                     match *id_opt_ref {
@@ -1043,7 +1051,7 @@ pub fn lower_fn_tuple_f64_arrays_collect(items: &Option<Box<ItemList>>) with Mut
                                         if mhead.kind == ItemKind::ItemFn {
                                             let mangled = ir_mangle_method_name(item_ref.name, mhead.name)
                                             let mfd_opt_ref: &Option<Box<FnDef>> = &mhead.fn_def
-                                            lower_fn_tuple_f64_arrays_collect_one(mangled, mfd_opt_ref)
+                                            lower_fn_tuple_f64_arrays_collect_one(mangled, mfd_opt_ref, force)
                                         }
                                         mcur = &(*mlist).tail
                                     }
@@ -1059,6 +1067,36 @@ pub fn lower_fn_tuple_f64_arrays_collect(items: &Option<Box<ItemList>>) with Mut
             _ => break
         }
     }
+}
+
+pub fn lower_fn_tuple_f64_arrays_collect(items: &Option<Box<ItemList>>) with Mut, Panic, Div, Alloc {
+    lower_fn_tuple_f64_arrays_collect_walk(items, false)
+}
+
+// Copilot review (PR #2516), comment 4110477187: thin_build_compiled_unit
+// (module_loader.sio) collects the owner program's own items AND every
+// imported callee module's items into this one process-global, name-only
+// table before lowering the owner's body. Because lower_fn_tuple_f64_arrays_
+// collect_one skips mask==0 (an all-non-f64-array tuple, the common case)
+// entirely, an owner-local `pair` returning `([i64;2],[i64;2])` left no
+// entry -- so an unrelated PRIVATE `pair` in any imported module that DOES
+// return an f64-array tuple could insert under the same bare name first,
+// and the owner's own lowering of `pair().0` would then read that
+// unrelated import's mask instead of its own. Call this INSTEAD of the
+// ordinary collector for the owner's own item list, before collecting any
+// imported callee: forcing the insert even at mask==0 gives the owner's
+// own declaration an authoritative slot for its own name, so a later,
+// unrelated import can never overwrite it (lower_fn_tuple_f64_arrays_
+// collect_one's insert is already "only if not yet present" -- this just
+// makes owner's own mask==0 count as "present" instead of "nothing to
+// record"). Residual, unclosed scope: two DIFFERENT imported callees (an
+// owner calls one, not the other, but neither IS the owner) sharing a bare
+// name with different masks can still collide with each other -- closing
+// that needs the same qualifier/module resolution this PR's sibling
+// review (PR #2515, comments 4110379040/54/72) already documented as a
+// genuine architectural addition out of scope for a contained fix.
+pub fn lower_fn_tuple_f64_arrays_collect_owner_priority(items: &Option<Box<ItemList>>) with Mut, Panic, Div, Alloc {
+    lower_fn_tuple_f64_arrays_collect_walk(items, true)
 }
 
 fn fo_ctor_path_fold(acc: i64, name_hash: i64) -> i64 with Mut, Panic, Div {
