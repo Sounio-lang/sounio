@@ -61,3 +61,22 @@ the invalid DeepSeek key in `~/.sounio-keys.env`. Raw outputs from this session:
   "Specify two BE half-steps": already specified.
 - **zai/local/deepseek:** not rerun. Status as in the previous entry (rate limit,
   endpoint down, invalid key).
+
+## 2026-09-26 — Claude (session 9e416846) — math-review, matrix_er K-P t^n helpers (docs/audit/MATRIX_ER_TRANSCENDENTAL_ACCURACY_DISPATCH_2026-09-26.md)
+- Input: claims C1–C9. C1–C5 cover the old helpers (ln floor −4.959346, F floor 7.8825e−3, exp bias −x²/2048, the
+  ln truncation for t > 4, and cap crossing 11.98637 → 12.00987 h). C6 is the q-tau non-telescoping leak (0.591 mg/dose →
+  ≤1.3e−8 mg). C7–C8 are the pure.sio ln/exp/sqrt error bounds. C9 is the post-fix SS ratio residual.
+  Route: chore/llm-offload-llmgateway-grok47 tooling (754c303cb) staged on the workspace.
+- xai, Grok 4.7: the LLM Gateway leg errored, so it ran via the automatic xAI-direct `grok-4.7` fallback (OFFLOAD_TIMEOUT=1200).
+  Verdicts: 8 OK and 1 TIGHTENABLE.
+  - C5: drop "exactly" for t*. The dispatch never states it as exact.
+  - C6: "about 7 orders" is 7.7 orders (4.5e7). Applied.
+  - C9: sound under a narrow reading. 3.1e−12 is accumulated residual (~1e4 ulp), not one rounding, and the claim does
+    not extend to the periodicity residual (still up to 1.7e−6 mg). Both points applied.
+- qwen, qwen3-235b (OpenRouter): 9/9 OK. It is shallow, and it accepts "exactly" for C5, which Grok tightened.
+- kimi, Kimi K3 (gateway), was NOT counted:
+  - max=8192: finish_reason=length, with empty content (all reasoning).
+  - max=32000: upstream 502 from scx-ai-gp.
+  - max=24000: finish_reason=length again, with empty content (24000 reasoning tokens).
+- zai and local: errored (rate limit and endpoint down), not counted.
+- Two independent vendors: xAI + Alibaba/Qwen.

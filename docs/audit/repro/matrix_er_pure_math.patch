@@ -1,0 +1,266 @@
+diff --git a/stdlib/darwin_pbpk/release/matrix_er.sio b/stdlib/darwin_pbpk/release/matrix_er.sio
+index f811c2040..af759088a 100644
+--- a/stdlib/darwin_pbpk/release/matrix_er.sio
++++ b/stdlib/darwin_pbpk/release/matrix_er.sio
+@@ -32,56 +32,26 @@
+ //   Siepmann J, Peppas NA (2012) Int J Pharm 418:6 — release mechanism review
+ //   DailyMed Effexor XR — 75 mg unit dose, Tmax parent ≈ 5.5 h (150 mg q24h label)
+ 
+-use darwin_pbpk::tsit5_pbpk14::{abs_f64, sqrt_f64}
++use darwin_pbpk::tsit5_pbpk14::{abs_f64}
++use math::pure::{exp, ln, sqrt}
+ 
+ // ============================================================================
+-// MATH HELPERS (self-contained — mirrors biomaterial_release.sio)
++// MATH HELPERS — canonical stdlib/math/pure.sio ln / exp / sqrt
+ // ============================================================================
++// K-P needs t^n over the whole dosing clock, (0, ~24] h, including the ~1e-15 h
++// positive clocks a q-tau regimen produces at dose boundaries. The former local
++// helpers failed away from t = 1: the 20-term artanh ln on (x-1)/(x+1) saturated
++// at -4.959 as t -> 0+, so F(t) floored at 7.88e-3 (0.59 mg of 75 mg); exp as
++// (1 + x/1024)^1024 carried a -x^2/2048 relative bias (-1.27e-3 at t = 12 h); the
++// 10-step Newton sqrt from y = x was wrong below t ~ 1e-4. pure.sio range-reduces
++// all three.
++// Evidence: docs/audit/MATRIX_ER_TRANSCENDENTAL_ACCURACY_DISPATCH_2026-09-26.md
+ 
+ fn mer_pow(t: f64, n: f64) -> f64 with Mut, Div, Panic {
+     if t <= 0.0 { return 0.0 }
+     if abs_f64(n - 1.0) < 1.0e-12 { return t }
+-    if abs_f64(n - 0.5) < 1.0e-12 { return sqrt_f64(t) }
+-    // General t^n via exp(n·ln t) — t > 0 only
+-    var ln_t = 0.0
+-    var x = t
+-    if x > 0.0 {
+-        // ln(x) by artanh series for 0 < x ≤ 2 (sufficient for dissolution times)
+-        if x > 2.0 {
+-            ln_t = mer_ln2() + mer_ln_unit(x / 2.0)
+-        } else {
+-            ln_t = mer_ln_unit(x)
+-        }
+-    }
+-    return mer_exp(n * ln_t)
+-}
+-
+-fn mer_ln2() -> f64 { return 0.6931471805599453 }
+-
+-fn mer_ln_unit(x: f64) -> f64 with Mut, Div {
+-    // ln(x) for x in (0, 2]: artanh series on y = (x-1)/(x+1)
+-    if x <= 0.0 { return 0.0 - 1.0e6 }
+-    let y = (x - 1.0) / (x + 1.0)
+-    var y2 = y * y
+-    var term = y
+-    var sum = term
+-    var k: i64 = 1
+-    while k < 20 {
+-        term = term * y2
+-        sum = sum + term / (2.0 * (k as f64) + 1.0)
+-        k = k + 1
+-    }
+-    return 2.0 * sum
+-}
+-
+-fn mer_exp(x: f64) -> f64 with Mut, Div {
+-    var r = 1.0 + x / 1024.0
+-    var i = 0
+-    while i < 10 {
+-        r = r * r
+-        i = i + 1
+-    }
+-    return r
++    if abs_f64(n - 0.5) < 1.0e-12 { return sqrt(t) }
++    return exp(n * ln(t))
+ }
+ 
+ // ============================================================================
+diff --git a/tests/run-pass/dissertation_pbpk28_parity_ref_venlafaxine.sio b/tests/run-pass/dissertation_pbpk28_parity_ref_venlafaxine.sio
+index 71c05e339..56a7b97f1 100644
+--- a/tests/run-pass/dissertation_pbpk28_parity_ref_venlafaxine.sio
++++ b/tests/run-pass/dissertation_pbpk28_parity_ref_venlafaxine.sio
+@@ -171,41 +171,77 @@ fn matrix_dose() -> f64 { return 75.0 }
+ fn matrix_k() -> f64 { return 0.199 }
+ fn matrix_n() -> f64 { return 0.65 }
+ 
+-// ─── Matrix transcendentals — identical to matrix_er.sio / pbpk28_core.mjs ───
+-fn mer_ln_unit(x: f64) -> f64 with Mut, Div {
+-    if x <= 0.0 { return 0.0 - 1.0e6 }
+-    let y = (x - 1.0) / (x + 1.0)
+-    let y2 = y * y
+-    var term = y
+-    var sum = term
+-    var k: i64 = 1
+-    while k < 20 {
+-        term = term * y2
+-        sum = sum + term / (2.0 * (k as f64) + 1.0)
++// ─── Matrix transcendentals — verbatim stdlib/math/pure.sio ln()/exp() ───────
++// matrix_er.sio calls math::pure::{ln, exp}; pbpk28_core.mjs ports the same two
++// functions (as i32 -> Math.trunc). Range-reduced, so t^n is accurate over the
++// whole dosing clock including sub-ulp positive clocks at dose boundaries.
++fn mer_ln(x: f64) -> f64 with Mut, Div {
++    if x <= 0.0 { return 0.0 - 1.0e30 }
++    if x == 1.0 { return 0.0 }
++    var m = x
++    var e_val = 0
++    while m >= 2.0 {
++        m = m / 2.0
++        e_val = e_val + 1
++    }
++    while m < 0.5 {
++        m = m * 2.0
++        e_val = e_val - 1
++    }
++    let t = (m - 1.0) / (m + 1.0)
++    let t2 = t * t
++    var sum = t
++    var term = t
++    var k = 1
++    while k < 30 {
++        term = term * t2
++        let denom = (2 * k + 1) as f64
++        sum = sum + term / denom
+         k = k + 1
+     }
+-    return 2.0 * sum
++    let ln_m = 2.0 * sum
++    return ln_m + (e_val as f64) * 0.6931471805599453
+ }
+ 
+-fn mer_exp(x: f64) -> f64 with Mut {
+-    var r = 1.0 + x / 1024.0
+-    var i = 0
+-    while i < 10 {
+-        r = r * r
+-        i = i + 1
++fn mer_exp(x: f64) -> f64 with Mut, Div {
++    if x > 500.0 { return 1.0e200 }
++    if x < -500.0 { return 0.0 }
++    var k_f = x / 0.6931471805599453
++    var k: i32 = 0
++    if k_f >= 0.0 {
++        k = k_f as i32
++    } else {
++        k = (k_f as i32) - 1
+     }
+-    return r
++    let r = x - (k as f64) * 0.6931471805599453
++    var sum = 1.0
++    var term = 1.0
++    var n = 1
++    while n < 25 {
++        term = term * r / (n as f64)
++        sum = sum + term
++        n = n + 1
++    }
++    var result = sum
++    if k >= 0 {
++        var i = 0
++        while i < k {
++            result = result * 2.0
++            i = i + 1
++        }
++    } else {
++        var i = 0
++        while i < (0 - k) {
++            result = result / 2.0
++            i = i + 1
++        }
++    }
++    return result
+ }
+ 
+ fn mer_pow(t: f64, n: f64) -> f64 with Mut, Div {
+     if t <= 0.0 { return 0.0 }
+-    var ln_t = 0.0
+-    if t > 2.0 {
+-        ln_t = 0.6931471805599453 + mer_ln_unit(t / 2.0)
+-    } else {
+-        ln_t = mer_ln_unit(t)
+-    }
+-    return mer_exp(n * ln_t)
++    return mer_exp(n * mer_ln(t))
+ }
+ 
+ fn mer_exp_neg(x: f64) -> f64 with Mut, Div {
+diff --git a/website/src/lib/pbpk28_core.mjs b/website/src/lib/pbpk28_core.mjs
+index 1b39f2403..2505761af 100644
+--- a/website/src/lib/pbpk28_core.mjs
++++ b/website/src/lib/pbpk28_core.mjs
+@@ -649,9 +649,10 @@ export function degenerateParams(base, { eps = 1e-3, psScale = 1e4 } = {}) {
+ // formation. Oral XR input is gated by a Korsmeyer-Peppas erodible matrix.
+ //
+ // Bit-compatible companion to tests/run-pass/dissertation_pbpk28_parity_ref_venlafaxine.sio.
+-// The matrix transcendentals (merLnUnit/merExp/merPow) and absorption (merExpNeg)
+-// are PORTED VERBATIM from the Sounio stdlib (release/matrix_er.sio, scenarios/
+-// venlafaxine_xr.sio) — NOT Math.pow/Math.exp — so the two engines agree to f64.
++// The matrix transcendentals (pureLn/pureExp/pureSqrt → merPow) and absorption
++// (merExpNeg) are PORTED VERBATIM from the Sounio stdlib (math/pure.sio via
++// release/matrix_er.sio, scenarios/venlafaxine_xr.sio) — NOT Math.pow/Math.exp —
++// so the two engines agree to f64.
+ //
+ // Sources: Gohel 2008 (matrix n=0.65/k=0.199), Wang 2022 (F_XR=0.45, ka=0.63),
+ // Klamerus 1999 (CL_parent 100, CL_form 43, CL_odv 28 L/h), Kirchheiner 2006
+@@ -673,27 +674,48 @@ export const VFX_PS_ODV    = Object.freeze([0.0, 700.0, 450.0, 90.0, 150.0, 6000
+ // CYP2D6 formation scale relative to NM (Kirchheiner 2006 ratios / 3.45). NM=1.0.
+ export const VFX_CL_FORM_SCALE = Object.freeze({ 0: 0.25 / 3.45, 1: 1.16 / 3.45, 2: 1.0, 3: 10.3 / 3.45 });
+ 
+-// ─── Matrix transcendentals — verbatim ports of release/matrix_er.sio ────────
+-function merLnUnit(x) {                       // ln(x) for x in (0,2], artanh series
+-  if (x <= 0.0) return -1.0e6;
+-  const y = (x - 1.0) / (x + 1.0);
+-  const y2 = y * y;
+-  let term = y, sum = term;
+-  for (let k = 1; k < 20; k++) { term = term * y2; sum = sum + term / (2.0 * k + 1.0); }
+-  return 2.0 * sum;
++// ─── Matrix transcendentals — verbatim ports of stdlib/math/pure.sio ─────────
++// release/matrix_er.sio calls math::pure::{ln, exp, sqrt}; these are line-for-line
++// ports (`as i32` -> Math.trunc), bit-identical to Madaros on the K-P grid
++// (docs/audit/repro/matrix_er_kp_bits_probe.{sio,mjs}).
++const PURE_LN2 = 0.6931471805599453;
++function pureLn(x) {                          // ln: reduce to m in [0.5, 2), artanh series
++  if (x <= 0.0) return -1.0e30;
++  if (x === 1.0) return 0.0;
++  let m = x, e = 0;
++  while (m >= 2.0) { m = m / 2.0; e = e + 1; }
++  while (m < 0.5) { m = m * 2.0; e = e - 1; }
++  const t = (m - 1.0) / (m + 1.0), t2 = t * t;
++  let sum = t, term = t;
++  for (let k = 1; k < 30; k++) { term = term * t2; sum = sum + term / (2 * k + 1); }
++  return 2.0 * sum + e * PURE_LN2;
+ }
+-function merExp(x) {                          // exp via (1+x/1024)^1024
+-  let r = 1.0 + x / 1024.0;
+-  for (let i = 0; i < 10; i++) r = r * r;
+-  return r;
++function pureExp(x) {                         // exp: 2^k · Taylor(r), r = x − k·ln2
++  if (x > 500.0) return 1.0e200;
++  if (x < -500.0) return 0.0;
++  const kf = x / PURE_LN2;
++  const k = kf >= 0.0 ? Math.trunc(kf) : Math.trunc(kf) - 1;
++  const r = x - k * PURE_LN2;
++  let sum = 1.0, term = 1.0;
++  for (let n = 1; n < 25; n++) { term = term * r / n; sum = sum + term; }
++  let res = sum;
++  if (k >= 0) { for (let i = 0; i < k; i++) res = res * 2.0; }
++  else { for (let i = 0; i < -k; i++) res = res / 2.0; }
++  return res;
++}
++function pureSqrt(x) {                        // sqrt: scale by 4^k into [1, 4), 20 Newton steps
++  if (x <= 0.0) return 0.0;
++  let v = x, s = 1.0;
++  while (v < 1.0) { v = v * 4.0; s = s * 2.0; }
++  let y = v;
++  for (let i = 0; i < 20; i++) y = 0.5 * (y + v / y);
++  return y / s;
+ }
+-function merPow(t, n) {                        // t^n via exp(n·ln t), t>0
++function merPow(t, n) {                        // t^n, mirrors matrix_er.sio mer_pow
+   if (t <= 0.0) return 0.0;
+   if (Math.abs(n - 1.0) < 1.0e-12) return t;
+-  if (Math.abs(n - 0.5) < 1.0e-12) return Math.sqrt(t);
+-  let lnT = 0.0;
+-  if (t > 0.0) lnT = (t > 2.0) ? (0.6931471805599453 + merLnUnit(t / 2.0)) : merLnUnit(t);
+-  return merExp(n * lnT);
++  if (Math.abs(n - 0.5) < 1.0e-12) return pureSqrt(t);
++  return pureExp(n * pureLn(t));
+ }
+ function merExpNeg(x) {                         // exp(x) for x<0, 20-term Taylor
+   if (x >= 0.0) return 1.0;
