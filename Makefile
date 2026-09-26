@@ -76,11 +76,14 @@ MADAROS_BG_PID := artifacts/self-hosted/build-madaros.pid
 
 build-madaros-bg:    ## Same, detached (survives SSH drops); log+pid under artifacts/self-hosted/
 	@mkdir -p artifacts/self-hosted
+	@# One shell: `exit` in a separate recipe line would not stop the launch.
 	@if [ -f $(MADAROS_BG_PID) ] && kill -0 $$(cat $(MADAROS_BG_PID)) 2>/dev/null; then \
-	  echo "build already running: pid $$(cat $(MADAROS_BG_PID)), log $(MADAROS_BG_LOG)"; exit 0; fi
-	@nohup bash scripts/ci/build_modular_madaros.sh artifacts/self-hosted/madaros > $(MADAROS_BG_LOG) 2>&1 & echo $$! > $(MADAROS_BG_PID)
-	@echo "→ Madaros build detached: pid $$(cat $(MADAROS_BG_PID)), log $(MADAROS_BG_LOG)"
-	@echo "   follow with: make build-madaros-wait"
+	  echo "build already running: pid $$(cat $(MADAROS_BG_PID)), log $(MADAROS_BG_LOG)"; \
+	else \
+	  nohup bash scripts/ci/build_modular_madaros.sh artifacts/self-hosted/madaros > $(MADAROS_BG_LOG) 2>&1 & echo $$! > $(MADAROS_BG_PID); \
+	  echo "→ Madaros build detached: pid $$(cat $(MADAROS_BG_PID)), log $(MADAROS_BG_LOG)"; \
+	  echo "   follow with: make build-madaros-wait"; \
+	fi
 
 build-madaros-wait:  ## Block until the detached build finishes; exit with its status
 	@if [ ! -f $(MADAROS_BG_PID) ]; then echo "no detached build (no $(MADAROS_BG_PID))"; exit 2; fi
