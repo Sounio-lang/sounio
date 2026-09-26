@@ -29,6 +29,7 @@
 
 use darwin_pbpk::core::pbpk28_params::*
 use darwin_pbpk::tsit5_pbpk28::*
+use darwin_pbpk::theta_pbpk28::*
 use darwin_pbpk::epistemic_pbpk28::{EpPrior28, ep28_rapamycin_params, ep28_rapamycin_priors, ep28_run}
 use darwin_pbpk::epistemic_pbpk28_hessian::{hessian_pbpk28_auc}
 
@@ -230,33 +231,25 @@ fn ms28_rapamycin_bounds() -> PriorBounds28 with Mut {
 }
 
 // ============================================================================
-// FAST AUC SIMULATION (mirrors mc28_auc_fast from E1)
+// FAST AUC SIMULATION (mirrors mc28_auc_fast from E1, Rannacher-started CN)
 // ============================================================================
 
+// Bolus run at dt = 0.5 h, t_end = 168 h (336 steps): Rannacher-started
+// clamp-free CN (theta_pbpk28). Shared by ms28_auc_fast and the mass-balance
+// gate. Until 2026-09-26 this was pbpk28_full_cn_step, whose floors biased
+// AUC_blood at this dt by +140% for rapamycin (0.966553 vs Dose/CL = 0.403226)
+// and +28% for semaglutide. A run that books visible negative mass fails
+// (returns false) instead of being floored.
+pub fn ms28_simulate_ledger(prm: PBPKParams28, dose_mg: f64,
+                          st: &!PBPKState28, led: &!PBPK28Ledger) -> bool with Mut, Div {
+    return pbpk28_bolus_run_mut(prm, dose_mg, 0.5, 168.0, 1000, st, led)
+}
+
 fn ms28_auc_fast(prm: PBPKParams28, dose_mg: f64) -> f64 with Mut, Div, Panic {
-    let t_end = 168.0
-    let dt    = 0.5
-    var st    = pbpk28_state_zero()
-    st.cv[0]  = dose_mg / prm.v_ref[0]
-    var t     = 0.0
-    var auc   = 0.0
-    var c_prev = st.cv[0]
-    var steps: i32 = 0
-    while t < t_end {
-        if steps > 1000 { return 0.0 }
-        let dt_use = if t + dt > t_end { t_end - t } else { dt }
-        let st_new = pbpk28_full_cn_step(st, prm, 0.0, dt_use)
-        let c_new  = st_new.cv[0]
-        if c_new != c_new { return 0.0 }
-        if c_new < 0.0    { return 0.0 }
-        if c_new > 1.0e12 { return 0.0 }
-        auc    = auc + 0.5 * (c_prev + c_new) * dt_use
-        c_prev = c_new
-        t      = t + dt_use
-        st     = st_new
-        steps  = steps + 1
-    }
-    return auc
+    var st = pbpk28_state_zero()
+    var led = pbpk28_ledger_zero()
+    if !ms28_simulate_ledger(prm, dose_mg, &!st, &!led) { return 0.0 }
+    return led.auc[0]
 }
 
 fn ms28_params_from_sample(base: PBPKParams28, priors: EpPrior28, vals: [f64; 8]) -> PBPKParams28 with Mut, Div, Epistemic {
@@ -477,6 +470,21 @@ fn ms28_sweep_main() -> i32 with IO, Mut, Div, Panic, Epistemic {
         println("  [PASS] TruncNormal improves Hessian/MC agreement vs LogNormal")
     } else {
         println("  [NOTE] No improvement — prior shape does not dominate GUM/MC discord")
+    }
+    println("")
+
+    // TEST 7: Mass balance at the production dt — exact discrete identity
+    // M(T) + CL·AUC − M(0) = 0 to rounding (theta_pbpk28 gate bounds).
+    println("TEST 7: Mass balance at production dt (dt=0.5h, 5 mg bolus)")
+    var mb_st = pbpk28_state_zero()
+    var mb_led = pbpk28_ledger_zero()
+    let mb_run = ms28_simulate_ledger(prm, dose_mg, &!mb_st, &!mb_led)
+    let mb_ok = mb_run && pbpk28_mass_gate_report(mb_led, mb_st, prm, dose_mg)
+    if mb_ok {
+        println("  [PASS] mass identity closes to rounding; no floor, no visible negativity")
+    } else {
+        println("  FAIL: discrete mass identity violated or negative mass visible")
+        return 1
     }
     println("")
 
