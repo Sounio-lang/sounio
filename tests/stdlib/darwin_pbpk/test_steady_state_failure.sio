@@ -1,0 +1,38 @@
+//@ run-pass
+//@ expect-stdout: SS_FAILURE_PROPAGATION_OK
+// Regression for the steady-state runner's failure signal (PR #2698).
+// A dosing interval whose step budget runs out before a checkpoint must fail
+// the whole report. It used to record the partial trace, carry the state into
+// later doses and report success.
+
+use darwin_pbpk::absorption::{rapamycin_absorption_params}
+use darwin_pbpk::bbb::bbb_rapamycin::{bbb_rapamycin_params}
+use darwin_pbpk::drugs::rapamycin::{rapamycin_mean_params}
+use darwin_pbpk::scenarios::steady_state_runner::*
+use darwin_pbpk::tsit5_pbpk14::{ODEConfig14, tight_ode_config}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let sys_prm = rapamycin_mean_params()
+    let bbb_prm = bbb_rapamycin_params()
+    let abs_prm = rapamycin_absorption_params()
+    let regimen = rapamycin_qd_regimen(3)
+
+    // One step per checkpoint, each at most 1e-3 h. Checkpoints are
+    // tau/15 = 1.6 h apart, so the first one cannot be reached.
+    var starved = tight_ode_config()
+    starved.max_steps = 1
+    starved.dt_init = 0.001
+    starved.dt_max = 0.001
+    let bad = run_oral_multidose_cfg(sys_prm, bbb_prm, abs_prm, regimen, 0.02, starved)
+    if bad.success { return 1 }
+    if bad.n_doses_run != 0 { return 2 }
+    if bad.reached_ss { return 3 }
+
+    // Control: the default step control completes every interval.
+    let good = run_oral_multidose_cfg(sys_prm, bbb_prm, abs_prm, regimen, 0.02, tight_ode_config())
+    if good.success == false { return 4 }
+    if good.n_doses_run != 3 { return 5 }
+
+    println("SS_FAILURE_PROPAGATION_OK")
+    0
+}
