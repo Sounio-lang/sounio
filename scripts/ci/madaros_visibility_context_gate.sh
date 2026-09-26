@@ -213,6 +213,17 @@ expect_private_rejection private-struct-specialized-generic \
 expect_private_rejection private-enum \
   "$ROOT_DIR/tests/multimodule/visibility_enum_private_main.sio" E177 \
   'enum constructor is private in its defining module'
+# Copilot review (PR #2515), comment 4109793910: checker_enum_visible_inplace
+# had no authoritative resolved-module-id denial (unlike the sibling fix
+# already applied to functions and structs above), so a PRIVATE enum's own
+# constructor stayed accessible cross-module on the specialized checking
+# path. Unlike structs, generic enums are never monomorphized/cloned by
+# the specializer, so this needed no analogous module-attribution fix at
+# the specializer level -- just the same deny-on-mismatch rule. Same
+# rationale as private-fn/struct-specialized-generic above, for enums.
+expect_private_rejection private-enum-specialized-generic \
+  "$ROOT_DIR/tests/multimodule/visibility_enum_private_specialized_generic_main.sio" E177 \
+  'enum constructor is private in its defining module'
 
 echo "[madaros-visibility-context] receipt issue=854 context_state=$single_state runtime_state=$runtime_state single_e175=$([[ "$single_state" == baseline ]] && echo 1 || echo 0) matrix_e175=$([[ "$matrix_state" == baseline ]] && echo 18 || echo 0) true_private_fn=E175 true_private_struct=E176 true_private_enum=E177"
 
