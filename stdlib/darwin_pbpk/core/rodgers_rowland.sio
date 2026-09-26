@@ -266,16 +266,51 @@ fn rr_pow10(x: f64) -> f64 with Mut, Div, Panic {
     if !(x <= 308.0 && x >= 0.0 - 323.0) { panic("rr_pow10: argument out of binary64 range or NaN") }
     let n = (if x < 0.0 { x - 0.5 } else { x + 0.5 }) as i64
     let f = x - (n as f64)
-    var pw = 1.0
-    let m = if n < 0 { 0 - n } else { n }
-    var j: i64 = 0
-    while j < m {
-        pw = pw * 10.0
-        j = j + 1
-    }
     let frac = rr_exp(f * 2.302585092994046)
-    if n < 0 { return frac / pw }
-    return frac * pw
+    let m = if n < 0 { 0 - n } else { n }
+
+    if n >= 0 {
+        // m <= 308 by the guard, so 10^m is finite.
+        var pw = 1.0
+        var j: i64 = 0
+        while j < m {
+            pw = pw * 10.0
+            j = j + 1
+        }
+        return frac * pw
+    }
+
+    // NEGATIVE exponents are split at 10^22, the largest power of ten that is
+    // EXACTLY representable in binary64. At or below it, one division by the
+    // exact power costs a single rounding, which is what keeps 10^-3
+    // bit-identical to the literal 0.001 -- T10's integral case and T11 both
+    // depend on that.
+    if m <= 22 {
+        var pw = 1.0
+        var j: i64 = 0
+        while j < m {
+            pw = pw * 10.0
+            j = j + 1
+        }
+        return frac / pw
+    }
+
+    // Beyond 10^22 no exact power exists, so the chain is unavoidable -- and it
+    // must be a chain. The first version of this function built 10^|n| and then
+    // divided once, which for n < -308 overflowed the DENOMINATOR to +Inf and
+    // collapsed the quotient to zero, silently discarding every representable
+    // subnormal result between 10^-309 and 10^-323 while the guard above
+    // advertised that range. Measured: the old form was not even monotonic there
+    // (10^-308 > 10^-309 > 10^-320 > 0 was FALSE); dividing stepwise degrades
+    // into the subnormals gracefully and restores it. Found in review by
+    // copilot-pull-request-reviewer; gated by rr_check_pow10_subnormal.
+    var res = frac
+    var t: i64 = 0
+    while t < m {
+        res = res / 10.0
+        t = t + 1
+    }
+    res
 }
 
 // ============================================================================
@@ -671,6 +706,19 @@ pub fn rr_check_pow10() -> i32 with Mut, Div, Panic {
     ok
 }
 
+// SUBNORMAL BOUNDARY of the advertised domain. A guard that accepts an argument
+// must not return zero for it when a representable answer exists.
+pub fn rr_check_pow10_subnormal() -> i32 with Mut, Div, Panic {
+    var ok = 0
+    // Strictly decreasing and strictly positive through the subnormal region.
+    if rr_pow10(0.0 - 308.0) > rr_pow10(0.0 - 309.0) { ok = ok + 1 }
+    if rr_pow10(0.0 - 309.0) > rr_pow10(0.0 - 320.0) { ok = ok + 1 }
+    if rr_pow10(0.0 - 320.0) > 0.0 { ok = ok + 1 }
+    // And the positive end of the advertised range stays finite.
+    if rr_pow10(308.0) <= 1.7976931348623157e308 { ok = ok + 1 }
+    ok
+}
+
 // DERIVATIVE CONSISTENCY. `dkp_dlogP = P*ln10*lipid_c*fu` is the analytic
 // derivative of the IDEAL 10^x, so it is the derivative of the function ACTUALLY
 // EXECUTED only if rr_pow10 satisfies exp' = exp to that accuracy. The old
@@ -799,6 +847,8 @@ struct DrugPropertiesRR {
 //      was too loose to be
 // T12: rr_pow10 satisfies exp' = exp, so dkp_dlogP is the derivative of the
 //      function actually executed (it was 7.16% out at logP 7 before)
+// T13: rr_pow10 returns the representable subnormals its own guard admits
+//      (10^-309 .. 10^-323 collapsed to zero, and were not even monotonic)
 
 fn main() -> i32 with IO, Mut, Div, Panic {
     let rr = rr_rapamycin()
@@ -963,6 +1013,17 @@ fn main() -> i32 with IO, Mut, Div, Panic {
         print("T12 FAIL: analytic dkp_dlogP disagrees with the executed function at ")
         print(5 - dv)
         println("/5 arguments")
+        failed = failed + 1
+    }
+
+    let sub = rr_check_pow10_subnormal()
+    if sub == 4 {
+        println("T13 PASS: rr_pow10 monotone and positive through the subnormals (4/4)")
+        passed = passed + 1
+    } else {
+        print("T13 FAIL: ")
+        print(4 - sub)
+        println("/4 subnormal-boundary checks fail -- the guard admits values the body cannot return")
         failed = failed + 1
     }
 
