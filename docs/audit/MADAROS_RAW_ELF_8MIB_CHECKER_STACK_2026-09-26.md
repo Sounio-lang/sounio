@@ -36,7 +36,7 @@ fn main() -> i32 {
 |---|---:|
 | `artifacts/self-hosted/madaros check repro.sio` under the default `ulimit -s 8192` | 139 |
 | the same with `h(h(h(1.0)))` (depth 3) | 0 |
-| `ulimit -s 65536; artifacts/self-hosted/madaros check repro.sio` | 0 |
+| `ulimit -s 65536 && artifacts/self-hosted/madaros check repro.sio` | 0 |
 | `bin/madaros check repro.sio` | 0 |
 | `bin/souc check repro.sio` | 0 |
 | `SOUNIO_SOUC_ENGINE=lean_single bin/souc check repro.sio` | 0 |
@@ -108,6 +108,14 @@ themselves: `aggregate_field_identity_gate.sh` sets 512 MiB and
 under the project limit. The 2026-09-26 report was the same trap, reached by
 calling `artifacts/self-hosted/madaros` directly.
 
+The wrapper's reservation is best effort, not a guarantee. `bin/madaros`
+ignores a failed `ulimit -s` (`|| true`) and carries on at whatever limit it
+inherited, and a caller can set `MADAROS_STACK_KB` below the default. On a
+host whose hard stack limit is below what the checker needs, the wrapper
+therefore hits the same SIGSEGV. Every wrapper result in this record was
+measured on the sounio-workspace pod, where `ulimit -Hs` is `unlimited`, so
+the raise succeeded there.
+
 ## Re-measured through the wrapper
 
 The ELF is the same one, built from `98315edcdb` plus the one-line
@@ -164,8 +172,12 @@ them:
 - **rc=182 is the unreclaimed handle table** already described in the
   2026-08-17 dispatch. Every construction of a struct larger than 16 bytes
   takes a handle that is never freed. The required table size ranges from
-  1.95× to 10.3× the 2^22 cap, so raising the cap cannot fix it. The repro is
-  `docs/handoff/repros/handle_table_182_per_construction_madaros.sio`.
+  1.95× to 10.3× the 2^22 cap, so raising the cap cannot fix it. The
+  checked-in dispatch is
+  `docs/audit/MADAROS_HANDLE_TABLE_182_LIFETIME_DISPATCH_2026-08-17.md`. The
+  per-construction repro and the 1.95×–10.3× range come from the
+  sleepy-easley session and are not in this tree yet. Treat that range as
+  reported, not reproducible from `main`.
 
 ## Proposed follow-ups (dispatch, not applied)
 
@@ -174,7 +186,12 @@ them:
    limit itself with `setrlimit` and re-exec, or refuse with a named
    diagnostic. At present a bare SIGSEGV after `about to check N modules` looks
    exactly like a checker crash. This change belongs in the driver
-   (`self-hosted/compiler/`), not in `check/`.
+   (`self-hosted/compiler/`), not in `check/`. `bin/madaros` should fail
+   closed as well: if the soft stack limit cannot be raised to
+   `MADAROS_STACK_KB`, it should refuse with a named diagnostic instead of
+   ignoring the `ulimit` failure. The follow-up should also verify that
+   refusal under a lowered hard limit, for example
+   `ulimit -Hs 8192; bin/madaros check repro.sio`.
 2. **Shrink the call-checking frame.** First confirm the attribution above by
    building with the `call_start_borrows` snapshots moved out of the recursive
    frame (heap, or one snapshot slot on the `Checker`) and re-running the
@@ -189,7 +206,7 @@ them:
 make build-madaros                       # bare; never wrap it in souc-build-lock.sh
 export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
 printf 'fn h(x: f64) -> f64 { return x }\nfn main() -> i32 {\n    let e = h(h(h(h(1.0))))\n    return 0\n}\n' > /tmp/repro.sio
-( ulimit -s 8192;  artifacts/self-hosted/madaros check /tmp/repro.sio ); echo rc=$?   # 139
-( ulimit -s 65536; artifacts/self-hosted/madaros check /tmp/repro.sio ); echo rc=$?   # 0
-./bin/souc check /tmp/repro.sio; echo rc=$?                                            # 0
+( ulimit -s 8192 && artifacts/self-hosted/madaros check /tmp/repro.sio ); echo rc=$?   # 139
+( ulimit -s 65536 && artifacts/self-hosted/madaros check /tmp/repro.sio ); echo rc=$?   # 0; a failed raise returns ulimit's error, not 139
+./bin/souc check /tmp/repro.sio; echo rc=$?   # 0 only where bin/madaros could raise the limit (check ulimit -Hs)
 ```
