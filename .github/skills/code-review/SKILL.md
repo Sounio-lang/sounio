@@ -74,7 +74,7 @@ Every finding has a location, a reason anchored in tier 1–3 of §1, and a conc
 
 4. LLVM core
 4.1 Coding standard (enforce, don't debate)
-clang-format with the in-tree .clang-format (LLVM style). Run git clang-format HEAD~1; a patch that fails it is not reviewable.
+clang-format with the in-tree .clang-format (LLVM style). Run git clang-format "$(git merge-base HEAD <target-branch>)"; a patch that fails it is not reviewable.
 Naming: types/variables UpperCamelCase, functions lowerCamelCase, enumerators UpperCamelCase with a type prefix where the enum is unscoped. No m_/_ prefixes.
 auto only when the type is obvious from the right-hand side (dyn_cast, iterators, lambdas). auto * for pointers.
 Early exits, no else after return. No braces on single-statement bodies unless the sibling branch needs them.
