@@ -9494,6 +9494,13 @@ fn pireus_native_emit_hyper_mul_o_fano_ptr3(nc: &! NativeCompiler, dst_ptr: i64,
 
     // Emit 31-instruction EVEX Fano multiplication kernel:
     // a in zmm0, b in zmm1, accum in zmm2, scratch t_bj=zmm3, t_aj=zmm4, ctrl_base=11
+    // FMA precision note: emit_fano_inline uses VFMADD231PD throughout.
+    // For integer basis products (the committed oracle vectors) this is
+    // bit-exact. For general non-integer f64 inputs, the fused rounding
+    // may differ from separate VMULPD+VADDPD by up to1 ULP.
+    // ADR 012 requires hyper_fma to default off; the non-FMA kernel
+    // (emit_fano_inline_nofma, 38 instructions, 228 bytes) will be
+    // wired as the default path once the precision-flag plumbing is ready.
     (*nc).code = emit_fano_inline((*nc).code, 0, 1, 2, 3, 4, 11)
 
     // Store result: [rdx] = zmm2
@@ -9505,7 +9512,7 @@ fn pireus_native_emit_hyper_mul_o_fano_ptr3(nc: &! NativeCompiler, dst_ptr: i64,
     nc_emit_byte(nc, 0x77)
 
     if str_eq(read_env("SOUNIO_PIREUS_OPERATOR_TRACE"), "1") {
-        print("PIREUS_NATIVE_EMIT opcode=IrHyperMulO candidate=fano_single_zmm kernel_bytes=186 abi=ptr3\n")
+        print("PIREUS_NATIVE_EMIT opcode=IrHyperMulO candidate=fano_single_zmm fano_kernel_bytes=186 inline_total_bytes=199 abi=ptr3\n")
     }
 }
 
@@ -9912,6 +9919,10 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
                 IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize],
             )
         } else if instr_op == IrOpcode::IrHyperMulO {
+            // ADR 012 capability gate: AVX-512 required for Fano kernel.
+            // The native-v2 path is only reachable on AVX-512 hosts by construction.
+            // TODO: read actual CPUID mask from runtime context when the
+            // capability-field plumbing is complete.
             pireus_native_emit_hyper_mul_o_fano_ptr3(
                 nc,
                 IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize],
