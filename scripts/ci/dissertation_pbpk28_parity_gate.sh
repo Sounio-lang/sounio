@@ -853,8 +853,10 @@ join -t"$(printf '\t')" -1 1 -2 1 <(vfx_ss_tsv "$VFX_SIO_LOG") <(vfx_ss_tsv "$VF
         dc=100*(($3+0)-($8+0))/($8+0); if(dc<0)dc=-dc;
         printf "%-9s %-10s %-10s %-10s %-22s %-19s %s,%s\n",$1,$2,$7,$3,$5,$6,$4,$9;
         if(dr>=THR+0 || dc>=THR+0){bad++; printf "  FAIL: dt=%s engines differ (ratio %.4f%%, cf %.4f%%)\n",$1,dr,dc}
-        if(($4+0)!=1 || ($9+0)!=1){bad++; printf "  FAIL: dt=%s closed form outside a certified interval\n",$1} }
-      END{ if(n!=2){printf "VENLAFAXINE_SS_RATIO_PARITY_FAIL expected 2 dt rows, got %d\n",n; exit 1}
+        if(($4+0)!=1 || ($9+0)!=1){bad++; printf "  FAIL: dt=%s closed form outside a certified interval\n",$1}
+        seen[$1]=1 }
+      END{ if(n!=2 || !(("0.500000") in seen) || !(("0.250000") in seen)){
+          printf "VENLAFAXINE_SS_RATIO_PARITY_FAIL expected dt rows 0.500000 and 0.250000 on both engines, got %d row(s)\n",n; exit 1}
         if(bad>0){printf "VENLAFAXINE_SS_RATIO_PARITY_FAIL\n"; exit 1}
         printf "VENLAFAXINE_SS_RATIO_PARITY_PASS %d/%d dt within %s%% and closed form certified on both engines\n",n,n,THR }'
 
