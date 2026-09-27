@@ -714,7 +714,12 @@ function pureSqrt(x) {                        // sqrt: scale x < 1 up by 4^k int
 function merPow(t, n) {                        // t^n, mirrors matrix_er.sio mer_pow
   if (t <= 0.0) return 0.0;
   if (t !== t) return t;                        // NaN propagates
-  if (t - t !== 0.0) return n > 0.0 ? t : 0.0;  // +inf: limit, before pureLn's halving loop (never ends on +inf)
+  if (t - t !== 0.0) {                          // +inf^n limit, before pureLn's halving loop (never ends on +inf)
+    if (n > 0.0) return t;
+    if (n < 0.0) return 0.0;
+    if (n === 0.0) return 1.0;
+    return n;                                   // NaN exponent propagates
+  }
   if (Math.abs(n - 1.0) < 1.0e-12) return t;
   if (Math.abs(n - 0.5) < 1.0e-12) return pureSqrt(t);
   return pureExp(n * pureLn(t));
