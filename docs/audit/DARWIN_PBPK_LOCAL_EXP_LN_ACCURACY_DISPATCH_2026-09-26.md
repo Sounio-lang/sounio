@@ -44,8 +44,9 @@ The five exp copies are the same arithmetic. The four ln copies are also the sam
 
 Results, measured on Madaros:
 
-* The **exp helper** reads low for every x ≠ 0 with x > −1024, which covers every call-site
-  argument (see §1 for x ≤ −1024). Its relative error is −x²/2048 to leading order. The
+* The **exp helper** reads low at every call-site argument measured (§2). In exact arithmetic it
+  is below exp(x) for every x ≠ 0 with x > −1024; binary64 rounding can reverse that for
+  |x| ≲ 2 × 10⁻⁵ (see §1). Its relative error is −x²/2048 to leading order. The
   comment on `rel_exp` claims "relative error < 0.01% for |x| < 10". That holds only for
   |x| ≲ 0.4525. At x = −10 the error is **−4.80%**.
 * On the stent's own first-order release argument at 1545 h the error is **−0.584%**. The
@@ -73,8 +74,20 @@ Therefore
 
     helper(x)/exp(x) − 1 = −x²/(2n) + x³/(3n²) + x⁴/(8n²) + O(n⁻³),   n = 1024.
 
-Because ln(1 + y) < y for every y ≠ 0 with y > −1, the helper is **strictly below** exp(x) for
-every x ≠ 0 with x > −1024. The bias is one-sided and does not average out.
+Because ln(1 + y) < y for every y ≠ 0 with y > −1, the helper in **exact arithmetic** is
+strictly below exp(x) for every x ≠ 0 with x > −1024. The bias is one-sided and does not
+average out.
+
+That is a statement about real numbers, not about the binary64 helper. Rounding `1 + x/1024`
+costs up to half an ulp, and the ten squarings multiply it by 1024, so the computed helper
+carries a relative rounding error of about 10⁻¹³ on top of the −x²/2048 bias.
+
+* The bias dominates, and the helper reads low, once x²/2048 is well above 10⁻¹³, i.e. for
+  |x| ≳ 2 × 10⁻⁵.
+* Below that the sign is set by rounding. At x = −10⁻¹⁴, `1 + x/1024` rounds to 1, so the helper
+  returns 1 > exp(x).
+* The smallest call-site argument is |x| = 0.00224, where the bias is 2.45 × 10⁻⁹. Every argument
+  in §2 reads low as measured.
 
 * The "< 0.01%" claim needs x²/2048 < 10⁻⁴, i.e. |x| < √0.2048 ≈ 0.4525 to leading order.
 * At x = −1024 the base 1 + x/1024 is 0. Below that it is negative and the even power is

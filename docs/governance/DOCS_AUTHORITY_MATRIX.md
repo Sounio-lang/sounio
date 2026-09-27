@@ -114,6 +114,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.correlated-effect-r6-2026-08-20 | repo_only | docs/audit/CORRELATED_EFFECT_R6_2026-08-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.cross-concepts-2026-08-19 | repo_only | docs/audit/CROSS_CONCEPTS_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.cross-engine-runpass-census-2026-08-17 | repo_only | docs/audit/CROSS_ENGINE_RUNPASS_CENSUS_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.darwin-pbpk-local-exp-ln-accuracy-dispatch-2026-09-26 | repo_only | docs/audit/DARWIN_PBPK_LOCAL_EXP_LN_ACCURACY_DISPATCH_2026-09-26.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.data-io-lane-compiler-blocker-2026-07-13 | repo_only | docs/audit/DATA_IO_LANE_COMPILER_BLOCKER_2026-07-13.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.data-io-trilha-b-builtin-bufptr-dispatch-2026-07-14 | repo_only | docs/audit/DATA_IO_TRILHA_B_BUILTIN_BUFPTR_DISPATCH_2026-07-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.dce-silent-truncation-census-2026-08-19 | repo_only | docs/audit/DCE_SILENT_TRUNCATION_CENSUS_2026-08-19.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -378,6 +379,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.pbpk-rapamycin-triage-2026-06-02 | repo_only | docs/audit/PBPK_RAPAMYCIN_TRIAGE_2026-06-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.pbpk14-identifiability-2026-06-14 | repo_only | docs/audit/PBPK14_IDENTIFIABILITY_2026-06-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.pbpk14-modelform-stiff-repair-2026-06-14 | repo_only | docs/audit/PBPK14_MODELFORM_STIFF_REPAIR_2026-06-14.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.pbpk28-cn-floor-clamp-mass-injection-dispatch-2026-09-26 | repo_only | docs/audit/PBPK28_CN_FLOOR_CLAMP_MASS_INJECTION_DISPATCH_2026-09-26.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.pediatric-pbpk-2026-07-27 | repo_only | docs/audit/PEDIATRIC_PBPK_2026-07-27.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.pin-count-unwired-honesty-2026-08-18 | repo_only | docs/audit/PIN_COUNT_UNWIRED_HONESTY_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.pireus-twist-gauge-factorization-2026-09-05 | repo_only | docs/audit/PIREUS_TWIST_GAUGE_FACTORIZATION_2026-09-05.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
