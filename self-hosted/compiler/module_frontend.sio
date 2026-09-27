@@ -826,34 +826,105 @@ fn module_frontend_relpath_basename_stem(rel_path: string) -> Name with Mut, Pan
 // legitimate associated-function call that needs "mod::Type" registered as
 // a combined suffix (the same shape round 14's brace-import fix,
 // checker_use_module_note_braced_items, already handles for `use a::b::
-// {Type};` specifically). Load the confirmed parent file and check whether
-// the terminal segment is ACTUALLY a struct/enum there -- if so, this
-// import is a type, not a function/value, and must NOT be noted into this
-// registry (noting it would suppress the very suffix registration
-// `mod::Type::method()` needs). A struct/enum name never collides with a
-// legitimate module-qualifier's OWN suffix registration the way a function/
-// value import's terminal does (nothing calls `SomeType::something(..)`
-// intending SomeType to BE the module), so skipping the note for a
-// confirmed type has no symmetric downside.
-fn module_frontend_named_import_terminal_is_type(parent_file_path: string, terminal: Name) -> bool with IO, Mut, Panic, Div, Alloc {
-    if terminal.len <= 0 {
+// {Type};` specifically). Check whether the terminal segment is ACTUALLY a
+// struct/enum in the confirmed parent file -- if so, this import is a type,
+// not a function/value, and must NOT be noted into this registry (noting
+// it would suppress the very suffix registration `mod::Type::method()`
+// needs). A struct/enum name never collides with a legitimate module-
+// qualifier's OWN suffix registration the way a function/value import's
+// terminal does (nothing calls `SomeType::something(..)` intending
+// SomeType to BE the module), so skipping the note for a confirmed type
+// has no symmetric downside.
+//
+// Copilot review (PR #2515), comment 4114195605: the first version of this
+// called load_module_file(parent_file_path) -- a REAL, full re-parse, not
+// an observational lookup. During the actual multi-module compile path
+// GLOBAL_VAR_INIT_SUPPRESS_RESET is set (so parses accumulate global-
+// initializer records across the whole compile instead of resetting per
+// file), and this speculative parse ran BEFORE the BFS below loads this
+// same parent file for real -- appending its initializer records TWICE,
+// which corrupts ast_global_var_init_count (lower_apply_global_var_init
+// then misreads count > 1 as an element-list initializer for what is
+// really a scalar global) and burns through the shared 8192-word
+// capacity. Scans the file's raw bytes directly instead (read_file, the
+// same side-effect-free primitive module_frontend_load_import_file already
+// uses for the raw-scanner lane elsewhere in this file) for a `struct
+// <terminal>` or `enum <terminal>` keyword+identifier match, rather than
+// running it through the real parser at all. A local buffer, not the
+// shared MODULE_FRONTEND_IMPORT_FILE_DATA scratch array: this function is
+// also called from inside that array's own active scan (the raw-scanner
+// lane below), so overwriting the shared buffer here would corrupt the
+// OUTER loop's own in-progress read of a DIFFERENT file.
+fn module_frontend_named_import_terminal_is_type(parent_file_path: string, terminal: Name) -> bool with IO, Mut, Panic, Div {
+    if terminal.len <= 0 || terminal.len > 384 {
         return false
     }
-    let parent_prog = load_module_file(parent_file_path)
-    var cur = parent_prog.items
-    while true {
-        match cur {
-            Some(list) => {
-                let it = (*list).head
-                if (it.kind == ItemKind::ItemStruct || it.kind == ItemKind::ItemEnum) && ir_name_eq(it.name, terminal) {
-                    return true
-                }
-                cur = (*list).tail
-            }
-            _ => break
+    let size = file_size(parent_file_path)
+    if size <= 0 {
+        return false
+    }
+    let n = if size > 1048576 { 1048576 } else { size }
+    let raw = read_file(parent_file_path)
+    var i: i64 = 0
+    while i < n {
+        var kw_len: i64 = 0
+        if module_frontend_bytes_match_kw(&raw, n, i, "struct") {
+            kw_len = 6
+        } else if module_frontend_bytes_match_kw(&raw, n, i, "enum") {
+            kw_len = 4
         }
+        if kw_len > 0 && (i == 0 || !module_frontend_import_is_ident_ch(raw[(i - 1) as usize])) {
+            var j = i + kw_len
+            while j < n && (raw[j as usize] == 32 as i8 || raw[j as usize] == 9 as i8) {
+                j = j + 1
+            }
+            if module_frontend_bytes_match_name(&raw, n, j, terminal) {
+                return true
+            }
+        }
+        i = i + 1
     }
     false
+}
+
+// True iff `kw` (a plain ASCII keyword, no wildcards) matches `raw[pos..]`
+// exactly. Word-boundary-BEFORE is checked by the caller (module_frontend_
+// named_import_terminal_is_type); this only checks the keyword bytes
+// themselves fit and match.
+fn module_frontend_bytes_match_kw(raw: &[i8; 1048576], n: i64, pos: i64, kw: string) -> bool with Mut, Panic, Div {
+    let kw_len = str_len(kw)
+    if pos + kw_len > n {
+        return false
+    }
+    var j: i64 = 0
+    while j < kw_len {
+        if (*raw)[(pos + j) as usize] != (str_char_at(kw, j) as i8) {
+            return false
+        }
+        j = j + 1
+    }
+    true
+}
+
+// True iff `raw[pos..pos+name.len]` matches `name`'s bytes exactly AND the
+// byte right after is not an identifier character (so `Widget2` never
+// matches a search for `Widget`).
+fn module_frontend_bytes_match_name(raw: &[i8; 1048576], n: i64, pos: i64, name: Name) -> bool with Mut, Panic, Div {
+    if pos + name.len > n {
+        return false
+    }
+    var j: i64 = 0
+    while j < name.len {
+        if (*raw)[(pos + j) as usize] != name.buf[j as usize] {
+            return false
+        }
+        j = j + 1
+    }
+    let after = pos + name.len
+    if after < n && module_frontend_import_is_ident_ch((*raw)[after as usize]) {
+        return false
+    }
+    true
 }
 
 fn resolve_import_file_path(path: AstPath, cur_dir: string) -> string with IO, Mut, Panic, Div, Alloc {

@@ -12,7 +12,6 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FIX="$ROOT_DIR/tests/multimodule/thinlink_pub_in_specialized"
 TAG="[madaros-pub-in-specialized]"
-WORK="${SOUNIO_MADAROS_PUB_IN_SPECIALIZED_GATE_DIR:-$(mktemp -d /tmp/sounio-madaros-pub-in-specialized.XXXXXX)}"
 
 fail() {
   echo "$TAG FAIL: $*" >&2
@@ -28,7 +27,19 @@ case "$(uname -m 2>/dev/null || echo unknown)" in
   *) echo "$TAG SKIP: x86-64 Linux-only gate" >&2; exit 0 ;;
 esac
 
-mkdir -p "$WORK"
+# Copilot review (PR #2515), comment 4114195565: `mkdir -p` accepts an
+# override that names an existing directory, and the EXIT trap below then
+# recursively deletes that caller-owned directory once KEEP is unset. Same
+# guard as madaros_tuple_arr_capacity_boundary_gate.sh's own override:
+# refuse an override that already exists and create it ourselves, so only
+# a directory THIS run made can ever be the trap's target.
+if [[ -n "${SOUNIO_MADAROS_PUB_IN_SPECIALIZED_GATE_DIR:-}" ]]; then
+  WORK="$SOUNIO_MADAROS_PUB_IN_SPECIALIZED_GATE_DIR"
+  [[ ! -e "$WORK" ]] || fail "refusing existing gate directory: $WORK"
+  mkdir "$WORK" || fail "could not create gate directory: $WORK"
+else
+  WORK="$(mktemp -d /tmp/sounio-madaros-pub-in-specialized.XXXXXX)"
+fi
 if [[ -z "${SOUNIO_MADAROS_PUB_IN_SPECIALIZED_GATE_KEEP:-}" ]]; then
   trap 'rm -rf "$WORK"' EXIT
 fi
