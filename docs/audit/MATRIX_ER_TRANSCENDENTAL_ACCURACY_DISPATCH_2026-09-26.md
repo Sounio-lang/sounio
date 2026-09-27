@@ -105,12 +105,12 @@ use math::pure::{exp, ln, sqrt}
 
 fn mer_pow(t: f64, n: f64) -> f64 with Mut, Div, Panic {
     if t <= 0.0 { return 0.0 }
-    if t != t { return t }                                    // NaN propagates
+    if t != t { return t }                                    // NaN t or n propagates
+    if n != n { return n }
     if t - t != 0.0 {                                         // +inf^n limit (see below)
         if n > 0.0 { return t }
         if n < 0.0 { return 0.0 }
-        if n == 0.0 { return 1.0 }
-        return n
+        return 1.0
     }
     if abs_f64(n - 1.0) < 1.0e-12 { return t }
     if abs_f64(n - 0.5) < 1.0e-12 { return sqrt(t) }
@@ -145,8 +145,9 @@ With the fix the cap crossing is 11.986367107929336, against 11.986367107929333 
 The old series returned NaN promptly instead. `mer_pow` therefore returns NaN for a NaN t first (`t ≠ t`), so an invalid clock never collapses to a
 plausible zero rate through the n − 1 < 0 exponent. For t = +inf it then returns the limit before either branch runs:
 +inf for n > 0, which caps F at 1; 0 for n < 0; and 1 for n = 0, matching exp(0·ln t) on the finite path.
-A NaN exponent propagates. Every finite result is bit-identical: the parity-ref and `matrix_er` outputs are byte-identical
-with and without the guard. The regression test asserts F(10·1e308) = 1 that `matrix_release_rate` at a NaN clock is NaN, and that at t = +inf n = 0 gives F = k while a NaN n gives NaN. With the guard removed, that test hangs
+A NaN exponent is returned before `exp` runs. On Madaros, `pure.sio` `exp(NaN)` casts NaN to the indefinite
+integer, so its 2^k scaling loop practically never ends. Every finite result is bit-identical: the parity-ref and `matrix_er` outputs are byte-identical
+with and without the guard. The regression test asserts that F(10·1e308) = 1; that `matrix_release_rate` at a NaN clock is NaN; that at t = +inf, n = 0 gives F = k; and that a NaN n gives NaN at both t = +inf and t = 2 h. With the guard removed, that test hangs
 until a 120 s timeout (rc=124). The hang in `pure.sio` itself is out of scope here and is flagged separately.
 
 A Cody-Waite split of ln2 would bring exp down to about 1 ulp. That is a `pure.sio` change affecting every
