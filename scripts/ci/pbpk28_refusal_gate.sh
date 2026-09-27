@@ -14,6 +14,15 @@
 #   bolus_unreg  md_bolus_dose_ok on the same slot. It answered "not ok"
 #                (5 mg divided by a zero volume), equally from empty storage.
 #   control      both predicates on the registered drug return normally.
+#   load_inspect md_factor_now when the inhibitor load overflows: ext_load =
+#                1e308 plus one inhibitor contribution C_u/Ki of 1e308 is +Inf,
+#                and the factor 1/(1 + Inf) came back as exactly 0 -- a victim
+#                sink silently switched off.
+#   load_step    md_step on the same state: the production path shares the one
+#                load implementation (md_site_load) and must refuse as well;
+#                it used to step with the victim's sink at 0.
+#   load_control the same state with ext_load = 1e307, so that the sum
+#                (1.1e308) is finite: the step and the inspection run.
 #
 # Engine: bin/souc (Madaros) by default; set SOUNIO_SOUC_ENGINE=lean_single to
 # run the same probes on the bootstrap engine.
@@ -86,5 +95,40 @@ write_probe oral_unreg "if md_oral_dose_ok(&md, 3, 5.0) { println(\"ok\") } else
 refused oral_unreg
 write_probe bolus_unreg "if md_bolus_dose_ok(&md, 3, 5.0) { println(\"ok\") } else { println(\"not ok\") }"
 refused bolus_unreg
+
+# Load overflow: a second drug x (Ki at CYP3A4) is dosed and run for an hour,
+# then Ki is set so that its liver contribution fu*C_t/(Kp*Ki) is 1e308 at the
+# current state, and ext_load is added on top of it.
+load_body() {
+  cat <<BODY
+md_set_clint(&!md, a, md_site_liver(), md_cyp3a4(), 100.0)
+    var q = pbpk28_params_rapamycin()
+    q.cl_central = 1.0
+    let x = md_add_drug(&!md, q, 0.1, 1.0, 1.0)
+    md_set_ki(&!md, x, md_cyp3a4(), 1.0)
+    md_dose_iv_bolus(&!md, a, 5.0)
+    md_dose_iv_bolus(&!md, x, 5.0)
+    md_run_to(&!md, 1.0, 0.1)
+    let c = md.ct[x * 14 + 1]
+    md_set_ki(&!md, x, md_cyp3a4(), md.fu_site[x * 2] * c / md.kp[x * 14 + 1] / 1.0e308)
+    md_set_ext_load(&!md, md_site_liver(), md_cyp3a4(), $1)
+    $2
+BODY
+}
+write_probe load_control "$(load_body 1.0e307 'let f = md_factor_now(&md, a, md_site_liver(), md_cyp3a4())
+    md_step(&!md, 0.1)
+    if !(f > 0.0) { return 2 }')"
+run_probe load_control
+if [ "$PROBE_RC" -ne 0 ] || ! grep -q 'PBPK28_REFUSAL_ESCAPED' "$OUT/load_control_run.log"; then
+  echo "FAIL: load control probe did not run to completion (rc $PROBE_RC)"
+  cat "$OUT/load_control_run.log" || true
+  exit 1
+fi
+echo "  control ok: finite inhibitor load accepted"
+write_probe load_inspect "$(load_body 1.0e308 'let f = md_factor_now(&md, a, md_site_liver(), md_cyp3a4())
+    print("factor ") println(f)')"
+refused load_inspect
+write_probe load_step "$(load_body 1.0e308 'md_step(&!md, 0.1)')"
+refused load_step
 
 echo "PBPK28_REFUSAL_GATE_OK"
