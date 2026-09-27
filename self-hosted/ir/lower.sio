@@ -19734,33 +19734,33 @@ impl Lowerer {
             var segs_ok = true
             var j: i64 = 0
             while j < cand {
+                // Copilot review (PR #2515), comment 4114245201: this used
+                // to ALSO reject a candidate whenever a segment merely
+                // LOOKED like a type (uppercase, or a known struct/enum) --
+                // BEFORE the registry check below (the actual authority on
+                // whether this candidate's combined text was ever really
+                // `use`d) got a chance to run at all. That let the look-
+                // like-a-type guess override a genuinely-registered LONGER
+                // qualifier: for a path-form type import where the
+                // qualifier's own combined suffix legitimately includes
+                // the type (`use pkg_mod::Widget;` then `pkg_mod::Widget::
+                // make()`, where only "pkg_mod::Widget" -- not bare
+                // "pkg_mod" -- was ever registered), the uppercase `Widget`
+                // forced a SHORTER, unregistered candidate instead, and
+                // codegen mangled to a body-less `pkg_mod_make` stub
+                // (SIGILL; tests/multimodule/module_qualified_type_import/).
+                // The registry check is the correct, authoritative signal
+                // on its own -- unlike this heuristic, it cannot be fooled
+                // by a segment's mere SPELLING -- so the type-boundary
+                // guess is now consulted only when NO cand at all matches
+                // the registry (see the `k == 0` fallback below), never to
+                // veto a cand the registry HAS confirmed. lower_named_item_
+                // terminal_known is unaffected: it excludes a segment
+                // CONFIRMED (by real file resolution, not spelling) to be a
+                // function/value import's terminal, a different, still-
+                // valid reason to refuse this candidate.
                 let seg = lower_string_list_nth_name(p.segments, j)
-                // Imported types are not guaranteed to have reached
-                // struct_layouts yet. Their uppercase spelling is still
-                // enough to stop module-prefix stripping, so
-                // `af_mod::AfNum::quad` retains `AfNum_quad`.
-                //
-                // Copilot review (PR #2515), comment 4114124500's own
-                // regression (tests/multimodule/module_qualified_type_
-                // import/): this heuristic runs BEFORE the registry check
-                // below ever gets a chance, so for a path-form type import
-                // where the qualifier's own combined suffix genuinely
-                // includes the type (`use pkg_mod::Widget;` then
-                // `pkg_mod::Widget::make()`, where only "pkg_mod::Widget" --
-                // not bare "pkg_mod" -- was ever registered), this segment
-                // being uppercase forces a SHORTER, unregistered candidate
-                // instead of the longer, genuinely-registered one, and
-                // codegen mangles to a body-less `pkg_mod_make` stub
-                // (SIGILL). Not fixed here: `af_mod::AfNum::quad`'s own case
-                // depends on exactly this ordering (the module qualifier
-                // there is deliberately SHORTER than the type), so
-                // preferring a registry match over this heuristic needs
-                // care not to invert that -- see this PR's tests/
-                // multimodule/module_qualified_type_import/README.md for
-                // the full writeup and why it is checked (--check) rather
-                // than compiled and run.
-                let c0 = if seg.len > 0 { (seg.buf[0] as i64) & 255 } else { 0 }
-                if self.callee_segment_names_type(seg) || (c0 >= 65 && c0 <= 90) || lower_named_item_terminal_known(ast_path_prefix_name(p, j)) {
+                if lower_named_item_terminal_known(ast_path_prefix_name(p, j)) {
                     segs_ok = false
                 }
                 j = j + 1
@@ -19843,8 +19843,29 @@ impl Lowerer {
             // is a positive, current-caller-scoped signal with no symmetric
             // downside), applied this same round; no analogous asymmetry
             // exists here; a real fix needs that shared resolution table.
-            if k == 1 && lower_impl_method_known(ir_mangle_method_name(lower_string_list_nth_name(p.segments, 0), last)) {
-                return ir_empty_name()
+            // Copilot review (PR #2515), comment 4114245201 (follow-up): this
+            // used to check ONLY segments[0], which is correct for k == 1
+            // (qualifier is one segment) but wrong for k > 1 -- a longer
+            // registered qualifier like "pkg_mod::Widget" (from `use
+            // pkg_mod::Widget;`) can legitimately win the cand loop above
+            // when "Widget" is a path-form TYPE import, leaving remaining == 1
+            // ("make") with segments[0] == "pkg_mod", not "Widget". Checking
+            // the wrong segment always misses the real impl method and falls
+            // through to `return last` (bare "make"), which the backend then
+            // refuses as a body-less stub (NATIVE_REFUSAL empty_stub_ud2) --
+            // the exact SIGILL the fixture in tests/multimodule/
+            // module_qualified_type_import/ was written to catch. The
+            // segment that actually sits next to `last` in the qualifier is
+            // always segments[k - 1], regardless of k; checking THAT one
+            // generalizes the original k == 1 special case (a mangled name
+            // it finds there is returned directly instead of bailing to
+            // expr_to_callee_name_ref's own first/last fallback, since for
+            // k == 1 that fallback mangles the identical two segments and
+            // would recompute the same name).
+            let qualifier_type_seg = lower_string_list_nth_name(p.segments, k - 1)
+            let mangled_method = ir_mangle_method_name(qualifier_type_seg, last)
+            if lower_impl_method_known(mangled_method) {
+                return mangled_method
             }
             return last
         }

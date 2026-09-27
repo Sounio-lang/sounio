@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # Copilot review (PR #2515), comment 4114124500: a path-form TYPE import
 # (`use pkg::mod::Type;`) must still register its module-qualifier suffix.
-# See tests/multimodule/module_qualified_type_import/README.md for why this
-# gate checks (--check) rather than compiles-and-runs this fixture.
+# Copilot review (PR #2515), comment 4114245201 (and its follow-up fix in
+# self-hosted/ir/lower.sio's callee_path_module_stripped_name): the lowerer
+# side of this exact shape is now fixed too, so this gate compiles and runs
+# the fixture end-to-end instead of only `--check`ing it. See
+# tests/multimodule/module_qualified_type_import/README.md for the history.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -48,23 +51,36 @@ fi
 
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
 
-# --- basic: a path-form type import must keep its module-qualifier suffix ---
-# --check only (never compiled/run): see this fixture's own comment and the
-# README for why -- this exact call shape (module::Type::method() through a
-# PATH-FORM type import specifically) separately depends on lower.sio's
-# callee_path_module_stripped_name, whose pre-existing uppercase-segment
-# heuristic stops module-prefix stripping before a genuinely-registered
-# "module::Type" suffix gets a chance to match, so a native compile+run
-# here would fail for a reason unrelated to what this gate exists to pin.
-log="$WORK/basic.log"
-if ! "$RAW" --check "$FIX/basic/main.sio" >"$log" 2>&1; then
-  tail -n 40 "$log" >&2 || true
-  fail "basic: --check rejected a path-form type import's qualified associated call (its module-qualifier suffix was not registered)"
-fi
-grep -Fq 'check: OK' "$log" || {
-  tail -n 40 "$log" >&2 || true
-  fail "basic: --check did not report OK"
+# compile_case <label> <source> -> $WORK/<label>.{log,elf,out}
+compile_and_run() {
+  local label="$1" src="$2"
+  local log="$WORK/$label.log" elf="$WORK/$label.elf" out="$WORK/$label.out"
+  [[ -f "$src" ]] || fail "$label: missing fixture $src"
+  if ! "$RAW" --native-compile "$src" -o "$elf" >"$log" 2>&1; then
+    tail -n 40 "$log" >&2 || true
+    fail "$label: did not compile"
+  fi
+  [[ -s "$elf" ]] || fail "$label: compiler did not emit an ELF"
+  chmod +x "$elf"
+  if ! timeout 30 "$elf" >"$out" 2>&1; then
+    cat "$out" >&2 || true
+    fail "$label: compiled program did not run to completion"
+  fi
 }
-echo "$TAG PASS(basic): a path-form type import keeps its module-qualifier suffix (--check)"
+
+expect_output() {
+  local label="$1" expected="$2"
+  if ! diff -u "$expected" "$WORK/$label.out" >"$WORK/$label.diff"; then
+    cat "$WORK/$label.diff" >&2
+    fail "$label: program output differs from $(basename "$(dirname "$expected")")/expected.txt"
+  fi
+}
+
+# --- basic: a path-form type import must keep its module-qualifier suffix,
+# AND the lowerer must resolve the resulting Type::method call to the real
+# mangled impl-method body, not a body-less stub (see README history) ---
+compile_and_run basic "$FIX/basic/main.sio"
+expect_output basic "$FIX/basic/expected.txt"
+echo "$TAG PASS(basic): a path-form type import's qualified associated call compiles and runs correctly"
 
 echo "$TAG PASS: path-form type import resolved correctly"
