@@ -61,3 +61,28 @@ the invalid DeepSeek key in `~/.sounio-keys.env`. Raw outputs from this session:
   "Specify two BE half-steps": already specified.
 - **zai/local/deepseek:** not rerun. Status as in the previous entry (rate limit,
   endpoint down, invalid key).
+
+## 2026-09-27T00:20Z — Claude (cloud session, branch claude/venlafaxine-odv-mass-balance) — M1 math-review for PR #2719 could not run
+
+| 2026-09-27 | xai, xai-fast, zai, deepseek, gemini — none reached | math-review | stdlib/darwin_pbpk/scenarios/venlafaxine_xr.sio (formation-step transfer), tests/run-pass/darwin_pbpk_venlafaxine_odv_mass_balance.sio | NOT RUN | No provider keys in this container. |
+
+**Trigger:** the PR changes a PK mass-transfer step (parent liver → ODV),
+which is an M1 math claim: the removed parent mass equals the ODV input, and
+both equal the formation amount capped at the liver's available mass.
+
+**Attempts:** `bin/llm-offload -t math-review -p <p>` for xai, xai-fast, zai,
+deepseek and gemini, in that order. `bin/llm-offload --status` reports
+`Keys file: (NOT FOUND)` and no provider variable is set in the environment,
+so each call wrote an empty result directory and made no request. Nothing was
+sent to any provider, and no leg is counted as a pass.
+
+**What stands in for it until a review runs:** the identity is gated by
+arithmetic, not by assertion. For all four CYP2D6 phenotypes, the test
+recomputes the expected transfer from public primitives. It checks the parent
+side to 1e-9 relative (measured 0) and the ODV side against a replayed CN step
+to 1e-9 (measured 0). Every comparison is written to fail on NaN.
+
+**Flagged for re-review:** run `bin/llm-offload -t math-review -p xai` and a
+second independent provider on the formation-step block
+(`venlafaxine_xr.sio`, step 4) from a checkout that has
+`~/.sounio-keys.env`, before merge.
