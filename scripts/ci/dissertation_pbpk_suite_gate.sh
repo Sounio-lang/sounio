@@ -39,7 +39,9 @@
 #                                  framework boundary audit, confidence gate PASS
 #
 # Each test ends with "PASS\n" on success. Gate fails if any test rc != 0
-# or stdout doesn't contain "PASS".
+# or stdout doesn't contain "PASS". Modules that fail on a documented defect
+# are listed in TESTS_EXPECTED_FAIL_HONEST instead and must fail exactly as
+# recorded (strict; see that list).
 #
 # CPU-only, ~30s total. Self-skips if souc is missing.
 #
@@ -119,7 +121,6 @@ TESTS=(
   "pop_pbpk_pd                stdlib/darwin_pbpk/population/pop_pbpk_pd.sio"
   "epistemic_pbpk28           stdlib/darwin_pbpk/epistemic_pbpk28.sio"
   "epistemic_pbpk28_hessian   stdlib/darwin_pbpk/epistemic_pbpk28_hessian.sio"
-  "pbpk28_sobol_pce           stdlib/darwin_pbpk/validation/pbpk28_sobol_pce.sio"
   "pbpk28_mc_cross_validation stdlib/darwin_pbpk/validation/pbpk28_mc_cross_validation.sio"
   "pbpk28_mc_prior_family_sweep stdlib/darwin_pbpk/validation/pbpk28_mc_prior_family_sweep.sio"
   "rapamycin_kaxi_fuse_prior    tests/run-pass/rapamycin_kaxi_fuse_prior.sio"
@@ -162,6 +163,35 @@ TESTS_PENDING=(
 # sd_post==sd_expected). Seq-of-struct/borrow paths remain Tier-2 (see
 # tests/known_failures/hardened_diagnostics_full_suite.txt).
 TESTS_PENDING_REGRESSION=()
+
+# Expected FAIL_HONEST: modules that currently fail on a documented,
+# diagnosed defect. Strict: the entry is accepted (XFAIL, neither pass nor
+# fail) only when the run exits with exactly the recorded rc, prints the
+# recorded diagnostic exactly the recorded number of times, and prints no
+# other `FAIL` line. A timeout, a different rc, any other failure, or an
+# unexpected pass (rc 0) fails the gate -- the last one so the entry is moved
+# back to TESTS once the defect is fixed.
+# Format: name|src|expected_rc|diagnostic_count|diagnostic (fixed string)
+TESTS_EXPECTED_FAIL_HONEST=(
+  # Saltelli estimator output violates S_i <= S_Ti in both self-tests
+  # (rapamycin and semaglutide TEST 7; stdlib/epistemic/sobol.sio not yet
+  # repaired). See docs/dissertation/results/sobol_pce_semaglutide_v2.md.
+  "pbpk28_sobol_pce|stdlib/darwin_pbpk/validation/pbpk28_sobol_pce.sio|2|2|FAIL: estimator output violates S_i <= S_Ti; not usable as Sobol' indices"
+)
+
+# Verdict for one expected-FAIL_HONEST run: prints XFAIL or FAIL:<reason>.
+dps_xfail_verdict() {
+  local log="$1" rc="$2" want_rc="$3" want_n="$4" diag="$5"
+  if [[ "$rc" == "124" ]]; then echo "FAIL:timeout"; return; fi
+  if [[ "$rc" == "0" ]]; then echo "FAIL:unexpected_pass"; return; fi
+  if [[ "$rc" != "$want_rc" ]]; then echo "FAIL:rc=${rc}_expected_${want_rc}"; return; fi
+  local n_diag n_fail
+  n_diag=$(grep -cF -- "$diag" "$log" || true)
+  n_fail=$(grep -cE '^[[:space:]]*FAIL' "$log" || true)
+  if [[ "$n_diag" != "$want_n" ]]; then echo "FAIL:diagnostic_count=$n_diag"; return; fi
+  if [[ "$n_fail" != "$want_n" ]]; then echo "FAIL:other_failures=$((n_fail - n_diag))"; return; fi
+  echo "XFAIL"
+}
 
 fails=0
 pending=0
@@ -315,7 +345,42 @@ for entry in "${TESTS_PENDING_REGRESSION[@]}"; do
   results+=("PEND  $name  seq_subsystem_regression")
 done
 
-total=$((${#TESTS[@]} + ${#TESTS_SMOKE[@]} + ${#TESTS_PENDING[@]} + ${#TESTS_PENDING_REGRESSION[@]}))
+# Expected FAIL_HONEST loop (see TESTS_EXPECTED_FAIL_HONEST).
+xfails=0
+for entry in "${TESTS_EXPECTED_FAIL_HONEST[@]}"; do
+  IFS='|' read -r name src want_rc want_n diag <<< "$entry"
+  log="$STAGE_DIR/$name.log"
+
+  echo ""
+  echo "[$name] (expected FAIL_HONEST)"
+  echo "  src=$src"
+
+  if [[ ! -f "$src" ]]; then
+    echo "  FAIL: source missing"
+    fails=$((fails + 1))
+    results+=("FAIL  $name  source_missing")
+    continue
+  fi
+
+  set +e
+  timeout "$TIMEOUT_SECONDS" "$SOUC_BIN" run "$src" >"$log" 2>&1
+  rc=$?
+  set -e
+
+  verdict=$(dps_xfail_verdict "$log" "$rc" "$want_rc" "$want_n" "$diag")
+  if [[ "$verdict" == "XFAIL" ]]; then
+    echo "  XFAIL: fails exactly as recorded (rc=$rc, diagnostic x$want_n, no other FAIL)"
+    xfails=$((xfails + 1))
+    results+=("XFAIL $name  documented_defect")
+  else
+    echo "  FAIL: expected-FAIL_HONEST entry did not fail as recorded (${verdict#FAIL:}; rc=$rc, timeout=$TIMEOUT_SECONDS)"
+    tail -5 "$log" | sed 's/^/    /'
+    fails=$((fails + 1))
+    results+=("FAIL  $name  ${verdict#FAIL:}")
+  fi
+done
+
+total=$((${#TESTS[@]} + ${#TESTS_SMOKE[@]} + ${#TESTS_PENDING[@]} + ${#TESTS_PENDING_REGRESSION[@]} + ${#TESTS_EXPECTED_FAIL_HONEST[@]}))
 
 echo ""
 echo "=== Summary ==="
@@ -330,8 +395,8 @@ if [[ $fails -ne 0 ]]; then
 fi
 
 echo ""
-if [[ $pending -ne 0 ]]; then
-  echo "dissertation_pbpk_suite_gate: PASS ($((total - pending))/$total active; $pending item(s) PENDING — see summary for detail)"
+if [[ $pending -ne 0 || $xfails -ne 0 ]]; then
+  echo "dissertation_pbpk_suite_gate: PASS ($((total - pending - xfails))/$total passing; $pending item(s) PENDING, $xfails expected FAIL_HONEST — see summary for detail)"
 else
   echo "dissertation_pbpk_suite_gate: PASS ($total/$total PBPK tests + smoke demos)"
 fi

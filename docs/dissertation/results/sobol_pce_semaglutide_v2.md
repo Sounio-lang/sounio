@@ -36,8 +36,12 @@ C_ij sample matrices) enters at least one of those indices, and NaN passes the e
 a rejection fails the run instead of entering the estimator as AUC = 0; in the logged run every
 index is finite, so no sampled trajectory was rejected. TEST 7 of each self-test checks the ordering
 invariant S_i ≤ S_Ti and **fails in both** (below), so the run exits with rc = 2 and prints no PASS
-marker; `scripts/ci/dissertation_pbpk_suite_gate.sh` therefore reports this module as FAIL until the
-estimator is repaired.
+marker. `scripts/ci/dissertation_pbpk_suite_gate.sh` lists the module under
+`TESTS_EXPECTED_FAIL_HONEST`: it is accepted (XFAIL) only when the run exits with rc = 2 and prints
+the S_i ≤ S_Ti diagnostic exactly twice and no other `FAIL` line; a timeout, any other failure, or
+an unexpected pass fails the gate. The full run takes ~40 min under lean_single, so the gate needs
+`DPS_TIMEOUT_SECONDS` ≳ 3000 for this entry (at the default 90 s it times out and fails, as it did
+before this change).
 
 ## Status of these numbers: estimator output, not validated Sobol' indices
 
