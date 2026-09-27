@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Copilot review (PR #2515), comment 4113834074: a real `use`d module can
 # collide with an unrelated, incidentally-same-named lowercase struct/enum.
-# See tests/multimodule/module_qualifier_type_collision/README.md for why
-# this gate checks (--check) rather than compiles-and-runs this fixture.
+# Copilot review (PR #2515), comment 4114680413: accepting this ambiguous
+# shape via --check was itself wrong -- the lowerer still crashes on it (see
+# tests/multimodule/module_qualifier_type_collision/README.md) -- so this
+# gate now asserts the checker REFUSES it (E263), not that it passes.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -48,21 +50,23 @@ fi
 
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
 
-# --- basic: a real used module must beat an unrelated same-named struct ---
-# --check only (never compiled/run): see this fixture's own comment and the
-# README for why -- this identical ambiguous shape separately trips the
-# STILL-OPEN lowerer-side gap (comment 4113834083) that this round's fix
-# does not touch, so a native compile+run here would fail for a reason
-# unrelated to what this gate exists to pin.
+# --- basic: a real used module colliding with an unrelated same-named
+# struct/enum method must be REFUSED (E263), not silently resolved either
+# way -- see this fixture's own comment and the README for why: the
+# checker has a strictly-stronger, asymmetric signal to prefer the module
+# (comment 4113834074), but the LOWERER's equivalent lookup does not, and
+# still crashes on this exact shape (comment 4113834083). A --check pass
+# the compiler then segfaults on is worse than a refusal, so this gate
+# checks for the refusal, not a pass.
 log="$WORK/basic.log"
-if ! "$RAW" --check "$FIX/basic/main.sio" >"$log" 2>&1; then
+if "$RAW" --check "$FIX/basic/main.sio" >"$log" 2>&1; then
   tail -n 40 "$log" >&2 || true
-  fail "basic: --check rejected a real used module qualifier colliding with an unrelated same-named struct (E012 or similar -- the struct's method won instead of the module's free fn)"
+  fail "basic: --check accepted an ambiguous module-vs-type qualifier collision (expected E263)"
 fi
-grep -Fq 'check: OK' "$log" || {
+grep -Fq 'error[E263]' "$log" || {
   tail -n 40 "$log" >&2 || true
-  fail "basic: --check did not report OK"
+  fail "basic: --check refused the program but not with E263 (ambiguous qualified-call collision)"
 }
-echo "$TAG PASS(basic): a real used module wins over an unrelated same-named lowercase struct (--check)"
+echo "$TAG PASS(basic): a module qualifier colliding with an unrelated same-named struct/enum method is refused, not silently resolved (--check, E263)"
 
 echo "$TAG PASS: module qualifier vs. type-name collision resolved correctly"

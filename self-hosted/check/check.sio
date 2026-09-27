@@ -11213,10 +11213,39 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
                 let path_type_name_is_used_module = checker_use_module_known((*c).current_module_id, path_type_name)
                 // Prefer semantic match (kind+name) then name-only self_type_name.
                 let recv_ty = ty_named(path_type_name)
+                let colliding_semantic_sig_id = fn_sig_table_find_method_semantic((*c).fn_sigs, recv_ty, path_method_name)
+                // Copilot review (PR #2515), comment 4114680413: preferring
+                // the caller's `use`d-module evidence here makes --check
+                // accept this call, but the LOWERER (self-hosted/ir/
+                // lower.sio's callee_path_module_stripped_name) still
+                // resolves the method through the global, no-provenance
+                // LOWER_IMPL_METHOD_HASH and can select the unrelated
+                // struct/enum's method body instead -- confirmed directly
+                // (tests/multimodule/module_qualifier_type_collision/basic
+                // segfaults at runtime once native-compiled). A checker
+                // pass that the compiler then crashes on is worse than a
+                // checker refusal: --check OK must mean "this will run",
+                // not "this typechecks under an asymmetric guess neither
+                // side of the compiler can fully honor." Closing this for
+                // real needs the same shared "qualifier -> target-module-
+                // id" resolution table this PR already documents as a
+                // genuine architectural gap (comment 4110379040 and
+                // others) -- not something to rush here. Until that
+                // exists, fail closed: when the qualifier is BOTH a real
+                // `use`d module AND collides with an unrelated struct/enum
+                // that actually defines this same method name, refuse the
+                // call outright instead of silently picking a side. This
+                // does not affect the common case (a used module with no
+                // colliding same-named type+method), which every other
+                // fixture in this PR (af_mod::AfNum::quad,
+                // pkg_mod::Widget::make) already compiles and runs.
+                if path_type_name_is_used_module && colliding_semantic_sig_id >= 0 {
+                    checker_report_error_at_inplace(c, e.span, 263, 0, 0, 0)
+                }
                 direct_sig_id = if path_type_name_is_used_module {
                     -1
                 } else {
-                    fn_sig_table_find_method_semantic((*c).fn_sigs, recv_ty, path_method_name)
+                    colliding_semantic_sig_id
                 }
                 // Round 10 (review comment 4099548863): for a path LONGER than
                 // 2 segments (e.g. `bogus::AfNum::quad(..)`), the match above
@@ -17439,6 +17468,7 @@ fn print_error_message(code: i64) with IO, Mut, Panic, Div {
     else if code == 262 { print("ontology classes are unrelated: no subsumption between them, so the operator cannot say what the result is an amount of") }
     else if code == 251 { print("product variance shortcut is unsound beyond the octonions: |xy| != |x||y| on Sedenion/Clifford, so Var(x*y) = |y|^2 Var x + |x|^2 Var y fabricates precision") }
     else if code == 252 { print("algebra declares a reassociation strategy its multiplication law cannot certify: `free` needs an associative product, `fano_selective` needs the octonion level") }
+    else if code == 263 { print("qualified call is ambiguous: this qualifier names a module you `use`d, but also collides with an unrelated struct/enum method of the same name, and the compiler cannot yet guarantee which one runs") }
     else { print("unknown error") }
 }
 
@@ -17775,6 +17805,9 @@ fn print_error_help(code: i64) with IO, Mut, Panic, Div {
         print("\n   =       (then the reported variance overstates, which is safe); `/` refuses")
         print("\n   =       any shared source, because its dropped term also depends on the sign")
         print("\n   =       of the product of the operand values, which is not tracked.\n")
+    }
+    else if code == 263 {
+        print("   |\n   = help: rename the struct/enum, the method, or the module import so the qualifier is no longer ambiguous\n")
     }
     else {
         // No help available for unknown errors
