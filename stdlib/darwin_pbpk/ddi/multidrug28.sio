@@ -717,35 +717,50 @@ pub fn md_step(md: &!MultiDrug28, dt: f64) with Mut, Div, Panic {
     (*md).t = t_next
 }
 
-// Advances to exactly t_end with steps of dt: the last step is shortened to
-// land on t_end, so dosing times off the dt grid are honoured. Differences
-// below tol = 1e-9·dt are accumulated round-off in t, not time to integrate: a
-// remainder within tol of dt is taken as a full dt step (so a target on the
-// grid gives exactly the md_step(dt) sequence), a remainder below tol is not
-// stepped, and t is then snapped to t_end. A non-finite t_end (NaN, +-Inf)
-// panics, as does a non-finite or non-positive dt. A finite target not strictly
-// ahead of t is a no-op: the snap must never move the clock backwards, which it
-// would for a t_end below t but within tol.
-// tol is also capped at half the requested span: 1e-9·dt alone can exceed the
-// whole interval (dt = 1e12 gives tol = 1000 h), and then no step ran and the
-// snap only moved the clock. With the cap a positive span always takes at least
-// one (shortened) step; spans above 2e-9·dt, including every grid case, are
-// unaffected.
+// Advances to exactly t_end with steps of dt. The number of full steps is
+// fixed from the initial span, n = floor(span/dt + round-off), and any real
+// remainder after them is integrated as one shortened step, so dosing times
+// off the dt grid are honoured and nothing is discarded. "Real" means above
+// the round-off scale of t: 4u·max(|t0|, |t_end|) plus the drift the n full
+// steps have actually accumulated, |t - (t0 + n·dt)|. A remainder at or below
+// that scale is round-off, not time, and t is then snapped to t_end. So a
+// target on the grid gives exactly the md_step(dt) sequence ((0.6, 0.02):
+// 30 steps), (0.61, 0.02) gives 30 steps plus a 0.01 step, and
+// (1.0000000005, 1.0) gives a 1.0 step plus a 5e-10 step. (Until 2026-09-27
+// a tolerance of 1e-9·dt decided both the step count and the snap, so that
+// last case took one step and dropped the 5e-10 h: PR #2695 review.)
+// A dt far larger than the span takes n = 0 full steps and one step of the
+// whole span. A non-finite t_end (NaN, +-Inf) panics, as does a non-finite
+// or non-positive dt. A finite target not strictly ahead of t is a no-op, so
+// the clock never moves backwards.
 pub fn md_run_to(md: &!MultiDrug28, t_end: f64, dt: f64) with Mut, Div, Panic {
     if !(is_finite_f64(dt) && dt > 0.0) { panic("multidrug28: md_run_to needs a finite dt > 0") }
     if !(is_finite_f64(t_end)) { panic("multidrug28: md_run_to needs a finite t_end") }
-    if !(t_end > (*md).t) { return }
-    let tol_dt = 1.0e-9 * dt
-    let half_span = 0.5 * (t_end - (*md).t)
-    let tol = if tol_dt < half_span { tol_dt } else { half_span }
-    while (*md).t < t_end - tol {
-        let rem = t_end - (*md).t
-        let h = if rem < dt - tol { rem } else { dt }
-        md_step(md, h)
+    let t0 = (*md).t
+    if !(t_end > t0) { return }
+    let u = 1.1102230246251565e-16
+    let at0 = if t0 < 0.0 { 0.0 - t0 } else { t0 }
+    let ate = if t_end < 0.0 { 0.0 - t_end } else { t_end }
+    let t_scale = if at0 > ate { at0 } else { ate }
+    let span = t_end - t0
+    let r = span / dt
+    // r carries the rounding of span (u·t_scale absolute) and of the division.
+    let r_tol = 4.0 * u * (r + t_scale / dt)
+    let n_full = (r + r_tol) as i64
+    var k: i64 = 0
+    while k < n_full {
+        md_step(md, dt)
+        k = k + 1
     }
-    if (*md).t > t_end - tol && (*md).t < t_end + tol {
-        (*md).t = t_end
+    let ideal = t0 + (n_full as f64) * dt
+    let d0 = (*md).t - ideal
+    let drift = if d0 < 0.0 { 0.0 - d0 } else { d0 }
+    let tol_t = 4.0 * u * t_scale + drift
+    let rem = t_end - (*md).t
+    if rem > tol_t {
+        md_step(md, rem)
     }
+    (*md).t = t_end
 }
 
 // Mass currently in the body (all organs, both layers) for drug i.
