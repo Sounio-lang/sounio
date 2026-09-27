@@ -846,20 +846,55 @@ pub fn md_step(md: &!MultiDrug28, dt: f64) with Mut, Div, Panic {
 // A non-finite t_end (NaN, +-Inf) panics, as does a non-finite or
 // non-positive dt. A finite target not strictly ahead of t is a no-op, so
 // the clock never moves backwards. The run ends with t == t_end exactly.
+// Spacing of the doubles in the binade of y >= 0 (finite): ulp(y) = 2^e·2^-52
+// for 2^e <= y < 2^(e+1) normal, and 2^-1074 below the normal range. The
+// power of two is found by halving or doubling from 1, which is exact.
+fn md_ulp(y: f64) -> f64 with Mut {
+    if y < 2.2250738585072014e-308 { return 4.9406564584124654e-324 }
+    var p = 1.0
+    if y >= 1.0 {
+        while p * 2.0 <= y { p = p * 2.0 }
+    } else {
+        while p > y { p = p * 0.5 }
+    }
+    return p * 2.220446049250313e-16
+}
+
 // Argument check of md_run_to, exposed so that a gate can test it (a panic
 // cannot be observed by the run-pass harness): 0 valid, 1 dt not a finite
-// positive number, 2 t_end not finite, 3 dt below the clock's resolution at
-// t, i.e. fl(t + dt) == t, when the target is ahead. At t = 2^53 (ulp 2 h) a
-// 1 h step cannot advance the clock (PR #2695 review). md_step already
-// refused such a step before mutating anything, but only when it came to it,
-// with a generic message. md_run_to now refuses up front, before any step.
-// It deliberately does not substitute a coarser step: that would change the
-// integrator's resolution without saying so.
+// positive number, 2 t_end not finite, 3 dt below the clock's resolution
+// somewhere on the way to a target ahead of t. md_run_to refuses on any
+// nonzero code before any step, so nothing is mutated. It deliberately does
+// not substitute a coarser step: that would change the integrator's
+// resolution without saying so.
+// Code 3 must hold for the whole run, not only at the starting clock (PR
+// #2695 review): from t = 2^53 - 1 toward 2^53 + 2 with dt = 1, the first
+// step is fine (ulp 1) and lands on 2^53, where fl(2^53 + 1) = 2^53 (ulp 2,
+// ties to even), so the next md_step panicked after the first had already
+// mutated the state. The check is therefore made where resolution is
+// coarsest. Every clock value x at which a full step can be taken lies in
+// [t, t_end]: steps only move forward, the loop steps only while
+// fl(x + dt) <= t_end, and a step that does not advance leaves x <= t_end.
+// So |x| <= Y = max(|t|, |t_end|), and since the spacing of doubles is
+// non-decreasing in |x|, the gap from x to its upper neighbour is at most
+// ulp(Y) (for x < 0 it can only be smaller). If dt > ulp(Y)/2, then x + dt
+// lies strictly beyond the midpoint between x and that neighbour, so
+// fl(x + dt) is at least the neighbour and exceeds x: every full step
+// advances the clock. The strict inequality is needed: at dt = ulp/2 exactly
+// the tie goes to the even neighbour, which is x itself half of the time, so
+// testing fl(x + dt) > x at one point would pass or fail by parity. The
+// remainder step then goes to t_end itself (md_step_to), which is ahead of
+// the clock, so it lands on t_end exactly and integrates h > 0.
 pub fn md_run_to_error(md: &MultiDrug28, t_end: f64, dt: f64) -> i32 with Mut {
     if !(is_finite_f64(dt) && dt > 0.0) { return 1 }
     if !(is_finite_f64(t_end)) { return 2 }
     let t = (*md).t
-    if t_end > t && !(t + dt > t) { return 3 }
+    if t_end > t {
+        let at = if t < 0.0 { 0.0 - t } else { t }
+        let ae = if t_end < 0.0 { 0.0 - t_end } else { t_end }
+        let y = if at > ae { at } else { ae }
+        if !(dt > 0.5 * md_ulp(y)) { return 3 }
+    }
     return 0
 }
 
@@ -867,7 +902,7 @@ pub fn md_run_to(md: &!MultiDrug28, t_end: f64, dt: f64) with Mut, Div, Panic {
     let e = md_run_to_error(md, t_end, dt)
     if e == 1 { panic("multidrug28: md_run_to needs a finite dt > 0") }
     if e == 2 { panic("multidrug28: md_run_to needs a finite t_end") }
-    if e == 3 { panic("multidrug28: md_run_to: dt below clock resolution at t (t + dt == t); refusing rather than stepping coarser") }
+    if e == 3 { panic("multidrug28: md_run_to: dt below clock resolution between t and t_end (dt <= ulp/2); refusing rather than stepping coarser") }
     if !(t_end > (*md).t) { return }
     while (*md).t + dt <= t_end {
         md_step(md, dt)

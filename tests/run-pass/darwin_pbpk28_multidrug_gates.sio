@@ -141,6 +141,16 @@
 //     dt 1 at t = 2^53 and for dt 1e-17 at t = 1, and 0 for dt 2 at 2^53 and
 //     for a target behind t (a no-op). Without the check it returns 0 and
 //     this fails.
+//     Resolution is checked over the whole run, where it is coarsest, not
+//     only at the starting clock: from t = 2^53 - 1 toward 2^53 + 2 with
+//     dt = 1 the first step is fine (ulp 1) but lands on 2^53, where
+//     fl(2^53 + 1) = 2^53, and the next step panicked after the first had
+//     mutated the state. md_run_to_error must return 3 there, before any step,
+//     and leave the drug state and clock identical to an untouched twin
+//     (md_same_drug and t). The check at the starting clock alone returned 0
+//     and this fails. The same interval with dt = 2 is valid (0), and running
+//     it must infuse exactly the 3 h of clock advance (a 1 h step that the
+//     clock rounds from 2^53 + 1 down to 2^53, then a 2 h step).
 //
 // V8  Configuration. md_config_error, the check every md_step panics on,
 //     returns 2 for md.iters < 0 (a negative count ran zero sweeps: silent Lie
@@ -627,9 +637,10 @@ fn gate_v7() -> bool with Mut, Div, Panic, IO {
     let big_c = v7_big_clock(9007199254740992.0, 2.0, 3.0)
     let big_d = v7_big_clock(9007199254740992.0, 6.0, 4.0)
     let big_e = v7_big_clock(9007199254740992.0, 4.0, 3.0)
+    let big_f = v7_big_clock(9007199254740991.0, 3.0, 2.0)
     print("V7 large clock, infused mass - clock advance (mg): t0 = 2^53, +2 h dt 2: ") print(big_a) print("  t0 = 2^40, +10.5 h dt 2: ") print(big_b)
-    print("  t0 = 2^53, +2 h dt 3: ") print(big_c) print("  t0 = 2^53, +6 h dt 4: ") print(big_d) print("  t0 = 2^53, +4 h dt 3: ") println(big_e)
-    let clock_ok = big_a == 0.0 && big_b == 0.0 && big_c == 0.0 && big_d == 0.0 && big_e == 0.0
+    print("  t0 = 2^53, +2 h dt 3: ") print(big_c) print("  t0 = 2^53, +6 h dt 4: ") print(big_d) print("  t0 = 2^53, +4 h dt 3: ") print(big_e) print("  t0 = 2^53 - 1, +3 h dt 2: ") println(big_f)
+    let clock_ok = big_a == 0.0 && big_b == 0.0 && big_c == 0.0 && big_d == 0.0 && big_e == 0.0 && big_f == 0.0
     // dt below the clock's resolution is refused up front (code 3), not
     // replaced by a coarser step; a resolvable dt at the same clock is valid.
     var r = md_new(true)
@@ -641,7 +652,19 @@ fn gate_v7() -> bool with Mut, Div, Panic, IO {
     let res_past = md_run_to_error(&r, 0.5, 1.0e-17)
     print("V7 run_to argument check: 2^53 dt 1, 2^53 dt 2, t=1 dt 1e-17, target behind = ")
     print(res_1) print(" ") print(res_2) print(" ") print(res_tiny) print(" ") println(res_past)
-    let res_ok = res_1 == 3 && res_2 == 0 && res_tiny == 3 && res_past == 0
+    // Binade boundary on the way: refused before any step, state untouched.
+    var bb = md_new(true)
+    let ib = v7_setup(&!bb)
+    bb.t = 9007199254740991.0
+    var tw = md_new(true)
+    let jw = v7_setup(&!tw)
+    tw.t = 9007199254740991.0
+    let res_bb = md_run_to_error(&bb, 9007199254740994.0, 1.0)
+    let res_bb2 = md_run_to_error(&bb, 9007199254740994.0, 2.0)
+    let untouched = bb.t == tw.t && md_same_drug(&bb, ib, &tw, jw)
+    print("V7 binade boundary 2^53 - 1 -> 2^53 + 2: dt 1, dt 2 = ") print(res_bb) print(" ") print(res_bb2)
+    print("  state untouched: ") println(untouched)
+    let res_ok = res_1 == 3 && res_2 == 0 && res_tiny == 3 && res_past == 0 && res_bb == 3 && res_bb2 == 0 && untouched
     return a.t == 0.61 && same && short_ok && grid_ok && back_ok && past_ok && big_ok && rem_ok && clock_ok && res_ok
 }
 
