@@ -804,13 +804,14 @@ vfx_rmse() {  # $1=prefix $2=pass-marker $3=fail-marker
     <(vfx_parse_cavg "$1" "$VFX_NODE_LOG" | awk -F'\t' '{print $1"|"$2"\t"$3}' | sort) \
   | awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" -v PASS="$2" -v FAILM="$3" "$VFX_AWK_FIN"'
       {split($1,a,"|"); i=a[2]+0; cs=fin($2); cn=fin($3); d=cs-cn; SS[i]+=d*d; NN[i]++;
-       if(cs>PK[i])PK[i]=cs; if(cn>PK[i])PK[i]=cn}
+       as=(cs<0)?-cs:cs; an=(cn<0)?-cn:cn; if(as>PK[i])PK[i]=as; if(an>PK[i])PK[i]=an}
       END{bad=0;
         if(nonfin>0){printf "%s %d non-finite value(s)\n",FAILM,nonfin; exit 1}
         printf "%-3s %-14s %-14s %-9s %s\n","i","rmse","peak","pct","status";
         for(i=0;i<14;i++){ if(NN[i]!=12){printf "%-3d %d/12 joined samples\n",i,NN[i]+0; bad++; continue}
           rmse=sqrt(SS[i]/NN[i]); pk=PK[i]+0;
-          if(pk==0){printf "%-3d %-14.3e %-14s %-9s zero-traj OK\n",i,rmse,"-","-"; continue}
+          if(pk==0 && rmse==0){printf "%-3d %-14.3e %-14s %-9s zero-traj OK\n",i,rmse,"-","-"; continue}
+          if(pk==0){printf "%-3d %-14.3e %-14s %-9s FAIL (zero peak, nonzero RMSE)\n",i,rmse,"-","-"; bad++; continue}
           pct=100*rmse/pk; st=(pct<THR+0)?"OK":"FAIL"; if(st=="FAIL")bad++;
           printf "%-3d %-14.6e %-14.6e %-8.4f %s\n",i,rmse,pk,pct,st }
         if(bad>0){printf "%s %d/14 compartments exceed threshold\n",FAILM,bad; exit 1}
@@ -841,7 +842,7 @@ join -t"$(printf '\t')" -1 1 -2 1 \
   <(awk -F= '/^VMATRIX\|t=/{t=$2} /^VMATRIX\|rel=/{print t"\t"$2}' "$VFX_SIO_LOG"  | sort) \
   <(awk -F= '/^VMATRIX\|t=/{t=$2} /^VMATRIX\|rel=/{print t"\t"$2}' "$VFX_NODE_LOG" | sort) \
   | awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" "$VFX_AWK_FIN"'
-      {a=fin($2); b=fin($3); d=a-b; SS+=d*d; NN++; if(a>PK)PK=a; if(b>PK)PK=b}
+      {a=fin($2); b=fin($3); d=a-b; SS+=d*d; NN++; aa=(a<0)?-a:a; ab=(b<0)?-b:b; if(aa>PK)PK=aa; if(ab>PK)PK=ab}
       END{ if(nonfin>0){printf "VENLAFAXINE_MATRIX_RELEASE_PARITY_FAIL %d non-finite value(s)\n",nonfin; exit 1}
         if(NN!=12){printf "VENLAFAXINE_MATRIX_RELEASE_PARITY_FAIL %d/12 rows\n",NN; exit 1}
         rmse=sqrt(SS/NN); pct=(PK>0)?100*rmse/PK:0;
@@ -862,7 +863,7 @@ for VFX_KEY in nm auc; do
     <(vfx_scalar "VRATIO|$VFX_KEY" "VRATIO|t" "$VFX_SIO_LOG"  | sort) \
     <(vfx_scalar "VRATIO|$VFX_KEY" "VRATIO|t" "$VFX_NODE_LOG" | sort) \
     | awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" -v KEY="$VFX_KEY" "$VFX_AWK_FIN"'
-        {a=fin($2); b=fin($3); d=a-b; SS+=d*d; NN++; if(a>PK)PK=a; if(b>PK)PK=b}
+        {a=fin($2); b=fin($3); d=a-b; SS+=d*d; NN++; aa=(a<0)?-a:a; ab=(b<0)?-b:b; if(aa>PK)PK=aa; if(ab>PK)PK=ab}
         END{ if(nonfin>0){printf "VENLAFAXINE_RATIO_PARITY_FAIL %s: %d non-finite value(s)\n",KEY,nonfin; exit 1}
           if(NN!=12){printf "VENLAFAXINE_RATIO_PARITY_FAIL %s: %d/12 rows\n",KEY,NN; exit 1}
           rmse=sqrt(SS/NN); pct=(PK>0)?100*rmse/PK:0;
