@@ -69,6 +69,12 @@ struct SpecGfNode {
     tp_h2: i64,
     tp_h3: i64,
     fd: Option<Box<FnDef>>,
+    // Copilot review (PR #2515), private-access follow-up: the template
+    // item's own visibility, so a monomorphized instance can inherit it
+    // instead of spec_make_fn_item hardcoding visibility_private() for
+    // every clone regardless of the template being `pub`. See
+    // spec_make_fn_item's own comment.
+    visibility: Visibility,
 }
 
 // Generic STRUCT template node (StructDef carries real type_params, so no
@@ -81,6 +87,9 @@ struct SpecStNode {
     tp_h2: i64,
     tp_h3: i64,
     sd: Option<Box<StructDef>>,
+    // Same reason as SpecGfNode's own field -- see spec_make_struct_item's
+    // own comment.
+    visibility: Visibility,
 }
 
 // Substitution context: the ACTIVE type-param set during one clone's
@@ -223,6 +232,8 @@ pub fn spec_report_cap_overflow() -> bool with IO {
         print("a compilation unit supports at most 256 generic structs")
     } else if SPEC_CAP_OVERFLOW_CODE == 4 {
         print("a compilation unit supports at most 64 emitted generic struct specializations")
+    } else if SPEC_CAP_OVERFLOW_CODE == 7 {
+        print("at most 1024 distinct lowercase `use` module segments (SPEC_USE_MODULE_HASH)")
     } else {
         print("an internal fixed-capacity specializer table was exhausted")
     }
@@ -256,6 +267,481 @@ fn spec_name_to_string(name: Name) -> string with Mut, Panic, Div {
 fn spec_path_single_name(path: AstPath) -> Name {
     if path.seg_count != 1 { return empty_name() }
     Name { buf: path.segments.head_buf, len: path.segments.head_len }
+}
+
+fn spec_string_list_last_name(sl: StringList) -> Name with Mut, Panic, Div {
+    match sl.tail {
+        Some(rest) => spec_string_list_last_name(*rest),
+        None => Name { buf: sl.head_buf, len: sl.head_len },
+    }
+}
+
+// Segment k of a path, by recursion (mirrors lower.sio's lower_string_list_nth_name).
+fn spec_string_list_nth_name(sl: StringList, k: i64) -> Name with Mut, Panic, Div {
+    if k <= 0 {
+        return Name { buf: sl.head_buf, len: sl.head_len }
+    }
+    match sl.tail {
+        Some(rest) => spec_string_list_nth_name(*rest, k - 1),
+        None => empty_name(),
+    }
+}
+
+// ============================================================
+// Known `use`-declared module segments (review comment 4089110697 /
+// finding B): spec_call_expr_callee_name below used to treat ANY
+// lowercase-first-byte multi-segment path root as "must be a module",
+// purely off capitalization. That is unsound both ways: a lowercase STRUCT
+// name is legal Sounio (`struct helper_`, see
+// tests/multimodule/private_fn_identity/reserved/pfi_res_b.sio), so
+// `helper_::method(..)` could be misread as a qualified free-fn call when
+// it is really `Type::method` on a lowercase-named struct; and a bogus,
+// never-`use`d lowercase qualifier still passed, so `bogus::real_fn(..)`
+// got silently rewritten to the bare monomorphized symbol with the invalid
+// namespace never checked. Populated once per specialize_generics() call
+// (this pass runs BEFORE type checking, so it cannot share check.sio's
+// checker-side registry, which is built later) by scanning `items` for
+// ItemUse, mirroring lower.sio's LOWER_USE_MODULE_HASH registry -- same
+// flat-scalar-buffer storage (NOT `[Name; N]`; see that registry's own
+// comment for the struct-array-global miscompile this works around).
+// Review comment 4091287518 (round 7, finding A): on the multi-module path
+// this registry used to combine `use` segments from EVERY loaded module
+// into one flat, unscoped set -- so a qualified generic call in module A
+// could borrow a qualifier only module B ever imported, and
+// spec_call_expr_callee_name would rewrite it to a valid bare
+// monomorphized symbol before the checker (which IS correctly per-module
+// scoped as of round 6) ever saw the original, invalid namespace. Fixed by
+// keying every entry with the registering module's id
+// (SPEC_USE_MODULE_MODULE_ID, parallel to HASH/LEN/BUF) and requiring an
+// exact match against SPEC_CURRENT_MODULE_ID at lookup -- see
+// specialize_generics_multi and SPEC_CURRENT_MODULE_ID's own comments for
+// how that id is threaded through the discovery scan.
+let SPEC_USE_MODULE_SEG_MAX: i64 = 384
+var SPEC_USE_MODULE_COUNT: i64 = 0
+var SPEC_USE_MODULE_HASH: [i64; 1024] = [0; 1024]
+var SPEC_USE_MODULE_LEN: [i64; 1024] = [0; 1024]
+var SPEC_USE_MODULE_MODULE_ID: [i64; 1024] = [0 - 1; 1024]
+var SPEC_USE_MODULE_BUF: [i8; 393216] = [0; 393216]
+
+// The module id spec_call_expr_callee_name's qualifier validation checks
+// registry entries against. -1 (the default) means "unscoped": every
+// single-module specialize_generics() call leaves this at -1, and entries
+// are always registered with module id 0 in that case (see
+// spec_use_module_note), so a single-module compile's own qualifier checks
+// still match correctly without needing any special-cased fallback path.
+// specialize_generics_multi sets this explicitly to the id of whichever
+// module is currently being scanned for instantiation sites, for the
+// duration of that module's own spec_scan_items call.
+var SPEC_CURRENT_MODULE_ID: i64 = 0 - 1
+
+fn spec_use_module_reset() with Mut {
+    SPEC_USE_MODULE_COUNT = 0
+    SPEC_CURRENT_MODULE_ID = 0 - 1
+}
+
+// Maps each top-level item's own name to the module it was declared in.
+// Populated by specialize_generics_multi's per-module loop (mirrors
+// SPEC_USE_MODULE_HASH's storage exactly), consulted by spec_finish_fn_item
+// to set SPEC_CURRENT_MODULE_ID correctly before rewriting THAT item's own
+// body -- fixing a gap SPEC_CURRENT_MODULE_ID's per-module SCAN scoping
+// (round 7) did not cover.
+//
+// The scan phase (spec_scan_items, correctly per-module scoped) only
+// DISCOVERS which generic templates need instantiating and votes on their
+// type args; it never rewrites call sites. The actual call-site REWRITE
+// happens later, in spec_finalize_items -> spec_finish_fn_item ->
+// spec_subst_block -> spec_rewrite_call_mut -> spec_call_expr_callee_name
+// (same qualifier-check code the scan phase uses) -- over the MERGED item
+// list, AFTER specialize_generics_multi has already reset
+// SPEC_CURRENT_MODULE_ID to -1. Every ordinary (non-generic) item goes
+// through this path too (spec_finalize_items's final branch calls
+// spec_finish_fn_item(it, it.name) for every ItemFn, generic or not), so
+// this was not a narrow "generic template body" edge case: EVERY call in
+// EVERY item was re-validated at rewrite time against module id -1's
+// fallback (module 0, i.e. whichever module happens to occupy `programs[0]`)
+// instead of the item's own declaring module. A module with no matching
+// `use` of its own could therefore have its illegitimate qualified call
+// legitimized by borrowing module 0's imports, exactly the class of bug
+// round 7 (finding A) fixed for the SCAN phase but left open here for the
+// REWRITE phase -- caught only once a regression test exercised it (a call
+// in an ordinary `fn main`, not inside a generic template).
+let SPEC_ITEM_MODULE_SEG_MAX: i64 = 384
+var SPEC_ITEM_MODULE_COUNT: i64 = 0
+// Round 13 (review comment 4103152059, verified the hard way): sized to
+// 4096 with just a hard-refuse on overflow broke this compiler's OWN
+// self-hosting build (self-hosted/compiler/main.sio typechecks 13000+
+// merged IR functions) -- the fixed-point gate immediately failed with
+// "item->module ownership registry overflowed" on a real, entirely valid
+// compilation. Copilot's own finding said as much: "even though this
+// compiler otherwise supports more than 4096 items".
+//
+// First correction sized this to IR_MAX_FUNCS (16384, ir/ir.sio) exactly --
+// still too small: scripts/ci/madaros_imported_capacity_gate.sh's own
+// boundary witness deliberately compiles a program at IR_MAX_FUNCS - 1
+// FUNCTIONS split across two modules, to test THAT gate's own diagnostic.
+// This registry counts every ItemFn/ItemStruct/ItemEnum/ItemUse/impl-method
+// (spec_item_module_collect), a STRICT SUPERSET of "functions" -- the same
+// witness's `use` declarations and any non-fn items push its real item count
+// past IR_MAX_FUNCS even though its FUNCTION count alone stays under it, so
+// sizing to IR_MAX_FUNCS exactly still overflowed on CI (the fixed-point
+// gate passed locally because this compiler's OWN source has comparatively
+// few non-fn items relative to its fn count; the imported-capacity gate's
+// synthetic witness does not). Doubled to give real headroom for the
+// non-function items IR_MAX_FUNCS's own ceiling was never counting.
+var SPEC_ITEM_MODULE_HASH: [i64; 32768] = [0; 32768]
+var SPEC_ITEM_MODULE_LEN: [i64; 32768] = [0; 32768]
+var SPEC_ITEM_MODULE_ID: [i64; 32768] = [0 - 1; 32768]
+var SPEC_ITEM_MODULE_BUF: [i8; 12582912] = [0; 12582912]
+// Round 13 (review comment 4103152059): exhausting this table used to just
+// silently drop new entries while spec_item_module_populated() stayed true
+// (COUNT > 0 from the entries that DID fit) -- so every item past the cap
+// was assigned SPEC_ITEM_MODULE_NOT_FOUND during rewrite/check/lowering, and
+// its own body lost access to its own module's imports, even though this
+// compiler otherwise supports far more than 4096 items (IR_MAX_FUNCS is
+// 16384). Round 12's fail-closed fix (comment 4100990400) made this SAFE
+// (no longer exploitable), but a large, entirely valid compilation could
+// still have its own legitimate qualified calls silently break past this
+// cap. Refuse loudly instead, folded into the same
+// lower_hard_error_pending()/lower_had_error_with_hard() mechanism (ir/lower.sio)
+// and compiler_visibility_preflight's check-only verdict (compiler/main.sio,
+// round 12 comment 4100990481's own fix) every sibling registry's overflow
+// already uses.
+var SPEC_ITEM_MODULE_OVERFLOWED: bool = false
+
+pub fn spec_item_module_overflowed() -> bool { SPEC_ITEM_MODULE_OVERFLOWED }
+
+fn spec_item_module_reset() with Mut {
+    SPEC_ITEM_MODULE_COUNT = 0
+    SPEC_ITEM_MODULE_OVERFLOWED = false
+}
+
+pub fn spec_item_module_populated() -> bool with Mut {
+    SPEC_ITEM_MODULE_COUNT > 0
+}
+
+// pub: also consulted by check::mod's check_items_verdict_boot4_with_module_map
+// (see its own comment) to attribute a top-level item to its declaring module
+// when checking the WP-A3 specialized-merged item list, where
+// Checker.current_module_id would otherwise never leave its init value of 0
+// -- this table is already populated by specialize_generics_multi, which
+// always runs immediately before that verdict function in run_check_mode.
+//
+// Round 12 (review comment 4100990400): "not found" used to return -1 -- the
+// SAME value SPEC_CURRENT_MODULE_ID/LOWER_CURRENT_MODULE_ID default to for a
+// genuinely single-module compile, which spec_path_qualifier_all_modules_known
+// and lower_effective_current_module_id() both treat as "assume module 0"
+// (a deliberate convenience so a single-module compile needs no special
+// casing). Assigning a lookup MISS straight into those globals therefore did
+// NOT fail closed as intended (round 10 findings 2/3/4/7): it silently fell
+// back to module 0's own registrations, letting an unmapped item (a capacity
+// miss, or a synthesized instance symbol) borrow module 0's imports during
+// rewriting/lowering instead of correctly matching nothing. Return
+// SPEC_ITEM_MODULE_NOT_FOUND (-2) instead, a value distinct from the -1
+// "unset, assume module 0" convention, so callers assigning this result
+// directly into SPEC_CURRENT_MODULE_ID/LOWER_CURRENT_MODULE_ID correctly
+// fail closed -- see those two fallback functions' own comments for the
+// matching exact-(-1)-only fix.
+let SPEC_ITEM_MODULE_NOT_FOUND: i64 = 0 - 2
+
+pub fn spec_item_module_lookup(n: Name) -> i64 with Mut, Panic, Div {
+    if n.len <= 0 || n.len > SPEC_ITEM_MODULE_SEG_MAX {
+        return SPEC_ITEM_MODULE_NOT_FOUND
+    }
+    let h = ast_name_hash(n)
+    var i: i64 = 0
+    while i < SPEC_ITEM_MODULE_COUNT {
+        if SPEC_ITEM_MODULE_HASH[i as usize] == h && SPEC_ITEM_MODULE_LEN[i as usize] == n.len {
+            let base = i * SPEC_ITEM_MODULE_SEG_MAX
+            var eq = true
+            var j: i64 = 0
+            while j < n.len {
+                if SPEC_ITEM_MODULE_BUF[(base + j) as usize] != n.buf[j as usize] {
+                    eq = false
+                }
+                j = j + 1
+            }
+            if eq {
+                return SPEC_ITEM_MODULE_ID[i as usize]
+            }
+        }
+        i = i + 1
+    }
+    SPEC_ITEM_MODULE_NOT_FOUND
+}
+
+// Round 10 (review comment 4099549051) tried marking a text collision
+// AMBIGUOUS (a sentinel treated as "owner unknown, fail closed" everywhere)
+// instead of silently keeping the first module's id. Round 11 (review
+// comment 4100285057) found that fix itself unsound for the OVERWHELMINGLY
+// common case: the SAME `use` path (e.g. `use parser::ast::*;`) legitimately
+// appears in MANY modules in any real codebase (this compiler's own source
+// among them), and a same-named PRIVATE fn/impl-method in two unrelated
+// modules is equally ordinary Sounio -- neither is a rare edge case, so
+// marking EVERY such pair ambiguous zeroed out BOTH modules' own item
+// attribution for what is routine, correct code, not just the occasional
+// genuine collision.
+//
+// This registry is keyed by TEXT alone (see its own top-level comment) and
+// cannot hold true per-occurrence provenance without a deeper redesign (e.g.
+// stamping a module id onto Item itself at load time, before merging) that
+// is out of scope here. Between the two available text-keyed approximations,
+// "keep the first match" strictly dominates "mark ambiguous": at least the
+// FIRST module to declare a given text still gets correctly attributed,
+// where "ambiguous" guarantees NEITHER colliding module does. A LATER module
+// sharing that same text still silently inherits the first's id when this
+// registry is looked up for one of ITS OWN items during the per-item walk
+// (check/mod.sio's check_items_verdict_boot4_with_module_map,
+// lowerer_lower_program_bodies_mut, spec_finish_fn_item) -- a known,
+// accepted imprecision of this text-keyed approximation, not something this
+// round claims to fully close.
+fn spec_item_module_note(module_id: i64, n: Name) with Mut, Panic, Div {
+    if n.len <= 0 || n.len > SPEC_ITEM_MODULE_SEG_MAX {
+        return
+    }
+    if spec_item_module_lookup(n) >= 0 {
+        return
+    }
+    if SPEC_ITEM_MODULE_COUNT >= 32768 {
+        SPEC_ITEM_MODULE_OVERFLOWED = true
+        return
+    }
+    let idx = SPEC_ITEM_MODULE_COUNT
+    SPEC_ITEM_MODULE_HASH[idx as usize] = ast_name_hash(n)
+    let base = idx * SPEC_ITEM_MODULE_SEG_MAX
+    var ci: i64 = 0
+    while ci < n.len {
+        SPEC_ITEM_MODULE_BUF[(base + ci) as usize] = n.buf[ci as usize]
+        ci = ci + 1
+    }
+    SPEC_ITEM_MODULE_LEN[idx as usize] = n.len
+    SPEC_ITEM_MODULE_ID[idx as usize] = module_id
+    SPEC_ITEM_MODULE_COUNT = idx + 1
+}
+
+// Round 9 (review comment 4098353536): a name-only registry cannot recover
+// module ownership for every item kind check_items_verdict_boot4_with_module_map
+// (check/mod.sio) walks. `ItemUse` has NO name at all (empty), so it fell
+// through to "leave current_module_id at whatever the PRECEDING item set it
+// to" -- meaning a dependency module's own leading `use` declarations got
+// registered under whichever OTHER module happened to be checked right
+// before them, defeating the per-module qualifier check the whole point of
+// that function is to provide. `ItemStruct`/`ItemEnum` were ALSO uncovered
+// (this function only ever recorded ItemFn / impl-method names). Fixed by
+// registering every named kind AND, for `ItemUse` specifically (which has no
+// name to key on), the item's own full joined `use` path text via
+// spec_item_module_note_by_path -- consistent with the lookup site in
+// check/mod.sio, which now checks `it.kind == ItemUse` and looks up the same
+// joined text instead of `it.name` for that one kind.
+//
+// Residual scope, same class as the documented "generic template body" gap:
+// a MONOMORPHIZED generic struct instance (e.g. `GBig__i64`, synthesized
+// during specialization) has no entry here (it never existed in the
+// PRE-specialization `programs[]` this collector walks), so its lookup falls
+// back to the preceding item's module -- not a regression, since that is
+// exactly today's behaviour for every item kind before this fix.
+fn spec_item_module_collect(items: Option<Box<ItemList>>, module_id: i64) with Mut, Panic, Div {
+    match items {
+        None => {}
+        Some(list) => {
+            let it = (*list).head
+            if it.kind == ItemKind::ItemFn || it.kind == ItemKind::ItemStruct || it.kind == ItemKind::ItemEnum {
+                spec_item_module_note(module_id, it.name)
+            } else if it.kind == ItemKind::ItemUse {
+                spec_item_module_note(module_id, ast_path_range_name(it.use_path, 0, it.use_path.seg_count - 1))
+            } else if it.kind == ItemKind::ItemImpl {
+                match it.impl_def {
+                    Some(id) => {
+                        var m = (*id).methods
+                        while true {
+                            match m {
+                                Some(ml) => {
+                                    spec_item_module_note(module_id, (*ml).head.name)
+                                    m = (*ml).tail
+                                }
+                                None => break
+                            }
+                        }
+                    }
+                    None => {}
+                }
+            }
+            spec_item_module_collect((*list).tail, module_id)
+        }
+    }
+}
+
+// Round 5 (comment 4090734423) added SPEC_KNOWN_FN_HASH here -- a specializer-
+// local registry of top-level free-fn names, used only to disambiguate a
+// `use` path segment that could be either a module or a path-form named
+// import's terminal (see spec_use_modules_collect's comment), since this
+// pass runs before type checking and has no signature table like check.sio's
+// to query instead. Round 6 found two problems with it: comment 4090966230
+// (finding B) -- its overflow silently dropped entries instead of refusing,
+// reopening the exact namespace-erasure bug it exists to prevent; and
+// comment 4090966282 (finding C, on lower.sio's identical heuristic, which
+// applies equally here) -- "does this name ALSO resolve as some unrelated
+// top-level function" is unsound the other way too: a genuine module whose
+// name happens to coincide with an unrelated function elsewhere in the
+// program was wrongly excluded. Both are fixed by deleting SPEC_KNOWN_FN_HASH
+// entirely and using parser::ast's lower_named_item_terminal_known instead
+// (see its own comment there): an AUTHORITATIVE registry, populated from
+// module_frontend.sio's real file-resolution outcome for this exact
+// question, not a name-collision guess -- so there is no overflow-prone
+// duplicate table to maintain here, and no false-positive exclusion risk.
+
+fn spec_use_module_known(module_id: i64, n: Name) -> bool with Mut, Panic, Div {
+    if n.len <= 0 || n.len > SPEC_USE_MODULE_SEG_MAX {
+        return false
+    }
+    let h = ast_name_hash(n)
+    var i: i64 = 0
+    while i < SPEC_USE_MODULE_COUNT {
+        if SPEC_USE_MODULE_MODULE_ID[i as usize] == module_id && SPEC_USE_MODULE_HASH[i as usize] == h && SPEC_USE_MODULE_LEN[i as usize] == n.len {
+            let base = i * SPEC_USE_MODULE_SEG_MAX
+            var eq = true
+            var j: i64 = 0
+            while j < n.len {
+                if SPEC_USE_MODULE_BUF[(base + j) as usize] != n.buf[j as usize] {
+                    eq = false
+                }
+                j = j + 1
+            }
+            if eq {
+                return true
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn spec_use_module_note(module_id: i64, n: Name) with Mut, Panic, Div {
+    if n.len <= 0 || n.len > SPEC_USE_MODULE_SEG_MAX {
+        return
+    }
+    // Uppercase-first-byte segments are never modules (Type/Enum names);
+    // same positive-evidence convention as lower.sio's registry.
+    let c0 = (n.buf[0] as i64) & 255
+    if c0 >= 65 && c0 <= 90 {
+        return
+    }
+    if spec_use_module_known(module_id, n) {
+        return
+    }
+    if SPEC_USE_MODULE_COUNT >= 1024 {
+        // Review comment 4089532579 (round 3, finding A) asked check.sio's
+        // sibling registry and this one to stay consistent on overflow:
+        // refuse loudly via the existing spec_mark_cap_overflow/
+        // spec_report_cap_overflow mechanism (same one every other
+        // specializer table-capacity refusal in this file already uses)
+        // instead of silently dropping the entry, so a later real module's
+        // qualified generic calls cannot be silently left unspecialized
+        // without any diagnostic at all.
+        spec_mark_cap_overflow(7)
+        return
+    }
+    let idx = SPEC_USE_MODULE_COUNT
+    SPEC_USE_MODULE_MODULE_ID[idx as usize] = module_id
+    SPEC_USE_MODULE_HASH[idx as usize] = ast_name_hash(n)
+    let base = idx * SPEC_USE_MODULE_SEG_MAX
+    var ci: i64 = 0
+    while ci < n.len {
+        SPEC_USE_MODULE_BUF[(base + ci) as usize] = n.buf[ci as usize]
+        ci = ci + 1
+    }
+    SPEC_USE_MODULE_LEN[idx as usize] = n.len
+    SPEC_USE_MODULE_COUNT = idx + 1
+}
+
+// Records every SUFFIX of a `use` path (the full path, and every shorter
+// suffix ending at the same terminal -- e.g. for `use a::b::c;`: "a::b::c",
+// "b::c", "c") scoped to `module_id`, as a POSITIVE-EVIDENCE candidate
+// qualifier string. Suffixes, not individual segments (round 8, review
+// comment 4096338764, extended here from check.sio for the same bug):
+// recording each segment independently let spec_path_qualifier_all_modules_known
+// accept a qualifier recombined from two unrelated `use` paths that happen to
+// share a segment name (e.g. `math::tc_c` when only `math::dd64` and
+// `testmod::tc_c` were ever imported). Registering complete suffix TEXT still
+// supports both call forms a single `use a::b;` allows (`b::f()` via the "b"
+// suffix, `a::b::f()` via the "a::b" suffix) without accepting a mix of
+// segments from different imports.
+//
+// This cannot exclude a path-form NAMED import's terminal
+// (`use a::b::specific_fn;`) here by shape alone: the AST gives no way to
+// tell that apart from a genuine whole-module import (`use a::b;`), where the
+// last segment really is the module -- both are `use_glob=false,
+// use_items=None, seg_count>=2`, syntactically identical.
+//
+// Round 9 (review comment 4098353722, and the collision it reopened):
+// registering suffixes here regardless and relying SOLELY on
+// spec_path_qualifier_all_modules_known's separate
+// lower_named_item_terminal_known exclusion does not work for a call spelled
+// with just the BARE terminal, because that registry is keyed by the FULL
+// `use` path text, not the bare form a short call actually asks for -- and
+// registering the bare terminal there too was tried and reverted: it
+// collided with an UNRELATED module elsewhere in the compilation whose own
+// bare-terminal qualifier happens to share the same text (round 7's own
+// uses_named_tc_c.sio/uses_real_tc_c_module.sio fixture exists specifically
+// to catch this). Fixed at the SOURCE instead: skip suffix registration for
+// this `use` path ENTIRELY when lower_named_item_terminal_known already
+// confirms the full path is a named item, not a module -- it was never a
+// legitimate module-qualifier candidate in the first place, so not
+// registering any of its suffixes here removes the false module-shaped entry
+// instead of trying to filter it back out later.
+fn spec_use_modules_collect(items: Option<Box<ItemList>>, module_id: i64) with Mut, Panic, Div {
+    match items {
+        None => {}
+        Some(list) => {
+            let it = (*list).head
+            if it.kind == ItemKind::ItemUse {
+                if !lower_named_item_terminal_known(ast_path_range_name(it.use_path, 0, it.use_path.seg_count - 1)) {
+                    var s: i64 = 0
+                    while s < it.use_path.seg_count {
+                        spec_use_module_note(module_id, ast_path_range_name(it.use_path, s, it.use_path.seg_count - 1))
+                        s = s + 1
+                    }
+                }
+            }
+            spec_use_modules_collect((*list).tail, module_id)
+        }
+    }
+}
+
+// The COMPLETE qualifier (every segment of `path` except the last, joined as
+// one string) must exactly match a known `use`-declared suffix path OF THE
+// MODULE CURRENTLY BEING SCANNED (SPEC_CURRENT_MODULE_ID -- round 7 finding
+// A; -1/unscoped means single-module, module id 0), and no accumulated prefix
+// of it may be authoritatively known to be a named item's terminal (see
+// lower_named_item_terminal_known's comment in parser/ast.sio), for `path` to
+// be treated as a qualified free-fn call. Empty (a bare identifier) or
+// single-segment paths have no qualifier to check.
+//
+// Round 8 (comment 4096338764): this used to check each qualifier segment
+// INDEPENDENTLY against the per-module registry, so a module with both
+// `use math::dd64;` and `use testmod::tc_c;` accepted the bogus recombined
+// qualifier `math::tc_c`. The registry now stores complete suffix TEXT (see
+// spec_use_modules_collect's own comment), so this checks the qualifier as
+// ONE joined string against ONE registered suffix, which cannot be satisfied
+// by mixing segments from two unrelated imports.
+fn spec_path_qualifier_all_modules_known(path: AstPath) -> bool with Mut, Panic, Div {
+    if path.seg_count < 2 {
+        return false
+    }
+    // Round 12 (review comment 4100990400): exact match on -1 (the genuine
+    // "unset, single-module compile" default), not "any negative value" --
+    // spec_item_module_lookup's "not found" result is a DIFFERENT sentinel
+    // (SPEC_ITEM_MODULE_NOT_FOUND, -2) precisely so a fail-closed assignment
+    // from that lookup does not get reinterpreted as "assume module 0" here.
+    let module_id = if SPEC_CURRENT_MODULE_ID == 0 - 1 { 0 } else { SPEC_CURRENT_MODULE_ID }
+    var k: i64 = 0
+    while k < path.seg_count - 1 {
+        if lower_named_item_terminal_known(ast_path_prefix_name(path, k)) {
+            return false
+        }
+        k = k + 1
+    }
+    let qualifier = ast_path_range_name(path, 0, path.seg_count - 2)
+    spec_use_module_known(module_id, qualifier)
 }
 
 // ============================================================
@@ -411,6 +897,12 @@ fn spec_generic_table_fd(slot: i64) -> Option<Box<FnDef>> with Mut, Panic, Div {
     (*p).fd
 }
 
+fn spec_generic_table_visibility(slot: i64) -> Visibility with Mut, Panic, Div {
+    if slot < 0 || slot >= SPEC_GF_COUNT { return visibility_private() }
+    let p = SPEC_GF_PTRS[slot as usize] as *mut SpecGfNode
+    (*p).visibility
+}
+
 fn spec_tp_hash_at(buf: SpecNameBuf, i: i64) -> i64 with Mut, Panic, Div {
     if i < buf.count && i < 4 {
         return ast_name_hash(buf.names[i as usize])
@@ -493,6 +985,12 @@ fn spec_struct_table_sd(slot: i64) -> Option<Box<StructDef>> with Mut, Panic, Di
     (*p).sd
 }
 
+fn spec_struct_table_visibility(slot: i64) -> Visibility with Mut, Panic, Div {
+    if slot < 0 || slot >= SPEC_ST_COUNT { return visibility_private() }
+    let p = SPEC_ST_PTRS[slot as usize] as *mut SpecStNode
+    (*p).visibility
+}
+
 fn spec_struct_tp_count_of(opt: Option<Box<TypeParamDefList>>) -> i64 with Mut, Panic, Div {
     match opt {
         None => 0
@@ -537,6 +1035,7 @@ fn spec_collect_generic_structs(items: Option<Box<ItemList>>) with Mut, Panic, D
                                 (*p).tp_h2 = spec_struct_tp_hash_of((*sd_box).type_params, 2)
                                 (*p).tp_h3 = spec_struct_tp_hash_of((*sd_box).type_params, 3)
                                 (*p).sd = it.struct_def
+                                (*p).visibility = it.visibility
                                 SPEC_ST_PTRS[slot as usize] = p as i64
                                 SPEC_ST_COUNT = SPEC_ST_COUNT + 1
                             }
@@ -572,6 +1071,7 @@ fn spec_collect_generic_fns(items: Option<Box<ItemList>>, known: SpecKnownNames)
                                 (*p).tp_h2 = spec_tp_hash_at(tp, 2)
                                 (*p).tp_h3 = spec_tp_hash_at(tp, 3)
                                 (*p).fd = it.fn_def
+                                (*p).visibility = it.visibility
                                 SPEC_GF_PTRS[slot as usize] = p as i64
                                 SPEC_GF_NEEDED[slot as usize] = false
                                 SPEC_GF_COUNT = SPEC_GF_COUNT + 1
@@ -622,6 +1122,7 @@ fn spec_collect_generic_method_items(methods: Option<Box<ItemList>>, known: Spec
                                 (*p).tp_h2 = spec_tp_hash_at(tp, 2)
                                 (*p).tp_h3 = spec_tp_hash_at(tp, 3)
                                 (*p).fd = it.fn_def
+                                (*p).visibility = it.visibility
                                 SPEC_GF_PTRS[slot as usize] = p as i64
                                 SPEC_GF_IS_METHOD[slot as usize] = true
                                 SPEC_GF_NEEDED[slot as usize] = false
@@ -1233,9 +1734,21 @@ fn spec_subst_field_list_opt(opt: Option<Box<FieldDefList>>, ctx: i64, targs: Op
     }
 }
 
-fn spec_make_struct_item(name: Name, sd: StructDef) -> Item with Mut, Panic, Div, Alloc {
+// `visibility` comes from the ORIGINAL template item (SpecStNode.visibility,
+// set when the template was first collected) -- not hardcoded here anymore.
+// Copilot review (PR #2515), private-access follow-up: this used to always
+// stamp visibility_private() on every monomorphized struct instance, so a
+// `pub struct S<F> { ... }`'s clone `S__i64` silently became PRIVATE
+// regardless of the template's own visibility -- invisible under the
+// OLD path-based visibility fallback (which granted access anyway via
+// ast_path_eq(empty, empty) on the specialized checking path), but a
+// real correctness bug once that fallback was tightened to deny on a
+// genuine module-id mismatch: a caller in a DIFFERENT module reading a
+// pub generic struct's own pub-ness through its monomorphized clone would
+// incorrectly get E176/E259 for a type it was always allowed to use.
+fn spec_make_struct_item(name: Name, sd: StructDef, visibility: Visibility) -> Item with Mut, Panic, Div, Alloc {
     Item {
-        kind: ItemKind::ItemStruct, span: sd.span, visibility: visibility_private(), name: name, fn_def: None,
+        kind: ItemKind::ItemStruct, span: sd.span, visibility: visibility, name: name, fn_def: None,
         struct_def: Some(Box::new(sd)), enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None,
         acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None,
         transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None,
@@ -1279,7 +1792,28 @@ fn spec_get_or_create_struct_instance(st_idx: i64, base: Name, targs: Option<Box
             (*sp).sd.type_params = None
             let st_ctx = spec_ctx_from_struct_slot(st_idx)
             (*sp).sd.fields = spec_subst_field_list_opt((*sp).sd.fields, st_ctx, targs)
-            spec_extra_push_item(spec_make_struct_item((*sp).sd.name, (*sp).sd))
+            spec_extra_push_item(spec_make_struct_item((*sp).sd.name, (*sp).sd, spec_struct_table_visibility(st_idx)))
+            // Copilot review (PR #2515): mirrors spec_finish_fn_item's own
+            // registration for synthesized FUNCTION symbols (see its own
+            // comment, round 12 review comment 4106485514) -- without this,
+            // the mangled struct symbol (`mangled`, e.g. "GBig__i64") is
+            // never noted under any module, so a later per-item walk
+            // (check_mod_item_module_owner in check/mod.sio) looks it up,
+            // gets SPEC_ITEM_MODULE_NOT_FOUND, and checker_struct_visible_inplace
+            // falls back to comparing two empty AstPaths on the specialized
+            // checking path -- silently granting cross-module access to a
+            // PRIVATE generic struct's clone regardless of which module
+            // actually declared the template. `base` (the template's own,
+            // unmangled name) is already registered by spec_item_module_collect
+            // when the template itself was first collected, so look ITS
+            // owner up and note the newly emitted `mangled` name under the
+            // SAME module -- a no-op when the owner is unresolved
+            // (spec_item_module_note skips n.len<=0 and already-known names
+            // on its own).
+            let owner = spec_item_module_lookup(base)
+            if owner >= 0 {
+                spec_item_module_note(owner, mangled)
+            }
         }
     }
     mangled
@@ -1309,9 +1843,22 @@ fn spec_emitted_push(n: Name) -> bool with Mut, Panic, Div {
     false
 }
 
-fn spec_make_fn_item(name: Name, fd: FnDef) -> Item with Mut, Panic, Div, Alloc {
+// `visibility` comes from the ORIGINAL template item (SpecGfNode.visibility,
+// set when the template was first collected) -- not hardcoded here anymore.
+// Copilot review (PR #2515), private-access follow-up: this used to always
+// stamp visibility_private() on every monomorphized function instance, so
+// a `pub fn f<T>(...)`'s clone `__sp_f...` silently became PRIVATE
+// regardless of the template's own visibility. That was invisible under
+// the OLD path-based visibility fallback (which granted access anyway via
+// ast_path_eq(empty, empty) on the specialized checking path), but became
+// a real correctness bug once that fallback was tightened to deny on a
+// genuine module-id mismatch: calling a pub generic function through its
+// monomorphized clone from a DIFFERENT module produced a spurious E175 --
+// exactly what broke tests/run-pass/madaros_module_qualified_generic_call.sio
+// (testmod::gen_big::gbig_basis::<i64>(..), a pub fn, read back as private).
+fn spec_make_fn_item(name: Name, fd: FnDef, visibility: Visibility) -> Item with Mut, Panic, Div, Alloc {
     Item {
-        kind: ItemKind::ItemFn, span: fd.span, visibility: visibility_private(), name: name, fn_def: Some(Box::new(fd)),
+        kind: ItemKind::ItemFn, span: fd.span, visibility: visibility, name: name, fn_def: Some(Box::new(fd)),
         struct_def: None, enum_def: None, impl_def: None, type_alias_ty: None, policy_def: None,
         acquisition_policy_def: None, recourse_policy_def: None, decision_policy_def: None, deferral_policy_def: None,
         transition_policy_def: None, transition_protocol_def: None, monitoring_policy_def: None, alternative_policy_def: None,
@@ -1369,9 +1916,32 @@ fn spec_ensure_instance(base_name: Name, targs: Option<Box<TypeExprList>>) with 
             (*fp).fd.params = spec_subst_param_list_opt((*fp).fd.params, fn_ctx, targs)
             (*fp).fd.return_type = spec_subst_type_opt((*fp).fd.return_type, fn_ctx, targs)
             (*fp).fd.body = spec_subst_block((*fp).fd.body, fn_ctx, targs)
+            // Round 10 (review comment 4099549090, closing the residual gap
+            // specialize_generics_multi's own comment already documented):
+            // this clone's body can itself contain qualified calls, and
+            // scanning it here can trigger a NESTED instantiation -- but
+            // SPEC_CURRENT_MODULE_ID at this point is whatever the CALLING
+            // module's own spec_scan_items iteration left it as, not this
+            // TEMPLATE's own declaring module. A qualified call written
+            // inside the template's source should be validated against the
+            // module that WROTE the template, not whichever module happened
+            // to be the first (or a later) caller to instantiate it -- one
+            // module's cross-module instantiation of another module's
+            // generic must not borrow the caller's own qualifier evidence
+            // for calls the template author wrote, and a legitimate
+            // template-local qualifier must not fail just because some
+            // OTHER, unrelated caller module does not share that import.
+            // Look the template's own module up via spec_item_module_lookup
+            // (base_name is the template's own name, registered by
+            // spec_item_module_collect regardless of genericity) for the
+            // duration of this one scan, then restore the caller's context
+            // so the OUTER scan continues under its own correct module.
+            let caller_module_id = SPEC_CURRENT_MODULE_ID
+            SPEC_CURRENT_MODULE_ID = spec_item_module_lookup(base_name)
             spec_scan_block((*fp).fd.body)
+            SPEC_CURRENT_MODULE_ID = caller_module_id
             let np = heap_alloc(16384) as *mut SpecItemNode
-            (*np).it = spec_make_fn_item((*fp).fd.name, (*fp).fd)
+            (*np).it = spec_make_fn_item((*fp).fd.name, (*fp).fd, spec_generic_table_visibility(gt_idx))
             (*np).next = 0
             (*ip).clone_ptr = np as i64
             SPEC_GF_CLONE_PTR[gt_idx as usize] = np as i64
@@ -1412,6 +1982,44 @@ fn spec_call_expr_callee_name(e: Expr) -> Name with Mut, Panic, Div {
                 c.name
             } else if c.kind == ExprKind::ExprPath && c.path.seg_count == 1 {
                 spec_path_single_name(c.path)
+            } else if c.kind == ExprKind::ExprPath && c.path.seg_count >= 2 && c.path.segments.head_len > 0 {
+                // `mod::f::<T>(..)` / `a::mod::f::<T>(..)`: the terminal
+                // segment is the free fn name to specialize, but ONLY when
+                // every segment before it is a real `use`-declared module
+                // (spec_path_qualifier_all_modules_known, populated by
+                // spec_use_modules_collect at the top of
+                // specialize_generics). Capitalization alone is NOT module
+                // evidence (review comment 4089110697 / finding B): a
+                // lowercase-named struct is legal Sounio
+                // (tests/multimodule/private_fn_identity/reserved/pfi_res_b.sio
+                // declares `struct helper_`), so a bare uppercase-byte test
+                // could misread `helper_::method(..)` as a qualified free-fn
+                // call when it is really `Type::method`; and an arbitrary
+                // bogus lowercase qualifier that was never `use`d could get
+                // silently rewritten to a bare monomorphized symbol by
+                // spec_rewrite_call_mut, with the invalid namespace never
+                // checked. When the qualifier does not resolve to real
+                // module data, return empty here (as for a genuine
+                // Type::method path) so spec_rewrite_call_mut leaves the
+                // full multi-segment path untouched and the checker gets a
+                // chance to reject it downstream instead of this pass
+                // silently accepting it.
+                // Copilot review (PR #2515), comment 4110379054: the same
+                // namespace-erasure gap as check.sio's checker_path_qualifier_
+                // all_modules_known call site (see its own comment) -- proving
+                // the qualifier is imported does not prove the GLOBAL generic
+                // table's same-named template actually belongs to that
+                // qualifier's target module. `tc_c::gbig_basis::<i64>` can
+                // rewrite to gen_big's specialization once both modules are
+                // loaded. Needs the same qualifier -> target-module-id
+                // resolution table check.sio's comment describes; left as the
+                // same accepted, out-of-scope gap rather than a rushed partial
+                // fix here.
+                if spec_path_qualifier_all_modules_known(c.path) {
+                    spec_string_list_last_name(c.path.segments)
+                } else {
+                    empty_name()
+                }
             } else {
                 empty_name()
             }
@@ -1612,6 +2220,54 @@ fn spec_extra_items_to_list() -> Option<Box<ItemList>> with Mut, Panic, Div, All
 
 fn spec_finish_fn_item(it: Item, symbol: Name) -> Item with Mut, Panic, Div, Alloc {
     if !SPEC_FN_MULTI { return it }
+    // This runs for EVERY ordinary (non-generic-template) item too, not
+    // only generic ones -- spec_finalize_items's final branch calls
+    // spec_finish_fn_item(it, it.name) unconditionally -- so it is exactly
+    // where a module-qualified call inside an ORDINARY function's body gets
+    // rewritten by spec_subst_block -> spec_rewrite_call_mut ->
+    // spec_call_expr_callee_name, over the MERGED item list, after
+    // specialize_generics_multi has already reset SPEC_CURRENT_MODULE_ID to
+    // -1. Restore the item's OWN declaring module (SPEC_ITEM_MODULE_HASH,
+    // populated per-module before this pass runs -- see its own comment)
+    // for the duration of its own substitution, so a qualified call here is
+    // validated against the module that actually wrote it, not whichever
+    // module happens to occupy `programs[0]`. An empty registry (the
+    // single-module specialize_generics() path, which never populates it)
+    // leaves SPEC_CURRENT_MODULE_ID untouched, matching that path's existing
+    // -1-means-module-0 convention.
+    //
+    // Round 11 (review comment 4100285088): guarding the assignment on
+    // `owner >= 0` left SPEC_CURRENT_MODULE_ID at whatever the PRECEDING
+    // item selected when THIS item's own owner could not be found (a
+    // synthesized instance symbol, a capacity miss, or now an ambiguous
+    // collision -- see spec_item_module_note's own comment) -- silently
+    // reinstating the exact "inherit stale traversal state" bug finding 2
+    // (comment 4099548914, check/mod.sio) already fixed for the checker's
+    // own per-item walk. Always assign: owner is -1 (never a real module id)
+    // when unmapped, so this item's own substitution correctly finds nothing
+    // in the per-module registries rather than borrowing the previous item's
+    // module.
+    if SPEC_ITEM_MODULE_COUNT > 0 {
+        SPEC_CURRENT_MODULE_ID = spec_item_module_lookup(it.name)
+        // Round 12 (review comment 4106485514): this restores the template's
+        // owner module ONLY for the duration of the substitution call just
+        // below -- the returned item is then renamed to `symbol` (a mangled
+        // `__sp_...` multi-instance name), but the registry above is still
+        // keyed by `it.name`, the ORIGINAL template name. A later per-item
+        // walk over the FINALIZED item list (check_items_verdict_boot4_with_module_map,
+        // lowerer_lower_program_bodies_mut) looks the clone up by its new
+        // `symbol` name, which was never registered, so it gets
+        // SPEC_ITEM_MODULE_NOT_FOUND and any module-qualified free call still
+        // in the clone's body fails qualifier lookup and lowers to a mangled
+        // stub -- for a clone that legitimately belongs to a real module.
+        // Register the emitted symbol under the SAME owner here so the later
+        // walk can find it under either name; a no-op when symbol == it.name
+        // or when the owner is unresolved (spec_item_module_note skips
+        // n.len<=0 and already-known names on its own).
+        if SPEC_CURRENT_MODULE_ID >= 0 {
+            spec_item_module_note(SPEC_CURRENT_MODULE_ID, symbol)
+        }
+    }
     match it.fn_def {
         None => it
         Some(fd) => {
@@ -1745,24 +2401,9 @@ fn spec_trace_out_items(items: Option<Box<ItemList>>) with IO, Mut, Panic, Div {
     }
 }
 
-pub fn specialize_generics(items: Option<Box<ItemList>>) -> Option<Box<ItemList>> with IO, Mut, Panic, Div, Alloc {
-    spec_reset_state()
-    let known = spec_collect_known_names(items, SpecKnownNames { names: [empty_name(); 32], count: 0 })
-    spec_collect_generic_fns(items, known)
-    spec_collect_generic_methods(items, known)
-    spec_collect_generic_structs(items)
-    if spec_trace_enabled() {
-        print("specializer: generic_fns=")
-        print_int(SPEC_GF_COUNT)
-        print("\n")
-    }
-    if SPEC_GF_COUNT == 0 {
-        return items
-    }
-    let roots = heap_alloc(4096) as *mut SpecItemsStage
-    (*roots).items = items
-    SPEC_SOURCE_ITEMS = roots as i64
-    spec_scan_items(items)
+// Shared tail of both specialize_generics and specialize_generics_multi,
+// after their own module-registration + discovery-scan setup has run.
+fn spec_finish_generics_after_scan(items: Option<Box<ItemList>>) -> Option<Box<ItemList>> with IO, Mut, Panic, Div, Alloc {
     var slot: i64 = 0
     while slot < SPEC_GF_COUNT {
         if SPEC_GF_INST_COUNT[slot as usize] > 1 && SPEC_GF_NEEDED[slot as usize] {
@@ -1779,6 +2420,112 @@ pub fn specialize_generics(items: Option<Box<ItemList>>) -> Option<Box<ItemList>
         spec_trace_out_items(out)
     }
     out
+}
+
+pub fn specialize_generics(items: Option<Box<ItemList>>) -> Option<Box<ItemList>> with IO, Mut, Panic, Div, Alloc {
+    spec_reset_state()
+    // Populated fresh every call, before anything below can read it (in
+    // particular spec_call_expr_callee_name, transitively via spec_scan_items
+    // and spec_finalize_items's rewrite pass) -- see spec_use_module_note's
+    // comment for why this pass needs its own registry rather than sharing
+    // check.sio's (specialize_generics runs before type checking). Single
+    // module here, so module id 0 throughout (matches
+    // spec_path_qualifier_all_modules_known's SPEC_CURRENT_MODULE_ID<0
+    // default). SPEC_ITEM_MODULE_* is reset (not populated -- single-module
+    // callers have nothing to disambiguate) so a stale multi-module registry
+    // from an earlier compile in this process cannot leak into this one; see
+    // spec_finish_fn_item's own comment for why an empty registry here is a
+    // deliberate no-op, not a gap.
+    spec_use_module_reset()
+    spec_item_module_reset()
+    spec_use_modules_collect(items, 0)
+    let known = spec_collect_known_names(items, SpecKnownNames { names: [empty_name(); 32], count: 0 })
+    spec_collect_generic_fns(items, known)
+    spec_collect_generic_methods(items, known)
+    spec_collect_generic_structs(items)
+    if spec_trace_enabled() {
+        print("specializer: generic_fns=")
+        print_int(SPEC_GF_COUNT)
+        print("\n")
+    }
+    if SPEC_GF_COUNT == 0 {
+        return items
+    }
+    let roots = heap_alloc(4096) as *mut SpecItemsStage
+    (*roots).items = items
+    SPEC_SOURCE_ITEMS = roots as i64
+    spec_scan_items(items)
+    spec_finish_generics_after_scan(items)
+}
+
+// Multi-module variant (review comment 4091287518, round 7 finding A): the
+// ordinary specialize_generics(items) above receives ONE merged item list
+// across every loaded module (module_frontend.sio's
+// module_frontend_merge_program_items), and its single
+// spec_use_modules_collect call folded every module's `use` segments into
+// ONE flat, unscoped set -- so a qualified generic call in module A could
+// borrow a qualifier only module B ever imported, and
+// spec_call_expr_callee_name would rewrite it to a valid bare monomorphized
+// symbol before the checker (correctly per-module scoped as of round 6)
+// ever saw the original, invalid namespace.
+//
+// This variant additionally takes the ORIGINAL, per-module `programs` array
+// and: (1) registers each module's own `use` segments under its own module
+// id (spec_use_modules_collect against `programs[i].items`, NOT the merged
+// list), and (2) runs the discovery scan (spec_scan_items) once per module
+// against `programs[i].items` too, with SPEC_CURRENT_MODULE_ID set to that
+// module's id for the duration -- discovery is read-only over source ASTs
+// (see spec_scan_items's own comment), so scanning each module separately,
+// in any order, is equivalent to one scan over their concatenation.
+// Template/struct COLLECTION (spec_collect_generic_fns et al.) and the
+// final rewrite (spec_finalize_items, via spec_finish_generics_after_scan)
+// still run over the MERGED `items`: neither involves qualifier validation
+// -- collection declares templates by name (global by design, not a
+// security boundary), and finalize only applies a rewrite already decided
+// during the scoped scan above -- so there is nothing to scope there.
+//
+// A module-qualified call written INSIDE a generic template's OWN body is
+// discovered when spec_ensure_instance clones and re-scans that body during
+// instantiation (spec_scan_block on the fresh clone) -- a different call path
+// than the per-module spec_scan_items loop below. Round 10 (review comment
+// 4099549090) closed this: spec_ensure_instance now temporarily sets
+// SPEC_CURRENT_MODULE_ID to the TEMPLATE's own declaring module (via
+// spec_item_module_lookup on the template's name) for the duration of that
+// one re-scan, instead of leaving whichever caller's context triggered the
+// instantiation, then restores it -- see spec_ensure_instance's own comment.
+pub fn specialize_generics_multi(items: Option<Box<ItemList>>, programs: &! [Program; 256], count: i64) -> Option<Box<ItemList>> with IO, Mut, Panic, Div, Alloc {
+    spec_reset_state()
+    spec_use_module_reset()
+    spec_item_module_reset()
+    var i: i64 = 0
+    while i < count {
+        spec_use_modules_collect((*programs)[i as usize].items, i)
+        spec_item_module_collect((*programs)[i as usize].items, i)
+        i = i + 1
+    }
+    let known = spec_collect_known_names(items, SpecKnownNames { names: [empty_name(); 32], count: 0 })
+    spec_collect_generic_fns(items, known)
+    spec_collect_generic_methods(items, known)
+    spec_collect_generic_structs(items)
+    if spec_trace_enabled() {
+        print("specializer: generic_fns=")
+        print_int(SPEC_GF_COUNT)
+        print("\n")
+    }
+    if SPEC_GF_COUNT == 0 {
+        return items
+    }
+    let roots = heap_alloc(4096) as *mut SpecItemsStage
+    (*roots).items = items
+    SPEC_SOURCE_ITEMS = roots as i64
+    i = 0
+    while i < count {
+        SPEC_CURRENT_MODULE_ID = i
+        spec_scan_items((*programs)[i as usize].items)
+        i = i + 1
+    }
+    SPEC_CURRENT_MODULE_ID = 0 - 1
+    spec_finish_generics_after_scan(items)
 }
 
 // ============================================================
@@ -1954,6 +2701,19 @@ fn spec_dce_scan_expr(e: Expr, marks: &! [i64; 16384], count: &! i64) with Mut, 
             let n = spec_path_single_name(e.path)
             if !name_is_empty(n) {
                 var _ins = spec_dce_hash_insert(marks, count, ast_name_hash(n))
+            }
+        } else if e.path.seg_count >= 2 && e.path.segments.head_len > 0 {
+            // `mod::f(..)` / `a::mod::f(..)`: keep the free fn `f` alive. The
+            // lowerer resolves module-qualified calls to the terminal name
+            // (lower.sio LOWER_USE_MODULE_HASH); unmarked, `f` was deleted here
+            // and the call became a body-less ud2 stub. Uppercase roots
+            // (Type::method, Enum::Variant) are left as they were.
+            let c0 = (e.path.segments.head_buf[0] as i64) & 255
+            if !(c0 >= 65 && c0 <= 90) {
+                let n = spec_string_list_last_name(e.path.segments)
+                if !name_is_empty(n) {
+                    var _ins = spec_dce_hash_insert(marks, count, ast_name_hash(n))
+                }
             }
         }
     }
