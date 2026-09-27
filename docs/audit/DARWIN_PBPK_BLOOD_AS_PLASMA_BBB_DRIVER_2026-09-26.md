@@ -38,7 +38,7 @@ are therefore off by the factor `rb_ratio`.
 |---|---|---|
 | `bbb/bbb_coupled.sio:112,136` | `c_plasma_prev`, `c_plasma_now` | `trace.plasma` |
 | `scenarios/oral_rapamycin_bbb.sio:103,135` (`oral_bbb_run`) | `c_prev`, `c_now` | `trace.plasma` |
-| `scenarios/steady_state_runner.sio:151,192` | `c_prev`, `c_now` | `trace.plasma` |
+| `scenarios/steady_state_runner.sio:160,201` | `c_prev`, `c_now` | `trace.plasma`; also the solver-step AUC accumulator `auc_p` (`:178`) behind `auc_plasma_u` (`:226`) |
 | `scenarios/des_sirolimus_bbb.sio:127,156` | `c_prev`, `c_now` | `trace.plasma` |
 | `scenarios/oral_haloperidol_bbb.sio:132,178,260` | `c_prev`, `c_now` | `trace.c_plasma` |
 
@@ -96,6 +96,12 @@ kinetics) and `rb_ratio` is a positive constant. Saturable transport,
 Michaelis–Menten efflux or nonlinear binding would break it. The exact
 common ×1.724 scaling in measurement 1 confirms linearity for this
 parameter regime, not in general.
+
+The steady-state runner's per-step AUC accumulator was added by PR #2698.
+It integrates the same whole-blood value, so the conversion must cover it
+too. Its code and its quadrature test now say so explicitly. That test
+compares two whole-blood integrals, and a constant `rb_ratio` rescaling
+leaves its relative error unchanged, so it stays valid after the fix.
 
 ## Measurements
 
