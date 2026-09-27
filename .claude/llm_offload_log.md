@@ -4311,3 +4311,33 @@ FAIL. Flagged for re-review once a provider is configured.
 _Timestamps of the four PBPK28 entries above corrected on 2026-09-26 to the
 commit times of 0eea0ba6, 829e0753, bdf495a8 and f4ae82c3; the first versions
 carried estimated, future-dated times (review of sounio-lang/sounio#2695)._
+
+## 2026-09-27T01:14Z — Claude (session_01RMzxzzsE5JNGEqnnkUs9Yo) — M1, PBPK28 clamp-free TR-BDF2 transport + per-drug restart
+
+| 2026-09-27 | xai kimi zai local | math-review | pbpk28_hepatic.sio TR-BDF2 section (stages, quadrature identity, fail-closed tol derivation); multidrug28.sio transport / coupling / restart-propagation header | WAIVED | `bin/llm-offload -t math-review -i <derivation>`: all four legs SKIPPED (no keys in this container). Verified by gates and controls, below. |
+
+**Trigger**: new hand-derived numerical-method identities on the dissertation
+PBPK path: (1) TR-BDF2 with γ = 2 − √2, stage 2 as a θ = 1 solve of
+c_g·x_γ − c_o·x_n with d = (1−γ)/(2−γ) = γ/2 (same matrix as stage 1);
+(2) the one-step identity x_{n+1} − x_n = dt·A·(w·x_n + w·x_γ + d·x_{n+1}) +
+dt·b, w = 1/(2(2−γ)), from c_g − c_o = 1 and c_g·γ + d = 1, hence exact mass
+and AUC bookkeeping with weights (w, w, d), and (0, 1/2, 1/2) for the
+backward-Euler restart; (3) the fail-closed tolerance
+tol = 1024·u·(1 + dt·λ_max) from an 80-flop chain × 3 cancelling groups ×
+(c_g + c_g + c_o) stage gain, rounded up; (4) second-order coupling from
+factors frozen at (f_n + f*)/2 across both stages; (5) the restart
+propagation rule (drug i restarts on j's event iff Ki_j,k > 0 and
+CLint_i,s,k > 0 for some k, s).
+
+**Outcome**: WAIVED. Evidence, both engines (Madaros committed ELF and
+lean_single): closed-system witness |M_n − M_0|/M_0 ≤ max(1e-12, n·1e-15) at
+every step, worst 0.51 of the bound, zero negative entries at any stage
+(CN + floor kernel: M(24 h)/M_0 = 1.21–1.77); identity residual ≤ 0.046 of
+its bound at dt 0.001–0.2 and on a two-drug coupled run; repeated oral dosing
+second order (grid ratios 3.22 → 3.62, trough 3.85 → 3.92); V5 coupling
+order unchanged in kind (PC vs iterated 3.31 → 3.74, Lie 2.09 → 2.03,
+self-convergence 3.67 → 3.82). Control for (3): TR-BDF2 without the restart
+after a bolus panics on the first step (γ-stage ≈ −0.085·C0 in the
+dispatch), so the check fires on real negativity. Control for (5): V6e
+fails with a global flag. Flagged for re-review once a provider is
+configured.
