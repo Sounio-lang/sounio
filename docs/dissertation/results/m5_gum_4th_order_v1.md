@@ -18,6 +18,8 @@ version: m5-v1
 date: 2026-05-14
 ---
 
+> **SUPERSEDED 2026-09-26: floor-biased PBPK28 numbers.** Every PBPK28 simulation number on this page was computed through `pbpk28_full_cn_step`, whose negativity floors injected mass into the 5 mg bolus: AUC_blood was +28% at dt = 0.05 h, +52% at 0.1 h and +140% at 0.5 h against the exact Dose/CL = 0.403226 mg·h/L. The same floors created parameter dependence that is not in the model, e.g. Kp sensitivities and Hessian entries. Conclusions drawn from these numbers may not hold. Regenerated results: [`m5_gum_4th_order_v2.md`](m5_gum_4th_order_v2.md). Audit: `docs/audit/PBPK28_CN_RANNACHER_MASS_BALANCE_2026-09-26.md`.
+
 # M5 GUM Fourth-Order Cumulant Budget - v1
 
 ## 4.14.1 Why second-order saturates

@@ -752,10 +752,17 @@ awk -F'\t' '
 #   10  parent PBPK28 (14 organs)          Node ↔ Sounio, cavg, <1% RMSE
 #   11  ODV PBPK28 (14 organs)             Node ↔ Sounio, cavg, <1% RMSE
 #   12  Korsmeyer-Peppas matrix release    Node ↔ Sounio  (biomaterial bridge, R8)
-#   13  ODV/parent total-mass ratio (NM)   Node ↔ Sounio  (PD-equivalent readout, R7)
+#   13  steady-state C_avg ODV/parent (NM) Node ↔ Sounio  (PD-equivalent readout, R7)
+#       blood AUC ratio over the 10th interval of 75 mg XR q24h, at dt = 0.5 and
+#       0.25 h; engines agree within the threshold AND each engine's closed-form
+#       steady state lies inside the error interval certified on its own run.
 #   +   mass conservation: parent+ODV ≤ F·released, release monotone non-decreasing
 # Numerical parity runs at the NM phenotype (R7); PM/IM/UM scaling is verified by
 # tests/run-pass/darwin_venlafaxine_xr_pgx_smoke.sio, not here (keeps the gate lean).
+# The Sounio side runs stdlib/darwin_pbpk/scenarios/venlafaxine_xr.sio itself
+# (model=stdlib_scenario, checked below); the Node side is the independent
+# reimplementation. The gate used to compare two self-contained copies, which
+# stayed green while the scenario changed underneath them.
 # ════════════════════════════════════════════════════════════════════════════
 echo
 echo "[pbpk28-parity] Cases 10-13: Sounio ↔ Node venlafaxine XR (parent + ODV + matrix + ratio)"
@@ -769,6 +776,8 @@ VFX_NODE_LOG="$OUT_DIR/vfx_node.txt"
   tail -n 20 "$VFX_SIO_LOG" >&2; exit 1; }
 if ! grep -q '^DISSERTATION_PBPK28_VENLAFAXINE_PARITY_DONE$' "$VFX_SIO_LOG"; then
   echo "[pbpk28-parity:case10] FAIL: Sounio venlafaxine ref did not emit DONE" >&2; exit 1; fi
+if ! grep -q '^model=stdlib_scenario$' "$VFX_SIO_LOG"; then
+  echo "[pbpk28-parity:case10] FAIL: Sounio venlafaxine ref does not run the stdlib scenario (model=stdlib_scenario missing)" >&2; exit 1; fi
 node "$VFX_NODE_RUNNER" > "$VFX_NODE_LOG" 2>&1 || {
   echo "[pbpk28-parity:case10] FAIL: Node venlafaxine runner returned non-zero" >&2
   tail -n 20 "$VFX_NODE_LOG" >&2; exit 1; }
@@ -827,16 +836,39 @@ join -t"$(printf '\t')" -1 1 -2 1 \
         else { printf "VENLAFAXINE_MATRIX_RELEASE_PARITY_FAIL %.4f%% RMSE\n",pct; exit 1 } }'
 
 echo
-echo "[pbpk28-parity:case13] venlafaxine ODV/parent total-mass ratio (NM)"
-join -t"$(printf '\t')" -1 1 -2 1 \
-  <(awk -F= '/^VRATIO\|t=/{t=$2} /^VRATIO\|nm=/{print t"\t"$2}' "$VFX_SIO_LOG"  | sort) \
-  <(awk -F= '/^VRATIO\|t=/{t=$2} /^VRATIO\|nm=/{print t"\t"$2}' "$VFX_NODE_LOG" | sort) \
+echo "[pbpk28-parity:case13] venlafaxine steady-state C_avg ODV/parent ratio (NM, 75 mg XR q24h)"
+# The ratio replaces the total-body mass ratio M_ODV/M_parent, which does not
+# converge under dt refinement once parent mass decays (the formation sink is now
+# implicit on both engines). Per dt: VSS|ratio and VSS|cf must agree between the
+# engines, and VSS|certified=1 on both (closed form inside the run's certified
+# [lo, hi]; the bound is measured on the run, not a chosen tolerance).
+# Every field is reset when a VSS|dt record starts and a missing one prints NA,
+# so a malformed record cannot reuse the previous dt's values (fails closed).
+vfx_ss_tsv() {  # $1=log → dt<TAB>ratio<TAB>cf<TAB>certified<TAB>rel_err_cf_e12<TAB>rel_halfwidth_e12
+  awk -F= '
+    function f(x) { return (x == "") ? "NA" : x }
+    /^VSS\|dt=/            { dt=$2; r=""; cf=""; re=""; hw=""; next }
+    /^VSS\|ratio=/         { r=$2; next }
+    /^VSS\|cf=/            { cf=$2; next }
+    /^VSS\|rel_err_cf_e12=/ { re=$2; next }
+    /^VSS\|rel_halfwidth_e12=/ { hw=$2; next }
+    /^VSS\|certified=/     { print f(dt)"\t"f(r)"\t"f(cf)"\t"f($2)"\t"f(re)"\t"f(hw); dt="" }
+  ' "$1" | sort
+}
+join -t"$(printf '\t')" -1 1 -2 1 <(vfx_ss_tsv "$VFX_SIO_LOG") <(vfx_ss_tsv "$VFX_NODE_LOG") \
   | awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" '
-      {d=($2+0)-($3+0); SS+=d*d; NN++; if(($2+0)>PK)PK=$2+0}
-      END{ if(NN==0){print "VENLAFAXINE_RATIO_PARITY_FAIL no rows"; exit 1}
-        rmse=sqrt(SS/NN); pct=(PK>0)?100*rmse/PK:0;
-        if(pct<THR+0) printf "VENLAFAXINE_RATIO_PARITY_PASS %d/%d samples within %s%% RMSE (NM ODV/parent, peak=%.4g)\n",NN,NN,THR,PK;
-        else { printf "VENLAFAXINE_RATIO_PARITY_FAIL %.4f%% RMSE\n",pct; exit 1 } }'
+      BEGIN{ printf "%-9s %-10s %-10s %-10s %-22s %-19s %s\n","dt","ratio_sio","ratio_node","cf","rel_err_cf(sio,x1e12)","rel_hw(sio,x1e12)","certified(sio,node)" }
+      { n++; seen[$1]=1;
+        for(i=1;i<=NF;i++) if($i=="NA"){bad++; printf "  FAIL: dt=%s record has a missing field (column %d)\n",$1,i; next}
+        dr=100*(($2+0)-($7+0))/($7+0); if(dr<0)dr=-dr;
+        dc=100*(($3+0)-($8+0))/($8+0); if(dc<0)dc=-dc;
+        printf "%-9s %-10s %-10s %-10s %-22s %-19s %s,%s\n",$1,$2,$7,$3,$5,$6,$4,$9;
+        if(dr>=THR+0 || dc>=THR+0){bad++; printf "  FAIL: dt=%s engines differ (ratio %.4f%%, cf %.4f%%)\n",$1,dr,dc}
+        if(($4+0)!=1 || ($9+0)!=1){bad++; printf "  FAIL: dt=%s closed form outside a certified interval\n",$1} }
+      END{ if(n!=2 || !(("0.500000") in seen) || !(("0.250000") in seen)){
+          printf "VENLAFAXINE_SS_RATIO_PARITY_FAIL expected dt rows 0.500000 and 0.250000 on both engines, got %d row(s)\n",n; exit 1}
+        if(bad>0){printf "VENLAFAXINE_SS_RATIO_PARITY_FAIL\n"; exit 1}
+        printf "VENLAFAXINE_SS_RATIO_PARITY_PASS %d/%d dt within %s%% and closed form certified on both engines\n",n,n,THR }'
 
 echo
 # Conservation: body burden (parent + ODV) can never exceed the drug the matrix
@@ -859,7 +891,63 @@ awk -F= '
 ' "$VFX_SIO_LOG"
 
 echo
-echo "[pbpk28-parity] venlafaxine XR canonical: parent + ODV + matrix + ratio all within ${RMSE_THRESHOLD_PCT}% RMSE (3rd canonical drug)"
+echo "[pbpk28-parity] venlafaxine guards: Node input/interval checks + Sounio vfx_integrate_to refusals"
+node "$ROOT_DIR/scripts/ci/pbpk28_core_venlafaxine_guards.mjs" || {
+  echo "[pbpk28-parity] FAIL: Node venlafaxine core guards" >&2; exit 1; }
+# Sounio refusals. A panic exits with status 1 and prints no message on either
+# engine (measured 2026-09-27 on lean_single and Madaros; same finding as
+# scripts/ci/pbpk28_refusal_gate.sh on #2695), so a probe is refused only if
+# its ELF exits with EXACTLY 1 after printing VFX_PROBE_REACHED and never
+# prints VFX_PROBE_ESCAPED. Any other status -- a segfault (139), an FP trap
+# (136), a stray exit code -- is a failure, not a refusal. The control must
+# exit 0 and print both sentinels. Each fixture is compiled and its ELF run
+# directly, so no wrapper can rewrite the status.
+VFX_PANIC_RC=1
+vfx_probe_run() {  # NAME ELF -> sets VFX_PROBE_RC, log in $OUT_DIR/vfx_probe_NAME.txt
+  set +e
+  "$2" > "$OUT_DIR/vfx_probe_$1.txt" 2>&1
+  VFX_PROBE_RC=$?
+  set -e
+}
+vfx_is_refusal() {  # NAME
+  [ "$VFX_PROBE_RC" -eq "$VFX_PANIC_RC" ] \
+    && grep -q '^VFX_PROBE_REACHED$' "$OUT_DIR/vfx_probe_$1.txt" \
+    && ! grep -q '^VFX_PROBE_ESCAPED$' "$OUT_DIR/vfx_probe_$1.txt"
+}
+vfx_probe_compile() {  # NAME FIXTURE -> ELF path in $OUT_DIR
+  "$SOUC_BIN" compile "$2" -o "$OUT_DIR/vfx_probe_$1.elf" > "$OUT_DIR/vfx_probe_$1_compile.txt" 2>&1 || {
+    echo "[pbpk28-parity] FAIL: probe $1 did not compile (see $OUT_DIR/vfx_probe_$1_compile.txt)" >&2; exit 1; }
+  chmod +x "$OUT_DIR/vfx_probe_$1.elf"
+}
+# Self-check of the classifier: stubs that print the REACHED sentinel and then
+# exit 7, or die of SIGSEGV (139), must NOT count as refusals.
+printf '#!/bin/sh\necho VFX_PROBE_REACHED\nexit 7\n' > "$OUT_DIR/vfx_probe_sab_exit7.elf"
+printf '#!/bin/sh\necho VFX_PROBE_REACHED\nkill -SEGV $$\n' > "$OUT_DIR/vfx_probe_sab_segv.elf"
+chmod +x "$OUT_DIR/vfx_probe_sab_exit7.elf" "$OUT_DIR/vfx_probe_sab_segv.elf"
+for sab in sab_exit7 sab_segv; do
+  vfx_probe_run "$sab" "$OUT_DIR/vfx_probe_$sab.elf"
+  if vfx_is_refusal "$sab"; then
+    echo "[pbpk28-parity] FAIL: guard classifier accepted $sab (rc $VFX_PROBE_RC) as a panic refusal" >&2; exit 1; fi
+  echo "  self-check ok: $sab (rc $VFX_PROBE_RC) is not a refusal"
+done
+vfx_probe_compile control tests/fixtures/darwin_pbpk/vfx_integrate_control.sio
+vfx_probe_run control "$OUT_DIR/vfx_probe_control.elf"
+if [ "$VFX_PROBE_RC" -ne 0 ] || ! grep -q '^VFX_PROBE_ESCAPED$' "$OUT_DIR/vfx_probe_control.txt"; then
+  echo "[pbpk28-parity] FAIL: control probe did not run to completion (rc $VFX_PROBE_RC)" >&2
+  cat "$OUT_DIR/vfx_probe_control.txt" >&2; exit 1; fi
+echo "  control ok: on-grid spans accepted (rc 0)"
+for probe in backwards offgrid; do
+  vfx_probe_compile "$probe" "tests/fixtures/darwin_pbpk/vfx_integrate_$probe.sio"
+  vfx_probe_run "$probe" "$OUT_DIR/vfx_probe_$probe.elf"
+  if ! vfx_is_refusal "$probe"; then
+    echo "[pbpk28-parity] FAIL: vfx_integrate_to $probe probe NOT refused by a panic (rc $VFX_PROBE_RC, want $VFX_PANIC_RC, REACHED and no ESCAPED)" >&2
+    cat "$OUT_DIR/vfx_probe_$probe.txt" >&2; exit 1; fi
+  echo "  refused: $probe (rc $VFX_PROBE_RC)"
+done
+echo "VENLAFAXINE_GUARDS_PASS (Node guards; Sounio vfx_integrate_to refuses backwards and off-grid spans, exit $VFX_PANIC_RC)"
+
+echo
+echo "[pbpk28-parity] venlafaxine XR canonical: parent + ODV + matrix within ${RMSE_THRESHOLD_PCT}% RMSE, steady-state ratio certified (3rd canonical drug)"
 
 # ════════════════════════════════════════════════════════════════════════════
 # Cases 14-16: Haloperidol (CASO II) canonical parity — PBPK14 + BBB + D2.
