@@ -172,10 +172,28 @@ fn mer_exp_neg(x: f64) -> f64 with Mut, Div {
     return y
 }
 
-// Advances `scen` from t_start to t_end. Panics unless dt > 0 and
-// t_end >= t_start: with t_end < t_start the loop never runs and the caller
-// would label the t_start state as t_end (sampling 1 h then 0 h returned the
-// 1 h state for 0 h), and dt <= 0 never terminates.
+// Number of dt steps in `span` (span >= 0, dt > 0), or −1 when span is not a
+// whole number of steps: the nearest count n must reproduce span to 1e-9
+// relative, |n·dt − span| ≤ 1e-9·span. One criterion for the dosing interval
+// (vfx_ss_interval) and for integration spans (vfx_integrate_to), so the two
+// cannot drift apart. The Node port (vfxWholeSteps, pbpk28_core.mjs) applies
+// the same test.
+fn vfx_whole_steps(span: f64, dt: f64) -> i64 with Mut, Div {
+    let n = (span / dt + 0.5) as i64
+    var off = (n as f64) * dt - span
+    if off < 0.0 { off = 0.0 - off }
+    if off > 1.0e-9 * span { return 0 - 1 }
+    return n
+}
+
+// Advances `scen` from t_start to t_end in whole dt steps. Panics unless
+// dt > 0, t_end >= t_start and t_end − t_start is a whole number of steps
+// (vfx_whole_steps). Otherwise the result is not the state at t_end, and the
+// caller labels it as if it were: t_end < t_start returned the t_start state
+// (sampling 1 h then 0 h gave the 1 h state for 0 h), and an off-grid t_end
+// snapped to the nearest step (dt = 0.5: t_end = 1.2 returned the 1.0 h
+// state, 1.3 the 1.5 h state). A remainder step is not taken either: it would
+// change the scheme's step size without saying so.
 pub fn vfx_integrate_to(
     scen: VenlafaxineXrScenario,
     rel: MatrixReleaseModel,
@@ -186,11 +204,17 @@ pub fn vfx_integrate_to(
     if !(dt > 0.0 && t_end >= t_start) {
         panic("vfx_integrate_to: need dt > 0 and t_end >= t_start")
     }
+    let n_steps = vfx_whole_steps(t_end - t_start, dt)
+    if n_steps < 0 {
+        panic("vfx_integrate_to: t_end - t_start must be a whole number of dt steps")
+    }
     var s = scen
     var t = t_start
-    while t < t_end - 0.5 * dt {
+    var k: i64 = 0
+    while k < n_steps {
         s = vfx_strang_step(s, rel, t, dt)
         t = t + dt
+        k = k + 1
     }
     return s
 }
@@ -338,10 +362,8 @@ pub fn vfx_ss_interval(
     if !(n_doses >= 1 && dt > 0.0 && tau >= dt) {
         panic("vfx_ss_interval: need n_doses >= 1, dt > 0 and tau >= dt")
     }
-    let steps_per_tau = (tau / dt + 0.5) as i64
-    var off = (steps_per_tau as f64) * dt - tau
-    if off < 0.0 { off = 0.0 - off }
-    if off > 1.0e-9 * tau {
+    let steps_per_tau = vfx_whole_steps(tau, dt)
+    if steps_per_tau < 0 {
         panic("vfx_ss_interval: tau must be a whole number of dt steps")
     }
     let n_warm = ((n_doses - 1) as i64) * steps_per_tau
