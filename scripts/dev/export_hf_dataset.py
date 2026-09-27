@@ -136,14 +136,21 @@ def build_instruction(
             summary += "."
         parts.append(summary)
     known_failure = annotations.get("known-failure")
+    check_only = "check-only" in annotations
     if suite == "run-pass":
         # A known-failure run-pass fixture does not currently pass -- some do
         # not even compile -- so a success claim or a stdout expectation would
         # describe a completion the source cannot produce.
         if not known_failure:
-            parts.append("It should compile and run successfully.")
-            if annotations.get("expect-stdout"):
-                parts.append(f"Expected stdout: {annotations['expect-stdout'][0]}")
+            if check_only:
+                # `//@ check-only` fixtures are type-checked and never run, so
+                # a runtime or stdout claim would describe behaviour the suite
+                # does not exercise (some cannot run at all today).
+                parts.append("It should type-check successfully; it is a check-only fixture and is not executed.")
+            else:
+                parts.append("It should compile and run successfully.")
+                if annotations.get("expect-stdout"):
+                    parts.append(f"Expected stdout: {annotations['expect-stdout'][0]}")
     else:
         parts.append("It should fail to compile.")
         if annotations.get("error-pattern"):
