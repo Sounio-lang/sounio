@@ -813,7 +813,7 @@ export function vfxMatrixStepAmount(rel, t, dt) {
 // ledger (minConc / negMass), never repaired.
 export function vfxLedgerZero() {
   return { administered: 0.0, eliminated: 0.0, sinkRemoved: 0.0, auc: new Float64Array(N),
-           minConc: 0.0, negMass: 0.0, steps: 0 };
+           minConc: 0.0, negMass: 0.0, stageMinConc: 0.0, stageNegMass: 0.0, steps: 0 };
 }
 
 // Kernel organ averages (V_v·C_v + V_t·C_t)/V_i; blood C_v[0].
@@ -929,6 +929,10 @@ function vfxTrbdf2Step(st, pr, relMid, inputOrgan, dt, sinkOrgan, clSink, lg) {
   const xnV = Float64Array.from(st.cv), xnT = Float64Array.from(st.ct);
   const scratch = vfxLedgerZero();
   vfxThetaStep(st, pr, relMid, inputOrgan, VFX_TRBDF2_GAMMA * dt, 0.5, sinkOrgan, clSink, scratch);
+  // x_γ enters the quadrature: carry its negativity into the stage fields
+  // before stage 2 books x_{n+1} into the scratch ledger too.
+  if (scratch.minConc < lg.stageMinConc) lg.stageMinConc = scratch.minConc;
+  if (scratch.negMass > lg.stageNegMass) lg.stageNegMass = scratch.negMass;
   const midAvg = vfxKernelAvgs(st);
   const am1 = VFX_TRBDF2_A - 1.0;
   for (let i = 0; i < N; i++) {
@@ -1055,7 +1059,10 @@ function vfxAccount(sc) {
     residSplit: sc.portal - h.fAbs * (sc.portal + sc.lost),
     boundSlack: h.fAbs * sc.released - sc.portal,
     residP: vfxLedgerResidual(sc.lgP, sc.parent), residO: vfxLedgerResidual(sc.lgO, sc.odv),
-    negMass: Math.max(sc.lgP.negMass, sc.lgO.negMass),
+    // Returned states and TR-BDF2's internal stage (it enters the quadrature).
+    negMass: Math.max(sc.lgP.negMass, sc.lgO.negMass, sc.lgP.stageNegMass, sc.lgO.stageNegMass),
+    stageNegMass: Math.max(sc.lgP.stageNegMass, sc.lgO.stageNegMass),
+    stageMinConc: Math.min(sc.lgP.stageMinConc, sc.lgO.stageMinConc),
     steps: sc.lgP.steps, fAbs: h.fAbs,
     gut: sc.gut, released: sc.released, portal: sc.portal, lost: sc.lost,
     administered: sc.lgP.administered, formed: sc.lgO.administered,
