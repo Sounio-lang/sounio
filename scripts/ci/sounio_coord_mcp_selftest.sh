@@ -65,13 +65,13 @@ else:
 PY
 
 bin/sounio-coord brief >"$TEST_ROOT/brief.out"
-grep -q 'Sounio coordination status\|Claims' /tmp/sounio_coord_mcp_brief.out \
+grep -q 'Sounio coordination status\|Claims' "$TEST_ROOT/brief.out" \
   || fail "coord brief unexpected output"
 
 # attention_brief must not require freeze
 bash scripts/dev/attention_brief.sh >"$TEST_ROOT/attention.out"
-grep -q 'Attention Brief' /tmp/attention_brief.out || fail "attention_brief header missing"
-grep -q 'active_p0' /tmp/attention_brief.out || fail "attention_brief missing active_p0"
+grep -q 'Attention Brief' "$TEST_ROOT/attention.out" || fail "attention_brief header missing"
+grep -q 'active_p0' "$TEST_ROOT/attention.out" || fail "attention_brief missing active_p0"
 
 # .mcp.json must register sounio-coord
 python3 - <<'PY'
