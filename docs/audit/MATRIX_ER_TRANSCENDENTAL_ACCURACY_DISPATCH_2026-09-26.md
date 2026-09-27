@@ -57,14 +57,17 @@ Measured against IEEE-754 `Math.pow` (V8), using the Node port (bit-identical to
 - The cap crossing k·t^n = 1 lies at t* = k^(−1/n) = **11.98637 h**. The current helpers put it at 12.00987 h, 0.0235 h late.
 - The error of t^(n−1), used by `matrix_release_rate`, follows the same pattern.
 
-### Minimal repro (24 lines) — `docs/audit/repro/matrix_er_ln_unit_floor.sio`
+### Regression test — `tests/run-pass/darwin_venlafaxine_xr_matrix_small_t.sio`
 
-The repro calls the live `matrix_fraction` at t = 3.5e−15, 1e−6 and 0.01, compares it with the exact 0.199·t^0.65, and exits 1 while the defect is present.
+This began as a 24-line repro in `docs/audit/repro/` and was moved into the run-pass suite after PR review. It calls
+the live `matrix_fraction` at t = 3.5e−15, 1e−6 and 0.01 and compares it with the exact 0.199·t^0.65. It also checks
+F(12 h) = 1, since the cap lies at 11.98637 h. It exits 1 while the defect is present.
 
-| tree | output (relative errors) | rc |
+| tree | output (relative errors, F(12 h)) | rc |
 |---|---|---:|
-| `main` 46e9b48b6 | `98665798.635112` / `313.654193` / `0.218976` / `REPRO_KP_SMALL_T_FLOOR` | 1 |
-| + proposed patch | `0.000000` ×3 / `KP_SMALL_T_OK` | 0 |
+| `main` (old helpers), Madaros | `98665798.635112` / `313.654193` / `0.218976` / `0.999466` / `REPRO_KP_SMALL_T_FLOOR` | 1 |
+| fix, Madaros | `0.000000` ×3 / `1.000000` / `KP_SMALL_T_OK` | 0 |
+| fix, lean_single | `4.85e−16` / `4.06e−16` / `0.000000` / `1.000000` / `KP_SMALL_T_OK` | 0 |
 
 ## How a tiny clock arises and what it costs
 
@@ -144,7 +147,7 @@ To reproduce the parity check:
 
 ```bash
 bin/souc run docs/audit/repro/matrix_er_kp_bits_probe.sio > kp.txt
-node docs/audit/repro/matrix_er_kp_bits_probe.mjs kp.txt
+node docs/audit/repro/matrix_er_kp_bits_probe.mjs kp.txt   # exits 1 (PARITY_FAIL) on any differing bit or row count
 ```
 
 For the parity ref under the patch, emulating gate cases 10–13 (per-organ C_avg RMSE, matrix, ratio; threshold 1%):

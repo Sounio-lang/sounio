@@ -4,7 +4,8 @@
 // new* = verbatim port of stdlib/math/pure.sio ln()/exp() (`as i32` -> Math.trunc).
 // Usage: node matrix_er_kp_bits_probe.mjs [sounio_probe_output.txt]
 //   no arg  -> prints the Node KP| lines plus accuracy vs Math.pow
-//   one arg -> additionally diffs bits against the Sounio run and prints PARITY lines
+//   one arg -> additionally diffs bits against the Sounio run and prints PARITY lines;
+//              exits 1 (PARITY_FAIL) on a row-count mismatch or any differing bit
 import { readFileSync } from 'node:fs';
 
 function curLnUnit(x) { if (x <= 0.0) return -1.0e6; const y = (x - 1.0) / (x + 1.0); const y2 = y * y;
@@ -54,4 +55,6 @@ if (process.argv[2]) {
     if (a[2] !== b[2]) tDiff++; if (a[3] !== b[3]) cDiff++; if (a[4] !== b[4]) nDiff++;
   }
   console.log(`PARITY rows sio=${sio.length} node=${node.length} t_bits_diff=${tDiff} cur_bits_diff=${cDiff} new_bits_diff=${nDiff}`);
+  if (sio.length !== node.length || tDiff || cDiff || nDiff) { console.log('PARITY_FAIL'); process.exit(1); }
+  console.log('PARITY_OK');
 }
