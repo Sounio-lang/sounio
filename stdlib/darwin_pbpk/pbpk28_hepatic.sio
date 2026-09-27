@@ -49,6 +49,7 @@
 // frame that filled it.
 
 use darwin_pbpk::core::pbpk28_params::*
+use eisa::format::{is_finite_f64}
 
 const P28H_LIVER: i32 = 1
 const P28H_GUT: i32 = 8
@@ -669,8 +670,8 @@ pub fn pbpk28_hepatic_elim_step_theta(
 //
 // Positivity is still not guaranteed (Bolley & Crouzeix 1978: no linear
 // method above first order is unconditionally positivity-preserving), so every
-// stage and every endpoint is checked and the step PANICS if any entry falls
-// below −tol·scale:
+// stage and every endpoint is checked and the step PANICS if any entry is not
+// finite or falls below −tol·scale:
 //   scale = max |entry| of x_n  +  max injected concentration dt·in/V
 //           (in_b/V_b for blood, in_t,i/V_t,i for tissue i),
 //   tol   = 1024 · u · (1 + dt·λ),  u = 2^-53,
@@ -753,19 +754,41 @@ fn pbpk28_step_bound_ws(
     (*ws).neg_min_rel = 0.0
 }
 
-// Fails closed on any active entry (C_v of all 14 organs, C_t of organs 1..13)
-// below −tol·scale, and records the most negative entry relative to scale. A
-// NaN entry fails too (the comparisons are written so that NaN is not >=).
-fn pbpk28_check_nonneg_ws(state: &PBPKState28, ws: &!PBPK28Work) with Mut, Div, Panic {
+// Verdict of the fail-closed check on *state (an endpoint or a stage) for the
+// step whose scale / tol are in ws: 0 accept, 1 an active entry (C_v of all 14
+// organs, C_t of organs 1..13) below -tol·scale, 2 an active entry or the
+// scale not finite. Finiteness is required explicitly: +Inf is not negative
+// and compares equal to itself, so a sign test and a NaN test both accept it.
+// Measured 2026-09-27 (PR #2695 review): flows 1e-300, CL = 0, V_b = 1,
+// dt = 2, in_b = 1e308 -- the BE restart's midpoint is 1e308 and its endpoint
+// +Inf, and the step returned it. Exposed so that a gate can test the verdict
+// (a panic cannot be observed by the run-pass harness).
+pub fn pbpk28_step_check_code(state: &PBPKState28, ws: &PBPK28Work) -> i32 with Mut {
     var m = (*state).cv[0]
-    var nan = !(m == m)
+    var finite = is_finite_f64(m)
     var i: i32 = 1
     while i < 14 {
         let cv = (*state).cv[i]
         let ct = (*state).ct[i]
-        if !(cv == cv) || !(ct == ct) { nan = true }
+        if !is_finite_f64(cv) || !is_finite_f64(ct) { finite = false }
         if cv < m { m = cv }
         if ct < m { m = ct }
+        i = i + 1
+    }
+    let sc = (*ws).scale
+    if !finite || !is_finite_f64(sc) || !is_finite_f64((*ws).tol) { return 2 }
+    if !(m >= 0.0 - (*ws).tol * sc) { return 1 }
+    return 0
+}
+
+// Fails closed on the verdict above, and records the most negative entry
+// relative to scale.
+fn pbpk28_check_nonneg_ws(state: &PBPKState28, ws: &!PBPK28Work) with Mut, Div, Panic {
+    var m = (*state).cv[0]
+    var i: i32 = 1
+    while i < 14 {
+        if (*state).cv[i] < m { m = (*state).cv[i] }
+        if (*state).ct[i] < m { m = (*state).ct[i] }
         i = i + 1
     }
     let sc = (*ws).scale
@@ -773,8 +796,12 @@ fn pbpk28_check_nonneg_ws(state: &PBPKState28, ws: &!PBPK28Work) with Mut, Div, 
         let r = m / sc
         if r < (*ws).neg_min_rel { (*ws).neg_min_rel = r }
     }
-    if nan || !(m >= 0.0 - (*ws).tol * sc) {
+    let code = pbpk28_step_check_code(state, ws)
+    if code == 1 {
         panic("pbpk28_hepatic: clamp-free step produced an entry below -tol*scale (fail closed; see the TR-BDF2 section)")
+    }
+    if code == 2 {
+        panic("pbpk28_hepatic: clamp-free step produced a non-finite entry (fail closed)")
     }
 }
 

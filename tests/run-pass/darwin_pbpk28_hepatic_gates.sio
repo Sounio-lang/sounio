@@ -57,6 +57,15 @@
 //     on negativity would abort the run, so completion also checks that no
 //     stage went below -tol·scale.
 //
+// VF  Fail-closed verdict (pbpk28_step_check_code, the check every TR-BDF2 /
+//     restart stage panics on). After a real restart step: the step's own
+//     state -> 0; one tissue entry set to +Inf -> 2; NaN -> 2; blood set to
+//     -1 (far below -tol·scale) -> 1; the scale set to +Inf -> 2. Before
+//     2026-09-27 the check tested sign and NaN only, so +Inf was accepted: the
+//     restart with flows 1e-300, CL = 0, V_b = 1, dt = 2, in_b = 1e308
+//     returned a blood concentration of +Inf. With finiteness removed from the
+//     verdict, the +Inf cases return 0 and VF fails.
+//
 // The V2 parameter set is the rapamycin transport profile with CL_central = 0 and
 // a synthetic hepatic CLint: a kernel-correctness fixture, not a drug claim.
 
@@ -351,18 +360,45 @@ fn gate_vr() -> bool with Mut, Div, Panic, IO {
     return mb <= 1.0 && err_iv < 1.0e-9 && err_po < 1.0e-9 && drift < 1.0e-9
 }
 
+// VF --------------------------------------------------------------------------
+fn gate_vf() -> bool with Mut, Div, Panic, IO {
+    let p = pbpk28_params_rapamycin()
+    var ws = pbpk28_work_new()
+    var s = pbpk28_state_zero()
+    s.cv[0] = 1.0
+    pbpk28_hepatic_be2_step_ws(&!s, p, pbpk28_hepatic_none(), pbpk28_input_none(), 0.1, &!ws)
+    let ok0 = pbpk28_step_check_code(&s, &ws)
+    let keep = s.ct[5]
+    s.ct[5] = 1.0e308 * 10.0
+    let c_inf = pbpk28_step_check_code(&s, &ws)
+    s.ct[5] = 0.0 * (1.0e308 * 10.0)
+    let c_nan = pbpk28_step_check_code(&s, &ws)
+    s.ct[5] = keep
+    let keep_b = s.cv[0]
+    s.cv[0] = 0.0 - 1.0
+    let c_neg = pbpk28_step_check_code(&s, &ws)
+    s.cv[0] = keep_b
+    ws.scale = 1.0e308 * 10.0
+    let c_sinf = pbpk28_step_check_code(&s, &ws)
+    print("VF verdicts: valid, +Inf entry, NaN entry, -1 entry, +Inf scale = ")
+    print(ok0) print(" ") print(c_inf) print(" ") print(c_nan) print(" ") print(c_neg) print(" ") println(c_sinf)
+    return ok0 == 0 && c_inf == 2 && c_nan == 2 && c_neg == 1 && c_sinf == 2
+}
+
 fn main() -> i32 with Mut, Div, Panic, IO {
     let v0 = gate_v0()
     let v1 = gate_v1()
     let v2 = gate_v2()
     let vt = gate_vt()
     let vr = gate_vr()
+    let vf = gate_vf()
     if v0 { println("V0 PASS") } else { println("V0 FAIL") }
     if v1 { println("V1 PASS") } else { println("V1 FAIL") }
     if v2 { println("V2 PASS") } else { println("V2 FAIL") }
     if vt { println("VT PASS") } else { println("VT FAIL") }
     if vr { println("VR PASS") } else { println("VR FAIL") }
-    if v0 && v1 && v2 && vt && vr {
+    if vf { println("VF PASS") } else { println("VF FAIL") }
+    if v0 && v1 && v2 && vt && vr && vf {
         println("PBPK28_HEPATIC_GATES_PASS")
         return 0
     }
