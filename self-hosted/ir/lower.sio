@@ -8254,8 +8254,9 @@ impl Lowerer {
     // The copy is FRESH, not written into the destination's existing storage.
     // Writing in place would cost no handle, but it is correct only while the
     // destination owns its storage alone, and Madaros still binds shared storage
-    // on other paths (`let v = *p`, `let v = o.f`, a struct literal fed a local
-    // aggregate, E232). An in-place copy through such a destination would write
+    // on other paths (a struct literal fed a local aggregate, E232; an element of
+    // an unannotated array literal; a returned place). An in-place copy through
+    // such a destination would write
     // into the other owner -- a new miscompile in place of the old one. A fresh
     // copy only ever rebinds the destination. Its cost is 1 + k handles per
     // executed assignment against the never-reclaimed handle table; running out
@@ -8280,6 +8281,89 @@ impl Lowerer {
         let slot_count = self.struct_layout_slot_count(st_name)
         if slot_count <= 0 { return (self, reg) }
         self.emit_struct_value_copy_budgeted(reg, st_name, slot_count)
+    }
+
+    // By-name sibling of struct_layout_field_pos: same FIRST-registration rule,
+    // matched on the field NAME a field access carries.
+    fn struct_layout_field_pos_by_name(self, type_name: Name, field_name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        if type_name.len <= 0 { return 0 - 1 }
+        if field_name.len <= 0 { return 0 - 1 }
+        var si: i64 = 0
+        while si < (*self.struct_layouts).count {
+            if ir_name_eq((*self.struct_layouts).entries[si as usize].type_name, type_name) {
+                var fi: i64 = 0
+                let fc = (*self.struct_layouts).entries[si as usize].field_count
+                while fi < fc && fi < 128 {
+                    if ir_name_eq(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].name_id), field_name) {
+                        return si * 128 + fi
+                    }
+                    fi = fi + 1
+                }
+                return 0 - 1
+            }
+            si = si + 1
+        }
+        0 - 1
+    }
+
+    // `let v = o.f` where `f` is a WORD-SCALAR fixed-array field: the field's
+    // layout position, else -1. Tuple slots (`pair.0`) are not named fields.
+    fn let_place_source_word_scalar_array_pos_ref(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+        if (*e).kind != ExprKind::ExprFieldAccess { return 0 - 1 }
+        if lower_name_tuple_index((*e).name) >= 0 { return 0 - 1 }
+        match (*e).left {
+            Some(owner) => {
+                let owner_st = self.expr_receiver_struct_type_ref(&(*owner))
+                let pos = self.struct_layout_field_pos_by_name(owner_st, (*e).name)
+                if pos >= 0 && self.struct_layout_pos_array_len(pos) > 0 { return pos }
+            }
+            None => {}
+        }
+        0 - 1
+    }
+
+    // Static struct type of a PLACE used as a let initialiser, or empty when it
+    // must keep the handle: a tuple slot, a Box field or Box deref (reference
+    // semantics), a deref or index of anything but an identifier, a Seq element.
+    // Knowledge and unregistered names are rejected by the caller through
+    // nested_struct_field_slot_count. An unannotated array literal records no
+    // element type, so `xs[i]` on it resolves empty and keeps the handle.
+    fn let_place_source_struct_type_ref(self, e: &Expr) -> Name with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprFieldAccess {
+            if lower_name_tuple_index((*e).name) >= 0 { return ir_empty_name() }
+            match (*e).left {
+                Some(owner) => {
+                    let owner_st = self.expr_receiver_struct_type_ref(&(*owner))
+                    return self.field_named_type_for_struct(owner_st, (*e).name)
+                }
+                None => {}
+            }
+            return ir_empty_name()
+        }
+        if (*e).kind == ExprKind::ExprUnary && (*e).un_op == UnaryOp::OpDeref {
+            match (*e).left {
+                Some(operand) => {
+                    if (*operand).kind == ExprKind::ExprIdent {
+                        if ir_name_is_box(self.lookup_local_struct_type((*operand).name)) { return ir_empty_name() }
+                    } else {
+                        return ir_empty_name()
+                    }
+                }
+                None => {}
+            }
+            return self.expr_receiver_struct_type_ref(e)
+        }
+        if (*e).kind == ExprKind::ExprIndex {
+            match (*e).left {
+                Some(indexed) => {
+                    if (*indexed).kind != ExprKind::ExprIdent { return ir_empty_name() }
+                    if ir_name_eq(self.lookup_local_struct_type((*indexed).name), make_name("Seq")) { return ir_empty_name() }
+                }
+                None => {}
+            }
+            return self.expr_receiver_struct_type_ref(e)
+        }
+        ir_empty_name()
     }
 
     // Whether `var y = x` on struct-typed local `x` may be value-copied.
@@ -17204,6 +17288,57 @@ impl Lowerer {
                         let copy_reg = copy_pair.1
                         lo = lo.emit(ir_copy(copy_reg, reg))
                         bind_reg = copy_reg
+                    }
+                } else {
+                    // PLACE sources: `let v = o.f`, `let v = *p`, `let v = xs[i]`.
+                    // `reg` is the HANDLE loaded from the place, so binding it made
+                    // `v` share storage with its owner: writes through either showed
+                    // through the other, and a callee's `var a = param.f; a.x = ..`
+                    // wrote the caller's value
+                    // (docs/audit/MADAROS_LET_FIELD_SOURCE_ALIAS_DISPATCH_2026-09-26.md).
+                    // Copy as the ExprIdent arm does, with the static type taken from
+                    // the place instead of the local table. A zero handle (a field a
+                    // partial struct literal omitted) is bound unchanged, never
+                    // dereferenced.
+                    let place_arr_pos = lo.let_place_source_word_scalar_array_pos_ref(&(*rhs_ident))
+                    let place_st = if place_arr_pos >= 0 { ir_empty_name() } else { lo.let_place_source_struct_type_ref(&(*rhs_ident)) }
+                    let place_slots = lo.nested_struct_field_slot_count(place_st)
+                    if place_arr_pos >= 0 || place_slots > 0 {
+                        let res_pair = lo.fresh_reg()
+                        lo = res_pair.0
+                        let res_reg = res_pair.1
+                        lo = lo.emit(ir_copy(res_reg, reg))
+                        let pz_pair = lo.emit_i64_const(0)
+                        lo = pz_pair.0
+                        let pc_pair = lo.fresh_reg()
+                        lo = pc_pair.0
+                        let pc_reg = pc_pair.1
+                        lo = lo.emit(ir_binop(pc_reg, reg, BinaryOp::OpNe, pz_pair.1))
+                        let ps_pair = lo.fresh_label()
+                        lo = ps_pair.0
+                        let ps_label = ps_pair.1
+                        lo = lo.emit(ir_branch_false(pc_reg, ps_label))
+                        if place_arr_pos >= 0 {
+                            let place_len = lo.struct_layout_pos_array_len(place_arr_pos)
+                            // is_float == 2 marks an array-of-f64 field (see
+                            // emit_struct_value_copy_deep). Recording it on the new
+                            // local is what keeps `println(v[i])` printing an f64.
+                            let place_float = lo.struct_layout_pos_is_float(place_arr_pos) == 2
+                            let pa_pair = lo.emit_fixed_array_value_copy(reg, place_len, place_float)
+                            lo = pa_pair.0
+                            lo = lo.emit(ir_copy(res_reg, pa_pair.1))
+                            fixed_array_len = place_len
+                            fixed_array_word_scalar = true
+                            if place_float {
+                                rhs_array_elem_is_float = true
+                            }
+                        } else {
+                            let pst_pair = lo.emit_struct_value_copy_budgeted(reg, place_st, place_slots)
+                            lo = pst_pair.0
+                            lo = lo.emit(ir_copy(res_reg, pst_pair.1))
+                        }
+                        lo = lo.emit(ir_label(ps_label))
+                        bind_reg = res_reg
                     }
                 }
             }

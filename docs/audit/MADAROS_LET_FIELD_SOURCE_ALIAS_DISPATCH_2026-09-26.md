@@ -12,7 +12,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-
 **Date:** 2026-09-26
 **Base:** `origin/main` @ `2e8b76d31` (workspace worktree `/workspace/worktrees/claude-let-field-alias`, branch `claude/madaros-let-field-alias`)
 **Engines:** Madaros, cross-checked against `SOUNIO_SOUC_ENGINE=lean_single`
-**Owner:** unassigned (`self-hosted/ir/lower.sio`, `Lowerer::lower_let_stmt_after_expr_ref`)
+**Owner:** `self-hosted/ir/lower.sio`, `Lowerer::lower_let_stmt_after_expr_ref`; fix on branch `claude/madaros-let-place-copy`, on top of Sounio-lang/sounio#2700
 **Status:** evidence recorded. The source-built baseline **reproduces**. A fix is proposed and measured on a scratch build ([Patched build](#patched-build)). It is **not** applied to `self-hosted/` in this change. Two stdlib functions give wrong answers on Madaros today ([stdlib sweep](#stdlib-sweep)).
 
 ## Why this dispatch
@@ -365,9 +365,9 @@ prints `LET_FIELD_SOURCE_NO_ALIAS_OK` only if all hold. Tag 9 uses the annotated
 array, which is what the proposed fix covers. Tag 10 is row 12: it prints an
 element of a field-bound `[f64; 4]` and a second `//@ expect-stdout` requires
 `LET_FIELD_ARRAY_ELEM 1.500000`, because a comparison passes with or without
-the float mark and only rendering shows it. It carries
-`//@ known-failure:` citing this dispatch. The fix commit should remove that
-line.
+the float mark and only rendering shows it. It carried
+`//@ known-failure:` citing this dispatch until the fix landed; the fix
+commit removed that line.
 
 | Compiler | Output |
 |---|---|
