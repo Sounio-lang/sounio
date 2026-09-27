@@ -462,6 +462,82 @@ pub struct NativeCompiler {
     pub bss_total_size: i64,
 }
 
+
+// One class per vreg id, up to the lowerer's ceiling.
+// 0 unknown, 1 float, 2 int, 3 conflict.
+// NC_VREG_LIMIT must equal IR_MAX_VREGS in ir/ir.sio.
+// BSS on purpose: a [i64; 16384] local, or the same array as a field of
+// NativeCompiler, is the compiler_new frame cliff. The 2048-slot
+// is_float_reg and reg_type fields stay for the readers that already index
+// them. OpNeg reads this table, plus the flag the lowerer stamps on a
+// float unary op. There is no second ceiling past 2048.
+pub let NC_VREG_LIMIT: i64 = 16384
+pub var NC_REG_CLASS: [i64; 16384] = [0; 16384]
+pub var NC_REG_CLASS_DROPPED: i64 = 0
+pub var NC_HIGH_FLOAT_IDS: [i64; 4096] = [0; 4096]
+pub var NC_HIGH_FLOAT_COUNT: i64 = 0
+pub var NC_HIGH_FLOAT_TRUNCATED: i64 = 0
+pub var NC_HIGH_SEEN: [i64; 512] = [0; 512]
+
+fn nc_reg_bit_mask(bit: i64) -> i64 {
+    var m: i64 = 1
+    var k: i64 = 0
+    while k < bit {
+        m = m * 2
+        k = k + 1
+    }
+    m
+}
+
+pub fn nc_reg_class_reset() with Mut, Panic {
+    var i: i64 = 0
+    while i < NC_VREG_LIMIT {
+        NC_REG_CLASS[i as usize] = 0
+        i = i + 1
+    }
+    i = 0
+    while i < 512 {
+        NC_HIGH_SEEN[i as usize] = 0
+        i = i + 1
+    }
+    NC_REG_CLASS_DROPPED = 0
+    NC_HIGH_FLOAT_COUNT = 0
+    NC_HIGH_FLOAT_TRUNCATED = 0
+}
+
+pub fn nc_reg_class_get(reg: i64) -> i64 with Mut, Panic, Div {
+    if reg < 0 || reg >= NC_VREG_LIMIT { return 0 }
+    NC_REG_CLASS[reg as usize]
+}
+
+pub fn nc_reg_class_set(reg: i64, cls: i64) with Mut, Panic, Div {
+    if reg < 0 || reg >= NC_VREG_LIMIT {
+        NC_REG_CLASS_DROPPED = NC_REG_CLASS_DROPPED + 1
+        return
+    }
+    NC_REG_CLASS[reg as usize] = cls
+}
+
+// A float marker whose vreg does not fit the 2048-bit set. Idempotent.
+// Past 4096 distinct ids, truncation is sticky and codegen refuses the
+// function instead of guessing integer negation.
+pub fn nc_high_float_note(reg: i64) with Mut, Panic, Div {
+    if reg < NC_MAX_VREGS || reg >= NC_VREG_LIMIT { return }
+    let word = reg / 32
+    let bit = reg % 32
+    if word < 0 || word >= 512 { return }
+    let mask = nc_reg_bit_mask(bit)
+    let w = NC_HIGH_SEEN[word as usize]
+    if (w / mask) % 2 == 1 { return }
+    NC_HIGH_SEEN[word as usize] = w | mask
+    if NC_HIGH_FLOAT_COUNT >= 4096 {
+        NC_HIGH_FLOAT_TRUNCATED = 1
+        return
+    }
+    NC_HIGH_FLOAT_IDS[NC_HIGH_FLOAT_COUNT as usize] = reg
+    NC_HIGH_FLOAT_COUNT = NC_HIGH_FLOAT_COUNT + 1
+}
+
 pub fn compiler_new() -> NativeCompiler with Mut {
     var out: NativeCompiler
     out.code = code_buffer_new()
@@ -516,6 +592,7 @@ pub fn compiler_new() -> NativeCompiler with Mut {
         out.vreg_spill_slots[i as usize] = -1
         i = i + 1
     }
+    nc_reg_class_reset()
     out
 }
 
@@ -537,6 +614,7 @@ pub fn reset_function_state_mut(nc: &! NativeCompiler) with Mut, Panic, Div {
         (*nc).is_float_reg[j as usize] = 0
         j = j + 1
     }
+    nc_reg_class_reset()
     (*nc).field_float_count = 0
     var fj = 0
     while fj < 256 {
