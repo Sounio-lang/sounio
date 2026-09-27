@@ -140,6 +140,25 @@ remote_bootstrap_sync() {
     return 13
   fi
 
+  # An optional file (e.g. keys/bootstrap_ed25519.pub) that is absent locally
+  # is simply left out of send_files above -- but an earlier bootstrap of
+  # this same REMOTE_DIR may have left its own copy in place, and the remote
+  # resolver (omega_resolve_souc_bin.sh) checks that persistent path BEFORE
+  # falling back to its built-in DEFAULT_CANONICAL_PUBKEY_HEX. Left alone, a
+  # clean checkout that has no local key could still verify against a stale
+  # (or wrong) key from a previous run, silently, with no signal that the
+  # key in use didn't come from this checkout. Remove the remote counterpart
+  # whenever this run isn't shipping a fresh one, so the remote state always
+  # matches what this run actually staged. See PR #2605 review thread
+  # 4067588202.
+  for file in "${BOOTSTRAP_OPTIONAL_FILES[@]}"; do
+    if [[ ! -f "$ROOT_DIR/$file" ]]; then
+      if ! ssh "${ssh_opts[@]}" "$host" "rm -f ${dir}/${file}" >>"$LOG_PATH" 2>&1; then
+        return 18
+      fi
+    fi
+  done
+
   if ! tar -cf - -C "$ROOT_DIR" "${send_files[@]}" 2>>"$LOG_PATH" | ssh "${ssh_opts[@]}" "$host" "mkdir -p ${dir} && tar -xf - -C ${dir}" >>"$LOG_PATH" 2>&1; then
     return 14
   fi
