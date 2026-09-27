@@ -665,6 +665,18 @@ fn md_check_finite_blood(md: &MultiDrug28) with Mut, Panic {
     }
 }
 
+// Configuration check made by every md_step, exposed so that a gate can test
+// it (a panic cannot be observed by the run-pass harness). Returns 0 when the
+// configuration is valid, 1 for an unknown md.method, 2 for md.iters < 0: a
+// negative sweep count ran zero sweeps and silently fell back to Lie coupling
+// (measured 2026-09-27: iters = -1 gave a victim AUC bit-identical to
+// iters = 0; PR #2695 review).
+pub fn md_config_error(md: &MultiDrug28) -> i32 {
+    if !((*md).method == 0 || (*md).method == 1) { return 1 }
+    if (*md).iters < 0 { return 2 }
+    return 0
+}
+
 // The clock update is checked before anything is mutated: t + dt can overflow
 // to +Inf (two steps of 1e308), and at a large t a small dt is absorbed by
 // round-off (t + dt == t), which would leave md_run_to looping forever.
@@ -672,7 +684,9 @@ pub fn md_step(md: &!MultiDrug28, dt: f64) with Mut, Div, Panic {
     if !(is_finite_f64(dt) && dt > 0.0) { panic("multidrug28: md_step needs a finite dt > 0") }
     let t_next = (*md).t + dt
     if !(is_finite_f64(t_next) && t_next > (*md).t) { panic("multidrug28: md_step: t + dt is not finite or does not advance t") }
-    if !((*md).method == 0 || (*md).method == 1) { panic("multidrug28: md.method must be md_method_trbdf2() or md_method_cn_legacy()") }
+    let cfg = md_config_error(md)
+    if cfg == 1 { panic("multidrug28: md.method must be md_method_trbdf2() or md_method_cn_legacy()") }
+    if cfg == 2 { panic("multidrug28: md.iters must be >= 0 (0 Lie, 1 predictor-corrector, >1 iterated)") }
     md_coupled_step(md, dt)
     md_check_finite_blood(md)
     (*md).t = t_next
