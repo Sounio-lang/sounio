@@ -21,6 +21,9 @@
 // Gate markers:
 //   MC_PRIOR_FAMILY_SWEEP_PASS   — at least one family achieves rel_Hess ≤ 0.10
 //   MC_PRIOR_FAMILY_SWEEP_OUTPUT — no family reaches Hessian criterion (honest result)
+//   neither marker, rc=1          — a GUM/Hessian budget failed, a family kept
+//                                   <= 1900 of its 2000 samples, or the mass
+//                                   balance gate failed
 //
 // N=2000, seed=1729, dose=5mg, t=168h, fast PBPK28 (dt=0.5h, 336 steps).
 //
@@ -365,6 +368,14 @@ fn ms28_sweep_main() -> i32 with IO, Mut, Div, Panic, Epistemic {
     print("  u_Hessian:  "); print_f64(u_hess); println(" mg.h/L")
     println("")
 
+    // A failed budget (a rejected reference or stencil trajectory) reports
+    // u = 0; comparing that to u_MC would print a spurious rel = 1 and the
+    // _OUTPUT marker, which the dissertation gate accepts. Fail instead.
+    if !gum_res.success || !hess_bud.success {
+        println("FAIL: GUM or Hessian budget failed (rejected trajectory); no comparison made")
+        return 1
+    }
+
     // -- MC: Gaussian (positive) --
     println("MC family 0: Gaussian(positive) N=2000 ...")
     let mc_g = ms28_run_family(prm, priors, bounds, dose_mg, 2000, 1729, 0)
@@ -420,12 +431,17 @@ fn ms28_sweep_main() -> i32 with IO, Mut, Div, Panic, Epistemic {
     println("==============================================================")
     println("")
 
-    // TESTS 1-3: Convergence diagnostics for each family
+    // TESTS 1-3: each family must keep > 1900 of its 2000 samples. Rejected
+    // trajectories (non-finite, or booked negative mass) are dropped, so a
+    // family that loses more is not an N = 2000 estimate: hard failure, no
+    // marker.
+    var n_short = 0
     println("TEST 1: Gaussian MC completes successfully (n_valid > 1900)")
     if mc_g.success && mc_g.n_valid > 1900 {
         println("  [PASS]")
     } else {
-        print("  [NOTE] n_valid="); print_f64(mc_g.n_valid as f64); println("")
+        print("  FAIL: n_valid="); print_f64(mc_g.n_valid as f64); println("")
+        n_short = n_short + 1
     }
     println("")
 
@@ -433,7 +449,8 @@ fn ms28_sweep_main() -> i32 with IO, Mut, Div, Panic, Epistemic {
     if mc_l.success && mc_l.n_valid > 1900 {
         println("  [PASS]")
     } else {
-        print("  [NOTE] n_valid="); print_f64(mc_l.n_valid as f64); println("")
+        print("  FAIL: n_valid="); print_f64(mc_l.n_valid as f64); println("")
+        n_short = n_short + 1
     }
     println("")
 
@@ -441,9 +458,15 @@ fn ms28_sweep_main() -> i32 with IO, Mut, Div, Panic, Epistemic {
     if mc_t.success && mc_t.n_valid > 1900 {
         println("  [PASS]")
     } else {
-        print("  [NOTE] n_valid="); print_f64(mc_t.n_valid as f64); println("")
+        print("  FAIL: n_valid="); print_f64(mc_t.n_valid as f64); println("")
+        n_short = n_short + 1
     }
     println("")
+
+    if n_short > 0 {
+        println("FAIL: at least one family kept <= 1900 valid samples")
+        return 1
+    }
 
     println("TEST 4: TruncNormal reduces u_MC relative to LogNormal (less Jensen bias)")
     if u_mc_t < u_mc_l {
