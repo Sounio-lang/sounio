@@ -316,9 +316,46 @@ The build failures include `darwin_sema_sc_depot_smoke` and
 sites are not compiled by Madaros today at all. None of the eight rc 182 tests
 moved: they already exhaust the table on the control.
 
-**Not run:** the full suite. The change is confined to `let`/`var` bindings
-whose initialiser is an aggregate-typed field, deref or index place. A full
-A/B is the remaining acceptance step before landing.
+**Full-suite A/B.** `scripts/dev/run_sio_test_suite.sh --jobs 24 --verbose
+--format junit` over all 3,328 test files, once per compiler, with
+`SOUNIO_MADAROS_AVAILABLE=1`, `SOUNIO_TEST_SOUC_BIN` set to the raw control or
+patched ELF, `ulimit -s 524288`, and a scrubbed environment (`env -i`, only
+`PATH`, `HOME`, `TMPDIR` and the harness variables). The tree was a
+`git archive` of this branch at `6b2134c58`, whose `tests/`, `stdlib/`,
+`scripts/`, `bin/` and `examples/` differ from `2e8b76d31` only by the new
+witness. Each arm ran in its own copy of that tree, both at once, on the SLURM
+node `gpuorangefs-multi-r740-proxmox` (job 12684, 64 CPUs), not on the
+workspace pod. The comparison is per-test harness status (pass, fail, known
+failure, skip, timeout), not stdout bytes. The byte-level comparison is the
+132-file list above.
+
+| Status | Control (`5764851f`) | Patched (`60322816`) |
+|---|---|---|
+| pass | 2,193 | 2,193 |
+| fail | 403 | 404 |
+| known failure | 100 | 99 |
+| skip | 300 | 300 |
+| timeout (30 s default) | 332 | 332 |
+
+The **only** test whose status differs is the witness: a known failure on the
+control, and on the patched build a pass that the harness reports as a stale
+`//@ known-failure` tag (counted as a fail until the fix commit removes the
+tag). Every other test has the same status on both arms, including the same
+332 timeouts.
+
+At 48 concurrent compiles the 30 s default timeout does not separate slow
+from hung, so those 332 were run again as a second job (12689) on the same
+node, with 8 jobs per arm and the default raised to 300 s in the scratch copy
+of the harness only.
+
+| Status | Control | Patched |
+|---|---|---|
+| pass | 309 | 309 |
+| timeout (300 s) | 23 | 23 |
+
+No status differs. Taken together: 2,502 tests pass on both compilers, 23
+time out at 300 s on both, and the witness is the only test the patch
+changes.
 
 ## Witness
 
