@@ -82,15 +82,37 @@ pub fn p28c_liver_fuclint(cl_h: f64, q_l: f64, ps_l: f64) -> f64 with Div, Panic
     return fuclint
 }
 
-// Forward map (for checks): hepatic blood clearance from fu·CLint.
-pub fn p28c_liver_clh(fuclint: f64, q_l: f64, ps_l: f64) -> f64 with Div {
-    let x = fuclint * ps_l / (ps_l + fuclint)
-    return q_l * x / (q_l + x)
+// a·b/(a + b) for a, b >= 0 (the "parallel" combination both liver forward
+// maps are built from). The textbook form is used whenever a·b is a normal
+// finite double and a + b is finite, so ordinary results are bit-identical to
+// it; otherwise it is n/(1 + n/m) with m = max(a, b), n = min(a, b), which
+// cannot overflow (n/m <= 1) and does not lose a representable result to an
+// underflowed product. PR #2695 review: the inverse now returns
+// fu·CLint = 2e154 for CL_H = 5e153, Q_L = 1e154, PS = 2e154, but
+// fuclint·PS = 4e308 overflowed to +Inf and the forward map returned
+// Inf/Inf = NaN instead of 5e153.
+fn p28c_parallel(a: f64, b: f64) -> f64 with Div {
+    let prod = a * b
+    let sum = a + b
+    if is_finite_f64(prod) && prod >= 2.2250738585072014e-308 && is_finite_f64(sum) { return prod / sum }
+    let m = if a > b { a } else { b }
+    let n = if a > b { b } else { a }
+    if m == 0.0 { return 0.0 }
+    return n / (1.0 + n / m)
 }
 
+// Forward map (for checks): hepatic blood clearance from fu·CLint.
+pub fn p28c_liver_clh(fuclint: f64, q_l: f64, ps_l: f64) -> f64 with Div {
+    let x = p28c_parallel(fuclint, ps_l)
+    return p28c_parallel(q_l, x)
+}
+
+// F_H = Q_L/(Q_L + X_L); when Q_L + X_L overflows, 1/(1 + X_L/Q_L).
 pub fn p28c_liver_fh(fuclint: f64, q_l: f64, ps_l: f64) -> f64 with Div {
-    let x = fuclint * ps_l / (ps_l + fuclint)
-    return q_l / (q_l + x)
+    let x = p28c_parallel(fuclint, ps_l)
+    let sum = q_l + x
+    if is_finite_f64(sum) { return q_l / sum }
+    return 1.0 / (1.0 + x / q_l)
 }
 
 // Gut-wall inverse: returns (PS_g, fu_g·CLint_g) in L/h for the target
