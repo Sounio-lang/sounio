@@ -1,0 +1,172 @@
+// lean_single variant of math_pure_ln_grid.sio: lean_single has no bits_to_f64, so inputs are built
+// by exact doubling/halving. Evidence: docs/audit/MATH_PURE_LN_POS_INF_DISPATCH_2026-09-27.md
+// Run: SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run docs/audit/repro/math_pure_ln_grid_lean.sio  (~4.5 min)
+use math::pure::{ln, log10, log2}
+
+fn ln_old(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    if x == 1.0 { return 0.0 }
+
+    // Range reduce to [0.5, 2)
+    var m = x
+    var e_val = 0
+    while m >= 2.0 {
+        m = m / 2.0
+        e_val = e_val + 1
+    }
+    while m < 0.5 {
+        m = m * 2.0
+        e_val = e_val - 1
+    }
+
+    // artanh series: ln(m) = 2 * sum_{k=0}^{N} t^(2k+1)/(2k+1)
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 {
+        term = term * t2
+        let denom = (2 * k + 1) as f64
+        sum = sum + term / denom
+        k = k + 1
+    }
+    let ln_m = 2.0 * sum
+
+    return ln_m + (e_val as f64) * 0.6931471805599453
+}
+
+fn ln10_c() -> f64 { 2.302585092994046 }
+fn ln2_c() -> f64 { 0.6931471805599453 }
+
+struct Acc { n: i64, bad: i64, h: i64 }
+
+fn cmp(a: &!Acc, x: f64) with IO, Mut, Div, Panic {
+    let bo = f64_to_bits(ln_old(x))
+    let bn = f64_to_bits(ln(x))
+    let b10o = f64_to_bits(ln_old(x) / ln10_c())
+    let b10n = f64_to_bits(log10(x))
+    let b2o = f64_to_bits(ln_old(x) / ln2_c())
+    let b2n = f64_to_bits(log2(x))
+    a.n = a.n + 1
+    if bo != bn || b10o != b10n || b2o != b2n {
+        a.bad = a.bad + 1
+        if a.bad < 10 {
+            print("MISMATCH x_bits=")
+            print_int(f64_to_bits(x))
+            print(" old=")
+            print_int(bo)
+            print(" new=")
+            print_int(bn)
+            println("")
+        }
+    }
+    // fingerprint of the new bits (xor of bits + sample index)
+    a.h = a.h ^ (bn + a.n)
+}
+
+fn pow2(e: i64) -> f64 with Mut, Div {
+    var p = 1.0
+    if e >= 0 {
+        var i: i64 = 0
+        while i < e {
+            p = p * 2.0
+            i = i + 1
+        }
+    } else {
+        var i: i64 = 0
+        while i < 0 - e {
+            p = p / 2.0
+            i = i + 1
+        }
+    }
+    p
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var a = Acc { n: 0, bad: 0, h: 1469598103934665603 }
+    let eps = pow2(0 - 52)
+    // L1: every binade e = -1022..1023: 256 mantissa points p*(1 + j/256), plus
+    //     p*(1 + k*eps) and p*(1 - k*eps/2) for k = 1..8 (the ULP neighbours of 2^e)
+    var e: i64 = 0 - 1022
+    while e <= 1023 {
+        let p = pow2(e)
+        var j: i64 = 0
+        while j < 256 {
+            cmp(&!a, p * (1.0 + (j as f64) / 256.0))
+            j = j + 1
+        }
+        var k: i64 = 1
+        while k <= 8 {
+            cmp(&!a, p * (1.0 + (k as f64) * eps))
+            cmp(&!a, p * (1.0 - (k as f64) * eps / 2.0))
+            k = k + 1
+        }
+        e = e + 1
+    }
+    // subnormals: 2^-1023 .. 2^-1074 and small multiples of the minimum
+    var d: i64 = 1023
+    while d <= 1074 {
+        cmp(&!a, pow2(0 - d))
+        d = d + 1
+    }
+    let tiny = pow2(0 - 1074)
+    var s: i64 = 2
+    while s <= 64 {
+        cmp(&!a, tiny * (s as f64))
+        s = s + 1
+    }
+    print("L1 n=")
+    print_int(a.n)
+    print(" bad=")
+    print_int(a.bad)
+    println("")
+    // L2: 2^16 ULPs each side of 1.0
+    var q: i64 = 1
+    while q <= 65536 {
+        cmp(&!a, 1.0 + (q as f64) * eps)
+        cmp(&!a, 1.0 - (q as f64) * eps / 2.0)
+        q = q + 1
+    }
+    // L3: top 4096 finite values below DBL_MAX (ULP there is 2^971)
+    let dmax = (2.0 - eps) * pow2(1023)
+    let ulp_top = pow2(971)
+    var t: i64 = 0
+    while t < 4096 {
+        cmp(&!a, dmax - (t as f64) * ulp_top)
+        t = t + 1
+    }
+    print("L3 n=")
+    print_int(a.n)
+    print(" bad=")
+    print_int(a.bad)
+    println("")
+    // L4: decimal grid i*1e-3, i = 1..2e6, and integers 1..1e5
+    var i: i64 = 1
+    while i <= 2000000 {
+        cmp(&!a, (i as f64) * 0.001)
+        i = i + 1
+    }
+    var m: i64 = 1
+    while m <= 100000 {
+        cmp(&!a, m as f64)
+        m = m + 1
+    }
+    // L5: non-positive and NaN
+    let big = 1.0e308
+    cmp(&!a, 0.0)
+    cmp(&!a, 0.0 - 0.0)
+    cmp(&!a, 0.0 - 1.0)
+    cmp(&!a, 0.0 - big)
+    cmp(&!a, 0.0 - big * 10.0)
+    cmp(&!a, big * 10.0 - big * 10.0)
+    print("GRID_TOTAL n=")
+    print_int(a.n)
+    print(" bad=")
+    print_int(a.bad)
+    print(" hash=")
+    print_int(a.h)
+    println("")
+    if a.bad == 0 { println("GRID_BIT_IDENTICAL") } else { println("GRID_MISMATCH") }
+    return 0
+}

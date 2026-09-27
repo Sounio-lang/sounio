@@ -1,0 +1,169 @@
+// Dense-grid bit-identity probe for the math::pure ln(+inf) guard (Madaros).
+// Evidence: docs/audit/MATH_PURE_LN_POS_INF_DISPATCH_2026-09-27.md
+// ln_old is stdlib/math/pure.sio ln at 9c5ffa2360, verbatim except the rename and ln2() inlined.
+// Run: SOUNIO_MADAROS_BIN=... ./bin/souc run docs/audit/repro/math_pure_ln_grid.sio  (~2.7 min)
+use math::pure::{ln, log10, log2}
+
+fn ln_old(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e30 }
+    if x == 1.0 { return 0.0 }
+
+    // Range reduce to [0.5, 2)
+    var m = x
+    var e_val = 0
+    while m >= 2.0 {
+        m = m / 2.0
+        e_val = e_val + 1
+    }
+    while m < 0.5 {
+        m = m * 2.0
+        e_val = e_val - 1
+    }
+
+    // artanh series: ln(m) = 2 * sum_{k=0}^{N} t^(2k+1)/(2k+1)
+    let t = (m - 1.0) / (m + 1.0)
+    let t2 = t * t
+    var sum = t
+    var term = t
+    var k = 1
+    while k < 30 {
+        term = term * t2
+        let denom = (2 * k + 1) as f64
+        sum = sum + term / denom
+        k = k + 1
+    }
+    let ln_m = 2.0 * sum
+
+    return ln_m + (e_val as f64) * 0.6931471805599453
+}
+
+fn ln10_c() -> f64 { 2.302585092994046 }
+fn ln2_c() -> f64 { 0.6931471805599453 }
+
+struct Acc { n: i64, bad: i64, h: i64 }
+
+fn cmp(a: &!Acc, x: f64) with IO, Mut, Div, Panic {
+    let bo = f64_to_bits(ln_old(x))
+    let bn = f64_to_bits(ln(x))
+    let b10o = f64_to_bits(ln_old(x) / ln10_c())
+    let b10n = f64_to_bits(log10(x))
+    let b2o = f64_to_bits(ln_old(x) / ln2_c())
+    let b2n = f64_to_bits(log2(x))
+    a.n = a.n + 1
+    if bo != bn || b10o != b10n || b2o != b2n {
+        a.bad = a.bad + 1
+        if a.bad < 10 {
+            print("MISMATCH x_bits=")
+            print_int(f64_to_bits(x))
+            print(" old=")
+            print_int(bo)
+            print(" new=")
+            print_int(bn)
+            println("")
+        }
+    }
+    // fingerprint of the new bits (xor of bits + sample index)
+    a.h = a.h ^ (bn + a.n)
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var a = Acc { n: 0, bad: 0, h: 1469598103934665603 }
+    // G1: strided sweep over every positive finite bit pattern (min subnormal .. DBL_MAX)
+    let top: i64 = 9218868437227405311          // 0x7FEFFFFFFFFFFFFF = DBL_MAX
+    let stride: i64 = 2199023255531             // ~2^41, odd, => ~4.19e6 samples
+    var b: i64 = 1
+    while b <= top {
+        cmp(&!a, bits_to_f64(b))
+        b = b + stride
+    }
+    print("G1 n=")
+    print_int(a.n)
+    print(" bad=")
+    print_int(a.bad)
+    println("")
+    // G2: 2^16 consecutive ULPs on each side of 1.0
+    let one: i64 = 4607182418800017408
+    var k: i64 = 1
+    while k <= 65536 {
+        cmp(&!a, bits_to_f64(one + k))
+        cmp(&!a, bits_to_f64(one - k))
+        k = k + 1
+    }
+    cmp(&!a, 1.0)
+    print("G2 n=")
+    print_int(a.n)
+    print(" bad=")
+    print_int(a.bad)
+    println("")
+    // G3: every binade boundary 2^e (e = -1074..1023) and +/-8 ULPs around it
+    var e: i64 = 1
+    while e <= 2046 {
+        let p: i64 = e * 4503599627370496       // biased exponent e, zero mantissa
+        var j: i64 = 0 - 8
+        while j <= 8 {
+            cmp(&!a, bits_to_f64(p + j))
+            j = j + 1
+        }
+        e = e + 1
+    }
+    var s: i64 = 1
+    while s <= 64 {                              // subnormal low end, contiguous
+        cmp(&!a, bits_to_f64(s))
+        s = s + 1
+    }
+    print("G3 n=")
+    print_int(a.n)
+    print(" bad=")
+    print_int(a.bad)
+    println("")
+    // G4: top 2^16 finite ULPs below DBL_MAX (closest to the new guard)
+    var t: i64 = 0
+    while t < 65536 {
+        cmp(&!a, bits_to_f64(top - t))
+        t = t + 1
+    }
+    print("G4 n=")
+    print_int(a.n)
+    print(" bad=")
+    print_int(a.bad)
+    println("")
+    // G5: decimal grid i*1e-3, i = 1..2e6 (0.001 .. 2000) and integers 1..1e5
+    var i: i64 = 1
+    while i <= 2000000 {
+        cmp(&!a, (i as f64) * 0.001)
+        i = i + 1
+    }
+    var m: i64 = 1
+    while m <= 100000 {
+        cmp(&!a, m as f64)
+        m = m + 1
+    }
+    print("G5 n=")
+    print_int(a.n)
+    print(" bad=")
+    print_int(a.bad)
+    println("")
+    // G6: non-positive and NaN (NaN compared by bit pattern)
+    let big = 1.0e308
+    cmp(&!a, 0.0)
+    cmp(&!a, 0.0 - 0.0)
+    cmp(&!a, 0.0 - 1.0)
+    cmp(&!a, 0.0 - big)
+    cmp(&!a, 0.0 - big * 10.0)
+    cmp(&!a, big * 10.0 - big * 10.0)
+    cmp(&!a, bits_to_f64(0 - 2251799813685248))  // 0xFFF8000000000000, negative quiet NaN
+    print("G6 n=")
+    print_int(a.n)
+    print(" bad=")
+    print_int(a.bad)
+    println("")
+    print("GRID_TOTAL n=")
+    print_int(a.n)
+    print(" bad=")
+    print_int(a.bad)
+    print(" hash=")
+    print_int(a.h)
+    println("")
+    if a.bad == 0 { println("GRID_BIT_IDENTICAL") } else { println("GRID_MISMATCH") }
+    return 0
+}

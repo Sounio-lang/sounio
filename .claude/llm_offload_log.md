@@ -61,3 +61,20 @@ the invalid DeepSeek key in `~/.sounio-keys.env`. Raw outputs from this session:
   "Specify two BE half-steps": already specified.
 - **zai/local/deepseek:** not rerun. Status as in the previous entry (rate limit,
   endpoint down, invalid key).
+
+## 2026-09-27T02:30Z — Claude (cloud session b5c9ebf4) — M1 math-review, math::pure ln(+inf) guard
+
+| 2026-09-27 | xai, kimi, zai, local | math-review | docs/audit/MATH_PURE_LN_POS_INF_DISPATCH_2026-09-27.md | **BLOCKED — not performed** | All legs SKIPPED: no provider credentials in the cloud container. |
+
+- `bin/llm-offload -t math-review -i docs/audit/MATH_PURE_LN_POS_INF_DISPATCH_2026-09-27.md`. Every leg SKIPPED:
+  Grok 4.7 and Kimi K3 (`LLMGATEWAY_API_KEY` unset, and `XAI_API_KEY` unset for the direct route), Z.AI
+  (`ZAI_API_KEY`/`ZHIPU_API_KEY` unset), local (`LOCAL_LLM_URL`/`LOCAL_LLM_MODEL` unset). No opinion is counted.
+- **M1 stays open.** Rerun the same command from a workspace with the gateway key before the PR merges.
+- The claims under review:
+  - `x / 2.0 == x` is false for every positive finite x, true for +inf, and false for NaN under ordered-compare
+    semantics;
+  - ln(+inf) = +inf (C11 F.10.3.7);
+  - finite outputs are bit-identical, by argument and on a 6.5 M-point grid (Madaros) plus a 2.8 M-point grid
+    (lean_single).
+- Author self-check (same model, not counted): the "x/2 exact for every normal x" wording was wrong in the lowest
+  normal binade. It was fixed before this entry, and the conclusion is unchanged.
