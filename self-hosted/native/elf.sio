@@ -108,17 +108,36 @@ pub fn elf_binary_new() -> Elf64Binary {
     out
 }
 
-// Symbol table data for .symtab/.strtab sections
+// Symbol payload lives off the struct. strtab (64 KiB) + name_offsets
+// (128 KiB) made SymbolData ~197 KiB by value. compiler_new stacks that
+// return on top of RelocationTable and the NativeCompiler local, which
+// crosses the seed compiler's ~640 KiB frame cliff (see encode.sio) and
+// the generated ELF SIGSEGVs. Same remedy as NC_BIG_CODE: BSS arrays,
+// one cursor left in the struct. One compile owns the table;
+// symbol_data_new resets the cursor. Accessed inline, not via a helper.
+pub var NC_SYM_STRTAB: [i8; 65536] = [0; 65536]
+pub var NC_SYM_NAME_OFFSETS: [i64; 16384] = [0; 16384]
+
+// Symbol table cursor for .symtab/.strtab. Bytes and per-function offsets
+// are NC_SYM_STRTAB / NC_SYM_NAME_OFFSETS.
 pub struct SymbolData {
-    pub strtab: [i8; 65536],         // null-terminated function name strings
     pub strtab_len: i64,              // current length (index 0 is always \0)
-    pub name_offsets: [i64; 16384],   // strtab byte offset for each function's name
 }
 
 pub fn symbol_data_new() -> SymbolData {
     var out: SymbolData
     out.strtab_len = 1             // slot 0 = \0 (null entry's st_name = 0)
-    out.strtab[0] = 0
+    NC_SYM_STRTAB[0] = 0
+    // A later compiler_new() in the same process must not observe the
+    // previous compile's offsets. 0 is a real strtab index, so unset
+    // slots have to go back to 0 only after the cursor reset — readers
+    // key off strtab_len / fn_count, but a short second compile used to
+    // see stale offsets past the names it rewrote. Clear them.
+    var zi: i64 = 0
+    while zi < 16384 {
+        NC_SYM_NAME_OFFSETS[zi as usize] = 0
+        zi = zi + 1
+    }
     out
 }
 
@@ -131,15 +150,15 @@ pub fn symbol_data_add_name(sym: SymbolData, fn_idx: i64, name_buf: [i8; 384], n
     // symbol name was DROPPED and nothing said so — measured as a program that
     // exits 0 and prints nothing at exactly 2046 functions.
     if fn_idx >= 0 && fn_idx < IR_MAX_FUNCS {
-        s.name_offsets[fn_idx as usize] = s.strtab_len
+        NC_SYM_NAME_OFFSETS[fn_idx as usize] = s.strtab_len
         var ni = 0
         while ni < name_len && s.strtab_len < 32767 {
-            s.strtab[s.strtab_len as usize] = name_buf[ni as usize]
+            NC_SYM_STRTAB[s.strtab_len as usize] = name_buf[ni as usize]
             s.strtab_len = s.strtab_len + 1
             ni = ni + 1
         }
         if s.strtab_len < 32767 {
-            s.strtab[s.strtab_len as usize] = 0
+            NC_SYM_STRTAB[s.strtab_len as usize] = 0
             s.strtab_len = s.strtab_len + 1
         }
     }
@@ -281,7 +300,7 @@ pub fn elf_builder_emit_strtab_symtab_ref(
     var si = 0
     let strtab_emit_len = if symbols.strtab_len > 0 { symbols.strtab_len } else { 1 }
     while si < strtab_emit_len {
-        elf_emit_byte_ref(bin, symbols.strtab[si as usize] as i64)
+        elf_emit_byte_ref(bin, NC_SYM_STRTAB[si as usize] as i64)
         si = si + 1
     }
     (*strtab_size) = (*bin).len - (*strtab_offset)
@@ -295,7 +314,7 @@ pub fn elf_builder_emit_strtab_symtab_ref(
 
     var fi = 0
     while fi < fn_count {
-        let fn_name_off = symbols.name_offsets[fi as usize]
+        let fn_name_off = NC_SYM_NAME_OFFSETS[fi as usize]
         let fn_va = text_va_base + fn_offsets[fi as usize]
         emit_symtab_entry_ref(bin, fn_name_off, 2, 1, 1, fn_va, 0)
         fi = fi + 1
