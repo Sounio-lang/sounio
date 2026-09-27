@@ -47,9 +47,32 @@ fn equilibrium_exp_approx(x: f64) -> f64 with Mut, Div, Panic {
     sumv
 }
 
+// sqrt(x) by exponent reduction plus Newton (Copilot review,
+// sounio-lang/sounio#2694). The previous 20 Newton steps from y = x spend
+// about 0.5*|log2 x| steps just halving toward the root before converging, so
+// they covered only a middle band of magnitudes. Reproduced through
+// k_from_delta_g (ut = 0, where uk*R*T/(K*udg) must be exactly 1): udg = 1e-9
+// gave 2378786.8, udg = 1e12 gave 382.3. Write x = m*4^k with m in [1, 4):
+// Newton on [1, 4) from (1 + m)/2 reaches full precision in about 5 steps
+// (8 taken), and the 2^k rescaling is exact.
 fn equilibrium_sqrt_approx(x: f64) -> f64 with Mut, Div, Panic {
     if x <= 0.0 { return 0.0; }
-    var y = x; var i=0; while i<20 { y = 0.5*(y + x/y); i=i+1; } y
+    // False for +Inf and NaN alike, which would not terminate the loops below.
+    if !(x <= 1.7976931348623157e308) { panic("equilibrium_sqrt_approx: argument is +Inf or NaN"); }
+    var m = x;
+    var k: i64 = 0;
+    while m >= 4.0 { m = m * 0.25; k = k + 1; }
+    while m < 1.0 { m = m * 4.0; k = k - 1; }
+    var y = (1.0 + m) * 0.5;
+    var i = 0;
+    while i < 8 { y = (y + m / y) * 0.5; i = i + 1; }
+    let n = if k < 0 { 0 - k } else { k };
+    var j: i64 = 0;
+    while j < n {
+        if k < 0 { y = y * 0.5; } else { y = y * 2.0; }
+        j = j + 1;
+    }
+    y
 }
 
 // Real K from deltaG
@@ -217,6 +240,25 @@ pub fn test_k_dg_rss_combination() -> bool with Mut, Div, Panic {
     equilibrium_check_near(uk, 0.387363, 1e-5)
 }
 
+// Regression for equilibrium_sqrt_approx's magnitude range (Copilot review,
+// same PR, third round). With ut = 0 the RSS collapses to one term, so
+// uk * R * T / (K * udg) must equal 1 for EVERY udg; the old 20-step Newton
+// from y = x returned 2378786.8 at udg = 1e-9 and 382.3 at udg = 1e12. The
+// tolerance is a few ulps times the ~10 roundings in the chain, not a value
+// chosen from the output.
+pub fn test_k_dg_sqrt_magnitude_range() -> bool with Mut, Div, Panic {
+    let udgs: [f64; 5] = [1.0e-9, 1.0e-3, 100.0, 1.0e6, 1.0e12];
+    var ok = true;
+    var i = 0;
+    while i < 5 {
+        let (k, uk) = k_from_delta_g(-5000.0, udgs[i], 300.0, 0.0);
+        let ratio = uk * r_const() * 300.0 / (k * udgs[i]);
+        if !equilibrium_check_near(ratio, 1.0, 1e-12) { ok = false; }
+        i = i + 1;
+    }
+    ok
+}
+
 fn main() -> i32 with Mut, Div, Panic, IO {
     var p: i32 = 0; var f: i32 = 0;
     if test_k_dg() { p = p + 1 } else { f = f + 1; println("FAIL kdg") }
@@ -227,6 +269,7 @@ fn main() -> i32 with Mut, Div, Panic, IO {
     if test_real_delta_g() { p = p + 1 } else { f = f + 1; println("FAIL real delta g") }
     if test_k_dg_negative_uncertainty_sign() { p = p + 1 } else { f = f + 1; println("FAIL k_dg negative uncertainty sign") }
     if test_k_dg_rss_combination() { p = p + 1 } else { f = f + 1; println("FAIL k_dg rss combination") }
+    if test_k_dg_sqrt_magnitude_range() { p = p + 1 } else { f = f + 1; println("FAIL k_dg sqrt magnitude range") }
     if test_speciation() { p = p + 1 } else { f = f + 1; println("FAIL speciation") }
     if f == 0 { println("EQUILIBRIUM + ELECTRO + SOLVERS REAL ALL PASS (phase3+)") } else { println("EQUIL FAILS") }
     return f
