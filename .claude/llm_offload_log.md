@@ -4181,6 +4181,18 @@ the invalid DeepSeek key in `~/.sounio-keys.env`. Raw outputs from this session:
 - **zai/local/deepseek:** not rerun. Status as in the previous entry (rate limit,
   endpoint down, invalid key).
 
+## 2026-09-26 (recorded 2026-09-27T01:20Z) — Claude — M1 math-review, PR #2699 (venlafaxine implicit CYP2D6 sink + steady-state readout)
+
+| 2026-09-26 | xai (grok-4.6), gemini-2.5-pro via OpenRouter | math-review | stdlib/darwin_pbpk/tsit5_pbpk28.sio (organ sink in the CN Schur solve), stdlib/darwin_pbpk/scenarios/venlafaxine_xr.sio (implicit formation, steady-state C_avg readout and its certified bound) | PASS after fixes; one disagreement recorded | Two independent providers. |
+
+Transcribed from the `LLM-offload-review:` trailers on this PR's commits, which were the only record until now (Copilot review on #2699).
+
+- **xai, organ sink (`1b61789b0`, `3e6b7e38e`):** claims 1–4 OK, with no coefficient error in pp/sb/rhs_v/rhs_t. Claim 5 was tightened: CN undershoot begins at h·k_s > 1.
+- **xai, steady-state readout (`7399fd421`):** claims 1–3, 5 and 7 OK. Claim 4 was tightened: the bound uses the volume-weighted mass functional VᵀA ≤ 0, not raw column sums, and the ODV residual is analogous. The overreach in claim 6 was removed: no λ_fast/λ_slow factor is claimed.
+- **gemini-2.5-pro (independent second leg, `d94b9ab40` review round):** claims 1–4, 6 and 7 OK. It **rejected claim 5** as "assumes F = 1".
+  - **Disagreement, not accepted, with reasoning:** F ≤ 1, and all converted mass leaves via CL_odv, so m_p/CL_odv is an upper bound whether or not F = 1. xai rated claim 5 OK. The reasoning is also documented in the source.
+- **Unavailable:** zai was rate-limited (provider code 1313), and the deepseek key was rejected as invalid. Neither leg counts.
+
 ## 2026-09-26T18:34Z — Claude (session_01RMzxzzsE5JNGEqnnkUs9Yo) — M1, PBPK28 portal/hepatic-sink kernel
 
 | 2026-09-26 | — | math-review | pbpk28_hepatic.sio, darwin_pbpk28_hepatic_gates.sio (CN step with portal topology + interstitial metabolic sink; extended-clearance-model steady-state identities) | WAIVED | No offload provider configured in this container (`bin/llm-offload --status`: keys file not found). Independent verification by exact closed-form gates plus sabotage controls; narrative below. |
