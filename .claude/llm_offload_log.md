@@ -82,6 +82,15 @@ recomputes the expected transfer from public primitives. It checks the parent
 side to 1e-9 relative (measured 0) and the ODV side against a replayed CN step
 to 1e-9 (measured 0). Every comparison is written to fail on NaN.
 
+**Canonical fan-out (added 2026-09-27T00:26Z, after review):** the default
+route `bin/llm-offload -t math-review -i <file>` (legs `xai kimi zai local`)
+was run as well. Every leg reported SKIPPED with its reason, and none sent a
+request:
+- xai (Grok 4.7): `set LLMGATEWAY_API_KEY, or XAI_API_KEY for the direct route`
+- kimi (Kimi K3): `set LLMGATEWAY_API_KEY`
+- zai: `set ZAI_API_KEY or ZHIPU_API_KEY, or fund OPENROUTER_API_KEY`
+- local: `set LOCAL_LLM_URL and LOCAL_LLM_MODEL` (no local endpoint in this container)
+
 **Flagged for re-review:** run `bin/llm-offload -t math-review -p xai` and a
 second independent provider on the formation-step block
 (`venlafaxine_xr.sio`, step 4) from a checkout that has
