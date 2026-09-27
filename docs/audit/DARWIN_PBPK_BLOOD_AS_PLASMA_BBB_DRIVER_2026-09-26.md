@@ -74,7 +74,7 @@ comparison. What is wrong is:
 
 The size and sign follow from plasma = blood / rb.
 
-| Parameter set | `rb_ratio` | Unbound plasma AUC and BBB driver (hence ISF/ICF exposure and PD) |
+| Parameter set | `rb_ratio` | Unbound plasma AUC, BBB driver and (linearly) ISF/ICF exposure |
 |---|---:|---|
 | haloperidol, midazolam | 1.0 | unaffected |
 | olanzapine | 0.96 | ~4% low |
@@ -82,8 +82,20 @@ The size and sign follow from plasma = blood / rb.
 | `rapamycin_fullvd_params` | 36.0 | **~36× high** |
 | tacrolimus | 15.0 | 15× high wherever a BBB or "unbound plasma" readout uses it |
 
+The factor applies to quantities linear in the driver: unbound plasma
+concentration and AUC, and the BBB driver. Because the BBB chain is linear,
+it also applies to ISF and ICF exposure. It does **not** carry over to PD:
+the Hill response saturates, so PD endpoints change by less than the
+driver. On the mean model, inhibition rises 68–69% while the driver rises
+×1.724 (measurement 1). PD must be re-simulated per model, not rescaled.
+
 Scale-free quantities survive: Kp,uu from the AUC ratio, cell-to-ISF ratios,
-t_max lag and accumulation ratios.
+t_max lag and accumulation ratios. This holds **only because** the
+driver-to-ISF/ICF chain is linear and time-invariant (passive, linear BBB
+kinetics) and `rb_ratio` is a positive constant. Saturable transport,
+Michaelis–Menten efflux or nonlinear binding would break it. The exact
+common ×1.724 scaling in measurement 1 confirms linearity for this
+parameter regime, not in general.
 
 ## Measurements
 
@@ -96,7 +108,7 @@ converted to `blood / rb_ratio` (three lines):
 
 | Output | Blood driver (current) | Plasma driver | Change |
 |---|---:|---:|---:|
-| C_max_plasma (mg/L) | 0.001755 | 0.003027 | ×1.725 (= 1/0.58) |
+| C_max_plasma (mg/L) | 0.001755 | 0.003027 | ×1.7248 displayed; exact scale 1/0.58 = 1.7241 |
 | C_plasma @ 24 h | 0.001387 | 0.002391 | ×1.72 |
 | C_icf @ 24 h | 0.000633 | 0.001091 | ×1.72 |
 | max_inhibition | 0.036075 | 0.060614 | **+68%** |
@@ -126,7 +138,16 @@ to compile, and its "failure" was discarded.
 4. Add a guard test with `rb_ratio != 1`. At steady state under constant
    infusion, `fu_isf * C_isf` must approach
    `kpuu_brain * fu_plasma * C_blood / rb_ratio`. That is an absolute
-   check, which the current benchmarks lack.
+   check, which the current benchmarks lack. The identity holds exactly
+   only:
+   - at true steady state (the test must allow for the approach);
+   - with `C_isf` the **total** ISF concentration;
+   - if `kpuu_brain` is the model's own implied unbound steady-state ratio,
+     that is, with no separate active-transport asymmetry making the
+     realised ratio differ from the parameter.
+
+   Stated this way, the guard tests the wiring, not a parameter
+   definition.
 5. Re-derive every dissertation-facing BBB and PD number (before/after
    table) and run `bin/llm-offload -t math-review`.
 
@@ -138,3 +159,24 @@ to compile, and its "failure" was discarded.
   correcting the scale.
 - **Q2.** Which quantity should the dissertation report as "plasma"
   concentration for sirolimus: whole blood (clinical convention) or plasma?
+
+## Math review (2026-09-27)
+
+Default fan-out `bin/llm-offload -t math-review`. Grok 4.7 (xAI direct,
+after the gateway leg timed out) and Kimi K3 (gateway) both returned
+verdicts. zai was rate-limited (1313) and local was down; both are errors,
+not passes.
+
+Both confirm the core claim: the driver and the reported unbound exposure
+are off by exactly `rb_ratio`, and the sign follows `rb − 1`. Accepted and
+applied:
+- Grok, **overreach**: the impact table applied the factor to PD, but the
+  Hill response is saturating (+68–69% measured versus ×1.724). The rows now
+  cover linear quantities only, with a PD note.
+- Grok, **wrong**: "×1.725 (= 1/0.58)". In fact 1/0.58 = 1.7241, and 1.7248
+  is the ratio of the rounded displayed values.
+- Both, **tightenable**: the scale-free claim needs linear, time-invariant
+  BBB kinetics.
+- Kimi, **tightenable**: the guard identity's hypotheses (steady state, total
+  C_isf, `kpuu_brain` equal to the implied ratio). Now stated.
+

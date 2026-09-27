@@ -4207,3 +4207,61 @@ the invalid DeepSeek key in `~/.sounio-keys.env`. Raw outputs from this session:
   interval granularity is documented.
 - **zai/deepseek/local:** not run (rate limit, invalid key, endpoint down per
   the earlier entries today).
+
+## 2026-09-27T05:30Z — Claude (session 9e18db24, confident-kilby) — PR #2698 math review on the canonical route
+
+| 2026-09-27 | default fan-out `xai kimi zai local` (Grok 4.7, Kimi K3 via LLM Gateway) | math-review | PR #2698 math-bearing content: A runner diff, B blood-as-plasma dispatch, C1/C2 lean_single dispatch excerpts, D tolerance-bearing fixtures | B and C2 PASS after fixes (both canonical legs); A, C1, D Grok-only so far (Kimi retry pending) | Supersedes the 2026-09-26T23:20Z entry's `-p xai` (grok-4.6) + qwen route. |
+
+Legs:
+- zai: ERROR 1313 (rate limit) on every call. local: ERROR (endpoint down).
+  Neither is represented as a pass.
+- Grok 4.7: the gateway leg timed out at 180 s and then at 600 s on A, C1
+  and D, and those verdicts came from the xAI direct fallback. A second leg
+  from the same vendor counts once.
+- Kimi K3: complete on B and C2. On C1 and D at 8,192 tokens it spent the
+  whole budget reasoning (`content: ""`); at 24,000 tokens and 600 s it timed
+  out. A Kimi-only retry at 1,200 s is running; the result will be added
+  below.
+
+Findings accepted and applied:
+- **B, Grok.** Overreach: the factor does not apply to PD (Hill response
+  saturates; +68–69% measured against ×1.724). Wrong: "×1.725 (= 1/0.58)";
+  1/0.58 = 1.7241. Tightenable (both): linearity assumption, guard-identity
+  hypotheses.
+- **A, Grok.** Wrong: the "~5% below the plateau" shortfall at SS
+  declaration; the bound is r·ε/(ε + 1 − r), ~7% at r = 0.79 and → 1 as r → 1.
+  Tightenable: "last interval is a lower bound" holds only for monotone
+  approach from below; "16-point trapezoid underestimated" holds for the
+  measured regimens, not in general. Runner comments and dispatch corrected.
+  Wrong (review text only): AUC_τ,k = AUC_ss(1 − r^(k+1)) for 0-based k; the
+  code was already right.
+- **C1, Grok.** Wrong: the literal-rounding mechanism as written could not
+  produce the 1–2 ulp errors on `0.041`, `0.000001` and similar (a single
+  divsd of exact integers is correctly rounded). Confirmed in the lexer
+  (`lean_single.sio:7555–7602`): leading zeros are folded into the exponent
+  (one extra ÷10 each), the 18-digit mantissa exceeds 2^53, and adding the
+  integer part rounds again. Mechanism rewritten. "31×" made explicit
+  (6.6e-4 against 2.1e-5 on the AUC ratio, both old metric). "Three
+  significant figures" superseded (−1.8e-5 against the per-step reference
+  on the fixed metric). "Likely amplifier" softened to "not shown".
+- **C2, Grok and Kimi.** Accepted: Kp,uu computed from these traces
+  survives the blood-as-plasma scale (linear BBB, and the factor cancels);
+  the dispatch had contradicted itself. Accepted: "2·τ for every drug"
+  follows from where the loop starts checking. Accepted from both: one
+  halving does not establish order. Measured h, h/2 and h/4: successive
+  differences 404 and 108 ppm, ratio 3.74, so order ≈ 1.9, **not** 1. The
+  quadrature fixture now uses second-order Richardson (4·A(h/4) − A(h/2))/3:
+  new runner +48.9 ppm, old runner −7,733 ppm, bound 2e-3. Gate PASS on the
+  new runner; exit 2 with the old runner restored.
+- **D, Grok.** Wrong: Σ|a_ij| < 27; row 6 is 27.04, bound γ5·Σ ≈ 1.5e-14.
+  Tightenable: 7-term sums for b and e; 6.45× not 6×. Overreach:
+  nfeval = 7·(nsteps + nreject) is an invariant of this implementation's
+  counter, not of the method; mass bounds are physical for this model
+  (measured 28.4 of 100). The extrapolated reference is not exact (measured;
+  see C2). Comments corrected.
+
+Disagreement documented, not applied: Kimi (C2) wrote that Kp,uu "does not"
+survive, because its numerator is a nonlinear functional of the wrong
+driver. Rejected in favour of Grok: bbb_ode is linear in `c_plasma`, and the
+exact common ×1.724 scaling of ISF and ICF in the blood-as-plasma
+measurement confirms it.

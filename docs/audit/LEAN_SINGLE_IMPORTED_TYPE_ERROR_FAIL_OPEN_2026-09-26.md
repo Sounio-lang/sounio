@@ -342,17 +342,36 @@ nearest `f64`. Madaros does. In the closure of the steady-state demos, 14 of
 under lean_single. With those 14 literals supplied as exact values, lean_single
 reproduces Madaros' output byte for byte.
 
-**Mechanism.** `self-hosted/compiler/lean_single.sio:13131` (float literal,
-token kind 53) does not emit the literal's bits. It emits code that rebuilds
-the value at run time:
+**Mechanism.** The lexer splits the literal
+(`self-hosted/compiler/lean_single.sio:7555–7602`), and the float-literal
+codegen (`lean_single.sio:13131`, token kind 53) rebuilds it at run time
+instead of emitting its bits:
 
 ```
 cvtsi2sd(int_part) + cvtsi2sd(frac_digits) / cvtsi2sd(10^n)
 ```
 
-followed by one `mulsd` or `divsd` by `10.0` per unit of the decimal exponent.
-Every step rounds. `1.0e-30`, for example, is thirty successive divisions of
-`1.0` by `10.0`.
+That is followed by one `mulsd` or `divsd` by `10.0` per unit of the stored
+exponent `TX`. Three things make the result land off the nearest `f64`:
+
+1. **Leading zeros after the decimal point are not digits of `frac`.** The
+   lexer counts them and folds them into the exponent
+   (`TX = exp_sign * exp_val - lit_leading_zeros`, `:7602`). Each becomes one
+   more `divsd` by 10.
+   - `0.041` becomes 41/100 (rounded) and then ÷10 (rounded again).
+   - `0.000001` becomes 1/10 followed by five ÷10s.
+   - `1.0e-30` is thirty ÷10s of `1.0`.
+2. **Long mantissas round before the division.** `frac` accumulates up to 18
+   digits (`:7561`). Above 2^53, as in `0.9800255409045097`, the
+   `cvtsi2sd(frac)` itself rounds.
+3. **Adding the integer part** to the quotient is a further rounding (for
+   example `1.379008574103742`).
+
+A single `divsd` of two exact integers would be correctly rounded, so none
+of the 14 errors could come from the `frac / 10^n` step alone. **Correction:**
+an earlier revision described only that step plus the explicit exponent,
+which does not account for `0.041`, `0.000001`, `0.000009`, `0.0000001` or
+`0.0000000001`. The math review caught it.
 
 ### Measurement 1: literal bits (115 literals)
 
@@ -409,8 +428,10 @@ Two points about the harness:
 | Madaros (exact literals) vs Madaros | identical | identical |
 
 The last row is expected: Madaros already parses the literals exactly, so
-nothing changes for it. The literal conversion accounts for the entire
-divergence. No other engine difference is involved in these two demos.
+nothing changes for it. On these two demos' outputs, the literal conversion
+accounts for the entire divergence. The intervention shows that no other
+engine difference affects these outputs. It does not show the absence of
+engine differences elsewhere.
 
 ### Consequences
 
@@ -418,22 +439,32 @@ divergence. No other engine difference is involved in these two demos.
   faithful to the source.
 - A 1–2 ulp perturbation of constants moved the printed C_max and AUC
   ratios by up to 6.4e-5 relative. The adaptive Tsit5 step control
-  (`rtol = 1e-6`) is the likely amplifier, because accept/reject decisions
-  near `err_norm = 1` depend on the tolerance and tableau literals. That is
-  inferred, not traced step by step.
+  (`rtol = 1e-6`) is a candidate amplifier, because accept/reject decisions
+  near `err_norm = 1` depend on the tolerance and tableau literals. This is
+  **not shown**. A 1-ulp change moves `err_norm` by only ~2e-10 of a step, so a
+  flip needs a step already that close to the threshold. The cascade was not
+  traced.
 - **The engine gap is not the accuracy of these numbers.** Lane
   `claude(gracious-bardeen)` reports an independent fixed-step RK4
   reference (continuous absorption, no operator splitting) for
   `AUC_last / AUC_first` in `dissertation_steady_state_fullvd_demo` (the demo
   that prints that ratio): 1.227702.
-  **Both** engines sit about 6.5e-4 away from it, roughly 31 times the
-  engine gap. They attribute this to the runner's operator-split oral bolus,
-  which is O(dt). The report is their dispatch,
+  Both engines are about 6.6e-4 (absolute) away from it: the Madaros
+  1.228366 minus 1.227702. The engine gap on the same ratio is 2.1e-5
+  (1.228366 against 1.228345), so the reference gap is about 31 times larger.
+  All three values use the old 16-checkpoint AUC quadrature, which that lane
+  has since confirmed their 1.227702 also uses. They attribute the gap to the
+  runner's operator-split oral bolus, O(dt) for smooth fields. The report is
+  their dispatch,
   `docs/audit/STEADY_STATE_DEMO_ENGINE_DIVERGENCE_REFERENCE_2026-09-26.md`
   (commit `6db545723` on `claude/gracious-bardeen-155cb0`, not yet pushed).
-  It is not re-measured here. On that evidence these ratios carry about
-  three significant figures, and the engine difference is noise beneath the
-  discretisation error. That lane also reports `t_to_90pct_h`,
+  It is not re-measured here. The earlier conclusion that "these ratios
+  carry about three significant figures" concerned that old metric and is
+  **superseded**. With the fixed quadrature, the runner's 1.218177 is
+  −1.8e-5 relative from the same lane's per-step reference (1.2181994); see
+  "Steady-state runner: three endpoint bugs". The old-metric difference
+  (1.228366 against 1.227702, 5.4e-4) is not explained here: the split
+  runner and the continuous RK4 reach different checkpoint values. That lane also reports `t_to_90pct_h`,
   steady-state dose labelling and trapezoid-AUC defects in
   `steady_state_runner.sio`; those three were fixed later in this PR (see
   "Steady-state runner: three endpoint bugs" below).
@@ -543,14 +574,23 @@ test fail on its own assertion.
 | Bug | Fix | Test (exit code with old runner) |
 |---|---|---|
 | `dose_of_ss` was the 0-based loop index, one row off the 1-based table | stores `dose_i + 1` | `darwin_pbpk_steady_state_endpoints` (4): `auc_tau_ss == auc_tau_per_dose[dose_of_ss - 1]` |
-| `t_to_90pct_h` tested `grew >= 0.9 * (grew + 1e-12)`, so it returned 2·tau for every drug | first interval whose AUC_tau reaches 90% of the last interval's AUC_tau; `-1` (undefined) without a detected SS | `darwin_pbpk_steady_state_failure` (10): no t_90 for a 3-dose regimen |
+| `t_to_90pct_h` tested `grew >= 0.9 * (grew + 1e-12)`, i.e. `grew >= 9e-12`, which is true at the first interval it checks (the loop starts checking at dose 2), so it returned 2·tau for every drug with a rising AUC | first interval whose AUC_tau reaches 90% of the last interval's AUC_tau; `-1` (undefined) without a detected SS | `darwin_pbpk_steady_state_failure` (10): no t_90 for a 3-dose regimen |
 | AUC_tau was a 16-point trapezoid (1.6 h spacing) | accumulated over every accepted Tsit5 step (plasma) and BBB RK4 sub-step (ISF, ICF) | `darwin_pbpk_steady_state_auc_quadrature` (2) |
 
 The AUC check uses a reference independent of the runner's quadrature. Dose
 1 is integrated inside the test with a fixed step and the same
-operator-split input. That reference is first-order in dt (0.005 h to
-0.0025 h moves it 404 ppm), so the Richardson extrapolation is used.
-Measured against it: new runner +3.1e-4, old runner −7.4e-3; the bound is 2e-3.
+operator-split input. Measured convergence of that fixed-step AUC:
+h = 0.005 → 0.0025 → 0.00125 h moves it by 404 and then 108 ppm. The ratio of
+successive differences is 3.74, i.e. order ≈ 1.9: effectively second order,
+with the trapezoid's O(h²) dominating the split input's O(h) term. The
+reference is therefore the second-order Richardson extrapolation
+(4·A(h/4) − A(h/2)) / 3. Measured against it: new runner +48.9 ppm, old
+runner −7,733 ppm; the bound is 2e-3.
+
+**Correction:** the first committed version assumed first order from a
+single halving and used 2·A(h/2) − A(h). That overshoots by ~260 ppm and
+gave "new +3.1e-4". The 2026-09-27 math review asked for a third step size,
+and the pass/fail verdict survived the fix.
 A first version of this test compared the runner against itself at a tighter
 tolerance. The checkpoint trapezoid cancelled on both sides, and the whole-runner
 sabotage showed that version passing on the old code. It was replaced before
@@ -577,7 +617,10 @@ runner's 1.218177 is −1.8e-5 relative from that, consistent with the O(dt)
 split-bolus error that remains in the runner. A math review (xai, qwen;
 `.claude/llm_offload_log.md`) confirmed the quadrature and changed one
 choice: the t_90 plateau is the last interval, not the AUC at SS
-declaration, which can sit ~5% below the plateau.
+declaration. The declaration's shortfall is up to r·ε/(ε + 1 − r) for
+AUC_n = AUC_ss(1 − r^n): ~7% for r ≈ 0.79 and ε = 0.02, and approaching 100%
+as r → 1. **Correction:** an earlier revision said "~5%", which the
+2026-09-27 review showed to be wrong.
 
 ### Open, not fixed: blood concentration used as plasma
 
@@ -605,8 +648,13 @@ plasma = blood / rb:
 - `rapamycin_fullvd_params` (`rb_ratio = 36.0`, Yatscoff 1995): they are
   about 36 × high.
 
-Ratios such as AUC_last / AUC_first are scale-free and survive. Absolute
-concentrations, AUCs and Kp,uu do not. The sign correction, which the
+Ratios such as AUC_last / AUC_first are scale-free and survive. So does Kp,uu
+as computed from these traces: the BBB chain is linear, so ISF and the
+reported plasma AUC scale by the same factor and it cancels. Absolute
+concentrations and AUCs do not survive, and neither do PD endpoints, which
+respond nonlinearly. **Correction:** an earlier revision said Kp,uu does not
+survive. That contradicted the blood-as-plasma dispatch, and the math review
+caught it. The sign correction, which the
 first version of this note missed, is from gracious-bardeen. It needs an operator decision
 and a math review before any change.
 
