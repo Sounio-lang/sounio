@@ -1077,6 +1077,11 @@ function vfxAccount(sc) {
  * account (`vfxAccount`). Default dt = 0.5 h matches the stdlib scenario.
  */
 export function runVenlafaxineScenario(sampleTimes, { dt = 0.5, pheno = 2 } = {}) {
+  // dt = 0 would never advance t; an out-of-range phenotype would silently
+  // read as NM in the default branches downstream.
+  if (!(Number.isFinite(dt) && dt > 0)) throw new RangeError(`runVenlafaxineScenario: dt must be finite and > 0, got ${dt}`);
+  if (!(Number.isInteger(pheno) && pheno >= 0 && pheno <= 3)) throw new RangeError(`runVenlafaxineScenario: pheno must be 0..3 (PM, IM, NM, UM), got ${pheno}`);
+  for (const t of sampleTimes) if (!(Number.isFinite(t) && t >= 0)) throw new RangeError(`runVenlafaxineScenario: sample times must be finite and >= 0, got ${t}`);
   const rel = VFX_MATRIX_GOHEL2008;
   const sc = vfxScenarioInit(pheno);
   const out = [];
