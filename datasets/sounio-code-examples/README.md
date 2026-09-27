@@ -30,13 +30,13 @@ Instruction/completion dataset for **Sounio**, a self-hosted systems + scientifi
 
 ## Contents
 
-- `train.jsonl`: 2452 examples
+- `train.jsonl`: 2457 examples
 - `validation.jsonl`: 273 examples
-- Total: 2725 examples extracted from `tests/run-pass` and `tests/compile-fail`
+- Total: 2730 examples extracted from `tests/run-pass` and `tests/compile-fail`
 
 Each record contains:
 
-- `instruction`: natural-language prompt derived from test annotations, descriptions, and file names; fixtures annotated `//@ known-failure` are described as documented known failures with their recorded reason, and run-pass ones carry no success claim or expected stdout
+- `instruction`: natural-language prompt derived from test annotations, descriptions, and file names; fixtures annotated `//@ known-failure`, and fixtures listed only in the full suite's known-failure manifest (`tests/known_failures/hardened_diagnostics_full_suite.txt`, with its pinned failure pattern as the reason), are described as documented known failures with their recorded reason, and run-pass ones carry no success claim or expected stdout
 - `completion`: the full `.sio` source file
 - `suite`: `run-pass` or `compile-fail`
 - `source_path`: original repository path
