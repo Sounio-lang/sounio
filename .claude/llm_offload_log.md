@@ -4265,3 +4265,34 @@ survive, because its numerator is a nonlinear functional of the wrong
 driver. Rejected in favour of Grok: bbb_ode is linear in `c_plasma`, and the
 exact common ×1.724 scaling of ISF and ICF in the blood-as-plasma
 measurement confirms it.
+
+### 2026-09-27T07:10Z addendum — second vendor for A, C1 and D
+
+Kimi K3 never produced a verdict for A, C1 or D:
+- `content: ""` at 8,192 tokens;
+- timeouts at 600 s and 1,200 s;
+- `BadRequestError ... rejected by an internal MaaS component` at 16,000
+  tokens.
+
+**Qwen 3 235B (OpenRouter) substituted as the independent second vendor**
+for those three. The policy requires an independent second opinion; Kimi is
+the canonical one. Qwen reviewed the same pre-correction inputs as Grok.
+- **A:** OK on all three claims. It accepted the review text's AUC_ss(1 − r^k)
+  formula, which Grok had flagged; the code uses k + 1. Grok's correction
+  stands.
+- **C1:** OK on the rounding, the exact-literal test and the dyadic
+  expressions. Overreach, "engine gap is not the accuracy", resting on an
+  external RK4 reference: already addressed (conclusion superseded, source
+  cited). It accepted "Tsit5 amplifies" and "6.4e-5 as expected", which
+  Grok marked as unproven. The stricter reading is kept, because the
+  mechanism was not traced.
+- **D:** Tightenable, "tolerance 1e-13 should be ~2e-14". **Rejected**: 2e-14
+  sits at the derived bound (~1.8e-14 including conversion), which leaves no
+  room for reassociation or conversion differences. 1e-13 is a documented
+  safety margin, not an unexplained number. Overreach, "3.7× below" the old
+  error: already fixed; the text now says ~3.9× below −7.7e-3 against the
+  second-order reference.
+
+Status: every math-bearing artefact of PR #2698 now has two independent
+vendors. B and C2: Grok + Kimi. A, C1 and D: Grok + Qwen, with Qwen standing
+in for Kimi. zai and local unavailable throughout.
