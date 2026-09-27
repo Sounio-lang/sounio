@@ -13,7 +13,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-
 **Base:** `origin/main` @ `2e8b76d31` (workspace worktree `/workspace/worktrees/claude-let-field-alias`, branch `claude/madaros-let-field-alias`)
 **Engines:** Madaros, cross-checked against `SOUNIO_SOUC_ENGINE=lean_single`
 **Owner:** `self-hosted/ir/lower.sio`, `Lowerer::lower_let_stmt_after_expr_ref`; fix on branch `claude/madaros-let-place-copy`, on top of Sounio-lang/sounio#2700
-**Status:** evidence recorded. The source-built baseline **reproduces**. A fix is proposed and measured on a scratch build ([Patched build](#patched-build)). It is **not** applied to `self-hosted/` in this change. Two stdlib functions give wrong answers on Madaros today ([stdlib sweep](#stdlib-sweep)).
+**Status:** evidence recorded; the source-built baseline **reproduces**. Two stdlib functions give wrong answers on Madaros today ([stdlib sweep](#stdlib-sweep)). The fix is applied on branch `claude/madaros-let-place-copy`, on top of Sounio-lang/sounio#2700, and measured there ([Fix on top of #2700](#fix-on-top-of-2700)). The scratch-build measurements against `main` are kept below ([Patched build](#patched-build)).
 
 ## Why this dispatch
 
@@ -356,6 +356,67 @@ of the harness only.
 No status differs. Taken together: 2,502 tests pass on both compilers, 23
 time out at 300 s on both, and the witness is the only test the patch
 changes.
+
+## Fix on top of #2700
+
+Branch `claude/madaros-let-place-copy` = Sounio-lang/sounio#2700 at
+`72dd3a2be` + this dispatch (merged) + the fix commit. The fix is the patch
+above with its inline budget check replaced by #2700's
+`emit_struct_value_copy_budgeted`, and the witness's `//@ known-failure` line
+removed.
+
+Both compilers were built with `scripts/ci/build_modular_madaros.sh` from
+the same tree, which differs only in `self-hosted/ir/lower.sio`. The build
+ran on the SLURM node `gpuorangefs-multi-r740-proxmox` (job 12702), with a
+private build lock and a scrubbed environment:
+
+| Build | md5 | Build log `error` lines |
+|---|---|---|
+| base: #2700 head `72dd3a2be` | `cc0c6e49…` (the md5 the #2700 dispatch records for its patched build) | 2, the pre-existing `tuple index out of bounds` pair |
+| fix | `f62c566b…` | the same 2, identical |
+
+**Probes.** Every probe in [Measurements](#measurements) was run on
+lean_single, base and fix:
+- Rows 1–8, the annotated row 9 and row 12 match lean_single on the fix,
+  and alias on the base, as on `main`.
+- The unannotated row 9 and row 10 (a returned place) still alias on both,
+  as documented under [Boundary](#boundary-still-open-after-the-fix).
+- The proptest battery is 36 / 64 on the base and 100 / 0 on the fix.
+- `produce_cycle` gives `3.5` on the base and `4.0` on the fix.
+- The witness prints 12 `BAD` lines and raw bits on the base, and
+  `LET_FIELD_ARRAY_ELEM 1.500000` and `LET_FIELD_SOURCE_NO_ALIAS_OK` on the fix.
+
+**Full suite, base vs fix.** Same harness invocation as the full-suite A/B
+above: 3,320 test files, `--jobs 24` per arm, both arms at once in separate
+tree copies.
+
+| Status | Base | Fix |
+|---|---|---|
+| pass | 2,195 | 2,196 |
+| fail | 377 | 376 |
+| known failure | 97 | 97 |
+| stale known-failure tag (counted as fail) | 21 | 21 |
+| skip | 299 | 299 |
+| timeout (30 s) | 331 | 331 |
+
+Three tests changed status:
+- The witness fails on the base (missing `LET_FIELD_SOURCE_NO_ALIAS_OK`) and
+  passes on the fix. It no longer carries a known-failure tag.
+- `lorenz_taylor2_step_request_imported` passed on the base and timed out on
+  the fix.
+- `solver_portfolio_v16_coverage_imported` did the opposite.
+
+The union of the 30 s timeouts on both arms (331 tests, which includes those
+two) was rerun at 300 s with 8 jobs per arm, raising the default in the
+scratch copy of the harness only:
+
+| Status | Base | Fix |
+|---|---|---|
+| pass | 309 | 309 |
+| timeout (300 s) | 22 | 22 |
+
+No status differs, and both boundary tests pass on both compilers at 300 s.
+Taken together, the witness is the only test whose result the fix changes.
 
 ## Witness
 
