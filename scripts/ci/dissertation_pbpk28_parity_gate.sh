@@ -825,24 +825,26 @@ echo "[pbpk28-parity:case11] venlafaxine ODV PBPK28 (14 organs)"
 vfx_rmse VODV "VENLAFAXINE_ODV_PARITY_PASS" "VENLAFAXINE_ODV_PARITY_FAIL"
 
 echo
-echo "[pbpk28-parity:case12] venlafaxine matrix Korsmeyer-Peppas release (biomaterial bridge)"
-join -t"$(printf '\t')" -1 1 -2 1 \
-  <(awk -F= '/^VMATRIX\|t=/{t=$2} /^VMATRIX\|rel=/{print t"\t"$2}' "$VFX_SIO_LOG"  | sort) \
-  <(awk -F= '/^VMATRIX\|t=/{t=$2} /^VMATRIX\|rel=/{print t"\t"$2}' "$VFX_NODE_LOG" | sort) \
-  | awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" '
-      {d=($2+0)-($3+0); SS+=d*d; NN++; if(($2+0)>PK)PK=$2+0}
-      END{ if(NN==0){print "VENLAFAXINE_MATRIX_RELEASE_PARITY_FAIL no rows"; exit 1}
-        rmse=sqrt(SS/NN); pct=(PK>0)?100*rmse/PK:0;
-        if(pct<THR+0) printf "VENLAFAXINE_MATRIX_RELEASE_PARITY_PASS %d/%d samples within %s%% RMSE (Korsmeyer-Peppas n=0.65, peak=%.4g mg)\n",NN,NN,THR,PK;
-        else { printf "VENLAFAXINE_MATRIX_RELEASE_PARITY_FAIL %.4f%% RMSE\n",pct; exit 1 } }'
-
-echo
-echo "[pbpk28-parity:case13] venlafaxine ODV/parent ratios (NM): total-mass and blood AUC"
 # awk coerces "nan"/"inf"/garbage to a number (nan -> 0 on this awk), so a solver
 # that emits NaN would read as a clean zero residual. Every venlafaxine value
 # below goes through fin(): anything that is not a finite decimal literal is
 # counted in nonfin and fails the check that consumes it.
 VFX_AWK_FIN='function fin(s) { if (s !~ /^[+-]?([0-9]+[.]?[0-9]*|[.][0-9]+)([eE][+-]?[0-9]+)?$/) { nonfin++; printf "  FAIL: non-finite or non-numeric value \"%s\"\n", s; return 0 } return s + 0 }'
+echo "[pbpk28-parity:case12] venlafaxine matrix Korsmeyer-Peppas release (biomaterial bridge)"
+join -t"$(printf '\t')" -1 1 -2 1 \
+  <(awk -F= '/^VMATRIX\|t=/{t=$2} /^VMATRIX\|rel=/{print t"\t"$2}' "$VFX_SIO_LOG"  | sort) \
+  <(awk -F= '/^VMATRIX\|t=/{t=$2} /^VMATRIX\|rel=/{print t"\t"$2}' "$VFX_NODE_LOG" | sort) \
+  | awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" "$VFX_AWK_FIN"'
+      {a=fin($2); b=fin($3); d=a-b; SS+=d*d; NN++; if(a>PK)PK=a; if(b>PK)PK=b}
+      END{ if(nonfin>0){printf "VENLAFAXINE_MATRIX_RELEASE_PARITY_FAIL %d non-finite value(s)\n",nonfin; exit 1}
+        if(NN!=12){printf "VENLAFAXINE_MATRIX_RELEASE_PARITY_FAIL %d/12 rows\n",NN; exit 1}
+        rmse=sqrt(SS/NN); pct=(PK>0)?100*rmse/PK:0;
+        if(PK<=0 && rmse>0){printf "VENLAFAXINE_MATRIX_RELEASE_PARITY_FAIL zero peak with nonzero RMSE %.3e\n",rmse; exit 1}
+        if(pct<THR+0) printf "VENLAFAXINE_MATRIX_RELEASE_PARITY_PASS %d/%d samples within %s%% RMSE (Korsmeyer-Peppas n=0.65, peak=%.4g mg)\n",NN,NN,THR,PK;
+        else { printf "VENLAFAXINE_MATRIX_RELEASE_PARITY_FAIL %.4f%% RMSE\n",pct; exit 1 } }'
+
+echo
+echo "[pbpk28-parity:case13] venlafaxine ODV/parent ratios (NM): total-mass and blood AUC"
 vfx_scalar() {  # $1=record key (e.g. VRATIO|nm) $2=time key (e.g. VRATIO|t) $3=infile → t<TAB>v
   awk -v K="$1" -v T="$2" '
     index($0, T"=")==1 { t=substr($0, length(T)+2); next }
