@@ -11,8 +11,9 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.matrix-e
 
 **Date:** 2026-09-26
 **Base:** measured on `main` at `46e9b48b6`; committed on `f141ad5d9`. No file under `stdlib/`, `tests/`, `website/` or `self-hosted/` differs between the two, and the patch applies to both.
-**Status:** applied (operator approval, 2026-09-26) in the commit after this dispatch. The same change is kept as
-`docs/audit/repro/matrix_er_pure_math.patch`. No constant moves, and nothing in `self-hosted/` is touched.
+**Status:** applied (operator approval, 2026-09-26) in PR #2722. `docs/audit/repro/matrix_er_pure_math.patch` holds
+the final diff of the three files against `f141ad5d9`, including the review fixes (the +inf guard and the `pureSqrt`
+comment). No constant moves, and nothing in `self-hosted/` is touched.
 **Compiler for every Sounio number below:** Madaros built from source, md5 `5764851f`. It came from a
 `make build-madaros` of `98315edcdb`, and `git diff --stat 98315edcdb 46e9b48b6 -- self-hosted` is empty.
 Seven independent builds on the pod carry the same md5. Every run used `bin/souc` (the 512 MiB-stack wrapper)
@@ -104,6 +105,7 @@ use math::pure::{exp, ln, sqrt}
 
 fn mer_pow(t: f64, n: f64) -> f64 with Mut, Div, Panic {
     if t <= 0.0 { return 0.0 }
+    if t - t != 0.0 { if n > 0.0 { return t } return 0.0 }   // +inf/NaN: limit (see below)
     if abs_f64(n - 1.0) < 1.0e-12 { return t }
     if abs_f64(n - 0.5) < 1.0e-12 { return sqrt(t) }
     return exp(n * ln(t))
@@ -132,6 +134,13 @@ Truncation is below 1e−29 in both, so the error is rounding-dominated. Measure
 
 On the probe grid, max |F_new/F_exact − 1| = **4.1e−15**, down from 1e−3 in the normal range and 1e8 at tiny t.
 With the fix the cap crossing is 11.986367107929336, against 11.986367107929333 exact.
+
+**+inf guard (added in review).** `pure.sio` `ln(+inf)` never terminates: its halving loop keeps m = +inf ≥ 2.
+The old series returned NaN promptly instead. `mer_pow` therefore returns the limit for a non-finite t, before either
+branch runs: +inf for n > 0, which caps F at 1, and 0 for n < 0. `t − t ≠ 0` holds only for ±inf and NaN, and NaN
+still returns NaN. Every finite result is bit-identical: the parity-ref and `matrix_er` outputs are byte-identical
+with and without the guard. The regression test asserts F(10·1e308) = 1. With the guard removed, that test hangs
+until a 120 s timeout (rc=124). The hang in `pure.sio` itself is out of scope here and is flagged separately.
 
 A Cody-Waite split of ln2 would bring exp down to about 1 ulp. That is a `pure.sio` change affecting every
 consumer, so it is out of scope here.
@@ -238,5 +247,5 @@ The two independent vendors are xAI and Qwen.
 
 ## Reverting
 
-Revert the fix commit with `git revert`. The fix also rewrites the parity ref's header comment, so
-`git apply -R docs/audit/repro/matrix_er_pure_math.patch` restores the code but not that comment.
+Revert the PR's fix commits with `git revert`, or run `git apply -R docs/audit/repro/matrix_er_pure_math.patch`.
+The patch is the full diff of the three source files against `f141ad5d9`, so reversing it restores them exactly.
