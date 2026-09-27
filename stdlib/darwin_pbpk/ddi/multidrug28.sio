@@ -510,65 +510,50 @@ pub fn md_absorbed_fraction(y: f64) -> f64 with Mut, Div, Panic {
     return sum
 }
 
-// Unbound enzyme-site concentration of drug j at `site`, read from `ct_src`.
-fn md_cu(md: &MultiDrug28, ct_src: &[f64; 224], j: i32, site: i32) -> f64 with Div {
-    let o = md_site_organ(site)
-    return (*md).fu_site[j * 2 + site] * (*ct_src)[j * 14 + o] / (*md).kp[j * 14 + o]
-}
-
-// Competitive factors for every (victim, site, enzyme): out[i·8 + site·4 + enz].
-// Allocating form, for inspection (md_factor_now); the step uses md_factors_into.
-fn md_factors(md: &MultiDrug28, ct_src: &[f64; 224]) -> [f64; 128] with Mut, Div {
-    var f: [f64; 128] = [1.0; 128]
+// Inhibitor load L_{i,s,k} = ext_load + Σ_{j≠i, Ki_{j,k}>0} C_u,j,s / Ki_{j,k}
+// seen by victim i at (site s, enzyme k), from the state (from_pred = false:
+// ct) or the predicted state (true: ct_pred). This is the ONE implementation:
+// the step's factors (md_factors_into) and the inspection path
+// (md_factor_now) both call it, so they agree by construction.
+// The interstitial concentration is floored at zero here, and only here.
+// The clamp-free transport tolerates entries down to -tol·scale (rounding),
+// and such an entry would make the load negative -- the inhibitor an
+// ACTIVATOR, with a factor above 1 (measured 2026-09-27: 1 + 1.85e-11 for
+// C_t = -1e-15·C_b with Ki = 1e-6; PR #2695 review). The floor keeps every
+// factor in (0, 1]. The state itself is untouched, and so is mass
+// conservation, since the factors only scale a sink k >= 0. For
+// non-negative concentrations the arithmetic is the same as before, bit for
+// bit.
+fn md_site_load(md: &MultiDrug28, from_pred: bool, i: i32, s: i32, k: i32) -> f64 with Mut, Div {
     let n = (*md).n
-    var i: i32 = 0
-    while i < n {
-        var s: i32 = 0
-        while s < MD_NS {
-            var k: i32 = 0
-            while k < MD_NE {
-                var load = (*md).ext_load[s * 4 + k]
-                var j: i32 = 0
-                while j < n {
-                    let kij = (*md).ki[j * 4 + k]
-                    if j != i && kij > 0.0 {
-                        load = load + md_cu(md, ct_src, j, s) / kij
-                    }
-                    j = j + 1
-                }
-                f[i * 8 + s * 4 + k] = 1.0 / (1.0 + load)
-                k = k + 1
-            }
-            s = s + 1
+    let o = md_site_organ(s)
+    var load = (*md).ext_load[s * 4 + k]
+    var j: i32 = 0
+    while j < n {
+        let kij = (*md).ki[j * 4 + k]
+        if j != i && kij > 0.0 {
+            let c_raw = if from_pred { (*md).ct_pred[j * 14 + o] } else { (*md).ct[j * 14 + o] }
+            let c = if c_raw > 0.0 { c_raw } else { 0.0 }
+            let cu = (*md).fu_site[j * 2 + s] * c / (*md).kp[j * 14 + o]
+            load = load + cu / kij
         }
-        i = i + 1
+        j = j + 1
     }
-    return f
+    return load
 }
 
-// Same arithmetic as md_factors, in place: source layer `from_pred` (false: the
-// state ct, true: ct_pred), destination `into_star` (false: f_n, true: f_star).
+// Competitive factors 1/(1 + load) for every (victim, site, enzyme), in place:
+// source layer `from_pred` (false: the state ct, true: ct_pred), destination
+// `into_star` (false: f_n, true: f_star).
 fn md_factors_into(md: &!MultiDrug28, from_pred: bool, into_star: bool) with Mut, Div {
     let n = (*md).n
     var i: i32 = 0
     while i < n {
         var s: i32 = 0
         while s < MD_NS {
-            let o = md_site_organ(s)
             var k: i32 = 0
             while k < MD_NE {
-                var load = (*md).ext_load[s * 4 + k]
-                var j: i32 = 0
-                while j < n {
-                    let kij = (*md).ki[j * 4 + k]
-                    if j != i && kij > 0.0 {
-                        let c = if from_pred { (*md).ct_pred[j * 14 + o] } else { (*md).ct[j * 14 + o] }
-                        let cu = (*md).fu_site[j * 2 + s] * c / (*md).kp[j * 14 + o]
-                        load = load + cu / kij
-                    }
-                    j = j + 1
-                }
-                let fk = 1.0 / (1.0 + load)
+                let fk = 1.0 / (1.0 + md_site_load(md, from_pred, i, s, k))
                 if into_star { (*md).f_star[i * 8 + s * 4 + k] = fk } else { (*md).f_n[i * 8 + s * 4 + k] = fk }
                 k = k + 1
             }
@@ -871,7 +856,5 @@ pub fn md_factor_now(md: &MultiDrug28, i: i32, site: i32, enz: i32) -> f64 with 
     md_check_drug(md, i)
     md_check_site(site)
     md_check_enz(enz)
-    let ct_now = (*md).ct
-    let f = md_factors(md, &ct_now)
-    return f[i * 8 + site * 4 + enz]
+    return 1.0 / (1.0 + md_site_load(md, false, i, site, enz))
 }
