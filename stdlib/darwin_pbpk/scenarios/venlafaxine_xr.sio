@@ -94,17 +94,43 @@ struct VenlafaxineXrScenario {
     lg_odv:    PBPK28Ledger,   // ODV: administered = formed
 }
 
-// Phenotype codes 0..3 (PM, IM, NM, UM). Any other code would read as NM in
-// the downstream default branches, so it is refused fail-closed: the gut pool
-// starts as NaN and every mass account and closed-form check of the run fails.
-pub fn vfx_scenario_init(pheno: i32) -> VenlafaxineXrScenario {
+// A refused scenario: NaN in the gut pool, both states, and both ledgers'
+// administered mass and blood AUC, so every readout (mass residual, CL/F, AUC
+// ratio, administered) is NaN and every check of it fails. NaN is built as
+// inf - inf so the callers need no Div effect.
+fn vfx_refused_scenario() -> VenlafaxineXrScenario {
     let big = 1.0e308
     let inf = big * 10.0
-    let gut0 = if pheno >= 0 && pheno <= 3 { 0.0 } else { inf - inf }
+    let nan = inf - inf
+    var ps = pbpk28_state_zero()
+    ps.cv[0] = nan
+    var os = pbpk28_state_zero()
+    os.cv[0] = nan
+    var lp = pbpk28_ledger_zero()
+    lp.administered = nan
+    lp.auc[0] = nan
+    var lo = pbpk28_ledger_zero()
+    lo.administered = nan
+    lo.auc[0] = nan
+    VenlafaxineXrScenario {
+        parent: ps,
+        odv:    os,
+        gut_mg: nan,
+        pheno:  0 - 1,
+        lg_parent: lp,
+        lg_odv:    lo,
+    }
+}
+
+// Phenotype codes 0..3 (PM, IM, NM, UM). Any other code would read as NM in
+// the downstream default branches, so it is refused fail-closed with a
+// NaN-poisoned scenario (vfx_refused_scenario).
+pub fn vfx_scenario_init(pheno: i32) -> VenlafaxineXrScenario {
+    if !(pheno >= 0 && pheno <= 3) { return vfx_refused_scenario() }
     VenlafaxineXrScenario {
         parent: pbpk28_state_zero(),
         odv:    pbpk28_state_zero(),
-        gut_mg: gut0,
+        gut_mg: 0.0,
         pheno:  pheno,
         lg_parent: pbpk28_ledger_zero(),
         lg_odv:    pbpk28_ledger_zero(),
@@ -501,6 +527,21 @@ pub fn vfx_integrate_to(
     t_end: f64,
     dt: f64
 ) -> VenlafaxineXrScenario with Mut, Div, Panic {
+    // The loop advances in whole dt steps, so dt must be finite and > 0 and
+    // t_end - t_start a finite, non-negative whole number of steps: dt <= 0
+    // never reaches t_end, and an off-grid horizon would stop at a different
+    // grid point (t_end = 0.8, dt = 0.5 ran to 1.0). Anything else is refused
+    // fail-closed with a NaN-poisoned scenario (vfx_refused_scenario).
+    let span = t_end - t_start
+    var ok = dt > 0.0 && dt - dt == 0.0 && span >= 0.0 && span - span == 0.0
+    if ok {
+        let k = span / dt
+        let kr = ((k + 0.5) as i64) as f64
+        let dk = if k > kr { k - kr } else { kr - k }
+        let tol = if k > 1.0 { 1.0e-9 * k } else { 1.0e-9 }
+        if dk > tol { ok = false }
+    }
+    if !ok { return vfx_refused_scenario() }
     var s = scen
     var t = t_start
     while t < t_end - 0.5 * dt {
