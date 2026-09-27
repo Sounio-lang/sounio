@@ -34971,6 +34971,22 @@ fn emit_read_byte_a64() with Mut, Panic {
         em32(0xD2800000 | ((63 & 0xFFFF) << 5) | 8)  // Linux arm64 SYS_read = 63 (x8)
     }
     emit_syscall_a64()
+    if TARGET_OS == 2 {
+        // macOS/XNU signals a failed syscall with the CARRY flag set and a
+        // POSITIVE errno in x0 (documented at emit_file_size_a64 above), not
+        // a negative return the way Linux does. Left unchecked, the plain
+        // `cmp x0, #0` below clobbers that carry and treats the positive
+        // errno as a "successful" byte count, so read_byte() would return an
+        // uninitialized stack byte instead of -1 on a genuine read failure.
+        // Normalize carry-set to x0 = -1 (this function's own EOF/error
+        // sentinel) before falling into the comparison shared with Linux,
+        // which already returns a negative errno there and needs no
+        // equivalent fixup.
+        let rb_carry_ok = CL
+        em32(0x54000003)  // b.cc ok (carry clear = success; patched)
+        em32(0x92800000)  // movn x0, #0 -> x0 = -1 (carry set: read() failed)
+        patch_branch_a64(rb_carry_ok, CL)
+    }
     // x0 = bytes_read (<=0 on EOF/error)
     em32(0xF100001F)  // cmp x0, #0
     let eof_patch = CL
@@ -35018,6 +35034,22 @@ fn emit_read_line_a64() with Mut, Panic {
         em32(0xD2800000 | ((63 & 0xFFFF) << 5) | 8)  // Linux arm64 SYS_read
     }
     emit_syscall_a64()
+    if TARGET_OS == 2 {
+        // macOS/XNU carry-flag normalization, same root cause as
+        // emit_read_byte_a64 above: a failed read() sets carry and returns
+        // +errno in x0, which the plain `cmp x0, #0` below would otherwise
+        // read as a positive "successful" byte count. Unlike read_byte(),
+        // this function indexes the mmap'd buffer at buf[x0] on the
+        // EOF/error path (below), so the sentinel here is 0, not -1: -1
+        // would compute buf[-1], an out-of-bounds write one byte before the
+        // mapped page. Folding a genuine read() error into the same buf[0]
+        // empty-string path as ordinary EOF is safe and matches this
+        // builtin's existing EOF contract.
+        let rl_carry_ok = CL
+        em32(0x54000003)  // b.cc ok (carry clear = success; patched)
+        em32(0xD2800000)  // movz x0, #0 -> x0 = 0 (carry set: read() failed)
+        patch_branch_a64(rl_carry_ok, CL)
+    }
     // x0 = bytes_read (<=0 on EOF/error; still null-terminate at buf[0] in that case)
     em32(0xF100001F)  // cmp x0, #0
     let strip_skip_patch = CL

@@ -1,0 +1,89 @@
+//@ run-pass
+//@ expect-stdout-contains: read_byte/read_line regression ok
+//
+// Regression gate for PR #2623 review comments (Copilot threads 4068240080 /
+// 4068240108) on the aarch64 emitters emit_read_byte_a64() / emit_read_line_a64()
+// in self-hosted/compiler/lean_single.sio.
+//
+// Bug: on aarch64-macos, a failed `read()` syscall signals the error by setting
+// the CARRY flag and returning a POSITIVE errno in x0 (XNU convention), whereas
+// aarch64-linux returns a plain negative errno with no carry semantics (see the
+// comment on emit_file_size_a64 in the same file, which already handled this
+// correctly for open()). emit_read_byte_a64()/emit_read_line_a64() emitted a
+// bare `cmp x0, #0` immediately after the read() syscall, which clobbers that
+// carry flag and reads the positive errno as a "successful" byte count -- so on
+// a genuine macOS read() failure, read_byte() returned an uninitialized stack
+// byte instead of -1.
+//
+// Fix: normalize a carry-set result to a safe sentinel before the shared
+// byte-count comparison, gated on `TARGET_OS == 2` (macOS) so the Linux path
+// (already correct) is untouched:
+//   - emit_read_byte_a64(): sentinel = -1 (this function's own EOF/error
+//     contract; safe because the value is only ever compared/returned, never
+//     used as a buffer index).
+//   - emit_read_line_a64(): sentinel = 0, NOT -1. This function indexes the
+//     mmap'd buffer at buf[bytes_read] on the EOF/error path; -1 would compute
+//     buf[-1], a write one byte before the mapped page. 0 reuses the existing,
+//     safe "empty line" EOF path.
+//
+// This test exercises the three behaviours the review asked for -- read_byte()
+// returning the exact value 255 (0xFF) rather than confusing it with the -1
+// sentinel, read_line() stripping a trailing '\n', and read_byte() returning a
+// clean -1 at EOF -- by writing a small file and redirecting this process's own
+// stdin (fd 0) to read from it via raw open()/dup2() syscalls, so the test does
+// not depend on whatever stdin the test harness happens to provide.
+//
+// Scope note: this runs the DEFAULT (x86-64) engine, which is what CI's
+// "Full Test Suite" job actually executes (souc-stage2 / lean_single native
+// x86-64); it does not exercise the aarch64 carry-flag branch itself (Linux
+// aarch64 also lacks a runtime execution surface in this repo's CI -- see
+// docs/audit/GPU_PIPELINE_SOTA_ASSESSMENT-adjacent aarch64 gates). The raw
+// syscall numbers used below (open=2, dup2=33) are x86-64 Linux-specific,
+// matching the existing convention in tests/run-pass/test_syscall_ffi.sio.
+//
+// To manually verify the aarch64 carry-flag fix itself (compile + disassembly,
+// since neither aarch64-linux nor aarch64-macos binaries execute in this
+// repo's CI):
+//   SOUNIO_SOUC_ENGINE=lean_single ./bin/souc compile \
+//       tests/run-pass/a64_read_byte_read_line_carry_regression.sio \
+//       -o /tmp/rb.a64.elf --target aarch64-macos
+//   aarch64-linux-gnu-objdump -D -b binary -m aarch64 /tmp/rb.a64.elf | less
+// Expect, immediately after each `svc #0x80`: a `b.cc` skipping a single
+// `mov x0, #0xffffffffffffffff` (read_byte) or `mov x0, #0x0` (read_line)
+// fixup instruction, then the pre-existing `cmp x0, #0x0`. The aarch64-linux
+// build of the same file must show plain `svc #0x0` -> `cmp x0, #0x0` with no
+// b.cc/mov inserted (Linux needs no fixup).
+
+fn main() -> i32 with IO, Panic {
+    // Craft a controlled stdin: a 0xFF byte, then "hello\n", then EOF.
+    let path = "/tmp/sounio_a64_rb_regress_input.bin"
+    let content = "\xFFhello\n"
+    write_file(path, content, str_len(content))
+
+    // open(path, O_RDONLY) then dup2(fd, 0): redirect this process's own
+    // stdin to read from the file above instead of whatever the harness
+    // gives us.
+    let fd = syscall6(2, path, 0, 0, 0, 0, 0)
+    assert(fd > 0)
+    let dup_rc = syscall6(33, fd, 0, 0, 0, 0, 0)
+    assert(dup_rc == 0)
+
+    // (1) read_byte() must zero-extend 0xFF to 255, not confuse it with the
+    // -1 EOF/error sentinel.
+    let b1 = read_byte()
+    assert(b1 == 255)
+
+    // (2) read_line() must strip the trailing '\n'.
+    let s1 = read_line()
+    assert(str_len(s1) == 5)
+    assert(str_eq(s1, "hello"))
+
+    // (3) read_byte() must return -1 cleanly once stdin is exhausted (EOF),
+    // not a garbage/uninitialized byte.
+    let b2 = read_byte()
+    assert(b2 == 0 - 1)
+
+    syscall6(3, fd, 0, 0, 0, 0, 0)
+    print("read_byte/read_line regression ok\n")
+    0
+}
