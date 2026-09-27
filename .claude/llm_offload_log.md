@@ -4181,6 +4181,45 @@ the invalid DeepSeek key in `~/.sounio-keys.env`. Raw outputs from this session:
 - **zai/local/deepseek:** not rerun. Status as in the previous entry (rate limit,
   endpoint down, invalid key).
 
+## 2026-09-26T19:59Z — Claude (session 6620bb30, branch claude/pbpk28-cn-rannacher) — math-review, theta_pbpk28.sio
+
+Re-recorded 2026-09-26: this log was gitignored when the entry was first written locally, and the
+merge that made it tracked replaced the local copy.
+- `-p xai` (grok-4.6): claims 1–5 and 7 OK (θ-step Schur coefficients, θ and TR-BDF2 mass
+  identities, b-weights (w, w, d), Rannacher booking, positivity). Claim 6 OVERREACH: the
+  `steps·1e-15` gate is a heuristic rounding budget, not a proven FP bound. The comments were
+  reworded; the threshold is unchanged.
+- Second opinions (policy): the default fan-out failed (zai 1313 rate limit, local unreachable),
+  the deepseek key is invalid, and mistral errored. qwen3-235b: 7/7 OK.
+
+## 2026-09-26 — Claude (session 6620bb30) — math-review, epistemic_pbpk28 TEST 5 analytic re-pin + Hessian values
+- xai: 6/6 OK. qwen: 5/6 OK; one "WRONG" whose own correction restates the claim (a lost Kp
+  column shows as an exact 0.0 share, and non-zero shares mean it is intact). Recorded as a misreading.
+
+## 2026-09-26 — Claude (session 6620bb30) — math-review, Hessian ρ guard v1 + MC u_MC re-pin
+- xai: 4/4 OK. qwen: 4/4 OK. mistral: 4/4 OK, plus a wording OVERREACH on "exact identity" (the
+  identity is exact in ℝ; M(168 h)/Dose is an observation). No change.
+
+## 2026-09-26 — Claude (session 6620bb30) — math-review, theta_pbpk28 input routing
+- xai: 4/4 OK. qwen: 4/4 OK.
+
+## 2026-09-26 — Claude (session 6620bb30) — external-facing review (`--raw xai gemini qwen`), 9 regenerated docs/dissertation/results pages
+- gemini: every reply truncated (150–340 bytes), not counted. deepseek: invalid key.
+- grok-4.6: substantive findings on all 9 pages (nominal-vs-sample bias labels; missing 12.4 vs
+  12.7 L/h and MC-resolution qualifiers in "safe to cite"; causal overreach; Sobol S_i > S_Ti;
+  budget-table closure; rel convention; legacy CV = 0.5807). All applied.
+- qwen3-235b: minor clarifications applied. Its attribution comment (replace the "Claude Code"
+  provenance) was rejected: that line is the AI disclosure.
+
+## 2026-09-26 — Claude (session 6620bb30) — math-review, PR #2696 review round 3 (ρ undefined sentinel; TEST 9 order gate on C_brain(24 h); 24 h capture fix)
+- xai (grok-4.6): 6/6 OK. qwen3-235b: 6/6 OK.
+
+## 2026-09-26 — Claude (session 6620bb30) — math-review, ρ̃ = ½ρ² vs variance ratio 2ρ² (PR #2696 review round 4)
+- xai (grok-4.6): 3/3 OK. qwen3-235b: 3/3 OK. The per-parameter second-order-to-first-order
+  variance ratio (normal input) is 2ρ_literal² = 4ρ̃; ρ̃ = ½ρ² as computed is not that ratio.
+  The docs and comments are corrected; the value and the [0.05, 0.20] editorial range are left for
+  the author to decide.
+
 ## 2026-09-27T00:48Z — Claude (session 2d8d50e4) — math-review, darwin_pbpk local exp/ln helper accuracy dispatch
 
 | 2026-09-26 | xai (Grok 4.7, `grok-4.7` via xAI direct after the gateway leg failed), qwen (OpenRouter `qwen/qwen3-235b-a22b`) | math-review | docs/audit/DARWIN_PBPK_LOCAL_EXP_LN_ACCURACY_DISPATCH_2026-09-26.md | PASS after fixes | Two independent vendors. Kimi K3 failed ×4, not counted. |
