@@ -4592,3 +4592,40 @@ verification instead:
 
 **Flagged for re-review**: per policy, alongside the six entries above,
 once a provider is configured in a session that has one.
+
+| 2026-09-27 | — | math-review | equilibrium.sio (range-reduced `equilibrium_sqrt_approx`; `delta_g_from_k` and `nernst` sensitivities corrected — no 1/\|ln K\| or 1/\|ln Q\| factor — and combined by root-sum-square; new `equilibrium_rss3`, a scaled RSS that does not square its terms before normalising) | WAIVED | All providers unavailable at 2026-09-27T08:41Z: `bin/llm-offload --status` → keys file NOT FOUND, `LLMGATEWAY_API_KEY` unset. Independent verification by identity tests and revert controls on both engines; narrative below. Flagged for re-review. |
+
+### 2026-09-27 — equilibrium.sio: sqrt range reduction, ΔG/Nernst sensitivities, scaled RSS (PR #2694, Copilot rounds 4–5)
+
+**Waiver.** Timestamped all-providers-failed: `bin/llm-offload --status`
+reports no keys file and no `LLMGATEWAY_API_KEY` in this container, so no
+math-review leg (Grok 4.7 / Kimi K3 via the gateway, or any direct vendor)
+could be reached. The checks below stand in for it; re-run M1 once a key is
+available.
+
+**Derivations checked.**
+1. `delta_g_from_k`: ΔG = −RT ln K ⇒ ∂ΔG/∂K = −RT/K, ∂ΔG/∂T = −R ln K.
+   The old K term was RT·uk/(K·|ln K|): a spurious 1/|ln K|, 0/0 or +Inf at
+   K = 1. Now u = RSS(RT·uk/K, R·|ln K|·ut).
+2. `nernst`: E = E0 − (RT/nF) ln Q ⇒ ∂E/∂E0 = 1, ∂E/∂Q = −(RT/nF)/Q,
+   ∂E/∂T = −(R/nF) ln Q. Same spurious 1/|ln Q|; ue0 was added linearly.
+   Now u = RSS(ue0, (RT/nF)·uq/Q, (R ln Q/nF)·ut).
+3. `equilibrium_rss3(a, b, c)` = m·√((a/m)² + (b/m)² + (c/m)²), m = max|·|;
+   each ratio is in [0, 1], so the radicand is in [1, 3] and neither squares
+   nor sums can leave the range when the RSS itself is representable.
+   Squaring first returned uk = 0 at udg = 1e-200 and +Inf (then the sqrt's
+   +Inf panic) at udg = 1e200.
+4. `equilibrium_sqrt_approx`: x = m·4^k, m ∈ [1, 4), Newton from (1+m)/2,
+   exact 2^k rescale (recorded in the round-3 commit; covered by the same
+   magnitude test).
+
+**Independent verification (Sounio only, both engines).**
+- Single-term identities, tolerance 1e-12 (a few ulps × the roundings in each
+  chain, not fitted): udg·K/(RT·uk) = 1 at K = 1, 2, 0.25 and at uk = 1e-200,
+  1e200; ue/((RT/nF)·uq) = 1 at Q = 1 and at uq = 1e-200, 1e200;
+  uk·RT/(K·udg) = 1 at udg from 1e-200 to 1e200.
+- Two-term RSS: u_both² = u_K² + u_T² to 1e-12, and u_both < u_K + u_T.
+- Revert controls: old ΔG/Nernst bodies → `FAIL delta_g k sensitivity`,
+  `FAIL nernst q sensitivity` on Madaros and lean_single; naive
+  √(a² + b² + c²) in `equilibrium_rss3` → the module run exits 1.
+- `test_equilibrium_deep_stdlib` (values only) unchanged.
