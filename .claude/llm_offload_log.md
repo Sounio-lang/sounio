@@ -4208,7 +4208,7 @@ the invalid DeepSeek key in `~/.sounio-keys.env`. Raw outputs from this session:
 - **zai/deepseek/local:** not run (rate limit, invalid key, endpoint down per
   the earlier entries today).
 
-## 2026-09-27T05:30Z — Claude (session 9e18db24, confident-kilby) — PR #2698 math review on the canonical route
+## 2026-09-27T06:23Z — Claude (session 9e18db24, confident-kilby) — PR #2698 math review on the canonical route
 
 | 2026-09-27 | default fan-out `xai kimi zai local` (Grok 4.7, Kimi K3 via LLM Gateway) | math-review | PR #2698 math-bearing content: A runner diff, B blood-as-plasma dispatch, C1/C2 lean_single dispatch excerpts, D tolerance-bearing fixtures | B and C2 PASS after fixes (both canonical legs); A, C1, D Grok-only so far (Kimi retry pending) | Supersedes the 2026-09-26T23:20Z entry's `-p xai` (grok-4.6) + qwen route. |
 
@@ -4266,7 +4266,7 @@ driver. Rejected in favour of Grok: bbb_ode is linear in `c_plasma`, and the
 exact common ×1.724 scaling of ISF and ICF in the blood-as-plasma
 measurement confirms it.
 
-### 2026-09-27T07:10Z addendum — second vendor for A, C1 and D
+### 2026-09-27T06:55Z addendum — second vendor for A, C1 and D
 
 Kimi K3 never produced a verdict for A, C1 or D:
 - `content: ""` at 8,192 tokens;
