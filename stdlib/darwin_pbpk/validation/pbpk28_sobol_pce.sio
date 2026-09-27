@@ -72,11 +72,34 @@ pub fn sp28_simulate_ledger(prm: PBPKParams28, dose_mg: f64,
     return pbpk28_bolus_run_mut(prm, dose_mg, 0.5, 168.0, 1000, st, led)
 }
 
+// A rejected trajectory returns NaN, not 0.0. saltelli_run has no
+// invalid-sample channel, and a 0.0 would enter its moments as a real AUC.
+// NaN survives the estimators' [0, 1] clamps (max_f64/min_f64 compare, so a
+// NaN operand passes through): a rejected A/B row poisons every index, a
+// rejected C_i row poisons S_i and S_Ti. sp28_all_indices_finite then fails
+// TEST 1 of both self-tests, so no PASS marker is printed.
 fn sp28_auc_fast(prm: PBPKParams28, dose_mg: f64) -> f64 with Mut, Div, Panic {
     var st = pbpk28_state_zero()
     var led = pbpk28_ledger_zero()
-    if !sp28_simulate_ledger(prm, dose_mg, &!st, &!led) { return 0.0 }
+    if !sp28_simulate_ledger(prm, dose_mg, &!st, &!led) {
+        let zero = 0.0
+        return zero / zero
+    }
     return led.auc[0]
+}
+
+// Every first- and total-order index for the 7 sampled parameters is a
+// number (x == x is false only for NaN).
+fn sp28_all_indices_finite(sr: SaltelliResult) -> bool with Mut, Div, Panic {
+    var ok = true
+    var i: i32 = 0
+    while i < 7 {
+        let si = sr.first_order[i]
+        let sti = sr.total_order[i]
+        if !(si == si) || !(sti == sti) { ok = false }
+        i = i + 1
+    }
+    return ok
 }
 
 // ============================================================================
@@ -212,12 +235,11 @@ fn sp28_selftest_main() -> i32 with IO, Mut, Div, Panic {
     var passed = 0
     var failed = 0
 
-    // TEST 1: Sobol run completes (all S_i finite)
+    // TEST 1: Sobol run completes (all S_i and S_Ti finite; a rejected
+    // trajectory makes some of them NaN, see sp28_auc_fast)
     println("TEST 1: Sobol run completes with finite indices")
-    let s0_ok = sr.first_order[0] == sr.first_order[0]
-    let s4_ok = sr.first_order[4] == sr.first_order[4]
-    if s0_ok && s4_ok {
-        println("  [PASS] S_i[0] and S_i[4] are finite")
+    if sp28_all_indices_finite(sr) {
+        println("  [PASS] S_i and S_Ti finite for all 7 parameters")
         passed = passed + 1
     } else {
         println("  FAIL: NaN detected in Sobol indices")
@@ -472,13 +494,11 @@ fn sp28_selftest_semaglutide_main() -> i32 with IO, Mut, Div, Panic {
     var passed = 0
     var failed = 0
 
-    // TEST 1: Sobol run completes (finite indices for all parameters)
+    // TEST 1: Sobol run completes (all S_i and S_Ti finite; a rejected
+    // trajectory makes some of them NaN, see sp28_auc_fast)
     println("TEST 1: Sobol run completes with finite indices")
-    let s0_ok = sr.first_order[0] == sr.first_order[0]
-    let s2_ok = sr.first_order[2] == sr.first_order[2]
-    let s4_ok = sr.first_order[4] == sr.first_order[4]
-    if s0_ok && s2_ok && s4_ok {
-        println("  [PASS] S_i[0], S_i[2], S_i[4] are finite")
+    if sp28_all_indices_finite(sr) {
+        println("  [PASS] S_i and S_Ti finite for all 7 parameters")
         passed = passed + 1
     } else {
         println("  FAIL: NaN detected in Sobol indices")
