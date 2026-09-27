@@ -266,8 +266,9 @@ run_struct_orchestrator() {
 # variance-aware adaptive integration, and GUM-vs-MC validation. CPU-only,
 # at least ~40 min: the suite's expected-FAIL_HONEST pbpk28_sobol_pce entry
 # alone takes 2331-2392 s (see that gate's header). This is the regression
-# shield for the dissertation's *evidence* (contributions #1/#2/#3 are about the mechanism; this gate is about the
-# results those mechanisms produce on rapamycin).
+# shield for the dissertation's *evidence* (contributions #1/#2/#3 are about
+# the mechanism; this gate is about the results those mechanisms produce on
+# rapamycin).
 run_dissertation_pbpk_suite() {
   local gate="dissertation_pbpk_suite"
   local gate_dir="$OUT_DIR/$gate"
