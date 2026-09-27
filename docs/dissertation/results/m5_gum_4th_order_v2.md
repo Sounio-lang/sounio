@@ -68,8 +68,9 @@ The variance rows add up: u_total² = u_1st² + Hessian increment + skewness + e
 page, plus the two variance rows it did not print, which come from the same probe run on the
 base commit.
 
-Analytic anchor: u_1st = Dose/CL²·√(v_CLhep + v_CLren + v_fu·CL²/fu_ref²) = 0.183456 at
-CL = 12.4 L/h, exact to the printed digits. The v1 derivative validation table (§4.14.4) and the
+Analytic anchor: the closed form u_1st = Dose/CL²·√(v_CLhep + v_CLren + v_fu·CL²/fu_ref²) at
+CL = 12.4 L/h is 0.183454 (0.183453851); the harness's finite-difference first-order budget prints
+0.183456, 1.2×10⁻⁵ relative above it (finite-difference and time-discretisation error). The v1 derivative validation table (§4.14.4) and the
 lognormal cumulants (§4.14.3, §4.14.5) do not involve the PBPK28 stepper and stand unchanged.
 
 Gate marker: the M5 claim assertion now evaluates to `M5_GUM_FOURTH_ORDER_CUMULANT_BUDGET_OUTPUT`

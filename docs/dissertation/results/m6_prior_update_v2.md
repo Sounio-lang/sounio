@@ -64,9 +64,10 @@ re-run at the base commit.
 ¹ ρ̃ = ½ρ_literal² is not a variance ratio. CL_hep's second-order-to-first-order variance ratio is
 2ρ_literal² = 0.289 (M6) / 0.674 (legacy); see `pbpk28_epistemic_v2.md` §4.10.4.
 
-ρ_literal(CL_hep) = σ/CL exactly (0.38 and 0.5807). u_GUM matches its closed form
-Dose/CL²·√(v_CLhep + v_CLren + v_fu·CL²/fu_ref²) at CL = 12.4: 0.183456 (M6) and 0.254961
-(legacy; the harness prints 0.254969, finite-difference truncation).
+ρ_literal(CL_hep) = σ/CL exactly (0.38 and 0.5807). The closed form of u_GUM,
+Dose/CL²·√(v_CLhep + v_CLren + v_fu·CL²/fu_ref²) at CL = 12.4, is 0.183454 (M6) and 0.254961
+(legacy); the harness's finite-difference budget prints 0.183456 and 0.254969, 1.2×10⁻⁵ and
+3.1×10⁻⁵ relative above it (finite-difference and time-discretisation error).
 
 First-order sensitivity shares (M6, `epistemic_pbpk28.sio` at dt = 0.05 h; v1 values from the
 floored Hessian CSV in brackets):

@@ -69,9 +69,10 @@ MC mean AUC 1.204004 → 0.549660 mg·h/L; n_valid 2000/2000. Marker: `…_OUTPU
 section come from the independent baseline, which keeps all 2000. The legacy configuration was not
 re-run at the base commit.
 
-Analytic anchors: AUC_ref = Dose/CL = 5/12.4 = 0.403226, and u_GUM =
-Dose/CL²·√(v_CLhep + v_CLren + v_fu·CL²/fu_ref²) at CL = 12.4 (0.183456 M6, 0.254969 legacy),
-exact to the printed digits.
+Analytic anchors: AUC_ref = Dose/CL = 5/12.4 = 0.403226. The closed-form first-order u_GUM =
+Dose/CL²·√(v_CLhep + v_CLren + v_fu·CL²/fu_ref²) at CL = 12.4 is 0.183454 (M6) and 0.254961
+(legacy); the harness's finite-difference values in the tables, 0.183456 and 0.254969, sit
+1.2×10⁻⁵ and 3.1×10⁻⁵ relative above them (finite-difference and time-discretisation error).
 
 ---
 
