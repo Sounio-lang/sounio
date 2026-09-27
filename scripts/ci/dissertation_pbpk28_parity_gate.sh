@@ -752,8 +752,18 @@ awk -F'\t' '
 #   10  parent PBPK28 (14 organs)          Node ↔ Sounio, cavg, <1% RMSE
 #   11  ODV PBPK28 (14 organs)             Node ↔ Sounio, cavg, <1% RMSE
 #   12  Korsmeyer-Peppas matrix release    Node ↔ Sounio  (biomaterial bridge, R8)
-#   13  ODV/parent total-mass ratio (NM)   Node ↔ Sounio  (PD-equivalent readout, R7)
-#   +   mass conservation: parent+ODV ≤ F·released, release monotone non-decreasing
+#   13  ODV/parent ratios (NM)             Node ↔ Sounio  (total-mass and blood-AUC, R7)
+#   +   mass account, both engines: gut balance, F_abs split, portal ≤ F_abs·released,
+#       ledger identities, body ≤ portal input, no negative mass, release monotone
+#   +   closed form at 120 h, both engines: oral CL/F and AUC ratio equal the
+#       well-stirred portal identities within the truncation bound; Node ↔ Sounio
+# Model: portal first pass (scenarios/venlafaxine_xr.sio). The gut pool is solved
+# exactly per step (release at a constant rate); F_abs of what leaves the lumen
+# enters the liver's vascular space, 1 − F_abs never reaches the portal vein;
+# hepatic clearance is a liver sink in the
+# TR-BDF2 solve, so F_H and presystemic ODV emerge (F_oral = 0.45 at NM).
+# The Sounio side drives the stdlib scenario's own step functions; the Node side
+# (website/src/lib/pbpk28_core.mjs) is an independent reimplementation.
 # Numerical parity runs at the NM phenotype (R7); PM/IM/UM scaling is verified by
 # tests/run-pass/darwin_venlafaxine_xr_pgx_smoke.sio, not here (keeps the gate lean).
 # ════════════════════════════════════════════════════════════════════════════
@@ -775,6 +785,11 @@ node "$VFX_NODE_RUNNER" > "$VFX_NODE_LOG" 2>&1 || {
 if ! grep -q '^DISSERTATION_PBPK28_VENLAFAXINE_PARITY_DONE$' "$VFX_NODE_LOG"; then
   echo "[pbpk28-parity:case10] FAIL: Node venlafaxine runner did not emit DONE" >&2; exit 1; fi
 
+# awk coerces "nan"/"inf"/garbage to a number (nan -> 0 on this awk), so a solver
+# that emits NaN would read as a clean zero residual. Every venlafaxine value
+# below goes through fin(): anything that is not a finite decimal literal is
+# counted in nonfin and fails the check that consumes it.
+VFX_AWK_FIN='function fin(s) { if (s !~ /^[+-]?([0-9]+[.]?[0-9]*|[.][0-9]+)([eE][+-]?[0-9]+)?$/) { nonfin++; printf "  FAIL: non-finite or non-numeric value \"%s\"\n", s; return 0 } return s + 0 }'
 # Prefixed cavg parser: $1=prefix label, $2=infile → t<TAB>i<TAB>cavg
 vfx_parse_cavg() {
   awk -v P="$1" '
@@ -787,14 +802,17 @@ vfx_rmse() {  # $1=prefix $2=pass-marker $3=fail-marker
   join -t"$(printf '\t')" -1 1 -2 1 \
     <(vfx_parse_cavg "$1" "$VFX_SIO_LOG"  | awk -F'\t' '{print $1"|"$2"\t"$3}' | sort) \
     <(vfx_parse_cavg "$1" "$VFX_NODE_LOG" | awk -F'\t' '{print $1"|"$2"\t"$3}' | sort) \
-  | awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" -v PASS="$2" -v FAILM="$3" '
-      {split($1,a,"|"); i=a[2]+0; d=($2+0)-($3+0); SS[i]+=d*d; NN[i]++;
-       cs=($2+0); cn=($3+0); if(cs>PK[i])PK[i]=cs; if(cn>PK[i])PK[i]=cn}
+  | awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" -v PASS="$2" -v FAILM="$3" "$VFX_AWK_FIN"'
+      {if(seen[$1]++)dup++; split($1,a,"|"); i=a[2]+0; cs=fin($2); cn=fin($3); d=cs-cn; SS[i]+=d*d; NN[i]++;
+       as=(cs<0)?-cs:cs; an=(cn<0)?-cn:cn; if(as>PK[i])PK[i]=as; if(an>PK[i])PK[i]=an}
       END{bad=0;
+        if(nonfin>0){printf "%s %d non-finite value(s)\n",FAILM,nonfin; exit 1}
+        if(dup>0){printf "%s %d duplicate (t, organ) key(s)\n",FAILM,dup; exit 1}
         printf "%-3s %-14s %-14s %-9s %s\n","i","rmse","peak","pct","status";
-        for(i=0;i<14;i++){ if(NN[i]==0){printf "%-3d MISSING\n",i; bad++; continue}
+        for(i=0;i<14;i++){ if(NN[i]!=12){printf "%-3d %d/12 joined samples\n",i,NN[i]+0; bad++; continue}
           rmse=sqrt(SS[i]/NN[i]); pk=PK[i]+0;
-          if(pk==0){printf "%-3d %-14.3e %-14s %-9s zero-traj OK\n",i,rmse,"-","-"; continue}
+          if(pk==0 && rmse==0){printf "%-3d %-14.3e %-14s %-9s zero-traj OK\n",i,rmse,"-","-"; continue}
+          if(pk==0){printf "%-3d %-14.3e %-14s %-9s FAIL (zero peak, nonzero RMSE)\n",i,rmse,"-","-"; bad++; continue}
           pct=100*rmse/pk; st=(pct<THR+0)?"OK":"FAIL"; if(st=="FAIL")bad++;
           printf "%-3d %-14.6e %-14.6e %-8.4f %s\n",i,rmse,pk,pct,st }
         if(bad>0){printf "%s %d/14 compartments exceed threshold\n",FAILM,bad; exit 1}
@@ -812,6 +830,11 @@ vfx_rmse VPARENT "VENLAFAXINE_PARENT_PARITY_PASS" "VENLAFAXINE_PARENT_PARITY_FAI
 
 echo
 echo "[pbpk28-parity:case11] venlafaxine ODV PBPK28 (14 organs)"
+VFX_SIO_O=$(vfx_parse_cavg VODV "$VFX_SIO_LOG" | wc -l)
+VFX_NODE_O=$(vfx_parse_cavg VODV "$VFX_NODE_LOG" | wc -l)
+if [[ "$VFX_SIO_O" -ne "$EXPECTED_VFX" || "$VFX_NODE_O" -ne "$EXPECTED_VFX" ]]; then
+  echo "[pbpk28-parity:case11] FAIL: ODV row mismatch Sounio=$VFX_SIO_O Node=$VFX_NODE_O expected=$EXPECTED_VFX" >&2; exit 1; fi
+echo "[pbpk28-parity:case11] both runs emitted $VFX_SIO_O ODV records"
 vfx_rmse VODV "VENLAFAXINE_ODV_PARITY_PASS" "VENLAFAXINE_ODV_PARITY_FAIL"
 
 echo
@@ -819,47 +842,143 @@ echo "[pbpk28-parity:case12] venlafaxine matrix Korsmeyer-Peppas release (biomat
 join -t"$(printf '\t')" -1 1 -2 1 \
   <(awk -F= '/^VMATRIX\|t=/{t=$2} /^VMATRIX\|rel=/{print t"\t"$2}' "$VFX_SIO_LOG"  | sort) \
   <(awk -F= '/^VMATRIX\|t=/{t=$2} /^VMATRIX\|rel=/{print t"\t"$2}' "$VFX_NODE_LOG" | sort) \
-  | awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" '
-      {d=($2+0)-($3+0); SS+=d*d; NN++; if(($2+0)>PK)PK=$2+0}
-      END{ if(NN==0){print "VENLAFAXINE_MATRIX_RELEASE_PARITY_FAIL no rows"; exit 1}
+  | awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" "$VFX_AWK_FIN"'
+      {if(seen[$1]++)dup++; a=fin($2); b=fin($3); d=a-b; SS+=d*d; NN++; aa=(a<0)?-a:a; ab=(b<0)?-b:b; if(aa>PK)PK=aa; if(ab>PK)PK=ab}
+      END{ if(nonfin>0){printf "VENLAFAXINE_MATRIX_RELEASE_PARITY_FAIL %d non-finite value(s)\n",nonfin; exit 1}
+        if(dup>0){printf "VENLAFAXINE_MATRIX_RELEASE_PARITY_FAIL %d duplicate time key(s)\n",dup; exit 1}
+        if(NN!=12){printf "VENLAFAXINE_MATRIX_RELEASE_PARITY_FAIL %d/12 rows\n",NN; exit 1}
         rmse=sqrt(SS/NN); pct=(PK>0)?100*rmse/PK:0;
+        if(PK<=0 && rmse>0){printf "VENLAFAXINE_MATRIX_RELEASE_PARITY_FAIL zero peak with nonzero RMSE %.3e\n",rmse; exit 1}
         if(pct<THR+0) printf "VENLAFAXINE_MATRIX_RELEASE_PARITY_PASS %d/%d samples within %s%% RMSE (Korsmeyer-Peppas n=0.65, peak=%.4g mg)\n",NN,NN,THR,PK;
         else { printf "VENLAFAXINE_MATRIX_RELEASE_PARITY_FAIL %.4f%% RMSE\n",pct; exit 1 } }'
 
 echo
-echo "[pbpk28-parity:case13] venlafaxine ODV/parent total-mass ratio (NM)"
-join -t"$(printf '\t')" -1 1 -2 1 \
-  <(awk -F= '/^VRATIO\|t=/{t=$2} /^VRATIO\|nm=/{print t"\t"$2}' "$VFX_SIO_LOG"  | sort) \
-  <(awk -F= '/^VRATIO\|t=/{t=$2} /^VRATIO\|nm=/{print t"\t"$2}' "$VFX_NODE_LOG" | sort) \
-  | awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" '
-      {d=($2+0)-($3+0); SS+=d*d; NN++; if(($2+0)>PK)PK=$2+0}
-      END{ if(NN==0){print "VENLAFAXINE_RATIO_PARITY_FAIL no rows"; exit 1}
-        rmse=sqrt(SS/NN); pct=(PK>0)?100*rmse/PK:0;
-        if(pct<THR+0) printf "VENLAFAXINE_RATIO_PARITY_PASS %d/%d samples within %s%% RMSE (NM ODV/parent, peak=%.4g)\n",NN,NN,THR,PK;
-        else { printf "VENLAFAXINE_RATIO_PARITY_FAIL %.4f%% RMSE\n",pct; exit 1 } }'
+echo "[pbpk28-parity:case13] venlafaxine ODV/parent ratios (NM): total-mass and blood AUC"
+vfx_scalar() {  # $1=record key (e.g. VRATIO|nm) $2=time key (e.g. VRATIO|t) $3=infile → t<TAB>v
+  awk -v K="$1" -v T="$2" '
+    index($0, T"=")==1 { t=substr($0, length(T)+2); next }
+    index($0, K"=")==1 { print t"\t"substr($0, length(K)+2) }
+  ' "$3"
+}
+for VFX_KEY in nm auc; do
+  join -t"$(printf '\t')" -1 1 -2 1 \
+    <(vfx_scalar "VRATIO|$VFX_KEY" "VRATIO|t" "$VFX_SIO_LOG"  | sort) \
+    <(vfx_scalar "VRATIO|$VFX_KEY" "VRATIO|t" "$VFX_NODE_LOG" | sort) \
+    | awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" -v KEY="$VFX_KEY" "$VFX_AWK_FIN"'
+        {if(seen[$1]++)dup++; a=fin($2); b=fin($3); d=a-b; SS+=d*d; NN++; aa=(a<0)?-a:a; ab=(b<0)?-b:b; if(aa>PK)PK=aa; if(ab>PK)PK=ab}
+        END{ if(nonfin>0){printf "VENLAFAXINE_RATIO_PARITY_FAIL %s: %d non-finite value(s)\n",KEY,nonfin; exit 1}
+          if(dup>0){printf "VENLAFAXINE_RATIO_PARITY_FAIL %s: %d duplicate time key(s)\n",KEY,dup; exit 1}
+          if(NN!=12){printf "VENLAFAXINE_RATIO_PARITY_FAIL %s: %d/12 rows\n",KEY,NN; exit 1}
+          rmse=sqrt(SS/NN); pct=(PK>0)?100*rmse/PK:0;
+          if(PK<=0 && rmse>0){printf "VENLAFAXINE_RATIO_PARITY_FAIL %s: zero peak with nonzero RMSE %.3e\n",KEY,rmse; exit 1}
+          if(pct<THR+0) printf "VENLAFAXINE_RATIO_PARITY_PASS %s %d/%d samples within %s%% RMSE (NM ODV/parent, peak=%.4g)\n",KEY,NN,NN,THR,PK;
+          else { printf "VENLAFAXINE_RATIO_PARITY_FAIL %s %.4f%% RMSE\n",KEY,pct; exit 1 } }'
+done
 
 echo
-# Conservation: body burden (parent + ODV) can never exceed the drug the matrix
-# has released; release is monotone non-decreasing and bounded by the 75 mg dose.
-# (F is modelled as an absorption-rate scalar — the unabsorbed gut fraction is
-# retained and absorbed later — so cumulative absorption approaches the released
-# dose; full parent+ODV+eliminated bookkeeping is not separately instrumented.)
-echo "[pbpk28-parity] venlafaxine mass conservation (parent + ODV ≤ released; release monotone ≤ dose)"
-awk -F= '
-  /^VMATRIX\|rel=/{rel=$2+0}
-  /^VMASS\|p=/{mp=$2+0}
-  /^VMASS\|o=/{mo=$2+0; body=mp+mo;
-    if(body > rel + 1.0e-6){bad++; printf "  FAIL: body=%.6f > released=%.6f\n",body,rel}
-    if(body < -1.0e-9){bad++; printf "  FAIL: negative body mass %.6f\n",body}
-    if(rel > 75.0 + 1.0e-6){bad++; printf "  FAIL: released %.6f > dose 75\n",rel}
-    if(NR>1 && rel < prev - 1.0e-9){mono++; printf "  FAIL: release non-monotone (%.4f < %.4f)\n",rel,prev}
-    prev=rel; n++}
-  END{ if(bad>0 || mono>0){printf "VENLAFAXINE_MASS_CONSERVATION_FAIL\n"; exit 1}
-       else printf "VENLAFAXINE_MASS_CONSERVATION_PASS %d/%d samples (parent+ODV ≤ released ≤ 75 mg, release monotone)\n",n,n }
-' "$VFX_SIO_LOG"
+# Mass account, checked on BOTH engines' output. Portal first-pass model: over each
+# step the gut pool loses what the exact solution of dG/dt = R − ka·G carries out
+# of it; F_abs of that enters the portal vein and 1 − F_abs never does, so
+# cumulative portal input ≤ F_abs·released. (The model
+# this replaced subtracted only the absorbed share from the pool, so the rest was
+# absorbed again later: cumulative input → released, effective F = 1.)
+# Residuals (and the slack F_abs·released − portal) are printed x1e12 (mg) by both
+# engines: println(f64) is fixed 6-decimal and would show every rounding-level
+# residual as 0.000000. They are identities of the model, so only rounding
+# separates them from zero (the slack equals F_abs·gut ≥ 0); the budget is the PBPK28
+# ledger's max(1e-12, steps·1e-15) relative to the released dose
+# (theta_pbpk28.sio pbpk28_mass_tol_rel): a heuristic rounding budget, not fitted
+# to observed residuals and not a proven floating-point bound. Negative mass is held
+# to pbpk28_neg_mass_bound_mg() = 5e-7 mg. Comparisons against printed 6-decimal
+# values carry the print resolution 1e-6 mg.
+for VFX_LOG in "$VFX_SIO_LOG" "$VFX_NODE_LOG"; do
+  echo "[pbpk28-parity] venlafaxine mass account: $(basename "$VFX_LOG")"
+  awk -F= "$VFX_AWK_FIN"'
+    # Fail closed: every field must appear exactly once per sample (a missing
+    # record would otherwise read as 0 and pass, and a duplicate could stand in
+    # for a missing one in an aggregate count) and be finite (fin()).
+    # The step count sets the tolerance, so it is not taken on trust from the
+    # engine under test: TR-BDF2 books two theta sub-steps per step, so at
+    # sample time t it must be exactly 2*t/dt (dt from the log header).
+    /^dt=/{if(dtv==""){dtv=fin($2)}}
+    /^VBAL\|t=/{tv=fin($2)}
+    /^VMASS\|p=/{mp=fin($2); cnt["mp"]++}
+    /^VMASS\|o=/{mo=fin($2); cnt["mo"]++}
+    /^VBAL\|released=/{rel=fin($2); cnt["rel"]++}
+    /^VBAL\|gut=/{gu=fin($2); cnt["gu"]++}
+    /^VBAL\|portal=/{por=fin($2); cnt["por"]++}
+    /^VBAL\|lost=/{lo=fin($2); cnt["lo"]++}
+    /^VBAL\|fabs=/{fa=fin($2); cnt["fa"]++}
+    /^VBAL\|resid_gut_e12=/{rg=fin($2); cnt["rg"]++}
+    /^VBAL\|resid_split_e12=/{rs=fin($2); cnt["rs"]++}
+    /^VBAL\|bound_slack_e12=/{bs=fin($2); cnt["bs"]++}
+    /^VBAL\|resid_p_e12=/{rp=fin($2); cnt["rp"]++}
+    /^VBAL\|resid_o_e12=/{ro=fin($2); cnt["ro"]++}
+    /^VBAL\|neg_e12=/{ng=fin($2); cnt["ng"]++}
+    /^VBAL\|steps=/{st=fin($2);
+      nk=split("mp mo rel gu por lo fa rg rs bs rp ro ng", req, " ")
+      for(ki=1; ki<=nk; ki++){ if(cnt[req[ki]]!=1){bad++; printf "  FAIL: sample %d has %d record(s) of field %s (need exactly 1)\n",n+1,cnt[req[ki]]+0,req[ki]}; cnt[req[ki]]=0 }
+      if(!(dtv>0)){bad++; printf "  FAIL: no positive dt= header to check the step count against\n"}
+      else { exp_st=int(2*tv/dtv+0.5); if(st!=exp_st || st<=0){bad++; printf "  FAIL: sample t=%s reports %d steps, expected 2*t/dt = %d\n",tv,st,exp_st} }
+      if(nonfin>0){bad+=nonfin; nonfin=0}
+      tr=st*1.0e-15; if(tr<1.0e-12)tr=1.0e-12; tol=tr*rel*1.0e12;   # residuals are printed x1e12 mg
+      a=(rg<0)?-rg:rg; if(a>tol){bad++; printf "  FAIL: gut balance residual %.3e > %.3e (x1e-12 mg)\n",rg,tol}
+      a=(rs<0)?-rs:rs; if(a>tol){bad++; printf "  FAIL: F_abs split residual %.3e > %.3e (x1e-12 mg)\n",rs,tol}
+      a=(rp<0)?-rp:rp; if(a>tol){bad++; printf "  FAIL: parent ledger residual %.3e > %.3e (x1e-12 mg)\n",rp,tol}
+      a=(ro<0)?-ro:ro; if(a>tol){bad++; printf "  FAIL: ODV ledger residual %.3e > %.3e (x1e-12 mg)\n",ro,tol}
+      if(bs < -tol){bad++; printf "  FAIL: portal input exceeds F_abs*released by %.3e (x1e-12 mg)\n",-bs}
+      if(mp+mo > por + 2.0e-6){bad++; printf "  FAIL: body %.6f > portal input %.6f mg\n",mp+mo,por}
+      if(ng > 5.0e5){bad++; printf "  FAIL: negative mass %.3e x1e-12 mg > 5e-7 mg\n",ng}
+      if(ng < 0){bad++; printf "  FAIL: negative-mass magnitude is negative (%.3e x1e-12 mg)\n",ng}
+      if(rel > 75.0 + 1.0e-6){bad++; printf "  FAIL: released %.6f > dose 75\n",rel}
+      if(n>0 && rel < prev - 1.0e-6){bad++; printf "  FAIL: release non-monotone (%.6f < %.6f)\n",rel,prev}
+      prev=rel; n++}
+    END{ if(n!=12){printf "VENLAFAXINE_MASS_ACCOUNT_FAIL %d/12 samples\n",n; exit 1}
+         if(bad>0){printf "VENLAFAXINE_MASS_ACCOUNT_FAIL %d violation(s)\n",bad; exit 1}
+         printf "VENLAFAXINE_MASS_ACCOUNT_PASS %d/%d samples (gut balance, F_abs split, ledgers, portal <= F_abs*released = %.6f mg, body <= portal, no negative mass)\n",n,n,fa*rel }
+  ' "$VFX_LOG"
+done
 
 echo
-echo "[pbpk28-parity] venlafaxine XR canonical: parent + ODV + matrix + ratio all within ${RMSE_THRESHOLD_PCT}% RMSE (3rd canonical drug)"
+# Closed form at the scenario horizon (120 h). Each engine checks that its oral
+# CL/F and blood AUC ratio equal the exact well-stirred portal identities within
+# the rigorous truncation bound (vfx_self_check_run's criterion) and prints
+# VFINAL|closed_form. The printed values must then agree between engines to the
+# 6-decimal print resolution.
+echo "[pbpk28-parity] venlafaxine closed form at 120 h (oral CL/F, AUC ratio)"
+for VFX_LOG in "$VFX_SIO_LOG" "$VFX_NODE_LOG"; do
+  # The integrated identities barely depend on the horizon, so a shortened run
+  # could stay green: require exactly one final record, at t = 120 h, and
+  # exactly one closed_form status line, PASS.
+  if [[ "$(grep -c '^VFINAL|t=' "$VFX_LOG")" != 1 || "$(grep '^VFINAL|t=' "$VFX_LOG")" != 'VFINAL|t=120.000000' ]]; then
+    echo "VENLAFAXINE_CLOSED_FORM_FAIL $(basename "$VFX_LOG"): need exactly one VFINAL|t=120.000000" >&2
+    grep '^VFINAL|t=' "$VFX_LOG" >&2 || true
+    exit 1
+  fi
+  if [[ "$(grep -c '^VFINAL|closed_form=' "$VFX_LOG")" != 1 ]]; then
+    echo "VENLAFAXINE_CLOSED_FORM_FAIL $(basename "$VFX_LOG"): need exactly one closed_form status" >&2
+    exit 1
+  fi
+  if ! grep -q '^VFINAL|closed_form=PASS$' "$VFX_LOG"; then
+    echo "VENLAFAXINE_CLOSED_FORM_FAIL $(basename "$VFX_LOG")" >&2
+    grep '^VFINAL|' "$VFX_LOG" >&2 || true
+    exit 1
+  fi
+done
+for VFX_KEY in aucr clf foral_pred; do
+  VFX_A=$(grep "^VFINAL|$VFX_KEY=" "$VFX_SIO_LOG"  | head -1 | cut -d= -f2)
+  VFX_B=$(grep "^VFINAL|$VFX_KEY=" "$VFX_NODE_LOG" | head -1 | cut -d= -f2)
+  awk -v A="$VFX_A" -v B="$VFX_B" -v K="$VFX_KEY" "$VFX_AWK_FIN"'BEGIN{
+    if(A=="" || B==""){printf "VENLAFAXINE_CLOSED_FORM_FAIL %s missing\n",K; exit 1}
+    a=fin(A); b=fin(B); if(nonfin>0){printf "VENLAFAXINE_CLOSED_FORM_FAIL %s non-finite\n",K; exit 1}
+    d=a-b; if(d<0)d=-d;
+    if(d>1.0000001e-6){printf "VENLAFAXINE_CLOSED_FORM_FAIL %s Sounio=%s Node=%s\n",K,A,B; exit 1}
+    printf "  %s Sounio=%s Node=%s\n",K,A,B }'
+done
+echo "VENLAFAXINE_CLOSED_FORM_PASS both engines (NM: F_oral = F_abs*F_H, CL/F = (c*X + CL_R)/F_abs, AUC ratio = s*c*X_form/CL_ODV)"
+
+echo
+echo "[pbpk28-parity] venlafaxine XR canonical: parent + ODV + matrix + ratios within ${RMSE_THRESHOLD_PCT}% RMSE, mass account and closed form on both engines (3rd canonical drug)"
 
 # ════════════════════════════════════════════════════════════════════════════
 # Cases 14-16: Haloperidol (CASO II) canonical parity — PBPK14 + BBB + D2.

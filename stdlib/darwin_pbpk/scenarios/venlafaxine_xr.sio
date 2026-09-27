@@ -4,17 +4,83 @@
 //   matrix_er (Korsmeyer-Peppas) → GI absorption → parent PBPK28
 //   → CYP2D6 formation → ODV PBPK28 → ODV/parent PGx readout
 //
-// Operator splitting per step (Lie-Trotter, same pattern as semaglutide_sc_depot):
-//   1. Matrix releases dissolved dose to gut pool
-//   2. First-order absorption (ka) from gut pool → parent blood input
-//   3. Parent PBPK28 CN step + CYP2D6 formation sink → ODV blood input
-//   4. ODV PBPK28 CN step
+// Operator splitting per step (Lie-Trotter):
+//   1-2. Gut pool dG/dt = R − ka·G integrated exactly over the step, with the
+//      step's matrix release entering at a constant rate over its release window
+//      (the whole step, or up to matrix saturation); of the mass that leaves the
+//      lumen a fraction F_abs reaches the PORTAL vein, the rest never does
+//      (`vfx_gut_release_step`)
+//   3. Parent PBPK28 TR-BDF2 step with the absorbed input routed into the liver's
+//      vascular space and all hepatic clearance as a liver sink inside the
+//      implicit solve; the CYP2D6 → ODV share of the removed mass feeds ODV blood
+//   4. ODV PBPK28 TR-BDF2 step
 //
-// Literature anchors: Gohel 2008 (matrix), Wang 2022 (ka, F), Klamerus 1999 (CL),
-// Kirchheiner 2006 (ODV/parent ratios).
+// Portal first pass. Absorbed drug meets the hepatic sink before it reaches the
+// systemic blood, so hepatic availability F_H = Q/(Q + X) and presystemic ODV
+// formation emerge from the solve instead of being imposed by a fixed F. With
+// the input in systemic blood instead, hepatic formation is flow-limited,
+// Q·X/(Q + X) ≤ Q, and the ODV/parent ratio could not exceed Q/CL_ODV (3.21
+// with the previous parameters) for any CYP2D6 activity
+// (docs/audit/VENLAFAXINE_PGX_STRUCTURE_AUDIT_2026-09-26.md).
+//
+// Hepatic resolution (`vfx_hepatic_em`). The literature clearances are ORAL
+// ones (Dose/AUC, Ae/AUC). For a well-stirred liver with venous-referenced
+// intrinsic clearance X, flow Q, renal clearance CL_R on the systemic side and
+// portal input, integrating the linear model over a dose gives
+// ∫C_v,liver = c·∫C_b with c = (Q + CL_R)/Q, hence
+//     F_H = Q/(Q + X),   Dose/AUC_b = (c·X + CL_R)/F_abs,   Ae_i/AUC_b = c·X_i.
+// Lessard 1999 (EM): Dose/AUC = 100, Ae(O-desmethyl)/AUC = 43, Dose/AUC = 17 with
+// CYP2D6 blocked by quinidine; CL_R = 4. Patat 1998: F = F_abs·F_H = 0.45. These
+// resolve in closed form (F_abs 0.8265, X 75.31, X_form 41.17, X_non2D6 9.62 L/h).
+// F_abs is the fraction of the dose that reaches the portal vein, i.e. absorption
+// times any gut-wall availability (F_abs = f_a·F_G); the model only sees their
+// product. The label's ≥ 92 % absorption is consistent with f_a ≈ 0.92, F_G ≈ 0.90.
+// CYP2D6 phenotype scales the two CYP2D6 pathways; F_abs and X_non2D6 do not change.
+//
+// Sink calibration (`vfx_liver_cl_sink`). The kernel's sink acts on the liver's
+// average concentration in both sub-compartments. Its venous-referenced
+// clearance at the liver's steady state is exact in closed form,
+//     X(cl) = (cl/V)·(V_v + V_t·PS/(PS/Kp + cl·V_t/V)),
+// and is inverted exactly (a quadratic), so the model realises X, not an
+// equilibrium approximation of it.
+//
+// ODV systemic clearance. The label/Klamerus value (0.4 L/h/kg) is Dose/AUC_ODV,
+// an apparent clearance; the systemic value is fm·CL_app with fm = 43/100 the
+// fraction of an EM dose converted to ODV (Lessard 1999).
+//
+// The formation flux is removed·X_form/X. CL·dt/V_liver is large at dt = 0.5 h,
+// so an explicit post-step subtraction cannot represent the sink: once the
+// step's demand exceeds the liver content it saturates to "empty the liver". The
+// sink is therefore folded into the liver's 2×2 block of the implicit solve,
+// the same way `cl_central` enters the blood row.
+//
+// Transport is TR-BDF2 (theta_pbpk28), not the floored Crank–Nicolson kernel of
+// tsit5_pbpk28. CN is not L-stable: in the stiff liver-sink and vascular modes it
+// rings with R ≈ −1 and goes negative in the decaying tail, and that kernel's
+// `x < 0 → 0` floors then add mass that was never dosed
+// (docs/audit/PBPK28_CN_FLOOR_CLAMP_MASS_INJECTION_DISPATCH_2026-09-26.md).
+// TR-BDF2 is L-stable, second order and linear, so it conserves mass exactly
+// and needs no floor; each ledger books AUC with the method's own quadrature
+// weights, so M(T) + CL·AUC_b + removed = administered holds to rounding.
+//
+// Readout: blood AUC_ODV / AUC_parent over the run. Under linear kinetics a
+// single dose's AUC(0–∞) equals the steady-state AUC over one dosing interval,
+// so this is a steady-state C_avg ratio, independent of dose, ka and the
+// release profile. By the identities above it equals s·c·X_form/CL_ODV =
+// s·(CL/F)_EM/CL_ODV,app exactly, where s is the CYP2D6 scale. s is DEFINED from
+// the literature phenotype ratios (pgx/cyp2d6_venlafaxine.sio, provenance
+// unverified), so matching those ratios is not independent evidence. Nor is
+// the EM/PM oral CL/F: the EM value is calibrated to Lessard's 100 L/h, and
+// the PM value uses s(PM) = 0.25/3.45 from the same unverified ratios, so
+// EM/PM > 4 (Lessard 1999: "more than fourfold") is a consistency check of
+// that ratio, not independent support. The run is long enough that the
+// truncated tail is negligible; main() prints the body mass left at t_end.
+//
+// Literature: Gohel 2008 (matrix), Wang 2022 (ka), Patat 1998 (F), Lessard 1999
+// (oral clearances), Klamerus 1996 / label (ODV apparent CL); see drugs/venlafaxine.sio.
 
 use darwin_pbpk::core::pbpk28_params::*
-use darwin_pbpk::tsit5_pbpk28::*
+use darwin_pbpk::theta_pbpk28::*
 use darwin_pbpk::release::matrix_er::*
 use darwin_pbpk::drugs::venlafaxine::*
 use darwin_pbpk::pgx::cyp2d6_venlafaxine::*
@@ -24,34 +90,253 @@ struct VenlafaxineXrScenario {
     odv:    PBPKState28,
     gut_mg: f64,
     pheno:  i32,
+    lg_parent: PBPK28Ledger,   // parent: administered = portal input, sink = hepatic removal
+    lg_odv:    PBPK28Ledger,   // ODV: administered = formed
 }
 
-fn vfx_scenario_init(pheno: i32) -> VenlafaxineXrScenario {
+// A refused scenario: NaN in the gut pool, both states, and both ledgers'
+// administered mass and blood AUC, so every readout (mass residual, CL/F, AUC
+// ratio, administered) is NaN and every check of it fails. NaN is built as
+// inf - inf so the callers need no Div effect.
+fn vfx_refused_scenario() -> VenlafaxineXrScenario {
+    let big = 1.0e308
+    let inf = big * 10.0
+    let nan = inf - inf
+    var ps = pbpk28_state_zero()
+    ps.cv[0] = nan
+    var os = pbpk28_state_zero()
+    os.cv[0] = nan
+    var lp = pbpk28_ledger_zero()
+    lp.administered = nan
+    lp.auc[0] = nan
+    var lo = pbpk28_ledger_zero()
+    lo.administered = nan
+    lo.auc[0] = nan
+    VenlafaxineXrScenario {
+        parent: ps,
+        odv:    os,
+        gut_mg: nan,
+        pheno:  0 - 1,
+        lg_parent: lp,
+        lg_odv:    lo,
+    }
+}
+
+// Phenotype codes 0..3 (PM, IM, NM, UM). Any other code would read as NM in
+// the downstream default branches, so it is refused fail-closed with a
+// NaN-poisoned scenario (vfx_refused_scenario).
+pub fn vfx_scenario_init(pheno: i32) -> VenlafaxineXrScenario {
+    if !(pheno >= 0 && pheno <= 3) { return vfx_refused_scenario() }
     VenlafaxineXrScenario {
         parent: pbpk28_state_zero(),
         odv:    pbpk28_state_zero(),
         gut_mg: 0.0,
         pheno:  pheno,
+        lg_parent: pbpk28_ledger_zero(),
+        lg_odv:    pbpk28_ledger_zero(),
     }
 }
 
+// Liver organ index in PBPK28 (portal input and hepatic clearance site).
+fn vfx_liver_organ() -> i32 { return 1 }
+
+// EM hepatic resolution (see header). All clearances venous-referenced, L/h.
+pub struct VfxHepaticEm {
+    pub f_abs: f64,       // fraction of the dose reaching the portal vein (f_a·F_G)
+    pub x_form: f64,      // CYP2D6 → ODV
+    pub x_other: f64,     // CYP2D6, not O-desmethylation
+    pub x_non2d6: f64,    // CYP2D6-independent hepatic
+    pub c: f64,           // (Q + CL_R)/Q
+    pub fm_odv: f64,      // fraction of an EM dose converted to ODV
+}
+
+pub fn vfx_hepatic_em() -> VfxHepaticEm with Mut, Div, Panic {
+    let q = pbpk28_params_venlafaxine_parent().q[vfx_liver_organ()]
+    let cl_r = venlafaxine_cl_renal()
+    let f = venlafaxine_f_oral_xr()
+    let clf = vfx_cl_parent_oral_nm()
+    let c = (q + cl_r) / q
+    // F = F_abs·Q/(Q + X) with c·X = F_abs·CL/F − CL_R, solved for F_abs.
+    let f_abs = f * (1.0 - cl_r / (c * q)) / (1.0 - f * clf / (c * q))
+    let x = (f_abs * clf - cl_r) / c
+    let x_form = vfx_cl_form_odv_nm() / c
+    let x_non = (f_abs * venlafaxine_cl_oral_quinidine_em() - cl_r) / c
+    VfxHepaticEm {
+        f_abs: f_abs,
+        x_form: x_form,
+        x_other: x - x_form - x_non,
+        x_non2d6: x_non,
+        c: c,
+        fm_odv: vfx_cl_form_odv_nm() / clf,
+    }
+}
+
+// Hepatic intrinsic clearance for a phenotype (CYP2D6 pathways scaled by s).
+pub fn vfx_x_hep(pheno: i32) -> f64 with Mut, Div, Panic {
+    let h = vfx_hepatic_em()
+    return h.x_non2d6 + vfx_cyp2d6_cl_form_scale(pheno) * (h.x_form + h.x_other)
+}
+
+// Fraction of the hepatic removal that is ODV formation.
+pub fn vfx_form_fraction(pheno: i32) -> f64 with Mut, Div, Panic {
+    let h = vfx_hepatic_em()
+    return vfx_cyp2d6_cl_form_scale(pheno) * h.x_form / vfx_x_hep(pheno)
+}
+
+// Venous-referenced clearance the kernel's liver sink realises at steady state
+// for sink parameter cl (header formula).
+pub fn vfx_liver_x_of_sink(p: PBPKParams28, cl: f64) -> f64 with Div {
+    let k = vfx_liver_organ()
+    let v = p.v_ref[k]
+    let vv = v * p.vasc_frac[k]
+    let vt = v * (1.0 - p.vasc_frac[k])
+    let ps = p.ps[k]
+    return (cl / v) * (vv + vt * ps / (ps / p.kp[k] + cl * vt / v))
+}
+
+// Inverse of vfx_liver_x_of_sink: the positive root of
+//   a·b·cl² + (a·PS/Kp + b·PS − X·b)·cl − X·PS/Kp = 0,  a = V_v/V, b = V_t/V,
+// in the cancellation-free form 2C/(B + sqrt(B² + 4·a·b·C)).
+pub fn vfx_liver_cl_sink(p: PBPKParams28, x: f64) -> f64 with Div {
+    let k = vfx_liver_organ()
+    let a = p.vasc_frac[k]
+    let b = 1.0 - a
+    let ps = p.ps[k]
+    let kp = p.kp[k]
+    let bb = a * ps / kp + b * ps - x * b
+    let cc = x * ps / kp
+    return 2.0 * cc / (bb + sqrt(bb * bb + 4.0 * a * b * cc))
+}
+
+// Parent: renal clearance on blood; all hepatic clearance is the liver sink.
 fn vfx_parent_params(pheno: i32) -> PBPKParams28 with Mut, Div, Panic {
     var p = pbpk28_params_venlafaxine_parent()
-    p.cl_central = venlafaxine_cl_parent_central_pgx(pheno)
+    p.cl_central = venlafaxine_cl_renal()
     return p
+}
+
+// ODV systemic clearance fm·CL_app (see header).
+pub fn vfx_cl_odv_systemic(pheno: i32) -> f64 with Mut, Div, Panic {
+    return vfx_hepatic_em().fm_odv * venlafaxine_cl_odv_pgx(pheno)
 }
 
 fn vfx_odv_params(pheno: i32) -> PBPKParams28 with Mut, Div, Panic {
     var p = pbpk28_params_venlafaxine_odv()
-    p.cl_central = venlafaxine_cl_odv_pgx(pheno)
+    p.cl_central = vfx_cl_odv_systemic(pheno)
     return p
 }
 
-// Formation rate parent → ODV (mg/h) proportional to parent blood concentration.
-fn vfx_formation_rate_mg_h(cb_parent: f64, pheno: i32) -> f64 with Div, Panic {
-    let cl_form = vfx_cl_form_odv_adjusted(pheno)
-    // Scale: CL_form [L/h] × C_b [mg/L] ≈ mg/h elimination flux at SS.
-    return cl_form * cb_parent
+// Parent TR-BDF2 step: `portal_input` (mg/h) enters the liver's vascular space,
+// and the whole hepatic clearance is the liver sink inside the implicit solve.
+// Advances `*parent`, books the step into `*ledger` (whose sink_removed is the
+// total hepatic removal), and returns the parent mass (mg) converted to ODV over
+// the step: the removed mass times the ODV-formation fraction.
+pub fn vfx_parent_step_with_formation(
+    parent: &!PBPKState28,
+    pheno: i32,
+    portal_input: f64,
+    dt: f64,
+    ledger: &!PBPK28Ledger
+) -> f64 with Mut, Div, Panic {
+    let pp = vfx_parent_params(pheno)
+    let cl_sink = vfx_liver_cl_sink(pp, vfx_x_hep(pheno))
+    let liver = vfx_liver_organ()
+    let removed = pbpk28_trbdf2_step_routed_sink_mut(parent, pp, portal_input, liver, dt, liver, cl_sink, ledger)
+    return removed * vfx_form_fraction(pheno)
+}
+
+// ODV TR-BDF2 step (no sink; ODV leaves through cl_central only).
+pub fn vfx_odv_step(
+    odv: &!PBPKState28,
+    pheno: i32,
+    odv_input: f64,
+    dt: f64,
+    ledger: &!PBPK28Ledger
+) with Mut, Div, Panic {
+    pbpk28_trbdf2_step_mut(odv, vfx_odv_params(pheno), odv_input, dt, ledger)
+}
+
+// Gut pool over one step: dG/dt = R − ka·G, with the step's released mass ΔR
+// (matrix_step_amount) entering at the constant rate R = ΔR/dt. Exactly, with
+// x = ka·dt,
+//     G₁ = G₀·e^(−x) + ΔR·(1 − e^(−x))/x,   leaving = G₀ + ΔR − G₁ = ∫ ka·G dt.
+// Adding ΔR to the pool at the start of the step instead lets it decay for a
+// whole dt rather than dt/2 on average, so mass leaves the lumen early by about
+// ΔR·x/2 per step: a first-order error, ~6 % in C_b at dt = 0.5 h
+// (docs/audit/VENLAFAXINE_PORTAL_PARITY_DT_CONVERGENCE_2026-09-26.md).
+// `leaving` is formed as a difference so the gut balance closes to rounding.
+// F_abs of the leaving mass reaches the portal vein (the hepatic first pass
+// happens in the PBPK, step 3); the other 1 − F_abs (unabsorbed or lost in the
+// gut wall) leaves the model. Cumulative portal input is F_abs·(released − G)
+// ≤ F_abs·dose.
+pub struct VfxGutStep {
+    pub gut_mg: f64,        // pool after the step
+    pub to_parent_mg: f64,  // F_abs · leaving, into the portal vein
+    pub lost_mg: f64,       // (1 − F_abs) · leaving, never reaches the portal vein
+}
+
+// Same, with the release confined to the first `rel_dt` of the step
+// (0 < rel_dt ≤ dt): constant rate ΔR/rel_dt on [0, rel_dt], none after. Exact:
+// the pool is carried through the release window, then decays for dt − rel_dt.
+// With rel_dt = dt the second factor is e^0 = 1 and this is the plain step.
+// Refused (NaN in every field, so any downstream mass account fails instead
+// of accepting a backward-decay step) unless dt is finite and > 0 and
+// 0 < rel_dt ≤ dt.
+pub fn vfx_gut_absorb_step_window(gut_mg: f64, rel_mg: f64, rel_dt: f64, dt: f64) -> VfxGutStep with Mut, Div, Panic {
+    if !(dt > 0.0 && dt - dt == 0.0 && rel_dt > 0.0 && rel_dt <= dt) {
+        let zero = 0.0
+        let nan = zero / zero
+        return VfxGutStep { gut_mg: nan, to_parent_mg: nan, lost_mg: nan }
+    }
+    let ka = venlafaxine_ka_abs()
+    let x = ka * rel_dt
+    let decay = mer_exp_neg(0.0 - x)
+    // (1 − e^(−x))/x → 1 as x → 0: with no window the release stays in the pool.
+    let rel_kept = if x > 0.0 { rel_mg * mer_phi(x) } else { rel_mg }
+    let gut_end_release = gut_mg * decay + rel_kept
+    let gut_new = gut_end_release * mer_exp_neg(0.0 - ka * (dt - rel_dt))
+    let leave_mg = (gut_mg + rel_mg) - gut_new
+    let to_parent = vfx_hepatic_em().f_abs * leave_mg
+    VfxGutStep {
+        gut_mg: gut_new,
+        to_parent_mg: to_parent,
+        lost_mg: leave_mg - to_parent,
+    }
+}
+
+pub fn vfx_gut_absorb_step(gut_mg: f64, rel_mg: f64, dt: f64) -> VfxGutStep with Mut, Div, Panic {
+    return vfx_gut_absorb_step_window(gut_mg, rel_mg, dt, dt)
+}
+
+// Length of the release window in the step [t, t + dt]: dt, except in the one
+// step where the matrix saturates (fraction reaches 1 at t* = (1/k)^(1/n):
+// 11.986 h for Gohel 2008 analytically, 12.010 h on matrix_er's series
+// transcendentals). There the release rate drops to zero at t*, so a
+// constant rate over the whole step would mis-time the step's release. t* is
+// found by bisecting matrix_fraction itself on the step, so the window ends
+// exactly where the release amounts this step uses stop growing (64 halvings of
+// dt reach f64 resolution).
+pub fn vfx_release_window(rel: MatrixReleaseModel, t_start: f64, dt: f64) -> f64 with Mut, Div, Panic {
+    if matrix_fraction(rel, t_start + dt) < 1.0 { return dt }
+    if matrix_fraction(rel, t_start) >= 1.0 { return dt }
+    var lo = t_start
+    var hi = t_start + dt
+    var i: i32 = 0
+    while i < 64 {
+        let mid = 0.5 * (lo + hi)
+        if matrix_fraction(rel, mid) >= 1.0 { hi = mid } else { lo = mid }
+        i = i + 1
+    }
+    // (t + dt) − t can exceed dt by an ulp; the window never does.
+    let w = hi - t_start
+    return if w > dt { dt } else { w }
+}
+
+// Steps 1-2: the step's matrix release enters the gut at a constant rate over
+// its release window, and the pool is solved exactly over the step.
+pub fn vfx_gut_release_step(gut_mg: f64, rel: MatrixReleaseModel, t_start: f64, dt: f64) -> VfxGutStep with Mut, Div, Panic {
+    let rel_amt = matrix_step_amount(rel, t_start, dt)
+    return vfx_gut_absorb_step_window(gut_mg, rel_amt, vfx_release_window(rel, t_start, dt), dt)
 }
 
 fn vfx_strang_step(
@@ -60,69 +345,179 @@ fn vfx_strang_step(
     t_start: f64,
     dt: f64
 ) -> VenlafaxineXrScenario with Mut, Div, Panic {
-    let pp = vfx_parent_params(scen.pheno)
-    let op = vfx_odv_params(scen.pheno)
-    let vb = pp.v_ref[0]
-    let f_abs = venlafaxine_f_oral_xr()
-    let ka = venlafaxine_ka_abs()
+    // 1-2. Matrix release → gut pool over its release window; F_abs of what
+    //      leaves the lumen goes to the portal vein.
+    let gs = vfx_gut_release_step(scen.gut_mg, rel, t_start, dt)
+    let gut = gs.gut_mg
 
-    // 1. Matrix dissolution → gut pool (mg)
-    let rel_amt = matrix_step_amount(rel, t_start, dt)
-    var gut = scen.gut_mg + rel_amt
+    let parent_input = gs.to_parent_mg / dt
 
-    // 2. First-order absorption from gut pool; F applied to absorbed fraction.
-    let frac_abs = 1.0 - mer_exp_neg(0.0 - ka * dt)
-    let absorb_amt = f_abs * gut * frac_abs
-    gut = gut - absorb_amt
-    if gut < 0.0 { gut = 0.0 }
+    // 3. Portal input + hepatic sink on the liver, one implicit solve.
+    var out_parent = scen.parent
+    var lg_parent = scen.lg_parent
+    let form_mg = vfx_parent_step_with_formation(&!out_parent, scen.pheno, parent_input, dt, &!lg_parent)
 
-    let parent_input = absorb_amt / dt
-
-    // 3. Parent transport with absorption input only.
-    var out_parent = pbpk28_full_cn_step(scen.parent, pp, parent_input, dt)
-
-    // 4. CYP2D6 formation at liver (organ 1): drain parent liver pool, feed ODV.
-    let c_liver = pbpk28_organ_average(out_parent, pp, 1)
-    let form_mg = vfx_formation_rate_mg_h(c_liver, scen.pheno) * dt
-    let v_liver = pp.v_ref[1]
-    out_parent.cv[1] = out_parent.cv[1] - form_mg / v_liver
-    if out_parent.cv[1] < 0.0 { out_parent.cv[1] = 0.0 }
-    if out_parent.cv[0] < 0.0 { out_parent.cv[0] = 0.0 }
-    let odv_input = form_mg / dt
-    var out_odv = pbpk28_full_cn_step(scen.odv, op, odv_input, dt)
+    // 4. ODV receives exactly the parent mass converted in step 3.
+    var out_odv = scen.odv
+    var lg_odv = scen.lg_odv
+    vfx_odv_step(&!out_odv, scen.pheno, form_mg / dt, dt, &!lg_odv)
 
     VenlafaxineXrScenario {
         parent: out_parent,
         odv:    out_odv,
         gut_mg: gut,
         pheno:  scen.pheno,
+        lg_parent: lg_parent,
+        lg_odv:    lg_odv,
     }
 }
 
 // Taylor exp for negative arguments (shared pattern with semaglutide scenario).
+// e^x for x < 0. The 20-term Taylor series is exact to rounding for |x| ≤ 0.5
+// but useless beyond a few units (it returns −0.0012 for e^(−6.3)), so the
+// argument is halved until |x| ≤ 0.5 and the result squared back m times
+// (relative error ~2^m ulp). Unchanged for |x| ≤ 0.5, the production range
+// (ka·dt = 0.315 at dt = 0.5 h). Below −700 the result underflows to 0.
 fn mer_exp_neg(x: f64) -> f64 with Mut, Div {
     if x >= 0.0 { return 1.0 }
+    if x < 0.0 - 700.0 { return 0.0 }
+    var r = x
+    var m: i32 = 0
+    while r < 0.0 - 0.5 {
+        r = r * 0.5
+        m = m + 1
+    }
     var y = 1.0
     var term = 1.0
     var k: i64 = 1
     while k < 20 {
-        term = term * x / (k as f64)
+        term = term * r / (k as f64)
         y = y + term
         k = k + 1
+    }
+    var i: i32 = 0
+    while i < m {
+        y = y * y
+        i = i + 1
     }
     return y
 }
 
-// Steady-state ODV/parent ratio (PD-equivalent readout).
-// Uses total-body mass ratio (parent vs ODV) — robust when blood Cv is near zero
-// after XR redistribution to tissues (clinical analog: AUC-weighted metabolite ratio).
-pub fn vfx_odv_parent_ratio(scen: VenlafaxineXrScenario) -> f64 with Mut, Div, Panic {
+// (1 − e^(−x))/x for x > 0, free of the 1 − e^(−x) cancellation at small x:
+// below x = 0.0625 its series Σ_{k≥0} (−x)^k/(k+1)!, 12 terms (truncation
+// < x^12/13! ≈ 5e-25); above, the direct form, whose relative error ≤ ulp/x.
+fn mer_phi(x: f64) -> f64 with Mut, Div {
+    if x < 0.0625 {
+        var sum = 1.0
+        var term = 1.0
+        var k: i64 = 1
+        while k < 12 {
+            term = term * (0.0 - x) / ((k + 1) as f64)
+            sum = sum + term
+            k = k + 1
+        }
+        return sum
+    }
+    return (1.0 - mer_exp_neg(0.0 - x)) / x
+}
+
+// ODV/parent blood AUC ratio over the run so far (see header: equals the
+// steady-state C_ODV/C_parent under linear kinetics once the dose is cleared).
+// Both AUCs use the TR-BDF2 quadrature booked by the ledgers. Undefined before
+// any parent exposure; returns 0.0 then.
+pub fn vfx_odv_parent_auc_ratio(scen: VenlafaxineXrScenario) -> f64 with Div {
+    let auc_p = scen.lg_parent.auc[0]
+    if auc_p <= 0.0 { return 0.0 }
+    return scen.lg_odv.auc[0] / auc_p
+}
+
+// Parent administered (mg) — the mass absorbed into the portal vein.
+pub fn vfx_parent_administered_mg(scen: VenlafaxineXrScenario) -> f64 {
+    return scen.lg_parent.administered
+}
+
+// Parent mass (mg) converted to ODV so far (= mass administered to ODV).
+pub fn vfx_formed_odv_mg(scen: VenlafaxineXrScenario) -> f64 {
+    return scen.lg_odv.administered
+}
+
+// Oral clearance Dose/AUC_b (L/h) over the run, with Dose the released mass
+// that has left the gut (portal input / F_abs).
+pub fn vfx_oral_clearance(scen: VenlafaxineXrScenario) -> f64 with Mut, Div, Panic {
+    let auc_p = scen.lg_parent.auc[0]
+    if auc_p <= 0.0 { return 0.0 }
+    return scen.lg_parent.administered / vfx_hepatic_em().f_abs / auc_p
+}
+
+// Truncation bounds. The closed forms hold for AUC(0, ∞); the run stops at t_end
+// with mass still in the body and possibly in the gut. After t_end the parent
+// still receives F_abs·G from the gut and loses at least its renal share, so
+// CL_R·AUC_tail,p ≤ M_left,p with M_left,p = parent body mass + F_abs·G; ODV
+// leaves only through blood, so CL_ODV·AUC_tail,o = M_left,o + (ODV still to
+// form) ≤ M_left,o + M_left,p. These bound tail/AUC(0, T) for each drug, which
+// is exactly the relative excess of Dose/AUC(0, T) over Dose/AUC(0, ∞) (the
+// F_abs·G term also covers the portal input still to come in Dose/AUC);
+// rigorous, not fitted. They assume the matrix has finished releasing by t_end
+// (t_end ≥ 12.01 h for Gohel 2008), as in main(); drug still in the matrix is
+// not counted.
+fn vfx_parent_left_mg(scen: VenlafaxineXrScenario, pp: PBPKParams28) -> f64 with Mut, Div, Panic {
+    return pbpk28_total_mass(scen.parent, pp) + vfx_hepatic_em().f_abs * scen.gut_mg
+}
+
+pub fn vfx_tail_bound_parent(scen: VenlafaxineXrScenario) -> f64 with Mut, Div, Panic {
+    let pp = vfx_parent_params(scen.pheno)
+    let auc_p = scen.lg_parent.auc[0]
+    if auc_p <= 0.0 { return 0.0 }
+    return vfx_parent_left_mg(scen, pp) / (pp.cl_central * auc_p)
+}
+
+pub fn vfx_tail_bound_odv(scen: VenlafaxineXrScenario) -> f64 with Mut, Div, Panic {
     let pp = vfx_parent_params(scen.pheno)
     let op = vfx_odv_params(scen.pheno)
-    let mp = pbpk28_total_mass(scen.parent, pp)
-    let mo = pbpk28_total_mass(scen.odv, op)
-    if mp < 1.0e-12 { return 0.0 }
-    return mo / mp
+    let auc_o = scen.lg_odv.auc[0]
+    if auc_o <= 0.0 { return 0.0 }
+    let left = pbpk28_total_mass(scen.odv, op) + vfx_parent_left_mg(scen, pp)
+    return left / (op.cl_central * auc_o)
+}
+
+// Closed-form predictions of the well-stirred identities (see header).
+pub fn vfx_oral_clearance_predicted(pheno: i32) -> f64 with Mut, Div, Panic {
+    let h = vfx_hepatic_em()
+    return (h.c * vfx_x_hep(pheno) + venlafaxine_cl_renal()) / h.f_abs
+}
+
+pub fn vfx_auc_ratio_predicted(pheno: i32) -> f64 with Mut, Div, Panic {
+    let h = vfx_hepatic_em()
+    return vfx_cyp2d6_cl_form_scale(pheno) * h.c * h.x_form / vfx_cl_odv_systemic(pheno)
+}
+
+// Absolute oral bioavailability F_abs·F_H for a phenotype.
+pub fn vfx_f_oral_predicted(pheno: i32) -> f64 with Mut, Div, Panic {
+    let q = pbpk28_params_venlafaxine_parent().q[vfx_liver_organ()]
+    return vfx_hepatic_em().f_abs * q / (q + vfx_x_hep(pheno))
+}
+
+// |parent ledger residual| + |ODV ledger residual| (mg): body + everything that
+// left − everything administered, from a zero start. Zero to rounding.
+pub fn vfx_mass_residual_mg(scen: VenlafaxineXrScenario) -> f64 with Mut, Div, Panic {
+    let rp = pbpk28_ledger_residual(scen.lg_parent, scen.parent, vfx_parent_params(scen.pheno), 0.0)
+    let ro = pbpk28_ledger_residual(scen.lg_odv, scen.odv, vfx_odv_params(scen.pheno), 0.0)
+    let ap = if rp < 0.0 { 0.0 - rp } else { rp }
+    let ao = if ro < 0.0 { 0.0 - ro } else { ro }
+    return ap + ao
+}
+
+// Largest negative mass (mg, ≥ 0) either transport step has produced, in the
+// returned states AND in TR-BDF2's internal stage x_γ, which enters the AUC,
+// elimination and sink quadrature. The kernel does not floor; a negative state
+// is reported here, not repaired. (Measured: zero for every phenotype at
+// dt ≤ 1 h; the stage first rings negative at dt = 2 h for UM, 5 h for NM.)
+pub fn vfx_neg_mass_mg(scen: VenlafaxineXrScenario) -> f64 {
+    var m = scen.lg_parent.neg_mass
+    if scen.lg_odv.neg_mass > m { m = scen.lg_odv.neg_mass }
+    if scen.lg_parent.stage_neg_mass > m { m = scen.lg_parent.stage_neg_mass }
+    if scen.lg_odv.stage_neg_mass > m { m = scen.lg_odv.stage_neg_mass }
+    return m
 }
 
 pub fn vfx_integrate_to(
@@ -132,6 +527,21 @@ pub fn vfx_integrate_to(
     t_end: f64,
     dt: f64
 ) -> VenlafaxineXrScenario with Mut, Div, Panic {
+    // The loop advances in whole dt steps, so dt must be finite and > 0 and
+    // t_end - t_start a finite, non-negative whole number of steps: dt <= 0
+    // never reaches t_end, and an off-grid horizon would stop at a different
+    // grid point (t_end = 0.8, dt = 0.5 ran to 1.0). Anything else is refused
+    // fail-closed with a NaN-poisoned scenario (vfx_refused_scenario).
+    let span = t_end - t_start
+    var ok = dt > 0.0 && dt - dt == 0.0 && span >= 0.0 && span - span == 0.0
+    if ok {
+        let k = span / dt
+        let kr = ((k + 0.5) as i64) as f64
+        let dk = if k > kr { k - kr } else { kr - k }
+        let tol = if k > 1.0 { 1.0e-9 * k } else { 1.0e-9 }
+        if dk > tol { ok = false }
+    }
+    if !ok { return vfx_refused_scenario() }
     var s = scen
     var t = t_start
     while t < t_end - 0.5 * dt {
@@ -142,6 +552,54 @@ pub fn vfx_integrate_to(
 }
 
 // ─── Runnable validation (library self-check) ───────────────────────────────
+fn vfx_self_check_run(scen: VenlafaxineXrScenario) -> bool with IO, Mut, Div, Panic {
+    let admin = vfx_parent_administered_mg(scen)
+    let tol = 1.0e-12 * admin
+    let res = vfx_mass_residual_mg(scen)
+    let neg = vfx_neg_mass_mg(scen)
+    let left = pbpk28_total_mass(scen.parent, vfx_parent_params(scen.pheno))
+        + pbpk28_total_mass(scen.odv, vfx_odv_params(scen.pheno))
+    print("  pheno "); print(scen.pheno)
+    print(": administered "); print_f64(admin)
+    print(" mg, formed "); print_f64(vfx_formed_odv_mg(scen))
+    print(" mg, residual "); print_f64(res)
+    print(" mg, neg mass "); print_f64(neg)
+    print(" mg, body left "); print_f64(left)
+    println(" mg")
+    if !(res <= tol) {
+        println("  FAIL: mass identity M + CL*AUC + formed = administered")
+        return false
+    }
+    if !(neg <= tol) {
+        println("  FAIL: negative state from the transport step")
+        return false
+    }
+    println("  [PASS] mass identity and positivity")
+    // The simulated oral CL/F and AUC ratio must equal the closed-form
+    // well-stirred values: both are exact integrated identities of the linear
+    // model over (0, ∞), so only the truncated tail (bounded rigorously by
+    // vfx_tail_bound_*) and rounding (1e-12) separate them.
+    let dp = vfx_tail_bound_parent(scen)
+    let dox = vfx_tail_bound_odv(scen)
+    let clf = vfx_oral_clearance(scen)
+    let clf_p = vfx_oral_clearance_predicted(scen.pheno)
+    let r = vfx_odv_parent_auc_ratio(scen)
+    let r_p = vfx_auc_ratio_predicted(scen.pheno)
+    print("    oral CL/F "); print_f64(clf); print(" (predicted "); print_f64(clf_p)
+    print("), AUC ratio "); print_f64(r); print(" (predicted "); print_f64(r_p)
+    print("), F_oral "); print_f64(vfx_f_oral_predicted(scen.pheno)); println("")
+    let e1 = if clf > clf_p { (clf - clf_p) / clf_p } else { (clf_p - clf) / clf_p }
+    let e2 = if r > r_p { (r - r_p) / r_p } else { (r_p - r) / r_p }
+    print("    rel. error CL/F "); print_f64(e1); print(" <= bound "); print_f64(dp)
+    print(", ratio "); print_f64(e2); print(" <= bound "); print_f64(dp + dox + dp * dox); println("")
+    if !(e1 <= dp + 1.0e-12 && e2 <= dp + dox + dp * dox + 1.0e-12) {
+        println("  FAIL: simulation departs from the closed-form first-pass identities")
+        return false
+    }
+    println("  [PASS] oral CL/F and AUC ratio match the closed form")
+    return true
+}
+
 fn main() -> i32 with IO, Mut, Div, Panic {
     println("======================================================================")
     println("  Venlafaxine XR — matrix release → parent/ODV PBPK28 scenario")
@@ -154,19 +612,21 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     var passed = 0
     var failed = 0
 
-    // Phenotype ordering: PM < NM < UM (Kirchheiner 2006 ODV/parent Css)
+    // Phenotype ordering of AUC_ODV/AUC_parent: PM < NM < UM
+    // (literature 0.25 / 3.45 / 10.3, provenance unverified; see header)
     var scen_pm = vfx_scenario_init(0)
     scen_pm = vfx_integrate_to(scen_pm, rel, 0.0, t_end, dt)
-    let ratio_pm = vfx_odv_parent_ratio(scen_pm)
+    let ratio_pm = vfx_odv_parent_auc_ratio(scen_pm)
 
     var scen_nm = vfx_scenario_init(2)
     scen_nm = vfx_integrate_to(scen_nm, rel, 0.0, t_end, dt)
-    let ratio_nm = vfx_odv_parent_ratio(scen_nm)
+    let ratio_nm = vfx_odv_parent_auc_ratio(scen_nm)
 
     var scen_um = vfx_scenario_init(3)
     scen_um = vfx_integrate_to(scen_um, rel, 0.0, t_end, dt)
-    let ratio_um = vfx_odv_parent_ratio(scen_um)
+    let ratio_um = vfx_odv_parent_auc_ratio(scen_um)
 
+    println("AUC_ODV/AUC_parent (blood):")
     println("PM ratio:")
     println(ratio_pm)
     println("NM ratio:")
@@ -183,10 +643,31 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     }
 
     if ratio_um > 2.0 {
-        println("  [PASS] UM ratio elevated (Kirchheiner 2006: 10.3)")
+        println("  [PASS] UM ratio > 2.0 (the unsourced 10.3 target is not tested)")
         passed = passed + 1
     } else {
         println("  FAIL: expected UM ratio > 2.0")
+        failed = failed + 1
+    }
+
+    // Mass identity and positivity, every phenotype run. Tolerance is a
+    // roundoff bound, max(1e-12, n·1e-15) relative with n = 240 steps
+    // (PBPK28 floor-clamp dispatch), not a fitted value.
+    if vfx_self_check_run(scen_pm) { passed = passed + 1 } else { failed = failed + 1 }
+    if vfx_self_check_run(scen_nm) { passed = passed + 1 } else { failed = failed + 1 }
+    if vfx_self_check_run(scen_um) { passed = passed + 1 } else { failed = failed + 1 }
+
+    // Consistency check, not independent evidence: Lessard 1999 reports PM oral
+    // clearance "more than fourfold" below EM, but the model's PM clearance
+    // uses s(PM) = 0.25/3.45 from the unverified phenotype ratios.
+    let em_pm = vfx_oral_clearance(scen_nm) / vfx_oral_clearance(scen_pm)
+    println("EM/PM oral CL/F:")
+    println(em_pm)
+    if em_pm > 4.0 {
+        println("  [PASS] EM/PM oral clearance > 4 (consistent with Lessard 1999; PM uses the unsourced s)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: expected EM/PM oral clearance > 4")
         failed = failed + 1
     }
 

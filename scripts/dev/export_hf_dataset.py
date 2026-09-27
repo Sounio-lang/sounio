@@ -18,6 +18,10 @@ TEST_DIRS = [
     ("run-pass", ROOT / "tests" / "run-pass"),
     ("compile-fail", ROOT / "tests" / "compile-fail"),
 ]
+# The full suite's external known-failure manifest. A test listed here does
+# not currently pass even without a `//@ known-failure` annotation in its
+# source; see scripts/dev/run_sio_test_suite_v2.sh (KNOWN_FAILURES_FILE).
+KNOWN_FAILURES_MANIFEST = ROOT / "tests" / "known_failures" / "hardened_diagnostics_full_suite.txt"
 
 
 @dataclass
@@ -122,12 +126,31 @@ def build_summary(stem: str, annotations: dict[str, list[str]], comments: list[s
     return stem.replace("_", " ")
 
 
+def load_known_failure_manifest(path: Path = KNOWN_FAILURES_MANIFEST) -> dict[str, str]:
+    """Map repo-relative test path -> pinned failure pattern ("" if none).
+
+    Parsed as run_sio_test_suite_v2.sh parses it: `#` starts a comment, blank
+    lines are skipped, and an entry is `path` or `path|pattern`.
+    """
+    pinned: dict[str, str] = {}
+    if not path.is_file():
+        return pinned
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        test_path, _, pattern = line.partition("|")
+        pinned[test_path.strip()] = pattern.strip()
+    return pinned
+
+
 def build_instruction(
     suite: str,
     stem: str,
     summary: str,
     annotations: dict[str, list[str]],
     ignore: bool,
+    manifest_pattern: str | None = None,
 ) -> str:
     parts = [f"Write a Sounio {suite} example named `{stem}`."]
     if summary:
@@ -136,6 +159,13 @@ def build_instruction(
             summary += "."
         parts.append(summary)
     known_failure = annotations.get("known-failure")
+    if not known_failure and manifest_pattern is not None:
+        # Pinned only in the external manifest: the same contract as a source
+        # annotation (no success claim), with the manifest as the recorded reason.
+        reason = f"pinned in {KNOWN_FAILURES_MANIFEST.relative_to(ROOT)}"
+        if manifest_pattern:
+            reason += f", expected failure output: {manifest_pattern}"
+        known_failure = [reason]
     if suite == "run-pass":
         # A known-failure run-pass fixture does not currently pass -- some do
         # not even compile -- so a success claim or a stdout expectation would
@@ -164,6 +194,7 @@ def build_instruction(
 
 def load_examples() -> list[Example]:
     examples: list[Example] = []
+    manifest = load_known_failure_manifest()
     for suite, directory in TEST_DIRS:
         for path in sorted(directory.glob("*.sio")):
             text = path.read_text(encoding="utf-8", errors="replace")
@@ -172,7 +203,10 @@ def load_examples() -> list[Example]:
             comments = leading_comments(lines)
             ignore = "ignore" in annotations
             summary = build_summary(path.stem, annotations, comments)
-            instruction = build_instruction(suite, path.stem, summary, annotations, ignore)
+            rel_path = str(path.relative_to(ROOT))
+            instruction = build_instruction(
+                suite, path.stem, summary, annotations, ignore, manifest.get(rel_path)
+            )
             examples.append(
                 Example(
                     source_path=str(path.relative_to(ROOT)),

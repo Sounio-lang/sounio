@@ -1,0 +1,77 @@
+// Venlafaxine XR portal scenario: time-step convergence probe.
+//
+// Drives the stdlib scenario's own step functions (the same calls, in the same
+// order, as vfx_strang_step) at dt = 0.5, 0.25, 0.125, 0.0625, 0.03125 h, NM,
+// and prints blood concentrations at fixed times, the cumulative portal input
+// and the run's blood AUC ratio / oral CL/F. Successive differences shrinking
+// by 2x per halving means first order; by 4x, second order.
+//
+// Run: bin/souc run docs/audit/repro/venlafaxine_portal_dt_convergence.sio
+// Results: docs/audit/VENLAFAXINE_PORTAL_PARITY_DT_CONVERGENCE_2026-09-26.md
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::theta_pbpk28::*
+use darwin_pbpk::release::matrix_er::*
+use darwin_pbpk::scenarios::venlafaxine_xr::*
+
+struct Acc { gut: f64, portal: f64 }
+
+fn step(
+    parent: &!PBPKState28,
+    odv: &!PBPKState28,
+    lg_p: &!PBPK28Ledger,
+    lg_o: &!PBPK28Ledger,
+    acc: &!Acc,
+    rel: MatrixReleaseModel,
+    t_start: f64,
+    dt: f64
+) with Mut, Div, Panic {
+    let gs = vfx_gut_release_step((*acc).gut, rel, t_start, dt)
+    (*acc).gut = gs.gut_mg
+    (*acc).portal = (*acc).portal + gs.to_parent_mg
+    let form_mg = vfx_parent_step_with_formation(parent, 2, gs.to_parent_mg / dt, dt, lg_p)
+    vfx_odv_step(odv, 2, form_mg / dt, dt, lg_o)
+}
+
+fn run_dt(dt: f64) with IO, Mut, Div, Panic {
+    let rel = venlafaxine_xr_matrix_gohel2008()
+    var parent = pbpk28_state_zero()
+    var odv = pbpk28_state_zero()
+    var lg_p = pbpk28_ledger_zero()
+    var lg_o = pbpk28_ledger_zero()
+    var acc = Acc { gut: 0.0, portal: 0.0 }
+    let n_total: i64 = (120.0 / dt) as i64
+    var n: i64 = 0
+    print("dt=")
+    println(dt)
+    while n < n_total {
+        step(&!parent, &!odv, &!lg_p, &!lg_o, &!acc, rel, (n as f64) * dt, dt)
+        n = n + 1
+        let t = (n as f64) * dt
+        if t == 2.0 || t == 4.0 || t == 8.0 || t == 12.0 || t == 24.0 {
+            print("  t=")
+            println(t)
+            print("    Cb_parent x1e6=")
+            println(1.0e6 * parent.cv[0])
+            print("    Cb_odv x1e6=")
+            println(1.0e6 * odv.cv[0])
+            print("    portal_mg x1e6=")
+            println(1.0e6 * acc.portal)
+        }
+    }
+    print("  AUC ratio x1e9=")
+    println(1.0e9 * (lg_o.auc[0] / lg_p.auc[0]))
+    print("  oral CL/F x1e6=")
+    println(1.0e6 * (lg_p.administered / vfx_hepatic_em().f_abs / lg_p.auc[0]))
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("VENLAFAXINE_PORTAL_DT_CONVERGENCE v1")
+    run_dt(0.5)
+    run_dt(0.25)
+    run_dt(0.125)
+    run_dt(0.0625)
+    run_dt(0.03125)
+    println("VENLAFAXINE_PORTAL_DT_CONVERGENCE_DONE")
+    return 0
+}

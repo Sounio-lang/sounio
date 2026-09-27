@@ -1,0 +1,114 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout-contains: VENLAFAXINE_PORTAL_MADAROS_PASS
+//
+// Venlafaxine XR portal first-pass scenario on Madaros (the PBPK compiler of
+// record; lean_single green is not evidence for it). The full suite runs
+// lean_single, so this marker is what puts the portal model on a
+// current-source Madaros in CI (scripts/ci/madaros_changed_tests_gate.sh).
+//
+// Asserted, all identities of the model or its numerics (tolerances are
+// rounding bounds, as in the scenario's own self-check):
+//   1. NM 120 h run: ledger mass identity M + CL·AUC + formed = administered
+//      and no negative state, to 1e-12 × administered.
+//   2. Portal input ≤ F_abs · 75 mg (the bound the old gut update broke).
+//   3. Oral CL/F and the blood AUC ratio equal the well-stirred closed forms
+//      within the rigorous truncation bound.
+//   4. The gut step is the exact solution for release at a constant rate:
+//      one step = two half steps at dt = 0.5 h and dt = 10 h (ka·dt = 6.3,
+//      where an un-reduced e^(−x) series goes negative), and a release window
+//      shorter than the step = window step + release-free step.
+//   5. Exactly one step of the run has a release window shorter than dt, and
+//      it ends where the matrix fraction reaches 1 and not before.
+
+use darwin_pbpk::scenarios::venlafaxine_xr::*
+use darwin_pbpk::release::matrix_er::*
+
+fn pm_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn main() with Mut, Div, IO, Panic {
+    let rel = venlafaxine_xr_matrix_gohel2008()
+    let dt = 0.5
+    let t_end = 120.0
+
+    var nm = vfx_scenario_init(2)
+    nm = vfx_integrate_to(nm, rel, 0.0, t_end, dt)
+
+    let admin = vfx_parent_administered_mg(nm)
+    let tol = 1.0e-12 * admin
+    let res = vfx_mass_residual_mg(nm)
+    let neg = vfx_neg_mass_mg(nm)
+    println("administered (mg), residual and negative mass (x1e12 mg):")
+    println(admin)
+    println(1.0e12 * res)
+    println(1.0e12 * neg)
+    if !(res <= tol && neg <= tol) {
+        println("FAIL: mass identity or positivity")
+        return
+    }
+    if !(admin <= vfx_hepatic_em().f_abs * 75.0 + tol) {
+        println("FAIL: portal input exceeds F_abs * dose")
+        return
+    }
+
+    let clf = vfx_oral_clearance(nm)
+    let clf_p = vfx_oral_clearance_predicted(2)
+    let r = vfx_odv_parent_auc_ratio(nm)
+    let r_p = vfx_auc_ratio_predicted(2)
+    let dp = vfx_tail_bound_parent(nm)
+    let dox = vfx_tail_bound_odv(nm)
+    println("oral CL/F, predicted, AUC ratio, predicted:")
+    println(clf)
+    println(clf_p)
+    println(r)
+    println(r_p)
+    if !(pm_abs(clf - clf_p) / clf_p <= dp + 1.0e-12) {
+        println("FAIL: oral CL/F departs from the closed form")
+        return
+    }
+    if !(pm_abs(r - r_p) / r_p <= dp + dox + dp * dox + 1.0e-12) {
+        println("FAIL: AUC ratio departs from the closed form")
+        return
+    }
+
+    let gtol = 1.0e-12
+    let one = vfx_gut_absorb_step(10.0, 5.0, 0.5)
+    let h1 = vfx_gut_absorb_step(10.0, 2.5, 0.25)
+    let h2 = vfx_gut_absorb_step(h1.gut_mg, 2.5, 0.25)
+    let big = vfx_gut_absorb_step(10.0, 5.0, 10.0)
+    let b1 = vfx_gut_absorb_step(10.0, 2.5, 5.0)
+    let b2 = vfx_gut_absorb_step(b1.gut_mg, 2.5, 5.0)
+    let w = vfx_gut_absorb_step_window(10.0, 5.0, 0.2, 0.5)
+    let w1 = vfx_gut_absorb_step(10.0, 5.0, 0.2)
+    let w2 = vfx_gut_absorb_step(w1.gut_mg, 0.0, 0.3)
+    println("gut pool at dt = 10 h (mg):")
+    println(big.gut_mg)
+    if !(pm_abs(one.gut_mg - h2.gut_mg) < gtol && pm_abs(big.gut_mg - b2.gut_mg) < gtol && big.gut_mg >= 0.0) {
+        println("FAIL: gut step is not exact")
+        return
+    }
+    if !(pm_abs(w.gut_mg - w2.gut_mg) < gtol) {
+        println("FAIL: release-window step is not exact")
+        return
+    }
+
+    var n_windows: i32 = 0
+    var ts = 0.0
+    while ts < t_end - 0.5 * dt {
+        let tau = vfx_release_window(rel, ts, dt)
+        if tau < dt {
+            n_windows = n_windows + 1
+            // The window must end exactly where the matrix saturates.
+            if !(tau > 0.0 && matrix_fraction(rel, ts + tau) >= 1.0 && matrix_fraction(rel, ts + tau * (1.0 - 1.0e-9)) < 1.0) {
+                println("FAIL: release window does not end at matrix saturation")
+                return
+            }
+        }
+        ts = ts + dt
+    }
+    if n_windows != 1 {
+        println("FAIL: expected exactly one saturation step")
+        return
+    }
+    println("VENLAFAXINE_PORTAL_MADAROS_PASS")
+}

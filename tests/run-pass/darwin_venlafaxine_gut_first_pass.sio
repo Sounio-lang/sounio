@@ -1,0 +1,162 @@
+//@ run-pass
+//@ expect-stdout-contains: VENLAFAXINE_GUT_FIRST_PASS_PASS
+//
+// Venlafaxine XR gut pool: over each step the lumen loses the mass that the
+// exact solution of dG/dt = R − ka·G carries out of it, of which F_abs reaches
+// the portal vein and 1 − F_abs never does.
+// (The hepatic first pass that takes F_abs down to F happens in the PBPK.)
+// Driven through the scenario's own `vfx_gut_release_step` over the canonical
+// 120 h run.
+//
+// An earlier step removed only the absorbed share from the pool, so the rest
+// stayed behind and was absorbed again on later steps: the cumulative input
+// reached the full 75 mg released instead of ≤ F_abs·75.
+//
+// Asserted, all identities of the model (tolerance is rounding, 1e-12 mg
+// against a 75 mg dose):
+//   1. released = G_end + Σ to_parent + Σ lost      (gut mass balance)
+//   2. Σ to_parent = F_abs · (Σ to_parent + Σ lost) (F_abs splits what leaves)
+//   3. Σ to_parent ≤ F_abs · released               (absorption bound)
+//   4. one step of dt with release ΔR = two steps of dt/2 with ΔR/2 each
+//      (pool and portal input). Only the exact solution of dG/dt = R − ka·G
+//      for release at a constant rate has this semigroup property; adding ΔR
+//      to the pool at the start of the step breaks it by about ΔR·ka·dt/4
+//      (0.31 mg for G₀ = 10, ΔR = 5, dt = 0.5 below). Repeated at dt = 10 h
+//      (ka·dt = 6.3), with the pool required to stay non-negative: without
+//      range reduction the step's e^(−x) series returns −0.0012 for e^(−6.3).
+//   5. a step whose release stops at τ < dt (matrix saturation) = a step of τ
+//      with the release followed by a step of dt − τ without it; and exactly
+//      one step of the run has τ < dt, with the matrix fraction reaching 1 at
+//      t + τ and not before.
+
+use darwin_pbpk::scenarios::venlafaxine_xr::*
+use darwin_pbpk::release::matrix_er::*
+use darwin_pbpk::drugs::venlafaxine::*
+
+fn gf_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn main() with Mut, Div, IO, Panic {
+    let rel = venlafaxine_xr_matrix_gohel2008()
+    let f = vfx_hepatic_em().f_abs
+    let dt = 0.5
+    var gut = 0.0
+    var released = 0.0
+    var to_parent = 0.0
+    var lost = 0.0
+    var t = 0.0
+    while t < 120.0 - 0.5 * dt {
+        let r = matrix_step_amount(rel, t, dt)
+        released = released + r
+        let gs = vfx_gut_release_step(gut, rel, t, dt)
+        gut = gs.gut_mg
+        to_parent = to_parent + gs.to_parent_mg
+        lost = lost + gs.lost_mg
+        t = t + dt
+    }
+    println("released, gut remaining, portal input, never reaching the portal vein (mg):")
+    println(released)
+    println(gut)
+    println(to_parent)
+    println(lost)
+
+    let tol = 1.0e-12
+    if !(gf_abs(released - (gut + to_parent + lost)) < tol) {
+        println("FAIL: gut mass balance")
+        return
+    }
+    if !(gf_abs(to_parent - f * (to_parent + lost)) < tol) {
+        println("FAIL: F_abs split of the mass leaving the gut")
+        return
+    }
+    if !(to_parent <= f * released + tol) {
+        println("FAIL: cumulative portal input exceeds F_abs * released")
+        return
+    }
+
+    let one = vfx_gut_absorb_step(10.0, 5.0, 0.5)
+    let h1 = vfx_gut_absorb_step(10.0, 2.5, 0.25)
+    let h2 = vfx_gut_absorb_step(h1.gut_mg, 2.5, 0.25)
+    let d_gut = one.gut_mg - h2.gut_mg
+    let d_portal = one.to_parent_mg - (h1.to_parent_mg + h2.to_parent_mg)
+    println("one step vs two half steps, pool and portal input (x1e12 mg):")
+    println(1.0e12 * d_gut)
+    println(1.0e12 * d_portal)
+    if !(gf_abs(d_gut) < tol && gf_abs(d_portal) < tol) {
+        println("FAIL: gut step is not the exact solution for release at a constant rate")
+        return
+    }
+    let big = vfx_gut_absorb_step(10.0, 5.0, 10.0)
+    let b1 = vfx_gut_absorb_step(10.0, 2.5, 5.0)
+    let b2 = vfx_gut_absorb_step(b1.gut_mg, 2.5, 5.0)
+    println("dt = 10 h: pool, one step vs two half steps (x1e12 mg):")
+    println(big.gut_mg)
+    println(1.0e12 * (big.gut_mg - b2.gut_mg))
+    if !(big.gut_mg >= 0.0 && b1.gut_mg >= 0.0) {
+        println("FAIL: negative gut pool at a large step")
+        return
+    }
+    let d_big_portal = big.to_parent_mg - (b1.to_parent_mg + b2.to_parent_mg)
+    if !(gf_abs(big.gut_mg - b2.gut_mg) < tol && gf_abs(d_big_portal) < tol) {
+        println("FAIL: gut step is not exact at a large step")
+        return
+    }
+
+    let w = vfx_gut_absorb_step_window(10.0, 5.0, 0.2, 0.5)
+    let w1 = vfx_gut_absorb_step(10.0, 5.0, 0.2)
+    let w2 = vfx_gut_absorb_step(w1.gut_mg, 0.0, 0.3)
+    let dw_gut = w.gut_mg - w2.gut_mg
+    let dw_portal = w.to_parent_mg - (w1.to_parent_mg + w2.to_parent_mg)
+    println("release window 0.2 of 0.5 h vs 0.2 + 0.3 h steps, pool and portal input (x1e12 mg):")
+    println(1.0e12 * dw_gut)
+    println(1.0e12 * dw_portal)
+    if !(gf_abs(dw_gut) < tol && gf_abs(dw_portal) < tol) {
+        println("FAIL: release-window step is not exact")
+        return
+    }
+    // An invalid phenotype code is refused rather than run as NM.
+    let bad_s = vfx_integrate_to(vfx_scenario_init(7), rel, 0.0, 1.0, dt)
+    let bad_res = vfx_mass_residual_mg(bad_s)
+    if !(bad_res != bad_res) {
+        println("FAIL: phenotype code 7 was not refused")
+        return
+    }
+    // An off-grid horizon or a non-positive dt is refused by vfx_integrate_to.
+    let off_grid = vfx_mass_residual_mg(vfx_integrate_to(vfx_scenario_init(2), rel, 0.0, 0.8, dt))
+    let zero_dt = vfx_mass_residual_mg(vfx_integrate_to(vfx_scenario_init(2), rel, 0.0, 1.0, 0.0))
+    if !(off_grid != off_grid && zero_dt != zero_dt) {
+        println("FAIL: off-grid horizon or dt = 0 was not refused")
+        return
+    }
+    // Invalid windows are refused: NaN in every field.
+    let bad_w = vfx_gut_absorb_step_window(10.0, 5.0, 0.6, 0.5)
+    let bad_dt = vfx_gut_absorb_step(10.0, 5.0, 0.0 - 0.5)
+    if !(bad_w.gut_mg != bad_w.gut_mg && bad_dt.to_parent_mg != bad_dt.to_parent_mg) {
+        println("FAIL: invalid release window or negative dt was not refused")
+        return
+    }
+    var n_windows: i32 = 0
+    var ts = 0.0
+    while ts < 120.0 - 0.5 * dt {
+        let tau = vfx_release_window(rel, ts, dt)
+        if tau < dt {
+            n_windows = n_windows + 1
+            println("saturation step start, release window (h):")
+            println(ts)
+            println(tau)
+            if !(tau > 0.0) {
+                println("FAIL: empty release window")
+                return
+            }
+            if !(matrix_fraction(rel, ts + tau) >= 1.0 && matrix_fraction(rel, ts + tau * (1.0 - 1.0e-9)) < 1.0) {
+                println("FAIL: release window does not end at matrix saturation")
+                return
+            }
+        }
+        ts = ts + dt
+    }
+    if n_windows != 1 {
+        println("FAIL: expected exactly one saturation step")
+        return
+    }
+    println("VENLAFAXINE_GUT_FIRST_PASS_PASS")
+}

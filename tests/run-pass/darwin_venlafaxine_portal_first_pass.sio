@@ -1,0 +1,103 @@
+//@ run-pass
+//@ expect-stdout-contains: VENLAFAXINE_PORTAL_FIRST_PASS_PASS
+//
+// Venlafaxine XR portal first pass: absorbed drug enters the liver's vascular
+// space and meets the hepatic sink before the systemic blood.
+//
+// Asserted (tolerances are rounding bounds, not fitted):
+//   1. The closed-form hepatic resolution reproduces its literature inputs
+//      (Lessard 1999 oral clearances, Patat 1998 F) through the well-stirred
+//      identities, to 1e-12 relative:
+//        F_abs·Q/(Q + X) = F,  (c·X + CL_R)/F_abs = CL/F,  c·X_form = CL_m,
+//        (c·X_non2D6 + CL_R)/F_abs = CL/F with quinidine;  0 < F_abs ≤ 1.
+//   2. The liver sink parameter realises the target venous-referenced
+//      clearance exactly: X(cl_sink(X)) = X to 1e-12 relative, every phenotype.
+//   3. Emergent oral availability: NM F_abs·F_H equals the Patat F it was
+//      resolved from; PM availability exceeds NM (less first-pass extraction).
+//   4. Through the full XR scenario, oral CL/F = Dose/AUC_b and the blood AUC
+//      ratio equal their closed forms within the rigorous truncation bound of
+//      the 120 h run (vfx_tail_bound_*) plus 1e-12, and the ordering holds.
+//   5. EM/PM oral CL/F > 4, as reported by Lessard 1999 ("more than fourfold").
+//      A consistency check, not independent evidence: the PM arm was not used
+//      to build the model, but PM clearance uses s(PM) = 0.25/3.45 from the
+//      unverified phenotype ratios.
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::scenarios::venlafaxine_xr::*
+use darwin_pbpk::release::matrix_er::*
+use darwin_pbpk::drugs::venlafaxine::*
+use darwin_pbpk::pgx::cyp2d6_venlafaxine::*
+
+fn pf_rel_err(a: f64, b: f64) -> f64 {
+    let d = if a > b { a - b } else { b - a }
+    let m = if b < 0.0 { 0.0 - b } else { b }
+    return d / m
+}
+
+fn main() with Mut, Div, IO, Panic {
+    let h = vfx_hepatic_em()
+    let q = pbpk28_params_venlafaxine_parent().q[1]
+    let cl_r = venlafaxine_cl_renal()
+    let x = h.x_form + h.x_other + h.x_non2d6
+    println("F_abs, X_hep, X_form, X_other2D6, X_non2D6, fm_ODV:")
+    println(h.f_abs)
+    println(x)
+    println(h.x_form)
+    println(h.x_other)
+    println(h.x_non2d6)
+    println(h.fm_odv)
+
+    // 1. The resolution reproduces its inputs.
+    let tol = 1.0e-12
+    if !(pf_rel_err(h.f_abs * q / (q + x), venlafaxine_f_oral_xr()) < tol) { println("FAIL: F"); return }
+    if !(pf_rel_err((h.c * x + cl_r) / h.f_abs, vfx_cl_parent_oral_nm()) < tol) { println("FAIL: CL/F"); return }
+    if !(pf_rel_err(h.c * h.x_form, vfx_cl_form_odv_nm()) < tol) { println("FAIL: CL_m"); return }
+    if !(pf_rel_err((h.c * h.x_non2d6 + cl_r) / h.f_abs, venlafaxine_cl_oral_quinidine_em()) < tol) { println("FAIL: CL/F quinidine"); return }
+    if !(h.f_abs > 0.0 && h.f_abs <= 1.0 && h.x_other > 0.0 && h.x_non2d6 > 0.0) { println("FAIL: resolution not physical"); return }
+
+    // 2. Exact sink calibration, every phenotype.
+    let pp = pbpk28_params_venlafaxine_parent()
+    var ph: i32 = 0
+    while ph < 4 {
+        let xt = vfx_x_hep(ph)
+        let cl = vfx_liver_cl_sink(pp, xt)
+        print("pheno "); print(ph); print(": X "); print_f64(xt); print(" L/h, cl_sink "); print_f64(cl)
+        print(" L/h, cl_sink*dt/V_liver (dt 0.5) "); print_f64(cl * 0.5 / pp.v_ref[1])
+        print(", F_oral "); print_f64(vfx_f_oral_predicted(ph)); println("")
+        if !(pf_rel_err(vfx_liver_x_of_sink(pp, cl), xt) < tol) { println("FAIL: sink inversion"); return }
+        ph = ph + 1
+    }
+
+    // 3. Emergent availability.
+    if !(pf_rel_err(vfx_f_oral_predicted(2), venlafaxine_f_oral_xr()) < tol) { println("FAIL: NM F_oral"); return }
+    if !(vfx_f_oral_predicted(0) > vfx_f_oral_predicted(2)) { println("FAIL: PM availability"); return }
+
+    // 4. Full scenario against the closed forms.
+    let rel = venlafaxine_xr_matrix_gohel2008()
+    var clf: [f64; 4] = [0.0; 4]
+    var rat: [f64; 4] = [0.0; 4]
+    ph = 0
+    while ph < 4 {
+        var sc = vfx_scenario_init(ph)
+        sc = vfx_integrate_to(sc, rel, 0.0, 120.0, 0.5)
+        clf[ph] = vfx_oral_clearance(sc)
+        rat[ph] = vfx_odv_parent_auc_ratio(sc)
+        print("pheno "); print(ph); print(": oral CL/F "); print_f64(clf[ph])
+        print(" (closed "); print_f64(vfx_oral_clearance_predicted(ph))
+        print("), AUC ratio "); print_f64(rat[ph])
+        print(" (closed "); print_f64(vfx_auc_ratio_predicted(ph)); println(")")
+        let dp = vfx_tail_bound_parent(sc)
+        let dox = vfx_tail_bound_odv(sc)
+        if !(pf_rel_err(clf[ph], vfx_oral_clearance_predicted(ph)) <= dp + 1.0e-12) { println("FAIL: oral CL/F vs closed form"); return }
+        if !(pf_rel_err(rat[ph], vfx_auc_ratio_predicted(ph)) <= dp + dox + dp * dox + 1.0e-12) { println("FAIL: AUC ratio vs closed form"); return }
+        ph = ph + 1
+    }
+    if !(rat[0] < rat[1] && rat[1] < rat[2] && rat[2] < rat[3]) { println("FAIL: ratio ordering"); return }
+
+    // 5. Consistency check against Lessard 1999 (PM uses the unsourced s).
+    println("EM/PM oral CL/F:")
+    println(clf[2] / clf[0])
+    if !(clf[2] / clf[0] > 4.0) { println("FAIL: EM/PM oral clearance <= 4"); return }
+
+    println("VENLAFAXINE_PORTAL_FIRST_PASS_PASS")
+}

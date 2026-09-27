@@ -2,6 +2,9 @@
 
 | Date | Provider | Task | Target | Outcome | Note |
 |---|---|---|---|---|---|
+| 2026-09-27 | gemini-2.5-pro [OK] + qwen3-235b [OK; Q3 objection rejected] | math-review | stdlib/darwin_pbpk/scenarios/venlafaxine_xr.sio (release window split at matrix saturation, PR #2728) | PASS | Window step (release at constant rate over [t, t*], none after) exact and bitwise equal to the plain step when rel_dt = dt; bisection on the capped matrix_fraction with the model's own t* (12.0099 h on matrix_er's series) consistent with the step amounts. Gemini added the mechanism for portal input at 24 h converging near second order (portal error = -F_abs*err(G), early start-up error decays like e^(-ka t)). Qwen's Q3 "overreach" read the before-split ratios (->2) instead of the after-split 3.80-3.93; rejected. Record: docs/audit/VENLAFAXINE_PORTAL_PARITY_DT_CONVERGENCE_2026-09-26.md (Round 3). Raw: /tmp/llm-offload-CZcPnO/ (workspace). |
+| 2026-09-27 | grok-4.7 xAI direct [DEFECT Q3, accepted] + gemini-2.5-pro [OK] + qwen3-235b [OK]; grok gateway EMPTY x2 | math-review | stdlib/darwin_pbpk/scenarios/venlafaxine_xr.sio (exact gut step for constant-rate release, PR #2728) | FINDINGS_ADDRESSED | All legs OK on G1 = G0 e^-x + dR(1-e^-x)/x exactness, leaving >= 0, the semigroup test and the old defect dR/2(e^-x - e^-x/2) = 0.311 mg. Grok DEFECT: the release switch-off was ~50x too small to explain the 24 h order at coarse dt. Accepted; a dt sweep to 1/256 h with an exact release curve isolated the release-rate singularity (order 1+n = 1.65, gut at 2 h -> ratio 3.136) and the matrix_er series floor (first order below dt ~ 0.06 h, PR #2722); Grok's alternative 2-n was not borne out. Record: audit note Round 2. Raw: /tmp/llm-offload-hNGt01/, /tmp/llm-offload-HXMmdZ/ (workspace). |
+| 2026-09-26 | grok-4.7 xAI direct [DEFECT, fixed] + qwen3-235b [3 claims rejected]; kimi-k3 + deepseek-v4-pro no verdict (reasoning exhausted token budget); zai 1313; local down | math-review | venlafaxine portal parity: website/src/lib/pbpk28_core.mjs, tests/run-pass/dissertation_pbpk28_parity_ref_venlafaxine.sio, scripts/ci/dissertation_pbpk28_parity_gate.sh (PR #2728) | FINDINGS_ADDRESSED | Grok OK on hepatic closed form, sink inversion, TR-BDF2 mass identity, gut split, dt attribution. DEFECT: truncation bound omitted parent input still in the gut (F_abs*G) and the residual budget is not a proved rounding bound; fixed in ref/JS (and later in the scenario, f5efa8adf) and reworded. Qwen claimed sink discriminant 4aC (wrong: leading coefficient ab), old update -> F_abs*released (wrong: measured 75 mg), ratio bound not rigorous (wrong: |R_T/R_inf - 1| <= max(d_p, d_o)). Record: audit note Round 1. Raw: /tmp/llm-offload-BVRebY/, /tmp/llm-offload-1bFiI0/ (workspace). |
 | 2026-09-09 | xai/grok-4.6 [OK] + mistral-large [OK]; first attempt zai [ERROR 1313 fair-usage] + local-think [ERROR: connection] + xai [EMPTY after 180s], retried at OFFLOAD_TIMEOUT=900 | math-review | formal/lean4/SounioSurfaceKinetics.lean | FINDINGS_ADDRESSED | Two independent legs obtained, so the policy's second opinion was met. **Mistral passed all eight theorems with no correction. Grok passed all eight PROOFS and rejected four DOCSTRING claims plus one redundant hypothesis - every one correct, and all five fixed rather than disputed.** (1) [OVERREACH] `langmuir_isotherm`'s docstring called the undivided identity `theta*(kr+kf*p)=kf*p` an equivalent of `theta = Kp/(1+Kp)` with `K=kf/kr`; that reading needs `kr != 0`, and the degenerate `kf=kr=0` satisfies both hypotheses for every `theta` with `theta+v=1`, making the identity vacuously true where the quotient is meaningless. Docstring now says so and points at `langmuir_isotherm_div`, which carries the hypothesis. (2) [OVERREACH] `dissociative_isotherm_iff`'s docstring read `kr*s^2 = kf*p` as `s = sqrt(Kp)`. Over Rat it is not: `kr` may vanish, `Kp` need not be a square in Rat at all, and both `s` and `-s` solve it (the physical branch `s >= 0` is imposed nowhere). Corrected. (3) [OVERREACH] and the sharpest - that same docstring asserted the coverage `theta = sqrt(Kp)/(1+sqrt(Kp))` while the file proved only its two halves and never assembled them. **A ninth theorem, `dissociative_coverage` (`theta*(1+s) = s`), was WRITTEN because of this review**; it did not exist before. (4) [OVERREACH] 'hydrogen coverage grows as the square root of pressure' holds only while `s << 1`; `s/(1+s)` flattens toward 1 at saturation and does not grow as sqrt(p) there. Restated as the low-coverage limit it is. (5) [TIGHTENABLE] `lh_quasi_equilibrium_div` carried `hD : D^2 != 0`; the site balance already forces `v*D = 1` and `0 = 1` is false in Rat, so it is derivable. Hypothesis dropped and derived in-proof. Separately, [OVERREACH] on prose calling `lh_quasi_equilibrium` a LIMIT theorem ('the closed form IS the mechanism's limit, not an approximation'): what is proved is the exact algebraic consequence of imposing quasi-equilibrium plus site balance - no limit taken, no residual bounded, no ODE trajectory shown to approach it. The docstring, docs/chemistry/SOUNIO_FOR_SURFACE_MICROKINETICS.md and the published summary page were all corrected to say algebraic consequence, with the residual gap named as measured (test_lh_reduces_to_closed_form) rather than proved. Every change is recorded at its own site rather than silently applied. Post-fix: 9 theorems, `lake build` green under leanprover/lean4:v4.33.0, `#print axioms` on all nine returns only [propext, Classical.choice, Quot.sound] - no sorryAx, no native_decide. Raw: /tmp/llm-offload-hNjQbL/ (retry, xai+mistral); /tmp/llm-offload-ZyvAbP/ (first attempt, all three legs failed; none represented as a pass). |
 | 2026-09-01 | xai/grok-4.6 [OK]; zai ERROR 1313 FUP; local ERROR | math-review | kind-6 Hessian chain rule H(f(g))=f''s_j s_k + f'H(g) (lower.sio + madaros_hessian_transcendental.sio) | PASS | All nine pins [OK]. Prior wrong 2.487814 is exactly (f''+f')s_g² (s_g² substituted for H_g). Fan-out zai/local unavailable; xai leg is the recorded pass. Raw: /tmp/llm-offload-gzOzUM/. |
 | 2026-08-28 | — | math-review | formal/lean4/SounioSedenionBipartite.lean | WAIVED | Rebase replay onto current origin/main (26a348da09) for PR #2224. No new mathematics: the file is byte-identical to the already-reviewed tip — blob ea9d277adb955a4db54a8effcbedf1d2fdbc4912 both at commit 25c822feb9 and after this replay; CorePatternsWitnesses.lean likewise c63de4691a8b3280d1e87f4831748adbe0243b56. The 2026-08-22 replay row and the six 2026-08-16/17 math-review rows below (including the union-theorem PASS) reviewed exactly these bytes. |
@@ -4180,3 +4183,42 @@ the invalid DeepSeek key in `~/.sounio-keys.env`. Raw outputs from this session:
   "Specify two BE half-steps": already specified.
 - **zai/local/deepseek:** not rerun. Status as in the previous entry (rate limit,
   endpoint down, invalid key).
+
+## 2026-09-26T19:59Z — Claude (session 6620bb30, branch claude/pbpk28-cn-rannacher) — math-review, theta_pbpk28.sio
+
+Re-recorded 2026-09-26: this log was gitignored when the entry was first written locally, and the
+merge that made it tracked replaced the local copy.
+- `-p xai` (grok-4.6): claims 1–5 and 7 OK (θ-step Schur coefficients, θ and TR-BDF2 mass
+  identities, b-weights (w, w, d), Rannacher booking, positivity). Claim 6 OVERREACH: the
+  `steps·1e-15` gate is a heuristic rounding budget, not a proven FP bound. The comments were
+  reworded; the threshold is unchanged.
+- Second opinions (policy): the default fan-out failed (zai 1313 rate limit, local unreachable),
+  the deepseek key is invalid, and mistral errored. qwen3-235b: 7/7 OK.
+
+## 2026-09-26 — Claude (session 6620bb30) — math-review, epistemic_pbpk28 TEST 5 analytic re-pin + Hessian values
+- xai: 6/6 OK. qwen: 5/6 OK; one "WRONG" whose own correction restates the claim (a lost Kp
+  column shows as an exact 0.0 share, and non-zero shares mean it is intact). Recorded as a misreading.
+
+## 2026-09-26 — Claude (session 6620bb30) — math-review, Hessian ρ guard v1 + MC u_MC re-pin
+- xai: 4/4 OK. qwen: 4/4 OK. mistral: 4/4 OK, plus a wording OVERREACH on "exact identity" (the
+  identity is exact in ℝ; M(168 h)/Dose is an observation). No change.
+
+## 2026-09-26 — Claude (session 6620bb30) — math-review, theta_pbpk28 input routing
+- xai: 4/4 OK. qwen: 4/4 OK.
+
+## 2026-09-26 — Claude (session 6620bb30) — external-facing review (`--raw xai gemini qwen`), 9 regenerated docs/dissertation/results pages
+- gemini: every reply truncated (150–340 bytes), not counted. deepseek: invalid key.
+- grok-4.6: substantive findings on all 9 pages (nominal-vs-sample bias labels; missing 12.4 vs
+  12.7 L/h and MC-resolution qualifiers in "safe to cite"; causal overreach; Sobol S_i > S_Ti;
+  budget-table closure; rel convention; legacy CV = 0.5807). All applied.
+- qwen3-235b: minor clarifications applied. Its attribution comment (replace the "Claude Code"
+  provenance) was rejected: that line is the AI disclosure.
+
+## 2026-09-26 — Claude (session 6620bb30) — math-review, PR #2696 review round 3 (ρ undefined sentinel; TEST 9 order gate on C_brain(24 h); 24 h capture fix)
+- xai (grok-4.6): 6/6 OK. qwen3-235b: 6/6 OK.
+
+## 2026-09-26 — Claude (session 6620bb30) — math-review, ρ̃ = ½ρ² vs variance ratio 2ρ² (PR #2696 review round 4)
+- xai (grok-4.6): 3/3 OK. qwen3-235b: 3/3 OK. The per-parameter second-order-to-first-order
+  variance ratio (normal input) is 2ρ_literal² = 4ρ̃; ρ̃ = ½ρ² as computed is not that ratio.
+  The docs and comments are corrected; the value and the [0.05, 0.20] editorial range are left for
+  the author to decide.

@@ -1,0 +1,199 @@
+//@ run-pass
+//@ expect-stdout-contains: VENLAFAXINE_FORMATION_SINK_IMPLICIT_PASS
+//
+// CYP2D6 parent -> ODV formation sink solved inside the PBPK28 transport step.
+//
+// The hepatic sink's cl_sink·dt/V_liver is 1.15 (PM) to 20.2 (UM) at dt = 0.5 h. An
+// explicit post-step subtraction of CL_form·C_liver·dt, capped at the liver
+// content, saturates to "empty the liver every step" for NM and UM alike, so
+// the two phenotypes form the same ODV. The sink is instead part of the
+// implicit solve of the scenario's TR-BDF2 step (theta_pbpk28), which also takes
+// the absorbed input through the portal vein into the liver. That step has
+// no negativity floor: a negative state is recorded in the ledger, not
+// repaired, so "clamp-free step" now means "step that produced no negative
+// entry". Asserted:
+//
+//   1. Per-step parent mass identity, on every clamp-free step:
+//        M_new = M_old + dt·input − CL_R·ΔAUC_b − removed
+//      (removed = all hepatic clearance; formed = removed · X_form/X_hep)
+//      with ΔAUC_b booked by the step's own quadrature weights (w, w, d). It
+//      is exact for the linear algebra, so the tolerance is rounding
+//      (1e-12 mg against a 75 mg dose).
+//   2. Transfer identity: ODV is administered exactly `formed`, formed is the
+//      ODV-formation share of the hepatic removal, and the ODV
+//      step satisfies M_new = M_old + formed − CL_odv·ΔAUC_b on its own
+//      clamp-free steps.
+//   3. Clamp-free steps carry essentially all of the formation (> 99.9 %).
+//      Stronger, and now checked too: no step produces negative mass beyond
+//      rounding, 1e-12 mg (the floored CN kernel went to −3e-4 mg in the
+//      post-release tail at dt = 0.5 h), and the cumulative identity M_n + CL·AUC_n + formed_n = administered_n holds
+//      after every step within max(1e-12, n·1e-15) of the administered mass.
+//   4. Formation separates every phenotype, PM < IM < NM < UM, and UM > NM
+//      is not a saturation artefact: the NM-UM gap is > 100× the
+//      dt = 0.5 vs 0.25 h change in cumulative formation.
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::theta_pbpk28::*
+use darwin_pbpk::scenarios::venlafaxine_xr::*
+use darwin_pbpk::release::matrix_er::*
+use darwin_pbpk::drugs::venlafaxine::*
+
+fn fs_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+struct FormationAudit {
+    formed_mg: f64,
+    formed_clean_mg: f64,
+    administered_mg: f64,
+    steps: i32,
+    max_res_parent: f64,
+    max_res_odv: f64,
+    max_cum_res: f64,
+    neg_mass: f64,
+}
+
+// Drives the scenario's gut step (vfx_gut_release_step), parent step
+// (vfx_parent_step_with_formation) and ODV step (vfx_odv_step) with the XR
+// matrix release, and audits every step.
+fn fs_run(pheno: i32, dt: f64) -> FormationAudit with Mut, Div, Panic {
+    let rel = venlafaxine_xr_matrix_gohel2008()
+    var pp = pbpk28_params_venlafaxine_parent()
+    pp.cl_central = venlafaxine_cl_renal()
+    var op = pbpk28_params_venlafaxine_odv()
+    op.cl_central = vfx_cl_odv_systemic(pheno)
+    var par = pbpk28_state_zero()
+    var odv = pbpk28_state_zero()
+    var lp = pbpk28_ledger_zero()
+    var lo = pbpk28_ledger_zero()
+    var gut = 0.0
+    var t = 0.0
+    var formed = 0.0
+    var formed_clean = 0.0
+    var steps: i32 = 0
+    var max_rp = 0.0
+    var max_ro = 0.0
+    var max_cum = 0.0
+    while t < 120.0 - 0.5 * dt {
+        let gs = vfx_gut_release_step(gut, rel, t, dt)
+        gut = gs.gut_mg
+
+        let mp0 = pbpk28_total_mass(par, pp)
+        let auc_p0 = lp.auc[0]
+        let neg_p0 = lp.neg_mass
+        let sneg_p0 = lp.stage_neg_mass
+        let rem0 = lp.sink_removed
+        let form = vfx_parent_step_with_formation(&!par, pheno, gs.to_parent_mg / dt, dt, &!lp)
+        let removed = lp.sink_removed - rem0
+        let mp1 = pbpk28_total_mass(par, pp)
+        formed = formed + form
+
+        let mo0 = pbpk28_total_mass(odv, op)
+        let auc_o0 = lo.auc[0]
+        let neg_o0 = lo.neg_mass
+        let sneg_o0 = lo.stage_neg_mass
+        vfx_odv_step(&!odv, pheno, form / dt, dt, &!lo)
+        let mo1 = pbpk28_total_mass(odv, op)
+
+        // A step is clean when neither its returned state nor TR-BDF2's internal
+        // stage x_γ (which enters the quadrature) added negative mass.
+        if !(lp.neg_mass > neg_p0) && !(lp.stage_neg_mass > sneg_p0) {
+            formed_clean = formed_clean + form
+            let rp = fs_abs(mp1 - (mp0 + gs.to_parent_mg - pp.cl_central * (lp.auc[0] - auc_p0) - removed))
+            if rp > max_rp { max_rp = rp }
+        }
+        if !(lo.neg_mass > neg_o0) && !(lo.stage_neg_mass > sneg_o0) {
+            let ro = fs_abs(mo1 - (mo0 + form - op.cl_central * (lo.auc[0] - auc_o0)))
+            if ro > max_ro { max_ro = ro }
+        }
+        let cum = fs_abs(pbpk28_ledger_residual(lp, par, pp, 0.0))
+            + fs_abs(pbpk28_ledger_residual(lo, odv, op, 0.0))
+            + fs_abs(lo.administered - formed)
+            + fs_abs(lp.sink_removed * vfx_form_fraction(pheno) - formed)
+        if cum > max_cum { max_cum = cum }
+
+        steps = steps + 1
+        t = t + dt
+    }
+    // Returned states and TR-BDF2's internal stage, both ledgers.
+    var neg = lp.neg_mass
+    if lo.neg_mass > neg { neg = lo.neg_mass }
+    if lp.stage_neg_mass > neg { neg = lp.stage_neg_mass }
+    if lo.stage_neg_mass > neg { neg = lo.stage_neg_mass }
+    FormationAudit {
+        formed_mg: formed,
+        formed_clean_mg: formed_clean,
+        administered_mg: lp.administered,
+        steps: steps,
+        max_res_parent: max_rp,
+        max_res_odv: max_ro,
+        max_cum_res: max_cum,
+        neg_mass: neg,
+    }
+}
+
+fn fs_audit_ok(a: FormationAudit) -> bool with IO {
+    let tol = 1.0e-12
+    if !(a.max_res_parent < tol) {
+        println("FAIL: parent per-step mass identity")
+        println(a.max_res_parent)
+        return false
+    }
+    if !(a.max_res_odv < tol) {
+        println("FAIL: ODV per-step transfer identity")
+        println(a.max_res_odv)
+        return false
+    }
+    if !(a.formed_mg > 0.0 && a.formed_clean_mg > 0.999 * a.formed_mg) {
+        println("FAIL: clamp-free steps do not carry the formation")
+        return false
+    }
+    if !(a.neg_mass <= tol) {
+        println("FAIL: negative state from the transport step")
+        println(a.neg_mass)
+        return false
+    }
+    let n_bound = (a.steps as f64) * 1.0e-15
+    let rel_tol = if n_bound > 1.0e-12 { n_bound } else { 1.0e-12 }
+    if !(a.max_cum_res <= rel_tol * a.administered_mg) {
+        println("FAIL: cumulative mass identity")
+        println(a.max_cum_res)
+        return false
+    }
+    return true
+}
+
+fn main() with Mut, Div, IO, Panic {
+    let dt = 0.5
+    let pm = fs_run(0, dt)
+    let im = fs_run(1, dt)
+    let nm = fs_run(2, dt)
+    let um = fs_run(3, dt)
+    println("formed ODV (mg) PM, IM, NM, UM:")
+    println(pm.formed_mg)
+    println(im.formed_mg)
+    println(nm.formed_mg)
+    println(um.formed_mg)
+
+    if !fs_audit_ok(pm) { return }
+    if !fs_audit_ok(im) { return }
+    if !fs_audit_ok(nm) { return }
+    if !fs_audit_ok(um) { return }
+
+    if !(pm.formed_mg < im.formed_mg && im.formed_mg < nm.formed_mg && nm.formed_mg < um.formed_mg) {
+        println("FAIL: formation ordering PM < IM < NM < UM")
+        return
+    }
+
+    let nm_half = fs_run(2, 0.5 * dt)
+    let um_half = fs_run(3, 0.5 * dt)
+    let dt_change = fs_abs(nm.formed_mg - nm_half.formed_mg) / nm_half.formed_mg
+        + fs_abs(um.formed_mg - um_half.formed_mg) / um_half.formed_mg
+    let gap = (um.formed_mg - nm.formed_mg) / nm.formed_mg
+    println("NM-UM relative gap, dt-refinement change:")
+    println(gap)
+    println(dt_change)
+    if !(gap > 100.0 * dt_change) {
+        println("FAIL: NM/UM separation not resolved above dt error")
+        return
+    }
+    println("VENLAFAXINE_FORMATION_SINK_IMPLICIT_PASS")
+}
