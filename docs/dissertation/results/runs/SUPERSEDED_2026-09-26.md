@@ -27,3 +27,6 @@ them was stepped with `pbpk28_full_cn_step`, whose negativity floors injected ma
 
 Not affected: `m6_dissertation_pbpk28_parity_gate_v1.txt` (parity refs run their own kernel copies at
 dt = 0.001 h, where the floors never fire), `m6_literature_access_v1.txt`, `m6_julia_reconciliation_v1.txt`.
+That parity log covers cases 1-9 (rapamycin, semaglutide) only. It holds no venlafaxine records:
+the venlafaxine cases 10-13 ran the legacy floored CN model at dt = 0.5 h until PR #2728 moved them
+to the portal first-pass model, so no earlier venlafaxine parity output is floor-free evidence.
