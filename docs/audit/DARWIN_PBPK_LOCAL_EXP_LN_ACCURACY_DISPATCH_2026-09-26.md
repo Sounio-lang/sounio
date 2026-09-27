@@ -127,7 +127,8 @@ It holds verbatim copies of both helpers and compares them with `math::pure` and
 
 The probe is a witness of the historical arithmetic, not a fix-sensitive test. It embeds its
 own copies, so applying the proposed patch does not change its result. It first checks every
-`math::pure` row against its reference and exits rc = 2 if any row is off by more than 10⁻¹⁴.
+`math::pure` row against its reference, and exits rc = 2 if any row is off by more than 10⁻¹⁴ or
+if `math::pure::ln` returns NaN at any point of the [0.5, 2] sweep.
 Only then does it classify the helper copies: rc = 1 means they are inaccurate, which is the
 expected result.
 
