@@ -130,10 +130,15 @@ Staged, so each stage is separately verifiable.
 - This is an estimate, not a measurement; re-profile after landing.
 
 **Stage B — index (algorithmic).**
-- Add a name → fn-id hash index on `IrModule`, reusing `ir_name_hash`.
-- It is updated at the only places a function name is written: `lowerer_find_or_add_fn_id_mut`, the merge append path and `ir_fn_set` when the name changes.
-- It must preserve *first-match* order, and for merge the *prefer lowered body over stub* rule. Store the lowest id, plus a body flag, per name.
+- Add a name → fn-id hash index on `IrModule`, open-addressed on `ir_name_hash`.
+- **A hash is not a key.** On a hash match, compare the full name and keep probing on mismatch, exactly as `ir_intern_name` does (`ir/ir.sio`: "Compare the NAME, not the hash"). Two colliding symbols must never alias one entry.
+- **Each lookup keeps its own selection rule.** One entry per distinct name, holding:
+  - `first_id`: the lowest id with that name. This is what the lowerer scans return: `lowerer_lookup_fn_id_by_name_ref`, `lowerer_find_or_add_fn_id_mut`, and `lowerer_name_has_body_mut`, which then reads `instr_count` of that first id live.
+  - `last_body_id`: the **highest** id with `instr_count > 0`. `ir_merge_find_function_name_index` overwrites `found` on every matching body, so it returns the last body, not the first.
+  - `first_stub_id`: the lowest id with `instr_count == 0`, the merge fallback.
+- **Invalidate on body writes, not only name writes.** `ir_module_promote_canonical_into_stub_slots` (`compiler/module_frontend.sio`) turns a same-named stub into a body through `ir_fn_set`, which changes `last_body_id` and `first_stub_id` without touching the name. Route every write through `ir_fn_set` and have it refresh the entry whenever `name` or `instr_count > 0` changes. Otherwise keep the merge lookup linear, but Stage A-cheap.
 - Guard with `SOUNIO_IR_FN_INDEX_VERIFY=1`: run indexed and linear lookup side by side and panic on any divergence. The CI rung runs once with it on.
+- Stage A keeps the existing scans and their order, so it inherits all three rules unchanged.
 
 **Stage C — checker sig table.** Same treatment for `FnSigTable`: a per-(name, module) index covering the three `prefer_module` passes.
 
