@@ -107,7 +107,10 @@ int main(int argc, char** argv) {
 done:
     // A short write (full disk, I/O error) would leave a truncated profile that
     // still looks complete; treat it as a profiler error.
-    if (std::ferror(f) | std::fclose(f)) {
+    // Sequenced on purpose: ferror() must see the stream before fclose() frees it.
+    const bool write_error = std::ferror(f) != 0;
+    const bool close_error = std::fclose(f) != 0;
+    if (write_error || close_error) {
         perror("[rip_sampler] writing samples");
         profiler_error = true;
     }
