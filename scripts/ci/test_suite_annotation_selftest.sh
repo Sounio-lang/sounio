@@ -165,6 +165,30 @@ else
     echo "SKIP: case 7 (mixed-environment gate) -- no lean_single ELF at $LEAN_SINGLE_ELF" >&2
 fi
 
+# --- 7b. The reciprocal: the same mixed environment must SKIP a
+#     `requires: madaros` fixture, because what actually resolved is
+#     lean_single (Copilot review, sounio-lang/sounio#2694: the madaros arm
+#     trusted SOUNIO_MADAROS_AVAILABLE alone and ran Madaros-only fixtures on
+#     lean_single). The fixture itself would pass on lean_single, so a PASS
+#     here means the gate ran it -- exactly the bug -- not that it is fine.
+if [[ -x "$LEAN_SINGLE_ELF" ]]; then
+    cat > "$TMP/madaros_gate_fixture.sio" <<'SIO'
+//@ run-pass
+//@ requires: madaros
+fn main() -> i32 with IO {
+    println("selftest_madaros_gate_marker_3d91")
+    0
+}
+SIO
+    printf '%s\n' "$TMP/madaros_gate_fixture.sio" > "$TMP/list_madaros_gate.txt"
+    expect_rc 0 "$TMP/madaros_gate.log" env SOUNIO_MADAROS_AVAILABLE=1 SOUNIO_TEST_SOUC_BIN="$LEAN_SINGLE_ELF" \
+        bash "$HARNESS" --test-list "$TMP/list_madaros_gate.txt" --jobs 1 --verbose
+    grep -Fq "Skip: 1" "$TMP/madaros_gate.log" \
+        || fail "requires:madaros ran under SOUNIO_MADAROS_AVAILABLE=1 although the resolved compiler is lean_single"
+else
+    echo "SKIP: case 7b (mixed-environment madaros gate) -- no lean_single ELF at $LEAN_SINGLE_ELF" >&2
+fi
+
 # --- 8. Unrecognized wrapper identity: `requires: lean_single` must fail
 #     CLOSED (skip), not default to "must be lean_single" (Copilot review,
 #     sounio-lang/sounio#2694: a wrapper-style SOUNIO_TEST_SOUC_BIN with no

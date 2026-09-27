@@ -488,9 +488,14 @@ run_test() {
             llvm) [[ -z "${SOUNIO_LLVM_AVAILABLE:-}" ]] && { echo "{\"status\":\"skip\",\"reason\":\"requires:llvm\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"; return; } ;;
             # `requires: madaros` — feature lives only in the modular Madaros compiler
             # (check.sio), not in the lean_single bootstrap that builds the suite's
-            # stage2 binary. Skipped unless SOUNIO_MADAROS_AVAILABLE is set (a future
-            # Madaros-based test job sets it). Tracked: Madaros-official migration.
-            madaros) [[ -z "${SOUNIO_MADAROS_AVAILABLE:-}" ]] && { echo "{\"status\":\"skip\",\"reason\":\"requires:madaros\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"; return; } ;;
+            # stage2 binary. Runs only when BOTH hold: SOUNIO_MADAROS_AVAILABLE is
+            # set (the job opts in) AND the probed $SOUC_BIN identifies as Madaros.
+            # The env var alone states intent, not what resolved (Copilot review,
+            # sounio-lang/sounio#2694): with SOUNIO_MADAROS_AVAILABLE=1 and an
+            # explicit lean_single SOUNIO_TEST_SOUC_BIN, trusting the var ran every
+            # Madaros-only fixture on lean_single. Same probe, and same fail-closed
+            # reading of an unrecognized identity, as the lean_single arm below.
+            madaros) [[ -z "${SOUNIO_MADAROS_AVAILABLE:-}" || "${SOUNIO_RESOLVED_IS_MADAROS:-0}" != "1" ]] && { echo "{\"status\":\"skip\",\"reason\":\"requires:madaros\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"; return; } ;;
             # `requires: lean_single` — the mirror of the above: the feature lives
             # only in the lean_single bootstrap, so the test must NOT run on the
             # Madaros job. Refinement subtyping is the case that needed this:
