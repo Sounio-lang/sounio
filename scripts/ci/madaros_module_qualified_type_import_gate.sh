@@ -133,4 +133,41 @@ compile_and_run oversized "$oversized_dir/main.sio"
 expect_output oversized "$oversized_dir/expected.txt"
 echo "$TAG PASS(oversized): a path-form type import past 1 MiB is still found by a real full-file scan, not a blind fail-closed guess"
 
+# --- multiline: Copilot review, "Handle newlines when scanning path-form
+# type imports": the lexer treats LF/CR as ordinary whitespace, so
+# `struct\nWidget` is a valid declaration, but the scanner used to skip
+# only space/tab after the keyword and missed it -- misclassifying the
+# import as a function/value and reintroducing the W044/body-less-lowering
+# bug this whole scanner exists to prevent.
+multiline_dir="$WORK/multiline"
+mkdir -p "$multiline_dir"
+cat <<'EOF' > "$multiline_dir/pkg_mod_ml.sio"
+pub struct
+Widget {
+    n: i64,
+}
+
+impl Widget {
+    pub fn make() -> i64 {
+        42
+    }
+}
+EOF
+cat <<'EOF' > "$multiline_dir/main.sio"
+use pkg_mod_ml::Widget;
+
+fn main() -> i32 with IO, Mut, Panic {
+    let v: i64 = pkg_mod_ml::Widget::make()
+    if v == 42 {
+        println("MULTILINE_MODULE_TYPE_IMPORT_QUALIFIER_OK")
+        return 0
+    }
+    1
+}
+EOF
+echo "MULTILINE_MODULE_TYPE_IMPORT_QUALIFIER_OK" > "$multiline_dir/expected.txt"
+compile_and_run multiline "$multiline_dir/main.sio"
+expect_output multiline "$multiline_dir/expected.txt"
+echo "$TAG PASS(multiline): a struct declaration split across a newline is still found by the type scanner"
+
 echo "$TAG PASS: path-form type import resolved correctly"
