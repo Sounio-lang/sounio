@@ -1,0 +1,53 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: PASS heap_realloc_nonpositive
+// heap_realloc(ptr, n) fails like heap_alloc(n) for n <= 0: it returns null and
+// ptr stays valid. The size check ran only AFTER adding the 8-byte header and page
+// slack (4103), so any n in (-4103, 0] became a small positive size and quietly
+// remapped the block to one page instead of failing. A very negative n and a
+// valid grow must keep working.
+
+fn main() -> i32 with IO, Alloc, Mut {
+    let p = heap_alloc(64) as *mut i64
+    write_i64(p, 0, 11)
+    write_i64(p, 7, 77)
+
+    // Each rejected call is checked before ptr is used again: a call that wrongly
+    // succeeded may have moved the block.
+    if heap_realloc(p as *mut i8, 0) as i64 != 0 {
+        print("FAIL realloc(p, 0) accepted\n")
+        return 1
+    }
+    if heap_realloc(p as *mut i8, 0 - 1) as i64 != 0 {
+        print("FAIL realloc(p, -1) accepted\n")
+        return 1
+    }
+    if heap_realloc(p as *mut i8, 0 - 4102) as i64 != 0 {
+        print("FAIL realloc(p, -4102) accepted\n")
+        return 1
+    }
+    if heap_realloc(p as *mut i8, 0 - 9000000) as i64 != 0 {
+        print("FAIL realloc(p, -9000000) accepted\n")
+        return 1
+    }
+
+    if read_i64(p, 0) != 11 || read_i64(p, 7) != 77 {
+        print("FAIL contents changed by rejected realloc\n")
+        return 1
+    }
+
+    // A valid grow still works and keeps the contents.
+    let q = heap_realloc(p as *mut i8, 64000) as *mut i64
+    if q as i64 == 0 {
+        print("FAIL valid grow returned null\n")
+        return 1
+    }
+    if read_i64(q, 0) != 11 || read_i64(q, 7) != 77 {
+        print("FAIL grow lost contents\n")
+        return 1
+    }
+    heap_free(q as *mut i8)
+
+    print("PASS heap_realloc_nonpositive\n")
+    return 0
+}

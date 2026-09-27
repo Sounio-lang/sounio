@@ -10,7 +10,7 @@
 // (accepted by the self-hosted runtime's flat-bundle approach).
 // Named imports only — glob imports caused type-checker stack overflow
 use parser::ast::{AstPath, empty_path, ImportItemList, ItemKind, ItemList, Name, Program, StringList, ast_reset_global_var_inits, GLOBAL_VAR_INIT_SUPPRESS_RESET}
-use ir::ir::{ir_empty_epistemic_section, ir_empty_function, ir_empty_module, ir_empty_name, ir_empty_validated_patch_stats, IrAlgebraTable, IrEpistemicSection, IrFunction, IrInstr, IrLowerResult, IR_MAX_EPI_ACQUISITION_PLANS, IR_MAX_EPI_ACQUISITION_POLICIES, IR_MAX_EPI_ACQUISITION_REASON_WITNESSES, IR_MAX_EPI_ALTERNATIVE_CANDIDATES, IR_MAX_EPI_ALTERNATIVE_FRONTIERS, IR_MAX_EPI_ALTERNATIVE_POLICIES, IR_MAX_EPI_ALTERNATIVE_REASON_WITNESSES, IR_MAX_EPI_ALTERNATIVE_SETS, IR_MAX_EPI_AUDITS, IR_MAX_EPI_CONTESTS, IR_MAX_EPI_CONTEST_WITNESSES, IR_MAX_EPI_COUNTEREXAMPLES, IR_MAX_EPI_DECISION_CERTIFICATES, IR_MAX_EPI_DECISION_POLICIES, IR_MAX_EPI_DEFERRAL_POLICIES, IR_MAX_EPI_DEFERRED_CERTIFICATES, IR_MAX_EPI_DEFERRED_REASON_WITNESSES, IR_MAX_EPI_MECHANISTIC_REPORTS, IR_MAX_EPI_MODEL_FAMILIES, IR_MAX_EPI_MONITORING_POLICIES, IR_MAX_EPI_OBSERVED_TRANSITIONS, IR_MAX_EPI_POLICIES, IR_MAX_EPI_POSTERIOR_WEIGHTS, IR_MAX_EPI_RECOURSE_PLANS, IR_MAX_EPI_RECOURSE_POLICIES, IR_MAX_EPI_RECOURSE_REASON_WITNESSES, IR_MAX_EPI_ROBUST_PROOFS, IR_MAX_EPI_ROLLBACK_CERTIFICATES, IR_MAX_EPI_TRANSITION_PLANS, IR_MAX_EPI_TRANSITION_POLICIES, IR_MAX_EPI_TRANSITION_PROTOCOLS, IR_MAX_EPI_TRANSITION_REASON_WITNESSES, IR_MAX_EPI_TRANSITION_STEPS, IR_MAX_EPI_VALIDATED_MANIFESTS, IR_MAX_EPI_VALIDATIONS, IR_MAX_FUNCS, IR_MAX_STRINGS, IrModule, ir_name_eq, IrOpcode, IrProfCounterInfo, IR_STRATEGY_STANDARD, make_name}
+use ir::ir::{ir_empty_epistemic_section, ir_empty_function, ir_empty_module, ir_empty_name, ir_empty_validated_patch_stats, IrAlgebraTable, IrEpistemicSection, IrFunction, IrInstr, IrLowerResult, IR_MAX_EPI_ACQUISITION_PLANS, IR_MAX_EPI_ACQUISITION_POLICIES, IR_MAX_EPI_ACQUISITION_REASON_WITNESSES, IR_MAX_EPI_ALTERNATIVE_CANDIDATES, IR_MAX_EPI_ALTERNATIVE_FRONTIERS, IR_MAX_EPI_ALTERNATIVE_POLICIES, IR_MAX_EPI_ALTERNATIVE_REASON_WITNESSES, IR_MAX_EPI_ALTERNATIVE_SETS, IR_MAX_EPI_AUDITS, IR_MAX_EPI_CONTESTS, IR_MAX_EPI_CONTEST_WITNESSES, IR_MAX_EPI_COUNTEREXAMPLES, IR_MAX_EPI_DECISION_CERTIFICATES, IR_MAX_EPI_DECISION_POLICIES, IR_MAX_EPI_DEFERRAL_POLICIES, IR_MAX_EPI_DEFERRED_CERTIFICATES, IR_MAX_EPI_DEFERRED_REASON_WITNESSES, IR_MAX_EPI_MECHANISTIC_REPORTS, IR_MAX_EPI_MODEL_FAMILIES, IR_MAX_EPI_MONITORING_POLICIES, IR_MAX_EPI_OBSERVED_TRANSITIONS, IR_MAX_EPI_POLICIES, IR_MAX_EPI_POSTERIOR_WEIGHTS, IR_MAX_EPI_RECOURSE_PLANS, IR_MAX_EPI_RECOURSE_POLICIES, IR_MAX_EPI_RECOURSE_REASON_WITNESSES, IR_MAX_EPI_ROBUST_PROOFS, IR_MAX_EPI_ROLLBACK_CERTIFICATES, IR_MAX_EPI_TRANSITION_PLANS, IR_MAX_EPI_TRANSITION_POLICIES, IR_MAX_EPI_TRANSITION_PROTOCOLS, IR_MAX_EPI_TRANSITION_REASON_WITNESSES, IR_MAX_EPI_TRANSITION_STEPS, IR_MAX_EPI_VALIDATED_MANIFESTS, IR_MAX_EPI_VALIDATIONS, IR_MAX_FUNCS, IR_MAX_STRINGS, IrModule, ir_name_eq, ir_name_at, ir_intern_name, IrOpcode, IrProfCounterInfo, IR_STRATEGY_STANDARD, make_name}
 use check::mod::{check_program_epistemic_into, check_program_with_artifacts, checker_apply_ir_metadata, checker_to_ir_epistemic_into}
 use resolve::mod::{resolve_modules, ResolveBatchResult}
 use resolve::imports::{collect_module_exports, ModuleEntry, ModuleRegistry, module_registry_find, module_registry_new, module_registry_put, module_registry_report_overflow, modreg_export_kind_at, modreg_export_name_at}
@@ -1921,6 +1921,12 @@ struct ModuleSummary {
     fn_names: [Name; 256],
     fn_param_counts: [i64; 256],
     fn_strategies: [i64; 256],
+    // The Box-return metadata of each function (return_box_slot, and the interned id
+    // of return_box_inner_id). A stub built from this summary is what call lowering
+    // consults for an imported function, and a stub without these lowered a call to a
+    // `Box<T>` / tuple-with-Box function as a plain scalar return.
+    fn_return_box_slots: [i64; 256],
+    fn_return_box_inner_ids: [i64; 256],
 }
 
 struct ThinModuleGraphNode {
@@ -1993,6 +1999,8 @@ fn thin_empty_module_summary() -> ModuleSummary {
         fn_names: [ir_empty_name(); 256],
         fn_param_counts: [0; 256],
         fn_strategies: [IR_STRATEGY_STANDARD; 256],
+        fn_return_box_slots: [-1; 256],
+        fn_return_box_inner_ids: [-1; 256],
     }
 }
 
@@ -2083,13 +2091,22 @@ fn thin_module_summary_from_ir_module(
         summary.fn_names[i as usize] = ir_fn_get(&(*module), i as usize).name
         summary.fn_param_counts[i as usize] = ir_fn_get(&(*module), i as usize).param_count
         summary.fn_strategies[i as usize] = ir_fn_get(&(*module), i as usize).compile_strategy
+        summary.fn_return_box_slots[i as usize] = ir_fn_get(&(*module), i as usize).return_box_slot
+        summary.fn_return_box_inner_ids[i as usize] = ir_fn_get(&(*module), i as usize).return_box_inner_id
         i = i + 1
     }
     summary
 }
 
 fn THIN_HASH_SEED() -> i64 { 1000003 }
-fn THIN_CACHE_SCHEMA_VERSION() -> i64 { 1 }
+// 2: cached SOIR modules and summaries carry the Box-return metadata (SOIR v5). The
+// version is part of every cache key, so a v1 entry, which lost it, is never read.
+// v3: the persistent summary now carries the Box<T> return payload's NAME
+// TEXT (fn_return_box_inner_ids), not the v2 process-local interned id --
+// bumped so a v2 cache file is never misread as if it held real payload
+// metadata (it would decode as an out-of-range id -> ir_empty_name -> every
+// Box<T> return stub silently losing its inner type again).
+fn THIN_CACHE_SCHEMA_VERSION() -> i64 { 3 }
 
 fn thin_hash_mix(base: i64, value: i64) -> i64 with Mut, Panic, Div {
     ((base * 131) + value + 97) % 2147483647
@@ -2230,11 +2247,17 @@ fn thin_cache_skip_ws(buf: [i8; 131072], len: i64, pos: i64) -> i64 with Mut, Pa
     p
 }
 
+// Cap raised 255 -> 511 (2026-09-27, Copilot review): a token can now carry
+// a full-width Name (Name.buf is [i8; 384], see lower_tuple_box_slot_list's
+// per-slot payload list, up to 384 bytes), and the previous 255-byte cap
+// silently truncated any such token before the caller ever saw it -- the
+// read-side half of the same bug the 128-byte thin_name_to_string cap was
+// on the write side.
 fn thin_cache_read_token(buf: [i8; 131072], len: i64, pos: i64) -> (string, i64) with Mut, Panic, Div {
     var p = thin_cache_skip_ws(buf, len, pos)
-    var out: [i8; 256] = [0; 256]
+    var out: [i8; 512] = [0; 512]
     var out_len: i64 = 0
-    while p < len && out_len < 255 {
+    while p < len && out_len < 511 {
         let ch = buf[p as usize] as i64
         if ch == 32 || ch == 10 || ch == 13 || ch == 9 {
             break
@@ -2265,8 +2288,25 @@ fn thin_try_write_summary_cache(path: string, summary: ModuleSummary, stats: &! 
         buf = a3.0; p = a3.1
         let a4 = io_trace_append_string(buf, p, io_trace_i64_string(summary.fn_strategies[i as usize]))
         buf = a4.0; p = a4.1
-        let a5 = io_trace_append_byte(buf, p, 10)
+        let a5 = io_trace_append_byte(buf, p, 32)
         buf = a5.0; p = a5.1
+        // return_box_slot is a small sentinel/index (-1 no box, -2 whole Box<T>,
+        // >=0 tuple slot), not an interned id: portable across processes as-is.
+        let a6 = io_trace_append_string(buf, p, io_trace_i64_string(summary.fn_return_box_slots[i as usize]))
+        buf = a6.0; p = a6.1
+        let a7 = io_trace_append_byte(buf, p, 32)
+        buf = a7.0; p = a7.1
+        // return_box_inner_id is a process-local interned-name id: writing it
+        // raw is what silently dropped payload metadata across a cache read in
+        // a fresh process. Resolve it to its NAME TEXT here instead ("-" when
+        // there is no box, or the id no longer resolves), and re-intern that
+        // text into a fresh id on read.
+        let box_inner_name = thin_name_to_string_wide(ir_name_at(summary.fn_return_box_inner_ids[i as usize]))
+        let box_inner_tok = if str_len(box_inner_name) > 0 { box_inner_name } else { "-" }
+        let a8 = io_trace_append_string(buf, p, box_inner_tok)
+        buf = a8.0; p = a8.1
+        let a9 = io_trace_append_byte(buf, p, 10)
+        buf = a9.0; p = a9.1
         i = i + 1
     }
     let ok = io_write_native_binary(path, buf, p)
@@ -2338,9 +2378,21 @@ fn thin_try_read_summary_cache(
         pos = param_tok.1
         let strat_tok = thin_cache_read_token(bytes, len, pos)
         pos = strat_tok.1
+        let box_slot_tok = thin_cache_read_token(bytes, len, pos)
+        pos = box_slot_tok.1
+        let box_inner_tok = thin_cache_read_token(bytes, len, pos)
+        pos = box_inner_tok.1
         summary.fn_names[i as usize] = make_name(name_tok.0)
         summary.fn_param_counts[i as usize] = parse_i64(param_tok.0)
         summary.fn_strategies[i as usize] = parse_i64(strat_tok.0)
+        summary.fn_return_box_slots[i as usize] = parse_i64(box_slot_tok.0)
+        // Re-intern the payload NAME TEXT into a fresh id valid for THIS
+        // process; the writer's id from its own process is never reused.
+        if str_eq(box_inner_tok.0, "-") {
+            summary.fn_return_box_inner_ids[i as usize] = 0 - 1
+        } else {
+            summary.fn_return_box_inner_ids[i as usize] = ir_intern_name(make_name(box_inner_tok.0))
+        }
         i = i + 1
     }
     (true, summary)
@@ -2600,6 +2652,8 @@ fn thin_module_summary_lookup_local(summary: ModuleSummary, fn_name: Name) -> (b
             func.name = summary.fn_names[i as usize]
             func.param_count = summary.fn_param_counts[i as usize]
             func.compile_strategy = summary.fn_strategies[i as usize]
+            func.return_box_slot = summary.fn_return_box_slots[i as usize]
+            func.return_box_inner_id = summary.fn_return_box_inner_ids[i as usize]
             return (true, i, func)
         }
         i = i + 1
@@ -2654,6 +2708,25 @@ fn thin_name_to_string(name: Name) -> string with Mut, Panic, Div {
     var buf: [i8; 512] = [0; 512]
     var i: i64 = 0
     while i < name.len && i < 128 {
+        buf[i as usize] = name.buf[i as usize]
+        i = i + 1
+    }
+    buf_to_string(buf, i)
+}
+
+// Full-width twin of thin_name_to_string, for the one field that can
+// legitimately need more than 128 bytes: the tuple Box payload name list
+// (thin_try_write_summary_cache's box_inner_name), which lower_tuple_box_slot_list
+// allows up to Name's own actual capacity (Name.buf is [i8; 384]). Every
+// other thin_name_to_string caller in this file serializes an ordinary
+// identifier and is left at the 128-byte cap.
+fn thin_name_to_string_wide(name: Name) -> string with Mut, Panic, Div {
+    // buf_to_string takes exactly [i8; 512] (Sounio has no implicit fixed-array
+    // size coercion); only the first 384 bytes are ever filled, matching
+    // Name.buf's own actual capacity.
+    var buf: [i8; 512] = [0; 512]
+    var i: i64 = 0
+    while i < name.len && i < 384 {
         buf[i as usize] = name.buf[i as usize]
         i = i + 1
     }

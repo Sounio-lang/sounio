@@ -1,0 +1,51 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: PASS heap_realloc_grow
+// heap_realloc had no native body in Madaros: every call reached a ud2 stub,
+// so a HeapI64Vec growing past its capacity died with SIGILL (rc=132).
+// Grow past a page boundary so mremap must extend (or move) the mapping, and
+// check the contents survive. A null pointer reallocates like heap_alloc.
+
+fn main() -> i32 with IO, Alloc, Mut {
+    var p = heap_alloc(64) as *mut i64
+    var i: i64 = 0
+    while i < 8 {
+        write_i64(p, i, i * 7)
+        i = i + 1
+    }
+
+    p = heap_realloc(p as *mut i8, 64000) as *mut i64
+    if p as i64 == 0 {
+        print("FAIL realloc returned null\n")
+        return 1
+    }
+    i = 0
+    while i < 8 {
+        if read_i64(p, i) != i * 7 {
+            print("FAIL contents lost\n")
+            return 1
+        }
+        i = i + 1
+    }
+    write_i64(p, 7999, 12345)
+    if read_i64(p, 7999) != 12345 {
+        print("FAIL grown tail\n")
+        return 1
+    }
+    heap_free(p as *mut i8)
+
+    let q = heap_realloc(0 as *mut i8, 16) as *mut i64
+    if q as i64 == 0 {
+        print("FAIL realloc(null)\n")
+        return 1
+    }
+    write_i64(q, 1, 9)
+    if read_i64(q, 1) != 9 {
+        print("FAIL realloc(null) store\n")
+        return 1
+    }
+    heap_free(q as *mut i8)
+
+    print("PASS heap_realloc_grow\n")
+    return 0
+}

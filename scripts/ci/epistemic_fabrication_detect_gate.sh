@@ -75,8 +75,20 @@ fi
 
 # --- F2: confidence magnitude under Madaros (before lean_single — engine env
 # isolation has been flaky when lean_single is interposed mid-gate) ---
+# Timeout raised 180 -> 600 on 2026-09-27, reasoning from the 2026-09-26
+# PBPK28 sprint's documented slowdown elsewhere. TESTED AND WRONG: CI (job
+# 108667241904, PR #2501) shows the whole gate -- F1 AND F2 -- completing in
+# under 2s, so nothing here is timing out; the failure is immediate, not a
+# budget problem. Left at 600 anyway since it is a harmless ceiling either
+# way, but it is not what makes this gate pass or fail. The real cause is
+# still open: either the captured EP28 run compiles/executes to completion
+# and prints something neither pattern below matches, or it fails to compile
+# or run at all and prints neither. The diagnostic dump right before the
+# final `fail` exists to settle that from the next real CI run's own visible
+# log, since the captured log itself was never previously surfaced (only its
+# /tmp path, gone when the job ends).
 set +e
-timeout 180 "$SOUC" run "$EP28" \
+timeout 600 "$SOUC" run "$EP28" \
   >"$TMP/ep28_madaros.log" 2>&1
 erc=$?
 set -e
@@ -99,7 +111,18 @@ if [[ "$f2_huge" -eq 1 || "$f2_mark" -eq 1 ]]; then
 elif grep -E 'AUC confidence:[[:space:]]*0\.[0-9]+' "$TMP/ep28_madaros.log" >/dev/null; then
   pass "F2 Madaros confidence print looks like a probability (engine healthy)"
 else
-  fail "F2 no confidence line recognised (log $TMP/ep28_madaros.log)"
+  # 2026-09-27: neither pattern matched, and both submitted follow-up fixes
+  # (raising this section's timeout; a real arity-mismatch fix elsewhere in
+  # the merged tree) left this FAIL unchanged -- CI shows the whole gate
+  # completing in under 2s, ruling out a timeout. The captured log has never
+  # been visible in CI output (only its /tmp path, gone when the job ends),
+  # so the actual cause was never confirmed. Print it here instead of
+  # guessing again.
+  echo "[epistemic-fab] F2 diagnostic: rc=$erc, captured EP28 output follows" >&2
+  echo "[epistemic-fab] ---- ep28_madaros.log (last 60 lines) ----" >&2
+  tail -n 60 "$TMP/ep28_madaros.log" >&2 || true
+  echo "[epistemic-fab] ---- end ep28_madaros.log ----" >&2
+  fail "F2 no confidence line recognised (log $TMP/ep28_madaros.log, rc=$erc)"
 fi
 
 # lean_single reference for F1: physics is not actually zero variance

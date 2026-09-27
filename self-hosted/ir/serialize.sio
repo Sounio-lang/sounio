@@ -31,6 +31,9 @@ use check::types::*
 //   - compile_strategy: i64
 //   - prof_counter_id: i64
 //   - hyper_algebra_kind: i64 (v3+)
+//   - return_box_slot: i64 (v5+)
+//   - return_box_inner: i64 marker (v5+): 1 = a length-prefixed name follows, else
+//     the raw id (0 or -1). The interned id is process-local, so the TEXT travels.
 //   - instrs: array of IrInstr
 //
 // IrInstr encoding (fixed-size, 128 bytes):
@@ -45,7 +48,7 @@ use check::types::*
 //   - arg_count: i64
 
 let SOIR_MAGIC: i64 = 1380206931  // "SOIR" as i32 cast to i64
-let SOIR_VERSION: i8 = 4
+let SOIR_VERSION: i8 = 5
 let SOIR_MAX_SIZE: i64 = 131072  // 128KB max module size
 
 // Detectable capacity refusal. Returning ir_empty_module() on an oversized
@@ -223,6 +226,42 @@ fn read_name(buf: [i8; 131072], pos: i64) -> (Name, i64) with Mut, Panic, Div {
         i = i + 1
     }
     (n, p + 128)
+}
+
+// A Name is 384 bytes but write_name / read_name carry only the first 128, which is
+// right for identifiers and wrong for the per-slot Box list a tuple return interns
+// (",B,,C" grows with the tuple). This pair writes the length and then exactly that
+// many bytes, so a long name round-trips whole.
+fn write_long_name(buf: [i8; 131072], pos: i64, n: Name) -> ([i8; 131072], i64) with Mut, Panic, Div {
+    var b = buf
+    var p = pos
+    var len = n.len
+    if len < 0 { len = 0 }
+    if len > 384 { len = 384 }
+    let pair = write_i64(b, p, len)
+    b = pair.0
+    p = pair.1
+    var i: i64 = 0
+    while i < len {
+        b[p + i] = n.buf[i]
+        i = i + 1
+    }
+    (b, p + len)
+}
+
+fn read_long_name(buf: [i8; 131072], pos: i64) -> (Name, i64) with Mut, Panic, Div {
+    let len_pair = read_i64(buf, pos)
+    var len = len_pair.0
+    let p = len_pair.1
+    if len < 0 { len = 0 }
+    if len > 384 { len = 384 }
+    var n = Name { buf: [0; 384], len: len }
+    var i: i64 = 0
+    while i < len {
+        n.buf[i] = buf[p + i]
+        i = i + 1
+    }
+    (n, p + len)
 }
 
 fn write_compare_op(buf: [i8; 131072], pos: i64, op: CompareOp) -> ([i8; 131072], i64) with Mut, Panic, Div {
@@ -604,6 +643,32 @@ fn serialize_ir_function(buf: [i8; 131072], pos: i64, func: IrFunction) -> ([i8;
         p = hyper_alg_pair.1
     }
 
+    // v5: the Box-return metadata call lowering reads (`return_box_slot`,
+    // `return_box_inner_id`). Left out, a module read back from the persistent
+    // thin cache carried -1 for both and a cache-backed call to a `Box<T>` /
+    // tuple-with-Box function was lowered as a plain scalar return.
+    if SOIR_VERSION >= 5 {
+        let box_slot_pair = write_i64(b, p, func.return_box_slot)
+        b = box_slot_pair.0
+        p = box_slot_pair.1
+        let inner_name = ir_name_at(func.return_box_inner_id)
+        let inner_has_text = func.return_box_inner_id > 0 && inner_name.len > 0
+        var inner_marker: i64 = 0
+        if inner_has_text {
+            inner_marker = 1
+        } else if func.return_box_inner_id < 0 {
+            inner_marker = 0 - 1
+        }
+        let inner_marker_pair = write_i64(b, p, inner_marker)
+        b = inner_marker_pair.0
+        p = inner_marker_pair.1
+        if inner_has_text {
+            let inner_name_pair = write_long_name(b, p, inner_name)
+            b = inner_name_pair.0
+            p = inner_name_pair.1
+        }
+    }
+
     // Write instructions
     var j: i64 = 0
     while j < func.instr_count {
@@ -665,6 +730,24 @@ fn deserialize_ir_function(buf: [i8; 131072], pos: i64, version: i8) -> (IrFunct
         p = hyper_alg_pair.1
     }
 
+    var return_box_slot: i64 = 0 - 1
+    var return_box_inner_id: i64 = 0 - 1
+    if version >= 5 {
+        let box_slot_pair = read_i64(buf, p)
+        return_box_slot = box_slot_pair.0
+        p = box_slot_pair.1
+        let inner_marker_pair = read_i64(buf, p)
+        p = inner_marker_pair.1
+        if inner_marker_pair.0 == 1 {
+            let inner_name_pair = read_long_name(buf, p)
+            p = inner_name_pair.1
+            // Re-intern: the writer's id is meaningless in this process.
+            return_box_inner_id = ir_intern_name(inner_name_pair.0)
+        } else {
+            return_box_inner_id = inner_marker_pair.0
+        }
+    }
+
     // Read instructions into the arena (post-#1649: IrFunction has `region`,
     // not an inline `instrs` array). Allocate a region sized to instr_count,
     // then store each deserialized instruction at its slot. instr_count is
@@ -704,6 +787,8 @@ fn deserialize_ir_function(buf: [i8; 131072], pos: i64, version: i8) -> (IrFunct
         returns_float: 0,
         return_struct_name: ir_empty_name(),
         return_fixed_array_len: 0 - 1,
+        return_box_slot: return_box_slot,
+        return_box_inner_id: return_box_inner_id,
         prof_counter_id: prof_counter_id,
         hyper_algebra_kind: hyper_algebra_kind,
         is_sret: 0,
@@ -4492,7 +4577,7 @@ fn deserialize_ir_module(buf: [i8; 131072], len: i64) -> IrModule with Mut, Pani
     }
 
     let version = buf[4]
-    if version != 1 && version != 2 as i8 && version != 3 as i8 && version != SOIR_VERSION {
+    if version != 1 && version != 2 as i8 && version != 3 as i8 && version != 4 as i8 && version != SOIR_VERSION {
         return ir_empty_module()
     }
 

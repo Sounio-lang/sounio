@@ -91,17 +91,54 @@ sounio_require_souc
 _sounio_engine_md5() {
     if [[ -r "$1" ]]; then md5sum "$1" 2>/dev/null | cut -c1-8; else echo "absent"; fi
 }
-SOUNIO_ENGINE_KIND="madaros"
-SOUNIO_ENGINE_ELF="$ROOT_DIR/artifacts/self-hosted/madaros"
-if [[ "${SOUNIO_SOUC_ENGINE:-}" == "lean_single" ]] || [[ ! -x "$ROOT_DIR/artifacts/self-hosted/madaros" ]]; then
-    SOUNIO_ENGINE_KIND="lean_single"
-    SOUNIO_ENGINE_ELF="$ROOT_DIR/bin/souc-lean-single-x86_64"
-    [[ -x "$SOUNIO_ENGINE_ELF" ]] || SOUNIO_ENGINE_ELF="$ROOT_DIR/bin/souc-linux-x86_64"
-fi
+# Report the engine this run will actually use. The harness runs
+# `"$SOUC_BIN" run|check|compile <file>`, so the engine is whatever SOUC_BIN is,
+# and when SOUC_BIN is bin/souc it is whatever bin/souc resolves. This mirrors
+# bin/souc's order: SOUNIO_SOUC_BIN (raw exec), SOUNIO_SOUC_ENGINE=lean_single,
+# then Madaros from MADAROS_RAW_BIN, SOUNIO_MADAROS_BIN,
+# artifacts/self-hosted/madaros and bin/madaros-linux-x86_64, and lean_single only
+# when none of those is a usable ELF.
+#
+# The previous check looked only for artifacts/self-hosted/madaros. Measured
+# 2026-09-14 with that artifact absent: the banner said engine=lean_single
+# (bin/souc-lean-single-x86_64) while `bin/souc --version` resolved the committed
+# bin/madaros-linux-x86_64 and every test ran on it. MADAROS_RAW_BIN, a
+# SOUNIO_SOUC_BIN override and a non-bin/souc SOUC_BIN were misreported the same
+# way, and the gen3.elf refusal below could fire on runs that were not lean_single.
+_sounio_is_elf() { [[ -n "${1:-}" && -x "$1" && "$(head -c 4 "$1" 2>/dev/null)" == $'\x7fELF' ]]; }
+_sounio_lean_elf="$ROOT_DIR/bin/souc-lean-single-x86_64"
+[[ -x "$_sounio_lean_elf" ]] || _sounio_lean_elf="$ROOT_DIR/bin/souc-linux-x86_64"
 if [[ -n "${SOUNIO_TEST_SOUC_BIN:-}" ]]; then
     SOUNIO_ENGINE_KIND="explicit"
     SOUNIO_ENGINE_ELF="$SOUNIO_TEST_SOUC_BIN"
+elif [[ "$(readlink -f "$SOUC_BIN" 2>/dev/null)" != "$(readlink -f "$ROOT_DIR/bin/souc" 2>/dev/null)" ]]; then
+    # Not bin/souc: the engine is whatever SOUC_BIN runs, so name SOUC_BIN itself.
+    SOUNIO_ENGINE_KIND="souc_bin"
+    SOUNIO_ENGINE_ELF="$SOUC_BIN"
+elif _sounio_is_elf "${SOUNIO_SOUC_BIN:-}"; then
+    # bin/souc execs this override directly (and refuses souc verbs under it).
+    SOUNIO_ENGINE_KIND="souc_bin_override"
+    SOUNIO_ENGINE_ELF="$SOUNIO_SOUC_BIN"
+else
+    SOUNIO_ENGINE_KIND="lean_single"
+    SOUNIO_ENGINE_ELF="$_sounio_lean_elf"
+    case "${SOUNIO_SOUC_ENGINE:-madaros}" in
+        lean_single|lean-single|leansingle) ;;
+        *)
+            for _sounio_cand in "${MADAROS_RAW_BIN:-}" "${SOUNIO_MADAROS_BIN:-}" \
+                                "$ROOT_DIR/artifacts/self-hosted/madaros" \
+                                "$ROOT_DIR/bin/madaros-linux-x86_64"; do
+                if _sounio_is_elf "$_sounio_cand"; then
+                    SOUNIO_ENGINE_KIND="madaros"
+                    SOUNIO_ENGINE_ELF="$_sounio_cand"
+                    break
+                fi
+            done
+            unset _sounio_cand
+            ;;
+    esac
 fi
+unset _sounio_lean_elf
 
 # Refuse to guess: a newer local build of the engine that is NOT the one about
 # to run means the result would describe the wrong compiler.

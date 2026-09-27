@@ -137,29 +137,57 @@ Compiler pin:
 - `/workspace/sounio/bin/souc-linux-x86_64`
 - SHA256 `3cbea2b475e79737046f8ccf463c07d22cd5fb678fd479a032ee04bd8e19da93`
 
-Commands run:
+> **Reproduction commands corrected (2026-09-13).** Six of the commands first recorded here, the
+> five focused tests and the MC cross-validation, had the form
+> `SOUNIO_SOUC_BIN=/workspace/sounio/bin/souc-linux-x86_64 bin/souc run <test>`. `bin/souc`
+> execs that override with its arguments unchanged (it already did at the merge that added this
+> file, `bebd78d74c`). Measured on 2026-09-13 with `bin/souc-linux-x86_64`, before `bin/souc`
+> began refusing the form: lean_single stopped at
+> `error: no main` (a current-source lean_single shows why: it opens `run`, which does not exist,
+> as a 0-byte source). How the recorded values were originally produced cannot be established
+> from this repository's history. `bin/souc` now refuses the form (exit 64). Those six commands below
+> use the ELF's raw `<source.sio> <output>` interface from the repository root, because
+> lean_single resolves stdlib imports relative to the working directory. The seventh command was
+> recorded as `SOUNIO_SOUC_BIN=… bash scripts/ci/dissertation_pbpk_suite_gate.sh`; it is kept
+> without the prefix. The pinned binary (sha256 `3cbea2b4…`) is no longer in the repository; the
+> re-run used `bin/souc-linux-x86_64`, sha256
+> `a63ca2c960183aafcdca56e57a0c2da88b5a2005db9df5c4f2dc6a6434b8a694`.
+>
+> What the 2026-09-13 re-run checked. Every other figure under Results is the original record for
+> the pinned binary and was not re-measured.
+>
+> - lean_single printed the recorded markers `D6_FULL_INTEGRATION_PASS`,
+>   `D2_HARDENED_GENERAL_SHAPES_PASS`, `D3_NN_PRIMITIVES_PASS`, `D4_OPTIMIZER_INTEGRATION_PASS`
+>   and `D5_CAPUTO_TENSOR_PASS`. The default Madaros engine (`bin/souc run <test>` with no
+>   `SOUNIO_SOUC_BIN` set; `bin/madaros-linux-x86_64` sha256
+>   `7ba4e70b6fd3a073697c629b5f17c68041afe604ebf6bb630e7c78e11e31eedb`) failed each of these
+>   five tests with `error[E037]` in `stdlib/tensor/ops.sio`.
+> - PBPK28 MC cross-validation: it printed `rel_Hess: 0.175405`, equal to the recorded value; no
+>   other output of that run was compared with this file. Its copula sweep lines do not match the
+>   saved m1 run log (see `m1_copula_v1.md`). Madaros exited 182 on it.
+> - PBPK suite: recorded as `PASS, 50/50`. On 2026-09-13 the gate held 53 tests and reported
+>   `FAIL (3 / 53 tests failed)`: `rapamycin_rk4_budget` (rc=1), `rapamycin_epistemic_adaptive`
+>   (rc=1) and `pbpk28_sobol_pce` (its 90 s timeout, also when the gate was run by itself).
+>   Which of today's tests correspond to the recorded 50 was not checked. Its verdicts were
+>   identical with and without the `SOUNIO_SOUC_BIN=` prefix; the script compiles through
+>   `SOUC_BIN`, which defaults to `scripts/ci/souc-seq-leansingle.sh`.
+
+Commands (from the repository root):
 
 ```bash
-SOUNIO_SOUC_BIN=/workspace/sounio/bin/souc-linux-x86_64 bin/souc run \
-  tests/stdlib/nn/test_pinn_full_integration_d6.sio
+cd "$(git rev-parse --show-toplevel)" && bin/souc-linux-x86_64 tests/stdlib/nn/test_pinn_full_integration_d6.sio /tmp/d6_pinn.elf && /tmp/d6_pinn.elf
 
-SOUNIO_SOUC_BIN=/workspace/sounio/bin/souc-linux-x86_64 bin/souc run \
-  tests/stdlib/tensor/test_tensor_autograd_d2_hardening.sio
+cd "$(git rev-parse --show-toplevel)" && bin/souc-linux-x86_64 tests/stdlib/tensor/test_tensor_autograd_d2_hardening.sio /tmp/d2_hardening.elf && /tmp/d2_hardening.elf
 
-SOUNIO_SOUC_BIN=/workspace/sounio/bin/souc-linux-x86_64 bin/souc run \
-  tests/stdlib/nn/test_nn_primitives_d3.sio
+cd "$(git rev-parse --show-toplevel)" && bin/souc-linux-x86_64 tests/stdlib/nn/test_nn_primitives_d3.sio /tmp/d3_nn_primitives.elf && /tmp/d3_nn_primitives.elf
 
-SOUNIO_SOUC_BIN=/workspace/sounio/bin/souc-linux-x86_64 bin/souc run \
-  tests/run-pass/d4_optimizer_integration.sio
+cd "$(git rev-parse --show-toplevel)" && bin/souc-linux-x86_64 tests/run-pass/d4_optimizer_integration.sio /tmp/d4_optimizer.elf && /tmp/d4_optimizer.elf
 
-SOUNIO_SOUC_BIN=/workspace/sounio/bin/souc-linux-x86_64 bin/souc run \
-  tests/stdlib/tensor/test_caputo_l1_tape.sio
+cd "$(git rev-parse --show-toplevel)" && bin/souc-linux-x86_64 tests/stdlib/tensor/test_caputo_l1_tape.sio /tmp/caputo_l1_tape.elf && /tmp/caputo_l1_tape.elf
 
-SOUNIO_SOUC_BIN=/workspace/sounio/bin/souc-linux-x86_64 bash \
-  scripts/ci/dissertation_pbpk_suite_gate.sh
+bash scripts/ci/dissertation_pbpk_suite_gate.sh
 
-SOUNIO_SOUC_BIN=/workspace/sounio/bin/souc-linux-x86_64 bin/souc run \
-  stdlib/darwin_pbpk/validation/pbpk28_mc_cross_validation.sio
+cd "$(git rev-parse --show-toplevel)" && bin/souc-linux-x86_64 stdlib/darwin_pbpk/validation/pbpk28_mc_cross_validation.sio /tmp/mc28.elf && /tmp/mc28.elf
 ```
 
 Results:

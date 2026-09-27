@@ -40,11 +40,18 @@ OUT_DIR="${CROSS_ENGINE_OUT_DIR:-$(mktemp -d /tmp/sounio-cross-engine.XXXXXX)}"
 mkdir -p "$OUT_DIR"
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
 
-# Both engines are invoked THROUGH bin/souc, not directly. lean_single's raw CLI is
-# `mini_native <source.sio> <output>` with no check-only mode, so calling it directly would compare
-# a full compile against a Madaros --check -- different amounts of work, and rc=1 on files that are
-# perfectly fine. The wrapper translates the verb for each engine. Measured while building this:
-# the direct form reported rc=1 for two files that both engines actually accept.
+# lean_single is invoked THROUGH bin/souc. Its raw CLI is `mini_native <source.sio> <output>` with
+# no check-only mode, so calling it directly would compare a full compile against a Madaros --check
+# -- different amounts of work, and rc=1 on files that are perfectly fine. SOUNIO_SOUC_ENGINE=
+# lean_single makes the wrapper translate `check`. Measured while building this: the direct form
+# reported rc=1 for two files that both engines actually accept.
+#
+# Madaros is invoked DIRECTLY as `$MADAROS_BIN --check <file>`, the mode bin/madaros itself uses.
+# The wrapper does NOT translate verbs for it: bin/souc's SOUNIO_SOUC_BIN override is documented as
+# a raw exec with arguments unchanged (a lean_single-style CLI). `souc check f` under that override
+# only worked because Madaros's own argv parser also accepts `check` (self-hosted/compiler/main.sio:
+# `mode == "check" || mode == "--check"`); measured 2026-09-13, byte-identical output and rc on an
+# accepted and a rejected file. Depending on that alias through a raw-exec override is not a contract.
 MADAROS_BIN="${CROSS_ENGINE_MADAROS_BIN:-}"
 
 if [[ -z "$MADAROS_BIN" ]]; then
@@ -69,11 +76,19 @@ printf '[cross-engine] lean=wrapper(SOUNIO_SOUC_ENGINE=lean_single)\n[cross-engi
 
 # Positive control: the instrument must be able to REPORT a disagreement, or a clean sweep means
 # nothing. These three are verified by hand -- both accept, Madaros-only rejects, both reject.
+# Each control must be TRACKED on this branch: a missing file makes both engines fail with "could
+# not read input file", which reads as AGREE_REJECT and fails the control for the wrong reason.
+# Measured 2026-09-13 at 59e82e3d50 with lean_single and Madaros both built from that source:
+#   tests/run-pass/_diag_sobol.sio                        lean rc=0  Madaros rc=0
+#   tests/compile-fail/f256_v0b_arithmetic_rejected.sio   lean rc=0  Madaros rc=1 error[E249]
+#   stdlib/verify/interval.sio                            lean rc=1  Madaros rc=1 error[E003]
+# The first two are also the controls of scripts/research/cross_engine_runpass_census.sh; the f256
+# file documents the divergence as intentional (Madaros reserves f256 arithmetic, lean_single does not).
 pc_fail=0
 pc() {
   local f="$1" want="$2"
   SOUNIO_SOUC_ENGINE=lean_single "$ROOT_DIR/bin/souc" check "$f" >/dev/null 2>&1; local l=$?
-  SOUNIO_SOUC_BIN="$MADAROS_BIN" "$ROOT_DIR/bin/souc" check "$f" >/dev/null 2>&1; local m=$?
+  "$MADAROS_BIN" --check "$f" >/dev/null 2>&1; local m=$?
   local got="AGREE_ACCEPT"
   if [[ $l -ne 0 && $m -ne 0 ]]; then got="AGREE_REJECT"
   elif [[ $l -eq 0 && $m -ne 0 ]]; then got="MADAROS_ONLY"
@@ -81,8 +96,8 @@ pc() {
   if [[ "$got" == "$want" ]]; then printf '[cross-engine] positive-control OK %s -> %s\n' "$(basename "$f")" "$got"
   else printf '[cross-engine] positive-control FAIL %s: want %s got %s\n' "$(basename "$f")" "$want" "$got" >&2; pc_fail=1; fi
 }
-pc tests/run-pass/struct_name_8byte_collision_ref.sio AGREE_ACCEPT
-pc tests/run-pass/interval_outward_rounding_containment.sio MADAROS_ONLY
+pc tests/run-pass/_diag_sobol.sio AGREE_ACCEPT
+pc tests/compile-fail/f256_v0b_arithmetic_rejected.sio MADAROS_ONLY
 pc stdlib/verify/interval.sio AGREE_REJECT
 if [[ $pc_fail -ne 0 ]]; then
   echo "[cross-engine] ABORT: the instrument cannot reproduce a known disagreement; a sweep would be meaningless." >&2
@@ -101,7 +116,7 @@ while IFS= read -r f; do
   n=$((n + 1))
   lout="$OUT_DIR/l.$$"; mout="$OUT_DIR/m.$$"
   SOUNIO_SOUC_ENGINE=lean_single timeout "$TMO" "$ROOT_DIR/bin/souc" check "$f" >"$lout" 2>&1; lrc=$?
-  SOUNIO_SOUC_BIN="$MADAROS_BIN" timeout "$TMO" "$ROOT_DIR/bin/souc" check "$f" >"$mout" 2>&1; mrc=$?
+  timeout "$TMO" "$MADAROS_BIN" --check "$f" >"$mout" 2>&1; mrc=$?
 
   if [[ "$lrc" -eq 124 || "$mrc" -eq 124 ]]; then
     verdict="TIMEOUT"

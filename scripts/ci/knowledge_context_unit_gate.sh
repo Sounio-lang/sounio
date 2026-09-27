@@ -13,8 +13,22 @@ NEGATIVE="tests/frontend/knowledge_static_unit_constraint_reject.sio"
 INTERNAL_LABEL_POSITIVE="tests/frontend/knowledge_static_unit_internal_label_positive.sio"
 INTERNAL_LABEL_NEGATIVE="tests/frontend/knowledge_static_unit_internal_label_reject.sio"
 
+PROBE_ELF="$TMP_DIR/knowledge-unit-probe.elf"
+# `bin/souc run PROBE -- FILE` forwards nothing after the `--`: bin/madaros
+# documents `run` as taking a source and nothing else. The probe therefore never
+# received the file it was asked to analyse and fell back to its own default,
+# which is the positive fixture. Every check below was reading that same file --
+# so the positive passed vacuously, and the negative could not fail for its own
+# reason. Build the probe once and hand it the path directly.
+if ! bin/madaros build "$PROBE" -o "$PROBE_ELF" >"$TMP_DIR/probe-build.log" 2>&1; then
+  printf 'FAIL  could not build %s\n' "$PROBE" >&2
+  cat "$TMP_DIR/probe-build.log" >&2
+  exit 1
+fi
+chmod +x "$PROBE_ELF"
+
 POSITIVE_LOG="$TMP_DIR/knowledge-unit-positive.log"
-if bin/souc run "$PROBE" -- "$POSITIVE" >"$POSITIVE_LOG" 2>&1 &&
+if "$PROBE_ELF" "$POSITIVE" >"$POSITIVE_LOG" 2>&1 &&
    grep -q 'knowledge_unit_ordinary_verdict=0' "$POSITIVE_LOG" &&
    grep -q 'knowledge_unit_semantic_verdict=0' "$POSITIVE_LOG"; then
   printf 'PASS  %s accepted matching Knowledge<T> unit constraint\n' "$POSITIVE"
@@ -25,7 +39,7 @@ else
 fi
 
 NEGATIVE_LOG="$TMP_DIR/knowledge-unit-negative.log"
-if bin/souc run "$PROBE" -- "$NEGATIVE" >"$NEGATIVE_LOG" 2>&1 &&
+if "$PROBE_ELF" "$NEGATIVE" >"$NEGATIVE_LOG" 2>&1 &&
    grep -q 'knowledge_unit_ordinary_verdict=1' "$NEGATIVE_LOG" &&
    grep -q 'knowledge_unit_semantic_verdict=1' "$NEGATIVE_LOG"; then
   printf 'PASS  %s rejected incompatible Knowledge<T> unit constraint\n' "$NEGATIVE"
@@ -36,7 +50,7 @@ else
 fi
 
 INTERNAL_LABEL_POSITIVE_LOG="$TMP_DIR/knowledge-unit-internal-label-positive.log"
-if bin/souc run "$PROBE" -- "$INTERNAL_LABEL_POSITIVE" >"$INTERNAL_LABEL_POSITIVE_LOG" 2>&1 &&
+if "$PROBE_ELF" "$INTERNAL_LABEL_POSITIVE" >"$INTERNAL_LABEL_POSITIVE_LOG" 2>&1 &&
    grep -q 'knowledge_unit_ordinary_verdict=0' "$INTERNAL_LABEL_POSITIVE_LOG" &&
    grep -q 'knowledge_unit_semantic_verdict=0' "$INTERNAL_LABEL_POSITIVE_LOG"; then
   printf 'PASS  %s accepted internal validation-data unit labels in Knowledge<T> constraints\n' "$INTERNAL_LABEL_POSITIVE"
@@ -47,7 +61,7 @@ else
 fi
 
 INTERNAL_LABEL_NEGATIVE_LOG="$TMP_DIR/knowledge-unit-internal-label-negative.log"
-if bin/souc run "$PROBE" -- "$INTERNAL_LABEL_NEGATIVE" >"$INTERNAL_LABEL_NEGATIVE_LOG" 2>&1 &&
+if "$PROBE_ELF" "$INTERNAL_LABEL_NEGATIVE" >"$INTERNAL_LABEL_NEGATIVE_LOG" 2>&1 &&
    grep -q 'knowledge_unit_ordinary_verdict=1' "$INTERNAL_LABEL_NEGATIVE_LOG" &&
    grep -q 'knowledge_unit_semantic_verdict=1' "$INTERNAL_LABEL_NEGATIVE_LOG"; then
   printf 'PASS  %s rejected incompatible internal validation-data unit label in Knowledge<T> constraint\n' "$INTERNAL_LABEL_NEGATIVE"

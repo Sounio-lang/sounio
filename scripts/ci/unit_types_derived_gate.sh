@@ -13,6 +13,25 @@ AST_PROBE="self-hosted/compiler/k2_unit_derived_ast_probe.sio"
 AST_PROBE_WITNESS="tests/frontend/unit_derived_acceleration_chain_current_source.sio"
 CHECKER_PROBE="self-hosted/compiler/k2_unit_derived_checker_probe.sio"
 
+# CURRENT_SOUC is a raw lean_single ELF: its CLI is `souc SRC OUT`, with no
+# run/check verbs. bin/souc execs a SOUNIO_SOUC_BIN override with its arguments
+# unchanged, so `SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc run f.sio` compiled a
+# source file literally named `run`: every step below failed with
+# `error[E221]: no main` before its witness was compiled. Call the raw ABI.
+lean_run() {
+  local out="$TMP_DIR/lean-run.elf"
+  rm -f "$out"
+  "$CURRENT_SOUC" "$1" "$out" || return $?
+  chmod +x "$out"
+  "$out"
+}
+
+lean_check() {
+  local out="$TMP_DIR/lean-check.elf"
+  rm -f "$out"
+  "$CURRENT_SOUC" "$1" "$out"
+}
+
 AST_PROBE_LOG="$TMP_DIR/unit-derived-ast-probe.log"
 if bin/souc run "$AST_PROBE" -- "$AST_PROBE_WITNESS" >"$AST_PROBE_LOG" 2>&1 &&
    grep -q 'unit_expr_factors=3' "$AST_PROBE_LOG" &&
@@ -61,7 +80,7 @@ ENERGY_EXPLICIT_OK="tests/run-pass/unit_energy_explicit_conversion.sio"
 ENERGY_REQUIRES_EXPLICIT="tests/compile-fail/unit_energy_requires_explicit_conversion.sio"
 
 DERIVED_OK_LOG="$TMP_DIR/unit-derived-velocity.log"
-if SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc run "$DERIVED_OK" >"$DERIVED_OK_LOG" 2>&1 &&
+if lean_run "$DERIVED_OK" >"$DERIVED_OK_LOG" 2>&1 &&
    grep -q 'unit derived velocity: PASS' "$DERIVED_OK_LOG"; then
   printf 'PASS  %s accepted m/s as derived velocity\n' "$DERIVED_OK"
 else
@@ -71,7 +90,7 @@ else
 fi
 
 DERIVED_REJECT_LOG="$TMP_DIR/unit-derived-velocity-reject.log"
-if SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc check "$DERIVED_REJECT" >"$DERIVED_REJECT_LOG" 2>&1; then
+if lean_check "$DERIVED_REJECT" >"$DERIVED_REJECT_LOG" 2>&1; then
   printf 'FAIL  %s unexpectedly accepted length as velocity\n' "$DERIVED_REJECT" >&2
   cat "$DERIVED_REJECT_LOG" >&2
   exit 1
@@ -85,7 +104,7 @@ else
 fi
 
 DERIVED_CHAIN_OK_LOG="$TMP_DIR/unit-derived-acceleration.log"
-if SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc run "$DERIVED_CHAIN_OK" >"$DERIVED_CHAIN_OK_LOG" 2>&1 &&
+if lean_run "$DERIVED_CHAIN_OK" >"$DERIVED_CHAIN_OK_LOG" 2>&1 &&
    grep -q 'unit derived acceleration: PASS' "$DERIVED_CHAIN_OK_LOG"; then
   printf 'PASS  %s accepted m/s/s as derived acceleration\n' "$DERIVED_CHAIN_OK"
 else
@@ -95,7 +114,7 @@ else
 fi
 
 DERIVED_CHAIN_REJECT_LOG="$TMP_DIR/unit-derived-acceleration-reject.log"
-if SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc check "$DERIVED_CHAIN_REJECT" >"$DERIVED_CHAIN_REJECT_LOG" 2>&1; then
+if lean_check "$DERIVED_CHAIN_REJECT" >"$DERIVED_CHAIN_REJECT_LOG" 2>&1; then
   printf 'FAIL  %s unexpectedly accepted velocity as acceleration\n' "$DERIVED_CHAIN_REJECT" >&2
   cat "$DERIVED_CHAIN_REJECT_LOG" >&2
   exit 1
@@ -109,7 +128,7 @@ else
 fi
 
 F64_UNIT_EXPR_OK_LOG="$TMP_DIR/unit-f64-unit-expr.log"
-if SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc run "$F64_UNIT_EXPR_OK" >"$F64_UNIT_EXPR_OK_LOG" 2>&1 &&
+if lean_run "$F64_UNIT_EXPR_OK" >"$F64_UNIT_EXPR_OK_LOG" 2>&1 &&
    grep -q 'unit f64 unit expr: PASS' "$F64_UNIT_EXPR_OK_LOG"; then
   printf 'PASS  %s accepted f64<UnitExpr> derived dimensions\n' "$F64_UNIT_EXPR_OK"
 else
@@ -119,7 +138,7 @@ else
 fi
 
 F64_UNIT_EXPR_REJECT_LOG="$TMP_DIR/unit-f64-unit-expr-reject.log"
-if SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc check "$F64_UNIT_EXPR_REJECT" >"$F64_UNIT_EXPR_REJECT_LOG" 2>&1; then
+if lean_check "$F64_UNIT_EXPR_REJECT" >"$F64_UNIT_EXPR_REJECT_LOG" 2>&1; then
   printf 'FAIL  %s unexpectedly accepted length as f64<m/s>\n' "$F64_UNIT_EXPR_REJECT" >&2
   cat "$F64_UNIT_EXPR_REJECT_LOG" >&2
   exit 1
@@ -133,7 +152,7 @@ else
 fi
 
 F64_UNIT_EXPR_UNKNOWN_LOG="$TMP_DIR/unit-f64-unit-expr-unknown.log"
-if SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc check "$F64_UNIT_EXPR_UNKNOWN_REJECT" >"$F64_UNIT_EXPR_UNKNOWN_LOG" 2>&1; then
+if lean_check "$F64_UNIT_EXPR_UNKNOWN_REJECT" >"$F64_UNIT_EXPR_UNKNOWN_LOG" 2>&1; then
   printf 'FAIL  %s unexpectedly accepted an unknown f64<UnitExpr> unit\n' "$F64_UNIT_EXPR_UNKNOWN_REJECT" >&2
   cat "$F64_UNIT_EXPR_UNKNOWN_LOG" >&2
   exit 1
@@ -147,7 +166,7 @@ else
 fi
 
 LITERAL_SUFFIX_OK_LOG="$TMP_DIR/unit-literal-suffix.log"
-if SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc run "$LITERAL_SUFFIX_OK" >"$LITERAL_SUFFIX_OK_LOG" 2>&1 &&
+if lean_run "$LITERAL_SUFFIX_OK" >"$LITERAL_SUFFIX_OK_LOG" 2>&1 &&
    grep -q 'unit literal suffix: PASS' "$LITERAL_SUFFIX_OK_LOG"; then
   printf 'PASS  %s accepted numeric literal unit suffixes\n' "$LITERAL_SUFFIX_OK"
 else
@@ -157,7 +176,7 @@ else
 fi
 
 LITERAL_SUFFIX_REJECT_LOG="$TMP_DIR/unit-literal-suffix-reject.log"
-if SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc check "$LITERAL_SUFFIX_REJECT" >"$LITERAL_SUFFIX_REJECT_LOG" 2>&1; then
+if lean_check "$LITERAL_SUFFIX_REJECT" >"$LITERAL_SUFFIX_REJECT_LOG" 2>&1; then
   printf 'FAIL  %s unexpectedly accepted a length literal where mass was required\n' "$LITERAL_SUFFIX_REJECT" >&2
   cat "$LITERAL_SUFFIX_REJECT_LOG" >&2
   exit 1
@@ -171,7 +190,7 @@ else
 fi
 
 CLINICAL_LITERAL_OK_LOG="$TMP_DIR/unit-literal-clinical.log"
-if SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc run "$CLINICAL_LITERAL_OK" >"$CLINICAL_LITERAL_OK_LOG" 2>&1 &&
+if lean_run "$CLINICAL_LITERAL_OK" >"$CLINICAL_LITERAL_OK_LOG" 2>&1 &&
    grep -q 'unit literal clinical: PASS' "$CLINICAL_LITERAL_OK_LOG"; then
   printf 'PASS  %s accepted clinical numeric literal unit suffixes\n' "$CLINICAL_LITERAL_OK"
 else
@@ -181,7 +200,7 @@ else
 fi
 
 CLINICAL_LITERAL_REJECT_LOG="$TMP_DIR/unit-literal-clinical-reject.log"
-if SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc check "$CLINICAL_LITERAL_REJECT" >"$CLINICAL_LITERAL_REJECT_LOG" 2>&1; then
+if lean_check "$CLINICAL_LITERAL_REJECT" >"$CLINICAL_LITERAL_REJECT_LOG" 2>&1; then
   printf 'FAIL  %s unexpectedly accepted mass concentration where amount concentration was required\n' "$CLINICAL_LITERAL_REJECT" >&2
   cat "$CLINICAL_LITERAL_REJECT_LOG" >&2
   exit 1
@@ -195,7 +214,7 @@ else
 fi
 
 ENERGY_EXPLICIT_OK_LOG="$TMP_DIR/unit-energy-explicit.log"
-if SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc run "$ENERGY_EXPLICIT_OK" >"$ENERGY_EXPLICIT_OK_LOG" 2>&1 &&
+if lean_run "$ENERGY_EXPLICIT_OK" >"$ENERGY_EXPLICIT_OK_LOG" 2>&1 &&
    grep -q 'unit energy explicit conversion: PASS' "$ENERGY_EXPLICIT_OK_LOG"; then
   printf 'PASS  %s accepted explicit conversion between compatible energy units\n' "$ENERGY_EXPLICIT_OK"
 else
@@ -205,7 +224,7 @@ else
 fi
 
 ENERGY_REQUIRES_EXPLICIT_LOG="$TMP_DIR/unit-energy-requires-explicit.log"
-if SOUNIO_SOUC_BIN="$CURRENT_SOUC" bin/souc check "$ENERGY_REQUIRES_EXPLICIT" >"$ENERGY_REQUIRES_EXPLICIT_LOG" 2>&1; then
+if lean_check "$ENERGY_REQUIRES_EXPLICIT" >"$ENERGY_REQUIRES_EXPLICIT_LOG" 2>&1; then
   printf 'FAIL  %s unexpectedly accepted energy-unit arithmetic without explicit conversion\n' "$ENERGY_REQUIRES_EXPLICIT" >&2
   cat "$ENERGY_REQUIRES_EXPLICIT_LOG" >&2
   exit 1

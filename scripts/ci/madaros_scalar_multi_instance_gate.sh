@@ -37,4 +37,13 @@ done
 if grep -Fxq 'specializer: out_fn twice' "$OUT/specializer_scalar_multi_instance.compile"; then
     echo 'FAIL: unspecialized twice survived'; exit 1
 fi
+# Emitted struct instances are remembered by exact mangled name. `Cell__B0` and
+# `Cell__AQ` share a DJB2 hash, and a hash-only cache emitted just one of them. The
+# program prints the same either way; the trace counts emitted struct instances.
+compile_run specializer_emitted_instance_hash_collision 'PASS specializer_emitted_instance_hash_collision'
+if ! grep -Fxq 'specializer: instances=2' "$OUT/specializer_emitted_instance_hash_collision.compile"; then
+    echo 'FAIL: colliding struct instances were merged into one'
+    grep -F 'specializer: instances=' "$OUT/specializer_emitted_instance_hash_collision.compile" || true
+    exit 1
+fi
 echo MADAROS_SCALAR_MULTI_INSTANCE_GATE_OK
