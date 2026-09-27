@@ -947,6 +947,18 @@ echo
 # 6-decimal print resolution.
 echo "[pbpk28-parity] venlafaxine closed form at 120 h (oral CL/F, AUC ratio)"
 for VFX_LOG in "$VFX_SIO_LOG" "$VFX_NODE_LOG"; do
+  # The integrated identities barely depend on the horizon, so a shortened run
+  # could stay green: require exactly one final record, at t = 120 h, and
+  # exactly one closed_form status line, PASS.
+  if [[ "$(grep -c '^VFINAL|t=' "$VFX_LOG")" != 1 || "$(grep '^VFINAL|t=' "$VFX_LOG")" != 'VFINAL|t=120.000000' ]]; then
+    echo "VENLAFAXINE_CLOSED_FORM_FAIL $(basename "$VFX_LOG"): need exactly one VFINAL|t=120.000000" >&2
+    grep '^VFINAL|t=' "$VFX_LOG" >&2 || true
+    exit 1
+  fi
+  if [[ "$(grep -c '^VFINAL|closed_form=' "$VFX_LOG")" != 1 ]]; then
+    echo "VENLAFAXINE_CLOSED_FORM_FAIL $(basename "$VFX_LOG"): need exactly one closed_form status" >&2
+    exit 1
+  fi
   if ! grep -q '^VFINAL|closed_form=PASS$' "$VFX_LOG"; then
     echo "VENLAFAXINE_CLOSED_FORM_FAIL $(basename "$VFX_LOG")" >&2
     grep '^VFINAL|' "$VFX_LOG" >&2 || true
