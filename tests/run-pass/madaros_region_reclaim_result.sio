@@ -1,0 +1,87 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: REGION_RECLAIM_RESULT_OK
+//@ description: region reclamation copies young struct/array results out intact, keeps older ones shared, and re-zeroes reclaimed heap
+// docs/audit/MADAROS_HANDLE_182_BBB_PER_CONSTRUCTION_DISPATCH_2026-09-26.md
+
+struct P { a: f64, b: f64, c: f64 }
+struct R { st: P, err: P, n: i64 }
+struct T { xs: [f64; 8], k: i64, tag: bool }
+
+fn mkp(x: f64) -> P { P { a: x, b: 2.0 * x, c: 3.0 * x } }
+
+// Young nested result, built through calls so the region is worth opening.
+fn build_r(x: f64) -> R {
+    let junk = mkp(123.0)
+    R { st: mkp(x), err: mkp(junk.a - 123.0 + 0.5), n: 7 }
+}
+
+// Result that shares an OLDER object (the argument) next to a young one.
+fn keep_old(old: P, x: f64) -> R {
+    let junk = mkp(456.0)
+    R { st: old, err: mkp(x + junk.a - 456.0), n: 9 }
+}
+
+// Young word-scalar array field.
+fn build_t(x: f64) -> T with Mut {
+    var xs: [f64; 8] = [0.0; 8]
+    var i: i64 = 0
+    while i < 8 {
+        xs[i as usize] = x + (i as f64)
+        i = i + 1
+    }
+    let junk = mkp(1.0)
+    T { xs: xs, k: 8, tag: junk.a == 1.0 }
+}
+
+// Fills fresh heap with nonzero words, then returns a scalar: its region
+// resets and must leave the reclaimed bytes zero again.
+fn dirty(n: i64) -> f64 with Mut {
+    var acc = 0.0
+    var i: i64 = 0
+    while i < n {
+        var ys: [f64; 32] = [0.0; 32]
+        var j: i64 = 0
+        while j < 32 {
+            ys[j as usize] = 7.0
+            j = j + 1
+        }
+        acc = acc + ys[31]
+        i = i + 1
+    }
+    acc
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var k: i64 = 0
+    while k < 2000 {
+        let r = build_r(1.5)
+        if r.st.a != 1.5 || r.st.b != 3.0 || r.st.c != 4.5 { return 1 }
+        if r.err.a != 0.5 || r.err.c != 1.5 || r.n != 7 { return 2 }
+        k = k + 1
+    }
+
+    let old = mkp(10.0)
+    let r2 = keep_old(old, 2.0)
+    if r2.st.a != 10.0 || r2.st.c != 30.0 || r2.err.b != 4.0 || r2.n != 9 { return 3 }
+
+    let t = build_t(4.0)
+    if t.xs[0] != 4.0 || t.xs[7] != 11.0 || t.k != 8 || !t.tag { return 4 }
+
+    let d = dirty(500)
+    if d != 3500.0 { return 5 }
+    // Fresh arrays are assumed zero at lowering; after dirty's reset they must be.
+    let zs: [f64; 32] = [0.0; 32]
+    var sum = 0.0
+    var z: i64 = 0
+    while z < 32 {
+        sum = sum + zs[z as usize]
+        z = z + 1
+    }
+    if sum != 0.0 { return 6 }
+    let q = P { a: 1.0, b: 1.0, c: 1.0 }
+    if q.a + q.b + q.c != 3.0 { return 7 }
+
+    println("REGION_RECLAIM_RESULT_OK")
+    0
+}

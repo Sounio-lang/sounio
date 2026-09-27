@@ -60,6 +60,11 @@ var NATIVE_ELF_OVERFLOW: i64 = 0
 // it. Per-function state, set beside nc_v2_reset_label_state; the surviving
 // record lives in NC_V2_LABEL_OVERFLOW_FN (frame.sio), which is reset per COMPILE.
 var NC_V2_CURRENT_FN_INDEX: i64 = -1
+// Function indices of the __rgn_barrier / __rgn_mark_all builtins in the module
+// being compiled, -1 when lowering opened no region anywhere in it (then no
+// region can ever be open at run time and no barrier is emitted).
+var NC_RGN_BARRIER_FN: i64 = -1
+var NC_RGN_MARK_ALL_FN: i64 = -1
 // Cached SOUNIO_WIDE_MUL_SABOTAGE. i64 (0/1) rather than bool: module-global
 // bool init is not exercised elsewhere in this backend. Refreshed from the
 // IO compile entry so nc_wide_mul_into does not take IO — its emit-loop
@@ -1301,6 +1306,30 @@ fn name_ref_is_print(n: &Name) -> bool with Mut, Panic, Div {
     true
 }
 
+// Bytes the bump heap may use: the 2 GiB mapping minus the runtime context,
+// the handle table, and the region record stack carved off its top
+// (native/gc.sio, "Region reclamation").
+fn nc_heap_arena_bytes() -> i64 {
+    2147483648 - runtime_context_size() - native_v2_handle_table_bytes() - native_v2_region_stack_bytes()
+}
+
+// Region reclamation builtins (60..69). Lowering emits calls to the first
+// eight; codegen itself calls __rgn_barrier and __rgn_mark_all.
+fn native_v2_region_builtin_id(n: Name) -> i64 with Mut, Panic, Div {
+    if n.len < 9 { return 0 }
+    if name_eq(n, make_name("__rgn_enter")) { return 60 }
+    if name_eq(n, make_name("__rgn_leave")) { return 61 }
+    if name_eq(n, make_name("__rgn_escaped")) { return 62 }
+    if name_eq(n, make_name("__rgn_young")) { return 63 }
+    if name_eq(n, make_name("__rgn_cursor")) { return 64 }
+    if name_eq(n, make_name("__rgn_count")) { return 65 }
+    if name_eq(n, make_name("__rgn_reset_fits")) { return 66 }
+    if name_eq(n, make_name("__rgn_exit_scalar")) { return 67 }
+    if name_eq(n, make_name("__rgn_barrier")) { return 68 }
+    if name_eq(n, make_name("__rgn_mark_all")) { return 69 }
+    0
+}
+
 fn native_v2_builtin_id_for_name_ref(name: &Name) -> i64 with Mut, Panic, Div {
     if name_ref_is_print_int(name) { return 1 }
     if name_ref_is_print_char(name) { return 2 }
@@ -1311,6 +1340,8 @@ fn native_v2_builtin_id_for_name_ref(name: &Name) -> i64 with Mut, Panic, Div {
     if name_is_malloc(*name) { return 23 }
     if name_is_free(*name) { return 24 }
     if name_is_arena_mark(*name) { return 56 }
+    let rgn_id_n = native_v2_region_builtin_id(*name)
+    if rgn_id_n != 0 { return rgn_id_n }
     if name_is_arena_reset(*name) { return 57 }
     if name_is_panic(*name) { return 58 }
     if name_is_untracked_counter(*name) { return 59 }
@@ -1396,6 +1427,8 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
     // The refusal path asks THIS function, not the by-name one: an empty stub
     // is what reaches the backend, so a builtin only exists if it is named here.
     if name_is_arena_mark((*func).name) { return 56 }
+    let rgn_id_f = native_v2_region_builtin_id((*func).name)
+    if rgn_id_f != 0 { return rgn_id_f }
     if name_is_arena_reset((*func).name) { return 57 }
     if name_is_panic((*func).name) { return 58 }
     if name_is_untracked_counter((*func).name) { return 59 }
@@ -2006,6 +2039,21 @@ fn nc_emit_jmp_mem_rip_disp32_into(nc: &! NativeCompiler, disp: i64) with Mut, P
 // which would push a second return address and leave the dynlib callee with
 // rsp%16==0 (SIMD libs like libzstd SEGV; simple integer probes still pass).
 fn emit_dynlink_got_stub_into(nc: &! NativeCompiler, name: Name) with Mut, Panic, Div, Alloc {
+    // Foreign code may keep any pointer it is handed, so no open region may
+    // reset once one is passed out (native/gc.sio). __rgn_mark_all clobbers
+    // rax (AL carries the vector-register count for variadic callees), rcx and
+    // r8, which are saved around it; the stack is balanced before the jump.
+    if NC_RGN_MARK_ALL_FN >= 0 {
+        nc_emit_byte(nc, 0x50)  // push rax
+        nc_emit_byte(nc, 0x51)  // push rcx
+        nc_emit_byte(nc, 0x41)  // push r8
+        nc_emit_byte(nc, 0x50)
+        rgn_emit_call_fn(nc, NC_RGN_MARK_ALL_FN)
+        nc_emit_byte(nc, 0x41)  // pop r8
+        nc_emit_byte(nc, 0x58)
+        nc_emit_byte(nc, 0x59)  // pop rcx
+        nc_emit_byte(nc, 0x58)  // pop rax
+    }
     let disp_off = (*nc).code.len + 2
     nc_emit_jmp_mem_rip_disp32_into(nc, 0)
     add_extern_reloc(&! (*nc).extern_relocs, disp_off, name.buf, name.len)
@@ -3479,6 +3527,7 @@ fn native_v2_emit_gc_empty_frame_reset(nc: NativeCompiler) -> NativeCompiler wit
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_cursor())
     c = emit_store_rax_gc_state_field(c, native_v2_gc_state_field_last_heap_cursor())
     c = emit_store_runtime_context_imm(c, runtime_context_field_handle_count(), 0)
+    c = emit_store_runtime_context_imm(c, runtime_context_field_region_top(), 0)
     c = emit_store_gc_state_imm(c, native_v2_gc_state_field_handle_count(), 0)
     c = emit_increment_gc_state_field(c, native_v2_gc_state_field_collections_completed())
     c = emit_increment_gc_state_field(c, native_v2_gc_state_field_compaction_count())
@@ -4206,6 +4255,8 @@ fn emit_builtin_heap_free_into(nc: &! NativeCompiler) with Mut, Panic, Div {
 // layout: payload_size is capacity in bytes and flags is logical length. When
 // full, retargeting the existing handle-table entry preserves every alias.
 fn emit_builtin_native_seq_push_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    // May grow the buffer and store its new address into the seq object.
+    rgn_emit_builtin_barrier(nc, 0 - 1, 7)
     nc_emit_push_rbp(nc)
     nc_emit_mov_rbp_rsp(nc)
     nc_emit_sub_rsp_imm32(nc, 64)
@@ -4344,6 +4395,8 @@ fn emit_builtin_native_seq_get_into(nc: &! NativeCompiler) with Mut, Panic, Div 
 }
 
 fn emit_builtin_native_seq_set_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    // Stores the word in rdx into the seq in rdi; never moves the seq.
+    rgn_emit_builtin_barrier(nc, 2, 7)
     nc_emit_push_rbp(nc)
     nc_emit_mov_rbp_rsp(nc)
     nc_emit_sub_rsp_imm32(nc, 48)
@@ -4635,6 +4688,7 @@ fn emit_builtin_read_offset64_into(nc: &! NativeCompiler) with Mut, Panic, Div {
 // raw bits regardless of i64/f64, so one body serves both ids.
 // args: rdi=buf, rsi=idx, rdx=val. no return value.
 fn emit_builtin_write_offset64_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    rgn_emit_builtin_barrier(nc, 2, 7)
     nc_emit_byte(nc, 0x48)  // REX.W
     nc_emit_byte(nc, 0x89)  // MOV r/m64, r64
     nc_emit_byte(nc, 0x14)  // ModRM: mod=00 reg=rdx(010) rm=100(SIB follows)
@@ -4663,10 +4717,630 @@ fn emit_builtin_arena_mark_into(nc: &! NativeCompiler) with Mut, Panic, Div {
 // Without this the reset was a refusal and the arena churn accumulated across
 // the whole module -- the call site records +11.5 GiB VmSize measured before it
 // existed.
+//
+// Moving the cursor by hand breaks the address-order invariant region
+// reclamation relies on (native/gc.sio), so every open region is marked
+// escaped first and none of them will reset.
 fn emit_builtin_arena_reset_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    rgn_emit_load_ctx(nc, 8)
+    rgn_emit_mark_all_escaped(nc, 8)
     nc_emit_mov_reg_reg(nc, 0, 7)
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_cursor())
     nc_emit_ret(nc)
+}
+
+// ============================================================================
+// Region reclamation runtime (native/gc.sio, "Region reclamation").
+//
+// Lowering calls __rgn_enter .. __rgn_exit_scalar around eligible functions;
+// codegen calls __rgn_barrier before stores that can write a reference word
+// and __rgn_mark_all before extern calls. The routines use only caller-saved
+// registers (rax rcx rdx rsi rdi r8-r11): the core path keeps every IR value
+// in a stack slot, so nothing is live in a register across these calls.
+// Addresses and handle ids compare UNSIGNED throughout.
+// ============================================================================
+
+fn rgn_rex(r: i64, b: i64) -> i64 {
+    var rex = 0x48
+    if r >= 8 { rex = rex + 4 }
+    if b >= 8 { rex = rex + 1 }
+    rex
+}
+
+// mov r, [b + disp32]
+fn rgn_emit_load(nc: &! NativeCompiler, r: i64, b: i64, disp: i64) with Mut, Panic, Div {
+    nc_emit_byte(nc, rgn_rex(r, b))
+    nc_emit_byte(nc, 0x8b)
+    nc_emit_byte(nc, 0x80 | ((r % 8) * 8) | (b % 8))
+    if (b % 8) == 4 { nc_emit_byte(nc, 0x24) }
+    nc_emit_u32_le(nc, disp)
+}
+
+// mov [b + disp32], r
+fn rgn_emit_store(nc: &! NativeCompiler, b: i64, disp: i64, r: i64) with Mut, Panic, Div {
+    nc_emit_byte(nc, rgn_rex(r, b))
+    nc_emit_byte(nc, 0x89)
+    nc_emit_byte(nc, 0x80 | ((r % 8) * 8) | (b % 8))
+    if (b % 8) == 4 { nc_emit_byte(nc, 0x24) }
+    nc_emit_u32_le(nc, disp)
+}
+
+// mov dst, src
+fn rgn_emit_mov(nc: &! NativeCompiler, dst: i64, src: i64) with Mut, Panic, Div {
+    nc_emit_byte(nc, rgn_rex(src, dst))
+    nc_emit_byte(nc, 0x89)
+    nc_emit_byte(nc, 0xc0 | ((src % 8) * 8) | (dst % 8))
+}
+
+// Two-register op `op a, b`: a = a op b, or for cmp/test only the flags of it.
+// opcode: 0x01 add, 0x29 sub, 0x39 cmp, 0x85 test, 0x31 xor.
+fn rgn_emit_alu(nc: &! NativeCompiler, opcode: i64, a: i64, b: i64) with Mut, Panic, Div {
+    nc_emit_byte(nc, rgn_rex(b, a))
+    nc_emit_byte(nc, opcode)
+    nc_emit_byte(nc, 0xc0 | ((b % 8) * 8) | (a % 8))
+}
+
+// `op r, imm32` (sign-extended). ext: 0 add, 5 sub.
+fn rgn_emit_alu_imm(nc: &! NativeCompiler, ext: i64, r: i64, imm: i64) with Mut, Panic, Div {
+    nc_emit_byte(nc, rgn_rex(0, r))
+    nc_emit_byte(nc, 0x81)
+    nc_emit_byte(nc, 0xc0 | (ext * 8) | (r % 8))
+    nc_emit_u32_le(nc, imm)
+}
+
+// mov r, imm32 (sign-extended)
+fn rgn_emit_mov_imm(nc: &! NativeCompiler, r: i64, imm: i64) with Mut, Panic, Div {
+    nc_emit_byte(nc, rgn_rex(0, r))
+    nc_emit_byte(nc, 0xc7)
+    nc_emit_byte(nc, 0xc0 | (r % 8))
+    nc_emit_u32_le(nc, imm)
+}
+
+// imul dst, src, imm32
+fn rgn_emit_imul_imm(nc: &! NativeCompiler, dst: i64, src: i64, imm: i64) with Mut, Panic, Div {
+    nc_emit_byte(nc, rgn_rex(dst, src))
+    nc_emit_byte(nc, 0x69)
+    nc_emit_byte(nc, 0xc0 | ((dst % 8) * 8) | (src % 8))
+    nc_emit_u32_le(nc, imm)
+}
+
+// shr r, imm8
+fn rgn_emit_shr_imm(nc: &! NativeCompiler, r: i64, imm: i64) with Mut, Panic, Div {
+    nc_emit_byte(nc, rgn_rex(0, r))
+    nc_emit_byte(nc, 0xc1)
+    nc_emit_byte(nc, 0xe8 | (r % 8))
+    nc_emit_byte(nc, imm)
+}
+
+// jcc rel32; returns the offset of the rel32 field, for rgn_patch.
+// cc: 0x84 jz, 0x85 jnz, 0x82 jb, 0x83 jae, 0x86 jbe, 0x87 ja.
+fn rgn_emit_jcc(nc: &! NativeCompiler, cc: i64) -> i64 with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x0f)
+    nc_emit_byte(nc, cc)
+    let at = (*nc).code.len
+    nc_emit_u32_le(nc, 0)
+    at
+}
+
+fn rgn_emit_jmp(nc: &! NativeCompiler) -> i64 with Mut, Panic, Div {
+    nc_emit_byte(nc, 0xe9)
+    let at = (*nc).code.len
+    nc_emit_u32_le(nc, 0)
+    at
+}
+
+// Point the rel32 at `at` to the current position.
+fn rgn_patch(nc: &! NativeCompiler, at: i64) with Mut, Panic, Div {
+    nc_patch_u32_le(nc, at, (*nc).code.len - (at + 4))
+}
+
+// Point the rel32 at `at` to an earlier position `target`.
+fn rgn_patch_to(nc: &! NativeCompiler, at: i64, target: i64) with Mut, Panic, Div {
+    nc_patch_u32_le(nc, at, target - (at + 4))
+}
+
+// r = RuntimeContext pointer. The load goes through rbx because the relocation
+// pass patches only the RIP-relative shapes native_v2_reloc_is_rip_disp_patch
+// recognises (`mov rbx, [rip+d]` among them) and silently skips any other: a
+// `mov rcx, [rip+d]` stays `[rip+0]`. rbx itself is preserved.
+fn rgn_emit_load_ctx(nc: &! NativeCompiler, r: i64) with Mut, Panic, Div {
+    if r != 3 { nc_emit_byte(nc, 0x53) }  // push rbx
+    let disp_pos = (*nc).code.len + 3
+    nc_emit_mov_rbx_rip_disp32(nc, 0)
+    nc_add_data_section_reloc(nc, disp_pos, (*nc).runtime_context_slot_offset)
+    if r != 3 {
+        rgn_emit_mov(nc, r, 3)
+        nc_emit_byte(nc, 0x5b)  // pop rbx
+    }
+}
+
+// Exits of the last rgn_emit_classify ("not a heap reference").
+var RGN_NOT_REF_EXITS: [i64; 3] = [0; 3]
+
+// Birth address of the object the word in `w` refers to. `c` holds the
+// context. On the fall-through path `b` holds the object's base address. The
+// word is not a heap reference when it is 0, not a live handle id (1 ..
+// handle_count), and not inside [heap_base, heap_cursor); those three exits
+// are left in RGN_NOT_REF_EXITS for rgn_patch_not_ref_exits. With tok >= 0 the
+// live bounds are widened to the region record's handles_to / zero_to, which
+// is how the second copy of a result still sees the first copy after a reset
+// moved the bumps below it. `t` and `t2` are scratch. A scalar that merely
+// looks like a reference classifies as one; every caller is conservative in
+// that direction.
+fn rgn_emit_classify(nc: &! NativeCompiler, w: i64, c: i64, b: i64, t: i64, tok: i64, t2: i64) with Mut, Panic, Div {
+    rgn_emit_alu(nc, 0x85, w, w)
+    RGN_NOT_REF_EXITS[0] = rgn_emit_jcc(nc, 0x84)
+    rgn_emit_load(nc, t, c, runtime_context_field_handle_count())
+    if tok >= 0 {
+        rgn_emit_load(nc, t2, tok, native_v2_region_record_field_handles_to())
+        rgn_emit_alu(nc, 0x39, t, t2)
+        let keep = rgn_emit_jcc(nc, 0x83)
+        rgn_emit_mov(nc, t, t2)
+        rgn_patch(nc, keep)
+    }
+    rgn_emit_alu(nc, 0x39, w, t)
+    let check_raw = rgn_emit_jcc(nc, 0x87)
+    rgn_emit_imul_imm(nc, b, w, native_v2_handle_entry_size())
+    rgn_emit_load(nc, t, c, runtime_context_field_handle_table_base())
+    rgn_emit_alu(nc, 0x01, b, t)
+    rgn_emit_load(nc, b, b, native_v2_handle_entry_field_object_base())
+    let have_b = rgn_emit_jmp(nc)
+    rgn_patch(nc, check_raw)
+    rgn_emit_load(nc, t, c, runtime_context_field_heap_base())
+    rgn_emit_alu(nc, 0x39, w, t)
+    RGN_NOT_REF_EXITS[1] = rgn_emit_jcc(nc, 0x82)
+    rgn_emit_load(nc, t, c, runtime_context_field_heap_cursor())
+    if tok >= 0 {
+        rgn_emit_load(nc, t2, tok, native_v2_region_record_field_zero_to())
+        rgn_emit_alu(nc, 0x39, t, t2)
+        let keep2 = rgn_emit_jcc(nc, 0x83)
+        rgn_emit_mov(nc, t, t2)
+        rgn_patch(nc, keep2)
+    }
+    rgn_emit_alu(nc, 0x39, w, t)
+    RGN_NOT_REF_EXITS[2] = rgn_emit_jcc(nc, 0x83)
+    rgn_emit_mov(nc, b, w)
+    rgn_patch(nc, have_b)
+}
+
+fn rgn_patch_not_ref_exits(nc: &! NativeCompiler) with Mut, Panic, Div {
+    rgn_patch(nc, RGN_NOT_REF_EXITS[0])
+    rgn_patch(nc, RGN_NOT_REF_EXITS[1])
+    rgn_patch(nc, RGN_NOT_REF_EXITS[2])
+}
+
+// Mark every open region escaped. `c` holds the context. Clobbers rax, rcx,
+// r11.
+fn rgn_emit_mark_all_escaped(nc: &! NativeCompiler, c: i64) with Mut, Panic, Div {
+    rgn_emit_load(nc, 11, c, runtime_context_field_region_top())
+    rgn_emit_alu(nc, 0x85, 11, 11)
+    let done_empty = rgn_emit_jcc(nc, 0x84)
+    rgn_emit_load(nc, 1, c, runtime_context_field_heap_limit())
+    rgn_emit_mov_imm(nc, 0, 1)
+    let loop_top = (*nc).code.len
+    rgn_emit_store(nc, 11, native_v2_region_record_field_escaped(), 0)
+    rgn_emit_alu(nc, 0x39, 11, 1)
+    let done_base = rgn_emit_jcc(nc, 0x86)
+    rgn_emit_alu_imm(nc, 5, 11, native_v2_region_record_size())
+    let back = rgn_emit_jmp(nc)
+    rgn_patch_to(nc, back, loop_top)
+    rgn_patch(nc, done_empty)
+    rgn_patch(nc, done_base)
+}
+
+// Zero the heap bytes [lo, hi), never past heap_limit (the record stack sits
+// right above it). With round_up the last partial word is zeroed too; without
+// it that word is left alone, for when bytes at hi are still live. Fresh-heap
+// allocations are assumed zero (lowering skips array zero-fill; omitted struct
+// fields read back 0), so every reclaimed byte must be zero again before it is
+// reused. `lo` and `hi` must not be rax, rcx, rdx or rdi. `c` holds the
+// context. Clobbers rax, rcx, rdx, rdi.
+fn rgn_emit_zero_range(nc: &! NativeCompiler, lo: i64, hi: i64, c: i64, round_up: bool) with Mut, Panic, Div {
+    rgn_emit_mov(nc, 1, hi)
+    rgn_emit_alu(nc, 0x29, 1, lo)
+    if round_up { rgn_emit_alu_imm(nc, 0, 1, 7) }
+    rgn_emit_shr_imm(nc, 1, 3)
+    rgn_emit_load(nc, 2, c, runtime_context_field_heap_limit())
+    rgn_emit_alu(nc, 0x29, 2, lo)
+    rgn_emit_shr_imm(nc, 2, 3)
+    rgn_emit_alu(nc, 0x39, 1, 2)
+    let fits = rgn_emit_jcc(nc, 0x86)
+    rgn_emit_mov(nc, 1, 2)
+    rgn_patch(nc, fits)
+    rgn_emit_mov(nc, 7, lo)
+    rgn_emit_alu(nc, 0x31, 0, 0)
+    nc_emit_byte(nc, 0xf3)  // rep stosq
+    nc_emit_byte(nc, 0x48)
+    nc_emit_byte(nc, 0xab)
+}
+
+// Set both bumps back to the start of the region at `tok`.
+// `c` holds the context. Clobbers r9.
+fn rgn_emit_reset_bumps(nc: &! NativeCompiler, tok: i64, c: i64) with Mut, Panic, Div {
+    rgn_emit_load(nc, 9, tok, native_v2_region_record_field_heap_start())
+    rgn_emit_store(nc, c, runtime_context_field_heap_cursor(), 9)
+    rgn_emit_load(nc, 9, tok, native_v2_region_record_field_handle_start())
+    rgn_emit_store(nc, c, runtime_context_field_handle_count(), 9)
+}
+
+// Pop the region at `tok`, and with it anything a missed leave left above.
+// `c` holds the context. Clobbers rax.
+fn rgn_emit_pop_to(nc: &! NativeCompiler, tok: i64, c: i64) with Mut, Panic, Div {
+    rgn_emit_load(nc, 0, c, runtime_context_field_heap_limit())
+    rgn_emit_alu(nc, 0x39, tok, 0)
+    let not_base = rgn_emit_jcc(nc, 0x85)
+    rgn_emit_alu(nc, 0x31, 0, 0)
+    rgn_emit_store(nc, c, runtime_context_field_region_top(), 0)
+    let done = rgn_emit_jmp(nc)
+    rgn_patch(nc, not_base)
+    rgn_emit_mov(nc, 0, tok)
+    rgn_emit_alu_imm(nc, 5, 0, native_v2_region_record_size())
+    rgn_emit_store(nc, c, runtime_context_field_region_top(), 0)
+    rgn_patch(nc, done)
+}
+
+// __rgn_enter() -> token: open a region; 0 when the record stack is full.
+fn emit_builtin_rgn_enter_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    rgn_emit_load_ctx(nc, 8)
+    rgn_emit_load(nc, 1, 8, runtime_context_field_heap_limit())
+    rgn_emit_load(nc, 0, 8, runtime_context_field_region_top())
+    rgn_emit_alu(nc, 0x85, 0, 0)
+    let have_top = rgn_emit_jcc(nc, 0x85)
+    rgn_emit_mov(nc, 0, 1)
+    let placed = rgn_emit_jmp(nc)
+    rgn_patch(nc, have_top)
+    rgn_emit_alu_imm(nc, 0, 0, native_v2_region_record_size())
+    rgn_patch(nc, placed)
+    // Full when the new record would end past heap_limit + stack_bytes.
+    rgn_emit_mov(nc, 2, 1)
+    rgn_emit_alu_imm(nc, 0, 2, native_v2_region_stack_bytes() - native_v2_region_record_size())
+    rgn_emit_alu(nc, 0x39, 0, 2)
+    let full = rgn_emit_jcc(nc, 0x87)
+    rgn_emit_load(nc, 2, 8, runtime_context_field_heap_cursor())
+    rgn_emit_store(nc, 0, native_v2_region_record_field_heap_start(), 2)
+    rgn_emit_load(nc, 2, 8, runtime_context_field_handle_count())
+    rgn_emit_store(nc, 0, native_v2_region_record_field_handle_start(), 2)
+    rgn_emit_mov_imm(nc, 2, 0)
+    rgn_emit_store(nc, 0, native_v2_region_record_field_escaped(), 2)
+    rgn_emit_store(nc, 0, native_v2_region_record_field_zero_to(), 2)
+    rgn_emit_store(nc, 0, native_v2_region_record_field_handles_to(), 2)
+    rgn_emit_store(nc, 8, runtime_context_field_region_top(), 0)
+    nc_emit_ret(nc)
+    rgn_patch(nc, full)
+    rgn_emit_alu(nc, 0x31, 0, 0)
+    nc_emit_ret(nc)
+}
+
+// __rgn_leave(tok): close the region at tok. After a reset, the first copy
+// of the return value still sits between the cursor and zero_to; zero it.
+fn emit_builtin_rgn_leave_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    rgn_emit_alu(nc, 0x85, 7, 7)
+    let none = rgn_emit_jcc(nc, 0x84)
+    rgn_emit_load_ctx(nc, 8)
+    rgn_emit_mov(nc, 11, 7)
+    rgn_emit_load(nc, 10, 11, native_v2_region_record_field_zero_to())
+    rgn_emit_load(nc, 9, 8, runtime_context_field_heap_cursor())
+    rgn_emit_alu(nc, 0x39, 9, 10)
+    let nothing_above = rgn_emit_jcc(nc, 0x83)
+    rgn_emit_zero_range(nc, 9, 10, 8, true)
+    rgn_patch(nc, nothing_above)
+    rgn_emit_pop_to(nc, 11, 8)
+    rgn_patch(nc, none)
+    nc_emit_ret(nc)
+}
+
+// __rgn_escaped(tok) -> 1 when the region must not reset (always 1 for tok 0).
+fn emit_builtin_rgn_escaped_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    rgn_emit_mov_imm(nc, 0, 1)
+    rgn_emit_alu(nc, 0x85, 7, 7)
+    let none = rgn_emit_jcc(nc, 0x84)
+    rgn_emit_load(nc, 0, 7, native_v2_region_record_field_escaped())
+    rgn_patch(nc, none)
+    nc_emit_ret(nc)
+}
+
+// __rgn_young(tok, w) -> 1 when w refers to a heap object born inside the
+// region at tok.
+fn emit_builtin_rgn_young_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    rgn_emit_alu(nc, 0x85, 7, 7)
+    let none = rgn_emit_jcc(nc, 0x84)
+    rgn_emit_load_ctx(nc, 8)
+    rgn_emit_classify(nc, 6, 8, 9, 10, 7, 11)
+    rgn_emit_load(nc, 10, 7, native_v2_region_record_field_heap_start())
+    rgn_emit_alu(nc, 0x39, 9, 10)
+    let old = rgn_emit_jcc(nc, 0x82)
+    rgn_emit_mov_imm(nc, 0, 1)
+    nc_emit_ret(nc)
+    rgn_patch(nc, none)
+    rgn_patch(nc, old)
+    rgn_patch_not_ref_exits(nc)
+    rgn_emit_alu(nc, 0x31, 0, 0)
+    nc_emit_ret(nc)
+}
+
+fn emit_builtin_rgn_cursor_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    rgn_emit_load_ctx(nc, 8)
+    rgn_emit_load(nc, 0, 8, runtime_context_field_heap_cursor())
+    nc_emit_ret(nc)
+}
+
+fn emit_builtin_rgn_count_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    rgn_emit_load_ctx(nc, 8)
+    rgn_emit_load(nc, 0, 8, runtime_context_field_handle_count())
+    nc_emit_ret(nc)
+}
+
+// __rgn_reset_fits(tok, snap_cursor, snap_count) -> 1 after resetting the
+// region at tok, 0 when it declined. Everything allocated since the snapshot
+// is the first copy of the return value. The second copy is written from H0
+// upward, so the reset is only safe when it cannot overrun the first (the two
+// copies have the same size, being copies of the same young graph):
+//   cursor - snap_cursor <= snap_cursor - H0   and
+//   count  - snap_count  <= snap_count  - C0.
+fn emit_builtin_rgn_reset_fits_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    rgn_emit_alu(nc, 0x85, 7, 7)
+    let none = rgn_emit_jcc(nc, 0x84)
+    rgn_emit_load_ctx(nc, 8)
+    rgn_emit_mov(nc, 11, 7)
+    rgn_emit_load(nc, 9, 8, runtime_context_field_heap_cursor())
+    rgn_emit_alu(nc, 0x29, 9, 6)
+    rgn_emit_mov(nc, 10, 6)
+    rgn_emit_load(nc, 0, 11, native_v2_region_record_field_heap_start())
+    rgn_emit_alu(nc, 0x29, 10, 0)
+    rgn_emit_alu(nc, 0x39, 9, 10)
+    let no_heap = rgn_emit_jcc(nc, 0x87)
+    rgn_emit_load(nc, 9, 8, runtime_context_field_handle_count())
+    rgn_emit_alu(nc, 0x29, 9, 2)
+    rgn_emit_mov(nc, 10, 2)
+    rgn_emit_load(nc, 0, 11, native_v2_region_record_field_handle_start())
+    rgn_emit_alu(nc, 0x29, 10, 0)
+    rgn_emit_alu(nc, 0x39, 9, 10)
+    let no_handles = rgn_emit_jcc(nc, 0x87)
+    // Zero the dead part [H0, snap_cursor), rounding DOWN: the first copy
+    // starts at snap_cursor and must survive until the second copy is made.
+    // The first copy's own bytes are zeroed by __rgn_leave via zero_to.
+    rgn_emit_load(nc, 9, 11, native_v2_region_record_field_heap_start())
+    rgn_emit_mov(nc, 10, 6)
+    rgn_emit_zero_range(nc, 9, 10, 8, false)
+    rgn_emit_load(nc, 10, 8, runtime_context_field_heap_cursor())
+    rgn_emit_store(nc, 11, native_v2_region_record_field_zero_to(), 10)
+    rgn_emit_load(nc, 10, 8, runtime_context_field_handle_count())
+    rgn_emit_store(nc, 11, native_v2_region_record_field_handles_to(), 10)
+    rgn_emit_reset_bumps(nc, 11, 8)
+    rgn_emit_mov_imm(nc, 0, 1)
+    nc_emit_ret(nc)
+    rgn_patch(nc, none)
+    rgn_patch(nc, no_heap)
+    rgn_patch(nc, no_handles)
+    rgn_emit_alu(nc, 0x31, 0, 0)
+    nc_emit_ret(nc)
+}
+
+// __rgn_exit_scalar(tok, v): close a region whose function returns a scalar,
+// resetting it unless it escaped or v itself refers to a young heap object
+// (an integer carrying a reference is not something lowering can rule out).
+fn emit_builtin_rgn_exit_scalar_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    rgn_emit_alu(nc, 0x85, 7, 7)
+    let none = rgn_emit_jcc(nc, 0x84)
+    rgn_emit_load_ctx(nc, 8)
+    rgn_emit_mov(nc, 11, 7)
+    rgn_emit_load(nc, 0, 11, native_v2_region_record_field_escaped())
+    rgn_emit_alu(nc, 0x85, 0, 0)
+    let escaped = rgn_emit_jcc(nc, 0x85)
+    rgn_emit_classify(nc, 6, 8, 9, 10, 0 - 1, 0 - 1)
+    rgn_emit_load(nc, 10, 11, native_v2_region_record_field_heap_start())
+    rgn_emit_alu(nc, 0x39, 9, 10)
+    let young = rgn_emit_jcc(nc, 0x83)
+    rgn_patch_not_ref_exits(nc)
+    rgn_emit_load(nc, 9, 11, native_v2_region_record_field_heap_start())
+    rgn_emit_load(nc, 10, 8, runtime_context_field_heap_cursor())
+    rgn_emit_zero_range(nc, 9, 10, 8, true)
+    rgn_emit_reset_bumps(nc, 11, 8)
+    rgn_patch(nc, escaped)
+    rgn_patch(nc, young)
+    rgn_emit_pop_to(nc, 11, 8)
+    rgn_patch(nc, none)
+    nc_emit_ret(nc)
+}
+
+// __rgn_barrier(w, t): called before a store of word w into target t, where
+// t is the target object's handle id or address, or 0 for a stack/BSS slot.
+// If w refers to a heap object born at b and the target was born at a < b,
+// every open region whose start s satisfies a < s <= b is marked escaped.
+fn emit_builtin_rgn_barrier_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    rgn_emit_load_ctx(nc, 8)
+    rgn_emit_load(nc, 11, 8, runtime_context_field_region_top())
+    rgn_emit_alu(nc, 0x85, 11, 11)
+    let no_regions = rgn_emit_jcc(nc, 0x84)
+    // b (r9) = birth of w; not a reference -> nothing can escape.
+    rgn_emit_classify(nc, 7, 8, 9, 10, 0 - 1, 0 - 1)
+    let have_b = rgn_emit_jmp(nc)
+    rgn_patch_not_ref_exits(nc)
+    nc_emit_ret(nc)
+    rgn_patch(nc, have_b)
+    // a (rdx) = birth of t; stack, BSS and 0 all count as a = 0.
+    rgn_emit_classify(nc, 6, 8, 2, 10, 0 - 1, 0 - 1)
+    let have_a = rgn_emit_jmp(nc)
+    rgn_patch_not_ref_exits(nc)
+    rgn_emit_alu(nc, 0x31, 2, 2)
+    rgn_patch(nc, have_a)
+    rgn_emit_alu(nc, 0x39, 2, 9)
+    let not_older = rgn_emit_jcc(nc, 0x83)
+    // Records from the innermost (largest start) outward.
+    rgn_emit_load(nc, 1, 8, runtime_context_field_heap_limit())
+    rgn_emit_mov_imm(nc, 0, 1)
+    let loop_top = (*nc).code.len
+    rgn_emit_load(nc, 10, 11, native_v2_region_record_field_heap_start())
+    rgn_emit_alu(nc, 0x39, 10, 2)
+    let at_or_below_a = rgn_emit_jcc(nc, 0x86)
+    rgn_emit_alu(nc, 0x39, 10, 9)
+    let above_b = rgn_emit_jcc(nc, 0x87)
+    rgn_emit_store(nc, 11, native_v2_region_record_field_escaped(), 0)
+    rgn_patch(nc, above_b)
+    rgn_emit_alu(nc, 0x39, 11, 1)
+    let at_base = rgn_emit_jcc(nc, 0x86)
+    rgn_emit_alu_imm(nc, 5, 11, native_v2_region_record_size())
+    let back = rgn_emit_jmp(nc)
+    rgn_patch_to(nc, back, loop_top)
+    rgn_patch(nc, no_regions)
+    rgn_patch(nc, not_older)
+    rgn_patch(nc, at_or_below_a)
+    rgn_patch(nc, at_base)
+    nc_emit_ret(nc)
+}
+
+// __rgn_mark_all(): mark every open region escaped. Emitted before extern
+// calls, since foreign code may keep any pointer it is handed.
+fn emit_builtin_rgn_mark_all_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    rgn_emit_load_ctx(nc, 8)
+    rgn_emit_mark_all_escaped(nc, 8)
+    nc_emit_ret(nc)
+}
+
+fn rgn_emit_call_fn(nc: &! NativeCompiler, fn_index: i64) with Mut, Panic, Div {
+    let call_pos = (*nc).code.len
+    nc_emit_call_rel32_placeholder(nc)
+    nc_add_call_reloc(nc, call_pos + 1, fn_index)
+}
+
+// Bind the two runtime entry points codegen calls on its own, by name, before
+// compiling a module.
+fn nc_rgn_bind_module_fns(module: &IrModule) with Mut, Panic, Div {
+    NC_RGN_BARRIER_FN = 0 - 1
+    NC_RGN_MARK_ALL_FN = 0 - 1
+    var fi: i64 = 0
+    while fi < (*module).fn_count {
+        let fname = ir_fn_get(&(*module), fi as usize).name
+        let id = native_v2_region_builtin_id(fname)
+        if id == 68 { NC_RGN_BARRIER_FN = fi }
+        if id == 69 { NC_RGN_MARK_ALL_FN = fi }
+        fi = fi + 1
+    }
+}
+
+// Before an IR store of the word in `value_vreg` into the object named by the
+// word in `target_vreg` (a handle id, a raw object or data pointer, a stack
+// cell, a BSS address; -1 = no heap object): if a region is open and the word
+// could be a reference, call __rgn_barrier(word, target). The inline test
+// only skips words that cannot be references (0, not a live handle id, and
+// not inside [heap_base, heap_cursor)): f64 bit patterns of normal numbers
+// never reach the call. Emitted between IR instructions, where the core path
+// keeps nothing live in registers.
+fn nc_rgn_emit_store_barrier(nc: &! NativeCompiler, value_vreg: i64, target_vreg: i64) with Mut, Panic, Div {
+    if NC_RGN_BARRIER_FN < 0 { return }
+    if value_vreg < 0 { return }
+    rgn_emit_load_ctx(nc, 1)
+    rgn_emit_load(nc, 0, 1, runtime_context_field_region_top())
+    rgn_emit_alu(nc, 0x85, 0, 0)
+    let skip_no_region = rgn_emit_jcc(nc, 0x84)
+    nc_emit_load_rbp_disp32_reg(nc, 7, ir_slot_offset(value_vreg))
+    rgn_emit_alu(nc, 0x85, 7, 7)
+    let skip_zero = rgn_emit_jcc(nc, 0x84)
+    rgn_emit_load(nc, 0, 1, runtime_context_field_handle_count())
+    rgn_emit_alu(nc, 0x39, 7, 0)
+    let maybe_handle = rgn_emit_jcc(nc, 0x86)
+    rgn_emit_load(nc, 0, 1, runtime_context_field_heap_base())
+    rgn_emit_alu(nc, 0x39, 7, 0)
+    let skip_low = rgn_emit_jcc(nc, 0x82)
+    rgn_emit_load(nc, 0, 1, runtime_context_field_heap_cursor())
+    rgn_emit_alu(nc, 0x39, 7, 0)
+    let skip_high = rgn_emit_jcc(nc, 0x83)
+    rgn_patch(nc, maybe_handle)
+    if target_vreg >= 0 {
+        nc_emit_load_rbp_disp32_reg(nc, 6, ir_slot_offset(target_vreg))
+    } else {
+        rgn_emit_alu(nc, 0x31, 6, 6)
+    }
+    rgn_emit_call_fn(nc, NC_RGN_BARRIER_FN)
+    rgn_patch(nc, skip_no_region)
+    rgn_patch(nc, skip_zero)
+    rgn_patch(nc, skip_low)
+    rgn_patch(nc, skip_high)
+}
+
+// Inside a builtin that is about to allocate a new object and make the target
+// (handle or address in t_reg) refer to it -- native Seq growth moves the
+// object and repoints the OLD handle at the new, young copy. The stored thing
+// is younger than every open region, so every region that opened after the
+// target was born is marked escaped. (Modelling it as a word born at
+// `cursor - 1` was wrong: in a region that has not allocated yet that address
+// is below H0, the region stayed clean, reset, and left the caller's handle
+// pointing into reclaimed memory -- seq_mut_ref_param_mutates.sio.)
+// Emitted inline; every SysV argument register is preserved.
+fn rgn_emit_builtin_youngest_store(nc: &! NativeCompiler, t_reg: i64) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x57)  // push rdi
+    nc_emit_byte(nc, 0x56)  // push rsi
+    nc_emit_byte(nc, 0x52)  // push rdx
+    nc_emit_byte(nc, 0x51)  // push rcx
+    nc_emit_byte(nc, 0x41)  // push r8
+    nc_emit_byte(nc, 0x50)
+    nc_emit_byte(nc, 0x41)  // push r9
+    nc_emit_byte(nc, 0x51)
+    rgn_emit_mov(nc, 6, t_reg)
+    rgn_emit_load_ctx(nc, 8)
+    rgn_emit_load(nc, 11, 8, runtime_context_field_region_top())
+    rgn_emit_alu(nc, 0x85, 11, 11)
+    let no_regions = rgn_emit_jcc(nc, 0x84)
+    // a (rdx) = birth of the target; stack, BSS and 0 count as a = 0.
+    rgn_emit_classify(nc, 6, 8, 2, 10, 0 - 1, 0 - 1)
+    let have_a = rgn_emit_jmp(nc)
+    rgn_patch_not_ref_exits(nc)
+    rgn_emit_alu(nc, 0x31, 2, 2)
+    rgn_patch(nc, have_a)
+    rgn_emit_load(nc, 1, 8, runtime_context_field_heap_limit())
+    rgn_emit_mov_imm(nc, 0, 1)
+    let loop_top = (*nc).code.len
+    rgn_emit_load(nc, 10, 11, native_v2_region_record_field_heap_start())
+    rgn_emit_alu(nc, 0x39, 10, 2)
+    let at_or_below_a = rgn_emit_jcc(nc, 0x86)
+    rgn_emit_store(nc, 11, native_v2_region_record_field_escaped(), 0)
+    rgn_emit_alu(nc, 0x39, 11, 1)
+    let at_base = rgn_emit_jcc(nc, 0x86)
+    rgn_emit_alu_imm(nc, 5, 11, native_v2_region_record_size())
+    let back = rgn_emit_jmp(nc)
+    rgn_patch_to(nc, back, loop_top)
+    rgn_patch(nc, no_regions)
+    rgn_patch(nc, at_or_below_a)
+    rgn_patch(nc, at_base)
+    nc_emit_byte(nc, 0x41)  // pop r9
+    nc_emit_byte(nc, 0x59)
+    nc_emit_byte(nc, 0x41)  // pop r8
+    nc_emit_byte(nc, 0x58)
+    nc_emit_byte(nc, 0x59)  // pop rcx
+    nc_emit_byte(nc, 0x5a)  // pop rdx
+    nc_emit_byte(nc, 0x5e)  // pop rsi
+    nc_emit_byte(nc, 0x5f)  // pop rdi
+}
+
+// Inside a builtin whose arguments are still live in rdi/rsi/rdx: call
+// __rgn_barrier(w_reg, t_reg), preserving every SysV argument register.
+fn rgn_emit_builtin_barrier(nc: &! NativeCompiler, w_reg: i64, t_reg: i64) with Mut, Panic, Div {
+    if NC_RGN_BARRIER_FN < 0 { return }
+    if w_reg < 0 {
+        rgn_emit_builtin_youngest_store(nc, t_reg)
+        return
+    }
+    nc_emit_byte(nc, 0x57)  // push rdi
+    nc_emit_byte(nc, 0x56)  // push rsi
+    nc_emit_byte(nc, 0x52)  // push rdx
+    nc_emit_byte(nc, 0x51)  // push rcx
+    nc_emit_byte(nc, 0x41)  // push r8
+    nc_emit_byte(nc, 0x50)
+    nc_emit_byte(nc, 0x41)  // push r9
+    nc_emit_byte(nc, 0x51)
+    rgn_emit_mov(nc, 11, t_reg)
+    rgn_emit_mov(nc, 10, w_reg)
+    rgn_emit_mov(nc, 7, 10)
+    rgn_emit_mov(nc, 6, 11)
+    rgn_emit_call_fn(nc, NC_RGN_BARRIER_FN)
+    nc_emit_byte(nc, 0x41)  // pop r9
+    nc_emit_byte(nc, 0x59)
+    nc_emit_byte(nc, 0x41)  // pop r8
+    nc_emit_byte(nc, 0x58)
+    nc_emit_byte(nc, 0x59)  // pop rcx
+    nc_emit_byte(nc, 0x5a)  // pop rdx
+    nc_emit_byte(nc, 0x5e)  // pop rsi
+    nc_emit_byte(nc, 0x5f)  // pop rdi
 }
 
 // panic(...) does not return. lean_single routes it to emit_assert_fail, whose
@@ -6790,6 +7464,7 @@ fn emit_builtin_file_size(nc: NativeCompiler) -> NativeCompiler with Mut, Panic,
 // ============================================================================
 
 pub fn compile_module_streaming_begin_into(nc: &! NativeCompiler, module: &IrModule) with Mut, Panic, Div, Alloc {
+    nc_rgn_bind_module_fns(module)
     (*nc).fn_count = module.fn_count
     (*nc).runtime_context_slot_offset = 0
     let runtime_slot_size = runtime_context_global_slot_size()
@@ -8095,6 +8770,16 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     if builtin_id == 26 { native_v2_persist_builtin_emit_into(nc, emit_builtin_f64_bits_identity((*nc))); return }
     if builtin_id == 27 { emit_builtin_syscall6_into(nc); return }
     if builtin_id == 56 { emit_builtin_arena_mark_into(nc); return }
+    if builtin_id == 60 { emit_builtin_rgn_enter_into(nc); return }
+    if builtin_id == 61 { emit_builtin_rgn_leave_into(nc); return }
+    if builtin_id == 62 { emit_builtin_rgn_escaped_into(nc); return }
+    if builtin_id == 63 { emit_builtin_rgn_young_into(nc); return }
+    if builtin_id == 64 { emit_builtin_rgn_cursor_into(nc); return }
+    if builtin_id == 65 { emit_builtin_rgn_count_into(nc); return }
+    if builtin_id == 66 { emit_builtin_rgn_reset_fits_into(nc); return }
+    if builtin_id == 67 { emit_builtin_rgn_exit_scalar_into(nc); return }
+    if builtin_id == 68 { emit_builtin_rgn_barrier_into(nc); return }
+    if builtin_id == 69 { emit_builtin_rgn_mark_all_into(nc); return }
     if builtin_id == 57 { emit_builtin_arena_reset_into(nc); return }
     if builtin_id == 58 { emit_builtin_panic_into(nc); return }
     if builtin_id == 59 { emit_builtin_untracked_counter_into(nc); return }
@@ -8660,7 +9345,7 @@ fn nc_core_emit_alloc_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, elem_
     let payload_size = native_v2_alloc_size_from_tag(type_tag)
     let total_size = payload_size + native_v2_object_header_size()
     let descriptor_id = native_v2_alloc_descriptor_from_tag(type_tag)
-    let max_heap_payload = 2147483648 - runtime_context_size() - native_v2_handle_table_bytes()
+    let max_heap_payload = nc_heap_arena_bytes()
     if dst < 0 || total_size <= 0 || total_size > max_heap_payload {
         return false
     }
@@ -9557,6 +10242,7 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
                 nc_core_mark_int_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
             }
         } else if instr_op == IrOpcode::IrFieldSet {
+            nc_rgn_emit_store_barrier(nc, IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize], IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize])
             if IR_A_LABEL_ID[(ir_region_slot_r((*func).region, (i))) as usize] == 1 {
                 native_v2_core_emit_store_ref_field_into(nc, IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize], IR_A_FIELD_IDX[(ir_region_slot_r((*func).region, (i))) as usize], IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize])
             } else {
@@ -9626,6 +10312,10 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             }
         } else if instr_op == IrOpcode::IrIndexSet {
             let base_reg = IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize]
+            // Label 3 stores one byte, which cannot hold a reference.
+            if IR_A_LABEL_ID[(ir_region_slot_r((*func).region, (i))) as usize] != 3 {
+                nc_rgn_emit_store_barrier(nc, IR_A_IMM_I64[(ir_region_slot_r((*func).region, (i))) as usize], base_reg)
+            }
             if IR_A_LABEL_ID[(ir_region_slot_r((*func).region, (i))) as usize] == 3 {
                 native_v2_core_emit_raw_byte_array_store_into(
                     nc,
@@ -9769,6 +10459,7 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             )
         } else if instr_op == IrOpcode::IrStorePtr {
             // [src1] = src2 : store val through a raw pointer. val -> rbx, ptr -> rax, [rax]=rbx.
+            nc_rgn_emit_store_barrier(nc, IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize], IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize])
             nc_core_load_temp_to_rax(nc, IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize])
             nc_emit_mov_rbx_rax(nc)
             nc_core_load_temp_to_rax(nc, IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize])
@@ -10033,6 +10724,7 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             nc_core_store_rax_to_temp(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
             nc_core_mark_int_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
         } else if instr_op == IrOpcode::IrStoreGlobal {
+            nc_rgn_emit_store_barrier(nc, IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize], 0 - 1)
             let bss_off = IR_A_IMM_I64[(ir_region_slot_r((*func).region, (i))) as usize]
             let abs_addr = BSS_BASE_LINUX + bss_off
             nc_core_load_temp_to_rax(nc, IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize])
@@ -11670,6 +12362,7 @@ fn emit_entry_trampoline_context_into(nc: &! NativeCompiler) with Mut, Panic, Di
     nc_emit_add_reg_reg(nc, 0, 1)
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_handle_table_base())
     emit_store_runtime_context_imm_into(nc, runtime_context_field_handle_count(), 0)
+    emit_store_runtime_context_imm_into(nc, runtime_context_field_region_top(), 0)
     emit_store_runtime_context_imm_into(nc, runtime_context_field_handle_capacity(), native_v2_handle_table_capacity_default())
     emit_store_runtime_context_imm_into(nc, runtime_context_field_pin_registry(), runtime_context_pin_registry_unwired())
     emit_store_runtime_context_imm_into(nc, runtime_context_field_pin_count(), runtime_context_pin_count_unwired())
@@ -11685,7 +12378,7 @@ fn emit_entry_trampoline_context_into(nc: &! NativeCompiler) with Mut, Panic, Di
 
 fn emit_entry_trampoline_heap_args_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     emit_load_runtime_context_field_rax_into(nc, runtime_context_field_heap_base())
-    nc_emit_mov_reg_imm(nc, 1, 2147483648 - runtime_context_size() - native_v2_handle_table_bytes())
+    nc_emit_mov_reg_imm(nc, 1, nc_heap_arena_bytes())
     nc_emit_add_reg_reg(nc, 0, 1)
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_limit())
 
@@ -11884,6 +12577,7 @@ pub fn emit_entry_trampoline_into(nc: &! NativeCompiler, main_fn_index: i64) wit
     (*nc).code = emit_add_reg_reg((*nc).code, 0, 1)
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_handle_table_base())
     emit_store_runtime_context_imm_into(nc, runtime_context_field_handle_count(), 0)
+    emit_store_runtime_context_imm_into(nc, runtime_context_field_region_top(), 0)
     emit_store_runtime_context_imm_into(nc, runtime_context_field_handle_capacity(), native_v2_handle_table_capacity_default())
     emit_store_runtime_context_imm_into(nc, runtime_context_field_pin_registry(), runtime_context_pin_registry_unwired())
     emit_store_runtime_context_imm_into(nc, runtime_context_field_pin_count(), runtime_context_pin_count_unwired())
@@ -11897,7 +12591,7 @@ pub fn emit_entry_trampoline_into(nc: &! NativeCompiler, main_fn_index: i64) wit
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_cursor())
 
     emit_load_runtime_context_field_rax_into(nc, runtime_context_field_heap_base())
-    (*nc).code = emit_mov_reg_imm((*nc).code, 1, 2147483648 - runtime_context_size() - native_v2_handle_table_bytes())
+    (*nc).code = emit_mov_reg_imm((*nc).code, 1, nc_heap_arena_bytes())
     (*nc).code = emit_add_reg_reg((*nc).code, 0, 1)
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_heap_limit())
 
@@ -12029,6 +12723,7 @@ fn emit_entry_trampoline_windows_x86(nc: NativeCompiler, main_fn_index: i64) -> 
     c.code = emit_add_reg_reg(c.code, 0, 1)
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_handle_table_base())
     c = emit_store_runtime_context_imm(c, runtime_context_field_handle_count(), 0)
+    c = emit_store_runtime_context_imm(c, runtime_context_field_region_top(), 0)
     c = emit_store_runtime_context_imm(c, runtime_context_field_handle_capacity(), native_v2_handle_table_capacity_default())
     c = emit_store_runtime_context_imm(c, runtime_context_field_pin_registry(), runtime_context_pin_registry_unwired())
     c = emit_store_runtime_context_imm(c, runtime_context_field_pin_count(), runtime_context_pin_count_unwired())
@@ -12044,7 +12739,7 @@ fn emit_entry_trampoline_windows_x86(nc: NativeCompiler, main_fn_index: i64) -> 
 
     // heap_limit = heap_base + (alloc_size - runtime_context_size - handle_table_bytes)
     c = emit_load_runtime_context_field_rax(c, runtime_context_field_heap_base())
-    c.code = emit_mov_reg_imm(c.code, 1, 2147483648 - runtime_context_size() - native_v2_handle_table_bytes())
+    c.code = emit_mov_reg_imm(c.code, 1, nc_heap_arena_bytes())
     c.code = emit_add_reg_reg(c.code, 0, 1)
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_limit())
 
@@ -12152,6 +12847,7 @@ fn emit_entry_trampoline_macos_x86(nc: NativeCompiler, main_fn_index: i64) -> Na
     c.code = emit_add_reg_reg(c.code, 0, 1)
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_handle_table_base())
     c = emit_store_runtime_context_imm(c, runtime_context_field_handle_count(), 0)
+    c = emit_store_runtime_context_imm(c, runtime_context_field_region_top(), 0)
     c = emit_store_runtime_context_imm(c, runtime_context_field_handle_capacity(), native_v2_handle_table_capacity_default())
     c = emit_store_runtime_context_imm(c, runtime_context_field_pin_registry(), runtime_context_pin_registry_unwired())
     c = emit_store_runtime_context_imm(c, runtime_context_field_pin_count(), runtime_context_pin_count_unwired())
@@ -12163,7 +12859,7 @@ fn emit_entry_trampoline_macos_x86(nc: NativeCompiler, main_fn_index: i64) -> Na
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_base())
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_cursor())
     c = emit_load_runtime_context_field_rax(c, runtime_context_field_heap_base())
-    c.code = emit_mov_reg_imm(c.code, 1, 2147483648 - runtime_context_size() - native_v2_handle_table_bytes())
+    c.code = emit_mov_reg_imm(c.code, 1, nc_heap_arena_bytes())
     c.code = emit_add_reg_reg(c.code, 0, 1)
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_limit())
     c.code = emit_mov_rax_mem_r14(c.code)

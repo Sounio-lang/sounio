@@ -1,0 +1,52 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: REGION_RECLAIM_ESCAPE_OK
+//@ description: region reclamation must not free a young struct that escaped through &! or a global
+// Each helper returns a scalar, so on return its region would reset -- unless
+// the store barrier saw a young object written into something older. If a
+// barrier were missing, the escaped object would be overwritten by the churn
+// that follows, and the checks below would read the churn's values instead.
+// docs/audit/MADAROS_HANDLE_182_BBB_PER_CONSTRUCTION_DISPATCH_2026-09-26.md
+
+struct P { a: f64, b: f64, c: f64 }
+struct H { p: P, n: i64 }
+
+var G: P = P { a: 0.0, b: 0.0, c: 0.0 }
+
+fn put_ref(h: &!H, x: f64) -> f64 with Mut {
+    (*h).p = P { a: x, b: x + 1.0, c: x + 2.0 }
+    x
+}
+
+fn put_global(x: f64) -> f64 with Mut {
+    G = P { a: x, b: x + 1.0, c: x + 2.0 }
+    x
+}
+
+// Allocates and discards many >16 B structs, filling reclaimed memory with 99s.
+fn churn(n: i64) -> f64 with Mut {
+    var acc = 0.0
+    var i: i64 = 0
+    while i < n {
+        let q = P { a: 99.0, b: 99.0, c: 99.0 }
+        acc = acc + q.a
+        i = i + 1
+    }
+    acc
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var h = H { p: P { a: 0.0, b: 0.0, c: 0.0 }, n: 0 }
+    let r1 = put_ref(&!h, 5.0)
+    let c1 = churn(10000)
+    if h.p.a != 5.0 || h.p.b != 6.0 || h.p.c != 7.0 { return 1 }
+
+    let r2 = put_global(11.0)
+    let c2 = churn(10000)
+    if G.a != 11.0 || G.b != 12.0 || G.c != 13.0 { return 2 }
+
+    if r1 + r2 != 16.0 { return 3 }
+    if c1 != 990000.0 || c2 != 990000.0 { return 4 }
+    println("REGION_RECLAIM_ESCAPE_OK")
+    0
+}
