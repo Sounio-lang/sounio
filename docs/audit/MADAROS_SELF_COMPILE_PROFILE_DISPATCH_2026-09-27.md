@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.madaros-self-compile-profile-dispatch-2026-09-27
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-self-compile-profile-dispatch-2026-09-27
+-->
+
 # Madaros self-compile: where the 54 minutes go — dispatch
 
 **Date:** 2026-09-27
@@ -157,7 +166,8 @@ Design:
 
 **Minimal repro** (principle 12), to be added with Stage A:
 - A generated `.sio` with *N* trivial `fn fK() -> i64 { K }` across *M* imported modules; time `madaros build` for N ∈ {1k, 2k, 4k, 8k}.
-- Quadratic growth before, near-linear after.
+- **Keep every `fK` alive.** Cross-module DCE (`spec_dce_filter_items`) drops unmarked functions before `into_acc` lowering, so small-N cases would never build the large table. Either call every `fK` from `main` (e.g. sum their results) or run with `SOUNIO_DISABLE_MM_DCE=1`, and record which.
+- **Expected shapes differ by stage.** Stage A keeps the linear scans, so growth stays quadratic with a smaller constant; the Stage A criterion is a smaller constant factor, not a new shape. Near-linear growth is the Stage B/C criterion.
 - This isolates the lookup cost from everything else in `main.sio`.
 
 ## 4. Side findings (not part of this dispatch)
@@ -169,7 +179,15 @@ Design:
 
 ## 5. Reproduce
 
-The sampler source and symboliser are in the ConfigMap `arc-runners/madaros-prof-tools`: `rip_sampler.cpp`, C++23, and `symbolize.pl`. The run is Job `madaros-fn-profile2`:
+The exact tooling that produced §1.2 is checked in under `scripts/dev/profiling/`:
+
+| File | sha256 |
+|---|---|
+| `rip_sampler.cpp` (C++23) | `1a8ddb6d2f4aae8ec32215cbfa8b1bbebf2c7f3fbf0f0d41b5fa3f8d25763342` |
+| `symbolize.pl` | `5212f6f3cfa9d30219de1957467bdfdfbd2e52221c4ad99ac27d9f2e82b0b1b5` |
+| `madaros-fn-profile-job.yaml` | the Job as run (`madaros-fn-profile2`) |
+
+The cluster ConfigMap `arc-runners/madaros-prof-tools` is built from these two files byte-for-byte. The core steps are:
 
 ```bash
 seed self-hosted/compiler/main.sio /tmp/m2 --debug-fn-map > seed.out   # seed = lean_single stage from the Madaros cache
