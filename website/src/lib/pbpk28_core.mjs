@@ -845,6 +845,16 @@ export function runVenlafaxineScenario(sampleTimes, { dt = 0.5, pheno = 2 } = {}
   if (!(Array.isArray(sampleTimes) && sampleTimes.every(Number.isFinite))) {
     throw new RangeError('sampleTimes must be an array of finite numbers');
   }
+  // The integrator only moves forward from t = 0, so a sample earlier than the
+  // current time would be labelled with a later state ([1, 0] emitted the 1 h
+  // state as t: 0). Require t >= 0 and strictly increasing sample times; the
+  // Sounio side panics the same way in vfx_integrate_to (t_end < t_start).
+  for (let i = 0; i < sampleTimes.length; i++) {
+    const prev = i === 0 ? 0.0 : sampleTimes[i - 1];
+    if (i === 0 ? sampleTimes[0] < 0.0 : !(sampleTimes[i] > prev)) {
+      throw new RangeError(`sampleTimes must be >= 0 and strictly increasing, got ${sampleTimes[i]} at index ${i} after ${prev}`);
+    }
+  }
   const rel = VFX_MATRIX_GOHEL2008;
   const clFormScale = VFX_CL_FORM_SCALE[pheno];
   let st = vfxZeroState();
