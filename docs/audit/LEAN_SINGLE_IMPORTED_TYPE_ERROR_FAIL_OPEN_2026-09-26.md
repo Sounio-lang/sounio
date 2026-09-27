@@ -667,3 +667,44 @@ interval is an open operator decision. It would change reported numbers
 (full-Vd AUC_tau_ss 0.001735 -> 0.001737), and the declaration can sit
 below the plateau (see the math review above).
 
+
+### ICF AUC: why there is no numerical regression test (2026-09-27)
+
+A review asked for numerical coverage of `auc_icf_tau_ss`, which the new
+quadrature also changes. The measurement below shows why a meaningful ICF
+test is not possible yet.
+
+Method: a scratch runner with a temporary `auc_icf_per_dose` field (not
+committed); dose 1 of `rapamycin_mean_params`; Madaros md5 `5764851f`. The
+reference is a fine coupled integration: PBPK and BBB advanced together at a
+fixed step h, with the BBB driven by the step-average blood concentration
+(the same blood-as-driver convention as the runner; see
+`DARWIN_PBPK_BLOOD_AS_PLASMA_BBB_DRIVER_2026-09-26.md`) and a trapezoid on the
+fine grid.
+
+| Dose-1 ICF unbound AUC (e−9 mg·h/L) | Value | vs reference at h = 0.0025 h |
+|---|---:|---:|
+| New runner (per-RK4-sub-step trapezoid) | 128,740.9 | −1.47% |
+| Old runner (16-checkpoint trapezoid) | 128,817.3 | −1.41% |
+| Reference, h = 0.005 h | 130,759.1 | +0.08% |
+| Reference, h = 0.0025 h | 130,660.1 | — |
+
+- **The quadrature change barely matters for ICF.** Old and new differ by
+  0.06%, because ICF is slow and smooth and 16 checkpoints already resolve
+  it. This is unlike plasma, where the old trapezoid was 0.8–4.6% low.
+- **ICF accuracy is limited by the BBB driver, not the quadrature.** Both
+  runners sit about 1.4–1.5% below the fine coupled reference. The runner
+  drives the BBB with blood linearly interpolated between checkpoints 1.6 h
+  apart (`c_mid = c_prev + alpha * (c_now - c_prev)`), not at solver
+  resolution. This is a pre-existing approximation and is not changed here.
+- **No test can separate the two effects.** A 1e-3 bound on ICF against the
+  fine reference would fail both runners (driver error); a 2e-2 bound would
+  pass both. Isolating the quadrature alone would mean re-implementing the
+  runner's own algorithm in the test, which tests the code against itself.
+  The plasma quadrature test remains the discriminating guard.
+
+**Open, not fixed:** drive the BBB at solver resolution. For example,
+advance the BBB inside each accepted Tsit5 step with that step's blood
+values, instead of a checkpoint-linear interpolation. It should be
+considered together with the blood-as-plasma decision, since both change
+the BBB driver.
