@@ -4256,8 +4256,9 @@ Findings accepted and applied:
   (6.6e-4 against 2.1e-5 on the AUC ratio, both old metric). "Three
   significant figures" superseded (−1.8e-5 against the per-step reference
   on the fixed metric). "Likely amplifier" softened to "not shown".
-- **C2, Grok and Kimi.** Accepted: Kp,uu computed from these traces
-  survives the blood-as-plasma scale (linear BBB, and the factor cancels);
+- **C2, Grok** (Kimi disagreed; see below). Accepted: Kp,uu computed from
+  these traces survives the blood-as-plasma scale (linear BBB, and the
+  factor cancels);
   the dispatch had contradicted itself. Accepted: "2·τ for every drug"
   follows from where the loop starts checking. Accepted from both: one
   halving does not establish order. Measured h, h/2 and h/4: successive
