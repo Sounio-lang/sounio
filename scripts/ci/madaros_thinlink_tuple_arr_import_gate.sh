@@ -9,6 +9,13 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FIX="$ROOT_DIR/tests/multimodule/thinlink_tuple_arr_import"
 TAG="[madaros-thinlink-tuple-arr-import]"
+# Copilot review (PR #2516), comment 4116326226: match the sibling gates'
+# KEEP semantics (e.g. madaros_tuple_arr_capacity_boundary_gate.sh:34,55) --
+# only "1" retains the work directory; every other value, including an
+# explicit "0", still cleans up. The old `-z` check inverted that: setting
+# KEEP=0 was falsy-but-nonempty, so `-z` was false and the cleanup trap was
+# skipped, unexpectedly retaining the directory.
+KEEP_WORK="${SOUNIO_MADAROS_THINLINK_TUPLE_ARR_IMPORT_GATE_KEEP:-0}"
 
 fail() {
   echo "$TAG FAIL: $*" >&2
@@ -39,7 +46,7 @@ if [[ -n "${SOUNIO_MADAROS_THINLINK_TUPLE_ARR_IMPORT_GATE_DIR:-}" ]]; then
 else
   WORK="$(mktemp -d /tmp/sounio-madaros-thinlink-tuple-arr-import.XXXXXX)"
 fi
-if [[ -z "${SOUNIO_MADAROS_THINLINK_TUPLE_ARR_IMPORT_GATE_KEEP:-}" ]]; then
+if [[ "$KEEP_WORK" != "1" ]]; then
   trap 'rm -rf "$WORK"' EXIT
 fi
 
