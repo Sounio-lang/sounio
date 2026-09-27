@@ -1081,7 +1081,13 @@ export function runVenlafaxineScenario(sampleTimes, { dt = 0.5, pheno = 2 } = {}
   // read as NM in the default branches downstream.
   if (!(Number.isFinite(dt) && dt > 0)) throw new RangeError(`runVenlafaxineScenario: dt must be finite and > 0, got ${dt}`);
   if (!(Number.isInteger(pheno) && pheno >= 0 && pheno <= 3)) throw new RangeError(`runVenlafaxineScenario: pheno must be 0..3 (PM, IM, NM, UM), got ${pheno}`);
-  for (const t of sampleTimes) if (!(Number.isFinite(t) && t >= 0)) throw new RangeError(`runVenlafaxineScenario: sample times must be finite and >= 0, got ${t}`);
+  // The integrator only advances, so a descending target would return a later
+  // state under an earlier label.
+  let prevT = 0.0;
+  for (const t of sampleTimes) {
+    if (!(Number.isFinite(t) && t >= prevT)) throw new RangeError(`runVenlafaxineScenario: sample times must be finite, >= 0 and non-decreasing, got ${t} after ${prevT}`);
+    prevT = t;
+  }
   const rel = VFX_MATRIX_GOHEL2008;
   const sc = vfxScenarioInit(pheno);
   const out = [];
