@@ -39,9 +39,13 @@ invariant S_i ≤ S_Ti and **fails in both** (below), so the run exits with rc =
 marker. `scripts/ci/dissertation_pbpk_suite_gate.sh` lists the module under
 `TESTS_EXPECTED_FAIL_HONEST`: it is accepted (XFAIL) only when the run exits with rc = 2 and prints
 the S_i ≤ S_Ti diagnostic exactly twice and no other `FAIL` line; a timeout, any other failure, or
-an unexpected pass fails the gate. The full run takes ~40 min under lean_single (2331–2392 s over
-four runs), so the entry carries its own 3600 s timeout instead of the gate's 90 s default, under
-which it could only ever time out (as it did before this change).
+an unexpected pass fails the gate. The gate also compiles the module once with its diagnostics
+visible and requires exactly the 36 pre-existing `pce.sio` errors, so a new compile error fails
+instead of hiding behind the expected rc. Runtime depends on the engine: 130 s with the gate's
+default (the `souc-seq-leansingle` shim, `bin/souc-linux-x86_64`), 2331–2392 s with
+`bin/souc-lean-single-x86_64` (the engine behind this page's run log, via `bin/souc` with
+`SOUNIO_SOUC_ENGINE=lean_single`). The entry carries its own 3600 s timeout, which covers both,
+instead of the gate's 90 s default.
 
 ## Status of these numbers: estimator output, not validated Sobol' indices
 

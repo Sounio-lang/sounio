@@ -44,10 +44,11 @@
 # recorded (strict; see that list).
 #
 # CPU-only. Self-skips if souc is missing. Runtime: each TESTS / smoke /
-# pending entry is bounded by DPS_TIMEOUT_SECONDS (default 90 s), but the
-# expected-FAIL_HONEST pbpk28_sobol_pce entry alone takes ~40 min under
-# lean_single (2331-2392 s measured) with its own 3600 s timeout, so a full
-# run takes at least ~40 min. Budget and schedule it accordingly.
+# pending entry is bounded by DPS_TIMEOUT_SECONDS (default 90 s). The
+# expected-FAIL_HONEST pbpk28_sobol_pce entry has its own 3600 s timeout: it
+# took 130 s with the default engine (souc-seq-leansingle shim), but
+# 2331-2392 s when SOUC_BIN points at bin/souc-lean-single-x86_64. Budget
+# for the engine you run.
 #
 # Knobs (env):
 #   DPS_STAGE_DIR             working directory (default mktemp)
@@ -178,15 +179,51 @@ TESTS_PENDING_REGRESSION=()
 # Each entry carries its own timeout (seconds), used instead of
 # DPS_TIMEOUT_SECONDS: an entry that cannot finish inside the default would
 # otherwise always be classified FAIL:timeout.
-# Format: name|src|expected_rc|diagnostic_count|timeout_s|diagnostic (fixed string)
+# The source is also compiled once with its diagnostics visible (the default
+# souc-seq-leansingle shim discards them and ignores the compiler's rc, so a
+# fail-open build regression could otherwise reach the expected rc). The
+# compiler output must contain exactly compile_error_count `error` lines, all
+# matching compile_error_pattern (a fixed string); anything else fails.
+# Format: name|src|expected_rc|diagnostic_count|timeout_s|compile_error_count|compile_error_pattern|diagnostic
 TESTS_EXPECTED_FAIL_HONEST=(
   # Saltelli estimator output violates S_i <= S_Ti in both self-tests
   # (rapamycin and semaglutide TEST 7; stdlib/epistemic/sobol.sio not yet
   # repaired). See docs/dissertation/results/sobol_pce_semaglutide_v2.md.
-  # Timeout: four lean_single runs on the workspace took 2331-2392 s
-  # (N = 512 Saltelli, two self-tests); 3600 s is ~1.5x the slowest.
-  "pbpk28_sobol_pce|stdlib/darwin_pbpk/validation/pbpk28_sobol_pce.sio|2|2|3600|FAIL: estimator output violates S_i <= S_Ti; not usable as Sobol' indices"
+  # Timeout: with the gate's default engine (the shim's
+  # bin/souc-linux-x86_64) the run took 130 s on the workspace; with
+  # bin/souc-lean-single-x86_64 (SOUC_BIN override) 2331-2392 s over four
+  # runs. 3600 s covers both (~1.5x the slower).
+  # Compile errors: 36 pre-existing `tuple index out of bounds` in
+  # stdlib/epistemic/pce.sio (lines 332-520); the compiler still emits the ELF.
+  "pbpk28_sobol_pce|stdlib/darwin_pbpk/validation/pbpk28_sobol_pce.sio|2|2|3600|36|error: tuple index out of bounds at stdlib/epistemic/pce.sio:|FAIL: estimator output violates S_i <= S_Ti; not usable as Sobol' indices"
 )
+
+# Compile `src` once and print the compiler's own output (diagnostics
+# included). With the default shim, call the ELF it wraps directly, because
+# its compile/run verbs send that output to /dev/null.
+dps_compile_diagnostics() {
+  local src="$1" tmp
+  tmp="$(mktemp)"
+  if [[ "$SOUC_BIN" == "$ROOT_DIR/scripts/ci/souc-seq-leansingle.sh" ]]; then
+    "${SOUNIO_SEQ_LEANSINGLE_ELF:-$ROOT_DIR/bin/souc-linux-x86_64}" "$src" "$tmp" 2>&1 || true
+  else
+    "$SOUC_BIN" compile "$src" -o "$tmp" 2>&1 || true
+  fi
+  rm -f "$tmp"
+}
+
+# Verdict on the compiler output: prints OK or FAIL:<reason>.
+dps_compile_verdict() {
+  local diag_log="$1" want_n="$2" pattern="$3"
+  local n_err n_known
+  n_err=$(grep -cE '(^|[^[:alnum:]_])error(\[|:)' "$diag_log" || true)
+  n_known=$(grep -cF -- "$pattern" "$diag_log" || true)
+  if [[ "$n_err" != "$want_n" || "$n_known" != "$want_n" ]]; then
+    echo "FAIL:compiler_diagnostics=${n_err}_known=${n_known}_expected_${want_n}"
+    return
+  fi
+  echo "OK"
+}
 
 # Verdict for one expected-FAIL_HONEST run: prints XFAIL or FAIL:<reason>.
 dps_xfail_verdict() {
@@ -357,7 +394,7 @@ done
 # Expected FAIL_HONEST loop (see TESTS_EXPECTED_FAIL_HONEST).
 xfails=0
 for entry in "${TESTS_EXPECTED_FAIL_HONEST[@]}"; do
-  IFS='|' read -r name src want_rc want_n entry_timeout diag <<< "$entry"
+  IFS='|' read -r name src want_rc want_n entry_timeout want_cerr cerr_pattern diag <<< "$entry"
   log="$STAGE_DIR/$name.log"
 
   echo ""
@@ -371,6 +408,17 @@ for entry in "${TESTS_EXPECTED_FAIL_HONEST[@]}"; do
     continue
   fi
 
+  diag_log="$STAGE_DIR/$name.compile.log"
+  dps_compile_diagnostics "$src" >"$diag_log"
+  cverdict=$(dps_compile_verdict "$diag_log" "$want_cerr" "$cerr_pattern")
+  if [[ "$cverdict" != "OK" ]]; then
+    echo "  FAIL: compiler output differs from the recorded diagnostics (${cverdict#FAIL:})"
+    grep -E '(^|[^[:alnum:]_])error(\[|:)' "$diag_log" | grep -vF -- "$cerr_pattern" | head -5 | sed 's/^/    /'
+    fails=$((fails + 1))
+    results+=("FAIL  $name  ${cverdict#FAIL:}")
+    continue
+  fi
+
   set +e
   timeout "$entry_timeout" "$SOUC_BIN" run "$src" >"$log" 2>&1
   rc=$?
@@ -378,7 +426,7 @@ for entry in "${TESTS_EXPECTED_FAIL_HONEST[@]}"; do
 
   verdict=$(dps_xfail_verdict "$log" "$rc" "$want_rc" "$want_n" "$diag")
   if [[ "$verdict" == "XFAIL" ]]; then
-    echo "  XFAIL: fails exactly as recorded (rc=$rc, diagnostic x$want_n, no other FAIL)"
+    echo "  XFAIL: fails exactly as recorded (compiler errors: the $want_cerr recorded; rc=$rc, diagnostic x$want_n, no other FAIL)"
     xfails=$((xfails + 1))
     results+=("XFAIL $name  documented_defect")
   else
