@@ -1,8 +1,8 @@
 diff --git a/stdlib/darwin_pbpk/release/matrix_er.sio b/stdlib/darwin_pbpk/release/matrix_er.sio
-index f811c2040..c89d6bdf9 100644
+index f811c2040..4608ea448 100644
 --- a/stdlib/darwin_pbpk/release/matrix_er.sio
 +++ b/stdlib/darwin_pbpk/release/matrix_er.sio
-@@ -32,56 +32,43 @@
+@@ -32,56 +32,53 @@
  //   Siepmann J, Peppas NA (2012) Int J Pharm 418:6 — release mechanism review
  //   DailyMed Effexor XR — 75 mg unit dose, Tmax parent ≈ 5.5 h (150 mg q24h label)
  
@@ -25,7 +25,19 @@ index f811c2040..c89d6bdf9 100644
  
  fn mer_pow(t: f64, n: f64) -> f64 with Mut, Div, Panic {
      if t <= 0.0 { return 0.0 }
--    if abs_f64(n - 1.0) < 1.0e-12 { return t }
++    // NaN t or n propagates. It must be caught before pure.sio runs: exp(NaN)
++    // casts NaN to an integer, and the 2^k scaling loop then practically never ends.
++    if t != t { return t }
++    if n != n { return n }
++    // t = +inf returns the limit before ln's halving loop, which never terminates on
++    // +inf (t - t is 0 for every finite t, NaN for +inf): +inf for n > 0, 0 for n < 0,
++    // 1 for n == 0 (as exp(0 * ln t) on the finite path).
++    if t - t != 0.0 {
++        if n > 0.0 { return t }
++        if n < 0.0 { return 0.0 }
++        return 1.0
++    }
+     if abs_f64(n - 1.0) < 1.0e-12 { return t }
 -    if abs_f64(n - 0.5) < 1.0e-12 { return sqrt_f64(t) }
 -    // General t^n via exp(n·ln t) — t > 0 only
 -    var ln_t = 0.0
@@ -36,8 +48,17 @@ index f811c2040..c89d6bdf9 100644
 -            ln_t = mer_ln2() + mer_ln_unit(x / 2.0)
 -        } else {
 -            ln_t = mer_ln_unit(x)
--        }
--    }
++    if abs_f64(n - 0.5) < 1.0e-12 {
++        // pure.sio sqrt only scales x < 1 up; above ~1e8 its 20 Newton steps from
++        // y = x have not converged. Scale t down by exact powers of 4 first.
++        var v = t
++        var s = 1.0
++        while v >= 4.0 {
++            v = v / 4.0
++            s = s * 2.0
+         }
++        return sqrt(v) * s
+     }
 -    return mer_exp(n * ln_t)
 -}
 -
@@ -55,18 +76,7 @@ index f811c2040..c89d6bdf9 100644
 -        term = term * y2
 -        sum = sum + term / (2.0 * (k as f64) + 1.0)
 -        k = k + 1
-+    // NaN t or n propagates. It must be caught before pure.sio runs: exp(NaN)
-+    // casts NaN to an integer, and the 2^k scaling loop then practically never ends.
-+    if t != t { return t }
-+    if n != n { return n }
-+    // t = +inf returns the limit before ln's halving loop, which never terminates on
-+    // +inf (t - t is 0 for every finite t, NaN for +inf): +inf for n > 0, 0 for n < 0,
-+    // 1 for n == 0 (as exp(0 * ln t) on the finite path).
-+    if t - t != 0.0 {
-+        if n > 0.0 { return t }
-+        if n < 0.0 { return 0.0 }
-+        return 1.0
-     }
+-    }
 -    return 2.0 * sum
 -}
 -
@@ -78,8 +88,6 @@ index f811c2040..c89d6bdf9 100644
 -        i = i + 1
 -    }
 -    return r
-+    if abs_f64(n - 1.0) < 1.0e-12 { return t }
-+    if abs_f64(n - 0.5) < 1.0e-12 { return sqrt(t) }
 +    // exp only ever sees a finite argument. x is NaN only for t == 1 with n = +/-inf
 +    // (IEEE pow gives 1), and x = +/-inf for an infinite n (gives +inf or 0).
 +    let x = n * ln(t)
@@ -220,7 +228,7 @@ index 71c05e339..acaaf5522 100644
  
  fn mer_exp_neg(x: f64) -> f64 with Mut, Div {
 diff --git a/website/src/lib/pbpk28_core.mjs b/website/src/lib/pbpk28_core.mjs
-index 1b39f2403..909f4c69a 100644
+index 1b39f2403..323bb74f2 100644
 --- a/website/src/lib/pbpk28_core.mjs
 +++ b/website/src/lib/pbpk28_core.mjs
 @@ -649,9 +649,10 @@ export function degenerateParams(base, { eps = 1e-3, psScale = 1e4 } = {}) {
@@ -237,7 +245,7 @@ index 1b39f2403..909f4c69a 100644
  //
  // Sources: Gohel 2008 (matrix n=0.65/k=0.199), Wang 2022 (F_XR=0.45, ka=0.63),
  // Klamerus 1999 (CL_parent 100, CL_form 43, CL_odv 28 L/h), Kirchheiner 2006
-@@ -673,27 +674,58 @@ export const VFX_PS_ODV    = Object.freeze([0.0, 700.0, 450.0, 90.0, 150.0, 6000
+@@ -673,27 +674,62 @@ export const VFX_PS_ODV    = Object.freeze([0.0, 700.0, 450.0, 90.0, 150.0, 6000
  // CYP2D6 formation scale relative to NM (Kirchheiner 2006 ratios / 3.45). NM=1.0.
  export const VFX_CL_FORM_SCALE = Object.freeze({ 0: 0.25 / 3.45, 1: 1.16 / 3.45, 2: 1.0, 3: 10.3 / 3.45 });
  
@@ -305,7 +313,11 @@ index 1b39f2403..909f4c69a 100644
 -  let lnT = 0.0;
 -  if (t > 0.0) lnT = (t > 2.0) ? (0.6931471805599453 + merLnUnit(t / 2.0)) : merLnUnit(t);
 -  return merExp(n * lnT);
-+  if (Math.abs(n - 0.5) < 1.0e-12) return pureSqrt(t);
++  if (Math.abs(n - 0.5) < 1.0e-12) {            // as matrix_er.sio: exact 4^k scaling down, then pureSqrt
++    let v = t, s = 1.0;
++    while (v >= 4.0) { v = v / 4.0; s = s * 2.0; }
++    return pureSqrt(v) * s;
++  }
 +  const x = n * pureLn(t);                      // non-finite x: as matrix_er.sio (t = 1, n = ±inf -> 1)
 +  if (x !== x) return 1.0;
 +  if (x - x !== 0.0) return x > 0.0 ? x : 0.0;

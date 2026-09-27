@@ -121,7 +121,15 @@ fn mer_pow(t: f64, n: f64) -> f64 with Mut, Div, Panic {
         return 1.0
     }
     if abs_f64(n - 1.0) < 1.0e-12 { return t }
-    if abs_f64(n - 0.5) < 1.0e-12 { return sqrt(t) }
+    if abs_f64(n - 0.5) < 1.0e-12 {                           // exact 4^k scaling down first
+        var v = t
+        var s = 1.0
+        while v >= 4.0 {
+            v = v / 4.0
+            s = s * 2.0
+        }
+        return sqrt(v) * s
+    }
     let x = n * ln(t)                                         // exp only sees a finite argument
     if x != x { return 1.0 }                                  // t == 1, n = ±inf (IEEE pow)
     if x - x != 0.0 { if x > 0.0 { return x } return 0.0 }    // infinite n
@@ -162,6 +170,11 @@ calling `exp`. x is NaN only for t = 1 with n = ±inf, where it returns 1 as IEE
 infinite n, and it returns +inf or 0. `exp` therefore only ever receives a finite argument. Every finite result is bit-identical: the parity-ref and `matrix_er` outputs are byte-identical
 with and without the guard. The regression test asserts that F(10·1e308) = 1; that `matrix_release_rate` at a NaN clock is NaN; that at t = +inf, n = 0 gives F = k; that a NaN n gives NaN at both t = +inf and t = 2 h; and that an infinite n gives F = k at t = 1, F = 1 at t = 2 and F = 0 at t = 0.5. With the guard removed, that test hangs
 until a 120 s timeout (rc=124). The hang in `pure.sio` itself is out of scope here and is flagged separately.
+
+**Large-t sqrt (added in review).** `pure.sio` `sqrt` scales only inputs below 1 upward. Above about 1e8, its
+20 Newton steps from y = x have not converged: at x = 1e20 it is 9.5e3× too high. The n ≈ 0.5 branch therefore
+first scales t down by exact powers of 4 into [1, 4). The worst error measured over [1e−15, 1e308] is 1 ulp. The
+regression test asserts 1e−15·√(1e20) = 1e−5.
 
 A Cody-Waite split of ln2 would bring exp down to about 1 ulp. That is a `pure.sio` change affecting every
 consumer, so it is out of scope here.

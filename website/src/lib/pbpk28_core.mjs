@@ -721,7 +721,11 @@ function merPow(t, n) {                        // t^n, mirrors matrix_er.sio mer
     return 1.0;
   }
   if (Math.abs(n - 1.0) < 1.0e-12) return t;
-  if (Math.abs(n - 0.5) < 1.0e-12) return pureSqrt(t);
+  if (Math.abs(n - 0.5) < 1.0e-12) {            // as matrix_er.sio: exact 4^k scaling down, then pureSqrt
+    let v = t, s = 1.0;
+    while (v >= 4.0) { v = v / 4.0; s = s * 2.0; }
+    return pureSqrt(v) * s;
+  }
   const x = n * pureLn(t);                      // non-finite x: as matrix_er.sio (t = 1, n = ±inf -> 1)
   if (x !== x) return 1.0;
   if (x - x !== 0.0) return x > 0.0 ? x : 0.0;
