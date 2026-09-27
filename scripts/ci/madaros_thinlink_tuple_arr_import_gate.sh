@@ -69,9 +69,9 @@ expect_output() {
   fi
 }
 
-# --- basic: imported tuple-array callee + same-named helper across units ---
+# --- basic: imported tuple-array callee vs. an unrelated same-named private fn ---
 compile_and_run basic "$FIX/basic/main.sio"
 expect_output basic "$FIX/basic/expected.txt"
-echo "$TAG PASS(basic): imported (f64, [f64; 3])-returning callee classifies correctly; same-named helper across two units does not cross-contaminate"
+echo "$TAG PASS(basic): imported (i64, [f64; 2])-returning callee classifies correctly, not clobbered by an unrelated, uncalled, same-named private fn collected first"
 
 echo "$TAG PASS: imported tuple-array callee through the real thin-link unit builder"
