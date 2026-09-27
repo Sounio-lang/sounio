@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawnSync, execFileSync} from 'node:child_process';
-import {overlaps, normalize, conflicts, parse, check} from '../dev/sounio_coord_github.mjs';
+import {overlaps, normalize, conflicts, parse, check, covers} from '../dev/sounio_coord_github.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'coord-github-'));
 process.on('exit', () => fs.rmSync(temp, {recursive:true, force:true}));
@@ -20,6 +20,7 @@ const fixture = path.join(temp,'fixture.json');
 fs.writeFileSync(path.join(bin,'gh'), `#!/usr/bin/env node
 const fs=require('node:fs'); const f=JSON.parse(fs.readFileSync(process.env.COORD_FIXTURE));
 const args=process.argv.slice(2); let data;
+if(f.patchFail && args.includes('-H')) {process.stderr.write('diff too large');process.exit(1);}
 if(f.fail) {process.stderr.write('API unavailable'); process.exit(1);}
 if(args.includes('graphql')) {
  const query=args.find(a=>a.startsWith('query='));
@@ -81,7 +82,7 @@ test('same branch in a fork is not an own carrier',()=>{
 test('declared future write sets and symbols conflict before implementation',()=>{
  const p=pr(['other']);p.body='Sounio-Coord-Files: self-hosted/ir/**\nSounio-Coord-Symbols: lower_let_stmt';
  result({prs:[p]},files,3);
- assert.deepEqual(conflicts({...p,files:['other']},[],['lower_let_stmt']),['symbol:lower_let_stmt']);
+ assert.deepEqual(conflicts({...p,files:['other'],trustedDeclarations:true},[],['lower_let_stmt']),['symbol:lower_let_stmt']);
  result({prs:[pr(['other'])],patch:'@@ fn lower_let_stmt()'},['--symbol','lower_let_stmt',...files],3);
 });
 test('paginated PR files and renamed source path are checked',()=>{
@@ -128,4 +129,24 @@ test('branch head advanced after PR inventory is checked separately',()=>{
 test('fork-only origin cannot silently scan an isolated GitHub store',()=>{
  const execute=(command,args)=>args.includes('--show-toplevel')?temp:args.includes('get-url')?'https://github.com/other/sounio.git':'origin';
  assert.throws(()=>check(parse(files),execute),/canonical Sounio-lang/);
+});
+
+test('fork body declarations cannot manufacture ownership; changed files still count',()=>{
+ const p=pr(['other']);p.headRepository.nameWithOwner='untrusted/sounio';
+ p.body='Sounio-Coord-Files: .\nSounio-Coord-Symbols: lower_let_stmt';
+ result({prs:[p]},['--symbol','lower_let_stmt',...files]);
+ p.files.nodes=[{path:'self-hosted/ir/lower.sio',changeType:'MODIFIED'}];result({prs:[p]},files,3);
+});
+test('directory/glob receipts cover child writes, never the reverse',()=>{
+ assert.ok(covers('self-hosted/ir/**','self-hosted/ir/lower.sio'));
+ assert.ok(!covers('self-hosted/ir/lower.sio','self-hosted/ir/**'));
+ result({},['remote-check','--files','self-hosted/ir/**'],0,{state:'glob',cli:true});
+ result({},['scope','--agent','a','--lane','glob','--intent','test',...files],0,{state:'glob',cli:true});
+ result({},['remote-check',...files],0,{state:'narrow',cli:true});
+ result({},['scope','--agent','a','--lane','narrow','--intent','test','--files','self-hosted/ir/**'],3,{state:'narrow',cli:true});
+});
+test('exact reviewed wide PR skips unavailable symbol diff; stale review does not',()=>{
+ const p=pr(['other']);p.changedFiles=3728;
+ result({prs:[p],patchFail:true},['--symbol','lower_let_stmt','--reviewed',`pr:2708@${p.headRefOid}`,'--review-reason','full external review',...files]);
+ result({prs:[p],patchFail:true},['--symbol','lower_let_stmt','--reviewed','pr:2708@old','--review-reason','old review',...files],3);
 });

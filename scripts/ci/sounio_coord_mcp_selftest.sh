@@ -5,6 +5,20 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 
+# Exercise the brief/MCP wiring without credentials or other live lanes.
+TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/sounio-coord-mcp-test.XXXXXX")"
+trap 'rm -rf "$TEST_ROOT"' EXIT
+mkdir -p "$TEST_ROOT/bin"
+export SOUNIO_COORD_DIR="$TEST_ROOT/state"
+cat > "$TEST_ROOT/bin/gh" <<'GH'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" == api && "$2" == graphql && "$*" == *pullRequests* ]] || exit 1
+printf '%s\n' '{"data":{"repository":{"defaultBranchRef":{"name":"main","target":{"oid":"fixture"}},"pullRequests":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}}'
+GH
+chmod +x "$TEST_ROOT/bin/gh"
+export PATH="$TEST_ROOT/bin:$PATH"
+
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
 [[ -f .claude/ATTENTION_CHARTER.md ]] || fail "missing ATTENTION_CHARTER.md"
@@ -50,12 +64,12 @@ else:
     print("sounio_coord_mcp import OK")
 PY
 
-bin/sounio-coord brief >/tmp/sounio_coord_mcp_brief.out
+bin/sounio-coord brief >"$TEST_ROOT/brief.out"
 grep -q 'Sounio coordination status\|Claims' /tmp/sounio_coord_mcp_brief.out \
   || fail "coord brief unexpected output"
 
 # attention_brief must not require freeze
-bash scripts/dev/attention_brief.sh >/tmp/attention_brief.out
+bash scripts/dev/attention_brief.sh >"$TEST_ROOT/attention.out"
 grep -q 'Attention Brief' /tmp/attention_brief.out || fail "attention_brief header missing"
 grep -q 'active_p0' /tmp/attention_brief.out || fail "attention_brief missing active_p0"
 

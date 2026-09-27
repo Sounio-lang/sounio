@@ -31,26 +31,31 @@ export function normalize(file, root) {
     throw new Error(`Invalid write path: ${file}`);
   return file;
 }
+function scopePrefix(s) {
+  const i = s.search(/[*?[{]/);
+  if (i < 0) return s;
+  const literal = s.slice(0, i);
+  return literal.slice(0, literal.lastIndexOf('/') + 1).replace(/\/$/, '');
+}
+export function covers(granted, requested) {
+  const a = scopePrefix(granted), b = scopePrefix(requested);
+  if (!a || a === '.') return true;
+  if (!b || b === '.') return false;
+  return a === b || b.startsWith(`${a}/`);
+}
 export function overlaps(a, b) {
-  if (a === '.' || b === '.') return true;
-  // Deliberately conservative: a glob reserves its literal directory prefix.
-  const prefix = s => {
-    const i = s.search(/[*?[{]/);
-    if (i < 0) return s;
-    const literal = s.slice(0, i);
-    return literal.slice(0, literal.lastIndexOf('/') + 1).replace(/\/$/, '');
-  };
-  a = prefix(a); b = prefix(b);
-  return !a || !b || a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+  // Deliberately conservative: globs reserve their literal directory prefix.
+  return covers(a, b) || covers(b, a);
 }
 function declarations(body, field) {
   return [...(body || '').matchAll(new RegExp(`^Sounio-Coord-${field}: (.+)$`, 'gm'))]
     .flatMap(m => m[1].trim().split(/\s+/));
 }
 export function conflicts(candidate, files, symbols) {
-  const paths = [...candidate.files, ...declarations(candidate.body, 'Files').map(p => path.posix.normalize(p).replace(/\/$/, ''))];
+  const body = candidate.trustedDeclarations ? candidate.body : '';
+  const paths = [...candidate.files, ...declarations(body, 'Files').map(p => path.posix.normalize(p).replace(/\/$/, ''))];
   return [...files.filter(f => paths.some(p => overlaps(f, p))).map(f => `path:${f}`),
-    ...symbols.filter(s => declarations(candidate.body, 'Symbols').includes(s) ||
+    ...symbols.filter(s => declarations(body, 'Symbols').includes(s) ||
       (candidate.patch || '').includes(s)).map(s => `symbol:${s}`)];
 }
 export function snapshot(repo, brief = false) {
@@ -75,7 +80,7 @@ export function snapshot(repo, brief = false) {
         pages(`repos/${repo}/pulls/${pr.number}/files`).flatMap(f => [f.filename, f.previous_filename].filter(Boolean)) :
         pr.files.nodes.map(f => f.path);
 
-      prs.push({...pr, id: `pr:${pr.number}`, sha: pr.headRefOid, files, incomplete: pr.changedFiles >= 3000 || files.length >= 3000});
+      prs.push({...pr, id: `pr:${pr.number}`, sha: pr.headRefOid, files, trustedDeclarations: pr.headRepository?.nameWithOwner?.toLowerCase() === repo.toLowerCase(), incomplete: pr.changedFiles >= 3000 || files.length >= 3000});
     }
     cursor = data.pullRequests.pageInfo.hasNextPage ? data.pullRequests.pageInfo.endCursor : null;
     if (data.pullRequests.pageInfo.hasNextPage && !cursor) throw new Error('Missing PR cursor');
@@ -104,7 +109,7 @@ export function check(options, execute = run) {
       const receipt = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
       if (Object.entries(identity).every(([k,v]) => receipt[k] === v) &&
           Date.now() >= receipt.time && Date.now() - receipt.time < 120000 &&
-          files.every(f => receipt.files.includes(f)) &&
+          files.every(f => receipt.files.some(scope => covers(scope, f))) &&
           options.symbols.every(s => receipt.symbols.includes(s))) {
         console.log('REMOTE_CHECK=PASS receipt_age_under_120s'); return;
       }
@@ -160,19 +165,19 @@ export function check(options, execute = run) {
     const own = candidate.id === `branch:${branch}` ||
       (candidate.headRefName === branch && candidate.headRepository?.nameWithOwner?.toLowerCase() === repo.toLowerCase());
     if (own && candidate.sha === head) continue;
+    const key = `${candidate.id}@${candidate.sha}`;
+    if (options.reviewed.includes(key) && options.reason.trim()) {
+      console.log(`REMOTE_REVIEWED ${key} reason=${JSON.stringify(options.reason)}`);
+      continue;
+    }
     if (options.symbols.length && candidate.number) {
       candidate.patch = run('gh', ['api', `repos/${repo}/pulls/${candidate.number}`, '-H', 'Accept: application/vnd.github.diff']);
     }
     const hits = conflicts(candidate, files, options.symbols);
     if (candidate.incomplete) hits.push('incomplete-diff:requires-full-review');
     if (!hits.length) continue;
-    const key = `${candidate.id}@${candidate.sha}`;
-    if (options.reviewed.includes(key) && options.reason.trim()) {
-      console.log(`REMOTE_REVIEWED ${key} reason=${JSON.stringify(options.reason)} hits=${hits.join(',')}`);
-    } else {
-      console.error(`REMOTE_OVERLAP ${key} ${candidate.url} ${hits.join(',')}`);
-      blocked = true;
-    }
+    console.error(`REMOTE_OVERLAP ${key} ${candidate.url} ${hits.join(',')}`);
+    blocked = true;
   }
   if (blocked) throw new Error('Remote overlap: join the carrier or obtain a scoped handoff; --reviewed ID@SHA --review-reason TEXT records an explicit reviewed exception');
   if (receiptFile) {
@@ -184,6 +189,7 @@ export function check(options, execute = run) {
   console.log('REMOTE_CHECK=PASS (snapshot, not a distributed lock)');
 }
 export function parse(args) {
+  args = [...args];
   const options = {files: [], symbols: [], reviewed: [], reason: '', brief: false};
   while (args.length) {
     const arg = args.shift();

@@ -215,7 +215,8 @@ reported local-only fixture; a configured but inaccessible origin blocks writes.
   plain-text body lines so other machines can discover **planned** writes:
   `Sounio-Coord-Files: path/one path/two` and
   `Sounio-Coord-Symbols: symbol_one symbol_two`. Paths cannot contain spaces.
-  Recheck after publication. Do not create a competing implementation carrier
+  Only same-repository PR bodies supply trusted intent declarations; fork PRs
+  are still checked for actual file/symbol changes. Recheck after publication. Do not create a competing implementation carrier
   when a matching PR already exists; join it or obtain a scoped handoff.
 - A reviewed exception is explicit and head-pinned:
   `remote-check --reviewed pr:123@FULL_SHA --review-reason "handoff/evidence" --files ...`.
