@@ -196,21 +196,32 @@ independent local helpers (stdlib submodules, examples, self-contained tests) th
 not claim to mirror `pure.sio`, so this dispatch does not touch them. A census of which of them can receive +∞ is a
 separate task.
 
-Two copies **declare** themselves verbatim ports of `pure.sio` `ln`. Both are introduced by PR #2722 and are not on
-`main` at `9c5ffa2360`:
+PR #2722 introduced two copies that **declare** themselves verbatim ports of `pure.sio` `ln`. Neither is on `main`
+at `9c5ffa2360`. At the #2722 head reviewed first, `0466ac7d`, both existed:
 
 | copy | declared as | reachable with +∞? |
 |---|---|---|
 | `tests/run-pass/dissertation_pbpk28_parity_ref_venlafaxine.sio` `mer_ln` | "verbatim stdlib/math/pure.sio ln()/exp()" | No. Its only caller `mer_pow` returns early for NaN and for `t - t != 0.0` (+∞) before calling `mer_ln`. |
 | `website/src/lib/pbpk28_core.mjs` `pureLn` | "line-for-line ports", "bit-identical to Madaros on the K-P grid" | No. Its only caller `merPow` has the same guard. |
 
-**Decision: mirror the guard in both.** Neither copy can hang today, so this is not a correctness fix. Both files
-claim to be verbatim, though, and once `pure.sio` carries the guard that claim is false without it. The guard is also
-inert for finite input, so mirroring it cannot move any parity output. `docs/audit/repro/math_pure_ln_parity_2722.patch`
-holds the two one-line additions against the PR #2722 head `0466ac7d`. Whichever of the two PRs lands second
-should carry them.
+**Update, #2722 head `8f3159d1` (after it merged the #2699 venlafaxine rework).** The parity reference no longer has
+a local copy. It imports `darwin_pbpk::release::matrix_er::*`, and `matrix_er.sio` imports `math::pure::{exp, ln, sqrt}`,
+so it receives this guard directly and needs no edit. **One textual copy remains: `pureLn` in `pbpk28_core.mjs`.** Its
+body is byte-identical at `0466ac7d` and `8f3159d1`. The check was
+`diff <(git show 0466ac7d:… | sed -n '/^function pureLn/,/^}/p') <(git show 8f3159d1:… | …)`, which printed nothing, so
+the JS grid result below still applies. `main` carries no `pureLn` (`git show origin/main:website/src/lib/pbpk28_core.mjs`
+has none).
 
-This was verified in a scratch worktree of `0466ac7d` with this fix and the patch applied, under Madaros `f427f163`:
+**Decision: mirror the guard in `pureLn`.** It cannot hang today, so this is not a correctness fix. The file claims to
+be a line-for-line port, though, and once `pure.sio` carries the guard that claim is false without it. The guard is
+also inert for finite input, so mirroring it cannot move any parity output.
+`docs/audit/repro/math_pure_ln_parity_2722.patch` now holds that single one-line hunk, regenerated against
+`8f3159d1`. `git apply --check` is clean there, and `node --check` passes on the patched file. Whichever of the two PRs
+lands second should carry it. The earlier two-file version, against `0466ac7d`, no longer applies, because `mer_ln` is
+gone.
+
+The original two-file patch was verified in a scratch worktree of `0466ac7d` under Madaros `f427f163`, with this fix
+applied:
 
 - `dissertation_pbpk28_parity_ref_venlafaxine.sio`: rc 0, and all 3 209 stdout lines identical to the unpatched PR head.
 - `darwin_venlafaxine_xr_matrix_small_t.sio`: rc 0, and all 54 lines identical.
