@@ -702,10 +702,17 @@ function merPow(t, n) {                        // t^n via exp(n·ln t), t>0
   if (t > 0.0) lnT = (t > 2.0) ? (0.6931471805599453 + merLnUnit(t / 2.0)) : merLnUnit(t);
   return merExp(n * lnT);
 }
-function merExpNeg(x) {                         // exp(x) for x<0, 20-term Taylor
+// exp(x) for x<0 — port of scenarios/venlafaxine_xr.sio mer_exp_neg, same
+// operations in the same order: halve x until |x| <= 0.5 (m halvings), sum the
+// 19-term Taylor series, then square m times: exp(x) = exp(x/2^m)^(2^m). For
+// |x| <= 0.5 (ka·dt <= 0.5) no halving happens and it is the plain series.
+function merExpNeg(x) {
   if (x >= 0.0) return 1.0;
+  let r = x, m = 0;
+  while (r < -0.5) { r = 0.5 * r; m++; }
   let y = 1.0, term = 1.0;
-  for (let k = 1; k < 20; k++) { term = term * x / k; y = y + term; }
+  for (let k = 1; k < 20; k++) { term = term * r / k; y = y + term; }
+  while (m > 0) { y = y * y; m--; }
   return y;
 }
 
@@ -877,17 +884,13 @@ export function runVenlafaxineScenario(sampleTimes, { dt = 0.5, pheno = 2 } = {}
 // The gut pool is not in P: both AUCs are linear in the interval's actual input
 // U, so U cancels in the ratio and the closed form does not depend on it.
 // `certified` fails closed unless AUC_parent > err_parent (interval denominator).
-// Step size: finite and > 0, and ka·dt ≤ 1. Absorption uses merExpNeg(−ka·dt),
-// a 20-term Taylor series with no range reduction (ported verbatim from the
-// stdlib). Its remainder is bounded by |x|^20/20!, ≤ 4.2e-19 for |x| ≤ 1, below
-// f64 resolution of e^−1; at |x| = 15 the series is meaningless (dt = 24 h
-// created ~28 000 mg·h/L of AUC from 750 mg). ka·dt ≤ 1 is dt ≤ 1.587 h; the
-// gate uses ≤ 0.5 h.
+// Step size: finite and > 0. Absorption uses merExpNeg(−ka·dt), which range-
+// reduces like the stdlib, so there is no ka·dt ceiling: the series only ever
+// sees |x| ≤ 0.5, where its remainder is bounded by 0.5^20/20! ≈ 3.9e-25. The
+// stdlib covers dt = 1 h and 24 h (tests/run-pass/darwin_venlafaxine_xr_large_dt.sio);
+// the parity gate uses dt ≤ 0.5 h, where no halving happens.
 function vfxCheckDt(dt) {
   if (!(Number.isFinite(dt) && dt > 0)) throw new RangeError(`dt must be finite and > 0, got ${dt}`);
-  if (VFX_KA_ABS * dt > 1.0) {
-    throw new RangeError(`ka·dt must be <= 1 for the absorption series, got ${VFX_KA_ABS}·${dt} = ${VFX_KA_ABS * dt}`);
-  }
 }
 
 // CYP2D6 phenotype enum: 0 = PM, 1 = IM, 2 = NM, 3 = UM. Checked as a number,
