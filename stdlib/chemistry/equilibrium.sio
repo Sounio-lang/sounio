@@ -103,8 +103,17 @@ pub fn k_from_delta_g(dg: f64, udg: f64, t: f64, ut: f64) -> (f64, f64) with Mut
 // Real deltaG from K
 pub fn delta_g_from_k(k: f64, uk: f64, t: f64, ut: f64) -> (f64, f64) with Mut, Div, Panic {
     if k <= 0.0 || t <= 0.0 { return (0.0, 0.0); }
-    let dg = 0.0 - r_const() * t * equilibrium_ln_approx(k);
-    let udg = equilibrium_abs_f64(r_const() * t * (uk / (k * equilibrium_abs_f64(equilibrium_ln_approx(k))))) + equilibrium_abs_f64(r_const() * equilibrium_ln_approx(k)) * ut;
+    let lnk = equilibrium_ln_approx(k);
+    let dg = 0.0 - r_const() * t * lnk;
+    // Copilot review, sounio-lang/sounio#2694: the K term divided by |ln K|,
+    // but for dG = -RT ln K the sensitivities are dG/dK = -RT/K and
+    // dG/dT = -R ln K; ln K does not appear in the first. At K = 1 the old
+    // term was 0/0 (uk = 0) or +Inf (uk > 0). K and T are independent inputs,
+    // so the two contributions combine by root-sum-square, as in
+    // k_from_delta_g above.
+    let term_k = equilibrium_abs_f64(r_const() * t / k) * uk;
+    let term_t = equilibrium_abs_f64(r_const() * lnk) * ut;
+    let udg = equilibrium_sqrt_approx(term_k * term_k + term_t * term_t); // GUM RSS combination
     (dg, udg)
 }
 
@@ -138,8 +147,15 @@ pub fn newton_equil_solve(guess: f64, tol: f64) -> f64 with Mut, Div, Panic {
 pub fn nernst(e0: f64, ue0: f64, n: i64, q: f64, uq: f64, t: f64, ut: f64) -> (f64, f64) with Mut, Div, Panic {
     if n == 0 { return (e0, ue0); }
     let rt_nf = (r_const() * t) / (n as f64 * 96485.0);
-    let e = e0 - rt_nf * equilibrium_ln_approx(q);
-    let ue = ue0 + equilibrium_abs_f64(rt_nf * (uq / (q * equilibrium_abs_f64(equilibrium_ln_approx(q))))) + equilibrium_abs_f64( (equilibrium_ln_approx(q) * r_const() / (n as f64 * 96485.0)) * ut );
+    let lnq = equilibrium_ln_approx(q);
+    let e = e0 - rt_nf * lnq;
+    // Same defect as delta_g_from_k (same review): dE/dQ = -(RT/nF)/Q, with
+    // no 1/|ln Q| factor, so Q = 1 gave +Inf for any uq > 0. E0, Q and T are
+    // independent inputs and combine by root-sum-square, not linearly.
+    let term_e0 = ue0;
+    let term_q = equilibrium_abs_f64(rt_nf / q) * uq;
+    let term_t = equilibrium_abs_f64(lnq * r_const() / (n as f64 * 96485.0)) * ut;
+    let ue = equilibrium_sqrt_approx(term_e0 * term_e0 + term_q * term_q + term_t * term_t); // GUM RSS combination
     (e, ue)
 }
 
@@ -259,6 +275,36 @@ pub fn test_k_dg_sqrt_magnitude_range() -> bool with Mut, Div, Panic {
     ok
 }
 
+// Regression for the K and Q sensitivities (Copilot review, same PR). At
+// K = 1 (and Q = 1) ln = 0, where the old 1/|ln| factor gave +Inf. With one
+// input uncertain, the RSS is that single term, so each identity below must
+// hold to rounding: udg = RT*uk/K and ue = (RT/nF)*uq/Q. The 1e-12 is a few
+// ulps times the handful of roundings in the chain, not a fitted value.
+pub fn test_delta_g_k_sensitivity() -> bool with Mut, Div, Panic {
+    let ks: [f64; 3] = [1.0, 2.0, 0.25];
+    var ok = true;
+    var i = 0;
+    while i < 3 {
+        let (_, udg) = delta_g_from_k(ks[i], 0.1, 298.0, 0.0);
+        let ratio = udg * ks[i] / (r_const() * 298.0 * 0.1);
+        if !equilibrium_check_near(ratio, 1.0, 1e-12) { ok = false; }
+        i = i + 1;
+    }
+    // Both inputs uncertain: RSS is strictly below the linear sum.
+    let (_, u_both) = delta_g_from_k(2.0, 0.1, 298.0, 1.0);
+    let (_, u_k) = delta_g_from_k(2.0, 0.1, 298.0, 0.0);
+    let (_, u_t) = delta_g_from_k(2.0, 0.0, 298.0, 1.0);
+    if !equilibrium_check_near(u_both * u_both / (u_k * u_k + u_t * u_t), 1.0, 1e-12) { ok = false; }
+    if !(u_both < u_k + u_t) { ok = false; }
+    ok
+}
+
+pub fn test_nernst_q_sensitivity() -> bool with Mut, Div, Panic {
+    let (_, ue) = nernst(1.0, 0.0, 1, 1.0, 0.1, 298.0, 0.0);
+    let expect = r_const() * 298.0 / 96485.0 * 0.1;
+    equilibrium_check_near(ue / expect, 1.0, 1e-12)
+}
+
 fn main() -> i32 with Mut, Div, Panic, IO {
     var p: i32 = 0; var f: i32 = 0;
     if test_k_dg() { p = p + 1 } else { f = f + 1; println("FAIL kdg") }
@@ -270,6 +316,8 @@ fn main() -> i32 with Mut, Div, Panic, IO {
     if test_k_dg_negative_uncertainty_sign() { p = p + 1 } else { f = f + 1; println("FAIL k_dg negative uncertainty sign") }
     if test_k_dg_rss_combination() { p = p + 1 } else { f = f + 1; println("FAIL k_dg rss combination") }
     if test_k_dg_sqrt_magnitude_range() { p = p + 1 } else { f = f + 1; println("FAIL k_dg sqrt magnitude range") }
+    if test_delta_g_k_sensitivity() { p = p + 1 } else { f = f + 1; println("FAIL delta_g k sensitivity") }
+    if test_nernst_q_sensitivity() { p = p + 1 } else { f = f + 1; println("FAIL nernst q sensitivity") }
     if test_speciation() { p = p + 1 } else { f = f + 1; println("FAIL speciation") }
     if f == 0 { println("EQUILIBRIUM + ELECTRO + SOLVERS REAL ALL PASS (phase3+)") } else { println("EQUIL FAILS") }
     return f
