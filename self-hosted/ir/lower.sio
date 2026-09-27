@@ -8440,13 +8440,14 @@ impl Lowerer {
     //   STRUCT_COPY_BLOCK_SHAPE  a fixed-array field whose element shape has no
     //                            value copy (aggregate_array_code < 0);
     //   STRUCT_COPY_BLOCK_LAYOUT the type has no registered layout.
-    // Walks exactly the fields emit_struct_value_copy_deep follows.
+    // Walks exactly the fields emit_struct_value_copy_deep follows. With
+    // `report`, prints the path to the blocking field, innermost first.
     //
     // Fields the copy deliberately SHARES are not blockers: Box and Knowledge
     // (reference semantics / side-channel variance, see
     // nested_struct_field_slot_count), and array elements that are not
     // registered structs (String, f128, Option<..>, generic parameters).
-    fn struct_value_copy_blocker(self, type_name: Name, slot_count: i64, depth: i64) -> i64 with Mut, Panic, Div, Alloc {
+    fn struct_value_copy_blocker(self, type_name: Name, slot_count: i64, depth: i64, report: bool) -> i64 with Mut, Panic, Div, Alloc, IO {
         if type_name.len <= 0 || slot_count <= 0 { return STRUCT_COPY_BLOCK_LAYOUT }
         var i: i64 = 0
         while i < slot_count && i < 128 {
@@ -8471,11 +8472,21 @@ impl Lowerer {
                     if depth >= self.struct_deep_copy_max_depth() {
                         why = STRUCT_COPY_BLOCK_DEPTH
                     } else {
-                        why = self.struct_value_copy_blocker(inner_name, inner_slots, depth + 1)
+                        why = self.struct_value_copy_blocker(inner_name, inner_slots, depth + 1, report)
                     }
                 }
             }
-            if why != 0 { return why }
+            if why != 0 {
+                if report {
+                    let fname = self.struct_layout_pos_field_name(pos)
+                    print("  in field `")
+                    print(str_from_bytes(type_name.buf, type_name.len))
+                    print(".")
+                    print(str_from_bytes(fname.buf, fname.len))
+                    print("`\n")
+                }
+                return why
+            }
             i = i + 1
         }
         0
@@ -8483,17 +8494,54 @@ impl Lowerer {
 
     // Budget the COMPLETE value copy before emitting any of it. Falling back to
     // a flat copy would preserve nested aggregate handles and silently alias.
+    //
+    // Both refusals name the function, the copied type and, for an incomplete
+    // copy, the field path that blocks it: lowering has no source span here, so
+    // the type and field names are what lets a user find the copy site.
     fn emit_struct_value_copy_budgeted(self, src_reg: i64, type_name: Name, slot_count: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
-        if lo.struct_value_copy_blocker(type_name, slot_count, 0) != 0 {
-            print("error: aggregate value copy cannot be made complete (nesting depth or unsupported array element shape); refusing shallow aliasing fallback\n")
+        let why = lo.struct_value_copy_blocker(type_name, slot_count, 0, false)
+        if why != 0 {
+            let fn_name = (*lo.current_func).name
+            print("error: by-value copy of `")
+            print(str_from_bytes(type_name.buf, type_name.len))
+            print("` in function `")
+            print(str_from_bytes(fn_name.buf, fn_name.len))
+            print("` cannot be made complete: ")
+            if why == STRUCT_COPY_BLOCK_DEPTH {
+                print("structs nest more than ")
+                print_int(lo.struct_deep_copy_max_depth() + 1)
+                print(" levels deep, past the value copy's depth limit")
+            } else if why == STRUCT_COPY_BLOCK_SHAPE {
+                print("a fixed-array field holds nested non-scalar arrays or tuples, which have no value copy")
+            } else {
+                print("the type has no registered struct layout")
+            }
+            print("; refusing to fall back to a shallow copy that would alias\n")
+            if why != STRUCT_COPY_BLOCK_LAYOUT {
+                print("  blocking field path (innermost first):\n")
+                lo.struct_value_copy_blocker(type_name, slot_count, 0, true)
+            }
+            print("  help: pass the value by reference (&T or &!T), or copy the inner fields explicitly\n")
             lowerer_mark_hard_error(&! lo)
             return (lo, src_reg)
         }
         let deep_cost = lo.struct_deep_copy_cost(type_name, slot_count, 0)
         let deep_room = IR_MAX_INSTRS - lo.struct_deep_copy_instr_headroom() - lo.current_func.instr_count
         if deep_cost > deep_room {
-            print("error: aggregate value copy exceeds remaining IR budget; refusing shallow aliasing fallback\n")
+            let fn_name = (*lo.current_func).name
+            print("error: by-value copy of `")
+            print(str_from_bytes(type_name.buf, type_name.len))
+            print("` in function `")
+            print(str_from_bytes(fn_name.buf, fn_name.len))
+            print("` needs about ")
+            print_int(deep_cost)
+            print(" IR instructions but only ")
+            print_int(deep_room)
+            print(" remain under IR_MAX_INSTRS (")
+            print_int(IR_MAX_INSTRS)
+            print("); refusing to fall back to a shallow copy that would alias\n")
+            print("  help: split the function into smaller functions, or pass the value by reference (&T or &!T)\n")
             lowerer_mark_hard_error(&! lo)
             return (lo, src_reg)
         }
