@@ -31,7 +31,13 @@
 //   phospholipid (f_np)  ε=0.55  Rodgers & Rowland 2006 — most variable  ← weakest
 //   protein/solids       ε=0.65  by difference (1 − water − lipid)
 //
-// References: Rodgers T & Rowland M (2006) J Pharm Sci 95:1743-1764;
+// UNVERIFIED (audit 2026-09-26): these values disagree with the rr_fw_e /
+// rr_fw_i / rr_fn_l / rr_fn_ph accessors in rodgers_rowland.sio on 33 of 56
+// shared entries, and neither table has been checked against the primary
+// source. rr_neutral does not read this table.
+//
+// References: Rodgers T & Rowland M (2006) J Pharm Sci 95(6):1238-1257,
+//               doi:10.1002/jps.20502 (PMID 16639716);
 //             Poulin P & Theil F-P (2002) J Pharm Sci 91:129-156;
 //             ICRP Publication 89 (2002) reference man; Brown 1997 (volumes).
 //
@@ -111,18 +117,32 @@ fn tc_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
 fn main() -> i32 with IO, Mut, Div, Panic {
     var fails = 0
 
-    // T1 — mass-balance invariant: every organ's fractions sum to ~1.0.
+    // T1 — composition consistency. f_protein is defined by difference, so a
+    //   loose "sums to ~1" check cannot fail. Instead require that every stored
+    //   fraction is non-negative, that the measured fractions (water + lipid)
+    //   do not exceed 1, and that the stored residual equals 1 − water − lipid
+    //   exactly (catches a water/lipid edit without the matching residual).
+    //   This checks internal consistency only; it does not validate the values
+    //   against the literature.
+    var t1_bad = 0
     var organ = 0
     while organ < 14 {
         let c = tc_comp(organ)
-        let total = c.f_ew + c.f_iw + c.f_nl + c.f_np + c.f_protein
-        if tc_abs(total - 1.0) > 0.06 { fails = fails + 1 }
+        let measured = c.f_ew + c.f_iw + c.f_nl + c.f_np
+        if c.f_ew < 0.0 || c.f_iw < 0.0 || c.f_nl < 0.0 || c.f_np < 0.0 || c.f_protein < 0.0 {
+            t1_bad = t1_bad + 1
+        } else if measured > 1.0 {
+            t1_bad = t1_bad + 1
+        } else if tc_abs(c.f_protein - (1.0 - measured)) > 1.0e-9 {
+            t1_bad = t1_bad + 1
+        }
         organ = organ + 1
     }
-    if fails == 0 {
-        println("T1 PASS: 14/14 organ compositions sum to 1.0 (mass balance)")
+    if t1_bad == 0 {
+        println("T1 PASS: 14/14 organs non-negative, water+lipid <= 1, residual = 1 - water - lipid")
     } else {
-        println("T1 FAIL: composition mass-balance violated")
+        println("T1 FAIL: composition inconsistent")
+        fails = fails + 1
     }
 
     // T2 — physiological ordering: adipose is the most lipid-rich tissue.
