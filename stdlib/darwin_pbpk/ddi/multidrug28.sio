@@ -762,27 +762,28 @@ pub fn md_step(md: &!MultiDrug28, dt: f64) with Mut, Div, Panic {
     (*md).t = t_next
 }
 
-// Advances to exactly t_end with steps of dt. The number of full steps is
-// fixed from the initial span: n starts at the integer nearest span/dt and is
-// lowered until t0 + n·dt <= t_end + 4u·max(|t0|, |t_end|), so the full steps
-// can never pass the target (a rounding allowance added to span/dt instead,
-// as first written, grew with t0/dt: from t0 = 2^53, run_to(t0 + 2, 2) took
-// three 2 h steps -- 6 mg of a 1 mg/h infusion -- and then moved the clock
-// back; PR #2695 review). Any real
-// remainder after them is integrated as one shortened step, so dosing times
-// off the dt grid are honoured and nothing is discarded. "Real" means above
-// the round-off scale of t: 4u·max(|t0|, |t_end|) plus the drift the n full
-// steps have actually accumulated, |t - (t0 + n·dt)|. A remainder at or below
-// that scale is round-off, not time, and t is then snapped to t_end. So a
-// target on the grid gives exactly the md_step(dt) sequence ((0.6, 0.02):
-// 30 steps), (0.61, 0.02) gives 30 steps plus a 0.01 step, and
-// (1.0000000005, 1.0) gives a 1.0 step plus a 5e-10 step. (Until 2026-09-27
-// a tolerance of 1e-9·dt decided both the step count and the snap, so that
-// last case took one step and dropped the 5e-10 h: PR #2695 review.)
-// A dt far larger than the span takes n = 0 full steps and one step of the
-// whole span. A non-finite t_end (NaN, +-Inf) panics, as does a non-finite
-// or non-positive dt. A finite target not strictly ahead of t is a no-op, so
-// the clock never moves backwards.
+// Advances to exactly t_end with steps of dt. A full step is taken only while
+// its endpoint on the actual clock does not pass the target, t + dt <= t_end,
+// compared exactly (no allowance), so no executed full step integrates time
+// beyond t_end. (Earlier versions fixed the count from span/dt with a
+// rounding allowance: from t0 = 2^53, run_to(t0 + 2, dt 2) took three steps,
+// and then, with the allowance only on the target, run_to(t0 + 2, dt 3) still
+// took one 3 h step -- 3 mg of a 1 mg/h infusion for a 2 h clock advance --
+// and rewound the clock; PR #2695 review.) Near-grid round-off is handled by
+// the remainder: whatever is left, t_end - t, is integrated as one shortened
+// step when it exceeds what the clock's own rounding can explain: the drift
+// the n full steps have accumulated, |t - (t0 + n·dt)|, plus 2u·max(|t0|,
+// |t_end|) for measuring it (zero when n = 0, since t_end - t0 is then real
+// time). At or below that it is round-off, and t is snapped to t_end.
+// So (0.61, 0.02) is 30 steps of 0.02 plus one of 0.01, (1.0000000005, 1.0)
+// a 1.0 step plus a 5e-10 step, and a dt far larger than the span one step
+// of the whole span. (0.6, 0.02) is still 30 steps, but the 30th is the
+// remainder step 0.6 - t: thirty accumulated steps of 0.02 put the clock at
+// 0.6000000000000002, past 0.6, so an exact no-overshoot rule cannot take a
+// 30th full step there (and 30·fl(0.02) exceeds fl(0.6) by 3.5e-17 even in
+// exact arithmetic). A non-finite t_end (NaN, +-Inf) panics, as does a
+// non-finite or non-positive dt. A finite target not strictly ahead of t is
+// a no-op, so the clock never moves backwards.
 pub fn md_run_to(md: &!MultiDrug28, t_end: f64, dt: f64) with Mut, Div, Panic {
     if !(is_finite_f64(dt) && dt > 0.0) { panic("multidrug28: md_run_to needs a finite dt > 0") }
     if !(is_finite_f64(t_end)) { panic("multidrug28: md_run_to needs a finite t_end") }
@@ -792,21 +793,18 @@ pub fn md_run_to(md: &!MultiDrug28, t_end: f64, dt: f64) with Mut, Div, Panic {
     let at0 = if t0 < 0.0 { 0.0 - t0 } else { t0 }
     let ate = if t_end < 0.0 { 0.0 - t_end } else { t_end }
     let t_scale = if at0 > ate { at0 } else { ate }
-    let span = t_end - t0
-    let slack = 4.0 * u * t_scale
-    var n_full = (span / dt + 0.5) as i64
-    while n_full > 0 && t0 + (n_full as f64) * dt > t_end + slack {
-        n_full = n_full - 1
-    }
-    var k: i64 = 0
-    while k < n_full {
+    var n_full: i64 = 0
+    while (*md).t + dt <= t_end {
         md_step(md, dt)
-        k = k + 1
+        n_full = n_full + 1
     }
     let ideal = t0 + (n_full as f64) * dt
     let d0 = (*md).t - ideal
     let drift = if d0 < 0.0 { 0.0 - d0 } else { d0 }
-    let tol_t = slack + drift
+    // The part of rem that is not time: the clock's drift from t0 + n·dt, as
+    // measured, plus the rounding of that measurement (the product and sum in
+    // `ideal`, 2u·t_scale), which is absent when no full step was taken.
+    let tol_t = if n_full > 0 { drift + 2.0 * u * t_scale } else { 0.0 }
     let rem = t_end - (*md).t
     if rem > tol_t {
         md_step(md, rem)

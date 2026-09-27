@@ -101,8 +101,11 @@
 //     dt = 0.02: t_end = 0.61 must end at t == 0.61 with the drug's state and
 //     accounting identical to the explicit sequence of 30 steps of 0.02 and one
 //     of 0.01 (md_step); t_end = 0.005 (below one step) must take one 0.005
-//     step; and t_end = 0.6 on the grid must take exactly 30 steps (no extra
-//     vanishing step from accumulated round-off in t). "Identical" is exact
+//     step; and t_end = 0.6 on the grid must take exactly 30 steps: 29 of
+//     0.02 and a last remainder step 0.6 - t, identical to that explicit
+//     sequence (thirty accumulated steps of 0.02 put the clock at
+//     0.6000000000000002, past 0.6, so no full step may end there; no extra
+//     vanishing step from accumulated round-off either). "Identical" is exact
 //     `==` on every per-drug state and accounting field: all 14 cv and 14 ct
 //     entries, lumen, AUC, eliminated, clamped, administered and never-absorbed
 //     mass (md_same_drug). A NaN on either side fails it; the only distinct bit
@@ -119,11 +122,13 @@
 //     remainder, and this check fails.
 //     At a large clock the full-step count must not pass the target: from
 //     t0 = 2^53 (ulp 2 h) with a 1 mg/h infusion, run_to(t0 + 2, dt 2) must
-//     end at t0 + 2 having infused exactly 2 mg, and from t0 = 2^40,
-//     run_to(t0 + 10.5, dt 2) five 2 h steps plus a 0.5 h one, 10.5 mg: the
-//     integrated time equals the clock advance. The first version of the
-//     step-count rule took three steps in the 2^53 case (6 mg for a 2 h
-//     advance) and moved the clock back, and this check fails on it.
+//     end at t0 + 2 having infused exactly 2 mg; run_to(t0 + 2, dt 3) too
+//     (no 3 h full step may be taken toward a 2 h target); and from
+//     t0 = 2^40, run_to(t0 + 10.5, dt 2) five 2 h steps plus a 0.5 h one,
+//     10.5 mg: the integrated time equals the clock advance. The first
+//     step-count rule took three steps in the first case (6 mg), and the
+//     second (count fixed from span/dt with an allowance on the target) one
+//     3 h step in the dt 3 case (3 mg); this check fails on both.
 //
 // V8  Configuration. md_config_error, the check every md_step panics on,
 //     returns 2 for md.iters < 0 (a negative count ran zero sweeps: silent Lie
@@ -531,12 +536,13 @@ fn gate_v7() -> bool with Mut, Div, Panic, IO {
     var f = md_new(true)
     let jf = v7_setup(&!f)
     k = 0
-    while k < 30 {
+    while k < 29 {
         md_step(&!f, 0.02)
         k = k + 1
     }
+    md_step(&!f, 0.6 - f.t)
     let grid_ok = e.t == 0.6 && md_same_drug(&e, ie, &f, jf)
-    print("V7 run_to(0.6, dt 0.02) on the grid: exactly 30 steps: ") println(grid_ok)
+    print("V7 run_to(0.6, dt 0.02) on the grid: exactly 30 steps (29 x 0.02 + remainder): ") println(grid_ok)
 
     // A target not ahead of t must not move the clock: without the early
     // return, a t_end below t but within tol was snapped backwards.
@@ -565,8 +571,10 @@ fn gate_v7() -> bool with Mut, Div, Panic, IO {
     print("V7 run_to(1.0000000005, dt 1.0) = explicit 1.0 + 5e-10 steps: ") println(rem_ok)
     let big_a = v7_big_clock(9007199254740992.0, 2.0, 2.0)
     let big_b = v7_big_clock(1099511627776.0, 10.5, 2.0)
-    print("V7 large clock, infused mass - clock advance (mg): t0 = 2^53, +2 h: ") print(big_a) print("  t0 = 2^40, +10.5 h: ") println(big_b)
-    let clock_ok = big_a == 0.0 && big_b == 0.0
+    let big_c = v7_big_clock(9007199254740992.0, 2.0, 3.0)
+    print("V7 large clock, infused mass - clock advance (mg): t0 = 2^53, +2 h dt 2: ") print(big_a) print("  t0 = 2^40, +10.5 h dt 2: ") print(big_b)
+    print("  t0 = 2^53, +2 h dt 3: ") println(big_c)
+    let clock_ok = big_a == 0.0 && big_b == 0.0 && big_c == 0.0
     return a.t == 0.61 && same && short_ok && grid_ok && back_ok && past_ok && big_ok && rem_ok && clock_ok
 }
 
