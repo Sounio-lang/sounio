@@ -35,8 +35,12 @@
 //                              − cl_sink·dt·(θ·C_avg,k,n+1 + (1−θ)·C_avg,k,n)
 // to rounding. A floor is a non-conservative projection and breaks that
 // identity; it is therefore absent here. Any negative concentration the step
-// produces is BOOKED in the ledger (`min_conc`, `neg_mass`) so a gate can fail
-// loudly on it instead of silently repairing it.
+// produces is BOOKED in the ledger, never repaired: `min_conc` / `neg_mass`
+// cover every returned state (the state a caller sees after each θ,
+// Rannacher or TR-BDF2 step), and `stage_min_conc` / `stage_neg_mass` cover
+// TR-BDF2's internal stage x_γ, which is not returned but does enter the AUC,
+// elimination and sink quadrature. The gates (`pbpk28_mass_gate_ok`,
+// `pbpk28_bolus_run_mut`) test the returned-state fields.
 //
 // Rannacher start-up (Rannacher 1984; Giles & Carter 2006)
 // --------------------------------------------------------
@@ -78,8 +82,10 @@ pub struct PBPK28Ledger {
     pub eliminated:   f64,       // cl_central · ∫C_b dt (mg)
     pub sink_removed: f64,       // cl_sink · ∫C_avg,k dt (mg), organ sink
     pub auc:          [f64; 14], // ∫C_avg,i dt (mg·h/L); i = 0 is blood
-    pub min_conc:     f64,       // most negative concentration after any step (≤ 0)
-    pub neg_mass:     f64,       // largest Σ V·min(C, 0) magnitude after any step (mg)
+    pub min_conc:     f64,       // most negative concentration of any returned state (≤ 0)
+    pub neg_mass:     f64,       // largest Σ V·min(C, 0) magnitude of any returned state (mg)
+    pub stage_min_conc: f64,     // same, for TR-BDF2's internal stage x_γ (≤ 0)
+    pub stage_neg_mass: f64,     // same, for TR-BDF2's internal stage x_γ (mg)
     pub steps:        i32,       // θ sub-steps taken
 }
 
@@ -91,6 +97,8 @@ pub fn pbpk28_ledger_zero() -> PBPK28Ledger {
         auc:          [0.0; 14],
         min_conc:     0.0,
         neg_mass:     0.0,
+        stage_min_conc: 0.0,
+        stage_neg_mass: 0.0,
         steps:        0,
     }
 }
@@ -450,6 +458,12 @@ pub fn pbpk28_trbdf2_step_routed_sink_mut(
 
     var scratch = pbpk28_ledger_zero()
     let _s1 = pbpk28_theta_step_routed_sink_mut(state, p, rel_mid, input_organ, gamma * dt, 0.5, sink_organ, cl_sink, &!scratch)
+    // The scratch ledger has booked x_γ's negativity; carry it into the
+    // caller's stage fields before stage 2 books x_{n+1} into the scratch too.
+    let g_min = scratch.min_conc
+    let g_neg = scratch.neg_mass
+    if g_min < (*ledger).stage_min_conc { (*ledger).stage_min_conc = g_min }
+    if g_neg > (*ledger).stage_neg_mass { (*ledger).stage_neg_mass = g_neg }
     var mid_avg: [f64; 14] = [0.0; 14]
     p28t_organ_avgs(state, p, &!mid_avg)
     p28t_bdf2_combine(state, &xn_v, &xn_t, p28t_trbdf2_a())
@@ -462,10 +476,10 @@ pub fn pbpk28_trbdf2_step_routed_sink_mut(
     let k0 = p28t_accum(ledger, &old_avg, w * dt, p.cl_central, sink_org, cl_sink)
     let k1 = p28t_accum(ledger, &mid_avg, w * dt, p.cl_central, sink_org, cl_sink)
     let k2 = p28t_accum(ledger, &new_avg, d * dt, p.cl_central, sink_org, cl_sink)
-    // Negativity is booked on the returned state x_{n+1} only. The stage x_γ
-    // is internal: right after a bolus its CN stage rings negative, and the
-    // quadrature carries that exactly (the identity above still holds), but
-    // it is not a state any caller sees.
+    // The returned state x_{n+1} goes into min_conc / neg_mass. The stage x_γ
+    // was booked into stage_min_conc / stage_neg_mass above: right after a
+    // bolus its CN stage rings negative, and the quadrature carries that
+    // exactly (the identity above still holds).
     p28t_negativity(ledger, state, p)
     (*ledger).administered = (*ledger).administered + dt * rel_mid
     (*ledger).steps = (*ledger).steps + scratch.steps
