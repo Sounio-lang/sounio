@@ -220,8 +220,9 @@ CLint_i,s,k > 0 for some k, s).
 **Outcome**: WAIVED. Evidence, both engines (Madaros committed ELF and
 lean_single): closed-system witness |M_n − M_0|/M_0 ≤ max(1e-12, n·1e-15) at
 every step, worst 0.51 of the bound, zero negative entries at any stage
-(CN + floor kernel: M(24 h)/M_0 = 1.21–1.77); identity residual ≤ 0.046 of
-its bound at dt 0.001–0.2 and on a two-drug coupled run; repeated oral dosing
+(CN + floor kernel: M(24 h)/M_0 = 1.21–1.77); identity residual ≤ 0.051 of
+its bound at dt 0.002–0.2 (gate I; its reference runs at dt 0.002) and ≤ 0.023
+on a two-drug coupled run; repeated oral dosing
 second order (grid ratios 3.22 → 3.62, trough 3.85 → 3.92); V5 coupling
 order unchanged in kind (PC vs iterated 3.31 → 3.74, Lie 2.09 → 2.03,
 self-convergence 3.67 → 3.82). Control for (3): TR-BDF2 without the restart
@@ -229,3 +230,22 @@ after a bolus panics on the first step (γ-stage ≈ −0.085·C0 in the
 dispatch), so the check fires on real negativity. Control for (5): V6e
 fails with a global flag. Flagged for re-review once a provider is
 configured.
+
+## 2026-09-27T03:05Z — Claude (session_01RMzxzzsE5JNGEqnnkUs9Yo) — M1, PBPK28 certificate ceiling and absorbed-fraction series
+
+| 2026-09-27 | xai kimi zai local | math-review | pbpk28_hepatic.sio "Ceiling" (tol <= 1e-6, dt_max(λ) = (1e-6/(1024u) − 1)/λ); multidrug28.sio md_absorbed_fraction (−expm1 series, 165u bound) and the V9 per-magnitude budget | WAIVED | `bin/llm-offload -t math-review -i <derivations>`: all four legs SKIPPED (no keys in this container). |
+
+**Trigger**: two new numerical claims from PR #2695 review. (1) The
+fail-closed tolerance 1024u(1 + dt·λ) is capped at 1e-6, the six-significant-
+digit resolution of the reported results, which gives dt_max(λ) ≈ 8.8e6/λ h
+(rapamycin 233.6 h, venlafaxine 303.6 h, ODV 399.2 h, semaglutide 2980 h;
+production and gate steps ≤ 0.5 h). (2) 1 − exp(−y) for y ≤ ½ is summed as the
+alternating series (25 terms, 100 flops, absolute-sum ratio e^y ≤ 1.65, so
+≤ 165u), and the range-reduced form is kept above ½ (amplification < 1.55).
+
+**Outcome**: WAIVED. Evidence, both engines: gate VC (certifiable false at
+dt = 2.3e8 h where tol = 0.98, true at 0.5 h; tol(dt_max) = ceiling to 1e-12;
+every gate configuration ≥ 100x below dt_max), gate V9 (13 magnitudes 1e-17 to
+40 against a Taylor / math::pure::exp reference, worst 0.024 of the
+operation-count budget; the old formula fails at 1e-17, 1e-16, 1e-12, 1e-8).
+Flagged for re-review once a provider is configured.
