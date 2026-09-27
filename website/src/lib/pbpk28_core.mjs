@@ -647,8 +647,15 @@ export function degenerateParams(base, { eps = 1e-3, psScale = 1e4 } = {}) {
 // Third canonical drug. Two coupled PBPK28 compartments: parent (venlafaxine)
 // and active metabolite ODV (O-desmethylvenlafaxine), bridged by hepatic CYP2D6
 // formation. Oral XR input is gated by a Korsmeyer-Peppas erodible matrix.
-//
-// Bit-compatible companion to tests/run-pass/dissertation_pbpk28_parity_ref_venlafaxine.sio.
+// Formation is a first-order liver sink solved inside the parent CN step:
+// CL_form·dt/V_liver is ~12 at NM and dt = 0.5 h, so an explicit post-step
+// subtraction saturates to "empty the liver" every step. Readout: steady-state
+// C_avg ODV/parent blood ratio (runVenlafaxineSteadyState).
+// This is the INDEPENDENT side of the venlafaxine parity gate (cases 10-13): a
+// JS reimplementation of stdlib/darwin_pbpk/scenarios/venlafaxine_xr.sio. The
+// Sounio side, tests/run-pass/dissertation_pbpk28_parity_ref_venlafaxine.sio,
+// runs that stdlib scenario itself rather than a copy, so a change to the
+// scenario that is not mirrored here fails the gate.
 // The matrix transcendentals (merLnUnit/merExp/merPow) and absorption (merExpNeg)
 // are PORTED VERBATIM from the Sounio stdlib (release/matrix_er.sio, scenarios/
 // venlafaxine_xr.sio) — NOT Math.pow/Math.exp — so the two engines agree to f64.
@@ -695,10 +702,17 @@ function merPow(t, n) {                        // t^n via exp(n·ln t), t>0
   if (t > 0.0) lnT = (t > 2.0) ? (0.6931471805599453 + merLnUnit(t / 2.0)) : merLnUnit(t);
   return merExp(n * lnT);
 }
-function merExpNeg(x) {                         // exp(x) for x<0, 20-term Taylor
+// exp(x) for x<0 — port of scenarios/venlafaxine_xr.sio mer_exp_neg, same
+// operations in the same order: halve x until |x| <= 0.5 (m halvings), sum the
+// 19-term Taylor series, then square m times: exp(x) = exp(x/2^m)^(2^m). For
+// |x| <= 0.5 (ka·dt <= 0.5) no halving happens and it is the plain series.
+function merExpNeg(x) {
   if (x >= 0.0) return 1.0;
+  let r = x, m = 0;
+  while (r < -0.5) { r = 0.5 * r; m++; }
   let y = 1.0, term = 1.0;
-  for (let k = 1; k < 20; k++) { term = term * x / k; y = y + term; }
+  for (let k = 1; k < 20; k++) { term = term * r / k; y = y + term; }
+  while (m > 0) { y = y * y; m--; }
   return y;
 }
 
@@ -712,10 +726,20 @@ export function vfxMatrixStepAmount(rel, t, dt) {
   return vfxMatrixCumulative(rel, t + dt) - vfxMatrixCumulative(rel, t);
 }
 
-// ─── Fully-coupled CN transport step — port of pbpk28_full_cn_step ───────────
-function vfxCnStep(Cv, Ct, kp, ps, clCentral, relMid, dt) {
+// ─── Fully-coupled CN transport step — port of pbpk28_full_cn_step_sink_mut ──
+// Optional first-order organ sink (flux = clSink · C_avg,k on organ k = sinkOrgan)
+// folded into that organ's 2×2 CN block on both sides, exactly as clCentral
+// enters the blood row through bigS (stdlib/darwin_pbpk/tsit5_pbpk28.sio,
+// 07baf94bc). Returns the new state and `removed`, the CN trapezoid
+// h·clSink·(C_avg,old + C_avg,new) read from the stored (clamped) state. On a
+// clamp-free step that is exactly the mass the sink took; when the non-negativity
+// clamp fires the gap lands in the steady-state audit's residual R. sinkOrgan
+// outside 1..13 or clSink == 0 means no sink: every added term is an exact ±0.
+function vfxCnStep(Cv, Ct, kp, ps, clCentral, relMid, dt, sinkOrgan, clSink) {
   const h = 0.5 * dt;
   const vb = V_REF[0];
+  const hasSink = sinkOrgan >= 1 && sinkOrgan < N && clSink > 0.0;
+  const sinkAvgOld = hasSink ? vfxOrganAverage(Cv, Ct, sinkOrgan) : 0.0;
   let sumQ = 0.0;
   for (let i = 1; i < N; i++) sumQ += Q[i];
   const bigS = h * (sumQ + clCentral) / vb;
@@ -728,15 +752,16 @@ function vfxCnStep(Cv, Ct, kp, ps, clCentral, relMid, dt) {
     const vi = V_REF[i], vf = VASC_FRAC[i];
     const vv = Math.max(vi * vf, 1e-30), vt = Math.max(vi * (1 - vf), 1e-30);
     const kpi = kp[i], psi = ps[i], qi = Q[i];
+    const hks = (hasSink && i === sinkOrgan) ? h * clSink / vi : 0.0;
     const beta = h * qi / vb, gamma = h * qi / vv;
-    const p = 1.0 + h * (qi + psi) / vv;
+    const p = 1.0 + h * (qi + psi) / vv + hks;
     const qq = h * psi / (vv * kpi);
     const r = h * psi / vt;
-    const sb = 1.0 + h * psi / (vt * kpi);
+    const sb = 1.0 + h * psi / (vt * kpi) + hks;
     const det = p * sb - qq * r;
     rhs0 += beta * Cv[i];
-    const rhsV = gamma * cbOld + (1.0 - h * (qi + psi) / vv) * Cv[i] + qq * Ct[i];
-    const rhsT = r * Cv[i] + (1.0 - h * psi / (vt * kpi)) * Ct[i];
+    const rhsV = gamma * cbOld + (1.0 - h * (qi + psi) / vv - hks) * Cv[i] + qq * Ct[i];
+    const rhsT = r * Cv[i] + (1.0 - h * psi / (vt * kpi) - hks) * Ct[i];
     aV[i] = (sb * rhsV + qq * rhsT) / det;
     bV[i] = (sb * gamma) / det;
     aT[i] = (r * rhsV + p * rhsT) / det;
@@ -753,7 +778,8 @@ function vfxCnStep(Cv, Ct, kp, ps, clCentral, relMid, dt) {
     outCv[i] = cv < 0 ? 0 : cv;
     outCt[i] = ct < 0 ? 0 : ct;
   }
-  return { cv: outCv, ct: outCt };
+  const removed = hasSink ? h * clSink * (sinkAvgOld + vfxOrganAverage(outCv, outCt, sinkOrgan)) : 0.0;
+  return { cv: outCv, ct: outCt, removed };
 }
 
 function vfxOrganAverage(cv, ct, i) {
@@ -770,11 +796,14 @@ function vfxTotalMass(cv, ct) {
   return total;
 }
 
-// One Lie-Trotter step: matrix → gut → ka absorption → parent CN → CYP2D6
-// liver formation (drain parent organ 1, feed ODV) → ODV CN. Mirrors
-// vfx_strang_step in scenarios/venlafaxine_xr.sio.
-function vfxStrangStep(st, rel, tStart, dt, clFormScale) {
-  const relAmt = vfxMatrixStepAmount(rel, tStart, dt);
+const VFX_LIVER = 1;   // CYP2D6 formation site (organ 1)
+
+// One Lie-Trotter step given the mass `relAmt` the matrix dissolves into the gut
+// over the step: gut → ka absorption → parent CN with the CYP2D6 formation sink
+// solved implicitly on the liver → ODV CN fed exactly the mass the sink removed.
+// Mirrors vfx_step_released in scenarios/venlafaxine_xr.sio (bba219013). Also
+// returns the step's absorbed and formed masses for the steady-state audit.
+function vfxStepReleased(st, relAmt, dt, clFormScale) {
   let gut = st.gut + relAmt;
   const fracAbs = 1.0 - merExpNeg(-VFX_KA_ABS * dt);
   const absorbAmt = VFX_F_ORAL_XR * gut * fracAbs;
@@ -782,58 +811,236 @@ function vfxStrangStep(st, rel, tStart, dt, clFormScale) {
   if (gut < 0) gut = 0;
   const parentInput = absorbAmt / dt;
 
-  const outP = vfxCnStep(st.pCv, st.pCt, VFX_KP_PARENT, VFX_PS_PARENT, VFX_CL_PARENT_CENTRAL, parentInput, dt);
-
-  const cLiver = vfxOrganAverage(outP.cv, outP.ct, 1);
   const clForm = VFX_CL_FORM_ODV_NM * clFormScale;
-  const formMg = clForm * cLiver * dt;
-  outP.cv[1] = outP.cv[1] - formMg / V_REF[1];
-  if (outP.cv[1] < 0) outP.cv[1] = 0;
-  if (outP.cv[0] < 0) outP.cv[0] = 0;
-  const odvInput = formMg / dt;
-
-  const outO = vfxCnStep(st.oCv, st.oCt, VFX_KP_ODV, VFX_PS_ODV, VFX_CL_ODV_CENTRAL, odvInput, dt);
-  return { pCv: outP.cv, pCt: outP.ct, oCv: outO.cv, oCt: outO.ct, gut };
+  const outP = vfxCnStep(st.pCv, st.pCt, VFX_KP_PARENT, VFX_PS_PARENT, VFX_CL_PARENT_CENTRAL,
+                         parentInput, dt, VFX_LIVER, clForm);
+  const formMg = outP.removed;
+  const outO = vfxCnStep(st.oCv, st.oCt, VFX_KP_ODV, VFX_PS_ODV, VFX_CL_ODV_CENTRAL,
+                         formMg / dt, dt, 0, 0.0);
+  return { pCv: outP.cv, pCt: outP.ct, oCv: outO.cv, oCt: outO.ct, gut,
+           absorbed: absorbAmt, formed: formMg };
 }
 
-/**
- * Integrate the venlafaxine XR scenario at NM (or a chosen CYP2D6 phenotype) and
- * sample parent + ODV organ-average trajectories at the given times. Returns a
- * record per sample with parent/ODV {cv,ct,avg}[14], cumulative matrix release,
- * and the total-body ODV/parent mass ratio. Default dt=0.5 h matches the stdlib
- * scenario; pheno default 2 = NM (the parity reference, R7).
- */
-export function runVenlafaxineScenario(sampleTimes, { dt = 0.5, pheno = 2 } = {}) {
-  const rel = VFX_MATRIX_GOHEL2008;
-  const clFormScale = VFX_CL_FORM_SCALE[pheno];
-  let st = {
+function vfxStrangStep(st, rel, tStart, dt, clFormScale) {
+  return vfxStepReleased(st, vfxMatrixStepAmount(rel, tStart, dt), dt, clFormScale);
+}
+
+function vfxZeroState() {
+  return {
     pCv: new Float64Array(N), pCt: new Float64Array(N),
     oCv: new Float64Array(N), oCt: new Float64Array(N), gut: 0.0,
   };
+}
+
+/**
+ * Integrate the venlafaxine XR scenario (one 75 mg unit) at NM (or a chosen
+ * CYP2D6 phenotype) and sample parent + ODV organ-average trajectories at the
+ * given times. Returns a record per sample with parent/ODV {cv,ct,avg}[14],
+ * cumulative matrix release and total parent/ODV body mass. Default dt = 0.5 h
+ * matches the stdlib scenario; pheno default 2 = NM (the parity reference, R7).
+ */
+export function runVenlafaxineScenario(sampleTimes, { dt = 0.5, pheno = 2 } = {}) {
+  vfxCheckDt(dt);
+  vfxCheckPheno(pheno);
+  if (!(Array.isArray(sampleTimes) && sampleTimes.every(Number.isFinite))) {
+    throw new RangeError('sampleTimes must be an array of finite numbers');
+  }
+  // The integrator only moves forward from t = 0 in whole dt steps, so any
+  // other sample would be labelled with a state from a different time: [1, 0]
+  // emitted the 1 h state as t: 0, and at dt = 0.5 a sample at 1.2 h got the
+  // 1.0 h state (1.3 h got the 1.5 h state). Require t >= 0, strictly
+  // increasing, and a whole number of steps from 0 (vfxWholeSteps). The Sounio
+  // side panics on the same inputs in vfx_integrate_to.
+  const sampleSteps = [];
+  for (let i = 0; i < sampleTimes.length; i++) {
+    const prev = i === 0 ? 0.0 : sampleTimes[i - 1];
+    if (i === 0 ? sampleTimes[0] < 0.0 : !(sampleTimes[i] > prev)) {
+      throw new RangeError(`sampleTimes must be >= 0 and strictly increasing, got ${sampleTimes[i]} at index ${i} after ${prev}`);
+    }
+    const n = vfxWholeSteps(sampleTimes[i], dt);
+    if (n < 0) {
+      throw new RangeError(`sampleTimes must be a whole number of dt steps from 0, got ${sampleTimes[i]} at dt = ${dt}`);
+    }
+    sampleSteps.push(n);
+  }
+  const rel = VFX_MATRIX_GOHEL2008;
+  const clFormScale = VFX_CL_FORM_SCALE[pheno];
+  let st = vfxZeroState();
   const out = [];
   let t = 0.0;
-  for (const target of sampleTimes) {
-    while (t + 0.5 * dt < target) {
+  let done = 0;
+  for (let j = 0; j < sampleTimes.length; j++) {
+    const target = sampleTimes[j];
+    while (done < sampleSteps[j]) {
       st = vfxStrangStep(st, rel, t, dt, clFormScale);
       t += dt;
+      done++;
     }
     const pAvg = new Float64Array(N), oAvg = new Float64Array(N);
     for (let i = 0; i < N; i++) {
       pAvg[i] = vfxOrganAverage(st.pCv, st.pCt, i);
       oAvg[i] = vfxOrganAverage(st.oCv, st.oCt, i);
     }
-    const mp = vfxTotalMass(st.pCv, st.pCt);
-    const mo = vfxTotalMass(st.oCv, st.oCt);
     out.push({
       t: target,
       pCv: Float64Array.from(st.pCv), pCt: Float64Array.from(st.pCt), pAvg,
       oCv: Float64Array.from(st.oCv), oCt: Float64Array.from(st.oCt), oAvg,
       released: vfxMatrixCumulative(rel, target),
-      ratio: mp < 1.0e-12 ? 0.0 : mo / mp,
-      pMass: mp, oMass: mo,
+      pMass: vfxTotalMass(st.pCv, st.pCt), oMass: vfxTotalMass(st.oCv, st.oCt),
     });
   }
   return out;
+}
+
+// ─── Steady-state C_avg ODV/parent readout — port of vfx_ss_interval ─────────
+// Blood AUC_ODV / AUC_parent over the last of `nDoses` 75 mg XR units given
+// every `tau` h, i.e. C_ss,avg(ODV)/C_ss,avg(parent). Summed over an interval the
+// split CN scheme gives S = (−A)⁻¹(B·U + J − Δx) exactly, so with no clamp
+// injection J and a periodic state it equals the continuous steady state at
+// every dt (derivation and bound: vfx_ss_interval in scenarios/venlafaxine_xr.sio,
+// bba219013). The certified AUC error bounds are measured on the same run:
+//   err_parent = (R_p + P_p)/CL_c + h·R_p/V_b
+//   err_odv    = (R_p + P_p + R_o + P_o)/CL_odv + h·R_o/V_b
+// R = Σ|per-step mass-identity residual|, P = Σ_k V_k·|x_end − x_start|.
+// The gut pool is not in P: both AUCs are linear in the interval's actual input
+// U, so U cancels in the ratio and the closed form does not depend on it.
+// `certified` fails closed unless AUC_parent > err_parent (interval denominator).
+// Step size: finite and > 0. Absorption uses merExpNeg(−ka·dt), which range-
+// reduces like the stdlib, so there is no ka·dt ceiling: the series only ever
+// sees |x| ≤ 0.5, where its remainder is bounded by 0.5^20/20! ≈ 3.9e-25. The
+// stdlib covers dt = 1 h and 24 h (tests/run-pass/darwin_venlafaxine_xr_large_dt.sio);
+// the parity gate uses dt ≤ 0.5 h, where no halving happens.
+function vfxCheckDt(dt) {
+  if (!(Number.isFinite(dt) && dt > 0)) throw new RangeError(`dt must be finite and > 0, got ${dt}`);
+}
+
+// Number of dt steps in `span` (span >= 0, dt > 0), or −1 when span is not a
+// whole number of steps — port of vfx_whole_steps, same test in the same
+// order: n = trunc(span/dt + 0.5), whole iff |n·dt − span| <= 1e-9·span. Used
+// for the dosing interval and for sample times, as the stdlib uses it for tau
+// and for vfx_integrate_to spans. A count that is not a safe integer is −1.
+function vfxWholeSteps(span, dt) {
+  const n = Math.trunc(span / dt + 0.5);
+  if (!Number.isSafeInteger(n)) return -1;
+  if (Math.abs(n * dt - span) > 1e-9 * span) return -1;
+  return n;
+}
+
+// CYP2D6 phenotype enum: 0 = PM, 1 = IM, 2 = NM, 3 = UM. Checked as a number,
+// not with `in`, which would accept inherited keys such as 'toString'.
+function vfxCheckPheno(pheno) {
+  if (!(Number.isInteger(pheno) && pheno >= 0 && pheno <= 3)) {
+    throw new RangeError(`pheno must be an integer 0..3 (PM, IM, NM, UM), got ${String(pheno)}`);
+  }
+}
+
+function vfxStateAbsDiffMass(aCv, aCt, bCv, bCt) {
+  let total = V_REF[0] * Math.abs(aCv[0] - bCv[0]);
+  for (let i = 1; i < N; i++) {
+    const vi = V_REF[i], vf = VASC_FRAC[i];
+    total += vi * vf * Math.abs(aCv[i] - bCv[i]) + vi * (1 - vf) * Math.abs(aCt[i] - bCt[i]);
+  }
+  return total;
+}
+
+// Certified interval ends, ports of vfx_ss_ratio_lo / vfx_ss_ratio_hi. When an
+// error bound swallows its AUC (large dt, heavy clamping) that side is
+// unbounded, not a quotient of negatives: the lower end is 0 and the upper end
+// is the stdlib's sentinel 1e300 (at dt = 6 h, NM, the naive upper end was −4.23).
+function vfxSsRatioLo(aucP, aucO, errP, errO) {
+  const num = aucO - errO;
+  if (num <= 0.0) return 0.0;
+  return num / (aucP + errP);
+}
+function vfxSsRatioHi(aucP, aucO, errP, errO) {
+  const den = aucP - errP;
+  if (den <= 0.0) return 1.0e300;
+  return (aucO + errO) / den;
+}
+
+export function runVenlafaxineSteadyState({ dt = 0.5, pheno = 2, nDoses = 10, tau = 24.0 } = {}) {
+  // Regimen guards: the audit needs a finite positive step, at least one dose,
+  // an interval of whole steps (otherwise the audited window is not tau), and a
+  // total step count that is a safe integer (so every loop bound is finite).
+  vfxCheckDt(dt);
+  if (!(Number.isFinite(tau) && tau > 0)) throw new RangeError(`tau must be finite and > 0, got ${tau}`);
+  if (!(Number.isSafeInteger(nDoses) && nDoses >= 1)) throw new RangeError(`nDoses must be a safe integer >= 1, got ${nDoses}`);
+  vfxCheckPheno(pheno);
+  const stepsPerTau = vfxWholeSteps(tau, dt);
+  if (stepsPerTau < 1) {
+    throw new RangeError(`tau must be a whole number (>= 1) of dt steps, got ${tau}/${dt} = ${tau / dt}`);
+  }
+  if (!Number.isSafeInteger(nDoses * stepsPerTau)) {
+    throw new RangeError(`nDoses·tau/dt = ${nDoses}·${stepsPerTau} steps is not a safe integer`);
+  }
+  const rel = VFX_MATRIX_GOHEL2008;
+  const clFormScale = VFX_CL_FORM_SCALE[pheno];
+  const h = 0.5 * dt;
+  const vb = V_REF[0];
+  const nWarm = (nDoses - 1) * stepsPerTau;
+  // Mass released over step n by doses given at steps 0, S, …, (nDoses−1)·S.
+  // Each dose's clock is (n − k·S)·dt from integer steps, as in the stdlib's
+  // vfx_released_qtau, so a dose starts at
+  // exactly t = 0: n·dt − k·tau can land at ±1e-15 for dt not exact in binary,
+  // and the ported ln series floors the Korsmeyer-Peppas fraction at ~7.9e-3
+  // for tiny t > 0, which would release ~0.6 mg instantly and break periodicity.
+  const releasedQtau = (n) => {
+    let amt = 0.0;
+    for (let k = 0; k < nDoses; k++) {
+      const m = n - k * stepsPerTau;
+      if (m >= 0) amt = amt + vfxMatrixStepAmount(rel, m * dt, dt);
+    }
+    return amt;
+  };
+
+  let st = vfxZeroState();
+  let n = 0;
+  while (n < nWarm) { st = vfxStepReleased(st, releasedQtau(n), dt, clFormScale); n++; }
+
+  const p0Cv = Float64Array.from(st.pCv), p0Ct = Float64Array.from(st.pCt);
+  const o0Cv = Float64Array.from(st.oCv), o0Ct = Float64Array.from(st.oCt);
+  let aucP = 0.0, aucO = 0.0, resP = 0.0, resO = 0.0;
+  const nEnd = nWarm + stepsPerTau;
+  while (n < nEnd) {
+    const mp0 = vfxTotalMass(st.pCv, st.pCt), mo0 = vfxTotalMass(st.oCv, st.oCt);
+    const cp0 = st.pCv[0], co0 = st.oCv[0];
+    st = vfxStepReleased(st, releasedQtau(n), dt, clFormScale);
+    const cp1 = st.pCv[0], co1 = st.oCv[0];
+    aucP = aucP + h * (cp0 + cp1);
+    aucO = aucO + h * (co0 + co1);
+    resP = resP + Math.abs(vfxTotalMass(st.pCv, st.pCt)
+      - (mp0 + st.absorbed - h * VFX_CL_PARENT_CENTRAL * (cp0 + cp1) - st.formed));
+    resO = resO + Math.abs(vfxTotalMass(st.oCv, st.oCt)
+      - (mo0 + st.formed - h * VFX_CL_ODV_CENTRAL * (co0 + co1)));
+    n++;
+  }
+  const perP = vfxStateAbsDiffMass(st.pCv, st.pCt, p0Cv, p0Ct);
+  const perO = vfxStateAbsDiffMass(st.oCv, st.oCt, o0Cv, o0Ct);
+  const errP = (resP + perP) / VFX_CL_PARENT_CENTRAL + h * resP / vb;
+  const errO = (resP + perP + resO + perO) / VFX_CL_ODV_CENTRAL + h * resO / vb;
+  return {
+    aucParent: aucP, aucOdv: aucO, ratio: aucO / aucP,
+    errAucParent: errP, errAucOdv: errO,
+    ratioLo: vfxSsRatioLo(aucP, aucO, errP, errO),
+    ratioHi: vfxSsRatioHi(aucP, aucO, errP, errO),
+    bounded: aucP > errP,
+  };
+}
+
+// Closed-form steady state of the same model (port of vfx_ss_ratio_closed_form):
+// liver 2×2 balance with the sink, ODV has no sink, so
+//   ratio = (CL_form / CL_odv) · C_avg/C_b,  C_avg/C_b = φ·Q / (Q + CL_form·φ).
+export function vfxSsRatioClosedForm(pheno = 2) {
+  vfxCheckPheno(pheno);
+  const li = VFX_LIVER;
+  const clf = VFX_CL_FORM_ODV_NM * VFX_CL_FORM_SCALE[pheno];
+  const v = V_REF[li], vv = v * VASC_FRAC[li], vt = v * (1.0 - VASC_FRAC[li]);
+  const ks = clf / v;
+  const ps = VFX_PS_PARENT[li], kp = VFX_KP_PARENT[li], q = Q[li];
+  const tauT = ps / (ps / kp + ks * vt);
+  const phi = (vv + vt * tauT) / v;
+  const cavgCb = phi * q / (q + clf * phi);
+  return (clf / VFX_CL_ODV_CENTRAL) * cavgCb;
 }
 
 // ════════════════════════════════════════════════════════════════════════════

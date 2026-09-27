@@ -4208,6 +4208,18 @@ the invalid DeepSeek key in `~/.sounio-keys.env`. Raw outputs from this session:
 - **zai/deepseek/local:** not run (rate limit, invalid key, endpoint down per
   the earlier entries today).
 
+## 2026-09-26 (recorded 2026-09-27T01:20Z) — Claude — M1 math-review, PR #2699 (venlafaxine implicit CYP2D6 sink + steady-state readout)
+
+| 2026-09-26 | xai (grok-4.6), gemini-2.5-pro via OpenRouter | math-review | stdlib/darwin_pbpk/tsit5_pbpk28.sio (organ sink in the CN Schur solve), stdlib/darwin_pbpk/scenarios/venlafaxine_xr.sio (implicit formation, steady-state C_avg readout and its certified bound) | PASS after fixes; one disagreement recorded | Two independent providers. |
+
+Transcribed from the `LLM-offload-review:` trailers on this PR's commits, which were the only record until now (Copilot review on #2699).
+
+- **xai, organ sink (`1b61789b0`, `3e6b7e38e`):** claims 1–4 OK, with no coefficient error in pp/sb/rhs_v/rhs_t. Claim 5 was tightened: CN undershoot begins at h·k_s > 1.
+- **xai, steady-state readout (`7399fd421`):** claims 1–3, 5 and 7 OK. Claim 4 was tightened: the bound uses the volume-weighted mass functional VᵀA ≤ 0, not raw column sums, and the ODV residual is analogous. The overreach in claim 6 was removed: no λ_fast/λ_slow factor is claimed.
+- **gemini-2.5-pro (independent second leg, `d94b9ab40` review round):** claims 1–4, 6 and 7 OK. It **rejected claim 5** as "assumes F = 1".
+  - **Disagreement, not accepted, with reasoning:** F ≤ 1, and all converted mass leaves via CL_odv, so m_p/CL_odv is an upper bound whether or not F = 1. xai rated claim 5 OK. The reasoning is also documented in the source.
+- **Unavailable:** zai was rate-limited (provider code 1313), and the deepseek key was rejected as invalid. Neither leg counts.
+
 ## 2026-09-27T06:23Z — Claude (session 9e18db24, confident-kilby) — PR #2698 math review on the canonical route
 
 | 2026-09-27 | default fan-out `xai kimi zai local` (Grok 4.7, Kimi K3 via LLM Gateway) | math-review | PR #2698 math-bearing content: A runner diff, B blood-as-plasma dispatch, C1/C2 lean_single dispatch excerpts, D tolerance-bearing fixtures | B and C2 PASS after fixes (both canonical legs); A, C1, D Grok-only so far (Kimi retry pending) | Supersedes the 2026-09-26T23:20Z entry's `-p xai` (grok-4.6) + qwen route. |
