@@ -580,6 +580,9 @@ declaration, which can sit ~5% below the plateau.
 
 ### Open, not fixed: blood concentration used as plasma
 
+Investigated in full, with measurements, in
+`docs/audit/DARWIN_PBPK_BLOOD_AS_PLASMA_BBB_DRIVER_2026-09-26.md`.
+
 Found during the math review and confirmed in the code; not changed here.
 `pbpk_ode` integrates **blood** concentration
 (`c_plasma = c_blood / rb_ratio`, `tsit5_pbpk14.sio:381`). Two places treat
