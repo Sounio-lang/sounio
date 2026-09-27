@@ -1,23 +1,22 @@
 //@ run-pass
 //@ expect-stdout-contains: read_byte/read_line regression ok
 //
-// Regression gate for PR #2623 review comments (Copilot threads 4068240080 /
-// 4068240108) on the aarch64 emitters emit_read_byte_a64() / emit_read_line_a64()
-// in self-hosted/compiler/lean_single.sio.
+// Regression gate for PR #2623 review comments (Copilot threads 4068240080,
+// 4068240108, 4113839765) on the aarch64 emitters emit_read_byte_a64() /
+// emit_read_line_a64() in self-hosted/compiler/lean_single.sio.
 //
-// Bug: on aarch64-macos, a failed `read()` syscall signals the error by setting
-// the CARRY flag and returning a POSITIVE errno in x0 (XNU convention), whereas
-// aarch64-linux returns a plain negative errno with no carry semantics (see the
-// comment on emit_file_size_a64 in the same file, which already handled this
-// correctly for open()). emit_read_byte_a64()/emit_read_line_a64() emitted a
-// bare `cmp x0, #0` immediately after the read() syscall, which clobbers that
-// carry flag and reads the positive errno as a "successful" byte count -- so on
-// a genuine macOS read() failure, read_byte() returned an uninitialized stack
-// byte instead of -1.
+// Bug 1 (macOS): a failed `read()` syscall on aarch64-macos signals the error
+// by setting the CARRY flag and returning a POSITIVE errno in x0 (XNU
+// convention), whereas aarch64-linux returns a plain negative errno with no
+// carry semantics (see the comment on emit_file_size_a64 in the same file,
+// which already handled this correctly for open()). emit_read_byte_a64()/
+// emit_read_line_a64() emitted a bare `cmp x0, #0` immediately after the
+// read() syscall, which clobbers that carry flag and reads the positive
+// errno as a "successful" byte count -- so on a genuine macOS read() failure,
+// read_byte() returned an uninitialized stack byte instead of -1.
 //
-// Fix: normalize a carry-set result to a safe sentinel before the shared
-// byte-count comparison, gated on `TARGET_OS == 2` (macOS) so the Linux path
-// (already correct) is untouched:
+// Fix 1: normalize a carry-set result to a safe sentinel before the shared
+// byte-count comparison, gated on `TARGET_OS == 2` (macOS):
 //   - emit_read_byte_a64(): sentinel = -1 (this function's own EOF/error
 //     contract; safe because the value is only ever compared/returned, never
 //     used as a buffer index).
@@ -26,7 +25,26 @@
 //     buf[-1], a write one byte before the mapped page. 0 reuses the existing,
 //     safe "empty line" EOF path.
 //
-// This test exercises the three behaviours the review asked for -- read_byte()
+// Bug 2 (Linux, thread 4113839765): aarch64-linux has no carry-flag error
+// signaling -- a failed read() returns -errno directly in x0 (e.g. -5 for
+// EIO). emit_read_line_a64()'s Linux path skipped the newline-strip probe on
+// a non-positive result (correctly) but never clamped x0 before the
+// null-terminate step below it also uses as a buffer index, so a genuine read
+// failure computed buf[x0] with x0 negative -- e.g. buf[-5] -- an
+// out-of-bounds WRITE before the mapped page (worse than Bug 1, which was
+// only a wrong read). emit_read_byte_a64()'s Linux path has no such buffer
+// index on its EOF/error branch (it just returns -1 unconditionally there),
+// so it was not affected.
+//
+// Fix 2: on the Linux (`TARGET_OS != 2`) path of emit_read_line_a64(), clamp
+// a negative x0 to 0 right after the read() syscall, before the shared
+// EOF/error logic -- reusing the exact branch-based clamp idiom
+// (`cmp`/`b.ge`/`movz #0`) this file already uses in emit_read_file_a64
+// above (there on x2; here on x0). This matches the documented aarch64
+// read_line() contract at docs/audit/windows_assert_a64_parity/READ_LINE.md
+// section 3 ("clamp bytes_read < 0 -> 0" as a deliberate a64/x86 divergence).
+//
+// This test exercises the three review-requested behaviours -- read_byte()
 // returning the exact value 255 (0xFF) rather than confusing it with the -1
 // sentinel, read_line() stripping a trailing '\n', and read_byte() returning a
 // clean -1 at EOF -- by writing a small file and redirecting this process's own
@@ -35,24 +53,32 @@
 //
 // Scope note: this runs the DEFAULT (x86-64) engine, which is what CI's
 // "Full Test Suite" job actually executes (souc-stage2 / lean_single native
-// x86-64); it does not exercise the aarch64 carry-flag branch itself (Linux
-// aarch64 also lacks a runtime execution surface in this repo's CI -- see
-// docs/audit/GPU_PIPELINE_SOTA_ASSESSMENT-adjacent aarch64 gates). The raw
-// syscall numbers used below (open=2, dup2=33) are x86-64 Linux-specific,
-// matching the existing convention in tests/run-pass/test_syscall_ffi.sio.
+// x86-64); it does not exercise either aarch64 fix at runtime (neither
+// aarch64-linux nor aarch64-macos binaries execute in this repo's CI -- the
+// macOS arm64 self-host job runs in `attest` mode only). The raw syscall
+// numbers used below (open=2, dup2=33) are x86-64 Linux-specific, matching
+// the existing convention in tests/run-pass/test_syscall_ffi.sio.
 //
-// To manually verify the aarch64 carry-flag fix itself (compile + disassembly,
-// since neither aarch64-linux nor aarch64-macos binaries execute in this
-// repo's CI):
+// Both fixes were verified by cross-compiling this exact probe shape for
+// --target aarch64-linux and --target aarch64-macos and disassembling with
+// an aarch64 objdump (aarch64-linux-gnu-objdump or
+// <triple>-objdump from any aarch64 binutils package), using a real x86-64
+// execution environment to run the seed compiler (Docker/Rosetta or, when
+// that was unavailable, a Lima/QEMU x86_64 VM -- lean_single itself is an
+// x86-64 Linux ELF and cannot run natively on an Apple Silicon host without
+// one of those). Observed, byte for byte:
+//   aarch64-macos:  svc #0x80 -> b.cc <ok> -> mov x0,#-1 (read_byte) or
+//                   mov x0,#0 (read_line) -> <ok>: cmp x0, #0x0
+//   aarch64-linux:  read_byte: svc #0x0 -> cmp x0, #0x0   (no fixup -- Bug 1
+//                   does not apply; Linux's own EOF/error branch never
+//                   indexes a buffer with x0)
+//                   read_line: svc #0x0 -> cmp x0,#0 -> b.ge <ok> ->
+//                   mov x0,#0 -> <ok>: cmp x0, #0x0        (Fix 2's clamp)
+// To reproduce:
 //   SOUNIO_SOUC_ENGINE=lean_single ./bin/souc compile \
 //       tests/run-pass/a64_read_byte_read_line_carry_regression.sio \
-//       -o /tmp/rb.a64.elf --target aarch64-macos
-//   aarch64-linux-gnu-objdump -D -b binary -m aarch64 /tmp/rb.a64.elf | less
-// Expect, immediately after each `svc #0x80`: a `b.cc` skipping a single
-// `mov x0, #0xffffffffffffffff` (read_byte) or `mov x0, #0x0` (read_line)
-// fixup instruction, then the pre-existing `cmp x0, #0x0`. The aarch64-linux
-// build of the same file must show plain `svc #0x0` -> `cmp x0, #0x0` with no
-// b.cc/mov inserted (Linux needs no fixup).
+//       -o /tmp/rb.a64.elf --target aarch64-macos   # or aarch64-linux
+//   <aarch64-triple>-objdump -D -b binary -m aarch64 /tmp/rb.a64.elf | less
 
 fn main() -> i32 with IO, Panic {
     // Craft a controlled stdin: a 0xFF byte, then "hello\n", then EOF.

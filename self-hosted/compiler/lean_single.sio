@@ -35049,6 +35049,24 @@ fn emit_read_line_a64() with Mut, Panic {
         em32(0x54000003)  // b.cc ok (carry clear = success; patched)
         em32(0xD2800000)  // movz x0, #0 -> x0 = 0 (carry set: read() failed)
         patch_branch_a64(rl_carry_ok, CL)
+    } else {
+        // Linux has no carry-flag error signaling: a failed read() returns
+        // -errno directly in x0 (e.g. -5 for EIO), with no other indication.
+        // Below, the EOF/error branch indexes the mmap'd buffer at
+        // buf[bytes_read] to null-terminate it -- left unclamped, a negative
+        // errno would compute buf[-5], an out-of-bounds write before the
+        // mapped page (same class of bug as the macOS carry case above, just
+        // without carry semantics to detect it). Clamp negative results to 0
+        // first, reusing the existing branch-based clamp idiom this file
+        // already uses in emit_read_file_a64 above (there on x2; here on x0),
+        // and matching the documented aarch64 read_line() contract in
+        // docs/audit/windows_assert_a64_parity/READ_LINE.md ("clamp bytes_read
+        // < 0 -> 0").
+        em32(0xF100001F)  // cmp x0, #0
+        let rl_neg_ok = CL
+        em32(0x5400000A)  // b.ge ok (x0 >= 0, skip clamp; patched)
+        em32(0xD2800000)  // movz x0, #0 (negative errno -> clamp to 0)
+        patch_branch_a64(rl_neg_ok, CL)
     }
     // x0 = bytes_read (<=0 on EOF/error; still null-terminate at buf[0] in that case)
     em32(0xF100001F)  // cmp x0, #0
