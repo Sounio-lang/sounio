@@ -59,6 +59,12 @@ fn soir_note_deser_refusal() with Mut {
     SOIR_DESER_REFUSAL_COUNT = SOIR_DESER_REFUSAL_COUNT + 1
 }
 
+// Corrupt or forward-version opcode wire tags must not silently decode as
+// IrNop (#878). read_opcode latches this flag on any unassigned tag and still
+// returns the inert IrNop sentinel; deserialize_ir_module resets the flag on
+// entry and refuses the module before the sentinel can become observable.
+pub var SOIR_READ_FAILED: bool = false
+
 fn write_i8(buf: [i8; 131072], pos: i64, val: i8) -> ([i8; 131072], i64) with Mut, Panic, Div {
     var b = buf
     b[pos] = val
@@ -332,7 +338,12 @@ fn read_opcode(buf: [i8; 131072], pos: i64) -> (IrOpcode, i64) with Mut, Panic, 
         else if tag == 34 { IrOpcode::IrProfCounter }
         else if tag == 35 { IrOpcode::IrCallSret }
         else if tag == 36 { IrOpcode::IrReturnSret }
-        else { IrOpcode::IrNop }
+        else {
+            // #878: unassigned wire tag — latch the failure; never let the
+            // inert sentinel stand in for a corrupt/forward-version opcode.
+            SOIR_READ_FAILED = true
+            IrOpcode::IrNop
+        }
     (op, next_pos)
 }
 
@@ -473,7 +484,8 @@ fn serialize_ir_instr(buf: [i8; 131072], pos: i64, instr: IrInstr) -> ([i8; 1310
     p = un_op_pair.1
     p = p + 7  // 7-byte padding
 
-    let name_pair = write_name(b, p, instr.name)
+    // IrInstr interned its name (ir.sio: name_id); resolve before writing.
+    let name_pair = write_name(b, p, ir_name_at(instr.name_id))
     b = name_pair.0
     p = name_pair.1
 
@@ -3958,7 +3970,7 @@ fn serialize_ir_epistemic_section(buf: [i8; 131072], pos: i64, ep: IrEpistemicSe
     (b, p)
 }
 
-fn deserialize_ir_epistemic_section(buf: [i8; 131072], pos: i64) -> (IrEpistemicSection, i64) with Mut, Panic, Div, Alloc {
+fn deserialize_ir_epistemic_section(buf: [i8; 131072], pos: i64, len: i64) -> (IrEpistemicSection, i64) with Mut, Panic, Div, Alloc {
     var p = pos
     var ep = ir_empty_epistemic_section()
 
@@ -4480,6 +4492,11 @@ fn serialize_ir_module(module: IrModule) -> ([i8; 131072], i64) with Mut, Panic,
 fn deserialize_ir_module(buf: [i8; 131072], len: i64) -> IrModule with Mut, Panic, Div, Alloc {
     var pos: i64 = 0
 
+    // #878: any unassigned opcode wire tag latches SOIR_READ_FAILED inside
+    // read_opcode; the flag is checked after the function loop below and the
+    // whole module is refused. Reset per top-level decode.
+    SOIR_READ_FAILED = false
+
     // Verify header magic - cast literals to i8 for comparison
     let b0: i8 = 83 as i8
     let b1: i8 = 79 as i8
@@ -4518,6 +4535,13 @@ fn deserialize_ir_module(buf: [i8; 131072], len: i64) -> IrModule with Mut, Pani
         i = i + 1
     }
 
+    // #878: an unassigned opcode wire tag was latched while decoding; refuse
+    // the module like any other malformed input instead of publishing IrNop.
+    if SOIR_READ_FAILED {
+        soir_note_deser_refusal()
+        return ir_empty_module()
+    }
+
     // Read string count
     let string_count_pair = read_i64(buf, pos)
     let string_count = string_count_pair.0
@@ -4544,7 +4568,7 @@ fn deserialize_ir_module(buf: [i8; 131072], len: i64) -> IrModule with Mut, Pani
     module.string_count = string_count
 
     if version >= 2 && pos < len {
-        let ep_pair = deserialize_ir_epistemic_section(buf, pos)
+        let ep_pair = deserialize_ir_epistemic_section(buf, pos, len)
         module.epistemic = ep_pair.0
         pos = ep_pair.1
     }
