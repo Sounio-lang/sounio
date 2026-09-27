@@ -7,14 +7,13 @@
 // M   Mass balance per drug under NONLINEAR coupling (two drugs, mutual CYP3A4
 //     competition at liver and gut, oral + IV dosing, central clearance):
 //       body + lumen + unabsorbed + eliminated = administered, to 1e-10,
-//     and the mass added by the kernel's negativity clamp stays at round-off:
-//     md_clamped <= n_steps · 27 · eps · dose (27 state entries per drug, each
-//     pushed below zero by at most ~eps times the mass scale per step once the
-//     true value is ~0). Oscillation clamping, which appears at larger dt (M's
-//     own scenario at dt = 0.05: 3e-10 relative), exceeds it; round-off in the
-//     deep terminal phase does not (V3 over 300 h: 1.3e-12 mg against a bound
-//     of 3.6e-10). A first version required exactly zero and failed V3 on that
-//     round-off; the bound replaced it before commit, derived, not fitted.
+//     and the clamped mass is exactly 0: the default transport (TR-BDF2 with
+//     a backward-Euler restart) has no negativity floor; it panics instead
+//     (pbpk28_hepatic.sio, TR-BDF2 section). Until 2026-09-27 the driver
+//     stepped floored CN, and this gate bounded the clamped mass by
+//     n_steps·27·eps·dose instead (floored round-off in the deep terminal
+//     phase: V3 over 300 h, 1.3e-12 mg). The legacy path keeps that floor;
+//     tests/run-pass/darwin_pbpk28_trbdf2_gates.sio (I) shows what it costs.
 //
 // V3  Static limit, exact. With a constant external inhibitor load L the factor
 //     f = 1/(1+L) is constant and the system is linear. Integrating it to
@@ -28,11 +27,15 @@
 //     with k = f·CLint·fu/K_p and D_gut = fa·D_oral. The last CL_sys term is gut
 //     metabolism of SYSTEMIC drug (blood -> gut -> portal -> liver), which the
 //     static well-stirred module (ddi/cyp3a_competitive.sio) does not have; its
-//     AUCR is printed for context, not gated. Because CN is the trapezoidal rule,
-//     summing the steps gives A·AUC_trap = -(delivered mass) exactly for constant
-//     A, so the discrete AUC equals the continuous one for ANY dt: the gate error
-//     is truncation (residual mass at t_end) plus round-off only; the clamp
-//     must stay at round-off (bound as in M). Q_g here is the whole gut blood flow
+//     AUCR is printed for context, not gated. Every step satisfies
+//     x_{n+1} - x_n = dt·A·Q_n + dt·b exactly, where Q_n is the step's own
+//     quadrature of the state (TR-BDF2 (w, w, d) on x_n, x_γ, x_{n+1}; the
+//     backward-Euler restart (0, 1/2, 1/2) on x_n, midpoint, x_{n+1}), and the
+//     AUC is accumulated with those weights; summing the steps gives
+//     A·AUC = -(delivered mass) exactly for constant A, so the discrete AUC
+//     equals the continuous one for ANY dt: the gate error is truncation
+//     (residual mass at t_end) plus round-off only; the clamped mass must be
+//     0 (as in M). Q_g here is the whole gut blood flow
 //     (q[8] = 55 L/h), not villous flow, and PS_g is large, so F_G is nearly
 //     flow-limited: a kernel-identity fixture, not a gut-physiology claim.
 //
@@ -93,7 +96,7 @@
 //     not a dosing event: an oral dose of 0, a bolus of 0 and an infusion rate
 //     set to its current value, all mid-run, leave the victim bit-identical
 //     (md_same_drug) to the run without those calls; they must not schedule the
-//     Rannacher start-up. A real rate change still does.
+//     restart. A real rate change still does.
 //
 // V7  md_run_to reaches targets off the dt grid exactly. From t = 0 with
 //     dt = 0.02: t_end = 0.61 must end at t == 0.61 with the drug's state and
@@ -121,11 +124,6 @@ use darwin_pbpk::ddi::cyp3a_competitive::*
 
 fn g_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
 fn e12(x: f64) -> i64 { return (x * 1000000000000.0) as i64 }
-
-// Round-off bound on the mass the negativity clamp may add (see header, M).
-fn clamp_bound(t_end: f64, dt: f64, dose: f64) -> f64 with Div {
-    return (t_end / dt) * 27.0 * 2.220446049250313e-16 * dose
-}
 
 // Victim fixture: liver + gut CYP3A4 substrate.
 fn add_victim(md: &!MultiDrug28, cl_c: f64) -> i32 with Mut, Panic {
@@ -168,7 +166,7 @@ fn gate_mass() -> bool with Mut, Div, Panic, IO {
     print("M victim factor at 48 h (liver, 3A4) = ") println(md_factor_now(&md, a, md_site_liver(), md_cyp3a4()))
     let cl = md_clamped(&md, a) + md_clamped(&md, b)
     print("M mass added by the negativity clamp (mg) = ") println(cl)
-    let cl_ok = md_clamped(&md, a) <= clamp_bound(48.0, 0.02, md.dose_in[a]) && md_clamped(&md, b) <= clamp_bound(48.0, 0.02, md.dose_in[b])
+    let cl_ok = md_clamped(&md, a) == 0.0 && md_clamped(&md, b) == 0.0
     return ra < 1.0e-10 && rb < 1.0e-10 && cl_ok
 }
 
@@ -243,7 +241,7 @@ fn gate_v3() -> bool with Mut, Div, Panic, IO {
     print("V3 residual mass fraction at t_end (x1e12) = ") println(e12(worst_left))
     let clamped = cl_po0 + cl_poi + cl_iv0 + cl_ivi
     print("V3 mass added by the negativity clamp (mg) = ") println(clamped)
-    return worst < 1.0e-9 && worst_left < 1.0e-12 && clamped <= 4.0 * clamp_bound(t_end, dt, 1.0)
+    return worst < 1.0e-9 && worst_left < 1.0e-12 && clamped == 0.0
 }
 
 // V4 --------------------------------------------------------------------------
@@ -300,7 +298,7 @@ fn gate_v4() -> bool with Mut, Div, Panic, IO {
     print("V4 victim AUC rel error (x1e12) = ") println(e12(err))
     print("V4 victim residual mass at t_end (x1e12) = ") println(e12(left))
     print("V4 mass added by the negativity clamp (mg) = ") println(clamped)
-    let cl_ok = md_clamped(&md, v) <= clamp_bound(420.0, 0.02, 1.0) && md_clamped(&md, x) <= clamp_bound(420.0, 0.02, md.dose_in[x])
+    let cl_ok = md_clamped(&md, v) == 0.0 && md_clamped(&md, x) == 0.0
     return ss_err < 1.0e-9 && err < 1.0e-9 && left < 1.0e-12 && cl_ok
 }
 
@@ -420,7 +418,7 @@ fn gate_v6d() -> bool with Mut, Div, Panic {
     // Control: a real rate change is a discontinuity and schedules the start-up.
     var c = v6d_run(false)
     md_set_iv_rate(&!c, 0, 3.0)
-    return same && c.pending_smooth
+    return same && md_restart_pending(&c, 0)
 }
 
 fn gate_v6() -> bool with Mut, Div, Panic, IO {
@@ -444,7 +442,7 @@ fn gate_v6() -> bool with Mut, Div, Panic, IO {
     if ok_b { println("V6b Ki=1e300 co-drug: victim bit-identical") } else { println("V6b FAIL: Ki=1e300 changed the victim") }
     if ok_c { println("V6c identical drugs: trajectories bit-identical") } else { println("V6c FAIL: symmetric pair diverged") }
     let ok_d = gate_v6d()
-    if ok_d { println("V6d zero dose / unchanged rate: victim bit-identical, no start-up") } else { println("V6d FAIL: a no-op dosing call changed the victim") }
+    if ok_d { println("V6d zero dose / unchanged rate: victim bit-identical, no restart") } else { println("V6d FAIL: a no-op dosing call changed the victim") }
     return ok_a && ok_b && ok_c && ok_d
 }
 

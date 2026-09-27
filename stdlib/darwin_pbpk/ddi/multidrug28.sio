@@ -1,8 +1,10 @@
 // stdlib/darwin_pbpk/ddi/multidrug28.sio — dynamic multi-drug interaction driver
 // on the PBPK28 (14 organs × {vascular, interstitial}) kernel.
 //
-// Each drug owns a PBPK28 state and is advanced by `pbpk28_hepatic_cn_step`
-// (implicit CN, portal routing, interstitial metabolic sinks). Drugs interact
+// Each drug owns a PBPK28 state and is advanced by the pbpk28_hepatic kernel
+// (portal routing, interstitial metabolic sinks): by default with the
+// clamp-free TR-BDF2 step and a backward-Euler restart after every dosing
+// event (see "Transport" below). Drugs interact
 // only through shared enzymes: at site s ∈ {liver (organ 1), gut (organ 8)} the
 // intrinsic clearance of victim i by enzyme k is scaled by the reversible
 // competitive factor
@@ -16,53 +18,75 @@
 // L_{k,s} is an optional constant external inhibitor load Σ I/Ki (used by the
 // static-limit gate). Self-inhibition (saturable kinetics) is not modelled here.
 //
+// Transport (md.method). Default md_method_trbdf2(): each step of a drug is
+// one TR-BDF2 step (γ = 2 − √2; L-stable, second order, no negativity floor,
+// fails closed on an entry below −tol·scale; derivation in the TR-BDF2
+// section of pbpk28_hepatic.sio), except that the first step after a dosing
+// event of that drug is two backward-Euler half-steps (the restart, below).
+// This is method 6 of
+// docs/audit/PBPK28_CN_FLOOR_CLAMP_MASS_INJECTION_DISPATCH_2026-09-26.md.
+// md_method_cn_legacy() keeps the previous transport -- the floored CN step
+// and a floored backward-Euler pair after events -- for old-path controls and
+// order studies; its clamped mass is booked in `clamped` (md_clamped). The
+// floor injects mass whenever CN's weakly damped stiff modes go negative
+// (dispatch: +28 % blood AUC at dt = 0.05 h after a rapamycin bolus); the
+// default path has no floor, so `clamped` stays 0.
+//
+// Quadrature. Blood AUC and elimination (central CL and every sink) are
+// accumulated with the weights of the step actually taken, on (x_n, interior
+// point, x_{n+1}): TR-BDF2 (w, w, d) with w = 1/(2(2−γ)), d = (1−γ)/(2−γ) on
+// (x_n, x_γ, x_{n+1}); the restart (0, 1/2, 1/2) on (x_n, midpoint, x_{n+1});
+// legacy CN (1/2, 0, 1/2). With those weights each step satisfies
+// x_{n+1} − x_n = dt·A·(quadrature of x) + dt·b exactly, so
+//   body + lumen + unabsorbed + eliminated = administered
+// holds to rounding at any dt (a trapezoid over a TR-BDF2 trajectory would not;
+// the dispatch's "second, independent error").
+//
 // Coupling across drugs per step (dt):
 //   1. oral absorption from each lumen into gut tissue (organ 8), integrated
-//      exactly over the step (lumen·(1 - e^{-ka·dt})), held as a constant input;
+//      exactly over the step (lumen·(1 - e^{-ka·dt})), held as a constant input
+//      over the whole step (both stages, or both restart half-steps);
 //   2. factors f^n from the states at t_n;
-//   3. predictor: CN-step every drug with f^n; factors f* from the predicted
-//      states; f^{n+1/2} = (f^n + f*)/2;
-//   4. corrector: CN-step every drug from t_n with f^{n+1/2}.
+//   3. predictor: step every drug over dt (its own method: restart or
+//      TR-BDF2) with f^n; factors f* from the predicted end states;
+//      f^{n+1/2} = (f^n + f*)/2;
+//   4. corrector: step every drug from t_n with f^{n+1/2}.
+// The factors -- hence each drug's matrix -- are held constant across the
+// whole step, both TR-BDF2 stages included. That keeps the two stages on one
+// matrix and keeps the quadrature identity above exact; it freezes the
+// coefficients at (an O(dt^2) approximation of) the step midpoint, which
+// costs O(dt^3) locally, so the coupling is second order. (Evaluating factors
+// at the γ-point for stage 1 and at the end for stage 2 would also conserve
+// mass -- the identity survives per-stage sinks with the stage-1 weights on
+// x_n, x_γ and the stage-2 weight on x_{n+1} -- but gains no order.)
 // `iters` sets how many predictor/corrector sweeps are made: 0 is plain Lie
-// coupling (f^n frozen, first order), 1 is the predictor-corrector above (second
-// order, the default), k > 1 iterates the sweep to its fixed point, the
-// midpoint-coefficient CN coupling y^{n+1} - y^n = (dt/2)·A((f^n + f^{n+1})/2)·
-// (y^n + y^{n+1}) + dt·u (A is affine in f; it differs from the implicit
-// trapezoidal rule by O(dt^3) per step, both second order). The convergence
-// gate uses it as the reference that shares the transport discretization.
+// coupling (f^n frozen, first order), 1 is the predictor-corrector above (the
+// default), k > 1 iterates the sweep to its fixed point, the
+// midpoint-coefficient coupling f_use = (f^n + f(x_{n+1}))/2 with the same
+// transport. The convergence gate uses it as the reference that shares the
+// transport discretization.
 // Transport is stiff but linear and stays implicit per drug; the interaction is
 // nonlinear and is treated explicitly, then corrected.
 // Order, as measured by tests/run-pass/darwin_pbpk28_multidrug_gates.sio (V5) on
-// the physiological transport: PC converges at second order and Lie at first.
+// the physiological transport and the default TR-BDF2 path (2026-09-27, both
+// engines): PC against the iterated reference D ratios 3.31, 3.74 (dt 0.02 ->
+// 0.005, second order), Lie 2.09, 2.03 (first order); PC self-convergence,
+// transport and coupling together, 3.67, 3.82 (dt 0.01 -> 0.00125). On the
+// legacy CN path the same study gave 3.89, 3.89 / 1.96, 1.99 / 3.58, 3.77.
 // How small dt must be before the ratios settle is set by the strength of the
 // interaction nonlinearity, not by transport stiffness (adversarial review,
-// 2026-09-26: backward-Euler transport and a 100x smaller lung PS leave the
-// ratios unchanged; with the perpetrator dose cut from 100 to 10 mg the PC
-// ratios are 3.87-3.93 from dt = 0.04 h down). With strong inhibition
-// (C_u/Ki ~ 20) the PC error changes sign near dt = 0.03 h and the ratios only
-// settle below dt ~ 0.003 h (3.54, 3.78, 3.89 at dt 0.0025 -> 0.000625); at
-// dt = 0.02 h its error is still ~1e3 times below Lie's.
+// 2026-09-26, on the CN path: backward-Euler transport and a 100x smaller lung
+// PS leave the ratios unchanged; with the perpetrator dose cut from 100 to
+// 10 mg the PC ratios are 3.87-3.93 from dt = 0.04 h down). With strong
+// inhibition (C_u/Ki ~ 20) the ratios only settle below dt ~ 0.003 h; at
+// dt = 0.02 h the PC error is still ~500 times below Lie's (V5b).
 //
-// Rannacher start-up: CN is not L-stable, and a dosing event (IV bolus, start of
-// absorption or of an infusion) excites the stiff vascular/interstitial exchange
-// modes into sign-alternating oscillation; the kernel's negativity clamp then
-// creates mass (measured: 10 mg bolus, dt = 0.02 h -> residual 1.8e-3). Every
-// dosing call therefore marks the NEXT step to be taken as two backward-Euler
-// half steps (θ = 1, L-stable), after which CN resumes; finitely many BE steps
-// keep the global order at two (Rannacher 1984, Numer. Math. 43:309-327).
-// Blood AUC and elimination are accumulated with the same θ-rule the step
-// integrates with, so the discrete identity A·AUC = -(delivered mass) holds
-// exactly -- as long as the kernel's negativity clamp never fires. Two BE half
-// steps damp the stiff modes only partly; the CN remnant is undamped (|R| ~ 0.98
-// per step at dt = 0.1 h for lambda ~ 2.5e3 /h) and dominates the true signal
-// once that has decayed by ~1e-6, whereupon the clamp adds mass. Measured
-// (adversarial review, 2026-09-26): two-drug oral scenario 0 clamp events at
-// dt = 0.02 h, 722 at 0.05 (residual 3e-10), 964 at 0.08; 10 mg IV bolus 0 at
-// 0.02, 180 at 0.1 (1.5e-8), 352 at 1.0 (1.7e-3). The clamped mass is booked in
-// `clamped` (md_clamped). At the dt used by the gates (<= 0.02 h) it stays at
-// round-off scale, not exactly zero: deep in the terminal phase round-off
-// alone pushes near-zero entries below zero (V3: 1.3e-12 mg over 300 h); the
-// gates bound it by n_steps·27·eps·dose.
+// Restart. TR-BDF2's first stage is a CN step of length γ·dt and rings on a
+// jump in the state or the input; two backward-Euler half-steps (R(∞) = 0)
+// absorb the jump first. A dosing event (oral dose, IV bolus, change of IV
+// rate) schedules the restart for the next step of every drug.
+// Finitely many first-order restart steps keep the global order at two
+// (Rannacher 1984, Numer. Math. 43:309-327).
 //
 // Engine note: under the default Madaros engine every struct literal with
 // array fields, every local coefficient array and the old portal block's
@@ -103,10 +127,15 @@ pub fn md_site_gut() -> i32 { return 1 }
 
 fn md_site_organ(site: i32) -> i32 { if site == 0 { return 1 } return 8 }
 
+// Transport methods (MultiDrug28.method).
+pub fn md_method_trbdf2() -> i32 { return 0 }
+pub fn md_method_cn_legacy() -> i32 { return 1 }
+
 pub struct MultiDrug28 {
     pub n: i32,
     pub portal: bool,
     pub iters: i32,           // coupling sweeps: 0 Lie, 1 predictor-corrector, >1 iterated
+    pub method: i32,          // transport: md_method_trbdf2() (default) or md_method_cn_legacy()
     // transport parameters, [drug·14 + organ]
     pub v_ref: [f64; 224],
     pub vasc_frac: [f64; 224],
@@ -131,10 +160,11 @@ pub struct MultiDrug28 {
     pub dose_in: [f64; 16],   // mg administered (oral + IV)
     pub lost: [f64; 16],      // mg never absorbed ((1 - fa) × oral dose)
     pub elim: [f64; 16],      // mg eliminated (central CL + all sinks)
-    pub auc_b: [f64; 16],     // blood AUC (mg·h/L), θ-rule of the step taken
-    pub clamped: [f64; 16],   // mg added by the kernel's negativity clamp (0 = exact)
+    pub auc_b: [f64; 16],     // blood AUC (mg·h/L), quadrature of the step taken (see header)
+    pub clamped: [f64; 16],   // mg added by the kernel's negativity clamp (legacy path only; 0 = exact)
+    pub neg_min_rel: [f64; 16], // most negative entry / scale of any stage or step (clamp-free path; <= 0)
     pub t: f64,
-    pub pending_smooth: bool, // next step = two BE half steps (Rannacher)
+    pub restart: [f64; 16],   // 1.0: the drug's next step is the backward-Euler restart (see header)
     // step scratch (not model state): persistent so that a step allocates no
     // managed handles under Madaros (see the engine note in the header)
     pub f_n: [f64; 128],      // factors at t_n
@@ -152,14 +182,14 @@ pub struct MultiDrug28 {
 
 pub fn md_new(portal: bool) -> MultiDrug28 {
     MultiDrug28 {
-        n: 0, portal: portal, iters: 1,
+        n: 0, portal: portal, iters: 1, method: 0,
         v_ref: [0.0; 224], vasc_frac: [0.0; 224], kp: [0.0; 224], ps: [0.0; 224], q: [0.0; 224],
         cl_central: [0.0; 16],
         fu_site: [0.0; 32], clint: [0.0; 128], ki: [0.0; 64], ext_load: [0.0; 8],
         fa: [0.0; 16], ka: [0.0; 16], iv_rate: [0.0; 16],
         cv: [0.0; 224], ct: [0.0; 224], lumen: [0.0; 16],
         dose_in: [0.0; 16], lost: [0.0; 16], elim: [0.0; 16], auc_b: [0.0; 16], clamped: [0.0; 16],
-        t: 0.0, pending_smooth: false,
+        neg_min_rel: [0.0; 16], t: 0.0, restart: [0.0; 16],
         f_n: [1.0; 128], f_star: [1.0; 128], f_use: [1.0; 128],
         ct_pred: [0.0; 224], gut_rate: [0.0; 16],
         sc_p: pbpk28_params_rapamycin(), sc_s0: pbpk28_state_zero(), sc_s: pbpk28_state_zero(),
@@ -256,11 +286,28 @@ pub fn md_set_ext_load(md: &!MultiDrug28, site: i32, enz: i32, load: f64) with M
     (*md).ext_load[site * 4 + enz] = load
 }
 
-// Dosing events schedule the Rannacher start-up (next step = two backward-Euler
-// half steps). A call that adds nothing is not an event: a zero dose, or a rate
-// equal to the current one, returns before touching any state, so it leaves the
-// trajectory bit-identical to no call. A real change of infusion rate is a step
-// discontinuity in the input and still schedules the start-up.
+// A dosing event schedules the backward-Euler restart for the next step of
+// every drug (see the header, "Restart"). A call that adds nothing is not an
+// event: a zero dose, or a rate equal to the current one, returns before
+// touching any state, so it leaves the trajectory bit-identical to no call. A
+// real change of infusion rate is a step discontinuity in the input and still
+// schedules the restart.
+fn md_mark_restart(md: &!MultiDrug28, j: i32) with Mut {
+    (*md).restart[j] = 1.0
+    let n = (*md).n
+    var i: i32 = 0
+    while i < n {
+        (*md).restart[i] = 1.0
+        i = i + 1
+    }
+}
+
+// True when drug i's next step is the backward-Euler restart.
+pub fn md_restart_pending(md: &MultiDrug28, i: i32) -> bool with Panic {
+    md_check_drug(md, i)
+    return (*md).restart[i] != 0.0
+}
+
 pub fn md_dose_oral(md: &!MultiDrug28, drug: i32, mg: f64) with Mut, Panic {
     md_check_drug(md, drug)
     if !(is_finite_f64(mg) && mg >= 0.0) { panic("multidrug28: md_dose_oral needs a finite mg >= 0") }
@@ -269,7 +316,7 @@ pub fn md_dose_oral(md: &!MultiDrug28, drug: i32, mg: f64) with Mut, Panic {
     (*md).lumen[drug] = (*md).lumen[drug] + fa * mg
     (*md).lost[drug] = (*md).lost[drug] + (1.0 - fa) * mg
     (*md).dose_in[drug] = (*md).dose_in[drug] + mg
-    (*md).pending_smooth = true
+    md_mark_restart(md, drug)
 }
 
 pub fn md_dose_iv_bolus(md: &!MultiDrug28, drug: i32, mg: f64) with Mut, Div, Panic {
@@ -278,7 +325,7 @@ pub fn md_dose_iv_bolus(md: &!MultiDrug28, drug: i32, mg: f64) with Mut, Div, Pa
     if mg == 0.0 { return }
     (*md).cv[drug * 14] = (*md).cv[drug * 14] + mg / (*md).v_ref[drug * 14]
     (*md).dose_in[drug] = (*md).dose_in[drug] + mg
-    (*md).pending_smooth = true
+    md_mark_restart(md, drug)
 }
 
 // A negative infusion rate would remove body mass and book it as dose.
@@ -287,7 +334,7 @@ pub fn md_set_iv_rate(md: &!MultiDrug28, drug: i32, mg_per_h: f64) with Mut, Pan
     if !(is_finite_f64(mg_per_h) && mg_per_h >= 0.0) { panic("multidrug28: md_set_iv_rate needs a finite mg/h >= 0") }
     if mg_per_h == (*md).iv_rate[drug] { return }
     (*md).iv_rate[drug] = mg_per_h
-    (*md).pending_smooth = true
+    md_mark_restart(md, drug)
 }
 
 // Both reconstructors validate the drug index: an unregistered slot below
@@ -466,27 +513,47 @@ fn md_load(md: &!MultiDrug28, i: i32) with Mut, Div {
     (*md).sc_i.in_t[8] = (*md).gut_rate[i]
 }
 
-// Steps the loaded drug in place. θ = 1/2 goes through the CN kernel (the
-// V0-verified extension of the original step); any other θ through the general
-// θ-scheme.
-fn md_kernel_loaded(md: &!MultiDrug28, dt: f64, theta: f64) with Mut, Div, Panic {
+// Steps the loaded drug i in place over dt with its method for this step:
+// the backward-Euler restart when one is due, otherwise TR-BDF2 (clamp-free,
+// fails closed on negativity) or, on the legacy path, the floored CN step
+// (the V0-verified extension of the original kernel) and the floored BE pair.
+// Every branch leaves x_n and the interior point in sc_w for md_advance.
+fn md_kernel_loaded(md: &!MultiDrug28, i: i32, dt: f64) with Mut, Div, Panic {
     let p = (*md).sc_p
     let hep = (*md).sc_h
     let inp = (*md).sc_i
-    if theta == 0.5 {
-        pbpk28_hepatic_cn_step_ws(&!(*md).sc_s, p, hep, inp, dt, &!(*md).sc_w)
+    let rs = (*md).restart[i] != 0.0
+    if (*md).method == 1 {
+        if rs {
+            pbpk28_hepatic_be2_floor_step_ws(&!(*md).sc_s, p, hep, inp, dt, &!(*md).sc_w)
+        } else {
+            pbpk28_hepatic_cn_step_saved_ws(&!(*md).sc_s, p, hep, inp, dt, &!(*md).sc_w)
+        }
     } else {
-        pbpk28_hepatic_theta_step_ws(&!(*md).sc_s, p, hep, inp, dt, theta, &!(*md).sc_w)
+        if rs {
+            pbpk28_hepatic_be2_step_ws(&!(*md).sc_s, p, hep, inp, dt, &!(*md).sc_w)
+        } else {
+            pbpk28_hepatic_trbdf2_step_ws(&!(*md).sc_s, p, hep, inp, dt, &!(*md).sc_w)
+        }
     }
 }
 
+// Quadrature weights (x_n, interior, x_{n+1}) of the step drug i takes:
+// restart (0, 1/2, 1/2); TR-BDF2 (w, w, d); legacy CN (1/2, 0, 1/2).
+fn md_weights(md: &MultiDrug28, i: i32) -> (f64, f64, f64) with Div {
+    if (*md).restart[i] != 0.0 { return (0.0, 0.5, 0.5) }
+    if (*md).method == 1 { return (0.5, 0.0, 0.5) }
+    let w = pbpk28_trbdf2_w()
+    return (w, w, pbpk28_trbdf2_d())
+}
+
 // Predictor pass: step every drug under f_use into ct_pred.
-fn md_predict(md: &!MultiDrug28, dt: f64, theta: f64) with Mut, Div, Panic {
+fn md_predict(md: &!MultiDrug28, dt: f64) with Mut, Div, Panic {
     let n = (*md).n
     var i: i32 = 0
     while i < n {
         md_load(md, i)
-        md_kernel_loaded(md, dt, theta)
+        md_kernel_loaded(md, i, dt)
         var o: i32 = 0
         while o < 14 {
             (*md).ct_pred[i * 14 + o] = (*md).sc_s.ct[o]
@@ -515,21 +582,24 @@ fn md_absorb(md: &!MultiDrug28, dt: f64) with Mut, Div, Panic {
 }
 
 // Corrector pass: advances every drug from t_n under f_use and books
-// elimination, dose and AUC.
-fn md_advance(md: &!MultiDrug28, dt: f64, theta: f64) with Mut, Div, Panic {
+// elimination, dose and AUC with the step's own quadrature weights, then
+// clears the drug's restart flag.
+fn md_advance(md: &!MultiDrug28, dt: f64) with Mut, Div, Panic {
     let n = (*md).n
     var i: i32 = 0
     while i < n {
         md_load(md, i)
-        md_kernel_loaded(md, dt, theta)
-        let s0 = (*md).sc_s0
-        let s1 = (*md).sc_s
-        let p = (*md).sc_p
-        let hep = (*md).sc_h
-        (*md).elim[i] = (*md).elim[i] + pbpk28_hepatic_elim_step_theta(s0, s1, p, hep, dt, theta)
+        md_kernel_loaded(md, i, dt)
+        let (w0, wg, w1) = md_weights(md, i)
+        let cl = (*md).sc_p.cl_central
+        (*md).elim[i] = (*md).elim[i] + pbpk28_hepatic_elim_quad_ws(&(*md).sc_s, &(*md).sc_w, cl, &(*md).sc_h, dt, w0, wg, w1)
         (*md).dose_in[i] = (*md).dose_in[i] + dt * (*md).sc_i.in_b
-        (*md).auc_b[i] = (*md).auc_b[i] + dt * (theta * (*md).sc_s.cv[0] + (1.0 - theta) * (*md).sc_s0.cv[0])
+        (*md).auc_b[i] = (*md).auc_b[i] + pbpk28_hepatic_auc_quad_ws(&(*md).sc_s, &(*md).sc_w, dt, w0, wg, w1)
         (*md).clamped[i] = (*md).clamped[i] + (*md).sc_w.clamped
+        if (*md).method != 1 {
+            if (*md).sc_w.neg_min_rel < (*md).neg_min_rel[i] { (*md).neg_min_rel[i] = (*md).sc_w.neg_min_rel }
+        }
+        (*md).restart[i] = 0.0
         var o: i32 = 0
         while o < 14 {
             (*md).cv[i * 14 + o] = (*md).sc_s.cv[o]
@@ -540,20 +610,19 @@ fn md_advance(md: &!MultiDrug28, dt: f64, theta: f64) with Mut, Div, Panic {
     }
 }
 
-// One coupled sub-step of length dt with the θ-scheme and md.iters coupling
-// sweeps (see header).
-fn md_substep(md: &!MultiDrug28, dt: f64, theta: f64) with Mut, Div, Panic {
+// One coupled step of length dt with md.iters coupling sweeps (see header).
+fn md_coupled_step(md: &!MultiDrug28, dt: f64) with Mut, Div, Panic {
     md_absorb(md, dt)
     md_factors_into(md, false, false)
     md_set_f_use(md, false)
     var sweep: i32 = 0
     while sweep < (*md).iters {
-        md_predict(md, dt, theta)
+        md_predict(md, dt)
         md_factors_into(md, true, true)
         md_set_f_use(md, true)
         sweep = sweep + 1
     }
-    md_advance(md, dt, theta)
+    md_advance(md, dt)
 }
 
 // A step must leave every drug's blood concentration finite. A finite but
@@ -579,13 +648,8 @@ pub fn md_step(md: &!MultiDrug28, dt: f64) with Mut, Div, Panic {
     if !(is_finite_f64(dt) && dt > 0.0) { panic("multidrug28: md_step needs a finite dt > 0") }
     let t_next = (*md).t + dt
     if !(is_finite_f64(t_next) && t_next > (*md).t) { panic("multidrug28: md_step: t + dt is not finite or does not advance t") }
-    if (*md).pending_smooth {
-        md_substep(md, 0.5 * dt, 1.0)
-        md_substep(md, 0.5 * dt, 1.0)
-        (*md).pending_smooth = false
-    } else {
-        md_substep(md, dt, 0.5)
-    }
+    if !((*md).method == 0 || (*md).method == 1) { panic("multidrug28: md.method must be md_method_trbdf2() or md_method_cn_legacy()") }
+    md_coupled_step(md, dt)
     md_check_finite_blood(md)
     (*md).t = t_next
 }
@@ -639,11 +703,20 @@ pub fn md_mass_residual(md: &MultiDrug28, i: i32) -> f64 with Mut, Div, Panic {
     return if r < 0.0 { 0.0 - r } else { r }
 }
 
-// Mass (mg) the negativity clamp has added to drug i so far. Mass balance and
+// Mass (mg) the negativity clamp has added to drug i so far (legacy CN path;
+// always 0 on the default TR-BDF2 path, which has no clamp). Mass balance and
 // the discrete AUC identity are exact only while this is zero.
 pub fn md_clamped(md: &MultiDrug28, i: i32) -> f64 with Panic {
     md_check_drug(md, i)
     return (*md).clamped[i]
+}
+
+// Most negative entry of any stage or endpoint of drug i so far, relative to
+// its step's scale (default path; 0 when none was negative). The kernel
+// panics below -tol, so a finished run has this >= -tol of every step.
+pub fn md_neg_min_rel(md: &MultiDrug28, i: i32) -> f64 with Panic {
+    md_check_drug(md, i)
+    return (*md).neg_min_rel[i]
 }
 
 // Current competitive factor seen by victim i at (site, enz).
