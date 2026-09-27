@@ -6897,28 +6897,51 @@ pub fn compile_module_streaming_finish_into(nc: &! NativeCompiler, module: &IrMo
     (*nc).code = apply_relocations((*nc).relocs, (*nc).code, (*nc).fn_offsets, (*nc).fn_count, rodata_file_offset, data_file_offset)
 }
 
-fn native_v2_reloc_is_call_patch(nc: &NativeCompiler, patch_offset: i64) -> bool with Panic, Div {
-    patch_offset > 0 && patch_offset + 4 <= (*nc).code.len
-        && NC_BIG_CODE[(patch_offset - 1) as usize] == (0xe8 as i8)
+// Byte at code offset `off` as 0..255, or -1 outside the emitted code.
+fn native_v2_reloc_code_u8(nc: &NativeCompiler, off: i64) -> i64 with Panic, Div {
+    if off < 0 || off >= (*nc).code.len { return -1 }
+    let x = NC_BIG_CODE[off as usize] as i64
+    if x < 0 { x + 256 } else { x }
 }
 
+fn native_v2_reloc_is_call_patch(nc: &NativeCompiler, patch_offset: i64) -> bool with Panic, Div {
+    patch_offset > 0 && patch_offset + 4 <= (*nc).code.len
+        && native_v2_reloc_code_u8(nc, patch_offset - 1) == 0xe8
+}
+
+// True when patch_offset is the disp32 of a [rip+disp32] operand that is the
+// LAST field of its instruction, so next_ip = patch_offset + 4 -- the only
+// thing apply_relocations_into assumes. An instruction with an immediate after
+// the disp32 (c7 05 disp32 imm32) must NOT match: its next_ip is further on.
+//   REX.W [+R] 8B/89/8D modrm(mod=00,rm=101)   mov r64,[rip] / mov [rip],r64 / lea
+//   F2 [REX] 0F 10/11 modrm(mod=00,rm=101)     movsd xmm,[rip] / movsd [rip],xmm
+// modrm's reg field is free, so mov rcx/rdx/.. and REX.R r8-r15 are accepted;
+// REX.X/B do not apply to RIP-relative addressing.
 fn native_v2_reloc_is_rip_disp_patch(nc: &NativeCompiler, patch_offset: i64) -> bool with Panic, Div {
     if !(patch_offset >= 3 && patch_offset + 4 <= (*nc).code.len) { return false }
-    if patch_offset >= 4
-        && NC_BIG_CODE[(patch_offset - 4) as usize] == (0xf2 as i8)
-        && NC_BIG_CODE[(patch_offset - 3) as usize] == (0x0f as i8)
-        && NC_BIG_CODE[(patch_offset - 2) as usize] == (0x10 as i8) {
-        let sse_modrm = NC_BIG_CODE[(patch_offset - 1) as usize]
-        if sse_modrm == (0x05 as i8) || sse_modrm == (0x0d as i8) {
-            return true
-        }
+    let modrm = native_v2_reloc_code_u8(nc, patch_offset - 1)
+    if (modrm & 0xc7) != 0x05 { return false }
+    let op = native_v2_reloc_code_u8(nc, patch_offset - 2)
+    let b3 = native_v2_reloc_code_u8(nc, patch_offset - 3)
+    if (op == 0x8b || op == 0x89 || op == 0x8d) && (b3 & 0xf8) == 0x48 {
+        return true
     }
-    if NC_BIG_CODE[(patch_offset - 3) as usize] != (0x48 as i8) { return false }
-    let op = NC_BIG_CODE[(patch_offset - 2) as usize]
-    let modrm = NC_BIG_CODE[(patch_offset - 1) as usize]
-    (op == (0x8d as i8) && modrm == (0x05 as i8))
-        || (op == (0x8b as i8) && modrm == (0x1d as i8))
-        || (op == (0x89 as i8) && modrm == (0x05 as i8))
+    if (op == 0x10 || op == 0x11) && b3 == 0x0f {
+        let b4 = native_v2_reloc_code_u8(nc, patch_offset - 4)
+        if b4 == 0xf2 { return true }
+        if (b4 & 0xf0) == 0x40 && native_v2_reloc_code_u8(nc, patch_offset - 5) == 0xf2 { return true }
+    }
+    false
+}
+
+// Latch an unpatched relocation (see NativeCompiler.reloc_unpatched_count).
+fn native_v2_reloc_note_unpatched(nc: &! NativeCompiler, patch_offset: i64, kind_code: i64, reason: i64) with Mut, Panic, Div {
+    if (*nc).reloc_unpatched_count == 0 {
+        (*nc).reloc_unpatched_offset = patch_offset
+        (*nc).reloc_unpatched_kind = kind_code
+        (*nc).reloc_unpatched_reason = reason
+    }
+    (*nc).reloc_unpatched_count = (*nc).reloc_unpatched_count + 1
 }
 
 fn apply_relocations_into(nc: &! NativeCompiler, rodata_file_offset: i64, data_file_offset: i64) with Mut, Panic, Div {
@@ -6929,40 +6952,105 @@ fn apply_relocations_into(nc: &! NativeCompiler, rodata_file_offset: i64, data_f
         let is_function = NC_FLAT_RELOC_IS_FUNCTIONS[i as usize]
         let target_index = NC_FLAT_RELOC_TARGET_INDICES[i as usize]
 
-        if kind_code == 1 && native_v2_reloc_is_call_patch(nc, patch_offset) {
-            if is_function == 1 {
-                let target_idx = target_index
-                if target_idx >= 0 && target_idx < (*nc).fn_count {
-                    let target_offset = (*nc).fn_offsets[target_idx as usize]
-                    let rel32 = target_offset - (patch_offset + 4)
-                    nc_patch_u32_le(nc, patch_offset, rel32)
-                }
+        if kind_code == 1 {
+            if !native_v2_reloc_is_call_patch(nc, patch_offset) {
+                native_v2_reloc_note_unpatched(nc, patch_offset, kind_code, 1)
+            } else if is_function != 1 || target_index < 0 || target_index >= (*nc).fn_count {
+                native_v2_reloc_note_unpatched(nc, patch_offset, kind_code, 2)
+            } else {
+                let target_offset = (*nc).fn_offsets[target_index as usize]
+                let rel32 = target_offset - (patch_offset + 4)
+                nc_patch_u32_le(nc, patch_offset, rel32)
             }
-        } else if kind_code == 2 && native_v2_reloc_is_rip_disp_patch(nc, patch_offset) {
-            let str_offset = target_index
-            let text_file_offset = 4096
-            let lea_next_ip = text_file_offset + patch_offset + 4
-            let string_va = rodata_file_offset + str_offset
-            let disp32 = string_va - lea_next_ip
-            nc_patch_u32_le(nc, patch_offset, disp32)
-        } else if kind_code == 3 && native_v2_reloc_is_rip_disp_patch(nc, patch_offset) {
-            let data_off = target_index
-            let text_file_offset2 = 4096
-            let next_ip = text_file_offset2 + patch_offset + 4
-            let counter_va = data_file_offset + data_off
-            let disp32_data = counter_va - next_ip
-            nc_patch_u32_le(nc, patch_offset, disp32_data)
-        } else if kind_code == 4 && native_v2_reloc_is_rip_disp_patch(nc, patch_offset) {
-            let target_idx = target_index
-            if target_idx >= 0 && target_idx < (*nc).fn_count {
-                let fn_off = (*nc).fn_offsets[target_idx as usize]
+        } else if kind_code == 2 || kind_code == 3 || kind_code == 4 {
+            if !native_v2_reloc_is_rip_disp_patch(nc, patch_offset) {
+                native_v2_reloc_note_unpatched(nc, patch_offset, kind_code, 1)
+            } else if kind_code == 2 {
+                let str_offset = target_index
+                let text_file_offset = 4096
+                let lea_next_ip = text_file_offset + patch_offset + 4
+                let string_va = rodata_file_offset + str_offset
+                let disp32 = string_va - lea_next_ip
+                nc_patch_u32_le(nc, patch_offset, disp32)
+            } else if kind_code == 3 {
+                let data_off = target_index
+                let text_file_offset2 = 4096
+                let next_ip = text_file_offset2 + patch_offset + 4
+                let counter_va = data_file_offset + data_off
+                let disp32_data = counter_va - next_ip
+                nc_patch_u32_le(nc, patch_offset, disp32_data)
+            } else if target_index < 0 || target_index >= (*nc).fn_count {
+                native_v2_reloc_note_unpatched(nc, patch_offset, kind_code, 2)
+            } else {
+                let fn_off = (*nc).fn_offsets[target_index as usize]
                 let disp32_fn = fn_off - (patch_offset + 4)
                 nc_patch_u32_le(nc, patch_offset, disp32_fn)
             }
+        } else {
+            native_v2_reloc_note_unpatched(nc, patch_offset, kind_code, 3)
         }
 
         i = i + 1
     }
+}
+
+fn native_v2_print_hex_u8(b: i64) with IO, Panic, Div {
+    let hi = (b / 16) % 16
+    let lo = b % 16
+    let hi_ch = if hi < 10 { 48 + hi } else { 87 + hi }
+    let lo_ch = if lo < 10 { 48 + lo } else { 87 + lo }
+    print_char(hi_ch)
+    print_char(lo_ch)
+}
+
+// Refuse to write an ELF that carries an unpatched relocation (rc=25). Called
+// by every x86-64 ELF writer before any byte reaches the output file. Names the
+// first offender and the up-to-5 bytes that precede its patch offset, so the
+// emitter that produced the unknown encoding can be found from the message.
+fn native_v2_reloc_unpatched_refusal(nc: &NativeCompiler) -> i32 with IO, Panic, Div {
+    if (*nc).reloc_unpatched_count == 0 { return 0 }
+    let off = (*nc).reloc_unpatched_offset
+    let reason = (*nc).reloc_unpatched_reason
+    print("Error: native relocation left unpatched -- count=")
+    print_int((*nc).reloc_unpatched_count)
+    print(" first: kind=")
+    print_int((*nc).reloc_unpatched_kind)
+    print(" reason=")
+    if reason == 1 {
+        print("unrecognised-instruction-shape")
+    } else if reason == 2 {
+        print("target-out-of-range")
+    } else {
+        print("unknown-kind")
+    }
+    // The function whose body holds the site: the greatest fn offset <= off.
+    var owner: i64 = -1
+    var owner_off: i64 = -1
+    var fi: i64 = 0
+    while fi < (*nc).fn_count && fi < 16384 {
+        let fo = (*nc).fn_offsets[fi as usize]
+        if fo <= off && fo > owner_off {
+            owner = fi
+            owner_off = fo
+        }
+        fi = fi + 1
+    }
+    print(" fn_index=")
+    print_int(owner)
+    print(" patch_offset=")
+    print_int(off)
+    print(" bytes_before=")
+    var k: i64 = 5
+    while k >= 1 {
+        let b = native_v2_reloc_code_u8(nc, off - k)
+        if b >= 0 {
+            native_v2_print_hex_u8(b)
+            if k > 1 { print(" ") }
+        }
+        k = k - 1
+    }
+    print(" (the site would keep its placeholder 0; extend native_v2_reloc_is_rip_disp_patch or emit a recognised form)\n")
+    25
 }
 
 pub fn compile_module_streaming_finish_main_into(nc: &! NativeCompiler, main_fn_index: i64) with Mut, Panic, Div, Alloc {
@@ -12643,6 +12731,8 @@ fn native_v2_file_emit_phdr(pos: i64, p_type: i64, flags: i64, offset: i64, vadd
 }
 
 fn native_v2_write_min_elf64_to_file(output_path: string, nc: &! NativeCompiler, entry_offset: i64, base_addr: i64) -> i32 with IO, Mut, Panic, Div {
+    let unpatched_rc = native_v2_reloc_unpatched_refusal(nc)
+    if unpatched_rc != 0 { return unpatched_rc }
     let text_offset: i64 = 4096
     let code_len = (*nc).code.len
     let rodata_len = if (*nc).flat_rodata_len > 0 { (*nc).flat_rodata_len } else { (*nc).rodata.len }
@@ -13453,6 +13543,8 @@ fn compile_native_finalize_and_write_ref(nc: &! NativeCompiler, base_addr: i64, 
         print("Error: native data section overflow (raise nc_flat_data_capacity)\n")
         return 21
     }
+    let unpatched_rc = native_v2_reloc_unpatched_refusal(nc)
+    if unpatched_rc != 0 { return unpatched_rc }
 
     let code_len = (*nc).code.len
     let rodata_len = if (*nc).flat_rodata_len > 0 { (*nc).flat_rodata_len } else { (*nc).rodata.len }
