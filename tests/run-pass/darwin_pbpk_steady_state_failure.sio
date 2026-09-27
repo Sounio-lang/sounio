@@ -2,11 +2,13 @@
 //@ requires: madaros
 //@ timeout: 120
 //@ expect-stdout: SS_FAILURE_PROPAGATION_OK
+//@ description: Steady-state runner failure signal: a dosing interval that exhausts its step budget, counted over the whole interval rather than per checkpoint, fails the whole report, and a regimen outside 1..32 doses fails without running any dose
 // Regression for the steady-state runner's failure signal (PR #2698).
 // A dosing interval whose step budget runs out before a checkpoint must fail
-// the whole report. It used to record the partial trace, carry the state into
-// later doses and report success. A regimen size outside 1..32 must also
-// fail instead of running zero doses or truncating.
+// the whole report; the budget counts accepted steps over the whole
+// interval. It used to record the partial trace, carry the state into later
+// doses and report success. A regimen size outside 1..32 must also fail
+// instead of running zero doses or truncating.
 //
 // Lives under tests/run-pass with `requires: madaros` so the current-source
 // Madaros CI gate (scripts/ci/madaros_changed_tests_gate.sh) runs it: PBPK is
@@ -34,6 +36,31 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     if bad.success { return 1 }
     if bad.n_doses_run != 0 { return 2 }
     if bad.reached_ss { return 3 }
+
+    // The budget covers the whole interval, not each checkpoint. A fixed
+    // step (dt_init = dt_min = dt_max) with tolerances loose enough that no
+    // stable step is rejected. The explicit method's stability limit here
+    // was measured between 0.005 h (all 3 doses complete) and 0.01 h (fails),
+    // so h = 0.0025 h sits at least 2x inside it. That is ~640 steps per
+    // 1.6 h checkpoint (a step or two more with rounding at the checkpoint)
+    // and ~9600 per 24 h interval. max_steps = 3000 is ~4.7x above any one
+    // checkpoint and ~3.2x below the interval: the old per-checkpoint counter
+    // completed it, the interval budget must fail it. max_steps = 30000
+    // (~3x above the interval) is the control.
+    var fixed = tight_ode_config()
+    fixed.rtol = 1.0
+    fixed.atol = 1.0
+    fixed.dt_init = 0.0025
+    fixed.dt_min = 0.0025
+    fixed.dt_max = 0.0025
+    fixed.max_steps = 3000
+    let over = run_oral_multidose_cfg(sys_prm, bbb_prm, abs_prm, regimen, 0.02, fixed)
+    if over.success { return 11 }
+    if over.n_doses_run != 0 { return 12 }
+    fixed.max_steps = 30000
+    let within = run_oral_multidose_cfg(sys_prm, bbb_prm, abs_prm, regimen, 0.02, fixed)
+    if within.success == false { return 13 }
+    if within.n_doses_run != 3 { return 14 }
 
     // Regimen sizes the report cannot hold fail up front: no doses run, no
     // silent truncation to 32.

@@ -520,10 +520,23 @@ Verified on Madaros:
 That failure is now replayable in CI. `run_oral_multidose_cfg` takes the ODE
 config, and `run_oral_multidose` wraps it with `tight_ode_config()`, so its
 behaviour is unchanged. `tests/run-pass/darwin_pbpk_steady_state_failure.sio`
-forces one step of at most 1e-3 h per checkpoint and asserts
+forces a budget of one step of at most 1e-3 h and asserts
 `success == false`, `n_doses_run == 0` and `reached_ss == false`. As a
 control, the default config completes all three doses with
 `success == true`. `ssr_print_report` now flags a failed report.
+
+A later review found that the budget itself was mis-scoped. `nsteps` and
+`nreject` were reset at each of the 15 checkpoints, so an interval could
+take about `15 * max_steps` accepted steps and still succeed, whereas
+`solve_pbpk14` counts `max_steps` over the whole solve. Both counters now
+span the whole interval, one solve over [0, tau]. The failure test gained a
+case that separates the two scopings. It uses a fixed step h = 0.0025 h with
+loose tolerances, so no step is rejected. That is ~640 steps per checkpoint
+and ~9,600 per interval. The step sits at least 2x inside the measured
+explicit-stability limit: 0.005 h completes, 0.01 h fails. At
+`max_steps = 3000` the report must fail, and at 30000 it must succeed. On
+Madaros 5764851f the test passes. Against the previous runner it fails at the
+3000-step assertion (rc 11).
 
 The fixture was first added under `tests/stdlib/darwin_pbpk/`. It was moved to
 `tests/run-pass/` with `//@ requires: madaros` because
