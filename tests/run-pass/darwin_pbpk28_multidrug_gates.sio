@@ -92,11 +92,15 @@
 //     bit-identical trajectories (symmetry).
 //
 // V7  md_run_to reaches targets off the dt grid exactly. From t = 0 with
-//     dt = 0.02: t_end = 0.61 must end at t == 0.61 with the state and AUC
-//     bit-identical to the explicit sequence of 30 steps of 0.02 and one of
-//     0.01 (md_step); t_end = 0.005 (below one step) must take one 0.005 step;
-//     and t_end = 0.6 on the grid must take exactly 30 steps (no extra
-//     vanishing step from accumulated round-off in t). A t_end not ahead of t
+//     dt = 0.02: t_end = 0.61 must end at t == 0.61 with the drug's state and
+//     accounting identical to the explicit sequence of 30 steps of 0.02 and one
+//     of 0.01 (md_step); t_end = 0.005 (below one step) must take one 0.005
+//     step; and t_end = 0.6 on the grid must take exactly 30 steps (no extra
+//     vanishing step from accumulated round-off in t). "Identical" is exact
+//     `==` on every per-drug state and accounting field: all 14 cv and 14 ct
+//     entries, lumen, AUC, eliminated, clamped, administered and never-absorbed
+//     mass (md_same_drug). A NaN on either side fails it; the only distinct bit
+//     patterns `==` identifies are +0 and -0. A t_end not ahead of t
 //     must leave t and the AUC untouched, whether it is below t by less than
 //     tol (which the snap would otherwise move backwards) or well below it.
 //
@@ -391,6 +395,26 @@ fn gate_v6() -> bool with Mut, Div, Panic, IO {
 }
 
 // V7 --------------------------------------------------------------------------
+// Exact equality of drug i in a and drug j in b over every per-drug state and
+// accounting field. Each test is `!(x == y)`, so a NaN on either side fails
+// rather than passing (NaN == NaN is false).
+fn md_same_drug(a: &MultiDrug28, i: i32, b: &MultiDrug28, j: i32) -> bool with Mut {
+    var ok = true
+    var o: i32 = 0
+    while o < 14 {
+        if !((*a).cv[i * 14 + o] == (*b).cv[j * 14 + o]) { ok = false }
+        if !((*a).ct[i * 14 + o] == (*b).ct[j * 14 + o]) { ok = false }
+        o = o + 1
+    }
+    if !((*a).lumen[i] == (*b).lumen[j]) { ok = false }
+    if !((*a).auc_b[i] == (*b).auc_b[j]) { ok = false }
+    if !((*a).elim[i] == (*b).elim[j]) { ok = false }
+    if !((*a).clamped[i] == (*b).clamped[j]) { ok = false }
+    if !((*a).dose_in[i] == (*b).dose_in[j]) { ok = false }
+    if !((*a).lost[i] == (*b).lost[j]) { ok = false }
+    return ok
+}
+
 fn v7_setup(md: &!MultiDrug28) -> i32 with Mut, Div, Panic {
     let i = add_victim(md, 1.5)
     md_dose_oral(md, i, 5.0)
@@ -410,7 +434,7 @@ fn gate_v7() -> bool with Mut, Div, Panic, IO {
         k = k + 1
     }
     md_step(&!b, 0.61 - b.t)
-    let same = a.auc_b[i] == b.auc_b[j] && a.cv[i * 14] == b.cv[j * 14] && a.ct[i * 14 + 1] == b.ct[j * 14 + 1] && a.lumen[i] == b.lumen[j]
+    let same = md_same_drug(&a, i, &b, j)
     print("V7 run_to(0.61, dt 0.02): t = ") print(a.t) print("  matches explicit 30 x 0.02 + remainder: ") println(same)
 
     var c = md_new(true)
@@ -419,7 +443,7 @@ fn gate_v7() -> bool with Mut, Div, Panic, IO {
     var d = md_new(true)
     let id = v7_setup(&!d)
     md_step(&!d, 0.005)
-    let short_ok = c.t == 0.005 && c.auc_b[ic] == d.auc_b[id]
+    let short_ok = c.t == 0.005 && md_same_drug(&c, ic, &d, id)
     print("V7 run_to(0.005, dt 0.02): t = ") print(c.t) print("  one 0.005 step: ") println(short_ok)
 
     var e = md_new(true)
@@ -432,7 +456,7 @@ fn gate_v7() -> bool with Mut, Div, Panic, IO {
         md_step(&!f, 0.02)
         k = k + 1
     }
-    let grid_ok = e.t == 0.6 && e.auc_b[ie] == f.auc_b[jf]
+    let grid_ok = e.t == 0.6 && md_same_drug(&e, ie, &f, jf)
     print("V7 run_to(0.6, dt 0.02) on the grid: exactly 30 steps: ") println(grid_ok)
 
     // A target not ahead of t must not move the clock: without the early
