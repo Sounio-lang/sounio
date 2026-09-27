@@ -133,6 +133,16 @@
 //     10u, or (74 + y/ln2 + 1)u·c + u. The old form 1 - md_exp_neg(y) was off by
 //     100 % at 1e-17, 11 % at 1e-16 and 2.2e-5 at 1e-12, and fails.
 //
+// V10 Parameter domains (md_params_error, which md_add_drug panics on). The
+//     four stock profiles return 0 (portal on). One-field violations return
+//     the field's code: v_ref[0] = 0 and v_ref[3] = NaN -> 1, cl_central = -1
+//     and +Inf -> 2, kp[4] = 0 -> 3, ps[5] = -1 -> 4, q[6] = -1 -> 5,
+//     vasc_frac[2] = 0, 1 and NaN -> 6, kp[0] = +Inf -> 7, and gut flow above
+//     the liver's share with portal routing -> 8 (0 without it). The boundary
+//     values ps = 0 and q = 0 are valid (0). Until 2026-09-27 md_add_drug
+//     copied the profile unchecked (it accepted v_ref[0] = 0, and the next
+//     bolus divided by zero); with the check returning 0, V10 fails.
+//
 // Transport parameters are the rapamycin PBPK28 profile with synthetic CLint and
 // Ki values: kernel/driver correctness fixtures, not drug claims.
 
@@ -568,6 +578,41 @@ fn gate_v9() -> bool with Mut, Div, Panic, IO {
     return ok
 }
 
+// V10 -------------------------------------------------------------------------
+fn v10_case(field: i32, idx: i32, value: f64, portal: bool) -> i32 with Mut {
+    var p = pbpk28_params_rapamycin()
+    if field == 1 { p.v_ref[idx] = value }
+    if field == 2 { p.cl_central = value }
+    if field == 3 { p.kp[idx] = value }
+    if field == 4 { p.ps[idx] = value }
+    if field == 5 { p.q[idx] = value }
+    if field == 6 { p.vasc_frac[idx] = value }
+    return md_params_error(p, portal)
+}
+
+fn gate_v10() -> bool with Mut, Div, Panic, IO {
+    let inf = 1.0e308 * 10.0
+    let nan = 0.0 * inf
+    let stock = md_params_error(pbpk28_params_rapamycin(), true) + md_params_error(pbpk28_params_venlafaxine_parent(), true) + md_params_error(pbpk28_params_venlafaxine_odv(), true) + md_params_error(pbpk28_params_semaglutide(), true)
+    var ok = stock == 0
+    let got = [
+        v10_case(1, 0, 0.0, true), v10_case(1, 3, nan, true), v10_case(2, 0, 0.0 - 1.0, true), v10_case(2, 0, inf, true),
+        v10_case(3, 4, 0.0, true), v10_case(4, 5, 0.0 - 1.0, true), v10_case(5, 6, 0.0 - 1.0, true),
+        v10_case(6, 2, 0.0, true), v10_case(6, 2, 1.0, true), v10_case(6, 2, nan, true), v10_case(3, 0, inf, true),
+        v10_case(5, 8, 90.0, true), v10_case(5, 8, 90.0, false), v10_case(4, 5, 0.0, true), v10_case(5, 6, 0.0, true)
+    ]
+    let want = [1, 1, 2, 2, 3, 4, 5, 6, 6, 6, 7, 8, 0, 0, 0]
+    print("V10 md_params_error: stock profiles ") print(stock) print("; cases")
+    var k: i32 = 0
+    while k < 15 {
+        print(" ") print(got[k])
+        if got[k] != want[k] { ok = false }
+        k = k + 1
+    }
+    println("")
+    return ok
+}
+
 fn main() -> i32 with Mut, Div, Panic, IO {
     let m = gate_mass()
     let v3 = gate_v3()
@@ -576,6 +621,7 @@ fn main() -> i32 with Mut, Div, Panic, IO {
     let v7 = gate_v7()
     let v8 = gate_v8()
     let v9 = gate_v9()
+    let v10 = gate_v10()
     if m { println("M PASS") } else { println("M FAIL") }
     if v3 { println("V3 PASS") } else { println("V3 FAIL") }
     if v4 { println("V4 PASS") } else { println("V4 FAIL") }
@@ -583,7 +629,8 @@ fn main() -> i32 with Mut, Div, Panic, IO {
     if v7 { println("V7 PASS") } else { println("V7 FAIL") }
     if v8 { println("V8 PASS") } else { println("V8 FAIL") }
     if v9 { println("V9 PASS") } else { println("V9 FAIL") }
-    if m && v3 && v4 && v6 && v7 && v8 && v9 {
+    if v10 { println("V10 PASS") } else { println("V10 FAIL") }
+    if m && v3 && v4 && v6 && v7 && v8 && v9 && v10 {
         println("PBPK28_MULTIDRUG_GATES_PASS")
         return 0
     }

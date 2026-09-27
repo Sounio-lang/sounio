@@ -221,6 +221,46 @@ pub fn md_new(portal: bool) -> MultiDrug28 {
 // and then calling md_set_clint for the liver counts hepatic elimination twice.
 // Set p.cl_central to the residual before registering -- the gates in
 // tests/run-pass/darwin_pbpk28_*_gates.sio all overwrite it for this reason.
+// Domain check of a transport parameter set, as the kernel uses each field.
+// Returns 0 when valid, else the first failing field:
+//   1 v_ref[o] not finite > 0 (o = 0..13; blood volume divides every blood
+//     row, organ volumes split into the two layers);
+//   2 cl_central not finite >= 0 (a negative clearance is a mass source);
+//   3 kp[o] not finite > 0, organs 1..13 (the kernel divides by K_p);
+//   4 ps[o] not finite >= 0, organs 1..13 (0 is a valid "no exchange");
+//   5 q[o] not finite >= 0, organs 1..13 (0 is a valid unperfused organ);
+//   6 vasc_frac[o] not finite in (0, 1) strictly, organs 1..13. The kernel
+//     floors a zero layer volume at 1e-30 L, which makes that layer's rate,
+//     hence λ_max and the fail-closed tolerance, ~1e30 times larger (the
+//     check becomes vacuous), while pbpk28_total_mass books the raw zero
+//     volume -- so 0 and 1 are rejected here even though the kernel runs;
+//   7 an index-0 field the kernel does not read (kp, ps, q, vasc_frac of
+//     blood) not finite: they are copied and returned by md_params_of;
+//   8 portal routing on and Q_liver < Q_gut + Q_spleen + Q_pancreas (the
+//     kernel would panic on the first step; rejected at registration instead).
+// NaN fails every test (each is written as a negated conjunction).
+pub fn md_params_error(p: PBPKParams28, portal: bool) -> i32 with Mut {
+    var o: i32 = 0
+    while o < 14 {
+        if !(is_finite_f64(p.v_ref[o]) && p.v_ref[o] > 0.0) { return 1 }
+        o = o + 1
+    }
+    if !(is_finite_f64(p.cl_central) && p.cl_central >= 0.0) { return 2 }
+    o = 1
+    while o < 14 {
+        if !(is_finite_f64(p.kp[o]) && p.kp[o] > 0.0) { return 3 }
+        if !(is_finite_f64(p.ps[o]) && p.ps[o] >= 0.0) { return 4 }
+        if !(is_finite_f64(p.q[o]) && p.q[o] >= 0.0) { return 5 }
+        if !(is_finite_f64(p.vasc_frac[o]) && p.vasc_frac[o] > 0.0 && p.vasc_frac[o] < 1.0) { return 6 }
+        o = o + 1
+    }
+    if !(is_finite_f64(p.kp[0]) && is_finite_f64(p.ps[0]) && is_finite_f64(p.q[0]) && is_finite_f64(p.vasc_frac[0])) { return 7 }
+    if portal {
+        if !(p.q[1] >= p.q[8] + p.q[11] + p.q[12]) { return 8 }
+    }
+    return 0
+}
+
 pub fn md_add_drug(md: &!MultiDrug28, p: PBPKParams28, fu_b: f64, fa: f64, ka: f64) -> i32 with Mut, Panic {
     let i = (*md).n
     if i >= MD_MAX { panic("multidrug28: more than 16 drugs") }
@@ -230,6 +270,7 @@ pub fn md_add_drug(md: &!MultiDrug28, p: PBPKParams28, fu_b: f64, fa: f64, ka: f
     if !(fu_b > 0.0 && fu_b <= 1.0) { panic("multidrug28: md_add_drug needs 0 < fu_b <= 1") }
     if !(fa >= 0.0 && fa <= 1.0) { panic("multidrug28: md_add_drug needs 0 <= fa <= 1") }
     if !(is_finite_f64(ka) && ka >= 0.0) { panic("multidrug28: md_add_drug needs a finite ka >= 0") }
+    if md_params_error(p, (*md).portal) != 0 { panic("multidrug28: md_add_drug: transport parameters out of domain (see md_params_error)") }
     var o: i32 = 0
     while o < 14 {
         (*md).v_ref[i * 14 + o] = p.v_ref[o]
