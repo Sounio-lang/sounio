@@ -31,6 +31,21 @@
 //     physiology instead of being imposed. The CN fixed point is the continuous steady state
 //     exactly, so the only error is residual transient plus round-off.
 //
+// VR  Clamp-free TR-BDF2 step (pbpk28_hepatic_trbdf2_step_ws) with the
+//     backward-Euler restart (pbpk28_hepatic_be2_step_ws) on the first step and
+//     on the step after the input switches off. (a) V1's open configuration
+//     (portal, liver + gut sinks, residual CL, 10 mg/h into gut tissue for
+//     2 h, dt = 0.01, 48 h), elimination booked with the steps' own weights
+//     (TR-BDF2 (w, w, d), restart (0, 1/2, 1/2); pbpk28_hepatic_elim_quad_ws):
+//     |M + E - D|/D <= max(1e-12, n·1e-15) at every step n -- the rounding
+//     budget of the closed-system witness, 1e-10 -> 4.8e-12 here. The
+//     identity is exact in real arithmetic (derivation in the kernel's TR-BDF2
+//     section). (b) V2's steady states (IV: C_b = R/CL_H; portal: C_b = R/X)
+//     to 1e-9, as V2: TR-BDF2's fixed point is the continuous steady state
+//     (A x + b = 0 makes x_γ = x and x_{n+1} = x). A kernel that fails closed
+//     on negativity would abort the run, so completion also checks that no
+//     stage went below -tol·scale.
+//
 // The V2 parameter set is the rapamycin transport profile with CL_central = 0 and
 // a synthetic hepatic CLint: a kernel-correctness fixture, not a drug claim.
 
@@ -250,16 +265,93 @@ fn gate_vt() -> bool with Mut, Div, Panic, IO {
     return worst_dev < 1.0e-12 && worst_mb < 1.0e-12
 }
 
+// VR --------------------------------------------------------------------------
+fn vr_mass_tol(n: i32) -> f64 {
+    let t = (n as f64) * 1.0e-15
+    if t > 1.0e-12 { return t }
+    return 1.0e-12
+}
+
+// Worst (|M + E - D|/D) / vr_mass_tol(n); restart on step 0 and when the
+// input switches off. Returns (worst ratio, blood C at t_end, 1 h before).
+fn vr_run(p: PBPKParams28, hep: PBPK28Hepatic, into_gut: bool, rate: f64, t_input: f64, t_end: f64, dt: f64) -> (f64, f64, f64) with Mut, Div, Panic {
+    var s = pbpk28_state_zero()
+    var ws = pbpk28_work_new()
+    let w = pbpk28_trbdf2_w()
+    let d = pbpk28_trbdf2_d()
+    let n = ((t_end / dt) + 0.5) as i32
+    let n_in = ((t_input / dt) + 0.5) as i32
+    let n_prev = ((t_end - 1.0) / dt + 0.5) as i32
+    var dose = 0.0
+    var elim = 0.0
+    var worst = 0.0
+    var cb_prev = 0.0
+    var k: i32 = 0
+    while k < n {
+        var inp = pbpk28_input_none()
+        if k < n_in {
+            if into_gut { inp.in_t[8] = rate } else { inp.in_b = rate }
+        }
+        let restart = k == 0 || k == n_in
+        if restart {
+            pbpk28_hepatic_be2_step_ws(&!s, p, hep, inp, dt, &!ws)
+            elim = elim + pbpk28_hepatic_elim_quad_ws(&s, &ws, p.cl_central, &hep, dt, 0.0, 0.5, 0.5)
+        } else {
+            pbpk28_hepatic_trbdf2_step_ws(&!s, p, hep, inp, dt, &!ws)
+            elim = elim + pbpk28_hepatic_elim_quad_ws(&s, &ws, p.cl_central, &hep, dt, w, w, d)
+        }
+        dose = dose + dt * pbpk28_input_rate(inp)
+        if dose > 0.0 {
+            let r = g_abs(pbpk28_total_mass(s, p) + elim - dose) / dose / vr_mass_tol(k + 1)
+            if !(r <= worst) { worst = r }
+        }
+        if k + 1 == n_prev { cb_prev = s.cv[0] }
+        k = k + 1
+    }
+    return (worst, s.cv[0], cb_prev)
+}
+
+fn gate_vr() -> bool with Mut, Div, Panic, IO {
+    var p = pbpk28_params_rapamycin()
+    p.cl_central = 2.0
+    var hep = pbpk28_hepatic_none()
+    hep.portal = true
+    hep.k_t[1] = pbpk28_sink_from_clint(500.0, 0.1, p.kp[1])
+    hep.k_t[8] = pbpk28_sink_from_clint(30.0, 1.0, p.kp[8])
+    let (mb, _cb1, _cb1p) = vr_run(p, hep, true, 10.0, 2.0, 48.0, 0.01)
+    print("VR TR-BDF2 open system: worst |M+E-D|/D over its bound = ") println(mb)
+
+    var p2 = pbpk28_params_rapamycin()
+    p2.cl_central = 0.0
+    let clint = 200.0
+    let fu = 0.1
+    var hep2 = pbpk28_hepatic_none()
+    hep2.portal = true
+    hep2.k_t[1] = pbpk28_sink_from_clint(clint, fu, p2.kp[1])
+    let x = pbpk28_ecm_x(clint, fu, p2.ps[1])
+    let clh = pbpk28_ecm_clh(p2.q[1], x)
+    let (_m_iv, cb_iv, cb_iv_prev) = vr_run(p2, hep2, false, 1.0, 1000.0, 100.0, 0.01)
+    let (_m_po, cb_po, cb_po_prev) = vr_run(p2, hep2, true, 1.0, 1000.0, 100.0, 0.01)
+    let err_iv = g_abs(cb_iv - 1.0 / clh) * clh
+    let err_po = g_abs(cb_po - 1.0 / x) * x
+    let drift = g_abs(cb_iv - cb_iv_prev) / cb_iv + g_abs(cb_po - cb_po_prev) / cb_po
+    print("VR TR-BDF2 steady state rel err IV, portal (x1e12) = ") print(e12(err_iv)) print("  ") println(e12(err_po))
+    print("VR last-hour drift (x1e12) = ") println(e12(drift))
+    return mb <= 1.0 && err_iv < 1.0e-9 && err_po < 1.0e-9 && drift < 1.0e-9
+}
+
 fn main() -> i32 with Mut, Div, Panic, IO {
     let v0 = gate_v0()
     let v1 = gate_v1()
     let v2 = gate_v2()
     let vt = gate_vt()
+    let vr = gate_vr()
     if v0 { println("V0 PASS") } else { println("V0 FAIL") }
     if v1 { println("V1 PASS") } else { println("V1 FAIL") }
     if v2 { println("V2 PASS") } else { println("V2 FAIL") }
     if vt { println("VT PASS") } else { println("VT FAIL") }
-    if v0 && v1 && v2 && vt {
+    if vr { println("VR PASS") } else { println("VR FAIL") }
+    if v0 && v1 && v2 && vt && vr {
         println("PBPK28_HEPATIC_GATES_PASS")
         return 0
     }

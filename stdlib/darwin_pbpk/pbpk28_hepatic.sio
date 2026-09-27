@@ -1,4 +1,4 @@
-// stdlib/darwin_pbpk/pbpk28_hepatic.sio — PBPK28 CN step with portal topology,
+// stdlib/darwin_pbpk/pbpk28_hepatic.sio — PBPK28 CN / TR-BDF2 steps with portal topology,
 // tissue-layer metabolic sinks and per-organ tissue input.
 //
 // Extends `tsit5_pbpk28.sio::pbpk28_full_cn_step_mut` (left untouched) with three
@@ -31,6 +31,12 @@
 //   - IV infusion R at steady state:     C_b = R / CL_H
 //   - portal infusion R at steady state: C_b = R / X
 //   - hence F_H = Q_L/(Q_L + X) emerges, it is not imposed.
+//
+// Steps: the CN step (`pbpk28_hepatic_cn_step*`) and the θ-step keep the
+// original negativity floor and are kept for parity and old-path controls. The
+// clamp-free TR-BDF2 step and its backward-Euler restart (section at the end)
+// are the production path of ddi/multidrug28.sio: they conserve mass exactly
+// and fail closed on negativity instead of flooring it.
 //
 // With k_t = 0, in_t = 0 and portal = false the step is bit-identical to
 // `pbpk28_full_cn_step_mut` (same expressions, same accumulation order; the sink
@@ -73,16 +79,35 @@ pub struct PBPK28Input {
 // `clamped` is set by every step to the mass (mg) the negativity clamp added in
 // that step, Σ V·max(0, -c) over blood and both layers of every organ. The
 // scheme conserves mass exactly only while it is zero (see the θ-step note).
+//
+// The clamp-free steps (TR-BDF2, backward-Euler restart; see the section at the
+// end of the file) also use the buffer to hand the caller what its quadrature
+// needs: x0_* is the state at t_n, g_* the interior point of the step (the
+// TR-BDF2 γ-stage x_γ, or the backward-Euler midpoint), and scale / tol /
+// neg_min_rel the negativity check of the last step (scale in mg/L, tol and
+// neg_min_rel relative to scale; neg_min_rel is the most negative entry of any
+// stage or endpoint divided by scale, 0 when none was negative).
 pub struct PBPK28Work {
     pub a_v: [f64; 14],
     pub b_v: [f64; 14],
     pub a_t: [f64; 14],
     pub b_t: [f64; 14],
     pub clamped: f64,
+    pub x0_cv: [f64; 14],
+    pub x0_ct: [f64; 14],
+    pub g_cv: [f64; 14],
+    pub g_ct: [f64; 14],
+    pub scale: f64,
+    pub tol: f64,
+    pub neg_min_rel: f64,
 }
 
 pub fn pbpk28_work_new() -> PBPK28Work {
-    PBPK28Work { a_v: [0.0; 14], b_v: [0.0; 14], a_t: [0.0; 14], b_t: [0.0; 14], clamped: 0.0 }
+    PBPK28Work {
+        a_v: [0.0; 14], b_v: [0.0; 14], a_t: [0.0; 14], b_t: [0.0; 14], clamped: 0.0,
+        x0_cv: [0.0; 14], x0_ct: [0.0; 14], g_cv: [0.0; 14], g_ct: [0.0; 14],
+        scale: 0.0, tol: 0.0, neg_min_rel: 0.0,
+    }
 }
 
 pub fn pbpk28_hepatic_none() -> PBPK28Hepatic {
@@ -155,6 +180,19 @@ fn pbpk28_hepatic_apply_ws(
         i = i + 1
     }
     (*ws).clamped = added
+}
+
+// Clamp-free reconstruction: C^{n+1} = a + b·C_b^{n+1}, negatives kept. The
+// caller checks them (pbpk28_check_nonneg_ws) and fails closed.
+fn pbpk28_hepatic_apply_free_ws(state: &!PBPKState28, cb_new: f64, ws: &!PBPK28Work) with Mut {
+    (*state).cv[0] = cb_new
+    var i: i32 = 1
+    while i < 14 {
+        (*state).cv[i] = (*ws).a_v[i] + (*ws).b_v[i] * cb_new
+        (*state).ct[i] = (*ws).a_t[i] + (*ws).b_t[i] * cb_new
+        i = i + 1
+    }
+    (*ws).clamped = 0.0
 }
 
 // Liver 2×2 block under portal routing. Inflow is Q_ha·C_b + Σ_s Q_s·C_v,s with
@@ -411,14 +449,19 @@ fn pbpk28_liver_portal_block_theta(
     (*ws).b_t[i] = bt
 }
 
-pub fn pbpk28_hepatic_theta_step_ws(
+// The θ-step proper. `floor` selects the reconstruction: true is the clamping
+// pbpk28_hepatic_apply_ws of the original step (the public θ-step keeps it, bit
+// for bit); false writes C^{n+1} = a + b·C_b^{n+1} unmodified, for the
+// clamp-free TR-BDF2 / backward-Euler steps below, which fail closed instead.
+fn pbpk28_hepatic_theta_core_ws(
     state: &!PBPKState28,
     p: PBPKParams28,
     hep: PBPK28Hepatic,
     inp: PBPK28Input,
     dt: f64,
     theta: f64,
-    ws: &!PBPK28Work
+    ws: &!PBPK28Work,
+    floor: bool
 ) with Mut, Div, Panic {
     let hi = theta * dt
     let he = (1.0 - theta) * dt
@@ -512,7 +555,23 @@ pub fn pbpk28_hepatic_theta_step_ws(
     }
 
     let cb_new = (rhs0 + sum_beta_a) / ((1.0 + s_imp) - sum_beta_b)
-    pbpk28_hepatic_apply_ws(state, cb_new, ws, p)
+    if floor {
+        pbpk28_hepatic_apply_ws(state, cb_new, ws, p)
+    } else {
+        pbpk28_hepatic_apply_free_ws(state, cb_new, ws)
+    }
+}
+
+pub fn pbpk28_hepatic_theta_step_ws(
+    state: &!PBPKState28,
+    p: PBPKParams28,
+    hep: PBPK28Hepatic,
+    inp: PBPK28Input,
+    dt: f64,
+    theta: f64,
+    ws: &!PBPK28Work
+) with Mut, Div, Panic {
+    pbpk28_hepatic_theta_core_ws(state, p, hep, inp, dt, theta, ws, true)
 }
 
 // Allocating convenience form: a fresh work buffer per call.
@@ -560,6 +619,311 @@ pub fn pbpk28_hepatic_elim_step_theta(
         i = i + 1
     }
     return e
+}
+
+// ─── Clamp-free TR-BDF2 and backward-Euler restart ──────────────────────────
+// The CN / θ steps above floor negative entries to zero
+// (pbpk28_hepatic_apply_ws). CN is A-stable but not L-stable, so after a
+// non-smooth event its stiff exchange modes ring with alternating sign, the
+// floor fires, and every firing adds mass that was never dosed
+// (docs/audit/PBPK28_CN_FLOOR_CLAMP_MASS_INJECTION_DISPATCH_2026-09-26.md:
+// +28 % blood AUC at dt = 0.05 h for a rapamycin bolus). The steps below have
+// NO floor. They conserve mass exactly (up to rounding) and fail closed when an
+// entry goes negative beyond rounding.
+//
+// TR-BDF2 (Bank et al. 1985; Hosea & Shampine 1996), γ = 2 − √2. For the linear
+// system x' = A x + b, with b (the inputs in_b, in_t) held constant over the
+// step so that each step adds exactly dt·(in_b + Σ in_t) of mass:
+//   stage 1 (trapezoid over γ·dt):
+//     (I − (γdt/2)·A) x_γ = (I + (γdt/2)·A) x_n + γdt·b
+//   stage 2 (BDF2):
+//     (I − d·dt·A) x_{n+1} = c_g·x_γ − c_o·x_n + d·dt·b
+//   d = (1−γ)/(2−γ), c_g = 1/(γ(2−γ)), c_o = (1−γ)²/(γ(2−γ)).
+// With γ = 2 − √2, γ/2 = d, so both stages solve with the same matrix; each is
+// one call of the θ-core (θ = 1/2 over γ·dt, then θ = 1 over d·dt applied to the
+// combined right-hand side). L-stable (R(∞) = 0) and second order.
+//
+// Quadrature. Eliminating x_γ from the two stages (c_g − c_o = 1,
+// c_g·γ + d = 1) gives the exact one-step identity
+//   x_{n+1} − x_n = dt·A·(w·x_n + w·x_γ + d·x_{n+1}) + dt·b,  w = 1/(2(2−γ)),
+// so any flux linear in the state (central clearance, tissue sinks, AUC)
+// integrates with the weights (w, w, d) on (x_n, x_γ, x_{n+1}), and
+//   M_{n+1} = M_n + dt·Σin − dt·(w·r(x_n) + w·r(x_γ) + d·r(x_{n+1})),
+//   r(x) = cl_central·C_b + Σ_i k_t,i·C_t,i,
+// holds to rounding (volume-weighted column sums of A telescope to the sinks).
+// A trapezoid over a TR-BDF2 trajectory is NOT this rule and breaks the
+// identity. The backward-Euler restart (two half-steps, x_n → x_m → x_{n+1})
+// has weights (0, 1/2, 1/2) on (x_n, x_m, x_{n+1}) by the same argument.
+//
+// The step exposes x_n (x0_*) and the interior point (g_*) through the work
+// buffer so the caller can apply those weights.
+//
+// Restart. TR-BDF2's first stage is itself a CN step of length γ·dt, so on a
+// jump in the state or the input it rings exactly as CN does; the BDF2 stage
+// damps it at the endpoint, but x_γ enters the quadrature. The dispatch
+// measured x_γ down to −0.085·C0 (rapamycin bolus, dt = 0.05 h). Two
+// backward-Euler half-steps after every discontinuity (dose, bolus, change of
+// infusion rate) absorb the jump first: 0 negative entries in all 12 measured
+// repeated-dosing cells, stages included (method 6 of the dispatch). The caller
+// schedules the restart; the kernel does not know where the doses are.
+//
+// Positivity is still not guaranteed (Bolley & Crouzeix 1978: no linear
+// method above first order is unconditionally positivity-preserving), so every
+// stage and every endpoint is checked and the step PANICS if any entry falls
+// below −tol·scale:
+//   scale = max |entry| of x_n  +  max injected concentration dt·in/V
+//           (in_b/V_b for blood, in_t,i/V_t,i for tissue i),
+//   tol   = 1024 · u · (1 + dt·λ),  u = 2^-53,
+//   λ     = the largest out-rate on the diagonal of A (blood (ΣQ + CL)/V_b,
+//           vascular (Q+PS)/V_v, tissue (PS/K_p + k_t)/V_t over all organs).
+// Derivation (a rounding budget from operation counts and coefficient sizes;
+// no measured value was used). Every entry of a stage result is one
+// straight-line evaluation: explicit right-hand side, 2×2 block elimination,
+// the blood-row Schur sums over 13 organs and the affine back-substitution,
+// at most n = 80 flops on the longest (blood) chain, so its rounding error is
+// at most γ_n·Σ|terms| with γ_n ≈ n·u. The terms that cancel have size at
+// most (1 + dt·λ)·scale in each of three places: the explicit factor
+// (1 − h_e·λ_i)·x, the block determinant and numerators (h·PS products), and
+// the blood-row sums Σβ_i·a_i with Σβ_i ≤ h·ΣQ/V_b ≤ dt·λ. Stage 2 sees the
+// stage-1 error through c_g ≈ 1.21 and rounds a right-hand side of size
+// (c_g + c_o)·scale ≈ 1.41·scale. Together: 80 · 3 · (1.21 + 1.41) ≈ 629, taken
+// up to 1024 because the stage-2 solve's max-norm gain in concentration units
+// is bounded by K_p ratios rather than by 1. The bound is then 2.3e-10 at
+// dt = 0.05 h on rapamycin (λ ≈ 3.8e4 /h) — eight orders below the −0.085
+// the unrestarted γ-stage produces — so it separates rounding from a real
+// positivity failure. It covers one step's rounding given its input; negativity
+// inherited from earlier steps is damped by the L-stable stages, not bounded
+// here.
+fn p28h_trbdf2_gamma() -> f64 { return 2.0 - 1.4142135623730951 }
+
+pub fn pbpk28_trbdf2_d() -> f64 with Div {
+    let g = p28h_trbdf2_gamma()
+    return (1.0 - g) / (2.0 - g)
+}
+
+pub fn pbpk28_trbdf2_w() -> f64 with Div {
+    let g = p28h_trbdf2_gamma()
+    return 1.0 / (2.0 * (2.0 - g))
+}
+
+pub fn pbpk28_negativity_tol_k() -> f64 { return 1024.0 }
+
+// scale, tol and the reset of neg_min_rel for the step about to be taken.
+fn pbpk28_step_bound_ws(
+    state: &PBPKState28,
+    p: PBPKParams28,
+    hep: PBPK28Hepatic,
+    inp: PBPK28Input,
+    dt: f64,
+    ws: &!PBPK28Work
+) with Mut, Div {
+    let vb = p.v_ref[0]
+    let cb = (*state).cv[0]
+    var smax = if cb < 0.0 { 0.0 - cb } else { cb }
+    var inj = dt * inp.in_b / vb
+    var sum_q = 0.0
+    var lam = 0.0
+    var i: i32 = 1
+    while i < 14 {
+        let cv = (*state).cv[i]
+        let ct = (*state).ct[i]
+        let acv = if cv < 0.0 { 0.0 - cv } else { cv }
+        let act = if ct < 0.0 { 0.0 - ct } else { ct }
+        if acv > smax { smax = acv }
+        if act > smax { smax = act }
+        let vi = p.v_ref[i]
+        let vf = p.vasc_frac[i]
+        let vv_raw = vi * vf
+        let vt_raw = vi * (1.0 - vf)
+        let vv = if vv_raw < 1.0e-30 { 1.0e-30 } else { vv_raw }
+        let vt = if vt_raw < 1.0e-30 { 1.0e-30 } else { vt_raw }
+        let ci = dt * inp.in_t[i] / vt
+        if ci > inj { inj = ci }
+        let lv = (p.q[i] + p.ps[i]) / vv
+        let lt = (p.ps[i] / p.kp[i] + hep.k_t[i]) / vt
+        if lv > lam { lam = lv }
+        if lt > lam { lam = lt }
+        sum_q = sum_q + p.q[i]
+        i = i + 1
+    }
+    let lb = (sum_q + p.cl_central) / vb
+    if lb > lam { lam = lb }
+    (*ws).scale = smax + inj
+    (*ws).tol = pbpk28_negativity_tol_k() * 1.1102230246251565e-16 * (1.0 + dt * lam)
+    (*ws).neg_min_rel = 0.0
+}
+
+// Fails closed on any active entry (C_v of all 14 organs, C_t of organs 1..13)
+// below −tol·scale, and records the most negative entry relative to scale. A
+// NaN entry fails too (the comparisons are written so that NaN is not >=).
+fn pbpk28_check_nonneg_ws(state: &PBPKState28, ws: &!PBPK28Work) with Mut, Div, Panic {
+    var m = (*state).cv[0]
+    var nan = !(m == m)
+    var i: i32 = 1
+    while i < 14 {
+        let cv = (*state).cv[i]
+        let ct = (*state).ct[i]
+        if !(cv == cv) || !(ct == ct) { nan = true }
+        if cv < m { m = cv }
+        if ct < m { m = ct }
+        i = i + 1
+    }
+    let sc = (*ws).scale
+    if m < 0.0 && sc > 0.0 {
+        let r = m / sc
+        if r < (*ws).neg_min_rel { (*ws).neg_min_rel = r }
+    }
+    if nan || !(m >= 0.0 - (*ws).tol * sc) {
+        panic("pbpk28_hepatic: clamp-free step produced an entry below -tol*scale (fail closed; see the TR-BDF2 section)")
+    }
+}
+
+// Element-wise saves (never a whole-struct copy: under Madaros a reassignment
+// or store of an array-holding struct aliases the source).
+fn pbpk28_work_save_x0(state: &PBPKState28, ws: &!PBPK28Work) with Mut {
+    var i: i32 = 0
+    while i < 14 {
+        (*ws).x0_cv[i] = (*state).cv[i]
+        (*ws).x0_ct[i] = (*state).ct[i]
+        i = i + 1
+    }
+}
+
+fn pbpk28_work_save_g(state: &PBPKState28, ws: &!PBPK28Work) with Mut {
+    var i: i32 = 0
+    while i < 14 {
+        (*ws).g_cv[i] = (*state).cv[i]
+        (*ws).g_ct[i] = (*state).ct[i]
+        i = i + 1
+    }
+}
+
+// *state ← c_g·x_γ − c_o·x_n, with x_γ = *state (= g_*) and x_n = x0_*.
+fn pbpk28_bdf2_combine_ws(state: &!PBPKState28, ws: &PBPK28Work) with Mut, Div {
+    let g = p28h_trbdf2_gamma()
+    let c_g = 1.0 / (g * (2.0 - g))
+    let c_o = (1.0 - g) * (1.0 - g) / (g * (2.0 - g))
+    var i: i32 = 0
+    while i < 14 {
+        (*state).cv[i] = c_g * (*ws).g_cv[i] - c_o * (*ws).x0_cv[i]
+        (*state).ct[i] = c_g * (*ws).g_ct[i] - c_o * (*ws).x0_ct[i]
+        i = i + 1
+    }
+}
+
+// One clamp-free TR-BDF2 step. Advances *state; leaves x_n in ws.x0_*, x_γ in
+// ws.g_*, and the negativity record in ws.scale / tol / neg_min_rel.
+// ws.clamped is 0.
+pub fn pbpk28_hepatic_trbdf2_step_ws(
+    state: &!PBPKState28,
+    p: PBPKParams28,
+    hep: PBPK28Hepatic,
+    inp: PBPK28Input,
+    dt: f64,
+    ws: &!PBPK28Work
+) with Mut, Div, Panic {
+    let g = p28h_trbdf2_gamma()
+    pbpk28_step_bound_ws(state, p, hep, inp, dt, ws)
+    pbpk28_work_save_x0(state, ws)
+    pbpk28_hepatic_theta_core_ws(state, p, hep, inp, g * dt, 0.5, ws, false)
+    pbpk28_check_nonneg_ws(state, ws)
+    pbpk28_work_save_g(state, ws)
+    pbpk28_bdf2_combine_ws(state, ws)
+    pbpk28_hepatic_theta_core_ws(state, p, hep, inp, pbpk28_trbdf2_d() * dt, 1.0, ws, false)
+    pbpk28_check_nonneg_ws(state, ws)
+}
+
+// The restart: two clamp-free backward-Euler half-steps. Leaves x_n in
+// ws.x0_*, the midpoint in ws.g_*; same negativity record as the TR-BDF2 step.
+pub fn pbpk28_hepatic_be2_step_ws(
+    state: &!PBPKState28,
+    p: PBPKParams28,
+    hep: PBPK28Hepatic,
+    inp: PBPK28Input,
+    dt: f64,
+    ws: &!PBPK28Work
+) with Mut, Div, Panic {
+    pbpk28_step_bound_ws(state, p, hep, inp, dt, ws)
+    pbpk28_work_save_x0(state, ws)
+    pbpk28_hepatic_theta_core_ws(state, p, hep, inp, 0.5 * dt, 1.0, ws, false)
+    pbpk28_check_nonneg_ws(state, ws)
+    pbpk28_work_save_g(state, ws)
+    pbpk28_hepatic_theta_core_ws(state, p, hep, inp, 0.5 * dt, 1.0, ws, false)
+    pbpk28_check_nonneg_ws(state, ws)
+}
+
+// The clamping backward-Euler pair of the legacy CN + Rannacher path, with the
+// same bookkeeping as pbpk28_hepatic_be2_step_ws (x0_*, g_*) and ws.clamped =
+// the mass both floors added. For old-path controls only.
+pub fn pbpk28_hepatic_be2_floor_step_ws(
+    state: &!PBPKState28,
+    p: PBPKParams28,
+    hep: PBPK28Hepatic,
+    inp: PBPK28Input,
+    dt: f64,
+    ws: &!PBPK28Work
+) with Mut, Div, Panic {
+    pbpk28_work_save_x0(state, ws)
+    pbpk28_hepatic_theta_core_ws(state, p, hep, inp, 0.5 * dt, 1.0, ws, true)
+    let c1 = (*ws).clamped
+    pbpk28_work_save_g(state, ws)
+    pbpk28_hepatic_theta_core_ws(state, p, hep, inp, 0.5 * dt, 1.0, ws, true)
+    (*ws).clamped = (*ws).clamped + c1
+}
+
+// The legacy CN step (bit-identical to pbpk28_hepatic_cn_step_ws, floor
+// included) with x_n saved in ws.x0_*, so that the caller can use the same
+// quadrature entry points (weights (1/2, 0, 1/2)).
+pub fn pbpk28_hepatic_cn_step_saved_ws(
+    state: &!PBPKState28,
+    p: PBPKParams28,
+    hep: PBPK28Hepatic,
+    inp: PBPK28Input,
+    dt: f64,
+    ws: &!PBPK28Work
+) with Mut, Div, Panic {
+    pbpk28_work_save_x0(state, ws)
+    pbpk28_hepatic_cn_step_ws(state, p, hep, inp, dt, ws)
+}
+
+fn p28h_rate(cb: f64, ct: &[f64; 14], k: &[f64; 14], cl: f64) -> f64 with Mut {
+    var r = cl * cb
+    var i: i32 = 1
+    while i < 14 {
+        r = r + (*k)[i] * (*ct)[i]
+        i = i + 1
+    }
+    return r
+}
+
+// Mass (mg) eliminated over the step just taken, with quadrature weights
+// (w0, wg, w1) on (x_n = ws.x0_*, interior = ws.g_*, x_{n+1} = *state):
+// TR-BDF2 (w, w, d), backward-Euler restart (0, 1/2, 1/2), CN (1/2, 0, 1/2).
+// A zero weight skips its point (the interior is stale after a CN step).
+pub fn pbpk28_hepatic_elim_quad_ws(
+    state: &PBPKState28,
+    ws: &PBPK28Work,
+    cl_central: f64,
+    hep: &PBPK28Hepatic,
+    dt: f64,
+    w0: f64,
+    wg: f64,
+    w1: f64
+) -> f64 with Mut {
+    var e = 0.0
+    if w0 != 0.0 { e = e + w0 * p28h_rate((*ws).x0_cv[0], &(*ws).x0_ct, &(*hep).k_t, cl_central) }
+    if wg != 0.0 { e = e + wg * p28h_rate((*ws).g_cv[0], &(*ws).g_ct, &(*hep).k_t, cl_central) }
+    if w1 != 0.0 { e = e + w1 * p28h_rate((*state).cv[0], &(*state).ct, &(*hep).k_t, cl_central) }
+    return dt * e
+}
+
+// Blood AUC increment (mg·h/L) of the step just taken, same weights.
+pub fn pbpk28_hepatic_auc_quad_ws(state: &PBPKState28, ws: &PBPK28Work, dt: f64, w0: f64, wg: f64, w1: f64) -> f64 with Mut {
+    var a = 0.0
+    if w0 != 0.0 { a = a + w0 * (*ws).x0_cv[0] }
+    if wg != 0.0 { a = a + wg * (*ws).g_cv[0] }
+    if w1 != 0.0 { a = a + w1 * (*state).cv[0] }
+    return dt * a
 }
 
 // Total mass input (mg/h) carried by an input record.
