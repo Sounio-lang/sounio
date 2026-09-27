@@ -15,6 +15,8 @@
 #   //@ expect-stdout-contains: X — stdout must contain X (run-pass only)
 #   //@ error-pattern: X      — stderr/stdout must contain X (compile-fail only)
 #   //@ known-failure: REASON — documented accepted failure
+#   //@ known-failure-pattern: X — a known-failure only counts as xfail when the
+#                               test output contains X; enforced in every mode
 #   //@ skip-if: CONDITION    — conditional skip (e.g., skip-if: no-gpu)
 #   //@ requires: FEATURE     — feature dependency (gpu|llvm|madaros|lean_single|slow)
 #   //@ flaky                 — known flaky test
@@ -323,6 +325,7 @@ run_test() {
     local skip_if=""
     local requires=""
     local known_reason=""
+    local known_pattern=""
     local unknown_expect=""
     
     # Parse annotations
@@ -357,6 +360,13 @@ run_test() {
             *"//@ typecheck-fail"*) is_typecheck_fail=true ;;
             *"//@ ignore"*) is_ignored=true ;;
             *"//@ check-only"*) is_check_only=true ;;
+            # Before the bare known-failure arm: case takes the first match.
+            *"//@ known-failure-pattern"*)
+                if [[ "$line" =~ known-failure-pattern:[[:space:]]*(.+) ]]; then
+                    known_pattern="${BASH_REMATCH[1]}"
+                    known_pattern="${known_pattern%"${known_pattern##*[![:space:]]}"}"
+                fi
+                ;;
             *"//@ known-failure"*) 
                 is_known_failure=true
                 if [[ "$line" =~ known-failure:[[:space:]]*(.+) ]]; then
@@ -676,11 +686,19 @@ run_test() {
     # failure whose test_output matches; anything else is a fresh fail, not a repeat
     # of the audited one. Checked here, before is_known_failure is consulted below,
     # so unmatched entries fall straight through to the ordinary fail path.
+    #
+    # The manifest is only loaded for unfiltered --format junit runs, so its pin
+    # alone left filtered and human runs accepting ANY failure of an inline
+    # `//@ known-failure` test (a crash, a different wrong answer). An inline
+    # `//@ known-failure-pattern: X` pins the failure the same way in every mode.
     if $is_known_failure && [[ $exit_code -ne 0 ]]; then
         expected_reason="${KNOWN_FAILURE_REASON_MAP[$rel_file]:-}"
         if [[ -n "$expected_reason" ]] && ! grep -qF -- "$expected_reason" <<<"$test_output"; then
             is_known_failure=false
             test_output="known-failure reason mismatch: expected '$expected_reason', got: $test_output"
+        elif [[ -n "$known_pattern" ]] && ! grep -qF -- "$known_pattern" <<<"$test_output"; then
+            is_known_failure=false
+            test_output="known-failure pattern mismatch: expected '$known_pattern', got: $test_output"
         fi
     fi
 
