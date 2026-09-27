@@ -58,12 +58,12 @@ Results, measured on Madaros:
   helper, so it under-reads by (ln G)²/2048: **−234 ppm at the 2.0 gate** and **−589 ppm at the
   3.0 gate**. From the exp error alone, a true GMFE in (2.0, 2.0004694] or (3.0, 3.0017691]
   prints at or below the gate and passes. The ln error of the individual FEs can widen that to
-  at most 2.0004716 and 3.0017725 (§2).
+  at most 2.0004716 and 3.0017725. At the 2.0 gate, six FEs already pass at 2.0004712 (§2).
 * **No PASS/FAIL verdict flips today.** The false-pass bands above are latent: no current
   input falls in them. Four printed values move, all in the 4th to 7th significant figure. The pbpk28 GMFE paths are dead until observed data land (`obs_n() = 0`).
   rapamycin_clinical's GMFE is a dead store.
-* `math::pure::{exp, ln}` matches V8 libm to within 0.56 × 10⁻¹⁵ at every call-site argument
-  measured (relative for exp, absolute for ln). The swap changes no constant.
+* `math::pure::{exp, ln}` matches V8 libm to within 0.56 × 10⁻¹⁵ on every §2 probe row
+  (relative for exp, absolute for ln). The swap changes no constant.
 
 ## 1. The two helpers, analytically
 
@@ -87,8 +87,17 @@ carries a relative rounding error of about 10⁻¹³ on top of the −x²/2048 b
   |x| ≳ 2 × 10⁻⁵.
 * Below that the sign is set by rounding. At x = −10⁻¹⁴, `1 + x/1024` rounds to 1, so the helper
   returns 1 > exp(x).
-* The smallest call-site argument is |x| = 0.00224, where the bias is 2.45 × 10⁻⁹. Every argument
-  in §2 reads low as measured.
+* The §2 probe rows start at t = 1 h (|x| = 0.00224, bias 2.45 × 10⁻⁹), and every row reads low
+  as measured. The rows are a sample, not every runtime argument.
+* The adaptive integrator reaches smaller arguments. `default_ode_config()` starts at
+  dt = 0.01 h, and `release_step_amount` evaluates Q(t + dt), so the first first-order step uses
+  x = −2.24 × 10⁻⁵. There the bias is 2.45 × 10⁻¹³, comparable to the rounding error.
+* The probe does not sample this range. A binary64 evaluation of the same operations (Node, not
+  Madaros) at t = 0.01, 0.02, 0.05, 0.1 and 0.5 h gives relative errors of −3.03e-13, −9.47e-13,
+  −6.06e-12, −2.45e-11 and −6.13e-10. All five read low, but at 0.01 h rounding is about a
+  quarter of the value.
+* At these small arguments the absolute effect on Q is below D · 3 × 10⁻¹³ per step, which is
+  negligible.
 
 * The "< 0.01%" claim needs x²/2048 < 10⁻⁴, i.e. |x| < √0.2048 ≈ 0.4525 to leading order.
 * At x = −1024 the base 1 + x/1024 is 0. Below that it is negative and the even power is
@@ -158,10 +167,18 @@ the exp-only edge × e^(1.1332 × 10⁻⁶):
 * G = 2.0: **≤ 2.0004716**
 * G = 3.0: **≤ 3.0017725**
 
-The composed bound assumes every FE reduces to sx = 2 (FE = 2·eᵏ), where the ln error is
-largest. Such a set cannot also have a geometric mean near the gate, so the bound is an upper
-limit rather than an attained value. For a given FE set, the actual edge lies between the two
-figures.
+The composed bound is effectively reached near the gate. FEs of exactly 2.0 sit at sx = 2,
+where the ln error is largest, and one slightly larger FE lifts the geometric mean above the
+gate. Bisection through the full helper pipeline (binary64, Node) gives the largest passing
+set of that shape:
+
+| FE set | true GMFE that still passes |
+|---|---|
+| 5 × 2.0 + 1 × 2.002829 | 2.0004712 |
+| 100 × 2.0 + 1 × 2.048197 | 2.0004716 |
+| 1000 × 2.0 + 1 × 2.532 | 2.00047162 (2 × 10⁻¹⁰ below the bound) |
+
+For a given FE set, the actual edge lies between the exp-only figure and the composed bound.
 
 ## 3. Per file: what moves on Madaros
 
