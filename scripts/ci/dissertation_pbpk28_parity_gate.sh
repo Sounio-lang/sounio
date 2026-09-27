@@ -891,6 +891,19 @@ awk -F= '
 ' "$VFX_SIO_LOG"
 
 echo
+echo "[pbpk28-parity] venlafaxine guards: Node sample-time/interval checks + Sounio backwards-integration panic"
+node "$ROOT_DIR/scripts/ci/pbpk28_core_venlafaxine_guards.mjs" || {
+  echo "[pbpk28-parity] FAIL: Node venlafaxine core guards" >&2; exit 1; }
+VFX_BACK_LOG="$OUT_DIR/vfx_backwards.txt"
+if "$SOUC_BIN" run tests/fixtures/darwin_pbpk/vfx_integrate_backwards.sio > "$VFX_BACK_LOG" 2>&1; then
+  echo "[pbpk28-parity] FAIL: vfx_integrate_to accepted t_end < t_start (exit 0)" >&2; exit 1; fi
+if ! grep -q '^VFX_BACKWARDS_REACHED$' "$VFX_BACK_LOG"; then
+  echo "[pbpk28-parity] FAIL: backwards fixture failed before the check (see $VFX_BACK_LOG)" >&2; exit 1; fi
+if grep -q '^VFX_BACKWARDS_ACCEPTED$' "$VFX_BACK_LOG"; then
+  echo "[pbpk28-parity] FAIL: vfx_integrate_to accepted t_end < t_start" >&2; exit 1; fi
+echo "VENLAFAXINE_GUARDS_PASS (Node guards; Sounio vfx_integrate_to panics on t_end < t_start)"
+
+echo
 echo "[pbpk28-parity] venlafaxine XR canonical: parent + ODV + matrix within ${RMSE_THRESHOLD_PCT}% RMSE, steady-state ratio certified (3rd canonical drug)"
 
 # ════════════════════════════════════════════════════════════════════════════
