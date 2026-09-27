@@ -30,9 +30,11 @@ varies across samples (`docs/audit/PBPK28_CN_RANNACHER_MASS_BALANCE_2026-09-26.m
 **Run log:** `runs/pbpk28_sobol_pce_v2.txt` (lean_single; the module does not type-check under
 Madaros on main, E259). The self-tests pass 6/6, including self-test TEST 6, a mass-balance check
 of one nominal-parameter run (1.3×10⁻¹³ relative); it is not a check of the Saltelli samples. A sampled
-trajectory the kernel rejects returns NaN, and self-test TEST 1 requires every S_i and S_Ti of the 7
-parameters to be finite, so a rejection fails the run instead of entering the estimator as AUC = 0;
-in the logged run every index is finite, so no sampled trajectory was rejected.
+trajectory the kernel rejects returns NaN, and self-test TEST 1 requires every S_i, S_Ti and the 21
+S_ij of the 7 parameters to be finite. Every trajectory the estimator evaluates (the A, B, C_i and
+C_ij sample matrices) enters at least one of those indices, and NaN passes the estimators' clamps, so
+a rejection fails the run instead of entering the estimator as AUC = 0; in the logged run every
+index is finite, so no sampled trajectory was rejected.
 
 ## Status of these numbers: estimator output, not validated Sobol' indices
 
