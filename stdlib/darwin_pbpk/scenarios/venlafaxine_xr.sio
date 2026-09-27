@@ -249,18 +249,28 @@ pub struct VfxSsInterval {
     pub periodicity_mg_odv: f64,     // P_o
 }
 
-// Mass released into the gut over [t, t + dt] by doses given at 0, τ, …, (n−1)τ.
-fn vfx_released_qtau(
+// Mass released into the gut over step n, [n·dt, (n + 1)·dt], by doses given
+// at steps 0, S, …, (n_doses − 1)·S, S = steps_per_tau. Each dose's age is
+// m = n − k·S counted in integer steps and evaluated at m·dt, so a dose starts
+// at exactly age 0. Subtracting floats, (n as f64)·dt − k·τ, lands at ±1e-14
+// when dt is not exact in binary (τ = 24, dt = 24/17), and the matrix's ln
+// series floors the Korsmeyer-Peppas fraction at ~7.9e-3 for tiny t > 0: the
+// step before every dose released 0.591 mg of it early. Steps before a dose
+// (m < 0) contribute nothing and are skipped rather than evaluated.
+pub fn vfx_released_qtau(
     rel: MatrixReleaseModel,
     n_doses: i32,
-    tau: f64,
-    t: f64,
+    steps_per_tau: i64,
+    n: i64,
     dt: f64
 ) -> f64 with Mut, Div, Panic {
     var amt = 0.0
     var k: i32 = 0
     while k < n_doses {
-        amt = amt + matrix_step_amount(rel, t - (k as f64) * tau, dt)
+        let m = n - (k as i64) * steps_per_tau
+        if m >= 0 {
+            amt = amt + matrix_step_amount(rel, (m as f64) * dt, dt)
+        }
         k = k + 1
     }
     return amt
@@ -332,7 +342,7 @@ pub fn vfx_ss_interval(
     var s = vfx_scenario_init(pheno)
     var n: i64 = 0
     while n < n_warm {
-        s = vfx_step_released(s, vfx_released_qtau(rel, n_doses, tau, (n as f64) * dt, dt), dt)
+        s = vfx_step_released(s, vfx_released_qtau(rel, n_doses, steps_per_tau, n, dt), dt)
         n = n + 1
     }
 
@@ -348,7 +358,7 @@ pub fn vfx_ss_interval(
         let mo0 = pbpk28_total_mass(s.odv, op)
         let cp0 = s.parent.cv[0]
         let co0 = s.odv.cv[0]
-        s = vfx_step_released(s, vfx_released_qtau(rel, n_doses, tau, (n as f64) * dt, dt), dt)
+        s = vfx_step_released(s, vfx_released_qtau(rel, n_doses, steps_per_tau, n, dt), dt)
         let cp1 = s.parent.cv[0]
         let co1 = s.odv.cv[0]
         auc_p = auc_p + h * (cp0 + cp1)

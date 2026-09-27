@@ -930,7 +930,8 @@ export function runVenlafaxineSteadyState({ dt = 0.5, pheno = 2, nDoses = 10, ta
   const vb = V_REF[0];
   const nWarm = (nDoses - 1) * stepsPerTau;
   // Mass released over step n by doses given at steps 0, S, …, (nDoses−1)·S.
-  // Each dose's clock is (n − k·S)·dt from integer steps, so a dose starts at
+  // Each dose's clock is (n − k·S)·dt from integer steps, as in the stdlib's
+  // vfx_released_qtau, so a dose starts at
   // exactly t = 0: n·dt − k·tau can land at ±1e-15 for dt not exact in binary,
   // and the ported ln series floors the Korsmeyer-Peppas fraction at ~7.9e-3
   // for tiny t > 0, which would release ~0.6 mg instantly and break periodicity.
