@@ -83,4 +83,56 @@ compile_and_run basic "$FIX/basic/main.sio"
 expect_output basic "$FIX/basic/expected.txt"
 echo "$TAG PASS(basic): a path-form type import's qualified associated call compiles and runs correctly"
 
+# --- oversized: Copilot review (PR #2515), comment 4114530613:
+# module_frontend_named_import_terminal_is_type's byte scanner reads through
+# read_file's fixed 1 MiB buffer (the same cap every read_file caller in
+# this tree lives with) -- a real module file past that size (self-hosted/
+# check/check.sio and self-hosted/ir/lower.sio both are) with its struct/
+# enum declaration past the cutoff used to scan as "not found", silently
+# misclassifying a genuine type import as a function/value one. Generated
+# at run time rather than checked in, so the repository does not carry a
+# multi-MiB fixture: a filler comment block pushes `pub struct Widget` past
+# 1 MiB in "pkg_mod_big.sio", exactly mirroring the `basic` case above but
+# at a size only the fail-closed fix (self-hosted/compiler/module_frontend.
+# sio) can get right.
+oversized_dir="$WORK/oversized"
+mkdir -p "$oversized_dir"
+{
+  i=0
+  # ~1.05 MiB of `// filler...\n` lines (18 bytes each) pushes the struct
+  # declaration past the 1 MiB read_file cutoff.
+  while ((i < 61000)); do
+    printf '// filler filler filler\n'
+    i=$((i + 1))
+  done
+  cat <<'EOF'
+pub struct Widget {
+    n: i64,
+}
+
+impl Widget {
+    pub fn make() -> i64 {
+        42
+    }
+}
+EOF
+} > "$oversized_dir/pkg_mod_big.sio"
+[[ "$(wc -c <"$oversized_dir/pkg_mod_big.sio")" -gt 1048576 ]] || fail "oversized: generated fixture did not exceed 1 MiB"
+cat <<'EOF' > "$oversized_dir/main.sio"
+use pkg_mod_big::Widget;
+
+fn main() -> i32 with IO, Mut, Panic {
+    let v: i64 = pkg_mod_big::Widget::make()
+    if v == 42 {
+        println("OVERSIZED_MODULE_TYPE_IMPORT_QUALIFIER_OK")
+        return 0
+    }
+    1
+}
+EOF
+echo "OVERSIZED_MODULE_TYPE_IMPORT_QUALIFIER_OK" > "$oversized_dir/expected.txt"
+compile_and_run oversized "$oversized_dir/main.sio"
+expect_output oversized "$oversized_dir/expected.txt"
+echo "$TAG PASS(oversized): a path-form type import past read_file's 1 MiB cutoff still keeps its module-qualifier suffix"
+
 echo "$TAG PASS: path-form type import resolved correctly"

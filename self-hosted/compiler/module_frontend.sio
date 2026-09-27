@@ -863,7 +863,33 @@ fn module_frontend_named_import_terminal_is_type(parent_file_path: string, termi
     if size <= 0 {
         return false
     }
-    let n = if size > 1048576 { 1048576 } else { size }
+    // Copilot review (PR #2515), comment 4114530613: read_file's buffer is a
+    // fixed 1 MiB ([i8; 1048576], the same cap every other read_file caller
+    // in this tree lives with -- see read_source_file's own "1MB lex buffer"
+    // comment; there is no larger-capacity read builtin to switch to). A
+    // real module file can exceed that (self-hosted/check/check.sio,
+    // self-hosted/ir/lower.sio both do) and carry a struct/enum declaration
+    // PAST the cutoff, which a truncated scan can never see. Silently
+    // returning `false` past this point previously meant "not found" was
+    // indistinguishable from "found nothing to look at", misclassifying a
+    // genuine type import as a function/value one and suppressing its
+    // module-qualifier registration (this file's own module_frontend_
+    // named_import_terminal_is_type existed to FIX exactly that
+    // misclassification for the in-range case -- silently mis-answering it
+    // for an out-of-range file would just move the same bug to a different
+    // trigger). Fail closed instead: when the scan cannot cover the whole
+    // file, assume the terminal COULD be a type (return true) rather than
+    // guess it is a plain function/value from partial data. The asymmetric
+    // cost matches this whole PR's own precedent (e.g. check.sio's
+    // checker_use_module_known guard) -- wrongly suppressing a real type's
+    // qualifier breaks a call outright, while wrongly not-excluding an
+    // oversized file's genuine function/value import only reopens the
+    // narrower, already-accepted "qualifier vs. unrelated same-named item"
+    // ambiguity this PR documents elsewhere as an out-of-scope gap.
+    if size > 1048576 {
+        return true
+    }
+    let n = size
     let raw = read_file(parent_file_path)
     var i: i64 = 0
     while i < n {
