@@ -168,18 +168,20 @@ these numbers from being used as Sobol' indices:
    0.000000 with S_Ti[CL_hep] = 1.000000, and in the semaglutide block a first-order index above
    its total-order index (S_i(fu) = 0.9505 > S_Ti(fu) = 0.5557). True indices satisfy
    S_i ≤ S_Ti. Both features are present in v1 and v2 alike. They point to
-   `stdlib/epistemic/sobol.sio`, which was not examined here.
+   `stdlib/epistemic/sobol.sio`, which was not examined here. The module's TEST 7 now checks
+   S_i ≤ S_Ti for all 7 parameters and fails in both blocks. In this one it is violated for
+   CL_renal (0.018363 > 0.001414) and, at noise level, for Kp_brain and Kp_kidney.
 
 Raw estimator output, for the record only:
 
 | Parameter | S_i v1 run | S_i v2 | S_Ti v2 |
 |---|---:|---:|---:|
 | CL_hepatic | 0.000000 | 0.000000 | 1.000000 |
-| CL_renal | 0.029295 | 0.018363 | not printed |
+| CL_renal | 0.029295 | 0.018363 | 0.001414 (TEST 7) |
 | fu_plasma | 0.049450 | 0.094698 | not printed |
-| Kp_brain | 0.000000 | 9.7e-11 | not printed |
+| Kp_brain | 0.000000 | 9.7e-11 | 4.0e-20 (TEST 7) |
 | Kp_liver | 0.000003 | ~0 | 1.3e-15 |
-| Kp_kidney | 0.000052 | 1.1e-9 | not printed |
+| Kp_kidney | 0.000052 | 1.1e-9 | 5.1e-18 (TEST 7) |
 | Kp_adipose | 0.000000 | ~0 | not printed |
 
 v1's dissertation claims for this section ("quasi-additive … ρ_add ∈ [0.85, 0.99]", "CL_hepatic
@@ -223,7 +225,7 @@ and 2.55×10⁻¹¹ mg/L, a ratio of 3.9998, i.e. second order. One fix was need
 below 24. The sample is now taken at the step nearest 24 h. The production dt = 0.05 h value is
 unchanged.
 | Hessian correction | `epistemic_pbpk28_hessian.sio` | 7/7 + 5/5 dual-ρ |
-| Sobol + PCE | `validation/pbpk28_sobol_pce.sio` | 6/6 + 6/6 (structural checks; see §4.10.5) |
+| Sobol + PCE | `validation/pbpk28_sobol_pce.sio` | 6/7 + 6/7: TEST 7 (S_i ≤ S_Ti) fails in both; rc = 2, no PASS marker (see §4.10.5) |
 | Mass-balance gates | `tests/run-pass/pbpk28_consumer_mass_balance.sio` | PASS |
 
 ## Provenance

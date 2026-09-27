@@ -28,18 +28,22 @@ date: 2026-09-26
 that was 0.283 mg of the 1 mg semaglutide bolus at dt = 0.5 h (+28% AUC_blood), and the amount
 varies across samples (`docs/audit/PBPK28_CN_RANNACHER_MASS_BALANCE_2026-09-26.md`).
 **Run log:** `runs/pbpk28_sobol_pce_v2.txt` (lean_single; the module does not type-check under
-Madaros on main, E259). The self-tests pass 6/6, including self-test TEST 6, a mass-balance check
+Madaros on main, E259). Tests 1–6 of each self-test pass, including TEST 6, a mass-balance check
 of one nominal-parameter run (1.3×10⁻¹³ relative); it is not a check of the Saltelli samples. A sampled
 trajectory the kernel rejects returns NaN, and self-test TEST 1 requires every S_i, S_Ti and the 21
 S_ij of the 7 parameters to be finite. Every trajectory the estimator evaluates (the A, B, C_i and
 C_ij sample matrices) enters at least one of those indices, and NaN passes the estimators' clamps, so
 a rejection fails the run instead of entering the estimator as AUC = 0; in the logged run every
-index is finite, so no sampled trajectory was rejected.
+index is finite, so no sampled trajectory was rejected. TEST 7 of each self-test checks the ordering
+invariant S_i ≤ S_Ti and **fails in both** (below), so the run exits with rc = 2 and prints no PASS
+marker; `scripts/ci/dissertation_pbpk_suite_gate.sh` therefore reports this module as FAIL until the
+estimator is repaired.
 
 ## Status of these numbers: estimator output, not validated Sobol' indices
 
 The Saltelli/Jansen estimator's output violates the defining inequality S_i ≤ S_Ti: here
-S_i(fu_plasma) = 0.950518 > S_Ti(fu_plasma) = 0.555677, and in v1 0.986 > 0.583. It also reports
+S_i(fu_plasma) = 0.950518 > S_Ti(fu_plasma) = 0.555677 (v1: 0.986 > 0.583), and TEST 7 also finds
+S_i > S_Ti for kp_brain (0.006599 > 0.000111) and kp_kidney (0.009373 > 0.000218). It also reports
 S_i(CL_proteolytic) = 0 (to the printed precision) with S_Ti = 0.657. The rapamycin block of the
 same module shows a first-order CL index of 0 with S_Ti = 1 (`pbpk28_epistemic_v2.md` §4.10.5).
 These are pre-existing properties of `stdlib/epistemic/sobol.sio` or of how the module calls it.

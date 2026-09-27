@@ -146,7 +146,7 @@ The canonical u_MC pin was re-derived from the rerun above and now lives in `m5_
 | semaglutide S_i fu / kp_brain / kp_kidney | 0.986151 / 0.009152 / 0.018073 | 0.950518 / 0.006599 / 0.009373 |
 | semaglutide S_Ti CL_proteolytic / fu / kp_liver | 0.689513 / 0.583407 / 0.002126 | 0.657361 / 0.555677 / 0.004522 |
 | semaglutide ρ_add = Σ S_i | 1.013376 | 0.966490 |
-| tests | 5/5 + 5/5 | 6/6 + 6/6 |
+| tests | 5/5 + 5/5 | 6/6 + 6/6 at the kernel switch; 6/7 + 6/7 since review added TEST 7 (S_i ≤ S_Ti), which the estimator output fails in both blocks (rc = 2, no PASS marker) |
 
 The header's old claim, a "~0.5% bias that cancels in variance ratios", did not describe the kernel. The injection depends on the sampled parameters, which is visible in the Kp indices. Pre-existing and unchanged: the rapamycin first-order S_i[CL_hepatic] prints 0.000000 while S_Ti[CL_hepatic] = 1.000000. That looks like an estimator issue in `epistemic::sobol` and was not examined here. Runtime: the ledger bookkeeping makes each model evaluation about 1.6–2× slower under lean_single (MC 361 s → 586 s; Sobol 1483 s → 2331 s).
 
