@@ -419,8 +419,10 @@ them.
 **Method.** `python3 docs/audit/repro/let_place_source_alias_sweep.py . stdlib`,
 over `git ls-files 'stdlib/*.sio'` at `2e8b76d31`. It reads every struct
 declaration in `stdlib/`, `self-hosted/`, `examples/` and `tests/`, and every
-declared return type, from source with `//` and `/* */` comments masked
-(offsets kept), so prose or commented-out declarations never register. Names are resolved per file and deterministically: a
+declared return type, from source with `//` and `/* */` comments and the
+contents of string and char literals masked (offsets kept), so prose,
+commented-out code and source embedded in strings (e.g. WGSL structs in
+`self-hosted/gpu/wgsl_render.sio`) never register as declarations. Names are resolved per file and deterministically: a
 definition in the same file first, then the module the file imports the name
 from with `use`, then the corpus-wide definition only when every definition of
 that name agrees. A name with conflicting definitions (389 struct names, e.g.
@@ -443,10 +445,10 @@ and is not flagged. Inside a loop, the search starts at the loop head, because a
 back-edge makes earlier writes later.
 
 The sweep is heuristic and line-oriented. It prints its own coverage counts,
-and they reconcile: of **2,917** place bindings in `stdlib/` (field chains,
-derefs and indexes), it resolves 2,464 to a scalar type and 93 to an aggregate.
-**360 (12.3 %) stay unresolved**: 181 whose root local has no known type and
-179 whose field chain does not resolve, mostly because a type comes from a
+and they reconcile: of **2,881** place bindings in `stdlib/` (field chains,
+derefs and indexes), it resolves 2,436 to a scalar type and 93 to an aggregate.
+**352 (12.2 %) stay unresolved**: 176 whose root local has no known type and
+176 whose field chain does not resolve, mostly because a type comes from a
 construct the sweep does not model (method returns, generic structs,
 multi-line statements) or from an ambiguous name. It
 does not follow mutation into a callee except through the B-param class. Every

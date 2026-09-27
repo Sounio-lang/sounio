@@ -49,23 +49,33 @@ def strip_comment(line):
 
 
 def mask_comments(text):
-    """`//` and `/* */` comments replaced by spaces, newlines and offsets kept.
+    """Comments and literal contents replaced by spaces, newlines and offsets kept.
 
-    String and char literals are skipped so `"http://..."` is not a comment.
-    Declarations and function spans are parsed from the masked text only, so
-    commented-out or prose `struct X { ... }` / `fn f(...)` never register.
+    `//` and `/* */` comments are blanked whole. String and char literals keep
+    their delimiters but their contents are blanked, so `"http://..."` is not
+    read as a comment and embedded source (e.g. WGSL `struct VertexIn {..}` in
+    a string) never registers. Declarations and function spans are parsed from
+    the masked text only.
     """
+    def blank(a, b):
+        for k in range(a, min(b, n)):
+            if text[k] != "\n":
+                out[k] = " "
+
     out = list(text)
     i, n = 0, len(text)
     while i < n:
         c = text[i]
         if c == '"':
-            i += 1
-            while i < n and text[i] != '"':
-                i += 2 if text[i] == "\\" else 1
-            i += 1
+            j = i + 1
+            while j < n and text[j] != '"':
+                j += 2 if text[j] == "\\" else 1
+            blank(i + 1, j)
+            i = j + 1
         elif c == "'" and i + 2 < n and (text[i + 2] == "'" or (text[i + 1] == "\\" and i + 3 < n and text[i + 3] == "'")):
-            i += 4 if text[i + 1] == "\\" else 3
+            w = 4 if text[i + 1] == "\\" else 3
+            blank(i + 1, i + w - 1)
+            i += w
         elif text.startswith("//", i):
             while i < n and text[i] != "\n":
                 out[i] = " "
