@@ -91,7 +91,9 @@ Every other printed line is identical.
 
 ## Measurement 2: independent reference
 
-`docs/audit/repro/ss_multidose_rk4_reference.sio` uses the **same model**
+`docs/audit/repro/ss_multidose_rk4_reference.sio` (fullvd, 14 doses) and
+`docs/audit/repro/ss_multidose_rk4_reference_mean.sio` (mean params, 7 doses)
+use the **same model**
 (`pbpk_ode`, `rapamycin_fullvd_params` / `rapamycin_mean_params`,
 `rapamycin_absorption_params`, 2 mg q24h, per-interval lag of 0.5 h). The
 numerics are **different**:
@@ -104,8 +106,9 @@ numerics are **different**:
   boundaries.
 
 It reports the demo's quantity: fu × trapezoid over the same 16 checkpoints,
-and C_max over the same checkpoints. It also reports the exact AUC, a
-trapezoid over every RK4 step.
+and C_max over the same checkpoints. It also reports a fine-grid AUC: a
+trapezoid over every RK4 step. That is not exact; halving h moves the fullvd ratio by 3e-7, an estimate of its
+quadrature error.
 
 The source's scheme is a first-order Lie–Trotter splitting of
 y′ = A·y + b·u(t). It adds the mass the depot releases over [t, t+dt] as a
@@ -121,13 +124,13 @@ rests on the empirical check: SUB = 40 (h = 2.5e-3 h) and SUB = 80 agree to
 | Quantity (fullvd, 14 doses) | SUB = 40 | SUB = 80 | Madaros = lean_single? |
 |---|---:|---:|---|
 | auc16 ratio | 1.227701683257 | 1.227701683257 | identical, all printed digits |
-| exact-AUC ratio | 1.218199363835 | 1.218199066331 | identical |
+| fine-grid-AUC ratio | 1.218199363835 | 1.218199066331 | identical |
 | C_max ratio | 1.062768049768 | 1.062768049768 | identical |
 
 | Quantity (mean params, 7 doses) | SUB = 40 | SUB = 80 |
 |---|---:|---:|
 | auc16 ratio | 4.788650990858 | 4.788650990857 |
-| exact-AUC ratio | 4.762119492696 | 4.762116943166 |
+| fine-grid-AUC ratio | 4.762119492696 | 4.762116943166 |
 | C_max ratio | 4.162524012230 | 4.162524012223 |
 
 With a fixed step and no accept/reject branching, the two engines agree on
@@ -264,7 +267,7 @@ both engines. **No dissertation figure moves.**
 caused by either engine and is not fixed here. The fullvd demo reports its SS
 row at 0-based dose index 7, which is 1-based table row 8:
 
-| fullvd value | printed (Madaros) | reference, same 16-pt quantity | reference, exact AUC |
+| fullvd value | printed (Madaros) | reference, same 16-pt quantity | reference, fine-grid AUC |
 |---|---:|---:|---:|
 | `C_max_ss` (row 8) | 0.003731 mg/L | 0.003754 (+0.63%) | — |
 | `C_trough_ss` (row 8) | 0.000234 mg/L | 0.000234 (+4.6e-5 rel.) | — |
@@ -273,7 +276,7 @@ row at 0-based dose index 7, which is 1-based table row 8:
 | `AUC_last / AUC_first` | 1.228366 | 1.227702 | 1.218199 |
 | SS dose index, `t_to_90pct_h` | 7, 48 | 7, 48 (unchanged; see adjacent finding 6) | — |
 
-| 7-dose demo, row 7 | printed (Madaros) | reference, 16-pt | reference, exact AUC |
+| 7-dose demo, row 7 | printed (Madaros) | reference, 16-pt | reference, fine-grid AUC |
 |---|---:|---:|---:|
 | C_max | 0.008062 | 0.008077 (+0.19%) | — |
 | C_trough | 0.006800 | 0.006800 | — |
@@ -289,10 +292,10 @@ row at 0-based dose index 7, which is 1-based table row 8:
    a 15th state. That changes the printed numbers, so it is an operator
    decision.
 2. **The 16-checkpoint trapezoid is biased low.** Measured from the reference
-   run (16-point against every-step trapezoid): `AUC_tau` is 3.4–4.1% below the exact interval
+   run (16-point against every-step trapezoid): `AUC_tau` is 3.4–4.1% below the fine-grid interval
    AUC for fullvd (4.1% at dose 1, 3.4% at dose 14), and 0.15–0.7% below for
    mean params. Only the dose-to-dose difference in that bias moves the ratio,
-   from 1.2182 (exact) to 1.2277. The spacing (1.6 h) exceeds 1/ka ≈ 0.91 h, so
+   from 1.2182 (fine grid) to 1.2277. The spacing (1.6 h) exceeds 1/ka ≈ 0.91 h, so
    under-resolution of the absorption peak is the plausible mechanism, but it
    was not isolated. `C_max` is likewise a checkpoint maximum, not the true
    peak.
@@ -379,10 +382,11 @@ unset SOUC_BIN SOUNIO_SOUC_BIN MADAROS_RAW_BIN SOUNIO_MADAROS_BIN
 ./bin/souc run examples/dissertation_steady_state_fullvd_demo.sio
 SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run examples/dissertation_steady_state_fullvd_demo.sio
 ./bin/souc run docs/audit/repro/ss_multidose_rk4_reference.sio         # 1.227701683257
+./bin/souc run docs/audit/repro/ss_multidose_rk4_reference_mean.sio    # 4.788650990858
 ./bin/souc run docs/audit/repro/ss_multidose_source_tol_probe.sio      # 1.228366492144
 ./bin/souc run docs/audit/repro/lean_single_float_literal_bits.sio     # LITERALS_EXACT
 SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run docs/audit/repro/lean_single_float_literal_bits.sio  # LITERALS_MISROUNDED
 ```
 
-The two probes and the literal repro need only `main`'s stdlib, not the
+The three probes and the literal repro need only `main`'s stdlib, not the
 cherry-picks.
