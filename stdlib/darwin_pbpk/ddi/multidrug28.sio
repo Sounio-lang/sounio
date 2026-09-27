@@ -83,8 +83,21 @@
 //
 // Restart. TR-BDF2's first stage is a CN step of length γ·dt and rings on a
 // jump in the state or the input; two backward-Euler half-steps (R(∞) = 0)
-// absorb the jump first. A dosing event (oral dose, IV bolus, change of IV
-// rate) schedules the restart for the next step of every drug.
+// absorb the jump first. The restart is scheduled PER DRUG. A dosing event
+// of drug j (oral dose, IV bolus, change of IV rate) schedules it for j and
+// for every drug i != j whose transport the event makes non-smooth. Drug i's
+// equations depend on the other drugs only through its sinks
+// k_t,i,s = fu·Σ_k CLint_i,s,k·f_i,s,k / K_p, and f_i,s,k depends on drug j
+// exactly when Ki_j,k > 0. The event makes j's enzyme-site concentration
+// non-smooth (a bolus: a kink and a seconds-scale exchange transient; an oral
+// dose or a rate change: a jump in its derivative), so i's matrix inherits
+// that non-smoothness iff
+//   there is an enzyme k with Ki_j,k > 0 and CLint_i,s,k > 0 at some site s.
+// Every other drug keeps TR-BDF2, and its trajectory is bit-identical to a run
+// without j's event (gate V6e). The rule reads Ki and CLint at the time of the
+// dosing call. It was a single global flag before 2026-09-27: dosing any drug
+// switched every drug's next step to the restart, so a co-drug dose changed an
+// uncoupled victim through the integrator alone (PR #2695 review).
 // Finitely many first-order restart steps keep the global order at two
 // (Rannacher 1984, Numer. Math. 43:309-327).
 //
@@ -286,18 +299,29 @@ pub fn md_set_ext_load(md: &!MultiDrug28, site: i32, enz: i32, load: f64) with M
     (*md).ext_load[site * 4 + enz] = load
 }
 
-// A dosing event schedules the backward-Euler restart for the next step of
-// every drug (see the header, "Restart"). A call that adds nothing is not an
-// event: a zero dose, or a rate equal to the current one, returns before
-// touching any state, so it leaves the trajectory bit-identical to no call. A
-// real change of infusion rate is a step discontinuity in the input and still
-// schedules the restart.
+// A dosing event of drug j schedules the backward-Euler restart for the next
+// step of j and of every drug whose transport it makes non-smooth (the
+// propagation rule is derived in the header, "Restart"). A call that adds
+// nothing is not an event: a zero dose, or a rate equal to the current one,
+// returns before touching any state, so it leaves the trajectory bit-identical
+// to no call. A real change of infusion rate is a step discontinuity in the
+// input and still schedules the restart.
 fn md_mark_restart(md: &!MultiDrug28, j: i32) with Mut {
     (*md).restart[j] = 1.0
     let n = (*md).n
     var i: i32 = 0
     while i < n {
-        (*md).restart[i] = 1.0
+        if i != j {
+            var coupled = false
+            var k: i32 = 0
+            while k < MD_NE {
+                if (*md).ki[j * 4 + k] > 0.0 {
+                    if (*md).clint[i * 8 + k] > 0.0 || (*md).clint[i * 8 + 4 + k] > 0.0 { coupled = true }
+                }
+                k = k + 1
+            }
+            if coupled { (*md).restart[i] = 1.0 }
+        }
         i = i + 1
     }
 }

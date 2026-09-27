@@ -97,6 +97,15 @@
 //     set to its current value, all mid-run, leave the victim bit-identical
 //     (md_same_drug) to the run without those calls; they must not schedule the
 //     restart. A real rate change still does.
+//     (e) The restart is per drug. A mid-run oral dose of a co-drug that is a
+//     CYP3A4 substrate but NOT an inhibitor leaves the victim bit-identical
+//     (md_same_drug) to the run without that dose. With the single global
+//     restart flag this driver had before 2026-09-27, the co-drug's dose
+//     switched the victim's next step to backward Euler and the gate failed
+//     (measured: victim differs). Controls: right after the dose the
+//     co-drug's own restart is pending and the victim's is not; when the
+//     co-drug inhibits CYP3A4 (Ki > 0) and the victim has CYP3A4 CLint, the
+//     victim's restart IS pending (the propagation rule in the driver header).
 //
 // V7  md_run_to reaches targets off the dt grid exactly. From t = 0 with
 //     dt = 0.02: t_end = 0.61 must end at t == 0.61 with the drug's state and
@@ -421,6 +430,37 @@ fn gate_v6d() -> bool with Mut, Div, Panic {
     return same && md_restart_pending(&c, 0)
 }
 
+// Victim dosed at 0, run to 6 h; the co-drug (a CYP3A4 substrate; an
+// inhibitor when ki_b > 0) is then dosed or not. The caller reads the restart
+// flags and runs on to 12 h.
+fn v6e_to_dose(dose_b: bool, ki_b: f64) -> MultiDrug28 with Mut, Div, Panic {
+    var md = md_new(true)
+    let v = add_victim(&!md, 1.5)
+    let b = add_victim(&!md, 0.5)
+    if ki_b > 0.0 { md_set_ki(&!md, b, md_cyp3a4(), ki_b) }
+    md_dose_oral(&!md, v, 5.0)
+    md_run_to(&!md, 6.0, 0.05)
+    if dose_b { md_dose_oral(&!md, b, 50.0) }
+    return md
+}
+
+fn gate_v6e() -> bool with Mut, Div, Panic, IO {
+    var a = v6e_to_dose(false, 0.0)
+    md_run_to(&!a, 12.0, 0.05)
+    var b = v6e_to_dose(true, 0.0)
+    let rb_v = md_restart_pending(&b, 0)
+    let rb_b = md_restart_pending(&b, 1)
+    md_run_to(&!b, 12.0, 0.05)
+    let same = a.t == b.t && md_same_drug(&a, 0, &b, 0)
+    let c = v6e_to_dose(true, 0.02)
+    let rc_v = md_restart_pending(&c, 0)
+    let rc_b = md_restart_pending(&c, 1)
+    print("V6e non-inhibitor co-drug dosed at 6 h: victim bit-identical ") print(same)
+    print("; restart pending victim, co-drug ") print(rb_v) print(" ") println(rb_b)
+    print("V6e inhibitor co-drug dosed at 6 h: restart pending victim, co-drug ") print(rc_v) print(" ") println(rc_b)
+    return same && !rb_v && rb_b && rc_v && rc_b
+}
+
 fn gate_v6() -> bool with Mut, Div, Panic, IO {
     let (s_auc, s_cb, s_ctl) = victim_run(false, 0.0)
     let (n_auc, n_cb, n_ctl) = victim_run(true, 0.0)
@@ -443,7 +483,9 @@ fn gate_v6() -> bool with Mut, Div, Panic, IO {
     if ok_c { println("V6c identical drugs: trajectories bit-identical") } else { println("V6c FAIL: symmetric pair diverged") }
     let ok_d = gate_v6d()
     if ok_d { println("V6d zero dose / unchanged rate: victim bit-identical, no restart") } else { println("V6d FAIL: a no-op dosing call changed the victim") }
-    return ok_a && ok_b && ok_c && ok_d
+    let ok_e = gate_v6e()
+    if ok_e { println("V6e per-drug restart: uncoupled victim bit-identical, coupled victim restarted") } else { println("V6e FAIL: restart scheduling is not per drug") }
+    return ok_a && ok_b && ok_c && ok_d && ok_e
 }
 
 // V7 --------------------------------------------------------------------------
