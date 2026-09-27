@@ -128,6 +128,11 @@ fn ep28_simulate(prm: PBPKParams28, dose_mg: f64, t_end: f64) -> PBPK28Metrics w
     ep28_simulate_dt(0.05, prm, dose_mg, t_end)
 }
 
+// Most θ steps ep28_simulate_dt may take (see the budget comment there).
+fn ep28_max_steps() -> i32 {
+    return 1000000
+}
+
 // Variant with explicit dt for convergence checks (CN is 2nd-order A-stable;
 // the start-up keeps it free of the stiff-mode ringing a bolus excites).
 fn ep28_simulate_dt(dt: f64, prm: PBPKParams28, dose_mg: f64, t_end: f64) -> PBPK28Metrics with Mut, Div, Panic {
@@ -136,6 +141,11 @@ fn ep28_simulate_dt(dt: f64, prm: PBPKParams28, dose_mg: f64, t_end: f64) -> PBP
     // would skip the loop and report a zero-step run as a success.
     if !(dt > 0.0) { return ep28_metrics_empty() }
     if !(t_end > 0.0) || !ep28_finite(t_end) { return ep28_metrics_empty() }
+    // Step budget: a tiny positive dt (e.g. 1e-20) passes the checks above
+    // but needs an infeasible number of steps, and once t + dt == t the loop
+    // below would never end. The finest dt any caller uses is 0.0125 h over
+    // 168 h (13,440 steps); ep28_max_steps() leaves ~74x headroom.
+    if t_end / dt > ep28_max_steps() as f64 { return ep28_metrics_empty() }
     var st = pbpk28_state_zero()
     st.cv[0] = dose_mg / prm.v_ref[0]
     let m0 = pbpk28_total_mass(st, prm)
@@ -150,6 +160,9 @@ fn ep28_simulate_dt(dt: f64, prm: PBPKParams28, dose_mg: f64, t_end: f64) -> PBP
     while t < t_end {
         let dt_use = if t + dt > t_end { t_end - t } else { dt }
 
+        // A step that cannot advance t (t + dt_use == t in floating point)
+        // would repeat forever; the budget also backstops the precheck.
+        if !(t + dt_use > t) || k >= ep28_max_steps() { return ep28_metrics_empty() }
         pbpk28_rannacher_step_mut(&!st, prm, 0.0, dt_use, k < n_start, &!led)
 
         if !ep28_finite(st.cv[0]) { return ep28_metrics_empty() }
