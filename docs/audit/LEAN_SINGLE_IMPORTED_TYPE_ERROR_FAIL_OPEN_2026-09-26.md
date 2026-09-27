@@ -689,11 +689,23 @@ fine grid.
 | Reference, h = 0.005 h | 130,759.1 | +0.08% |
 | Reference, h = 0.0025 h | 130,660.1 | — |
 
-- **The quadrature change barely matters for ICF.** Old and new differ by
-  0.06%, because ICF is slow and smooth and 16 checkpoints already resolve
+ISF, measured the same way:
+
+| Dose-1 ISF unbound AUC (e−9 mg·h/L) | Value | vs reference at h = 0.0025 h |
+|---|---:|---:|
+| New runner | 118,561.5 | −1.12% |
+| Old runner | 118,590.6 | −1.10% |
+| Reference, h = 0.005 h | 119,974.2 | +0.06% |
+| Reference, h = 0.0025 h | 119,905.0 | — |
+
+For ISF, old and new differ by 0.025%.
+
+- **The quadrature change barely matters for ISF or ICF.** Old and new differ
+  by 0.025% (ISF) and 0.06% (ICF), because ICF is slow and smooth and 16 checkpoints already resolve
   it. This is unlike plasma, where the old trapezoid was 0.8–4.6% low.
-- **ICF accuracy is limited by the BBB driver, not the quadrature.** Both
-  runners sit about 1.4–1.5% below the fine coupled reference. The runner
+- **ISF/ICF accuracy is limited by the BBB driver, not the quadrature.** Both
+  runners sit about 1.1% (ISF) and 1.4–1.5% (ICF) below the fine coupled
+  reference. The runner
   drives the BBB with blood linearly interpolated between checkpoints 1.6 h
   apart (`c_mid = c_prev + alpha * (c_now - c_prev)`), not at solver
   resolution. This is a pre-existing approximation and is not changed here.
