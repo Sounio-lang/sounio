@@ -413,7 +413,9 @@ for entry in "${TESTS_EXPECTED_FAIL_HONEST[@]}"; do
   cverdict=$(dps_compile_verdict "$diag_log" "$want_cerr" "$cerr_pattern")
   if [[ "$cverdict" != "OK" ]]; then
     echo "  FAIL: compiler output differs from the recorded diagnostics (${cverdict#FAIL:})"
-    grep -E '(^|[^[:alnum:]_])error(\[|:)' "$diag_log" | grep -vF -- "$cerr_pattern" | head -5 | sed 's/^/    /'
+    # Reporting only: under `set -euo pipefail` this pipeline fails when no
+    # unexpected line exists (e.g. only the count changed), so keep it non-fatal.
+    { grep -E '(^|[^[:alnum:]_])error(\[|:)' "$diag_log" | grep -vF -- "$cerr_pattern" | head -5 | sed 's/^/    /'; } || true
     fails=$((fails + 1))
     results+=("FAIL  $name  ${cverdict#FAIL:}")
     continue
