@@ -7064,6 +7064,40 @@ fn lower_tuple_slot_struct_sentinel_slot(code: i64) -> i64 {
     0 - 3 - code
 }
 
+// Copilot review (PR #2516), comment 4115407173 (follow-up investigation):
+// strengthening madaros_expr_index_receiver_call_array_method.sio with
+// arithmetic on the indexed value (as requested) exposed that the fix it
+// was meant to pin was incomplete at a DEEPER level than the ExprIndex
+// receiver resolver: a function whose return type is a fixed array of a
+// NAMED STRUCT (`fn f() -> [Holder; N]`, as opposed to an array of a word
+// scalar like `[f64; N]`, or a struct nested inside a TUPLE return) was
+// never recognised by return_fixed_array_len/return_struct_name at all --
+// lower_opt_type_word_scalar_array_len only matches WORD-SCALAR element
+// types, and lower_opt_type_return_layout_name's other arms are tuple-
+// specific. So expr_call_return_struct_name_ref (and everything built on
+// it, including this round's ExprIndex fix) had nothing to recurse INTO:
+// return_struct_name_for_fn_id came back empty for `make_holders`, no
+// matter how the caller reached it. `f64` element arithmetic on the
+// indexed struct field kept reading the raw IEEE bits as an integer.
+//
+// Mirrors the existing word-scalar array check, but for a NAMED (non-
+// word-scalar) element: the length is meaningful only when the element
+// resolves to a real name, exactly the same "single-value encoding of a
+// pair" discipline lower_opt_type_word_scalar_array_len documents for its
+// own guard.
+fn lower_opt_type_named_struct_array_elem_name(ty_opt: &Option<Box<TypeExpr>>) -> Name with Mut, Panic, Div {
+    if lower_opt_type_fixed_array_word_scalar(ty_opt) { return ir_empty_name() }
+    match *ty_opt {
+        Some(ty) => lower_type_expr_array_elem_name(&(*ty)),
+        None => ir_empty_name(),
+    }
+}
+
+fn lower_opt_type_named_struct_array_len(ty_opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
+    if lower_opt_type_named_struct_array_elem_name(ty_opt).len <= 0 { return 0 - 1 }
+    lower_opt_type_fixed_array_len(ty_opt)
+}
+
 fn lower_opt_type_return_fixed_array_code(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
     if lower_opt_type_tuple0_array_elem_struct_name(opt).len > 0 {
         return lower_tuple0_array_struct_return_sentinel()
@@ -7072,7 +7106,11 @@ fn lower_opt_type_return_fixed_array_code(opt: &Option<Box<TypeExpr>>) -> i64 wi
     if struct_slot >= 0 && lower_opt_type_tuple_struct_slot_name(opt).len > 0 {
         return lower_tuple_slot_struct_return_sentinel(struct_slot)
     }
-    lower_opt_type_word_scalar_array_len(opt)
+    let word_scalar_len = lower_opt_type_word_scalar_array_len(opt)
+    if word_scalar_len >= 0 {
+        return word_scalar_len
+    }
+    lower_opt_type_named_struct_array_len(opt)
 }
 
 fn lower_opt_type_return_layout_name(opt: &Option<Box<TypeExpr>>) -> Name with Mut, Panic, Div {
@@ -7084,7 +7122,11 @@ fn lower_opt_type_return_layout_name(opt: &Option<Box<TypeExpr>>) -> Name with M
     if tuple0.len > 0 {
         return tuple0
     }
-    lower_opt_type_tuple_struct_slot_name(opt)
+    let tuple_slot_name = lower_opt_type_tuple_struct_slot_name(opt)
+    if tuple_slot_name.len > 0 {
+        return tuple_slot_name
+    }
+    lower_opt_type_named_struct_array_elem_name(opt)
 }
 
 // Struct-type name of a parameter, unwrapping `&T` / `&!T`. Used so a method body's
