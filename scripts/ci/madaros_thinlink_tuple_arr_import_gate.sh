@@ -87,4 +87,9 @@ compile_and_run basic "$FIX/basic/main.sio"
 expect_output basic "$FIX/basic/expected.txt"
 echo "$TAG PASS(basic): imported (i64, [f64; 2])-returning callee classifies correctly, not clobbered by an unrelated, uncalled, same-named private fn collected first"
 
+# --- zero_mask: selected zero mask must overwrite a later namesake mask ---
+compile_and_run zero_mask "$FIX/zero_mask/main.sio"
+expect_output zero_mask "$FIX/zero_mask/expected.txt"
+echo "$TAG PASS(zero_mask): selected integer-array tuple return records an authoritative zero mask, not a later namesake f64-array mask"
+
 echo "$TAG PASS: imported tuple-array callee through the real thin-link unit builder"
