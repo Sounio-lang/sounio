@@ -759,6 +759,10 @@ awk -F'\t' '
 #   +   mass conservation: parent+ODV ≤ F·released, release monotone non-decreasing
 # Numerical parity runs at the NM phenotype (R7); PM/IM/UM scaling is verified by
 # tests/run-pass/darwin_venlafaxine_xr_pgx_smoke.sio, not here (keeps the gate lean).
+# The Sounio side runs stdlib/darwin_pbpk/scenarios/venlafaxine_xr.sio itself
+# (model=stdlib_scenario, checked below); the Node side is the independent
+# reimplementation. The gate used to compare two self-contained copies, which
+# stayed green while the scenario changed underneath them.
 # ════════════════════════════════════════════════════════════════════════════
 echo
 echo "[pbpk28-parity] Cases 10-13: Sounio ↔ Node venlafaxine XR (parent + ODV + matrix + ratio)"
@@ -772,6 +776,8 @@ VFX_NODE_LOG="$OUT_DIR/vfx_node.txt"
   tail -n 20 "$VFX_SIO_LOG" >&2; exit 1; }
 if ! grep -q '^DISSERTATION_PBPK28_VENLAFAXINE_PARITY_DONE$' "$VFX_SIO_LOG"; then
   echo "[pbpk28-parity:case10] FAIL: Sounio venlafaxine ref did not emit DONE" >&2; exit 1; fi
+if ! grep -q '^model=stdlib_scenario$' "$VFX_SIO_LOG"; then
+  echo "[pbpk28-parity:case10] FAIL: Sounio venlafaxine ref does not run the stdlib scenario (model=stdlib_scenario missing)" >&2; exit 1; fi
 node "$VFX_NODE_RUNNER" > "$VFX_NODE_LOG" 2>&1 || {
   echo "[pbpk28-parity:case10] FAIL: Node venlafaxine runner returned non-zero" >&2
   tail -n 20 "$VFX_NODE_LOG" >&2; exit 1; }

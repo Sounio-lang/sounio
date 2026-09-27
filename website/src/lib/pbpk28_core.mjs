@@ -651,13 +651,11 @@ export function degenerateParams(base, { eps = 1e-3, psScale = 1e4 } = {}) {
 // CL_form·dt/V_liver is ~12 at NM and dt = 0.5 h, so an explicit post-step
 // subtraction saturates to "empty the liver" every step. Readout: steady-state
 // C_avg ODV/parent blood ratio (runVenlafaxineSteadyState).
-// The stdlib counterparts (pbpk28_full_cn_step_sink_mut 07baf94bc, scenario
-// 3c0bbc50c, vfx_ss_odv_parent_ratio bba219013) are on branch
-// claude/elegant-borg-a14bdf, NOT on main: main's scenarios/venlafaxine_xr.sio
-// still uses the explicit sink. This port and the Sounio parity ref check each
-// other and the closed form; they do not establish parity with main's stdlib.
-//
-// Bit-compatible companion to tests/run-pass/dissertation_pbpk28_parity_ref_venlafaxine.sio.
+// This is the INDEPENDENT side of the venlafaxine parity gate (cases 10-13): a
+// JS reimplementation of stdlib/darwin_pbpk/scenarios/venlafaxine_xr.sio. The
+// Sounio side, tests/run-pass/dissertation_pbpk28_parity_ref_venlafaxine.sio,
+// runs that stdlib scenario itself rather than a copy, so a change to the
+// scenario that is not mirrored here fails the gate.
 // The matrix transcendentals (merLnUnit/merExp/merPow) and absorption (merExpNeg)
 // are PORTED VERBATIM from the Sounio stdlib (release/matrix_er.sio, scenarios/
 // venlafaxine_xr.sio) — NOT Math.pow/Math.exp — so the two engines agree to f64.
