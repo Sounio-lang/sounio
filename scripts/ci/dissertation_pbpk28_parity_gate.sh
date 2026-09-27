@@ -873,18 +873,22 @@ echo
 for VFX_LOG in "$VFX_SIO_LOG" "$VFX_NODE_LOG"; do
   echo "[pbpk28-parity] venlafaxine mass account: $(basename "$VFX_LOG")"
   awk -F= '
-    /^VMASS\|p=/{mp=$2+0}
-    /^VMASS\|o=/{mo=$2+0}
-    /^VBAL\|released=/{rel=$2+0}
-    /^VBAL\|portal=/{por=$2+0}
-    /^VBAL\|fabs=/{fa=$2+0}
-    /^VBAL\|resid_gut_e12=/{rg=$2+0}
-    /^VBAL\|resid_split_e12=/{rs=$2+0}
-    /^VBAL\|bound_slack_e12=/{bs=$2+0}
-    /^VBAL\|resid_p_e12=/{rp=$2+0}
-    /^VBAL\|resid_o_e12=/{ro=$2+0}
-    /^VBAL\|neg_e12=/{ng=$2+0}
+    # Fail closed: every field must be present for every sample; a missing
+    # record would otherwise read as 0 and pass.
+    /^VMASS\|p=/{mp=$2+0; nf++}
+    /^VMASS\|o=/{mo=$2+0; nf++}
+    /^VBAL\|released=/{rel=$2+0; nf++}
+    /^VBAL\|portal=/{por=$2+0; nf++}
+    /^VBAL\|fabs=/{fa=$2+0; nf++}
+    /^VBAL\|resid_gut_e12=/{rg=$2+0; nf++}
+    /^VBAL\|resid_split_e12=/{rs=$2+0; nf++}
+    /^VBAL\|bound_slack_e12=/{bs=$2+0; nf++}
+    /^VBAL\|resid_p_e12=/{rp=$2+0; nf++}
+    /^VBAL\|resid_o_e12=/{ro=$2+0; nf++}
+    /^VBAL\|neg_e12=/{ng=$2+0; nf++}
     /^VBAL\|steps=/{st=$2+0;
+      if(nf!=11){bad++; printf "  FAIL: sample %d has %d/11 mass-account fields\n",n+1,nf}
+      nf=0
       tr=st*1.0e-15; if(tr<1.0e-12)tr=1.0e-12; tol=tr*rel*1.0e12;   # residuals are printed x1e12 mg
       a=(rg<0)?-rg:rg; if(a>tol){bad++; printf "  FAIL: gut balance residual %.3e > %.3e (x1e-12 mg)\n",rg,tol}
       a=(rs<0)?-rs:rs; if(a>tol){bad++; printf "  FAIL: F_abs split residual %.3e > %.3e (x1e-12 mg)\n",rs,tol}
