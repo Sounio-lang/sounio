@@ -195,6 +195,24 @@
 //     gave 1 + 1.85e-11 on this state (the inhibitor acting as an
 //     activator); V12 fails on that.
 //
+// V13 md_neg_min_rel counts the predictor's stages. A victim whose only mass
+//     outside an isolated store (organ 7, PS = 0: it sets the step's scale and
+//     never moves) is 1e-10 of it in liver tissue, with liver PS = 1 L/h and
+//     a CYP3A4 sink of 60.5 L/h, steps TR-BDF2 over 0.1 h next to an
+//     inhibitor (Ki = 1e-12 mg/L) just dosed by bolus. At t_n the inhibitor
+//     has not reached the liver, so f_n = 1, and the predictor steps the
+//     victim with the full sink, which drives the tissue entry to about
+//     -0.15 of itself within the step: a tolerated negative (-1.5e-11 of
+//     scale, tol 4.3e-10). The predicted state inhibits fully (f* ~ 0), so the
+//     corrector steps with half the sink and stays positive. The first
+//     predictor pass is the Lie step exactly (same state, same factors f_n),
+//     so md_neg_min_rel with iters = 1 and with iters = 4 must equal its
+//     iters = 0 value, bit for bit, and be negative. The victim's restart,
+//     scheduled by the inhibitor's bolus through the shared enzyme, is
+//     cleared by hand: the backward-Euler restart cannot go negative. Before
+//     2026-09-27 only the corrector was folded in, iters 1 and 4 reported 0,
+//     and V13 fails.
+//
 // Transport parameters are the rapamycin PBPK28 profile with synthetic CLint and
 // Ki values: kernel/driver correctness fixtures, not drug claims.
 
@@ -773,6 +791,37 @@ fn gate_v12() -> bool with Mut, Div, Panic, IO {
     return f_insp == f_prod && f_prod == 1.0 && g_insp == g_prod && g_prod < 1.0
 }
 
+// V13 -------------------------------------------------------------------------
+fn v13_neg(iters: i32) -> f64 with Mut, Div, Panic {
+    var md = md_new(true)
+    md.iters = iters
+    var p = pbpk28_params_rapamycin()
+    p.cl_central = 0.0
+    p.ps[1] = 1.0
+    p.ps[7] = 0.0
+    let v = md_add_drug(&!md, p, 1.0, 1.0, 1.0)
+    md_set_clint(&!md, v, md_site_liver(), md_cyp3a4(), 60.5 * 5.4)
+    var q = pbpk28_params_rapamycin()
+    q.cl_central = 1.0
+    let x = md_add_drug(&!md, q, 0.1, 1.0, 1.0)
+    md_set_ki(&!md, x, md_cyp3a4(), 0.000000000001)
+    md.ct[v * 14 + 7] = 1.0
+    md.ct[v * 14 + 1] = 1.0e-10
+    md_dose_iv_bolus(&!md, x, 5.0)
+    md.restart[v] = 0.0
+    md_step(&!md, 0.1)
+    return md_neg_min_rel(&md, v)
+}
+
+fn gate_v13() -> bool with Mut, Div, Panic, IO {
+    let lie = v13_neg(0)
+    let pc = v13_neg(1)
+    let it4 = v13_neg(4)
+    print("V13 md_neg_min_rel x1e12: iters 0 (Lie = first predictor pass), 1, 4 = ")
+    print(lie * 1.0e12) print(" ") print(pc * 1.0e12) print(" ") println(it4 * 1.0e12)
+    return lie < 0.0 && pc == lie && it4 == lie
+}
+
 fn main() -> i32 with Mut, Div, Panic, IO {
     let m = gate_mass()
     let v3 = gate_v3()
@@ -784,6 +833,7 @@ fn main() -> i32 with Mut, Div, Panic, IO {
     let v10 = gate_v10()
     let v11 = gate_v11()
     let v12 = gate_v12()
+    let v13 = gate_v13()
     if m { println("M PASS") } else { println("M FAIL") }
     if v3 { println("V3 PASS") } else { println("V3 FAIL") }
     if v4 { println("V4 PASS") } else { println("V4 FAIL") }
@@ -794,7 +844,8 @@ fn main() -> i32 with Mut, Div, Panic, IO {
     if v10 { println("V10 PASS") } else { println("V10 FAIL") }
     if v11 { println("V11 PASS") } else { println("V11 FAIL") }
     if v12 { println("V12 PASS") } else { println("V12 FAIL") }
-    if m && v3 && v4 && v6 && v7 && v8 && v9 && v10 && v11 && v12 {
+    if v13 { println("V13 PASS") } else { println("V13 FAIL") }
+    if m && v3 && v4 && v6 && v7 && v8 && v9 && v10 && v11 && v12 && v13 {
         println("PBPK28_MULTIDRUG_GATES_PASS")
         return 0
     }
