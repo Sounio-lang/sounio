@@ -105,7 +105,12 @@ int main(int argc, char** argv) {
         ptrace(PTRACE_CONT, child, nullptr, nullptr);
     }
 done:
-    std::fclose(f);
+    // A short write (full disk, I/O error) would leave a truncated profile that
+    // still looks complete; treat it as a profiler error.
+    if (std::ferror(f) | std::fclose(f)) {
+        perror("[rip_sampler] writing samples");
+        profiler_error = true;
+    }
     if (profiler_error) {
         std::fprintf(stderr, "[rip_sampler] %ld samples, PROFILER ERROR (child status unknown)\n", samples);
         return 125;

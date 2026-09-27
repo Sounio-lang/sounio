@@ -11,7 +11,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-
 
 **Date:** 2026-09-27
 **Status:** EVIDENCE + PROPOSED FIX (no `self-hosted/` change in this dispatch)
-**Scope:** wall time of `madaros build self-hosted/compiler/main.sio` (the post-merge fixed-point rung, 56–62 min in CI)
+**Scope:** wall time of `madaros build self-hosted/compiler/main.sio` (the post-merge Madaros self-compile (gen2) rung, 56–62 min in CI; Madaros has no measured fixed point, see `scripts/ci/madaros_fixed_point_gate.sh`)
 
 ## 1. Measurements
 
@@ -198,9 +198,9 @@ The tooling is checked in under `scripts/dev/profiling/`.
 
 **Current versions.** They differ only in failure handling and labelling:
 - `rip_sampler` reaps a child that exits between samples and reports its real status.
-- A failed `PTRACE_GETREGS` aborts the run instead of dropping the sample. Profiler errors exit 125.
+- A failed `PTRACE_GETREGS` or a failed write of the sample file aborts the run instead of leaving a partial profile. Profiler errors exit 125.
 - `symbolize.pl` labels inclusive depth from the data instead of a hard-coded 16.
-- The Job pins `SOUNIO_REF`, `SEED_PATH` and `SEED_SHA256`. It also verifies the mounted tools against `RIP_SAMPLER_SHA256` / `SYMBOLIZE_SHA256`, because the ConfigMap is mutable. It records all of these and fails on any non-zero step.
+- The Job pins `SOUNIO_REF`, `SEED_PATH` and `SEED_SHA256`. It also verifies the mounted tools against `RIP_SAMPLER_SHA256` / `SYMBOLIZE_SHA256`, because the ConfigMap is mutable. It records all of these and fails on any non-zero step, including every stage of a pipeline.
 - The Job cuts per-phase windows at this run's own timestamped progress markers. If any marker is missing it computes no windows rather than guessing.
 
 The core steps are:
