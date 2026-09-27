@@ -801,9 +801,28 @@ pub fn md_step(md: &!MultiDrug28, dt: f64) with Mut, Div, Panic {
 // non-positive dt. A finite target not strictly ahead of t is a no-op, so
 // the clock never moves backwards. After the remainder step t is set to
 // t_end, which moves it only by the rounding of that last addition.
+// Argument check of md_run_to, exposed so that a gate can test it (a panic
+// cannot be observed by the run-pass harness): 0 valid, 1 dt not a finite
+// positive number, 2 t_end not finite, 3 dt below the clock's resolution at
+// t, i.e. fl(t + dt) == t, when the target is ahead. At t = 2^53 (ulp 2 h) a
+// 1 h step cannot advance the clock (PR #2695 review). md_step already
+// refused such a step before mutating anything, but only when it came to it,
+// with a generic message. md_run_to now refuses up front, before any step.
+// It deliberately does not substitute a coarser step: that would change the
+// integrator's resolution without saying so.
+pub fn md_run_to_error(md: &MultiDrug28, t_end: f64, dt: f64) -> i32 with Mut {
+    if !(is_finite_f64(dt) && dt > 0.0) { return 1 }
+    if !(is_finite_f64(t_end)) { return 2 }
+    let t = (*md).t
+    if t_end > t && !(t + dt > t) { return 3 }
+    return 0
+}
+
 pub fn md_run_to(md: &!MultiDrug28, t_end: f64, dt: f64) with Mut, Div, Panic {
-    if !(is_finite_f64(dt) && dt > 0.0) { panic("multidrug28: md_run_to needs a finite dt > 0") }
-    if !(is_finite_f64(t_end)) { panic("multidrug28: md_run_to needs a finite t_end") }
+    let e = md_run_to_error(md, t_end, dt)
+    if e == 1 { panic("multidrug28: md_run_to needs a finite dt > 0") }
+    if e == 2 { panic("multidrug28: md_run_to needs a finite t_end") }
+    if e == 3 { panic("multidrug28: md_run_to: dt below clock resolution at t (t + dt == t); refusing rather than stepping coarser") }
     if !(t_end > (*md).t) { return }
     while (*md).t + dt <= t_end {
         md_step(md, dt)
