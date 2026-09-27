@@ -142,9 +142,8 @@ fn mer_pow(t: f64, n: f64) -> f64 with Mut, Div, Panic {
 
 `mer_ln2`, `mer_ln_unit` and `mer_exp` are deleted. Before #2699, the parity ref copied `pure.sio` `ln`/`exp` verbatim
 as `mer_ln`/`mer_exp`. Since #2699 it imports `matrix_er` instead (see Status). `pbpk28_core.mjs` ports `pure.sio` `ln`/`exp`/`sqrt` line for line
-(`as i32` → `Math.trunc`). The patch touches all three files and applies cleanly to `main` 46e9b48b6 and to
-`claude/elegant-borg-a14bdf`. On nifty-goodall `dacd8c2b4` the two helper blocks are textually identical, and only the
-`pbpk28_core.mjs` header-comment hunk needs a rebase.
+(`as i32` → `Math.trunc`). The archived patch covers both files (`matrix_er.sio` and `pbpk28_core.mjs`) against
+current `main`; see Status and Reverting.
 
 **Algorithms (pure.sio).**
 - `ln`: exact halving or doubling to m ∈ [0.5, 2), then a 29-term artanh series with |t| ≤ 1/3, plus e·ln2.
