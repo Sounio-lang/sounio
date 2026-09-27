@@ -722,7 +722,10 @@ function merPow(t, n) {                        // t^n, mirrors matrix_er.sio mer
   }
   if (Math.abs(n - 1.0) < 1.0e-12) return t;
   if (Math.abs(n - 0.5) < 1.0e-12) return pureSqrt(t);
-  return pureExp(n * pureLn(t));
+  const x = n * pureLn(t);                      // non-finite x: as matrix_er.sio (t = 1, n = ±inf -> 1)
+  if (x !== x) return 1.0;
+  if (x - x !== 0.0) return x > 0.0 ? x : 0.0;
+  return pureExp(x);
 }
 function merExpNeg(x) {                         // exp(x) for x<0, 20-term Taylor
   if (x >= 0.0) return 1.0;

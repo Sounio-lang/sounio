@@ -114,7 +114,10 @@ fn mer_pow(t: f64, n: f64) -> f64 with Mut, Div, Panic {
     }
     if abs_f64(n - 1.0) < 1.0e-12 { return t }
     if abs_f64(n - 0.5) < 1.0e-12 { return sqrt(t) }
-    return exp(n * ln(t))
+    let x = n * ln(t)                                         // exp only sees a finite argument
+    if x != x { return 1.0 }                                  // t == 1, n = ±inf (IEEE pow)
+    if x - x != 0.0 { if x > 0.0 { return x } return 0.0 }    // infinite n
+    return exp(x)
 }
 ```
 
@@ -146,8 +149,10 @@ The old series returned NaN promptly instead. `mer_pow` therefore returns NaN fo
 plausible zero rate through the n − 1 < 0 exponent. For t = +inf it then returns the limit before either branch runs:
 +inf for n > 0, which caps F at 1; 0 for n < 0; and 1 for n = 0, matching exp(0·ln t) on the finite path.
 A NaN exponent is returned before `exp` runs. On Madaros, `pure.sio` `exp(NaN)` casts NaN to the indefinite
-integer, so its 2^k scaling loop practically never ends. Every finite result is bit-identical: the parity-ref and `matrix_er` outputs are byte-identical
-with and without the guard. The regression test asserts that F(10·1e308) = 1; that `matrix_release_rate` at a NaN clock is NaN; that at t = +inf, n = 0 gives F = k; and that a NaN n gives NaN at both t = +inf and t = 2 h. With the guard removed, that test hangs
+integer, so its 2^k scaling loop practically never ends. For the same reason `mer_pow` checks x = n·ln t before
+calling `exp`. x is NaN only for t = 1 with n = ±inf, where it returns 1 as IEEE `pow` does. x = ±inf means an
+infinite n, and it returns +inf or 0. `exp` therefore only ever receives a finite argument. Every finite result is bit-identical: the parity-ref and `matrix_er` outputs are byte-identical
+with and without the guard. The regression test asserts that F(10·1e308) = 1; that `matrix_release_rate` at a NaN clock is NaN; that at t = +inf, n = 0 gives F = k; that a NaN n gives NaN at both t = +inf and t = 2 h; and that an infinite n gives F = k at t = 1, F = 1 at t = 2 and F = 0 at t = 0.5. With the guard removed, that test hangs
 until a 120 s timeout (rc=124). The hang in `pure.sio` itself is out of scope here and is flagged separately.
 
 A Cody-Waite split of ln2 would bring exp down to about 1 ulp. That is a `pure.sio` change affecting every

@@ -1,8 +1,8 @@
 diff --git a/stdlib/darwin_pbpk/release/matrix_er.sio b/stdlib/darwin_pbpk/release/matrix_er.sio
-index f811c2040..194ef16b9 100644
+index f811c2040..c89d6bdf9 100644
 --- a/stdlib/darwin_pbpk/release/matrix_er.sio
 +++ b/stdlib/darwin_pbpk/release/matrix_er.sio
-@@ -32,56 +32,38 @@
+@@ -32,56 +32,43 @@
  //   Siepmann J, Peppas NA (2012) Int J Pharm 418:6 — release mechanism review
  //   DailyMed Effexor XR — 75 mg unit dose, Tmax parent ≈ 5.5 h (150 mg q24h label)
  
@@ -80,12 +80,17 @@ index f811c2040..194ef16b9 100644
 -    return r
 +    if abs_f64(n - 1.0) < 1.0e-12 { return t }
 +    if abs_f64(n - 0.5) < 1.0e-12 { return sqrt(t) }
-+    return exp(n * ln(t))
++    // exp only ever sees a finite argument. x is NaN only for t == 1 with n = +/-inf
++    // (IEEE pow gives 1), and x = +/-inf for an infinite n (gives +inf or 0).
++    let x = n * ln(t)
++    if x != x { return 1.0 }
++    if x - x != 0.0 { if x > 0.0 { return x } return 0.0 }
++    return exp(x)
  }
  
  // ============================================================================
 diff --git a/tests/run-pass/dissertation_pbpk28_parity_ref_venlafaxine.sio b/tests/run-pass/dissertation_pbpk28_parity_ref_venlafaxine.sio
-index 71c05e339..b002b9a1d 100644
+index 71c05e339..acaaf5522 100644
 --- a/tests/run-pass/dissertation_pbpk28_parity_ref_venlafaxine.sio
 +++ b/tests/run-pass/dissertation_pbpk28_parity_ref_venlafaxine.sio
 @@ -7,9 +7,9 @@
@@ -101,7 +106,7 @@ index 71c05e339..b002b9a1d 100644
  //
  // Companion: scripts/ci/dissertation_pbpk28_parity_gate.sh cases 10-13 diff this
  // against the Node engine within 1.0% RMSE per organ (parent + ODV cavg) plus
-@@ -171,41 +171,84 @@ fn matrix_dose() -> f64 { return 75.0 }
+@@ -171,41 +171,87 @@ fn matrix_dose() -> f64 { return 75.0 }
  fn matrix_k() -> f64 { return 0.199 }
  fn matrix_n() -> f64 { return 0.65 }
  
@@ -207,12 +212,15 @@ index 71c05e339..b002b9a1d 100644
 +        return 1.0
      }
 -    return mer_exp(n * ln_t)
-+    return mer_exp(n * mer_ln(t))
++    let x = n * mer_ln(t)                                     // non-finite x: as matrix_er.sio
++    if x != x { return 1.0 }
++    if x - x != 0.0 { if x > 0.0 { return x } return 0.0 }
++    return mer_exp(x)
  }
  
  fn mer_exp_neg(x: f64) -> f64 with Mut, Div {
 diff --git a/website/src/lib/pbpk28_core.mjs b/website/src/lib/pbpk28_core.mjs
-index 1b39f2403..e20f87907 100644
+index 1b39f2403..909f4c69a 100644
 --- a/website/src/lib/pbpk28_core.mjs
 +++ b/website/src/lib/pbpk28_core.mjs
 @@ -649,9 +649,10 @@ export function degenerateParams(base, { eps = 1e-3, psScale = 1e4 } = {}) {
@@ -229,7 +237,7 @@ index 1b39f2403..e20f87907 100644
  //
  // Sources: Gohel 2008 (matrix n=0.65/k=0.199), Wang 2022 (F_XR=0.45, ka=0.63),
  // Klamerus 1999 (CL_parent 100, CL_form 43, CL_odv 28 L/h), Kirchheiner 2006
-@@ -673,27 +674,55 @@ export const VFX_PS_ODV    = Object.freeze([0.0, 700.0, 450.0, 90.0, 150.0, 6000
+@@ -673,27 +674,58 @@ export const VFX_PS_ODV    = Object.freeze([0.0, 700.0, 450.0, 90.0, 150.0, 6000
  // CYP2D6 formation scale relative to NM (Kirchheiner 2006 ratios / 3.45). NM=1.0.
  export const VFX_CL_FORM_SCALE = Object.freeze({ 0: 0.25 / 3.45, 1: 1.16 / 3.45, 2: 1.0, 3: 10.3 / 3.45 });
  
@@ -298,7 +306,10 @@ index 1b39f2403..e20f87907 100644
 -  if (t > 0.0) lnT = (t > 2.0) ? (0.6931471805599453 + merLnUnit(t / 2.0)) : merLnUnit(t);
 -  return merExp(n * lnT);
 +  if (Math.abs(n - 0.5) < 1.0e-12) return pureSqrt(t);
-+  return pureExp(n * pureLn(t));
++  const x = n * pureLn(t);                      // non-finite x: as matrix_er.sio (t = 1, n = ±inf -> 1)
++  if (x !== x) return 1.0;
++  if (x - x !== 0.0) return x > 0.0 ? x : 0.0;
++  return pureExp(x);
  }
  function merExpNeg(x) {                         // exp(x) for x<0, 20-term Taylor
    if (x >= 0.0) return 1.0;
