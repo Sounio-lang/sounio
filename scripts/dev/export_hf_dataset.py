@@ -136,11 +136,24 @@ def build_instruction(
             summary += "."
         parts.append(summary)
     known_failure = annotations.get("known-failure")
+    # Copilot review (PR #2515), comment 4113458020: `//@ check-only` fixtures
+    # live under tests/run-pass (suite == "run-pass" here) but are verified
+    # with `--check` and never executed -- some, like the bogus-qualifier
+    # fixtures this review round added, deliberately contain a call that
+    # crashes if it ever ran. Describe them as type-check-only instead of
+    # falling into the ordinary run-pass "compile and run successfully"
+    # claim, which every //@ check-only fixture would otherwise get wrong.
+    check_only = annotations.get("check-only")
     if suite == "run-pass":
+        if check_only:
+            parts.append("It is verified with type-checking only (--check); it is not expected to be executed.")
+            if annotations.get("expect-stdout-contains"):
+                patterns = "; ".join(annotations["expect-stdout-contains"])
+                parts.append(f"The check output should include: {patterns}.")
         # A known-failure run-pass fixture does not currently pass -- some do
         # not even compile -- so a success claim or a stdout expectation would
         # describe a completion the source cannot produce.
-        if not known_failure:
+        elif not known_failure:
             parts.append("It should compile and run successfully.")
             if annotations.get("expect-stdout"):
                 parts.append(f"Expected stdout: {annotations['expect-stdout'][0]}")

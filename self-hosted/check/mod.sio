@@ -651,7 +651,20 @@ fn check_mod_item_module_owner(it: Item) -> i64 with Mut, Panic, Div {
     }
 }
 
-pub fn check_items_verdict_boot4_with_module_map(items: Option<Box<ItemList>>, module_path: AstPath) -> i64 with Mut, Panic, Div, Alloc, IO {
+// Copilot review (PR #2515), comment 4113458034: `current_module_id` (used
+// by every defining_module_id-keyed private-visibility check) was already
+// stamped per item below via `owner`, but `current_module` (the real
+// `AstPath`, used by `visibility_allows_access`'s `pub(in path)` check --
+// `ast_path_is_prefix(vis.path, current_module)`) stayed fixed at whatever
+// `module_path` the caller passed -- always `empty_path()` at every call
+// site. A `pub(in path)` access from a module whose real path is NOT a
+// prefix of `empty_path()` (every real path isn't) then always failed
+// closed, rejecting a legitimate restricted-public access whenever an
+// unrelated generic instantiation anywhere routed the whole program through
+// this specialized path. `programs`/`program_count` let this function look
+// up each item's real declaring module's own `AstPath` by the same `owner`
+// id, alongside `current_module_id`.
+pub fn check_items_verdict_boot4_with_module_map(items: Option<Box<ItemList>>, module_path: AstPath, programs: &! [Program; 256], program_count: i64) -> i64 with Mut, Panic, Div, Alloc, IO {
     if !spec_item_module_populated() {
         return check_items_verdict_boot4_with_module_path(items, module_path)
     }
@@ -687,6 +700,11 @@ pub fn check_items_verdict_boot4_with_module_map(items: Option<Box<ItemList>>, m
                 let it = (*list).head
                 let owner = check_mod_item_module_owner(it)
                 (*checker_ptr).current_module_id = owner
+                if owner >= 0 && owner < program_count {
+                    (*checker_ptr).current_module = (*programs)[owner as usize].module_path
+                } else {
+                    (*checker_ptr).current_module = module_path
+                }
                 checker_collect_item_only_mut(checker_ptr, it)
                 cur = (*list).tail
             }
@@ -714,6 +732,11 @@ pub fn check_items_verdict_boot4_with_module_map(items: Option<Box<ItemList>>, m
                 let it = (*list).head
                 let owner = check_mod_item_module_owner(it)
                 (*checker_ptr).current_module_id = owner
+                if owner >= 0 && owner < program_count {
+                    (*checker_ptr).current_module = (*programs)[owner as usize].module_path
+                } else {
+                    (*checker_ptr).current_module = module_path
+                }
                 checker_check_items_mut(checker_ptr, check_mod_singleton_item_list(it))
                 chk = (*list).tail
             }
