@@ -5,15 +5,11 @@
 
 module native::encode
 
-// Lane B residual (2026-08-13): `.bytes` is vestigial on the Linux native_v2 path.
-// Real machine code lives in NC_BIG_CODE; `.len` is the only live field threaded
-// through by-value emit_* and by-ref nc_emit_*. Keeping a multi-256 KiB array here
-// forced every `var out = buf` / `nc: NativeCompiler` copy to pay ~256 KiB per
-// stack frame (and nested emit_u64 → emit_u32 → emit_byte chains stacked several).
-// The 64-byte stub preserves a non-empty array type for the few macho/pe readers
-// that still mention `.bytes`; those paths must read NC_BIG_CODE for payload.
+// CodeBuffer is only the length cursor for NC_BIG_CODE. The bytes are not in
+// the struct: a by-value copy must not be able to snapshot or clobber the image.
+// Keeping a multi-256 KiB array here forced every `var out = buf` /
+// `nc: NativeCompiler` copy to pay that many bytes per stack frame.
 pub struct CodeBuffer {
-    pub bytes: [i8; 64],
     pub len: i64,
 }
 
@@ -23,8 +19,7 @@ pub struct CodeBuffer {
 // module-global BSS array holds the emitted code so NativeCompiler stays small on
 // the stack, while `.len` (a scalar, threaded through BOTH the by-ref nc_emit_byte
 // path and the by-value emit_byte path) stays the authoritative length. Both emit
-// paths write NC_BIG_CODE[.len]; the struct .bytes field is now a 64-byte stub (see
-// struct comment). Because .len is threaded consistently, the by-value builtin
+// paths write NC_BIG_CODE[.len]. Because .len is threaded consistently, the by-value builtin
 // emitters (which emit into a copy of nc) append to the same global at the shared
 // offset, so no persist/call-site changes are needed. Accessed INLINE only —
 // never via a returning helper (miscompiles under the seed).
@@ -46,8 +41,14 @@ pub fn code_buffer_new() -> CodeBuffer {
     out
 }
 
-// Read materialized Linux native-v2 code without exposing the vestigial
-// CodeBuffer.bytes stub to byte-level backend gates.
+// Same byte as an i8, so existing `buf.bytes[i]` comparisons keep their type.
+// Does not consult `.len`: callers that indexed the old array did not either.
+pub fn code_buffer_read_i8(buf: CodeBuffer, idx: i64) -> i8 with Mut, Panic, Div {
+    let _cursor = buf.len
+    if idx < 0 || idx >= nc_code_capacity_bytes() { return 0 }
+    NC_BIG_CODE[idx as usize]
+}
+// Read one emitted byte as 0..255. Past `.len` returns -1.
 pub fn code_buffer_read_byte(buf: CodeBuffer, idx: i64) -> i64 with Mut, Panic, Div {
     if idx < 0 || idx >= buf.len || idx >= nc_code_capacity_bytes() { return -1 }
     let x = NC_BIG_CODE[idx as usize] as i64
