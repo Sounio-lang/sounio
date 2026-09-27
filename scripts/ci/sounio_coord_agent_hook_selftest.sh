@@ -112,4 +112,17 @@ sleep 2
 output="$(run_coord "$REPO" prune)"
 grep -q 'pruned_messages=1$' <<< "$output" || fail 'expired message was not pruned'
 
+# A slow/unavailable coordinator must never grant a structured write.
+mv "$REPO/bin/sounio-coord" "$REPO/bin/sounio-coord.saved"
+printf '#!/usr/bin/env bash\nsleep 5\n' > "$REPO/bin/sounio-coord"
+chmod +x "$REPO/bin/sounio-coord"
+set +e
+slow_output="$(SOUNIO_COORD_HOOK_BUDGET_SECONDS=1 run_hook codex "$REPO" \
+  "{\"session_id\":\"slow\",\"cwd\":\"$REPO\",\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"self-hosted/parser/ast.sio\"}}" 2>&1)"
+slow_rc=$?
+set -e
+[[ "$slow_rc" -eq 2 ]] || fail "timed-out write returned $slow_rc instead of 2"
+grep -q 'write blocked' <<< "$slow_output" || fail 'timeout did not explain denial'
+mv "$REPO/bin/sounio-coord.saved" "$REPO/bin/sounio-coord"
+
 echo 'sounio-coord-agent-hook-selftest: PASS'
