@@ -5,480 +5,126 @@
 //
 // Controlled-release witness: Korsmeyer-Peppas erodible matrix (oral XR) feeding
 // TWO coupled PBPK28 compartments — parent (venlafaxine) and active metabolite
-// ODV — bridged by hepatic CYP2D6 formation (organ 1 = liver). Self-contained
-// reimplementation (same pattern as the semaglutide ref) so it carries no
-// cross-module private-field access; the matrix transcendentals (stdlib/math/pure.sio
-// ln/exp, as called by release/matrix_er.sio) and absorption (scenarios/venlafaxine_xr.sio)
-// are bit-identical to website/src/lib/pbpk28_core.mjs (runVenlafaxineScenario).
+// ODV — bridged by hepatic CYP2D6 formation (organ 1 = liver).
+//
+// This ref runs the stdlib scenario ITSELF (scenarios/venlafaxine_xr.sio): its
+// step, its implicit formation sink, its matrix model, its steady-state audit
+// and its closed form. It holds no copy of the model. The Sounio side of the
+// gate therefore witnesses the code the dissertation uses; the Node side
+// (website/src/lib/pbpk28_core.mjs) is the independent reimplementation it is
+// compared against. The earlier ref was a self-contained copy, and the gate
+// compared two copies with each other: it stayed green while the scenario moved
+// to the implicit sink (PR #2699 review).
+//
+// Formation is a first-order sink CL_form·C_liver,avg solved inside the parent
+// CN step (pbpk28_full_cn_step_sink_mut); ODV receives exactly the mass the
+// sink removed.
+//
+// Ratio readout: steady-state C_avg ODV/parent blood ratio, AUC_ODV/AUC_parent
+// over the 10th interval of 75 mg XR q24h (vfx_ss_regimen_interval), with the
+// closed form of the same model and the error bound the scenario certifies on
+// the run (derivation in the scenario header).
 //
 // Companion: scripts/ci/dissertation_pbpk28_parity_gate.sh cases 10-13 diff this
 // against the Node engine within 1.0% RMSE per organ (parent + ODV cavg) plus
-// matrix release (case 12, biomaterial bridge) and ODV/parent ratio (case 13).
+// matrix release (case 12, biomaterial bridge) and the steady-state ratio at
+// dt = 0.5 and 0.25 h (case 13; each engine must also certify the closed form).
 // Parity runs at NM (R7); PM/IM/UM are scaling verified by the pgx smoke.
 //
 // Sources: Gohel 2008 (matrix n=0.65/k=0.199), Wang 2022 (F_XR=0.45, ka=0.63),
-// Klamerus 1999 (CL_parent 57, CL_odv 28, CL_form 43 L/h), Kirchheiner 2006.
+// Klamerus 1999 (CL_parent 57, CL_odv 28, CL_form 43 L/h).
 // ============================================================================
 
-struct CnOut {
-    cv: [f64; 14],
-    ct: [f64; 14]
-}
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::tsit5_pbpk28::*
+use darwin_pbpk::release::matrix_er::*
+use darwin_pbpk::scenarios::venlafaxine_xr::*
 
-struct VfxState {
-    p_cv: [f64; 14],
-    p_ct: [f64; 14],
-    o_cv: [f64; 14],
-    o_ct: [f64; 14],
-    gut:  f64
-}
+fn nm() -> i32 { return 2 }
 
-fn vfx_zero() -> VfxState {
-    VfxState {
-        p_cv: [0.0; 14], p_ct: [0.0; 14],
-        o_cv: [0.0; 14], o_ct: [0.0; 14],
-        gut:  0.0
-    }
-}
-
-// ─── Anatomy (drug-independent; same as rapamycin/semaglutide refs) ──────────
-fn vref_at(i: i64) -> f64 {
-    if i ==  0 { return 5.0 }
-    if i ==  1 { return 1.8 }
-    if i ==  2 { return 0.31 }
-    if i ==  3 { return 1.45 }
-    if i ==  4 { return 0.33 }
-    if i ==  5 { return 1.1 }
-    if i ==  6 { return 28.0 }
-    if i ==  7 { return 20.0 }
-    if i ==  8 { return 1.2 }
-    if i ==  9 { return 3.6 }
-    if i == 10 { return 6.6 }
-    if i == 11 { return 0.18 }
-    if i == 12 { return 0.09 }
-    return 3.7
-}
-
-fn vasc_frac_at(i: i64) -> f64 {
-    if i ==  0 { return 1.000 }
-    if i ==  1 { return 0.210 }
-    if i ==  2 { return 0.160 }
-    if i ==  3 { return 0.037 }
-    if i ==  4 { return 0.262 }
-    if i ==  5 { return 0.262 }
-    if i ==  6 { return 0.040 }
-    if i ==  7 { return 0.050 }
-    if i ==  8 { return 0.024 }
-    if i ==  9 { return 0.019 }
-    if i == 10 { return 0.041 }
-    if i == 11 { return 0.282 }
-    if i == 12 { return 0.180 }
-    return 0.050
-}
-
-fn q_at(i: i64) -> f64 {
-    if i ==  0 { return 350.0 }
-    if i ==  1 { return 90.0 }
-    if i ==  2 { return 74.0 }
-    if i ==  3 { return 44.0 }
-    if i ==  4 { return 16.0 }
-    if i ==  5 { return 350.0 }
-    if i ==  6 { return 42.0 }
-    if i ==  7 { return 10.0 }
-    if i ==  8 { return 55.0 }
-    if i ==  9 { return 21.0 }
-    if i == 10 { return 17.0 }
-    if i == 11 { return 10.0 }
-    if i == 12 { return 8.0 }
-    return 13.0
-}
-
-// ─── Venlafaxine Kp/PS tables (which: 0=parent, 1=ODV) ───────────────────────
-fn kp_at(which: i32, i: i64) -> f64 {
-    if which == 0 {
-        if i ==  0 { return 1.00 }
-        if i ==  1 { return 4.20 }
-        if i ==  2 { return 3.50 }
-        if i ==  3 { return 1.20 }
-        if i ==  4 { return 2.00 }
-        if i ==  5 { return 2.80 }
-        if i ==  6 { return 1.80 }
-        if i ==  7 { return 1.20 }
-        if i ==  8 { return 2.40 }
-        if i ==  9 { return 1.50 }
-        if i == 10 { return 0.80 }
-        if i == 11 { return 2.00 }
-        if i == 12 { return 1.60 }
-        return 0.90
-    }
-    if i ==  0 { return 1.00 }
-    if i ==  1 { return 3.50 }
-    if i ==  2 { return 3.00 }
-    if i ==  3 { return 1.00 }
-    if i ==  4 { return 1.60 }
-    if i ==  5 { return 2.20 }
-    if i ==  6 { return 1.40 }
-    if i ==  7 { return 0.90 }
-    if i ==  8 { return 2.00 }
-    if i ==  9 { return 1.20 }
-    if i == 10 { return 0.70 }
-    if i == 11 { return 1.60 }
-    if i == 12 { return 1.30 }
-    return 0.70
-}
-
-fn ps_at(which: i32, i: i64) -> f64 {
-    if which == 0 {
-        if i ==  0 { return 0.0 }
-        if i ==  1 { return 900.0 }
-        if i ==  2 { return 600.0 }
-        if i ==  3 { return 120.0 }
-        if i ==  4 { return 200.0 }
-        if i ==  5 { return 8000.0 }
-        if i ==  6 { return 250.0 }
-        if i ==  7 { return 80.0 }
-        if i ==  8 { return 500.0 }
-        if i ==  9 { return 100.0 }
-        if i == 10 { return 40.0 }
-        if i == 11 { return 120.0 }
-        if i == 12 { return 80.0 }
-        return 60.0
-    }
-    if i ==  0 { return 0.0 }
-    if i ==  1 { return 700.0 }
-    if i ==  2 { return 450.0 }
-    if i ==  3 { return 90.0 }
-    if i ==  4 { return 150.0 }
-    if i ==  5 { return 6000.0 }
-    if i ==  6 { return 200.0 }
-    if i ==  7 { return 60.0 }
-    if i ==  8 { return 400.0 }
-    if i ==  9 { return 80.0 }
-    if i == 10 { return 30.0 }
-    if i == 11 { return 100.0 }
-    if i == 12 { return 70.0 }
-    return 50.0
-}
-
-fn cl_central(which: i32) -> f64 { if which == 0 { return 57.0 } return 28.0 }
-
-fn vfx_f_oral() -> f64 { return 0.45 }
-fn vfx_ka() -> f64 { return 0.63 }
-fn vfx_cl_form_nm() -> f64 { return 43.0 }
-
-// Matrix model (Gohel 2008): total_dose=75, k=0.199, n=0.65.
-fn matrix_dose() -> f64 { return 75.0 }
-fn matrix_k() -> f64 { return 0.199 }
-fn matrix_n() -> f64 { return 0.65 }
-
-// ─── Matrix transcendentals — verbatim stdlib/math/pure.sio ln()/exp() ───────
-// matrix_er.sio calls math::pure::{ln, exp}; pbpk28_core.mjs ports the same two
-// functions (as i32 -> Math.trunc). Range-reduced, so t^n is accurate over the
-// whole dosing clock including sub-ulp positive clocks at dose boundaries.
-fn mer_ln(x: f64) -> f64 with Mut, Div {
-    if x <= 0.0 { return 0.0 - 1.0e30 }
-    if x == 1.0 { return 0.0 }
-    var m = x
-    var e_val = 0
-    while m >= 2.0 {
-        m = m / 2.0
-        e_val = e_val + 1
-    }
-    while m < 0.5 {
-        m = m * 2.0
-        e_val = e_val - 1
-    }
-    let t = (m - 1.0) / (m + 1.0)
-    let t2 = t * t
-    var sum = t
-    var term = t
-    var k = 1
-    while k < 30 {
-        term = term * t2
-        let denom = (2 * k + 1) as f64
-        sum = sum + term / denom
-        k = k + 1
-    }
-    let ln_m = 2.0 * sum
-    return ln_m + (e_val as f64) * 0.6931471805599453
-}
-
-fn mer_exp(x: f64) -> f64 with Mut, Div {
-    if x > 500.0 { return 1.0e200 }
-    if x < -500.0 { return 0.0 }
-    var k_f = x / 0.6931471805599453
-    var k: i32 = 0
-    if k_f >= 0.0 {
-        k = k_f as i32
-    } else {
-        k = (k_f as i32) - 1
-    }
-    let r = x - (k as f64) * 0.6931471805599453
-    var sum = 1.0
-    var term = 1.0
-    var n = 1
-    while n < 25 {
-        term = term * r / (n as f64)
-        sum = sum + term
-        n = n + 1
-    }
-    var result = sum
-    if k >= 0 {
-        var i = 0
-        while i < k {
-            result = result * 2.0
-            i = i + 1
-        }
-    } else {
-        var i = 0
-        while i < (0 - k) {
-            result = result / 2.0
-            i = i + 1
-        }
-    }
-    return result
-}
-
-fn mer_pow(t: f64, n: f64) -> f64 with Mut, Div {
-    if t <= 0.0 { return 0.0 }
-    if t != t { return t }                                    // NaN t or n propagates, as matrix_er.sio
-    if n != n { return n }
-    if t - t != 0.0 {                                         // +inf^n limit, as matrix_er.sio
-        if n > 0.0 { return t }
-        if n < 0.0 { return 0.0 }
-        return 1.0
-    }
-    let x = n * mer_ln(t)                                     // non-finite x: as matrix_er.sio
-    if x != x { return 1.0 }
-    if x - x != 0.0 { if x > 0.0 { return x } return 0.0 }
-    return mer_exp(x)
-}
-
-fn mer_exp_neg(x: f64) -> f64 with Mut, Div {
-    if x >= 0.0 { return 1.0 }
-    var y = 1.0
-    var term = 1.0
-    var k: i64 = 1
-    while k < 20 {
-        term = term * x / (k as f64)
-        y = y + term
-        k = k + 1
-    }
-    return y
-}
-
-fn matrix_fraction(t: f64) -> f64 with Mut, Div {
-    if t <= 0.0 { return 0.0 }
-    let f = matrix_k() * mer_pow(t, matrix_n())
-    if f > 1.0 { return 1.0 }
-    return f
-}
-
-fn matrix_cumulative(t: f64) -> f64 with Mut, Div {
-    return matrix_dose() * matrix_fraction(t)
-}
-
-fn matrix_step_amount(t: f64, dt: f64) -> f64 with Mut, Div {
-    return matrix_cumulative(t + dt) - matrix_cumulative(t)
-}
-
-// ─── Fully-coupled CN transport step (port of pbpk28_full_cn_step) ───────────
-fn cn_step(cv: [f64; 14], ct: [f64; 14], which: i32, rel_mid: f64, dt: f64) -> CnOut with Mut, Div {
-    let h = 0.5 * dt
-    let vb = vref_at(0)
-
-    var sum_q = 0.0
-    var i = 1
+fn emit_state(prefix: i32, st: PBPKState28, p: PBPKParams28, t: f64) with IO, Mut, Div {
+    var i: i32 = 0
     while i < 14 {
-        sum_q = sum_q + q_at(i)
-        i = i + 1
-    }
-    let big_s = h * (sum_q + cl_central(which)) / vb
-
-    let cb_old = cv[0]
-    var rhs0 = (1.0 - big_s) * cb_old + dt * rel_mid / vb
-
-    var a_v: [f64; 14] = [0.0; 14]
-    var b_v: [f64; 14] = [0.0; 14]
-    var a_t: [f64; 14] = [0.0; 14]
-    var b_t: [f64; 14] = [0.0; 14]
-    var sum_beta_a = 0.0
-    var sum_beta_b = 0.0
-
-    i = 1
-    while i < 14 {
-        let vi = vref_at(i)
-        let vf = vasc_frac_at(i)
-        let vv_raw = vi * vf
-        let vt_raw = vi * (1.0 - vf)
-        let vv = if vv_raw < 1.0e-30 { 1.0e-30 } else { vv_raw }
-        let vt = if vt_raw < 1.0e-30 { 1.0e-30 } else { vt_raw }
-        let kp = kp_at(which, i)
-        let ps = ps_at(which, i)
-        let qi = q_at(i)
-
-        let beta = h * qi / vb
-        let gamma = h * qi / vv
-        let p = 1.0 + h * (qi + ps) / vv
-        let qq = h * ps / (vv * kp)
-        let rr = h * ps / vt
-        let sb = 1.0 + h * ps / (vt * kp)
-        let det = p * sb - qq * rr
-
-        rhs0 = rhs0 + beta * cv[i]
-
-        let rhs_v = gamma * cb_old + (1.0 - h * (qi + ps) / vv) * cv[i] + qq * ct[i]
-        let rhs_t = rr * cv[i] + (1.0 - h * ps / (vt * kp)) * ct[i]
-
-        let av = (sb * rhs_v + qq * rhs_t) / det
-        let bv = (sb * gamma) / det
-        let at = (rr * rhs_v + p * rhs_t) / det
-        let bt = (rr * gamma) / det
-
-        a_v[i] = av
-        b_v[i] = bv
-        a_t[i] = at
-        b_t[i] = bt
-
-        sum_beta_a = sum_beta_a + beta * av
-        sum_beta_b = sum_beta_b + beta * bv
-        i = i + 1
-    }
-
-    let cb_new = (rhs0 + sum_beta_a) / ((1.0 + big_s) - sum_beta_b)
-
-    var out = CnOut { cv: [0.0; 14], ct: [0.0; 14] }
-    out.cv[0] = if cb_new < 0.0 { 0.0 } else { cb_new }
-    i = 1
-    while i < 14 {
-        let cvi = a_v[i] + b_v[i] * cb_new
-        let cti = a_t[i] + b_t[i] * cb_new
-        out.cv[i] = if cvi < 0.0 { 0.0 } else { cvi }
-        out.ct[i] = if cti < 0.0 { 0.0 } else { cti }
-        i = i + 1
-    }
-    return out
-}
-
-fn organ_average(cv: [f64; 14], ct: [f64; 14], i: i64) -> f64 {
-    if i == 0 { return cv[0] }
-    let vf = vasc_frac_at(i)
-    return vf * cv[i] + (1.0 - vf) * ct[i]
-}
-
-fn total_mass(cv: [f64; 14], ct: [f64; 14]) -> f64 with Mut {
-    var total = vref_at(0) * cv[0]
-    var i = 1
-    while i < 14 {
-        let vi = vref_at(i)
-        let vf = vasc_frac_at(i)
-        total = total + vi * vf * cv[i] + vi * (1.0 - vf) * ct[i]
-        i = i + 1
-    }
-    return total
-}
-
-// One Lie-Trotter step: matrix → gut → absorption → parent CN → CYP2D6 → ODV CN.
-fn vfx_step(st: VfxState, t_start: f64, dt: f64) -> VfxState with Mut, Div {
-    let rel_amt = matrix_step_amount(t_start, dt)
-    var gut = st.gut + rel_amt
-    let frac_abs = 1.0 - mer_exp_neg(0.0 - vfx_ka() * dt)
-    let absorb = vfx_f_oral() * gut * frac_abs
-    gut = gut - absorb
-    if gut < 0.0 { gut = 0.0 }
-    let parent_input = absorb / dt
-
-    let outp = cn_step(st.p_cv, st.p_ct, 0, parent_input, dt)
-
-    let c_liver = organ_average(outp.cv, outp.ct, 1)
-    let form_mg = vfx_cl_form_nm() * c_liver * dt
-    var p_cv = outp.cv
-    p_cv[1] = p_cv[1] - form_mg / vref_at(1)
-    if p_cv[1] < 0.0 { p_cv[1] = 0.0 }
-    if p_cv[0] < 0.0 { p_cv[0] = 0.0 }
-    let odv_input = form_mg / dt
-
-    let outo = cn_step(st.o_cv, st.o_ct, 1, odv_input, dt)
-
-    return VfxState {
-        p_cv: p_cv, p_ct: outp.ct,
-        o_cv: outo.cv, o_ct: outo.ct,
-        gut:  gut
-    }
-}
-
-fn integrate_to(st: VfxState, t_start: f64, t_end: f64, dt: f64) -> VfxState with Mut, Div {
-    var s = st
-    var t = t_start
-    while t + 0.5 * dt < t_end {
-        s = vfx_step(s, t, dt)
-        t = t + dt
-    }
-    return s
-}
-
-fn emit_at(st: &VfxState, t: f64) with IO, Mut, Div {
-    var i = 0
-    while i < 14 {
-        print("VPARENT|t=")
+        if prefix == 0 { print("VPARENT|t=") } else { print("VODV|t=") }
         println(t)
         println("")
-        print("VPARENT|i=")
+        if prefix == 0 { print("VPARENT|i=") } else { print("VODV|i=") }
         println(i)
-        print("VPARENT|cv=")
-        println(st.p_cv[i])
+        if prefix == 0 { print("VPARENT|cv=") } else { print("VODV|cv=") }
+        println(st.cv[i])
         println("")
-        print("VPARENT|ct=")
-        println(st.p_ct[i])
+        if prefix == 0 { print("VPARENT|ct=") } else { print("VODV|ct=") }
+        println(st.ct[i])
         println("")
-        print("VPARENT|cavg=")
-        println(organ_average(st.p_cv, st.p_ct, i))
+        if prefix == 0 { print("VPARENT|cavg=") } else { print("VODV|cavg=") }
+        println(pbpk28_organ_average(st, p, i))
         println("")
         i = i + 1
     }
-    i = 0
-    while i < 14 {
-        print("VODV|t=")
-        println(t)
-        println("")
-        print("VODV|i=")
-        println(i)
-        print("VODV|cv=")
-        println(st.o_cv[i])
-        println("")
-        print("VODV|ct=")
-        println(st.o_ct[i])
-        println("")
-        print("VODV|cavg=")
-        println(organ_average(st.o_cv, st.o_ct, i))
-        println("")
-        i = i + 1
-    }
+}
+
+fn emit_at(scen: VenlafaxineXrScenario, rel: MatrixReleaseModel, t: f64) with IO, Mut, Div, Panic {
+    let pp = pbpk28_params_venlafaxine_parent()
+    let op = pbpk28_params_venlafaxine_odv()
+    emit_state(0, scen.parent, pp, t)
+    emit_state(1, scen.odv, op, t)
     print("VMATRIX|t=")
     println(t)
     println("")
     print("VMATRIX|rel=")
-    println(matrix_cumulative(t))
-    println("")
-    let mp = total_mass(st.p_cv, st.p_ct)
-    let mo = total_mass(st.o_cv, st.o_ct)
-    let ratio = if mp < 1.0e-12 { 0.0 } else { mo / mp }
-    print("VRATIO|t=")
-    println(t)
-    println("")
-    print("VRATIO|nm=")
-    println(ratio)
+    println(matrix_cumulative(rel, t))
     println("")
     print("VMASS|p=")
-    println(mp)
+    println(pbpk28_total_mass(scen.parent, pp))
     println("")
     print("VMASS|o=")
-    println(mo)
+    println(pbpk28_total_mass(scen.odv, op))
     println("")
 }
 
+// 75 mg XR q24h, 10th interval, through the scenario's own audit. Returns 1
+// when the closed form lies inside the run's certified interval, 0 otherwise
+// (main fails the run on 0). Fails closed when the parent bound swallows the
+// parent AUC: the scenario then reports an unbounded upper end.
+fn emit_ss(dt: f64) -> i64 with IO, Mut, Div, Panic {
+    let iv = vfx_ss_regimen_interval(nm(), dt)
+    let ratio = vfx_ss_ratio(iv)
+    let lo = vfx_ss_ratio_lo(iv)
+    let hi = vfx_ss_ratio_hi(iv)
+    let cf = vfx_ss_ratio_closed_form(nm())
+    var certified: i64 = 0
+    if iv.auc_parent > iv.err_auc_parent && lo <= cf && cf <= hi { certified = 1 }
+    print("VSS|dt=")
+    println(dt)
+    println("")
+    print("VSS|auc_parent=")
+    println(iv.auc_parent)
+    println("")
+    print("VSS|auc_odv=")
+    println(iv.auc_odv)
+    println("")
+    print("VSS|ratio=")
+    println(ratio)
+    println("")
+    print("VSS|cf=")
+    println(cf)
+    println("")
+    // Diagnostics scaled by 1e12: Madaros prints every f64 as 6-decimal fixed
+    // (lean_single switches to scientific below 1e-6), so unscaled values in the
+    // 1e-13..1e-7 range would print as 0.000000 under Madaros.
+    print("VSS|rel_err_cf_e12=")
+    println(1.0e12 * (ratio - cf) / cf)
+    println("")
+    print("VSS|rel_halfwidth_e12=")
+    println(1.0e12 * 0.5 * (hi - lo) / ratio)
+    println("")
+    print("VSS|certified=")
+    println(certified)
+    return certified
+}
+
 fn main() -> i32 with IO, Mut, Div, Panic {
-    println("DISSERTATION_PBPK28_VENLAFAXINE_PARITY_REF v1")
+    println("DISSERTATION_PBPK28_VENLAFAXINE_PARITY_REF v3")
     println("compartments=14")
     println("dt=0.5")
     println("dose_mg=75.0")
@@ -491,23 +137,38 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     println("drug=venlafaxine")
     println("release=korsmeyer_peppas_matrix")
     println("samples=12")
+    println("formation=implicit_liver_sink")
+    println("ratio_readout=ss_cavg_q24h_interval10")
+    println("model=stdlib_scenario")
 
     let dt = 0.5
-    var s = vfx_zero()
+    let rel = venlafaxine_xr_matrix_gohel2008()
+    var s = vfx_scenario_init(nm())
     var t = 0.0
 
-    s = integrate_to(s, t,  1.0, dt); t =  1.0; emit_at(&s, t)
-    s = integrate_to(s, t,  2.0, dt); t =  2.0; emit_at(&s, t)
-    s = integrate_to(s, t,  4.0, dt); t =  4.0; emit_at(&s, t)
-    s = integrate_to(s, t,  6.0, dt); t =  6.0; emit_at(&s, t)
-    s = integrate_to(s, t,  8.0, dt); t =  8.0; emit_at(&s, t)
-    s = integrate_to(s, t, 12.0, dt); t = 12.0; emit_at(&s, t)
-    s = integrate_to(s, t, 18.0, dt); t = 18.0; emit_at(&s, t)
-    s = integrate_to(s, t, 24.0, dt); t = 24.0; emit_at(&s, t)
-    s = integrate_to(s, t, 36.0, dt); t = 36.0; emit_at(&s, t)
-    s = integrate_to(s, t, 48.0, dt); t = 48.0; emit_at(&s, t)
-    s = integrate_to(s, t, 72.0, dt); t = 72.0; emit_at(&s, t)
-    s = integrate_to(s, t, 96.0, dt); t = 96.0; emit_at(&s, t)
+    s = vfx_integrate_to(s, rel, t,  1.0, dt); t =  1.0; emit_at(s, rel, t)
+    s = vfx_integrate_to(s, rel, t,  2.0, dt); t =  2.0; emit_at(s, rel, t)
+    s = vfx_integrate_to(s, rel, t,  4.0, dt); t =  4.0; emit_at(s, rel, t)
+    s = vfx_integrate_to(s, rel, t,  6.0, dt); t =  6.0; emit_at(s, rel, t)
+    s = vfx_integrate_to(s, rel, t,  8.0, dt); t =  8.0; emit_at(s, rel, t)
+    s = vfx_integrate_to(s, rel, t, 12.0, dt); t = 12.0; emit_at(s, rel, t)
+    s = vfx_integrate_to(s, rel, t, 18.0, dt); t = 18.0; emit_at(s, rel, t)
+    s = vfx_integrate_to(s, rel, t, 24.0, dt); t = 24.0; emit_at(s, rel, t)
+    s = vfx_integrate_to(s, rel, t, 36.0, dt); t = 36.0; emit_at(s, rel, t)
+    s = vfx_integrate_to(s, rel, t, 48.0, dt); t = 48.0; emit_at(s, rel, t)
+    s = vfx_integrate_to(s, rel, t, 72.0, dt); t = 72.0; emit_at(s, rel, t)
+    s = vfx_integrate_to(s, rel, t, 96.0, dt); t = 96.0; emit_at(s, rel, t)
+
+    // Steady-state ratio at two step sizes; both must certify the closed form,
+    // and the run fails (nonzero exit) if either does not, so the run-pass
+    // suite enforces it without the parity gate.
+    var failed: i32 = 0
+    if emit_ss(0.5) != 1 { failed = failed + 1 }
+    if emit_ss(0.25) != 1 { failed = failed + 1 }
+    if failed != 0 {
+        println("VSS|FAIL closed form outside a certified interval")
+        return failed
+    }
 
     println("DISSERTATION_PBPK28_VENLAFAXINE_PARITY_DONE")
     return 0
