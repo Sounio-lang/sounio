@@ -13,7 +13,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-
 **Base:** `origin/main` @ `2e8b76d31` (workspace worktree `/workspace/worktrees/claude-struct-reassign-alias`, branch `claude/madaros-struct-reassign-alias`)
 **Engines:** Madaros, cross-checked against `SOUNIO_SOUC_ENGINE=lean_single`
 **Owner:** unassigned (`self-hosted/ir/lower.sio`, `Lowerer::lower_assign_stmt_ref`)
-**Status:** evidence recorded; source-built baseline **reproduces**; fix for identifier sources proposed and measured ([Patched build](#patched-build)); non-identifier sources measured and **left open** ([Boundary](#boundary-still-open-after-the-fix)).
+**Status:** evidence recorded; source-built baseline **reproduces**; fix for identifier sources proposed and measured, including a full-suite A/B whose only change is the witness ([Patched build](#patched-build)); non-identifier sources measured and **left open** ([Boundary](#boundary-still-open-after-the-fix)).
 
 ## Why this dispatch
 
@@ -281,10 +281,41 @@ the 30,000-step rapamycin reference that the #1479 header discusses.
 agrees: 48 pass / 6 fail on the control, 49 / 5 on the patched build, and the
 witness is the only status that differs.
 
-**Not run:** the full 3,286-test suite. The change touches only assignments
-whose right-hand side is an aggregate identifier. The list above covers every
-run-pass file the sweep finds with that shape, plus the dissertation surface.
-A full-suite A/B is the remaining acceptance step before landing.
+**Full suite (2026-09-26 21:43Z – 2026-09-27 00:29Z).** Each arm ran
+`scripts/dev/run_sio_test_suite.sh --jobs 2 --verbose --format junit` in its
+own detached worktree, with `SOUNIO_MADAROS_AVAILABLE=1` so that
+`requires: madaros` tests execute. `SOUNIO_TEST_SOUC_BIN` pointed at that arm's
+compiler, which was also installed as the worktree's
+`artifacts/self-hosted/madaros`. Control: `/workspace/worktrees/ab-alias-base`
+at `2e8b76d31`, Madaros `5764851f`. Patched: `/workspace/worktrees/ab-alias-patched`
+at `72dd3a2be`, Madaros `cc0c6e49`. Both arms ran at the same time, so they
+shared the same load on the 8-CPU workspace pod. Load was high throughout,
+including a window of about 23:05–23:17Z when another agent's suite fanned out
+to 80 jobs.
+
+| | Pass | Fail | Known failures | Stale known-failure (XPAS) | Vacuous (tolerated) | Skip | Total |
+|---|---|---|---|---|---|---|---|
+| Control (`5764851f`) | 2212 | 695 | 99 | 21 | 20 | 280 | 3327 |
+| Patched (`cc0c6e49`) | 2215 | 693 | 99 | 21 | 20 | 280 | 3328 |
+
+The patched arm has one more test: the witness, which passes. Per-test statuses
+were diffed from the two junit files. The harness writes junit that is not
+well-formed XML, so it was parsed by `<testcase>` pattern. 21 tests differ:
+
+- `madaros_struct_reassign_store_no_alias`: absent → PASS, as intended.
+- 20 others, split 11 control-FAIL → patched-PASS and 9 control-PASS →
+  patched-FAIL. Every failure message is `run timed out after 30s`, and every
+  one is a `solver_portfolio_*` or `lorenz_i256_*` test whose passing runs took
+  up to 30 s under that load.
+
+Each of the 20 was then rebuilt with both compilers and run once with no
+harness timeout, one at a time. **All 20 produce byte-identical ELFs from the
+control and patched compilers, and identical stdout with exit 0.** The patch
+cannot affect a program whose binary it does not change, so all 20 flips are
+load-induced timeouts.
+
+**Result: across the full suite, the only behavioural change is the new
+witness passing.**
 
 ## Boundary still open after the fix
 
@@ -294,7 +325,10 @@ the static aggregate type of an arbitrary place expression at the copy site,
 which the identifier path gets for free from the local table. They are the same
 defect and should be the next change. The witness does not assert them, so it
 can pass on a fixed identifier path without claiming the rest. Until then, copy
-from a pointer or a field element-wise.
+from a pointer or a field element-wise. The `let` side of these rows is taken
+up in `docs/audit/MADAROS_LET_FIELD_SOURCE_ALIAS_DISPATCH_2026-09-26.md`
+(upbeat-gould lane, PR #2706). That lane reports wrong answers in stdlib today,
+in `stdlib/epistemic/proptest.sio` and `stdlib/cybernetic/autopoiesis.sio`.
 
 ## stdlib sweep
 
