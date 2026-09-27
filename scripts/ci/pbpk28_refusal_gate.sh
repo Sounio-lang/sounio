@@ -3,9 +3,15 @@
 #
 # The v2 harness has no run-fail mode: a panic is an exit 1 with no message on
 # both engines, so a run-pass file cannot assert "this call is refused". Each
-# probe below is compiled and run here and must ABORT (non-zero exit) WITHOUT
-# printing its escape sentinel; a control must run to completion. Same pattern
-# as scripts/ci/ep_gum_covariance_gate.sh.
+# probe below is compiled and run here and must exit with EXACTLY the panic
+# status WITHOUT printing its escape sentinel; a control must exit 0 AND print
+# the sentinel. The panic status is 1 on both engines (measured 2026-09-27:
+# `panic("boom")` in main exits 1 under Madaros and under lean_single). Any
+# other non-zero status is a failure, not a refusal: a segfault (139), a
+# floating-point trap (136) or a stray exit code would otherwise pass as the
+# expected panic (PR #2695 review). The gate checks this about itself before
+# any probe: a probe that returns 7 and a probe that dies of SIGSEGV must both
+# be classified as NOT refused.
 #
 # Probes (PR #2695 review):
 #   oral_unreg   md_oral_dose_ok on an unregistered slot below capacity. It
@@ -69,26 +75,53 @@ run_probe() {
   set -e
 }
 
+PANIC_RC=1
+
+# is_refusal NAME: true only for the panic status and no escape sentinel.
+is_refusal() {
+  [ "$PROBE_RC" -eq "$PANIC_RC" ] && ! grep -q 'PBPK28_REFUSAL_ESCAPED' "$OUT/$1_run.log"
+}
+
 refused() {
   local name="$1"
   run_probe "$name"
-  if [ "$PROBE_RC" -eq 0 ] || grep -q 'PBPK28_REFUSAL_ESCAPED' "$OUT/${name}_run.log"; then
-    echo "FAIL: probe '$name' was NOT refused"
+  if ! is_refusal "$name"; then
+    echo "FAIL: probe '$name' was NOT refused by a panic (rc $PROBE_RC, want $PANIC_RC and no sentinel)"
     cat "$OUT/${name}_run.log" || true
     exit 1
   fi
   echo "  refused: $name (rc $PROBE_RC)"
 }
 
+# control NAME: must exit 0 and print the sentinel.
+control() {
+  local name="$1"
+  run_probe "$name"
+  if [ "$PROBE_RC" -ne 0 ] || ! grep -q 'PBPK28_REFUSAL_ESCAPED' "$OUT/${name}_run.log"; then
+    echo "FAIL: control probe '$name' did not run to completion (rc $PROBE_RC)"
+    cat "$OUT/${name}_run.log" || true
+    exit 1
+  fi
+}
+
+# Self-check of the classifier: an ordinary non-zero exit and a crash must not
+# count as a refusal.
+write_probe sab_exit7 "return 7"
+run_probe sab_exit7
+if is_refusal sab_exit7; then echo "FAIL: gate classified exit $PROBE_RC as a panic refusal"; exit 1; fi
+echo "  self-check ok: exit $PROBE_RC is not a refusal"
+printf '#!/bin/sh\nkill -SEGV $$\n' > "$OUT/pbpk28_refusal_sab_segv.elf"
+chmod +x "$OUT/pbpk28_refusal_sab_segv.elf"
+set +e
+{ "$OUT/pbpk28_refusal_sab_segv.elf"; PROBE_RC=$?; } >"$OUT/sab_segv_run.log" 2>&1
+set -e
+if is_refusal sab_segv; then echo "FAIL: gate classified a SIGSEGV (rc $PROBE_RC) as a panic refusal"; exit 1; fi
+echo "  self-check ok: SIGSEGV (rc $PROBE_RC) is not a refusal"
+
 write_probe control "let o = md_oral_dose_ok(&md, a, 5.0)
     let b = md_bolus_dose_ok(&md, a, 5.0)
     if !(o && b) { return 2 }"
-run_probe control
-if [ "$PROBE_RC" -ne 0 ] || ! grep -q 'PBPK28_REFUSAL_ESCAPED' "$OUT/control_run.log"; then
-  echo "FAIL: control probe did not run to completion (rc $PROBE_RC)"
-  cat "$OUT/control_run.log" || true
-  exit 1
-fi
+control control
 echo "  control ok: registered drug accepted"
 
 write_probe oral_unreg "if md_oral_dose_ok(&md, 3, 5.0) { println(\"ok\") } else { println(\"not ok\") }"
@@ -118,12 +151,7 @@ BODY
 write_probe load_control "$(load_body 1.0e307 'let f = md_factor_now(&md, a, md_site_liver(), md_cyp3a4())
     md_step(&!md, 0.1)
     if !(f > 0.0) { return 2 }')"
-run_probe load_control
-if [ "$PROBE_RC" -ne 0 ] || ! grep -q 'PBPK28_REFUSAL_ESCAPED' "$OUT/load_control_run.log"; then
-  echo "FAIL: load control probe did not run to completion (rc $PROBE_RC)"
-  cat "$OUT/load_control_run.log" || true
-  exit 1
-fi
+control load_control
 echo "  control ok: finite inhibitor load accepted"
 write_probe load_inspect "$(load_body 1.0e308 'let f = md_factor_now(&md, a, md_site_liver(), md_cyp3a4())
     print("factor ") println(f)')"
