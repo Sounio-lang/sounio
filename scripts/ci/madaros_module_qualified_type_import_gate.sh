@@ -83,24 +83,22 @@ compile_and_run basic "$FIX/basic/main.sio"
 expect_output basic "$FIX/basic/expected.txt"
 echo "$TAG PASS(basic): a path-form type import's qualified associated call compiles and runs correctly"
 
-# --- oversized: Copilot review (PR #2515), comment 4114530613:
-# module_frontend_named_import_terminal_is_type's byte scanner reads through
-# read_file's fixed 1 MiB buffer (the same cap every read_file caller in
-# this tree lives with) -- a real module file past that size (self-hosted/
-# check/check.sio and self-hosted/ir/lower.sio both are) with its struct/
-# enum declaration past the cutoff used to scan as "not found", silently
-# misclassifying a genuine type import as a function/value one. Generated
-# at run time rather than checked in, so the repository does not carry a
-# multi-MiB fixture: a filler comment block pushes `pub struct Widget` past
-# 1 MiB in "pkg_mod_big.sio", exactly mirroring the `basic` case above but
-# at a size only the fail-closed fix (self-hosted/compiler/module_frontend.
-# sio) can get right.
+# --- oversized: Copilot review (PR #2515), comment 4114530613 (correcting
+# the prior round's own comment 4114530613 fix -- see this fixture's
+# README): module_frontend_named_import_terminal_is_type now scans the
+# file's real, full size (read_file is not actually 1 MiB-capped; only the
+# lexer's genuine 16 MiB ceiling is), rather than either truncating at 1
+# MiB or blindly guessing "is type" past it. Generated at run time rather
+# than checked in, so the repository does not carry a multi-MiB fixture: a
+# filler comment block pushes `pub struct Widget` past 1 MiB in
+# "pkg_mod_big.sio", exactly mirroring the `basic` case above but at a size
+# a real scan -- not a truncated one -- is needed to get right.
 oversized_dir="$WORK/oversized"
 mkdir -p "$oversized_dir"
 {
   i=0
-  # ~1.05 MiB of `// filler...\n` lines (18 bytes each) pushes the struct
-  # declaration past the 1 MiB read_file cutoff.
+  # ~1.05 MiB of `// filler...\n` lines pushes the struct declaration well
+  # past 1 MiB (still far under the lexer's real 16 MiB ceiling).
   while ((i < 61000)); do
     printf '// filler filler filler\n'
     i=$((i + 1))
@@ -133,6 +131,6 @@ EOF
 echo "OVERSIZED_MODULE_TYPE_IMPORT_QUALIFIER_OK" > "$oversized_dir/expected.txt"
 compile_and_run oversized "$oversized_dir/main.sio"
 expect_output oversized "$oversized_dir/expected.txt"
-echo "$TAG PASS(oversized): a path-form type import past read_file's 1 MiB cutoff still keeps its module-qualifier suffix"
+echo "$TAG PASS(oversized): a path-form type import past 1 MiB is still found by a real full-file scan, not a blind fail-closed guess"
 
 echo "$TAG PASS: path-form type import resolved correctly"

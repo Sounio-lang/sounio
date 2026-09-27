@@ -863,30 +863,30 @@ fn module_frontend_named_import_terminal_is_type(parent_file_path: string, termi
     if size <= 0 {
         return false
     }
-    // Copilot review (PR #2515), comment 4114530613: read_file's buffer is a
-    // fixed 1 MiB ([i8; 1048576], the same cap every other read_file caller
-    // in this tree lives with -- see read_source_file's own "1MB lex buffer"
-    // comment; there is no larger-capacity read builtin to switch to). A
-    // real module file can exceed that (self-hosted/check/check.sio,
-    // self-hosted/ir/lower.sio both do) and carry a struct/enum declaration
-    // PAST the cutoff, which a truncated scan can never see. Silently
-    // returning `false` past this point previously meant "not found" was
-    // indistinguishable from "found nothing to look at", misclassifying a
-    // genuine type import as a function/value one and suppressing its
-    // module-qualifier registration (this file's own module_frontend_
-    // named_import_terminal_is_type existed to FIX exactly that
-    // misclassification for the in-range case -- silently mis-answering it
-    // for an out-of-range file would just move the same bug to a different
-    // trigger). Fail closed instead: when the scan cannot cover the whole
-    // file, assume the terminal COULD be a type (return true) rather than
-    // guess it is a plain function/value from partial data. The asymmetric
-    // cost matches this whole PR's own precedent (e.g. check.sio's
-    // checker_use_module_known guard) -- wrongly suppressing a real type's
-    // qualifier breaks a call outright, while wrongly not-excluding an
-    // oversized file's genuine function/value import only reopens the
-    // narrower, already-accepted "qualifier vs. unrelated same-named item"
-    // ambiguity this PR documents elsewhere as an out-of-scope gap.
-    if size > 1048576 {
+    // Copilot review (PR #2515), comment 4114610736 (correcting the prior
+    // round's own comment 4114530613 fix): read_file is NOT capped at 1 MiB
+    // -- emit_builtin_read_file (self-hosted/native/codegen_x86_linux.sio)
+    // mmaps a buffer sized to the file's REAL st_size (rounded up to a page,
+    // +64B NUL tail), falling back to 1 MiB only on an fstat failure/empty
+    // file; its declared type is `string`, not a fixed-size array. The prior
+    // round's "return true past 1 MiB" fix was itself the bug this comment
+    // caught: it classified EVERY named import from a file over 1 MiB as a
+    // type without ever looking, so a large module's genuine function/value
+    // import lost its named-item marker and its suffix became trusted
+    // module-qualifier evidence again -- reopening the exact "qualified
+    // call binds an unrelated same-named symbol" class of bug this whole PR
+    // fixes, just for large files instead of small ones.
+    //
+    // The real, load-bearing ceiling is the LEXER's, not read_file's:
+    // lex_file_to_globals (self-hosted/lexer/mod.sio) hard-refuses (returns
+    // -1, never silently truncates) any source over 16 MiB, so no Sounio
+    // module this compiler can otherwise parse ever exceeds that size.
+    // Scan the file's full, real size up to that same 16 MiB ceiling --
+    // covering every module that can actually be compiled -- and fail
+    // closed (assume the terminal COULD be a type) only past it, where no
+    // real answer is possible anyway because nothing else in the compiler
+    // could have parsed that file either.
+    if size > 16777216 {
         return true
     }
     let n = size
