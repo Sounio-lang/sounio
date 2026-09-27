@@ -3806,6 +3806,7 @@ fn print_help() with IO {
     println("  --probe-filtered-body-reset-boundary <file_a.sio> <file_b.sio> <fn_name>  Lower fn_name through lower_program_function_body_from_summary_with_epistemic_ref for two different inputs in one process and report its mask after each, to catch a reset-boundary leak between them")
     println("  --probe-tuple-arr-capacity <source.sio> <fn_name>  Collect LOWER_FN_TUPLE_ARR_* directly from raw parsed items (bypasses DCE) and report one function's mask")
     println("  --probe-tuple-arr-reset-boundary <file_a.sio> <file_b.sio> <fn_name>  Call lower_program_to_ir on two different inputs in one process and report fn_name's mask after each, to catch a reset-boundary leak between them")
+    println("  --probe-tuple-arr-callsite-reset-boundary <file_a.sio> <file_b.sio> <fn_name>  Same as --probe-tuple-arr-reset-boundary, but through the separate lower_program_to_ir_probe_callsite public entry point")
     println("  --probe-ir-callsite <source.sio> <caller_fn> <callee_fn>  Probe lowered callsite hidden-arg behavior")
     println("  --probe-ir-opt-strategy <source.sio>  Probe ir_opt_apply_strategy() on instrumented IR fns")
     println("  --probe-wasm-dispatch <source.sio> [out.wasm]  Probe wasm dispatch marker path")
@@ -9992,6 +9993,57 @@ fn run_probe_tuple_arr_reset_boundary(args: ArgList, flag_index: i64) with IO, M
         panic("probe_tuple_arr_reset_boundary: lower failed for file_b")
     }
     print("probe_tuple_arr_reset_boundary: after_b fn=")
+    print(fn_name_str)
+    print(" mask=")
+    print_int(lower_fn_tuple_f64_array_mask(target))
+    print("\n")
+}
+
+// --probe-tuple-arr-callsite-reset-boundary <file_a.sio> <file_b.sio> <fn_name>:
+// Copilot review (PR #2516), comment 4115267768: lower_program_to_ir_probe_
+// callsite (self-hosted/ir/lower.sio) is a SEPARATE public entry point from
+// lower_program_to_ir above -- it reaches the same tuple-array-mask
+// collector through lower_program_bodies_filtered_ref, but did not reset the
+// table itself before this round's fix, so two calls to THIS API in one
+// process for two different inputs sharing a function name could leak the
+// first call's mask into the second, the identical shape --probe-tuple-arr-
+// reset-boundary above pins for lower_program_to_ir. Same probe shape, this
+// entry point instead: lower file A through lower_program_to_ir_probe_
+// callsite, print fn_name's mask, lower file B the same way, print again --
+// with the fix, B's mask reflects its own shape for fn_name; without it, B's
+// reported mask would incorrectly equal A's.
+fn run_probe_tuple_arr_callsite_reset_boundary(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 3 >= args.len {
+        panic("probe_tuple_arr_callsite_reset_boundary: expected <file_a.sio> <file_b.sio> <fn_name>")
+    }
+    let path_a = arg_list_get(args, flag_index + 1)
+    let path_b = arg_list_get(args, flag_index + 2)
+    let fn_name_str = arg_list_get(args, flag_index + 3)
+    let target = make_name(fn_name_str)
+
+    let prog_a = load_module_file(path_a)
+    if parser_last_error_count() > 0 {
+        panic("probe_tuple_arr_callsite_reset_boundary: parse failed for file_a")
+    }
+    let low_a = lower_program_to_ir_probe_callsite(prog_a, target)
+    if low_a.had_error {
+        panic("probe_tuple_arr_callsite_reset_boundary: lower failed for file_a")
+    }
+    print("probe_tuple_arr_callsite_reset_boundary: after_a fn=")
+    print(fn_name_str)
+    print(" mask=")
+    print_int(lower_fn_tuple_f64_array_mask(target))
+    print("\n")
+
+    let prog_b = load_module_file(path_b)
+    if parser_last_error_count() > 0 {
+        panic("probe_tuple_arr_callsite_reset_boundary: parse failed for file_b")
+    }
+    let low_b = lower_program_to_ir_probe_callsite(prog_b, target)
+    if low_b.had_error {
+        panic("probe_tuple_arr_callsite_reset_boundary: lower failed for file_b")
+    }
+    print("probe_tuple_arr_callsite_reset_boundary: after_b fn=")
     print(fn_name_str)
     print(" mask=")
     print_int(lower_fn_tuple_f64_array_mask(target))
@@ -29337,6 +29389,9 @@ fn main() with IO, Mut, Panic, Div, Alloc {
             return
         } else if mode == "--probe-tuple-arr-capacity" || starts_with(mode, "--probe-tuple-arr-cap") {
             run_probe_tuple_arr_capacity(args, arg_idx)
+            return
+        } else if mode == "--probe-tuple-arr-callsite-reset-boundary" || starts_with(mode, "--probe-tuple-arr-callsite") {
+            run_probe_tuple_arr_callsite_reset_boundary(args, arg_idx)
             return
         } else if mode == "--probe-tuple-arr-reset-boundary" || starts_with(mode, "--probe-tuple-arr-reset") {
             run_probe_tuple_arr_reset_boundary(args, arg_idx)
