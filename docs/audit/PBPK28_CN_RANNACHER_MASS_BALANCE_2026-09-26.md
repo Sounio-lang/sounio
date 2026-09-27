@@ -123,7 +123,9 @@ The comparison used to set an MC at dt = 0.5 (+140% bias) against a GUM at dt = 
 
 The module's printed scientific conclusion, that no prior family resolves the GUM/MC discord, **no longer holds**: the LogNormal prior meets the Hessian criterion.
 
-### `cumulants.sio` (M5 fourth-order budget, dt = 0.1; scratch probe, because `tests/run-pass/pbpk28_m5_gum_4th_order.sio` does not compile on main: E035, and E259 under Madaros)
+### `cumulants.sio` (M5 fourth-order budget, dt = 0.1; scratch probe)
+
+The numbers below come from a scratch probe because, when they were captured, `tests/run-pass/pbpk28_m5_gum_4th_order.sio` did not compile (E035: `main` lacked the `Epistemic` effect). This PR later added it (e5360f0b2): under lean_single the test now compiles and prints the same budget (u_1st 0.183456, u_2nd 0.207808, u_total 0.266505) before its honest `_OUTPUT` verdict. Under Madaros it still fails to build with E259 (five private-field reads in the test).
 
 | output | before (u_MC pin 0.357945) | after (u_MC pin 0.211790) |
 |---|---:|---:|

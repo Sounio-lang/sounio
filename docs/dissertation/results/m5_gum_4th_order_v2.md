@@ -29,9 +29,12 @@ u_MC). For sampled parameters the amount varies
 Rannacher-started clamp-free Crank–Nicolson of `stdlib/darwin_pbpk/theta_pbpk28.sio`.
 
 **Run log:** `runs/m5_gum_4th_order_v2.txt` (lean_single). The numbers come from a probe that
-calls `m5_pbpk28_convergence_budget()` directly. The run-pass test
-`tests/run-pass/pbpk28_m5_gum_4th_order.sio` is not the source: it does not compile on main
-(pre-existing E035).
+calls `m5_pbpk28_convergence_budget()` directly, captured when the run-pass test
+`tests/run-pass/pbpk28_m5_gum_4th_order.sio` did not yet compile (E035: `main` lacked the
+`Epistemic` effect). Later in this PR the test gained it: under lean_single it now compiles, prints
+the same budget (u_1st 0.183456, u_2nd 0.207808, u_total 0.266505), and exits 1 with
+`M5_GUM_FOURTH_ORDER_CUMULANT_BUDGET_OUTPUT`, which the known-failure manifest pins. Under Madaros
+it still fails to build (E259, private-field reads in the test).
 **Canonical u_MC:** 0.211790 mg·h/L, the post-fix M6 run (`runs/m6_full_stack_v2.txt`), now
 the value of `m5_pbpk28_u_mc_canonical()` in `stdlib/darwin_pbpk/cumulants.sio`.
 **Convention:** rel_X = |u_X − u_MC| / u_MC.
