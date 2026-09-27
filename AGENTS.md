@@ -376,7 +376,7 @@ At the end of substantial work, report:
 
 This repository runs many parallel agents with a single human author. Pre-commit review by orthogonal LLM providers via `bin/llm-offload` is **mandatory** at the checkpoints listed in `.claude/AGENT_OFFLOAD_POLICY.md`:
 
-- **Math claims** (PK/PD, GUM, p-box, Lean statements, refinement invariants) → `bin/llm-offload -t math-review -p xai`
+- **Math claims** (PK/PD, GUM, p-box, Lean statements, refinement invariants) → `bin/llm-offload -t math-review -i <file>` (default fan-out: Grok 4.7 + Kimi K3 via LLM Gateway, plus zai/local; two independent vendors required)
 - **Clinical-pathway code** (`stdlib/clinical/*`, vancomycin tests, clinical Lean) → `bin/llm-offload -t review -p deepseek`
 - **External-facing artifacts** (papers, cover letters, dissertation, IRB) → `bin/llm-offload --raw <draft> deepseek xai gemini`
 

@@ -318,9 +318,11 @@ Pre-commit review by orthogonal LLM providers via `bin/llm-offload` is mandatory
 
 | Trigger | Command | Required |
 |---|---|---|
-| Math claims (PK/PD, GUM, p-box, Lean theorem, refinement invariants) | `bin/llm-offload -t math-review -p xai` | Yes |
+| Math claims (PK/PD, GUM, p-box, Lean theorem, refinement invariants) | `bin/llm-offload -t math-review -i <file>` (default fan-out; needs two independent vendors) | Yes |
 | Clinical-pathway code (`stdlib/clinical/*`, vancomycin tests, clinical Lean obligations) | `bin/llm-offload -t review -p deepseek` | Yes |
 | External-facing artefacts (papers, dissertation, IRB, cover letters) | `bin/llm-offload --raw <draft> deepseek xai gemini` | Yes |
+
+**Canonical route (operator decision 2026-09-26):** LLM Gateway (paid API, `LLMGATEWAY_API_KEY`, `https://api.llmgateway.io/v1`) serving **Grok 4.7** (xAI) as the primary math leg and **Kimi K3** (Moonshot) as the independent second vendor. `-p xai` means Grok 4.7 via the gateway, falling back to xAI direct. Any gateway model is reachable as `-p gw:<model-id>`. Details: [`.claude/offload-routing.md`](.claude/offload-routing.md).
 
 Every non-trivial offload appends to `.claude/llm_offload_log.md`. Bug-catching offloads require an `LLM-offload-review:` trailer in the commit. Codex agents must not skip this step.
 
