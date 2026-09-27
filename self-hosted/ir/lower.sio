@@ -6836,10 +6836,20 @@ fn lower_opt_return_float_code(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Pan
     // 1024+mask keeps every existing consumer (all of which test == 1 or == 2)
     // inert while carrying per-slot float-ness for tuple returns.
     //
-    // Written without a `let`: bound in the tail position of an else block the name
-    // reads back as undeclared (E137) when the compiler typechecks its own source.
-    // The classifier is a pure function of the type expression, so calling it twice
-    // costs compile time and nothing else.
+    // Merge note (PR #2516 vs. an independently-developed sibling change):
+    // the sibling packed a SECOND, array-slot mask into bits 32-63 of this
+    // same code via `<< 32` and read it back with `expr_result_tuple_
+    // array_float_mask_ref`. PR #2516's own field comment on `tuple_arr_mask`
+    // (Lowerer's per-local struct) explains why that packing is unsound:
+    // slot 31 shifted into the high half lands on this i64's sign bit,
+    // corrupting the whole code and dropping every slot's mask via the
+    // `code >= 1024` / `>= 1024` guards below and at every consumer. PR
+    // #2516 tracks the array-slot mask through its own, unpacked channels
+    // instead (the per-local `tuple_arr_mask` field for lets/params, and the
+    // global name-keyed `LOWER_FN_TUPLE_ARR_*` table -- see
+    // lower_fn_tuple_f64_array_mask -- for a call's declared return type),
+    // so this code carries only the pre-existing scalar mask; no consumer
+    // in this tree reads a packed high half.
     } else if lower_opt_type_tuple_float_mask(opt) != 0 {
         1024 + lower_opt_type_tuple_float_mask(opt)
     } else {
@@ -18612,6 +18622,11 @@ impl Lowerer {
                         lo = lo.bind_local_array_elem_float(s.name)
                     } else if lo.expr_result_is_f64_array_ref(&(*expr_box_arr)) {
                         lo = lo.bind_local_array_elem_float(s.name)
+                    // Tuple-let desugar: `let (a, b) = f()` with `f() -> ([f64;2], f64)`
+                    // binds `a` here via an unannotated `let a = __tup.0` (parser/stmts.sio's
+                    // tplet_emit_elems) -- without the expr_is_tuple_slot_f64_array_ref arm
+                    // above, `a` never got array_elem_float and `a[0] * 2.0` mis-lowered as an
+                    // integer multiply, reinterpreting the IEEE bits on print.
                     } else if lo.expr_is_tuple_slot_f64_array_ref(&(*expr_box_arr)) {
                         lo = lo.bind_local_array_elem_float(s.name)
                     } else if rhs_array_elem_is_float {
