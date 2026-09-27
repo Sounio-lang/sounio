@@ -264,8 +264,9 @@ run_struct_orchestrator() {
 # Dissertation PBPK suite: applied evidence layer for the rapamycin model.
 # 5 run-pass tests cover Euler+RK4 ISO budgets, BBB/Pgp clinical claims,
 # variance-aware adaptive integration, and GUM-vs-MC validation. CPU-only,
-# ~30s. This is the regression shield for the dissertation's *evidence*
-# (contributions #1/#2/#3 are about the mechanism; this gate is about the
+# at least ~40 min: the suite's expected-FAIL_HONEST pbpk28_sobol_pce entry
+# alone takes 2331-2392 s (see that gate's header). This is the regression
+# shield for the dissertation's *evidence* (contributions #1/#2/#3 are about the mechanism; this gate is about the
 # results those mechanisms produce on rapamycin).
 run_dissertation_pbpk_suite() {
   local gate="dissertation_pbpk_suite"

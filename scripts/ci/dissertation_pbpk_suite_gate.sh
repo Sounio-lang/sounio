@@ -43,7 +43,11 @@
 # are listed in TESTS_EXPECTED_FAIL_HONEST instead and must fail exactly as
 # recorded (strict; see that list).
 #
-# CPU-only, ~30s total. Self-skips if souc is missing.
+# CPU-only. Self-skips if souc is missing. Runtime: each TESTS / smoke /
+# pending entry is bounded by DPS_TIMEOUT_SECONDS (default 90 s), but the
+# expected-FAIL_HONEST pbpk28_sobol_pce entry alone takes ~40 min under
+# lean_single (2331-2392 s measured) with its own 3600 s timeout, so a full
+# run takes at least ~40 min. Budget and schedule it accordingly.
 #
 # Knobs (env):
 #   DPS_STAGE_DIR             working directory (default mktemp)
