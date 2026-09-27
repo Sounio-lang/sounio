@@ -49,6 +49,10 @@ spec:
         - {name: SOUNIO_REF, value: "897c344892fafd98bfbbb0a611738aad08149d7d"}  # commit profiled in the dispatch
         - {name: SEED_PATH, value: ""}      # e.g. /cache/madaros/seed/<key>/artifact
         - {name: SEED_SHA256, value: ""}    # full sha256 of SEED_PATH
+        # The mounted ConfigMap is mutable; the tools are verified against these before use.
+        # Update both together with scripts/dev/profiling/{rip_sampler.cpp,symbolize.pl}.
+        - {name: RIP_SAMPLER_SHA256, value: "4ec2be1e3c7bb02093feb7f2f6194f47afb79fefbce9c612c1961f1e47217fde"}
+        - {name: SYMBOLIZE_SHA256, value: "b5602ab82acb8441a69f6533858858aff88343ff9a8511f25de5f05dd828e7bf"}
         args:
         - |
           set -uo pipefail
@@ -56,10 +60,15 @@ spec:
           [ -n "$SEED_PATH" ] && [ -n "$SEED_SHA256" ] || die "SEED_PATH and SEED_SHA256 must be set"
           OUT=/cache/profile/fn2-$(date -u +%Y%m%dT%H%M%S); mkdir -p "$OUT"; echo "OUT=$OUT"
           sudo apt-get update -qq >/dev/null && sudo apt-get install -y -qq g++ perl git binutils >/dev/null 2>&1 || die "apt"
+          for t in rip_sampler.cpp:$RIP_SAMPLER_SHA256 symbolize.pl:$SYMBOLIZE_SHA256; do
+            f=${t%%:*}; want=${t#*:}; got=$(sha256sum < "/tools/$f" | cut -c1-64)
+            [ "$got" = "$want" ] || die "/tools/$f sha256 $got != $want (stale ConfigMap?)"
+            echo "tool $f sha256=$got" >> "$OUT/inputs.tools"
+          done
           g++ -std=c++23 -O2 -o /tmp/rip_sampler /tools/rip_sampler.cpp || die "build rip_sampler"
           git clone -q https://github.com/Sounio-lang/sounio /tmp/sounio || die "clone"
           cd /tmp/sounio && git checkout -q "$SOUNIO_REF" || die "checkout $SOUNIO_REF"
-          echo "source=$(git rev-parse HEAD)" | tee "$OUT/inputs"
+          echo "source=$(git rev-parse HEAD)" | tee "$OUT/inputs"; cat "$OUT/inputs.tools" | tee -a "$OUT/inputs"
           export SOUNIO_STDLIB_PATH=/tmp/sounio/stdlib
           got=$(sha256sum < "$SEED_PATH" | cut -c1-64); [ "$got" = "$SEED_SHA256" ] || die "seed sha256 $got != $SEED_SHA256"
           echo "seed=$SEED_PATH sha256=$got" | tee -a "$OUT/inputs"
@@ -74,17 +83,28 @@ spec:
           chmod +x /tmp/m2   # the seed does not set +x
           echo "m2 sha256=$(sha256sum < /tmp/m2 | cut -c1-64) size=$(stat -c %s /tmp/m2)" | tee -a "$OUT/inputs"
           readelf -h /tmp/m2 2>/dev/null | grep Entry; readelf -l /tmp/m2 2>/dev/null | grep -A1 LOAD | head -6
+          # Timestamp the compiler's own progress lines (seconds since launch) so the
+          # phase windows below come from THIS run, not from bounds measured elsewhere.
           t0=$(date +%s)
-          ( ulimit -s 524288 2>/dev/null || true; /tmp/rip_sampler --out "$OUT/samples.txt" --interval-ms 50 --depth 24 -- /tmp/m2 build self-hosted/compiler/main.sio /tmp/gen2 ) > "$OUT/gen2.log" 2>&1
-          rc=$?; echo "gen2 rc=$rc $(( $(date +%s)-t0 ))s samples=$(wc -l < "$OUT/samples.txt")"
-          tail -3 "$OUT/gen2.log"
+          ( ulimit -s 524288 2>/dev/null || true; /tmp/rip_sampler --out "$OUT/samples.txt" --interval-ms 50 --depth 24 -- /tmp/m2 build self-hosted/compiler/main.sio /tmp/gen2 ) 2>&1 \
+            | perl -MTime::HiRes=time -ne 'BEGIN{$|=1;$s=time} printf "%.1f %s", time-$s, $_' > "$OUT/gen2.ts.log"
+          rc=${PIPESTATUS[0]}; echo "gen2 rc=$rc $(( $(date +%s)-t0 ))s samples=$(wc -l < "$OUT/samples.txt")"
+          tail -3 "$OUT/gen2.ts.log"
           [ "$rc" -eq 0 ] || die "profiled compile rc=$rc (profile would be partial)"
           perl /tools/symbolize.pl "$OUT/fnmap.txt" "$OUT/samples.txt" 401000 > "$OUT/profile.txt" || die "symbolize"
           cat "$OUT/profile.txt"
-          # phase windows by wall time (seconds): check, typecheck, seed-lower, dep-lower, merge, native
-          for w in "0 139" "139 275" "275 416" "416 1500" "1500 2610" "2610 3128" "3128 99999"; do
-            set -- $w
-            awk -v a=$1 -v b=$2 '$1>=a*1000 && $1<b*1000' "$OUT/samples.txt" > /tmp/win.txt
-            [ -s /tmp/win.txt ] || continue
-            echo "== window ${1}s-${2}s =="; perl /tools/symbolize.pl "$OUT/fnmap.txt" /tmp/win.txt 401000 | awk '/== SELF/{s=1;next} /== INCL/{s=0; i=1; next} s&&n<8{print "S " $0; n++} i&&m<14{print "I " $0; m++}'
-          done | tee "$OUT/windows.txt"
+          # Phase boundaries from this run's markers; a missing marker skips the windows, never guesses.
+          mark() { awk -v p="$1" 'index($0,p){print $1; exit}' "$OUT/gen2.ts.log"; }
+          b1=$(mark "run_check_mode: verdict"); b2=$(mark "imported_compile: typecheck_done")
+          b3=$(mark "lower_array: seed_done");  b4=$(mark "imported_compile: lower_done"); b5=$(mark "Merged IR:")
+          echo "phase bounds (s): check<$b1 typecheck<$b2 seed_lower<$b3 dep_lower<$b4 merge<$b5 native" | tee -a "$OUT/inputs"
+          if [ -n "$b1" ] && [ -n "$b2" ] && [ -n "$b3" ] && [ -n "$b4" ] && [ -n "$b5" ]; then
+            for w in "check 0 $b1" "typecheck $b1 $b2" "seed_lower $b2 $b3" "dep_lower $b3 $b4" "merge $b4 $b5" "native $b5 999999"; do
+              set -- $w
+              awk -v a="$2" -v b="$3" '$1>=a*1000 && $1<b*1000' "$OUT/samples.txt" > /tmp/win.txt
+              [ -s /tmp/win.txt ] || continue
+              echo "== $1 (${2}s-${3}s) =="; perl /tools/symbolize.pl "$OUT/fnmap.txt" /tmp/win.txt 401000 | awk '/== SELF/{s=1;next} /== INCL/{s=0; i=1; next} s&&n<8{print "S " $0; n++} i&&m<14{print "I " $0; m++}'
+            done | tee "$OUT/windows.txt"
+          else
+            echo "phase markers missing; per-phase windows not computed" | tee "$OUT/windows.txt"
+          fi

@@ -94,6 +94,12 @@ int main(int argc, char** argv) {
                 }
                 std::fputc('\n', f);
                 ++samples;
+            } else {
+                // A dropped sample would bias the profile toward whatever is easy
+                // to stop; refuse the run instead of publishing a partial one.
+                perror("[rip_sampler] PTRACE_GETREGS");
+                profiler_error = true;
+                goto done;
             }
         }
         ptrace(PTRACE_CONT, child, nullptr, nullptr);

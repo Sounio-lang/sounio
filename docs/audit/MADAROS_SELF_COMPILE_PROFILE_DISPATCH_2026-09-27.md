@@ -89,6 +89,8 @@ From per-line timestamps on the compiler's own progress output:
 
 **Per-phase windows (top self):**
 
+These windows were cut with the phase bounds from the separate timing run (`f141ad5d`, 3242 s). The sampled run (`897c3448`) took 3149 s, 2.9% shorter, so each boundary may be off by up to about 90 s. The windows are therefore approximate at their edges. Edge error does not change the attribution. In every window except native emit, the leading function outleads the second by at least 2.7× (merge: 57.1% vs 21.0%). In native emit the top two, `ir_float_bit_mask` at 45% and `ir_float_bits_get` at 37%, are the same float-bits path. The current Job derives the bounds from each run's own progress markers (§5).
+
 | Window | Dominant self |
 |---|---|
 | check + typecheck (0–275 s) | `fn_sig_table_find_prefer_module` **65–69%** |
@@ -195,9 +197,11 @@ The tooling is checked in under `scripts/dev/profiling/`.
 - Both steps exited 0: seed build rc=0 in 265 s; profiled compile rc=0 in 3149 s, 62 799 samples. So the as-run manifest's missing fail-closed checks did not affect this profile.
 
 **Current versions.** They differ only in failure handling and labelling:
-- `rip_sampler` reaps a child that exits between samples and reports its real status; profiler errors exit 125.
+- `rip_sampler` reaps a child that exits between samples and reports its real status.
+- A failed `PTRACE_GETREGS` aborts the run instead of dropping the sample. Profiler errors exit 125.
 - `symbolize.pl` labels inclusive depth from the data instead of a hard-coded 16.
-- The Job pins `SOUNIO_REF`, `SEED_PATH` and `SEED_SHA256`, records all three, and fails on any non-zero step.
+- The Job pins `SOUNIO_REF`, `SEED_PATH` and `SEED_SHA256`. It also verifies the mounted tools against `RIP_SAMPLER_SHA256` / `SYMBOLIZE_SHA256`, because the ConfigMap is mutable. It records all of these and fails on any non-zero step.
+- The Job cuts per-phase windows at this run's own timestamped progress markers. If any marker is missing it computes no windows rather than guessing.
 
 The core steps are:
 
