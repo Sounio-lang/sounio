@@ -31,9 +31,17 @@ F(t) = min(1, k·t^n), with k = 0.199 and n = 0.65 for venlafaxine XR (Gohel 200
 | `mer_exp(x)` | (1 + x/1024)^1024 | Relative error ≈ −x²/2048 for either sign of x: −1.27e−3 at x = 0.65·ln 12. |
 | `sqrt_f64` (n = 0.5 branch, from `tsit5_pbpk14`) | 10 Newton steps from y₀ = x | +30% at x = 1e−6; 9.8e−4 at x = 1e−15 (true value 3.2e−8). No in-tree caller uses n = 0.5. |
 
-The same three helpers are copied verbatim into `tests/run-pass/dissertation_pbpk28_parity_ref_venlafaxine.sio`
-(`mer_ln_unit`/`mer_exp`/`mer_pow`) and `website/src/lib/pbpk28_core.mjs`
-(`merLnUnit`/`merExp`/`merPow`; the n = 0.5 branch uses `Math.sqrt`).
+Before this fix (as of `f141ad5d9`), the copies relate as follows:
+
+- **ln and exp:** copied verbatim into `tests/run-pass/dissertation_pbpk28_parity_ref_venlafaxine.sio`
+  (`mer_ln_unit`/`mer_exp`) and `website/src/lib/pbpk28_core.mjs` (`merLnUnit`/`merExp`).
+- **Power wrapper, parity ref:** `mer_pow` has only the general ln/exp path. It lacks the n ≈ 1 and n ≈ 0.5
+  branches.
+- **Power wrapper, Node:** `merPow` has both fast paths, and its n ≈ 0.5 branch calls `Math.sqrt` where `matrix_er`
+  uses `sqrt_f64`.
+
+Every in-tree model uses n = 0.65, so all three wrappers reach the shared ln/exp path and the defect reproduces
+identically in each.
 
 ### Accuracy over the t range the scenarios use
 
