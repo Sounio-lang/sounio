@@ -1,0 +1,295 @@
+//@ run-pass
+//@ timeout: 120
+// tests/stdlib/chemistry/test_pbpk_clearance_ode.sio
+//
+// chemistry::kinetics::pbpk_full_metabolic declares the model
+//
+//     Drug -> M1 (k1),   M1 -> M2 (k2),   M1 -> cleared (k3)        (all first order)
+//
+// It used to run epistemic::ode system 5, whose k3 is the BIMOLECULAR step Drug + M1 -> D:
+// a different network (M1 = 0.484 and "D" = 0.038 at t = 23.76 instead of 0.464 and a
+// cleared amount of 0.077). System 6 is the declared model, and being linear it has an
+// exact solution, evaluated here in Sounio. With a = k2 + k3:
+//
+//   Drug(t) = D0 e^{-k1 t}
+//   M1(t)   = D0 k1 (e^{-k1 t} - e^{-a t}) / (a - k1)
+//   int_0^t M1 = D0 k1 [ (1 - e^{-k1 t})/k1 - (1 - e^{-a t})/a ] / (a - k1)
+//   M2      = k2 int M1,     Cleared = k3 int M1,      Drug + M1 + M2 + Cleared = D0
+//
+// Uncertainty: the state is linear in D0, so with exact rates Var(y_j) = (y_j / D0)^2 Var(D0);
+// and dM1/dk3, dDrug/dk1 are closed forms, so single-parameter GUM variances are exact too.
+// RK4 at k dt = 0.0165 is exact to ~1e-12 here; the central-difference Jacobian sets the
+// variance tolerance (1e-6).
+
+use chemistry::kinetics::*
+
+fn absf(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+fn expn(x: f64) -> f64 with Mut, Div, Panic {
+    // exp(-x), x >= 0, halving and squaring
+    var y = x
+    var k = 0
+    while y > 0.5 {
+        y = y / 2.0
+        k = k + 1
+    }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i < 30 {
+        term = 0.0 - term * y / (i as f64)
+        sum = sum + term
+        i = i + 1
+    }
+    while k > 0 {
+        sum = sum * sum
+        k = k - 1
+    }
+    sum
+}
+
+fn rel(a: f64, b: f64) -> f64 with Div { absf(a - b) / absf(b) }
+
+// exact [Drug, M1, M2, Cleared] of the linear chain at time t (D0 = 1, k = [0.05, 0.02, 0.01])
+fn exact_state(t: f64) -> [f64; 4] with Mut, Div, Panic {
+    let k1 = 0.05
+    let k2 = 0.02
+    let k3 = 0.01
+    let a = k2 + k3
+    let e1 = expn(k1 * t)
+    let ea = expn(a * t)
+    let integ = k1 * ((1.0 - e1) / k1 - (1.0 - ea) / a) / (a - k1)
+    let out: [f64; 4] = [e1, k1 * (e1 - ea) / (a - k1), k2 * integ, k3 * integ]
+    out
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fail: i32 = 0
+    let d0 = 1.0
+    let k1 = 0.05
+    let k2 = 0.02
+    let k3 = 0.01
+    let dt = 0.33
+    let nsteps = 72
+    let t = dt * (nsteps as f64)
+    let a = k2 + k3
+
+    let e1 = expn(k1 * t)
+    let ea = expn(a * t)
+    let drug = d0 * e1
+    let m1 = d0 * k1 * (e1 - ea) / (a - k1)
+    let integ = d0 * k1 * ((1.0 - e1) / k1 - (1.0 - ea) / a) / (a - k1)
+    let m2 = k2 * integ
+    let cl = k3 * integ
+
+    let ks: [f64; 3] = [k1, k2, k3]
+    let exact_k: [f64; 3] = [0.0, 0.0, 0.0]
+    let no_var: [f64; 4] = [0.0, 0.0, 0.0, 0.0]
+    let init: [f64; 4] = [d0, 0.0, 0.0, 0.0]
+
+    // ---- 1. values, no uncertainty ---------------------------------------------------
+    let (v0, _u0) = simulate_pbpk_clearance_full(&init, &no_var, &ks, &exact_k, dt, nsteps)
+    print("Drug ") print(v0[0]) print(" ") print(drug) println("")
+    print("M1   ") print(v0[1]) print(" ") print(m1) println("")
+    print("M2   ") print(v0[2]) print(" ") print(m2) println("")
+    print("CL   ") print(v0[3]) print(" ") print(cl) println("")
+    if !(rel(v0[0], drug) <= 1.0e-8) { fail = fail + 1; println("FAIL Drug vs exact") }
+    if !(rel(v0[1], m1) <= 1.0e-8) { fail = fail + 1; println("FAIL M1 vs exact") }
+    if !(rel(v0[2], m2) <= 1.0e-8) { fail = fail + 1; println("FAIL M2 vs exact") }
+    if !(rel(v0[3], cl) <= 1.0e-8) { fail = fail + 1; println("FAIL Cleared vs exact") }
+    // conservation
+    if !(absf(v0[0] + v0[1] + v0[2] + v0[3] - d0) <= 1.0e-12) { fail = fail + 1; println("FAIL mass balance") }
+    // the cleared amount is the discriminator against system 5's bimolecular D (0.0384)
+    if absf(v0[3] - 0.0384) < 0.03 { fail = fail + 1; println("FAIL Cleared looks like the bimolecular product") }
+
+    // ---- 2. initial-condition uncertainty only: sigma_j = (y_j / D0) * sigma_D0 ------------
+    let var0 = 0.04
+    let iv: [f64; 4] = [var0, 0.0, 0.0, 0.0]
+    let (_v1, u1) = simulate_pbpk_clearance_full(&init, &iv, &ks, &exact_k, dt, nsteps)
+    let s0 = 0.2
+    if !(rel(u1[0], drug * s0 / d0) <= 1.0e-6) { fail = fail + 1; println("FAIL sigma Drug (initial condition)") }
+    if !(rel(u1[1], m1 * s0 / d0) <= 1.0e-6) { fail = fail + 1; println("FAIL sigma M1 (initial condition)") }
+    if !(rel(u1[2], m2 * s0 / d0) <= 1.0e-6) { fail = fail + 1; println("FAIL sigma M2 (initial condition)") }
+    if !(rel(u1[3], cl * s0 / d0) <= 1.0e-6) { fail = fail + 1; println("FAIL sigma Cleared (initial condition)") }
+
+    // ---- 3. clearance-rate uncertainty only: dM1/dk3 from the closed form -------------------
+    // d/da [ D0 k1 (e^{-k1 t} - e^{-a t}) / (a - k1) ]
+    //   = D0 k1 [ t e^{-a t} (a - k1) - (e^{-k1 t} - e^{-a t}) ] / (a - k1)^2, and a = k2 + k3
+    let uk3 = 0.0015
+    let only_k3: [f64; 3] = [0.0, 0.0, uk3]
+    let (_v2, u2) = simulate_pbpk_clearance_full(&init, &no_var, &ks, &only_k3, dt, nsteps)
+    let dm1_dk3 = d0 * k1 * (t * ea * (a - k1) - (e1 - ea)) / ((a - k1) * (a - k1))
+    let sig_m1 = absf(dm1_dk3) * uk3
+    print("sigma M1 (k3 only) ") print(u2[1]) print(" exact ") print(sig_m1) println("")
+    if !(rel(u2[1], sig_m1) <= 1.0e-6) { fail = fail + 1; println("FAIL sigma M1 from k3") }
+    // Drug does not depend on k3 at all
+    if !(u2[0] <= 1.0e-12) { fail = fail + 1; println("FAIL Drug picked up variance from k3") }
+
+    // ---- 4. metabolism-rate uncertainty only: dDrug/dk1 = -D0 t e^{-k1 t} ------------------
+    let uk1 = 0.004
+    let only_k1: [f64; 3] = [uk1, 0.0, 0.0]
+    let (_v3, u3) = simulate_pbpk_clearance_full(&init, &no_var, &ks, &only_k1, dt, nsteps)
+    let sig_drug = d0 * t * e1 * uk1
+    print("sigma Drug (k1 only) ") print(u3[0]) print(" exact ") print(sig_drug) println("")
+    if !(rel(u3[0], sig_drug) <= 1.0e-6) { fail = fail + 1; println("FAIL sigma Drug from k1") }
+
+    // ---- 5. the public entry point reaches the REQUESTED time --------------------------------
+    // t = 24 is 73 steps of 24/73, not 72 steps of 0.33 (which stop at 23.76: M1 would be
+    // 0.463598 instead of 0.463895, a 6e-4 relative difference the 1e-8 bound below rejects)
+    let x24 = exact_state(24.0)
+    let (pv, pu) = pbpk_full_metabolic(1.0, 0.05, 24.0)
+    print("t=24: M1 ") print(pv[1]) print(" exact ") print(x24[1]) println("")
+    if !(rel(pv[0], x24[0]) <= 1.0e-8) { fail = fail + 1; println("FAIL pbpk_full_metabolic Drug at t=24") }
+    if !(rel(pv[1], x24[1]) <= 1.0e-8) { fail = fail + 1; println("FAIL pbpk_full_metabolic M1 at t=24") }
+    if !(rel(pv[2], x24[2]) <= 1.0e-8) { fail = fail + 1; println("FAIL pbpk_full_metabolic M2 at t=24") }
+    if !(rel(pv[3], x24[3]) <= 1.0e-8) { fail = fail + 1; println("FAIL pbpk_full_metabolic Cleared at t=24") }
+    if !(pu[1] > 0.0) || !(pu[3] > 0.0) { fail = fail + 1; println("FAIL pbpk_full_metabolic uncertainty") }
+
+    // shorter horizons: t < 1/3 must still take a step (it used to take none), and t that is
+    // not a multiple of 0.33 must land on t, not on the previous multiple
+    var ti = 0
+    while ti < 2 {
+        let tq = if ti == 0 { 0.2 } else { 1.0 }
+        let xq = exact_state(tq)
+        let (pq, _uq) = pbpk_full_metabolic(1.0, 0.05, tq)
+        var qi = 0
+        while qi < 4 {
+            if !(absf(pq[qi] - xq[qi]) <= 1.0e-9) { fail = fail + 1; println("FAIL pbpk_full_metabolic at a short horizon") }
+            qi = qi + 1
+        }
+        ti = ti + 1
+    }
+    // t = 0 is the initial state, with its own standard uncertainty
+    let (p0, u0z) = pbpk_full_metabolic(1.0, 0.05, 0.0)
+    if p0[0] != 1.0 || p0[1] != 0.0 || p0[3] != 0.0 || !(absf(u0z[0] - 0.05) <= 1.0e-15) { fail = fail + 1; println("FAIL pbpk_full_metabolic at t = 0") }
+
+    // ---- 6. units: u_d is a STANDARD uncertainty. The state is linear in D0 and D0 is
+    // independent of the rates, so variances add: Var(M1; u_d) - Var(M1; 0) = (M1/D0)^2 u_d^2.
+    // (Passing u_d through unsquared made the difference (M1/D0)^2 u_d, off by 1/u_d = 20x here.)
+    let u_d = 0.05
+    let (_pa, ua) = pbpk_full_metabolic(1.0, u_d, 24.0)
+    let (_pb, ub) = pbpk_full_metabolic(1.0, 0.0, 24.0)
+    let dvar_m1 = ua[1] * ua[1] - ub[1] * ub[1]
+    let want_m1 = x24[1] * x24[1] * u_d * u_d
+    let dvar_cl = ua[3] * ua[3] - ub[3] * ub[3]
+    let want_cl = x24[3] * x24[3] * u_d * u_d
+    print("initial-uncertainty variance contribution M1: ") print(dvar_m1) print(" expected ") print(want_m1) println("")
+    if !(rel(dvar_m1, want_m1) <= 1.0e-4) { fail = fail + 1; println("FAIL initial uncertainty is not treated as a standard uncertainty (M1)") }
+    if !(rel(dvar_cl, want_cl) <= 1.0e-4) { fail = fail + 1; println("FAIL initial uncertainty is not treated as a standard uncertainty (Cleared)") }
+
+    // ---- 7. the checked entry points report an incomplete solve instead of hiding it ----------
+    // (The panicking wrappers cannot be asserted in-process: the harness runs run-pass programs
+    // to exit 0, and a panic is an exit 1. What they add over *_checked is one `if status != 0`.)
+    let big = 1.0e308
+    let inf_rate: [f64; 3] = [big * 10.0, 0.02, 0.01]
+    let (st_ok, v_ok, _u_ok) = simulate_pbpk_clearance_checked(&init, &no_var, &ks, &exact_k, dt, nsteps)
+    if st_ok != 0 { fail = fail + 1; println("FAIL checked: a valid solve must report status 0") }
+    if !(rel(v_ok[1], m1) <= 1.0e-8) { fail = fail + 1; println("FAIL checked: valid solve value") }
+    // an infinite rate makes the first step non-finite: status 3, and the "result" is just the
+    // initial state -- which is exactly why a caller must look at the status
+    let (st_inf, v_inf, _u_inf) = simulate_pbpk_clearance_checked(&init, &no_var, &inf_rate, &exact_k, dt, nsteps)
+    print("infinite rate: status=") print(st_inf) print(" Drug=") print(v_inf[0]) println("")
+    if st_inf != 3 { fail = fail + 1; println("FAIL checked: an infinite rate must report status 3") }
+    if v_inf[0] != 1.0 { fail = fail + 1; println("FAIL checked: expected the initial state back for a failed solve") }
+    // a zero step size used to be reported as a finished solve (status 0, initial state)
+    let (st_dt0, v_dt0, _u_dt0) = simulate_pbpk_clearance_checked(&init, &no_var, &ks, &exact_k, 0.0, nsteps)
+    if st_dt0 != 3 { fail = fail + 1; println("FAIL checked: dt = 0 must report status 3") }
+    if v_dt0[0] != 1.0 { fail = fail + 1; println("FAIL checked: dt = 0 must return the initial state") }
+    // same for the chemistry-network simulator
+    let chem_k: [f64; 3] = [0.1, 0.05, 0.2]
+    let (sc_ok, _vc, _uc) = simulate_chem_network_checked(&init, &no_var, &chem_k, &exact_k, 0.1, 20)
+    if sc_ok != 0 { fail = fail + 1; println("FAIL chem checked: a valid solve must report status 0") }
+    let chem_inf: [f64; 3] = [big * 10.0, 0.05, 0.2]
+    let (sc_inf, _vci, _uci) = simulate_chem_network_checked(&init, &no_var, &chem_inf, &exact_k, 0.1, 20)
+    if sc_inf != 3 { fail = fail + 1; println("FAIL chem checked: an infinite rate must report status 3") }
+
+    // ---- 8. a failed covariance is not "zero uncertainty" ---------------------------------------
+    // A negative input variance finishes the STATE solve (ODESolution.status 0) with covariance_mode 2
+    // and a negative variance. sqrt_approx would clamp that to 0 and hand the caller (0, .., 0.0): the
+    // false certainty. It is status 4 with a NaN uncertainty.
+    let neg_var: [f64; 4] = [0.0 - 0.01, 0.0, 0.0, 0.0]
+    let (st_neg, v_neg, u_neg) = simulate_pbpk_clearance_checked(&init, &neg_var, &ks, &exact_k, dt, nsteps)
+    print("negative input variance: status=") print(st_neg) print(" sigma Drug=") print(u_neg[0]) println("")
+    if st_neg != 4 { fail = fail + 1; println("FAIL: a failed covariance must report status 4") }
+    if !(u_neg[0] != u_neg[0]) { fail = fail + 1; println("FAIL: an invalid variance must give a NaN uncertainty, not 0") }
+    if !(rel(v_neg[1], m1) <= 1.0e-8) { fail = fail + 1; println("FAIL: the state must be unaffected by a failed covariance") }
+    let (st_cneg, _vcn, u_cneg) = simulate_chem_network_checked(&init, &neg_var, &chem_k, &exact_k, 0.1, 20)
+    if st_cneg != 4 { fail = fail + 1; println("FAIL chem: a failed covariance must report status 4") }
+    if !(u_cneg[0] != u_cneg[0]) { fail = fail + 1; println("FAIL chem: an invalid variance must give a NaN uncertainty, not 0") }
+    // NaN input variance: same
+    let nan_v = 1.0e308 * 10.0 - 1.0e308 * 10.0
+    let nan_var: [f64; 4] = [nan_v, 0.0, 0.0, 0.0]
+    let (st_nan, _vn, _un) = simulate_pbpk_clearance_checked(&init, &nan_var, &ks, &exact_k, dt, nsteps)
+    if st_nan != 4 { fail = fail + 1; println("FAIL: a NaN input variance must report status 4") }
+    // and a healthy solve still reports 0 (checked above), so 4 is not a default
+    if st_ok != 0 { fail = fail + 1; println("FAIL: healthy solve must stay status 0") }
+
+    // ---- 9. pbpk_full_metabolic_checked validates its inputs, including at t = 0 ---------------
+    // The t = 0 shortcut used to return the inputs as-is: a NaN init_d as a "successful" state, and a
+    // negative u_d as a negative standard uncertainty -- while for t > 0 the same u_d was squared
+    // into a plausible positive variance. Both are invalid for every t.
+    let nan_d = 1.0e308 * 10.0 - 1.0e308 * 10.0
+    let (s_ok0, v_ok0, u_ok0) = pbpk_full_metabolic_checked(1.0, 0.05, 0.0)
+    if s_ok0 != 0 || v_ok0[0] != 1.0 || !(absf(u_ok0[0] - 0.05) <= 1.0e-15) { fail = fail + 1; println("FAIL: a valid t = 0 call must return the initial state, status 0") }
+    let (s_n0, _vn0, _un0) = pbpk_full_metabolic_checked(nan_d, 0.05, 0.0)
+    let (s_neg0, _vg0, _ug0) = pbpk_full_metabolic_checked(1.0, 0.0 - 0.05, 0.0)
+    let (s_nu0, _vu0, _uu0) = pbpk_full_metabolic_checked(1.0, nan_d, 0.0)
+    if s_n0 != 3 { fail = fail + 1; println("FAIL: a NaN init_d at t = 0 must be status 3") }
+    if s_neg0 != 3 { fail = fail + 1; println("FAIL: a negative u_d at t = 0 must be status 3") }
+    if s_nu0 != 3 { fail = fail + 1; println("FAIL: a NaN u_d at t = 0 must be status 3") }
+    // and for t > 0: a negative u_d must not be squared into a valid-looking variance
+    let (s_neg24, _vg24, _ug24) = pbpk_full_metabolic_checked(1.0, 0.0 - 0.05, 24.0)
+    let (s_n24, _vn24, _un24) = pbpk_full_metabolic_checked(nan_d, 0.05, 24.0)
+    if s_neg24 != 3 { fail = fail + 1; println("FAIL: a negative u_d at t = 24 must be status 3") }
+    if s_n24 != 3 { fail = fail + 1; println("FAIL: a NaN init_d at t = 24 must be status 3") }
+    // t itself
+    let (s_tn, _vtn, _utn) = pbpk_full_metabolic_checked(1.0, 0.05, 0.0 - 1.0)
+    let (s_tnan, _vtnan, _utnan) = pbpk_full_metabolic_checked(1.0, 0.05, nan_d)
+    let (s_thuge, _vth, _uth) = pbpk_full_metabolic_checked(1.0, 0.05, 1.0e7)
+    if s_tn != 3 || s_tnan != 3 || s_thuge != 3 { fail = fail + 1; println("FAIL: a negative, NaN or absurd t must be status 3") }
+    // System 6 is full-covariance (7 augmented components, finite-differenced every step): t
+    // alone used to accept up to 1e6, deriving ceil(1e6 / 0.33) = 3,030,304 steps -- an
+    // impractical synchronous solve. The derived step count is now bounded directly (20,000, the
+    // //@ timeout on this file bounds the case above it too), at exactly the same dt = 0.33 this
+    // function already integrates in fixed steps of. t = 6600 is exactly 20,000 steps, accepted;
+    // one step more (6600.33, 20,001 steps) is rejected.
+    let (s_budget_ok, _vbo, _ubo) = pbpk_full_metabolic_checked(1.0, 0.05, 6600.0)
+    let (s_budget_over, _vbv, _ubv) = pbpk_full_metabolic_checked(1.0, 0.05, 6600.33)
+    if s_budget_ok != 0 { fail = fail + 1; println("FAIL: exactly 20,000 derived steps must still be accepted") }
+    if s_budget_over != 3 { fail = fail + 1; println("FAIL: a t whose derived step count exceeds the budget must be status 3, not an unbounded solve") }
+    // a valid call is unchanged
+    let (s_v, v_v, _u_v) = pbpk_full_metabolic_checked(1.0, 0.05, 24.0)
+    if s_v != 0 || !(rel(v_v[1], x24[1]) <= 1.0e-8) { fail = fail + 1; println("FAIL: a valid call must stay status 0 with the exact solution") }
+    // zero uncertainty is valid (a deterministic run)
+    let (s_z, _vz, _uz) = pbpk_full_metabolic_checked(1.0, 0.0, 24.0)
+    if s_z != 0 { fail = fail + 1; println("FAIL: u_d = 0 is a valid (deterministic) input") }
+
+    // ---- 10. standard uncertainties are validated BEFORE they are squared ---------------------
+    // `uks` (and u_d) are standard uncertainties. Squared blindly, -0.0015 becomes the plausible
+    // variance 2.25e-6 and the "checked" call reports status 0 with a normal-looking result.
+    let neg_uk: [f64; 3] = [0.0, 0.0, 0.0 - 0.0015]
+    let (s_nuk, _vnuk, u_nuk) = simulate_pbpk_clearance_checked(&init, &no_var, &ks, &neg_uk, dt, nsteps)
+    print("negative uks: status=") print(s_nuk) print(" sigma=") print(u_nuk[1]) println("")
+    if s_nuk != 3 { fail = fail + 1; println("FAIL: a negative parameter uncertainty must be status 3 (pbpk)") }
+    if !(u_nuk[1] != u_nuk[1]) { fail = fail + 1; println("FAIL: an invalid call must not carry a usable uncertainty") }
+    let (s_cnuk, _vcnuk, _ucnuk) = simulate_chem_network_checked(&init, &no_var, &chem_k, &neg_uk, 0.1, 20)
+    if s_cnuk != 3 { fail = fail + 1; println("FAIL: a negative parameter uncertainty must be status 3 (chem)") }
+    let nan_uk: [f64; 3] = [nan_d, 0.0, 0.0]
+    let (s_nauk, _vn1, _un1) = simulate_pbpk_clearance_checked(&init, &no_var, &ks, &nan_uk, dt, nsteps)
+    let (s_cnauk, _vn2, _un2) = simulate_chem_network_checked(&init, &no_var, &chem_k, &nan_uk, 0.1, 20)
+    if s_nauk != 3 || s_cnauk != 3 { fail = fail + 1; println("FAIL: a NaN parameter uncertainty must be status 3") }
+    // zero is valid (a deterministic parameter), and so are the values used everywhere else
+    let (s_zuk, _vz1, _uz1) = simulate_pbpk_clearance_checked(&init, &no_var, &ks, &exact_k, dt, nsteps)
+    if s_zuk != 0 { fail = fail + 1; println("FAIL: zero parameter uncertainty is valid") }
+
+    // a negative initial drug AMOUNT is invalid for every t, including t = 0 (it is integrated and
+    // returned with status 0 otherwise); zero is a valid, if empty, dose
+    let (s_dn0, _vd0, _ud0) = pbpk_full_metabolic_checked(0.0 - 1.0, 0.05, 0.0)
+    let (s_dn24, _vd24, _ud24) = pbpk_full_metabolic_checked(0.0 - 1.0, 0.05, 24.0)
+    if s_dn0 != 3 || s_dn24 != 3 { fail = fail + 1; println("FAIL: a negative init_d must be status 3") }
+    let (s_dz, v_dz, _u_dz) = pbpk_full_metabolic_checked(0.0, 0.0, 24.0)
+    if s_dz != 0 || !(absf(v_dz[1]) <= 1.0e-300) { fail = fail + 1; println("FAIL: init_d = 0 is a valid empty dose (status 0, all zero)") }
+
+    if fail == 0 { println("PBPK CLEARANCE ODE PASS") }
+    fail
+}

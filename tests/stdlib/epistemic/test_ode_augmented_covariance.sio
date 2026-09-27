@@ -1,0 +1,236 @@
+//@ run-pass
+//@ timeout: 120
+// tests/stdlib/epistemic/test_ode_augmented_covariance.sio
+//
+// solve_ode's variances must be the first-order GUM variance of the actual
+// solution, including state-parameter correlation. Closed form, evaluated in
+// Sounio (sounio_native_expected):
+//
+//   dy/dt = -k y,  y(0) = y0 +- u0,  k +- uk, independent inputs
+//   y(t)   = y0 exp(-k t)
+//   Var(t) = exp(-2kt) u0^2 + (y0 t exp(-kt))^2 uk^2
+//
+// RK4 at k dt = 0.01 matches exp(-k t) to ~1e-11 relative, so the only
+// tolerance needed is the central-difference Jacobian's (h = 1e-7 relative).
+// The diagonal I + dt*J scheme this replaces rebuilds the state-parameter
+// correlation from zero at every step and misses the (y0 t)^2 growth.
+
+use epistemic::ode::*
+
+fn absf(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// NaN, built by overflow so no literal is needed
+fn nan_val() -> f64 { let big = 1.0e308; let inf = big * 10.0; inf - inf }
+
+fn expn(x: f64) -> f64 with Mut, Div, Panic {
+    // exp(-x), x >= 0, halving and squaring
+    var y = x
+    var k = 0
+    while y > 0.5 {
+        y = y / 2.0
+        k = k + 1
+    }
+    var sum = 1.0
+    var term = 1.0
+    var i = 1
+    while i < 30 {
+        term = 0.0 - term * y / (i as f64)
+        sum = sum + term
+        i = i + 1
+    }
+    while k > 0 {
+        sum = sum * sum
+        k = k - 1
+    }
+    sum
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fail: i32 = 0
+    let y0 = 1.0
+    let u0 = 0.1
+    let kk = 0.1
+    let uk = 0.01
+    let dt = 0.1
+    let nsteps = 20
+    let t_end = dt * (nsteps as f64)
+
+    var init = estate_new(1)
+    estate_set(&!init, 0, y0, u0 * u0)
+    var p = ode_params_new()
+    ode_params_set(&!p, 0, kk, uk * uk)
+    let sol = solve_ode(ode_system_exp_decay(), init, p, 0.0, t_end, solver_options_fixed(dt, nsteps))
+    let last = sol.n_steps - 1
+
+    let e1 = expn(kk * t_end)
+    let v_exact = e1 * e1 * u0 * u0 + (y0 * t_end * e1) * (y0 * t_end * e1) * uk * uk
+    let y_exact = y0 * e1
+    let y = solution_get_value(&sol, last, 0)
+    let v = solution_get_variance(&sol, last, 0)
+    // without the parameter term, for discrimination
+    let v_no_param = e1 * e1 * u0 * u0
+
+    print("y=") print(y) print(" exact=") print(y_exact) println("")
+    print("var=") print(v) print(" exact=") print(v_exact) print(" state-only=") print(v_no_param) println("")
+    print("covariance_mode=") print(sol.covariance_mode) println("")
+
+    if !(absf(y - y_exact) <= 0.000000001) { fail = fail + 1 println("FAIL value") }
+    if !(absf(v / v_exact - 1.0) <= 0.00001) { fail = fail + 1 println("FAIL variance vs closed form") }
+    // the parameter contribution here is 4% of the total, 4000x the tolerance
+    if absf(v / v_no_param - 1.0) < 0.01 { fail = fail + 1 println("FAIL test cannot see the parameter term") }
+    if sol.covariance_mode != 1 { fail = fail + 1 println("FAIL covariance mode") }
+
+    // ---- an invalid input variance must not be laundered by the round-off clamp -------------
+    // augcov_write_variances_checked's round-off allowance (1e-9 of the block's largest STATE
+    // diagonal) is one number for the whole call, shared by every dimension. Drug's variance
+    // starts invalid (negative); M1's starts healthy at scale 1.0, so the allowance is sized for
+    // M1, not for Drug. Over one tiny step Drug's diagonal barely moves off its input value, which
+    // sits far inside that allowance -- so without tracking "input was already invalid"
+    // separately, Drug's variance would be silently clamped to a usable-looking 0.0 even though
+    // covariance_mode already says 2. (system 6, pbpk_clearance: Drug -> M1 -> M2 + clearance)
+    var init_bad = estate_new(4)
+    estate_set(&!init_bad, 0, 1.0, 0.0 - 1.0e-12) // Drug: invalid input variance
+    estate_set(&!init_bad, 1, 1.0, 1.0)           // M1: healthy, sets the block's scale
+    estate_set(&!init_bad, 2, 0.0, 0.0)
+    estate_set(&!init_bad, 3, 0.0, 0.0)
+    var p_bad = ode_params_new()
+    ode_params_set(&!p_bad, 0, 0.1, 0.0001)
+    ode_params_set(&!p_bad, 1, 0.1, 0.0001)
+    ode_params_set(&!p_bad, 2, 0.1, 0.0001)
+    let tiny_dt = 1.0e-6
+    let sol_bad = solve_ode(ode_system_pbpk_clearance(), init_bad, p_bad, 0.0, tiny_dt, solver_options_fixed(tiny_dt, 1))
+    let v_drug = solution_get_variance(&sol_bad, sol_bad.n_steps - 1, 0)
+    print("invalid Drug variance, healthy M1 nearby: covariance_mode=") print(sol_bad.covariance_mode)
+    print(" reported Drug variance=") println(v_drug)
+    if sol_bad.covariance_mode != 2 { fail = fail + 1 println("FAIL: invalid input variance must set covariance_mode 2") }
+    // NaN-safe: !(v_drug < 0.0) also catches a NaN turning this vacuous
+    if !(v_drug < 0.0) { fail = fail + 1 println("FAIL: invalid input variance was laundered to a non-negative value by the round-off clamp") }
+
+    // ---- an unused parameter slot must not change the algorithm or the result ----------------
+    // p.n_params is the caller's highest SET index + 1, not how many parameters the system
+    // actually reads: exp_decay reads only p[0]. Setting an irrelevant p[63] (any value, even
+    // 0.0 with 0 variance) used to inflate n_dims + p.n_params past 64 and force the coarser
+    // diagonal-only fallback for this otherwise full-covariance-eligible system, silently
+    // changing the reported variance for physically identical inputs.
+    var init_c = estate_new(1)
+    estate_set(&!init_c, 0, y0, u0 * u0)
+    var p_clean = ode_params_new()
+    ode_params_set(&!p_clean, 0, kk, uk * uk)
+    let sol_clean = solve_ode(ode_system_exp_decay(), init_c, p_clean, 0.0, t_end, solver_options_fixed(dt, nsteps))
+
+    var init_g = estate_new(1)
+    estate_set(&!init_g, 0, y0, u0 * u0)
+    var p_garbage = ode_params_new()
+    ode_params_set(&!p_garbage, 0, kk, uk * uk)
+    ode_params_set(&!p_garbage, 63, 0.0, 0.0) // irrelevant to exp_decay's RHS
+    let sol_garbage = solve_ode(ode_system_exp_decay(), init_g, p_garbage, 0.0, t_end, solver_options_fixed(dt, nsteps))
+
+    let v_clean = solution_get_variance(&sol_clean, sol_clean.n_steps - 1, 0)
+    let v_garbage = solution_get_variance(&sol_garbage, sol_garbage.n_steps - 1, 0)
+    print("no garbage slot: covariance_mode=") print(sol_clean.covariance_mode) print(" var=") println(v_clean)
+    print("garbage p[63]:   covariance_mode=") print(sol_garbage.covariance_mode) print(" var=") println(v_garbage)
+    if sol_clean.covariance_mode != 1 { fail = fail + 1 println("FAIL: clean run must use full covariance") }
+    if sol_garbage.covariance_mode != 1 { fail = fail + 1 println("FAIL: an irrelevant parameter slot forced the diagonal fallback") }
+    if !(absf(v_clean - v_garbage) <= 1.0e-15) { fail = fail + 1 println("FAIL: an irrelevant parameter slot changed the reported variance") }
+
+    // The augmented covariance is sized off np (fixed above), but two VALIDATION loops still
+    // checked p[0..p.n_params) directly: ode_initial_covariance_ok (variances) and
+    // ode_solve_inputs_ok (values). A garbage variance/value in an unread slot could fail either
+    // check on data the solver never looks at, forcing covariance_mode 2 or status 3 on an
+    // otherwise valid solve.
+    var init_nv = estate_new(1)
+    estate_set(&!init_nv, 0, y0, u0 * u0)
+    var p_neg_var = ode_params_new()
+    ode_params_set(&!p_neg_var, 0, kk, uk * uk)
+    ode_params_set(&!p_neg_var, 63, 5.0, 0.0 - 1.0) // irrelevant slot, NEGATIVE variance
+    let sol_neg_var = solve_ode(ode_system_exp_decay(), init_nv, p_neg_var, 0.0, t_end, solver_options_fixed(dt, nsteps))
+    print("garbage p[63] with negative variance: status=") print(sol_neg_var.status)
+    print(" covariance_mode=") println(sol_neg_var.covariance_mode)
+    if sol_neg_var.status != 0 { fail = fail + 1 println("FAIL: an irrelevant slot's negative variance must not fail the solve") }
+    if sol_neg_var.covariance_mode != 1 { fail = fail + 1 println("FAIL: an irrelevant slot's negative variance must not force covariance_mode 2") }
+
+    var init_nan = estate_new(1)
+    estate_set(&!init_nan, 0, y0, u0 * u0)
+    var p_nan_val = ode_params_new()
+    ode_params_set(&!p_nan_val, 0, kk, uk * uk)
+    ode_params_set(&!p_nan_val, 63, nan_val(), 0.0) // irrelevant slot, NaN VALUE (not variance)
+    let sol_nan_val = solve_ode(ode_system_exp_decay(), init_nan, p_nan_val, 0.0, t_end, solver_options_fixed(dt, nsteps))
+    print("garbage p[63] with a NaN value:       status=") print(sol_nan_val.status)
+    print(" covariance_mode=") println(sol_nan_val.covariance_mode)
+    if sol_nan_val.status != 0 { fail = fail + 1 println("FAIL: an irrelevant slot's NaN value must not fail the solve (status 3)") }
+    if sol_nan_val.covariance_mode != 1 { fail = fail + 1 println("FAIL: an irrelevant slot's NaN value must not force covariance_mode 2") }
+
+    // ---- a LOW unused index (not just a high one) must also stay inert ------------------------
+    // The fixes above bound the covariance/validation range to [0, ode_system_n_params(id)), which
+    // closes the high-index hole -- but linear_2 (system 3) reserves index 0 for ka (oral
+    // absorption) and its RHS (rhs_linear_2) reads only p[1..4). A [0, n_params) range still
+    // includes index 0, so the exact same defect reappears there if a caller sets p[0] anyway
+    // (plausibly carrying an oral-dosing ka value/variance into an IV-only solve). Reachable
+    // through the public API via ode_system_new(3, 2), even though the convenience constructor
+    // ode_system_linear_2() is private.
+    let sys3 = ode_system_new(3, 2)
+    var init3 = estate_new(2)
+    estate_set(&!init3, 0, 1.0, 0.01)
+    estate_set(&!init3, 1, 0.0, 0.0)
+    var p3_clean = ode_params_new()
+    ode_params_set(&!p3_clean, 1, 0.1, 0.0001)
+    ode_params_set(&!p3_clean, 2, 0.05, 0.0001)
+    ode_params_set(&!p3_clean, 3, 0.02, 0.0001)
+    let sol3_clean = solve_ode(sys3, init3, p3_clean, 0.0, 1.0, solver_options_fixed(0.1, 10))
+    print("system 3, p[0] never set:        status=") print(sol3_clean.status) print(" mode=") println(sol3_clean.covariance_mode)
+    if sol3_clean.status != 0 || sol3_clean.covariance_mode != 1 { fail = fail + 1 println("FAIL: system 3's own clean solve must complete in full covariance") }
+
+    var init3n = estate_new(2)
+    estate_set(&!init3n, 0, 1.0, 0.01)
+    estate_set(&!init3n, 1, 0.0, 0.0)
+    var p3_nan = ode_params_new()
+    ode_params_set(&!p3_nan, 0, nan_val(), 0.0) // unread ka slot, NaN VALUE
+    ode_params_set(&!p3_nan, 1, 0.1, 0.0001)
+    ode_params_set(&!p3_nan, 2, 0.05, 0.0001)
+    ode_params_set(&!p3_nan, 3, 0.02, 0.0001)
+    let sol3_nan = solve_ode(sys3, init3n, p3_nan, 0.0, 1.0, solver_options_fixed(0.1, 10))
+    print("system 3, p[0]=NaN value:        status=") print(sol3_nan.status) print(" mode=") println(sol3_nan.covariance_mode)
+    if sol3_nan.status != 0 { fail = fail + 1 println("FAIL: an unread p[0] value must not fail system 3's solve (status 3)") }
+
+    var init3v = estate_new(2)
+    estate_set(&!init3v, 0, 1.0, 0.01)
+    estate_set(&!init3v, 1, 0.0, 0.0)
+    var p3_negvar = ode_params_new()
+    ode_params_set(&!p3_negvar, 0, 5.0, 0.0 - 1.0) // unread ka slot, NEGATIVE variance
+    ode_params_set(&!p3_negvar, 1, 0.1, 0.0001)
+    ode_params_set(&!p3_negvar, 2, 0.05, 0.0001)
+    ode_params_set(&!p3_negvar, 3, 0.02, 0.0001)
+    let sol3_negvar = solve_ode(sys3, init3v, p3_negvar, 0.0, 1.0, solver_options_fixed(0.1, 10))
+    print("system 3, p[0] negative variance: status=") print(sol3_negvar.status) print(" mode=") println(sol3_negvar.covariance_mode)
+    if sol3_negvar.covariance_mode != 1 { fail = fail + 1 println("FAIL: an unread p[0] variance must not force covariance_mode 2 on system 3") }
+
+    // A finite negative variance in p[0] (above) is harmless once multiplied by the RHS's exactly-
+    // zero sensitivity to it (0.0 * finite = 0.0). A NON-FINITE one is not: 0.0 * NaN and 0.0 * inf
+    // are both NaN, so augcov_init used to copy p.param_variances[0] into the augmented matrix
+    // regardless, and the J P J^T product's 0 * NaN terms poisoned the REPORTED state diagonals --
+    // not just p[0]'s own (unread) one. augcov_init now leaves an inactive slot's diagonal at its
+    // zero-initialized default instead of copying it, so this never reaches the matrix at all.
+    let sol3_clean_cmp = sol3_clean // reuse the p[0]-never-set baseline from above
+    var init3nv = estate_new(2)
+    estate_set(&!init3nv, 0, 1.0, 0.01)
+    estate_set(&!init3nv, 1, 0.0, 0.0)
+    var p3_nanvar = ode_params_new()
+    ode_params_set(&!p3_nanvar, 0, 5.0, nan_val()) // unread ka slot, NaN VARIANCE
+    ode_params_set(&!p3_nanvar, 1, 0.1, 0.0001)
+    ode_params_set(&!p3_nanvar, 2, 0.05, 0.0001)
+    ode_params_set(&!p3_nanvar, 3, 0.02, 0.0001)
+    let sol3_nanvar = solve_ode(sys3, init3nv, p3_nanvar, 0.0, 1.0, solver_options_fixed(0.1, 10))
+    let v3n_0 = solution_get_variance(&sol3_nanvar, sol3_nanvar.n_steps - 1, 0)
+    let v3n_1 = solution_get_variance(&sol3_nanvar, sol3_nanvar.n_steps - 1, 1)
+    let v3c_0 = solution_get_variance(&sol3_clean_cmp, sol3_clean_cmp.n_steps - 1, 0)
+    let v3c_1 = solution_get_variance(&sol3_clean_cmp, sol3_clean_cmp.n_steps - 1, 1)
+    print("system 3, p[0] NaN variance:      status=") print(sol3_nanvar.status) print(" mode=") print(sol3_nanvar.covariance_mode)
+    print(" v0=") print(v3n_0) print(" v1=") println(v3n_1)
+    if sol3_nanvar.covariance_mode != 1 { fail = fail + 1 println("FAIL: an unread p[0]'s NaN variance must not force covariance_mode 2 on system 3") }
+    // NaN-safe: v3n_0 != v3n_0 is true only for NaN, catching exactly the contamination this covers
+    if v3n_0 != v3n_0 || v3n_1 != v3n_1 { fail = fail + 1 println("FAIL: an unread p[0]'s NaN variance leaked NaN into the reported state covariance") }
+    if !(absf(v3n_0 - v3c_0) <= 1.0e-15) || !(absf(v3n_1 - v3c_1) <= 1.0e-15) { fail = fail + 1 println("FAIL: an unread p[0]'s NaN variance changed the reported result") }
+
+    if fail == 0 { println("ODE AUGMENTED COVARIANCE PASS") }
+    fail
+}

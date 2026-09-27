@@ -1,9 +1,11 @@
 # Sounio Parallel Agent Handoff
 
 Status: active
-Updated: 2026-05-10
+Updated: 2026-05-10 (branch pointer below refreshed 2026-09-22; the rest of
+this file, including the "Coordination facts" section, is otherwise as of
+the original date and should be re-verified before acting on it)
 Workspace: `/workspace/sounio`
-Safe branch: `integration/sounio-dev-ready-base`
+Safe branch: `main` (canonical since 2026-09-22; `integration/sounio-dev-ready-base` is deprecated, see `CLAUDE.md` §3)
 
 ## ACTIVE: 6-Agent Lane Assignment (2026-05-10)
 
@@ -44,9 +46,12 @@ Kimi, and Beagle-context agents working in the Sounio repository.
 5. Do not trust `.beagle/context/*` branch fields without Git verification;
    some Beagle context still says `main`.
 
-## Current coordination facts
+## Coordination facts from the 2026-05-10 sweep (historical -- superseded by the "Safe branch" line above)
 
-- Active branch verified during the sweep: `integration/sounio-dev-ready-base`.
+- Active branch verified during that sweep: `integration/sounio-dev-ready-base`.
+  This was accurate as of 2026-05-10 only; `main` has been canonical since
+  2026-09-22 (see `CLAUDE.md` §3). Do not act on this section's branch
+  without re-verifying `git branch --show-current` first.
 - During orchestration setup, a local modification was observed in
   `self-hosted/compiler/lean_single.sio`. Verify current `git status` before
   touching it. If it is modified, treat it as active work owned by whoever

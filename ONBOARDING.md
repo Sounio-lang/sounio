@@ -37,8 +37,13 @@ IR ou claims científicas, leia também
 
 ## 2. Branch é a verdade operacional
 
-- A **branch atualmente em checkout** manda nesta sessão.
-- **Não** troque para `main` ou `integration/sounio-dev-ready-base` só porque docs antigos mencionam.
+- A **branch atualmente em checkout** manda nesta sessão -- isso preserva uma lane
+  já ativa (WIP de outro agente/sessão); não force um `checkout` só porque um doc
+  antigo menciona outra branch.
+- Para **trabalho novo** (sem lane ativa em andamento), a branch padrão é `main`
+  (canônica desde 2026-09-22 -- `integration/sounio-dev-ready-base` está
+  descontinuada, ver `CLAUDE.md` §3). Não comece trabalho novo em
+  `integration/sounio-dev-ready-base` achando que é o default.
 - `BEAGLE_WORKSPACE_BRANCH` ≠ branch git atual. Sempre confira `git branch --show-current`.
 - Imprima a branch depois de qualquer checkout, antes de assumir que pegou.
 

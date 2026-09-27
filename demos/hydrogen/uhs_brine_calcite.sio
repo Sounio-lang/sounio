@@ -97,18 +97,26 @@
 //       are floored at ~9.5e-7. Affected prints are flagged ENGINE-FLOOR.
 //   E4. At 90 C the reverse closure is fast (k_b·[HCO3] ~ 7 > 1): the
 //       J^2 amplification diverges and the variance overflows non-finite.
-//       lean_single's sqrt_approx guard (x <= 0 -> 0) reads that back as
-//       an exact 0.0 — indistinguishable from a true zero band except
-//       that a true band is strictly positive here (the Calcite source
-//       term is positive at every step). The demo detects ou <= 0 and
-//       WITHHOLDS the band instead of printing a number. The corner
+//       What comes back is ENGINE-DEPENDENT: the seed this file was first
+//       validated on read it back as an exact 0.0 through sqrt_approx's
+//       (x <= 0 -> 0) guard; the lean_single seed on main as of 2026-09-15
+//       returns NaN for every sigma (measured: x == x is false, and every
+//       ordered comparison is false). A NaN slipped past the old ou <= 0
+//       test, and ubc_fix6 then looped forever on NaN as i64 < 0 — the demo
+//       hung at "sig(Calcite) =". The demo now prints a band only when all
+//       three printed sigmas are FINITE AND POSITIVE (a true band is
+//       strictly positive here: the Calcite source term is positive at
+//       every step), so 0.0, negatives, NaN and inf are all WITHHELD, and
+//       ubc_fix6 refuses non-finite input instead of looping. The corner
 //       p-boxes are value-only and unaffected.
-//   E5. Madaros (default engine) cannot compile ANY import of
-//       chemistry::kinetics on current main (ede0f3219): "visibility
-//       preflight failed", reproduced with the repo's own
-//       tests/stdlib/chemistry/test_kinetics_epistemic_ensemble.sio.
-//       PRE-EXISTING compiler blocker, not from this demo. This file is
-//       therefore validated on lean_single
+//   E5. Madaros (default engine) cannot build this file. When it was
+//       written (main ede0f3219) any chemistry::kinetics import failed
+//       "visibility preflight". On main 20a11b53e3 (2026-09-15) the type
+//       check passes and native lowering stops in stdlib/plot's
+//       error_bar_chart ("cannot safely lower print/println argument with
+//       unresolved scalar kind"); tests/stdlib/chemistry/test_kinetics_*
+//       fail the same way. PRE-EXISTING compiler blocker, not from this
+//       demo. This file is therefore validated on lean_single
 //       (SOUNIO_SOUC_ENGINE=lean_single bin/souc run ...).
 //   E6. lean_single ALIASES simultaneously-held returned arrays across
 //       calls: a second call to a ([f64;8],[f64;8])-returning fn
@@ -170,6 +178,15 @@ fn ubc_pow10(x: f64) -> f64 with Mut, Div {
 fn ubc_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
 fn ubc_max(a: f64, b: f64) -> f64 { if a > b { a } else { b } }
 
+// true only for a finite, strictly positive value: NaN fails both ordered
+// comparisons, +inf fails the upper one, 0.0 and negatives fail the lower
+fn ubc_finite_pos(x: f64) -> bool {
+    if x > 0.0 {
+        if x < 1.0e300 { return true }
+    }
+    false
+}
+
 // ─── integer digit printer (byte-stable on every engine) ───
 
 fn ubc_floor_i64(x: f64) -> i64 with Mut {
@@ -198,10 +215,17 @@ fn ubc_i2(n: i64) with IO {
     ubc_pd(n % 10)
 }
 
-// fixed 6-decimal printer; |x| < 10^6, round-half-up
+// fixed 6-decimal printer; |x| < 10^6, round-half-up. Anything else —
+// NaN, inf, or out of range — is refused with a marker: NaN as i64 is
+// negative, and a negative ip made the digit loop below never terminate.
 fn ubc_fix6(x: f64) with IO, Mut {
     var v = x
     if v < 0.0 { print("-"); v = 0.0 - v }
+    let in_range = v < 1000000.0
+    if !in_range {
+        print("NON-FINITE")
+        return
+    }
     let n = ubc_floor_i64(v * 1000000.0 + 0.5)
     let ip = n / 1000000
     let fp = n % 1000000
@@ -342,17 +366,23 @@ fn report_t(nu: MatNM, t: f64, cel: i64) with IO, Mut, Div, Panic {
         if i == 2 {
             println("")
             // E4: the propagator's J^2 amplification can diverge (here at
-            // 90 C, k_b·[HCO3] ~ 7 > 1); the variance overflows non-finite
-            // and lean_single's sqrt_approx guard (x <= 0 -> 0) swallows it
-            // to an exact 0.0. A non-positive band is unphysical here (the
-            // source term is strictly positive for Calcite at every step),
-            // so ou <= 0 detects the artifact and the band is WITHHELD.
-            if ou[2] <= 0.0 {
+            // 90 C, k_b·[HCO3] ~ 7 > 1) and the variance overflows
+            // non-finite. The engine hands that back as 0.0 or as NaN
+            // depending on the seed (header E4), so the band is printed only
+            // when every sigma printed below is finite and positive — a true
+            // band is strictly positive here — and WITHHELD otherwise.
+            var band_ok = false
+            if ubc_finite_pos(ou[0]) {
+                if ubc_finite_pos(ou[2]) {
+                    if ubc_finite_pos(ou[4]) { band_ok = true }
+                }
+            }
+            if !band_ok {
                 print("    GUM 1-sigma: UNSTABLE-WITHHELD (E4: J^2 amplification")
                 println("")
-                print("      diverges at this T; non-finite variance reads back")
+                print("      diverges at this T; the variance comes back non-finite")
                 println("")
-                print("      as 0.0 through the sqrt_approx guard — refused,")
+                print("      or as 0.0 depending on the engine seed — refused,")
                 println("")
                 print("      corners unaffected)")
                 println("")

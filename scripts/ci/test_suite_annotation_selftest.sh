@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Harness self-test for //@ expect-stdout-contains and unknown expect-* keys.
+# Harness self-test for //@ expect-stdout-contains, unknown expect-* keys, and the
+# known-failure manifest's optional `path|substring` reason pin.
 #
 # The control the defect requires: a garbage marker must go red. If this
 # script stays green while a mutated marker still passes, the bug is back.
@@ -39,6 +40,14 @@ run_list() {
     # Unset CI so a one-file selection is allowed. Do not load the full-suite
     # known-failure manifest (that path is junit + no filter only, but be explicit).
     SOUNIO_TEST_KNOWN_FAILURES_FILE="" \
+        bash "$HARNESS" --test-list "$list" --jobs 1 --verbose
+}
+
+# Like run_list, but loads the given scratch manifest instead of disabling it --
+# for the known-failure reason-pin cases below.
+run_list_with_manifest() {
+    local list="$1" manifest="$2"
+    SOUNIO_TEST_KNOWN_FAILURES_FILE="$manifest" \
         bash "$HARNESS" --test-list "$list" --jobs 1 --verbose
 }
 
@@ -89,5 +98,42 @@ printf '%s\n' "$TMP/unknown.sio" > "$TMP/list_unknown.txt"
 expect_rc 1 "$TMP/unknown.log" run_list "$TMP/list_unknown.txt"
 grep -Fq "unknown annotation: expect-stdout-not-a-thing" "$TMP/unknown.log" \
     || fail "unknown expect-* key was not rejected"
+
+# --- 4/5/6. Known-failure manifest reason pin (path|substring) ---
+# A deterministic, non-timing-dependent failure: fixed exit code, fixed marker.
+# Never listed under tests/, so the ordinary suite (which globs tests/run-pass/*.sio
+# etc.) never sees it; only --test-list here does.
+cat > "$TMP/reason_fixture.sio" <<'SIO'
+//@ run-pass
+fn main() -> i32 with IO {
+    println("selftest_reason_marker_9f3c1")
+    1
+}
+SIO
+printf '%s\n' "$TMP/reason_fixture.sio" > "$TMP/list_reason.txt"
+
+# 4. Matching reason: the pin's substring is in test_output ("run exited 1 | ...
+#    selftest_reason_marker_9f3c1") -> laundered as a known failure, exit 0.
+printf '%s|selftest_reason_marker_9f3c1\n' "$TMP/reason_fixture.sio" > "$TMP/manifest_match.txt"
+expect_rc 0 "$TMP/reason_match.log" run_list_with_manifest "$TMP/list_reason.txt" "$TMP/manifest_match.txt"
+grep -Fq "Known failures: 1" "$TMP/reason_match.log" \
+    || fail "matching reason pin was not accepted as a known failure"
+
+# 5. Mismatching reason: the pin's substring is not in test_output -> a fresh FAIL,
+#    not a repeat of whatever the entry was audited for. This is the case the
+#    plain-path form (no |) cannot catch: it would launder ANY failure.
+printf '%s|THIS_SUBSTRING_IS_NOT_IN_THE_OUTPUT\n' "$TMP/reason_fixture.sio" > "$TMP/manifest_mismatch.txt"
+expect_rc 1 "$TMP/reason_mismatch.log" run_list_with_manifest "$TMP/list_reason.txt" "$TMP/manifest_mismatch.txt"
+grep -Fq "known-failure reason mismatch" "$TMP/reason_mismatch.log" \
+    || fail "mismatching reason pin did not report a reason mismatch"
+grep -Fq "FAIL  reason_fixture.sio" "$TMP/reason_mismatch.log" \
+    || fail "mismatching reason pin did not fail the suite"
+
+# 6. Legacy plain-path entry (no |): unaffected by the reason-pin feature, still
+#    laundered whatever the failure is, exactly as before this feature existed.
+printf '%s\n' "$TMP/reason_fixture.sio" > "$TMP/manifest_legacy.txt"
+expect_rc 0 "$TMP/reason_legacy.log" run_list_with_manifest "$TMP/list_reason.txt" "$TMP/manifest_legacy.txt"
+grep -Fq "Known failures: 1" "$TMP/reason_legacy.log" \
+    || fail "legacy plain-path entry regressed"
 
 echo "TEST_SUITE_ANNOTATION_SELFTEST_PASS"
