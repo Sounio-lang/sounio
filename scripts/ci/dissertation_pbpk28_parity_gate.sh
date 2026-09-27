@@ -854,10 +854,11 @@ for VFX_KEY in nm auc; do
     <(vfx_scalar "VRATIO|$VFX_KEY" "VRATIO|t" "$VFX_SIO_LOG"  | sort) \
     <(vfx_scalar "VRATIO|$VFX_KEY" "VRATIO|t" "$VFX_NODE_LOG" | sort) \
     | awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" -v KEY="$VFX_KEY" "$VFX_AWK_FIN"'
-        {a=fin($2); b=fin($3); d=a-b; SS+=d*d; NN++; if(a>PK)PK=a}
+        {a=fin($2); b=fin($3); d=a-b; SS+=d*d; NN++; if(a>PK)PK=a; if(b>PK)PK=b}
         END{ if(nonfin>0){printf "VENLAFAXINE_RATIO_PARITY_FAIL %s: %d non-finite value(s)\n",KEY,nonfin; exit 1}
           if(NN!=12){printf "VENLAFAXINE_RATIO_PARITY_FAIL %s: %d/12 rows\n",KEY,NN; exit 1}
           rmse=sqrt(SS/NN); pct=(PK>0)?100*rmse/PK:0;
+          if(PK<=0 && rmse>0){printf "VENLAFAXINE_RATIO_PARITY_FAIL %s: zero peak with nonzero RMSE %.3e\n",KEY,rmse; exit 1}
           if(pct<THR+0) printf "VENLAFAXINE_RATIO_PARITY_PASS %s %d/%d samples within %s%% RMSE (NM ODV/parent, peak=%.4g)\n",KEY,NN,NN,THR,PK;
           else { printf "VENLAFAXINE_RATIO_PARITY_FAIL %s %.4f%% RMSE\n",KEY,pct; exit 1 } }'
 done
