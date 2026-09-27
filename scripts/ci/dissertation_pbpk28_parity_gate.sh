@@ -882,30 +882,31 @@ echo
 for VFX_LOG in "$VFX_SIO_LOG" "$VFX_NODE_LOG"; do
   echo "[pbpk28-parity] venlafaxine mass account: $(basename "$VFX_LOG")"
   awk -F= "$VFX_AWK_FIN"'
-    # Fail closed: every field must be present for every sample (a missing
-    # record would otherwise read as 0 and pass) and finite (fin()).
+    # Fail closed: every field must appear exactly once per sample (a missing
+    # record would otherwise read as 0 and pass, and a duplicate could stand in
+    # for a missing one in an aggregate count) and be finite (fin()).
     # The step count sets the tolerance, so it is not taken on trust from the
     # engine under test: TR-BDF2 books two theta sub-steps per step, so at
     # sample time t it must be exactly 2*t/dt (dt from the log header).
     /^dt=/{if(dtv==""){dtv=fin($2)}}
     /^VBAL\|t=/{tv=fin($2)}
-    /^VMASS\|p=/{mp=fin($2); nf++}
-    /^VMASS\|o=/{mo=fin($2); nf++}
-    /^VBAL\|released=/{rel=fin($2); nf++}
-    /^VBAL\|portal=/{por=fin($2); nf++}
-    /^VBAL\|fabs=/{fa=fin($2); nf++}
-    /^VBAL\|resid_gut_e12=/{rg=fin($2); nf++}
-    /^VBAL\|resid_split_e12=/{rs=fin($2); nf++}
-    /^VBAL\|bound_slack_e12=/{bs=fin($2); nf++}
-    /^VBAL\|resid_p_e12=/{rp=fin($2); nf++}
-    /^VBAL\|resid_o_e12=/{ro=fin($2); nf++}
-    /^VBAL\|neg_e12=/{ng=fin($2); nf++}
+    /^VMASS\|p=/{mp=fin($2); cnt["mp"]++}
+    /^VMASS\|o=/{mo=fin($2); cnt["mo"]++}
+    /^VBAL\|released=/{rel=fin($2); cnt["rel"]++}
+    /^VBAL\|portal=/{por=fin($2); cnt["por"]++}
+    /^VBAL\|fabs=/{fa=fin($2); cnt["fa"]++}
+    /^VBAL\|resid_gut_e12=/{rg=fin($2); cnt["rg"]++}
+    /^VBAL\|resid_split_e12=/{rs=fin($2); cnt["rs"]++}
+    /^VBAL\|bound_slack_e12=/{bs=fin($2); cnt["bs"]++}
+    /^VBAL\|resid_p_e12=/{rp=fin($2); cnt["rp"]++}
+    /^VBAL\|resid_o_e12=/{ro=fin($2); cnt["ro"]++}
+    /^VBAL\|neg_e12=/{ng=fin($2); cnt["ng"]++}
     /^VBAL\|steps=/{st=fin($2);
-      if(nf!=11){bad++; printf "  FAIL: sample %d has %d/11 mass-account fields\n",n+1,nf}
+      nk=split("mp mo rel por fa rg rs bs rp ro ng", req, " ")
+      for(ki=1; ki<=nk; ki++){ if(cnt[req[ki]]!=1){bad++; printf "  FAIL: sample %d has %d record(s) of field %s (need exactly 1)\n",n+1,cnt[req[ki]]+0,req[ki]}; cnt[req[ki]]=0 }
       if(!(dtv>0)){bad++; printf "  FAIL: no positive dt= header to check the step count against\n"}
       else { exp_st=int(2*tv/dtv+0.5); if(st!=exp_st || st<=0){bad++; printf "  FAIL: sample t=%s reports %d steps, expected 2*t/dt = %d\n",tv,st,exp_st} }
       if(nonfin>0){bad+=nonfin; nonfin=0}
-      nf=0
       tr=st*1.0e-15; if(tr<1.0e-12)tr=1.0e-12; tol=tr*rel*1.0e12;   # residuals are printed x1e12 mg
       a=(rg<0)?-rg:rg; if(a>tol){bad++; printf "  FAIL: gut balance residual %.3e > %.3e (x1e-12 mg)\n",rg,tol}
       a=(rs<0)?-rs:rs; if(a>tol){bad++; printf "  FAIL: F_abs split residual %.3e > %.3e (x1e-12 mg)\n",rs,tol}
