@@ -2208,11 +2208,17 @@ fn thin_cache_skip_ws(buf: [i8; 131072], len: i64, pos: i64) -> i64 with Mut, Pa
     p
 }
 
+// Cap raised 255 -> 511 (2026-09-27, Copilot review): a token can now carry
+// a full-width Name (Name.buf is [i8; 384], see lower_tuple_box_slot_list's
+// per-slot payload list, up to 384 bytes), and the previous 255-byte cap
+// silently truncated any such token before the caller ever saw it -- the
+// read-side half of the same bug the 128-byte thin_name_to_string cap was
+// on the write side.
 fn thin_cache_read_token(buf: [i8; 131072], len: i64, pos: i64) -> (string, i64) with Mut, Panic, Div {
     var p = thin_cache_skip_ws(buf, len, pos)
-    var out: [i8; 256] = [0; 256]
+    var out: [i8; 512] = [0; 512]
     var out_len: i64 = 0
-    while p < len && out_len < 255 {
+    while p < len && out_len < 511 {
         let ch = buf[p as usize] as i64
         if ch == 32 || ch == 10 || ch == 13 || ch == 9 {
             break
@@ -2256,7 +2262,7 @@ fn thin_try_write_summary_cache(path: string, summary: ModuleSummary, stats: &! 
         // a fresh process. Resolve it to its NAME TEXT here instead ("-" when
         // there is no box, or the id no longer resolves), and re-intern that
         // text into a fresh id on read.
-        let box_inner_name = thin_name_to_string(ir_name_at(summary.fn_return_box_inner_ids[i as usize]))
+        let box_inner_name = thin_name_to_string_wide(ir_name_at(summary.fn_return_box_inner_ids[i as usize]))
         let box_inner_tok = if str_len(box_inner_name) > 0 { box_inner_name } else { "-" }
         let a8 = io_trace_append_string(buf, p, box_inner_tok)
         buf = a8.0; p = a8.1
@@ -2663,6 +2669,25 @@ fn thin_name_to_string(name: Name) -> string with Mut, Panic, Div {
     var buf: [i8; 512] = [0; 512]
     var i: i64 = 0
     while i < name.len && i < 128 {
+        buf[i as usize] = name.buf[i as usize]
+        i = i + 1
+    }
+    buf_to_string(buf, i)
+}
+
+// Full-width twin of thin_name_to_string, for the one field that can
+// legitimately need more than 128 bytes: the tuple Box payload name list
+// (thin_try_write_summary_cache's box_inner_name), which lower_tuple_box_slot_list
+// allows up to Name's own actual capacity (Name.buf is [i8; 384]). Every
+// other thin_name_to_string caller in this file serializes an ordinary
+// identifier and is left at the 128-byte cap.
+fn thin_name_to_string_wide(name: Name) -> string with Mut, Panic, Div {
+    // buf_to_string takes exactly [i8; 512] (Sounio has no implicit fixed-array
+    // size coercion); only the first 384 bytes are ever filled, matching
+    // Name.buf's own actual capacity.
+    var buf: [i8; 512] = [0; 512]
+    var i: i64 = 0
+    while i < name.len && i < 384 {
         buf[i as usize] = name.buf[i as usize]
         i = i + 1
     }
