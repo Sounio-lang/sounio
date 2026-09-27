@@ -767,19 +767,39 @@ pub fn md_config_error(md: &MultiDrug28) -> i32 {
     return 0
 }
 
-// The clock update is checked before anything is mutated: t + dt can overflow
-// to +Inf (two steps of 1e308), and at a large t a small dt is absorbed by
-// round-off (t + dt == t), which would leave md_run_to looping forever.
-pub fn md_step(md: &!MultiDrug28, dt: f64) with Mut, Div, Panic {
-    if !(is_finite_f64(dt) && dt > 0.0) { panic("multidrug28: md_step needs a finite dt > 0") }
-    let t_next = (*md).t + dt
-    if !(is_finite_f64(t_next) && t_next > (*md).t) { panic("multidrug28: md_step: t + dt is not finite or does not advance t") }
+// One coupled step from t to the representable time t_next > t. The step is
+// integrated over the ACTUAL clock delta h = fl(t_next - t), never over a
+// requested dt: transport, absorption, infusion, AUC and elimination all use
+// h, and the clock then becomes t_next. So the integrated time and the clock
+// advance agree (PR #2695 review: at t = 2^53, fl(t + 3) = t + 4, and a step
+// integrated over 3 h while the clock moved 4 h, so an infusion delivered 3 mg
+// for 4 h of clock). The subtraction is exact whenever t >= t_next - t
+// (Sterbenz), which covers every step after the first on any grid; otherwise
+// it carries one rounding, <= ulp(h)/2. The clock update is checked before
+// anything is mutated: t_next must be finite and ahead of t, so h > 0.
+fn md_step_to(md: &!MultiDrug28, t_next: f64) with Mut, Div, Panic {
+    let t = (*md).t
+    if !(is_finite_f64(t_next) && t_next > t) { panic("multidrug28: md_step: t + dt is not finite or does not advance t") }
+    let h = t_next - t
     let cfg = md_config_error(md)
     if cfg == 1 { panic("multidrug28: md.method must be md_method_trbdf2() or md_method_cn_legacy()") }
     if cfg == 2 { panic("multidrug28: md.iters must be >= 0 (0 Lie, 1 predictor-corrector, >1 iterated)") }
-    md_coupled_step(md, dt)
+    md_coupled_step(md, h)
     md_check_finite_blood(md)
     (*md).t = t_next
+}
+
+// Advances the clock to fl(t + dt) and integrates the step over the actual
+// clock delta h = fl(t + dt) - t (md_step_to), which differs from dt by the
+// rounding of the clock addition: |h - dt| <= ulp(t + dt)/2. At ordinary
+// clocks that is a relative 1.1e-16 of dt, or nothing; at t = 2^53 with
+// dt = 3 it is h = 4. t + dt can overflow to +Inf (two steps of 1e308), and
+// at a large t a small dt is absorbed by round-off (t + dt == t, h = 0),
+// which would leave md_run_to looping forever: both panic before anything is
+// mutated.
+pub fn md_step(md: &!MultiDrug28, dt: f64) with Mut, Div, Panic {
+    if !(is_finite_f64(dt) && dt > 0.0) { panic("multidrug28: md_step needs a finite dt > 0") }
+    md_step_to(md, (*md).t + dt)
 }
 
 // Advances to exactly t_end with steps of dt. A full step is taken only while
@@ -804,10 +824,16 @@ pub fn md_step(md: &!MultiDrug28, dt: f64) with Mut, Div, Panic {
 // clock at 0.6000000000000002, past 0.6. (0.61, 0.02) is 30 steps plus a
 // 0.01 remainder, and (1.0000000005, 1.0) is a 1.0 step plus a 5e-10 step.
 // A dt far larger than the span takes one step of the whole span.
+// Every step, full or remainder, integrates the actual clock delta, not the
+// requested dt (md_step_to): a full step integrates h = fl(t + dt) - t, with
+// |h - dt| <= ulp(t + dt)/2, and the remainder step goes to t_end exactly and
+// integrates h = fl(t_end - t), exact when t >= t_end/2 and otherwise within
+// ulp(h)/2 of the true delta. At t = 2^53, run_to(t + 4, dt 3) is one step
+// that the clock rounds to 4 h, and it integrates 4 h. At ordinary clocks h
+// equals dt or differs from it in the last bit.
 // A non-finite t_end (NaN, +-Inf) panics, as does a non-finite or
 // non-positive dt. A finite target not strictly ahead of t is a no-op, so
-// the clock never moves backwards. After the remainder step t is set to
-// t_end, which moves it only by the rounding of that last addition.
+// the clock never moves backwards. The run ends with t == t_end exactly.
 // Argument check of md_run_to, exposed so that a gate can test it (a panic
 // cannot be observed by the run-pass harness): 0 valid, 1 dt not a finite
 // positive number, 2 t_end not finite, 3 dt below the clock's resolution at
@@ -834,11 +860,9 @@ pub fn md_run_to(md: &!MultiDrug28, t_end: f64, dt: f64) with Mut, Div, Panic {
     while (*md).t + dt <= t_end {
         md_step(md, dt)
     }
-    let rem = t_end - (*md).t
-    if rem > 0.0 {
-        md_step(md, rem)
+    if t_end > (*md).t {
+        md_step_to(md, t_end)
     }
-    (*md).t = t_end
 }
 
 // Mass currently in the body (all organs, both layers) for drug i.
