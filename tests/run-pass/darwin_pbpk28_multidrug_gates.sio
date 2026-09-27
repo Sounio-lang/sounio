@@ -89,7 +89,11 @@
 //     (a) A co-administered CYP3A4 substrate that is NOT an inhibitor
 //     (Ki unset) leaves the victim BIT-IDENTICAL to the victim alone. (b) The same
 //     with Ki = 1e300. (c) Two identical drugs, identical doses, mutual Ki:
-//     bit-identical trajectories (symmetry).
+//     bit-identical trajectories (symmetry). (d) A call that adds nothing is
+//     not a dosing event: an oral dose of 0, a bolus of 0 and an infusion rate
+//     set to its current value, all mid-run, leave the victim bit-identical
+//     (md_same_drug) to the run without those calls; they must not schedule the
+//     Rannacher start-up. A real rate change still does.
 //
 // V7  md_run_to reaches targets off the dt grid exactly. From t = 0 with
 //     dt = 0.02: t_end = 0.61 must end at t == 0.61 with the drug's state and
@@ -358,6 +362,26 @@ fn gate_v5() -> bool with Mut, Div, Panic, IO {
 }
 
 // V6 --------------------------------------------------------------------------
+// Exact equality of drug i in a and drug j in b over every per-drug state and
+// accounting field. Each test is `!(x == y)`, so a NaN on either side fails
+// rather than passing (NaN == NaN is false).
+fn md_same_drug(a: &MultiDrug28, i: i32, b: &MultiDrug28, j: i32) -> bool with Mut {
+    var ok = true
+    var o: i32 = 0
+    while o < 14 {
+        if !((*a).cv[i * 14 + o] == (*b).cv[j * 14 + o]) { ok = false }
+        if !((*a).ct[i * 14 + o] == (*b).ct[j * 14 + o]) { ok = false }
+        o = o + 1
+    }
+    if !((*a).lumen[i] == (*b).lumen[j]) { ok = false }
+    if !((*a).auc_b[i] == (*b).auc_b[j]) { ok = false }
+    if !((*a).elim[i] == (*b).elim[j]) { ok = false }
+    if !((*a).clamped[i] == (*b).clamped[j]) { ok = false }
+    if !((*a).dose_in[i] == (*b).dose_in[j]) { ok = false }
+    if !((*a).lost[i] == (*b).lost[j]) { ok = false }
+    return ok
+}
+
 fn victim_run(with_b: bool, ki_b: f64) -> (f64, f64, f64) with Mut, Div, Panic {
     var md = md_new(true)
     let a = add_victim(&!md, 1.5)
@@ -369,6 +393,31 @@ fn victim_run(with_b: bool, ki_b: f64) -> (f64, f64, f64) with Mut, Div, Panic {
     }
     md_run_to(&!md, 24.0, 0.05)
     return (md.auc_b[a], md.cv[a * 14], md.ct[a * 14 + 1])
+}
+
+fn v6d_run(noop_calls: bool) -> MultiDrug28 with Mut, Div, Panic {
+    var md = md_new(true)
+    let v = add_victim(&!md, 1.5)
+    md_dose_oral(&!md, v, 5.0)
+    md_set_iv_rate(&!md, v, 2.0)
+    md_run_to(&!md, 1.0, 0.02)
+    if noop_calls {
+        md_dose_oral(&!md, v, 0.0)
+        md_dose_iv_bolus(&!md, v, 0.0)
+        md_set_iv_rate(&!md, v, 2.0)
+    }
+    md_run_to(&!md, 2.0, 0.02)
+    return md
+}
+
+fn gate_v6d() -> bool with Mut, Div, Panic {
+    let a = v6d_run(false)
+    let b = v6d_run(true)
+    let same = a.t == b.t && md_same_drug(&a, 0, &b, 0)
+    // Control: a real rate change is a discontinuity and schedules the start-up.
+    var c = v6d_run(false)
+    md_set_iv_rate(&!c, 0, 3.0)
+    return same && c.pending_smooth
 }
 
 fn gate_v6() -> bool with Mut, Div, Panic, IO {
@@ -391,30 +440,12 @@ fn gate_v6() -> bool with Mut, Div, Panic, IO {
     if ok_a { println("V6a non-inhibitor co-drug: victim bit-identical") } else { println("V6a FAIL: non-inhibitor co-drug changed the victim") }
     if ok_b { println("V6b Ki=1e300 co-drug: victim bit-identical") } else { println("V6b FAIL: Ki=1e300 changed the victim") }
     if ok_c { println("V6c identical drugs: trajectories bit-identical") } else { println("V6c FAIL: symmetric pair diverged") }
-    return ok_a && ok_b && ok_c
+    let ok_d = gate_v6d()
+    if ok_d { println("V6d zero dose / unchanged rate: victim bit-identical, no start-up") } else { println("V6d FAIL: a no-op dosing call changed the victim") }
+    return ok_a && ok_b && ok_c && ok_d
 }
 
 // V7 --------------------------------------------------------------------------
-// Exact equality of drug i in a and drug j in b over every per-drug state and
-// accounting field. Each test is `!(x == y)`, so a NaN on either side fails
-// rather than passing (NaN == NaN is false).
-fn md_same_drug(a: &MultiDrug28, i: i32, b: &MultiDrug28, j: i32) -> bool with Mut {
-    var ok = true
-    var o: i32 = 0
-    while o < 14 {
-        if !((*a).cv[i * 14 + o] == (*b).cv[j * 14 + o]) { ok = false }
-        if !((*a).ct[i * 14 + o] == (*b).ct[j * 14 + o]) { ok = false }
-        o = o + 1
-    }
-    if !((*a).lumen[i] == (*b).lumen[j]) { ok = false }
-    if !((*a).auc_b[i] == (*b).auc_b[j]) { ok = false }
-    if !((*a).elim[i] == (*b).elim[j]) { ok = false }
-    if !((*a).clamped[i] == (*b).clamped[j]) { ok = false }
-    if !((*a).dose_in[i] == (*b).dose_in[j]) { ok = false }
-    if !((*a).lost[i] == (*b).lost[j]) { ok = false }
-    return ok
-}
-
 fn v7_setup(md: &!MultiDrug28) -> i32 with Mut, Div, Panic {
     let i = add_victim(md, 1.5)
     md_dose_oral(md, i, 5.0)
