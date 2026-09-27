@@ -65,6 +65,13 @@ struct LowerLocalStack {
     // Tuple-typed local: bit k set iff element k of the tuple is f64. 0 = not a
     // tuple / no float elements. See lower_opt_type_tuple_float_mask (issue #1502).
     tuple_float_mask: Box<LowerLocalI64Slots>,
+    // Tuple-typed local: bit k set iff element k of the tuple is `[f64; N]`
+    // (an f64 ARRAY, not a scalar f64 -- tuple_float_mask's bit k means slot k
+    // IS an f64 value). tuple-let desugaring (tplet_emit_elems in
+    // parser/stmts.sio) turns `let (a, b) = f()` into `let a = __tup.0` with no
+    // type annotation, so `a` must inherit its array-elem-float status from
+    // slot 0 of __tup's own mask -- see lower_opt_type_tuple_array_float_mask.
+    tuple_array_f64_mask: Box<LowerLocalI64Slots>,
     // Layout index for an aggregate element carried by a local: tuple slot-0
     // fixed arrays and Seq<T> share this slot because those shapes are disjoint.
     tuple0_array_elem_layout: Box<LowerLocalI64Slots>,
@@ -144,6 +151,7 @@ fn empty_lower_local_stack() -> LowerLocalStack with Alloc, Mut {
         is_ref: lowerer_box_local_i64_slots(0),
         scalar_kind: lowerer_box_local_i64_slots(0),
         tuple_float_mask: lowerer_box_local_i64_slots(0),
+        tuple_array_f64_mask: lowerer_box_local_i64_slots(0),
         tuple0_array_elem_layout: lowerer_box_local_i64_slots(-1),
         tuple_struct_layout: lowerer_box_local_i64_slots(-1),
         tuple_struct_slot: lowerer_box_local_i64_slots(-1),
@@ -995,6 +1003,36 @@ fn lower_epistemic_contest_index_from_ref(epistemic: &IrEpistemicSection) -> Box
     index
 }
 
+// Stack-economy: the four big fixed-count accumulator arrays used to be INLINE
+// fields of Lowerer (~25KB of the ~26KB struct), so EVERY by-value
+// `(Lowerer, i64)` hop in the block/stmt/expr recursion copied them again.
+// Measured (core.3195050, kl16x-compiled Madaros, 8MB default stack): ~27 live
+// hop levels x ~27.8KB = ~748KB of hop tower = the SIGSEGV that made every
+// `madaros run` die after "lower_array: bodies_begin", recoverable only with
+// `ulimit -s unlimited`. Boxing them behind ONE pointer shrinks the hop
+// payload to ~1.2KB. Share-through-Box semantics already governs
+// locals/fo_bind/module (see the (*lo.fo_bind) reads) — zero behavioural
+// delta; mirrors the #1649 "REUSE the Box" precedent.
+struct LowerBigArrays {
+    array_elem_float_regs: [i64; 512],
+    variance_base_regs: [i64; 1024],
+    variance_value_regs: [i64; 1024],
+    so_bind_hess: [i64; 576],
+}
+
+fn empty_lower_big_arrays() -> LowerBigArrays with Mut {
+    LowerBigArrays {
+        array_elem_float_regs: [IR_INVALID_REG; 512],
+        variance_base_regs: [IR_INVALID_REG; 1024],
+        variance_value_regs: [IR_INVALID_REG; 1024],
+        so_bind_hess: [-1; 576],
+    }
+}
+
+fn lowerer_box_empty_big_arrays() -> Box<LowerBigArrays> with Alloc, Mut {
+    Box::new(empty_lower_big_arrays())
+}
+
 struct Lowerer {
     module: Box<IrModule>,
     epistemic_contests: Box<LowerEpistemicContestIndex>,
@@ -1015,10 +1053,8 @@ struct Lowerer {
     // Frontend-owned global element types. BSS byte size cannot distinguish
     // `[f64; N]` from `[i64; N]`, so this survives summary -> body lowering.
     global_types: Box<LowerGlobalTypeTable>,
-    array_elem_float_regs: [i64; 512],
+    big: Box<LowerBigArrays>,
     array_elem_float_reg_count: i64,
-    variance_base_regs: [i64; 1024],
-    variance_value_regs: [i64; 1024],
     variance_base_reg_count: i64,
     // Sprint 28: Debug-mode witness enforcement
     debug_mode: bool,
@@ -1048,7 +1084,6 @@ struct Lowerer {
     // rows so a local carries its Hessian exactly as it carries its gradient.
     so_enabled: bool,
     so_expr_hess: [i64; 36],
-    so_bind_hess: [i64; 576],
     // Inter-procedural FO: pure-fn transfer table (survives across function lowers).
     // kind: 0=none 1=id(p0) 2=scale(lit*p0) 3=add(p0+p1) 4=mul(p0*p1) 5=fwd(g)
     fo_xfer_count: i64,
@@ -1332,10 +1367,8 @@ fn lowerer_new() -> Lowerer with Alloc, Mut, Panic, Div {
         enum_variants: enum_variants,
         struct_layouts: struct_layouts,
         global_types: global_types,
-        array_elem_float_regs: [IR_INVALID_REG; 512],
+        big: lowerer_box_empty_big_arrays(),
         array_elem_float_reg_count: 0,
-        variance_base_regs: [IR_INVALID_REG; 1024],
-        variance_value_regs: [IR_INVALID_REG; 1024],
         variance_base_reg_count: 0,
         debug_mode: false,
         probe_mode: false,
@@ -1351,7 +1384,6 @@ fn lowerer_new() -> Lowerer with Alloc, Mut, Panic, Div {
         fo_bind: Box::new(empty_lower_fo_bind_table()),
         so_enabled: false,
         so_expr_hess: [-1; 36],
-        so_bind_hess: [-1; 576],
         fo_xfer_count: 0,
         fo_xfer_kind: [0; 64],
         fo_xfer_lit: [0.0; 64],
@@ -1907,10 +1939,8 @@ fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEp
         enum_variants: enum_variants,
         struct_layouts: struct_layouts,
         global_types: global_types,
-        array_elem_float_regs: [IR_INVALID_REG; 512],
+        big: lowerer_box_empty_big_arrays(),
         array_elem_float_reg_count: 0,
-        variance_base_regs: [IR_INVALID_REG; 1024],
-        variance_value_regs: [IR_INVALID_REG; 1024],
         variance_base_reg_count: 0,
         debug_mode: false,
         probe_mode: summary.probe_mode,
@@ -1926,7 +1956,6 @@ fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEp
         fo_bind: Box::new(empty_lower_fo_bind_table()),
         so_enabled: false,
         so_expr_hess: [-1; 36],
-        so_bind_hess: [-1; 576],
         fo_xfer_count: 0,
         fo_xfer_kind: [0; 64],
         fo_xfer_lit: [0.0; 64],
@@ -1970,10 +1999,8 @@ fn lowerer_new_from_program_summary_owned(summary: IrProgramSummary, epistemic: 
         enum_variants: summary.enum_variants,
         struct_layouts: summary.struct_layouts,
         global_types: summary.global_types,
-        array_elem_float_regs: [IR_INVALID_REG; 512],
+        big: lowerer_box_empty_big_arrays(),
         array_elem_float_reg_count: 0,
-        variance_base_regs: [IR_INVALID_REG; 1024],
-        variance_value_regs: [IR_INVALID_REG; 1024],
         variance_base_reg_count: 0,
         debug_mode: false,
         probe_mode: summary.probe_mode,
@@ -1989,7 +2016,6 @@ fn lowerer_new_from_program_summary_owned(summary: IrProgramSummary, epistemic: 
         fo_bind: Box::new(empty_lower_fo_bind_table()),
         so_enabled: false,
         so_expr_hess: [-1; 36],
-        so_bind_hess: [-1; 576],
         fo_xfer_count: 0,
         fo_xfer_kind: [0; 64],
         fo_xfer_lit: [0.0; 64],
@@ -2037,10 +2063,8 @@ fn lowerer_from_acc_module(module: Box<IrModule>) -> Lowerer with Alloc, Mut, Pa
         enum_variants: enum_variants,
         struct_layouts: struct_layouts,
         global_types: global_types,
-        array_elem_float_regs: [IR_INVALID_REG; 512],
+        big: lowerer_box_empty_big_arrays(),
         array_elem_float_reg_count: 0,
-        variance_base_regs: [IR_INVALID_REG; 1024],
-        variance_value_regs: [IR_INVALID_REG; 1024],
         variance_base_reg_count: 0,
         debug_mode: false,
         probe_mode: false,
@@ -2056,7 +2080,6 @@ fn lowerer_from_acc_module(module: Box<IrModule>) -> Lowerer with Alloc, Mut, Pa
         fo_bind: Box::new(empty_lower_fo_bind_table()),
         so_enabled: false,
         so_expr_hess: [-1; 36],
-        so_bind_hess: [-1; 576],
         fo_xfer_count: 0,
         fo_xfer_kind: [0; 64],
         fo_xfer_lit: [0.0; 64],
@@ -4897,11 +4920,33 @@ fn lowerer_lower_fn_params_mut(
                 // F128Bits handles (immutable objects: every f128 op allocates a
                 // fresh one), so the element-wise slot copy that keeps a by-value
                 // `[i64; N]` param from aliasing the caller's array is exactly right
-                // for it too. `&[f128; N]` is TypeReference → len -1 → no copy.
+                // for it too.
+                //
+                // `&[f128; N]` must NOT take this copy path: KL-14a
+                // (lower_type_expr_fixed_array_len_ref, self-hosted/ir/lower.sio
+                // ~:3261) made param_array_len peel one `&`/`&!` so `&[i8; N]` FFI
+                // params get a known extent -- so param_array_len is no longer -1
+                // for a reference param, contrary to what this comment used to say.
+                // preg for a reference param holds the ADDRESS of the caller's slot
+                // (native-v2 OpRef is LEA of that slot; see the comment above
+                // fn lower_name_is_handle_buf_builtin for the fuller
+                // explanation -- no line number, this file's line numbers
+                // shift too often for a numeric ref to stay accurate), not
+                // the array
+                // handle itself, so emit_fixed_array_value_copy on it resolves an
+                // unrelated address as a bogus handle -- SIGSEGV, or on a resolvable
+                // address silently wrong data (both measured: the array_only DCE
+                // trigger and the language_f128_arrays witness in
+                // scripts/ci/madaros_f128_f256_v0e57_language_arrays_gate.sh). Only a
+                // BY-VALUE `[f128; N]` legitimately wants the slot copy; a reference
+                // param is bound straight to preg below and reads through the
+                // is_ref / label_id=1 "ref array" path instead (lower_index_expr_ref,
+                // lower_field_expr_ref).
+                let param_is_ref = lower_type_expr_is_ref_like(&(*list).head.ty)
                 let param_word_scalar = lower_type_expr_fixed_array_word_scalar_ref(&(*list).head.ty)
-                    || lower_type_expr_is_array_of_f128(&(*list).head.ty)
+                    || (lower_type_expr_is_array_of_f128(&(*list).head.ty) && !param_is_ref)
                 var param_value_reg = preg
-                if param_array_len >= 0 && param_word_scalar {
+                if param_array_len >= 0 && param_word_scalar && !param_is_ref {
                     let copy_pair = (*lo).emit_fixed_array_value_copy(
                         preg,
                         param_array_len,
@@ -6398,6 +6443,43 @@ fn lower_opt_type_tuple_float_mask(opt: &Option<Box<TypeExpr>>) -> i64 with Mut,
     }
 }
 
+// Sibling of lower_type_list_float_mask: bit k set iff element k of a declared
+// tuple type is an f64 ARRAY (`[f64; N]`), not a scalar f64. `let (a, b) = f()`
+// with `f() -> ([f64;2], f64)` needs THIS bit for slot 0 -- tuple_float_mask's
+// bit 0 would stay clear there since the slot itself is not a scalar float,
+// and without a separate signal `a[i] * k` had no way to learn `a` is a float
+// array once tuple-let desugaring (parser/stmts.sio's tplet_emit_elems) bound
+// it via an unannotated `let a = __tup.0`.
+fn lower_type_list_array_float_mask(opt: &Option<Box<TypeExprList>>, bit: i64) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(list) => {
+            var m: i64 = 0
+            // 31, not 32. The mask is packed into bits 32-62 of the returns_float
+            // code by `<< 32`, and bit 31 shifted that far lands on the i64 sign
+            // bit. The result is negative, and lower_opt_return_float_code then
+            // rejects the whole code at `code >= 1024`, dropping every slot's
+            // mask rather than one. Slot 31 is therefore not representable.
+            if bit < 31 {
+                if lower_type_expr_is_array_of_f64(&(*list).head) {
+                    m = 1 << (bit as i32)
+                }
+            }
+            m + lower_type_list_array_float_mask(&(*list).tail, bit + 1)
+        }
+        None => 0,
+    }
+}
+
+fn lower_opt_type_tuple_array_float_mask(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(te) => {
+            if (*te).kind != TypeExprKind::TypeTuple { return 0 }
+            lower_type_list_array_float_mask(&(*te).type_args, 0)
+        }
+        None => 0,
+    }
+}
+
 // returns_float classification for a declared return type: 1 = scalar f64, 2 = an
 // f64 array (`[f64; N]`), 1024+mask = a tuple with f64 element(s), 0 = other. The `2` lets a caller's `let r = mk()` (mk
 // returning an f64 array) flag `r` as a float-element local, so `r[i]` reads
@@ -6449,8 +6531,15 @@ fn lower_opt_return_float_code(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Pan
     // reads back as undeclared (E137) when the compiler typechecks its own source.
     // The classifier is a pure function of the type expression, so calling it twice
     // costs compile time and nothing else.
-    } else if lower_opt_type_tuple_float_mask(opt) != 0 {
-        1024 + lower_opt_type_tuple_float_mask(opt)
+    //
+    // The scalar mask (bit k = slot k is a scalar f64) lives in bits 0-31; the
+    // array mask (bit k = slot k is `[f64; N]`, e.g. slot 0 of `mk() -> ([f64;2], f64)`)
+    // is packed into bits 32-63 of the SAME code via `<< 32`. Every existing
+    // `code - 1024` consumer reads only bits 0-31 (tuple_idx is always < 32), so
+    // the packed high bits are inert there -- only expr_result_tuple_array_float_mask_ref
+    // reads them back out with `>> 32`.
+    } else if lower_opt_type_tuple_float_mask(opt) != 0 || lower_opt_type_tuple_array_float_mask(opt) != 0 {
+        1024 + lower_opt_type_tuple_float_mask(opt) + (lower_opt_type_tuple_array_float_mask(opt) << (32 as i32))
     } else {
         0
     }
@@ -8232,7 +8321,20 @@ impl Lowerer {
                 }
                 if max_idx < 0 { return 0 - 1 }
                 let slots = max_idx + 1
-                if slots > 64 { return 0 - 1 }
+                // NOTE: this bound must track the field-scan loop above (`fi <
+                // 128`) and the backing `fields: [StructFieldEntry; 128]`
+                // array (see the struct layout table definition). It
+                // originally matched a `fields: [StructFieldEntry; 64]` /
+                // `fi < 64` pair introduced together in 5769c6e851; when the
+                // array and scan bound were both later widened to 128, this
+                // reject threshold was missed. Left at 64, every struct with
+                // 65-128 fields silently fails "is this a registered struct
+                // type" (returns -1) instead of correctly reporting its slot
+                // count -- which made the uninitialized-struct-local backing-
+                // allocation fix (a74aa956a3) silently skip allocation for
+                // structs in that range too, since it gates on this return
+                // value being > 0. Found via PR #2667 review.
+                if slots > 128 { return 0 - 1 }
                 return slots
             }
             si = si + 1
@@ -8284,7 +8386,12 @@ impl Lowerer {
         let dst_reg = pair_dst.1
         lo = lo.emit(ir_alloc(dst_reg, lo.aggregate_storage_bytes(slot_count)))
         var i: i64 = 0
-        while i < slot_count && i < 64 {
+        // Bound must track struct_layout_slot_count's own cap (128, the
+        // registry's actual field capacity) -- this used to stop at 64,
+        // silently truncating the copy (fields 64-127 kept their old/zero
+        // value) for any struct slot_count allocation already widened past
+        // 64 elsewhere. Found via PR #2667 review, comment 4104667818.
+        while i < slot_count && i < 128 {
             let fname = lo.struct_layout_field_name_at(type_name, i)
             let pair_slot = lo.fresh_reg()
             lo = pair_slot.0
@@ -8298,7 +8405,12 @@ impl Lowerer {
 
     // #1479: ONE lookup shared by every per-field query the deep copy makes.
     //
-    // Returns `layout_entry_index * 64 + field_entry_index` for the entry that
+    // Returns `layout_entry_index * 128 + field_entry_index` (128 = the field
+    // scan bound / registry capacity above, not just a base large enough for
+    // this to be a bijection -- a base of 64 previously let field_entry_index
+    // values >= 64 collide with the next layout_entry_index's low field
+    // indices, corrupting struct_layout_pos_* lookups for wide structs; fixed
+    // alongside PR #2667 review comment 4104667818) for the entry that
     // registers slot `slot_index` of `type_name`, or -1 when absent.
     //
     // Why one position instead of three independent scans: a struct type can be
@@ -8319,7 +8431,7 @@ impl Lowerer {
                 let fc = (*self.struct_layouts).entries[si as usize].field_count
                 while fi < fc && fi < 128 {
                     if (*self.struct_layouts).entries[si as usize].fields[fi as usize].index == slot_index {
-                        return si * 64 + fi
+                        return si * 128 + fi
                     }
                     fi = fi + 1
                 }
@@ -8358,8 +8470,8 @@ impl Lowerer {
 
     fn struct_layout_pos_field_name(self, pos: i64) -> Name with Mut, Panic, Div, Alloc {
         if pos < 0 { return ir_empty_name() }
-        let si = pos / 64
-        let fi = pos - si * 64
+        let si = pos / 128
+        let fi = pos - si * 128
         if si >= (*self.struct_layouts).count { return ir_empty_name() }
         // Ported onto main's interned-name representation (was `.name: Name`).
         // NOTE: leaving this as `.name` type-checked and BUILT anyway -- that is #1494
@@ -8370,24 +8482,24 @@ impl Lowerer {
 
     fn struct_layout_pos_array_len(self, pos: i64) -> i64 with Mut, Panic, Div, Alloc {
         if pos < 0 { return 0 }
-        let si = pos / 64
-        let fi = pos - si * 64
+        let si = pos / 128
+        let fi = pos - si * 128
         if si >= (*self.struct_layouts).count { return 0 }
         (*self.struct_layouts).entries[si as usize].fields[fi as usize].word_scalar_array_len
     }
 
     fn struct_layout_pos_is_float(self, pos: i64) -> i64 with Mut, Panic, Div, Alloc {
         if pos < 0 { return 0 }
-        let si = pos / 64
-        let fi = pos - si * 64
+        let si = pos / 128
+        let fi = pos - si * 128
         if si >= (*self.struct_layouts).count { return 0 }
         (*self.struct_layouts).entries[si as usize].fields[fi as usize].is_float
     }
 
     fn struct_layout_pos_named_type(self, pos: i64) -> Name with Mut, Panic, Div, Alloc {
         if pos < 0 { return ir_empty_name() }
-        let si = pos / 64
-        let fi = pos - si * 64
+        let si = pos / 128
+        let fi = pos - si * 128
         if si >= (*self.struct_layouts).count { return ir_empty_name() }
         // Ported onto main's interned-name representation: the layout now stores an
         // id, and `ir_name_at` is main's existing id -> Name reverse.
@@ -8458,7 +8570,12 @@ impl Lowerer {
     fn struct_deep_copy_cost(self, type_name: Name, slot_count: i64, depth: i64) -> i64 with Mut, Panic, Div, Alloc {
         var total: i64 = 1
         var i: i64 = 0
-        while i < slot_count && i < 64 {
+        // Bound must track emit_struct_value_copy_deep's own loop below (and
+        // struct_layout_slot_count's 128-field cap) -- an under-estimate here
+        // would let the actual emitter overrun IR_MAX_INSTRS (see the doc
+        // comment above), so this was the more dangerous of the two stale-64
+        // instances fixed alongside comment 4104667818.
+        while i < slot_count && i < 128 {
             total = total + 2
             let pos = self.struct_layout_field_pos(type_name, i)
             let arr_len = self.struct_layout_pos_array_len(pos)
@@ -8507,7 +8624,9 @@ impl Lowerer {
         let dst_reg = pair_dst.1
         lo = lo.emit(ir_alloc(dst_reg, lo.aggregate_storage_bytes(slot_count)))
         var i: i64 = 0
-        while i < slot_count && i < 64 {
+        // Same stale-64 cap as emit_struct_value_copy above (comment 4104667818):
+        // widened to 128 to match struct_layout_slot_count's actual capacity.
+        while i < slot_count && i < 128 {
             let pos = lo.struct_layout_field_pos(type_name, i)
             let fname = lo.struct_layout_pos_field_name(pos)
             let pair_slot = lo.fresh_reg()
@@ -9223,6 +9342,12 @@ impl Lowerer {
                 // Callers that know a positive kind (for-IV int, float local) re-bind.
                 (*(*stk).scalar_kind).values[idx as usize] = 0
                 (*(*stk).tuple_float_mask).values[idx as usize] = 0
+                // Same reuse hazard as tuple_float_mask: lower_block_ref restores
+                // only locals.count on block exit, so a slot handed to a later
+                // binding still holds the previous tuple's array mask. Without
+                // this zeroing, `a[i]` of an integer array inherited the f64
+                // classification and lowered as a float multiply.
+                (*(*stk).tuple_array_f64_mask).values[idx as usize] = 0
                 (*(*stk).tuple0_array_elem_layout).values[idx as usize] = 0 - 1
                 (*(*stk).tuple_struct_layout).values[idx as usize] = 0 - 1
                 (*(*stk).tuple_struct_slot).values[idx as usize] = 0 - 1
@@ -9374,6 +9499,36 @@ impl Lowerer {
         while i >= 0 {
             if (*(*self.locals).depths).values[i as usize] <= self.scope_depth && ir_name_eq((*(*self.locals).names).values[i as usize], name) {
                 return (*(*self.locals).tuple_float_mask).values[i as usize]
+            }
+            i = i - 1
+        }
+        0
+    }
+
+    // Sibling of bind_local_tuple_float_mask for the array-slot mask (see the
+    // tuple_array_f64_mask field comment): bit k set iff slot k of this
+    // tuple-typed local is `[f64; N]`.
+    fn bind_local_tuple_array_float_mask(self, name: Name, mask: i64) -> Lowerer with Mut, Alloc, Panic, Div {
+        var lo = self
+        if mask == 0 { return lo }
+        var stk = *lo.locals
+        var i = stk.count - 1
+        while i >= 0 {
+            if (*stk.depths).values[i as usize] <= lo.scope_depth && ir_name_eq((*stk.names).values[i as usize], name) {
+                (*stk.tuple_array_f64_mask).values[i as usize] = mask
+                lo.locals = Box::new(stk)
+                return lo
+            }
+            i = i - 1
+        }
+        lo
+    }
+
+    fn lookup_local_tuple_array_float_mask(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*(*self.locals).depths).values[i as usize] <= self.scope_depth && ir_name_eq((*(*self.locals).names).values[i as usize], name) {
+                return (*(*self.locals).tuple_array_f64_mask).values[i as usize]
             }
             i = i - 1
         }
@@ -9908,16 +10063,16 @@ impl Lowerer {
         }
         var i: i64 = 0
         while i < lo.variance_base_reg_count {
-            if lo.variance_base_regs[i as usize] == base_reg {
-                lo.variance_value_regs[i as usize] = variance_reg
+            if (*lo.big).variance_base_regs[i as usize] == base_reg {
+                (*lo.big).variance_value_regs[i as usize] = variance_reg
                 return lo
             }
             i = i + 1
         }
         if lo.variance_base_reg_count < 1024 {
             let idx = lo.variance_base_reg_count
-            lo.variance_base_regs[idx as usize] = base_reg
-            lo.variance_value_regs[idx as usize] = variance_reg
+            (*lo.big).variance_base_regs[idx as usize] = base_reg
+            (*lo.big).variance_value_regs[idx as usize] = variance_reg
             lo.variance_base_reg_count = idx + 1
         }
         // #1706 NOTE: past this wall a variance binding is silently DROPPED and the
@@ -9997,8 +10152,8 @@ impl Lowerer {
     fn lookup_variance_for_base_reg(self, base_reg: i64) -> i64 with Mut, Panic, Div {
         var i: i64 = 0
         while i < self.variance_base_reg_count {
-            if self.variance_base_regs[i as usize] == base_reg {
-                return self.variance_value_regs[i as usize]
+            if (*self.big).variance_base_regs[i as usize] == base_reg {
+                return (*self.big).variance_value_regs[i as usize]
             }
             i = i + 1
         }
@@ -10512,7 +10667,7 @@ impl Lowerer {
         }
         var i: i64 = 0
         while i < 36 {
-            lo.so_bind_hess[(row * 36 + i) as usize] = lo.so_expr_hess[i as usize]
+            (*lo.big).so_bind_hess[(row * 36 + i) as usize] = lo.so_expr_hess[i as usize]
             i = i + 1
         }
         lo
@@ -10535,7 +10690,7 @@ impl Lowerer {
         }
         var j: i64 = 0
         while j < 36 {
-            lo.so_expr_hess[j as usize] = lo.so_bind_hess[(row * 36 + j) as usize]
+            lo.so_expr_hess[j as usize] = (*lo.big).so_bind_hess[(row * 36 + j) as usize]
             j = j + 1
         }
         lo
@@ -13246,13 +13401,13 @@ impl Lowerer {
         }
         var i: i64 = 0
         while i < lo.array_elem_float_reg_count {
-            if lo.array_elem_float_regs[i as usize] == reg {
+            if (*lo.big).array_elem_float_regs[i as usize] == reg {
                 return lo
             }
             i = i + 1
         }
         if lo.array_elem_float_reg_count < 512 {
-            lo.array_elem_float_regs[lo.array_elem_float_reg_count as usize] = reg
+            (*lo.big).array_elem_float_regs[lo.array_elem_float_reg_count as usize] = reg
             lo.array_elem_float_reg_count = lo.array_elem_float_reg_count + 1
         }
         lo
@@ -13264,7 +13419,7 @@ impl Lowerer {
         }
         var i: i64 = 0
         while i < self.array_elem_float_reg_count {
-            if self.array_elem_float_regs[i as usize] == reg {
+            if (*self.big).array_elem_float_regs[i as usize] == reg {
                 return true
             }
             i = i + 1
@@ -16516,11 +16671,18 @@ impl Lowerer {
 
                     let param_array_len = lower_type_expr_fixed_array_len_ref(&(*list).head.ty)
                     // V0-E.5.7: see path A — a by-value `[f128; N]` param copies its
-                    // handle slots so it cannot alias the caller's array.
+                    // handle slots so it cannot alias the caller's array. `&[f128; N]`
+                    // must NOT: since KL-14a, param_array_len peels one `&`/`&!` (so
+                    // `&[i8; N]` FFI params get a known extent) and is no longer -1 for
+                    // a reference param, so this copy must be excluded explicitly or it
+                    // treats preg -- the ADDRESS of the caller's slot for a reference
+                    // param, not the array handle -- as a handle to copy from. Same
+                    // root cause and fix as path A above.
+                    let ref_param_is_ref = lower_type_expr_is_ref_like(&(*list).head.ty)
                     let param_word_scalar = lower_type_expr_fixed_array_word_scalar_ref(&(*list).head.ty)
-                        || lower_type_expr_is_array_of_f128(&(*list).head.ty)
+                        || (lower_type_expr_is_array_of_f128(&(*list).head.ty) && !ref_param_is_ref)
                     var param_value_reg = preg
-                    if param_array_len >= 0 && param_word_scalar {
+                    if param_array_len >= 0 && param_word_scalar && !ref_param_is_ref {
                         lo.current_func = current_func
                         let copy_pair = lo.emit_fixed_array_value_copy(
                             preg,
@@ -17324,6 +17486,33 @@ impl Lowerer {
         false
     }
 
+    // Tuple-let desugar (parser/stmts.sio's tplet_emit_elems): `let (a, b) = f()`
+    // becomes `let __tup = f()` plus an unannotated `let a = __tup.0`. Neither
+    // expr_result_is_f64_array_ref (wants an ExprCall) nor the ExprIdent/literal
+    // cases in lower_let_stmt_type_metadata_ref ever match that shape, so `a`
+    // needs its own check: is `e` a tuple-slot field access whose base carries
+    // an array-mask bit for that slot (bound on `__tup` by
+    // expr_result_tuple_array_float_mask_ref, below, when `__tup` itself was let-bound)?
+    fn expr_result_is_tuple_slot_f64_array_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).kind != ExprKind::ExprFieldAccess {
+            return false
+        }
+        let slot = lower_name_tuple_index((*e).name)
+        if slot < 0 || slot >= 32 {
+            return false
+        }
+        match (*e).left {
+            Some(base) => {
+                if (*base).kind == ExprKind::ExprIdent {
+                    let mask = self.lookup_local_tuple_array_float_mask((*base).name)
+                    return (mask >> (slot as i32)) % 2 == 1
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
     // #1502: per-slot float mask of a tuple-producing initialiser -- either a call
     // whose declared return type is a tuple (encoded 1024+mask by
     // lower_opt_return_float_code) or a literal tuple, whose element expressions are
@@ -17358,6 +17547,68 @@ impl Lowerer {
                     let code = ir_fn_get(&(*self.module), fn_id as usize).returns_float
                     if code >= 1024 {
                         return code - 1024
+                    }
+                }
+                0
+            }
+            _ => 0,
+        }
+    }
+
+    // Sibling of expr_result_tuple_float_mask_ref for the array-slot mask: reads
+    // back the high half (bits 32-62) that lower_opt_return_float_code packed
+    // via `<< 32` -- bit k set iff slot k of the call's declared tuple return
+    // type is `[f64; N]`. `code - 1024` in bits 0-31 is the scalar mask and is
+    // untouched by this shift.
+    fn expr_list_tuple_array_float_mask_ref(self, opt: &Option<Box<ExprList>>, bit: i64) -> i64 with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(list) => {
+                var m: i64 = 0
+                // 31, not 32: bit 31 shifted into the high half hits the sign bit.
+                if bit < 31 {
+                    let head = &(*list).head
+                    var is_f64_array = lower_expr_is_f64_array_literal_ref(head)
+                    if !is_f64_array && (*head).kind == ExprKind::ExprIdent {
+                        is_f64_array = self.lookup_local_array_elem_float((*head).name)
+                    }
+                    if !is_f64_array {
+                        is_f64_array = self.expr_result_is_f64_array_ref(head)
+                    }
+                    // `(pair.0, 1.0)`: the element is itself a tuple slot that
+                    // was already classified. The direct binding handles that
+                    // shape; wrapping it in a tuple literal has to as well.
+                    if !is_f64_array {
+                        is_f64_array = self.expr_result_is_tuple_slot_f64_array_ref(head)
+                    }
+                    if is_f64_array {
+                        m = 1 << (bit as i32)
+                    }
+                }
+                m + self.expr_list_tuple_array_float_mask_ref(&(*list).tail, bit + 1)
+            }
+            _ => 0,
+        }
+    }
+
+    fn expr_result_tuple_array_float_mask_ref(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+        // `let (a, b) = (arr, 9.0)` binds `__tup` from an ExprTupleLit, not a call.
+        // The scalar twin handles that shape; without the same arm here, `a`
+        // never receives array_elem_float and `a[0] * k` lowers as an integer
+        // multiply exactly as the call case did before this fix.
+        if (*e).kind == ExprKind::ExprTupleLit {
+            return self.expr_list_tuple_array_float_mask_ref(&(*e).args, 0)
+        }
+        if (*e).kind != ExprKind::ExprCall {
+            return 0
+        }
+        match (*e).left {
+            Some(callee_expr) => {
+                let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
+                let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
+                if fn_id >= 0 && fn_id < self.module.fn_count {
+                    let code = ir_fn_get(&(*self.module), fn_id as usize).returns_float
+                    if code >= 1024 {
+                        return (code - 1024) >> (32 as i32)
                     }
                 }
                 0
@@ -17422,6 +17673,34 @@ impl Lowerer {
 
     fn lower_let_stmt_after_expr_ref(self, s: &Stmt, is_mut: bool, reg: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
+        // Captured BEFORE bind_local(s.name, ...) below rebinds `s.name` to a
+        // fresh (non-ref) slot. Same-name shadowing (`let a = a`) means a
+        // post-bind lookup_local_is_ref(rhs name) would find that fresh slot
+        // instead of the outer one it's meant to read, since lookup searches
+        // newest-first — silently losing is_ref on the shadowing form.
+        var rhs_ident_is_ref = false
+        match s.expr {
+            Some(rhs_ident_pre) => {
+                if (*rhs_ident_pre).kind == ExprKind::ExprIdent {
+                    // A source that is BOTH ref-typed AND array_copy_word_scalar must
+                    // NOT propagate is_ref. V0-E.5.7 forces a value-copy of every
+                    // `&[f128; N]` param regardless of the `&` annotation
+                    // (lower_fn_params_ref: param_word_scalar is true for any f128
+                    // array, ref or not), materializing a REAL GC array handle in
+                    // the param's own register via emit_fixed_array_value_copy --
+                    // not a caller address. That local is simultaneously is_ref=1
+                    // (from the `&` in its declared type) and array_copy_word_scalar=1
+                    // (from the forced copy); the copy is what actually describes its
+                    // register's contents. Propagating is_ref to `zs` in `let zs = a`
+                    // would route zs[i] through the ref-array/deref path (label_id=1)
+                    // onto a register that holds a handle, not an address --
+                    // corrupting the read/write instead of indexing the array.
+                    rhs_ident_is_ref = lo.lookup_local_is_ref((*rhs_ident_pre).name)
+                        && !lo.lookup_local_array_copy_word_scalar((*rhs_ident_pre).name)
+                }
+            }
+            _ => {}
+        }
         var fixed_array_len = lower_opt_type_fixed_array_len(&s.ty)
         var fixed_array_word_scalar = lower_opt_type_fixed_array_word_scalar(&s.ty)
         var rhs_array_elem_is_float = false
@@ -17492,6 +17771,43 @@ impl Lowerer {
                         lo = lo.bind_reg_array_elem_float(uninit_dst)
                     }
                     bind_reg = uninit_dst
+                } else {
+                    // #2667-repeat (same shape as #1548, for structs instead of
+                    // fixed arrays): `var out: SomeStruct` with NO initializer must
+                    // still allocate the struct's backing handle. Without this,
+                    // s.expr is None so the generic path above lowers to
+                    // emit_unit (ir_load_imm 0) and `out` is bound to the bare
+                    // value 0 — any subsequent field write/read on `out` (or on
+                    // the value once returned to a caller across a module
+                    // boundary, e.g. `code_buffer_new()`) resolves handle 0 and
+                    // SIGSEGVs. A struct LITERAL (`SomeStruct { .. }`) already
+                    // allocates correctly via lower_struct_literal_expr_ref; an
+                    // annotated-but-uninitialized declaration is the one shape
+                    // that fell through to emit_unit. Allocate exactly like the
+                    // fixed-array case above: ir_alloc with no fill, since the
+                    // fresh heap arena is zero pages (every slot reads 0 / the
+                    // GC-boxed zero handle), matching struct-literal parity.
+                    //
+                    // Existence check uses lower_struct_layout_index_of (a plain
+                    // registry lookup) rather than `struct_layout_slot_count(..) >
+                    // 0`: the latter used to reject (return -1) any struct past 64
+                    // slots even though the registry supports up to 128 fields (see
+                    // struct_layout_slot_count's own widening, PR #2667 review
+                    // comment 4104342929) -- decoupling "is this a registered
+                    // struct" from "how many slots does it have" means this gate
+                    // itself can never regress the same way again, independent of
+                    // whatever the slot-count cap happens to be.
+                    let st_name = lower_opt_type_named_name(&s.ty)
+                    let st_idx = lower_struct_layout_index_of(&(*lo.struct_layouts), st_name)
+                    if st_idx >= 0 {
+                        let st_slot_count = lo.struct_layout_slot_count(st_name)
+                        let uninit_pair = lo.fresh_reg()
+                        lo = uninit_pair.0
+                        let uninit_dst = uninit_pair.1
+                        lo = lo.emit(ir_alloc(uninit_dst, lo.aggregate_storage_bytes(st_slot_count)))
+                        lo = lo.bind_local_struct_type(s.name, st_name)
+                        bind_reg = uninit_dst
+                    }
                 }
             }
             _ => {}
@@ -17563,7 +17879,22 @@ impl Lowerer {
             _ => {}
         }
         lo = lo.bind_local(s.name, bind_reg, is_mut)
-        lo.lower_let_stmt_finalize_ref(s, is_mut, reg, fixed_array_len, fixed_array_word_scalar, rhs_array_elem_is_float)
+        // See the `var out: SomeStruct` (no initializer) note above: the local
+        // must exist on the stack (bind_local, just above) before
+        // bind_local_struct_type can record its type -- it mutates an existing
+        // stack entry rather than creating one.
+        match s.expr {
+            None => {
+                if fixed_array_len < 0 {
+                    let st_name_noinit = lower_opt_type_named_name(&s.ty)
+                    if lo.struct_layout_slot_count(st_name_noinit) > 0 {
+                        lo = lo.bind_local_struct_type(s.name, st_name_noinit)
+                    }
+                }
+            }
+            _ => {}
+        }
+        lo.lower_let_stmt_finalize_ref(s, is_mut, reg, fixed_array_len, fixed_array_word_scalar, rhs_array_elem_is_float, rhs_ident_is_ref)
     }
 
     fn lower_let_stmt_finalize_ref(
@@ -17573,7 +17904,8 @@ impl Lowerer {
         reg: i64,
         fixed_array_len: i64,
         fixed_array_word_scalar: bool,
-        rhs_array_elem_is_float: bool
+        rhs_array_elem_is_float: bool,
+        rhs_ident_is_ref: bool
     ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         // Ref-typed locals (annotated &T / &!T, or RHS is & / &! expr) must be marked
@@ -17586,6 +17918,23 @@ impl Lowerer {
                 Some(rhs_ref) => {
                     if (*rhs_ref).kind == ExprKind::ExprUnary {
                         if (*rhs_ref).un_op == UnaryOp::OpRef || (*rhs_ref).un_op == UnaryOp::OpRefMut {
+                            bind_as_ref = true
+                        }
+                    } else if (*rhs_ref).kind == ExprKind::ExprIdent {
+                        // `let zs = a` where `a` is itself already a reference-typed
+                        // local/param (unannotated bare-identifier alias). Without this,
+                        // `zs` loses the is_ref bit that every lookup_local_is_ref call
+                        // site (IndexGet/Set, FieldGet/Set, .len(), &self auto-ref,
+                        // for-in-array, struct_local_is_value_copyable, …) depends on to
+                        // route through the ref-array/deref path instead of treating the
+                        // address as an ordinary GC handle.
+                        //
+                        // rhs_ident_is_ref was captured by the caller BEFORE s.name was
+                        // rebound (bind_local above), so same-name shadowing (`let a = a`)
+                        // still reads the OUTER `a` here instead of the fresh (non-ref)
+                        // slot bind_local just created for the new `a` — lookup_local_is_ref
+                        // on (*rhs_ref).name at this point would find that fresh slot first.
+                        if rhs_ident_is_ref {
                             bind_as_ref = true
                         }
                     }
@@ -17625,7 +17974,7 @@ impl Lowerer {
                     let dst_reg = lo.lookup_local(s.name)
                     if src_reg >= 0 && dst_reg >= 0 && src_reg != dst_reg {
                         var fi: i64 = 0
-                        while fi < 64 {
+                        while fi < 128 {  // matches the struct layout registry's 128-field capacity (see struct_layout_slot_count); was 64, silently dropping variance metadata for fields 64-127
                             let sv = lo.lookup_variance_for_field(src_reg, fi)
                             if sv >= 0 {
                                 lo = lo.bind_variance_for_field(dst_reg, fi, sv)
@@ -17683,7 +18032,7 @@ impl Lowerer {
                     let dst_reg = lo.lookup_local(s.name)
                     if src_reg >= 0 && dst_reg >= 0 && src_reg != dst_reg {
                         var fi: i64 = 0
-                        while fi < 64 {
+                        while fi < 128 {  // matches the struct layout registry's 128-field capacity (see struct_layout_slot_count); was 64, silently dropping variance metadata for fields 64-127
                             let sv = lo.lookup_variance_for_field(src_reg, fi)
                             if sv >= 0 {
                                 lo = lo.bind_variance_for_field(dst_reg, fi, sv)
@@ -17768,6 +18117,13 @@ impl Lowerer {
                         lo = lo.bind_local_array_elem_float(s.name)
                     } else if rhs_array_elem_is_float {
                         lo = lo.bind_local_array_elem_float(s.name)
+                    } else if lo.expr_result_is_tuple_slot_f64_array_ref(&(*expr_box_arr)) {
+                        // Tuple-let desugar: `let (a, b) = f()` with `f() -> ([f64;2], f64)`
+                        // binds `a` here via an unannotated `let a = __tup.0` (parser/stmts.sio's
+                        // tplet_emit_elems) -- none of the cases above match that shape, so `a`
+                        // never got array_elem_float and `a[0] * 2.0` mis-lowered as an integer
+                        // multiply, reinterpreting the IEEE bits on print.
+                        lo = lo.bind_local_array_elem_float(s.name)
                     }
                 }
                 _ => {}
@@ -17783,6 +18139,24 @@ impl Lowerer {
                     let init_tuple_mask = lo.expr_result_tuple_float_mask_ref(&(*expr_box_tup))
                     if init_tuple_mask != 0 {
                         lo = lo.bind_local_tuple_float_mask(s.name, init_tuple_mask)
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Sibling of the tuple_float_mask block above, for the array-slot mask:
+        // record which slots of a tuple-typed local are `[f64; N]`, so a LATER
+        // `let a = __tup.0` (tuple-let desugar) can look this up via
+        // expr_result_is_tuple_slot_f64_array_ref, above.
+        let annotated_tuple_array_mask = lower_opt_type_tuple_array_float_mask(&s.ty)
+        if annotated_tuple_array_mask != 0 {
+            lo = lo.bind_local_tuple_array_float_mask(s.name, annotated_tuple_array_mask)
+        } else {
+            match s.expr {
+                Some(expr_box_tup_arr) => {
+                    let init_tuple_array_mask = lo.expr_result_tuple_array_float_mask_ref(&(*expr_box_tup_arr))
+                    if init_tuple_array_mask != 0 {
+                        lo = lo.bind_local_tuple_array_float_mask(s.name, init_tuple_array_mask)
                     }
                 }
                 _ => {}
