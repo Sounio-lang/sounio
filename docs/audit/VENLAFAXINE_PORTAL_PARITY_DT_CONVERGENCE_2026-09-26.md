@@ -167,26 +167,64 @@ Successive-difference ratios, halvings from dt = 0.5 h to 1/256 h:
   instantaneous release at t = 0⁺. A constant rate over the first step
   mis-times that impulse by ~h/2, which is a first-order term. It dominates
   below dt ≈ 0.06 h and is small at 0.5 h. The same series is also −0.1 % low
-  near saturation (74.919 mg at 11.99 h), which moves the switch-off. This is
+  near saturation (74.919 mg at 11.99 h), which moves the switch-off from
+  11.986 h to 12.010 h. This is
   bold-robinson's dispatch
   (docs/audit/MATRIX_ER_TRANSCENDENTAL_ACCURACY_DISPATCH_2026-09-26.md, PR
   #2722, `matrix_er` → `math::pure`), not addressed here.
-- **Release switch-off.** At t* = (1/k)^(1/n) ≈ 11.99 h the release rate drops
-  to zero inside a step. A constant rate over that step mis-times a moment of
-  order R(t*)·δ·(h − δ), δ = 12 − t*. The effect is small at production dt
-  (Grok estimated it at ~50× below the start-up term at 0.5 h), but it makes
-  the late-time ratios erratic once dt is comparable to δ. With the exact
-  curve, cumulative portal input at 24 h converges at first order.
+- **Release switch-off.** The release rate drops to zero inside a step at
+  t* = (1/k)^(1/n): 11.986 h analytically, 12.010 h on `matrix_er`'s series.
+  A constant rate over that step mis-times a moment of order R(t*)·δ·(h − δ),
+  where δ is t*'s offset in its step. The effect is small at production dt
+  (Grok estimated it at ~50× below the start-up term at 0.5 h), but it made
+  the late-time ratios erratic once dt was comparable to δ. With the exact
+  curve, cumulative portal input at 24 h converged at first order. **Fixed by
+  the split below.**
 
-Whether the 2 h and 24 h concentrations at production dt sit at 1.3–1.4
-because of solver start-up on the non-smooth input (Grok's 2 − n = 1.35
-suggestion) is not settled. With the exact curve the 2 h order climbs to 1.57
-and has not levelled off by dt = 1/256 h.
+Whether the 2 h concentrations at production dt sit at 1.3–1.4 because of
+solver start-up on the non-smooth input (Grok's 2 − n = 1.35 suggestion) is not
+settled. With the exact curve the 2 h order climbs to 1.57 and has not levelled
+off by dt = 1/256 h.
 
-Splitting the step at t* and replacing the release transcendentals would remove
-the last two limits. Neither is done here: `MatrixReleaseModel`'s k and dose
-fields are private, #2722 is another lane's open PR, and the operator approved
-the gut update only.
+### Release window split at matrix saturation (applied, operator decision 2026-09-27)
+
+`vfx_gut_release_step(gut, rel, t, dt)` now confines the step's release to
+`vfx_release_window(rel, t, dt)`. That is dt, except in the one step where the
+matrix saturates. There the window ends at the saturation time, found by
+bisecting the public `matrix_fraction` on the step (64 halvings), so it matches
+the curve the release amounts come from, 12.0099 h on the current series. The
+pool is solved exactly through the window (`vfx_gut_absorb_step_window`) and
+then decays for the rest of the step. `MatrixReleaseModel`'s private fields
+are not needed. The scenario, the formation test, the parity ref and the probe
+all call `vfx_gut_release_step`. The JS mirror follows in the same operation
+order.
+
+`darwin_venlafaxine_gut_first_pass.sio` asserts:
+- that a windowed step equals a step of the window length with the release
+  followed by a release-free step for the remainder. The residual is 0 on
+  Madaros; with the post-window decay removed, it fails by 2.3 mg;
+- that exactly one step of the canonical run has a window shorter than dt
+  (12.0 h, window 0.009873 h on both engines);
+- that the matrix fraction reaches 1 at the window's end and not before.
+
+Successive-difference ratios, dt = 0.5 h down to 1/256 h, exact release curve:
+
+| quantity | before the split | after the split |
+|---|---|---|
+| C_b,parent 24 h | 2.55 2.55 2.47 2.36 6.41 2.66 | 2.85 3.02 3.08 3.09 3.10 3.12 (p → 1.64) |
+| C_b,ODV 24 h | 3.23 3.19 3.14 3.08 3.78 3.21 | 3.29 3.28 3.28 3.29 3.30 3.30 (p 1.72) |
+| portal input 24 h | 2.36 2.19 2.10 2.05 12.4 2.13 (p → 1) | 3.93 3.91 3.88 3.85 3.81 3.80 (p 1.92–1.98) |
+
+The late-time orders are now regular. They sit at the release singularity's
+1 + n (concentrations) or near 2 (cumulative portal input, which integrates
+the input). Nothing before 12 h changes. At dt = 0.5 h the values move little,
+as expected (C_b,parent at 24 h: +0.056 % → about +0.04 %). The stdlib curve
+still carries the `matrix_er` floor term below dt ≈ 0.06 h, which #2722
+addresses. C_b,parent at 12 h is sampled 0.014 h after the analytic t*; there
+its successive differences change sign, so its ratios do not measure an order.
+
+Replacing the release transcendentals (#2722) is still not done here: it is
+another lane's open PR.
 
 The run-integrated readouts remain dt-independent: the oral CL/F is
 100.0000000, AUC_parent(0, 120 h) is 0.75, and the AUC ratio is 3.5714241 at
@@ -272,3 +310,22 @@ dt-independence claim. Three vendors returned verdicts.
     does not bear out Grok's alternative 2 − n = 1.35 at 2 h: that order climbs
     past 1.5 with the exact curve. The audit text above was rewritten to match
     the measurements.
+
+### Round 3: release window split (2026-09-27)
+
+- **Gemini 2.5 Pro.** OK on the window step (exact, and bitwise equal to the
+  plain step when τ = dt), on bisecting the capped fraction with the model's own
+  t*, and on the late-time interpretation. It adds the reason portal input at
+  24 h converges near second order:
+  - portal(T) = F_abs·(released(T) − G(T)), and released(T) is exact on the grid;
+  - so the portal error is −F_abs·err(G(T));
+  - err(G) obeys e′ = −ka·e + (R − R̃), so the early start-up error decays like
+    e^(−ka·t) and only the smooth, O(h²) error near the switch-off is left by
+    24 h;
+  - concentrations are a convolution over the whole error history, so they keep
+    the early 1 + n term.
+- **Qwen 3 235B.** OK on the window step and the bisection. Its Q3 "overreach"
+  is rejected: it reads portal input as converging with ratios → 2, which are
+  the before-split numbers. After the split the ratios are 3.80–3.93. Its own
+  argument, that integrating the input gains one order capped at 2, supports
+  the near-second-order reading.
