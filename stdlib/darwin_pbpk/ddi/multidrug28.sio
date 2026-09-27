@@ -763,7 +763,12 @@ pub fn md_step(md: &!MultiDrug28, dt: f64) with Mut, Div, Panic {
 }
 
 // Advances to exactly t_end with steps of dt. The number of full steps is
-// fixed from the initial span, n = floor(span/dt + round-off), and any real
+// fixed from the initial span: n starts at the integer nearest span/dt and is
+// lowered until t0 + n·dt <= t_end + 4u·max(|t0|, |t_end|), so the full steps
+// can never pass the target (a rounding allowance added to span/dt instead,
+// as first written, grew with t0/dt: from t0 = 2^53, run_to(t0 + 2, 2) took
+// three 2 h steps -- 6 mg of a 1 mg/h infusion -- and then moved the clock
+// back; PR #2695 review). Any real
 // remainder after them is integrated as one shortened step, so dosing times
 // off the dt grid are honoured and nothing is discarded. "Real" means above
 // the round-off scale of t: 4u·max(|t0|, |t_end|) plus the drift the n full
@@ -788,10 +793,11 @@ pub fn md_run_to(md: &!MultiDrug28, t_end: f64, dt: f64) with Mut, Div, Panic {
     let ate = if t_end < 0.0 { 0.0 - t_end } else { t_end }
     let t_scale = if at0 > ate { at0 } else { ate }
     let span = t_end - t0
-    let r = span / dt
-    // r carries the rounding of span (u·t_scale absolute) and of the division.
-    let r_tol = 4.0 * u * (r + t_scale / dt)
-    let n_full = (r + r_tol) as i64
+    let slack = 4.0 * u * t_scale
+    var n_full = (span / dt + 0.5) as i64
+    while n_full > 0 && t0 + (n_full as f64) * dt > t_end + slack {
+        n_full = n_full - 1
+    }
     var k: i64 = 0
     while k < n_full {
         md_step(md, dt)
@@ -800,7 +806,7 @@ pub fn md_run_to(md: &!MultiDrug28, t_end: f64, dt: f64) with Mut, Div, Panic {
     let ideal = t0 + (n_full as f64) * dt
     let d0 = (*md).t - ideal
     let drift = if d0 < 0.0 { 0.0 - d0 } else { d0 }
-    let tol_t = 4.0 * u * t_scale + drift
+    let tol_t = slack + drift
     let rem = t_end - (*md).t
     if rem > tol_t {
         md_step(md, rem)

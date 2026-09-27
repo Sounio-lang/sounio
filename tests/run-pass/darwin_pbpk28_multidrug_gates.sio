@@ -117,6 +117,13 @@
 //     md_step of the 5e-10 h remainder (md_same_drug) and end at that t. With
 //     the previous 1e-9·dt snap tolerance it took one step and dropped the
 //     remainder, and this check fails.
+//     At a large clock the full-step count must not pass the target: from
+//     t0 = 2^53 (ulp 2 h) with a 1 mg/h infusion, run_to(t0 + 2, dt 2) must
+//     end at t0 + 2 having infused exactly 2 mg, and from t0 = 2^40,
+//     run_to(t0 + 10.5, dt 2) five 2 h steps plus a 0.5 h one, 10.5 mg: the
+//     integrated time equals the clock advance. The first version of the
+//     step-count rule took three steps in the 2^53 case (6 mg for a 2 h
+//     advance) and moved the clock back, and this check fails on it.
 //
 // V8  Configuration. md_config_error, the check every md_step panics on,
 //     returns 2 for md.iters < 0 (a negative count ran zero sweeps: silent Lie
@@ -480,6 +487,20 @@ fn v7_setup(md: &!MultiDrug28) -> i32 with Mut, Div, Panic {
     return i
 }
 
+// Infusion of 1 mg/h from clock t0; returns infused mass minus clock advance
+// after run_to(t0 + span, dt), or 1e300 when the clock did not land on t_end.
+fn v7_big_clock(t0: f64, span: f64, dt: f64) -> f64 with Mut, Div, Panic {
+    var md = md_new(true)
+    var p = pbpk28_params_rapamycin()
+    p.cl_central = 1.0
+    let i = md_add_drug(&!md, p, 0.1, 1.0, 1.0)
+    md.t = t0
+    md_set_iv_rate(&!md, i, 1.0)
+    md_run_to(&!md, t0 + span, dt)
+    if !(md.t == t0 + span) { return 1.0e300 }
+    return md.dose_in[i] - (md.t - t0)
+}
+
 fn gate_v7() -> bool with Mut, Div, Panic, IO {
     var a = md_new(true)
     let i = v7_setup(&!a)
@@ -542,7 +563,11 @@ fn gate_v7() -> bool with Mut, Div, Panic, IO {
     md_step(&!hx, 1.0000000005 - hx.t)
     let rem_ok = h.t == 1.0000000005 && md_same_drug(&h, ih, &hx, jx)
     print("V7 run_to(1.0000000005, dt 1.0) = explicit 1.0 + 5e-10 steps: ") println(rem_ok)
-    return a.t == 0.61 && same && short_ok && grid_ok && back_ok && past_ok && big_ok && rem_ok
+    let big_a = v7_big_clock(9007199254740992.0, 2.0, 2.0)
+    let big_b = v7_big_clock(1099511627776.0, 10.5, 2.0)
+    print("V7 large clock, infused mass - clock advance (mg): t0 = 2^53, +2 h: ") print(big_a) print("  t0 = 2^40, +10.5 h: ") println(big_b)
+    let clock_ok = big_a == 0.0 && big_b == 0.0
+    return a.t == 0.61 && same && short_ok && grid_ok && back_ok && past_ok && big_ok && rem_ok && clock_ok
 }
 
 // V8 --------------------------------------------------------------------------
