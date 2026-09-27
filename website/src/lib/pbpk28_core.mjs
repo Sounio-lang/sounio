@@ -979,6 +979,9 @@ function vfxLedgerResidual(lg, st) {
 // (vfx_gut_absorb_step_window): pool carried through the window, then decays
 // for dt − relDt.
 export function vfxGutAbsorbStepWindow(gutMg, relMg, relDt, dt) {
+  if (!(Number.isFinite(dt) && dt > 0 && relDt > 0 && relDt <= dt)) {
+    throw new RangeError(`vfxGutAbsorbStepWindow: need finite dt > 0 and 0 < relDt <= dt, got dt = ${dt}, relDt = ${relDt}`);
+  }
   const ka = VFX_KA_ABS;
   const x = ka * relDt;
   const decay = merExpNeg(0.0 - x);
@@ -1002,7 +1005,8 @@ export function vfxReleaseWindow(rel, tStart, dt) {
     const mid = 0.5 * (lo + hi);
     if (vfxMatrixFraction(rel, mid) >= 1.0) hi = mid; else lo = mid;
   }
-  return hi - tStart;
+  const w = hi - tStart;            // (t + dt) − t can exceed dt by an ulp
+  return w > dt ? dt : w;
 }
 
 // Steps 1-2 (vfx_gut_release_step).
