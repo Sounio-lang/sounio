@@ -2,8 +2,8 @@
 topic_id: repo.docs.audit.madaros-wave13-imported-f64-lognormal-defect-2026-07-24
 authority: repo_only
 audience: users
-last_validated: 2026-07-24
-validated_by: claude-1
+last_validated: 2026-03-07
+validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-wave13-imported-f64-lognormal-defect-2026-07-24
 -->
 
