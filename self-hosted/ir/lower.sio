@@ -14616,6 +14616,46 @@ impl Lowerer {
                     if (*indexed).kind == ExprKind::ExprFieldAccess {
                         return self.field_array_elem_type_name_for_base_ref(&(*indexed).left, (*indexed).name)
                     }
+                    // Copilot review (PR #2516), comment 4114931470: this
+                    // ExprIndex arm only ever handled an ExprIdent or
+                    // ExprFieldAccess indexed base, so `make_holders()[0]
+                    // .values` (indexed base is an ExprCall) and
+                    // `[Holder { .. }][0].values` (an ExprArrayLit) fell
+                    // through to ir_empty_name() -- the same "unresolved
+                    // owner" signal field_array_elem_is_float_for_base_ref's
+                    // round-9 fix (correctly) treats as "not float, don't
+                    // guess", misclassifying a legitimate f64-array field as
+                    // integer and corrupting its arithmetic. return_struct_
+                    // name_for_fn_id already answers "element struct name"
+                    // for BOTH a plain struct return AND an array-of-struct
+                    // return (same field, disambiguated only by
+                    // return_fixed_array_len -- see its own comment), so
+                    // indexing an ExprCall's result names the same struct
+                    // its own receiver-type arm above already resolves;
+                    // recurse into it rather than duplicate that lookup. An
+                    // ExprArrayLit's element struct type is whatever its own
+                    // first element resolves to (a repeated-value literal
+                    // `[v; n]` and a listed literal `[a, b, c]` each expose
+                    // their first element the same two ways every other
+                    // ExprArrayLit reader in this file already uses).
+                    if (*indexed).kind == ExprKind::ExprCall {
+                        return self.expr_receiver_struct_type_ref(&(*indexed))
+                    }
+                    if (*indexed).kind == ExprKind::ExprArrayLit {
+                        match (*indexed).left {
+                            Some(repeat_value) => {
+                                return self.expr_receiver_struct_type_ref(&(*repeat_value))
+                            }
+                            _ => {
+                                match (*indexed).args {
+                                    Some(list) => {
+                                        return self.expr_receiver_struct_type_ref(&(*list).head)
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -18208,6 +18248,31 @@ impl Lowerer {
             _ => {}
         }
 
+        // Copilot review (PR #2516), comment 4114931502: captured BEFORE
+        // bind_local(s.name, ...) below rebinds `s.name` to a fresh slot,
+        // for the exact same reason rhs_ident_is_ref is captured before it
+        // (see that capture's own comment, just above this function).
+        // bind_local already inserts and zeroes the destination's OWN
+        // tuple_arr_mask; for same-name shadowing (`let t = pair(); { let
+        // t = t; let a = t.0 }`), a POST-bind lookup by name in
+        // lower_let_stmt_type_metadata_ref would resolve the just-bound,
+        // still-zero inner `t` instead of the outer one the RHS actually
+        // reads (lookup searches newest-first) -- silently losing the
+        // array-slot mask on the shadowing form, the same way rhs_ident_
+        // is_ref would lose is_ref there. tuple_float_mask (the scalar-slot
+        // sibling of tuple_arr_mask, same function, same post-bind lookup
+        // shape) has the identical gap and is captured here too rather than
+        // left with the twin of the bug just fixed.
+        var rhs_tuple_arr_mask: i64 = 0
+        var rhs_tuple_mask: i64 = 0
+        match s.expr {
+            Some(rhs_mask_pre) => {
+                rhs_tuple_arr_mask = lo.expr_result_tuple_arr_mask_ref(&(*rhs_mask_pre))
+                rhs_tuple_mask = lo.expr_result_tuple_float_mask_ref(&(*rhs_mask_pre))
+            }
+            _ => {}
+        }
+
         // A bare identifier lowers to the source local's register. Scalars need a
         // fresh register only for mutable bindings; fixed arrays need fresh backing
         // storage for both `let` and `var`, otherwise an indexed mutation through
@@ -18342,6 +18407,48 @@ impl Lowerer {
             _ => {}
         }
         lo = lo.bind_local(s.name, bind_reg, is_mut)
+        // #1502: record which slots of a tuple-typed local are f64.
+        //
+        // Copilot review (PR #2516), comment 4114931502: this binding used
+        // to happen inside lower_let_stmt_type_metadata_ref, re-deriving
+        // the mask from s.expr THERE (after bind_local, above, already
+        // inserted and zeroed s.name's own tuple_arr_mask/tuple_float_mask)
+        // instead of using the value captured before bind_local ran. For
+        // same-name shadowing (`let t = pair(); { let t = t; let a = t.0 }`)
+        // that post-bind, by-name lookup resolved the just-bound, still-
+        // zero inner `t` instead of the outer one the RHS actually reads
+        // (lookup searches newest-first), silently losing the mask.
+        //
+        // Threading rhs_tuple_arr_mask/rhs_tuple_mask as extra parameters to
+        // lower_let_stmt_type_metadata_ref (moving only the VALUE across
+        // that function boundary, this exact restructuring's first attempt)
+        // measurably corrupted the value in transit: printf-verified the
+        // captured local held mask=2 right before the call and the SAME
+        // named parameter read back mask=0 as the very first statement
+        // inside the callee, with no code between the two that could
+        // explain a legitimate zero. This is done here, directly after
+        // bind_local -- in the same function, same scope, no function-call
+        // boundary for the value to cross -- instead of chasing that
+        // separately.
+        let annotated_tuple_mask = lower_opt_type_tuple_float_mask(&s.ty)
+        if annotated_tuple_mask != 0 {
+            lo = lo.bind_local_tuple_float_mask(s.name, annotated_tuple_mask)
+        } else if rhs_tuple_mask != 0 {
+            lo = lo.bind_local_tuple_float_mask(s.name, rhs_tuple_mask)
+        }
+        // Array-slot counterpart: which slots of a tuple-typed local are
+        // `[f64; N]` arrays, tracked in its own mask (tuple_arr_mask) rather
+        // than packed into the high bits of tuple_float_mask. Annotated type
+        // first (covers a tuple LITERAL initialiser, which has no declared
+        // CALL-return-type tracking), falling back to the initialiser
+        // expression's own mask (covers a CALL initialiser with no
+        // annotation) -- same precedence as the scalar mask above.
+        let annotated_tuple_arr_mask = lower_opt_type_tuple_arr_mask(&s.ty)
+        if annotated_tuple_arr_mask != 0 {
+            lo = lo.bind_local_tuple_arr_mask(s.name, annotated_tuple_arr_mask)
+        } else if rhs_tuple_arr_mask != 0 {
+            lo = lo.bind_local_tuple_arr_mask(s.name, rhs_tuple_arr_mask)
+        }
         // See the `var out: SomeStruct` (no initializer) note above: the local
         // must exist on the stack (bind_local, just above) before
         // bind_local_struct_type can record its type -- it mutates an existing
@@ -18613,42 +18720,6 @@ impl Lowerer {
                         lo = lo.bind_local_array_elem_float(s.name)
                     } else if rhs_array_elem_is_float {
                         lo = lo.bind_local_array_elem_float(s.name)
-                    }
-                }
-                _ => {}
-            }
-        }
-        // #1502: record which slots of a tuple-typed local are f64.
-        let annotated_tuple_mask = lower_opt_type_tuple_float_mask(&s.ty)
-        if annotated_tuple_mask != 0 {
-            lo = lo.bind_local_tuple_float_mask(s.name, annotated_tuple_mask)
-        } else {
-            match s.expr {
-                Some(expr_box_tup) => {
-                    let init_tuple_mask = lo.expr_result_tuple_float_mask_ref(&(*expr_box_tup))
-                    if init_tuple_mask != 0 {
-                        lo = lo.bind_local_tuple_float_mask(s.name, init_tuple_mask)
-                    }
-                }
-                _ => {}
-            }
-        }
-        // Array-slot counterpart: which slots of a tuple-typed local are
-        // `[f64; N]` arrays, tracked in its own mask (tuple_arr_mask) rather
-        // than packed into the high bits of tuple_float_mask. Annotated type
-        // first (covers a tuple LITERAL initialiser, which has no declared
-        // CALL-return-type tracking), falling back to the initialiser
-        // expression's own mask (covers a CALL initialiser with no
-        // annotation) -- same precedence as the scalar mask above.
-        let annotated_tuple_arr_mask = lower_opt_type_tuple_arr_mask(&s.ty)
-        if annotated_tuple_arr_mask != 0 {
-            lo = lo.bind_local_tuple_arr_mask(s.name, annotated_tuple_arr_mask)
-        } else {
-            match s.expr {
-                Some(expr_box_tup_arr) => {
-                    let init_tuple_arr_mask = lo.expr_result_tuple_arr_mask_ref(&(*expr_box_tup_arr))
-                    if init_tuple_arr_mask != 0 {
-                        lo = lo.bind_local_tuple_arr_mask(s.name, init_tuple_arr_mask)
                     }
                 }
                 _ => {}

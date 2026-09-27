@@ -1,0 +1,39 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: TUPLE_ARR_MASK_SHADOW_REBIND PASS
+//
+// Copilot review (PR #2516), comment 4114931502: lower_let_stmt_type_
+// metadata_ref (self-hosted/ir/lower.sio) used to look up the RHS
+// initializer's tuple_arr_mask by NAME, AFTER lower_let_stmt_after_expr_ref
+// had already called bind_local(s.name, ...) for the destination -- which
+// inserts and zeroes that name's OWN tuple_arr_mask slot. For a same-name
+// shadowing rebind (`let t = pair(); let t = t;`), that post-bind, by-name
+// lookup resolved the just-bound, still-zero INNER `t` instead of the
+// OUTER `t` the RHS actually reads (lookup searches newest-first), so the
+// array-slot mask was silently lost across the shadow and `t.0[i]` read
+// the f64 bits as an integer.
+//
+// The fix captures the initializer's mask BEFORE bind_local runs (mirroring
+// this same function's existing pre-bind capture of rhs_ident_is_ref) and
+// threads that captured value through instead of re-deriving it too late.
+fn pair() -> ([f64; 2], i64) with Mut, Panic {
+    var a: [f64; 2] = [0.0; 2]
+    a[0] = 1.5
+    a[1] = 2.5
+    (a, 7)
+}
+
+fn main() -> i32 with IO, Mut, Panic {
+    let t = pair()
+    // Same-name shadowing rebind: `t` on the right is the OUTER tuple;
+    // `t` on the left is a fresh binding that reuses the same slot row.
+    let t = t
+    let a0: f64 = t.0[0]
+    let a1: f64 = t.0[1]
+    let acc: f64 = a0 + a1
+    if acc == 4.0 {
+        println("TUPLE_ARR_MASK_SHADOW_REBIND PASS")
+        return 0
+    }
+    1
+}
