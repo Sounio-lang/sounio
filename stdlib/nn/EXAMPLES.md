@@ -1,5 +1,15 @@
 # NN Examples
 
+> **Checked surface.** The blocks below use method-call shapes that these
+> modules do not expose. `stdlib/nn/dense.sio` is free functions —
+> `dense_new(w, b)`, `dense_forward(layer, x)`, `dense_output(t)`,
+> `dense_grad_w(t)` — there is no `Dense::new` or `.forward`. There is no
+> `EpistemicLayer` type, and `Knowledge::measured(val, std, source)` is not on
+> the checked surface; epistemic values are `ep_measured(val, std_dev)` from
+> `stdlib/epistemic/knowledge.sio`. `stdlib/nn/autograd.sio`'s `Tape` is a
+> private struct driven by free functions (`backward(tape, out)`), not
+> `Tape::new()` / `push_var()`. Treat the examples as the intended shape.
+
 ## 1. Dense Layer Forward Pass
 
 ```sio
@@ -48,7 +58,7 @@ pub fn main() with Mut, Div, Panic {
 use nn::autograd::Tape;
 
 pub fn main() with Mut, Panic {
-    let mut tape = Tape::new();
+    var tape = Tape::new();
     
     // Push variables
     let x = tape.push_var(2.0);
