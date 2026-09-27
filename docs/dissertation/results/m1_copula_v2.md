@@ -33,8 +33,9 @@ and under the GUM/Hessian budgets:
    never rejected a sample.
 
 **Convention:** rel_X = |u_X − u_MC| / u_MC (computed from unrounded values); u and mean AUC in
-mg·h/L. Row gate (`M1_COPULA_SWEEP_PASS`): every copula row completes with n_valid > 1900, and
-the ρ = 0 row reproduces the independent sampler.
+mg·h/L. Row gate (`M1_COPULA_SWEEP_PASS`): every copula row keeps all 2000 draws (n_valid = 2000)
+with u_MC > 0, and the ρ = 0 row reproduces the independent sampler. A failed row gate ends the run
+with rc = 1 and no M1 PASS marker.
 
 **Harness:** `stdlib/darwin_pbpk/validation/pbpk28_mc_cross_validation.sio` (the copula sweep follows
 the independent baseline). N = 2000, seed = 1729, LogNormal marginals, rapamycin 5 mg.
@@ -70,11 +71,15 @@ u_GUM = 0.183456; u_Hessian = 0.207808 mg·h/L.
 | combined | −0.5 | +0.3 | 2000 | 0.457316 | 0.148202 | 0.237882 | 0.402200 |
 
 Under both priors the ρ = 0 copula row reproduces the independent sampler exactly
-(`delta_mean = 0`, `delta_u_MC = 0`). Gates: `M1_COPULA_SWEEP_PASS`, `M1_COPULA_CHOLESKY_PASS`.
+(`delta_mean = 0`, `delta_u_MC = 0`). Gates: under the M6 prior `M1_COPULA_SWEEP_PASS` and
+`M1_COPULA_CHOLESKY_PASS`; under the legacy prior the row gate **fails** (sweep_5, below), the run
+prints `M1_COPULA_SWEEP_OUTPUT` and exits with rc = 1.
 
 **n_valid = 1998 (legacy, ρ = +0.3).** Two samples were rejected by the fail-closed checks
-(item 2 above). That is within the > 1900 row gate. Which check fired for these two samples was
-not diagnosed.
+(item 2 above), so the legacy sweep_5 row fails the row gate. Rejection depends on the sampled
+parameters, so the 1998 retained draws are not a sample of the stated prior: this row's mean and
+u_MC are printed for the record and **must not be cited** as the ρ = +0.3 estimate. Which check
+fired for the two draws was not diagnosed.
 
 ## What changed in the reading
 

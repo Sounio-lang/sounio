@@ -79,7 +79,8 @@ MC mean 0.476478. E4: LogNormal rel_Hess 0.018800 (YES); TruncNormal 0.279486 (N
 MC_CROSS_VALIDATION_PBPK28_LOGNORMAL_HESSIAN_PASS   (v2: ..._OUTPUT) — both priors; LogNormal rel_Hess <= 0.10
 MC_PRIOR_FAMILY_SWEEP_PASS                          (v2: ..._OUTPUT) — both priors; at least one family meets rel_Hess <= 0.10,
                                                       Gaussian fails under both, TruncNormal fails under M6
-M1_COPULA_CHOLESKY_PASS, M2_HIERARCHICAL_PRIOR_PASS (v1 M2: ..._OUTPUT)
+M1_COPULA_CHOLESKY_PASS (M6 only; the legacy run fails its copula row gate, rc = 1, see m1_copula_v2.md),
+M2_HIERARCHICAL_PRIOR_PASS (v1 M2: ..._OUTPUT)
 ```
 
 Determinism: the M6 E1 and E4 runs printed byte-identical results in two independent processes
