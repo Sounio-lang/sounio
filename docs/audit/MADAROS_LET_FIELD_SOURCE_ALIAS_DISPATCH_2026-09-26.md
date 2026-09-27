@@ -457,9 +457,22 @@ harness run that reports `Skip` for this file checked nothing.
   A concurrent lane (determined-leavitt, 2026-09-26) reports it is fixing
   call results that return a by-value parameter or a place, callee-side at
   the return sites of `lower.sio`. Its hunks do not overlap this patch.
-- **Not measured:** `let v = *p` for `p: &[T; N]` (the deref resolves no struct
-  type, so the fix keeps the handle), tuple slots of aggregate type, and
-  aggregate places reached through a method call.
+- **Deref of a fixed-array reference.** `let a = *p` with `p: &[T; N]`
+  still binds the array handle. The deref resolver answers struct types only,
+  so the fix keeps the handle. Not measured.
+- **The deep-copy budget fallback.** For a struct, the fix calls #2700's
+  `emit_struct_value_copy_budgeted`. When the deep copy would not fit under
+  `IR_MAX_INSTRS` (16,384 per function, less the headroom reserve), that
+  helper falls back to the #1475 flat copy. A flat copy copies the top-level
+  slots, but nested aggregate fields keep sharing their handles. So in a very
+  large function, `let v = o.f` of a struct with array or struct fields can
+  still alias one level down. The identifier arm (`let y = x`, #1479) and
+  #2700's assignments have the same fallback. Making it fail closed means
+  refusing to lower such a function, which changes the shared helper for all
+  three paths, so it is left to a change of that helper. Not measured: no
+  test in the full-suite runs is known to reach the fallback.
+- **Not measured:** tuple slots of aggregate type, and aggregate places
+  reached through a method call.
 
 ## Relation to the assignment dispatch
 
