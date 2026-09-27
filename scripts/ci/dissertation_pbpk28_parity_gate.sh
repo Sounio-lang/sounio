@@ -785,6 +785,11 @@ node "$VFX_NODE_RUNNER" > "$VFX_NODE_LOG" 2>&1 || {
 if ! grep -q '^DISSERTATION_PBPK28_VENLAFAXINE_PARITY_DONE$' "$VFX_NODE_LOG"; then
   echo "[pbpk28-parity:case10] FAIL: Node venlafaxine runner did not emit DONE" >&2; exit 1; fi
 
+# awk coerces "nan"/"inf"/garbage to a number (nan -> 0 on this awk), so a solver
+# that emits NaN would read as a clean zero residual. Every venlafaxine value
+# below goes through fin(): anything that is not a finite decimal literal is
+# counted in nonfin and fails the check that consumes it.
+VFX_AWK_FIN='function fin(s) { if (s !~ /^[+-]?([0-9]+[.]?[0-9]*|[.][0-9]+)([eE][+-]?[0-9]+)?$/) { nonfin++; printf "  FAIL: non-finite or non-numeric value \"%s\"\n", s; return 0 } return s + 0 }'
 # Prefixed cavg parser: $1=prefix label, $2=infile → t<TAB>i<TAB>cavg
 vfx_parse_cavg() {
   awk -v P="$1" '
@@ -797,12 +802,13 @@ vfx_rmse() {  # $1=prefix $2=pass-marker $3=fail-marker
   join -t"$(printf '\t')" -1 1 -2 1 \
     <(vfx_parse_cavg "$1" "$VFX_SIO_LOG"  | awk -F'\t' '{print $1"|"$2"\t"$3}' | sort) \
     <(vfx_parse_cavg "$1" "$VFX_NODE_LOG" | awk -F'\t' '{print $1"|"$2"\t"$3}' | sort) \
-  | awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" -v PASS="$2" -v FAILM="$3" '
-      {split($1,a,"|"); i=a[2]+0; d=($2+0)-($3+0); SS[i]+=d*d; NN[i]++;
-       cs=($2+0); cn=($3+0); if(cs>PK[i])PK[i]=cs; if(cn>PK[i])PK[i]=cn}
+  | awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" -v PASS="$2" -v FAILM="$3" "$VFX_AWK_FIN"'
+      {split($1,a,"|"); i=a[2]+0; cs=fin($2); cn=fin($3); d=cs-cn; SS[i]+=d*d; NN[i]++;
+       if(cs>PK[i])PK[i]=cs; if(cn>PK[i])PK[i]=cn}
       END{bad=0;
+        if(nonfin>0){printf "%s %d non-finite value(s)\n",FAILM,nonfin; exit 1}
         printf "%-3s %-14s %-14s %-9s %s\n","i","rmse","peak","pct","status";
-        for(i=0;i<14;i++){ if(NN[i]==0){printf "%-3d MISSING\n",i; bad++; continue}
+        for(i=0;i<14;i++){ if(NN[i]!=12){printf "%-3d %d/12 joined samples\n",i,NN[i]+0; bad++; continue}
           rmse=sqrt(SS[i]/NN[i]); pk=PK[i]+0;
           if(pk==0){printf "%-3d %-14.3e %-14s %-9s zero-traj OK\n",i,rmse,"-","-"; continue}
           pct=100*rmse/pk; st=(pct<THR+0)?"OK":"FAIL"; if(st=="FAIL")bad++;
@@ -822,14 +828,14 @@ vfx_rmse VPARENT "VENLAFAXINE_PARENT_PARITY_PASS" "VENLAFAXINE_PARENT_PARITY_FAI
 
 echo
 echo "[pbpk28-parity:case11] venlafaxine ODV PBPK28 (14 organs)"
+VFX_SIO_O=$(vfx_parse_cavg VODV "$VFX_SIO_LOG" | wc -l)
+VFX_NODE_O=$(vfx_parse_cavg VODV "$VFX_NODE_LOG" | wc -l)
+if [[ "$VFX_SIO_O" -ne "$EXPECTED_VFX" || "$VFX_NODE_O" -ne "$EXPECTED_VFX" ]]; then
+  echo "[pbpk28-parity:case11] FAIL: ODV row mismatch Sounio=$VFX_SIO_O Node=$VFX_NODE_O expected=$EXPECTED_VFX" >&2; exit 1; fi
+echo "[pbpk28-parity:case11] both runs emitted $VFX_SIO_O ODV records"
 vfx_rmse VODV "VENLAFAXINE_ODV_PARITY_PASS" "VENLAFAXINE_ODV_PARITY_FAIL"
 
 echo
-# awk coerces "nan"/"inf"/garbage to a number (nan -> 0 on this awk), so a solver
-# that emits NaN would read as a clean zero residual. Every venlafaxine value
-# below goes through fin(): anything that is not a finite decimal literal is
-# counted in nonfin and fails the check that consumes it.
-VFX_AWK_FIN='function fin(s) { if (s !~ /^[+-]?([0-9]+[.]?[0-9]*|[.][0-9]+)([eE][+-]?[0-9]+)?$/) { nonfin++; printf "  FAIL: non-finite or non-numeric value \"%s\"\n", s; return 0 } return s + 0 }'
 echo "[pbpk28-parity:case12] venlafaxine matrix Korsmeyer-Peppas release (biomaterial bridge)"
 join -t"$(printf '\t')" -1 1 -2 1 \
   <(awk -F= '/^VMATRIX\|t=/{t=$2} /^VMATRIX\|rel=/{print t"\t"$2}' "$VFX_SIO_LOG"  | sort) \
