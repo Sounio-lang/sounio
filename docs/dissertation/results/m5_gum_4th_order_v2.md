@@ -93,8 +93,8 @@ Gate marker: the M5 claim assertion now evaluates to `M5_GUM_FOURTH_ORDER_CUMULA
 
 **Safe to cite** (all three qualifiers belong in the sentence): "Under the M6 prior, on the
 mass-conserving PBPK28 kernel, the second-order (Hessian) standard uncertainty 0.2078 mg·h/L
-differs from an N = 2000 Monte Carlo estimate of 0.2118 mg·h/L by 1.9%, which is within the
-Monte Carlo's own ~1.6% resolution. The budgets are linearised at CL = 12.4 L/h while the MC is
+differs from an N = 2000 Monte Carlo estimate of 0.2118 mg·h/L by 1.9%, which is of the same
+order as the Monte Carlo's own ~1.6% resolution. The budgets are linearised at CL = 12.4 L/h while the MC is
 centred at 12.7 L/h. The fourth-order cumulant extension gives 0.2665 mg·h/L (25.8% above the
 MC)."
 

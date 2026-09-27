@@ -92,7 +92,13 @@ The non-zero Kp share of the AUC_blood variance was entirely a solver artefact. 
 | ρ_literal / ρ_normalized, kp_brain | 0.349828 / 0.061190 | 0 / 0 (guarded, see below) |
 | \|mean shift\| / AUC_ref | 0.192536 | 0.206996 |
 
-Once the Kp columns are rounding noise, the nonlinearity ratios would print noise divided by noise: ρ_normalized(kp_adipose) came out as 1,075,556 before the guard was added. `h28_first_order_resolvable` now reports ρ = 0 when |cᵢ|σᵢ ≤ 1e-9·|AUC_ref|. That floor is about 25–50× above the finite-difference rounding floor and about 10⁷× below the smallest real effect (cl_renal). The Hessian self-test gained TEST 7 (mass identity); 7/7 and 3/3 pass.
+Once the Kp columns are rounding noise, the nonlinearity ratios would print noise divided by noise: ρ_normalized(kp_adipose) came out as 1,075,556 before the guard was added. The guard (`h28_ratio_status`) tests each order against its own rounding floor: the first order is resolvable when |cᵢ|σᵢ > 1e-9·|AUC_ref| (`h28_first_order_resolvable`; about 25–50× above the finite-difference rounding floor and about 10⁷× below the smallest real effect, cl_renal), and the second order when ½|Hᵢᵢ|σᵢ² > 1e-7·|AUC_ref| (`h28_second_order_resolvable`; about 12× above its floor and 10³× below cl_renal's term). Both ratios then report:
+
+- **0.0** only when *neither* order is resolvable: the parameter has no measurable effect (the Kp columns here);
+- **−1.0**, an undefined-ratio sentinel (a valid ratio is ≥ 0), when the curvature is resolvable but the slope is not. A purely quadratic response is therefore never reported as linear;
+- the ratio as defined when the first order is resolvable.
+
+The Hessian self-test gained TEST 7 (mass identity), and the dual-ρ self-test gained TEST 4 (purely quadratic budget → −1.0 from both ratio functions) and TEST 5 (neither order resolvable → 0.0); 7/7 and 5/5 pass.
 
 ### `validation/pbpk28_mc_cross_validation.sio` (LogNormal, N = 2000, seed 1729, dt = 0.5)
 
@@ -170,6 +176,8 @@ The review record lives here because `.claude/llm_offload_log.md` is gitignored 
 | θ-step Schur coefficients, θ and TR-BDF2 mass identities, b-weights, Rannacher booking, gate budget, positivity (7) | 1–5, 7 OK; 6 OVERREACH (budget is heuristic, not a proven FP bound → comments reworded, threshold unchanged) | all 7 OK | error |
 | ep28 analytic sensitivity pins, FD truncation, Kp-tail ceiling, Hessian values, per-organ Kp column detector, artefact attribution (6) | all 6 OK | 1–4, 6 OK; 5 "WRONG" | error |
 | Hessian ρ analytic values, 1e-9 resolvability guard, Kp 0/0, MC u_MC re-pin (4) | all 4 OK | all 4 OK | all 4 OK; OVERREACH on wording "M(168 h)/Dose ~ 4e-18" |
+| review round 3: ρ undefined sentinel (the two-order guard above, which superseded the first-order-only guard of the previous row), TEST 9 order gate on C_brain(24 h), 24 h capture (6) | all 6 OK | all 6 OK | not run |
+| review round 4: ρ̃ = ½ρ² is not the variance ratio 2ρ² = 4ρ̃ (3) | all 3 OK | all 3 OK | not run |
 | input routing: forcing placement, mass identity, unrouted bit-identity, first-pass direction (4) | all 4 OK | all 4 OK | error |
 
 Disagreements, recorded as the policy requires:
