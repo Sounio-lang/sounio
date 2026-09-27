@@ -67,8 +67,9 @@ u_GUM = 0.183456; u_Hessian = 0.207808.
 
 Module test lines: TruncNormal does not lower u_MC relative to LogNormal (NOTE); §4.13 hypothesis
 not met (0.279); no Hessian-agreement improvement (NOTE). Marker `MC_PRIOR_FAMILY_SWEEP_PASS`
-(LogNormal meets the gate). The module's printed RESULT line "high CL_hep CV (58%) dominates" is
-a hard-coded string, stale under the M6 prior, and not a measurement.
+(LogNormal meets the gate). The RESULT line used to print a hard-coded "high CL_hep CV (58%)
+dominates"; it now prints the active prior's CL_hep CV (0.38 here) and no cause, which this module
+does not measure.
 
 ---
 
