@@ -845,25 +845,36 @@ export function runVenlafaxineScenario(sampleTimes, { dt = 0.5, pheno = 2 } = {}
   if (!(Array.isArray(sampleTimes) && sampleTimes.every(Number.isFinite))) {
     throw new RangeError('sampleTimes must be an array of finite numbers');
   }
-  // The integrator only moves forward from t = 0, so a sample earlier than the
-  // current time would be labelled with a later state ([1, 0] emitted the 1 h
-  // state as t: 0). Require t >= 0 and strictly increasing sample times; the
-  // Sounio side panics the same way in vfx_integrate_to (t_end < t_start).
+  // The integrator only moves forward from t = 0 in whole dt steps, so any
+  // other sample would be labelled with a state from a different time: [1, 0]
+  // emitted the 1 h state as t: 0, and at dt = 0.5 a sample at 1.2 h got the
+  // 1.0 h state (1.3 h got the 1.5 h state). Require t >= 0, strictly
+  // increasing, and a whole number of steps from 0 (vfxWholeSteps). The Sounio
+  // side panics on the same inputs in vfx_integrate_to.
+  const sampleSteps = [];
   for (let i = 0; i < sampleTimes.length; i++) {
     const prev = i === 0 ? 0.0 : sampleTimes[i - 1];
     if (i === 0 ? sampleTimes[0] < 0.0 : !(sampleTimes[i] > prev)) {
       throw new RangeError(`sampleTimes must be >= 0 and strictly increasing, got ${sampleTimes[i]} at index ${i} after ${prev}`);
     }
+    const n = vfxWholeSteps(sampleTimes[i], dt);
+    if (n < 0) {
+      throw new RangeError(`sampleTimes must be a whole number of dt steps from 0, got ${sampleTimes[i]} at dt = ${dt}`);
+    }
+    sampleSteps.push(n);
   }
   const rel = VFX_MATRIX_GOHEL2008;
   const clFormScale = VFX_CL_FORM_SCALE[pheno];
   let st = vfxZeroState();
   const out = [];
   let t = 0.0;
-  for (const target of sampleTimes) {
-    while (t + 0.5 * dt < target) {
+  let done = 0;
+  for (let j = 0; j < sampleTimes.length; j++) {
+    const target = sampleTimes[j];
+    while (done < sampleSteps[j]) {
       st = vfxStrangStep(st, rel, t, dt, clFormScale);
       t += dt;
+      done++;
     }
     const pAvg = new Float64Array(N), oAvg = new Float64Array(N);
     for (let i = 0; i < N; i++) {
@@ -901,6 +912,18 @@ export function runVenlafaxineScenario(sampleTimes, { dt = 0.5, pheno = 2 } = {}
 // the parity gate uses dt ≤ 0.5 h, where no halving happens.
 function vfxCheckDt(dt) {
   if (!(Number.isFinite(dt) && dt > 0)) throw new RangeError(`dt must be finite and > 0, got ${dt}`);
+}
+
+// Number of dt steps in `span` (span >= 0, dt > 0), or −1 when span is not a
+// whole number of steps — port of vfx_whole_steps, same test in the same
+// order: n = trunc(span/dt + 0.5), whole iff |n·dt − span| <= 1e-9·span. Used
+// for the dosing interval and for sample times, as the stdlib uses it for tau
+// and for vfx_integrate_to spans. A count that is not a safe integer is −1.
+function vfxWholeSteps(span, dt) {
+  const n = Math.trunc(span / dt + 0.5);
+  if (!Number.isSafeInteger(n)) return -1;
+  if (Math.abs(n * dt - span) > 1e-9 * span) return -1;
+  return n;
 }
 
 // CYP2D6 phenotype enum: 0 = PM, 1 = IM, 2 = NM, 3 = UM. Checked as a number,
@@ -943,11 +966,9 @@ export function runVenlafaxineSteadyState({ dt = 0.5, pheno = 2, nDoses = 10, ta
   if (!(Number.isFinite(tau) && tau > 0)) throw new RangeError(`tau must be finite and > 0, got ${tau}`);
   if (!(Number.isSafeInteger(nDoses) && nDoses >= 1)) throw new RangeError(`nDoses must be a safe integer >= 1, got ${nDoses}`);
   vfxCheckPheno(pheno);
-  const stepsExact = tau / dt;
-  const stepsPerTau = Math.round(stepsExact);
-  if (!Number.isSafeInteger(stepsPerTau) || stepsPerTau < 1
-      || Math.abs(stepsExact - stepsPerTau) > 1e-9 * stepsPerTau) {
-    throw new RangeError(`tau/dt must be a whole number of steps, got ${tau}/${dt} = ${stepsExact}`);
+  const stepsPerTau = vfxWholeSteps(tau, dt);
+  if (stepsPerTau < 1) {
+    throw new RangeError(`tau must be a whole number (>= 1) of dt steps, got ${tau}/${dt} = ${tau / dt}`);
   }
   if (!Number.isSafeInteger(nDoses * stepsPerTau)) {
     throw new RangeError(`nDoses·tau/dt = ${nDoses}·${stepsPerTau} steps is not a safe integer`);
