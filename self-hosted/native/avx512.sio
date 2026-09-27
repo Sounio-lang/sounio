@@ -120,7 +120,7 @@ struct Avx512Emitter {
 // Constructors
 // ============================================================================
 
-fn avx_reg_zmm(id: i64) -> Avx512Reg {
+pub fn avx_reg_zmm(id: i64) -> Avx512Reg {
     Avx512Reg { reg_id: id, width: 512, is_mask: 0 }
 }
 
@@ -147,7 +147,7 @@ fn avx_instr_new() -> Avx512Instr {
     }
 }
 
-fn avx_emitter_new() -> Avx512Emitter {
+pub fn avx_emitter_new() -> Avx512Emitter {
     Avx512Emitter {
         bytes: [0; 65536],
         pos: 0,
@@ -265,9 +265,9 @@ fn avx_reset_mask(e: Avx512Emitter) -> Avx512Emitter with Mut {
 //   B  = inverted bit 3 of ModRM.r/m  (source register)
 //   R' = inverted bit 4 of ModRM.reg  (regs 16-31)
 //   mm = map select (01 = 0F, 10 = 0F38, 11 = 0F3A)
-fn avx_encode_evex_b1(reg_id: i64, rm_id: i64, idx_id: i64, map: i64) -> i64 {
+fn avx_encode_evex_b1(reg_id: i64, rm_id: i64, x_bit: i64, map: i64) -> i64 {
     let r_inv  = avx_invert_bit(avx_reg_bit3(reg_id))
-    let x_inv  = avx_invert_bit(avx_reg_bit3(idx_id))
+    let x_inv  = avx_invert_bit(x_bit)
     let b_inv  = avx_invert_bit(avx_reg_bit3(rm_id))
     let rp_inv = avx_invert_bit(avx_reg_bit4(reg_id))
     (r_inv << 7) | (x_inv << 6) | (b_inv << 5) | (rp_inv << 4)
@@ -342,7 +342,7 @@ fn avx_emit_evex_rr(
     bcast: i64
 ) -> Avx512Emitter with Mut, Panic, Div {
     var out = e
-    let b1 = avx_encode_evex_b1(dst.reg_id, src2.reg_id, 0, map)
+    let b1 = avx_encode_evex_b1(dst.reg_id, src2.reg_id, avx_reg_bit4(src2.reg_id), map)
     let b2 = avx_encode_evex_b2(w, src1.reg_id, pp)
     let b3 = avx_encode_evex_b3(0, vec_len, bcast, src1.reg_id, out.mask_reg)
     out = avx_emit_byte(out, AVX_EVEX_PREFIX)
@@ -505,6 +505,12 @@ fn avx_vfmsub213pd_zmm(e: Avx512Emitter, dst: Avx512Reg, src1: Avx512Reg, src2: 
 
 fn avx_vfmsub231pd_zmm(e: Avx512Emitter, dst: Avx512Reg, src1: Avx512Reg, src2: Avx512Reg) -> Avx512Emitter with Mut, Panic, Div {
     avx_emit_evex_rr(e, AVX_MAP_0F38, 1, 1, 0xBA, dst, src1, src2, AVX_WIDTH_512, 0)
+}
+
+// Negated FMA: dst = -(src1 * src2) + dst = dst - src1 * src2
+//   vfnmadd231pd zmm, zmm, zmm — map 0F38, opcode 0xBC, W=1, pp=01
+pub fn avx_vfnmadd231pd_zmm(e: Avx512Emitter, dst: Avx512Reg, src1: Avx512Reg, src2: Avx512Reg) -> Avx512Emitter with Mut, Panic, Div {
+    avx_emit_evex_rr(e, AVX_MAP_0F38, 1, 1, 0xBC, dst, src1, src2, AVX_WIDTH_512, 0)
 }
 
 // ============================================================================
@@ -770,256 +776,6 @@ fn avx_vmulpd_zmm_bcast(e: Avx512Emitter, dst: Avx512Reg, src1: Avx512Reg, base:
 }
 
 // ============================================================================
-// Octonion multiply — avx512_octonion_mul
-//
-// Octonion multiplication: o = a * b where a,b are 8-component (e0..e7).
-// Uses the Cayley-Dickson construction, implemented as a series of FMA
-// operations on ZMM registers.
-//
-// Input:  zmm_a (zmm0..zmm7 components loaded into one ZMM as 8 x f64)
-//         zmm_b (same layout)
-// Output: zmm_r (result in one ZMM register)
-// Temps:  zmm_t0..zmm_t5 (scratch registers)
-//
-// The multiplication table for octonions requires 48 multiply-add/subtract
-// operations. We use FMA instructions to compute each result component:
-//   r0 = a0*b0 - a1*b1 - a2*b2 - a3*b3 - a4*b4 - a5*b5 - a6*b6 - a7*b7
-//   r1 = a0*b1 + a1*b0 + a2*b3 - a3*b2 + a4*b5 - a5*b4 - a6*b7 + a7*b6
-//   r2 = a0*b2 - a1*b3 + a2*b0 + a3*b1 + a4*b6 + a5*b7 - a6*b4 - a7*b5
-//   r3 = a0*b3 + a1*b2 - a2*b1 + a3*b0 + a4*b7 - a5*b6 + a6*b5 - a7*b4
-//   r4 = a0*b4 - a1*b5 - a2*b6 - a3*b7 + a4*b0 + a5*b1 + a6*b2 + a7*b3
-//   r5 = a0*b5 + a1*b4 - a2*b7 + a3*b6 - a4*b1 + a5*b0 - a6*b3 + a7*b2
-//   r6 = a0*b6 + a1*b7 + a2*b4 - a3*b5 - a4*b2 + a5*b3 + a6*b0 - a7*b1
-//   r7 = a0*b7 - a1*b6 + a2*b5 + a3*b4 - a4*b3 - a5*b2 + a6*b1 + a7*b0
-//
-// Strategy: Use broadcasts + FMA chains.
-// For each result component ri, we:
-//   1. Broadcast a[i] across all lanes of a temp ZMM
-//   2. Use vfmadd231pd / vfmsub231pd to accumulate a[j]*b[k] terms
-//
-// Since we are emitting raw instruction bytes (not executing), we emit
-// a sequence of instructions that a CPU would execute. Each component
-// requires 8 FMA operations = 8 x 6 bytes = 48 bytes per component,
-// 8 components = 384 bytes total, plus broadcasts and shuffles.
-//
-// We use a register allocation:
-//   zmm0  = a (input, 8 packed f64)
-//   zmm1  = b (input, 8 packed f64)
-//   zmm2  = result accumulator
-//   zmm3  = temp broadcast / shuffle
-//   zmm4  = temp for negation mask
-//   zmm5  = temp scratch
-//   zmm16-zmm23 = a components broadcast (a0..a7 each broadcast to 8 lanes)
-//   zmm24-zmm31 = b components broadcast (b0..b7)
-//
-// Simplified approach: emit the FMA chain instruction sequence for
-// one octonion multiply as a series of vfmadd231pd / vfmsub231pd.
-// Each FMA instruction is 6 bytes (EVEX rr form).
-// ============================================================================
-
-fn avx512_octonion_mul(e: Avx512Emitter) -> Avx512Emitter with Mut, Panic, Div {
-    var out = e
-    // Register assignments:
-    let a = avx_reg_zmm(0)       // input a
-    let b = avx_reg_zmm(1)       // input b
-    let r = avx_reg_zmm(2)       // result
-    let t0 = avx_reg_zmm(3)      // temp 0
-    let t1 = avx_reg_zmm(4)      // temp 1
-    let t2 = avx_reg_zmm(5)      // temp 2
-
-    // Step 1: Zero the result register
-    //   vxorpd zmm2, zmm2, zmm2
-    out = avx_vxorpd_zmm(out, r, r, r)
-
-    // Step 2: Broadcast each component of a into zmm16..zmm23
-    // We use vbroadcastsd from the XMM sub-register.
-    // Component i of a ZMM is at element position i.
-    // To extract: vpermilpd + vbroadcastsd (simplified: we emit
-    // vpermpd to move component i to lane 0, then broadcast).
-    //
-    // Emit 8 broadcasts for a (zmm16..zmm23):
-    //   vpermpd zmm16, zmm0, imm=0x00  (broadcast a[0])
-    //   vpermpd zmm17, zmm0, imm=0x55  (broadcast a[1])
-    //   vpermpd zmm18, zmm0, imm=0xAA  (broadcast a[2])
-    //   vpermpd zmm19, zmm0, imm=0xFF  (broadcast a[3])
-    //   ... and zmm20..zmm23 for a[4..7] using upper half permutes
-    let a0 = avx_reg_zmm(16)
-    let a1 = avx_reg_zmm(17)
-    let a2 = avx_reg_zmm(18)
-    let a3 = avx_reg_zmm(19)
-    let a4 = avx_reg_zmm(20)
-    let a5 = avx_reg_zmm(21)
-    let a6 = avx_reg_zmm(22)
-    let a7 = avx_reg_zmm(23)
-
-    // Permute patterns to broadcast each of the 8 f64 components.
-    // vpermpd imm8: selects from 4 src elements per 256-bit lane.
-    //   0x00 = all lane0, 0x55 = all lane1, 0xAA = all lane2, 0xFF = all lane3
-    out = avx_vpermpd_zmm(out, a0, a, 0x00)
-    out = avx_vpermpd_zmm(out, a1, a, 0x55)
-    out = avx_vpermpd_zmm(out, a2, a, 0xAA)
-    out = avx_vpermpd_zmm(out, a3, a, 0xFF)
-    out = avx_vpermpd_zmm(out, a4, a, 0x00)  // upper half: same pattern
-    out = avx_vpermpd_zmm(out, a5, a, 0x55)
-    out = avx_vpermpd_zmm(out, a6, a, 0xAA)
-    out = avx_vpermpd_zmm(out, a7, a, 0xFF)
-
-    // Broadcast each component of b into zmm24..zmm31:
-    let b0 = avx_reg_zmm(24)
-    let b1 = avx_reg_zmm(25)
-    let b2 = avx_reg_zmm(26)
-    let b3 = avx_reg_zmm(27)
-    let b4 = avx_reg_zmm(28)
-    let b5 = avx_reg_zmm(29)
-    let b6 = avx_reg_zmm(30)
-    let b7 = avx_reg_zmm(31)
-
-    out = avx_vpermpd_zmm(out, b0, b, 0x00)
-    out = avx_vpermpd_zmm(out, b1, b, 0x55)
-    out = avx_vpermpd_zmm(out, b2, b, 0xAA)
-    out = avx_vpermpd_zmm(out, b3, b, 0xFF)
-    out = avx_vpermpd_zmm(out, b4, b, 0x00)
-    out = avx_vpermpd_zmm(out, b5, b, 0x55)
-    out = avx_vpermpd_zmm(out, b6, b, 0xAA)
-    out = avx_vpermpd_zmm(out, b7, b, 0xFF)
-
-    // Step 3: Compute r0 = a0*b0 - a1*b1 - a2*b2 - ... - a7*b7
-    // Use vfmadd231pd (dst = dst + src1 * src2)
-    // and vfmsub231pd (dst = src1 * src2 - dst)
-    //
-    // r = a0 * b0  (initial multiply)
-    out = avx_vmulpd_zmm(out, r, a0, b0)
-    // r = r - a1*b1  => use vfmsub: we want r = a0*b0 - a1*b1
-    //   Actually: vfmsub231pd computes dst = src1*src2 - dst
-    //   So we need: t0 = a1*b1, then r = r - t0
-    //   Better: use vfmadd231pd with negated: or simply emit
-    //   a subtract after multiply.
-    // For efficiency we use the FMA pattern:
-    //   vfmsub231pd r, a1, b1   => r = a1*b1 - r  (WRONG sign)
-    //   We need: r = r - a1*b1
-    //   vfnmadd231pd does: dst = -(src1*src2) + dst = dst - src1*src2
-    //   opcode 0xBC (map 0F38, W=1, pp=01)
-    // For clarity, use mul + sub pairs:
-    out = avx_vmulpd_zmm(out, t0, a1, b1)
-    out = avx_vsubpd_zmm(out, r, r, t0)
-    out = avx_vmulpd_zmm(out, t0, a2, b2)
-    out = avx_vsubpd_zmm(out, r, r, t0)
-    out = avx_vmulpd_zmm(out, t0, a3, b3)
-    out = avx_vsubpd_zmm(out, r, r, t0)
-    out = avx_vmulpd_zmm(out, t0, a4, b4)
-    out = avx_vsubpd_zmm(out, r, r, t0)
-    out = avx_vmulpd_zmm(out, t0, a5, b5)
-    out = avx_vsubpd_zmm(out, r, r, t0)
-    out = avx_vmulpd_zmm(out, t0, a6, b6)
-    out = avx_vsubpd_zmm(out, r, r, t0)
-    out = avx_vmulpd_zmm(out, t0, a7, b7)
-    out = avx_vsubpd_zmm(out, r, r, t0)
-
-    // Step 4: Compute r1 = a0*b1 + a1*b0 + a2*b3 - a3*b2 + a4*b5 - a5*b4 - a6*b7 + a7*b6
-    // Store in t1 (zmm4)
-    out = avx_vmulpd_zmm(out, t1, a0, b1)
-    out = avx_vfmadd231pd_zmm(out, t1, a1, b0)    // t1 += a1*b0
-    out = avx_vfmadd231pd_zmm(out, t1, a2, b3)    // t1 += a2*b3
-    out = avx_vmulpd_zmm(out, t0, a3, b2)
-    out = avx_vsubpd_zmm(out, t1, t1, t0)          // t1 -= a3*b2
-    out = avx_vfmadd231pd_zmm(out, t1, a4, b5)    // t1 += a4*b5
-    out = avx_vmulpd_zmm(out, t0, a5, b4)
-    out = avx_vsubpd_zmm(out, t1, t1, t0)          // t1 -= a5*b4
-    out = avx_vmulpd_zmm(out, t0, a6, b7)
-    out = avx_vsubpd_zmm(out, t1, t1, t0)          // t1 -= a6*b7
-    out = avx_vfmadd231pd_zmm(out, t1, a7, b6)    // t1 += a7*b6
-
-    // Step 5: Compute r2 = a0*b2 - a1*b3 + a2*b0 + a3*b1 + a4*b6 + a5*b7 - a6*b4 - a7*b5
-    out = avx_vmulpd_zmm(out, t2, a0, b2)
-    out = avx_vmulpd_zmm(out, t0, a1, b3)
-    out = avx_vsubpd_zmm(out, t2, t2, t0)
-    out = avx_vfmadd231pd_zmm(out, t2, a2, b0)
-    out = avx_vfmadd231pd_zmm(out, t2, a3, b1)
-    out = avx_vfmadd231pd_zmm(out, t2, a4, b6)
-    out = avx_vfmadd231pd_zmm(out, t2, a5, b7)
-    out = avx_vmulpd_zmm(out, t0, a6, b4)
-    out = avx_vsubpd_zmm(out, t2, t2, t0)
-    out = avx_vmulpd_zmm(out, t0, a7, b5)
-    out = avx_vsubpd_zmm(out, t2, t2, t0)
-
-    // Steps 6-9: r3 through r7 follow the same FMA chain pattern.
-    // For the emitter, we emit the same instruction sequence structure.
-    // Each component is 8-10 FMA/mul/sub instructions = 48-60 bytes.
-
-    // r3 = a0*b3 + a1*b2 - a2*b1 + a3*b0 + a4*b7 - a5*b6 + a6*b5 - a7*b4
-    let r3 = avx_reg_zmm(6)
-    out = avx_vmulpd_zmm(out, r3, a0, b3)
-    out = avx_vfmadd231pd_zmm(out, r3, a1, b2)
-    out = avx_vmulpd_zmm(out, t0, a2, b1)
-    out = avx_vsubpd_zmm(out, r3, r3, t0)
-    out = avx_vfmadd231pd_zmm(out, r3, a3, b0)
-    out = avx_vfmadd231pd_zmm(out, r3, a4, b7)
-    out = avx_vmulpd_zmm(out, t0, a5, b6)
-    out = avx_vsubpd_zmm(out, r3, r3, t0)
-    out = avx_vfmadd231pd_zmm(out, r3, a6, b5)
-    out = avx_vmulpd_zmm(out, t0, a7, b4)
-    out = avx_vsubpd_zmm(out, r3, r3, t0)
-
-    // r4 = a0*b4 - a1*b5 - a2*b6 - a3*b7 + a4*b0 + a5*b1 + a6*b2 + a7*b3
-    let r4 = avx_reg_zmm(7)
-    out = avx_vmulpd_zmm(out, r4, a0, b4)
-    out = avx_vmulpd_zmm(out, t0, a1, b5)
-    out = avx_vsubpd_zmm(out, r4, r4, t0)
-    out = avx_vmulpd_zmm(out, t0, a2, b6)
-    out = avx_vsubpd_zmm(out, r4, r4, t0)
-    out = avx_vmulpd_zmm(out, t0, a3, b7)
-    out = avx_vsubpd_zmm(out, r4, r4, t0)
-    out = avx_vfmadd231pd_zmm(out, r4, a4, b0)
-    out = avx_vfmadd231pd_zmm(out, r4, a5, b1)
-    out = avx_vfmadd231pd_zmm(out, r4, a6, b2)
-    out = avx_vfmadd231pd_zmm(out, r4, a7, b3)
-
-    // r5 = a0*b5 + a1*b4 - a2*b7 + a3*b6 - a4*b1 + a5*b0 - a6*b3 + a7*b2
-    let r5 = avx_reg_zmm(8)
-    out = avx_vmulpd_zmm(out, r5, a0, b5)
-    out = avx_vfmadd231pd_zmm(out, r5, a1, b4)
-    out = avx_vmulpd_zmm(out, t0, a2, b7)
-    out = avx_vsubpd_zmm(out, r5, r5, t0)
-    out = avx_vfmadd231pd_zmm(out, r5, a3, b6)
-    out = avx_vmulpd_zmm(out, t0, a4, b1)
-    out = avx_vsubpd_zmm(out, r5, r5, t0)
-    out = avx_vfmadd231pd_zmm(out, r5, a5, b0)
-    out = avx_vmulpd_zmm(out, t0, a6, b3)
-    out = avx_vsubpd_zmm(out, r5, r5, t0)
-    out = avx_vfmadd231pd_zmm(out, r5, a7, b2)
-
-    // r6 = a0*b6 + a1*b7 + a2*b4 - a3*b5 - a4*b2 + a5*b3 + a6*b0 - a7*b1
-    let r6 = avx_reg_zmm(9)
-    out = avx_vmulpd_zmm(out, r6, a0, b6)
-    out = avx_vfmadd231pd_zmm(out, r6, a1, b7)
-    out = avx_vfmadd231pd_zmm(out, r6, a2, b4)
-    out = avx_vmulpd_zmm(out, t0, a3, b5)
-    out = avx_vsubpd_zmm(out, r6, r6, t0)
-    out = avx_vmulpd_zmm(out, t0, a4, b2)
-    out = avx_vsubpd_zmm(out, r6, r6, t0)
-    out = avx_vfmadd231pd_zmm(out, r6, a5, b3)
-    out = avx_vfmadd231pd_zmm(out, r6, a6, b0)
-    out = avx_vmulpd_zmm(out, t0, a7, b1)
-    out = avx_vsubpd_zmm(out, r6, r6, t0)
-
-    // r7 = a0*b7 - a1*b6 + a2*b5 + a3*b4 - a4*b3 - a5*b2 + a6*b1 + a7*b0
-    let r7 = avx_reg_zmm(10)
-    out = avx_vmulpd_zmm(out, r7, a0, b7)
-    out = avx_vmulpd_zmm(out, t0, a1, b6)
-    out = avx_vsubpd_zmm(out, r7, r7, t0)
-    out = avx_vfmadd231pd_zmm(out, r7, a2, b5)
-    out = avx_vfmadd231pd_zmm(out, r7, a3, b4)
-    out = avx_vmulpd_zmm(out, t0, a4, b3)
-    out = avx_vsubpd_zmm(out, r7, r7, t0)
-    out = avx_vmulpd_zmm(out, t0, a5, b2)
-    out = avx_vsubpd_zmm(out, r7, r7, t0)
-    out = avx_vfmadd231pd_zmm(out, r7, a6, b1)
-    out = avx_vfmadd231pd_zmm(out, r7, a7, b0)
-
-    out
-}
-
-// ============================================================================
 // Quaternion operations — avx512_quat_mul, avx512_quat_conj
 //
 // Quaternion multiplication using 4 lanes within a ZMM register.
@@ -1148,7 +904,7 @@ fn avx_emit_evex_rr_with_rounding(
     rounding: i64
 ) -> Avx512Emitter with Mut, Panic, Div {
     var out = e
-    let b1 = avx_encode_evex_b1(dst.reg_id, src2.reg_id, 0, map)
+    let b1 = avx_encode_evex_b1(dst.reg_id, src2.reg_id, avx_reg_bit4(src2.reg_id), map)
     let b2 = avx_encode_evex_b2(w, src1.reg_id, pp)
     // b-bit = 1 for SAE, L'L = rounding mode
     let b3 = avx_encode_evex_b3(0, rounding, 1, src1.reg_id, out.mask_reg)
@@ -1183,7 +939,7 @@ fn avx_emitter_bytes_since(e: Avx512Emitter, start: i64) -> i64 {
 // ============================================================================
 
 // Helper: check that a byte at position idx equals expected.
-fn avx_check_byte(e: Avx512Emitter, idx: i64, expected: i64) -> bool with Div, Panic {
+pub fn avx_check_byte(e: Avx512Emitter, idx: i64, expected: i64) -> bool with Div, Panic {
     avx_read_byte(e, idx) == expected
 }
 
@@ -1586,26 +1342,6 @@ fn test_avx_vmovapd_store_opcode() -> bool with Mut, Panic, Div {
     avx_check_byte(e, 4, 0x29)
 }
 
-// T38: Octonion multiply produces substantial instruction sequence
-fn test_avx_octonion_mul_length() -> bool with Mut, Panic, Div {
-    var e = avx_emitter_new()
-    let start = e.pos
-    e = avx512_octonion_mul(e)
-    let len = e.pos - start
-    // Expect > 500 bytes (many FMA + mul + sub instructions)
-    // 1 xorpd(6) + 16 permpd(7) + ~70 arith(6) > 500 bytes
-    len > 500
-}
-
-// T39: Octonion multiply starts with vxorpd (zeroing result)
-fn test_avx_octonion_mul_starts_xor() -> bool with Mut, Panic, Div {
-    var e = avx_emitter_new()
-    e = avx512_octonion_mul(e)
-    // First instruction: EVEX prefix
-    if avx_check_byte(e, 0, 0x62) == false { return false }
-    // Opcode of vxorpd is 0x57
-    avx_check_byte(e, 4, 0x57)
-}
 
 // T40: Quaternion multiply emits instructions
 fn test_avx_quat_mul_length() -> bool with Mut, Panic, Div {
@@ -1652,6 +1388,32 @@ fn test_avx_rounding_trunc() -> bool with Mut, Panic, Div {
     let b_bit = (b3 >> 4) & 1
     let ll = (b3 >> 5) & 3
     if b_bit == 1 { ll == AVX_ROUND_TRUNC } else { false }
+}
+
+// T43b: Rounding-form EVEX emitter (avx_emit_evex_rr_with_rounding) encodes
+// src2's bit 4 into EVEX.X for a high register (zmm16-31), same as the
+// non-rounding avx_emit_evex_rr already covered by T39 (removed with
+// avx512_octonion_mul) -- but that byte-level coverage only ever exercised
+// the non-rounding path. T42/T43 above only use zmm2 for src2, so they can't
+// catch a regression here: if `avx_reg_bit4(src2.reg_id)` were dropped from
+// avx_emit_evex_rr_with_rounding (reverting to a hardcoded 0, as it was
+// before this PR), every other rounding test would still pass. This does a
+// full 6-byte check with src2 = zmm25 and AVX_ROUND_DOWN, independently
+// verified against Capstone: 62 91 F5 38 58 C1 decodes as
+// "vaddpd zmm0, zmm1, zmm25, {rd-sae}".
+fn test_avx_rounding_high_reg_src2() -> bool with Mut, Panic, Div {
+    var e = avx_emitter_new()
+    let z0 = avx_reg_zmm(0)
+    let z1 = avx_reg_zmm(1)
+    let z25 = avx_reg_zmm(25)
+    e = avx_vaddpd_zmm_rn(e, z0, z1, z25, AVX_ROUND_DOWN)
+    if avx_check_byte(e, 0, 0x62) == false { return false }
+    if avx_check_byte(e, 1, 0x91) == false { return false }
+    if avx_check_byte(e, 2, 0xF5) == false { return false }
+    if avx_check_byte(e, 3, 0x38) == false { return false }
+    if avx_check_byte(e, 4, 0x58) == false { return false }
+    if avx_check_byte(e, 5, 0xC1) == false { return false }
+    true
 }
 
 // T44: Two consecutive instructions have correct positions
@@ -1736,6 +1498,23 @@ fn test_avx_fmsub231_opcode() -> bool with Mut, Panic, Div {
     let z2 = avx_reg_zmm(2)
     e = avx_vfmsub231pd_zmm(e, z0, z1, z2)
     avx_check_byte(e, 4, 0xBA)
+}
+
+fn test_avx_vfnmadd231_opcode() -> bool with Mut, Panic, Div {
+    var e = avx_emitter_new()
+    let z0 = avx_reg_zmm(0)
+    let z1 = avx_reg_zmm(1)
+    let z25 = avx_reg_zmm(25)
+    e = avx_vfnmadd231pd_zmm(e, z0, z1, z25)
+    // Full byte encoding check with high register zmm25 (bit 4 sets EVEX.X=0, bit 3 sets EVEX.B=0):
+    // b0=0x62, b1=0x92, b2=0xF5, b3=0x48, opcode=0xBC, ModRM=0xC1
+    if avx_check_byte(e, 0, 0x62) == false { return false }
+    if avx_check_byte(e, 1, 0x92) == false { return false }
+    if avx_check_byte(e, 2, 0xF5) == false { return false }
+    if avx_check_byte(e, 3, 0x48) == false { return false }
+    if avx_check_byte(e, 4, 0xBC) == false { return false }
+    if avx_check_byte(e, 5, 0xC1) == false { return false }
+    true
 }
 
 // T52: EVEX byte 2 fixed bit (bit 2 must be 1)
@@ -1922,7 +1701,7 @@ fn test_avx_vmovapd_rr_length() -> bool with Mut, Panic, Div {
 // Test runner
 // ============================================================================
 
-fn run_avx512_tests() -> i32 with IO, Mut, Panic, Div {
+pub fn run_avx512_tests() -> i32 with IO, Mut, Panic, Div {
     var passed: i64 = 0
     let total: i64 = 70
 
@@ -1965,12 +1744,11 @@ fn run_avx512_tests() -> i32 with IO, Mut, Panic, Div {
     if test_avx_vmovupd_store_opcode() { passed = passed + 1; print("  T35 OK (vmovupd store opcode)\n") } else { print("  FAIL: T35 vmovupd store opcode\n") }
     if test_avx_vmovapd_load_opcode() { passed = passed + 1; print("  T36 OK (vmovapd load opcode)\n") } else { print("  FAIL: T36 vmovapd load opcode\n") }
     if test_avx_vmovapd_store_opcode() { passed = passed + 1; print("  T37 OK (vmovapd store opcode)\n") } else { print("  FAIL: T37 vmovapd store opcode\n") }
-    if test_avx_octonion_mul_length() { passed = passed + 1; print("  T38 OK (octonion mul length)\n") } else { print("  FAIL: T38 octonion mul length\n") }
-    if test_avx_octonion_mul_starts_xor() { passed = passed + 1; print("  T39 OK (octonion mul starts xor)\n") } else { print("  FAIL: T39 octonion mul starts xor\n") }
     if test_avx_quat_mul_length() { passed = passed + 1; print("  T40 OK (quat mul length)\n") } else { print("  FAIL: T40 quat mul length\n") }
     if test_avx_quat_conj_length() { passed = passed + 1; print("  T41 OK (quat conj length)\n") } else { print("  FAIL: T41 quat conj length\n") }
     if test_avx_rounding_mode_encoding() { passed = passed + 1; print("  T42 OK (rounding mode encoding)\n") } else { print("  FAIL: T42 rounding mode encoding\n") }
     if test_avx_rounding_trunc() { passed = passed + 1; print("  T43 OK (rounding trunc)\n") } else { print("  FAIL: T43 rounding trunc\n") }
+    if test_avx_rounding_high_reg_src2() { passed = passed + 1; print("  T43b OK (rounding-form high reg src2)\n") } else { print("  FAIL: T43b rounding-form high reg src2\n") }
     if test_avx_consecutive_instrs() { passed = passed + 1; print("  T44 OK (consecutive instrs)\n") } else { print("  FAIL: T44 consecutive instrs\n") }
     if test_avx_vvvv_encoding() { passed = passed + 1; print("  T45 OK (vvvv encoding)\n") } else { print("  FAIL: T45 vvvv encoding\n") }
     if test_avx_map_0f() { passed = passed + 1; print("  T46 OK (map 0F)\n") } else { print("  FAIL: T46 map 0F\n") }
@@ -1979,6 +1757,7 @@ fn run_avx512_tests() -> i32 with IO, Mut, Panic, Div {
     if test_avx_emitter_mask_reset() { passed = passed + 1; print("  T49 OK (emitter mask reset)\n") } else { print("  FAIL: T49 emitter mask reset\n") }
     if test_avx_vzeroall_length() { passed = passed + 1; print("  T50 OK (vzeroall length)\n") } else { print("  FAIL: T50 vzeroall length\n") }
     if test_avx_fmsub231_opcode() { passed = passed + 1; print("  T51 OK (FMsub231 opcode)\n") } else { print("  FAIL: T51 FMsub231 opcode\n") }
+    if test_avx_vfnmadd231_opcode() { passed = passed + 1; print("  T51b OK (VFNMADD231 opcode 0xBC)\n") } else { print("  FAIL: T51b VFNMADD231 opcode\n") }
     if test_avx_evex_b2_fixed_bit() { passed = passed + 1; print("  T52 OK (EVEX b2 fixed bit)\n") } else { print("  FAIL: T52 EVEX b2 fixed bit\n") }
     if test_avx_load_disp32_length() { passed = passed + 1; print("  T53 OK (load disp32 length)\n") } else { print("  FAIL: T53 load disp32 length\n") }
     if test_avx_store_disp32_bytes() { passed = passed + 1; print("  T54 OK (store disp32 bytes)\n") } else { print("  FAIL: T54 store disp32 bytes\n") }

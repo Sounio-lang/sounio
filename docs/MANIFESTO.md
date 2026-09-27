@@ -54,7 +54,7 @@ In the physical world, there is no such thing as a perfect measurement. The Heis
 let concentration = 5.23  // mg/L... but really?
 
 // Right: acknowledging uncertainty
-let concentration = Knowledge::new(5.23 mg/L, uncertainty: 0.15 mg/L)
+let concentration = ep_measured(5.23, 0.15)  // mg/L, std-dev ±0.15
 ```
 
 Sounio makes this explicit. When you declare a value, you must consider: *how well do I actually know this?*
@@ -64,31 +64,23 @@ Sounio makes this explicit. When you declare a value, you must consider: *how we
 Data without origin is data without trust. When a regulatory agency asks "where did this number come from?", you should have an answer that traces back to primary sources.
 
 ```sio
-let clearance = Knowledge::new(
-    value: 10.5 L/h,
-    uncertainty: 1.2 L/h,
-    source: Source {
-        origin: "Phase III Trial NCT04123456",
-        timestamp: 2025-03-15,
-        method: "Population PK analysis",
-        confidence: 0.95
-    }
-)
+// Provenance stays attached to the measurement; the canonical value type is Epistemic:
+let clearance = ep_measured(10.5, 1.2)  // L/h, std-dev ±1.2 (source: Phase III Trial NCT04123456, 2025-03-15, Population PK)
 ```
 
-Every `Knowledge<T>` carries its provenance. The lineage of your data is as important as the data itself.
+Every measurement carries its provenance. The lineage of your data is as important as the data itself.
 
 ### 3. Uncertainty Propagates Automatically
 
 Manual uncertainty propagation is tedious and error-prone. The GUM (Guide to the Expression of Uncertainty in Measurement) defines how uncertainties combine through mathematical operations. Sounio implements this automatically.
 
 ```sio
-let mass = Knowledge::new(100.0 g, uncertainty: 0.5 g)
-let volume = Knowledge::new(50.0 mL, uncertainty: 0.2 mL)
+let mass = ep_measured(100.0, 0.5)  // g, std-dev ±0.5
+let volume = ep_measured(50.0, 0.2)  // mL, std-dev ±0.2
 
 // Density calculation with automatic propagation
-let density = mass / volume
-// density.uncertainty is computed via GUM: 
+let density = ep_div(&mass, &volume)
+// ep_std(&density) is computed via GUM:
 // δρ/ρ = sqrt((δm/m)² + (δV/V)²)
 ```
 
@@ -99,15 +91,15 @@ You write the physics. The compiler handles the statistics.
 Not all computations should proceed blindly. When confidence drops below a threshold, execution should pause, warn, or take alternative paths.
 
 ```sio
-fn critical_decision(data: Knowledge<f64>) -> Action {
-    if data.confidence < 0.90 {
+fn critical_decision(data: Epistemic) -> Action {
+    if ep_confidence(&data) < 900 {
         return Action::RequestMoreData
     }
-    
-    if data.confidence < 0.95 {
+
+    if ep_confidence(&data) < 950 {
         return Action::ProceedWithCaution(data)
     }
-    
+
     Action::Proceed(data)
 }
 ```
@@ -137,7 +129,7 @@ When a measurement of `5.23 mg/L` is passed between systems, stored in databases
 
 ### The Solution
 
-Sounio makes uncertainty *infectious*. You cannot accidentally drop it. The type system won't let you convert `Knowledge<T>` to bare `T` without explicit acknowledgment.
+Sounio makes uncertainty *infectious*. You cannot accidentally drop it. The type system won't let you convert `Epistemic` to bare `f64` without explicit acknowledgment.
 
 ```sio
 let safe_value = measurement.value  // Compiler error!

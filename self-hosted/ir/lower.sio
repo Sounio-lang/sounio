@@ -5,7 +5,7 @@ module ir::lower
 use parser::ast::*
 use ir::ir::*
 use ir::numeric_payload::{ir_wide_compile_pool_reset, ir_wide_compile_pool_intern_low}
-use check::specializer::{spec_dce_filter_with_global_marks, spec_dce_global_marks_ready}
+use check::specializer::{spec_dce_filter_with_global_marks, spec_dce_global_marks_ready, spec_item_module_lookup, spec_item_module_populated, spec_item_module_overflowed}
 use io::trace::*
 use io::env::{read_env}
 
@@ -64,6 +64,14 @@ struct LowerLocalStack {
     // Tuple-typed local: bit k set iff element k of the tuple is f64. 0 = not a
     // tuple / no float elements. See lower_opt_type_tuple_float_mask (issue #1502).
     tuple_float_mask: Box<LowerLocalI64Slots>,
+    // Tuple-typed local: bit k set iff element k of the tuple is an `[f64; N]`
+    // ARRAY (as opposed to a scalar f64). 0 = no array slots. Kept as its OWN
+    // i64 slot table rather than packed into the high bits of tuple_float_mask:
+    // both masks independently need up to 32 usable bits (matching the existing
+    // #1502 scalar mask's `bit < 32` cap), and packing array bits into bits
+    // 32-63 of one i64 pushes array slot 31 onto the sign bit of the combined
+    // value, corrupting it. See lower_fn_tuple_f64_array_mask.
+    tuple_arr_mask: Box<LowerLocalI64Slots>,
     // Layout index for an aggregate element carried by a local: tuple slot-0
     // fixed arrays and Seq<T> share this slot because those shapes are disjoint.
     tuple0_array_elem_layout: Box<LowerLocalI64Slots>,
@@ -136,6 +144,7 @@ fn empty_lower_local_stack() -> LowerLocalStack with Alloc, Mut {
         is_ref: lowerer_box_local_i64_slots(0),
         scalar_kind: lowerer_box_local_i64_slots(0),
         tuple_float_mask: lowerer_box_local_i64_slots(0),
+        tuple_arr_mask: lowerer_box_local_i64_slots(0),
         tuple0_array_elem_layout: lowerer_box_local_i64_slots(-1),
         tuple_struct_layout: lowerer_box_local_i64_slots(-1),
         tuple_struct_slot: lowerer_box_local_i64_slots(-1),
@@ -549,7 +558,7 @@ pub fn lower_note_error(site: i64, n: Name) with Mut {
 }
 var IR_LOWER_HARD_ERROR_LIMIT: i64 = 0
 
-pub fn lower_hard_error_pending() -> bool { IR_LOWER_HARD_ERROR != 0 }
+pub fn lower_hard_error_pending() -> bool { IR_LOWER_HARD_ERROR != 0 || LOWER_USE_MODULE_OVERFLOWED || LOWER_IMPL_METHOD_OVERFLOWED || ast_named_item_terminal_overflowed() || spec_item_module_overflowed() || ast_path_range_name_overflowed() }
 
 // Print what the flag knows, or say plainly that it knows nothing — never
 // silence. Called by the consumers that used to print a bare "ir_summary_failed".
@@ -616,6 +625,33 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
         }
         print("\n")
     }
+    if LOWER_USE_MODULE_OVERFLOWED {
+        print("  cause: more than 1024 distinct lowercase `use` path segments in this\n")
+        print("         compilation; the module-qualified-call registry (LOWER_USE_MODULE_HASH)\n")
+        print("         dropped the rest. Any `mod::f(..)` naming a module past this point\n")
+        print("         falls back to the mangled `mod_f` stub this gate exists to prevent,\n")
+        print("         silently -- reported here because the transient hard-error state may\n")
+        print("         have been reset by a later module's lowerer_new().\n")
+    }
+    if LOWER_IMPL_METHOD_OVERFLOWED {
+        print("  cause: more than 4096 distinct mangled impl-method names in this compilation;\n")
+        print("         the impl-method registry (LOWER_IMPL_METHOD_HASH) dropped the rest. A\n")
+        print("         lowercase-typed method past this point can lose its \"this is a real\n")
+        print("         method\" evidence and be stripped to a bare free-fn name -- reported here\n")
+        print("         because the transient hard-error state may have been reset by a later\n")
+        print("         module's lowerer_new().\n")
+    }
+    if ast_named_item_terminal_overflowed() {
+        print("  cause: more than 4096 distinct named-item import terminals in this compilation\n")
+        print("         (or a prior compilation in this same process -- this registry is never\n")
+        print("         reset); the shared registry (AST_NAMED_ITEM_TERMINAL_HASH, parser/ast.sio)\n")
+        print("         dropped the rest. Since round 9, the module-qualifier registries skip\n")
+        print("         registering a `use` path's suffixes entirely when this registry confirms\n")
+        print("         it names an item, not a module -- a dropped entry past this cap means\n")
+        print("         that suffix falls back into the module registries as if it were a real\n")
+        print("         module, reopening the namespace-erasure class this registry exists to\n")
+        print("         prevent for whichever names overflow.\n")
+    }
     if IR_LOWER_HARD_ERROR == 0 {
         return
     }
@@ -623,6 +659,20 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
         print("  cause: cannot safely lower print/println argument with unresolved scalar kind in function `")
         ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
         print("`\n")
+    } else if IR_LOWER_HARD_ERROR_REASON == 3 {
+        print("  cause: more than ")
+        print_int(IR_LOWER_HARD_ERROR_LIMIT)
+        print(" distinct lowercase `use` path segments in this compilation; the module-\n")
+        print("         qualified-call registry (LOWER_USE_MODULE_HASH) dropped the rest.\n")
+        print("         Any `mod::f(..)` naming a module past this point falls back to the\n")
+        print("         mangled `mod_f` stub this gate exists to prevent, silently.\n")
+    } else if IR_LOWER_HARD_ERROR_REASON == 4 {
+        print("  cause: more than ")
+        print_int(IR_LOWER_HARD_ERROR_LIMIT)
+        print(" distinct mangled impl-method names in this compilation; the impl-method\n")
+        print("         registry (LOWER_IMPL_METHOD_HASH) dropped the rest. A lowercase-typed\n")
+        print("         method past this point can lose its \"this is a real method\" evidence\n")
+        print("         and be stripped to a bare free-fn name, silently.\n")
     } else if IR_LOWER_HARD_ERROR_NEEDED > 0 {
         print("  cause: function `")
         ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
@@ -650,8 +700,21 @@ pub fn lower_hard_error_reset() with Mut {
 }
 
 // OR the durable flag into a value-threaded had_error. Used at every
-// IrLowerResult/IrLowerBoxResult construction site.
-pub fn lower_had_error_with_hard(v: bool) -> bool { v || IR_LOWER_HARD_ERROR != 0 }
+// IrLowerResult/IrLowerBoxResult construction site. Must track
+// lower_hard_error_pending()'s condition exactly: a caller that trusts a
+// returned had_error field instead of separately polling
+// lower_hard_error_pending() (module_frontend_merge_imported_box and the
+// public load_multimodule_ir* routes do exactly this) would otherwise see
+// success on a module-registry overflow that IR_LOWER_HARD_ERROR alone
+// cannot see, since lowerer_new() resets it per module while the overflow
+// flag is deliberately durable across that reset.
+// Round 11 (review comment 4100285133): this had drifted out of sync with
+// lower_hard_error_pending() (missing ast_named_item_terminal_overflowed()),
+// so a named-item-terminal registry overflow could still be returned as
+// successful IR by any of the many IrLowerResult/IrLowerBoxResult
+// construction sites that gate on THIS helper rather than polling the
+// separate pending flag directly.
+pub fn lower_had_error_with_hard(v: bool) -> bool { v || IR_LOWER_HARD_ERROR != 0 || LOWER_USE_MODULE_OVERFLOWED || LOWER_IMPL_METHOD_OVERFLOWED || ast_named_item_terminal_overflowed() || spec_item_module_overflowed() || ast_path_range_name_overflowed() }
 fn lower_ok_without_hard(v: bool) -> bool { !lower_had_error_with_hard(v) }
 var FO_XFER_COUNT: i64 = 0
 var FO_XFER_KIND: [i64; 64] = [0; 64]
@@ -734,16 +797,767 @@ fn fo_cov_rho_get(i: i64, j: i64) -> f64 with Mut, Panic, Div {
 }
 var FO_XFER_FWD_HASH: [i64; 64] = [0; 64]
 
+// Copilot review (PR #2516): the byte cap here must match Name.buf's actual
+// capacity (parser/ast.sio: `buf: [i8; 384]`), not an arbitrary smaller
+// bound -- identifiers up to 384 bytes are accepted by the parser, and
+// capping the hash at 64 bytes meant two same-length names sharing a 64-byte
+// prefix but differing only after byte 64 hashed identically, silently
+// colliding in every fo_name_hash-keyed table (FO_XFER, FO_CTOR, and
+// LOWER_FN_TUPLE_ARR_HASH among them).
 fn fo_name_hash(n: Name) -> i64 with Mut, Panic, Div {
     var h: i64 = 5381
     var i: i64 = 0
-    while i < n.len && i < 64 {
+    while i < n.len && i < 384 {
         let b = (n.buf[i as usize] as i64) & 255
         h = h * 33 + b
         i = i + 1
     }
     h + n.len
 }
+
+// Module names that appear in a `use` declaration of any loaded module.
+//
+// `use chemistry::equilibrium;` then `equilibrium::solve_ab_c_equil(..)` is a
+// call to the free fn `solve_ab_c_equil`: the function namespace is flat
+// (lean_single flattens `a::b::f` to `f` for the same reason). Without this
+// set expr_to_callee_name_ref could not tell a module prefix from a type, so it
+// mangled the call as `equilibrium_solve_ab_c_equil` -- a name with no body --
+// and native codegen emitted a ud2 stub (NATIVE_REFUSAL empty_stub_ud2, SIGILL
+// at run time) while `check` stayed green.
+//
+// POSITIVE evidence only: a segment counts as a module when a `use` names it,
+// it starts lowercase, and at the call site it is not a known struct or enum.
+// Everything else keeps the Type::method mangling.
+//
+// FIXED (review 5301534901, round 7 finding A's sibling gap; the round-6
+// comment below described this as a KNOWN, deliberately deferred SCOPING
+// GAP -- kept verbatim below for history): this registry used to be a
+// single GLOBAL set across every loaded module, not scoped to "did the
+// CURRENT module actually `use` this". check.sio's CHECKER_USE_MODULE_HASH
+// was per-module-scoped in round 6, and specializer.sio's sibling
+// SPEC_USE_MODULE_HASH in round 7 (finding A) -- but round 6 reasoned this
+// one could stay unscoped because "check.sio's validation always runs
+// before lowering and would already reject an invalid qualifier via W044".
+// Round 7's finding A review comment pointed out that reasoning does not
+// actually hold: W044 is a WARNING, not a hard compile error (by long-
+// standing design, since it fires on pre-existing broken code elsewhere in
+// this codebase too) -- so a program whose qualifier check.sio only
+// *warned* about still proceeds to body lowering, where this registry, if
+// left globally scoped, could independently (and silently) resolve the
+// same illegitimately-borrowed qualifier to an unrelated module's real
+// function and emit a genuine miscompilation, with no diagnostic at all.
+// That is strictly worse than check.sio's non-fatal warning and entirely
+// bypasses it. Fixed the same way as SPEC_USE_MODULE_HASH: every entry is
+// now stamped with the registering module's id (LOWER_USE_MODULE_MODULE_ID,
+// parallel to HASH/LEN/BUF) and lookup requires an exact match against
+// LOWER_CURRENT_MODULE_ID, which the three body-lowering entry points that
+// can resolve a module-qualified call (module_frontend.sio's
+// module_frontend_lower_program_items_box_traced_with_externs, this file's
+// lower_dep_program_items_into_acc_with_externs, and the single-module
+// direct-box path, which relies on the -1-means-0 fallback below since it
+// never lowers more than module 0) now set via lower_set_current_module_id
+// before lowering that module's own bodies. The ACCUMULATION timing itself
+// (every loaded module's `use` paths collected up front, before any body is
+// lowered -- see lower_use_modules_collect's own comment) is unchanged;
+// only the id each entry is stamped with, and the id required at lookup,
+// are new.
+var LOWER_USE_MODULE_COUNT: i64 = 0
+var LOWER_USE_MODULE_HASH: [i64; 1024] = [0; 1024]
+var LOWER_USE_MODULE_MODULE_ID: [i64; 1024] = [0 - 1; 1024]
+
+// The module id callee_path_module_stripped_name's qualifier lookup checks
+// registry entries against. -1 (the default) means "unscoped": the single-
+// module direct-box path never calls lower_set_current_module_id, and
+// lower_use_module_known/note both fall back to module id 0 when this is
+// negative, so that path's own (always module-0) entries still match
+// without any special-cased fallback branch. The three multi-module body-
+// lowering entry points listed above set this explicitly to the id of
+// whichever module's own items are currently being lowered, for the
+// duration of that module's body lowering.
+var LOWER_CURRENT_MODULE_ID: i64 = 0 - 1
+
+// Sets LOWER_CURRENT_MODULE_ID from module_frontend.sio, which owns the
+// loop indices that know which loaded module is about to have its body
+// lowered; lower.sio's own body-lowering entry points call this directly.
+pub fn lower_set_current_module_id(module_id: i64) with Mut {
+    LOWER_CURRENT_MODULE_ID = module_id
+}
+
+// Round 12 (review comment 4100990400): exact match on -1 (the genuine
+// "unset, single-module compile" default), not "any negative value" --
+// spec_item_module_lookup's "not found" result is a DIFFERENT sentinel
+// (SPEC_ITEM_MODULE_NOT_FOUND, -2, check::specializer) precisely so a
+// fail-closed assignment from that lookup (see lowerer_lower_program_bodies_mut's
+// per-item attribution) does not get silently reinterpreted as "assume
+// module 0" here.
+fn lower_effective_current_module_id() -> i64 with Mut {
+    if LOWER_CURRENT_MODULE_ID == 0 - 1 { 0 } else { LOWER_CURRENT_MODULE_ID }
+}
+
+// Round 9 (review comment 4098353609): module_frontend_lower_specialized_items_box
+// passes a MERGED, all-modules item list to module_frontend_lower_program_items_
+// box_traced_with_externs with module_index=0 (a specialized/monomorphized program
+// has no single "module" of its own -- see that function's own comment). That
+// value flows straight into lower_set_current_module_id, so
+// lowerer_lower_program_bodies_mut's own recollection
+// (lower_use_modules_collect(items, lower_effective_current_module_id())) re-notes
+// EVERY dependency module's `use` paths under module id 0 -- module 0 (the seed)
+// can then borrow a qualifier only some OTHER, unrelated module actually
+// imported, exactly the cross-module leak the per-module registry exists to
+// prevent, and because W044 is a non-fatal warning this can surface as lowering
+// silently resolving to a real but wrong function, not merely a rejected
+// diagnostic. Unlike the OTHER (genuinely single-module) callers of
+// lowerer_lower_program_bodies_mut, this recollection is neither a no-op resend
+// (the module ids it would write are simply wrong) nor necessary (the specialized
+// path's items were already fully preregistered per-module before specialization
+// ran, in module_frontend.sio's ordinary preregister loop). Set for the
+// duration of ONE such call (module_frontend_lower_specialized_items_box), never
+// durable, never cleared by lower_use_module_reset() (that call always precedes
+// this one within the same compile, so clearing it there would be a no-op either
+// way -- kept simple as its own flag instead of overloading the reset).
+var LOWER_SKIP_USE_RECOLLECT_FOR_MERGED: bool = false
+
+pub fn lower_set_skip_use_recollect_for_merged(skip: bool) with Mut {
+    LOWER_SKIP_USE_RECOLLECT_FOR_MERGED = skip
+}
+// Durable: NOT cleared by lower_hard_error_reset(), which fo_preregister_program_items_multipass
+// (via lowerer_new()) calls once per loaded module -- immediately after this table might be
+// filled, on the very same call path, before any compile-boundary check ever sees the flag.
+// Folded back into the hard-error report at the two barrier sites in module_frontend.sio via
+// lower_hard_error_pending()/lower_hard_error_report(), so it still refuses the binary rather
+// than reverting to the silent drop this gate exists to replace.
+var LOWER_USE_MODULE_OVERFLOWED: bool = false
+
+pub fn lower_use_module_reset() with Mut {
+    LOWER_USE_MODULE_COUNT = 0
+    LOWER_USE_MODULE_OVERFLOWED = false
+    LOWER_IMPL_METHOD_COUNT = 0
+    LOWER_IMPL_METHOD_OVERFLOWED = false
+    LOWER_CURRENT_MODULE_ID = 0 - 1
+    // LOWER_NAMED_ITEM_TERMINAL_* (parser::ast) is deliberately NOT reset
+    // anywhere in this file -- see its own comment there for why.
+}
+// fo_name_hash is a djb2 variant with real collisions (e.g. "aar" and "ac0"
+// both hash to 193485948) and only hashes a name's first 64 bytes -- but hash
+// alone is never identity here regardless: the full segment text is stored
+// alongside it and compared byte-for-byte after a hash match (below), so a
+// truncated-hash collision cannot be mistaken for a real module match. That
+// full-length compare is also why MODULE_SEG_MAX must cover every byte `Name`
+// can hold (384, matching `Name.buf: [i8; 384]` in parser/ast.sio) rather than
+// some shorter cap: a shorter cap made `lower_use_module_note`/`known` refuse
+// (silently, not an error) any module segment longer than the cap, so a real
+// `use` of a >cap-byte module still parsed/checked but its qualified calls
+// fell back to the mangled body-less stub -- the same SIGILL class of bug
+// this registry exists to prevent, just for long identifiers instead of
+// missing ones. Reported by review (comment 4089110718) against an earlier,
+// shorter (64-byte) cap on this same registry.
+//
+// Stored as a flat scalar byte buffer (LOWER_USE_MODULE_BUF/LEN), NOT
+// `[Name; 1024]` (a 392-byte struct array): a `[Name; 1024]` global here was
+// observed to corrupt on both read and write (hash stayed correct, but the
+// stored len/buf came back as unrelated stack-address-shaped garbage) even
+// after eliminating every by-value Name copy at the call sites -- reproduced
+// on this branch's own base commit (692e709), independent of any of the 4
+// review findings, so this is a pre-existing miscompilation in this
+// compiler's own codegen for large-struct global array elements, not
+// something introduced by this PR. Scalar (i8/i64) global arrays are the
+// pattern already proven reliable throughout this file (LOWER_USE_MODULE_HASH
+// itself, LOWER_ENUM_VARIANT_PTRS, FN_PARAM_NAME_OFF, …).
+let LOWER_USE_MODULE_SEG_MAX: i64 = 384
+var LOWER_USE_MODULE_LEN: [i64; 1024] = [0; 1024]
+var LOWER_USE_MODULE_BUF: [i8; 393216] = [0; 393216]
+
+fn lower_use_module_known(module_id: i64, n: Name) -> bool with Mut, Panic, Div {
+    if n.len <= 0 || n.len > LOWER_USE_MODULE_SEG_MAX {
+        return false
+    }
+    let h = fo_name_hash(n)
+    var i: i64 = 0
+    while i < LOWER_USE_MODULE_COUNT {
+        if LOWER_USE_MODULE_MODULE_ID[i as usize] == module_id && LOWER_USE_MODULE_HASH[i as usize] == h && LOWER_USE_MODULE_LEN[i as usize] == n.len {
+            let base = i * LOWER_USE_MODULE_SEG_MAX
+            var eq = true
+            var j: i64 = 0
+            while j < n.len {
+                if LOWER_USE_MODULE_BUF[(base + j) as usize] != n.buf[j as usize] {
+                    eq = false
+                }
+                j = j + 1
+            }
+            if eq {
+                return true
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn lower_use_module_note(module_id: i64, n: Name) with Mut, Panic, Div {
+    if n.len <= 0 || n.len > LOWER_USE_MODULE_SEG_MAX {
+        return
+    }
+    let c0 = (n.buf[0] as i64) & 255
+    if c0 >= 65 && c0 <= 90 {
+        return
+    }
+    if lower_use_module_known(module_id, n) {
+        return
+    }
+    if LOWER_USE_MODULE_COUNT >= 1024 {
+        // Silently continuing here would recreate exactly the bug this registry exists
+        // to prevent: a `mod::f(..)` call for the segment that didn't fit falls back to
+        // the mangled `mod_f` stub, but now with no diagnostic at all. Refuse instead.
+        // The durable flag survives the lower_hard_error_reset() every later module's
+        // fo_preregister_program_items_multipass -> lowerer_new() call makes; the
+        // transient fields are also set for anything that checks IR_LOWER_HARD_ERROR
+        // before that next reset happens.
+        LOWER_USE_MODULE_OVERFLOWED = true
+        if IR_LOWER_HARD_ERROR == 0 {
+            IR_LOWER_HARD_ERROR = 1
+            IR_LOWER_HARD_ERROR_REASON = 3
+            IR_LOWER_HARD_ERROR_LIMIT = 1024
+        }
+        return
+    }
+    let use_idx = LOWER_USE_MODULE_COUNT
+    LOWER_USE_MODULE_MODULE_ID[use_idx as usize] = module_id
+    LOWER_USE_MODULE_HASH[use_idx as usize] = fo_name_hash(n)
+    let use_base = use_idx * LOWER_USE_MODULE_SEG_MAX
+    var use_ci: i64 = 0
+    while use_ci < n.len {
+        LOWER_USE_MODULE_BUF[(use_base + use_ci) as usize] = n.buf[use_ci as usize]
+        use_ci = use_ci + 1
+    }
+    LOWER_USE_MODULE_LEN[use_idx as usize] = n.len
+    LOWER_USE_MODULE_COUNT = LOWER_USE_MODULE_COUNT + 1
+}
+
+// Segment k of a path, by recursion like ir_string_list_last (no by-value
+// self-reassignment of the StringList).
+fn lower_string_list_nth_name(sl: StringList, k: i64) -> Name with Mut, Panic, Div {
+    if k <= 0 {
+        return Name { buf: sl.head_buf, len: sl.head_len }
+    }
+    match sl.tail {
+        Some(rest) => lower_string_list_nth_name(*rest, k - 1),
+        _ => ir_empty_name(),
+    }
+}
+
+// Record every segment of every `use` path. For `use a::b::*` and
+// `use a::b::{x}` the path is `a::b`, all modules. `use a::f;` may name an
+// item; noting `f` is harmless because a call spelled `f::g` still has to pass
+// the call-site type checks.
+pub fn lower_use_modules_collect(items: &Option<Box<ItemList>>, module_id: i64) with Mut, Panic, Div, Alloc {
+    // Same every-module-before-body-lowering timing this function already
+    // provides for LOWER_USE_MODULE_HASH: populate the impl-method registry
+    // here too so callee_path_module_stripped_name always sees a complete
+    // set before any call site is resolved.
+    lower_impl_methods_collect(items)
+    var current = items
+    while true {
+        match *current {
+            Some(list) => {
+                let item_ref = &(*list).head
+                if item_ref.kind == ItemKind::ItemUse {
+                    // Records every SUFFIX of the `use` path (the full path,
+                    // and every shorter suffix ending at the same terminal --
+                    // e.g. for `use a::b::c;`: "a::b::c", "b::c", "c") as a
+                    // POSITIVE-EVIDENCE candidate qualifier string. Suffixes,
+                    // not individual segments (round 8, review comment
+                    // 4096338764): recording each segment independently let
+                    // callee_path_module_stripped_name accept a qualifier
+                    // recombined from two unrelated `use` paths that happen to
+                    // share a segment name (e.g. `math::tc_c` when only
+                    // `math::dd64` and `testmod::tc_c` were ever imported).
+                    // Registering complete suffix TEXT still supports both
+                    // call forms a single `use a::b;` allows (`b::f()` via the
+                    // "b" suffix, `a::b::f()` via the "a::b" suffix) without
+                    // accepting a mix of segments from different imports.
+                    //
+                    // This cannot exclude a path-form NAMED import's terminal
+                    // (`use a::b::specific_fn;`) here by shape alone: the AST
+                    // gives no way to tell that apart from a genuine
+                    // whole-module import (`use a::b;`) -- both are
+                    // `use_glob=false, use_items=None, seg_count>=2`,
+                    // syntactically identical. `use
+                    // epistemic::propagate::monte_carlo;` is real
+                    // (tests/stdlib/epistemic/test_stiff_ode_knightian_mc.sio),
+                    // `monte_carlo` is a function, not a module.
+                    //
+                    // Round 9 (review comment 4098353722, and the collision it
+                    // reopened): registering suffixes here regardless and
+                    // relying SOLELY on callee_path_module_stripped_name's
+                    // separate lower_named_item_terminal_known exclusion does
+                    // not work for a call spelled with just the BARE terminal
+                    // (`monte_carlo::something()`), because that registry is
+                    // keyed by the FULL `use` path text, not the bare form a
+                    // short call actually asks for -- and registering the bare
+                    // terminal there too was tried and reverted: it collided
+                    // with an UNRELATED module elsewhere in the compilation
+                    // whose own bare-terminal qualifier happens to share the
+                    // same text (round 7's own
+                    // uses_named_tc_c.sio/uses_real_tc_c_module.sio fixture
+                    // exists specifically to catch this). Fixed at the SOURCE
+                    // instead: skip suffix registration for this `use` path
+                    // ENTIRELY when lower_named_item_terminal_known already
+                    // confirms the full path is a named item, not a module --
+                    // it was never a legitimate module-qualifier candidate in
+                    // the first place (a named-item import brings its target
+                    // into scope as a bare, unqualified name), so not
+                    // registering any of its suffixes here removes the false
+                    // module-shaped entry instead of trying to filter it back
+                    // out later, and a genuinely unrelated real module's own
+                    // identical-text suffix is never put at risk.
+                    if !lower_named_item_terminal_known(ast_path_range_name(item_ref.use_path, 0, item_ref.use_path.seg_count - 1)) {
+                        var s: i64 = 0
+                        while s < item_ref.use_path.seg_count {
+                            let suffix = ast_path_range_name(item_ref.use_path, s, item_ref.use_path.seg_count - 1)
+                            lower_use_module_note(module_id, suffix)
+                            s = s + 1
+                        }
+                    }
+                }
+                current = &(*list).tail
+            }
+            _ => break
+        }
+    }
+}
+
+
+// Tuple-return slots that are f64 ARRAYS, per fn name: bit k set when slot k of
+// the declared return type is `[f64; N]`.
+//
+// `let (ov, ou) = f()` desugars to `let __tupN = f()` + `let ov = __tupN.0`. The
+// #1502 tuple mask only records SCALAR f64 slots and returns_float is 0 for
+// `([f64; 8], [f64; 8])`, so `ov` was never marked as an f64-element array and
+// `p * ov[j]` converted the element's f64 BITS as an i64 (kinetics
+// structural_ensemble under Madaros). Kept out of returns_float on purpose: that
+// code is read by codegen, the optimizer and the IR serializer, where a new
+// nonzero value for these tuples would change behaviour.
+// Sized to IR_MAX_FUNCS (ir.sio:35), not an arbitrary smaller cap: Copilot
+// review (PR #2516) found the previous `[i64; 4096]` sizing silently dropped
+// tuple-array metadata for any function past entry 4096 in a program with
+// more than 4096 top-level fns, even though the IR itself accepts up to
+// IR_MAX_FUNCS. A dropped entry reverts that function's tuple-array slots to
+// the integer path -- the exact corruption this whole side table exists to
+// prevent -- so truncation had to be replaced with a table that cannot
+// overflow before IR_MAX_FUNCS does, rather than with a loud failure.
+var LOWER_FN_TUPLE_ARR_COUNT: i64 = 0
+// `h` (from fo_name_hash below) selects the open-addressed bucket only --
+// see LOWER_FN_TUPLE_ARR_NAME_ID's own comment for the exact-identity check
+// a probe actually verifies against. An earlier round of this review used a
+// SECOND independently-seeded hash here instead of an exact check
+// (h == LOWER_FN_TUPLE_ARR_HASH[idx] && h2 == LOWER_FN_TUPLE_ARR_HASH2[idx]),
+// astronomically unlikely to false-positive but not provably exact; that
+// second array is gone now that LOWER_FN_TUPLE_ARR_NAME_ID (below) verifies
+// exactly instead. This table does not instead store the full Name directly
+// (a [Name; 16384] global, i.e. a table of a 392-byte struct rather than a
+// plain i64, was tried and is not used here: it triggered a reproducible
+// miscompile specific to this self-hosted toolchain -- ir_name_eq against a
+// value read back from a large global struct array spuriously returned
+// false for genuinely-equal Names in this exact call context, confirmed by
+// isolating it with `bin/madaros run` against a minimal `let (a,b)=f();
+// a[0]*2.0` repro and bisecting hash-only vs hash+ir_name_eq lookups
+// against two otherwise-identical builds).
+var LOWER_FN_TUPLE_ARR_HASH: [i64; 16384] = [0; 16384]
+var LOWER_FN_TUPLE_ARR_MASK: [i64; 16384] = [0; 16384]
+// Copilot review (PR #2516), round 11: two independent hashes matching is
+// astronomically unlikely but still not EXACT identity -- a genuine
+// collision between two valid identifiers would alias function A's mask
+// onto function B, reintroducing the corruption this table exists to
+// prevent. Storing the full Name directly here was already tried and
+// reverted (see LOWER_FN_TUPLE_ARR_HASH2's own comment: a [Name; 16384]
+// global triggered a reproducible miscompile in this exact toolchain). This
+// stores the PLAIN i64 interned name id from ir_intern_name (ir.sio) --
+// the same i64-array-at-this-scale shape as HASH/MASK above, not the
+// [Name; N] shape that broke -- and ir_intern_name's own pool already does
+// exact byte-for-byte comparison on every intern (ir_name_pool_eq), so two
+// different names can never collide onto the same id (only a pool overflow
+// can produce a false 0==0, the same "no name" sentinel ir_intern_name
+// already uses, and is limited to the pool's own generous IR_NAME_POOL_MAX
+// capacity, not this table's 16384). `h` (fo_name_hash) still selects the
+// open-addressed bucket (kept for distribution -- nid is a sequential pool
+// index, a poor hash), but LOWER_FN_TUPLE_ARR_NAME_ID is now what a probe
+// verifies against for identity, not a second hash.
+var LOWER_FN_TUPLE_ARR_NAME_ID: [i64; 16384] = [0; 16384]
+
+// Copilot review (PR #2516): lookup used to be a linear scan over up to
+// IR_MAX_FUNCS dense entries, and every insertion during collection ALSO
+// does a lookup (to dedup), making full collection O(n^2) -- about 134M
+// comparisons at capacity, and worse when a caller collected the same list
+// twice (since fixed separately in this same round). This open-addressing
+// index mirrors self-hosted/intern.sio's StringInterner.hash_table exactly
+// (DJB2-family hash, linear probing, sized well above the dense capacity to
+// keep load factor low, -1 = empty sentinel): LOWER_FN_TUPLE_ARR_SLOT maps a
+// hash-derived bucket to the DENSE index in HASH/MASK/NAME_ID above, turning
+// both lookup and the insert-time dedup check into O(1) amortized instead of
+// O(n). Sized to 2x IR_MAX_FUNCS (32768, a power of two so `& (SIZE-1)` can
+// replace `%`) for a <=0.5 load factor at full capacity, same margin the
+// interner uses (INTERN_HASH_TABLE_SIZE = 2x INTERN_MAX_STRINGS).
+let LOWER_FN_TUPLE_ARR_SLOT_SIZE: i64 = 32768
+let LOWER_FN_TUPLE_ARR_SLOT_MASK: i64 = 32767
+var LOWER_FN_TUPLE_ARR_SLOT: [i64; 32768] = [-1; 32768]
+
+// The table above is a global, process-lifetime side table with no per-entry
+// invalidation: line ~807 refuses to overwrite an existing nonzero mask for a
+// name, and nothing removes an entry for a function that stops returning an
+// f64-array tuple. A second frontend load in the same process (LSP, or any
+// caller compiling more than one program per process) would otherwise see the
+// FIRST program's masks bleed into the second. Call this once per
+// compilation, alongside fo_xfer_global_reset(), before collecting modules —
+// not once per module, since fo_preregister_program_items_multipass calls the
+// collector once per loaded module and must keep accumulating within one
+// compilation.
+pub fn lower_fn_tuple_arr_reset() with Mut {
+    LOWER_FN_TUPLE_ARR_COUNT = 0
+    // Clear the open-addressing index too, not just the dense count: a stale
+    // LOWER_FN_TUPLE_ARR_SLOT entry points at a dense index that a later
+    // collect() in the SAME process (after this reset) will overwrite with a
+    // DIFFERENT name's hash/mask/name_id, and leaving the slot occupied would
+    // both mask new insertions behind it during probing and let old,
+    // uncleared entries answer lookups with recycled-but-stale data.
+    var i: i64 = 0
+    while i < LOWER_FN_TUPLE_ARR_SLOT_SIZE {
+        LOWER_FN_TUPLE_ARR_SLOT[i as usize] = -1
+        i = i + 1
+    }
+}
+
+// Cap at 32 slots (bit < 32), matching the scalar f64 tuple mask's own cap
+// (lower_type_list_float_mask / expr_list_tuple_float_mask_ref, both `bit <
+// 32`). This mask now lives in its own dedicated i64 (tuple_arr_mask /
+// LOWER_FN_TUPLE_ARR_MASK) rather than being packed into the high half of a
+// combined value shared with the scalar mask, so slot 31 (bit 31, value
+// 2^31) no longer collides with any sign bit -- it was previously dropped by
+// an `if bit < 31` guard specifically to avoid landing on bit 63 of a
+// `scalar_mask + array_mask * 2^32` packed i64. See expr_result_tuple_arr_mask_ref.
+fn lower_type_list_f64_array_mask(opt: &Option<Box<TypeExprList>>, bit: i64) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(list) => {
+            var m: i64 = 0
+            if bit < 32 {
+                if lower_type_expr_is_array_of_f64(&(*list).head) {
+                    m = 1 << (bit as i32)
+                }
+            }
+            m + lower_type_list_f64_array_mask(&(*list).tail, bit + 1)
+        }
+        None => 0,
+    }
+}
+
+// Copilot review (PR #2516): `fo_name_hash` alone is not collision-free (e.g.
+// "ab" and "bA" hash equal), so a single-hash match could return function A's
+// mask for function B's name and reintroduce the bits-as-i64 corruption this
+// table exists to prevent. An earlier round verified candidates against a
+// SECOND independently-seeded hash instead, astronomically unlikely to
+// false-positive but not provably exact; every candidate is now verified
+// against the EXACT interned name id from ir_intern_name (ir.sio) instead --
+// see LOWER_FN_TUPLE_ARR_NAME_ID's declaration for why this table verifies
+// exact identity via that pooled id rather than a directly-stored Name +
+// ir_name_eq (the natural choice, mirroring lowerer_lookup_fn_id_by_name_ref,
+// but it triggered a reproducible miscompile specific to this self-hosted
+// toolchain when tried here).
+//
+// Copilot review (PR #2516), performance finding: this used to be a linear
+// scan over LOWER_FN_TUPLE_ARR_COUNT dense entries, and the insert-time dedup
+// check called it too, making full collection O(n^2) (~134M comparisons at
+// IR_MAX_FUNCS capacity). Both the lookup here and the insert dedup check in
+// lower_fn_tuple_f64_arrays_collect_one now go through
+// lower_fn_tuple_arr_slot_find, an open-addressed index lookup (see
+// LOWER_FN_TUPLE_ARR_SLOT's declaration) -- O(1) amortized instead of O(n).
+// Marked pub (round 6 of the PR #2516 review, finding 3): a new CLI probe in
+// compiler/main.sio (--probe-tuple-arr-capacity) needs to query this table
+// directly, bypassing the normal compile pipeline's DCE filtering, so that
+// a capacity-boundary gate can populate LOWER_FN_TUPLE_ARR_* with every
+// generated function -- not just the ones reachable from `main` -- and
+// still verify a specific late entry. Same treatment as round 5's fix to
+// lower_program_function_body_from_summary_with_epistemic_ref.
+pub fn lower_fn_tuple_f64_array_mask(name: Name) -> i64 with Mut, Panic, Div {
+    if name.len <= 0 {
+        return 0
+    }
+    // Copilot review (PR #2516), round 11: nid=0 means either an empty name
+    // (already excluded above) or the interner's pool overflowed for this
+    // name (ir_intern_name's own "could not allocate" sentinel) -- in
+    // either case there is no exact identity to verify against, so answer
+    // "unknown" (mask 0, the same conservative fallback an unresolved owner
+    // already gets) rather than risk a false match against another
+    // overflowed name that also reads back nid=0.
+    let nid = ir_intern_name(name)
+    if nid <= 0 {
+        return 0
+    }
+    let idx = lower_fn_tuple_arr_slot_find(fo_name_hash(name), nid)
+    if idx < 0 {
+        return 0
+    }
+    LOWER_FN_TUPLE_ARR_MASK[idx as usize]
+}
+
+// Open-addressed index lookup shared by lower_fn_tuple_f64_array_mask (query)
+// and lower_fn_tuple_f64_arrays_collect_one (insert-time dedup check): probes
+// LOWER_FN_TUPLE_ARR_SLOT from `h`'s bucket (kept for distribution -- `nid`
+// is a sequential pool index, a poor hash) but verifies EXACT identity via
+// `nid`, the interned name id from ir_intern_name (ir.sio) -- ir_intern_name's
+// own pool already does exact byte-for-byte comparison on every intern, so
+// two different names can never produce the same nid (see
+// LOWER_FN_TUPLE_ARR_NAME_ID's own comment for why this replaced the
+// two-hash collision check an earlier round of this review added). O(1)
+// amortized via linear probing (mirrors self-hosted/intern.sio's
+// StringInterner hash table) instead of an O(n) scan. Returns the dense
+// index into LOWER_FN_TUPLE_ARR_HASH/MASK/NAME_ID, or -1 if not present.
+fn lower_fn_tuple_arr_slot_find(h: i64, nid: i64) -> i64 with Mut, Panic, Div {
+    var slot = h & LOWER_FN_TUPLE_ARR_SLOT_MASK
+    var probes: i64 = 0
+    while probes < LOWER_FN_TUPLE_ARR_SLOT_SIZE {
+        let idx = LOWER_FN_TUPLE_ARR_SLOT[slot as usize]
+        if idx < 0 {
+            return -1
+        }
+        if LOWER_FN_TUPLE_ARR_NAME_ID[idx as usize] == nid {
+            return idx
+        }
+        slot = (slot + 1) & LOWER_FN_TUPLE_ARR_SLOT_MASK
+        probes = probes + 1
+    }
+    -1
+}
+
+// Shared by both the top-level free-fn walk below and the ItemImpl method
+// walk (Copilot review (PR #2516), finding #5's ExprMethodCall half): a
+// method-call tuple producer like `obj.pair()` resolves through
+// expr_result_tuple_arr_mask_ref to the mangled name
+// (ir_mangle_method_name(recv_type, method_name)), so an impl method whose
+// return type is a tuple of f64 arrays must be collected under THAT mangled
+// name or the lookup at destructure time always misses and returns 0.
+// Copilot review (PR #2516), comment 4110477187: `force` lets
+// lower_fn_tuple_f64_arrays_collect_owner_priority (below) register an
+// owner's own tuple-returning fn even when mask==0 (an all-non-f64-array
+// tuple), which the ordinary `mask != 0` guard below otherwise treats as
+// "nothing to record" -- see that function's own comment for why an
+// owner's own mask==0 declaration must still occupy this name's slot.
+// Every other caller (lower_fn_tuple_f64_arrays_collect, unchanged) keeps
+// passing force=false, so this adds no behavior change anywhere else.
+fn lower_fn_tuple_f64_arrays_collect_one(name: Name, fd_opt_ref: &Option<Box<FnDef>>, force: bool) with Mut, Panic, Div, Alloc {
+    match *fd_opt_ref {
+        Some(fd) => {
+            let rt_opt_ref: &Option<Box<TypeExpr>> = &(*fd).return_type
+            match *rt_opt_ref {
+                Some(rt) => {
+                    if (*rt).kind == TypeExprKind::TypeTuple {
+                        let mask = lower_type_list_f64_array_mask(&(*rt).type_args, 0)
+                        // Table is sized to IR_MAX_FUNCS (ir.sio:35), the hard
+                        // ceiling on the number of functions any program can
+                        // declare (ir.sio:20 clamps fn_count there too), so this
+                        // guard is a defensive bound rather than a real truncation
+                        // point -- see the LOWER_FN_TUPLE_ARR_COUNT declaration.
+                        // nid<=0: pool overflow for this name (see
+                        // lower_fn_tuple_f64_array_mask's own comment) --
+                        // skip the insert rather than risk two overflowed
+                        // names aliasing onto the same nid=0 identity.
+                        let nid = ir_intern_name(name)
+                        if (mask != 0 || force) && nid > 0 && LOWER_FN_TUPLE_ARR_COUNT < IR_MAX_FUNCS {
+                            let h = fo_name_hash(name)
+                            if lower_fn_tuple_arr_slot_find(h, nid) < 0 {
+                                let idx = LOWER_FN_TUPLE_ARR_COUNT
+                                LOWER_FN_TUPLE_ARR_HASH[idx as usize] = h
+                                LOWER_FN_TUPLE_ARR_NAME_ID[idx as usize] = nid
+                                LOWER_FN_TUPLE_ARR_MASK[idx as usize] = mask
+                                LOWER_FN_TUPLE_ARR_COUNT = idx + 1
+                                // Insert into the open-addressed index: probe from
+                                // the primary hash's bucket to the first empty slot
+                                // (guaranteed to exist -- load factor stays <= 0.5
+                                // at IR_MAX_FUNCS entries against a 2x-sized table).
+                                var slot = h & LOWER_FN_TUPLE_ARR_SLOT_MASK
+                                var placed = false
+                                var probes: i64 = 0
+                                while !placed && probes < LOWER_FN_TUPLE_ARR_SLOT_SIZE {
+                                    if LOWER_FN_TUPLE_ARR_SLOT[slot as usize] < 0 {
+                                        LOWER_FN_TUPLE_ARR_SLOT[slot as usize] = idx
+                                        placed = true
+                                    } else {
+                                        slot = (slot + 1) & LOWER_FN_TUPLE_ARR_SLOT_MASK
+                                        probes = probes + 1
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
+        None => {}
+    }
+}
+
+fn lower_fn_tuple_f64_arrays_collect_walk(items: &Option<Box<ItemList>>, force: bool) with Mut, Panic, Div, Alloc {
+    var current = items
+    while true {
+        match *current {
+            Some(list) => {
+                let item_ref = &(*list).head
+                if item_ref.kind == ItemKind::ItemFn {
+                    let fd_opt_ref: &Option<Box<FnDef>> = &item_ref.fn_def
+                    lower_fn_tuple_f64_arrays_collect_one(item_ref.name, fd_opt_ref, force)
+                } else if item_ref.kind == ItemKind::ItemImpl {
+                    let id_opt_ref: &Option<Box<ImplDef>> = &item_ref.impl_def
+                    match *id_opt_ref {
+                        Some(id) => {
+                            var mcur = &(*id).methods
+                            while true {
+                                match *mcur {
+                                    Some(mlist) => {
+                                        let mhead = &(*mlist).head
+                                        if mhead.kind == ItemKind::ItemFn {
+                                            let mangled = ir_mangle_method_name(item_ref.name, mhead.name)
+                                            let mfd_opt_ref: &Option<Box<FnDef>> = &mhead.fn_def
+                                            lower_fn_tuple_f64_arrays_collect_one(mangled, mfd_opt_ref, force)
+                                        }
+                                        mcur = &(*mlist).tail
+                                    }
+                                    _ => break
+                                }
+                            }
+                        }
+                        None => {}
+                    }
+                }
+                current = &(*list).tail
+            }
+            _ => break
+        }
+    }
+}
+
+pub fn lower_fn_tuple_f64_arrays_collect(items: &Option<Box<ItemList>>) with Mut, Panic, Div, Alloc {
+    lower_fn_tuple_f64_arrays_collect_walk(items, false)
+}
+
+// Copilot review (PR #2516), comment 4110477187: thin_build_compiled_unit
+// (module_loader.sio) collects the owner program's own items AND every
+// imported callee module's items into this one process-global, name-only
+// table before lowering the owner's body. Because lower_fn_tuple_f64_arrays_
+// collect_one skips mask==0 (an all-non-f64-array tuple, the common case)
+// entirely, an owner-local `pair` returning `([i64;2],[i64;2])` left no
+// entry -- so an unrelated PRIVATE `pair` in any imported module that DOES
+// return an f64-array tuple could insert under the same bare name first,
+// and the owner's own lowering of `pair().0` would then read that
+// unrelated import's mask instead of its own. Call this INSTEAD of the
+// ordinary collector for the owner's own item list, before collecting any
+// imported callee: forcing the insert even at mask==0 gives the owner's
+// own declaration an authoritative slot for its own name, so a later,
+// unrelated import can never overwrite it (lower_fn_tuple_f64_arrays_
+// collect_one's insert is already "only if not yet present" -- this just
+// makes owner's own mask==0 count as "present" instead of "nothing to
+// record"). Residual, unclosed scope (raised again as round-3 review
+// comment 4113800125): two DIFFERENT, genuinely SELECTED imports --
+// `a::make_pair()` and `b::make_pair()`, both real, both `pub`, both
+// actually called via an explicit qualifier -- sharing one bare name with
+// different masks can still collide with each other here. Closing this
+// exactly the way the comment asks (key this table by resolved module/
+// function identity, and use that same identity at the call-site lookup)
+// is not yet possible in isolation: no such resolved identity exists
+// ANYWHERE in this compiler yet for this exact shape. Verified directly in
+// self-hosted/check/defs.sio's fn_sig_table_find_prefer_module (the
+// checker's own qualified-call resolver, called from every `mod::f(..)`
+// site): it takes no path/qualifier argument at all, and for two REAL,
+// both-pub, same-named free fns it returns whichever is FIRST in table
+// order, unconditionally -- the qualifier written at the call site does
+// not change which one is picked. Keying this side table by a "resolved
+// identity" the checker and lowerer's own call resolution do not yet
+// compute anywhere would either be unreachable dead code or would silently
+// diverge from what the call itself actually resolves to (right function
+// called, table says a different one's mask) -- worse than today's
+// documented gap. Closing it needs the same qualifier/module resolution
+// this PR's sibling review (PR #2515, comments 4110379040/54/72,
+// 4113458034) already scoped as a genuine architectural addition -- and,
+// per this finding, one that reaches fn_sig_table_find_prefer_module
+// itself, not only the tuple-array table.
+pub fn lower_fn_tuple_f64_arrays_collect_owner_priority(items: &Option<Box<ItemList>>) with Mut, Panic, Div, Alloc {
+    lower_fn_tuple_f64_arrays_collect_walk(items, true)
+}
+
+// Copilot review (PR #2516), comment 4113556102 + comment 4113556110:
+// thin_build_compiled_unit used to hand an imported callee module's WHOLE
+// raw item list to lower_fn_tuple_f64_arrays_collect above, not just the
+// specific export(s) that module's own import_map entry actually names.
+// Two failure modes followed from that: (1) any UNRELATED, unreachable
+// tuple-returning fn in that module -- dead code, or simply not the thing
+// being imported -- could still occupy a table slot, one of only
+// IR_MAX_FUNCS available; and (2) worse, a same-named PRIVATE fn in that
+// same module (never imported by anyone, never callable from this unit)
+// could insert its OWN mask under the shared bare name FIRST -- since
+// lower_fn_tuple_f64_arrays_collect_one's insert is "only if not yet
+// present" -- so the actually-selected import's later, correct mask for
+// that name would silently lose to it (or, at mask==0, never get inserted
+// over it at all). Walking the SAME list but matching only the ONE
+// `want` name (module_loader.sio passes each import_map entry's own
+// export_name -- the callee's real declared name, not a local alias)
+// means an unrelated same-named private fn in that module is never even
+// visited, closing exactly the collision comment 4113556110's example
+// describes. (A residual, narrower case remains and is unchanged by this:
+// two DIFFERENT imports, from two different modules, that are BOTH
+// genuinely selected and happen to share one bare name -- see this
+// function's own sibling comment above for why closing that needs real
+// module-qualified keying, out of scope here.)
+fn lower_fn_tuple_f64_arrays_collect_one_named_walk(items: &Option<Box<ItemList>>, want: Name) with Mut, Panic, Div, Alloc {
+    var current = items
+    while true {
+        match *current {
+            Some(list) => {
+                let item_ref = &(*list).head
+                if item_ref.kind == ItemKind::ItemFn {
+                    if ir_name_eq(item_ref.name, want) {
+                        let fd_opt_ref: &Option<Box<FnDef>> = &item_ref.fn_def
+                        // A selected import's zero mask is authoritative too:
+                        // record it so a later full-body scan cannot install an
+                        // unrelated same-named declaration's nonzero mask.
+                        lower_fn_tuple_f64_arrays_collect_one(item_ref.name, fd_opt_ref, true)
+                    }
+                } else if item_ref.kind == ItemKind::ItemImpl {
+                    let id_opt_ref: &Option<Box<ImplDef>> = &item_ref.impl_def
+                    match *id_opt_ref {
+                        Some(id) => {
+                            var mcur = &(*id).methods
+                            while true {
+                                match *mcur {
+                                    Some(mlist) => {
+                                        let mhead = &(*mlist).head
+                                        if mhead.kind == ItemKind::ItemFn {
+                                            let mangled = ir_mangle_method_name(item_ref.name, mhead.name)
+                                            if ir_name_eq(mangled, want) {
+                                                let mfd_opt_ref: &Option<Box<FnDef>> = &mhead.fn_def
+                                                lower_fn_tuple_f64_arrays_collect_one(mangled, mfd_opt_ref, true)
+                                            }
+                                        }
+                                        mcur = &(*mlist).tail
+                                    }
+                                    _ => break
+                                }
+                            }
+                        }
+                        None => {}
+                    }
+                }
+                current = &(*list).tail
+            }
+            _ => break
+        }
+    }
+}
+
+pub fn lower_fn_tuple_f64_arrays_collect_one_named(items: &Option<Box<ItemList>>, want: Name) with Mut, Panic, Div, Alloc {
+    if want.len <= 0 {
+        return
+    }
+    lower_fn_tuple_f64_arrays_collect_one_named_walk(items, want)
+}
+
 
 fn fo_ctor_path_fold(acc: i64, name_hash: i64) -> i64 with Mut, Panic, Div {
     acc * 33 + name_hash
@@ -960,6 +1774,36 @@ fn lower_epistemic_contest_index_from_ref(epistemic: &IrEpistemicSection) -> Box
     index
 }
 
+// Stack-economy: the four big fixed-count accumulator arrays used to be INLINE
+// fields of Lowerer (~25KB of the ~26KB struct), so EVERY by-value
+// `(Lowerer, i64)` hop in the block/stmt/expr recursion copied them again.
+// Measured (core.3195050, kl16x-compiled Madaros, 8MB default stack): ~27 live
+// hop levels x ~27.8KB = ~748KB of hop tower = the SIGSEGV that made every
+// `madaros run` die after "lower_array: bodies_begin", recoverable only with
+// `ulimit -s unlimited`. Boxing them behind ONE pointer shrinks the hop
+// payload to ~1.2KB. Share-through-Box semantics already governs
+// locals/fo_bind/module (see the (*lo.fo_bind) reads) — zero behavioural
+// delta; mirrors the #1649 "REUSE the Box" precedent.
+struct LowerBigArrays {
+    array_elem_float_regs: [i64; 512],
+    variance_base_regs: [i64; 1024],
+    variance_value_regs: [i64; 1024],
+    so_bind_hess: [i64; 576],
+}
+
+fn empty_lower_big_arrays() -> LowerBigArrays with Mut {
+    LowerBigArrays {
+        array_elem_float_regs: [IR_INVALID_REG; 512],
+        variance_base_regs: [IR_INVALID_REG; 1024],
+        variance_value_regs: [IR_INVALID_REG; 1024],
+        so_bind_hess: [-1; 576],
+    }
+}
+
+fn lowerer_box_empty_big_arrays() -> Box<LowerBigArrays> with Alloc, Mut {
+    Box::new(empty_lower_big_arrays())
+}
+
 struct Lowerer {
     module: Box<IrModule>,
     epistemic_contests: Box<LowerEpistemicContestIndex>,
@@ -980,10 +1824,8 @@ struct Lowerer {
     // Frontend-owned global element types. BSS byte size cannot distinguish
     // `[f64; N]` from `[i64; N]`, so this survives summary -> body lowering.
     global_types: Box<LowerGlobalTypeTable>,
-    array_elem_float_regs: [i64; 512],
+    big: Box<LowerBigArrays>,
     array_elem_float_reg_count: i64,
-    variance_base_regs: [i64; 1024],
-    variance_value_regs: [i64; 1024],
     variance_base_reg_count: i64,
     // Sprint 28: Debug-mode witness enforcement
     debug_mode: bool,
@@ -1013,7 +1855,6 @@ struct Lowerer {
     // rows so a local carries its Hessian exactly as it carries its gradient.
     so_enabled: bool,
     so_expr_hess: [i64; 36],
-    so_bind_hess: [i64; 576],
     // Inter-procedural FO: pure-fn transfer table (survives across function lowers).
     // kind: 0=none 1=id(p0) 2=scale(lit*p0) 3=add(p0+p1) 4=mul(p0*p1) 5=fwd(g)
     fo_xfer_count: i64,
@@ -1297,10 +2138,8 @@ fn lowerer_new() -> Lowerer with Alloc, Mut, Panic, Div {
         enum_variants: enum_variants,
         struct_layouts: struct_layouts,
         global_types: global_types,
-        array_elem_float_regs: [IR_INVALID_REG; 512],
+        big: lowerer_box_empty_big_arrays(),
         array_elem_float_reg_count: 0,
-        variance_base_regs: [IR_INVALID_REG; 1024],
-        variance_value_regs: [IR_INVALID_REG; 1024],
         variance_base_reg_count: 0,
         debug_mode: false,
         probe_mode: false,
@@ -1316,7 +2155,6 @@ fn lowerer_new() -> Lowerer with Alloc, Mut, Panic, Div {
         fo_bind: Box::new(empty_lower_fo_bind_table()),
         so_enabled: false,
         so_expr_hess: [-1; 36],
-        so_bind_hess: [-1; 576],
         fo_xfer_count: 0,
         fo_xfer_kind: [0; 64],
         fo_xfer_lit: [0.0; 64],
@@ -1870,10 +2708,8 @@ fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEp
         enum_variants: enum_variants,
         struct_layouts: struct_layouts,
         global_types: global_types,
-        array_elem_float_regs: [IR_INVALID_REG; 512],
+        big: lowerer_box_empty_big_arrays(),
         array_elem_float_reg_count: 0,
-        variance_base_regs: [IR_INVALID_REG; 1024],
-        variance_value_regs: [IR_INVALID_REG; 1024],
         variance_base_reg_count: 0,
         debug_mode: false,
         probe_mode: summary.probe_mode,
@@ -1889,7 +2725,6 @@ fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEp
         fo_bind: Box::new(empty_lower_fo_bind_table()),
         so_enabled: false,
         so_expr_hess: [-1; 36],
-        so_bind_hess: [-1; 576],
         fo_xfer_count: 0,
         fo_xfer_kind: [0; 64],
         fo_xfer_lit: [0.0; 64],
@@ -1933,10 +2768,8 @@ fn lowerer_new_from_program_summary_owned(summary: IrProgramSummary, epistemic: 
         enum_variants: summary.enum_variants,
         struct_layouts: summary.struct_layouts,
         global_types: summary.global_types,
-        array_elem_float_regs: [IR_INVALID_REG; 512],
+        big: lowerer_box_empty_big_arrays(),
         array_elem_float_reg_count: 0,
-        variance_base_regs: [IR_INVALID_REG; 1024],
-        variance_value_regs: [IR_INVALID_REG; 1024],
         variance_base_reg_count: 0,
         debug_mode: false,
         probe_mode: summary.probe_mode,
@@ -1952,7 +2785,6 @@ fn lowerer_new_from_program_summary_owned(summary: IrProgramSummary, epistemic: 
         fo_bind: Box::new(empty_lower_fo_bind_table()),
         so_enabled: false,
         so_expr_hess: [-1; 36],
-        so_bind_hess: [-1; 576],
         fo_xfer_count: 0,
         fo_xfer_kind: [0; 64],
         fo_xfer_lit: [0.0; 64],
@@ -2000,10 +2832,8 @@ fn lowerer_from_acc_module(module: Box<IrModule>) -> Lowerer with Alloc, Mut, Pa
         enum_variants: enum_variants,
         struct_layouts: struct_layouts,
         global_types: global_types,
-        array_elem_float_regs: [IR_INVALID_REG; 512],
+        big: lowerer_box_empty_big_arrays(),
         array_elem_float_reg_count: 0,
-        variance_base_regs: [IR_INVALID_REG; 1024],
-        variance_value_regs: [IR_INVALID_REG; 1024],
         variance_base_reg_count: 0,
         debug_mode: false,
         probe_mode: false,
@@ -2019,7 +2849,6 @@ fn lowerer_from_acc_module(module: Box<IrModule>) -> Lowerer with Alloc, Mut, Pa
         fo_bind: Box::new(empty_lower_fo_bind_table()),
         so_enabled: false,
         so_expr_hess: [-1; 36],
-        so_bind_hess: [-1; 576],
         fo_xfer_count: 0,
         fo_xfer_kind: [0; 64],
         fo_xfer_lit: [0.0; 64],
@@ -2355,9 +3184,68 @@ fn lowerer_lower_program_bodies_mut(
     lo: &! Lowerer,
     items: &Option<Box<ItemList>>
 ) with Mut, Panic, Div, Alloc, IO {
+    // This is the seed/main module's real body-lowering entry (called once,
+    // with the seed program's own DCE-filtered items, from
+    // lower_program_bodies_from_summary_with_epistemic_boxed_owned). An
+    // earlier version of this call site reset LOWER_USE_MODULE_HASH /
+    // LOWER_IMPL_METHOD_HASH here before recollecting -- wrong, and reported
+    // by review (comment 4089110737): the ordinary multi-module path already
+    // builds the registry across the WHOLE module graph, every loaded
+    // program in turn, at module_frontend.sio's `while fo_pi < loaded {
+    // fo_preregister_program_items_multipass(&prog.items) }` loop, before
+    // this function ever runs. Resetting here threw that away and rebuilt it
+    // from ONLY the seed's own items, so a qualified call inside a
+    // DEPENDENCY module -- reached via lower_dep_program_items_into_acc_with_
+    // externs, which never recollects its own `use` paths -- whose module
+    // prefix the seed itself never `use`s lost its registry entry and fell
+    // back to a mangled `mod_f` stub. It also cleared a durable overflow flag
+    // the combined module graph may have legitimately raised. Only
+    // ACCUMULATE from `items` here (lower_use_module_note is idempotent, so
+    // recollecting the seed's own already-registered segments is harmless);
+    // never reset -- that stays owned by the top-level compile-boundary call
+    // sites (module_frontend.sio, lowerer_new()/fo_preregister_program_items_
+    // multipass's callers) that already do it once per compile. Uses
+    // lower_effective_current_module_id() (not a hardcoded 0): the caller
+    // (module_frontend.sio / lower_dep_program_items_into_acc_with_externs)
+    // has already called lower_set_current_module_id for whichever module's
+    // body is being lowered right now, so this recollection stamps the same
+    // module id its earlier, authoritative preregister pass used -- it is a
+    // genuine no-op resend, not a fresh (and possibly wrongly-id'd) entry.
+    //
+    // EXCEPT for the one caller (module_frontend_lower_specialized_items_box)
+    // where `items` is a MERGED, all-modules list and lower_effective_current_
+    // module_id() is NOT this list's real per-item module -- see
+    // LOWER_SKIP_USE_RECOLLECT_FOR_MERGED's own comment.
+    if !LOWER_SKIP_USE_RECOLLECT_FOR_MERGED {
+        lower_use_modules_collect(items, lower_effective_current_module_id())
+    }
     // Keep the multi-module FO table: the frontend may have pre-registered
     // imported helpers before entering this module.
     lowerer_fo_preregister_pure_fns_multipass_mut(lo, items)
+    // Round 10 (review comment 4099548955): skipping the recollection above
+    // (LOWER_SKIP_USE_RECOLLECT_FOR_MERGED) stops module 0 from WRONGLY
+    // gaining every dependency's imports, but on its own it does NOT fix the
+    // underlying problem for the one caller that sets that flag
+    // (module_frontend_lower_specialized_items_box): `items` there is a
+    // MERGED, all-modules list, and LOWER_CURRENT_MODULE_ID stays fixed at 0
+    // (module_frontend_lower_program_items_box_traced_with_externs's own
+    // lower_set_current_module_id(module_index) call, module_index=0) for
+    // the WHOLE body-lowering pass below -- so a qualified call inside a
+    // DEPENDENCY's own body now looks itself up under module 0, which
+    // (correctly, per the skip above) does not have that dependency's
+    // imports, and falls back to the mangled stub this machinery exists to
+    // prevent. Attribute each item's body to its real declaring module the
+    // same way check_items_verdict_boot4_with_module_map does (check/mod.sio)
+    // -- via check::specializer's item->module registry, reusable here since
+    // this file already imports from that module -- for the duration of
+    // lowering just that one item's body. Fails CLOSED to -1 (never a real
+    // module id, see LOWER_CURRENT_MODULE_ID's own comment) when the
+    // registry has no entry, same reasoning as check/mod.sio's own fix.
+    // Only engaged for the merged-list caller: every other (genuinely
+    // single-module) caller already has the right LOWER_CURRENT_MODULE_ID
+    // set once for its own whole items list, and per-item overriding it here
+    // would be wrong for those.
+    let attribute_per_item = LOWER_SKIP_USE_RECOLLECT_FOR_MERGED && spec_item_module_populated()
     var current = items
     var item_count: i64 = 0
     while true {
@@ -2369,6 +3257,9 @@ fn lowerer_lower_program_bodies_mut(
                 item_count = item_count + 1
                 if item_count > IR_MAX_FUNCS { return }
                 if kind == ItemKind::ItemFn {
+                    if attribute_per_item {
+                        lower_set_current_module_id(spec_item_module_lookup(name))
+                    }
                     if lower_body_diag_enabled() {
                         lower_body_trace_append("body_list_fn name=" + str_from_bytes(name.buf, name.len))
                     }
@@ -2380,7 +3271,22 @@ fn lowerer_lower_program_bodies_mut(
                 } else if kind == ItemKind::ItemImpl {
                     let impl_def_ref = &head.impl_def
                     match *impl_def_ref {
-                        Some(id) => { lowerer_lower_impl_methods_mut(lo, name, (*id).methods) }
+                        Some(id) => {
+                            // spec_item_module_collect registers each impl
+                            // METHOD under its own (unmangled) name, not the
+                            // impl block's own `name` (the TYPE it is for) --
+                            // an impl block has no name of its own in that
+                            // registry. All methods in one impl block share a
+                            // declaring module, so look ownership up via the
+                            // first method's name instead.
+                            if attribute_per_item {
+                                match (*id).methods {
+                                    Some(ml) => { lower_set_current_module_id(spec_item_module_lookup((*ml).head.name)) }
+                                    None => { lower_set_current_module_id(0 - 1) }
+                                }
+                            }
+                            lowerer_lower_impl_methods_mut(lo, name, (*id).methods)
+                        }
                         None => {}
                     }
                 }
@@ -4429,6 +5335,14 @@ fn lowerer_bind_local_mut(
         (*(*locals_box).is_global).values[idx as usize] = 0
         (*(*locals_box).is_ref).values[idx as usize] = 0
         (*(*locals_box).scalar_kind).values[idx as usize] = 0
+        // Copilot review (PR #2516): the locals stack is REUSED across
+        // functions (count is reset, arrays are not, same as box_inner_layout
+        // below), so a stale tuple_float_mask/tuple_arr_mask from an earlier
+        // function's tuple local left this slot's array bit set and a later,
+        // unrelated tuple param at the same slot inherited it -- classifying
+        // a plain f64 slot as an f64-ARRAY. Explicit 0, mirroring bind_local.
+        (*(*locals_box).tuple_float_mask).values[idx as usize] = 0
+        (*(*locals_box).tuple_arr_mask).values[idx as usize] = 0
         // Post-#2084: tuple0_array_elem_layout was added on main to track when a
         // tuple slot-0 is a fixed array, which gates the aggregate-shallow-copy path.
         (*(*locals_box).tuple0_array_elem_layout).values[idx as usize] = 0 - 1
@@ -4513,6 +5427,34 @@ fn lowerer_mark_local_array_elem_wide_bits_mut(
     while i >= 0 {
         if (*(*locals_box).depths).values[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*locals_box).names).values[i as usize], name) {
             (*(*locals_box).array_elem_wide_bits).values[i as usize] = bits
+            (*lo).locals = locals_box
+            return
+        }
+        i = i - 1
+    }
+}
+
+// Copilot review (PR #2516): lowerer_bind_local_mut (the *mut param binder
+// used above) has no TypeExpr parameter to populate tuple_float_mask /
+// tuple_arr_mask from directly, and leaves both untouched -- which, on this
+// REUSED locals stack (count resets per function, arrays don't), lets a
+// stale array bit from an earlier function's tuple local misclassify a
+// same-slot tuple param here as holding an f64 array. Mirrors the direct
+// parameter binder's (lower_fn_params_ref) population: always writes both
+// masks, 0 when the param type is not itself TypeTuple, so a stale value
+// can never survive a rebind at this slot.
+fn lowerer_mark_local_tuple_masks_mut(
+    lo: &! Lowerer,
+    name: Name,
+    float_mask: i64,
+    arr_mask: i64
+) with Mut, Alloc, Panic, Div {
+    var locals_box = (*lo).locals
+    var i = (*locals_box).count - 1
+    while i >= 0 {
+        if (*(*locals_box).depths).values[i as usize] <= (*lo).scope_depth && ir_name_eq((*(*locals_box).names).values[i as usize], name) {
+            (*(*locals_box).tuple_float_mask).values[i as usize] = float_mask
+            (*(*locals_box).tuple_arr_mask).values[i as usize] = arr_mask
             (*lo).locals = locals_box
             return
         }
@@ -4818,11 +5760,33 @@ fn lowerer_lower_fn_params_mut(
                 // F128Bits handles (immutable objects: every f128 op allocates a
                 // fresh one), so the element-wise slot copy that keeps a by-value
                 // `[i64; N]` param from aliasing the caller's array is exactly right
-                // for it too. `&[f128; N]` is TypeReference → len -1 → no copy.
+                // for it too.
+                //
+                // `&[f128; N]` must NOT take this copy path: KL-14a
+                // (lower_type_expr_fixed_array_len_ref, self-hosted/ir/lower.sio
+                // ~:3261) made param_array_len peel one `&`/`&!` so `&[i8; N]` FFI
+                // params get a known extent -- so param_array_len is no longer -1
+                // for a reference param, contrary to what this comment used to say.
+                // preg for a reference param holds the ADDRESS of the caller's slot
+                // (native-v2 OpRef is LEA of that slot; see the comment above
+                // fn lower_name_is_handle_buf_builtin for the fuller
+                // explanation -- no line number, this file's line numbers
+                // shift too often for a numeric ref to stay accurate), not
+                // the array
+                // handle itself, so emit_fixed_array_value_copy on it resolves an
+                // unrelated address as a bogus handle -- SIGSEGV, or on a resolvable
+                // address silently wrong data (both measured: the array_only DCE
+                // trigger and the language_f128_arrays witness in
+                // scripts/ci/madaros_f128_f256_v0e57_language_arrays_gate.sh). Only a
+                // BY-VALUE `[f128; N]` legitimately wants the slot copy; a reference
+                // param is bound straight to preg below and reads through the
+                // is_ref / label_id=1 "ref array" path instead (lower_index_expr_ref,
+                // lower_field_expr_ref).
+                let param_is_ref = lower_type_expr_is_ref_like(&(*list).head.ty)
                 let param_word_scalar = lower_type_expr_fixed_array_word_scalar_ref(&(*list).head.ty)
-                    || lower_type_expr_is_array_of_f128(&(*list).head.ty)
+                    || (lower_type_expr_is_array_of_f128(&(*list).head.ty) && !param_is_ref)
                 var param_value_reg = preg
-                if param_array_len >= 0 && param_word_scalar {
+                if param_array_len >= 0 && param_word_scalar && !param_is_ref {
                     let copy_pair = (*lo).emit_fixed_array_value_copy(
                         preg,
                         param_array_len,
@@ -4833,6 +5797,9 @@ fn lowerer_lower_fn_params_mut(
                 }
 
                 lowerer_bind_local_mut(lo, (*list).head.name, param_value_reg, (*list).head.is_self_mut)
+                let param_tuple_float_mask = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_float_mask(&(*list).head.ty.type_args, 0) } else { 0 }
+                let param_tuple_arr_mask = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_arr_mask(&(*list).head.ty.type_args, 0) } else { 0 }
+                lowerer_mark_local_tuple_masks_mut(lo, (*list).head.name, param_tuple_float_mask, param_tuple_arr_mask)
                 let param_elem_wide_bits = lower_type_expr_array_elem_wide_bits(&(*list).head.ty)
                 if param_elem_wide_bits > 0 {
                     // V0-E.5.7: `[f128; N]` / `&[f128; N]` param — element reads are
@@ -5423,6 +6390,18 @@ fn lowerer_fo_preregister_pure_fns_multipass_mut(
     lo: &! Lowerer,
     items: &Option<Box<ItemList>>
 ) with Mut, Panic, Div, Alloc, IO {
+    // Copilot review (PR #2516): fo_preregister_program_items_multipass (the
+    // public wrapper) calls the tuple-array collector before delegating here,
+    // but lower_program_bodies_ref and the other lowering lanes that call this
+    // function directly (lowerer_lower_program_bodies_dedup_mut,
+    // lowerer_lower_program_bodies_mut) did not, so bodies lowered through
+    // those paths depended on some earlier, unrelated pass having populated
+    // LOWER_FN_TUPLE_ARR_* as a side effect. Collecting here instead of at
+    // every call site covers all of them uniformly; the collector itself is
+    // idempotent per name (lower_fn_tuple_f64_arrays_collect only inserts when
+    // the existing mask is 0), so calling it again on an already-collected
+    // item list is a no-op.
+    lower_fn_tuple_f64_arrays_collect(items)
     // 4 passes: reverse-order chains of depth 3 close by pass 4.
     var pass: i64 = 0
     while pass < 4 {
@@ -5435,8 +6414,25 @@ fn lowerer_fo_preregister_pure_fns_multipass_mut(
 // FO_XFER is global — call once per loaded module *before* seed body lower so
 // imported helpers (e.g. epistemic::fo::fo_add2) FO-transfer into user main.
 pub fn fo_preregister_program_items_multipass(
-    items: &Option<Box<ItemList>>
+    items: &Option<Box<ItemList>>,
+    module_id: i64
 ) with Mut, Panic, Div, Alloc, IO {
+    // Same every-module-before-body-lowering timing that module-qualified
+    // calls need: see LOWER_USE_MODULE_HASH. module_id is the caller's own
+    // loop index over the loaded module array (0 for a single-module
+    // compile), stamped onto every entry this call registers so a later
+    // per-module lookup (LOWER_CURRENT_MODULE_ID) can tell them apart.
+    lower_use_modules_collect(items, module_id)
+    // Copilot review (PR #2516): lowerer_fo_preregister_pure_fns_multipass_mut
+    // (below) now collects the tuple-array table itself, so this call used to
+    // ALSO collect the SAME item list a second time (for that table)
+    // immediately before delegating -- doubling the O(n) collection pass for
+    // every caller of this public wrapper. Removed; the collector's own
+    // dedup guard made this redundant rather than wrong, but redundant
+    // collection over up to IR_MAX_FUNCS items is exactly the pathological-
+    // compile-time risk this review round flagged. (The module-use
+    // collection just above is a separate table -- LOWER_USE_MODULE_HASH,
+    // not LOWER_FN_TUPLE_ARR_* -- and is not redundant with anything below.)
     var lo = lowerer_new()
     lowerer_fo_preregister_pure_fns_multipass_mut(&! lo, items)
 }
@@ -5446,6 +6442,17 @@ fn lowerer_lower_program_items_mut(
     items: Option<Box<ItemList>>
 ) with Mut, Panic, Div, Alloc, IO {
     fo_xfer_global_reset()
+    lower_use_module_reset()
+    lower_fn_tuple_arr_reset()
+    // Single-module entry point -- only ever one module's items here, so
+    // module id 0 (matching lower_effective_current_module_id's own
+    // unscoped-default convention) is always correct.
+    lower_use_modules_collect(&items, 0)
+    // Copilot review (PR #2516): same duplicate-collection removal as
+    // fo_preregister_program_items_multipass above -- multipass_mut collects
+    // this exact item list itself now (for the tuple-array table; the
+    // module-use collection just above is the separate LOWER_USE_MODULE_HASH
+    // table and is not redundant with anything below).
     // Pre-register FO transfers so reverse-order pure helpers expand nested calls.
     lowerer_fo_preregister_pure_fns_multipass_mut(lo, &items)
     var current = items
@@ -6212,11 +7219,51 @@ fn lower_type_list_float_mask(opt: &Option<Box<TypeExprList>>, bit: i64) -> i64 
     }
 }
 
+// Array-slot counterpart of lower_type_list_float_mask / lower_opt_type_tuple_float_mask:
+// bit k set iff element k of a declared tuple TYPE is a `[f64; N]` array, so a
+// tuple-typed PARAMETER's slots can be classified from its signature alone
+// (no lowered initialiser expression to read, unlike a `let` binding). Own
+// mask, same reasoning as tuple_arr_mask itself: packing into high bits of
+// the scalar mask corrupts slot 31.
+fn lower_type_list_arr_mask(opt: &Option<Box<TypeExprList>>, bit: i64) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(list) => {
+            var m: i64 = 0
+            if bit < 32 {
+                if lower_type_expr_is_array_of_f64(&(*list).head) {
+                    m = 1 << (bit as i32)
+                }
+            }
+            m + lower_type_list_arr_mask(&(*list).tail, bit + 1)
+        }
+        None => 0,
+    }
+}
+
 fn lower_opt_type_tuple_float_mask(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
     match *opt {
         Some(te) => {
             if (*te).kind != TypeExprKind::TypeTuple { return 0 }
             lower_type_list_float_mask(&(*te).type_args, 0)
+        }
+        None => 0,
+    }
+}
+
+// Array-slot counterpart of lower_opt_type_tuple_float_mask, mirroring its
+// annotated-type-first pattern for tuple_arr_mask: an explicitly typed tuple
+// literal local (`let t: ([f64; 2], i64) = (a, 0)`) has a declared TYPE to
+// read the array mask off directly. expr_result_tuple_arr_mask_ref only
+// covers a CALL initialiser (lower_fn_tuple_f64_array_mask keys off a
+// function's declared return type, and tuple literals have no such
+// tracking), so without this an annotated tuple-literal local's array slots
+// stayed unmarked and a later `let x = t.0; x[0] * 2.0` still corrupted the
+// f64 bits via the integer path.
+fn lower_opt_type_tuple_arr_mask(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
+    match *opt {
+        Some(te) => {
+            if (*te).kind != TypeExprKind::TypeTuple { return 0 }
+            lower_type_list_arr_mask(&(*te).type_args, 0)
         }
         None => 0,
     }
@@ -6269,10 +7316,20 @@ fn lower_opt_return_float_code(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Pan
     // 1024+mask keeps every existing consumer (all of which test == 1 or == 2)
     // inert while carrying per-slot float-ness for tuple returns.
     //
-    // Written without a `let`: bound in the tail position of an else block the name
-    // reads back as undeclared (E137) when the compiler typechecks its own source.
-    // The classifier is a pure function of the type expression, so calling it twice
-    // costs compile time and nothing else.
+    // Merge note (PR #2516 vs. an independently-developed sibling change):
+    // the sibling packed a SECOND, array-slot mask into bits 32-63 of this
+    // same code via `<< 32` and read it back with `expr_result_tuple_
+    // array_float_mask_ref`. PR #2516's own field comment on `tuple_arr_mask`
+    // (Lowerer's per-local struct) explains why that packing is unsound:
+    // slot 31 shifted into the high half lands on this i64's sign bit,
+    // corrupting the whole code and dropping every slot's mask via the
+    // `code >= 1024` / `>= 1024` guards below and at every consumer. PR
+    // #2516 tracks the array-slot mask through its own, unpacked channels
+    // instead (the per-local `tuple_arr_mask` field for lets/params, and the
+    // global name-keyed `LOWER_FN_TUPLE_ARR_*` table -- see
+    // lower_fn_tuple_f64_array_mask -- for a call's declared return type),
+    // so this code carries only the pre-existing scalar mask; no consumer
+    // in this tree reads a packed high half.
     } else if lower_opt_type_tuple_float_mask(opt) != 0 {
         1024 + lower_opt_type_tuple_float_mask(opt)
     } else {
@@ -6469,6 +7526,40 @@ fn lower_tuple_slot_struct_sentinel_slot(code: i64) -> i64 {
     0 - 3 - code
 }
 
+// Copilot review (PR #2516), comment 4115407173 (follow-up investigation):
+// strengthening madaros_expr_index_receiver_call_array_method.sio with
+// arithmetic on the indexed value (as requested) exposed that the fix it
+// was meant to pin was incomplete at a DEEPER level than the ExprIndex
+// receiver resolver: a function whose return type is a fixed array of a
+// NAMED STRUCT (`fn f() -> [Holder; N]`, as opposed to an array of a word
+// scalar like `[f64; N]`, or a struct nested inside a TUPLE return) was
+// never recognised by return_fixed_array_len/return_struct_name at all --
+// lower_opt_type_word_scalar_array_len only matches WORD-SCALAR element
+// types, and lower_opt_type_return_layout_name's other arms are tuple-
+// specific. So expr_call_return_struct_name_ref (and everything built on
+// it, including this round's ExprIndex fix) had nothing to recurse INTO:
+// return_struct_name_for_fn_id came back empty for `make_holders`, no
+// matter how the caller reached it. `f64` element arithmetic on the
+// indexed struct field kept reading the raw IEEE bits as an integer.
+//
+// Mirrors the existing word-scalar array check, but for a NAMED (non-
+// word-scalar) element: the length is meaningful only when the element
+// resolves to a real name, exactly the same "single-value encoding of a
+// pair" discipline lower_opt_type_word_scalar_array_len documents for its
+// own guard.
+fn lower_opt_type_named_struct_array_elem_name(ty_opt: &Option<Box<TypeExpr>>) -> Name with Mut, Panic, Div {
+    if lower_opt_type_fixed_array_word_scalar(ty_opt) { return ir_empty_name() }
+    match *ty_opt {
+        Some(ty) => lower_type_expr_array_elem_name(&(*ty)),
+        None => ir_empty_name(),
+    }
+}
+
+fn lower_opt_type_named_struct_array_len(ty_opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
+    if lower_opt_type_named_struct_array_elem_name(ty_opt).len <= 0 { return 0 - 1 }
+    lower_opt_type_fixed_array_len(ty_opt)
+}
+
 fn lower_opt_type_return_fixed_array_code(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
     if lower_opt_type_tuple0_array_elem_struct_name(opt).len > 0 {
         return lower_tuple0_array_struct_return_sentinel()
@@ -6477,7 +7568,11 @@ fn lower_opt_type_return_fixed_array_code(opt: &Option<Box<TypeExpr>>) -> i64 wi
     if struct_slot >= 0 && lower_opt_type_tuple_struct_slot_name(opt).len > 0 {
         return lower_tuple_slot_struct_return_sentinel(struct_slot)
     }
-    lower_opt_type_word_scalar_array_len(opt)
+    let word_scalar_len = lower_opt_type_word_scalar_array_len(opt)
+    if word_scalar_len >= 0 {
+        return word_scalar_len
+    }
+    lower_opt_type_named_struct_array_len(opt)
 }
 
 fn lower_opt_type_return_layout_name(opt: &Option<Box<TypeExpr>>) -> Name with Mut, Panic, Div {
@@ -6489,7 +7584,11 @@ fn lower_opt_type_return_layout_name(opt: &Option<Box<TypeExpr>>) -> Name with M
     if tuple0.len > 0 {
         return tuple0
     }
-    lower_opt_type_tuple_struct_slot_name(opt)
+    let tuple_slot_name = lower_opt_type_tuple_struct_slot_name(opt)
+    if tuple_slot_name.len > 0 {
+        return tuple_slot_name
+    }
+    lower_opt_type_named_struct_array_elem_name(opt)
 }
 
 // Struct-type name of a parameter, unwrapping `&T` / `&!T`. Used so a method body's
@@ -7344,6 +8443,158 @@ pub fn lower_program_has_captured_closure_value_misuse_ref(prog: &Program) -> bo
     false
 }
 
+// Authoritative registry of mangled impl-method names (Type_method), populated
+// once per program from every ItemImpl's methods (see lower_impl_methods_collect,
+// called alongside lower_use_modules_collect -- same every-module-before-body-
+// lowering timing). This exists because `lowerer_lookup_fn_id_by_name_ref` only
+// answers "does ANY fn with this exact mangled name exist", which cannot tell a
+// real impl method from an unrelated top-level free fn that happens to be
+// spelled identically to a mangled name (e.g. `use m; m::f(..)` colliding with
+// an unrelated top-level `fn m_f(..)`). callee_path_module_stripped_name uses
+// this instead of a bare existence check to decide whether a lowercase-rooted
+// two-segment path is really `Type::method` or a module-qualified free fn.
+//
+// Stored as a flat scalar byte buffer (LOWER_IMPL_METHOD_BUF/LEN), NOT
+// `[Name; 4096]` (a 392-byte struct array) -- same reasoning as
+// LOWER_USE_MODULE_HASH's sibling registry just above: a `[Name; N]` global
+// array was observed to corrupt on both read and write in this compiler's
+// own codegen (hash stayed correct, stored len/buf came back as unrelated
+// stack-address-shaped garbage), reproduced on this branch's own base commit
+// (692e709), independent of any of the 4 review findings. Scalar (i8/i64)
+// global arrays are the pattern already proven reliable throughout this file.
+//
+// SEG_MAX is 384, matching `Name.buf: [i8; 384]` (parser/ast.sio) and the
+// output cap `ir_mangle_method_name` itself enforces -- not a shorter,
+// arbitrary cap. A shorter cap made `lower_impl_method_note`/`known` silently
+// refuse any mangled name longer than the cap, so a real impl method with a
+// long enough Type_method name lost its "this is a real method" registration
+// -- the same class of bug review comment 4089110718 reported against
+// LOWER_USE_MODULE_SEG_MAX's earlier 64-byte cap.
+let LOWER_IMPL_METHOD_SEG_MAX: i64 = 384
+var LOWER_IMPL_METHOD_COUNT: i64 = 0
+var LOWER_IMPL_METHOD_HASH: [i64; 4096] = [0; 4096]
+var LOWER_IMPL_METHOD_LEN: [i64; 4096] = [0; 4096]
+var LOWER_IMPL_METHOD_BUF: [i8; 1572864] = [0; 1572864]
+// Review comment 4089532660 (round 3, finding B): unlike LOWER_USE_MODULE_
+// OVERFLOWED (this registry's sibling, declared near line 793), overflow
+// here used to silently continue instead of refusing. That is NOT a safe
+// best-effort fallback: this registry is what lets callee_path_module_
+// stripped_name tell a real lowercase-typed impl method apart from an
+// unrelated top-level free fn that collides with the mangled name (round 1
+// finding B). A dropped entry past capacity means a later `Type_method`
+// entry silently loses its "this really is a method" evidence, and
+// callee_path_module_stripped_name can strip it to the bare method name --
+// a wrong call or a body-less stub, the exact failure class this whole PR
+// exists to fix. Like LOWER_USE_MODULE_OVERFLOWED, this is cleared by
+// lower_use_module_reset() (the once-per-whole-compile top-level boundary)
+// but NOT by lower_hard_error_reset() (called per loaded module via
+// lowerer_new(), mid-compile) -- durable across the latter so the
+// transient IR_LOWER_HARD_ERROR state it also sets cannot be silently lost
+// to a later module's reset before a barrier site ever reports it.
+var LOWER_IMPL_METHOD_OVERFLOWED: bool = false
+
+pub fn lower_impl_method_known(n: Name) -> bool with Mut, Panic, Div {
+    if n.len <= 0 || n.len > LOWER_IMPL_METHOD_SEG_MAX {
+        return false
+    }
+    let h = fo_name_hash(n)
+    var i: i64 = 0
+    while i < LOWER_IMPL_METHOD_COUNT {
+        if LOWER_IMPL_METHOD_HASH[i as usize] == h && LOWER_IMPL_METHOD_LEN[i as usize] == n.len {
+            let base = i * LOWER_IMPL_METHOD_SEG_MAX
+            var eq = true
+            var j: i64 = 0
+            while j < n.len {
+                if LOWER_IMPL_METHOD_BUF[(base + j) as usize] != n.buf[j as usize] {
+                    eq = false
+                }
+                j = j + 1
+            }
+            if eq {
+                return true
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn lower_impl_method_note(n: Name) with Mut, Panic, Div {
+    if n.len <= 0 || n.len > LOWER_IMPL_METHOD_SEG_MAX {
+        return
+    }
+    if lower_impl_method_known(n) {
+        return
+    }
+    if LOWER_IMPL_METHOD_COUNT >= 4096 {
+        // Refuse (review comment 4089532660 / finding B), matching
+        // lower_use_module_note's own overflow refusal just above in this
+        // file: silently continuing here would let a later real impl
+        // method's mangled name get treated as "not a method" (no
+        // registry evidence for it), and callee_path_module_stripped_name
+        // strip it to a bare free-fn name -- a wrong call or a body-less
+        // stub. The durable flag survives lower_hard_error_reset() the same
+        // way LOWER_USE_MODULE_OVERFLOWED does.
+        LOWER_IMPL_METHOD_OVERFLOWED = true
+        if IR_LOWER_HARD_ERROR == 0 {
+            IR_LOWER_HARD_ERROR = 1
+            IR_LOWER_HARD_ERROR_REASON = 4
+            IR_LOWER_HARD_ERROR_LIMIT = 4096
+        }
+        return
+    }
+    let idx = LOWER_IMPL_METHOD_COUNT
+    LOWER_IMPL_METHOD_HASH[idx as usize] = fo_name_hash(n)
+    let base = idx * LOWER_IMPL_METHOD_SEG_MAX
+    var ci: i64 = 0
+    while ci < n.len {
+        LOWER_IMPL_METHOD_BUF[(base + ci) as usize] = n.buf[ci as usize]
+        ci = ci + 1
+    }
+    LOWER_IMPL_METHOD_LEN[idx as usize] = n.len
+    LOWER_IMPL_METHOD_COUNT = idx + 1
+}
+
+fn lower_impl_methods_collect_list(type_name: Name, methods: &Option<Box<ItemList>>) with Mut, Panic, Div, Alloc {
+    var current = methods
+    while true {
+        match *current {
+            Some(list) => {
+                let head = &(*list).head
+                if head.kind == ItemKind::ItemFn {
+                    lower_impl_method_note(ir_mangle_method_name(type_name, head.name))
+                }
+                current = &(*list).tail
+            }
+            _ => break
+        }
+    }
+}
+
+// Record every method of every ItemImpl, mangled the same way the real
+// lowering passes mangle them (ir_mangle_method_name). Called alongside
+// lower_use_modules_collect so the registry is complete before any call
+// site resolution (callee_path_module_stripped_name) runs.
+pub fn lower_impl_methods_collect(items: &Option<Box<ItemList>>) with Mut, Panic, Div, Alloc {
+    var current = items
+    while true {
+        match *current {
+            Some(list) => {
+                let item_ref = &(*list).head
+                if item_ref.kind == ItemKind::ItemImpl {
+                    match item_ref.impl_def {
+                        Some(id) => {
+                            lower_impl_methods_collect_list(item_ref.name, &(*id).methods)
+                        }
+                        None => {}
+                    }
+                }
+                current = &(*list).tail
+            }
+            _ => break
+        }
+    }
+}
 
 impl Lowerer {
     fn current_fn_compile_strategy(self) -> i64 with Mut, Panic, Div {
@@ -7834,7 +9085,20 @@ impl Lowerer {
                 }
                 if max_idx < 0 { return 0 - 1 }
                 let slots = max_idx + 1
-                if slots > 64 { return 0 - 1 }
+                // NOTE: this bound must track the field-scan loop above (`fi <
+                // 128`) and the backing `fields: [StructFieldEntry; 128]`
+                // array (see the struct layout table definition). It
+                // originally matched a `fields: [StructFieldEntry; 64]` /
+                // `fi < 64` pair introduced together in 5769c6e851; when the
+                // array and scan bound were both later widened to 128, this
+                // reject threshold was missed. Left at 64, every struct with
+                // 65-128 fields silently fails "is this a registered struct
+                // type" (returns -1) instead of correctly reporting its slot
+                // count -- which made the uninitialized-struct-local backing-
+                // allocation fix (a74aa956a3) silently skip allocation for
+                // structs in that range too, since it gates on this return
+                // value being > 0. Found via PR #2667 review.
+                if slots > 128 { return 0 - 1 }
                 return slots
             }
             si = si + 1
@@ -7886,7 +9150,12 @@ impl Lowerer {
         let dst_reg = pair_dst.1
         lo = lo.emit(ir_alloc(dst_reg, lo.aggregate_storage_bytes(slot_count)))
         var i: i64 = 0
-        while i < slot_count && i < 64 {
+        // Bound must track struct_layout_slot_count's own cap (128, the
+        // registry's actual field capacity) -- this used to stop at 64,
+        // silently truncating the copy (fields 64-127 kept their old/zero
+        // value) for any struct slot_count allocation already widened past
+        // 64 elsewhere. Found via PR #2667 review, comment 4104667818.
+        while i < slot_count && i < 128 {
             let fname = lo.struct_layout_field_name_at(type_name, i)
             let pair_slot = lo.fresh_reg()
             lo = pair_slot.0
@@ -7900,7 +9169,12 @@ impl Lowerer {
 
     // #1479: ONE lookup shared by every per-field query the deep copy makes.
     //
-    // Returns `layout_entry_index * 64 + field_entry_index` for the entry that
+    // Returns `layout_entry_index * 128 + field_entry_index` (128 = the field
+    // scan bound / registry capacity above, not just a base large enough for
+    // this to be a bijection -- a base of 64 previously let field_entry_index
+    // values >= 64 collide with the next layout_entry_index's low field
+    // indices, corrupting struct_layout_pos_* lookups for wide structs; fixed
+    // alongside PR #2667 review comment 4104667818) for the entry that
     // registers slot `slot_index` of `type_name`, or -1 when absent.
     //
     // Why one position instead of three independent scans: a struct type can be
@@ -7921,7 +9195,7 @@ impl Lowerer {
                 let fc = (*self.struct_layouts).entries[si as usize].field_count
                 while fi < fc && fi < 128 {
                     if (*self.struct_layouts).entries[si as usize].fields[fi as usize].index == slot_index {
-                        return si * 64 + fi
+                        return si * 128 + fi
                     }
                     fi = fi + 1
                 }
@@ -7960,8 +9234,8 @@ impl Lowerer {
 
     fn struct_layout_pos_field_name(self, pos: i64) -> Name with Mut, Panic, Div, Alloc {
         if pos < 0 { return ir_empty_name() }
-        let si = pos / 64
-        let fi = pos - si * 64
+        let si = pos / 128
+        let fi = pos - si * 128
         if si >= (*self.struct_layouts).count { return ir_empty_name() }
         // Ported onto main's interned-name representation (was `.name: Name`).
         // NOTE: leaving this as `.name` type-checked and BUILT anyway -- that is #1494
@@ -7972,24 +9246,24 @@ impl Lowerer {
 
     fn struct_layout_pos_array_len(self, pos: i64) -> i64 with Mut, Panic, Div, Alloc {
         if pos < 0 { return 0 }
-        let si = pos / 64
-        let fi = pos - si * 64
+        let si = pos / 128
+        let fi = pos - si * 128
         if si >= (*self.struct_layouts).count { return 0 }
         (*self.struct_layouts).entries[si as usize].fields[fi as usize].word_scalar_array_len
     }
 
     fn struct_layout_pos_is_float(self, pos: i64) -> i64 with Mut, Panic, Div, Alloc {
         if pos < 0 { return 0 }
-        let si = pos / 64
-        let fi = pos - si * 64
+        let si = pos / 128
+        let fi = pos - si * 128
         if si >= (*self.struct_layouts).count { return 0 }
         (*self.struct_layouts).entries[si as usize].fields[fi as usize].is_float
     }
 
     fn struct_layout_pos_named_type(self, pos: i64) -> Name with Mut, Panic, Div, Alloc {
         if pos < 0 { return ir_empty_name() }
-        let si = pos / 64
-        let fi = pos - si * 64
+        let si = pos / 128
+        let fi = pos - si * 128
         if si >= (*self.struct_layouts).count { return ir_empty_name() }
         // Ported onto main's interned-name representation: the layout now stores an
         // id, and `ir_name_at` is main's existing id -> Name reverse.
@@ -8060,7 +9334,12 @@ impl Lowerer {
     fn struct_deep_copy_cost(self, type_name: Name, slot_count: i64, depth: i64) -> i64 with Mut, Panic, Div, Alloc {
         var total: i64 = 1
         var i: i64 = 0
-        while i < slot_count && i < 64 {
+        // Bound must track emit_struct_value_copy_deep's own loop below (and
+        // struct_layout_slot_count's 128-field cap) -- an under-estimate here
+        // would let the actual emitter overrun IR_MAX_INSTRS (see the doc
+        // comment above), so this was the more dangerous of the two stale-64
+        // instances fixed alongside comment 4104667818.
+        while i < slot_count && i < 128 {
             total = total + 2
             let pos = self.struct_layout_field_pos(type_name, i)
             let arr_len = self.struct_layout_pos_array_len(pos)
@@ -8109,7 +9388,9 @@ impl Lowerer {
         let dst_reg = pair_dst.1
         lo = lo.emit(ir_alloc(dst_reg, lo.aggregate_storage_bytes(slot_count)))
         var i: i64 = 0
-        while i < slot_count && i < 64 {
+        // Same stale-64 cap as emit_struct_value_copy above (comment 4104667818):
+        // widened to 128 to match struct_layout_slot_count's actual capacity.
+        while i < slot_count && i < 128 {
             let pos = lo.struct_layout_field_pos(type_name, i)
             let fname = lo.struct_layout_pos_field_name(pos)
             let pair_slot = lo.fresh_reg()
@@ -8324,7 +9605,18 @@ impl Lowerer {
         let left_opt: Option<Box<Expr>> = e.left
         match left_opt {
             Some(value_expr) => {
-                let elem_is_float = lower_expr_has_float_source_ref(&(*value_expr))
+                // Copilot review (PR #2516): lower_array_literal_expr_ref routes
+                // `Some(_)` repeat literals here without ever calling the
+                // local-aware classifier, so this used the free-fn
+                // lower_expr_has_float_source_ref, which only sees float
+                // literals/casts/binary subtrees of those -- not an f64 LOCAL.
+                // `([x; 2])[0] * 2.0` with `x: f64` therefore stayed on the
+                // integer path. array_literal_elems_are_float_ref is the same
+                // classifier lower_array_literal_expr_ref's non-repeat branch
+                // already uses (it OR's this free fn with the local-aware
+                // self.expr_result_is_float_ref on the repeat element), so route
+                // through it here too instead of re-deriving a narrower check.
+                let elem_is_float = self.array_literal_elems_are_float_ref(e)
                 // Aggregate literals must be re-materialised per slot, otherwise
                 // every element aliases one object. repeat_count <= 0 keeps the
                 // legacy path so the value expression is still lowered exactly
@@ -8825,6 +10117,7 @@ impl Lowerer {
                 // Callers that know a positive kind (for-IV int, float local) re-bind.
                 (*(*stk).scalar_kind).values[idx as usize] = 0
                 (*(*stk).tuple_float_mask).values[idx as usize] = 0
+                (*(*stk).tuple_arr_mask).values[idx as usize] = 0
                 (*(*stk).tuple0_array_elem_layout).values[idx as usize] = 0 - 1
                 (*(*stk).tuple_struct_layout).values[idx as usize] = 0 - 1
                 (*(*stk).tuple_struct_slot).values[idx as usize] = 0 - 1
@@ -8901,6 +10194,25 @@ impl Lowerer {
         lo
     }
 
+    // Array-slot counterpart of bind_local_tuple_float_mask: records which
+    // slots of a tuple-typed local are `[f64; N]` arrays, in its own table
+    // instead of the high bits of tuple_float_mask (see tuple_arr_mask field).
+    fn bind_local_tuple_arr_mask(self, name: Name, mask: i64) -> Lowerer with Mut, Alloc, Panic, Div {
+        var lo = self
+        if mask == 0 { return lo }
+        var stk = *lo.locals
+        var i = stk.count - 1
+        while i >= 0 {
+            if (*stk.depths).values[i as usize] <= lo.scope_depth && ir_name_eq((*stk.names).values[i as usize], name) {
+                (*stk.tuple_arr_mask).values[i as usize] = mask
+                lo.locals = Box::new(stk)
+                return lo
+            }
+            i = i - 1
+        }
+        lo
+    }
+
     fn bind_local_tuple_struct(self, name: Name, layout_idx: i64, slot: i64) -> Lowerer with Mut, Alloc, Panic, Div {
         var lo = self
         if layout_idx < 0 { return lo }
@@ -8941,6 +10253,18 @@ impl Lowerer {
         while i >= 0 {
             if (*(*self.locals).depths).values[i as usize] <= self.scope_depth && ir_name_eq((*(*self.locals).names).values[i as usize], name) {
                 return (*(*self.locals).tuple_float_mask).values[i as usize]
+            }
+            i = i - 1
+        }
+        0
+    }
+
+    // Array-slot counterpart of lookup_local_tuple_float_mask.
+    fn lookup_local_tuple_arr_mask(self, name: Name) -> i64 with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*(*self.locals).depths).values[i as usize] <= self.scope_depth && ir_name_eq((*(*self.locals).names).values[i as usize], name) {
+                return (*(*self.locals).tuple_arr_mask).values[i as usize]
             }
             i = i - 1
         }
@@ -9475,16 +10799,16 @@ impl Lowerer {
         }
         var i: i64 = 0
         while i < lo.variance_base_reg_count {
-            if lo.variance_base_regs[i as usize] == base_reg {
-                lo.variance_value_regs[i as usize] = variance_reg
+            if (*lo.big).variance_base_regs[i as usize] == base_reg {
+                (*lo.big).variance_value_regs[i as usize] = variance_reg
                 return lo
             }
             i = i + 1
         }
         if lo.variance_base_reg_count < 1024 {
             let idx = lo.variance_base_reg_count
-            lo.variance_base_regs[idx as usize] = base_reg
-            lo.variance_value_regs[idx as usize] = variance_reg
+            (*lo.big).variance_base_regs[idx as usize] = base_reg
+            (*lo.big).variance_value_regs[idx as usize] = variance_reg
             lo.variance_base_reg_count = idx + 1
         }
         // #1706 NOTE: past this wall a variance binding is silently DROPPED and the
@@ -9564,8 +10888,8 @@ impl Lowerer {
     fn lookup_variance_for_base_reg(self, base_reg: i64) -> i64 with Mut, Panic, Div {
         var i: i64 = 0
         while i < self.variance_base_reg_count {
-            if self.variance_base_regs[i as usize] == base_reg {
-                return self.variance_value_regs[i as usize]
+            if (*self.big).variance_base_regs[i as usize] == base_reg {
+                return (*self.big).variance_value_regs[i as usize]
             }
             i = i + 1
         }
@@ -10079,7 +11403,7 @@ impl Lowerer {
         }
         var i: i64 = 0
         while i < 36 {
-            lo.so_bind_hess[(row * 36 + i) as usize] = lo.so_expr_hess[i as usize]
+            (*lo.big).so_bind_hess[(row * 36 + i) as usize] = lo.so_expr_hess[i as usize]
             i = i + 1
         }
         lo
@@ -10102,7 +11426,7 @@ impl Lowerer {
         }
         var j: i64 = 0
         while j < 36 {
-            lo.so_expr_hess[j as usize] = lo.so_bind_hess[(row * 36 + j) as usize]
+            lo.so_expr_hess[j as usize] = (*lo.big).so_bind_hess[(row * 36 + j) as usize]
             j = j + 1
         }
         lo
@@ -12813,13 +14137,13 @@ impl Lowerer {
         }
         var i: i64 = 0
         while i < lo.array_elem_float_reg_count {
-            if lo.array_elem_float_regs[i as usize] == reg {
+            if (*lo.big).array_elem_float_regs[i as usize] == reg {
                 return lo
             }
             i = i + 1
         }
         if lo.array_elem_float_reg_count < 512 {
-            lo.array_elem_float_regs[lo.array_elem_float_reg_count as usize] = reg
+            (*lo.big).array_elem_float_regs[lo.array_elem_float_reg_count as usize] = reg
             lo.array_elem_float_reg_count = lo.array_elem_float_reg_count + 1
         }
         lo
@@ -12831,7 +14155,7 @@ impl Lowerer {
         }
         var i: i64 = 0
         while i < self.array_elem_float_reg_count {
-            if self.array_elem_float_regs[i as usize] == reg {
+            if (*self.big).array_elem_float_regs[i as usize] == reg {
                 return true
             }
             i = i + 1
@@ -12925,20 +14249,21 @@ impl Lowerer {
         if (*expr).kind != ExprKind::ExprCall { return 0 - 1 }
         match (*expr).left {
             Some(callee_expr) => {
-                var callee_name = ir_empty_name()
-                if (*callee_expr).kind == ExprKind::ExprIdent {
-                    callee_name = (*callee_expr).name
-                } else if (*callee_expr).kind == ExprKind::ExprPath {
-                    let first = ir_path_first_name((*callee_expr).path)
-                    let last = ir_path_last_name((*callee_expr).path)
-                    if first.len > 0 && last.len > 0 && !ir_name_eq(first, last) {
-                        callee_name = ir_mangle_method_name(first, last)
-                    } else {
-                        callee_name = first
-                    }
-                } else {
-                    return 0 - 1
-                }
+                // Resolve through the same module-qualified-path-aware
+                // resolver the emitted call target uses (expr_to_callee_name_ref
+                // / callee_path_module_stripped_name), not a separate
+                // first/last reconstruction -- otherwise `mod::make_array()`
+                // looks up `make_array`'s metadata under the plain name while
+                // the actual call target was correctly resolved, and a
+                // module-qualified call to a fixed-array-returning free fn
+                // loses its declared array length. An empty result (rather
+                // than a kind allowlist) is the guard: expr_to_callee_name_ref
+                // already answers ir_empty_name() for any callee_expr kind it
+                // cannot resolve, so checking its result covers every kind
+                // that resolver supports without this reader separately
+                // guessing which kinds are valid.
+                let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
+                if callee_name.len <= 0 { return 0 - 1 }
                 let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
                 if fn_id >= 0 && fn_id < self.module.fn_count {
                     return ir_fn_get(&(*self.module), fn_id as usize).return_fixed_array_len
@@ -12949,28 +14274,30 @@ impl Lowerer {
         }
     }
 
-    // The expr_call_return_* accessors around this each re-derive the callee's
-    // fn_id with the same twelve lines. This is that resolution written once, for
-    // the new readers; the existing three are left alone rather than churned into
-    // this change.
+    // Copilot review (PR #2516), comment 4114493048: this and the three
+    // sibling expr_call_return_* accessors below used to re-derive the
+    // callee name inline via a bare first/last mangle, duplicating (and
+    // liable to drift from) expr_to_callee_name_ref -- the resolution every
+    // REAL call-lowering site in this file actually uses (see its own many
+    // callers above). A companion PR (#2515) is adding module-qualifier
+    // stripping to that shared resolution (`mod::make_holder()` resolving to
+    // bare "make_holder" instead of a body-less mangled "mod_make_holder");
+    // once merged, any reader still duplicating the OLD inline logic here
+    // would silently disagree with how the call itself actually lowered,
+    // so a receiver type resolved through one of these accessors (e.g.
+    // expr_receiver_struct_type_ref's ExprCall arm) could come back empty
+    // for that shape even though the call itself compiled and ran fine.
+    // All four now delegate to expr_to_callee_name_ref instead of
+    // duplicating its logic, so they can never separately drift out of
+    // sync with it again, in this change or any future one.
     fn expr_call_callee_fn_id_ref(self, expr: &Expr) -> i64 with Mut, Panic, Div, Alloc {
         if (*expr).kind != ExprKind::ExprCall { return 0 - 1 }
         match (*expr).left {
             Some(callee_expr) => {
-                var callee_name = ir_empty_name()
-                if (*callee_expr).kind == ExprKind::ExprIdent {
-                    callee_name = (*callee_expr).name
-                } else if (*callee_expr).kind == ExprKind::ExprPath {
-                    let first = ir_path_first_name((*callee_expr).path)
-                    let last = ir_path_last_name((*callee_expr).path)
-                    if first.len > 0 && last.len > 0 && !ir_name_eq(first, last) {
-                        callee_name = ir_mangle_method_name(first, last)
-                    } else {
-                        callee_name = first
-                    }
-                } else {
-                    return 0 - 1
-                }
+                // Same resolver as the emitted call target -- see
+                // expr_call_return_fixed_array_len_ref.
+                let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
+                if callee_name.len <= 0 { return 0 - 1 }
                 lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
             }
             None => 0 - 1,
@@ -12981,20 +14308,13 @@ impl Lowerer {
         if (*expr).kind != ExprKind::ExprCall { return ir_empty_name() }
         match (*expr).left {
             Some(callee_expr) => {
-                var callee_name = ir_empty_name()
-                if (*callee_expr).kind == ExprKind::ExprIdent {
-                    callee_name = (*callee_expr).name
-                } else if (*callee_expr).kind == ExprKind::ExprPath {
-                    let first = ir_path_first_name((*callee_expr).path)
-                    let last = ir_path_last_name((*callee_expr).path)
-                    if first.len > 0 && last.len > 0 && !ir_name_eq(first, last) {
-                        callee_name = ir_mangle_method_name(first, last)
-                    } else {
-                        callee_name = first
-                    }
-                } else {
-                    return ir_empty_name()
-                }
+                // Same resolver as the emitted call target -- see
+                // expr_call_return_fixed_array_len_ref. Without this, a
+                // module-qualified call to a struct-returning free fn (e.g.
+                // `mod::make_struct()`) lost the return layout needed by
+                // later indexing or field access.
+                let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
+                if callee_name.len <= 0 { return ir_empty_name() }
                 let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
                 self.return_struct_name_for_fn_id(fn_id)
             }
@@ -13006,20 +14326,10 @@ impl Lowerer {
         if (*expr).kind != ExprKind::ExprCall { return ir_empty_name() }
         match (*expr).left {
             Some(callee_expr) => {
-                var callee_name = ir_empty_name()
-                if (*callee_expr).kind == ExprKind::ExprIdent {
-                    callee_name = (*callee_expr).name
-                } else if (*callee_expr).kind == ExprKind::ExprPath {
-                    let first = ir_path_first_name((*callee_expr).path)
-                    let last = ir_path_last_name((*callee_expr).path)
-                    if first.len > 0 && last.len > 0 && !ir_name_eq(first, last) {
-                        callee_name = ir_mangle_method_name(first, last)
-                    } else {
-                        callee_name = first
-                    }
-                } else {
-                    return ir_empty_name()
-                }
+                // Same resolver as the emitted call target -- see
+                // expr_call_return_fixed_array_len_ref.
+                let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
+                if callee_name.len <= 0 { return ir_empty_name() }
                 let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
                 self.return_tuple0_array_elem_struct_name_for_fn_id(fn_id)
             }
@@ -13363,10 +14673,24 @@ impl Lowerer {
     // Phase 3.2: Lookup struct field index without needing struct name
     // Used when we don't know the struct type at the call site
     fn field_idx_from_name_simple(self, n: Name) -> i64 with Mut, Panic, Div {
-        // Try numeric field access first (.0, .1, .2, ...)
-        let first_byte = n.buf[0] as i64
-        if n.len == 1 && first_byte >= 48 && first_byte <= 57 {
-            return first_byte - 48
+        // Try numeric field access first (.0, .1, .2, ..., .15, ...). Tuple-let
+        // desugaring turns `let (_, ..., v10) = f()` into a temporary tuple plus
+        // `let v10 = __tup.10` (#1502), so a tuple slot name can be more than one
+        // decimal digit. This used to check `n.len == 1`, which only recognised
+        // slots 0-9; a two-digit slot name (slot 10+) fell through the
+        // struct-field-name scan below (no struct has a field literally named
+        // "10"), then to the `(n.buf[0] as i64) % 64` legacy hash fallback,
+        // which returns a bogus index derived from the first digit character
+        // (e.g. "10" -> '1' (49) % 64 = 49) instead of 10. That wrong index read
+        // whatever memory happened to sit at word offset 49 of the tuple's
+        // storage: a wrong value for a scalar f64 slot, and a garbage/null
+        // pointer for an `[f64; N]` array slot -- segfaulting when the caller
+        // then indexed into it. lower_name_tuple_index already does the general
+        // decimal parse (and rejects non-numeric names); reuse it here so every
+        // tuple slot, not just single-digit ones, resolves to its real index.
+        let tuple_idx = lower_name_tuple_index(n)
+        if tuple_idx >= 0 {
+            return tuple_idx
         }
         // The synthetic "Knowledge" layout (ir_register_knowledge_layout) is
         // preseeded as entry 0, before any user struct is registered, and its
@@ -13604,23 +14928,6 @@ impl Lowerer {
         false
     }
 
-    fn field_array_elem_is_float_by_name_simple(self, field_name: Name) -> bool with Mut, Panic, Div {
-        var si: i64 = 0
-        while si < (*self.struct_layouts).count {
-            var fi: i64 = 0
-            while fi < (*self.struct_layouts).entries[si as usize].field_count {
-                if ir_name_eq(ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].name_id), field_name) {
-                    if (*self.struct_layouts).entries[si as usize].fields[fi as usize].is_float == 2 {
-                        return true
-                    }
-                }
-                fi = fi + 1
-            }
-            si = si + 1
-        }
-        false
-    }
-
     // Pointer-class lookup for a field OF A KNOWN STRUCT TYPE. Deliberately type-aware: a
     // by-NAME scan over every registered struct answers with the FIRST field of that name, so
     // two structs sharing a field name but differing in pointer-ness get the wrong answer.
@@ -13742,9 +15049,28 @@ impl Lowerer {
                     // marks i64 component loads as float (field_array_float=1).
                     return self.field_array_elem_is_float_for_struct(type_name, field_name)
                 }
-                self.field_array_elem_is_float_by_name_simple(field_name)
+                // Copilot review (PR #2516), round 9: this used to fall back to
+                // field_array_elem_is_float_by_name_simple (ANY registered
+                // struct with a field of this name) whenever expr_receiver_
+                // struct_type_ref couldn't resolve the owner -- which it never
+                // could for an ExprCall/ExprMethodCall owner (`make_int_holder()
+                // .values`, no arm for it there), only for ExprIdent/ExprIndex/
+                // deref chains. That by-name scan can match an UNRELATED
+                // struct's same-named field and misclassify a genuine integer
+                // array as f64 -- the exact class of bug this file's sibling
+                // predicate, field_is_float_for_base_ref just above, was
+                // already written to avoid by returning false outright on an
+                // unresolved owner type rather than guessing by name. Building
+                // real call/method return-type resolution here would still
+                // leave the "genuinely unresolvable owner" case (e.g. an
+                // opaque/generic return) with the same unsound guess, so drop
+                // the by-name fallback entirely and match the sibling's
+                // conservative default: unresolved owner type -> not a float
+                // array. field_array_elem_is_float_by_name_simple is now
+                // unused and removed with this change.
+                false
             }
-            _ => self.field_array_elem_is_float_by_name_simple(field_name),
+            _ => false,
         }
     }
 
@@ -13803,6 +15129,23 @@ impl Lowerer {
                     return false
                 }
                 if (*base_expr).kind == ExprKind::ExprFieldAccess {
+                    // Copilot review (PR #2516), "Previously missed" finding:
+                    // this branch used to send EVERY ExprFieldAccess straight
+                    // to field_array_elem_is_float_for_base_ref, treating a
+                    // numeric tuple-slot name (`.0` in `pair().0[0]` /
+                    // `t.0[0]`) the same as a real struct field name. A
+                    // tuple-returning call/local has no struct owner type,
+                    // so that lookup always missed and fell back to `false`
+                    // -- the integer element path, cvtsi2sd-ing the f64 bit
+                    // pattern of the array's real values. Numeric field
+                    // names must be checked as a tuple slot FIRST, via the
+                    // same expr_is_tuple_slot_f64_array_ref the tuple-literal
+                    // classifier already uses (it returns false immediately
+                    // for any non-numeric field name via lower_name_tuple_index,
+                    // so real struct field access below is unaffected).
+                    if self.expr_is_tuple_slot_f64_array_ref(&(*base_expr)) {
+                        return true
+                    }
                     return self.field_array_elem_is_float_for_base_ref(&(*base_expr).left, (*base_expr).name)
                 }
                 if (*base_expr).kind == ExprKind::ExprUnary && (*base_expr).un_op == UnaryOp::OpDeref {
@@ -13860,6 +15203,84 @@ impl Lowerer {
         if (*expr).kind == ExprKind::ExprIdent {
             return self.lookup_local_struct_type((*expr).name)
         }
+        // Copilot review (PR #2516), round 11: this resolver had no arm for
+        // ExprStructLit/ExprIf/ExprMatch/ExprBlock owners, so
+        // `(Holder { ... }).values` or `(if cond { left } else { right }).values`
+        // fell through to ir_empty_name() -- the same "unresolved owner"
+        // signal field_array_elem_is_float_for_base_ref's round-9 fix
+        // (correctly) treats as "not float, don't guess", so these
+        // LEGITIMATE f64-array fields were misclassified as integer and
+        // their elements corrupted in arithmetic. A struct literal names its
+        // own type directly (ir_path_first_name, same extraction
+        // fo_ctor_register_body already uses for ExprStructLit elsewhere in
+        // this file); if/match/block owners recurse into their trailing
+        // expression, since a well-typed if/match's arms and a block's tail
+        // all share the owner expression's own type.
+        if (*expr).kind == ExprKind::ExprStructLit {
+            return ir_path_first_name((*expr).path)
+        }
+        if (*expr).kind == ExprKind::ExprBlock {
+            return self.opt_block_tail_struct_type_ref(&(*expr).block)
+        }
+        if (*expr).kind == ExprKind::ExprIf {
+            let then_ty = self.opt_block_tail_struct_type_ref(&(*expr).block)
+            if then_ty.len > 0 {
+                return then_ty
+            }
+            match (*expr).else_expr {
+                Some(else_e) => {
+                    return self.expr_receiver_struct_type_ref(&(*else_e))
+                }
+                _ => {}
+            }
+        }
+        if (*expr).kind == ExprKind::ExprMatch {
+            var arm_cursor = &(*expr).arms
+            while true {
+                match *arm_cursor {
+                    Some(list) => {
+                        let body_ty = self.expr_receiver_struct_type_ref(&(*list).head.body)
+                        if body_ty.len > 0 {
+                            return body_ty
+                        }
+                        arm_cursor = &(*list).tail
+                    }
+                    _ => break
+                }
+            }
+        }
+        // Copilot review (PR #2516), round 10 finding 1: this resolver had no
+        // arm for a CALL/METHOD-CALL owner, so `make_float_holder().values`
+        // (owner is an ExprCall) fell through every arm below to
+        // ir_empty_name() -- indistinguishable from a genuinely unresolvable
+        // owner. field_array_elem_is_float_for_base_ref's round-9 fix (return
+        // false on an unresolved owner, to stop guessing by field name)
+        // therefore also swallowed this LEGITIMATE case: a valid f64-array
+        // struct field reached through a call's declared return type.
+        // expr_call_return_struct_name_ref and return_struct_name_for_fn_id
+        // already resolve a plain call's / a method's declared return struct
+        // type elsewhere in this file (float-holder/tuple-slot machinery) --
+        // reuse both here so this receiver-type resolver, used by every
+        // field-access-classification caller, gains the same answer.
+        if (*expr).kind == ExprKind::ExprCall {
+            let rn = self.expr_call_return_struct_name_ref(expr)
+            if rn.len > 0 {
+                return rn
+            }
+        }
+        if (*expr).kind == ExprKind::ExprMethodCall {
+            let recv_type = self.lower_method_recv_type(&(*expr).left)
+            let call_name = if recv_type.len > 0 {
+                ir_mangle_method_name(recv_type, (*expr).name)
+            } else {
+                (*expr).name
+            }
+            let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, call_name)
+            let rn = self.return_struct_name_for_fn_id(fn_id)
+            if rn.len > 0 {
+                return rn
+            }
+        }
         if (*expr).kind == ExprKind::ExprIndex {
             match (*expr).left {
                 Some(indexed) => {
@@ -13872,6 +15293,54 @@ impl Lowerer {
                     }
                     if (*indexed).kind == ExprKind::ExprFieldAccess {
                         return self.field_array_elem_type_name_for_base_ref(&(*indexed).left, (*indexed).name)
+                    }
+                    // Copilot review (PR #2516), comment 4114931470: this
+                    // ExprIndex arm only ever handled an ExprIdent or
+                    // ExprFieldAccess indexed base, so `make_holders()[0]
+                    // .values` (indexed base is an ExprCall) and
+                    // `[Holder { .. }][0].values` (an ExprArrayLit) fell
+                    // through to ir_empty_name() -- the same "unresolved
+                    // owner" signal field_array_elem_is_float_for_base_ref's
+                    // round-9 fix (correctly) treats as "not float, don't
+                    // guess", misclassifying a legitimate f64-array field as
+                    // integer and corrupting its arithmetic. return_struct_
+                    // name_for_fn_id already answers "element struct name"
+                    // for BOTH a plain struct return AND an array-of-struct
+                    // return (same field, disambiguated only by
+                    // return_fixed_array_len -- see its own comment), so
+                    // indexing an ExprCall's result names the same struct
+                    // its own receiver-type arm above already resolves;
+                    // recurse into it rather than duplicate that lookup. An
+                    // ExprArrayLit's element struct type is whatever its own
+                    // first element resolves to (a repeated-value literal
+                    // `[v; n]` and a listed literal `[a, b, c]` each expose
+                    // their first element the same two ways every other
+                    // ExprArrayLit reader in this file already uses).
+                    // Copilot review (PR #2516), comment 4115332468: the
+                    // ExprCall arm just above missed ExprMethodCall, so
+                    // `factory.make_holders()[0].values` (indexed base is a
+                    // METHOD call) still fell through to ir_empty_name() --
+                    // the identical bug, just for a method receiver instead
+                    // of a free function. expr_receiver_struct_type_ref's
+                    // own ExprMethodCall arm (above, in this same function)
+                    // already resolves this the same way; recurse into it.
+                    if (*indexed).kind == ExprKind::ExprCall || (*indexed).kind == ExprKind::ExprMethodCall {
+                        return self.expr_receiver_struct_type_ref(&(*indexed))
+                    }
+                    if (*indexed).kind == ExprKind::ExprArrayLit {
+                        match (*indexed).left {
+                            Some(repeat_value) => {
+                                return self.expr_receiver_struct_type_ref(&(*repeat_value))
+                            }
+                            _ => {
+                                match (*indexed).args {
+                                    Some(list) => {
+                                        return self.expr_receiver_struct_type_ref(&(*list).head)
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
                     }
                 }
                 _ => {}
@@ -13920,6 +15389,18 @@ impl Lowerer {
                                 return (*self.struct_layouts).entries[tl as usize].type_name
                             }
                         }
+                        // A direct call has no local tuple-layout binding to
+                        // consult: resolve its selected struct slot from the
+                        // same callee return metadata used when binding a
+                        // tuple-valued initializer. This covers both free and
+                        // method calls (`make_pair().0` / `f.make_pair().0`)
+                        // without reviving the unsafe cross-struct name scan.
+                        if (*tb).kind == ExprKind::ExprCall || (*tb).kind == ExprKind::ExprMethodCall {
+                            let tfid = self.expr_method_fn_id(&(*tb))
+                            if self.return_tuple_struct_slot_for_fn_id(tfid) == tix {
+                                return self.return_tuple_struct_name_for_fn_id(tfid)
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -13959,6 +15440,43 @@ impl Lowerer {
             }
         }
         ir_empty_name()
+    }
+
+    // Struct type of a block's trailing expression, for expr_receiver_struct_type_ref's
+    // ExprBlock/ExprIf arms -- mirrors opt_block_tail_method_fn_id/block_tail_method_fn_id's
+    // own shape, but resolving a struct type instead of a method fn id.
+    fn block_tail_struct_type_ref(self, blk: &Block) -> Name with Mut, Panic, Div, Alloc {
+        var current = &(*blk).stmts
+        var result = ir_empty_name()
+        while true {
+            match *current {
+                Some(list) => {
+                    let stmt_ref = &(*list).head
+                    if stmt_ref.kind == StmtKind::StmtExpr {
+                        result = self.opt_expr_struct_type_ref(&stmt_ref.expr)
+                    } else {
+                        result = ir_empty_name()
+                    }
+                    current = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        result
+    }
+
+    fn opt_block_tail_struct_type_ref(self, blk_opt: &Option<Box<Block>>) -> Name with Mut, Panic, Div, Alloc {
+        match *blk_opt {
+            Some(blk) => self.block_tail_struct_type_ref(&(*blk)),
+            _ => ir_empty_name(),
+        }
+    }
+
+    fn opt_expr_struct_type_ref(self, e_opt: &Option<Box<Expr>>) -> Name with Mut, Panic, Div, Alloc {
+        match *e_opt {
+            Some(e) => self.expr_receiver_struct_type_ref(&(*e)),
+            _ => ir_empty_name(),
+        }
     }
 
     fn index_base_elem_struct_type_ref(self, base_opt: &Option<Box<Expr>>) -> Name with Mut, Panic, Div, Alloc {
@@ -14356,7 +15874,14 @@ impl Lowerer {
             // an f64 slot was misclassified as integer. Consult the tuple mask first.
             let tuple_idx = lower_name_tuple_index((*e).name)
             if tuple_idx >= 0 {
-                let tuple_mask = self.opt_base_tuple_float_mask_ref(&(*e).left)
+                // opt_base_tuple_float_mask_ref / tuple_float_mask are scalar-f64-only
+                // (f64-ARRAY slots live in their own tuple_arr_mask -- see
+                // expr_is_tuple_slot_f64_array_ref). The `& 4294967295` here is now
+                // belt-and-suspenders: it was load-bearing when array bits were
+                // packed into bits 32-63 of this same value; kept so a future
+                // caller of opt_base_tuple_float_mask_ref that returns >32 bits
+                // (e.g. a raw returns_float code) still can't leak into this check.
+                let tuple_mask = self.opt_base_tuple_float_mask_ref(&(*e).left) & 4294967295
                 if tuple_mask != 0 {
                     return (tuple_mask >> (tuple_idx as i32)) % 2 == 1
                 }
@@ -15298,6 +16823,20 @@ impl Lowerer {
 
     fn lower_program_items_ref(self, items: &Option<Box<ItemList>>) -> Lowerer with Mut, Panic, Div, Alloc, IO {
         fo_xfer_global_reset()
+        // This ref-based path (production streaming: module_native_streaming.sio ->
+        // lower_program_to_ir_ordered_with_epistemic_boxed_trace_ref -> here) never
+        // called lower_use_modules_collect at all -- module-qualified calls only
+        // resolved on it if an earlier, unrelated preflight happened to populate
+        // the registry as a side effect first. Same gap class as the sibling
+        // f64-tuple-array table in #2516 (see lower_fn_tuple_arr_reset just
+        // below, and its own comment there for why that one's explicit
+        // collect() call was removed instead -- lowerer_fo_preregister_pure_
+        // fns_multipass_mut collects the tuple-array table itself now, but has
+        // no equivalent for LOWER_USE_MODULE_HASH). Only ever one module's
+        // items on this path, so module id 0 always matches.
+        lower_use_module_reset()
+        lower_fn_tuple_arr_reset()
+        lower_use_modules_collect(items, 0)
         var lo = self
         lowerer_fo_preregister_pure_fns_multipass_mut(&! lo, items)
         var current = items
@@ -15716,6 +17255,16 @@ impl Lowerer {
     }
 
     fn lower_program_bodies_filtered_ref(self, items: &Option<Box<ItemList>>, target_name: Name) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        // Copilot review (PR #2516): this streaming single-function lowering
+        // lane (lower_program_function_body_from_* -> ... -> here) never went
+        // through lowerer_fo_preregister_pure_fns_multipass_mut (the shared
+        // multipass function an earlier round of this review wired the
+        // collector into), so it never populated LOWER_FN_TUPLE_ARR_* at all --
+        // an isolated streaming body for a function returning a tuple of f64
+        // arrays started with no mask and fell back to the integer-element
+        // path. Collect over the full item set available at this entry point
+        // (idempotent per name, like every other call site).
+        lower_fn_tuple_f64_arrays_collect(items)
         var lo = self
         var current: Option<Box<ItemList> > = *items
         while true {
@@ -15988,11 +17537,18 @@ impl Lowerer {
 
                     let param_array_len = lower_type_expr_fixed_array_len_ref(&(*list).head.ty)
                     // V0-E.5.7: see path A — a by-value `[f128; N]` param copies its
-                    // handle slots so it cannot alias the caller's array.
+                    // handle slots so it cannot alias the caller's array. `&[f128; N]`
+                    // must NOT: since KL-14a, param_array_len peels one `&`/`&!` (so
+                    // `&[i8; N]` FFI params get a known extent) and is no longer -1 for
+                    // a reference param, so this copy must be excluded explicitly or it
+                    // treats preg -- the ADDRESS of the caller's slot for a reference
+                    // param, not the array handle -- as a handle to copy from. Same
+                    // root cause and fix as path A above.
+                    let ref_param_is_ref = lower_type_expr_is_ref_like(&(*list).head.ty)
                     let param_word_scalar = lower_type_expr_fixed_array_word_scalar_ref(&(*list).head.ty)
-                        || lower_type_expr_is_array_of_f128(&(*list).head.ty)
+                        || (lower_type_expr_is_array_of_f128(&(*list).head.ty) && !ref_param_is_ref)
                     var param_value_reg = preg
-                    if param_array_len >= 0 && param_word_scalar {
+                    if param_array_len >= 0 && param_word_scalar && !ref_param_is_ref {
                         lo.current_func = current_func
                         let copy_pair = lo.emit_fixed_array_value_copy(
                             preg,
@@ -16025,6 +17581,17 @@ impl Lowerer {
                         // Findings 11 (#2084): stamp is_unsigned_int=1 when the param is u8/u16/u32/u64/usize.
                         (*(*locals).is_unsigned_int).values[idx as usize] = if lower_type_expr_is_unsigned_int(&(*list).head.ty) { 1 } else { 0 }
                         (*(*locals).is_ref).values[idx as usize] = if lower_type_expr_is_ref_like(&(*list).head.ty) { 1 } else { 0 }
+                        // Copilot review (PR #2516): a tuple-typed PARAMETER (e.g.
+                        // fn f(t: (f64, [f64; 8]))) needs the same per-slot masks a
+                        // `let`-bound tuple local gets from its initialiser (see
+                        // lower_let_stmt_ref / #1502), or `t.1[j]` inside the fn body
+                        // reads the array bits as an integer. Explicit 0 in the
+                        // non-tuple case too: the locals stack is REUSED across
+                        // functions (count resets, arrays don't), so a stale mask
+                        // from an earlier function's tuple local at this slot must
+                        // not leak into this param.
+                        (*(*locals).tuple_float_mask).values[idx as usize] = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_float_mask(&(*list).head.ty.type_args, 0) } else { 0 }
+                        (*(*locals).tuple_arr_mask).values[idx as usize] = if (*list).head.ty.kind == TypeExprKind::TypeTuple { lower_type_list_arr_mask(&(*list).head.ty.type_args, 0) } else { 0 }
                         (*(*locals).box_inner_layout).values[idx as usize] = if lower_type_expr_is_box(&(*list).head.ty) { lower_struct_layout_index_of(&(*lo.struct_layouts), lower_box_inner_type_name(&(*list).head.ty)) } else { 0 - 1 }
                         if lower_type_expr_is_box(&(*list).head.ty) && str_eq(read_env("SOUNIO_BOX_TRACE"), "1") {
                             print("boxtrace: WRITE-B ")
@@ -16770,7 +18337,105 @@ impl Lowerer {
     // (returns_float == 2, set by lower_opt_return_float_code). Used so `let r = mk()`
     // flags `r` as a float-element local — otherwise `r[i]` reads classify as integer
     // and get cvtsi2sd-corrupted in arithmetic/comparisons.
+    //
+    // Copilot review (PR #2516), finding C: also handles ExprMethodCall
+    // (`obj.mk_arr()`), resolving the mangled impl-method name the same way
+    // expr_result_tuple_arr_mask_ref's ExprMethodCall branch does, so a
+    // plain (non-tuple) f64-array-returning method is recognised here too --
+    // needed for tuple-literal slots like `(obj.mk_arr(), 0)` where the slot
+    // itself is a single [f64; N] array, not a tuple.
     fn expr_result_is_f64_array_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        // Copilot review (PR #2516), round 11 finding 2: round 10's
+        // ExprIf/ExprMatch/ExprBlock propagation below recurses into each
+        // arm/block-tail through THIS function, but this function only ever
+        // recognised ExprMethodCall/ExprCall results -- so `(if cond { xs }
+        // else { ys }, 0)`, where each arm's tail is just an already-known
+        // f64-array LOCAL (ExprIdent), or `(if cond { [x; 2] } else { ys },
+        // 0)`, where an arm is a direct array literal, both fell through to
+        // `false` for that arm. tuple_lit_slot_is_f64_array_ref already
+        // classifies exactly these two forms at its own top level (array
+        // literal via array_literal_elems_are_float_ref, ExprIdent via
+        // lookup_local_array_elem_float) -- checking them here too, before
+        // the call/method-call/control-flow arms below, means a recursive
+        // call from a block tail sees the same answer a top-level slot
+        // would.
+        if self.array_literal_elems_are_float_ref(e) {
+            return true
+        }
+        if (*e).kind == ExprKind::ExprIdent {
+            if self.lookup_local_array_elem_float((*e).name) {
+                return true
+            }
+            // Copilot review (PR #2516), round 13 finding 1: this ExprIdent arm
+            // only checked local array_elem_float metadata, but a module-level
+            // `var F: [f64; N]` is not always bound as a local with that flag
+            // set -- mirrors the exact gap index_base_elem_is_float_ref's
+            // ExprIdent arm documents and fixes via the preseed global type
+            // table. Without this fallback, `(if c { GLOBAL_F64_ARRAY } else
+            // { other }, 0)` classifies as non-float and the destructured
+            // array's elements take the integer (cvtsi2sd-corrupted) path.
+            let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, (*e).name)
+            if fn_id >= 0 {
+                let gkind = lower_global_type_table_lookup(&(*self.global_types), fn_id)
+                if gkind == LOWER_GLOBAL_ELEM_F64 {
+                    return true
+                }
+            }
+            return false
+        }
+        // Copilot review (PR #2516), round 12 finding: the ExprIf/ExprMatch/
+        // ExprBlock recursion (below) re-enters THIS function for each
+        // arm/block-tail, but this function had no ExprFieldAccess arm --
+        // so `(if cond { left.values } else { right.values }, 0)` (a
+        // struct-field array) and `(if cond { pair().0 } else { pair2().0
+        // }, 0)` (a numeric tuple-slot extraction) both fell through to
+        // `false` for every arm, even though tuple_lit_slot_is_f64_array_ref
+        // already classifies both of these exact ExprFieldAccess shapes
+        // when they appear directly (not wrapped in control flow) --
+        // numeric tuple-slot names via expr_is_tuple_slot_f64_array_ref,
+        // struct-field names via field_array_elem_is_float_for_base_ref.
+        // Delegate to that same dispatch here rather than duplicating it,
+        // exactly as tuple_lit_slot_is_f64_array_ref itself delegates BACK
+        // to this function for ExprCall/ExprMethodCall/control-flow slots.
+        if (*e).kind == ExprKind::ExprFieldAccess {
+            if lower_name_tuple_index((*e).name) >= 0 {
+                return self.expr_is_tuple_slot_f64_array_ref(e)
+            }
+            return self.field_array_elem_is_float_for_base_ref(&(*e).left, (*e).name)
+        }
+        if (*e).kind == ExprKind::ExprMethodCall {
+            let recv_type = self.lower_method_recv_type(&(*e).left)
+            let call_name = if recv_type.len > 0 {
+                ir_mangle_method_name(recv_type, (*e).name)
+            } else {
+                (*e).name
+            }
+            let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, call_name)
+            if fn_id >= 0 && fn_id < self.module.fn_count {
+                return ir_fn_get(&(*self.module), fn_id as usize).returns_float == 2
+            }
+            return false
+        }
+        // Copilot review (PR #2516), round 10 finding 2: this single-array
+        // classifier (used for a tuple LITERAL slot that's itself a plain
+        // f64 array, e.g. the `mk_a()` in `(mk_a(), 0)`) had no ExprIf/
+        // ExprMatch/ExprBlock arm, so `(if cond { mk_a() } else { mk_b() }, 0)`
+        // fell straight through to `false` even when both arms return
+        // [f64;N] -- mirrors expr_result_tuple_arr_mask_ref's identical gap,
+        // fixed for the TUPLE-valued case in round 6/7 finding 2. Same OR-
+        // across-arms philosophy: post-typecheck, every arm of an if/match/
+        // block-tail bound to one slot agrees on its exact array-or-not
+        // type, so ORing only ever adds `true` from an arm this classifier
+        // recognises -- it cannot introduce a wrong `true`.
+        if (*e).kind == ExprKind::ExprIf {
+            return self.opt_block_tail_is_f64_array_ref(&(*e).block) || self.opt_expr_result_is_f64_array_ref(&(*e).else_expr)
+        }
+        if (*e).kind == ExprKind::ExprMatch {
+            return self.match_arms_is_f64_array_ref(&(*e).arms)
+        }
+        if (*e).kind == ExprKind::ExprBlock {
+            return self.opt_block_tail_is_f64_array_ref(&(*e).block)
+        }
         if (*e).kind != ExprKind::ExprCall {
             return false
         }
@@ -16785,6 +18450,54 @@ impl Lowerer {
             _ => {}
         }
         false
+    }
+
+    fn opt_expr_result_is_f64_array_ref(self, opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(e) => self.expr_result_is_f64_array_ref(&(*e)),
+            _ => false,
+        }
+    }
+
+    fn opt_block_tail_is_f64_array_ref(self, blk_opt: &Option<Box<Block>>) -> bool with Mut, Panic, Div, Alloc {
+        match *blk_opt {
+            Some(blk) => self.block_tail_is_f64_array_ref(&(*blk)),
+            _ => false,
+        }
+    }
+
+    // Same shape as block_tail_tuple_arr_mask_ref: a block's value is its
+    // trailing expression statement.
+    fn block_tail_is_f64_array_ref(self, blk: &Block) -> bool with Mut, Panic, Div, Alloc {
+        var current = &(*blk).stmts
+        var result: bool = false
+        while true {
+            match *current {
+                Some(list) => {
+                    let stmt_ref = &(*list).head
+                    if stmt_ref.kind == StmtKind::StmtExpr {
+                        result = self.opt_expr_result_is_f64_array_ref(&stmt_ref.expr)
+                    } else {
+                        result = false
+                    }
+                    current = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        result
+    }
+
+    // ORs the single-array classification across every `match` arm's body
+    // (see expr_result_is_f64_array_ref's ExprIf case for why OR is safe).
+    fn match_arms_is_f64_array_ref(self, arms_opt: &Option<Box<MatchArmList>>) -> bool with Mut, Panic, Div, Alloc {
+        match *arms_opt {
+            Some(list) => {
+                let arm = &(*list).head
+                self.expr_result_is_f64_array_ref(&arm.body) || self.match_arms_is_f64_array_ref(&(*list).tail)
+            }
+            _ => false,
+        }
     }
 
     // #1502: per-slot float mask of a tuple-producing initialiser -- either a call
@@ -16806,9 +18519,32 @@ impl Lowerer {
         }
     }
 
+    // #1502: per-slot SCALAR-f64 mask of a tuple-producing initialiser -- either
+    // a call whose declared return type is a tuple (encoded 1024+mask by
+    // lower_opt_return_float_code) or a literal tuple, whose element expressions
+    // are classified directly. The `[f64; N]` ARRAY-slot mask for a call is a
+    // separate value; see expr_result_tuple_arr_mask_ref. The two used to be
+    // packed into one combined i64 (scalar in bits 0-31, array in bits 32-63),
+    // which forced array slot 31 to be dropped to avoid corrupting the sign bit
+    // (bit 63) of the combined value -- see that function's history for the bug
+    // this split fixes.
     fn expr_result_tuple_float_mask_ref(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
         if (*e).kind == ExprKind::ExprTupleLit {
             return self.expr_list_tuple_float_mask_ref(&(*e).args, 0)
+        }
+        // Copilot review (PR #2516), comment 4115176690: this classifier's
+        // array-slot sibling (expr_result_tuple_arr_mask_ref) already
+        // propagates an unannotated tuple ALIAS's mask (`let t = pair();
+        // let t = t`) through its own ExprIdent arm; this scalar-slot
+        // classifier had no such arm at all, so the identical alias --
+        // including the same-name shadowing rebind this file's own
+        // rhs_tuple_mask capture exists to preserve -- always recorded 0
+        // for the scalar mask here, even though the outer local's
+        // tuple_float_mask was already tracked and nonzero. A later `t.0`
+        // arithmetic read on the re-bound `t` could then take the integer
+        // path. Mirrors the array-mask arm's lookup exactly.
+        if (*e).kind == ExprKind::ExprIdent {
+            return self.lookup_local_tuple_float_mask((*e).name)
         }
         if (*e).kind != ExprKind::ExprCall {
             return 0
@@ -16817,15 +18553,286 @@ impl Lowerer {
             Some(callee_expr) => {
                 let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
                 let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, callee_name)
+                var scalar_mask: i64 = 0
                 if fn_id >= 0 && fn_id < self.module.fn_count {
                     let code = ir_fn_get(&(*self.module), fn_id as usize).returns_float
                     if code >= 1024 {
-                        return code - 1024
+                        scalar_mask = code - 1024
                     }
                 }
-                0
+                scalar_mask
             }
             _ => 0,
+        }
+    }
+
+    // Copilot review (PR #2516), finding C: a tuple LITERAL's slot is an f64
+    // array not only when the slot expression IS an array literal
+    // (array_literal_elems_are_float_ref), but also when it's an ExprIdent
+    // referring to a local already known to hold one (`let xs = mk_arr();
+    // (xs, 0)`), or an ExprCall/ExprMethodCall whose OWN return type is a
+    // plain [f64; N] array (`(mk_arr(), 0)` -- note mk_arr returns a single
+    // array here, not a tuple, so this is the SCALAR array-return check
+    // (expr_result_is_f64_array_ref), not the tuple-slot mask machinery).
+    // Without this, both forms fell through to `false` and `a[0]` on the
+    // destructured slot took the integer path.
+    fn tuple_lit_slot_is_f64_array_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if self.array_literal_elems_are_float_ref(e) {
+            return true
+        }
+        if (*e).kind == ExprKind::ExprIdent {
+            if self.lookup_local_array_elem_float((*e).name) {
+                return true
+            }
+            // Copilot review (PR #2516), round 13 finding 2: a module-level
+            // `[f64; N]` used directly as a tuple-literal slot (e.g.
+            // `(GLOBAL_F64_ARRAY, 0)`) is not always locally bound with
+            // array_elem_float=1, so this ExprIdent arm needs the same
+            // global-type-table fallback expr_result_is_f64_array_ref's
+            // ExprIdent arm now uses -- without it the slot classifies as
+            // non-float and its destructured elements take the integer path.
+            let fn_id = lowerer_lookup_fn_id_by_name_ref(&self, (*e).name)
+            if fn_id >= 0 {
+                let gkind = lower_global_type_table_lookup(&(*self.global_types), fn_id)
+                if gkind == LOWER_GLOBAL_ELEM_F64 {
+                    return true
+                }
+            }
+            return false
+        }
+        // Copilot review (PR #2516), round 10 finding 2: ExprIf/ExprMatch/
+        // ExprBlock added alongside ExprCall/ExprMethodCall here so a tuple-
+        // literal slot produced through control flow (`(if cond { mk_a() }
+        // else { mk_b() }, 0)`) reaches expr_result_is_f64_array_ref's own
+        // now-added control-flow propagation instead of falling straight to
+        // `false` below.
+        if (*e).kind == ExprKind::ExprCall || (*e).kind == ExprKind::ExprMethodCall || (*e).kind == ExprKind::ExprIf || (*e).kind == ExprKind::ExprMatch || (*e).kind == ExprKind::ExprBlock {
+            return self.expr_result_is_f64_array_ref(e)
+        }
+        if (*e).kind == ExprKind::ExprFieldAccess {
+            // Copilot review (PR #2516), round 8 finding 1: ExprFieldAccess is
+            // how BOTH a struct field access (`holder.values`) AND a nested
+            // tuple-slot extraction (`pair().0`) are represented -- the round-6
+            // fix below only ever tried the struct-field lookup, so a numeric
+            // field name like "0" simply matched no struct field and fell
+            // through to false, even though pair()'s slot 0 being an f64
+            // array is exactly what expr_is_tuple_slot_f64_array_ref already
+            // classifies. A tuple-slot name (lower_name_tuple_index >= 0)
+            // can never also be a real struct field name, so check tuple-slot
+            // extraction FIRST and use its answer outright rather than
+            // falling through to the struct-field path for it.
+            if lower_name_tuple_index((*e).name) >= 0 {
+                return self.expr_is_tuple_slot_f64_array_ref(e)
+            }
+            // Copilot review (PR #2516), round 6 finding 1: a tuple-literal slot
+            // backed by an f64-array STRUCT FIELD (`(holder.values, 0)`) arrives
+            // here as ExprFieldAccess, which fell through to `false` even though
+            // field_array_elem_is_float_for_base_ref already resolves exactly
+            // this shape elsewhere in this file (struct-typed base -> declared
+            // field layout, with the by-name fallback for an unknown base type).
+            return self.field_array_elem_is_float_for_base_ref(&(*e).left, (*e).name)
+        }
+        false
+    }
+
+    // Element-wise counterpart of expr_list_tuple_float_mask_ref for a tuple
+    // LITERAL's f64-ARRAY slots: `let (a, b) = ([x; 2], [y; 2])` has no callee
+    // return type to consult (there is no function here), so each slot's mask
+    // bit is derived directly from its own sub-expression via
+    // tuple_lit_slot_is_f64_array_ref above (array literals, f64-array
+    // locals, and f64-array-returning calls/method calls).
+    fn expr_list_tuple_f64_array_mask_ref(self, opt: &Option<Box<ExprList>>, bit: i64) -> i64 with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(list) => {
+                var m: i64 = 0
+                if bit < 32 {
+                    if self.tuple_lit_slot_is_f64_array_ref(&(*list).head) {
+                        m = 1 << (bit as i32)
+                    }
+                }
+                m + self.expr_list_tuple_f64_array_mask_ref(&(*list).tail, bit + 1)
+            }
+            _ => 0,
+        }
+    }
+
+    // Array-slot counterpart of expr_result_tuple_float_mask_ref: per-slot mask
+    // of which slots of a tuple-producing expression are `[f64; N]` arrays.
+    //
+    // Copilot review (PR #2516): restricting this to ExprCall left two other
+    // valid tuple producers unclassified -- `let (a, b) = ([x], [y])`
+    // (ExprTupleLit) and `let (a, b) = obj.pair()` (ExprMethodCall) -- both
+    // silently kept their destructured arrays on the integer path. Tuple
+    // literals derive the mask directly from their element sub-expressions
+    // (expr_list_tuple_f64_array_mask_ref) since there is no callee return
+    // type to consult; method calls resolve the mangled impl-method name the
+    // same way expr_result_is_float_ref's ExprMethodCall branch does
+    // (self.lower_method_recv_type + ir_mangle_method_name) and look it up in
+    // the same per-fn declared-array-return table the ExprCall branch uses.
+    fn expr_result_tuple_arr_mask_ref(self, e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+        if (*e).kind == ExprKind::ExprTupleLit {
+            return self.expr_list_tuple_f64_array_mask_ref(&(*e).args, 0)
+        }
+        // Copilot review (PR #2516), round 7 finding 1: an unannotated tuple
+        // ALIAS -- `let t = pair(); let u = t` -- has `u`'s initializer as a
+        // plain ExprIdent naming `t`. Without this case, `u`'s own mask got
+        // bound as 0 regardless of `t`'s already-tracked mask (this function
+        // runs at BIND time for `u`, computing the mask that gets attached to
+        // the new local), so a later `u.0` / `let (a, n) = u` fell back to
+        // the integer path even though `t.0` classified correctly. Propagate
+        // the aliased local's own tracked mask, the same lookup
+        // expr_is_tuple_slot_f64_array_ref already uses for a direct
+        // identifier base on a field access -- this closes the matching gap
+        // at the BINDING step instead.
+        if (*e).kind == ExprKind::ExprIdent {
+            return self.lookup_local_tuple_arr_mask((*e).name)
+        }
+        if (*e).kind == ExprKind::ExprMethodCall {
+            let recv_type = self.lower_method_recv_type(&(*e).left)
+            let call_name = if recv_type.len > 0 {
+                ir_mangle_method_name(recv_type, (*e).name)
+            } else {
+                (*e).name
+            }
+            return lower_fn_tuple_f64_array_mask(call_name)
+        }
+        // Copilot review (PR #2516): this returned 0 for every conditional,
+        // so `let (a, b) = if cond { pair1() } else { pair2() }` lost the
+        // array-slot mask entirely and `a[0]` fell back to the integer path,
+        // even though both arms of an if/match a tuple gets bound from must
+        // agree on their exact tuple type post-typecheck (a [f64;N] slot in
+        // one arm cannot pair with, say, an i64 slot in the other). ORs the
+        // per-slot bits from every arm rather than trusting a single one:
+        // type agreement guarantees any bit a given arm's classifier DOES
+        // recognise is correct, so ORing only ever adds bits a less-complete
+        // arm expression failed to resolve on its own -- it cannot introduce
+        // a wrong one. Mirrors expr_result_is_float_ref's own ExprIf case
+        // (opt_block_tail_is_float_ref || opt_expr_result_is_float_ref),
+        // which uses the same "either arm is enough" OR philosophy for the
+        // scalar case.
+        if (*e).kind == ExprKind::ExprIf {
+            return self.opt_block_tail_tuple_arr_mask_ref(&(*e).block) | self.opt_expr_result_tuple_arr_mask_ref(&(*e).else_expr)
+        }
+        if (*e).kind == ExprKind::ExprMatch {
+            return self.match_arms_tuple_arr_mask_ref(&(*e).arms)
+        }
+        // Copilot review (PR #2516), round 6 finding 2: a BRACED match arm
+        // (`0 => { pair1() }`) or any other bare block expression arrives
+        // here as ExprBlock, not as the tail expression directly -- without
+        // this, match_arms_tuple_arr_mask_ref called expr_result_tuple_arr_
+        // mask_ref(&arm.body) on the ExprBlock itself, which fell through to
+        // `return 0` below (an ExprBlock is not an ExprCall), so every
+        // braced arm contributed mask 0 regardless of what it evaluated to.
+        // Delegates to the same block-tail helper the ExprIf case above
+        // already uses for its `then` branch (expr_result_is_float_ref has
+        // the identical gap fixed for the scalar case: its own ExprIf
+        // handling reaches block tails via opt_block_tail_is_float_ref, but
+        // an ExprBlock passed to IT directly has the same hole -- out of
+        // scope here since round 6 findings 1/2 are both about the tuple
+        // array-mask classifier specifically).
+        if (*e).kind == ExprKind::ExprBlock {
+            return self.opt_block_tail_tuple_arr_mask_ref(&(*e).block)
+        }
+        if (*e).kind != ExprKind::ExprCall {
+            return 0
+        }
+        match (*e).left {
+            Some(callee_expr) => {
+                let callee_name = self.expr_to_callee_name_ref(&(*callee_expr))
+                lower_fn_tuple_f64_array_mask(callee_name)
+            }
+            _ => 0,
+        }
+    }
+
+    fn opt_expr_result_tuple_arr_mask_ref(self, opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(e) => self.expr_result_tuple_arr_mask_ref(&(*e)),
+            _ => 0,
+        }
+    }
+
+    fn opt_block_tail_tuple_arr_mask_ref(self, blk_opt: &Option<Box<Block>>) -> i64 with Mut, Panic, Div, Alloc {
+        match *blk_opt {
+            Some(blk) => self.block_tail_tuple_arr_mask_ref(&(*blk)),
+            _ => 0,
+        }
+    }
+
+    // Same shape as block_tail_is_float_ref: a block's value is its trailing
+    // expression statement, so an if-arm's `{ ...; pair() }` is classified by
+    // that last statement, not the block as a whole.
+    fn block_tail_tuple_arr_mask_ref(self, blk: &Block) -> i64 with Mut, Panic, Div, Alloc {
+        var current = &(*blk).stmts
+        var result: i64 = 0
+        while true {
+            match *current {
+                Some(list) => {
+                    let stmt_ref = &(*list).head
+                    if stmt_ref.kind == StmtKind::StmtExpr {
+                        result = self.opt_expr_result_tuple_arr_mask_ref(&stmt_ref.expr)
+                    } else {
+                        result = 0
+                    }
+                    current = &(*list).tail
+                }
+                _ => break
+            }
+        }
+        result
+    }
+
+    // ORs the per-slot array-slot mask across every `match` arm's body (see
+    // expr_result_tuple_arr_mask_ref's ExprIf case for why OR is safe here:
+    // all arms share the same tuple type post-typecheck).
+    fn match_arms_tuple_arr_mask_ref(self, arms_opt: &Option<Box<MatchArmList>>) -> i64 with Mut, Panic, Div, Alloc {
+        match *arms_opt {
+            Some(list) => {
+                let arm = &(*list).head
+                self.expr_result_tuple_arr_mask_ref(&arm.body) | self.match_arms_tuple_arr_mask_ref(&(*list).tail)
+            }
+            _ => 0,
+        }
+    }
+
+    // `let ov = __tupN.K` where slot K of the tuple local is an f64 array (bit K
+    // of its OWN mask, recorded from the callee's declared return type -- see
+    // tuple_arr_mask / lookup_local_tuple_arr_mask). Mirrors
+    // opt_base_tuple_float_mask_ref's coverage: `base.K` is resolved either
+    // from the local table (base is a bound identifier) or, for `mk().K` with
+    // no intervening binding, straight off the call's declared array mask via
+    // expr_result_tuple_arr_mask_ref.
+    fn expr_is_tuple_slot_f64_array_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if (*e).kind != ExprKind::ExprFieldAccess {
+            return false
+        }
+        let slot = lower_name_tuple_index((*e).name)
+        if slot < 0 || slot >= 32 {
+            return false
+        }
+        match (*e).left {
+            Some(base_expr) => {
+                var arr_bits: i64 = 0
+                if (*base_expr).kind == ExprKind::ExprIdent {
+                    arr_bits = self.lookup_local_tuple_arr_mask((*base_expr).name)
+                } else {
+                    // Copilot review (PR #2516): this used to special-case only
+                    // ExprCall and fall through to `false` for everything else,
+                    // so `p.pair().0` (base is ExprMethodCall) and
+                    // `([x; 2], [y; 2]).0` (base is ExprTupleLit) never got
+                    // array-slot metadata even though expr_result_tuple_arr_mask_ref
+                    // already knows how to classify both of those base kinds (it
+                    // was extended for exactly this in an earlier round of this
+                    // same review). Delegate every non-identifier base to it
+                    // instead of re-special-casing each kind here; it already
+                    // returns 0 (never an array slot) for any kind it doesn't
+                    // recognise, so this is a strict superset of the old
+                    // ExprCall-only behaviour.
+                    arr_bits = self.expr_result_tuple_arr_mask_ref(&(*base_expr))
+                }
+                (arr_bits >> (slot as i32)) % 2 == 1
+            }
+            None => false,
         }
     }
 
@@ -16885,6 +18892,34 @@ impl Lowerer {
 
     fn lower_let_stmt_after_expr_ref(self, s: &Stmt, is_mut: bool, reg: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
+        // Captured BEFORE bind_local(s.name, ...) below rebinds `s.name` to a
+        // fresh (non-ref) slot. Same-name shadowing (`let a = a`) means a
+        // post-bind lookup_local_is_ref(rhs name) would find that fresh slot
+        // instead of the outer one it's meant to read, since lookup searches
+        // newest-first — silently losing is_ref on the shadowing form.
+        var rhs_ident_is_ref = false
+        match s.expr {
+            Some(rhs_ident_pre) => {
+                if (*rhs_ident_pre).kind == ExprKind::ExprIdent {
+                    // A source that is BOTH ref-typed AND array_copy_word_scalar must
+                    // NOT propagate is_ref. V0-E.5.7 forces a value-copy of every
+                    // `&[f128; N]` param regardless of the `&` annotation
+                    // (lower_fn_params_ref: param_word_scalar is true for any f128
+                    // array, ref or not), materializing a REAL GC array handle in
+                    // the param's own register via emit_fixed_array_value_copy --
+                    // not a caller address. That local is simultaneously is_ref=1
+                    // (from the `&` in its declared type) and array_copy_word_scalar=1
+                    // (from the forced copy); the copy is what actually describes its
+                    // register's contents. Propagating is_ref to `zs` in `let zs = a`
+                    // would route zs[i] through the ref-array/deref path (label_id=1)
+                    // onto a register that holds a handle, not an address --
+                    // corrupting the read/write instead of indexing the array.
+                    rhs_ident_is_ref = lo.lookup_local_is_ref((*rhs_ident_pre).name)
+                        && !lo.lookup_local_array_copy_word_scalar((*rhs_ident_pre).name)
+                }
+            }
+            _ => {}
+        }
         var fixed_array_len = lower_opt_type_fixed_array_len(&s.ty)
         var fixed_array_word_scalar = lower_opt_type_fixed_array_word_scalar(&s.ty)
         var rhs_array_elem_is_float = false
@@ -16929,6 +18964,31 @@ impl Lowerer {
             _ => {}
         }
 
+        // Copilot review (PR #2516), comment 4114931502: captured BEFORE
+        // bind_local(s.name, ...) below rebinds `s.name` to a fresh slot,
+        // for the exact same reason rhs_ident_is_ref is captured before it
+        // (see that capture's own comment, just above this function).
+        // bind_local already inserts and zeroes the destination's OWN
+        // tuple_arr_mask; for same-name shadowing (`let t = pair(); { let
+        // t = t; let a = t.0 }`), a POST-bind lookup by name in
+        // lower_let_stmt_type_metadata_ref would resolve the just-bound,
+        // still-zero inner `t` instead of the outer one the RHS actually
+        // reads (lookup searches newest-first) -- silently losing the
+        // array-slot mask on the shadowing form, the same way rhs_ident_
+        // is_ref would lose is_ref there. tuple_float_mask (the scalar-slot
+        // sibling of tuple_arr_mask, same function, same post-bind lookup
+        // shape) has the identical gap and is captured here too rather than
+        // left with the twin of the bug just fixed.
+        var rhs_tuple_arr_mask: i64 = 0
+        var rhs_tuple_mask: i64 = 0
+        match s.expr {
+            Some(rhs_mask_pre) => {
+                rhs_tuple_arr_mask = lo.expr_result_tuple_arr_mask_ref(&(*rhs_mask_pre))
+                rhs_tuple_mask = lo.expr_result_tuple_float_mask_ref(&(*rhs_mask_pre))
+            }
+            _ => {}
+        }
+
         // A bare identifier lowers to the source local's register. Scalars need a
         // fresh register only for mutable bindings; fixed arrays need fresh backing
         // storage for both `let` and `var`, otherwise an indexed mutation through
@@ -16955,6 +19015,43 @@ impl Lowerer {
                         lo = lo.bind_reg_array_elem_float(uninit_dst)
                     }
                     bind_reg = uninit_dst
+                } else {
+                    // #2667-repeat (same shape as #1548, for structs instead of
+                    // fixed arrays): `var out: SomeStruct` with NO initializer must
+                    // still allocate the struct's backing handle. Without this,
+                    // s.expr is None so the generic path above lowers to
+                    // emit_unit (ir_load_imm 0) and `out` is bound to the bare
+                    // value 0 — any subsequent field write/read on `out` (or on
+                    // the value once returned to a caller across a module
+                    // boundary, e.g. `code_buffer_new()`) resolves handle 0 and
+                    // SIGSEGVs. A struct LITERAL (`SomeStruct { .. }`) already
+                    // allocates correctly via lower_struct_literal_expr_ref; an
+                    // annotated-but-uninitialized declaration is the one shape
+                    // that fell through to emit_unit. Allocate exactly like the
+                    // fixed-array case above: ir_alloc with no fill, since the
+                    // fresh heap arena is zero pages (every slot reads 0 / the
+                    // GC-boxed zero handle), matching struct-literal parity.
+                    //
+                    // Existence check uses lower_struct_layout_index_of (a plain
+                    // registry lookup) rather than `struct_layout_slot_count(..) >
+                    // 0`: the latter used to reject (return -1) any struct past 64
+                    // slots even though the registry supports up to 128 fields (see
+                    // struct_layout_slot_count's own widening, PR #2667 review
+                    // comment 4104342929) -- decoupling "is this a registered
+                    // struct" from "how many slots does it have" means this gate
+                    // itself can never regress the same way again, independent of
+                    // whatever the slot-count cap happens to be.
+                    let st_name = lower_opt_type_named_name(&s.ty)
+                    let st_idx = lower_struct_layout_index_of(&(*lo.struct_layouts), st_name)
+                    if st_idx >= 0 {
+                        let st_slot_count = lo.struct_layout_slot_count(st_name)
+                        let uninit_pair = lo.fresh_reg()
+                        lo = uninit_pair.0
+                        let uninit_dst = uninit_pair.1
+                        lo = lo.emit(ir_alloc(uninit_dst, lo.aggregate_storage_bytes(st_slot_count)))
+                        lo = lo.bind_local_struct_type(s.name, st_name)
+                        bind_reg = uninit_dst
+                    }
                 }
             }
             _ => {}
@@ -17026,7 +19123,64 @@ impl Lowerer {
             _ => {}
         }
         lo = lo.bind_local(s.name, bind_reg, is_mut)
-        lo.lower_let_stmt_finalize_ref(s, is_mut, reg, fixed_array_len, fixed_array_word_scalar, rhs_array_elem_is_float)
+        // #1502: record which slots of a tuple-typed local are f64.
+        //
+        // Copilot review (PR #2516), comment 4114931502: this binding used
+        // to happen inside lower_let_stmt_type_metadata_ref, re-deriving
+        // the mask from s.expr THERE (after bind_local, above, already
+        // inserted and zeroed s.name's own tuple_arr_mask/tuple_float_mask)
+        // instead of using the value captured before bind_local ran. For
+        // same-name shadowing (`let t = pair(); { let t = t; let a = t.0 }`)
+        // that post-bind, by-name lookup resolved the just-bound, still-
+        // zero inner `t` instead of the outer one the RHS actually reads
+        // (lookup searches newest-first), silently losing the mask.
+        //
+        // Threading rhs_tuple_arr_mask/rhs_tuple_mask as extra parameters to
+        // lower_let_stmt_type_metadata_ref (moving only the VALUE across
+        // that function boundary, this exact restructuring's first attempt)
+        // measurably corrupted the value in transit: printf-verified the
+        // captured local held mask=2 right before the call and the SAME
+        // named parameter read back mask=0 as the very first statement
+        // inside the callee, with no code between the two that could
+        // explain a legitimate zero. This is done here, directly after
+        // bind_local -- in the same function, same scope, no function-call
+        // boundary for the value to cross -- instead of chasing that
+        // separately.
+        let annotated_tuple_mask = lower_opt_type_tuple_float_mask(&s.ty)
+        if annotated_tuple_mask != 0 {
+            lo = lo.bind_local_tuple_float_mask(s.name, annotated_tuple_mask)
+        } else if rhs_tuple_mask != 0 {
+            lo = lo.bind_local_tuple_float_mask(s.name, rhs_tuple_mask)
+        }
+        // Array-slot counterpart: which slots of a tuple-typed local are
+        // `[f64; N]` arrays, tracked in its own mask (tuple_arr_mask) rather
+        // than packed into the high bits of tuple_float_mask. Annotated type
+        // first (covers a tuple LITERAL initialiser, which has no declared
+        // CALL-return-type tracking), falling back to the initialiser
+        // expression's own mask (covers a CALL initialiser with no
+        // annotation) -- same precedence as the scalar mask above.
+        let annotated_tuple_arr_mask = lower_opt_type_tuple_arr_mask(&s.ty)
+        if annotated_tuple_arr_mask != 0 {
+            lo = lo.bind_local_tuple_arr_mask(s.name, annotated_tuple_arr_mask)
+        } else if rhs_tuple_arr_mask != 0 {
+            lo = lo.bind_local_tuple_arr_mask(s.name, rhs_tuple_arr_mask)
+        }
+        // See the `var out: SomeStruct` (no initializer) note above: the local
+        // must exist on the stack (bind_local, just above) before
+        // bind_local_struct_type can record its type -- it mutates an existing
+        // stack entry rather than creating one.
+        match s.expr {
+            None => {
+                if fixed_array_len < 0 {
+                    let st_name_noinit = lower_opt_type_named_name(&s.ty)
+                    if lo.struct_layout_slot_count(st_name_noinit) > 0 {
+                        lo = lo.bind_local_struct_type(s.name, st_name_noinit)
+                    }
+                }
+            }
+            _ => {}
+        }
+        lo.lower_let_stmt_finalize_ref(s, is_mut, reg, fixed_array_len, fixed_array_word_scalar, rhs_array_elem_is_float, rhs_ident_is_ref)
     }
 
     fn lower_let_stmt_finalize_ref(
@@ -17036,7 +19190,8 @@ impl Lowerer {
         reg: i64,
         fixed_array_len: i64,
         fixed_array_word_scalar: bool,
-        rhs_array_elem_is_float: bool
+        rhs_array_elem_is_float: bool,
+        rhs_ident_is_ref: bool
     ) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
         var lo = self
         // Ref-typed locals (annotated &T / &!T, or RHS is & / &! expr) must be marked
@@ -17049,6 +19204,23 @@ impl Lowerer {
                 Some(rhs_ref) => {
                     if (*rhs_ref).kind == ExprKind::ExprUnary {
                         if (*rhs_ref).un_op == UnaryOp::OpRef || (*rhs_ref).un_op == UnaryOp::OpRefMut {
+                            bind_as_ref = true
+                        }
+                    } else if (*rhs_ref).kind == ExprKind::ExprIdent {
+                        // `let zs = a` where `a` is itself already a reference-typed
+                        // local/param (unannotated bare-identifier alias). Without this,
+                        // `zs` loses the is_ref bit that every lookup_local_is_ref call
+                        // site (IndexGet/Set, FieldGet/Set, .len(), &self auto-ref,
+                        // for-in-array, struct_local_is_value_copyable, …) depends on to
+                        // route through the ref-array/deref path instead of treating the
+                        // address as an ordinary GC handle.
+                        //
+                        // rhs_ident_is_ref was captured by the caller BEFORE s.name was
+                        // rebound (bind_local above), so same-name shadowing (`let a = a`)
+                        // still reads the OUTER `a` here instead of the fresh (non-ref)
+                        // slot bind_local just created for the new `a` — lookup_local_is_ref
+                        // on (*rhs_ref).name at this point would find that fresh slot first.
+                        if rhs_ident_is_ref {
                             bind_as_ref = true
                         }
                     }
@@ -17088,7 +19260,7 @@ impl Lowerer {
                     let dst_reg = lo.lookup_local(s.name)
                     if src_reg >= 0 && dst_reg >= 0 && src_reg != dst_reg {
                         var fi: i64 = 0
-                        while fi < 64 {
+                        while fi < 128 {  // matches the struct layout registry's 128-field capacity (see struct_layout_slot_count); was 64, silently dropping variance metadata for fields 64-127
                             let sv = lo.lookup_variance_for_field(src_reg, fi)
                             if sv >= 0 {
                                 lo = lo.bind_variance_for_field(dst_reg, fi, sv)
@@ -17146,7 +19318,7 @@ impl Lowerer {
                     let dst_reg = lo.lookup_local(s.name)
                     if src_reg >= 0 && dst_reg >= 0 && src_reg != dst_reg {
                         var fi: i64 = 0
-                        while fi < 64 {
+                        while fi < 128 {  // matches the struct layout registry's 128-field capacity (see struct_layout_slot_count); was 64, silently dropping variance metadata for fields 64-127
                             let sv = lo.lookup_variance_for_field(src_reg, fi)
                             if sv >= 0 {
                                 lo = lo.bind_variance_for_field(dst_reg, fi, sv)
@@ -17205,6 +19377,32 @@ impl Lowerer {
         lo.lower_let_stmt_type_metadata_ref(s, reg, rhs_array_elem_is_float)
     }
 
+    // `[r0, r1, r2]` whose elements are f64 LOCALS (or calls, fields, indexes the
+    // classifier positively reports as f64). lower_expr_is_f64_array_literal_ref is
+    // a free fn that only sees float literals, casts and binary subtrees of them, so
+    // an array built from computed f64 locals was an integer array and every
+    // `rates[k]` used in arithmetic converted the f64 BITS as an i64: kinetics
+    // test_stoich_matrix read dc[0] = -9.18e18 instead of -0.2 under Madaros.
+    // f64 array literals are homogeneous after typecheck, so the first element is
+    // representative, as in the free fn.
+    fn array_literal_elems_are_float_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+        if lower_expr_is_f64_array_literal_ref(e) {
+            return true
+        }
+        if (*e).kind != ExprKind::ExprArrayLit {
+            return false
+        }
+        match (*e).left {
+            Some(repeat_expr) => self.expr_result_is_float_ref(&(*repeat_expr)),
+            None => {
+                match (*e).args {
+                    Some(args) => self.expr_result_is_float_ref(&(*args).head),
+                    None => false,
+                }
+            }
+        }
+    }
+
     fn lower_let_stmt_type_metadata_ref(
         self,
         s: &Stmt,
@@ -17225,27 +19423,19 @@ impl Lowerer {
         } else {
             match s.expr {
                 Some(expr_box_arr) => {
-                    if lower_expr_is_f64_array_literal_ref(&(*expr_box_arr)) {
+                    if lo.array_literal_elems_are_float_ref(&(*expr_box_arr)) {
                         lo = lo.bind_local_array_elem_float(s.name)
                     } else if lo.expr_result_is_f64_array_ref(&(*expr_box_arr)) {
                         lo = lo.bind_local_array_elem_float(s.name)
+                    // Tuple-let desugar: `let (a, b) = f()` with `f() -> ([f64;2], f64)`
+                    // binds `a` here via an unannotated `let a = __tup.0` (parser/stmts.sio's
+                    // tplet_emit_elems) -- without the expr_is_tuple_slot_f64_array_ref arm
+                    // above, `a` never got array_elem_float and `a[0] * 2.0` mis-lowered as an
+                    // integer multiply, reinterpreting the IEEE bits on print.
+                    } else if lo.expr_is_tuple_slot_f64_array_ref(&(*expr_box_arr)) {
+                        lo = lo.bind_local_array_elem_float(s.name)
                     } else if rhs_array_elem_is_float {
                         lo = lo.bind_local_array_elem_float(s.name)
-                    }
-                }
-                _ => {}
-            }
-        }
-        // #1502: record which slots of a tuple-typed local are f64.
-        let annotated_tuple_mask = lower_opt_type_tuple_float_mask(&s.ty)
-        if annotated_tuple_mask != 0 {
-            lo = lo.bind_local_tuple_float_mask(s.name, annotated_tuple_mask)
-        } else {
-            match s.expr {
-                Some(expr_box_tup) => {
-                    let init_tuple_mask = lo.expr_result_tuple_float_mask_ref(&(*expr_box_tup))
-                    if init_tuple_mask != 0 {
-                        lo = lo.bind_local_tuple_float_mask(s.name, init_tuple_mask)
                     }
                 }
                 _ => {}
@@ -18729,10 +20919,196 @@ impl Lowerer {
         (lo, dst)
     }
 
+    fn callee_segment_names_type(self, seg: Name) -> bool with Mut, Panic, Div {
+        if lower_struct_layout_index_of(&(*self.struct_layouts), seg) >= 0 {
+            return true
+        }
+        var i: i64 = 0
+        while i < (*self.enum_variants).count {
+            if ir_name_eq((*self.enum_variants).entries[i as usize].enum_name, seg) {
+                return true
+            }
+            i = i + 1
+        }
+        false
+    }
+
+    // `mod::f`, `a::mod::f`, `mod::Type::method`: drop the leading segments that
+    // name a module (LOWER_USE_MODULE_HASH) and are not a struct/enum known here.
+    // Empty when nothing was dropped, so the caller keeps Type::method mangling.
+    //
+    // Round 8 (review comment 4096338764, extended here from check.sio to the
+    // lowerer for the same bug class): this used to grow `k` one segment at a
+    // time, accepting segment `k` whenever IT ALONE was independently
+    // registered as a known module -- so a module with both `use math::dd64;`
+    // and `use testmod::tc_c;` would strip the bogus call `math::tc_c::f()`
+    // down to `tc_c_f`/`f`, since `math` and `tc_c` were each independently
+    // "known" even though "math::tc_c" together was never imported. Fixed by
+    // searching qualifier LENGTHS longest-first and requiring the FULL
+    // candidate qualifier (all `cand` segments joined into one string) to
+    // exactly match a registered `use`-path suffix (see
+    // lower_use_modules_collect's own comment) -- the qualifier can no longer
+    // be satisfied by mixing segments from two unrelated imports.
+    fn callee_path_module_stripped_name(self, p: AstPath) -> Name with Mut, Panic, Div, Alloc {
+        if p.seg_count < 2 || LOWER_USE_MODULE_COUNT <= 0 {
+            return ir_empty_name()
+        }
+        let module_id = lower_effective_current_module_id()
+        var k: i64 = 0
+        var cand: i64 = p.seg_count - 1
+        while cand >= 1 {
+            var segs_ok = true
+            var j: i64 = 0
+            while j < cand {
+                // Copilot review (PR #2515), comment 4114245201: this used
+                // to ALSO reject a candidate whenever a segment merely
+                // LOOKED like a type (uppercase, or a known struct/enum) --
+                // BEFORE the registry check below (the actual authority on
+                // whether this candidate's combined text was ever really
+                // `use`d) got a chance to run at all. That let the look-
+                // like-a-type guess override a genuinely-registered LONGER
+                // qualifier: for a path-form type import where the
+                // qualifier's own combined suffix legitimately includes
+                // the type (`use pkg_mod::Widget;` then `pkg_mod::Widget::
+                // make()`, where only "pkg_mod::Widget" -- not bare
+                // "pkg_mod" -- was ever registered), the uppercase `Widget`
+                // forced a SHORTER, unregistered candidate instead, and
+                // codegen mangled to a body-less `pkg_mod_make` stub
+                // (SIGILL; tests/multimodule/module_qualified_type_import/).
+                // The registry check is the correct, authoritative signal
+                // on its own -- unlike this heuristic, it cannot be fooled
+                // by a segment's mere SPELLING -- so the type-boundary
+                // guess is now consulted only when NO cand at all matches
+                // the registry (see the `k == 0` fallback below), never to
+                // veto a cand the registry HAS confirmed. lower_named_item_
+                // terminal_known is unaffected: it excludes a segment
+                // CONFIRMED (by real file resolution, not spelling) to be a
+                // function/value import's terminal, a different, still-
+                // valid reason to refuse this candidate.
+                let seg = lower_string_list_nth_name(p.segments, j)
+                if lower_named_item_terminal_known(ast_path_prefix_name(p, j)) {
+                    segs_ok = false
+                }
+                j = j + 1
+            }
+            if segs_ok {
+                // lower_use_module_note cannot tell a path-form named-item
+                // import's terminal (`use a::b::specific_fn;`, where
+                // `specific_fn` is a function) apart from a genuine
+                // whole-module import (`use a::b;`) at registration time --
+                // both are the same AST shape -- so it registers both.
+                // lower_named_item_terminal_known (checked per-segment above)
+                // is the authoritative tie-breaker: it is populated from
+                // module_frontend.sio's real file-resolution outcome for this
+                // exact question (see its own comment), not a name-collision
+                // guess. round 5 (comment 4090734484) used
+                // `lowerer_lookup_fn_id_by_name_ref(&self, seg) >= 0` here
+                // instead -- "does this name ALSO resolve as some real
+                // function" -- which review comment 4090966282 (round 6,
+                // finding C) correctly flagged as unsound the other way: a
+                // genuine module whose name happens to coincide with an
+                // unrelated top-level function elsewhere in the program
+                // (e.g. `use testmod::tc_c;` alongside an unrelated
+                // top-level `fn tc_c(..)`) was wrongly excluded too, breaking
+                // the real module's own qualified calls.
+                // Copilot review (PR #2515), comment 4110379072: the same
+                // namespace-erasure gap as check.sio's checker_path_qualifier_
+                // all_modules_known and specializer.sio's spec_call_expr_
+                // callee_name (see their own comments) -- lower_use_module_known
+                // only proves `qualifier` is imported, not that the module it
+                // names is the one that owns `last` (the stripped bare name
+                // returned below). With `tc_c` and `dep_chain_leaf` both loaded,
+                // `tc_c::leaf_add(..)` strips to bare `leaf_add` and binds
+                // whichever module's `leaf_add` body the merged IR happens to
+                // hold, regardless of which module actually exported it under
+                // this qualifier. Needs the same qualifier -> target-module-id
+                // resolution table described there; left as the same accepted,
+                // out-of-scope gap rather than a rushed partial fix here.
+                let qualifier = ast_path_range_name(p, 0, cand - 1)
+                if lower_use_module_known(module_id, qualifier) {
+                    k = cand
+                    break
+                }
+            }
+            cand = cand - 1
+        }
+        if k == 0 {
+            return ir_empty_name()
+        }
+        let last = ir_path_last_name(p)
+        let remaining = p.seg_count - k
+        if remaining == 1 {
+            // An impl method whose lowercase type is spelled like a module keeps
+            // the mangled name that already has a body. Checked against the
+            // LOWER_IMPL_METHOD_HASH registry (populated from every ItemImpl's
+            // methods, see lower_impl_methods_collect) rather than a bare
+            // "does any fn with this mangled name exist" lookup -- the latter
+            // cannot distinguish a real impl method from an unrelated top-level
+            // free fn that happens to be spelled identically (e.g. `use m;
+            // m::f(..)` colliding with an unrelated top-level `fn m_f(..)`).
+            //
+            // Copilot review (PR #2515), round-3 comment 4113834083: this
+            // registry is GLOBAL and has no per-import provenance, so the
+            // opposite collision is still open -- if the loaded program ALSO
+            // contains an unrelated `struct m { impl m { fn f(...) } }` in
+            // some OTHER module, `lower_impl_method_known("m_f")` is true
+            // here even when `k`'s own qualifier match (the `lower_use_
+            // module_known` loop above) confirms "m" IS a real, `use`d
+            // module for THIS caller -- so a genuine `m::f()` call to that
+            // module's own free `f` is hijacked to the unrelated struct's
+            // method body instead. There is no way to tell these apart
+            // locally: both are simultaneously real by construction (the
+            // registry entry existing at all means some ItemImpl for a
+            // type literally spelled "m" was parsed somewhere), so this
+            // is the SAME "qualifier -> target-module-id" resolution gap
+            // already documented at length just above this function
+            // (comment 4110379040) and in checker_check_expr_call_inplace's
+            // Type::method arm (self-hosted/check/check.sio) -- not a new,
+            // independently-fixable case. check.sio's arm DOES have a safe,
+            // strictly-stronger local fix available (checker_use_module_known
+            // is a positive, current-caller-scoped signal with no symmetric
+            // downside), applied this same round; no analogous asymmetry
+            // exists here; a real fix needs that shared resolution table.
+            // Copilot review (PR #2515), comment 4114245201 (follow-up): this
+            // used to check ONLY segments[0], which is correct for k == 1
+            // (qualifier is one segment) but wrong for k > 1 -- a longer
+            // registered qualifier like "pkg_mod::Widget" (from `use
+            // pkg_mod::Widget;`) can legitimately win the cand loop above
+            // when "Widget" is a path-form TYPE import, leaving remaining == 1
+            // ("make") with segments[0] == "pkg_mod", not "Widget". Checking
+            // the wrong segment always misses the real impl method and falls
+            // through to `return last` (bare "make"), which the backend then
+            // refuses as a body-less stub (NATIVE_REFUSAL empty_stub_ud2) --
+            // the exact SIGILL the fixture in tests/multimodule/
+            // module_qualified_type_import/ was written to catch. The
+            // segment that actually sits next to `last` in the qualifier is
+            // always segments[k - 1], regardless of k; checking THAT one
+            // generalizes the original k == 1 special case (a mangled name
+            // it finds there is returned directly instead of bailing to
+            // expr_to_callee_name_ref's own first/last fallback, since for
+            // k == 1 that fallback mangles the identical two segments and
+            // would recompute the same name).
+            let qualifier_type_seg = lower_string_list_nth_name(p.segments, k - 1)
+            let mangled_method = ir_mangle_method_name(qualifier_type_seg, last)
+            if lower_impl_method_known(mangled_method) {
+                return mangled_method
+            }
+            return last
+        }
+        if remaining == 2 {
+            return ir_mangle_method_name(lower_string_list_nth_name(p.segments, k), last)
+        }
+        ir_empty_name()
+    }
+
     fn expr_to_callee_name_ref(self, e: &Expr) -> Name with Mut, Panic, Div, Alloc {
         if e.kind == ExprKind::ExprIdent {
             e.name
         } else if e.kind == ExprKind::ExprPath {
+            let module_stripped = self.callee_path_module_stripped_name(e.path)
+            if module_stripped.len > 0 {
+                return module_stripped
+            }
             // Type::method → Type_method (matches ir_mangle_method_name for impl methods).
             // Using only the first path segment mis-resolves E::of as bare "E" (body-less).
             let first = ir_path_first_name(e.path)
@@ -22062,7 +24438,7 @@ impl Lowerer {
         match e.left {
             Some(_) => self.lower_array_repeat_literal_ref(e),
             None => {
-                let elem_is_float = lower_expr_is_f64_array_literal_ref(e)
+                let elem_is_float = self.array_literal_elems_are_float_ref(e)
                 let pair_dst = self.fresh_reg()
                 var lo = pair_dst.0
                 let dst = pair_dst.1
@@ -24384,6 +26760,18 @@ fn lower_program_to_ir_ref(prog: &Program) -> IrLowerResult with Mut, Panic, Div
 }
 
 pub fn lower_program_to_ir(prog: Program) -> IrLowerResult with Mut, Panic, Div, Alloc, IO {
+    // Copilot review (PR #2516): this public entry point's body-lowering
+    // path (lower_program_to_ir_ref -> ... -> lower_program_bodies_ref)
+    // collects into the process-global tuple-array-mask table but never
+    // reset it first, unlike the other top-level compile entry points in
+    // module_frontend.sio and main.sio's --probe-tuple-arr-capacity. Since
+    // collection dedupes by name, run_ir_verify_pipeline (main.sio:565,596)
+    // calling lower_program_to_ir twice in one process -- once per input
+    // file -- let a name collision (e.g. both inputs define `pair`, one
+    // with an f64-array tuple slot, one with a different mask) leak the
+    // first call's mask into the second call's lowering. Reset here, once
+    // per call to this public API, before any collection happens.
+    lower_fn_tuple_arr_reset()
     lower_monolithic_public_probe_boundary("public_call_entry")
     lower_program_to_ir_ref(&prog)
 }
@@ -24619,7 +27007,19 @@ pub fn lower_program_to_ir_probe_summary(prog: Program) -> IrLowerResult with Mu
     lower_program_to_ir_probe_summary_ref(&prog)
 }
 
-fn lower_program_function_body_from_summary_with_epistemic_ref(
+// Marked pub (was private, default visibility -- no stated reason to keep it
+// module-internal, and several sibling `_ref` helpers in this file are
+// already pub directly, e.g. lower_program_to_ir_summary_box_with_epistemic_ref,
+// lower_program_bodies_from_summary_flat_with_epistemic_ref): CI's gen1
+// self-typecheck of compiler/main.sio (madaros_fixed_point_gate.sh) failed
+// with E175 "function is private in its defining module" once
+// compiler::main's --probe-filtered-body-lower (finding D, round 4 of the
+// PR #2516 review) started calling this across the module boundary. The
+// owned-by-value pub wrapper right below (lower_program_function_body_from_
+// summary_with_epistemic) does not fit that probe's loop, which reuses one
+// `program`/`summary` by reference across every function in the summary
+// rather than re-deriving them per call.
+pub fn lower_program_function_body_from_summary_with_epistemic_ref(
     prog: &Program,
     summary: &IrProgramSummary,
     epistemic: IrEpistemicSection,
@@ -24802,6 +27202,13 @@ pub fn lower_dep_program_items_into_acc_with_externs(
     }
     lowerer_preseed_dep_items_into_acc_mut(&! lo, items, ir_empty_name())
     // DEDUP body lower: skip main + existing bodies; fill stubs and new names.
+    // self_index is this dependency module's own loaded-program index (the
+    // same id fo_preregister_program_items_multipass stamped its `use`
+    // entries with) -- set it as the current module before lowering this
+    // module's own bodies, so callee_path_module_stripped_name's qualifier
+    // lookups are scoped to what THIS module actually imported, not the
+    // whole loaded module graph. See LOWER_CURRENT_MODULE_ID's comment.
+    lower_set_current_module_id(self_index)
     lowerer_lower_program_bodies_dedup_mut(&! lo, items)
     // Residual closeout: re-attempt any ItemImpl methods still at ic=0.
     lowerer_force_fill_impl_methods_mut(&! lo, items)
@@ -24875,6 +27282,47 @@ pub fn lower_program_bodies_from_summary_flat_with_epistemic_ref(
     }
 }
 
+// Copilot review (PR #2516): lower_program_bodies_filtered_ref (reached via
+// the _ref variant below) collects into the process-global
+// LOWER_FN_TUPLE_ARR_* table with no reset boundary of its own. A caller
+// that drives a per-function loop against ONE program must reset once
+// itself, before that loop, since each call's collect() re-scans and must
+// keep accumulating across sibling functions in the SAME program --
+// main.sio's run_probe_filtered_body_lower does exactly this.
+//
+// Copilot review (PR #2516), round 3 (comment 4109402799): this comment
+// used to also name streaming_body_lower_smoke.sio as a caller that
+// "resets once itself" -- it does not: it never imports or calls
+// lower_fn_tuple_arr_reset at all. It gets away with that because it has
+// its own `fn main` (self-hosted/compiler/streaming_body_lower_smoke.sio)
+// and makes exactly ONE lowering call in that process's entire lifetime,
+// so there is nothing for a stale mask to leak FROM -- not because it
+// participates in the reset contract described above. A future caller
+// that copied "streaming_body_lower_smoke.sio resets once" as a pattern,
+// while actually making more than one call or sharing a process with
+// other lowering, would silently inherit this table's leak bugs.
+//
+// Round 2 (Copilot review, comment 4109134765): this OWNED wrapper used to
+// reset unconditionally on EVERY call, reasoning that module_loader.sio's
+// thin-link path (thin_build_compiled_unit) calls it repeatedly for
+// potentially DIFFERENT modules across one process. That reasoning missed
+// that thin_build_compiled_unit calls this wrapper MULTIPLE TIMES within
+// the SAME compiled unit too -- once per local function (its `owner_prog`
+// loop) and once per SELECTED imported callee (its separate-`prog` loop) --
+// and each call's collect() only ever scans the `items` of the ONE `prog`
+// it was given, never the other program's. Resetting on every call
+// therefore wiped an imported callee's own tuple-array mask (collected
+// while lowering THAT callee's own body, from ITS OWN prog) before the
+// OWNER's body got lowered and needed to classify its call to that same
+// callee -- an imported function returning `([f64; N], ...)` silently lost
+// its mask and still lowered through the integer path. This wrapper no
+// longer resets at all: thin_build_compiled_unit now resets once and
+// collects every program relevant to the WHOLE unit (owner + every
+// import_map callee) up front, before any body in the unit is lowered, so
+// no per-call reset is needed or correct here. Callers with a narrower,
+// single-program scope (main.sio's --probe-filtered-body-reset-boundary)
+// reset explicitly themselves, same as the _ref variant's callers already
+// do.
 pub fn lower_program_function_body_from_summary_with_epistemic(
     prog: Program,
     summary: IrProgramSummary,
@@ -24917,6 +27365,18 @@ fn lower_program_to_ir_probe_callsite_ref(prog: &Program, caller_name: Name) -> 
 }
 
 pub fn lower_program_to_ir_probe_callsite(prog: Program, caller_name: Name) -> IrLowerResult with Mut, Panic, Div, Alloc, IO {
+    // Copilot review (PR #2516), comment 4115267768: this public entry
+    // point's body-lowering path (lower_program_to_ir_probe_callsite_ref ->
+    // lower_program_bodies_filtered_ref) collects into the process-global
+    // tuple-array-mask table (LOWER_FN_TUPLE_ARR_*) but never reset it
+    // first, unlike lower_program_to_ir's own identical fix just above (and
+    // every other standalone public entry point that reaches this
+    // collector). Two calls to this API in one process that reuse a
+    // function name -- e.g. two different probe programs, or the same
+    // probe run twice -- would let the first call's mask leak into the
+    // second's lowering. Reset here, once per call to this public API,
+    // before any collection happens.
+    lower_fn_tuple_arr_reset()
     lower_program_to_ir_probe_callsite_ref(&prog, caller_name)
 }
 
