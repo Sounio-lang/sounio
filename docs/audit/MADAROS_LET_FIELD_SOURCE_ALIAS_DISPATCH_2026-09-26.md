@@ -362,15 +362,23 @@ changes.
 `tests/run-pass/madaros_let_field_source_no_alias.sio` (`//@ requires: madaros`)
 asserts rows 1–9 as tags 1–9, each against a value the program itself wrote, and
 prints `LET_FIELD_SOURCE_NO_ALIAS_OK` only if all hold. Tag 9 uses the annotated
-array, which is what the proposed fix covers. It carries
+array, which is what the proposed fix covers. Tag 10 is row 12: it prints an
+element of a field-bound `[f64; 4]` and a second `//@ expect-stdout` requires
+`LET_FIELD_ARRAY_ELEM 1.500000`, because a comparison passes with or without
+the float mark and only rendering shows it. It carries
 `//@ known-failure:` citing this dispatch. The fix commit should remove that
 line.
 
 | Compiler | Output |
 |---|---|
-| lean_single | `LET_FIELD_SOURCE_NO_ALIAS_OK` |
-| Madaros, committed (`57c015c1`) and from source (`5764851f`) | `BAD 1`, `BAD 2`, `BAD 3`, `BAD 4`, `BAD 5`, `BAD 6` ×3, `BAD 7` ×2, `BAD 8`, `BAD 9`, `…_FAIL` |
-| Madaros from source + proposed fix (`60322816`) | `LET_FIELD_SOURCE_NO_ALIAS_OK` |
+| lean_single | `LET_FIELD_ARRAY_ELEM 1.500000`, `LET_FIELD_SOURCE_NO_ALIAS_OK` |
+| Madaros, committed (`57c015c1`) and from source (`5764851f`) | `BAD 1`, `BAD 2`, `BAD 3`, `BAD 4`, `BAD 5`, `BAD 6` ×3, `BAD 7` ×2, `BAD 8`, `BAD 9`, `LET_FIELD_ARRAY_ELEM 4609434218613702656`, `…_FAIL` |
+| Madaros from source + proposed fix (`60322816`) | `LET_FIELD_ARRAY_ELEM 1.500000`, `LET_FIELD_SOURCE_NO_ALIAS_OK` |
+
+Tag 10 was added after the full-suite A/B below ran. Its three rows were
+measured separately on the same three compilers; the harness reports the
+control as a known failure and the patched build as a stale known-failure
+tag, as before.
 
 `//@ requires: madaros` tests run only with `SOUNIO_MADAROS_AVAILABLE=1`. A
 harness run that reports `Skip` for this file checked nothing.
@@ -411,10 +419,11 @@ them.
 **Method.** `python3 docs/audit/repro/let_place_source_alias_sweep.py . stdlib`,
 over `git ls-files 'stdlib/*.sio'` at `2e8b76d31`. It reads every struct
 declaration in `stdlib/`, `self-hosted/`, `examples/` and `tests/`, and every
-declared return type. Names are resolved per file and deterministically: a
+declared return type, from source with `//` and `/* */` comments masked
+(offsets kept), so prose or commented-out declarations never register. Names are resolved per file and deterministically: a
 definition in the same file first, then the module the file imports the name
 from with `use`, then the corpus-wide definition only when every definition of
-that name agrees. A name with conflicting definitions (416 struct names, e.g.
+that name agrees. A name with conflicting definitions (389 struct names, e.g.
 the several `State` structs) is otherwise left unresolved rather than guessed.
 The output is identical under `PYTHONHASHSEED` 1, 2 and 3. For each `fn` it resolves the static type of each
 `let`/`var` whose initialiser is a place (`a.f…`, `(*p).f…`, `*p`, `xs[i]`),
@@ -434,9 +443,9 @@ and is not flagged. Inside a loop, the search starts at the loop head, because a
 back-edge makes earlier writes later.
 
 The sweep is heuristic and line-oriented. It prints its own coverage counts,
-and they reconcile: of **2,940** place bindings in `stdlib/` (field chains,
-derefs and indexes), it resolves 2,477 to a scalar type and 93 to an aggregate.
-**370 (12.6 %) stay unresolved**: 191 whose root local has no known type and
+and they reconcile: of **2,917** place bindings in `stdlib/` (field chains,
+derefs and indexes), it resolves 2,464 to a scalar type and 93 to an aggregate.
+**360 (12.3 %) stay unresolved**: 181 whose root local has no known type and
 179 whose field chain does not resolve, mostly because a type comes from a
 construct the sweep does not model (method returns, generic structs,
 multi-line statements) or from an ambiguous name. It

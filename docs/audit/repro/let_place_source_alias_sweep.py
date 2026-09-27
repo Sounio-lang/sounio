@@ -48,6 +48,41 @@ def strip_comment(line):
     return line if i < 0 else line[:i]
 
 
+def mask_comments(text):
+    """`//` and `/* */` comments replaced by spaces, newlines and offsets kept.
+
+    String and char literals are skipped so `"http://..."` is not a comment.
+    Declarations and function spans are parsed from the masked text only, so
+    commented-out or prose `struct X { ... }` / `fn f(...)` never register.
+    """
+    out = list(text)
+    i, n = 0, len(text)
+    while i < n:
+        c = text[i]
+        if c == '"':
+            i += 1
+            while i < n and text[i] != '"':
+                i += 2 if text[i] == "\\" else 1
+            i += 1
+        elif c == "'" and i + 2 < n and (text[i + 2] == "'" or (text[i + 1] == "\\" and i + 3 < n and text[i + 3] == "'")):
+            i += 4 if text[i + 1] == "\\" else 3
+        elif text.startswith("//", i):
+            while i < n and text[i] != "\n":
+                out[i] = " "
+                i += 1
+        elif text.startswith("/*", i):
+            while i < n and not text.startswith("*/", i):
+                if text[i] != "\n":
+                    out[i] = " "
+                i += 1
+            for k in range(i, min(i + 2, n)):
+                out[k] = " "
+            i += 2
+        else:
+            i += 1
+    return "".join(out)
+
+
 def split_top(s, sep=","):
     parts, depth, cur = [], 0, []
     for ch in s:
@@ -277,7 +312,7 @@ def sweep(root, subdirs):
     texts = {}
     for p in sorted(set(all_files) | set(files)):
         try:
-            texts[p] = open(f"{root}/{p}", encoding="utf-8", errors="replace").read()
+            texts[p] = mask_comments(open(f"{root}/{p}", encoding="utf-8", errors="replace").read())
         except OSError:
             pass
     tables = SymbolTables(texts)
