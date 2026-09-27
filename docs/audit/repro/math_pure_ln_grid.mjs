@@ -25,3 +25,4 @@ for (let i = 1; i <= 2000000; i++) cmp(i * 0.001);
 for (const x of [0, -0, -1, -1e308, -Infinity, NaN]) cmp(x);
 console.log(`JS_GRID n=${n} bad=${bad}`);
 console.log(`newLn(Infinity)=${newLn(Infinity)} log10=${newLn(Infinity) / 2.302585092994046}`);
+if (bad !== 0) process.exitCode = 1;       // a mismatch must fail a scripted reproduction

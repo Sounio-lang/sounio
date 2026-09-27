@@ -258,6 +258,8 @@ where x/2 is subnormal. The inertness argument is unaffected, and the rounding b
 
 ## Reproduce
 
+Each grid probe exits 1 on any mismatch, so a scripted reproduction cannot mistake a mismatch for success.
+
 ```bash
 make build-madaros
 export SOUNIO_MADAROS_BIN=$PWD/artifacts/self-hosted/madaros SOUNIO_STDLIB_PATH=$PWD/stdlib
