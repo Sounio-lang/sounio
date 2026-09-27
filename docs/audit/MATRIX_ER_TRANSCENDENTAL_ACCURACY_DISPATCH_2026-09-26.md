@@ -12,8 +12,11 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.matrix-e
 **Date:** 2026-09-26
 **Base:** measured on `main` at `46e9b48b6`; committed on `f141ad5d9`. No file under `stdlib/`, `tests/`, `website/` or `self-hosted/` differs between the two, and the patch applies to both.
 **Status:** applied (operator approval, 2026-09-26) in PR #2722. `docs/audit/repro/matrix_er_pure_math.patch` holds
-the final diff of the three files against `f141ad5d9`, including the review fixes (the +inf guard and the `pureSqrt`
-comment). No constant moves, and nothing in `self-hosted/` is touched.
+the PR's final diff of `release/matrix_er.sio` and `website/src/lib/pbpk28_core.mjs` against `main` at `f9d0e0974`,
+including the review fixes. No constant moves, and nothing in `self-hosted/` is touched.
+**After #2699** (merged into `main` on 2026-09-27), `dissertation_pbpk28_parity_ref_venlafaxine.sio` runs the stdlib
+`venlafaxine_xr` scenario and `release/matrix_er` directly, and no longer carries helper copies. From then on the fix
+lives in two places: `matrix_er.sio` and its Node port.
 **Compiler for every Sounio number below:** Madaros built from source, md5 `5764851f`. It came from a
 `make build-madaros` of `98315edcdb`, and `git diff --stat 98315edcdb 46e9b48b6 -- self-hosted` is empty.
 Seven independent builds on the pod carry the same md5. Every run used `bin/souc` (the 512 MiB-stack wrapper)
@@ -137,8 +140,8 @@ fn mer_pow(t: f64, n: f64) -> f64 with Mut, Div, Panic {
 }
 ```
 
-`mer_ln2`, `mer_ln_unit` and `mer_exp` are deleted. The parity ref copies `pure.sio` `ln`/`exp` verbatim as
-`mer_ln`/`mer_exp`; the ref stays self-contained. `pbpk28_core.mjs` ports `pure.sio` `ln`/`exp`/`sqrt` line for line
+`mer_ln2`, `mer_ln_unit` and `mer_exp` are deleted. Before #2699, the parity ref copied `pure.sio` `ln`/`exp` verbatim
+as `mer_ln`/`mer_exp`. Since #2699 it imports `matrix_er` instead (see Status). `pbpk28_core.mjs` ports `pure.sio` `ln`/`exp`/`sqrt` line for line
 (`as i32` → `Math.trunc`). The patch touches all three files and applies cleanly to `main` 46e9b48b6 and to
 `claude/elegant-borg-a14bdf`. On nifty-goodall `dacd8c2b4` the two helper blocks are textually identical, and only the
 `pbpk28_core.mjs` header-comment hunk needs a rebase.
@@ -282,4 +285,5 @@ The two independent vendors are xAI and Qwen.
 ## Reverting
 
 Revert the PR's fix commits with `git revert`, or run `git apply -R docs/audit/repro/matrix_er_pure_math.patch`.
-The patch is the full diff of the three source files against `f141ad5d9`, so reversing it restores them exactly.
+The patch is the PR's diff of `matrix_er.sio` and `pbpk28_core.mjs` against `main` at `f9d0e0974`, so reversing it
+restores both files to that state.

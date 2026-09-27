@@ -97,144 +97,14 @@ index f811c2040..4608ea448 100644
  }
  
  // ============================================================================
-diff --git a/tests/run-pass/dissertation_pbpk28_parity_ref_venlafaxine.sio b/tests/run-pass/dissertation_pbpk28_parity_ref_venlafaxine.sio
-index 71c05e339..acaaf5522 100644
---- a/tests/run-pass/dissertation_pbpk28_parity_ref_venlafaxine.sio
-+++ b/tests/run-pass/dissertation_pbpk28_parity_ref_venlafaxine.sio
-@@ -7,9 +7,9 @@
- // TWO coupled PBPK28 compartments — parent (venlafaxine) and active metabolite
- // ODV — bridged by hepatic CYP2D6 formation (organ 1 = liver). Self-contained
- // reimplementation (same pattern as the semaglutide ref) so it carries no
--// cross-module private-field access; the matrix transcendentals and absorption
--// are bit-identical to stdlib/darwin_pbpk/{release/matrix_er,scenarios/
--// venlafaxine_xr}.sio and to website/src/lib/pbpk28_core.mjs (runVenlafaxineScenario).
-+// cross-module private-field access; the matrix transcendentals (stdlib/math/pure.sio
-+// ln/exp, as called by release/matrix_er.sio) and absorption (scenarios/venlafaxine_xr.sio)
-+// are bit-identical to website/src/lib/pbpk28_core.mjs (runVenlafaxineScenario).
- //
- // Companion: scripts/ci/dissertation_pbpk28_parity_gate.sh cases 10-13 diff this
- // against the Node engine within 1.0% RMSE per organ (parent + ODV cavg) plus
-@@ -171,41 +171,87 @@ fn matrix_dose() -> f64 { return 75.0 }
- fn matrix_k() -> f64 { return 0.199 }
- fn matrix_n() -> f64 { return 0.65 }
- 
--// ─── Matrix transcendentals — identical to matrix_er.sio / pbpk28_core.mjs ───
--fn mer_ln_unit(x: f64) -> f64 with Mut, Div {
--    if x <= 0.0 { return 0.0 - 1.0e6 }
--    let y = (x - 1.0) / (x + 1.0)
--    let y2 = y * y
--    var term = y
--    var sum = term
--    var k: i64 = 1
--    while k < 20 {
--        term = term * y2
--        sum = sum + term / (2.0 * (k as f64) + 1.0)
-+// ─── Matrix transcendentals — verbatim stdlib/math/pure.sio ln()/exp() ───────
-+// matrix_er.sio calls math::pure::{ln, exp}; pbpk28_core.mjs ports the same two
-+// functions (as i32 -> Math.trunc). Range-reduced, so t^n is accurate over the
-+// whole dosing clock including sub-ulp positive clocks at dose boundaries.
-+fn mer_ln(x: f64) -> f64 with Mut, Div {
-+    if x <= 0.0 { return 0.0 - 1.0e30 }
-+    if x == 1.0 { return 0.0 }
-+    var m = x
-+    var e_val = 0
-+    while m >= 2.0 {
-+        m = m / 2.0
-+        e_val = e_val + 1
-+    }
-+    while m < 0.5 {
-+        m = m * 2.0
-+        e_val = e_val - 1
-+    }
-+    let t = (m - 1.0) / (m + 1.0)
-+    let t2 = t * t
-+    var sum = t
-+    var term = t
-+    var k = 1
-+    while k < 30 {
-+        term = term * t2
-+        let denom = (2 * k + 1) as f64
-+        sum = sum + term / denom
-         k = k + 1
-     }
--    return 2.0 * sum
-+    let ln_m = 2.0 * sum
-+    return ln_m + (e_val as f64) * 0.6931471805599453
- }
- 
--fn mer_exp(x: f64) -> f64 with Mut {
--    var r = 1.0 + x / 1024.0
--    var i = 0
--    while i < 10 {
--        r = r * r
--        i = i + 1
-+fn mer_exp(x: f64) -> f64 with Mut, Div {
-+    if x > 500.0 { return 1.0e200 }
-+    if x < -500.0 { return 0.0 }
-+    var k_f = x / 0.6931471805599453
-+    var k: i32 = 0
-+    if k_f >= 0.0 {
-+        k = k_f as i32
-+    } else {
-+        k = (k_f as i32) - 1
-+    }
-+    let r = x - (k as f64) * 0.6931471805599453
-+    var sum = 1.0
-+    var term = 1.0
-+    var n = 1
-+    while n < 25 {
-+        term = term * r / (n as f64)
-+        sum = sum + term
-+        n = n + 1
-     }
--    return r
-+    var result = sum
-+    if k >= 0 {
-+        var i = 0
-+        while i < k {
-+            result = result * 2.0
-+            i = i + 1
-+        }
-+    } else {
-+        var i = 0
-+        while i < (0 - k) {
-+            result = result / 2.0
-+            i = i + 1
-+        }
-+    }
-+    return result
- }
- 
- fn mer_pow(t: f64, n: f64) -> f64 with Mut, Div {
-     if t <= 0.0 { return 0.0 }
--    var ln_t = 0.0
--    if t > 2.0 {
--        ln_t = 0.6931471805599453 + mer_ln_unit(t / 2.0)
--    } else {
--        ln_t = mer_ln_unit(t)
-+    if t != t { return t }                                    // NaN t or n propagates, as matrix_er.sio
-+    if n != n { return n }
-+    if t - t != 0.0 {                                         // +inf^n limit, as matrix_er.sio
-+        if n > 0.0 { return t }
-+        if n < 0.0 { return 0.0 }
-+        return 1.0
-     }
--    return mer_exp(n * ln_t)
-+    let x = n * mer_ln(t)                                     // non-finite x: as matrix_er.sio
-+    if x != x { return 1.0 }
-+    if x - x != 0.0 { if x > 0.0 { return x } return 0.0 }
-+    return mer_exp(x)
- }
- 
- fn mer_exp_neg(x: f64) -> f64 with Mut, Div {
 diff --git a/website/src/lib/pbpk28_core.mjs b/website/src/lib/pbpk28_core.mjs
-index 1b39f2403..323bb74f2 100644
+index b4f8d8ee5..35a8297dc 100644
 --- a/website/src/lib/pbpk28_core.mjs
 +++ b/website/src/lib/pbpk28_core.mjs
-@@ -649,9 +649,10 @@ export function degenerateParams(base, { eps = 1e-3, psScale = 1e4 } = {}) {
- // formation. Oral XR input is gated by a Korsmeyer-Peppas erodible matrix.
- //
- // Bit-compatible companion to tests/run-pass/dissertation_pbpk28_parity_ref_venlafaxine.sio.
+@@ -656,9 +656,10 @@ export function degenerateParams(base, { eps = 1e-3, psScale = 1e4 } = {}) {
+ // Sounio side, tests/run-pass/dissertation_pbpk28_parity_ref_venlafaxine.sio,
+ // runs that stdlib scenario itself rather than a copy, so a change to the
+ // scenario that is not mirrored here fails the gate.
 -// The matrix transcendentals (merLnUnit/merExp/merPow) and absorption (merExpNeg)
 -// are PORTED VERBATIM from the Sounio stdlib (release/matrix_er.sio, scenarios/
 -// venlafaxine_xr.sio) — NOT Math.pow/Math.exp — so the two engines agree to f64.
@@ -245,7 +115,7 @@ index 1b39f2403..323bb74f2 100644
  //
  // Sources: Gohel 2008 (matrix n=0.65/k=0.199), Wang 2022 (F_XR=0.45, ka=0.63),
  // Klamerus 1999 (CL_parent 100, CL_form 43, CL_odv 28 L/h), Kirchheiner 2006
-@@ -673,27 +674,62 @@ export const VFX_PS_ODV    = Object.freeze([0.0, 700.0, 450.0, 90.0, 150.0, 6000
+@@ -680,27 +681,62 @@ export const VFX_PS_ODV    = Object.freeze([0.0, 700.0, 450.0, 90.0, 150.0, 6000
  // CYP2D6 formation scale relative to NM (Kirchheiner 2006 ratios / 3.45). NM=1.0.
  export const VFX_CL_FORM_SCALE = Object.freeze({ 0: 0.25 / 3.45, 1: 1.16 / 3.45, 2: 1.0, 3: 10.3 / 3.45 });
  
@@ -323,5 +193,5 @@ index 1b39f2403..323bb74f2 100644
 +  if (x - x !== 0.0) return x > 0.0 ? x : 0.0;
 +  return pureExp(x);
  }
- function merExpNeg(x) {                         // exp(x) for x<0, 20-term Taylor
-   if (x >= 0.0) return 1.0;
+ // exp(x) for x<0 — port of scenarios/venlafaxine_xr.sio mer_exp_neg, same
+ // operations in the same order: halve x until |x| <= 0.5 (m halvings), sum the
