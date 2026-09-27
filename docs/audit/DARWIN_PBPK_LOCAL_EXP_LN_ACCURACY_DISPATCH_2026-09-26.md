@@ -56,8 +56,9 @@ Results, measured on Madaros:
   exp error.
 * **GMFE is biased low.** Every GMFE these files compute is `exp(mean ln FE)` through the exp
   helper, so it under-reads by (ln G)²/2048: **−234 ppm at the 2.0 gate** and **−589 ppm at the
-  3.0 gate**. A true GMFE in (2.0, 2.0004694] or (3.0, 3.0017691] prints at or below the gate and
-  passes.
+  3.0 gate**. From the exp error alone, a true GMFE in (2.0, 2.0004694] or (3.0, 3.0017691]
+  prints at or below the gate and passes. The ln error of the individual FEs can widen that to
+  at most 2.0004716 and 3.0017725 (§2).
 * **No PASS/FAIL verdict flips today.** The false-pass bands above are latent: no current
   input falls in them. Four printed values move, all in the 4th to 7th significant figure. The pbpk28 GMFE paths are dead until observed data land (`obs_n() = 0`).
   rapamycin_clinical's GMFE is a dead store.
@@ -140,11 +141,27 @@ printed digits.
 | ln, tail concentration | 1e-6 | −7.3e-13 abs | 0 |
 | ln, tacrolimus FE(t½) | 1.673122 | −4.96e-8 abs | 0 |
 
-**GMFE false-pass band.** Bisection on `helper(ln g) ≤ G` gives the largest true GMFE that a
-gate still passes:
+**GMFE false-pass band.** Production evaluates `old_exp(mean(old_ln(FE_i)))`. The band has two
+parts.
+
+*Exp error alone.* Bisection on `old_exp(ln g) ≤ G`, with an exact mean ln, gives the largest true
+GMFE that the gate still passes:
 
 * G = 2.0 (pbpk28 files): **2.0004694** (+234.7 ppm)
 * G = 3.0 (tacrolimus TEST 7): **3.0017691** (+589.7 ppm)
+
+*Composed pipeline.* Each `old_ln(FE_i)` is off by at most 1.1332 × 10⁻⁶ (§1), so the mean ln is
+off by at most that much. The error depends on the individual FEs, not only on their geometric
+mean. The helper exp is increasing in its argument, so the largest passing true GMFE is at most
+the exp-only edge × e^(1.1332 × 10⁻⁶):
+
+* G = 2.0: **≤ 2.0004716**
+* G = 3.0: **≤ 3.0017725**
+
+The composed bound assumes every FE reduces to sx = 2 (FE = 2·eᵏ), where the ln error is
+largest. Such a set cannot also have a geometric mean near the gate, so the bound is an upper
+limit rather than an attained value. For a given FE set, the actual edge lies between the two
+figures.
 
 ## 3. Per file: what moves on Madaros
 
@@ -191,14 +208,16 @@ TEST 7 computes `ln_avg` from three `tco_ln` calls. It then computes exp(ln_avg)
 * **ln contribution.** The FEs printed are 1.156497, 1.673122 and 1.068589. The ln errors add
   −1.65 × 10⁻⁸ to ln_avg, which is negligible.
 * **exp contribution.** −28.6 ppm, which accounts for the printed move 1.273939 → 1.273975.
-* **Gate.** 1.27 is far from the 3.0 gate. The latent false-pass band is (3.0, 3.0017691].
+* **Gate.** 1.27 is far from the 3.0 gate. The latent false-pass band is (3.0, 3.0017691] from
+  exp alone and at most (3.0, 3.0017725] with the ln error (§2).
 
 ### 3.3 `validation/pbpk28_semaglutide_clinical.sio`
 
 * **Live path.** `obs_n() = 0`, so the only live consumer is `sv_ln` in the terminal-slope fit.
   It moves the printed t½ by −6.1 × 10⁻⁷ relative.
 * **Dead path.** The GMFE branch (`sv_ln` + `sv_exp`) is dead until observed data are filled
-  in. It will then read low by (mean ln FE)²/2048, with a false-pass band of (2.0, 2.0004694].
+  in. It will then read low by about (mean ln FE)²/2048. Its false-pass band is (2.0, 2.0004694]
+  from exp alone and at most (2.0, 2.0004716] with the ln error (§2).
 
 ### 3.4 `validation/rapamycin_clinical.sio`
 
@@ -251,7 +270,12 @@ The patch was checked for side effects:
 * **Constants.** No literal constant changes.
 * **Effects.** `pure::exp` / `pure::ln` are `with Mut, Div, Panic`. Every call site is already
   inside a function that declares all three (`release_cumulative`, `release_rate`,
-  `gmfe_from_fes`, `main`). The patched files compile on Madaros with the rc values in §3.
+  `gmfe_from_fes`, `main`).
+* **Compilation.** Four patched files compile and run on Madaros with the rc values in §3:
+  biomaterial_release, tacrolimus_oral_pbpk and pbpk28_semaglutide_clinical exit rc 0;
+  rapamycin_clinical reaches the same rc = 182 abort. `pbpk28_rapamycin_clinical` still fails
+  E001, before and after the patch. Its patched body was compiled and run only through the
+  scratch harness of §3.5.
 * **Name clashes.** No glob import in these files (`tsit5_pbpk14::*`, `tsit5_pbpk28::*`,
   `pbpk28_params::*`) exports `exp` or `ln`. No local binding is named `exp` or `ln`.
 * **Behaviour differences, all unreachable from the current callers.**
