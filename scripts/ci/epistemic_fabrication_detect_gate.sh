@@ -75,8 +75,23 @@ fi
 
 # --- F2: confidence magnitude under Madaros (before lean_single — engine env
 # isolation has been flaky when lean_single is interposed mid-gate) ---
+# Timeout raised 180 -> 600 (2026-09-27): the 2026-09-26 PBPK28 sprint moved
+# every kernel EP28 depends on (tsit5_pbpk28.sio, the new theta_pbpk28.sio
+# Rannacher-started TR-BDF2 stepper, per-step mass-ledger bookkeeping) onto
+# slower, more heavily-instrumented stepping, and this run does a reference
+# simulation plus up to 14 central-difference perturbation pairs (~29 full
+# simulate_dt calls total), not the single call F1's 120s budgets for.
+# Documented order-of-magnitude evidence from the SAME sprint: commit
+# 1f99371df raised two other PBPK28 gates' stated runtime from "~30s total"
+# to "at least ~40 min" for the dissertation suite (whose worst single entry,
+# pbpk28_sobol_pce, alone measured 2331-2392s). This gate's EP28 run is not
+# that outlier, but 180s is no longer a safe assumption either; not verified
+# against a live timing measurement in this session (see this branch's other
+# commits for why: the local Docker/QEMU path needed to run a compiled
+# Madaros ELF was unavailable). Re-measure and tighten once execution is
+# available again.
 set +e
-timeout 180 "$SOUC" run "$EP28" \
+timeout 600 "$SOUC" run "$EP28" \
   >"$TMP/ep28_madaros.log" 2>&1
 erc=$?
 set -e
