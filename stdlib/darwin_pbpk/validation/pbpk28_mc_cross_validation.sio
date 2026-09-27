@@ -30,6 +30,8 @@
 //   |u_Hessian − u_MC| / u_MC ≤ 0.10 (if GUM fails but Hessian passes)
 //     → MC_CROSS_VALIDATION_PBPK28_LOGNORMAL_HESSIAN_PASS
 //   Both fail → MC_CROSS_VALIDATION_PBPK28_LOGNORMAL_OUTPUT (with numbers)
+//   No marker, rc=1 → a GUM/Hessian budget failed, the MC kept <= 1900 of its
+//   2000 samples, or the mass balance gate failed
 //
 // N=2000 samples, seed=1729, fast PBPK28 (dt=0.5h, 336 steps).
 //
@@ -39,6 +41,7 @@
 
 use darwin_pbpk::core::pbpk28_params::*
 use darwin_pbpk::tsit5_pbpk28::*
+use darwin_pbpk::theta_pbpk28::*
 use darwin_pbpk::epistemic_pbpk28::{EpPrior28, ep28_rapamycin_params, ep28_rapamycin_priors, ep28_run}
 use darwin_pbpk::epistemic_pbpk28_hessian::{hessian_pbpk28_auc, h28_nonlinearity_ratio_literal}
 use numerical::linalg::{Cholesky7, cholesky7_banachiewicz, mat7_get, mat7_identity, mat7_set}
@@ -218,33 +221,25 @@ fn mc28_lognormal_from_z(mean: f64, variance: f64, z: f64) -> f64 with Mut, Div,
 }
 
 // ============================================================================
-// FAST AUC SIMULATION (dt=0.5h, 336 steps for 168h)
+// FAST AUC SIMULATION (dt=0.5h, 336 steps for 168h, Rannacher-started CN)
 // ============================================================================
 
+// Bolus run at dt = 0.5 h, t_end = 168 h (336 steps): Rannacher-started
+// clamp-free CN (theta_pbpk28). Shared by mc28_auc_fast and the mass-balance
+// gate. Until 2026-09-26 this was pbpk28_full_cn_step, whose floors biased
+// AUC_blood at this dt by +140% for rapamycin (0.966553 vs Dose/CL = 0.403226)
+// and +28% for semaglutide. A run that books visible negative mass fails
+// (returns false) instead of being floored.
+pub fn mc28_simulate_ledger(prm: PBPKParams28, dose_mg: f64,
+                          st: &!PBPKState28, led: &!PBPK28Ledger) -> bool with Mut, Div {
+    return pbpk28_bolus_run_mut(prm, dose_mg, 0.5, 168.0, 1000, st, led)
+}
+
 fn mc28_auc_fast(prm: PBPKParams28, dose_mg: f64) -> f64 with Mut, Div, Panic {
-    let t_end = 168.0
-    let dt    = 0.5
-    var st    = pbpk28_state_zero()
-    st.cv[0]  = dose_mg / prm.v_ref[0]
-    var t     = 0.0
-    var auc   = 0.0
-    var c_prev = st.cv[0]
-    var steps: i32 = 0
-    while t < t_end {
-        if steps > 1000 { return 0.0 }
-        let dt_use = if t + dt > t_end { t_end - t } else { dt }
-        let st_new = pbpk28_full_cn_step(st, prm, 0.0, dt_use)
-        let c_new  = st_new.cv[0]
-        if c_new != c_new { return 0.0 }
-        if c_new < 0.0    { return 0.0 }
-        if c_new > 1.0e12 { return 0.0 }
-        auc    = auc + 0.5 * (c_prev + c_new) * dt_use
-        c_prev = c_new
-        t      = t + dt_use
-        st     = st_new
-        steps  = steps + 1
-    }
-    return auc
+    var st = pbpk28_state_zero()
+    var led = pbpk28_ledger_zero()
+    if !mc28_simulate_ledger(prm, dose_mg, &!st, &!led) { return 0.0 }
+    return led.auc[0]
 }
 
 // ============================================================================
@@ -705,6 +700,14 @@ fn mc28_selftest_main() -> i32 with IO, Mut, Div, Panic, Epistemic {
     print("  u_Hessian (2nd-order): "); print_f64(u_hess); println(" mg.h/L")
     println("")
 
+    // A failed budget (a rejected reference or stencil trajectory) reports
+    // u = 0; comparing that to u_MC would print a spurious rel = 1 and the
+    // _OUTPUT marker, which the dissertation gate accepts. Fail instead.
+    if !gum_res.success || !hess_bud.success {
+        println("FAIL: GUM or Hessian budget failed (rejected trajectory); no comparison made")
+        return 1
+    }
+
     // -- MC lognormal N=2000 --
     println("Running MC lognormal (N=2000, seed=1729) ...")
     let mc_res  = mc28_run_lognormal(prm, priors, dose_mg, 2000, 1729)
@@ -725,15 +728,20 @@ fn mc28_selftest_main() -> i32 with IO, Mut, Div, Panic, Epistemic {
     println("  Criterion Hessian: <= 0.10 (weakly nonlinear regime)")
     println("")
 
-    // TESTS 1-5: convergence diagnostics — informational, not gate-blocking.
-    // The test always passes (rc=0); the gate markers distinguish convergence quality.
+    // TESTS 2-5: convergence diagnostics — informational, not gate-blocking;
+    // the gate markers distinguish convergence quality. TEST 1 (sample count)
+    // and TEST 6 (mass balance) are hard failures (rc=1, no marker).
 
     // TEST 1: MC completes with N_valid > 1900
+    // Hard failure: rejected trajectories are dropped, and an MC that keeps
+    // <= 1900 of its 2000 samples is not the N = 2000 estimate the markers
+    // describe.
     println("TEST 1: MC completes with n_valid > 1900")
     if mc_res.success && mc_res.n_valid > 1900 {
         println("  [PASS]")
     } else {
-        print("  [NOTE] n_valid="); print_f64(mc_res.n_valid as f64); println("")
+        print("  FAIL: n_valid="); print_f64(mc_res.n_valid as f64); println("")
+        return 1
     }
     println("")
 
@@ -772,6 +780,21 @@ fn mc28_selftest_main() -> i32 with IO, Mut, Div, Panic, Epistemic {
         println("  [PASS]")
     } else {
         print("  [NOTE] MC mean AUC="); print_f64(mc_res.mean_auc); println(" outside [0.1,10.0]")
+    }
+    println("")
+
+    // TEST 6: Mass balance at the production dt — exact discrete identity
+    // M(T) + CL·AUC − M(0) = 0 to rounding (theta_pbpk28 gate bounds).
+    println("TEST 6: Mass balance at production dt (dt=0.5h, 5 mg bolus)")
+    var mb_st = pbpk28_state_zero()
+    var mb_led = pbpk28_ledger_zero()
+    let mb_run = mc28_simulate_ledger(prm, dose_mg, &!mb_st, &!mb_led)
+    let mb_ok = mb_run && pbpk28_mass_gate_report(mb_led, mb_st, prm, dose_mg)
+    if mb_ok {
+        println("  [PASS] mass identity closes to rounding; no floor, no visible negativity")
+    } else {
+        println("  FAIL: discrete mass identity violated or negative mass visible")
+        return 1
     }
     println("")
 

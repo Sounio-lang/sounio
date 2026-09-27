@@ -12,8 +12,10 @@
 //
 //   1. Rannacher (2 start-up steps), TR-BDF2 and plain clamp-free CN keep
 //      M_n = M_0 at every step, three drug profiles, dt ∈ {0.5, 0.1, 0.05} h.
-//   2. Rannacher and TR-BDF2 book no visible negative mass (CN alone would:
-//      it rings to −9 mg/L here, which is why it is not the production path).
+//   2. Rannacher and TR-BDF2 book no visible negative mass in any returned
+//      state (CN alone would: it rings to −9 mg/L here, which is why it is not
+//      the production path). TR-BDF2's internal stage x_γ is printed as
+//      stage_neg_mass and not gated.
 //   3. With central clearance and an organ sink (venlafaxine CYP2D6 formation
 //      clearance on the liver, CL_form·dt/V_liver ≈ 12 at dt = 0.5 h), the
 //      ledger identity M(T) + eliminated + sink_removed − administered = M(0)
@@ -59,6 +61,8 @@ fn t_closed(tag: string, p0: PBPKParams28, dose: f64, dt: f64, nsteps: i32, meth
     while k < nsteps {
         t_step(method, &!st, p, dt, k, &!led)
         let drift = t_abs(pbpk28_total_mass(st, p) - m0) / m0
+        // NaN compares false against every bound: reject it explicitly.
+        if drift != drift { ok = false }
         if drift > worst { worst = drift }
         if drift > pbpk28_mass_tol_rel(led.steps) { ok = false }
         k = k + 1
@@ -74,7 +78,11 @@ fn t_closed(tag: string, p0: PBPKParams28, dose: f64, dt: f64, nsteps: i32, meth
     print(" M_end=")
     print(pbpk28_total_mass(st, p))
     print(" neg_mass x1e12=")
-    println(led.neg_mass * 1.0e12)
+    print(led.neg_mass * 1.0e12)
+    // TR-BDF2's internal stage x_γ: reported, not gated (it is not a returned
+    // state; after a bolus its CN stage rings negative by design).
+    print(" stage_neg_mass x1e12=")
+    println(led.stage_neg_mass * 1.0e12)
     if ok { return 0 }
     println("  FAIL")
     return 1
@@ -115,6 +123,10 @@ fn t_sink(method: i32, dt: f64) -> i32 with IO, Mut, Div {
         k = k + 1
     }
     let r = pbpk28_ledger_residual(led, st, p, 0.0)
+    if r != r {
+        println("  FAIL: NaN residual")
+        return 1
+    }
     print("sink method=")
     print(method)
     print(" dt=")
@@ -143,15 +155,19 @@ fn t_route_run(method: i32, route: i32, dt: f64) -> f64 with IO, Mut, Div {
     let cl_form = 43.0
     let rel = 3.0
     var t = 0.0
+    var k: i32 = 0
     while t < 48.0 - 0.5 * dt {
         if method == 1 {
-            let _s = pbpk28_theta_step_routed_sink_mut(&!st, p, rel, route, dt, 1.0, 1, cl_form, &!led)
+            // Rannacher: BE half-step pairs for the start-up, routed CN after.
+            let _s = pbpk28_rannacher_step_routed_sink_mut(&!st, p, rel, route, dt, k < pbpk28_rannacher_startup_steps(), 1, cl_form, &!led)
         } else {
             let _s = pbpk28_trbdf2_step_routed_sink_mut(&!st, p, rel, route, dt, 1, cl_form, &!led)
         }
         t = t + dt
+        k = k + 1
     }
     let r = pbpk28_ledger_residual(led, st, p, 0.0)
+    if r != r { return 0.0 - 1.0 }
     print("route method=")
     print(method)
     print(" input_organ=")

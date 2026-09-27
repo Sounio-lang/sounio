@@ -2,7 +2,7 @@
 topic_id: repo.docs.audit.venlafaxine-portal-parity-dt-convergence-2026-09-26
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
+last_validated: 2026-09-27
 validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.venlafaxine-portal-parity-dt-convergence-2026-09-26
 -->
@@ -293,8 +293,9 @@ route) on the workspace. Legs with a verdict come from two independent vendors:
   trace raised the same truncation-bound gap as Grok. GLM (Z.AI) was
   rate-limited (1313), and the local leg was down.
 
-`.claude/llm_offload_log.md` is absent from main (deleted wholesale in
-`3944ff825`), so the review record is kept here.
+`.claude/llm_offload_log.md` was absent from main when this round ran (deleted
+wholesale in `3944ff825`), so the record was kept here. #2714 has since
+restored the log, and all three rounds are also recorded there.
 
 ### Round 2: exact gut step (2026-09-27)
 
