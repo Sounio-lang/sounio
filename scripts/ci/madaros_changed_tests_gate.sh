@@ -41,6 +41,16 @@ selected=()
 for path in "${paths[@]}"; do
   case "$path" in
     tests/run-pass/*.sio) ;;
+    # Copilot review (PR #2515), comments 4113834092/4113834108: this used to
+    # select only tests/run-pass, so a changed compile-fail fixture with
+    # //@ requires: madaros (e.g. the module-qualified-call private-fn /
+    # wrong-arg-type regressions this PR adds) was never actually compiled
+    # against Madaros here -- the full suite runs lean_single stage2, which
+    # `requires: madaros` skips outright. run_sio_test_suite.sh's --test-list
+    # path already validates //@ error-pattern for compile-fail fixtures
+    # (that is how the full suite's own compile-fail tests are checked), so
+    # widening this case is the only change needed.
+    tests/compile-fail/*.sio) ;;
     *) continue ;;
   esac
   [[ -f "$ROOT_DIR/$path" ]] || continue

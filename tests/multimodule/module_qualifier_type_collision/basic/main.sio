@@ -1,0 +1,44 @@
+// Copilot review (PR #2515), round-3 comment 4113834074:
+// `checker_check_expr_call_inplace`'s `Type::method` associated-function
+// arm (self-hosted/check/check.sio) resolves a 2-segment path's penultimate
+// segment through the GLOBAL struct/enum tables via `fn_sig_table_find_
+// method_semantic` before ever asking whether that segment is a module the
+// CURRENT caller actually `use`d. `zz` here names both: the real module
+// `zz.sio` (via `use zz;` below, exporting `f() -> i64 { 42 }`) AND this
+// file's own unrelated lowercase `struct zz` with its own method `f`.
+// Before the fix, `zz::f()` always bound the struct's method regardless of
+// the real module import; the fix consults checker_use_module_known FIRST,
+// so a qualifier the caller actually `use`d as a module wins over an
+// incidentally-same-named global type.
+//
+// Checked with `--check` only, not compiled and run: this exact shape --
+// a real module and an unrelated impl method sharing one qualifier --
+// separately trips the STILL-OPEN lowerer-side gap this same review round
+// raised (comment 4113834083, self-hosted/ir/lower.sio's
+// callee_path_module_stripped_name): LOWER_IMPL_METHOD_HASH is global with
+// no per-import provenance either, so codegen for this identical
+// ambiguous call can still target the wrong body even once the checker
+// accepts it correctly. See this fixture's own README for why closing
+// that needs the shared "qualifier -> target-module-id" resolution table
+// already documented elsewhere in this PR as a genuine architectural
+// addition, not something fixable locally the way the checker's arm was.
+use zz;
+
+struct zz {
+    n: i64,
+}
+
+impl zz {
+    fn f(self) -> i64 with Mut, Panic, Div, Alloc {
+        self.n + 1000
+    }
+}
+
+fn main() -> i32 with IO, Mut, Panic {
+    let v: i64 = zz::f()
+    if v == 42 {
+        println("MODULE_QUALIFIER_WINS_OVER_TYPE_COLLISION PASS")
+        return 0
+    }
+    1
+}

@@ -11179,9 +11179,33 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             } else if (*callee_expr).kind == ExprKind::ExprPath && (*callee_expr).path.seg_count >= 2 {
                 let path_type_name = checker_copy_string_list_penultimate_to_name((*callee_expr).path.segments)
                 let path_method_name = checker_copy_string_list_tail_to_name((*callee_expr).path.segments)
+                // Copilot review (PR #2515), round-3 comment 4113834074: a
+                // globally-known lowercase struct/enum can share its name
+                // with a module the CALLER actually `use`d (e.g. `use m;`
+                // alongside an unrelated, elsewhere-declared `struct m`) --
+                // `fn_sig_table_find_method_semantic` below has no per-import
+                // provenance and would happily bind `m::f()` to the struct's
+                // unrelated method even though the caller's own qualifier
+                // namespace names a real module. checker_use_module_known
+                // already answers "did THIS module actually `use` a module
+                // by this name" (round 3 of an earlier finding, comment
+                // 4089110672) -- consult that FIRST, before the semantic
+                // type-method lookup touches any global table, so a
+                // genuinely-imported module qualifier is never shadowed by
+                // an unrelated same-named type. This does not (and cannot
+                // alone) resolve which SPECIFIC module a qualifier targets
+                // when two real modules share a suffix -- see the
+                // checker_use_module_known call further below (comment
+                // 4110379040) for that separate, still-open architectural
+                // gap.
+                let path_type_name_is_used_module = checker_use_module_known((*c).current_module_id, path_type_name)
                 // Prefer semantic match (kind+name) then name-only self_type_name.
                 let recv_ty = ty_named(path_type_name)
-                direct_sig_id = fn_sig_table_find_method_semantic((*c).fn_sigs, recv_ty, path_method_name)
+                direct_sig_id = if path_type_name_is_used_module {
+                    -1
+                } else {
+                    fn_sig_table_find_method_semantic((*c).fn_sigs, recv_ty, path_method_name)
+                }
                 // Round 10 (review comment 4099548863): for a path LONGER than
                 // 2 segments (e.g. `bogus::AfNum::quad(..)`), the match above
                 // only ever looks at the PENULTIMATE segment ("AfNum") to find
@@ -11250,8 +11274,16 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
                 // already 0 today. Promoting to an error requires deciding what they should
                 // be, which is stdlib semantics work, not a checker change.
                 if direct_sig_id < 0 {
-                    if struct_table_find((*c).structs, path_type_name) < 0 {
-                        if enum_table_find((*c).enums, path_type_name) < 0 {
+                    // path_type_name_is_used_module short-circuits these two
+                    // lookups: when the qualifier is a module the CALLER
+                    // actually `use`d, treat this as a module-qualified
+                    // free-fn call regardless of whether an UNRELATED
+                    // same-named struct/enum also exists globally -- see
+                    // this arm's own comment above (round-3 comment
+                    // 4113834074) for why the caller's own import namespace
+                    // must win over a global type-table hit here.
+                    if path_type_name_is_used_module || struct_table_find((*c).structs, path_type_name) < 0 {
+                        if path_type_name_is_used_module || enum_table_find((*c).enums, path_type_name) < 0 {
                             // `path_type_name` is not a known struct/enum, so this
                             // is plausibly a module-qualified free-fn call
                             // (`mod::f(..)`, `a::mod::f(..)`) rather than
