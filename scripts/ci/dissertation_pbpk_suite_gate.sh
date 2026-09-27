@@ -39,13 +39,20 @@
 #                                  framework boundary audit, confidence gate PASS
 #
 # Each test ends with "PASS\n" on success. Gate fails if any test rc != 0
-# or stdout doesn't contain "PASS".
+# or stdout doesn't contain "PASS". Modules that fail on a documented defect
+# are listed in TESTS_EXPECTED_FAIL_HONEST instead and must fail exactly as
+# recorded (strict; see that list).
 #
-# CPU-only, ~30s total. Self-skips if souc is missing.
+# CPU-only. Self-skips if souc is missing. Runtime: each TESTS / smoke /
+# pending entry is bounded by DPS_TIMEOUT_SECONDS (default 90 s). The
+# expected-FAIL_HONEST pbpk28_sobol_pce entry has its own 3600 s timeout: it
+# took 130 s with the default engine (souc-seq-leansingle shim), but
+# 2331-2392 s when SOUC_BIN points at bin/souc-lean-single-x86_64. Budget
+# for the engine you run.
 #
 # Knobs (env):
 #   DPS_STAGE_DIR             working directory (default mktemp)
-#   DPS_TIMEOUT_SECONDS       per-test timeout (default 90)
+#   DPS_TIMEOUT_SECONDS       per-test timeout (default 90; TESTS_EXPECTED_FAIL_HONEST entries carry their own)
 #   SOUNIO_DPS_GATE_SKIP=1    skip entirely
 
 set -euo pipefail
@@ -119,7 +126,6 @@ TESTS=(
   "pop_pbpk_pd                stdlib/darwin_pbpk/population/pop_pbpk_pd.sio"
   "epistemic_pbpk28           stdlib/darwin_pbpk/epistemic_pbpk28.sio"
   "epistemic_pbpk28_hessian   stdlib/darwin_pbpk/epistemic_pbpk28_hessian.sio"
-  "pbpk28_sobol_pce           stdlib/darwin_pbpk/validation/pbpk28_sobol_pce.sio"
   "pbpk28_mc_cross_validation stdlib/darwin_pbpk/validation/pbpk28_mc_cross_validation.sio"
   "pbpk28_mc_prior_family_sweep stdlib/darwin_pbpk/validation/pbpk28_mc_prior_family_sweep.sio"
   "rapamycin_kaxi_fuse_prior    tests/run-pass/rapamycin_kaxi_fuse_prior.sio"
@@ -162,6 +168,76 @@ TESTS_PENDING=(
 # sd_post==sd_expected). Seq-of-struct/borrow paths remain Tier-2 (see
 # tests/known_failures/hardened_diagnostics_full_suite.txt).
 TESTS_PENDING_REGRESSION=()
+
+# Expected FAIL_HONEST: modules that currently fail on a documented,
+# diagnosed defect. Strict: the entry is accepted (XFAIL, neither pass nor
+# fail) only when the run exits with exactly the recorded rc, prints the
+# recorded diagnostic exactly the recorded number of times, and prints no
+# other `FAIL` line. A timeout, a different rc, any other failure, or an
+# unexpected pass (rc 0) fails the gate -- the last one so the entry is moved
+# back to TESTS once the defect is fixed.
+# Each entry carries its own timeout (seconds), used instead of
+# DPS_TIMEOUT_SECONDS: an entry that cannot finish inside the default would
+# otherwise always be classified FAIL:timeout.
+# The source is also compiled once with its diagnostics visible (the default
+# souc-seq-leansingle shim discards them and ignores the compiler's rc, so a
+# fail-open build regression could otherwise reach the expected rc). The
+# compiler output must contain exactly compile_error_count `error` lines, all
+# matching compile_error_pattern (a fixed string); anything else fails.
+# Format: name|src|expected_rc|diagnostic_count|timeout_s|compile_error_count|compile_error_pattern|diagnostic
+TESTS_EXPECTED_FAIL_HONEST=(
+  # Saltelli estimator output violates S_i <= S_Ti in both self-tests
+  # (rapamycin and semaglutide TEST 7; stdlib/epistemic/sobol.sio not yet
+  # repaired). See docs/dissertation/results/sobol_pce_semaglutide_v2.md.
+  # Timeout: with the gate's default engine (the shim's
+  # bin/souc-linux-x86_64) the run took 130 s on the workspace; with
+  # bin/souc-lean-single-x86_64 (SOUC_BIN override) 2331-2392 s over four
+  # runs. 3600 s covers both (~1.5x the slower).
+  # Compile errors: 36 pre-existing `tuple index out of bounds` in
+  # stdlib/epistemic/pce.sio (lines 332-520); the compiler still emits the ELF.
+  "pbpk28_sobol_pce|stdlib/darwin_pbpk/validation/pbpk28_sobol_pce.sio|2|2|3600|36|error: tuple index out of bounds at stdlib/epistemic/pce.sio:|FAIL: estimator output violates S_i <= S_Ti; not usable as Sobol' indices"
+)
+
+# Compile `src` once and print the compiler's own output (diagnostics
+# included). With the default shim, call the ELF it wraps directly, because
+# its compile/run verbs send that output to /dev/null.
+dps_compile_diagnostics() {
+  local src="$1" tmp
+  tmp="$(mktemp)"
+  if [[ "$SOUC_BIN" == "$ROOT_DIR/scripts/ci/souc-seq-leansingle.sh" ]]; then
+    "${SOUNIO_SEQ_LEANSINGLE_ELF:-$ROOT_DIR/bin/souc-linux-x86_64}" "$src" "$tmp" 2>&1 || true
+  else
+    "$SOUC_BIN" compile "$src" -o "$tmp" 2>&1 || true
+  fi
+  rm -f "$tmp"
+}
+
+# Verdict on the compiler output: prints OK or FAIL:<reason>.
+dps_compile_verdict() {
+  local diag_log="$1" want_n="$2" pattern="$3"
+  local n_err n_known
+  n_err=$(grep -cE '(^|[^[:alnum:]_])error(\[|:)' "$diag_log" || true)
+  n_known=$(grep -cF -- "$pattern" "$diag_log" || true)
+  if [[ "$n_err" != "$want_n" || "$n_known" != "$want_n" ]]; then
+    echo "FAIL:compiler_diagnostics=${n_err}_known=${n_known}_expected_${want_n}"
+    return
+  fi
+  echo "OK"
+}
+
+# Verdict for one expected-FAIL_HONEST run: prints XFAIL or FAIL:<reason>.
+dps_xfail_verdict() {
+  local log="$1" rc="$2" want_rc="$3" want_n="$4" diag="$5"
+  if [[ "$rc" == "124" ]]; then echo "FAIL:timeout"; return; fi
+  if [[ "$rc" == "0" ]]; then echo "FAIL:unexpected_pass"; return; fi
+  if [[ "$rc" != "$want_rc" ]]; then echo "FAIL:rc=${rc}_expected_${want_rc}"; return; fi
+  local n_diag n_fail
+  n_diag=$(grep -cF -- "$diag" "$log" || true)
+  n_fail=$(grep -cE '^[[:space:]]*FAIL' "$log" || true)
+  if [[ "$n_diag" != "$want_n" ]]; then echo "FAIL:diagnostic_count=$n_diag"; return; fi
+  if [[ "$n_fail" != "$want_n" ]]; then echo "FAIL:other_failures=$((n_fail - n_diag))"; return; fi
+  echo "XFAIL"
+}
 
 fails=0
 pending=0
@@ -315,7 +391,55 @@ for entry in "${TESTS_PENDING_REGRESSION[@]}"; do
   results+=("PEND  $name  seq_subsystem_regression")
 done
 
-total=$((${#TESTS[@]} + ${#TESTS_SMOKE[@]} + ${#TESTS_PENDING[@]} + ${#TESTS_PENDING_REGRESSION[@]}))
+# Expected FAIL_HONEST loop (see TESTS_EXPECTED_FAIL_HONEST).
+xfails=0
+for entry in "${TESTS_EXPECTED_FAIL_HONEST[@]}"; do
+  IFS='|' read -r name src want_rc want_n entry_timeout want_cerr cerr_pattern diag <<< "$entry"
+  log="$STAGE_DIR/$name.log"
+
+  echo ""
+  echo "[$name] (expected FAIL_HONEST, timeout=${entry_timeout}s)"
+  echo "  src=$src"
+
+  if [[ ! -f "$src" ]]; then
+    echo "  FAIL: source missing"
+    fails=$((fails + 1))
+    results+=("FAIL  $name  source_missing")
+    continue
+  fi
+
+  diag_log="$STAGE_DIR/$name.compile.log"
+  dps_compile_diagnostics "$src" >"$diag_log"
+  cverdict=$(dps_compile_verdict "$diag_log" "$want_cerr" "$cerr_pattern")
+  if [[ "$cverdict" != "OK" ]]; then
+    echo "  FAIL: compiler output differs from the recorded diagnostics (${cverdict#FAIL:})"
+    # Reporting only: under `set -euo pipefail` this pipeline fails when no
+    # unexpected line exists (e.g. only the count changed), so keep it non-fatal.
+    { grep -E '(^|[^[:alnum:]_])error(\[|:)' "$diag_log" | grep -vF -- "$cerr_pattern" | head -5 | sed 's/^/    /'; } || true
+    fails=$((fails + 1))
+    results+=("FAIL  $name  ${cverdict#FAIL:}")
+    continue
+  fi
+
+  set +e
+  timeout "$entry_timeout" "$SOUC_BIN" run "$src" >"$log" 2>&1
+  rc=$?
+  set -e
+
+  verdict=$(dps_xfail_verdict "$log" "$rc" "$want_rc" "$want_n" "$diag")
+  if [[ "$verdict" == "XFAIL" ]]; then
+    echo "  XFAIL: fails exactly as recorded (compiler errors: the $want_cerr recorded; rc=$rc, diagnostic x$want_n, no other FAIL)"
+    xfails=$((xfails + 1))
+    results+=("XFAIL $name  documented_defect")
+  else
+    echo "  FAIL: expected-FAIL_HONEST entry did not fail as recorded (${verdict#FAIL:}; rc=$rc, timeout=${entry_timeout}s)"
+    tail -5 "$log" | sed 's/^/    /'
+    fails=$((fails + 1))
+    results+=("FAIL  $name  ${verdict#FAIL:}")
+  fi
+done
+
+total=$((${#TESTS[@]} + ${#TESTS_SMOKE[@]} + ${#TESTS_PENDING[@]} + ${#TESTS_PENDING_REGRESSION[@]} + ${#TESTS_EXPECTED_FAIL_HONEST[@]}))
 
 echo ""
 echo "=== Summary ==="
@@ -330,8 +454,8 @@ if [[ $fails -ne 0 ]]; then
 fi
 
 echo ""
-if [[ $pending -ne 0 ]]; then
-  echo "dissertation_pbpk_suite_gate: PASS ($((total - pending))/$total active; $pending item(s) PENDING — see summary for detail)"
+if [[ $pending -ne 0 || $xfails -ne 0 ]]; then
+  echo "dissertation_pbpk_suite_gate: PASS ($((total - pending - xfails))/$total passing; $pending item(s) PENDING, $xfails expected FAIL_HONEST — see summary for detail)"
 else
   echo "dissertation_pbpk_suite_gate: PASS ($total/$total PBPK tests + smoke demos)"
 fi
