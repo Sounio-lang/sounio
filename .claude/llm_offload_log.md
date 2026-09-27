@@ -231,7 +231,7 @@ dispatch), so the check fires on real negativity. Control for (5): V6e
 fails with a global flag. Flagged for re-review once a provider is
 configured.
 
-## 2026-09-27T03:05Z — Claude (session_01RMzxzzsE5JNGEqnnkUs9Yo) — M1, PBPK28 certificate ceiling and absorbed-fraction series
+## 2026-09-27T02:17Z — Claude (session_01RMzxzzsE5JNGEqnnkUs9Yo) — M1, PBPK28 certificate ceiling and absorbed-fraction series
 
 | 2026-09-27 | xai kimi zai local | math-review | pbpk28_hepatic.sio "Ceiling" (tol <= 1e-6, dt_max(λ) = (1e-6/(1024u) − 1)/λ); multidrug28.sio md_absorbed_fraction (−expm1 series, 165u bound) and the V9 per-magnitude budget | WAIVED | `bin/llm-offload -t math-review -i <derivations>`: all four legs SKIPPED (no keys in this container). |
 
