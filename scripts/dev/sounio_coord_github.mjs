@@ -91,6 +91,8 @@ export function check(options, execute = run) {
   const match = origin.match(/^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([^/]+\/[^/]+?)(?:\.git)?$/);
   if (!match) throw new Error('origin must identify a GitHub repository; cannot establish shared visibility');
   const repo = match[1];
+  if (repo.toLowerCase() !== 'sounio-lang/sounio')
+    throw new Error('Shared coordination requires canonical Sounio-lang/sounio origin; a fork-only origin is not shared visibility');
   const files = options.files.map(f => normalize(f, root));
 
   const branch = execute('git', ['branch', '--show-current']);

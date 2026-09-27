@@ -192,7 +192,8 @@ and next-action fields.
 Local leases and agent-bus stores do **not** establish cross-machine ownership.
 GitHub is the shared discovery layer. Before implementation, run `brief` and
 `bin/sounio-coord remote-check --files <full write set>`, then claim/scope.
-Dependencies: authenticated `gh` and Node.js 20+. No remote means an explicitly
+Dependencies: authenticated `gh`, Node.js 20+ and canonical
+`Sounio-lang/sounio` as origin (fork-only origins fail closed). No remote means an explicitly
 reported local-only fixture; a configured but inaccessible origin blocks writes.
 
 - `claim` performs a fresh remote preflight before creating a lease.

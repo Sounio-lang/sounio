@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {spawnSync, execFileSync} from 'node:child_process';
-import {overlaps, normalize, conflicts, parse} from '../dev/sounio_coord_github.mjs';
+import {overlaps, normalize, conflicts, parse, check} from '../dev/sounio_coord_github.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'coord-github-'));
 process.on('exit', () => fs.rmSync(temp, {recursive:true, force:true}));
@@ -123,4 +123,9 @@ test('PR and branch inventory pagination sees conflicts beyond the first page',(
 test('branch head advanced after PR inventory is checked separately',()=>{
  const p=pr(['other']);
  result({prs:[p],refs:[{name:'carrier',target:{oid:'b'.repeat(40),committedDate:new Date().toISOString()}}],compare:{files:[{filename:'self-hosted/ir/lower.sio'}]}},files,3);
+});
+
+test('fork-only origin cannot silently scan an isolated GitHub store',()=>{
+ const execute=(command,args)=>args.includes('--show-toplevel')?temp:args.includes('get-url')?'https://github.com/other/sounio.git':'origin';
+ assert.throws(()=>check(parse(files),execute),/canonical Sounio-lang/);
 });
