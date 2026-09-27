@@ -905,7 +905,9 @@ for VFX_LOG in "$VFX_SIO_LOG" "$VFX_NODE_LOG"; do
     /^VMASS\|p=/{mp=fin($2); cnt["mp"]++}
     /^VMASS\|o=/{mo=fin($2); cnt["mo"]++}
     /^VBAL\|released=/{rel=fin($2); cnt["rel"]++}
+    /^VBAL\|gut=/{gu=fin($2); cnt["gu"]++}
     /^VBAL\|portal=/{por=fin($2); cnt["por"]++}
+    /^VBAL\|lost=/{lo=fin($2); cnt["lo"]++}
     /^VBAL\|fabs=/{fa=fin($2); cnt["fa"]++}
     /^VBAL\|resid_gut_e12=/{rg=fin($2); cnt["rg"]++}
     /^VBAL\|resid_split_e12=/{rs=fin($2); cnt["rs"]++}
@@ -914,7 +916,7 @@ for VFX_LOG in "$VFX_SIO_LOG" "$VFX_NODE_LOG"; do
     /^VBAL\|resid_o_e12=/{ro=fin($2); cnt["ro"]++}
     /^VBAL\|neg_e12=/{ng=fin($2); cnt["ng"]++}
     /^VBAL\|steps=/{st=fin($2);
-      nk=split("mp mo rel por fa rg rs bs rp ro ng", req, " ")
+      nk=split("mp mo rel gu por lo fa rg rs bs rp ro ng", req, " ")
       for(ki=1; ki<=nk; ki++){ if(cnt[req[ki]]!=1){bad++; printf "  FAIL: sample %d has %d record(s) of field %s (need exactly 1)\n",n+1,cnt[req[ki]]+0,req[ki]}; cnt[req[ki]]=0 }
       if(!(dtv>0)){bad++; printf "  FAIL: no positive dt= header to check the step count against\n"}
       else { exp_st=int(2*tv/dtv+0.5); if(st!=exp_st || st<=0){bad++; printf "  FAIL: sample t=%s reports %d steps, expected 2*t/dt = %d\n",tv,st,exp_st} }
