@@ -44,12 +44,14 @@ DRUGS = {
     7: ("CYP3A4",  "simvastatin"),
 }
 
-# Fano triples per the same Fano labeling used in the original CSV.
-FANO_TRIPLES = {
-    (1, 2, 4), (1, 3, 7), (1, 5, 6),
-    (2, 3, 5), (2, 6, 7),
-    (3, 4, 6), (4, 5, 7),
-}
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from lib.cyp_fano_canon import FANO_TRIPLES_SORTED, fano_flag  # noqa: E402
+
+# Canonical medical Fano (cyp450_fano.sio); sorted triples for combinations().
+FANO_TRIPLES = set(FANO_TRIPLES_SORTED)
 
 API = "https://api.fda.gov/drug/event.json"
 PAGE_SIZE = 100
@@ -162,7 +164,7 @@ def main():
         asym = (
             abs(a_first - b_first) / temporal if temporal > 0 else -1.0
         )
-        fano = "True" if (i, j, k) in FANO_TRIPLES else "False"
+        fano = fano_flag(i, j, k)
         row = {
             "cyp_a": cyp_a, "cyp_b": cyp_b, "cyp_c": cyp_c,
             "fano": fano,

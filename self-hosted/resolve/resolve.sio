@@ -21,15 +21,15 @@ use resolve::imports::*
 // ============================================================
 
 pub struct Resolver {
-    symbols: SymbolTable,
-    scopes: ScopeStack,
-    modules: ModuleRegistry,
-    error_count: i64,
-    had_error: bool,
-    next_id: i64,
+    pub symbols: SymbolTable,
+    pub scopes: ScopeStack,
+    pub modules: ModuleRegistry,
+    pub error_count: i64,
+    pub had_error: bool,
+    pub next_id: i64,
 }
 
-fn resolver_new() -> Resolver {
+pub fn resolver_new() -> Resolver {
     Resolver {
         symbols: symbol_table_new(),
         scopes: scope_stack_new(),
@@ -40,7 +40,7 @@ fn resolver_new() -> Resolver {
     }
 }
 
-fn resolver_with_modules(mods: ModuleRegistry) -> Resolver {
+pub fn resolver_with_modules(mods: ModuleRegistry) -> Resolver {
     Resolver {
         symbols: symbol_table_new(),
         scopes: scope_stack_new(),
@@ -459,6 +459,12 @@ impl Resolver {
                     self
                 }
             }
+            // Claims are metadata, not symbols; normally filtered from the
+            // item stream by parser::mod, so this arm is defensive only.
+            ItemKind::ItemClaim => self
+            // A causal graph is unit-global metadata in the CG_* registry; it
+            // declares no symbol, so there is nothing to resolve.
+            ItemKind::ItemCausalGraph => self
         }
     }
 
@@ -502,8 +508,10 @@ impl Resolver {
         // Glob import (`use foo::*`): import all exports.
         if is_glob {
             var i: i64 = 0
-            while i < entry.export_count && i < 1024 {
-                r = r.define(entry.exports[i as usize].name, SymbolKind::SymImported, span)
+            while i < entry.export_count {
+                // #1689: exports live in the shared pool now, not inline in the
+                // entry. The old `&& i < 1024` bound was also a silent cap.
+                r = r.define(modreg_export_name_at(entry.export_base + i), SymbolKind::SymImported, span)
                 i = i + 1
             }
             return r
@@ -595,6 +603,8 @@ impl Resolver {
             ItemKind::ItemAlgebra => self  // Algebra metadata is collected by the checker.
             ItemKind::ItemStudy => self  // Study metadata is collected by the checker.
             ItemKind::ItemOntology => self  // Ontology metadata is collected by the checker.
+            ItemKind::ItemClaim => self  // Claim metadata; no body to resolve.
+            ItemKind::ItemCausalGraph => self  // Graph metadata; no body to resolve.
         }
     }
 
@@ -649,7 +659,7 @@ impl Resolver {
     fn resolve_param(self, p: Param) -> Resolver with Mut, Panic, Div, Alloc, IO {
         var r = self.resolve_type_expr(p.ty)
         if p.is_self {
-            r = r.define(Name { buf: [0; 128], len: 4 }, SymbolKind::SymParameter, p.span)
+            r = r.define(Name { buf: [0; 384], len: 4 }, SymbolKind::SymParameter, p.span)
             // Note: "self" name bytes would be 115,101,108,102 but we don't need exact bytes
             // for the self-hosted phase — self is implicitly available
         } else {
@@ -1156,6 +1166,8 @@ impl Resolver {
             }
             ExprKind::ExprClosure => self.resolve_closure_expr(e)
             ExprKind::ExprForIn => self.resolve_for_in_expr(e)
+            // Leaf node, no children -- same as ExprError below.
+            ExprKind::ExprDsepProof => self
             ExprKind::ExprError => self
         }
     }

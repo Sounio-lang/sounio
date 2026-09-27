@@ -1,0 +1,239 @@
+// stdlib/clinical/mercyful.sio
+//
+// Mercyful Learning scheduler — first substrate-aware suffering-budget runtime.
+//
+// This module computes paths on a finite directed graph that minimize
+//   cost(γ; μ) = Σ_{(u,v)∈γ} s(u)·ℓ((u,v)) + μ · max_{v∈γ} s(v)
+// subject to len(γ) ≤ L0 and reaching the target state.
+//
+// The anti-Goodhart constraint is explicit: paths that do not reach the target
+// are infeasible, regardless of cost.
+//
+// Clinical warning: this is a synthetic graph scheduler for research
+// infrastructure. It is not medical guidance, not a treatment recommendation,
+// and not a clinical decision-support tool.
+
+// Maximum sizes (fixed-array Sounio style)
+let MAX_STATES: i64 = 16
+let MAX_EDGES: i64 = 64
+let MAX_PATHS: i64 = 256
+let MAX_PATH_LEN: i64 = 32
+
+pub struct MercyEdge {
+    from: i64,
+    to: i64,
+    length: f64,
+}
+
+pub struct MercyGraph {
+    state_count: i64,
+    edge_count: i64,
+    suffering: [f64; 16],
+    edges: [MercyEdge; 64],
+}
+
+pub struct PathCost {
+    length: f64,
+    integral: f64,
+    peak: f64,
+    total: f64,
+}
+
+// Initialize an empty graph
+pub fn mercy_graph_new() -> MercyGraph {
+    var g = MercyGraph {
+        state_count: 0,
+        edge_count: 0,
+        suffering: [0.0; 16],
+        edges: [MercyEdge { from: 0, to: 0, length: 1.0 }; 64],
+    }
+    g
+}
+
+// Add a state with suffering value
+pub fn mercy_add_state(g: MercyGraph, suffering: f64) -> MercyGraph with Mut, Panic {
+    assert(g.state_count < MAX_STATES)
+    var out = g
+    out.suffering[out.state_count as usize] = suffering
+    out.state_count = out.state_count + 1
+    out
+}
+
+// Add an edge
+pub fn mercy_add_edge(g: MercyGraph, from: i64, to: i64, length: f64) -> MercyGraph with Mut, Panic {
+    assert(g.edge_count < MAX_EDGES)
+    assert(from >= 0 && from < g.state_count)
+    assert(to >= 0 && to < g.state_count)
+    var out = g
+    out.edges[out.edge_count as usize] = MercyEdge { from: from, to: to, length: length }
+    out.edge_count = out.edge_count + 1
+    out
+}
+
+// Compute cost of a path (array of state indices)
+pub fn mercy_path_cost(g: &MercyGraph, path: &[i64; 32], path_len: i64, mu: f64) -> PathCost with Panic {
+    var length = 0.0
+    var integral = 0.0
+    var peak = 0.0
+    var i = 0
+    while i < path_len - 1 {
+        let u = path[i as usize]
+        let v = path[(i + 1) as usize]
+        // find edge length
+        var ell = 1.0
+        var j = 0
+        while j < g.edge_count {
+            let e = g.edges[j as usize]
+            if e.from == u && e.to == v {
+                ell = e.length
+            }
+            j = j + 1
+        }
+        length = length + ell
+        let s = g.suffering[u as usize]
+        integral = integral + s * ell
+        if s > peak { peak = s }
+        i = i + 1
+    }
+    // include target suffering in peak
+    let target_s = g.suffering[path[(path_len - 1) as usize] as usize]
+    if target_s > peak { peak = target_s }
+    PathCost { length: length, integral: integral, peak: peak, total: integral + mu * peak }
+}
+
+// Simple path existence check (DFS with length budget)
+fn mercy_reachable(g: &MercyGraph, start: i64, target: i64, L0: f64) -> bool with Mut, Panic {
+    var visited = [false; 16]
+    var stack = [0; 32]
+    var stack_len = 0
+    stack[stack_len as usize] = start
+    stack_len = stack_len + 1
+    while stack_len > 0 {
+        stack_len = stack_len - 1
+        let node = stack[stack_len as usize]
+        if node == target { return true }
+        if !visited[node as usize] {
+            visited[node as usize] = true
+            var j = 0
+            while j < g.edge_count {
+                let e = g.edges[j as usize]
+                if e.from == node {
+                    stack[stack_len as usize] = e.to
+                    stack_len = stack_len + 1
+                }
+                j = j + 1
+            }
+        }
+    }
+    false
+}
+
+// Find the best path from start to target within budget.
+// For small graphs, uses exhaustive enumeration of simple paths via BFS queue.
+// Returns (found, path_length, integral, peak, total_cost)
+pub fn mercyful_schedule(
+    g: &MercyGraph,
+    start: i64,
+    target: i64,
+    mu: f64,
+    L0: f64
+) -> (bool, f64, f64, f64, f64) with Mut, Panic {
+    if !mercy_reachable(g, start, target, L0) {
+        return (false, 0.0, 0.0, 0.0, 0.0)
+    }
+
+    var best_cost = 1e100
+    var best_length = 0.0
+    var best_integral = 0.0
+    var best_peak = 0.0
+    var found = false
+
+    // BFS queue of (node, path_len, path).
+    // Paths are stored in a FLAT [i64; MAX_PATHS*MAX_PATH_LEN] array
+    // (slot*32 + position) instead of a nested [[i64; 32]; 256]: the
+    // lean_single bootstrap compiler mis-lowers nested i64-array element
+    // reads (reads return 0), which zeroed every path copied out of the
+    // queue and with it every suffering integral. Flat indexing is
+    // semantically identical and works on both engines.
+    var queue_node = [0; 256]
+    var queue_len = [0; 256]
+    var queue_path = [0; 8192]
+    var queue_head = 0
+    var queue_tail = 0
+
+    queue_node[queue_tail as usize] = start
+    queue_len[queue_tail as usize] = 1
+    queue_path[(queue_tail * 32) as usize] = start
+    queue_tail = queue_tail + 1
+
+    while queue_head < queue_tail {
+        let node = queue_node[queue_head as usize]
+        let plen = queue_len[queue_head as usize]
+        var path = [0; 32]
+        var i = 0
+        while i < plen {
+            path[i as usize] = queue_path[(queue_head * 32 + i) as usize]
+            i = i + 1
+        }
+        queue_head = queue_head + 1
+
+        if node == target && plen > 1 {
+            let cost = mercy_path_cost(g, &path, plen, mu)
+            if cost.length <= L0 && cost.total < best_cost {
+                best_cost = cost.total
+                best_length = cost.length
+                best_integral = cost.integral
+                best_peak = cost.peak
+                found = true
+            }
+        }
+
+        if plen < MAX_PATH_LEN {
+            var j = 0
+            while j < g.edge_count {
+                let e = g.edges[j as usize]
+                if e.from == node {
+                    // check if e.to already in path (simple path)
+                    var in_path = false
+                    var k = 0
+                    while k < plen {
+                        if path[k as usize] == e.to { in_path = true }
+                        k = k + 1
+                    }
+                    if !in_path {
+                        queue_node[queue_tail as usize] = e.to
+                        queue_len[queue_tail as usize] = plen + 1
+                        var m = 0
+                        while m < plen {
+                            queue_path[(queue_tail * 32 + m) as usize] = path[m as usize]
+                            m = m + 1
+                        }
+                        queue_path[(queue_tail * 32 + plen) as usize] = e.to
+                        queue_tail = queue_tail + 1
+                    }
+                }
+                j = j + 1
+            }
+        }
+    }
+
+    (found, best_length, best_integral, best_peak, best_cost)
+}
+
+// Exposure-therapy graph builder
+pub fn mercy_exposure_therapy_graph() -> MercyGraph with Mut, Panic {
+    var g = mercy_graph_new()
+    // states: 0=avoidance, 1=mild, 2=moderate, 3=recovery
+    g = mercy_add_state(g, 0.0)  // avoidance
+    g = mercy_add_state(g, 2.0)  // mild
+    g = mercy_add_state(g, 5.0)  // moderate
+    g = mercy_add_state(g, 0.0)  // recovery
+    // edges
+    g = mercy_add_edge(g, 0, 0, 1.0)  // avoidance -> avoidance
+    g = mercy_add_edge(g, 0, 1, 1.0)  // avoidance -> mild
+    g = mercy_add_edge(g, 1, 0, 1.0)  // mild -> avoidance
+    g = mercy_add_edge(g, 1, 2, 1.0)  // mild -> moderate
+    g = mercy_add_edge(g, 2, 1, 1.0)  // moderate -> mild
+    g = mercy_add_edge(g, 2, 3, 1.0)  // moderate -> recovery
+    g
+}

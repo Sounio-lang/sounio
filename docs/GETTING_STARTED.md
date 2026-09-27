@@ -14,7 +14,7 @@ artifacts already committed under `artifacts/omega/souc-bin/`. Do not begin
 with `cargo build` at the repo root; there is no top-level compiler Cargo
 manifest there anymore.
 
-## 1. Default JIT workflow
+## 1. Default workflow (checked `bin/souc` artifact)
 
 ```bash
 export SOUC_BIN="$(pwd)/bin/souc"
@@ -26,7 +26,10 @@ export SOUC_BIN="$(pwd)/bin/souc"
 What this default artifact proves today:
 
 - version `1.0.0-beta.4`
-- Cranelift JIT enabled
+- **Cranelift JIT NOT compiled** — `souc info` prints `[-] Cranelift JIT - rebuild
+  with --features jit`. Measured 2026-08-27: no artifact enables it, no build path
+  passes the feature, and the binary exports no Cranelift symbol. This bullet
+  previously read "Cranelift JIT enabled" — not compiled
 - LLVM and GPU codegen disabled in this artifact
 - SMT, LSP, distributed, and package-manager features disabled in this artifact
 - ontology resolution CLI enabled natively via `souc ontology <resolve|search|ancestors|is-subclass>`
@@ -34,7 +37,7 @@ What this default artifact proves today:
 Use this profile for the ordinary docs workflow, examples, and `check`-first
 validation.
 
-The website graphics showcase is also generated from this checked JIT artifact:
+The website graphics showcase is also generated from this checked compiler artifact:
 it currently publishes five real raster previews from `examples/render/`.
 
 ## 2. GPU workflow

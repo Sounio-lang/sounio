@@ -1,0 +1,56 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: float_literal_correctly_rounded: PASS
+// requires: madaros because lean_single carries its OWN copy of the decimal
+// conversion, inside lean_single.sio, still the pre-#1626 one -- it gets five
+// of these ten wrong. The suite's stage2 binary is built by lean_single, so
+// without this guard the test is a false red. Porting the bignum path there is
+// a separate change: it needs its own seed re-derivation. Filed as follow-up.
+// #1626: decimal -> binary64 must be correctly rounded, not merely close.
+//
+// The original conversion accumulated `frac = frac * 0.1`, and 0.1 is not
+// representable, so every digit compounded a rounding: 32 of 91 realistic
+// literals were wrong. Exact fast paths took that to 4, and the bignum slow
+// path takes it to 0 -- measured at 0 wrong across 920 random literals
+// spanning 1e-320 to 1e300, against 359 wrong on the pre-fix compiler.
+//
+// Every literal below is one that a shortcut got wrong at some point in that
+// sequence. Keep them: each one is a different failure mode, and they are
+// cheap insurance against the next person reaching for a shortcut.
+//
+//   0.99999999            one ULP high; this is what made log look like it
+//                         had a 2^-53 residual, since ulp(1.0)/1.0 IS 2^-53
+//   944.6810951079374     16 significant digits -- trimming the significand
+//                         to 2^53 threw away a digit it actually carries
+//   118.06577825496211    17 digits; f64 accumulation stops at 2^53
+//   1.602176634e-19       |exponent| > 22, outside the exact power-of-ten window
+//   1e300 / 1e-300        chunked scaling cost one rounding per chunk
+//   610e-315              SUBNORMAL: extracting 53 bits and scaling down
+//                         rounds twice, because binary64 loses precision
+//                         gradually below 2^-1022
+//
+// Compared against bit patterns from CPython. Kept short on purpose: a file
+// with ~150 such comparisons hits a separate Madaros miscompile and reports
+// false failures, which cost a measurement pass to notice.
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    var bad: i64 = 0
+    if f64_to_bits(0.99999999) != 4607182418709945415 { bad = bad + 1 }
+    if f64_to_bits(944.6810951079374) != 4651520718607872116 { bad = bad + 1 }
+    if f64_to_bits(118.06577825496211) != 4638008557483030122 { bad = bad + 1 }
+    if f64_to_bits(0.9999999999999999) != 4607182418800017407 { bad = bad + 1 }
+    if f64_to_bits(1.602176634e-19) != 4325607224011134547 { bad = bad + 1 }
+    if f64_to_bits(1e300) != 9094988921128908188 { bad = bad + 1 }
+    if f64_to_bits(1e-300) != 118622047889322841 { bad = bad + 1 }
+    if f64_to_bits(610e-315) != 123465374517 { bad = bad + 1 }
+    if f64_to_bits(6.02214076e23) != 4962933279127225623 { bad = bad + 1 }
+    if f64_to_bits(3.141592653589793) != 4614256656552045848 { bad = bad + 1 }
+    if bad != 0 {
+        print("float_literal_correctly_rounded: FAIL ")
+        print_int(bad)
+        print("\n")
+        return 1
+    }
+    print("float_literal_correctly_rounded: PASS\n")
+    0
+}

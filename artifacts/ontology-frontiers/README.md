@@ -1,0 +1,749 @@
+# Ontology Frontiers — relatório final da meta autônoma
+
+**Data:** 2026-08-02
+**Lane:** `kimi--ontology-frontiers-20260802` (released)
+**Método:** mineração de literatura via scite MCP (ontologias biomédicas /
+validação semântica) → 3 fronteiras profundas, cada uma com documento de
+evidência, protótipo executável e formalização Lean 4 verificada.
+
+## Fronteiras atacadas
+
+### 1. `epistemic-alignment-repair/`
+Reparo de alinhamentos de ontologias com confiança epistêmica tipada.
+Âncoras: Jiménez-Ruiz et al. 2011 (`10.1186/2041-1480-2-s1-s2`),
+Solimando et al. 2016 (`10.1007/s10115-016-0983-3`), Rovai 2026
+(`10.48550/arxiv.2605.09184`).
+- `alignment_repair.sio` — `souc check` OK, `souc run` → `ALL PASS`.
+- `formal/OntologyAlignmentRepair.lean` — soundness (`mem_repair_nil`),
+  correção (`pairwise_repair_nil`), testemunha de maximalidade
+  (`repair_witness_nil`); instância `Fin 5` por `native_decide`.
+
+### 2. `epistemic-claim-status/`
+Status epistêmico verificável de claims em knowledge graphs.
+Âncoras: arXiv:2602.15353, arXiv:2601.21116, arXiv:2604.11759,
+arXiv:2603.28444.
+- `claim_status.sio` — `souc check` OK, `souc run` → `ALL PASS`.
+- `formal/OntologyClaimStatus.lean` — cadeia weakest-link
+  (`chainConf_le_acc`, `chainConf_le_mem`, `chainConf_ge`) e fusão DS
+  (`dsNum_ge_max`), confianças em por-mil (Nat, aritmética exata).
+
+### 3. `consistent-ontology-evolution/`
+Evolução de ontologias com consistência a priori verificada.
+Âncoras: Bayoudhi et al. 2018 (`10.1111/exsy.12355`), Jiménez-Ruiz et al.
+2011 (consistency principle).
+- `version_chain.sio` — `souc check` OK, `souc run` → `ALL PASS`.
+- `formal/OntologyEvolution.lean` — transição com guarda
+  (`consistent_applyEdit`), invariante a priori
+  (`mem_versions_consistent`), preservação em rejeição
+  (`applyEdit_reject`); importa `OntologyAlignmentRepair`.
+
+## Verificação
+
+- `bin/souc check` nos 3 protótipos: `check: OK`.
+- `bin/souc run` nos 3 protótipos: `ALL PASS`.
+- `cd formal && lake build`: **Build completed successfully** (lib inteira,
+  incluindo as 3 novas roots; zero `sorry`, zero novos axioms).
+- Revisão matemática obrigatória (política do repo):
+  `bin/llm-offload -t math-review -p xai` → **PASS** (todos os teoremas
+  [OK]; única nota estilística [TIGHTENABLE] em `conflictsAny_*`).
+  Log: `.claude/llm_offload_log.md` (2026-08-02); saída completa em
+  `LEAN_MATH_REVIEW_XAI.md`.
+
+## Limitações do compilador encontradas (documentadas nos artefatos)
+
+1. Refinamentos `where result.confidence >= ...` (usados em exemplos como
+   `examples/epistemic_dempster_shafer.sio`) **não são aceitos pelo parser
+   Madaros atual** — os contratos foram enforcement de runtime.
+2. Arrays de structs e arrays sem inicialização splat (`var a: [f64; N]`)
+   **segfaultam em runtime**; protótipos usam arrays paralelos primitivos
+   com splat (`= [0.0; N]`).
+3. A equivalência entre o greedy "drop-weaker" par a par (protótipo F1) e
+   o fold por prioridade (Lean) está argumentada, não mecanizada — lacuna
+   registrada no FRONTIER.md da fronteira 1.
+
+## Lacunas por fronteira
+
+Ver seção "Lacunas e riscos" de cada `FRONTIER.md`: oráculos de conflito
+abstratos (não ligados a reasoner OWL/EL++), escala real (SNOMED CT 300k+
+entidades) fora de escopo, álgebra de propagação escolhida (min/DS) é uma
+entre várias.
+
+## Rodada 2 — swarm de fechamento de lacunas (2026-08-02)
+
+Quatro agentes em paralelo fecharam as lacunas documentadas:
+
+1. **Equivalência mecanizada (fronteira 1)** —
+   `formal/OntologyRepairEquivalence.lean` (~630 linhas): teorema
+   `repair_iff_greedy` prova que o greedy par-a-par do protótipo e o fold
+   por prioridade computam o mesmo conjunto retido, sob confianças
+   distintas e conflitos em **grafo de clusters** (união disjunta de
+   cliques). Descoberta: a afirmação original "confianças distintas
+   bastam" é **falsa em geral** — contraexemplo mecanizado
+   (`cx_equivalence_fails`): no caminho de conflitos 0—1—2 com confianças
+   0<1<2, o greedy retém {2} e o fold retém {0,2}. O comentário em
+   `OntologyAlignmentRepair.lean` foi corrigido.
+2. **Remoção + repair-then-retry (fronteira 3)** —
+   `formal/OntologyEvolutionRepair.lean`: edits `add | remove`; sublista
+   de versão consistente é consistente; invariante de cadeia generalizado;
+   `repair_retry` (após remover o *único* parceiro conflitante, o axioma
+   rejeitado é aceito e a versão segue consistente). Protótipo
+   `version_chain_removal.sio`: add 1,2,3 → add 4 rejeitado → remove 2 →
+   re-add 4 aceito → {1,3,4}; `ALL PASS`.
+3. **Confianças intervalares (fronteira 2)** — `formal/ClaimStatusInterval.lean`:
+   `IConf {lo, hi}` por-mil; preservação de validade, contenção do
+   resultado pontual, preservação de limiar no lado `lo`, e
+   `ds_lo ≥ max` das fontes. Protótipo `interval_claims.sio`: `ALL PASS`.
+4. **Repros de compilador** — `compiler-repros/`: 4 arquivos mínimos +
+   `REPORT.md` com saídas verificadas (parse error em `where`; SIGSEGV em
+   arrays de structs e arrays sem splat; controle com splat OK).
+   Referência cruzada com `docs/compiler/KNOWN_LIMITATIONS.md`. Nota: o
+   wrapper atual sai com código 1 (não 0) no parse error — saída de erro
+   continua só em stdout.
+
+Todas as novas formalizações passaram por math-review xai (PASS, log em
+`.claude/llm_offload_log.md`). Verificação central: `lake build` verde com
+as 6 roots de fronteira; `souc check`/`run` re-executados nos novos
+protótipos.
+
+Lacunas restantes (declaradas nos arquivos): equivalência greedy≡fold só
+sob hipótese de cluster; repair-then-retry exige parceiro conflitante
+único (remoção minimal entre vários parceiros = trabalho futuro, conecta
+com a fronteira 1); p-box/GUM de segunda ordem completo segue aberto;
+oráculos de conflito continuam abstratos.
+
+## Rodada 3 — remoção minimal + gate CI (2026-08-02)
+
+- `formal/OntologyMinimalRepair.lean`: decisão admitir-vs-rejeitar para
+  candidato conflitando com **múltiplos** parceiros — o conjunto de remoção
+  é forçado (todos os parceiros; unicidade/minimalidade nas duas
+  direções), a decisão por massa epistêmica retida é ótima entre as duas
+  opções, e ambos os ramos preservam consistência. Protótipo
+  `minimal_repair_demo.sio`: `ALL PASS`. Math-review xai: PASS.
+- `scripts/ci/ontology_frontiers_gate.sh` criado (ver "Gate CI").
+
+## Rodada 4 — oráculo fundamentado em semântica EL (2026-08-02)
+
+- `formal/OntologyELReasoner.lean`: mini lógica de descrição (axiomas
+  `sub`/`disj`), semântica de Tarski, fecho transitivo de subsunção como
+  sistema dedutivo indutivo, e o teorema central **`incoherent_empty`**:
+  toda classe marcada incoerente pelo fecho é vazia em todo modelo da
+  TBox. `oracle_sound` conecta isso ao oráculo de conflitos das fronteiras
+  anteriores: pares sinalizados não podem valer simultaneamente em nenhum
+  modelo. Instância `Fin 8` biomédica com 11 checks `decide`/`native_decide`.
+  Math-review xai: PASS. Limitação honesta (registrada no arquivo): o
+  fecho booleano computacional foi validado contra o sistema indutivo só
+  na instância concreta — uma verificação geral do fecho fica para a
+  próxima rodada.
+- `el-grounding/` (nova fronteira): `el_conflict_demo.sio` **deriva** os
+  conflitos de uma TBox em miniatura (fecho de subsunção + disjunção) em
+  vez de hardcodá-los, e confirma que o oráculo derivado coincide com o
+  hardcoded da fronteira 1 na instância compartilhada (mesmos sobreviventes
+  do reparo).
+
+## Rodada 5 — fecho verificado + empates determinísticos (2026-08-02)
+
+- `formal/OntologyELClosureVerified.lean` (~700 linhas): a ponte
+  computacional↔dedutiva fechada em **generalidade total** —
+  `subB_iff_subDer` (o fecho booleano coincide com o sistema indutivo,
+  soundness via invariante de iteração e completeness via linearização de
+  derivações em walks + corte de laços com cota n+1 iterações) e
+  `conflictB_iff` (o oráculo booleano É o `DerivedConflict` semântico, nas
+  duas direções). A limitação honesta da rodada 4 está fechada.
+  Math-review xai: PASS.
+- `formal/OntologyRepairTies.lean`: a equivalência greedy≡fold estendida
+  de confianças distintas para **arbitrárias**, via prioridade
+  lexicográfica (conf desc, id asc) codificada injetivamente em Nat —
+  `repair_iff_greedy` da rodada 2 aplicado verbatim com `conf := prio`;
+  `greedyStep_prio_eq_sio` prova que o passo do greedy com prioridade é
+  definicionalmente o tie-break do protótipo `.sio`; determinismo do
+  greedy provado; instância `Fin 6` com empate real (m0/m1 a 0.50)
+  computada pelos dois algoritmos com resultado igual. Protótipo
+  `tie_repair_demo.sio`: `ALL PASS` (determinismo em duas execuções,
+  sobreviventes livres de conflito, testemunhas). Math-review xai: PASS.
+
+## Rodada 6 — dados reais + empacotamento (2026-08-02)
+
+- **`real-data/` — validação no OAEI 2016 Anatomy track real**
+  (human.owl 3.304 classes / mouse.owl 2.744, reference.rdf oficial):
+  1.961 classes (cap fechado por ancestrais), 2.266 axiomas sub, 17
+  disjunções, 6.638 mappings candidatos (matcher lexical Jaccard;
+  P=0.187/R=0.817 contra a referência oficial), **368 conflitos derivados
+  (0 entre mappings de referência)**, reparo descarta 246 (conf média
+  0.41 vs 0.55 dos retidos) e **apenas 3 dos 1.238 mappings de
+  referência** — o reparo epistêmico remove preferencialmente
+  não-referências. Driver `real_repair_driver.sio` com espelho python
+  cruzado: `ALL PASS` (~17s). Reprodução completa (URLs, sha256,
+  comandos) em `real-data/REAL_RESULTS.md`.
+- **`stdlib/ontology/` — empacotamento**: `closure.sio`, `repair.sio`,
+  `evolve.sio` (módulos reutilizáveis, convenção `stdlib/algo`) +
+  `examples/ontology_pipeline_demo.sio` end-to-end (`ALL PASS`).
+- **`TECHNICAL_NOTE.md`** — nota técnica externa (5 rodadas, teoremas,
+  limitações); revisão externa `llm-offload --raw`: deepseek PASS 9/10,
+  xai PASS (gemini indisponível — fallback de 2 providers, conforme
+  política).
+- **Novos pitfalls de compilador encontrados** (a propagar para
+  `compiler-repros/` numa próxima rodada): >682 statements por função
+  silenciosamente descartados; arrays splat em nível de módulo com
+  elementos iniciais sujos; atribuição a elemento de array f64 fora de
+  `main` é no-op silencioso; thin-link multimódulo falha além de ~24k
+  assignments; **forma qualificada de import (`mod::f`) miscompila**
+  (mutações `&!` perdidas) — a forma nomeada funciona.
+
+## Rodada 7 — EL+, escala sem cap, miscompile (2026-08-02)
+
+- **`formal/OntologyELPlus.lean`** (~530 linhas): o fragmento EL⁺ que a
+  SNOMED CT realmente usa — conceitos `atom | ⊤ | ⊓ | ∃r.C`, axiomas
+  `sub | disj | roleSub`, semântica de Tarski com interpretação de papéis,
+  sistema dedutivo de 9 regras (**nenhuma descartada**) com `der_sound`
+  por indução, `incoherentP_empty`, ponte de oráculo `oracle_sound_P`, e
+  projeção atômica reutilizando o fecho verificado (`subBP_sound`,
+  `conflictBP_sound`). Instância `Fin 8 × Fin 2` estilo SNOMED
+  (Pneumonia ⊑ ∃RoleGroup.(Lung ⊓ Inflammation) ⊑ ∃RoleGroup.Organ).
+  Composição de papéis `r∘s⊑t` declarada como próxima fronteira.
+  Math-review xai: PASS.
+- **Escala sem cap** (`real-data/scale/`): a TBox Anatomy **completa**
+  (3.304 classes, sem cap) roda até `ALL PASS` — 21.859 arestas de fecho,
+  368 conflitos, kept 6.392 / dropped 246, **byte-idêntico** à rodada 6
+  (confirmando que o cap ancestral era lossless). Estratégia esparsa
+  (BFS por classe, sem matriz N²): **nenhum teto encontrado** (estrela de
+  10M classes em 3.5s; cadeia de 30k classes com 450M arestas em 8.9s).
+  Tetos reais medidos: muro de ~24k statements por compilação (single e
+  multimódulo); denso N² OK até N=50.000 (7.5GB); N=100k → handoff Slurm
+  documentado (não executado, conforme regra do repo).
+- **Miscompile caçado** (`compiler-repros/` + `docs/audit/`): os 5
+  pitfalls reproduzidos com limiares refinados (P1 é uma família
+  dependente de forma — 256 a 682; P3 = P1 com f64 RMW; P4 = 10.2k/10.4k
+  statements). **Causa-raiz do P5 (import qualificado)**:
+  `self-hosted/ir/lower.sio:15698-15717` mangles `m::f` → `m_f`; funções
+  importadas registradas como `f`, então o linker fabrica um stub sem
+  corpo e a chamada cai nele silenciosamente — confirmado empiricamente
+  no compilador não modificado. Patch candidato (não aplicado, dry-run
+  OK) em `compiler-repros/qualified_import_fix_candidate.diff`; auditoria
+  completa em `docs/audit/QUALIFIED_IMPORT_MISCOMPILE_2026-08-02.md`.
+
+## Demo executável — fecho EL⁺ completo (rodada 8)
+
+- **`examples/ontology_elplus_closure_demo.sio`**: espelho executável do
+  motor de saturação role-aware de `formal/OntologyELPlusClosureComplete.lean`
+  (o fecho `closeSatF` completo, com `subBPlusC_iff` / `conflictBPlusC_iff`),
+  instanciado na TBox SNOMED de `formal/OntologyELPlus.lean` (`Fin 8 × Fin 3`).
+  Conceitos internados em tabela (átomos 0..7, ⊤, `Lung ⊓ Inflammation` e as
+  restrições existenciais necessárias), relações `S` (subsunção), `R`
+  (arestas de papel com filler base) e `rclos` (fecho da hierarquia de
+  papéis) como arrays primitivos paralelos; a rodada de fixpoint reproduz
+  o `crStep` (transitividade, ⊓-elim/intro, stoR/RtoS, Rmono, roleSub via
+  `rclos`, composição `DirectSite ∘ PartOf ⊑ RoleGroup`) e itera até
+  estabilidade (3 rodadas). Checks: `Pneumonia ⊑ ∃RoleGroup.Organ` = true,
+  `conflict(Pneumonia, Drug)` = true, `conflict(DrugInducedDisorder, ele
+  mesmo)` = true (testemunha de incoerência), `Organ ⊑ Disorder` = false.
+  `souc check` OK; `souc run` → `ALL PASS` (marcadores `//@ run-pass` /
+  `//@ expect-stdout: ALL PASS`).
+
+## Rodada 9 — fecho EL⁺ role-aware no pipeline de dados reais (2026-08-04)
+
+Integração do fecho booleano EL⁺ com papéis (o motor verificado de
+`formal/OntologyELPlusClosureComplete.lean`) no pipeline OAEI Anatomy:
+
+- **`real-data/extract_tbox.py`** não descarta mais as restrições
+  anônimas: `owl:Restriction`/`someValuesFrom` viram linhas
+  `exsub <ont> <child> <role> <filler>` (1.637 mouse / 1.662 human),
+  `owl:ObjectProperty` + `rdfs:subPropertyOf` viram `roleSub`,
+  `owl:propertyChainAxiom` vira `roleComp`, e uma nova `roles.tsv`
+  tabela os papéis. Classes/sub/disj extraídos são byte-idênticos às
+  rodadas anteriores.
+- **`real-data/scale/gen_elplus_data.py`** — espelho python do fixpoint
+  de 8 regras (transitividade, ⊓-elim/intro, stoR/RtoS, Rmono, roleSub,
+  roleComp) sobre o universo internado completo (átomos + ⊤ + ∃r.f para
+  todo papel r e filler base; U = 9.915 conceitos), com cross-check
+  packed (máscaras de bits de ancestrais + fórmulas reduzidas) — o script
+  aborta se as duas representações divergirem.
+- **`stdlib/ontology/elplus.sio`** — módulo reutilizável: variante densa
+  (fixpoint de 8 regras, ≤64 conceitos / 8 papéis / 8 cadeias) e
+  variante esparsa (BFS por classe + expansão in-place de ancestrais,
+  ≤4.096 classes). As matrizes de trabalho da variante esparsa são
+  globais do próprio módulo: **arrays em nível de módulo passados por
+  `&!` miscompilam** (mutações caem num stub do linker; spreads grandes
+  de índice → SIGSEGV) — novo pitfall encontrado nesta rodada, variante
+  da família P5 documentada em `compiler-repros/`.
+- **`real-data/scale/elplus_scale_driver.sio`** — Parte A: instância
+  sintética estilo SNOMED (40 conceitos) via variante densa, exercitando
+  ⊓/roleSub/roleComp (as 6 queries da demo da rodada 8 + contagens do
+  espelho: 201 células S, 140 arestas de papel). Parte B: TBox Anatomy
+  humana completa com papéis via variante esparsa — 21.859 arestas de
+  fecho atômico (= rodada 7), **21.761 arestas de papel com fonte
+  atômica / 72.089 totais**, 103.863 células S no universo internado,
+  **736 conflitos derivados — byte-idêntico à rodada 7**: os papéis
+  estendem a subsunção (alvos existenciais) sem alterar a disjunção
+  atômica, logo o reparo da rodada 7 carrega-se sem alteração (m_keep /
+  m_conf não re-emitidos). `ALL PASS`.
+- **Limitação honesta** (afirmada no driver): a track Anatomy tem UM
+  papel ativo (`part_of`; a segunda propriedade declarada,
+  `ObsoleteProperty`, nunca aparece em restrições) e ZERO axiomas
+  roleSub/roleComp — essas regras são exercidas apenas na instância
+  sintética da Parte A.
+
+## Rodada 10 — EL+ role-aware nos drivers de repair (2026-08-04)
+
+Integração do `stdlib/ontology/elplus.sio` nos três drivers de repair,
+que passam a computar conflitos com o fecho role-aware (o motor
+verificado de `formal/OntologyELPlusClosureComplete.lean`) em vez do
+fecho atômico/oráculo hardcoded:
+
+- **`stdlib/ontology/elplus.sio`** — 3 novos exports de integração (API
+  existente intacta): `elplus_derive_conflicts` (deriva a relação de
+  conflito entre mappings a partir da matriz EL+ densa fechada; saída no
+  mesmo stride 256 de `ontology::closure::derive_conflicts`, então
+  `ontology::repair` pluga sem mudança), `elplus_subsumes_sparse` e
+  `elplus_edge_sparse` (acessores O(1) de leitura sobre as matrizes de
+  trabalho esparsas, para drivers consultarem o fecho role-aware sem
+  cruzar fronteira `&!` com arrays de módulo).
+- **`real-data/real_repair_driver.sio`** — o fixpoint atômico próprio
+  foi substituído pela variante esparsa do elplus (BFS por classe +
+  seeding dos fillers + expansão de ancestrais); todas as consultas de
+  fecho passam pelo motor EL+. `gen_sounio_data.py` agora carrega as
+  linhas `exsub` do `tbox.txt` (extração da rodada 9): **862 de 1.662**
+  restrições existenciais `C ⊑ ∃part_of.F` sobrevivem ao cap (ambos os
+  endpoints mantidos; papel ativo único afirmado), emitidas como
+  `ex_c`/`ex_f` (e `h_sub` paddado a 4096 para casar com as assinaturas
+  do stdlib). Novos valores de espelho: `expected_exsub()=862`,
+  `expected_closure_edges()=12669`, `expected_role_edges_atom()=10801`.
+  **Saída byte-idêntica às rodadas 6-7/9, documentada e intencional**:
+  o perfil Anatomy não tem conjunções, tem um único papel ativo, zero
+  roleSub/roleComp e endpoints de disjunção todos atômicos, e nenhuma
+  regra EL+ adiciona alvos atômicos de subsunção além do fecho atômico
+  (stoR/RtoS/Rmono só alcançam alvos existenciais) — logo os conflitos
+  derivados role-aware são EXATAMENTE os atômicos: 736 pares ordenados,
+  kept 6.392 / dropped 246, mesmo top-5; as duas linhas da camada de
+  papéis (exsub, role edges) são o único acréscimo à saída. O espelho
+  python aborta se as premissas do perfil forem violadas (endpoint
+  não-atômico de disjunção ou segundo papel ativo), então uma extração
+  futura que introduzisse conflitos role-derivados dispara o gerador em
+  vez de mudar o repair silenciosamente.
+- **`epistemic-alignment-repair/alignment_repair.sio`** — o oráculo
+  hardcoded `fn conflicts` foi substituído pela variante densa do elplus
+  (`elplus_fixpoint` + `elplus_derive_conflicts`). A mini TBox ganha uma
+  camada de papel (`heart ⊑ ∃part_of.Organ`, `∃part_of.Organ ⊥
+  DrugClass`): o conflito CONCEITO `conflict(heart, drugclass)` é
+  genuinamente role-derivado (invisível ao fecho atômico), enquanto os
+  conflitos de MAPPING permanecem exatamente `{m0-m1, m2-m3}` — a
+  instância compartilhada de 5 mappings e os sobreviventes
+  `{m0, m2, m4}` não mudam.
+- **`examples/ontology_pipeline_demo.sio`** — as fases de fecho +
+  derivação de conflitos migraram de `ontology::closure` para
+  `ontology::elplus` (variante densa, mesma TBox estendida); as fases de
+  repair (`ontology::repair`) e evolução (`ontology::evolve`) não mudam.
+- Gate `scripts/ci/ontology_frontiers_gate.sh`: **12/12 OK**.
+
+## Rodada 11 — fecho EL+ role-aware em ontologia real ROLE-RICA (GO/RO) (2026-08-04)
+
+A limitação honesta da rodada 9 (Anatomy: UM papel ativo, ZERO axiomas
+roleSub/roleComp) é fechada com dados reais role-ricos: **GO
+(`go-plus.owl`, 237 MB) + RO (`ro.owl`)**, baixados de
+`purl.obolibrary.org` para `real-data/downloads/`. O fallback sintético
+(Track A) não foi necessário.
+
+- **`real-data/extract_tbox.py --go`** — novo modo GO/RO:
+  `owl:TransitiveProperty` (elemento ou `rdf:type`) vira a cadeia
+  `r ∘ r ⊑ r`; `rdfs:subPropertyOf` vira `roleSub`;
+  `owl:propertyChainAxiom` (2 membros; RO usa `rdf:Description
+  rdf:about=`, não `owl:ObjectProperty rdf:resource=`) vira `roleComp`.
+  Slice **ancestor-closed** de go-plus com raiz `GO:0051301` ("cell
+  division", cone de 50 descendentes): a política é fillers/pais/parceiros
+  de disjunção **somente GO** (sem isso o fecho ancestral explode:
+  2.263 classes para GO:0006915; medido) + parceiros de disjunção. O
+  conjunto de papéis é **RO-fechado** (superpropriedades e alvos de
+  cadeias cujos membros são usados), o que adiciona `overlaps`
+  (RO:0002131) — papel que só recebe arestas derivadas. Restrições no
+  lado superclasse (`∃r.F ⊑ C`) foram sondadas: **0 ocorrências** em
+  go-plus. Resultado: **H=204 classes, NR=8 papéis, 253 sub, 93 exsub,
+  43 disj, 2 roleSub (part_of/has_part ⊑ overlaps), 9 roleComp**
+  (transitividade de part_of/has_part/overlaps/regulates + cadeias
+  cruzadas como `has_part ∘ part_of ⊑ overlaps`), universo internado
+  U = 1.845 conceitos (cap U ≤ 2.048 para viabilidade densa).
+- **`real-data/scale/gen_elplus_data.py --go`** — o mesmo espelho python
+  do fixpoint geral de 8 regras da rodada 9, agora sobre o slice GO,
+  mais: projeção atômica (bitmask de ancestrais só do sub estatuído),
+  **ablações** (fixpoint sem roleComp / sem roleSub) e a **asserção do
+  teorema de perfil**: sem conjunções e sem restrições superclasse,
+  papéis não adicionam subsunções/conflitos ATÔMICOS (o script aborta se
+  violado). Emite `go_elplus_data.sio` (400 assignments; packing
+  `child*1024+parent`, `(child*32+role)*1024+filler`) e
+  `go_elplus_driver.sio` com os valores do espelho em `go_expected_*()`.
+- **`real-data/scale/go_elplus_driver.sio`** — driver auto-contido: a
+  capacidade densa do stdlib (64 conceitos) não comporta U=1.845 e
+  matrizes de módulo não cruzam fronteira `&!`, então as matrizes de
+  trabalho são globais do próprio driver (sb/sx separadas + cubo de
+  papéis; stor/rtos como helpers guardados). Três fixpoints: completo,
+  sem roleComp, sem roleSub — mais a projeção atômica própria.
+  **`ALL PASS` em ~6 s** (compilação + run), todos os 16 números iguais
+  ao espelho.
+- **Resultados**: 24.524 células S / 21.628 arestas de papel (3.380 com
+  fonte atômica = 3.380 alvos existenciais revelados por papéis);
+  1.051 arestas atômicas role-aware **= projeção atômica**; 8.436
+  conflitos ordenados **= projeção atômica** (teorema de perfil verificado
+  computacionalmente nos dois lados). Ablações: sem roleComp → 18.006
+  células S / 15.110 arestas (**roleComp contribui 6.518 arestas — a
+  família dominante neste dado**); sem roleSub → 21.834 / 18.938
+  (roleSub contribui 2.690). Comparação com a rodada 9: em Anatomy
+  roleSub/roleComp eram ZERO; aqui respondem por 42% das arestas de papel.
+- **Limitações honestas**: slice de 204 classes (cap por viabilidade
+  densa; GO completo tem ~52k classes GO / 85k declaradas); fillers
+  externos (CHEBI/CL/UBERON) excluídos; como go-plus não tem restrições
+  superclasse nem conjunções extraídas, os conflitos atômicos não mudam
+  com papéis — **medido**, não assumido.
+- Gate `scripts/ci/ontology_frontiers_gate.sh`: **13/13 OK** (driver GO
+  adicionado).
+- Revisão matemática obrigatória (política do repo):
+  `bin/llm-offload -t math-review -p xai` sobre as 4 claims (teorema de
+  perfil, bijeção stoR/RtoS, equivalência do fixpoint, framing das
+  ablações) → **PASS**, todos [OK]. Log em
+  `agent_logs/go_elplus_offload_2026-08-04.md` (o log canônico
+  `.claude/llm_offload_log.md` estava sob claim ativa de outra lane).
+
+## Rodada 12 — escala TOTAL: GO go-plus completo (38.245 classes, 92 papéis) (2026-08-04)
+
+A limitação de escala da rodada 11 (slice de 204 classes, cap pela
+viabilidade densa U ≤ 2.048) é fechada: o fecho EL+ role-aware roda sobre
+**todo o GO go-plus** sob a política GO-only da rodada 11 (classes, pais,
+fillers e parceiros de disjunção restritos ao namespace GO; classes
+obsoletas `owl:deprecated` excluídas — 13.736).
+
+### Análise de estratégia (por que nenhuma variante existente comporta o GO)
+
+- **Variante densa do stdlib** (64 conceitos) e **driver denso da rodada
+  11**: inviáveis — U = (H+1)×(NR+1) = 3.556.878 conceitos internados; as
+  matrizes U×B teriam ~1,8×10¹⁰ células e o cubo de papéis ~146 GB.
+- **Variante esparsa do stdlib** (`ELPLUS_SC = 4096`): capacidade ~9×
+  menor que H e restrita ao perfil Anatomy (papel único, sem hierarquia) —
+  o GO tem NR = 92 papéis com 107 roleSub e 60 roleComp.
+- **Dados embutidos como statements**: 58k sub + 19k exsub + axiomas de
+  papel ≫ o muro de ~24k statements por compilação.
+- **Sharding**: rejeitado — o fecho é global (transitividade e cadeias
+  cruzam qualquer particionamento).
+- **Slurm**: não necessário — a representação bitmask cabe na máquina
+  (~35 GB disponíveis).
+
+**Estratégia escolhida (nova variante esparsa multi-papel bitmask + carga
+em runtime)**: (i) a TBox é lida em RUNTIME via `read_file` +
+`str_char_at` (padrão de `stdlib/data/csv_reader.sio`; builtin 1-arg,
+fix #1078) de um arquivo packed emitido pelo espelho — o muro de
+statements não é engatilhado (zero data statements); (ii) as matrizes
+booleanas O(U²) viram bitmasks i64 (WC = 598 palavras por linha):
+ancestrais `anc[c]` (187 MB) e fillers `F[(r,c)]` (92 × 38.245 × 598 ×
+8 B = 17,9 GB BSS — sondado antes: aloca e roda em <1 s).
+
+### Extração (`extract_tbox.py --go --go-full`)
+
+Sem slice: todas as 38.245 classes GO ativas, 57.824 sub, 18.791 exsub
+C ⊑ ∃r.F com filler GO (as ~85k restrições com fillers CHEBI/CL/UBERON
+ficam fora pela política GO-only), 55 disj, e o conjunto de papéis
+**RO-fechado sem cap**: 55 papéis usados + 37 alvos de derivação =
+**NR = 92** (107 roleSub, 60 roleComp). Interseções (definições lógicas)
+seguem descartadas e contadas (91 restr_shape + 14.898 anon).
+
+### Bug encontrado e corrigido (rodada 12b) — worklist incompleto para roleComp
+
+A primeira versão do fixpoint usava um worklist de células dirty por
+componente-fonte. Esse worklist é **incompleto para roleComp**: quando
+F[r2][f] ganha uma aresta, a cadeia r1∘r2 ⊑ r3 deve disparar para todo c
+com f ∈ F[r1][c] — e essas células (r1, c) não estão no dirty set
+("direção 2"). Duas ordens de iteração corretas (por fases vs por
+varredura) convergiram para totais **7.200 arestas diferentes**
+(2.135.093 vs 2.127.893), expondo o vazamento — iteração caótica monótona
+deveria convergir para o mesmo menor fixpoint. Correção: **roleSub via
+worklist** (completo — regra de entrada única, semi-naive) + **roleComp
+via varredura completa por rodada** (fixpoint ingênuo); a rodada híbrida
+é iteração caótica Gauss-Seidel e atinge o mesmo menor fixpoint. Um
+segundo vazamento, desta vez de implementação (12c): os produtos da
+composição eram marcados no dirty-set errado no fim da rodada, e a
+cascata roleSub do último round se perdia (21 arestas) — corrigido com um
+swap de dirty-sets ao fim de cada rodada externa. O espelho python foi
+revalidado contra o fixpoint geral no slice da rodada 11 após a correção
+(exato nas 3 configurações).
+
+### Resultados (espelho python bitmask == driver Sounio, todos os números)
+
+- **395.939** arestas de fecho atômico (subsunção GO-only, reflexiva,
+  sem a coluna top);
+- **2.135.207** arestas de papel com fonte atômica = alvos existenciais
+  revelados por papéis (bijeção stoR/RtoS) — 5,4× o fecho atômico;
+- **792.814.846** conflitos atômicos (pares ordenados) — conferidos por
+  contagem independente: as 3 grandes disjunções de GO
+  (molecular_function × biological_process × cellular_component, cones de
+  10.041/24.129/4.075 descendentes) explicam ~763M dos pares;
+- fixpoint híbrido em **4 rodadas** (espelho);
+- ablações: sem roleComp → **1.883.813** (roleComp contribui 251.394);
+  sem roleSub → **597.305** (**roleSub contribui 1.537.902 — 72% das
+  arestas; no slice da rodada 11 o dominante era roleComp** — a
+  hierarquia RO profunda (107 roleSub sobre 92 papéis) domina no GO
+  completo). Os worklists vazados reportavam 597.284 (déficit de 21) e
+  2.135.093/2.127.893 (déficits de 114/7.314) — todos estritamente abaixo
+  do menor fixpoint, como previsto pela teoria.
+- Driver `go_full_elplus_driver.sio`: compila + roda em ~3,5 min
+  (3 fixpoints: completo + 2 ablações), `ALL PASS`.
+
+### Validação
+
+1. Redução bitmask == fixpoint geral de conjuntos no slice da rodada 11
+   (3 configurações: completo, sem-roleComp, sem-roleSub — exato, antes e
+   depois da correção 12b);
+2. driver Sounio == espelho python no GO completo (todos os contadores:
+  arestas atômicas, arestas de papel, alvos existenciais, conflitos,
+  ablações);
+3. conflitos conferidos por contagem independente por par de disjunções
+   (cones de descendentes);
+4. math-review xai obrigatória (política do repo), 2 revisões: redução
+   bitmask (12) e diagnóstico+correção do vazamento (12b) → **PASS**,
+   todos [OK]. Log em `agent_logs/go_full_elplus_offload_2026-08-04.md`.
+
+### Limitações honestas
+
+- Estatísticas em NÍVEL ATÔMICO: arestas com fonte existencial (∃r.f) e
+  totais de células S sobre U não são computados (exigiriam um fixpoint
+  de composição por conceito existencial; o conteúdo científico —
+  subsunções atômicas, alvos existenciais, conflitos — é atom-level).
+- Política GO-only exclui fillers externos (CHEBI/CL/UBERON);
+  interseções não extraídas (contadas).
+
+Gate `scripts/ci/ontology_frontiers_gate.sh`: **14/14 OK** (driver
+full-GO adicionado; o timeout default por arquivo subiu de 180 s para
+300 s para cobrir o run de ~3,5 min — override via
+`ONTOLOGY_FRONTIERS_RUN_TIMEOUT`).
+
+
+## Rodada 13 — otimização (3,3× mais rápido que ELK), DDI, multi-ontologia, adaptador SNOMED (2026-08-05)
+
+Quatro frentes (commit `56ea5df30b`; demo/adaptador SNOMED em `3e4441051f`,
+`2e67714f0a`):
+
+- **Otimização do fecho full-GO** — reescrita do motor de fixpoint de
+  `go_full_elplus_driver.sio`: linhas esparsas ordenadas em arena (o cubo
+  bitmask de 17,9 GB BSS vira ~0,9 GB), lista de células não-vazias,
+  worklist single-queue para roleSub, roleComp semi-naive com salto por
+  versão (forma semi-naive completa da regra 12b), e contagem de conflitos
+  agrupada por máscara de endpoints (218 máscaras distintas; 1,46G → 8,3M
+  iterações). Resultado: **3m43s → 4,7s wall (2,2s run) — 3,3× mais rápido
+  que ELK 0.6.0 (15,4s)**, com todos os números **byte-idênticos** à
+  rodada 12 (arestas atômicas, arestas de papel, conflitos, ablações,
+  rodadas 4/2/4). Documento completo:
+  `real-data/scale/OPTIMIZATION_RESULTS.md`. Novos pitfalls documentados:
+  inicializadores de escalares em nível de módulo; `&&`/`||` sem
+  curto-circuito na leitura de array do RHS.
+- **DDI role-aware** — `examples/clinical/ddi_elplus_demo.sio`: ponte entre
+  o grounding ChEBI de `stdlib/chemistry/ontology.sio` e
+  `elplus_fixpoint` + `elplus_derive_conflicts`; flags de interação
+  derivadas de uma mini TBox farmacológica (não de tabela hardcoded).
+  Claims split registrado no arquivo: fidelidade lógica PROVADA
+  (`subBPlusC_iff`/`conflictBPlusC_iff`); adequação farmacológica NÃO
+  estabelecida. Roda na lane lean_single (módulo chemistry); gate
+  `scripts/clinical_ddi_elplus_gate.sh`.
+- **Multi-ontologia** — `multi-ontology/`: três cones raiz do GO
+  (BP/CC/MF) + **CL** (3.335 classes, 29 papéis, 146.188 arestas de papel)
+  e **UBERON** (14.975 classes, 128 papéis, 2.343.535 arestas de papel).
+  Os cones **particionam** o GO completo: arestas atômicas somam
+  exatamente 395.939 (= rodada 12) e o contador agrupado reproduz
+  792.814.846 conflitos por um segundo algoritmo; o déficit de arestas de
+  papel (503.092) são as 3.603 restrições cross-cone (medido). roleSub
+  domina em todos os alvos (46–77%). Gate próprio
+  `scripts/ci/ontology_multi_ontology_gate.sh` (2/2 OK). Resultados:
+  `multi-ontology/RESULTS.md`.
+- **Adaptador SNOMED** — `stdlib/ontology/biomedical/snomed.sio`
+  (`SNOMEDElplus`): o `close()` chamava `elplus_fixpoint_packed`
+  cross-module, que **miscompilava `ELPLUS_MAXC`** (resolvia para 8 em vez
+  de 64) no frame de impl-method, tornando o fixpoint um no-op — corrigido
+  com o fixpoint de 8 regras totalmente inline sobre buffers globais; o
+  teste de aceitação `tests/stdlib/ontology/test_snomed_elplus_adapter.sio`
+  agora passa (era known-failure). Demo executável
+  `examples/ontology/biomedical/snomed_elplus_demo.sio` (Pericarditis/
+  Endocardium ⇒ "heart finding" via `finding_site ⊑ part_of` e
+  `part_of ∘ part_of ⊑ part_of`).
+
+Math-review xai das três frentes: PASS (log
+`agent_logs/multi_ontology_offload_2026-08-05.md`).
+
+## Rodada 14 — rastreabilidade metrológica como composição de papéis EL+ (2026-08-05)
+
+Aplicação nova do fecho EL+ denso fora do eixo biomédico: a "cadeia
+ininterrupta de calibrações" da VIM3 (JCGM 200:2012, 2.41) expressa como
+TBox EL+ role-aware, substituindo a caminhada imperativa de 4 elos de
+`stdlib/epistemic/traceability.sio` por derivação declarativa via roleComp.
+
+- **`examples/epistemic/traceability_elplus_demo.sio`** — conceitos
+  `Measurement`, `WorkingStandard`, `AccreditedLabStandard`,
+  `NationalStandard`, `SIPrimary` (⊑ `ReferenceStandard`) e `FieldDevice`;
+  papéis `calibratedAgainst`, `traceableTo`, `contributesUncertainty`;
+  axiomas de papel `calibratedAgainst ∘ calibratedAgainst ⊑ traceableTo`,
+  `calibratedAgainst ⊑ traceableTo` e `traceableTo ∘ traceableTo ⊑
+  traceableTo` (transitividade — necessária para cadeias de N elos; os dois
+  primeiros sozinhos só compõem 2 elos). A consulta "o resultado R é
+  rastreável ao SI?" vira `Measurement ⊑ ∃traceableTo.SIPrimary`, respondida
+  por `elplus_subsumes_dense` em O(1) após UM fixpoint (3 rodadas). A
+  extensão N-elos é demonstrada com `FieldDevice` (caminho de 5 arestas,
+  sem cap de 4 elos — o limite é só o budget de 64 conceitos da variante
+  densa). Checks positivos: cadeias de 4/5/3 elos, Rmono via `SIPrimary ⊑
+  ReferenceStandard`, aresta composta no cubo de papéis. Checks negativos:
+  `ReferenceStandard` genérico NÃO é rastreável ao SI; `contributesUncertainty`
+  NÃO compõe para `traceableTo`. `souc check` OK; `souc run` → `ALL PASS`
+  (marcadores `//@ run-pass` / `//@ expect-stdout: ALL PASS`).
+
+## Rodada 14 — fecho de derivação de proveniência PROV-DM/SLSA (2026-08-05)
+
+Segunda aplicação fora do eixo biomédico: as regras de inferência do
+PROV-CONSTRAINTS são literalmente axiomas de papel EL+, e a hierarquia de
+relações do PROV mapeia sobre o fecho de hierarquia de papéis — o storage
+em structs planas de `stdlib/epistemic/prov.sio` (sem raciocínio
+transitivo) é substituído por uma TBox declarativa.
+
+- **`examples/epistemic/prov_elplus_demo.sio`** — conceitos `Entity` com
+  `Measured`/`Literature`/`Computed` (⊑ `Entity`), `Undocumented`,
+  `SLSAL3Claim` e `UnsignedArtifact`; papéis `derivedFrom`, `generatedBy`,
+  `used`, `influencedBy`; axiomas `derivedFrom ∘ derivedFrom ⊑
+  derivedFrom` (transitividade PROV), `influencedBy ∘ influencedBy ⊑
+  influencedBy` (cadeias de N elos) e a hierarquia `derivedFrom`/
+  `generatedBy`/`used ⊑ influencedBy`. A consulta
+  `prov_ultimate_sources(e)` conta os fillers `Literature`/`Measured`
+  alcançáveis pelas arestas `influencedBy` FECHADAS (O(nb) sobre o cubo
+  de papéis após UM fixpoint, 2 rodadas). O gate SLSA-L3 é a disjunção
+  `SLSAL3Claim ⊥ ∃derivedFrom.Undocumented`: `UnsignedArtifact` (que
+  clama SLSA-L3 E tem derivação indocumentada) dispara `HARD ERROR` via
+  `elplus_conflict` (teorema `conflictBPlusC_iff`); o conceito `Computed`
+  limpo passa o gate. Checks negativos: `Computed` sem derivação
+  indocumentada; nenhuma aresta `influencedBy` sai de `Literature`
+  (fontes não influenciam seus usuários). `souc check` OK; `souc run` →
+  `ALL PASS` (marcadores `//@ run-pass` / `//@ expect-stdout: ALL PASS`).
+
+## Arquivos criados
+
+- `artifacts/ontology-frontiers/{epistemic-alignment-repair,epistemic-claim-status,consistent-ontology-evolution}/FRONTIER.md`
+- `artifacts/ontology-frontiers/epistemic-alignment-repair/alignment_repair.sio`
+- `artifacts/ontology-frontiers/epistemic-claim-status/{claim_status.sio,interval_claims.sio}`
+- `artifacts/ontology-frontiers/consistent-ontology-evolution/{version_chain.sio,version_chain_removal.sio}`
+- `artifacts/ontology-frontiers/compiler-repros/` (4 repros + REPORT.md)
+- `artifacts/ontology-frontiers/LEAN_MATH_REVIEW_XAI.md`
+- `formal/OntologyAlignmentRepair.lean`, `formal/OntologyClaimStatus.lean`,
+  `formal/OntologyEvolution.lean`, `formal/OntologyRepairEquivalence.lean`,
+  `formal/OntologyEvolutionRepair.lean`, `formal/ClaimStatusInterval.lean`
+- `scripts/ci/ontology_frontiers_gate.sh` — gate CI standalone (rodada 3,
+  lane `frontier-gate`; ver seção "Gate CI").
+- `artifacts/ontology-frontiers/consistent-ontology-evolution/minimal_repair_demo.sio` (rodada 3)
+- `artifacts/ontology-frontiers/el-grounding/{FRONTIER.md,el_conflict_demo.sio}` (rodada 4)
+- `formal/OntologyMinimalRepair.lean` (rodada 3),
+  `formal/OntologyELReasoner.lean` (rodada 4)
+- `formal/OntologyELClosureVerified.lean`,
+  `formal/OntologyRepairTies.lean` (rodada 5)
+- `artifacts/ontology-frontiers/epistemic-alignment-repair/tie_repair_demo.sio` (rodada 5)
+- `examples/ontology_elplus_closure_demo.sio` (demo executável do fecho EL⁺
+  completo — ver seção acima)
+- `examples/epistemic/traceability_elplus_demo.sio` (rodada 13 —
+  rastreabilidade metrológica VIM3 como composição de papéis EL+)
+- `examples/epistemic/prov_elplus_demo.sio` (rodada 14 — fecho de
+  derivação de proveniência PROV-DM/SLSA como axiomas de papel EL+)
+- `stdlib/ontology/elplus.sio` (rodada 9 — fecho EL⁺ role-aware: variante
+  densa + variante esparsa)
+- `artifacts/ontology-frontiers/real-data/scale/gen_elplus_data.py`
+  (rodada 9 — espelho python do fixpoint de 8 regras + cross-check packed)
+- `artifacts/ontology-frontiers/real-data/scale/{elplus_data.sio,elplus_synth_data.sio,elplus_scale_driver.sio}`
+  (rodada 9, gerados)
+- `artifacts/ontology-frontiers/real-data/roles.tsv` (rodada 9, gerado)
+- `artifacts/ontology-frontiers/real-data/downloads/{go-plus.owl,ro.owl}`
+  (rodada 11 — GO + RO, 237 MB + 1,2 MB)
+- `artifacts/ontology-frontiers/real-data/{go_elplus_tbox.txt,go_roles.tsv,go_classes.tsv}`
+  (rodada 11, gerados pelo modo `--go` do extract_tbox.py)
+- `artifacts/ontology-frontiers/real-data/scale/{go_elplus_data.sio,go_elplus_driver.sio}`
+  (rodada 11, gerados pelo modo `--go` do gen_elplus_data.py)
+- `artifacts/ontology-frontiers/real-data/{go_full_elplus_tbox.txt,go_full_roles.tsv,go_full_classes.tsv}`
+  (rodada 12, gerados pelo modo `--go --go-full` do extract_tbox.py —
+  GO completo, GO-only, deprecated excluídas, papéis RO-fechados sem cap)
+- `artifacts/ontology-frontiers/real-data/scale/gen_go_full_data.py`
+  (rodada 12 — espelho python bitmask do fecho multi-papel + validação no
+  slice + emissão de go_full_packed.txt / go_full_expected.sio)
+- `artifacts/ontology-frontiers/real-data/scale/{go_full_packed.txt,go_full_expected.sio,go_full_elplus_driver.sio}`
+  (rodada 12 — dados runtime, valores do espelho, driver com carga via
+  read_file e fixpoint híbrido bitmask)
+- `agent_logs/go_full_elplus_offload_2026-08-04.md` (rodada 12 — log das
+  duas math-reviews xai)
+
+## Gate CI
+
+Rodada 3 adicionou um gate standalone que re-verifica os protótipos sem
+editar nenhum arquivo existente:
+
+```bash
+bash scripts/ci/ontology_frontiers_gate.sh   # funciona a partir de qualquer cwd
+```
+
+O que ele checa, para cada um dos 14 protótipos (`alignment_repair.sio`,
+`claim_status.sio`, `interval_claims.sio`, `version_chain.sio`,
+`version_chain_removal.sio`, `minimal_repair_demo.sio`,
+`el_conflict_demo.sio`, `tie_repair_demo.sio`, `real_repair_driver.sio`,
+`full_scale_driver.sio`, `elplus_scale_driver.sio` — rodada 9,
+`go_elplus_driver.sio` — rodada 11, `go_full_elplus_driver.sio` —
+rodada 12 — e `examples/ontology_pipeline_demo.sio`):
+
+1. `./bin/souc check <file>` — exige `check: OK` na saída e ausência de
+   `parse error`;
+2. `./bin/souc run <file>` — exige uma linha exata `ALL PASS` na saída.
+
+O exit code do `souc` não é confiável, então todos os vereditos vêm do
+stdout capturado. O gate imprime uma linha OK/FAIL por arquivo e sai com
+código 1 se qualquer protótipo falhar. Cada `souc run` leva ~30–60s; há um
+timeout por arquivo (`ONTOLOGY_FRONTIERS_RUN_TIMEOUT`, default 300s desde a rodada 12). O
+wrapper pode ser trocado via `SOUC_BIN`. Os repros de compilador em
+`compiler-repros/` são propositalmente excluídos (eles demonstram falhas).
+
+## Arquivos editados
+
+- `formal/lakefile.lean` — apenas adição das 8 novas roots (permitido pela
+  meta).
+- `formal/OntologyAlignmentRepair.lean` — apenas o comentário de header
+  (correção da lacuna de equivalência após o contraexemplo mecanizado).
+- `scripts/ci/ontology_frontiers_gate.sh` — lista de protótipos (rodadas
+  3-4, 9).
+- `.claude/llm_offload_log.md` — linhas de log das revisões (política do
+  repo).
+- Rodada 10 (integração EL+ nos drivers de repair):
+  - `stdlib/ontology/elplus.sio` — 3 novos exports
+    (`elplus_derive_conflicts`, `elplus_subsumes_sparse`,
+    `elplus_edge_sparse`); API existente intacta.
+  - `artifacts/ontology-frontiers/epistemic-alignment-repair/alignment_repair.sio`
+    — oráculo hardcoded → variante densa do elplus (+ camada de papel).
+  - `artifacts/ontology-frontiers/real-data/real_repair_driver.sio` —
+    fixpoint atômico próprio → variante esparsa do elplus.
+  - `artifacts/ontology-frontiers/real-data/gen_sounio_data.py` — carrega
+    `exsub`, espelha a camada de papéis, emite `ex_c`/`ex_f` +
+    `expected_exsub/closure_edges/role_edges_atom`.
+  - `artifacts/ontology-frontiers/real-data/tbox_data.sio` — regenerado
+    (números das rodadas 6-7 preservados; role layer adicionada).
+  - `examples/ontology_pipeline_demo.sio` — fases de fecho/conflito via
+    elplus denso.
+  - `artifacts/ontology-frontiers/real-data/REAL_RESULTS.md` — adendo da
+    rodada 10 (§10) + saída atualizada (§5).
+- Rodada 11 (GO/RO role-rich):
+  - `artifacts/ontology-frontiers/real-data/extract_tbox.py` — modo
+    `--go/--ro/--go-root`: slice ancestor-closed de GO (GO-only) +
+    axiomas de papel de RO (TransitiveProperty → cadeia, subPropertyOf,
+    propertyChainAxiom com membros `rdf:Description`), RO-fecho do
+    conjunto de papéis, caps de papel/universo.
+  - `artifacts/ontology-frontiers/real-data/scale/gen_elplus_data.py` —
+    modo `--go`: espelho do fixpoint de 8 regras sobre o slice GO,
+    projeção atômica, ablações roleComp/roleSub, asserção do teorema de
+    perfil; emite `go_elplus_data.sio` + `go_elplus_driver.sio`.
+  - `scripts/ci/ontology_frontiers_gate.sh` — 13 protótipos (driver GO).
+- Rodada 12 (GO completo):
+  - `artifacts/ontology-frontiers/real-data/extract_tbox.py` — modo
+    `--go-full`: GO completo sem slice (política GO-only), classes
+    `owl:deprecated` excluídas, conjunto de papéis RO-fechado sem cap.
+
+Commits na branch: `54cef93d7` (rodadas 1-2), `156858916` (rodada 3);
+rodada 4 aguardando autorização de commit.
+
+## Nota técnica consolidada (rodadas 1–14)
+
+A linha inteira está consolidada em
+`docs/papers/ontology_frontiers_technical_note_2026-08-05.md` — abstract,
+resultados formais (soundness/completeness/normalização+conservatividade,
+com os teoremas-chave de cada arquivo Lean), resultados executáveis com os
+números exatos (Anatomy, probes de escala + Slurm N=100k, GO completo,
+otimização vs ELK, multi-ontologia), aplicações (repair, DDI, SNOMED,
+rastreabilidade), baseline ELK, pesquisa aberta e referências
+(commits/arquivos/benchmarks).

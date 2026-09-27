@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # gemini-offload.sh — Fan-out to Gemini CLI for Sounio-specific tasks
-# Usage: ./scripts/gemini-offload.sh <prompt-file> [mode: review|scaffold|explain|optimize|math]
+# Usage: ./scripts/mcp/gemini-offload.sh <prompt-file> [mode: review|scaffold|explain|optimize|math]
 
 set -euo pipefail
 

@@ -34,6 +34,41 @@ LEAN_SINGLE="$ROOT_DIR/bin/souc-lean-single-x86_64"
 
 _is_elf() { [[ -n "${1:-}" && -x "$1" && "$(head -c2 "$1" 2>/dev/null)" != '#!' ]]; }
 
+# An explicit compiler override that cannot be used must ABORT, never be skipped.
+#
+# WHY. `_is_elf` requires the execute bit. A build that leaves its output
+# non-executable therefore produces a path that fails this test, and the
+# resolution loop below simply moves on to the next candidate — ending at the
+# COMMITTED `bin/madaros-linux-x86_64`, which lags `self-hosted/` source. The
+# caller asked to measure their build and silently measured the shipped one.
+#
+# That is not hypothetical: on 2026-08-28 an agent read `check: OK` through a
+# supposedly fresh compiler and `error[E245]` through the same ELF after
+# `chmod +x` — opposite verdicts, same file, no message in between. A wrong
+# measurement that still exits 0 costs more than a failed one, so an override
+# that was SET and is unusable stops here and says which reason applies.
+_reject_unusable_override() {  # _reject_unusable_override <var-name> <path>
+  local var="$1" path="$2" why
+  if   [[ ! -e "$path" ]];              then why="no such file"
+  elif [[ -d "$path" ]];                then why="is a directory"
+  elif [[ ! -x "$path" ]];              then why="not executable (chmod +x it)"
+  elif [[ "$(head -c2 "$path" 2>/dev/null)" == '#!' ]]; then why="is a script, not a raw ELF"
+  else why="unusable"; fi
+  echo "error[E-SRB-001]: $var is set but cannot be used: $why" >&2
+  echo "  $var=$path" >&2
+  echo "souc: refusing to fall back to the committed compiler — it lags self-hosted/ source," >&2
+  echo "souc: so the measurement you asked for would silently become a different one." >&2
+  echo "souc: fix the path, or unset $var to use the default resolution order." >&2
+  exit 78
+}
+
+# Abort on any override that is set-but-unusable, before any resolution runs.
+for _ov in MADAROS_RAW_BIN SOUNIO_MADAROS_BIN SOUNIO_SOUC_BIN; do
+  _ov_val="${!_ov:-}"
+  [[ -n "$_ov_val" ]] && ! _is_elf "$_ov_val" && _reject_unusable_override "$_ov" "$_ov_val"
+done
+unset _ov _ov_val
+
 _science_boundary_requested() {
   local arg
   for arg in "$@"; do
@@ -72,6 +107,23 @@ _resolve_madaros() {
     if _is_elf "$cand"; then echo "$cand"; return 0; fi
   done
   return 1
+}
+
+# Which build is a resolved ELF? "committed" when it IS bin/madaros-linux-x86_64 or is
+# byte-identical to it; otherwise a local artifact or an override, with its build time.
+# Measured 2026-08-31: a gitignored artifacts/self-hosted/madaros from 2026-08-16 was
+# resolved ahead of the committed ELF for a day of measurements while `souc --version`
+# still said "COMMITTED" -- a false compiler defect (#2318) was filed on its output.
+_madaros_provenance_kind() {
+  local elf="$1" committed="$ROOT_DIR/bin/madaros-linux-x86_64" when
+  if [[ "$elf" == "$committed" ]]; then echo committed; return; fi
+  if [[ -f "$committed" ]] && cmp -s "$elf" "$committed"; then echo committed; return; fi
+  when="$(date -r "$elf" +%Y-%m-%dT%H:%M 2>/dev/null || echo '?')"
+  if [[ "$elf" == "$ROOT_DIR/artifacts/self-hosted/madaros" ]]; then
+    echo "local artifact built $when"
+  else
+    echo "override ${elf#$ROOT_DIR/} built $when"
+  fi
 }
 
 cmd_init() {
@@ -143,6 +195,11 @@ Usage:
                                       emit an atomic, verified .sio-release bundle
   souc pkg verify <bundle> [--root <project>]
                                       revalidate a package release bundle
+  souc install <package>              shorthand for `souc pkg install`
+  souc search <query>                 shorthand for `souc pkg search`
+  souc ontology <resolve|search|ancestors|is-subclass|map>
+                                      resolve CURIEs against the bundled ontology
+                                      slice (GO, HPO, LOINC, CHEBI, SNOMED)
 
 Science boundary:
   --science-boundary off|advisory|strict
@@ -199,7 +256,17 @@ fi
 # Keep routing this through the lean_single bootstrap ELF even though Madaros is
 # the default verb-oriented engine; the modular launcher does not implement the
 # raw `SRC OUT` ABI.
+#
+# Fail-closed: a flag-looking second argument is not an output path.
+# `souc file.sio -o dest.elf` used to exec lean_single with OUT=`-o`, write a
+# file literally named `-o`, and exit 0. That is the silent-success class.
+# See docs/audit/SOUC_WRAPPER_BARE_DASH_O_SWALLOW_DISPATCH_2026-08-18.md.
 if [[ $# -ge 2 && "${1:-}" == *.sio ]]; then
+  if [[ "${2:-}" == -* ]]; then
+    echo "souc: refused: bare form 'souc $1 $2 …' would treat '$2' as the output filename and exit 0" >&2
+    echo "souc: use: souc compile $1 -o <out>" >&2
+    exit 2
+  fi
   if _science_boundary_requested "$@"; then
     _reject_science_without_madaros
   fi
@@ -225,13 +292,13 @@ case "${SOUNIO_SOUC_ENGINE:-madaros}" in
     case "${1:-}" in
       run)
         _ls_src="${2:-}"
-        _ls_tmp="$(mktemp /tmp/souc-lean-run-XXXXXX.elf)"
+        _ls_tmp="$(mktemp /tmp/souc-lean-run-XXXXXX)"
         "$LEAN_SINGLE" "$_ls_src" "$_ls_tmp" >/dev/null 2>&1
         chmod +x "$_ls_tmp"
         exec "$_ls_tmp" "${@:3}"
         ;;
       check)
-        _ls_tmp2="$(mktemp /tmp/souc-lean-check-XXXXXX.elf)"
+        _ls_tmp2="$(mktemp /tmp/souc-lean-check-XXXXXX)"
         "$LEAN_SINGLE" "${2:-}" "$_ls_tmp2" 2>&1
         _ls_rc=$?
         rm -f "$_ls_tmp2"
@@ -254,6 +321,32 @@ case "${SOUNIO_SOUC_ENGINE:-madaros}" in
     ;;
 esac
 
+# The committed Madaros prebuilt is stored compressed. Generate
+# bin/madaros-linux-x86_64 from it (verified against the tracked sha256, exit 78
+# on a mismatch) before resolving; see scripts/lib/materialize_madaros_prebuilt.sh.
+# Always attempt this -- even when a higher-priority override (MADAROS_RAW_BIN,
+# SOUNIO_MADAROS_BIN, or a local artifacts/self-hosted/madaros) is present, so
+# that _madaros_provenance_kind() below has a materialized bin/madaros-linux-x86_64
+# to `cmp` a byte-identical override against and correctly report it as
+# "committed" rather than misreporting it as a local build. Only tolerate a
+# materialization FAILURE (a corrupted or missing prebuilt) when a higher-
+# priority override is present: that run was never going to use the prebuilt
+# ELF itself, only (optionally) compare against it, so it must not abort --
+# resolution just proceeds without a committed comparison file.
+_madaros_higher_priority_override_present() {
+  local cand
+  for cand in "${MADAROS_RAW_BIN:-}" "${SOUNIO_MADAROS_BIN:-}" "$ROOT_DIR/artifacts/self-hosted/madaros"; do
+    _is_elf "$cand" && return 0
+  done
+  return 1
+}
+if [[ -f "$ROOT_DIR/scripts/lib/materialize_madaros_prebuilt.sh" ]]; then
+  if ! bash "$ROOT_DIR/scripts/lib/materialize_madaros_prebuilt.sh"; then
+    _mat_rc=$?
+    _madaros_higher_priority_override_present || exit "$_mat_rc"
+  fi
+fi
+
 # 3) Default: Madaros (via bin/madaros, which maps the souc verbs to the raw ELF).
 if MADAROS_ELF="$(_resolve_madaros)"; then
   # Advertise the souc verb CLI so capability-probing callers select the verb form
@@ -261,6 +354,48 @@ if MADAROS_ELF="$(_resolve_madaros)"; then
   case "${1:-}" in
     -h|--help|help) _print_souc_help; exit 0 ;;
   esac
+  # Provenance on STDERR, never stdout.
+  #
+  # `souc --version` prints "Madaros v0.80.0" and nothing about WHICH build that
+  # is, so a binary months behind its source is indistinguishable from a fresh
+  # one in every log, paste and report. Measured 2026-08-23: two agents
+  # independently concluded the compiler does not enforce the EpistemicComplete
+  # floor -- and that a dissertation contribution was inert -- from an rc=0 that
+  # came from the committed ELF, not from the source they were reading. Both had
+  # carefully unset the poisoned SOUC_BIN and SOUNIO_STDLIB_PATH first. Clearing
+  # the environment disarms one trap; the binary is a second one.
+  #
+  # The condition was not being omitted out of carelessness. There was nowhere to
+  # read it. This puts it where nobody has to remember.
+  #
+  # stdout stays byte-identical because ~657 call sites parse it; stderr is where
+  # the condition goes, so a human or a captured log sees it and a parser does not.
+  _prov_kind="$(_madaros_provenance_kind "$MADAROS_ELF")"
+  if [[ "${SOUNIO_REQUIRE_COMMITTED_MADAROS:-0}" == "1" && "$_prov_kind" != "committed" ]]; then
+    echo "souc: refusing to run: SOUNIO_REQUIRE_COMMITTED_MADAROS=1 but the resolved Madaros ELF is not the committed bin/madaros-linux-x86_64" >&2
+    echo "  resolved: ${MADAROS_ELF#$ROOT_DIR/} ($_prov_kind)" >&2
+    echo "  remove artifacts/self-hosted/madaros or unset MADAROS_RAW_BIN -- or unset SOUNIO_REQUIRE_COMMITTED_MADAROS" >&2
+    exit 78
+  fi
+  if [[ "${1:-}" == "--version" ]]; then
+    _prov_elf="$MADAROS_ELF"
+    _prov_sum="$( { md5sum "$_prov_elf" 2>/dev/null || echo '? -'; } | cut -c1-8 )"
+    _prov_src="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || echo 'no-git')"
+    _prov_dirty=""
+    if ! git -C "$ROOT_DIR" diff --quiet -- self-hosted 2>/dev/null; then
+      _prov_dirty=" self-hosted/ MODIFIED since this tree's HEAD"
+    fi
+    printf 'provenance: elf=%s md5=%s tree=%s%s\n' \
+      "${_prov_elf#$ROOT_DIR/}" "$_prov_sum" "$_prov_src" "$_prov_dirty" >&2
+    if [[ "$_prov_kind" == "committed" ]]; then
+      printf 'provenance: this ELF is the COMMITTED binary; it is not built from the tree above.\n' >&2
+    else
+      _prov_csum="$( { md5sum "$ROOT_DIR/bin/madaros-linux-x86_64" 2>/dev/null || echo '? -'; } | cut -c1-8 )"
+      printf 'provenance: this ELF is a LOCAL BUILD (%s), NOT the committed bin/madaros-linux-x86_64 (md5=%s); it was resolved ahead of the committed ELF.\n' "$_prov_kind" "$_prov_csum" >&2
+      printf 'provenance: set SOUNIO_REQUIRE_COMMITTED_MADAROS=1 to refuse local builds; a claim about the committed compiler must not be measured on this one.\n' >&2
+    fi
+    printf 'provenance: for a claim about compiler behaviour, build from source.\n' >&2
+  fi
   exec env MADAROS_RAW_BIN="$MADAROS_ELF" "$ROOT_DIR/bin/madaros" "$@"
 fi
 

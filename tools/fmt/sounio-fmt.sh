@@ -9,7 +9,7 @@
 #   - Normalise `,` spacing: exactly one space after `,`, no space before `,`
 #   - Normalise `->` spacing: exactly one space on each side
 #
-# Phase 1 explicitly defers (noted in docs/compiler/KNOWN_LIMITATIONS.md):
+# Phase 1 explicitly defers (noted in docs/compiler/MATURITY.md):
 #   - Operator spacing for `+`, `-`, `*`, `/`, `:`, `=`
 #     (ambiguous: `-` vs `->`, `*` deref vs multiply, `:` in URLs and types)
 #   - AST-based indentation normalisation (requires full parse)

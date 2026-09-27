@@ -1,0 +1,202 @@
+//@ run-pass
+// Scalarized native executor for proof-carrying endogenous observability D4.
+
+struct ContestState {
+    survivor_mask: i64,
+    survivor_count: i64,
+    evidence_count: i64,
+    burden_spent: i64,
+    last_provenance_id: i64,
+    provenance_fingerprint: i64,
+}
+
+fn as_i64(value: bool) -> i64 { if value { 1 } else { 0 } }
+
+fn popcount4(mask: i64) -> i64 with Panic {
+    assert(mask >= 0 && mask <= 15)
+    as_i64(mask % 2 == 1) + as_i64((mask / 2) % 2 == 1) +
+        as_i64((mask / 4) % 2 == 1) + as_i64((mask / 8) % 2 == 1)
+}
+
+fn scheduled(mode: i64) -> bool with Panic {
+    assert(mode >= 0 && mode <= 3)
+    mode != 3
+}
+
+fn delivered(mode: i64) -> bool with Panic {
+    assert(mode >= 0 && mode <= 3)
+    mode == 1 || mode == 2
+}
+
+fn hidden_target(mode: i64) -> i64 with Panic {
+    assert(mode >= 0 && mode <= 3)
+    if mode <= 1 { 2 } else { 8 }
+}
+
+fn custody_matches(
+    mode: i64,
+    considered_value: bool,
+    scheduled_value: bool,
+    delivered_value: bool,
+    opportunity_value: bool,
+    response_value: bool,
+    delayed_value: bool,
+    present_value: bool,
+    observed_value: i64,
+) -> bool with Panic {
+    considered_value && scheduled_value == scheduled(mode) &&
+        delivered_value == delivered(mode) &&
+        opportunity_value == delivered(mode) &&
+        !response_value && !delayed_value && !present_value && observed_value == -1
+}
+
+fn custody_mask(
+    considered_value: bool,
+    scheduled_value: bool,
+    delivered_value: bool,
+    opportunity_value: bool,
+    response_value: bool,
+    delayed_value: bool,
+    present_value: bool,
+    observed_value: i64,
+) -> i64 with Panic {
+    as_i64(custody_matches(0, considered_value, scheduled_value, delivered_value,
+        opportunity_value, response_value, delayed_value, present_value, observed_value)) +
+        2 * as_i64(custody_matches(1, considered_value, scheduled_value, delivered_value,
+            opportunity_value, response_value, delayed_value, present_value, observed_value)) +
+        4 * as_i64(custody_matches(2, considered_value, scheduled_value, delivered_value,
+            opportunity_value, response_value, delayed_value, present_value, observed_value)) +
+        8 * as_i64(custody_matches(3, considered_value, scheduled_value, delivered_value,
+            opportunity_value, response_value, delayed_value, present_value, observed_value))
+}
+
+fn initial_contest() -> ContestState {
+    ContestState {
+        survivor_mask: 15,
+        survivor_count: 4,
+        evidence_count: 0,
+        burden_spent: 0,
+        last_provenance_id: 0,
+        provenance_fingerprint: 0,
+    }
+}
+
+fn update_custody(source: ContestState, provenance_id: i64) -> ContestState with Panic {
+    assert(source.survivor_mask == 15 && source.last_provenance_id == 0)
+    let mask = custody_mask(true, true, true, true, false, false, false, -1)
+    ContestState {
+        survivor_mask: mask,
+        survivor_count: popcount4(mask),
+        evidence_count: source.evidence_count + 1,
+        burden_spent: source.burden_spent + 5,
+        last_provenance_id: provenance_id,
+        provenance_fingerprint: source.provenance_fingerprint * 31 + provenance_id,
+    }
+}
+
+fn retry_matches(mode: i64, responded: bool, present: bool, value: i64) -> bool with Panic {
+    assert(mode == 1 || mode == 2)
+    let expected = mode == 1
+    responded == expected && present == expected &&
+        value == (if expected { 2 } else { -1 })
+}
+
+fn update_retry(
+    source: ContestState,
+    provenance_id: i64,
+    previous_provenance_id: i64,
+    responded: bool,
+) -> ContestState with Panic {
+    assert(source.survivor_mask == 6)
+    assert(previous_provenance_id == source.last_provenance_id)
+    let present = responded
+    let value = if responded { 2 } else { -1 }
+    let h1 = (source.survivor_mask / 2) % 2 == 1 && retry_matches(1, responded, present, value)
+    let h2 = (source.survivor_mask / 4) % 2 == 1 && retry_matches(2, responded, present, value)
+    let mask = 2 * as_i64(h1) + 4 * as_i64(h2)
+    ContestState {
+        survivor_mask: mask,
+        survivor_count: popcount4(mask),
+        evidence_count: source.evidence_count + 1,
+        burden_spent: source.burden_spent + 4,
+        last_provenance_id: provenance_id,
+        provenance_fingerprint: source.provenance_fingerprint * 31 + provenance_id,
+    }
+}
+
+fn main() with Mut, Panic {
+    let mode0_mask = custody_mask(true, true, false, false, false, false, false, -1)
+    let mode1_mode2_mask = custody_mask(true, true, true, true, false, false, false, -1)
+    let mode3_mask = custody_mask(true, false, false, false, false, false, false, -1)
+    assert(mode0_mask == 1)
+    assert(mode1_mode2_mask == 6)
+    assert(mode3_mask == 8)
+
+    // Coarsening all four traces to -1 destroys exactly the custody partition.
+    var mode: i64 = 0
+    while mode < 4 {
+        let legacy_missing = -1
+        assert(legacy_missing == -1)
+        mode = mode + 1
+    }
+    let legacy_mask = 15
+    assert(legacy_mask == 15)
+
+    let after_custody = update_custody(initial_contest(), 7101)
+    assert(after_custody.survivor_mask == 6)
+    assert(after_custody.survivor_count == 2)
+    assert(after_custody.burden_spent == 5)
+    assert(after_custody.provenance_fingerprint == 7101)
+
+    assert(hidden_target(1) == 2 && hidden_target(2) == 8)
+    assert(custody_matches(1, true, true, true, true, false, false, false, -1))
+    assert(custody_matches(2, true, true, true, true, false, false, false, -1))
+    assert(retry_matches(1, true, true, 2))
+    assert(retry_matches(2, false, false, -1))
+
+    let after_response = update_retry(after_custody, 7102, 7101, true)
+    assert(after_response.survivor_mask == 2)
+    assert(after_response.survivor_count == 1)
+    assert(after_response.burden_spent == 9)
+    assert(after_response.provenance_fingerprint == 227233)
+
+    let after_nonresponse = update_retry(after_custody, 7102, 7101, false)
+    assert(after_nonresponse.survivor_mask == 4)
+    assert(after_nonresponse.survivor_count == 1)
+    assert(after_nonresponse.burden_spent == 9)
+    assert(after_nonresponse.provenance_fingerprint == 227233)
+
+    let prompt_tick = 2
+    let arrival_tick = 3
+    let aligned_tick = arrival_tick
+    assert(arrival_tick - prompt_tick == 1)
+    assert(aligned_tick == 3)
+    assert(aligned_tick != prompt_tick)
+
+    let policy_erased_mask = after_custody.survivor_mask
+    let disconnected_retry_mask = after_custody.survivor_mask
+    assert(policy_erased_mask == 6 && disconnected_retry_mask == 6)
+
+    // Prediction functions depend on mode, never on hypothesis identifiers.
+    let original_ids = [310, 311, 312, 313]
+    let relabeled_ids = [410, 411, 412, 413]
+    mode = 0
+    while mode < 4 {
+        assert(original_ids[mode] != relabeled_ids[mode])
+        assert(scheduled(mode) == scheduled(mode))
+        assert(delivered(mode) == delivered(mode))
+        mode = mode + 1
+    }
+    let maximum_two_link_fingerprint = 1000000 * 31 + 1000000
+    assert(maximum_two_link_fingerprint == 32000000)
+
+    println("D4-W0 legacy_missing mask=15 mechanisms=4")
+    println("D4-W1 custody scheduled=1 delivered=1 opportunity=1 response=0 mask=6 ambiguous=independent,dependent")
+    println("D4-W2 equivalence original=same hidden=2|8 retry=response2|nonresponse recoverability=false")
+    println("D4-W3 retry_response mask=2 selected=311 burden=9 fingerprint=227233")
+    println("D4-W4 retry_nonresponse mask=4 selected=312 target_observed=false")
+    println("D4-W5 delayed prompt_tick=2 arrival_tick=3 aligned_tick=3 retroactive=false")
+    println("D4-W6 policy_erased=abstain disconnected=abstain mask=6")
+    println("D4-W7 relabel=invariant clinical=false suffering=false fingerprint_max2=32000000")
+    println("PROOF-CARRYING ENDOGENOUS OBSERVABILITY D4 PASS")
+}

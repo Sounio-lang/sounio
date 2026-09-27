@@ -1,0 +1,28 @@
+//@ run-pass
+//@ expect-stdout-contains: COLLISION-DISPATCH 42
+// Regression guard (#789 lane C, cd_exact <F> consumer crash):
+// lower_method_recv_type's ExprIndex arm must resolve a struct field's OWN
+// element type before the float heuristic. The float check falls back to a
+// by-NAME search across ALL structs; when two structs share a field name but
+// differ in element type -- here `FHolder.c: [f64;4]` and `RHolder.c: [Rat;4]`
+// -- `r.c[i].dbl()` on the Rat holder was misclassified as f64 and dispatched
+// to a body-less `f64_dbl`, crashing codegen. It must dispatch to `Rat_dbl`.
+struct Rat { num: i64, den: i64 }
+impl Rat {
+    fn dbl(self) -> Rat with Mut { Rat { num: self.num * 2, den: self.den } }
+}
+// f64-array field named `c` FIRST, so the by-name-simple fallback finds it.
+struct FHolder { c: [f64; 4], tag: i32 }
+struct RHolder { c: [Rat; 4], tag: i32 }
+
+fn main() -> i64 with Mut, Panic, IO {
+    var f = FHolder { c: [1.0; 4], tag: 0 }
+    let _ = f.c[0 as usize]            // keep FHolder.c live (f64 array field)
+    var r = RHolder { c: [Rat { num: 21, den: 1 }; 4], tag: 0 }
+    // Must dispatch to Rat_dbl (NOT body-less f64_dbl) despite the name clash.
+    let d = r.c[0 as usize].dbl()
+    print("COLLISION-DISPATCH ")
+    print_int(d.num)                    // 21 * 2 = 42 (asserted via expect-stdout-contains)
+    print("\n")
+    return 0
+}

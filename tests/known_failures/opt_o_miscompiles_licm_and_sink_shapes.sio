@@ -1,0 +1,93 @@
+//@ ignore
+// TWO PRE-EXISTING -O MISCOMPILES on origin/main, found while trying to cover
+// ir_arena_swap_slots end to end. NEITHER is caused by the #1649 arena: both
+// reproduce identically on origin/main's compiler and on this branch, and both
+// disappear without -O.
+//
+//   shape        -O          no -O     what it is
+//   ----------   ---------   -------   --------------------------------------
+//   loop         HANGS       exit 0    loop-invariant const + call in a loop
+//   sink         exit 1      exit 0    const load followed by an independent
+//                                      binop -- wrong answer, not a hang
+//
+// Measured on both compilers, four combinations each. Compilation succeeds
+// (rc=0) every time; the defect is in the emitted program.
+//
+// These are the two IR shapes that reach ir_arena_swap_slots -- ocp_licm's
+// hoist and the sink-loads swap -- which is why covering that primitive through
+// a running program is currently impossible: the passes that call it miscompile
+// on their own, before the swap can be blamed or exonerated. The primitive
+// itself IS covered, in isolation and non-vacuously, by
+// tests/native-v2/ir_arena_swap_witness.sio.
+//
+// Minimal reproductions, both self-contained:
+//
+//   LOOP (hangs under -O on both compilers)
+//       fn add3(a: i64, b: i64, c: i64) -> i64 { a + b + c }
+//       fn main() -> i64 {
+//           var acc: i64 = 0
+//           var i: i64 = 0
+//           while i < 4 { let k = 7  let m = 9  acc = acc + add3(k, m, i)  i = i + 1 }
+//           if acc == 70 { return 0 }
+//           return 1
+//       }
+//
+//   SINK (returns 1 instead of 0 under -O on both compilers)
+//       fn add3(a: i64, b: i64, c: i64) -> i64 { a + b + c }
+//       fn main() -> i64 {
+//           let z = 11
+//           let w = 5 * 2
+//           let acc = w + add3(1, 2, 3) + z
+//           if acc == 27 { return 0 }
+//           return 1
+//       }
+//
+// The sink case is the more dangerous of the two: a hang is loud, a wrong exit
+// code is not. Filed against main as #1667, where it minimised much further than
+// the "sink" framing suggested: it is not about a constant load next to a binop
+// at all. A function that sums THREE OR MORE parameters returns the wrong value
+// under -O, full stop --
+//
+//     add2(1, 2)    = 3   correct
+//     add3(1, 2, 3) = 3   want 6
+//     add4(1,2,3,4) = 3   want 10
+//     first3(7,8,9) = 7   correct, so parameters do arrive
+//
+// -- on both compilers, with literal or variable arguments, clean without -O.
+//
+// Refs #1649, #1667
+
+fn add3(a: i64, b: i64, c: i64) -> i64 { a + b + c }
+
+fn main() -> i64 {
+    var acc: i64 = 0
+    var i: i64 = 0
+    while i < 4 {
+        let k = 7
+        let m = 9
+        acc = acc + add3(k, m, i)
+        i = i + 1
+    }
+    let z = 11
+    let w = acc * 2
+    acc = w + add3(1, 2, 3) + z
+    if acc == 157 { return 0 }
+    return 1
+}
+
+// UPDATE 2026-08-06: minimised much further, and it is CONTROL FLOW.
+//
+//     fn main() -> i64 {
+//         var s: i64 = 0
+//         var i: i64 = 0
+//         if i < 1 { s = s + 1 } else { s = s + 2 }
+//         if i < 2 { s = s + 1 } else { s = s + 2 }
+//         if i < 3 { s = s + 1 } else { s = s + 2 }
+//         if s == 3 { return 0 }
+//         return 1
+//     }
+//
+// -O exits 1, no -O exits 0, on BOTH compilers. Instrumented, s goes 1 -> 4 -> 7:
+// each if/else after the first adds 1+2, so BOTH branches execute. A needed jump
+// or label is being deleted. No calls involved, so the original three-parameter
+// framing was a symptom, not the cause. See #1667.

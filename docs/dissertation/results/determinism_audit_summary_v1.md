@@ -91,6 +91,16 @@ The self-implemented `exp` function (post-fix) has < 10⁻¹² relative error fo
 
 **Gate:** `MC_PBPK28_COMPILER_DETERMINISM_PASS` (via `mc_determinism_probe.sh --post-fix`)
 
+> **Engine dependency (verified 2026-08-17).** `scripts/audit/mc_determinism_probe.sh`
+> hardcodes `SOUC="./bin/souc"` (line 26) with no engine override, and under `set -euo
+> pipefail` it compiles *and executes* `pbpk28_mc_cross_validation.sio` and
+> `pbpk28_mc_prior_family_sweep.sio`. Both of those harnesses **crash at runtime with `rc=182`**
+> (`madaros: handles full`, a resource-ceiling abort) under default Madaros — so this script
+> currently aborts before it can emit `MC_PBPK28_COMPILER_DETERMINISM_PASS` at all when run
+> under the project's default engine. The "Sounio on x86-64 Linux" codegen claim above is true
+> of both engines in principle (same `addsd`/`subsd`/`mulsd`/`divsd` scalar codegen), but this
+> specific gate marker has only ever been produced under `SOUNIO_SOUC_ENGINE=lean_single`.
+
 ---
 
 ## 5. Canonical final numbers

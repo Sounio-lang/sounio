@@ -269,7 +269,14 @@ theorem bayesianUpdate_bounded (prior evidence : Knowledge) (bound : Nat) :
 theorem bayesianUpdate_zero_evidence (prior : Knowledge) (bound : Nat)
     (hv : prior.confidence ≤ bound) :
     (bayesianUpdate prior (measure 0) bound).confidence = prior.confidence := by
-  simp only [bayesianUpdate, measure, Confidence] at *; split <;> omega
+  -- `split` cannot case on this `ite` under Lean 4.33; it can under the pinned
+  -- 4.32.2. That difference is what took `main` red when `leanprover/lean4:stable`
+  -- moved (fixed by pinning, 7cd35ba73c). No case analysis is needed either way:
+  -- `measure 0` contributes zero confidence, so `Nat.add_zero` reduces the guard to
+  -- exactly `hv` and `if_pos` takes the then-branch. Verified to compile under BOTH
+  -- 4.32.2 and 4.33.0, so the pin can be moved forward without reopening this.
+  simp only [bayesianUpdate, measure, Confidence, Nat.add_zero]
+  exact if_pos hv
 
 theorem bayesianUpdate_provenance_sum (k e₁ e₂ : Knowledge) (bound : Nat) :
     (bayesianUpdate (bayesianUpdate k e₁ bound) e₂ bound).provenance =

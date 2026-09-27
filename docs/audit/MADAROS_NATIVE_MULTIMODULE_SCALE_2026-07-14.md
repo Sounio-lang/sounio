@@ -68,7 +68,34 @@ is a real ceiling on real-world usability of composed stdlib code.
 
 `souc compile` (default Madaros) of the `prob::distributions` probe above produces a runnable ELF.
 
+## Update 2026-07-22 — filed fail class **CLOSED** (Wave15C)
+
+Measured on `origin/main` post into-acc (#1402) + specialized-list DCE (#1397) under stock
+Madaros v0.80.0: the probe compiles (`Merged IR` ~73 after into-acc; historically ~210),
+runs `m=5.000000`, and the textbook science graph / `tests/stdlib/prob/test_prob_stdlib.sio`
+print `PROB_TEXTBOOK_OK` / `PROB_STDLIB_OK` under **default Madaros** (no lean_single pin).
+
+Hard gate:
+
+```bash
+bash scripts/madaros_native_multimodule_scale_901_gate.sh
+# → MADAROS_NATIVE_MULTIMODULE_SCALE_901_GATE_OK
+```
+
+Closeout audit: [`MADAROS_WAVE15C_ISSUE901_SCALE_CLOSEOUT_2026-07-22.md`](MADAROS_WAVE15C_ISSUE901_SCALE_CLOSEOUT_2026-07-22.md).
+Related: #921 thin-link pairing closed Wave14D; compact opt-in residual classified there.
+
+**Remaining (orthogonal to this fail class):** ~~stats OLS multi-mod still red with `E019`
+(method calls)~~ — **narrowed 2026-08-04 (Attention P0=A):** fixed-array OLS path
+(`stats::ols_fixed` + `cooks_distance` + `shapiro_wilk`) is green under default Madaros
+(`scripts/ci/madaros_ols_fixed_e2e_gate.sh` → `MADAROS_OLS_FIXED_E2E_GATE_OK`). Residual
+E019 remains on `stats::validation` slice `.len()`/`.push()` forms — see
+`docs/handoff/BLK-20260804-p0a-d3-validation-e019.md`. Exclusive-ref / memory-wall
+fragile chains elsewhere remain open.
+
 ## Next-Action
 
-Fix the imported/native codegen so large merged IR graphs (compact-IR path + full-IR fallback) thin-link
-successfully, matching lean_single's coverage; also set the exec bit on lean_single output.
+~~Fix the imported/native codegen so large merged IR graphs thin-link successfully~~ — **done**
+for the filed `prob::distributions` scale class (gate above). Residual work is non-scale D3
+(exclusive-ref chains; `stats::validation` E019 only — fixed-array OLS is green) and optional
+compact-emitter rewrite (not fail-open).

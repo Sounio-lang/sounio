@@ -41,6 +41,16 @@ runproof "product_nonassoc: fano/nonfano" tests/epistemic_trust/product_nonassoc
 # Full propagate delta-method + value-style LCG MC (2026-07-20): exp/product + MC kernels.
 runproof "propagate: exp/product/MC" tests/epistemic_trust/propagate_trust.sio PROPAGATE_TRUST_OK
 
+# C1 (2026-08-06): imported Epistemic Var preserve under particle amp graph.
+# Dual-engine parity (lean_single ≡ Madaros scaled i64). Fail-closed.
+echo "== imported ep-var preserve (Madaros ≡ lean_single) =="
+if bash scripts/ci/madaros_imported_ep_var_preserve_gate.sh; then
+  echo "PASS: MADAROS_IMPORTED_EP_VAR_PRESERVE_GATE_OK"
+else
+  echo "FAIL: imported ep-var preserve gate"
+  fail=1
+fi
+
 # Finite-dof coverage factor (promoted from retired Section B trip-wire).
 # Expect k95*1000 = 2776 = t95(4) on Type-A-dominant budget (NOT 1960).
 echo "== gum k95 coverage factor (gating: expect 2776 = t95(4)) =="

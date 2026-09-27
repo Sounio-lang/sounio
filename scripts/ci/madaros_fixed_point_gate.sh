@@ -1,0 +1,315 @@
+#!/usr/bin/env bash
+# scripts/ci/madaros_fixed_point_gate.sh
+#
+# Does Madaros compile Madaros? Today: no. This gate is how we find out where
+# it stops, in a way that names the stage.
+#
+# WHAT IS AND IS NOT TRUE TODAY. lean_single.sio reaches a byte-identical
+# self-compiled fixed point and has for months. Madaros never has.
+# scripts/ci/build_modular_madaros.sh performs exactly two compilations —
+# committed ELF -> lean_single.sio -> seed, then seed -> main.sio -> Madaros.
+# There is no second application and no gen1/gen2 pair to compare, so the
+# property has never been measured, let alone held. CLAUDE.md:89 says so
+# outright: "Do not describe Madaros itself as fixed-point-verified."
+#
+# THE LADDER. Each rung is named, and the gate reports the first one that
+# fails rather than a bare non-zero exit:
+#
+#   check    gen1 typechecks self-hosted/compiler/main.sio
+#   gen2     gen1 compiles main.sio to an ELF
+#   run      gen2 answers --version as Madaros
+#   gen3     gen2 compiles main.sio to an ELF
+#   fixpoint gen2 and gen3 have identical executable payloads
+#
+# `gen1 == gen2` is NOT the property and must not be asserted. gen1 is built by
+# a lean_single-derived seed, and the two backends need not agree on codegen.
+# `gen2 == gen3` is the property: the first output Madaros produced about itself,
+# reproduced by that output.
+#
+# usage:  MADAROS_BIN=/path/to/gen1.elf scripts/ci/madaros_fixed_point_gate.sh
+#
+# SOUNIO_MADAROS_FP_EXPECT=<rung> records the rung the tree is known to reach.
+# The gate is green when it reaches exactly that rung and RED both when it falls
+# short and when it goes further — a ratchet, so ground gained cannot be lost
+# silently and ground gained is not absorbed silently either.
+#
+# The default is `run`. History of the ratchet, each step a recorded gain:
+#   - `none` when written: measured 2026-08-04 against origin/main 40116b661d,
+#     gen1 reported 3635 errors on main.sio and never reached lowering.
+#   - `check` as of 2026-08-05: `madaros check self-hosted/compiler/main.sio`
+#     exits 0 with zero diagnostics — Madaros typechecks its own entry point.
+#   - `gen2`: gen1 compiles main.sio to a gen2 ELF.
+#   - `run` as of 2026-09-06: gen2 answers `--version` as Madaros. This became
+#     reachable once the seed-module structs were registered in the preseed
+#     (self-hosted/ir/lower.sio): before, arg_list_get read ArgList.len from a
+#     legacy-hash slot and gen2 SIGSEGV'd on --version. See the field-idx /
+#     ArgList-offset fix for the full root cause.
+#
+# The historical wall was named and loud, which is the point of the whole line:
+#
+#     imported_compile: typecheck ok
+#     imported_compile: lower_done
+#     IR lowering failed during merge: too many functions:
+#         shared IR module capacity exceeded (max 8191 slots)
+#
+# The cap has since moved. This gate reads IR_MAX_FUNCS from the source instead
+# of carrying another numeric copy: a stale 2048 comparison falsely classified
+# a 13107-function merge as truncated when the tree's cap was 16384.
+
+set -uo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+# ── receipt reuse ─────────────────────────────────────────────────────────────
+# gen2 and gen3 are two full self-compiles (~40 min in CI, in swap). Their
+# outcome is a function of: the gen1 bytes, the source tree, this gate and its
+# libraries, and the ratchet parameters. When SOUNIO_MADAROS_CACHE is set and a
+# GREEN run with exactly that key exists, its full log is replayed and the gate
+# exits 0 without recompiling. A red run is never stored -- it always reruns.
+# Opt out per run with SOUNIO_MADAROS_NOCACHE=1.
+# Reuse is only sound when everything the compile reads is inside the hashed
+# trees: a source outside self-hosted/ + stdlib/ may import siblings the key
+# cannot see, so such runs always recompile.
+_fp_src_in_tree=1
+case "${SOUNIO_MADAROS_FP_SRC:-self-hosted/compiler/main.sio}" in
+  self-hosted/*|stdlib/*|"$ROOT_DIR"/self-hosted/*|"$ROOT_DIR"/stdlib/*) ;;
+  *) _fp_src_in_tree=0
+     if [[ -n "${SOUNIO_MADAROS_CACHE:-}" ]]; then
+       echo "[madaros_fixed_point] SOUNIO_MADAROS_FP_SRC is outside self-hosted/ and stdlib/ -- receipt reuse disabled" >&2
+     fi ;;
+esac
+if [[ -z "${_MADAROS_FP_INNER:-}" && -n "${SOUNIO_MADAROS_CACHE:-}" && -x "${MADAROS_BIN:-}" && "$_fp_src_in_tree" == 1 ]]; then
+  # shellcheck source=../dev/madaros-cache.sh
+  source "$ROOT_DIR/scripts/dev/madaros-cache.sh"
+  _fp_key="$(
+    {
+      echo "fixed-point-v2"
+      sha256sum "$MADAROS_BIN" | cut -c1-64
+      madaros_tree_key
+      # gen2/gen3 are compiled under this environment; SOUNIO_* overrides
+      # change what they emit (see madaros_env_fingerprint).
+      madaros_env_fingerprint
+      # The gate, every scripts/lib helper it sources or runs (including the
+      # gen2/gen3 comparator compare_executable_payloads.sh) and the IR
+      # capacity probe it consults.
+      sha256sum "$ROOT_DIR/scripts/ci/madaros_fixed_point_gate.sh" \
+                "$ROOT_DIR/scripts/ci/madaros_ir_capacity_probe.sh" \
+                "$ROOT_DIR"/scripts/lib/*.sh | cut -c1-64
+      # The source compiled, by content: SOUNIO_MADAROS_FP_SRC may point
+      # outside the self-hosted/ + stdlib/ tree key.
+      _fp_src="${SOUNIO_MADAROS_FP_SRC:-self-hosted/compiler/main.sio}"
+      echo "src=$_fp_src"
+      # Absolute paths are used as given; relative ones resolve from ROOT_DIR.
+      if [[ "$_fp_src" == /* ]]; then _fp_src_path="$_fp_src"; else _fp_src_path="$ROOT_DIR/$_fp_src"; fi
+      if [[ -f "$_fp_src_path" ]]; then sha256sum "$_fp_src_path" | cut -c1-64; else echo "src-missing"; fi
+      echo "expect=${SOUNIO_MADAROS_FP_EXPECT:-run}"
+      echo "min_into_acc_done=${SOUNIO_MADAROS_FP_MIN_INTO_ACC_DONE:-40}"
+    } | sha256sum | cut -c1-64
+  )"
+  _fp_log="$(mktemp)"
+  if madaros_cache_get fixed-point "$_fp_key" "$_fp_log"; then
+    echo "[madaros_fixed_point] REPLAY of a green run with identical key $_fp_key"
+    echo "[madaros_fixed_point] (gen1 sha, source tree, gate scripts and ratchet all equal; recorded log follows)"
+    cat "$_fp_log"
+    rm -f "$_fp_log"
+    exit 0
+  fi
+  echo "[madaros_fixed_point] no green receipt for key $_fp_key -- running the gate"
+  _MADAROS_FP_INNER=1 bash "$ROOT_DIR/scripts/ci/madaros_fixed_point_gate.sh" "$@" 2>&1 | tee "$_fp_log"
+  _fp_rc=${PIPESTATUS[0]}
+  if [[ "$_fp_rc" -eq 0 ]]; then
+    madaros_cache_put fixed-point "$_fp_key" "$_fp_log"
+    madaros_cache_prune
+  fi
+  rm -f "$_fp_log"
+  exit "$_fp_rc"
+fi
+
+. "$ROOT_DIR/scripts/lib/gate_assert.sh"
+. "$ROOT_DIR/scripts/lib/souc_invoke.sh"
+gate_name "madaros_fixed_point"
+
+SRC="${SOUNIO_MADAROS_FP_SRC:-self-hosted/compiler/main.sio}"
+EXPECT="${SOUNIO_MADAROS_FP_EXPECT:-run}"
+MIN_INTO_ACC_DONE="${SOUNIO_MADAROS_FP_MIN_INTO_ACC_DONE:-40}"
+MADAROS="${MADAROS_BIN:-}"
+IR_MAX_FUNCS="$(sed -nE 's/^pub let IR_MAX_FUNCS: i64 = ([0-9]+).*$/\1/p' self-hosted/ir/ir.sio | head -1)"
+
+RUNGS=(none check gen2 run gen3 fixpoint)
+
+rung_index() {
+  local want="$1" i=0
+  for r in "${RUNGS[@]}"; do
+    [[ "$r" == "$want" ]] && { printf '%s' "$i"; return 0; }
+    i=$((i + 1))
+  done
+  printf '%s' "-1"
+}
+
+[[ "$(rung_index "$EXPECT")" -ge 0 ]] \
+  || gate_fail "SOUNIO_MADAROS_FP_EXPECT=$EXPECT is not a rung; expected one of: ${RUNGS[*]}"
+[[ "$MIN_INTO_ACC_DONE" =~ ^[0-9]+$ ]] \
+  || gate_fail "SOUNIO_MADAROS_FP_MIN_INTO_ACC_DONE=$MIN_INTO_ACC_DONE is not a non-negative integer"
+[[ "$IR_MAX_FUNCS" =~ ^[0-9]+$ ]] \
+  || gate_fail "could not read IR_MAX_FUNCS from self-hosted/ir/ir.sio"
+
+if [[ -z "$MADAROS" ]]; then
+  echo "MADAROS_FIXED_POINT_SKIP: set MADAROS_BIN to a raw Madaros ELF (gen1)" >&2
+  exit 0
+fi
+
+require_executable "$MADAROS"
+if head -c2 "$MADAROS" 2>/dev/null | grep -q '#!'; then
+  gate_fail "$MADAROS is a wrapper script, not a raw ELF — a wrapper resolves to whatever compiler happens to be installed, which makes this verdict unattributable to the tree under test"
+fi
+
+# The one guard build_modular_madaros.sh cannot make for itself: that script
+# invokes its seed as `<seed> <src> <out>`, which is lean_single's argv. Handing
+# it a Madaros produces a.out and exit 0. See scripts/lib/souc_invoke.sh.
+KIND="$(souc_banner "$MADAROS")"
+[[ "$KIND" == "madaros" ]] \
+  || gate_fail "MADAROS_BIN identifies as '$KIND', not madaros. This gate compiles with the Madaros argv (\`build <src> <out>\`); giving that argv to lean_single, or lean_single's argv to Madaros, silently compiles the wrong thing to the wrong place."
+
+require_file "$SRC"
+
+WORK="${SOUNIO_MADAROS_FP_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/madaros-fp.XXXXXX")}"
+mkdir -p "$WORK"
+
+# module_frontend.sio:334 prefers $SOUNIO_STDLIB_PATH over the tree's own
+# stdlib/. An inherited value compiles PARTS OF ANOTHER CHECKOUT into gen2,
+# which would make a gen2/gen3 comparison say nothing about this tree.
+if [[ -d "$ROOT_DIR/stdlib" ]]; then
+  export SOUNIO_STDLIB_PATH="$ROOT_DIR/stdlib"
+fi
+GEN2="$WORK/madaros.gen2"
+GEN3="$WORK/madaros.gen3"
+
+REACHED="none"
+FAIL_DETAIL=""
+
+reached() { REACHED="$1"; }
+
+echo "MADAROS_FIXED_POINT_V1"
+echo "gen1   $MADAROS"
+echo "src    $SRC"
+echo "work   $WORK"
+echo "expect $EXPECT"
+echo "min_into_acc_done $MIN_INTO_ACC_DONE"
+echo "ir_max_functions $IR_MAX_FUNCS"
+echo
+
+# ── rung: check ───────────────────────────────────────────────────────────────
+# `build` runs the checker first and refuses to lower a program with errors, so
+# a failing check is the honest name for where this stops today.
+echo "[rung check] gen1 typechecks $SRC"
+( ulimit -s 524288 2>/dev/null || true; "$MADAROS" check "$SRC" ) >"$WORK/check.log" 2>&1
+CHECK_RC=$?
+ERRORS="$(grep -oE 'error\[E[0-9]+\]' "$WORK/check.log" | wc -l | tr -d ' ')"
+echo "           rc=$CHECK_RC errors=$ERRORS"
+if [[ "$ERRORS" -gt 0 ]]; then
+  echo "           by code:"
+  grep -oE 'error\[E[0-9]+\]' "$WORK/check.log" | sort | uniq -c | sort -rn | head -8 | sed 's/^/             /'
+fi
+
+if [[ "$CHECK_RC" -ne 0 || "$ERRORS" -gt 0 ]]; then
+  FAIL_DETAIL="gen1 cannot typecheck the compiler's own entry point: $ERRORS errors, rc=$CHECK_RC. See $WORK/check.log"
+else
+  reached check
+
+  # ── rung: gen2 ──────────────────────────────────────────────────────────────
+  echo "[rung gen2] gen1 compiles $SRC"
+  souc_compile "$MADAROS" "$SRC" "$GEN2" >"$WORK/gen2.log" 2>&1
+  GEN2_RC=$?
+  MERGED="$(grep -oE 'Merged IR: *[0-9]+' "$WORK/gen2.log" | grep -oE '[0-9]+' | tail -1)"
+  INTO_ACC_DONE="$(grep -oE 'into_acc_done[[:space:]]+[0-9]+' "$WORK/gen2.log" | grep -oE '[0-9]+' | tail -1)"
+  INTO_ACC_DONE="${INTO_ACC_DONE:-0}"
+  FIRST_GEN2_FAILURE="$(grep -m1 -E 'println-poison|IR lowering failed|ir_[a-z_]+_failed|error\[E[0-9]+\]|Error: native code buffer overflow|Error: native relocation table overflow|Failed to write native binary|multimodule native thin-link compilation failed' "$WORK/gen2.log" || true)"
+  GEN2_FAILURE_CONTEXT="$(grep -E 'first flagged in preseed stage|unresolved identifiers|lowering-error record|lowering errors:|raised at lower\.sio lines:|cause:' "$WORK/gen2.log" | head -8 || true)"
+  echo "           rc=$GEN2_RC merged_ir_functions=${MERGED:-<none>}"
+  echo "           into_acc_done=$INTO_ACC_DONE minimum=$MIN_INTO_ACC_DONE"
+  if [[ -n "$FIRST_GEN2_FAILURE" ]]; then
+    echo "           first_failure=$FIRST_GEN2_FAILURE"
+  fi
+  if [[ -n "$GEN2_FAILURE_CONTEXT" ]]; then
+    echo "           failure_context:"
+    printf '%s\n' "$GEN2_FAILURE_CONTEXT" | sed 's/^/             /'
+  fi
+  if [[ -n "$MERGED" ]] && [[ "$MERGED" -ge "$IR_MAX_FUNCS" ]]; then
+    gate_fail "merged IR reached IR_MAX_FUNCS ($MERGED >= $IR_MAX_FUNCS). ir_merge_modules_into may have stopped copying at the cap, so a progress/rung verdict would be attributable to a potentially truncated module. See scripts/ci/madaros_ir_capacity_probe.sh"
+  fi
+  if [[ "$GEN2_RC" -ne 0 || ! -s "$GEN2" ]]; then
+    FAIL_DETAIL="gen1 typechecked $SRC but produced no ELF (rc=$GEN2_RC). See $WORK/gen2.log"
+  else
+    chmod +x "$GEN2"
+    reached gen2
+
+    # ── rung: run ─────────────────────────────────────────────────────────────
+    echo "[rung run] gen2 identifies itself"
+    GEN2_KIND="$(souc_banner "$GEN2")"
+    echo "           banner=$GEN2_KIND"
+    if [[ "$GEN2_KIND" != "madaros" ]]; then
+      # 2026-09-03: banner=unknown alone does not say WHY -- dump what
+      # souc_banner's own classifier is blind to (exit code, full stdout+stderr,
+      # ELF file(1) classification) so this failure is diagnosable from the
+      # gate log alone instead of needing a second remote round-trip.
+      GEN2_VERSION_RAW="$("$GEN2" --version 2>&1)"
+      GEN2_VERSION_RC=$?
+      echo "           raw_exit_code=$GEN2_VERSION_RC"
+      echo "           raw_output_begin"
+      printf '%s\n' "$GEN2_VERSION_RAW" | sed 's/^/             /'
+      echo "           raw_output_end"
+      echo "           file=$(file -b "$GEN2" 2>&1)"
+      FAIL_DETAIL="gen2 is an ELF but does not run as Madaros (banner=$GEN2_KIND, --version exit=$GEN2_VERSION_RC) — the payload is wrong, not merely different"
+    else
+      reached run
+
+      # ── rung: gen3 ──────────────────────────────────────────────────────────
+      echo "[rung gen3] gen2 compiles $SRC"
+      souc_compile "$GEN2" "$SRC" "$GEN3" >"$WORK/gen3.log" 2>&1
+      GEN3_RC=$?
+      echo "           rc=$GEN3_RC"
+      if [[ "$GEN3_RC" -ne 0 || ! -s "$GEN3" ]]; then
+        FAIL_DETAIL="gen2 runs but cannot compile the source it was built from (rc=$GEN3_RC). See $WORK/gen3.log"
+      else
+        chmod +x "$GEN3"
+        reached gen3
+
+        # ── rung: fixpoint ────────────────────────────────────────────────────
+        echo "[rung fixpoint] gen2 vs gen3 executable payloads"
+        if bash "$ROOT_DIR/scripts/lib/compare_executable_payloads.sh" "$GEN2" "$GEN3" >"$WORK/cmp.log" 2>&1; then
+          echo "           identical"
+          reached fixpoint
+        else
+          FAIL_DETAIL="gen2 and gen3 differ — Madaros compiles itself but not to a fixed point. $(head -3 "$WORK/cmp.log")"
+        fi
+      fi
+    fi
+  fi
+fi
+
+echo
+REACHED_IDX="$(rung_index "$REACHED")"
+EXPECT_IDX="$(rung_index "$EXPECT")"
+echo "reached  $REACHED"
+echo "expected $EXPECT"
+
+if [[ "$REACHED_IDX" -lt "$EXPECT_IDX" ]]; then
+  gate_fail "stopped at rung '$REACHED' but this tree is recorded as reaching '$EXPECT'.
+$FAIL_DETAIL"
+fi
+
+if [[ "${INTO_ACC_DONE:-0}" -lt "$MIN_INTO_ACC_DONE" ]]; then
+  gate_fail "self-build progress regressed: into_acc_done=${INTO_ACC_DONE:-0}, required >=$MIN_INTO_ACC_DONE.
+First failure: ${FIRST_GEN2_FAILURE:-not found}. See $WORK/gen2.log"
+fi
+
+if [[ "$REACHED_IDX" -gt "$EXPECT_IDX" ]]; then
+  gate_fail "reached rung '$REACHED', further than the recorded '$EXPECT'. This is PROGRESS, and it is red on purpose: raise SOUNIO_MADAROS_FP_EXPECT (and the default in this file) to '$REACHED' so the ground gained cannot be lost silently."
+fi
+
+if [[ "$REACHED" == "fixpoint" ]]; then
+  gate_pass "Madaros compiles Madaros to a fixed point: gen2 == gen3"
+else
+  gate_pass "reached rung '$REACHED' as recorded; the next wall is '${RUNGS[$((REACHED_IDX + 1))]}' — $FAIL_DETAIL"
+fi

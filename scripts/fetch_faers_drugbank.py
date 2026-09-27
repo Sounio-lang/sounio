@@ -28,19 +28,15 @@ import time
 import csv
 import os
 
-CYP_NAMES = {
-    1: "CYP1A2", 2: "CYP2C9", 3: "CYP2C8", 4: "CYP2B6",
-    5: "CYP2C19", 6: "CYP2D6", 7: "CYP3A4",
-}
+import sys
+from pathlib import Path
 
-# Fano lines of the Cayley-Dickson octonion as implemented in stdlib/math/octonion.sio.
-# Verified by computing assoc_norm(e_i, e_j, e_k) = 0 using the actual oct_mul table.
-# Do NOT use an external source's Fano plane — the Sounio stdlib uses a specific convention.
-FANO_TRIPLES = {
-    (1, 2, 3), (1, 4, 5), (1, 6, 7),
-    (2, 4, 6), (2, 5, 7),
-    (3, 4, 7), (3, 5, 6),
-}
+# Canonical Fano = stdlib/medical/cyp450_fano.sio (NOT alternate CD tables).
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from lib.cyp_fano_canon import CYP_NAMES, FANO_TRIPLES_SORTED, fano_flag  # noqa: E402
+
+# Ordered (i<j<k) membership — combinations() yields sorted triples.
+FANO_TRIPLES = set(FANO_TRIPLES_SORTED)
 
 API = "https://api.fda.gov/drug/event.json"
 PAGE = 100
@@ -173,7 +169,7 @@ def main():
         asym = (
             abs(a_first - b_first) / temporal if temporal > 0 else -1.0
         )
-        fano = "True" if (i, j, k) in FANO_TRIPLES else "False"
+        fano = fano_flag(i, j, k)
         row = {
             "cyp_a": CYP_NAMES[i], "cyp_b": CYP_NAMES[j], "cyp_c": CYP_NAMES[k],
             "fano": fano,

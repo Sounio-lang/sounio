@@ -288,7 +288,7 @@ cargo run -- run tests/rustless-regressions/01_fibonacci.sio
 - `.github/workflows/ci.yml` (+15 LOC, new `rustless-e2e` job)
 
 ### Documentation
-- `docs/PHASE3_VALIDATION.md` (this file)
+- `docs/implementation/PHASE3_VALIDATION.md` (this file)
 
 **Total**: ~708 LOC test code + infrastructure
 

@@ -1,0 +1,35 @@
+//@ run-pass
+// NOTE: stdout also contains the "hi"/"STDIN" echoes from the raw write
+// syscalls, so no //@ expect-stdout line; scripts/ci/madaros_syscall6_gate.sh
+// greps the full transcript for the marker.
+// Regression: &! of a BSS global array passed to syscall6 must reach the
+// kernel as the RAW buffer address, not the Sounio reference handle (pointer
+// to a slot holding address-minus-object-header). Before the raw-arg
+// lowering path (lower_expr_args_raw_ref), write(1, &!GB, n) emitted the
+// handle's low bytes. lsp/server.sio's read/write wrappers depend on this.
+var GB: [i8; 64] = [0; 64]
+fn main() -> i32 with IO, Mut {
+    GB[0] = 104
+    GB[1] = 105
+    // write(1, GB, 2) must print "hi" (borrow form, server.sio style)
+    syscall6(1, 1, &! GB, 2, 0, 0, 0)
+    // read(0, GB, 5) must land stdin bytes in GB (borrow form).
+    // The test suite runs without piped stdin (n <= 0 there); the full
+    // "STDIN" witness is asserted by scripts/ci/madaros_syscall6_gate.sh.
+    let n = syscall6(0, 0, &! GB, 5, 0, 0, 0)
+    if n > 0 && n != 5 {
+        print("FAIL read n\n")
+        return 1
+    }
+    // when "STDIN" was piped in: S=83 T=84 D=68 I=73 N=78
+    if n == 5 {
+        if GB[0] as i64 != 83 || GB[4] as i64 != 78 {
+            print("FAIL read contents\n")
+            return 2
+        }
+    }
+    // bare-name form must also yield the raw base pointer
+    syscall6(1, 1, GB, 5, 0, 0, 0)
+    print("\nSYSCALL6_GLOBAL_BUFFER_OK\n")
+    0
+}

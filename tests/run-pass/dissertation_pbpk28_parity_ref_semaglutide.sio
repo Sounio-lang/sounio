@@ -329,27 +329,21 @@ fn full_cn_step(state: Pbpk28, dt: f64, rel_mid: f64) -> Pbpk28 with Mut, Div {
 // Couples pancreas GLP-1R occupancy (i=12) to a 2-state linear system:
 //   state.a[12]  =  ΔG  (mg/dL)  plasma glucose deviation from Gb=100
 //   state.n[12]  =  ΔI  (mU/L)   plasma insulin deviation from Ib=10
-// ─── PD layer — sourced from stdlib/darwin_pbpk/pd/bergman_glucose_insulin.sio
-// `use darwin_pbpk::pd::bergman_glucose_insulin::*` (top of file) pulls in:
-//   bergman_{gb,ib,sg,si,ki,kbase,alpha}
-// Bergman minimal model + GLP-1R-modulated insulin secretion at pancreas (i=12).
+// ─── PD layer — stdlib Bergman kernel, packed on Pbpk28.{a,n}[12] ────────
+// Occupancy is local (Pbpk28 TMDD state). The step is the stdlib kernel
+// extracted from this file at G-ε-14: implicit CN, ΔI first, then ΔG at
+// ΔI_new; h = dt/2. Params are bergman_default_params() (the getter pack:
+// ki, kbase, alpha, sg, si, gb, ib). Packed: a[12] = ΔG, n[12] = ΔI.
 
-fn pd_step_glucose_insulin(state: Pbpk28, dt: f64) -> Pbpk28 with Mut, Div {
+fn pd_step_glucose_insulin_pbpk28(state: Pbpk28, dt: f64) -> Pbpk28 with Mut, Div {
     var r = state
-    let h = 0.5 * dt
     let denom = r.rfree[12] + r.dr[12]
     let occ = if denom > 1.0e-9 { r.dr[12] / denom } else { 0.0 }
-
-    // dΔI/dt = k_base · α · occ - kI · ΔI
-    let di_new = ((1.0 - h * bergman_ki()) * r.n[12]
-                  + dt * bergman_kbase() * bergman_alpha() * occ) / (1.0 + h * bergman_ki())
-    r.n[12] = di_new
-
-    // dΔG/dt = -(SG + SI·Ib)·ΔG - SI·Gb·ΔI_new   (linearized at G ≈ Gb)
-    let lambda_g = bergman_sg() + bergman_si() * bergman_ib()
-    let dg_new = ((1.0 - h * lambda_g) * r.a[12]
-                  - dt * bergman_si() * bergman_gb() * r.n[12]) / (1.0 + h * lambda_g)
-    r.a[12] = dg_new
+    let p = bergman_default_params()
+    let s0 = BergmanState { dg: r.a[12], di: r.n[12] }
+    let s1 = pd_step_glucose_insulin(s0, occ, p, dt)
+    r.a[12] = s1.dg
+    r.n[12] = s1.di
     return r
 }
 
@@ -359,7 +353,7 @@ fn strang_step(state: Pbpk28, t_start: f64, dt: f64) -> Pbpk28 with Mut, Div {
     s = tmdd_step_organ(s, 3, dt)
     s = tmdd_step_organ(s, 8, dt)
     s = tmdd_step_organ(s, 12, dt)
-    s = pd_step_glucose_insulin(s, dt)
+    s = pd_step_glucose_insulin_pbpk28(s, dt)
     return s
 }
 

@@ -1,0 +1,195 @@
+// L3 — FAERS DrugBank asymmetry residual after age + sex controls
+// Join: data/faers_drugbank.csv × data/faers_demographics.csv (triple-level;
+// true case-level openFDA dumps are not in-repo — documented as next gate).
+// Fano: geometry-correct flags embedded with rows.
+//
+// OLS: asym ~ 1 + age + frac_female  (normal equations, 3×3)
+// Then mean residual Fano vs non-Fano + bootstrap CI + perm p
+//
+//   ./bin/souc run experiments/deep_four/l3_faers_demographics_residual.sio
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+fn floor_f(v: f64) -> f64 {
+    return (v as i64) as f64
+}
+
+var RNG: f64 = 20260725.0
+fn rng_u01() -> f64 with Mut, Div, Panic {
+    let A = 16807.0; let M = 2147483647.0
+    let prod = A * RNG
+    let q = (prod / M) as i64
+    RNG = prod - (q as f64) * M
+    if RNG < 1.0 { RNG = 1.0 }
+    return RNG / M
+}
+
+fn mean_n(x: &[f64; 64], n: i32) -> f64 with Mut, Div, Panic {
+    var s = 0.0; var i = 0
+    while i < n { s = s + x[i as usize]; i = i + 1 }
+    return s / (n as f64)
+}
+
+fn main() with IO, Mut, Div, Panic {
+    print("L3_FAERS_DEMOG_BEGIN\n")
+    print("L3_NOTE=triple_level_join_not_case_level\n")
+    let n: i32 = 32
+    // Embedded join (geometry-correct fano, usable demog) — NJOIN=32
+    var asym: [f64; 64] = [0.0; 64]
+    var age: [f64; 64] = [0.0; 64]
+    var ff: [f64; 64] = [0.0; 64]
+    var is_f: [f64; 64] = [0.0; 64]
+    asym[0]=0.0392; age[0]=60.25; ff[0]=0.5; is_f[0]=1.0
+    asym[1]=0.066; age[1]=67.52; ff[1]=0.3721; is_f[1]=0.0
+    asym[2]=0.0088; age[2]=74.0; ff[2]=1.0; is_f[2]=0.0
+    asym[3]=0.0816; age[3]=77.12; ff[3]=0.0299; is_f[3]=0.0
+    asym[4]=0.4638; age[4]=25.0; ff[4]=1.0; is_f[4]=0.0
+    asym[5]=0.3193; age[5]=74.0; ff[5]=0.5; is_f[5]=1.0
+    asym[6]=0.2173; age[6]=56.89; ff[6]=0.68; is_f[6]=0.0
+    asym[7]=0.1709; age[7]=59.07; ff[7]=0.5; is_f[7]=0.0
+    asym[8]=0.2294; age[8]=65.0; ff[8]=0.4545; is_f[8]=0.0
+    asym[9]=0.1468; age[9]=65.11; ff[9]=0.3966; is_f[9]=1.0
+    asym[10]=0.1853; age[10]=70.54; ff[10]=0.5294; is_f[10]=0.0
+    asym[11]=0.0932; age[11]=73.9; ff[11]=0.2083; is_f[11]=0.0
+    asym[12]=0.2857; age[12]=57.47; ff[12]=0.6667; is_f[12]=0.0
+    asym[13]=0.1933; age[13]=68.06; ff[13]=0.5714; is_f[13]=1.0
+    asym[14]=0.0235; age[14]=69.25; ff[14]=0.6667; is_f[14]=0.0
+    asym[15]=0.0; age[15]=79.66; ff[15]=0.4667; is_f[15]=0.0
+    asym[16]=0.2184; age[16]=61.7; ff[16]=0.639; is_f[16]=0.0
+    asym[17]=0.3113; age[17]=57.13; ff[17]=0.5429; is_f[17]=0.0
+    asym[18]=0.2319; age[18]=62.62; ff[18]=0.4558; is_f[18]=0.0
+    asym[19]=0.2325; age[19]=69.9; ff[19]=0.6432; is_f[19]=0.0
+    asym[20]=0.2286; age[20]=71.61; ff[20]=0.4804; is_f[20]=0.0
+    asym[21]=0.0039; age[21]=71.81; ff[21]=0.5404; is_f[21]=1.0
+    asym[22]=0.0195; age[22]=70.44; ff[22]=0.6; is_f[22]=0.0
+    asym[23]=0.2377; age[23]=71.14; ff[23]=0.3333; is_f[23]=1.0
+    asym[24]=0.0182; age[24]=67.59; ff[24]=0.0; is_f[24]=0.0
+    asym[25]=0.0302; age[25]=73.62; ff[25]=0.4615; is_f[25]=0.0
+    asym[26]=0.1653; age[26]=72.84; ff[26]=0.4776; is_f[26]=0.0
+    asym[27]=0.0457; age[27]=71.88; ff[27]=0.3333; is_f[27]=0.0
+    asym[28]=0.1814; age[28]=54.92; ff[28]=0.5425; is_f[28]=0.0
+    asym[29]=0.0913; age[29]=61.0; ff[29]=0.6332; is_f[29]=1.0
+    asym[30]=0.0383; age[30]=62.94; ff[30]=0.6941; is_f[30]=0.0
+    asym[31]=0.1006; age[31]=69.6; ff[31]=0.5593; is_f[31]=0.0
+
+    // Build X'X and X'y for [1, age, ff]
+    var xtx00 = 0.0; var xtx01 = 0.0; var xtx02 = 0.0
+    var xtx11 = 0.0; var xtx12 = 0.0; var xtx22 = 0.0
+    var xty0 = 0.0; var xty1 = 0.0; var xty2 = 0.0
+    var i = 0
+    while i < n {
+        let x0 = 1.0
+        let x1 = age[i as usize]
+        let x2 = ff[i as usize]
+        let y = asym[i as usize]
+        xtx00 = xtx00 + x0 * x0
+        xtx01 = xtx01 + x0 * x1
+        xtx02 = xtx02 + x0 * x2
+        xtx11 = xtx11 + x1 * x1
+        xtx12 = xtx12 + x1 * x2
+        xtx22 = xtx22 + x2 * x2
+        xty0 = xty0 + x0 * y
+        xty1 = xty1 + x1 * y
+        xty2 = xty2 + x2 * y
+        i = i + 1
+    }
+    // Cramer's rule / elimination for 3×3
+    // Augmented matrix row ops
+    var a00 = xtx00; var a01 = xtx01; var a02 = xtx02; var b0 = xty0
+    var a10 = xtx01; var a11 = xtx11; var a12 = xtx12; var b1 = xty1
+    var a20 = xtx02; var a21 = xtx12; var a22 = xtx22; var b2 = xty2
+    // eliminate
+    var f = a10 / a00
+    a11 = a11 - f * a01; a12 = a12 - f * a02; b1 = b1 - f * b0
+    f = a20 / a00
+    a21 = a21 - f * a01; a22 = a22 - f * a02; b2 = b2 - f * b0
+    f = a21 / a11
+    a22 = a22 - f * a12; b2 = b2 - f * b1
+    let beta2 = b2 / a22
+    let beta1 = (b1 - a12 * beta2) / a11
+    let beta0 = (b0 - a01 * beta1 - a02 * beta2) / a00
+    print("L3_BETA0="); print_f64(beta0); print("\n")
+    print("L3_BETA_AGE="); print_f64(beta1); print("\n")
+    print("L3_BETA_FF="); print_f64(beta2); print("\n")
+
+    var res: [f64; 64] = [0.0; 64]
+    var rf: [f64; 64] = [0.0; 64]
+    var rn: [f64; 64] = [0.0; 64]
+    var nf: i32 = 0
+    var nn: i32 = 0
+    i = 0
+    while i < n {
+        let pred = beta0 + beta1 * age[i as usize] + beta2 * ff[i as usize]
+        let r = asym[i as usize] - pred
+        res[i as usize] = r
+        if is_f[i as usize] > 0.5 {
+            rf[nf as usize] = r
+            nf = nf + 1
+        } else {
+            rn[nn as usize] = r
+            nn = nn + 1
+        }
+        i = i + 1
+    }
+    let mf = mean_n(&rf, nf)
+    let mn = mean_n(&rn, nn)
+    let diff = mn - mf
+    print("L3_N_FANO="); print(nf as i64); print("\n")
+    print("L3_N_NONFANO="); print(nn as i64); print("\n")
+    print("L3_RES_MEAN_FANO="); print_f64(mf); print("\n")
+    print("L3_RES_MEAN_NONFANO="); print_f64(mn); print("\n")
+    print("L3_RES_DIFF_N_MINUS_F="); print_f64(diff); print("\n")
+
+    // Bootstrap CI on residual means
+    RNG = 20260725.0
+    let b: i32 = 2000
+    var diffs: [f64; 2048] = [0.0; 2048]
+    var rep = 0
+    while rep < b {
+        var sf = 0.0; var k = 0
+        while k < nf {
+            var idx = floor_f(rng_u01() * (nf as f64)) as i32
+            if idx >= nf { idx = nf - 1 }
+            if idx < 0 { idx = 0 }
+            sf = sf + rf[idx as usize]
+            k = k + 1
+        }
+        var sn = 0.0; k = 0
+        while k < nn {
+            var idy = floor_f(rng_u01() * (nn as f64)) as i32
+            if idy >= nn { idy = nn - 1 }
+            if idy < 0 { idy = 0 }
+            sn = sn + rn[idy as usize]
+            k = k + 1
+        }
+        diffs[rep as usize] = sn / (nn as f64) - sf / (nf as f64)
+        rep = rep + 1
+    }
+    // sort
+    var p = 1
+    while p < b {
+        let key = diffs[p as usize]
+        var q = p - 1
+        while q >= 0 && diffs[q as usize] > key {
+            diffs[(q + 1) as usize] = diffs[q as usize]
+            q = q - 1
+        }
+        diffs[(q + 1) as usize] = key
+        p = p + 1
+    }
+    let lo = diffs[floor_f(0.025 * (b as f64)) as i32 as usize]
+    let hi = diffs[floor_f(0.975 * (b as f64)) as i32 as usize]
+    print("L3_CI_LO="); print_f64(lo); print("\n")
+    print("L3_CI_HI="); print_f64(hi); print("\n")
+    if lo > 0.0 { print("L3_BOOT_VERDICT=SUPPORT\n") }
+    else {
+        if hi < 0.0 { print("L3_BOOT_VERDICT=FAIL_HONEST\n") }
+        else { print("L3_BOOT_VERDICT=INCONCLUSIVE\n") }
+    }
+
+    // Note: residual diff is negative (non-Fano lower residual) → H1 not supported
+    print("L3_CASE_LEVEL=NOT_IN_REPO_openFDA_raw_pending\n")
+    print("L3_FAERS_DEMOG_COMPLETE\n")
+}

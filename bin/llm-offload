@@ -23,7 +23,20 @@
 #   scaffold     -> deepseek (code-strong)
 #   review       -> deepseek (code) or xai/grok (math/blunt)
 #   paraphrase   -> minimax  (Anthropic-compat) [requires MINIMAX_API_KEY]
-#   math-review  -> xai zai  (fan-out: Grok 4.3 + Z.AI GLM — independent second opinion; default for all agents)
+#   math-review  -> xai kimi zai local  (canonical since 2026-09-26: `xai` = Grok 4.7 via
+#                  LLM Gateway with xAI-direct fallback, `kimi` = Kimi K3 (Moonshot) via
+#                  LLM Gateway; zai and the on-prem `local` leg keep a second independent
+#                  vendor alive if the gateway itself is down)
+#
+# LLM GATEWAY (canonical paid route): set LLMGATEWAY_API_KEY in ~/.sounio-keys.env.
+# Any gateway model is reachable as `-p gw:<model-id>`.
+#
+# LOCAL endpoints: providers `local` and `local2` speak to any OpenAI-compatible server
+# (Ollama / vLLM / llama.cpp / LM Studio).  Configure LOCAL_LLM_URL (INCLUDING the /v1 prefix)
+# and LOCAL_LLM_MODEL, and optionally LOCAL2_* for a second, independent local model —
+# `-p "local local2"` then satisfies the two-provider review policy without any hosted API.
+# Set OFFLOAD_TIMEOUT higher for local reasoning models; a curl timeout writes an EMPTY file,
+# which reads exactly like a provider error.
 
 set -euo pipefail
 
@@ -38,7 +51,18 @@ default_provider_for() {
         scaffold)    echo "deepseek" ;;
         review)      echo "deepseek" ;;
         paraphrase)  echo "minimax" ;;
-        math-review) echo "xai zai" ;;   # fan-out default: Grok 4.3 + Z.AI GLM (independent providers)
+        # Fan-out default.  Three providers, not two, so ONE outage still leaves an
+        # independent second opinion: `local` is the on-prem gateway, and the policy
+        # (.claude/AGENT_OFFLOAD_POLICY.md M1) accepts a local leg for exactly this.
+        # Measured 2026-08-24: zai returns 1310 Weekly/Monthly Limit Exhausted, and
+        # with a two-provider default that silently degraded every math review that
+        # day to a single vendor.
+        # 2026-09-26 (operator decision): Grok 4.7 + Kimi K3 through the paid LLM
+        # Gateway are the canonical pair. zai and local stay in the set because
+        # both gateway legs share one point of failure; the xai leg alone falls
+        # back to xAI direct. The same day zai was rate-limited (1313) and local
+        # was down, so the gateway pair was the only working two-vendor option.
+        math-review) echo "xai kimi zai local" ;;
         *)           echo "" ;;
     esac
 }
@@ -87,6 +111,25 @@ status() {
         done
     else
         echo "Keys file: $env_file (NOT FOUND)"
+    fi
+    # Report the key the driver will actually see. The driver sources the keys file
+    # over the inherited environment, so a file line can set the key or clear an
+    # inherited one (an empty assignment, or an unset). Evaluate it the same way,
+    # in a subshell, and never print the value.
+    local gw_src=""
+    if ( if [[ -f "$env_file" ]]; then source "$env_file" >/dev/null 2>&1; fi
+         [[ -n "${LLMGATEWAY_API_KEY:-}" ]] ); then
+        if [[ -f "$env_file" ]] && grep -qE "^(export +)?LLMGATEWAY_API_KEY=.+" "$env_file"; then
+            gw_src="keys file"
+        else
+            gw_src="environment"
+        fi
+    fi
+    if [[ -n "$gw_src" ]]; then
+        echo "LLM Gateway: LLMGATEWAY_API_KEY set ($gw_src); canonical route (Grok 4.7 + Kimi K3) available"
+    else
+        echo "  ! LLMGATEWAY_API_KEY unset or empty after the keys file is applied: the CANONICAL math-review route"
+        echo "    (Grok 4.7 + Kimi K3 via LLM Gateway) is unavailable; xai falls back to xAI direct, kimi SKIPS"
     fi
     echo
     echo "Tasks dir:  $TASKS_DIR"

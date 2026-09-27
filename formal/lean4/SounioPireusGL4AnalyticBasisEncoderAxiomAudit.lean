@@ -1,0 +1,46 @@
+import SounioPireusGL4AnalyticBasisEncoder
+
+open SounioPireusGL4AnalyticBasisEncoder
+
+#print axioms basisFirst
+#print axioms basisSecond
+#print axioms basisThird
+#print axioms basisFourth
+#print axioms encodedRow
+#print axioms encoded_row_lt_sixteen
+#print axioms encodedRowLane
+#print axioms encoded_row_components
+#print axioms matrixCodeOfBasis
+#print axioms matrix_code_of_basis_lt_matrix_codes
+#print axioms boundedMatrixCodeOfBasis
+#print axioms matrix_row_code_of_basis_zero
+#print axioms matrix_row_code_of_basis_one
+#print axioms matrix_row_code_of_basis_two
+#print axioms matrix_row_code_of_basis_three
+#print axioms matrix_parity_code_of_basis_lane1
+#print axioms matrix_parity_code_of_basis_lane2
+#print axioms matrix_parity_code_of_basis_lane4
+#print axioms matrix_parity_code_of_basis_lane8
+#print axioms matrix_lane_map_code_of_basis_lane1
+#print axioms matrix_lane_map_code_of_basis_lane2
+#print axioms matrix_lane_map_code_of_basis_lane4
+#print axioms matrix_lane_map_code_of_basis_lane8
+#print axioms spanFour
+#print axioms span_extend_closed
+#print axioms spanThree_closed
+#print axioms spanFour_nodup_of_outside
+#print axioms map_spanFour
+#print axioms standard_span_four_is_lane_universe
+#print axioms analytic_ordered_basis_membership_facts
+#print axioms analytic_basis_span_four_nodup
+#print axioms encoded_basis_lane_universe_image_nodup
+#print axioms injective_of_lane_universe_map_nodup
+#print axioms matrix_lane_map_code_of_analytic_basis_injective
+#print axioms eraseDups_eq_self_of_nodup_nat
+#print axioms matrix_images_code_of_analytic_basis_nodup
+#print axioms matrix_code_of_analytic_basis_invertible
+#print axioms AnalyticBasisEntry
+#print axioms matrixWitnessOfAnalyticBasis
+#print axioms scanEntryOfAnalyticBasis
+#print axioms basis_of_scan_entry_of_analytic_basis
+#print axioms scan_entry_of_basis_of_scan_entry

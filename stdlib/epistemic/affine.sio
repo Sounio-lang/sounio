@@ -1,0 +1,196 @@
+// stdlib/epistemic/affine.sio
+//
+// First-order AFFINE uncertainty forms — exact first-order propagation with shared sources.
+//
+// The scalar `Epistemic` type (knowledge.sio) carries one variance per value and must assume
+// its operands are independent at every `ep_add`/`ep_mul`. When two operands descend from the
+// same measurement that assumption is false and the reported variance is wrong by exactly
+// 2·Cov (Lemma 1 of the anti-garbling paper): under-stated when Cov > 0 (precision
+// manufactured), over-stated when Cov < 0 (information lost). Measured on the vancomycin
+// two-compartment chain (docs/research/sounio/rq4_vanco_two_compartment_flip.sio): 34 % of true
+// WARNs silenced in the interval sum, a 300× variance over-statement across the phase chain.
+//
+// An affine form fixes both directions by construction. A value is
+//
+//     x  =  v  +  Σ_s  c_s · ε_s ,      ε_s independent, zero-mean, unit variance,
+//
+// one noise symbol ε_s per MEASUREMENT SOURCE s. Every operation propagates the coefficient
+// vector c exactly to first order (linearisation at the point value), so the variance
+// Σ c_s² and every covariance Σ a_s·b_s are the true first-order ones however the sources are
+// shared. This is the runtime twin of the noise-set discipline the checker enforces (E230):
+// where the type system rejects an independence-assuming add over non-disjoint sources, this
+// type computes the sum correctly instead. It is also the object `Aff` of the mechanized
+// calculus formal/lean4/EpistemicEffectsNS.lean (trueVar_append, trueVar_mul,
+// naive_add_understates_iff).
+//
+// Sources are integers in [0, af_max_sources()). Assign one per physical measurement; two
+// measurements given the same source are treated as the same noise symbol (over-approximation);
+// two physically correlated measurements given different sources are treated as independent —
+// the honest-labelling axiom, which no propagation scheme can discharge for you.
+//
+// First-order only: products, quotients, roots use the delta method (the same linearisation
+// `ep_*` uses); second-order terms are dropped in both. Not a probability distribution — the
+// variance is the algebraic Σ c_s².
+//
+// Engine notes (2026-08-31): the run-pass tests below pass on the committed Madaros and on
+// lean_single. An earlier crash attributed to a per-function slot budget (#2318) was a stale local
+// build resolved ahead of the committed ELF — not a property of the shipped compiler. lean_single
+// cannot parse `&f(&g(x))` in imported calls; bind call temporaries to `let`s in test code.
+
+use epistemic::knowledge::{Epistemic, ep_new}
+
+pub fn af_max_sources() -> i64 { 32 }
+
+pub struct Affine {
+    v: f64,
+    c: [f64; 32],
+}
+
+// ── construction ─────────────────────────────────────────────────────────────
+
+pub fn af_const(v: f64) -> Affine {
+    Affine { v: v, c: [0.0; 32] }
+}
+
+// A measurement: value `v`, standard uncertainty `sd`, on noise source `src`.
+pub fn af_measured(v: f64, sd: f64, src: i64) -> Affine with Mut, Panic {
+    assert(src >= 0 && src < 32)
+    var a = af_const(v)
+    a.c[src] = sd
+    a
+}
+
+// ── accessors ────────────────────────────────────────────────────────────────
+
+pub fn af_value(a: &Affine) -> f64 { a.v }
+
+pub fn af_coeff(a: &Affine, src: i64) -> f64 with Mut, Panic {
+    assert(src >= 0 && src < 32)
+    a.c[src]
+}
+
+// True first-order variance: Σ c_s².
+pub fn af_variance(a: &Affine) -> f64 with Mut {
+    var s = 0.0
+    var i: i64 = 0
+    while i < 32 { s = s + a.c[i] * a.c[i]; i = i + 1 }
+    s
+}
+
+// True first-order covariance: Σ a_s·b_s (Lemma 1's inner product).
+pub fn af_cov(a: &Affine, b: &Affine) -> f64 with Mut {
+    var s = 0.0
+    var i: i64 = 0
+    while i < 32 { s = s + a.c[i] * b.c[i]; i = i + 1 }
+    s
+}
+
+fn af_sqrt_f(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i: i64 = 0
+    while i < 30 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+pub fn af_std(a: &Affine) -> f64 with Mut, Div, Panic { af_sqrt_f(af_variance(a)) }
+
+// Correlation coefficient in [-1, 1]; 0.0 when either variance is zero.
+pub fn af_corr(a: &Affine, b: &Affine) -> f64 with Mut, Div, Panic {
+    let va = af_variance(a)
+    let vb = af_variance(b)
+    if va <= 0.0 || vb <= 0.0 { return 0.0 }
+    af_cov(a, b) / (af_sqrt_f(va) * af_sqrt_f(vb))
+}
+
+// Support test — the runtime analogue of the checker's E230 precondition:
+// true iff no source carries uncertainty into BOTH operands.
+pub fn af_sources_disjoint(a: &Affine, b: &Affine) -> bool with Mut {
+    var i: i64 = 0
+    while i < 32 {
+        if a.c[i] != 0.0 && b.c[i] != 0.0 { return false }
+        i = i + 1
+    }
+    true
+}
+
+// What the independence-assuming scalar add WOULD report for a + b, and the gap.
+pub fn af_naive_add_variance(a: &Affine, b: &Affine) -> f64 with Mut { af_variance(a) + af_variance(b) }
+// Lemma 1: Var(a+b) − (Var a + Var b) = 2·Cov(a,b)
+pub fn af_add_gap(a: &Affine, b: &Affine) -> f64 with Mut { 2.0 * af_cov(a, b) }
+
+// ── linear operations (exact) ────────────────────────────────────────────────
+
+pub fn af_add(a: &Affine, b: &Affine) -> Affine with Mut {
+    var r = af_const(a.v + b.v)
+    var i: i64 = 0
+    while i < 32 { r.c[i] = a.c[i] + b.c[i]; i = i + 1 }
+    r
+}
+
+pub fn af_sub(a: &Affine, b: &Affine) -> Affine with Mut {
+    var r = af_const(a.v - b.v)
+    var i: i64 = 0
+    while i < 32 { r.c[i] = a.c[i] - b.c[i]; i = i + 1 }
+    r
+}
+
+pub fn af_scale(a: &Affine, k: f64) -> Affine with Mut {
+    var r = af_const(a.v * k)
+    var i: i64 = 0
+    while i < 32 { r.c[i] = a.c[i] * k; i = i + 1 }
+    r
+}
+
+pub fn af_shift(a: &Affine, k: f64) -> Affine with Mut {
+    var r = af_const(a.v + k)
+    var i: i64 = 0
+    while i < 32 { r.c[i] = a.c[i]; i = i + 1 }
+    r
+}
+
+// ── nonlinear operations (delta method, first order) ─────────────────────────
+
+// d(ab) = b·da + a·db
+pub fn af_mul(a: &Affine, b: &Affine) -> Affine with Mut {
+    var r = af_const(a.v * b.v)
+    var i: i64 = 0
+    while i < 32 { r.c[i] = b.v * a.c[i] + a.v * b.c[i]; i = i + 1 }
+    r
+}
+
+// d(a/b) = da/b − a·db/b²
+pub fn af_div(a: &Affine, b: &Affine) -> Affine with Mut, Div, Panic {
+    let ib = 1.0 / b.v
+    let q = a.v * ib * ib
+    var r = af_const(a.v * ib)
+    var i: i64 = 0
+    while i < 32 { r.c[i] = a.c[i] * ib - q * b.c[i]; i = i + 1 }
+    r
+}
+
+// d(a²) = 2a·da  — note: af_mul(a, a) gives the SAME result (shared source handled), unlike ep_mul.
+pub fn af_square(a: &Affine) -> Affine with Mut {
+    var r = af_const(a.v * a.v)
+    var i: i64 = 0
+    while i < 32 { r.c[i] = 2.0 * a.v * a.c[i]; i = i + 1 }
+    r
+}
+
+// d√a = da / (2√a)
+pub fn af_sqrt(a: &Affine) -> Affine with Mut, Div, Panic {
+    let s = af_sqrt_f(a.v)
+    let k = if s > 0.0 { 0.5 / s } else { 0.0 }
+    var r = af_const(s)
+    var i: i64 = 0
+    while i < 32 { r.c[i] = a.c[i] * k; i = i + 1 }
+    r
+}
+
+// ── bridge to the scalar type ────────────────────────────────────────────────
+
+// Collapse to a scalar Epistemic carrying the TRUE first-order variance. Do this at the end of
+// a shared-source chain, never in the middle (the scalar type cannot carry sources).
+pub fn af_to_epistemic(a: &Affine, confidence: i64) -> Epistemic with Mut {
+    ep_new(a.v, af_variance(a), confidence)
+}

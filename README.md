@@ -17,7 +17,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.frontdoor.readme
 <p align="center">
   <a href="https://www.souniolang.org"><img src="https://img.shields.io/badge/website-souniolang.org-blue.svg" alt="Sounio Website"/></a>
   <a href="https://www.souniolang.org/playground"><img src="https://img.shields.io/badge/playground-wasm-purple.svg" alt="Playground"/></a>
-  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-1.0.0--beta.6-orange.svg" alt="Version 1.0.0-beta.6"/></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-2.1.0-blue.svg" alt="Version 2.1.0"/></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache--2.0-gold.svg" alt="Apache-2.0 License"/></a>
   <a href="#honest-status"><img src="https://img.shields.io/badge/scale-6.1k%20.sio%20files-informational.svg" alt="~6.1k tracked .sio files; see SCALE.md"/></a>
 </p>
@@ -238,7 +238,7 @@ The result was verified computationally in Sounio and independently reproduced i
 
 ## Get started
 
-This checkout ships checked self-hosted compiler artifacts for Linux `x86_64`, macOS `arm64`, and macOS `x86_64` behind the host-aware `bin/souc` launcher, which is the official compiler entrypoint and routes to Madaros by default. No Rust build step is required for the default workflow.
+This checkout ships checked self-hosted compiler artifacts for Linux `x86_64` behind the host-aware `bin/souc` launcher, which is the official compiler entrypoint and routes to Madaros by default. The checked `bin/souc-*` binaries are Linux ELF artifacts; macOS is a cross-compile target rather than a host-native binary lane. No Rust build step is required for the default workflow.
 
 ```bash
 git clone https://github.com/sounio-lang/sounio.git
@@ -247,7 +247,7 @@ cd sounio
 export SOUC="$(pwd)/bin/souc"
 export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 
-$SOUC --version                              # souc 1.0.0-beta.6
+$SOUC --version                              # souc 2.1.0
 $SOUC info                                   # selected host artifact + wrapper contract
 $SOUC check examples/hello.sio               # type-check via checked self-hosted lane
 $SOUC init hello_pkg && cd hello_pkg         # create a minimal sounio.toml project
@@ -335,7 +335,7 @@ If you use Sounio in academic work:
   title     = {Sounio: A Systems Programming Language for Epistemic Computing},
   author    = {Agourakis, Demetrios Chiuratto and Gerenutti, Marli},
   year      = {2026},
-  version   = {1.0.0-beta.6},
+  version   = {2.1.0},
   doi       = {10.5281/zenodo.18726647},
   url       = {https://github.com/sounio-lang/sounio},
   note      = {Self-hosted compiler with epistemic types and Lean 4 verification}

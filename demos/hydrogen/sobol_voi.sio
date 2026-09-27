@@ -1,0 +1,266 @@
+// demos/hydrogen/sobol_voi.sio
+//
+// Sobol variance decomposition + value-of-information sequencing for the
+// shale caprock problem — which measurement buys certainty, and in which
+// ORDER. One deterministic run, default engine.
+//
+// Companion to caprock_integrity_v2.sio, for Dr. Emmanuel Stamatakis
+// (NCSR Demokritos, H2Lab). The shale formation is the indeterminate one
+// (seal p-box [42, 67] % for an 800 m column), so it is the one where
+// measurement strategy matters.
+//
+// Part 1 — Sobol indices of ln P_c = const + ln γ − ln r (θ fixed at 30°):
+//   analytic (log-space linearisation) vs Monte Carlo Saltelli/Jansen
+//   total-order estimators with two independent sample matrices.
+//   Question: does the aleatory scatter come from IFT (γ) or pore throats (r)?
+//
+// Part 2 — value-of-information sequencing (shale, 800 m threshold):
+//   baseline:      θ ∈ [15,45]°,  σ_log r = 0.5
+//   option A:      measure θ to ±7.5°  -> epistemic interval halved
+//   option B:      image pore throats  -> σ_log r halved (aleatory halved)
+//   The result is NOT commutative, and the run shows why.
+
+// ─── pure-Sounio math ───
+
+fn mh_sqrt(x: f64) -> f64 with Mut {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i = 0
+    while i < 30 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn mh_exp(x: f64) -> f64 with Mut, Div {
+    if x > 700.0 { return 1.0e200 }
+    if x < 0.0 - 700.0 { return 0.0 }
+    var kf = x / 0.6931471805599453
+    var k = kf as i64
+    if kf < 0.0 {
+        if kf != (k as f64) { k = k - 1 }
+    }
+    let r = x - (k as f64) * 0.6931471805599453
+    var s = 1.0
+    var term = 1.0
+    var n: i64 = 1
+    while n < 25 { term = term * r / (n as f64); s = s + term; n = n + 1 }
+    var result = s
+    if k >= 0 {
+        var i: i64 = 0
+        while i < k { result = result * 2.0; i = i + 1 }
+    } else {
+        var i: i64 = 0
+        while i < (0 - k) { result = result / 2.0; i = i + 1 }
+    }
+    result
+}
+
+fn mh_ln(x: f64) -> f64 with Mut, Div {
+    var m = x
+    var k: i64 = 0
+    while m >= 2.0 { m = m / 2.0; k = k + 1 }
+    while m < 1.0 { m = m * 2.0; k = k - 1 }
+    let y = (m - 1.0) / (m + 1.0)
+    let y2 = y * y
+    var term = y
+    var sum = 0.0
+    var i: i64 = 0
+    while i < 12 {
+        sum = sum + term / (2.0 * (i as f64) + 1.0)
+        term = term * y2
+        i = i + 1
+    }
+    2.0 * sum + (k as f64) * 0.6931471805599453
+}
+
+fn mh_cos(x: f64) -> f64 {
+    let x2 = x * x
+    1.0 - x2 / 2.0 + x2 * x2 / 24.0 - x2 * x2 * x2 / 720.0
+}
+
+// ─── PRNG ───
+
+var RNG_A: i64 = 0
+var RNG_B: i64 = 0
+
+fn rng_seed(a: i64, b: i64) with Mut {
+    RNG_A = a
+    RNG_B = b
+}
+
+fn rng_next() -> i64 with Mut {
+    var x = RNG_A
+    let y = RNG_B
+    RNG_A = y
+    x = x ^ (x << 23)
+    x = x ^ (x >> 17)
+    x = x ^ (y ^ (y >> 26))
+    RNG_B = x
+    let r = x + y
+    if r < 0 { 0 - r } else { r }
+}
+
+fn rand_uniform() -> f64 with Mut, Div {
+    let r = rng_next()
+    (r % 10000) as f64 / 10000.0
+}
+
+fn rand_normal() -> f64 with Mut, Div {
+    var sum = 0.0
+    var j = 0
+    while j < 12 { sum = sum + rand_uniform(); j = j + 1 }
+    sum - 6.0
+}
+
+fn rand_gaussian(mu: f64, sigma: f64) -> f64 with Mut, Div {
+    mu + sigma * rand_normal()
+}
+
+// ─── part 1: Saltelli matrices ───
+
+var GA1: [f64; 10000] = [0.0; 10000]
+var GA2: [f64; 10000] = [0.0; 10000]
+var GB1: [f64; 10000] = [0.0; 10000]
+var GB2: [f64; 10000] = [0.0; 10000]
+var FA: [f64; 10000] = [0.0; 10000]
+
+// response surface: ln P_c at theta = 30 deg, in log space
+fn flog(gamma_mn: f64, lnr: f64) -> f64 with Mut, Div {
+    mh_ln(2.0 * (gamma_mn / 1000.0) * mh_cos(30.0 * 3.141592653589793 / 180.0)) - lnr
+}
+
+fn fill_matrices(n: i64, gmu: f64, sg: f64, lnr_mu: f64, sr: f64) with Mut, Div {
+    var i: i64 = 0
+    while i < n {
+        GA1[i] = rand_gaussian(gmu, sg)
+        GA2[i] = rand_gaussian(lnr_mu, sr)
+        GB1[i] = rand_gaussian(gmu, sg)
+        GB2[i] = rand_gaussian(lnr_mu, sr)
+        FA[i] = flog(GA1[i], GA2[i])
+        i = i + 1
+    }
+}
+
+// Jansen total-order index of variable `which` (0 = gamma, 1 = ln r)
+fn total_index(n: i64, which: i64, var_tot: f64) -> f64 with Mut, Div {
+    var i: i64 = 0
+    var acc = 0.0
+    while i < n {
+        var f_ab = 0.0
+        if which == 0 {
+            f_ab = flog(GB1[i], GA2[i])
+        } else {
+            f_ab = flog(GA1[i], GB2[i])
+        }
+        let d = FA[i] - f_ab
+        acc = acc + d * d
+        i = i + 1
+    }
+    acc / (n as f64) / (2.0 * var_tot)
+}
+
+// ─── part 2: seal reliability with tunable aleatory sigma ───
+
+fn seal_mc2(theta_deg: f64, gmu: f64, r_med_nm: f64, sigr: f64, thr_mpa: f64, n: i64) -> f64 with Mut, Div {
+    let cth = mh_cos(theta_deg * 3.141592653589793 / 180.0)
+    let lnr = mh_ln(r_med_nm) - 20.72326583694641
+    var i: i64 = 0
+    var hits: i64 = 0
+    while i < n {
+        let gamma = rand_gaussian(gmu, 5.0) / 1000.0
+        let r = mh_exp(rand_gaussian(lnr, sigr))
+        let pc = 2.0 * gamma * cth / r / 1000000.0
+        if pc >= thr_mpa { hits = hits + 1 }
+        i = i + 1
+    }
+    100.0 * (hits as f64) / (n as f64)
+}
+
+// ─── main ───
+
+fn main() -> i32 with IO, Mut, Div {
+    let gmu = 71.88
+    let sg = 5.0
+    let sr = 0.5
+    let lnr_mu = mh_ln(15.0) - 20.72326583694641
+    let thr = 950.0 * 9.81 * 800.0 / 1000000.0
+
+    print("=== Sobol decomposition + VoI sequencing — shale caprock ===")
+    println("")
+
+    // ── part 1: Sobol ──
+    let sgl = sg / gmu   // sigma of ln gamma (linearised)
+    let v_tot = sgl * sgl + sr * sr
+    print("analytic (log-space): S_gamma = "); println(sgl * sgl / v_tot)
+    print("                      S_r     = "); println(sr * sr / v_tot)
+    rng_seed(314159265, 271828182)
+    let n: i64 = 10000
+    fill_matrices(n, gmu, sg, lnr_mu, sr)
+    var mean = 0.0
+    var i: i64 = 0
+    while i < n { mean = mean + FA[i]; i = i + 1 }
+    mean = mean / (n as f64)
+    var var_tot = 0.0
+    i = 0
+    while i < n {
+        let d = FA[i] - mean
+        var_tot = var_tot + d * d
+        i = i + 1
+    }
+    var_tot = var_tot / ((n - 1) as f64)
+    print("MC total-order (Jansen, N=10000): T_gamma = "); println(total_index(n, 0, var_tot))
+    print("                                  T_r     = "); println(total_index(n, 1, var_tot))
+    println("")
+
+    // ── part 2: VoI sequencing ──
+    let m: i64 = 20000
+    print("baseline shale p-box (theta [15,45], sigma_r 0.5):")
+    println("")
+    rng_seed(314159265, 271828182)
+    let b_hi = seal_mc2(15.0, gmu, 15.0, 0.5, thr, m)
+    rng_seed(314159265, 271828182)
+    let b_lo = seal_mc2(45.0, gmu, 15.0, 0.5, thr, m)
+    print("   ["); println(b_lo)
+    print("    ,"); println(b_hi)
+    print("   ]  width [pp]: "); println(b_hi - b_lo)
+    println("")
+
+    print("option A: measure theta to +-7.5 deg (interval halved):")
+    println("")
+    rng_seed(314159265, 271828182)
+    let a_hi = seal_mc2(22.5, gmu, 15.0, 0.5, thr, m)
+    rng_seed(314159265, 271828182)
+    let a_lo = seal_mc2(37.5, gmu, 15.0, 0.5, thr, m)
+    print("   ["); println(a_lo)
+    print("    ,"); println(a_hi)
+    print("   ]  width [pp]: "); println(a_hi - a_lo)
+    println("")
+
+    print("option B: image pore throats (sigma_r 0.5 -> 0.25):")
+    println("")
+    rng_seed(314159265, 271828182)
+    let c_mid = seal_mc2(30.0, gmu, 15.0, 0.25, thr, m)
+    rng_seed(314159265, 271828182)
+    let c_hi = seal_mc2(15.0, gmu, 15.0, 0.25, thr, m)
+    rng_seed(314159265, 271828182)
+    let c_lo = seal_mc2(45.0, gmu, 15.0, 0.25, thr, m)
+    print("   mid(theta=30) reliability [%]: "); println(c_mid)
+    print("   p-box ["); println(c_lo)
+    print("         ,"); println(c_hi)
+    print("   ]  width [pp]: "); println(c_hi - c_lo)
+    println("")
+
+    print("Sobol says 98% of aleatory scatter is pore throats, only 2% IFT.")
+    println("")
+    print("But option B BACKFIRES epistemically: halving sigma_r raises the")
+    println("")
+    print("mid estimate yet WIDENS the p-box (~24 -> ~44 pp) — with less")
+    println("")
+    print("aleatory noise the answer becomes MORE sensitive to the unknown")
+    println("")
+    print("wettability. Correct order: measure theta FIRST (width 24 -> 12 pp),")
+    println("")
+    print("then image the pores. Sequence matters; Sounio prices both steps.")
+    println("")
+    println("SOBOL_VOI_OK")
+    0
+}

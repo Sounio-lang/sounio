@@ -57,6 +57,7 @@ pub fn check_knowledge_type(checker: Checker, info: KnowledgeTypeInfo) -> (Check
 
     // Validate epsilon bound if present
     var eps_val: f64 = -1.0
+    var eps_mode: i64 = 0
     match info.epsilon {
         Some(eb) => {
             let bound = *eb
@@ -66,12 +67,21 @@ pub fn check_knowledge_type(checker: Checker, info: KnowledgeTypeInfo) -> (Check
                 c = c.report_error_at(Span { file_id: 0, start: 0, end: 0 }, 22, 0, 0, 0)
             } else {
                 eps_val = bound.value
+                eps_mode = epsilon_mode_from_compare_op(bound.op)
             }
         }
         None => {}
     }
 
-    let ty = ty_knowledge(inner_ty, eps_val)
+    // Persist the annotation's provenance category as TypeEntry payload
+    // (parsed by the parser, converted by provenance_from_ast via `meta`,
+    // and DROPPED here until 2026-09-01). Identity is untouched —
+    // types_equal never reads this field; the call-boundary check is the
+    // only consumer. Lane: SOUNIO-KNOWLEDGE-BOUNDARY-PROVENANCE.
+    var ty = ty_knowledge(inner_ty, eps_val)
+    ty.knowledge_epsilon_mode = eps_mode
+    let prov = meta.provenance
+    ty.knowledge_provenance_kind = prov.kind
     (c, ty)
 }
 
@@ -81,6 +91,7 @@ pub fn check_intervention_type(checker: Checker, info: KnowledgeTypeInfo) -> (Ch
     let inner_ty = pair.1
 
     var eps_val: f64 = -1.0
+    var eps_mode: i64 = 0
     match info.epsilon {
         Some(eb) => {
             let bound = *eb
@@ -90,12 +101,14 @@ pub fn check_intervention_type(checker: Checker, info: KnowledgeTypeInfo) -> (Ch
                 c = c.report_error_at(Span { file_id: 0, start: 0, end: 0 }, 22, 0, 0, 0)
             } else {
                 eps_val = bound.value
+                eps_mode = epsilon_mode_from_compare_op(bound.op)
             }
         }
         None => {}
     }
 
-    let ty = ty_intervention(inner_ty, eps_val)
+    var ty = ty_intervention(inner_ty, eps_val)
+    ty.knowledge_epsilon_mode = eps_mode
     (c, ty)
 }
 
@@ -105,6 +118,7 @@ pub fn check_counterfactual_type(checker: Checker, info: KnowledgeTypeInfo) -> (
     let inner_ty = pair.1
 
     var eps_val: f64 = -1.0
+    var eps_mode: i64 = 0
     match info.epsilon {
         Some(eb) => {
             let bound = *eb
@@ -114,12 +128,14 @@ pub fn check_counterfactual_type(checker: Checker, info: KnowledgeTypeInfo) -> (
                 c = c.report_error_at(Span { file_id: 0, start: 0, end: 0 }, 22, 0, 0, 0)
             } else {
                 eps_val = bound.value
+                eps_mode = epsilon_mode_from_compare_op(bound.op)
             }
         }
         None => {}
     }
 
-    let ty = ty_counterfactual(inner_ty, eps_val)
+    var ty = ty_counterfactual(inner_ty, eps_val)
+    ty.knowledge_epsilon_mode = eps_mode
     (c, ty)
 }
 
@@ -129,6 +145,7 @@ pub fn check_validated_type(checker: Checker, info: KnowledgeTypeInfo) -> (Check
     let inner_ty = pair.1
 
     var eps_val: f64 = -1.0
+    var eps_mode: i64 = 0
     match info.epsilon {
         Some(eb) => {
             let bound = *eb
@@ -138,12 +155,14 @@ pub fn check_validated_type(checker: Checker, info: KnowledgeTypeInfo) -> (Check
                 c = c.report_error_at(Span { file_id: 0, start: 0, end: 0 }, 22, 0, 0, 0)
             } else {
                 eps_val = bound.value
+                eps_mode = epsilon_mode_from_compare_op(bound.op)
             }
         }
         None => {}
     }
 
-    let ty = ty_validated(inner_ty, eps_val)
+    var ty = ty_validated(inner_ty, eps_val)
+    ty.knowledge_epsilon_mode = eps_mode
     (c, ty)
 }
 
@@ -223,8 +242,8 @@ const PROVENANCE_KIND_INPUT: i64 = 5
 
 // Provenance metadata tracking source and lineage
 pub struct Provenance {
-    kind: i64,
-    source_id: i64
+    pub kind: i64,
+    pub source_id: i64
 }
 
 // Construct provenance with a specific kind
@@ -335,18 +354,19 @@ pub fn check_knowledge_epsilon_of(ty: TypeEntry) -> TypeEntry {
 
 // Check if provenance is from a trusted source
 pub fn provenance_is_trusted(prov: Provenance) -> bool {
-    match prov.kind {
-        PROVENANCE_KIND_SOURCE => true,
-        PROVENANCE_KIND_LITERATURE => true,
-        PROVENANCE_KIND_MEASURED => true,
-        PROVENANCE_KIND_DERIVED => false,
-        PROVENANCE_KIND_COMPUTED => false,
-        PROVENANCE_KIND_INPUT => false
-    }
+    // if-chain, NOT match-on-const: in Madaros a const pattern binds instead
+    // of matching (measured 2026-09-01: match x { A => ..., B => ... } with
+    // x=2 returns the A arm), which made this function return true for every
+    // kind and killed provenance_subsumes silently. The arm order and the
+    // trusted set are unchanged: Source, Literature, Measured are trusted.
+    if prov.kind == PROVENANCE_KIND_SOURCE { return true }
+    if prov.kind == PROVENANCE_KIND_LITERATURE { return true }
+    if prov.kind == PROVENANCE_KIND_MEASURED { return true }
+    false
 }
 
 // Get string representation of provenance kind
-pub fn provenance_kind_name(kind: i64) -> String with Alloc {
+pub fn provenance_kind_name(kind: i64) -> string with Alloc {
     match kind {
         PROVENANCE_KIND_DERIVED => "derived",
         PROVENANCE_KIND_SOURCE => "source",
@@ -387,9 +407,9 @@ const VALIDITY_KIND_WHILE_COND: i64 = 3
 
 // Validity metadata for knowledge temporal bounds
 pub struct Validity {
-    kind: i64,
-    duration_sec: f64,
-    until_timestamp: f64
+    pub kind: i64,
+    pub duration_sec: f64,
+    pub until_timestamp: f64
 }
 
 // Create always-valid validity (no expiration)
@@ -478,9 +498,9 @@ pub fn validity_intersect(a: Validity, b: Validity) -> Validity {
 // Combined metadata for Knowledge types including
 // epsilon bound, validity conditions, and provenance
 pub struct KnowledgeMeta {
-    epsilon: f64,
-    validity: Validity,
-    provenance: Provenance
+    pub epsilon: f64,
+    pub validity: Validity,
+    pub provenance: Provenance
 }
 
 // Create default metadata with always-valid and unknown provenance
@@ -498,10 +518,14 @@ pub fn knowledge_meta_from_ty(ty: TypeEntry) -> KnowledgeMeta with Mut, Panic, D
     match ty.kind {
         TypeKind::TyKnowledge => {
             let eps = ty.knowledge_epsilon
+            // Read the persisted provenance payload instead of flattening to
+            // DERIVED. -1 (absent: intrinsics, binary results) maps to
+            // DERIVED — which is what a computed value honestly is.
+            let prov_kind = if ty.knowledge_provenance_kind >= 0 { ty.knowledge_provenance_kind } else { PROVENANCE_KIND_DERIVED }
             KnowledgeMeta {
                 epsilon: eps,
                 validity: validity_always(),
-                provenance: provenance_new(PROVENANCE_KIND_DERIVED)
+                provenance: provenance_new(prov_kind)
             }
         }
         TypeKind::TyIntervention => {
@@ -584,45 +608,65 @@ pub fn knowledge_meta_is_valid(meta: KnowledgeMeta) -> bool {
 // Confidence subsumption lattice (lines 301-380)
 // ============================================================
 
-// Confidence subsumption: lower epsilon = higher confidence
-// epsilon_subsumes(eps_a, eps_b) returns true if a is at least as
-// confident as b (eps_a <= eps_b)
-//
-// This defines a partial order where:
-//   0.0 (certain) > 0.1 > 0.5 > 1.0 (unknown)
-//
-// Returns true if eps_a <= eps_b
-pub fn epsilon_subsumes(eps_a: f64, eps_b: f64) -> bool {
-    eps_a <= eps_b
+// TypeEntry stores the parser operator as the same compact mode used by the
+// bootstrap seed: 0=error bound/unspecified, 1=exact, 2=confidence floor.
+pub fn epsilon_mode_from_compare_op(op: CompareOp) -> i64 {
+    if op == CompareOp::CmpEq { return 1 }
+    if op == CompareOp::CmpGe || op == CompareOp::CmpGt { return 2 }
+    0
 }
 
-// Function-call boundaries fail closed on unknown/invalid provided epsilon.
-// Required epsilon < 0.0 means "unspecified requirement".
-pub fn epsilon_subsumes_call_boundary(provided_eps: f64, required_eps: f64) -> bool {
-    if !epsilon_is_valid(provided_eps) {
+// Directional epsilon subsumption. This deliberately mirrors lean_single
+// ty_eq: the required annotation chooses the direction, while a confidence
+// value cannot flow into an error-bound requirement.
+pub fn epsilon_subsumes(provided_eps: f64, provided_mode: i64, required_eps: f64, required_mode: i64) -> bool {
+    if provided_eps > 1.0 || required_eps > 1.0 {
         return false
+    }
+    if required_mode == 3 {
+        if provided_mode == 3 { return true }
+        return provided_mode == 0 && provided_eps < 0.0
+    }
+    if required_mode == 2 {
+        if provided_mode == 3 || !epsilon_is_valid(provided_eps) || !epsilon_is_valid(required_eps) {
+            return false
+        }
+        return provided_eps >= required_eps
+    }
+    if required_mode == 1 {
+        if provided_mode == 3 || !epsilon_is_valid(provided_eps) || !epsilon_is_valid(required_eps) {
+            return false
+        }
+        return provided_eps == required_eps
     }
     if required_eps < 0.0 {
         return true
     }
-    if !epsilon_is_valid(required_eps) {
+    if provided_mode == 2 || provided_mode == 3 {
         return false
     }
-    epsilon_subsumes(provided_eps, required_eps)
+    if !epsilon_is_valid(provided_eps) || !epsilon_is_valid(required_eps) {
+        return false
+    }
+    provided_eps <= required_eps
 }
 
-// Get the more confident (lower) epsilon
-pub fn epsilon_meet(eps_a: f64, eps_b: f64) -> f64 {
-    if eps_a < eps_b {
+pub fn epsilon_subsumes_call_boundary(provided_eps: f64, provided_mode: i64, required_eps: f64, required_mode: i64) -> bool {
+    epsilon_subsumes(provided_eps, provided_mode, required_eps, required_mode)
+}
+
+// Meet/join follow the annotation polarity: confidence floors order upward,
+// while error bounds (and propagated, mode-0 values) order downward.
+pub fn epsilon_meet(eps_a: f64, eps_b: f64, mode: i64) -> f64 {
+    if (mode == 2 && eps_a > eps_b) || (mode != 2 && eps_a < eps_b) {
         eps_a
     } else {
         eps_b
     }
 }
 
-// Get the less confident (higher) epsilon
-pub fn epsilon_join(eps_a: f64, eps_b: f64) -> f64 {
-    if eps_a > eps_b {
+pub fn epsilon_join(eps_a: f64, eps_b: f64, mode: i64) -> f64 {
+    if (mode == 2 && eps_a < eps_b) || (mode != 2 && eps_a > eps_b) {
         eps_a
     } else {
         eps_b
@@ -645,7 +689,12 @@ pub fn knowledge_compatible(ty_a: TypeEntry, ty_b: TypeEntry) -> bool with Mut, 
         false
     } else {
         // Check epsilon subsumption
-        epsilon_subsumes(ty_a.knowledge_epsilon, ty_b.knowledge_epsilon)
+        epsilon_subsumes(
+            ty_a.knowledge_epsilon,
+            ty_a.knowledge_epsilon_mode,
+            ty_b.knowledge_epsilon,
+            ty_b.knowledge_epsilon_mode
+        )
     }
 }
 
@@ -665,7 +714,7 @@ pub fn types_equal(a: TypeEntry, b: TypeEntry) -> bool {
 // Check if knowledge type meets epsilon requirement
 pub fn knowledge_meets_epsilon(ty: TypeEntry, required_epsilon: f64) -> bool {
     if is_knowledge_type(ty) {
-        epsilon_subsumes(ty.knowledge_epsilon, required_epsilon)
+        epsilon_subsumes(ty.knowledge_epsilon, ty.knowledge_epsilon_mode, required_epsilon, 0)
     } else {
         false
     }
@@ -779,7 +828,12 @@ pub fn epsilon_combine_weighted(eps_a: f64, eps_b: f64, weight_a: f64, weight_b:
 
 // Compute result type for binary operations on Knowledge types
 // Handles epsilon propagation according to operation semantics
-pub fn knowledge_binary_result(op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry) -> TypeEntry with Mut, Panic, Div, Alloc {
+//
+// ns_table: the calling Checker's noise-symbol interning table (see
+// check::noise_sets, check.sio's Checker.ns_table). N2 dataflow (REQ-3):
+// the result's noise_set_id is the UNION of the two operands' sets, computed
+// here right beside the epsilon propagation it mirrors.
+pub fn knowledge_binary_result(op: BinaryOp, left_ty: TypeEntry, right_ty: TypeEntry, ns_table: *mut NoiseSetTable) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     // If neither operand is Knowledge, return error
     let left_is_knowledge = is_knowledge_type(left_ty)
     let right_is_knowledge = is_knowledge_type(right_ty)
@@ -841,7 +895,65 @@ pub fn knowledge_binary_result(op: BinaryOp, left_ty: TypeEntry, right_ty: TypeE
             _ => {
                 // For arithmetic operations, result is Knowledge with combined epsilon
                 // Inner type is the same as input inner types (assuming they match)
-                ty_knowledge(left_inner, result_epsilon)
+                var result = ty_knowledge(left_inner, result_epsilon)
+                // N2 (REQ-3): union the two operands' noise-symbol sets. A
+                // non-Knowledge operand (e.g. a plain literal added to a
+                // measured value) contributes the empty set -- it carries no
+                // uncertainty sources of its own, so ns_union's empty-is-
+                // identity handling folds it away rather than corrupting the
+                // union with an unrelated value. Sabotage leaves noise_set_id
+                // at ty_knowledge's -1 default.
+                //
+                // W4: the transfer is OP-SPECIFIC, because the coefficient
+                // SIGNS are. Membership unions the same way in every case (so
+                // ns_disjoint, and therefore the Add/Mul verdict, is unchanged
+                // from N2), but:
+                //   a - b  negates b's coefficients (ns_union_sub). That is what
+                //          lets E230 tell `x - x` (same-sign reuse: the naive
+                //          variance does not UNDERstate -- naive - true = 2Cov
+                //          with Cov >= 0, so it is >= the truth, exactly equal
+                //          when Cov = 0 -- safe) apart from `(p - a) - a`
+                //          (opposite-sign reuse: it UNDERSTATES). The `x - x`
+                //          acceptance holds only while every source of x has a
+                //          KNOWN sign; once x has been through Mul/Div, or
+                //          through a join that met + with -, its sources are
+                //          top and the same shape is refused.
+                //   a * b  produce a first-order form in the RELATIVE basis,
+                //   a / b  whose coefficients are not comparable with the
+                //          additive ones, so ns_union_opaque marks every source
+                //          of the result sign-unknown and every later sign query
+                //          over it fails closed. A non-Knowledge operand goes
+                //          through this too: `k * c` scales k's coefficients by
+                //          a constant whose SIGN this domain does not track.
+                if !checker_ns_sabotage() {
+                    let left_ns = if left_is_knowledge { left_ty.noise_set_id } else { ns_empty() }
+                    let right_ns = if right_is_knowledge { right_ty.noise_set_id } else { ns_empty() }
+                    //
+                    // THE DEFAULT IS OPAQUE, NOT UNION. Only OpAdd may keep the
+                    // additive signs; every other operator either negates them
+                    // (OpSub), leaves the additive basis entirely (OpMul/OpDiv),
+                    // or is not modelled at all. `ns_union` as the fallback was a
+                    // FAIL-OPEN (caught by math-review, grok-4.6, 2026-09-02):
+                    // OpRem reached it, so `r = a % b` published a's and b's
+                    // additive signs as if they were r's, and a later `r - a`
+                    // could then collect a Cov >= 0 certificate from
+                    // ns_cov_nonneg that the real Jacobian does not support --
+                    // understating the variance, which is exactly what E230
+                    // exists to prevent. An unmodelled operator must reach
+                    // ns_union_opaque so every source of its result is
+                    // sign-unknown and every later sign query fails closed.
+                    let is_add_lane = op == BinaryOp::OpAdd
+                    let is_sub_lane = op == BinaryOp::OpSub
+                    result.noise_set_id = if is_add_lane {
+                        ns_union(&!(*ns_table), left_ns, right_ns)
+                    } else if is_sub_lane {
+                        ns_union_sub(&!(*ns_table), left_ns, right_ns)
+                    } else {
+                        ns_union_opaque(&!(*ns_table), left_ns, right_ns)
+                    }
+                }
+                checker_ns_trace_emit("union", result.noise_set_id)
+                result
             }
         }
     }
@@ -870,7 +982,13 @@ pub fn knowledge_op_supported(op: BinaryOp) -> bool {
         BinaryOp::OpShr => false,
         BinaryOp::OpConcat => false,
         BinaryOp::OpRange => false,
-        BinaryOp::OpRangeInclusive => false
+        BinaryOp::OpRangeInclusive => false,
+        // Findings 11 (#2084): unsigned counterparts. Knowledge<T>
+        // arithmetic is unsupported (matches signed fallthrough above), so
+        // these also return false.
+        BinaryOp::OpUDiv => false,
+        BinaryOp::OpURem => false,
+        BinaryOp::OpUShr => false
     }
 }
 
@@ -889,7 +1007,12 @@ pub fn knowledge_call_boundary_compatible(provided: TypeEntry, required: TypeEnt
     }
     let pmeta = knowledge_meta_from_ty(provided)
     let rmeta = knowledge_meta_from_ty(required)
-    if !epsilon_subsumes_call_boundary(knowledge_meta_epsilon(pmeta), knowledge_meta_epsilon(rmeta)) {
+    if !epsilon_subsumes_call_boundary(
+        knowledge_meta_epsilon(pmeta),
+        provided.knowledge_epsilon_mode,
+        knowledge_meta_epsilon(rmeta),
+        required.knowledge_epsilon_mode
+    ) {
         return false
     }
     if !validity_subsumes(knowledge_meta_validity(pmeta), knowledge_meta_validity(rmeta)) {

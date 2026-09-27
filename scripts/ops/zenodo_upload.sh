@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# scripts/zenodo_upload.sh — Upload a preprint to Zenodo via REST API
+# scripts/ops/zenodo_upload.sh — Upload a preprint to Zenodo via REST API
 #
 # Usage:
 #   export ZENODO_TOKEN="your-token-here"
-#   bash scripts/zenodo_upload.sh paper/preprint.pdf
+#   bash scripts/ops/zenodo_upload.sh paper/preprint.pdf
 #
 # Prerequisites:
 #   1. Create a Zenodo account at https://zenodo.org
@@ -15,7 +15,7 @@
 # For testing, use the sandbox:
 #   export ZENODO_SANDBOX=1
 #   export ZENODO_TOKEN="sandbox-token"
-#   bash scripts/zenodo_upload.sh paper/preprint.pdf
+#   bash scripts/ops/zenodo_upload.sh paper/preprint.pdf
 #
 # The script will:
 #   1. Create a new deposit

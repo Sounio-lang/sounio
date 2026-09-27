@@ -1,0 +1,108 @@
+// Instruction-landing / enum-argument diagnostic — NOT a gate (always exits
+// 0). Prints OBSERVED / NOT_OBSERVED per shape so the witness-matrix lane
+// can track fixes mechanically. Companion to aggregate_store_diag.sio; both
+// findings are documented in
+// docs/audit/MADAROS_NESTED_AGGREGATE_ELEMENT_STORE_DISPATCH_2026-08-16.md
+// (S2a addendum).
+//
+// SHAPE 3 — MliInst return landing corrupts operand fields (id reads as
+//   tag) in SOME module closures: `let inst = mli_inst_get(f, slot)` lands a
+//   shifted copy while per-slot column accessors read true data. Measured in
+//   the 8-module closure (ir::ir + mli::*), NOT in the 5-module S1 closure —
+//   closure-dependent codegen (D3 family). This file imports the same
+//   closure as the S2a gate to reproduce.
+//
+// SHAPE 4 — enum values passed as function arguments collapse to
+//   discriminant 0: ir_binop(dst, lhs, BinaryOp::OpShl, rhs) stores
+//   IR_A_BIN_OP == 0. Enum equality also miscompiles (context-dependent
+//   always-true / always-false). This is why mli::ir_to_mli reads raw i64
+//   columns and runtime-calibrates opcode ordinals.
+
+use ir::ir::*
+use mli::ir::*
+use mli::builder::*
+use mli::verify::*
+use mli::interp::*
+use mli::ir_to_mli::*
+
+fn enum_arg_probe(op: BinaryOp) -> i64 {
+    if op == BinaryOp::OpShl { return 100 }
+    if op == BinaryOp::OpAdd { return 300 }
+    400
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    println("inst_landing_diag: begin")
+    if ir_instr_arena_init() != IR_ARENA_OK {
+        println("inst_landing_diag: arena init failed (inconclusive)")
+        return 0
+    }
+
+    // --- SHAPE 3: build mul v2, v0, v1 in an MLI pool, read both ways. ---
+    var m = mli_func_new("diag", mli_kind_int(64, 1))
+    let a = mli_add_arg(&!m, mli_kind_int(64, 1))
+    let b = mli_add_arg(&!m, mli_kind_int(64, 1))
+    let b0 = mli_new_block(&!m)
+    let r = mli_new_vreg(&!m, mli_kind_int(64, 1))
+    if a < 0 || b < 0 || b0 < 0 || r < 0 {
+        println("inst_landing_diag: builder failed (inconclusive)")
+        return 0
+    }
+    let dst = mli_vreg_opd(&m, r)
+    let s1 = mli_vreg_opd(&m, a)
+    let s2 = mli_vreg_opd(&m, b)
+    if !mli_emit(&!m, b0, mli_inst3(MLI_OP_MUL, dst, s1, s2)) {
+        println("inst_landing_diag: emit failed (inconclusive)")
+        return 0
+    }
+
+    // Truth via per-slot accessors (measured correct in every closure).
+    let t_d = mli_slot_dst(&m, mli_slot(0, 0))
+    let t_s1 = mli_slot_src1(&m, mli_slot(0, 0))
+    let t_s2 = mli_slot_src2(&m, mli_slot(0, 0))
+    // Landed copy via mli_inst_get.
+    let landed = mli_inst_get(&m, mli_slot(0, 0))
+
+    var bad3: i64 = 0
+    if landed.dst.id != t_d.id { bad3 = bad3 + 1 }
+    if landed.src1.id != t_s1.id { bad3 = bad3 + 1 }
+    if landed.src2.id != t_s2.id { bad3 = bad3 + 1 }
+    if t_d.id != 2 || t_s1.id != 0 || t_s2.id != 1 {
+        println("SHAPE3 accessor truth itself wrong — WORSE than known; investigate")
+    }
+    if bad3 == 0 {
+        println("SHAPE3 MliInst landing: NOT_OBSERVED (landed copy matches accessors)")
+    } else {
+        print("SHAPE3 MliInst landing: OBSERVED (")
+        print_int(bad3)
+        print(" of 3 operand ids corrupted in the landed copy)")
+        print("\n")
+    }
+
+    // --- SHAPE 4: enum argument collapse. ---
+    let e_shl = enum_arg_probe(BinaryOp::OpShl)
+    let e_add = enum_arg_probe(BinaryOp::OpAdd)
+    var r4 = ir_region_invalid()
+    var raw_bin: i64 = 0 - 1
+    if ir_instr_arena_alloc(2, &!r4) == IR_ARENA_OK {
+        if ir_region_push(&!r4, ir_binop(2, 0, BinaryOp::OpShl, 1)) == IR_ARENA_OK {
+            raw_bin = IR_A_BIN_OP[(ir_region_slot_r(r4, 0)) as usize]
+        }
+    }
+    // OpShl declaration ordinal is 16 (parser/ast.sio); collapse stores 0.
+    if e_shl != e_add && raw_bin == 16 {
+        println("SHAPE4 enum-arg collapse: NOT_OBSERVED (ordinals distinct and stored)")
+    } else {
+        print("SHAPE4 enum-arg collapse: OBSERVED (probe shl=")
+        print_int(e_shl)
+        print(" add=")
+        print_int(e_add)
+        print(" raw stored bin_op=")
+        print_int(raw_bin)
+        print(" want 16)")
+        print("\n")
+    }
+
+    println("inst_landing_diag: end")
+    0
+}

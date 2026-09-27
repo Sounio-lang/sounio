@@ -10,7 +10,8 @@
 
 use parser::ast::*
 use lexer::token::*
-use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, pt_read_kind_code, parser_peek_ahead, parser_assign_op_code, parser_advance, mk_expr, error_expr, dummy_type_expr, parser_store_expr_box, parser_take_expr_box}
+use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, pt_read_kind_code, parser_peek_ahead, parser_ahead_is_p_ident, parser_ahead_is_hex_frac_p_ident, parser_assign_op_code, parser_advance, parser_prev_token_end, mk_expr, error_expr, dummy_type_expr, parser_store_expr_box, parser_take_expr_box, f64_hex_literal_from_source}
+use parser::f128_literal::*
 use parser::types::*
 use parser::stmts::*
 use parser::patterns::*
@@ -208,7 +209,7 @@ impl Parser {
         } else if k == TokenKind::Bang {
             self.parse_unary(UnaryOp::OpNot)
         } else if k == TokenKind::Tilde {
-            self.parse_unary(UnaryOp::OpNot)
+            self.parse_unary(UnaryOp::OpBitNot)
         } else if k == TokenKind::Amp {
             self.parse_unary(UnaryOp::OpRef)
         } else if k == TokenKind::AmpBang {
@@ -217,7 +218,15 @@ impl Parser {
             self.parse_unary(UnaryOp::OpDeref)
         }
         // Literals
-        else if k == TokenKind::IntLit || k == TokenKind::HexLit || k == TokenKind::BinLit || k == TokenKind::OctLit {
+        else if k == TokenKind::HexLit {
+            // V0-B: C99 hex-float may arrive split as HexLit + (Dot+digits)? + p + exp
+            // when the lexer still emits legacy HexLit for the 0x… mantissa.
+            if parser_hex_float_tail_ahead(self) {
+                self.parse_c99_hex_float_literal()
+            } else {
+                self.parse_int_literal()
+            }
+        } else if k == TokenKind::IntLit || k == TokenKind::BinLit || k == TokenKind::OctLit {
             self.parse_int_literal()
         } else if k == TokenKind::FloatLit {
             self.parse_float_literal()
@@ -310,7 +319,7 @@ impl Parser {
         // TokenKind::Var is included so bare `var` works as a binding *use*
         // after `let var = ...` (contextual keyword; see patterns.sio).
         // Statement `var x = ...` is dispatched from parse_stmt, not here.
-        else if k == TokenKind::Ident || k == TokenKind::Knowledge || k == TokenKind::Close || k == TokenKind::Unit || k == TokenKind::Kernel || k == TokenKind::Var {
+        else if k == TokenKind::Ident || k == TokenKind::Knowledge || k == TokenKind::Close || k == TokenKind::Unit || k == TokenKind::Kernel || k == TokenKind::Var || tk_is_contextual_ident(k) {
             self.parse_ident_expr()
         }
         // Error recovery: advance past unrecognized token to avoid infinite loops
@@ -366,6 +375,65 @@ impl Parser {
         let p = self.advance()
         var e = mk_expr(ExprKind::ExprFloatLit, span)
         e.float_val = tok.float_value
+        // V0-E.5.9: exact binary128 identity from the token's source bytes
+        // (decimal, or a lexer-fused C99 hex-float). No f64 on this path.
+        let lit = f128_literal_from_source(span.start, span.end)
+        e.f128_lit_lo = lit.lo
+        e.f128_lit_hi = lit.hi
+        e.f128_lit_exact = lit.exact
+        parser_store_expr_box(Box::new(e))
+        p
+    }
+
+    // Consume HexLit [ . frac | FloatLit | Ident(hex+p) ] p? [+|-] IntLit [suffix] as FloatLit.
+    // Magnitude is a V0-B placeholder (limb identity is V0-D).
+    fn parse_c99_hex_float_literal(self) -> Parser with Mut, IO, Panic, Div, Alloc {
+        let start = self.current_span()
+        var p = self.advance()  // HexLit mantissa
+        if parser_peek(p) == TokenKind::Dot {
+            p = parser_advance(p)
+            let frac = parser_peek(p)
+            if frac == TokenKind::IntLit || frac == TokenKind::HexLit || frac == TokenKind::FloatLit {
+                p = parser_advance(p)
+            } else if frac == TokenKind::Ident {
+                // Either hex-frac+p fused, or hex-frac then separate p.
+                p = parser_advance(p)
+            }
+        } else if parser_peek(p) == TokenKind::FloatLit {
+            p = parser_advance(p)
+        }
+        if parser_peek(p) == TokenKind::Ident {
+            p = parser_advance(p)  // p / P (when not fused into frac Ident)
+        }
+        let sign_or_exp = parser_peek(p)
+        if sign_or_exp == TokenKind::Plus || sign_or_exp == TokenKind::Minus {
+            p = parser_advance(p)
+        }
+        if parser_peek(p) == TokenKind::IntLit {
+            p = parser_advance(p)
+        }
+        // Optional numeric suffix tokenised as Ident (f128 / f256). V0-E.5.10:
+        // only when GLUED to the exponent digits — an identifier on the next
+        // line (`0x1.8p+0\n    print(...)`) was swallowed as a suffix, turning
+        // the following `(` into a call on the literal (E017).
+        if parser_peek(p) == TokenKind::Ident {
+            let sfx_span = p.current_span()
+            if sfx_span.start == parser_prev_token_end(p) {
+                p = parser_advance(p)
+            }
+        }
+        let span = p.span_from(start)
+        var e = mk_expr(ExprKind::ExprFloatLit, span)
+        // V0-E.5.9: the exact identity is read from the bytes actually
+        // consumed (start of the HexLit .. end of the last token above), so
+        // the placeholder magnitude can never reach an f128 position.
+        // V0-E.5.10: the f64 value is read from the same bytes, correctly
+        // rounded — no more 1.0 placeholder on the f64 path either.
+        e.float_val = f64_hex_literal_from_source(start.start, parser_prev_token_end(p))
+        let lit = f128_literal_from_source(start.start, parser_prev_token_end(p))
+        e.f128_lit_lo = lit.lo
+        e.f128_lit_hi = lit.hi
+        e.f128_lit_exact = lit.exact
         parser_store_expr_box(Box::new(e))
         p
     }
@@ -1130,6 +1198,35 @@ impl Parser {
                 turbofish_args = Some(Box::new(ta_pair.1))
             }
 
+            // E043, path-qualified: `foo::bar!(...)`. Same lexical-adjacency
+            // rule as the bare-identifier site below -- `!` must touch BOTH the
+            // preceding segment and the following `(`. Whitespace on either
+            // side keeps the existing operator expression valid, exactly as for
+            // `x! (y)` / `x !(y)`.
+            //
+            // Without this arm E043 meant "bare identifier followed by a tight
+            // bang-call" rather than "Rust macro syntax", so the namespaced
+            // shape most Rust code actually writes -- `std::println!(..)`,
+            // `vec!`-style paths -- fell through to E004 and the message on the
+            // diagnostic was wider than the rule that produced it.
+            //
+            // The left boundary here is p1.pos - 1 (the last path segment),
+            // not self.pos: the path consumed several tokens to get here.
+            if parser_peek(p1) == TokenKind::Bang
+                && p1.pos > 0
+                && p1.pos + 1 < p1.token_count
+                && (parser_peek_ahead(p1, 1) == TokenKind::LParen || pt_read_kind_code(p1.pos + 1) == 174)
+                && PT_END[(p1.pos - 1) as usize] == PT_START[p1.pos as usize]
+                && PT_END[p1.pos as usize] == PT_START[(p1.pos + 1) as usize] {
+                p1.had_error = true
+                p1.error_count = p1.error_count + 1
+                if p1.error_count <= 20 {
+                    print("error[E043]: Sounio does not use Rust macros (`ident!(...)`)\n")
+                    print("  help: use a regular function call instead of macro syntax\n")
+                }
+                p1 = parser_advance(p1)  // skip `!`; recover as a regular call
+            }
+
             if !p1.no_struct_lit && parser_peek(p1) == TokenKind::LBrace {
                 // Struct literal: Foo { x: 1, y: 2 }
                 p1.parse_struct_literal(path, start)
@@ -1154,6 +1251,24 @@ impl Parser {
             // Simple identifier — may still carry turbofish: vec_new::<f64>()
             let span = self.current_span()
             var p = parser_advance(self)
+
+            // E043: reject only the tightly-adjacent Rust macro shape
+            // `ident!(...)`. Whitespace on either side of `!` preserves the
+            // existing operator expression, for example `x! (y)`.
+            if parser_peek(p) == TokenKind::Bang
+                && p.pos + 1 < p.token_count
+                && (parser_peek_ahead(p, 1) == TokenKind::LParen || pt_read_kind_code(p.pos + 1) == 174)
+                && PT_END[self.pos as usize] == PT_START[p.pos as usize]
+                && PT_END[p.pos as usize] == PT_START[(p.pos + 1) as usize] {
+                p.had_error = true
+                p.error_count = p.error_count + 1
+                if p.error_count <= 20 {
+                    print("error[E043]: Sounio does not use Rust macros (`ident!(...)`)\n")
+                    print("  help: use a regular function call instead of macro syntax\n")
+                }
+                p = parser_advance(p)  // skip `!`; recover as a regular call
+            }
+
             var e = mk_expr(ExprKind::ExprIdent, span)
             e.name = name
             if parser_peek(p) == TokenKind::ColonColon && parser_peek_ahead(p, 1) == TokenKind::Lt {
@@ -1288,6 +1403,89 @@ impl Parser {
             p = p.expect(TokenKind::RParen)
         }
         let span = p.span_from(start)
+
+        // d_separated(A, B) / d_separated(A, B | Z): the only way to obtain a
+        // proven independence witness. A, B and Z name nodes of the declared
+        // causal graph, not variables, so the call is recorded for the checker
+        // to verify and replaced here by the proof token -- the literal 1, which
+        // is what indep_dsep consumes. See ast_record_dsep.
+        if callee.kind == ExprKind::ExprIdent
+            && callee.name.len == 11
+            && callee.name.buf[0] == (100 as i8)
+            && callee.name.buf[1] == (95 as i8)
+            && callee.name.buf[2] == (115 as i8)
+            && callee.name.buf[3] == (101 as i8)
+            && callee.name.buf[4] == (112 as i8)
+            && callee.name.buf[5] == (97 as i8)
+            && callee.name.buf[6] == (114 as i8)
+            && callee.name.buf[7] == (97 as i8)
+            && callee.name.buf[8] == (116 as i8)
+            && callee.name.buf[9] == (101 as i8)
+            && callee.name.buf[10] == (100 as i8) {
+            var d_a: i64 = 0
+            var d_b: i64 = 0
+            var d_z: i64 = 0 - 1
+            var form_ok: i64 = 0
+            match args_opt {
+                None => {}
+                Some(l1) => {
+                    let a_e = (*l1).head
+                    match (*l1).tail {
+                        None => {}
+                        Some(l2) => {
+                            let b_e = (*l2).head
+                            // Exactly two arguments; a third is not the form.
+                            match (*l2).tail {
+                                Some(_) => {}
+                                None => {
+                                    if a_e.kind == ExprKind::ExprIdent {
+                                        d_a = ast_indep_name_hash(a_e.name)
+                                        if b_e.kind == ExprKind::ExprIdent {
+                                            d_b = ast_indep_name_hash(b_e.name)
+                                            form_ok = 1
+                                        } else if b_e.kind == ExprKind::ExprBinary && b_e.bin_op == BinaryOp::OpBitOr {
+                                            // `B | Z` parses as a bitwise-or; the
+                                            // bar is the conditioning bar of
+                                            // P(A ⊥ B | Z), and both sides must
+                                            // still be plain names.
+                                            match b_e.left {
+                                                None => {}
+                                                Some(bl) => {
+                                                    match b_e.right {
+                                                        None => {}
+                                                        Some(br) => {
+                                                            if (*bl).kind == ExprKind::ExprIdent && (*br).kind == ExprKind::ExprIdent {
+                                                                d_b = ast_indep_name_hash((*bl).name)
+                                                                d_z = ast_indep_name_hash((*br).name)
+                                                                form_ok = 1
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            ast_record_dsep(d_a, d_b, d_z, form_ok, span.file_id as i64, span.start, span.end)
+            // ExprDsepProof, not ExprIntLit: a hand-typed i64 literal `1` at
+            // indep_dsep's call site used to be accepted identically to this
+            // rewrite's output, because both were the SAME node kind carrying
+            // the SAME value -- nothing was left to tell them apart. This node
+            // kind exists so indep_dsep's declared `proof: DsepProof` parameter
+            // can require the one thing a bare literal is not: this specific,
+            // unforgeable expression shape. int_val stays 1 for codegen -- the
+            // opacity is a compile-time property, not a runtime one.
+            var proof = mk_expr(ExprKind::ExprDsepProof, span)
+            proof.int_val = 1
+            parser_store_expr_box(Box::new(proof))
+            return p
+        }
+
         var e = mk_expr(ExprKind::ExprCall, span)
         e.type_args = callee.type_args
         e.left = Some(callee)
@@ -1495,7 +1693,7 @@ fn exprs_name_is_hardware_publish(n: Name) -> bool {
 }
 
 fn exprs_name_knowledge_kaxi_publish() -> Name with Mut, Panic {
-    var n = Name { buf: [0; 128], len: 24 }
+    var n = Name { buf: [0; 384], len: 24 }
     // "__knowledge_kaxi_publish"
     n.buf[0] = 95 as i8
     n.buf[1] = 95 as i8
@@ -1537,9 +1735,9 @@ fn path_first_is_kaxi(path: AstPath) -> bool {
 }
 
 fn exprs_copy_string_list_to_name(seg: StringList) -> Name with Mut, Panic, Div {
-    var n = Name { buf: [0; 128], len: seg.head_len }
+    var n = Name { buf: [0; 384], len: seg.head_len }
     var i: i64 = 0
-    while i < seg.head_len && i < 128 {
+    while i < seg.head_len && i < 384 {
         n.buf[i] = seg.head_buf[i]
         i = i + 1
     }

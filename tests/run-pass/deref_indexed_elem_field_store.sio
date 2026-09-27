@@ -1,0 +1,199 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+//
+// Regression guard for the lean_single seed's array-element-subfield store:
+// `(*p).arr[i].field = v` (and the deeper `(*p).arr[i].arr2[j].field = v`).
+//
+// Before the fix this shape had no store handler, so it fell through to the generic
+// assignment path with TWO defects:
+//   1. SILENT MISCOMPILE — the element was materialised as a value-copy, written, and
+//      discarded, so the store read back as its old value (verified: 0 instead of 7,
+//      while Madaros produced 7).
+//   2. FALSE REJECT — the assignment leaked the assigned field's type into
+//      LAST_STMT_HAS_VALUE, so a unit fn whose tail-if arms end in such stores to
+//      differently-typed fields was rejected with "if arm type does not match else arm".
+//      This is the shape self-hosted/ir/opt_cleanup.sio uses throughout
+//      (ocp_mfi_instr_move_fields: (*module).functions[fi].instrs[dst_i].op = op).
+//
+// Both directions are covered: the stores must PERSIST (defect 1) and the tail-if unit
+// fns must TYPECHECK (defect 2 — this file failing to compile at all is the regression).
+
+struct Cell {
+    a: i64,
+    b: bool,
+}
+
+struct Wrap {
+    cs: [Cell; 4],
+    n: i64,
+}
+
+struct Outer {
+    ws: [Wrap; 2],
+}
+
+// Tail-if whose arms end in indexed-element stores to differently-typed fields.
+// The mere presence of this fn is the defect-2 guard.
+fn set_either(w: &! Wrap, i: i64, flag: bool) with Mut, Panic {
+    if flag {
+        (*w).cs[i as usize].a = 7
+    } else {
+        (*w).cs[i as usize].b = true
+    }
+}
+
+// Array-POINTEE root: the chain starts at an index rather than a field, so the pointee is
+// an array, not a struct. Pre-fix this was a second silent miscompile of the same family —
+// it emitted NO diagnostic at all (not even a warning) and stored nothing.
+fn set_elem(cs: &! [Cell; 4], i: i64, v: i64) with Mut, Panic {
+    (*cs)[i as usize].a = v
+}
+
+// AUTO-DEREF root: same chain, bare-ident spelling, pointer-like root. Pre-fix this was the
+// highest-site-count region of the family (~131 sites under self-hosted/, incl. ~95 in
+// compiler/main.sio), and it silently stored NOTHING with zero errors and zero warnings.
+// The live casualty was ir/dead_code.sio:260 — dce_mark_reachable marked no instruction
+// reachable. A VALUE struct root is deliberately NOT covered (different address story, left
+// to the generic path), so this fn takes a ref.
+fn set_via_ident_root(o: &! Outer, i: i64, j: i64, v: i64) with Mut, Panic {
+    o.ws[i as usize].cs[j as usize].a = v
+}
+
+// VALUE struct root: a by-value param copied into a local, mutated, and returned — the
+// vm/gc.sio:258 gc_set_color shape. A struct value keeps its data address in the local's slot
+// (a struct literal evaluates to `lea rax,[rbp-(base+nslots-1)*8]`), which is why reads
+// through a value root always worked; only the store was dropped, so the GC never wrote a
+// mark colour. Two field hops precede the index here, which is what put it outside the narrow
+// one-hop ident handler.
+fn value_root_set(o: Outer, i: i64, j: i64, v: i64) -> Outer with Mut, Panic, Div {
+    var c = o
+    c.ws[i as usize].cs[j as usize].a = v
+    c
+}
+
+fn mk_cell(av: i64, bv: bool) -> Cell {
+    Cell { a: av, b: bv }
+}
+
+// TERMINAL-INDEX form: the chain ends in `[j] =`, so the store target is the array ELEMENT
+// itself, not a field of it. This is the shape ir/opt_cleanup.sio uses 30 times for its
+// whole-record rewrites — (*module).functions[fi].instrs[i] = ir_copy(...) and = ir_nop() —
+// so pre-fix the optimizer's record moves AND its nop marking silently wrote nothing.
+// Elements are pointer-per-slot, so an aggregate RHS is copied into fresh element storage and
+// the pointer is written into the slot.
+fn set_whole_elem(o: &! Outer, i: i64, j: i64, av: i64) with Mut, Panic, Div {
+    (*o).ws[i as usize].cs[j as usize] = mk_cell(av, true)
+}
+
+// Same terminal form with a SCALAR element, where the aggregate materialisation must no-op.
+struct Rows {
+    row: [i64; 4],
+}
+
+struct Grid {
+    rows: [Rows; 2],
+}
+
+fn set_scalar_elem(g: &! Grid, i: i64, j: i64, v: i64) with Mut, Panic, Div {
+    (*g).rows[i as usize].row[j as usize] = v
+}
+
+// Deep chain: two indices, the opt_cleanup shape.
+fn set_deep(o: &! Outer, i: i64, j: i64, v: i64) with Mut, Panic {
+    (*o).ws[i as usize].cs[j as usize].a = v
+}
+
+// Field-wise move between two elements — reads and writes the same array.
+fn move_cell(w: &! Wrap, dst: i64, src: i64) with Mut, Panic {
+    let a = (*w).cs[src as usize].a
+    let b = (*w).cs[src as usize].b
+    (*w).cs[dst as usize].a = a
+    (*w).cs[dst as usize].b = b
+}
+
+// Div is required because value_root_set declares it (the `as usize` index casts).
+fn main() with IO, Mut, Panic, Div {
+    var ok = true
+
+    // Explicit element lists (not `[V; N]` repeat literals) are used deliberately: repeat
+    // literals of aggregate values alias their slots under Madaros while allocating per
+    // slot under the lean_single seed, so only explicit lists give distinct elements on
+    // BOTH engines — which the "other elements untouched" assertions below depend on.
+    var w: Wrap = Wrap { cs: [Cell { a: 0, b: false }, Cell { a: 0, b: false }, Cell { a: 0, b: false }, Cell { a: 0, b: false }], n: 0 }
+
+    // Defect 1: the store must persist.
+    set_either(&!w, 2, true)
+    if w.cs[2].a != 7 { ok = false }
+    // ...and must hit only the indexed element.
+    if w.cs[0].a != 0 { ok = false }
+    if w.cs[1].a != 0 { ok = false }
+    if w.cs[3].a != 0 { ok = false }
+
+    // The other arm stores a differently-typed field at the same shape.
+    set_either(&!w, 1, false)
+    if w.cs[1].b != true { ok = false }
+    if w.cs[1].a != 0 { ok = false }
+
+    // Field-wise move (the ocp_mfi_instr_move_fields pattern).
+    move_cell(&!w, 3, 2)
+    if w.cs[3].a != 7 { ok = false }
+    if w.cs[2].a != 7 { ok = false }
+
+    // Deep chain: (*o).ws[i].cs[j].a = v
+    // Built from bindings rather than inline nested literals: the seed rejects an
+    // array-of-struct literal written directly inside another struct literal's field
+    // initializer ("field initializer type does not match struct field"), a separate
+    // pre-existing seed gap unrelated to this store fix.
+    let wa: Wrap = Wrap { cs: [Cell { a: 0, b: false }, Cell { a: 0, b: false }, Cell { a: 0, b: false }, Cell { a: 0, b: false }], n: 0 }
+    let wb: Wrap = Wrap { cs: [Cell { a: 0, b: false }, Cell { a: 0, b: false }, Cell { a: 0, b: false }, Cell { a: 0, b: false }], n: 0 }
+    var o: Outer = Outer { ws: [wa, wb] }
+    set_deep(&!o, 1, 3, 42)
+    if o.ws[1].cs[3].a != 42 { ok = false }
+    if o.ws[0].cs[3].a != 0 { ok = false }
+    if o.ws[1].cs[0].a != 0 { ok = false }
+
+    // Auto-deref root: o.ws[i].cs[j].a = v — same chain, no explicit parens.
+    set_via_ident_root(&!o, 0, 1, 64)
+    if o.ws[0].cs[1].a != 64 { ok = false }
+    if o.ws[0].cs[0].a != 0 { ok = false }
+    if o.ws[1].cs[1].a != 0 { ok = false }
+
+    // Value struct root: c.ws[i].cs[j].a = v on a by-value copy, returned.
+    // NOTE on semantics, verified identical on both engines: `var c = o` copies the TOP-LEVEL
+    // struct but shares the element pointers of its array-of-struct field, so the copy is
+    // SHALLOW and this write is visible through `o` as well. The assertions below therefore
+    // do not treat `o` as untouched — they only require that the store landed.
+    let vout = value_root_set(o, 1, 2, 81)
+    if vout.ws[1].cs[2].a != 81 { ok = false }
+    if vout.ws[1].cs[3].a != 42 { ok = false }
+    if vout.ws[0].cs[2].a != 0 { ok = false }
+
+    // Terminal-index, aggregate element: (*o).ws[i].cs[j] = mk_cell(...)
+    set_whole_elem(&!o, 0, 0, 55)
+    if o.ws[0].cs[0].a != 55 { ok = false }
+    if o.ws[0].cs[1].a != 64 { ok = false }
+    // A slot nothing above has written (ws[1].cs[2] carries 81 from the shallow-copy alias).
+    if o.ws[1].cs[0].a != 0 { ok = false }
+
+    // Terminal-index, scalar element: (*g).rows[i].row[j] = v
+    let gr0: Rows = Rows { row: [1, 2, 3, 4] }
+    let gr1: Rows = Rows { row: [5, 6, 7, 8] }
+    var g: Grid = Grid { rows: [gr0, gr1] }
+    set_scalar_elem(&!g, 1, 2, 99)
+    if g.rows[1].row[2] != 99 { ok = false }
+    if g.rows[1].row[3] != 8 { ok = false }
+    if g.rows[0].row[2] != 3 { ok = false }
+
+    // Array-pointee root: (*cs)[i].a = v
+    var bare: [Cell; 4] = [Cell { a: 0, b: false }, Cell { a: 0, b: false }, Cell { a: 0, b: false }, Cell { a: 0, b: false }]
+    set_elem(&!bare, 2, 5)
+    if bare[2].a != 5 { ok = false }
+    if bare[0].a != 0 { ok = false }
+    if bare[3].a != 0 { ok = false }
+
+    if ok {
+        println("ALL PASS")
+    } else {
+        println("FAIL")
+    }
+}

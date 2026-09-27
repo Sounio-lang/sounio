@@ -31,7 +31,7 @@ The following checkpoints are **MANDATORY** for any agent before commit / PR ope
 bin/llm-offload -t math-review -i <file_or_diff>
 ```
 
-before commit. **As of 2026-07-07 this fans out by default to two independent providers — xai (grok-4.3) and zai (Z.AI GLM) — for every agent.** A single-vendor pass is no longer the standard for math claims; the independent second opinion is mandatory. (Z.AI requires `ZAI_API_KEY`/`ZHIPU_API_KEY`; if absent, the run degrades to xai-only and logs a SKIPPED notice — treat a Z.AI skip as an incomplete review, not a pass.) If any provider rejects a claim, EITHER fix it OR document the disagreement in `.claude/llm_offload_log.md` with explicit reasoning. Precedent for this rule: on 2026-07-07 grok-4.3 + grok-4.20-reasoning caught a sign error making the NeuroDyn "octonion" product non-normed/non-alternative that had passed all prior review.
+before commit. **Canonical since 2026-09-26 (operator decision): the default fan-out is `xai kimi zai local`, where `xai` = Grok 4.7 via LLM Gateway (paid API, `LLMGATEWAY_API_KEY`; falls back to xAI direct `grok-4.7`) and `kimi` = Kimi K3 (Moonshot) via LLM Gateway.** Grok and Kimi are the canonical independent pair. zai and local stay in the set because both gateway legs share the gateway as a single point of failure. (Superseded: 2026-08-31 `grok-4.6` direct.) A single-vendor pass is no longer the standard for math claims; the independent second opinion is mandatory. (The gateway legs require `LLMGATEWAY_API_KEY`; Z.AI requires `ZAI_API_KEY`/`ZHIPU_API_KEY`. Unavailable legs print a SKIPPED or ERROR notice and must not be represented as passes. Two legs served by the same vendor, e.g. Grok via the gateway and Grok direct, count as ONE opinion.) If any provider rejects a claim, EITHER fix it OR document the disagreement in `.claude/llm_offload_log.md` with explicit reasoning. Precedent for this rule: on 2026-07-07 grok-4.3 + grok-4.20-reasoning caught a sign error making the NeuroDyn "octonion" product non-normed/non-alternative that had passed all prior review.
 
 For high-stakes math (theorem published / referee-bound), fan out:
 
@@ -79,7 +79,7 @@ Format:
 …
 
 LLM-offload-review:
-  provider: xai (Grok 4.1 fast reasoning)
+  provider: xai (Grok 4.7 via LLM Gateway)
   task: math-review
   issue: <one line>
 ```

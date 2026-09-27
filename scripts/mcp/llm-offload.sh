@@ -1,13 +1,26 @@
 #!/usr/bin/env bash
 # llm-offload — Fan-out a prompt to multiple LLM providers
-# Usage: ./scripts/llm-offload.sh <prompt-file> [providers...]
+# Usage: ./scripts/mcp/llm-offload.sh <prompt-file> [providers...]
 # If no providers specified, fans out to the default 5 (diverse consensus set).
 #
 # Available providers:
-#   deepseek     — DeepSeek Coder (code intuition, different training data)
-#   xai|grok     — Grok 4.3 (primary adversarial math/review lane)
+#   deepseek     — DeepSeek V4 Pro (reasoning; 'deepseek-coder' silently
+#                  resolved to the weaker v4-flash and is no longer a listed model)
+#   xai|grok     — Grok 4.7 (primary adversarial math/review lane). CANONICAL ROUTE:
+#                  via LLM Gateway (paid, LLMGATEWAY_API_KEY, model grok-4-7). Falls back
+#                  to xAI direct (XAI_API_KEY, model grok-4.7) when the gateway key is
+#                  absent or the gateway call fails.
+#   kimi         — Kimi K3 (Moonshot) via LLM Gateway; the independent second vendor
+#                  of the canonical math-review fan-out
+#   gw:<model>   — any LLM Gateway model id, e.g. gw:deepseek-v4-pro, gw:glm-5.3,
+#                  gw:gpt-5.5 (catalogue: curl https://api.llmgateway.io/v1/models)
+#   xai-direct   — Grok 4.7 on xAI direct only (skips the gateway)
 #   xai-fast     — Grok 4.1 Fast Reasoning (lower-latency fallback)
 #   zai|glm      — Z.AI GLM-5.2 direct (independent math/review provider)
+#   local        — a LOCAL OpenAI-compatible endpoint (Ollama/vLLM/llama.cpp/LM Studio):
+#                  set LOCAL_LLM_URL (with the /v1 prefix) and LOCAL_LLM_MODEL
+#   local2       — a second local endpoint (LOCAL2_LLM_URL / LOCAL2_LLM_MODEL), so a
+#                  two-local fan-out can satisfy the two-provider review policy
 #   grok-code    — Grok Code Fast 1 (fast code tasks)
 #   groq         — Llama 3.3 70B on Groq (fast inference)
 #   gemini       — Gemini 2.5 Pro via OpenRouter (1M ctx, best long-context)
@@ -20,8 +33,11 @@
 #   all          — ALL providers (13 models)
 #
 # Keys read from env vars (set in ~/.sounio-keys.env):
+#   LLMGATEWAY_API_KEY (canonical, https://api.llmgateway.io/v1),
 #   DEEPSEEK_API_KEY, XAI_API_KEY, ZAI_API_KEY or ZHIPU_API_KEY,
 #   GROQ_API_KEY, OPENROUTER_API_KEY, MINIMAX_API_KEY
+# Model / endpoint overrides: LLMGATEWAY_BASE_URL, LLMGATEWAY_GROK_MODEL (grok-4-7),
+#   LLMGATEWAY_KIMI_MODEL (kimi-k3), XAI_MODEL (grok-4.7).
 
 set -euo pipefail
 
@@ -44,9 +60,12 @@ done
 
 PROMPT="$(cat "$PROMPT_FILE")"
 
+LLMGATEWAY_BASE_URL="${LLMGATEWAY_BASE_URL:-https://api.llmgateway.io/v1}"
+
 call_openai_compat() {
     local name="$1" url="$2" key="$3" model="$4" outfile="$5"
     local max_tok="${OFFLOAD_MAX_TOKENS:-8192}"
+    local request_file
     # Expensive models get fewer tokens to stay within credits (unless overridden).
     if [[ -z "${OFFLOAD_MAX_TOKENS:-}" ]]; then
         case "$model" in
@@ -58,15 +77,27 @@ call_openai_compat() {
         esac
     fi
     echo "  -> Sending to $name ($model, max=$max_tok)..."
-    curl -s -m 180 "$url/chat/completions" \
+    # Local reasoning models are slow; give them room rather than losing the leg.
+    local _tmo="${OFFLOAD_TIMEOUT:-180}"
+    case "$name" in Local*) _tmo="${OFFLOAD_TIMEOUT:-600}" ;; esac
+    request_file="$(mktemp "$OUTDIR/request-XXXXXX.json")"
+    jq -Rs --arg model "$model" --argjson maxtok "$max_tok" '{
+        model: $model,
+        messages: [{role: "user", content: .}],
+        max_tokens: $maxtok,
+        temperature: 0.7
+    }' <<< "$PROMPT" > "$request_file"
+    curl -s -m "$_tmo" "$url/chat/completions" \
         -H "Authorization: Bearer $key" \
         -H "Content-Type: application/json" \
-        -d "$(jq -n --arg model "$model" --arg prompt "$PROMPT" --argjson maxtok "$max_tok" '{
-            model: $model,
-            messages: [{role: "user", content: $prompt}],
-            max_tokens: $maxtok,
-            temperature: 0.7
-        }')" > "$outfile" 2>&1
+        --data-binary "@$request_file" > "$outfile" 2>&1 || true
+    rm -f "$request_file"
+    # `|| true` is load-bearing under `set -e`: curl exits non-zero on a TIMEOUT or a
+    # connection failure (unlike an HTTP error, where it exits 0 with a JSON body), and
+    # without it the whole background subshell dies right here — no "<- name: ERROR" line,
+    # no mention of the provider at all.  The fan-out then prints a clean Results section
+    # and exits 0 having silently lost a leg.  Measured 2026-08-24 with a local reasoning
+    # model that needed longer than the 180 s cap.
 
     # Prefer .content; fall back to .reasoning_content for reasoning models
     # (e.g. Z.AI GLM-5.x) that leave .content empty. Treat empty output as error.
@@ -74,7 +105,11 @@ call_openai_compat() {
         jq -r 'if (.choices[0].message.content // "") != "" then .choices[0].message.content else .choices[0].message.reasoning_content end' "$outfile" > "${outfile%.json}.md"
         echo "  <- $name: DONE ($(wc -c < "${outfile%.json}.md") bytes)"
     else
-        echo "  <- $name: ERROR (see $outfile)"
+        if [[ ! -s "$outfile" ]]; then
+            echo "  <- $name: EMPTY after ${_tmo}s — timeout or unreachable endpoint (raise OFFLOAD_TIMEOUT)"
+        else
+            echo "  <- $name: ERROR (see $outfile)"
+        fi
     fi
 }
 
@@ -83,11 +118,45 @@ run_provider() {
     case "$p" in
         deepseek)
             [[ -n "${DEEPSEEK_API_KEY:-}" ]] && \
-            call_openai_compat "DeepSeek" "https://api.deepseek.com" "$DEEPSEEK_API_KEY" "deepseek-coder" "$OUTDIR/deepseek.json"
+            call_openai_compat "DeepSeek" "https://api.deepseek.com" "$DEEPSEEK_API_KEY" "deepseek-v4-pro" "$OUTDIR/deepseek.json"
             ;;
         xai|grok)
-            [[ -n "${XAI_API_KEY:-}" ]] && \
-            call_openai_compat "Grok 4.3" "https://api.x.ai/v1" "$XAI_API_KEY" "grok-4.3" "$OUTDIR/grok.json"
+            # Canonical (2026-09-26): Grok 4.7 through LLM Gateway; xAI direct is the
+            # fallback, so a gateway outage never silently drops the primary math leg.
+            if [[ -n "${LLMGATEWAY_API_KEY:-}" ]]; then
+                call_openai_compat "Grok 4.7 (LLM Gateway)" "$LLMGATEWAY_BASE_URL" "$LLMGATEWAY_API_KEY" "${LLMGATEWAY_GROK_MODEL:-grok-4-7}" "$OUTDIR/grok.json"
+                if [[ ! -s "$OUTDIR/grok.md" && -n "${XAI_API_KEY:-}" ]]; then
+                    mv -f "$OUTDIR/grok.json" "$OUTDIR/grok-gateway-failed.json" 2>/dev/null || true
+                    echo "  .. Grok 4.7: gateway leg failed, falling back to xAI direct"
+                    call_openai_compat "Grok 4.7 (xAI direct)" "https://api.x.ai/v1" "$XAI_API_KEY" "${XAI_MODEL:-grok-4.7}" "$OUTDIR/grok.json"
+                fi
+            elif [[ -n "${XAI_API_KEY:-}" ]]; then
+                call_openai_compat "Grok 4.7 (xAI direct)" "https://api.x.ai/v1" "$XAI_API_KEY" "${XAI_MODEL:-grok-4.7}" "$OUTDIR/grok.json"
+            else
+                echo "  <- Grok 4.7: SKIPPED (set LLMGATEWAY_API_KEY, or XAI_API_KEY for the direct route)"
+            fi
+            ;;
+        xai-direct)
+            if [[ -n "${XAI_API_KEY:-}" ]]; then
+                call_openai_compat "Grok 4.7 (xAI direct)" "https://api.x.ai/v1" "$XAI_API_KEY" "${XAI_MODEL:-grok-4.7}" "$OUTDIR/grok-direct.json"
+            else
+                echo "  <- Grok 4.7 (xAI direct): SKIPPED (set XAI_API_KEY)"
+            fi
+            ;;
+        kimi|moonshot)
+            if [[ -n "${LLMGATEWAY_API_KEY:-}" ]]; then
+                call_openai_compat "Kimi K3 (LLM Gateway)" "$LLMGATEWAY_BASE_URL" "$LLMGATEWAY_API_KEY" "${LLMGATEWAY_KIMI_MODEL:-kimi-k3}" "$OUTDIR/kimi.json"
+            else
+                echo "  <- Kimi K3: SKIPPED (set LLMGATEWAY_API_KEY)"
+            fi
+            ;;
+        gw:*)
+            local _gm="${p#gw:}"
+            if [[ -n "${LLMGATEWAY_API_KEY:-}" && -n "$_gm" ]]; then
+                call_openai_compat "LLM Gateway $_gm" "$LLMGATEWAY_BASE_URL" "$LLMGATEWAY_API_KEY" "$_gm" "$OUTDIR/gw-${_gm//[^A-Za-z0-9._-]/_}.json"
+            else
+                echo "  <- LLM Gateway ${_gm:-?}: SKIPPED (set LLMGATEWAY_API_KEY; usage gw:<model-id>)"
+            fi
             ;;
         xai-fast)
             [[ -n "${XAI_API_KEY:-}" ]] && \
@@ -143,6 +212,25 @@ run_provider() {
             [[ -n "${MINIMAX_API_KEY:-}" ]] && \
             call_openai_compat "MiniMax M2.7" "https://api.minimax.io/v1" "$MINIMAX_API_KEY" "MiniMax-M2.7" "$OUTDIR/minimax.json"
             ;;
+        local|local1|local2)
+            # LOCAL endpoints (Ollama / vLLM / llama.cpp / LM Studio — all OpenAI-compatible).
+            # Configure with LOCAL_LLM_URL (must end in the OpenAI-compatible prefix, e.g.
+            # http://host:11434/v1) and LOCAL_LLM_MODEL.  LOCAL_LLM_KEY is optional; most local
+            # servers ignore it but curl still needs a bearer, so it defaults to "local".
+            # A SECOND endpoint can be given as LOCAL2_LLM_URL / LOCAL2_LLM_MODEL, so that a
+            # fan-out of two independent local models satisfies the two-provider review policy.
+            local _u _m _k _tag
+            if [[ "$p" == "local2" ]]; then
+                _u="${LOCAL2_LLM_URL:-}"; _m="${LOCAL2_LLM_MODEL:-}"; _k="${LOCAL2_LLM_KEY:-local}"; _tag="local2"
+            else
+                _u="${LOCAL_LLM_URL:-}"; _m="${LOCAL_LLM_MODEL:-}"; _k="${LOCAL_LLM_KEY:-local}"; _tag="local"
+            fi
+            if [[ -n "$_u" && -n "$_m" ]]; then
+                call_openai_compat "Local $_m" "$_u" "$_k" "$_m" "$OUTDIR/$_tag.json"
+            else
+                echo "  <- Local ($_tag): SKIPPED (set ${_tag^^}_LLM_URL and ${_tag^^}_LLM_MODEL; URL must include the /v1 prefix)"
+            fi
+            ;;
         *)
             echo "  ?? Unknown provider: $p"
             ;;
@@ -154,7 +242,7 @@ expand_providers() {
     local result=()
     for p in "$@"; do
         if [[ "$p" == "all" ]]; then
-            result+=(deepseek xai zai grok-code groq gemini qwen mistral llama cohere openrouter minimax)
+            result+=(deepseek xai kimi zai grok-code groq gemini qwen mistral llama cohere openrouter minimax)
         else
             result+=("$p")
         fi

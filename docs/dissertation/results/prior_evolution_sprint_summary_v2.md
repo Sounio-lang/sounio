@@ -19,6 +19,16 @@ compilation context." That attribution was incorrect. The spread was caused by a
 Taylor-series coding defect in `ms28_exp` that has now been identified, corrected,
 and verified to be eliminated.
 
+> **Engine dependency (verified 2026-08-17).** Both harnesses behind this document's numbers
+> (`pbpk28_mc_cross_validation.sio` and `pbpk28_mc_prior_family_sweep.sio`) compile clean but
+> **crash at runtime with `rc=182`** (`madaros: handles full`, a resource ceiling) partway
+> through the N=2000 loop under default Madaros (`bin/souc`). Both run to completion (`rc=0`,
+> `PASS`) under `SOUNIO_SOUC_ENGINE=lean_single`. The "Verification command" below
+> (`mc_determinism_probe.sh`) hardcodes `SOUC="./bin/souc"` with no engine override and compiles
+> *and executes* both harnesses under `set -euo pipefail` — under default Madaros it aborts at
+> that crash before reaching the gate markers this document cites. Every canonical number here
+> was produced under lean_single.
+
 ---
 
 ## Canonical numbers — single verified value per metric

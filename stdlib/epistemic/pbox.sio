@@ -1,0 +1,153 @@
+//! Probability boxes (p-boxes) — bounds on probability when the data is too
+//! scarce to name a distribution.
+//!
+//! A p-box separates two kinds of uncertainty:
+//!   - aleatory:   physical scatter (described by distributions)
+//!   - epistemic:  ignorance (described by INTERVALS, not distributions)
+//!
+//! Treating an epistemic interval as if it were a Gaussian is a category
+//! error: it manufactures a precise number (mean, sigma) out of ignorance.
+//! The p-box keeps the two apart and reports reliability as an interval
+//! [lo, hi] whose WIDTH is the remaining ignorance.
+//!
+//! Corner-exact bounds: when the model response is monotonic in the
+//! epistemic parameter over its interval (verified by the caller, e.g.
+//! numerically as in demos/hydrogen/caprock_integrity_v2.sio), evaluating
+//! the reliability at the two interval corners yields EXACT bounds, not
+//! samples.
+//!
+//! References:
+//!   - Ferson et al., "Constructing Probability Boxes and Dempster-Shafer
+//!     Structures", SAND2002-4015
+//!   - IEEE 1788-2015 interval arithmetic (see epistemic::interval_ieee)
+//!
+//! Pure-Sounio math only: no extern, deterministic on every engine.
+
+module epistemic::pbox
+
+/// Reliability/probability bounds: the true value lies in [lo, hi].
+/// Invariant: lo <= hi. Use `new` (orders the corners) to construct.
+pub struct PBox {
+    pub lo: f64,
+    pub hi: f64,
+}
+
+/// Construct from two corners in any order.
+pub fn new(a: f64, b: f64) -> PBox {
+    if a <= b {
+        return PBox { lo: a, hi: b }
+    }
+    PBox { lo: b, hi: a }
+}
+
+/// Epistemic width: the size of the remaining ignorance, in the same units
+/// as the bounds (percentage points when the box holds probabilities in %).
+pub fn width(b: PBox) -> f64 {
+    b.hi - b.lo
+}
+
+/// Midpoint — for display only; never mistake it for a point estimate.
+pub fn midpoint(b: PBox) -> f64 {
+    0.5 * (b.lo + b.hi)
+}
+
+/// Is x inside the bounds (inclusive)?
+pub fn contains(b: PBox, x: f64) -> bool {
+    x >= b.lo && x <= b.hi
+}
+
+/// Is the box determinate within tolerance `tol` (ignorance resolved)?
+pub fn is_determinate(b: PBox, tol: f64) -> bool {
+    width(b) <= tol
+}
+
+/// Envelope of two boxes (widest bounds covering both).
+pub fn union(a: PBox, b: PBox) -> PBox {
+    var lo = a.lo
+    if b.lo < lo { lo = b.lo }
+    var hi = a.hi
+    if b.hi > hi { hi = b.hi }
+    PBox { lo: lo, hi: hi }
+}
+
+/// Overlap of two boxes. If they do not overlap the result is flagged by
+/// lo > hi (empty interval in the IEEE 1788 sense); callers must check
+/// with `is_empty`.
+pub fn intersect(a: PBox, b: PBox) -> PBox {
+    var lo = a.lo
+    if b.lo > lo { lo = b.lo }
+    var hi = a.hi
+    if b.hi < hi { hi = b.hi }
+    PBox { lo: lo, hi: hi }
+}
+
+/// Empty-interval flag (only possible after `intersect` of disjoint boxes).
+pub fn is_empty(b: PBox) -> bool {
+    b.lo > b.hi
+}
+
+/// Scale by a real constant (bounds preserved; swapped when k < 0).
+pub fn scale_pos(b: PBox, k: f64) -> PBox {
+    if k >= 0.0 {
+        return PBox { lo: b.lo * k, hi: b.hi * k }
+    }
+    PBox { lo: b.hi * k, hi: b.lo * k }
+}
+
+/// Sum of two boxes (interval arithmetic; valid for any dependence).
+pub fn add(a: PBox, b: PBox) -> PBox {
+    PBox { lo: a.lo + b.lo, hi: a.hi + b.hi }
+}
+
+/// Product of two non-negative boxes (interval arithmetic; callers must
+/// ensure lo >= 0 for both, e.g. probabilities, reliabilities, costs).
+pub fn mul_pos(a: PBox, b: PBox) -> PBox {
+    PBox { lo: a.lo * b.lo, hi: a.hi * b.hi }
+}
+
+/// Ignorance share: epistemic width relative to a reference aleatory range
+/// (e.g. a 4-sigma aleatory band). > 1 means ignorance dominates scatter —
+/// more data beats better models.
+pub fn ignorance_ratio(b: PBox, aleatory_range: f64) -> f64 with Div {
+    width(b) / aleatory_range
+}
+
+/// Self-test: returns 0 when all identities hold.
+pub fn run_tests() -> i32 with Div {
+    var fails = 0
+    let b = new(66.6, 42.4)   // corners given out of order
+    if abs_f(b.lo - 42.4) > 0.0001 { fails = fails + 1 }
+    if abs_f(b.hi - 66.6) > 0.0001 { fails = fails + 1 }
+    if abs_f(width(b) - 24.2) > 0.0001 { fails = fails + 1 }
+    if abs_f(midpoint(b) - 54.5) > 0.0001 { fails = fails + 1 }
+    if !contains(b, 50.0) { fails = fails + 1 }
+    if contains(b, 70.0) { fails = fails + 1 }
+    if is_determinate(b, 10.0) { fails = fails + 1 }
+    if !is_determinate(b, 30.0) { fails = fails + 1 }
+    let u = union(new(1.0, 5.0), new(3.0, 9.0))
+    if abs_f(u.lo - 1.0) > 0.0001 { fails = fails + 1 }
+    if abs_f(u.hi - 9.0) > 0.0001 { fails = fails + 1 }
+    let it = intersect(new(1.0, 5.0), new(3.0, 9.0))
+    if abs_f(it.lo - 3.0) > 0.0001 { fails = fails + 1 }
+    if abs_f(it.hi - 5.0) > 0.0001 { fails = fails + 1 }
+    if is_empty(it) { fails = fails + 1 }
+    let empty = intersect(new(1.0, 2.0), new(3.0, 4.0))
+    if !is_empty(empty) { fails = fails + 1 }
+    let s = scale_pos(new(2.0, 4.0), 3.0)
+    if abs_f(s.hi - 12.0) > 0.0001 { fails = fails + 1 }
+    let sn = scale_pos(new(2.0, 4.0), 0.0 - 1.0)
+    if abs_f(sn.lo + 4.0) > 0.0001 { fails = fails + 1 }
+    if abs_f(sn.hi + 2.0) > 0.0001 { fails = fails + 1 }
+    let ad = add(new(1.0, 2.0), new(10.0, 20.0))
+    if abs_f(ad.hi - 22.0) > 0.0001 { fails = fails + 1 }
+    let mp = mul_pos(new(0.5, 0.8), new(0.1, 0.25))
+    if abs_f(mp.lo - 0.05) > 0.0001 { fails = fails + 1 }
+    if abs_f(mp.hi - 0.2) > 0.0001 { fails = fails + 1 }
+    let ir = ignorance_ratio(new(40.0, 65.0), 12.5)
+    if abs_f(ir - 2.0) > 0.0001 { fails = fails + 1 }
+    fails
+}
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}

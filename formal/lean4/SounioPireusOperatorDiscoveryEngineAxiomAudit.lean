@@ -1,0 +1,11 @@
+/- Axiom audit for every exported Pireus Operator Discovery Engine v10 theorem. -/
+import SounioPireusOperatorDiscoveryEngine
+
+open SounioPireusOperatorDiscoveryEngine
+
+#print axioms formal_parity_summary_matches_frozen_sounio
+#print axioms c2_diag_group_and_full_atlas_action_exact
+#print axioms candidate_zero_has_all_six_frozen_separators
+#print axioms collision_and_incomplete_controls_are_not_n2
+#print axioms candidate_law_spectrum_matches_frozen_sounio
+#print axioms n2_does_not_promote_stronger_or_public_claims

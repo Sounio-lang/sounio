@@ -1,0 +1,177 @@
+//@ check-only
+// Imported API conformance for proof-carrying endogenous observability D4.
+
+use epistemic::proof_carrying_endogenous_observability::*
+
+fn main() with Panic {
+    let h0 = declare_observation_hypothesis(310, 0, 320)
+    let h1 = declare_observation_hypothesis(311, 1, 320)
+    let h2 = declare_observation_hypothesis(312, 2, 320)
+    let h3 = declare_observation_hypothesis(313, 3, 320)
+    let family = declare_endogenous_observation_family(320, 8300, h0, h1, h2, h3)
+    let intent = declare_measurement_intent(4001, 8300)
+
+    let p0 = derive_observation_policy_decision(4100, intent, h0)
+    let p1 = derive_observation_policy_decision(4101, intent, h1)
+    let p2 = derive_observation_policy_decision(4101, intent, h2)
+    let p3 = derive_observation_policy_decision(4103, intent, h3)
+    let d0 = derive_delivery_event(4200, p0)
+    let d1 = derive_delivery_event(4201, p1)
+    let d2 = derive_delivery_event(4201, p2)
+    let d3 = derive_delivery_event(4203, p3)
+    let o0 = derive_response_opportunity(4300, d0)
+    let o1 = derive_response_opportunity(4301, d1)
+    let o2 = derive_response_opportunity(4301, d2)
+    let o3 = derive_response_opportunity(4303, d3)
+
+    assert(p0.scheduled && !d0.delivered && !o0.response_opportunity_existed)
+    assert(p1.scheduled && d1.delivered && o1.response_opportunity_existed)
+    assert(p2.scheduled && d2.delivered && o2.response_opportunity_existed)
+    assert(!p3.scheduled && !d3.delivered && !o3.response_opportunity_existed)
+    assert(!p0.participant_response_claimed)
+    assert(!d0.participant_nonresponse_claimed)
+
+    let n1 = record_window_nonresponse(4401, intent, o1)
+    let n2 = record_window_nonresponse(4402, intent, o2)
+    assert(n1.response_opportunity_existed && !n1.responded_within_window)
+    assert(n2.response_opportunity_existed && !n2.numeric_target_observed)
+    assert(!n1.response_never_occurs_claimed)
+
+    let prov0 = record_observation_provenance(7000, 5000, 8300, 2, 0, 4100)
+    let prov1 = record_observation_provenance(7101, 5001, 8300, 2, 0, 4101)
+    let prov2 = record_observation_provenance(7101, 5001, 8300, 2, 0, 4101)
+    let prov3 = record_observation_provenance(7003, 5003, 8300, 2, 0, 4103)
+    let t0 = admit_observation_custody_trace(5100, family, intent, p0, d0, o0, prov0)
+    let t1 = admit_observation_custody_trace(5101, family, intent, p1, d1, o1, prov1)
+    let t2 = admit_observation_custody_trace(5101, family, intent, p2, d2, o2, prov2)
+    let t3 = admit_observation_custody_trace(5103, family, intent, p3, d3, o3, prov3)
+    assert(t0.candidate_considered && t0.scheduled && !t0.delivered)
+    assert(t1.scheduled && t1.delivered && t1.response_opportunity_existed)
+    assert(t2.scheduled && t2.delivered && t2.response_opportunity_existed)
+    assert(t1.responded_within_window == t2.responded_within_window)
+    assert(t1.observed_value == -1 && t2.observed_value == -1)
+    assert(!t3.scheduled && !t3.delivered)
+
+    let l0 = coarsen_custody_to_legacy_missing(5200, t0)
+    let l1 = coarsen_custody_to_legacy_missing(5201, t1)
+    let l2 = coarsen_custody_to_legacy_missing(5202, t2)
+    let l3 = coarsen_custody_to_legacy_missing(5203, t3)
+    assert(l0.legacy_missing_code == l1.legacy_missing_code)
+    assert(l1.legacy_missing_code == l2.legacy_missing_code)
+    assert(l2.legacy_missing_code == l3.legacy_missing_code)
+    assert(l0.custody_erased && l3.hypotheses_eliminated == 0)
+
+    let initial = begin_endogenous_observability_contest(6000, family)
+    let legacy_abstention = abstain_on_legacy_missing(6001, initial, l1)
+    assert(legacy_abstention.survivor_mask_unchanged == 15)
+    assert(legacy_abstention.hypotheses_eliminated == 0)
+    let erased = erase_policy_from_custody_trace(5301, t1)
+    let erased_abstention = abstain_on_policy_erased_custody(6002, initial, erased)
+    assert(erased_abstention.survivor_mask_unchanged == 15)
+    assert(erased_abstention.inference_deferred)
+
+    let custody_update = update_observability_contest_with_custody(
+        6101, 6102, initial, family, t1,
+    )
+    let after_custody = observability_contest_transition_result(custody_update)
+    assert(observability_contest_survivor_mask(after_custody) == 6)
+    assert(observability_contest_survivor_count(after_custody) == 2)
+    assert(observability_contest_burden_spent(after_custody) == 5)
+    assert(observability_contest_provenance_fingerprint(after_custody) == 7101)
+
+    let equivalence = certify_observed_trace_equivalence(
+        6201, h1, h2, t1, t2, l1, l2,
+    )
+    assert(equivalence.original_custody_traces_equal)
+    assert(equivalence.legacy_tokens_equal)
+    assert(equivalence.left_hidden_target_value == 2)
+    assert(equivalence.right_hidden_target_value == 8)
+    assert(equivalence.retry_predictions_differ)
+    assert(!equivalence.empirically_identified_from_original_trace)
+    assert(!equivalence.global_recoverability_established)
+    assert(!equivalence.missingness_taxonomy_established)
+
+    let ambiguity = certify_endogenous_observability_ambiguity(
+        6301, custody_update, family,
+    )
+    assert(ambiguity.survivor_mask == 6 && ambiguity.survivor_count == 2)
+    assert(ambiguity.target_independent_hypothesis_survives)
+    assert(ambiguity.target_dependent_hypothesis_survives)
+    assert(ambiguity.custody_process_partially_identified)
+    assert(!ambiguity.response_mechanism_identified)
+    assert(!ambiguity.latent_target_observed)
+    assert(!ambiguity.biological_mechanism_established)
+
+    let retry = declare_synthetic_exogenous_retry_assignment(7001, 8300)
+    assert(retry.exogenously_assigned_within_fixture)
+    assert(!retry.real_person_randomization_claimed)
+    assert(!retry.consent_authority && !retry.clinical_authority)
+    let retry_provenance = record_observation_provenance(
+        7102, 5002, 8300, 3, 7101, 4101,
+    )
+    let response_trace = admit_retry_trace(
+        7201, family, retry, retry_provenance, true,
+    )
+    let response_update = update_observability_contest_with_retry(
+        7301, 7302, after_custody, family, response_trace,
+    )
+    let after_response = observability_contest_transition_result(response_update)
+    assert(observability_contest_survivor_mask(after_response) == 2)
+    assert(observability_contest_burden_spent(after_response) == 9)
+    assert(observability_contest_provenance_fingerprint(after_response) == 227233)
+    let independent = certify_declared_response_mechanism_identification(
+        7401, response_update, family,
+    )
+    assert(independent.selected_hypothesis_id == 311)
+    assert(independent.selected_mode == 1)
+    assert(independent.mechanism_identified_within_declared_family)
+    assert(!independent.latent_original_target_observed)
+    assert(!independent.empirical_missingness_taxonomy_established)
+    assert(!independent.biological_mechanism_established)
+    assert(!independent.clinical_authority)
+
+    let nonresponse_trace = admit_retry_trace(
+        7202, family, retry, retry_provenance, false,
+    )
+    let nonresponse_update = update_observability_contest_with_retry(
+        7303, 7304, after_custody, family, nonresponse_trace,
+    )
+    let after_nonresponse = observability_contest_transition_result(nonresponse_update)
+    assert(observability_contest_survivor_mask(after_nonresponse) == 4)
+    let dependent = certify_declared_response_mechanism_identification(
+        7402, nonresponse_update, family,
+    )
+    assert(dependent.selected_hypothesis_id == 312)
+    assert(dependent.selected_mode == 2)
+    assert(!dependent.latent_original_target_observed)
+
+    let disconnected = disconnect_retry_provenance(7501, response_trace)
+    let disconnected_abstention = abstain_on_disconnected_retry(
+        7502, after_custody, disconnected,
+    )
+    assert(disconnected_abstention.survivor_mask_unchanged == 6)
+    assert(disconnected_abstention.hypotheses_eliminated == 0)
+
+    let delayed_provenance = record_observation_provenance(
+        7200, 5004, 8300, 3, 7101, 4101,
+    )
+    let delayed = record_delayed_response(7601, intent, o2, delayed_provenance, 3, 8)
+    assert(delayed.prompt_tick == 2 && delayed.arrival_tick == 3)
+    assert(delayed.elapsed_ticks == 1)
+    assert(delayed.response_arrived_after_window)
+    assert(!delayed.contemporaneous_with_prompt)
+    let aligned = align_delayed_response_to_arrival(7602, delayed)
+    assert(aligned.aligned_tick == 3 && aligned.observed_value == 8)
+    assert(!aligned.retroactively_assigned_to_prompt_tick)
+
+    let q0 = declare_observation_hypothesis(410, 0, 321)
+    let q1 = declare_observation_hypothesis(411, 1, 321)
+    let q2 = declare_observation_hypothesis(412, 2, 321)
+    let q3 = declare_observation_hypothesis(413, 3, 321)
+    let relabeled = declare_endogenous_observation_family(321, 8300, q0, q1, q2, q3)
+    let relabel = certify_observability_relabel_invariance(7701, family, relabeled)
+    assert(relabel.corresponding_hypothesis_ids_changed)
+    assert(relabel.custody_predictions_equal)
+    assert(relabel.retry_predictions_equal)
+    assert(relabel.partitions_invariant)
+}

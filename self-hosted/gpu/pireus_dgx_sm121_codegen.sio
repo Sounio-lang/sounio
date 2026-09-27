@@ -1,0 +1,45 @@
+use kernel_ir::*
+use lower_to_ptx::*
+use ptx::*
+
+fn append_op(kernel: GpuKernelIr, op: GpuOp) -> GpuKernelIr {
+    var out = kernel
+    out.ops[out.op_count as usize] = op
+    out.op_count = out.op_count + 1
+    out
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    var kernel = gpu_kernel_new()
+    kernel.kernel_name = ki_ir_name_from_bytes(112, 105, 114, 101, 4)
+    kernel.max_reg_u32 = 3
+
+    var shuffle = gpu_op_new()
+    shuffle.opcode = GpuOpcode::GpuShflBfly
+    shuffle.dst_reg = 2
+    shuffle.src_reg = 1
+    shuffle.rhs_imm = 8
+    shuffle.mask = 65535
+    shuffle.byte_offset = 15
+    shuffle.ty = GpuType::GpuU32
+    kernel = append_op(kernel, shuffle)
+
+    var ret = gpu_op_new()
+    ret.opcode = GpuOpcode::GpuRet
+    kernel = append_op(kernel, ret)
+
+    let dgx = gpu_lower_to_ptx_for_target(kernel, true)
+    let generic = gpu_lower_to_ptx(kernel)
+    let dgx_ok = ptx_buf_contains(dgx, ".version 9.0")
+        && ptx_buf_contains(dgx, ".target sm_121")
+        && ptx_buf_contains(dgx, "shfl.sync.bfly.b32 %r2, %r1, 8, 15, 65535;")
+    let fallback_ok = ptx_buf_contains(generic, ".target sm_50")
+        && !ptx_buf_contains(generic, ".target sm_121")
+
+    if dgx_ok && fallback_ok {
+        print("PIREUS_DGX_SM121_CODEGEN_PASS\n")
+        return 0
+    }
+    print("PIREUS_DGX_SM121_CODEGEN_FAIL\n")
+    1
+}

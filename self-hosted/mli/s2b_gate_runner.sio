@@ -1,0 +1,412 @@
+// MLI S2b gate — CFG and branches through the IR->MLI side door.
+//
+// Run: ./bin/souc run self-hosted/mli/s2b_gate_runner.sio
+// Exit 0 iff every case passes.
+//
+// What S2b adds over S2a (both gates stay live):
+//   - block splitting: IrLabel opens blocks, jumps/branches/returns close
+//     them, fallthrough edges become explicit jmps;
+//   - IrBranchTrue/False -> br over Bool vregs (D2: Bool, not Flags), with
+//     the fallthrough edge targeting the textually next block;
+//   - compares OpEq..OpGe -> icmp/fcmp producing Bool;
+//   - interp executes the CFG under a fuel budget: non-termination REFUSES
+//     with MLI_I_FUEL instead of hanging (refuse-first applied to
+//     termination).
+//
+// Corpus notes: B2 defines the SAME vreg on both branch arms and uses it
+// after the join — the no-phi copy-insertion representation (design §4.4)
+// exercised end-to-end through the side door. B3 is a real loop with a
+// back-edge. R1 is an intentionally infinite loop: translator and verifier
+// accept it (a non-terminating function is legal), the interp refuses on
+// fuel.
+
+use ir::ir::*
+use mli::ir::*
+use mli::builder::*
+use mli::verify::*
+use mli::ir_to_mli::*
+use mli::interp::*
+
+// ---------------------------------------------------------------------------
+// Reporting helpers.
+// ---------------------------------------------------------------------------
+
+fn report_pass(name: string) -> i64 with IO {
+    print("PASS: ")
+    print(name)
+    print("\n")
+    0
+}
+
+fn report_fail(name: string, detail: string, got: i64, want: i64) -> i64 with IO {
+    print("FAIL: ")
+    print(name)
+    print(" [")
+    print(detail)
+    print("] got=")
+    print_int(got)
+    print(" want=")
+    print_int(want)
+    print("\n")
+    1
+}
+
+// ---------------------------------------------------------------------------
+// IR construction helpers (arena API; same discipline as the S2a runner).
+// ---------------------------------------------------------------------------
+
+fn gate_func_begin(cap: i64) -> IrFunction with Mut, Panic, Div {
+    var f = ir_empty_function()
+    var r = ir_region_invalid()
+    let rc = ir_instr_arena_alloc(cap, &!r)
+    if rc == IR_ARENA_OK {
+        f.region = r
+    }
+    f
+}
+
+fn gate_push(f: &!IrFunction, inst: IrInstr) -> bool with Mut, Panic, Div {
+    var r = f.region
+    if ir_region_push(&!r, inst) != IR_ARENA_OK { return false }
+    f.region = r
+    f.instr_count = f.instr_count + 1
+    true
+}
+
+// Push a binop skeleton and poke the true BinaryOp ordinal (enum arguments
+// collapse to 0 under native-v2 — dispatch addendum SHAPE 4).
+fn gate_push_binop(f: &!IrFunction, dst: i64, lhs: i64, bin_ordinal: i64, rhs: i64) -> bool with Mut, Panic, Div {
+    if !gate_push(f, ir_binop(dst, lhs, BinaryOp::OpAdd, rhs)) { return false }
+    s2a_poke_bin_op(f.region, f.instr_count - 1, bin_ordinal)
+    true
+}
+
+fn gate_param(f: &!IrFunction, reg: i64, is_float: bool) with Mut, Panic, Div {
+    let pi = f.param_count
+    f.param_regs[pi] = reg
+    f.param_count = pi + 1
+    if is_float {
+        let rc = ir_float_bits_set(f, reg)
+        if rc < 0 {
+            f.param_count = 0 - 100
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Case runners.
+// ---------------------------------------------------------------------------
+
+fn run_case_i64(name: string, src: &IrFunction, a0: i64, a1: i64, expect: i64) -> i64 with IO, Mut, Panic, Div {
+    var m = mli_func_empty()
+    let st = ir_to_mli_scalar(src, &!m)
+    if !st.ok { return report_fail(name, "lower", st.code, MLI_T_OK) }
+    let vr = mli_verify_function(&m)
+    if vr.code != MLI_VERR_OK { return report_fail(name, "verify", vr.code, MLI_VERR_OK) }
+    var args = mli_interp_args_empty()
+    args.ai[0] = a0
+    args.ai[1] = a1
+    let res = mli_interp_run(&m, &args)
+    if !res.ok { return report_fail(name, "interp", res.code, MLI_I_OK) }
+    if !res.has_value { return report_fail(name, "no-value", 0, 1) }
+    if res.ret_is_float { return report_fail(name, "ret-kind", 1, 0) }
+    if res.ret_i != expect { return report_fail(name, "value", res.ret_i, expect) }
+    report_pass(name)
+}
+
+fn run_case_f64(name: string, src: &IrFunction, a0: f64, a1: f64, expect: f64) -> i64 with IO, Mut, Panic, Div {
+    var m = mli_func_empty()
+    let st = ir_to_mli_scalar(src, &!m)
+    if !st.ok { return report_fail(name, "lower", st.code, MLI_T_OK) }
+    let vr = mli_verify_function(&m)
+    if vr.code != MLI_VERR_OK { return report_fail(name, "verify", vr.code, MLI_VERR_OK) }
+    var args = mli_interp_args_empty()
+    args.af[0] = a0
+    args.af[1] = a1
+    let res = mli_interp_run(&m, &args)
+    if !res.ok { return report_fail(name, "interp", res.code, MLI_I_OK) }
+    if !res.has_value { return report_fail(name, "no-value", 0, 1) }
+    if !res.ret_is_float { return report_fail(name, "ret-kind", 0, 1) }
+    if res.ret_f != expect { return report_fail(name, "value", 0, 1) }
+    report_pass(name)
+}
+
+fn expect_lower_code(name: string, src: &IrFunction, want: i64) -> i64 with IO, Mut, Panic, Div {
+    var m = mli_func_empty()
+    let st = ir_to_mli_scalar(src, &!m)
+    if st.ok { return report_fail(name, "lower-accepted", MLI_T_OK, want) }
+    if st.code != want { return report_fail(name, "lower-code", st.code, want) }
+    report_pass(name)
+}
+
+// ---------------------------------------------------------------------------
+// Positive corpus.
+// ---------------------------------------------------------------------------
+
+// B1: fn max(a: i64, b: i64) -> i64 { if a > b { a } else { b } }
+//   0: c = a OpGt b        (icmp.gt -> Bool)
+//   1: branch_true c, L1
+//   2: ret b               (fallthrough: a <= b)
+//   3: label L1
+//   4: ret a
+fn build_max() -> IrFunction with Mut, Panic, Div {
+    var f = gate_func_begin(6)
+    gate_param(&!f, 0, false)
+    gate_param(&!f, 1, false)
+    f.reg_count = 3
+    var ok = gate_push_binop(&!f, 2, 0, S2A_B_GT, 1)
+    ok = ok && gate_push(&!f, ir_branch_true(2, 1))
+    ok = ok && gate_push(&!f, ir_return(1))
+    ok = ok && gate_push(&!f, ir_label(1))
+    ok = ok && gate_push(&!f, ir_return(0))
+    if !ok { f.param_count = 0 - 100 }
+    f
+}
+
+fn case_max_then() -> i64 with IO, Mut, Panic, Div {
+    var f = build_max()
+    run_case_i64("B1a max(9,3) == 9 (then path)", &f, 9, 3, 9)
+}
+
+fn case_max_else() -> i64 with IO, Mut, Panic, Div {
+    var f = build_max()
+    run_case_i64("B1b max(3,9) == 9 (fallthrough path)", &f, 3, 9, 9)
+}
+
+// B2: absdiff via diamond with copy-insertion (same dst vreg on BOTH arms —
+// the §4.4 no-phi representation, end to end):
+//   0: c = a OpLt b
+//   1: branch_true c, L1
+//   2: r = a - b
+//   3: jump L2
+//   4: label L1
+//   5: r = b - a
+//   6: label L2           (block of 5 falls through -> explicit jmp)
+//   7: ret r
+fn build_absdiff() -> IrFunction with Mut, Panic, Div {
+    var f = gate_func_begin(9)
+    gate_param(&!f, 0, false)
+    gate_param(&!f, 1, false)
+    f.reg_count = 4
+    var ok = gate_push_binop(&!f, 2, 0, S2A_B_LT, 1)
+    ok = ok && gate_push(&!f, ir_branch_true(2, 1))
+    ok = ok && gate_push_binop(&!f, 3, 0, S2A_B_SUB, 1)
+    ok = ok && gate_push(&!f, ir_jump(2))
+    ok = ok && gate_push(&!f, ir_label(1))
+    ok = ok && gate_push_binop(&!f, 3, 1, S2A_B_SUB, 0)
+    ok = ok && gate_push(&!f, ir_label(2))
+    ok = ok && gate_push(&!f, ir_return(3))
+    if !ok { f.param_count = 0 - 100 }
+    f
+}
+
+fn case_absdiff_hi() -> i64 with IO, Mut, Panic, Div {
+    var f = build_absdiff()
+    run_case_i64("B2a absdiff(10,3) == 7 (else arm)", &f, 10, 3, 7)
+}
+
+fn case_absdiff_lo() -> i64 with IO, Mut, Panic, Div {
+    var f = build_absdiff()
+    run_case_i64("B2b absdiff(3,10) == 7 (then arm, same dst vreg)", &f, 3, 10, 7)
+}
+
+// B3: loop with back-edge — fn sum(n: i64) -> i64 { 1+2+...+n }
+//   0: i = copy n
+//   1: s = imm 0
+//   2: one = imm 1
+//   3: z = imm 0
+//   4: label L0
+//   5: c = i OpGt z
+//   6: branch_false c, L1   (exit when i <= 0)
+//   7: s = s + i
+//   8: i = i - one
+//   9: jump L0
+//  10: label L1
+//  11: ret s
+fn case_loop_sum() -> i64 with IO, Mut, Panic, Div {
+    var f = gate_func_begin(13)
+    gate_param(&!f, 0, false)
+    f.reg_count = 6
+    var ok = gate_push(&!f, ir_copy(1, 0))
+    ok = ok && gate_push(&!f, ir_load_imm(2, 0))
+    ok = ok && gate_push(&!f, ir_load_imm(3, 1))
+    ok = ok && gate_push(&!f, ir_load_imm(4, 0))
+    ok = ok && gate_push(&!f, ir_label(0))
+    ok = ok && gate_push_binop(&!f, 5, 1, S2A_B_GT, 4)
+    ok = ok && gate_push(&!f, ir_branch_false(5, 1))
+    ok = ok && gate_push_binop(&!f, 2, 2, S2A_B_ADD, 1)
+    ok = ok && gate_push_binop(&!f, 1, 1, S2A_B_SUB, 3)
+    ok = ok && gate_push(&!f, ir_jump(0))
+    ok = ok && gate_push(&!f, ir_label(1))
+    ok = ok && gate_push(&!f, ir_return(2))
+    if !ok { return report_fail("B3 loop", "build", 0, 1) }
+    run_case_i64("B3 sum(5) == 15 (loop, back-edge)", &f, 5, 0, 15)
+}
+
+// B4: float compare + branch — fn fmax(x: f64, y: f64) -> f64.
+fn case_fmax() -> i64 with IO, Mut, Panic, Div {
+    var f = gate_func_begin(6)
+    gate_param(&!f, 0, true)
+    gate_param(&!f, 1, true)
+    f.reg_count = 3
+    f.returns_float = 1
+    var ok = gate_push_binop(&!f, 2, 0, S2A_B_GT, 1)
+    ok = ok && gate_push(&!f, ir_branch_true(2, 1))
+    ok = ok && gate_push(&!f, ir_return(1))
+    ok = ok && gate_push(&!f, ir_label(1))
+    ok = ok && gate_push(&!f, ir_return(0))
+    if !ok { return report_fail("B4 fmax", "build", 0, 1) }
+    run_case_f64("B4 fmax(1.5,2.5) == 2.5 (fcmp fallthrough)", &f, 1.5, 2.5, 2.5)
+}
+
+// B5: bool literal drives the branch (LoadBool -> Bool vreg -> br).
+fn case_bool_literal_branch() -> i64 with IO, Mut, Panic, Div {
+    var f = gate_func_begin(8)
+    f.reg_count = 3
+    var ok = gate_push(&!f, ir_load_bool(0, true))
+    ok = ok && gate_push(&!f, ir_branch_true(0, 1))
+    ok = ok && gate_push(&!f, ir_load_imm(1, 2))
+    ok = ok && gate_push(&!f, ir_return(1))
+    ok = ok && gate_push(&!f, ir_label(1))
+    ok = ok && gate_push(&!f, ir_load_imm(2, 1))
+    ok = ok && gate_push(&!f, ir_return(2))
+    if !ok { return report_fail("B5 boolbr", "build", 0, 1) }
+    run_case_i64("B5 LoadBool(true) branch == 1", &f, 0, 0, 1)
+}
+
+// B6: branch_false polarity — fn min(a: i64, b: i64) -> i64.
+//   c = a OpLt b; branch_false c, L1; ret a; label L1; ret b
+fn build_min() -> IrFunction with Mut, Panic, Div {
+    var f = gate_func_begin(6)
+    gate_param(&!f, 0, false)
+    gate_param(&!f, 1, false)
+    f.reg_count = 3
+    var ok = gate_push_binop(&!f, 2, 0, S2A_B_LT, 1)
+    ok = ok && gate_push(&!f, ir_branch_false(2, 1))
+    ok = ok && gate_push(&!f, ir_return(0))
+    ok = ok && gate_push(&!f, ir_label(1))
+    ok = ok && gate_push(&!f, ir_return(1))
+    if !ok { f.param_count = 0 - 100 }
+    f
+}
+
+fn case_min_lt() -> i64 with IO, Mut, Panic, Div {
+    var f = build_min()
+    run_case_i64("B6a min(3,9) == 3 (branch_false falls through)", &f, 3, 9, 3)
+}
+
+fn case_min_ge() -> i64 with IO, Mut, Panic, Div {
+    var f = build_min()
+    run_case_i64("B6b min(9,3) == 3 (branch_false takes label)", &f, 9, 3, 3)
+}
+
+// ---------------------------------------------------------------------------
+// Refusal controls.
+// ---------------------------------------------------------------------------
+
+// R1: intentionally infinite loop — translator and verifier accept it (a
+// non-terminating function is legal MLI); the interp MUST refuse on fuel.
+fn case_fuel_refused() -> i64 with IO, Mut, Panic, Div {
+    var f = gate_func_begin(3)
+    f.reg_count = 1
+    var ok = gate_push(&!f, ir_label(0))
+    ok = ok && gate_push(&!f, ir_jump(0))
+    if !ok { return report_fail("R1 fuel", "build", 0, 1) }
+
+    var m = mli_func_empty()
+    let st = ir_to_mli_scalar(&f, &!m)
+    if !st.ok { return report_fail("R1 fuel", "lower", st.code, MLI_T_OK) }
+    let vr = mli_verify_function(&m)
+    if vr.code != MLI_VERR_OK { return report_fail("R1 fuel", "verify", vr.code, MLI_VERR_OK) }
+    var args = mli_interp_args_empty()
+    let res = mli_interp_run(&m, &args)
+    if res.ok { return report_fail("R1 fuel", "interp-accepted", MLI_I_OK, MLI_I_FUEL) }
+    if res.code != MLI_I_FUEL { return report_fail("R1 fuel", "interp-code", res.code, MLI_I_FUEL) }
+    report_pass("R1 infinite loop REFUSED on fuel")
+}
+
+// R2: bool-logic OpAnd stays refused (no MLI bool-logic op — underspecified).
+fn case_bool_logic_refused() -> i64 with IO, Mut, Panic, Div {
+    var f = gate_func_begin(5)
+    f.reg_count = 4
+    var ok = gate_push(&!f, ir_load_bool(0, true))
+    ok = ok && gate_push(&!f, ir_load_bool(1, false))
+    ok = ok && gate_push_binop(&!f, 2, 0, S2A_B_AND, 1)
+    ok = ok && gate_push(&!f, ir_return(2))
+    if !ok { return report_fail("R2 boollogic", "build", 0, 1) }
+    expect_lower_code("R2 OpAnd on bools refused (unpinned)", &f, MLI_T_BOOL_LOGIC_UNPINNED)
+}
+
+// R3: a branch whose condition register is an INT must refuse — Bool only
+// (D2 rule 3; Flags does not exist and ints are not conditions).
+fn case_int_cond_refused() -> i64 with IO, Mut, Panic, Div {
+    var f = gate_func_begin(6)
+    gate_param(&!f, 0, false)
+    f.reg_count = 2
+    var ok = gate_push(&!f, ir_branch_true(0, 1))
+    ok = ok && gate_push(&!f, ir_return(0))
+    ok = ok && gate_push(&!f, ir_label(1))
+    ok = ok && gate_push(&!f, ir_return(0))
+    if !ok { return report_fail("R3 intcond", "build", 0, 1) }
+    expect_lower_code("R3 int-kind branch cond refused", &f, MLI_T_OPERAND)
+}
+
+// R4: jump to a label that never appears must refuse — never guess a target.
+fn case_undef_label_refused() -> i64 with IO, Mut, Panic, Div {
+    var f = gate_func_begin(3)
+    gate_param(&!f, 0, false)
+    f.reg_count = 1
+    var ok = gate_push(&!f, ir_jump(7))
+    ok = ok && gate_push(&!f, ir_return(0))
+    if !ok { return report_fail("R4 undeflabel", "build", 0, 1) }
+    expect_lower_code("R4 undefined label refused", &f, MLI_T_LABEL_UNDEF)
+}
+
+// R5: falling off the end (open final block) must refuse — never invent a
+// return.
+fn case_fell_off_end_refused() -> i64 with IO, Mut, Panic, Div {
+    var f = gate_func_begin(3)
+    gate_param(&!f, 0, false)
+    f.reg_count = 2
+    var ok = gate_push(&!f, ir_load_imm(1, 5))
+    if !ok { return report_fail("R5 openend", "build", 0, 1) }
+    expect_lower_code("R5 open final block refused (missing return)", &f, MLI_T_MISSING_RETURN)
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    println("=== MLI S2b gate: CFG, branches, block splitting ===")
+    if ir_instr_arena_init() != IR_ARENA_OK {
+        println("FAIL: arena init")
+        return 1
+    }
+    if !s2a_calibrate() {
+        println("FAIL: opcode ordinal calibration")
+        return 1
+    }
+
+    var failures: i64 = 0
+    failures = failures + case_max_then()
+    failures = failures + case_max_else()
+    failures = failures + case_absdiff_hi()
+    failures = failures + case_absdiff_lo()
+    failures = failures + case_loop_sum()
+    failures = failures + case_fmax()
+    failures = failures + case_bool_literal_branch()
+    failures = failures + case_min_lt()
+    failures = failures + case_min_ge()
+    failures = failures + case_fuel_refused()
+    failures = failures + case_bool_logic_refused()
+    failures = failures + case_int_cond_refused()
+    failures = failures + case_undef_label_refused()
+    failures = failures + case_fell_off_end_refused()
+
+    if failures == 0 {
+        println("=== MLI S2b: ALL CASES PASS ===")
+        return 0
+    }
+    print("=== MLI S2b: FAILURES = ")
+    print_int(failures)
+    print(" ===")
+    print("\n")
+    1
+}

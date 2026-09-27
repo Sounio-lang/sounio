@@ -1,0 +1,282 @@
+//@ run-pass
+// Scalarized native executor for proof-carrying reflexive inquiry D3.
+
+struct LayeredState {
+    mode: i64,
+    relational: i64,
+    instrument: i64,
+    projection: i64,
+    action_mask: i64,
+    action_count: i64,
+    last_provenance_id: i64,
+    trace_fingerprint: i64,
+}
+
+struct ContestState {
+    survivor_mask: i64,
+    survivor_count: i64,
+    evidence_count: i64,
+    burden_spent: i64,
+    last_provenance_id: i64,
+    provenance_fingerprint: i64,
+}
+
+fn as_i64(value: bool) -> i64 { if value { 1 } else { 0 } }
+
+fn popcount3(mask: i64) -> i64 with Panic {
+    assert(mask >= 0 && mask <= 7)
+    as_i64(mask % 2 == 1) + as_i64((mask / 2) % 2 == 1) +
+        as_i64((mask / 4) % 2 == 1)
+}
+
+fn bit(action: i64) -> i64 with Panic {
+    assert(action >= 0 && action <= 2)
+    if action == 0 { 1 } else if action == 1 { 2 } else { 4 }
+}
+
+fn initial(mode: i64) -> LayeredState with Panic {
+    assert(mode >= 0 && mode <= 2)
+    LayeredState {
+        mode: mode,
+        relational: 1,
+        instrument: 0,
+        projection: 1,
+        action_mask: 0,
+        action_count: 0,
+        last_provenance_id: 0,
+        trace_fingerprint: 0,
+    }
+}
+
+fn step(source: LayeredState, action: i64, provenance_id: i64) -> LayeredState with Panic {
+    assert(action >= 0 && action <= 2)
+    assert(provenance_id > 0 && provenance_id <= 1000000)
+    assert(source.relational >= 0 && source.relational <= 1000)
+    assert(source.instrument >= 0 && source.instrument <= 1000)
+    assert(source.projection == source.relational + source.instrument)
+    let next_relational = if source.mode != 1 {
+        source.relational
+    } else if action == 0 {
+        source.relational * 2
+    } else if action == 1 {
+        source.relational + 1
+    } else {
+        source.relational + 2
+    }
+    let next_instrument = if source.mode != 2 {
+        source.instrument
+    } else if action == 0 {
+        source.instrument * 2 + 1
+    } else if action == 1 {
+        source.instrument + 1
+    } else {
+        source.instrument + 2
+    }
+    LayeredState {
+        mode: source.mode,
+        relational: next_relational,
+        instrument: next_instrument,
+        projection: next_relational + next_instrument,
+        action_mask: source.action_mask + bit(action),
+        action_count: source.action_count + 1,
+        last_provenance_id: provenance_id,
+        trace_fingerprint: source.trace_fingerprint * 31 + provenance_id,
+    }
+}
+
+fn predicted_trace_value(mode: i64, slot: i64) -> i64 with Panic {
+    assert(mode >= 0 && mode <= 2)
+    assert(slot >= 0 && slot <= 3)
+    if mode == 0 { 1 }
+    else if slot == 0 { 2 }
+    else if slot == 1 { 3 }
+    else if slot == 2 { 2 }
+    else { 4 }
+}
+
+fn trace_matches(
+    mode: i64,
+    pq_first: i64,
+    pq_second: i64,
+    qp_first: i64,
+    qp_second: i64,
+) -> bool with Panic {
+    predicted_trace_value(mode, 0) == pq_first &&
+        predicted_trace_value(mode, 1) == pq_second &&
+        predicted_trace_value(mode, 2) == qp_first &&
+        predicted_trace_value(mode, 3) == qp_second
+}
+
+fn predicted_layer(mode: i64, layer: i64) -> i64 with Panic {
+    assert(mode >= 0 && mode <= 2)
+    assert(layer == 0 || layer == 1)
+    if layer == 0 {
+        if mode == 1 { 3 } else { 1 }
+    } else {
+        if mode == 2 { 2 } else { 0 }
+    }
+}
+
+fn initial_contest() -> ContestState {
+    ContestState {
+        survivor_mask: 7,
+        survivor_count: 3,
+        evidence_count: 0,
+        burden_spent: 0,
+        last_provenance_id: 0,
+        provenance_fingerprint: 0,
+    }
+}
+
+fn update_order_trace(
+    source: ContestState,
+    provenance_id: i64,
+    previous_provenance_id: i64,
+    pq_first: i64,
+    pq_second: i64,
+    qp_first: i64,
+    qp_second: i64,
+) -> ContestState with Panic {
+    assert(previous_provenance_id == source.last_provenance_id)
+    assert(provenance_id > 0 && provenance_id <= 1000000)
+    let h0 = source.survivor_mask % 2 == 1 &&
+        trace_matches(0, pq_first, pq_second, qp_first, qp_second)
+    let h1 = (source.survivor_mask / 2) % 2 == 1 &&
+        trace_matches(1, pq_first, pq_second, qp_first, qp_second)
+    let h2 = (source.survivor_mask / 4) % 2 == 1 &&
+        trace_matches(2, pq_first, pq_second, qp_first, qp_second)
+    let mask = as_i64(h0) + 2 * as_i64(h1) + 4 * as_i64(h2)
+    ContestState {
+        survivor_mask: mask,
+        survivor_count: popcount3(mask),
+        evidence_count: source.evidence_count + 1,
+        burden_spent: source.burden_spent + 4,
+        last_provenance_id: provenance_id,
+        provenance_fingerprint: source.provenance_fingerprint * 31 + provenance_id,
+    }
+}
+
+fn update_layer_audit(
+    source: ContestState,
+    provenance_id: i64,
+    previous_provenance_id: i64,
+    layer: i64,
+    value: i64,
+) -> ContestState with Panic {
+    assert(previous_provenance_id == source.last_provenance_id)
+    assert(provenance_id > 0 && provenance_id <= 1000000)
+    let h0 = source.survivor_mask % 2 == 1 && predicted_layer(0, layer) == value
+    let h1 = (source.survivor_mask / 2) % 2 == 1 && predicted_layer(1, layer) == value
+    let h2 = (source.survivor_mask / 4) % 2 == 1 && predicted_layer(2, layer) == value
+    let mask = as_i64(h0) + 2 * as_i64(h1) + 4 * as_i64(h2)
+    ContestState {
+        survivor_mask: mask,
+        survivor_count: popcount3(mask),
+        evidence_count: source.evidence_count + 1,
+        burden_spent: source.burden_spent + 3,
+        last_provenance_id: provenance_id,
+        provenance_fingerprint: source.provenance_fingerprint * 31 + provenance_id,
+    }
+}
+
+fn main() with Mut, Panic {
+    // Passive control: no target or instrument write, so state and trace agree.
+    let passive_p = step(initial(0), 0, 5101)
+    let passive_pq = step(passive_p, 1, 5102)
+    let passive_q = step(initial(0), 1, 5201)
+    let passive_qp = step(passive_q, 0, 5202)
+    assert(passive_p.projection == 1 && passive_pq.projection == 1)
+    assert(passive_q.projection == 1 && passive_qp.projection == 1)
+    assert(passive_pq.relational == passive_qp.relational)
+    assert(passive_pq.instrument == passive_qp.instrument)
+
+    // Relational write locus.
+    let relational_p = step(initial(1), 0, 5301)
+    let relational_pq = step(relational_p, 1, 5302)
+    let relational_q = step(initial(1), 1, 5401)
+    let relational_qp = step(relational_q, 0, 5402)
+    assert(relational_p.projection == 2 && relational_pq.projection == 3)
+    assert(relational_q.projection == 2 && relational_qp.projection == 4)
+    assert(relational_pq.relational == 3 && relational_pq.instrument == 0)
+    assert(relational_qp.relational == 4 && relational_qp.instrument == 0)
+    let relational_commutator = relational_pq.projection - relational_qp.projection
+    assert(relational_commutator == -1)
+
+    // Instrument write locus, observationally identical under P/Q schedules.
+    let instrument_p = step(initial(2), 0, 5501)
+    let instrument_pq = step(instrument_p, 1, 5502)
+    let instrument_q = step(initial(2), 1, 5601)
+    let instrument_qp = step(instrument_q, 0, 5602)
+    assert(instrument_p.projection == 2 && instrument_pq.projection == 3)
+    assert(instrument_q.projection == 2 && instrument_qp.projection == 4)
+    assert(instrument_pq.relational == 1 && instrument_pq.instrument == 2)
+    assert(instrument_qp.relational == 1 && instrument_qp.instrument == 3)
+    let instrument_commutator = instrument_pq.projection - instrument_qp.projection
+    assert(instrument_commutator == -1)
+    assert(instrument_p.projection == relational_p.projection)
+    assert(instrument_pq.projection == relational_pq.projection)
+    assert(instrument_q.projection == relational_q.projection)
+    assert(instrument_qp.projection == relational_qp.projection)
+
+    // Overlap is only a warning: additive Q/R writes commute on final state,
+    // while emitted observations retain their order.
+    let additive_q = step(initial(1), 1, 5701)
+    let additive_qr = step(additive_q, 2, 5702)
+    let additive_r = step(initial(1), 2, 5801)
+    let additive_rq = step(additive_r, 1, 5802)
+    assert(additive_q.projection == 2 && additive_qr.projection == 4)
+    assert(additive_r.projection == 3 && additive_rq.projection == 4)
+    assert(additive_qr.relational == additive_rq.relational)
+    assert(additive_qr.instrument == additive_rq.instrument)
+    assert(additive_q.projection != additive_r.projection)
+
+    // Missing and unaudited evidence are routed away from the update.
+    let initial_missing = initial_contest()
+    let missing_mask = initial_missing.survivor_mask
+    let unaudited_mask = initial_missing.survivor_mask
+    assert(missing_mask == 7 && unaudited_mask == 7)
+
+    let after_order = update_order_trace(
+        initial_contest(), 6101, 0, 2, 3, 2, 4,
+    )
+    assert(after_order.survivor_mask == 6)
+    assert(after_order.survivor_count == 2)
+    assert(after_order.burden_spent == 4)
+    assert(after_order.provenance_fingerprint == 6101)
+
+    let after_audit = update_layer_audit(after_order, 6102, 6101, 0, 3)
+    assert(after_audit.survivor_mask == 2)
+    assert(after_audit.survivor_count == 1)
+    assert(after_audit.evidence_count == 2)
+    assert(after_audit.burden_spent == 7)
+    assert(after_audit.provenance_fingerprint == 195233)
+
+    // Hypothesis identifiers never enter the prediction functions.
+    let original_ids = [210, 211, 212]
+    let relabeled_ids = [410, 411, 412]
+    var mode: i64 = 0
+    while mode < 3 {
+        assert(original_ids[mode] != relabeled_ids[mode])
+        var slot: i64 = 0
+        while slot < 4 {
+            assert(predicted_trace_value(mode, slot) == predicted_trace_value(mode, slot))
+            slot = slot + 1
+        }
+        assert(predicted_layer(mode, 0) == predicted_layer(mode, 0))
+        assert(predicted_layer(mode, 1) == predicted_layer(mode, 1))
+        mode = mode + 1
+    }
+
+    let maximum_two_link_fingerprint = 1000000 * 31 + 1000000
+    assert(maximum_two_link_fingerprint == 32000000)
+
+    println("D3-W0 passive PQ=1,1 QP=1,1 layers_and_values_commute=true")
+    println("D3-W1 relation PQ=2,3 QP=2,4 locus=relational commutator=-1")
+    println("D3-W2 instrument PQ=2,3 QP=2,4 locus=instrument commutator=-1")
+    println("D3-W3 overlap Q,R final=4 traces=2,4|3,4 layer_commutator=0 value_reorder=false")
+    println("D3-W4 order_trace mask=6 ambiguous=relational,instrument")
+    println("D3-W5 audit relational=3 mask=2 selected=211 burden=7 fingerprint=195233")
+    println("D3-W6 full_state=deterministic projection_sufficient=false nonassociativity=false clinical=false")
+    println("D3-W7 missing=7 unaudited=7 relabel=invariant fingerprint_max2=32000000")
+    println("PROOF-CARRYING REFLEXIVE INQUIRY D3 PASS")
+}

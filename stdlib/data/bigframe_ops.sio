@@ -3766,53 +3766,11 @@ pub fn bf_transform_std_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFra
     bf_transform_by(src, key_col, val_col, 5)
 }
 
-/// Per-group cumulative min/max engine shared by bf_cummin_by / bf_cummax_by: a
-/// row-aligned running extreme WITHIN each key_col group (like pandas
-/// df.groupby(key)[val].cummin() / .cummax()): out[i] = min/max of val over the rows of
-/// row i's group up to and including i. ismax=1 -> cummax, 0 -> cummin. DENSE integer keys
-/// 0..1023 only (direct-index running array, no hashing -- the same fast dense-key
-/// contract as bf_groupby_sum; a row whose key is outside [0,1024) gets its own value).
-/// O(n), a single pass. Returns a 1-column BigFrame of length n. NATIVE + lean_single only.
-fn bf_cumextrema_by(src: &BigFrame, key_col: i64, val_col: i64, ismax: i64) -> BigFrame with Alloc, Mut, Div, Panic {
-    var run: [f64; 1024] = [0.0; 1024]
-    var seen: [i64; 1024] = [0; 1024]
-    let n = bf_nrows(src)
-    let nc = bf_ncols(src)
-    var out = bf_new(1, n)
-    out.n_rows = n
-    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || n <= 0 { return out }
-    let kp = bf_col_ptr(src, key_col) as *mut f64
-    let vp = bf_col_ptr(src, val_col) as *mut f64
-    let op = bf_col_ptr(&out, 0) as *mut f64
-    var i: i64 = 0
-    while i < n {
-        let k = read_f64(kp, i) as i64
-        let v = read_f64(vp, i)
-        if k >= 0 && k < 1024 {
-            if seen[k] == 0 { seen[k] = 1; run[k] = v }
-            else { if ismax == 1 { if v > run[k] { run[k] = v } } else { if v < run[k] { run[k] = v } } }
-            write_f64(op, i, run[k])
-        } else {
-            write_f64(op, i, v)
-        }
-        i = i + 1
-    }
-    out
-}
-
-/// Per-group cumulative MAXIMUM (pandas df.groupby(key)[val].cummax()): out[i] = the max
-/// of val over row i's group up to and including i, row-aligned. Dense integer keys
-/// 0..1023 (see bf_cumextrema_by). NATIVE + lean_single only.
-pub fn bf_cummax_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
-    bf_cumextrema_by(src, key_col, val_col, 1)
-}
-
-/// Per-group cumulative MINIMUM (pandas df.groupby(key)[val].cummin()): out[i] = the min
-/// of val over row i's group up to and including i, row-aligned. Dense integer keys
-/// 0..1023 (see bf_cumextrema_by). NATIVE + lean_single only.
-pub fn bf_cummin_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
-    bf_cumextrema_by(src, key_col, val_col, 0)
-}
+// (A second `bf_cummax_by` / `bf_cummin_by` pair used to sit here, delegating to a
+// private DENSE-key helper `bf_cumextrema_by` over integer keys 0..1023 -- a row with
+// a key outside [0,1024) got its own value and fractional keys collapsed via `as i64`.
+// First definition wins, so neither ever ran; the live hash-table bodies above handle
+// any f64 key. Both wrappers and the now-callerless helper have been removed.)
 
 /// Per-group RANK of `val_col`, ascending, 1-based within each `key_col` group (like
 /// pandas df.groupby(key)[val].rank(method=...)): out[i] = the rank of row i's value
@@ -4634,31 +4592,10 @@ pub fn bf_expanding_min_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFra
     bf_cummin_by(src, key_col, val_col)
 }
 
-/// Per-group cumulative PRODUCT (pandas df.groupby(key)[val].cumprod()): out[i] = the
-/// product of val over row i's group from its start to i (overflows to inf, as in pandas).
-/// DENSE direct-index running product over keys 0..1023 (no hashing -- the same fast
-/// dense-key contract as bf_groupby_sum; a row whose key is outside [0,1024) gets its own
-/// value). O(n), one pass. NATIVE + lean_single only (heap).
-pub fn bf_cumprod_by(src: &BigFrame, key_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic {
-    var acc: [f64; 1024] = [1.0; 1024]
-    let n = bf_nrows(src)
-    let nc = bf_ncols(src)
-    var out = bf_new(1, n)
-    out.n_rows = n
-    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || n <= 0 { return out }
-    let kp = bf_col_ptr(src, key_col) as *mut f64
-    let vp = bf_col_ptr(src, val_col) as *mut f64
-    let op = bf_col_ptr(&out, 0) as *mut f64
-    var i: i64 = 0
-    while i < n {
-        let k = read_f64(kp, i) as i64
-        let v = read_f64(vp, i)
-        if k >= 0 && k < 1024 { acc[k] = acc[k] * v; write_f64(op, i, acc[k]) }   // acc starts 1 -> first row = v
-        else { write_f64(op, i, v) }
-        i = i + 1
-    }
-    out
-}
+// (A second, DENSE-key `bf_cumprod_by` used to sit here: a direct-index running
+// product over integer keys 0..1023 that gave any row with a key outside [0,1024)
+// its own value and truncated fractional keys via `as i64`. First definition wins,
+// so it never ran; the live hash-table body above handles any f64 key. Removed.)
 
 /// Per-group STATISTIC BROADCAST engine shared by bf_zscore_by / bf_demean_by /
 /// bf_minmax_scale_by / bf_sem_by / bf_range_by: computes a per-group statistic (a
@@ -8297,3 +8234,618 @@ pub fn bf_rms_scaled_by(src: &BigFrame, key_col: i64, val_col: i64, scaled_max: 
 pub fn bf_contraharmonic_mean_scaled_by(src: &BigFrame, key_col: i64, val_col: i64, scaled_max: i64, scale: f64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_powermean_scaled(src, key_col, val_col, scaled_max, scale, 2.0, 1) }
 /// Per-group POWER (Hölder) MEAN of order p for fixed-precision float values, broadcast. Scaled LUT. NATIVE + lean_single.
 pub fn bf_power_mean_scaled_by(src: &BigFrame, key_col: i64, val_col: i64, scaled_max: i64, scale: f64, p: f64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_powermean_scaled(src, key_col, val_col, scaled_max, scale, p, 0) }
+
+/// Inverse-CDF weighted quantile over a weight histogram: the smallest bucket whose cumulative
+/// weight reaches q·totW. Returns the scaled value index (caller divides by scale). Helper for
+/// the weighted-quantile verbs. NATIVE + lean_single only.
+fn bf_wq(wh: *mut f64, base: i64, vm1: i64, totW: f64, q: f64) -> f64 with Mut, Div, Panic {
+    let t = q * totW
+    var cw = 0.0
+    var v: i64 = 0
+    while v < vm1 { cw = cw + read_f64(wh, base + v); if cw >= t { return v as f64 } v = v + 1 }
+    (vm1 - 1) as f64
+}
+
+/// Per-group WEIGHTED QUANTILES (value column + weight column) via a weight histogram (dense keys
+/// 0..1023, buckets round(v·scale)). Each value bucket accumulates its rows' weights; the
+/// inverse-CDF weighted quantile (smallest value whose cumulative weight reaches q·ΣW) is read
+/// back and divided by scale. modes 0=median 1=q25 2=q75 3=IQR 4=percentile(param). Broadcast.
+/// O(n + G·scaled_range). NATIVE + lean_single only.
+fn bf_group_wquantile_dense(src: &BigFrame, key_col: i64, val_col: i64, wt_col: i64, scaled_max: i64, scale: f64, param: f64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var totW: [f64; 1024] = [0.0; 1024]
+    var res:  [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || wt_col < 0 || wt_col >= nc || n <= 0 || scaled_max < 0 || scale <= 0.0 { return out }
+    let vm1 = scaled_max + 1
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let wp = bf_col_ptr(src, wt_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let wh = heap_alloc(1024 * vm1 * 8) as *mut f64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        let s = (read_f64(vp, i) * scale + 0.5) as i64
+        let w = read_f64(wp, i)
+        if k >= 0 && k < 1024 && s >= 0 && s < vm1 && w > 0.0 { let idx = k * vm1 + s; write_f64(wh, idx, read_f64(wh, idx) + w); totW[k] = totW[k] + w }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        if totW[g] > 0.0 {
+            let base = g * vm1
+            let tw = totW[g]
+            if mode == 0 { res[g] = bf_wq(wh, base, vm1, tw, 0.5) / scale }
+            else { if mode == 1 { res[g] = bf_wq(wh, base, vm1, tw, 0.25) / scale }
+            else { if mode == 2 { res[g] = bf_wq(wh, base, vm1, tw, 0.75) / scale }
+            else { if mode == 3 { res[g] = (bf_wq(wh, base, vm1, tw, 0.75) - bf_wq(wh, base, vm1, tw, 0.25)) / scale }
+            else { if mode == 4 { res[g] = bf_wq(wh, base, vm1, tw, param) / scale }
+            else { if mode == 5 { res[g] = (bf_wq(wh, base, vm1, tw, 0.25) + 2.0 * bf_wq(wh, base, vm1, tw, 0.5) + bf_wq(wh, base, vm1, tw, 0.75)) / (4.0 * scale) }
+            else { if mode == 6 { res[g] = (bf_wq(wh, base, vm1, tw, 0.25) + bf_wq(wh, base, vm1, tw, 0.75)) / (2.0 * scale) }
+            else { if mode == 7 { let q1 = bf_wq(wh, base, vm1, tw, 0.25); let q2 = bf_wq(wh, base, vm1, tw, 0.5); let q3 = bf_wq(wh, base, vm1, tw, 0.75); let d = q3 - q1; if d != 0.0 { res[g] = (q3 + q1 - 2.0 * q2) / d } }
+            else { if mode == 8 { let e1 = bf_wq(wh, base, vm1, tw, 0.125); let e2 = bf_wq(wh, base, vm1, tw, 0.25); let e3 = bf_wq(wh, base, vm1, tw, 0.375); let e5 = bf_wq(wh, base, vm1, tw, 0.625); let e6 = bf_wq(wh, base, vm1, tw, 0.75); let e7 = bf_wq(wh, base, vm1, tw, 0.875); let d = e6 - e2; if d != 0.0 { res[g] = (e7 - e5 + e3 - e1) / d } }
+            else { if mode == 9 { let q2 = bf_wq(wh, base, vm1, tw, 0.5); if q2 != 0.0 { res[g] = (bf_wq(wh, base, vm1, tw, 0.75) - bf_wq(wh, base, vm1, tw, 0.25)) / q2 } }
+            else { if mode == 10 { let b = bf_wq(wh, base, vm1, tw, 0.1); if b > 0.0 { res[g] = bf_wq(wh, base, vm1, tw, 0.9) / b } }
+            else { res[g] = (bf_wq(wh, base, vm1, tw, 0.9) - bf_wq(wh, base, vm1, tw, 0.1)) / scale } } } } } } } } } } }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, read_f64(vp, i)) } i = i + 1 }
+    heap_free(wh as *mut i8)
+    out
+}
+/// Per-group WEIGHTED MEDIAN of dense integer values with a weight column, broadcast. NATIVE + lean_single.
+pub fn bf_weighted_median_dense_by(src: &BigFrame, key_col: i64, val_col: i64, wt_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_wquantile_dense(src, key_col, val_col, wt_col, vmax, 1.0, 0.0, 0) }
+/// Per-group WEIGHTED Q25 of dense integer values, broadcast. NATIVE + lean_single.
+pub fn bf_weighted_q1_dense_by(src: &BigFrame, key_col: i64, val_col: i64, wt_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_wquantile_dense(src, key_col, val_col, wt_col, vmax, 1.0, 0.0, 1) }
+/// Per-group WEIGHTED Q75 of dense integer values, broadcast. NATIVE + lean_single.
+pub fn bf_weighted_q3_dense_by(src: &BigFrame, key_col: i64, val_col: i64, wt_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_wquantile_dense(src, key_col, val_col, wt_col, vmax, 1.0, 0.0, 2) }
+/// Per-group WEIGHTED IQR of dense integer values, broadcast. NATIVE + lean_single.
+pub fn bf_weighted_iqr_dense_by(src: &BigFrame, key_col: i64, val_col: i64, wt_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_wquantile_dense(src, key_col, val_col, wt_col, vmax, 1.0, 0.0, 3) }
+/// Per-group WEIGHTED PERCENTILE q (inverse-CDF) of dense integer values, broadcast. NATIVE + lean_single.
+pub fn bf_weighted_percentile_dense_by(src: &BigFrame, key_col: i64, val_col: i64, wt_col: i64, vmax: i64, q: f64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_wquantile_dense(src, key_col, val_col, wt_col, vmax, 1.0, q, 4) }
+/// Per-group WEIGHTED MEDIAN of fixed-precision float values with a weight column, broadcast. Scaled histogram. NATIVE + lean_single.
+pub fn bf_weighted_median_scaled_by(src: &BigFrame, key_col: i64, val_col: i64, wt_col: i64, scaled_max: i64, scale: f64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_wquantile_dense(src, key_col, val_col, wt_col, scaled_max, scale, 0.0, 0) }
+/// Per-group WEIGHTED PERCENTILE q of fixed-precision float values, broadcast. Scaled histogram. NATIVE + lean_single.
+pub fn bf_weighted_percentile_scaled_by(src: &BigFrame, key_col: i64, val_col: i64, wt_col: i64, scaled_max: i64, scale: f64, q: f64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_wquantile_dense(src, key_col, val_col, wt_col, scaled_max, scale, q, 4) }
+
+/// Per-group WEIGHTED GEOMETRIC MEAN / WEIGHTED ENTROPY (value + weight columns) via a scaled
+/// ln-LUT and a weight histogram (buckets round(v·scale)). mode 0 = weighted geometric mean
+/// exp(Σw·ln v / Σw) (÷scale); mode 1 = Shannon entropy of the per-value weight distribution
+/// (−Σ(Wᵥ/W)·ln(Wᵥ/W), scale-free). Broadcast. O(n + G·scaled_range). NATIVE + lean_single only.
+fn bf_group_wstat_dense(src: &BigFrame, key_col: i64, val_col: i64, wt_col: i64, scaled_max: i64, scale: f64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var sw:   [f64; 1024] = [0.0; 1024]
+    var swl:  [f64; 1024] = [0.0; 1024]
+    var swl2: [f64; 1024] = [0.0; 1024]
+    var totW: [f64; 1024] = [0.0; 1024]
+    var res:  [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || wt_col < 0 || wt_col >= nc || n <= 0 || scaled_max < 0 || scale <= 0.0 { return out }
+    let vm1 = scaled_max + 1
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let wp = bf_col_ptr(src, wt_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    let lut = heap_alloc(vm1 * 8) as *mut f64
+    let wh = heap_alloc(1024 * vm1 * 8) as *mut f64
+    var v: i64 = 1
+    while v < vm1 { write_f64(lut, v, bf_ln(v as f64, sc)) v = v + 1 }
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        let s = (read_f64(vp, i) * scale + 0.5) as i64
+        let w = read_f64(wp, i)
+        if k >= 0 && k < 1024 && s >= 0 && s < vm1 && w > 0.0 {
+            let idx = k * vm1 + s; write_f64(wh, idx, read_f64(wh, idx) + w); totW[k] = totW[k] + w
+            if s >= 1 { let l = read_f64(lut, s); swl[k] = swl[k] + w * l; swl2[k] = swl2[k] + w * l * l; sw[k] = sw[k] + w }
+        }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        if totW[g] > 0.0 {
+            if mode == 0 { if sw[g] > 0.0 { res[g] = bf_exp(swl[g] / sw[g], sc) / scale } }
+            else { if mode == 5 {
+                if sw[g] > 0.0 { let mln = swl[g] / sw[g]; var vv = swl2[g] / sw[g] - mln * mln; if vv < 0.0 { vv = 0.0 }; res[g] = bf_exp(bf_sqrt(vv, sc), sc) }
+            } else {
+                let base = g * vm1
+                let W = totW[g]
+                var s2: i64 = 0
+                var hh = 0.0
+                var sq = 0.0
+                while s2 < vm1 { let wv = read_f64(wh, base + s2); if wv > 0.0 { let pp = wv / W; hh = hh - pp * bf_ln(pp, sc); sq = sq + pp * pp } s2 = s2 + 1 }
+                if mode == 1 { res[g] = hh }
+                else { if mode == 2 { res[g] = bf_exp(hh, sc) }
+                else { if mode == 3 { if sq > 0.0 { res[g] = 1.0 / sq } }
+                else { res[g] = 1.0 - sq } } }
+            } }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(lut as *mut i8)
+    heap_free(wh as *mut i8)
+    heap_free(sc as *mut i8)
+    out
+}
+/// Per-group WEIGHTED GEOMETRIC MEAN of dense integer values (value + weight cols), broadcast. NATIVE + lean_single.
+pub fn bf_weighted_geomean_dense_by(src: &BigFrame, key_col: i64, val_col: i64, wt_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_wstat_dense(src, key_col, val_col, wt_col, vmax, 1.0, 0) }
+/// Per-group WEIGHTED GEOMETRIC MEAN of fixed-precision float values, broadcast. Scaled ln-LUT. NATIVE + lean_single.
+pub fn bf_weighted_geomean_scaled_by(src: &BigFrame, key_col: i64, val_col: i64, wt_col: i64, scaled_max: i64, scale: f64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_wstat_dense(src, key_col, val_col, wt_col, scaled_max, scale, 0) }
+/// Per-group WEIGHTED ENTROPY (Shannon entropy of the per-value weight distribution), broadcast. NATIVE + lean_single.
+pub fn bf_weighted_entropy_dense_by(src: &BigFrame, key_col: i64, val_col: i64, wt_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_wstat_dense(src, key_col, val_col, wt_col, vmax, 1.0, 1) }
+
+/// Per-group CATEGORICAL-ASSOCIATION analytics between two low-cardinality integer columns x,y
+/// via a 2D joint histogram (dense keys 0..1023; x in 0..xmax, y in 0..ymax, both <= 255). One
+/// joint count table per group yields the marginals, Shannon entropies H(X), H(Y), H(X,Y), the
+/// mutual information MI = H(X)+H(Y)-H(X,Y), and the chi-square statistic. modes:
+///   0 mutual information            5 variation of information (H(X,Y)-MI)
+///   1 joint entropy H(X,Y)          6 symmetric uncertainty (2MI/(H(X)+H(Y)))
+///   2 conditional entropy H(Y|X)    7 chi-square statistic
+///   3 normalized MI (MI/sqrt(HxHy)) 8 Cramer's V
+///   4 uncertainty coefficient U(Y|X)=MI/H(Y)   9 mean-square contingency phi^2 = chi2/N
+/// Broadcast. O(n + G*(xmax+1)*(ymax+1)). NATIVE + lean_single only.
+fn bf_group_joint2d(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, xmax: i64, ymax: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var cnt: [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || x_col < 0 || x_col >= nc || y_col < 0 || y_col >= nc || n <= 0 || xmax < 0 || xmax > 255 || ymax < 0 || ymax > 255 { return out }
+    let yp1 = ymax + 1
+    let xym = (xmax + 1) * yp1
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let xp = bf_col_ptr(src, x_col) as *mut f64
+    let yp = bf_col_ptr(src, y_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let joint = heap_alloc(1024 * xym * 8) as *mut i64
+    let sc = heap_alloc(8) as *mut i64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        let x = read_f64(xp, i) as i64
+        let y = read_f64(yp, i) as i64
+        if k >= 0 && k < 1024 && x >= 0 && x <= xmax && y >= 0 && y <= ymax { let idx = k * xym + x * yp1 + y; write_i64(joint, idx, read_i64(joint, idx) + 1); cnt[k] = cnt[k] + 1.0 }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        if cnt[g] > 0.0 {
+            let nf = cnt[g]
+            let base = g * xym
+            var rowsum: [f64; 256] = [0.0; 256]
+            var colsum: [f64; 256] = [0.0; 256]
+            var hxy = 0.0
+            var x: i64 = 0
+            while x <= xmax {
+                var y: i64 = 0
+                while y <= ymax {
+                    let j = read_i64(joint, base + x * yp1 + y)
+                    if j > 0 { let jf = j as f64; rowsum[x] = rowsum[x] + jf; colsum[y] = colsum[y] + jf; let p = jf / nf; hxy = hxy - p * bf_ln(p, sc) }
+                    y = y + 1
+                }
+                x = x + 1
+            }
+            var hx = 0.0
+            x = 0
+            while x <= xmax { if rowsum[x] > 0.0 { let px = rowsum[x] / nf; hx = hx - px * bf_ln(px, sc) } x = x + 1 }
+            var hy = 0.0
+            var y2: i64 = 0
+            while y2 <= ymax { if colsum[y2] > 0.0 { let py = colsum[y2] / nf; hy = hy - py * bf_ln(py, sc) } y2 = y2 + 1 }
+            let mi = hx + hy - hxy
+            var chi2 = 0.0
+            x = 0
+            while x <= xmax {
+                var y: i64 = 0
+                while y <= ymax {
+                    let e = rowsum[x] * colsum[y] / nf
+                    if e > 0.0 { let d = (read_i64(joint, base + x * yp1 + y) as f64) - e; chi2 = chi2 + d * d / e }
+                    y = y + 1
+                }
+                x = x + 1
+            }
+            if mode == 0 { res[g] = mi }
+            else { if mode == 1 { res[g] = hxy }
+            else { if mode == 2 { res[g] = hxy - hx }
+            else { if mode == 3 { let d = hx * hy; if d > 0.0 { res[g] = mi / bf_sqrt(d, sc) } }
+            else { if mode == 4 { if hy > 0.0 { res[g] = mi / hy } }
+            else { if mode == 5 { res[g] = hxy - mi }
+            else { if mode == 6 { let d = hx + hy; if d > 0.0 { res[g] = 2.0 * mi / d } }
+            else { if mode == 7 { res[g] = chi2 }
+            else { if mode == 8 { var md = xmax; if ymax < md { md = ymax }; if md > 0 { res[g] = bf_sqrt(chi2 / (nf * (md as f64)), sc) } }
+            else { res[g] = chi2 / nf } } } } } } } } }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(joint as *mut i8)
+    heap_free(sc as *mut i8)
+    out
+}
+/// Per-group MUTUAL INFORMATION MI(X;Y) between two integer columns (nats), broadcast. Joint 2D histogram. NATIVE + lean_single.
+pub fn bf_mutual_info_dense_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, xmax: i64, ymax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_joint2d(src, key_col, x_col, y_col, xmax, ymax, 0) }
+/// Per-group JOINT ENTROPY H(X,Y) (nats), broadcast. Joint 2D histogram. NATIVE + lean_single.
+pub fn bf_joint_entropy_dense_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, xmax: i64, ymax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_joint2d(src, key_col, x_col, y_col, xmax, ymax, 1) }
+/// Per-group CONDITIONAL ENTROPY H(Y|X) (nats), broadcast. Joint 2D histogram. NATIVE + lean_single.
+pub fn bf_conditional_entropy_dense_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, xmax: i64, ymax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_joint2d(src, key_col, x_col, y_col, xmax, ymax, 2) }
+/// Per-group NORMALIZED MUTUAL INFORMATION (MI/sqrt(H(X)·H(Y)), 0..1), broadcast. Joint 2D histogram. NATIVE + lean_single.
+pub fn bf_normalized_mi_dense_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, xmax: i64, ymax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_joint2d(src, key_col, x_col, y_col, xmax, ymax, 3) }
+/// Per-group UNCERTAINTY COEFFICIENT U(Y|X) = MI/H(Y) (Theil's U, asymmetric), broadcast. Joint 2D histogram. NATIVE + lean_single.
+pub fn bf_uncertainty_coeff_dense_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, xmax: i64, ymax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_joint2d(src, key_col, x_col, y_col, xmax, ymax, 4) }
+/// Per-group VARIATION OF INFORMATION (H(X,Y)-MI, a metric), broadcast. Joint 2D histogram. NATIVE + lean_single.
+pub fn bf_variation_of_info_dense_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, xmax: i64, ymax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_joint2d(src, key_col, x_col, y_col, xmax, ymax, 5) }
+/// Per-group SYMMETRIC UNCERTAINTY (2MI/(H(X)+H(Y)), 0..1), broadcast. Joint 2D histogram. NATIVE + lean_single.
+pub fn bf_symmetric_uncertainty_dense_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, xmax: i64, ymax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_joint2d(src, key_col, x_col, y_col, xmax, ymax, 6) }
+/// Per-group CHI-SQUARE statistic of independence, broadcast. Joint 2D histogram. NATIVE + lean_single.
+pub fn bf_chi2_dense_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, xmax: i64, ymax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_joint2d(src, key_col, x_col, y_col, xmax, ymax, 7) }
+/// Per-group CRAMER'S V (chi-square-based categorical association, 0..1), broadcast. Joint 2D histogram. NATIVE + lean_single.
+pub fn bf_cramers_v_dense_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, xmax: i64, ymax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_joint2d(src, key_col, x_col, y_col, xmax, ymax, 8) }
+/// Per-group MEAN-SQUARE CONTINGENCY phi^2 (= chi2/N), broadcast. Joint 2D histogram. NATIVE + lean_single.
+pub fn bf_phi2_dense_by(src: &BigFrame, key_col: i64, x_col: i64, y_col: i64, xmax: i64, ymax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_joint2d(src, key_col, x_col, y_col, xmax, ymax, 9) }
+
+/// Per-group WEIGHTED PERPLEXITY (exp of the weighted Shannon entropy) of the per-value weight distribution, broadcast. NATIVE + lean_single.
+pub fn bf_weighted_perplexity_dense_by(src: &BigFrame, key_col: i64, val_col: i64, wt_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_wstat_dense(src, key_col, val_col, wt_col, vmax, 1.0, 2) }
+/// Per-group WEIGHTED INVERSE SIMPSON (1/Σ(Wᵥ/W)²) of the per-value weight distribution, broadcast. NATIVE + lean_single.
+pub fn bf_weighted_inv_simpson_dense_by(src: &BigFrame, key_col: i64, val_col: i64, wt_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_wstat_dense(src, key_col, val_col, wt_col, vmax, 1.0, 3) }
+/// Per-group WEIGHTED GINI-SIMPSON IMPURITY (1−Σ(Wᵥ/W)²) of the per-value weight distribution, broadcast. NATIVE + lean_single.
+pub fn bf_weighted_gini_impurity_dense_by(src: &BigFrame, key_col: i64, val_col: i64, wt_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_wstat_dense(src, key_col, val_col, wt_col, vmax, 1.0, 4) }
+/// Per-group WEIGHTED GEOMETRIC STD DEV (exp of the weight-population std of ln v), broadcast. NATIVE + lean_single.
+pub fn bf_weighted_geostd_dense_by(src: &BigFrame, key_col: i64, val_col: i64, wt_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_wstat_dense(src, key_col, val_col, wt_col, vmax, 1.0, 5) }
+
+/// Per-group WEIGHTED INEQUALITY indices (value + weight columns) via a weight histogram (buckets
+/// round(v·scale)). An ascending rank-walk over cumulative weight yields the weighted Gini
+/// coefficient (Σ x·wᵥ·(2·cw+wᵥ−W) / (W·Σwx)), weighted Hoover (Σwᵥ|x−μ_w| / 2Σwx) and weighted
+/// Theil-T ((1/W)Σwᵥ(x/μ_w)ln(x/μ_w)); all scale-free. modes 0=Gini 1=Hoover 2=Theil. Broadcast.
+/// O(n + G·scaled_range). NATIVE + lean_single only.
+fn bf_group_winequality_dense(src: &BigFrame, key_col: i64, val_col: i64, wt_col: i64, scaled_max: i64, scale: f64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var totW: [f64; 1024] = [0.0; 1024]
+    var swx:  [f64; 1024] = [0.0; 1024]
+    var res:  [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || wt_col < 0 || wt_col >= nc || n <= 0 || scaled_max < 0 || scale <= 0.0 { return out }
+    let vm1 = scaled_max + 1
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let wp = bf_col_ptr(src, wt_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let wh = heap_alloc(1024 * vm1 * 8) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    let lut = heap_alloc(vm1 * 8) as *mut f64
+    var v: i64 = 1
+    while v < vm1 { write_f64(lut, v, bf_ln(v as f64, sc)) v = v + 1 }
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        let s = (read_f64(vp, i) * scale + 0.5) as i64
+        let w = read_f64(wp, i)
+        if k >= 0 && k < 1024 && s >= 0 && s < vm1 && w > 0.0 { let idx = k * vm1 + s; write_f64(wh, idx, read_f64(wh, idx) + w); totW[k] = totW[k] + w; swx[k] = swx[k] + w * (s as f64) }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        if totW[g] > 0.0 && swx[g] > 0.0 {
+            let W = totW[g]
+            let sumx = swx[g]
+            let mu = sumx / W
+            let lnmu = bf_ln(mu, sc)
+            let base = g * vm1
+            var vv: i64 = 0
+            var cw = 0.0
+            var gacc = 0.0
+            var hoov = 0.0
+            var theil = 0.0
+            while vv < vm1 {
+                let wv = read_f64(wh, base + vv)
+                if wv > 0.0 {
+                    let xf = vv as f64
+                    gacc = gacc + xf * wv * (2.0 * cw + wv - W)
+                    hoov = hoov + wv * bf_fabs(xf - mu)
+                    if vv >= 1 { theil = theil + wv * (xf / mu) * (read_f64(lut, vv) - lnmu) }
+                    cw = cw + wv
+                }
+                vv = vv + 1
+            }
+            if mode == 0 { res[g] = gacc / (W * sumx) }
+            else { if mode == 1 { res[g] = hoov / (2.0 * sumx) }
+            else { res[g] = theil / W } }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(wh as *mut i8)
+    heap_free(lut as *mut i8)
+    heap_free(sc as *mut i8)
+    out
+}
+/// Per-group WEIGHTED GINI COEFFICIENT of dense integer values (value + weight cols), broadcast. NATIVE + lean_single.
+pub fn bf_weighted_gini_dense_by(src: &BigFrame, key_col: i64, val_col: i64, wt_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_winequality_dense(src, key_col, val_col, wt_col, vmax, 1.0, 0) }
+/// Per-group WEIGHTED HOOVER INDEX of dense integer values, broadcast. NATIVE + lean_single.
+pub fn bf_weighted_hoover_dense_by(src: &BigFrame, key_col: i64, val_col: i64, wt_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_winequality_dense(src, key_col, val_col, wt_col, vmax, 1.0, 1) }
+/// Per-group WEIGHTED THEIL-T INDEX of dense integer values, broadcast. NATIVE + lean_single.
+pub fn bf_weighted_theil_dense_by(src: &BigFrame, key_col: i64, val_col: i64, wt_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_winequality_dense(src, key_col, val_col, wt_col, vmax, 1.0, 2) }
+/// Per-group WEIGHTED GINI COEFFICIENT of fixed-precision float values, broadcast. Scaled histogram. NATIVE + lean_single.
+pub fn bf_weighted_gini_scaled_by(src: &BigFrame, key_col: i64, val_col: i64, wt_col: i64, scaled_max: i64, scale: f64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_winequality_dense(src, key_col, val_col, wt_col, scaled_max, scale, 0) }
+
+/// Per-group WEIGHTED POWER MEAN (value + weight columns): (Σw·vᵖ / Σw)^(1/p) via a v^p LUT over
+/// scaled buckets (round(v·scale)). Result divides back by scale. mode is folded into p: p=−1 gives
+/// the weighted harmonic mean, p=2 the weighted RMS. Broadcast. O(n + scaled_range). NATIVE + lean_single.
+fn bf_group_wpowermean_dense(src: &BigFrame, key_col: i64, val_col: i64, wt_col: i64, scaled_max: i64, scale: f64, p: f64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var sw:  [f64; 1024] = [0.0; 1024]
+    var swp: [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || wt_col < 0 || wt_col >= nc || n <= 0 || scaled_max < 0 || scale <= 0.0 { return out }
+    let vm1 = scaled_max + 1
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let wp = bf_col_ptr(src, wt_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    let lut = heap_alloc(vm1 * 8) as *mut f64
+    var v: i64 = 1
+    while v < vm1 { write_f64(lut, v, bf_pow(v as f64, p, sc)) v = v + 1 }
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        let s = (read_f64(vp, i) * scale + 0.5) as i64
+        let w = read_f64(wp, i)
+        if k >= 0 && k < 1024 && s >= 1 && s < vm1 && w > 0.0 { sw[k] = sw[k] + w; swp[k] = swp[k] + w * read_f64(lut, s) }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        if sw[g] > 0.0 { res[g] = bf_pow(swp[g] / sw[g], 1.0 / p, sc) / scale }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(lut as *mut i8)
+    heap_free(sc as *mut i8)
+    out
+}
+/// Per-group WEIGHTED HARMONIC MEAN (Σw / Σ(w/v)) of dense integer values, broadcast. NATIVE + lean_single.
+pub fn bf_weighted_harmonic_dense_by(src: &BigFrame, key_col: i64, val_col: i64, wt_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_wpowermean_dense(src, key_col, val_col, wt_col, vmax, 1.0, 0.0 - 1.0) }
+/// Per-group WEIGHTED ROOT MEAN SQUARE (sqrt(Σw·v²/Σw)) of dense integer values, broadcast. NATIVE + lean_single.
+pub fn bf_weighted_rms_dense_by(src: &BigFrame, key_col: i64, val_col: i64, wt_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_wpowermean_dense(src, key_col, val_col, wt_col, vmax, 1.0, 2.0) }
+
+/// Per-group WEIGHTED TRIMEAN ((wq25+2·wq50+wq75)/4) of dense integer values (value+weight), broadcast. NATIVE + lean_single.
+pub fn bf_weighted_trimean_dense_by(src: &BigFrame, key_col: i64, val_col: i64, wt_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_wquantile_dense(src, key_col, val_col, wt_col, vmax, 1.0, 0.0, 5) }
+/// Per-group WEIGHTED MIDHINGE ((wq25+wq75)/2) of dense integer values, broadcast. NATIVE + lean_single.
+pub fn bf_weighted_midhinge_dense_by(src: &BigFrame, key_col: i64, val_col: i64, wt_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_wquantile_dense(src, key_col, val_col, wt_col, vmax, 1.0, 0.0, 6) }
+/// Per-group WEIGHTED BOWLEY SKEWNESS of dense integer values, broadcast. NATIVE + lean_single.
+pub fn bf_weighted_bowley_skew_dense_by(src: &BigFrame, key_col: i64, val_col: i64, wt_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_wquantile_dense(src, key_col, val_col, wt_col, vmax, 1.0, 0.0, 7) }
+/// Per-group WEIGHTED MOORS KURTOSIS of dense integer values, broadcast. NATIVE + lean_single.
+pub fn bf_weighted_moors_kurt_dense_by(src: &BigFrame, key_col: i64, val_col: i64, wt_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_wquantile_dense(src, key_col, val_col, wt_col, vmax, 1.0, 0.0, 8) }
+/// Per-group WEIGHTED ROBUST CV (wIQR/wmedian) of dense integer values, broadcast. NATIVE + lean_single.
+pub fn bf_weighted_robust_cv_dense_by(src: &BigFrame, key_col: i64, val_col: i64, wt_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_wquantile_dense(src, key_col, val_col, wt_col, vmax, 1.0, 0.0, 9) }
+/// Per-group WEIGHTED P90/P10 RATIO of dense integer values, broadcast. NATIVE + lean_single.
+pub fn bf_weighted_p90p10_ratio_dense_by(src: &BigFrame, key_col: i64, val_col: i64, wt_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_wquantile_dense(src, key_col, val_col, wt_col, vmax, 1.0, 0.0, 10) }
+/// Per-group WEIGHTED DECILE RANGE (wP90−wP10) of dense integer values, broadcast. NATIVE + lean_single.
+pub fn bf_weighted_decile_range_dense_by(src: &BigFrame, key_col: i64, val_col: i64, wt_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_wquantile_dense(src, key_col, val_col, wt_col, vmax, 1.0, 0.0, 11) }
+/// Per-group WEIGHTED TRIMEAN of fixed-precision float values, broadcast. Scaled weight histogram. NATIVE + lean_single.
+pub fn bf_weighted_trimean_scaled_by(src: &BigFrame, key_col: i64, val_col: i64, wt_col: i64, scaled_max: i64, scale: f64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_wquantile_dense(src, key_col, val_col, wt_col, scaled_max, scale, 0.0, 5) }
+
+/// Per-group WEIGHTED MEDIAN ABSOLUTE DEVIATION (value + weight columns) via two weight histograms
+/// (buckets round(v·scale)). The weighted median m comes from the inverse-CDF weighted quantile;
+/// a weighted deviation histogram indexed by |2v−2m| then yields the weighted median of |v−m|,
+/// halved and divided by scale. mode 0 = wMAD, mode 1 = wMADN (1.4826·wMAD). Broadcast.
+/// O(n + G·scaled_range). NATIVE + lean_single only.
+fn bf_group_wmad_dense(src: &BigFrame, key_col: i64, val_col: i64, wt_col: i64, scaled_max: i64, scale: f64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var totW: [f64; 1024] = [0.0; 1024]
+    var res:  [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || val_col < 0 || val_col >= nc || wt_col < 0 || wt_col >= nc || n <= 0 || scaled_max < 0 || scale <= 0.0 { return out }
+    let vm1 = scaled_max + 1
+    let dvm1 = 2 * scaled_max + 1
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let wp = bf_col_ptr(src, wt_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let wh = heap_alloc(1024 * vm1 * 8) as *mut f64
+    let dwh = heap_alloc(dvm1 * 8) as *mut f64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        let s = (read_f64(vp, i) * scale + 0.5) as i64
+        let w = read_f64(wp, i)
+        if k >= 0 && k < 1024 && s >= 0 && s < vm1 && w > 0.0 { let idx = k * vm1 + s; write_f64(wh, idx, read_f64(wh, idx) + w); totW[k] = totW[k] + w }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        if totW[g] > 0.0 {
+            let base = g * vm1
+            let tw = totW[g]
+            let m = bf_wq(wh, base, vm1, tw, 0.5)
+            let twoM = (2.0 * m + 0.5) as i64
+            var d: i64 = 0
+            while d < dvm1 { write_f64(dwh, d, 0.0); d = d + 1 }
+            var v: i64 = 0
+            while v < vm1 {
+                let wv = read_f64(wh, base + v)
+                if wv > 0.0 { var dd = 2 * v - twoM; if dd < 0 { dd = 0 - dd }; if dd >= 0 && dd < dvm1 { write_f64(dwh, dd, read_f64(dwh, dd) + wv) } }
+                v = v + 1
+            }
+            let madreal = bf_wq(dwh, 0, dvm1, tw, 0.5) / (2.0 * scale)
+            if mode == 0 { res[g] = madreal } else { res[g] = madreal * 1.4826 }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(wh as *mut i8)
+    heap_free(dwh as *mut i8)
+    out
+}
+/// Per-group WEIGHTED MAD (robust scale) of dense integer values (value + weight cols), broadcast. NATIVE + lean_single.
+pub fn bf_weighted_mad_dense_by(src: &BigFrame, key_col: i64, val_col: i64, wt_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_wmad_dense(src, key_col, val_col, wt_col, vmax, 1.0, 0) }
+/// Per-group WEIGHTED NORMALIZED MAD (1.4826·wMAD ≈ robust σ) of dense integer values, broadcast. NATIVE + lean_single.
+pub fn bf_weighted_madn_dense_by(src: &BigFrame, key_col: i64, val_col: i64, wt_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_wmad_dense(src, key_col, val_col, wt_col, vmax, 1.0, 1) }
+
+/// Per-group TWO-SAMPLE moment statistics (columns key, group∈{0,1}, value). Per key the two
+/// subgroups (group 0 = control, group 1 = treatment) are compared: n/Σ/Σ² are accumulated per
+/// (key,group) in one pass, then a contrast statistic is broadcast to every row of the key.
+/// Sample variances use ddof=1. modes: 0=mean difference (m1−m0), 1=Welch t, 2=Cohen's d,
+/// 3=Glass's Δ (÷sd of group 0), 4=pooled SD, 5=point-biserial r. Returns 0 for keys missing a
+/// group or with undefined denominators. O(n). NATIVE + lean_single only.
+fn bf_group_twosample_moment(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var n0:  [f64; 1024] = [0.0; 1024]
+    var s0:  [f64; 1024] = [0.0; 1024]
+    var ss0: [f64; 1024] = [0.0; 1024]
+    var n1:  [f64; 1024] = [0.0; 1024]
+    var s1:  [f64; 1024] = [0.0; 1024]
+    var ss1: [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || grp_col < 0 || grp_col >= nc || val_col < 0 || val_col >= nc || n <= 0 { return out }
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let gp = bf_col_ptr(src, grp_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let sc = heap_alloc(8) as *mut i64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        if k >= 0 && k < 1024 {
+            let g = read_f64(gp, i) as i64
+            let v = read_f64(vp, i)
+            if g == 1 { n1[k] = n1[k] + 1.0; s1[k] = s1[k] + v; ss1[k] = ss1[k] + v * v }
+            else { if g == 0 { n0[k] = n0[k] + 1.0; s0[k] = s0[k] + v; ss0[k] = ss0[k] + v * v } }
+        }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        if n0[g] > 0.0 && n1[g] > 0.0 {
+            let a0 = n0[g]; let a1 = n1[g]
+            let m0 = s0[g] / a0; let m1 = s1[g] / a1
+            let diff = m1 - m0
+            var v0 = 0.0; if a0 > 1.0 { v0 = (ss0[g] - s0[g] * s0[g] / a0) / (a0 - 1.0); if v0 < 0.0 { v0 = 0.0 } }
+            var v1 = 0.0; if a1 > 1.0 { v1 = (ss1[g] - s1[g] * s1[g] / a1) / (a1 - 1.0); if v1 < 0.0 { v1 = 0.0 } }
+            if mode == 0 { res[g] = diff }
+            else { if mode == 1 { let den = bf_sqrt(v1 / a1 + v0 / a0, sc); if den > 0.0 { res[g] = diff / den } }
+            else { if mode == 2 { let dof = a1 + a0 - 2.0; if dof > 0.0 { let psd = bf_sqrt(((a1 - 1.0) * v1 + (a0 - 1.0) * v0) / dof, sc); if psd > 0.0 { res[g] = diff / psd } } }
+            else { if mode == 3 { let sd0 = bf_sqrt(v0, sc); if sd0 > 0.0 { res[g] = diff / sd0 } }
+            else { if mode == 4 { let dof = a1 + a0 - 2.0; if dof > 0.0 { res[g] = bf_sqrt(((a1 - 1.0) * v1 + (a0 - 1.0) * v0) / dof, sc) } }
+            else { let N = a0 + a1; let sT = s0[g] + s1[g]; let ssT = ss0[g] + ss1[g]; var vpop = ssT / N - (sT / N) * (sT / N); if vpop < 0.0 { vpop = 0.0 }; let sdT = bf_sqrt(vpop, sc); if sdT > 0.0 { res[g] = diff / sdT * bf_sqrt(a1 * a0 / (N * N), sc) } } } } } }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(sc as *mut i8)
+    out
+}
+/// Per-group MEAN DIFFERENCE (m1 − m0) between the two subgroups, broadcast. NATIVE + lean_single.
+pub fn bf_mean_diff_by(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_twosample_moment(src, key_col, grp_col, val_col, 0) }
+/// Per-group WELCH t-STATISTIC ((m1−m0)/√(v1/n1+v0/n0), unequal-variance), broadcast. NATIVE + lean_single.
+pub fn bf_ttest_welch_by(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_twosample_moment(src, key_col, grp_col, val_col, 1) }
+/// Per-group COHEN'S d effect size ((m1−m0)/pooled SD), broadcast. NATIVE + lean_single.
+pub fn bf_cohens_d_by(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_twosample_moment(src, key_col, grp_col, val_col, 2) }
+/// Per-group GLASS'S Δ effect size ((m1−m0)/sd of the control group 0), broadcast. NATIVE + lean_single.
+pub fn bf_glass_delta_by(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_twosample_moment(src, key_col, grp_col, val_col, 3) }
+/// Per-group POOLED STANDARD DEVIATION of the two subgroups, broadcast. NATIVE + lean_single.
+pub fn bf_pooled_sd_by(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_twosample_moment(src, key_col, grp_col, val_col, 4) }
+/// Per-group POINT-BISERIAL CORRELATION between the binary group and the value, broadcast. NATIVE + lean_single.
+pub fn bf_point_biserial_by(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_twosample_moment(src, key_col, grp_col, val_col, 5) }
+
+/// Per-group TWO-SAMPLE RANK / ECDF statistics (columns key, group∈{0,1}, integer value 0..vmax)
+/// via per-key group-split value histograms. One ascending walk yields the Mann-Whitney U1
+/// (wins + ½·ties over all group1×group0 pairs), the common-language effect size CLES =
+/// U1/(n1·n0), the rank-biserial correlation (2·CLES−1) and the Kolmogorov-Smirnov D
+/// (maxᵥ|ECDF1−ECDF0|). Broadcast. modes 0=U 1=CLES 2=rank-biserial 3=KS. O(n + G·vrange).
+/// NATIVE + lean_single only.
+fn bf_group_twosample_rank(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64, vmax: i64, mode: i64) -> BigFrame with Alloc, Mut, Div, Panic {
+    var n0:  [f64; 1024] = [0.0; 1024]
+    var n1:  [f64; 1024] = [0.0; 1024]
+    var res: [f64; 1024] = [0.0; 1024]
+    let n = bf_nrows(src)
+    let nc = bf_ncols(src)
+    var out = bf_new(1, n)
+    out.n_rows = n
+    if key_col < 0 || key_col >= nc || grp_col < 0 || grp_col >= nc || val_col < 0 || val_col >= nc || n <= 0 || vmax < 0 { return out }
+    let vm1 = vmax + 1
+    let kp = bf_col_ptr(src, key_col) as *mut f64
+    let gp = bf_col_ptr(src, grp_col) as *mut f64
+    let vp = bf_col_ptr(src, val_col) as *mut f64
+    let op = bf_col_ptr(&out, 0) as *mut f64
+    let h0 = heap_alloc(1024 * vm1 * 8) as *mut i64
+    let h1 = heap_alloc(1024 * vm1 * 8) as *mut i64
+    var i: i64 = 0
+    while i < n {
+        let k = read_f64(kp, i) as i64
+        let v = read_f64(vp, i) as i64
+        if k >= 0 && k < 1024 && v >= 0 && v < vm1 {
+            let g = read_f64(gp, i) as i64
+            if g == 1 { let idx = k * vm1 + v; write_i64(h1, idx, read_i64(h1, idx) + 1); n1[k] = n1[k] + 1.0 }
+            else { if g == 0 { let idx = k * vm1 + v; write_i64(h0, idx, read_i64(h0, idx) + 1); n0[k] = n0[k] + 1.0 } }
+        }
+        i = i + 1
+    }
+    var g: i64 = 0
+    while g < 1024 {
+        if n0[g] > 0.0 && n1[g] > 0.0 {
+            let N0 = n0[g]; let N1 = n1[g]
+            let base = g * vm1
+            var v: i64 = 0
+            var cum0 = 0.0
+            var wins = 0.0
+            var ties = 0.0
+            var c0 = 0.0
+            var c1 = 0.0
+            var ks = 0.0
+            while v < vm1 {
+                let a0 = read_i64(h0, base + v) as f64
+                let a1 = read_i64(h1, base + v) as f64
+                if a1 > 0.0 { wins = wins + a1 * cum0; ties = ties + a1 * a0 }
+                cum0 = cum0 + a0
+                c0 = c0 + a0; c1 = c1 + a1
+                let d = bf_fabs(c1 / N1 - c0 / N0); if d > ks { ks = d }
+                v = v + 1
+            }
+            let U1 = wins + 0.5 * ties
+            if mode == 0 { res[g] = U1 }
+            else { if mode == 1 { res[g] = U1 / (N1 * N0) }
+            else { if mode == 2 { res[g] = 2.0 * U1 / (N1 * N0) - 1.0 }
+            else { res[g] = ks } } }
+        }
+        g = g + 1
+    }
+    i = 0
+    while i < n { let k = read_f64(kp, i) as i64; if k >= 0 && k < 1024 { write_f64(op, i, read_f64(res as *mut f64, k)) } else { write_f64(op, i, 0.0) } i = i + 1 }
+    heap_free(h0 as *mut i8)
+    heap_free(h1 as *mut i8)
+    out
+}
+/// Per-group MANN-WHITNEY U (U1 = wins + ½·ties for group 1 vs group 0), broadcast. NATIVE + lean_single.
+pub fn bf_mannwhitney_u_by(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_twosample_rank(src, key_col, grp_col, val_col, vmax, 0) }
+/// Per-group COMMON-LANGUAGE EFFECT SIZE (CLES = P(X₁>X₀) = U1/(n1·n0)), broadcast. NATIVE + lean_single.
+pub fn bf_cles_by(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_twosample_rank(src, key_col, grp_col, val_col, vmax, 1) }
+/// Per-group RANK-BISERIAL CORRELATION (2·CLES − 1, in [−1,1]), broadcast. NATIVE + lean_single.
+pub fn bf_rank_biserial_by(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_twosample_rank(src, key_col, grp_col, val_col, vmax, 2) }
+/// Per-group KOLMOGOROV-SMIRNOV D (maxᵥ|ECDF₁−ECDF₀|), broadcast. NATIVE + lean_single.
+pub fn bf_ks_stat_by(src: &BigFrame, key_col: i64, grp_col: i64, val_col: i64, vmax: i64) -> BigFrame with Alloc, Mut, Div, Panic { bf_group_twosample_rank(src, key_col, grp_col, val_col, vmax, 3) }

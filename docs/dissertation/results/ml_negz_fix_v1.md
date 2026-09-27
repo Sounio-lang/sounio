@@ -62,6 +62,15 @@ fractional PINN operating range.
 
 ## Focused Results
 
+> **Engine dependency (verified 2026-08-17).** `SOUNIO_SOUC_BIN=<elf>` is documented in
+> `bin/souc`'s own header comment as "exec that ELF directly (**raw, lean_single CLI**)" — the
+> command below is silently pinned to the lean_single-family binary, undisclosed. Worse, as of
+> today that exact command **fails**: `error: no main` (the raw lean_single CLI misparses this
+> invocation shape). The plain, undocumented `bin/souc run tests/stdlib/special/test_mittag_leffler_d8_grid.sio`
+> (no override, default Madaros) **succeeds** and prints the same `ML_NEGATIVE_Z_FIX_PASS`
+> marker. The prescribed reproduction path below is both wrongly attributed and currently broken;
+> use the plain default-engine command instead until this is corrected.
+
 Command:
 
 ```bash

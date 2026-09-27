@@ -227,7 +227,7 @@ Effects track what a function can do. Missing effects = compile error.
 | Effect | Required when | Example |
 |--------|---------------|---------|
 | `IO` | Printing, file ops, env | `println("text")` |
-| `Mut` | Mutating `&!` refs or arrays | `arr[i] = 42`, `*x = 10` |
+| `Mut` | Mutating `&!` refs or arrays — **not** a plain local `var` | `arr[i] = 42`, `*x = 10` |
 | `Div` | Division `/` or modulo `%` | `a / b` (always pair with `Panic`) |
 | `Panic` | Array bounds, asserts, `as` casts | `arr[i]`, `assert(cond)` |
 | `Alloc` | Heap allocation | Rare |
@@ -236,8 +236,20 @@ Effects track what a function can do. Missing effects = compile error.
 | `GPU` | GPU kernels | Rare |
 | `Prob` | Probabilistic operations | Rare |
 
+> **`Mut` and the two engines (measured 2026-07-27).** The rule above — `Mut`
+> for mutation the caller can observe, nothing for a function-local `var` — is
+> the intended semantics, specified in `docs/spec/LANGUAGE_SPECIFICATION.md`
+> §7.2.1. Neither shipped engine enforces exactly it: the default compiler
+> (Madaros) currently requires `Mut` for **neither** case, and the frozen
+> `lean_single` seed requires it for **both** (so a pure integer helper that
+> mutates a local is rejected under `SOUNIO_SOUC_ENGINE=lean_single`). Writing
+> the annotation as the table describes is correct and future-proof; omitting
+> it on a local `var` will not currently be caught by the default compiler.
+> Scoped in `docs/audit/MUT_EFFECT_ENFORCEMENT_DISPATCH_2026-07-27.md`.
+
 ```sio
 fn pure_add(a: i64, b: i64) -> i64 { a + b }                   // no effects = pure
+fn bump(n: i64) -> i64 { var y = 1  y = y + n  y }             // local var only: no Mut
 fn mutate(x: &!i32) with Mut { *x = 42 }                        // mutation
 fn divide(a: f64, b: f64) -> f64 with Div, Panic { a / b }      // division
 fn observe(x: Unobserved<f64>) -> bool with Observe { x > 0.0 } // observation

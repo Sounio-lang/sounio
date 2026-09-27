@@ -1,0 +1,55 @@
+//@ run-pass
+//@ requires: lean_single
+//@ description: a product whose operand carries only a high sensitivity channel must keep its value
+//
+// lean_single saved the product before emitting sensitivity-shadow code only
+// when channels 0..3 were live, but emitted shadow code for channels 0..7.
+// A local assigned from `x as i64` and later reassigned under an f64
+// comparison carried a shadow on a higher channel, so `(k as f64) * c` ran the
+// shadow code without saving rax and the product term was replaced by
+// (k as f64) * 0.0. `x - (k as f64) * 0.25` then returned x unchanged.
+
+fn floor_scaled(x: f64) -> f64 with Mut {
+    var k = x as i64
+    if x < 0.0 { k = k - 1 }
+    return x - (k as f64) * 0.25
+}
+
+fn exp_like(x: f64) -> f64 with Mut, Div {
+    var kf = x / 0.6931471805599453
+    var k = kf as i64
+    if kf < 0.0 {
+        if kf != (k as f64) { k = k - 1 }
+    }
+    let r = x - (k as f64) * 0.6931471805599453
+    var s = 1.0
+    var term = 1.0
+    var n: i64 = 1
+    while n < 25 { term = term * r / (n as f64); s = s + term; n = n + 1 }
+    var result = s
+    var i: i64 = 0
+    while i < k { result = result * 2.0; i = i + 1 }
+    return result
+}
+
+fn near(a: f64, b: f64) -> bool {
+    let d = a - b
+    if d < 0.0 { return (0.0 - d) < 1.0e-6 }
+    return d < 1.0e-6
+}
+
+fn main() -> i64 with IO, Mut, Div {
+    var bad = 0
+    if !near(floor_scaled(1.0), 0.75) { bad = bad + 1 }
+    if !near(floor_scaled(2.5), 2.0) { bad = bad + 1 }
+    if !near(floor_scaled(0.0 - 1.0), 0.0 - 0.5) { bad = bad + 1 }
+    if !near(exp_like(1.0), 2.718281828) { bad = bad + 1 }
+    if !near(exp_like(3.0), 20.0855369) { bad = bad + 1 }
+    if bad != 0 {
+        print("product value lost under a live sensitivity shadow, violations: ")
+        println(bad)
+        return 1
+    }
+    println("MUL_SHADOW_RESULT_PRESERVED_OK")
+    return 0
+}

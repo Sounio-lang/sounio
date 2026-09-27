@@ -1,0 +1,168 @@
+//@ run-pass
+//@ expect-stdout: PASS
+// test_knightian_pbpk.sio — validação da camada Knightian Pharmacometrics (P1)
+// Self-contained (padrão test_morphine_validation; workaround thin-link #1715).
+// Flagship: claim E4c clonidina lactente — cadeia analítica tipada × cantos
+// numéricos do kernel PBPK28, com contrato de contenção.
+
+struct KPBox {
+    lo_mean: f64,
+    hi_mean: f64,
+    variance: f64,
+    confidence: i64,
+    provenance: i64,
+}
+
+fn kb_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+fn kb_max(a: f64, b: f64) -> f64 { if a < b { b } else { a } }
+fn kb_min_i64(a: i64, b: i64) -> i64 { if a < b { a } else { b } }
+fn kb_decay(c: i64) -> i64 {
+    let d = c - 2
+    if d < 0 { return 0 }
+    return d
+}
+fn kb_new(lo_mean: f64, hi_mean: f64, variance: f64, confidence: i64, prov: i64) -> KPBox {
+    KPBox {
+        lo_mean: kb_min(lo_mean, hi_mean),
+        hi_mean: kb_max(lo_mean, hi_mean),
+        variance: variance,
+        confidence: confidence,
+        provenance: prov,
+    }
+}
+fn kb_certain(v: f64, prov: i64) -> KPBox {
+    KPBox { lo_mean: v, hi_mean: v, variance: 0.0, confidence: 1000, provenance: prov }
+}
+fn kb_vacuous() -> KPBox {
+    KPBox { lo_mean: 0.0 - 1.0e300, hi_mean: 1.0e300, variance: 1.0e300, confidence: 0, provenance: 0 }
+}
+fn kb_midpoint(p: KPBox) -> f64 { 0.5 * (p.lo_mean + p.hi_mean) }
+fn kb_mul_corners_lo(a: KPBox, b: KPBox) -> f64 {
+    let c1 = a.lo_mean * b.lo_mean
+    let c2 = a.lo_mean * b.hi_mean
+    let c3 = a.hi_mean * b.lo_mean
+    let c4 = a.hi_mean * b.hi_mean
+    return kb_min(kb_min(c1, c2), kb_min(c3, c4))
+}
+fn kb_mul_corners_hi(a: KPBox, b: KPBox) -> f64 {
+    let c1 = a.lo_mean * b.lo_mean
+    let c2 = a.lo_mean * b.hi_mean
+    let c3 = a.hi_mean * b.lo_mean
+    let c4 = a.hi_mean * b.hi_mean
+    return kb_max(kb_max(c1, c2), kb_max(c3, c4))
+}
+fn kb_mul(a: KPBox, b: KPBox) -> KPBox {
+    let am = kb_midpoint(a)
+    let bm = kb_midpoint(b)
+    KPBox {
+        lo_mean: kb_mul_corners_lo(a, b),
+        hi_mean: kb_mul_corners_hi(a, b),
+        variance: bm * bm * a.variance + am * am * b.variance + a.variance * b.variance,
+        confidence: kb_decay(kb_min_i64(a.confidence, b.confidence)),
+        provenance: 4,
+    }
+}
+fn kb_div(a: KPBox, b: KPBox) -> KPBox {
+    if b.lo_mean <= 0.0 && b.hi_mean >= 0.0 { return kb_vacuous() }
+    let r_lo = 1.0 / b.hi_mean
+    let r_hi = 1.0 / b.lo_mean
+    let recip = KPBox {
+        lo_mean: kb_min(r_lo, r_hi),
+        hi_mean: kb_max(r_lo, r_hi),
+        variance: b.variance / (b.lo_mean * b.lo_mean * b.hi_mean * b.hi_mean),
+        confidence: b.confidence,
+        provenance: 4,
+    }
+    return kb_mul(a, recip)
+}
+fn kb_scale(a: KPBox, c: f64) -> KPBox {
+    if c >= 0.0 {
+        KPBox { lo_mean: c * a.lo_mean, hi_mean: c * a.hi_mean,
+                variance: c * c * a.variance, confidence: a.confidence,
+                provenance: a.provenance }
+    } else {
+        KPBox { lo_mean: c * a.hi_mean, hi_mean: c * a.lo_mean,
+                variance: c * c * a.variance, confidence: a.confidence,
+                provenance: a.provenance }
+    }
+}
+fn kb_from_cv(v: f64, cv: f64, ehw: f64, confidence: i64, prov: i64) -> KPBox {
+    KPBox {
+        lo_mean: v * (1.0 - ehw),
+        hi_mean: v * (1.0 + ehw),
+        variance: v * v * cv * cv,
+        confidence: confidence,
+        provenance: prov,
+    }
+}
+fn kb_css(rate_mgh: f64, cl: KPBox) -> KPBox {
+    let r = kb_certain(rate_mgh, 1)
+    return kb_div(r, cl)
+}
+fn kb_contains(inner: KPBox, outer: KPBox) -> i64 {
+    if inner.lo_mean >= outer.lo_mean && inner.hi_mean <= outer.hi_mean { return 1 }
+    return 0
+}
+fn kb_guarantees(p: KPBox, threshold: f64) -> i64 {
+    if p.lo_mean >= threshold { return 1 }
+    return 0
+}
+
+fn main() -> i64 with Mut, Div, IO {
+    println("VALIDAÇÃO Knightian Pharmacometrics (P1)")
+    var ok: i64 = 1
+
+    // A) mul: cantos exatos [2..3]x[4..5] = [8..15]
+    let a = kb_new(2.0, 3.0, 0.01, 900, 1)
+    let b = kb_new(4.0, 5.0, 0.01, 900, 1)
+    let c = kb_mul(a, b)
+    print("A mul cantos: ["); print(c.lo_mean); print(","); print(c.hi_mean); println("]")
+    if c.lo_mean != 8.0 || c.hi_mean != 15.0 { ok = 0 println("  G FAIL mul") }
+
+    // B) div com denominador cruzando zero ⇒ vacuoso (confiança 0)
+    //    (lean_single não resolve `&` sobre temporários — bindar antes)
+    let one = kb_certain(1.0, 1)
+    let straddle = kb_new(0.0 - 1.0, 1.0, 0.1, 900, 1)
+    let z = kb_div(one, straddle)
+    print("B div straddle-zero: conf="); println(z.confidence)
+    if z.confidence != 0 { ok = 0 println("  G FAIL vacuous") }
+
+    // C) confiança decai em composição
+    let cc = kb_mul(a, a)
+    if cc.confidence >= a.confidence { ok = 0 println("  G FAIL decay") }
+    println("C decay de confiança OK")
+
+    // D) FLAGSHIP E4c lactente: cadeia analítica Css=rate/CL × cantos kernel
+    //    CL PBox: Potts BSV 35.1% (aleatório) + banda epistêmica ±35%
+    let cl = kb_from_cv(1.237336, 0.351, 0.35, 850, 1)
+    let css_a = kb_css(0.00615, cl)   // mg/L → x1000 ng/mL
+    let corners = kb_new(3.345, 6.835, 2.070, 800, 2)   // E4c p-box kernel (ng/mL)
+    let analytic_ngml = kb_scale(css_a, 1000.0)
+    print("D analítico: ["); print(analytic_ngml.lo_mean); print(",")
+    print(analytic_ngml.hi_mean); print("] vs cantos kernel [3.345,6.835]: contém? ")
+    let cont0 = kb_contains(corners, analytic_ngml)
+    println(cont0)
+    // CONTRATO: banda analítica NÃO contém o canto inferior (ignora a subida
+    // distributiva) — a violação DEVE ser detectada (framework honesto)
+    if cont0 != 0 { ok = 0 println("  G FAIL contrato devia detectar violação") }
+
+    // E) correção de atraso distributivo: média 120h ≈ 0.897 × Css
+    //    (tau = Vss/CL = 12.4h; 1 - tau/T*(1-exp(-T/tau)) = 0.897)
+    let corr = kb_scale(analytic_ngml, 0.897)
+    let cont1 = kb_contains(corners, corr)
+    print("E banda corrigida: ["); print(corr.lo_mean); print(",")
+    print(corr.hi_mean); print("]: contém? "); println(cont1)
+    if cont1 != 1 { ok = 0 println("  G FAIL contenção corrigida") }
+
+    // F) claim operacional: cantos garantem limiar clínico 2 ng/mL
+    let g2 = kb_guarantees(corners, 2.0)
+    print("F garante 2 ng/mL (Knightiano)? "); println(g2)
+    if g2 != 1 { ok = 0 println("  G FAIL garantia") }
+
+    if ok == 1 {
+        println("PASS")
+        return 0
+    }
+    println("FAIL")
+    return 1
+}

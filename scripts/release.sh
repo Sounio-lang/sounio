@@ -16,8 +16,16 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-VERSION="${SOUNIO_RELEASE_VERSION:-$(bin/souc --version 2>/dev/null \
-  | awk 'NR==1 {print $NF}' || echo 1.0.0-beta.5)}"
+VERSION="${SOUNIO_RELEASE_VERSION:-}"
+if [[ -z "$VERSION" ]]; then
+  # RELEASE_POLICY.md: CITATION.cff is the single source of truth for version
+  # metadata. Do NOT scrape bin/souc --version banner text -- that broke twice
+  # (a stray newline in June, then the last-field grab landing on the word
+  # "compiler" once the banner text changed again). A structured file does not
+  # drift under free-text edits the way a human-readable banner does.
+  VERSION="$(grep -m1 "^version:" "$ROOT_DIR/CITATION.cff" 2>/dev/null | sed "s/^version:[[:space:]]*//")"
+  VERSION="${VERSION:-1.0.0-beta.6}"
+fi
 TARGET=""
 OUT_DIR="$ROOT_DIR/dist"
 
@@ -71,9 +79,11 @@ Extract and add to PATH:
 Documentation:
     share/doc/sounio/INSTALL.md
     share/doc/sounio/KNOWN_LIMITATIONS.md
+    share/doc/sounio/MATURITY.md
 
 Maturity: this is a beta release. Honest scope lives in
-share/doc/sounio/KNOWN_LIMITATIONS.md. Read it before claims.
+share/doc/sounio/MATURITY.md (tiers) and share/doc/sounio/KNOWN_LIMITATIONS.md
+(open-defect ledger). Read them before claims.
 EOF
 
 mkdir -p "$OUT_DIR"

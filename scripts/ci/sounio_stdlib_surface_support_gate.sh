@@ -60,7 +60,7 @@ summary_path = Path(sys.argv[4]).resolve()
 
 registry_path = root / "docs/serious-language/public-claim-registry.v1.tsv"
 spec_matrix_path = root / "docs/serious-language/spec-evidence-matrix.v1.tsv"
-known_limitations_path = root / "docs/compiler/KNOWN_LIMITATIONS.md"
+known_limitations_path = root / "docs/compiler/MATURITY.md"
 
 gate_ref = "scripts/ci/sounio_stdlib_surface_support_gate.sh"
 
@@ -138,10 +138,14 @@ else:
         add_failure("spec_matrix", f"stdlib.surface evidence_ref={spec_row.get('evidence_ref')}")
 
 limitations = known_limitations_path.read_text(encoding="utf-8", errors="replace")
+# These are not self-derived prose: the scanner supplies the expected value and
+# the independently maintained document must contain it. If the tree inventory
+# changes without a documentation refresh, the new expectation misses the stale
+# prose and this gate fails.
 for token in [
     "stdlib.surface = validated_research",
-    "1252 `.sio` files",
-    "155 active module entrypoints",
+    f"{sio_files} `.sio` files",
+    f"{active_entrypoints} active module entrypoints",
     "NOT PROVED",
 ]:
     if token not in limitations:
