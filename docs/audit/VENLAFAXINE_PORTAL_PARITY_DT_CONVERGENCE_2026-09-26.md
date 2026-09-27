@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.venlafaxine-portal-parity-dt-convergence-2026-09-26
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.venlafaxine-portal-parity-dt-convergence-2026-09-26
+-->
+
 # Venlafaxine XR portal model: parity port and time-step convergence
 
 Date: 2026-09-26. Branch `claude/vfx-portal-parity`, on top of `03769363f`
