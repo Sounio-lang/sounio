@@ -6884,8 +6884,11 @@ fn lower_type_list_slot_is_box(opt: &Option<Box<TypeExprList>>, k: i64) -> bool 
 // name for a Box slot ("?" when T is unnamed, so the slot still reads as a Box),
 // empty for any other slot, cut after the last Box slot. `(A, Box<B>, i64, Box<C>)`
 // is ",B,,C". It is interned as ONE name so it rides in return_box_inner_id through
-// every copy of the function record unchanged. Empty when it does not fit a name;
-// the slots then stay untyped, which is the behaviour before any of this existed.
+// every copy of the function record unchanged. When it does not fit a name, this
+// function does NOT fall back to leaving the slots untyped: it sets
+// IR_LOWER_HARD_ERROR (reason 3) and refuses compilation, so a Box payload name
+// too long to encode here can never silently degrade into the untyped fallback
+// (raw pointer deref, name-based field lookup) this metadata exists to avoid.
 fn lower_tuple_box_slot_list(te: &TypeExpr) -> Name with Mut, Panic, Div {
     var out = ir_empty_name()
     let n = lower_type_list_len(&(*te).type_args)
@@ -18697,6 +18700,21 @@ impl Lowerer {
                                         s.name,
                                         lower_struct_layout_index_of(&(*lo.struct_layouts), t_name),
                                         t_slot)
+                                }
+                            }
+                            // Agreeing on the outer name alone is not enough for a whole
+                            // `Box<T>` return: t_ret/e_ret are both just "Box", which says
+                            // nothing about T. Compare the full Box metadata (the slot
+                            // sentinel AND the inner layout it names) and only bind when
+                            // both branches agree on T -- matching the ExprMethodCall arm's
+                            // own bind_local_box_inner_layout call above.
+                            let t_box_slot = lo.return_box_slot_for_fn_id(then_fn)
+                            let e_box_slot = lo.return_box_slot_for_fn_id(else_fn)
+                            if t_box_slot == 0 - 2 && e_box_slot == 0 - 2 {
+                                let t_box_layout = lo.return_box_inner_layout_for_fn_id(then_fn)
+                                let e_box_layout = lo.return_box_inner_layout_for_fn_id(else_fn)
+                                if t_box_layout == e_box_layout {
+                                    lo = lo.bind_local_box_inner_layout(s.name, t_box_layout)
                                 }
                             }
                         }
