@@ -201,14 +201,20 @@ var SPEC_SC_TYPE: [i64; 4096] = [0; 4096]
 // before anything else touches it.
 var SPEC_SC_NAMES: [i64; 4096] = [0; 4096]
 var SPEC_RT_COUNT: i64 = 0
-var SPEC_RT_HASH: [i64; 4096] = [0; 4096]
-var SPEC_RT_TYPE: [i64; 4096] = [0; 4096]
+// Sized to IR_MAX_FUNCS (16384), not the 4096 every other fixed-capacity
+// specializer table uses: unlike a per-scope or per-call-site count, this
+// table holds one entry per non-generic top-level fn in the WHOLE
+// compilation unit, and main.sio alone is documented at self-hosted/ir/ir.sio:31-35
+// as declaring 10,705 functions -- comfortably past 4096, comfortably under
+// IR_MAX_FUNCS.
+var SPEC_RT_HASH: [i64; 16384] = [0; 16384]
+var SPEC_RT_TYPE: [i64; 16384] = [0; 16384]
 // Same hash-as-identity gap as SPEC_SC_NAMES / SPEC_EMITTED_NAMES: two
 // functions with colliding names (the az/bY pair used elsewhere in this
 // file collides) made a nested generic call infer the WRONG function's
 // return type and instantiate the wrong clone. *mut SpecNameStage per
 // entry, same reason -- a Name held across deep calls arrives corrupted.
-var SPEC_RT_NAMES: [i64; 4096] = [0; 4096]
+var SPEC_RT_NAMES: [i64; 16384] = [0; 16384]
 var SPEC_CS_COUNT: i64 = 0
 var SPEC_CS_FILE: [i64; 4096] = [0; 4096]
 var SPEC_CS_START: [i64; 4096] = [0; 4096]
@@ -2044,7 +2050,17 @@ fn spec_array_type_stage(elem_ptr: i64, count: i64) -> i64 with Mut, Panic, Div,
 }
 
 fn spec_scope_bind(name: Name, type_ptr: i64) with Mut, Panic, Div, Alloc {
-    if type_ptr == 0 || SPEC_SC_TOP >= 4096 { return }
+    if type_ptr == 0 { return }
+    if SPEC_SC_TOP >= 4096 {
+        // Fail closed, matching the emitted-instance and call-site tables: a
+        // local binding dropped here is not "one fewer binding" -- a later
+        // generic call inferred from this identifier either gets no recorded
+        // type (spurious E263) or, if the name still resolves via an older,
+        // shadowed entry still on the stack, silently infers from the WRONG
+        // binding.
+        spec_mark_cap_overflow(0)
+        return
+    }
     let ns = heap_alloc(1024) as *mut SpecNameStage
     (*ns).n = name
     SPEC_SC_NAMES[SPEC_SC_TOP as usize] = ns as i64
@@ -2107,7 +2123,7 @@ fn spec_collect_return_types(items: Option<Box<ItemList>>) with Mut, Panic, Div,
         None => {}
         Some(list) => {
             let it = (*list).head
-            if it.kind == ItemKind::ItemFn && SPEC_RT_COUNT < 4096 {
+            if it.kind == ItemKind::ItemFn {
                 match it.fn_def {
                     Some(fd_box) => {
                         match (*fd_box).type_params {
@@ -2115,12 +2131,23 @@ fn spec_collect_return_types(items: Option<Box<ItemList>>) with Mut, Panic, Div,
                             None => {
                                 match (*fd_box).return_type {
                                     Some(rt) => {
-                                        let rns = heap_alloc(1024) as *mut SpecNameStage
-                                        (*rns).n = it.name
-                                        SPEC_RT_NAMES[SPEC_RT_COUNT as usize] = rns as i64
-                                        SPEC_RT_HASH[SPEC_RT_COUNT as usize] = ast_name_hash(it.name)
-                                        SPEC_RT_TYPE[SPEC_RT_COUNT as usize] = spec_stage_type(*rt)
-                                        SPEC_RT_COUNT = SPEC_RT_COUNT + 1
+                                        if SPEC_RT_COUNT >= 16384 {
+                                            // Latched, not silently continued with a
+                                            // partial cache: a nested generic call whose
+                                            // callee lands past a truncated cache would
+                                            // either fail inference (spurious E263) or,
+                                            // worse, hit a hash collision against
+                                            // whatever the cache DOES hold and select
+                                            // the wrong return type / clone.
+                                            spec_mark_cap_overflow(0)
+                                        } else {
+                                            let rns = heap_alloc(1024) as *mut SpecNameStage
+                                            (*rns).n = it.name
+                                            SPEC_RT_NAMES[SPEC_RT_COUNT as usize] = rns as i64
+                                            SPEC_RT_HASH[SPEC_RT_COUNT as usize] = ast_name_hash(it.name)
+                                            SPEC_RT_TYPE[SPEC_RT_COUNT as usize] = spec_stage_type(*rt)
+                                            SPEC_RT_COUNT = SPEC_RT_COUNT + 1
+                                        }
                                     }
                                     None => {}
                                 }
@@ -2631,14 +2658,27 @@ fn spec_scan_expr(e: Expr) with IO, Mut, Panic, Div, Alloc {
 }
 
 fn spec_scan_block(b: Block) with IO, Mut, Panic, Div, Alloc {
+    // A nested if/loop/handler block's own let/var bindings must not leak
+    // into the sibling branch or the code after it: identify(x) inside a
+    // LATER branch would otherwise infer x from an EARLIER branch's binding
+    // (or a loop-local surviving past the loop) and instantiate the wrong
+    // generic clone. The four top-level call sites (spec_scan_impl_methods
+    // and friends) already save/restore SPEC_SC_TOP by hand around a whole
+    // function body; doing it here too closes the leak for every NESTED
+    // block reached through spec_scan_expr, and is a harmless no-op where
+    // the caller already wraps it.
+    let saved_top = SPEC_SC_TOP
     spec_scan_stmt_list_opt(b.stmts)
+    SPEC_SC_TOP = saved_top
 }
 
 fn spec_scan_block_opt(opt: Option<Box<Block>>) with IO, Mut, Panic, Div, Alloc {
+    let saved_top = SPEC_SC_TOP
     match opt {
         None => {}
         Some(b) => spec_scan_stmt_list_opt((*b).stmts)
     }
+    SPEC_SC_TOP = saved_top
 }
 
 fn spec_scan_stmt_list_opt(opt: Option<Box<StmtList>>) with IO, Mut, Panic, Div, Alloc {
