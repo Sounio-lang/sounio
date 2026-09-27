@@ -160,6 +160,17 @@
 //     copied the profile unchecked (it accepted v_ref[0] = 0, and the next
 //     bolus divided by zero); with the check returning 0, V10 fails.
 //
+// V11 Cumulative dose accounting cannot overflow (md_oral_dose_ok and
+//     md_bolus_dose_ok, which the dosing calls panic on before mutating
+//     anything). On a fresh drug a 1e308 oral dose and a 1e308 bolus are
+//     accepted; after one of each, a second 1e308 dose is refused (its
+//     administered total would be +Inf) while a 5 mg dose is still accepted.
+//     Before 2026-09-27 two 1e308 oral doses left administered = +Inf and
+//     returned normally; with the predicates always true, V11 fails. (The
+//     step-level sums -- elimination, dose, AUC -- are checked the same way
+//     in md_advance; measured by hand: AUC at the largest double plus a
+//     1e295 mg bolus step exits 1 on both engines, where it returned +Inf.)
+//
 // Transport parameters are the rapamycin PBPK28 profile with synthetic CLint and
 // Ki values: kernel/driver correctness fixtures, not drug claims.
 
@@ -679,6 +690,26 @@ fn gate_v10() -> bool with Mut, Div, Panic, IO {
     return ok
 }
 
+// V11 -------------------------------------------------------------------------
+fn gate_v11() -> bool with Mut, Div, Panic, IO {
+    var md = md_new(true)
+    var p = pbpk28_params_rapamycin()
+    p.cl_central = 1.0
+    let a = md_add_drug(&!md, p, 0.1, 0.95, 1.0)
+    let b = md_add_drug(&!md, p, 0.1, 0.95, 1.0)
+    let o_first = md_oral_dose_ok(&md, a, 1.0e308)
+    let b_first = md_bolus_dose_ok(&md, b, 1.0e308)
+    md_dose_oral(&!md, a, 1.0e308)
+    md_dose_iv_bolus(&!md, b, 1.0e308)
+    let o_again = md_oral_dose_ok(&md, a, 1.0e308)
+    let b_again = md_bolus_dose_ok(&md, b, 1.0e308)
+    let o_small = md_oral_dose_ok(&md, a, 5.0)
+    let b_small = md_bolus_dose_ok(&md, b, 5.0)
+    print("V11 oral ok: first 1e308, second 1e308, 5 mg = ") print(o_first) print(" ") print(o_again) print(" ") println(o_small)
+    print("V11 bolus ok: first 1e308, second 1e308, 5 mg = ") print(b_first) print(" ") print(b_again) print(" ") println(b_small)
+    return o_first && b_first && !o_again && !b_again && o_small && b_small
+}
+
 fn main() -> i32 with Mut, Div, Panic, IO {
     let m = gate_mass()
     let v3 = gate_v3()
@@ -688,6 +719,7 @@ fn main() -> i32 with Mut, Div, Panic, IO {
     let v8 = gate_v8()
     let v9 = gate_v9()
     let v10 = gate_v10()
+    let v11 = gate_v11()
     if m { println("M PASS") } else { println("M FAIL") }
     if v3 { println("V3 PASS") } else { println("V3 FAIL") }
     if v4 { println("V4 PASS") } else { println("V4 FAIL") }
@@ -696,7 +728,8 @@ fn main() -> i32 with Mut, Div, Panic, IO {
     if v8 { println("V8 PASS") } else { println("V8 FAIL") }
     if v9 { println("V9 PASS") } else { println("V9 FAIL") }
     if v10 { println("V10 PASS") } else { println("V10 FAIL") }
-    if m && v3 && v4 && v6 && v7 && v8 && v9 && v10 {
+    if v11 { println("V11 PASS") } else { println("V11 FAIL") }
+    if m && v3 && v4 && v6 && v7 && v8 && v9 && v10 && v11 {
         println("PBPK28_MULTIDRUG_GATES_PASS")
         return 0
     }
