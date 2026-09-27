@@ -1,6 +1,13 @@
 //@ run-pass
 //@ expect-stdout-contains: PBPK28_HEPATIC_GATES_PASS
+//@ timeout: 60
 
+// Runtime (2026-09-27): 5.1 s on lean_single (souc-stage2 engine, this
+// workspace pod, run only). CI job 108525867166 put the Full Test Suite
+// runner at 2.65-4.3x slower than the pod (hepatic 11.3 s timed out at
+// 30 s; calibration 42 s passed within 180 s), so the timeout is about
+// 2x the worst projected CI time, 4.3 x 5.1 s.
+//
 // Gates V0-V2 for stdlib/darwin_pbpk/pbpk28_hepatic.sio.
 //
 // V0  Reduction: with k_t = 0, in_t = 0 and portal = false the new step must be
@@ -35,14 +42,18 @@
 //     backward-Euler restart (pbpk28_hepatic_be2_step_ws) on the first step and
 //     on the step after the input switches off. (a) V1's open configuration
 //     (portal, liver + gut sinks, residual CL, 10 mg/h into gut tissue for
-//     2 h, dt = 0.01, 48 h), elimination booked with the steps' own weights
+//     2 h, dt = 0.05, 48 h), elimination booked with the steps' own weights
 //     (TR-BDF2 (w, w, d), restart (0, 1/2, 1/2); pbpk28_hepatic_elim_quad_ws):
 //     |M + E - D|/D <= max(1e-12, n·1e-15) at every step n -- the rounding
-//     budget of the closed-system witness, 1e-10 -> 4.8e-12 here. The
+//     budget of the closed-system witness (the 1e-12 floor at 960 steps). The
 //     identity is exact in real arithmetic (derivation in the kernel's TR-BDF2
 //     section). (b) V2's steady states (IV: C_b = R/CL_H; portal: C_b = R/X)
-//     to 1e-9, as V2: TR-BDF2's fixed point is the continuous steady state
-//     (A x + b = 0 makes x_γ = x and x_{n+1} = x). A kernel that fails closed
+//     to 1e-9, as V2, at dt = 0.1 over V2's 100 h: TR-BDF2's fixed point is
+//     the continuous steady state (A x + b = 0 makes x_γ = x and
+//     x_{n+1} = x), and being L-stable it damps the stiff transient at any
+//     dt, so only the horizon matters. (V2 itself keeps dt = 0.01: CN's
+//     stiff modes decay only by |R| per step, so CN needs the finer step.)
+//     VR ran at dt = 0.01 until 2026-09-27; coarsened for runtime. A kernel that fails closed
 //     on negativity would abort the run, so completion also checks that no
 //     stage went below -tol·scale.
 //
@@ -318,7 +329,7 @@ fn gate_vr() -> bool with Mut, Div, Panic, IO {
     hep.portal = true
     hep.k_t[1] = pbpk28_sink_from_clint(500.0, 0.1, p.kp[1])
     hep.k_t[8] = pbpk28_sink_from_clint(30.0, 1.0, p.kp[8])
-    let (mb, _cb1, _cb1p) = vr_run(p, hep, true, 10.0, 2.0, 48.0, 0.01)
+    let (mb, _cb1, _cb1p) = vr_run(p, hep, true, 10.0, 2.0, 48.0, 0.05)
     print("VR TR-BDF2 open system: worst |M+E-D|/D over its bound = ") println(mb)
 
     var p2 = pbpk28_params_rapamycin()
@@ -330,8 +341,8 @@ fn gate_vr() -> bool with Mut, Div, Panic, IO {
     hep2.k_t[1] = pbpk28_sink_from_clint(clint, fu, p2.kp[1])
     let x = pbpk28_ecm_x(clint, fu, p2.ps[1])
     let clh = pbpk28_ecm_clh(p2.q[1], x)
-    let (_m_iv, cb_iv, cb_iv_prev) = vr_run(p2, hep2, false, 1.0, 1000.0, 100.0, 0.01)
-    let (_m_po, cb_po, cb_po_prev) = vr_run(p2, hep2, true, 1.0, 1000.0, 100.0, 0.01)
+    let (_m_iv, cb_iv, cb_iv_prev) = vr_run(p2, hep2, false, 1.0, 1000.0, 100.0, 0.1)
+    let (_m_po, cb_po, cb_po_prev) = vr_run(p2, hep2, true, 1.0, 1000.0, 100.0, 0.1)
     let err_iv = g_abs(cb_iv - 1.0 / clh) * clh
     let err_po = g_abs(cb_po - 1.0 / x) * x
     let drift = g_abs(cb_iv - cb_iv_prev) / cb_iv + g_abs(cb_po - cb_po_prev) / cb_po
