@@ -695,6 +695,20 @@ pub fn pbpk28_hepatic_elim_step_theta(
 // positivity failure. It covers one step's rounding given its input; negativity
 // inherited from earlier steps is damped by the L-stable stages, not bounded
 // here.
+//
+// Ceiling. tol grows linearly in dt·λ, and a certificate that admits entries
+// down to −tol·scale stops meaning anything once tol reaches the resolution
+// of the results: at dt·λ ≈ 8.8e12 it would accept −scale itself (measured
+// 2026-09-27: the restart at dt = 2.3e8 h on rapamycin ran with tol = 0.98;
+// PR #2695 review). The kernel's outputs are reported and gated to six
+// significant digits (the dispatch's negativity resolution is half the last
+// digit of a 6-decimal print), so a certificate looser than 1e-6 of the scale
+// could hide a negative entry visible in the reported numbers. The ceiling is
+// therefore tol ≤ 1e-6, i.e.
+//   dt ≤ dt_max(λ) = (1e-6 / (1024·u) − 1) / λ ≈ 8.8e6 / λ  hours,
+// about 234 h for rapamycin's lung (λ ≈ 3.8e4 /h) against production and gate
+// steps of at most 0.5 h (dt/dt_max ≤ 2.2e-3). Above it the step PANICS as not
+// certifiable instead of running with a meaningless certificate.
 fn p28h_trbdf2_gamma() -> f64 { return 2.0 - 1.4142135623730951 }
 
 pub fn pbpk28_trbdf2_d() -> f64 with Div {
@@ -709,6 +723,51 @@ pub fn pbpk28_trbdf2_w() -> f64 with Div {
 
 pub fn pbpk28_negativity_tol_k() -> f64 { return 1024.0 }
 
+// Largest certifiable tolerance (see "Ceiling" above).
+pub fn pbpk28_tol_ceiling() -> f64 { return 1.0e-6 }
+
+// The fail-closed tolerance of a step of length dt with largest rate lam.
+pub fn pbpk28_step_tol(dt: f64, lam: f64) -> f64 {
+    return pbpk28_negativity_tol_k() * 1.1102230246251565e-16 * (1.0 + dt * lam)
+}
+
+// dt_max(λ): the largest step whose tolerance stays within the ceiling.
+pub fn pbpk28_dt_max(lam: f64) -> f64 with Div {
+    return (pbpk28_tol_ceiling() / (pbpk28_negativity_tol_k() * 1.1102230246251565e-16) - 1.0) / lam
+}
+
+// A step can be certified iff its tolerance is finite and within the ceiling.
+pub fn pbpk28_step_certifiable(dt: f64, lam: f64) -> bool {
+    let t = pbpk28_step_tol(dt, lam)
+    return t <= pbpk28_tol_ceiling()
+}
+
+// λ: the largest out-rate on the diagonal of A (blood (ΣQ + CL)/V_b, vascular
+// (Q + PS)/V_v, tissue (PS/K_p + k_t)/V_t over organs 1..13), with the
+// kernel's degenerate-volume floor.
+pub fn pbpk28_lambda_max(p: PBPKParams28, hep: PBPK28Hepatic) -> f64 with Mut, Div {
+    var sum_q = 0.0
+    var lam = 0.0
+    var i: i32 = 1
+    while i < 14 {
+        let vi = p.v_ref[i]
+        let vf = p.vasc_frac[i]
+        let vv_raw = vi * vf
+        let vt_raw = vi * (1.0 - vf)
+        let vv = if vv_raw < 1.0e-30 { 1.0e-30 } else { vv_raw }
+        let vt = if vt_raw < 1.0e-30 { 1.0e-30 } else { vt_raw }
+        let lv = (p.q[i] + p.ps[i]) / vv
+        let lt = (p.ps[i] / p.kp[i] + hep.k_t[i]) / vt
+        if lv > lam { lam = lv }
+        if lt > lam { lam = lt }
+        sum_q = sum_q + p.q[i]
+        i = i + 1
+    }
+    let lb = (sum_q + p.cl_central) / p.v_ref[0]
+    if lb > lam { lam = lb }
+    return lam
+}
+
 // scale, tol and the reset of neg_min_rel for the step about to be taken.
 fn pbpk28_step_bound_ws(
     state: &PBPKState28,
@@ -717,13 +776,11 @@ fn pbpk28_step_bound_ws(
     inp: PBPK28Input,
     dt: f64,
     ws: &!PBPK28Work
-) with Mut, Div {
+) with Mut, Div, Panic {
     let vb = p.v_ref[0]
     let cb = (*state).cv[0]
     var smax = if cb < 0.0 { 0.0 - cb } else { cb }
     var inj = dt * inp.in_b / vb
-    var sum_q = 0.0
-    var lam = 0.0
     var i: i32 = 1
     while i < 14 {
         let cv = (*state).cv[i]
@@ -740,17 +797,14 @@ fn pbpk28_step_bound_ws(
         let vt = if vt_raw < 1.0e-30 { 1.0e-30 } else { vt_raw }
         let ci = dt * inp.in_t[i] / vt
         if ci > inj { inj = ci }
-        let lv = (p.q[i] + p.ps[i]) / vv
-        let lt = (p.ps[i] / p.kp[i] + hep.k_t[i]) / vt
-        if lv > lam { lam = lv }
-        if lt > lam { lam = lt }
-        sum_q = sum_q + p.q[i]
         i = i + 1
     }
-    let lb = (sum_q + p.cl_central) / vb
-    if lb > lam { lam = lb }
+    let lam = pbpk28_lambda_max(p, hep)
+    if !pbpk28_step_certifiable(dt, lam) {
+        panic("pbpk28_hepatic: step cannot be certified: dt exceeds dt_max(lambda) (fail-closed tolerance above 1e-6; see the TR-BDF2 section)")
+    }
     (*ws).scale = smax + inj
-    (*ws).tol = pbpk28_negativity_tol_k() * 1.1102230246251565e-16 * (1.0 + dt * lam)
+    (*ws).tol = pbpk28_step_tol(dt, lam)
     (*ws).neg_min_rel = 0.0
 }
 
