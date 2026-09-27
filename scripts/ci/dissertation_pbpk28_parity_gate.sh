@@ -891,17 +891,60 @@ awk -F= '
 ' "$VFX_SIO_LOG"
 
 echo
-echo "[pbpk28-parity] venlafaxine guards: Node sample-time/interval checks + Sounio backwards-integration panic"
+echo "[pbpk28-parity] venlafaxine guards: Node input/interval checks + Sounio vfx_integrate_to refusals"
 node "$ROOT_DIR/scripts/ci/pbpk28_core_venlafaxine_guards.mjs" || {
   echo "[pbpk28-parity] FAIL: Node venlafaxine core guards" >&2; exit 1; }
-VFX_BACK_LOG="$OUT_DIR/vfx_backwards.txt"
-if "$SOUC_BIN" run tests/fixtures/darwin_pbpk/vfx_integrate_backwards.sio > "$VFX_BACK_LOG" 2>&1; then
-  echo "[pbpk28-parity] FAIL: vfx_integrate_to accepted t_end < t_start (exit 0)" >&2; exit 1; fi
-if ! grep -q '^VFX_BACKWARDS_REACHED$' "$VFX_BACK_LOG"; then
-  echo "[pbpk28-parity] FAIL: backwards fixture failed before the check (see $VFX_BACK_LOG)" >&2; exit 1; fi
-if grep -q '^VFX_BACKWARDS_ACCEPTED$' "$VFX_BACK_LOG"; then
-  echo "[pbpk28-parity] FAIL: vfx_integrate_to accepted t_end < t_start" >&2; exit 1; fi
-echo "VENLAFAXINE_GUARDS_PASS (Node guards; Sounio vfx_integrate_to panics on t_end < t_start)"
+# Sounio refusals. A panic exits with status 1 and prints no message on either
+# engine (measured 2026-09-27 on lean_single and Madaros; same finding as
+# scripts/ci/pbpk28_refusal_gate.sh on #2695), so a probe is refused only if
+# its ELF exits with EXACTLY 1 after printing VFX_PROBE_REACHED and never
+# prints VFX_PROBE_ESCAPED. Any other status -- a segfault (139), an FP trap
+# (136), a stray exit code -- is a failure, not a refusal. The control must
+# exit 0 and print both sentinels. Each fixture is compiled and its ELF run
+# directly, so no wrapper can rewrite the status.
+VFX_PANIC_RC=1
+vfx_probe_run() {  # NAME ELF -> sets VFX_PROBE_RC, log in $OUT_DIR/vfx_probe_NAME.txt
+  set +e
+  "$2" > "$OUT_DIR/vfx_probe_$1.txt" 2>&1
+  VFX_PROBE_RC=$?
+  set -e
+}
+vfx_is_refusal() {  # NAME
+  [ "$VFX_PROBE_RC" -eq "$VFX_PANIC_RC" ] \
+    && grep -q '^VFX_PROBE_REACHED$' "$OUT_DIR/vfx_probe_$1.txt" \
+    && ! grep -q '^VFX_PROBE_ESCAPED$' "$OUT_DIR/vfx_probe_$1.txt"
+}
+vfx_probe_compile() {  # NAME FIXTURE -> ELF path in $OUT_DIR
+  "$SOUC_BIN" compile "$2" -o "$OUT_DIR/vfx_probe_$1.elf" > "$OUT_DIR/vfx_probe_$1_compile.txt" 2>&1 || {
+    echo "[pbpk28-parity] FAIL: probe $1 did not compile (see $OUT_DIR/vfx_probe_$1_compile.txt)" >&2; exit 1; }
+  chmod +x "$OUT_DIR/vfx_probe_$1.elf"
+}
+# Self-check of the classifier: stubs that print the REACHED sentinel and then
+# exit 7, or die of SIGSEGV (139), must NOT count as refusals.
+printf '#!/bin/sh\necho VFX_PROBE_REACHED\nexit 7\n' > "$OUT_DIR/vfx_probe_sab_exit7.elf"
+printf '#!/bin/sh\necho VFX_PROBE_REACHED\nkill -SEGV $$\n' > "$OUT_DIR/vfx_probe_sab_segv.elf"
+chmod +x "$OUT_DIR/vfx_probe_sab_exit7.elf" "$OUT_DIR/vfx_probe_sab_segv.elf"
+for sab in sab_exit7 sab_segv; do
+  vfx_probe_run "$sab" "$OUT_DIR/vfx_probe_$sab.elf"
+  if vfx_is_refusal "$sab"; then
+    echo "[pbpk28-parity] FAIL: guard classifier accepted $sab (rc $VFX_PROBE_RC) as a panic refusal" >&2; exit 1; fi
+  echo "  self-check ok: $sab (rc $VFX_PROBE_RC) is not a refusal"
+done
+vfx_probe_compile control tests/fixtures/darwin_pbpk/vfx_integrate_control.sio
+vfx_probe_run control "$OUT_DIR/vfx_probe_control.elf"
+if [ "$VFX_PROBE_RC" -ne 0 ] || ! grep -q '^VFX_PROBE_ESCAPED$' "$OUT_DIR/vfx_probe_control.txt"; then
+  echo "[pbpk28-parity] FAIL: control probe did not run to completion (rc $VFX_PROBE_RC)" >&2
+  cat "$OUT_DIR/vfx_probe_control.txt" >&2; exit 1; fi
+echo "  control ok: on-grid spans accepted (rc 0)"
+for probe in backwards offgrid; do
+  vfx_probe_compile "$probe" "tests/fixtures/darwin_pbpk/vfx_integrate_$probe.sio"
+  vfx_probe_run "$probe" "$OUT_DIR/vfx_probe_$probe.elf"
+  if ! vfx_is_refusal "$probe"; then
+    echo "[pbpk28-parity] FAIL: vfx_integrate_to $probe probe NOT refused by a panic (rc $VFX_PROBE_RC, want $VFX_PANIC_RC, REACHED and no ESCAPED)" >&2
+    cat "$OUT_DIR/vfx_probe_$probe.txt" >&2; exit 1; fi
+  echo "  refused: $probe (rc $VFX_PROBE_RC)"
+done
+echo "VENLAFAXINE_GUARDS_PASS (Node guards; Sounio vfx_integrate_to refuses backwards and off-grid spans, exit $VFX_PANIC_RC)"
 
 echo
 echo "[pbpk28-parity] venlafaxine XR canonical: parent + ODV + matrix within ${RMSE_THRESHOLD_PCT}% RMSE, steady-state ratio certified (3rd canonical drug)"
