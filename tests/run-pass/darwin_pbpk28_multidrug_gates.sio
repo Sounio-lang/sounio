@@ -178,7 +178,11 @@
 //     and +Inf -> 2, kp[4] = 0 -> 3, ps[5] = -1 -> 4, q[6] = -1 -> 5,
 //     vasc_frac[2] = 0, 1 and NaN -> 6, kp[0] = +Inf -> 7, and gut flow above
 //     the liver's share with portal routing -> 8 (0 without it). The boundary
-//     values ps = 0 and q = 0 are valid (0). Until 2026-09-27 md_add_drug
+//     values ps = 0 and q = 0 are valid (0). Rounding (PR #2695 review):
+//     Q_L = 1, Q_gut = 1, Q_spleen = 2^-54, Q_pancreas = 0 -> 8, because the
+//     kernel's sequential Q_L - Q_gut - Q_spleen - Q_pancreas is -2^-54 and it
+//     panics; the check used to compare Q_L with the rounded sum (= 1) and
+//     returned 0. With Q_spleen = 0 the same flows give Q_ha = 0 exactly -> 0. Until 2026-09-27 md_add_drug
 //     copied the profile unchecked (it accepted v_ref[0] = 0, and the next
 //     bolus divided by zero); with the check returning 0, V10 fails.
 //
@@ -756,6 +760,16 @@ fn v10_case(field: i32, idx: i32, value: f64, portal: bool) -> i32 with Mut {
     return md_params_error(p, portal)
 }
 
+// Portal flows set exactly; every other field is the rapamycin profile.
+fn v10_portal(q_l: f64, q_gut: f64, q_spleen: f64, q_pancreas: f64) -> i32 with Mut {
+    var p = pbpk28_params_rapamycin()
+    p.q[1] = q_l
+    p.q[8] = q_gut
+    p.q[11] = q_spleen
+    p.q[12] = q_pancreas
+    return md_params_error(p, true)
+}
+
 fn gate_v10() -> bool with Mut, Div, Panic, IO {
     let inf = 1.0e308 * 10.0
     let nan = 0.0 * inf
@@ -765,12 +779,13 @@ fn gate_v10() -> bool with Mut, Div, Panic, IO {
         v10_case(1, 0, 0.0, true), v10_case(1, 3, nan, true), v10_case(2, 0, 0.0 - 1.0, true), v10_case(2, 0, inf, true),
         v10_case(3, 4, 0.0, true), v10_case(4, 5, 0.0 - 1.0, true), v10_case(5, 6, 0.0 - 1.0, true),
         v10_case(6, 2, 0.0, true), v10_case(6, 2, 1.0, true), v10_case(6, 2, nan, true), v10_case(3, 0, inf, true),
-        v10_case(5, 8, 90.0, true), v10_case(5, 8, 90.0, false), v10_case(4, 5, 0.0, true), v10_case(5, 6, 0.0, true)
+        v10_case(5, 8, 90.0, true), v10_case(5, 8, 90.0, false), v10_case(4, 5, 0.0, true), v10_case(5, 6, 0.0, true),
+        v10_portal(1.0, 1.0, 5.551115123125783e-17, 0.0), v10_portal(1.0, 1.0, 0.0, 0.0)
     ]
-    let want = [1, 1, 2, 2, 3, 4, 5, 6, 6, 6, 7, 8, 0, 0, 0]
+    let want = [1, 1, 2, 2, 3, 4, 5, 6, 6, 6, 7, 8, 0, 0, 0, 8, 0]
     print("V10 md_params_error: stock profiles ") print(stock) print("; cases")
     var k: i32 = 0
-    while k < 15 {
+    while k < 17 {
         print(" ") print(got[k])
         if got[k] != want[k] { ok = false }
         k = k + 1
