@@ -9,7 +9,6 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FIX="$ROOT_DIR/tests/multimodule/thinlink_tuple_arr_import"
 TAG="[madaros-thinlink-tuple-arr-import]"
-WORK="${SOUNIO_MADAROS_THINLINK_TUPLE_ARR_IMPORT_GATE_DIR:-$(mktemp -d /tmp/sounio-madaros-thinlink-tuple-arr-import.XXXXXX)}"
 
 fail() {
   echo "$TAG FAIL: $*" >&2
@@ -25,7 +24,21 @@ case "$(uname -m 2>/dev/null || echo unknown)" in
   *) echo "$TAG SKIP: x86-64 Linux-only gate" >&2; exit 0 ;;
 esac
 
-mkdir -p "$WORK"
+# Copilot review (PR #2516), comment 4113800060: an override that names an
+# EXISTING directory would otherwise get `rm -rf`'d by the EXIT trap below
+# once KEEP is unset -- a CI/local config typo (or a path meant for
+# something else entirely) must not silently become a delete. Same guard
+# as madaros_tuple_arr_capacity_boundary_gate.sh's own SOUNIO_MADAROS_
+# TUPLE_ARR_CAP_GATE_DIR: refuse an override that already exists and
+# create it ourselves, so only a directory THIS run made can ever be the
+# trap's target.
+if [[ -n "${SOUNIO_MADAROS_THINLINK_TUPLE_ARR_IMPORT_GATE_DIR:-}" ]]; then
+  WORK="$SOUNIO_MADAROS_THINLINK_TUPLE_ARR_IMPORT_GATE_DIR"
+  [[ ! -e "$WORK" ]] || fail "refusing existing gate directory: $WORK"
+  mkdir "$WORK" || fail "could not create gate directory: $WORK"
+else
+  WORK="$(mktemp -d /tmp/sounio-madaros-thinlink-tuple-arr-import.XXXXXX)"
+fi
 if [[ -z "${SOUNIO_MADAROS_THINLINK_TUPLE_ARR_IMPORT_GATE_KEEP:-}" ]]; then
   trap 'rm -rf "$WORK"' EXIT
 fi

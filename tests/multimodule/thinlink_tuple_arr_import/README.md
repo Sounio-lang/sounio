@@ -20,7 +20,17 @@ list, has an actual compiled-and-run program to fail against.
 
 A residual, narrower case remains out of scope: two DIFFERENT imports, from
 two different modules, that are BOTH genuinely selected (both actually named
-in some `use`) and happen to share one bare name. Closing that needs real
-module-qualified keying of `LOWER_FN_TUPLE_ARR_*`, not just narrowing which
-items get collected -- see `lower_fn_tuple_f64_arrays_collect_owner_priority`'s
-own comment in `ir/lower.sio`.
+in some `use`, both `pub`) and happen to share one bare name -- e.g.
+`a::make_pair()` and `b::make_pair()`. Verified directly: `self-hosted/
+check/defs.sio`'s `fn_sig_table_find_prefer_module` (the checker's own
+qualified-call resolver) takes no path/qualifier argument at all and picks
+whichever same-named `pub` free fn comes first in table order regardless of
+which qualifier was written, so no resolved module/function identity exists
+ANYWHERE in this compiler yet for this shape -- not only in
+`LOWER_FN_TUPLE_ARR_*`. Keying this side table by an identity the checker
+and lowerer's own call resolution do not yet compute would either be
+unreachable or silently diverge from what the call actually resolves to.
+Closing this needs the same qualifier/module resolution this PR's sibling
+review (PR #2515) already scoped as a genuine architectural addition -- see
+`lower_fn_tuple_f64_arrays_collect_owner_priority`'s own comment in
+`ir/lower.sio` for the full finding.
