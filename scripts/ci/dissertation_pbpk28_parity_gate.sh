@@ -929,6 +929,7 @@ for VFX_LOG in "$VFX_SIO_LOG" "$VFX_NODE_LOG"; do
       if(bs < -tol){bad++; printf "  FAIL: portal input exceeds F_abs*released by %.3e (x1e-12 mg)\n",-bs}
       if(mp+mo > por + 2.0e-6){bad++; printf "  FAIL: body %.6f > portal input %.6f mg\n",mp+mo,por}
       if(ng > 5.0e5){bad++; printf "  FAIL: negative mass %.3e x1e-12 mg > 5e-7 mg\n",ng}
+      if(ng < 0){bad++; printf "  FAIL: negative-mass magnitude is negative (%.3e x1e-12 mg)\n",ng}
       if(rel > 75.0 + 1.0e-6){bad++; printf "  FAIL: released %.6f > dose 75\n",rel}
       if(n>0 && rel < prev - 1.0e-6){bad++; printf "  FAIL: release non-monotone (%.6f < %.6f)\n",rel,prev}
       prev=rel; n++}
