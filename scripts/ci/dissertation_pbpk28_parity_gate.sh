@@ -838,6 +838,11 @@ join -t"$(printf '\t')" -1 1 -2 1 \
 
 echo
 echo "[pbpk28-parity:case13] venlafaxine ODV/parent ratios (NM): total-mass and blood AUC"
+# awk coerces "nan"/"inf"/garbage to a number (nan -> 0 on this awk), so a solver
+# that emits NaN would read as a clean zero residual. Every venlafaxine value
+# below goes through fin(): anything that is not a finite decimal literal is
+# counted in nonfin and fails the check that consumes it.
+VFX_AWK_FIN='function fin(s) { if (s !~ /^[+-]?([0-9]+[.]?[0-9]*|[.][0-9]+)([eE][+-]?[0-9]+)?$/) { nonfin++; printf "  FAIL: non-finite or non-numeric value \"%s\"\n", s; return 0 } return s + 0 }'
 vfx_scalar() {  # $1=record key (e.g. VRATIO|nm) $2=time key (e.g. VRATIO|t) $3=infile → t<TAB>v
   awk -v K="$1" -v T="$2" '
     index($0, T"=")==1 { t=substr($0, length(T)+2); next }
@@ -848,9 +853,10 @@ for VFX_KEY in nm auc; do
   join -t"$(printf '\t')" -1 1 -2 1 \
     <(vfx_scalar "VRATIO|$VFX_KEY" "VRATIO|t" "$VFX_SIO_LOG"  | sort) \
     <(vfx_scalar "VRATIO|$VFX_KEY" "VRATIO|t" "$VFX_NODE_LOG" | sort) \
-    | awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" -v KEY="$VFX_KEY" '
-        {d=($2+0)-($3+0); SS+=d*d; NN++; if(($2+0)>PK)PK=$2+0}
-        END{ if(NN!=12){printf "VENLAFAXINE_RATIO_PARITY_FAIL %s: %d/12 rows\n",KEY,NN; exit 1}
+    | awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" -v KEY="$VFX_KEY" "$VFX_AWK_FIN"'
+        {a=fin($2); b=fin($3); d=a-b; SS+=d*d; NN++; if(a>PK)PK=a}
+        END{ if(nonfin>0){printf "VENLAFAXINE_RATIO_PARITY_FAIL %s: %d non-finite value(s)\n",KEY,nonfin; exit 1}
+          if(NN!=12){printf "VENLAFAXINE_RATIO_PARITY_FAIL %s: %d/12 rows\n",KEY,NN; exit 1}
           rmse=sqrt(SS/NN); pct=(PK>0)?100*rmse/PK:0;
           if(pct<THR+0) printf "VENLAFAXINE_RATIO_PARITY_PASS %s %d/%d samples within %s%% RMSE (NM ODV/parent, peak=%.4g)\n",KEY,NN,NN,THR,PK;
           else { printf "VENLAFAXINE_RATIO_PARITY_FAIL %s %.4f%% RMSE\n",KEY,pct; exit 1 } }'
@@ -874,22 +880,23 @@ echo
 # values carry the print resolution 1e-6 mg.
 for VFX_LOG in "$VFX_SIO_LOG" "$VFX_NODE_LOG"; do
   echo "[pbpk28-parity] venlafaxine mass account: $(basename "$VFX_LOG")"
-  awk -F= '
-    # Fail closed: every field must be present for every sample; a missing
-    # record would otherwise read as 0 and pass.
-    /^VMASS\|p=/{mp=$2+0; nf++}
-    /^VMASS\|o=/{mo=$2+0; nf++}
-    /^VBAL\|released=/{rel=$2+0; nf++}
-    /^VBAL\|portal=/{por=$2+0; nf++}
-    /^VBAL\|fabs=/{fa=$2+0; nf++}
-    /^VBAL\|resid_gut_e12=/{rg=$2+0; nf++}
-    /^VBAL\|resid_split_e12=/{rs=$2+0; nf++}
-    /^VBAL\|bound_slack_e12=/{bs=$2+0; nf++}
-    /^VBAL\|resid_p_e12=/{rp=$2+0; nf++}
-    /^VBAL\|resid_o_e12=/{ro=$2+0; nf++}
-    /^VBAL\|neg_e12=/{ng=$2+0; nf++}
-    /^VBAL\|steps=/{st=$2+0;
+  awk -F= "$VFX_AWK_FIN"'
+    # Fail closed: every field must be present for every sample (a missing
+    # record would otherwise read as 0 and pass) and finite (fin()).
+    /^VMASS\|p=/{mp=fin($2); nf++}
+    /^VMASS\|o=/{mo=fin($2); nf++}
+    /^VBAL\|released=/{rel=fin($2); nf++}
+    /^VBAL\|portal=/{por=fin($2); nf++}
+    /^VBAL\|fabs=/{fa=fin($2); nf++}
+    /^VBAL\|resid_gut_e12=/{rg=fin($2); nf++}
+    /^VBAL\|resid_split_e12=/{rs=fin($2); nf++}
+    /^VBAL\|bound_slack_e12=/{bs=fin($2); nf++}
+    /^VBAL\|resid_p_e12=/{rp=fin($2); nf++}
+    /^VBAL\|resid_o_e12=/{ro=fin($2); nf++}
+    /^VBAL\|neg_e12=/{ng=fin($2); nf++}
+    /^VBAL\|steps=/{st=fin($2);
       if(nf!=11){bad++; printf "  FAIL: sample %d has %d/11 mass-account fields\n",n+1,nf}
+      if(nonfin>0){bad+=nonfin; nonfin=0}
       nf=0
       tr=st*1.0e-15; if(tr<1.0e-12)tr=1.0e-12; tol=tr*rel*1.0e12;   # residuals are printed x1e12 mg
       a=(rg<0)?-rg:rg; if(a>tol){bad++; printf "  FAIL: gut balance residual %.3e > %.3e (x1e-12 mg)\n",rg,tol}
@@ -925,9 +932,10 @@ done
 for VFX_KEY in aucr clf foral_pred; do
   VFX_A=$(grep "^VFINAL|$VFX_KEY=" "$VFX_SIO_LOG"  | head -1 | cut -d= -f2)
   VFX_B=$(grep "^VFINAL|$VFX_KEY=" "$VFX_NODE_LOG" | head -1 | cut -d= -f2)
-  awk -v A="$VFX_A" -v B="$VFX_B" -v K="$VFX_KEY" 'BEGIN{
+  awk -v A="$VFX_A" -v B="$VFX_B" -v K="$VFX_KEY" "$VFX_AWK_FIN"'BEGIN{
     if(A=="" || B==""){printf "VENLAFAXINE_CLOSED_FORM_FAIL %s missing\n",K; exit 1}
-    d=(A+0)-(B+0); if(d<0)d=-d;
+    a=fin(A); b=fin(B); if(nonfin>0){printf "VENLAFAXINE_CLOSED_FORM_FAIL %s non-finite\n",K; exit 1}
+    d=a-b; if(d<0)d=-d;
     if(d>1.0000001e-6){printf "VENLAFAXINE_CLOSED_FORM_FAIL %s Sounio=%s Node=%s\n",K,A,B; exit 1}
     printf "  %s Sounio=%s Node=%s\n",K,A,B }'
 done
