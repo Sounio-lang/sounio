@@ -44,7 +44,8 @@ The five exp copies are the same arithmetic. The four ln copies are also the sam
 
 Results, measured on Madaros:
 
-* The **exp helper** always reads low. Its relative error is −x²/2048 to leading order. The
+* The **exp helper** reads low for every x ≠ 0 with x > −1024, which covers every call-site
+  argument (see §1 for x ≤ −1024). Its relative error is −x²/2048 to leading order. The
   comment on `rel_exp` claims "relative error < 0.01% for |x| < 10". That holds only for
   |x| ≲ 0.4525. At x = −10 the error is **−4.80%**.
 * On the stent's own first-order release argument at 1545 h the error is **−0.584%**. The
@@ -99,7 +100,13 @@ every x ≠ 0 with x > −1024. The bias is one-sided and does not average out.
 
 Probe: [`repro/darwin_pbpk_local_exp_ln_accuracy.sio`](repro/darwin_pbpk_local_exp_ln_accuracy.sio).
 It holds verbatim copies of both helpers and compares them with `math::pure` and with V8
-`Math.exp` / `Math.log` references (< 1 ulp, 17 s.f.). rc = 1 means the defect is present.
+`Math.exp` / `Math.log` references (< 1 ulp, 17 s.f.).
+
+The probe is a witness of the historical arithmetic, not a fix-sensitive test. It embeds its
+own copies, so applying the proposed patch does not change its result. It first checks every
+`math::pure` row against its reference and exits rc = 2 if any row is off by more than 10⁻¹⁴.
+Only then does it classify the helper copies: rc = 1 means they are inaccurate, which is the
+expected result.
 
 On Madaros 5764851f it exits rc = 1 with `REPRO_DARWIN_PBPK_LOCAL_EXP_LN_INACCURATE`. Every
 helper figure below agrees with an independent Node evaluation of the same helper to all
@@ -270,7 +277,7 @@ On the workspace, from a checkout of `ce93ea9534` with the Madaros ELF above:
 ```bash
 unset SOUC_BIN SOUNIO_SOUC_BIN MADAROS_RAW_BIN SOUNIO_SOUC_ENGINE
 export SOUNIO_STDLIB_PATH=$PWD/stdlib SOUNIO_MADAROS_BIN=$PWD/artifacts/self-hosted/madaros
-./bin/souc run docs/audit/repro/darwin_pbpk_local_exp_ln_accuracy.sio          # rc=1 = defect
+./bin/souc run docs/audit/repro/darwin_pbpk_local_exp_ln_accuracy.sio          # rc=1 expected; rc=2 = bad reference
 for f in stdlib/darwin_pbpk/release/biomaterial_release.sio \
          stdlib/darwin_pbpk/validation/{tacrolimus_oral_pbpk,pbpk28_semaglutide_clinical,rapamycin_clinical,pbpk28_rapamycin_clinical}.sio; do
   ./bin/souc run "$f" > "before_$(basename "$f" .sio).out"; echo "$f rc=$?"
