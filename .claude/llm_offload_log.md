@@ -183,9 +183,16 @@ doi:10.1016/S0009-9236(96)90162-9, midazolam intestinal extraction 0.43 ± 0.18
 of the absorbed dose vs 0.08 ± 0.11 of arterial drug per passage (anhepatic
 liver-transplant recipients, n = 5 + 5).
 
-**Outcome**: WAIVED. Gates, both engines: C0 algebraic round trips 0 (x1e12);
-C1 IV AUC = D/(CL_H + CL_c) to 1e-11; C2 F_G and E_sys recovered on the dynamic
-model to < 1e-12; C3 F = F_G·F_H to 1.8e-11. Sabotages: liver inverse replaced
+**Outcome**: WAIVED. Gates, both engines: C0 algebraic round trips enforced to
+1e-12, measured 0 (x1e12). C1 (IV AUC = D/(CL_H + CL_c)), C2 (F_G and E_sys
+recovered on the dynamic model) and C3 (F = F_G·F_H) are each ENFORCED at a
+relative error of 1e-9 (truncation at t_end plus round-off, V3's tolerance).
+Measured when this entry was written, on the CN transport: C1 1.074e-11
+(Madaros 1.07405e-11, lean_single 1.07408e-11), C2 < 1e-12, C3 1.8e-11.
+Measured again on 2026-09-27 on the TR-BDF2 default transport: C1 1.6e-14,
+C2 2.4e-13, C3 <= 3e-15. (The first version of this entry said "C1 to 1e-11",
+which is neither the enforced tolerance nor the measured value; corrected in
+review of sounio-lang/sounio#2695.) Sabotages: liver inverse replaced
 by the forward form -> C0, C1, C3 FAIL; gut inverse a/(1 − a) -> C0, C2, C3
 FAIL. Flagged for re-review once a provider is configured.
 
