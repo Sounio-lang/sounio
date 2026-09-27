@@ -81,7 +81,12 @@
 //     not a dosing event: an oral dose of 0, a bolus of 0 and an infusion rate
 //     set to its current value, all mid-run, leave the victim bit-identical
 //     (md_same_drug) to the run without those calls; they must not schedule the
-//     restart. A real rate change still does.
+//     restart. A real rate change still does. Nor is an oral dose of a drug
+//     that cannot absorb it: a CYP3A4 inhibitor co-drug with fa = 0, or with
+//     ka = 0, dosed 50 mg mid-run leaves the victim bit-identical to the run
+//     without that dose, and neither drug's restart is pending after it. Before
+//     2026-09-27 such a dose scheduled a restart for the co-drug and, through
+//     its Ki, for the victim, and this check fails.
 //     (e) The restart is per drug. A mid-run oral dose of a co-drug that is a
 //     CYP3A4 substrate but NOT an inhibitor leaves the victim bit-identical
 //     (md_same_drug) to the run without that dose. With the single global
@@ -371,6 +376,33 @@ fn v6d_run(noop_calls: bool) -> MultiDrug28 with Mut, Div, Panic {
     return md
 }
 
+// Victim (drug 0) plus a CYP3A4-inhibitor co-drug (drug 1) that cannot absorb
+// an oral dose (fa = 0 when no_fa, else ka = 0); the co-drug is dosed 50 mg at
+// 1 h or not. Returns the driver at 1 h, right after that call.
+fn v6d_inert_to_dose(no_fa: bool, dose: bool) -> MultiDrug28 with Mut, Div, Panic {
+    var md = md_new(true)
+    let v = add_victim(&!md, 1.5)
+    var p = pbpk28_params_rapamycin()
+    p.cl_central = 0.5
+    let fa = if no_fa { 0.0 } else { 0.95 }
+    let ka = if no_fa { 1.5 } else { 0.0 }
+    let b = md_add_drug(&!md, p, 0.1, fa, ka)
+    md_set_ki(&!md, b, md_cyp3a4(), 0.02)
+    md_dose_oral(&!md, v, 5.0)
+    md_run_to(&!md, 1.0, 0.02)
+    if dose { md_dose_oral(&!md, b, 50.0) }
+    return md
+}
+
+fn v6d_inert(no_fa: bool) -> bool with Mut, Div, Panic {
+    var a = v6d_inert_to_dose(no_fa, false)
+    var b = v6d_inert_to_dose(no_fa, true)
+    let no_restart = !md_restart_pending(&b, 0) && !md_restart_pending(&b, 1)
+    md_run_to(&!a, 2.0, 0.02)
+    md_run_to(&!b, 2.0, 0.02)
+    return no_restart && a.t == b.t && md_same_drug(&a, 0, &b, 0)
+}
+
 fn gate_v6d() -> bool with Mut, Div, Panic {
     let a = v6d_run(false)
     let b = v6d_run(true)
@@ -378,7 +410,8 @@ fn gate_v6d() -> bool with Mut, Div, Panic {
     // Control: a real rate change is a discontinuity and schedules the start-up.
     var c = v6d_run(false)
     md_set_iv_rate(&!c, 0, 3.0)
-    return same && md_restart_pending(&c, 0)
+    let inert = v6d_inert(true) && v6d_inert(false)
+    return same && md_restart_pending(&c, 0) && inert
 }
 
 // Victim dosed at 0, run to 6 h; the co-drug (a CYP3A4 substrate; an
@@ -433,7 +466,7 @@ fn gate_v6() -> bool with Mut, Div, Panic, IO {
     if ok_b { println("V6b Ki=1e300 co-drug: victim bit-identical") } else { println("V6b FAIL: Ki=1e300 changed the victim") }
     if ok_c { println("V6c identical drugs: trajectories bit-identical") } else { println("V6c FAIL: symmetric pair diverged") }
     let ok_d = gate_v6d()
-    if ok_d { println("V6d zero dose / unchanged rate: victim bit-identical, no restart") } else { println("V6d FAIL: a no-op dosing call changed the victim") }
+    if ok_d { println("V6d zero dose / unchanged rate / dose that cannot absorb (fa = 0, ka = 0): victim bit-identical, no restart") } else { println("V6d FAIL: a no-op dosing call changed the victim") }
     let ok_e = gate_v6e()
     if ok_e { println("V6e per-drug restart: uncoupled victim bit-identical, coupled victim restarted") } else { println("V6e FAIL: restart scheduling is not per drug") }
     return ok_a && ok_b && ok_c && ok_d && ok_e
