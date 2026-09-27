@@ -35004,7 +35004,7 @@ fn emit_read_byte_a64() with Mut, Panic {
 
 // ARM64 read_line() -- read one line from stdin (fd=0) into a fresh mmap buffer,
 // stripping a trailing '\n' and null-terminating. Twin of emit_read_line_x86.
-fn emit_read_line_a64() with Mut, Panic {
+fn emit_read_line_a64() with Mut, Panic, Div {
     // mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0)
     em32(0xD2800000)  // movz x0, #0 (NULL)
     emit_imm64_reg_a64(1, 4096)  // x1 = 4096
@@ -35029,15 +35029,31 @@ fn emit_read_line_a64() with Mut, Panic {
     // finally dereferenced by the null-terminate `strb` near the end of this
     // function, turning an allocation failure into an out-of-bounds
     // write/segfault. Mirror emit_file_size_a64's open()-failure pattern: on
-    // failure, set x0 = 0 (NULL -- the natural sentinel for this function's
-    // string-typed return, matching read_byte()'s -1 for its int-typed one)
-    // and jump straight to the function's end, never pushing/dereferencing
-    // the bad pointer or reaching the read()/strip/null-terminate code below.
+    // failure, jump straight to the function's end, never pushing/
+    // dereferencing the bad pointer or reaching the read()/strip/
+    // null-terminate code below.
+    //
+    // The sentinel returned in x0 on that path must itself be a genuinely
+    // usable empty string, NOT NULL/0: read_line()'s return type is string,
+    // and every string primitive in this file (e.g. emit_str_len_a64 just
+    // below: `ldrb w10, [x9, x0]` with x9 = the string pointer) dereferences
+    // its argument unconditionally with no null check. Returning 0 would not
+    // avoid the crash Bug 3 fixed -- it would only move it to the first
+    // string operation a caller performs on the result, e.g.
+    // `str_len(read_line())` would fault reading address zero. Point x0 at a
+    // freshly reserved, permanently zero-initialized 8-byte BSS slot instead
+    // (bss_alloc_aligned + emit_image_addr_a64, the same allocation/address
+    // idiom RET_AGG_BSS_OFF and friends already use above): BSS is
+    // zero-initialized by the loader, so its first byte is already a valid
+    // NUL terminator with no store needed, and the pointer stays valid for
+    // the life of the process (unlike a stack address, which would dangle
+    // once this function returns).
+    let rl_empty_str_off = bss_alloc_aligned(8)
     var mmap_fail_done: i64 = 0
     if TARGET_OS == 2 {
         let mmap_ok = CL
         em32(0x54000003)  // b.cc ok (carry clear = success; patched)
-        em32(0xD2800000)  // movz x0, #0 -> x0 = NULL (carry set: mmap() failed)
+        emit_image_addr_a64(GL_BSS_BASE + rl_empty_str_off)  // x0 = &empty_str (carry set: mmap() failed)
         mmap_fail_done = CL
         em32(0x14000000)  // b done (patched)
         patch_branch_a64(mmap_ok, CL)
@@ -35045,7 +35061,7 @@ fn emit_read_line_a64() with Mut, Panic {
         em32(0xF100001F)  // cmp x0, #0
         let mmap_ok = CL
         em32(0x5400000A)  // b.ge ok (x0 >= 0, mmap() succeeded; patched)
-        em32(0xD2800000)  // movz x0, #0 -> x0 = NULL (negative errno: mmap() failed)
+        emit_image_addr_a64(GL_BSS_BASE + rl_empty_str_off)  // x0 = &empty_str (negative errno: mmap() failed)
         mmap_fail_done = CL
         em32(0x14000000)  // b done (patched)
         patch_branch_a64(mmap_ok, CL)
