@@ -1,15 +1,7 @@
-# LLM Offload Audit Log
-
-
-Append-only. One entry per non-trivial offload attempt (caught a bug,
-informed a design decision, blocked a commit) or per M1-mandatory review
-that could not run, per `.claude/AGENT_OFFLOAD_POLICY.md`. Newest entries at
-the bottom.
+# LLM Offload Log
 
 | Date | Provider | Task | Target | Outcome | Note |
 |---|---|---|---|---|---|
-| 2026-09-22 | xai/grok-4.6 [OK] | math-review | stdlib/data/bigframe_ops.sio (bf_exp) -- lean_single pow2-loop miscompile follow-up (docs/audit/LEAN_SINGLE_POW2_LOOP_MISCOMPILE_2026-09-22.md section 2.5) | PASS | Reviewed the bf_exp range-reduction fix: replaced the bodyless-else "var k = t as i64; if (k as f64) > t { k = k - 1 }" floor idiom with a full if/else where both branches assign k, to remove the confirmed lean_single miscompile trigger (a cast-initialized int, conditionally reassigned by a bodyless-else, re-read via the write_i64 bit-construction step after the intervening 14-term Taylor while loop -- confirmed independently in this session via an isolated repro before the fix: bf_exp(ln(12.4)) returned 198.399985 instead of 12.4, matching the audit's k:4->8 corruption). 10 claims [OK] (identity exp(x)=2^k*exp(r); |r|<=ln2/2 from k=floor(x/ln2+0.5); the two f64 constants correctly rounded; trunc-then-correct implementing floor; **new if/else control-flow-only equivalent to old bodyless decrement**; (k+1023)<<52 IEEE754 encoding safe given the |x|>700 clamp bounds k to normals; 14-term Taylor remainder ~6e-18 abs on this range, well under the ~1e-13 rel doc claim; the k:4->8 corruption arithmetic; exp(-ln(12.4))=1/12.4 and exp(3.5*ln2)=2^3.5 identities matching the fix's own verification runs). 2 [TIGHTENABLE], both pre-existing (not introduced by this fix, not blocking): the ~1e-13 rel doc comment is a measured envelope rather than a derived bound; the |x|>700 clamp to 1.0e300 is not a monotone saturate of the true exp(700)~1.01e304. No FAIL, no OVERREACH. Verified before/after: SOUNIO_SOUC_ENGINE=lean_single, tests/stdlib/data/test_bigframe_ops_stdlib.sio (exercises bf_exp via softmax/logsumexp/geomean/geostd/perplexity, batch 13-14) went FAIL (return 612, FAIL softmax0) pre-fix to PASS post-fix, 0 regressions across the full `bigframe` test filter (3 pass, 6 skip no-annotation, 0 fail) and a manual run of the no-annotation test_bigframe_ml.sio. Raw: /tmp/llm-offload-gWdQgR/ (workspace host). |
-| 2026-09-22 | xai/grok-4.6 [OK]; zai/local not invoked this round | math-review | stdlib/darwin_pbpk/cumulants.sio (m5_exp) + stdlib/darwin_pbpk/validation/pbpk28_mc_cross_validation.sio (mc28_exp) -- PBPK28 M2/M5 known-failure investigation | FINDINGS_ADDRESSED | Root-caused both tests/run-pass/pbpk28_m2_hierarchical_prior.sio and tests/run-pass/pbpk28_m5_gum_4th_order.sio known-failures to the SAME defect: a lean_single miscompile of the "n_f=x*inv_ln2; n=n_f as i64; if (n as f64)>n_f {n=n-1}" floor-then-power-loop exp() range-reduction idiom, which runs the subsequent power-of-2 while loop at ~2x its correct trip count regardless of whether the correcting if-branch is taken (minimal repros: mc28_exp(ln(12.4)) returned 99.2 instead of 12.4 = 2^3 doubled to 2^6; m5_exp(6*0.134880) for the CL_hep lognormal kappa4 returned 4.492593 instead of 2.246297). Fixed by replacing the range reduction in both duplicated exp() helpers with the already-correct iterative form (matching ms28_exp in pbpk28_mc_prior_family_sweep.sio, independently verified NOT to trigger the bug). Grok [OK] on the equivalence of the iterative vs cast-then-correct reduction for all x actually evaluated here (moderate |x|, not an exact multiple of ln2); flagged one real edge case (r landing on exactly +-ln2 defeats the truncated Taylor series) -- ADDRESSED by switching both while-loop guards from strict >/< to >=/<=. Grok [OK] that leaving tests/run-pass/pbpk28_m2_hierarchical_prior.sio as known-failure with the corrected numbers (rel_Hess_individual 0.875070->0.191766, rel_Hess_population 0.873336->0.194044, both still exceeding the JCGM-101-style 0.10 acceptance gate) is the right call, not a leftover bug: post-fix M2 is now consistent with THREE independent measurements of the same rapamycin PBPK28 AUC endpoint's second-order-Hessian-vs-MC gap at comparable CV (M1 single-level ~0.175, M5 Hessian-only 0.175404, M2 hierarchical individual/population ~0.19), plus two independent cross-checks outside M2's own gate: M5's fixed kappa4=1302.266361 matches a reference closed-form lognormal fourth-cumulant calculation to 6 significant figures, and the fixed M1 single-level MC (mc28_selftest_main) reproduces u_MC=0.357945, an exact match to the hardcoded M6-canonical MC-truth constant already used elsewhere in cumulants.sio. Grok [OK] that M5's post-fix result (fourth-order residual 0.057910 < second-order 0.175404) is the theoretically expected direction for a moderately-nonlinear convex endpoint's first-omitted-term correction, not a JCGM guarantee of monotonic improvement in general -- test docstring updated to say so rather than overclaim. Raw: /tmp/grok_response.json on the workspace host (session-pbpk28-gum-investigation remote worktree /workspace/.wt/claude-pbpk28-investigation, captured via a direct curl to api.x.ai after the bin/llm-offload wrapper's own two attempts silently timed out at 180s on this long technical prompt; same xai key, same grok-4.6 model, 213.8s wall time). |
 | 2026-09-09 | xai/grok-4.6 [OK] + mistral-large [OK]; first attempt zai [ERROR 1313 fair-usage] + local-think [ERROR: connection] + xai [EMPTY after 180s], retried at OFFLOAD_TIMEOUT=900 | math-review | formal/lean4/SounioSurfaceKinetics.lean | FINDINGS_ADDRESSED | Two independent legs obtained, so the policy's second opinion was met. **Mistral passed all eight theorems with no correction. Grok passed all eight PROOFS and rejected four DOCSTRING claims plus one redundant hypothesis - every one correct, and all five fixed rather than disputed.** (1) [OVERREACH] `langmuir_isotherm`'s docstring called the undivided identity `theta*(kr+kf*p)=kf*p` an equivalent of `theta = Kp/(1+Kp)` with `K=kf/kr`; that reading needs `kr != 0`, and the degenerate `kf=kr=0` satisfies both hypotheses for every `theta` with `theta+v=1`, making the identity vacuously true where the quotient is meaningless. Docstring now says so and points at `langmuir_isotherm_div`, which carries the hypothesis. (2) [OVERREACH] `dissociative_isotherm_iff`'s docstring read `kr*s^2 = kf*p` as `s = sqrt(Kp)`. Over Rat it is not: `kr` may vanish, `Kp` need not be a square in Rat at all, and both `s` and `-s` solve it (the physical branch `s >= 0` is imposed nowhere). Corrected. (3) [OVERREACH] and the sharpest - that same docstring asserted the coverage `theta = sqrt(Kp)/(1+sqrt(Kp))` while the file proved only its two halves and never assembled them. **A ninth theorem, `dissociative_coverage` (`theta*(1+s) = s`), was WRITTEN because of this review**; it did not exist before. (4) [OVERREACH] 'hydrogen coverage grows as the square root of pressure' holds only while `s << 1`; `s/(1+s)` flattens toward 1 at saturation and does not grow as sqrt(p) there. Restated as the low-coverage limit it is. (5) [TIGHTENABLE] `lh_quasi_equilibrium_div` carried `hD : D^2 != 0`; the site balance already forces `v*D = 1` and `0 = 1` is false in Rat, so it is derivable. Hypothesis dropped and derived in-proof. Separately, [OVERREACH] on prose calling `lh_quasi_equilibrium` a LIMIT theorem ('the closed form IS the mechanism's limit, not an approximation'): what is proved is the exact algebraic consequence of imposing quasi-equilibrium plus site balance - no limit taken, no residual bounded, no ODE trajectory shown to approach it. The docstring, docs/chemistry/SOUNIO_FOR_SURFACE_MICROKINETICS.md and the published summary page were all corrected to say algebraic consequence, with the residual gap named as measured (test_lh_reduces_to_closed_form) rather than proved. Every change is recorded at its own site rather than silently applied. Post-fix: 9 theorems, `lake build` green under leanprover/lean4:v4.33.0, `#print axioms` on all nine returns only [propext, Classical.choice, Quot.sound] - no sorryAx, no native_decide. Raw: /tmp/llm-offload-hNjQbL/ (retry, xai+mistral); /tmp/llm-offload-ZyvAbP/ (first attempt, all three legs failed; none represented as a pass). |
 | 2026-09-01 | xai/grok-4.6 [OK]; zai ERROR 1313 FUP; local ERROR | math-review | kind-6 Hessian chain rule H(f(g))=f''s_j s_k + f'H(g) (lower.sio + madaros_hessian_transcendental.sio) | PASS | All nine pins [OK]. Prior wrong 2.487814 is exactly (f''+f')s_g² (s_g² substituted for H_g). Fan-out zai/local unavailable; xai leg is the recorded pass. Raw: /tmp/llm-offload-gzOzUM/. |
 | 2026-08-28 | — | math-review | formal/lean4/SounioSedenionBipartite.lean | WAIVED | Rebase replay onto current origin/main (26a348da09) for PR #2224. No new mathematics: the file is byte-identical to the already-reviewed tip — blob ea9d277adb955a4db54a8effcbedf1d2fdbc4912 both at commit 25c822feb9 and after this replay; CorePatternsWitnesses.lean likewise c63de4691a8b3280d1e87f4831748adbe0243b56. The 2026-08-22 replay row and the six 2026-08-16/17 math-review rows below (including the union-theorem PASS) reviewed exactly these bytes. |
@@ -150,8 +142,813 @@ the bottom.
 | 2026-06-16 | xai | math-review | SounioErdos90PlanarLowerBound.lean | OK | New `erdos90_compact_disk_u15705` theorem (u(15705) ≥ 176768) and auxiliary integer-arithmetic definitions verified; no symbolic gaps. Raw output: /tmp/llm-offload-IVjt9t |
 | 2026-06-16 | xai | math-review | SounioErdos90PlanarLowerBound.lean | OK | Added `erdos90_compact_disk_u31417` (u(31417) ≥ 405648); exact integer enumeration and lower-bound claims verified. Raw output: /tmp/llm-offload-BoQKjM |
 
-Format: `## <UTC timestamp> — <agent> — <what>` followed by outcome and
-reasoning.
+| 2026-09-22 | xai/grok-4.6 [OK] | math-review | stdlib/data/bigframe_ops.sio (bf_exp) -- lean_single pow2-loop miscompile follow-up (docs/audit/LEAN_SINGLE_POW2_LOOP_MISCOMPILE_2026-09-22.md section 2.5) | PASS | Reviewed the bf_exp range-reduction fix: replaced the bodyless-else "var k = t as i64; if (k as f64) > t { k = k - 1 }" floor idiom with a full if/else where both branches assign k, to remove the confirmed lean_single miscompile trigger (a cast-initialized int, conditionally reassigned by a bodyless-else, re-read via the write_i64 bit-construction step after the intervening 14-term Taylor while loop -- confirmed independently in this session via an isolated repro before the fix: bf_exp(ln(12.4)) returned 198.399985 instead of 12.4, matching the audit's k:4->8 corruption). 10 claims [OK] (identity exp(x)=2^k*exp(r); |r|<=ln2/2 from k=floor(x/ln2+0.5); the two f64 constants correctly rounded; trunc-then-correct implementing floor; **new if/else control-flow-only equivalent to old bodyless decrement**; (k+1023)<<52 IEEE754 encoding safe given the |x|>700 clamp bounds k to normals; 14-term Taylor remainder ~6e-18 abs on this range, well under the ~1e-13 rel doc claim; the k:4->8 corruption arithmetic; exp(-ln(12.4))=1/12.4 and exp(3.5*ln2)=2^3.5 identities matching the fix's own verification runs). 2 [TIGHTENABLE], both pre-existing (not introduced by this fix, not blocking): the ~1e-13 rel doc comment is a measured envelope rather than a derived bound; the |x|>700 clamp to 1.0e300 is not a monotone saturate of the true exp(700)~1.01e304. No FAIL, no OVERREACH. Verified before/after: SOUNIO_SOUC_ENGINE=lean_single, tests/stdlib/data/test_bigframe_ops_stdlib.sio (exercises bf_exp via softmax/logsumexp/geomean/geostd/perplexity, batch 13-14) went FAIL (return 612, FAIL softmax0) pre-fix to PASS post-fix, 0 regressions across the full `bigframe` test filter (3 pass, 6 skip no-annotation, 0 fail) and a manual run of the no-annotation test_bigframe_ml.sio. Raw: /tmp/llm-offload-gWdQgR/ (workspace host). |
+| 2026-09-22 | xai/grok-4.6 [OK]; zai/local not invoked this round | math-review | stdlib/darwin_pbpk/cumulants.sio (m5_exp) + stdlib/darwin_pbpk/validation/pbpk28_mc_cross_validation.sio (mc28_exp) -- PBPK28 M2/M5 known-failure investigation | FINDINGS_ADDRESSED | Root-caused both tests/run-pass/pbpk28_m2_hierarchical_prior.sio and tests/run-pass/pbpk28_m5_gum_4th_order.sio known-failures to the SAME defect: a lean_single miscompile of the "n_f=x*inv_ln2; n=n_f as i64; if (n as f64)>n_f {n=n-1}" floor-then-power-loop exp() range-reduction idiom, which runs the subsequent power-of-2 while loop at ~2x its correct trip count regardless of whether the correcting if-branch is taken (minimal repros: mc28_exp(ln(12.4)) returned 99.2 instead of 12.4 = 2^3 doubled to 2^6; m5_exp(6*0.134880) for the CL_hep lognormal kappa4 returned 4.492593 instead of 2.246297). Fixed by replacing the range reduction in both duplicated exp() helpers with the already-correct iterative form (matching ms28_exp in pbpk28_mc_prior_family_sweep.sio, independently verified NOT to trigger the bug). Grok [OK] on the equivalence of the iterative vs cast-then-correct reduction for all x actually evaluated here (moderate |x|, not an exact multiple of ln2); flagged one real edge case (r landing on exactly +-ln2 defeats the truncated Taylor series) -- ADDRESSED by switching both while-loop guards from strict >/< to >=/<=. Grok [OK] that leaving tests/run-pass/pbpk28_m2_hierarchical_prior.sio as known-failure with the corrected numbers (rel_Hess_individual 0.875070->0.191766, rel_Hess_population 0.873336->0.194044, both still exceeding the JCGM-101-style 0.10 acceptance gate) is the right call, not a leftover bug: post-fix M2 is now consistent with THREE independent measurements of the same rapamycin PBPK28 AUC endpoint's second-order-Hessian-vs-MC gap at comparable CV (M1 single-level ~0.175, M5 Hessian-only 0.175404, M2 hierarchical individual/population ~0.19), plus two independent cross-checks outside M2's own gate: M5's fixed kappa4=1302.266361 matches a reference closed-form lognormal fourth-cumulant calculation to 6 significant figures, and the fixed M1 single-level MC (mc28_selftest_main) reproduces u_MC=0.357945, an exact match to the hardcoded M6-canonical MC-truth constant already used elsewhere in cumulants.sio. Grok [OK] that M5's post-fix result (fourth-order residual 0.057910 < second-order 0.175404) is the theoretically expected direction for a moderately-nonlinear convex endpoint's first-omitted-term correction, not a JCGM guarantee of monotonic improvement in general -- test docstring updated to say so rather than overclaim. Raw: /tmp/grok_response.json on the workspace host (session-pbpk28-gum-investigation remote worktree /workspace/.wt/claude-pbpk28-investigation, captured via a direct curl to api.x.ai after the bin/llm-offload wrapper's own two attempts silently timed out at 180s on this long technical prompt; same xai key, same grok-4.6 model, 213.8s wall time). |
+| 2026-09-22 | xai/grok-4.6 [OK]; zai [ERROR 1313 fair-usage]; local [not configured] | math-review | benchmarks/chemistry/RESULTS.md (GBS oracle re-derivation, 2026-09-15, lines 1850-1903) | FINDINGS_ADDRESSED | Reviewed the GBS-oracle re-measurement added by this branch (depth/scale sweep, halving ladder vs the independent integrator, per-halving growth factors). Only two of the three fan-out legs were reachable: zai returned provider code 1313 (fair-usage limit) and `local` has no LOCAL_LLM_URL configured on this host, so this is one independent opinion, not the usual two-plus. 16 claims checked: 12 [OK], 3 [TIGHTENABLE] (a "three orders below" phrase that is 598x/2.8 orders, not 10^3 -- left as prose since the underlying bound and its 390x restatement two paragraphs later are both correct; using the sweep's single floor minimum as "the" resolution, already caveated in the text as order-of-magnitude only; "grows over the last two halvings" true of the net map, not every individual rung, matching the text's own wording), 1 [OVERREACH] (the 1.6x-17x detection claim at dt=1.25e-9 restated as a clean detection when the same document says these resolutions carry only order-of-magnitude information). Addressed the OVERREACH: added an inline caveat noting the low end (1.6x) is not a clean detection on its own, and that the ratios above 3x plus the monotone three-halving trend are what carry the claim -- no measured numbers changed. Raw: /tmp/llm-offload-WZpN5O/ (xai), /tmp/llm-offload-XBXxdb/ (zai, error only). |
+
+## 2026-05-30: Multiquadratic faithfulness — irrationality core (no_rat_sqrt) + edge-level radical support
+
+- **Empirical (no offload needed)**: `_radical_support_probe.lean` edge pass over G₅₂₉ (2670 edges):
+  √3→2620, √11→2383, √5→590, √7→**0** edges; per prime 3→2634, 5→594, 11→2598, 7→0; only 2 of
+  2670 edges fully rational. Confirms minimal witness field at edge level too: **ℚ(√3,√5,√11)** (deg 8);
+  √7 absent in both vertices and edges. Sharpened theorem: χ(F²)≥5 for every ordered field F⊇{√3,√5,√11}.
+- **Claim (math)**: `formal/lean4/SounioMultiquadIndep.lean` — irrationality core of the ℚ-linear-
+  independence programme, Mathlib-free over `RealCauchyField`. `no_rat_sqrt m (∀k,k·k≠m) : ¬∃q:ℚ, q²=m`
+  via the pure-coprimality route (cross-multiply `divInt` → integer identity `a²=m·b²` → natAbs →
+  `Nat.Coprime.pow` + `dvd_gcd` ⇒ `b²∣1` ⇒ b=1 ⇒ a²=m, contra; NO p-adic valuation / unique factorisation).
+  `not_sq_radicand` (finite-bound `decide`/`omega`) for the 7 squarefree radicands {3,5,11,15,33,55,165};
+  `ofRat_inj` (nonzero constant ↛ 0); `sqrt_radicand_irrational` (√m ≠ any rational class, squaring the
+  RealEq via `mul_cong` + `newton_sq_tendsto`). No `sorry`/`sorryAx`; `no_rat_sqrt` axioms =
+  {propext, Classical.choice, Quot.sound}. `lake build SounioMultiquadIndep` exit 0.
+- **Offload (policy, math claim)**: `bin/llm-offload -t math-review -p xai` → Grok 4.1. **All 7 [OK]**:
+  no_rat_sqrt "standard coprimality; each step (cross-multiply, natAbs, Nat.Coprime.pow, dvd_gcd)
+  justified"; not_sq_radicand "finite bound + decidable enumeration correct, omega closes tail";
+  ofRat_inj / eq_zero_of_tendsToZero_const "ε=c/2 contradiction"; sqrt_radicand_irrational "telescoping +
+  eq_zero_of_tendsToZero_const closes". "No leaps or missing side-conditions detected."
+
+## 2026-05-30: RootedField refactor + multiplicative structure of ℝ (mul_cauchy, mul_cong) + inverse crux (bounded_away)
+
+- **Claim**: Two pieces. (1) **Phase-1 interface refactor** — `SounioSqrtField.lean` now exposes
+  `RootedField` (ordered field + four prime square-root generators `root : Fin 4 → F` with
+  `root_nonneg`, `root_sq`) **with no total `sqrt`**; the de Grey transfer
+  (`SounioDeGreyChi5TransferWf.lean`) is re-targeted at it as `rootedField_chi_ge_5`, and the classic
+  total-`sqrt` `SqrtField` is kept as a thin bundle with `sqrtField_chi_ge_5` recovered via
+  `toRootedField`. `SounioMultiquadHom` re-parameterised over `RootedField` (no `sqrt` was ever used
+  on the critical path — only `s`/`s_sq` at the four primes). (2) **Phase-2a/2b-crux analytics** in
+  `SounioSqrtFieldReal.lean`: a Mathlib-free `ratAbs` toolkit (`ratAbs_mul`, `ratAbs_add_le`,
+  two-sided lemmas), `cauchy_bounded` (Cauchy ⇒ eventually bounded), `mul_cauchy` (product of Cauchy
+  is Cauchy) and `mul_cong` (`·` respects `RealEq`) via the `K=Bf+Bg+1`, `δ=ε·K⁻¹` scaling
+  (`rat_prod_bound`), discharging `RealMulCongObligation` and `MulPreservesCauchy`; plus the inverse
+  CRUX `bounded_away` (`¬ RealEq x 0 ⇒ ∃ δ>0 N, ∀ n≥N, δ ≤ |xₙ|`) via reverse triangle + Cauchy
+  modulus. No `sorry`/`sorryAx`; `lake build SounioDeGreyChi5TransferWf SounioSqrtFieldReal` exit 0.
+- **Offload (policy, math claim)**: `bin/llm-offload -t math-review -p xai` → Grok 4.1 on the
+  analytic core. **All [OK]**: realEq_*, add_cauchy/mul_cauchy ("standard ε/2 + ratAbs toolkit;
+  cauchy_bounded supplies the K=Bf+Bg+1 guard"), realOpsCong_add/mul_cong ("bounded by the same
+  ε/2 + rat_prod_bound argument"), obligations directly discharged "no leap". `[TIGHTENABLE]` only on
+  the still-⏳ ledger entries (inverse completion, order axioms, completeness, sqrt) — acknowledged as
+  the remaining checklist, no error found. "All downstream claims rest only on the proved lemmas; no
+  compounding error."
+
+## 2026-05-30: RealEq is an equivalence — realEq_trans (ε/2 triangle) + realSetoid; ℝ := Quotient
+
+- **Claim**: `formal/lean4/SounioSqrtFieldReal.lean` discharges `RealEqTransObligation` with
+  `realEq_trans` (the ε/2 triangle inequality over `Rat`), built on `rat_sub_split`
+  (`x - z = (x-y)+(y-z)`), `rat_half_pos`, and `rat_add_halves` (`ε·½ + ε·½ = ε`) using the core
+  `Rat` order API (`Rat.add_le_add_left/right` iff-forms, `Rat.le_trans`, `Rat.mul_pos`,
+  `Rat.add_neg_cancel`, `Rat.neg_add`). `RealEq` is now a full `Equivalence` (`realEq_equivalence`)
+  and `Setoid` (`realSetoid`), so **ℝ := `Quotient realSetoid`** is available — the quotient is
+  unlocked. Two scalar facts (`0 < (1/2:Rat)`, `(1/2+1/2:Rat)=1`) use `native_decide` because
+  kernel `decide` stalls on `Rat` division normalisation; consistent with the χ5 chain's existing
+  native_decide use. `lake build` exit 0.
+- **Offload (policy, math claim)**: `bin/llm-offload -t math-review -p xai` → Grok 4.1.
+  Findings: refl/symm/helpers/ledger/equivalence/setoid all **[OK]**.
+  **DISAGREEMENT (logged per policy)**: Grok flagged `[WRONG] realEq_trans`, claiming the chain
+  `Rat.le_trans (add_le_add_right.mpr h1a) (add_le_add_left.mpr h2a)` "does not establish the bound"
+  and suggested `Rat.add_le_add h1a h2a`. **Rejected with reasoning**: (1) the term is
+  machine-verified by the Lean kernel (`lake build` exit 0) — ground truth; (2) the two-step pattern
+  (add `(b-c)` on the right of `h1a`, then add `ε·½` on the left of `h2a`, chained by `le_trans`)
+  is a standard and valid way to add two inequalities, yielding exactly
+  `(a-b)+(b-c) ≤ ε·½ + ε·½`; (3) the suggested `Rat.add_le_add` **does not exist** Mathlib-free
+  (verified by `#check`: only the iff-forms `Rat.add_le_add_left/right` are available), so the
+  proposed fix would fail to compile. Grok's `[OVERREACH]` note ("Rat lemmas used as primitives")
+  is a misreading of "Mathlib-free" — these are Lean *core* `Rat` lemmas, no Mathlib import.
+
+## 2026-05-30: started analytic SqrtField ℝ — RealEq (Cauchy null-difference) refl+symm + obligation ledger
+
+- **Claim**: `formal/lean4/SounioSqrtFieldReal.lean` begins the sole remaining input to χ(ℝ²)≥5
+  ("ℝ is a SqrtField"). ℝ = quotient of `SounioRealCauchy` (Cauchy `Rat` sequences) by the
+  null-difference relation `RealEq a b := TendsToZero (a.seq - b.seq)`. Proved: `realEq_refl`
+  (via `Rat.sub_self`) and `realEq_symm` (via `Rat.neg_sub`, swapping the band halves) — neither
+  needs the sparse Mathlib-free `Rat` order API. The rest is an explicit obligation ledger
+  (`RealEqTransObligation`, `RealOpsCongObligation`, field/order/completeness/sqrt) following the
+  repo's `OrderedCarrierObligation` pattern; `RealEqTrans`/`RealOpsCong` are stated concretely,
+  the field/order/completeness/sqrt ones are `True` documentation placeholders marked ⏳ deferred
+  (the genuine multi-week analytic core: ε/2 triangle over `Rat`, mul-monotonicity ≈500–1000 LOC,
+  order completeness/sup, constructive sqrt with `sqrt_sq`). No sorry; `lake build` exit 0.
+- **Offload (policy, math claim)**: `bin/llm-offload -t math-review -p xai` → Grok 4.1 **[OK]**
+  "realEq_refl/realEq_symm: no gaps. Obligation ledger exactly enumerates the missing analytic
+  steps needed for a SqrtField ℝ instance; no over-claim. No mathematical content requires
+  correction." [TIGHTENABLE] the `True` placeholders could be expanded to explicit Props
+  (harmless, no downstream effect).
+
+## 2026-05-30: guarded abstract transfer — χ(F²)≥5 for EVERY SqrtField F (Mathlib-free)
+
+- **Claim**: `formal/lean4/SounioDeGreyChi5TransferWf.lean` packages the QF→F transfer with the
+  well-formedness guard `qfWf x := x.2 ≠ 0` on the homomorphism laws (`QFTransferWf`), proves
+  `geom_transfer_wf` (every G₅₂₉ edge lands at `T.unit`, threading the guard through the squared
+  distance via `qfWf_qsub`/`qfWf_qmul`/`qfWf_qadd` since each op carries denominator `x.2*y.2`) and
+  `chi_ge_5_wf`. `emb_den_ne_zero` discharges the guard on the whole edge set (`native_decide` that
+  every entry of the De Grey coordinate arrays `X`/`Y` has nonzero `.2`, + default `1`). The
+  `SqrtField` instance `sqrtTransfer R` plugs the proved fraction homomorphism
+  (`phi_qadd`/`phi_qmul`/`phi_qsub`/`phi_unit`) straight into the four structure laws — the
+  geometry's `DeGrey529.qadd/qmul/gi/isOne` and φ's byte-identical `MultiquadRing` copies are
+  definitionally equal, so no bridge lemmas are needed. Result: `sqrtField_chi_ge_5` —
+  **χ(F²) ≥ 5 for every `SqrtField` F**, axioms `[propext, Classical.choice, Quot.sound]` + the
+  legitimate `native_decide` certificates (`perm_range_xor`, `geom_all_edges_unitFP`, `allX_ne`,
+  `allY_ne`); **no sorryAx**. The only remaining input to χ(ℝ²)≥5 is the analytic "ℝ is a `SqrtField`".
+  `lake build SounioDeGreyChi5TransferWf` exit 0.
+- **Offload (policy, math claim)**: `bin/llm-offload -t math-review -p xai` → Grok 4.1 **[OK]**
+  "geom_transfer_wf — guarded homs applied exactly once per subexpression; final hunit discharges
+  on the unitFP certificate. sqrtTransfer + sqrtField_chi_ge_5 — only external assumption is 'R is
+  SqrtField'. NO MATHEMATICAL LEAPS OR GAPS IN THE FORMAL CLAIMS."
+
+## 2026-05-30: φ is unital — phi_unit (QF representing 1 ↦ R.one)
+
+- **Claim**: `formal/lean4/SounioMultiquadHom.lean` adds the unital law `phi_unit`: any QF value `d`
+  with `gi d.1 0 = d.2`, all other coefficients `0`, and `d.2 ≠ 0` satisfies `phi d = R.one`. Proof:
+  a summand-isolation lemma `fsum_single` (vanishing-off-one-index ⇒ `fsum` collapses to that term)
+  reduces `evalNum d.1` to the surviving `r 0 = R.one` term (`r_zero`), giving `evalNum d.1 = ofInt d.2`;
+  then `phi d = mul (ofInt d.2) (inv (ofInt d.2)) = R.one` by `mul_inv` (needs `d.2 ≠ 0`). This is the
+  den-aware mathematical content of the `hunit` law a guarded `QFTransfer` SqrtField instance requires;
+  with phi_qmul/phi_qadd/phi_qsub it makes φ a complete **unital ring homomorphism** QF→F. Axioms
+  `[propext, Classical.choice, Quot.sound]` (Classical.choice from `by_cases` in `fsum_single`; no
+  native_decide, no sorry). `lake build` exit 0.
+- **Offload (policy, math claim)**: `bin/llm-offload -t math-review -p xai` → Grok 4.1 **[OK]**
+  "phi_unit — fsum_single correctly isolates the r_0 term under the stated coefficient hypotheses;
+  mul_inv closes. NO MATHEMATICAL ERRORS OR OVERREACHES. All downstream claims hold."
+
+## 2026-05-30: fraction homomorphism φ:QF→F — guarded ring-hom laws (phi_qmul/qadd/qsub)
+
+- **Claim**: `formal/lean4/SounioMultiquadHom.lean` adds the den-aware fraction map
+  `φ(c,d) = (Σ cᵢ rᵢ)·inv(ofInt d) = mul (evalNum c) (inv (ofInt d))` and proves it is a ring
+  homomorphism under the guard `den ≠ 0`: `phi_qmul` (`φ(qmul x y)=mul(φ x)(φ y)`),
+  `phi_qadd` (`φ(qadd x y)=add(φ x)(φ y)`), `phi_qsub` (`φ(qsub x y)=add(φ x)(neg(φ y))`).
+  Multiplicative law = `evalNum_qmul` + `ofInt_mul` + `sf_inv_mul_inv` + `mul4comm`. Additive laws
+  = numerator-linearity lemmas `evalNum_qadd`/`evalNum_qsub` (via `evalNum_mul_right`, `fsum_add`,
+  `fsum_neg`, `ofInt_add`/`ofInt_sub`/`ofInt_mul`, `right_distrib`) + the field fraction-addition
+  identities `frac_add`/`frac_sub` (`(a₁d₂±a₂d₁)/(d₁d₂) = a₁/d₁ ± a₂/d₂`, from `mul_inv`/`mul4comm`).
+  Axioms: `phi_qadd`/`phi_qsub` = `[propext, Quot.sound]` (fully clean — no Classical, no native);
+  `phi_qmul` inherits only the `perm_range_xor` certs via `evalNum_qmul`. `lake build` exit 0.
+  This is the den-aware completion of `evalNum_qmul` and the φ that a guarded `QFTransfer` ℝ-instance
+  will use; remaining gap to χ(ℝ²)≥5 is purely (a) thread the `den≠0`+len-16 guard through
+  `QFTransfer.hadd/hmul/hsub` and reprove the geometry emb well-formedness, (b) the analytic
+  `SqrtField ℝ` instance.
+- **Offload (policy, math claim)**: `bin/llm-offload -t math-review -p xai` → Grok 4.1 **[OK]**
+  "phi_qmul/phi_qadd/phi_qsub (guarded ring-hom laws) — hypotheses (denominators ≠0) are necessary
+  and sufficient; frac_add/frac_sub supply the exact field identities required. NO MATHEMATICAL
+  ERRORS COMPOUNDING DOWNSTREAM." [TIGHTENABLE] private helpers duplicate latent SqrtField axioms
+  (unavoidable — those `SqrtField` helpers are `private`); harmless.
+
+## 2026-05-30: evalNum multiplicative core — QF numerator convolution → SqrtField radical-sum product
+
+- **Claim**: new `formal/lean4/SounioMultiquadHom.lean` proves the deepest algebraic step of QF↪ℝ,
+  Mathlib-free: `evalNum_qmul : evalNum (qmul x y).1 = mul (evalNum x.1) (evalNum y.1)`, where
+  `evalNum l = Σ_{i<16} ofInt(lᵢ)·r i`. The 16-dim multiquadratic convolution `qmul` maps to the
+  product of radical-sums. Proof promotes the per-generator `generator_law`
+  (`rᵢ·rⱼ = ofNatProd(i∧j)·r_{i⊕j}`) to a full bilinear identity via a from-scratch finite-sum
+  library `fsum` (foldr-based `Finset.sum` substitute): `fsum_add`, `fsum_zero`, `fsum_congr`,
+  `mul_fsum_left/right`, `fsum_mul_fsum`, `fsum_map`, `fsum_perm` (List.Perm induction), `fsum_comm`
+  (Fubini), and `fsum_xor` (XOR reindex via `perm_range_xor`). Supporting bridges: `ofInt_fsum`
+  (ℤ-fold → F-sum), `foldl_add_int` (foldl=foldr for `qmulCoeff`), `ofNatProd_eq`/`bcoeff_int_eq`
+  (the two bcoeff defs agree, by `decide` over range 16 — kernel, no native axiom). 7-step `calc`:
+  fsum_mul_fsum → mul4comm+generator_law → XOR reindex (j↦i⊕idx) → fsum_comm → factor r idx →
+  W_eq (term=ofInt qmulTerm) → ofInt_qmulCoeff → gi/qmul_getElem. The convolution is **den-free**
+  (uses only numerators), so this is the standalone multiplicative heart of the eventual fraction
+  φ : QF → F. Axioms: `[propext, Quot.sound]` from new code; inherited `Classical.choice` +
+  `perm_range_xor` native_decide certificates come entirely from the already-committed reindex
+  permutation (authorised C-toolchain verification). `lake build SounioMultiquadHom` exit 0.
+- **Offload (policy, math claim)**: `bin/llm-offload -t math-review -p xai` → Grok 4.1 **[OK]**
+  "All listed fsum lemmas, W_eq, ofInt_qmulCoeff, generator_law and fsum_xor steps compose to a
+  valid equational proof of the ring-homomorphism identity; no leaps visible." [TIGHTENABLE] note:
+  proof complete modulo the imported (already-proved) `perm_range_xor`/`generator_law` statements.
+
+## 2026-05-30: ℤ→F ring homomorphism (ofInt_add / ofInt_mul / ofInt_neg) for QF↪ℝ
+
+- **Claim**: `formal/lean4/SounioSqrtField.lean` proves `ofInt : ℤ → F` is a ring homomorphism:
+  `ofInt_neg` (`ofInt(-a)=neg(ofInt a)`), `ofInt_add` (`ofInt(a+b)=add(ofInt a)(ofInt b)`),
+  `ofInt_mul` (`ofInt(a·b)=mul(ofInt a)(ofInt b)`). Proof by Int constructor case analysis
+  (`ofNat`/`negSucc`) with directed helpers `ofInt_add_one`/`ofInt_sub_one`/`ofInt_add_ofNat`/
+  `ofInt_add_negSucc`/`ofInt_mul_ofNat`; Int-level identities discharged by `rfl`/`decide`/`omega`
+  (omega needs `Int.ofNat (n+1) = Int.ofNat n + 1` rewrite first, as it atomises the two), F-level by
+  `left_distrib`/`sf_neg_add`/`sf_mul_neg`. `structure SqrtField` UNCHANGED. Axioms
+  `[propext, Quot.sound]` — no Classical, no sorry. This is the signed-coefficient/denominator
+  cast the `evalNum` numerator map and the eventual fraction φ consume. `lake build` exit 0.
+- **Offload (policy, math claim)**: `bin/llm-offload -t math-review -p xai` → Grok 4.1 **[OK]**
+  "All proofs discharge from the stated field/order/sqrt axioms; no hidden axioms or sorry."
+
+## 2026-05-30: Char-0 denominator toolkit for QF↪ℝ + QFTransfer den≠0 structural finding
+
+- **Structural finding**: a *total* `QFTransfer` instance into a field is impossible — `hadd`/`hmul`
+  are `∀ a b` over all QF (any denominator incl. 0); a denominator-dropping φ satisfies `hmul`
+  (generator law) but breaks `hadd` (qadd cross-multiplies by denominators), and a fraction φ
+  satisfies `hadd` but breaks `hmul` at `den=0`. ⇒ the ℝ instance must guard the hom laws with
+  `den ≠ 0`, which needs an ordered field to be characteristic zero (so denominators invert).
+- **Claim**: `formal/lean4/SounioSqrtField.lean` adds the char-0 / field-of-fractions toolkit:
+  `ofNat_ne_zero` (successor nat cast ≠ 0, via order: `0≤ofNat n` ⇒ `neg(ofNat n)≤0`, antisymm vs
+  `0≤1`), `ofInt`/`ofInt_ofNat`/`ofInt_one`/`ofInt_ne_zero` (nonzero ℤ casts ≠ 0), `sf_inv_one`,
+  `sf_inv_ne_zero`, `sf_inv_mul_inv` (`inv(ab)=inv a·inv b`, nonzero `mul a b` derived
+  constructively by multiplying through `inv a` — no `by_cases`, so no Classical). `structure
+  SqrtField` UNCHANGED. **All three exported lemmas `#print axioms`-EMPTY** (no propext, no
+  Classical, no Quot.sound — fully constructive). `lake build SounioSqrtField` exit 0.
+- **Offload (policy, math claim)**: `bin/llm-offload -t math-review -p xai` → Grok 4.1 **[OK]**
+  "All derivations are equational rewrites from the field/order/sqrt axioms … no gaps or external
+  axioms. All printed #print axioms blocks are empty as claimed." (one cosmetic [TIGHTENABLE]:
+  the 19-axiom structure could be Mathlib-style — intentionally kept explicit/Mathlib-free.)
+
+## 2026-05-30: Generator law PROVED — QF→SqrtField multiplicative core (no Mathlib, no Classical)
+
+- **Claim**: `formal/lean4/SounioSqrtField.lean` discharges `GeneratorLawObligation` as the theorem
+  `generator_law` (+ `generatorLaw_solved`): `R.mul (r i) (r j) = R.mul (ofNatProd (i∧j)) (r (i⊕j))`
+  for all `i,j` (bounded `<16` hyps unused-but-harmless). Proof = finite four-bit radical factorisation:
+  reusable microlibrary `ofNat_one/ofNat_add/ofNat_mul` (ℕ→F cast hom, by induction + `left_distrib`),
+  `mul8` (8-factor interleave = 3× existing `sf_mul_mul_mul_comm`), per-bit `radicalBit_mul`
+  (four `Bool` cases; `(true,true)` is exactly `s_sq`), and coefficient collapse via `ofNat_mul`
+  + `Nat.testBit_and`/`Nat.testBit_xor`. `structure SqrtField` UNCHANGED — the law is DERIVED, not an
+  axiomatic field (no epistemic leak). Axioms `[propext, Quot.sound]`; **no `Classical.choice`**, no
+  `sorry`/`native_decide`. Method: compiler-in-loop (realises the plan's Runner-A bitwise lemma-factored
+  design directly; Runner-B Fin-16 fallback not needed as A did not stall; avoids worktree clobber on the
+  shared file). `lake build SounioSqrtField` exit 0.
+- **Offload (policy, math claim)**: `bin/llm-offload -t math-review -p xai` → Grok 4.1 **[OK]**
+  "All listed theorems … Finite case analysis + explicit equational rewriting; no gaps, no extra axioms,
+  bounds on i/j unused but harmless."
+
+## 2026-05-30: QF value-equivalence quotient ring + abstract SqrtField (no Mathlib, fan-out subagents)
+
+- **Method**: two parallel `best-of-n-runner` subagents (composer-2.5-fast) drafted the
+  two files in isolated worktrees; the main agent independently rebuilt both, audited the
+  statements (QFeq def, congruence, distrib, qCommRing bundle, sqrt lemmas), and verified
+  `#print axioms` shows NO `sorryAx`, before gating with math-review.
+- **`formal/lean4/SounioMultiquadQuotient.lean`**: value-equivalence `QFeq` (cross-mult),
+  `Setoid QFp` (positive-denominator length-16 reps; transitivity via `Int.eq_of_mul_eq_mul_right`),
+  qadd/qmul/qsub congruences, additive inverse (`qadd_neg_QFeq`, closes QaddNegObligation),
+  left/right distributivity (closes the distrib obligations), and `qCommRing : QCommRingBundle`
+  (comm/assoc-add, zero, neg, mul-comm/one, distrib). `qmul` associativity STAGED.
+- **`formal/lean4/SounioSqrtField.lean`**: abstract ordered field with √ (`SqrtField`),
+  `nonneg_sqrt_unique`, `mul_sqrt` (√a·√b=√(ab)), radical map `r`, `GeneratorLawObligation` STAGED.
+- **Offload (policy, math claims)**: `bin/llm-offload -t math-review -p xai` ×2 (fan-out).
+  Quotient: Grok "All checked claims are mathematically sound … ready for the next stage";
+  SqrtField: Grok "No mathematical errors found". Both: "no axiom leaks".
+
+## 2026-05-30: QF ring laws — additive assoc + multiplicative unit discharged (no Mathlib)
+
+- **Claim**: `formal/lean4/SounioMultiquadRing.lean` adds `qadd_assoc` (syntactic) and
+  `qmul_one_left/right` + `qmulOne_solved` (canonical `qfone` is a two-sided multiplicative
+  unit on length-16 reps), discharging the former `QmulOneObligation`. Axioms
+  `[propext, Quot.sound]`. Open: qmul assoc/distrib + additive inverse (need fraction-eq
+  quotient).
+- **Offload (policy, math claim)**: `bin/llm-offload -t math-review -p xai`.
+
+## 2026-05-30: Abstract transfer leg — χ(F²)≥5 for any QF-receiving ring (no Mathlib)
+
+- **Claim**: `formal/lean4/SounioDeGreyChi5Transfer.lean` `QFTransfer.chi_ge_5` proves
+  χ(F²)≥5 for every commutative-ring-like `F` receiving QF via a homomorphism
+  (`hadd/hmul/hsub` + unit-detection `hunit`), using NO ring axioms of `F` and no
+  Mathlib; the `qfSelf` (identity) instance recovers `g529_field_plane_needs_5_colours`
+  definitionally. Isolates Euclidean χ(ℝ²)≥5 to a single ℝ instance.
+- **Offload (policy, math claim)**: `bin/llm-offload -t math-review -p xai` →
+  all theorems **[OK]**, "No further mathematical claims present" (geom_transfer,
+  chi_ge_5, qfSelf_* all sound). Axioms verified `[propext, native_decide.ax]`.
+
+## 2026-05-30: QF↪ℝ groundwork — multiquadratic generator law certified (no Mathlib)
+
+- **Claim**: `formal/lean4/SounioMultiquadRing.lean` `basis_mul_law` certifies the
+  multiquadratic multiplication law `√i·√j = bcoeff(i∧j)·√(i⊕j)` for all 256 basis
+  pairs (`native_decide`), plus `√pᵢ²=pᵢ` and cross-products. This is the relation the
+  eventual `QF↪ℝ` embedding (`basis m ↦ ∏√pⱼ`) must preserve — the generator-level
+  algebraic groundwork for Euclidean χ(ℝ²)≥5, with no Mathlib.
+- **Offload (policy, math claim)**: `bin/llm-offload -t math-review -p xai` →
+  **"NO MATHEMATICAL ERRORS FOUND"**. Reviewer flagged one *prose* overstatement
+  ("faithful model" without assoc/distrib); **applied** — softened to "generator-level
+  law, not full ring/field" in both the Lean docstring and roadmap §1c-B4. No silent
+  dismissal.
+
+## 2026-05-30: FIELD-PLANE χ(QF²) ≥ 5 CLOSED in Lean core — both legs, zero hypotheses
+
+- **Claim**: `formal/lean4/SounioDeGreyChi5Closed.lean` wires the now-proven SAT leg
+  (`g529_not_colourable`, below) into the previously-discharged geometry reduction
+  (`SounioDeGreyChi5Concrete`), proving `g529_field_plane_chi_ge_5`: the exact symbolic
+  field-plane `QF×QF` (QF = ℚ(√3,√5,√7,√11)) unit-distance graph has **no proper
+  4-colouring** — χ(QF²) ≥ 5. **Zero remaining hypotheses, no Mathlib, no `sorry`, no
+  external checker as trust anchor.** `edges_eq` (`native_decide`) proves the geometry and
+  SAT edge lists literally equal (both `data/degrey_529.edge`, 2670 pairs).
+- **Offload (policy, math claim)**: `bin/llm-offload -t math-review -p xai` →
+  **"NO MATHEMATICAL ERRORS OR GAPS IN THE SUPPLIED ARTIFACT… No overreach"** (Grok
+  correctly notes the sole remaining gap is the `QF×QF ↪ ℝ²` isometry for Euclidean
+  χ(ℝ²)≥5, which needs Mathlib's ℝ). See table row below.
+
+## 2026-05-30: FLAGSHIP — χ(G₅₂₉) ≥ 5 fully machine-checked in Lean core ("souc_check")
+
+- **Claim**: the B1 term-size wall is *broken*. souc_sat's 98 616-action LRAT for the
+  de Grey G₅₂₉ unit-distance fragment is re-checked **inside Lean core** by the verified
+  LRAT checker via **file-loaded-style reflection** — the LRAT is embedded as a single
+  `String` literal and parsed by an unverified (soundness-irrelevant) parser *inside* the
+  `native_decide` computation, so parse+check run as compiled native code. Wall-clock
+  **~11 s** (vs 171 s for K₇/6's 1 464-action *embedded-term* route, which would not scale).
+- **Result**: `g529_not_colourable : ¬ ∃ proper 4-colouring of G₅₂₉` — **unconditional
+  χ(G₅₂₉) ≥ 5**, no Mathlib, no external checker as trust anchor. Axioms `[propext,
+  Classical.choice, Quot.sound, native_decide.ax]`, no `sorry`.
+- **New math artifact**: `formal/lean4/SounioSatColouringSB.lean` —
+  `not_colourable_of_unsat_tri`: the souc_sat triangle-precolour symmetry break is
+  satisfiability-preserving (WLOG colour permutation, `relabel4` bijection decided over
+  `Fin 4`), lifting the SB-augmented `Unsat` to the unconditional bound. Axioms
+  `[propext, Quot.sound]` (no Mathlib, no `native_decide`).
+- **Negative control**: corrupting one SB unit makes `native_decide` evaluate
+  `check … = true` to **false** (proof fails with `sorryAx`) — the positive result is
+  genuine, not vacuous.
+- **Offload (policy, math claim)**: `bin/llm-offload -t math-review -p xai` on
+  `SounioSatColouringSB.lean`. Verdict **[OK]** across all 6 obligations — "no gaps in the
+  reduction". See table rows below.
+
+## 2026-05-29: FLAGSHIP B1 — SAT leg internalised in Lean core (no Mathlib)
+
+- **Claim**: a souc_sat (Sounio CDCL) UNSAT certificate is re-checked *inside Lean* by
+  Lean core's formally-verified LRAT checker (`Std.Tactic.BVDecide.LRAT.check_sound`,
+  reflected by `native_decide`), and a **pure-logic** encoding-soundness bridge lifts the
+  resulting `CNF.Unsat` to a graph-chromatic statement — **no Mathlib**. Full chain closed
+  end-to-end on K₇/6: `k76_not_colourable : ¬ ∃ proper 6-colouring of K₇` (χ(K₇) ≥ 7),
+  axioms `[propext, Classical.choice, Quot.sound, native_decide.ax]`, no `sorry`.
+- **New math artifact**: `formal/lean4/SounioSatColouringBridge.lean` —
+  `not_proper_of_unsat`/`not_colourable_of_unsat`: `(colourCNF n k edges).Unsat → ¬`
+  proper k-colouring. Axioms `[propext, Quot.sound]` (no `native_decide`, scale-independent).
+- **Offload (policy-aligned, math claim — Lean theorem statements)**:
+  `bin/llm-offload -t math-review -p xai` (Grok 4.1 fast reasoning, ~5 s). Verdict: **[OK]
+  all claims (defs, asg, div/mod/asg_iff, sat_* lemmas, not_proper_of_unsat,
+  not_colourable_of_unsat) — proofs direct, only decidable equality + Nat.div/mod
+  arithmetic discharged by supplied lemmas; no gaps, no overclaims, no axioms beyond Lean
+  core.** No disagreement; no change required.
+- **Honest scaling status**: G₅₂₉ (98 616-line / 31.5 MB LRAT) does **not** fit the
+  embedded-term `native_decide` route in-workspace (term-size/RAM wall; K₇/6 = 171 s for
+  1 464 actions). Mechanism + bridge are proven; closing G₅₂₉ needs file-loaded reflection
+  (`bv_check`/`ofReduceBool` style) or the cluster. Documented in
+  `examples/erdos/B1_SAT_LEG_IN_LEAN.md`. No fabrication.
+
+| date | task | provider | Target | outcome | note |
+|---|---|---|---|---|---|
+| 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioMultiquadIndep.lean (tower top √11∉ℚ(√3,√5)) | PASS | final non-containment step. indep4 ({1,√3,√5,√15} ℚ-lin-indep via factoring through ℚ(√5) + explicit Q5_inv subfield inverse + not_R3_in_Q5), E_mul5/E_sq4 (ℚ(√5) product + 16-term norm), Qsqrt5_no_zero_div, sqrt11_not_in_Q_sqrt3_sqrt5 (4 coeff eqs → no_rat_sqrt {11,55,33,165}). Grok: "math correct throughout, no leaps or gaps." axioms {propext,Classical.choice,Quot.sound}(+native_decide); no sorryAx |
+| 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioMultiquadIndep.lean (base case √5∉ℚ(√3)) | PASS | tower base case. indep_1_R3 ({1,√3} ℚ-lin-indep via R3_irrational), E_sq (4-corner ring expansion in quotient), sqrt5_not_in_Q_sqrt3 (a=0→no_rat_sqrt 15, b=0→no_rat_sqrt 5). Grok: "statements tight, hypotheses exactly required, sorry/axiom count zero, every step justified — no correction." axioms {propext,Classical.choice,Quot.sound}(+native_decide); no sorryAx |
+| 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioMultiquadIndep.lean | PASS | irrationality core of ℚ-linear-independence programme. All 7 lemmas [OK]: no_rat_sqrt (pure coprimality, no p-adic/UFD), not_sq_radicand, ofRat_inj, sqrt_radicand_irrational. "No leaps or missing side-conditions." no_rat_sqrt axioms = {propext, Classical.choice, Quot.sound}; no sorryAx |
+| 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioSatColouringBridge.lean | PASS | "no gaps, no overclaims, no axioms beyond Lean core" — the substantive math (encoding soundness: colourCNF.Unsat → ¬ colourable) |
+| 2026-05-30 | math-review | xai (covered by bridge review) | SounioSatK76.lean | PASS (no new math claim) | autogenerated; k76_unsat is the verified LRAT checker (check_sound+native_decide) on souc_sat's cert, k76_not_colourable applies the reviewed bridge; clause-order identity to colourCNF verified by diff |
+| 2026-05-30 | math-review | xai (covered by bridge review) | SounioSatCheckSpike.lean | PASS (no new math claim) | trivial 1-variable (x)∧(¬x) mechanism demo; relies only on check_sound |
+| 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioSatColouringSB.lean | PASS | WLOG triangle-precolour leg (relabel4 bijection by decide over Fin 4; not_colourable_of_unsat_tri lifts SB-augmented Unsat to unconditional χ≥5). Grok: "no gaps in the reduction" across all 6 proof obligations. Axioms [propext, Quot.sound] |
+| 2026-05-30 | math-review | xai (covered by SB+bridge review) | SounioSatG529.lean | PASS (no new math claim) | autogenerated by gen_lean_sat_reflect.sh; g529_unsat = verified LRAT checker on souc_sat's 98 616-action cert via file-loaded reflection, g529_not_colourable applies the reviewed WLOG leg (triangle 0,1,5 adjacency by native_decide). χ(G₅₂₉)≥5, no Mathlib |
+| 2026-05-30 | review | n/a (soundness-irrelevant) | SounioSatReflect.lean | N/A | unverified LRAT-text parser; check_sound trusts only the verified checker's verdict on the parsed actions, so a parser bug can only fail (never falsely pass) — no math claim |
+| 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioDeGreyChi5Closed.lean | PASS | composition closing field-plane χ(QF²)≥5 (edges_eq + SAT-leg discharge → g529_field_plane_chi_ge_5). Grok: "NO MATHEMATICAL ERRORS OR GAPS… No overreach" (correctly isolates the sole remaining QF↪ℝ gap) |
+| 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioMultiquadRing.lean | PASS (1 prose tighten applied) | multiquadratic generator law basis_mul_law (256 basis pairs) + √pᵢ²=pᵢ/cross-products. Grok: "NO MATHEMATICAL ERRORS FOUND"; flagged that "faithful model" overstated without assoc/distrib → softened the docstring/roadmap to "generator-level law, not full ring/field". |
+| 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioDeGreyChi5Transfer.lean | PASS | abstract transfer QFTransfer.chi_ge_5 (χ(F²)≥5 for any QF-receiving ring) + qfSelf instance. Grok: all theorems [OK], "No further mathematical claims present". Isolates χ(ℝ²)≥5 to one ℝ instance. |
+| 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioMultiquadRing.lean (ring laws) | PASS | qadd_assoc + qmul_one_left/right + qmulOne_solved (QmulOneObligation discharged). Grok: "No mathematical errors or leaps"; open obligations correctly flagged. Axioms [propext, Quot.sound]. |
+| 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioMultiquadQuotient.lean | PASS | QFeq Setoid quotient + congruence + neg + distrib + qCommRing bundle (subagent-drafted, main-agent audited). Grok: "All checked claims are mathematically sound … no hidden axioms … ready for the next stage". qmul-assoc staged. |
+| 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioSqrtField.lean | PASS | abstract ordered field + √ interface; nonneg_sqrt_unique, mul_sqrt, radical map (subagent-drafted, main-agent audited). Grok: "No mathematical errors found … no axiom leaks". GeneratorLawObligation staged. |
+| 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioSqrtField.lean (ℤ→F hom) | PASS | ofInt_neg/ofInt_add/ofInt_mul — ℤ→F is a ring homomorphism (Int constructor case analysis + directed helpers). Grok: "all proofs discharge from the axioms; no hidden axioms or sorry". Axioms [propext, Quot.sound]. |
+| 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioMultiquadHom.lean | PASS | evalNum_qmul — QF numerator convolution → SqrtField radical-sum product, via from-scratch Mathlib-free fsum library + generator_law + perm_range_xor XOR reindex. Grok: "fsum lemmas, W_eq, ofInt_qmulCoeff, generator_law and fsum_xor steps compose to a valid equational proof of the ring-homomorphism identity; no leaps visible". New code axioms [propext, Quot.sound]. |
+| 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioMultiquadHom.lean (φ frac hom) | PASS | fraction map φ(c,d)=(Σcᵢrᵢ)·inv(ofInt d) + guarded ring-hom laws phi_qmul/phi_qadd/phi_qsub (den≠0), via evalNum_qadd/qsub + frac_add/frac_sub. Grok: "hypotheses (denominators ≠0) necessary and sufficient; frac_add/frac_sub supply the exact field identities. NO MATHEMATICAL ERRORS COMPOUNDING DOWNSTREAM". phi_qadd/qsub [propext, Quot.sound]; phi_qmul inherits perm_range_xor certs. |
+| 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioMultiquadHom.lean (phi_unit) | PASS | unital law phi_unit: QF representing 1 (coeff₀=den, rest 0, den≠0) ↦ R.one, via fsum_single summand-isolation + r_zero + mul_inv. Grok: "fsum_single correctly isolates the r_0 term under the stated coefficient hypotheses; mul_inv closes. NO MATHEMATICAL ERRORS OR OVERREACHES". Axioms [propext, Classical.choice, Quot.sound]. |
+| 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioSqrtFieldReal.lean | PASS | started analytic SqrtField ℝ: ℝ as quotient of SounioRealCauchy by null-difference RealEq; realEq_refl (Rat.sub_self) + realEq_symm (Rat.neg_sub) proved, plus obligation ledger for the deferred analytic core (ε/2 transitivity, op-congruence, field/order/completeness/sqrt). Grok: "no gaps; obligation ledger exactly enumerates the missing analytic steps; no over-claim". No sorry; deferred = Prop defs. |
+| 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioSqrtFieldReal.lean (add_cauchy/realOpsCong_add) | PASS | add_cauchy (sum of Cauchy is Cauchy) + realOpsCong_add (+ respects RealEq ⇒ descends to quotient), via rat_add_sub_add + ε/2 triangle. Grok: "same ε/2 splitting; additive well-definedness on quotient holds; ledger matches proved vs deferred; no over-claim". On re-review realEq_trans now also [OK] (earlier [WRONG] was a transient reviewer error). |
+| 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioSqrtFieldReal.lean (realEq_trans) | DISAGREE-LOGGED | realEq_trans (ε/2 triangle) → RealEq is Equivalence + Setoid → ℝ := Quotient realSetoid. Grok [OK] on refl/symm/helpers/equivalence/setoid; flagged [WRONG] realEq_trans suggesting non-existent Rat.add_le_add. REJECTED: term machine-verified (lake build exit 0); add_le_add_right.mpr ∘ add_le_add_left.mpr ∘ le_trans is the valid two-step inequality sum; Rat.add_le_add absent Mathlib-free (only iff-forms exist) so the "fix" would not compile. |
+| 2026-05-30 | math-review | xai (Grok 4.1 fast reasoning) | SounioDeGreyChi5TransferWf.lean | PASS | guarded abstract transfer: χ(F²)≥5 for EVERY SqrtField F (Mathlib-free). QFTransferWf (den≠0 guard) + geom_transfer_wf + chi_ge_5_wf + emb_den_ne_zero (native_decide X/Y dens nonzero) + sqrtTransfer instance from phi_*/phi_unit. Grok: "guarded homs applied exactly once per subexpression; final hunit discharges on unitFP certificate; sqrtField_chi_ge_5 only external assumption is 'R is SqrtField'. NO MATHEMATICAL LEAPS OR GAPS". Axioms [propext, Classical.choice, Quot.sound] + native certs; no sorryAx. |
+
+## 2026-05-29: FLAGSHIP V-track — geometry leg machine-checked in Lean 4 + LRAT
+
+- **Lean theorem (geometry leg)**: `formal/lean4/SounioDeGreyUnitDistance.lean`
+  `theorem g529_all_edges_unit_distance : edges.all edgeUnit = true := by native_decide`
+  — all 2670 edges of G₅₂₉ have `dist²=1` exact over ℚ(√3,√5,√7,√11) (integer 16-tuple
+  field kernel). `lean` checks it (~3 min); `#print axioms` = `[propext,
+  native_decide.ax]` — **no `sorryAx`**. Lean `Int` is bignum ⟹ no overflow risk (stronger
+  than the i64 Sounio Part B). Coordinates emitted by the Sounio source of truth
+  (`degrey_geometry.sio lean`) via `gen_lean_geometry.sh`; the field kernel mirrors the
+  reviewed `degrey_geometry.sio` algebra (Grok 4.1 math-review clean, see below).
+- **SAT leg → LRAT**: `drat-trim … -L g529.lrat` → 36 MB LRAT (hints), `s VERIFIED`.
+- **Trust base**: the geometry leg now rests on the Lean kernel + `native_decide` compiler
+  axiom (not on the Sounio i64 arithmetic). The SAT leg still rests on drat-trim; a verified
+  LRAT checker (cake_lpr / LeanSAT) on `g529.lrat` is the staged final step before a single
+  composed χ(ℝ²)≥5 theorem. No offload needed (the math is the same field algebra already
+  math-reviewed; Lean independently re-verifies). Logged for the audit trail.
+
+## 2026-05-29: FLAGSHIP Part B — exact unit-distance certification (`degrey_geometry.sio`)
+
+- **Claim**: every one of G₅₂₉'s 2670 edges has squared distance exactly 1 over
+  ℚ(√3,√5,√11) (no floating point) ⟹ G₅₂₉ is a unit-distance graph; with Part A
+  (χ≥5, drat-trim) ⟹ **χ(ℝ²) ≥ 5**.
+- **Evidence**: `degrey_geometry.sio` parses the 529 exact Mathematica coordinates
+  into a denominator-extended degree-8 field kernel (the `Q16` XOR-mask algebra of
+  `degrey_fieldtower.sio` + a common denominator), computes (Δx)²+(Δy)² with exact
+  integer arithmetic, and reports **2670/2670 `dist²=1`, 0 FAIL**, self-test
+  `dist²(v0,v1)=1`, no `SQRT_ERR` (every radical stayed in the field) and no `DIV_ERR`
+  (every division was by a rational or √3). Magnitudes ≤ ~10¹³ ≪ i64 max ⟹ no overflow.
+- **Offload (policy-aligned, math claim)**: `bin/llm-offload -t math-review -p xai`
+  (Grok 4.1 fast reasoning, 9 s). Verdict: **NO MATHEMATICAL ERRORS OR OVERREACHES** —
+  confirmed (i) the field multiplication `b_i·b_j = bcoeff(i&j)·b_{i⊕j}` matches the
+  square-free-basis ring homomorphism, (ii) `qf_is_one` after `qf_reduce` exactly tests
+  equality with 1, (iii) the specialised `qf_div` (rational/√3 cases) is algebraically
+  equivalent to the general inverse on the data that occurs, (iv) the distance computation
+  is entirely exact, (v) the overall claim follows from exhaustive exact evaluation.
+- **Soundness chain (textbook)**: exact embedding ⟹ unit-distance graph; CNF UNSAT ⟹ not
+  4-colourable; a non-4-colourable unit-distance graph ⟹ χ(ℝ²) ≥ 5 (Hadwiger–Nelson).
+  No overclaim beyond what Parts A+B verify; full *formal* (Lean) machine-checking of the
+  DRAT→LRAT→theorem composition is still staged (V-track).
+
+## 2026-05-29: FLAGSHIP — χ(G₅₂₉) ≥ 5 via Sounio solver (`souc_sat.sio` graph-file mode)
+
+- **Claim**: the Heule 529-vertex de Grey core G₅₂₉ is **not 4-colourable** ⟹ χ(G₅₂₉) ≥ 5,
+  certified by the self-hosted Sounio solver + external `drat-trim`.
+- **Evidence (ground truth)**: `souc_sat` reads `data/degrey_529.edge` (529 vtx / 2670
+  edges, vendored from `marijnheule/CNP-SAT`), builds the one-hot 4-colouring CNF
+  (529 + 2670×4 = 11 209 clauses) + 3 triangle-precolour units (11 212 total — clause
+  count matches the structure exactly, confirming faithful parse), refutes in 327 208
+  conflicts / 33 s, streams a **72 MB DRAT**, and **`drat-trim` → `s VERIFIED`**
+  (9 776/11 212 core clauses, 5 010 369 resolution steps). Deterministic on re-run.
+- **Soundness of the symmetry break (math claim, self-derived)**: the 3 added units pin a
+  *real* triangle {0,1,5} (all three edges present, checked via the adjacency matrix) to
+  colours 0,1,2. A triangle needs 3 distinct colours in any proper colouring; by colour
+  permutation (S₄) WLOG they are 0,1,2 — so the predicate is **satisfiability-preserving**:
+  F∧precolour SAT ⟺ F SAT, hence F∧precolour UNSAT ⟹ F UNSAT. Therefore the verified
+  refutation of the augmented formula proves the *original* G₅₂₉ 4-colouring CNF is UNSAT.
+  (Cross-check available: the un-augmented `cnf/529-4.cnf` is Heule's published UNSAT
+  instance; our base CNF is that plus the 3 units.)
+- **Why this is honest about scope**: refuting a *given* core is the easy half — kissat/
+  CaDiCaL do it in seconds; our basic LRB-CDCL needs the triangle precolour (without it
+  it does not close in 300 s, lacking inprocessing). The Sounio *novelty* is the
+  exact + self-hosted + machine-checked chain; this is **Part A** (non-4-colourability).
+  **Part B** (exact `dist²=1` over ℚ(√3,√5,√11) from `degrey_529.vtx`) and the Lean
+  V-track are still TODO. No overclaim of χ(ℝ²)≥5 until Part B lands.
+- **Offload**: math claim is standard (graph k-colouring encoding + value/clique symmetry
+  is textbook; the chromatic fact is Heule 2019, arXiv:1907.00929). drat-trim is the
+  arbiter. No provider offload invoked for this published-result reproduction; logged here
+  for the audit trail.
+
+## 2026-05-29: souc-sat F2 value precedence + honest correction — review (`souc_sat.sio`)
+
+- **Target**: `add_value_precedence` (Law–Lee 2004 value precedence, `SB=2`/`SB=3`).
+- **Ground truth**: A/B/C/D matrix (none/clique/VP/both) on spindle (13/2/2/2 conflicts)
+  and K₈/₇ (46 165/1/1/1), **all `drat-trim s VERIFIED`**.
+- **deepseek review**: 8 findings (3 BLOCKER, 5 MAJOR) — **all recycled engine concerns
+  from prior rounds, none touching the new VP code, all previously adjudicated**:
+  #1 emit_delete format (both paths drat-trim VERIFIED); #2 `abstract_level & 31` collision
+  — REJECT, the abstraction is only a *pruning gate* before the full recursive reason-chain
+  check, so a collision merely declines to prune (sound), and `vlevel ≥ 0`; #3 lbd_ring
+  sizing — heuristic, index < LBD_WIN ≤ 63 < 64 so no OOB; #4 `&!` buffer pointer — REFUTED
+  by the 23 MB streamed proof verifying; #5 lrb_alpha negative — REJECT, `if <60 →60` clamps
+  it; #6 P_n in stream — cosmetic; #7 native `verify` deletion check — drat-trim is the
+  arbiter, not `verify`; #8 reduce_db reason update — REFUTED by K₈/₇ (91 k lemmas, many
+  reduce rounds) verifying. **No new valid defect.**
+- **Honest correction logged** (not a reviewer finding — author's own derivation): an earlier
+  `DEGREY_LITERATURE_REVIEW.md` draft claimed "value precedence is *required* for the de Grey
+  4-colouring." **Wrong.** Unit-distance plane graphs are K₄-free (ω=3); precolouring one
+  triangle leaves residual colour symmetry S_{k−ω}=S_{4−3}=S₁ (trivial), so clique-precolour
+  is **already complete** for k=4. The A/B/C/D matrix confirms VP ≡ clique here (identical
+  conflicts). VP is retained as the general tool for **k−ω≥2** only. Doc corrected.
+- **Build-env note**: `bin/souc` resolves the host binary to `bin/souc-linux-x86_64`, which
+  in this checkout is a *copy of the wrapper* ⇒ infinite self-`exec` recursion unless
+  `SOUNIO_SOUC_BIN` points at the real ELF `artifacts/self-hosted/souc-self-hosted-x86_64`.
+  Set `export SOUNIO_SOUC_BIN="$PWD/artifacts/self-hosted/souc-self-hosted-x86_64"` before
+  compiling. (Also had to rebuild `drat-trim` from the official source into `/tmp` after a
+  `/tmp` wipe; gcc verification-only, per authorisation.)
+
+## 2026-05-29: souc-sat F2 symmetry-breaking + graph-colouring encoder — soundness review (`souc_sat.sio`)
+
+- **Target**: `examples/erdos/souc_sat.sio` — added (a) initial unit-clause
+  propagation at level 0 in `solve()` (needed for symmetry-breaking units / any
+  unit in the input), (b) clique-precolour symmetry breaking `add_sb_units`
+  (precolour the first k-clique with distinct colours; satisfiability-preserving,
+  so F∧SB UNSAT ⟹ F UNSAT), and (c) an edge-list graph-colouring encoder
+  (`add_edge`, `add_atleast_one`, `build_spindle_3col`) certifying the Moser
+  spindle is not 3-colourable (χ ≥ 4).
+- **Orthogonal ground truth**: external `drat-trim` returns `s VERIFIED` on the
+  spindle 3-colouring refutation **both with and without SB** (13→2 conflicts),
+  and on K₈/₇ with SB (46 165→1 conflict). A 3-colourable graph or an unsound SB
+  predicate could not yield `s VERIFIED` on the un-SB'd CNF — the no-SB spindle
+  run is the decisive independent check that SB is satisfiability-preserving here.
+- **deepseek (devil's advocate) review**: 11 findings (3 BLOCKER, 5 MAJOR, 2 MINOR,
+  1 NIT). **No new valid soundness defect.**
+
+| # | sev | finding | verdict |
+|---|---|---|---|
+| 1 | BLOCKER | `abstract_level` shift on negative `vlevel[v]` is UB | **REJECT.** `vlevel` is a decision level, ≥ 0 by construction (set in `enqueue`, never negative). Pre-existing code; K₈/₇ heavy-minimisation path drat-trim `s VERIFIED`. |
+| 2 | BLOCKER | empty clause not terminal — `analyze` keeps emitting after `emit_empty` | **REJECT.** Every empty-clause path returns from `solve()` immediately (level-0 conflict in `analyze`, and the new unit-init `emit_empty()  return 0`). drat-trim requires a terminal empty clause and reports `s VERIFIED`. |
+| 3 | BLOCKER | `reduce_db` leaves stale `wnext` after compaction | **REJECT (re-adjudicated).** `whead` reset then every surviving clause re-watched via `watch_clause`, which rewrites that clause's `wnext`; deleted clauses are unreachable from any `whead` chain. K₈/₇ (91 k lemmas, many `reduce_db` rounds) drat-trim `s VERIFIED`. |
+| 4 | MAJOR | `lit_redundant` `mstack` overflow (check after push) | **REJECT (misread).** Guard `if sp >= 8192 { return 0 }` (line 405) is **before** the push `mstack[sp]` (line 412); max write index 8191, in-bounds for `[i64;8192]`. Already accepted/fixed last round. |
+| 5 | MAJOR | `lrb_alpha = 400 - n/1000` goes negative past 400 k conflicts | **REJECT (wrong).** Immediately clamped by `if lrb_alpha < 60 { lrb_alpha = 60 }` — a negative value is `< 60`, so it becomes 60. Never negative. |
+| 6 | MAJOR | `trail_ema=0` blocks all restarts until EMA warms | **ACK, won't-fix (heuristic-only).** Pure restart-scheduling nuance, not soundness; restarts still fire (K₈/₇ restarts=415). EMA warms within ~32 conflicts under the α=1/32 update. drat-trim unaffected. |
+| 7 | MAJOR | seed `phase[]` overwritten by `cancel_to` phase-saving | **REJECT.** Intended interaction; seed still diverts the initial descent + seeds `LBD_WIN`/`RESTART_FLOOR`. Measured 3× conflict spread across seeds confirms diversification works. |
+| 8 | MAJOR | `nvars` may undercount ⇒ DRAT header mismatch | **REJECT.** Every colour var appears in an at-least-one clause, so `db_add`'s running max equals `n*k`. drat-trim checks the header and reports `s VERIFIED`. |
+| 9 | MINOR | `print_digit` prints "9" for d≥9 | **REJECT (debug-only, callers pass 0–9).** |
+| 10 | MINOR | `str_to_int` swallows leading '-' | **REJECT (non-issue).** Seeds/n/flags are non-negative. |
+| 11 | NIT | `proof_over` mid-proof guarantee weaker than comment | **REJECT.** `verify()` is the native path; drat-trim is ground truth and overflow latches refusal. |
+
+Outcome: no code change required — the new SB/encoder/unit-init logic is sound and
+drat-trim is the arbiter. New verified milestone: **χ(Moser spindle) ≥ 4** certified
+end-to-end (edge encoder → triangle-precolour SB → LRB CDCL → streamed DRAT →
+`drat-trim s VERIFIED`), confirmed UNSAT both with and without SB.
+
+## 2026-05-29: souc-sat E0/E1/E2 + portfolio — soundness review (`souc_sat.sio`)
+
+- **Target**: `examples/erdos/souc_sat.sio` — hardened CDCL engine adding E0
+  proof-on-disk (`write_file` + overflow guard), E1 recursive clause minimisation
+  (MiniSat `ccmin_mode=2`), E2 Glucose LBD-EMA restarts, and a P1 portfolio worker
+  mode. Reviewed because minimisation and the proof-store paths are the parts most
+  able to corrupt a certificate.
+- **xai (Grok 4.1) math-review**: `NO MATHEMATICAL CONTENT TO REVIEW` (engine code,
+  not a formula) — re-routed to `review`.
+- **deepseek (devil's advocate) review**: 12 findings (2 BLOCKER, 6 MAJOR, 2 MINOR,
+  2 NIT). **Decisive orthogonal evidence: external `drat-trim` returns `s VERIFIED`
+  on the K₇/6 cert *and* `s NOT VERIFIED` on an unjustified empty clause** — a
+  satisfiable formula or unsound minimisation cannot yield `s VERIFIED`.
+
+| # | sev | finding | verdict |
+|---|---|---|---|
+| 1 | BLOCKER | `write_seed_cert` checks `PB_over` on "stale" data; partial file left on disk | **PARTIAL ACCEPT.** "Stale flag" is **wrong** — `build_drat_buf` resets `PB_over` then sets it during the build, so the check is fresh (empirically K₈/₇ → "cert refused"). The partial-file nit is real but harmless (workers use private mktemp dirs). **Fixed anyway**: build/check DRAT *before* writing CNF. |
+| 2 | BLOCKER | `lit_redundant` `mstack` has no `sp` bound (size 8192) | **ACCEPT.** `sp` ≤ distinct vars ≤ `nvars` (each var pushed once via `seen`), so ≤ 8192 only at the `nvars==MAXV` edge. **Fixed**: guard `sp>=8192` ⇒ return 0 (not-redundant = keep literal = sound). |
+| 3 | MAJOR | `reduce_db` corrupts original-clause `cstart` after compaction | **REJECT (misread).** Compaction loops `c=0..nclauses` (not `c=n_orig`); originals are all kept, stay first in order, so their `newidx==c` and `cstart` is recomputed correctly. K₇ fires `reduce_db` (reduces=3) and drat-trim still `s VERIFIED`. The `c=n_orig` loop is only delete-record emission. |
+| 4 | MAJOR | `verify` tautology overwrite corrupts persistent assignment | **REJECT.** `reset_assign_full()` runs at the start of *every* lemma iteration, so no cross-lemma persistence; and `taut⇒ok` skips propagation for that lemma. (1-UIP lemmas are never tautological anyway.) |
+| 5 | MAJOR | `trail_ema=0` blocks the first restart | **REJECT (non-issue).** The window gate (`lbd_rcnt≥LBD_WIN=50`) gives the α=1/32 EMA ~32 conflicts to converge before any restart is considered; restarts do fire (K₇ restarts=7). |
+| 6 | MAJOR | pigeonhole encoding missing at-most-one-colour ⇒ formula SAT | **REJECT (decisively).** K_n needs n pairwise-disjoint non-empty colour-sets; n−1 colours ⇒ UNSAT even allowing multi-colour vertices. **drat-trim verifies a refutation against this exact CNF**, impossible if SAT. |
+| 7 | MAJOR | `emit_*` silently drop on `P_lits`/`P_n` overflow ⇒ false VERIFIED | **ACCEPT.** **Fixed**: `proof_over` latch set on every overflow path; `verify()` returns −2 and all cert paths refuse when set. |
+| 8 | MAJOR | `analyze`/`minimize` `seen[]` corruption | **REJECT (author concurs it's safe).** `minimize_and_clear` clears `seen` for all touched vars (mtoclear); UIP `seen` already 0 ⇒ fully clean on exit. |
+| 9 | MINOR | `print_dec` `i64::MIN` not handled | **REJECT (unreachable).** Only counts/literals (bounded) are printed. |
+| 10 | MINOR | `pb_dec` `i64::MIN` infinite loop | **REJECT (unreachable).** Literals are bounded by `nvars`. |
+| 11 | NIT | redundant `reset_assign_full` before `verify` | **REJECT (harmless).** |
+| 12 | NIT | seed range note | no bug. |
+
+Outcome: two hardening fixes applied (#2 stack guard, #7 proof-overflow latch; plus
+#1 reorder); gate re-validated after the fixes (K₄–K₇ `RUP:VERIFIED`, drat-trim
+`s VERIFIED`, redundant-lits-in-core 334→86). All soundness BLOCKERs/MAJORs
+adjudicated against drat-trim ground truth.
+
+### Addendum — streamed proof (held `syscall6` fd) + LRB branching review
+
+Second `deepseek` review after adding (a) truly streamed DRAT to disk via a held
+`syscall6` fd (O(1) RAM) and (b) LRB integer-fixed-point branching. **12 findings;
+no valid new defect.** Decisive evidence: the **K₈/₇ streamed 23 MB proof drat-trim
+`s VERIFIED`** (both VSIDS 182k-conflict and LRB 46k-conflict variants).
+
+| # | sev | finding | verdict |
+|---|---|---|---|
+| 1 | BLOCKER | `db_add` `-1` ignored ⇒ `reason[-1]`/`lbd[-1]` corruption | **REJECT (misread).** `solve()` does `let lidx=db_add(...) if lidx<0 {return 3}` *before* any use. |
+| 2 | BLOCKER | `lit_redundant` abstract-level shortcut unsound | **REJECT.** Abstract level is the recursion *gate* (off-signature ⇒ return 0 = keep), not the decision; full reason-chain recursion still runs — exact MiniSat `ccmin_mode=2`. drat-trim verifies every minimised lemma. |
+| 3 | MAJOR | `lrb_alpha` goes negative after 400k conflicts | **REJECT.** Immediately clamped: `if lrb_alpha < 60 { lrb_alpha = 60 }`. |
+| 4 | MAJOR | `reduce_db` stale `n_orig` | **REJECT (repeat).** Originals kept + re-indexed identically every compaction; K₈/₇ runs `reduce_db` 100s of times, drat-trim `s VERIFIED`. |
+| 5 | MAJOR | streamed `emit_delete` deletes never-added/reused clause | **REJECT.** DRAT deletion is *content*-matched; clause was emitted on learn and is deleted by literals while live. 430k-record streamed proof verifies. |
+| 6 | MAJOR | `verify` accepts empty clause unchecked | **REJECT.** Empty lemma still runs `propagate_noenq`; `ok==0 ⇒ return −1` *before* the `pln==0 ⇒ return 1`. |
+| 7 | MAJOR | `arr[c as usize]` is invalid Sounio | **REJECT.** Compiles + runs (whole suite executes). |
+| 8 | MAJOR | `str_to_int` overflow on huge seed | **REJECT (non-issue).** Seeds are small harness ints. |
+| 9–11 | MINOR | `wb_dec(0)`, `lbd_ring` 64-vs-63, ring wrap on `LBD_WIN` | **REJECT.** Ring wrap MUST be `LBD_WIN` (window size); 64 is intentional headroom; no overflow (clamp ≤63). |
+| 12 | NIT | "drat-trim verifies every worker" comment | **ACCEPT (doc).** True at harness level; comment context kept (portfolio.sh runs drat-trim on the winner). |
+
+Net: no fix required; the streamed-proof + LRB additions are sound under the
+drat-trim arbiter, confirmed by the verified K₈/₇ certificates.
+
+## 2026-05-29: Fast CDCL + LBD clause deletion — soundness review (`cdcl_fast.sio`)
+
+- **Target**: `examples/erdos/cdcl_fast.sio` — two-watched-literal CDCL with integer
+  VSIDS, phase saving, inner/outer restarts, and **LBD-based clause deletion**
+  emitting DRUP `d` (delete) records. Reviewed because clause deletion is the part
+  most able to corrupt a proof.
+- **xai (Grok 4.1) math-review**: `NO MATHEMATICAL CONTENT TO REVIEW` (code, not a
+  formula) — re-routed to `review`.
+- **deepseek (devil's advocate) review**: provider returned empty (0-byte response;
+  transient outage) — fell back to **xai (Grok 4.1) `review`** per offload policy.
+- **Decisive orthogonal evidence**: external `drat-trim` returns `s VERIFIED` on a
+  K₇/6-col proof **containing 1136 `d` deletion lines**, and `s NOT VERIFIED` when a
+  single added lemma is corrupted. drat-trim *processes* deletions, so it directly
+  validates the deletion machinery; no solver bug can yield a false `s VERIFIED`.
+
+| # | sev | finding | verdict |
+|---|---|---|---|
+| 1 | BLOCKER | `reset_all` clears arrays only up to the stale `nvars`, leaking VSIDS/phase/reason across `run_case` calls | **ACCEPT (robustness).** Empirically safe here (cases K₄<…<K₇ are monotonic, so higher slots stay pristine 0) but fragile. **Fixed**: clear the full static arrays (0..MAXV). |
+| 2 | BLOCKER | native `verify` ignores `d` records ⇒ over-approximating checker | **REJECT (intentional + sound).** A lemma RUP w.r.t. a *superset* DB is still RUP; the native checker can only over-approximate, never falsely accept ⊥. Deletions ARE respected by drat-trim, which returns `s VERIFIED`. Documented in-code. |
+| 3 | MAJOR | watch traversal leaves `prev` inconsistent on watch move | **REJECT.** Standard two-watch pattern: `prev` advances only when the node stays (other-true / unit), stays put when the node is spliced out (replacement found). Validated by drat-trim + the 7877/7877 de Grey propagation. |
+| 4 | MAJOR | `comp_lbd` reads `LEARNT[0]` before it is written | **REJECT.** `LEARNT[0] = 0 − p` is set right after the 1-UIP loop; `comp_lbd()` is called strictly later (end of `analyze`). Ordering is correct. |
+| 5 | MINOR | `reduce_db` may delete the just-added asserting clause ⇒ "add then delete" rejected by drat-trim | **REJECT.** add-then-delete is valid DRAT (common); the add is RUP-checked, the delete just removes it. After `cancel_to(0)` the clause is not needed for backjump (full restart). Empirically the K₇ gate fires `reduce_db` and drat-trim still returns `s VERIFIED`. |
+| 6 | NIT | `print_digit` only handles 0–9 | **REJECT.** Its sole caller `print_dec` feeds `x % 10` ∈ [0,9]. |
+
+Outcome: one robustness fix applied (#1, full-array `reset_all`); gate re-validated
+(`s VERIFIED`, 1136 deletions). All soundness BLOCKERs adjudicated against the
+deletion-respecting drat-trim ground truth.
+
+## 2026-05-29: CDCL (1-UIP) + DRUP emitter — adversarial logic review (`cdcl_proof.sio`)
+
+- **Target**: `examples/erdos/cdcl_proof.sio` — from-scratch conflict-driven
+  clause-learning solver (trail/levels/reasons, 1-UIP analysis, non-chronological
+  backjump) that emits DRUP, checked by the same native RUP verifier + drat-trim.
+- **xai (Grok 4.1) math-review**: `NO MATHEMATICAL CONTENT TO REVIEW` (treats the
+  file as code, not a formula) — re-routed to `review`.
+- **deepseek (devil's advocate) review**: 10 findings (2 BLOCKER, 5 MAJOR, 2 MINOR,
+  1 NIT). Adjudication below. **Decisive orthogonal evidence: external `drat-trim`
+  independently returned `s VERIFIED` on the CDCL-emitted K₇/6-col proof**, which
+  directly refutes every soundness BLOCKER and every "crash" claim (a crash or an
+  unsound proof cannot produce a drat-trim `s VERIFIED`).
+
+| # | sev | finding | verdict |
+|---|---|---|---|
+| 1 | BLOCKER | RUP checker `propagate_noenq` "unsound — partial assignment" | **REJECT.** `verify()` is the textbook RUP check: assign the negation of each lemma literal, UP over formula+prior-lemmas, expect conflict. drat-trim agrees. |
+| 2 | BLOCKER | `reason[-1]` read for decision UIP | **REJECT (invariant).** `reason` read only when `pathC>0` ⇒ `p` is propagated, never the lone decision (resolved last). K₄–K₁₀ ran clean. Added invariant comment. |
+| 3 | MAJOR | `seen` not zeroed before `analyze` | **REJECT.** `analyze` clears every `seen` it sets (current-level vars on pop; LEARNT vars in final loop). Enters all-zero. |
+| 4 | MAJOR | "missing semicolon" parse error | **REJECT.** Sounio has no semicolons; whitespace-separated statements are valid. File compiles. |
+| 5 | MAJOR | `db_add` no tautology/dup check breaks RUP | **REJECT.** Colouring CNFs are never tautological; RUP soundness does not require dedup; drat-trim parsed 133/133. |
+| 6 | MAJOR | `trail_lim[btlevel+1]` uninit when `btlevel==cur_level` | **REJECT (invariant).** UIP is the unique current-level literal ⇒ `btlevel < cur_level` always ⇒ index initialised during descent. Added invariant comment. |
+| 7 | MAJOR | `lit_var` i32 overflow for huge DIMACS lits | **ACK / out-of-scope.** vars bounded by MAXV=2048; no overflow in any instance built here. |
+| 8 | MINOR | `print_dec` buffer width / `i64::MIN` | **ACK cosmetic.** values positive & small; 24 digits ample. |
+| 9 | MINOR | DIMACS header count vs learned clauses | **REJECT.** Intentional DIMACS(originals)+DRAT(lemmas) split; drat-trim accepted it. |
+| 10 | NIT | "resolution consequence" vs RUP wording | **ACK.** 1-UIP clauses *are* resolution-derived (hence RUP); wording is accurate, kept. |
+
+Outcome: no change to logic required; two invariant comments added for
+auditability. As with the earlier `sat_proof_kernel.sio` review, DeepSeek
+mis-modelled the RUP mechanism and Sounio syntax; the independent drat-trim
+verification is the ground truth that settles the soundness questions.
+
+## 2026-05-29: Erdős #90 — repcount engine + decoding OpenAI 2026 unit-distance disproof (math-review)
+
+### math-review (xai / Grok 4.1) — r₂ doubling core + construction decoding
+
+- **Target**: `examples/erdos/erdos90_repcount_engine.sio` (exact integer check that
+  r₂(∏ q_i)=4·2^t for t distinct primes ≡1 mod4; ≡3 mod4 ⇒ 0) and the UPDATE section
+  of `docs/research/erdos-90-planar-search-plan.md` decoding the OpenAI 2026 Lean
+  disproof (github.com/logical-intelligence/erdos-unit-distance).
+
+```
+[OK] Claim 1  r₂(n)=4(d₁−d₃) ⇒ exactly 4·2^t for squarefree N (t primes ≡1 mod4);
+              ≡3 mod4 odd power ⇒ r₂=0.
+[OK] Claim 2  lens/overlap area 2R²·arccos(1/2R) − ½√(4R²−1) is the two-unit-separated-
+              disk intersection.
+[OK] Claim 3  fixed δ>0 on an infinite set falsifies n^{1+o(1)}; t·log2 vs log H
+              mechanism faithfully reproduced.
+[OK] Claim 4  scoping honest — verification limited to the finite r₂ count; class-field/
+              Golod–Shafarevich content explicitly disclaimed.
+```
+
+Outcome: clean, no OVERREACH. The .sio runs all-exact (8→16→32→64). No independent
+claim made on the exponent; OpenAI artifact flagged as days-old / not peer-reviewed.
+
+## 2026-05-28: Exact arithmetic kernel over Q(√3,√5,√7,√11) — de Grey degree-16 field (#508)
+
+### math-review (xai / Grok 4.1) — field tower + XOR multiplication law
+
+- **Target**: `examples/erdos/degrey_fieldtower.sio` — extends the Q(√3,√11) spindle
+  kernel to the full degree-16 field Q(√3,√5,√7,√11) of de Grey's 1581-vertex graph
+  (N = Z[ω_1,ω_3,ω_4,ω_16]). 16-tuple representation indexed by 4-bit mask; the
+  multiplication law is pure XOR: basis i·j → basis (i^j) with rational coefficient
+  = ∏ primes in (i&j). Self-tests + exact unit-edge realizations of ω_4 (√5) and
+  ω_16 (√7).
+
+```
+[OK]  Claim 1  Field tower / angles / surds {3,5,7,11} exact; degree 16 from distinct primes.
+[OK]  Claim 2  XOR multiplication is the standard multiquadratic relation; pairwise
+               coprimality ⟹ linear independence over Q (no degree collapse).
+[OK]  Claim 3  (√15)²=15, √15·√35=5√21, (√3+√5)²=8+2√15 — all hold by direct expansion.
+[OK]  Claim 4  Both isosceles realizations satisfy law of cosines (base=1); ×4→16, ×8→64.
+[OK]  Claim 5  Scope honest: arithmetic kernel only, no χ≥5 graph claim.
+```
+
+Outcome: clean review, no OVERREACH flags. 5/5 runtime checks pass. The exact
+arithmetic foundation for de Grey's full 5-chromatic graph now exists in Sounio.
+
+## 2026-05-28: Field-closure of de Grey spindle gluing + native SAT cap raise (#508)
+
+### math-review (xai / Grok 4.1) — field closure under R_60 / R_φ
+
+- **Target**: `examples/erdos/degrey_fragment_q3q11.sio` — glues a 2nd Moser spindle
+  by a 60° rotation, exact Q(√3,√11) (scale ×24), verifies all coords exact + all
+  unit edges dist²=576 with zero surd parts. Directly addresses the prior review's
+  flag that spindle gluing "may introduce an auxiliary surd."
+
+```
+[OK]          Q(√3,√11) closed under +,−,×,÷; matrix products / point images / squared
+              distances of field points stay in the field.
+[OK]          Computational witness: concrete 11-vertex unit-distance graph, 3-col UNSAT.
+[OVERREACH]   "the FULL de Grey 1581-vertex graph lies in Q(√3,√11)" — proven only for
+              graphs generated by R_60 and R_φ + translations; not verified that de Grey
+              uses EXCLUSIVELY these rotations. Softened in the file (SCOPE note).
+[TIGHTENABLE] ×24 scaling formulas consistent with witness output but not symbolically
+              re-derived by the reviewer.
+```
+
+Action: closure argument confirmed for the rotation generators; the surd flag is
+closed for the spindle's own rotations. Full-graph field membership left explicitly
+open (literature step). File comment scoped accordingly.
+
+### Native SAT/UNSAT capacity raise (infra; validated by known-χ oracles, no offload)
+
+Operator: "we have native SAT/UNSAT." Raised `stdlib/theorem/smt.sio` caps — boolean
+vars 64→256, clauses 256→4096, literals 1024→16384 — leaving ALL LIA arrays at 64
+(LIA path is dormant when `n_constraints==0`, i.e. pure graph coloring). SRET probe
+first: a struct with `[i64; 2048]` returns by value correctly, so large `SmtContext`
+return is not a blocker. Regression: existing `test_smt_solver_basic` ALL PASS
+(incl. LIA T3/T4); spindle + fragment unchanged (3-col UNSAT / 4-col SAT). New
+`native_sat_scale_demo.sio` validates >64-var soundness against known χ: K_18 4-col
+UNSAT (72 vars), even C_80 2-col SAT (160 vars), odd C_81 2-col UNSAT (162 vars) — all
+[OK]. Corrects the earlier "needs external SAT + DRAT" boundary: χ certificates are
+native; de Grey scale (~2048 vars) is a further cap raise, not an external dependency.
+
+## 2026-05-28: Exact Moser spindle over Q(√3,√11) — Erdős #508 (math-review)
+
+- **Task**: math-review
+- **Provider**: xai / **Model**: Grok 4.1 (grok-4-1-fast-reasoning)
+- **Target**: `examples/erdos/degrey_q3q11_spindle.sio` — exact Q(√3,√11) integer
+  arithmetic kernel realizing the Moser spindle (χ=4), the de-cage from the Z^16
+  bipartite ceiling and the atomic building block of de Grey's 5-chromatic graph.
+
+### Verdict
+
+```
+[OK]        1. Q(√3,√11) multiplication/squaring formulas — match ring relations
+[OK]        2. Coordinates realize |C−F|=1 exactly (cos φ=5/6, sin φ=√11/6; 3·4+33·4=144)
+[OK]        3. Edge set = exactly the 11 Moser edges (exhaustive exact check over 21 pairs)
+[OK]        4. χ=4 — standard Moser-spindle fact; 4^7 brute force decisive
+[OVERREACH] 5. "de Grey's 1581-vertex graph lies in Q(√3,√11)" — rotations preserve the
+            field individually, but gluing spindles at non-Moser vertices may introduce an
+            auxiliary surd; UNVERIFIED in artifact.
+[OK]        6. Division of labour: exact distance-1 geometry is native-decidable;
+            non-4-colorability of 1581 vertices needs SAT + checked DRAT (not native_decide).
+```
+
+### Action
+
+- Claims 1–4, 6 stand (machine-run: 11 edges, all dist²=144 with zero √-parts; χ=4).
+- Claim 5 softened in the file (header comment + printed RESULT) to flag the field-closure
+  check as the first task when scaling toward de Grey. No overclaim of the full-graph field.
+
+### Addendum (same day): native SAT/UNSAT route added
+
+Operator noted Sounio has native SAT/UNSAT (`theorem::smt`, CDCL, 64-var cap). The
+prior "needs external SAT + DRAT" boundary was wrong: the χ certificate is produced
+INSIDE Sounio. Added route (b) to the artifact — 3-coloring = UNSAT, 4-coloring = SAT
+via `smt_solve`, cross-checking the already-reviewed brute-force χ=4 (two independent
+methods agree). No new math claim (χ=4 unchanged); the standard 3-SAT coloring encoding
+is empirically validated by agreement with brute force and with the K_n encoding test
+(`168_kgraph_coloring_test.sio`). de Grey-scale χ≥5 is now a native task: grow the
+solver's 64-var cap, not import a third-party solver.
+
+## 2026-05-28: Erdős #90 planar-search foreclosure audit (math-review)
+
+- **Task**: math-review
+- **Provider**: xai / **Model**: Grok 4.1 (grok-4-1-fast-reasoning)
+- **Target**: foreclosure argument in `docs/research/erdos-90-planar-search-plan.md`
+  (lines ~157-159), cross-checking an adversarial-audit finding before the operator acts.
+- **Why**: this doc was NOT part of the 2026-05-25 xai review of the chromatic
+  corpus (`erdos-168-chromatic-separation.md`), so the foreclosure claim was unreviewed.
+
+### Verdict
+
+```
+[OK]          Claim A — cross-lattice exact unit distances exist in ℚ(√3):
+              (0,0)∈ℤ² and (½,√3/2)∈ℤ[ω] satisfy d²=1 exactly.
+[OK]          Claim B — per-lattice vertex-transitivity imposes no symmetry on a
+              heterogeneous union.
+[OVERREACH]   quoted foreclosure correct ONLY under unstated "integer Cartesian
+              coordinates" restriction; as written it falsely rules out algebraic exactness.
+[TIGHTENABLE] triangular lattice = best explicit lower bound (Harborth); whether it
+              maximizes u(n) among periodic sets is OPEN.
+[WRONG]       "no exact periodic-pool subset search can beat the grid". Minimal fix:
+              "no search confined to a single integer lattice can beat the triangular lattice."
+```
+
+### Action
+
+- Audit finding **confirmed by orthogonal reviewer**. The foreclosure as written is a
+  non-sequitur; recommend rewording per Grok's minimal correction before the plan is
+  used to justify stopping the search. No code/commit touched in this session (audit only).
+
+## 2026-05-26: A1 probe math-review (168_regime_a1.sio)
+
+- **Task**: math-review
+- **Provider**: xai / **Model**: grok-4.3
+- **Tokens**: prompt=1576, completion=270 (reasoning=513), total=2359
+- **Cost**: $0.0379 (37931000 usd_ticks)
+- **Target**: Mathematical claims in `examples/erdos/168_regime_a1.sio` and `docs/research/locus-coeruleus-surgical-controller-sounio-note.md §5(c)`
+
+### Verdict
+
+```
+[OK]         42 vars from 14×3 encoding — correct
+[OK]         56 coloring-base clauses (14×3 + 42×2) — correct
+[OK]         151 + 3e formula and five ratios — arithmetic holds
+[OVERREACH]  e≥9 → UNSAT: no proof/citation that graphs are non-3-colorable
+[OVERREACH]  above-threshold → shorter refutation: known only for uniform random 3-SAT; structured clauses + LCG background invalidate extrapolation
+[TIGHTENABLE] regime_recent_hardness tracks conflict count: non-standard metric, unvalidated in probe
+[TIGHTENABLE] "CONFIRMED" at margin 0.01 (0.06>0.05) with n=4 for e=18: statistically fragile
+[WRONG]      "ZD surgery edge structure correlates with epistemic regime signal": rests on the two OVERREACH claims; not established at probe level
+```
+
+### Action required (original)
+
+- §5(c) and A1 probe status header must be downgraded from "CONFIRMED" to "directional probe / math review flags two overreaches"
+- UNSAT claim requires either: (a) cite χ>3 for specific 14-vertex unit-distance graphs, or (b) add runtime SAT/UNSAT check to the probe
+- Phase-transition extrapolation must be flagged as heuristic only (not derived from mixed-formula theory)
+- n=4 for e=18 is insufficient; note recommends denser surgery scan
+
+### Resolution (Phase 0 probe + B→A→C arc, 2026-05-26)
+
+Added Phase 0 to `examples/erdos/168_regime_a1.sio`: pure coloring solver (no background)
+for each distinct edge-count group. Result: **r=1, confl=0 for ALL groups** (e=8,10,11,12,18).
+
+**The 14-vertex unit-distance graphs ARE 3-colorable (χ≤3). UNSAT interpretation definitively
+refuted.** The CDCL phase-transition framing (shorter UNSAT refutation → fewer conflicts →
+lower hardness) does not apply. Directional signal re-framed as SAT-search difficulty:
+more edge constraints → fewer valid colorings → CDCL converges faster. This is also heuristic.
+
+**B→A→C arc completed (same session):**
+- B: Three chromatic-flip probes (init_probe14, C₅, cross-half sums) — all null.
+- A: Moser spindle UNSAT probe — all 84 instances hit 500-conflict cap, fiber ratio 1.17x (weak).
+- C: Exhaustive edge map for K=1..4 component diffs reveals:
+  - K=1: always edge (all 84 surgeries) → hypercube subgraph → bipartite
+  - K=2: never edge (algebraic cancellation in sedenion product)
+  - K=3: edge for 4-8 surgeries per diff type (378/560 positive diffs), but triangle-free (parity)
+  - K=4: never edge (sample verified)
+- **THEOREM (machine-verified):** Integer sedenion ZD-surgery unit-distance graph is always
+  bipartite. χ=2 universally. All 84 surgeries, all vertex sets tested. 2-coloring SAT r=1,
+  confl=0 on rich mixed vertex set.
+- **Escape route:** Non-integer coordinates (rational/algebraic). C₅ with ε~1e-4 is next probe.
 
 ---
 
@@ -3207,38 +4004,11 @@ This exception applies only to byte-identical archival integration. It does not 
 | 2026-09-14 | xai/grok-4.6 [DONE on retry with OFFLOAD_TIMEOUT=900; first attempt EMPTY at 180 s]; zai/glm-5.2 [ERROR 1313 fair-usage]; local-think [ERROR: no local-think model group] | math-review | knowledge.sio (ep_*_cov covariance-domain validation and rounding projection), ep_gum_covariance.sio, ep_gum_covariance_gate.sh | ADDRESSED_SINGLE_PROVIDER | Grok 7 [OK]: S is PSD iff Var X >= 0, Var Y >= 0 and Cov^2 <= Var X Var Y, so the old product-only guard accepted Var X = Var Y = -1, Cov = 0; the four forms are g'Sg with g = (1,1), (1,-1), (y,x), (1/y, -x/y^2); a zero variance forces Cov = 0; the old 1e-10 slack accepts Cov = 4(1+2e-11) with Var(X-Y) = -1.6e-10 and the new check refuses it; refusing an overflowing Var X Var Y is conservative; a validated exact 0 is genuine degeneracy; no NaN reaches a returned variance. 1 [WRONG], fixed: the knowledge.sio comment said != evaluates TRUE for a NaN on both compilers; measured FALSE (< <= == TRUE, != FALSE, > >= FALSE). 2 [TIGHTENABLE], applied: the exact negative from an accepted input is about tol/4 of s, not tol/2, so the 7.2e-15 s projection threshold is a ~16x margin (comment reworded); the means are not range-checked, so inf*0 yields a NaN variance and a refusal (documented), and no probe reached the product-overflow refusal (ovfprod probe added). The Z.AI and local legs failed and are not represented as passes; the independent second opinion is still missing. |
 | 2026-09-14 | — | math-review | knowledge.sio (Epistemic fields marked pub) | WAIVED | Visibility-only change: `pub` added to the val, variance and confidence fields of pub struct Epistemic so modules outside knowledge.sio compile under KL-4 (E259, c592f2c612, #2488). No formula, bound, tolerance or control-flow change, so there is no mathematical content to review. |
 | 2026-09-14 | — | math-review | knowledge.sio (NaN comparison comment corrected) | WAIVED | Comment-only correction. The 2026-09-14 xai row above and commit 1479550468 attributed the NaN comparison defect (<, <= and == TRUE, != FALSE) to the current lean_single and Madaros. Re-measured on 64 NaN comparisons: lean_single and Madaros from 70fa39522f follow IEEE 754; the defect is on builds before KL-2 (9b370a778f, #2492), which produced the earlier reading. The review WRONG item was judged against that pre-KL-2 reading; on current builds != evaluates TRUE for a NaN, as IEEE 754 requires. No code changes: the guard already uses only >= and >, which are FALSE for a NaN on every build measured. |
-| 2026-09-14 | deepseek/deepseek-v4-pro [ERROR] | review (M3 external-facing) | d1_tensor_ops_v1.md, d2_autograd_v1.md, d2_hardening_v1.md, d3_nn_primitives_v1.md, d4_optimizers_v1.md, d5_caputo_scalar_v1.md, d5_caputo_tensor_v1.md, d6_full_integration_v1.md, m1_copula_v1.md, m2_hierarchical_v1.md, m5_gum_4th_order_v1.md, ml_negz_fix_v1.md | ERROR, not a review | `authentication_error`: "Your api key: ****8cec is invalid". The diff was transmitted; no review came back. Not counted. Raw: `/tmp/llm-offload-7FqFZD/deepseek.json`. |
-| 2026-09-14 | zai/glm-5.2 [ERROR] | review (M3 external-facing) | d1_tensor_ops_v1.md, d2_autograd_v1.md, d2_hardening_v1.md, d3_nn_primitives_v1.md, d4_optimizers_v1.md, d5_caputo_scalar_v1.md, d5_caputo_tensor_v1.md, d6_full_integration_v1.md, m1_copula_v1.md, m2_hierarchical_v1.md, m5_gum_4th_order_v1.md, ml_negz_fix_v1.md | ERROR, not a review | Code 1313, account-level Fair Usage Policy rate limit (not a missing key). Not counted. Raw: `/tmp/llm-offload-yfDvVw/zai.json`. |
-| 2026-09-14 | openrouter/google/gemini-2.5-pro [INCOMPLETE] | review (M3 external-facing) | d1_tensor_ops_v1.md, d2_autograd_v1.md, d2_hardening_v1.md, d3_nn_primitives_v1.md, d4_optimizers_v1.md, d5_caputo_scalar_v1.md, d5_caputo_tensor_v1.md, d6_full_integration_v1.md, m1_copula_v1.md, m2_hierarchical_v1.md, m5_gum_4th_order_v1.md, ml_negz_fix_v1.md | INCOMPLETE, not a review | `finish_reason: length` at the wrapper's max=2048 (1965 reasoning tokens). Returned only the opening of a BLOCKER on m5's "canonical u_MC" sentence. Checked by hand and it was right: the sentence implied the literal came from a named MC run. Rewritten with source citations (see the xai row). Not counted as a review. Raw: `/tmp/llm-offload-7FqFZD/gemini.json`. |
-| 2026-09-14 | local/local-think + local2/local-code [ERROR] | review (M3 external-facing) | d1_tensor_ops_v1.md, d2_autograd_v1.md, d2_hardening_v1.md, d3_nn_primitives_v1.md, d4_optimizers_v1.md, d5_caputo_scalar_v1.md, d5_caputo_tensor_v1.md, d6_full_integration_v1.md, m1_copula_v1.md, m2_hierarchical_v1.md, m5_gum_4th_order_v1.md, ml_negz_fix_v1.md | ERROR, not a review | On-prem LiteLLM gateway reachable, both backends `Connection error`, no fallback group. Retried with `LOCAL_LLM_MODEL=mind` / `LOCAL2_LLM_MODEL=science`; the wrapper still sent `local-think`/`local-code` (models come from the keys file), same error. Not counted. Raw: `/tmp/llm-offload-7uqWZL/`, `/tmp/llm-offload-1hfpU3/`. |
-| 2026-09-14 | xai/grok-4.6 [COMPLETE, 3 parts] | review (M3 external-facing) | d1_tensor_ops_v1.md, d2_autograd_v1.md, d2_hardening_v1.md, d3_nn_primitives_v1.md, d4_optimizers_v1.md, d5_caputo_scalar_v1.md, d5_caputo_tensor_v1.md, d6_full_integration_v1.md, m1_copula_v1.md, m2_hierarchical_v1.md, m5_gum_4th_order_v1.md, ml_negz_fix_v1.md | 2 BLOCKER, 12 MAJOR, 16 MINOR; resolved below | Full 12-doc prompt came back EMPTY at the wrapper's 180 s cap; re-run as three parts with `OFFLOAD_TIMEOUT=900`, all `finish_reason: stop`. **Fixed:** m2 "was generated by" put a new command on a recorded table (BLOCKER): the recorded command is kept as history, labeled as not working, with "how the numbers were produced cannot be established"; the failing raw command lives only in the note. m5 "canonical u_MC" (BLOCKER, also Gemini's fragment): now cites `cumulants.sio:449` and parameter `u_mc` at `:386`, and states that the recorded MC runs disagree (0.357945 in the 2026-09-13 re-run summary, 0.549197 in `runs/m1_copula_sweep_v1.txt`). "reproduced" overclaims replaced by "lean_single printed the marker; every other value is the original record" in every doc (covers d4's adjacent table). d6: gate command separated from the `bin/souc run` commands; PBPK suite stated side by side (recorded 50/50, measured FAIL 3/53, mapping not checked); "never" and "idle host" removed; MC row limited to the matching `rel_Hess`. m1: blanket "not reproduced" replaced by the field-by-field differences. `bin/souc run` ambiguity: every Madaros mention now says "with no `SOUNIO_SOUC_BIN` set" and pins the Madaros sha256. `cd "$(git rev-parse --show-toplevel)"` added to every command. m2 known-failure now quotes the annotation's `error[E035]`; m1/m2/m5 carry the shallow-history hedge; d5 wording made one clause. **Disagreed, with evidence the prompt had omitted:** "`error: no main` was never observed" (MAJOR A, MINOR C): measured 2026-09-13, before the refusal commit, with a copy of `bin/souc-linux-x86_64` (`error: no main`) and a current-source lean_single (`source: run 0 bytes`, `error[E221]: no main`); the notes now say when and with which binary. "E037 unmeasured for d3, d4, d6" (MAJOR A, B): the per-test Madaros logs each show `error[E037]` in `tensor/ops::sum_to_shape`. "Epistemic call chain not in evidence" (MAJOR C): read in source; the notes now cite `pbpk28_m2_hierarchical_prior.sio:11-12`, `pbpk28_mc_cross_validation.sio:599` and `cumulants.sio:442`. **Not changed:** recorded markers sitting inside command fences in d2/d3/d5 (original layout; the notes label what was re-checked); m1's run-log path (already listed in that doc). Raw: `/tmp/llm-offload-6yqaaR/`, `/tmp/llm-offload-pAmd5t/`, `/tmp/llm-offload-QvrfIZ/`. |
-| 2026-09-14 | kimi/kimi-k3 [COMPLETE] | review (M3 external-facing) | d1_tensor_ops_v1.md, d2_autograd_v1.md, d2_hardening_v1.md, d3_nn_primitives_v1.md, d4_optimizers_v1.md, d5_caputo_scalar_v1.md, d5_caputo_tensor_v1.md, d6_full_integration_v1.md, m1_copula_v1.md, m2_hierarchical_v1.md, m5_gum_4th_order_v1.md, ml_negz_fix_v1.md | 0 BLOCKER, 2 MAJOR, 6 MINOR; resolved below | Second independent opinion. kimi-cli 1.49.0 in print mode, empty sandbox work dir, no tool calls made (sandbox still empty afterwards). The first attempt aborted before the model saw the prompt: the default `~/.kimi/mcp.json` servers (`beagle` unreachable, `scite` 401) are fatal in print mode; re-run with `--mcp-config-file` pointing at an empty config. Reviewed the diff after the xai fixes, with a fuller evidence list than xai had. **Fixed:** every note now says how the recorded values were originally produced cannot be established from this repository's history (MAJOR); `error: no main` is attributed to the copied `bin/souc-linux-x86_64`, and the "opens `run` as a 0-byte source" mechanism to a current-source build (MINOR); m1 adds the missing `rel_GUM` pair 0.422624 against 0.362543; m2 quotes its `//@ known-failure` text verbatim and notes it cites line 10 under lean_single while today lean_single reports line 12 and `error[E035]` comes from Madaros; m5 now states the test is still `//@ run-pass` with no known-failure; m5's `u_MC` values are paraphrased instead of quoted as program output. **Disagreed, with evidence:** "`N` and `seed` not verified against the saved log" (MAJOR): both headers read `N=2000  seed=1729  dt=0.5h  prior=LogNormal` (line 58 of `runs/m1_copula_sweep_v1.txt` and of the re-run log). "`FAIL (3 / 53 tests failed)` is not exact output" (MINOR): it is the gate's verbatim last line (`dissertation_pbpk_suite_gate: FAIL (3 / 53 tests failed)`). Raw: `/tmp/claude-override-audit/fanout/kimi_review2.md`. |
-| 2026-09-14 | — | review (M3 external-facing) | m5_gum_4th_order_v1.md | WAIVED | One-sentence factual update, not independently reviewed. The note committed in 4c0e2fcbdd said the test "is still annotated `//@ run-pass`, with no `//@ known-failure`, so the test harness expects it to pass"; cf42e812bd added that annotation, so the sentence became false. Replaced with: "Since `cf42e812bd` (2026-09-14) the test also carries `//@ known-failure` for this, so the test suite reports it as a known failure, not a failure." No provider saw the new sentence: today's xai/grok-4.6 and kimi/kimi-k3 rows for this file reviewed the earlier text only. Evidence for the new sentence, measured 2026-09-14: `run_sio_test_suite.sh pbpk28_m5_gum_4th_order` reported `Fail: 1` (rc=1) before cf42e812bd and `Known failures: 1` (rc=0) after. No recorded number or other text changed. |
-| 2026-09-14 | kimi/kimi-k3 [COMPLETE] | review (M3 external-facing) | m2_hierarchical_v1.md, m5_gum_4th_order_v1.md | 0 BLOCKER, 2 MAJOR, 1 MINOR; all fixed | Review of the notes updated after 36f9b34cc7 (m5: Epistemic on main, known-failure removed, `//@ timeout: 90`) and 2c4b0e7739 (m2: Epistemic on main, known-failure kept for the Madaros exit 182). kimi-cli 1.49.0 in print mode, empty sandbox work dir (still empty afterwards), `--mcp-config-file` pointing at an empty config. **Fixed:** m2 "every value in the table below equals the re-run output" overclaimed, since the table's "Hessian <=10%?" column (NO / informational) is not printed; now "all twelve numeric entries", citing the printed `individual_hessian_criterion: OUTPUT (rel_Hess_individual > 0.10)` (MAJOR). m5, same pattern for "dominant correction index 0 (CL_hep)": the program prints `dominant_correction_idx: 0.000000`, not the `CL_hep` label; now "all ten numeric values" (MAJOR). m5's 17 s direct Madaros run is now stated separately from the 21 s filtered suite run (MINOR). Raw: `/tmp/claude-override-audit/m2m5docs/kimi_review.md`. |
-| 2026-09-14 | xai/grok-4.6 [COMPLETE] | review (M3 external-facing) | m2_hierarchical_v1.md, m5_gum_4th_order_v1.md | 0 BLOCKER, 6 MAJOR, 4 MINOR; resolved below | Same notes and prompt as the kimi row, reviewed in parallel before kimi's fixes were applied; one part with `OFFLOAD_TIMEOUT=900`, `finish_reason: stop`. **Already fixed via the kimi row:** "every value in the table below equals the re-run output" for m2 and m5 (MAJOR 1, 2) and the 17 s direct Madaros run read as the suite time (MAJOR 6). **Fixed:** both notes again say the table cells are the original record and were not edited on 2026-09-14 (MAJOR 3); in both notes the current state now comes before the 2026-09-13 history, so m5 no longer opens with "did not compile" (MAJOR 4, 5); m2 points to the test's updated known-failure reason on line 2 (MINOR 2); m5 dates `cf42e812bd` to 2026-09-14 (MINOR 3); the two 2026-09-13 lean_single errors are attributed to their command forms, `error: no main` to the recorded `bin/souc run` form and "effect not declared" to the raw interface on the test file (MINOR 4). **Not changed:** the fenced recorded command (MINOR 1) is already introduced as "It does not work as written" and is kept as history, as the 2026-09-13 xai BLOCKER fix required. Raw: `/tmp/llm-offload-6iVDNa/`. |
-| 2026-09-14 | — | math-review | SounioPireusAnalyticActionClosure.lean; SounioPireusAnalyticActionClosureAxiomAudit.lean; SounioPireusBasisFixedGaugeRebase.lean; SounioPireusBasisFixedGaugeRebaseAxiomAudit.lean; SounioPireusConcreteQuotientAction.lean; SounioPireusConcreteQuotientActionAxiomAudit.lean; SounioPireusConcreteQuotientTarget03Check.lean; SounioPireusExecutedStreamingProbe.lean; SounioPireusExecutedStreamingProbeAxiomAudit.lean; SounioPireusExecutedStreamingProbeBlocks0.lean; SounioPireusExecutedStreamingProbeBlocks1.lean; SounioPireusExecutedStreamingProbeBlocks2.lean; SounioPireusExecutedStreamingProbeBlocks3.lean; SounioPireusExecutedStreamingProbeBlocks4.lean; SounioPireusExecutedStreamingProbeBlocks5.lean; SounioPireusExecutedStreamingProbeBlocks6.lean; SounioPireusExecutedStreamingProbeBlocks7.lean; SounioPireusExecutedStreamingProbeCertificate.lean; SounioPireusExecutedStreamingProbeCheck.lean; SounioPireusFiniteActionCanonicalization.lean; SounioPireusFiniteActionCanonicalizationAxiomAudit.lean; SounioPireusGL4ActionEnumeration.lean; SounioPireusGL4ActionEnumerationAxiomAudit.lean; SounioPireusGL4AnalyticActionCensus.lean; SounioPireusGL4AnalyticActionCensusAxiomAudit.lean; SounioPireusGL4AnalyticBasisEncoder.lean; SounioPireusGL4AnalyticBasisEncoderAxiomAudit.lean; SounioPireusGL4AnalyticCensus.lean; SounioPireusGL4AnalyticCensusAxiomAudit.lean; SounioPireusGL4AnalyticScanBijection.lean; SounioPireusGL4AnalyticScanBijectionAxiomAudit.lean; SounioPireusGL4AnalyticScanEmbedding.lean; SounioPireusGL4AnalyticScanEmbeddingAxiomAudit.lean; SounioPireusGaugeCoboundaryAction.lean; SounioPireusGaugeCoboundaryActionAxiomAudit.lean; SounioPireusGaugeCoboundaryFaithfulness.lean; SounioPireusGaugeCoboundaryFaithfulnessAxiomAudit.lean; SounioPireusGaugeSectionCanonicalization.lean; SounioPireusGaugeSectionCanonicalizationAxiomAudit.lean; SounioPireusLinearSwapGaugeDescent.lean; SounioPireusLinearSwapGaugeDescentAxiomAudit.lean; SounioPireusMatrixCodeXorEquiv.lean; SounioPireusMatrixCodeXorEquivAxiomAudit.lean; SounioPireusOperatorDiscoveryEngine.lean; SounioPireusOperatorDiscoveryEngineAxiomAudit.lean; SounioPireusOperatorLoweringForge.lean; SounioPireusOperatorLoweringForgeAxiomAudit.lean; SounioPireusOperatorMorphogenesis.lean; SounioPireusOperatorMorphogenesisAxiomAudit.lean; SounioPireusOperatorNoveltyFeedback.lean; SounioPireusOperatorNoveltyFeedbackAtlas.lean; SounioPireusOperatorNoveltyFeedbackAxiomAudit.lean; SounioPireusOperatorNoveltyFeedbackChallenge.lean; SounioPireusOperatorNoveltyFeedbackCore.lean; SounioPireusOperatorNoveltyFeedbackParent.lean; SounioPireusOperatorNoveltyFeedbackParentAction00.lean; SounioPireusOperatorNoveltyFeedbackParentAction01.lean; SounioPireusOperatorNoveltyFeedbackParentAction02.lean; SounioPireusOperatorNoveltyFeedbackParentAction03.lean; SounioPireusOperatorNoveltyFeedbackParentAction04.lean; SounioPireusOperatorNoveltyFeedbackParentAction05.lean; SounioPireusOperatorNoveltyFeedbackParentAction06.lean; SounioPireusOperatorNoveltyFeedbackParentAction07.lean; SounioPireusOperatorNoveltyFeedbackParentAction08.lean; SounioPireusOperatorNoveltyFeedbackParentAction09.lean; SounioPireusOperatorNoveltyFeedbackParentAction10.lean; SounioPireusOperatorNoveltyFeedbackParentAction11.lean; SounioPireusOperatorNoveltyFeedbackShard00.lean; SounioPireusOperatorNoveltyFeedbackShard01.lean; SounioPireusOperatorNoveltyFeedbackShard02.lean; SounioPireusOperatorNoveltyFeedbackShard03.lean; SounioPireusOperatorNoveltyFeedbackShard04.lean; SounioPireusOperatorNoveltyFeedbackShard05.lean; SounioPireusOperatorNoveltyFeedbackShard06.lean; SounioPireusOperatorNoveltyFeedbackShard07.lean; SounioPireusOperatorNoveltyFeedbackShard08.lean; SounioPireusOperatorNoveltyFeedbackShard09.lean; SounioPireusOperatorNoveltyFeedbackShard10.lean; SounioPireusOperatorNoveltyFeedbackShard11.lean; SounioPireusOperatorNoveltyFeedbackShard12.lean; SounioPireusOperatorNoveltyFeedbackShard13.lean; SounioPireusOperatorNoveltyFrontier.lean; SounioPireusOperatorNoveltyFrontierAxiomAudit.lean; SounioPireusOperatorOrbitAdmissionReconstruction.lean; SounioPireusOperatorOrbitAdmissionReconstructionAxiomAudit.lean; SounioPireusOperatorOrbitArchiveReconstruction.lean; SounioPireusOperatorOrbitArchiveReconstructionAxiomAudit.lean; SounioPireusOperatorOrbitCanonicalization.lean; SounioPireusOperatorOrbitCanonicalizationAxiomAudit.lean; SounioPireusOperatorOrbitClassReconstruction.lean; SounioPireusOperatorOrbitClassReconstructionAxiomAudit.lean; SounioPireusQuotientNoveltyForge.lean; SounioPireusSignTableBitVecLex.lean; SounioPireusSignTableBitVecLexAxiomAudit.lean; SounioPireusStreamingMinimumCorrespondence.lean; SounioPireusStreamingMinimumCorrespondenceAxiomAudit.lean; SounioPireusStreamingMinimumCorrespondenceCheck.lean; SounioSparkPairDecommissionParity.lean; SounioZDTwoMode.lean; SounioZDTwoModeBridge.lean | WAIVED | Merge of `origin/main` (5a67251c68) into `feat/w1-qd128-transcend` (cb7921fbba). **No new mathematics**: all 100 files arrive from main unchanged and none was touched by the conflict resolution. Verified by blob identity: for every one, `git rev-parse :<path>` equals `git rev-parse origin/main:<path>`. Main already records them: 98 as 2026-09-06 custody-verifier WAIVED rows (byte-identical historical transfer) and 2 in a 2026-09-06 math-review row with a PASS outcome. The conflicts this merge resolved are `self-hosted/ir/lower.sio`, `self-hosted/compiler/lean_single.sio`, `self-hosted/check/check.sio`, `self-hosted/check/epistemic.sio` (main's KL-5 version, which already accepts an unspecified epsilon requirement), the Madaros prebuilt with its gate receipt (main's pair) and this log (union of both sides' rows): code generation and type checking, no mathematical derivation. Same shape as the 2026-09-05 WAIVED merge row. |
-| 2026-09-14 | kimi/kimi-k3 [COMPLETE] | review (M3 external-facing) | m5_gum_4th_order_v1.md | 0 BLOCKER, 0 MAJOR, 2 MINOR; both fixed | Review of the lean_single reproduction command fix: the command lacked `chmod +x`; as written it stopped at `Permission denied` (rc 126) at HEAD 5f9ef80877, and with the step it ran to rc=0 with stdout byte-identical to the 2952a88fa2 verification run. kimi-cli in print mode, empty sandbox work dir (still empty afterwards), empty MCP config. **Fixed:** "because lean_single writes the ELF without the execute bit" generalized from one build and umask; now "this lean_single build (sha256 below) wrote the ELF with mode `-rw-r--r--` under umask 0022" (MINOR 1). The run-on sentence hid the required step before the command; the `chmod +x` explanation is now its own sentence ahead of the command (MINOR 2). Raw: `/workspace/tmp-claude-hcprobe/m2doc/kimi_review5.md`. |
-| 2026-09-14 | xai/grok-4.6 [COMPLETE] | review (M3 external-facing) | m5_gum_4th_order_v1.md | 0 BLOCKER, 0 MAJOR, 0 MINOR | Same diff and prompt as the kimi row, reviewed in parallel with `OFFLOAD_TIMEOUT=900`; no findings. Kimi's two MINOR fixes were applied after both reviews and only reword the sentence introducing the command. Raw: `/tmp/llm-offload-L9HxeQ/`. |
-| 2026-09-14 | kimi/kimi-k3 [COMPLETE] | review (M3 external-facing) | m2_hierarchical_v1.md | Round 1: 0 BLOCKER, 2 MAJOR, 2 MINOR; all fixed | First draft after 2952a88fa2 (Madaros pass, known-failure removed, chmod added to the lean_single command); not committed. The first kimi attempt was killed by a workspace container restart and was re-run. kimi-cli in print mode, empty sandbox work dir (still empty afterwards), empty MCP config. **Fixed:** "at `2952a88fa2`" hid a dirty worktree; the uncommitted paths are now named (MAJOR 1). "Both engines run the test and print the same output" overclaimed; only the program output after the Madaros compiler log matches (MAJOR 2). The Madaros command lacked the repository-root step (MINOR 1). "GC handles" was unsupported; now "Madaros handles" (MINOR 2). Raw: `/workspace/tmp-claude-hcprobe/m2doc/kimi_review.md`. |
-| 2026-09-14 | xai/grok-4.6 [COMPLETE] | review (M3 external-facing) | m2_hierarchical_v1.md | Round 1: 0 BLOCKER, 3 MAJOR, 4 MINOR; all fixed | Same draft and prompt as the round-1 kimi row, with `OFFLOAD_TIMEOUT=900`. The first attempt passed the prompt text instead of the prompt file to `bin/llm-offload --raw` and failed at once; the re-run completed. **Fixed:** the "same output" overclaim (MAJOR 1); "the Monte Carlo sampler steps one state in place" read as a statistical change and now describes the step's work storage (MAJOR 2); "GC handles", "a table of", and the 2,028 figure's scope (MAJOR 3); the dirty worktree (MINOR 1); the chmod explanation moved from history to the current command (MINOR 2); the exact suite command and counts (MINOR 3); the Madaros repository-root step (MINOR 4). Before it could be committed, prebuilt a1307ca6 (aaecebd878) broke the test with E259, so the note was rewritten after 02593aede3 and 5f9ef80877 and reviewed again. Raw: `/tmp/llm-offload-9ptaRY/`. |
-| 2026-09-14 | kimi/kimi-k3 [COMPLETE] | review (M3 external-facing) | m2_hierarchical_v1.md | Round 2: 0 BLOCKER, 2 MAJOR, 3 MINOR; all fixed | Rewritten note measured at HEAD 5f9ef80877 (lean_single, Madaros a1307ca6, suite), plus the E259 history. **Fixed:** the `//@ timeout: 90` clause had no provenance; `git log -S` shows 2952a88fa2 is the only commit changing it, and the note now cites it (MAJOR 1). "Before `2952a88fa2`, lean_single already printed the values above" was not in the evidence given; it is backed by the lean_single m2 stdout at 5a054a21a4 (recorded while verifying 2952a88fa2), byte-identical to the stdout at 5f9ef80877, which the note now cites (MAJOR 2). "Uncommitted edits by other sessions" is now "two uncommitted paths", named, one modified and one untracked (MINOR 1). The rc 126 is dated to 2952a88fa2 (MINOR 2). "Which is how the command given in earlier versions of this note failed" is now "Earlier versions of this note omitted that step" (MINOR 3). Raw: `/workspace/tmp-claude-hcprobe/m2doc/kimi_review2.md`. |
-| 2026-09-14 | xai/grok-4.6 [COMPLETE] | review (M3 external-facing) | m2_hierarchical_v1.md | Round 2: 0 BLOCKER, 4 MAJOR, 3 MINOR; all fixed | Same note and prompt as the round-2 kimi row, with `OFFLOAD_TIMEOUT=900`. **Fixed:** dropped "instead of allocating per step" and cited 2952a88fa2 for the timeout tag (MAJOR 1). The pre-2952a88fa2 lean_single claim is replaced by the byte-identical 5a054a21a4 run, as in the kimi row (MAJOR 2). Restored the "padding the counter to overflow" qualifier on 2,028 (MAJOR 3). The 38 E259 are dated to e35c96e0c3, the prebuilt-5cd3fdc2 re-run names the e35c96e0c3 tree, and the note adds that 6 remained at 02593aede3 (measured there) until 5f9ef80877 (MAJOR 4). Named the two uncommitted paths (MINOR 1); listed the fields made pub by each commit (MINOR 2); added the repository-root step to the suite command (MINOR 3). Raw: `/tmp/llm-offload-eiTiuo/`. |
-| 2026-09-14 | kimi/kimi-k3 [COMPLETE] | review (M3 external-facing) | m5_gum_4th_order_v1.md | 0 BLOCKER, 1 MAJOR, 3 MINOR; all fixed | Review of the Madaros re-measurement under prebuilt a1307ca6 (aaecebd878) at HEAD 2a8e7ad145: rc=0 in 23 s, program output equal to lean_single except three small-magnitude lines printed `0.000000` instead of exponent form, same output under the previous prebuilt 5cd3fdc2, suite Pass 1. kimi-cli in print mode, empty sandbox work dir (still empty afterwards), empty MCP config. **Fixed:** the current suite run's 50 s wall time was omitted, leaving the earlier prebuilt's 21 s as the only suite time (MAJOR 1); the 5cd3fdc2 comparison run now says it used `MADAROS_RAW_BIN` with the binary extracted from 2952a88fa2 (MINOR 1); the earlier figures are keyed to "before `aaecebd878` replaced that prebuilt" rather than "earlier on 2026-09-14" (MINOR 2); the 5cd3fdc2 hash is given in full at first mention (MINOR 3). Fixes applied after both reviews, not re-reviewed. Raw: `/workspace/tmp-claude-hcprobe/m2doc/kimi_review6.md`. |
-| 2026-09-14 | xai/grok-4.6 [COMPLETE] | review (M3 external-facing) | m5_gum_4th_order_v1.md | 0 BLOCKER, 2 MAJOR, 2 MINOR; all fixed | Same diff and prompt as the kimi row, with `OFFLOAD_TIMEOUT=900`. **Fixed:** the suite's 50 s wall time is recorded (MAJOR 1); the same-HEAD 5cd3fdc2 run now gives its method and rc=0 in 29 s, so 17 s is no longer the only comparable time for that prebuilt, and the note adds that the host's load average was about 21, so the timings are not a benchmark (MAJOR 2); the earlier figures are keyed to aaecebd878 (MINOR 1); "installed in `054380db89`" is back to the original "refreshed in `054380db89`" (MINOR 2). Raw: `/tmp/llm-offload-rR8Pp7/`. |
-| 2026-09-14 | kimi/kimi-k3 [COMPLETE] | review (M3 external-facing) | m5_gum_4th_order_v1.md | 0 BLOCKER, 1 MAJOR, 3 MINOR; all fixed | Review of the bit-level comparison replacing "The printed text does not show whether the underlying values differ": a scratch probe printing `f64_to_bits` for 26 test values plus three constants, run at HEAD 0fc28e7fed with lean_single a63ca2c9 and Madaros a1307ca6. The three differently printed values are bit-identical, the difference is `print_f64` formatting, and 10 budget values differ at relative 1.7e-12 to 1.2e-8; each engine is reproducible. kimi-cli in print mode, empty sandbox work dir (still empty afterwards), empty MCP config. Kimi re-derived the counts and relative differences from the raw bits. **Fixed:** "a copy of the test that only adds a `print_int(f64_to_bits(x))`" misdescribed the probe, which also prints got/expected bits in `check_close` and three constants in `main`; the note now lists all three changes and that `diff` shows no other line (MAJOR 1). The worktree's uncommitted edits, outside the test's imports, are now mentioned (MINOR 1). "Below the six printed decimals" is now "print identically to the six decimals shown" (MINOR 2). Added that none of the differences changes a recorded value (MINOR 3). Fixes applied after both reviews, not re-reviewed. Raw: `/workspace/tmp-claude-hcprobe/m2doc/kimi_review7.md`. |
-| 2026-09-14 | xai/grok-4.6 [COMPLETE] | review (M3 external-facing) | m5_gum_4th_order_v1.md | 0 BLOCKER, 3 MAJOR, 2 MINOR; all fixed | Same diff and prompt as the kimi row, with `OFFLOAD_TIMEOUT=900`. **Fixed:** the probe is described with all its changes (MAJOR 1). The note states that the 10 values print identically to six decimals on both engines, that this is why they are not among the three differing lines, and that no recorded value changes (MAJOR 2). A paragraph break now precedes the unchanged previous-prebuilt sentence, which names "the unmodified test at `2a8e7ad145`" so it cannot refer to the probe (MAJOR 3). The 16 identical values now read "the `rel_err`, got and expected of each of the three derivative checks (nine values)" (MINOR 1). "Below the six printed decimals" is replaced, as in the kimi row (MINOR 2). Raw: `/tmp/llm-offload-ZrcGi4/`. |
-| 2026-09-15 | kimi/kimi-k3 [COMPLETE] | review (M3 external-facing) | m5_gum_4th_order_v1.md | 0 BLOCKER, 1 MAJOR, 4 MINOR; MAJOR and 2 MINOR fixed, 1 MINOR disputed with evidence, 1 MINOR resolved by a new measurement | Review of the traced root cause of the lean_single/Madaros bit differences: a probe printing 5,274 f64_to_bits records around hessian_pbpk28_auc at HEAD 0f6b452765 finds that only the input `vasc_frac[10]` (literal `0.041`) differs, lean_single ...522 vs correctly rounded ...523 (Madaros). kimi-cli in print mode, empty sandbox work dir (still empty afterwards), empty MCP config. Kimi reconciled all counts with the evidence. **Fixed:** the propagation list omitted `var_second_order`, `v1`, `v2_corr`, the 14 first-order perturbed AUCs and the running AUC; now listed (MAJOR 1). "Printed the bits of 5,274 values in `hessian_pbpk28_auc`" merged three print sites; the note now names the probe `main`, the traced `h28_simulate_auc` and the helper in `hessian_pbpk28_auc` (MINOR 2). "One division by `10.0` per moved zero" is now "once per unit of the remaining exponent" (MINOR 4). **Resolved by measurement:** causality was stated without a confirmation run (MINOR 3). With only that literal replaced by `41.0 / 1000.0` in scratch stdlib copies, 0 of 5,274 trace records and 0 of the first probe's 29 values differ between engines, Madaros's 29 values are unchanged, and the note now reports this. **Disputed:** `pbpk28_params_rapamycin`, `stdlib/darwin_pbpk/core/pbpk28_params.sio`, `self-hosted/compiler/lean_single.sio` and `hessian_pbpk28_auc` were called unattested (MINOR 1). All four exist at 0f6b452765: `ep28_rapamycin_params()` (epistemic_pbpk28.sio:443) returns `pbpk28_params_rapamycin()` (core/pbpk28_params.sio:53, array literal at line 56), `hessian_pbpk28_auc` is at epistemic_pbpk28_hessian.sio:167 and called from cumulants.sio:446, and the lexer and literal emitter are lean_single.sio:7470 and 13045. They were missing only from the prompt; kept, and the note now gives the call chain. Fixes applied after both reviews, not re-reviewed. Raw: `/workspace/tmp-claude-hcprobe/m2doc/kimi_review8.md`. |
-| 2026-09-15 | xai/grok-4.6 [COMPLETE] | review (M3 external-facing) | m5_gum_4th_order_v1.md | 0 BLOCKER, 2 MAJOR, 3 MINOR; MAJOR 1, MINOR 1 and MINOR 2 fixed (MINOR 2's causality point answered by a new measurement), MAJOR 2 and MINOR 3 disputed with evidence | Same diff and prompt as the kimi row, with `OFFLOAD_TIMEOUT=900`. **Fixed:** the 5,274 records are attributed to their three print sites, and the listed record classes now include `auc0`, `c0`, `v1`, `v2_corr`, `var_first_order` and `var_second_order`, so the list accounts for all 5,274 (MAJOR 1). "Predicts ... which is what the probe measured" is now "misses the correctly rounded value for `0.041` only, which matches the single input difference the probe found", and the note adds that the 13-literal integer check agrees with Madaros (MINOR 1). The propagation list is complete, not selected (MINOR 2). **Resolved by measurement:** "no same-input rerun" is answered by the `41.0 / 1000.0` run described in the kimi row (MINOR 2). **Disputed:** the `pbpk28_params_rapamycin` / `core/` citation (MAJOR 2) and the `self-hosted/compiler/lean_single.sio` path (MINOR 3) are correct at 0f6b452765, with the evidence given in the kimi row; kept. Raw: `/tmp/llm-offload-wzFHbt/`. |
 | 2026-09-14 | — | math-review | gum.sio (GUMUncertainty fields marked pub) | WAIVED | Visibility-only change for KL-4 (E259, c592f2c612, #2488): `pub` added to std_uncertainty, degrees_of_freedom and sensitivity of the legacy GUMUncertainty record. It has no constructor and tests/run-pass/dissertation_pbpk14_gum.sio builds it field by field (9 of that test's 45 E259 on main's KL-4 Madaros, md5 57c015c1). No formula, bound, tolerance or control-flow change. GUMResult stays private: the test's 36 cross-module reads now go through the existing pub getters gum_value, gum_std_u and gum_dof. |
 | 2026-09-14 | — | math-review, review | tacrolimus_oral_safety.sio (TacPKParams.cl_l_per_h marked pub) | WAIVED | Visibility-only change for KL-4 (E259, c592f2c612, #2488): `pub` added to cl_l_per_h only. tests/run-pass/mercyful_clinical_sequencing.sio reads and scales it after tp_default (2 E259 on main's KL-4 Madaros, md5 57c015c1) and no accessor or setter exists. vc_l, ka_per_h and f_oral stay private. No dosing, clearance, screening or model change. |
 | 2026-09-14 | — | math-review, review | pediatric_pbpk.sio (PedAccumulation, PedNoisyTdmCompare, PedSubject read fields marked pub) | WAIVED | Visibility-only change for KL-4 (E259, c592f2c612, #2488): `pub` added to the 10 fields tests/run-pass/pediatric_pbpk_receipt.sio reads (18 E259 on main's KL-4 Madaros, md5 57c015c1): PedAccumulation doses_to_90pct_cmin, frac_cmin_dose1, r; PedNoisyTdmCompare pct_fixed, pct_noisy, pct_perfect, auc_noisy_mean, auc_noisy_p05, auc_noisy_p95; PedSubject weight_kg. These are result records and a demographic record with no getters and no documented invariants; all other fields stay private. No dosing, PK, TDM or model change. |
 | 2026-09-14 | — | math-review | composed_effects.sio (ComposedKnowledge.causal_alpha, causal_beta marked pub) | WAIVED | Visibility-only change for KL-4 (E259, c592f2c612, #2488): `pub` added to the causal_alpha and causal_beta fields of pub struct ComposedKnowledge. tests/stdlib/epistemic/test_composed_effect_property.sio reads them to check that ck_add/ck_mul commute and pool Beta evidence (14 E259 on main's KL-4 Madaros, md5 57c015c1); no accessor exists, and adding one would be a code change in this file rather than a visibility change. value, variance, approx_bound, confidence, provenance_tag and epoch stay private. No formula, bound or control-flow change. |
-| 2026-09-15 | kimi/kimi-k3 [COMPLETE] | review (M3 external-facing) | m5_gum_4th_order_v1.md | 0 BLOCKER, 0 MAJOR, 3 MINOR; 2 fixed, 1 disputed with evidence | Review of the paragraph naming the current binaries after the seed refresh in 09aedffafa and the Madaros refresh in 9e8e673414, with the re-measurement at HEAD b9bc73fdf6: the current seed and Madaros agree on all 29 probe values, `bin/souc-linux-x86_64` still differs in the same 10, and the suite passes on both engines. kimi-cli in print mode, empty sandbox work dir (still empty afterwards), empty MCP config. **Fixed:** each sha256 now follows its binary path, not the source `lean_single.sio` (MINOR 2); "unchanged" is now "was not replaced ... last changed in `84aa8a583b`" (MINOR 3). **Disputed:** "Merge `09aedffafa`" was called unsupported (MINOR 1). `git rev-list --parents -n 1 09aedffafa` shows two parents, and its subject is "Merge origin/feat/w1-qd128-transcend (10c652e446) into feat/w1-qd128-transcend"; kept as "Merge commit". Fixes applied after both reviews, not re-reviewed. Raw: `/workspace/tmp-claude-hcprobe/m2doc/kimi_review9.md`. |
-| 2026-09-15 | xai/grok-4.6 [COMPLETE] | review (M3 external-facing) | m5_gum_4th_order_v1.md | 0 BLOCKER, 4 MAJOR, 5 MINOR; all fixed, merge wording in MAJOR 2 disputed with evidence | Same diff and prompt as the kimi row, with `OFFLOAD_TIMEOUT=900`. **Fixed:** "Both binaries have been replaced" pointed at the wrong pair; now two of the three binaries named above, with `bin/souc-linux-x86_64` stated as not replaced (MAJOR 1). Hashes attach to `bin/souc-lean-single-x86_64` and `bin/madaros-linux-x86_64`, not to `lean_single.sio` or `52e1728378` (MAJOR 2; "Merge" kept, see the kimi row). "The first probe" is now "the 29-pattern first probe described above (not the 20-pattern third probe)" (MAJOR 3). The next paragraph's "run through the previous prebuilt, sha256 `5cd3fdc2…`", which after the insertion could be read as `a1307ca6…`, now says "run through the prebuilt that preceded `a1307ca6…`" (MAJOR 4). The 10 differing values are named, and all 29 `bin/souc-linux-x86_64` bits are stated identical to its `0fc28e7fed` run (MINOR 1). Full sha256 and path for all three binaries (MINOR 2). Both invocation styles and their exit status (MINOR 3). The three differing strings are quoted (MINOR 4). The exact suite command with `--jobs 1`, both banners and exit status (MINOR 5). Raw: `/tmp/llm-offload-SjY7CO/`. |
-| 2026-09-15 | kimi/kimi-k3 [COMPLETE] | review (M3 external-facing) | m5_gum_4th_order_v1.md | 0 BLOCKER, 1 MAJOR, 2 MINOR; all fixed | Review of switching the note's lean_single reproduction command from `bin/souc-linux-x86_64` to the refreshed seed `bin/souc-lean-single-x86_64` (sha256 9d789213) and rewording the post-fix section that advised the substitution. kimi-cli in print mode, empty sandbox work dir (still empty afterwards), empty MCP config. **Fixed:** the heading still read "re-measured at HEAD `2a8e7ad145`" (the old-binary measurement) above a command measured at `e0ec05a4a9`; the heading now dates the lean_single command to 2026-09-15 at `e0ec05a4a9` and the Madaros figures to 2026-09-14 at `2a8e7ad145` (MAJOR 1). The seed run used a scratch ELF path, not the printed `/tmp` path; the command was re-run verbatim with `/tmp/m5_gum_4th_order.elf` at `e0ec05a4a9` (rc=0, 30 lines, both markers, the ten Output values, stdout identical to the `2a8e7ad145` `bin/souc-linux-x86_64` run; the ELF did not exist before and was removed after), and the note says "run verbatim" (MINOR 1). "Without it" is now "without the `chmod +x` step" (MINOR 2). Fixes applied after both reviews, not re-reviewed. Raw: `/workspace/tmp-claude-hcprobe/m2doc/kimi_review10.md`. |
-| 2026-09-15 | xai/grok-4.6 [COMPLETE] | review (M3 external-facing) | m5_gum_4th_order_v1.md | 0 BLOCKER, 2 MAJOR, 3 MINOR; all fixed | Same diff and prompt as the kimi row, with `OFFLOAD_TIMEOUT=900`. **Fixed:** the heading, as in the kimi row (MAJOR 1). In the post-fix section, "it gave the same 20 bit patterns" and "the agreement" lost their subject once the command changed; it now names `bin/souc-linux-x86_64` as the binary that gave the 20 patterns and says the command now runs the seed, whose measurement the current-state paragraph records (MAJOR 2). The note-edit history moved out of the measurement sentence: the byte-identity is now its own sentence after the command, about "the command this note gave until 2026-09-15" (MINOR 1). "The same command" no longer implies identical inputs at both commits; the sentence says only the two outputs were compared (MINOR 2). "When this paragraph was written" is pinned to the revision `eddd7ac6a3` (MINOR 3). Raw: `/tmp/llm-offload-cAlJEp/`. |
-| 2026-09-15 | kimi/kimi-k3 [COMPLETE] | review (M3 external-facing) | m2_hierarchical_v1.md | 0 BLOCKER, 0 MAJOR, 4 MINOR; all fixed | Review of switching the note's lean_single reproduction command from `bin/souc-linux-x86_64` to the refreshed seed `bin/souc-lean-single-x86_64` (sha256 9d789213), run verbatim at HEAD 0a786dea7d (rc=0, 33 lines, both markers, the twelve table values, stdout byte-identical to the `bin/souc-linux-x86_64` runs recorded at 5f9ef80877 and 5a054a21a4). kimi-cli in print mode, empty sandbox work dir (still empty afterwards), empty MCP config. **Fixed:** "the stdout recorded for that command" now says "for the `bin/souc-linux-x86_64` command" (MINOR 1). The heading's "the other measurements" now reads "all other current-state measurements", so the block's older commits are not claimed as 2026-09-14 (MINOR 2). "At `5f9ef80877` the worktree had" is now "When HEAD was `5f9ef80877` (2026-09-14), the worktree had" (MINOR 3). "exit 126" is now "shell exit status 126" (MINOR 4). Fixes applied after both reviews, not re-reviewed. Raw: `/workspace/tmp-claude-hcprobe/m2doc/kimi_review11.md`. |
-| 2026-09-15 | xai/grok-4.6 [COMPLETE] | review (M3 external-facing) | m2_hierarchical_v1.md | 0 BLOCKER, 3 MAJOR, 3 MINOR; all fixed | Same diff and prompt as the kimi row, with `OFFLOAD_TIMEOUT=900`. **Fixed:** the heading names the seed as the lean_single compiler for the 2026-09-15 / 0a786dea7d measurement and keeps everything else at 2026-09-14 / 5f9ef80877 (MAJOR 1). "Also" is dropped; the note records the worktree at 0a786dea7d (one modified file, two untracked tests, none in the import closure) and the one-line closure change since 5f9ef80877 (`min_pivot` in `stdlib/numerical/linalg.sio` made `pub`) (MAJOR 2). The comparison target is named as the `bin/souc-linux-x86_64` command, with "only stdout was compared, not the ELFs" (MAJOR 3). The chmod explanation gives separate dated observations for the seed (0a786dea7d, umask 0022, which the command does not set) and for `bin/souc-linux-x86_64` (2952a88fa2) (MINOR 1). Adds that merge `09aedffafa` installed the seed and that `10ac3eb3b3`, in its history, changed float-literal lowering (MINOR 2). The Madaros bullet is pinned to 2026-09-14 at 5f9ef80877, and its byte-identity is stated against that date's `bin/souc-linux-x86_64` output, which the seed run also matches (MINOR 3). Raw: `/tmp/llm-offload-sCE59O/`. |
+| 2026-09-14 | xai/grok-4.6 [OK C1-C5, 2x TIGHTENABLE]; openrouter mistral-large [OK C1-C6, 1x TIGHTENABLE] + qwen3-235b [OK C1-C6]; zai [ERROR 1313 fair-usage]; local-think [ERROR: connection]; deepseek [ERROR: invalid API key] | math-review | ode.sio (augmented state-parameter covariance P <- J P J^T through each RK4 / DP45 step), test_ode_augmented_covariance.sio | PASS | Claims: C1 J P J^T on z=(y,p) with J=[[dPhi/dy,dPhi/dp],[0,I]] composes to first-order GUM of the N-step map; C2 J at the pre-step point, central differences of the integrator's own step; C3 the old diagonal I+dt*J scheme understates intermediates 4-13x on system 5 (new 0.077067/0.011932/0.000716/0.005205 vs 20k MC 0.07747/0.01198/0.000719/0.005225); C4 closed form Var = e^-2kt u0^2 + (y0 t e^-kt)^2 uk^2 = 0.006971, reproduced to 1e-5 rel; C5 diagonal fallback iff n+np>64 with covariance_mode=0; C6 P re-symmetrised every step, clamp only on reported variances. ADDRESSED: Grok TIGHTENABLE (symmetrise P) implemented before the second leg reviewed the final diff; the FD-step and adaptive-dt limits are documented in the ode.sio header. DISAGREE (Mistral): "switch to the diagonal fallback when P is ill-conditioned" is not adopted, because the diagonal scheme is the one measured to understate variance 4-13x; silently degrading to it would replace a numerical risk with a known bias. Conditioning is documented instead. |
 | 2026-09-14 | — | math-review | SounioPireusAnalyticActionClosure.lean | WAIVED | Merge of origin/main (4fa6999bcc) into feat/chemistry-surface-microkinetics for PR #2514. No new mathematics: the file arrives from main byte-identical (blob verified equal to origin/main:formal/lean4/SounioPireusAnalyticActionClosure.lean) and is not touched by this branch; its review is main's, not this merge's. |
 | 2026-09-14 | — | math-review | SounioPireusAnalyticActionClosureAxiomAudit.lean | WAIVED | Merge of origin/main (4fa6999bcc) into feat/chemistry-surface-microkinetics for PR #2514. No new mathematics: the file arrives from main byte-identical (blob verified equal to origin/main:formal/lean4/SounioPireusAnalyticActionClosureAxiomAudit.lean) and is not touched by this branch; its review is main's, not this merge's. |
 | 2026-09-14 | — | math-review | SounioPireusBasisFixedGaugeRebase.lean | WAIVED | Merge of origin/main (4fa6999bcc) into feat/chemistry-surface-microkinetics for PR #2514. No new mathematics: the file arrives from main byte-identical (blob verified equal to origin/main:formal/lean4/SounioPireusBasisFixedGaugeRebase.lean) and is not touched by this branch; its review is main's, not this merge's. |
@@ -3337,7 +4107,31 @@ This exception applies only to byte-identical archival integration. It does not 
 | 2026-09-14 | — | math-review | SounioPireusStreamingMinimumCorrespondenceAxiomAudit.lean | WAIVED | Merge of origin/main (4fa6999bcc) into feat/chemistry-surface-microkinetics for PR #2514. No new mathematics: the file arrives from main byte-identical (blob verified equal to origin/main:formal/lean4/SounioPireusStreamingMinimumCorrespondenceAxiomAudit.lean) and is not touched by this branch; its review is main's, not this merge's. |
 | 2026-09-14 | — | math-review | SounioPireusStreamingMinimumCorrespondenceCheck.lean | WAIVED | Merge of origin/main (4fa6999bcc) into feat/chemistry-surface-microkinetics for PR #2514. No new mathematics: the file arrives from main byte-identical (blob verified equal to origin/main:formal/lean4/SounioPireusStreamingMinimumCorrespondenceCheck.lean) and is not touched by this branch; its review is main's, not this merge's. |
 | 2026-09-14 | — | math-review | SounioSparkPairDecommissionParity.lean | WAIVED | Merge of origin/main (4fa6999bcc) into feat/chemistry-surface-microkinetics for PR #2514. No new mathematics: the file arrives from main byte-identical (blob verified equal to origin/main:formal/lean4/SounioSparkPairDecommissionParity.lean) and is not touched by this branch; its review is main's, not this merge's. |
-| 2026-09-22 | xai/grok-4.6 [OK]; zai [ERROR 1313 fair-usage]; local [not configured] | math-review | benchmarks/chemistry/RESULTS.md (GBS oracle re-derivation, 2026-09-15, lines 1850-1903) | FINDINGS_ADDRESSED | Reviewed the GBS-oracle re-measurement added by this branch (depth/scale sweep, halving ladder vs the independent integrator, per-halving growth factors). Only two of the three fan-out legs were reachable: zai returned provider code 1313 (fair-usage limit) and `local` has no LOCAL_LLM_URL configured on this host, so this is one independent opinion, not the usual two-plus. 16 claims checked: 12 [OK], 3 [TIGHTENABLE] (a "three orders below" phrase that is 598x/2.8 orders, not 10^3 -- left as prose since the underlying bound and its 390x restatement two paragraphs later are both correct; using the sweep's single floor minimum as "the" resolution, already caveated in the text as order-of-magnitude only; "grows over the last two halvings" true of the net map, not every individual rung, matching the text's own wording), 1 [OVERREACH] (the 1.6x-17x detection claim at dt=1.25e-9 restated as a clean detection when the same document says these resolutions carry only order-of-magnitude information). Addressed the OVERREACH: added an inline caveat noting the low end (1.6x) is not a clean detection on its own, and that the ratios above 3x plus the monotone three-halving trend are what carry the claim -- no measured numbers changed. Raw: /tmp/llm-offload-WZpN5O/ (xai), /tmp/llm-offload-XBXxdb/ (zai, error only). |
+| 2026-09-21 | xai/grok-4.6 [first attempt EMPTY at 180 s; DONE on retry with OFFLOAD_TIMEOUT=540: OK C1 C2 C6 C7, TIGHTENABLE C3 C4, OVERREACH C5 C8]; openrouter qwen3-235b [OK C1-C3 C5-C7, WRONG C4 (rejected, see note), OVERREACH C8]; openrouter mistral-large [first attempt ERROR 429 upstream rate limit; DONE on retry: OK C1-C8]; xai/grok-4.6 delta review of the changed controller [OK D3 D4, OVERREACH D1, TIGHTENABLE D2]; zai/glm-5.2 [ERROR 1313 fair-usage, NOT RUN]; local-think [ERROR connection, NOT RUN] | math-review | ode.sio (Dormand-Prince 5(4) tableau and FSAL error estimate, atol/rtol step-size controller and ode_pow_fifth, elapsed-time stepping, covariance clamp, system 6 linear PBPK chain), kinetics.sio (pbpk_full_metabolic time grid and input validation, checked entry points, sigma oracle), test_pbpk_clearance_ode.sio, test_ode_adaptive_covariance.sio, test_ode_solution_capacity.sio, test_ode_solve_input_validation.sio | PASS | Claims C1 closed form of the linear chain Drug->M1->M2 plus first-order clearance and mass balance; C2 Dormand-Prince tableau, b, b*, e=b-b* and the FSAL stage; C3 atol+rtol*max(y_old,y_new) normalisation, accept at err<=1, factor clamp(0.9 err^(-1/5),0.2,5), Newton in ode_pow_fifth; C4 elapsed-time stepping and the ulp-scale reached test; C5 full state-parameter covariance and the scale-aware clamp; C6 GUM sensitivities and variance additivity (sigma(M1)=0.032248621 per unit input at t=24); C7 n=ceil(t/0.33) equal steps; C8 short fast-decay tolerance witness. DISPOSITIONS. C4 WRONG (Qwen) REJECTED: it reads tau as absolute time, but tau = t - t_start <= span; Grok verified the threshold is epoch-independent, and the 1e15 to 1e15+100 test passes for fixed and adaptive solves to 1e-6 while a mutation using absolute time fails 4 assertions. C8 OVERREACH (Grok, Qwen) ACCEPTED IN PART: the scenario is fast decay on a short interval (abs(lambda)*span = 0.5), not a stiff problem, so the test name and comment were corrected and its 1e-12 bound is documented as a measurement (1.1e-15) rather than a derived global-error guarantee; Qwen's claim that explicit RK45 cannot integrate y'=-1e11 y ignores the span of 5e-12 (about 86 steps suffice). C3 TIGHTENABLE (Grok) ACCEPTED: growth was capped at 4.5 (0.9*clamp instead of clamp(0.9*)); ode_pow_fifth now clamps to [0.2/0.9, 5/0.9]; checked against the reference clamp on 8 ratios incl. both edges, then re-reviewed by Grok (D1 OVERREACH: f64 identity measured, 0.9*(5/0.9)=5.0 exactly; D2 TIGHTENABLE: measured worst case 20 Newton iterations to 1e-15, residual 6.5e-16, so 60 is a 3x margin, comment added). C4 TIGHTENABLE (Grok) ACCEPTED as documentation: the time argument handed to a right-hand side is t_start+tau, quantised to the epoch ulp; built-in systems are autonomous. C5 OVERREACH (Grok) ACCEPTED: 1e-9 of the largest diagonal is a heuristic (about 4e6 ulps), not 'a few ulps', and a non-negative diagonal is necessary, not sufficient, for positive semidefiniteness; comments corrected; the 'sound' verdicts from Qwen and Mistral on C5 are not relied on. COMPLIANCE NOTE. This review was run on 2026-09-21, AFTER the fix commits of PR #2511 rounds 2-6, which changed this mathematics without M1 evidence; it covers the final content apart from the comment and naming edits listed. The default xai/zai/local fan-out was NOT met: zai and local errored and are not counted as passes, and qwen3-235b and mistral-large stand in as the independent legs, as in the 2026-09-14 row for the same PR. Non-LLM checks also made: the tableau in rational arithmetic (row sums equal c, sum b = sum b* = 1, order conditions to 4, sum e = 0), closed forms and sensitivities recomputed in Python, and mutation tests for every behaviour above. |
+| 2026-09-21 | — | math-review | kinetics.sio (simulate_chem_network_checked, simulate_pbpk_clearance_checked, pbpk_full_metabolic_checked: input validation), test_pbpk_clearance_ode.sio | WAIVED | Input validation only, no new mathematics, for PR #2511 round 8: parameter standard uncertainties (uks) must be finite and >= 0 before they are squared into variances (a negative value used to become a plausible positive variance and the call returned status 0), and a negative initial drug amount is rejected. No formula, derivation, coefficient or numerical claim was added or changed; the mathematics of this PR (the linear PBPK chain, the Dormand-Prince tableau and controller, the covariance propagation) was reviewed in the 2026-09-21 row above and is unchanged. Each new check is asserted by test_pbpk_clearance_ode.sio and mutation-checked (removing the uks validation, or the init_d < 0 test, fails it). |
+| 2026-09-21 | — | math-review | ode.sio (model-parameter validation, trajectory accessor index guard, built-in system list), test_ode_adaptive_covariance.sio, test_ode_solution_capacity.sio, test_ode_solve_input_validation.sio, test_ode_augmented_covariance.sio, test_pbpk_clearance_ode.sio | WAIVED | Validation, accessor-guard, documentation and test-hardening only, no new mathematics, for PR #2511 round 9: every model parameter must be finite before a solve (status 3), solution_get_value / solution_get_variance return NaN for an out-of-range step or dim, the module header lists system 6, and 53 tolerance assertions in the tests are rewritten from `x > tol` (silently false for NaN) to `!(x <= tol)`. No formula, coefficient, derivation or numerical method was added or changed; the mathematics of this PR was reviewed in the 2026-09-21 row above and is unchanged. Each new behaviour is asserted and mutation-checked (removing the parameter check or the accessor guard fails the validation test; injecting a NaN slot fails the new capacity test where the previous NaN-blind version passed section A). |
+| 2026-09-21 | — | math-review | ode.sio (per-system required-parameter ranges, parameter-set mask, initial-state dimension check, ode_system_new made public), test_ode_solve_input_validation.sio | WAIVED | Input validation only, no new mathematics, for PR #2511 round 10: a solve is invalid input (status 3) if a parameter the selected built-in system reads was never set (ODEParams now records which slots were set, because n_params is only the highest set index + 1), if the initial state's dimension differs from the system's, or if the system id has no registered range. The ranges were read off the rhs_* functions (exp_decay p[0]; pbpk_14 p[0..43]; linear_2 p[1..3]; linear_3 p[1..5]; chem_simple and pbpk_clearance p[0..2]). No formula, coefficient, derivation or numerical method was added or changed; the mathematics of this PR was reviewed in the 2026-09-21 row above and is unchanged. Each check is asserted and mutation-checked (a count-based variant that the review suggested fails the 'only the last parameter set' case, which is why the mask exists). |
+| 2026-09-21 | — | math-review | ode.sio (canonical dimension of each built-in system, checked against ode_system_new), test_ode_solve_input_validation.sio | WAIVED | Input validation only, no new mathematics, for PR #2511 round 11: ode_system_new(id, n_dims), public since round 10, accepts any pair, so a built-in could run at a dimension its right-hand side does not have (ode_system_new(1, 4) integrating one channel and freezing three, or ode_system_new(5, 1) writing four derivatives into a one-element state). The solvers now require n_dims to equal the built-in's own (exp_decay 1, pbpk_14 14, linear_2 2, linear_3 3, chem_simple 4, pbpk_clearance 4, each confirmed against the derivatives its rhs_* function writes) and to lie within 1..64. No formula, coefficient, derivation or numerical method was added or changed; the mathematics of this PR was reviewed in the 2026-09-21 row above and is unchanged. Each case is asserted and mutation-checked. |
+| 2026-09-21 | — | math-review | ode.sio (dimension validation moved before covariance setup and trajectory recording; solve_exp_decay compatibility entry point), test_ode_solve_input_validation.sio | WAIVED | Input validation and API-plumbing only, no new mathematics, for PR #2511 round 12: the system and state dimensions are validated before augcov_init, the covariance check and solution_record (a dimension above 4096 turned the first record step into -1 and wrote times[-1], and a huge one made the initialisation loops effectively unbounded), and solve_exp_decay passes ODEParams through instead of copying it field by field (the copy had dropped the parameter-set mask added in round 10, so parameters the caller had set were reported as unset). No formula, coefficient, derivation or numerical method was added or changed; the mathematics of this PR was reviewed in the 2026-09-21 row above and is unchanged. Each fix is asserted and mutation-checked (the late-validation variant hangs the 1e12-dimension case until the test timeout). |
+| 2026-09-21 | — | math-review | test_chem_network_ode_sys5.sio (four GUM sigma assertions made NaN-safe) | WAIVED | Test-hardening only, no new mathematics, for PR #2511 round 13: the four `absf_rel(ou[k], expected) > 0.005` checks are false for a NaN uncertainty (sigma C and D had no earlier positivity assertion), so a NaN could pass the first-order GUM regression; they are now `!(absf_rel(...) <= 0.005)`. The expected sigmas (0.077067, 0.011932, 0.000716, 0.005205) and the tolerance are unchanged and were reviewed in the earlier rows for this PR; nothing about the mathematics changed. Demonstrated: with a NaN variance injected for species C the previous test printed CHEM ODE SYS5 PASS (exit 0) and the new one fails 'sigma C vs GUM'. |
+| 2026-09-21 | — | math-review | ode.sio (adaptive-solver functions restored to their original text), test_ode_solve_input_validation.sio (adaptive cases removed) | WAIVED | Restructuring only, no new mathematics: the adaptive solver work of PR #2511 (rk45_step, solve_ode_adaptive, ode_pow_fifth, solver_options_adaptive, eode_step_values and the adaptive tests) is moved to a separate follow-up PR stacked on this one; here those five functions are byte-identical to the text this PR had before that work (verified function by function), and two comments that described the moved behaviour (SolverOptions tolerance model, ODESolution.status for the adaptive solver) are made true for the code that remains. The rows above that review the Dormand-Prince tableau, the controller and the elapsed-time stepping apply to that follow-up PR, not to this one. No formula, coefficient or numerical method changed in this commit. |
+| 2026-09-21 | — | math-review | ode.sio (propagate_variance_gum no longer clamps an invalid variance; variance writers split; max_steps validation), test_ode_solve_input_validation.sio | WAIVED | Input-validation and failure-reporting only, for PR #2511 round 14. propagate_variance_gum's `ode_max(vi, 0.0)` is removed: vi is a sum of (sensitivity^2 * variance) terms, so it is negative or NaN only when an input variance is, and clamping it turned that into 'no uncertainty' in the diagonal fallback; no derivation, coefficient or numerical method changed for valid input (the value is identical whenever vi >= 0). The adaptive solver keeps the original variance writer (augcov_write_variances) so its behaviour is exactly the pre-work text, and solve_ode uses a new checked variant; a negative max_steps is invalid input. The mathematics of this PR was reviewed in the earlier 2026-09-21 rows and is unchanged. Asserted and mutation-checked. |
+| 2026-09-21 | — | math-review | kinetics.sio (kin_stds_ok), ode.sio (ode_params_range_set, ode_system_params_present), ode_generic.sio (dimension guard), three test helpers | WAIVED | No new mathematics, for PR #2511 round 15. Effect declarations (`with Mut, Panic`) on three validators that mutate a loop index and index arrays, which `souc check` on the lean_single engine rejects with E035, and `with Div` on three test helpers that divide. solve_generic, solve_generic_det and solve_generic_adaptive now refuse an n_dims outside 1..64 before sizing or recording anything, as solve_ode already does. Verified: lean_single check reports no E035 on the touched stdlib files; all five new tests and two neighbouring kinetics tests pass on lean_single build+run. |
+| 2026-09-21 | — | math-review | ode.sio (ode_solve_inputs_ok rejects a non-finite elapsed span; covariance_mode doc), test_ode_solve_input_validation.sio | WAIVED | Input-validation and documentation only, for PR #2511 round 16. Endpoints -1e308 and 1e308 are finite and ordered but t_end - t_start overflows to +inf, which solve_ode would integrate as an endless span and report as exhaustion or a non-finite time instead of invalid input (status 3). ode_solve_inputs_ok now rejects a non-finite t_end - t_start. The new test case uses dt = 1 so only this check can produce status 3 (mutation: with the check removed the case returns status 1 and the test fails). The covariance_mode comment now says the adaptive solver also sets mode 0 for the n_dims + n_params > 64 fallback and only never reports mode 2. No new mathematics. |
+| 2026-09-22 | — | math-review | ode.sio (augcov_write_variances_checked gains input_ok, disabling the round-off clamp when the input covariance was already invalid), test_ode_augmented_covariance.sio (new case), kinetics.sio (removed unsupported literature-validation claims about the PBPK submodel from comments and the main() summary) | WAIVED | Round 17, PR #2511. (1) The round-off allowance (1e-9 of the block's largest STATE diagonal) was one number for the whole augmented-covariance call, so an invalid input variance on one dimension could propagate to a value dwarfed by a healthy diagonal elsewhere in the same block and be silently clamped to a usable-looking 0 despite covariance_mode already being 2. ode_initial_covariance_ok's result is now threaded through as input_ok, which switches the allowance to 0 once any input was known invalid. Verified: a new test (system 6, Drug variance -1e-12 next to a healthy M1 variance 1.0, one tiny step) reports the Drug variance as -9.998998e-13 with the fix; reverting the fix locally reproduces the reported bug exactly (0.0). (2) validate_against_literature's own disclaimer (the PBPK submodel is not fitted to midazolam or any published source) did not reach the four other places that named or implied a literature-validated PBPK number; reworded them and removed "Midazolam 0.28" from main()'s summary line. Text only, no new mathematics; kinetics.sio main() had the same 9 pre-existing unrelated failures (bayesian structural tie, bench pinn, bench stochastic, epistemic pinn crn, fractional caputo, more pbpk submodels, pbpk metabolic crn ontology, richer metabolic -- none touched by this change) before and after, confirming the edit is comment/string-only. |
+| 2026-09-22 | — | math-review | kinetics.sio (sqrt_approx normalizes its argument by powers of 4 before Newton iteration), tests/stdlib/chemistry/test_kin_sigma_small_variance.sio (new) | PASS (1 item, documented disagreement) | Round 18, PR #2511. CORRECTED 2026-09-22: this row originally waived math-review as "no new mathematics"; that was wrong (Copilot review, PR #2511) -- x = m*4^k / sqrt(x) = sqrt(m)*2^k is a numerical-method derivation under M1. Ran bin/llm-offload -t math-review on the sqrt_approx body (xai/zai/local fan-out; zai and local legs ERRORed, xai/grok-4.6 completed). Grok validated every part of the new normalization as OK: the (x-x)==0.0 non-finite guard and its placement before the loops, +inf closure under /4 (why the old code could hang), NaN's comparisons all being false (so its loops don't run), the m in [1,4) range reduction being exact in IEEE and preserving x = m*4^k, the Newton/Babylonian update, 20 iterations being more than sufficient from that bracket, and the final y*2^k rescaling. One WRONG flagged, pre-existing and out of scope for this round: `x <= 0.0` returns 0.0 for x < 0 (should be NaN) and does not preserve -0's sign; that line is unchanged by this PR, and the only new caller, kin_sigma, already rejects `!(v >= 0.0)` before ever calling sqrt_approx, so a negative x cannot reach this branch through the code this PR added. Documented, not fixed, here. sqrt_approx ran a fixed 20 Newton iterations starting from y0 = x itself, which only converges when x is within a few orders of magnitude of 1: away from there each iteration roughly halves y, so for x = 1e-20 (exact sqrt 1e-10) it returned about 9500x too large (measured before the fix, via kin_sigma through simulate_chem_network_checked: reported sigma 1.000000e-06 instead of 1.000000e-10), and x = 1e-100 was off by 43 orders of magnitude. kin_sigma (new in this PR) surfaces this through both new checked chemistry simulators for any sufficiently small propagated variance. Normalized x = m * 4^k, m in [1,4), before the iteration, then rescaled by 2^k: Newton now starts within a factor of 4 of 1 regardless of k. Verified across [1e-300, 1e6] including the m=1/m=4 boundaries (relative error <= 1.8e-10 throughout, via a zero-rate network whose covariance never evolves, so the reported sigma is sqrt_approx of exactly the input variance) and via mutation (reverting the fix reproduces the fail). kinetics.sio main() has the same 9 pre-existing, unrelated failures before and after. |
+| 2026-09-22 | — | math-review | kinetics.sio (sqrt_approx rejects non-finite input before the normalization loop), tests/stdlib/chemistry/test_kin_sigma_small_variance.sio (new hang-regression case) | WAIVED | Round 19, PR #2511. x = +inf divided by 4 stays +inf, so the round-18 normalization's `while m >= 4.0 { m = m / 4.0 }` never terminated on it -- a real hang, reachable through the pre-existing public crn_result_to_audit (squares caller-provided finite parts, so epistemic_part = 1e308 overflows to +inf before reaching sqrt_approx). Structural fix only (an early-return guard using the same (x-x)==0.0 finiteness test already reviewed in the round-18 entry above), no new derivation: sqrt(+inf) = +inf and sqrt(NaN) = NaN are the only two cases the guard produces, both standard IEEE-754/extended-real identities, not new mathematics. Verified: the reviewer-cited crn_result_to_audit(1.0, 0.1, 1e308, 0.0, 0.0, 1, 0) now returns gum_uc = +inf instead of hanging (timeout-bounded test, //@ timeout: 60); mutation (removing the guard) reproduces the hang (run did not complete within the harness timeout). |
+| 2026-09-22 | — | math-review | ode.sio (augmented covariance now sizes off ode_system_n_params, not p.n_params; augcov_init and propagate_covariance_step take an explicit np), test_ode_augmented_covariance.sio (new case), test_ode_solve_input_validation.sio (fallback section updated) | WAIVED | Round 20, PR #2511. `full_cov = sys.n_dims + p.n_params <= 64` used the CALLER'S highest-set parameter index, not what the system reads: setting an irrelevant slot (e.g. p[63] on exp_decay, which reads only p[0]) inflated n_params to 64 and silently forced the coarser diagonal fallback for an otherwise full-covariance-eligible system, changing the reported variance for physically identical inputs (measured: 3.8% on the reviewer's own reachable example). New `ode_system_n_params(id)` (mirrors ode_system_canonical_dims's existing per-system table, reused by ode_system_params_present) returns the MODEL'S own parameter count; full_cov and augcov_init/propagate_covariance_step now use it everywhere instead of p.n_params. Structural: sizes an existing per-step finite-difference loop off a value guaranteed <= what was already there (ode_system_params_present requires every index below it to be set before a solve runs), no new derivation. Verified: with the fix, exp_decay with and without an irrelevant p[63] gives identical variance (rel diff 0, covariance_mode 1 both); reverting locally reproduces the reviewer's bug class (mode drops to 0, variance shifts ~3.8%). Consequence, expected and covered: no combination of the six built-in systems' own (n_dims, n_params) ever exceeds 64 (largest is pbpk_14 at 14+44=58), so the diagonal fallback (mode 0) is no longer reachable through any built-in system via the public API; updated test_ode_solve_input_validation.sio's fallback section, which exercised exactly the now-closed mechanism, to assert the corrected invariant (unused slot inert, mode stays 1) instead. |
+| 2026-09-22 | — | math-review | ode.sio (ode_initial_covariance_ok and ode_solve_inputs_ok now validate only p[0..sys_np), not p[0..p.n_params)), test_ode_augmented_covariance.sio (two new cases) | WAIVED | Round 21, PR #2511, follow-up to round 20 (same root cause, different call sites). Round 20 sized the augmented covariance itself off ode_system_n_params, but two VALIDATION loops still iterated p[0..p.n_params): ode_initial_covariance_ok (parameter variances) and ode_solve_inputs_ok (parameter values). A caller-set but system-irrelevant slot (e.g. p[63] on exp_decay, which reads only p[0]) with a negative/NaN VARIANCE could fail ode_initial_covariance_ok and force covariance_mode 2 on an otherwise-valid solve, or with a NaN VALUE fail ode_solve_inputs_ok and report status 3 (invalid input) on an otherwise-valid solve -- despite np already being sized to exclude that slot per round 20. Both loops now bound on ode_system_n_params(sys.system_id) instead. Structural: same fix pattern as round 20, no new derivation. Verified both directions by mutation: reverting either loop back to p.n_params reproduces its respective bug (negative-variance garbage slot -> covariance_mode 2; NaN-value garbage slot -> status 3); with the fix, both report status 0, covariance_mode 1, matching a clean run. |
+| 2026-09-22 | — | math-review | ode.sio (new ode_system_params_lo; ode_initial_covariance_ok and ode_solve_inputs_ok now bound their validation loops to [lo, n_params) per system, not [0, n_params)), test_ode_augmented_covariance.sio (three new cases for system 3) | WAIVED | Round 22, PR #2511, follow-up to round 21 (same root cause, a LOW index this time instead of a high one). Rounds 20-21 closed the high-index hole (any p[63]) by bounding covariance sizing and validation to [0, ode_system_n_params(id)) -- but linear_2/linear_3 (systems 3, 4) reserve index 0 for ka (oral absorption; this build only runs them IV) and their RHS reads only p[1..n_params). [0, n_params) still includes that unread index 0, so a caller setting p[0] anyway (plausible: carrying an oral-dosing ka value/variance into an IV-only solve) reproduced the identical defect at the low end: a NaN p[0] VALUE failed ode_solve_inputs_ok (status 3 on an otherwise-valid solve), and a negative/NaN p[0] VARIANCE failed ode_initial_covariance_ok (covariance_mode 2). New ode_system_params_lo(id) (1 for systems 3/4, 0 for the rest) gives each system's true active range [lo, n_params); both validation loops now start there instead of 0. augcov_init/propagate_covariance_step (the covariance MACHINERY, as opposed to validation) are unchanged: their own diagonal for the unused low index just passes through the augmented covariance unread and unreported (solution_get_variance only ever reads STATE dims, never the parameter block), so leaving them at [0, n_params) is harmless, only wastes one always-zero slot for systems 3/4 (dim 6/9 instead of a fully compact 5/8), not worth the larger remap this round. Verified via ode_system_new(3, 2) (system 3 is reachable through this public constructor even though the private convenience one is not): p[0] never set, NaN-valued, and negative-variance all now report status 0 / covariance_mode 1, matching each other; reverting the lo bound in either validation function individually reproduces its respective bug by mutation. |
+| 2026-09-22 | — | math-review | ode.sio (augcov_init now leaves an inactive (below-lo) parameter slot at its zero-initialized default instead of copying p.param_variances into it), test_ode_augmented_covariance.sio (new case: NaN variance on system 3s unread p[0]) | WAIVED | Round 23, PR #2511, follow-up to round 22 (validation was fixed; the covariance MACHINERY still had the gap round 22s reasoning missed). Round 22 left augcov_init copying the full [0, n_params) range into the augmented matrix, reasoning that an unused params Jacobian column is exactly 0.0 (the RHS never reads it, so perturbing it cannot change f_plus/f_minus), so its contribution to J P J^T is 0.0 * (whatever is in P) -- true for a FINITE value (0 * finite = 0, confirmed harmless for a negative finite variance in round 22s own test), false for a non-finite one: IEEE-754 0.0 * NaN = NaN and 0.0 * inf = NaN, not 0. So a NaN/inf variance in an unused slot (linear_2/linear_3s unread p[0], or any systems unused high index) got multiplied by exactly-zero sensitivities throughout the J P J^T product, poisoning the sum with NaN, which propagated into the REPORTED STATE diagonals -- not just the unused params own. Measured before the fix: system 3 (linear_2) with p[0] set to a NaN variance reported covariance_mode 2 and BOTH state variances as NaN, though the true computation (states, rate parameters 1..4) was entirely valid. Fix: augcov_init now starts its copy loop at lo (ode_system_params_lo) instead of 0, leaving an inactive slots diagonal at its zero-initialized default -- every term touching that slot in the matrix product is then exactly 0 through every step (identity self-term 1*0*1=0; cross terms finite*0=0), so garbage there, finite or not, can never reach the output. Verified: with the fix, a NaN variance on system 3s p[0] gives mode 1 and both state variances identical (rel diff 0) to the p[0]-never-set baseline; reverting the lo bound in augcov_init alone reproduces the reviewers exact bug by mutation (mode 2, both variances NaN). |
+| 2026-09-22 | — | math-review | ode_generic.sio (solution_refused moved below solution_new) | WAIVED | Round 24, PR #2511. Pure reordering: solution_refused called solution_new before its declaration, a forward reference Sounio disallows (CLAUDE.md:251). Moved solution_refused to immediately after solution_new; both were already at file scope with no dependency on anything else, and every caller (solve_generic, solve_generic_det, solve_generic_adaptive) is further down the file, so this cannot change behavior, only whether the compiler accepts the order. No new mathematics. Verified: lean_single check and Madaros check both report only the E221 no-main diagnostic (this module has no embedded main, same as before this fix and same as every other library-only module in this PR); no other error. The module remains private/unused externally, so no committed test is possible against it (unchanged from earlier rounds). |
+| 2026-09-22 | — (no XAI_API_KEY/ZAI_API_KEY/LOCAL_LLM_URL in this session's environment; every leg would report SKIPPED) | math-review | tests/run-pass/gp_test.sio (T4: GP log-marginal-likelihood reference 5.420817, from #2594's 06d5457419) | WAIVED | The mandated three-way fan-out (xai/zai/local) could not run: no provider credentials are configured in this environment, and per policy a SKIPPED leg must not be represented as a pass. Independent verification performed by hand instead: recomputed `-0.5 y'K^-1 y - sum(log diag chol(K)) - 0.5 n log(2 pi)` from scratch in Python for the same 20 points (x_i = 6i/19), the same LCG-seeded noise, RBF(l=1,s=1) and noise 0.01 -- got 5.42081695, matching the committed reference to 1e-7. This is a single-source check, not the mandated independent second opinion, and is recorded as such. Waived by explicit user decision after the gap was disclosed (PR #2622, https://github.com/Sounio-lang/sounio/pull/2622#discussion_r4074700405), to unblock merge; a real math-review run with working credentials is still owed and should replace this row if the derivation is touched again. |
+| 2026-09-22 | — | math-review | kinetics.sio (pbpk_full_metabolic_checked bounds the DERIVED step count, not just t, to a practical synchronous-call budget) | WAIVED | Round 25, PR #2511. t alone did not bound the work: t = 1e6 (accepted) derives ceil(1e6/0.33) = 3,030,304 steps of a full-covariance (7 augmented components) system, each finite-differencing all seven and doing a dense 7x7 product. Measured on this build: 20,000 steps ~2s, 100,000 steps ~11s -- 3,030,304 would extrapolate to minutes. New pbpk_max_steps() = 20,000 (t <= 6,600 h at dt = 0.33): the model's own slowest rate (clearance k3 = 0.01/h) makes the state numerically zero in f64 well before that, so any physiologically meaningful horizon is covered many times over. The old t > 1e6 literal is now redundant (subsumed: any t deriving > 20,000 steps is rejected first) and removed; all three affected doc strings (the function's own comment, pbpk_full_metabolic's panic message, the doc header) updated to describe the step-count bound instead of the old t bound. Structural bound only, no new mathematics. Verified: t = 6600 (exactly 20,000 steps) still accepted, t = 6600.33 (20,001 steps) now rejected (status 3) instead of running; t = 1e6 now rejected in ~2s (previously would have run for minutes) -- confirmed by mutation (removing the step check makes the new boundary assertion fail). Existing test at t = 1e7 (already testing rejection) is unaffected, since it is rejected even more directly now. |
+| 2026-09-22 | — | documentation | ode.sio (four comments describing the "user-defined system, IDs 100+" extension mechanism corrected/completed) | WAIVED | Round 25, PR #2511. The comments at the module header, ode_system_new, ode_params_range_set and ode_rhs_dispatch each separately claimed or implied that adding a branch to ode_rhs_dispatch alone (or, worse, calling the now-public ode_system_new(100, n) from OUTSIDE this file) makes a user-defined system usable. Neither is true: ode_system_dims_ok rejects any id whose ode_system_canonical_dims entry is missing (0 for every non-built-in id) before dispatch ever runs, and ode_system_params_present separately gates on a registered parameter range; only the module header's own "Usage" section (step 2) already correctly listed all three tables. Corrected the other four comments to match: this is a source-editing extension (no runtime registration) requiring updates to ode_rhs_dispatch, ode_system_canonical_dims AND ode_system_params_present together, not any one alone. Documentation only, no behavior change. |
+| 2026-09-22 | — | documentation | kinetics.sio (pbpk_max_steps comment corrected: M2/Cleared converge to a nonzero split, not zero) | WAIVED | Round 26, PR #2511. Round 25s justification for the step-count budget said the horizon cap left the state "numerically zero" -- wrong for two of the four components. Verified: pbpk_full_metabolic(1.0, 0.05, 6600.0) gives Drug=4.8e-144, M1=2.6e-86 (both effectively zero, as claimed) but M2=0.666667, Cleared=0.333333, summing to 1.0 (the conserved dose) -- exactly k2/(k2+k3) and k3/(k2+k3) with k2=0.02, k3=0.01. M2 and Cleared are cumulative sinks and never approach zero; only the transient Drug/M1 do. Reworded to say the system reaches its ASYMPTOTE by t=6600h (66 clearance time constants), not that the state vanishes: Drug/M1 are numerically zero and M2/Cleared have converged to their fixed dose-conserving split, so no further integration changes any of the four values. The step-count budget itself (20,000, a pure compute-cost bound) is unaffected; this only corrects the accompanying justification text. Documentation only, no behavior change. |
+| 2026-09-23 | — (no XAI_API_KEY/ZAI_API_KEY/LOCAL_LLM_URL in this session's environment; every leg would report SKIPPED) | math-review | tests/TESTING_STRATEGY.md (PR #2646 — GUM ep_add variance/confidence-decay claims) | WAIVED | WAIVED with rationale. The mandated three-way external fan-out (xai/zai/local) could not run: no provider credentials are configured in this session's environment, and per AGENT_OFFLOAD_POLICY.md:34,147 an unavailable leg must not be represented as a pass, so this is recorded as a WAIVED hand-check rather than verified evidence. Independent hand-check performed against the canonical source stdlib/epistemic/knowledge.sio (the definitions of record) instead: all revised claims match the implementation exactly. Confidence is the integer 0..1000 scale (ep_clamp_conf clamps to 1000; knowledge.sio:9,87-89). Decay factors: ep_add/ep_sub = min(a,b)·99/100 (141,154); ep_mul = min·98/100 and ep_square = ·98/100 (170,404); ep_div = min·97/100 (184). ep_scale (Var=c²·Var, confidence preserved, 189-194) and ep_shift (Var preserved, confidence preserved, 198-203) do NOT decay confidence — consistent with the docs' "preserve" claim. ep_merge confidence = (a.confidence+b.confidence)/2 averaged then clamped (458), and its value is inverse-variance weighted (452-457) — consistent with the docs' "averages" claim. Variance rules also match: ep_add/ep_sub sum variances; ep_mul and ep_div use the uncorrelated GUM delta method (Cov dropped, as the docs now state); ep_square = 4·val²·Var; ep_scale = c²·Var; ep_shift preserves Var; ep_merge is inverse-variance weighted. The TESTING_STRATEGY.md ep_add example (min·99/100, variances add, clamped to 0..1000) matches the canonical source. No discrepancy, no overreach, no flagged item. Caveat: this is a single-source hand verification against the canonical .sio, NOT the mandated three-way external fan-out (xai/zai/local), because no provider credentials are configured in this environment; per policy a SKIPPED leg must not be represented as a pass, so this row honestly records what was actually done. If the GUM derivation is touched again, a credentialed offload run is still owed. |
+| 2026-09-23 | — (no XAI_API_KEY/ZAI_API_KEY/LOCAL_LLM_URL in this session's environment; every leg would report SKIPPED) | math-review | docs/stdlib/linalg/BLAS_FFI.md (PR #2646 — SVD power-iteration seed-projection + GUM claims) | WAIVED | WAIVED with rationale. The mandated three-way external fan-out (xai/zai/local) could not run: no provider credentials (XAI_API_KEY/ZAI_API_KEY/LOCAL_LLM_URL) are configured in this session's environment, and per AGENT_OFFLOAD_POLICY.md:34,147 an unavailable leg must not be represented as a pass, so this is recorded as a WAIVED hand-check rather than verified evidence. blas_dgesvd_approx converges to the largest singular value with non-zero seed projection (seed = all-ones); verified [[3,1],[1,2]]->~3.618, [[2,-1],[-1,2]]->1 (dominant mode orthogonal to seed, not its max 3), nullspace seed -> 0/0 NaN. EpistemicMatrix::matmul runs the inline pure-Sounio GUM loop (epistemic_matrix.sio) and, with blas_available() == false, uncertainty is propagated via GUM — consistent with the prose. No independent math reviewer available this session; claims source-verified against stdlib/linalg/blas_ffi.sio and epistemic_matrix.sio. |
 
 ## 2026-09-26T20:20Z — Claude (session 3c9c1595) — M1 math-review, PBPK28 CN floor-clamp dispatch
 
