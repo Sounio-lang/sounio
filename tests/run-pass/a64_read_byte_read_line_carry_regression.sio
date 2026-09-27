@@ -2,8 +2,9 @@
 //@ expect-stdout-contains: read_byte/read_line regression ok
 //
 // Regression gate for PR #2623 review comments (Copilot threads 4068240080,
-// 4068240108, 4113839765) on the aarch64 emitters emit_read_byte_a64() /
-// emit_read_line_a64() in self-hosted/compiler/lean_single.sio.
+// 4068240108, 4113839765, 4113946887) on the aarch64 emitters
+// emit_read_byte_a64() / emit_read_line_a64() in
+// self-hosted/compiler/lean_single.sio.
 //
 // Bug 1 (macOS): a failed `read()` syscall on aarch64-macos signals the error
 // by setting the CARRY flag and returning a POSITIVE errno in x0 (XNU
@@ -44,6 +45,28 @@
 // read_line() contract at docs/audit/windows_assert_a64_parity/READ_LINE.md
 // section 3 ("clamp bytes_read < 0 -> 0" as a deliberate a64/x86 divergence).
 //
+// Bug 3 (thread 4113946887, upstream of Bugs 1 and 2): emit_read_line_a64()
+// never checked its OWN allocating mmap() call for failure before using the
+// result as "buf" -- pushing it, handing it to read() as the destination,
+// and (via Bugs 1/2's own now-fixed clamps) eventually dereferencing it at
+// the null-terminate `strb` near the end of the function. mmap() failing
+// hits the exact same negative-errno (Linux) / carry-set-positive-errno
+// (macOS) pattern as read() -- so an allocation failure that used to be
+// silently miscompiled into a wrong read (Bugs 1/2) would, upstream of
+// them, turn into an out-of-bounds write/segfault through a pointer that
+// was never a valid buffer at all. emit_read_file_a64's own mmap() call has
+// the same latent gap; it is out of scope here (not what the review flagged)
+// and is tracked separately.
+//
+// Fix 3: check the mmap() result immediately after its syscall, before
+// emit_push_a64() ever stores it as "buf" -- same OS-gated carry/negative
+// check as Fixes 1/2, but on failure it sets x0 = 0 (NULL, the natural
+// sentinel for this function's string-typed return -- read_byte()'s
+// int-typed equivalent is -1) and jumps straight past the push/read/strip/
+// null-terminate code to the function's normal return point, mirroring the
+// unconditional-jump idiom (`let X = CL; em32(b); ...; patch_branch_a64(X,
+// CL)`) emit_read_byte_a64's own EOF path already uses above.
+//
 // This test exercises the three review-requested behaviours -- read_byte()
 // returning the exact value 255 (0xFF) rather than confusing it with the -1
 // sentinel, read_line() stripping a trailing '\n', and read_byte() returning a
@@ -59,21 +82,30 @@
 // numbers used below (open=2, dup2=33) are x86-64 Linux-specific, matching
 // the existing convention in tests/run-pass/test_syscall_ffi.sio.
 //
-// Both fixes were verified by cross-compiling this exact probe shape for
-// --target aarch64-linux and --target aarch64-macos and disassembling with
-// an aarch64 objdump (aarch64-linux-gnu-objdump or
-// <triple>-objdump from any aarch64 binutils package), using a real x86-64
-// execution environment to run the seed compiler (Docker/Rosetta or, when
-// that was unavailable, a Lima/QEMU x86_64 VM -- lean_single itself is an
-// x86-64 Linux ELF and cannot run natively on an Apple Silicon host without
-// one of those). Observed, byte for byte:
-//   aarch64-macos:  svc #0x80 -> b.cc <ok> -> mov x0,#-1 (read_byte) or
-//                   mov x0,#0 (read_line) -> <ok>: cmp x0, #0x0
-//   aarch64-linux:  read_byte: svc #0x0 -> cmp x0, #0x0   (no fixup -- Bug 1
-//                   does not apply; Linux's own EOF/error branch never
-//                   indexes a buffer with x0)
-//                   read_line: svc #0x0 -> cmp x0,#0 -> b.ge <ok> ->
-//                   mov x0,#0 -> <ok>: cmp x0, #0x0        (Fix 2's clamp)
+// All three fixes were verified by cross-compiling this exact probe shape
+// for --target aarch64-linux and --target aarch64-macos and disassembling
+// with an aarch64 objdump (aarch64-linux-gnu-objdump, or
+// <triple>-objdump from any aarch64 binutils package -- e.g. Alpine's
+// binutils-aarch64 ships aarch64-alpine-linux-musl-objdump), using a real
+// x86-64 execution environment to run the seed compiler (Docker/Rosetta or,
+// when that was unavailable mid-session, a local Lima/QEMU x86_64 VM --
+// lean_single itself is an x86-64 Linux ELF and cannot run natively on an
+// Apple Silicon host without one of those). Observed, byte for byte,
+// read_line()'s mmap() call immediately followed by its read() call:
+//   aarch64-macos:
+//     svc #0x80 (mmap)  -> b.cc <a> -> mov x0,#0 -> b <end>          (Fix 3)
+//     <a>: push buf; ...; svc #0x80 (read)
+//          -> b.cc <b> -> mov x0,#0 -> <b>: cmp x0, #0x0             (Fix 1)
+//   aarch64-linux:
+//     svc #0x0 (mmap)   -> cmp x0,#0 -> b.ge <a> -> mov x0,#0
+//          -> b <end>                                                (Fix 3)
+//     <a>: push buf; ...; svc #0x0 (read)
+//          -> cmp x0,#0 -> b.ge <b> -> mov x0,#0 -> <b>: cmp x0, #0x0 (Fix 2)
+// In both builds, <end> lands exactly on the instruction right after the
+// function's normal `emit_pop_x0_a64()` -- confirmed by disassembly address
+// arithmetic, i.e. the mmap-failure path never executes the push or the pop
+// and cannot corrupt the stack. read_byte() has no mmap() call and is
+// unaffected by Fix 3; its own fixup is unchanged (see Fix 1/Bug 2 above).
 // To reproduce:
 //   SOUNIO_SOUC_ENGINE=lean_single ./bin/souc compile \
 //       tests/run-pass/a64_read_byte_read_line_carry_regression.sio \

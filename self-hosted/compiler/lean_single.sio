@@ -35022,6 +35022,34 @@ fn emit_read_line_a64() with Mut, Panic {
         em32(0xD2800000 | ((222 & 0xFFFF) << 5) | 8)  // Linux arm64 SYS_mmap
     }
     emit_syscall_a64()
+    // Check the mmap() result BEFORE using it as a buffer for anything. A
+    // failed mmap returns the same negative-errno (Linux) / carry-set (macOS)
+    // pattern as a failed read() above -- left unchecked, the invalid "buf"
+    // pointer would be pushed, handed to read() as the destination, and
+    // finally dereferenced by the null-terminate `strb` near the end of this
+    // function, turning an allocation failure into an out-of-bounds
+    // write/segfault. Mirror emit_file_size_a64's open()-failure pattern: on
+    // failure, set x0 = 0 (NULL -- the natural sentinel for this function's
+    // string-typed return, matching read_byte()'s -1 for its int-typed one)
+    // and jump straight to the function's end, never pushing/dereferencing
+    // the bad pointer or reaching the read()/strip/null-terminate code below.
+    var mmap_fail_done: i64 = 0
+    if TARGET_OS == 2 {
+        let mmap_ok = CL
+        em32(0x54000003)  // b.cc ok (carry clear = success; patched)
+        em32(0xD2800000)  // movz x0, #0 -> x0 = NULL (carry set: mmap() failed)
+        mmap_fail_done = CL
+        em32(0x14000000)  // b done (patched)
+        patch_branch_a64(mmap_ok, CL)
+    } else {
+        em32(0xF100001F)  // cmp x0, #0
+        let mmap_ok = CL
+        em32(0x5400000A)  // b.ge ok (x0 >= 0, mmap() succeeded; patched)
+        em32(0xD2800000)  // movz x0, #0 -> x0 = NULL (negative errno: mmap() failed)
+        mmap_fail_done = CL
+        em32(0x14000000)  // b done (patched)
+        patch_branch_a64(mmap_ok, CL)
+    }
     // x0 = buf. Keep it on the stack (16-byte slot) across the read syscall.
     emit_push_a64()
     // read(0, buf, 4095) -- leave room for '\0'
@@ -35090,6 +35118,7 @@ fn emit_read_line_a64() with Mut, Panic {
     em32(0x8B000021)  // add x1, x1, x0
     em32(0x3900003F)  // strb wzr, [x1]
     emit_pop_x0_a64()  // return buf
+    patch_branch_a64(mmap_fail_done, CL)  // done: (mmap() failure lands here with x0 = NULL)
 }
 
 fn emit_read_file_a64() with Mut, Panic {
