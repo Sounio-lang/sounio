@@ -116,6 +116,18 @@
 //     harness; measured by hand: md_step with iters = -1 exits 1 on both
 //     engines.)
 //
+// V9  Absorbed fraction 1 - exp(-y) = -expm1(-y) at 13 magnitudes of
+//     y = ka·dt from 1e-17 to 40, against a reference: the 5th-order Taylor
+//     polynomial for y <= 1e-4 (truncation < y^5/720 relative, 10 flops) and
+//     1 - math::pure::exp(-y) above (an independent ln2 range reduction; the
+//     subtraction is well conditioned there for the reference's purpose, its
+//     amplification c = e^-y/(1 - e^-y) is in the budget). Budget per y, from
+//     operation counts: the driver's series 165u (100 flops, absolute-sum
+//     ratio <= 1.65) for y <= 1/2, or md_exp_neg's 72 Taylor flops amplified by
+//     its m = 2^halvings squarings, (72m + m)u·c + u, above; the reference's
+//     10u, or (74 + y/ln2 + 1)u·c + u. The old form 1 - md_exp_neg(y) was off by
+//     100 % at 1e-17, 11 % at 1e-16 and 2.2e-5 at 1e-12, and fails.
+//
 // Transport parameters are the rapamycin PBPK28 profile with synthetic CLint and
 // Ki values: kernel/driver correctness fixtures, not drug claims.
 
@@ -123,6 +135,7 @@ use darwin_pbpk::core::pbpk28_params::*
 use darwin_pbpk::pbpk28_hepatic::*
 use darwin_pbpk::ddi::multidrug28::*
 use darwin_pbpk::ddi::cyp3a_competitive::*
+use math::pure::{exp}
 
 fn g_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
 fn e12(x: f64) -> i64 { return (x * 1000000000000.0) as i64 }
@@ -491,6 +504,54 @@ fn gate_v8() -> bool with Mut, Div, Panic, IO {
     return fresh == 0 && neg == 2 && lie == 0 && many == 0 && bad_m == 1
 }
 
+// V9 --------------------------------------------------------------------------
+// Rounding budget (relative) of md_absorbed_fraction(y) against its reference,
+// from operation counts (u = 2^-53); see the V9 header.
+fn v9_tol(y: f64) -> f64 with Mut, Div, Panic {
+    let u = 1.1102230246251565e-16
+    if y <= 0.0001 { return (165.0 + 10.0) * u }
+    let e = exp(0.0 - y)
+    let c = e / (1.0 - e)
+    let k = y / 0.6931471805599453 + 1.0
+    let ref_side = (74.0 + k) * u * c + u
+    if y <= 0.5 { return 165.0 * u + ref_side }
+    var z = y
+    var m = 1.0
+    while z > 0.5 {
+        z = z * 0.5
+        m = m * 2.0
+    }
+    let md_side = (72.0 * m + m) * u * c + u
+    return md_side + ref_side
+}
+
+fn gate_v9() -> bool with Mut, Div, Panic, IO {
+    let ys = [1.0e-17, 1.0e-16, 1.0e-12, 1.0e-8, 1.0e-4, 0.01, 0.1, 0.49, 0.5, 0.51, 1.0, 5.0, 40.0]
+    var ok = true
+    var worst = 0.0
+    var k: i32 = 0
+    while k < 13 {
+        let y = ys[k]
+        let got = md_absorbed_fraction(y)
+        var want = 0.0
+        if y <= 0.0001 {
+            want = y * (1.0 - y * (0.5 - y * (1.0 / 6.0 - y * (1.0 / 24.0 - y / 120.0))))
+        } else {
+            want = 1.0 - exp(0.0 - y)
+        }
+        let rel = g_abs(got - want) / want
+        let r = rel / v9_tol(y)
+        if !(r <= worst) { worst = r }
+        if !(r <= 1.0) {
+            ok = false
+            print("V9 FAIL at y x1e20 = ") print(y * 1.0e20) print("  rel err x1e15 = ") println(rel * 1.0e15)
+        }
+        k = k + 1
+    }
+    print("V9 absorbed fraction, 13 magnitudes 1e-17..40: worst error / rounding budget = ") println(worst)
+    return ok
+}
+
 fn main() -> i32 with Mut, Div, Panic, IO {
     let m = gate_mass()
     let v3 = gate_v3()
@@ -498,13 +559,15 @@ fn main() -> i32 with Mut, Div, Panic, IO {
     let v6 = gate_v6()
     let v7 = gate_v7()
     let v8 = gate_v8()
+    let v9 = gate_v9()
     if m { println("M PASS") } else { println("M FAIL") }
     if v3 { println("V3 PASS") } else { println("V3 FAIL") }
     if v4 { println("V4 PASS") } else { println("V4 FAIL") }
     if v6 { println("V6 PASS") } else { println("V6 FAIL") }
     if v7 { println("V7 PASS") } else { println("V7 FAIL") }
     if v8 { println("V8 PASS") } else { println("V8 FAIL") }
-    if m && v3 && v4 && v6 && v7 && v8 {
+    if v9 { println("V9 PASS") } else { println("V9 FAIL") }
+    if m && v3 && v4 && v6 && v7 && v8 && v9 {
         println("PBPK28_MULTIDRUG_GATES_PASS")
         return 0
     }

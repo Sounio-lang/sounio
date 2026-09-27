@@ -422,6 +422,31 @@ fn md_exp_neg(y: f64) -> f64 with Mut, Div, Panic {
     return sum
 }
 
+// Fraction absorbed over a step, 1 - exp(-y) = -expm1(-y), for y = ka·dt >= 0.
+// Computing it as 1 - md_exp_neg(y) cancels catastrophically for small y:
+// measured 2026-09-27 (PR #2695 review), relative error 2.2e-5 at y = 1e-12,
+// 11 % at 1e-16, and a result of exactly 0 at 1e-17 (nothing absorbed). For
+// y <= 1/2 the alternating series y - y^2/2 + y^3/6 - ... is summed directly
+// (25 terms; the first omitted term is below 0.5^26/26! < 1e-34 of y). Its
+// rounding: 4 flops per term, 100 in all, on terms whose absolute sum is
+// e^y - 1 = e^y·(1 - e^-y) <= 1.65 times the result, so the relative error
+// is below 100·1.65·u ≈ 165u ≈ 3.7e-14. For y > 1/2, exp(-y) <= 0.61 and
+// 1 - exp(-y) >= 0.39, so the subtraction amplifies md_exp_neg's relative
+// error by at most e^-y/(1 - e^-y) < 1.55 and the range-reduced form is kept.
+pub fn md_absorbed_fraction(y: f64) -> f64 with Mut, Div, Panic {
+    if !(y >= 0.0) { panic("multidrug28: md_absorbed_fraction needs y >= 0") }
+    if y > 0.5 { return 1.0 - md_exp_neg(y) }
+    var term = y
+    var sum = y
+    var k: i32 = 2
+    while k < 26 {
+        term = term * (0.0 - y) / (k as f64)
+        sum = sum + term
+        k = k + 1
+    }
+    return sum
+}
+
 // Unbound enzyme-site concentration of drug j at `site`, read from `ct_src`.
 fn md_cu(md: &MultiDrug28, ct_src: &[f64; 224], j: i32, site: i32) -> f64 with Div {
     let o = md_site_organ(site)
@@ -595,7 +620,7 @@ fn md_absorb(md: &!MultiDrug28, dt: f64) with Mut, Div, Panic {
     while i < n {
         let lum = (*md).lumen[i]
         if lum > 0.0 {
-            let absorbed = lum * (1.0 - md_exp_neg((*md).ka[i] * dt))
+            let absorbed = lum * md_absorbed_fraction((*md).ka[i] * dt)
             (*md).lumen[i] = lum - absorbed
             (*md).gut_rate[i] = absorbed / dt
         } else {
