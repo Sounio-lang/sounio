@@ -12,8 +12,10 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-
 **Date:** 2026-09-26
 **Status:** mechanism CONFIRMED on the committed ELF and on a Madaros built
 from the tree under test (§2). Root cause is the one already dispatched in
-[`MADAROS_HANDLE_TABLE_182_LIFETIME_DISPATCH_2026-08-17.md`](MADAROS_HANDLE_TABLE_182_LIFETIME_DISPATCH_2026-08-17.md)
-and is still OPEN. This document is a dispatch: no `self-hosted/` file is changed.
+[`MADAROS_HANDLE_TABLE_182_LIFETIME_DISPATCH_2026-08-17.md`](MADAROS_HANDLE_TABLE_182_LIFETIME_DISPATCH_2026-08-17.md).
+**Fixed** by region reclamation (direction B of §8), landed with this update;
+§10 records the implementation and its verification. §§1–9 are the original
+dispatch, unchanged.
 **What is new here:** a measured per-operation cost model (§3), a
 quantified per-test demand (§4), and a second unreclaimed resource that sits
 behind the first (§5). Together they settle "leak or capacity" (§6) and rule
@@ -245,6 +247,105 @@ The following are estimates, not measurements.
   claimed `self-hosted/native/gc.sio`. A patch goes through that lane.
 - The exit-181 finding (§5) is recorded because it constrains the 182 fix.
   It is not separately root-caused here.
+
+## 10. Fix: region reclamation (direction B)
+
+Implemented in `self-hosted/native/gc.sio` (design comment "Region reclamation"),
+`self-hosted/ir/lower.sio` (eligibility, typed young-copy, shared exit block) and
+`self-hosted/native/codegen_x86_linux.sio` (runtime builtins `__rgn_*`, store
+barriers). `SOUNIO_NO_REGION_RECLAIM=1` lowers exactly as before.
+
+**Mechanism.** An eligible function opens a region at entry: it records the heap
+cursor H0 and handle count C0 on a record stack carved from the top of the 2 GiB
+arena. Every `return` jumps to one exit block. If the region did not escape, the
+young part of the result is copied above the dead region. Both bumps then reset
+to (H0, C0), the result is copied back down to H0, and the reclaimed bytes are
+zeroed, because lowering assumes fresh heap is zero. Scalar results skip the
+copies.
+
+**Escapes are caught dynamically.** Before every store that can write a word into
+memory (`IrFieldSet`, `IrIndexSet` except byte stores, `IrStorePtr`,
+`IrStoreGlobal`, `write_offset64`, native `Seq` push/set), codegen calls a
+barrier. The barrier marks escaped every open region that started after the
+target object and no later than the stored object. Stack, BSS and global targets
+count as older than everything. Extern calls mark every open region escaped.
+
+**Where the design refuses rather than guesses.**
+- Only result types proven by their declaration to be word scalars, word-scalar
+  arrays, or such structs nested up to depth 4 are copied.
+- `StructFieldEntry.decl_word_scalar` is set only on declaration paths. The
+  literal-seeded layout path leaves it 0, so such types are not eligible.
+- Box and Knowledge results are excluded.
+- Kernels, `main`, `extern`, GPU and Async functions are excluded.
+- A function whose body plus two copies would come within 256 instructions of
+  IR_MAX_INSTRS closes without a region.
+
+**Limit.** Garbage allocated directly in `main`'s own loop is not reclaimed, since
+`main` never returns. The q4/q5/q6 probes (a one-allocation leaf called straight
+from `main`) still exit 182. The BBB family allocates inside called functions,
+which is what the regions cover.
+
+### Verification (source build of 2e8b76d312 + this change)
+
+Final ELF md5 `35f3e506`. The table was first taken on the pre-Seq-fix build `087a0ae3`; every row was re-run on `35f3e506`, with identical BBB output.
+
+| Program | Before (5764851f) | After (35f3e506) |
+|---|---|---|
+| repro (§7) | 182 after i=1044480 | `REPRO_OK` |
+| t3: 100 × `bbb_coupled_run` | dies in run 8 | 100 runs, rc=0 |
+| `test_bbb_gum_budget` | 182 | `BBB_GUM_BUDGET_OK` |
+| `test_bbb_hdmr_7d` | 182 | `BBB_HDMR_7D_OK` |
+| `test_bbb_pce2d_sobol` | 182 | `BBB_PCE2D_SOBOL_OK` |
+| `test_bbb_pce_vs_gum` | 182 | `BBB_PCE_VS_GUM_OK` |
+| `test_des_bbb_coupled` | 182 | `DES_BBB_COUPLED_OK` |
+| `tests/run-pass/madaros_region_reclaim_{loop,escape,result}.sio` | — | all OK |
+
+**Arithmetic is unchanged.**
+- A central difference on fu_plasma (two coupled runs, small enough to fit the
+  table before the fix) prints byte-identical output, scaled to 1e-18, under the
+  baseline ELF, the fixed ELF, and the fixed ELF with `SOUNIO_NO_REGION_RECLAIM=1`.
+- The BBB outputs match lean_single line for line, apart from Madaros's fixed
+  6-decimal printing of tiny values.
+- They also differ in the sign of two ~1e-12 entries: the fu_plasma sensitivity
+  is analytically zero, since fu_plasma cancels in kpuu. Both engines compute
+  y₊ − y₋ = −4.44e-16, and lean_single's kpuu already differs from Madaros's at
+  ~1e-9 relative with or without this change.
+
+**Corpus.** `scripts/ci/madaros_corpus_regression_gate.sh` in refresh mode,
+run with each ELF on the same tree (SOUNIO_TEST_JOBS=2), and the two failure
+lists diffed. The checked-in baseline file is stale on main, so the comparison
+is baseline ELF vs fixed ELF, not against that file.
+
+| | Failures / programs |
+|---|---:|
+| baseline `5764851f` | 182 / 1991 |
+| fixed `35f3e506` | 180 / 1991 |
+| new failures | **0** |
+| newly passing | `lyapunov_flow_benettin.sio`, `madaros_region_reclaim_loop.sio` |
+
+The first A/B (on `087a0ae3`) found one new failure,
+`seq_mut_ref_param_mutates.sio`; it is fixed as described below.
+
+**Found on the way.**
+
+- **Relocation shapes.** The relocation pass patches RIP-relative relocations
+  only for a whitelist of instruction shapes and silently leaves any other
+  displacement at 0. The first build segfaulted for that reason. It is being
+  fixed separately (PR #2724); the runtime here loads the context only through
+  a whitelisted shape.
+- **Seq growth moves an object under an old handle.** The first corpus A/B
+  caught `tests/run-pass/seq_mut_ref_param_mutates.sio`. `seq_push` grows by
+  copying the object to the heap cursor and repointing the *existing* handle's
+  table entry at the copy. The first barrier modelled that as storing a word
+  born at `cursor - 1`. In a region that had not allocated yet, that address is
+  below H0, so the region stayed clean, reset, and left the caller's handle
+  pointing into reclaimed memory.
+  - `seq_push` now marks every open region that started after the seq was born
+    (`rgn_emit_builtin_youngest_store`).
+  - `seq_set`, which never moves the object, gets the precise barrier on the
+    stored value.
+  - Lesson for any future builtin: repointing an old handle at new memory is a
+    store of the youngest possible object into that handle's object.
 
 ## AI disclosure
 
