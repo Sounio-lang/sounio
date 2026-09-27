@@ -134,7 +134,7 @@ Saltelli output cannot currently be used.)
 | Artifact | Status |
 |---|---|
 | `runs/m6_epistemic_pbpk28_v2.txt` | 9/9, `ALL 9 TESTS PASSED` |
-| `runs/m6_hessian_pbpk28_v2.txt` | 7/7 + 3/3, `HESSIAN_PBPK28_DUAL_RHO_PASS` |
+| `runs/m6_hessian_pbpk28_v2.txt` | 7/7 + 5/5, `HESSIAN_PBPK28_DUAL_RHO_PASS` |
 | `runs/m6_full_stack_v2.txt` | `MC_CROSS_VALIDATION_PBPK28_LOGNORMAL_HESSIAN_PASS`, `M1_COPULA_CHOLESKY_PASS` |
 | `runs/legacy_*_v2.txt` | legacy-prior counterparts |
 | `m6_literature_access_v1.txt`, `m6_julia_reconciliation_v1.txt` | unaffected (no PBPK28 stepping) |

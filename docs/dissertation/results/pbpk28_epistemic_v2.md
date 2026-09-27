@@ -154,7 +154,7 @@ AUC ∝ 1/CL_eff, they depend on the parameters' CVs rather than on the mean. Th
 
 *Legacy prior* (`runs/legacy_hessian_pbpk28_v2.txt`): ρ_literal(CL_hep) = 0.580701 (= σ/CL),
 ρ̃ = 0.168607; var₁ = 0.065009, var₂ = 0.106708 (u₁ = 0.2550, u₂ = 0.3267, ratio 1.641);
-Hessian mean-corrected AUC 0.564443 (+39.98%). 7/7 + 3/3 pass.
+Hessian mean-corrected AUC 0.564443 (+39.98%). 7/7 + 5/5 pass.
 
 ---
 
@@ -222,7 +222,7 @@ and 2.55×10⁻¹¹ mg/L, a ratio of 3.9998, i.e. second order. One fix was need
 `t ≥ 24` sampled one step late at the finer dts, because float accumulation left `t` a few ulp
 below 24. The sample is now taken at the step nearest 24 h. The production dt = 0.05 h value is
 unchanged.
-| Hessian correction | `epistemic_pbpk28_hessian.sio` | 7/7 + 3/3 dual-ρ |
+| Hessian correction | `epistemic_pbpk28_hessian.sio` | 7/7 + 5/5 dual-ρ |
 | Sobol + PCE | `validation/pbpk28_sobol_pce.sio` | 6/6 + 6/6 (structural checks; see §4.10.5) |
 | Mass-balance gates | `tests/run-pass/pbpk28_consumer_mass_balance.sio` | PASS |
 
