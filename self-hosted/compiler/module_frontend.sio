@@ -87,6 +87,29 @@ fn module_frontend_find_user_main_idx(module: &IrModule) -> i64 with Mut, Div, P
     user_main
 }
 
+// True if the entry file itself declares a top-level `fn main`. Scans the
+// entry module's AST, not merged IR: an imported module that happens to
+// declare its own `main` (scenarios/venlafaxine_xr.sio does) must not make a
+// library entry file look runnable.
+fn module_frontend_items_declare_main(items: Option<Box<ItemList>>) -> bool with Mut, Panic, Div {
+    let main_nm = make_name("main")
+    var cur = items
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                let it = (*list).head
+                if it.kind == ItemKind::ItemFn && ir_name_eq(it.name, main_nm) {
+                    return true
+                }
+                cur = (*list).tail
+            }
+        }
+    }
+    false
+}
+
 // Memoised: read_env allocates and the runtime allocator never reclaims,
 // so a gate evaluated at every call site leaks on every call. CHECKED is
 // separate from the value because "off" and "not yet read" are different.
@@ -6769,6 +6792,19 @@ pub fn module_frontend_compile_imported_to_file(
     }
     trace.typechecked_modules = loaded
     print("imported_compile: typecheck ok\n")
+    // An executable needs an entry point. Without `main` the writer used to emit
+    // an ELF whose e_entry was .text+0 -- merged function 0 -- which then died
+    // with SIGSEGV, or SIGILL when D2 below had emptied that slot. Same code and
+    // text as lean_single. `check` and `--emit-obj` do not come through here.
+    // docs/audit/MADAROS_NO_MAIN_ENTRY_FN0_DISPATCH_2026-09-26.md
+    if !module_frontend_items_declare_main(programs[0].items) {
+        print("error[E221]: no main\n")
+        print("note: ")
+        print(main_path)
+        print(" declares no `fn main`; a library can be checked, not built into an executable\n")
+        module_frontend_global_init_compile_end()
+        return 1
+    }
     if use_collapse && loaded > 1 {
         print("imported_compile: specialized_collapse lower_count=1 (from ")
         print_int(loaded)
