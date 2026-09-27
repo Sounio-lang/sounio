@@ -424,7 +424,8 @@ divergence. No other engine difference is involved in these two demos.
 - **The engine gap is not the accuracy of these numbers.** Lane
   `claude(gracious-bardeen)` reports an independent fixed-step RK4
   reference (continuous absorption, no operator splitting) for
-  `AUC_last / AUC_first` in `dissertation_steady_state_demo`: 1.227702.
+  `AUC_last / AUC_first` in `dissertation_steady_state_fullvd_demo` (the demo
+  that prints that ratio): 1.227702.
   **Both** engines sit about 6.5e-4 away from it, roughly 31 times the
   engine gap. They attribute this to the runner's operator-split oral bolus,
   which is O(dt). The report is their dispatch,
