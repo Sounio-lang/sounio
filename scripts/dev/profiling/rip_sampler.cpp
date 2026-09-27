@@ -53,16 +53,29 @@ int main(int argc, char** argv) {
     auto t0 = std::chrono::steady_clock::now();
     long samples = 0;
     int status = 0;
+    bool profiler_error = false;
+    // PTRACE_INTERRUPT fails with ESRCH once the child has exited but is not yet
+    // reaped. Reap it so `status` is its real termination status rather than the
+    // last ptrace stop; any other failure is the profiler's, not the child's.
+    auto on_interrupt_failure = [&]() {
+        if (errno == ESRCH) {
+            while (waitpid(child, &status, __WALL) >= 0)
+                if (WIFEXITED(status) || WIFSIGNALED(status)) return;
+        }
+        perror("[rip_sampler] PTRACE_INTERRUPT/waitpid");
+        profiler_error = true;
+    };
     for (;;) {
         std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
-        if (ptrace(PTRACE_INTERRUPT, child, nullptr, nullptr) != 0) break;
+        if (ptrace(PTRACE_INTERRUPT, child, nullptr, nullptr) != 0) { on_interrupt_failure(); goto done; }
         for (;;) {                                   // wait for our interrupt-stop
             pid_t w = waitpid(child, &status, __WALL);
-            if (w < 0 || WIFEXITED(status) || WIFSIGNALED(status)) goto done;
+            if (w < 0) { perror("[rip_sampler] waitpid"); profiler_error = true; goto done; }
+            if (WIFEXITED(status) || WIFSIGNALED(status)) goto done;
             if (WIFSTOPPED(status) && (status >> 16) == PTRACE_EVENT_STOP) break;
             int sig = WIFSTOPPED(status) ? WSTOPSIG(status) : 0;   // real signal: pass through
             ptrace(PTRACE_CONT, child, nullptr, (void*)(long)sig);
-            if (ptrace(PTRACE_INTERRUPT, child, nullptr, nullptr) != 0) goto done;
+            if (ptrace(PTRACE_INTERRUPT, child, nullptr, nullptr) != 0) { on_interrupt_failure(); goto done; }
         }
         {
             user_regs_struct r{};
@@ -87,7 +100,11 @@ int main(int argc, char** argv) {
     }
 done:
     std::fclose(f);
-    int code = WIFEXITED(status) ? WEXITSTATUS(status) : (WIFSIGNALED(status) ? 128 + WTERMSIG(status) : 1);
+    if (profiler_error) {
+        std::fprintf(stderr, "[rip_sampler] %ld samples, PROFILER ERROR (child status unknown)\n", samples);
+        return 125;
+    }
+    int code = WIFEXITED(status) ? WEXITSTATUS(status) : (WIFSIGNALED(status) ? 128 + WTERMSIG(status) : 125);
     std::fprintf(stderr, "[rip_sampler] %ld samples, child exit %d\n", samples, code);
     return code;
 }

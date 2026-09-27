@@ -1,5 +1,6 @@
-# Job that produced the function-level profile in
-# docs/audit/MADAROS_SELF_COMPILE_PROFILE_DISPATCH_2026-09-27.md (run fn2-20260927T023032).
+# Function-level profile Job for docs/audit/MADAROS_SELF_COMPILE_PROFILE_DISPATCH_2026-09-27.md.
+# The run in that dispatch (fn2-20260927T023032) used the earlier, unpinned version of this
+# manifest (see the dispatch, section 5); this version pins inputs and fails on any error.
 #
 # The ConfigMap is built from the two files beside this manifest:
 #   kubectl -n arc-runners create configmap madaros-prof-tools \
@@ -43,30 +44,43 @@ spec:
         - {mountPath: /cache, name: madaros-cache}
         - {mountPath: /tools, name: tools}
         command: ["/bin/bash", "-c"]
+        env:
+        # Inputs are pinned, not "whatever is newest". Set all three before applying.
+        - {name: SOUNIO_REF, value: "897c344892fafd98bfbbb0a611738aad08149d7d"}  # commit profiled in the dispatch
+        - {name: SEED_PATH, value: ""}      # e.g. /cache/madaros/seed/<key>/artifact
+        - {name: SEED_SHA256, value: ""}    # full sha256 of SEED_PATH
         args:
         - |
           set -uo pipefail
+          die() { echo "FAIL: $*" >&2; exit 1; }
+          [ -n "$SEED_PATH" ] && [ -n "$SEED_SHA256" ] || die "SEED_PATH and SEED_SHA256 must be set"
           OUT=/cache/profile/fn2-$(date -u +%Y%m%dT%H%M%S); mkdir -p "$OUT"; echo "OUT=$OUT"
-          sudo apt-get update -qq >/dev/null && sudo apt-get install -y -qq g++ perl git binutils >/dev/null 2>&1; echo apt=$?
-          g++ -std=c++23 -O2 -o /tmp/rip_sampler /tools/rip_sampler.cpp || exit 5
-          git clone -q --depth 1 https://github.com/Sounio-lang/sounio /tmp/sounio || exit 3
-          cd /tmp/sounio; git log --oneline -1 | tee "$OUT/commit"
+          sudo apt-get update -qq >/dev/null && sudo apt-get install -y -qq g++ perl git binutils >/dev/null 2>&1 || die "apt"
+          g++ -std=c++23 -O2 -o /tmp/rip_sampler /tools/rip_sampler.cpp || die "build rip_sampler"
+          git clone -q https://github.com/Sounio-lang/sounio /tmp/sounio || die "clone"
+          cd /tmp/sounio && git checkout -q "$SOUNIO_REF" || die "checkout $SOUNIO_REF"
+          echo "source=$(git rev-parse HEAD)" | tee "$OUT/inputs"
           export SOUNIO_STDLIB_PATH=/tmp/sounio/stdlib
-          SEED=$(ls -t /cache/madaros/seed/*/artifact | head -1); cp "$SEED" /tmp/seed && chmod +x /tmp/seed
+          got=$(sha256sum < "$SEED_PATH" | cut -c1-64); [ "$got" = "$SEED_SHA256" ] || die "seed sha256 $got != $SEED_SHA256"
+          echo "seed=$SEED_PATH sha256=$got" | tee -a "$OUT/inputs"
+          cp "$SEED_PATH" /tmp/seed && chmod +x /tmp/seed
           t0=$(date +%s)
           ( ulimit -s 524288 2>/dev/null || true; /tmp/seed self-hosted/compiler/main.sio /tmp/m2 --debug-fn-map ) > "$OUT/seed.out" 2>&1
-          echo "seed build rc=$? $(( $(date +%s)-t0 ))s"
+          rc=$?; echo "seed build rc=$rc $(( $(date +%s)-t0 ))s"
+          [ "$rc" -eq 0 ] || { tail -c 2000 "$OUT/seed.out"; die "seed build rc=$rc"; }
           perl -0777 -ne 'while(/fnmap fn=(\d+)\s+off=(-?\d+)\s+name=(\S+)/g){print "fnmap fn=$1 off=$2 name=$3\n"}' "$OUT/seed.out" > "$OUT/fnmap.txt"
-          echo "fnmap entries=$(wc -l < "$OUT/fnmap.txt")"; head -3 "$OUT/fnmap.txt"
-          test -s /tmp/m2 || { tail -c 2000 "$OUT/seed.out"; exit 4; }
-          chmod +x /tmp/m2
-          echo "m2 sha=$(sha256sum < /tmp/m2 | cut -c1-16) size=$(stat -c %s /tmp/m2)"
+          [ -s "$OUT/fnmap.txt" ] || die "empty fnmap"
+          echo "fnmap entries=$(wc -l < "$OUT/fnmap.txt")"
+          chmod +x /tmp/m2   # the seed does not set +x
+          echo "m2 sha256=$(sha256sum < /tmp/m2 | cut -c1-64) size=$(stat -c %s /tmp/m2)" | tee -a "$OUT/inputs"
           readelf -h /tmp/m2 2>/dev/null | grep Entry; readelf -l /tmp/m2 2>/dev/null | grep -A1 LOAD | head -6
           t0=$(date +%s)
           ( ulimit -s 524288 2>/dev/null || true; /tmp/rip_sampler --out "$OUT/samples.txt" --interval-ms 50 --depth 24 -- /tmp/m2 build self-hosted/compiler/main.sio /tmp/gen2 ) > "$OUT/gen2.log" 2>&1
-          echo "gen2 rc=$? $(( $(date +%s)-t0 ))s samples=$(wc -l < "$OUT/samples.txt")"
+          rc=$?; echo "gen2 rc=$rc $(( $(date +%s)-t0 ))s samples=$(wc -l < "$OUT/samples.txt")"
           tail -3 "$OUT/gen2.log"
-          perl /tools/symbolize.pl "$OUT/fnmap.txt" "$OUT/samples.txt" 401000 > "$OUT/profile.txt"; cat "$OUT/profile.txt"
+          [ "$rc" -eq 0 ] || die "profiled compile rc=$rc (profile would be partial)"
+          perl /tools/symbolize.pl "$OUT/fnmap.txt" "$OUT/samples.txt" 401000 > "$OUT/profile.txt" || die "symbolize"
+          cat "$OUT/profile.txt"
           # phase windows by wall time (seconds): check, typecheck, seed-lower, dep-lower, merge, native
           for w in "0 139" "139 275" "275 416" "416 1500" "1500 2610" "2610 3128" "3128 99999"; do
             set -- $w

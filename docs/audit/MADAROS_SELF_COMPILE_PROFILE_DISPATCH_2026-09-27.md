@@ -179,15 +179,27 @@ Design:
 
 ## 5. Reproduce
 
-The exact tooling that produced §1.2 is checked in under `scripts/dev/profiling/`:
+The tooling is checked in under `scripts/dev/profiling/`.
 
-| File | sha256 |
+**As run.** The versions that produced §1.2 are preserved at commit `9f7f0e9b1`: `git show 9f7f0e9b1:scripts/dev/profiling/<file>`. They are byte-identical to the cluster ConfigMap `arc-runners/madaros-prof-tools` that the Job mounted.
+
+| File (as run) | sha256 |
 |---|---|
 | `rip_sampler.cpp` (C++23) | `1a8ddb6d2f4aae8ec32215cbfa8b1bbebf2c7f3fbf0f0d41b5fa3f8d25763342` |
 | `symbolize.pl` | `5212f6f3cfa9d30219de1957467bdfdfbd2e52221c4ad99ac27d9f2e82b0b1b5` |
-| `madaros-fn-profile-job.yaml` | the Job as run (`madaros-fn-profile2`) |
 
-The cluster ConfigMap `arc-runners/madaros-prof-tools` is built from these two files byte-for-byte. The core steps are:
+**Inputs of the recorded run.**
+- Source: `897c344892fafd98bfbbb0a611738aad08149d7d`.
+- Profiled compiler `m2`: sha256 prefix `f1f69e71a204a42b`, 125 121 681 bytes.
+- The seed was the newest entry under `/cache/madaros/seed/`; the as-run manifest did not record its path or digest. `m2` is the seed's output for that source and is what the fn map describes, so the attribution does not depend on which seed built it. The time does, only through `m2` itself.
+- Both steps exited 0: seed build rc=0 in 265 s; profiled compile rc=0 in 3149 s, 62 799 samples. So the as-run manifest's missing fail-closed checks did not affect this profile.
+
+**Current versions.** They differ only in failure handling and labelling:
+- `rip_sampler` reaps a child that exits between samples and reports its real status; profiler errors exit 125.
+- `symbolize.pl` labels inclusive depth from the data instead of a hard-coded 16.
+- The Job pins `SOUNIO_REF`, `SEED_PATH` and `SEED_SHA256`, records all three, and fails on any non-zero step.
+
+The core steps are:
 
 ```bash
 seed self-hosted/compiler/main.sio /tmp/m2 --debug-fn-map > seed.out   # seed = lean_single stage from the Madaros cache
