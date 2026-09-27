@@ -9,8 +9,9 @@
 // (f_ew), intracellular water (f_iw), neutral lipid (f_nl), neutral
 // phospholipid (f_np) and residual protein/solids (f_protein) — the mechanistic
 // inputs to Rodgers-Rowland (2006) Kp prediction in core/rodgers_rowland.sio.
-// Centralises the table that was previously scattered across the per-fraction
-// accessors (rr_fw_e / rr_fw_i / rr_fn_l / rr_fn_ph) in rodgers_rowland.sio.
+// rr_neutral in rodgers_rowland.sio reads its OWN per-fraction accessors
+// (rr_fw_e / rr_fw_i / rr_fn_l / rr_fn_ph), not this table; the two carry the
+// same R&R values and a committed gate holds them equal.
 //
 // Per dissertation convention (and Madaros stdlib compatibility) this stdlib
 // module stays PLAIN f64: composition values and their literature evidence ε
@@ -24,16 +25,33 @@
 //   0=blood, 1=liver, 2=kidney, 3=brain, 4=heart, 5=lung, 6=muscle,
 //   7=adipose, 8=gut, 9=skin, 10=bone, 11=spleen, 12=pancreas, 13=other
 //
+// COMPOSITION SOURCE (corrected 2026-09-26). All four measured fractions are
+// Rodgers & Rowland's RAT tissue composition (R&R 2005 doi:10.1002/jps.20322,
+// R&R 2006 doi:10.1002/jps.20502; read via the open-access reproduction in Ye,
+// Nagar & Korzekwa 2016 doi:10.1002/bdd.1996, PMC4844798, Table 2 -- whose two
+// water column headers are printed transposed -- and the R&R data file of a
+// reference R implementation). R&R report rat tissues only, so this is a rat
+// composition applied to a human PBPK28 physiology: a standard modelling choice
+// (Ye 2016 make it), but a rat composition. Before this correction the table was
+// a mislabelled hybrid: its waters were already R&R's, but in 9 of the 12
+// organs R&R cover, f_nl was Poulin & Theil's f_n_l and f_np was Poulin &
+// Theil's TOTAL phospholipid f_pl (neutral + acidic), not R&R's neutral f_n_pl
+// (brain, bone and pancreas were other mixtures). See the SOURCE note in core/rodgers_rowland.sio.
+//
 // EVIDENCE ε per fraction class (literature evidence-quality, dimensionless,
-// NOT a probability):
-//   water (f_ew, f_iw)   ε=0.85  ICRP 89 reference man — directly measured
-//   neutral lipid (f_nl) ε=0.70  Poulin & Theil 2002 — gravimetric extraction
-//   phospholipid (f_np)  ε=0.55  Rodgers & Rowland 2006 — most variable  ← weakest
+// NOT a probability). The ε values are unchanged judgements carried over from
+// the previous revision; they were not re-derived when the composition source
+// was corrected, and their old source labels (ICRP 89 for water, Poulin & Theil
+// for lipid) described values that are not the ones in this table:
+//   water (f_ew, f_iw)   ε=0.85  R&R rat composition
+//   neutral lipid (f_nl) ε=0.70  R&R rat composition
+//   phospholipid (f_np)  ε=0.55  R&R rat composition -- most variable  ← weakest
 //   protein/solids       ε=0.65  by difference (1 − water − lipid)
 //
 // References: Rodgers T & Rowland M (2006) J Pharm Sci 95(6):1238-1257 (doi:10.1002/jps.20502);
-//             Poulin P & Theil F-P (2002) J Pharm Sci 91:129-156;
-//             ICRP Publication 89 (2002) reference man; Brown 1997 (volumes).
+//             Rodgers & Rowland (2005) J Pharm Sci (doi:10.1002/jps.20322);
+//             Ye, Nagar & Korzekwa (2016) Biopharm Drug Dispos 37(3):123-141 (doi:10.1002/bdd.1996);
+//             Brown 1997 (volumes).
 //
 // Author: Demetrios Chiuratto Agourakis
 
@@ -50,24 +68,42 @@ struct TissueComp {
     ph_iw:     f64    // intracellular pH
 }
 
-// Rodgers-Rowland (2006) / Poulin-Theil (2002) reference composition.
-// Blood (organ 0) is plasma-water dominated; C_t[0] is unused in the kernel but
-// the plasma composition is provided for completeness.
+// Rodgers & Rowland RAT tissue composition -- the same numbers, digit for
+// digit, as core/rodgers_rowland.sio's rr_fw_e / rr_fw_i / rr_fn_l / rr_fn_ph
+// for organs 1-12; see the SOURCE note there for what was read (the R&R data
+// file of a reference R implementation, and Ye, Nagar & Korzekwa 2016 Table 2,
+// doi:10.1002/bdd.1996, whose two water headers are printed transposed).
+// f_nl is R&R's f_n_l and f_np is R&R's NEUTRAL phospholipid f_n_pl.
+// tests/stdlib/darwin_pbpk/test_composition_tables.sio holds the two tables
+// equal. ph_iw is not part of this correction and is unchanged.
+//
+// f_protein is by difference, 1 - (f_ew + f_iw + f_nl + f_np), recomputed from
+// the R&R values. For ADIPOSE it is NEGATIVE (-0.0066): R&R's own adipose row
+// sums to 1.0066, so no by-difference remainder can be feasible there. That is
+// a property of the source data, pinned by the audit gate, not repaired here.
+//
+// NOT R&R, unsourced here, and unchanged:
+//   blood (0) -- lipids are R&R's PLASMA row (f_n_l 0.0023, f_n_pl 0.0013);
+//                f_ew 0.945 / f_iw 0.000 are not R&R (R&R give no plasma or
+//                whole-blood water). 0.945 equals Poulin & Theil's plasma
+//                f_water, but its provenance in this tree is not recorded.
+//                C_t[0] is unused in the kernel.
+//   other (13) -- R&R have no such tissue; values carried over unsourced.
 pub fn tc_comp(organ: i32) -> TissueComp {
     if organ == 0  { return TissueComp { f_ew: 0.945, f_iw: 0.000, f_nl: 0.0023, f_np: 0.0013, f_protein: 0.0514, ph_iw: 7.40 } } // blood/plasma
-    if organ == 1  { return TissueComp { f_ew: 0.161, f_iw: 0.573, f_nl: 0.0348, f_np: 0.0252, f_protein: 0.2060, ph_iw: 7.00 } } // liver
-    if organ == 2  { return TissueComp { f_ew: 0.273, f_iw: 0.483, f_nl: 0.0207, f_np: 0.0162, f_protein: 0.2071, ph_iw: 7.00 } } // kidney
-    if organ == 3  { return TissueComp { f_ew: 0.162, f_iw: 0.620, f_nl: 0.0390, f_np: 0.0150, f_protein: 0.1640, ph_iw: 7.00 } } // brain
-    if organ == 4  { return TissueComp { f_ew: 0.320, f_iw: 0.456, f_nl: 0.0115, f_np: 0.0166, f_protein: 0.1959, ph_iw: 7.00 } } // heart
-    if organ == 5  { return TissueComp { f_ew: 0.336, f_iw: 0.446, f_nl: 0.0030, f_np: 0.0090, f_protein: 0.2060, ph_iw: 6.60 } } // lung
-    if organ == 6  { return TissueComp { f_ew: 0.118, f_iw: 0.630, f_nl: 0.0238, f_np: 0.0072, f_protein: 0.2210, ph_iw: 6.97 } } // muscle
-    if organ == 7  { return TissueComp { f_ew: 0.135, f_iw: 0.017, f_nl: 0.7900, f_np: 0.0020, f_protein: 0.0560, ph_iw: 7.00 } } // adipose
-    if organ == 8  { return TissueComp { f_ew: 0.282, f_iw: 0.475, f_nl: 0.0487, f_np: 0.0163, f_protein: 0.1780, ph_iw: 7.00 } } // gut
-    if organ == 9  { return TissueComp { f_ew: 0.382, f_iw: 0.291, f_nl: 0.0284, f_np: 0.0111, f_protein: 0.2875, ph_iw: 7.00 } } // skin
-    if organ == 10 { return TissueComp { f_ew: 0.100, f_iw: 0.346, f_nl: 0.0170, f_np: 0.0017, f_protein: 0.5353, ph_iw: 7.00 } } // bone
-    if organ == 11 { return TissueComp { f_ew: 0.207, f_iw: 0.579, f_nl: 0.0201, f_np: 0.0198, f_protein: 0.1741, ph_iw: 7.00 } } // spleen
-    if organ == 12 { return TissueComp { f_ew: 0.120, f_iw: 0.664, f_nl: 0.0410, f_np: 0.0170, f_protein: 0.1580, ph_iw: 7.00 } } // pancreas
-    return TissueComp { f_ew: 0.200, f_iw: 0.500, f_nl: 0.0300, f_np: 0.0150, f_protein: 0.2550, ph_iw: 7.00 }                    // other (13)
+    if organ == 1  { return TissueComp { f_ew: 0.161, f_iw: 0.573, f_nl: 0.014, f_np: 0.024, f_protein: 0.228, ph_iw: 7.00 } } // liver
+    if organ == 2  { return TissueComp { f_ew: 0.273, f_iw: 0.483, f_nl: 0.012, f_np: 0.0242, f_protein: 0.2078, ph_iw: 7.00 } } // kidney
+    if organ == 3  { return TissueComp { f_ew: 0.162, f_iw: 0.620, f_nl: 0.039, f_np: 0.0015, f_protein: 0.1775, ph_iw: 7.00 } } // brain
+    if organ == 4  { return TissueComp { f_ew: 0.320, f_iw: 0.456, f_nl: 0.014, f_np: 0.0111, f_protein: 0.1989, ph_iw: 7.00 } } // heart
+    if organ == 5  { return TissueComp { f_ew: 0.336, f_iw: 0.446, f_nl: 0.022, f_np: 0.0128, f_protein: 0.1832, ph_iw: 6.60 } } // lung
+    if organ == 6  { return TissueComp { f_ew: 0.118, f_iw: 0.630, f_nl: 0.01, f_np: 0.0072, f_protein: 0.2348, ph_iw: 6.97 } } // muscle
+    if organ == 7  { return TissueComp { f_ew: 0.135, f_iw: 0.017, f_nl: 0.853, f_np: 0.0016, f_protein: -0.0066, ph_iw: 7.00 } } // adipose (infeasible in R&R's own data)
+    if organ == 8  { return TissueComp { f_ew: 0.282, f_iw: 0.475, f_nl: 0.038, f_np: 0.0125, f_protein: 0.1925, ph_iw: 7.00 } } // gut
+    if organ == 9  { return TissueComp { f_ew: 0.382, f_iw: 0.291, f_nl: 0.06, f_np: 0.0044, f_protein: 0.2626, ph_iw: 7.00 } } // skin
+    if organ == 10 { return TissueComp { f_ew: 0.100, f_iw: 0.346, f_nl: 0.017, f_np: 0.0017, f_protein: 0.5353, ph_iw: 7.00 } } // bone
+    if organ == 11 { return TissueComp { f_ew: 0.207, f_iw: 0.579, f_nl: 0.0077, f_np: 0.0113, f_protein: 0.195, ph_iw: 7.00 } } // spleen
+    if organ == 12 { return TissueComp { f_ew: 0.120, f_iw: 0.664, f_nl: 0.041, f_np: 0.0093, f_protein: 0.1657, ph_iw: 7.00 } } // pancreas
+    return TissueComp { f_ew: 0.200, f_iw: 0.500, f_nl: 0.0300, f_np: 0.0150, f_protein: 0.2550, ph_iw: 7.00 }                    // other (13) -- NOT R&R, unsourced
 }
 
 // Convenience derived quantities.
@@ -103,9 +139,11 @@ pub fn tc_f_protein(organ: i32) -> f64 { let c = tc_comp(organ)  c.f_protein }
 // Evidence ε per fraction class (literature evidence-quality, dimensionless f64)
 // ============================================================================
 
-pub fn tc_eps_water() -> f64    { return 0.85 }   // ICRP 89 reference man
-pub fn tc_eps_lipid() -> f64    { return 0.70 }   // Poulin & Theil 2002
-pub fn tc_eps_phospho() -> f64  { return 0.55 }   // Rodgers & Rowland 2006 (weakest)
+// Values unchanged from the previous revision; see the header on why their
+// old source labels no longer describe this table.
+pub fn tc_eps_water() -> f64    { return 0.85 }   // R&R rat composition
+pub fn tc_eps_lipid() -> f64    { return 0.70 }   // R&R rat composition
+pub fn tc_eps_phospho() -> f64  { return 0.55 }   // R&R rat composition (weakest)
 pub fn tc_eps_protein() -> f64  { return 0.65 }   // by difference
 
 // Honest confidence ceiling (per-million convention) for a claim that uses the

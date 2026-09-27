@@ -8,66 +8,63 @@
 //       (the accessors rr_neutral calls)
 //   B = core/tissue_composition.sio  tc_f_ew / tc_f_iw / tc_f_nl / tc_f_np
 //
-// Both are attributed to Rodgers & Rowland (2006), and at most one of them can
-// be. This gate does not decide which -- that needs the paper, and R&R's own
-// table is RAT (PMID 16639716 / 15858854; MeSH Animals + Rats, not Humans),
-// which rules out "R&R Table 1, human" as an answer altogether. What it does is
-// recompute every figure the rodgers_rowland.sio header quotes about the
-// conflict, so that a silent edit to either table breaks CI.
+// HISTORY. Both tables used to claim Rodgers & Rowland (R&R) and neither was.
+// A had wrong water in brain, lung and pancreas and R&R's neutral phospholipid
+// in only 1 of 12 organs; B had R&R's water but, in 9 of 12 organs, Poulin &
+// Theil's neutral lipid and TOTAL phospholipid in place of R&R's f_n_l and
+// NEUTRAL f_n_pl. The previous revision of this gate pinned that divergence.
+// Both tables now carry R&R's RAT composition (R&R 2005 doi:10.1002/jps.20322,
+// R&R 2006 doi:10.1002/jps.20502; read via the R&R data file of a reference R
+// implementation and Ye, Nagar & Korzekwa 2016 doi:10.1002/bdd.1996 Table 2,
+// whose two water headers are printed transposed), applied to a human PBPK28
+// physiology. See the SOURCE note in core/rodgers_rowland.sio.
 //
-// It replaces an exploratory PYTHON script in a scratchpad that an earlier
-// revision of that header cited: a reference to a file not in the repository,
-// and Python in the science path besides (CLAUDE.md principle 4). The finding
-// was raised in review by copilot-pull-request-reviewer.
+// So this gate now asserts AGREEMENT, and pins a handful of R&R values as
+// literals, so that a silent edit to either table fails CI.
 //
 // Reproduce with:
 //   bash scripts/dev/run_sio_test_suite_v2.sh --filter composition_tables
 //
-// C1 Every fraction of both tables lies in [0, 1].
-// C2 Table A leaves non-negative protein volume in 13 of 14 organs; the single
-//    violation is ADIPOSE at 1.0070 (0.70% over), which assigns adipose
-//    negative protein volume on the fraction that dominates every Kp the module
-//    predicts.
-// C3 Table B is feasible 14/14, and its five fractions sum to exactly 1 in all
-//    14 organs -- which is why that module's own "mass balance" test cannot
-//    fail: f_protein there IS 1 minus the other four.
-// C4 The disagreement is confined to lipid. Identical values: waters 10/14,
-//    f_nl 2/14, f_np 1/14. These are exact integer pins, no tolerance.
-// C5 The lipid fractions differ in BOTH directions -- min B/A below 0.14, max
-//    above 2.7 -- so this is not a unit or scaling difference between two
-//    versions of one table. They are two different tables.
-// C6 What the choice is worth: with one formula and two tables, Kpu_B/Kpu_A is
-//    smallest at LUNG and largest at MUSCLE, spanning more than a factor of 5
-//    across organs, and the per-organ ratio is the same at P = 1e7 and P = 1e4
-//    to better than 0.01 -- the lipid term dominates in both regimes, so the
-//    divergence does not wash out for an in-domain drug. Exact magnitudes are
-//    printed rather than bracketed by a chosen tolerance.
+// C1 The four measured fractions of both tables lie in [0, 1], all 14 organs.
+//    (B's by-difference f_protein is NOT in [0, 1] for adipose; see C3.)
+// C2 Table A leaves non-negative protein volume in exactly 13 of 14 organs;
+//    the single violation is ADIPOSE at 0.135 + 0.017 + 0.853 + 0.0016 =
+//    1.0066. That is R&R's OWN adipose row: the infeasibility is in the source
+//    data, not an in-tree defect, and is pinned rather than closed with an
+//    invented number. The bound stays <= 1.0.
+// C3 Table B: the same 13/14 with adipose at 1.0066; its five fractions sum to
+//    exactly 1 in all 14 organs (f_protein IS 1 minus the other four, which is
+//    why that module's own "mass balance" test cannot fail); and so f_protein
+//    is negative in exactly one organ, adipose.
+// C4 A and B are EQUAL, exactly (no tolerance -- they are copies of the same
+//    decimal literals), on all four fractions in the 12 organs with an R&R row
+//    (1-12), and on the two lipid fractions of blood (R&R's plasma row). Blood
+//    water and organ 13 ("other") are not R&R, are unsourced, and are left out.
+// C5 Pins against literals copied from R&R's table, in BOTH tables: liver f_n_l,
+//    kidney f_n_pl, brain f_ew, f_iw and f_n_pl, lung f_ew, adipose f_n_l,
+//    spleen f_n_l, pancreas f_iw, plasma f_n_l and f_n_pl.
+//    Exact equality: the literal in the table and the literal here parse to the
+//    same binary64.
+// Adipose sum tolerance, C2/C3: 1e-12. Four binary64 additions of values below
+// 1 cost a few ulp (~1e-15); the bound is derived, not fitted to a residual.
 
 use darwin_pbpk::core::rodgers_rowland::{rr_fw_e, rr_fw_i, rr_fn_l, rr_fn_ph}
 use darwin_pbpk::core::tissue_composition::{tc_f_ew, tc_f_iw, tc_f_nl, tc_f_np, tc_f_protein}
 
 fn ct_abs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
 
-// Exact integral powers of ten by repeated multiplication: 10^0..10^22 are all
-// exactly representable in binary64, so no series is involved here.
-fn ct_pow10i(n: i32) -> f64 with Mut {
-    var p = 1.0
-    var i = 0
-    while i < n {
-        p = p * 10.0
-        i = i + 1
-    }
-    p
-}
-
 fn ct_in_unit(x: f64) -> bool { x >= 0.0 && x <= 1.0 }
 
 fn ct_sum_a(i: i32) -> f64 { rr_fw_e(i) + rr_fw_i(i) + rr_fn_l(i) + rr_fn_ph(i) }
 fn ct_sum_b(i: i32) -> f64 { tc_f_ew(i) + tc_f_iw(i) + tc_f_nl(i) + tc_f_np(i) }
 
-// Kpu under the module's own neutral formula; fu cancels in the B/A ratio.
-fn ct_kpu_a(i: i32, p: f64) -> f64 { rr_fw_e(i) + rr_fw_i(i) + p * (rr_fn_l(i) + 0.3 * rr_fn_ph(i)) }
-fn ct_kpu_b(i: i32, p: f64) -> f64 { tc_f_ew(i) + tc_f_iw(i) + p * (tc_f_nl(i) + 0.3 * tc_f_np(i)) }
+// One literal pin, checked in both tables. field: 0=f_ew 1=f_iw 2=f_n_l 3=f_n_pl.
+fn ct_pin(organ: i32, field: i32, want: f64) -> bool {
+    if field == 0 { return rr_fw_e(organ) == want && tc_f_ew(organ) == want }
+    if field == 1 { return rr_fw_i(organ) == want && tc_f_iw(organ) == want }
+    if field == 2 { return rr_fn_l(organ) == want && tc_f_nl(organ) == want }
+    rr_fn_ph(organ) == want && tc_f_np(organ) == want
+}
 
 fn main() -> i32 with IO, Mut, Div, Panic {
     var fails = 0
@@ -77,94 +74,69 @@ fn main() -> i32 with IO, Mut, Div, Panic {
     var i = 0
     while i < 14 {
         let a = ct_in_unit(rr_fw_e(i)) && ct_in_unit(rr_fw_i(i)) && ct_in_unit(rr_fn_l(i)) && ct_in_unit(rr_fn_ph(i))
-        let b = ct_in_unit(tc_f_ew(i)) && ct_in_unit(tc_f_iw(i)) && ct_in_unit(tc_f_nl(i)) && ct_in_unit(tc_f_np(i)) && ct_in_unit(tc_f_protein(i))
+        let b = ct_in_unit(tc_f_ew(i)) && ct_in_unit(tc_f_iw(i)) && ct_in_unit(tc_f_nl(i)) && ct_in_unit(tc_f_np(i))
         if a && b { unit_ok = unit_ok + 1 }
         i = i + 1
     }
-    print("C1 fractions in [0,1], both tables : ") print(unit_ok) println("/14")
+    print("C1 measured fractions in [0,1]     : ") print(unit_ok) println("/14")
     let c1 = unit_ok == 14
 
     // C2 / C3
     var feas_a = 0
     var feas_b = 0
     var sum1_b = 0
+    var neg_prot = 0
     var j = 0
     while j < 14 {
         if ct_sum_a(j) <= 1.0 { feas_a = feas_a + 1 }
         if ct_sum_b(j) <= 1.0 { feas_b = feas_b + 1 }
         if ct_abs(ct_sum_b(j) + tc_f_protein(j) - 1.0) <= 1.0e-12 { sum1_b = sum1_b + 1 }
+        if tc_f_protein(j) < 0.0 { neg_prot = neg_prot + 1 }
         j = j + 1
     }
     print("C2 table A feasible                : ") print(feas_a) print("/14   adipose sum = ") println(ct_sum_a(7))
     print("C3 table B feasible                : ") print(feas_b) print("/14   adipose sum = ") println(ct_sum_b(7))
     print("C3 table B sums to exactly 1       : ") print(sum1_b) println("/14 (by construction: f_protein = 1 - rest)")
-    let c2 = feas_a == 13 && ct_sum_a(7) > 1.0
-    let c3 = feas_b == 14 && sum1_b == 14
+    print("C3 table B negative f_protein      : ") print(neg_prot) print("/14   adipose f_protein = ") println(tc_f_protein(7))
+    let c2 = feas_a == 13 && ct_sum_a(7) > 1.0 && ct_abs(ct_sum_a(7) - 1.0066) <= 1.0e-12
+    let c3 = feas_b == 13 && ct_sum_b(7) > 1.0 && ct_abs(ct_sum_b(7) - 1.0066) <= 1.0e-12
+             && sum1_b == 14 && neg_prot == 1 && tc_f_protein(7) < 0.0
 
     // C4
-    var same_w = 0
-    var same_nl = 0
-    var same_np = 0
-    var k = 0
-    while k < 14 {
-        if rr_fw_e(k) == tc_f_ew(k) && rr_fw_i(k) == tc_f_iw(k) { same_w = same_w + 1 }
-        if rr_fn_l(k) == tc_f_nl(k) { same_nl = same_nl + 1 }
-        if rr_fn_ph(k) == tc_f_np(k) { same_np = same_np + 1 }
+    var same_all = 0
+    var k = 1
+    while k <= 12 {
+        if rr_fw_e(k) == tc_f_ew(k) && rr_fw_i(k) == tc_f_iw(k) && rr_fn_l(k) == tc_f_nl(k) && rr_fn_ph(k) == tc_f_np(k) {
+            same_all = same_all + 1
+        }
         k = k + 1
     }
-    print("C4 identical waters                : ") print(same_w) println("/14")
-    print("C4 identical f_nl                  : ") print(same_nl) println("/14")
-    print("C4 identical f_np                  : ") print(same_np) println("/14")
-    let c4 = same_w == 10 && same_nl == 2 && same_np == 1
+    let same_blood_lipid = rr_fn_l(0) == tc_f_nl(0) && rr_fn_ph(0) == tc_f_np(0)
+    print("C4 A == B, all 4 fractions, R&R organs 1-12 : ") print(same_all) println("/12")
+    print("C4 A == B, blood lipids (R&R plasma row)    : ") println(if same_blood_lipid { "yes" } else { "no" })
+    let c4 = same_all == 12 && same_blood_lipid
 
-    // C5
-    var lo_lip = 1.0e30
-    var hi_lip = 0.0
-    var m = 0
-    while m < 14 {
-        let rn = tc_f_nl(m) / rr_fn_l(m)
-        let rp = tc_f_np(m) / rr_fn_ph(m)
-        if rn < lo_lip { lo_lip = rn }
-        if rn > hi_lip { hi_lip = rn }
-        if rp < lo_lip { lo_lip = rp }
-        if rp > hi_lip { hi_lip = rp }
-        m = m + 1
-    }
-    print("C5 lipid B/A ratio                 : ") print(lo_lip) print(" .. ") println(hi_lip)
-    let c5 = lo_lip < 0.14 && hi_lip > 2.7
-
-    // C6
-    let p7 = ct_pow10i(7)
-    let p4 = ct_pow10i(4)
-    var lo7 = 1.0e30
-    var hi7 = 0.0
-    var lo_org = 0
-    var hi_org = 0
-    var drift = 0.0
-    var n = 0
-    while n < 14 {
-        let r7 = ct_kpu_b(n, p7) / ct_kpu_a(n, p7)
-        let r4 = ct_kpu_b(n, p4) / ct_kpu_a(n, p4)
-        if r7 < lo7 { lo7 = r7
-            lo_org = n }
-        if r7 > hi7 { hi7 = r7
-            hi_org = n }
-        let d = ct_abs(r7 - r4)
-        if d > drift { drift = d }
-        n = n + 1
-    }
-    print("C6 Kpu_B/Kpu_A at P=1e7            : ") print(lo7) print(" (organ ") print(lo_org) print(") .. ") print(hi7) print(" (organ ") print(hi_org) println(")")
-    print("C6 spread across organs            : ") println(hi7 / lo7)
-    print("C6 max |ratio(1e7) - ratio(1e4)|   : ") println(drift)
-    // organ 5 = lung, organ 6 = muscle
-    let c6 = lo_org == 5 && hi_org == 6 && hi7 / lo7 > 5.0 && drift < 0.01
+    // C5 -- literals copied from R&R's table (tissue, column, value)
+    var pins = 0
+    if ct_pin(1, 2, 0.014) { pins = pins + 1 }     // Liver    f_n_l
+    if ct_pin(2, 3, 0.0242) { pins = pins + 1 }    // Kidney   f_n_pl
+    if ct_pin(3, 0, 0.162) { pins = pins + 1 }     // Brain    f_ew
+    if ct_pin(3, 1, 0.62) { pins = pins + 1 }      // Brain    f_iw
+    if ct_pin(3, 3, 0.0015) { pins = pins + 1 }    // Brain    f_n_pl
+    if ct_pin(5, 0, 0.336) { pins = pins + 1 }     // Lung     f_ew
+    if ct_pin(7, 2, 0.853) { pins = pins + 1 }     // Adipose  f_n_l
+    if ct_pin(11, 2, 0.0077) { pins = pins + 1 }   // Spleen   f_n_l
+    if ct_pin(12, 1, 0.664) { pins = pins + 1 }    // Pancreas f_iw
+    if ct_pin(0, 2, 0.0023) { pins = pins + 1 }    // Plasma   f_n_l  (blood lipids)
+    if ct_pin(0, 3, 0.0013) { pins = pins + 1 }    // Plasma   f_n_pl (blood lipids)
+    print("C5 R&R literal pins, both tables   : ") print(pins) println("/11")
+    let c5 = pins == 11
 
     if c1 { println("C1 PASS") } else { println("C1 FAIL"); fails = fails + 1 }
     if c2 { println("C2 PASS") } else { println("C2 FAIL"); fails = fails + 1 }
     if c3 { println("C3 PASS") } else { println("C3 FAIL"); fails = fails + 1 }
     if c4 { println("C4 PASS") } else { println("C4 FAIL"); fails = fails + 1 }
     if c5 { println("C5 PASS") } else { println("C5 FAIL"); fails = fails + 1 }
-    if c6 { println("C6 PASS") } else { println("C6 FAIL"); fails = fails + 1 }
 
     if fails == 0 {
         println("RR_TABLE_AUDIT_OK")
