@@ -96,6 +96,28 @@ probe_status_from_markers() {
   printf 'pass\n'
 }
 
+# gpu_runtime_file_binary reads tests/fixtures/fmri/tiny_real_slice_nifti1.nii
+# (384 bytes on disk) via read_file+as_bytes and prints the byte count it
+# read back. read_file currently truncates at the fixture's leading NUL byte
+# (a separate, out-of-scope bug -- NOT fixed here), so the length observed
+# today is 2, not 384. Accept exactly {2, 384}: 2 = today's NUL-truncated
+# behavior, 384 = the fixture's true byte length, so this keeps passing
+# once/if that truncation bug is fixed without silently accepting any other
+# (wrong) value such as 0. See PR #2605 review thread 4067566923.
+validate_gpu_runtime_file_binary_len() {
+  local out_path="$1"
+  local len_line
+  len_line="$(grep -m1 '^GPU_RUNTIME_FILE_BINARY_LEN ' "$out_path" 2>/dev/null || true)"
+  if [[ -z "$len_line" ]]; then
+    return 1
+  fi
+  local len_value="${len_line#GPU_RUNTIME_FILE_BINARY_LEN }"
+  case "$len_value" in
+    2|384) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 souc_supports_gpu_backend() {
   local candidate="$1"
   local log_path="$2"
@@ -122,6 +144,7 @@ run_probe() {
   local src="$2"
   local start_marker="$3"
   local after_marker="$4"
+  local validator="${5:-}"
   local out_path="$TMP_DIR/${name}.out"
   local check_rc=125
   local run_rc=125
@@ -149,6 +172,11 @@ PY
 
   local status
   status="$(probe_status_from_markers "$out_path" "$start_marker" "$after_marker" "$check_rc" "$run_rc")"
+  if [[ "$status" == "pass" && -n "$validator" ]]; then
+    if ! "$validator" "$out_path"; then
+      status="fail"
+    fi
+  fi
   local rc="$run_rc"
   if [[ "$run_rc" -eq 125 ]]; then
     rc="$check_rc"
@@ -368,7 +396,7 @@ fi
 
 run_probe "gpu_runtime_literal" "$PROBE_LITERAL" "GPU_RUNTIME_LITERAL_START" "GPU_RUNTIME_LITERAL_AFTER"
 run_probe "gpu_runtime_file_text" "$PROBE_TEXT" "GPU_RUNTIME_FILE_TEXT_START" "GPU_RUNTIME_FILE_TEXT_AFTER"
-run_probe "gpu_runtime_file_binary" "$PROBE_BINARY" "GPU_RUNTIME_FILE_BINARY_START" "GPU_RUNTIME_FILE_BINARY_AFTER"
+run_probe "gpu_runtime_file_binary" "$PROBE_BINARY" "GPU_RUNTIME_FILE_BINARY_START" "GPU_RUNTIME_FILE_BINARY_AFTER" "validate_gpu_runtime_file_binary_len"
 run_probe "gpu_runtime_dynamic_slice" "$PROBE_SLICE" "GPU_RUNTIME_SLICE_START" "GPU_RUNTIME_SLICE_AFTER"
 run_gpu_compile_smoke
 run_gpu_runtime_smoke
