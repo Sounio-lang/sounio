@@ -2834,11 +2834,32 @@ pub fn test_bayesian_checkpoint_mismatch_sensitivity() -> bool with Mut, Div, Pa
     nu = matnm_set(nu, 0 as i64, 0 as i64, -1.0); nu = matnm_set(nu, 1 as i64, 0 as i64, 1.0);
     nu = matnm_set(nu, 1 as i64, 1 as i64, -1.0); nu = matnm_set(nu, 2 as i64, 1 as i64, 1.0);
     let initv: [f64; 8] = [1.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0];
+    // ORACLE for the pairing itself (Copilot review, sounio-lang/sounio#2694):
+    // "shuffling changes the posterior" alone would also hold for a
+    // regression to position-dependent comparisons. datas[d] is the closed
+    // form A(t) = exp(-k_true * dt * cps[d]) with k_true = 0.12, dt = 0.2,
+    // rounded to 6 decimals, so the simulator at k_true must reproduce each
+    // one IN ITS OWN SLOT. Tolerance 1e-6: the 6-decimal rounding
+    // contributes <= 5e-7, and RK4's global error for 30 steps at
+    // k*dt = 0.024 is about 30 * (0.024)^5 / 120 = 2e-9.
+    let ks_true: [f64; 8] = [0.12, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    let sim = simulate_general_crn_checkpoints(&initv, &ks_true, nu, 3, 2, 0.2, &cps, 0);
+    var paired_ok = true;
+    var d: i64 = 0;
+    while d < 4 {
+        if !check_near(sim[d], datas[d], 1e-6) { paired_ok = false; }
+        d = d + 1;
+    }
     let (pk_correct, _, _) = simulate_bayesian_posterior_crn(&initv, &datas, &dus, 0.1, 0.02, nu, 3, 2, 0.2, &cps, 10);
     let (pk_mismatched, _, _) = simulate_bayesian_posterior_crn(&initv, &datas_mismatched, &dus, 0.1, 0.02, nu, 3, 2, 0.2, &cps, 10);
     // Measured: pk_correct=0.114357 (close to k_true=0.12), pk_mismatched=
     // 0.095415 -- a ~0.019 gap, comfortably outside this 1e-3 tolerance.
-    !check_near(pk_correct, pk_mismatched, 1e-3)
+    // The posterior must also CONSUME that pairing: correctly paired data
+    // must land strictly closer to k_true than the shuffled data. check_near
+    // is written as `< tol`, so a NaN posterior fails every clause here.
+    let err_correct = abs_f64(pk_correct - 0.12);
+    let err_mismatched = abs_f64(pk_mismatched - 0.12);
+    paired_ok && err_correct < err_mismatched && !check_near(pk_correct, pk_mismatched, 1e-3)
 }
 
 pub fn test_bayesian_structural_tie() -> bool with Mut, Div, Panic, Observe, IO {
