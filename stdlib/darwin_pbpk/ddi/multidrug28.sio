@@ -373,13 +373,24 @@ pub fn md_restart_pending(md: &MultiDrug28, i: i32) -> bool with Panic {
     return (*md).restart[i] != 0.0
 }
 
-// Whether an oral dose / an IV bolus of mg keeps every cumulative quantity it
-// updates finite (lumen, never absorbed, administered; blood concentration and
+// The dose domain shared by the predicates and the dosing calls: a finite
+// mg >= 0. Zero is admissible (a no-op).
+fn md_dose_mg_ok(mg: f64) -> bool {
+    return is_finite_f64(mg) && mg >= 0.0
+}
+
+// Whether md_dose_oral / md_dose_iv_bolus would accept a dose of mg: true
+// exactly when the call returns normally, because each dosing call panics
+// on precisely `!predicate` (after the same index check) before mutating
+// anything. The predicate checks the dose domain first (md_dose_mg_ok, the
+// one helper the calls use): until 2026-09-27 it checked only overflow, so a
+// finite negative dose that the call rejects answered true (PR #2695
+// review). It then checks that every cumulative quantity the call updates
+// stays finite (lumen, never absorbed, administered; blood concentration and
 // administered). Each is a sum of finite doses and can overflow to +Inf: two
 // oral doses of 1e308 made `administered` +Inf and the call returned
-// normally (PR #2695 review). The dosing calls compute the next values,
-// check them here, and panic before mutating anything; exposed so that a gate
-// can test it (a panic cannot be observed by the run-pass harness).
+// normally (PR #2695 review). Exposed so that a gate can test it (a panic
+// cannot be observed by the run-pass harness).
 // Both validate the drug index like every other public per-drug function
 // (md_check_drug): an unregistered slot below capacity would otherwise answer
 // from zero-filled storage -- measured 2026-09-27 on slot 3 of a one-drug
@@ -387,20 +398,23 @@ pub fn md_restart_pending(md: &MultiDrug28, i: i32) -> bool with Panic {
 // review.
 pub fn md_oral_dose_ok(md: &MultiDrug28, drug: i32, mg: f64) -> bool with Mut, Panic {
     md_check_drug(md, drug)
+    if !md_dose_mg_ok(mg) { return false }
     let fa = (*md).fa[drug]
     return is_finite_f64((*md).lumen[drug] + fa * mg) && is_finite_f64((*md).lost[drug] + (1.0 - fa) * mg) && is_finite_f64((*md).dose_in[drug] + mg)
 }
 
 pub fn md_bolus_dose_ok(md: &MultiDrug28, drug: i32, mg: f64) -> bool with Mut, Div, Panic {
     md_check_drug(md, drug)
+    if !md_dose_mg_ok(mg) { return false }
     return is_finite_f64((*md).cv[drug * 14] + mg / (*md).v_ref[drug * 14]) && is_finite_f64((*md).dose_in[drug] + mg)
 }
 
 pub fn md_dose_oral(md: &!MultiDrug28, drug: i32, mg: f64) with Mut, Panic {
-    md_check_drug(md, drug)
-    if !(is_finite_f64(mg) && mg >= 0.0) { panic("multidrug28: md_dose_oral needs a finite mg >= 0") }
+    if !md_oral_dose_ok(md, drug, mg) {
+        if !md_dose_mg_ok(mg) { panic("multidrug28: md_dose_oral needs a finite mg >= 0") }
+        panic("multidrug28: md_dose_oral: cumulative dose accounting would overflow")
+    }
     if mg == 0.0 { return }
-    if !md_oral_dose_ok(md, drug, mg) { panic("multidrug28: md_dose_oral: cumulative dose accounting would overflow") }
     let fa = (*md).fa[drug]
     (*md).lumen[drug] = (*md).lumen[drug] + fa * mg
     (*md).lost[drug] = (*md).lost[drug] + (1.0 - fa) * mg
@@ -413,10 +427,11 @@ pub fn md_dose_oral(md: &!MultiDrug28, drug: i32, mg: f64) with Mut, Panic {
 }
 
 pub fn md_dose_iv_bolus(md: &!MultiDrug28, drug: i32, mg: f64) with Mut, Div, Panic {
-    md_check_drug(md, drug)
-    if !(is_finite_f64(mg) && mg >= 0.0) { panic("multidrug28: md_dose_iv_bolus needs a finite mg >= 0") }
+    if !md_bolus_dose_ok(md, drug, mg) {
+        if !md_dose_mg_ok(mg) { panic("multidrug28: md_dose_iv_bolus needs a finite mg >= 0") }
+        panic("multidrug28: md_dose_iv_bolus: blood concentration or dose accounting would overflow")
+    }
     if mg == 0.0 { return }
-    if !md_bolus_dose_ok(md, drug, mg) { panic("multidrug28: md_dose_iv_bolus: blood concentration or dose accounting would overflow") }
     (*md).cv[drug * 14] = (*md).cv[drug * 14] + mg / (*md).v_ref[drug * 14]
     (*md).dose_in[drug] = (*md).dose_in[drug] + mg
     md_mark_restart(md, drug)

@@ -29,6 +29,10 @@
 #                it used to step with the victim's sink at 0.
 #   load_control the same state with ext_load = 1e307, so that the sum
 #                (1.1e308) is finite: the step and the inspection run.
+#   oral_neg/nan/inf, bolus_neg/nan/inf
+#                md_dose_oral / md_dose_iv_bolus with mg = -1, NaN, +Inf: the
+#                refusal side of "the predicate is false exactly when the
+#                call panics" (the accepting side is V14 of the multidrug gates).
 #
 # Engine: bin/souc (Madaros) by default; set SOUNIO_SOUC_ENGINE=lean_single to
 # run the same probes on the bootstrap engine.
@@ -158,5 +162,16 @@ write_probe load_inspect "$(load_body 1.0e308 'let f = md_factor_now(&md, a, md_
 refused load_inspect
 write_probe load_step "$(load_body 1.0e308 'md_step(&!md, 0.1)')"
 refused load_step
+
+# Dose domain: each dose the predicates reject (-1, NaN, +Inf) must make the
+# dosing call panic, so that "*_dose_ok is false" and "the call is refused"
+# coincide (the accepted doses are checked in the multidrug gates, V14).
+for d in "neg:0.0 - 1.0" "nan:0.0 * (1.0e308 * 10.0)" "inf:1.0e308 * 10.0"; do
+  tag="${d%%:*}"; expr="${d#*:}"
+  write_probe "oral_${tag}" "md_dose_oral(&!md, a, ${expr})"
+  refused "oral_${tag}"
+  write_probe "bolus_${tag}" "md_dose_iv_bolus(&!md, a, ${expr})"
+  refused "bolus_${tag}"
+done
 
 echo "PBPK28_REFUSAL_GATE_OK"
