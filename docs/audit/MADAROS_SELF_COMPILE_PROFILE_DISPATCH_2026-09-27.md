@@ -130,17 +130,30 @@ Staged, so each stage is separately verifiable.
 - This is an estimate, not a measurement; re-profile after landing.
 
 **Stage B — index (algorithmic).**
-- Add a name → fn-id hash index on `IrModule`, open-addressed on `ir_name_hash`.
-- **A hash is not a key.** On a hash match, compare the full name and keep probing on mismatch, exactly as `ir_intern_name` does (`ir/ir.sio`: "Compare the NAME, not the hash"). Two colliding symbols must never alias one entry.
-- **Each lookup keeps its own selection rule.** One entry per distinct name, holding:
-  - `first_id`: the lowest id with that name. This is what the lowerer scans return: `lowerer_lookup_fn_id_by_name_ref`, `lowerer_find_or_add_fn_id_mut`, and `lowerer_name_has_body_mut`, which then reads `instr_count` of that first id live.
-  - `last_body_id`: the **highest** id with `instr_count > 0`. `ir_merge_find_function_name_index` overwrites `found` on every matching body, so it returns the last body, not the first.
-  - `first_stub_id`: the lowest id with `instr_count == 0`, the merge fallback.
-- **Invalidate on body writes, not only name writes.** `ir_module_promote_canonical_into_stub_slots` (`compiler/module_frontend.sio`) turns a same-named stub into a body through `ir_fn_set`, which changes `last_body_id` and `first_stub_id` without touching the name. Route every write through `ir_fn_set` and have it refresh the entry whenever `name` or `instr_count > 0` changes. Otherwise keep the merge lookup linear, but Stage A-cheap.
-- Guard with `SOUNIO_IR_FN_INDEX_VERIFY=1`: run indexed and linear lookup side by side and panic on any divergence. The CI rung runs once with it on.
-- Stage A keeps the existing scans and their order, so it inherits all three rules unchanged.
 
-**Stage C — checker sig table.** Same treatment for `FnSigTable`: a per-(name, module) index covering the three `prefer_module` passes.
+The index must preserve three selection rules. Stage A keeps the existing scans in the same order, so it inherits them unchanged.
+- **Lowerer scans take the first id with the name.** This covers `lowerer_lookup_fn_id_by_name_ref` and `lowerer_find_or_add_fn_id_mut`. `lowerer_name_has_body_mut` also stops at the first id and reads its `instr_count` live.
+- **Merge takes the last id with a body.** `ir_merge_find_function_name_index` overwrites `found` on every matching id with `instr_count > 0`, so it returns the **highest** such id, not the first.
+- **Merge falls back to the first stub.** With no body, it returns the lowest id with `instr_count == 0`.
+
+Design:
+- **Posting lists, not cached answers.** Keep one list per distinct name holding every id with that name in ascending order. Run the *unchanged* selection code over that list instead of over `0..fn_count`. Every rule above depends only on same-name candidates and on the live `instr_count`, so the result is identical by construction. That includes promotion by `ir_module_promote_canonical_into_stub_slots`, which changes `instr_count` but not names.
+- **Full-name keys.** The table is open-addressed on `ir_name_hash`. On a hash match, compare the full name and keep probing on mismatch, as `ir_intern_name` does. A hash is not a key, and colliding symbols must never share a list.
+- **Scoped, stamped lifetime; no global write hooks.** `fn_count` is assigned directly in about 200 places. For example, `reach_compact_module` (`ir/reachability.sio`) rewrites slots via `ir_fn_set` and then truncates `fn_count` without clearing the tail. So an `IrModule`-wide index kept in sync by hooks is not viable.
+  - Build the index at the start of each dep module's `into_acc` pass, and once at the start of `ir_module_finalize_merged_calls`.
+  - Stamp it with the `fn_count` it reflects. `lowerer_find_or_add_fn_id_mut` appends to the list and bumps the stamp together.
+  - Any lookup that finds `stamp != fn_count` falls back to the linear scan and rebuilds.
+  - Drop the index at the end of the scope.
+- **Verify mode.** With `SOUNIO_IR_FN_INDEX_VERIFY=1`, run the indexed and linear lookups side by side and panic on any divergence. The CI rung runs once with it on.
+
+**Stage C — checker sig table.** Same posting-list approach for `FnSigTable`.
+- Index free functions (`!is_method`) by full name into ascending `gi` lists.
+- Run the three existing `prefer_module` passes over that list, in order:
+  1. first entry whose `defining_module_id` matches;
+  2. first non-private entry across all modules;
+  3. first entry that is not a foreign private extern.
+- Each pass is "earliest in table order among same-name entries satisfying P", so restricting to the name's list preserves the result, including the E175 fallbacks.
+- Same `SOUNIO_IR_FN_INDEX_VERIFY=1` side-by-side check.
 
 **Minimal repro** (principle 12), to be added with Stage A:
 - A generated `.sio` with *N* trivial `fn fK() -> i64 { K }` across *M* imported modules; time `madaros build` for N ∈ {1k, 2k, 4k, 8k}.
