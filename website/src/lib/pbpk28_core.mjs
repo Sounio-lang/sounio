@@ -910,6 +910,21 @@ function vfxStateAbsDiffMass(aCv, aCt, bCv, bCt) {
   return total;
 }
 
+// Certified interval ends, ports of vfx_ss_ratio_lo / vfx_ss_ratio_hi. When an
+// error bound swallows its AUC (large dt, heavy clamping) that side is
+// unbounded, not a quotient of negatives: the lower end is 0 and the upper end
+// is the stdlib's sentinel 1e300 (at dt = 6 h, NM, the naive upper end was −4.23).
+function vfxSsRatioLo(aucP, aucO, errP, errO) {
+  const num = aucO - errO;
+  if (num <= 0.0) return 0.0;
+  return num / (aucP + errP);
+}
+function vfxSsRatioHi(aucP, aucO, errP, errO) {
+  const den = aucP - errP;
+  if (den <= 0.0) return 1.0e300;
+  return (aucO + errO) / den;
+}
+
 export function runVenlafaxineSteadyState({ dt = 0.5, pheno = 2, nDoses = 10, tau = 24.0 } = {}) {
   // Regimen guards: the audit needs a finite positive step, at least one dose,
   // an interval of whole steps (otherwise the audited window is not tau), and a
@@ -975,8 +990,8 @@ export function runVenlafaxineSteadyState({ dt = 0.5, pheno = 2, nDoses = 10, ta
   return {
     aucParent: aucP, aucOdv: aucO, ratio: aucO / aucP,
     errAucParent: errP, errAucOdv: errO,
-    ratioLo: (aucO - errO) / (aucP + errP),
-    ratioHi: (aucO + errO) / (aucP - errP),
+    ratioLo: vfxSsRatioLo(aucP, aucO, errP, errO),
+    ratioHi: vfxSsRatioHi(aucP, aucO, errP, errO),
     bounded: aucP > errP,
   };
 }
