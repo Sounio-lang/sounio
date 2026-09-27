@@ -9487,6 +9487,200 @@ fn pireus_native_emit_hyper_mul_o_fano_ptr3(nc: &! NativeCompiler, dst_ptr: i64,
     }
 }
 
+// Materialize 16D sedenion Cayley-Dickson multiplication at the native-v2 boundary.
+// 22 pre-loaded constants (7 broadcast, 7 Fano permutations, 7 sign masks, 1 conj mask)
+// Pipeline: 4 Fano products + 2 sign conjugations + 1 sub + 1 add = 128 instructions, 768 bytes on AVX-512.
+fn pireus_native_emit_hyper_mul_s_cd_ptr3(nc: &! NativeCompiler, dst_ptr: i64, lhs_ptr: i64, rhs_ptr: i64) with IO, Mut, Panic, Div {
+    pireus_native_rodata_align64(nc)
+    let fano_table_offset = (*nc).flat_rodata_len
+
+    // Broadcast indices: [j]*8 for j in 1..7
+    var j: i64 = 1
+    while j <= 7 {
+        var lane: i64 = 0
+        while lane < 8 {
+            pireus_native_rodata_append_i64(nc, j)
+            lane = lane + 1
+        }
+        j = j + 1
+    }
+
+    // Permutation vectors FANO_PERM_1..7
+    // PERM 1: 1, 0, 3, 2, 5, 4, 7, 6
+    pireus_native_rodata_append_i64(nc, 1); pireus_native_rodata_append_i64(nc, 0)
+    pireus_native_rodata_append_i64(nc, 3); pireus_native_rodata_append_i64(nc, 2)
+    pireus_native_rodata_append_i64(nc, 5); pireus_native_rodata_append_i64(nc, 4)
+    pireus_native_rodata_append_i64(nc, 7); pireus_native_rodata_append_i64(nc, 6)
+
+    // PERM 2: 2, 3, 0, 1, 6, 7, 4, 5
+    pireus_native_rodata_append_i64(nc, 2); pireus_native_rodata_append_i64(nc, 3)
+    pireus_native_rodata_append_i64(nc, 0); pireus_native_rodata_append_i64(nc, 1)
+    pireus_native_rodata_append_i64(nc, 6); pireus_native_rodata_append_i64(nc, 7)
+    pireus_native_rodata_append_i64(nc, 4); pireus_native_rodata_append_i64(nc, 5)
+
+    // PERM 3: 3, 2, 1, 0, 7, 6, 5, 4
+    pireus_native_rodata_append_i64(nc, 3); pireus_native_rodata_append_i64(nc, 2)
+    pireus_native_rodata_append_i64(nc, 1); pireus_native_rodata_append_i64(nc, 0)
+    pireus_native_rodata_append_i64(nc, 7); pireus_native_rodata_append_i64(nc, 6)
+    pireus_native_rodata_append_i64(nc, 5); pireus_native_rodata_append_i64(nc, 4)
+
+    // PERM 4: 4, 5, 6, 7, 0, 1, 2, 3
+    pireus_native_rodata_append_i64(nc, 4); pireus_native_rodata_append_i64(nc, 5)
+    pireus_native_rodata_append_i64(nc, 6); pireus_native_rodata_append_i64(nc, 7)
+    pireus_native_rodata_append_i64(nc, 0); pireus_native_rodata_append_i64(nc, 1)
+    pireus_native_rodata_append_i64(nc, 2); pireus_native_rodata_append_i64(nc, 3)
+
+    // PERM 5: 5, 4, 7, 6, 1, 0, 3, 2
+    pireus_native_rodata_append_i64(nc, 5); pireus_native_rodata_append_i64(nc, 4)
+    pireus_native_rodata_append_i64(nc, 7); pireus_native_rodata_append_i64(nc, 6)
+    pireus_native_rodata_append_i64(nc, 1); pireus_native_rodata_append_i64(nc, 0)
+    pireus_native_rodata_append_i64(nc, 3); pireus_native_rodata_append_i64(nc, 2)
+
+    // PERM 6: 6, 7, 4, 5, 2, 3, 0, 1
+    pireus_native_rodata_append_i64(nc, 6); pireus_native_rodata_append_i64(nc, 7)
+    pireus_native_rodata_append_i64(nc, 4); pireus_native_rodata_append_i64(nc, 5)
+    pireus_native_rodata_append_i64(nc, 2); pireus_native_rodata_append_i64(nc, 3)
+    pireus_native_rodata_append_i64(nc, 0); pireus_native_rodata_append_i64(nc, 1)
+
+    // PERM 7: 7, 6, 5, 4, 3, 2, 1, 0
+    pireus_native_rodata_append_i64(nc, 7); pireus_native_rodata_append_i64(nc, 6)
+    pireus_native_rodata_append_i64(nc, 5); pireus_native_rodata_append_i64(nc, 4)
+    pireus_native_rodata_append_i64(nc, 3); pireus_native_rodata_append_i64(nc, 2)
+    pireus_native_rodata_append_i64(nc, 1); pireus_native_rodata_append_i64(nc, 0)
+
+    // Sign flip masks (bit 63 set = 0x8000000000000000)
+    let s_neg: i64 = 0 - 9223372036854775807 - 1
+    let s_pos: i64 = 0
+
+    // SIGN 1: neg={0,3,5,6}
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_pos)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_neg)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_neg)
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_pos)
+
+    // SIGN 2: neg={0,1,6,7}
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_neg)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_pos)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_pos)
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_neg)
+
+    // SIGN 3: neg={0,2,5,7}
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_pos)
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_pos)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_neg)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_neg)
+
+    // SIGN 4: neg={0,1,2,3}
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_neg)
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_neg)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_pos)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_pos)
+
+    // SIGN 5: neg={0,2,4,6}
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_pos)
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_pos)
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_pos)
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_pos)
+
+    // SIGN 6: neg={0,3,4,7}
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_pos)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_neg)
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_pos)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_neg)
+
+    // SIGN 7: neg={0,1,4,5}
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_neg)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_pos)
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_neg)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_pos)
+
+    // SIGN CONJ (lane 0 = positive 0, lanes 1-7 = negative 0x8000000000000000)
+    pireus_native_rodata_append_i64(nc, s_pos); pireus_native_rodata_append_i64(nc, s_neg)
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_neg)
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_neg)
+    pireus_native_rodata_append_i64(nc, s_neg); pireus_native_rodata_append_i64(nc, s_neg)
+
+    // Load operand addresses into SysV GPRs: rdi=7 (lhs), rsi=6 (rhs), rdx=2 (dst)
+    nc_emit_load_rbp_disp32_reg(nc, 7, ir_slot_offset(lhs_ptr))
+    nc_emit_load_rbp_disp32_reg(nc, 6, ir_slot_offset(rhs_ptr))
+    nc_emit_load_rbp_disp32_reg(nc, 2, ir_slot_offset(dst_ptr))
+
+    // Vector loads:
+    // lhs: zmm0 = alpha_a [rdi], zmm1 = beta_b [rdi + 64]
+    // rhs: zmm2 = alpha_c [rsi], zmm3 = beta_d [rsi + 64]
+    (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x10, 0, 0, 7, 0, 2)
+    (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x10, 1, 0, 7, 64, 2)
+    (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x10, 2, 0, 6, 0, 2)
+    (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x10, 3, 0, 6, 64, 2)
+
+    // Pre-load 21 Fano control constants + 1 conj sign mask into zmm10..zmm31
+    let fano_lea = (*nc).code.len
+    nc_emit_lea_rax_rip_disp32(nc, 0)
+    nc_add_rodata_reloc(nc, fano_lea + 3, fano_table_offset)
+
+    var k: i64 = 0
+    while k < 22 {
+        (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x6f, 10 + k, 0, 0, k * 64, 2)
+        k = k + 1
+    }
+
+    // Register mapping for EVEX Sedenion Cayley-Dickson multiplication:
+    // Operands:
+    //   alpha_a = zmm0
+    //   beta_b  = zmm1
+    //   alpha_c = zmm2
+    //   beta_d  = zmm3
+    // Scratch & accumulator:
+    //   t_bj      = zmm4
+    //   t_aj      = zmm5
+    //   p1_accum  = zmm6
+    //   p2_accum  = zmm7
+    // Output:
+    //   dst_lo    = zmm8 (alpha)
+    //   dst_hi    = zmm9 (beta)
+    // Constants:
+    //   ctrl_base = 10 (zmm10..zmm30)
+    //   conj_sign = 31 (zmm31)
+
+    // Step 1: p1 = a * c
+    (*nc).code = emit_fano_inline((*nc).code, 0, 2, 6, 4, 5, 10)
+
+    // Step 2: conj_d = conj(d) = VXORPD(beta_d, conj_sign) in t_aj (zmm5)
+    (*nc).code = emit_evex_pd_rr_full((*nc).code, 1, 0x57, 5, 3, 31, 2, 0, 0)
+
+    // Step 3: p2 = conj(d) * b
+    (*nc).code = emit_fano_inline((*nc).code, 5, 1, 7, 4, 5, 10)
+
+    // Step 4: dst_lo = p1 - p2 (zmm8 = zmm6 - zmm7)
+    (*nc).code = emit_evex_pd_rr_full((*nc).code, 1, 0x5C, 8, 6, 7, 2, 0, 0)
+
+    // Step 5: p3 = d * a (reuse p1_accum zmm6)
+    (*nc).code = emit_fano_inline((*nc).code, 3, 0, 6, 4, 5, 10)
+
+    // Step 6: conj_c = conj(c) = VXORPD(alpha_c, conj_sign) in t_aj (zmm5)
+    (*nc).code = emit_evex_pd_rr_full((*nc).code, 1, 0x57, 5, 2, 31, 2, 0, 0)
+
+    // Step 7: p4 = b * conj(c) (reuse p2_accum zmm7)
+    (*nc).code = emit_fano_inline((*nc).code, 1, 5, 7, 4, 5, 10)
+
+    // Step 8: dst_hi = p3 + p4 (zmm9 = zmm6 + zmm7)
+    (*nc).code = emit_evex_pd_rr_full((*nc).code, 1, 0x58, 9, 6, 7, 2, 0, 0)
+
+    // Store 128-byte result to destination pointer:
+    // [rdx] = dst_lo (zmm8), [rdx + 64] = dst_hi (zmm9)
+    (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x11, 8, 0, 2, 0, 2)
+    (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x11, 9, 0, 2, 64, 2)
+
+    // VZEROUPPER: C5 F8 77
+    nc_emit_byte(nc, 0xc5)
+    nc_emit_byte(nc, 0xf8)
+    nc_emit_byte(nc, 0x77)
+
+    if str_eq(read_env("SOUNIO_PIREUS_OPERATOR_TRACE"), "1") {
+        print("PIREUS_NATIVE_EMIT opcode=IrHyperMulS candidate=cayley_dickson_sedenion kernel_bytes=768 abi=ptr3\n")
+    }
+}
+
 pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunction, fn_index: i64) -> bool with IO, Mut, Panic, Div, Alloc {
     nc_refresh_wide_mul_sabotage()
     nc_refresh_ieee_f64_sabotage()
@@ -9891,6 +10085,13 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             )
         } else if instr_op == IrOpcode::IrHyperMulO {
             pireus_native_emit_hyper_mul_o_fano_ptr3(
+                nc,
+                IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize],
+                IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize],
+                IR_A_SRC2[(ir_region_slot_r((*func).region, (i))) as usize],
+            )
+        } else if instr_op == IrOpcode::IrHyperMulS {
+            pireus_native_emit_hyper_mul_s_cd_ptr3(
                 nc,
                 IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize],
                 IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize],
