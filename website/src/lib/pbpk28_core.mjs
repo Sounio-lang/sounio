@@ -778,11 +778,23 @@ function merPow(t, n) {                        // t^n via exp(n·ln t), t>0
   if (t > 0.0) lnT = (t > 2.0) ? (0.6931471805599453 + merLnUnit(t / 2.0)) : merLnUnit(t);
   return merExp(n * lnT);
 }
-function merExpNeg(x) {                         // exp(x) for x<0, 20-term Taylor
+function merExpNeg(x) {   // exp(x) for x<0: range-reduced 20-term Taylor (mer_exp_neg)
   if (x >= 0.0) return 1.0;
+  if (x < 0.0 - 700.0) return 0.0;
+  let r = x, m = 0;
+  while (r < 0.0 - 0.5) { r = r * 0.5; m = m + 1; }
   let y = 1.0, term = 1.0;
-  for (let k = 1; k < 20; k++) { term = term * x / k; y = y + term; }
+  for (let k = 1; k < 20; k++) { term = term * r / k; y = y + term; }
+  for (let i = 0; i < m; i++) y = y * y;
   return y;
+}
+function merPhi(x) {      // (1 − e^(−x))/x for x > 0, series below 0.0625 (mer_phi)
+  if (x < 0.0625) {
+    let sum = 1.0, term = 1.0;
+    for (let k = 1; k < 12; k++) { term = term * (0.0 - x) / (k + 1); sum = sum + term; }
+    return sum;
+  }
+  return (1.0 - merExpNeg(0.0 - x)) / x;
 }
 
 export function vfxMatrixFraction(rel, t) {
@@ -966,7 +978,7 @@ export function vfxGutAbsorbStepWindow(gutMg, relMg, relDt, dt) {
   const ka = VFX_KA_ABS;
   const x = ka * relDt;
   const decay = merExpNeg(0.0 - x);
-  const relKept = x > 0.0 ? relMg * ((1.0 - decay) / x) : relMg;
+  const relKept = x > 0.0 ? relMg * merPhi(x) : relMg;
   const gutEndRelease = gutMg * decay + relKept;
   const gutNew = gutEndRelease * merExpNeg(0.0 - ka * (dt - relDt));
   const leaveMg = (gutMg + relMg) - gutNew;

@@ -250,7 +250,7 @@ pub fn vfx_gut_absorb_step_window(gut_mg: f64, rel_mg: f64, rel_dt: f64, dt: f64
     let x = ka * rel_dt
     let decay = mer_exp_neg(0.0 - x)
     // (1 − e^(−x))/x → 1 as x → 0: with no window the release stays in the pool.
-    let rel_kept = if x > 0.0 { rel_mg * ((1.0 - decay) / x) } else { rel_mg }
+    let rel_kept = if x > 0.0 { rel_mg * mer_phi(x) } else { rel_mg }
     let gut_end_release = gut_mg * decay + rel_kept
     let gut_new = gut_end_release * mer_exp_neg(0.0 - ka * (dt - rel_dt))
     let leave_mg = (gut_mg + rel_mg) - gut_new
@@ -329,17 +329,52 @@ fn vfx_strang_step(
 }
 
 // Taylor exp for negative arguments (shared pattern with semaglutide scenario).
+// e^x for x < 0. The 20-term Taylor series is exact to rounding for |x| ≤ 0.5
+// but useless beyond a few units (it returns −0.0012 for e^(−6.3)), so the
+// argument is halved until |x| ≤ 0.5 and the result squared back m times
+// (relative error ~2^m ulp). Unchanged for |x| ≤ 0.5, the production range
+// (ka·dt = 0.315 at dt = 0.5 h). Below −700 the result underflows to 0.
 fn mer_exp_neg(x: f64) -> f64 with Mut, Div {
     if x >= 0.0 { return 1.0 }
+    if x < 0.0 - 700.0 { return 0.0 }
+    var r = x
+    var m: i32 = 0
+    while r < 0.0 - 0.5 {
+        r = r * 0.5
+        m = m + 1
+    }
     var y = 1.0
     var term = 1.0
     var k: i64 = 1
     while k < 20 {
-        term = term * x / (k as f64)
+        term = term * r / (k as f64)
         y = y + term
         k = k + 1
     }
+    var i: i32 = 0
+    while i < m {
+        y = y * y
+        i = i + 1
+    }
     return y
+}
+
+// (1 − e^(−x))/x for x > 0, free of the 1 − e^(−x) cancellation at small x:
+// below x = 0.0625 its series Σ_{k≥0} (−x)^k/(k+1)!, 12 terms (truncation
+// < x^12/13! ≈ 5e-25); above, the direct form, whose relative error ≤ ulp/x.
+fn mer_phi(x: f64) -> f64 with Mut, Div {
+    if x < 0.0625 {
+        var sum = 1.0
+        var term = 1.0
+        var k: i64 = 1
+        while k < 12 {
+            term = term * (0.0 - x) / ((k + 1) as f64)
+            sum = sum + term
+            k = k + 1
+        }
+        return sum
+    }
+    return (1.0 - mer_exp_neg(0.0 - x)) / x
 }
 
 // ODV/parent blood AUC ratio over the run so far (see header: equals the
