@@ -169,7 +169,7 @@ Bounds (`theta_pbpk28.sio`): `|residual|/scale ≤ max(1e-12, sub_steps·1e-15)`
 
 ## LLM-offload math review record
 
-The review record lives here because `.claude/llm_offload_log.md` is gitignored (`.gitignore`: `.claude/`), so the append-only log exists only per checkout. `.claude/AGENT_OFFLOAD_POLICY.md` requires an independent second opinion for math claims, so every review input was also sent through the default fan-out (`bin/llm-offload -t math-review`), and then to other providers when legs failed. On 2026-09-26 the default fan-out's `zai` leg was refused (Fair Usage rate limit, code 1313) and its `local` leg was unreachable. `deepseek` rejected its API key and `mistral` errored on three of the four inputs. None of those failed legs is counted as a pass below.
+This section is a self-contained copy of this PR's entries in the committed offload log, `.claude/llm_offload_log.md` (tracked; this PR appends to it), kept here so the audit can be read without the log. `.claude/AGENT_OFFLOAD_POLICY.md` requires an independent second opinion for math claims, so every review input was also sent through the default fan-out (`bin/llm-offload -t math-review`), and then to other providers when legs failed. On 2026-09-26 the default fan-out's `zai` leg was refused (Fair Usage rate limit, code 1313) and its `local` leg was unreachable. `deepseek` rejected its API key and `mistral` errored on three of the four inputs. None of those failed legs is counted as a pass below.
 
 | review input (claims) | xai grok-4.6 | qwen3-235b | mistral-large |
 |---|---|---|---|
