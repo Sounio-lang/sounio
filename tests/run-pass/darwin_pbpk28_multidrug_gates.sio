@@ -238,6 +238,19 @@
 //     Until 2026-09-27 the predicates checked only overflow and answered true
 //     for -1, and V14 fails on that.
 //
+// V15 Kinetic setters after the first step schedule the restart (PR #2695
+//     review). Victims v, w (CLint on CYP3A4 at both sites), perpetrator x
+//     (no CLint, Ki on CYP3A4), all dosed and run to 1 h so every pending
+//     restart has been consumed. Then, one change at a time, each followed by
+//     a step that consumes it: Ki of x 1.0 -> 2.0 schedules v and w, not x;
+//     Ki 2.0 -> 0 (inhibition switched OFF) schedules v and w as well; the
+//     external CYP3A4 liver load 0 -> 0.5 schedules v and w; CLint of v
+//     schedules v alone; fu of x at the liver schedules x (its own sink is
+//     zero, but its inhibitor load moves) and v, w. Re-writing a stored value
+//     schedules nothing, and on a fresh driver before any step no setter
+//     schedules anything (setup order stays bit-identical). Without the
+//     scheduling, every "schedules" case reads false and V15 fails.
+//
 // Transport parameters are the rapamycin PBPK28 profile with synthetic CLint and
 // Ki values: kernel/driver correctness fixtures, not drug claims.
 
@@ -890,6 +903,59 @@ fn gate_v13() -> bool with Mut, Div, Panic, IO {
     return lie < 0.0 && pc == lie && it4 == lie
 }
 
+// V15 -------------------------------------------------------------------------
+fn v15_pending(md: &MultiDrug28, v: i32, w: i32, x: i32) -> i32 with Mut, Panic {
+    var code: i32 = 0
+    if md_restart_pending(md, v) { code = code + 1 }
+    if md_restart_pending(md, w) { code = code + 2 }
+    if md_restart_pending(md, x) { code = code + 4 }
+    return code
+}
+
+fn gate_v15() -> bool with Mut, Div, Panic, IO {
+    var fresh = md_new(true)
+    let fv = add_victim(&!fresh, 1.5)
+    var q = pbpk28_params_rapamycin()
+    q.cl_central = 1.0
+    let fx = md_add_drug(&!fresh, q, 0.1, 1.0, 1.0)
+    md_set_ki(&!fresh, fx, md_cyp3a4(), 1.0)
+    md_set_ext_load(&!fresh, md_site_liver(), md_cyp3a4(), 0.5)
+    let pre = v15_pending(&fresh, fv, fv, fx)
+
+    var md = md_new(true)
+    let v = add_victim(&!md, 1.5)
+    let w = add_victim(&!md, 0.5)
+    let x = md_add_drug(&!md, q, 0.1, 1.0, 1.0)
+    md_set_ki(&!md, x, md_cyp3a4(), 1.0)
+    md_dose_iv_bolus(&!md, v, 5.0)
+    md_dose_iv_bolus(&!md, w, 5.0)
+    md_dose_iv_bolus(&!md, x, 5.0)
+    md_run_to(&!md, 1.0, 0.1)
+    let settled = v15_pending(&md, v, w, x)
+    md_set_ki(&!md, x, md_cyp3a4(), 2.0)
+    let c_ki = v15_pending(&md, v, w, x)
+    md_step(&!md, 0.1)
+    md_set_ki(&!md, x, md_cyp3a4(), 2.0)
+    let c_same = v15_pending(&md, v, w, x)
+    md_set_ki(&!md, x, md_cyp3a4(), 0.0)
+    let c_off = v15_pending(&md, v, w, x)
+    md_step(&!md, 0.1)
+    md_set_ext_load(&!md, md_site_liver(), md_cyp3a4(), 0.5)
+    let c_ext = v15_pending(&md, v, w, x)
+    md_step(&!md, 0.1)
+    md_set_clint(&!md, v, md_site_liver(), md_cyp3a4(), 150.0)
+    let c_cl = v15_pending(&md, v, w, x)
+    md_step(&!md, 0.1)
+    md_set_ki(&!md, x, md_cyp3a4(), 1.0)
+    md_step(&!md, 0.1)
+    md_set_fu_site(&!md, x, md_site_liver(), 0.2)
+    let c_fu = v15_pending(&md, v, w, x)
+    print("V15 pending bitmask (v=1, w=2, x=4): pre-start ") print(pre) print(", settled ") print(settled)
+    print(", Ki change ") print(c_ki) print(", same Ki ") print(c_same) print(", Ki off ") print(c_off)
+    print(", ext load ") print(c_ext) print(", CLint v ") print(c_cl) print(", fu x ") println(c_fu)
+    return pre == 0 && settled == 0 && c_ki == 3 && c_same == 0 && c_off == 3 && c_ext == 3 && c_cl == 1 && c_fu == 7
+}
+
 // V14 -------------------------------------------------------------------------
 fn gate_v14() -> bool with Mut, Div, Panic, IO {
     let inf = 1.0e308 * 10.0
@@ -940,6 +1006,7 @@ fn main() -> i32 with Mut, Div, Panic, IO {
     let v12 = gate_v12()
     let v13 = gate_v13()
     let v14 = gate_v14()
+    let v15 = gate_v15()
     if m { println("M PASS") } else { println("M FAIL") }
     if v3 { println("V3 PASS") } else { println("V3 FAIL") }
     if v4 { println("V4 PASS") } else { println("V4 FAIL") }
@@ -952,7 +1019,8 @@ fn main() -> i32 with Mut, Div, Panic, IO {
     if v12 { println("V12 PASS") } else { println("V12 FAIL") }
     if v13 { println("V13 PASS") } else { println("V13 FAIL") }
     if v14 { println("V14 PASS") } else { println("V14 FAIL") }
-    if m && v3 && v4 && v6 && v7 && v8 && v9 && v10 && v11 && v12 && v13 && v14 {
+    if v15 { println("V15 PASS") } else { println("V15 FAIL") }
+    if m && v3 && v4 && v6 && v7 && v8 && v9 && v10 && v11 && v12 && v13 && v14 && v15 {
         println("PBPK28_MULTIDRUG_GATES_PASS")
         return 0
     }

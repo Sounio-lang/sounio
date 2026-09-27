@@ -178,6 +178,7 @@ pub struct MultiDrug28 {
     pub neg_min_rel: [f64; 16], // most negative entry / scale of any stage or step (clamp-free path; <= 0)
     pub t: f64,
     pub restart: [f64; 16],   // 1.0: the drug's next step is the backward-Euler restart (see header)
+    pub stepped: f64,         // 1.0 once any step has been taken (kinetic setters then restart)
     // step scratch (not model state): persistent so that a step allocates no
     // managed handles under Madaros (see the engine note in the header)
     pub f_n: [f64; 128],      // factors at t_n
@@ -202,7 +203,7 @@ pub fn md_new(portal: bool) -> MultiDrug28 {
         fa: [0.0; 16], ka: [0.0; 16], iv_rate: [0.0; 16],
         cv: [0.0; 224], ct: [0.0; 224], lumen: [0.0; 16],
         dose_in: [0.0; 16], lost: [0.0; 16], elim: [0.0; 16], auc_b: [0.0; 16], clamped: [0.0; 16],
-        neg_min_rel: [0.0; 16], t: 0.0, restart: [0.0; 16],
+        neg_min_rel: [0.0; 16], t: 0.0, restart: [0.0; 16], stepped: 0.0,
         f_n: [1.0; 128], f_star: [1.0; 128], f_use: [1.0; 128],
         ct_pred: [0.0; 224], gut_rate: [0.0; 16],
         sc_p: pbpk28_params_rapamycin(), sc_s0: pbpk28_state_zero(), sc_s: pbpk28_state_zero(),
@@ -307,11 +308,54 @@ fn md_check_enz(enz: i32) with Panic {
     if enz < 0 || enz >= MD_NE { panic("multidrug28: enzyme code out of range") }
 }
 
+// Kinetic setters after integration has started (PR #2695 review). A change of
+// fu, CLint, Ki or an external load moves sink coefficients, which is a
+// discontinuity in the operator of every drug whose sink it touches; TR-BDF2
+// applied across it rings exactly as it does after a dose. So once a step has
+// been taken, a setter that actually changes a value schedules the
+// backward-Euler restart for each affected drug (md_restart_sinks_at). Before
+// the first step nothing has been integrated and nothing is scheduled, so
+// setup order leaves trajectories bit-identical; a call that writes the value
+// already stored is not an event either.
+//
+// Affected drugs: md_set_clint(i, s, k) and md_set_fu_site(i, s) change drug
+// i's own sink at site s; fu also scales i's contribution C_u = fu·C_t/K_p to
+// the inhibitor load at site s, so every drug with CLint at that site on an
+// enzyme i inhibits is affected too. md_set_ki(j, k) changes the factor of
+// every other drug with CLint on enzyme k at either site -- whatever the sign
+// of the old or new Ki, which covers switching inhibition on and off.
+// md_set_ext_load(s, k) changes the factor of every drug with CLint at (s, k).
+fn md_restart_sinks_at(md: &!MultiDrug28, skip: i32, site: i32, enz: i32) with Mut {
+    let n = (*md).n
+    var i: i32 = 0
+    while i < n {
+        if i != skip {
+            var hit = false
+            if site < 0 {
+                if (*md).clint[i * 8 + enz] > 0.0 || (*md).clint[i * 8 + 4 + enz] > 0.0 { hit = true }
+            } else {
+                if (*md).clint[i * 8 + site * 4 + enz] > 0.0 { hit = true }
+            }
+            if hit { (*md).restart[i] = 1.0 }
+        }
+        i = i + 1
+    }
+}
+
 pub fn md_set_fu_site(md: &!MultiDrug28, drug: i32, site: i32, fu: f64) with Mut, Panic {
     md_check_drug(md, drug)
     md_check_site(site)
     if !(fu > 0.0 && fu <= 1.0) { panic("multidrug28: md_set_fu_site needs 0 < fu <= 1") }
+    if fu == (*md).fu_site[drug * 2 + site] { return }
     (*md).fu_site[drug * 2 + site] = fu
+    if (*md).stepped != 0.0 {
+        (*md).restart[drug] = 1.0
+        var k: i32 = 0
+        while k < MD_NE {
+            if (*md).ki[drug * 4 + k] > 0.0 { md_restart_sinks_at(md, drug, site, k) }
+            k = k + 1
+        }
+    }
 }
 
 // clint_u < 0 would make the interstitial sink a mass SOURCE.
@@ -320,7 +364,9 @@ pub fn md_set_clint(md: &!MultiDrug28, drug: i32, site: i32, enz: i32, clint_u: 
     md_check_site(site)
     md_check_enz(enz)
     if !(is_finite_f64(clint_u) && clint_u >= 0.0) { panic("multidrug28: md_set_clint needs a finite CLint_u >= 0") }
+    if clint_u == (*md).clint[drug * 8 + site * 4 + enz] { return }
     (*md).clint[drug * 8 + site * 4 + enz] = clint_u
+    if (*md).stepped != 0.0 { (*md).restart[drug] = 1.0 }
 }
 
 // A finite Ki <= 0 stays the documented way to declare "not an inhibitor of
@@ -330,7 +376,9 @@ pub fn md_set_ki(md: &!MultiDrug28, drug: i32, enz: i32, ki_u: f64) with Mut, Pa
     md_check_drug(md, drug)
     md_check_enz(enz)
     if !is_finite_f64(ki_u) { panic("multidrug28: md_set_ki needs a finite Ki (use Ki <= 0 for no inhibition)") }
+    if ki_u == (*md).ki[drug * 4 + enz] { return }
     (*md).ki[drug * 4 + enz] = ki_u
+    if (*md).stepped != 0.0 { md_restart_sinks_at(md, drug, 0 - 1, enz) }
 }
 
 // load < 0 would raise the factor above 1 (a competitive ACTIVATOR), and
@@ -339,7 +387,9 @@ pub fn md_set_ext_load(md: &!MultiDrug28, site: i32, enz: i32, load: f64) with M
     md_check_site(site)
     md_check_enz(enz)
     if !(is_finite_f64(load) && load >= 0.0) { panic("multidrug28: md_set_ext_load needs a finite load >= 0") }
+    if load == (*md).ext_load[site * 4 + enz] { return }
     (*md).ext_load[site * 4 + enz] = load
+    if (*md).stepped != 0.0 { md_restart_sinks_at(md, 0 - 1, site, enz) }
 }
 
 // A dosing event of drug j schedules the backward-Euler restart for the next
@@ -816,6 +866,7 @@ fn md_step_to(md: &!MultiDrug28, t_next: f64) with Mut, Div, Panic {
     md_coupled_step(md, h)
     md_check_finite_blood(md)
     (*md).t = t_next
+    (*md).stepped = 1.0
 }
 
 // Advances the clock to fl(t + dt) and integrates the step over the actual
