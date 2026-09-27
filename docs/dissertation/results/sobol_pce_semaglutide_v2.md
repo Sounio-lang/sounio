@@ -39,9 +39,9 @@ invariant S_i ≤ S_Ti and **fails in both** (below), so the run exits with rc =
 marker. `scripts/ci/dissertation_pbpk_suite_gate.sh` lists the module under
 `TESTS_EXPECTED_FAIL_HONEST`: it is accepted (XFAIL) only when the run exits with rc = 2 and prints
 the S_i ≤ S_Ti diagnostic exactly twice and no other `FAIL` line; a timeout, any other failure, or
-an unexpected pass fails the gate. The full run takes ~40 min under lean_single, so the gate needs
-`DPS_TIMEOUT_SECONDS` ≳ 3000 for this entry (at the default 90 s it times out and fails, as it did
-before this change).
+an unexpected pass fails the gate. The full run takes ~40 min under lean_single (2331–2392 s over
+four runs), so the entry carries its own 3600 s timeout instead of the gate's 90 s default, under
+which it could only ever time out (as it did before this change).
 
 ## Status of these numbers: estimator output, not validated Sobol' indices
 

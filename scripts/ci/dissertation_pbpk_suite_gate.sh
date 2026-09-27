@@ -47,7 +47,7 @@
 #
 # Knobs (env):
 #   DPS_STAGE_DIR             working directory (default mktemp)
-#   DPS_TIMEOUT_SECONDS       per-test timeout (default 90)
+#   DPS_TIMEOUT_SECONDS       per-test timeout (default 90; TESTS_EXPECTED_FAIL_HONEST entries carry their own)
 #   SOUNIO_DPS_GATE_SKIP=1    skip entirely
 
 set -euo pipefail
@@ -171,12 +171,17 @@ TESTS_PENDING_REGRESSION=()
 # other `FAIL` line. A timeout, a different rc, any other failure, or an
 # unexpected pass (rc 0) fails the gate -- the last one so the entry is moved
 # back to TESTS once the defect is fixed.
-# Format: name|src|expected_rc|diagnostic_count|diagnostic (fixed string)
+# Each entry carries its own timeout (seconds), used instead of
+# DPS_TIMEOUT_SECONDS: an entry that cannot finish inside the default would
+# otherwise always be classified FAIL:timeout.
+# Format: name|src|expected_rc|diagnostic_count|timeout_s|diagnostic (fixed string)
 TESTS_EXPECTED_FAIL_HONEST=(
   # Saltelli estimator output violates S_i <= S_Ti in both self-tests
   # (rapamycin and semaglutide TEST 7; stdlib/epistemic/sobol.sio not yet
   # repaired). See docs/dissertation/results/sobol_pce_semaglutide_v2.md.
-  "pbpk28_sobol_pce|stdlib/darwin_pbpk/validation/pbpk28_sobol_pce.sio|2|2|FAIL: estimator output violates S_i <= S_Ti; not usable as Sobol' indices"
+  # Timeout: four lean_single runs on the workspace took 2331-2392 s
+  # (N = 512 Saltelli, two self-tests); 3600 s is ~1.5x the slowest.
+  "pbpk28_sobol_pce|stdlib/darwin_pbpk/validation/pbpk28_sobol_pce.sio|2|2|3600|FAIL: estimator output violates S_i <= S_Ti; not usable as Sobol' indices"
 )
 
 # Verdict for one expected-FAIL_HONEST run: prints XFAIL or FAIL:<reason>.
@@ -348,11 +353,11 @@ done
 # Expected FAIL_HONEST loop (see TESTS_EXPECTED_FAIL_HONEST).
 xfails=0
 for entry in "${TESTS_EXPECTED_FAIL_HONEST[@]}"; do
-  IFS='|' read -r name src want_rc want_n diag <<< "$entry"
+  IFS='|' read -r name src want_rc want_n entry_timeout diag <<< "$entry"
   log="$STAGE_DIR/$name.log"
 
   echo ""
-  echo "[$name] (expected FAIL_HONEST)"
+  echo "[$name] (expected FAIL_HONEST, timeout=${entry_timeout}s)"
   echo "  src=$src"
 
   if [[ ! -f "$src" ]]; then
@@ -363,7 +368,7 @@ for entry in "${TESTS_EXPECTED_FAIL_HONEST[@]}"; do
   fi
 
   set +e
-  timeout "$TIMEOUT_SECONDS" "$SOUC_BIN" run "$src" >"$log" 2>&1
+  timeout "$entry_timeout" "$SOUC_BIN" run "$src" >"$log" 2>&1
   rc=$?
   set -e
 
@@ -373,7 +378,7 @@ for entry in "${TESTS_EXPECTED_FAIL_HONEST[@]}"; do
     xfails=$((xfails + 1))
     results+=("XFAIL $name  documented_defect")
   else
-    echo "  FAIL: expected-FAIL_HONEST entry did not fail as recorded (${verdict#FAIL:}; rc=$rc, timeout=$TIMEOUT_SECONDS)"
+    echo "  FAIL: expected-FAIL_HONEST entry did not fail as recorded (${verdict#FAIL:}; rc=$rc, timeout=${entry_timeout}s)"
     tail -5 "$log" | sed 's/^/    /'
     fails=$((fails + 1))
     results+=("FAIL  $name  ${verdict#FAIL:}")
