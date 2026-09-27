@@ -36,6 +36,24 @@
 use darwin_pbpk::core::pbpk28_params::*
 use eisa::format::{is_finite_f64}
 
+// a·b/d for positive a, b, d, where b/d is the well-scaled factor (>= 1 for
+// the liver inverse, bounded by 2^53 for the gut one). When the product a·b
+// is a normal finite double this is fl(fl(a·b)/d), bit for bit the form these
+// inverses always used. Otherwise that product has underflowed or overflowed
+// although the result may be representable, and the ratio is taken first:
+// a·(b/d). PR #2695 review: CL_H = 5e-201, Q_L = 1e-200, PS = 2e-200 passed
+// every domain check, Q_L·CL_H underflowed to 0 and the liver inverse returned
+// 0 instead of 2e-200; CL_H = 5e153, Q_L = 1e154, PS = 2e154 returned +Inf
+// (and panicked) instead of 2e154. Always taking the ratio first would move
+// ordinary results as well: measured over 1920 liver cases, 1112 changed, by
+// up to 161 ulp where PS - X_L cancels. The fallback changes nothing that
+// did not already underflow or overflow.
+fn p28c_mul_div(a: f64, b: f64, d: f64) -> f64 with Div {
+    let prod = a * b
+    if is_finite_f64(prod) && prod >= 2.2250738585072014e-308 { return prod / d }
+    return a * (b / d)
+}
+
 // fu·CLint (L/h) of the liver sink that gives hepatic blood clearance cl_h
 // (L/h) with total liver blood flow q_l and liver PS ps_l.
 // Every domain test is written as a NEGATED predicate, `!(ok)`, not as its
@@ -47,12 +65,15 @@ pub fn p28c_liver_fuclint(cl_h: f64, q_l: f64, ps_l: f64) -> f64 with Div, Panic
     if !(is_finite_f64(q_l) && q_l > 0.0) { panic("pbpk28_calibration: need a finite Q_L > 0") }
     if !(is_finite_f64(ps_l) && ps_l > 0.0) { panic("pbpk28_calibration: need a finite liver PS > 0") }
     if !(is_finite_f64(cl_h) && cl_h > 0.0 && cl_h < q_l) { panic("pbpk28_calibration: need a finite 0 < CL_H < Q_L") }
-    let x = q_l * cl_h / (q_l - cl_h)
+    // Both products go through p28c_mul_div, whose fallback factors,
+    // Q_L/(Q_L - CL_H) and PS/(PS - X_L), lie between 1 and about 2^53, so
+    // neither leaves the range unless its result does.
+    let x = p28c_mul_div(cl_h, q_l, q_l - cl_h)
     if !(x < ps_l) { panic("pbpk28_calibration: CL_H not reachable with this liver PS (X_L >= PS)") }
-    // Finite, in-domain inputs can still overflow here: CL_H = 5e153,
-    // Q_L = 1e154, PS = 2e154 give a finite X_L = 1e154 and X_L·PS = +Inf.
-    // The result is checked rather than returned as a calibrated value.
-    let fuclint = x * ps_l / (ps_l - x)
+    // The result itself can still overflow when X_L is within a few ulps of
+    // PS (the ratio PS/(PS - X_L) reaches 2^52 or so) and X_L is large. It is
+    // checked rather than returned as a calibrated value.
+    let fuclint = p28c_mul_div(x, ps_l, ps_l - x)
     if !is_finite_f64(fuclint) { panic("pbpk28_calibration: liver fu*CLint overflows (inputs out of physiological range)") }
     return fuclint
 }
@@ -80,7 +101,10 @@ pub fn p28c_gut_asymmetric(f_g: f64, e_sys: f64, q_g: f64) -> (f64, f64) with Di
     if !(is_finite_f64(q_g) && q_g > 0.0) { panic("pbpk28_calibration: need a finite Q_gut > 0") }
     if !(e_sys > 0.0 && e_sys < 1.0) { panic("pbpk28_calibration: need 0 < E_sys < 1") }
     if !(f_g > 0.0 && f_g < 1.0 - e_sys) { panic("pbpk28_calibration: need 0 < F_G < 1 - E_sys") }
-    let x = q_g * e_sys / (1.0 - e_sys)
+    // Through p28c_mul_div, as in the liver inverse: its fallback factor
+    // E_sys/(1 - E_sys) lies in (E_sys, 2^53], so the product leaves the range
+    // only with its result (or for a subnormal E_sys).
+    let x = p28c_mul_div(q_g, e_sys, 1.0 - e_sys)
     let a = f_g / (1.0 - e_sys)
     let ps = x / (1.0 - a)
     let clint = ps * (1.0 - a) / a

@@ -23,6 +23,25 @@
 //     systemic gut clearance Q_g·E_sys, to 1e-9.
 // C3  Both sites: AUC_po/AUC_iv = F_G·F_H with the liver and the asymmetric gut
 //     calibrated together (the portal route composes the two first passes).
+// C4  Range: an inverse whose result is representable must return it, even
+//     when a textbook intermediate is not. Liver: CL_H = 5e-201,
+//     Q_L = 1e-200, PS = 2e-200 (Q_L·CL_H underflows to 0; the inverse
+//     returned 0, PR #2695 review). Gut: F_G = 4e-10, E_sys = 1 - 2^-30,
+//     Q_gut = 1e-315 (Q_gut·E_sys is subnormal with ~27 significant bits, and
+//     the inverse was off by ~2e-9 relative). The reference is the same
+//     inverse on inputs scaled by S = 2^664, where every intermediate is a
+//     normal double, divided by S: power-of-two scaling is exact, so the two
+//     differ only by the rounding of different operation orders. Tolerance,
+//     by operation count with u = 2^-53: liver X_L carries <= 3u per path, the
+//     subtraction PS - X_L amplifies it by kappa - 1 (kappa = PS/(PS - X_L))
+//     and adds u, and the final product and quotient 2u, so <= (3kappa + 3)u
+//     per path and (6kappa + 6)u between them (18u here, kappa = 2); gut X_g
+//     3u, PS_g one more division, CLint_g two more operations, so <= 6u per
+//     path and 12u between them. The unfixed liver inverse returns 0
+//     (relative error 1) and the gut one misses by ~2e-9: both fail. For
+//     ordinary inputs the result is bit-identical to the previous form
+//     (measured over 1920 liver and 2964 gut cases).
+//
 // Targets are midazolam-like (F_G 0.57, E_sys 0.08: Paine 1996; E_H 0.44:
 // Thummel 1996) on the rapamycin physiology, to exercise realistic magnitudes;
 // they are fixtures, not the midazolam profile.
@@ -49,6 +68,9 @@ fn run(fuclint_l: f64, fuclint_g: f64, ps_g: f64, cl_c: f64, oral: bool) -> (f64
     md_run_to(&!md, 300.0, 0.1)
     return (md.auc_b[i], md_clamped(&md, i))
 }
+
+// X_L = Q_L·CL_H/(Q_L - CL_H) for the C4 tolerance (kappa), at normal scale.
+fn c4_x_ref(cl_h: f64, q_l: f64) -> f64 with Div { return q_l * cl_h / (q_l - cl_h) }
 
 fn main() -> i32 with Mut, Div, Panic, IO {
     let p = pbpk28_params_rapamycin()
@@ -95,11 +117,36 @@ fn main() -> i32 with Mut, Div, Panic, IO {
     print("C3 error (rel x1e12) = ") println(e12(err3))
     let ok3 = err3 < 1.0e-9 && cp3 <= bound && ci3 <= bound
 
+    // C4
+    let u = 1.1102230246251565e-16
+    var sc = 1.0
+    var kk: i32 = 0
+    while kk < 664 {
+        sc = sc * 2.0
+        kk = kk + 1
+    }
+    let tiny_l = p28c_liver_fuclint(5.0e-201, 1.0e-200, 2.0e-200)
+    let ref_l = p28c_liver_fuclint(5.0e-201 * sc, 1.0e-200 * sc, 2.0e-200 * sc) / sc
+    let x_ref = c4_x_ref(5.0e-201 * sc, 1.0e-200 * sc)
+    let kappa = 2.0e-200 * sc / (2.0e-200 * sc - x_ref)
+    let err_l = rel(tiny_l, ref_l)
+    let tol_l = (6.0 * kappa + 6.0) * u
+    let e_sys4 = 1.0 - 1.0 / 1073741824.0
+    let (ps4, cl4) = p28c_gut_asymmetric(4.0e-10, e_sys4, 1.0e-315)
+    let (rps4, rcl4) = p28c_gut_asymmetric(4.0e-10, e_sys4, 1.0e-315 * sc)
+    let err_g = rel(ps4, rps4 / sc) + rel(cl4, rcl4 / sc)
+    let tol_g = 12.0 * u
+    print("C4 liver tiny inverse x1e200 = ") print(tiny_l * 1.0e200) print("  scaled reference x1e200 = ") print(ref_l * 1.0e200)
+    print("  error / tolerance = ") println(err_l / tol_l)
+    print("C4 gut tiny inverse: summed relative error / tolerance = ") println(err_g / tol_g)
+    let ok4 = err_l <= tol_l && err_g <= tol_g
+
     if ok0 { println("C0 PASS") } else { println("C0 FAIL") }
     if ok1 { println("C1 PASS") } else { println("C1 FAIL") }
     if ok2 { println("C2 PASS") } else { println("C2 FAIL") }
     if ok3 { println("C3 PASS") } else { println("C3 FAIL") }
-    if ok0 && ok1 && ok2 && ok3 {
+    if ok4 { println("C4 PASS") } else { println("C4 FAIL") }
+    if ok0 && ok1 && ok2 && ok3 && ok4 {
         println("PBPK28_CALIBRATION_GATES_PASS")
         return 0
     }
