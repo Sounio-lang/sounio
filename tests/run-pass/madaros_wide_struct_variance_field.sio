@@ -1,0 +1,134 @@
+//@ run-pass
+// Regression for the 64->128 variance-metadata widening in
+// self-hosted/ir/lower.sio (PR #2667 review, comment 4106025436): the two
+// `while fi < 128` loops that copy per-field uncertainty-tracking metadata
+// (one for `let x = agg.field` where the field is itself struct-valued --
+// ExprFieldAccess -- one for `let x = existing_local` -- ExprIdent alias)
+// were previously capped at 64, silently dropping variance for fields 64-127.
+// The wide-struct tests added earlier for the allocation/copy widening use
+// only plain i64/array fields with no uncertain-value tracking, so neither
+// exercises this path at all.
+//
+// WideVar places its one uncertain field (`unc: f64`) at index 64 -- the old
+// cap's exact boundary -- preceded by 64 plain i64 fields. Nests it inside
+// Outer so `let extracted = o.inner` is a struct-valued field access,
+// exercising the FIRST loop (ExprFieldAccess); then `let alias = extracted`
+// exercises the SECOND loop (ExprIdent). variance_of() must survive both hops,
+// unchanged from the direct value -- exactly the field-chain pattern
+// tests/run-pass/gum_fo_field_chain_variance.sio pins for a small struct,
+// extended here to a field index past the old 64-slot cap.
+//@ requires: madaros
+//@ expect-stdout: WIDE_VARIANCE_OK
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 { return 0.0 - x }
+    return x
+}
+
+struct WideVar {
+    f0: i64,
+    f1: i64,
+    f2: i64,
+    f3: i64,
+    f4: i64,
+    f5: i64,
+    f6: i64,
+    f7: i64,
+    f8: i64,
+    f9: i64,
+    f10: i64,
+    f11: i64,
+    f12: i64,
+    f13: i64,
+    f14: i64,
+    f15: i64,
+    f16: i64,
+    f17: i64,
+    f18: i64,
+    f19: i64,
+    f20: i64,
+    f21: i64,
+    f22: i64,
+    f23: i64,
+    f24: i64,
+    f25: i64,
+    f26: i64,
+    f27: i64,
+    f28: i64,
+    f29: i64,
+    f30: i64,
+    f31: i64,
+    f32: i64,
+    f33: i64,
+    f34: i64,
+    f35: i64,
+    f36: i64,
+    f37: i64,
+    f38: i64,
+    f39: i64,
+    f40: i64,
+    f41: i64,
+    f42: i64,
+    f43: i64,
+    f44: i64,
+    f45: i64,
+    f46: i64,
+    f47: i64,
+    f48: i64,
+    f49: i64,
+    f50: i64,
+    f51: i64,
+    f52: i64,
+    f53: i64,
+    f54: i64,
+    f55: i64,
+    f56: i64,
+    f57: i64,
+    f58: i64,
+    f59: i64,
+    f60: i64,
+    f61: i64,
+    f62: i64,
+    f63: i64,
+    unc: f64,
+}
+
+struct Outer {
+    inner: WideVar,
+    tag: i64,
+}
+
+fn main() with IO, Mut, Div, Panic, Alloc, Epistemic {
+    let kx: Knowledge<f64> = measure(5.0, uncertainty: 0.3)
+    let x = kx.value
+
+    let o = Outer {
+        inner: WideVar {
+            f0: 0, f1: 1, f2: 2, f3: 3, f4: 4, f5: 5, f6: 6, f7: 7, f8: 8, f9: 9, f10: 10, f11: 11, f12: 12, f13: 13, f14: 14, f15: 15, f16: 16, f17: 17, f18: 18, f19: 19, f20: 20, f21: 21, f22: 22, f23: 23, f24: 24, f25: 25, f26: 26, f27: 27, f28: 28, f29: 29, f30: 30, f31: 31, f32: 32, f33: 33, f34: 34, f35: 35, f36: 36, f37: 37, f38: 38, f39: 39, f40: 40, f41: 41, f42: 42, f43: 43, f44: 44, f45: 45, f46: 46, f47: 47, f48: 48, f49: 49, f50: 50, f51: 51, f52: 52, f53: 53, f54: 54, f55: 55, f56: 56, f57: 57, f58: 58, f59: 59, f60: 60, f61: 61, f62: 62, f63: 63, unc: x
+        },
+        tag: 1,
+    }
+
+    let v_direct = variance_of(x)
+
+    // Loop 1: ExprFieldAccess (`let extracted = o.inner`, a struct-valued field)
+    let extracted = o.inner
+    let v_one_hop = variance_of(extracted.unc)
+
+    // Loop 2: ExprIdent alias (`let alias = extracted`)
+    let alias = extracted
+    let v_two_hop = variance_of(alias.unc)
+
+    print("direct="); print_f64(v_direct); print("\n")
+    print("one_hop="); print_f64(v_one_hop); print("\n")
+    print("two_hop="); print_f64(v_two_hop); print("\n")
+
+    // 0.3^2 = 0.09; a field-chain hop past the old 64-slot cap must not lose it.
+    if abs_f(v_direct - 0.09) < 1.0e-9
+        && abs_f(v_one_hop - 0.09) < 1.0e-9
+        && abs_f(v_two_hop - 0.09) < 1.0e-9 {
+        print("WIDE_VARIANCE_OK\n")
+    } else {
+        print("WIDE_VARIANCE_FAIL\n")
+    }
+}

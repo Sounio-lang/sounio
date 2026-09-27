@@ -674,15 +674,21 @@ comparison-arguable and labeled unproven. Second, the house engine's
 per-step GUM propagator has its own caveats — the band scales with dt
 and does not accumulate, sub-1e-6 σ values hit a sqrt-convergence floor
 (flagged ENGINE-FLOOR), and at 90 °C the J² amplification diverges, so
-the band is **refused** there rather than printed. All of this is
+the band is **refused** there rather than printed. The refusal accepts a
+band only when every printed σ is finite and positive: the engine hands
+the diverged variance back as 0.0 on some lean_single seeds and as NaN on
+others, and a NaN used to slip past the old `<= 0` test and hang the digit
+printer (fixed 2026-09-15). All of this is
 labeled E1–E6 in the file header (E6: lean_single aliases returned
 arrays across calls, so the demo extracts every run's scalars before the
 next call — do not refactor it to collect-then-print).
 
-Engine coverage: **lean_single only** — on current main, Madaros fails
-"visibility preflight" on *any* `chemistry::kinetics` import (reproduced
-with the repo's own `tests/stdlib/chemistry/test_kinetics_epistemic_ensemble.sio`;
-pre-existing blocker, not from this demo). Run:
+Engine coverage: **lean_single only** — on main as of 2026-09-15 Madaros
+type-checks the file but stops in native lowering at stdlib/plot's
+`error_bar_chart` ("cannot safely lower print/println argument with
+unresolved scalar kind"), the same failure as the repo's own
+`tests/stdlib/chemistry/test_kinetics_*` tests; pre-existing blocker, not
+from this demo. Run:
 
 ```bash
 SOUNIO_SOUC_ENGINE=lean_single bin/souc run demos/hydrogen/uhs_brine_calcite.sio

@@ -22,8 +22,9 @@ fi
 paths=()
 if (($#)); then
   paths=("$@")
-elif [[ "$EVENT_NAME" == "pull_request" ]]; then
-  [[ -n "$BASE_SHA" ]] || fail "missing_pull_request_base_sha"
+elif [[ "$EVENT_NAME" == "pull_request" || "$EVENT_NAME" == "merge_group" ]]; then
+  # A merge-queue run tests exactly the queued diff (merge_group.base_sha..head_sha).
+  [[ -n "$BASE_SHA" ]] || fail "missing_${EVENT_NAME}_base_sha"
   if ! changed_paths="$(
     git -C "$ROOT_DIR" diff --name-only --diff-filter=ACMR "$BASE_SHA...$HEAD_SHA"
   )"; then

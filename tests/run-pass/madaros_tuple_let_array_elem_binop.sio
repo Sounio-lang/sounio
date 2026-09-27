@@ -1,0 +1,90 @@
+//@ run-pass
+//@ requires: madaros
+// Regression: a tuple-let-destructured `[f64; N]` local's element, read as an
+// operand of a binary op directly (`a[0] * 2.0`), used to lower as an integer
+// multiply and reinterpret the IEEE bit pattern as f64 on print. The array
+// local `a` from `let (a, b) = mk()` never got its array_elem_float flag set,
+// because tuple-let desugaring binds it via an unannotated `let a = __tup.0`,
+// a shape the classifier had no case for -- see lower_type_list_array_float_mask
+// / expr_result_is_tuple_slot_f64_array_ref in self-hosted/ir/lower.sio.
+//
+// `let x: f64 = a[0]` followed by `x * 2.0` was NOT affected (the annotation
+// sets x's scalar_kind directly), so this test exercises the direct-operand
+// form specifically.
+
+fn mk() -> ([f64; 2], f64) with Mut, Panic {
+    var arr: [f64; 2] = [0.0; 2]
+    arr[0] = 1.5
+    arr[1] = 0.25
+    (arr, 9.0)
+}
+
+fn mk_int() -> ([i64; 2], i64) with Mut, Panic {
+    var arr: [i64; 2] = [0; 2]
+    arr[0] = 3
+    (arr, 4)
+}
+
+fn mk_arr() -> [f64; 2] with Mut, Panic {
+    var arr: [f64; 2] = [0.0; 2]
+    arr[0] = 3.0
+    arr
+}
+
+fn main() -> i32 with IO, Mut, Panic {
+    let (a, b) = mk()
+
+    let d0: f64 = a[0] * 2.0
+    let d1: f64 = a[1] * 4.0
+    let sum: f64 = d0 + d1 + b
+
+    assert(d0 > 2.99 && d0 < 3.01)
+    assert(d1 > 0.99 && d1 < 1.01)
+    assert(sum > 12.99 && sum < 13.01)
+    assert(b > 8.99 && b < 9.01)
+
+    // Same shape from a tuple literal rather than a call. The desugar still
+    // binds `c` through an unannotated `let c = __tup.0`, and the array mask
+    // has to come off the literal, not off a declared return type.
+    let (c, d) = ([2.5, 0.5], 1.0)
+    let e0: f64 = c[0] * 2.0
+    assert(e0 > 4.99 && e0 < 5.01)
+
+    // Slot reuse. A block binds an f64-array tuple and exits; the next binding
+    // at the same stack slot is an integer array. If the array mask survived
+    // the scope pop, `g[0] * 2` lowers as a float multiply.
+    var h: i64 = 0
+    {
+        let (f, _) = mk()
+        h = 1
+    }
+    let (g, k) = mk_int()
+    let gi: i64 = g[0] * 2
+    assert(gi == 6)
+    assert(k == 4)
+    assert(h == 1)
+
+    // The array element of the tuple literal is a local, not an array literal.
+    // Its f64-array status has to come from the local metadata.
+    var src: [f64; 2] = [0.0; 2]
+    src[0] = 4.0
+    let (p, _) = (src, 1.0)
+    let pv: f64 = p[0] * 2.0
+    assert(pv > 7.99 && pv < 8.01)
+
+    // And a call that returns an f64 array, nested in the tuple literal.
+    let (q, _) = (mk_arr(), 1.0)
+    let qv: f64 = q[0] * 2.0
+    assert(qv > 5.99 && qv < 6.01)
+
+    // The element is a tuple slot, not a bare local: pair.0 was classified
+    // when pair was bound, and wrapping it in another tuple literal must
+    // keep that classification.
+    let pair = mk()
+    let (r, _) = (pair.0, 1.0)
+    let rv: f64 = r[0] * 2.0
+    assert(rv > 2.99 && rv < 3.01)
+
+    println("madaros tuple let array elem binop passed")
+    0
+}
