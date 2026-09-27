@@ -756,19 +756,6 @@ awk -F'\t' '
 #   +   mass conservation: parent+ODV ≤ F·released, release monotone non-decreasing
 # Numerical parity runs at the NM phenotype (R7); PM/IM/UM scaling is verified by
 # tests/run-pass/darwin_venlafaxine_xr_pgx_smoke.sio, not here (keeps the gate lean).
-#
-# SCOPE (PR #2699): both references here, the Sounio port
-# tests/run-pass/dissertation_pbpk28_parity_ref_venlafaxine.sio and the Node
-# runner, still implement the LEGACY explicit post-step CYP2D6 subtraction
-# (clamped at 0). stdlib/darwin_pbpk/scenarios/venlafaxine_xr.sio now solves
-# formation as an implicit sink inside the CN step. So cases 10-13 certify
-# Sounio<->Node agreement on the legacy reference model; they do NOT certify
-# the production scenario. The production scenario is gated by
-# tests/run-pass/darwin_venlafaxine_formation_sink_implicit.sio (per-step mass
-# identity, transfer identity, dt convergence against a closed form). Both
-# references are to be replaced by the portal-model parity port, which the
-# operator made canonical; until then, a green case 10-13 says nothing about
-# the stdlib scenario.
 # ════════════════════════════════════════════════════════════════════════════
 echo
 echo "[pbpk28-parity] Cases 10-13: Sounio ↔ Node venlafaxine XR (parent + ODV + matrix + ratio)"
