@@ -757,9 +757,10 @@ awk -F'\t' '
 #       ledger identities, body ≤ portal input, no negative mass, release monotone
 #   +   closed form at 120 h, both engines: oral CL/F and AUC ratio equal the
 #       well-stirred portal identities within the truncation bound; Node ↔ Sounio
-# Model: portal first pass (scenarios/venlafaxine_xr.sio). The gut pool decays
-# exactly, F_abs of what leaves the lumen enters the liver's vascular space,
-# 1 − F_abs never reaches the portal vein; hepatic clearance is a liver sink in the
+# Model: portal first pass (scenarios/venlafaxine_xr.sio). The gut pool is solved
+# exactly per step (release at a constant rate); F_abs of what leaves the lumen
+# enters the liver's vascular space, 1 − F_abs never reaches the portal vein;
+# hepatic clearance is a liver sink in the
 # TR-BDF2 solve, so F_H and presystemic ODV emerge (F_oral = 0.45 at NM).
 # The Sounio side drives the stdlib scenario's own step functions; the Node side
 # (website/src/lib/pbpk28_core.mjs) is an independent reimplementation.
@@ -856,9 +857,10 @@ for VFX_KEY in nm auc; do
 done
 
 echo
-# Mass account, checked on BOTH engines' output. Portal first-pass model: the gut
-# pool loses G·(1 − e^(−ka·dt)) per step, F_abs of it enters the portal vein and
-# 1 − F_abs never does, so cumulative portal input ≤ F_abs·released. (The model
+# Mass account, checked on BOTH engines' output. Portal first-pass model: over each
+# step the gut pool loses what the exact solution of dG/dt = R − ka·G carries out
+# of it; F_abs of that enters the portal vein and 1 − F_abs never does, so
+# cumulative portal input ≤ F_abs·released. (The model
 # this replaced subtracted only the absorbed share from the pool, so the rest was
 # absorbed again later: cumulative input → released, effective F = 1.)
 # Residuals (and the slack F_abs·released − portal) are printed x1e12 (mg) by both

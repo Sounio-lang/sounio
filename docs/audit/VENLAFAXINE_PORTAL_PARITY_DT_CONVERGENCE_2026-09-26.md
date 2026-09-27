@@ -58,16 +58,16 @@ uses.
      rounding budget, as that function documents: not fitted to the observed
      residuals, and not a proven floating-point bound.
 
-## Parity (Madaros ELF md5 57c015c1, Node 22, full gate rc = 0)
+## Parity (Madaros ELF md5 57c015c1, Node 22, full gate rc = 0, with the exact gut step)
 
 | Surface | Result |
 |---|---|
-| Parent cavg, 14 organs × 12 samples | RMSE ≤ 1.0e-8 (from print resolution alone: Madaros prints values < 5e-7 as `0.000000`) |
+| Parent cavg, 14 organs × 12 samples | RMSE ≤ 1.1e-8 (from print resolution alone: Madaros prints values < 5e-7 as `0.000000`) |
 | ODV cavg, 14 × 12 | RMSE 0 |
-| ODV/parent total-mass ratio at 96 h | 175719.742698 on both engines |
+| ODV/parent total-mass ratio at 96 h | 170107.171549 on both engines |
 | Blood AUC ratio at 120 h, NM | 3.571424 on both (closed form 3.571429, within the truncation bound) |
 | Oral CL/F at 120 h, NM | 100.000000 on both (closed form 100) |
-| Mass account, both engines | at 96 h: gut residual 0.04e-12 mg, ledger residuals ≤ 4.7e-12 mg (tolerance 75e-12 mg); portal input 61.989796 mg ≤ F_abs·75 = 61.989796 mg; negative mass 0 |
+| Mass account, both engines | at 96 h: gut, split and bound residuals < 1e-18 mg, ledger residuals ≤ 4.8e-12 mg (tolerance 75e-12 mg); portal input 61.989796 mg ≤ F_abs·75 = 61.989796 mg; negative mass 0 |
 | Mutation: old gut update (pool keeps the unabsorbed share) in both engines | parity still passes (both engines share the defect); mass account FAILS on every sample: gut balance −15.7 mg, portal input exceeds F_abs·released by up to 13.0 mg |
 
 JS all-phenotype run (dt = 0.5 h, 120 h), matching the figures in `03769363f`:
@@ -84,6 +84,8 @@ Probe: `docs/audit/repro/venlafaxine_portal_dt_convergence.sio`. It drives the
 stdlib step functions under Madaros, and the JS engine agrees with it to about
 12 significant digits at every dt. Blood concentrations are in mg/L.
 
+### Before: release added to the pool at the start of the step
+
 | dt (h) | C_b,parent 2 h | C_b,parent 24 h | C_b,ODV 24 h | portal input 4 h (mg) | AUC ratio 120 h |
 |---:|---:|---:|---:|---:|---:|
 | 0.5     | 0.0467352 | 0.00179676 | 0.0437279 | 22.78852 | 3.57142425 |
@@ -92,43 +94,106 @@ stdlib step functions under Madaros, and the JS engine agrees with it to about
 | 0.0625  | 0.0443706 | 0.00189830 | 0.0447449 | 21.67350 | 3.57142413 |
 | 0.03125 | 0.0442018 | 0.00190594 | 0.0448237 | 21.58794 | 3.57142413 |
 
-Successive differences halve with each halving of dt (ratios 1.998, 2.001,
+Successive differences halved with each halving of dt (ratios 1.998, 2.001,
 2.002 at 2 h; 1.920, 1.958, 1.978 at 24 h; 1.891, 1.942, 1.970 for portal
-input). **The scheme is first order in dt.** Richardson extrapolation puts the
-error at the production dt = 0.5 h at about +6.1 % for C_b,parent at 2 h,
-−6.1 % at 24 h, −2.6 % for C_b,ODV at 24 h, and +6.0 % for cumulative portal
-input at 4 h.
+input): **first order**. At the production dt = 0.5 h, Richardson extrapolation
+put the error at about +6.1 % for C_b,parent at 2 h, −6.1 % at 24 h, −2.6 % for
+C_b,ODV at 24 h, and +6.0 % for cumulative portal input at 4 h.
 
-The run-integrated readouts are dt-independent. The oral CL/F is 100.0000000
-at every dt, AUC_parent(0, 120 h) is 0.75 at every dt, and the AUC ratio moves
-by 1.3e-7 relative. These readouts are exact integrated identities of the
-linear model (Dose/AUC and Ae/AUC), and they do not depend on when the input
-arrives.
-
-**Where the first order comes from.** The gut decay is exact:
-G → G·e^(−ka·dt). TR-BDF2 is second order for input held constant over a step.
-What remains is the Lie splitting of the release. Step 1 adds the whole step's
+The cause was the Lie splitting of the release. Step 1 added the whole step's
 release `matrix_step_amount(t, dt)` to the pool at the start of the step, so
-that mass decays for a full dt instead of dt/2 on average. Mass therefore leaves
-the lumen early by O(ka·dt/2) of each step's release, which fits the
-overestimated early portal input and the phase-shifted concentrations in the
-table.
+that mass decayed for a full dt instead of dt/2 on average and left the lumen
+early by about ka·dt/2 of each step's release. The gut decay itself was exact,
+and TR-BDF2 is second order for input held constant over a step.
 
-For release at a constant rate over the step, integrating dG/dt = R − ka·G
-exactly gives
+### After: exact gut step for release at a constant rate (applied, operator decision 2026-09-26)
 
-    G_{n+1} = G_n·e^(−ka·dt) + (ΔR/(ka·dt))·(1 − e^(−ka·dt)),
-    leaving = G_n + ΔR − G_{n+1},
+`vfx_gut_absorb_step(gut, ΔR, dt)` now integrates dG/dt = R − ka·G exactly
+with R = ΔR/dt over the step, where x = ka·dt:
 
-where ΔR = `matrix_step_amount`. With that update the gut step is exact for
-piecewise-constant release. The expected overall order is then 2, limited by
-holding the portal input constant over the step, which is still second order.
-That expectation is not yet measured.
+    G₁ = G₀·e^(−x) + ΔR·(1 − e^(−x))/x,   leaving = G₀ + ΔR − G₁.
 
-**This change was not made here.** It alters the scenario numerics in
-`venlafaxine_xr.sio`, which belongs to another lane, and it is a
-dissertation-facing modelling choice. It is recorded as a proposal for the
-operator.
+Only the exact solution has the semigroup property: one step of dt with ΔR
+equals two steps of dt/2 with ΔR/2. `darwin_venlafaxine_gut_first_pass.sio`
+now asserts this to 1e-12 mg. The residual is 1.8e-15 mg on both engines. With
+the release-at-start update restored, the assertion fails by 0.311 mg, which
+matches the predicted ΔR·x/4 order.
+
+| dt (h) | C_b,parent 2 h | C_b,parent 24 h | C_b,ODV 24 h | portal input 4 h (mg) | AUC ratio 120 h |
+|---:|---:|---:|---:|---:|---:|
+| 0.5     | 0.0441861 | 0.00191473 | 0.0449544 | 21.45981 | 3.57142412 |
+| 0.25    | 0.0440913 | 0.00191406 | 0.0449193 | 21.48888 | 3.57142412 |
+| 0.125   | 0.0440561 | 0.00191381 | 0.0449086 | 21.49754 | 3.57142412 |
+| 0.0625  | 0.0440426 | 0.00191371 | 0.0449052 | 21.50016 | 3.57142412 |
+| 0.03125 | 0.0440373 | 0.00191367 | 0.0449041 | 21.50100 | 3.57142412 |
+
+At dt = 0.5 h the Richardson error is now about +0.34 % (C_b,parent at 2 h),
++0.46 % (at 4 h), +0.06 % (at 24 h), +0.11 % (C_b,ODV at 24 h) and −0.19 %
+(portal input at 4 h). That is 13–110 times smaller than before.
+
+Successive-difference ratios over the halvings (observed order p = log₂ ratio):
+
+| quantity | ratios | p |
+|---|---|---|
+| C_b,parent 4 h / 8 h / 12 h | 3.26–3.27 / 3.35–3.49 / 3.52–3.64 | 1.6–1.9 |
+| C_b,ODV 24 h, portal input 4 h | 3.10–3.36 | 1.6–1.75 |
+| C_b,parent 2 h / 24 h | 2.58–2.70 / 2.51–2.66 | 1.3–1.4 |
+
+**The order is not 2.** The limits come from the release input, not from the
+gut step or TR-BDF2. They were measured by extending the JS sweep to
+dt = 1/256 h, both with the stdlib release curve and with an exact one
+(`Math.pow` in place of `matrix_er`'s `mer_pow`, in a scratch copy only).
+Successive-difference ratios, halvings from dt = 0.5 h to 1/256 h:
+
+| quantity | stdlib release curve | exact release curve |
+|---|---|---|
+| gut mass / portal input at 2 h | 3.20 3.16 3.02 2.66 2.35 2.19 (p → 1.1) | 3.20 3.16 3.15 3.14 3.136 3.136 (p → 1.65) |
+| C_b,parent 4 h | 3.26 3.27 3.12 2.73 2.39 2.20 | 3.25 3.27 3.25 3.21 3.19 3.18 (p → 1.67) |
+| C_b,parent 2 h | 2.70 2.61 2.58 2.31 2.12 2.06 | 2.69 2.61 2.74 2.84 2.92 2.97 (p rising, 1.57) |
+| C_b,ODV 24 h | 3.25 3.21 3.10 2.82 2.69 2.51 | 3.23 3.19 3.14 3.08 3.78 3.21 |
+| portal input 24 h | 2.65 2.39 2.22 2.11 … | 2.36 2.19 2.10 2.05 … (p → 1) |
+
+- **Release-rate singularity (confirmed).** The Korsmeyer–Peppas rate
+  ∝ t^(n−1) = t^(−0.35) is singular at t = 0, and a constant rate per step
+  cannot resolve it. On the first step the local error is Θ(h^(1+n)). Later
+  steps contribute h³·t^(n−2); their sum converges because n − 2 < −1, and it
+  is dominated by the first steps. That gives global order 1 + n = 1.65. With
+  the exact curve, the gut and portal input at 2 h converge to ratio 3.136
+  = 2^1.65.
+- **`matrix_er` transcendental floor (first order at small dt).** With the stdlib
+  curve the same gut quantity drifts to p ≈ 1. `mer_pow`'s series floors the K–P
+  fraction at small t: 0.714 mg is released by t = 0.0039 h against an exact
+  0.406 mg (+76 %; +9.7 % at 0.0156 h), which is effectively a ~0.6 mg
+  instantaneous release at t = 0⁺. A constant rate over the first step
+  mis-times that impulse by ~h/2, which is a first-order term. It dominates
+  below dt ≈ 0.06 h and is small at 0.5 h. The same series is also −0.1 % low
+  near saturation (74.919 mg at 11.99 h), which moves the switch-off. This is
+  bold-robinson's dispatch
+  (docs/audit/MATRIX_ER_TRANSCENDENTAL_ACCURACY_DISPATCH_2026-09-26.md, PR
+  #2722, `matrix_er` → `math::pure`), not addressed here.
+- **Release switch-off.** At t* = (1/k)^(1/n) ≈ 11.99 h the release rate drops
+  to zero inside a step. A constant rate over that step mis-times a moment of
+  order R(t*)·δ·(h − δ), δ = 12 − t*. The effect is small at production dt
+  (Grok estimated it at ~50× below the start-up term at 0.5 h), but it makes
+  the late-time ratios erratic once dt is comparable to δ. With the exact
+  curve, cumulative portal input at 24 h converges at first order.
+
+Whether the 2 h and 24 h concentrations at production dt sit at 1.3–1.4
+because of solver start-up on the non-smooth input (Grok's 2 − n = 1.35
+suggestion) is not settled. With the exact curve the 2 h order climbs to 1.57
+and has not levelled off by dt = 1/256 h.
+
+Splitting the step at t* and replacing the release transcendentals would remove
+the last two limits. Neither is done here: `MatrixReleaseModel`'s k and dose
+fields are private, #2722 is another lane's open PR, and the operator approved
+the gut update only.
+
+The run-integrated readouts remain dt-independent: the oral CL/F is
+100.0000000, AUC_parent(0, 120 h) is 0.75, and the AUC ratio is 3.5714241 at
+every dt. These are exact integrated identities of the linear model. The
+ledger's b-weighted quadrature is the scheme's own mass identity, so they hold
+for the discrete solution regardless of when the input arrives. The AUC ratio
+now moves by 1e-9 relative across dt (3.5e-9 absolute), against 1.3e-7 before.
 
 ## Not addressed
 
@@ -183,3 +248,27 @@ route) on the workspace. Legs with a verdict come from two independent vendors:
 
 `.claude/llm_offload_log.md` is absent from main (deleted wholesale in
 `3944ff825`), so the review record is kept here.
+
+### Round 2: exact gut step (2026-09-27)
+
+Packet: the new step, the semigroup test, the convergence explanation and the
+dt-independence claim. Three vendors returned verdicts.
+
+- **Gemini 2.5 Pro (OpenRouter).** OK on all four questions: the exact solution,
+  leaving ≥ 0, the semigroup property and the size of the old defect, order
+  1 + n from the singularity, and dt-independence.
+- **Qwen 3 235B.** OK on all four. Its Q3(a) justification calls t^(n−2)
+  integrable at 0, which is false. The conclusion still matches the h^(1+n)
+  sum above.
+- **Grok 4.7 (xAI direct, after two 600 s timeouts).** OK on Q1, Q2 and Q4.
+  - Q2 note, accepted: "about ΔR·x/4" is the leading term (0.394 mg). The exact
+    defect ΔR/2·e^(−x/2)(1 − e^(−x/2)) = 0.311 mg is what the test measures.
+  - Q4 note, accepted: dt-independence is the discrete identity plus a small
+    horizon tail, not an identity that ignores the tail.
+  - DEFECT on Q3, accepted: the release switch-off is too small to explain the
+    24 h order at coarse dt. The finer sweep above was run to check. It
+    confirms the h^(1+n) singularity term exactly with an exact release curve,
+    and it finds the `matrix_er` floor as the first-order term at small dt. It
+    does not bear out Grok's alternative 2 − n = 1.35 at 2 h: that order climbs
+    past 1.5 with the exact curve. The audit text above was rewritten to match
+    the measurements.

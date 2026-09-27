@@ -5,9 +5,10 @@
 //   → CYP2D6 formation → ODV PBPK28 → ODV/parent PGx readout
 //
 // Operator splitting per step (Lie-Trotter):
-//   1. Matrix releases dissolved dose to gut pool
-//   2. First-order absorption (ka) out of the gut pool; a fraction F_abs of it
-//      reaches the PORTAL vein, the rest never does (`vfx_gut_absorb_step`)
+//   1-2. Gut pool dG/dt = R − ka·G integrated exactly over the step, with the
+//      step's matrix release entering at a constant rate; of the mass that
+//      leaves the lumen a fraction F_abs reaches the PORTAL vein, the rest never
+//      does (`vfx_gut_absorb_step`)
 //   3. Parent PBPK28 TR-BDF2 step with the absorbed input routed into the liver's
 //      vascular space and all hepatic clearance as a liver sink inside the
 //      implicit solve; the CYP2D6 → ODV share of the removed mass feeds ODV blood
@@ -220,24 +221,35 @@ pub fn vfx_odv_step(
     pbpk28_trbdf2_step_mut(odv, vfx_odv_params(pheno), odv_input, dt, ledger)
 }
 
-// Gut pool after matrix dissolution: dG/dt = R(t) − ka·G. Release is applied
-// first (step 1), then the pool decays exactly over dt, G → G·e^(−ka·dt), so
-// G·(1 − e^(−ka·dt)) leaves the lumen. F_abs of that leaving mass reaches the
-// portal vein (the hepatic first pass happens in the PBPK, step 3); the other
-// 1 − F_abs (unabsorbed or lost in the gut wall) leaves the model. Cumulative
-// portal input is F_abs·(released − G) ≤ F_abs·dose.
+// Gut pool over one step: dG/dt = R − ka·G, with the step's released mass ΔR
+// (matrix_step_amount) entering at the constant rate R = ΔR/dt. Exactly, with
+// x = ka·dt,
+//     G₁ = G₀·e^(−x) + ΔR·(1 − e^(−x))/x,   leaving = G₀ + ΔR − G₁ = ∫ ka·G dt.
+// Adding ΔR to the pool at the start of the step instead lets it decay for a
+// whole dt rather than dt/2 on average, so mass leaves the lumen early by about
+// ΔR·x/2 per step: a first-order error, ~6 % in C_b at dt = 0.5 h
+// (docs/audit/VENLAFAXINE_PORTAL_PARITY_DT_CONVERGENCE_2026-09-26.md).
+// `leaving` is formed as a difference so the gut balance closes to rounding.
+// F_abs of the leaving mass reaches the portal vein (the hepatic first pass
+// happens in the PBPK, step 3); the other 1 − F_abs (unabsorbed or lost in the
+// gut wall) leaves the model. Cumulative portal input is F_abs·(released − G)
+// ≤ F_abs·dose.
 pub struct VfxGutStep {
     pub gut_mg: f64,        // pool after the step
-    pub to_parent_mg: f64,  // F_abs · G · (1 − e^(−ka·dt)), into the portal vein
-    pub lost_mg: f64,       // (1 − F_abs) · G · (1 − e^(−ka·dt)), never reaches the portal vein
+    pub to_parent_mg: f64,  // F_abs · leaving, into the portal vein
+    pub lost_mg: f64,       // (1 − F_abs) · leaving, never reaches the portal vein
 }
 
-pub fn vfx_gut_absorb_step(gut_mg: f64, dt: f64) -> VfxGutStep with Mut, Div, Panic {
-    let frac_abs = 1.0 - mer_exp_neg(0.0 - venlafaxine_ka_abs() * dt)
-    let leave_mg = gut_mg * frac_abs
+pub fn vfx_gut_absorb_step(gut_mg: f64, rel_mg: f64, dt: f64) -> VfxGutStep with Mut, Div, Panic {
+    let x = venlafaxine_ka_abs() * dt
+    let decay = mer_exp_neg(0.0 - x)
+    // (1 − e^(−x))/x → 1 as x → 0: with no step the release stays in the pool.
+    let rel_kept = if x > 0.0 { rel_mg * ((1.0 - decay) / x) } else { rel_mg }
+    let gut_new = gut_mg * decay + rel_kept
+    let leave_mg = (gut_mg + rel_mg) - gut_new
     let to_parent = vfx_hepatic_em().f_abs * leave_mg
     VfxGutStep {
-        gut_mg: gut_mg - leave_mg,
+        gut_mg: gut_new,
         to_parent_mg: to_parent,
         lost_mg: leave_mg - to_parent,
     }
@@ -252,8 +264,9 @@ fn vfx_strang_step(
     // 1. Matrix dissolution → gut pool (mg)
     let rel_amt = matrix_step_amount(rel, t_start, dt)
 
-    // 2. First-order absorption: the pool loses G·frac_abs, F_abs of it to the portal vein.
-    let gs = vfx_gut_absorb_step(scen.gut_mg + rel_amt, dt)
+    // 2. Gut pool over the step (release at a constant rate); F_abs of what
+    //    leaves the lumen goes to the portal vein.
+    let gs = vfx_gut_absorb_step(scen.gut_mg, rel_amt, dt)
     let gut = gs.gut_mg
 
     let parent_input = gs.to_parent_mg / dt

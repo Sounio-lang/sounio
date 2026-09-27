@@ -1,8 +1,9 @@
 //@ run-pass
 //@ expect-stdout-contains: VENLAFAXINE_GUT_FIRST_PASS_PASS
 //
-// Venlafaxine XR gut pool: the lumen loses G·(1 − e^(−ka·dt)) per step, of
-// which F_abs reaches the portal vein and 1 − F_abs never does.
+// Venlafaxine XR gut pool: over each step the lumen loses the mass that the
+// exact solution of dG/dt = R − ka·G carries out of it, of which F_abs reaches
+// the portal vein and 1 − F_abs never does.
 // (The hepatic first pass that takes F_abs down to F happens in the PBPK.)
 // Driven through the scenario's own `vfx_gut_absorb_step` over the canonical
 // 120 h run.
@@ -16,6 +17,11 @@
 //   1. released = G_end + Σ to_parent + Σ lost      (gut mass balance)
 //   2. Σ to_parent = F_abs · (Σ to_parent + Σ lost) (F_abs splits what leaves)
 //   3. Σ to_parent ≤ F_abs · released               (absorption bound)
+//   4. one step of dt with release ΔR = two steps of dt/2 with ΔR/2 each
+//      (pool and portal input). Only the exact solution of dG/dt = R − ka·G
+//      for release at a constant rate has this semigroup property; adding ΔR
+//      to the pool at the start of the step breaks it by about ΔR·ka·dt/4
+//      (0.31 mg for G₀ = 10, ΔR = 5, dt = 0.5 below).
 
 use darwin_pbpk::scenarios::venlafaxine_xr::*
 use darwin_pbpk::release::matrix_er::*
@@ -35,7 +41,7 @@ fn main() with Mut, Div, IO, Panic {
     while t < 120.0 - 0.5 * dt {
         let r = matrix_step_amount(rel, t, dt)
         released = released + r
-        let gs = vfx_gut_absorb_step(gut + r, dt)
+        let gs = vfx_gut_absorb_step(gut, r, dt)
         gut = gs.gut_mg
         to_parent = to_parent + gs.to_parent_mg
         lost = lost + gs.lost_mg
@@ -58,6 +64,19 @@ fn main() with Mut, Div, IO, Panic {
     }
     if !(to_parent <= f * released + tol) {
         println("FAIL: cumulative portal input exceeds F_abs * released")
+        return
+    }
+
+    let one = vfx_gut_absorb_step(10.0, 5.0, 0.5)
+    let h1 = vfx_gut_absorb_step(10.0, 2.5, 0.25)
+    let h2 = vfx_gut_absorb_step(h1.gut_mg, 2.5, 0.25)
+    let d_gut = one.gut_mg - h2.gut_mg
+    let d_portal = one.to_parent_mg - (h1.to_parent_mg + h2.to_parent_mg)
+    println("one step vs two half steps, pool and portal input (x1e12 mg):")
+    println(1.0e12 * d_gut)
+    println(1.0e12 * d_portal)
+    if !(gf_abs(d_gut) < tol && gf_abs(d_portal) < tol) {
+        println("FAIL: gut step is not the exact solution for release at a constant rate")
         return
     }
     println("VENLAFAXINE_GUT_FIRST_PASS_PASS")

@@ -657,9 +657,9 @@ export function degenerateParams(base, { eps = 1e-3, psScale = 1e4 } = {}) {
 // engines agree to f64 rounding, not merely within the 1 % gate.
 //
 // Per step (Lie-Trotter):
-//   1. matrix release → gut pool
-//   2. the pool decays exactly, G → G·e^(−ka·dt); F_abs of the mass leaving the
-//      lumen enters the PORTAL vein (liver vascular space), 1 − F_abs never does
+//   1-2. gut pool dG/dt = R − ka·G solved exactly over the step, the matrix
+//      release entering at a constant rate; F_abs of the mass leaving the lumen
+//      enters the PORTAL vein (liver vascular space), 1 − F_abs never does
 //   3. parent TR-BDF2 step, input routed to the liver, all hepatic clearance a
 //      liver sink inside the implicit solve; ODV formation = removed · X_form/X
 //   4. ODV TR-BDF2 step, formed mass into blood
@@ -954,20 +954,25 @@ function vfxLedgerResidual(lg, st) {
   return vfxTotalMass(st.cv, st.ct) + lg.eliminated + lg.sinkRemoved - lg.administered;
 }
 
-// Gut pool step (vfx_gut_absorb_step): release is applied first, then the pool
-// decays exactly over dt; F_abs of what leaves reaches the portal vein.
-export function vfxGutAbsorbStep(gutMg, dt) {
-  const fracAbs = 1.0 - merExpNeg(0.0 - VFX_KA_ABS * dt);
-  const leaveMg = gutMg * fracAbs;
+// Gut pool step (vfx_gut_absorb_step): dG/dt = R − ka·G solved exactly over the
+// step with the release ΔR entering at a constant rate, x = ka·dt:
+// G₁ = G₀·e^(−x) + ΔR·(1 − e^(−x))/x, leaving = G₀ + ΔR − G₁. F_abs of what
+// leaves reaches the portal vein.
+export function vfxGutAbsorbStep(gutMg, relMg, dt) {
+  const x = VFX_KA_ABS * dt;
+  const decay = merExpNeg(0.0 - x);
+  const relKept = x > 0.0 ? relMg * ((1.0 - decay) / x) : relMg;
+  const gutNew = gutMg * decay + relKept;
+  const leaveMg = (gutMg + relMg) - gutNew;
   const toParent = vfxHepaticEm().fAbs * leaveMg;
-  return { gutMg: gutMg - leaveMg, toParentMg: toParent, lostMg: leaveMg - toParent };
+  return { gutMg: gutNew, toParentMg: toParent, lostMg: leaveMg - toParent };
 }
 
 // One Lie-Trotter step (vfx_strang_step). Mutates `sc` in place.
 function vfxStrangStep(sc, rel, tStart, dt) {
   const relAmt = vfxMatrixStepAmount(rel, tStart, dt);
   sc.released = sc.released + relAmt;
-  const gs = vfxGutAbsorbStep(sc.gut + relAmt, dt);
+  const gs = vfxGutAbsorbStep(sc.gut, relAmt, dt);
   sc.gut = gs.gutMg;
   sc.portal = sc.portal + gs.toParentMg;
   sc.lost = sc.lost + gs.lostMg;
