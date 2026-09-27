@@ -29,6 +29,12 @@
 #                it used to step with the victim's sink at 0.
 #   load_control the same state with ext_load = 1e307, so that the sum
 #                (1.1e308) is finite: the step and the inspection run.
+#   gut_underflow p28c_gut_asymmetric(0.5, 5e-324, 5e-324): every input is in
+#                its domain, but X_g = Q_gut*E_sys/(1 - E_sys) = 2.5e-647
+#                rounds to 0, and it returned (0, 0) -- a gut wall with no
+#                permeability and no enzyme -- instead of refusing.
+#   gut_control  F_G = 0.5, E_sys = 0.25, Q_gut = 1e-300 (X_g = 3.3e-301, tiny
+#                but representable) must return a positive PS and CLint.
 #   oral_neg/nan/inf, bolus_neg/nan/inf
 #                md_dose_oral / md_dose_iv_bolus with mg = -1, NaN, +Inf: the
 #                refusal side of "the predicate is false exactly when the
@@ -173,5 +179,27 @@ for d in "neg:0.0 - 1.0" "nan:0.0 * (1.0e308 * 10.0)" "inf:1.0e308 * 10.0"; do
   write_probe "bolus_${tag}" "md_dose_iv_bolus(&!md, a, ${expr})"
   refused "bolus_${tag}"
 done
+
+# Calibration inverse underflow: the probe template imports only the driver,
+# so these probes carry their own import line.
+write_cal_probe() {
+  local name="$1" body="$2"
+  cat > "$OUT/pbpk28_refusal_${name}.sio" <<PROBE
+//@ run-pass
+use darwin_pbpk::pbpk28_calibration::*
+fn main() -> i32 with Mut, Div, Panic, IO {
+    ${body}
+    println("PBPK28_REFUSAL_ESCAPED")
+    return 0
+}
+PROBE
+}
+write_cal_probe gut_control "let (ps, cl) = p28c_gut_asymmetric(0.5, 0.25, 1.0e-300)
+    if !(ps > 0.0 && cl > 0.0) { return 2 }"
+control gut_control
+echo "  control ok: representable gut-wall inverse accepted"
+write_cal_probe gut_underflow "let (ps, cl) = p28c_gut_asymmetric(0.5, 5.0e-324, 5.0e-324)
+    print(\"ps \") print(ps) print(\" clint \") println(cl)"
+refused gut_underflow
 
 echo "PBPK28_REFUSAL_GATE_OK"
