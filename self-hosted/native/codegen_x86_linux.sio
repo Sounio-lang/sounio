@@ -10657,6 +10657,80 @@ pub fn compile_native_v2_sret_witness_to_file(output_path: string, plain_call: b
     native_v2_write_min_elf64_to_file(output_path, &! nc, nc.entry_offset, 4194304)
 }
 
+// Relocation-shape witness: --native-v2-emit-reloc-shape <shape> <out_path>.
+// main stores 37 into a .data slot through a recognised `mov [rip+d],rax`, then
+// reads the slot back through the instruction under test, which carries a
+// kind-3 (.data) relocation:
+//   shape 0: 48 8b 0d d32         mov rcx,[rip+d]  -> patched, exit 37
+//   shape 1: 4c 8b 05 d32         mov r8,[rip+d]   -> patched, exit 37 (REX.R)
+//   shape 2: c7 05 d32 imm32      mov dword [rip+d],imm32; the disp32 is not the
+//            last field, so next_ip != patch+4 and it must be REFUSED (rc=25)
+// Left at [rip+0], shapes 0/1 load the next instruction's bytes instead of 37.
+// The only outcomes the witness accepts are "exit 37" and "no ELF, rc=25".
+pub fn compile_native_v2_reloc_shape_witness_to_file(output_path: string, shape: i64) -> i32 with IO, Mut, Panic, Div, Alloc {
+    var nc = compiler_new()
+    compile_module_streaming_begin_count_into(&! nc, 1)
+
+    var final_data = nc.data
+    let slot = runtime_context_global_slot_size()
+    if final_data.len < slot + 8 {
+        final_data.len = slot + 8
+        nc.data = final_data
+    }
+
+    reset_function_state_mut(&! nc)
+    native_compiler_set_fn_offset(&! nc, 0, nc.code.len)
+    let main_name = ir_name_from_bytes(109, 97, 105, 110, 4)
+    native_compiler_add_symbol_name_ref(&! nc, 0, &main_name)
+    nc_emit_push_rbp(&! nc)
+    nc_emit_mov_rbp_rsp(&! nc)
+    nc_emit_sub_rsp_imm32(&! nc, 512)
+
+    nc_emit_mov_reg_imm(&! nc, 0, 37)
+    let store_pos = nc.code.len
+    nc_emit_mov_rip_disp32_rax(&! nc, 0)
+    nc_add_data_section_reloc(&! nc, store_pos + 3, slot)
+    nc_emit_mov_reg_imm(&! nc, 0, 0)
+
+    if shape == 0 {
+        nc_emit_byte(&! nc, 0x48)
+        nc_emit_byte(&! nc, 0x8b)
+        nc_emit_byte(&! nc, 0x0d)
+        nc_add_data_section_reloc(&! nc, nc.code.len, slot)
+        nc_emit_u32_le(&! nc, 0)
+        nc_emit_mov_reg_reg(&! nc, 0, 1)
+    } else if shape == 1 {
+        nc_emit_byte(&! nc, 0x4c)
+        nc_emit_byte(&! nc, 0x8b)
+        nc_emit_byte(&! nc, 0x05)
+        nc_add_data_section_reloc(&! nc, nc.code.len, slot)
+        nc_emit_u32_le(&! nc, 0)
+        nc_emit_byte(&! nc, 0x4c)
+        nc_emit_byte(&! nc, 0x89)
+        nc_emit_byte(&! nc, 0xc0)
+    } else {
+        nc_emit_byte(&! nc, 0xc7)
+        nc_emit_byte(&! nc, 0x05)
+        nc_add_data_section_reloc(&! nc, nc.code.len, slot)
+        nc_emit_u32_le(&! nc, 0)
+        nc_emit_u32_le(&! nc, 11)
+        let load_pos = nc.code.len
+        nc_emit_mov_rbx_rip_disp32(&! nc, 0)
+        nc_add_data_section_reloc(&! nc, load_pos + 3, slot)
+        nc_emit_mov_rax_rbx(&! nc)
+    }
+    nc_core_store_rax_to_temp(&! nc, 0)
+    native_v2_core_emit_return_into(&! nc, 0)
+
+    emit_entry_trampoline_split_into(&! nc, 0)
+    let text_file_offset = 4096
+    let reloc_rodata_off = align_page(text_file_offset + nc.code.len)
+    let reloc_eff_rodata = if nc.flat_rodata_len > 0 { nc.flat_rodata_len } else { nc.rodata.len }
+    let reloc_data_off = align_page(reloc_rodata_off + reloc_eff_rodata)
+    apply_relocations_into(&! nc, reloc_rodata_off, reloc_data_off)
+    native_v2_write_min_elf64_to_file(output_path, &! nc, nc.entry_offset, 4194304)
+}
+
 // Map MachineOperand to a scheduler register ID for dependency tracking.
 // GPR64 → vreg directly; STACK_SLOT → 2000+slot; FLAGS → 4000; else REG_NONE.
 fn mir_operand_to_sched_reg(op: MachineOperand) -> i64 {
