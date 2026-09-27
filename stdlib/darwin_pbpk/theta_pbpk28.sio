@@ -86,6 +86,7 @@ pub struct PBPK28Ledger {
     pub neg_mass:     f64,       // largest Σ V·min(C, 0) magnitude of any returned state (mg)
     pub stage_min_conc: f64,     // same, for TR-BDF2's internal stage x_γ (≤ 0)
     pub stage_neg_mass: f64,     // same, for TR-BDF2's internal stage x_γ (mg)
+    pub rejected_input: f64,     // Σ dt·rel_mid refused by a routed step (mg); see p28t_route_rejected
     pub steps:        i32,       // θ sub-steps taken
 }
 
@@ -99,8 +100,28 @@ pub fn pbpk28_ledger_zero() -> PBPK28Ledger {
         neg_mass:     0.0,
         stage_min_conc: 0.0,
         stage_neg_mass: 0.0,
+        rejected_input: 0.0,
         steps:        0,
     }
+}
+
+// Routed input into a vascular space below the degenerate-volume floor is
+// refused. The step divides the forcing by the floored 1e-30 while
+// pbpk28_total_mass / p28t_organ_avgs weigh C_v by the raw V_i·f_v,i, so
+// the space holds (almost) no mass. Measured 2026-09-27 before this refusal
+// (venlafaxine parent, liver f_v = 0, 3 mg/h for 8 Rannacher steps of
+// 0.5 h, 12 mg booked): with the liver's Q and PS the implicit solve passed
+// the input straight on to blood and tissue and the identity closed
+// (residual -1.8e-13 mg); with Q = PS = 0 it had nowhere to go and all
+// 12 mg were lost (body mass 0, residual -12 mg). A zero-volume space is not
+// a meaningful administration target either way, so the step injects
+// nothing, books dt·rel_mid as `rejected_input` instead of `administered`
+// (the identity then closes in both cases), and pbpk28_mass_gate_ok fails
+// on any rejected input.
+fn p28t_route_rejected(p: PBPKParams28, input_organ: i32) -> bool {
+    if input_organ < 1 || input_organ >= 14 { return false }
+    let vv_raw = p.v_ref[input_organ] * p.vasc_frac[input_organ]
+    return !(vv_raw >= 1.0e-30)
 }
 
 // Organ-average concentrations C_avg,i = (V_v·C_v + V_t·C_t)/V_i into `*out`
@@ -201,7 +222,9 @@ fn p28t_negativity(ledger: &!PBPK28Ledger, state: &PBPKState28, p: PBPKParams28)
 // `input_organ` (e.g. the liver for portal first-pass): the forcing term
 // dt·rel_mid/V moves from the blood row to that organ's vascular row. It is
 // forcing, not a rate, so it is not θ-weighted, and 1ᵀ·W·b = rel_mid
-// wherever it lands, so the ledger identity is unchanged. Advances `*state`,
+// wherever it lands, so the ledger identity is unchanged -- except into a
+// vascular space below the degenerate-volume floor, where the input is
+// refused and booked as `rejected_input` (p28t_route_rejected). Advances `*state`,
 // books the step into `*ledger`, and returns the sink mass (mg) removed over
 // the step.
 pub fn pbpk28_theta_step_routed_sink_mut(
@@ -227,6 +250,7 @@ pub fn pbpk28_theta_step_routed_sink_mut(
     let vb = p.v_ref[0]
     let has_sink = sink_organ >= 1 && sink_organ < 14 && cl_sink > 0.0
     let routed = input_organ >= 1 && input_organ < 14
+    let reject_input = p28t_route_rejected(p, input_organ)
 
     var sum_q = 0.0
     var i: i32 = 1
@@ -278,7 +302,7 @@ pub fn pbpk28_theta_step_routed_sink_mut(
         rhs0 = rhs0 + (he * qi / vb) * cv_old
 
         let rhs_v0 = (he * qi / vv) * cb_old + (1.0 - he * (kv + ks)) * cv_old + (he * kvt) * ct_old
-        let rhs_v = if routed && i == input_organ { rhs_v0 + dt * rel_mid / vv } else { rhs_v0 }
+        let rhs_v = if routed && i == input_organ && !reject_input { rhs_v0 + dt * rel_mid / vv } else { rhs_v0 }
         let rhs_t = (he * ktv) * cv_old + (1.0 - he * (kt + ks)) * ct_old
 
         let av = (sb * rhs_v + qq * rhs_t) / det
@@ -303,7 +327,11 @@ pub fn pbpk28_theta_step_routed_sink_mut(
     let s_old = p28t_accum(ledger, &old_avg, he, p.cl_central, sink_org, cl_sink)
     let s_new = p28t_accum(ledger, &new_avg, hi, p.cl_central, sink_org, cl_sink)
     p28t_negativity(ledger, state, p)
-    (*ledger).administered = (*ledger).administered + dt * rel_mid
+    if reject_input {
+        (*ledger).rejected_input = (*ledger).rejected_input + dt * rel_mid
+    } else {
+        (*ledger).administered = (*ledger).administered + dt * rel_mid
+    }
     (*ledger).steps = (*ledger).steps + 1
     return s_old + s_new
 }
@@ -481,7 +509,13 @@ pub fn pbpk28_trbdf2_step_routed_sink_mut(
     // bolus its CN stage rings negative, and the quadrature carries that
     // exactly (the identity above still holds).
     p28t_negativity(ledger, state, p)
-    (*ledger).administered = (*ledger).administered + dt * rel_mid
+    // Both stages refused the input iff p28t_route_rejected (they injected
+    // nothing), so the whole step's dt·rel_mid is rejected, not administered.
+    if p28t_route_rejected(p, input_organ) {
+        (*ledger).rejected_input = (*ledger).rejected_input + dt * rel_mid
+    } else {
+        (*ledger).administered = (*ledger).administered + dt * rel_mid
+    }
     (*ledger).steps = (*ledger).steps + scratch.steps
     return k0 + k1 + k2
 }
@@ -545,7 +579,7 @@ pub fn pbpk28_neg_mass_bound_mg() -> f64 { return 5.0e-7 }
 pub fn pbpk28_mass_gate_ok(ledger: PBPK28Ledger, s: PBPKState28, p: PBPKParams28, m0: f64, scale: f64) -> bool with Mut {
     let r = pbpk28_ledger_residual(ledger, s, p, m0)
     let ra = if r < 0.0 { 0.0 - r } else { r }
-    return ra <= pbpk28_mass_tol_rel(ledger.steps) * scale && ledger.neg_mass <= pbpk28_neg_mass_bound_mg()
+    return ra <= pbpk28_mass_tol_rel(ledger.steps) * scale && ledger.neg_mass <= pbpk28_neg_mass_bound_mg() && ledger.rejected_input == 0.0
 }
 
 // Print the gate's inputs (scaled so they read on both engines' fixed-point
@@ -561,6 +595,11 @@ pub fn pbpk28_mass_gate_report(ledger: PBPK28Ledger, s: PBPKState28, p: PBPKPara
     println(pbpk28_mass_tol_rel(ledger.steps) * 1.0e12)
     print("  booked negative mass (mg) x 1e12: ")
     println(ledger.neg_mass * 1.0e12)
+    // Printed only when non-zero, so runs without routed input print as before.
+    if ledger.rejected_input != 0.0 {
+        print("  rejected routed input (mg): ")
+        println(ledger.rejected_input)
+    }
     return pbpk28_mass_gate_ok(ledger, s, p, m0, m0)
 }
 
