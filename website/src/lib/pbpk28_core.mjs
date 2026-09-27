@@ -703,7 +703,7 @@ function pureExp(x) {                         // exp: 2^k Â· Taylor(r), r = x âˆ
   else { for (let i = 0; i < -k; i++) res = res / 2.0; }
   return res;
 }
-function pureSqrt(x) {                        // sqrt: scale by 4^k into [1, 4), 20 Newton steps
+function pureSqrt(x) {                        // sqrt: scale x < 1 up by 4^k into [1, 4) (x >= 1 is not scaled), 20 Newton steps
   if (x <= 0.0) return 0.0;
   let v = x, s = 1.0;
   while (v < 1.0) { v = v * 4.0; s = s * 2.0; }
