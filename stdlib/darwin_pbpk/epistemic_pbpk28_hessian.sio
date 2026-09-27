@@ -90,6 +90,12 @@ pub fn h28_simulate_ledger(prm: PBPKParams28, dose_mg: f64, t_end: f64,
     return pbpk28_bolus_run_mut(prm, dose_mg, 0.1, t_end, 5000, st, led)
 }
 
+// A stencil AUC is usable iff finite and > 0 (0.0 is h28_simulate_auc's
+// failure value).
+fn h28_solve_ok(auc: f64) -> bool {
+    return h28_finite(auc) && auc > 0.0
+}
+
 fn h28_simulate_auc(prm: PBPKParams28, dose_mg: f64, t_end: f64) -> f64 with Mut, Div, Panic {
     var st = pbpk28_state_zero()
     var led = pbpk28_ledger_zero()
@@ -174,6 +180,12 @@ pub fn hessian_pbpk28_auc(
     }
     bud.auc_ref = auc0
 
+    // Every stencil solve must succeed. h28_simulate_auc returns 0.0 for a
+    // rejected trajectory (non-finite, runaway, or booked negative mass above
+    // pbpk28_neg_mass_bound_mg()); a valid AUC is > 0. One rejected solve
+    // fails the whole budget instead of entering a difference quotient as 0.
+    var all_ok = true
+
     // Step sizes per parameter
     var hs: [f64; 8] = [0.0; 8]
     var i: i32 = 0
@@ -191,6 +203,7 @@ pub fn hessian_pbpk28_auc(
             let p_n = h28_perturb(base_prm, i, 0.0 - h)
             let f_p = h28_simulate_auc(p_p, dose_mg, t_end)
             let f_n = h28_simulate_auc(p_n, dose_mg, t_end)
+            if !h28_solve_ok(f_p) || !h28_solve_ok(f_n) { all_ok = false }
             let ci  = (f_p - f_n) / (2.0 * h)
             bud.sensitivity[i] = ci
             let hii = (f_p - 2.0 * auc0 + f_n) / (h * h)
@@ -211,6 +224,7 @@ pub fn hessian_pbpk28_auc(
                 let f_pn = h28_simulate_auc(h28_perturb2(base_prm, i, hi,        j, 0.0 - hj), dose_mg, t_end)
                 let f_np = h28_simulate_auc(h28_perturb2(base_prm, i, 0.0 - hi, j, hj),        dose_mg, t_end)
                 let f_nn = h28_simulate_auc(h28_perturb2(base_prm, i, 0.0 - hi, j, 0.0 - hj), dose_mg, t_end)
+                if !h28_solve_ok(f_pp) || !h28_solve_ok(f_pn) || !h28_solve_ok(f_np) || !h28_solve_ok(f_nn) { all_ok = false }
                 let hij  = (f_pp - f_pn - f_np + f_nn) / (4.0 * hi * hj)
                 bud.hessian[i * 8 + j] = hij
                 bud.hessian[j * 8 + i] = hij
@@ -219,6 +233,8 @@ pub fn hessian_pbpk28_auc(
         }
         i = i + 1
     }
+
+    if !all_ok { return h28_budget_zero() }
 
     // First-order variance
     var v1: f64 = 0.0
