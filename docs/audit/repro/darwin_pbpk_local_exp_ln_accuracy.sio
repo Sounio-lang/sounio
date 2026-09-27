@@ -1,0 +1,106 @@
+// Repro: darwin_pbpk local exp/ln helpers vs canonical math::pure::{exp, ln}.
+// old_exp1024 is verbatim rel_exp / pv_exp / sv_exp / cv_exp and the inline GMFE
+// block in tacrolimus_oral_pbpk.sio; old_ln5 is verbatim pv_ln / sv_ln / cv_ln /
+// tco_ln. Arguments are the ones their callers use. References: V8 Math.exp /
+// Math.log (< 1 ulp), 17 s.f. Errors print scaled because println(f64) is %f.
+// Run via bin/souc (Madaros, 512 MiB stack). rc=1 = defect present; rc=2 = the
+// reference or math::pure disagrees (probe itself untrustworthy); rc=0 = fixed.
+// Evidence: docs/audit/DARWIN_PBPK_LOCAL_EXP_LN_ACCURACY_DISPATCH_2026-09-26.md
+use math::pure::{exp, ln}
+
+fn old_exp1024(x: f64) -> f64 with Mut, Div {
+    var r = 1.0 + x / 1024.0
+    var i = 0
+    while i < 10 {
+        r = r * r
+        i = i + 1
+    }
+    return r
+}
+
+fn old_ln5(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 999999.0 }
+    var sx = x
+    var scale = 0
+    while sx > 2.0 { sx = sx / 2.718281828459045; scale = scale + 1 }
+    while sx < 0.5 { sx = sx * 2.718281828459045; scale = scale - 1 }
+    let u = (sx - 1.0) / (sx + 1.0)
+    let u2 = u * u
+    let result = 2.0 * (u + u * u2 / 3.0 + u * u2 * u2 / 5.0
+                       + u * u2 * u2 * u2 / 7.0 + u * u2 * u2 * u2 * u2 / 9.0)
+    var sf = 0.0
+    var si = 0
+    if scale > 0 {
+        while si < scale { sf = sf + 1.0; si = si + 1 }
+    } else {
+        while si < (0 - scale) { sf = sf - 1.0; si = si + 1 }
+    }
+    return result + sf
+}
+
+fn absd(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// Prints the helper's relative error in ppm and pure's in units of 1e-15; returns the helper's.
+fn exp_row(x: f64, want: f64) -> f64 with IO, Mut, Div, Panic {
+    let e_old = old_exp1024(x) / want - 1.0
+    let e_new = exp(x) / want - 1.0
+    print("exp x = "); println(x)
+    print("  old rel err, ppm   = "); println(e_old * 1.0e6)
+    print("  pure rel err, 1e-15 = "); println(e_new * 1.0e15)
+    return e_old
+}
+
+// Absolute errors: helper's in 1e-9, pure's in 1e-15; returns the helper's.
+fn ln_row(x: f64, want: f64) -> f64 with IO, Mut, Div, Panic {
+    let e_old = old_ln5(x) - want
+    let e_new = ln(x) - want
+    print("ln x = "); println(x)
+    print("  old abs err, 1e-9  = "); println(e_old * 1.0e9)
+    print("  pure abs err, 1e-15 = "); println(e_new * 1.0e15)
+    return e_old
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let kr = 0.00224   // des_sirolimus_first_order() k_r, 1/h
+    // biomaterial_release first-order Q(t) = D(1 - exp(-k_r t)): t = 1, 168 (sim end), 720, 1545 h (TEST 2)
+    let a = exp_row(0.0 - kr * 1.0, 0.99776250692781121)
+    let b = exp_row(0.0 - kr * 168.0, 0.68638265544601751)
+    let c = exp_row(0.0 - kr * 720.0, 0.19932871158437079)
+    let d = exp_row(0.0 - kr * 1545.0, 0.031404628263595392)
+    let e = exp_row(0.0 - 10.0, 0.000045399929762484847)   // rel_exp's own "|x| < 10" claim
+    // GMFE = exp(mean ln FE) at the 2.0 and 3.0 acceptance gates, and tacrolimus's ln_avg
+    let g2 = exp_row(0.69314718055994529, 2.0)
+    let g3 = exp_row(1.0986122886681096, 2.9999999999999996)
+    let gt = exp_row(0.24212, 1.2739470572910179)
+    // ln: sweep endpoints, a tail concentration, tacrolimus's printed FEs
+    let l0 = ln_row(0.5, 0.0 - 0.69314718055994529)
+    let l1 = ln_row(2.0, 0.69314718055994529)
+    let l2 = ln_row(1.0e-6, 0.0 - 13.815510557964274)
+    let l3 = ln_row(1.156497, 0.14539560865226997)
+    let l4 = ln_row(1.673122, 0.51469134223894852)
+    let l5 = ln_row(1.068589, 0.066339086646141340)
+
+    // Worst ln helper error over the reduced domain [0.5, 2] (1e-9 units), against pure.
+    var worst = 0.0
+    var i = 0
+    while i <= 30000 {
+        let x = 0.5 + 1.5 * (i as f64) / 30000.0
+        let err = absd(old_ln5(x) - ln(x))
+        if err > worst { worst = err }
+        i = i + 1
+    }
+    print("ln5 worst |err| on [0.5,2], 1e-9 = "); println(worst * 1.0e9)
+
+    // pure must match the references to a few ulp or the probe proves nothing.
+    if absd(exp(0.0 - kr * 1545.0) / 0.031404628263595392 - 1.0) > 1.0e-14
+        || absd(ln(0.5) + 0.69314718055994529) > 1.0e-15 {
+        println("PROBE_REFERENCE_MISMATCH")
+        return 2
+    }
+    if absd(d) > 1.0e-9 || absd(g2) > 1.0e-9 || absd(l0) > 1.0e-12 || worst > 1.0e-12 {
+        println("REPRO_DARWIN_PBPK_LOCAL_EXP_LN_INACCURATE")
+        return 1
+    }
+    println("DARWIN_PBPK_LOCAL_EXP_LN_OK")
+    return 0
+}
