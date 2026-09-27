@@ -32,56 +32,26 @@
 //   Siepmann J, Peppas NA (2012) Int J Pharm 418:6 — release mechanism review
 //   DailyMed Effexor XR — 75 mg unit dose, Tmax parent ≈ 5.5 h (150 mg q24h label)
 
-use darwin_pbpk::tsit5_pbpk14::{abs_f64, sqrt_f64}
+use darwin_pbpk::tsit5_pbpk14::{abs_f64}
+use math::pure::{exp, ln, sqrt}
 
 // ============================================================================
-// MATH HELPERS (self-contained — mirrors biomaterial_release.sio)
+// MATH HELPERS — canonical stdlib/math/pure.sio ln / exp / sqrt
 // ============================================================================
+// K-P needs t^n over the whole dosing clock, (0, ~24] h, including the ~1e-15 h
+// positive clocks a q-tau regimen produces at dose boundaries. The former local
+// helpers failed away from t = 1: the 20-term artanh ln on (x-1)/(x+1) saturated
+// at -4.959 as t -> 0+, so F(t) floored at 7.88e-3 (0.59 mg of 75 mg); exp as
+// (1 + x/1024)^1024 carried a -x^2/2048 relative bias (-1.27e-3 at t = 12 h); the
+// 10-step Newton sqrt from y = x was wrong below t ~ 1e-4. pure.sio range-reduces
+// all three.
+// Evidence: docs/audit/MATRIX_ER_TRANSCENDENTAL_ACCURACY_DISPATCH_2026-09-26.md
 
 fn mer_pow(t: f64, n: f64) -> f64 with Mut, Div, Panic {
     if t <= 0.0 { return 0.0 }
     if abs_f64(n - 1.0) < 1.0e-12 { return t }
-    if abs_f64(n - 0.5) < 1.0e-12 { return sqrt_f64(t) }
-    // General t^n via exp(n·ln t) — t > 0 only
-    var ln_t = 0.0
-    var x = t
-    if x > 0.0 {
-        // ln(x) by artanh series for 0 < x ≤ 2 (sufficient for dissolution times)
-        if x > 2.0 {
-            ln_t = mer_ln2() + mer_ln_unit(x / 2.0)
-        } else {
-            ln_t = mer_ln_unit(x)
-        }
-    }
-    return mer_exp(n * ln_t)
-}
-
-fn mer_ln2() -> f64 { return 0.6931471805599453 }
-
-fn mer_ln_unit(x: f64) -> f64 with Mut, Div {
-    // ln(x) for x in (0, 2]: artanh series on y = (x-1)/(x+1)
-    if x <= 0.0 { return 0.0 - 1.0e6 }
-    let y = (x - 1.0) / (x + 1.0)
-    var y2 = y * y
-    var term = y
-    var sum = term
-    var k: i64 = 1
-    while k < 20 {
-        term = term * y2
-        sum = sum + term / (2.0 * (k as f64) + 1.0)
-        k = k + 1
-    }
-    return 2.0 * sum
-}
-
-fn mer_exp(x: f64) -> f64 with Mut, Div {
-    var r = 1.0 + x / 1024.0
-    var i = 0
-    while i < 10 {
-        r = r * r
-        i = i + 1
-    }
-    return r
+    if abs_f64(n - 0.5) < 1.0e-12 { return sqrt(t) }
+    return exp(n * ln(t))
 }
 
 // ============================================================================

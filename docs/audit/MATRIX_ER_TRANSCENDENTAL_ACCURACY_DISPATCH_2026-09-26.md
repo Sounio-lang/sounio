@@ -11,7 +11,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.matrix-e
 
 **Date:** 2026-09-26
 **Base:** measured on `main` at `46e9b48b6`; committed on `f141ad5d9`. No file under `stdlib/`, `tests/`, `website/` or `self-hosted/` differs between the two, and the patch applies to both.
-**Status:** dispatch. The fix is measured but **not applied**. The patch is in
+**Status:** applied (operator approval, 2026-09-26) in the commit after this dispatch. The same change is kept as
 `docs/audit/repro/matrix_er_pure_math.patch`. No constant moves, and nothing in `self-hosted/` is touched.
 **Compiler for every Sounio number below:** Madaros built from source, md5 `5764851f`. It came from a
 `make build-madaros` of `98315edcdb`, and `git diff --stat 98315edcdb 46e9b48b6 -- self-hosted` is empty.
@@ -235,5 +235,5 @@ The two independent vendors are xAI and Qwen.
 
 ## Reverting
 
-Nothing lands with this dispatch. Once the patch is applied, revert it with
-`git apply -R docs/audit/repro/matrix_er_pure_math.patch`.
+Revert the fix commit with `git revert`. The fix also rewrites the parity ref's header comment, so
+`git apply -R docs/audit/repro/matrix_er_pure_math.patch` restores the code but not that comment.
