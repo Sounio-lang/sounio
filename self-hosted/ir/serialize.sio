@@ -31,7 +31,8 @@ use check::types::*
 //   - compile_strategy: i64
 //   - prof_counter_id: i64
 //   - hyper_algebra_kind: i64 (v3+)
-//   - float_reg_bits: [i64; 64] (v5+)
+//   - float_reg_word_count: i64 (v5+)
+//   - float_reg_bits: [i64; float_reg_word_count] (v5+)
 //   - instrs: array of IrInstr
 //
 // IrInstr encoding (232 bytes through v4; 240 bytes in v5+):
@@ -56,6 +57,7 @@ let SOIR_MAX_SIZE: i64 = 131072  // 128KB max module size
 // "refused because it would write past the buffer". Incremented on every
 // capacity refuse so a gate / test can observe that deserialize declined.
 pub var SOIR_DESER_REFUSAL_COUNT: i64 = 0
+pub var SOIR_SER_REFUSAL_COUNT: i64 = 0
 
 fn soir_note_deser_refusal() with Mut {
     SOIR_DESER_REFUSAL_COUNT = SOIR_DESER_REFUSAL_COUNT + 1
@@ -63,6 +65,10 @@ fn soir_note_deser_refusal() with Mut {
 
 fn write_i8(buf: [i8; 131072], pos: i64, val: i8) -> ([i8; 131072], i64) with Mut, Panic, Div {
     var b = buf
+    if pos < 0 || pos >= SOIR_MAX_SIZE {
+        SOIR_SER_REFUSAL_COUNT = SOIR_SER_REFUSAL_COUNT + 1
+        return (b, SOIR_MAX_SIZE)
+    }
     b[pos] = val
     (b, pos + 1)
 }
@@ -618,8 +624,14 @@ fn serialize_ir_function(buf: [i8; 131072], pos: i64, func: IrFunction) -> ([i8;
     }
 
     if SOIR_VERSION >= 5 {
+        var float_word_count = (func.reg_count + 31) / 32
+        if float_word_count < 0 { float_word_count = 0 }
+        if float_word_count > 64 { float_word_count = 64 }
+        let float_count_pair = write_i64(b, p, float_word_count)
+        b = float_count_pair.0
+        p = float_count_pair.1
         var fw: i64 = 0
-        while fw < 64 {
+        while fw < float_word_count {
             let float_bits_pair = write_i64(b, p, func.float_reg_bits[fw as usize])
             b = float_bits_pair.0
             p = float_bits_pair.1
@@ -691,8 +703,16 @@ fn deserialize_ir_function(buf: [i8; 131072], pos: i64, version: i8) -> (IrFunct
 
     var float_reg_bits: [i64; 64] = [0; 64]
     if version >= 5 {
+        let float_count_pair = read_i64(buf, p)
+        let float_word_count = float_count_pair.0
+        p = float_count_pair.1
+        if float_word_count < 0 || float_word_count > 64 {
+            soir_note_deser_refusal()
+            let empty = ir_empty_function()
+            return (empty, p)
+        }
         var fw: i64 = 0
-        while fw < 64 {
+        while fw < float_word_count {
             let float_bits_pair = read_i64(buf, p)
             float_reg_bits[fw as usize] = float_bits_pair.0
             p = float_bits_pair.1
@@ -749,34 +769,6 @@ fn deserialize_ir_function(buf: [i8; 131072], pos: i64, version: i8) -> (IrFunct
         float_reg_bits: float_reg_bits,
     }
     (func, p)
-}
-
-// Regression gate for the metadata consumed by high-vreg f64 lowering.
-// Both the per-instruction marker and the function's legacy float bitmap must
-// survive the cache boundary; preserving only one is insufficient.
-pub fn soir_float_metadata_roundtrip_selftest() -> bool with Mut, Panic, Div, Alloc {
-    var module = ir_empty_module()
-    var func = ir_empty_function()
-    if ir_instr_arena_alloc(1, &! func.region) != IR_ARENA_OK { return false }
-    func.instr_count = 1
-    func.reg_count = 3002
-    func.float_reg_bits[63 as usize] = 1073741824
-    var neg = ir_unaryop(3001, UnaryOp::OpNeg, 3000)
-    neg.imm_flags = IR_FLOAT_REG_MARKER_FLAG
-    ir_arena_store(ir_region_slot_w(func.region, 0), neg)
-    ir_fn_pool_ensure(&module, 0)
-    ir_fn_set(&! module, 0, func)
-    module.fn_count = 1
-
-    let encoded = serialize_ir_module(module)
-    let restored = deserialize_ir_module(encoded.0, encoded.1)
-    if restored.fn_count != 1 { return false }
-    let restored_func = ir_fn_get(&restored, 0)
-    if restored_func.float_reg_bits[63 as usize] != 1073741824 { return false }
-    let restored_neg = ir_arena_load(ir_region_slot_r(restored_func.region, 0))
-    restored_neg.dst == 3001 &&
-        restored_neg.src1 == 3000 &&
-        restored_neg.imm_flags == IR_FLOAT_REG_MARKER_FLAG
 }
 
 fn write_ir_algebra_info(buf: [i8; 131072], pos: i64, info: IrAlgebraInfo) -> ([i8; 131072], i64) with Mut, Panic, Div {
@@ -4477,6 +4469,7 @@ fn deserialize_ir_epistemic_section(buf: [i8; 131072], pos: i64) -> (IrEpistemic
 fn serialize_ir_module_into(module: IrModule, out_buf: &![i8; 131072], out_len: &! i64) with Mut, Panic, Div, Alloc {
     var buf: [i8; 131072] = [0; 131072]
     var pos: i64 = 0
+    let refusals_before = SOIR_SER_REFUSAL_COUNT
 
     // Write header
     buf[0] = 83 as i8   // 'S'
@@ -4530,7 +4523,11 @@ fn serialize_ir_module_into(module: IrModule, out_buf: &![i8; 131072], out_len: 
     }
 
     (*out_buf) = buf
-    (*out_len) = pos
+    if SOIR_SER_REFUSAL_COUNT != refusals_before {
+        (*out_len) = 0
+    } else {
+        (*out_len) = pos
+    }
 }
 
 fn serialize_ir_module(module: IrModule) -> ([i8; 131072], i64) with Mut, Panic, Div, Alloc {

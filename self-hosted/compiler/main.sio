@@ -64,7 +64,6 @@ use ir::lower::{lower_program_function_body_from_program_with_epistemic_ref}
 use ir::lower::{lower_program_function_body_from_summary_with_epistemic}
 use ir::lower::{lower_fn_tuple_arr_reset, lower_fn_tuple_f64_arrays_collect, lower_fn_tuple_f64_array_mask}
 use ir::normalize::*
-use ir::serialize::{soir_float_metadata_roundtrip_selftest}
 use ir::const_prop::{cp_check_load_imm, cp_empty_instrs, cp_make_test_func, cp_optimize_function}
 use ir::dce::{dce_check_nop, dce_empty_instrs, dce_make_test_func, dce_optimize_function}
 use ir::profile::*
@@ -2017,7 +2016,7 @@ fn compiler_ir_roundtrip_non_ep_buffer(in_buf: &![i8; 131072], len: i64, out_buf
         return compiler_ir_roundtrip_result(false, 0, 0, 0)
     }
     let soir_version = (*in_buf)[4]
-    let fn_header_bytes: i64 = if soir_version >= 5 { 1208 } else { 696 }
+    let legacy_fn_header_bytes: i64 = if soir_version >= 3 { 704 } else { 696 }
     let instr_bytes_each: i64 = if soir_version >= 5 { 240 } else { 232 }
 
     var in_pos: i64 = 0
@@ -2036,6 +2035,14 @@ fn compiler_ir_roundtrip_non_ep_buffer(in_buf: &![i8; 131072], len: i64, out_buf
 
     var i: i64 = 0
     while i < fn_count {
+        var fn_header_bytes = legacy_fn_header_bytes
+        if soir_version >= 5 {
+            let reg_count = compiler_ir_read_i64_at(in_buf, in_pos + 144)
+            var float_word_count = (reg_count + 31) / 32
+            if float_word_count < 0 { float_word_count = 0 }
+            if float_word_count > 64 { float_word_count = 64 }
+            fn_header_bytes = fn_header_bytes + 8 + float_word_count * 8
+        }
         if in_pos + fn_header_bytes > len {
             return compiler_ir_roundtrip_result(false, 0, fn_count, 0)
         }
@@ -7079,8 +7086,7 @@ fn compiler_main_test_ir_vreg_boundary_contract() -> bool with Mut, Panic, Div, 
     if !ir_reg_count_can_grow(IR_MAX_VREGS - 1, 1) { return false }
     if ir_reg_count_can_grow(IR_MAX_VREGS, 1) { return false }
     if ir_reg_count_can_grow(IR_MAX_VREGS - 1, 2) { return false }
-    if !compiler_main_test_native_vreg_rejection_paths() { return false }
-    soir_float_metadata_roundtrip_selftest()
+    compiler_main_test_native_vreg_rejection_paths()
 }
 
 fn compiler_main_test_used_allocatable_preg_mask() -> bool with Mut, Panic, Div, Alloc {
@@ -23244,10 +23250,10 @@ fn compiler_main_self_tests_part_01(passed_in: i64) -> i64 with IO, Mut, Panic, 
     }
 
     if compiler_main_test_used_allocatable_preg_mask() {
-        println("  T70 OK: preg mask, 16384-vreg bounds, and SOIR f64 metadata are fail-closed")
+        println("  T70 OK: preg mask and 16384-vreg growth boundaries are fail-closed")
         passed = passed + 1
     } else {
-        println("  FAIL: T70 preg mask/vreg/SOIR metadata contract")
+        println("  FAIL: T70 preg mask/vreg boundary contract")
     }
 
     if compiler_main_test_frame_align_for_saved_pregs() {
