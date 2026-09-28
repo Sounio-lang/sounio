@@ -64,6 +64,7 @@ use ir::lower::{lower_program_function_body_from_program_with_epistemic_ref}
 use ir::lower::{lower_program_function_body_from_summary_with_epistemic}
 use ir::lower::{lower_fn_tuple_arr_reset, lower_fn_tuple_f64_arrays_collect, lower_fn_tuple_f64_array_mask}
 use ir::normalize::*
+use ir::serialize::{soir_float_metadata_roundtrip_selftest}
 use ir::const_prop::{cp_check_load_imm, cp_empty_instrs, cp_make_test_func, cp_optimize_function}
 use ir::dce::{dce_check_nop, dce_empty_instrs, dce_make_test_func, dce_optimize_function}
 use ir::profile::*
@@ -2015,6 +2016,9 @@ fn compiler_ir_roundtrip_non_ep_buffer(in_buf: &![i8; 131072], len: i64, out_buf
     if (*in_buf)[0] != (83 as i8) || (*in_buf)[1] != (79 as i8) || (*in_buf)[2] != (73 as i8) || (*in_buf)[3] != (82 as i8) {
         return compiler_ir_roundtrip_result(false, 0, 0, 0)
     }
+    let soir_version = (*in_buf)[4]
+    let fn_header_bytes: i64 = if soir_version >= 5 { 1208 } else { 696 }
+    let instr_bytes_each: i64 = if soir_version >= 5 { 240 } else { 232 }
 
     var in_pos: i64 = 0
     var out_pos: i64 = 0
@@ -2032,17 +2036,17 @@ fn compiler_ir_roundtrip_non_ep_buffer(in_buf: &![i8; 131072], len: i64, out_buf
 
     var i: i64 = 0
     while i < fn_count {
-        if in_pos + 696 > len {
+        if in_pos + fn_header_bytes > len {
             return compiler_ir_roundtrip_result(false, 0, fn_count, 0)
         }
         let instr_count = compiler_ir_read_i64_at(in_buf, in_pos + 136)
         if instr_count < 0 {
             return compiler_ir_roundtrip_result(false, 0, fn_count, 0)
         }
-        let fn_header_copy = compiler_ir_copy_bytes(in_buf, in_pos, out_buf, out_pos, 696)
+        let fn_header_copy = compiler_ir_copy_bytes(in_buf, in_pos, out_buf, out_pos, fn_header_bytes)
         in_pos = fn_header_copy.src_pos
         out_pos = fn_header_copy.dst_pos
-        let instr_bytes = instr_count * 232
+        let instr_bytes = instr_count * instr_bytes_each
         if instr_bytes < 0 || in_pos + instr_bytes > len {
             return compiler_ir_roundtrip_result(false, 0, fn_count, 0)
         }
@@ -7075,7 +7079,8 @@ fn compiler_main_test_ir_vreg_boundary_contract() -> bool with Mut, Panic, Div, 
     if !ir_reg_count_can_grow(IR_MAX_VREGS - 1, 1) { return false }
     if ir_reg_count_can_grow(IR_MAX_VREGS, 1) { return false }
     if ir_reg_count_can_grow(IR_MAX_VREGS - 1, 2) { return false }
-    compiler_main_test_native_vreg_rejection_paths()
+    if !compiler_main_test_native_vreg_rejection_paths() { return false }
+    soir_float_metadata_roundtrip_selftest()
 }
 
 fn compiler_main_test_used_allocatable_preg_mask() -> bool with Mut, Panic, Div, Alloc {
@@ -23239,10 +23244,10 @@ fn compiler_main_self_tests_part_01(passed_in: i64) -> i64 with IO, Mut, Panic, 
     }
 
     if compiler_main_test_used_allocatable_preg_mask() {
-        println("  T70 OK: preg mask and 16384-vreg growth boundaries are fail-closed")
+        println("  T70 OK: preg mask, 16384-vreg bounds, and SOIR f64 metadata are fail-closed")
         passed = passed + 1
     } else {
-        println("  FAIL: T70 preg mask/vreg boundary contract")
+        println("  FAIL: T70 preg mask/vreg/SOIR metadata contract")
     }
 
     if compiler_main_test_frame_align_for_saved_pregs() {
