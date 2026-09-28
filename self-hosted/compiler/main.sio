@@ -7039,17 +7039,36 @@ fn compiler_main_test_frame_trim_param_vreg() -> bool with Mut, Panic, Div {
     nc.vreg_to_preg[1 as usize] = 15   // preg-alloc
     var func = ir_empty_function()
     func.reg_count = 2
-    nc_min_frame_size(nc, func) == 16
+    if nc_min_frame_size(nc, func) != 16 { return false }
+
+    // Every vreg above the allocation table is stack-only. Exercise both the
+    // first such slot and the final legal IR slot.
+    func.reg_count = NC_MAX_VREGS + 1
+    if nc_min_frame_size(nc, func) != align16((NC_MAX_VREGS + 1) * 8) { return false }
+    func.reg_count = IR_MAX_VREGS
+    nc_min_frame_size(nc, func) == align16(IR_MAX_VREGS * 8)
 }
 
 // T70: used allocatable preg mask tracks only r12-r15 assignments
+fn compiler_main_test_ir_vreg_boundary_contract() -> bool {
+    if !ir_reg_count_is_valid(IR_MAX_VREGS - 1) { return false }
+    if !ir_reg_count_is_valid(IR_MAX_VREGS) { return false }
+    if ir_reg_count_is_valid(IR_MAX_VREGS + 1) { return false }
+    if !ir_reg_count_can_grow(IR_MAX_VREGS - 1, 1) { return false }
+    if ir_reg_count_can_grow(IR_MAX_VREGS, 1) { return false }
+    if ir_reg_count_can_grow(IR_MAX_VREGS - 1, 2) { return false }
+    true
+}
+
 fn compiler_main_test_used_allocatable_preg_mask() -> bool with Mut {
     var nc = compiler_new()
     nc.vreg_to_preg[0 as usize] = 15
     nc.vreg_to_preg[1 as usize] = 12
     nc.vreg_to_preg[2 as usize] = -1
     nc.vreg_to_preg[3 as usize] = 0
-    nc_used_allocatable_preg_mask(nc, 4) == (X86_ALLOCATABLE_R12_MASK() | X86_ALLOCATABLE_R15_MASK())
+    if nc_used_allocatable_preg_mask(nc, 4) != (X86_ALLOCATABLE_R12_MASK() | X86_ALLOCATABLE_R15_MASK()) { return false }
+    if nc_used_allocatable_preg_mask(nc, NC_MAX_VREGS + 1) != (X86_ALLOCATABLE_R12_MASK() | X86_ALLOCATABLE_R15_MASK()) { return false }
+    compiler_main_test_ir_vreg_boundary_contract()
 }
 
 // T71: odd allocatable-save counts add an 8-byte alignment pad before calls
@@ -23195,17 +23214,17 @@ fn compiler_main_self_tests_part_01(passed_in: i64) -> i64 with IO, Mut, Panic, 
     }
 
     if compiler_main_test_frame_trim_param_vreg() {
-        println("  T69 OK: nc_min_frame_size handles param vreg (RA_UNASSIGNED) as stack slot")
+        println("  T69 OK: nc_min_frame_size covers params and high stack-only vreg boundaries")
         passed = passed + 1
     } else {
-        println("  FAIL: T69 nc_min_frame_size handles param vreg (RA_UNASSIGNED) as stack slot")
+        println("  FAIL: T69 nc_min_frame_size param/high-vreg boundary contract")
     }
 
     if compiler_main_test_used_allocatable_preg_mask() {
-        println("  T70 OK: used allocatable preg mask tracks only r12-r15 assignments")
+        println("  T70 OK: preg mask and 16384-vreg growth boundaries are fail-closed")
         passed = passed + 1
     } else {
-        println("  FAIL: T70 used allocatable preg mask tracks only r12-r15 assignments")
+        println("  FAIL: T70 preg mask/vreg boundary contract")
     }
 
     if compiler_main_test_frame_align_for_saved_pregs() {
