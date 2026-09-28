@@ -980,6 +980,51 @@ jobs:
         env:
           MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
         run: bash scripts/ci/madaros_private_fn_identity_gate.sh
+      # Copilot review (PR #2515), comment 4110379104: this gate's fixtures
+      # (private fn/struct/enum/field, plain and specialized-generic) guard
+      # the specialized multi-module visibility fixes on this branch, but no
+      # workflow named it -- gate_workflow_reference_ratchet.sh's own point
+      # is that an unnamed gate protects nothing. Reuses the ELF built above.
+      - name: Specialized-generic visibility denies private cross-module access
+        env:
+          MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/madaros_visibility_context_gate.sh
+      # Copilot review (PR #2515), comment 4113458034: check_items_verdict_
+      # boot4_with_module_map stamped current_module_id per item but left
+      # current_module (used by pub(in path)'s ast_path_is_prefix check)
+      # fixed at empty_path() -- refusing every pub(in path) access through
+      # this specialized path unconditionally. Reuses the ELF built above.
+      - name: pub(in path) visibility correct through the specialized checker
+        env:
+          MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/madaros_pub_in_specialized_gate.sh
+      # Copilot review (PR #2515), comment 4113834074: checker_check_expr_
+      # call_inplace's Type::method arm consulted global struct/enum tables
+      # before ever checking whether the qualifier was a module the caller
+      # actually `use`d.
+      - name: A module colliding with a same-named lowercase type is refused, not guessed
+        env:
+          MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/madaros_module_qualifier_type_collision_gate.sh
+      # Copilot review (PR #2515), comment 4114124500: a path-form TYPE
+      # import (no braces) was recorded into the same "named item, not a
+      # module" registry a function/value import uses, which suppressed
+      # its module-qualifier suffix registration.
+      - name: A path-form type import keeps its module-qualifier suffix
+        env:
+          MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/madaros_module_qualified_type_import_gate.sh
+      # Every other tuple-array-mask gate above drives a lowerer PROBE entry
+      # point or a single file with no cross-module import. This one compiles
+      # and RUNS a real multi-module program (--native-compile) where main
+      # imports a tuple-array-returning callee, alongside an unrelated,
+      # uncalled private fn of the same bare name (a different tuple-array
+      # shape) collected first from a module `use`d earlier -- see
+      # tests/multimodule/thinlink_tuple_arr_import/README.md.
+      - name: Imported tuple-array callee through the real thin-link unit builder
+        env:
+          MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/madaros_thinlink_tuple_arr_import_gate.sh
       - name: KL-3 specializer caps and method turbofish fail closed
         env:
           SOUNIO_MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
@@ -991,6 +1036,71 @@ jobs:
         env:
           SOUNIO_MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
         run: bash scripts/ci/madaros_seq_ref_param_gate.sh
+      # lower_program_bodies_filtered_ref (the streaming single-function body
+      # lowering lane, reached only via the NON-flat
+      # lower_program_function_body_from_summary_with_epistemic_ref -- neither
+      # `souc run` nor --probe-native-streaming reach it) never populated the
+      # tuple-array mask table on its own. This gate drives that lane directly
+      # through --probe-filtered-body-lower and asserts tuple_arr_mask=3 for
+      # fn=pair (a direct query of lower_fn_tuple_f64_array_mask, populated
+      # only by the collector) -- a body-wide float-register-marker count was
+      # tried first and dropped as a round-6 review finding because ordinary
+      # f64 literals in the fixture also set it, so it stayed positive even
+      # with the collector call removed. Reuses the ELF built above; adds no
+      # build.
+      - name: Streaming single-function body lowering marks f64-array tuple slots
+        env:
+          SOUNIO_MADAROS_FILTERED_BODY_GATE_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/madaros_tuple_arr_filtered_body_lower_gate.sh
+      # The run-pass fixture form of this capacity test only declares 65
+      # functions -- nowhere near the old 4096-entry cap it documents, so it
+      # cannot detect a regression back to it. This gate generates a
+      # 4097-function witness at run time and, via --probe-tuple-arr-capacity,
+      # collects the RAW parsed item list directly and queries entry 4096's
+      # mask -- a synthetic probe of the collector/table alone, not
+      # end-to-end lowering through the normal compile pipeline (none of the
+      # 4097 functions are destructured, called, or compiled). Reuses the
+      # ELF built above; adds no build.
+      - name: Tuple-array table survives past the old 4096-entry cap
+        env:
+          SOUNIO_MADAROS_TUPLE_ARR_CAP_GATE_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/madaros_tuple_arr_capacity_boundary_gate.sh
+      # lower_program_to_ir (self-hosted/ir/lower.sio) collects into the
+      # process-global tuple-array-mask table but, before round 9, never
+      # reset it first, unlike every other top-level compile entry point.
+      # Two back-to-back calls to this public API in one process for two
+      # different inputs that both define a same-named function could leak
+      # the first input's mask into the second's lowering. This gate drives
+      # that exact shape through --probe-tuple-arr-reset-boundary: an
+      # all-f64-array `pair` then an all-integer-array `pair`, asserting the
+      # second call reports its own (mask=0) result rather than the first
+      # call's leaked mask=3. Reuses the ELF built above; adds no build.
+      - name: Tuple-array table resets between separate lower_program_to_ir calls
+        env:
+          SOUNIO_MADAROS_RESET_BOUNDARY_GATE_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/madaros_tuple_arr_reset_boundary_gate.sh
+      # Same leak, a THIRD entry point: lower_program_to_ir_probe_callsite is
+      # a separate public API from lower_program_to_ir above, reaching the
+      # same collector but (before comment 4115267768's fix) never
+      # resetting the table itself. Reuses the ELF built above; adds no
+      # build.
+      - name: Tuple-array table resets between separate lower_program_to_ir_probe_callsite calls
+        env:
+          SOUNIO_MADAROS_CALLSITE_RESET_BOUNDARY_GATE_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/madaros_tuple_arr_callsite_reset_boundary_gate.sh
+      # Same leak, different entry point: lower_program_function_body_from_
+      # summary_with_epistemic_ref (the streaming single-function lane
+      # run_probe_filtered_body_lower and streaming_body_lower_smoke.sio both
+      # drive) reaches the same process-global tuple-array-mask table but
+      # wasn't covered by the gate above, which only exercises
+      # lower_program_to_ir. Drives --probe-filtered-body-reset-boundary the
+      # same way: an all-f64-array `pair` then an all-integer-array `pair`,
+      # asserting the second call reports its own (mask=0) result. Reuses
+      # the ELF built above; adds no build.
+      - name: Filtered-body lane resets tuple-array table between separate programs
+        env:
+          SOUNIO_MADAROS_FILTERED_BODY_RESET_BOUNDARY_GATE_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/madaros_filtered_body_reset_boundary_gate.sh
       # KL-6: hessian_of on Madaros. Quotient rule, the transcendental chain
       # rule with a compound inner on both transfer paths (kind 6 and kind 8),
       # and a quotient fed by a composite numerator -- against closed-form
