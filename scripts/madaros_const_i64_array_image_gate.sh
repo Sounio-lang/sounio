@@ -4,7 +4,7 @@
 # Const [i64; N] literal image gate. A let-bound all-i64 literal is stamped
 # into the flat rodata; loads read the image. Stores to it are a compile
 # error; var bindings keep the store path; escape into a callee keeps the
-# heap fill.
+# heap fill; a literal nested in another array literal keeps its stores.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
@@ -55,6 +55,14 @@ if "$SOUC" compile "$OUT/store_let.sio" -o "$OUT/store_let.elf" >"$OUT/store_let
   echo "FAIL: store to let-bound const literal compiled"; fail=1
 else
   echo "PASS: store to let-bound const literal rejected"
+fi
+
+# 5. a literal nested in another array literal keeps its stores (26)
+if ! "$SOUC" compile tests/run-pass/const_i64_array_nested.sio -o "$OUT/nested.elf" >"$OUT/nested.log" 2>&1; then
+  echo "FAIL: compile nested"; tail -15 "$OUT/nested.log" || true; fail=1
+else
+  chmod +x "$OUT/nested.elf"
+  if ! "$OUT/nested.elf"; then echo "FAIL: run nested"; fail=1; else echo "PASS: nested keeps its stores"; fi
 fi
 
 if [ "$fail" -ne 0 ]; then exit 1; fi

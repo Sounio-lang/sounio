@@ -144,4 +144,7 @@ pass "package manager self-test"
 bash "$ROOT_DIR/scripts/ci/madaros_imported_deref_f64_array_gate.sh"
 pass "current-source imported dereferenced f64-array lowering"
 
-echo "[madaros-full] PASS: public CLI, source ELF path, ABI witnesses, visibility, pkg self-test, and current-source dereferenced f64-array lowering"
+bash "$ROOT_DIR/scripts/madaros_const_i64_array_image_gate.sh"
+pass "const i64 array image"
+
+echo "[madaros-full] PASS: public CLI, source ELF path, ABI witnesses, visibility, pkg self-test, current-source dereferenced f64-array lowering, and const i64 array image"
