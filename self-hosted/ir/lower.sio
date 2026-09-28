@@ -45,6 +45,13 @@ struct LowerLocalStack {
     // 1 only when each array element is known to occupy one non-aggregate word.
     // Nested arrays and struct elements must not take the shallow slot-copy path.
     array_copy_word_scalar: Box<LowerLocalI64Slots>,
+    // 1 when struct_types holds an ARRAY's element type rather than the
+    // local's own type. bind_local_struct_type is shared by both, and an
+    // open array (`[P]`) or a fixed array of non-literal length has
+    // array_lens == -1, so nothing else tells them apart. Without this bit
+    // the by-value copy reads such an array as one P and copies the wrong
+    // number of slots.
+    struct_type_is_array_elem: Box<LowerLocalI64Slots>,
     wide_bits: Box<LowerLocalI64Slots>,
     wide_signed: Box<LowerLocalI64Slots>,
     // Findings 11 (#2084): 1 when a local/param is a non-wide unsigned integer
@@ -126,6 +133,7 @@ fn empty_lower_local_stack() -> LowerLocalStack with Alloc, Mut {
         array_elem_wide_bits: lowerer_box_local_i64_slots(0),
         array_lens: lowerer_box_local_i64_slots(-1),
         array_copy_word_scalar: lowerer_box_local_i64_slots(0),
+        struct_type_is_array_elem: lowerer_box_local_i64_slots(0),
         wide_bits: lowerer_box_local_i64_slots(0),
         wide_signed: lowerer_box_local_i64_slots(0),
         // Findings 11 (#2084): see the is_unsigned_int field comment above.
@@ -4435,6 +4443,7 @@ fn lowerer_bind_local_mut(
         (*(*locals_box).array_elem_wide_bits).values[idx as usize] = 0
         (*(*locals_box).array_lens).values[idx as usize] = -1
         (*(*locals_box).array_copy_word_scalar).values[idx as usize] = 0
+        (*(*locals_box).struct_type_is_array_elem).values[idx as usize] = 0
         (*(*locals_box).wide_bits).values[idx as usize] = 0
         (*(*locals_box).wide_signed).values[idx as usize] = 0
         // Findings 11 (#2084): zero-init the per-slot unsigned-int flag.
@@ -8276,6 +8285,10 @@ impl Lowerer {
             return (self, reg)
         }
         let st_name = self.lookup_local_struct_type(name)
+        // struct_types also carries an array's element type. An open array
+        // or a fixed array of non-literal length has no recorded length, so
+        // it would be copied as one element. Keep the handle instead.
+        if self.lookup_local_struct_type_is_array_elem(name) { return (self, reg) }
         if !self.struct_local_is_value_copyable(name, st_name) { return (self, reg) }
         let slot_count = self.struct_layout_slot_count(st_name)
         if slot_count <= 0 { return (self, reg) }
@@ -8939,6 +8952,7 @@ impl Lowerer {
                 (*(*stk).array_elem_wide_bits).values[idx as usize] = 0
                 (*(*stk).array_lens).values[idx as usize] = -1
                 (*(*stk).array_copy_word_scalar).values[idx as usize] = 0
+                (*(*stk).struct_type_is_array_elem).values[idx as usize] = 0
                 (*(*stk).wide_bits).values[idx as usize] = 0
                 (*(*stk).wide_signed).values[idx as usize] = 0
                 // Findings 11 (#2084): zero-init the per-slot unsigned-int flag.
@@ -9186,6 +9200,23 @@ impl Lowerer {
         lo
     }
 
+    // struct_types was just set from an array's element type, not from the
+    // local's own type. See struct_type_is_array_elem.
+    fn bind_local_struct_type_is_array_elem(self, name: Name) -> Lowerer with Mut, Alloc, Panic, Div {
+        var lo = self
+        var stk = lo.locals
+        var i = (*stk).count - 1
+        while i >= 0 {
+            if (*(*stk).depths).values[i as usize] <= lo.scope_depth && ir_name_eq((*(*stk).names).values[i as usize], name) {
+                (*(*stk).struct_type_is_array_elem).values[i as usize] = 1
+                lo.locals = stk
+                return lo
+            }
+            i = i - 1
+        }
+        lo
+    }
+
     // Mark a local as a capturing closure bound to synthetic fn `fn_id` (closures step 2).
     fn bind_local_closure_fn_id(self, name: Name, fn_id: i64) -> Lowerer with Mut, Alloc, Panic, Div {
         var lo = self
@@ -9318,6 +9349,16 @@ impl Lowerer {
         -1
     }
 
+    fn lookup_local_struct_type_is_array_elem(self, name: Name) -> bool with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*(*self.locals).depths).values[i as usize] <= self.scope_depth && ir_name_eq((*(*self.locals).names).values[i as usize], name) {
+                return (*(*self.locals).struct_type_is_array_elem).values[i as usize] == 1
+            }
+            i = i - 1
+        }
+        false
+    }
     fn lookup_local_array_copy_word_scalar(self, name: Name) -> bool with Mut, Panic, Div, Alloc {
         var i = (*self.locals).count - 1
         while i >= 0 {
@@ -17677,10 +17718,12 @@ impl Lowerer {
                         Some(el) => {
                             if (*el).kind == TypeExprKind::TypeKnowledge {
                                 lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"))
+                                lo = lo.bind_local_struct_type_is_array_elem(s.name)
                             } else if (*el).kind == TypeExprKind::TypeNamed {
                                 let el_name = ir_path_first_name((*el).path)
                                 if el_name.len > 0 {
                                     lo = lo.bind_local_struct_type(s.name, el_name)
+                                    lo = lo.bind_local_struct_type_is_array_elem(s.name)
                                 }
                             }
                         }
