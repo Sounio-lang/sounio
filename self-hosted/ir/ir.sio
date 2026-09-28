@@ -5412,11 +5412,22 @@ fn ir_reg_operand_is_valid(reg: i64, reg_count: i64) -> bool {
     reg < 0 || (reg < reg_count && reg < IR_MAX_VREGS)
 }
 
+fn ir_reg_span_is_valid(base: i64, width: i64, reg_count: i64) -> bool {
+    base >= 0 && width >= 1 && base <= reg_count - width && base <= IR_MAX_VREGS - width
+}
+
 // Validate the declared register count and every register reference before a
 // native backend derives a stack offset from it. This is intentionally shared
 // by the legacy and native-v2 entry points, including cached SOIR input.
 pub fn ir_function_regs_are_valid(f: &IrFunction) -> bool with Mut, Panic, Div {
     if !ir_reg_count_is_valid((*f).reg_count) { return false }
+    if (*f).param_count < 0 || (*f).param_count > 64 { return false }
+    var pi: i64 = 0
+    while pi < (*f).param_count {
+        if !ir_reg_span_is_valid((*f).param_regs[pi as usize], 1, (*f).reg_count) { return false }
+        pi = pi + 1
+    }
+    if (*f).is_sret == 1 && !ir_reg_span_is_valid((*f).sret_dest_reg, 1, (*f).reg_count) { return false }
     var i: i64 = 0
     while i < (*f).instr_count {
         let slot = ir_region_slot_r((*f).region, i)
@@ -5427,6 +5438,21 @@ pub fn ir_function_regs_are_valid(f: &IrFunction) -> bool with Mut, Panic, Div {
             !ir_reg_operand_is_valid(IR_A_SRC2[slot as usize], (*f).reg_count) { return false }
         if op == IrOpcode::IrIndexSet &&
             !ir_reg_operand_is_valid(IR_A_IMM_I64[slot as usize], (*f).reg_count) { return false }
+        let limbs = IR_A_IMM_I64[slot as usize]
+        let is_wide_binary = op == IrOpcode::IrWideAdd || op == IrOpcode::IrWideSub ||
+            op == IrOpcode::IrWideMul || op == IrOpcode::IrWideDiv || op == IrOpcode::IrWideMod ||
+            op == IrOpcode::IrWideCmp || op == IrOpcode::IrWideDivFull || op == IrOpcode::IrWideModFull
+        let is_wide_shift = op == IrOpcode::IrWideShrLimb || op == IrOpcode::IrWideShr
+        if (is_wide_binary || is_wide_shift) &&
+            !ir_reg_span_is_valid(IR_A_SRC1[slot as usize], limbs, (*f).reg_count) { return false }
+        if is_wide_binary &&
+            !ir_reg_span_is_valid(IR_A_SRC2[slot as usize], if op == IrOpcode::IrWideDiv || op == IrOpcode::IrWideMod { 1 } else { limbs }, (*f).reg_count) { return false }
+        var dst_width = limbs
+        if op == IrOpcode::IrWideCmp { dst_width = 1 }
+        if op == IrOpcode::IrWideMul { dst_width = limbs + 2 }
+        if op == IrOpcode::IrWideDivFull || op == IrOpcode::IrWideModFull { dst_width = limbs * 3 }
+        if (is_wide_binary || is_wide_shift) &&
+            !ir_reg_span_is_valid(IR_A_DST[slot as usize], dst_width, (*f).reg_count) { return false }
         var k: i64 = 0
         while k < IR_A_ARG_COUNT[slot as usize] {
             if !ir_reg_operand_is_valid(ir_arena_arg_at(slot, k), (*f).reg_count) { return false }
