@@ -7160,7 +7160,7 @@ pub fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) 
     c.code = emit_prologue_with_preg_mask(c.code, frame_size, preg_mask)
 
     // Spill parameters from ABI registers to their stack slots
-    c = spill_ir_params(c, effective_func)
+    c = spill_ir_params(c, effective_func, preg_mask)
 
     // Lower each IR instruction
     var ip = 0
@@ -8325,7 +8325,7 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
     while sp_i < func.param_count {
         let sp_vreg = func.param_regs[sp_i as usize]
         if sp_vreg >= 0 {
-            let sp_in_offset = 16 + ((sp_i + sp_sret_shift - 6) * 8)
+            let sp_in_offset = 16 + nc_preg_push_bytes_from_mask(preg_mask) + ((sp_i + sp_sret_shift - 6) * 8)
             let sp_out_offset = ir_slot_offset(sp_vreg)
             c.code = emit_load_rbp_disp32_rax(c.code, sp_in_offset)
             c.code = emit_store_reg_rbp_disp32(c.code, sp_out_offset, 0)
@@ -8509,6 +8509,17 @@ fn nc_core_mov_reg_from_rax(nc: &! NativeCompiler, reg: i64) with Mut, Panic, Di
 fn nc_core_load_temp_to_reg(nc: &! NativeCompiler, temp: i64, reg: i64) with Mut, Panic, Div {
     nc_core_load_temp_to_rax(nc, temp)
     nc_core_mov_reg_from_rax(nc, reg)
+}
+
+// #1671: bytes of callee-saved pregs a prologue pushes BEFORE push rbp;
+// incoming stack args sit above them and must be addressed past this.
+fn nc_preg_push_bytes_from_mask(mask: i64) -> i64 with Mut, Panic, Div {
+    var bytes: i64 = 0
+    if (mask & X86_ALLOCATABLE_R12_MASK()) != 0 { bytes = bytes + 8 }
+    if (mask & X86_ALLOCATABLE_R13_MASK()) != 0 { bytes = bytes + 8 }
+    if (mask & X86_ALLOCATABLE_R14_MASK()) != 0 { bytes = bytes + 8 }
+    if (mask & X86_ALLOCATABLE_R15_MASK()) != 0 { bytes = bytes + 8 }
+    bytes
 }
 
 fn nc_core_func_stays_on_stack(func: &IrFunction) -> bool with Mut, Panic, Div {
@@ -11008,7 +11019,7 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
     (*nc).current_frame_size = frame_size
 
     (*nc).code = emit_prologue_with_preg_mask((*nc).code, frame_size, preg_mask)
-    spill_ir_params_mut(nc, func)
+    spill_ir_params_mut(nc, func, preg_mask)
     var fi_sched: i64 = 0
     while fi_sched < MIR_MAX_FLOAT_SLOTS && fi_sched < NC_MAX_VREGS {
         if machine_func.is_float_slot[fi_sched as usize] == 1 {
@@ -11162,13 +11173,13 @@ pub fn compile_module_v2_mut(nc: &! NativeCompiler, module: &IrModule) -> string
 }
 
 // Spill parameter registers to their IR-assigned stack slots
-fn spill_ir_params(nc: NativeCompiler, func: IrFunction) -> NativeCompiler with Mut, Panic, Div {
+fn spill_ir_params(nc: NativeCompiler, func: IrFunction, preg_mask: i64) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
-    spill_ir_params_mut(&! c, func)
+    spill_ir_params_mut(&! c, func, preg_mask)
     c
 }
 
-fn spill_ir_params_mut(nc: &! NativeCompiler, func: IrFunction) with Mut, Panic, Div {
+fn spill_ir_params_mut(nc: &! NativeCompiler, func: IrFunction, preg_mask: i64) with Mut, Panic, Div {
     var i = 0
     let sret_shift = if func.is_sret == 1 { 1 } else { 0 }
     if sret_shift == 1 {
@@ -11189,7 +11200,7 @@ fn spill_ir_params_mut(nc: &! NativeCompiler, func: IrFunction) with Mut, Panic,
     while i < func.param_count {
         let vreg = func.param_regs[i as usize]
         if vreg >= 0 {
-            let in_offset = 16 + ((i + sret_shift - 6) * 8)
+            let in_offset = 16 + nc_preg_push_bytes_from_mask(preg_mask) + ((i + sret_shift - 6) * 8)
             let out_offset = ir_slot_offset(vreg)
             nc_emit_load_rbp_disp32_reg(nc, 0, in_offset)
             nc_emit_store_rbp_disp32_reg(nc, 0, out_offset)
@@ -11216,10 +11227,13 @@ fn spill_ir_params_ref_mut(nc: &! NativeCompiler, func: &IrFunction) with Mut, P
         }
         i = i + 1
     }
+    // #1671: callee-saved pregs pushed BEFORE push rbp sit between the saved
+    // rbp and the return address, so incoming stack args start above them.
+    let saved_preg_bytes = nc_preg_push_bytes_from_mask(NC_CORE_PREG_MASK)
     while i < (*func).param_count {
         let vreg = (*func).param_regs[i as usize]
         if vreg >= 0 {
-            let in_offset = 16 + ((i + sret_shift - 6) * 8)
+            let in_offset = 16 + saved_preg_bytes + ((i + sret_shift - 6) * 8)
             let out_offset = ir_slot_offset(vreg)
             nc_emit_load_rbp_disp32_reg(nc, 0, in_offset)
             nc_emit_store_rbp_disp32_reg(nc, 0, out_offset)
