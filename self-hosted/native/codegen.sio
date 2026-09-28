@@ -3440,6 +3440,11 @@ pub fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) 
     if func.compile_strategy == IR_STRATEGY_INSTRUMENTED {
         effective_func = ir_opt_apply_strategy(func)
     }
+    if !ir_reg_count_is_valid(effective_func.reg_count) {
+        c.ir_vreg_overflow = true
+        c.ir_vreg_overflow_needed = effective_func.reg_count
+        return c
+    }
 
     let has_control_flow = native_func_has_control_flow(effective_func)
 
@@ -3492,8 +3497,12 @@ fn native_v2_local_frame_size(stack_slots: i64, spill_count: i64) -> i64 with Mu
 
 fn native_v2_load_temp_to_rax(nc: NativeCompiler, temp: i64) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
-    if temp < 0 || temp >= NC_MAX_VREGS {
+    if temp < 0 {
         c.code = emit_xor_rax_rax(c.code)
+        return c
+    }
+    if temp >= NC_MAX_VREGS {
+        c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(temp))
         return c
     }
     let preg = c.vreg_to_preg[temp as usize]
@@ -3512,7 +3521,11 @@ fn native_v2_load_temp_to_rax(nc: NativeCompiler, temp: i64) -> NativeCompiler w
 
 fn native_v2_store_rax_to_temp(nc: NativeCompiler, temp: i64) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
-    if temp < 0 || temp >= NC_MAX_VREGS {
+    if temp < 0 {
+        return c
+    }
+    if temp >= NC_MAX_VREGS {
+        c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(temp))
         return c
     }
     let preg = c.vreg_to_preg[temp as usize]
@@ -3656,7 +3669,7 @@ fn native_v2_run_machine_regalloc_ref_mut(nc: &! NativeCompiler, func: &MachineF
 fn native_v2_used_allocatable_preg_mask_ref(nc: &NativeCompiler, reg_count: i64) -> i64 {
     var mask: i64 = 0
     var v: i64 = 0
-    while v < reg_count {
+    while v < reg_count && v < NC_MAX_VREGS {
         mask = mask | x86_allocatable_mask_for_reg((*nc).vreg_to_preg[v as usize])
         v = v + 1
     }
@@ -4193,6 +4206,11 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
 
 pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func: MachineFunction, fn_index: i64) -> NativeCompiler with Mut, Panic, Div, Alloc {
     var c = nc
+    if !ir_reg_count_is_valid(func.reg_count) {
+        c.ir_vreg_overflow = true
+        c.ir_vreg_overflow_needed = func.reg_count
+        return c
+    }
 
     // --- reset_function_state (inlined, no &!) ---
     c.return_jump_count = 0
@@ -4329,6 +4347,11 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
 }
 
 pub fn compile_ir_function_v2_into(nc: &! NativeCompiler, func: &IrFunction, machine_func: &MachineFunction, fn_index: i64) with Mut, Panic, Div, Alloc {
+    if !ir_reg_count_is_valid((*func).reg_count) {
+        (*nc).ir_vreg_overflow = true
+        (*nc).ir_vreg_overflow_needed = (*func).reg_count
+        return
+    }
     reset_function_state_mut(nc)
 
     let function_offset = (*nc).code.len
@@ -4368,6 +4391,11 @@ pub fn compile_ir_function_v2_into(nc: &! NativeCompiler, func: &IrFunction, mac
 // sites. See CODGEN_DEAD_BODY_DELETION_2026-08-18.md for the full audit.
 
 fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_func: MachineFunction, fn_index: i64) with Mut, Panic, Div, Alloc {
+    if !ir_reg_count_is_valid(func.reg_count) {
+        (*nc).ir_vreg_overflow = true
+        (*nc).ir_vreg_overflow_needed = func.reg_count
+        return
+    }
     reset_function_state_mut(nc)
 
     (*nc).fn_offsets[fn_index as usize] = (*nc).code.len
@@ -6291,6 +6319,9 @@ fn compile_to_elf(module: &IrModule, base_addr: i64) -> Elf64Binary with Mut, Pa
 }
 
 pub fn finalize_compiled_elf(nc: NativeCompiler, base_addr: i64) -> Elf64Binary with Mut, Panic, Div, Alloc {
+    if nc.ir_vreg_overflow {
+        return elf_binary_new()
+    }
     let entry = trampoline_offset(&nc)
     var final_data = nc.data
     let min_data_len = nc.prof_counter_data_base + (nc.prof_counter_count * 8)
