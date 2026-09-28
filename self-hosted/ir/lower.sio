@@ -623,6 +623,14 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
         print("  cause: cannot safely lower print/println argument with unresolved scalar kind in function `")
         ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
         print("`\n")
+    } else if IR_LOWER_HARD_ERROR_REASON == 3 {
+        print("  cause: function `")
+        ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
+        print("` needs ")
+        print_int(IR_LOWER_HARD_ERROR_NEEDED)
+        print(" virtual registers but IR_MAX_VREGS is ")
+        print_int(IR_LOWER_HARD_ERROR_LIMIT)
+        print("\n")
     } else if IR_LOWER_HARD_ERROR_NEEDED > 0 {
         print("  cause: function `")
         ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
@@ -4691,9 +4699,11 @@ fn lowerer_fresh_reg_mut(lo: &! Lowerer) -> i64 with Mut, Panic, Div {
     var current_func_box = (*lo).current_func
     let reg = (*current_func_box).reg_count
     if reg >= IR_MAX_VREGS {
+        let first_hard = IR_LOWER_HARD_ERROR_REASON == 0
         lowerer_mark_hard_error(lo)
         IR_LOWER_HARD_ERROR_LIMIT = IR_MAX_VREGS
         IR_LOWER_HARD_ERROR_NEEDED = reg + 1
+        if first_hard { IR_LOWER_HARD_ERROR_REASON = 3 }
         return 0
     }
     (*current_func_box).reg_count = reg + 1
@@ -7679,7 +7689,14 @@ impl Lowerer {
         let pair = self.fresh_reg()
         let lo = pair.0
         let reg = pair.1
-        let lo2 = lo.emit(ir_load_imm(reg, f64_to_bits(value)))
+        var iins = ir_load_imm(reg, f64_to_bits(value))
+        // Bit 1: the loaded immediate is f64 bits, not an i64. Codegen and the
+        // float-type lattice read it off the instruction, so the literal stays
+        // float at any vreg even when the marker nop beside it is absent or
+        // inert (#1669 C1). The nop below is kept: markers-on emission must
+        // remain byte-identical while the experiment runs.
+        iins.imm_flags = 2
+        let lo2 = lo.emit(iins)
         let lo3 = lo2.emit(ir_mark_float_reg(reg))
         (lo3, reg)
     }
@@ -13088,7 +13105,7 @@ impl Lowerer {
         if reg >= IR_MAX_VREGS {
             IR_LOWER_HARD_ERROR = 1
             if IR_LOWER_HARD_ERROR_REASON == 0 {
-                IR_LOWER_HARD_ERROR_REASON = 1
+                IR_LOWER_HARD_ERROR_REASON = 3
                 IR_LOWER_HARD_ERROR_LIMIT = IR_MAX_VREGS
                 IR_LOWER_HARD_ERROR_NEEDED = reg + 1
             }
@@ -13114,7 +13131,7 @@ impl Lowerer {
         if reg >= IR_MAX_VREGS || end < reg || end > IR_MAX_VREGS {
             IR_LOWER_HARD_ERROR = 1
             if IR_LOWER_HARD_ERROR_REASON == 0 {
-                IR_LOWER_HARD_ERROR_REASON = 1
+                IR_LOWER_HARD_ERROR_REASON = 3
                 IR_LOWER_HARD_ERROR_LIMIT = IR_MAX_VREGS
                 IR_LOWER_HARD_ERROR_NEEDED = end
             }
