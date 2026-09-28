@@ -8532,6 +8532,13 @@ fn nc_core_func_stays_on_stack(func: &IrFunction) -> bool with Mut, Panic, Div {
             || op == IrOpcode::IrBranchTrue || op == IrOpcode::IrBranchFalse {
             return true
         }
+        // #1672: call-argument vregs live in the arena arg list, which the
+        // (dst, src1, src2) liveness stream never sees. Their intervals look
+        // dead right after the literal store, so linear scan may home several
+        // of them on the SAME callee-saved preg and the last store wins; the
+        // emitter then reads the shared preg for every argument. Callers stay
+        // on the stack until the RA models call args as uses.
+        if op == IrOpcode::IrCall { return true }
         if op == IrOpcode::IrUnaryOp {
             let uop = (IR_A_UN_OP[slot as usize] as UnaryOp)
             if uop == UnaryOp::OpRef || uop == UnaryOp::OpRefMut { return true }
@@ -8543,6 +8550,15 @@ fn nc_core_func_stays_on_stack(func: &IrFunction) -> bool with Mut, Panic, Div {
 
 fn nc_core_assign_pregs(nc: &! NativeCompiler, func: &IrFunction) with Mut, Panic, Div {
     NC_CORE_PREG_MASK = 0
+    // #1673: preg homing is DISABLED. The (dst, src1, src2) liveness stream
+    // does not model every operand channel: call args live in the arena arg
+    // list and index/field-store values in aux, so those vregs look dead at
+    // their def, linear scan homes several of them on the SAME preg, and the
+    // emitter reads a clobbered home (arity-13: every arg read the last
+    // literal; ref_alias: the stored value 77, 0, and 1 all homed on r15).
+    // Re-land only after liveness sees every channel as a use.
+    var preg_lane_enabled: i64 = 0
+    if preg_lane_enabled == 0 { return }
     if nc_core_func_stays_on_stack(func) { return }
     var ra_instrs: [RaSimpleInstr; 4096] = [ra_empty_simple_instr(); 4096]
     let count = (*func).instr_count
