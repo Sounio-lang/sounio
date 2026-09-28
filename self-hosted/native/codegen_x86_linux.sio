@@ -7338,7 +7338,9 @@ fn native_v2_run_machine_regalloc_ref_mut(nc: &! NativeCompiler, func: &MachineF
 fn native_v2_used_allocatable_preg_mask_ref(nc: &NativeCompiler, reg_count: i64) -> i64 with Mut, Panic, Div {
     var mask: i64 = 0
     var v: i64 = 0
-    while v < reg_count {
+    // Legalization can grow temp_count beyond the fixed physical-allocation
+    // tables. Those higher temporaries are stack-only by construction.
+    while v < reg_count && v < NC_MAX_VREGS {
         mask = mask | x86_allocatable_mask_for_reg((*nc).vreg_to_preg[v as usize])
         v = v + 1
     }
@@ -9415,6 +9417,19 @@ fn nc_collect_high_float_markers(func: &IrFunction) with Mut, Panic, Div {
 }
 
 pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunction, fn_index: i64) -> bool with IO, Mut, Panic, Div, Alloc {
+    // Final fail-closed boundary: several optimization/legalization passes can
+    // allocate registers after lowering. Never let oversized final IR reach
+    // the fixed native register-class and allocation tables.
+    if (*func).reg_count > IR_MAX_VREGS {
+        print("NATIVE_REFUSAL kind=ir_vreg_limit fn=")
+        print_int(fn_index)
+        print(" needed=")
+        print_int((*func).reg_count)
+        print(" limit=")
+        print_int(IR_MAX_VREGS)
+        print("\n")
+        return false
+    }
     nc_refresh_wide_mul_sabotage()
     nc_refresh_ieee_f64_sabotage()
     nc_v2_reset_label_state()
@@ -10295,6 +10310,18 @@ pub fn compile_ir_function_v2_from_ir_into(nc: &! NativeCompiler, func: &IrFunct
         native_compiler_set_fn_offset(nc, fn_index, (*nc).code.len)
         native_compiler_add_symbol_func_ref(nc, fn_index, func)
         return true
+    }
+    // Keep the limit check ahead of every executable builtin/dynlink/cache
+    // consumption path as well as in the core entry (which has direct callers).
+    if (*func).reg_count > IR_MAX_VREGS {
+        print("NATIVE_REFUSAL kind=ir_vreg_limit fn=")
+        print_int(fn_index)
+        print(" needed=")
+        print_int((*func).reg_count)
+        print(" limit=")
+        print_int(IR_MAX_VREGS)
+        print("\n")
+        return false
     }
     let builtin_id = native_v2_builtin_id_for_func_ref(func)
     if builtin_id != 0 {
