@@ -37,6 +37,7 @@ use ir::opt_strategy::{ir_opt_apply_strategy}
 // with the 18 native:: module imports already present here (~2000+ symbols).
 use io::trace::{io_trace_append_byte, io_trace_append_string, io_trace_append_json_string, io_trace_bool_string, io_trace_i64_string, io_write_bytes_to_file}
 use io::env::{read_env}
+use io::file_write::{io_make_executable}
 // Note: native::avx512 EVEX emitters are available in native/avx512.sio.
 // They will be wired into the lowering pass in Horizon 3.2 (vector IR ops).
 
@@ -7122,7 +7123,7 @@ pub fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) 
     c.code = emit_prologue_with_preg_mask(c.code, frame_size, preg_mask)
 
     // Spill parameters from ABI registers to their stack slots
-    c = spill_ir_params(c, effective_func)
+    c = spill_ir_params(c, effective_func, preg_mask)
 
     // Lower each IR instruction
     var ip = 0
@@ -7155,8 +7156,12 @@ fn native_v2_local_frame_size(stack_slots: i64, spill_count: i64) -> i64 with Mu
 
 fn native_v2_load_temp_to_rax(nc: NativeCompiler, temp: i64) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
-    if temp < 0 || temp >= NC_MAX_VREGS {
+    if temp < 0 {
         c.code = emit_xor_rax_rax(c.code)
+        return c
+    }
+    if temp >= NC_MAX_VREGS {
+        c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(temp))
         return c
     }
     let preg = c.vreg_to_preg[temp as usize]
@@ -7175,7 +7180,11 @@ fn native_v2_load_temp_to_rax(nc: NativeCompiler, temp: i64) -> NativeCompiler w
 
 fn native_v2_store_rax_to_temp(nc: NativeCompiler, temp: i64) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
-    if temp < 0 || temp >= NC_MAX_VREGS {
+    if temp < 0 {
+        return c
+    }
+    if temp >= NC_MAX_VREGS {
+        c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(temp))
         return c
     }
     let preg = c.vreg_to_preg[temp as usize]
@@ -7195,7 +7204,12 @@ fn native_v2_store_rax_to_temp(nc: NativeCompiler, temp: i64) -> NativeCompiler 
 fn native_v2_store_rax_to_stack_slot(nc: NativeCompiler, slot: i64) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
     if slot >= 0 {
-        c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(slot))
+        let spill = c.vreg_spill_slots[slot as usize]
+        if spill >= 0 {
+            c.code = emit_store_rax_rbp_disp32(c.code, native_v2_spill_slot_offset(c.current_machine_base_slots, spill))
+        } else {
+            c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(slot))
+        }
     }
     c
 }
@@ -7370,10 +7384,14 @@ fn native_compiler_add_symbol_func_ref(nc: &! NativeCompiler, fn_index: i64, fun
     }
 }
 
-fn native_v2_emit_unary_code(nc: NativeCompiler, op: UnaryOp) -> NativeCompiler with Mut, Panic, Div {
+fn native_v2_emit_unary_code(nc: NativeCompiler, op: UnaryOp, is_float: bool) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
     if op == UnaryOp::OpNeg {
-        c.code = emit_neg_rax(c.code)
+        if is_float {
+            c.code = emit_btc_rax_63(c.code)
+        } else {
+            c.code = emit_neg_rax(c.code)
+        }
     } else if op == UnaryOp::OpNot {
         c.code = emit_not_bool_rax(c.code)
     } else if op == UnaryOp::OpBitNot {
@@ -7388,7 +7406,12 @@ fn native_v2_emit_machine_instr(nc: NativeCompiler, instr: MachineInstr) -> Nati
     var c = nc
 
     if instr.opcode == MIR_OP_LOAD_STACK {
-        c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src1.value))
+        let src_spill = c.vreg_spill_slots[instr.src1.value as usize]
+        if src_spill >= 0 {
+            c.code = emit_load_rbp_disp32_rax(c.code, native_v2_spill_slot_offset(c.current_machine_base_slots, src_spill))
+        } else {
+            c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.src1.value))
+        }
         return native_v2_store_rax_to_temp(c, instr.dst.value)
     }
 
@@ -7442,7 +7465,11 @@ fn native_v2_emit_machine_instr(nc: NativeCompiler, instr: MachineInstr) -> Nati
 
     if instr.opcode == MIR_OP_UNARY {
         c = native_v2_load_temp_to_rax(c, instr.src1.value)
-        c = native_v2_emit_unary_code(c, instr.un_op)
+        let is_float = if instr.aux.value == 1 || (instr.src1.value >= 0 && instr.src1.value < NC_MAX_VREGS && c.is_float_reg[instr.src1.value as usize] == 1) { true } else { false }
+        c = native_v2_emit_unary_code(c, instr.un_op, is_float)
+        if is_float && instr.dst.value >= 0 && instr.dst.value < NC_MAX_VREGS {
+            c.is_float_reg[instr.dst.value as usize] = 1
+        }
         return native_v2_store_rax_to_temp(c, instr.dst.value)
     }
 
@@ -7794,6 +7821,13 @@ fn native_v2_emit_machine_function(nc: NativeCompiler, func: MachineFunction, fn
 }
 
 fn native_v2_emit_machine_function_mut(nc: &! NativeCompiler, func: MachineFunction, fn_index: i64, fn_offset: i64) with Mut, Panic, Div {
+    var fi: i64 = 0
+    while fi < MIR_MAX_FLOAT_SLOTS && fi < NC_MAX_VREGS {
+        if func.is_float_slot[fi as usize] == 1 {
+            (*nc).is_float_reg[fi as usize] = 1
+        }
+        fi = fi + 1
+    }
     var i: i64 = 0
     while i < func.blocks[0].instr_count {
         let instr = func.blocks[0].instrs[i as usize]
@@ -7807,6 +7841,13 @@ fn native_v2_emit_machine_function_mut(nc: &! NativeCompiler, func: MachineFunct
 }
 
 fn native_v2_emit_machine_function_ref_mut(nc: &! NativeCompiler, func: &MachineFunction, fn_index: i64, fn_offset: i64) with Mut, Panic, Div {
+    var fi: i64 = 0
+    while fi < MIR_MAX_FLOAT_SLOTS && fi < NC_MAX_VREGS {
+        if (*func).is_float_slot[fi as usize] == 1 {
+            (*nc).is_float_reg[fi as usize] = 1
+        }
+        fi = fi + 1
+    }
     var i: i64 = 0
     while i < (*func).blocks[0].instr_count {
         let instr = (*func).blocks[0].instrs[i as usize]
@@ -8107,6 +8148,7 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
         c.is_float_reg[rst_j as usize] = 0
         rst_j = rst_j + 1
     }
+    nc_reg_class_reset()
     c.current_strategy = 0
     var rst_ra = 0
     while rst_ra < NC_MAX_VREGS {
@@ -8222,7 +8264,7 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
     while sp_i < func.param_count {
         let sp_vreg = func.param_regs[sp_i as usize]
         if sp_vreg >= 0 {
-            let sp_in_offset = 16 + ((sp_i + sp_sret_shift - 6) * 8)
+            let sp_in_offset = 16 + nc_preg_push_bytes_from_mask(preg_mask) + ((sp_i + sp_sret_shift - 6) * 8)
             let sp_out_offset = ir_slot_offset(sp_vreg)
             c.code = emit_load_rbp_disp32_rax(c.code, sp_in_offset)
             c.code = emit_store_reg_rbp_disp32(c.code, sp_out_offset, 0)
@@ -8326,27 +8368,198 @@ pub fn compile_ir_function_v2_into(nc: &! NativeCompiler, func: &IrFunction, mac
     patch_label_forwards_mut(nc)
 }
 
+// Straight-line core emission keeps a value in r12-r15 when the linear scan
+// assigns one. Those four are the whole allocatable set and all are
+// callee-saved, so a value live across a call stays in the register.
+// A branch, an address-of, or more than 4096 instructions stays on the stack:
+// the scan reads a straight line, and `&x` needs the slot.
+var NC_CORE_PREG_MASK: i64 = 0
+
+fn nc_core_mov_rax_preg(nc: &! NativeCompiler, preg: i64) with Mut, Panic, Div {
+    if preg == 15 {
+        nc_emit_byte(nc, 0x4c); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0xf8)
+    } else if preg == 14 {
+        nc_emit_byte(nc, 0x4c); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0xf0)
+    } else if preg == 13 {
+        nc_emit_byte(nc, 0x4c); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0xe8)
+    } else if preg == 12 {
+        nc_emit_byte(nc, 0x4c); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0xe0)
+    }
+}
+
+fn nc_core_mov_preg_rax(nc: &! NativeCompiler, preg: i64) with Mut, Panic, Div {
+    if preg == 15 {
+        nc_emit_byte(nc, 0x49); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0xc7)
+    } else if preg == 14 {
+        nc_emit_byte(nc, 0x49); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0xc6)
+    } else if preg == 13 {
+        nc_emit_byte(nc, 0x49); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0xc5)
+    } else if preg == 12 {
+        nc_emit_byte(nc, 0x49); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0xc4)
+    }
+}
+
 fn nc_core_load_temp_to_rax(nc: &! NativeCompiler, temp: i64) with Mut, Panic, Div {
     if temp < 0 {
         nc_emit_xor_rax_rax(nc)
         return
     }
+    if temp < NC_MAX_VREGS {
+        let preg = (*nc).vreg_to_preg[temp as usize]
+        if preg >= 12 {
+            nc_core_mov_rax_preg(nc, preg)
+            return
+        }
+    }
     nc_emit_load_rbp_disp32_rax(nc, ir_slot_offset(temp))
 }
 
 fn nc_core_store_rax_to_temp(nc: &! NativeCompiler, temp: i64) with Mut, Panic, Div {
-    if temp >= 0 {
-        nc_emit_store_rax_rbp_disp32(nc, ir_slot_offset(temp))
+    if temp < 0 { return }
+    if temp < NC_MAX_VREGS {
+        let preg = (*nc).vreg_to_preg[temp as usize]
+        if preg >= 12 {
+            nc_core_mov_preg_rax(nc, preg)
+            return
+        }
     }
+    nc_emit_store_rax_rbp_disp32(nc, ir_slot_offset(temp))
+}
+
+fn nc_core_mov_reg_from_rax(nc: &! NativeCompiler, reg: i64) with Mut, Panic, Div {
+    if reg == 0 { return }
+    if reg >= 8 { nc_emit_byte(nc, 0x49) } else { nc_emit_byte(nc, 0x48) }
+    nc_emit_byte(nc, 0x89)
+    nc_emit_byte(nc, 0xc0 | (reg % 8))
+}
+
+fn nc_core_load_temp_to_reg(nc: &! NativeCompiler, temp: i64, reg: i64) with Mut, Panic, Div {
+    nc_core_load_temp_to_rax(nc, temp)
+    nc_core_mov_reg_from_rax(nc, reg)
+}
+
+// #1671: bytes of callee-saved pregs a prologue pushes BEFORE push rbp;
+// incoming stack args sit above them and must be addressed past this.
+fn nc_preg_push_bytes_from_mask(mask: i64) -> i64 with Mut, Panic, Div {
+    var bytes: i64 = 0
+    if (mask & X86_ALLOCATABLE_R12_MASK()) != 0 { bytes = bytes + 8 }
+    if (mask & X86_ALLOCATABLE_R13_MASK()) != 0 { bytes = bytes + 8 }
+    if (mask & X86_ALLOCATABLE_R14_MASK()) != 0 { bytes = bytes + 8 }
+    if (mask & X86_ALLOCATABLE_R15_MASK()) != 0 { bytes = bytes + 8 }
+    bytes
+}
+
+fn nc_core_func_stays_on_stack(func: &IrFunction) -> bool with Mut, Panic, Div {
+    if (*func).instr_count > RA_MAX_SIMPLE_INSTRS { return true }
+    var i: i64 = 0
+    while i < (*func).instr_count && i < IR_MAX_INSTRS {
+        let slot = ir_region_slot_r((*func).region, (i))
+        let op = (IR_A_OP[slot as usize] as IrOpcode)
+        if op == IrOpcode::IrLabel || op == IrOpcode::IrJump
+            || op == IrOpcode::IrBranchTrue || op == IrOpcode::IrBranchFalse {
+            return true
+        }
+        // #1672: call-argument vregs live in the arena arg list, which the
+        // (dst, src1, src2) liveness stream never sees. Their intervals look
+        // dead right after the literal store, so linear scan may home several
+        // of them on the SAME callee-saved preg and the last store wins; the
+        // emitter then reads the shared preg for every argument. Callers stay
+        // on the stack until the RA models call args as uses.
+        if op == IrOpcode::IrCall { return true }
+        if op == IrOpcode::IrUnaryOp {
+            let uop = (IR_A_UN_OP[slot as usize] as UnaryOp)
+            if uop == UnaryOp::OpRef || uop == UnaryOp::OpRefMut { return true }
+        }
+        i = i + 1
+    }
+    false
+}
+
+fn nc_core_assign_pregs(nc: &! NativeCompiler, func: &IrFunction) with Mut, Panic, Div {
+    NC_CORE_PREG_MASK = 0
+    // #1673: preg homing is DISABLED. The (dst, src1, src2) liveness stream
+    // does not model every operand channel: call args live in the arena arg
+    // list and index/field-store values in aux, so those vregs look dead at
+    // their def, linear scan homes several of them on the SAME preg, and the
+    // emitter reads a clobbered home (arity-13: every arg read the last
+    // literal; ref_alias: the stored value 77, 0, and 1 all homed on r15).
+    // Re-land only after liveness sees every channel as a use.
+    var preg_lane_enabled: i64 = 0
+    if preg_lane_enabled == 0 { return }
+    if nc_core_func_stays_on_stack(func) { return }
+    var ra_instrs: [RaSimpleInstr; 4096] = [ra_empty_simple_instr(); 4096]
+    let count = (*func).instr_count
+    var i: i64 = 0
+    while i < count && i < RA_MAX_SIMPLE_INSTRS {
+        let slot = ir_region_slot_r((*func).region, (i))
+        ra_instrs[i as usize] = ra_simple_instr(IR_A_DST[slot as usize], IR_A_SRC1[slot as usize], IR_A_SRC2[slot as usize])
+        i = i + 1
+    }
+    var state = liveness_compute_intervals(ra_instrs, count)
+    state = regalloc_linear_scan(state, native_target_policy_x86_allocation_order_count())
+    var v: i64 = 0
+    while v < state.count {
+        let interval = state.intervals[v as usize]
+        let vreg = interval.vreg
+        if vreg >= 0 && vreg < NC_MAX_VREGS && interval.assigned_preg >= 0 {
+            (*nc).vreg_to_preg[vreg as usize] = native_target_policy_x86_allocation_order_reg_id(interval.assigned_preg)
+        }
+        v = v + 1
+    }
+    var pi: i64 = 0
+    while pi < (*func).param_count && pi < 64 {
+        let pv = (*func).param_regs[pi as usize]
+        if pv >= 0 && pv < NC_MAX_VREGS {
+            (*nc).vreg_to_preg[pv as usize] = -2
+        }
+        pi = pi + 1
+    }
+    if (*func).is_sret == 1 {
+        let dest = (*func).sret_dest_reg
+        if dest >= 0 && dest < NC_MAX_VREGS {
+            (*nc).vreg_to_preg[dest as usize] = -2
+        }
+    }
+    NC_CORE_PREG_MASK = native_v2_used_allocatable_preg_mask_ref(nc, (*func).reg_count)
+}
+
+fn nc_core_push_saved_pregs(nc: &! NativeCompiler) with Mut, Panic, Div {
+    let mask = NC_CORE_PREG_MASK
+    if (mask & X86_ALLOCATABLE_R15_MASK()) != 0 { nc_emit_byte(nc, 0x41); nc_emit_byte(nc, 0x57) }
+    if (mask & X86_ALLOCATABLE_R14_MASK()) != 0 { nc_emit_byte(nc, 0x41); nc_emit_byte(nc, 0x56) }
+    if (mask & X86_ALLOCATABLE_R13_MASK()) != 0 { nc_emit_byte(nc, 0x41); nc_emit_byte(nc, 0x55) }
+    if (mask & X86_ALLOCATABLE_R12_MASK()) != 0 { nc_emit_byte(nc, 0x41); nc_emit_byte(nc, 0x54) }
+}
+
+fn nc_core_pop_saved_pregs(nc: &! NativeCompiler) with Mut, Panic, Div {
+    let mask = NC_CORE_PREG_MASK
+    if (mask & X86_ALLOCATABLE_R12_MASK()) != 0 { nc_emit_byte(nc, 0x41); nc_emit_byte(nc, 0x5c) }
+    if (mask & X86_ALLOCATABLE_R13_MASK()) != 0 { nc_emit_byte(nc, 0x41); nc_emit_byte(nc, 0x5d) }
+    if (mask & X86_ALLOCATABLE_R14_MASK()) != 0 { nc_emit_byte(nc, 0x41); nc_emit_byte(nc, 0x5e) }
+    if (mask & X86_ALLOCATABLE_R15_MASK()) != 0 { nc_emit_byte(nc, 0x41); nc_emit_byte(nc, 0x5f) }
+}
+
+fn nc_core_emit_epilogue(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_mov_rsp_rbp(nc)
+    nc_emit_pop_rbp(nc)
+    nc_core_pop_saved_pregs(nc)
+    nc_emit_ret(nc)
+}
+
+fn nc_emit_btc_rax_63_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0xba)
+    nc_emit_byte(nc, 0xf8); nc_emit_byte(nc, 0x3f)
 }
 
 fn nc_core_mark_float_reg(nc: &! NativeCompiler, reg: i64) with Mut, Panic, Div {
+    nc_reg_class_set(reg, 1)
     if reg >= 0 && reg < NC_MAX_VREGS {
         (*nc).is_float_reg[reg as usize] = 1
     }
 }
 
 fn nc_core_mark_int_reg(nc: &! NativeCompiler, reg: i64) with Mut, Panic, Div {
+    nc_reg_class_set(reg, 2)
     if reg >= 0 && reg < NC_MAX_VREGS {
         (*nc).is_float_reg[reg as usize] = 2
     }
@@ -9035,7 +9248,7 @@ fn nc_core_load_call_arg_into(nc: &! NativeCompiler, func: &IrFunction, instr_in
         }
         return false
     }
-    nc_emit_load_rbp_disp32_reg(nc, preg, ir_slot_offset(arg))
+    nc_core_load_temp_to_reg(nc, arg, preg)
     true
 }
 
@@ -9162,9 +9375,18 @@ fn nc_compute_float_types(nc: &! NativeCompiler, func: &IrFunction) with Mut, Pa
             // def: type produced by this instruction (-1 = produces no recorded def)
             var def = -1
             if op == IrOpcode::IrNop {
-                if fl == IR_FLOAT_REG_MARKER_FLAG { def = 1 }
+                // #1669 experiment fidelity: under IR_FLOAT_NO_MARKERS the lattice
+                // must not see the markers either. The write below is capped at
+                // NC_MAX_VREGS so this arm never typed a high vreg, but for the
+                // low ones it duplicated the bitset seed and hid that the seed
+                // alone carries them.
+                if fl == IR_FLOAT_REG_MARKER_FLAG && IR_FLOAT_NO_MARKERS == 0 { def = 1 }
             } else if op == IrOpcode::IrLoadImm {
-                def = 2
+                // #1669 C1: bit 1 (emit_f64_const) types the literal float. The
+                // old unconditional def = 2 joined with the marker nop's def = 1
+                // into CONFLICT for every f64 literal; the typed bit makes the
+                // definition itself say float, marker or no marker.
+                if ((fl / 2) & 1) == 1 { def = 1 } else { def = 2 }
             } else if op == IrOpcode::IrUnaryOp {
                 let uop = (IR_A_UN_OP[(ir_region_slot_r((*func).region, (i))) as usize] as UnaryOp)
                 if uop == UnaryOp::OpNeg {
@@ -9303,9 +9525,9 @@ fn pireus_native_emit_xor_convolution_s_ptr3(nc: &! NativeCompiler, dst_ptr: i64
     }
 
     // SysV pointer registers stay live through the EVEX-only kernel.
-    nc_emit_load_rbp_disp32_reg(nc, 7, ir_slot_offset(lhs_ptr))
-    nc_emit_load_rbp_disp32_reg(nc, 6, ir_slot_offset(rhs_ptr))
-    nc_emit_load_rbp_disp32_reg(nc, 2, ir_slot_offset(dst_ptr))
+    nc_core_load_temp_to_reg(nc, lhs_ptr, 7)
+    nc_core_load_temp_to_reg(nc, rhs_ptr, 6)
+    nc_core_load_temp_to_reg(nc, dst_ptr, 2)
     (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x10, 6, 0, 7, 0, 2)
     (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x10, 7, 0, 7, 64, 2)
     (*nc).code = emit_evex_pd_rm_disp32((*nc).code, 1, 0x10, 8, 0, 6, 0, 2)
@@ -9343,6 +9565,28 @@ fn pireus_native_emit_xor_convolution_s_ptr3(nc: &! NativeCompiler, dst_ptr: i64
     }
 }
 
+fn nc_collect_high_float_markers(func: &IrFunction) with Mut, Panic, Div {
+    // #1669 experiment fidelity: this scan is a marker consumer too. With the
+    // in-stream arms gated but the collector live, NC_HIGH_FLOAT_IDS still
+    // carried every high-vreg marker into the per-instruction reaffirm loop,
+    // so a "markers off" run kept measuring the markers for vregs past the
+    // 2048-bit set. Gate it like the arms: markers off means markers carry
+    // nothing, and NC_HIGH_FLOAT_TRUNCATED can no longer be marker-induced.
+    if IR_FLOAT_NO_MARKERS == 1 { return }
+    var i: i64 = 0
+    while i < (*func).instr_count && i < IR_MAX_INSTRS {
+        let slot = ir_region_slot_r((*func).region, (i))
+        let fl = IR_A_IMM_FLAGS[slot as usize]
+        if fl == IR_FLOAT_REG_MARKER_FLAG {
+            let dst = IR_A_DST[slot as usize]
+            if dst >= NC_MAX_VREGS {
+                nc_high_float_note(dst)
+            }
+        }
+        i = i + 1
+    }
+}
+
 pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunction, fn_index: i64) -> bool with IO, Mut, Panic, Div, Alloc {
     nc_refresh_wide_mul_sabotage()
     nc_refresh_ieee_f64_sabotage()
@@ -9350,13 +9594,17 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
     NC_V2_CURRENT_FN_INDEX = fn_index
     reset_function_state_mut(nc)
     nc_compute_float_types(nc, func)
+    nc_collect_high_float_markers(func)
+    if NC_HIGH_FLOAT_TRUNCATED == 1 { return false }
     let function_offset = (*nc).code.len
     native_compiler_set_fn_offset(nc, fn_index, function_offset)
     native_compiler_add_symbol_func_ref(nc, fn_index, func)
 
+    nc_core_assign_pregs(nc, func)
+    let frame_sz = x86_align_frame_size_for_calls(align16((*func).reg_count * 8), NC_CORE_PREG_MASK)
+    nc_core_push_saved_pregs(nc)
     nc_emit_push_rbp(nc)
     nc_emit_mov_rbp_rsp(nc)
-    let frame_sz = align16((*func).reg_count * 8)
     if frame_sz > 0 {
         nc_emit_sub_rsp_imm32(nc, frame_sz)
     }
@@ -9450,6 +9698,11 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
                 if ir_float_bits_get(func, rfb) { nc_core_mark_float_reg(nc, rfb) }
                 rfb = rfb + 1
             }
+            var hi: i64 = 0
+            while hi < NC_HIGH_FLOAT_COUNT {
+                nc_core_mark_float_reg(nc, NC_HIGH_FLOAT_IDS[hi as usize])
+                hi = hi + 1
+            }
         }
         let instr_op = (IR_A_OP[(ir_region_slot_r((*func).region, (i))) as usize] as IrOpcode)
         if instr_op == IrOpcode::IrNop && IR_A_IMM_FLAGS[(ir_region_slot_r((*func).region, (i))) as usize] == IR_FLOAT_REG_MARKER_FLAG
@@ -9491,7 +9744,15 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             } else {
                 nc_emit_mov_rax_imm(nc, imm_value)
                 nc_core_store_rax_to_temp(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
-                nc_core_mark_int_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
+                // #1669 C1: bit 1 says the immediate is f64 bits (emit_f64_const).
+                // Marks float for any vreg, so the literal's fact is carried by
+                // the instruction itself, marker nop or no marker nop.
+                let lif = IR_A_IMM_FLAGS[(ir_region_slot_r((*func).region, (i))) as usize]
+                if ((lif / 2) & 1) == 1 {
+                    nc_core_mark_float_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
+                } else {
+                    nc_core_mark_int_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
+                }
             }
         } else if instr_op == IrOpcode::IrLoadBool {
             nc_emit_mov_rax_imm(nc, IR_A_IMM_I64[(ir_region_slot_r((*func).region, (i))) as usize])
@@ -9667,10 +9928,22 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
         } else if instr_op == IrOpcode::IrCopy {
             nc_core_load_temp_to_rax(nc, IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize])
             nc_core_store_rax_to_temp(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
-            if IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize] >= 0 && IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize] < NC_MAX_VREGS {
-                if (*nc).is_float_reg[IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize] as usize] == 1 {
+            let csrc = IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize]
+            if csrc >= 0 && csrc < NC_MAX_VREGS {
+                if (*nc).is_float_reg[csrc as usize] == 1 {
                     nc_core_mark_float_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
                 } else {
+                    nc_core_mark_int_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
+                }
+            } else if csrc >= NC_MAX_VREGS && csrc < NC_VREG_LIMIT {
+                // #1669 C2: above the 2048-bit set the class table IS the
+                // instruction-carried fact store (every mark writes it uncapped).
+                // Propagate only definite facts: an UNKNOWN(0) source stays
+                // unmarked, which is exactly today's behavior.
+                let cc = nc_reg_class_get(csrc)
+                if cc == 1 {
+                    nc_core_mark_float_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
+                } else if cc == 2 {
                     nc_core_mark_int_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
                 }
             }
@@ -9687,15 +9960,20 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
                 let src1 = IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize]
                 let src1_marked_float = if src1 >= 0 && src1 < NC_MAX_VREGS && (*nc).is_float_reg[src1 as usize] == 1 { 1 } else { 0 }
                 let src1_typed_float = if src1 >= 0 && src1 < NC_MAX_VREGS && (*nc).reg_type[src1 as usize] == 1 { 1 } else { 0 }
-                if src1_marked_float == 1 || src1_typed_float == 1 {
+                let src1_class_float = if nc_reg_class_get(src1) == 1 { 1 } else { 0 }
+                let neg_flags = IR_A_IMM_FLAGS[(ir_region_slot_r((*func).region, (i))) as usize]
+                let src1_insn_float = if ((neg_flags / 2) & 1) == 1 { 1 } else { 0 }
+                if src1_marked_float == 1 || src1_typed_float == 1 || src1_class_float == 1 || src1_insn_float == 1 {
                     // IEEE negation flips the sign bit. It is NOT `0.0 - x`: that
                     // subtraction gives +0.0 at x = +0.0 where -x is -0.0.
-                    // btc rax, 63 -- 48 0F BA F8 3F (/7 ib). No scratch register.
+                    // btc rax, 63. The flag on the IrUnaryOp is authoritative;
+                    // the class table covers a marker nop above the 2048-bit set.
                     nc_core_load_temp_to_rax(nc, src1)
-                    nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x0f); nc_emit_byte(nc, 0xba)
-                    nc_emit_byte(nc, 0xf8); nc_emit_byte(nc, 0x3f)
+                    nc_emit_btc_rax_63_into(nc)
                     nc_core_store_rax_to_temp(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
                     nc_core_mark_float_reg(nc, IR_A_DST[(ir_region_slot_r((*func).region, (i))) as usize])
+                } else if src1 >= NC_VREG_LIMIT {
+                    return false
                 } else {
                     nc_core_load_temp_to_rax(nc, src1)
                     nc_emit_neg_rax(nc)
@@ -9802,22 +10080,22 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             if dest_reg < 0 { return false }
             let first_arg = IR_A_FIELD_IDX[(ir_region_slot_r((*func).region, (i))) as usize]
             if !nc_core_push_sret_stack_args(nc, first_arg, argc) { return false }
-            nc_emit_load_rbp_disp32_reg(nc, 7, ir_slot_offset(dest_reg))
+            nc_core_load_temp_to_reg(nc, dest_reg, 7)
             if argc > 0 {
                 if first_arg < 0 { return false }
-                nc_emit_load_rbp_disp32_reg(nc, 6, ir_slot_offset(first_arg))
+                nc_core_load_temp_to_reg(nc, first_arg, 6)
             }
             if argc > 1 {
-                nc_emit_load_rbp_disp32_reg(nc, 2, ir_slot_offset(first_arg + 1))
+                nc_core_load_temp_to_reg(nc, first_arg + 1, 2)
             }
             if argc > 2 {
-                nc_emit_load_rbp_disp32_reg(nc, 1, ir_slot_offset(first_arg + 2))
+                nc_core_load_temp_to_reg(nc, first_arg + 2, 1)
             }
             if argc > 3 {
-                nc_emit_load_rbp_disp32_reg(nc, 8, ir_slot_offset(first_arg + 3))
+                nc_core_load_temp_to_reg(nc, first_arg + 3, 8)
             }
             if argc > 4 {
-                nc_emit_load_rbp_disp32_reg(nc, 9, ir_slot_offset(first_arg + 4))
+                nc_core_load_temp_to_reg(nc, first_arg + 4, 9)
             }
             let call_pos = (*nc).code.len
             nc_emit_call_rel32_placeholder(nc)
@@ -9831,15 +10109,11 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
             }
         } else if instr_op == IrOpcode::IrReturn {
             nc_core_load_temp_to_rax(nc, IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize])
-            nc_emit_mov_rsp_rbp(nc)
-            nc_emit_pop_rbp(nc)
-            nc_emit_ret(nc)
+            nc_core_emit_epilogue(nc)
             saw_return = true
         } else if instr_op == IrOpcode::IrReturnSret {
             nc_core_load_temp_to_rax(nc, IR_A_SRC1[(ir_region_slot_r((*func).region, (i))) as usize])
-            nc_emit_mov_rsp_rbp(nc)
-            nc_emit_pop_rbp(nc)
-            nc_emit_ret(nc)
+            nc_core_emit_epilogue(nc)
             saw_return = true
         } else if instr_op == IrOpcode::IrLabel {
             nc_define_label(nc, IR_A_LABEL_ID[(ir_region_slot_r((*func).region, (i))) as usize])
@@ -10029,9 +10303,7 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
     // that hit this path still need a larger IR_MAX_INSTRS for full semantics.
     if !saw_return {
         nc_emit_mov_rax_imm(nc, 0)
-        nc_emit_mov_rsp_rbp(nc)
-        nc_emit_pop_rbp(nc)
-        nc_emit_ret(nc)
+        nc_core_emit_epilogue(nc)
     }
 
     patch_label_forwards_mut(nc)
@@ -10056,6 +10328,7 @@ pub fn native_v2_core_begin_function_from_ir_into(nc: &! NativeCompiler, func: &
     let function_offset = (*nc).code.len
     native_compiler_set_fn_offset(nc, fn_index, function_offset)
     native_compiler_add_symbol_func_ref(nc, fn_index, func)
+    NC_CORE_PREG_MASK = 0
     nc_emit_push_rbp(nc)
     nc_emit_mov_rbp_rsp(nc)
     nc_emit_sub_rsp_imm32(nc, 512)
@@ -10150,9 +10423,7 @@ pub fn native_v2_core_emit_call1_into(nc: &! NativeCompiler, dst: i64, fn_id: i6
 
 pub fn native_v2_core_emit_return_into(nc: &! NativeCompiler, src: i64) with Mut, Panic, Div {
     nc_core_load_temp_to_rax(nc, src)
-    nc_emit_mov_rsp_rbp(nc)
-    nc_emit_pop_rbp(nc)
-    nc_emit_ret(nc)
+    nc_core_emit_epilogue(nc)
 }
 
 fn nc_emit_load_rbp_disp32_reg(nc: &! NativeCompiler, reg: i64, disp: i64) with Mut, Panic, Div {
@@ -10179,10 +10450,10 @@ fn nc_emit_store_rbp_disp32_reg(nc: &! NativeCompiler, reg: i64, disp: i64) with
 
 // Pass up to 4 args from consecutive vregs into SysV param regs (rdi/rsi/rdx/rcx)
 pub fn native_v2_core_emit_call_argc_into(nc: &! NativeCompiler, dst: i64, fn_id: i64, arg0: i64, argc: i64) with Mut, Panic, Div {
-    if argc >= 1 { nc_emit_load_rbp_disp32_reg(nc, 7, ir_slot_offset(arg0)) }
-    if argc >= 2 { nc_emit_load_rbp_disp32_reg(nc, 6, ir_slot_offset(arg0 + 1)) }
-    if argc >= 3 { nc_emit_load_rbp_disp32_reg(nc, 2, ir_slot_offset(arg0 + 2)) }
-    if argc >= 4 { nc_emit_load_rbp_disp32_reg(nc, 1, ir_slot_offset(arg0 + 3)) }
+    if argc >= 1 { nc_core_load_temp_to_reg(nc, arg0, 7) }
+    if argc >= 2 { nc_core_load_temp_to_reg(nc, arg0 + 1, 6) }
+    if argc >= 3 { nc_core_load_temp_to_reg(nc, arg0 + 2, 2) }
+    if argc >= 4 { nc_core_load_temp_to_reg(nc, arg0 + 3, 1) }
     let call_pos = (*nc).code.len
     nc_emit_call_rel32_placeholder(nc)
     nc_add_call_reloc(nc, call_pos + 1, fn_id)
@@ -10195,17 +10466,16 @@ pub fn native_v2_core_emit_call_argc_into(nc: &! NativeCompiler, dst: i64, fn_id
 pub fn native_v2_core_emit_return_struct_into(nc: &! NativeCompiler, base_reg: i64, fcount: i64) with Mut, Panic, Div {
     nc_core_load_temp_to_rax(nc, base_reg)
     if fcount >= 2 {
-        nc_emit_load_rbp_disp32_reg(nc, 2, ir_slot_offset(base_reg + 1))
+        nc_core_load_temp_to_reg(nc, base_reg + 1, 2)
     }
-    nc_emit_mov_rsp_rbp(nc)
-    nc_emit_pop_rbp(nc)
-    nc_emit_ret(nc)
+    nc_core_emit_epilogue(nc)
 }
 
 // Save rdx (second return reg) into a vreg stack slot
 pub fn native_v2_core_emit_rdx_to_temp_into(nc: &! NativeCompiler, dst: i64) with Mut, Panic, Div {
     if dst >= 0 {
-        nc_emit_store_rbp_disp32_reg(nc, 2, ir_slot_offset(dst))
+        nc_emit_byte(nc, 0x48); nc_emit_byte(nc, 0x89); nc_emit_byte(nc, 0xd0)
+        nc_core_store_rax_to_temp(nc, dst)
     }
 }
 
@@ -10448,6 +10718,7 @@ fn native_v2_emit_sret_witness_main_into(nc: &! NativeCompiler, plain_call: bool
     let main_name = ir_name_from_bytes(109, 97, 105, 110, 4)
     native_compiler_add_symbol_name_ref(nc, 0, &main_name)
 
+    NC_CORE_PREG_MASK = 0
     nc_emit_push_rbp(nc)
     nc_emit_mov_rbp_rsp(nc)
     nc_emit_sub_rsp_imm32(nc, 512)
@@ -10489,6 +10760,7 @@ fn native_v2_emit_sret_witness_make_into(nc: &! NativeCompiler) -> bool with Mut
     let make_name = ir_name_from_bytes(109, 97, 107, 101, 4)
     native_compiler_add_symbol_name_ref(nc, 1, &make_name)
 
+    NC_CORE_PREG_MASK = 0
     nc_emit_push_rbp(nc)
     nc_emit_mov_rbp_rsp(nc)
     nc_emit_sub_rsp_imm32(nc, 512)
@@ -10660,7 +10932,14 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
     (*nc).current_frame_size = frame_size
 
     (*nc).code = emit_prologue_with_preg_mask((*nc).code, frame_size, preg_mask)
-    spill_ir_params_mut(nc, func)
+    spill_ir_params_mut(nc, func, preg_mask)
+    var fi_sched: i64 = 0
+    while fi_sched < MIR_MAX_FLOAT_SLOTS && fi_sched < NC_MAX_VREGS {
+        if machine_func.is_float_slot[fi_sched as usize] == 1 {
+            (*nc).is_float_reg[fi_sched as usize] = 1
+        }
+        fi_sched = fi_sched + 1
+    }
     if !native_v2_scheduler_enabled() {
         native_v2_emit_machine_function_mut(nc, machine_func, fn_index, function_offset)
     } else {
@@ -10807,13 +11086,13 @@ pub fn compile_module_v2_mut(nc: &! NativeCompiler, module: &IrModule) -> string
 }
 
 // Spill parameter registers to their IR-assigned stack slots
-fn spill_ir_params(nc: NativeCompiler, func: IrFunction) -> NativeCompiler with Mut, Panic, Div {
+fn spill_ir_params(nc: NativeCompiler, func: IrFunction, preg_mask: i64) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
-    spill_ir_params_mut(&! c, func)
+    spill_ir_params_mut(&! c, func, preg_mask)
     c
 }
 
-fn spill_ir_params_mut(nc: &! NativeCompiler, func: IrFunction) with Mut, Panic, Div {
+fn spill_ir_params_mut(nc: &! NativeCompiler, func: IrFunction, preg_mask: i64) with Mut, Panic, Div {
     var i = 0
     let sret_shift = if func.is_sret == 1 { 1 } else { 0 }
     if sret_shift == 1 {
@@ -10834,7 +11113,7 @@ fn spill_ir_params_mut(nc: &! NativeCompiler, func: IrFunction) with Mut, Panic,
     while i < func.param_count {
         let vreg = func.param_regs[i as usize]
         if vreg >= 0 {
-            let in_offset = 16 + ((i + sret_shift - 6) * 8)
+            let in_offset = 16 + nc_preg_push_bytes_from_mask(preg_mask) + ((i + sret_shift - 6) * 8)
             let out_offset = ir_slot_offset(vreg)
             nc_emit_load_rbp_disp32_reg(nc, 0, in_offset)
             nc_emit_store_rbp_disp32_reg(nc, 0, out_offset)
@@ -10861,10 +11140,13 @@ fn spill_ir_params_ref_mut(nc: &! NativeCompiler, func: &IrFunction) with Mut, P
         }
         i = i + 1
     }
+    // #1671: callee-saved pregs pushed BEFORE push rbp sit between the saved
+    // rbp and the return address, so incoming stack args start above them.
+    let saved_preg_bytes = nc_preg_push_bytes_from_mask(NC_CORE_PREG_MASK)
     while i < (*func).param_count {
         let vreg = (*func).param_regs[i as usize]
         if vreg >= 0 {
-            let in_offset = 16 + ((i + sret_shift - 6) * 8)
+            let in_offset = 16 + saved_preg_bytes + ((i + sret_shift - 6) * 8)
             let out_offset = ir_slot_offset(vreg)
             nc_emit_load_rbp_disp32_reg(nc, 0, in_offset)
             nc_emit_store_rbp_disp32_reg(nc, 0, out_offset)
@@ -10883,9 +11165,11 @@ pub fn native_v2_core_begin_fn_spill_into(nc: &! NativeCompiler, func: &IrFuncti
     let function_offset = (*nc).code.len
     native_compiler_set_fn_offset(nc, fn_index, function_offset)
     native_compiler_add_symbol_func_ref(nc, fn_index, func)
+    nc_core_assign_pregs(nc, func)
+    let frame_sz = x86_align_frame_size_for_calls(align16((*func).reg_count * 8), NC_CORE_PREG_MASK)
+    nc_core_push_saved_pregs(nc)
     nc_emit_push_rbp(nc)
     nc_emit_mov_rbp_rsp(nc)
-    let frame_sz = align16((*func).reg_count * 8)
     if frame_sz > 0 {
         nc_emit_sub_rsp_imm32(nc, frame_sz)
     }
@@ -12691,6 +12975,11 @@ fn native_v2_write_min_elf64_to_file(output_path: string, nc: &! NativeCompiler,
     if NC_BIG_ELF[2 as usize] != (0x4c as i8) { return 16 }
     if NC_BIG_ELF[3 as usize] != (0x46 as i8) { return 17 }
     if write_file(output_path, NC_BIG_ELF, file_len) < 0 { return 18 }
+    // #1670: publish executable. The driver route chmods via
+    // driver_make_executable, but this front-half route (compile
+    // --backend=native) never did, so ELFs landed 0644 and the run step
+    // failed with Permission denied. chmod is absolute (no umask).
+    if !io_make_executable(output_path) { return 19 }
     0
 }
 

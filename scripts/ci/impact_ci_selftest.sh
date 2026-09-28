@@ -50,6 +50,21 @@ non_pr="$(CI_EVENT_NAME=push $CLASSIFIER)"
 expect "$non_pr" full true
 expect "$non_pr" compiler true
 
+# merge_group is diff-classified like the PR it carries (not forced full).
+mq_docs="$(CI_EVENT_NAME=merge_group "$CLASSIFIER" docs/internal/concepts/README.md)"
+expect "$mq_docs" docs true
+expect "$mq_docs" compiler false
+expect "$mq_docs" full false
+mq_compiler="$(CI_EVENT_NAME=merge_group "$CLASSIFIER" self-hosted/ir/opt_cleanup.sio)"
+expect "$mq_compiler" compiler true
+mq_workflow="$(CI_EVENT_NAME=merge_group "$CLASSIFIER" .github/workflows/ci.yml)"
+expect "$mq_workflow" full true
+# ...and refuses a merge group with no base, instead of an all-false matrix.
+if (cd "$ROOT_DIR" && CI_EVENT_NAME=merge_group CI_BASE_SHA= "$CLASSIFIER" >/dev/null 2>&1); then
+  echo "impact-ci-selftest: classifier accepted a merge_group with no base SHA" >&2
+  exit 1
+fi
+
 # A failed `git diff` used to be invisible through process substitution:
 # paths=(), every output false, exit 0 -- a run downstream reads identically
 # to "no jobs needed" (silent skip of the whole matrix). Same for an empty
