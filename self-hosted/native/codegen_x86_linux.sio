@@ -7106,6 +7106,16 @@ pub fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) 
     if !ir_reg_count_is_valid(effective_func.reg_count) {
         c.ir_vreg_overflow = true
         c.ir_vreg_overflow_needed = effective_func.reg_count
+        c.ir_vreg_overflow_limit = IR_MAX_VREGS
+        return c
+    }
+    // The legacy lowering helpers still own 2048-entry float tables. Refuse
+    // this fallback above their representable range; the core path supports
+    // the larger IR ceiling through NC_REG_CLASS.
+    if effective_func.reg_count > NC_MAX_VREGS {
+        c.ir_vreg_overflow = true
+        c.ir_vreg_overflow_needed = effective_func.reg_count
+        c.ir_vreg_overflow_limit = NC_MAX_VREGS
         return c
     }
 
@@ -8150,6 +8160,7 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
     if !ir_reg_count_is_valid(func.reg_count) {
         c.ir_vreg_overflow = true
         c.ir_vreg_overflow_needed = func.reg_count
+        c.ir_vreg_overflow_limit = IR_MAX_VREGS
         return c
     }
 
@@ -8337,6 +8348,7 @@ pub fn compile_ir_function_v2_into(nc: &! NativeCompiler, func: &IrFunction, mac
     if !ir_reg_count_is_valid((*func).reg_count) {
         (*nc).ir_vreg_overflow = true
         (*nc).ir_vreg_overflow_needed = (*func).reg_count
+        (*nc).ir_vreg_overflow_limit = IR_MAX_VREGS
         return
     }
     reset_function_state_mut(nc)
@@ -9436,12 +9448,15 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
     // allocate registers after lowering. Never let oversized final IR reach
     // the fixed native register-class and allocation tables.
     if !ir_reg_count_is_valid((*func).reg_count) {
+        (*nc).ir_vreg_overflow = true
+        (*nc).ir_vreg_overflow_needed = (*func).reg_count
+        (*nc).ir_vreg_overflow_limit = IR_MAX_VREGS
         print("NATIVE_REFUSAL kind=ir_vreg_limit fn=")
         print_int(fn_index)
         print(" needed=")
         print_int((*func).reg_count)
         print(" limit=")
-        print_int(IR_MAX_VREGS)
+        print_int(nc.ir_vreg_overflow_limit)
         print("\n")
         return false
     }
@@ -10329,6 +10344,9 @@ pub fn compile_ir_function_v2_from_ir_into(nc: &! NativeCompiler, func: &IrFunct
     // Keep the limit check ahead of every executable builtin/dynlink/cache
     // consumption path as well as in the core entry (which has direct callers).
     if !ir_reg_count_is_valid((*func).reg_count) {
+        (*nc).ir_vreg_overflow = true
+        (*nc).ir_vreg_overflow_needed = (*func).reg_count
+        (*nc).ir_vreg_overflow_limit = IR_MAX_VREGS
         print("NATIVE_REFUSAL kind=ir_vreg_limit fn=")
         print_int(fn_index)
         print(" needed=")
@@ -13747,6 +13765,14 @@ pub fn compile_native_x86_linux_to_file(module: &IrModule, output_path: string) 
     while fi < (*module).fn_count {
         let fn_body = ir_fn_get(&(*module), fi as usize)
         if !compile_ir_function_v2_from_ir_into(&! nc, &fn_body, fi) {
+            if nc.ir_vreg_overflow {
+                print("NATIVE_REFUSAL kind=ir_vreg_limit needed=")
+                print_int(nc.ir_vreg_overflow_needed)
+                print(" limit=")
+                print_int(nc.ir_vreg_overflow_limit)
+                print("\n")
+                return 24
+            }
             print("Native compilation failed: native_driver_function_codegen_failed\n")
             return 1
         }
@@ -13756,7 +13782,7 @@ pub fn compile_native_x86_linux_to_file(module: &IrModule, output_path: string) 
         print("NATIVE_REFUSAL kind=ir_vreg_limit needed=")
         print_int(nc.ir_vreg_overflow_needed)
         print(" limit=")
-        print_int(IR_MAX_VREGS)
+        print_int(nc.ir_vreg_overflow_limit)
         print("\n")
         return 24
     }
