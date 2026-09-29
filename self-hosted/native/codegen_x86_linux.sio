@@ -8566,7 +8566,10 @@ fn nc_core_assign_pregs(nc: &! NativeCompiler, func: &IrFunction) with Mut, Pani
     // emitter reads a clobbered home (arity-13: every arg read the last
     // literal; ref_alias: the stored value 77, 0, and 1 all homed on r15).
     // Re-land only after liveness sees every channel as a use.
-    var preg_lane_enabled: i64 = 0
+    // Re-landed 2026-09-29 (#1673): nc_core_assign_pregs now notes every
+    // IrCall arena arg as a use before the scan, closing the hidden
+    // channel; repros arity-13 and ref_alias gate the land.
+    var preg_lane_enabled: i64 = 1
     if preg_lane_enabled == 0 { return }
     if nc_core_func_stays_on_stack(func) { return }
     var ra_instrs: [RaSimpleInstr; 4096] = [ra_empty_simple_instr(); 4096]
@@ -8594,6 +8597,18 @@ fn nc_core_assign_pregs(nc: &! NativeCompiler, func: &IrFunction) with Mut, Pani
                     state = regalloc_note_use(state, arg, k)
                 }
                 a = a + 1
+            }
+        } else if call_op == IrOpcode::IrIndexSet {
+            // The index-set VALUE rides in imm_i64 (ir_index_set lowers
+            // the stored value into the immediate slot), a channel the
+            // (dst, src1, src2) stream never sees. Without this note the
+            // value temp looks dead at its def, linear scan reuses its
+            // preg for later temps, and the emitter reads the wrong home
+            // (ref_alias stored the index over the 77). ir_load_imm keeps
+            // TRUE constants in imm_i64, so key on the opcode.
+            let src_vreg = IR_A_IMM_I64[kslot as usize]
+            if src_vreg >= 0 && src_vreg < NC_MAX_VREGS {
+                state = regalloc_note_use(state, src_vreg, k)
             }
         }
         k = k + 1
