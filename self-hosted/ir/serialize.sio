@@ -46,6 +46,7 @@ use check::types::*
 //   - un_op: UnaryOp (1 byte + 7 padding)
 //   - name: Name (128 bytes + 8 byte length)
 //   - arg_count: i64
+//   - call_args: [i64; arg_count] (v5+)
 
 let SOIR_MAGIC: i64 = 1380206931  // "SOIR" as i32 cast to i64
 let SOIR_VERSION: i8 = 5
@@ -494,13 +495,38 @@ fn serialize_ir_instr(buf: [i8; 131072], pos: i64, instr: IrInstr) -> ([i8; 1310
     let arg_count_pair = write_i64(b, p, instr.arg_count)
     b = arg_count_pair.0
     p = arg_count_pair.1
-    // Note: call_args linked list is NOT serialized (reconstructed from arg_count)
+    var args = instr.call_args
+    var ai: i64 = 0
+    let has_serialized_args = instr.op == IrOpcode::IrCall || instr.op == IrOpcode::IrCallExtern || instr.op == IrOpcode::IrCallIndirect
+    while has_serialized_args && ai < instr.arg_count {
+        match args {
+            Some(node) => {
+                let arg_pair = write_i64(b, p, (*node).head)
+                b = arg_pair.0
+                p = arg_pair.1
+                args = (*node).tail
+            }
+            _ => {
+                SOIR_SER_REFUSAL_COUNT = SOIR_SER_REFUSAL_COUNT + 1
+                return (b, p)
+            }
+        }
+        ai = ai + 1
+    }
+    if has_serialized_args && ir_reg_list_len(args) != 0 {
+        SOIR_SER_REFUSAL_COUNT = SOIR_SER_REFUSAL_COUNT + 1
+    }
 
     (b, p)
 }
 
-fn deserialize_ir_instr(buf: [i8; 131072], pos: i64, version: i8) -> (IrInstr, i64) with Mut, Panic, Div {
+fn deserialize_ir_instr(buf: [i8; 131072], len: i64, pos: i64, version: i8) -> (IrInstr, i64) with Mut, Panic, Div, Alloc {
     var p = pos
+    let fixed_instr_size: i64 = if version >= 5 { 240 } else { 232 }
+    if p < 0 || len < 0 || len > SOIR_MAX_SIZE || p > len - fixed_instr_size || p > SOIR_MAX_SIZE - fixed_instr_size {
+        soir_note_deser_refusal()
+        return (ir_instr_new(IrOpcode::IrNop), p)
+    }
     let op_pair = read_opcode(buf, p)
     let op = op_pair.0
     p = op_pair.1 + 7  // skip padding
@@ -560,6 +586,31 @@ fn deserialize_ir_instr(buf: [i8; 131072], pos: i64, version: i8) -> (IrInstr, i
     let arg_count = arg_count_pair.0
     p = arg_count_pair.1
 
+    let has_serialized_args = op == IrOpcode::IrCall || op == IrOpcode::IrCallExtern || op == IrOpcode::IrCallIndirect
+    if arg_count < 0 || arg_count > 64 || (version >= 5 && has_serialized_args && (p > len - arg_count * 8 || p > SOIR_MAX_SIZE - arg_count * 8)) {
+        soir_note_deser_refusal()
+        return (ir_instr_new(IrOpcode::IrNop), p)
+    }
+    var call_args = ir_empty_reg_list()
+    var ai: i64 = 0
+    while version >= 5 && has_serialized_args && ai < arg_count {
+        let arg_pair = read_i64(buf, p)
+        let arg_reg = arg_pair.0
+        p = arg_pair.1
+        if ai == 0 {
+            call_args = Some(Box::new(ir_reg_list_single(arg_reg)))
+        } else {
+            match call_args {
+                Some(list) => { call_args = Some(Box::new(ir_reg_list_append(*list, arg_reg))) }
+                _ => {
+                    soir_note_deser_refusal()
+                    return (ir_instr_new(IrOpcode::IrNop), p)
+                }
+            }
+        }
+        ai = ai + 1
+    }
+
     let instr = IrInstr {
         op: op,
         dst: dst,
@@ -574,7 +625,7 @@ fn deserialize_ir_instr(buf: [i8; 131072], pos: i64, version: i8) -> (IrInstr, i
         bin_op: bin_op,
         un_op: un_op,
         name_id: ir_intern_name(name),
-        call_args: ir_empty_reg_list(),  // Not serialized
+        call_args: call_args,
         arg_count: arg_count,
     }
     (instr, p)
@@ -771,7 +822,7 @@ fn deserialize_ir_function(buf: [i8; 131072], len: i64, pos: i64, version: i8) -
     }
     var j: i64 = 0
     while j < instr_count {
-        let instr_pair = deserialize_ir_instr(buf, p, version)
+        let instr_pair = deserialize_ir_instr(buf, len, p, version)
         ir_arena_store(ir_region_slot_w(region, (j)), instr_pair.0)
         p = instr_pair.1
         j = j + 1
@@ -4571,6 +4622,11 @@ fn deserialize_ir_module(buf: [i8; 131072], len: i64) -> IrModule with Mut, Pani
     var pos: i64 = 0
     let refusals_before = SOIR_DESER_REFUSAL_COUNT
 
+    if len < 16 || len > SOIR_MAX_SIZE {
+        soir_note_deser_refusal()
+        return ir_empty_module()
+    }
+
     // Verify header magic - cast literals to i8 for comparison
     let b0: i8 = 83 as i8
     let b1: i8 = 79 as i8
@@ -4616,6 +4672,10 @@ fn deserialize_ir_module(buf: [i8; 131072], len: i64) -> IrModule with Mut, Pani
     }
 
     // Read string count
+    if pos < 0 || pos > len - 8 {
+        soir_note_deser_refusal()
+        return ir_empty_module()
+    }
     let string_count_pair = read_i64(buf, pos)
     let string_count = string_count_pair.0
     pos = string_count_pair.1
@@ -4630,6 +4690,10 @@ fn deserialize_ir_module(buf: [i8; 131072], len: i64) -> IrModule with Mut, Pani
     var string_table: [Name; 16384] = [ir_empty_name(); 16384]
     var j: i64 = 0
     while j < string_count {
+        if pos < 0 || pos > len - 136 {
+            soir_note_deser_refusal()
+            return ir_empty_module()
+        }
         let name_pair = read_name(buf, pos)
         string_table[j] = name_pair.0
         pos = name_pair.1
