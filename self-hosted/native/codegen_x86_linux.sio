@@ -8179,7 +8179,10 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
 
 pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func: MachineFunction, fn_index: i64) -> NativeCompiler with Mut, Panic, Div, Alloc {
     var c = nc
-    if !ir_function_regs_are_valid(&func) {
+    // Bodyless builtin/extern stubs retain signature metadata without an
+    // allocated register body. Always enforce the count ceiling, but require
+    // full register structure only when executable IR is present.
+    if !ir_reg_count_is_valid(func.reg_count) || (func.instr_count > 0 && !ir_function_regs_are_valid(&func)) {
         if !ir_reg_count_is_valid(func.reg_count) {
             c.ir_vreg_overflow = true
             c.ir_vreg_overflow_needed = func.reg_count
@@ -8372,7 +8375,8 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
 }
 
 pub fn compile_ir_function_v2_into(nc: &! NativeCompiler, func: &IrFunction, machine_func: &MachineFunction, fn_index: i64) with Mut, Panic, Div, Alloc {
-    if !ir_function_regs_are_valid(func) {
+    // Streaming callers also see intentionally bodyless builtin/extern stubs.
+    if !ir_reg_count_is_valid((*func).reg_count) || ((*func).instr_count > 0 && !ir_function_regs_are_valid(func)) {
         if !ir_reg_count_is_valid((*func).reg_count) {
             (*nc).ir_vreg_overflow = true
             (*nc).ir_vreg_overflow_needed = (*func).reg_count
@@ -10759,6 +10763,17 @@ fn mir_opcode_port_mask(opcode: i64) -> i64 {
 fn native_v2_scheduler_enabled() -> bool { true }
 
 fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_func: MachineFunction, fn_index: i64) with Mut, Panic, Div, Alloc {
+    if !ir_reg_count_is_valid(func.reg_count) || (func.instr_count > 0 && !ir_function_regs_are_valid(&func)) {
+        if !ir_reg_count_is_valid(func.reg_count) {
+            (*nc).ir_vreg_overflow = true
+            (*nc).ir_vreg_overflow_needed = func.reg_count
+            (*nc).ir_vreg_overflow_limit = IR_MAX_VREGS
+        } else {
+            (*nc).ir_validation_failed = true
+            (*nc).ir_validation_reg_count = func.reg_count
+        }
+        return
+    }
     reset_function_state_mut(nc)
 
     let function_offset = (*nc).code.len
