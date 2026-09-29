@@ -21,10 +21,12 @@
 # WHY THIS IS PARALLEL, WHY THE PER-PROBE TIMEOUTS LOOK THE WAY THEY DO, AND
 # WHY rep_adiabatic_bug ISN'T HERE BY DEFAULT.
 #
-# gbs_oracle and h2_ignition_uq_demo were added to PROBES on 2026-09-02/03
-# (d04c6715f8, 79812c2016), five months after the gate shipped with a single
-# `timeout 1500` (25 min) sized for the original three light probes -- neither
-# that per-probe timeout nor the job's timeout-minutes was ever revisited.
+# The gate shipped on 2026-09-02 (525b2da42). gbs_oracle was added roughly six
+# hours later (d04c6715f8), and h2_ignition_uq_demo followed on 2026-09-03
+# (79812c2016), while the original `timeout 1500` (25 min) and 45-minute job
+# budget remained unchanged. Main later widened those limits to 3600 seconds
+# and 90 minutes on 2026-09-23 (c49287e19), but that still cannot accommodate
+# the serial five-probe workload described below.
 # Measured directly (not assumed) on this engine: rep_traj_bug ~153s,
 # rep_stagnation ~346s, gbs_oracle ~32 min, h2_ignition_uq_demo ~45 min. All
 # four are independent processes writing to separate files with no shared
