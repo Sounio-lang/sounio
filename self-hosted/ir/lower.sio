@@ -10442,30 +10442,19 @@ impl Lowerer {
         }
     }
 
-    fn bind_local_struct_type(self, name: Name, type_name: Name) -> Lowerer with Mut, Alloc, Panic, Div {
+    // `from_array` is not optional decoration. struct_types holds either the
+    // local's own struct type or, for an array, the element's type, and the
+    // by-value copy cannot tell them apart except by the bit set here. Taking
+    // the bit in the same call is the point: a second setter was forgotten by
+    // every path that grew a binding after it existed.
+    fn bind_local_struct_type(self, name: Name, type_name: Name, from_array: bool) -> Lowerer with Mut, Alloc, Panic, Div {
         var lo = self
         var stk = lo.locals
         var i = (*stk).count - 1
         while i >= 0 {
             if (*(*stk).depths).values[i as usize] <= lo.scope_depth && ir_name_eq((*(*stk).names).values[i as usize], name) {
                 (*(*stk).struct_types).values[i as usize] = type_name
-                lo.locals = stk
-                return lo
-            }
-            i = i - 1
-        }
-        lo
-    }
-
-    // struct_types was just set from an array's element type, not from the
-    // local's own type. See struct_type_is_array_elem.
-    fn bind_local_struct_type_is_array_elem(self, name: Name) -> Lowerer with Mut, Alloc, Panic, Div {
-        var lo = self
-        var stk = lo.locals
-        var i = (*stk).count - 1
-        while i >= 0 {
-            if (*(*stk).depths).values[i as usize] <= lo.scope_depth && ir_name_eq((*(*stk).names).values[i as usize], name) {
-                (*(*stk).struct_type_is_array_elem).values[i as usize] = 1
+                (*(*stk).struct_type_is_array_elem).values[i as usize] = if from_array { 1 } else { 0 }
                 lo.locals = stk
                 return lo
             }
@@ -19152,7 +19141,7 @@ impl Lowerer {
                         lo = uninit_pair.0
                         let uninit_dst = uninit_pair.1
                         lo = lo.emit(ir_alloc(uninit_dst, lo.aggregate_storage_bytes(st_slot_count)))
-                        lo = lo.bind_local_struct_type(s.name, st_name)
+                        lo = lo.bind_local_struct_type(s.name, st_name, false)
                         bind_reg = uninit_dst
                     }
                 }
@@ -19266,7 +19255,7 @@ impl Lowerer {
                 if fixed_array_len < 0 {
                     let st_name_noinit = lower_opt_type_named_name(&s.ty)
                     if lo.struct_layout_slot_count(st_name_noinit) > 0 {
-                        lo = lo.bind_local_struct_type(s.name, st_name_noinit)
+                        lo = lo.bind_local_struct_type(s.name, st_name_noinit, false)
                     }
                 }
             }
@@ -19696,13 +19685,13 @@ impl Lowerer {
         match s.ty {
             Some(ann_ty) => {
                 if (*ann_ty).kind == TypeExprKind::TypeKnowledge {
-                    lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"))
+                    lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"), false)
                 }
             }
             _ => {}
         }
         if lower_opt_type_is_seq(&s.ty) {
-            lo = lo.bind_local_struct_type(s.name, make_name("Seq"))
+            lo = lo.bind_local_struct_type(s.name, make_name("Seq"), false)
             match s.ty {
                 Some(seq_ty) => {
                     let seq_elem = lower_type_expr_seq_named_elem_name(&(*seq_ty))
@@ -19741,13 +19730,11 @@ impl Lowerer {
                     match (*arr_ty).inner {
                         Some(el) => {
                             if (*el).kind == TypeExprKind::TypeKnowledge {
-                                lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"))
-                                lo = lo.bind_local_struct_type_is_array_elem(s.name)
+                                lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"), true)
                             } else if (*el).kind == TypeExprKind::TypeNamed {
                                 let el_name = ir_path_first_name((*el).path)
                                 if el_name.len > 0 {
-                                    lo = lo.bind_local_struct_type(s.name, el_name)
-                                    lo = lo.bind_local_struct_type_is_array_elem(s.name)
+                                    lo = lo.bind_local_struct_type(s.name, el_name, true)
                                 }
                             }
                         }
@@ -19760,7 +19747,7 @@ impl Lowerer {
         match s.expr {
             Some(expr_box) => {
                 if (*expr_box).kind == ExprKind::ExprStructLit {
-                    lo = lo.bind_local_struct_type(s.name, ir_path_first_name((*expr_box).path))
+                    lo = lo.bind_local_struct_type(s.name, ir_path_first_name((*expr_box).path), false)
                 } else if (*expr_box).kind == ExprKind::ExprCall {
                     let callee_opt_struct_ref = &(*expr_box).left
                     let callee_struct_name = match *callee_opt_struct_ref {
@@ -19793,10 +19780,10 @@ impl Lowerer {
                     }
                     // measure(...) → Knowledge (return-name lookup often misses builtins)
                     if ir_name_is_measure(callee_struct_name) {
-                        lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"))
+                        lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"), false)
                     }
                     if name_eq(callee_struct_name, make_name("seq_len")) {
-                        lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"))
+                        lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"), false)
                     }
                     // `let pair = f()` where f returns a tuple carrying a named
                     // struct in slot k: record THAT slot's layout, so `pair.k.field`
@@ -19814,13 +19801,13 @@ impl Lowerer {
                     if !callee_is_box {
                         let ret_name = lo.expr_call_return_struct_name_ref(&(*expr_box))
                         if ret_name.len > 0 {
-                            lo = lo.bind_local_struct_type(s.name, ret_name)
+                            lo = lo.bind_local_struct_type(s.name, ret_name, false)
                         }
                     } else {
                         // `let b = Box::new(...)`: tag the local's struct-type slot with
                         // "Box" so `*b` lowers to a field-0 read (box deref through the
                         // handle) rather than a raw IrUnaryOp(OpDeref) pointer load.
-                        lo = lo.bind_local_struct_type(s.name, make_name("Box"))
+                        lo = lo.bind_local_struct_type(s.name, make_name("Box"), false)
                         let bxl = lower_struct_layout_index_of(&(*lo.struct_layouts), lo.expr_first_arg_struct_name_ref(&(*expr_box)))
                         lo = lo.bind_local_box_inner_layout(s.name, bxl)
                     }
@@ -19846,7 +19833,7 @@ impl Lowerer {
                                     if tsl >= 0 && tsl < (*lo.struct_layouts).count {
                                         lo = lo.bind_local_struct_type(
                                             s.name,
-                                            (*lo.struct_layouts).entries[tsl as usize].type_name)
+                                            (*lo.struct_layouts).entries[tsl as usize].type_name, false)
                                     }
                                 }
                             }
@@ -19860,11 +19847,10 @@ impl Lowerer {
                                     let tuple0_layout = lo.lookup_local_tuple0_array_elem_layout((*tuple_base).name)
                                     if tuple0_layout >= 0 && tuple0_layout < (*lo.struct_layouts).count {
                                         let tuple0_type = (*lo.struct_layouts).entries[tuple0_layout as usize].type_name
-                                        lo = lo.bind_local_struct_type(s.name, tuple0_type)
                                         // The layout came from a tuple slot that holds an
                                         // array, so the type bound here is the element
                                         // type, not the local's own type.
-                                        lo = lo.bind_local_struct_type_is_array_elem(s.name)
+                                        lo = lo.bind_local_struct_type(s.name, tuple0_type, true)
                                     }
                                 }
                             }
@@ -19901,7 +19887,7 @@ impl Lowerer {
                             if base_st.len > 0 {
                                 let fld_ty = lo.struct_layout_field_named_type(base_st, (*expr_box).name)
                                 if fld_ty.len > 0 {
-                                    lo = lo.bind_local_struct_type(s.name, fld_ty)
+                                    lo = lo.bind_local_struct_type(s.name, fld_ty, false)
                                 }
                             }
                         }
@@ -19925,7 +19911,7 @@ impl Lowerer {
                     // when two structs shared a field name (see field_is_pointer_for_struct).
                     if lo.field_is_box_for_base_ref(&(*expr_box).left, (*expr_box).name) {
                         if lower_aggregate_diag_enabled() { print("lower_agg: BIND-BOX-FROM-FIELD fired\n") }
-                        lo = lo.bind_local_struct_type(s.name, make_name("Box"))
+                        lo = lo.bind_local_struct_type(s.name, make_name("Box"), false)
                         // expr_first_arg_struct_name_ref answers the inner T only
                         // for call/struct-literal RHS (`Box::new(mk())`); a
                         // FIELD-access RHS (`let p = h.inner`) carries no argument
@@ -19951,7 +19937,7 @@ impl Lowerer {
                     let fn_id = lowerer_lookup_fn_id_by_name_ref(&lo, call_name)
                     let ret_name = lo.return_struct_name_for_fn_id(fn_id)
                     if ret_name.len > 0 {
-                        lo = lo.bind_local_struct_type(s.name, ret_name)
+                        lo = lo.bind_local_struct_type(s.name, ret_name, false)
                     }
                     // `let pair = c.method(...)` where the method returns
                     // `(Self, T)`. The plain-call branch above records the tuple
@@ -19991,7 +19977,7 @@ impl Lowerer {
                         let e_slot = lo.return_tuple_struct_slot_for_fn_id(else_fn)
                         if t_slot == e_slot && ir_name_eq(t_ret, e_ret) {
                             if t_ret.len > 0 {
-                                lo = lo.bind_local_struct_type(s.name, t_ret)
+                                lo = lo.bind_local_struct_type(s.name, t_ret, false)
                             }
                             if t_slot >= 0 {
                                 let t_name = lo.return_tuple_struct_name_for_fn_id(then_fn)
@@ -20009,10 +19995,7 @@ impl Lowerer {
                     // bound from `Some(nx)`) so `*b` / field access on b resolve correctly.
                     let src_st = lo.lookup_local_struct_type((*expr_box).name)
                     if src_st.len > 0 {
-                        lo = lo.bind_local_struct_type(s.name, src_st)
-                        if lo.lookup_local_struct_type_is_array_elem((*expr_box).name) {
-                            lo = lo.bind_local_struct_type_is_array_elem(s.name)
-                        }
+                        lo = lo.bind_local_struct_type(s.name, src_st, lo.lookup_local_struct_type_is_array_elem((*expr_box).name))
                     }
                     let src_elem_layout = lo.lookup_local_tuple0_array_elem_layout((*expr_box).name)
                     if src_elem_layout >= 0 {
@@ -22565,7 +22548,7 @@ impl Lowerer {
                     // the recursive-data root). Safe for non-Box payloads: marking only
                     // changes how `*nx` lowers, and deref/field-access of a non-Box payload
                     // (e.g. Option<i64>) is not valid code anyway.
-                    lo = lo.bind_local_struct_type(inner.name, make_name("Box"))
+                    lo = lo.bind_local_struct_type(inner.name, make_name("Box"), false)
                     lo
                 } else if inner.kind == PatternKind::PatWildcard {
                     // _ inside Some(_) — no binding needed
@@ -23682,7 +23665,7 @@ impl Lowerer {
                 lo = lo.bind_local(s.name, dest, is_mut)
                 lo = lo.bind_local_scalar_kind(s.name, 5)
                 lo = lo.bind_local_wide_type(s.name, 128, 0)
-                lo = lo.bind_local_struct_type(s.name, make_name("F128Bits"))
+                lo = lo.bind_local_struct_type(s.name, make_name("F128Bits"), false)
                 (lo, dest)
             }
             None => lower_f128_fail(self, "f128 let requires an initializer (V0-E.5.1)"),
