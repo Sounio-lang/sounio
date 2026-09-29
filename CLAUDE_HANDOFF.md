@@ -232,7 +232,7 @@ Active remote execution surface:
 Prefer:
 
 - preserving recovery state
-- working on `integration/sounio-dev-ready-base`
+- working on `main` (canonical since 2026-09-22; `integration/sounio-dev-ready-base` is deprecated, see `CLAUDE.md` §3)
 - remote-first development
 - commands that survive disconnects via tmux
 - using browser/SSH workspace instead of inventing a local-only loop
@@ -255,7 +255,7 @@ On the MacBook, the expected commands are:
 
 Inside the remote repo, expect:
 
-- branch: `integration/sounio-dev-ready-base`
+- branch: `main` (canonical since 2026-09-22 -- superseding the recovery-era `integration/sounio-dev-ready-base` pointer below; see `CLAUDE.md` §3 and `.claude/main-integration-divergence-report.md`)
 - path: `/workspace/sounio`
 
 ## If Claude Needs To Reorient Fast
@@ -264,7 +264,7 @@ Use this summary:
 
 - Sounio was recovered from a VM export, not cloned cleanly.
 - Git was reattached to GitHub afterwards.
-- The safe active branch is `integration/sounio-dev-ready-base`.
+- The safe active branch is `main` (as of 2026-09-22 -- `integration/sounio-dev-ready-base` is deprecated, see `CLAUDE.md` §3).
 - Development is remote-first through the promoted Kubernetes habitat workspace.
 - The official remote repo path is `/workspace/sounio`.
 - The MacBook is only a mobile control surface.

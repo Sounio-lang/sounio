@@ -45,8 +45,8 @@ jobs:
         name: Classify changed paths
         env:
           CI_EVENT_NAME: ${{ github.event_name }}
-          CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
         run: bash scripts/ci/classify_ci_impact.sh
       - name: Classifier self-test
         run: bash scripts/ci/impact_ci_selftest.sh
@@ -59,6 +59,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Materialize the committed Madaros prebuilt
+        run: bash scripts/lib/materialize_madaros_prebuilt.sh
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -84,6 +86,8 @@ jobs:
       # was red from that merge and invisible for want of a runner. 4 s.
       - name: PIREUS admission engine compiles and answers
         run: bash scripts/ci/pireus_admission_engine_gate.sh
+      - name: Pireus Walsh twist channel spectrum gate
+        run: bash scripts/ci/pireus_walsh_twist_channel_spectrum_gate.sh
       # A number this repo states about itself must equal the number the tree
       # yields. Seeded from a 2026-08-27 backlog sweep where nearly every rebased
       # PR asserted a figure that was true when written and false by then --
@@ -721,6 +725,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Materialize the committed Madaros prebuilt
+        run: bash scripts/lib/materialize_madaros_prebuilt.sh
       - name: Self-falsifying compilation line (R6 corpus sweep, nightly)
         run: bash scripts/ci/self_falsifying_compilation_line_r6_gate.sh
 
@@ -735,6 +741,8 @@ jobs:
       SOUNIO_FORCE_SOURCE_BOOTSTRAP: "1"
     steps:
       - uses: actions/checkout@v4
+      - name: Materialize the committed Madaros prebuilt
+        run: bash scripts/lib/materialize_madaros_prebuilt.sh
       - name: Host self-host gate
         run: bash scripts/ci/selfhost_host_gate.sh
       - name: Aggregate field identity across module boundaries
@@ -774,6 +782,8 @@ jobs:
       SOUNIO_SELFHOST_HOST_GATE_DIR: /tmp/sounio-source-bootstrap-selfhost-linux-x86_64
     steps:
       - uses: actions/checkout@v4
+      - name: Materialize the committed Madaros prebuilt
+        run: bash scripts/lib/materialize_madaros_prebuilt.sh
       - name: Source-bootstrap host self-host gate
         run: bash scripts/codex/action-source-bootstrap-host-gate.sh
       - name: Cross-build macOS arm64 compiler artifact
@@ -795,6 +805,13 @@ jobs:
           SOUNIO_ARM64_WITNESS_DIR: /tmp/sounio-arm64-array-element-field-witness
           SOUNIO_ARM64_WITNESS_MODE: attest
           SOUNIO_ARM64_WITNESS_SOURCE: tests/run-pass/arm64_deref_array_element_field_store.sio
+        run: bash scripts/ci/arm64_nested_store_witness_gate.sh
+      - name: Cross-compile ARM64 kernel-named-parameter identifier witness
+        env:
+          SOUNIO_ARM64_WITNESS_COMPILER: /tmp/sounio-source-bootstrap-selfhost-linux-x86_64/artifacts/souc-stage2
+          SOUNIO_ARM64_WITNESS_DIR: /tmp/sounio-arm64-kernel-identifier-witness
+          SOUNIO_ARM64_WITNESS_MODE: attest
+          SOUNIO_ARM64_WITNESS_SOURCE: tests/run-pass/arm64_kernel_named_param_identifier.sio
         run: bash scripts/ci/arm64_nested_store_witness_gate.sh
       - name: Source-bootstrap modular typecheck proof
         run: |
@@ -828,12 +845,22 @@ jobs:
   madaros-current-source-deref-f64:
     name: Madaros Current-Source f64 Lowering
     needs: impact
+    outputs:
+      rung_outcome: ${{ steps.rung.outcome }}
     # `stdlib` is here for a measured reason: 7 files in main.sio's own import
     # closure live under stdlib/compiler/ontology/ and classify as stdlib, not
     # compiler. A PR that makes stdlib/compiler/ontology/store.sio unparseable
     # breaks the compiler's closure and, without this, runs none of these gates.
     if: needs.impact.outputs.compiler == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.tests == 'true' || needs.impact.outputs.full == 'true'
-    runs-on: ubuntu-24.04
+    # The DARWIN runner pool (infra/ci-runners/) when the repository variable
+    # SOUNIO_CI_RUNNER names it, and only for reviewed code: runs on main (push,
+    # schedule, workflow_dispatch of main) and merge_group, which starts only
+    # after a maintainer enqueues. No pull_request run and no dispatch of a
+    # feature branch touches cluster hardware or the shared writable cache: that
+    # code is unreviewed, and a read-only flag enforced by its own scripts is
+    # not a boundary. Delete the variable to fall back to
+    # GitHub-hosted runners at once, without a commit.
+    runs-on: ${{ (vars.SOUNIO_CI_RUNNER != '' && (github.event_name == 'merge_group' || (github.event_name != 'pull_request' && github.ref == 'refs/heads/main'))) && vars.SOUNIO_CI_RUNNER || 'ubuntu-24.04' }}
     # 15 held a full Madaros build plus four sub-gates; the self-parse sweep adds
     # ~20 s. The extra headroom is so a slow run reads as slow, not as a hang.
     # Raised again to 35 here because this branch adds three more sub-gates to
@@ -858,10 +885,43 @@ jobs:
     env:
       SOUNIO_MADAROS_F64_LOWERING_GATE_DIR: /tmp/sounio-madaros-current-source-f64-lowering
       SOUNIO_MADAROS_F64_LOWERING_GATE_KEEP: 1
+      # Content-addressed Madaros cache (scripts/dev/madaros-cache.sh): the build
+      # and the fixed-point receipt are keyed on the exact bytes they depend on,
+      # so a restored entry that does not match is simply a miss.
+      SOUNIO_MADAROS_CACHE: /tmp/sounio-madaros-cache
+      # Pull-request code may read the cache but never write it: an entry is keyed
+      # by content, so a PR able to store one could plant a binary under the key
+      # the next main or merge-queue run will look up. Trusted events write.
+      SOUNIO_MADAROS_CACHE_READONLY: ${{ github.event_name == 'pull_request' && '1' || '0' }}
+      SOUNIO_MADAROS_CACHE_KEEP: ${{ (vars.SOUNIO_CI_RUNNER != '' && (github.event_name == 'merge_group' || (github.event_name != 'pull_request' && github.ref == 'refs/heads/main'))) && '16' || '1' }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Provision toolchain (DARWIN runner)
+        if: runner.environment == 'self-hosted'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends gcc libc6-dev python3 file util-linux xz-utils make >/dev/null
+      - name: Use the shared DARWIN Madaros cache
+        if: runner.environment == 'self-hosted'
+        run: |
+          mkdir -p "$SOUNIO_MADAROS_CACHE_SHARED"
+          ln -sfn "$SOUNIO_MADAROS_CACHE_SHARED" /tmp/sounio-madaros-cache
+          ls /tmp/sounio-madaros-cache/ || true
+      - name: Restore content-addressed Madaros cache
+        id: madaros-cache
+        if: runner.environment == 'github-hosted'
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/sounio-madaros-cache
+          key: madaros-cache-v1-${{ hashFiles('self-hosted/**', 'stdlib/**', 'bin/souc-linux-x86_64', 'bin/souc-lean-single-x86_64', 'scripts/lib/**', 'scripts/ci/build_modular_madaros.sh', 'scripts/ci/madaros_fixed_point_gate.sh', 'scripts/dev/madaros-cache.sh') }}
+          restore-keys: madaros-cache-v1-
+      - name: Mark the restored cache state
+        if: runner.environment == 'github-hosted'
+        run: touch /tmp/sounio-madaros-cache.stamp
+      - name: Materialize the committed Madaros prebuilt
+        run: bash scripts/lib/materialize_madaros_prebuilt.sh
       # The gen2 self-compile ("Madaros compiles Madaros" below) is memory-bound,
       # not CPU-bound: sampled every 5 s on a 64-core box on 2026-09-10/11, its
       # peak RSS was 18.34 GB for `main` (c769d38f) and 18.45 GB for PR #2463 —
@@ -876,6 +936,7 @@ jobs:
       # a headroom measure, not a correctness claim. Printed before/after so a
       # future reader can see the actual numbers in the log.
       - name: Add swap headroom for the gen2 self-compile (peak RSS 18.4 GB vs 16 GB RAM)
+        if: runner.environment == 'github-hosted'
         run: |
           echo "--- before"; free -m; swapon --show; df -h /mnt
           sudo fallocate -l 16G /mnt/swapfile-gen2
@@ -910,6 +971,58 @@ jobs:
         env:
           MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
         run: bash scripts/ci/madaros_scalar_multi_instance_gate.sh
+      # Two modules that each define a private `fn helper` used to share ONE body
+      # (the merged IR keyed functions by unqualified name; first-loaded won; no
+      # diagnostic; import order picked the winner). Reuses the ELF built above.
+      - name: Same-named private fns keep separate identities across modules
+        env:
+          MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/madaros_private_fn_identity_gate.sh
+      # Copilot review (PR #2515), comment 4110379104: this gate's fixtures
+      # (private fn/struct/enum/field, plain and specialized-generic) guard
+      # the specialized multi-module visibility fixes on this branch, but no
+      # workflow named it -- gate_workflow_reference_ratchet.sh's own point
+      # is that an unnamed gate protects nothing. Reuses the ELF built above.
+      - name: Specialized-generic visibility denies private cross-module access
+        env:
+          MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/madaros_visibility_context_gate.sh
+      # Copilot review (PR #2515), comment 4113458034: check_items_verdict_
+      # boot4_with_module_map stamped current_module_id per item but left
+      # current_module (used by pub(in path)'s ast_path_is_prefix check)
+      # fixed at empty_path() -- refusing every pub(in path) access through
+      # this specialized path unconditionally. Reuses the ELF built above.
+      - name: pub(in path) visibility correct through the specialized checker
+        env:
+          MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/madaros_pub_in_specialized_gate.sh
+      # Copilot review (PR #2515), comment 4113834074: checker_check_expr_
+      # call_inplace's Type::method arm consulted global struct/enum tables
+      # before ever checking whether the qualifier was a module the caller
+      # actually `use`d.
+      - name: A module colliding with a same-named lowercase type is refused, not guessed
+        env:
+          MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/madaros_module_qualifier_type_collision_gate.sh
+      # Copilot review (PR #2515), comment 4114124500: a path-form TYPE
+      # import (no braces) was recorded into the same "named item, not a
+      # module" registry a function/value import uses, which suppressed
+      # its module-qualifier suffix registration.
+      - name: A path-form type import keeps its module-qualifier suffix
+        env:
+          MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/madaros_module_qualified_type_import_gate.sh
+      # Every other tuple-array-mask gate above drives a lowerer PROBE entry
+      # point or a single file with no cross-module import. This one compiles
+      # and RUNS a real multi-module program (--native-compile) where main
+      # imports a tuple-array-returning callee, alongside an unrelated,
+      # uncalled private fn of the same bare name (a different tuple-array
+      # shape) collected first from a module `use`d earlier -- see
+      # tests/multimodule/thinlink_tuple_arr_import/README.md.
+      - name: Imported tuple-array callee through the real thin-link unit builder
+        env:
+          MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/madaros_thinlink_tuple_arr_import_gate.sh
       - name: KL-3 specializer caps and method turbofish fail closed
         env:
           SOUNIO_MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
@@ -921,6 +1034,71 @@ jobs:
         env:
           SOUNIO_MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
         run: bash scripts/ci/madaros_seq_ref_param_gate.sh
+      # lower_program_bodies_filtered_ref (the streaming single-function body
+      # lowering lane, reached only via the NON-flat
+      # lower_program_function_body_from_summary_with_epistemic_ref -- neither
+      # `souc run` nor --probe-native-streaming reach it) never populated the
+      # tuple-array mask table on its own. This gate drives that lane directly
+      # through --probe-filtered-body-lower and asserts tuple_arr_mask=3 for
+      # fn=pair (a direct query of lower_fn_tuple_f64_array_mask, populated
+      # only by the collector) -- a body-wide float-register-marker count was
+      # tried first and dropped as a round-6 review finding because ordinary
+      # f64 literals in the fixture also set it, so it stayed positive even
+      # with the collector call removed. Reuses the ELF built above; adds no
+      # build.
+      - name: Streaming single-function body lowering marks f64-array tuple slots
+        env:
+          SOUNIO_MADAROS_FILTERED_BODY_GATE_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/madaros_tuple_arr_filtered_body_lower_gate.sh
+      # The run-pass fixture form of this capacity test only declares 65
+      # functions -- nowhere near the old 4096-entry cap it documents, so it
+      # cannot detect a regression back to it. This gate generates a
+      # 4097-function witness at run time and, via --probe-tuple-arr-capacity,
+      # collects the RAW parsed item list directly and queries entry 4096's
+      # mask -- a synthetic probe of the collector/table alone, not
+      # end-to-end lowering through the normal compile pipeline (none of the
+      # 4097 functions are destructured, called, or compiled). Reuses the
+      # ELF built above; adds no build.
+      - name: Tuple-array table survives past the old 4096-entry cap
+        env:
+          SOUNIO_MADAROS_TUPLE_ARR_CAP_GATE_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/madaros_tuple_arr_capacity_boundary_gate.sh
+      # lower_program_to_ir (self-hosted/ir/lower.sio) collects into the
+      # process-global tuple-array-mask table but, before round 9, never
+      # reset it first, unlike every other top-level compile entry point.
+      # Two back-to-back calls to this public API in one process for two
+      # different inputs that both define a same-named function could leak
+      # the first input's mask into the second's lowering. This gate drives
+      # that exact shape through --probe-tuple-arr-reset-boundary: an
+      # all-f64-array `pair` then an all-integer-array `pair`, asserting the
+      # second call reports its own (mask=0) result rather than the first
+      # call's leaked mask=3. Reuses the ELF built above; adds no build.
+      - name: Tuple-array table resets between separate lower_program_to_ir calls
+        env:
+          SOUNIO_MADAROS_RESET_BOUNDARY_GATE_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/madaros_tuple_arr_reset_boundary_gate.sh
+      # Same leak, a THIRD entry point: lower_program_to_ir_probe_callsite is
+      # a separate public API from lower_program_to_ir above, reaching the
+      # same collector but (before comment 4115267768's fix) never
+      # resetting the table itself. Reuses the ELF built above; adds no
+      # build.
+      - name: Tuple-array table resets between separate lower_program_to_ir_probe_callsite calls
+        env:
+          SOUNIO_MADAROS_CALLSITE_RESET_BOUNDARY_GATE_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/madaros_tuple_arr_callsite_reset_boundary_gate.sh
+      # Same leak, different entry point: lower_program_function_body_from_
+      # summary_with_epistemic_ref (the streaming single-function lane
+      # run_probe_filtered_body_lower and streaming_body_lower_smoke.sio both
+      # drive) reaches the same process-global tuple-array-mask table but
+      # wasn't covered by the gate above, which only exercises
+      # lower_program_to_ir. Drives --probe-filtered-body-reset-boundary the
+      # same way: an all-f64-array `pair` then an all-integer-array `pair`,
+      # asserting the second call reports its own (mask=0) result. Reuses
+      # the ELF built above; adds no build.
+      - name: Filtered-body lane resets tuple-array table between separate programs
+        env:
+          SOUNIO_MADAROS_FILTERED_BODY_RESET_BOUNDARY_GATE_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/madaros_filtered_body_reset_boundary_gate.sh
       # KL-6: hessian_of on Madaros. Quotient rule, the transcendental chain
       # rule with a compound inner on both transfer paths (kind 6 and kind 8),
       # and a quotient fed by a composite numerator -- against closed-form
@@ -971,6 +1149,15 @@ jobs:
         env:
           MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
         run: bash scripts/ci/madaros_dce_reachability_gate.sh
+      # Same hash-0-vs-empty-slot sentinel mistake as
+      # madaros_private_fn_identity_gate.sh's census table, in a different
+      # hash table (spec_dce_hash_insert/spec_dce_hash_find's marks[]): a live,
+      # called function whose name hashes to exactly 0 was silently dropped by
+      # cross-module DCE. Reuses the ELF built above; adds no build.
+      - name: DCE does not drop a live function whose name hashes to 0
+        env:
+          MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/madaros_spec_dce_hash_zero_gate.sh
       # -O is advertised in the compiler's --help and, until this step, nothing
       # in CI compiled anything with it. 632 of 1724 buildable run-pass programs
       # behaved differently under it, 16 silently. One fixture, built twice by
@@ -980,6 +1167,24 @@ jobs:
           MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
         run: bash scripts/ci/madaros_opt_chained_call_gate.sh
       - name: Madaros compiles Madaros (ratcheted rung)
+        # gen2 + gen3 are two more full self-compiles (~40 min, in swap on a 16 GB
+        # runner). Whether Madaros reaches its fixed point depends on the compiler
+        # sources AND on the stdlib modules it imports: main.sio uses
+        # compiler::ontology (stdlib/compiler/ontology/), and self-hosted/ also
+        # imports stdlib pkg, mem, hardware and random. So it runs on compiler or
+        # stdlib changes; a tests/docs-only change cannot move it.
+        #
+        # POST-MERGE ONLY (2026-09-25). Measured on PRs #2688-#2690: the rung is
+        # one gen1 self-compile of main.sio taking 56-62 min (gen3 then SIGSEGVs
+        # in ~8 s, rung `run` as recorded). On pull_request and merge_group that
+        # hour sat on the critical path of every compiler PR, twice (PR run, then
+        # queue run). It now runs on push to main, nightly and manual dispatch;
+        # a red result on main opens an issue (job fixed-point-regression-alert)
+        # instead of blocking the merge. Trade-off, stated plainly: a PR can now
+        # land that lowers into_acc_done or the rung; it is caught on the next
+        # main run, not before merge. Force it on a branch with workflow_dispatch.
+        id: rung
+        if: (github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && (needs.impact.outputs.compiler == 'true' || needs.impact.outputs.stdlib == 'true' || needs.impact.outputs.full == 'true')
         env:
           MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
           SOUNIO_MADAROS_FP_DIR: /tmp/sounio-madaros-current-source-f64-lowering/fixed-point
@@ -991,8 +1196,8 @@ jobs:
         env:
           SOUNIO_MADAROS_CHANGED_TESTS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
           CI_EVENT_NAME: ${{ github.event_name }}
-          CI_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          CI_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.event.merge_group.head_sha || github.sha }}
           SOUNIO_TEST_JOBS: 4
         run: bash scripts/ci/madaros_changed_tests_gate.sh
       - name: Epistemic e-graph reassociation gate
@@ -1021,6 +1226,21 @@ jobs:
       # before #1532 -- this time for an undecided reason instead of a
       # mechanical one. Wire in once a decision is made on how to handle the
       # gap (see the plan doc for the full finding).
+      - name: Check whether the Madaros cache has entries to save
+        id: madaros-cache-has
+        if: always() && runner.environment == 'github-hosted' && steps.madaros-cache.outputs.cache-hit != 'true'
+        run: |
+          # Only entries stored by THIS run: re-saving what was just restored (e.g.
+            # after a failed build) would pin a stale snapshot under a new key.
+            if [ -n "$(find /tmp/sounio-madaros-cache/madaros /tmp/sounio-madaros-cache/fixed-point /tmp/sounio-madaros-cache/seed -mindepth 1 -maxdepth 1 -newer /tmp/sounio-madaros-cache.stamp ! -name '.tmp.*' 2>/dev/null)" ]; then
+            echo "entries=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Save content-addressed Madaros cache
+        if: always() && steps.madaros-cache-has.outputs.entries == 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/sounio-madaros-cache
+          key: madaros-cache-v1-${{ hashFiles('self-hosted/**', 'stdlib/**', 'bin/souc-linux-x86_64', 'bin/souc-lean-single-x86_64', 'scripts/lib/**', 'scripts/ci/build_modular_madaros.sh', 'scripts/ci/madaros_fixed_point_gate.sh', 'scripts/dev/madaros-cache.sh') }}
       - name: Upload current-source f64 lowering logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -1090,6 +1310,8 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+      - name: Materialize the committed Madaros prebuilt
+        run: bash scripts/lib/materialize_madaros_prebuilt.sh
       - name: Download native compiler artifact
         uses: actions/download-artifact@v4
         with:
@@ -1181,6 +1403,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+      - name: Materialize the committed Madaros prebuilt
+        run: bash scripts/lib/materialize_madaros_prebuilt.sh
       - name: Build Madaros from this PR's own source
         run: |
           ulimit -s 1048576 2>/dev/null || true
@@ -1189,6 +1413,14 @@ jobs:
         env:
           MADAROS_RAW_BIN: /tmp/madaros-ci.elf
         run: bash scripts/ci/madaros_imported_seed_lowering_gate.sh
+      # `let zs = a` where `a` is itself an already reference-typed bare
+      # identifier (no explicit `&T` annotation, RHS not a literal `&x`/`&!x`)
+      # lost the is_ref bit -- see docs/audit/REF_ALIAS_BIND_AS_REF_MISS_2026-09-22.md.
+      # Must run against a fresh build: the fix is in lower.sio itself.
+      - name: Ref-alias bind_as_ref regression against the fresh build
+        env:
+          MADAROS_RAW_BIN: /tmp/madaros-ci.elf
+        run: bash scripts/ci/madaros_ref_alias_bind_as_ref_gate.sh
       # E230 noise-set anti-garbling (Paper A wire, N1-N4): the same-source-built
       # sabotage witness -- E230 refuses x+x / x+top / ident(x)+x, vanishes under
       # SOUNIO_NS_DISABLE=1, and an unrelated refusal (E245) survives the knob.
@@ -1268,12 +1500,55 @@ jobs:
         run: |
           ulimit -s 1048576 2>/dev/null || true
           bash scripts/ci/madaros_kl8_f128_residuals_gate.sh
-      - name: KL-15a softfloat_f256 add/sub (V0-F.5) against the fresh build
+      # scripts/ci/madaros_f128_f256_ladder_gate.sh is a dispatcher over 20 named
+      # stages (v0b..v0f5); this step used to invoke only the last one, v0f5,
+      # which tests f256 add/sub specifically and does not exercise, source, or
+      # replicate any of the f128 language-surface stages below it (v0c..v0e510)
+      # -- a distinct, parallel track with no CI coverage at all. Measured
+      # 2026-09-22 against a fresh build of this tree: 15 of 20 stages passed
+      # cleanly outright. Of the 5 that didn't, 4 were triaged and fixed the
+      # same day (see docs/audit/MADAROS_F128_LADDER_5STAGE_TRIAGE_2026-09-22.md)
+      # and are wired in below: 14 of the original 15 (v0e510 is deliberately
+      # NOT repeated here -- the KL-8 step immediately above already invokes
+      # `--stage v0e510` and requires its PASS marker, so adding it to this
+      # loop too would just recompile/rerun the same six witnesses against the
+      # same fresh binary a second time in a job capped at 30 minutes), and
+      # v0e4 is likewise NOT listed on its own -- v0e41 already invokes the
+      # complete v0e4 gate internally
+      # (madaros_f128_f256_v0e41_fail_closed_lower_gate.sh:63-64) and requires
+      # its result, so listing both here would run v0e4's seed/language checks
+      # twice. v0e41 alone provides both stages' coverage. Plus:
+      #   - v0e4 / v0e41 (v0e41 covers v0e4, see above): the negative control
+      #     asserted a stale lean_single behavior (silent f64 greenwash of an
+      #     inexact f128 literal); since commit 8b99209e41 (#2387) lean_single
+      #     does real binary128 and correctly REFUSES that literal instead --
+      #     fixture updated to expect the (better) refusal.
+      #   - v0e55: the negative control asserted f128 `+=` must fail closed;
+      #     KL-8 (#2491) made it a real, correct softfloat operation -- fixture
+      #     updated to assert the correct computed result instead of a refusal.
+      #   - v0e57: a genuine miscompile, now fixed in self-hosted/ir/lower.sio.
+      #     Any element read through a `&[f128; N]` *reference* parameter
+      #     produced garbage (SIGSEGV or silently wrong data) because the
+      #     by-value array param-copy path fired on reference params too,
+      #     copying "elements" from the address of the caller's slot instead
+      #     of the array itself. `&[i64; N]` and by-value `[f128; N]` were
+      #     unaffected. The stage's third failure (an array-element compound
+      #     assign that fails closed with a more specific message than the
+      #     fixture's fixed string) was a separate, harmless fixture staleness,
+      #     also fixed.
+      # v0c remains deliberately unwired: it is a genuinely unfinished V0-C
+      # milestone (the external wire-corpus-consuming codec was scaffolded but
+      # never built -- confirmed never green in this repo's history), not a
+      # regression to fix here. See docs/architecture/F128_F256_LADDER.md §V0-C
+      # and tests/vectors/f128_f256_v0c/V0C_GATE_CONSUMPTION.md.
+      - name: KL-15a f128/f256 ladder, all currently-green stages, against the fresh build
         env:
           MADAROS_RAW_BIN: /tmp/madaros-ci.elf
         run: |
           ulimit -s 1048576 2>/dev/null || true
-          bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0f5
+          for stage in v0b v0d v0e v0e2 v0e3 v0e5 v0e51 v0e52 v0e53 v0e54 v0e56 v0e58 v0e59 v0f5 v0e41 v0e55 v0e57; do
+            bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage "$stage"
+          done
       - name: Parameterized Epistemic confidence floor against the fresh build
         env:
           MADAROS_RAW_BIN: /tmp/madaros-ci.elf
@@ -1409,6 +1684,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - name: Materialize the committed Madaros prebuilt
+        run: bash scripts/lib/materialize_madaros_prebuilt.sh
       - name: Build Madaros from this PR's own source
         run: |
           ulimit -s 1048576 2>/dev/null || true
@@ -1462,6 +1739,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+      - name: Materialize the committed Madaros prebuilt
+        run: bash scripts/lib/materialize_madaros_prebuilt.sh
       - name: Validate all .sio files
         run: bash check_sounio.sh --summary
 
@@ -1473,6 +1752,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - name: Materialize the committed Madaros prebuilt
+        run: bash scripts/lib/materialize_madaros_prebuilt.sh
       - name: Cache elan toolchain
         uses: actions/cache@v4
         with:
@@ -1574,6 +1855,43 @@ jobs:
   # and a red R6 could not fail CI: evaluate_ci_decision.py only judges jobs it
   # is given. "Required gate skipped" had been traded for "required gate not
   # counted".
+  # The self-compile rung runs post-merge only (see its step). When it goes red
+  # on main -- or the job fails before reaching it -- open (or bump) one issue so
+  # the regression is visible without anyone watching the Actions tab.
+  # `cancelled` is deliberately NOT an alert: the concurrency group cancels a
+  # superseded main run whenever the next merge lands, and the newer run
+  # carries the verdict.
+  fixed-point-regression-alert:
+    name: Fixed-point regression alert
+    needs: madaros-current-source-deref-f64
+    if: always() && (github.event_name == 'push' || github.event_name == 'schedule') && (needs.madaros-current-source-deref-f64.outputs.rung_outcome == 'failure' || needs.madaros-current-source-deref-f64.result == 'failure')
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          RUNG: ${{ needs.madaros-current-source-deref-f64.outputs.rung_outcome }}
+          JOB: ${{ needs.madaros-current-source-deref-f64.result }}
+        with:
+          script: |
+            const title = 'Madaros self-compile gate red on main';
+            const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = `Event \`${context.eventName}\` at \`${context.sha.slice(0, 9)}\`: rung step \`${process.env.RUNG || 'not reached'}\`, job \`${process.env.JOB}\`.\n\nRun: ${run}\n\nThe ratcheted rung (scripts/ci/madaros_fixed_point_gate.sh) no longer blocks PRs; this issue is how a regression surfaces. Bisect between this commit and the last green main run.`;
+            // The label may not exist yet; create it idempotently (422 = exists).
+            try {
+              await github.rest.issues.createLabel({ ...context.repo, name: 'fixed-point-regression', color: 'b60205', description: 'Madaros self-compile rung red on main' });
+            } catch (e) {
+              if (e.status !== 422) throw e;
+            }
+            const { data: open } = await github.rest.issues.listForRepo({ ...context.repo, state: 'open', labels: 'fixed-point-regression', per_page: 5 });
+            const hit = open.find(i => i.title === title);
+            if (hit) {
+              await github.rest.issues.createComment({ ...context.repo, issue_number: hit.number, body });
+            } else {
+              await github.rest.issues.create({ ...context.repo, title, body, labels: ['fixed-point-regression'] });
+            }
+
   ci-decision:
     name: CI Decision
     if: always()

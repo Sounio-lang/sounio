@@ -7,6 +7,8 @@ validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.dissertation.results.determinism-audit-v1
 -->
 
+> **Note 2026-09-26: the determinism findings stand; the quoted u_MC / rel_Hess values do not.** The `ms28_exp` root cause, the intra- and inter-process determinism measurements and the Welford/two-pass agreement are unaffected. The absolute values quoted here (u_MC = 0.549197, rel_Hess = 0.155, …) were produced through `pbpk28_full_cn_step`, whose negativity floors biased AUC_blood by +140% at the MC's dt = 0.5 h. For the regenerated values see [`prior_evolution_sprint_summary_v3.md`](prior_evolution_sprint_summary_v3.md); on the corrected kernel, two independent processes print byte-identical E1/E4 results (see that summary). Audit: `docs/audit/PBPK28_CN_RANNACHER_MASS_BALANCE_2026-09-26.md`.
+
 # PBPK28 MC Numerical-Determinism Audit — v1
 
 **Date:** 2026-05-13  

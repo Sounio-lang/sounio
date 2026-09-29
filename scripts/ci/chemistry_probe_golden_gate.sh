@@ -91,6 +91,18 @@ if [[ ${#PROBES[@]} -eq 0 ]]; then
   exit 1
 fi
 
+# Parallel bookkeeping and output files are keyed by probe name. Reject a
+# duplicate selection before spawning anything so two children cannot race on
+# the same PID slot, stdout, stderr, or result file.
+declare -A SEEN_PROBE=()
+for p in "${PROBES[@]}"; do
+  if [[ -n "${SEEN_PROBE[$p]:-}" ]]; then
+    echo "[chem-golden] FAIL: duplicate probe selected: $p" >&2
+    exit 1
+  fi
+  SEEN_PROBE[$p]=1
+done
+
 # Seconds. Override per probe with SOUNIO_CHEM_TIMEOUT_<PROBE_UPPERCASE>=N --
 # for ANY probe, not just rep_adiabatic_bug (a prior version only wired the
 # override through for that one entry, so the documented knob was a no-op for
