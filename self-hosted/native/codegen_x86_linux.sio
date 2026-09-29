@@ -7104,9 +7104,14 @@ pub fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) 
         effective_func = ir_opt_apply_strategy(func)
     }
     if !ir_function_regs_are_valid(&effective_func) {
-        c.ir_vreg_overflow = true
-        c.ir_vreg_overflow_needed = effective_func.reg_count
-        c.ir_vreg_overflow_limit = IR_MAX_VREGS
+        if !ir_reg_count_is_valid(effective_func.reg_count) {
+            c.ir_vreg_overflow = true
+            c.ir_vreg_overflow_needed = effective_func.reg_count
+            c.ir_vreg_overflow_limit = IR_MAX_VREGS
+        } else {
+            c.ir_validation_failed = true
+            c.ir_validation_reg_count = effective_func.reg_count
+        }
         return c
     }
     // The legacy lowering helpers still own 2048-entry float tables. Refuse
@@ -8158,9 +8163,14 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
 pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func: MachineFunction, fn_index: i64) -> NativeCompiler with Mut, Panic, Div, Alloc {
     var c = nc
     if !ir_function_regs_are_valid(&func) {
-        c.ir_vreg_overflow = true
-        c.ir_vreg_overflow_needed = func.reg_count
-        c.ir_vreg_overflow_limit = IR_MAX_VREGS
+        if !ir_reg_count_is_valid(func.reg_count) {
+            c.ir_vreg_overflow = true
+            c.ir_vreg_overflow_needed = func.reg_count
+            c.ir_vreg_overflow_limit = IR_MAX_VREGS
+        } else {
+            c.ir_validation_failed = true
+            c.ir_validation_reg_count = func.reg_count
+        }
         return c
     }
 
@@ -8346,9 +8356,14 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
 
 pub fn compile_ir_function_v2_into(nc: &! NativeCompiler, func: &IrFunction, machine_func: &MachineFunction, fn_index: i64) with Mut, Panic, Div, Alloc {
     if !ir_function_regs_are_valid(func) {
-        (*nc).ir_vreg_overflow = true
-        (*nc).ir_vreg_overflow_needed = (*func).reg_count
-        (*nc).ir_vreg_overflow_limit = IR_MAX_VREGS
+        if !ir_reg_count_is_valid((*func).reg_count) {
+            (*nc).ir_vreg_overflow = true
+            (*nc).ir_vreg_overflow_needed = (*func).reg_count
+            (*nc).ir_vreg_overflow_limit = IR_MAX_VREGS
+        } else {
+            (*nc).ir_validation_failed = true
+            (*nc).ir_validation_reg_count = (*func).reg_count
+        }
         return
     }
     reset_function_state_mut(nc)
@@ -9448,9 +9463,14 @@ pub fn compile_ir_function_v2_core_ir_into(nc: &! NativeCompiler, func: &IrFunct
     // allocate registers after lowering. Never let oversized final IR reach
     // the fixed native register-class and allocation tables.
     if !ir_function_regs_are_valid(func) {
-        (*nc).ir_vreg_overflow = true
-        (*nc).ir_vreg_overflow_needed = (*func).reg_count
-        (*nc).ir_vreg_overflow_limit = IR_MAX_VREGS
+        if !ir_reg_count_is_valid((*func).reg_count) {
+            (*nc).ir_vreg_overflow = true
+            (*nc).ir_vreg_overflow_needed = (*func).reg_count
+            (*nc).ir_vreg_overflow_limit = IR_MAX_VREGS
+        } else {
+            (*nc).ir_validation_failed = true
+            (*nc).ir_validation_reg_count = (*func).reg_count
+        }
         return false
     }
     nc_refresh_wide_mul_sabotage()
@@ -10337,9 +10357,14 @@ pub fn compile_ir_function_v2_from_ir_into(nc: &! NativeCompiler, func: &IrFunct
     // Keep the limit check ahead of every executable builtin/dynlink/cache
     // consumption path as well as in the core entry (which has direct callers).
     if !ir_function_regs_are_valid(func) {
-        (*nc).ir_vreg_overflow = true
-        (*nc).ir_vreg_overflow_needed = (*func).reg_count
-        (*nc).ir_vreg_overflow_limit = IR_MAX_VREGS
+        if !ir_reg_count_is_valid((*func).reg_count) {
+            (*nc).ir_vreg_overflow = true
+            (*nc).ir_vreg_overflow_needed = (*func).reg_count
+            (*nc).ir_vreg_overflow_limit = IR_MAX_VREGS
+        } else {
+            (*nc).ir_validation_failed = true
+            (*nc).ir_validation_reg_count = (*func).reg_count
+        }
         return false
     }
     let builtin_id = native_v2_builtin_id_for_func_ref(func)
@@ -13266,6 +13291,12 @@ pub fn compile_native_v2_preview_to_file(module: &IrModule, target_spec: NativeT
         print("\n")
         return 24
     }
+    if nc.ir_validation_failed {
+        print("NATIVE_REFUSAL kind=malformed_ir_registers reg_count=")
+        print_int(nc.ir_validation_reg_count)
+        print("\n")
+        return 25
+    }
     // #1649: report an arena contract breach BEFORE the unsupported-opcode
     // bailout. A violated handle makes instructions read back as nops, which
     // presents as "unsupported opcode" -- the rc=12 path returning first meant
@@ -13759,6 +13790,12 @@ pub fn compile_native_x86_linux_to_file(module: &IrModule, output_path: string) 
                 print("\n")
                 return 24
             }
+            if nc.ir_validation_failed {
+                print("NATIVE_REFUSAL kind=malformed_ir_registers reg_count=")
+                print_int(nc.ir_validation_reg_count)
+                print("\n")
+                return 25
+            }
             print("Native compilation failed: native_driver_function_codegen_failed\n")
             return 1
         }
@@ -13771,6 +13808,12 @@ pub fn compile_native_x86_linux_to_file(module: &IrModule, output_path: string) 
         print_int(nc.ir_vreg_overflow_limit)
         print("\n")
         return 24
+    }
+    if nc.ir_validation_failed {
+        print("NATIVE_REFUSAL kind=malformed_ir_registers reg_count=")
+        print_int(nc.ir_validation_reg_count)
+        print("\n")
+        return 25
     }
     compile_module_streaming_finish_into(&! nc, module)
     let reloc_rodata_off: i64 = align_page(4096 + nc.code.len)
@@ -13785,7 +13828,7 @@ pub fn compile_native_x86_linux_to_file(module: &IrModule, output_path: string) 
 fn compile_to_elf(module: &IrModule, base_addr: i64) -> Elf64Binary with Mut, Panic, Div, Alloc {
     var nc = compiler_new()
     nc = compile_module(nc, module)
-    if nc.ir_vreg_overflow {
+    if nc.ir_vreg_overflow || nc.ir_validation_failed {
         return elf_binary_new()
     }
     let entry = trampoline_offset(&nc)
@@ -13799,7 +13842,7 @@ fn compile_to_elf(module: &IrModule, base_addr: i64) -> Elf64Binary with Mut, Pa
 }
 
 pub fn finalize_compiled_elf(nc: NativeCompiler, base_addr: i64) -> Elf64Binary with Mut, Panic, Div, Alloc {
-    if nc.ir_vreg_overflow {
+    if nc.ir_vreg_overflow || nc.ir_validation_failed {
         return elf_binary_new()
     }
     let entry = trampoline_offset(&nc)
