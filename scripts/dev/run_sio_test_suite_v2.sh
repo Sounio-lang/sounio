@@ -780,6 +780,18 @@ else
     for f in "$ROOT_DIR"/tests/gpu/*.sio; do
         [[ -f "$f" ]] && TEST_FILES+=("$f")
     done
+    # Self-hosted compiler tests (e.g. tests/self-hosted/gen_fano_raw_kernel.sio).
+    # Single level, same as every glob above. These were invisible to the suite
+    # because this list never scanned the directory, so a CI run measured
+    # nothing about them while reporting green. Additive: the globs above are
+    # untouched, and the [[ -f ]] guard makes an absent directory select
+    # nothing rather than fail (same contract as the globs above). Tests here
+    # are gated by their own annotations like every other fixture -- a
+    # `//@ requires: madaros` header is enforced by run_test, so these run
+    # only on the Madaros job (SOUNIO_MADAROS_AVAILABLE=1) and skip elsewhere.
+    for f in "$ROOT_DIR"/tests/self-hosted/*.sio; do
+        [[ -f "$f" ]] && TEST_FILES+=("$f")
+    done
 fi
 
 if [[ -n "$TEST_LIST_HEADER_MODE" ]]; then

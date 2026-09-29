@@ -67,7 +67,7 @@ fn main() -> i32 with IO, Mut, Panic, Div {
     print("Found 99 at index: ")
     print(idx2)
     println("")
-    0
+    return 0
 }
 ```
 
