@@ -927,12 +927,15 @@ fn ir_test_16_method_call_lowered() -> bool with Mut, Panic, Div, Alloc, IO {
 // Phase 0 tests: IR serialization and normalization
 fn ir_test_17_serialize_roundtrip() -> bool with Alloc, Mut, Panic, Div, IO {
     var module = ir_empty_module()
-    module.fn_count = 1
+    module.fn_count = 2
 
     var func = ir_empty_function()
     func.name = ir_name_from_bytes(116 as i8, 101 as i8, 115 as i8, 116 as i8, 4)
-    func.instr_count = 7
+    func.instr_count = 8
     func.reg_count = 5
+    var func_region = ir_region_invalid()
+    if ir_instr_arena_alloc(func.instr_count, &! func_region) != IR_ARENA_OK { return false }
+    func.region = func_region
     ir_arena_store(ir_region_slot_w(func.region, (0)), ir_load_imm(0, 42))
     var neg = ir_unaryop(1, UnaryOp::OpNeg, 0)
     neg.imm_flags = 2
@@ -941,28 +944,40 @@ fn ir_test_17_serialize_roundtrip() -> bool with Alloc, Mut, Panic, Div, IO {
     ir_arena_store(ir_region_slot_w(func.region, (2)), ir_call(2, 0, irt_name4(99, 97, 108, 108), call_args, 2))
     let extern_args = Some(Box::new(ir_reg_list_cons(1, Some(Box::new(ir_reg_list_single(2))))))
     ir_arena_store(ir_region_slot_w(func.region, (3)), ir_call_extern(3, irt_name4(101, 120, 116, 0), extern_args, 2))
+    ir_arena_store(ir_region_slot_w(func.region, (4)), ir_load_fn_ref(4, 1))
     let indirect_args = Some(Box::new(ir_reg_list_cons(2, Some(Box::new(ir_reg_list_single(3))))))
-    ir_arena_store(ir_region_slot_w(func.region, (4)), ir_call_indirect(4, 0, indirect_args, 2))
-    var sret_call = ir_call_sret(4, 0, irt_name4(115, 114, 101, 116), 0, 1, 2)
+    ir_arena_store(ir_region_slot_w(func.region, (5)), ir_call_indirect(4, 4, indirect_args, 2))
+    var sret_call = ir_call_sret(4, 1, irt_name4(115, 114, 101, 116), 0, 1, 2)
     sret_call.call_args = Some(Box::new(ir_reg_list_cons(1, Some(Box::new(ir_reg_list_single(2))))))
-    ir_arena_store(ir_region_slot_w(func.region, (5)), sret_call)
-    ir_arena_store(ir_region_slot_w(func.region, (6)), ir_return(4))
+    ir_arena_store(ir_region_slot_w(func.region, (6)), sret_call)
+    ir_arena_store(ir_region_slot_w(func.region, (7)), ir_return(4))
     ir_float_bits_set(&! func, 1)
 
     ir_fn_set(&! module, 0, func)
+    var sret_callee = ir_empty_function()
+    sret_callee.name = irt_name4(115, 114, 101, 116)
+    sret_callee.instr_count = 1
+    sret_callee.reg_count = 1
+    sret_callee.is_sret = 1
+    sret_callee.sret_dest_reg = 0
+    var sret_region = ir_region_invalid()
+    if ir_instr_arena_alloc(sret_callee.instr_count, &! sret_region) != IR_ARENA_OK { return false }
+    sret_callee.region = sret_region
+    ir_arena_store(ir_region_slot_w(sret_callee.region, (0)), ir_return_sret(0))
+    ir_fn_set(&! module, 1, sret_callee)
 
     let pair = serialize_ir_module(module)
     let buf = pair.0
     let len = pair.1
-    if buf[5] != 1 as i8 { return false }
+    if buf[5] != 3 as i8 { return false }
 
     let restored = deserialize_ir_module(buf, len)
 
-    if restored.fn_count != 1 {
+    if restored.fn_count != 2 {
         return false
     }
     let restored_func = ir_fn_get(&restored, 0)
-    if restored_func.instr_count != 7 {
+    if restored_func.instr_count != 8 {
         return false
     }
     if IR_A_IMM_I64[(ir_region_slot_r(restored_func.region, (0))) as usize] != 42 {
@@ -984,16 +999,27 @@ fn ir_test_17_serialize_roundtrip() -> bool with Alloc, Mut, Panic, Div, IO {
         ir_arena_arg_at(restored_extern_slot, 0) != 1 || ir_arena_arg_at(restored_extern_slot, 1) != 2 {
         return false
     }
-    let restored_indirect_slot = ir_region_slot_r(restored_func.region, (4))
+    let restored_fn_ref_slot = ir_region_slot_r(restored_func.region, (4))
+    if (IR_A_OP[restored_fn_ref_slot as usize] as IrOpcode) != IrOpcode::IrLoadFnRef ||
+        IR_A_FN_ID[restored_fn_ref_slot as usize] != 1 {
+        return false
+    }
+    let restored_indirect_slot = ir_region_slot_r(restored_func.region, (5))
     if (IR_A_OP[restored_indirect_slot as usize] as IrOpcode) != IrOpcode::IrCallIndirect ||
+        IR_A_SRC1[restored_indirect_slot as usize] != 4 ||
         ir_arena_arg_at(restored_indirect_slot, 0) != 2 || ir_arena_arg_at(restored_indirect_slot, 1) != 3 {
         return false
     }
-    let restored_sret_slot = ir_region_slot_r(restored_func.region, (5))
+    let restored_sret_slot = ir_region_slot_r(restored_func.region, (6))
     if (IR_A_OP[restored_sret_slot as usize] as IrOpcode) != IrOpcode::IrCallSret ||
         IR_A_ARG_COUNT[restored_sret_slot as usize] != 2 ||
         IR_A_FIELD_IDX[restored_sret_slot as usize] != 1 ||
         ir_arena_arg_at(restored_sret_slot, 0) != 1 || ir_arena_arg_at(restored_sret_slot, 1) != 2 {
+        return false
+    }
+    let restored_sret_callee = ir_fn_get(&restored, 1)
+    if restored_sret_callee.is_sret != 1 || restored_sret_callee.sret_dest_reg != 0 ||
+        restored_sret_callee.instr_count != 1 {
         return false
     }
 
