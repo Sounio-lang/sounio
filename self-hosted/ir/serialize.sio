@@ -441,6 +441,11 @@ fn serialize_ir_instr(buf: [i8; 131072], pos: i64, instr: IrInstr) -> ([i8; 1310
     var b = buf
     var p = pos
 
+    if instr.arg_count < 0 || instr.arg_count > 64 {
+        SOIR_SER_REFUSAL_COUNT = SOIR_SER_REFUSAL_COUNT + 1
+        return (b, p)
+    }
+
     let op_pair = write_opcode(b, p, instr.op)
     b = op_pair.0
     p = op_pair.1
@@ -695,7 +700,30 @@ fn serialize_ir_function(buf: [i8; 131072], pos: i64, func: IrFunction) -> ([i8;
     // Write instructions
     var j: i64 = 0
     while j < func.instr_count {
-        let instr_pair = serialize_ir_instr(b, p, ir_arena_load(ir_region_slot_r(func.region, (j))))
+        let instr_slot = ir_region_slot_r(func.region, j)
+        var instr = ir_arena_load(instr_slot)
+        let has_serialized_args = instr.op == IrOpcode::IrCall || instr.op == IrOpcode::IrCallExtern || instr.op == IrOpcode::IrCallIndirect
+        if has_serialized_args && instr.arg_count > 0 {
+            var args = ir_empty_reg_list()
+            var ai: i64 = 0
+            while ai < instr.arg_count {
+                let arg_reg = ir_arena_arg_at(instr_slot, ai)
+                if ai == 0 {
+                    args = Some(Box::new(ir_reg_list_single(arg_reg)))
+                } else {
+                    match args {
+                        Some(list) => { args = Some(Box::new(ir_reg_list_append(*list, arg_reg))) }
+                        _ => {
+                            SOIR_SER_REFUSAL_COUNT = SOIR_SER_REFUSAL_COUNT + 1
+                            return
+                        }
+                    }
+                }
+                ai = ai + 1
+            }
+            instr.call_args = args
+        }
+        let instr_pair = serialize_ir_instr(b, p, instr)
         b = instr_pair.0
         p = instr_pair.1
         j = j + 1
@@ -704,7 +732,7 @@ fn serialize_ir_function(buf: [i8; 131072], pos: i64, func: IrFunction) -> ([i8;
     (b, p)
 }
 
-fn deserialize_ir_function(buf: [i8; 131072], len: i64, pos: i64, version: i8) -> (IrFunction, i64) with Mut, Panic, Div {
+fn deserialize_ir_function(buf: [i8; 131072], len: i64, pos: i64, version: i8) -> (IrFunction, i64) with Mut, Panic, Div, Alloc {
     var p = pos
     // The fixed header is 696 bytes through prof_counter_id, plus the
     // hyper-algebra field introduced in v3. Refuse before the first read so a
