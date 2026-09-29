@@ -8505,6 +8505,26 @@ fn nc_core_assign_pregs(nc: &! NativeCompiler, func: &IrFunction) with Mut, Pani
         i = i + 1
     }
     var state = liveness_compute_intervals(ra_instrs, count)
+    // #1673: call arguments live in the arena arg pool (ir_arena_arg_at),
+    // never in (dst, src1, src2), so without this pass they look dead at
+    // their def and linear scan homes several of them on the SAME preg
+    // (arity-13 read the last literal; ref_alias homed 77/0/1 on r15).
+    var k: i64 = 0
+    while k < count && k < RA_MAX_SIMPLE_INSTRS {
+        let kslot = ir_region_slot_r((*func).region, (k))
+        let call_op = (IR_A_OP[kslot as usize] as IrOpcode)
+        if call_op == IrOpcode::IrCall {
+            var a: i64 = 0
+            while a < IR_A_ARG_COUNT[kslot as usize] && a < 64 {
+                let arg = ir_arena_arg_at(kslot, a)
+                if arg >= 0 && arg < NC_MAX_VREGS {
+                    state = regalloc_note_use(state, arg, k)
+                }
+                a = a + 1
+            }
+        }
+        k = k + 1
+    }
     state = regalloc_linear_scan(state, native_target_policy_x86_allocation_order_count())
     var v: i64 = 0
     while v < state.count {
