@@ -11,7 +11,8 @@ use check::types::*
 // Header (8 bytes):
 //   - Magic: "SOIR" (0x534F4952 little-endian)
 //   - Version: 5 (1 byte)
-//   - Reserved: 0x00 (3 bytes padding)
+//   - Feature flags: 1 byte (bit 0 = variable call-argument payloads)
+//   - Reserved: 0x00 (2 bytes padding)
 //
 // Body:
 //   - fn_count: i64 (8 bytes)
@@ -50,6 +51,7 @@ use check::types::*
 
 let SOIR_MAGIC: i64 = 1380206931  // "SOIR" as i32 cast to i64
 let SOIR_VERSION: i8 = 5
+let SOIR_FEATURE_CALL_ARGS: i8 = 1
 let SOIR_MAX_SIZE: i64 = 131072  // 128KB max module size
 
 // Detectable capacity refusal. Returning ir_empty_module() on an oversized
@@ -525,7 +527,7 @@ fn serialize_ir_instr(buf: [i8; 131072], pos: i64, instr: IrInstr) -> ([i8; 1310
     (b, p)
 }
 
-fn deserialize_ir_instr(buf: [i8; 131072], len: i64, pos: i64, version: i8) -> (IrInstr, i64) with Mut, Panic, Div, Alloc {
+fn deserialize_ir_instr(buf: [i8; 131072], len: i64, pos: i64, version: i8, features: i8) -> (IrInstr, i64) with Mut, Panic, Div, Alloc {
     var p = pos
     let fixed_instr_size: i64 = if version >= 5 { 240 } else { 232 }
     if p < 0 || len < 0 || len > SOIR_MAX_SIZE || p > len - fixed_instr_size || p > SOIR_MAX_SIZE - fixed_instr_size {
@@ -592,13 +594,18 @@ fn deserialize_ir_instr(buf: [i8; 131072], len: i64, pos: i64, version: i8) -> (
     p = arg_count_pair.1
 
     let has_serialized_args = op == IrOpcode::IrCall || op == IrOpcode::IrCallExtern || op == IrOpcode::IrCallIndirect
-    if arg_count < 0 || arg_count > 64 || (version >= 5 && has_serialized_args && (p > len - arg_count * 8 || p > SOIR_MAX_SIZE - arg_count * 8)) {
+    let call_args_present = version >= 5 && (features & SOIR_FEATURE_CALL_ARGS) != 0
+    if version >= 5 && !call_args_present && has_serialized_args && arg_count > 0 {
+        soir_note_deser_refusal()
+        return (ir_instr_new(IrOpcode::IrNop), p)
+    }
+    if arg_count < 0 || arg_count > 64 || (call_args_present && has_serialized_args && (p > len - arg_count * 8 || p > SOIR_MAX_SIZE - arg_count * 8)) {
         soir_note_deser_refusal()
         return (ir_instr_new(IrOpcode::IrNop), p)
     }
     var call_args = ir_empty_reg_list()
     var ai: i64 = 0
-    while version >= 5 && has_serialized_args && ai < arg_count {
+    while call_args_present && has_serialized_args && ai < arg_count {
         let arg_pair = read_i64(buf, p)
         let arg_reg = arg_pair.0
         p = arg_pair.1
@@ -732,7 +739,7 @@ fn serialize_ir_function(buf: [i8; 131072], pos: i64, func: IrFunction) -> ([i8;
     (b, p)
 }
 
-fn deserialize_ir_function(buf: [i8; 131072], len: i64, pos: i64, version: i8) -> (IrFunction, i64) with Mut, Panic, Div, Alloc {
+fn deserialize_ir_function(buf: [i8; 131072], len: i64, pos: i64, version: i8, features: i8) -> (IrFunction, i64) with Mut, Panic, Div, Alloc {
     var p = pos
     // The fixed header is 696 bytes through prof_counter_id, plus the
     // hyper-algebra field introduced in v3. Refuse before the first read so a
@@ -850,7 +857,7 @@ fn deserialize_ir_function(buf: [i8; 131072], len: i64, pos: i64, version: i8) -
     }
     var j: i64 = 0
     while j < instr_count {
-        let instr_pair = deserialize_ir_instr(buf, len, p, version)
+        let instr_pair = deserialize_ir_instr(buf, len, p, version, features)
         ir_arena_store(ir_region_slot_w(region, (j)), instr_pair.0)
         p = instr_pair.1
         j = j + 1
@@ -4586,7 +4593,7 @@ fn serialize_ir_module_into(module: IrModule, out_buf: &![i8; 131072], out_len: 
     buf[2] = 73 as i8   // 'I'
     buf[3] = 82 as i8   // 'R'
     buf[4] = SOIR_VERSION
-    buf[5] = 0 as i8
+    buf[5] = SOIR_FEATURE_CALL_ARGS
     buf[6] = 0 as i8
     buf[7] = 0 as i8
     pos = 8
@@ -4670,6 +4677,11 @@ fn deserialize_ir_module(buf: [i8; 131072], len: i64) -> IrModule with Mut, Pani
     if version != 1 && version != 2 as i8 && version != 3 as i8 && version != 4 as i8 && version != SOIR_VERSION {
         return ir_empty_module()
     }
+    let features = if version >= 5 { buf[5] } else { 0 as i8 }
+    if features != 0 as i8 && features != SOIR_FEATURE_CALL_ARGS {
+        soir_note_deser_refusal()
+        return ir_empty_module()
+    }
 
     pos = 8  // Skip header
 
@@ -4686,7 +4698,7 @@ fn deserialize_ir_module(buf: [i8; 131072], len: i64) -> IrModule with Mut, Pani
     var module = ir_empty_module()
     var i: i64 = 0
     while i < fn_count {
-        let func_pair = deserialize_ir_function(buf, len, pos, version)
+        let func_pair = deserialize_ir_function(buf, len, pos, version, features)
         // A refused/truncated function must invalidate the whole cache entry.
         // Keeping fn_count while storing ir_empty_function() would expose a
         // partially accepted module to thin-cache consumers.
@@ -4732,15 +4744,32 @@ fn deserialize_ir_module(buf: [i8; 131072], len: i64) -> IrModule with Mut, Pani
     module.string_table = string_table
     module.string_count = string_count
 
+    if version >= 2 && pos >= len {
+        soir_note_deser_refusal()
+        return ir_empty_module()
+    }
     if version >= 2 && pos < len {
         let ep_pair = deserialize_ir_epistemic_section(buf, pos)
         module.epistemic = ep_pair.0
         pos = ep_pair.1
     }
 
+    if version >= 3 && pos >= len {
+        soir_note_deser_refusal()
+        return ir_empty_module()
+    }
     if version >= 3 && pos < len {
         let alg_pair = deserialize_ir_algebra_table(buf, pos)
         module.algebras = alg_pair.0
+        pos = alg_pair.1
+    }
+
+    // Every serializer version emitted by this module is canonical: accepting
+    // either a truncated section or trailing bytes would let the declared
+    // length describe a different cache object than the bytes consumed.
+    if pos != len {
+        soir_note_deser_refusal()
+        return ir_empty_module()
     }
 
     module
