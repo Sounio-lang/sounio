@@ -45,6 +45,13 @@ struct LowerLocalStack {
     // 1 only when each array element is known to occupy one non-aggregate word.
     // Nested arrays and struct elements must not take the shallow slot-copy path.
     array_copy_word_scalar: Box<LowerLocalI64Slots>,
+    // 1 when struct_types holds an ARRAY's element type rather than the
+    // local's own type. bind_local_struct_type is shared by both, and an
+    // open array (`[P]`) or a fixed array of non-literal length has
+    // array_lens == -1, so nothing else tells them apart. Without this bit
+    // the by-value copy reads such an array as one P and copies the wrong
+    // number of slots.
+    struct_type_is_array_elem: Box<LowerLocalI64Slots>,
     wide_bits: Box<LowerLocalI64Slots>,
     wide_signed: Box<LowerLocalI64Slots>,
     // Findings 11 (#2084): 1 when a local/param is a non-wide unsigned integer
@@ -134,6 +141,7 @@ fn empty_lower_local_stack() -> LowerLocalStack with Alloc, Mut {
         array_elem_wide_bits: lowerer_box_local_i64_slots(0),
         array_lens: lowerer_box_local_i64_slots(-1),
         array_copy_word_scalar: lowerer_box_local_i64_slots(0),
+        struct_type_is_array_elem: lowerer_box_local_i64_slots(0),
         wide_bits: lowerer_box_local_i64_slots(0),
         wide_signed: lowerer_box_local_i64_slots(0),
         // Findings 11 (#2084): see the is_unsigned_int field comment above.
@@ -5334,6 +5342,7 @@ fn lowerer_bind_local_mut(
         (*(*locals_box).array_elem_wide_bits).values[idx as usize] = 0
         (*(*locals_box).array_lens).values[idx as usize] = -1
         (*(*locals_box).array_copy_word_scalar).values[idx as usize] = 0
+        (*(*locals_box).struct_type_is_array_elem).values[idx as usize] = 0
         (*(*locals_box).wide_bits).values[idx as usize] = 0
         (*(*locals_box).wide_signed).values[idx as usize] = 0
         // Findings 11 (#2084): zero-init the per-slot unsigned-int flag.
@@ -9455,6 +9464,66 @@ impl Lowerer {
         (lo, dst_reg)
     }
 
+    // Budget the deep copy BEFORE emitting any of it. `emit` turns an overrun
+    // past IR_MAX_INSTRS into a lowering error, so a struct whose aggregate
+    // fields will not fit degrades to the #1475 flat copy -- strictly the
+    // previous behaviour -- instead of breaking a build the user did not ask us
+    // to break.
+    fn emit_struct_value_copy_budgeted(self, src_reg: i64, type_name: Name, slot_count: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let deep_cost = self.struct_deep_copy_cost(type_name, slot_count, 0)
+        let deep_room = IR_MAX_INSTRS - self.struct_deep_copy_instr_headroom() - self.current_func.instr_count
+        if deep_cost <= deep_room {
+            self.emit_struct_value_copy_deep(src_reg, type_name, slot_count, 0)
+        } else {
+            self.emit_struct_value_copy(src_reg, type_name, slot_count)
+        }
+    }
+
+    // Value of the aggregate local `name` (currently in `reg`) as a STORED
+    // value: a fresh deep copy for a word-scalar fixed array or a value-copyable
+    // struct, `reg` unchanged for everything else.
+    //
+    // `let y = x` has copied since #1475/#1479, but assignment stored the source
+    // HANDLE: `z = x`, `*dst = x`, `o.f = x` and `a[i] = x` all left the
+    // destination sharing x's storage, so a later in-place write through either
+    // name showed through the other -- scalar fields included, not only array
+    // fields (docs/audit/MADAROS_STRUCT_REASSIGN_ARRAY_ALIAS_DISPATCH_2026-09-26.md).
+    //
+    // The copy is FRESH, not written into the destination's existing storage.
+    // Writing in place would cost no handle, but it is correct only while the
+    // destination owns its storage alone, and Madaros still binds shared storage
+    // on other paths (`let v = *p`, `let v = o.f`, a struct literal fed a local
+    // aggregate, E232). An in-place copy through such a destination would write
+    // into the other owner -- a new miscompile in place of the old one. A fresh
+    // copy only ever rebinds the destination. Its cost is 1 + k handles per
+    // executed assignment against the never-reclaimed handle table; running out
+    // exits 182 rather than printing a wrong number.
+    //
+    // Same carve-outs as the let path: arrays whose elements are not word
+    // scalars (`[Struct; N]`), Box, Knowledge, reference locals and BSS globals
+    // keep the handle.
+    fn emit_ident_aggregate_value_copy(self, name: Name, reg: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if self.lookup_local(name) < 0 { return (self, reg) }
+        if self.lookup_local_is_global(name) { return (self, reg) }
+        let arr_len = self.lookup_local_fixed_array_len(name)
+        if arr_len >= 0 {
+            if self.lookup_local_array_copy_word_scalar(name) {
+                let elem_is_float = self.lookup_local_array_elem_float(name)
+                return self.emit_fixed_array_value_copy(reg, arr_len, elem_is_float)
+            }
+            return (self, reg)
+        }
+        let st_name = self.lookup_local_struct_type(name)
+        // struct_types also carries an array's element type. An open array
+        // or a fixed array of non-literal length has no recorded length, so
+        // it would be copied as one element. Keep the handle instead.
+        if self.lookup_local_struct_type_is_array_elem(name) { return (self, reg) }
+        if !self.struct_local_is_value_copyable(name, st_name) { return (self, reg) }
+        let slot_count = self.struct_layout_slot_count(st_name)
+        if slot_count <= 0 { return (self, reg) }
+        self.emit_struct_value_copy_budgeted(reg, st_name, slot_count)
+    }
+
     // Whether `var y = x` on struct-typed local `x` may be value-copied.
     //
     // Excluded, each for a distinct reason:
@@ -10123,6 +10192,7 @@ impl Lowerer {
                 (*(*stk).array_elem_wide_bits).values[idx as usize] = 0
                 (*(*stk).array_lens).values[idx as usize] = -1
                 (*(*stk).array_copy_word_scalar).values[idx as usize] = 0
+                (*(*stk).struct_type_is_array_elem).values[idx as usize] = 0
                 (*(*stk).wide_bits).values[idx as usize] = 0
                 (*(*stk).wide_signed).values[idx as usize] = 0
                 // Findings 11 (#2084): zero-init the per-slot unsigned-int flag.
@@ -10402,6 +10472,23 @@ impl Lowerer {
         lo
     }
 
+    // struct_types was just set from an array's element type, not from the
+    // local's own type. See struct_type_is_array_elem.
+    fn bind_local_struct_type_is_array_elem(self, name: Name) -> Lowerer with Mut, Alloc, Panic, Div {
+        var lo = self
+        var stk = lo.locals
+        var i = (*stk).count - 1
+        while i >= 0 {
+            if (*(*stk).depths).values[i as usize] <= lo.scope_depth && ir_name_eq((*(*stk).names).values[i as usize], name) {
+                (*(*stk).struct_type_is_array_elem).values[i as usize] = 1
+                lo.locals = stk
+                return lo
+            }
+            i = i - 1
+        }
+        lo
+    }
+
     // Mark a local as a capturing closure bound to synthetic fn `fn_id` (closures step 2).
     fn bind_local_closure_fn_id(self, name: Name, fn_id: i64) -> Lowerer with Mut, Alloc, Panic, Div {
         var lo = self
@@ -10534,6 +10621,16 @@ impl Lowerer {
         -1
     }
 
+    fn lookup_local_struct_type_is_array_elem(self, name: Name) -> bool with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*(*self.locals).depths).values[i as usize] <= self.scope_depth && ir_name_eq((*(*self.locals).names).values[i as usize], name) {
+                return (*(*self.locals).struct_type_is_array_elem).values[i as usize] == 1
+            }
+            i = i - 1
+        }
+        false
+    }
     fn lookup_local_array_copy_word_scalar(self, name: Name) -> bool with Mut, Panic, Div, Alloc {
         var i = (*self.locals).count - 1
         while i >= 0 {
@@ -17610,6 +17707,12 @@ impl Lowerer {
                         (*(*locals).array_elem_wide_bits).values[idx as usize] = lower_type_expr_array_elem_wide_bits(&(*list).head.ty)
                         (*(*locals).array_lens).values[idx as usize] = param_array_len
                         (*(*locals).array_copy_word_scalar).values[idx as usize] = if param_word_scalar { 1 } else { 0 }
+                        // This path writes the slot directly, not through bind_local,
+                        // and the stack only resets count between functions. An
+                        // array local in a function lowered earlier can leave
+                        // struct_type_is_array_elem set on the slot this parameter
+                        // reuses, which would suppress the copy for a struct param.
+                        (*(*locals).struct_type_is_array_elem).values[idx as usize] = 0
                         // V0-E.5.4: f128 params are F128Bits handles (wide_bits=128, kind 5
                         // below) so they are ready softfloat operands; f256 stays kind 5 only.
                         (*(*locals).wide_bits).values[idx as usize] = if lower_type_expr_is_f128(&(*list).head.ty) { 128 } else { 0 }
@@ -19126,18 +19229,7 @@ impl Lowerer {
                         // the #1475 carve-out for `[Struct;N]` LOCALS.
                         let st_name = lo.lookup_local_struct_type((*rhs_ident).name)
                         let slot_count = lo.struct_layout_slot_count(st_name)
-                        // Budget the deep copy BEFORE emitting any of it. `emit` turns an
-                        // overrun past IR_MAX_INSTRS into a lowering error, so a struct
-                        // whose aggregate fields will not fit degrades to the #1475 flat
-                        // copy — strictly the previous behaviour — instead of breaking a
-                        // build the user did not ask us to break.
-                        let deep_cost = lo.struct_deep_copy_cost(st_name, slot_count, 0)
-                        let deep_room = IR_MAX_INSTRS - lo.struct_deep_copy_instr_headroom() - lo.current_func.instr_count
-                        let struct_copy_pair = if deep_cost <= deep_room {
-                            lo.emit_struct_value_copy_deep(reg, st_name, slot_count, 0)
-                        } else {
-                            lo.emit_struct_value_copy(reg, st_name, slot_count)
-                        }
+                        let struct_copy_pair = lo.emit_struct_value_copy_budgeted(reg, st_name, slot_count)
                         lo = struct_copy_pair.0
                         bind_reg = struct_copy_pair.1
                     } else {
@@ -19686,10 +19778,12 @@ impl Lowerer {
                         Some(el) => {
                             if (*el).kind == TypeExprKind::TypeKnowledge {
                                 lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"))
+                                lo = lo.bind_local_struct_type_is_array_elem(s.name)
                             } else if (*el).kind == TypeExprKind::TypeNamed {
                                 let el_name = ir_path_first_name((*el).path)
                                 if el_name.len > 0 {
                                     lo = lo.bind_local_struct_type(s.name, el_name)
+                                    lo = lo.bind_local_struct_type_is_array_elem(s.name)
                                 }
                             }
                         }
@@ -19803,6 +19897,10 @@ impl Lowerer {
                                     if tuple0_layout >= 0 && tuple0_layout < (*lo.struct_layouts).count {
                                         let tuple0_type = (*lo.struct_layouts).entries[tuple0_layout as usize].type_name
                                         lo = lo.bind_local_struct_type(s.name, tuple0_type)
+                                        // The layout came from a tuple slot that holds an
+                                        // array, so the type bound here is the element
+                                        // type, not the local's own type.
+                                        lo = lo.bind_local_struct_type_is_array_elem(s.name)
                                     }
                                 }
                             }
@@ -19948,6 +20046,9 @@ impl Lowerer {
                     let src_st = lo.lookup_local_struct_type((*expr_box).name)
                     if src_st.len > 0 {
                         lo = lo.bind_local_struct_type(s.name, src_st)
+                        if lo.lookup_local_struct_type_is_array_elem((*expr_box).name) {
+                            lo = lo.bind_local_struct_type_is_array_elem(s.name)
+                        }
                     }
                     let src_elem_layout = lo.lookup_local_tuple0_array_elem_layout((*expr_box).name)
                     if src_elem_layout >= 0 {
@@ -20184,7 +20285,37 @@ impl Lowerer {
             self.lower_opt_expr_ref(&s.expr)
         }
         var lo = pair_rhs.0
-        let rhs = pair_rhs.1
+        var rhs = pair_rhs.1
+        // An aggregate stored from a named local is stored BY VALUE, as `let`
+        // binds it (see emit_ident_aggregate_value_copy). f128 slots copied their
+        // limbs above.
+        if !target_is_f128 {
+            match s.expr {
+                Some(rhs_agg) => {
+                    if (*rhs_agg).kind == ExprKind::ExprIdent {
+                        // `x = x` changes nothing. The copy allocates a fresh
+                        // handle per execution and handles are never reclaimed
+                        // (gc.sio, cap 4194304), so a self-assignment inside a
+                        // loop would exit 182 on a program that was a no-op.
+                        var self_assign = false
+                        match s.target {
+                            Some(tgt_agg) => {
+                                if (*tgt_agg).kind == ExprKind::ExprIdent {
+                                    self_assign = ir_name_eq((*tgt_agg).name, (*rhs_agg).name)
+                                }
+                            }
+                            _ => {}
+                        }
+                        if !self_assign {
+                            let agg_pair = lo.emit_ident_aggregate_value_copy((*rhs_agg).name, rhs)
+                            lo = agg_pair.0
+                            rhs = agg_pair.1
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
         var rhs_variance: i64 = -1
         var rhs_is_float: bool = false
         match s.expr {
