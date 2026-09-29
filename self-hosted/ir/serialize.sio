@@ -61,6 +61,10 @@ let SOIR_MAX_SIZE: i64 = 131072  // 128KB max module size
 // capacity refuse so a gate / test can observe that deserialize declined.
 pub var SOIR_DESER_REFUSAL_COUNT: i64 = 0
 pub var SOIR_SER_REFUSAL_COUNT: i64 = 0
+// Bound used by every primitive decoder during one module decode.  Composite
+// section readers are intentionally built from these primitives, so a
+// truncated declared payload is refused before any backing-array access.
+var SOIR_DESER_ACTIVE_LIMIT: i64 = SOIR_MAX_SIZE
 
 fn soir_note_deser_refusal() with Mut {
     SOIR_DESER_REFUSAL_COUNT = SOIR_DESER_REFUSAL_COUNT + 1
@@ -134,10 +138,21 @@ fn write_name(buf: [i8; 131072], pos: i64, n: Name) -> ([i8; 131072], i64) with 
 }
 
 fn read_i8(buf: [i8; 131072], pos: i64) -> (i8, i64) with Mut, Panic, Div {
+    if pos < 0 || pos >= SOIR_DESER_ACTIVE_LIMIT || pos >= SOIR_MAX_SIZE {
+        soir_note_deser_refusal()
+        return (0 as i8, SOIR_DESER_ACTIVE_LIMIT)
+    }
     (buf[pos], pos + 1)
 }
 
 fn read_i64(buf: [i8; 131072], pos: i64) -> (i64, i64) with Mut, Panic, Div {
+    if pos < 0 ||
+       SOIR_DESER_ACTIVE_LIMIT < 8 ||
+       pos > SOIR_DESER_ACTIVE_LIMIT - 8 ||
+       pos > SOIR_MAX_SIZE - 8 {
+        soir_note_deser_refusal()
+        return (0, SOIR_DESER_ACTIVE_LIMIT)
+    }
     // Little-endian decoding - mask to ensure unsigned byte interpretation
     let raw0: i64 = buf[pos + 0] as i64
     let raw1: i64 = buf[pos + 1] as i64
@@ -232,10 +247,12 @@ fn read_name(buf: [i8; 131072], pos: i64) -> (Name, i64) with Mut, Panic, Div {
     var n = Name { buf: [0; 384], len: len }
     var i: i64 = 0
     while i < 128 {
-        n.buf[i] = buf[p + i]
+        let byte_pair = read_i8(buf, p)
+        n.buf[i] = byte_pair.0
+        p = byte_pair.1
         i = i + 1
     }
-    (n, p + 128)
+    (n, p)
 }
 
 fn write_compare_op(buf: [i8; 131072], pos: i64, op: CompareOp) -> ([i8; 131072], i64) with Mut, Panic, Div {
@@ -4133,7 +4150,7 @@ fn serialize_ir_epistemic_section(buf: [i8; 131072], pos: i64, ep: IrEpistemicSe
     (b, p)
 }
 
-fn deserialize_ir_epistemic_section(buf: [i8; 131072], pos: i64) -> (IrEpistemicSection, i64) with Mut, Panic, Div, Alloc {
+fn deserialize_ir_epistemic_section(buf: [i8; 131072], pos: i64, len: i64) -> (IrEpistemicSection, i64) with Mut, Panic, Div, Alloc {
     var p = pos
     var ep = ir_empty_epistemic_section()
 
@@ -4665,6 +4682,7 @@ fn deserialize_ir_module(buf: [i8; 131072], len: i64) -> IrModule with Mut, Pani
         soir_note_deser_refusal()
         return ir_empty_module()
     }
+    SOIR_DESER_ACTIVE_LIMIT = len
 
     // Verify header magic - cast literals to i8 for comparison
     let b0: i8 = 83 as i8
@@ -4753,7 +4771,10 @@ fn deserialize_ir_module(buf: [i8; 131072], len: i64) -> IrModule with Mut, Pani
         return ir_empty_module()
     }
     if version >= 2 && pos < len {
-        let ep_pair = deserialize_ir_epistemic_section(buf, pos)
+        let ep_pair = deserialize_ir_epistemic_section(buf, pos, len)
+        if SOIR_DESER_REFUSAL_COUNT != refusals_before {
+            return ir_empty_module()
+        }
         module.epistemic = ep_pair.0
         pos = ep_pair.1
     }
@@ -4764,6 +4785,9 @@ fn deserialize_ir_module(buf: [i8; 131072], len: i64) -> IrModule with Mut, Pani
     }
     if version >= 3 && pos < len {
         let alg_pair = deserialize_ir_algebra_table(buf, pos)
+        if SOIR_DESER_REFUSAL_COUNT != refusals_before {
+            return ir_empty_module()
+        }
         module.algebras = alg_pair.0
         pos = alg_pair.1
     }
