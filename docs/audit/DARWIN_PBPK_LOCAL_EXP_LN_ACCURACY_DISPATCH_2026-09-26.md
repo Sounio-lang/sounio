@@ -101,9 +101,11 @@ carries a relative rounding error of about 10⁻¹³ on top of the −x²/2048 b
 
 * The "< 0.01%" claim needs x²/2048 < 10⁻⁴, i.e. |x| < √0.2048 ≈ 0.4525 to leading order.
 * At x = −1024 the base 1 + x/1024 is 0. Below that it is negative and the even power is
-  meaningless. In double arithmetic the result is exactly 0 wherever |1 + x/1024| < 0.4834,
-  i.e. for x between about −529 and −1519. It climbs back to exactly 1 at x = −2048, and
-  exceeds 1 below that.
+  meaningless. In double arithmetic the result is exactly 0 wherever the power rounds below half
+  the smallest subnormal, i.e. |1 + x/1024| < 2^(−1075/1024) ≈ 0.48303: x between −529.37 and
+  −1518.63, which matches the measured band. (At |1 + x/1024| = 0.4834 the power is still the
+  smallest subnormal, 5 × 10⁻³²⁴, not 0.) It climbs back to exactly 1 at x = −2048, and exceeds 1
+  below that.
 * For the Cypher k_r in `biomaterial_release` these points fall at t ≈ 457 143 h, ≈ 914 286 h
   and beyond. Measured with the helper arithmetic: `release_cumulative` (pub) returns Q = D up
   to about 6.8 × 10⁵ h, Q = 4.5 × 10⁻⁶ mg at 914 285.7 h, −9.0 × 10⁻⁵ mg at 914 286 h,
