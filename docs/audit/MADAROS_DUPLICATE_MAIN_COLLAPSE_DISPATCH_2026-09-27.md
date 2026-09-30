@@ -7,12 +7,12 @@ validated_by: claude
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.madaros-duplicate-main-collapse-dispatch-2026-09-27
 -->
 
-# Madaros runs an imported module's `main` instead of the program's own, on the specialized-collapse path — dispatch
+# Madaros imported-module `main` takeover on specialized collapse — audit and remediation
 
 **Date:** 2026-09-27
 **Base:** `main` @ `9c5ffa236`. Line references are to that commit.
 **Engines:** see "Engines measured" below. All engines were invoked through `./bin/souc`.
-**Status:** dispatch only. `self-hosted/` is not patched.
+**Status:** compiler fix and exact-output regression gate implemented in PR #2734; exact-head CI is authoritative for acceptance.
 
 ## Engines measured
 
