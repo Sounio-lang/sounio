@@ -10,3 +10,7 @@ The gate first requires the compiler receipt
 `specialized lower failed` fallback receipt, and then compares stdout
 byte-for-byte with `expected.txt`. This proves the fixed lowering branch
 completed, that `USER_MAIN` is present, and that `DEP_MAIN` is absent.
+
+`typecheck_error/` holds a semantic type error only inside the dependency's
+`main`. Compilation must be refused without writing an ELF, proving dependency
+entry functions remain in the typecheck merge even though lowering filters them.

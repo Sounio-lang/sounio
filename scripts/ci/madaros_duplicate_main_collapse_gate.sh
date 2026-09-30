@@ -70,3 +70,19 @@ if ! diff -u "$FIX/expected.txt" "$WORK/actual.txt" >"$WORK/output.diff"; then
 fi
 
 echo "$TAG PASS: USER_MAIN is the sole executable entry on specialized collapse"
+
+BAD_FIX="$ROOT_DIR/tests/multimodule/duplicate_main_collapse/typecheck_error"
+BAD_ELF="$WORK/typecheck-error.elf"
+if (cd "$BAD_FIX" && "$RAW" --native-compile main.sio -o "$BAD_ELF") >"$WORK/typecheck-error.log" 2>&1; then
+  tail -n 40 "$WORK/typecheck-error.log" >&2 || true
+  fail "dependency main semantic error was not typechecked"
+fi
+if [[ -s "$BAD_ELF" ]]; then
+  fail "refused dependency-main fixture still emitted an ELF"
+fi
+grep -Fq "Type mismatch" "$WORK/typecheck-error.log" || {
+  tail -n 40 "$WORK/typecheck-error.log" >&2 || true
+  fail "dependency-main fixture was refused without the expected type mismatch"
+}
+
+echo "$TAG PASS: dependency main remains in the typecheck merge"
