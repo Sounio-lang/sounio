@@ -140,10 +140,10 @@ So the defect is latent. It becomes live as soon as a program that imports one o
 also instantiates a generic. The 14 programs refused before lowering were not measured on this
 axis. Neither were `examples/` and `tests/stdlib/` (181 more importers).
 
-## Proposed fix (not applied)
+## Remediation implemented
 
-In `module_frontend_specialized_prepare`, build the **lowering** list (`specialized_raw`,
-`:6305`) from a merge that omits top-level `main` items of `programs[1..count)`. This mirrors
+In `module_frontend_specialized_prepare`, the **lowering** list (`specialized_raw`) is now
+built from a merge that omits top-level `main` items of `programs[1..count)`. This mirrors
 the rule the into-acc path already follows ("seed owns entry").
 
 - Leave the **typecheck** merge (`specialized_tc`, `:6285`) as it is. Dependency `main`s keep
@@ -151,9 +151,10 @@ the rule the into-acc path already follows ("seed owns entry").
   path it takes.
 - With one `main` in the lowering list, the DCE root, the name-keyed slot, reachability and
   codegen all agree without further change.
-- **Witness:** a `//@ requires: madaros` run-pass test that imports a real stdlib module with
-  a `main` and instantiates a generic explicitly. It asserts the user's marker
-  (`expect-stdout-contains`) and the **absence** of the library's output.
+- **Witness:** `scripts/ci/madaros_duplicate_main_collapse_gate.sh` compiles the
+  isolated multi-module fixture under `tests/multimodule/duplicate_main_collapse/`
+  with current-source Madaros. Its byte-for-byte stdout comparison requires
+  `USER_MAIN` and proves `DEP_MAIN` is absent.
 - **Acceptance:**
   - the repro prints `USER_MAIN` under Madaros;
   - every surveyed program on the collapse path keeps or gains its user output;
