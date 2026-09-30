@@ -51,6 +51,10 @@ grep -Fq "imported_compile: specialized_collapse lower_count=1" "$WORK/compile.l
   tail -n 40 "$WORK/compile.log" >&2 || true
   fail "fixture did not exercise the specialized-collapse lowering path"
 }
+if grep -Fq "imported_compile: specialized lower failed (" "$WORK/compile.log"; then
+  tail -n 40 "$WORK/compile.log" >&2 || true
+  fail "specialized lowering failed and fell back to the ordinary multi-module path"
+fi
 [[ -s "$WORK/probe.elf" ]] || fail "compiler did not emit an ELF"
 chmod +x "$WORK/probe.elf"
 if ! timeout 30 "$WORK/probe.elf" >"$WORK/actual.txt" 2>&1; then

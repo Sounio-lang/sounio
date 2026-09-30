@@ -6,6 +6,7 @@ instantiating an imported generic. The dependency deliberately defines its own
 the importing program's entry point.
 
 The gate first requires the compiler receipt
-`specialized_collapse lower_count=1`, then compares stdout byte-for-byte with
-`expected.txt`. This proves the fixed lowering branch actually ran, that
-`USER_MAIN` is present, and that `DEP_MAIN` is absent.
+`specialized_collapse lower_count=1`, rejects the explicit
+`specialized lower failed` fallback receipt, and then compares stdout
+byte-for-byte with `expected.txt`. This proves the fixed lowering branch
+completed, that `USER_MAIN` is present, and that `DEP_MAIN` is absent.
