@@ -47,6 +47,10 @@ if ! (cd "$FIX" && "$RAW" --native-compile main.sio -o "$WORK/probe.elf") >"$WOR
   tail -n 40 "$WORK/compile.log" >&2 || true
   fail "specialized-collapse fixture did not compile"
 fi
+grep -Fq "imported_compile: specialized_collapse lower_count=1" "$WORK/compile.log" || {
+  tail -n 40 "$WORK/compile.log" >&2 || true
+  fail "fixture did not exercise the specialized-collapse lowering path"
+}
 [[ -s "$WORK/probe.elf" ]] || fail "compiler did not emit an ELF"
 chmod +x "$WORK/probe.elf"
 if ! timeout 30 "$WORK/probe.elf" >"$WORK/actual.txt" 2>&1; then
