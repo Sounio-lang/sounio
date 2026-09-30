@@ -299,6 +299,7 @@ Final ELF md5 `35f3e506`. The table was first taken on the pre-Seq-fix build `08
 | `test_bbb_pce_vs_gum` | 182 | `BBB_PCE_VS_GUM_OK` |
 | `test_des_bbb_coupled` | 182 | `DES_BBB_COUPLED_OK` |
 | `tests/run-pass/madaros_region_reclaim_{loop,escape,result}.sio` | — | all OK |
+| `tests/run-pass/madaros_region_reclaim_seq_push.sio` | — | exact-head CI pending |
 
 **Arithmetic is unchanged.**
 - A central difference on fu_plasma (two coupled runs, small enough to fit the
@@ -346,6 +347,18 @@ The first A/B (on `087a0ae3`) found one new failure,
     stored value.
   - Lesson for any future builtin: repointing an old handle at new memory is a
     store of the youngest possible object into that handle's object.
+- **Non-growing Seq append must not escape the helper region.** Review of the
+  first fix found that placing the youngest-store barrier at `seq_push` entry
+  also marked the common no-growth path escaped. That defeated reclamation for
+  helpers that append scalars into an already-capacious Seq, even though no
+  reference crossed the region boundary. The barrier is now split by event:
+  - the growth path applies the youngest-store barrier immediately before the
+    old handle is repointed at the copied object;
+  - the append path applies the ordinary value barrier to the stored element;
+  - `madaros_region_reclaim_seq_push.sio` performs 4,300,000 helper calls, above
+    the 2^22 handle-table capacity. It is selected by the changed-Madaros-test
+    gate and the full suite. This row remains explicitly pending until those
+    gates pass against the exact published head.
 
 ## AI disclosure
 
