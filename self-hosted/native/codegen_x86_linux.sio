@@ -4255,8 +4255,6 @@ fn emit_builtin_heap_free_into(nc: &! NativeCompiler) with Mut, Panic, Div {
 // layout: payload_size is capacity in bytes and flags is logical length. When
 // full, retargeting the existing handle-table entry preserves every alias.
 fn emit_builtin_native_seq_push_into(nc: &! NativeCompiler) with Mut, Panic, Div {
-    // May grow the buffer and store its new address into the seq object.
-    rgn_emit_builtin_barrier(nc, 0 - 1, 7)
     nc_emit_push_rbp(nc)
     nc_emit_mov_rbp_rsp(nc)
     nc_emit_sub_rsp_imm32(nc, 64)
@@ -4329,6 +4327,11 @@ fn emit_builtin_native_seq_push_into(nc: &! NativeCompiler) with Mut, Panic, Div
     nc_emit_mov_reg_reg(nc, 3, 7)
     nc_emit_add_rax_rbx(nc)
     nc_emit_mov_rbx_rax(nc)                   // handle entry
+    // Growth is the only path that repoints the old handle at a newly
+    // allocated object. Mark the precise youngest-store escape here, after
+    // capacity proved growth necessary and immediately before the repoint.
+    nc_emit_load_rbp_disp32_reg(nc, 7, -8)
+    rgn_emit_builtin_youngest_store(nc, 7)
     nc_emit_load_rbp_disp32_reg(nc, 0, -48)
     nc_emit_store_rax_mem_rbx_disp32(nc, native_v2_handle_entry_field_object_base())
     nc_emit_load_rbp_disp32_reg(nc, 0, -40)
@@ -4338,6 +4341,12 @@ fn emit_builtin_native_seq_push_into(nc: &! NativeCompiler) with Mut, Panic, Div
 
     let append_offset = (*nc).code.len
     nc_patch_u32_le(nc, append_patch, append_offset - (append_patch + 4))
+    // Every append stores the supplied word. The ordinary barrier is precise:
+    // scalar values do nothing, while a young reference stored into an older
+    // Seq marks only the regions whose objects can now escape.
+    nc_emit_load_rbp_disp32_reg(nc, 7, -8)
+    nc_emit_load_rbp_disp32_reg(nc, 6, -16)
+    rgn_emit_builtin_barrier(nc, 6, 7)
     nc_emit_load_rbp_disp32_reg(nc, 2, -24)
     nc_emit_mov_reg_imm(nc, 1, native_v2_object_header_size())
     nc_emit_add_reg_reg(nc, 2, 1)             // rdx = payload base
