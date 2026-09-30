@@ -80,7 +80,7 @@ fi
 if [[ -s "$BAD_ELF" ]]; then
   fail "refused dependency-main fixture still emitted an ELF"
 fi
-grep -Fq "Type mismatch" "$WORK/typecheck-error.log" || {
+grep -Fq "this binding expects a different type" "$WORK/typecheck-error.log" || {
   tail -n 40 "$WORK/typecheck-error.log" >&2 || true
   fail "dependency-main fixture was refused without the expected type mismatch"
 }
