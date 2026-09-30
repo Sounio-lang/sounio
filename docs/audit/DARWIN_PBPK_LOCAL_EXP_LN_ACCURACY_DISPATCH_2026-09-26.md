@@ -96,8 +96,9 @@ carries a relative rounding error of about 10⁻¹³ on top of the −x²/2048 b
   Madaros) at t = 0.01, 0.02, 0.05, 0.1 and 0.5 h gives relative errors of −3.03e-13, −9.47e-13,
   −6.06e-12, −2.45e-11 and −6.13e-10. All five read low, but at 0.01 h rounding is about a
   quarter of the value.
-* At these small arguments the absolute effect on Q is below D · 3 × 10⁻¹³ per step, which is
-  negligible.
+* The absolute error in Q(t) is about D × |relative error| × e^(−k_r t). It is D · 3.0 × 10⁻¹³ at
+  the first step (t = 0.01 h) and grows with t: D · 6.1 × 10⁻¹⁰ at 0.5 h and D · 2.45 × 10⁻⁹ at 1 h.
+  All of these are negligible next to the +1.5 × 10⁻⁴ relative error in Q(168 h) (§3.1).
 
 * The "< 0.01%" claim needs x²/2048 < 10⁻⁴, i.e. |x| < √0.2048 ≈ 0.4525 to leading order.
 * At x = −1024 the base 1 + x/1024 is 0. Below that it is negative and the even power is
