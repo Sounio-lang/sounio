@@ -131,7 +131,9 @@ It holds verbatim copies of both helpers and compares them with `math::pure` and
 The probe is a witness of the historical arithmetic, not a fix-sensitive test. It embeds its
 own copies, so applying the proposed patch does not change its result. It first checks every
 `math::pure` row against its reference, and exits rc = 2 if any row is off by more than 10⁻¹⁴ or
-if `math::pure::ln` returns NaN at any point of the [0.5, 2] sweep.
+if `math::pure::ln` returns NaN at any point of the [0.5, 2] sweep. The 10⁻¹⁴ tolerance is a
+sanity check, not an ulp-level test: it is tight only near |ln x| = 13.8 and admits about 720 ulp
+at ln(1.068589). The ulp-level evidence is the printed worst row, 0.56 × 10⁻¹⁵.
 Only then does it classify the helper copies: rc = 1 means they are inaccurate, which is the
 expected result.
 
