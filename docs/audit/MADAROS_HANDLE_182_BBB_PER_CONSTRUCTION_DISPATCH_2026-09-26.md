@@ -357,8 +357,9 @@ The first A/B (on `087a0ae3`) found one new failure,
   - the append path applies the ordinary value barrier to the stored element;
   - `madaros_region_reclaim_seq_push.sio` performs 4,300,000 helper calls, above
     the 2^22 handle-table capacity. It is selected by the changed-Madaros-test
-    gate and the full suite. This row remains explicitly pending until those
-    gates pass against the exact published head.
+    gate. The ordinary full-suite lane does not enable `requires: madaros`, so
+    it is not evidence for this fixture. This row remains explicitly pending
+    until the changed-Madaros gate passes against the exact published head.
 
 ## AI disclosure
 

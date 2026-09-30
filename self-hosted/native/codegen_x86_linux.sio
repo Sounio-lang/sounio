@@ -4451,6 +4451,28 @@ fn emit_builtin_native_seq_set_into(nc: &! NativeCompiler) with Mut, Panic, Div 
 // (each move frees its own source before the next read) and loads a6 last,
 // before any push would shift the stack slots. Return value stays in rax.
 fn emit_builtin_syscall6_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    // A raw syscall may retain any pointer argument after it returns. Preserve
+    // the complete SysV argument tuple (including the stack-passed a6), mark
+    // every open region escaped, then restore the original call frame before
+    // shuffling into the Linux syscall ABI. Six argument-register pushes plus
+    // one padding push keep the nested call 16-byte aligned.
+    if NC_RGN_MARK_ALL_FN >= 0 {
+        nc_emit_byte(nc, 0x57)  // push rdi
+        nc_emit_byte(nc, 0x56)  // push rsi
+        nc_emit_byte(nc, 0x52)  // push rdx
+        nc_emit_byte(nc, 0x51)  // push rcx
+        nc_emit_byte(nc, 0x41); nc_emit_byte(nc, 0x50)  // push r8
+        nc_emit_byte(nc, 0x41); nc_emit_byte(nc, 0x51)  // push r9
+        nc_emit_byte(nc, 0x50)  // alignment padding (saved rax)
+        rgn_emit_call_fn(nc, NC_RGN_MARK_ALL_FN)
+        nc_emit_byte(nc, 0x58)  // pop padding
+        nc_emit_byte(nc, 0x41); nc_emit_byte(nc, 0x59)  // pop r9
+        nc_emit_byte(nc, 0x41); nc_emit_byte(nc, 0x58)  // pop r8
+        nc_emit_byte(nc, 0x59)  // pop rcx
+        nc_emit_byte(nc, 0x5a)  // pop rdx
+        nc_emit_byte(nc, 0x5e)  // pop rsi
+        nc_emit_byte(nc, 0x5f)  // pop rdi
+    }
     nc_emit_mov_reg_reg(nc, 0, 7)   // mov rax, rdi  (nr)
     nc_emit_mov_reg_reg(nc, 7, 6)   // mov rdi, rsi  (a1)
     nc_emit_mov_reg_reg(nc, 6, 2)   // mov rsi, rdx  (a2)
@@ -9089,26 +9111,10 @@ pub fn compile_ir_function_v2_into(nc: &! NativeCompiler, func: &IrFunction, mac
 
     var builtin_id = native_v2_builtin_id_for_func_ref(func)
     if builtin_id != 0 {
-        if builtin_id == 1 {
-            emit_builtin_print_int_into(nc)
-            return
-        }
-        if builtin_id == 2 {
-            emit_builtin_print_char_into(nc)
-            return
-        }
-        if builtin_id == 3 {
-            emit_builtin_print_str_into(nc)
-            return
-        }
-        if builtin_id == 23 {
-            emit_builtin_heap_alloc_into(nc)
-            return
-        }
-        if builtin_id == 24 {
-            emit_builtin_heap_free_into(nc)
-            return
-        }
+        // Streaming compilation must use the same complete builtin emitter as
+        // whole-module compilation. Returning here without a body left region
+        // builtin ids 60..69 as zero-length unresolved call targets.
+        native_v2_emit_builtin_by_id_into(nc, builtin_id)
         return
     }
     if native_v2_try_emit_dynlink_stub_into(nc, (*func).name) { return }
