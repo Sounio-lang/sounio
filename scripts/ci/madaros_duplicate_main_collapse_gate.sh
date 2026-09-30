@@ -26,6 +26,9 @@ if [[ -n "${SOUNIO_MADAROS_DUP_MAIN_GATE_DIR:-}" ]]; then
 else
   WORK="$(mktemp -d /tmp/sounio-madaros-duplicate-main.XXXXXX)"
 fi
+# Compiler invocation changes to the fixture directory. Resolve caller-provided
+# relative overrides now so every later artifact path names the same directory.
+WORK="$(cd "$WORK" && pwd -P)"
 if [[ -z "${SOUNIO_MADAROS_DUP_MAIN_GATE_KEEP:-}" ]]; then
   trap 'rm -rf "$WORK"' EXIT
 fi
