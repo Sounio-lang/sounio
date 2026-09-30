@@ -63,7 +63,8 @@ Results, measured on Madaros:
   input falls in them. Four printed values move, all in the 4th to 7th significant figure. The pbpk28 GMFE paths are dead until observed data land (`obs_n() = 0`).
   rapamycin_clinical's GMFE is a dead store.
 * `math::pure::{exp, ln}` matches V8 libm to within 0.56 × 10⁻¹⁵ on every §2 probe row
-  (relative for exp, absolute for ln). The swap changes no constant.
+  (relative for exp, absolute for ln). The swap changes no model parameter or acceptance
+  threshold.
 
 ## 1. The two helpers, analytically
 
@@ -290,7 +291,11 @@ sites. The tacrolimus inline block becomes `let gmfe = exp(ln_avg)`. The full di
 
 The patch was checked for side effects:
 
-* **Constants.** No literal constant changes.
+* **Constants.** No model parameter (k_r, doses, Kp values) or acceptance threshold (0.96, the
+  2.0 and 3.0 GMFE gates) changes. The literals the patch removes are all helper internals:
+  1024.0, the ten-squaring count, 2.718281828459045, the [0.5, 2] range bounds, the series
+  denominators 3/5/7/9 and the −999999 sentinel. The rewritten call sites keep their own
+  literals verbatim (`1.0 - exp(0.0 - …)`, `/ 3.0`).
 * **Effects.** `pure::exp` / `pure::ln` are `with Mut, Div, Panic`. Every call site is already
   inside a function that declares all three (`release_cumulative`, `release_rate`,
   `gmfe_from_fes`, `main`).
