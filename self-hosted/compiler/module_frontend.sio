@@ -6573,6 +6573,44 @@ fn module_frontend_merge_program_items(
     merged
 }
 
+// Specialized collapse lowers one merged item list, unlike the ordinary
+// into-acc path. Keep dependency `main` items in the typecheck merge, but
+// remove them from the lowering merge: programs[0] owns the executable entry.
+fn module_frontend_without_top_level_main(
+    items: Option<Box<ItemList>>
+) -> Option<Box<ItemList>> with Mut, Panic, Div, Alloc {
+    match items {
+        Some(list) => {
+            let item = (*list).head
+            let rest = module_frontend_without_top_level_main((*list).tail)
+            if item.kind == ItemKind::ItemFn && ir_name_eq(item.name, make_name("main")) {
+                rest
+            } else {
+                Some(Box::new(ItemList { head: item, tail: rest }))
+            }
+        }
+        None => None,
+    }
+}
+
+fn module_frontend_merge_program_items_for_lowering(
+    programs: &! [Program; 256],
+    count: i64
+) -> Option<Box<ItemList>> with Mut, Panic, Div, Alloc {
+    var merged: Option<Box<ItemList>> = None
+    var i: i64 = count - 1
+    while i >= 0 {
+        let items = if i == 0 {
+            (*programs)[i as usize].items
+        } else {
+            module_frontend_without_top_level_main((*programs)[i as usize].items)
+        }
+        merged = spec_append_item_lists(items, merged)
+        i = i - 1
+    }
+    merged
+}
+
 // WP-A3 typecheck-only residual (callers that do not own programs for rewrite).
 // Prefer module_frontend_specialized_prepare when IR lower follows — that path
 // rewrites programs[0] to the monomorphized merged list so body lower never
@@ -6692,7 +6730,7 @@ fn module_frontend_specialized_prepare(
     // Monomorphized + retained non-generic items from every module live in
     // one list under same-name mono. Multi-mod template body lower SEGV'd on
     // cd_add_exact / trait-method array loops (Wave12 residual).
-    let specialized_raw = specialize_generics_multi(module_frontend_merge_program_items(programs, count), programs, count)
+    let specialized_raw = specialize_generics_multi(module_frontend_merge_program_items_for_lowering(programs, count), programs, count)
     let mono_n2: i64 = spec_mono_marker_count()
     if mono_n2 <= 0 {
         return 0

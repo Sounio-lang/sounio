@@ -2015,6 +2015,9 @@ fn compiler_ir_roundtrip_non_ep_buffer(in_buf: &![i8; 131072], len: i64, out_buf
     if (*in_buf)[0] != (83 as i8) || (*in_buf)[1] != (79 as i8) || (*in_buf)[2] != (73 as i8) || (*in_buf)[3] != (82 as i8) {
         return compiler_ir_roundtrip_result(false, 0, 0, 0)
     }
+    let soir_version = (*in_buf)[4]
+    let legacy_fn_header_bytes: i64 = if soir_version >= 3 { 704 } else { 696 }
+    let instr_bytes_each: i64 = if soir_version >= 5 { 240 } else { 232 }
 
     var in_pos: i64 = 0
     var out_pos: i64 = 0
@@ -2032,17 +2035,27 @@ fn compiler_ir_roundtrip_non_ep_buffer(in_buf: &![i8; 131072], len: i64, out_buf
 
     var i: i64 = 0
     while i < fn_count {
-        if in_pos + 696 > len {
+        var fn_header_bytes = legacy_fn_header_bytes
+        if soir_version >= 5 {
+            let reg_count = compiler_ir_read_i64_at(in_buf, in_pos + 144)
+            var float_word_count = (reg_count + 31) / 32
+            if float_word_count < 0 { float_word_count = 0 }
+            if float_word_count > 64 { float_word_count = 64 }
+            // SOIR v5 extends the v3 header with is_sret, sret_dest_reg, and
+            // float_word_count before the variable float-bit words.
+            fn_header_bytes = fn_header_bytes + 24 + float_word_count * 8
+        }
+        if in_pos + fn_header_bytes > len {
             return compiler_ir_roundtrip_result(false, 0, fn_count, 0)
         }
         let instr_count = compiler_ir_read_i64_at(in_buf, in_pos + 136)
         if instr_count < 0 {
             return compiler_ir_roundtrip_result(false, 0, fn_count, 0)
         }
-        let fn_header_copy = compiler_ir_copy_bytes(in_buf, in_pos, out_buf, out_pos, 696)
+        let fn_header_copy = compiler_ir_copy_bytes(in_buf, in_pos, out_buf, out_pos, fn_header_bytes)
         in_pos = fn_header_copy.src_pos
         out_pos = fn_header_copy.dst_pos
-        let instr_bytes = instr_count * 232
+        let instr_bytes = instr_count * instr_bytes_each
         if instr_bytes < 0 || in_pos + instr_bytes > len {
             return compiler_ir_roundtrip_result(false, 0, fn_count, 0)
         }
@@ -7039,17 +7052,54 @@ fn compiler_main_test_frame_trim_param_vreg() -> bool with Mut, Panic, Div {
     nc.vreg_to_preg[1 as usize] = 15   // preg-alloc
     var func = ir_empty_function()
     func.reg_count = 2
-    nc_min_frame_size(nc, func) == 16
+    if nc_min_frame_size(nc, func) != 16 { return false }
+
+    // Every vreg above the allocation table is stack-only. Exercise both the
+    // first such slot and the final legal IR slot.
+    func.reg_count = NC_MAX_VREGS + 1
+    if nc_min_frame_size(nc, func) != align16((NC_MAX_VREGS + 1) * 8) { return false }
+    func.reg_count = IR_MAX_VREGS
+    nc_min_frame_size(nc, func) == align16(IR_MAX_VREGS * 8)
 }
 
 // T70: used allocatable preg mask tracks only r12-r15 assignments
-fn compiler_main_test_used_allocatable_preg_mask() -> bool with Mut {
+fn compiler_main_test_native_vreg_rejection_paths() -> bool with Mut, Panic, Div, Alloc {
+    var oversized = ir_empty_function()
+    oversized.reg_count = IR_MAX_VREGS + 1
+    var machine = machine_function_new()
+    var core_nc = compiler_new()
+    compile_ir_function_v2_into(&! core_nc, &oversized, &machine, 0)
+    if !core_nc.ir_vreg_overflow { return false }
+    if core_nc.ir_vreg_overflow_needed != IR_MAX_VREGS + 1 { return false }
+    if core_nc.ir_vreg_overflow_limit != IR_MAX_VREGS { return false }
+
+    var legacy = ir_empty_function()
+    legacy.reg_count = NC_MAX_VREGS + 1
+    let legacy_nc = compile_ir_function(compiler_new(), legacy, 0)
+    if !legacy_nc.ir_vreg_overflow { return false }
+    if legacy_nc.ir_vreg_overflow_needed != NC_MAX_VREGS + 1 { return false }
+    legacy_nc.ir_vreg_overflow_limit == NC_MAX_VREGS
+}
+
+fn compiler_main_test_ir_vreg_boundary_contract() -> bool with Mut, Panic, Div, Alloc {
+    if !ir_reg_count_is_valid(IR_MAX_VREGS - 1) { return false }
+    if !ir_reg_count_is_valid(IR_MAX_VREGS) { return false }
+    if ir_reg_count_is_valid(IR_MAX_VREGS + 1) { return false }
+    if !ir_reg_count_can_grow(IR_MAX_VREGS - 1, 1) { return false }
+    if ir_reg_count_can_grow(IR_MAX_VREGS, 1) { return false }
+    if ir_reg_count_can_grow(IR_MAX_VREGS - 1, 2) { return false }
+    compiler_main_test_native_vreg_rejection_paths()
+}
+
+fn compiler_main_test_used_allocatable_preg_mask() -> bool with Mut, Panic, Div, Alloc {
     var nc = compiler_new()
     nc.vreg_to_preg[0 as usize] = 15
     nc.vreg_to_preg[1 as usize] = 12
     nc.vreg_to_preg[2 as usize] = -1
     nc.vreg_to_preg[3 as usize] = 0
-    nc_used_allocatable_preg_mask(nc, 4) == (X86_ALLOCATABLE_R12_MASK() | X86_ALLOCATABLE_R15_MASK())
+    if nc_used_allocatable_preg_mask(nc, 4) != (X86_ALLOCATABLE_R12_MASK() | X86_ALLOCATABLE_R15_MASK()) { return false }
+    if nc_used_allocatable_preg_mask(nc, NC_MAX_VREGS + 1) != (X86_ALLOCATABLE_R12_MASK() | X86_ALLOCATABLE_R15_MASK()) { return false }
+    compiler_main_test_ir_vreg_boundary_contract()
 }
 
 // T71: odd allocatable-save counts add an 8-byte alignment pad before calls
@@ -23195,17 +23245,17 @@ fn compiler_main_self_tests_part_01(passed_in: i64) -> i64 with IO, Mut, Panic, 
     }
 
     if compiler_main_test_frame_trim_param_vreg() {
-        println("  T69 OK: nc_min_frame_size handles param vreg (RA_UNASSIGNED) as stack slot")
+        println("  T69 OK: nc_min_frame_size covers params and high stack-only vreg boundaries")
         passed = passed + 1
     } else {
-        println("  FAIL: T69 nc_min_frame_size handles param vreg (RA_UNASSIGNED) as stack slot")
+        println("  FAIL: T69 nc_min_frame_size param/high-vreg boundary contract")
     }
 
     if compiler_main_test_used_allocatable_preg_mask() {
-        println("  T70 OK: used allocatable preg mask tracks only r12-r15 assignments")
+        println("  T70 OK: preg mask and 16384-vreg growth boundaries are fail-closed")
         passed = passed + 1
     } else {
-        println("  FAIL: T70 used allocatable preg mask tracks only r12-r15 assignments")
+        println("  FAIL: T70 preg mask/vreg boundary contract")
     }
 
     if compiler_main_test_frame_align_for_saved_pregs() {
