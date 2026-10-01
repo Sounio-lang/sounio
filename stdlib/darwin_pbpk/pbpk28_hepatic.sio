@@ -699,13 +699,19 @@ pub fn pbpk28_hepatic_elim_step_theta(
 // the blood-row sums Σβ_i·a_i with Σβ_i ≤ h·ΣQ/V_b ≤ dt·λ. Stage 2 sees the
 // stage-1 error through c_g ≈ 1.21 and rounds a right-hand side of size
 // (c_g + c_o)·scale ≈ 1.41·scale. Together: 80 · 3 · (1.21 + 1.41) ≈ 629, taken
-// up to 1024 because the stage-2 solve's max-norm gain in concentration units
-// is bounded by K_p ratios rather than by 1. The bound is then 2.1e-10 at
-// dt = 0.05 h on rapamycin (λ ≈ 3.8e4 /h) — eight orders below the −0.085
-// the unrestarted γ-stage produces — so it separates rounding from a real
-// positivity failure. It covers one step's rounding given its input; negativity
-// inherited from earlier steps is damped by the L-stable stages, not bounded
-// here.
+// up to 1024 as a rounding-only margin (operation counts and coefficient
+// sizes; no measured value went into 1024 itself). It is NOT a bound on the
+// stage-2 solve's actual max-norm gain, which is set by K_p and PS and is
+// unbounded over the domain `md_params_error` accepts (any finite K_p > 0):
+// Copilot review, PR #2695, 2026-10-01, confirmed by direct repro — see
+// "K_p is not bounded by this tolerance" below. At production dt (≤ 0.5 h,
+// λ ≈ 3.8e4 /h for rapamycin) the bound is 2.1e-10 at dt = 0.05 h, eight
+// orders below the −0.085 the unrestarted γ-stage produces, so it separates
+// rounding from a real positivity failure there. It covers one step's
+// rounding given its input; negativity inherited from earlier steps is
+// damped by the L-stable stages, not bounded here, and — like the K_p gain
+// above — genuine (non-rounding) loss of positivity remains possible at any
+// dt (Bolley & Crouzeix 1978; see "Known limits" in the PR / module docs).
 //
 // Ceiling. tol grows linearly in dt·λ, and a certificate that admits entries
 // down to −tol·scale stops meaning anything once tol reaches the resolution
@@ -720,6 +726,27 @@ pub fn pbpk28_hepatic_elim_step_theta(
 // about 234 h for rapamycin's lung (λ ≈ 3.8e4 /h) against production and gate
 // steps of at most 0.5 h (dt/dt_max ≤ 2.2e-3). Above it the step PANICS as not
 // certifiable instead of running with a meaningless certificate.
+//
+// dt_max is NOT a promise that a step below it will succeed. It bounds only
+// when the ROUNDING tolerance (1024·u·(1+dt·λ)) stops being a meaningful
+// threshold; it does not bound the K_p/PS-dependent gain above, so a step
+// can legitimately panic on real, non-rounding positivity loss at any
+// dt ≤ dt_max, by design (Bolley & Crouzeix 1978). Measured 2026-10-01 (PR
+// #2695 review, responding to the Copilot finding above): starting the
+// UNMODIFIED rapamycin profile from a uniform C_v = 1, C_t,i = K_p,i state
+// (both with k_t = 0 and with a representative nonzero per-organ k_t), the
+// very first TR-BDF2 step panics for dt ≥ ~0.05·dt_max (≈ 12 h) and first
+// succeeds at dt ≈ 0.02·dt_max (≈ 4.7 h) in the cases measured — roughly
+// 20-50× below the stated 234 h ceiling, not a rounding-margin miss. That is
+// still ~10-20× the largest production/gate dt (0.5 h) used anywhere in this
+// repository, so no shipped scenario is affected, and no gate exercises a
+// step anywhere near dt_max (VC tests only the `pbpk28_step_certifiable`
+// predicate, never a real step at dt_max). But dt_max must not be read, here
+// or elsewhere, as "the largest dt a real step will run at" for an arbitrary
+// profile — deriving a K_p/PS-aware bound that would make it so is tracked
+// as follow-up work requiring dedicated numerical review (blocked in this
+// container: no LLM-offload provider key is configured for the mandatory
+// M1 math review), not attempted blind in this revision.
 fn p28h_trbdf2_gamma() -> f64 { return 2.0 - 1.4142135623730951 }
 
 pub fn pbpk28_trbdf2_d() -> f64 with Div {
