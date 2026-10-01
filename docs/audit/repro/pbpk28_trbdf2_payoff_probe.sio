@@ -1,0 +1,83 @@
+// Probe: what the clamp-free TR-BDF2 transport of ddi/multidrug28.sio buys on
+// a long coupled run. Evidence for PR #2695, not a gate.
+// Dispatch: docs/audit/PBPK28_CN_FLOOR_CLAMP_MASS_INJECTION_DISPATCH_2026-09-26.md
+//
+// Scenario: 60 days (1440 h), three drugs on the gate fixtures' profiles
+// (tests/run-pass/darwin_pbpk28_multidrug_gates.sio), portal routing,
+// predictor-corrector coupling (md.iters = 1, the default):
+//   A  victim fixture (rapamycin transport, CL_c 1.5, CYP3A4 CLint liver 200 /
+//      gut 30 L/h, fu 0.1, fa 0.95, ka 1.5), Ki 0.02; oral 5 mg every 24 h;
+//   B  victim fixture with CL_c 0.5, Ki 0.005; oral 100 mg every 24 h;
+//   C  gate V4's perpetrator (rapamycin transport, CL_c 10, fu 0.3, no CLint),
+//      Ki 0.05; IV infusion 5 mg/h on days 0-30, then off.
+// ARM selects the run (edit the constant, or use the sed line in "Reproduce"):
+//   0  TR-BDF2 + backward-Euler restart (the new default) at dt = 0.1 h
+//   1  legacy CN + floored restart (the previous default) at dt = 0.02 h
+//   2  TR-BDF2 at dt = 0.01 h (fine reference)
+//   3  TR-BDF2 at dt = 0.02 h (the transport swap alone, at the old dt)
+//   4  legacy at dt = 0.1 h (the dt change alone, on the old transport)
+//   5  TR-BDF2 at dt = 0.1 h with 4 coupling sweeps (md.iters = 4)
+// Prints per drug: AUC_blood (x1e6, 12 significant digits), the identity
+// residual |body + lumen + lost + elim - dose|/dose, and the clamped mass.
+//
+// Reproduce (from the repository root):
+//   for a in 0 1 2 3 4 5; do sed "s/^const ARM: i32 = 0/const ARM: i32 = $a/" \
+//     docs/audit/repro/pbpk28_trbdf2_payoff_probe.sio > /tmp/payoff_$a.sio
+//     ./bin/souc compile /tmp/payoff_$a.sio -o /tmp/payoff_$a.elf
+//     /usr/bin/time -f "%e s" /tmp/payoff_$a.elf; done
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::ddi::multidrug28::*
+
+const ARM: i32 = 0
+
+fn add_victim(md: &!MultiDrug28, cl_c: f64) -> i32 with Mut, Panic {
+    var p = pbpk28_params_rapamycin()
+    p.cl_central = cl_c
+    let i = md_add_drug(md, p, 0.1, 0.95, 1.5)
+    md_set_fu_site(md, i, md_site_gut(), 1.0)
+    md_set_clint(md, i, md_site_liver(), md_cyp3a4(), 200.0)
+    md_set_clint(md, i, md_site_gut(), md_cyp3a4(), 30.0)
+    return i
+}
+
+fn main() -> i32 with Mut, Div, Panic, IO {
+    var md = md_new(true)
+    var dt = 0.1
+    if ARM == 1 {
+        md.method = md_method_cn_legacy()
+        dt = 0.02
+    }
+    if ARM == 2 { dt = 0.01 }
+    if ARM == 3 { dt = 0.02 }
+    if ARM == 4 { md.method = md_method_cn_legacy() }
+    if ARM == 5 { md.iters = 4 }
+    let a = add_victim(&!md, 1.5)
+    let b = add_victim(&!md, 0.5)
+    var pc = pbpk28_params_rapamycin()
+    pc.cl_central = 10.0
+    let c = md_add_drug(&!md, pc, 0.3, 1.0, 1.0)
+    md_set_fu_site(&!md, c, md_site_gut(), 1.0)
+    md_set_ki(&!md, a, md_cyp3a4(), 0.02)
+    md_set_ki(&!md, b, md_cyp3a4(), 0.005)
+    md_set_ki(&!md, c, md_cyp3a4(), 0.05)
+    md_set_iv_rate(&!md, c, 5.0)
+    var day: i32 = 0
+    while day < 60 {
+        if day == 30 { md_set_iv_rate(&!md, c, 0.0) }
+        md_dose_oral(&!md, a, 5.0)
+        md_dose_oral(&!md, b, 100.0)
+        md_run_to(&!md, ((day + 1) * 24) as f64, dt)
+        day = day + 1
+    }
+    print("PAYOFF arm=") print(ARM) print(" dt=") println(dt)
+    var i: i32 = 0
+    while i < 3 {
+        print("  drug=") print(i)
+        print(" AUC_blood_x1e6=") print(md.auc_b[i] * 1000000.0)
+        print(" identity_resid_x1e12=") print(md_mass_residual(&md, i) * 1.0e12)
+        print(" clamped_mg_x1e12=") println(md_clamped(&md, i) * 1.0e12)
+        i = i + 1
+    }
+    0
+}
