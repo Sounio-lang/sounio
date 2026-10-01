@@ -45,6 +45,13 @@ struct LowerLocalStack {
     // 1 only when each array element is known to occupy one non-aggregate word.
     // Nested arrays and struct elements must not take the shallow slot-copy path.
     array_copy_word_scalar: Box<LowerLocalI64Slots>,
+    // 1 when struct_types holds an ARRAY's element type rather than the
+    // local's own type. bind_local_struct_type is shared by both, and an
+    // open array (`[P]`) or a fixed array of non-literal length has
+    // array_lens == -1, so nothing else tells them apart. Without this bit
+    // the by-value copy reads such an array as one P and copies the wrong
+    // number of slots.
+    struct_type_is_array_elem: Box<LowerLocalI64Slots>,
     wide_bits: Box<LowerLocalI64Slots>,
     wide_signed: Box<LowerLocalI64Slots>,
     // Findings 11 (#2084): 1 when a local/param is a non-wide unsigned integer
@@ -134,6 +141,7 @@ fn empty_lower_local_stack() -> LowerLocalStack with Alloc, Mut {
         array_elem_wide_bits: lowerer_box_local_i64_slots(0),
         array_lens: lowerer_box_local_i64_slots(-1),
         array_copy_word_scalar: lowerer_box_local_i64_slots(0),
+        struct_type_is_array_elem: lowerer_box_local_i64_slots(0),
         wide_bits: lowerer_box_local_i64_slots(0),
         wide_signed: lowerer_box_local_i64_slots(0),
         // Findings 11 (#2084): see the is_unsigned_int field comment above.
@@ -673,6 +681,14 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
         print("         registry (LOWER_IMPL_METHOD_HASH) dropped the rest. A lowercase-typed\n")
         print("         method past this point can lose its \"this is a real method\" evidence\n")
         print("         and be stripped to a bare free-fn name, silently.\n")
+    } else if IR_LOWER_HARD_ERROR_REASON == 5 {
+        print("  cause: function `")
+        ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
+        print("` needs at least ")
+        print_int(IR_LOWER_HARD_ERROR_NEEDED)
+        print(" virtual registers but IR_MAX_VREGS is ")
+        print_int(IR_LOWER_HARD_ERROR_LIMIT)
+        print("\n")
     } else if IR_LOWER_HARD_ERROR_NEEDED > 0 {
         print("  cause: function `")
         ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
@@ -5326,6 +5342,7 @@ fn lowerer_bind_local_mut(
         (*(*locals_box).array_elem_wide_bits).values[idx as usize] = 0
         (*(*locals_box).array_lens).values[idx as usize] = -1
         (*(*locals_box).array_copy_word_scalar).values[idx as usize] = 0
+        (*(*locals_box).struct_type_is_array_elem).values[idx as usize] = 0
         (*(*locals_box).wide_bits).values[idx as usize] = 0
         (*(*locals_box).wide_signed).values[idx as usize] = 0
         // Findings 11 (#2084): zero-init the per-slot unsigned-int flag.
@@ -5617,6 +5634,13 @@ fn lowerer_fresh_reg_mut(lo: &! Lowerer) -> i64 with Mut, Panic, Div {
     }
     var current_func_box = (*lo).current_func
     let reg = (*current_func_box).reg_count
+    if !ir_reg_count_can_grow(reg, 1) {
+        lowerer_mark_hard_error(lo)
+        IR_LOWER_HARD_ERROR_REASON = 5
+        IR_LOWER_HARD_ERROR_LIMIT = IR_MAX_VREGS
+        IR_LOWER_HARD_ERROR_NEEDED = reg + 1
+        return 0
+    }
     (*current_func_box).reg_count = reg + 1
     (*lo).current_func = current_func_box
     reg
@@ -9440,6 +9464,66 @@ impl Lowerer {
         (lo, dst_reg)
     }
 
+    // Budget the deep copy BEFORE emitting any of it. `emit` turns an overrun
+    // past IR_MAX_INSTRS into a lowering error, so a struct whose aggregate
+    // fields will not fit degrades to the #1475 flat copy -- strictly the
+    // previous behaviour -- instead of breaking a build the user did not ask us
+    // to break.
+    fn emit_struct_value_copy_budgeted(self, src_reg: i64, type_name: Name, slot_count: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        let deep_cost = self.struct_deep_copy_cost(type_name, slot_count, 0)
+        let deep_room = IR_MAX_INSTRS - self.struct_deep_copy_instr_headroom() - self.current_func.instr_count
+        if deep_cost <= deep_room {
+            self.emit_struct_value_copy_deep(src_reg, type_name, slot_count, 0)
+        } else {
+            self.emit_struct_value_copy(src_reg, type_name, slot_count)
+        }
+    }
+
+    // Value of the aggregate local `name` (currently in `reg`) as a STORED
+    // value: a fresh deep copy for a word-scalar fixed array or a value-copyable
+    // struct, `reg` unchanged for everything else.
+    //
+    // `let y = x` has copied since #1475/#1479, but assignment stored the source
+    // HANDLE: `z = x`, `*dst = x`, `o.f = x` and `a[i] = x` all left the
+    // destination sharing x's storage, so a later in-place write through either
+    // name showed through the other -- scalar fields included, not only array
+    // fields (docs/audit/MADAROS_STRUCT_REASSIGN_ARRAY_ALIAS_DISPATCH_2026-09-26.md).
+    //
+    // The copy is FRESH, not written into the destination's existing storage.
+    // Writing in place would cost no handle, but it is correct only while the
+    // destination owns its storage alone, and Madaros still binds shared storage
+    // on other paths (`let v = *p`, `let v = o.f`, a struct literal fed a local
+    // aggregate, E232). An in-place copy through such a destination would write
+    // into the other owner -- a new miscompile in place of the old one. A fresh
+    // copy only ever rebinds the destination. Its cost is 1 + k handles per
+    // executed assignment against the never-reclaimed handle table; running out
+    // exits 182 rather than printing a wrong number.
+    //
+    // Same carve-outs as the let path: arrays whose elements are not word
+    // scalars (`[Struct; N]`), Box, Knowledge, reference locals and BSS globals
+    // keep the handle.
+    fn emit_ident_aggregate_value_copy(self, name: Name, reg: i64) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if self.lookup_local(name) < 0 { return (self, reg) }
+        if self.lookup_local_is_global(name) { return (self, reg) }
+        let arr_len = self.lookup_local_fixed_array_len(name)
+        if arr_len >= 0 {
+            if self.lookup_local_array_copy_word_scalar(name) {
+                let elem_is_float = self.lookup_local_array_elem_float(name)
+                return self.emit_fixed_array_value_copy(reg, arr_len, elem_is_float)
+            }
+            return (self, reg)
+        }
+        let st_name = self.lookup_local_struct_type(name)
+        // struct_types also carries an array's element type. An open array
+        // or a fixed array of non-literal length has no recorded length, so
+        // it would be copied as one element. Keep the handle instead.
+        if self.lookup_local_struct_type_is_array_elem(name) { return (self, reg) }
+        if !self.struct_local_is_value_copyable(name, st_name) { return (self, reg) }
+        let slot_count = self.struct_layout_slot_count(st_name)
+        if slot_count <= 0 { return (self, reg) }
+        self.emit_struct_value_copy_budgeted(reg, st_name, slot_count)
+    }
+
     // Whether `var y = x` on struct-typed local `x` may be value-copied.
     //
     // Excluded, each for a distinct reason:
@@ -10108,6 +10192,7 @@ impl Lowerer {
                 (*(*stk).array_elem_wide_bits).values[idx as usize] = 0
                 (*(*stk).array_lens).values[idx as usize] = -1
                 (*(*stk).array_copy_word_scalar).values[idx as usize] = 0
+                (*(*stk).struct_type_is_array_elem).values[idx as usize] = 0
                 (*(*stk).wide_bits).values[idx as usize] = 0
                 (*(*stk).wide_signed).values[idx as usize] = 0
                 // Findings 11 (#2084): zero-init the per-slot unsigned-int flag.
@@ -10372,13 +10457,19 @@ impl Lowerer {
         }
     }
 
-    fn bind_local_struct_type(self, name: Name, type_name: Name) -> Lowerer with Mut, Alloc, Panic, Div {
+    // `from_array` is not optional decoration. struct_types holds either the
+    // local's own struct type or, for an array, the element's type, and the
+    // by-value copy cannot tell them apart except by the bit set here. Taking
+    // the bit in the same call is the point: a second setter was forgotten by
+    // every path that grew a binding after it existed.
+    fn bind_local_struct_type(self, name: Name, type_name: Name, from_array: bool) -> Lowerer with Mut, Alloc, Panic, Div {
         var lo = self
         var stk = lo.locals
         var i = (*stk).count - 1
         while i >= 0 {
             if (*(*stk).depths).values[i as usize] <= lo.scope_depth && ir_name_eq((*(*stk).names).values[i as usize], name) {
                 (*(*stk).struct_types).values[i as usize] = type_name
+                (*(*stk).struct_type_is_array_elem).values[i as usize] = if from_array { 1 } else { 0 }
                 lo.locals = stk
                 return lo
             }
@@ -10519,6 +10610,16 @@ impl Lowerer {
         -1
     }
 
+    fn lookup_local_struct_type_is_array_elem(self, name: Name) -> bool with Mut, Panic, Div, Alloc {
+        var i = (*self.locals).count - 1
+        while i >= 0 {
+            if (*(*self.locals).depths).values[i as usize] <= self.scope_depth && ir_name_eq((*(*self.locals).names).values[i as usize], name) {
+                return (*(*self.locals).struct_type_is_array_elem).values[i as usize] == 1
+            }
+            i = i - 1
+        }
+        false
+    }
     fn lookup_local_array_copy_word_scalar(self, name: Name) -> bool with Mut, Panic, Div, Alloc {
         var i = (*self.locals).count - 1
         while i >= 0 {
@@ -14352,6 +14453,16 @@ impl Lowerer {
         }
         var current_func_box = lo.current_func
         let reg = (*current_func_box).reg_count
+        if reg >= IR_MAX_VREGS {
+            IR_LOWER_HARD_ERROR = 1
+            if IR_LOWER_HARD_ERROR_REASON == 0 {
+                IR_LOWER_HARD_ERROR_REASON = 5
+                IR_LOWER_HARD_ERROR_LIMIT = IR_MAX_VREGS
+                IR_LOWER_HARD_ERROR_NEEDED = reg + 1
+                ir_copy_name_to_flat(&(*current_func_box).name, &! IR_LOWER_HARD_ERROR_FN_BUF, &! IR_LOWER_HARD_ERROR_FN_LEN)
+            }
+            return (lo, 0)
+        }
         (*current_func_box).reg_count = reg + 1
         lo.current_func = current_func_box
         (lo, reg)
@@ -14368,6 +14479,17 @@ impl Lowerer {
         }
         var current_func_box = lo.current_func
         let reg = (*current_func_box).reg_count
+        let end = reg + limbs
+        if reg >= IR_MAX_VREGS || end < reg || end > IR_MAX_VREGS {
+            IR_LOWER_HARD_ERROR = 1
+            if IR_LOWER_HARD_ERROR_REASON == 0 {
+                IR_LOWER_HARD_ERROR_REASON = 5
+                IR_LOWER_HARD_ERROR_LIMIT = IR_MAX_VREGS
+                IR_LOWER_HARD_ERROR_NEEDED = end
+                ir_copy_name_to_flat(&(*current_func_box).name, &! IR_LOWER_HARD_ERROR_FN_BUF, &! IR_LOWER_HARD_ERROR_FN_LEN)
+            }
+            return (lo, 0)
+        }
         (*current_func_box).reg_count = reg + limbs
         lo.current_func = current_func_box
         (lo, reg)
@@ -17574,6 +17696,12 @@ impl Lowerer {
                         (*(*locals).array_elem_wide_bits).values[idx as usize] = lower_type_expr_array_elem_wide_bits(&(*list).head.ty)
                         (*(*locals).array_lens).values[idx as usize] = param_array_len
                         (*(*locals).array_copy_word_scalar).values[idx as usize] = if param_word_scalar { 1 } else { 0 }
+                        // This path writes the slot directly, not through bind_local,
+                        // and the stack only resets count between functions. An
+                        // array local in a function lowered earlier can leave
+                        // struct_type_is_array_elem set on the slot this parameter
+                        // reuses, which would suppress the copy for a struct param.
+                        (*(*locals).struct_type_is_array_elem).values[idx as usize] = 0
                         // V0-E.5.4: f128 params are F128Bits handles (wide_bits=128, kind 5
                         // below) so they are ready softfloat operands; f256 stays kind 5 only.
                         (*(*locals).wide_bits).values[idx as usize] = if lower_type_expr_is_f128(&(*list).head.ty) { 128 } else { 0 }
@@ -19049,7 +19177,7 @@ impl Lowerer {
                         lo = uninit_pair.0
                         let uninit_dst = uninit_pair.1
                         lo = lo.emit(ir_alloc(uninit_dst, lo.aggregate_storage_bytes(st_slot_count)))
-                        lo = lo.bind_local_struct_type(s.name, st_name)
+                        lo = lo.bind_local_struct_type(s.name, st_name, false)
                         bind_reg = uninit_dst
                     }
                 }
@@ -19090,18 +19218,7 @@ impl Lowerer {
                         // the #1475 carve-out for `[Struct;N]` LOCALS.
                         let st_name = lo.lookup_local_struct_type((*rhs_ident).name)
                         let slot_count = lo.struct_layout_slot_count(st_name)
-                        // Budget the deep copy BEFORE emitting any of it. `emit` turns an
-                        // overrun past IR_MAX_INSTRS into a lowering error, so a struct
-                        // whose aggregate fields will not fit degrades to the #1475 flat
-                        // copy — strictly the previous behaviour — instead of breaking a
-                        // build the user did not ask us to break.
-                        let deep_cost = lo.struct_deep_copy_cost(st_name, slot_count, 0)
-                        let deep_room = IR_MAX_INSTRS - lo.struct_deep_copy_instr_headroom() - lo.current_func.instr_count
-                        let struct_copy_pair = if deep_cost <= deep_room {
-                            lo.emit_struct_value_copy_deep(reg, st_name, slot_count, 0)
-                        } else {
-                            lo.emit_struct_value_copy(reg, st_name, slot_count)
-                        }
+                        let struct_copy_pair = lo.emit_struct_value_copy_budgeted(reg, st_name, slot_count)
                         lo = struct_copy_pair.0
                         bind_reg = struct_copy_pair.1
                     } else {
@@ -19174,7 +19291,7 @@ impl Lowerer {
                 if fixed_array_len < 0 {
                     let st_name_noinit = lower_opt_type_named_name(&s.ty)
                     if lo.struct_layout_slot_count(st_name_noinit) > 0 {
-                        lo = lo.bind_local_struct_type(s.name, st_name_noinit)
+                        lo = lo.bind_local_struct_type(s.name, st_name_noinit, false)
                     }
                 }
             }
@@ -19604,13 +19721,13 @@ impl Lowerer {
         match s.ty {
             Some(ann_ty) => {
                 if (*ann_ty).kind == TypeExprKind::TypeKnowledge {
-                    lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"))
+                    lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"), false)
                 }
             }
             _ => {}
         }
         if lower_opt_type_is_seq(&s.ty) {
-            lo = lo.bind_local_struct_type(s.name, make_name("Seq"))
+            lo = lo.bind_local_struct_type(s.name, make_name("Seq"), false)
             match s.ty {
                 Some(seq_ty) => {
                     let seq_elem = lower_type_expr_seq_named_elem_name(&(*seq_ty))
@@ -19649,11 +19766,11 @@ impl Lowerer {
                     match (*arr_ty).inner {
                         Some(el) => {
                             if (*el).kind == TypeExprKind::TypeKnowledge {
-                                lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"))
+                                lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"), true)
                             } else if (*el).kind == TypeExprKind::TypeNamed {
                                 let el_name = ir_path_first_name((*el).path)
                                 if el_name.len > 0 {
-                                    lo = lo.bind_local_struct_type(s.name, el_name)
+                                    lo = lo.bind_local_struct_type(s.name, el_name, true)
                                 }
                             }
                         }
@@ -19666,7 +19783,7 @@ impl Lowerer {
         match s.expr {
             Some(expr_box) => {
                 if (*expr_box).kind == ExprKind::ExprStructLit {
-                    lo = lo.bind_local_struct_type(s.name, ir_path_first_name((*expr_box).path))
+                    lo = lo.bind_local_struct_type(s.name, ir_path_first_name((*expr_box).path), false)
                 } else if (*expr_box).kind == ExprKind::ExprCall {
                     let callee_opt_struct_ref = &(*expr_box).left
                     let callee_struct_name = match *callee_opt_struct_ref {
@@ -19699,10 +19816,10 @@ impl Lowerer {
                     }
                     // measure(...) → Knowledge (return-name lookup often misses builtins)
                     if ir_name_is_measure(callee_struct_name) {
-                        lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"))
+                        lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"), false)
                     }
                     if name_eq(callee_struct_name, make_name("seq_len")) {
-                        lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"))
+                        lo = lo.bind_local_struct_type(s.name, make_name("Knowledge"), false)
                     }
                     // `let pair = f()` where f returns a tuple carrying a named
                     // struct in slot k: record THAT slot's layout, so `pair.k.field`
@@ -19720,13 +19837,13 @@ impl Lowerer {
                     if !callee_is_box {
                         let ret_name = lo.expr_call_return_struct_name_ref(&(*expr_box))
                         if ret_name.len > 0 {
-                            lo = lo.bind_local_struct_type(s.name, ret_name)
+                            lo = lo.bind_local_struct_type(s.name, ret_name, false)
                         }
                     } else {
                         // `let b = Box::new(...)`: tag the local's struct-type slot with
                         // "Box" so `*b` lowers to a field-0 read (box deref through the
                         // handle) rather than a raw IrUnaryOp(OpDeref) pointer load.
-                        lo = lo.bind_local_struct_type(s.name, make_name("Box"))
+                        lo = lo.bind_local_struct_type(s.name, make_name("Box"), false)
                         let bxl = lower_struct_layout_index_of(&(*lo.struct_layouts), lo.expr_first_arg_struct_name_ref(&(*expr_box)))
                         lo = lo.bind_local_box_inner_layout(s.name, bxl)
                     }
@@ -19752,7 +19869,7 @@ impl Lowerer {
                                     if tsl >= 0 && tsl < (*lo.struct_layouts).count {
                                         lo = lo.bind_local_struct_type(
                                             s.name,
-                                            (*lo.struct_layouts).entries[tsl as usize].type_name)
+                                            (*lo.struct_layouts).entries[tsl as usize].type_name, false)
                                     }
                                 }
                             }
@@ -19766,7 +19883,10 @@ impl Lowerer {
                                     let tuple0_layout = lo.lookup_local_tuple0_array_elem_layout((*tuple_base).name)
                                     if tuple0_layout >= 0 && tuple0_layout < (*lo.struct_layouts).count {
                                         let tuple0_type = (*lo.struct_layouts).entries[tuple0_layout as usize].type_name
-                                        lo = lo.bind_local_struct_type(s.name, tuple0_type)
+                                        // The layout came from a tuple slot that holds an
+                                        // array, so the type bound here is the element
+                                        // type, not the local's own type.
+                                        lo = lo.bind_local_struct_type(s.name, tuple0_type, true)
                                     }
                                 }
                             }
@@ -19803,7 +19923,7 @@ impl Lowerer {
                             if base_st.len > 0 {
                                 let fld_ty = lo.struct_layout_field_named_type(base_st, (*expr_box).name)
                                 if fld_ty.len > 0 {
-                                    lo = lo.bind_local_struct_type(s.name, fld_ty)
+                                    lo = lo.bind_local_struct_type(s.name, fld_ty, false)
                                 }
                             }
                         }
@@ -19827,7 +19947,7 @@ impl Lowerer {
                     // when two structs shared a field name (see field_is_pointer_for_struct).
                     if lo.field_is_box_for_base_ref(&(*expr_box).left, (*expr_box).name) {
                         if lower_aggregate_diag_enabled() { print("lower_agg: BIND-BOX-FROM-FIELD fired\n") }
-                        lo = lo.bind_local_struct_type(s.name, make_name("Box"))
+                        lo = lo.bind_local_struct_type(s.name, make_name("Box"), false)
                         // expr_first_arg_struct_name_ref answers the inner T only
                         // for call/struct-literal RHS (`Box::new(mk())`); a
                         // FIELD-access RHS (`let p = h.inner`) carries no argument
@@ -19853,7 +19973,7 @@ impl Lowerer {
                     let fn_id = lowerer_lookup_fn_id_by_name_ref(&lo, call_name)
                     let ret_name = lo.return_struct_name_for_fn_id(fn_id)
                     if ret_name.len > 0 {
-                        lo = lo.bind_local_struct_type(s.name, ret_name)
+                        lo = lo.bind_local_struct_type(s.name, ret_name, false)
                     }
                     // `let pair = c.method(...)` where the method returns
                     // `(Self, T)`. The plain-call branch above records the tuple
@@ -19893,7 +20013,7 @@ impl Lowerer {
                         let e_slot = lo.return_tuple_struct_slot_for_fn_id(else_fn)
                         if t_slot == e_slot && ir_name_eq(t_ret, e_ret) {
                             if t_ret.len > 0 {
-                                lo = lo.bind_local_struct_type(s.name, t_ret)
+                                lo = lo.bind_local_struct_type(s.name, t_ret, false)
                             }
                             if t_slot >= 0 {
                                 let t_name = lo.return_tuple_struct_name_for_fn_id(then_fn)
@@ -19911,7 +20031,7 @@ impl Lowerer {
                     // bound from `Some(nx)`) so `*b` / field access on b resolve correctly.
                     let src_st = lo.lookup_local_struct_type((*expr_box).name)
                     if src_st.len > 0 {
-                        lo = lo.bind_local_struct_type(s.name, src_st)
+                        lo = lo.bind_local_struct_type(s.name, src_st, lo.lookup_local_struct_type_is_array_elem((*expr_box).name))
                     }
                     let src_elem_layout = lo.lookup_local_tuple0_array_elem_layout((*expr_box).name)
                     if src_elem_layout >= 0 {
@@ -20148,7 +20268,37 @@ impl Lowerer {
             self.lower_opt_expr_ref(&s.expr)
         }
         var lo = pair_rhs.0
-        let rhs = pair_rhs.1
+        var rhs = pair_rhs.1
+        // An aggregate stored from a named local is stored BY VALUE, as `let`
+        // binds it (see emit_ident_aggregate_value_copy). f128 slots copied their
+        // limbs above.
+        if !target_is_f128 {
+            match s.expr {
+                Some(rhs_agg) => {
+                    if (*rhs_agg).kind == ExprKind::ExprIdent {
+                        // `x = x` changes nothing. The copy allocates a fresh
+                        // handle per execution and handles are never reclaimed
+                        // (gc.sio, cap 4194304), so a self-assignment inside a
+                        // loop would exit 182 on a program that was a no-op.
+                        var self_assign = false
+                        match s.target {
+                            Some(tgt_agg) => {
+                                if (*tgt_agg).kind == ExprKind::ExprIdent {
+                                    self_assign = ir_name_eq((*tgt_agg).name, (*rhs_agg).name)
+                                }
+                            }
+                            _ => {}
+                        }
+                        if !self_assign {
+                            let agg_pair = lo.emit_ident_aggregate_value_copy((*rhs_agg).name, rhs)
+                            lo = agg_pair.0
+                            rhs = agg_pair.1
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
         var rhs_variance: i64 = -1
         var rhs_is_float: bool = false
         match s.expr {
@@ -22434,7 +22584,7 @@ impl Lowerer {
                     // the recursive-data root). Safe for non-Box payloads: marking only
                     // changes how `*nx` lowers, and deref/field-access of a non-Box payload
                     // (e.g. Option<i64>) is not valid code anyway.
-                    lo = lo.bind_local_struct_type(inner.name, make_name("Box"))
+                    lo = lo.bind_local_struct_type(inner.name, make_name("Box"), false)
                     lo
                 } else if inner.kind == PatternKind::PatWildcard {
                     // _ inside Some(_) — no binding needed
@@ -23551,7 +23701,7 @@ impl Lowerer {
                 lo = lo.bind_local(s.name, dest, is_mut)
                 lo = lo.bind_local_scalar_kind(s.name, 5)
                 lo = lo.bind_local_wide_type(s.name, 128, 0)
-                lo = lo.bind_local_struct_type(s.name, make_name("F128Bits"))
+                lo = lo.bind_local_struct_type(s.name, make_name("F128Bits"), false)
                 (lo, dest)
             }
             None => lower_f128_fail(self, "f128 let requires an initializer (V0-E.5.1)"),
@@ -24650,7 +24800,13 @@ impl Lowerer {
         var lo3 = if is_box_deref {
             lo2.emit(ir_field_get(dst, src, 0, ir_empty_name()))
         } else {
-            lo2.emit(ir_unaryop(dst, e.un_op, src))
+            var uins = ir_unaryop(dst, e.un_op, src)
+            // Bit 1: the operand is f64. Codegen reads it off the instruction,
+            // so a vreg past the 2048-bit set still flips the sign bit.
+            if src_is_float && e.un_op == UnaryOp::OpNeg {
+                uins.imm_flags = 2
+            }
+            lo2.emit(uins)
         }
         if src_is_float {
             lo3 = lo3.emit(ir_mark_float_reg(dst))
@@ -26603,6 +26759,17 @@ fn ir_patch_validated_calls_in_function(
     }
 
     if func.compile_strategy != IR_STRATEGY_INSTRUMENTED {
+        // This patch allocates one register after ordinary lowering. Refuse it
+        // at the same ceiling instead of producing final IR outside the range
+        // represented by the native class tables.
+        if !ir_reg_count_can_grow(func.reg_count, 1) {
+            IR_LOWER_HARD_ERROR = 1
+            IR_LOWER_HARD_ERROR_REASON = 5
+            IR_LOWER_HARD_ERROR_LIMIT = IR_MAX_VREGS
+            IR_LOWER_HARD_ERROR_NEEDED = func.reg_count + 1
+            ir_copy_name_to_flat(&func.name, &! IR_LOWER_HARD_ERROR_FN_BUF, &! IR_LOWER_HARD_ERROR_FN_LEN)
+            return
+        }
         shared_validated_reg = func.reg_count
         func.reg_count = func.reg_count + 1
         if ir_function_insert_instr_front(func, ir_load_imm(shared_validated_reg, 1)) {
