@@ -39,6 +39,19 @@
 #                md_dose_oral / md_dose_iv_bolus with mg = -1, NaN, +Inf: the
 #                refusal side of "the predicate is false exactly when the
 #                call panics" (the accepting side is V14 of the multidrug gates).
+#   absorb_underflow  a second drug with ka = 400 /h, dt = 2 h (ka*dt = 800
+#                >= 750, so md_exp_neg(800) = 0 exactly and
+#                md_absorbed_fraction returns 1.0 exactly: absorbed = lum
+#                unchanged, no flush at the multiply). Dosed 5e-324 (the
+#                smallest positive subnormal): absorbed/dt = 5e-324/2 rounds
+#                to exactly 0 (dividing by a divisor > 1 shrinks it below the
+#                smallest subnormal), so the lumen would lose the dose while
+#                the tissue input received nothing -- a silent mass leak
+#                md_absorb used to let through (PR #2695 review). dt = 2 is
+#                far inside rapamycin's dt_max (~234 h), so this is purely
+#                the rate-underflow path, not the certificate ceiling.
+#   absorb_control  the same drug/dt with a larger (still tiny) dose, 1e-300,
+#                whose absorbed/dt is representable; must step normally.
 #
 # Engine: bin/souc (Madaros) by default; set SOUNIO_SOUC_ENGINE=lean_single to
 # run the same probes on the bootstrap engine.
@@ -201,5 +214,20 @@ echo "  control ok: representable gut-wall inverse accepted"
 write_cal_probe gut_underflow "let (ps, cl) = p28c_gut_asymmetric(0.5, 5.0e-324, 5.0e-324)
     print(\"ps \") print(ps) print(\" clint \") println(cl)"
 refused gut_underflow
+
+absorb_body() {
+  cat <<BODY
+var q = pbpk28_params_rapamycin()
+    q.cl_central = 1.0
+    let y = md_add_drug(&!md, q, 0.1, 1.0, 400.0)
+    md_dose_oral(&!md, y, $1)
+    md_step(&!md, 2.0)
+BODY
+}
+write_probe absorb_control "$(absorb_body 1.0e-300)"
+control absorb_control
+echo "  control ok: representable absorbed-dose rate accepted"
+write_probe absorb_underflow "$(absorb_body 5.0e-324)"
+refused absorb_underflow
 
 echo "PBPK28_REFUSAL_GATE_OK"
