@@ -362,6 +362,17 @@ fn md_restart_sinks_at(md: &!MultiDrug28, skip: i32, site: i32, enz: i32) with M
     }
 }
 
+// Has `drug` a positive CLint at `site`, over any of the 4 enzymes -- i.e.
+// does its own sink actually depend on `fu_site[drug][site]`?
+fn md_has_clint_at_site(md: &MultiDrug28, drug: i32, site: i32) -> bool with Mut {
+    var k: i32 = 0
+    while k < MD_NE {
+        if (*md).clint[drug * 8 + site * 4 + k] > 0.0 { return true }
+        k = k + 1
+    }
+    return false
+}
+
 pub fn md_set_fu_site(md: &!MultiDrug28, drug: i32, site: i32, fu: f64) with Mut, Panic {
     md_check_drug(md, drug)
     md_check_site(site)
@@ -369,7 +380,14 @@ pub fn md_set_fu_site(md: &!MultiDrug28, drug: i32, site: i32, fu: f64) with Mut
     if fu == (*md).fu_site[drug * 2 + site] { return }
     (*md).fu_site[drug * 2 + site] = fu
     if (*md).stepped != 0.0 {
-        (*md).restart[drug] = 1.0
+        // fu only enters drug's own ODE through its sink k_t = CLint_u·fu/K_p
+        // (pbpk28_sink_from_clint): with no CLint at this site that sink is
+        // zero regardless of fu, so drug's own trajectory is unaffected and
+        // restarting it would perturb an otherwise-untouched step for no
+        // physical reason (Copilot review, PR #2695, 2026-10-01). fu still
+        // scales drug's contribution to the shared inhibitor load at this
+        // site (C_u = fu·C_t/K_p), so victims restart as before.
+        if md_has_clint_at_site(md, drug, site) { (*md).restart[drug] = 1.0 }
         var k: i32 = 0
         while k < MD_NE {
             if (*md).ki[drug * 4 + k] > 0.0 { md_restart_sinks_at(md, drug, site, k) }
