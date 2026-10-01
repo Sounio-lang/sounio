@@ -1615,9 +1615,71 @@ pub fn parser_ahead_is_hex_frac_p_ident(p: Parser, offset: i64) -> bool with Mut
     true
 }
 
+// C99 hex-float exponent with NO sign: the lexer's identifier rule swallows the
+// exponent digits, so `p0` / `p10` / `fp0` arrive as ONE Ident. A signed
+// exponent (`p+0`) stops the Ident at the sign, which is why only that form was
+// recognised. True when the Ident at p.pos+offset is
+//   <hex digit>{min_hex,} [pP] <decimal digit> <ident chars>*
+// (the trailing ident chars are a glued suffix, accepted exactly as a glued
+// suffix Ident is after `p+0`).
+pub fn parser_ahead_fused_exp_ident(p: Parser, offset: i64, min_hex: i64) -> bool with Mut, Panic, Div {
+    if p.pending_gt > 0 {
+        return false
+    }
+    let idx = p.pos + offset
+    if idx < 0 || idx >= p.token_count {
+        return false
+    }
+    if pt_read_kind(idx) != TokenKind::Ident {
+        return false
+    }
+    let s = PT_START[idx as usize]
+    let e = PT_END[idx as usize]
+    if s < 0 || e > CURSOR_SOURCE_LEN || e - s < 2 {
+        return false
+    }
+    var i: i64 = s
+    while i < e {
+        let ch = CURSOR_SOURCE[i as usize]
+        let is_hex = (ch >= 48 as i8 && ch <= 57 as i8)
+            || (ch >= 97 as i8 && ch <= 102 as i8)
+            || (ch >= 65 as i8 && ch <= 70 as i8)
+        if !is_hex {
+            break
+        }
+        i = i + 1
+    }
+    if i - s < min_hex || i + 1 >= e {
+        return false
+    }
+    let pch = CURSOR_SOURCE[i as usize]
+    if pch != 112 as i8 && pch != 80 as i8 {
+        return false
+    }
+    let d = CURSOR_SOURCE[(i + 1) as usize]
+    if d < 48 as i8 || d > 57 as i8 {
+        return false
+    }
+    true
+}
+
+// Token at p.pos+offset starts exactly where the previous token ends.
+pub fn parser_ahead_glued(p: Parser, offset: i64) -> bool with Mut, Panic, Div {
+    if p.pending_gt > 0 {
+        return false
+    }
+    let idx = p.pos + offset
+    if idx < 1 || idx >= p.token_count {
+        return false
+    }
+    PT_START[idx as usize] == PT_END[(idx - 1) as usize]
+}
+
 // V0-B: true when tokens after a HexLit look like a C99 hex-float tail:
 //   p±exp   or   .frac p±exp   or   FloatLit(.frac) p±exp
 //   or   . Ident(hexdigits+p) ±exp   (long hex frac fused with p)
+// and, with an unsigned exponent, the same shapes with `p<digits>` fused into
+// one glued Ident: `0x1p0`, `0x1.8p0`, `0x1.0fp0`, `0x1.fp0`.
 pub fn parser_hex_float_tail_ahead(p: Parser) -> bool with Mut, Panic, Div {
     if parser_ahead_is_p_ident(p, 1) {
         let after_p = parser_peek_ahead(p, 2)
@@ -1625,6 +1687,10 @@ pub fn parser_hex_float_tail_ahead(p: Parser) -> bool with Mut, Panic, Div {
             return parser_peek_ahead(p, 3) == TokenKind::IntLit
         }
         return after_p == TokenKind::IntLit
+    }
+    // `0x1p0`: HexLit + Ident(`p0`).
+    if parser_ahead_fused_exp_ident(p, 1, 0) && parser_ahead_glued(p, 1) {
+        return true
     }
     if parser_peek_ahead(p, 1) == TokenKind::Dot {
         let frac = parser_peek_ahead(p, 2)
@@ -1635,6 +1701,11 @@ pub fn parser_hex_float_tail_ahead(p: Parser) -> bool with Mut, Panic, Div {
                     return parser_peek_ahead(p, 5) == TokenKind::IntLit
                 }
                 return after_p == TokenKind::IntLit
+            }
+            // `0x1.8p0` / `0x1.0000000000000001p0`: IntLit(`8`) + Ident(`p0`);
+            // `0x1.0fp0`: IntLit(`0`) + Ident(`fp0`).
+            if parser_ahead_fused_exp_ident(p, 3, 0) && parser_ahead_glued(p, 3) {
+                return true
             }
         }
         // Fraction that starts with a decimal digit and continues with a hex
@@ -1660,6 +1731,10 @@ pub fn parser_hex_float_tail_ahead(p: Parser) -> bool with Mut, Panic, Div {
             }
             return after_p == TokenKind::IntLit
         }
+        // `0x1.fp0`: Ident(`fp0`), hex fraction and unsigned exponent fused.
+        if parser_ahead_fused_exp_ident(p, 2, 1) && parser_ahead_glued(p, 2) {
+            return true
+        }
     }
     // Lexer may fuse ".8" into a single FloatLit after HexLit "0x1".
     if parser_peek_ahead(p, 1) == TokenKind::FloatLit && parser_ahead_is_p_ident(p, 2) {
@@ -1668,6 +1743,10 @@ pub fn parser_hex_float_tail_ahead(p: Parser) -> bool with Mut, Panic, Div {
             return parser_peek_ahead(p, 4) == TokenKind::IntLit
         }
         return after_p == TokenKind::IntLit
+    }
+    if parser_peek_ahead(p, 1) == TokenKind::FloatLit
+        && parser_ahead_fused_exp_ident(p, 2, 0) && parser_ahead_glued(p, 2) {
+        return true
     }
     false
 }
