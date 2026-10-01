@@ -239,6 +239,19 @@ pub fn md_new(portal: bool) -> MultiDrug28 {
 //     blood) not finite: they are copied and returned by md_params_of;
 //   8 portal routing on and Q_liver < Q_gut + Q_spleen + Q_pancreas (the
 //     kernel would panic on the first step; rejected at registration instead).
+//   9 v_ref[o]*vasc_frac[o] or v_ref[o]*(1-vasc_frac[o]) < 1e-30, organs
+//     1..13 (Copilot review, PR #2695, 2026-10-01, confirmed by direct
+//     repro): a v_ref small enough to put either raw layer volume below the
+//     kernel's 1e-30 floor is accepted by check 1 (v_ref only needs > 0) and
+//     by check 6 (vasc_frac strictly in (0,1) alone does not bound the
+//     product), but the solver then computes that layer's rate, hence its
+//     whole trajectory, as if the volume were the floored 1e-30 -- while
+//     pbpk28_total_mass (core/pbpk28_params.sio) books the true, unfloored
+//     volume, the same split check 6 already documents for vasc_frac = 0/1.
+//     Measured: v_ref[1] = 1e-32 (vasc_frac unchanged) passes checks 1-8,
+//     and one 0.001 h CN step with no sink or dosing moves total mass by
+//     0.23% (5.0 -> 4.988324) and the tissue concentration from 0 to
+//     10.169484 -- a real mass-conservation violation, not rounding.
 // NaN fails every test (each is written as a negated conjunction).
 pub fn md_params_error(p: PBPKParams28, portal: bool) -> i32 with Mut {
     var o: i32 = 0
@@ -260,6 +273,13 @@ pub fn md_params_error(p: PBPKParams28, portal: bool) -> i32 with Mut {
         // The kernel's own expression (pbpk28_hepatic_artery_flow panics on a
         // negative value), so validation and kernel round identically.
         if !(pbpk28_hepatic_artery_flow_unchecked(p) >= 0.0) { return 8 }
+    }
+    o = 1
+    while o < 14 {
+        let vv_raw = p.v_ref[o] * p.vasc_frac[o]
+        let vt_raw = p.v_ref[o] * (1.0 - p.vasc_frac[o])
+        if !(vv_raw >= 1.0e-30 && vt_raw >= 1.0e-30) { return 9 }
+        o = o + 1
     }
     return 0
 }
