@@ -1742,3 +1742,4 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | website.tutorials.zh.drug-dosing-04-propagation | website_only | - | tutorials/zh/drug-dosing-04-propagation | A2 | en:present, pt:english_only, el:english_only, zh:english_only, ja:english_only, es:english_only |
 | website.tutorials.zh.drug-dosing-05-decision | website_only | - | tutorials/zh/drug-dosing-05-decision | A2 | en:present, pt:english_only, el:english_only, zh:english_only, ja:english_only, es:english_only |
 | website.tutorials.zh.hello-world | website_only | - | tutorials/zh/hello-world | A2 | en:present, pt:english_only, el:english_only, zh:english_only, ja:english_only, es:english_only |
+| repo.docs.internal.concepts.pireus-material-ontology | repo_only | docs/internal/concepts/pireus-material-ontology.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
