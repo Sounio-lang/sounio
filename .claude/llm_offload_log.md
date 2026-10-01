@@ -4247,6 +4247,29 @@ merge that made it tracked replaced the local copy.
 - **zai/deepseek/local:** not run (rate limit, invalid key, endpoint down per
   the earlier entries today).
 
+## 2026-09-27T00:48Z — Claude (session 2d8d50e4) — math-review, darwin_pbpk local exp/ln helper accuracy dispatch
+
+| 2026-09-26 | xai (Grok 4.7, `grok-4.7` via xAI direct after the gateway leg failed), qwen (OpenRouter `qwen/qwen3-235b-a22b`) | math-review | docs/audit/DARWIN_PBPK_LOCAL_EXP_LN_ACCURACY_DISPATCH_2026-09-26.md | PASS after fixes | Two independent vendors. Kimi K3 failed ×4, not counted. |
+
+Route: `bin/llm-offload -t math-review` from `main` @ `ce93ea9534` (gateway tooling of #2701), keys from the workspace keys file.
+
+- **Default fan-out (xai kimi zai local), 8192 tokens:** every leg failed. Grok 4.7 via the gateway and via xAI direct returned EMPTY at 180 s. Kimi K3 hit `finish=length` with empty content. zai returned 1313 (rate limit). local: connection error.
+- **xai, rerun with OFFLOAD_MAX_TOKENS=32000 / OFFLOAD_TIMEOUT=1500:** the gateway returned `fetch_failed` (upstream xai), and the driver fell back to xAI direct `grok-4.7`, which completed. All load-bearing figures were marked OK: the expansion, the ppm table, the GMFE bias direction and the false-pass edges 2.0004694 / 3.0017691, and the printed deltas. **Four WRONG, all accepted and fixed:**
+  - Q = 0 is reached at x = −2048, not −1024. The text now gives the exact-zero underflow band (x ≈ −529 to −1519, measured), Q → 0 at 914 286 h, and Q < 0 beyond.
+  - The "< 0.01%" radius is ≈ 0.4525, not 0.45.
+  - The −7.3e-13 ln error at 1e-6 is series tail at sx ≈ 1.2026, not e-rounding.
+  - Newton sqrt from y = x converges; the problem is that 15 steps are too few for x ≳ 2³⁰.
+  **Three TIGHTENABLE, applied:** 7-digit band edges, truncation bound 1.1547e-6, and ln_avg ≈ 0.242142 noted.
+- **kimi (Kimi K3 via gateway):** four attempts, none produced content.
+  - 8192 tokens, full doc: `length`.
+  - 20000 tokens, full doc: `length`, 47k chars of reasoning.
+  - 32000 tokens, math excerpt: `fetch_failed` (upstream novita).
+  - 24000 tokens, math excerpt: `length` (together-ai).
+  Not counted.
+- **qwen, on the corrected text:** every math claim OK. One OVERREACH, accepted: "no verdict flips today" now says the false-pass bands are latent. Its gloss "even powers do not ensure positivity in floating point" is its own slip; the dispatch does not claim that.
+
+**Flagged:** Kimi K3 needs a lower-reasoning mode or a longer gateway upstream timeout before it can review documents of this size. Raw outputs: `/workspace/worktrees/claude-transc-helpers/.transc/offload{1,2_xai,3_kimi,4_kimi,5_kimi,5_qwen}.log` (scratch worktree).
+
 ## 2026-09-26 (recorded 2026-09-27T01:20Z) — Claude — M1 math-review, PR #2699 (venlafaxine implicit CYP2D6 sink + steady-state readout)
 
 | 2026-09-26 | xai (grok-4.6), gemini-2.5-pro via OpenRouter | math-review | stdlib/darwin_pbpk/tsit5_pbpk28.sio (organ sink in the CN Schur solve), stdlib/darwin_pbpk/scenarios/venlafaxine_xr.sio (implicit formation, steady-state C_avg readout and its certified bound) | PASS after fixes; one disagreement recorded | Two independent providers. |
