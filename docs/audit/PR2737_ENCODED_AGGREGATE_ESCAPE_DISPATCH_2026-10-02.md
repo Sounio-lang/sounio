@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.pr2737-encoded-aggregate-escape-dispatch-2026-10-02
+authority: repo_only
+audience: users
+last_validated: 2026-10-02
+validated_by: codex
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.pr2737-encoded-aggregate-escape-dispatch-2026-10-02
+-->
+
 # PR #2737: Encoded References In Aggregate Results
 
 Blocker-ID: BLK-20261002-pr2737-encoded-aggregate-escape
