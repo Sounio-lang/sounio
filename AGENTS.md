@@ -187,6 +187,50 @@ If an agent leaves a blocker for another agent, it must use that contract's
 Blocker-ID, severity, class, evidence, owner, worktree, branch, acceptance gate,
 and next-action fields.
 
+### GitHub preflight across machines and containers
+
+Local leases and agent-bus stores do **not** establish cross-machine ownership.
+GitHub is the shared discovery layer. Before implementation, run `brief` and
+`bin/sounio-coord remote-check --files <full write set>`, then claim/scope.
+Dependencies: authenticated `gh`, Node.js 20+ and canonical
+`Sounio-lang/sounio` as origin (fork-only origins fail closed). No remote means an explicitly
+reported local-only fixture; a configured but inaccessible origin blocks writes.
+
+- `claim` performs a fresh remote preflight before creating a lease.
+- `scope` (including structured-write hooks) requires a successful receipt no
+  older than 120 seconds for the same checkout, origin, branch, HEAD and paths.
+  Run `remote-check` again when it expires or the write set grows. This keeps
+  the hook within its existing time budget. Heartbeat is presence, not permission.
+- The scan includes **all open PRs**, with paginated files and rename sources,
+  recent closed-PR discovery, and branches whose tip commit is within seven days
+  and has no open PR. Branch comparisons use the remote default-branch SHA.
+  A branch diff at GitHub's 300-file cap blocks as incomplete; API, auth,
+  pagination and dependency failures never mean “no overlap”.
+- File overlap is conservative (directory/glob scopes reserve their literal
+  directory prefix). Optional repeated `--symbol NAME` also searches PR diffs,
+  available branch patches and declared symbols; this is textual discovery,
+  not semantic symbol resolution. Missing binary patches cannot prove symbol
+  disjointness; always declare the complete file write set.
+- Before implementation, publish an authorized draft carrier containing these
+  plain-text body lines so other machines can discover **planned** writes:
+  `Sounio-Coord-Files: path/one path/two` and
+  `Sounio-Coord-Symbols: symbol_one symbol_two`. Paths cannot contain spaces.
+  Only same-repository PR bodies supply trusted intent declarations; fork PRs
+  are still checked for actual file/symbol changes. Recheck after publication. Do not create a competing implementation carrier
+  when a matching PR already exists; join it or obtain a scoped handoff.
+- A reviewed exception is explicit and head-pinned:
+  `remote-check --reviewed pr:123@FULL_SHA --review-reason "handoff/evidence" --files ...`.
+  Repeat `--reviewed` for each reviewed PR or `branch:NAME@FULL_SHA`. A changed
+  remote head invalidates that exception at the next scan. Record the reason
+  in the carrier PR; this flag is not permission to override another writer.
+
+Limits: this is a read-only snapshot plus a short local receipt, **not an atomic
+cross-machine lock**. Concurrent unpublished work cannot be observed, and new
+remote work can appear after the scan. A newly pushed old commit can fall outside
+the branch window; open PRs have no age cutoff. Keep local leases, publish intent,
+and recheck before implementation/push. `brief` is inventory only, not clearance.
+Regression gate: `node --test scripts/ci/sounio_coord_github_selftest.mjs`.
+
 ### Claude Code
 Use for:
 - read-only repository surveys

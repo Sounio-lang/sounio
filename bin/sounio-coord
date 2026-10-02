@@ -12,6 +12,8 @@ so every worktree attached to the same repository can see the same leases.
 
 Commands:
   brief                          show the startup-sized coordination summary
+  remote-check [--symbol NAME] [--reviewed pr:N@SHA --review-reason TEXT]
+          --files PATH ...       refresh GitHub preflight receipt (120 seconds)
   status                         show claims, conflicts, and relevant worktrees
   status --all-worktrees         include a full (slower) worktree scan
   check                          status, then fail when active file conflicts exist
@@ -350,10 +352,22 @@ worktree_in_list() {
   return 1
 }
 
+
+remote_check() {
+  # Local-only fixtures have no remote. A configured but unavailable origin fails closed.
+  if [[ -z "$(git -C "$WORKTREE" remote)" ]]; then
+    printf 'REMOTE_CHECK=LOCAL_ONLY no configured remotes\n'
+    return 0
+  fi
+  local helper
+  helper="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scripts/dev/sounio_coord_github.mjs"
+  node "$helper" --receipt-dir "$STATE_DIR/remote-receipts" "$@"
+}
+
 claim_command() {
   local agent="${SOUNIO_AGENT_ID:-}" lane='' intent='' ttl="${SOUNIO_COORD_TTL_SECONDS:-14400}"
   local file claim_file existing old_file new_file conflict=0
-  local files=()
+  local files=() remote_options=()
 
   while (($#)); do
     case "$1" in
@@ -361,6 +375,7 @@ claim_command() {
       --lane) require_arg "$1" "$2"; lane="$2"; shift 2 ;;
       --intent) require_arg "$1" "$2"; intent="$2"; shift 2 ;;
       --ttl-seconds) require_arg "$1" "$2"; ttl="$2"; shift 2 ;;
+      --symbol|--reviewed|--review-reason) require_arg "$1" "$2"; remote_options+=("$1" "$2"); shift 2 ;;
       --files)
         shift
         while (($#)); do files+=("$(normalize_path "$1")"); shift; done
@@ -382,6 +397,7 @@ claim_command() {
 
   C_ID="$(claim_id_for "$agent" "$lane")"
   claim_file="$CLAIMS_DIR/$C_ID.claim"
+  remote_check "${remote_options[@]}" --files "${files[@]}"
   acquire_state_lock "the claim"
   [[ ! -e "$claim_file" ]] || die "claim already exists: $C_ID (use heartbeat or release it first)"
 
@@ -427,7 +443,7 @@ claim_command() {
 scope_command() {
   local agent="${SOUNIO_AGENT_ID:-}" lane='' intent='' ttl="${SOUNIO_COORD_TTL_SECONDS:-14400}"
   local file claim_file existing old_file new_file requested_id created_utc event='SCOPE' conflict=0
-  local files=() merged_files=() existing_files=()
+  local files=() merged_files=() existing_files=() remote_options=()
 
   while (($#)); do
     case "$1" in
@@ -435,6 +451,7 @@ scope_command() {
       --lane) require_arg "$1" "$2"; lane="$2"; shift 2 ;;
       --intent) require_arg "$1" "$2"; intent="$2"; shift 2 ;;
       --ttl-seconds) require_arg "$1" "$2"; ttl="$2"; shift 2 ;;
+      --symbol|--reviewed|--review-reason) require_arg "$1" "$2"; remote_options+=("$1" "$2"); shift 2 ;;
       --files)
         shift
         while (($#)); do files+=("$(normalize_path "$1")"); shift; done
@@ -490,6 +507,10 @@ scope_command() {
       merged_files+=("$file")
     fi
   done
+
+  if ((${#merged_files[@]})); then
+    remote_check --reuse-receipt "${remote_options[@]}" --files "${merged_files[@]}"
+  fi
 
   refresh_claim_paths
   for existing in "${claim_paths[@]}"; do
@@ -896,7 +917,9 @@ command="${1:-status}"
 if (($#)); then shift; fi
 
 case "$command" in
+  remote-check) remote_check "$@" ;;
   brief)
+    remote_check --brief
     status_command --brief "$@"
     ;;
   status|list)

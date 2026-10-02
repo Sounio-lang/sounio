@@ -76,7 +76,8 @@ Before non-trivial changes:
 1. Read `CLAUDE_HANDOFF.md` — recovery history and workspace context
 2. Verify current branch. **`main` is now the canonical branch** (decision made 2026-09-22, superseding the prior "workspace default" pointer to `integration/sounio-dev-ready-base`).
 3. `integration/sounio-dev-ready-base` and `main` diverged for a full month (~1000 commits combined) without ever being reconciled — see `.claude/main-integration-divergence-report.md` for the full inventory. `integration`'s one substantial piece of unique work (a TCP/TLS 1.3/X.509/crypto stack for Madaros) is being ported onto `main` (branch `port/integration-tls-crypto-onto-main`); do not start new work from `integration` going forward, and do not treat it as a source of truth once that port lands.
-4. Do not propose destructive `reset`/`clean`/`rebase` flows on this repo
+4. Run `bin/sounio-coord brief`, then `bin/sounio-coord remote-check --files <full write set>` before claim/scope or implementation. GitHub PRs and recent branches are the shared discovery layer across containers; an empty local bus does not mean a free write set. Publish planned write sets in the draft carrier and follow [AGENTS.md: GitHub preflight](AGENTS.md#github-preflight-across-machines-and-containers). Remote errors/overlaps block writes; a short receipt keeps structured-write hooks fast.
+5. Do not propose destructive `reset`/`clean`/`rebase` flows on this repo
 
 ---
 

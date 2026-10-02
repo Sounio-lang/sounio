@@ -23,8 +23,8 @@ CONFLICT_OWNER = re.compile(r"existing_claim=\S+ agent=(\S+) lane=(\S+)")
 # .claude/settings.json), and a killed PreToolUse hook stalls the tool call for
 # the whole budget first. So the hook keeps its own, smaller deadline: every
 # subprocess is bounded, and once the budget is gone the remaining coordination
-# work is skipped rather than started. Coordination is advisory — arriving late
-# is fine, blocking an agent for ten seconds is not.
+# presence work is skipped rather than started. Structured writes fail closed
+# on unavailable coordination; refresh the remote preflight outside the hook.
 BUDGET_SECONDS = float(os.getenv("SOUNIO_COORD_HOOK_BUDGET_SECONDS", "8"))
 
 # `inbox` re-reads every message file on each call, so its cost grows with the
@@ -241,6 +241,9 @@ def main() -> int:
     cwd = str(event.get("cwd") or os.getcwd())
     root = repo_root(cwd)
     if root is None or not (root / "bin" / "sounio-coord").is_file():
+        if event.get("hook_event_name") == "PreToolUse" and extract_paths(event):
+            warn("cannot establish coordination root; write blocked")
+            return 2
         return 0
 
     event_name = str(event.get("hook_event_name", ""))
@@ -277,10 +280,8 @@ def main() -> int:
             return 0
         result = run_coord(root, "scope", *common, "--files", *paths, timeout=4.0)
         if was_skipped(result):
-            # Never block a write because coordination was slow or unavailable —
-            # exit 2 here would deny the tool call outright.
-            warn(f"{result.stderr.strip()}; proceeding without a lease")
-            return 0
+            warn(f"{result.stderr.strip()}; write blocked; run sounio-coord remote-check then retry")
+            return 2
         if result.returncode != 0:
             notify_conflict(root, agent, lane, paths, result.stderr)
             sys.stderr.write(result.stderr or "coordination scope update failed\n")

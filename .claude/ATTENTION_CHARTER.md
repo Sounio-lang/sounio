@@ -83,11 +83,17 @@ Owner:
 Closes: A | B | C | D | E | none(Garden)
 Worktree:   # must NOT be /workspace/sounio for heavy 1/2 work
 Branch:
-Write-Set:  # exact paths; claim via sounio-coord or MCP coord_claim
+Write-Set:  # exact paths; remote-check before local claim/scope or MCP coord_claim
+Remote-Preflight: # timestamp, remote heads, overlap disposition / canonical carrier
 Required-Gates:
 Merge-Target:
 Known-Blockers:  # PARALLEL_BLOCKER_CONTRACT shape or "none"
 ```
+
+Across machines, local leases are insufficient. Follow the [GitHub preflight
+contract](../AGENTS.md#github-preflight-across-machines-and-containers), publish
+planned write sets in the carrier, and recheck before implementation. A receipt
+is a bounded snapshot, not a distributed lock.
 
 If `Closes: none(Garden)`, the agent is **read-only** unless the shepherd
 explicitly opens a B4 sandbox with TTL.
