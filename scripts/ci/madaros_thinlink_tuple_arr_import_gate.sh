@@ -64,6 +64,10 @@ fi
 [[ "$(head -c 2 "$RAW")" != '#!' ]] || fail "not a raw ELF (a wrapper script?): $RAW"
 
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
+# This gate verifies imported tuple-array metadata through the real thin-link
+# unit builder. Keep region reclamation out so an unrelated native-region crash
+# cannot mask thin-link tuple-array regressions.
+export SOUNIO_NO_REGION_RECLAIM=1
 
 compile_and_run() {
   local label="$1" src="$2"
