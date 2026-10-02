@@ -1,0 +1,92 @@
+//@ run-pass
+//@ known-failure: PR #1737 DECLARED RESIDUAL, measured live 2026-08-16 -- imported enums are not in the importing unit's variant table, so lookup_variant_discriminant_by_path falls back to the unqualified, collision-prone lookup; Verdict::Proved mints the LOCAL Gate::Proved's discriminant. Fix owner: claude-3 (f32-narrowing/enum lane). This test going green (xpas) is the promotion signal.
+//@ expect-stdout: enum_shared_variant_import: PASS
+//@ description: PR #1737 residual probe -- shared variant name ACROSS an import boundary
+//
+// Probes the DECLARED RESIDUAL of the enum-discriminant fix (3d8cc0cb95):
+//
+//     Falls back to the unqualified lookup when the enum is unknown here (e.g. an
+//     unregistered imported enum) so nothing that resolves today starts failing.
+//
+// i.e. lookup_variant_discriminant_by_path only resolves by (enum_name,
+// variant_name) when the enum is in THIS unit's enum-variant table; when it is
+// not -- the case for an enum imported from a stdlib module -- the lookup
+// degrades to the pre-fix, collision-prone, variant-name-only search.
+//
+// This file imports stdlib Verdict { Proved=0, MeasuredF64=1, MeasuredF256=2 }
+// and declares a local enum sharing the variant name `Proved` at a DIFFERENT
+// discriminant (Gate { Open=0, Proved=1 }).
+//
+// ─── MEASURED OUTCOME, 2026-08-16 (glm-cli2, ws-a-witnesses lane) ───
+// Compiler: fresh source build of main @ a5548481d1 (post-3d8cc0cb95),
+// artifacts/self-hosted/madaros-wsa-witnesses-glm-cli2. Same verdicts under
+// the checked-in prebuilt refreshed 2026-08-15 22:10. `souc check` is GREEN
+// on this program (typecheck ok) -- the defect is silent at compile time.
+//
+//   Verdict::Proved      minted 1  (expected 0) -- the LOCAL Gate::Proved's
+//                                 discriminant hijacks it through the fallback:
+//                                 the w7 collision, alive one import away.
+//   Verdict::MeasuredF64 minted 0  (expected 1) -- no local namesake exists, so
+//                                 the fallback finds nothing and the mint
+//                                 yields 0 regardless of the true discriminant.
+//   Gate::Proved         minted 1  (correct)    -- local enums are unaffected.
+//   Gate::Open           minted 0  (correct)
+//
+// SUBTLETY worth knowing before fixing: the match ARM lookup degrades the same
+// way, so the arm compares against the same WRONG discriminant the mint
+// produced -- `match v { Verdict::Proved => ... }` dispatches "correctly"
+// relative to the wrong value. Arm dispatch alone therefore looks healthy;
+// only the constructed-value assertions below catch the residual. A fix must
+// make the mint and the arm lookup agree on the TRUE discriminant.
+//
+// The assertions below state the CORRECT semantics. They fail today (hence the
+// known-failure annotation); the day the fallback is fixed they flip to
+// xpas in the suite's verbose output -- remove the annotation then.
+
+use algebra::sedenion_verdict::{Verdict}
+
+// Local enum: Proved is discriminant 1 here, 0 in the imported Verdict.
+enum Gate { Open, Proved }
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    var bad: i64 = 0
+
+    // The sharp probe: the CONSTRUCTED value of the imported variant must be
+    // Verdict's own discriminant (0), not the local Gate::Proved's (1). Even
+    // though construction and match-arm lookups agree on a wrong value, this
+    // value assertion still catches it.
+    let imported_proved: i64 = Verdict::Proved
+    if imported_proved != 0 { bad = bad + 1 }
+
+    // The match arm must dispatch on the imported enum's discriminants.
+    let v: Verdict = Verdict::Proved
+    let arm: i64 = match v {
+        Verdict::Proved => 10,
+        Verdict::MeasuredF64 => 20,
+        Verdict::MeasuredF256 => 30,
+        _ => 0,
+    }
+    if arm != 10 { bad = bad + 1 }
+
+    // A second imported variant whose name does NOT collide locally: with no
+    // local namesake the fallback finds nothing, and the mint must still
+    // produce the TRUE discriminant (1), not a default 0.
+    let imported_measured: i64 = Verdict::MeasuredF64
+    if imported_measured != 1 { bad = bad + 1 }
+
+    // The local enum must keep its own discriminants regardless: Gate::Proved
+    // is 1, Gate::Open is 0.
+    let local_proved: i64 = Gate::Proved
+    if local_proved != 1 { bad = bad + 1 }
+    let local_open: i64 = Gate::Open
+    if local_open != 0 { bad = bad + 1 }
+
+    if bad != 0 {
+        print("enum_shared_variant_import: FAIL ")
+        print_int(bad)
+        print("\n")
+        return 1
+    }
+    print("enum_shared_variant_import: PASS\n")
+    0
+}
