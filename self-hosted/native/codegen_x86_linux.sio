@@ -4348,9 +4348,8 @@ fn emit_builtin_native_seq_push_common_into(nc: &! NativeCompiler, element_barri
     let append_offset = (*nc).code.len
     nc_patch_u32_le(nc, append_patch, append_offset - (append_patch + 4))
     if element_barrier {
-        // Every reference append stores the supplied word. The ordinary barrier
-        // is needed here; scalar Seq push lowers to the sibling builtin below
-        // because arbitrary scalar words can alias valid handle ids.
+        // Integer and floating-point words may encode recoverable references.
+        // Preserve them conservatively even when the Seq element is scalar.
         nc_emit_load_rbp_disp32_reg(nc, 7, -8)
         nc_emit_load_rbp_disp32_reg(nc, 6, -16)
         rgn_emit_builtin_barrier(nc, 6, 7)
@@ -4382,7 +4381,8 @@ fn emit_builtin_native_seq_push_into(nc: &! NativeCompiler) with Mut, Panic, Div
 }
 
 fn emit_builtin_native_seq_push_scalar_into(nc: &! NativeCompiler) with Mut, Panic, Div {
-    emit_builtin_native_seq_push_common_into(nc, false)
+    // Keep the legacy internal symbol safe for previously serialized calls.
+    emit_builtin_native_seq_push_common_into(nc, true)
 }
 
 // Scalar Seq accessors share the aggregate handle layout used by push. Bounds
@@ -4420,14 +4420,14 @@ fn emit_builtin_native_seq_get_into(nc: &! NativeCompiler) with Mut, Panic, Div 
 }
 
 fn emit_builtin_native_seq_set_into(nc: &! NativeCompiler) with Mut, Panic, Div {
-    // Stores the word in rdx into the seq in rdi; never moves the seq.
-    rgn_emit_builtin_barrier(nc, 2, 7)
     nc_emit_push_rbp(nc)
     nc_emit_mov_rbp_rsp(nc)
     nc_emit_sub_rsp_imm32(nc, 48)
     nc_emit_store_rbp_disp32_reg(nc, 3, -32)
     nc_emit_store_rbp_disp32_reg(nc, 6, -8)
     nc_emit_store_rbp_disp32_reg(nc, 2, -16)
+    // The prologue aligns rsp before the barrier's nested call.
+    rgn_emit_builtin_barrier(nc, 2, 7)
     nc_emit_mov_reg_reg(nc, 0, 7)
     native_v2_resolve_handle_to_object_base_rax_into(nc)
     nc_emit_store_rbp_disp32_reg(nc, 0, -24)
@@ -4735,7 +4735,9 @@ fn emit_builtin_read_offset64_into(nc: &! NativeCompiler) with Mut, Panic, Div {
 // raw bits regardless of i64/f64, so one body serves both ids.
 // args: rdi=buf, rsi=idx, rdx=val. no return value.
 fn emit_builtin_write_offset64_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    nc_emit_sub_rsp_imm32(nc, 8)
     rgn_emit_builtin_barrier(nc, 2, 7)
+    nc_emit_add_rsp_imm32(nc, 8)
     nc_emit_byte(nc, 0x48)  // REX.W
     nc_emit_byte(nc, 0x89)  // MOV r/m64, r64
     nc_emit_byte(nc, 0x14)  // ModRM: mod=00 reg=rdx(010) rm=100(SIB follows)

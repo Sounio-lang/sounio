@@ -6029,7 +6029,7 @@ fn lowerer_try_canonical_hello_block_mut(lo: &! Lowerer, blk: &Block) -> i64 wit
 
 // Region reclamation (native/gc.sio): how an eligible function's return value
 // leaves its region. 1 = integer, bool or unit (one word, maybe a disguised
-// reference, so the runtime checks it); 2 = f64 (never a reference); 3 = a
+// reference, so the runtime checks it); 2 = f64 (raw bits are checked too); 3 = a
 // struct rgn_copy_cost accepts, whose interned name is left in
 // LOWER_RGN_PENDING_TYPE_ID. 0 = not eligible.
 var LOWER_RGN_PENDING_TYPE_ID: i64 = 0
@@ -6115,14 +6115,9 @@ fn lowerer_rgn_emit_exit_mut(lo: &! Lowerer, kind: i64, type_name: Name) with Mu
         let leave3 = (*lo).rgn_call("__rgn_leave", tok, 0, 0, 1)
         (*lo) = leave3.0
     } else {
-        var v_arg = ret
-        if kind == 2 {
-            // An f64 is never a reference; do not hand its bits to a GPR check.
-            let zero2 = (*lo).emit_i64_const(0)
-            (*lo) = zero2.0
-            v_arg = zero2.1
-        }
-        let exit_pair = (*lo).rgn_call("__rgn_exit_scalar", tok, v_arg, 0, 2)
+        // Internal calls pass f64 as raw words too; bits_to_f64 can encode a
+        // handle or arena address, so classify the actual return value.
+        let exit_pair = (*lo).rgn_call("__rgn_exit_scalar", tok, ret, 0, 2)
         (*lo) = exit_pair.0
     }
     (*lo) = (*lo).emit(ir_label(plain_label))
@@ -25475,16 +25470,7 @@ impl Lowerer {
                     lowerer_mark_hard_error(&! lo_seq_push)
                     return (lo_seq_push, IR_INVALID_REG)
                 }
-                var seq_push_scalar = false
-                match e.left {
-                    Some(recv_seq_push) => {
-                        if (*recv_seq_push).kind == ExprKind::ExprIdent {
-                            seq_push_scalar = lo_seq_push.lookup_local_array_copy_word_scalar((*recv_seq_push).name)
-                        }
-                    }
-                    None => {}
-                }
-                let call_name_seq_push = if seq_push_scalar { make_name("__sounio_seq_push_scalar") } else { make_name("__sounio_seq_push") }
+                let call_name_seq_push = make_name("__sounio_seq_push")
                 let fn_id_seq_push = lowerer_find_or_add_fn_id_mut(&! lo_seq_push, call_name_seq_push)
                 let call_args_seq_push: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(
                     base_reg_seq_push,
