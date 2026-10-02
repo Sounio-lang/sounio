@@ -5905,6 +5905,9 @@ fn lowerer_lower_fn_params_mut(
                 }
                 lowerer_bind_local_struct_type_mut(lo, (*list).head.name, lower_param_struct_type_name(&(*list).head.ty))
                 let param_seq_elem = lower_type_expr_seq_named_elem_name(&(*list).head.ty)
+                if lower_name_is_direct_word_scalar_type(param_seq_elem) {
+                    lowerer_mark_local_array_copy_word_scalar_mut(lo, (*list).head.name)
+                }
                 lowerer_bind_local_index_elem_layout_mut(
                     lo,
                     (*list).head.name,
@@ -7657,6 +7660,12 @@ fn lower_opt_type_is_seq(opt: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, D
 }
 
 fn lower_type_expr_seq_named_elem_name(ty: &TypeExpr) -> Name with Mut, Panic, Div {
+    if (*ty).kind == TypeExprKind::TypeReference || (*ty).kind == TypeExprKind::TypeRefMut {
+        match (*ty).inner {
+            Some(inner) => return lower_type_expr_seq_named_elem_name(&(*inner)),
+            None => return ir_empty_name(),
+        }
+    }
     if (*ty).kind != TypeExprKind::TypeNamed { return ir_empty_name() }
     if !ir_name_eq(ir_path_first_name((*ty).path), make_name("Seq")) { return ir_empty_name() }
     match (*ty).type_args {
@@ -7671,6 +7680,10 @@ fn lower_type_expr_seq_named_elem_name(ty: &TypeExpr) -> Name with Mut, Panic, D
         }
         None => ir_empty_name(),
     }
+}
+
+fn lower_type_expr_seq_elem_is_direct_word_scalar(ty: &TypeExpr) -> bool with Mut, Panic, Div {
+    lower_name_is_direct_word_scalar_type(lower_type_expr_seq_named_elem_name(ty))
 }
 
 fn lower_type_expr_array_named_elem_name(ty: &TypeExpr) -> Name with Mut, Panic, Div {
@@ -17964,7 +17977,7 @@ impl Lowerer {
                         // fail closed instead of lowering as integers.
                         (*(*locals).array_elem_wide_bits).values[idx as usize] = lower_type_expr_array_elem_wide_bits(&(*list).head.ty)
                         (*(*locals).array_lens).values[idx as usize] = param_array_len
-                        (*(*locals).array_copy_word_scalar).values[idx as usize] = if param_word_scalar { 1 } else { 0 }
+                        (*(*locals).array_copy_word_scalar).values[idx as usize] = if param_word_scalar || lower_type_expr_seq_elem_is_direct_word_scalar(&(*list).head.ty) { 1 } else { 0 }
                         // This path writes the slot directly, not through bind_local,
                         // and the stack only resets count between functions. An
                         // array local in a function lowered earlier can leave
@@ -20012,6 +20025,9 @@ impl Lowerer {
                     // The array branch marks this; the Seq branch did not.
                     if ir_name_eq(seq_elem, make_name("f64")) || ir_name_eq(seq_elem, make_name("f32")) {
                         lo = lo.bind_local_array_elem_float(s.name)
+                    }
+                    if lower_name_is_direct_word_scalar_type(seq_elem) {
+                        lo = lo.bind_local_array_copy_word_scalar(s.name)
                     }
                 }
                 None => {}
@@ -25459,7 +25475,16 @@ impl Lowerer {
                     lowerer_mark_hard_error(&! lo_seq_push)
                     return (lo_seq_push, IR_INVALID_REG)
                 }
-                let call_name_seq_push = make_name("__sounio_seq_push")
+                var seq_push_scalar = false
+                match e.left {
+                    Some(recv_seq_push) => {
+                        if (*recv_seq_push).kind == ExprKind::ExprIdent {
+                            seq_push_scalar = lo_seq_push.lookup_local_array_copy_word_scalar((*recv_seq_push).name)
+                        }
+                    }
+                    None => {}
+                }
+                let call_name_seq_push = if seq_push_scalar { make_name("__sounio_seq_push_scalar") } else { make_name("__sounio_seq_push") }
                 let fn_id_seq_push = lowerer_find_or_add_fn_id_mut(&! lo_seq_push, call_name_seq_push)
                 let call_args_seq_push: Option<Box<IrRegList>> = Some(Box::new(ir_reg_list_cons(
                     base_reg_seq_push,

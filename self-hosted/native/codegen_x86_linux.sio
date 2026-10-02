@@ -1064,6 +1064,10 @@ fn name_is___sounio_seq_push(n: Name) -> bool with Mut, Panic, Div {
     true
 }
 
+fn name_is___sounio_seq_push_scalar(n: Name) -> bool with Mut, Panic, Div {
+    name_eq(n, make_name("__sounio_seq_push_scalar"))
+}
+
 fn name_is___sounio_seq_get(n: Name) -> bool with Mut, Panic, Div {
     if n.len != 16 { return false }
     name_eq(n, make_name("__sounio_seq_get"))
@@ -1358,6 +1362,7 @@ fn native_v2_builtin_id_for_name_ref(name: &Name) -> i64 with Mut, Panic, Div {
     if name_is_acknowledge(*name) { return 37 }
     if name_is_require_confidence(*name) { return 38 }
     if name_is___sounio_seq_push(*name) { return 51 }
+    if name_is___sounio_seq_push_scalar(*name) { return 70 }
     if name_is___sounio_seq_get(*name) { return 52 }
     if name_is___sounio_seq_set(*name) { return 53 }
     0
@@ -1463,6 +1468,7 @@ fn native_v2_builtin_id_for_func_ref(func: &IrFunction) -> i64 with Mut, Panic, 
     if name_is_acknowledge((*func).name) { return 37 }
     if name_is_require_confidence((*func).name) { return 38 }
     if name_is___sounio_seq_push((*func).name) { return 51 }
+    if name_is___sounio_seq_push_scalar((*func).name) { return 70 }
     if name_is___sounio_seq_get((*func).name) { return 52 }
     if name_is___sounio_seq_set((*func).name) { return 53 }
         // COLLISION RESOLVED 2026-08-23. main ids 23..38 are all taken
@@ -4254,7 +4260,7 @@ fn emit_builtin_heap_free_into(nc: &! NativeCompiler) with Mut, Panic, Div {
 // __sounio_seq_push(handle, value) -> unit. Seq reuses the aggregate object
 // layout: payload_size is capacity in bytes and flags is logical length. When
 // full, retargeting the existing handle-table entry preserves every alias.
-fn emit_builtin_native_seq_push_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+fn emit_builtin_native_seq_push_common_into(nc: &! NativeCompiler, element_barrier: bool) with Mut, Panic, Div {
     nc_emit_push_rbp(nc)
     nc_emit_mov_rbp_rsp(nc)
     nc_emit_sub_rsp_imm32(nc, 64)
@@ -4341,12 +4347,14 @@ fn emit_builtin_native_seq_push_into(nc: &! NativeCompiler) with Mut, Panic, Div
 
     let append_offset = (*nc).code.len
     nc_patch_u32_le(nc, append_patch, append_offset - (append_patch + 4))
-    // Every append stores the supplied word. The ordinary barrier is precise:
-    // scalar values do nothing, while a young reference stored into an older
-    // Seq marks only the regions whose objects can now escape.
-    nc_emit_load_rbp_disp32_reg(nc, 7, -8)
-    nc_emit_load_rbp_disp32_reg(nc, 6, -16)
-    rgn_emit_builtin_barrier(nc, 6, 7)
+    if element_barrier {
+        // Every reference append stores the supplied word. The ordinary barrier
+        // is needed here; scalar Seq push lowers to the sibling builtin below
+        // because arbitrary scalar words can alias valid handle ids.
+        nc_emit_load_rbp_disp32_reg(nc, 7, -8)
+        nc_emit_load_rbp_disp32_reg(nc, 6, -16)
+        rgn_emit_builtin_barrier(nc, 6, 7)
+    }
     nc_emit_load_rbp_disp32_reg(nc, 2, -24)
     nc_emit_mov_reg_imm(nc, 1, native_v2_object_header_size())
     nc_emit_add_reg_reg(nc, 2, 1)             // rdx = payload base
@@ -4367,6 +4375,14 @@ fn emit_builtin_native_seq_push_into(nc: &! NativeCompiler) with Mut, Panic, Div
     let heap_fail_offset = (*nc).code.len
     nc_patch_u32_le(nc, heap_fail_patch, heap_fail_offset - (heap_fail_patch + 4))
     nc_emit_exit_code(nc, 181)
+}
+
+fn emit_builtin_native_seq_push_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    emit_builtin_native_seq_push_common_into(nc, true)
+}
+
+fn emit_builtin_native_seq_push_scalar_into(nc: &! NativeCompiler) with Mut, Panic, Div {
+    emit_builtin_native_seq_push_common_into(nc, false)
 }
 
 // Scalar Seq accessors share the aggregate handle layout used by push. Bounds
@@ -8749,6 +8765,7 @@ pub fn native_v2_builtin_id_for_name(name: Name) -> i64 with Mut, Panic, Div {
     if name_is_heap_alloc(name) { return 23 }
     if name_is_heap_free(name) { return 24 }
     if name_is___sounio_seq_push(name) { return 51 }
+    if name_is___sounio_seq_push_scalar(name) { return 70 }
     if name_is___sounio_seq_get(name) { return 52 }
     if name_is___sounio_seq_set(name) { return 53 }
     if name_is_syscall6(name) { return 27 }
@@ -8826,6 +8843,7 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     if builtin_id == 49 { native_v2_persist_builtin_emit_into(nc, emit_builtin_ffi_pow((*nc))); return }
     if builtin_id == 50 { native_v2_persist_builtin_emit_into(nc, emit_builtin_ffi_tgamma((*nc))); return }
     if builtin_id == 51 { emit_builtin_native_seq_push_into(nc); return }
+    if builtin_id == 70 { emit_builtin_native_seq_push_scalar_into(nc); return }
     if builtin_id == 52 { emit_builtin_native_seq_get_into(nc); return }
     if builtin_id == 53 { emit_builtin_native_seq_set_into(nc); return }
     if builtin_id == 1 { emit_builtin_print_int_into(nc); return }
@@ -8966,6 +8984,7 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
         if name_is_assert(func.name) { return emit_builtin_assert(c) }
         if name_is_heap_alloc(func.name) { emit_builtin_heap_alloc_into(&! c); return c }
         if name_is___sounio_seq_push(func.name) { emit_builtin_native_seq_push_into(&! c); return c }
+        if name_is___sounio_seq_push_scalar(func.name) { emit_builtin_native_seq_push_scalar_into(&! c); return c }
         if name_is___sounio_seq_get(func.name) { emit_builtin_native_seq_get_into(&! c); return c }
         if name_is___sounio_seq_set(func.name) { emit_builtin_native_seq_set_into(&! c); return c }
         if name_is_heap_free(func.name) { emit_builtin_heap_free_into(&! c); return c }
@@ -11523,6 +11542,7 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
         if name_is_assert(func.name) { (*nc) = emit_builtin_assert((*nc)); return }
         if name_is_heap_alloc(func.name) { emit_builtin_heap_alloc_into(nc); return }
         if name_is___sounio_seq_push(func.name) { emit_builtin_native_seq_push_into(nc); return }
+        if name_is___sounio_seq_push_scalar(func.name) { emit_builtin_native_seq_push_scalar_into(nc); return }
         if name_is___sounio_seq_get(func.name) { emit_builtin_native_seq_get_into(nc); return }
         if name_is___sounio_seq_set(func.name) { emit_builtin_native_seq_set_into(nc); return }
         if name_is_heap_free(func.name) { emit_builtin_heap_free_into(nc); return }
