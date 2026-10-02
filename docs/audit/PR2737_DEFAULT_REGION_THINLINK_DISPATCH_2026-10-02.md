@@ -12,7 +12,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.pr2737-d
 Blocker-ID: BLK-20261002-pr2737-default-region-integration
 Status: review-ready
 Severity: B2
-Class: evidence-gap
+Class: harness-routing
 Evidence-Level: E3
 Owner: codex
 Lane: pr2737-default-region-thinlink
@@ -34,6 +34,30 @@ compiler built by CI run 37030399012. Its compiler sources match b7905db7;
 b7905db7 changes only the scalar-escape witness. No native source change is
 required to restore these gates to the default mode. Each gate now explicitly
 unsets the A/B opt-out, including when the caller exported it.
+
+## Compiler Stack Routing
+
+Exact-tip CI run 37040225568 rebuilt the compiler at 49b73d5ba, then failed
+the visibility gate with compiler SIGSEGV during native emission. The gates
+invoked the raw ELF without the stack reservation made by `bin/madaros`.
+The isolated four-way reproduction gives the same result for the old and new
+compilers: 8192 KiB exits 139, whereas 524288 KiB compiles and executes the
+visibility fixture successfully. This is a harness-routing defect, not evidence
+that the aggregate scan introduced this crash.
+
+Each gate now reserves the launcher's default 524288 KiB (or explicit
+`MADAROS_STACK_KB`, with 0 meaning unlimited) in a compiler-only subshell.
+Failure to configure the requested stack refuses a verdict rather than running
+under an unsuitable limit. Compiled programs retain the caller's original stack.
+An intentionally restricted hard limit produced the expected refusal.
+
+The rebuilt compiler passed all four patched gates from an 8192 KiB soft limit,
+including with the caller's opt-out set; the gates unset it. Refusal controls
+still passed. The new compiler's SHA256 is
+`46ca23bd4cd5d351e5ae2dc4e1fd4e01a573b91c48cf1caa792135993df3618a`.
+Receipts: `receipts/stack-routing/` and `receipts/current-source-stack/` under
+the evidence root's parent directory. Exact-tip remote CI remains an independent
+acceptance requirement.
 
 ## Legacy Investigation (Not A Reproduced Default-Route Failure)
 
@@ -78,5 +102,5 @@ Legacy-Kept: yes; legacy thin-link/cache code is untouched.
 LLM-Offload: not-required; local Sounio scaffold attempt failed verification and
 was not used in the final change (no new Sounio source is committed).
 
-Next-Action: push the default-mode gates and verify exact-tip CI. This dispatch
+Next-Action: push the stack-routing repair and verify exact-tip CI. This dispatch
 does not clear unrelated activation, streaming or escape-path coverage findings.

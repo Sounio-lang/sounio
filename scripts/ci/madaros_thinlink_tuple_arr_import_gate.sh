@@ -67,11 +67,23 @@ export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
 # Exercise the shipped default, even if the caller exported the A/B opt-out.
 unset SOUNIO_NO_REGION_RECLAIM
 
+# Match bin/madaros without changing the compiled program's stack limit.
+raw_compile() (
+  local stack_kb="${MADAROS_STACK_KB:-524288}"
+  case "$stack_kb" in
+    ''|*[!0-9]*) fail "invalid MADAROS_STACK_KB: $stack_kb" ;;
+    0) stack_kb=unlimited ;;
+  esac
+  ulimit -s "$stack_kb" 2>/dev/null || fail "cannot configure compiler stack to $stack_kb KiB; no verdict"
+  [[ "$(ulimit -s)" == "$stack_kb" ]] || fail "compiler stack does not match requested $stack_kb; no verdict"
+  exec "$RAW" "$@"
+)
+
 compile_and_run() {
   local label="$1" src="$2"
   local log="$WORK/$label.log" elf="$WORK/$label.elf" out="$WORK/$label.out"
   [[ -f "$src" ]] || fail "$label: missing fixture $src"
-  if ! "$RAW" --native-compile "$src" -o "$elf" >"$log" 2>&1; then
+  if ! raw_compile --native-compile "$src" -o "$elf" >"$log" 2>&1; then
     tail -n 40 "$log" >&2 || true
     fail "$label: did not compile"
   fi
