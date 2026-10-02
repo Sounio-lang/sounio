@@ -47,10 +47,8 @@ case "$RAW" in /*) ;; *) RAW="$PWD/$RAW" ;; esac
 
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
 
-# This gate verifies specialized-collapse entrypoint selection and typecheck
-# coverage for dependency mains. Keep region reclamation out so an unrelated
-# native-region crash cannot mask duplicate-main regressions.
-export SOUNIO_NO_REGION_RECLAIM=1
+# Exercise the shipped default, even if the caller exported the A/B opt-out.
+unset SOUNIO_NO_REGION_RECLAIM
 
 if ! (cd "$FIX" && "$RAW" --native-compile main.sio -o "$WORK/probe.elf") >"$WORK/compile.log" 2>&1; then
   tail -n 40 "$WORK/compile.log" >&2 || true

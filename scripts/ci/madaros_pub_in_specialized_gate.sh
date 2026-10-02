@@ -63,10 +63,8 @@ esac
 
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
 
-# This gate verifies pub(in path) visibility through the specialized
-# multi-module checker. Keep region reclamation out of these tiny fixtures so
-# an unrelated native-region crash cannot mask a visibility regression.
-export SOUNIO_NO_REGION_RECLAIM=1
+# Exercise the shipped default, even if the caller exported the A/B opt-out.
+unset SOUNIO_NO_REGION_RECLAIM
 
 # compile_and_run <label> <fixture-dir>: invoked with CWD set to
 # <fixture-dir> and a BARE "main.sio" argument (zero slashes), so
