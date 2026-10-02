@@ -1,25 +1,22 @@
 import { readFile, stat } from 'node:fs/promises';
 import { writeSync } from 'node:fs';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   ACCEPTANCE_RELATIVE_PATH,
   LOCALES,
-  REGISTRY_RELATIVE_PATH,
   buildGovernedTopicRegistry,
   formatAcceptanceReportStub,
   isRealValidationDate,
+  listGovernedRepoDocPaths,
+  listGovernedWebsiteDocSlugs,
   metadataFieldsForTopic,
   parseFrontmatter,
   parseRepoMetadata,
-  readRegistryFile,
 } from './governance_registry.mjs';
 
 const rootDir = path.resolve(process.cwd());
 const markdownLinkPattern = /\[[^\]]+\]\(([^)]+)\)/g;
-
-function compareRegistry(expected, actual) {
-  return JSON.stringify(expected) === JSON.stringify(actual);
-}
 
 function fail(errors) {
   if (errors.length === 0) {
@@ -67,12 +64,12 @@ function shouldValidateRepoLinks(topic) {
   );
 }
 
-async function validateRepoLinks(topic, errors) {
+async function validateRepoLinks(checkRoot, topic, errors) {
   if (!topic.repo_doc_path || !shouldValidateRepoLinks(topic)) {
     return;
   }
 
-  const absPath = path.join(rootDir, topic.repo_doc_path);
+  const absPath = path.join(checkRoot, topic.repo_doc_path);
   const content = await readFile(absPath, 'utf8');
   markdownLinkPattern.lastIndex = 0;
   let match;
@@ -154,23 +151,47 @@ function provenanceFormatErrors(actualFields, context, errors) {
   }
 }
 
-async function main() {
+// Validate a registry object against the filesystem. The live gate builds
+// that object from the tree (generate-then-validate). It does NOT
+// JSON-stringify-compare a checked-in copy: that serialisation is a function
+// of every governed doc, so any concurrent PR that adds one makes every
+// other PR's copy stale. Same move as the acceptance-report stub below.
+//
+// The four refusals that must stay meaningful:
+//   - a governed doc with no registry entry
+//   - a registry entry whose doc no longer exists
+//   - a malformed last_validated (R22: '2026-13-45' is shaped like a date)
+//   - an empty validated_by
+export async function collectRegistryErrors(checkRoot, registry) {
   const errors = [];
-  const expectedRegistry = await buildGovernedTopicRegistry(rootDir);
-  const actualRegistry = await readRegistryFile(rootDir);
-
-  if (!compareRegistry(expectedRegistry, actualRegistry)) {
-    errors.push(`Checked-in ${REGISTRY_RELATIVE_PATH} is stale. Re-run node scripts/docs/sync_governance_metadata.mjs`);
+  const registeredPaths = new Set(
+    (registry.topics ?? []).map((topic) => topic.repo_doc_path).filter(Boolean)
+  );
+  for (const relPath of await listGovernedRepoDocPaths(checkRoot)) {
+    if (!registeredPaths.has(relPath)) {
+      errors.push(`Governed doc has no registry entry: ${relPath}`);
+    }
   }
 
-  // Deliberately NOT a function of expectedRegistry: the acceptance report is
+  const registeredSlugs = new Set(
+    (registry.topics ?? [])
+      .filter((topic) => topic.collection === 'docs' && topic.website_slug)
+      .map((topic) => topic.website_slug)
+  );
+  for (const slug of await listGovernedWebsiteDocSlugs(checkRoot)) {
+    if (!registeredSlugs.has(slug)) {
+      errors.push(`Governed doc has no registry entry: website docs/${slug}`);
+    }
+  }
+
+  // Deliberately NOT a function of the topic corpus: the acceptance report is
   // a static stub (see formatAcceptanceReportStub), so this check can never
   // race against a concurrent PR that adds or removes an unrelated governed
   // doc. It still catches real drift -- a hand-edited or bit-rotted stub --
   // because the stub is a fixed string, not a corpus scan.
   try {
     const expectedAcceptance = `${formatAcceptanceReportStub().trimEnd()}\n`;
-    const actualAcceptance = await readFile(path.join(rootDir, ACCEPTANCE_RELATIVE_PATH), 'utf8');
+    const actualAcceptance = await readFile(path.join(checkRoot, ACCEPTANCE_RELATIVE_PATH), 'utf8');
     if (actualAcceptance !== expectedAcceptance) {
       errors.push(`Checked-in ${ACCEPTANCE_RELATIVE_PATH} is stale. Re-run node scripts/docs/sync_governance_metadata.mjs`);
     }
@@ -178,9 +199,10 @@ async function main() {
     errors.push(`Missing acceptance report: ${ACCEPTANCE_RELATIVE_PATH}`);
   }
 
-  for (const topic of actualRegistry.topics) {
+  for (const topic of registry.topics ?? []) {
+    let repoDocReadable = false;
     if (topic.repo_doc_path) {
-      const absPath = path.join(rootDir, topic.repo_doc_path);
+      const absPath = path.join(checkRoot, topic.repo_doc_path);
       try {
         const content = await readFile(absPath, 'utf8');
         const actualMeta = parseRepoMetadata(content);
@@ -193,6 +215,7 @@ async function main() {
         if ((topic.authority === 'historical' || topic.authority === 'archived') && !content.includes('Docs status:')) {
           errors.push(`${topic.repo_doc_path} is missing a visible ${topic.authority} status note`);
         }
+        repoDocReadable = true;
       } catch {
         errors.push(`Missing repo doc path from registry: ${topic.repo_doc_path}`);
       }
@@ -200,7 +223,7 @@ async function main() {
 
     for (const [locale, relPath] of Object.entries(topic.website_paths ?? {})) {
       try {
-        const content = await readFile(path.join(rootDir, relPath), 'utf8');
+        const content = await readFile(path.join(checkRoot, relPath), 'utf8');
         const actualMeta = parseFrontmatter(content);
         metadataMismatch(metadataFieldsForTopic(topic, actualMeta), actualMeta, relPath, errors);
         provenanceFormatErrors(actualMeta, relPath, errors);
@@ -219,7 +242,7 @@ async function main() {
     }
 
     for (const artifact of topic.related_artifacts ?? []) {
-      const absArtifact = path.join(rootDir, artifact);
+      const absArtifact = path.join(checkRoot, artifact);
       try {
         await stat(absArtifact);
       } catch {
@@ -227,10 +250,19 @@ async function main() {
       }
     }
 
-    await validateRepoLinks(topic, errors);
+    if (repoDocReadable) {
+      await validateRepoLinks(checkRoot, topic, errors);
+    }
   }
 
-  fail(errors);
+  return errors;
 }
 
-await main();
+async function main() {
+  const registry = await buildGovernedTopicRegistry(rootDir);
+  fail(await collectRegistryErrors(rootDir, registry));
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
+  await main();
+}

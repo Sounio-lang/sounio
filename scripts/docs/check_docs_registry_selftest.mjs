@@ -4,6 +4,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
+import { buildGovernedTopicRegistry } from './governance_registry.mjs';
+import { collectRegistryErrors } from './check_docs_registry.mjs';
 
 const execFileAsync = promisify(execFile);
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
@@ -161,10 +163,15 @@ async function main() {
     const gettingStarted = slugRegistry.topics.find((topic) => topic.topic_id === 'website.docs.getting-started');
     gettingStarted.website_slug = 'getting-started-stale';
     await writeFile(slugRegistryPath, `${JSON.stringify(slugRegistry, null, 2)}\n`, 'utf8');
-    await expectFailure(
-      await runNode(parityCheckScript, path.join(slugDriftDir, 'website')),
-      'Website slug drift for website.docs.getting-started',
-      'stale website alias detection'
+    const staleSlugParity = await runNode(parityCheckScript, path.join(slugDriftDir, 'website'));
+    assert(
+      staleSlugParity.ok,
+      `stale checked-in slug must not fail parity (that is the registry race):\n${staleSlugParity.stderr || staleSlugParity.stdout}`
+    );
+    const staleSlugCheck = await runNode(registryCheckScript, slugDriftDir);
+    assert(
+      staleSlugCheck.ok,
+      `stale checked-in slug must not fail the registry gate:\n${staleSlugCheck.stderr || staleSlugCheck.stdout}`
     );
 
     const missingLocaleDir = await cloneFixture(baseDir, 'missing-locale');
@@ -172,7 +179,7 @@ async function main() {
     await rm(path.join(missingLocaleDir, 'website/src/content/docs/ja/gpu.mdx'));
     await expectFailure(
       await runNode(parityCheckScript, path.join(missingLocaleDir, 'website')),
-      'Locale status drift for website.docs.gpu ja: expected missing, found present',
+      'Docs topic website.docs.gpu is missing localized coverage for ja',
       'missing locale page detection'
     );
 
@@ -326,6 +333,100 @@ async function main() {
       `Registry check failed after adding an unrelated doc and resyncing:\n${corpusGrowthCheck.stderr || corpusGrowthCheck.stdout}`
     );
 
+    // The race itself: a concurrent PR lands an unrelated governed doc and
+    // this branch does NOT rewrite topic-registry.v1.json. Generate-then-
+    // validate must still pass. Before this fix the gate compared the
+    // checked-in serialisation and failed here.
+    const unsyncedGrowthDir = await cloneFixture(baseDir, 'unsynced-growth');
+    cleanupPaths.push(unsyncedGrowthDir);
+    const unsyncedRegistryBefore = await readFile(
+      path.join(unsyncedGrowthDir, 'docs/governance/topic-registry.v1.json'),
+      'utf8'
+    );
+    await writeFixtureFile(
+      unsyncedGrowthDir,
+      'docs/guide/concurrent-unrelated-doc.md',
+      [
+        '<!-- docs:meta',
+        'topic_id: repo.docs.guide.concurrent-unrelated-doc',
+        'authority: repo_only',
+        'audience: users',
+        'last_validated: 2026-08-23',
+        'validated_by: A5',
+        'source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.guide.concurrent-unrelated-doc',
+        '-->',
+        '',
+        '# Concurrent Unrelated Doc',
+        '',
+        'Simulates a sibling PR adding a governed doc without rewriting topic-registry.v1.json.',
+        '',
+      ].join('\n')
+    );
+    const unsyncedGrowthCheck = await runNode(registryCheckScript, unsyncedGrowthDir);
+    assert(
+      unsyncedGrowthCheck.ok,
+      `Registry check raced on an unsynced new governed doc:\n${unsyncedGrowthCheck.stderr || unsyncedGrowthCheck.stdout}`
+    );
+    assert(
+      (await readFile(path.join(unsyncedGrowthDir, 'docs/governance/topic-registry.v1.json'), 'utf8')) ===
+        unsyncedRegistryBefore,
+      'the gate rewrote the checked-in registry; generate-then-validate must not'
+    );
+
+    // Four required refusals — break each deliberately against the generated
+    // registry, not against JSON.stringify equality of the checked-in file.
+    const missingEntryDir = await cloneFixture(baseDir, 'missing-entry');
+    cleanupPaths.push(missingEntryDir);
+    const missingEntryRegistry = await buildGovernedTopicRegistry(missingEntryDir);
+    missingEntryRegistry.topics = missingEntryRegistry.topics.filter(
+      (topic) => topic.repo_doc_path !== 'docs/guide/getting-started.md'
+    );
+    const missingEntryErrors = await collectRegistryErrors(missingEntryDir, missingEntryRegistry);
+    assert(
+      missingEntryErrors.some((error) =>
+        error.includes('Governed doc has no registry entry: docs/guide/getting-started.md')
+      ),
+      `missing-entry did not refuse. errors=\n${missingEntryErrors.join('\n')}`
+    );
+
+    const ghostEntryDir = await cloneFixture(baseDir, 'ghost-entry');
+    cleanupPaths.push(ghostEntryDir);
+    const ghostEntryRegistry = await buildGovernedTopicRegistry(ghostEntryDir);
+    ghostEntryRegistry.topics.push({
+      topic_id: 'repo.docs.guide.ghost-does-not-exist',
+      collection: 'repo',
+      repo_doc_path: 'docs/guide/ghost-does-not-exist.md',
+      website_slug: null,
+      website_paths: {},
+      audience: 'users',
+      authority: 'repo_only',
+      owner_agent: 'A2',
+      locale_status: Object.fromEntries(['en', 'pt', 'el', 'zh', 'ja', 'es'].map((locale) => [locale, 'n/a'])),
+      validation_commands: [],
+      related_artifacts: [],
+    });
+    const ghostEntryErrors = await collectRegistryErrors(ghostEntryDir, ghostEntryRegistry);
+    assert(
+      ghostEntryErrors.some((error) =>
+        error.includes('Missing repo doc path from registry: docs/guide/ghost-does-not-exist.md')
+      ),
+      `ghost-entry did not refuse. errors=\n${ghostEntryErrors.join('\n')}`
+    );
+
+    const emptyValidatorDir = await cloneFixture(baseDir, 'empty-validator');
+    cleanupPaths.push(emptyValidatorDir);
+    const emptyValidatorPath = path.join(emptyValidatorDir, 'docs/features/GPU_RUNTIME.md');
+    const emptyValidatorContent = (await readFile(emptyValidatorPath, 'utf8')).replace(
+      /^validated_by: .*$/m,
+      'validated_by: '
+    );
+    await writeFile(emptyValidatorPath, emptyValidatorContent, 'utf8');
+    await expectFailure(
+      await runNode(registryCheckScript, emptyValidatorDir),
+      'metadata mismatch for validated_by: expected a non-empty validator, got ""',
+      'empty validated_by detection'
+    );
+
     const corruptedStubDir = await cloneFixture(baseDir, 'corrupted-stub');
     cleanupPaths.push(corruptedStubDir);
     const corruptedStubPath = path.join(corruptedStubDir, acceptanceReportPath);
@@ -341,7 +442,7 @@ async function main() {
     );
 
     console.log(
-      'Docs registry selftest passed (5 failure scenarios + baseline + 4 provenance-preserve scenarios + 2 corpus-race scenarios).'
+      'Docs registry selftest passed (5 failure scenarios + baseline + 4 provenance-preserve scenarios + 2 corpus-race scenarios + unsynced-growth + 4 required refusals).'
     );
   } finally {
     await Promise.all(cleanupPaths.map((target) => rm(target, { recursive: true, force: true })));
