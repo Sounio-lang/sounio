@@ -6062,6 +6062,7 @@ fn lowerer_rgn_return_kind_mut(lo: &! Lowerer, rt: &Option<Box<TypeExpr>>) -> i6
 //   scalar kinds:
 //          __rgn_exit_scalar(tok, v)         // reset unless escaped, then pop
 //   struct kind:
+//          scan_scalar_words(v)             // encoded references escape too
 //          if __rgn_escaped(tok) goto leave_v
 //          sc, sh = __rgn_count(), __rgn_cursor()
 //          t  = young_copy(v)                // above the dead region
@@ -6080,6 +6081,7 @@ fn lowerer_rgn_emit_exit_mut(lo: &! Lowerer, kind: i64, type_name: Name) with Mu
     let plain_label = plain_pair.1
     (*lo) = (*lo).emit(ir_branch_false(tok, plain_label))
     if kind == 3 {
+        (*lo) = (*lo).rgn_emit_result_escape_scan(ret, type_name, 0)
         let esc_pair = (*lo).rgn_call("__rgn_escaped", tok, 0, 0, 1)
         (*lo) = esc_pair.0
         let zero_pair = (*lo).emit_i64_const(0)
@@ -6512,7 +6514,8 @@ lower_rss_mark("before_block")
         }
         let body_end_idx = (*(*lo).current_func).instr_count
         var epilogue_cost: i64 = 64
-        if rgn_kind == 3 { epilogue_cost = epilogue_cost + 2 * (*lo).rgn_copy_cost(rgn_type, 0) }
+        // The escape scan is bounded by the same per-shape cost as one copy.
+        if rgn_kind == 3 { epilogue_cost = epilogue_cost + 3 * (*lo).rgn_copy_cost(rgn_type, 0) }
         if body_end_idx + epilogue_cost > IR_MAX_INSTRS - 256 {
             // The copies would push a body already near the cap over it: close
             // the function without a region rather than fail to compile it.
@@ -26016,11 +26019,11 @@ impl Lowerer {
         ir_name_at((*self.struct_layouts).entries[si as usize].fields[fi as usize].elem_type_name_id)
     }
 
-    // Projected IR cost of one young-copy of a `type_name` value, or -1 when a
-    // value of that type cannot be copied soundly. Sound means every slot is
-    // PROVEN by the declaration to be a non-integer word scalar, a
-    // non-integer word-scalar array, or a
-    // struct that is itself copyable. A slot wrongly taken for a scalar would
+    // Projected IR bound for one young-copy or escape scan of a `type_name`
+    // value, or -1 for an unsupported shape. Declarations classify storage;
+    // the exit scan still checks scalar bits for encoded references before
+    // resetting. Supported slots are non-integer word scalars, their arrays,
+    // or structs that are themselves copyable. A slot wrongly taken for a scalar would
     // keep a reference into memory the reset hands back, so anything else --
     // a string, Option, &T, an array of structs, an unregistered or
     // literal-seeded layout -- makes the whole type ineligible. Box and
@@ -26039,16 +26042,13 @@ impl Lowerer {
             let pos = self.struct_layout_field_pos(type_name, i)
             if pos < 0 { return 0 - 1 }
             if self.struct_layout_pos_array_len(pos) > 0 {
-                // Integer arrays can carry pointer bits through explicit casts.
-                // Until the copy path scans every element at runtime, keep the
-                // whole aggregate out of region reclamation.
+                // Keep the existing conservative integer-array exclusion.
+                // Expanding eligibility needs its own result-relocation tests.
                 if lower_name_is_integer_type(self.rgn_pos_elem_type_name(pos)) { return 0 - 1 }
                 total = total + 26
             } else if self.rgn_pos_decl_word_scalar(pos) == 1 {
-                // An integer field is not proof of non-reference: Sounio permits
-                // pointer-to-integer casts. Scalar function returns are checked
-                // by __rgn_exit_scalar; aggregate integer slots currently are
-                // not, so refuse this result shape conservatively.
+                // Retain the existing integer-bearing aggregate exclusion;
+                // declaration types alone cannot exclude references.
                 if lower_name_is_integer_type(self.struct_layout_pos_named_type(pos)) { return 0 - 1 }
                 total = total + 2
             } else {
@@ -26079,6 +26079,82 @@ impl Lowerer {
         let dst = pair.1
         lo = lo.emit(ir_call(dst, fn_id, fname, args, argc))
         (lo, dst)
+    }
+
+    // Returning scalar bits publishes them to the caller, an older target.
+    // Load raw words (no float conversion) and reuse the store classifier.
+    fn rgn_emit_result_array_escape_scan(self, src_reg: i64, elem_count: i64, target_reg: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        let end_pair = lo.fresh_label()
+        lo = end_pair.0
+        let end_label = end_pair.1
+        lo = lo.emit(ir_branch_false(src_reg, end_label))
+        let idx_pair = lo.emit_i64_const(0)
+        lo = idx_pair.0
+        let idx_reg = idx_pair.1
+        let limit_pair = lo.emit_i64_const(elem_count)
+        lo = limit_pair.0
+        let limit_reg = limit_pair.1
+        let one_pair = lo.emit_i64_const(1)
+        lo = one_pair.0
+        let one_reg = one_pair.1
+        let top_pair = lo.fresh_label()
+        lo = top_pair.0
+        let top_label = top_pair.1
+        lo = lo.emit(ir_label(top_label))
+        let cond_pair = lo.fresh_reg()
+        lo = cond_pair.0
+        lo = lo.emit(ir_binop(cond_pair.1, idx_reg, BinaryOp::OpLt, limit_reg))
+        lo = lo.emit(ir_branch_false(cond_pair.1, end_label))
+        let elem_pair = lo.fresh_reg()
+        lo = elem_pair.0
+        lo = lo.emit(ir_index_get(elem_pair.1, src_reg, idx_reg))
+        let barrier_pair = lo.rgn_call("__rgn_barrier", elem_pair.1, target_reg, 0, 2)
+        lo = barrier_pair.0
+        let next_pair = lo.fresh_reg()
+        lo = next_pair.0
+        lo = lo.emit(ir_binop(next_pair.1, idx_reg, BinaryOp::OpAdd, one_reg))
+        lo = lo.emit(ir_copy(idx_reg, next_pair.1))
+        lo = lo.emit(ir_jump(top_label))
+        lo.emit(ir_label(end_label))
+    }
+
+    fn rgn_emit_result_escape_scan(self, src_reg: i64, type_name: Name, depth: i64) -> Lowerer with Mut, Panic, Div, Alloc, IO {
+        var lo = self
+        if depth > 4 {
+            let escaped = lo.rgn_call("__rgn_mark_all", 0, 0, 0, 0)
+            return escaped.0
+        }
+        let done_pair = lo.fresh_label()
+        lo = done_pair.0
+        let done_label = done_pair.1
+        lo = lo.emit(ir_branch_false(src_reg, done_label))
+        let target_pair = lo.emit_i64_const(0)
+        lo = target_pair.0
+        let target_reg = target_pair.1
+        let slots = lo.struct_layout_slot_count(type_name)
+        var i: i64 = 0
+        while i < slots {
+            let pos = lo.struct_layout_field_pos(type_name, i)
+            let fname = lo.struct_layout_pos_field_name(pos)
+            let arr_len = lo.struct_layout_pos_array_len(pos)
+            let is_scalar = lo.rgn_pos_decl_word_scalar(pos) == 1
+            let nested_name = lo.struct_layout_pos_named_type(pos)
+            let slot_pair = lo.fresh_reg()
+            lo = slot_pair.0
+            let slot_reg = slot_pair.1
+            lo = lo.emit(ir_field_get(slot_reg, src_reg, i, fname))
+            if arr_len > 0 {
+                lo = lo.rgn_emit_result_array_escape_scan(slot_reg, arr_len, target_reg)
+            } else if is_scalar {
+                let barrier_pair = lo.rgn_call("__rgn_barrier", slot_reg, target_reg, 0, 2)
+                lo = barrier_pair.0
+            } else {
+                lo = lo.rgn_emit_result_escape_scan(slot_reg, nested_name, depth + 1)
+            }
+            i = i + 1
+        }
+        lo.emit(ir_label(done_label))
     }
 
     // Copy of a word-scalar array handle when it was born inside the region at
