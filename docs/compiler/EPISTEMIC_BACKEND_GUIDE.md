@@ -11,6 +11,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.epist
 
 > **⚠️ File paths updated 2026-07-11 (doc-reality audit).** This page was written against the retired Rust compiler tree (`crates/`, `compiler/src/*.rs`, `codegen/llvm/`); those files no longer exist — the compiler is self-hosted Sounio (Madaros v0.80.0). The design and concepts below remain accurate, but the epistemic backend/runtime now lives in `self-hosted/` as `.sio` (knowledge-runtime guards in `self-hosted/compiler/knowledge_runtime_guard*.sio`, native emission in `self-hosted/native/`) — not any `epistemic_runtime.rs` / `c_layout.rs` / LLVM backend variant. Do not look for the `.rs` paths below.
 
+> **Checked public API vs. internal representation.** This document uses `Knowledge<T>` to describe the compiler's internal epistemic backend (runtime modes, memory layouts, C-ABI). The checked public surface for user code is the `Epistemic` struct from `stdlib/epistemic/knowledge.sio` with free-function arithmetic (`ep_measured`, `ep_val`, `ep_std`, `ep_add`, `ep_mul`, `ep_div`, `ep_merge`, `ep_is_credible`), exercised by `tests/stdlib/epistemic/test_knowledge_madaros_import_e2e.sio` and `tests/run-pass/ep_gum_covariance.sio`. `Knowledge<T>` generic syntax, `measure()` constructor, `.uncertainty` field access, and units-as-type-parameters (`Knowledge<mg>`) shown in examples below are aspirational and not on the checked public surface — see `docs/compiler/KNOWN_LIMITATIONS.md`.
+
 
 ## 1. Introduction
 

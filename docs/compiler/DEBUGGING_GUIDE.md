@@ -11,6 +11,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.debug
 
 > **⚠️ File paths updated 2026-07-11 (doc-reality audit).** This page was written against the retired Rust compiler tree (`crates/`, `compiler/src/*.rs`, `codegen/llvm/`); those files no longer exist — the compiler is self-hosted Sounio (Madaros v0.80.0). The design and concepts below remain accurate, but DWARF/debug-info emission now lives in `self-hosted/native/dwarf.sio` and `self-hosted/native/debug_info.sio`; the epistemic/knowledge runtime in `self-hosted/compiler/knowledge_runtime_guard*.sio` — not any `codegen/llvm/*.rs` or `backend/native/*.rs`. Do not look for the `.rs` paths below.
 
+> **Checked public API.** This document uses `Knowledge<T>`, `Knowledge<f64>`, `Knowledge<mg/L>`, and `measure()` constructor in examples and GDB pretty-printer output to describe how the compiler's internal epistemic representation appears in DWARF debug info. The checked public surface for user code is the `Epistemic` struct from `stdlib/epistemic/knowledge.sio` with free-function arithmetic (`ep_measured`, `ep_val`, `ep_std`, `ep_add`, `ep_div`), exercised by `tests/stdlib/epistemic/test_knowledge_madaros_import_e2e.sio`. `Knowledge<T>` generic syntax, `measure()` constructor, and units-as-type-parameters are aspirational and not on the checked public surface — see `docs/compiler/KNOWN_LIMITATIONS.md`.
+
 
 ## 1. Introduction
 
