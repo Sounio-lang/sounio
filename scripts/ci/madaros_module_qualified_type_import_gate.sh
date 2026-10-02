@@ -50,6 +50,10 @@ fi
 [[ "$(head -c 2 "$RAW")" != '#!' ]] || fail "not a raw ELF (a wrapper script?): $RAW"
 
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
+# This gate verifies path-form type-import qualifier retention through the
+# modular native path. Keep region reclamation out so an unrelated native-region
+# crash cannot mask qualifier/import regressions.
+export SOUNIO_NO_REGION_RECLAIM=1
 
 # compile_case <label> <source> -> $WORK/<label>.{log,elf,out}
 compile_and_run() {
