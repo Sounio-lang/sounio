@@ -60,7 +60,9 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.architecture.ws-c-pr2-staging-manifest | repo_only | docs/architecture/WS_C_PR2_STAGING_MANIFEST.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.archived.announcement | archived | docs/archived/ANNOUNCEMENT.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.archived.architecture | archived | docs/archived/ARCHITECTURE.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.archived.audit-sounio-machinery | archived | docs/archived/AUDIT_SOUNIO_MACHINERY.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.archived.compiler-roadmap | archived | docs/archived/COMPILER_ROADMAP.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.archived.experimental-results | archived | docs/archived/EXPERIMENTAL_RESULTS.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.archived.garden-rosetta | archived | docs/archived/GARDEN_ROSETTA.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.archived.gemini | archived | docs/archived/GEMINI.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.archived.getting-started-duplicates.check-sounio-guide | archived | docs/archived/getting-started-duplicates/CHECK_SOUNIO_GUIDE.md | - | A7 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
