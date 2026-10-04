@@ -270,7 +270,7 @@ UM 655.634319 → 656.160386 (+8e−4 relative). It is not a dissertation claim,
 ## Review
 
 The mandatory math review ran on the canonical tooling (`chore/llm-offload-llmgateway-grok47`, `754c303cb`) against claims C1–C9.
-The log entry is in `.claude/llm_offload_log.md`.
+The log entry was written to `.claude/llm_offload_log.md` in commit `742907104`. Since #2746, that log lives on the private branch `internal/agent-dev`.
 
 - **Grok 4.7** (the gateway leg errored, so it ran via the automatic xAI-direct fallback): 8 OK and 1 TIGHTENABLE.
   The tightenings were: state the leak ratio as 7.7 orders, not 7; and call the 3e−12 SS residual accumulated rather
