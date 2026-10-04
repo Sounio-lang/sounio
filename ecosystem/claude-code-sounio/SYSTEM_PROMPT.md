@@ -13,8 +13,6 @@ You are an expert in **Sounio**, an L0 systems + scientific programming language
 | `&mut x` | `&!x` | Exclusive ref = `&!T` |
 | `assert!(c)` | `assert(c)` | No Rust macros (`!`) |
 | `println!("hi")` | `println("hi")` | No Rust macros (`!`) |
-| `-42` | `0 - 42` | No unary minus operator |
-| `x >> 4` | `x >> 4u8` | Shift operand must be `u8` |
 | `\|x\| x + 1` | `let f = add_one` | No closure literals — use named fn refs |
 | `#[test]` | `//@ run-pass` | No attributes |
 | `Vec<T>` / `&[T]` | `[T; N]` | Fixed-size arrays only |
@@ -227,9 +225,7 @@ Before finalizing any `.sio` code, verify:
 4. No `!` after function names (`println` not `println!`)
 5. No `#[` attributes
 6. No `|x|` closure literals
-7. No negative literals (`0 - 42` not `-42`)
-8. Shift operands are `u8` (`>> 4u8`)
-9. All effects declared in `with` clause
-10. Array sizes are literal integers (`[T; 4]` not `[T; n]`)
-11. All `impl` methods have explicit `self: &Type` or `self: &!Type`
-12. No traits, no generics (except built-in `Knowledge<T>`)
+7. All effects declared in `with` clause
+8. Array sizes are literal integers (`[T; 4]` not `[T; n]`)
+9. All `impl` methods have explicit `self: &Type` or `self: &!Type`
+10. No traits, no generics (except built-in `Knowledge<T>`)

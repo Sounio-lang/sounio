@@ -17,10 +17,8 @@ $SOUC run file.sio          # compile to temp ELF, then execute
 - NO `&mut`: use `&!` for exclusive refs
 - NO `let mut`: use `var` for mutable bindings
 - NO Rust macros: `assert(cond)` not `assert!(cond)`, `println("text")` not `println!("text")`
-- NO unary minus: `0 - 42` not `-42`
 - NO closure literals: `|x| x + 1` does not work. Use named fn refs: `let f = square`
 - NO attributes: no `#[test]`, `#[derive()]`
-- Bit shifts require u8: `x >> 4u8`
 
 ## Effects System (REQUIRED)
 
@@ -96,8 +94,6 @@ fn fill(arr: &![i64; 4]) with Mut, Panic { (*arr)[0] = 42 }
 2. `&!` not `&mut`, `var` not `let mut`
 3. Declare effects: `with IO, Mut, Div, Panic`
 4. `assert()` not `assert!()`, `println()` not `println!()`
-5. `0 - x` not `-x`
-6. Bit shifts: `x >> 4u8`
-7. Named fn refs only, no closure literals
-8. Helpers must be defined before callers (no forward refs)
-9. Run `$SOUC check file.sio` to validate
+5. Named fn refs only, no closure literals
+6. Helpers must be defined before callers (no forward refs)
+7. Run `$SOUC check file.sio` to validate
