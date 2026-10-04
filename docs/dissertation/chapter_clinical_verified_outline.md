@@ -175,4 +175,4 @@ Following the user's M5 protocol, this chapter is offered to multiple LLMs in pa
 - **Reviewer B** (e.g., Codex): focus on clinical methods, statistical analysis plan, reviewer-pre-empt rigor.
 - **Reviewer C** (e.g., Grok / DeepSeek): focus on synthesis, dissertation-level argument, broader implications.
 
-Reviewer disagreements are valuable — log to `.claude/vancomycin_track.md` LLM Review Notes section.
+Reviewer disagreements are valuable — log to the private research tracker's LLM Review Notes section.
