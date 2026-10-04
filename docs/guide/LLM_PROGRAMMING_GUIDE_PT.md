@@ -378,16 +378,16 @@ fn sort(b: &! SortBuf) with Mut { b.data[0] = 99 }   // funciona perfeitamente
 ### Manipulação de Bits
 `&`, `|`, `^`, `>>`, `<<`
 
-*   **Operandos de deslocamento devem ser explicitamente `u8`:**
+*   **A quantidade de deslocamento é um inteiro comum** (literal ou variável de qualquer tipo inteiro):
 ```sio
-let high = byte >> 4u8
-let low = byte & 15u8
+let high = byte >> 4
+let low = byte & 15
 ```
 
-### Proibição de Menos Unário
+### Menos Unário
 ```sio
-let neg = 0 - 42       // CORRETO
-// let neg = -42        // ERRO DE COMPILAÇÃO
+let neg = -42          // funciona com literais, variáveis e argumentos
+let flipped = -x       // não precisa do contorno `0 - x`
 ```
 
 ### Concatenação de Arrays
@@ -435,8 +435,8 @@ print("value = ")
 Para strings dinâmicas mutáveis, utilize buffers de tamanho fixo em formato de arrays de bytes:
 ```sio
 var name: [i8; 64] = [0; 64]
-name[0] = 72i8    // caractere 'H'
-name[1] = 101i8   // caractere 'e'
+name[0] = 72    // caractere 'H'
+name[1] = 101   // caractere 'e'
 ```
 
 ---
@@ -614,7 +614,6 @@ Blocos declarativos consistentes com as especificações internacionais de saúd
 | Macros de Rust (`assert!`, etc.) | Proibido | Use chamadas comuns: `assert()`, `println()` |
 | Literais de closure (`|x| x+1`) | Bloqueado | Use referências a funções nomeadas normais |
 | Atributos de cabeçalho (`#[test]`) | Bloqueado | Defina funções locais de teste comuns |
-| Menos unário (`-42`) | Bloqueado | Substitua pelo termo aritmético `0 - 42` |
 | FFI para inteiros complexos | JIT instável | Use os stubs nativos pré-compilados |
 
 ---
