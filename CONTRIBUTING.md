@@ -164,19 +164,6 @@ The Sounio standard library (`stdlib/`) is organized by domain and is the core s
 
 ---
 
-## Mandatory LLM-Offload Policy
-
-Sounio enforces a pre-commit peer review audit by external AI engines on math, clinical, and external-facing artifacts. If your changes touch any of the following, you **must** run `bin/llm-offload` before committing and append the audit evidence to `.claude/llm_offload_log.md`:
-
-- **Math claims** (PK formulas, GUM derivations, Lean statements):
-  `bin/llm-offload -t math-review -i <file>` (default fan-out: Grok 4.7 + Kimi K3 via LLM Gateway, plus zai/local)
-- **Clinical pathway code** (`stdlib/clinical/*`, Vancomycin tests):
-  `bin/llm-offload -t review -p deepseek -i <file>`
-- **External publications or papers** (`docs/papers/*`):
-  `bin/llm-offload --raw <draft> deepseek xai gemini`
-
----
-
 ## License
 
 By contributing to Sounio, you agree that your contributions will be licensed under the **Apache License, Version 2.0** (with copyright assigned to Sounio Language Project).
