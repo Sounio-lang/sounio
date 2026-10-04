@@ -683,12 +683,30 @@ labeled E1–E6 in the file header (E6: lean_single aliases returned
 arrays across calls, so the demo extracts every run's scalars before the
 next call — do not refactor it to collect-then-print).
 
-Engine coverage: **lean_single only** — on main as of 2026-09-15 Madaros
-type-checks the file but stops in native lowering at stdlib/plot's
+**On the 90 °C column (corrected 2026-10-04).** The 0.000 % loss at 90 °C
+is the k_m = 0 slot read back, not a test of the abstract's "negligible
+above ~70 °C". An earlier revision of the demo printed it as "consistent
+with the abstract's qualitative claim", which was circular; it now prints
+"A2: NOT TESTED HERE". Only the paper's own rate law (slot S2) can test A2.
+
+Engine coverage: **lean_single only.** Until 2026-10-04 Madaros
+type-checked the file but stopped in native lowering at stdlib/plot's
 `error_bar_chart` ("cannot safely lower print/println argument with
-unresolved scalar kind"), the same failure as the repo's own
-`tests/stdlib/chemistry/test_kinetics_*` tests; pre-existing blocker, not
-from this demo. Run:
+unresolved scalar kind"), the same failure as the four
+`tests/stdlib/chemistry/test_kinetics_*` tests. Binding the struct-field
+string to a typed local fixes the lowering. Measured on Madaros with the fix:
+
+| program | Madaros | lean_single |
+|---|---|---|
+| `test_kinetics_deep_stdlib` | `KINETICS_DEEP_STDLIB_OK` | OK |
+| `test_kinetics_core` | `Illegal instruction` | OK |
+| `test_kinetics_epistemic_ensemble` | `FAIL structural_ensemble` | `PASS` |
+| `test_kinetics_gri_mech` | `madaros: arena full` | `PASS` |
+| this demo | H2 prints `NON-FINITE`, then `arena full` | `UHS_BRINE_CALCITE_OK` |
+
+So the compile-time block is gone and three run-time engine divergences
+are now visible instead of masked. They are compiler defects, not
+chemistry ones, and they are open. Run:
 
 ```bash
 SOUNIO_SOUC_ENGINE=lean_single bin/souc run demos/hydrogen/uhs_brine_calcite.sio
