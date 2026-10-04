@@ -90,11 +90,9 @@ Sounio is **NOT Rust**. The compiler will reject common Rust syntax. Follow thes
 2. **Mutability**: Use `var` for mutable bindings, never `let mut`.
 3. **Exclusive References**: Use `&!` for exclusive references, never `&mut`.
 4. **No Rust Macros**: Use `println("text")` and `assert(cond)` instead of macro syntax.
-5. **No Unary Minus**: Write `0 - x` instead of `-x` for negation.
-6. **Bit Shifts**: Shift operands must be explicitly typed as `u8` (e.g., `x >> 4u8`).
-7. **No Closure Literals**: Closure syntax like `|x| x + 1` does not exist. Use named function references.
-8. **Explicit Self**: All struct method implementations must declare `self` explicitly as `self: &Type` or `self: &!Type`.
-9. **Algebraic Effects System**: All functions with side effects must declare them using the `with` keyword:
+5. **No Closure Literals**: Closure syntax like `|x| x + 1` does not exist. Use named function references.
+6. **Explicit Self**: All struct method implementations must declare `self` explicitly as `self: &Type` or `self: &!Type`.
+7. **Algebraic Effects System**: All functions with side effects must declare them using the `with` keyword:
    - `IO`: printing, file access, terminal operations
    - `Mut`: exclusive reference mutation or reassignment
    - `Div`: mathematical division or modulo operations
@@ -163,19 +161,6 @@ The Sounio standard library (`stdlib/`) is organized by domain and is the core s
 | `stdlib/math/` | Special functions, fractional calculus, autograd, and linear algebra. |
 | `stdlib/gpu/` | PTX and GPU-accelerated computing backends. |
 | `stdlib/ontology/` | Semantic ontology stores, subclass relations, and clinical terminologies (LOINC/SNOMED). |
-
----
-
-## Mandatory LLM-Offload Policy
-
-Sounio enforces a pre-commit peer review audit by external AI engines on math, clinical, and external-facing artifacts. If your changes touch any of the following, you **must** run `bin/llm-offload` before committing and append the audit evidence to `.claude/llm_offload_log.md`:
-
-- **Math claims** (PK formulas, GUM derivations, Lean statements):
-  `bin/llm-offload -t math-review -i <file>` (default fan-out: Grok 4.7 + Kimi K3 via LLM Gateway, plus zai/local)
-- **Clinical pathway code** (`stdlib/clinical/*`, Vancomycin tests):
-  `bin/llm-offload -t review -p deepseek -i <file>`
-- **External publications or papers** (`docs/papers/*`):
-  `bin/llm-offload --raw <draft> deepseek xai gemini`
 
 ---
 
