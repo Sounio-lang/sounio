@@ -29,7 +29,16 @@ command that produced it, run from the repository root named in `repositorio`,
 and `espera` a string it prints. A row is never edited in place when the number
 changes: mark the old row `corrigido` or `retirado`, say in `citado_em` what
 replaced it, and add a new row. With `--verify`, a missing producer file is
-reported as **Ausente** and a missing string as **Falhou**, never as valid.
+reported as **Ausente**, never as valid. A row is **Verificado** only when its
+producer exits 0 *and* prints `espera`; a non-zero exit is **Falhou** (exit code
+in the note) even if the string was printed before the failure. The
+`Lean`-backed row needs `lake` on `PATH` (`~/.elan/bin`), or it fails with
+code 127.
 
 The generator only marshals data into cells; it computes no scientific
 number. Yellow cells in the workbook are for a person to fill in.
+
+CI (`.github/workflows/ledger.yml`) checks the generator, not the science: the
+verdict unit tests (`python3 -m unittest tools/ledger/test_build_ledger.py`) and
+an offline `--no-github` smoke build that must produce the five sheets. It does
+not run `--verify`.

@@ -21,8 +21,8 @@ Usage:
       [--verify] [--no-github]
 
 Fails closed: a results row whose producer file is missing is reported as
-"Ausente", never as valid; a check that does not print the expected string is
-"Falhou", never silently dropped.
+"Ausente", never as valid; a check whose producer exits non-zero, or does not
+print the expected string, is "Falhou", never silently dropped.
 """
 import argparse
 import csv
@@ -170,10 +170,34 @@ def defect_rows():
 
 
 # ---------------------------------------------------------------- results
-def results_rows(args):
+def run_producer(cmd, cwd):
+    """Run one producer command; return (stdout+stderr, seconds, exit code)."""
+    t0 = dt.datetime.now()
+    p = subprocess.run(["bash", "-c", cmd], cwd=cwd,
+                       capture_output=True, text=True, timeout=900,
+                       env={**os.environ, "SOUNIO_STDLIB_PATH": os.path.join(ROOT, "stdlib")})
+    return p.stdout + p.stderr, (dt.datetime.now() - t0).total_seconds(), p.returncode
+
+
+def judge(espera, out, secs, rc):
+    """Verificado only when the producer exited 0 AND printed the expected string.
+    A producer that printed the value and then failed is Falhou: the string alone
+    does not prove a successful run."""
+    found = espera in out
+    if rc == 0 and found:
+        return "Verificado", f"{secs:.0f} s"
+    why = []
+    if rc != 0:
+        why.append(f"saiu com código {rc}")
+    if not found:
+        why.append(f"não encontrou: {espera}")
+    return "Falhou", f"{secs:.0f} s; " + "; ".join(why)
+
+
+def results_rows(args, path=None):
     cache = {}
     rows = []
-    for r in read_tsv(os.path.join(ROOT, "docs/ledger/results.tsv")):
+    for r in read_tsv(path or os.path.join(ROOT, "docs/ledger/results.tsv")):
         base = repo_path(r["repositorio"], args)
         verdict, note = "não verificado", ""
         if args.verify:
@@ -186,15 +210,9 @@ def results_rows(args):
             else:
                 key = (base, r["comando"])
                 if key not in cache:
-                    t0 = dt.datetime.now()
-                    p = subprocess.run(["bash", "-c", r["comando"]], cwd=base,
-                                       capture_output=True, text=True, timeout=900,
-                                       env={**os.environ, "SOUNIO_STDLIB_PATH": os.path.join(ROOT, "stdlib")})
-                    cache[key] = (p.stdout + p.stderr, (dt.datetime.now() - t0).total_seconds())
-                out, secs = cache[key]
-                ok = r["espera"] in out
-                verdict = "Verificado" if ok else "Falhou"
-                note = f"{secs:.0f} s" + ("" if ok else f"; não encontrou: {r['espera']}")
+                    cache[key] = run_producer(r["comando"], base)
+                out, secs, rc = cache[key]
+                verdict, note = judge(r["espera"], out, secs, rc)
         val = r["valor"]
         try:
             val = float(val) if val else None
