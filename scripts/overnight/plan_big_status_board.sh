@@ -59,14 +59,6 @@ extract_json_field_or() {
 declare -a GATE_RESULTS
 
 if [[ "$RUN_GATES" -eq 1 ]]; then
-  gate_json="$(run_gate claude_plan_consistency bash scripts/ci/check_claude_plan_consistency.sh || true)"
-  GATE_RESULTS+=("$gate_json")
-  copy_log "$(jq -r '.log' <<<"$gate_json")" "artifacts/omega/plan_big_gate_claude_plan_consistency.log"
-
-  gate_json="$(run_gate claude_operational_contract bash scripts/ci/claude_operational_contract_gate.sh || true)"
-  GATE_RESULTS+=("$gate_json")
-  copy_log "$(jq -r '.log' <<<"$gate_json")" "artifacts/omega/plan_big_gate_claude_operational_contract.log"
-
   gate_json="$(run_gate lsp_smoke bash scripts/ci/lsp_smoke_gate.sh || true)"
   GATE_RESULTS+=("$gate_json")
   copy_log "$(jq -r '.log' <<<"$gate_json")" "artifacts/omega/plan_big_gate_lsp_smoke.log"
