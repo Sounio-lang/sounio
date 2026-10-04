@@ -186,7 +186,29 @@ if [ "$PROBE_RC" -ne 0 ] || ! grep -q 'KIN_REFUSAL_ESCAPED' "$OUT/direct_control
 fi
 echo "  control ok: simulate_general_crn direct call accepted"
 
-write_direct_probe direct_nsp_zero     0 2 10; refused direct_nsp_zero
+# direct_nsp_zero isolates nsp < 1 on its own: write_direct_probe's default
+# 3x2 matrix would also trip the shape guard (nu.rows != nsp) at nsp = 0,
+# so removing only the lower bound would stay green (Copilot review, same
+# PR). Matching 0x0 dims (nrxn = 0 is itself valid) make the lower-bound
+# guard the only one that can fire; nrxn = 0 means there is no reaction
+# column, so the probe skips the coefficient writes write_direct_probe's
+# template always makes.
+cat > "$OUT/kin_refusal_direct_nsp_zero.sio" <<'PROBE'
+//@ run-pass
+use linalg::matnm::matnm_new
+use chemistry::kinetics::*
+fn main() -> i32 with Mut, Div, Panic, IO {
+    let nu = matnm_new(0 as i64, 0 as i64)
+    let initv: [f64; 8] = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let ks: [f64; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let sim = simulate_general_crn(&initv, &ks, nu, 0, 0, 0.2, 10)
+    print("sim0 ") println(sim[0])
+    println("KIN_REFUSAL_ESCAPED")
+    return 0
+}
+PROBE
+refused direct_nsp_zero
+
 write_direct_probe direct_dims_mismatch 3 1 10; refused direct_dims_mismatch
 
 echo "KINETICS_REFUSAL_GATE_OK"
