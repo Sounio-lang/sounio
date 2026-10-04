@@ -220,28 +220,6 @@ The only exception: `Knowledge<T>` is a built-in generic — use it as-is.
 
 ---
 
-## E09 — Bit shift without `u8` operand
-
-**Symptom:** Type error on shift expression.
-
-**Error pattern:**
-```
-error: shift amount must be u8
-```
-
-**Fix:**
-```sio
-// ✗ WRONG
-let high = byte >> 4
-let low = byte & 15
-
-// ✓ CORRECT
-let high = byte >> 4u8
-let low = byte & 15u8
-```
-
----
-
 ## E10 — Array mutation doesn't propagate (interpreter)
 
 **Symptom:** Values written to `&![T; N]` inside a function are invisible to the caller.
