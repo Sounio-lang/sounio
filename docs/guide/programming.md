@@ -1965,8 +1965,6 @@ fn foo() -> i32 {
 
 // Type annotations: use same syntax
 let x: i32 = 5         // OK
-let x = 5<i32>         // OK (type suffix syntax)
-let x = 5.0<f64>       // OK for floats with units
 
 // Effect annotation: use 'with' keyword
 fn foo() -> i32 with IO { }   // Sounio style

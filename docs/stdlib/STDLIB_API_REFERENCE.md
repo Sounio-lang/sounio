@@ -4450,7 +4450,7 @@ organized by module. Generated from source on the date shown below.
 
 **16 public functions** across 6 files
 
-- `pub fn cstring_write(src: [u8; 256], src_len: i64, dst: &![u8; 257]) -> i64 {` — *ffi/cstring.sio*
+- `pub fn cstring_write(src: [u8; 256], src_len: i64, dst: &![u8; 257]) -> i64 with Mut {` — *ffi/cstring.sio*
 - `pub fn cstring_len(buf: [u8; 257], max: i64) -> i64 {` — *ffi/cstring.sio*
 - `pub fn cstring_eq(a: [u8; 257], b: [u8; 257], max: i64) -> i64 {` — *ffi/cstring.sio*
 - `pub fn slice_from_raw_parts<T>(ptr: *const T, len: usize) -> *const [T] {` — *ffi/lib.sio*
