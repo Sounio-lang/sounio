@@ -31,6 +31,16 @@
 #                  disagree about the reaction count.
 #   control        the same valid call with every guard satisfied (3x2 A->B->C,
 #                  checkpoints 5,10,10,20, species 0) runs to completion.
+#   direct_*       every probe above calls simulate_general_crn_checkpoints,
+#                  never simulate_general_crn itself (Copilot review,
+#                  sounio-lang/sounio#2694, "add coverage for the direct
+#                  entry point"): both functions call check_general_crn_dims
+#                  independently, so deleting that call from
+#                  simulate_general_crn's own body left this gate green
+#                  while the public, species_idx-free entry point silently
+#                  accepted out-of-range dims. direct_control and
+#                  direct_nsp_zero/direct_dims_mismatch below call
+#                  simulate_general_crn directly to close that gap.
 #
 # Engine: lean_single only. kinetics.sio checks clean under Madaros but hits
 # the documented multimodule native-link limitation at `run` (see
@@ -69,6 +79,30 @@ fn main() -> i32 with Mut, Div, Panic, IO {
     let ks: [f64; 8] = [0.12, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
     let cps: [i64; 4] = ${cps}
     let sim = simulate_general_crn_checkpoints(&initv, &ks, nu, ${nsp}, ${nrxn}, 0.2, &cps, ${sp})
+    print("sim0 ") println(sim[0])
+    println("KIN_REFUSAL_ESCAPED")
+    return 0
+}
+PROBE
+}
+
+# write_direct_probe NAME NSP NRXN STEPS [ROWS COLS]: like write_probe, but
+# calls simulate_general_crn directly instead of simulate_general_crn_checkpoints
+# -- no checkpoints array, no species_idx -- so these probes isolate
+# check_general_crn_dims at simulate_general_crn's own call site.
+write_direct_probe() {
+  local name="$1" nsp="$2" nrxn="$3" steps="$4" rows="${5:-3}" cols="${6:-2}"
+  cat > "$OUT/kin_refusal_${name}.sio" <<PROBE
+//@ run-pass
+use linalg::matnm::{matnm_new, matnm_set, MatNM}
+use chemistry::kinetics::*
+fn main() -> i32 with Mut, Div, Panic, IO {
+    var nu = matnm_new(${rows} as i64, ${cols} as i64)
+    nu = matnm_set(nu, 0 as i64, 0 as i64, 0.0 - 1.0)
+    nu = matnm_set(nu, 1 as i64, 0 as i64, 1.0)
+    let initv: [f64; 8] = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let ks: [f64; 8] = [0.12, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let sim = simulate_general_crn(&initv, &ks, nu, ${nsp}, ${nrxn}, 0.2, ${steps})
     print("sim0 ") println(sim[0])
     println("KIN_REFUSAL_ESCAPED")
     return 0
@@ -142,5 +176,17 @@ write_probe species_oob   3 2 "[5, 10, 10, 20]" 3;  refused species_oob
 write_probe nsp_nine      9 2 "[5, 10, 10, 20]" 0 9 2; refused nsp_nine
 write_probe nrxn_nine     3 9 "[5, 10, 10, 20]" 0 3 9; refused nrxn_nine
 write_probe dims_mismatch 3 1 "[5, 10, 10, 20]" 0;  refused dims_mismatch
+
+write_direct_probe direct_control 3 2 10
+run_probe direct_control
+if [ "$PROBE_RC" -ne 0 ] || ! grep -q 'KIN_REFUSAL_ESCAPED' "$OUT/direct_control_run.log"; then
+  echo "FAIL: direct control probe did not run to completion (rc $PROBE_RC)"
+  cat "$OUT/direct_control_run.log" || true
+  exit 1
+fi
+echo "  control ok: simulate_general_crn direct call accepted"
+
+write_direct_probe direct_nsp_zero     0 2 10; refused direct_nsp_zero
+write_direct_probe direct_dims_mismatch 3 1 10; refused direct_dims_mismatch
 
 echo "KINETICS_REFUSAL_GATE_OK"
