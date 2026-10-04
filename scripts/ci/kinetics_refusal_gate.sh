@@ -177,6 +177,72 @@ write_probe nsp_nine      9 2 "[5, 10, 10, 20]" 0 9 2; refused nsp_nine
 write_probe nrxn_nine     3 9 "[5, 10, 10, 20]" 0 3 9; refused nrxn_nine
 write_probe dims_mismatch 3 1 "[5, 10, 10, 20]" 0;  refused dims_mismatch
 
+# nrxn_neg and row_mismatch close the two remaining gaps Copilot found in
+# the dimension contract (sounio-lang/sounio#2694): dims_mismatch above
+# only ever exercises nu.cols != nrxn (nsp_nine/nrxn_nine likewise only
+# ever match nu.rows == nsp), so nu.rows != nsp has never been probed, and
+# every nrxn probe so far is >= 0 (nrxn_nine is the upper bound only), so
+# nrxn < 0 has never been probed either. matnm_new performs no validation
+# of its own (stdlib/linalg/matnm.sio), so a matrix can carry a negative
+# cols field; write_probe's template always calls matnm_set, which would
+# still be a harmless write at a degenerate shape but is skipped here to
+# keep each probe a minimal isolation of one guard, same reasoning as
+# direct_nsp_zero above.
+#
+# nrxn_neg: nsp=3 is in range, so only the nrxn<0 half of the bound check
+# can fire -- UNLESS that half is the one removed, in which case the
+# matrix must still agree with nrxn so the shape guard does not fire in
+# its place: nu = matnm_new(3, -1) matches nrxn = -1 exactly (nu.rows == 3
+# == nsp, nu.cols == -1 == nrxn), so with the bound check sabotaged out,
+# execution reaches compute_rates_general's `while r < nrxn` with nrxn =
+# -1, which never runs (0 < -1 is false), and general_dc's matnm_mul inner
+# loop `while p < k` with k = nu.cols = -1 likewise never runs -- both
+# degenerate to an all-zero result with no out-of-bounds access, so the
+# probe escapes cleanly rather than crashing.
+cat > "$OUT/kin_refusal_nrxn_neg.sio" <<'PROBE'
+//@ run-pass
+use linalg::matnm::matnm_new
+use chemistry::kinetics::*
+fn main() -> i32 with Mut, Div, Panic, IO {
+    let nu = matnm_new(3, -1)
+    let initv: [f64; 8] = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let ks: [f64; 8] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let cps: [i64; 4] = [5, 10, 10, 20]
+    let sim = simulate_general_crn_checkpoints(&initv, &ks, nu, 3, -1, 0.2, &cps, 0)
+    print("sim0 ") println(sim[0])
+    println("KIN_REFUSAL_ESCAPED")
+    return 0
+}
+PROBE
+refused nrxn_neg
+
+# row_mismatch: nsp=3 and nrxn=2 are both in range, so only the
+# nu.rows != nsp half of the shape guard can fire -- UNLESS that half is
+# the one removed, in which case the matrix's cols must still agree with
+# nrxn (2) so the cols half of the same guard does not fire in its place:
+# nu = matnm_new(2, 2) has rows = 2 != nsp = 3, cols = 2 == nrxn = 2. With
+# only the rows half sabotaged out, compute_rates_general and general_dc
+# read/write within the fixed 4096-entry buffer regardless of nu.rows (see
+# matnm_get/matnm_mul, which index by nu.cols and the caller's own loop
+# bounds, never by nu.rows against nsp), so the probe escapes cleanly with
+# a zero-filled result rather than crashing.
+cat > "$OUT/kin_refusal_row_mismatch.sio" <<'PROBE'
+//@ run-pass
+use linalg::matnm::matnm_new
+use chemistry::kinetics::*
+fn main() -> i32 with Mut, Div, Panic, IO {
+    let nu = matnm_new(2, 2)
+    let initv: [f64; 8] = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let ks: [f64; 8] = [0.12, 0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    let cps: [i64; 4] = [5, 10, 10, 20]
+    let sim = simulate_general_crn_checkpoints(&initv, &ks, nu, 3, 2, 0.2, &cps, 0)
+    print("sim0 ") println(sim[0])
+    println("KIN_REFUSAL_ESCAPED")
+    return 0
+}
+PROBE
+refused row_mismatch
+
 write_direct_probe direct_control 3 2 10
 run_probe direct_control
 if [ "$PROBE_RC" -ne 0 ] || ! grep -q 'KIN_REFUSAL_ESCAPED' "$OUT/direct_control_run.log"; then

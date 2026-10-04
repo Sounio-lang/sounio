@@ -165,6 +165,15 @@ pub fn newton_equil_solve(guess: f64, tol: f64) -> f64 with Mut, Div, Panic {
 // Electro: Nernst E = E0 - (RT/nF) ln Q , with unc. F~96485
 pub fn nernst(e0: f64, ue0: f64, n: i64, q: f64, uq: f64, t: f64, ut: f64) -> (f64, f64) with Mut, Div, Panic {
     if n == 0 { return (e0, ue0); }
+    // Q is a ratio of activities/concentrations, so it is undefined for
+    // q <= 0 -- ln(q) has no real value there. equilibrium_ln_approx
+    // silently returns 0.0 for nonpositive x, which let this function
+    // compute a finite-looking (e, ue) for a q that should never reach it
+    // (Copilot review, sounio-lang/sounio#2694: "q < 0 now returns a
+    // plausible finite result even though ln(q) is undefined"). Guarded
+    // the same way delta_g_from_k rejects k <= 0 below, for the same
+    // reason: a (0.0, 0.0) sentinel, not a silently-plausible value.
+    if q <= 0.0 { return (0.0, 0.0); }
     let rt_nf = (r_const() * t) / (n as f64 * 96485.0);
     let lnq = equilibrium_ln_approx(q);
     let e = e0 - rt_nf * lnq;
@@ -352,6 +361,19 @@ pub fn test_nernst_rss_three_term() -> bool with Mut, Div, Panic {
     u_all < u_e0 + u_q + u_t
 }
 
+// Regression for the q <= 0 domain guard (Copilot review, same PR): Q is a
+// ratio of activities/concentrations and has no real logarithm at or below
+// zero. Checks negative, zero and a valid positive control so the guard is
+// pinned on both invalid branches without disturbing the normal case.
+pub fn test_nernst_q_domain_guard() -> bool with Mut, Div, Panic {
+    let (e_neg, u_neg) = nernst(1.0, 0.02, 1, 0.0 - 1.0, 0.1, 298.0, 1.0);
+    let (e_zero, u_zero) = nernst(1.0, 0.02, 1, 0.0, 0.1, 298.0, 1.0);
+    let (e_ok, u_ok) = nernst(1.0, 0.02, 1, 2.0, 0.1, 298.0, 1.0);
+    if e_neg != 0.0 || u_neg != 0.0 { return false; }
+    if e_zero != 0.0 || u_zero != 0.0 { return false; }
+    e_ok != 0.0 && u_ok > 0.0
+}
+
 fn main() -> i32 with Mut, Div, Panic, IO {
     var p: i32 = 0; var f: i32 = 0;
     if test_k_dg() { p = p + 1 } else { f = f + 1; println("FAIL kdg") }
@@ -366,6 +388,7 @@ fn main() -> i32 with Mut, Div, Panic, IO {
     if test_delta_g_k_sensitivity() { p = p + 1 } else { f = f + 1; println("FAIL delta_g k sensitivity") }
     if test_nernst_q_sensitivity() { p = p + 1 } else { f = f + 1; println("FAIL nernst q sensitivity") }
     if test_nernst_rss_three_term() { p = p + 1 } else { f = f + 1; println("FAIL nernst rss three term") }
+    if test_nernst_q_domain_guard() { p = p + 1 } else { f = f + 1; println("FAIL nernst q domain guard") }
     if test_speciation() { p = p + 1 } else { f = f + 1; println("FAIL speciation") }
     if f == 0 { println("EQUILIBRIUM + ELECTRO + SOLVERS REAL ALL PASS (phase3+)") } else { println("EQUIL FAILS") }
     return f
