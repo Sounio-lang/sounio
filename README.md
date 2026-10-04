@@ -83,15 +83,7 @@ uv run --with numpy python scripts/research/cpc2026_ossm_subset_audit.py
 
 ## For LLMs and Code Tools
 
-- Session bootstrap:
-  1. Run `./sounio-whereami --quick`
-  2. Read [ONBOARDING.md](ONBOARDING.md)
-  3. Read [CLAUDE_HANDOFF.md](CLAUDE_HANDOFF.md)
-  4. Read [CLAUDE.md](CLAUDE.md)
-  5. Read [AGENTS.md](AGENTS.md)
-  6. Verify the current branch before editing
-  7. Treat `/workspace/sounio` as the active remote-first workspace path
-  8. Do not propose destructive reset/clean/rebase flows to "simplify" recovery state
+- Start here: [CLAUDE.md](CLAUDE.md) (build and run, the syntax that differs from Rust, agent tooling, known limitations) and [AGENTS.md](AGENTS.md)
 - Prompt surface: [llms.txt](llms.txt)
 - **Repository scale (read before estimating size):** [SCALE.md](SCALE.md) · [docs/audit/README.md](docs/audit/README.md)
 - Regenerate numbers: `bash scripts/dev/measure_repo_scale.sh`
