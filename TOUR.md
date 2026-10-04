@@ -79,9 +79,12 @@ link between the two is by construction and by test, not by proof.
 Each result has an independent oracle outside the language:
 
 - **Cantera 3.2 for GRI-Mech 3.0.** The full 53-species mechanism agrees within the
-  oracle's own measured resolution. The cross-validation found three real defects:
-  a reverse-rate bug in the Python oracle, a 1 bar vs 1 atm standard state, and a
-  √(T/Δt) under-accumulation of the uncertainty band. It is frozen with a DOI:
+  oracle's own measured resolution. The headline of the cross-validation is that
+  **the implementation was right and its test oracle was wrong**: the Python
+  replica added parameter uncertainty in quadrature at every step, so its band
+  scaled with √dt, while Sounio's native band is step-size invariant. The reported
+  parity gap was one rounded gas constant, not the integrator, and a reported
+  1 bar vs 1 atm defect was checked and does not exist. It is frozen with a DOI:
   [`Sounio-lang/sounio-gri30-crossvalidation`](https://github.com/Sounio-lang/sounio-gri30-crossvalidation),
   v1.0.3, [10.5281/zenodo.22263060](https://doi.org/10.5281/zenodo.22263060).
 - **C++23 re-implementations written from the protocol**, not translated from the
