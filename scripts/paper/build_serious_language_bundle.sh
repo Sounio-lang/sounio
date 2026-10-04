@@ -206,7 +206,6 @@ cat >>"$RESULTS" <<EOF
 - Confirm public PL claims close through \`docs/serious-language/public-claim-registry.v1.tsv\` and \`docs/serious-language/doc-claim-surface.v1.tsv\`.
 - Confirm high-value public claims have exact anchors in \`docs/serious-language/claim-line-annotations.v1.tsv\`.
 - Downgrade any claim whose supporting command failed or was not run.
-- For external-facing papers/slides/abstracts, run the required \`bin/llm-offload\` review and log the result.
 - Record remaining blockers before submission.
 
 ## Final Status
