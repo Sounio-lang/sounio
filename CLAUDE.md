@@ -28,6 +28,12 @@ Two things are simultaneously true about this repository:
 
 ---
 
+## 3. Canonical branch
+
+`main` is the canonical branch; `integration/sounio-dev-ready-base` is deprecated. Start new work from `main`.
+
+---
+
 ## 4. Build & run
 
 The compiler is self-hosted (written in Sounio, not Rust). **`bin/souc` is the default compiler entrypoint and now routes to Madaros** — the self-hosted *modular* compiler (`artifacts/self-hosted/madaros`, built via `make build-madaros`). The legacy single-file `lean_single` engine that `bin/souc` used to be is preserved as `bin/souc-lean-single-x86_64`; force it with `SOUNIO_SOUC_ENGINE=lean_single`. lean_single remains the **bootstrap seed** (`make build`, `make build-madaros`) and the canonical fixed-point ELF — it is no longer the default *user-facing* compiler. If Madaros has not been built yet, `bin/souc` falls back to lean_single with a notice on stderr.
