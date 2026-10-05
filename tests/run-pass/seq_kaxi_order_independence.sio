@@ -1,0 +1,356 @@
+//@ run-pass
+//@ expect-stdout-contains: PASS
+//@ description: Seq<Knowledge<f64>> reductions — independent kaxi_fuse vs sequential observe vs correlated BLUE.
+// Method demonstration only. Numbers are the same ILLUSTRATIVE synthetic clearance
+// values as rapamycin_kaxi_fuse_prior.sio (Ferron 1997 prior + three synthetic
+// individuals). This makes NO clinical-accuracy, dose, or patient-safety claim.
+// ρ = 0.5 is a sensitivity probe, not a measured assay correlation.
+use epistemic::kaxi::*;
+
+fn abs_f64(x: f64) -> f64 {
+    if x < 0.0 {
+        return 0.0 - x
+    }
+    x
+}
+
+fn near(a: f64, b: f64, tol: f64) -> bool {
+    abs_f64(a - b) <= tol
+}
+
+// Normal-normal conjugate step (stdlib observe_with_prior is not pub).
+fn update_mean(pm: f64, pv: f64, y: f64, yv: f64) -> f64 with Div {
+    let total: f64 = pv + yv
+    if total == 0.0 {
+        return y
+    }
+    (pv * y + yv * pm) / total
+}
+
+fn update_var(pv: f64, yv: f64) -> f64 with Div {
+    let total: f64 = pv + yv
+    if total == 0.0 {
+        return 0.0
+    }
+    (pv * yv) / total
+}
+
+// Two-observation BLUE of one scalar, covariance ρ σ1 σ2.
+// var = (v1 v2 (1-ρ²)) / (v1 + v2 - 2ρ √(v1 v2))
+// denom == 0 only at ρ=+1 and v1==v2; the removable limit is v1 (one measurement, not two).
+fn blue2_var(v1: f64, v2: f64, rho: f64) -> f64 with Div {
+    let s12: f64 = sqrt(v1 * v2)
+    let denom: f64 = v1 + v2 - 2.0 * rho * s12
+    if denom == 0.0 {
+        return v1
+    }
+    let num: f64 = v1 * v2 * (1.0 - rho * rho)
+    num / denom
+}
+
+fn blue2_mean(y1: f64, v1: f64, y2: f64, v2: f64, rho: f64) -> f64 with Div {
+    let s12: f64 = sqrt(v1 * v2)
+    let denom: f64 = v1 + v2 - 2.0 * rho * s12
+    if denom == 0.0 {
+        return 0.5 * y1 + 0.5 * y2
+    }
+    let w1: f64 = (v2 - rho * s12) / denom
+    let w2: f64 = (v1 - rho * s12) / denom
+    w1 * y1 + w2 * y2
+}
+
+// Actual variance of the *independent-weight* estimator under true cov ρ.
+// Always ≥ BLUE variance (GLS). Distinct from the SD kaxi *reports*.
+fn kaxi_weights_true_var(v1: f64, v2: f64, rho: f64) -> f64 with Div {
+    let s12: f64 = sqrt(v1 * v2)
+    let tot: f64 = v1 + v2
+    let w1: f64 = v2 / tot
+    let w2: f64 = v1 / tot
+    w1 * w1 * v1 + w2 * w2 * v2 + 2.0 * w1 * w2 * rho * s12
+}
+
+// Same BLUE via explicit 2×2 precision-matrix row sums (cross-check).
+fn blue2_var_inv(v1: f64, v2: f64, rho: f64) -> f64 with Div {
+    let s12: f64 = sqrt(v1 * v2)
+    let det: f64 = v1 * v2 * (1.0 - rho * rho)
+    if det == 0.0 {
+        return v1
+    }
+    let inv11: f64 = v2 / det
+    let inv12: f64 = (0.0 - rho * s12) / det
+    let inv22: f64 = v1 / det
+    let s1: f64 = inv11 + inv12
+    let s2: f64 = inv12 + inv22
+    1.0 / (s1 + s2)
+}
+
+fn det3(
+    a00: f64, a01: f64, a02: f64,
+    a10: f64, a11: f64, a12: f64,
+    a20: f64, a21: f64, a22: f64
+) -> f64 {
+    let m00: f64 = a11 * a22 - a12 * a21
+    let m01: f64 = a10 * a22 - a12 * a20
+    let m02: f64 = a10 * a21 - a11 * a20
+    a00 * m00 - a01 * m01 + a02 * m02
+}
+
+// Three-observation GLS of one scalar, equicorrelated at ρ (pairwise).
+// Returns posterior variance (1' Σ^{-1} 1)^{-1}. det==0 → refuse as v1.
+fn blue3_var(v1: f64, v2: f64, v3: f64, rho: f64) -> f64 with Div {
+    let c12: f64 = rho * sqrt(v1 * v2)
+    let c13: f64 = rho * sqrt(v1 * v3)
+    let c23: f64 = rho * sqrt(v2 * v3)
+    let d: f64 = det3(v1, c12, c13, c12, v2, c23, c13, c23, v3)
+    if d == 0.0 {
+        return v1
+    }
+    let c00: f64 = v2 * v3 - c23 * c23
+    let c01: f64 = 0.0 - (c12 * v3 - c13 * c23)
+    let c02: f64 = c12 * c23 - c13 * v2
+    let c10: f64 = 0.0 - (c12 * v3 - c13 * c23)
+    let c11: f64 = v1 * v3 - c13 * c13
+    let c12t: f64 = 0.0 - (v1 * c23 - c13 * c12)
+    let c20: f64 = c12 * c23 - v2 * c13
+    let c21: f64 = 0.0 - (v1 * c23 - c12 * c13)
+    let c22: f64 = v1 * v2 - c12 * c12
+    let s0: f64 = (c00 + c10 + c20) / d
+    let s1: f64 = (c01 + c11 + c21) / d
+    let s2: f64 = (c02 + c12t + c22) / d
+    1.0 / (s0 + s1 + s2)
+}
+
+fn blue3_mean(
+    y1: f64, v1: f64,
+    y2: f64, v2: f64,
+    y3: f64, v3: f64,
+    rho: f64
+) -> f64 with Div {
+    let c12: f64 = rho * sqrt(v1 * v2)
+    let c13: f64 = rho * sqrt(v1 * v3)
+    let c23: f64 = rho * sqrt(v2 * v3)
+    let d: f64 = det3(v1, c12, c13, c12, v2, c23, c13, c23, v3)
+    if d == 0.0 {
+        return (y1 + y2 + y3) / 3.0
+    }
+    let c00: f64 = v2 * v3 - c23 * c23
+    let c01: f64 = 0.0 - (c12 * v3 - c13 * c23)
+    let c02: f64 = c12 * c23 - c13 * v2
+    let c10: f64 = 0.0 - (c12 * v3 - c13 * c23)
+    let c11: f64 = v1 * v3 - c13 * c13
+    let c12t: f64 = 0.0 - (v1 * c23 - c13 * c12)
+    let c20: f64 = c12 * c23 - v2 * c13
+    let c21: f64 = 0.0 - (v1 * c23 - c12 * c13)
+    let c22: f64 = v1 * v2 - c12 * c12
+    let s0: f64 = (c00 + c10 + c20) / d
+    let s1: f64 = (c01 + c11 + c21) / d
+    let s2: f64 = (c02 + c12t + c22) / d
+    (s0 * y1 + s1 * y2 + s2 * y3) / (s0 + s1 + s2)
+}
+
+// Inverse-variance fuse of two independent estimators (BLUE3 and the prior).
+fn fuse2_var(v_a: f64, v_b: f64) -> f64 with Div {
+    1.0 / (1.0 / v_a + 1.0 / v_b)
+}
+
+fn fuse2_mean(m_a: f64, v_a: f64, m_b: f64, v_b: f64) -> f64 with Div {
+    let p_a: f64 = 1.0 / v_a
+    let p_b: f64 = 1.0 / v_b
+    (m_a * p_a + m_b * p_b) / (p_a + p_b)
+}
+
+// True variance of kaxi-on-4 weights when prior ⊥ individuals and
+// the three individuals are equicorrelated at ρ.
+fn kaxi4_true_var(v0: f64, v1: f64, v2: f64, v3: f64, rho: f64) -> f64 with Div {
+    let p0: f64 = 1.0 / v0
+    let p1: f64 = 1.0 / v1
+    let p2: f64 = 1.0 / v2
+    let p3: f64 = 1.0 / v3
+    let pt: f64 = p0 + p1 + p2 + p3
+    let w0: f64 = p0 / pt
+    let w1: f64 = p1 / pt
+    let w2: f64 = p2 / pt
+    let w3: f64 = p3 / pt
+    let c12: f64 = rho * sqrt(v1 * v2)
+    let c13: f64 = rho * sqrt(v1 * v3)
+    let c23: f64 = rho * sqrt(v2 * v3)
+    w0 * w0 * v0
+        + w1 * w1 * v1 + w2 * w2 * v2 + w3 * w3 * v3
+        + 2.0 * w1 * w2 * c12
+        + 2.0 * w1 * w3 * c13
+        + 2.0 * w2 * w3 * c23
+}
+
+fn blue2_mean_inv(y1: f64, v1: f64, y2: f64, v2: f64, rho: f64) -> f64 with Div {
+    let s12: f64 = sqrt(v1 * v2)
+    let det: f64 = v1 * v2 * (1.0 - rho * rho)
+    if det == 0.0 {
+        return 0.5 * y1 + 0.5 * y2
+    }
+    let inv11: f64 = v2 / det
+    let inv12: f64 = (0.0 - rho * s12) / det
+    let inv22: f64 = v1 / det
+    let s1: f64 = inv11 + inv12
+    let s2: f64 = inv12 + inv22
+    (s1 * y1 + s2 * y2) / (s1 + s2)
+}
+
+fn main() with IO, Alloc, Mut, Epistemic, Div, Panic {
+    // Same four numbers as rapamycin_kaxi_fuse_prior — method demo, not a patient.
+    let y0: f64 = 12.4
+    let s0: f64 = 7.4
+    let y1: f64 = 10.8
+    let s1: f64 = 3.0
+    let y2: f64 = 11.5
+    let s2: f64 = 2.5
+    let y3: f64 = 9.9
+    let s3: f64 = 3.5
+
+    var fwd: Seq<Knowledge<f64>> = seq_new()
+    fwd.push(measure(y0, uncertainty: s0))
+    fwd.push(measure(y1, uncertainty: s1))
+    fwd.push(measure(y2, uncertainty: s2))
+    fwd.push(measure(y3, uncertainty: s3))
+
+    // W1 — kaxi_fuse (batch, Σ commutes) vs sequential conjugate updates.
+    let fused: Knowledge<f64> = kaxi_fuse(fwd)
+    let fm: f64 = acknowledge(fused, "kaxi batch mean")
+    let fu: f64 = uncertainty_of(fused)
+
+    var sm: f64 = y0
+    var sv: f64 = s0 * s0
+    sm = update_mean(sm, sv, y1, s1 * s1)
+    sv = update_var(sv, s1 * s1)
+    sm = update_mean(sm, sv, y2, s2 * s2)
+    sv = update_var(sv, s2 * s2)
+    sm = update_mean(sm, sv, y3, s3 * s3)
+    sv = update_var(sv, s3 * s3)
+    let su: f64 = sqrt(sv)
+
+    // W2 — same elements, individuals reversed. Independent fuse must ignore order.
+    var rev: Seq<Knowledge<f64>> = seq_new()
+    rev.push(measure(y0, uncertainty: s0))
+    rev.push(measure(y3, uncertainty: s3))
+    rev.push(measure(y2, uncertainty: s2))
+    rev.push(measure(y1, uncertainty: s1))
+    let fused_rev: Knowledge<f64> = kaxi_fuse(rev)
+    let rm: f64 = acknowledge(fused_rev, "kaxi reversed mean")
+    let ru: f64 = uncertainty_of(fused_rev)
+
+    // W3 — two synthetic individuals only. Independent fuse vs BLUE at ρ=0.5.
+    // ρ is a probe, not a measured correlation.
+    var pair: Seq<Knowledge<f64>> = seq_new()
+    pair.push(measure(y1, uncertainty: s1))
+    pair.push(measure(y2, uncertainty: s2))
+    let pair_f: Knowledge<f64> = kaxi_fuse(pair)
+    let pm: f64 = acknowledge(pair_f, "pair independent mean")
+    let pu: f64 = uncertainty_of(pair_f)
+
+    let v1: f64 = s1 * s1
+    let v2: f64 = s2 * s2
+    let rho: f64 = 0.5
+    let bm: f64 = blue2_mean(y1, v1, y2, v2, rho)
+    let bv: f64 = blue2_var(v1, v2, rho)
+    let bu: f64 = sqrt(bv)
+    let bm_i: f64 = blue2_mean_inv(y1, v1, y2, v2, rho)
+    let bv_i: f64 = blue2_var_inv(v1, v2, rho)
+
+    // ρ=0 must recover inverse-variance (positive control that the BLUE impl is not a stub).
+    let b0m: f64 = blue2_mean(y1, v1, y2, v2, 0.0)
+    let b0u: f64 = sqrt(blue2_var(v1, v2, 0.0))
+
+    let d_w1_m: f64 = fm - sm
+    let d_w1_u: f64 = fu - su
+    let d_w2_m: f64 = fm - rm
+    let d_w2_u: f64 = fu - ru
+    let d_w3_u: f64 = bu - pu
+    let rel_over: f64 = (bu / pu) - 1.0
+    let ku2: f64 = kaxi_weights_true_var(v1, v2, rho)
+    let ku: f64 = sqrt(ku2)
+
+    print("W1_kaxi_vs_seq dm="); print_f64(d_w1_m)
+    print(" du="); print_f64(d_w1_u)
+    print(" kaxi_m="); print_f64(fm)
+    print(" kaxi_u="); print_f64(fu)
+    print(" seq_m="); print_f64(sm)
+    print(" seq_u="); print_f64(su)
+    print("\n")
+    print("W2_order dm="); print_f64(d_w2_m)
+    print(" du="); print_f64(d_w2_u)
+    print("\n")
+    print("W3_indep_m="); print_f64(pm)
+    print(" indep_u="); print_f64(pu)
+    print(" blue_m="); print_f64(bm)
+    print(" blue_u="); print_f64(bu)
+    print(" du="); print_f64(d_w3_u)
+    print(" rel_over="); print_f64(rel_over)
+    print("\n")
+    print("W4_kaxi_true_u="); print_f64(ku)
+    print(" blue_u="); print_f64(bu)
+    print(" reported_u="); print_f64(pu)
+    print("\n")
+
+    // W5 — dissertation 4-tuple: prior ⊥ the three individuals; individuals
+    // equicorrelated at ρ. BLUE3 then inverse-variance fuse with the prior.
+    let v0: f64 = s0 * s0
+    let v3: f64 = s3 * s3
+    let b3v: f64 = blue3_var(v1, v2, v3, rho)
+    let b3m: f64 = blue3_mean(y1, v1, y2, v2, y3, v3, rho)
+    let b4v: f64 = fuse2_var(b3v, v0)
+    let b4m: f64 = fuse2_mean(b3m, b3v, y0, v0)
+    let b4u: f64 = sqrt(b4v)
+    let b3v0: f64 = blue3_var(v1, v2, v3, 0.0)
+    let b4v0: f64 = fuse2_var(b3v0, v0)
+    let b4u0: f64 = sqrt(b4v0)
+    let b3m0: f64 = blue3_mean(y1, v1, y2, v2, y3, v3, 0.0)
+    let b4m0: f64 = fuse2_mean(b3m0, b3v0, y0, v0)
+
+    // W6 — true SD of the kaxi-on-4 weights under that block Σ.
+    let k4t: f64 = sqrt(kaxi4_true_var(v0, v1, v2, v3, rho))
+    let rel4: f64 = (b4u / fu) - 1.0
+
+    print("W5_blue4_m="); print_f64(b4m)
+    print(" blue4_u="); print_f64(b4u)
+    print(" kaxi4_m="); print_f64(fm)
+    print(" kaxi4_u="); print_f64(fu)
+    print(" rel_over="); print_f64(rel4)
+    print("\n")
+    print("W6_kaxi4_true_u="); print_f64(k4t)
+    print(" blue4_u="); print_f64(b4u)
+    print(" reported_u="); print_f64(fu)
+    print("\n")
+
+    var ok: i64 = 1
+    // W1/W2: independence makes order disposable. Bound is numerical, not fitted.
+    if !near(fm, sm, 0.000000001) { ok = 0 }
+    if !near(fu, su, 0.000000001) { ok = 0 }
+    if !near(fm, rm, 0.000000001) { ok = 0 }
+    if !near(fu, ru, 0.000000001) { ok = 0 }
+    // W3 positive control: ρ=0 recovers kaxi.
+    if !near(b0m, pm, 0.000000001) { ok = 0 }
+    if !near(b0u, pu, 0.000000001) { ok = 0 }
+    // W3 implementation cross-check.
+    if !near(bm, bm_i, 0.000000001) { ok = 0 }
+    if !near(bv, bv_i, 0.000000001) { ok = 0 }
+    // W3: for THIS (v1,v2,ρ), reported independent σ is below BLUE σ.
+    // Not a general law — unequal variances + high ρ can reverse it (Z.AI).
+    if bu <= pu { ok = 0 }
+    if rel_over <= 0.0 { ok = 0 }
+    // W4: true var of kaxi weights under Σ ≥ BLUE (GLS), and > reported σ.
+    if ku + 0.000000001 < bu { ok = 0 }
+    if ku <= pu { ok = 0 }
+    // W5 positive control: ρ=0 recovers kaxi-on-4.
+    if !near(b4m0, fm, 0.000000001) { ok = 0 }
+    if !near(b4u0, fu, 0.000000001) { ok = 0 }
+    // W5 instance (these four variances, ρ=0.5): reported kaxi σ is below BLUE4.
+    if b4u <= fu { ok = 0 }
+    // W6: GLS optimality of BLUE4 vs kaxi weights under the same Σ.
+    if k4t + 0.000000001 < b4u { ok = 0 }
+    if k4t <= fu { ok = 0 }
+
+    if ok == 1 {
+        print("PASS\n")
+    } else {
+        print("FAIL\n")
+    }
+}

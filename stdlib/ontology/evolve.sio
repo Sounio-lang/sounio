@@ -1,0 +1,172 @@
+//! stdlib/ontology/evolve.sio
+//!
+//! Guarded version-chain edits (add/remove) for consistent ontology
+//! evolution, packaged from the verified ontology-frontiers prototypes
+//! (artifacts/ontology-frontiers/, frontier
+//! consistent-ontology-evolution, rounds 1 and 2).
+//!
+//! A version is a set of active axiom ids. Edits are guarded by a
+//! consistency oracle (a symmetric conflict relation over axiom ids,
+//! e.g. derived with `ontology::closure`): an `add` is applied only if
+//! the candidate conflicts with no active axiom, otherwise it is
+//! REJECTED and the version is preserved exactly; a `remove` always
+//! succeeds and excises the axiom. Together these enforce the a priori
+//! invariant: EVERY reachable version of the chain is consistent, not
+//! just the last one checked a posteriori.
+//!
+//! Verified guarantees (Lean 4):
+//!   - a priori chain invariant (formal/OntologyEvolution.lean,
+//!     `mem_versions_consistent`) and preservation on rejection
+//!     (`applyEdit_reject`);
+//!   - removal preserves consistency via the general consistent-sublist
+//!     lemma (formal/OntologyEvolutionRepair.lean, `consistent_sublist`,
+//!     `consistent_removeAxiom`), and the invariant generalises to mixed
+//!     add/remove scripts (`mem_versions2_consistent`);
+//!   - repair-then-retry: after removing the UNIQUE conflicting partner,
+//!     the rejected axiom is accepted and consistency holds
+//!     (`repair_retry`);
+//!   - the multi-partner case is decided optimally by epistemic mass
+//!     (formal/OntologyMinimalRepair.lean, `decide_optimal`,
+//!     `admit_succeeds`, `reject_consistent`).
+//!
+//! Literature anchors:
+//!   - Bayoudhi, Sassi, Jaziri 2018 (doi:10.1111/exsy.12355) — a priori
+//!     consistency for multiversion OWL 2 DL ontologies.
+//!   - Jimenez-Ruiz, Cuenca Grau, Horrocks 2011
+//!     (doi:10.1186/2041-1480-2-s1-s2) — the consistency principle.
+//!
+//! NOTE (compiler limitations, see
+//! artifacts/ontology-frontiers/compiler-repros/REPORT.md): parallel
+//! primitive arrays with splat init; runtime checks instead of `where`
+//! refinements.
+//!
+//! # Conventions (match stdlib/algo)
+//! Fixed-size arrays; axiom ids range over 0..63 and the conflict matrix
+//! is flattened row-major: index `a * 64 + b`.
+//!
+//! # Usage
+//! ```sio
+//! use ontology::evolve::{guarded_add, remove_axiom, version_consistent}
+//! var active: [bool; 64] = [false; 64]
+//! let applied = guarded_add(&!active, &ax_conf, 3)
+//! // version_consistent(&active, &ax_conf, 64) == true
+//! ```
+//!
+//! NOTE: use NAMED imports (`use ontology::evolve::{...}`); the qualified
+//! form miscompiles on the current Madaros imported-module native lane
+//! (see stdlib/ontology/closure.sio header and
+//! docs/compiler/KNOWN_LIMITATIONS.md).
+
+// Maximum number of axiom ids this module tracks.
+// Conflict matrices are [bool; 4096] = 64 x 64 flattened.
+const MAX_AXIOMS: i64 = 64
+
+/// Check that a version (set of active axioms) is consistent: no two
+/// active axioms conflict.
+///
+/// # Parameters
+/// - `active`: active-axiom flags (index < n used).
+/// - `ax_conf`: symmetric conflict matrix over axiom ids.
+/// - `n`: number of axiom ids in scope (0 <= n <= 64).
+///
+/// # Return
+/// `bool` — true iff the version is consistent.
+///
+/// # Complexity
+/// O(n^2)
+///
+/// # References
+/// - formal/OntologyEvolution.lean, `mem_versions_consistent`: every
+///   version produced by the guarded chain satisfies this check.
+pub fn version_consistent(
+    active: &[bool; 64],
+    ax_conf: &[bool; 4096],
+    n: i64
+) -> bool with Div, Panic {
+    var i: i64 = 0
+    while i < n {
+        var j: i64 = i + 1
+        while j < n {
+            if active[i] && active[j] {
+                if ax_conf[i * MAX_AXIOMS + j] {
+                    return false
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return true
+}
+
+/// Guarded addition: apply `add a` only if axiom `a` conflicts with no
+/// active axiom. On conflict the edit is REJECTED and the version is
+/// preserved exactly (a priori consistency).
+///
+/// # Parameters
+/// - `active`: active-axiom flags (mutated in place; unchanged on
+///   rejection).
+/// - `ax_conf`: symmetric conflict matrix over axiom ids.
+/// - `a`: candidate axiom id (0 <= a < 64).
+///
+/// # Return
+/// `bool` — true iff the edit was applied (false = rejected, version
+/// unchanged).
+///
+/// # Complexity
+/// O(n) with n = 64 axiom ids.
+///
+/// # References
+/// - formal/OntologyEvolution.lean, `applyEdit_reject`: rejection
+///   preserves the previous version exactly.
+pub fn guarded_add(
+    active: &![bool; 64],
+    ax_conf: &[bool; 4096],
+    a: i64
+) -> bool with Mut, Div, Panic {
+    if a < 0 { return false }
+    if a >= MAX_AXIOMS { return false }
+    if active[a] { return true }
+    var clash = false
+    var x: i64 = 0
+    while x < MAX_AXIOMS {
+        if active[x] {
+            if ax_conf[a * MAX_AXIOMS + x] {
+                clash = true
+            }
+        }
+        x = x + 1
+    }
+    if clash {
+        return false
+    }
+    active[a] = true
+    return true
+}
+
+/// Removal: excise axiom `a` from the version. Always succeeds; removal
+/// preserves consistency (sublist of a consistent set is consistent).
+///
+/// # Parameters
+/// - `active`: active-axiom flags (mutated in place).
+/// - `a`: axiom id to remove (0 <= a < 64).
+///
+/// # Return
+/// `bool` — true iff the axiom was active (and is now removed).
+///
+/// # Complexity
+/// O(1)
+///
+/// # References
+/// - formal/OntologyEvolutionRepair.lean, `consistent_removeAxiom`:
+///   removal preserves consistency; `repair_retry`: removing the unique
+///   conflicting partner unblocks a rejected addition.
+pub fn remove_axiom(active: &![bool; 64], a: i64) -> bool with Mut, Div, Panic {
+    if a < 0 { return false }
+    if a >= MAX_AXIOMS { return false }
+    if active[a] {
+        active[a] = false
+        return true
+    }
+    return false
+}

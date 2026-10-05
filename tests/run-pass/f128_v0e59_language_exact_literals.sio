@@ -1,0 +1,132 @@
+//@ run-pass
+//@ requires: madaros
+//@ description: V0-E.5.9 — exact f128 literals: decimal d.ddd e±N and C99 hex-float 0xh.hhh p±N lower to their exact binary128 limbs from the source text (no f64 anywhere); anything inexact fails closed
+//@ ladder-stage: V0-E.5.9
+//@ semantic-lane: WS-G-V0E-STDLIB-GUM-SURFACE
+//@ claim-clock: sounio_native_expected (ADR-008 / ADR-009)
+//@ note: lean_single language f128 still greenwashes to f64 — not a claim path
+//@ note: f128_from_limbs/to_lo/to_hi call sites are intercepted; bodies are placeholders
+//@ expect-stdout-contains: dec_e23=1.00000000000000000000000000000000000e+0023
+//@ expect-stdout-contains: dec_two60p1=1.15292150460684697700000000000000000e+0018
+//@ expect-stdout-contains: dec_hex_1p112=1.00000000000000000000000000000000019e+0000
+//@ expect-stdout-contains: dec_e38=1.00000000000000000000000000000000000e+0038
+//@ expect-stdout-contains: PASS f128_v0e59_language_exact_literals
+//
+// Gate: scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e59
+//
+// Before this rung the lowerer decided whether a float literal could stand in
+// an f128 position by looking its BINARY64 value up in an 8-entry table
+// (0, ±1, 2, 3, 0.5, 1.5, 0.25): `4.0` was refused, and a C99 hex-float reached
+// the table as the parser's placeholder magnitude, so `0x1.8p+0` lowered as
+// that placeholder — a greenwash. Now the parser reads the literal's source
+// bytes once (self-hosted/parser/f128_literal.sio) and stamps the node with its
+// exact binary128 limbs, or with `f128_lit_exact = false` when the text is not
+// a dyadic rational with an odd part of at most 113 bits in the finite range.
+// The lowerer emits those limbs or fails closed. No f64 is read on the path.
+//
+// Anti-f64 controls (a binary64 detour would change the limbs):
+//   1e23                     exact in binary128 (5^23 * 2^23), not in binary64
+//   1152921504606846977.0    2^60 + 1: exact here, rounds to 2^60 in binary64
+//   0x1.0000000000000000000000000001p+0   1 + 2^-112, below binary64 resolution
+// Distinct non-zero exits:
+// 11=dec_four 12=dec_eighth 13=dec_1024 14=dec_e3 15=dec_602 16=dec_2pow16
+// 17=dec_e23 18=dec_two60p1 19=two60p1_minus_two60 20=hex_three 21=hex_half
+// 22=hex_1p112 23=hex_1p112_minus_one 24=hex_max 25=hex_min_sub 26=hex_1_5_not_placeholder
+// 27=dec_e38 28=dec_three_quarters 29=hex_uppercase 30=dec_in_struct_literal 31=hex_arg
+
+use math::softfloat_f128::{
+    f128_from_limbs,
+    f128_to_lo,
+    f128_to_hi,
+}
+use math::softfloat_f128_fmt::{println_f128}
+use math::wide_float::{print_limb_hex16}
+
+fn limbs_are(x: f128, lo: i64, hi: i64) -> bool {
+    f128_to_lo(x) == lo && f128_to_hi(x) == hi
+}
+
+fn scale_by(x: f128, k: f128) -> f128 { x * k }
+
+struct P { x: f128 }
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    println("v0e59_main_entered")
+
+    // ---- decimal literals outside the old table ----
+    let four: f128 = 4.0
+    if !limbs_are(four, 0, 4611967493404098560) { println("FAIL dec_four"); return 11 }
+    let eighth: f128 = 0.125
+    if !limbs_are(eighth, 0, 4610560118520545280) { println("FAIL dec_eighth"); return 12 }
+    let k: f128 = 1024.0
+    if !limbs_are(k, 0, 4614219293217783808) { println("FAIL dec_1024"); return 13 }
+    let e3: f128 = 1e3
+    if !limbs_are(e3, 0, 4614206099078250496) { println("FAIL dec_e3"); return 14 }
+    let six02: f128 = 6.02e2
+    if !limbs_are(six02, 0, 4613987296264323072) { println("FAIL dec_602"); return 15 }
+    let p16: f128 = 0.0000152587890625
+    if !limbs_are(p16, 0, 4606900943823306752) { println("FAIL dec_2pow16"); return 16 }
+
+    // ---- anti-f64: exact in binary128, not in binary64 ----
+    let e23: f128 = 1e23
+    if !limbs_are(e23, 7493989779944505344, 4632887695733822639) { println("FAIL dec_e23"); return 17 }
+    print("dec_e23=")
+    println_f128(e23)
+    let two60p1: f128 = 1152921504606846977.0
+    if !limbs_are(two60p1, 4503599627370496, 4628293042053316608) { println("FAIL dec_two60p1"); return 18 }
+    print("dec_two60p1=")
+    println_f128(two60p1)
+    let two60: f128 = 1152921504606846976.0
+    let one: f128 = 1.0
+    let diff = two60p1 - two60
+    if !limbs_are(diff, 0, 4611404543450677248) { println("FAIL two60p1_minus_two60"); return 19 }
+
+    // ---- C99 hex-float literals ----
+    let h3: f128 = 0x1.8p+1
+    if !limbs_are(h3, 0, 4611826755915743232) { println("FAIL hex_three"); return 20 }
+    let hh: f128 = 0x1p-1
+    if !limbs_are(hh, 0, 4611123068473966592) { println("FAIL hex_half"); return 21 }
+    let h1p112: f128 = 0x1.0000000000000000000000000001p+0
+    if !limbs_are(h1p112, 1, 4611404543450677248) { println("FAIL hex_1p112"); return 22 }
+    print("dec_hex_1p112=")
+    println_f128(h1p112)
+    let ulp = h1p112 - one
+    if !limbs_are(ulp, 0, 4579879346059083776) { println("FAIL hex_1p112_minus_one"); return 23 }
+    let hmax: f128 = 0x1.ffffffffffffffffffffffffffffp+16383
+    if !limbs_are(hmax, 0 - 1, 9223090561878065151) { println("FAIL hex_max"); return 24 }
+    let hsub: f128 = 0x0.0000000000000000000000000001p-16382
+    if !limbs_are(hsub, 1, 0) { println("FAIL hex_min_sub"); return 25 }
+    // The greenwash this rung closes: a hex-float used to lower as the
+    // parser's placeholder magnitude. 0x1.8p+0 is 1.5 — not 1.0, not 0.0.
+    let h15: f128 = 0x1.8p+0
+    if !limbs_are(h15, 0, 4611545280939032576) { println("FAIL hex_1_5_not_placeholder"); return 26 }
+
+    // ---- wide digit strings and separators ----
+    let e38: f128 = 1e38
+    if !limbs_are(e38, 1290323248780673024, 4646919787784530459) { println("FAIL dec_e38"); return 27 }
+    print("dec_e38=")
+    println_f128(e38)
+    let q3: f128 = 0.75
+    if !limbs_are(q3, 0, 4611263805962321920) { println("FAIL dec_three_quarters"); return 28 }
+    let hup: f128 = 0X1.8P+1
+    if !limbs_are(hup, 0, 4611826755915743232) { println("FAIL hex_uppercase"); return 29 }
+
+    // ---- literals in struct-literal position and as f128 arguments ----
+    let p = P { x: 0.0625 }
+    if !limbs_are(p.x, 0, 4610278643543834624) { println("FAIL dec_in_struct_literal"); return 30 }
+    let scaled = scale_by(eighth, 0x1p+5)
+    if !limbs_are(scaled, 0, 4611967493404098560) { println("FAIL hex_arg"); return 31 }
+
+    print("wire_e23=")
+    print_limb_hex16(f128_to_hi(e23))
+    print(":")
+    print_limb_hex16(f128_to_lo(e23))
+    println("")
+    print("wire_hex_max=")
+    print_limb_hex16(f128_to_hi(hmax))
+    print(":")
+    print_limb_hex16(f128_to_lo(hmax))
+    println("")
+    println("PASS f128_v0e59_language_exact_literals decimal=dyadic113 hex=c99 anti_f64=green literal=madaros")
+    0
+}

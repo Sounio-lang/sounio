@@ -12,19 +12,23 @@
 #   //@ ignore                — skip this test
 #   //@ check-only            — compile only, do not execute
 #   //@ expect-stdout: X      — stdout must contain X (run-pass only)
+#   //@ expect-stdout-contains: X — stdout must contain X (run-pass only)
 #   //@ error-pattern: X      — stderr/stdout must contain X (compile-fail only)
 #   //@ known-failure: REASON — documented accepted failure
 #   //@ skip-if: CONDITION    — conditional skip (e.g., skip-if: no-gpu)
-#   //@ requires: FEATURE     — feature dependency (e.g., requires: gpu)
+#   //@ requires: FEATURE     — feature dependency (gpu|llvm|madaros|lean_single|slow)
 #   //@ flaky                 — known flaky test
 #   //@ timeout: SECONDS      — override default timeout
 #
+# Unknown `expect-*` / `expected-*` header keys fail the test. They used to
+# be skipped silently, so `expect-stdout-contains` asserted nothing.
+#
 # Usage:
-#   bash scripts/run_sio_test_suite_v2.sh [--filter PATTERN] [--verbose] [--format junit] [--jobs N]
-#   bash scripts/run_sio_test_suite_v2.sh --filter-prefix PREFIX [--verbose] [--format junit] [--jobs N]
-#   bash scripts/run_sio_test_suite_v2.sh --filter-exact BASENAME [--verbose] [--format junit] [--jobs N]
-#   bash scripts/run_sio_test_suite_v2.sh [--filter PATTERN] --list-tests
-#   bash scripts/run_sio_test_suite_v2.sh --test-list FILE [--verbose] [--format junit] [--jobs N]
+#   bash scripts/dev/run_sio_test_suite_v2.sh [--filter PATTERN] [--verbose] [--format junit] [--jobs N]
+#   bash scripts/dev/run_sio_test_suite_v2.sh --filter-prefix PREFIX [--verbose] [--format junit] [--jobs N]
+#   bash scripts/dev/run_sio_test_suite_v2.sh --filter-exact BASENAME [--verbose] [--format junit] [--jobs N]
+#   bash scripts/dev/run_sio_test_suite_v2.sh [--filter PATTERN] --list-tests
+#   bash scripts/dev/run_sio_test_suite_v2.sh --test-list FILE [--verbose] [--format junit] [--jobs N]
 
 set -uo pipefail
 
@@ -69,6 +73,62 @@ fi
 
 source "$ROOT_DIR/scripts/lib/resolve_souc.sh"
 sounio_require_souc
+
+# ── Which compiler is under test (G8) ───────────────────────────────────────
+# A local `make build` leaves gen3.elf in the tree. It does NOT replace
+# bin/souc-lean-single-x86_64, which is what bin/souc execs for the lean_single
+# engine, so a lean_single run measures the compiler as it was BEFORE the change
+# and reports nothing about it -- silently, and with a green suite.
+#
+# This is not hypothetical. A reaction-literal feature was measured this way,
+# pronounced inert because three compile-fail fixtures compiled cleanly, and was
+# correct the whole time; run against gen3.elf directly the same fixtures gave
+# E188/E189/E190.
+#
+# Madaros does not have this hole: bin/souc already resolves a local
+# artifacts/self-hosted/madaros ahead of the committed ELF and says so. The
+# lean_single path prints no provenance at all, which is why this lives here.
+_sounio_engine_md5() {
+    if [[ -r "$1" ]]; then md5sum "$1" 2>/dev/null | cut -c1-8; else echo "absent"; fi
+}
+SOUNIO_ENGINE_KIND="madaros"
+SOUNIO_ENGINE_ELF="$ROOT_DIR/artifacts/self-hosted/madaros"
+if [[ "${SOUNIO_SOUC_ENGINE:-}" == "lean_single" ]] || [[ ! -x "$ROOT_DIR/artifacts/self-hosted/madaros" ]]; then
+    SOUNIO_ENGINE_KIND="lean_single"
+    SOUNIO_ENGINE_ELF="$ROOT_DIR/bin/souc-lean-single-x86_64"
+    [[ -x "$SOUNIO_ENGINE_ELF" ]] || SOUNIO_ENGINE_ELF="$ROOT_DIR/bin/souc-linux-x86_64"
+fi
+if [[ -n "${SOUNIO_TEST_SOUC_BIN:-}" ]]; then
+    SOUNIO_ENGINE_KIND="explicit"
+    SOUNIO_ENGINE_ELF="$SOUNIO_TEST_SOUC_BIN"
+fi
+
+# Refuse to guess: a newer local build of the engine that is NOT the one about
+# to run means the result would describe the wrong compiler.
+if [[ "$SOUNIO_ENGINE_KIND" == "lean_single" \
+      && -f "$ROOT_DIR/gen3.elf" \
+      && "$ROOT_DIR/gen3.elf" -nt "$SOUNIO_ENGINE_ELF" \
+      && "${SOUNIO_TEST_ALLOW_STALE_ENGINE:-0}" != "1" ]]; then
+    echo "harness: refusing to run -- a locally built gen3.elf is newer than the" >&2
+    echo "         lean_single binary this run would use, so the result would" >&2
+    echo "         describe the committed seed, not the tree." >&2
+    echo "           would run:  $SOUNIO_ENGINE_ELF  (md5 $(_sounio_engine_md5 "$SOUNIO_ENGINE_ELF"))" >&2
+    echo "           local build: $ROOT_DIR/gen3.elf  (md5 $(_sounio_engine_md5 "$ROOT_DIR/gen3.elf"))" >&2
+    echo "         pick one:" >&2
+    echo "           SOUNIO_TEST_SOUC_BIN=$ROOT_DIR/gen3.elf  $0 ...   # test the build" >&2
+    echo "           SOUNIO_TEST_ALLOW_STALE_ENGINE=1         $0 ...   # test the seed, on purpose" >&2
+    exit 2
+fi
+
+# Every run says what produced it, so no result can be quoted without it.
+# stderr, not stdout: run_ontology_validation.sh captures this script's
+# stdout under --list-tests as a literal test-path list (build_validated_harness_list
+# reads every line as a fixture). A confirmation line on stdout was treated as
+# a selected test and rejected as "non-kernel fixture" -- measured on CI,
+# 2026-09-03, PR #2394. stdout here must be ONLY the test list or the JSON a
+# caller asked for; every human-facing status line belongs on stderr, as the
+# refusal branch above it already does.
+echo "harness: engine=$SOUNIO_ENGINE_KIND elf=$SOUNIO_ENGINE_ELF md5=$(_sounio_engine_md5 "$SOUNIO_ENGINE_ELF")" >&2
 
 # If SOUC_BIN resolved to a raw ELF (not a shell script), route through the
 # subcommand wrapper so the harness can call `check`/`run`/`compile` correctly.
@@ -152,8 +212,14 @@ ERRORS=""
 
 # Repo-level blocker manifest. This lets CI stay strict about new failures while
 # keeping old, audited hardening backlog items visible as xfails instead of noise.
+# An entry may pin the failure mode it was audited for with `path|substring`: the
+# manifest only launders a failure whose test_output contains that substring, so a
+# regression that fails a DIFFERENT way (a new SIGSEGV, a wrong answer) still reports
+# as a fresh fail instead of being silently absorbed by an old entry that was about
+# something else. Plain `path` entries (most of the file) are unchecked, as before.
 KNOWN_FAILURES_FILE="${SOUNIO_TEST_KNOWN_FAILURES_FILE:-}"
 declare -A KNOWN_FAILURE_MAP=()
+declare -A KNOWN_FAILURE_REASON_MAP=()
 if [[ -z "$KNOWN_FAILURES_FILE" && -z "$FILTER" && "$FORMAT" == "junit" ]]; then
     KNOWN_FAILURES_FILE="$ROOT_DIR/tests/known_failures/hardened_diagnostics_full_suite.txt"
 fi
@@ -163,7 +229,15 @@ if [[ -n "$KNOWN_FAILURES_FILE" && -f "$KNOWN_FAILURES_FILE" ]]; then
         line="${line#"${line%%[![:space:]]*}"}"
         line="${line%"${line##*[![:space:]]}"}"
         [[ -z "$line" ]] && continue
-        KNOWN_FAILURE_MAP["$line"]=1
+        kf_path="$line"; kf_reason=""
+        if [[ "$line" == *"|"* ]]; then
+            kf_path="${line%%|*}"
+            kf_reason="${line#*|}"
+            kf_path="${kf_path%"${kf_path##*[![:space:]]}"}"
+            kf_reason="${kf_reason#"${kf_reason%%[![:space:]]*}"}"
+        fi
+        KNOWN_FAILURE_MAP["$kf_path"]=1
+        [[ -n "$kf_reason" ]] && KNOWN_FAILURE_REASON_MAP["$kf_path"]="$kf_reason"
     done < "$KNOWN_FAILURES_FILE"
 fi
 
@@ -249,11 +323,33 @@ run_test() {
     local skip_if=""
     local requires=""
     local known_reason=""
+    local unknown_expect=""
     
     # Parse annotations
     while IFS= read -r line; do
         if [[ ! "$line" =~ ^[[:space:]]*//@\  && ! "$line" =~ ^[[:space:]]*//\  && ! "$line" =~ ^[[:space:]]*$ ]]; then
             break
+        fi
+        # Fail closed on invented stdout assertions. `expect-stdout-contains`
+        # was silently ignored because the harness only extracted
+        # `expect-stdout:`; the same hole would swallow `expected-output` or
+        # `expect-stdout-has`. Key extraction is identifier-only; the payload
+        # is still read by parameter expansion below (the vacuous-regex bug).
+        local expect_line="${line%"${line##*[![:space:]]}"}"
+        expect_line="${expect_line#"${expect_line%%[![:space:]]*}"}"
+        expect_line="${expect_line%$'\r'}"
+        if [[ "$expect_line" == "//@ expect"* || "$expect_line" == "//@ expected"* ]]; then
+            local expect_key="${expect_line#//@ }"
+            expect_key="${expect_key%%:*}"
+            expect_key="${expect_key%% *}"
+            case "$expect_key" in
+                expect-stdout|expect-stdout-contains) ;;
+                *)
+                    if [[ -z "$unknown_expect" ]]; then
+                        unknown_expect="$expect_key"
+                    fi
+                    ;;
+            esac
         fi
         case "$line" in
             *"//@ run-pass"*) is_run_pass=true ;;
@@ -303,6 +399,11 @@ run_test() {
     if ! test_matches_filter "$basename"; then
         return
     fi
+
+    if [[ -n "$unknown_expect" ]]; then
+        echo "{\"status\":\"fail\",\"category\":\"fail\",\"name\":\"$basename\",\"relfile\":\"$rel_file\",\"time\":0,\"output\":\"unknown annotation: $unknown_expect (expected: expect-stdout|expect-stdout-contains)\",\"idx\":$idx}" > "$output_file"
+        return
+    fi
     
     # Check ignored
     if $is_ignored; then
@@ -337,13 +438,48 @@ run_test() {
             # stage2 binary. Skipped unless SOUNIO_MADAROS_AVAILABLE is set (a future
             # Madaros-based test job sets it). Tracked: Madaros-official migration.
             madaros) [[ -z "${SOUNIO_MADAROS_AVAILABLE:-}" ]] && { echo "{\"status\":\"skip\",\"reason\":\"requires:madaros\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"; return; } ;;
+            # `requires: lean_single` — the mirror of the above: the feature lives
+            # only in the lean_single bootstrap, so the test must NOT run on the
+            # Madaros job. Refinement subtyping is the case that needed this:
+            # lean_single evaluates the predicate and emits E208/E209, while
+            # Madaros carries the diagnostic (E042, "value does not satisfy the
+            # refinement predicate") but never reaches it, because it relates a
+            # refinement type to its base in NEITHER direction -- measured
+            # 2026-09-03: `fn f(x: Positive) -> i32 { x }` is E008 and
+            # `let p: Positive = 0` is E001, a bare type mismatch where the
+            # predicate should have spoken. Without this arm such a test would
+            # fail on the Madaros job for a reason unrelated to what it asserts.
+            lean_single)
+                # Gated on what will ACTUALLY run, not on a declaration. The
+                # madaros arm above trusts SOUNIO_MADAROS_AVAILABLE, which is a
+                # statement of intent; a local checkout with a built Madaros and
+                # that variable unset runs Madaros anyway, and the test would
+                # then fail with "missing error: ..." as though the compiler were
+                # wrong instead of the test being inapplicable. Second clause is
+                # bin/souc's own rule, restated once: it picks Madaros when a
+                # local artifact exists and no explicit engine was handed in.
+                if [[ -n "${SOUNIO_MADAROS_AVAILABLE:-}" ]] \
+                   || { [[ -z "${SOUNIO_TEST_SOUC_BIN:-}" ]] && [[ -x "$ROOT_DIR/artifacts/self-hosted/madaros" ]]; }; then
+                    echo "{\"status\":\"skip\",\"reason\":\"requires:lean_single\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"
+                    return
+                fi
+                ;;
+            # `requires: slow` — tests that legitimately need minutes, not
+            # seconds (full GRI-Mech kinetics integrations, PINN training
+            # loops, a Lyapunov spectrum). The default Full Test Suite job
+            # runs on a shared GHA runner where these routinely exceed their
+            # own generous `//@ timeout:` -- not because they are wrong, but
+            # because they are slow. Skipped unless SOUNIO_SLOW_TESTS_AVAILABLE
+            # is set; the nightly slow-lane job sets it, with a much larger
+            # job timeout budget.
+            slow) [[ -z "${SOUNIO_SLOW_TESTS_AVAILABLE:-}" ]] && { echo "{\"status\":\"skip\",\"reason\":\"requires:slow\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"; return; } ;;
             # An unrecognized requires value must not fall through silently: a typo
             # (e.g. `requires: madros`) would otherwise run the test against
             # whatever engine is present instead of being gated as intended, with
             # the annotation asserting nothing -- indistinguishable from the
             # vacuous-match defect this PR exists to remove.
             *)
-                echo "{\"status\":\"fail\",\"category\":\"fail\",\"name\":\"$basename\",\"output\":\"unknown requires: $requires (expected: gpu|llvm|madaros)\",\"idx\":$idx}" > "$output_file"
+                echo "{\"status\":\"fail\",\"category\":\"fail\",\"name\":\"$basename\",\"output\":\"unknown requires: $requires (expected: gpu|llvm|madaros|lean_single|slow)\",\"idx\":$idx}" > "$output_file"
                 return
                 ;;
         esac
@@ -357,6 +493,7 @@ run_test() {
     
     # Read expected patterns
     local expect_stdout=()
+    local expect_stdout_contains=()
     local error_patterns=()
     while IFS= read -r line; do
         if [[ ! "$line" =~ ^[[:space:]]*//@\  && ! "$line" =~ ^[[:space:]]*//\  && ! "$line" =~ ^[[:space:]]*$ ]]; then
@@ -372,6 +509,9 @@ run_test() {
         # metacharacter class to get this wrong for either annotation.
         if [[ "$line" == "//@ expect-stdout: "* ]]; then
             expect_stdout+=("${line#*//@ expect-stdout: }")
+        fi
+        if [[ "$line" == "//@ expect-stdout-contains: "* ]]; then
+            expect_stdout_contains+=("${line#*//@ expect-stdout-contains: }")
         fi
         if [[ "$line" == "//@ error-pattern: "* ]]; then
             error_patterns+=("${line#*//@ error-pattern: }")
@@ -399,7 +539,19 @@ run_test() {
             if [[ $exit_code -eq 124 ]]; then
                 test_output="run timed out after ${timeout_val}s"
             elif [[ $exit_code -ne 0 ]]; then
+                # Keep the numeric verdict AND a snippet of compiler/program
+                # output. "run exited 1" alone hid compile-fail vs main().
+                # No pipeline: pipefail + head -c would fail on long output.
+                raw="${output//$'\n'/ | }"
+                if ((${#raw} > 160)); then
+                    snippet="${raw: -160}"
+                else
+                    snippet="$raw"
+                fi
                 test_output="run exited $exit_code"
+                if [[ -n "$snippet" ]]; then
+                    test_output="$test_output | $snippet"
+                fi
             fi
         fi
         
@@ -422,6 +574,15 @@ run_test() {
                     break
                 fi
             done
+            if [[ $exit_code -eq 0 ]]; then
+                for pattern in "${expect_stdout_contains[@]}"; do
+                    if ! grep -qF -- "$pattern" <<<"$output"; then
+                        exit_code=1
+                        test_output="missing stdout contains: $pattern"
+                        break
+                    fi
+                done
+            fi
         fi
         
     elif $is_compile_fail; then
@@ -510,11 +671,23 @@ run_test() {
 
     end_time=$(date +%s)
     local duration=$((end_time - start_time))
-    
+
+    # A manifest entry that pinned its failure mode (path|substring) only covers a
+    # failure whose test_output matches; anything else is a fresh fail, not a repeat
+    # of the audited one. Checked here, before is_known_failure is consulted below,
+    # so unmatched entries fall straight through to the ordinary fail path.
+    if $is_known_failure && [[ $exit_code -ne 0 ]]; then
+        expected_reason="${KNOWN_FAILURE_REASON_MAP[$rel_file]:-}"
+        if [[ -n "$expected_reason" ]] && ! grep -qF -- "$expected_reason" <<<"$test_output"; then
+            is_known_failure=false
+            test_output="known-failure reason mismatch: expected '$expected_reason', got: $test_output"
+        fi
+    fi
+
     # Determine final status
     local status=""
     local category=""
-    
+
     if [[ $exit_code -eq 0 ]]; then
         if $is_known_failure; then
             status="xpas"

@@ -1,0 +1,1309 @@
+//@ module document::pdf_table
+//! Bounded Sounio-owned projection of PDF path geometry for table recovery.
+
+use document::pdf_flatedecode::{
+    SounioPdfFlateInventory,
+    SOUNIO_PDF_OK,
+    sounio_pdf_flate_import,
+    sounio_pdf_expected_inventory,
+    sounio_pdf_decode_flate_object,
+}
+use compress::inflate::{
+    SounioInflateResult,
+    SOUNIO_INFLATE_OK,
+}
+use document::pdf_text::{
+    SounioPdfTextProjection,
+    SounioPdfTextProjectionDigest,
+}
+use crypto::sha256::{
+    SHA256State,
+    sha256_init,
+    sha256_update,
+    sha256_finalize,
+    sha256_digest_byte,
+}
+
+pub const SOUNIO_PDF_TABLE_OK: i64 = 0
+pub const SOUNIO_PDF_TABLE_ERR_BASE: i64 = 301
+pub const SOUNIO_PDF_TABLE_ERR_LEXER: i64 = 302
+pub const SOUNIO_PDF_TABLE_ERR_STATE: i64 = 303
+pub const SOUNIO_PDF_TABLE_ERR_CAPACITY: i64 = 304
+pub const SOUNIO_PDF_TABLE_ERR_DIGEST: i64 = 305
+
+pub const SOUNIO_PDF_TABLE_FIXED_SCALE: i64 = 1000000
+pub const SOUNIO_PDF_TABLE_GRAPHICS_DEPTH: i64 = 128
+pub const SOUNIO_PDF_TABLE_SEGMENT_CAPACITY: i64 = 32768
+pub const SOUNIO_PDF_TABLE_CELL_CAPACITY: i64 = 4096
+
+pub struct SounioPdfTableGeometry {
+    pub error: i64,
+    pub base_error: i64,
+    pub pages: i64,
+    pub decoded_bytes: i64,
+    pub operators: i64,
+    pub graphics_saves: i64,
+    pub graphics_restores: i64,
+    pub matrix_concats: i64,
+    pub rectangles: i64,
+    pub move_tos: i64,
+    pub line_tos: i64,
+    pub close_paths: i64,
+    pub curve_tos: i64,
+    pub paint_paths: i64,
+    pub clip_paths: i64,
+    pub stroke_segments: i64,
+    pub fill_segments: i64,
+    pub fill_stroke_segments: i64,
+    pub discarded_segments: i64,
+    pub fill_paths: i64,
+    pub filled_rectangles: i64,
+    pub nonrectangular_fills: i64,
+    pub segments: i64,
+    pub horizontal_segments: i64,
+    pub vertical_segments: i64,
+    pub oblique_segments: i64,
+    pub quantized_numbers: i64,
+    pub max_graphics_depth: i64,
+    pub scan_page: i64,
+    pub scan_offset: i64,
+    pub scan_stack: i64,
+    pub scan_operator_length: i64,
+    pub scan_operator_bytes: [i64; 16],
+    pub page_segment_count: [i64; 64],
+    pub page_stroke_horizontal: [i64; 64],
+    pub page_stroke_vertical: [i64; 64],
+    pub page_fill_horizontal: [i64; 64],
+    pub page_fill_vertical: [i64; 64],
+    pub page_discarded_segments: [i64; 64],
+    pub page_filled_rectangles: [i64; 64],
+    pub segment_page: [i64; 32768],
+    pub segment_x0: [i64; 32768],
+    pub segment_y0: [i64; 32768],
+    pub segment_x1: [i64; 32768],
+    pub segment_y1: [i64; 32768],
+    pub segment_source: [i64; 32768],
+    pub segment_paint: [i64; 32768],
+    pub rectangle_page: [i64; 4096],
+    pub rectangle_min_x: [i64; 4096],
+    pub rectangle_min_y: [i64; 4096],
+    pub rectangle_max_x: [i64; 4096],
+    pub rectangle_max_y: [i64; 4096],
+}
+
+pub struct SounioPdfTableCellProjection {
+    pub error: i64,
+    pub pages: i64,
+    pub source_rectangles: i64,
+    pub duplicate_rectangles: i64,
+    pub cells: i64,
+    pub nonempty_cells: i64,
+    pub empty_cells: i64,
+    pub text_objects: i64,
+    pub empty_text_objects: i64,
+    pub assigned_objects: i64,
+    pub unassigned_objects: i64,
+    pub nested_resolutions: i64,
+    pub exact_tie_objects: i64,
+    pub containment_matches: i64,
+    pub cell_page: [i64; 4096],
+    pub cell_min_x: [i64; 4096],
+    pub cell_min_y: [i64; 4096],
+    pub cell_max_x: [i64; 4096],
+    pub cell_max_y: [i64; 4096],
+    pub cell_object_count: [i64; 4096],
+    pub cell_scalar_count: [i64; 4096],
+    pub object_cell: [i64; 4096],
+}
+
+pub struct SounioPdfTableCellDigest {
+    pub error: i64,
+    pub serialized_bytes: i64,
+    pub bytes: [i64; 32],
+}
+
+struct PdfTableDigestBuilder {
+    state: SHA256State,
+    chunk: [u8; 256],
+    chunk_length: i64,
+    total_length: i64,
+    error: i64,
+}
+
+pub fn sounio_pdf_table_geometry_empty() -> SounioPdfTableGeometry {
+    SounioPdfTableGeometry {
+        error: SOUNIO_PDF_TABLE_OK,
+        base_error: 0,
+        pages: 0,
+        decoded_bytes: 0,
+        operators: 0,
+        graphics_saves: 0,
+        graphics_restores: 0,
+        matrix_concats: 0,
+        rectangles: 0,
+        move_tos: 0,
+        line_tos: 0,
+        close_paths: 0,
+        curve_tos: 0,
+        paint_paths: 0,
+        clip_paths: 0,
+        stroke_segments: 0,
+        fill_segments: 0,
+        fill_stroke_segments: 0,
+        discarded_segments: 0,
+        fill_paths: 0,
+        filled_rectangles: 0,
+        nonrectangular_fills: 0,
+        segments: 0,
+        horizontal_segments: 0,
+        vertical_segments: 0,
+        oblique_segments: 0,
+        quantized_numbers: 0,
+        max_graphics_depth: 0,
+        scan_page: -1,
+        scan_offset: -1,
+        scan_stack: 0,
+        scan_operator_length: 0,
+        scan_operator_bytes: [0; 16],
+        page_segment_count: [0; 64],
+        page_stroke_horizontal: [0; 64],
+        page_stroke_vertical: [0; 64],
+        page_fill_horizontal: [0; 64],
+        page_fill_vertical: [0; 64],
+        page_discarded_segments: [0; 64],
+        page_filled_rectangles: [0; 64],
+        segment_page: [0; 32768],
+        segment_x0: [0; 32768],
+        segment_y0: [0; 32768],
+        segment_x1: [0; 32768],
+        segment_y1: [0; 32768],
+        segment_source: [0; 32768],
+        segment_paint: [0; 32768],
+        rectangle_page: [0; 4096],
+        rectangle_min_x: [0; 4096],
+        rectangle_min_y: [0; 4096],
+        rectangle_max_x: [0; 4096],
+        rectangle_max_y: [0; 4096],
+    }
+}
+
+pub fn sounio_pdf_table_cell_projection_empty() -> SounioPdfTableCellProjection {
+    SounioPdfTableCellProjection {
+        error: SOUNIO_PDF_TABLE_OK,
+        pages: 0,
+        source_rectangles: 0,
+        duplicate_rectangles: 0,
+        cells: 0,
+        nonempty_cells: 0,
+        empty_cells: 0,
+        text_objects: 0,
+        empty_text_objects: 0,
+        assigned_objects: 0,
+        unassigned_objects: 0,
+        nested_resolutions: 0,
+        exact_tie_objects: 0,
+        containment_matches: 0,
+        cell_page: [0; 4096],
+        cell_min_x: [0; 4096],
+        cell_min_y: [0; 4096],
+        cell_max_x: [0; 4096],
+        cell_max_y: [0; 4096],
+        cell_object_count: [0; 4096],
+        cell_scalar_count: [0; 4096],
+        object_cell: [-1; 4096],
+    }
+}
+
+fn table_digest_builder_empty() -> PdfTableDigestBuilder {
+    PdfTableDigestBuilder {
+        state: sha256_init(),
+        chunk: [0; 256],
+        chunk_length: 0,
+        total_length: 0,
+        error: SOUNIO_PDF_TABLE_OK,
+    }
+}
+
+fn table_digest_result_empty() -> SounioPdfTableCellDigest {
+    SounioPdfTableCellDigest {
+        error: SOUNIO_PDF_TABLE_OK,
+        serialized_bytes: 0,
+        bytes: [0; 32],
+    }
+}
+
+fn table_digest_push_byte(
+    builder: &!PdfTableDigestBuilder,
+    value: i64,
+) with Mut, Panic, Div {
+    if builder.error != SOUNIO_PDF_TABLE_OK { return }
+    if value < 0 || value > 255 {
+        builder.error = SOUNIO_PDF_TABLE_ERR_DIGEST
+        return
+    }
+    builder.chunk[builder.chunk_length as usize] = value as u8
+    builder.chunk_length = builder.chunk_length + 1
+    builder.total_length = builder.total_length + 1
+    if builder.chunk_length == 256 {
+        builder.state = sha256_update(builder.state, builder.chunk, 256)
+        builder.chunk_length = 0
+    }
+}
+
+fn table_digest_push_u64(
+    builder: &!PdfTableDigestBuilder,
+    value: i64,
+) with Mut, Panic, Div {
+    var shift: i64 = 56
+    while shift >= 0 {
+        table_digest_push_byte(builder, (value >> shift) & 255)
+        shift = shift - 8
+    }
+}
+
+fn table_digest_push_string(
+    builder: &!PdfTableDigestBuilder,
+    value: string,
+) with Mut, Panic, Div {
+    var at: i64 = 0
+    while at < str_len(value) {
+        table_digest_push_byte(builder, str_char_at(value, at))
+        at = at + 1
+    }
+}
+
+fn table_inflate_result_empty() -> SounioInflateResult {
+    SounioInflateResult {
+        bytes: [0; 262144],
+        error: SOUNIO_INFLATE_OK,
+        input_bytes: 0,
+        output_bytes: 0,
+        blocks: 0,
+        stored_blocks: 0,
+        fixed_blocks: 0,
+        dynamic_blocks: 0,
+        literals: 0,
+        copies: 0,
+        max_distance: 0,
+        checksum_match: false,
+    }
+}
+
+fn table_is_whitespace(code: i64) -> bool {
+    code == 0 || code == 9 || code == 10 || code == 12 ||
+        code == 13 || code == 32
+}
+
+fn table_is_delimiter(code: i64) -> bool {
+    table_is_whitespace(code) || code == 40 || code == 41 ||
+        code == 60 || code == 62 || code == 91 || code == 93 ||
+        code == 123 || code == 125 || code == 47 || code == 37
+}
+
+fn table_name_end(
+    content: &SounioInflateResult,
+    limit: i64,
+    start: i64,
+) -> i64 with Panic {
+    var pos = start
+    while pos < limit && !table_is_delimiter(content.bytes[pos as usize]) {
+        pos = pos + 1
+    }
+    pos
+}
+
+fn table_literal_end(
+    content: &SounioInflateResult,
+    limit: i64,
+    start: i64,
+) -> i64 with Panic {
+    if start >= limit || content.bytes[start as usize] != 40 { return -1 }
+    var pos = start + 1
+    var depth: i64 = 1
+    while pos < limit {
+        let code = content.bytes[pos as usize]
+        if code == 92 {
+            pos = pos + 1
+            if pos >= limit { return -1 }
+            if content.bytes[pos as usize] == 13 {
+                pos = pos + 1
+                if pos < limit && content.bytes[pos as usize] == 10 {
+                    pos = pos + 1
+                }
+            } else { pos = pos + 1 }
+        } else {
+            if code == 40 { depth = depth + 1 }
+            else {
+                if code == 41 {
+                    depth = depth - 1
+                    if depth == 0 { return pos + 1 }
+                }
+            }
+            pos = pos + 1
+        }
+    }
+    -1
+}
+
+fn table_hex_end(
+    content: &SounioInflateResult,
+    limit: i64,
+    start: i64,
+) -> i64 with Panic {
+    if start >= limit || content.bytes[start as usize] != 60 { return -1 }
+    var pos = start + 1
+    while pos < limit {
+        let code = content.bytes[pos as usize]
+        if code == 62 { return pos + 1 }
+        let hex = (code >= 48 && code <= 57) ||
+            (code >= 65 && code <= 70) || (code >= 97 && code <= 102)
+        if !hex && !table_is_whitespace(code) { return -1 }
+        pos = pos + 1
+    }
+    -1
+}
+
+fn table_dictionary_end(
+    content: &SounioInflateResult,
+    limit: i64,
+    start: i64,
+) -> i64 with Panic {
+    if start + 1 >= limit || content.bytes[start as usize] != 60 ||
+        content.bytes[(start + 1) as usize] != 60 { return -1 }
+    var pos = start + 2
+    var depth: i64 = 1
+    while pos < limit {
+        let code = content.bytes[pos as usize]
+        if code == 37 {
+            while pos < limit && content.bytes[pos as usize] != 10 &&
+                content.bytes[pos as usize] != 13 { pos = pos + 1 }
+        } else {
+            if code == 40 {
+                let after = table_literal_end(content, limit, pos)
+                if after < 0 { return -1 }
+                pos = after
+            } else {
+                if code == 60 && pos + 1 < limit &&
+                    content.bytes[(pos + 1) as usize] == 60 {
+                    depth = depth + 1
+                    pos = pos + 2
+                } else {
+                    if code == 62 && pos + 1 < limit &&
+                        content.bytes[(pos + 1) as usize] == 62 {
+                        depth = depth - 1
+                        pos = pos + 2
+                        if depth == 0 { return pos }
+                    } else {
+                        if code == 60 {
+                            let after = table_hex_end(content, limit, pos)
+                            if after < 0 { return -1 }
+                            pos = after
+                        } else { pos = pos + 1 }
+                    }
+                }
+            }
+        }
+    }
+    -1
+}
+
+fn table_array_end(
+    content: &SounioInflateResult,
+    limit: i64,
+    start: i64,
+) -> i64 with Panic {
+    if start >= limit || content.bytes[start as usize] != 91 { return -1 }
+    var pos = start + 1
+    var depth: i64 = 1
+    while pos < limit {
+        let code = content.bytes[pos as usize]
+        if code == 37 {
+            while pos < limit && content.bytes[pos as usize] != 10 &&
+                content.bytes[pos as usize] != 13 { pos = pos + 1 }
+        } else {
+            if code == 40 {
+                let after = table_literal_end(content, limit, pos)
+                if after < 0 { return -1 }
+                pos = after
+            } else {
+                if code == 60 && (pos + 1 >= limit ||
+                    content.bytes[(pos + 1) as usize] != 60) {
+                    let after = table_hex_end(content, limit, pos)
+                    if after < 0 { return -1 }
+                    pos = after
+                } else {
+                    if code == 91 { depth = depth + 1; pos = pos + 1 }
+                    else {
+                        if code == 93 {
+                            depth = depth - 1
+                            pos = pos + 1
+                            if depth == 0 { return pos }
+                        } else { pos = pos + 1 }
+                    }
+                }
+            }
+        }
+    }
+    -1
+}
+
+fn table_number_end(
+    content: &SounioInflateResult,
+    limit: i64,
+    start: i64,
+) -> i64 with Panic {
+    var pos = start
+    if pos < limit && (content.bytes[pos as usize] == 43 ||
+        content.bytes[pos as usize] == 45) { pos = pos + 1 }
+    var digits: i64 = 0
+    var dots: i64 = 0
+    while pos < limit {
+        let code = content.bytes[pos as usize]
+        if code >= 48 && code <= 57 {
+            digits = digits + 1
+            pos = pos + 1
+        } else {
+            if code == 46 && dots == 0 { dots = 1; pos = pos + 1 }
+            else { break }
+        }
+    }
+    if digits == 0 { return start }
+    if pos < limit && !table_is_delimiter(content.bytes[pos as usize]) {
+        return start
+    }
+    pos
+}
+
+fn table_fixed_value(
+    content: &SounioInflateResult,
+    start: i64,
+    end: i64,
+) -> (i64, i64, i64) with Panic {
+    if start >= end { return (0, 0, 0) }
+    var pos = start
+    var sign: i64 = 1
+    if content.bytes[pos as usize] == 45 { sign = -1; pos = pos + 1 }
+    else { if content.bytes[pos as usize] == 43 { pos = pos + 1 } }
+    var integer: i64 = 0
+    var integer_digits: i64 = 0
+    while pos < end && content.bytes[pos as usize] >= 48 &&
+        content.bytes[pos as usize] <= 57 {
+        if integer > 9000000000000 { return (0, 0, 0) }
+        integer = integer * 10 + content.bytes[pos as usize] - 48
+        integer_digits = integer_digits + 1
+        pos = pos + 1
+    }
+    var fraction: i64 = 0
+    var fraction_digits: i64 = 0
+    var quantized: i64 = 0
+    var round_up: i64 = 0
+    if pos < end && content.bytes[pos as usize] == 46 {
+        pos = pos + 1
+        while pos < end && content.bytes[pos as usize] >= 48 &&
+            content.bytes[pos as usize] <= 57 {
+            let digit = content.bytes[pos as usize] - 48
+            if fraction_digits >= 6 {
+                quantized = 1
+                if fraction_digits == 6 && digit >= 5 { round_up = 1 }
+            } else {
+                fraction = fraction * 10 + digit
+            }
+            fraction_digits = fraction_digits + 1
+            pos = pos + 1
+        }
+    }
+    if pos != end || (integer_digits == 0 && fraction_digits == 0) {
+        return (0, 0, 0)
+    }
+    var kept_digits = fraction_digits
+    if kept_digits > 6 { kept_digits = 6 }
+    while kept_digits < 6 {
+        fraction = fraction * 10
+        kept_digits = kept_digits + 1
+    }
+    if round_up == 1 { fraction = fraction + 1 }
+    if integer > 9223372036854 { return (0, 0, 0) }
+    (1, sign * (integer * SOUNIO_PDF_TABLE_FIXED_SCALE + fraction), quantized)
+}
+
+fn table_token_is(
+    content: &SounioInflateResult,
+    start: i64,
+    length: i64,
+    expected: string,
+) -> bool with Mut, Panic {
+    if length != str_len(expected) { return false }
+    var i: i64 = 0
+    while i < length {
+        if content.bytes[(start + i) as usize] != str_char_at(expected, i) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn table_fixed_mul(left: i64, right: i64) -> i64 with Div {
+    (left * right) / SOUNIO_PDF_TABLE_FIXED_SCALE
+}
+
+fn table_matrix_identity() -> [i64; 6] {
+    [SOUNIO_PDF_TABLE_FIXED_SCALE, 0, 0,
+        SOUNIO_PDF_TABLE_FIXED_SCALE, 0, 0]
+}
+
+fn table_matrix_concat(
+    left: &[i64; 6],
+    right: &[i64; 6],
+) -> [i64; 6] with Div, Panic {
+    [
+        table_fixed_mul(left[0], right[0]) +
+            table_fixed_mul(left[1], right[2]),
+        table_fixed_mul(left[0], right[1]) +
+            table_fixed_mul(left[1], right[3]),
+        table_fixed_mul(left[2], right[0]) +
+            table_fixed_mul(left[3], right[2]),
+        table_fixed_mul(left[2], right[1]) +
+            table_fixed_mul(left[3], right[3]),
+        table_fixed_mul(left[4], right[0]) +
+            table_fixed_mul(left[5], right[2]) + right[4],
+        table_fixed_mul(left[4], right[1]) +
+            table_fixed_mul(left[5], right[3]) + right[5]
+    ]
+}
+
+fn table_transform_point(
+    ctm: &[i64; 6],
+    x: i64,
+    y: i64,
+) -> (i64, i64) with Div, Panic {
+    (
+        table_fixed_mul(x, ctm[0]) + table_fixed_mul(y, ctm[2]) + ctm[4],
+        table_fixed_mul(x, ctm[1]) + table_fixed_mul(y, ctm[3]) + ctm[5]
+    )
+}
+
+fn table_record_segment(
+    page: i64,
+    x0: i64,
+    y0: i64,
+    x1: i64,
+    y1: i64,
+    source: i64,
+    geometry: &!SounioPdfTableGeometry,
+) -> i64 with Mut, Panic {
+    if geometry.segments >= SOUNIO_PDF_TABLE_SEGMENT_CAPACITY ||
+        page < 0 || page >= 64 { return SOUNIO_PDF_TABLE_ERR_CAPACITY }
+    let at = geometry.segments
+    geometry.segment_page[at as usize] = page
+    geometry.segment_x0[at as usize] = x0
+    geometry.segment_y0[at as usize] = y0
+    geometry.segment_x1[at as usize] = x1
+    geometry.segment_y1[at as usize] = y1
+    geometry.segment_source[at as usize] = source
+    geometry.segments = geometry.segments + 1
+    geometry.page_segment_count[page as usize] =
+        geometry.page_segment_count[page as usize] + 1
+    if y0 == y1 { geometry.horizontal_segments = geometry.horizontal_segments + 1 }
+    else {
+        if x0 == x1 { geometry.vertical_segments = geometry.vertical_segments + 1 }
+        else { geometry.oblique_segments = geometry.oblique_segments + 1 }
+    }
+    SOUNIO_PDF_TABLE_OK
+}
+
+fn table_all_numbers(types: &[i64; 256], count: i64) -> bool with Panic {
+    var i: i64 = 0
+    while i < count {
+        if types[i as usize] != 2 { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn table_values(
+    content: &SounioInflateResult,
+    starts: &[i64; 256],
+    ends: &[i64; 256],
+    count: i64,
+    values: &![i64; 6],
+    geometry: &!SounioPdfTableGeometry,
+) -> i64 with Mut, Panic {
+    var i: i64 = 0
+    while i < count {
+        let (ok, value, quantized) = table_fixed_value(
+            content, starts[i as usize], ends[i as usize])
+        if ok != 1 { return SOUNIO_PDF_TABLE_ERR_LEXER }
+        values[i as usize] = value
+        geometry.quantized_numbers = geometry.quantized_numbers + quantized
+        i = i + 1
+    }
+    SOUNIO_PDF_TABLE_OK
+}
+
+fn table_paint_kind(
+    content: &SounioInflateResult,
+    start: i64,
+    length: i64,
+) -> i64 with Mut, Panic {
+    if table_token_is(content, start, length, "S") ||
+        table_token_is(content, start, length, "s") { return 1 }
+    if table_token_is(content, start, length, "f") ||
+        table_token_is(content, start, length, "F") ||
+        table_token_is(content, start, length, "f*") { return 2 }
+    if table_token_is(content, start, length, "B") ||
+        table_token_is(content, start, length, "B*") ||
+        table_token_is(content, start, length, "b") ||
+        table_token_is(content, start, length, "b*") { return 3 }
+    if table_token_is(content, start, length, "n") { return 4 }
+    0
+}
+
+fn table_mark_path(
+    page: i64,
+    start: i64,
+    kind: i64,
+    geometry: &!SounioPdfTableGeometry,
+) with Mut, Panic {
+    var segment = start
+    while segment >= 0 && segment < geometry.segments {
+        geometry.segment_paint[segment as usize] = kind
+        let horizontal = geometry.segment_y0[segment as usize] ==
+            geometry.segment_y1[segment as usize]
+        let vertical = geometry.segment_x0[segment as usize] ==
+            geometry.segment_x1[segment as usize]
+        if kind == 1 {
+            geometry.stroke_segments = geometry.stroke_segments + 1
+            if horizontal {
+                geometry.page_stroke_horizontal[page as usize] =
+                    geometry.page_stroke_horizontal[page as usize] + 1
+            }
+            if vertical {
+                geometry.page_stroke_vertical[page as usize] =
+                    geometry.page_stroke_vertical[page as usize] + 1
+            }
+        } else {
+            if kind == 2 {
+                geometry.fill_segments = geometry.fill_segments + 1
+                if horizontal {
+                    geometry.page_fill_horizontal[page as usize] =
+                        geometry.page_fill_horizontal[page as usize] + 1
+                }
+                if vertical {
+                    geometry.page_fill_vertical[page as usize] =
+                        geometry.page_fill_vertical[page as usize] + 1
+                }
+            } else {
+                if kind == 3 {
+                    geometry.fill_stroke_segments =
+                        geometry.fill_stroke_segments + 1
+                }
+                if kind == 4 {
+                    geometry.discarded_segments =
+                        geometry.discarded_segments + 1
+                    geometry.page_discarded_segments[page as usize] =
+                        geometry.page_discarded_segments[page as usize] + 1
+                }
+            }
+        }
+        segment = segment + 1
+    }
+}
+
+fn table_record_fill_rectangle(
+    page: i64,
+    start: i64,
+    geometry: &!SounioPdfTableGeometry,
+) -> i64 with Mut, Panic {
+    geometry.fill_paths = geometry.fill_paths + 1
+    if start < 0 || geometry.segments - start != 4 {
+        geometry.nonrectangular_fills = geometry.nonrectangular_fills + 1
+        return SOUNIO_PDF_TABLE_OK
+    }
+    var min_x = geometry.segment_x0[start as usize]
+    var max_x = min_x
+    var min_y = geometry.segment_y0[start as usize]
+    var max_y = min_y
+    var horizontal: i64 = 0
+    var vertical: i64 = 0
+    var segment = start
+    while segment < geometry.segments {
+        let x0 = geometry.segment_x0[segment as usize]
+        let y0 = geometry.segment_y0[segment as usize]
+        let x1 = geometry.segment_x1[segment as usize]
+        let y1 = geometry.segment_y1[segment as usize]
+        if x0 < min_x { min_x = x0 }
+        if x1 < min_x { min_x = x1 }
+        if x0 > max_x { max_x = x0 }
+        if x1 > max_x { max_x = x1 }
+        if y0 < min_y { min_y = y0 }
+        if y1 < min_y { min_y = y1 }
+        if y0 > max_y { max_y = y0 }
+        if y1 > max_y { max_y = y1 }
+        if y0 == y1 { horizontal = horizontal + 1 }
+        if x0 == x1 { vertical = vertical + 1 }
+        segment = segment + 1
+    }
+    if horizontal != 2 || vertical != 2 || min_x >= max_x || min_y >= max_y {
+        geometry.nonrectangular_fills = geometry.nonrectangular_fills + 1
+        return SOUNIO_PDF_TABLE_OK
+    }
+    if geometry.filled_rectangles >= SOUNIO_PDF_TABLE_CELL_CAPACITY {
+        return SOUNIO_PDF_TABLE_ERR_CAPACITY
+    }
+    let rectangle = geometry.filled_rectangles
+    geometry.rectangle_page[rectangle as usize] = page
+    geometry.rectangle_min_x[rectangle as usize] = min_x
+    geometry.rectangle_min_y[rectangle as usize] = min_y
+    geometry.rectangle_max_x[rectangle as usize] = max_x
+    geometry.rectangle_max_y[rectangle as usize] = max_y
+    geometry.filled_rectangles = geometry.filled_rectangles + 1
+    geometry.page_filled_rectangles[page as usize] =
+        geometry.page_filled_rectangles[page as usize] + 1
+    SOUNIO_PDF_TABLE_OK
+}
+
+fn table_scan_page(
+    content: &SounioInflateResult,
+    page: i64,
+    geometry: &!SounioPdfTableGeometry,
+) -> i64 with Mut, Panic, Div {
+    var types: [i64; 256] = [0; 256]
+    var starts: [i64; 256] = [0; 256]
+    var ends: [i64; 256] = [0; 256]
+    var stack: i64 = 0
+    var graphics: [i64; 768] = [0; 768]
+    var graphics_depth: i64 = 0
+    var ctm = table_matrix_identity()
+    var current_x: i64 = 0
+    var current_y: i64 = 0
+    var subpath_x: i64 = 0
+    var subpath_y: i64 = 0
+    var current_valid = false
+    var path_start: i64 = -1
+    var pos: i64 = 0
+    let limit = content.output_bytes
+    while pos < limit {
+        geometry.scan_page = page
+        geometry.scan_offset = pos
+        geometry.scan_stack = stack
+        let code = content.bytes[pos as usize]
+        if table_is_whitespace(code) { pos = pos + 1 }
+        else {
+            if code == 37 {
+                while pos < limit && content.bytes[pos as usize] != 10 &&
+                    content.bytes[pos as usize] != 13 { pos = pos + 1 }
+            } else {
+                if stack >= 256 { return SOUNIO_PDF_TABLE_ERR_CAPACITY }
+                if code == 47 {
+                    let after = table_name_end(content, limit, pos + 1)
+                    types[stack as usize] = 1
+                    starts[stack as usize] = pos + 1
+                    ends[stack as usize] = after
+                    stack = stack + 1
+                    pos = after
+                } else {
+                    if code == 40 {
+                        let after = table_literal_end(content, limit, pos)
+                        if after < 0 { return SOUNIO_PDF_TABLE_ERR_LEXER }
+                        types[stack as usize] = 3
+                        starts[stack as usize] = pos
+                        ends[stack as usize] = after
+                        stack = stack + 1
+                        pos = after
+                    } else {
+                        if code == 91 {
+                            let after = table_array_end(content, limit, pos)
+                            if after < 0 { return SOUNIO_PDF_TABLE_ERR_LEXER }
+                            types[stack as usize] = 4
+                            starts[stack as usize] = pos
+                            ends[stack as usize] = after
+                            stack = stack + 1
+                            pos = after
+                        } else {
+                            if code == 60 && pos + 1 < limit &&
+                                content.bytes[(pos + 1) as usize] == 60 {
+                                let after = table_dictionary_end(content, limit, pos)
+                                if after < 0 { return SOUNIO_PDF_TABLE_ERR_LEXER }
+                                types[stack as usize] = 5
+                                starts[stack as usize] = pos
+                                ends[stack as usize] = after
+                                stack = stack + 1
+                                pos = after
+                            } else {
+                                if code == 60 {
+                                    let after = table_hex_end(content, limit, pos)
+                                    if after < 0 { return SOUNIO_PDF_TABLE_ERR_LEXER }
+                                    types[stack as usize] = 6
+                                    starts[stack as usize] = pos
+                                    ends[stack as usize] = after
+                                    stack = stack + 1
+                                    pos = after
+                                } else {
+                                    let number_end = table_number_end(content, limit, pos)
+                                    if number_end > pos {
+                                        types[stack as usize] = 2
+                                        starts[stack as usize] = pos
+                                        ends[stack as usize] = number_end
+                                        stack = stack + 1
+                                        pos = number_end
+                                    } else {
+                                        let after = table_name_end(content, limit, pos)
+                                        if after <= pos { return SOUNIO_PDF_TABLE_ERR_LEXER }
+                                        let length = after - pos
+                                        geometry.scan_offset = pos
+                                        geometry.scan_stack = stack
+                                        geometry.scan_operator_length = length
+                                        var operator_byte: i64 = 0
+                                        while operator_byte < 16 {
+                                            geometry.scan_operator_bytes[
+                                                operator_byte as usize] = 0
+                                            if operator_byte < length {
+                                                geometry.scan_operator_bytes[
+                                                    operator_byte as usize] = content.bytes[
+                                                        (pos + operator_byte) as usize]
+                                            }
+                                            operator_byte = operator_byte + 1
+                                        }
+                                        geometry.operators = geometry.operators + 1
+                                        var values: [i64; 6] = [0; 6]
+                                        if table_token_is(content, pos, length, "q") {
+                                            if stack != 0 || graphics_depth >=
+                                                SOUNIO_PDF_TABLE_GRAPHICS_DEPTH {
+                                                return SOUNIO_PDF_TABLE_ERR_STATE
+                                            }
+                                            var i: i64 = 0
+                                            while i < 6 {
+                                                graphics[(graphics_depth * 6 + i) as usize] =
+                                                    ctm[i as usize]
+                                                i = i + 1
+                                            }
+                                            graphics_depth = graphics_depth + 1
+                                            geometry.graphics_saves = geometry.graphics_saves + 1
+                                            if graphics_depth > geometry.max_graphics_depth {
+                                                geometry.max_graphics_depth = graphics_depth
+                                            }
+                                        } else {
+                                            if table_token_is(content, pos, length, "Q") {
+                                                if stack != 0 || graphics_depth <= 0 {
+                                                    return SOUNIO_PDF_TABLE_ERR_STATE
+                                                }
+                                                graphics_depth = graphics_depth - 1
+                                                var i: i64 = 0
+                                                while i < 6 {
+                                                    ctm[i as usize] = graphics[
+                                                        (graphics_depth * 6 + i) as usize]
+                                                    i = i + 1
+                                                }
+                                                geometry.graphics_restores =
+                                                    geometry.graphics_restores + 1
+                                            } else {
+                                                if table_token_is(content, pos, length, "cm") {
+                                                    if stack != 6 || !table_all_numbers(&types, 6) {
+                                                        return SOUNIO_PDF_TABLE_ERR_STATE
+                                                    }
+                                                    let error = table_values(
+                                                        content, &starts, &ends, 6, &!values,
+                                                        geometry)
+                                                    if error != SOUNIO_PDF_TABLE_OK { return error }
+                                                    ctm = table_matrix_concat(&values, &ctm)
+                                                    geometry.matrix_concats =
+                                                        geometry.matrix_concats + 1
+                                                } else {
+                                                    if table_token_is(content, pos, length, "m") {
+                                                        if stack != 2 || !table_all_numbers(&types, 2) {
+                                                            return SOUNIO_PDF_TABLE_ERR_STATE
+                                                        }
+                                                        let error = table_values(
+                                                            content, &starts, &ends, 2, &!values,
+                                                            geometry)
+                                                        if error != SOUNIO_PDF_TABLE_OK { return error }
+                                                        let point = table_transform_point(
+                                                            &ctm, values[0], values[1])
+                                                        if path_start < 0 {
+                                                            path_start = geometry.segments
+                                                        }
+                                                        current_x = point.0; current_y = point.1
+                                                        subpath_x = current_x; subpath_y = current_y
+                                                        current_valid = true
+                                                        geometry.move_tos = geometry.move_tos + 1
+                                                    } else {
+                                                        if table_token_is(content, pos, length, "l") {
+                                                            if stack != 2 || !current_valid ||
+                                                                !table_all_numbers(&types, 2) {
+                                                                return SOUNIO_PDF_TABLE_ERR_STATE
+                                                            }
+                                                            let error = table_values(
+                                                                content, &starts, &ends, 2, &!values,
+                                                                geometry)
+                                                            if error != SOUNIO_PDF_TABLE_OK { return error }
+                                                            let point = table_transform_point(
+                                                                &ctm, values[0], values[1])
+                                                            let record = table_record_segment(
+                                                                page, current_x, current_y,
+                                                                point.0, point.1, 1, geometry)
+                                                            if record != SOUNIO_PDF_TABLE_OK { return record }
+                                                            current_x = point.0; current_y = point.1
+                                                            geometry.line_tos = geometry.line_tos + 1
+                                                        } else {
+                                                            if table_token_is(content, pos, length, "h") {
+                                                                if stack != 0 || !current_valid {
+                                                                    return SOUNIO_PDF_TABLE_ERR_STATE
+                                                                }
+                                                                let record = table_record_segment(
+                                                                    page, current_x, current_y,
+                                                                    subpath_x, subpath_y, 2, geometry)
+                                                                if record != SOUNIO_PDF_TABLE_OK { return record }
+                                                                current_x = subpath_x; current_y = subpath_y
+                                                                geometry.close_paths =
+                                                                    geometry.close_paths + 1
+                                                            } else {
+                                                                if table_token_is(content, pos, length, "re") {
+                                                                    if stack != 4 || !table_all_numbers(&types, 4) {
+                                                                        return SOUNIO_PDF_TABLE_ERR_STATE
+                                                                    }
+                                                                    let error = table_values(
+                                                                        content, &starts, &ends, 4, &!values,
+                                                                        geometry)
+                                                                    if error != SOUNIO_PDF_TABLE_OK { return error }
+                                                                    if path_start < 0 {
+                                                                        path_start = geometry.segments
+                                                                    }
+                                                                    let p0 = table_transform_point(
+                                                                        &ctm, values[0], values[1])
+                                                                    let p1 = table_transform_point(
+                                                                        &ctm, values[0] + values[2], values[1])
+                                                                    let p2 = table_transform_point(
+                                                                        &ctm, values[0] + values[2],
+                                                                        values[1] + values[3])
+                                                                    let p3 = table_transform_point(
+                                                                        &ctm, values[0], values[1] + values[3])
+                                                                    let e0 = table_record_segment(
+                                                                        page, p0.0, p0.1, p1.0, p1.1, 3, geometry)
+                                                                    let e1 = table_record_segment(
+                                                                        page, p1.0, p1.1, p2.0, p2.1, 3, geometry)
+                                                                    let e2 = table_record_segment(
+                                                                        page, p2.0, p2.1, p3.0, p3.1, 3, geometry)
+                                                                    let e3 = table_record_segment(
+                                                                        page, p3.0, p3.1, p0.0, p0.1, 3, geometry)
+                                                                    if e0 != 0 || e1 != 0 || e2 != 0 || e3 != 0 {
+                                                                        return SOUNIO_PDF_TABLE_ERR_CAPACITY
+                                                                    }
+                                                                    current_x = p0.0; current_y = p0.1
+                                                                    subpath_x = p0.0; subpath_y = p0.1
+                                                                    current_valid = true
+                                                                    geometry.rectangles = geometry.rectangles + 1
+                                                                } else {
+                                                                    let curve_c = table_token_is(
+                                                                        content, pos, length, "c")
+                                                                    let curve_v = table_token_is(
+                                                                        content, pos, length, "v")
+                                                                    let curve_y = table_token_is(
+                                                                        content, pos, length, "y")
+                                                                    if curve_c || curve_v || curve_y {
+                                                                        var expected: i64 = 4
+                                                                        if curve_c { expected = 6 }
+                                                                        if stack != expected || !current_valid ||
+                                                                            !table_all_numbers(&types, expected) {
+                                                                            return SOUNIO_PDF_TABLE_ERR_STATE
+                                                                        }
+                                                                        let error = table_values(
+                                                                            content, &starts, &ends,
+                                                                            expected, &!values, geometry)
+                                                                        if error != SOUNIO_PDF_TABLE_OK { return error }
+                                                                        let point = table_transform_point(
+                                                                            &ctm, values[(expected - 2) as usize],
+                                                                            values[(expected - 1) as usize])
+                                                                        current_x = point.0; current_y = point.1
+                                                                        geometry.curve_tos = geometry.curve_tos + 1
+                                                                    } else {
+                                                                        if table_token_is(content, pos, length, "W") ||
+                                                                            table_token_is(content, pos, length, "W*") {
+                                                                            geometry.clip_paths =
+                                                                                geometry.clip_paths + 1
+                                                                        }
+                                                                        let paint_kind = table_paint_kind(
+                                                                            content, pos, length)
+                                                                        if paint_kind != 0 {
+                                                                            geometry.paint_paths =
+                                                                                geometry.paint_paths + 1
+                                                                            if paint_kind == 2 {
+                                                                                let rectangle_error =
+                                                                                    table_record_fill_rectangle(
+                                                                                        page, path_start, geometry)
+                                                                                if rectangle_error !=
+                                                                                    SOUNIO_PDF_TABLE_OK {
+                                                                                    return rectangle_error
+                                                                                }
+                                                                            }
+                                                                            table_mark_path(
+                                                                                page, path_start,
+                                                                                paint_kind, geometry)
+                                                                            current_valid = false
+                                                                            path_start = -1
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        stack = 0
+                                        pos = after
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if stack != 0 || graphics_depth != 0 || path_start >= 0 {
+        return SOUNIO_PDF_TABLE_ERR_STATE
+    }
+    SOUNIO_PDF_TABLE_OK
+}
+
+pub fn sounio_pdf_table_project_geometry(
+    path: string,
+    geometry: &!SounioPdfTableGeometry,
+) -> i64 with IO, Mut, Panic, Div {
+    geometry.error = SOUNIO_PDF_TABLE_OK
+    let base: SounioPdfFlateInventory = sounio_pdf_flate_import(path)
+    geometry.base_error = base.error
+    if base.error != SOUNIO_PDF_OK || !sounio_pdf_expected_inventory(&base) {
+        geometry.error = SOUNIO_PDF_TABLE_ERR_BASE
+        return geometry.error
+    }
+    var content = table_inflate_result_empty()
+    var page: i64 = 0
+    while page < base.pages {
+        let decode_error = sounio_pdf_decode_flate_object(
+            &base, base.content_objects[page as usize],
+            base.content_generations[page as usize], &!content)
+        if decode_error != SOUNIO_PDF_OK {
+            geometry.base_error = decode_error
+            geometry.error = SOUNIO_PDF_TABLE_ERR_BASE
+            return geometry.error
+        }
+        let scan_error = table_scan_page(&content, page, geometry)
+        if scan_error != SOUNIO_PDF_TABLE_OK {
+            geometry.error = scan_error
+            return geometry.error
+        }
+        geometry.pages = geometry.pages + 1
+        geometry.decoded_bytes = geometry.decoded_bytes + content.output_bytes
+        page = page + 1
+    }
+    geometry.error = SOUNIO_PDF_TABLE_OK
+    geometry.error
+}
+
+pub fn sounio_pdf_table_project_cells(
+    geometry: &SounioPdfTableGeometry,
+    text: &SounioPdfTextProjection,
+    cells: &!SounioPdfTableCellProjection,
+) -> i64 with Mut, Panic {
+    cells.error = SOUNIO_PDF_TABLE_OK
+    cells.pages = geometry.pages
+    cells.source_rectangles = geometry.filled_rectangles
+    cells.text_objects = text.text_objects
+    if geometry.error != SOUNIO_PDF_TABLE_OK || text.error != 0 ||
+        geometry.pages != text.pages ||
+        geometry.filled_rectangles > SOUNIO_PDF_TABLE_CELL_CAPACITY ||
+        text.text_objects > 4096 {
+        cells.error = SOUNIO_PDF_TABLE_ERR_STATE
+        return cells.error
+    }
+    var cell: i64 = 0
+    var rectangle: i64 = 0
+    while rectangle < geometry.filled_rectangles {
+        var existing: i64 = -1
+        cell = 0
+        while cell < cells.cells {
+            if cells.cell_page[cell as usize] ==
+                geometry.rectangle_page[rectangle as usize] &&
+                cells.cell_min_x[cell as usize] ==
+                    geometry.rectangle_min_x[rectangle as usize] &&
+                cells.cell_min_y[cell as usize] ==
+                    geometry.rectangle_min_y[rectangle as usize] &&
+                cells.cell_max_x[cell as usize] ==
+                    geometry.rectangle_max_x[rectangle as usize] &&
+                cells.cell_max_y[cell as usize] ==
+                    geometry.rectangle_max_y[rectangle as usize] {
+                existing = cell
+            }
+            cell = cell + 1
+        }
+        if existing < 0 {
+            if cells.cells >= SOUNIO_PDF_TABLE_CELL_CAPACITY {
+                cells.error = SOUNIO_PDF_TABLE_ERR_CAPACITY
+                return cells.error
+            }
+            let at = cells.cells
+            cells.cell_page[at as usize] =
+                geometry.rectangle_page[rectangle as usize]
+            cells.cell_min_x[at as usize] =
+                geometry.rectangle_min_x[rectangle as usize]
+            cells.cell_min_y[at as usize] =
+                geometry.rectangle_min_y[rectangle as usize]
+            cells.cell_max_x[at as usize] =
+                geometry.rectangle_max_x[rectangle as usize]
+            cells.cell_max_y[at as usize] =
+                geometry.rectangle_max_y[rectangle as usize]
+            cells.cells = cells.cells + 1
+        } else {
+            cells.duplicate_rectangles = cells.duplicate_rectangles + 1
+        }
+        rectangle = rectangle + 1
+    }
+    var object: i64 = 0
+    while object < text.text_objects {
+        if text.object_scalar_count[object as usize] > 0 {
+            let page = text.object_page[object as usize]
+            let x = text.object_device_x[object as usize]
+            let y = text.object_device_y[object as usize]
+            var best: i64 = -1
+            var best_area: i64 = 0
+            var best_ties: i64 = 0
+            var matches: i64 = 0
+            cell = 0
+            while cell < cells.cells {
+                if cells.cell_page[cell as usize] == page &&
+                    x >= cells.cell_min_x[cell as usize] &&
+                    x <= cells.cell_max_x[cell as usize] &&
+                    y >= cells.cell_min_y[cell as usize] &&
+                    y <= cells.cell_max_y[cell as usize] {
+                    matches = matches + 1
+                    let width = cells.cell_max_x[cell as usize] -
+                        cells.cell_min_x[cell as usize]
+                    let height = cells.cell_max_y[cell as usize] -
+                        cells.cell_min_y[cell as usize]
+                    let area = width * height
+                    if best < 0 || area < best_area {
+                        best = cell
+                        best_area = area
+                        best_ties = 1
+                    } else {
+                        if area == best_area { best_ties = best_ties + 1 }
+                    }
+                }
+                cell = cell + 1
+            }
+            cells.containment_matches = cells.containment_matches + matches
+            if best >= 0 && best_ties == 1 {
+                cells.object_cell[object as usize] = best
+                cells.cell_object_count[best as usize] =
+                    cells.cell_object_count[best as usize] + 1
+                cells.cell_scalar_count[best as usize] =
+                    cells.cell_scalar_count[best as usize] +
+                    text.object_scalar_count[object as usize]
+                cells.assigned_objects = cells.assigned_objects + 1
+                if matches > 1 {
+                    cells.nested_resolutions = cells.nested_resolutions + 1
+                }
+            } else {
+                cells.unassigned_objects = cells.unassigned_objects + 1
+                if best_ties > 1 {
+                    cells.exact_tie_objects = cells.exact_tie_objects + 1
+                }
+            }
+        } else {
+            cells.empty_text_objects = cells.empty_text_objects + 1
+        }
+        object = object + 1
+    }
+    cell = 0
+    while cell < cells.cells {
+        if cells.cell_object_count[cell as usize] > 0 {
+            cells.nonempty_cells = cells.nonempty_cells + 1
+        } else { cells.empty_cells = cells.empty_cells + 1 }
+        cell = cell + 1
+    }
+    cells.error
+}
+
+pub fn sounio_pdf_table_cell_digest(
+    parent: &SounioPdfTextProjectionDigest,
+    text: &SounioPdfTextProjection,
+    cells: &SounioPdfTableCellProjection,
+) -> SounioPdfTableCellDigest with Mut, Panic, Div {
+    var result = table_digest_result_empty()
+    if parent.error != 0 || cells.error != SOUNIO_PDF_TABLE_OK ||
+        text.error != 0 || cells.pages != text.pages ||
+        cells.text_objects != text.text_objects ||
+        cells.cells < 0 || cells.cells > SOUNIO_PDF_TABLE_CELL_CAPACITY ||
+        cells.assigned_objects + cells.unassigned_objects +
+            cells.empty_text_objects != text.text_objects {
+        result.error = SOUNIO_PDF_TABLE_ERR_DIGEST
+        return result
+    }
+    var builder = table_digest_builder_empty()
+    table_digest_push_string(&!builder, "SOUNIO_PDF_TABLE_CELL_PROJECTION_V1")
+    table_digest_push_byte(&!builder, 0)
+    var byte: i64 = 0
+    while byte < 32 {
+        table_digest_push_byte(&!builder, parent.bytes[byte as usize])
+        byte = byte + 1
+    }
+    table_digest_push_u64(&!builder, cells.pages)
+    table_digest_push_u64(&!builder, cells.source_rectangles)
+    table_digest_push_u64(&!builder, cells.duplicate_rectangles)
+    table_digest_push_u64(&!builder, cells.cells)
+    table_digest_push_u64(&!builder, cells.nonempty_cells)
+    table_digest_push_u64(&!builder, cells.empty_cells)
+    table_digest_push_u64(&!builder, cells.text_objects)
+    table_digest_push_u64(&!builder, cells.empty_text_objects)
+    table_digest_push_u64(&!builder, cells.assigned_objects)
+    table_digest_push_u64(&!builder, cells.unassigned_objects)
+    table_digest_push_u64(&!builder, cells.nested_resolutions)
+    table_digest_push_u64(&!builder, cells.exact_tie_objects)
+    table_digest_push_u64(&!builder, cells.containment_matches)
+    var cell: i64 = 0
+    while cell < cells.cells {
+        table_digest_push_u64(&!builder, cell)
+        table_digest_push_u64(&!builder, cells.cell_page[cell as usize])
+        table_digest_push_u64(&!builder, cells.cell_min_x[cell as usize])
+        table_digest_push_u64(&!builder, cells.cell_min_y[cell as usize])
+        table_digest_push_u64(&!builder, cells.cell_max_x[cell as usize])
+        table_digest_push_u64(&!builder, cells.cell_max_y[cell as usize])
+        table_digest_push_u64(&!builder, cells.cell_object_count[cell as usize])
+        table_digest_push_u64(&!builder, cells.cell_scalar_count[cell as usize])
+        cell = cell + 1
+    }
+    var object: i64 = 0
+    while object < text.text_objects {
+        table_digest_push_u64(&!builder, object)
+        table_digest_push_u64(&!builder, cells.object_cell[object as usize])
+        table_digest_push_u64(&!builder,
+            text.object_scalar_start[object as usize])
+        table_digest_push_u64(&!builder,
+            text.object_scalar_count[object as usize])
+        object = object + 1
+    }
+    if builder.error != SOUNIO_PDF_TABLE_OK {
+        result.error = builder.error
+        return result
+    }
+    if builder.chunk_length > 0 {
+        builder.state = sha256_update(builder.state, builder.chunk,
+            builder.chunk_length as i32)
+    }
+    let digest = sha256_finalize(builder.state)
+    var digest_byte: i32 = 0
+    while digest_byte < 32 {
+        let value = sha256_digest_byte(&digest, digest_byte)
+        if value < 0 {
+            result.error = SOUNIO_PDF_TABLE_ERR_DIGEST
+            return result
+        }
+        result.bytes[digest_byte as usize] = value
+        digest_byte = digest_byte + 1
+    }
+    result.serialized_bytes = builder.total_length
+    result.error = SOUNIO_PDF_TABLE_OK
+    result
+}

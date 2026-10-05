@@ -1,0 +1,110 @@
+//@ run-pass
+//@ requires: madaros
+//@ exit-code: 0
+//@ description: ExactlyPrivate wired to ker L_z basis — completeness, soundness (residual=0 ⟺ L_z(w)=0), round-trip, ĝ²=−1, not-a-subalgebra, preservation calculus
+// Full Test Suite CI uses souc-stage2 (lean_single). Madaros runs this graph.
+//
+// This is the machine-checked "wiring": it proves the constructive 4-vector
+// certificate is SOUND AND COMPLETE for the ExactlyPrivate property, and
+// exhibits the composition boundary (linear-preserved, *-fragile, with a
+// decidable preserving set). All operands are integer/±1 so comparisons are
+// exact (== 0.0, not tolerance).
+
+use algebra::sedenion::{sed_mul, sed_norm_sq, sed_zd_z, sed_basis}
+use privacy::exactly_private::{
+    forget_contribution, kernel_coords, from_kernel_coords,
+    is_exactly_private, preserves_exact_privacy,
+}
+
+fn lz_zero(w: &[f64; 16]) -> i64 with Mut {
+    var z: [f64; 16] = [0.0; 16]
+    sed_zd_z(&!z)
+    var zw: [f64; 16] = [0.0; 16]
+    sed_mul(&z, w, &!zw)
+    if sed_norm_sq(&zw) == 0.0 { 1 } else { 0 }
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic, ZD {
+    var ok: i64 = 1
+
+    // basis generators
+    var g0: [f64; 16] = [0.0; 16]; g0[6] = 1.0;  g0[15] = 0.0 - 1.0
+    var g1: [f64; 16] = [0.0; 16]; g1[4] = 1.0;  g1[13] = 1.0
+    var g2: [f64; 16] = [0.0; 16]; g2[5] = 1.0;  g2[12] = 0.0 - 1.0
+    var g3: [f64; 16] = [0.0; 16]; g3[7] = 1.0;  g3[14] = 1.0
+
+    // ── (1) COMPLETENESS: the old 2-of-4 bug is dead. g1 and g2 were the
+    //        silently-omitted generators; a pure-g1 / pure-g2 input must now be
+    //        forgotten ENTIRELY (residual 0). ──────────────────────────────────
+    let f1 = forget_contribution(&g1)
+    let f2 = forget_contribution(&g2)
+    if sed_norm_sq(&f1) != 0.0 { ok = 0 }
+    if sed_norm_sq(&f2) != 0.0 { ok = 0 }
+
+    // ── (2) SOUNDNESS: is_exactly_private(w) == (L_z(w)==0) for a battery. This
+    //        proves the named 4-basis is the WHOLE kernel. ─────────────────────
+    var e0: [f64; 16] = [0.0; 16]; e0[0] = 1.0
+    var e1: [f64; 16] = [0.0; 16]; e1[1] = 1.0
+    // w3 = g0 + g2 (kernel), w4 = g0 + e1 (mixed), w5 = 2 g1 − g3 (kernel combo)
+    var w3: [f64; 16] = [0.0; 16]
+    var w4: [f64; 16] = [0.0; 16]
+    var w5: [f64; 16] = [0.0; 16]
+    var i: i64 = 0
+    while i < 16 {
+        w3[i] = g0[i] + g2[i]
+        w4[i] = g0[i] + e1[i]
+        w5[i] = 2.0 * g1[i] - g3[i]
+        i = i + 1
+    }
+    if is_exactly_private(&g0) != lz_zero(&g0) { ok = 0 }
+    if is_exactly_private(&e0) != lz_zero(&e0) { ok = 0 }
+    if is_exactly_private(&w3) != lz_zero(&w3) { ok = 0 }
+    if is_exactly_private(&w4) != lz_zero(&w4) { ok = 0 }
+    if is_exactly_private(&w5) != lz_zero(&w5) { ok = 0 }
+    // and the values are what we expect: g0,w3,w5 private; e0,w4 not
+    if is_exactly_private(&g0) != 1 { ok = 0 }
+    if is_exactly_private(&e0) != 0 { ok = 0 }
+    if is_exactly_private(&w3) != 1 { ok = 0 }
+    if is_exactly_private(&w4) != 0 { ok = 0 }
+    if is_exactly_private(&w5) != 1 { ok = 0 }
+
+    // ── (3) ROUND-TRIP: coords -> value -> coords is identity, and a value
+    //        built from coords is exactly private. ─────────────────────────────
+    var c: [f64; 4] = [0.0; 4]; c[0] = 1.0; c[1] = 0.0 - 2.0; c[2] = 3.0; c[3] = 5.0
+    let v = from_kernel_coords(&c)
+    let c2 = kernel_coords(&v)
+    var k: i64 = 0
+    while k < 4 { if c2[k] != c[k] { ok = 0 } k = k + 1 }
+    if is_exactly_private(&v) != 1 { ok = 0 }
+
+    // ── (4) EACH ĝ_k IS AN IMAGINARY UNIT: g_k * g_k = −2·e0 (so ĝ_k² = −1). ──
+    var gg: [f64; 16] = [0.0; 16]
+    sed_mul(&g0, &g0, &!gg)
+    if gg[0] != 0.0 - 2.0 { ok = 0 }
+    if sed_norm_sq(&gg) != 4.0 { ok = 0 }   // only the e0 component is nonzero
+
+    // ── (5) NOT A SUBALGEBRA: g0*g1 leaves the kernel (escapes span{g}). ──────
+    var p01: [f64; 16] = [0.0; 16]
+    sed_mul(&g0, &g1, &!p01)
+    if sed_norm_sq(&p01) == 0.0 { ok = 0 }        // the product is nonzero
+    if is_exactly_private(&p01) != 0 { ok = 0 }   // and NOT private -> escaped ker
+
+    // ── (6) PRESERVATION CALCULUS: which multipliers keep privacy? ───────────
+    var e2: [f64; 16] = [0.0; 16]; sed_basis(2, &!e2)
+    var e8: [f64; 16] = [0.0; 16]; sed_basis(8, &!e8)
+    var e4: [f64; 16] = [0.0; 16]; sed_basis(4, &!e4)
+    var z:  [f64; 16] = [0.0; 16]; sed_zd_z(&!z)
+    if preserves_exact_privacy(&e2) != 1 { ok = 0 }   // preserves
+    if preserves_exact_privacy(&e8) != 1 { ok = 0 }   // preserves
+    if preserves_exact_privacy(&z)  != 1 { ok = 0 }   // preserves
+    if preserves_exact_privacy(&e1) != 0 { ok = 0 }   // breaks
+    if preserves_exact_privacy(&e4) != 0 { ok = 0 }   // breaks
+
+    if ok == 1 {
+        print("EP KER BASIS: completeness/soundness/roundtrip/imaginary-units/not-subalgebra/preservation PASS\n")
+        0
+    } else {
+        print("EP KER BASIS FAIL\n")
+        1
+    }
+}

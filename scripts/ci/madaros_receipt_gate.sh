@@ -2,7 +2,8 @@
 # A binary that asserts its own identity must be telling the truth.
 #
 # artifacts/self-hosted/madaros.gate-receipt is TRACKED in git and claims a
-# sha256, a source_commit and a gate result for artifacts/self-hosted/madaros —
+# sha256, a source_commit and a gate result for whatever artifact it NAMES --
+# today bin/madaros-linux-x86_64, not the path in this file's own name --
 # which is NOT tracked (.gitignore:206). Measured 2026-08-04:
 #
 #     receipt sha256   5629c3a48b6c...    file sha256   6303ec70187b...
@@ -52,6 +53,19 @@ require_nonempty "$claimed_result" "receipt has no gate_result= line"
 [[ "$claimed_result" == "pass" ]] \
   || gate_fail "receipt records gate_result=$claimed_result — a binary whose own gate did not pass must not be shipped"
 
+# The prebuilt is committed compressed: bin/madaros-linux-x86_64.gz plus
+# bin/madaros-linux-x86_64.sha256 (sha256 of the ELF). The ELF path is generated
+# from them by scripts/lib/materialize_madaros_prebuilt.sh and is not tracked.
+# Git lookups below follow the tracked .sha256, which changes exactly when the
+# ELF does; the sha256 comparison at the end is still made on the ELF itself.
+tracked_artifact="$claimed_artifact"
+packed=0
+if ! git ls-files --error-unmatch "$claimed_artifact" >/dev/null 2>&1 \
+   && git ls-files --error-unmatch "$claimed_artifact.gz" >/dev/null 2>&1; then
+  tracked_artifact="$claimed_artifact.sha256"
+  packed=1
+fi
+
 # The gate it names must exist. `gate=` carries a bare filename.
 gate_path="$ROOT_DIR/scripts/ci/$claimed_gate"
 require_file "$gate_path" "receipt names gate '$claimed_gate' which does not exist at scripts/ci/"
@@ -72,8 +86,34 @@ if ! git rev-parse --verify -q "${claimed_commit}^{commit}" >/dev/null 2>&1; the
   fi
 else
   if ! git merge-base --is-ancestor "$claimed_commit" HEAD 2>/dev/null; then
-    gate_fail "receipt source_commit=$claimed_commit is not an ancestor of HEAD — the receipt describes a tree this branch is not on"
-  fi
+          # Not in this history. Two legitimate ways that happens, and neither is a
+          # false claim:
+          #
+          #   squash merge      the branch collapsed into one new commit, so the id
+          #                     the receipt names never lands
+          #   written early     madaros_write_receipt.sh records HEAD when the
+          #                     artifact is modified-but-uncommitted, and HEAD is by
+          #                     definition the commit BEFORE the new binary. That
+          #                     commit therefore carries the OLD blob.
+          #
+          # I first accepted only the squash shape, by requiring the named commit to
+          # carry the same blob as HEAD. That failed main at e5e7ce8aff on a receipt
+          # whose sha256 matched the shipped ELF byte for byte -- the second shape
+          # above. Once a commit is outside this history its blob proves nothing
+          # either way, so provenance is reported UNVERIFIED and the sha256 check
+          # below is what stands. It always was the load-bearing one; making the
+          # commit id load-bearing is what broke twice in one day.
+          head_blob="$(git rev-parse -q --verify "HEAD:$tracked_artifact" 2>/dev/null || true)"
+          claimed_blob="$(git rev-parse -q --verify "$claimed_commit:$tracked_artifact" 2>/dev/null || true)"
+          if [[ -n "$claimed_blob" && "$claimed_blob" == "$head_blob" ]]; then
+            echo "  receipt: source=$claimed_commit was rewritten out of this history (squash); it carried this exact artifact"
+          else
+            echo "  receipt: source=$claimed_commit is not in this history -- provenance UNVERIFIED"
+            echo "  receipt: the sha256 comparison below is what stands"
+          fi
+          delivered="$(git log -1 --format=%H -- "$tracked_artifact" 2>/dev/null)"
+          claimed_commit="${delivered:-$claimed_commit}"
+        fi
   behind="$(git rev-list --count "${claimed_commit}..HEAD" 2>/dev/null || echo '?')"
   echo "  receipt: gate=$claimed_gate result=$claimed_result source=$claimed_commit (${behind} commits behind HEAD)"
 fi
@@ -88,8 +128,17 @@ case "$claimed_artifact" in
 esac
 
 BINARY="$ROOT_DIR/$claimed_artifact"
-if ! git ls-files --error-unmatch "$claimed_artifact" >/dev/null 2>&1; then
+if ! git ls-files --error-unmatch "$tracked_artifact" >/dev/null 2>&1; then
   gate_fail "receipt names '$claimed_artifact', which is not tracked in git. A receipt for a file that is not in the repository is a claim nobody can check — point it at the committed binary (bin/madaros-linux-x86_64)."
+fi
+if [[ $packed -eq 1 ]]; then
+  # Materialize with a full re-hash: the ELF on disk must be the one the tracked
+  # .gz and .sha256 describe, and that sha256 must be the one the receipt claims.
+  bash "$ROOT_DIR/scripts/lib/materialize_madaros_prebuilt.sh" --verify \
+    || gate_fail "$claimed_artifact.gz does not materialize to the ELF named by $claimed_artifact.sha256"
+  tracked_sha="$(awk 'NR == 1 {print $1}' "$ROOT_DIR/$claimed_artifact.sha256")"
+  [[ "$tracked_sha" == "$claimed_sha" ]] \
+    || gate_fail "receipt claims $claimed_sha but the tracked $claimed_artifact.sha256 records $tracked_sha"
 fi
 require_nonempty_file "$BINARY" "receipt names '$claimed_artifact' but there is no such file"
 
@@ -100,11 +149,12 @@ if [[ "$actual_sha" != "$claimed_sha" ]]; then
   echo "  receipt claims $claimed_sha"
   echo "  file is       $actual_sha"
   echo
-  echo "  This ELF is not the one the receipt was written for. It is resolved as an"
-  echo "  oracle by ~82 scripts and preferred by scripts/install.sh over the committed"
-  echo "  bin/madaros-linux-x86_64. Rebuild and re-emit the receipt, or delete the ELF:"
-  echo "    make build-madaros && bash scripts/ci/madaros_write_receipt.sh"
-  gate_fail "artifacts/self-hosted/madaros does not match its own receipt"
+  echo "  This ELF is not the one the receipt was written for. Whatever the receipt"
+  echo "  names is resolved as an oracle by ~82 scripts, so a stale receipt lets every"
+  echo "  one of them attest a build nobody measured. Re-run the gate against the ELF"
+  echo "  that is actually there, then re-emit the receipt:"
+  echo "    bash scripts/ci/madaros_full_gate.sh && bash scripts/ci/madaros_write_receipt.sh"
+  gate_fail "$claimed_artifact does not match its own receipt"
 fi
 
 gate_pass "binary matches its receipt ($actual_sha)"

@@ -1,0 +1,120 @@
+//@ run-pass
+// N1 bounded model control (codex review): an INVALID positive NS handle must
+// be fail-closed — never disjoint, and union saturates to unknown. This file
+// reproduces the relevant handle operations at a smaller table cap (64 versus
+// production's 4096); it checks the model-level logic, not the checker's live
+// table. Integrated current-source behavior is owned by the N3 gate.
+
+fn ns_unknown() -> i64 { 0 - 1 }
+fn ns_empty() -> i64 { 0 }
+
+struct NoiseSetTable { masks: [i64; 64], count: i64 }
+fn ns_table_new() -> NoiseSetTable { NoiseSetTable { masks: [0; 64], count: 0 } }
+
+fn ns_bit(src: i64) -> i64 {
+    if src < 0 { 0 } else if src > 63 { 0 } else {
+        let sh = src as u8
+        ((1 as i64) << sh) as i64
+    }
+}
+
+fn ns_deref(table: &NoiseSetTable, handle: i64) -> i64 {
+    if handle <= 0 { 0 } else {
+        let idx = handle - 1
+        if idx < table.count { table.masks[idx as usize] } else { 0 }
+    }
+}
+
+fn ns_intern(table: &!NoiseSetTable, mask: i64) -> i64 with Mut, Panic, Div {
+    if mask == 0 { return 0 }
+    var i: i64 = 0
+    while i < table.count {
+        if table.masks[i as usize] == mask { return i + 1 }
+        i = i + 1
+    }
+    if table.count >= 64 { return ns_unknown() }
+    let idx = table.count
+    table.masks[idx as usize] = mask
+    table.count = idx + 1
+    idx + 1
+}
+
+fn ns_singleton(table: &!NoiseSetTable, src: i64) -> i64 with Mut, Panic, Div {
+    if src < 0 { return ns_unknown() }
+    if src > 63 { return ns_unknown() }
+    let m = ns_bit(src)
+    if m == 0 { return ns_unknown() }   // grok-4.6 fix: never intern a 0-mask for a real source
+    ns_intern(table, m)
+}
+
+fn ns_handle_valid(table: &NoiseSetTable, h: i64) -> bool {
+    (h == 0) || (h > 0 && h <= table.count)
+}
+
+fn ns_union(table: &!NoiseSetTable, a: i64, b: i64) -> i64 with Mut, Panic, Div {
+    if a < 0 { return ns_unknown() }
+    if b < 0 { return ns_unknown() }
+    if a > table.count { return ns_unknown() }
+    if b > table.count { return ns_unknown() }
+    if a == 0 { return b }
+    if b == 0 { return a }
+    let ma = ns_deref(table, a)
+    let mb = ns_deref(table, b)
+    ns_intern(table, ma | mb)
+}
+
+fn ns_disjoint(table: &NoiseSetTable, a: i64, b: i64) -> bool {
+    if a < 0 { return false }
+    if b < 0 { return false }
+    if !ns_handle_valid(table, a) { return false }
+    if !ns_handle_valid(table, b) { return false }
+    if a == 0 { return true }
+    if b == 0 { return true }
+    let ma = ns_deref(table, a)
+    let mb = ns_deref(table, b)
+    (ma & mb) == 0
+}
+
+fn report(got: bool, want: bool) -> i32 with IO {
+    if got == want { println("PASS") return 0 } else { println("FAIL") return 1 }
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div {
+    var t = ns_table_new()
+    var fails = 0
+    println("NS handle-validity controls (fail-closed on invalid positive handle)")
+
+    let s0 = ns_singleton(&!t, 0)      // handle 1 (valid), count=1
+    let bad = 999                       // invalid positive handle
+
+    print("6a invalid vs empty NOT disjoint: ")
+    fails = fails + report(ns_disjoint(&t, bad, ns_empty()), false)
+    print("6b invalid vs valid NOT disjoint: ")
+    fails = fails + report(ns_disjoint(&t, bad, s0), false)
+    print("6c invalid vs invalid NOT disjoint: ")
+    fails = fails + report(ns_disjoint(&t, bad, bad), false)
+
+    print("7a union(invalid, valid) = unknown: ")
+    let u1 = ns_union(&!t, bad, s0)
+    fails = fails + report(u1 == ns_unknown(), true)
+    print("7b union(invalid, empty) = unknown: ")
+    let u2 = ns_union(&!t, bad, ns_empty())
+    fails = fails + report(u2 == ns_unknown(), true)
+
+    let s1 = ns_singleton(&!t, 1)
+    print("8 valid disjoint still true: ")
+    fails = fails + report(ns_disjoint(&t, s0, s1), true)
+
+    // grok-4.6 review: source 63 (sign bit) must be a real, non-empty singleton,
+    // never certified independent of itself, and disjoint from source 0.
+    let s63 = ns_singleton(&!t, 63)
+    print("9a singleton(63) is not empty/unknown: ")
+    fails = fails + report(s63 > 0, true)
+    print("9b singleton(63) NOT disjoint from itself: ")
+    fails = fails + report(ns_disjoint(&t, s63, s63), false)
+    print("9c singleton(63) disjoint from source 0: ")
+    fails = fails + report(ns_disjoint(&t, s63, s0), true)
+
+    if fails == 0 { println("ALL HANDLE-VALIDITY CONTROLS PASS") return 0 }
+    else { println("SOME CONTROL FAILED") return 1 }
+}

@@ -1,0 +1,419 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+// Round 9: EL+ role-aware boolean closure integrated into the OAEI 2016
+// Anatomy real-data pipeline.  Executable mirror of the verified
+// saturation engine of formal/OntologyELPlusClosureComplete.lean (crStep,
+// iterated to a genuine fixpoint like closeSatF; subBPlusC_iff /
+// conflictBPlusC_iff), via the reusable stdlib/ontology/elplus.sio module.
+//
+// Part A (synthetic, DENSE variant): the SNOMED-flavoured TBox of
+// formal/OntologyELPlus.lean (8 atoms, 3 roles, one conjunction,
+// DirectSite <= RoleGroup, DirectSite o PartOf <= RoleGroup), interned
+// over the full concept universe (40 concepts).  This part exercises the
+// rules the real data cannot: conjElim/Intro, roleSub, roleComp.
+//
+// Part B (real data, SPARSE variant): the FULL Anatomy human TBox
+// (H = 3304 classes, 3761 sub axioms, 1662 existential restrictions
+// C <= ex part_of.F, 17 disjoint pairs, 6638 candidate mappings) with
+// the role-aware closure computed by ancestor-set expansion over packed
+// adjacency (no per-role matrix): E(c) = union over ancestors a of c of
+// the ancestor sets of the stated fillers of a.  The python mirror runs
+// the GENERAL 8-rule fixpoint and aborts unless it agrees with this
+// reduction exactly; the checks below compare the driver against the
+// mirror.
+//
+// Data profile limitation (asserted below, documented in README): the
+// Anatomy track has ONE active role (part_of) and NO roleSub/roleComp
+// axioms, so roles extend the subsumption relation (existential targets)
+// without changing the atomic disjointness conflicts: the derived
+// conflict count must equal the round-7 value byte-identically, and the
+// round-7 repair therefore carries over unchanged (m_keep/m_conf are not
+// re-emitted).
+//
+// Data: elplus_data.sio + elplus_synth_data.sio (generated; mirror
+// numbers embedded as expected_*() / synth_expected_*()).
+
+import elplus_data::*
+import elplus_synth_data::*
+use ontology::elplus::{elplus_role_closure, elplus_seed, elplus_fixpoint, elplus_s_count, elplus_r_count, elplus_conflict, elplus_sparse_init_mats, elplus_sparse_build_adj, elplus_sparse_bfs, elplus_sparse_seed_edges, elplus_sparse_expand, elplus_sparse_row_count}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var n_fail = 0
+
+    // ══ Part A: synthetic SNOMED-style instance, dense fixpoint ═══════
+    synth_init_data()
+    let U = synth_expected_u()
+    let NB = synth_expected_base()
+    let NRS = synth_expected_nr()
+    let TOP = synth_expected_top()
+
+    // exid[r*64+f] = interned id of ex r.(base f), or -1
+    var exid: [i64; 512] = [0; 512]
+    var ci: i64 = 0
+    while ci < 512 {
+        exid[ci] = 0 - 1
+        ci = ci + 1
+    }
+    ci = 0
+    while ci < U {
+        if sc_kind[ci] == 3 {
+            exid[sc_arg1[ci] * 64 + sc_arg2[ci]] = ci
+        }
+        ci = ci + 1
+    }
+
+    // role-hierarchy closure (reflexive + transitive over stated roleSub)
+    var rclos: [bool; 64] = [false; 64]
+    var k: i64 = 0
+    var rr: i64 = 0
+    var ss: i64 = 0
+    while k < synth_expected_rolesub() {
+        rr = srsub[k] / 10
+        ss = srsub[k] - rr * 10
+        rclos[rr * 8 + ss] = true
+        k = k + 1
+    }
+    elplus_role_closure(&!rclos, NRS)
+
+    // seed S: reflexivity + top + stated sub + stated exsub
+    var s: [bool; 4096] = [false; 4096]
+    elplus_seed(&!s, U, TOP)
+    var c: i64 = 0
+    var d: i64 = 0
+    k = 0
+    while k < synth_expected_sub() {
+        c = ssub[k] / 100
+        d = ssub[k] - c * 100
+        s[c * 64 + d] = true
+        k = k + 1
+    }
+    k = 0
+    var x: i64 = 0
+    while k < synth_expected_exsub() {
+        c = sex_cf[k] / 100
+        d = sex_cf[k] - c * 100
+        x = exid[sex_r[k] * 64 + d]
+        if x >= 0 {
+            s[c * 64 + x] = true
+        } else {
+            println("FAIL: stated existential not interned (synth)")
+            n_fail = n_fail + 1
+        }
+        k = k + 1
+    }
+
+    // disjointness (symmetric)
+    var sdisjm: [bool; 4096] = [false; 4096]
+    k = 0
+    var a2: i64 = 0
+    var b2: i64 = 0
+    while k < synth_expected_disj() {
+        a2 = sdisj[k] / 100
+        b2 = sdisj[k] - a2 * 100
+        sdisjm[a2 * 64 + b2] = true
+        sdisjm[b2 * 64 + a2] = true
+        k = k + 1
+    }
+
+    // unpack composition chains
+    var ch1: [i64; 8] = [0; 8]
+    var ch2: [i64; 8] = [0; 8]
+    var ch3: [i64; 8] = [0; 8]
+    k = 0
+    var pack: i64 = 0
+    while k < synth_expected_rolecomp() {
+        pack = schain[k]
+        ch3[k] = pack - (pack / 10) * 10
+        pack = pack / 10
+        ch2[k] = pack - (pack / 10) * 10
+        ch1[k] = pack / 10
+        k = k + 1
+    }
+
+    // dense 8-rule fixpoint (crStep mirror, iterated to stability)
+    var redges: [bool; 32768] = [false; 32768]
+    let rounds = elplus_fixpoint(&!s, &!redges, &sc_kind, &sc_arg1, &sc_arg2, &exid, &rclos, &ch1, &ch2, &ch3, synth_expected_rolecomp(), U, NB, NRS)
+    println("synthetic closure rounds:")
+    println(rounds)
+
+    let sc = elplus_s_count(&s, U)
+    if sc != synth_expected_s_cells() {
+        println("FAIL: synthetic S cell count disagrees with mirror")
+        n_fail = n_fail + 1
+    }
+    let rc = elplus_r_count(&redges, NRS, U, NB)
+    if rc != synth_expected_r_edges() {
+        println("FAIL: synthetic role edge count disagrees with mirror")
+        n_fail = n_fail + 1
+    }
+
+    // the six demo queries
+    x = exid[0 * 64 + 3]
+    if s[4 * 64 + x] {
+        println("subBPlus 4 (ex 0 (atom 3)) = true")
+    } else {
+        println("FAIL: Pneumonia <= ex RoleGroup.Organ should hold (roleComp)")
+        n_fail = n_fail + 1
+    }
+    x = exid[0 * 64 + 9]
+    if s[4 * 64 + x] {
+        println("subBPlus 4 (ex 0 (conj 2 0)) = true")
+    } else {
+        println("FAIL: Pneumonia <= ex RoleGroup.(Lung x Infl) should hold (roleSub)")
+        n_fail = n_fail + 1
+    }
+    if s[4 * 64 + 1] {
+        println("subBPlus 4 1 = true")
+    } else {
+        println("FAIL: Pneumonia <= Disorder should hold (transitivity)")
+        n_fail = n_fail + 1
+    }
+    if elplus_conflict(&s, &sdisjm, U, 4, 5) {
+        println("conflictBPlus 4 5 = true")
+    } else {
+        println("FAIL: conflict(Pneumonia, Drug) should hold")
+        n_fail = n_fail + 1
+    }
+    if elplus_conflict(&s, &sdisjm, U, 7, 7) {
+        println("conflictBPlus 7 7 = true")
+    } else {
+        println("FAIL: conflict(DrugInducedDisorder, itself) should hold")
+        n_fail = n_fail + 1
+    }
+    if s[3 * 64 + 1] {
+        println("FAIL: Organ <= Disorder should NOT hold")
+        n_fail = n_fail + 1
+    } else {
+        println("subBPlus 3 1 = false")
+    }
+
+    // ══ Part B: full Anatomy human TBox with roles, sparse variant ════
+    init_data()
+    let H = expected_h()
+    let W = H + 1
+    let NSUB = expected_sub()
+    let NEX = expected_exsub()
+    let NDEP = expected_disj()
+    let EP = expected_endpoints()
+    let M = expected_mappings()
+    let NR = expected_roles()
+
+    // data profile assertions (see header): no role hierarchy on real data
+    if NR != 2 {
+        println("FAIL: role count disagrees with extraction")
+        n_fail = n_fail + 1
+    }
+
+    // packed parent adjacency (counting sort) + per-class BFS closure
+    // (workspace matrices live in stdlib elplus.sio: module-level arrays
+    // must not cross a &! boundary on the current compiler lane)
+    elplus_sparse_init_mats()
+    var poff: [i64; 4097] = [0; 4097]
+    var pcount: [i64; 4096] = [0; 4096]
+    var plist: [i64; 4096] = [0; 4096]
+    var vis: [i64; 4096] = [0; 4096]
+    var queue: [i64; 4096] = [0; 4096]
+    elplus_sparse_build_adj(&h_sub, NSUB, &!poff, &!pcount, &!plist, H)
+    let edges = elplus_sparse_bfs(&poff, &plist, &!vis, &!queue, H, W)
+    if edges != expected_closure_edges() {
+        println("FAIL: atom closure edge count disagrees with mirror")
+        n_fail = n_fail + 1
+    }
+
+    // seed e[c] with the ancestor rows of the stated fillers of c, then
+    // expand in place: e[c] |= e[a] over ancestors a of c (role-aware
+    // edge fillers; exact single pass, see stdlib module docs)
+    elplus_sparse_seed_edges(&ex_c, &ex_f, NEX, W)
+    elplus_sparse_expand(H, W)
+
+    var nre: i64 = 0
+    c = 0
+    while c < H {
+        nre = nre + elplus_sparse_row_count(1, c, W)
+        c = c + 1
+    }
+    if nre != expected_role_edges_atom() {
+        println("FAIL: atom-source role edge count disagrees with mirror")
+        n_fail = n_fail + 1
+    }
+
+    // total S cells over the interned universe (atoms + top + existentials)
+    var scells: i64 = 0
+    c = 0
+    while c < H {
+        scells = scells + elplus_sparse_row_count(0, c, W)
+        scells = scells + elplus_sparse_row_count(1, c, W)
+        c = c + 1
+    }
+    scells = scells + 1  // top row: top <= top only
+    var basesum: i64 = 0
+    c = 0
+    while c < W {
+        basesum = basesum + elplus_sparse_row_count(0, c, W)
+        c = c + 1
+    }
+    let BB = W
+    scells = scells + NR * (BB + basesum)
+    if scells != expected_s_cells() {
+        println("FAIL: total S cell count disagrees with mirror")
+        n_fail = n_fail + 1
+    }
+    let nrtotal = nre + NR * basesum
+    if nrtotal != expected_role_edges_total() {
+        println("FAIL: total role edge count disagrees with mirror")
+        n_fail = n_fail + 1
+    }
+
+    // ── derived conflicts must equal round 7 (roles add no atomic
+    //    disjointness): endpoint partner-bit masks over the sub closure ──
+    var ep_bit: [i64; 3304] = [0; 3304]
+    var ep_pbits: [bool; 81] = [false; 81]
+    var neps: i64 = 0
+    var a: i64 = 0
+    var b: i64 = 0
+    var ia: i64 = 0
+    var ib: i64 = 0
+    k = 0
+    while k < NDEP {
+        a = h_dep[k] / 10000
+        b = h_dep[k] - a * 10000
+        if ep_bit[a] == 0 {
+            neps = neps + 1
+            ep_bit[a] = neps
+        }
+        if ep_bit[b] == 0 {
+            neps = neps + 1
+            ep_bit[b] = neps
+        }
+        ia = ep_bit[a] - 1
+        ib = ep_bit[b] - 1
+        ep_pbits[ia * EP + ib] = true
+        ep_pbits[ib * EP + ia] = true
+        k = k + 1
+    }
+    if neps != EP {
+        println("FAIL: distinct endpoint count disagrees with mirror")
+        n_fail = n_fail + 1
+    }
+
+    var mask: [bool; 29736] = [false; 29736]
+    c = 0
+    while c < H {
+        if ep_bit[c] > 0 {
+            mask[c * EP + ep_bit[c] - 1] = true
+        }
+        c = c + 1
+    }
+    var e: i64 = 0
+    var p: i64 = 0
+    var changed = true
+    while changed {
+        changed = false
+        e = 0
+        while e < NSUB {
+            c = h_sub[e] / 10000
+            p = h_sub[e] - c * 10000
+            k = 0
+            while k < EP {
+                if mask[p * EP + k] && !mask[c * EP + k] {
+                    mask[c * EP + k] = true
+                    changed = true
+                }
+                k = k + 1
+            }
+            e = e + 1
+        }
+    }
+
+    var pmask: [bool; 29736] = [false; 29736]
+    var j: i64 = 0
+    var any = false
+    c = 0
+    while c < H {
+        j = 0
+        while j < EP {
+            any = false
+            k = 0
+            while k < EP {
+                if mask[c * EP + k] && ep_pbits[k * EP + j] {
+                    any = true
+                }
+                k = k + 1
+            }
+            pmask[c * EP + j] = any
+            j = j + 1
+        }
+        c = c + 1
+    }
+
+    var ei: i64 = 0
+    var ej: i64 = 0
+    var ci2: i64 = 0
+    var cj2: i64 = 0
+    var hit = false
+    var n_conf: i64 = 0
+    var i: i64 = 0
+    while i < M {
+        ei = m_pack[i] / 10000
+        ci2 = m_pack[i] - ei * 10000
+        j = 0
+        while j < M {
+            if i != j {
+                ej = m_pack[j] / 10000
+                if ei == ej {
+                    cj2 = m_pack[j] - ej * 10000
+                    hit = false
+                    k = 0
+                    while k < EP {
+                        if mask[ci2 * EP + k] && pmask[cj2 * EP + k] {
+                            hit = true
+                        }
+                        k = k + 1
+                    }
+                    if hit {
+                        n_conf = n_conf + 1
+                    }
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    if n_conf != expected_derived_conflicts() {
+        println("FAIL: derived conflict count disagrees with mirror")
+        n_fail = n_fail + 1
+    }
+
+    // ── Summary ─────────────────────────────────────────────────────────
+    println("=== OAEI 2016 Anatomy: EL+ role-aware closure (round 9) ===")
+    println("human classes (H):")
+    println(H)
+    println("roles (NR):")
+    println(NR)
+    println("sub axioms:")
+    println(NSUB)
+    println("existential restrictions (exsub):")
+    println(NEX)
+    println("disjoint pairs:")
+    println(NDEP)
+    println("atom closure edges:")
+    println(edges)
+    println("atom-source role edges:")
+    println(nre)
+    println("total role edges (incl existential sources):")
+    println(nrtotal)
+    println("total S cells over interned universe:")
+    println(scells)
+    println("candidate mappings (M):")
+    println(M)
+    println("derived conflicts (ordered pairs, = round 7):")
+    println(n_conf)
+
+    if n_fail == 0 {
+        println("ALL PASS")
+        return 0
+    }
+    println("FAILURES:")
+    println(n_fail)
+    return 1
+}

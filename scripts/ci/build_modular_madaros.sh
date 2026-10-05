@@ -29,12 +29,33 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
+# Content-addressed cache for both stages (scripts/dev/madaros-cache.sh).
+# shellcheck source=../dev/madaros-cache.sh
+source "$ROOT_DIR/scripts/dev/madaros-cache.sh"
 
 OUT="${1:-$ROOT_DIR/artifacts/self-hosted/madaros}"
 if [[ "$OUT" == -* ]]; then
     echo "error: output path must not start with '-': $OUT" >&2
     exit 2
 fi
+
+relax_bootstrap_vmem_limit() {
+    local before after
+    before="$(ulimit -v 2>/dev/null || true)"
+    if [[ -z "$before" || "$before" == "unlimited" ]]; then
+        return 0
+    fi
+
+    ulimit -v unlimited 2>/dev/null || true
+    after="$(ulimit -v 2>/dev/null || true)"
+    if [[ "$after" == "unlimited" ]]; then
+        echo "→ relaxed VMEM limit for bootstrap build: $before -> unlimited"
+    else
+        echo "warning: could not relax VMEM limit for bootstrap build (ulimit -v=$before); old bootstrap read_file may SIGSEGV under large module imports" >&2
+    fi
+}
+
+relax_bootstrap_vmem_limit
 
 # Resolve the bootstrap ELF used to derive the source-tracking seed. It MUST be an
 # ELF — never the bin/souc wrapper (a #!-script that now routes to Madaros); the
@@ -117,7 +138,8 @@ else
     echo "  lean src:      $LEAN_SRC"
     echo "  gen seed:      $SEED"
     # One generation is sufficient — it carries the current source's features.
-    scripts/dev/souc-build-lock.sh "$BOOTSTRAP_ELF" "$LEAN_SRC" "$SEED"
+    SEED_KEY="$(madaros_seed_key "$BOOTSTRAP_ELF" "$LEAN_SRC")"
+    madaros_cache_build_locked seed "$SEED_KEY" "$SEED" "$BOOTSTRAP_ELF" "$LEAN_SRC" "$SEED"
     if [[ ! -s "$SEED" ]]; then
         echo "error: seed derivation produced no output: $SEED" >&2
         exit 1
@@ -130,8 +152,16 @@ echo "  seed:  $SEED"
 echo "  src:   $SRC"
 echo "  out:   $OUT"
 
-# Serialize heavy build via the global workspace lock.
-scripts/dev/souc-build-lock.sh "$SEED" "$SRC" "$OUT"
+# Serialize heavy build via the global workspace lock — unless this exact
+# (seed, tree) pair was already built on this pod, in which case the artifact is
+# copied out in seconds and the lock is never touched.
+# One tree snapshot for both the key and the store-time check.
+TREE_KEY="$(madaros_tree_key)"
+BUILD_KEY="$(madaros_build_key "$SEED" "$TREE_KEY")"
+echo "  key:   $BUILD_KEY"
+MADAROS_CACHE_TREE_AT_KEY="$TREE_KEY" \
+    madaros_cache_build_locked madaros "$BUILD_KEY" "$OUT" "$SEED" "$SRC" "$OUT"
+madaros_cache_prune
 
 if [[ ! -s "$OUT" ]]; then
     echo "error: modular compiler build produced no output: $OUT" >&2

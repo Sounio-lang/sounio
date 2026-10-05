@@ -30,5 +30,5 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.papers.readme
 
 ## Related
 
-- [Language Specification](../docs/spec/LANGUAGE_SPECIFICATION.md)
-- [Epistemic Computing Theory](../docs/CYBERNETICS_THEORY.md)
+- [Language Specification](../spec/LANGUAGE_SPECIFICATION.md)
+- [Epistemic Computing Theory](../architecture/CYBERNETICS_THEORY.md)

@@ -1,0 +1,35 @@
+--- a/self-hosted/ir/lower.sio
++++ b/self-hosted/ir/lower.sio
+@@ -15698,17 +15698,31 @@
+     fn expr_to_callee_name_ref(self, e: &Expr) -> Name with Mut, Panic, Div {
+         if e.kind == ExprKind::ExprIdent {
+             e.name
+         } else if e.kind == ExprKind::ExprPath {
+             // Type::method → Type_method (matches ir_mangle_method_name for impl methods).
+             // Using only the first path segment mis-resolves E::of as bare "E" (body-less).
+             let first = ir_path_first_name(e.path)
+             let last = ir_path_last_name(e.path)
+             if first.len > 0 && last.len > 0 && !ir_name_eq(first, last) {
+-                return ir_mangle_method_name(first, last)
++                let mangled = ir_mangle_method_name(first, last)
++                // Module-qualified call `m::f` (whole-module import, `use m;`):
++                // imported functions are registered under their PLAIN name `f`,
++                // and no `m_f` impl method exists. Keeping the Type_method
++                // mangling here makes lowerer_find_or_add_fn_id_mut fabricate a
++                // body-less stub named `m_f`; the call then silently targets the
++                // stub (lost &! mutations, or SIGSEGV when the stub is reached
++                // through a used return value). Only keep the mangling when a
++                // function with the mangled name actually exists (real impl
++                // method, preseeded before body lowering); otherwise resolve to
++                // the last path segment.
++                if lowerer_lookup_fn_id_by_name_ref(&self, mangled) >= 0 {
++                    return mangled
++                }
++                return last
+             }
+             first
+         } else if e.kind == ExprKind::ExprFieldAccess {
+             e.name
+         } else if e.kind == ExprKind::ExprMethodCall {
+             e.name
+         } else {

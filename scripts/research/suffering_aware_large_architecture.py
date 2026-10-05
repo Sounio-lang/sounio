@@ -114,7 +114,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 # ---------------- determinism / config --------------------------------------
-SEED = 17
+SEED = int(os.environ.get("SAN_LARGE_SEED", "17"))
 torch.manual_seed(SEED)
 np.random.seed(SEED)
 
@@ -179,7 +179,9 @@ WARMUP_AUX = os.environ.get("SAN_LARGE_WARMUP_AUX", "1") == "1"
 AUX_W = float(os.environ.get("SAN_LARGE_AUXW", "1.0"))  # probe-head loss weight
 E_PER_FLOP = 4e-12      # J/FLOP, same convention as the machine-channel benchmark
 LR = 1e-3
-BATCH = 128
+BATCH = int(os.environ.get("SAN_LARGE_BATCH", "128"))
+GRAD_ACCUM = int(os.environ.get("SAN_LARGE_GRAD_ACCUM", "1"))
+GRAD_ANALYSIS = os.environ.get("SAN_LARGE_GRAD_ANALYSIS", "0") == "1"
 
 # GPT configuration (larger transformer leg).
 GPT_DIM, GPT_HEADS = 384, 6
@@ -215,6 +217,13 @@ else:
     else:
         _DEF_TAU_RESNET, _DEF_TAU_VIT, _DEF_TAU_GPT = "0.34", "0.251", "0.165"
         _DEF_DELTA_RESNET, _DEF_DELTA_VIT, _DEF_DELTA_GPT = "0.55", "0.45", "0.31"
+    _N_TRAIN = int(os.environ.get("SAN_LARGE_N_TRAIN", "4000"))
+    _N_VAL = int(os.environ.get("SAN_LARGE_N_VAL", "1000"))
+    N_TRAIN, N_VAL = _N_TRAIN, _N_VAL
+    _EPOCHS_RESNET = int(os.environ.get("SAN_LARGE_EPOCHS_RESNET", "8"))
+    _EPOCHS_VIT = int(os.environ.get("SAN_LARGE_EPOCHS_VIT", "10"))
+    _EPOCHS_GPT = int(os.environ.get("SAN_LARGE_EPOCHS_GPT", "10"))
+    EPOCHS_RESNET, EPOCHS_VIT, EPOCHS_GPT = _EPOCHS_RESNET, _EPOCHS_VIT, _EPOCHS_GPT
     TAU_RESNET = float(os.environ.get("SAN_LARGE_TAU_RESNET", _DEF_TAU_RESNET))
     TAU_VIT = float(os.environ.get("SAN_LARGE_TAU_VIT", _DEF_TAU_VIT))
     TAU_GPT = float(os.environ.get("SAN_LARGE_TAU_GPT", _DEF_TAU_GPT))
@@ -908,84 +917,137 @@ def train_run(model, x_tr, y_tr, x_va, y_va, epochs, tau, tag, is_lm=False):
     ledger = []
     t_star = None
     g = model.g if is_lm else 0
-    for epoch in range(epochs):
-        t0 = time.time()
-        model.train()
-        model.meter = MachineMeter()
-        warmup = epoch < getattr(model, "warmup", 1)
-        use_exits = (model.kind == "san") and (not warmup)
-        # Heads train from epoch 0 only when they cannot touch the trunk
-        # (detached probes); trunk-coupled (aux) heads start at epoch 1 so
-        # the shared epoch-0 exposure (L7) is preserved.
-        detach = getattr(model, "detach_aux", False)
-        train_aux = (model.kind == "san") and (
-            use_exits or (WARMUP_AUX and (epoch >= 1 or detach)))
-        for b0 in range(0, x_tr.shape[0], BATCH):
-            idx = schedule[epoch][b0:b0 + BATCH]
-            xb, yb = x_tr[idx], y_tr[idx]
-            _, _, _, _, aux_records, final_record = model(
-                xb, train=True, use_exit_heads=use_exits, train_aux=train_aux)
+    # Gradient-analysis instrumentation: collect per-stage gradient norms
+    # after each backward pass. Hooks are registered once per run and removed
+    # at the end to avoid side effects on other runs.
+    grad_hooks = []
+    grad_stats = {f"stage_{k}": [] for k in range(model_depth(model))}
+    grad_stats["final_head"] = []
+    grad_stats["exit_heads"] = []
+
+    def _make_hook(name):
+        def hook(module, grad_input, grad_output):
+            if grad_output and grad_output[0] is not None:
+                norm = float(grad_output[0].detach().norm().item())
+                grad_stats[name].append(norm)
+        return hook
+
+    if GRAD_ANALYSIS and model.kind == "san":
+        # Trunk stages
+        if hasattr(model, "trunk"):
+            for k, stage in enumerate(model.trunk.stages):
+                for blk in stage:
+                    grad_hooks.append(blk.register_full_backward_hook(_make_hook(f"stage_{k}")))
+        # Exit heads
+        for k, head in enumerate(model.exit_heads):
+            grad_hooks.append(head.register_full_backward_hook(_make_hook("exit_heads")))
+        # Final head
+        grad_hooks.append(model.final_head.register_full_backward_hook(_make_hook("final_head")))
+
+    try:
+        for epoch in range(epochs):
+            t0 = time.time()
+            model.train()
+            model.meter = MachineMeter()
+            warmup = epoch < getattr(model, "warmup", 1)
+            use_exits = (model.kind == "san") and (not warmup)
+            # Heads train from epoch 0 only when they cannot touch the trunk
+            # (detached probes); trunk-coupled (aux) heads start at epoch 1 so
+            # the shared epoch-0 exposure (L7) is preserved.
+            detach = getattr(model, "detach_aux", False)
+            train_aux = (model.kind == "san") and (
+                use_exits or (WARMUP_AUX and (epoch >= 1 or detach)))
+            nb = 0
+            for b0 in range(0, x_tr.shape[0], BATCH):
+                idx = schedule[epoch][b0:b0 + BATCH]
+                xb, yb = x_tr[idx], y_tr[idx]
+                micro = (xb.shape[0] == BATCH)
+                _, _, _, _, aux_records, final_record = model(
+                    xb, train=True, use_exit_heads=use_exits, train_aux=train_aux)
+                if not is_lm:
+                    losses = []
+                    if final_record is not None:
+                        f_idx, f_logits = final_record
+                        losses.append(CE(f_logits, yb[f_idx]))
+                    if aux_records:
+                        losses.append(AUX_W * torch.stack(
+                            [CE(a_logits, yb[a_idx])
+                             for a_idx, a_logits in aux_records]).mean())
+                    loss = sum(losses)
+                else:
+                    yg = yb[:, -g:]
+                    losses = []
+                    if final_record is not None:
+                        f_idx, f_logits = final_record      # (a, T, V)
+                        losses.append(CE(f_logits.reshape(-1, f_logits.shape[-1]),
+                                         yb[f_idx].reshape(-1)))
+                    if aux_records:
+                        losses.append(AUX_W * torch.stack(
+                            [CE(a_logits.reshape(-1, a_logits.shape[-1]),
+                                yg[a_idx].reshape(-1))
+                             for a_idx, a_logits in aux_records]).mean())
+                    loss = sum(losses)
+                if GRAD_ACCUM > 1:
+                    loss = loss / GRAD_ACCUM
+                if nb % GRAD_ACCUM == 0:
+                    opt.zero_grad()
+                loss.backward()
+                if (nb + 1) % GRAD_ACCUM == 0 or not micro:
+                    opt.step()
+                nb += 1
+            train_flops = model.meter.flops
+            # held-out evaluation (forward only): the cohort-in-waiting
+            model.eval()
+            model.meter = MachineMeter()
+            EVAL_BATCH = int(os.environ.get("SAN_LARGE_EVAL_BATCH", "512"))
+            with torch.no_grad():
+                vlogits_chunks = []
+                vdepth_chunks = []
+                for e0 in range(0, x_va.shape[0], EVAL_BATCH):
+                    e1 = e0 + EVAL_BATCH
+                    xb = x_va[e0:e1]
+                    l, d, _, _, _, _ = model(xb, train=False, use_exit_heads=use_exits)
+                    vlogits_chunks.append(l)
+                    vdepth_chunks.append(d)
+                vlogits = torch.cat(vlogits_chunks, dim=0)
+                vdepth = torch.cat(vdepth_chunks, dim=0)
+            eval_flops = model.meter.flops
             if not is_lm:
-                losses = []
-                if final_record is not None:
-                    f_idx, f_logits = final_record
-                    losses.append(CE(f_logits, yb[f_idx]))
-                if aux_records:
-                    losses.append(AUX_W * torch.stack(
-                        [CE(a_logits, yb[a_idx])
-                         for a_idx, a_logits in aux_records]).mean())
-                loss = sum(losses)
+                pred = vlogits.argmax(dim=1)
+                acc = float((pred == y_va).float().mean().item())
+                harm = harm_of(pred, y_va)
             else:
-                yg = yb[:, -g:]
-                losses = []
-                if final_record is not None:
-                    f_idx, f_logits = final_record      # (a, T, V)
-                    losses.append(CE(f_logits.reshape(-1, f_logits.shape[-1]),
-                                     yb[f_idx].reshape(-1)))
-                if aux_records:
-                    losses.append(AUX_W * torch.stack(
-                        [CE(a_logits.reshape(-1, a_logits.shape[-1]),
-                            yg[a_idx].reshape(-1))
-                         for a_idx, a_logits in aux_records]).mean())
-                loss = sum(losses)
-            opt.zero_grad()
-            loss.backward()
-            opt.step()
-        train_flops = model.meter.flops
-        # held-out evaluation (forward only): the cohort-in-waiting
-        model.eval()
-        model.meter = MachineMeter()
-        with torch.no_grad():
-            vlogits, vdepth, _, _, _, _ = model(
-                x_va, train=False, use_exit_heads=use_exits)
-        eval_flops = model.meter.flops
-        if not is_lm:
-            pred = vlogits.argmax(dim=1)
-            acc = float((pred == y_va).float().mean().item())
-            harm = harm_of(pred, y_va)
-        else:
-            yg = y_va[:, -g:]
-            pred = vlogits.argmax(dim=-1)               # (n, G)
-            acc = float((pred == yg).float().mean().item())
-            harm = float(HARM_LM[yg.reshape(-1), pred.reshape(-1)].mean().item())
-        exit_frac = float((vdepth < model_depth(model)).float().mean().item())
-        # Feasibility is a property of the DEPLOYED (gated) model: for SAN it
-        # only counts once the gates are active (post-warmup). Counting an
-        # ungated warmup epoch would freeze on a model that is never shipped.
-        gates_active = use_exits or model.kind != "san"
-        feasible = (acc >= tau) and gates_active
-        if feasible and t_star is None:
-            t_star = epoch
-        ledger.append({
-            "epoch": epoch, "flops": train_flops + eval_flops,
-            "acc": acc, "harm": harm, "exit_frac": exit_frac,
-            "feasible": feasible,
-        })
-        print(f"    [{tag}] epoch={epoch} acc={acc:.4f} harm={harm:.3f} "
-              f"exit={exit_frac:.3f} flops={(train_flops + eval_flops) / 1e9:.2f}GF "
-              f"({time.time() - t0:.0f}s)", flush=True)
-        if model.kind in ("san", "earlystop") and t_star is not None:
-            break  # freeze-on-green: gratuitous suffering is exactly zero
+                yg = y_va[:, -g:]
+                pred = vlogits.argmax(dim=-1)               # (n, G)
+                acc = float((pred == yg).float().mean().item())
+                harm = float(HARM_LM[yg.reshape(-1), pred.reshape(-1)].mean().item())
+            exit_frac = float((vdepth < model_depth(model)).float().mean().item())
+            # Feasibility is a property of the DEPLOYED (gated) model: for SAN it
+            # only counts once the gates are active (post-warmup). Counting an
+            # ungated warmup epoch would freeze on a model that is never shipped.
+            gates_active = use_exits or model.kind != "san"
+            feasible = (acc >= tau) and gates_active
+            if feasible and t_star is None:
+                t_star = epoch
+            ledger.append({
+                "epoch": epoch, "flops": train_flops + eval_flops,
+                "acc": acc, "harm": harm, "exit_frac": exit_frac,
+                "feasible": feasible,
+            })
+            if GRAD_ANALYSIS and model.kind == "san":
+                stage_norms = {k: float(np.mean(v)) if v else 0.0
+                               for k, v in grad_stats.items() if k.startswith("stage_")}
+                exit_norm = float(np.mean(grad_stats["exit_heads"])) if grad_stats["exit_heads"] else 0.0
+                final_norm = float(np.mean(grad_stats["final_head"])) if grad_stats["final_head"] else 0.0
+                print(f"    [{tag}] grad: stages={stage_norms} exit_heads={exit_norm:.4f} final={final_norm:.4f}", flush=True)
+            print(f"    [{tag}] epoch={epoch} acc={acc:.4f} harm={harm:.3f} "
+                  f"exit={exit_frac:.3f} flops={(train_flops + eval_flops) / 1e9:.2f}GF "
+                  f"({time.time() - t0:.0f}s)", flush=True)
+            if model.kind in ("san", "earlystop") and t_star is not None:
+                break  # freeze-on-green: gratuitous suffering is exactly zero
+    finally:
+        for h in grad_hooks:
+            h.remove()
     return model, ledger, t_star
 
 
@@ -1247,6 +1309,7 @@ def main():
           "no clinical claim; not medical guidance")
     print("note=no_consciousness_claim (machine channel is an operational burden proxy)")
     print(f"config: n_train={N_TRAIN} n_val={N_VAL} batch={BATCH} "
+          f"grad_accum={GRAD_ACCUM} "
           f"epochs=({EPOCHS_RESNET},{EPOCHS_VIT},{EPOCHS_GPT}) "
           f"tau=({TAU_RESNET},{TAU_VIT},{TAU_GPT}) "
           f"delta=({DELTA_RESNET},{DELTA_VIT},{DELTA_GPT}) "

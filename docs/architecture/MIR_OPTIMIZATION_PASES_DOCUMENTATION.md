@@ -13,11 +13,64 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.architecture.m
 > This page is preserved for lineage. Start at [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md) and [docs index](../README.md) for the current canonical surface for this topic.
 <!-- docs:status-note:end -->
 
-# MIR Optimization Passes - Technical Documentation
+# MIR Optimization Passes - Historical Documentation
+
+> **Status: historical (retired Rust/Cranelift backend).**
+> The Rust-implemented MIR optimizer pipeline described below — `pub trait MIRPass`,
+> `MirModule`/`MirFunction`, the `PassManager`, every `compiler/src/mir/optimization/*.rs`
+> pass, and the `Cranelift` backend shown in the pipeline diagram — no longer
+> exists in the tree. The compiler was rebuilt self-hosted in Sounio
+> (`self-hosted/compiler/`, `stdlib/compiler/lib.sio`) as part of the
+> `rustless` cutover (see `docs/implementation/RUSTLESS_COMPLETE.md`,
+> `docs/implementation/RUSTLESS_CUTOVER.md`). Do not use the API surface
+> in this file as a guide to current behavior; it is preserved verbatim
+> for lineage. For the current canonical surface, see
+> [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md),
+> [Docs Index](../README.md), and
+> [Compiler Maturity Blueprint](compiler-maturity-blueprint.md).
+
+## Lineage Summary
+
+This page preserves the design notes that the original Rust-based MIR
+optimizer was written against (Sounio ≤ v0.93.0). The pipeline it
+describes — HLIR → MIR → optimizer passes → Cranelift codegen — has
+been superseded. Historical code paths, file references, and Rust
+snippets below are kept for traceability of the migration and the
+prior `topic-registry.v1.json` entry
+`repo.docs.architecture.mir-optimization-pases-documentation`.
+
+## What This Document Used to Describe
+
+The sections that follow are the original technical documentation,
+retained without code updates. All Rust types, file paths
+(`compiler/src/mir/optimization/*.rs`), trait signatures, optimization
+pass names, and the Cranelift backend reference the retired
+implementation.
+
+For the topics each pass historically covered, the current equivalents live in:
+
+- HLIR lowering: `self-hosted/compiler/lean_frontend.sio` and the
+  surrounding `self-hosted/compiler/` corpus.
+- Epistemic semantics: `docs/architecture/CYBERNETICS_THEORY.md`,
+  `docs/architecture/CYBERNETICS_LAYER_2.md`.
+- Compilation pipeline: `docs/architecture/compiler-maturity-blueprint.md`.
+- MIR strategy and literature review: `docs/architecture/MIR_OPTIMIZATION_STRATEGY.md`
+  (also historical).
+
+## Original (Historical) Documentation
+
+The body below is preserved verbatim from the pre-`rustless` tree so
+that contributors tracing a design decision or benchmark can follow
+the lineage without reaching into git history.
 
 ## Overview
 
-This document provides comprehensive technical documentation for the MIR (Mid-level Intermediate Representation) optimization passes implemented in the Sounio compiler. The optimization pipeline provides a modular, extensible framework for improving generated code quality through various analysis and transformation passes.
+This document originally provided comprehensive technical
+documentation for the MIR (Mid-level Intermediate Representation)
+optimization passes implemented in the Sounio compiler. The
+optimization pipeline provided a modular, extensible framework for
+improving generated code quality through various analysis and
+transformation passes.
 
 ## Architecture
 
@@ -27,7 +80,11 @@ This document provides comprehensive technical documentation for the MIR (Mid-le
 HLIR → MIR → [Optimizer] → Cranelift → Native Code
 ```
 
-The optimization pipeline operates on MIR, which provides:
+> The pipeline above is the **historical** Rust + Cranelift pipeline.
+> The current self-hosted compiler does not use Cranelift; see the
+> Status note at the top of this file.
+
+The historical optimization pipeline operated on MIR, which provided:
 
 - **SSA Form**: Single Static Assignment representation for register allocation
 - **Basic Blocks**: Explicit control flow with blocks and terminators
@@ -36,7 +93,7 @@ The optimization pipeline operates on MIR, which provides:
 
 ### Pass Manager System
 
-The optimization framework is built around a trait-based system:
+The historical optimization framework was built around a trait-based system:
 
 ```rust
 pub trait MIRPass {
@@ -504,7 +561,7 @@ impl MIRPass for MyOptimization {
 }
 ```
 
-1. **Register in PassManager**
+2. **Register in PassManager**
 
 ```rust
 // In compiler/src/mir/optimization/mod.rs
@@ -516,7 +573,7 @@ match self.level {
 }
 ```
 
-1. **Add Tests**
+3. **Add Tests**
 
 ```rust
 #[cfg(test)]
@@ -631,4 +688,4 @@ let duration = start.elapsed();
 
 ---
 
-*This documentation covers the MIR optimization pipeline as of Sounio v0.93.0. For the most current implementation details, refer to the source code in `compiler/src/mir/`.*
+*This documentation is preserved for lineage; it covers the historical Rust-based MIR optimizer pipeline (Sounio ≤ v0.93.0). For the current compiler, start at `self-hosted/compiler/` and `stdlib/compiler/lib.sio`, and consult the [Docs Authority Matrix](../governance/DOCS_AUTHORITY_MATRIX.md).*

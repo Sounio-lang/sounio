@@ -29,14 +29,14 @@ CLAIM_FILE = 'stdlib/epistemic/zero_encounter_pipeline_claim.sio'
 CLAIM_NAME = 'garden_zero_encounter_pipeline'
 WITNESSES = [
     'stdlib/epistemic/zero_event.sio',
-    'tests/known_failures/zero_provenance_native_v2_probe.sio',
+    'tests/run-pass/zero_provenance_native_v2_combined.sio',
 ]
 GATES = [
     'scripts/ci/zero_event_gate.sh',
     'scripts/ci/zero_provenance_witness_gate.sh',
     'scripts/ci/zero_event_native_v2_matrix.sh',
 ]
-PROBE = 'tests/known_failures/zero_provenance_native_v2_probe.sio'
+PROBE = 'tests/run-pass/zero_provenance_native_v2_combined.sio'
 PROBE_MARKER = 'ZERO_PROVENANCE PASS'
 GARDEN_LABELS = ['Garden', 'Hypothesis', 'Executable', 'Claim-ready']
 

@@ -1,0 +1,184 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+// Consistent ontology evolution — MINIMAL repair against MULTIPLE
+// conflicting partners (miniature).
+//
+// Frontier: consistent-ontology-evolution (see FRONTIER.md)
+//
+// This prototype closes the gap left by version_chain_removal.sio: there,
+// the rejected candidate had a UNIQUE conflicting partner; here the
+// candidate axiom 4 contradicts TWO established axioms (1 and 3). Because
+// each partner independently blocks the candidate, admitting 4 forces the
+// removal of BOTH partners — the removal set is uniquely determined
+// (necessity). The only real choice is binary, made on epistemic mass:
+//
+//   ADMIT(a)  — remove all partners, add a; contested mass kept = conf(a)
+//   REJECT(a) — keep the version; contested mass kept = sum of partner
+//               confidences (mass convention: SUM, not max)
+//
+//   decide: ADMIT iff conf(a) > sum(partners); tie would REJECT.
+//
+// The companion formal/OntologyMinimalRepair.lean proves: admit_succeeds
+// (removing all partners unblocks a, result consistent), reject_consistent,
+// decide_optimal, and the necessity direction (removing all partners is
+// the UNIQUE minimal removal set).
+//
+// Scenario: version {1, 2, 3} with conf(1) = 0.40, conf(3) = 0.40.
+//   Branch 1: conf(4) = 0.90 > 0.80  -> ADMIT: remove 1 and 3, add 4.
+//   Branch 2: conf(4) = 0.30 < 0.80  -> REJECT: version unchanged.
+//   Necessity: removing only ONE partner still blocks the candidate.
+//
+// NOTE: contracts are runtime assertions (Madaros does not yet parse
+// `where` refinements); arrays use splat initialisation and parallel
+// primitive arrays.
+
+fn conflicts(a: i64, b: i64) -> bool {
+    // Candidate axiom 4 contradicts established axioms 1 AND 3 (symmetric).
+    if a == 4 && b == 1 { return true }
+    if a == 1 && b == 4 { return true }
+    if a == 4 && b == 3 { return true }
+    if a == 3 && b == 4 { return true }
+    return false
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var n_fail = 0
+
+    // Axiom ids 0..6; confidences in [0, 1] (mass = confidence).
+    var conf: [f64; 7] = [0.0; 7]
+    conf[1] = 0.40
+    conf[2] = 0.70
+    conf[3] = 0.40
+
+    // Current version: {1, 2, 3} active.
+    var active: [bool; 7] = [false; 7]
+    active[1] = true
+    active[2] = true
+    active[3] = true
+
+    let a: i64 = 4
+
+    // ── Partner set + summed partner mass ───────────────────────────────
+    var is_partner: [bool; 7] = [false; 7]
+    var partner_mass = 0.0
+    var n_partners: i64 = 0
+    var x: i64 = 0
+    while x < 7 {
+        if active[x] {
+            if conflicts(a, x) {
+                is_partner[x] = true
+                partner_mass = partner_mass + conf[x]
+                n_partners = n_partners + 1
+            }
+        }
+        x = x + 1
+    }
+
+    // Exactly two partners: axioms 1 and 3; summed mass 0.80.
+    if n_partners != 2 { println("FAIL: expected exactly 2 partners"); n_fail = n_fail + 1 }
+    if !is_partner[1] { println("FAIL: axiom 1 should be a partner"); n_fail = n_fail + 1 }
+    if !is_partner[3] { println("FAIL: axiom 3 should be a partner"); n_fail = n_fail + 1 }
+    if is_partner[2] { println("FAIL: axiom 2 must not be a partner"); n_fail = n_fail + 1 }
+    if partner_mass < 0.79 { println("FAIL: partner mass wrong"); n_fail = n_fail + 1 }
+    if partner_mass > 0.81 { println("FAIL: partner mass wrong"); n_fail = n_fail + 1 }
+
+    // ── Necessity: removing only ONE partner still blocks the candidate ─
+    // Excise only partner 3 (hypothetically) and re-test the guard.
+    var blocked = false
+    x = 0
+    while x < 7 {
+        if active[x] {
+            if x != 3 {
+                if conflicts(a, x) {
+                    blocked = true
+                }
+            }
+        }
+        x = x + 1
+    }
+    if !blocked { println("FAIL: removing only partner 3 should still block a"); n_fail = n_fail + 1 }
+
+    // ── Branch 1: conf(a) = 0.90 > 0.80 -> ADMIT ────────────────────────
+    conf[4] = 0.90
+    if conf[a] > partner_mass {
+        // ADMIT: remove ALL partners, then add the candidate.
+        x = 0
+        while x < 7 {
+            if is_partner[x] {
+                active[x] = false
+            }
+            x = x + 1
+        }
+        active[a] = true
+    } else {
+        println("FAIL: branch 1 should admit")
+        n_fail = n_fail + 1
+    }
+
+    // Post-admit state: exactly {2, 4} active.
+    if active[1]  { println("FAIL: partner 1 should be removed"); n_fail = n_fail + 1 }
+    if !active[2] { println("FAIL: axiom 2 must survive"); n_fail = n_fail + 1 }
+    if active[3]  { println("FAIL: partner 3 should be removed"); n_fail = n_fail + 1 }
+    if !active[4] { println("FAIL: candidate 4 should be admitted"); n_fail = n_fail + 1 }
+
+    // Consistency of the admitted version (all active pairs conflict-free).
+    var i: i64 = 0
+    while i < 7 {
+        var j: i64 = i + 1
+        while j < 7 {
+            if active[i] && active[j] {
+                if conflicts(i, j) {
+                    println("FAIL: admitted version inconsistent")
+                    n_fail = n_fail + 1
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    // ── Branch 2: conf(a) = 0.30 < 0.80 -> REJECT ───────────────────────
+    // Restore the original version {1, 2, 3} and lower the candidate mass.
+    active[1] = true
+    active[2] = true
+    active[3] = true
+    active[4] = false
+    conf[4] = 0.30
+
+    if conf[a] > partner_mass {
+        println("FAIL: branch 2 should reject")
+        n_fail = n_fail + 1
+    } else {
+        // REJECT: keep the version unchanged (no partners removed, no add).
+    }
+
+    // Post-reject state: version exactly {1, 2, 3}, candidate absent.
+    if !active[1] { println("FAIL: reject must keep axiom 1"); n_fail = n_fail + 1 }
+    if !active[2] { println("FAIL: reject must keep axiom 2"); n_fail = n_fail + 1 }
+    if !active[3] { println("FAIL: reject must keep axiom 3"); n_fail = n_fail + 1 }
+    if active[4]  { println("FAIL: reject must not add candidate 4"); n_fail = n_fail + 1 }
+
+    // Consistency of the rejected (unchanged) version.
+    i = 0
+    while i < 7 {
+        var j: i64 = i + 1
+        while j < 7 {
+            if active[i] && active[j] {
+                if conflicts(i, j) {
+                    println("FAIL: rejected version inconsistent")
+                    n_fail = n_fail + 1
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    if n_fail == 0 {
+        println("ALL PASS")
+        return 0
+    }
+    println("FAILURES:")
+    println(n_fail)
+    return 1
+}

@@ -242,6 +242,20 @@ cargo build --release --features gpu
 
 ## Feature Flags
 
+> **⚠️ This entire section describes the retired Rust tree — measured 2026-08-27.**
+> There is no `Cargo.toml` in this repository; the Rust crates were removed on
+> 2026-02-26 by `79acc192e1`. Every `cargo build --features …` line below, and every
+> row of the table, is a record of how the compiler used to be built, not an
+> instruction you can follow.
+>
+> Two rows are worth naming because they are quoted elsewhere as if current:
+> `jit` is marked "(default)" and **Cranelift was never compiled into any shipped
+> artifact** — `souc info` prints `[-] Cranelift JIT - rebuild with --features jit`,
+> and the binary exports no Cranelift symbol. The same holds for `llvm15/16/17`.
+>
+> To build today, see the self-hosted path at the top of this document; the shipped
+> engine is native-v2 (Madaros) per `docs/RELEASE_POLICY.md`.
+
 Sounio uses Cargo feature flags to enable optional functionality:
 
 | Feature | Description | Dependencies |
@@ -376,7 +390,7 @@ brew install cmake
 **Solution**:
 ```bash
 export SOUNIO_STDLIB_PATH=/path/to/sounio/stdlib
-souc sysroot stdlib-paths  # Verify configuration
+souc info                  # Verify configuration: the `stdlib:` line echoes the resolved path
 ```
 
 ### Build Fails with `feature X requires feature Y`
