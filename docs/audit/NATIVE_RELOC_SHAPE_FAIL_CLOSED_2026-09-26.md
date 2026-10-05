@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.native-reloc-shape-fail-closed-2026-09-26
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.native-reloc-shape-fail-closed-2026-09-26
+-->
+
 # Native relocations: patched or refused, never left at `[rip+0]` (2026-09-26)
 
 ## Defect
