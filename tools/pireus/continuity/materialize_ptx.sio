@@ -12,7 +12,32 @@ fn address_index(layout: i64, coefficient: string) with IO {
         print("    mad.lo.u32 %r7, "); print(coefficient); print(", %r2, %r1;\n")
     }
 }
-pub fn emit_lowering_ptx(stride: i64, offset: i64, load: i64, layout: i64, unroll: i64) with IO, Mut, Panic, Div {
+
+// Bilinear phase computation i^T B j mod 2 over F2^4
+fn ptx_bilinear(code: i64, x: i64, y: i64) -> i64 with Mut {
+    var s: i64 = 0
+    var i: i64 = 0
+    while i < 4 {
+        if ((x >> i) & 1) == 1 {
+            var j: i64 = 0
+            while j < 4 {
+                if ((y >> j) & 1) == 1 { s = s ^ ((code >> (i * 4 + j)) & 1) }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    s
+}
+
+// Structure coefficient with bilinear phase twist
+fn ptx_sigma_phase(code: i64, a: i64, b: i64) -> i64 with Mut, Panic, Div {
+    let base = cd_sigma(a as i32, b as i32, 4) as i64
+    if ptx_bilinear(code, a, b) == 1 { return 0 - base }
+    base
+}
+
+pub fn emit_lowering_ptx(stride: i64, offset: i64, load: i64, layout: i64, unroll: i64, phase: i64) with IO, Mut, Panic, Div {
     print(".version 9.0\n.target sm_121\n.address_size 64\n")
     print("// PIREUS material probe: f64 mul, sign mul, add; ascending j; no FMA.\n")
     print(".const .align 4 .u32 pireus_signs[16] = {")
@@ -21,7 +46,7 @@ pub fn emit_lowering_ptx(stride: i64, offset: i64, load: i64, layout: i64, unrol
         var mask: i64 = 0
         var k: i64 = 0
         while k < 16 {
-            if cd_sigma((k ^ j) as i32, j as i32, 4) < 0 { mask = mask | (1 << k) }
+            if ptx_sigma_phase(phase, (k ^ j) as i64, j as i64) < 0 { mask = mask | (1 << k) }
             k = k + 1
         }
         if j > 0 { print(",") }
@@ -53,7 +78,8 @@ pub fn emit_lowering_ptx(stride: i64, offset: i64, load: i64, layout: i64, unrol
         } else {
             print("    sub.u32 %r8, %r5, "); print_int(offset); print(";\n")
             print("    mul.lo.u32 %r8, %r8, "); print_int(inverse); print(";\n    and.b32 %r8, %r8, 15;\n")
-            print("    shfl.sync.idx.b32 %r9, %r11, %r8, 15, 65535;\n    shfl.sync.idx.b32 %r10, %r12, %r8, 15, 65535;\n    mov.b64 %fd2, {%r9,%r10};\n")
+            print("    shfl.sync.idx.b32 %r9, %r11, %r8, 15, 65535;\n    shfl.sync.idx.b32 %r10, %r12, %r8, 15, 65535;\n")
+            print("    mov.b64 %fd2, {%r9,%r10};\n")
         }
         print("    mul.rn.f64 %fd3, %fd1, %fd2;\n")
         print("    mov.u64 %rd4, pireus_signs;\n    mul.wide.u32 %rd5, %r5, 4;\n    add.u64 %rd4, %rd4, %rd5;\n    ld.const.u32 %r13, [%rd4];\n")

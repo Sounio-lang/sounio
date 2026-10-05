@@ -1,32 +1,61 @@
 //@ run-pass
 //@ expect-stdout-contains: VENLAFAXINE_XR_PGX_SMOKE_PASS
+//
+// Steady-state ODV/parent readout (75 mg XR q24h, C_avg blood ratio over the
+// 10th interval) across CYP2D6 phenotypes.
+//
+//   1. Ordering PM < IM < NM < UM at dt = 0.5 h.
+//   2. At dt = 0.5 and 0.25 h, the closed-form steady state of the same model
+//      (vfx_ss_ratio_closed_form, no integrator) lies inside the interval the
+//      run certifies from its own clamp residuals and non-periodicity
+//      (vfx_ss_ratio_lo/hi; derivation in the scenario header). Both bounds
+//      come from the run, so no tolerance is chosen here. This is the
+//      dt-convergence statement: at either dt the readout is within its
+//      certified error of the dt-independent steady state.
+//
+// Agreement with published ratios is a separate known-failure test:
+// darwin_venlafaxine_xr_odv_ratio_literature.sio.
 
 use darwin_pbpk::scenarios::venlafaxine_xr::*
-use darwin_pbpk::release::matrix_er::*
+
+fn smoke_certified(pheno: i32, dt: f64) -> bool with IO, Mut, Div, Panic {
+    let iv = vfx_ss_regimen_interval(pheno, dt)
+    let cf = vfx_ss_ratio_closed_form(pheno)
+    let lo = vfx_ss_ratio_lo(iv)
+    let hi = vfx_ss_ratio_hi(iv)
+    println("pheno, dt, ratio, closed form, lo, hi:")
+    println(pheno)
+    println(dt)
+    println(vfx_ss_ratio(iv))
+    println(cf)
+    println(lo)
+    println(hi)
+    return lo <= cf && cf <= hi
+}
 
 fn main() with Mut, Div, IO, Panic {
-    let rel = venlafaxine_xr_matrix_gohel2008()
     let dt = 0.5
-    let t_end = 120.0
+    let r_pm = vfx_ss_odv_parent_ratio(0, dt)
+    let r_im = vfx_ss_odv_parent_ratio(1, dt)
+    let r_nm = vfx_ss_odv_parent_ratio(2, dt)
+    let r_um = vfx_ss_odv_parent_ratio(3, dt)
 
-    var pm = vfx_scenario_init(0)
-    pm = vfx_integrate_to(pm, rel, 0.0, t_end, dt)
-    var nm = vfx_scenario_init(2)
-    nm = vfx_integrate_to(nm, rel, 0.0, t_end, dt)
-    var um = vfx_scenario_init(3)
-    um = vfx_integrate_to(um, rel, 0.0, t_end, dt)
-
-    let r_pm = vfx_odv_parent_ratio(pm)
-    let r_nm = vfx_odv_parent_ratio(nm)
-    let r_um = vfx_odv_parent_ratio(um)
-
-    if !(r_pm < r_nm && r_nm < r_um) {
+    if !(r_pm < r_im && r_im < r_nm && r_nm < r_um) {
         println("FAIL: CYP2D6 ordering")
         return
     }
-    if r_um < 2.0 {
-        println("FAIL: UM ratio")
-        return
+
+    var ph: i32 = 0
+    while ph < 4 {
+        if !smoke_certified(ph, dt) {
+            println("FAIL: closed form outside certified interval at dt = 0.5")
+            return
+        }
+        if !smoke_certified(ph, 0.5 * dt) {
+            println("FAIL: closed form outside certified interval at dt = 0.25")
+            return
+        }
+        ph = ph + 1
     }
     println("VENLAFAXINE_XR_PGX_SMOKE_PASS")
 }

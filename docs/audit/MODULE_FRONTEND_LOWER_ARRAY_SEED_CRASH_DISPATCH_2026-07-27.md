@@ -237,8 +237,7 @@ mitigated on the caller side without a root cause:**
   force `SOUNIO_SOUC_ENGINE=lean_single` for affected code — i.e. avoid
   Madaros for multi-module/f64-heavy programs entirely, rather than raise
   the stack limit.
-- [`docs/handoff/particle_exp123_madaros_lower_array_segv_2026-07-25.md`](../handoff/particle_exp123_madaros_lower_array_segv_2026-07-25.md)
-  (`BLK-20260725-madaros-exp123-lower-array-segv`) — "SEGV at `lower_array:
+- `BLK-20260725-madaros-exp123-lower-array-segv` — "SEGV at `lower_array:
   seed_begin`" on the EXP123 particle-physics vertical, closed only by
   **splitting the source file and rewriting call sites** to shrink the IR —
   a mitigation on the caller side (smaller programs accumulate a shallower

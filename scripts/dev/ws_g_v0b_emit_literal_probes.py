@@ -9,8 +9,8 @@ Writes:
   tests/run-pass/f256_v0b_literal_forms.sio
 
 Rules:
-  - Embed every source_literal that does not require unary minus (Sounio has
-    no unary `-`; those rows are recorded as limb-oracle-only).
+  - Embed every source_literal without a leading `-` (rows with a leading `-`
+    are recorded as limb-oracle-only, not emitted as source literals).
   - MUST embed every double_rounds_differs=true row that is embeddable as
     source (catches widen-via-f64 shortcuts).
   - expected.limbs are emitted as i64 arrays (LSW-first) — external oracle
@@ -203,10 +203,10 @@ def emit_probe(
 
     lines.append("")
     lines.append(
-        "    // Unary-minus corpus rows cannot be spelled as source literals"
+        "    // Corpus rows with a leading `-` are not emitted as source literals"
     )
     lines.append(
-        "    // (Sounio has no unary minus). Oracle limb tables above still"
+        "    // (they stay limb-oracle-only). Oracle limb tables above still"
     )
     lines.append(
         "    // carry expected/via_f64 for those ids — payload path only."
