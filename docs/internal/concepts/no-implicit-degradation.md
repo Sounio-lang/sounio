@@ -49,7 +49,7 @@ the point of loss; absence of an act is the gap this table exists to expose.
 | Uncertainty restored without measuring | `attest(v, uncertainty:, because:)` | decided, unimplemented |
 | Origins of different classes combined | `misturar(a, b, because:)` | decided, unimplemented |
 | Exact result narrowed to floating point | — | `SOUNIO-EXACTNESS` states the invariant; no act named |
-| Precision narrowed (`f256` → `f64`) | — | **no act** |
+| Precision narrowed (`f256` → `f64`) | `narrow(v, to:, because:)`, always, over epistemic and exact values | decided 2026-08-19; see `SOUNIO-PRECISION-PRESERVATION` |
 | Independence assumed where a common ancestor exists | — | **no act**; see `SOUNIO-PROVENANCE` |
 | Evaluation outside the validated domain | — | **no act** |
 | A computed value presented as measured | — | **no act**; the class distinction exists in `ProvEntity`, unenforced |

@@ -2,7 +2,7 @@
 topic_id: repo.docs.llm-guide.error-catalog
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
+last_validated: 2026-08-26
 validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.llm-guide.error-catalog
 -->
@@ -220,28 +220,6 @@ The only exception: `Knowledge<T>` is a built-in generic — use it as-is.
 
 ---
 
-## E09 — Bit shift without `u8` operand
-
-**Symptom:** Type error on shift expression.
-
-**Error pattern:**
-```
-error: shift amount must be u8
-```
-
-**Fix:**
-```sio
-// ✗ WRONG
-let high = byte >> 4
-let low = byte & 15
-
-// ✓ CORRECT
-let high = byte >> 4u8
-let low = byte & 15u8
-```
-
----
-
 ## E10 — Array mutation doesn't propagate (interpreter)
 
 **Symptom:** Values written to `&![T; N]` inside a function are invisible to the caller.
@@ -408,6 +386,49 @@ Codes the compiler *can* emit in `error[Exxxx]:` format. Note: there is **no** `
 
 > **⚠️ Enforcement reality — verified 2026-07-11 against the default `bin/souc` (Madaros).** The default compiler is **more permissive** than this table implies; several listed codes do **not** currently fire under `souc check` (the "wrong" example compiles clean). Verified non-firing: **E035** (missing IO/Div/Observe effect — effects are not enforced under `check`), **E040/E041/E042/E043** (Rust `let mut` / `&mut` / `#[...]` / `ident!()` — these surface as a bare `parse error` or `check: OK`, not a coded compat error), **E201–E207** (the `ZD` capability family — unenforced), **E208/E209** (refinement predicates — `Pos`/`Prob` treated nominally; the predicate is not evaluated), **E213** (tuple-destructure arity), **E216** (recursive struct type), **E224** (unreadable/dead import — silently ignored). Wrong code numbers: an arity mismatch surfaces as **E010** (not E006); a tail/return-type mismatch as **E008** (not E218). Confirmed firing: E001, E010, E170, E171. `check` stops before codegen, so codegen/linker codes (E007, E217–E223) are not reachable via `check`. Treat this table as the code *namespace*, not a guarantee that every guard is wired. (Note: the `lean_single` seed engine is stricter and rejects some of the above — but agents use the default Madaros.)
 
+> **⚠️ One number, two meanings — measured 2026-08-26 (#2180).** This namespace has
+> **two owners**. `lean_single` (the CI oracle and the seed) and `check.sio` (the
+> Madaros checker) both emit `error[E<N>]`, and for the fifteen codes below they
+> emit it for **different diagnostics**. The table above documents the
+> `lean_single` identity in every case; `explanations/E<N>.md` explains that one.
+> If you saw the code come out of the default `bin/souc`, the right-hand column is
+> what you actually hit, and the explanation file will not describe it.
+>
+> This happened mechanically, not carelessly: until #2180 `lean_single` printed 42
+> of its diagnostics as a bare `error: <text>` with no number, so a survey taken
+> from inside `check.sio` saw those numbers as free. It now prints 41 of them,
+> and `scripts/ci/diagnostic_identity_gate.sh` surveys both engines, so the next
+> re-allocation collides visibly instead of silently. Which identity keeps each
+> number is a separate decision, per code, and is not yet made.
+>
+| Code | `lean_single` emits (documented above) | `check.sio` / Madaros emits |
+|------|----------------------------------------|------------------------------|
+| E006 | arity mismatch | conditions must be of type `bool` |
+| E007 | too many local variables in function | branches have incompatible types |
+| E008 | too many globals | return value does not match the declared return type |
+| E036 | `Unobserved<T>` crosses the observation boundary without `with Observe` | confidence bound is not tight enough |
+| E040 | Rust `let mut` — use `var` | linear value must be used |
+| E041 | Rust `&mut` — use `&!` | ontology subsumption could not be verified |
+| E042 | Rust attribute `#[...]` not valid in Sounio | value does not satisfy the refinement predicate |
+| E043 | Rust macro `ident!(...)` not valid in Sounio | incompatible unit dimensions in conversion |
+| E067 | potential confounding | causal query is non-identifiable (no valid adjustment set) |
+| E080 | `Deterministic` function declares an IO effect | contest metadata is incomplete for witness projection |
+| E208 | refinement type violation (integer) | ZD locus is not a well-formed sedenion pair `eIeJ` |
+| E217 | invalid function body span | f128/f256 value conversion is not implemented; wide-float casts fail closed |
+| E218 | tail type mismatch | f128/f256 is reserved for compiler-owned format identity |
+| E219 | function pass mismatch | call to an `extern "C"` function |
+
+> **E219 is the one exception, and it is instructive.** `lean_single` does NOT
+> print its tag for `function pass mismatch`, because
+> `scripts/ci/e219_engine_oracle_gate.sh` asserts the seed must not spell E219 at
+> all: that oracle scores an engine SPLIT in which E219 is a Madaros judgment
+> about an unimplemented `extern "C"` builtin, and it says outright that a
+> cosmetic E219 on the seed "is a fail, not a close. A real seed refuse is also a
+> fail — update the theorem, do not silence the gate." So the catalogue and that
+> gate disagree about who owns E219. Tagging the seat forced the disagreement
+> into the open; resolving it is a decision about the theorem, not an edit.
+| E221 | no main | this math function is bound for typechecking but the native backend cannot emit it |
+
 | Code | Component | Severity | Gloss | Explanation |
 |------|-----------|----------|-------|-------------|
 | E000 | legacy | error | Unclassified error (legacy — no code assigned) | — |
@@ -426,6 +447,9 @@ Codes the compiler *can* emit in `error[Exxxx]:` format. Note: there is **no** `
 | E072 | type-checker/kernel | error | Kernel function must return unit `()` | [E072.md](explanations/E072.md) |
 | E170 | type-checker/epistemic | error | `.value` on `Knowledge<T>` requires `with Epistemic` | [E170.md](explanations/E170.md) |
 | E171 | type-checker/epistemic | error | Cannot cast epistemic type to its inner type | [E171.md](explanations/E171.md) |
+| E200 | lean_single/resolve | error | Undefined identifier | — |
+| E178 | type-checker/epistemic | error | noise-source capacity exceeded: more independent measurement sources than the noise-symbol domain can represent | — |
+| E179 | type-checker/epistemic | error | noise-set interning table exhausted: too many distinct source-sets in one checker run | — |
 | E201 | type-checker/zero-divisor | error | `ExactlyPrivate<T>` requires `with ZD` | [E201.md](explanations/E201.md) |
 | E202 | type-checker/zero-divisor | error | `Editable<T>` requires `with ZD` | [E202.md](explanations/E202.md) |
 | E203 | type-checker/zero-divisor | error | `CapabilityGated<T>` requires `with ZD` | [E203.md](explanations/E203.md) |
@@ -454,3 +478,27 @@ Codes the compiler *can* emit in `error[Exxxx]:` format. Note: there is **no** `
 | E226 | import | error | import path table full | [E226.md](explanations/E226.md) |
 | E227 | import | error | import too large for SRC buffer | [E227.md](explanations/E227.md) |
 | E228 | import | error | import copy truncated | [E228.md](explanations/E228.md) |
+| E229 | lexer | error | source exceeds lexer byte buffer, or token table full (fail-closed) | [E229.md](explanations/E229.md) |
+| E230 | type-checker/epistemic | error | independence-assuming operation over correlated uncertainty | — |
+| E232 | type-checker/struct | error | the same array local initialises two fields | — |
+| E236 | type-checker/epistemic | error | binary operation on Knowledge values reuses a correlated binding; independence is not assumed (add `with Correlated`) | — |
+| E244 | type-checker/epistemic | error | Knowledge provenance boundary mismatch: the argument's provenance cannot satisfy the parameter's requirement (trusted classes: Source, Literature, Measured) | — |
+| E245 | type-checker/epistemic | error | arithmetic between two Knowledge<T> values is not supported | — |
+| E246 | type-checker/effects | error | unknown effect, or effect dropped as a ninth slot | — |
+| E247 | type-checker/zero-divisor | error | ZD locus is not a well-formed sedenion pair | [E247.md](explanations/E247.md) |
+| E248 | type-checker/numeric | error | f128/f256 value conversion is not implemented | [E248.md](explanations/E248.md) |
+| E249 | parser/type-checker | error | f128/f256 is reserved for compiler-owned format identity | [E249.md](explanations/E249.md) |
+| E250 | type-checker/extern | error | call to an extern C function the native backend does not implement | [E250.md](explanations/E250.md) |
+| E251 | type-checker/epistemic | error | product variance shortcut is unsound beyond the octonions (norm not multiplicative on Sedenion/Clifford) | [E251.md](explanations/E251.md) |
+| E252 | type-checker/algebra | error | algebra declares a reassociation strategy its multiplication law cannot certify | [E252.md](explanations/E252.md) |
+| E253 | type-checker/gpu | error | kernel function must return unit type | — |
+| E254 | type-checker/causal | error | is not a node of the declared causal graph | — |
+| E255 | type-checker/causal | error | is not d-separated from the other variable given the stated conditioning set | — |
+| E256 | type-checker/causal | error | `d_separated` needs a declared causal graph and exactly two variable names, with an optional conditioning set | — |
+| E257 | type-checker/causal | error | `indep_dsep`'s argument must be a `d_separated(...)` call the compiler itself discharged, not a hand-written value | — |
+| E258 | parser | error | string literal(s) exceed Name capacity (384 bytes incl. quotes); refuses rather than silently truncating | [E258.md](explanations/E258.md) |
+| E259 | type-checker/visibility | error | struct field is private in its defining module | — |
+| E260 | lexer (lean_single) | error | compound assignment (`+=` `-=` `*=` `/=` `%=` `&=` `\|=` `^=` `<<=` `>>=`) is not supported by lean_single; write `x = x op (e)` | — |
+| E261 | type-checker/ontology | error | ontology classes are disjoint and cannot be combined by this operator (e.g. an amount of H2 added to an amount of CO2) | — |
+| E262 | type-checker/ontology | error | ontology classes are unrelated: no subsumption between them, so the operator cannot say what the result is an amount of | — |
+| E263 | type-checker/modules | error | qualified call is ambiguous: the qualifier names a `use`d module but also collides with an unrelated struct/enum method of the same name, and the compiler cannot yet guarantee which one runs | — |

@@ -1,0 +1,674 @@
+//! Linear evidence algebra for verifiable fleet transactions.
+//!
+//! `HostTrust` is the trusted-computing boundary: it admits a complete runtime
+//! assertion after the host performs its SQLite, process, hash, signature, and
+//! recipient checks. A private linear seal prevents ordinary consumers from
+//! laundering caller-chosen integers into host receipts merely by declaring
+//! the effect. Outside that sealed adapter, imports consume assertions without
+//! accepting parallel payloads, and safe promotions preserve one transaction
+//! and monotone receipt chain.
+//! The executable refinement lives in `scripts/dev/sounio_coord_fleetd.py`;
+//! the bounded safety model lives in `formal/tla/SounioFleet.tla`.
+
+pub effect HostTrust {}
+
+linear struct HostTrustSeal {
+    transaction_id: i64,
+    receipt_chain_id: i64,
+    next_receipt_id: i64,
+}
+
+linear struct HostRuntimeReceipt {
+    transaction_id: i64,
+    receipt_id: i64,
+    receipt_chain_id: i64,
+    receipt_kind: i64,
+    capability_id: i64,
+    slot_id: i64,
+    argv_digest_id: i64,
+    checkpoint_id: i64,
+    evidence_set_id: i64,
+    handoff_id: i64,
+    recipient_id: i64,
+    prepared_seq: i64,
+    anchor_receipt_id: i64,
+    anchored_through_seq: i64,
+}
+
+linear struct IssuedStartCapability {
+    transaction_id: i64,
+    receipt_chain_id: i64,
+    last_receipt_id: i64,
+    capability_id: i64,
+    slot_id: i64,
+}
+
+linear struct ConsumedStartCapability {
+    transaction_id: i64,
+    receipt_chain_id: i64,
+    last_receipt_id: i64,
+    capability_id: i64,
+    slot_id: i64,
+}
+
+linear struct HostArgvAttestation {
+    transaction_id: i64,
+    receipt_chain_id: i64,
+    receipt_id: i64,
+    capability_id: i64,
+    slot_id: i64,
+    argv_digest_id: i64,
+}
+
+linear struct AttestedActiveSlot {
+    transaction_id: i64,
+    receipt_chain_id: i64,
+    last_receipt_id: i64,
+    slot_id: i64,
+    argv_digest_id: i64,
+}
+
+linear struct HostCheckpointDraft {
+    transaction_id: i64,
+    receipt_chain_id: i64,
+    receipt_id: i64,
+    slot_id: i64,
+    argv_digest_id: i64,
+    checkpoint_id: i64,
+    evidence_set_id: i64,
+}
+
+linear struct DraftCheckpoint {
+    transaction_id: i64,
+    receipt_chain_id: i64,
+    last_receipt_id: i64,
+    slot_id: i64,
+    argv_digest_id: i64,
+    checkpoint_id: i64,
+    evidence_set_id: i64,
+}
+
+linear struct HostEvidenceVerification {
+    transaction_id: i64,
+    receipt_chain_id: i64,
+    receipt_id: i64,
+    checkpoint_id: i64,
+    evidence_set_id: i64,
+}
+
+linear struct VerifiedCheckpoint {
+    transaction_id: i64,
+    receipt_chain_id: i64,
+    last_receipt_id: i64,
+    slot_id: i64,
+    argv_digest_id: i64,
+    checkpoint_id: i64,
+    evidence_set_id: i64,
+}
+
+linear struct HostHandoffPreparation {
+    transaction_id: i64,
+    receipt_chain_id: i64,
+    receipt_id: i64,
+    checkpoint_id: i64,
+    evidence_set_id: i64,
+    handoff_id: i64,
+    recipient_id: i64,
+    prepared_seq: i64,
+}
+
+linear struct PreparedHandoff {
+    transaction_id: i64,
+    receipt_chain_id: i64,
+    last_receipt_id: i64,
+    slot_id: i64,
+    argv_digest_id: i64,
+    checkpoint_id: i64,
+    evidence_set_id: i64,
+    handoff_id: i64,
+    recipient_id: i64,
+    prepared_seq: i64,
+}
+
+linear struct HostAnchorRecipientVerification {
+    transaction_id: i64,
+    receipt_chain_id: i64,
+    receipt_id: i64,
+    handoff_id: i64,
+    recipient_id: i64,
+    anchor_receipt_id: i64,
+    anchored_through_seq: i64,
+}
+
+linear struct AcceptedHandoff {
+    transaction_id: i64,
+    receipt_chain_id: i64,
+    last_receipt_id: i64,
+    slot_id: i64,
+    argv_digest_id: i64,
+    checkpoint_id: i64,
+    evidence_set_id: i64,
+    handoff_id: i64,
+    recipient_id: i64,
+    prepared_seq: i64,
+    anchor_receipt_id: i64,
+    anchored_through_seq: i64,
+}
+
+linear struct FinalizedHandoffReceipt {
+    transaction_id: i64,
+    receipt_chain_id: i64,
+    last_receipt_id: i64,
+    slot_id: i64,
+    argv_digest_id: i64,
+    checkpoint_id: i64,
+    evidence_set_id: i64,
+    handoff_id: i64,
+    recipient_id: i64,
+    prepared_seq: i64,
+    anchor_receipt_id: i64,
+    anchored_through_seq: i64,
+}
+
+// This constructor is deliberately private. The native host adapter is the
+// only production caller; single-module gates exercise it as the TCB witness.
+fn open_host_trust_bridge(
+    transaction_id: i64,
+    receipt_chain_id: i64,
+) -> HostTrustSeal with HostTrust, Panic {
+    if transaction_id <= 0 || receipt_chain_id <= 0 {
+        panic("host trust bridge identity must be positive")
+    }
+    HostTrustSeal {
+        transaction_id: transaction_id,
+        receipt_chain_id: receipt_chain_id,
+        next_receipt_id: 1,
+    }
+}
+
+// Receipt kinds: 1 issued, 2 argv, 3 draft, 4 evidence, 5 preparation,
+// 6 anchor-recipient verification. All payload fields are in-band. Admission
+// consumes and returns the private seal, so receipt identities cannot fork.
+fn admit_runtime_receipt(
+    seal: HostTrustSeal,
+    receipt_transaction_id: i64,
+    receipt_id: i64,
+    receipt_chain: i64,
+    receipt_kind: i64,
+    capability_id: i64,
+    slot_id: i64,
+    argv_digest_id: i64,
+    checkpoint_id: i64,
+    evidence_set_id: i64,
+    handoff_id: i64,
+    recipient_id: i64,
+    prepared_seq: i64,
+    anchor_receipt_id: i64,
+    anchored_through_seq: i64,
+) -> (HostTrustSeal, HostRuntimeReceipt) with HostTrust, Panic {
+    let HostTrustSeal {
+        transaction_id,
+        receipt_chain_id,
+        next_receipt_id,
+    } = seal
+    let kind_valid =
+        (receipt_kind == 1 && capability_id > 0 && slot_id > 0 &&
+            argv_digest_id == 0 && checkpoint_id == 0 && evidence_set_id == 0 &&
+            handoff_id == 0 && recipient_id == 0 && prepared_seq == 0 &&
+            anchor_receipt_id == 0 && anchored_through_seq == 0) ||
+        (receipt_kind == 2 && capability_id > 0 && slot_id > 0 &&
+            argv_digest_id > 0 && checkpoint_id == 0 && evidence_set_id == 0 &&
+            handoff_id == 0 && recipient_id == 0 && prepared_seq == 0 &&
+            anchor_receipt_id == 0 && anchored_through_seq == 0) ||
+        (receipt_kind == 3 && capability_id > 0 && slot_id > 0 &&
+            argv_digest_id > 0 && checkpoint_id > 0 && evidence_set_id > 0 &&
+            handoff_id == 0 && recipient_id == 0 && prepared_seq == 0 &&
+            anchor_receipt_id == 0 && anchored_through_seq == 0) ||
+        (receipt_kind == 4 && capability_id > 0 && slot_id > 0 &&
+            argv_digest_id > 0 && checkpoint_id > 0 && evidence_set_id > 0 &&
+            handoff_id == 0 && recipient_id == 0 && prepared_seq == 0 &&
+            anchor_receipt_id == 0 && anchored_through_seq == 0) ||
+        (receipt_kind == 5 && capability_id > 0 && slot_id > 0 &&
+            argv_digest_id > 0 && checkpoint_id > 0 && evidence_set_id > 0 &&
+            handoff_id > 0 && recipient_id > 0 && prepared_seq > 0 &&
+            anchor_receipt_id == 0 && anchored_through_seq == 0) ||
+        (receipt_kind == 6 && capability_id > 0 && slot_id > 0 &&
+            argv_digest_id > 0 && checkpoint_id > 0 && evidence_set_id > 0 &&
+            handoff_id > 0 && recipient_id > 0 && prepared_seq > 0 &&
+            anchor_receipt_id > 0 && anchored_through_seq >= prepared_seq)
+    if receipt_transaction_id != transaction_id ||
+        receipt_chain != receipt_chain_id ||
+        receipt_id != next_receipt_id || !kind_valid {
+        panic("runtime receipt payload is not canonical for its kind")
+    }
+    let next_seal = HostTrustSeal {
+        transaction_id: transaction_id,
+        receipt_chain_id: receipt_chain_id,
+        next_receipt_id: next_receipt_id + 1,
+    }
+    let receipt = HostRuntimeReceipt {
+        transaction_id: receipt_transaction_id,
+        receipt_id: receipt_id,
+        receipt_chain_id: receipt_chain,
+        receipt_kind: receipt_kind,
+        capability_id: capability_id,
+        slot_id: slot_id,
+        argv_digest_id: argv_digest_id,
+        checkpoint_id: checkpoint_id,
+        evidence_set_id: evidence_set_id,
+        handoff_id: handoff_id,
+        recipient_id: recipient_id,
+        prepared_seq: prepared_seq,
+        anchor_receipt_id: anchor_receipt_id,
+        anchored_through_seq: anchored_through_seq,
+    }
+    (next_seal, receipt)
+}
+
+fn close_host_trust_bridge(seal: HostTrustSeal) with Panic {
+    let HostTrustSeal {
+        transaction_id,
+        receipt_chain_id,
+        next_receipt_id,
+    } = seal
+    if transaction_id <= 0 || receipt_chain_id <= 0 || next_receipt_id <= 1 {
+        panic("host trust bridge closed without an admitted receipt")
+    }
+}
+
+pub fn import_issued_start_capability(
+    receipt: HostRuntimeReceipt,
+) -> IssuedStartCapability with Panic {
+    let HostRuntimeReceipt {
+        transaction_id, receipt_id, receipt_chain_id, receipt_kind,
+        capability_id, slot_id, argv_digest_id, checkpoint_id,
+        evidence_set_id, handoff_id, recipient_id, prepared_seq,
+        anchor_receipt_id, anchored_through_seq,
+    } = receipt
+    if receipt_kind != 1 || receipt_id <= 0 || receipt_chain_id <= 0 {
+        panic("issued capability receipt has invalid provenance")
+    }
+    IssuedStartCapability {
+        transaction_id: transaction_id,
+        receipt_chain_id: receipt_chain_id,
+        last_receipt_id: receipt_id,
+        capability_id: capability_id,
+        slot_id: slot_id,
+    }
+}
+
+pub fn import_host_argv_attestation(
+    receipt: HostRuntimeReceipt,
+) -> HostArgvAttestation with Panic {
+    let HostRuntimeReceipt {
+        transaction_id, receipt_id, receipt_chain_id, receipt_kind,
+        capability_id, slot_id, argv_digest_id, checkpoint_id,
+        evidence_set_id, handoff_id, recipient_id, prepared_seq,
+        anchor_receipt_id, anchored_through_seq,
+    } = receipt
+    if receipt_kind != 2 || receipt_id <= 0 || receipt_chain_id <= 0 {
+        panic("argv receipt has invalid provenance")
+    }
+    HostArgvAttestation {
+        transaction_id: transaction_id,
+        receipt_chain_id: receipt_chain_id,
+        receipt_id: receipt_id,
+        capability_id: capability_id,
+        slot_id: slot_id,
+        argv_digest_id: argv_digest_id,
+    }
+}
+
+pub fn import_host_checkpoint_draft(
+    receipt: HostRuntimeReceipt,
+) -> HostCheckpointDraft with Panic {
+    let HostRuntimeReceipt {
+        transaction_id, receipt_id, receipt_chain_id, receipt_kind,
+        capability_id, slot_id, argv_digest_id, checkpoint_id,
+        evidence_set_id, handoff_id, recipient_id, prepared_seq,
+        anchor_receipt_id, anchored_through_seq,
+    } = receipt
+    if receipt_kind != 3 || receipt_id <= 0 || receipt_chain_id <= 0 {
+        panic("checkpoint draft receipt has invalid provenance")
+    }
+    HostCheckpointDraft {
+        transaction_id: transaction_id,
+        receipt_chain_id: receipt_chain_id,
+        receipt_id: receipt_id,
+        slot_id: slot_id,
+        argv_digest_id: argv_digest_id,
+        checkpoint_id: checkpoint_id,
+        evidence_set_id: evidence_set_id,
+    }
+}
+
+pub fn import_host_evidence_verification(
+    receipt: HostRuntimeReceipt,
+) -> HostEvidenceVerification with Panic {
+    let HostRuntimeReceipt {
+        transaction_id, receipt_id, receipt_chain_id, receipt_kind,
+        capability_id, slot_id, argv_digest_id, checkpoint_id,
+        evidence_set_id, handoff_id, recipient_id, prepared_seq,
+        anchor_receipt_id, anchored_through_seq,
+    } = receipt
+    if receipt_kind != 4 || receipt_id <= 0 || receipt_chain_id <= 0 {
+        panic("evidence receipt has invalid provenance")
+    }
+    HostEvidenceVerification {
+        transaction_id: transaction_id,
+        receipt_chain_id: receipt_chain_id,
+        receipt_id: receipt_id,
+        checkpoint_id: checkpoint_id,
+        evidence_set_id: evidence_set_id,
+    }
+}
+
+pub fn import_host_handoff_preparation(
+    receipt: HostRuntimeReceipt,
+) -> HostHandoffPreparation with Panic {
+    let HostRuntimeReceipt {
+        transaction_id, receipt_id, receipt_chain_id, receipt_kind,
+        capability_id, slot_id, argv_digest_id, checkpoint_id,
+        evidence_set_id, handoff_id, recipient_id, prepared_seq,
+        anchor_receipt_id, anchored_through_seq,
+    } = receipt
+    if receipt_kind != 5 || receipt_id <= 0 || receipt_chain_id <= 0 {
+        panic("handoff preparation receipt has invalid provenance")
+    }
+    HostHandoffPreparation {
+        transaction_id: transaction_id,
+        receipt_chain_id: receipt_chain_id,
+        receipt_id: receipt_id,
+        checkpoint_id: checkpoint_id,
+        evidence_set_id: evidence_set_id,
+        handoff_id: handoff_id,
+        recipient_id: recipient_id,
+        prepared_seq: prepared_seq,
+    }
+}
+
+pub fn import_host_anchor_recipient_verification(
+    receipt: HostRuntimeReceipt,
+) -> HostAnchorRecipientVerification with Panic {
+    let HostRuntimeReceipt {
+        transaction_id, receipt_id, receipt_chain_id, receipt_kind,
+        capability_id, slot_id, argv_digest_id, checkpoint_id,
+        evidence_set_id, handoff_id, recipient_id, prepared_seq,
+        anchor_receipt_id, anchored_through_seq,
+    } = receipt
+    if receipt_kind != 6 || receipt_id <= 0 || receipt_chain_id <= 0 {
+        panic("anchor receipt has invalid provenance")
+    }
+    HostAnchorRecipientVerification {
+        transaction_id: transaction_id,
+        receipt_chain_id: receipt_chain_id,
+        receipt_id: receipt_id,
+        handoff_id: handoff_id,
+        recipient_id: recipient_id,
+        anchor_receipt_id: anchor_receipt_id,
+        anchored_through_seq: anchored_through_seq,
+    }
+}
+
+pub fn consume_start_capability(
+    capability: IssuedStartCapability,
+) -> ConsumedStartCapability {
+    let IssuedStartCapability {
+        transaction_id, receipt_chain_id, last_receipt_id,
+        capability_id, slot_id,
+    } = capability
+    ConsumedStartCapability {
+        transaction_id: transaction_id,
+        receipt_chain_id: receipt_chain_id,
+        last_receipt_id: last_receipt_id,
+        capability_id: capability_id,
+        slot_id: slot_id,
+    }
+}
+
+pub fn attest_started_argv(
+    capability: ConsumedStartCapability,
+    attestation: HostArgvAttestation,
+) -> AttestedActiveSlot with Panic {
+    let ConsumedStartCapability {
+        transaction_id, receipt_chain_id, last_receipt_id,
+        capability_id, slot_id,
+    } = capability
+    let expected_transaction_id = transaction_id
+    let expected_chain_id = receipt_chain_id
+    let expected_capability_id = capability_id
+    let expected_slot_id = slot_id
+    let HostArgvAttestation {
+        transaction_id, receipt_chain_id, receipt_id,
+        capability_id, slot_id, argv_digest_id,
+    } = attestation
+    if expected_transaction_id != transaction_id ||
+        expected_chain_id != receipt_chain_id ||
+        expected_capability_id != capability_id ||
+        expected_slot_id != slot_id || receipt_id != last_receipt_id + 1 {
+        panic("argv attestation does not match consumed start authority")
+    }
+    AttestedActiveSlot {
+        transaction_id: expected_transaction_id,
+        receipt_chain_id: expected_chain_id,
+        last_receipt_id: receipt_id,
+        slot_id: expected_slot_id,
+        argv_digest_id: argv_digest_id,
+    }
+}
+
+pub fn draft_checkpoint(
+    slot: AttestedActiveSlot,
+    draft: HostCheckpointDraft,
+) -> DraftCheckpoint with Panic {
+    let AttestedActiveSlot {
+        transaction_id, receipt_chain_id, last_receipt_id,
+        slot_id, argv_digest_id,
+    } = slot
+    let expected_transaction_id = transaction_id
+    let expected_chain_id = receipt_chain_id
+    let expected_slot_id = slot_id
+    let expected_argv_digest_id = argv_digest_id
+    let HostCheckpointDraft {
+        transaction_id, receipt_chain_id, receipt_id, slot_id,
+        argv_digest_id, checkpoint_id, evidence_set_id,
+    } = draft
+    if expected_transaction_id != transaction_id ||
+        expected_chain_id != receipt_chain_id ||
+        expected_slot_id != slot_id ||
+        expected_argv_digest_id != argv_digest_id ||
+        receipt_id != last_receipt_id + 1 {
+        panic("checkpoint draft does not match argv-attested slot")
+    }
+    DraftCheckpoint {
+        transaction_id: expected_transaction_id,
+        receipt_chain_id: expected_chain_id,
+        last_receipt_id: receipt_id,
+        slot_id: expected_slot_id,
+        argv_digest_id: expected_argv_digest_id,
+        checkpoint_id: checkpoint_id,
+        evidence_set_id: evidence_set_id,
+    }
+}
+
+pub fn verify_checkpoint(
+    checkpoint: DraftCheckpoint,
+    verification: HostEvidenceVerification,
+) -> VerifiedCheckpoint with Panic {
+    let DraftCheckpoint {
+        transaction_id, receipt_chain_id, last_receipt_id, slot_id,
+        argv_digest_id, checkpoint_id, evidence_set_id,
+    } = checkpoint
+    let expected_transaction_id = transaction_id
+    let expected_chain_id = receipt_chain_id
+    let expected_checkpoint_id = checkpoint_id
+    let expected_evidence_set_id = evidence_set_id
+    let HostEvidenceVerification {
+        transaction_id, receipt_chain_id, receipt_id,
+        checkpoint_id, evidence_set_id,
+    } = verification
+    if expected_transaction_id != transaction_id ||
+        expected_chain_id != receipt_chain_id ||
+        expected_checkpoint_id != checkpoint_id ||
+        expected_evidence_set_id != evidence_set_id ||
+        receipt_id != last_receipt_id + 1 {
+        panic("evidence verification does not match checkpoint draft")
+    }
+    VerifiedCheckpoint {
+        transaction_id: expected_transaction_id,
+        receipt_chain_id: expected_chain_id,
+        last_receipt_id: receipt_id,
+        slot_id: slot_id,
+        argv_digest_id: argv_digest_id,
+        checkpoint_id: expected_checkpoint_id,
+        evidence_set_id: expected_evidence_set_id,
+    }
+}
+
+pub fn prepare_handoff(
+    checkpoint: VerifiedCheckpoint,
+    preparation: HostHandoffPreparation,
+) -> PreparedHandoff with Panic {
+    let VerifiedCheckpoint {
+        transaction_id, receipt_chain_id, last_receipt_id, slot_id,
+        argv_digest_id, checkpoint_id, evidence_set_id,
+    } = checkpoint
+    let expected_transaction_id = transaction_id
+    let expected_chain_id = receipt_chain_id
+    let expected_checkpoint_id = checkpoint_id
+    let expected_evidence_set_id = evidence_set_id
+    let HostHandoffPreparation {
+        transaction_id, receipt_chain_id, receipt_id, checkpoint_id,
+        evidence_set_id, handoff_id, recipient_id, prepared_seq,
+    } = preparation
+    if expected_transaction_id != transaction_id ||
+        expected_chain_id != receipt_chain_id ||
+        expected_checkpoint_id != checkpoint_id ||
+        expected_evidence_set_id != evidence_set_id ||
+        receipt_id != last_receipt_id + 1 {
+        panic("handoff preparation does not match verified checkpoint")
+    }
+    PreparedHandoff {
+        transaction_id: expected_transaction_id,
+        receipt_chain_id: expected_chain_id,
+        last_receipt_id: receipt_id,
+        slot_id: slot_id,
+        argv_digest_id: argv_digest_id,
+        checkpoint_id: expected_checkpoint_id,
+        evidence_set_id: expected_evidence_set_id,
+        handoff_id: handoff_id,
+        recipient_id: recipient_id,
+        prepared_seq: prepared_seq,
+    }
+}
+
+pub fn accept_anchored_handoff(
+    handoff: PreparedHandoff,
+    verification: HostAnchorRecipientVerification,
+) -> AcceptedHandoff with Panic {
+    let PreparedHandoff {
+        transaction_id, receipt_chain_id, last_receipt_id, slot_id,
+        argv_digest_id, checkpoint_id, evidence_set_id, handoff_id,
+        recipient_id, prepared_seq,
+    } = handoff
+    let expected_transaction_id = transaction_id
+    let expected_chain_id = receipt_chain_id
+    let expected_handoff_id = handoff_id
+    let expected_recipient_id = recipient_id
+    let HostAnchorRecipientVerification {
+        transaction_id, receipt_chain_id, receipt_id, handoff_id,
+        recipient_id, anchor_receipt_id, anchored_through_seq,
+    } = verification
+    if expected_transaction_id != transaction_id ||
+        expected_chain_id != receipt_chain_id ||
+        expected_handoff_id != handoff_id ||
+        expected_recipient_id != recipient_id ||
+        receipt_id != last_receipt_id + 1 ||
+        anchored_through_seq < prepared_seq {
+        panic("anchor or recipient verification does not match prepared handoff")
+    }
+    AcceptedHandoff {
+        transaction_id: expected_transaction_id,
+        receipt_chain_id: expected_chain_id,
+        last_receipt_id: receipt_id,
+        slot_id: slot_id,
+        argv_digest_id: argv_digest_id,
+        checkpoint_id: checkpoint_id,
+        evidence_set_id: evidence_set_id,
+        handoff_id: expected_handoff_id,
+        recipient_id: expected_recipient_id,
+        prepared_seq: prepared_seq,
+        anchor_receipt_id: anchor_receipt_id,
+        anchored_through_seq: anchored_through_seq,
+    }
+}
+
+pub fn finalize_accepted_handoff(
+    handoff: AcceptedHandoff,
+) -> FinalizedHandoffReceipt {
+    let AcceptedHandoff {
+        transaction_id, receipt_chain_id, last_receipt_id, slot_id,
+        argv_digest_id, checkpoint_id, evidence_set_id, handoff_id,
+        recipient_id, prepared_seq, anchor_receipt_id, anchored_through_seq,
+    } = handoff
+    FinalizedHandoffReceipt {
+        transaction_id: transaction_id,
+        receipt_chain_id: receipt_chain_id,
+        last_receipt_id: last_receipt_id,
+        slot_id: slot_id,
+        argv_digest_id: argv_digest_id,
+        checkpoint_id: checkpoint_id,
+        evidence_set_id: evidence_set_id,
+        handoff_id: handoff_id,
+        recipient_id: recipient_id,
+        prepared_seq: prepared_seq,
+        anchor_receipt_id: anchor_receipt_id,
+        anchored_through_seq: anchored_through_seq,
+    }
+}
+
+pub fn finalized_receipt_matches(
+    receipt: FinalizedHandoffReceipt,
+    transaction_id: i64,
+    receipt_chain_id: i64,
+    last_receipt_id: i64,
+    slot_id: i64,
+    argv_digest_id: i64,
+    checkpoint_id: i64,
+    evidence_set_id: i64,
+    handoff_id: i64,
+    recipient_id: i64,
+    prepared_seq: i64,
+    anchor_receipt_id: i64,
+    anchored_through_seq: i64,
+) -> bool {
+    let expected_transaction_id = transaction_id
+    let expected_receipt_chain_id = receipt_chain_id
+    let expected_last_receipt_id = last_receipt_id
+    let expected_slot_id = slot_id
+    let expected_argv_digest_id = argv_digest_id
+    let expected_checkpoint_id = checkpoint_id
+    let expected_evidence_set_id = evidence_set_id
+    let expected_handoff_id = handoff_id
+    let expected_recipient_id = recipient_id
+    let expected_prepared_seq = prepared_seq
+    let expected_anchor_receipt_id = anchor_receipt_id
+    let expected_anchored_through_seq = anchored_through_seq
+    let FinalizedHandoffReceipt {
+        transaction_id, receipt_chain_id, last_receipt_id, slot_id,
+        argv_digest_id, checkpoint_id, evidence_set_id, handoff_id,
+        recipient_id, prepared_seq, anchor_receipt_id, anchored_through_seq,
+    } = receipt
+    expected_transaction_id == transaction_id &&
+        expected_receipt_chain_id == receipt_chain_id &&
+        expected_last_receipt_id == last_receipt_id &&
+        expected_slot_id == slot_id &&
+        expected_argv_digest_id == argv_digest_id &&
+        expected_checkpoint_id == checkpoint_id &&
+        expected_evidence_set_id == evidence_set_id &&
+        expected_handoff_id == handoff_id &&
+        expected_recipient_id == recipient_id &&
+        expected_prepared_seq == prepared_seq &&
+        expected_anchor_receipt_id == anchor_receipt_id &&
+        expected_anchored_through_seq == anchored_through_seq
+}

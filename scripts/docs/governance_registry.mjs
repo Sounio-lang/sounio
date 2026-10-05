@@ -30,10 +30,13 @@ const ACTIVE_FEATURE_DOCS = new Set([
 ]);
 
 const ACTIVE_RESEARCH_DOCS = new Set([
+  // The design target for the language, not retired lineage.
+  'docs/research/delta_epistemic_gradual_compilation_paper.md',
   'docs/research/RESEARCH_VALIDATION_SUMMARY.md',
   'docs/research/epistemic_algebra_review.md',
   'docs/research/vancomycin-uncertainty.md',
   'docs/research/rna_cayley_dickson_confirmatory_preregistration_2026-08-09.md',
+  'docs/research/cd-tower-automorphism-freeze.md',
 ]);
 
 const WEBSITE_DOC_OVERRIDES = {
@@ -278,7 +281,7 @@ function inferAudienceFromSlug(slug) {
 }
 
 function defaultWebsiteValidation(collection, ownerAgent, websiteSlug) {
-  const commands = ['bash scripts/check_docs_registry.sh'];
+  const commands = ['bash scripts/dev/check_docs_registry.sh'];
 
   if (collection === 'docs') {
     commands.push('node website/scripts/check-docs-parity.mjs');
@@ -445,14 +448,14 @@ function inferRepoTopicDetails(relPath) {
 }
 
 function defaultRepoValidation(relPath, ownerAgent, authority) {
-  const commands = ['bash scripts/check_docs_registry.sh'];
+  const commands = ['bash scripts/dev/check_docs_registry.sh'];
 
   if (authority !== 'historical' && authority !== 'archived') {
-    commands.push('bash scripts/check_docs_consistency.sh');
+    commands.push('bash scripts/dev/check_docs_consistency.sh');
   }
 
   if (ownerAgent === 'A4' || ownerAgent === 'A5') {
-    commands.push('bash scripts/fast_gate.sh');
+    commands.push('bash scripts/dev/fast_gate.sh');
   }
 
   if (ownerAgent === 'A6' && relPath.startsWith('paper/')) {
@@ -969,6 +972,9 @@ export function formatAcceptanceReport(registry) {
   }
   lines.push(
     `- English-only website collections allowed by policy and marked in the registry: ${englishOnlyCollections.join('; ')}`
+  );
+  lines.push(
+    '- Locale coverage above measures file presence only, not translation freshness or quality. See `website/i18n/AUDIT-2026-04-20.md` (or its successor) for per-locale translation status.'
   );
 
   lines.push('', '## Evidence-Bearing Topics', '');

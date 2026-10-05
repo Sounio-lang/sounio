@@ -134,7 +134,9 @@ if [[ "$NOT_RUN" -eq 0 ]]; then
   check_grep "knowledge_ctor_checks_first_argument" \
     'let v_ty = checker_check_opt_expr_inplace\(c, first_arg\)' "$KNOWLEDGE_BODY"
   check_grep "knowledge_ctor_propagates_argument_type" \
-    'ty_knowledge\(v_ty,[[:space:]]*0\.0[[:space:]]*-[[:space:]]*1\.0\)' "$KNOWLEDGE_BODY"
+    'ty_knowledge\(v_ty,[[:space:]]*confidence\)' "$KNOWLEDGE_BODY"
+  check_grep "knowledge_ctor_preserves_literal_confidence" \
+    'let confidence = checker_enforce_knowledge_confidence_inplace\(c, e\.args, e\.span\)' "$KNOWLEDGE_BODY"
   check_absent "knowledge_ctor_must_not_pin_scalar_type" \
     'ty_knowledge\((ty_f64\(\)|ty_real\(\)|ty_real|TypeEntry::Real|\.treal)' "$KNOWLEDGE_BODY"
 

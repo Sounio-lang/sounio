@@ -9,6 +9,9 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 
 # Proof-Carrying Inference
 
+
+Status: **executable**
+
 Concept-ID: `SOUNIO-PROOF-CARRYING-INFERENCE`
 
 ## Founder Intent

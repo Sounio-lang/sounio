@@ -53,6 +53,7 @@ def main():
     exp_legacy_elf = int(sys.argv[5])
     base_addr = int(sys.argv[6])
     exp_label = int(sys.argv[7])
+    exp_rodata = int(sys.argv[8])
 
     loaded = []
     for _key, rel in SOURCES:
@@ -173,8 +174,15 @@ def main():
          cgx, "apply_relocations_bound")
 
     # rc=19 (code buffer) and rc=20 (relocations) must both exist, distinctly.
-    rc19 = r"if nc\.code_overflow \%s\s*\n\s*return 19\s*\n\s*\%s" % (LB, RB)
-    rc20 = r"if nc\.reloc_overflow \%s\s*\n\s*return 20\s*\n\s*\%s" % (LB, RB)
+    # rc19 allows a diagnostic body between the brace and the return (matching
+    # the rc22/label_overflow precedent below) -- 2026-09-02: the branch now
+    # reports code_overflow_bytes_attempted so a capacity bump is sized against
+    # a measured number instead of a guess. rc20 stays bare; no diagnostic body
+    # has been added there yet.
+    rc19 = r"if nc\.code_overflow \%s(?:.|\n)*?return 19\s*\n\s*\%s" % (LB, RB)
+    # rc20 loosened the same way and for the same reason (2026-09-02):
+    # reloc_overflow_count_attempted is now reported before returning.
+    rc20 = r"if nc\.reloc_overflow \%s(?:.|\n)*?return 20\s*\n\s*\%s" % (LB, RB)
     if not re.search(rc19, cgx):
         fail("rc19_code_overflow_check_missing")
     if not re.search(rc20, cgx):
@@ -231,6 +239,30 @@ def main():
         if not re.search(needle, legacy):
             fail(reason)
 
+    # -- 5b. NC_BIG_RODATA (flat rodata: string/constant data) -- 2026-09-03,
+    # #2393. Same shape as the code/reloc/label tiers: fixed array + accessor
+    # + true attempted-count field + a distinct fail-closed rc (23). Unlike
+    # those three, the append sites here (native_v2_rodata_append_updated_tail,
+    # nc_rodata_add_ir_instr_name, nc_rodata_add_name_value,
+    # native_v2_rodata_append_byte_into) used to bound-check the write WITHOUT
+    # ever setting an overflow flag or refusing -- silent truncation, not a
+    # capacity refusal, first measured on self-hosted/compiler/main.sio
+    # (963,478 bytes needed against a 256 KiB cap). This tier proves the fix
+    # holds together, not that runtime data stays under the new cap.
+    tier("rodata_tier",
+         only(r"^pub var NC_BIG_RODATA: \[i8; ([0-9]+)\] = \[0; ([0-9]+)\]$",
+              frame, "nc_big_rodata_decl"),
+         only(accessor("nc_flat_rodata_capacity", "pub "), frame,
+              "nc_flat_rodata_capacity_accessor"),
+         exp_rodata)
+    if not re.search(r"pub rodata_overflow_bytes_attempted: i64,", frame):
+        fail("rodata_overflow_bytes_attempted_field_missing")
+    if not re.search(r"out\.rodata_overflow_bytes_attempted = 0", frame):
+        fail("rodata_overflow_bytes_attempted_not_initialised")
+    rc23 = r"if nc\.rodata_overflow_bytes_attempted > nc_flat_rodata_capacity\(\) \%s(?:.|\n)*?return 23\s*\n\s*\%s" % (LB, RB)
+    if not re.search(rc23, cgx):
+        fail("rc23_rodata_overflow_check_missing")
+
     # -- 6. the 0x400000 ELF LOAD BASE ADDRESS must survive as a literal ---
     # This is the trap: 4194304 is BOTH the retired 4 MiB ELF capacity and the
     # ELF load address. Every remaining occurrence must be a plain argument.
@@ -252,9 +284,9 @@ def main():
             fail("elf_base_addr_unexpected_form")
 
     print("NATIVE_CAPACITY_TIERS_CHECK "
-          "code=%d reloc=%d elf=%d legacy_elf=%d label=%d base_addr_literals=%d "
-          "fail_closed=rc19/rc20/rc21/rc22 coherent=pass"
-          % (exp_code, exp_reloc, exp_elf, exp_legacy_elf, exp_label, len(occ)))
+          "code=%d reloc=%d elf=%d legacy_elf=%d label=%d rodata=%d base_addr_literals=%d "
+          "fail_closed=rc19/rc20/rc21/rc22/rc23 coherent=pass"
+          % (exp_code, exp_reloc, exp_elf, exp_legacy_elf, exp_label, exp_rodata, len(occ)))
 
 
 if __name__ == "__main__":

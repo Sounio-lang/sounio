@@ -378,16 +378,16 @@ fn sort(b: &! SortBuf) with Mut { b.data[0] = 99 }   // works correctly
 ### Bitwise
 `&`, `|`, `^`, `>>`, `<<`
 
-**Bit shift operand must be `u8`:**
+**Bit shifts take a plain integer amount** (a literal, or a variable of any integer type):
 ```sio
-let high = byte >> 4u8
-let low = byte & 15u8
+let high = byte >> 4
+let low = byte & 15
 ```
 
-### No Unary Minus
+### Unary Minus
 ```sio
-let neg = 0 - 42       // correct
-// let neg = -42        // WRONG — no unary minus
+let neg = -42          // works on literals, variables and arguments
+let flipped = -x       // no `0 - x` workaround needed
 ```
 
 ### Concatenation
@@ -432,8 +432,8 @@ print("value = ")
 For mutable string data, use fixed-size byte arrays:
 ```sio
 var name: [i8; 64] = [0; 64]
-name[0] = 72i8    // 'H'
-name[1] = 101i8   // 'e'
+name[0] = 72    // 'H'
+name[1] = 101   // 'e'
 ```
 
 ## 11. Error Handling
@@ -619,7 +619,6 @@ fn exploratory() -> i32 with Hypothesis {
 | Rust macros `assert!()` `println!()` | Never | `assert()` `println()` |
 | Closure literals `\|x\| x+1` | Blocked | Named fn refs: `let f = square` |
 | Attributes `#[test]` `#[derive]` | Never | Inline tests |
-| Unary minus `-42` | Never | `0 - 42` |
 | Integer FFI (`malloc`, etc.) | Broken in JIT | Fixed-size arrays; native binary has workaround via syscall stubs |
 | Bare `&![T;N]` mutation (interpreter) | JIT only | Struct wrapper in JIT; works in native binary |
 | Async / `spawn` / `channel` | JIT: not supported | Use native binary (`./bin/souc run`) |
@@ -632,11 +631,9 @@ Before submitting Sounio code:
 2. `&!` for mutable refs, `var` for mutable bindings
 3. Effects declared: `with IO, Mut, Div, Panic` as needed
 4. No Rust macros — use `assert()`, `println()`, `print()`
-5. Bit shifts use `u8`: `x >> 4u8`
-6. Negative numbers: `0 - x`
-7. Array index cast: `arr[i as usize]`
-8. Named fn refs for higher-order, not closures
-9. Bare array `&!` mutation: wrap in struct if interpreter
+5. Array index cast: `arr[i as usize]`
+6. Named fn refs for higher-order, not closures
+7. Bare array `&!` mutation: wrap in struct if interpreter
 
 ## 20. Real Code to Study
 

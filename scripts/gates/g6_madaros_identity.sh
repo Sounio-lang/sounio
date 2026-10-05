@@ -18,8 +18,8 @@ if [[ -z "$IDENTITY" ]]; then
   exit 1
 fi
 
-if [[ "$VERSION_OUTPUT" != *"Madaros"* && "$VERSION_OUTPUT" != *"Madares"* ]]; then
-  echo "[g6] FAIL: expected Madaros/Madares identity, got:" >&2
+if [[ "$VERSION_OUTPUT" != *"Madaros"* ]]; then
+  echo "[g6] FAIL: expected Madaros identity, got:" >&2
   printf '%s\n' "$VERSION_OUTPUT" >&2
   exit 1
 fi

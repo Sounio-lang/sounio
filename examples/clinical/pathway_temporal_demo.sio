@@ -1,0 +1,373 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// examples/clinical/pathway_temporal_demo.sio
+//
+// Chemotherapy pathway TEMPORAL VALIDATION: regimen phase orderings and
+// guideline constraints are stated as pointisable Allen interval
+// relations (before / meets / during), translated to endpoint point
+// constraints by stdlib/ontology/temporal.sio, and checked for joint
+// satisfiability by the verified EL+ engine of
+// stdlib/ontology/elplus.sio — roleComp path-consistency over the
+// point algebra, with inconsistency surfacing as a derived strict
+// self-loop before(c, c).  The numeric sequencing lane
+// (stdlib/clinical/mercyful.sio, synthetic suffering-budget scheduler)
+// validates the SEQUENTIAL SKELETON of the same pathway for budget
+// feasibility (concurrent RT is outside its representational power and
+// is numerically unvalidated — the graph is a linear chain, so RT is
+// folded into the CYC_B block's suffering field); the demo asserts
+// only that BOTH lanes independently accept the synthetic backbone,
+// and that they DISAGREE on the contradictory edit below — exactly as
+// expected, because the numeric lane is ordering-agnostic.  SMOKE DEMO
+// (unit test, not a validated scheduling service).
+//
+// CLAIMS SPLIT:
+//   * Proven: logical fidelity of the closure engine only.  The
+//     boolean closure coincides with EL+ entailment over the interned
+//     concept universe (formal/OntologyELPlusClosureComplete.lean,
+//     theorem subBPlusC_iff).  `temporal_consistent` therefore reads
+//     precisely as "the EL+-closed matrix contains no strict self-loop
+//     before(c, c)" — its identification with point-algebra
+//     UNSATISFIABILITY of the stated network rests on the cited
+//     Vilain & Kautz / van Beek results, which are NOT machine-checked
+//     here (see the temporal.sio header), so a CONSISTENT/INCONSISTENT
+//     verdict below is an engine-derived self-loop report backed by a
+//     cited theorem, not a verified satisfiability proof.
+//   * NOT established: clinical adequacy of this synthetic pathway,
+//     any guideline concordance, durations or metric constraints (the
+//     algebra is purely qualitative), and minimal-network extraction.
+//     A derived "consistent" verdict means the STATED ordering
+//     constraints are jointly satisfiable, nothing more.
+//
+// Clinical warning: synthetic pathway, synthetic suffering values.
+// This is not medical guidance, not a treatment recommendation, and
+// not a clinical decision-support tool.
+//
+// Engine: lean_single.  This demo imports stdlib/clinical/mercyful.sio,
+// and ANY program importing another module segfaults at runtime on the
+// current Madaros native lane (multi-module lowering bug, see
+// docs/audit/MADAROS_MULTIMODULE_FALLBACK_SEGFAULT_2026-06-30.md); the
+// file COMPILES under the default `bin/souc run`, but execution must go
+// through the lean_single bootstrap engine, exactly like
+// examples/clinical/ddi_elplus_demo.sio.  The EL+/temporal layers
+// themselves run under both engines.
+// Gate: bash scripts/clinical_pathway_temporal_gate.sh
+//
+// Pathway (synthetic adjuvant-style regimen; weeks in the numeric lane):
+//
+//   intervals:  SCREEN   screening / baseline workup
+//               CYC_A    first chemotherapy block
+//               REST_A   chemo-free recovery interval
+//               CYC_B    second chemotherapy block
+//               RT       radiotherapy course
+//               SURG     surgery
+//               MAINT    maintenance therapy
+//
+//   stated regimen orderings:
+//     SCREEN before CYC_A        (workup completes before treatment)
+//     CYC_A  meets  REST_A       (recovery starts when the block ends)
+//     REST_A meets  CYC_B
+//     RT     during CYC_B        (concurrent chemoradiation window)
+//     CYC_B  before SURG         (surgery only after chemo completes)
+//     SURG   meets  MAINT
+//
+//   derived guideline checks (NOT stated — must come out of the
+//   roleComp fixpoint):
+//     SCREEN before SURG, CYC_A before CYC_B, RT before SURG,
+//     CYC_A before MAINT, and NOT (MAINT before SCREEN)
+//
+//   negative case: a conflicting guideline edit adds
+//     MAINT before SCREEN
+//   which closes a strict cycle through every phase; the oracle must
+//   report INCONSISTENT and a before(c, c) self-loop must be present
+//   on the SCREEN endpoints, while the ordering-agnostic numeric
+//   scheduler still finds the pathway feasible (the temporal oracle
+//   is what rejects the edit).
+//
+//   chain-provenance regression: the same contradictory seed with
+//   nchain = 0 must report CONSISTENT — if it did not, detection would
+//   be an artifact of seeding, not of role composition.  (This is a
+//   PROVENANCE check on the derivation, not a fail-safe: a deployment
+//   must treat a disabled composition engine as UNKNOWN, never as
+//   CONSISTENT.)
+//
+// claims_not_made: CPIC/NCCN/ESMO concordance; dose/duration modeling;
+//   cohort statistics or FP/FN validation; a machine-checked
+//   instantiation of the endpoint translation at THIS network;
+//   bedside scheduling product.
+
+use ontology::elplus::{elplus_role_closure, elplus_seed, elplus_fixpoint}
+use ontology::temporal::{
+    temporal_start,
+    temporal_nb,
+    temporal_nc,
+    temporal_intern,
+    temporal_load_chains,
+    temporal_constrain,
+    temporal_interval_before,
+    temporal_edge,
+    temporal_consistent
+}
+use clinical::mercyful::{mercy_graph_new, mercy_add_state, mercy_add_edge, mercyful_schedule}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var n_fail = 0
+
+    // ── Local ids (main-local `let`s: module-level const ids referenced
+    //    from helpers miscompile on the Madaros lane — see the PGx demo
+    //    header; kept here so this file also runs under lean_single) ──
+    let TOP = 0
+    let N = 7
+    // Universe sizes come from the encoding functions, not literals, so
+    // a layout drift in ontology::temporal fails HERE, not silently.
+    let NB = temporal_nb(N)
+    let NC = temporal_nc(N)
+    if NB != 15 || NC != 43 {
+        println("FAIL: temporal universe sizes drifted from the interned layout")
+        n_fail = n_fail + 1
+    }
+    let NR = 2
+    let STRICT = 1
+    // Pointisable Allen relation codes (must mirror the TEMPORAL_REL_*
+    // constants of ontology::temporal).
+    let REL_BEFORE = 0
+    let REL_MEETS = 1
+    let REL_DURING = 4
+    // Phase (interval) ids.
+    let SCREEN = 0
+    let CYC_A = 1
+    let REST_A = 2
+    let CYC_B = 3
+    let RT = 4
+    let SURG = 5
+    let MAINT = 6
+
+    // ── Dense EL+ tables ─────────────────────────────────────────────
+    var ckind: [i64; 64] = [0; 64]
+    var carg1: [i64; 64] = [0; 64]
+    var carg2: [i64; 64] = [0; 64]
+    var exid: [i64; 512] = [0; 512]
+    var rclos: [bool; 64] = [false; 64]
+    var s: [bool; 4096] = [false; 4096]
+    var redges: [bool; 32768] = [false; 32768]
+    var ch1: [i64; 8] = [0; 8]
+    var ch2: [i64; 8] = [0; 8]
+    var ch3: [i64; 8] = [0; 8]
+
+    // Intern the 14 endpoint atoms + both existential layers, seed the
+    // role-hierarchy closure (reflexivity only — no role hierarchy in
+    // the point algebra encoding), and load the 4 point-composition
+    // chains (the endpoint-translated Allen sub-table).
+    temporal_intern(&!ckind, &!carg1, &!carg2, &!exid, N)
+    elplus_role_closure(&!rclos, NR)
+    let nchain = temporal_load_chains(&!ch1, &!ch2, &!ch3)
+    if nchain != 4 {
+        println("FAIL: temporal chain table should hold 4 chains")
+        n_fail = n_fail + 1
+    }
+    // Chain CONTENTS, not just cardinality: the point-algebra
+    // composition table leq/strict x leq/strict (roles 0 and 1).
+    if ch1[0] != 0 || ch2[0] != 0 || ch3[0] != 0 {
+        println("FAIL: chain 0 should be leq o leq <= leq")
+        n_fail = n_fail + 1
+    }
+    if ch1[1] != 0 || ch2[1] != 1 || ch3[1] != 1 {
+        println("FAIL: chain 1 should be leq o strict <= strict")
+        n_fail = n_fail + 1
+    }
+    if ch1[2] != 1 || ch2[2] != 0 || ch3[2] != 1 {
+        println("FAIL: chain 2 should be strict o leq <= strict")
+        n_fail = n_fail + 1
+    }
+    if ch1[3] != 1 || ch2[3] != 1 || ch3[3] != 1 {
+        println("FAIL: chain 3 should be strict o strict <= strict")
+        n_fail = n_fail + 1
+    }
+
+    // ══ Consistent pathway: stated orderings, then fixpoint ══════════
+    elplus_seed(&!s, NC, TOP)
+    temporal_constrain(&!redges, REL_BEFORE, SCREEN, CYC_A)
+    temporal_constrain(&!redges, REL_MEETS, CYC_A, REST_A)
+    temporal_constrain(&!redges, REL_MEETS, REST_A, CYC_B)
+    temporal_constrain(&!redges, REL_DURING, RT, CYC_B)
+    temporal_constrain(&!redges, REL_BEFORE, CYC_B, SURG)
+    temporal_constrain(&!redges, REL_MEETS, SURG, MAINT)
+    let rounds1 = elplus_fixpoint(&!s, &!redges, &ckind, &carg1, &carg2, &exid, &rclos, &ch1, &ch2, &ch3, nchain, NC, NB, NR)
+    if rounds1 <= 0 {
+        println("FAIL: consistent-pathway fixpoint took no rounds")
+        n_fail = n_fail + 1
+    }
+
+    // 1. The stated network is jointly satisfiable.
+    if !temporal_consistent(&redges, N) {
+        println("FAIL: consistent pathway reported INCONSISTENT")
+        n_fail = n_fail + 1
+    }
+
+    // 2. Derived guideline checks (transitivity through meets/during).
+    if !temporal_interval_before(&redges, SCREEN, SURG) {
+        println("FAIL: SCREEN before SURG should be derived")
+        n_fail = n_fail + 1
+    }
+    if !temporal_interval_before(&redges, CYC_A, CYC_B) {
+        println("FAIL: CYC_A before CYC_B should be derived")
+        n_fail = n_fail + 1
+    }
+    if !temporal_interval_before(&redges, RT, SURG) {
+        println("FAIL: RT before SURG should be derived (during o before)")
+        n_fail = n_fail + 1
+    }
+    if !temporal_interval_before(&redges, CYC_A, MAINT) {
+        println("FAIL: CYC_A before MAINT should be derived")
+        n_fail = n_fail + 1
+    }
+    if !temporal_interval_before(&redges, SCREEN, RT) {
+        println("FAIL: SCREEN before RT should be derived (before o during-converse)")
+        n_fail = n_fail + 1
+    }
+
+    // 3. Guard against a degenerate everything-true closure: converses
+    //    and backward-in-time edges must NOT be derived.
+    if temporal_interval_before(&redges, MAINT, SCREEN) {
+        println("FAIL: MAINT before SCREEN must not be derived")
+        n_fail = n_fail + 1
+    }
+    if temporal_interval_before(&redges, SURG, CYC_A) {
+        println("FAIL: SURG before CYC_A must not be derived")
+        n_fail = n_fail + 1
+    }
+    if temporal_interval_before(&redges, RT, CYC_A) {
+        println("FAIL: RT before CYC_A must not be derived")
+        n_fail = n_fail + 1
+    }
+    if temporal_interval_before(&redges, MAINT, SURG) {
+        println("FAIL: MAINT before SURG must not be derived")
+        n_fail = n_fail + 1
+    }
+
+    // ══ Numeric lane: mercyful sequencing graph over the same
+    //    pathway backbone (RT is concurrent with CYC_B, so it is
+    //    folded into the CYC_B block's suffering field; the numeric
+    //    lane validates the SEQUENTIAL backbone only) ═══════════════
+    var g = mercy_graph_new()
+    g = mercy_add_state(g, 0.0)  // 0 SCREEN
+    g = mercy_add_state(g, 5.0)  // 1 CYC_A
+    g = mercy_add_state(g, 1.0)  // 2 REST_A
+    g = mercy_add_state(g, 6.0)  // 3 CYC_B (incl. concurrent RT window)
+    g = mercy_add_state(g, 4.0)  // 4 SURG
+    g = mercy_add_state(g, 1.0)  // 5 MAINT
+    g = mercy_add_edge(g, 0, 0, 1.0)   // watch-and-wait trap (never reaches MAINT)
+    g = mercy_add_edge(g, 0, 1, 2.0)   // weeks
+    g = mercy_add_edge(g, 1, 2, 3.0)
+    g = mercy_add_edge(g, 2, 3, 2.0)
+    g = mercy_add_edge(g, 3, 4, 3.0)
+    g = mercy_add_edge(g, 4, 5, 12.0)
+    // Cost algebra (from stdlib/clinical/mercyful.sio): a path's
+    //   length   = sum of edge lengths (weeks),
+    //   integral = sum over edges of s(u) * length(u, v)  (left-endpoint
+    //              quadrature of the suffering field),
+    //   peak     = max suffering over visited states (incl. target),
+    //   total    = integral + mu * peak.
+    // Unique simple path 0-1-2-3-4-5 (the watch-and-wait self-loop at 0
+    // never reaches MAINT, so these exact metrics also witness that the
+    // scheduler did NOT take the trap): length 22, integral
+    // 0*2 + 5*3 + 1*2 + 6*3 + 4*12 = 83, peak 6, total 89 at mu = 1.
+    // (found-ness is read off the cost tuple, not the bool: lean_single
+    // mistypes bools destructured from heterogeneous tuples — see
+    // tests/run-pass/mercyful_chemo_sequencing.sio.)
+    let (f9, l9, i9, p9, t9) = mercyful_schedule(&g, 0, 5, 1.0, 40.0)
+    if l9 != 22.0 || i9 != 83.0 || p9 != 6.0 || t9 != 89.0 {
+        println("FAIL: mercyful backbone metrics should be 22/83/6/89")
+        n_fail = n_fail + 1
+    }
+    let numeric_feasible = t9 > 0.0 && t9 < 1e90
+
+    // 4. Independence check on the stated pathway: the numeric lane
+    //    (budget feasibility of the sequential skeleton) and the
+    //    temporal oracle (qualitative ordering satisfiability) BOTH
+    //    accept.  No joint semantics is claimed — the lanes model
+    //    different aspects, and they are EXPECTED to disagree on the
+    //    contradictory edit below (check 7).
+    if numeric_feasible != temporal_consistent(&redges, N) {
+        println("FAIL: numeric and temporal lanes disagree on the stated pathway")
+        n_fail = n_fail + 1
+    }
+
+    // ══ Negative case: conflicting guideline edit MAINT before SCREEN ═
+    var i: i64 = 0
+    while i < 32768 {
+        redges[i] = false
+        i = i + 1
+    }
+    elplus_seed(&!s, NC, TOP)
+    temporal_constrain(&!redges, REL_BEFORE, SCREEN, CYC_A)
+    temporal_constrain(&!redges, REL_MEETS, CYC_A, REST_A)
+    temporal_constrain(&!redges, REL_MEETS, REST_A, CYC_B)
+    temporal_constrain(&!redges, REL_DURING, RT, CYC_B)
+    temporal_constrain(&!redges, REL_BEFORE, CYC_B, SURG)
+    temporal_constrain(&!redges, REL_MEETS, SURG, MAINT)
+    temporal_constrain(&!redges, REL_BEFORE, MAINT, SCREEN)
+    let rounds2 = elplus_fixpoint(&!s, &!redges, &ckind, &carg1, &carg2, &exid, &rclos, &ch1, &ch2, &ch3, nchain, NC, NB, NR)
+    if rounds2 <= 0 {
+        println("FAIL: contradictory-pathway fixpoint took no rounds")
+        n_fail = n_fail + 1
+    }
+
+    // 5. The oracle rejects the edit: strict cycle = inconsistency.
+    if temporal_consistent(&redges, N) {
+        println("FAIL: contradictory pathway (MAINT before SCREEN) must be INCONSISTENT")
+        n_fail = n_fail + 1
+    }
+
+    // 6. The witness: a derived before(c, c) self-loop on the SCREEN
+    //    endpoints (start: atom 1, finish: atom 2).
+    if !temporal_edge(&redges, STRICT, temporal_start(SCREEN), temporal_start(SCREEN)) {
+        println("FAIL: strict self-loop on SCREEN start endpoint should witness the cycle")
+        n_fail = n_fail + 1
+    }
+
+    // 7. The ordering-agnostic numeric lane still admits the pathway;
+    //    the temporal oracle is what rejects the contradictory edit.
+    if !numeric_feasible || temporal_consistent(&redges, N) {
+        println("FAIL: numeric lane should stay feasible while the temporal oracle rejects")
+        n_fail = n_fail + 1
+    }
+
+    // ══ Chain-provenance regression: same contradiction, chains
+    //    disabled.  NOTE: this is a PROVENANCE check on the derivation,
+    //    not a fail-safe — a real deployment must treat a disabled
+    //    composition engine as UNKNOWN, never as CONSISTENT. ══════════
+    i = 0
+    while i < 32768 {
+        redges[i] = false
+        i = i + 1
+    }
+    elplus_seed(&!s, NC, TOP)
+    temporal_constrain(&!redges, REL_BEFORE, SCREEN, CYC_A)
+    temporal_constrain(&!redges, REL_MEETS, CYC_A, REST_A)
+    temporal_constrain(&!redges, REL_MEETS, REST_A, CYC_B)
+    temporal_constrain(&!redges, REL_DURING, RT, CYC_B)
+    temporal_constrain(&!redges, REL_BEFORE, CYC_B, SURG)
+    temporal_constrain(&!redges, REL_MEETS, SURG, MAINT)
+    temporal_constrain(&!redges, REL_BEFORE, MAINT, SCREEN)
+    let rounds3 = elplus_fixpoint(&!s, &!redges, &ckind, &carg1, &carg2, &exid, &rclos, &ch1, &ch2, &ch3, 0, NC, NB, NR)
+    if rounds3 <= 0 {
+        println("FAIL: chain-disabled fixpoint took no rounds")
+        n_fail = n_fail + 1
+    }
+
+    // 8. With roleComp disabled the contradiction is NOT detected —
+    //    detection above is chain-derived, not a seeding artifact.
+    if !temporal_consistent(&redges, N) {
+        println("FAIL: with chains disabled the oracle must NOT detect the contradiction")
+        n_fail = n_fail + 1
+    }
+
+    if n_fail == 0 {
+        println("ALL PASS")
+        return 0
+    }
+    println("FAILURES:")
+    println(n_fail)
+    return 1
+}

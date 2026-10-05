@@ -18,7 +18,7 @@ scripts/ci/typekind_archaeology_gate.sh        # runs pairs; prints derived ladd
 | `kind` | TypeKind name |
 | `pass_fixture` | program that **must** compile+run (empty ⇒ Garden) |
 | `refuse_fixture` | program that **must** be refused with named diagnostic |
-| `expected_diagnostic` | e.g. `E001`, `E218` |
+| `expected_diagnostic` | e.g. `E001`, `E249` |
 | `deepest_named_layer` | deepest layer that still names the kind (parser…codegen) |
 
 ## Derived positions (gate output)

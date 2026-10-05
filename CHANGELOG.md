@@ -2,6 +2,24 @@
 
 All notable changes to the Sounio programming language and compiler are documented in this file. Sounio follows semantic versioning and this changelog is maintained for each release.
 
+## [2.1.0] - 2026-06-04
+
+### Release — Native-v2 (Madaros) is the shipped engine
+
+The self-hosted modular native backend (Madaros, `native-v2`) is now the default
+and only shipped compiler engine. The legacy Cranelift JIT artifact (`bin/souc`)
+is retained for development and reference only; it is not the release engine.
+
+### Changed
+- Default and only shipped backend is the native-v2 (Madaros) x86-64 code
+  generator. `--native-v2-compile` is the release path; the Cranelift JIT is
+  no longer a shipped default.
+- Version metadata (`CITATION.cff`, README badge / `--version` / citation) and
+  `docs/RELEASE_POLICY.md` aligned to a single authoritative version string
+  (2.1.0) and to the native-only engine (#1735).
+
+Tag: `v2.1.0-native-v2`.
+
 ## [2.0.0] - 2026-04-01
 
 ### Release — Epistemic Gradual Compilation
@@ -570,7 +588,7 @@ foundational systems are robust.
 - Unit definition parsing correctly handles quotient expressions
 
 ### Known Limitations
-See `compiler/docs/KNOWN_LIMITATIONS.md` for current language limitations and
+See `docs/compiler/KNOWN_LIMITATIONS.md` for current language limitations and
 planned features for future releases.
 
 ---
@@ -803,8 +821,8 @@ Special thanks to:
 
 ## Resources
 
-- **Documentation**: [docs/MINIMUM_VIABLE_SOUNIO.md](docs/MINIMUM_VIABLE_SOUNIO.md)
-- **Syntax Reference**: [docs/LLM_PROGRAMMING_GUIDE.md](docs/LLM_PROGRAMMING_GUIDE.md)
+- **Documentation**: [docs/guide/MINIMUM_VIABLE_SOUNIO.md](docs/guide/MINIMUM_VIABLE_SOUNIO.md)
+- **Syntax Reference**: [docs/guide/LLM_PROGRAMMING_GUIDE.md](docs/guide/LLM_PROGRAMMING_GUIDE.md)
 - **Research Papers**: [docs/RESEARCH_PAPERS.md](docs/RESEARCH_PAPERS.md)
 - **GitHub**: [github.com/demetrios/sounio](https://github.com/demetrios/sounio)
 - **Community**: [discord.gg/sounio](https://discord.gg/sounio)

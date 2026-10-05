@@ -7,10 +7,10 @@
 # V0-B intent: literals + type spellings accepted end-to-end through `check`.
 # Arithmetic/casts/implicit conversion remain rejected.
 #
-# CRITICAL SHAPE: this gate must FAIL under current V0-A (parser E218 on
+# CRITICAL SHAPE: this gate must FAIL under current V0-A (parser E249 on
 # f128/f256) and PASS only when V0-B is genuinely implemented. A silent no-op
 # cannot pass — the positive control must fire, and positives must reach
-# `check: OK` without error[E218].
+# `check: OK` without error[E249].
 #
 # External oracle (not Sounio): tests/vectors/f128_f256/literal_boundary_*.jsonl
 # from MPFR via gen/literal_boundary_gen.c (GENERATION_RECEIPT.md). Probes embed
@@ -18,7 +18,7 @@
 # shortcut cannot green-wash against self-consistency. Arithmetic corpora
 # f128.jsonl/f256.jsonl are intentionally NOT consumed at V0-B (V0-D only).
 #
-# Note: Madaros may exit 0 while still printing E218 (diagnostic muting).
+# Note: Madaros may exit 0 while still printing E249 (diagnostic muting).
 # The gate judges stdout/stderr content, not exit code alone.
 #
 # Usage:
@@ -42,7 +42,7 @@ elif [[ "${1:-}" == --stage=* ]]; then
   STAGE="${1#--stage=}"
   shift || true
 elif [[ $# -gt 0 ]]; then
-  echo "usage: $0 --stage v0b|v0c|v0d" >&2
+  echo "usage: $0 --stage v0b|v0c|v0d|v0e|v0e2|v0e3|v0e4|v0e41|v0e5|v0e51|v0e52|v0e53|v0e54|v0e55|v0e56|v0e57|v0e58|v0e59|v0e510|v0f5" >&2
   exit 64
 fi
 
@@ -54,8 +54,76 @@ if [[ "$STAGE" == "v0d" ]]; then
   exec bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0d_softfloat_gate.sh" "$@"
 fi
 
+if [[ "$STAGE" == "v0e" ]]; then
+  exec bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0e_surface_gate.sh" "$@"
+fi
+
+if [[ "$STAGE" == "v0e2" ]]; then
+  exec bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0e2_source_ops_gate.sh" "$@"
+fi
+
+if [[ "$STAGE" == "v0e3" ]]; then
+  exec bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0e3_run_ops_gate.sh" "$@"
+fi
+
+if [[ "$STAGE" == "v0e4" ]]; then
+  exec bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0e4_language_lower_gate.sh" "$@"
+fi
+
+if [[ "$STAGE" == "v0e41" ]]; then
+  exec bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0e41_fail_closed_lower_gate.sh" "$@"
+fi
+
+if [[ "$STAGE" == "v0e5" ]]; then
+  exec bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0e5_softfloat_add_gate.sh" "$@"
+fi
+
+if [[ "$STAGE" == "v0e51" ]]; then
+  exec bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0e51_language_add_gate.sh" "$@"
+fi
+
+if [[ "$STAGE" == "v0e52" ]]; then
+  exec bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0e52_language_mul_neg_cmp_gate.sh" "$@"
+fi
+
+if [[ "$STAGE" == "v0e53" ]]; then
+  exec bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0e53_language_div_gate.sh" "$@"
+fi
+
+if [[ "$STAGE" == "v0e54" ]]; then
+  exec bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0e54_language_params_abi_gate.sh" "$@"
+fi
+
+if [[ "$STAGE" == "v0e55" ]]; then
+  exec bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0e55_language_struct_fields_gate.sh" "$@"
+fi
+
+if [[ "$STAGE" == "v0e57" ]]; then
+  exec bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0e57_language_arrays_gate.sh" "$@"
+fi
+
+if [[ "$STAGE" == "v0e58" ]]; then
+  exec bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0e58_print_f128_gate.sh" "$@"
+fi
+
+if [[ "$STAGE" == "v0e56" ]]; then
+  exec bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0e56_language_methods_gate.sh" "$@"
+fi
+
+if [[ "$STAGE" == "v0e59" ]]; then
+  exec bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0e59_exact_literals_gate.sh" "$@"
+fi
+
+if [[ "$STAGE" == "v0e510" ]]; then
+  exec bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0e510_surface_closure_gate.sh" "$@"
+fi
+
+if [[ "$STAGE" == "v0f5" ]]; then
+  exec bash "$ROOT_DIR/scripts/ci/madaros_f128_f256_v0f5_softfloat_add_gate.sh" "$@"
+fi
+
 if [[ "$STAGE" != "v0b" ]]; then
-  echo "FAIL unsupported stage='$STAGE' (implemented: v0b, v0c, v0d)" >&2
+  echo "FAIL unsupported stage='$STAGE' (implemented: v0b, v0c, v0d, v0e, v0e2, v0e3, v0e4, v0e41, v0e5, v0e51, v0e52, v0e53, v0e54, v0e55, v0e56, v0e57, v0e58, v0e59, v0e510, v0f5)" >&2
   exit 64
 fi
 
@@ -77,7 +145,7 @@ if [[ ! -d "$SOUNIO_STDLIB_PATH" ]]; then
 fi
 
 # V0-B is a Madaros check-path gate. lean_single does not print `check: OK` and
-# does not own the E218 reserved-wide surface the same way — refuse silent
+# does not own the E249 reserved-wide surface the same way — refuse silent
 # engine fallback that would green-wash or mis-diagnose.
 if [[ "${SOUNIO_SOUC_ENGINE:-}" == "lean_single" ]]; then
   echo "FAIL stage=v0b requires default Madaros check path; SOUNIO_SOUC_ENGINE=lean_single is refused" >&2
@@ -118,8 +186,8 @@ run_check() {
   "$SOUC" check "$src" >"$log" 2>&1 || true
 }
 
-has_e218() {
-  grep -Fq 'error[E218' "$1"
+has_e249() {
+  grep -Fq 'error[E249' "$1"
 }
 
 has_check_ok() {
@@ -201,7 +269,7 @@ for fmt, corpus, probe in pairs:
     for r in dr:
         lit = r["source_literal"]
         if lit.startswith("-"):
-            # Sounio has no unary minus — limb-oracle only; still require table.
+            # Leading-'-' rows are limb-oracle only; still require table.
             if f"ORACLE_{r['id']}_EXPECTED" not in text:
                 missing.append(f"limb_table:{r['id']}")
             continue
@@ -270,17 +338,17 @@ if [[ ! -f "$ROOT_DIR/$CONTROL_SRC" ]]; then
   note_fail "positive_control_missing:$CONTROL_SRC"
 else
   run_check "$CONTROL_SRC" "$CONTROL_LOG"
-  if has_check_ok "$CONTROL_LOG" && ! has_e218 "$CONTROL_LOG"; then
+  if has_check_ok "$CONTROL_LOG" && ! has_e249 "$CONTROL_LOG"; then
     note_pass "positive_control_f64_check_ok"
   else
-    note_fail "positive_control_did_not_fire (expected check: OK without E218 on $CONTROL_SRC)"
+    note_fail "positive_control_did_not_fire (expected check: OK without E249 on $CONTROL_SRC)"
     cat "$CONTROL_LOG" >&2 || true
   fi
 fi
 
 # ---------------------------------------------------------------------------
-# V0-B positive witnesses — must check green WITHOUT E218.
-# Under V0-A these print E218 → stage FAIL (correct today).
+# V0-B positive witnesses — must check green WITHOUT E249.
+# Under V0-A these print E249 → stage FAIL (correct today).
 # ---------------------------------------------------------------------------
 POSITIVE_SOURCES=(
   tests/run-pass/f128_v0b_literal_smoke.sio
@@ -295,29 +363,28 @@ for src in "${POSITIVE_SOURCES[@]}"; do
     continue
   fi
   run_check "$src" "$log"
-  if has_e218 "$log"; then
+  if has_e249 "$log"; then
     # Expected under V0-A — record exact diagnostic for the receipt.
-    e218_line="$(grep -F 'error[E218' "$log" | head -1 || true)"
+    e249_line="$(grep -F 'error[E249' "$log" | head -1 || true)"
     reserved_hit=0
     grep -Fq "$RESERVED_MSG" "$log" && reserved_hit=1
-    note_fail "positive_still_E218:$label :: ${e218_line} reserved_msg=${reserved_hit}"
+    note_fail "positive_still_E249:$label :: ${e249_line} reserved_msg=${reserved_hit}"
     continue
   fi
   if has_check_ok "$log"; then
     note_pass "positive_check_ok:$label"
   else
-    note_fail "positive_no_check_ok:$label (no E218 but check did not print check: OK)"
+    note_fail "positive_no_check_ok:$label (no E249 but check did not print check: OK)"
     tail -40 "$log" >&2 || true
   fi
 done
 
 # ---------------------------------------------------------------------------
 # V0-B negative witnesses — must NOT reach check: OK.
-# Pins the boundary so V0-B cannot silently grow into V0-D arithmetic.
+# Casts/implicit stay refused. Same-format arithmetic is V0-E.2 (no longer
+# pinned here as E004).
 # ---------------------------------------------------------------------------
 NEGATIVE_SOURCES=(
-  tests/compile-fail/f128_v0b_arithmetic_rejected.sio
-  tests/compile-fail/f256_v0b_arithmetic_rejected.sio
   tests/compile-fail/f128_v0b_cast_rejected.sio
   tests/compile-fail/f128_v0b_implicit_conversion_rejected.sio
 )
@@ -350,7 +417,7 @@ echo "NEGATIVE_REJECTED=$NEGATIVE_OK/${#NEGATIVE_SOURCES[@]}"
 
 if [[ "$FAIL" -eq 0 ]]; then
   # Exact success receipt from docs/architecture/F128_F256_LADDER.md
-  echo "PASS f128_f256_v0b_literals check=green parser=E218_lifted typecheck=distinct_no_implicit literals=decimal+hex+binary negative_arithmetic=${#NEGATIVE_SOURCES[@]}"
+  echo "PASS f128_f256_v0b_literals check=green parser=E249_lifted typecheck=distinct_no_implicit literals=decimal+hex+binary negative_arithmetic=${#NEGATIVE_SOURCES[@]}"
   echo "PASS madaros_f128_f256_ladder_gate stage=v0b"
   exit 0
 fi
@@ -361,9 +428,9 @@ for f in "${FAILURES[@]}"; do
   echo "  - $f" >&2
 done
 
-# Explicit V0-A diagnosis when positives are still E218 (today's expected state).
-if printf '%s\n' "${FAILURES[@]}" | grep -q 'positive_still_E218'; then
-  echo "diagnosis=V0-A_parser_E218_still_active (expected until V0-B implementation lands)" >&2
+# Explicit V0-A diagnosis when positives are still E249 (today's expected state).
+if printf '%s\n' "${FAILURES[@]}" | grep -q 'positive_still_E249'; then
+  echo "diagnosis=V0-A_parser_E249_still_active (expected until V0-B implementation lands)" >&2
   echo "observed_reserved_message=$RESERVED_MSG" >&2
 fi
 

@@ -166,7 +166,7 @@ Example change:
 
 ```bash
 # Edit self-hosted code
-vim self-hosted/check/type_inference.sio
+vim self-hosted/check/infer.sio
 
 # Test your changes
 cargo run --release -- run self-hosted/test_check.sio
@@ -212,7 +212,7 @@ cargo test --test rustless_e2e
 
 **Steps**:
 
-1. **Add to parser** (`self-hosted/parser/expr.sio`):
+1. **Add to parser** (`self-hosted/parser/exprs.sio`):
 ```sio
 fn parse_match_expr(parser: Parser) -> Expr {
     // Parse "match" keyword
@@ -228,7 +228,7 @@ fn parse_match_expr(parser: Parser) -> Expr {
 }
 ```
 
-2. **Add to type checker** (`self-hosted/check/type_check.sio`):
+2. **Add to type checker** (`self-hosted/check/check.sio`):
 ```sio
 fn check_match_expr(ctx: CheckContext, expr: Expr) -> Type {
     // Check scrutinee type
@@ -286,7 +286,7 @@ cargo test --test rustless_e2e
 
 #### Task: Fix a Bug in Self-Hosted Code
 
-**Example**: Type inference bug in `self-hosted/check/type_inference.sio`
+**Example**: Type inference bug in `self-hosted/check/infer.sio`
 
 **Steps**:
 
@@ -407,7 +407,7 @@ cargo run -p souc -- run program.sio
 
 ```bash
 # Edit self-hosted compiler
-vim self-hosted/check/type_check.sio
+vim self-hosted/check/check.sio
 
 # Test
 cargo run -- run self-hosted/test_check.sio
@@ -457,7 +457,7 @@ vim crates/souc/src/check/type_check.rs  # Edit Rust code
 
 **After**:
 ```bash
-vim self-hosted/check/type_check.sio  # Edit self-hosted code
+vim self-hosted/check/check.sio  # Edit self-hosted code
 cargo run -- run self-hosted/test_check.sio
 ```
 
@@ -594,7 +594,9 @@ The following env vars now hard-error with migration guidance:
 - `SOUNIO_SELFHOST_NO_RUST_HARNESS`
 - `SOUNIO_SELFHOST_DRIVER_REQUIRE_OUTPUT`
 
-Use signed bundle/state commands instead:
+Use signed bundle/state commands instead. They run on the checked artifact
+`artifacts/omega/souc-bin/souc-linux-x86_64-gpu`, not on the default `./bin/souc`
+(Madaros), which has no `bootstrap` or `opt` subcommand:
 
 ```bash
 souc bootstrap verify --bundle bootstrap
@@ -643,7 +645,7 @@ Then gradually work up to larger changes.
 
 **Learning Resources**:
 - `docs/guide/tutorial.md` - Language tutorial
-- `docs/LLM_PROGRAMMING_GUIDE.md` - Syntax reference
+- `docs/guide/LLM_PROGRAMMING_GUIDE.md` - Syntax reference
 - `self-hosted/test_*.sio` - Example code
 
 ### Q11: How do I report bugs?
@@ -670,12 +672,12 @@ Poseidon VM is pure C99 and works anywhere.
 
 ## Additional Resources
 
-- **Rustless Cutover Documentation**: `docs/RUSTLESS_CUTOVER.md`
-- **SOIR Format Specification**: `docs/SOIR_REFERENCE.md`
-- **Developer Workflow Guide**: `docs/DEVELOPER_WORKFLOW.md`
+- **Rustless Cutover Documentation**: `docs/implementation/RUSTLESS_CUTOVER.md`
+- **SOIR Format Specification**: `docs/architecture/SOIR_REFERENCE.md`
+- **Developer Workflow Guide**: `docs/contributor-guide/DEVELOPER_WORKFLOW.md`
 - **Poseidon VM Documentation**: `bootstrap/poseidon/README.md`
 - **SOIR Library Documentation**: `crates/soir/README.md`
-- **Complete Implementation Guide**: `docs/RUSTLESS_COMPLETE.md`
+- **Complete Implementation Guide**: `docs/implementation/RUSTLESS_COMPLETE.md`
 
 ---
 

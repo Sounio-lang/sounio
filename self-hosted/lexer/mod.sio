@@ -15,10 +15,96 @@ use lexer::numparse::*
 use lexer::tables::*
 use lexer::token::{TokenKind}
 use parser::ast::*
-use parser::parser::{parser_set_token_at, parser_set_token_flat, parser_set_token_int_value, parser_set_token_scalar}
+use parser::parser::{parser_set_token_at, parser_set_token_flat, parser_set_token_int_value, parser_set_token_scalar, parser_set_last_errors}
 use parser::mod::{parse_items_preloaded}
 
-// Maximum tokens per file (2097152) — use literal not constant: boot4 leaves let globals at 0
+// Maximum tokens per file (2097152) — use literal not constant: boot4 leaves let globals at 0.
+//
+// HISTORICAL DEFECT (fixed 2026-08-17): when tc reached the table size, emits
+// were silently skipped (parser_set_token_* no-ops past the wall) while the
+// lexer kept walking source. The returned token_count could still grow, and
+// out-of-range reads synthesized Eof — so the parser blamed an innocent line
+// that never changed. That is success-by-silence: the compiler discarded its
+// own input and lied about where the failure was. Same sin class as fabricating
+// a zero for unimplemented extern "C" (E219). Refusal is mandatory; raising the
+// ceiling without refusal only moves the lie.
+
+// LEXER_TOKEN_OVERFLOW: 0 = ok, 1 = token table full, 2 = source byte buffer full
+var LEXER_TOKEN_OVERFLOW: i64 = 0
+var LEXER_TOKEN_OVERFLOW_LINE: i64 = 0
+var LEXER_TOKEN_OVERFLOW_COL: i64 = 0
+var LEXER_TOKEN_OVERFLOW_BYTE: i64 = 0
+
+pub fn lexer_reset_token_overflow() with Mut {
+    LEXER_TOKEN_OVERFLOW = 0
+    LEXER_TOKEN_OVERFLOW_LINE = 0
+    LEXER_TOKEN_OVERFLOW_COL = 0
+    LEXER_TOKEN_OVERFLOW_BYTE = 0
+}
+
+pub fn lexer_token_overflow_kind() -> i64 {
+    LEXER_TOKEN_OVERFLOW
+}
+
+pub fn lexer_token_overflow_line() -> i64 {
+    LEXER_TOKEN_OVERFLOW_LINE
+}
+
+pub fn lexer_token_overflow_col() -> i64 {
+    LEXER_TOKEN_OVERFLOW_COL
+}
+
+pub fn lexer_token_overflow_byte() -> i64 {
+    LEXER_TOKEN_OVERFLOW_BYTE
+}
+
+// Record overflow once (first site wins — that is the real cause).
+fn lexer_mark_token_overflow(line: i64, col: i64, byte_pos: i64, kind: i64) with Mut {
+    if LEXER_TOKEN_OVERFLOW == 0 {
+        LEXER_TOKEN_OVERFLOW = kind
+        LEXER_TOKEN_OVERFLOW_LINE = line
+        LEXER_TOKEN_OVERFLOW_COL = col
+        LEXER_TOKEN_OVERFLOW_BYTE = byte_pos
+    }
+}
+
+// Push one flat token. Returns new tc, or -1 if the table is full (overflow marked).
+// Capacity 2097152 is the array length; the last slot must remain available for Eof
+// only when we finish cleanly — any content emit at tc >= 2097152 is refusal.
+fn lexer_push_flat(tc: i64, kind: i64, start: i64, end: i64, line: i64, col: i64, ival: i64) -> i64 with Mut, Panic {
+    if tc >= 2097152 {
+        lexer_mark_token_overflow(line, col, start, 1)
+        return 0 - 1
+    }
+    parser_set_token_flat(tc, kind, start, end, line, col, ival)
+    tc + 1
+}
+
+// Print E229 and return true if overflow is set. Call after lex when IO is available.
+pub fn lexer_report_token_overflow_if_any() -> bool with IO, Mut {
+    if LEXER_TOKEN_OVERFLOW == 0 {
+        return false
+    }
+    print("error[E229]: ")
+    if LEXER_TOKEN_OVERFLOW == 2 {
+        print("source exceeds lexer byte buffer (capacity 16777216 bytes)")
+    } else {
+        print("lexer token table full (capacity 2097152 tokens)")
+    }
+    print("\n  --> reached at line ")
+    print_int(LEXER_TOKEN_OVERFLOW_LINE)
+    print(" column ")
+    print_int(LEXER_TOKEN_OVERFLOW_COL)
+    print(" (byte offset ")
+    print_int(LEXER_TOKEN_OVERFLOW_BYTE)
+    print(")\n")
+    print("  = note: tokens past this table were previously SILENTLY DROPPED, so later\n")
+    print("          parse errors blamed innocent lines. This is a fail-closed refusal\n")
+    print("          (same discipline as E219 for unimplemented extern \"C\").\n")
+    print("  = help: split the module. Raising the ceiling without keeping this refusal\n")
+    print("          only moves the lie to the next input past the new wall.\n")
+    true
+}
 
 // ============================================================================
 // WHITESPACE AND COMMENT HANDLING
@@ -186,6 +272,70 @@ fn keyword_lookup_code(text: [i8; 256], len: i64) -> i64 {
 // NUMBER SCANNING (int, float, hex, bin, oct, suffixes)
 // ============================================================================
 
+// V0-B: absorb C99 hex-float tails left after a HexLit scan (0x1 + p+exp).
+// Takes scalar start/end/kind — NEVER pass ScanResult into this helper
+// (IS_SPTR struct-arg corruption; ScanResult::new comment).
+fn extend_c99_hex_float(start: i64, end: i64, kind0: TokenKind, source_len: i64, line0: i64, col0: i64) -> ScanResult with Mut, Div, Panic {
+    if start + 1 >= source_len {
+        let cur0 = Cursor { source_len: source_len, pos: end, line: line0, col: col0, current: 0 as i8 }
+        return ScanResult::new(cur0, kind0, start, end)
+    }
+    if CURSOR_SOURCE[start as usize] != 48 as i8 {
+        let cur0 = Cursor { source_len: source_len, pos: end, line: line0, col: col0, current: 0 as i8 }
+        return ScanResult::new(cur0, kind0, start, end)
+    }
+    let xch = CURSOR_SOURCE[(start + 1) as usize]
+    if xch != 120 as i8 && xch != 88 as i8 {
+        let cur0 = Cursor { source_len: source_len, pos: end, line: line0, col: col0, current: 0 as i8 }
+        return ScanResult::new(cur0, kind0, start, end)
+    }
+    var pos: i64 = end
+    var col: i64 = col0
+    var line: i64 = line0
+    var kind = kind0
+    var changed = 0
+    var current: i8 = 0 as i8
+    if pos < source_len { current = CURSOR_SOURCE[pos as usize] }
+    if pos < source_len && current == 46 as i8 {
+        var after_dot: i8 = 0 as i8
+        if pos + 1 < source_len { after_dot = CURSOR_SOURCE[(pos + 1) as usize] }
+        if is_hex_digit(after_dot) {
+            changed = 1
+            kind = TokenKind::FloatLit
+            col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+            while pos < source_len && (is_hex_digit(current) || current == 95 as i8) {
+                col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+            }
+        }
+    }
+    if pos < source_len && (current == 112 as i8 || current == 80 as i8) {
+        var after_p: i8 = 0 as i8
+        if pos + 1 < source_len { after_p = CURSOR_SOURCE[(pos + 1) as usize] }
+        if is_digit(after_p) || after_p == 43 as i8 || after_p == 45 as i8 {
+            changed = 1
+            kind = TokenKind::FloatLit
+            col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+            if pos < source_len && (current == 43 as i8 || current == 45 as i8) {
+                col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+            }
+            while pos < source_len && is_digit(current) {
+                col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+            }
+        }
+    }
+    if changed == 0 {
+        if pos < source_len { current = CURSOR_SOURCE[pos as usize] }
+        let cur0 = Cursor { source_len: source_len, pos: pos, line: line, col: col, current: current }
+        return ScanResult::new(cur0, kind0, start, end)
+    }
+    let tmp_c = Cursor { source_len: source_len, pos: pos, line: line, col: col, current: current }
+    let suf = skip_numeric_suffix(tmp_c)
+    pos = suf.pos; col = suf.col; line = suf.line
+    if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+    let result_cursor = Cursor { source_len: source_len, pos: pos, line: line, col: col, current: current }
+    ScanResult::new(result_cursor, kind, start, pos)
+}
+
 fn scan_number(c: Cursor) -> ScanResult with Mut, Div, Panic {
     var pos: i64 = c.pos
     let source_len: i64 = c.source_len
@@ -202,13 +352,42 @@ fn scan_number(c: Cursor) -> ScanResult with Mut, Div, Panic {
         if next == 120 as i8 || next == 88 as i8 {  // 'x' or 'X'
             col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
             col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
-            while pos < source_len && is_hex_digit(current) {
-                col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
-            }
+            // Hex integer or C99 hex-float (0x1.8p+0 / 0x1p-10 / 0x.1p+4).
+            // Mirror the decimal '.' / 'e' paths below: mutate `kind` in place,
+            // no bool flag (boot4/lean_single has bitten bool locals in large fns).
+            kind = TokenKind::HexLit
             while pos < source_len && (is_hex_digit(current) || current == 95 as i8) {
                 col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
             }
-            kind = TokenKind::HexLit
+            // Resync from CURSOR_SOURCE — do not trust a stale `current` local.
+            if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+            // Optional hex fractional part: '.' + hex digit
+            if pos < source_len && current == 46 as i8 {  // '.'
+                var after_dot: i8 = 0 as i8
+                if pos + 1 < source_len { after_dot = CURSOR_SOURCE[(pos + 1) as usize] }
+                if is_hex_digit(after_dot) {
+                    kind = TokenKind::FloatLit
+                    col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+                    while pos < source_len && (is_hex_digit(current) || current == 95 as i8) {
+                        col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+                    }
+                }
+            }
+            // Binary exponent: 'p'/'P' + optional sign + decimal digits (required for C99 hex-float)
+            if pos < source_len && (current == 112 as i8 || current == 80 as i8) {  // 'p'/'P'
+                var after_p: i8 = 0 as i8
+                if pos + 1 < source_len { after_p = CURSOR_SOURCE[(pos + 1) as usize] }
+                if is_digit(after_p) || after_p == 43 as i8 || after_p == 45 as i8 {
+                    kind = TokenKind::FloatLit
+                    col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+                    if pos < source_len && (current == 43 as i8 || current == 45 as i8) {
+                        col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+                    }
+                    while pos < source_len && is_digit(current) {
+                        col = col + 1; pos = pos + 1; if pos < source_len { current = CURSOR_SOURCE[pos as usize] } else { current = 0 as i8 }
+                    }
+                }
+            }
             let tmp_c = Cursor { source_len: source_len, pos: pos, line: line, col: col, current: current }
             let suf = skip_numeric_suffix(tmp_c)
             pos = suf.pos; col = suf.col; line = suf.line; current = suf.current
@@ -311,6 +490,17 @@ fn skip_numeric_suffix(c: Cursor) -> Cursor with Mut, Div, Panic {
     if ch == 102 as i8 {  // 'f'
         if n1 == 51 as i8 && n2 == 50 as i8 { skip = 3 }       // "f32"
         else if n1 == 54 as i8 && n2 == 52 as i8 { skip = 3 }  // "f64"
+        else if n1 == 49 as i8 && n2 == 50 as i8 {
+            // "f128"
+            var n3: i8 = 0 as i8
+            if pos0 + 3 < source_len { n3 = CURSOR_SOURCE[(pos0 + 3) as usize] }
+            if n3 == 56 as i8 { skip = 4 }
+        } else if n1 == 50 as i8 && n2 == 53 as i8 {
+            // "f256"
+            var n3b: i8 = 0 as i8
+            if pos0 + 3 < source_len { n3b = CURSOR_SOURCE[(pos0 + 3) as usize] }
+            if n3b == 54 as i8 { skip = 4 }
+        }
     }
     if ch == 105 as i8 {  // 'i'
         if n1 == 56 as i8 { skip = 2 }                                  // "i8"
@@ -537,14 +727,30 @@ pub fn sourcefile_trace_enable() with Mut {
     SOURCEFILE_TRACE = 1
 }
 
+// V0-E.5.10: `_` at CURSOR_SOURCE[pos] that is followed by a (hex) digit — a
+// digit separator inside a numeric literal, never a trailing suffix start.
+fn lex_flat_sep_before_digit(pos: i64, n: i64) -> bool with Mut, Panic {
+    CURSOR_SOURCE[pos as usize] == 95 as i8 && pos + 1 < n && is_digit(CURSOR_SOURCE[(pos + 1) as usize])
+}
+
+fn lex_flat_sep_before_hex_digit(pos: i64, n: i64) -> bool with Mut, Panic {
+    CURSOR_SOURCE[pos as usize] == 95 as i8 && pos + 1 < n && is_hex_digit(CURSOR_SOURCE[(pos + 1) as usize])
+}
+
 // Runs the full lexer over CURSOR_SOURCE[0..source_len], emitting all tokens
 // via parser_set_token_at() only — no LexerState or token array allocation.
 // CURSOR_SOURCE must be populated before calling (e.g. by lex_file_to_globals).
 // Returns the total number of tokens emitted (including the EOF token).
 pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
+    lexer_reset_token_overflow()
     var n: i64 = source_len
     if n < 0 { n = 0 }
-    if n > 2097152 { n = 2097152 }
+    // Source buffer is CURSOR_SOURCE, [i8; 16777216]. Truncating here was a
+    // second silent drop (bytes past the wall never lexed). Refuse instead.
+    if n > 16777216 {
+        lexer_mark_token_overflow(1, 1, n, 2)
+        return 0 - 1
+    }
     CURSOR_SOURCE_LEN = n
     var pos: i64 = 0
     var line: i64 = 1
@@ -552,6 +758,11 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
     var tc: i64 = 0
 
     while pos < n {
+        // Fail closed before any further emit once the table is full.
+        if tc >= 2097152 {
+            lexer_mark_token_overflow(line, col, pos, 1)
+            break
+        }
         let ch = CURSOR_SOURCE[pos as usize]
 
         if ch == 32 as i8 || ch == 9 as i8 || ch == 13 as i8 {
@@ -615,7 +826,15 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
                 pos = pos + 1
                 col = col + 1
             }
-            parser_set_token_flat(tc, keyword_lookup_code(text, text_idx), start, pos, line, start_col, 0)
+            // main moved the identifier slot to the scalar setter (TokenKind
+            // directly) so a new keyword needs no arm in parser_set_token_flat's
+            // dispatch. Keep that, and keep this PR's fail-closed guard: the
+            // guard is about the slot, not about which setter writes it.
+            if tc >= 2097152 {
+                lexer_mark_token_overflow(line, start_col, start, 1)
+                break
+            }
+            parser_set_token_scalar(tc, keyword_lookup(text, text_idx), start, pos, line, start_col)
             tc = tc + 1
             continue
         }
@@ -629,7 +848,9 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
                (CURSOR_SOURCE[(pos + 1) as usize] == 120 as i8 || CURSOR_SOURCE[(pos + 1) as usize] == 88 as i8) {
                 pos = pos + 2
                 col = col + 2
-                while pos < n && is_hex_digit(CURSOR_SOURCE[pos as usize]) {
+                // V0-E.5.10: `_` between hex digits is a separator (`0x1_0`);
+                // it is only consumed when a hex digit follows.
+                while pos < n && (is_hex_digit(CURSOR_SOURCE[pos as usize]) || lex_flat_sep_before_hex_digit(pos, n)) {
                     let hc = CURSOR_SOURCE[pos as usize]
                     if hc >= 48 as i8 && hc <= 57 as i8 {
                         value = value * 16 + ((hc - 48 as i8) as i64)
@@ -641,19 +862,27 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
                     pos = pos + 1
                     col = col + 1
                 }
-                parser_set_token_flat(tc, 129, start, pos, line, start_col, value)
-                tc = tc + 1
+                tc = lexer_push_flat(tc, 129, start, pos, line, start_col, value)
+                if tc < 0 { break }
                 continue
             }
-            while pos < n && is_digit(CURSOR_SOURCE[pos as usize]) {
-                value = value * 10 + ((CURSOR_SOURCE[pos as usize] - 48 as i8) as i64)
+            // V0-E.5.10: digit separators. The spec (2.6.1) promised `1_000_000`
+            // and this lexer split it into `1` + Ident(`_000_000`) (E137); the
+            // Cursor-based scan_number that accepted `_` is unreachable code
+            // below `return tc`. A `_` is consumed only when a digit follows, in
+            // the integer part, the fraction and the exponent, so a trailing
+            // `_mg`-style suffix still ends the number.
+            while pos < n && (is_digit(CURSOR_SOURCE[pos as usize]) || lex_flat_sep_before_digit(pos, n)) {
+                if CURSOR_SOURCE[pos as usize] != 95 as i8 {
+                    value = value * 10 + ((CURSOR_SOURCE[pos as usize] - 48 as i8) as i64)
+                }
                 pos = pos + 1
                 col = col + 1
             }
             if pos + 1 < n && CURSOR_SOURCE[pos as usize] == 46 as i8 && is_digit(CURSOR_SOURCE[(pos + 1) as usize]) {
                 pos = pos + 1
                 col = col + 1
-                while pos < n && is_digit(CURSOR_SOURCE[pos as usize]) {
+                while pos < n && (is_digit(CURSOR_SOURCE[pos as usize]) || lex_flat_sep_before_digit(pos, n)) {
                     pos = pos + 1
                     col = col + 1
                 }
@@ -671,7 +900,7 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
                         pos = pos + 1
                         col = col + 1
                     }
-                    while pos < n && is_digit(CURSOR_SOURCE[pos as usize]) {
+                    while pos < n && (is_digit(CURSOR_SOURCE[pos as usize]) || lex_flat_sep_before_digit(pos, n)) {
                         pos = pos + 1
                         col = col + 1
                     }
@@ -679,11 +908,11 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
                 }
             }
             if is_float_token {
-                parser_set_token_flat(tc, 125, start, pos, line, start_col, 0)
+                tc = lexer_push_flat(tc, 125, start, pos, line, start_col, 0)
             } else {
-                parser_set_token_flat(tc, 124, start, pos, line, start_col, value)
+                tc = lexer_push_flat(tc, 124, start, pos, line, start_col, value)
             }
-            tc = tc + 1
+            if tc < 0 { break }
             continue
         }
 
@@ -705,8 +934,8 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
                 pos = pos + 1
                 col = col + 1
             }
-            parser_set_token_flat(tc, 126, start, pos, line, start_col, 0)
-            tc = tc + 1
+            tc = lexer_push_flat(tc, 126, start, pos, line, start_col, 0)
+            if tc < 0 { break }
             continue
         }
 
@@ -772,13 +1001,22 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
         else if ch == 64 as i8 { kind_code = 184 }
         else if ch == 35 as i8 { kind_code = 185 }
 
-        parser_set_token_flat(tc, kind_code, start, start + width, line, start_col, 0)
-        tc = tc + 1
+        tc = lexer_push_flat(tc, kind_code, start, start + width, line, start_col, 0)
+        if tc < 0 { break }
         pos = pos + width
         col = col + width
     }
 
-    parser_set_token_flat(tc, 0, pos, pos, line, col, 0)
+    // Overflow: do not hand the parser a truncated stream (that re-creates the lie).
+    if LEXER_TOKEN_OVERFLOW != 0 {
+        return 0 - 1
+    }
+
+    // Eof must fit; if not, refuse rather than omit the terminator.
+    tc = lexer_push_flat(tc, 0, pos, pos, line, col, 0)
+    if tc < 0 {
+        return 0 - 1
+    }
     return tc
 
     var first_byte: i8 = 0 as i8
@@ -891,7 +1129,13 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
         if is_digit(ch) {
             let line = cur.line
             let col = cur.col
-            let result = scan_number(cur)
+            let source_len = cur.source_len
+            let scanned = scan_number(cur)
+            // Extract scalars BEFORE any struct-arg helper (IS_SPTR).
+            let s0 = scanned.start
+            let e0 = scanned.end
+            let k0 = scanned.kind
+            let result = extend_c99_hex_float(s0, e0, k0, source_len, line, col)
             cur = result.cursor
             let nv = parse_numeric(result.start, result.end, result.kind)
             var tok = Token::with_kind(result.kind, result.start, result.end, line, col)
@@ -1028,11 +1272,16 @@ pub fn lex_source_to_globals(source_len: i64) -> i64 with Mut, Div, Panic {
 // Returns the token count. Frame is tiny: file pointer + a few scalars.
 pub fn lex_file_to_globals(path: string) -> i64 with IO, Mut, Div, Panic {
     if SOURCEFILE_TRACE == 1 { print("trace=lex_file_to_globals_enter\n") }
+    lexer_reset_token_overflow()
     let size = file_size(path)
     let data = read_file(path)
     var n: i64 = size
     if n < 0 { n = 0 }
-    if n > 2097152 { n = 2097152 }
+    // Do not silently clip the file to the CURSOR_SOURCE wall.
+    if n > 16777216 {
+        lexer_mark_token_overflow(1, 1, n, 2)
+        return 0 - 1
+    }
     var ci: i64 = 0
     while ci < n {
         CURSOR_SOURCE[ci as usize] = data[ci as usize]
@@ -1048,6 +1297,14 @@ pub fn lex_file_to_globals(path: string) -> i64 with IO, Mut, Div, Panic {
 pub fn lex_file_parse_items(path: string) -> Option<Box<ItemList>> with IO, Mut, Div, Panic, Alloc {
     if SOURCEFILE_TRACE == 1 { print("trace=lex_file_parse_items_enter\n") }
     let tc = lex_file_to_globals(path)
+    // Fail closed: never parse a silently truncated token stream.
+    if tc < 0 || lexer_token_overflow_kind() != 0 {
+        let _reported = lexer_report_token_overflow_if_any()
+        // Make check-mode preflight fail (same channel as parse errors).
+        parser_set_last_errors(true, 1)
+        if SOURCEFILE_TRACE == 1 { print("trace=lex_token_overflow\n") }
+        return None
+    }
     if SOURCEFILE_TRACE == 1 { print("trace=lex_ok\n") }
     let items = parse_items_preloaded(tc)
     if SOURCEFILE_TRACE == 1 { print("trace=parse_ok\n") }

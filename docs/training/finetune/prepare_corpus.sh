@@ -17,6 +17,12 @@ echo ""
 DIRS=(stdlib tests examples benchmarks)
 INCLUDE_ONTOLOGY="${LORA_CORPUS_INCLUDE_ONTOLOGY:-0}"
 
+# Files deliberately left out of the corpus. Each carries a literal-suffix form
+# (0_i64, 10.0_f64, .sum::<f64>()) that Madaros rejects; keeping them would teach
+# the very syntax the rest of the corpus avoids. validate_lora_assets.py reads this
+# list and fails if any of these files has a section in the corpus.
+EXCLUDE_FILES=(examples/test_i64_bug_fix.sio stdlib/pbpk/regulatory.sio)
+
 > "$OUTPUT"  # truncate
 
 FILE_COUNT=0
@@ -32,6 +38,13 @@ for dir in "${DIRS[@]}"; do
     while IFS= read -r -d '' sio_file; do
         REL_PATH="${sio_file#$REPO_ROOT/}"
         if [[ "$INCLUDE_ONTOLOGY" != "1" && "$REL_PATH" == stdlib/ontology/* ]]; then
+            continue
+        fi
+        skip=0
+        for excluded in "${EXCLUDE_FILES[@]}"; do
+            [[ "$REL_PATH" == "$excluded" ]] && skip=1
+        done
+        if [[ "$skip" == 1 ]]; then
             continue
         fi
         LINE_COUNT=$(wc -l < "$sio_file")

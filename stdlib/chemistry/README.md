@@ -57,9 +57,9 @@ export SOUNIO_STDLIB_PATH=$(pwd)/stdlib
 
 See EXAMPLES.md / BENCHMARKS.md for LIT PASS + GUM.
 
-**Super Showcase Químico**: Existe `kinetics::super_chemical_showcase()` — um cenário integrado que usa **todas** as capacidades avançadas (ontologia ChEBI para cada composto, ensembles estrutural+fracionário, estocástico, Bayes com Observe + Knowledge<CHEBI_15377>, auditoria regulatória, etc.). É o melhor exemplo para entender o diferencial de Sounio.
+**Super Showcase Químico**: Existe `kinetics::super_chemical_showcase()` — um cenário integrado que usa **todas** as capacidades avançadas (ontologia ChEBI para cada composto, ensembles estrutural+fracionário, estocástico, Bayes com Observe + Epistemic, auditoria regulatória, etc.). É o melhor exemplo para entender o diferencial de Sounio.
 
-Phase 6 (in parallel): expanded Bayesian (Observe+multi-data EState, ident, structural tie), regulatory provenance (audit struct+budget export), scale benches + general nets. **FULL real ontologies**: complete ChEBI species map for every compound, GO + Rhea, bundle directives, explicit Knowledge<CHEBI_xxx>, deep epistemic provenance. LLM-offload before new math claims.
+Phase 6 (in parallel): expanded Bayesian (Observe+multi-data EState, ident, structural tie), regulatory provenance (audit struct+budget export), scale benches + general nets. **FULL real ontologies**: complete ChEBI species map for every compound, GO + Rhea, bundle directives, explicit Epistemic, deep epistemic provenance. LLM-offload before new math claims.
 
 **PBPK28 dissertation expansion (Task 5)**: Added digoxin_chebi, cyp3a4_enzyme_chebi, warfarin_chebi; GO xenobiotic_metabolic (6805), proteolysis (6508), abc_xenobiotic_transporter (8559), oxidative_demethylation (70989); Rhea 47261/55924 specific CYP + transport; pbpk28_drug_enzyme_chebi_map, extended species_to for pbpk28/cyp/pgp/proteolytic, knowledge_pbpk_drug_conc, pbpk_metabolic_crn_with_ontology in kinetics + tests/docs updated. Now every PBPK28 drug/enzyme (rapa/tacro/sema/vanco/midazolam/digoxin + CYP/P-gp/proteolysis) has concrete ChEBI+GO+Rhea.
 

@@ -24,6 +24,8 @@
 #                            floor 2026-08-13: minimal ok at 16 MiB+, helper at 32 MiB+.
 #                            Set 0 for unlimited. See MADAROS_HARDENING_PLAN_2026-08-12.md.
 #   MADAROS_VMEM_LIMIT_KB  — virtual-memory guard (default 32 GiB)
+#   MADAROS_NATIVE_COMPILE_TIMEOUT_SECONDS — native compile deadline, 1..600
+#                            seconds (default 300); does not change GPU/check deadlines.
 #
 # To obtain the raw ELF, run:
 #   make build-madaros
@@ -33,6 +35,63 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Resolve the underlying modular raw ELF.
+# An explicit raw-ELF override that cannot be used ABORTS rather than being
+# skipped. The loop below moves past any candidate failing the -x test, so a
+# build that left its output non-executable resolves silently to the COMMITTED
+# bin/madaros-linux-x86_64 — which lags self-hosted/ source. The caller then
+# measures the shipped compiler while believing they measured theirs. Observed
+# 2026-08-28: `check: OK` and `error[E245]` from the same file, the only
+# difference being `chmod +x`, with no message in between.
+_madaros_reject_override() {  # _madaros_reject_override <var-name> <path>
+  local var="$1" path="$2" why
+  if   [[ ! -e "$path" ]]; then why="no such file"
+  elif [[ -d "$path" ]];   then why="is a directory"
+  elif [[ ! -x "$path" ]]; then why="not executable (chmod +x it)"
+  elif [[ "$(head -c 2 "$path" 2>/dev/null)" == "#!" ]]; then why="is a script, not a raw ELF"
+  else why="unusable"; fi
+  echo "error: madaros: $var is set but cannot be used: $why" >&2
+  echo "  $var=$path" >&2
+  echo "  refusing to fall back to the committed compiler: it lags self-hosted/ source," >&2
+  echo "  so this run would measure a different compiler than the one you named." >&2
+  echo "  fix the path, or unset $var to use the default resolution order." >&2
+  exit 78
+}
+
+for _mv in MADAROS_RAW_BIN SOUNIO_MADAROS_BIN; do
+  _mv_val="${!_mv:-}"
+  if [[ -n "$_mv_val" ]] \
+     && ! { [[ -x "$_mv_val" ]] && [[ "$(head -c 2 "$_mv_val" 2>/dev/null)" != "#!" ]]; }; then
+    _madaros_reject_override "$_mv" "$_mv_val"
+  fi
+done
+unset _mv _mv_val
+
+# The committed prebuilt is stored as bin/madaros-linux-x86_64.gz plus the ELF's
+# sha256; the ELF path is generated from them. Materialize it (verified against
+# the tracked sha256, exit 78 on a mismatch) before resolution looks for it.
+# Always attempt this -- even when a higher-priority override (MADAROS_RAW_BIN,
+# SOUNIO_MADAROS_BIN, or a local artifacts/self-hosted/madaros) is present, so
+# that the strict-mode `cmp` below has a materialized bin/madaros-linux-x86_64
+# to compare a byte-identical override against and correctly accept it, rather
+# than refusing it for want of a comparison file. Only tolerate a
+# materialization FAILURE (a corrupted or missing prebuilt) when a higher-
+# priority override is present: that run was never going to use the prebuilt
+# ELF itself, only (optionally) compare against it, so it must not abort --
+# resolution just proceeds without a committed comparison file.
+_madaros_higher_priority_override_present() {
+  local cand
+  for cand in "${MADAROS_RAW_BIN:-}" "${SOUNIO_MADAROS_BIN:-}" "$ROOT_DIR/artifacts/self-hosted/madaros"; do
+    [[ -n "$cand" && -x "$cand" && "$(head -c 2 "$cand" 2>/dev/null)" != "#!" ]] && return 0
+  done
+  return 1
+}
+if [[ -f "$ROOT_DIR/scripts/lib/materialize_madaros_prebuilt.sh" ]]; then
+  if ! bash "$ROOT_DIR/scripts/lib/materialize_madaros_prebuilt.sh"; then
+    _mat_rc=$?
+    _madaros_higher_priority_override_present || exit "$_mat_rc"
+  fi
+fi
+
 # Resolution order:
 #   1. MADAROS_RAW_BIN / SOUNIO_MADAROS_BIN env var
 #   2. artifacts/self-hosted/madaros (built by make build-madaros)
@@ -53,6 +112,18 @@ _resolve_modular_elf() {
 
 if ! RAW_MADAROS="$(_resolve_modular_elf)"; then
   exit 127
+fi
+
+# Strict mode (SOUNIO_REQUIRE_COMMITTED_MADAROS=1): refuse any raw ELF that is not the committed
+# prebuilt, by path or by content. Measured 2026-08-31 (#2318): a stale local artifact resolved
+# ahead of the committed ELF for a day; nothing in the chain could refuse it.
+if [[ "${SOUNIO_REQUIRE_COMMITTED_MADAROS:-0}" == "1" ]]; then
+  _committed_elf="$ROOT_DIR/bin/madaros-linux-x86_64"
+  if [[ "$RAW_MADAROS" != "$_committed_elf" ]] && ! cmp -s "$RAW_MADAROS" "$_committed_elf"; then
+    echo "madaros: refusing to run: SOUNIO_REQUIRE_COMMITTED_MADAROS=1 but the resolved raw ELF is not the committed bin/madaros-linux-x86_64" >&2
+    echo "  resolved: ${RAW_MADAROS#$ROOT_DIR/}" >&2
+    exit 78
+  fi
 fi
 
 MADAROS_VMEM_LIMIT_KB="${MADAROS_VMEM_LIMIT_KB:-33554432}"
@@ -571,8 +642,13 @@ _compile_source_to_artifact() {
     fi
     return 0
   fi
+  local native_timeout="${MADAROS_NATIVE_COMPILE_TIMEOUT_SECONDS:-300}"
+  if [[ ! "$native_timeout" =~ ^[1-9][0-9]{0,2}$ ]] || (( native_timeout > 600 )); then
+    echo "error: madaros build: MADAROS_NATIVE_COMPILE_TIMEOUT_SECONDS must be an integer from 1 to 600" >&2
+    return 2
+  fi
   set +e
-  ( ulimit -v "$MADAROS_VMEM_LIMIT_KB" 2>/dev/null || true; exec timeout 300 "$RAW_MADAROS" "$src" -o "$out" )
+  ( ulimit -v "$MADAROS_VMEM_LIMIT_KB" 2>/dev/null || true; exec timeout "$native_timeout" "$RAW_MADAROS" "$src" -o "$out" )
   rc=$?
   set -e
   if [[ $rc -ne 0 ]]; then

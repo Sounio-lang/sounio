@@ -42,7 +42,7 @@ RESERVED = {
     "affine", "algebra", "as", "async", "await", "break", "const",
     "contest", "continue", "crate", "effect", "else", "enum", "export",
     "extern", "false", "fn", "for", "handler", "if", "impl", "import", "in",
-    "let", "linear", "loop", "match", "models", "mut", "on", "ontology",
+    "let", "linear", "loop", "match", "models", "mut", "ontology",
     "perform", "pub", "resume", "return", "self", "spawn", "static",
     "struct", "super", "trait", "true", "type", "unsafe", "use", "where",
     "while", "with",
@@ -61,6 +61,13 @@ IDENTIFIER_OK = {
     "posterior", "prior", "recourse_policy", "recv", "ref", "require",
     "rollback_route", "route", "sample", "scope", "send", "session", "step",
     "strategy", "study", "transition_policy", "transition_protocol",
+    # `on` is a keyword in exactly one position -- the Contest form
+    # `contest [ m1, m2 ] on subject` -- and domain vocabulary everywhere else.
+    # It was RESERVED here while lean_single had no such class at all, so
+    # a parameter or local named `on` parse-failed under Madaros and compiled
+    # under lean. Four stdlib files use it as a name and one, graphics/surface.sio,
+    # blocked every viz_* test through a three-deep import chain.
+    "on",
     "uncertain", "unit", "valid", "validation", "var",
 }
 

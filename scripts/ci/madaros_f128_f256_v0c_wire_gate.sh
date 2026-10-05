@@ -177,7 +177,7 @@ done
 if printf '%s\n' "${FAILURES[@]}" | grep -q 'v0c_codec_does_not_consume_external_corpus'; then
   echo "diagnosis=V0-C_scaffold_alive_but_external_wire_corpus_unconsumed" >&2
   echo "right_reason=wire_f128.jsonl(31)+wire_f256.jsonl(24) not mapped through limb/wire codec; hardcoded probes are not the corpus" >&2
-  echo "engine=scaffold_probes_use_lean_single_seed; corpus_contract_is_codec_coverage_not_engine_E218" >&2
+  echo "engine=scaffold_probes_use_lean_single_seed; corpus_contract_is_codec_coverage_not_engine_E249" >&2
 fi
 
 exit 1

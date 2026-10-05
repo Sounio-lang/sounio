@@ -1,0 +1,36 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout-contains: HEXFLOAT_OVERFLOW_OK
+//@ description: V0-E.5.10 follow-up (#2478) — a hex-float literal that overflows binary64 rounds to +/-inf, not to max-finite.
+//
+// The f64 hex-float reader (parser::f64_hex_literal_from_source) used to return
+// binary64 max-finite for any unbiased exponent e > 1023. That contradicts the
+// "correctly rounded binary64" contract: under round-to-nearest-ties-to-even a
+// magnitude >= 2^1024 rounds to +inf. Oracle values cross-checked against C
+// strtod (IEEE): 0x1p+1024 -> +inf, -0x1p+1024 -> -inf, 0x1.fffffffffffffp+1023
+// -> max-finite (below the boundary), 0x1.fffffffffffff8p+1023 -> +inf (the
+// significand rounds up and carries into the exponent), 0x1.fffffffffffff7p+1023
+// -> max-finite (just below the rounding boundary).
+//
+// inf is detected without an inf literal: for a finite non-zero x, x/2 != x,
+// while inf/2 == inf. Sign splits +inf (x > 0) from -inf (x < 0); 0.0 is
+// excluded by the sign guard.
+
+fn is_pos_inf(x: f64) -> bool with Div { return x > 0.0 && x == x / 2.0 }
+fn is_neg_inf(x: f64) -> bool with Div { return x < 0.0 && x == x / 2.0 }
+fn is_finite_nonzero(x: f64) -> bool with Div { return x != 0.0 && x != x / 2.0 }
+
+fn main() -> i32 with IO, Div {
+    // 2^1024: above every finite binary64 -> +inf.
+    if !is_pos_inf(0x1p+1024) { print("FAIL 0x1p+1024 not +inf\n") return 1 }
+    // -2^1024 -> -inf (unary minus on the +inf magnitude).
+    if !is_neg_inf(-0x1p+1024) { print("FAIL -0x1p+1024 not -inf\n") return 1 }
+    // max-finite itself must stay finite.
+    if !is_finite_nonzero(0x1.fffffffffffffp+1023) { print("FAIL max-finite became inf\n") return 1 }
+    // significand carry into the exponent rounds up past max-finite -> +inf.
+    if !is_pos_inf(0x1.fffffffffffff8p+1023) { print("FAIL carry-to-inf not +inf\n") return 1 }
+    // one ULP-boundary lower rounds down to max-finite.
+    if !is_finite_nonzero(0x1.fffffffffffff7p+1023) { print("FAIL near-boundary not finite\n") return 1 }
+    print("HEXFLOAT_OVERFLOW_OK\n")
+    return 0
+}

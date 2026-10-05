@@ -20,7 +20,7 @@ Write minimal, high-signal tests that protect language semantics, diagnostics, a
 
 ### 2) Keep tests small and explicit
 
-- Avoid relying on features listed as missing in `compiler/docs/KNOWN_LIMITATIONS.md`.
+- Avoid relying on features listed as missing in `docs/compiler/KNOWN_LIMITATIONS.md`.
 - Prefer one behavior per test file; add `//@ ignore` if it’s documenting an aspirational feature.
 
 ### 3) Run the narrowest validation first

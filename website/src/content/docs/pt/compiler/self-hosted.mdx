@@ -13,85 +13,86 @@ source_of_truth: "docs/governance/topic-registry.v1.json#website.docs.compiler.s
 
 # Compilador Self-Hosted
 
-O Sounio inclui um compilador *self-hosted* escrito inteiramente em ficheiros `.sio`. Este compilador é capaz de realizar a análise sintática (*parsing*), a verificação de tipos (*type-checking*), a conversão para representação intermédia (redução para IR), a otimização e a emissão direta de binários nativos ELF x86-64 — sem qualquer dependência do LLVM, do Cranelift ou de geradores de código externos.
+O Sounio inclui um compilador *self-hosted* escrito inteiramente em arquivos `.sio`. Este compilador é capaz de realizar a análise sintática (*parsing*), a verificação de tipos (*type-checking*), a conversão para representação intermediária (redução para IR), a otimização e a emissão direta de binários nativos ELF x86-64 — sem depender do LLVM, do Cranelift ou de qualquer gerador de código externo.
 
 ## Pipeline de Compilação
 
 ```
 Origem (.sio) → Lexer → Parser → AST
-    → ir/lower.sio → IrModule (IR customizada)
-    → Passagens de Otimização (E-graphs, etc.)
+    → ir/lower.sio → IrModule (IR própria)
+    → Passagens de Otimização
     → native/codegen.sio → Código de Máquina x86-64
-    → native/elf.sio → Binário ELF Final
+    → native/elf.sio → Binário ELF
 ```
 
-Este pipeline é totalmente independente do caminho HLIR/LLVM utilizado pelo compilador hospedado em Rust. O backend nativo gera binários ELF diretamente, sem a necessidade de produzir ficheiros de objetos intermédios.
+Este pipeline é o **caminho padrão do compilador público** via `bin/souc`. Ele emite binários ELF/Mach-O nativos diretamente, sem arquivos de objeto intermediários. Perfis opcionais de LLVM e de Cranelift JIT existem em artefatos omega separados — eles não são a história principal de onboarding.
 
 ## Módulos Principais
 
-| Módulo | Ficheiro | Propósito |
+| Módulo | Arquivo | Propósito |
 | :--- | :--- | :--- |
 | **Lexer** | `self-hosted/lexer/` | Tokenização do código-fonte |
-| **Parser** | `self-hosted/parser/` | Construção da Árvore de Sintaxe Abstrata (AST) |
-| **Redução para IR** | `self-hosted/ir/lower.sio` | Conversão da AST para IR e seleção de estratégias |
+| **Parser** | `self-hosted/parser/` | Construção da AST |
+| **Redução para IR** | `self-hosted/ir/lower.sio` | Conversão da AST para IR, cálculo de estratégias |
 | **Tipos de IR** | `self-hosted/ir/ir.sio` | Definições de `IrFunction`, `IrModule` e `IrInstr` |
-| **Otimizador** | `self-hosted/ir/opt_cleanup.sio` | Simplificações, eliminação de código morto (DCE) e redução de força |
-| **Perfil (PGO)** | `self-hosted/ir/profile.sio` | Leitura de dados `.sprof` e decisão de estratégias de otimização |
-| **Inliner** | `self-hosted/ir/inline.sio` | Integração de funções (*inlining*) orientada por dados de perfil |
-| **Layout** | `self-hosted/ir/layout.sio` | Ordenação de funções em memória para otimizar a localidade de cache |
-| **E-graph** | `self-hosted/ir/egraph.sio` | Saturação de igualdade para leis e identidades algébricas |
-| **Codegen** | `self-hosted/native/codegen.sio` | Geração e emissão de instruções de máquina x86-64 |
-| **Frame** | `self-hosted/native/frame.sio` | Desenho do *stack frame* e alocação local de registadores |
-| **ELF** | `self-hosted/native/elf.sio` | Estruturação e gravação do ficheiro binário ELF final |
-| **Relocações** | `self-hosted/native/reloc.sio` | Ajuste de endereços e interligação de símbolos |
-| **Entrada** | `self-hosted/compiler/main.sio` | Orquestração global e interface de linha de comandos (CLI) |
+| **Otimizador** | `self-hosted/ir/opt_cleanup.sio` | Constant folding, DCE, redução de força |
+| **Perfil** | `self-hosted/ir/profile.sio` | Dados de profiling `.sprof`, promoção de estratégia |
+| **Inliner** | `self-hosted/ir/inline.sio` | Inlining de funções guiado por perfil |
+| **Layout** | `self-hosted/ir/layout.sio` | Ordenação de funções guiada por perfil |
+| **E-graph** | `self-hosted/ir/egraph.sio` | Saturação de igualdade para regras algébricas |
+| **Codegen** | `self-hosted/native/codegen.sio` | Emissão de instruções x86-64 |
+| **Frame** | `self-hosted/native/frame.sio` | Layout do stack frame, alocação de registradores |
+| **ELF** | `self-hosted/native/elf.sio` | Emissão do formato binário ELF |
+| **Relocações** | `self-hosted/native/reloc.sio` | Relocações de símbolos e seções |
+| **Entrada** | `self-hosted/compiler/main.sio` | Driver de CLI e orquestração da compilação |
 
 ## Passagens de Otimização
 
-O otimizador *self-hosted* executa mais de 20 passos distintos, desenvolvidos de forma incremental ao longo do projeto:
+O otimizador *self-hosted* inclui mais de 20 passagens, construídas de forma incremental ao longo dos sprints 51-110:
 
-- **Constant folding:** Avalia operações aritméticas de constantes conhecidas em tempo de compilação.
-- **Dead code elimination (DCE):** Algoritmo *mark-and-sweep* para detetar e remover instruções cujos resultados nunca são lidos.
-- **Strength reduction:** Substitui operações dispendiosas por equivalentes mais velozes (ex: `x * 2^n` por shifts `x << n`, `x % 2^n` por `x & (2^n - 1)`).
-- **Copy propagation:** Propaga atribuições diretas de `IrCopy` para expor novas oportunidades de simplificação.
-- **Peephole optimization:** Elimina redundâncias locais, tais como `IrCopy(r, r)` para `IrNop` ou cargas redundantes de imediatos.
-- **Normalização algébrica:** Simplificações identitárias como `x - x` para `0`, `x ^ x` para `0` e redução de cadeias de constantes como `(x + 3) + 5` para `x + 8`.
-- **Saturação de E-graphs:** Aplicação sistemática de associatividade, comutatividade e identidades algébricas para reduzir a complexidade lógica.
-- **CSE (Common Subexpression Elimination):** Deduplicação de expressões comuns usando tabelas de dispersão (*hash*) locais.
-- **LICM (Loop Invariant Code Motion):** Desloca expressões invariantes (como `IrLoadImm` constantes) para fora de ciclos.
-- **GVN (Global Value Numbering):** Atribuição de números de valor únicos a expressões equivalentes para otimização global.
-- **Simplificação booleana:** Simplifica negações encadeadas e avaliações redundantes (ex: `(x == 0) == 0` torna-se `x`).
-- **Folding de ramificações:** Avalia condições estáticas de saltos transformando `BranchTrue(constante)` em saltos incondicionais ou `IrNop`.
+- **Constant folding**: avalia em tempo de compilação aritmética de valores já conhecidos como constantes.
+- **Dead code elimination**: mark-sweep para remover instruções não utilizadas.
+- **Strength reduction**: substitui `x * 2^n` por `x << n`, `x / 2^n` por `x >> n`, `x % 2^n` por `x & (2^n - 1)`.
+- **Copy propagation**: rastreia cadeias de `IrCopy` para habilitar mais folding.
+- **Peephole**: `IrCopy(r,r)` vira `IrNop`, elimina `IrLoadImm` duplicados.
+- **Normalização algébrica**: `x - x` vira 0, `x ^ x` vira 0, folding de cadeias de constantes como `(x + 3) + 5` vira `x + 8`.
+- **Saturação de E-graph**: canonicalização comutativa, identidades bit a bit, anulação por multiplicação.
+- **CSE**: tabela hash de 128 entradas com ordenação canônica de operandos.
+- **LICM**: içar `IrLoadImm` invariantes de laço para fora das back edges.
+- **GVN**: numeração global de valores com tabela de 128 entradas.
+- **Simplificação booleana**: `(x == 0) == 0` vira `IrCopy(x)`, `bool != 0` vira `IrCopy(bool)`.
+- **Folding de branch condicional**: `BranchTrue(constante_conhecida)` vira `IrJump` ou `IrNop`.
+- **Jump-to-return**: `IrJump(L)` onde `L+1 = IrReturn` vira `IrReturn`.
 
-## Alocação de Registadores
+## Alocação de Registradores
 
-O backend nativo adota um alocador de registadores por varrimento linear (*linear-scan*) limitado a 4 registadores de uso geral: `r12`, `r13`, `r14` e `r15` (preservados pelo chamado — *callee-saved*). Quando ocorrem salvaguardas para a pilha (*spills*), o gerador de código adota uma codificação adaptativa `disp8`/`disp32` para reduzir ao mínimo o tamanho do binário gerado.
+O backend nativo usa um alocador linear-scan de 4 registradores, direcionado a `r12`, `r13`, `r14`, `r15` (callee-saved). Spills para a pilha usam codificação adaptativa `disp8`/`disp32` para minimizar o tamanho do código.
 
 ## Otimização Guiada por Perfil (PGO)
 
-O compilador inclui suporte nativo a um fluxo de otimização baseado em dados de execução real:
+O compilador self-hosted implementa um pipeline completo de PGO:
 
-1. **Instrumentação:** O compilador injeta opcodes `IrProfCounter` (gerando instruções nativas `INC [RIP+disp32]`) no ponto de entrada das funções.
-2. **Gravação de Perfil:** A chamada runtime `__prof_dump` gera ficheiros `.sprof` contendo a frequência de execução exata de cada função.
-3. **Seleção de Estratégia:** Funções com elevado tráfego (mais de 1.000 chamadas) são promovidas a `AGGRESSIVE`, enquanto funções moderadas avançam para `PRECISION`.
-4. **Inlining Inteligente:** A prioridade de integração de funções incorpora bónus derivados do perfil de execução quente.
-5. **Reordenação de Layout:** Funções críticas são agrupadas no início da secção de texto do binário ELF para reduzir falhas de cache de instruções.
+1. **Instrumentação**: opcodes `IrProfCounter` injetam `INC [RIP+disp32]` nos pontos de entrada das funções.
+2. **Dump de perfil**: `__prof_dump` grava arquivos `.sprof` na saída, com contagens de execução por função.
+3. **Promoção de estratégia**: funções quentes (contagem > 1000) são promovidas a `AGGRESSIVE`, funções mornas (> 100) a `PRECISION`.
+4. **Inlining guiado por perfil**: o score de inlining incorpora bônus de estratégia.
+5. **Layout guiado por perfil**: funções quentes são ordenadas no início do binário para localidade de cache.
 
 ## Como Executar o Compilador Self-Hosted
 
 ```bash
 SOUC=./bin/souc
 
-# Corre os testes internos de conformidade e otimização
+# Self-test (roda todos os casos de teste internos)
 $SOUC run self-hosted/compiler/main.sio -- --self-test
 
-# Apenas verificação sintática e semântica (sem geração de código)
+# Apenas verificação (sem geração de código)
 $SOUC run self-hosted/compiler/main.sio -- --check
 
-# Dump da representação intermédia (IR) de uma função específica
+# Dump de IR para uma função específica
 $SOUC run self-hosted/compiler/main.sio -- --ir-dump --fn=main
 ```
 
-## Verificação e Conformidade
+## Verificação
 
-A estabilidade e robustez do compilador *self-hosted* são validadas continuamente através de mais de 347 testes internos focados em garantir a precisão e a correção de cada passo do otimizador. As diretivas rigorosas de integração impedem a introdução de regressões sem a validação verde de todos os cenários.
+O compilador self-hosted se valida através de mais de 347 self-tests cobrindo cada passagem de otimização. Scripts de gate (ex.: `scripts/sprint52_regalloc_gate.sh`) rodam a matriz completa de testes e reportam contagens de PASS/FAIL/NOT_RUN.

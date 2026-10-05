@@ -9,6 +9,9 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 
 # Relational Associator
 
+
+Status: **executable**
+
 Concept-ID: `SOUNIO-RELATIONAL-ASSOCIATOR`
 
 ## Founder Intent

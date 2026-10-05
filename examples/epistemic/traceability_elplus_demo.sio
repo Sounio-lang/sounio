@@ -1,0 +1,272 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+// Metrological traceability as EL+ role composition — the VIM3 "unbroken
+// chain of calibrations" (JCGM 200:2012, 2.41) expressed as a role-aware
+// EL+ TBox over the verified dense fixpoint of stdlib/ontology/elplus.sio
+// (executable mirror of crStep / closeSatF of
+// formal/OntologyELPlusClosureComplete.lean, subBPlusC_iff).
+//
+// This REPLACES the hand-rolled 4-link TraceabilityChain walk of
+// stdlib/epistemic/traceability.sio with a declarative TBox: the chain is
+// not walked imperatively, it is DERIVED by the roleComp completion rule.
+//
+//   Concepts (atoms):
+//     0 Measurement            1 ReferenceStandard   2 WorkingStandard
+//     3 AccreditedLabStandard  4 NationalStandard    5 SIPrimary
+//     6 FieldDevice            7 top
+//
+//   Concept subsumption (the standards hierarchy):
+//     WorkingStandard        ⊑ ReferenceStandard
+//     AccreditedLabStandard  ⊑ ReferenceStandard
+//     NationalStandard       ⊑ ReferenceStandard
+//     SIPrimary              ⊑ ReferenceStandard
+//     FieldDevice            ⊑ Measurement
+//
+//   Roles:  0 calibratedAgainst  1 traceableTo  2 contributesUncertainty
+//
+//   Role axioms:
+//     calibratedAgainst ∘ calibratedAgainst ⊑ traceableTo  (chain rule)
+//     calibratedAgainst ⊑ traceableTo                      (single link)
+//     traceableTo ∘ traceableTo ⊑ traceableTo              (transitivity —
+//       VIM "unbroken chain": needed so roleComp iterates over chains of
+//       ANY length N, not just the 2-link compositions the first two
+//       axioms yield on their own)
+//
+//   Stated calibration chain (VIM3 4-level chain, result -> SI):
+//     Measurement           ⊑ ∃calibratedAgainst.WorkingStandard
+//     WorkingStandard       ⊑ ∃calibratedAgainst.AccreditedLabStandard
+//     AccreditedLabStandard ⊑ ∃calibratedAgainst.NationalStandard
+//     NationalStandard      ⊑ ∃calibratedAgainst.SIPrimary
+//   plus the uncertainty-budget edge (VIM: "each contributing to the
+//   measurement uncertainty"):
+//     Measurement           ⊑ ∃contributesUncertainty.WorkingStandard
+//
+// Interned concept universe (ckind: 0 atom, 1 top, 3 existential; no
+// conjunctions in this TBox):
+//   0..6  atoms                          7  top
+//   8     ∃calibratedAgainst.WorkingStandard
+//   9     ∃calibratedAgainst.AccreditedLabStandard
+//   10    ∃calibratedAgainst.NationalStandard
+//   11    ∃calibratedAgainst.SIPrimary
+//   12    ∃traceableTo.WorkingStandard        (needed by roleSub/roleComp:
+//   13    ∃traceableTo.AccreditedLabStandard   derived edges only materialise
+//   14    ∃traceableTo.NationalStandard        when the target existential is
+//   15    ∃traceableTo.SIPrimary               interned — the conceptUniv
+//   16    ∃traceableTo.ReferenceStandard       restriction of the Lean dev)
+//   17    ∃contributesUncertainty.WorkingStandard
+// Base concepts (role-edge fillers) are the atoms 0..6 + top, nb = 8.
+//
+// THE QUERY: "is result R traceable to SI?"  ==
+//   Measurement ⊑ ∃traceableTo.SIPrimary
+// answered by elplus_subsumes_dense in O(1) after ONE fixpoint run — the
+// composed traceableTo edge (Measurement, SIPrimary) is derived by
+// roleComp over the 4 stated calibratedAgainst links.  N-LINK EXTENSION:
+// FieldDevice reaches SIPrimary through a 5-edge path (one inherited
+// link + the 4 stated ones) with NO extra code and no 4-link cap —
+// chain length is bounded only by the 64-concept budget of the dense
+// variant.
+//
+// Checked queries:
+//   Measurement  ⊑ ∃traceableTo.SIPrimary            = true  (4-link chain)
+//   FieldDevice  ⊑ ∃traceableTo.SIPrimary            = true  (5-link chain)
+//   WorkingStandard ⊑ ∃traceableTo.SIPrimary         = true  (3-link chain)
+//   Measurement  ⊑ ∃traceableTo.ReferenceStandard    = true  (Rmono via
+//                                                            SIPrimary ⊑ RefStd)
+//   edge (traceableTo, Measurement, SIPrimary)       = true  (role-cube O(1))
+//   ReferenceStandard ⊑ ∃traceableTo.SIPrimary       = false (a generic
+//                                     reference is not itself SI-traceable)
+//   edge (contributesUncertainty, Measurement, SIPrimary) = false (the
+//                                     uncertainty role does NOT compose
+//                                     into traceability)
+//
+// Relations (parallel primitive arrays with splat init; no struct arrays,
+// no where clauses — see artifacts/ontology-frontiers/compiler-repros/REPORT.md):
+//   s[c*64+d]                    subsumption pairs over the universe
+//   redges[(r*64+c)*64+f]        role edges (r, C, f), f base
+//   rclos[r*8+s]                 role-hierarchy closure
+//   exid[r*64+f]                 interned id of ∃r.(base f), or -1
+
+// NOTE: NAMED imports — the qualified form (`use ontology::elplus;
+// f(...)`) miscompiles on the current Madaros imported-module
+// native lane (see docs/compiler/KNOWN_LIMITATIONS.md).
+use ontology::elplus::{elplus_role_closure, elplus_seed, elplus_fixpoint, elplus_subsumes_dense, elplus_edge_dense}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var n_fail = 0
+
+    // ── Concept interning table ─────────────────────────────────────────
+    var ckind: [i64; 64] = [0; 64]
+    var carg1: [i64; 64] = [0; 64]
+    var carg2: [i64; 64] = [0; 64]
+    var ci: i64 = 0
+    while ci < 7 {
+        ckind[ci] = 0
+        carg1[ci] = ci
+        ci = ci + 1
+    }
+    ckind[7] = 1
+    // ∃calibratedAgainst.{WorkingStandard, AccreditedLabStandard,
+    // NationalStandard, SIPrimary}
+    ckind[8] = 3
+    carg1[8] = 0
+    carg2[8] = 2
+    ckind[9] = 3
+    carg1[9] = 0
+    carg2[9] = 3
+    ckind[10] = 3
+    carg1[10] = 0
+    carg2[10] = 4
+    ckind[11] = 3
+    carg1[11] = 0
+    carg2[11] = 5
+    // ∃traceableTo.{WorkingStandard, AccreditedLabStandard,
+    // NationalStandard, SIPrimary, ReferenceStandard}
+    ckind[12] = 3
+    carg1[12] = 1
+    carg2[12] = 2
+    ckind[13] = 3
+    carg1[13] = 1
+    carg2[13] = 3
+    ckind[14] = 3
+    carg1[14] = 1
+    carg2[14] = 4
+    ckind[15] = 3
+    carg1[15] = 1
+    carg2[15] = 5
+    ckind[16] = 3
+    carg1[16] = 1
+    carg2[16] = 1
+    // ∃contributesUncertainty.WorkingStandard
+    ckind[17] = 3
+    carg1[17] = 2
+    carg2[17] = 2
+
+    // ── exid[r*64+f] = interned id of ∃r.(base f), or -1 ───────────────
+    var exid: [i64; 512] = [0; 512]
+    ci = 0
+    while ci < 512 {
+        exid[ci] = 0 - 1
+        ci = ci + 1
+    }
+    exid[0 * 64 + 2] = 8
+    exid[0 * 64 + 3] = 9
+    exid[0 * 64 + 4] = 10
+    exid[0 * 64 + 5] = 11
+    exid[1 * 64 + 2] = 12
+    exid[1 * 64 + 3] = 13
+    exid[1 * 64 + 4] = 14
+    exid[1 * 64 + 5] = 15
+    exid[1 * 64 + 1] = 16
+    exid[2 * 64 + 2] = 17
+
+    // ── Role hierarchy: calibratedAgainst ⊑ traceableTo ────────────────
+    var rclos: [bool; 64] = [false; 64]
+    rclos[0 * 8 + 1] = true
+    elplus_role_closure(&!rclos, 3)
+
+    // ── Composition chains: ca ∘ ca ⊑ tt  and  tt ∘ tt ⊑ tt ────────────
+    var ch1: [i64; 8] = [0; 8]
+    var ch2: [i64; 8] = [0; 8]
+    var ch3: [i64; 8] = [0; 8]
+    ch1[0] = 0
+    ch2[0] = 0
+    ch3[0] = 1
+    ch1[1] = 1
+    ch2[1] = 1
+    ch3[1] = 1
+
+    // ── Seed S: reflexivity + top + stated inclusions ──────────────────
+    var s: [bool; 4096] = [false; 4096]
+    elplus_seed(&!s, 18, 7)
+    // standards hierarchy
+    s[2 * 64 + 1] = true
+    s[3 * 64 + 1] = true
+    s[4 * 64 + 1] = true
+    s[5 * 64 + 1] = true
+    // a field-device result is a measurement
+    s[6 * 64 + 0] = true
+    // the stated calibration chain (VIM3: result -> working -> accredited
+    // -> national -> SI primary)
+    s[0 * 64 + 8] = true
+    s[2 * 64 + 9] = true
+    s[3 * 64 + 10] = true
+    s[4 * 64 + 11] = true
+    // uncertainty budget: the working standard contributes uncertainty
+    s[0 * 64 + 17] = true
+
+    // ── ONE dense 8-rule fixpoint (crStep mirror, iterated to stability) ─
+    var redges: [bool; 32768] = [false; 32768]
+    let rounds = elplus_fixpoint(&!s, &!redges, &ckind, &carg1, &carg2, &exid, &rclos, &ch1, &ch2, &ch3, 2, 18, 8, 3)
+
+    println("closure rounds:")
+    println(rounds)
+
+    // ── Query 1 (THE traceability query): is the measurement result
+    //    traceable to SI?  Measurement ⊑ ∃traceableTo.SIPrimary ─────────
+    if elplus_subsumes_dense(&s, 0, 15) {
+        println("traceableTo SI (4-link chain) = true")
+    } else {
+        println("FAIL: Measurement <= ex traceableTo.SIPrimary should be true")
+        n_fail = n_fail + 1
+    }
+
+    // ── Query 2 (N-link extension): FieldDevice ⊑ ∃traceableTo.SIPrimary
+    //    — a 5-edge path, derived with no chain-length cap ──────────────
+    if elplus_subsumes_dense(&s, 6, 15) {
+        println("traceableTo SI (5-link chain) = true")
+    } else {
+        println("FAIL: FieldDevice <= ex traceableTo.SIPrimary should be true")
+        n_fail = n_fail + 1
+    }
+
+    // ── Query 3: WorkingStandard ⊑ ∃traceableTo.SIPrimary (3 links) ────
+    if elplus_subsumes_dense(&s, 2, 15) {
+        println("traceableTo SI (3-link chain) = true")
+    } else {
+        println("FAIL: WorkingStandard <= ex traceableTo.SIPrimary should be true")
+        n_fail = n_fail + 1
+    }
+
+    // ── Query 4: Measurement ⊑ ∃traceableTo.ReferenceStandard (Rmono
+    //    through SIPrimary ⊑ ReferenceStandard) ─────────────────────────
+    if elplus_subsumes_dense(&s, 0, 16) {
+        println("traceableTo ReferenceStandard (Rmono) = true")
+    } else {
+        println("FAIL: Measurement <= ex traceableTo.ReferenceStandard should be true")
+        n_fail = n_fail + 1
+    }
+
+    // ── Query 5: the composed role edge itself, O(1) on the role cube ──
+    if elplus_edge_dense(&redges, 1, 0, 5) {
+        println("edge (traceableTo, Measurement, SIPrimary) = true")
+    } else {
+        println("FAIL: derived edge (traceableTo, Measurement, SIPrimary) missing")
+        n_fail = n_fail + 1
+    }
+
+    // ── Query 6 (negative): a generic ReferenceStandard is NOT itself
+    //    traceable to SI — no calibration edges leave concept 1 ─────────
+    if elplus_subsumes_dense(&s, 1, 15) {
+        println("FAIL: ReferenceStandard <= ex traceableTo.SIPrimary should be false")
+        n_fail = n_fail + 1
+    } else {
+        println("traceableTo SI from bare ReferenceStandard = false")
+    }
+
+    // ── Query 7 (negative): contributesUncertainty does NOT compose into
+    //    traceability — no uncertainty edge reaches SIPrimary ───────────
+    if elplus_edge_dense(&redges, 2, 0, 5) {
+        println("FAIL: edge (contributesUncertainty, Measurement, SIPrimary) should be false")
+        n_fail = n_fail + 1
+    } else {
+        println("edge (contributesUncertainty, Measurement, SIPrimary) = false")
+    }
+
+    if n_fail == 0 {
+        println("ALL PASS")
+        return 0
+    }
+    println("FAILURES:")
+    println(n_fail)
+    return 1
+}

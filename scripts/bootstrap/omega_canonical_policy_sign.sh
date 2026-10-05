@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Resolved here, at the top, because this script changes directory later and a
+# relative BASH_SOURCE stops resolving once it does.
+_SOUC_GUARD_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/souc_verb_guard.sh"
+. "$_SOUC_GUARD_LIB"
 
 usage() {
   cat <<'EOF'
@@ -70,6 +74,11 @@ if [ -z "$OUT_PATH" ]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Refuse before the work, and name what is actually missing: the `opt`
+# verbs went with the Rust crate (79acc192e1) and the fall-through
+# diagnostic reports a missing FILE. See scripts/lib/souc_verb_guard.sh.
+require_souc_verb "$SOUC_BIN" opt "signing the canonical policy"
+
 CANONICAL_BOOTSTRAP_SCRIPT="${OMEGA_CANONICAL_BOOTSTRAP_SCRIPT:-$SCRIPT_DIR/omega_canonical_key_bootstrap.sh}"
 if [ ! -x "$CANONICAL_BOOTSTRAP_SCRIPT" ]; then
   echo "error: canonical bootstrap script not executable: $CANONICAL_BOOTSTRAP_SCRIPT" >&2

@@ -17,7 +17,7 @@ Generated artifacts:
 
 To regenerate:
 ```bash
-python3 scripts/roofline_octonion_matmul.py \
+python3 scripts/benchmarks/roofline_octonion_matmul.py \
   --criterion-dir target/criterion/octonion_matmul \
   --out-csv docs/compiler/figures/octonion_matmul_points.csv
 ```
