@@ -31,7 +31,15 @@ import numpy as np
 TEMPERATURE = 1500.0
 END_TIME = 4.0e-7
 SEED_H = 1.0e-11  # mol / cm^3
-GAS_CONSTANT_CM3_ATM = 82.057  # matches the Sounio checkpoint exactly
+# mol/cm^3 at 1 atm is P0/(R*T)*1e-6.  This file used to carry the 82.057
+# shorthand, whose truncated molar gas volume ran 4.461e-06 high; it matched
+# the Sounio checkpoint only because Sounio carried the same shorthand.
+#
+# The form matters, not just the value: 1/(Rcgs*T) and P0/(R*T)*1e-6 differ by
+# 1 ULP, and this stack is compared at 1-30 ULP.  Every site uses the SAME
+# expression the Sounio modules use, so the arithmetic is bit-identical.
+P0 = 101325.0
+R_SI = 8.31446261815324  # J/(mol*K)
 RTOL = 1.0e-12
 ATOL = 1.0e-22
 
@@ -52,7 +60,7 @@ NAMED_UREL = {
 
 def initial_concentrations(gas: ct.Solution) -> np.ndarray:
     """Exact Sounio initial concentrations in mol/cm^3."""
-    total = 1.0 / (GAS_CONSTANT_CM3_ATM * TEMPERATURE)
+    total = P0 / (R_SI * TEMPERATURE) * 1e-6
     c = np.zeros(gas.n_species)
     c[gas.species_index("H2")] = 0.02 * total
     c[gas.species_index("O2")] = 0.01 * total

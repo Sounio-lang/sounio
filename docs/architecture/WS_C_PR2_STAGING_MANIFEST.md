@@ -20,7 +20,7 @@ Source of truth: `docs/architecture/WS_C_PR1_PAYLOAD_CENSUS.md` on `origin/main`
 
 PR2 should land the reviewable gate/payload bulk from the C1 census without touching the occupied `self-hosted/` writer surfaces and without violating C3 shared-oracle ownership.
 
-Use `scripts/dev/ws_c_pr2_stage_payload.sh` as the executable staging manifest. It copies files from `origin/canon/madaros-v2-sota` into a target worktree in ordered groups, refuses to overwrite existing different content, and fails if a `tools/eisa/` or `stdlib/eisa/` path already exists on `origin/main`.
+The staging driver `scripts/dev/ws_c_pr2_stage_payload.sh` is **not in the repository** — it exists in no ref of this repo, so the invocations recorded below document the interface it was to expose rather than a command you can run today. The **Review Chunks** table in this document is the file-level manifest of record. As specified, the driver copies files from `origin/canon/madaros-v2-sota` into a target worktree in ordered groups, refuses to overwrite existing different content, and fails if a `tools/eisa/` or `stdlib/eisa/` path already exists on `origin/main`.
 
 Default PR2 staging mode is the **49-file non-enir payload**:
 
@@ -86,7 +86,7 @@ Only `tools/eisa/eisa_evm_run.sio` is a shared oracle source in the C3 sense. It
 
 ## Exact Ordered File List
 
-The script is the executable copy source. To view the exact ordered list with per-file provenance:
+The script was to be the executable copy source; since it is not in the repository, the exact ordered list is not reproducible from `main` and the **Review Chunks** table above is the surviving record. The intended invocations were:
 
 ```bash
 bash scripts/dev/ws_c_pr2_stage_payload.sh --list --mode all63

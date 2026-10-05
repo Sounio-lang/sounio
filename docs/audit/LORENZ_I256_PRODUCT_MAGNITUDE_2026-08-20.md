@@ -29,9 +29,11 @@ The comparison bound was the signed i64 maximum:
 
     2^63 - 1 = 9,223,372,036,854,775,807
 
-The observed value is 868,167,572 times that bound. It is therefore an
-observed product, not an inferred requirement from the type name or from the
-number of digits in a source literal.
+The observed value is exactly 868,167,572 times `2^63`, not exactly that many
+times `2^63 - 1`. Dividing by the signed i64 maximum gives quotient
+868,167,572 and remainder 868,167,572. It is therefore an observed product,
+not an inferred requirement from the type name or from the number of digits in
+a source literal.
 
 ## Measurement
 

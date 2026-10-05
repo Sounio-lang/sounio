@@ -13,37 +13,71 @@ source_of_truth: "docs/governance/topic-registry.v1.json#website.docs.gpu"
 
 # GPU プログラミング
 
-このリポジトリの現在のスナップショットには、2つのチェックイン済み
-compiler profile があります。
+このリポジトリの現在のスナップショットには、2つの GPU compiler パスが
+あります。
 
-- `souc-linux-x86_64`: 既定の native profile
-- `souc-linux-x86_64-gpu`: 公開 GPU profile
+- `souc-linux-x86_64`（既定の self-hosted artifact）: GPU 構文をコンパイルし、
+  serial CPU fallback を実行し、`kretikos` に定義済み PTX/CUBIN artifact
+  template を構築させます。
+- `souc-linux-x86_64-gpu`（GPU 向け artifact）: `build --backend gpu` による、
+  より広い PTX 出力に対応した別バイナリです。
 
-## Self-hosted GPU パス
+## Self-hosted GPU パス（CPU fallback + artifact template）
 
-既定の self-hosted compiler (`bin/souc`) は GPU kernel 構文を受け付け、`kretikos` から定義済み artifact template を出力できます:
+既定のコンパイラ（`bin/souc` または `bin/souc-linux-x86_64`）は GPU kernel
+構文を受け付け、決定論的な serial CPU fallback を実行します。Kretikos CLI
+はそのコンパイラを使って小さな in-tree emitter driver を構築し、定義済みの
+GPU artifact template を書き出します:
 
 ```bash
-# 定義済み vec_add PTX template を出力
+# 定義済み PTX template を出力する（self-hosted、GPU 不要）
 kretikos emit-ptx vec_add     -o /tmp/kernel.ptx
 kretikos emit-ptx vec_sub     -o /tmp/kernel.ptx
 kretikos emit-ptx vec_mul     -o /tmp/kernel.ptx
 kretikos emit-ptx vec_div     -o /tmp/kernel.ptx
 kretikos emit-ptx vec_add_f64 -o /tmp/kernel.ptx
 kretikos emit-ptx fma         -o /tmp/kernel.ptx
+kretikos emit-ptx fma_f64     -o /tmp/kernel.ptx
+kretikos emit-ptx store_u32_const -o /tmp/kernel.ptx
 
+# 定義済み Metal/MSL template を出力する（self-hosted、macOS 不要）
 kretikos emit-metal vec_add          -o /tmp/kernel.metal
 kretikos emit-metal ossm_oct_step    -o /tmp/kernel.metal
 kretikos emit-metal sedenion_cd_step -o /tmp/kernel.metal
 
-# 定義済み vec_add_f32 CUBIN template を出力
+# 定義済み CUBIN template を出力する
+kretikos emit-cubin exit_only -o /tmp/kernel.cubin
+kretikos emit-cubin store_u32_const -o /tmp/kernel.cubin
 kretikos emit-cubin vec_add_f32 -o /tmp/kernel.cubin
+kretikos emit-cubin epistemic_dual_f32 -o /tmp/kernel.cubin
 
-# PTX+CUBIN と structural bundle manifest を出力
+# 構造化された artifact bundle（PTX、CUBIN、ハッシュ、境界）を出力する
 kretikos bundle -o /tmp/kretikos-bundle
+
+# 任意で assembler/disassembler と CUDA Driver API の証拠を記録する
+kretikos bundle -o /tmp/kretikos-validated-bundle --validate-toolchain --validate-runtime
 ```
 
-## 現在確認済みの内容
+この時点で確認できる事実:
+
+- self-hosted compiler は `kernel fn`、`with GPU`、`GPU.launch`、`GPU.sync` を
+  コンパイルします。
+- CPU fallback は決定論的な thread/block ID でカーネルを直列実行します。
+- `kretikos` CLI wrapper は、in-tree の Sounio コードから定義済みの PTX
+  テキストと NVIDIA CUDA ELF/CUBIN バイトの template を出力します。
+- `kretikos bundle` コマンドは、artifact ハッシュ、構造チェック、任意の
+  `ptxas`/`nvdisasm` と CUDA Driver API 検証、明示的な non-claims を含む
+  機械可読の `sounio.kretikos.bundle.v1` manifest を書き出します。
+- **このパスは、まだ任意のユーザー kernel ソースを PTX/CUBIN に lowering
+  しません。**
+- ツールチェイン/ランタイム検証は、`kretikos` が選択した定義済みの
+  PTX/CUBIN template にのみ適用され、任意のユーザーが書いた kernel を
+  検証するものではありません。
+
+## GPU artifact パス（より広い PTX 出力）
+
+チェックイン済み GPU artifact は、より広いパターンサポートを持つ別バイナリ
+です:
 
 ```bash
 export SOUC_GPU_BIN="$(pwd)/artifacts/omega/souc-bin/souc-linux-x86_64-gpu"
@@ -55,15 +89,9 @@ export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 "$SOUC_GPU_BIN" build examples/kernel_matmul.sio --backend gpu -o /tmp/kernel_matmul.ptx
 ```
 
-この時点で確認できる事実:
+## 公開 surface とソースツリー surface
 
-- チェックイン済み GPU artifact では GPU codegen が有効です。
-- 公開 PTX 出力経路は `build --backend gpu` です。
-- `kernel fn`、`with GPU`、`GPU.launch`、`GPU.sync` はその GPU profile で受理されます。
-
-## 現在の公開 surface
-
-現在公開かつ検証済み:
+チェックイン済みの公開 GPU artifact が現在受理するもの:
 
 - `kernel fn`
 - `with GPU`
@@ -71,12 +99,23 @@ export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 - `perform GPU.sync()`
 - `build --backend gpu` による PTX 出力
 
-まだチェックイン済み公開 surface ではないもの:
+self-hosted compiler（`bin/souc`）も同じ構文を受理し、さらに次を扱います:
+- `kretikos emit-ptx` による定義済み PTX template
+- `kretikos emit-cubin` による定義済み CUBIN template
+- `kretikos bundle` による構造化された PTX/CUBIN artifact bundle
+- `kretikos bundle --require-toolchain` と `kretikos bundle --require-runtime`
+  によるオプションの fail-closed ツールチェイン/ランタイムチェック
+
+チェックイン済みの公開 GPU artifact は、過去のスケッチに由来する古い
+`gpu.*` intrinsic 名前空間をまだ解決しません:
 
 - `gpu.thread_id.*`
 - `gpu.block_id.*`
 - `gpu.block_dim.*`
 - `gpu.alloc<T>(...)`
+
+これらの名前は実装上の物語としては今も重要ですが、まだ推奨される公開構文
+ではありません。
 
 ## Backend の証拠
 
@@ -91,3 +130,12 @@ export SOUNIO_STDLIB_PATH="$(pwd)/stdlib"
 
 - CUDA: `cuda-sm80`
 - ROCm: `rocm-gfx942`
+
+## より大きな GPU 実装がある場所
+
+- `self-hosted/gpu/` には PTX、SPIR-V、Metal、runtime、tensor、tuning に
+  関する作業が含まれています。
+- `docs/features/GPU_RUNTIME.md` は、現在の contract に関するリポジトリ
+  ネイティブの説明です。
+- self-hosted ツリーには内部の `gpu-emit` パスも残っていますが、
+  チェックイン済みの公開 CLI パスは `build --backend gpu` です。

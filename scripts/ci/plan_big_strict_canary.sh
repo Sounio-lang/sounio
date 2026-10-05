@@ -13,7 +13,7 @@ GATE_ARGS="${PLAN_BIG_STRICT_CANARY_GATE_ARGS:---with-overnight-health --overnig
 
 usage() {
   cat <<USAGE
-Usage: scripts/plan_big_strict_canary.sh [--gate-script PATH_OR_CMD] [--gate-args "ARGS"]
+Usage: scripts/ci/plan_big_strict_canary.sh [--gate-script PATH_OR_CMD] [--gate-args "ARGS"]
 
 Environment:
   PLAN_BIG_STRICT_CANARY_GATE_SCRIPT  Gate script/command (default: scripts/ci/plan_big_gate.sh)

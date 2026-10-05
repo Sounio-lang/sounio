@@ -20,7 +20,40 @@ self-hosted compiler without runtime Rust compilation of the root suite.
 
 ## R2 Cutover Update (No-Rust Contracts)
 
-Sounio now supports signed bundle/state bootstrap commands:
+This section described signed bundle/state bootstrap commands:
+
+> **These commands do not exist.** `bootstrap` and `opt` were subcommands of the
+> Rust `souc` (`crates/souc/src/main.rs`), removed on 2026-02-26 by
+> `79acc192e1 [cutover] Remove Rust crates -- compiler is self-hosted`. The
+> Madaros compiler shipped as `bin/souc` has no `bootstrap` or `opt` verb --
+> `souc --help` does not list them. They do fail loudly rather than silently:
+> `souc bootstrap verify --bundle bootstrap` exits **1**, because `souc` falls
+> back to treating an unrecognised argument as a source filename and
+> reports `error: at bootstrap:0:0 - could not read input file`. The diagnostic
+> names a missing file rather than a missing subcommand, so it misdirects, but
+> it is a real refusal and no script relying on it can pass silently. (Note that
+> `souc --help` is not a complete inventory of what the binary dispatches --
+> `souc ontology`, for instance, is a real, working subcommand that the help
+> text omits. Absence from `--help` is not by itself proof a verb is gone;
+> running it is.) The signed
+> data these verbs operated on is still in the tree
+> (`bootstrap/artifacts/manifest.v2.json`, `bootstrap/policies/policy.v1.json`),
+> but nothing in the shipped compiler reads it, and every in-repo wrapper that
+> still calls these verbs (`scripts/selfhost/selfhost_independence_gate.sh`,
+> `scripts/selfhost/selfhost_cycle_gate.sh`,
+> `scripts/omega/omega_strict_closure_gate.sh`,
+> `scripts/bootstrap/bootstrap_verify_artifacts.sh`,
+> `scripts/omega/omega_prepare_policy_smoke.sh`,
+> `scripts/omega/omega_policy_status.sh`,
+> `scripts/bootstrap/omega_canonical_policy_sign.sh`,
+> `scripts/dev/diverse_double_compile_check.sh`) is dead for the same reason.
+> The bootstrap chain that is actually exercised today is
+> `scripts/ci/bootstrap_chain_gate.sh`, which drives `bootstrap/stage0.c` ->
+> `bootstrap/boot1.sio` directly without any `souc` subcommand, alongside
+> `scripts/bootstrap/bootstrap_full_gate.sh`. Seed rebuilds go through
+> `scripts/bootstrap/build_bootstrap_seed.sh` and
+> `scripts/dev/refresh_lean_seed.sh`. The optimization-policy lane has no
+> surviving entrypoint at all. The list below is retained for lineage only.
 
 - `souc bootstrap verify --bundle <dir>`
 - `souc bootstrap init --bundle <dir> --state <dir>`
@@ -34,7 +67,9 @@ The signed bundle contract is defined by `bootstrap/artifacts/manifest.v2.json`
 
 Optimization policy contract is defined by
 `bootstrap/policies/policy.v1.json`
-(`schema = "sounio.optimization.policy.v1"`). Policy promotion/evaluation uses:
+(`schema = "sounio.optimization.policy.v1"`). The file is still in the tree, but
+the CLI that promoted and evaluated it is gone with the Rust crates (see the
+note above); these four invocations are retained for lineage only:
 
 - `souc opt policy train --corpus <path> --output <file>`
 - `souc opt policy eval --policy <file>`
@@ -132,7 +167,7 @@ In seed-enforced wrapper mode:
 Generate/update seed artifact with:
 
 ```bash
-bash scripts/build_bootstrap_seed.sh
+bash scripts/bootstrap/build_bootstrap_seed.sh
 ```
 
 This script:
@@ -178,7 +213,7 @@ Diverse Double-Compilation*. PhD dissertation, George Mason University.
 Before any tagged release of Sounio, the following command **must exit 0**:
 
 ```bash
-bash scripts/diverse_double_compile_check.sh
+bash scripts/dev/diverse_double_compile_check.sh
 ```
 
 This builds `souc` under two independent host toolchains:
@@ -214,13 +249,13 @@ compiler could have silently modified the Sounio code.
 
 ```bash
 # Full check (two cargo builds, ~5–10 min):
-bash scripts/diverse_double_compile_check.sh
+bash scripts/dev/diverse_double_compile_check.sh
 
 # Skip rebuild if binaries already exist:
-bash scripts/diverse_double_compile_check.sh --skip-build
+bash scripts/dev/diverse_double_compile_check.sh --skip-build
 
 # Use a custom reference program:
-bash scripts/diverse_double_compile_check.sh --ref-program path/to/program.sio
+bash scripts/dev/diverse_double_compile_check.sh --ref-program path/to/program.sio
 
 # Rust integration test (requires pre-built DDC binaries):
 cargo test -p souc --test ddc_check -- --include-ignored

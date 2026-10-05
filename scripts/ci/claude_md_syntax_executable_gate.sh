@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/lib/gate_artifact.sh"
 # The CLAUDE.md section 7 syntax table, executed.
 #
 # GATE_CONTRACT: v0
@@ -77,7 +78,7 @@ pass=0; fail=0
 for row in "${rows[@]}"; do
   id=$(cut -f1 <<<"$row"); verdict=$(cut -f2 <<<"$row"); frag=$(cut -f3- <<<"$row")
   f="$WORK/$id.sio"
-  printf '%b\n' "$frag" > "$f"
+  printf '%b\n' "$frag" | gate_write_artifact "$f"
   out=$(timeout 200 "$SOUC" check "$f" 2>&1); 
   refused=0
   grep -qiE 'error|failed to parse' <<<"$out" && refused=1
@@ -117,7 +118,7 @@ if (( fail > 0 )); then
 else
   echo "OK: all ${n} rows of the CLAUDE.md syntax table hold."
 fi
-cat > "$OUT" <<JSON
+cat <<JSON | gate_write_artifact "$OUT"
 {
   "gate": "claude_md_syntax_executable",
   "status": "${status}",

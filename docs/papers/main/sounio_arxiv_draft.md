@@ -40,7 +40,7 @@ bibliography: references.bib
 
 # Abstract
 
-We present Sounio, a self-hosted systems programming language designed for verifiable scientific computing. Sounio integrates **epistemic types** (`Knowledge<T,ε>`) for uncertainty quantification following the Guide to the Expression of Uncertainty in Measurement (GUM), **linear types** for resource safety, **refinement types** with SMT verification, and **algebraic effect tracking** for computational purity. The compiler implements a verified 3-stage bootstrap (Rust-hosted Stage 1 → Sounio self-hosted Stage 2 → verified equivalence) and generates native code via multiple backends (native ELF/Mach-O, LLVM, Cranelift). We demonstrate Sounio's capabilities through pharmacokinetic modeling with certified uncertainty bounds, showing 10-100× more compact uncertainty propagation compared to Monte Carlo methods, while maintaining systems-level performance.
+We present Sounio, a self-hosted systems programming language designed for verifiable scientific computing. Sounio integrates **epistemic types** (`Epistemic`) for uncertainty quantification following the Guide to the Expression of Uncertainty in Measurement (GUM), **linear types** for resource safety, **refinement types** with SMT verification, and **algebraic effect tracking** for computational purity. The compiler implements a verified 3-stage bootstrap (Rust-hosted Stage 1 → Sounio self-hosted Stage 2 → verified equivalence) and generates native code via multiple backends (native ELF/Mach-O, LLVM, Cranelift). We demonstrate Sounio's capabilities through pharmacokinetic modeling with certified uncertainty bounds, showing 10-100× more compact uncertainty propagation compared to Monte Carlo methods, while maintaining systems-level performance.
 
 # 1. Introduction
 
@@ -56,7 +56,7 @@ This gap creates recurring failure modes in scientific software:
 
 Sounio bridges this gap by integrating four key innovations:
 
-- **Epistemic types** (§2.1): First-class `Knowledge<T,ε>` types that encode uncertainty bounds at the type level, with automatic GUM-compliant propagation
+- **Epistemic types** (§2.1): First-class `Epistemic` types that encode uncertainty bounds at the type level, with automatic GUM-compliant propagation
 - **Linear types** (§2.2): Affine type system ensuring single consumption of resources
 - **Refinement types with SMT** (§2.3): Compile-time verification of value constraints via Z3 integration
 - **Algebraic effect system** (§2.4): Explicit tracking of computational effects (IO, Mut, Div, Async, GPU)
@@ -67,7 +67,7 @@ The implementation achieves full self-hosting (§3) with a verified bootstrap en
 
 ## 2.1 Epistemic Types
 
-The central abstraction `Knowledge<T, ε, Φ, t>` couples a value with uncertainty metadata:
+The central abstraction `Epistemic` couples a value with uncertainty metadata:
 
 - `T`: Base type (`f64`, `i32`, etc.)
 - `ε`: Standard uncertainty bound (relative or absolute)
@@ -78,7 +78,7 @@ The central abstraction `Knowledge<T, ε, Φ, t>` couples a value with uncertain
 
 ```sio
 // Create from measurement with standard uncertainty
-let mass = epistemic_std(75.0, 0.5, 0.95)  // value, std_uncert, confidence
+let mass = ep_std(75.0, 0.5, 0.95)  // value, std_uncert, confidence
 
 // Create from interval bounds
 let temp = epistemic_interval(20.0, 25.0, 0.99)  // lo, hi, confidence
@@ -93,13 +93,13 @@ Epistemic types automatically propagate uncertainty following JCGM 100:2008 (GUM
 
 **Addition/Subtraction** (uncorrelated):
 ```sio
-let sum = add_epistemic(mass_1, mass_2)
+let sum = ep_add(mass_1, mass_2)
 // σ_sum = √(σ₁² + σ₂²)   [RSS propagation]
 ```
 
 **Multiplication/Division** (relative uncertainty):
 ```sio
-let product = mul_epistenic(dose, volume)
+let product = ep_mul(dose, volume)
 // σ_rel = √((σ₁/v₁)² + (σ₂/v₂)²)
 // σ_product = |v₁ × v₂| × σ_rel
 ```
@@ -115,9 +115,9 @@ let clearance = transform(clearance_fn, dose, weight, age)
 Multiple measurements of the same quantity can be fused for reduced uncertainty:
 
 ```sio
-let m1 = epistemic_std(100.0, 5.0, 0.90)
-let m2 = epistemic_std(102.0, 4.0, 0.85)
-let fused = fuse_measurements(m1, m2)  // Weighted by inverse variance
+let m1 = ep_std(100.0, 5.0, 0.90)
+let m2 = ep_std(102.0, 4.0, 0.85)
+let fused = ep_merge(m1, m2)  // Weighted by inverse variance
 // σ_fused = 1/√(1/σ₁² + 1/σ₂²) ≈ 3.1
 ```
 
@@ -190,7 +190,7 @@ fn map_effect<T, U>(f: fn(T) -> U with E, xs: [T]) -> [U] with E {
 
 Effects compose with epistemic types for audit trails:
 ```sio
-fn measure_with_provenance() -> Knowledge<f64, 0.05> with IO {
+fn measure_with_provenance() -> Epistemic with IO {
     perform IO.read_sensor()  // Effect tracked with provenance
 }
 ```
@@ -266,16 +266,16 @@ Physiologically-based pharmacokinetic (PBPK) models predict drug concentration o
 
 ```sio
 struct PKParams {
-    dose: Knowledge<mg>,           // Administered dose
-    volume: Knowledge<L>,          // Distribution volume
-    clearance: Knowledge<mL/min>,  // Elimination rate
-    ka: Knowledge<1/hr>            // Absorption rate constant
+    dose: Epistemic,           // Administered dose
+    volume: Epistemic,          // Distribution volume
+    clearance: Epistemic,  // Elimination rate
+    ka: Epistemic            // Absorption rate constant
 }
 
 fn concentration(
     params: PKParams,
     t: hr
-) -> Knowledge<mg/L> with Div {
+) -> Epistemic with Div {
     // C(t) = (Dose × ka / (ka - kel)) × (exp(-kel×t) - exp(-ka×t))
     let kel = params.clearance / params.volume  // Elimination constant
     
@@ -309,7 +309,7 @@ type ValidTime = { t: hr | t >= 0.0 && t < 24.0 }
 fn simulate(
     dose: PositiveMass,
     duration: ValidTime
-) -> [Knowledge<mg/L>] { ... }
+) -> [Epistemic] { ... }
 // SMT verifies: dose > 0 and 0 ≤ duration < 24 at compile time
 ```
 

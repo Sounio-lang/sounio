@@ -2,9 +2,9 @@
 # gpu_test_runner.sh — run epistemic GEMM profile on remote GPU node
 #
 # Usage:
-#   GPU_HOST=gpu-appliance-l4  bash scripts/gpu_test_runner.sh
-#   GPU_HOST=r740              bash scripts/gpu_test_runner.sh
-#   GPU_HOST=5860              bash scripts/gpu_test_runner.sh
+#   GPU_HOST=gpu-appliance-l4  bash scripts/gpu/gpu_test_runner.sh
+#   GPU_HOST=r740              bash scripts/gpu/gpu_test_runner.sh
+#   GPU_HOST=5860              bash scripts/gpu/gpu_test_runner.sh
 #
 # Outputs:
 #   [souc-gpu] epistemic_gemm NxNxN  ... X.X GFLOPS  bound=...  eff=...%  dbuf=yes

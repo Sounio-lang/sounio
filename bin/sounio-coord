@@ -214,6 +214,18 @@ claim_expired() {
   return 1
 }
 
+# A claim records the worktree it was taken from, and scope/heartbeat/release
+# all refuse to touch a claim taken from somewhere else. That guard is right
+# while the other worktree still exists — but agents legitimately work in
+# throwaway worktrees, and when one is removed with a lease still live the
+# claim becomes unreachable: its own owner can no longer release, refresh or
+# re-scope it, and it lingers until the TTL expires. A worktree that is gone
+# cannot be interfered with, so treat such a claim as orphaned. Ownership is
+# still checked separately at every call site, so only the same agent benefits.
+claim_worktree_missing() {
+  [[ -n "$C_WORKTREE" && ! -d "$C_WORKTREE" ]]
+}
+
 path_scope() {
   local path="$1"
   case "$path" in
@@ -452,6 +464,13 @@ scope_command() {
       unlink "$claim_file"
       created_utc="$NOW_UTC"
       event='CLAIM'
+    elif [[ "$C_AGENT" == "$agent" ]] && claim_worktree_missing; then
+      # Orphaned by a removed worktree: retake it from scratch here, the same
+      # way an expired lease is retaken, rather than leaving the owner wedged.
+      append_event ORPHANED "worktree $C_WORKTREE no longer exists"
+      unlink "$claim_file"
+      created_utc="$NOW_UTC"
+      event='CLAIM'
     else
       [[ "$C_AGENT" == "$agent" ]] || die "claim owner mismatch: $C_AGENT"
       [[ "$C_WORKTREE" == "$WORKTREE" ]] || die "claim belongs to worktree $C_WORKTREE"
@@ -524,7 +543,10 @@ heartbeat_command() {
   [[ -f "$claim_file" ]] || die "claim not found: $(claim_id_for "$agent" "$lane")"
   load_claim "$claim_file"
   [[ "$C_AGENT" == "$agent" ]] || die "claim owner mismatch: $C_AGENT"
-  [[ "$C_WORKTREE" == "$WORKTREE" ]] || die "claim belongs to worktree $C_WORKTREE"
+  if [[ "$C_WORKTREE" != "$WORKTREE" ]]; then
+    claim_worktree_missing && die "claim belongs to worktree $C_WORKTREE, which no longer exists; run scope to retake the lane here"
+    die "claim belongs to worktree $C_WORKTREE"
+  fi
   [[ "$C_BRANCH" == "$(current_branch)" ]] || die "branch changed from $C_BRANCH; release and claim again"
 
   acquire_state_lock "the heartbeat"
@@ -555,7 +577,11 @@ release_command() {
   [[ -f "$claim_file" ]] || die "claim not found: $(claim_id_for "$agent" "$lane")"
   load_claim "$claim_file"
   [[ "$C_AGENT" == "$agent" ]] || die "claim owner mismatch: $C_AGENT"
-  [[ "$C_WORKTREE" == "$WORKTREE" ]] || die "claim belongs to worktree $C_WORKTREE"
+  if [[ "$C_WORKTREE" != "$WORKTREE" ]]; then
+    # Releasing an orphan is always safe: the recorded worktree is gone, so
+    # there is nothing left to interfere with, and the owner already matched.
+    claim_worktree_missing || die "claim belongs to worktree $C_WORKTREE"
+  fi
   acquire_state_lock "the release"
   C_BRANCH="$(current_branch)"
   C_SHA="$(current_sha)"

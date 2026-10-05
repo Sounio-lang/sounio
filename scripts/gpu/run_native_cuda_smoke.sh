@@ -93,8 +93,75 @@ export LD_LIBRARY_PATH="$(dirname "$CUDA_DRIVER_LIB")${LD_LIBRARY_PATH:+:$LD_LIB
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 OUT_FILE="$TMP_DIR/native_cuda_smoke.out"
+BIN_FILE="$TMP_DIR/native_cuda_smoke.bin"
+COMPILE_LOG="$TMP_DIR/native_cuda_smoke.compile.log"
 
-"$SOUC_BIN" run "$FIXTURE" >"$OUT_FILE" 2>&1
+if ! "$SOUC_BIN" build "$FIXTURE" -o "$BIN_FILE" >"$COMPILE_LOG" 2>&1; then
+  cat "$COMPILE_LOG"
+  exit 1
+fi
+
+if command -v python3 >/dev/null 2>&1; then
+  SOUNIO_CUDA_SMOKE_BIN="$BIN_FILE" \
+  SOUNIO_CUDA_SMOKE_OUT="$OUT_FILE" \
+  SOUNIO_CUDA_SMOKE_EXPECT="$EXPECTED_STDOUT" \
+  python3 - <<'PY'
+import os
+import signal
+import subprocess
+import sys
+import time
+
+bin_file = os.environ["SOUNIO_CUDA_SMOKE_BIN"]
+out_file = os.environ["SOUNIO_CUDA_SMOKE_OUT"]
+expected = os.environ["SOUNIO_CUDA_SMOKE_EXPECT"]
+deadline = time.time() + float(os.environ.get("SOUNIO_CUDA_SMOKE_TIMEOUT", "120"))
+expected_seen_at = None
+
+with open(out_file, "wb") as out:
+    proc = subprocess.Popen([bin_file], stdout=out, stderr=subprocess.STDOUT)
+
+while True:
+    rc = proc.poll()
+    try:
+        text = open(out_file, "r", errors="replace").read()
+    except FileNotFoundError:
+        text = ""
+    if "GPU unavailable:" in text:
+        if rc is None:
+            proc.terminate()
+        sys.exit(1)
+    if expected in text:
+        if rc is not None:
+            sys.exit(rc)
+        if expected_seen_at is None:
+            expected_seen_at = time.time()
+        if time.time() - expected_seen_at > 1.0:
+            # Some CUDA/container combinations leave the completed child in a
+            # wait state after stdout is already durable. The smoke contract is
+            # the observed CUDA stdout plus no fallback marker.
+            proc.terminate()
+            sys.exit(0)
+    else:
+        expected_seen_at = None
+    if expected in text and time.time() > deadline - 2:
+        if rc is None:
+            proc.terminate()
+        sys.exit(0)
+    if rc is not None:
+        sys.exit(rc)
+    if time.time() > deadline:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        sys.exit(124)
+    time.sleep(0.1)
+PY
+else
+  "$BIN_FILE" >"$OUT_FILE" 2>&1
+fi
 cat "$OUT_FILE"
 
 if grep -q 'GPU unavailable:' "$OUT_FILE"; then

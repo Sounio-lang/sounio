@@ -1,0 +1,108 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+// Consistent ontology evolution — guarded version chain (miniature).
+//
+// Frontier: consistent-ontology-evolution (see FRONTIER.md)
+//
+// Literature anchor: Bayoudhi, Sassi, Jaziri 2018 (doi:10.1111/exsy.12355)
+// — most ontology-versioning work checks inconsistency a posteriori; the
+// guarded transition here enforces consistency a priori, and the invariant
+// "every reachable version is consistent" is proved in
+// formal/OntologyEvolution.lean.
+//
+// Scenario: an ontology starts empty; edits add axioms 1..5 in order.
+// Axiom 4 logically contradicts the established axiom 2, so the guard
+// rejects it; every recorded version stays consistent.
+//
+// NOTE: contracts are runtime assertions (Madaros does not yet parse
+// `where` refinements); arrays use splat initialisation.
+
+fn conflicts(a: i64, b: i64) -> bool {
+    // The only incoherent pair: new axiom 4 contradicts established axiom 2.
+    if a == 2 && b == 4 { return true }
+    if a == 4 && b == 2 { return true }
+    return false
+}
+
+fn main() -> i32 with IO, Mut {
+    var n_fail = 0
+
+    // Active axiom set for the current version (ids 0..5).
+    var active: [bool; 6] = [false; 6]
+
+    // Edit script: add axioms 1, 2, 3, 4, 5 in order.
+    var edits: [i64; 5] = [0; 5]
+    edits[0] = 1
+    edits[1] = 2
+    edits[2] = 3
+    edits[3] = 4
+    edits[4] = 5
+
+    var n_versions: i64 = 1  // the initial empty version
+    var n_rejected: i64 = 0
+
+    var e: i64 = 0
+    while e < 5 {
+        let a = edits[e]
+        // Guard: does the candidate axiom conflict with any active one?
+        var clash = false
+        var x: i64 = 0
+        while x < 6 {
+            if active[x] {
+                if conflicts(a, x) {
+                    clash = true
+                }
+            }
+            x = x + 1
+        }
+        // Snapshot to check preservation on rejection.
+        let was2 = active[2]
+        let was4 = active[4]
+        if clash {
+            n_rejected = n_rejected + 1
+        } else {
+            active[a] = true
+        }
+        n_versions = n_versions + 1
+
+        // Rejection must preserve the previous version exactly.
+        if clash {
+            if active[2] != was2 { println("FAIL: version changed on reject"); n_fail = n_fail + 1 }
+            if active[4] != was4 { println("FAIL: version changed on reject"); n_fail = n_fail + 1 }
+        }
+
+        // ── A priori invariant: the new version is consistent ──────────
+        var i: i64 = 0
+        while i < 6 {
+            var j: i64 = i + 1
+            while j < 6 {
+                if active[i] && active[j] {
+                    if conflicts(i, j) {
+                        println("FAIL: inconsistent version produced")
+                        n_fail = n_fail + 1
+                    }
+                }
+                j = j + 1
+            }
+            i = i + 1
+        }
+        e = e + 1
+    }
+
+    // ── Final state: exactly {1, 2, 3, 5} active, axiom 4 rejected ─────
+    if !active[1] { println("FAIL: axiom 1 missing"); n_fail = n_fail + 1 }
+    if !active[2] { println("FAIL: axiom 2 missing"); n_fail = n_fail + 1 }
+    if !active[3] { println("FAIL: axiom 3 missing"); n_fail = n_fail + 1 }
+    if active[4]  { println("FAIL: axiom 4 should be rejected"); n_fail = n_fail + 1 }
+    if !active[5] { println("FAIL: axiom 5 missing"); n_fail = n_fail + 1 }
+    if n_rejected != 1 { println("FAIL: expected exactly 1 rejection"); n_fail = n_fail + 1 }
+    if n_versions != 6 { println("FAIL: expected 6 versions"); n_fail = n_fail + 1 }
+
+    if n_fail == 0 {
+        println("ALL PASS")
+        return 0
+    }
+    println("FAILURES:")
+    println(n_fail)
+    return 1
+}

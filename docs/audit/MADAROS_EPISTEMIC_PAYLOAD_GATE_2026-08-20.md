@@ -112,6 +112,38 @@ epistemic-payload-gate: PASS
 REMOTE: witness_gate rc=0
 ```
 
+## Post-merge addendum: negative payloads are not modeled
+
+Measured on 2026-08-21 after #2048 merged as `2ca46ce2b`. The modular parser
+uses `EffectRef.payload == -1` to mean that an effect carries no payload. A
+negative literal is tokenized as `Minus`, `IntLit`, so
+`parse_effect_payload` does not take its single-`IntLit` branch. It skips the
+balanced parentheses and returns the same `-1` sentinel. Consequently,
+`with Epistemic(-1)` and bare `with Epistemic` are indistinguishable after
+parsing.
+
+This was checked with one source whose only relevant signature is:
+
+```sio
+fn reserved_negative_payload() -> i64 with Epistemic(-1) { 1 }
+fn main() -> i64 with Epistemic { reserved_negative_payload() }
+```
+
+Both engines accepted it and emitted an ELF:
+
+| Engine | rc | ELF | Named negative-payload diagnostic |
+|---|---:|---|---|
+| checked-in Madaros | 0 | yes | no |
+| `SOUNIO_SOUC_ENGINE=lean_single` | 0 | yes | no |
+
+**Known boundary:** negative effect payloads are not modeled; `-1` is the
+absence sentinel and collides with them. The #2048 consumer activates a floor
+only for positive payloads, so it does not reinterpret the colliding `-1` as a
+valid confidence floor. A future implementation must either reserve negative
+payload syntax with the same named refusal in both engines, or replace the
+sentinel with an option-like representation. It must not make `-1` a valid
+floor.
+
 ## Claim boundary
 
 This receipt proves the four-rung literal-constructor oracle. It does not claim

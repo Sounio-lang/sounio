@@ -77,7 +77,7 @@ registry's; the ladder is monotone (`MATURITY_LADDER`).
 | 9 | Uncertainty propagation | machine-level emitters in `ir/lower.sio`; `emit_variance_independent_product` assumes independence with nothing checking it | contested |
 | 10 | Units and dimensions | `stdlib/units/` 9 files incl. QUDT; whether `mg` is an alias, a nominal type or a primitive is **under measurement** | undefined |
 | 11 | Ontological validation | ChEBI, GO, HPO, LOINC bundles + reasoner; TBox present, **ABox absent** | measured, incomplete |
-| 12 | Numeric tower | **written**: `S12_NUMERIC_TOWER.md`. The row below was measured against the enums; measured against the *compiler*, `i<n>`/`u<n>` are accepted for any n≥1 (`i999999` typechecks) and **no width has semantics** — `i8` gives 200 for 100+100, and `i256` wraps at `i64`. `f128`/`f256` **Reserved** (`E218`) on Madaros only. | written |
+| 12 | Numeric tower | **written**: `S12_NUMERIC_TOWER.md`. The row below was measured against the enums; measured against the *compiler*, `i<n>`/`u<n>` are accepted for any n≥1 (`i999999` typechecks) and **no width has semantics** — `i8` gives 200 for 100+100, and `i256` wraps at `i64`. `f128`/`f256` **Reserved** (`E249`) on Madaros only. | written |
 | 13 | Memory and linearity | `linear struct`, `&`/`&!`; `OwnTypeKind` has 4 variants | undefined |
 | 14 | Lowering pipeline | live: `parser → check → ir → native`; HLIR is the **GPU frontend**; ENIR is a parallel verified pipeline with 0 production importers | contested |
 | 15 | Backends | x86-64 ELF, arm64, GPU/PTX, wasm | undefined |

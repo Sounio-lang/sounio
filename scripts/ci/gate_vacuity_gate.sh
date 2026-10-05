@@ -21,7 +21,9 @@ set -uo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR" || exit 9
 . "$ROOT_DIR/scripts/lib/gate_assert.sh"
+. "$ROOT_DIR/scripts/lib/gate_measurement_receipt.sh"
 gate_name "gate_vacuity_gate"
+gate_measurement_reset
 
 BASELINE="$ROOT_DIR/scripts/ci/fixtures/gate_vacuity_baseline.txt"
 
@@ -85,4 +87,7 @@ if [[ -n "$FIXED" ]]; then
   gate_fail "the baseline may only shrink, and it is now out of date"
 fi
 
+# Positive measurement: every gate script scanned is one assertion exercised.
+gate_measurement_set "$scanned"
+gate_measurement_emit pass
 gate_pass "${flagged_n:-0} known-unguarded, all in the baseline; the list may only shrink"

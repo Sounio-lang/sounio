@@ -234,3 +234,7 @@ require_rc_file() {
 gate_measured_yes() {
   echo "measured=yes"
 }
+
+# The idempotent artefact writer lives in its own side-effect-free file so
+# gates that do not source this library can use it too.
+. "$(dirname "${BASH_SOURCE[0]}")/gate_artifact.sh"

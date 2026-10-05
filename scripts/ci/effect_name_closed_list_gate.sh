@@ -174,6 +174,12 @@ SKIP_PREFIXES = (
     "archive/",
     "bootstrap/",
     "self-hosted/bootstrap/",
+    # Refusal fixtures must contain the refused construct: an unknown effect
+    # name in tests/compile-fail/ is the subject of the test, not corpus debt.
+    # Since E210 (checker_collect_effects_mut) the compiler itself refuses
+    # these names and the compile-fail harness asserts the diagnostic, so
+    # counting them here double-accuses sanctioned fixtures.
+    "tests/compile-fail/",
 )
 IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 WITH_RE = re.compile(r"\bwith\b")

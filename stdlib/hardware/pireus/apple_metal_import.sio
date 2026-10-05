@@ -1,0 +1,1393 @@
+//! Grammar-bounded importer for Apple's pinned MTLGPUFamily DocC JSON.
+//!
+//! Sounio validates the complete JSON stream, rejects duplicate object keys,
+//! selects exact MTLGPUFamily reference objects, and projects vendor enum cases
+//! without turning the catalog into a device-support observation.
+
+use crypto::sha256::{
+    SHA256State, SHA256Digest,
+    sha256_init, sha256_update, sha256_finalize,
+}
+use hardware::pireus::model::{
+    PIREUS_RDF_TYPE, PIREUS_CLASS_ONTOLOGY_CLASS,
+    PIREUS_CLASS_EVIDENCE_ROLE, PIREUS_HAS_EVIDENCE_ROLE,
+}
+use hardware::pireus::execution_engine::{
+    pireus_execution_engine_store,
+    PIREUS_BLUEPRINT_APPLE_GPU,
+}
+use ontology::query::{
+    TripleStore, SparqlResult,
+    triple_store_add, triple_iri,
+    sparql_new, sparql_select, sparql_add_pattern, sparql_execute,
+    triple_pattern_new, queryterm_variable, queryterm_iri,
+}
+
+pub const PIREUS_APPLE_OK: i64 = 0
+pub const PIREUS_APPLE_ERR_FILE: i64 = 1
+pub const PIREUS_APPLE_ERR_LENGTH: i64 = 2
+pub const PIREUS_APPLE_ERR_HASH: i64 = 3
+pub const PIREUS_APPLE_ERR_JSON: i64 = 4
+pub const PIREUS_APPLE_ERR_DEPTH: i64 = 5
+pub const PIREUS_APPLE_ERR_DUPLICATE_KEY: i64 = 6
+pub const PIREUS_APPLE_ERR_SELECTED_SHAPE: i64 = 7
+pub const PIREUS_APPLE_ERR_DUPLICATE_CASE: i64 = 8
+pub const PIREUS_APPLE_ERR_CAPACITY: i64 = 9
+
+pub const PIREUS_APPLE_GROUP_APPLE: i64 = 1
+pub const PIREUS_APPLE_GROUP_METAL: i64 = 2
+pub const PIREUS_APPLE_GROUP_COMMON: i64 = 3
+pub const PIREUS_APPLE_GROUP_MAC: i64 = 4
+pub const PIREUS_APPLE_GROUP_MAC_CATALYST: i64 = 5
+
+pub const PIREUS_APPLE_CLASS_GPU_FAMILY_CASE: i64 = 705000
+pub const PIREUS_APPLE_CLASS_API_ENUMERATION: i64 = 705001
+pub const PIREUS_APPLE_CLASS_VENDOR_CORPUS: i64 = 705002
+pub const PIREUS_APPLE_CLASS_FAMILY_GROUP: i64 = 705003
+pub const PIREUS_APPLE_CLASS_LIFECYCLE: i64 = 705004
+pub const PIREUS_APPLE_CLASS_PLATFORM_RECORD: i64 = 705005
+pub const PIREUS_APPLE_CLASS_RAW_BOOLEAN: i64 = 705006
+pub const PIREUS_APPLE_CLASS_RAW_VERSION: i64 = 705007
+pub const PIREUS_APPLE_HAS_CORPUS: i64 = 705100
+pub const PIREUS_APPLE_HAS_ENUMERATION: i64 = 705101
+pub const PIREUS_APPLE_HAS_GROUP: i64 = 705102
+pub const PIREUS_APPLE_HAS_LIFECYCLE: i64 = 705103
+pub const PIREUS_APPLE_HAS_PLATFORM: i64 = 705104
+pub const PIREUS_APPLE_DESCRIBES_ENGINE_BLUEPRINT: i64 = 705105
+pub const PIREUS_APPLE_HAS_INTRODUCED_AT: i64 = 705106
+pub const PIREUS_APPLE_HAS_RAW_BETA: i64 = 705107
+pub const PIREUS_APPLE_HAS_RAW_DEPRECATED: i64 = 705108
+pub const PIREUS_APPLE_HAS_RAW_UNAVAILABLE: i64 = 705109
+pub const PIREUS_APPLE_CORPUS_DOCC_2026_08_06: i64 = 705200
+pub const PIREUS_APPLE_ENUM_MTL_GPU_FAMILY: i64 = 705201
+pub const PIREUS_APPLE_EVIDENCE_NORMATIVE_API: i64 = 705202
+pub const PIREUS_APPLE_LIFECYCLE_ACTIVE: i64 = 705203
+pub const PIREUS_APPLE_LIFECYCLE_DEPRECATED: i64 = 705204
+pub const PIREUS_APPLE_GROUP_IRI_APPLE: i64 = 705210
+pub const PIREUS_APPLE_GROUP_IRI_METAL: i64 = 705211
+pub const PIREUS_APPLE_GROUP_IRI_COMMON: i64 = 705212
+pub const PIREUS_APPLE_GROUP_IRI_MAC: i64 = 705213
+pub const PIREUS_APPLE_GROUP_IRI_MAC_CATALYST: i64 = 705214
+pub const PIREUS_APPLE_PLATFORM_IOS: i64 = 705220
+pub const PIREUS_APPLE_PLATFORM_IPADOS: i64 = 705221
+pub const PIREUS_APPLE_PLATFORM_MAC_CATALYST: i64 = 705222
+pub const PIREUS_APPLE_PLATFORM_MACOS: i64 = 705223
+pub const PIREUS_APPLE_PLATFORM_TVOS: i64 = 705224
+pub const PIREUS_APPLE_PLATFORM_VISIONOS: i64 = 705225
+pub const PIREUS_APPLE_RAW_FALSE: i64 = 705230
+pub const PIREUS_APPLE_RAW_TRUE: i64 = 705231
+pub const PIREUS_APPLE_VERSION_13_0: i64 = 705240
+pub const PIREUS_APPLE_VERSION_13_1: i64 = 705241
+pub const PIREUS_APPLE_VERSION_10_15: i64 = 705242
+pub const PIREUS_APPLE_VERSION_1_0: i64 = 705243
+
+const APPLE_EXPECTED_BYTES: i64 = 39513
+const APPLE_MAX_DEPTH: i64 = 128
+const APPLE_KEYS_PER_OBJECT: i64 = 64
+
+const APPLE_SCOPE_REFERENCES: i64 = 1
+const APPLE_SCOPE_CASE: i64 = 2
+const APPLE_SCOPE_ROOT_IDENTIFIER: i64 = 3
+const APPLE_SCOPE_TOPIC_ARRAY: i64 = 4
+const APPLE_SCOPE_TOPIC_ITEM: i64 = 5
+const APPLE_SCOPE_ROOT_METADATA: i64 = 6
+const APPLE_SCOPE_PLATFORM_ARRAY: i64 = 7
+const APPLE_SCOPE_PLATFORM_ITEM: i64 = 8
+
+const APPLE_KEY_REFERENCES: i64 = 1
+const APPLE_KEY_TITLE: i64 = 2
+const APPLE_KEY_DEPRECATED: i64 = 3
+const APPLE_KEY_IDENTIFIER: i64 = 4
+const APPLE_KEY_KIND: i64 = 5
+const APPLE_KEY_INTERFACE_LANGUAGE: i64 = 6
+const APPLE_KEY_TOPIC_SECTIONS: i64 = 7
+const APPLE_KEY_URL: i64 = 8
+const APPLE_KEY_METADATA: i64 = 9
+const APPLE_KEY_PLATFORMS: i64 = 10
+const APPLE_KEY_NAME: i64 = 11
+const APPLE_KEY_BETA: i64 = 12
+const APPLE_KEY_UNAVAILABLE: i64 = 13
+const APPLE_KEY_INTRODUCED_AT: i64 = 14
+
+pub struct PireusAppleMetalInventory {
+    pub case_kind: [i64; 24],
+    pub case_deprecated: [i64; 24],
+    pub platform_kind: [i64; 8],
+    pub platform_introduced: [i64; 8],
+    pub platform_beta: [i64; 8],
+    pub platform_deprecated: [i64; 8],
+    pub platform_unavailable: [i64; 8],
+    pub count: i64,
+    pub platform_count: i64,
+    pub apple_count: i64,
+    pub metal_count: i64,
+    pub common_count: i64,
+    pub mac_count: i64,
+    pub mac_catalyst_count: i64,
+    pub deprecated_count: i64,
+    pub active_count: i64,
+    pub platform_beta_true_count: i64,
+    pub platform_deprecated_true_count: i64,
+    pub platform_unavailable_true_count: i64,
+    pub introduced_13_0_count: i64,
+    pub introduced_13_1_count: i64,
+    pub introduced_10_15_count: i64,
+    pub introduced_1_0_count: i64,
+    pub selected_topic_groups: i64,
+    pub json_objects: i64,
+    pub json_arrays: i64,
+    pub json_strings: i64,
+    pub max_depth: i64,
+    pub total_bytes: i64,
+    pub digest_match: bool,
+    pub root_identity: bool,
+    pub error: i64,
+}
+
+struct AppleParser {
+    container_kind: [i64; 128],
+    container_state: [i64; 128],
+    scope: [i64; 128],
+    key_kind: [i64; 128],
+    key_case: [i64; 128],
+    key_count: [i64; 128],
+    key_hashes: [i64; 8192],
+    case_kind: [i64; 128],
+    case_title: [i64; 128],
+    case_title_count: [i64; 128],
+    case_deprecated_seen: [i64; 128],
+    case_deprecated: [i64; 128],
+    platform_kind: [i64; 128],
+    platform_name_count: [i64; 128],
+    platform_introduced: [i64; 128],
+    platform_introduced_count: [i64; 128],
+    platform_beta_seen: [i64; 128],
+    platform_beta: [i64; 128],
+    platform_deprecated_seen: [i64; 128],
+    platform_deprecated: [i64; 128],
+    platform_unavailable_seen: [i64; 128],
+    platform_unavailable: [i64; 128],
+    seen_case: [i64; 24],
+    seen_platform: [i64; 8],
+    depth: i64,
+    root_seen: bool,
+    root_done: bool,
+    in_string: bool,
+    string_role: i64,
+    escape: bool,
+    unicode_remaining: i64,
+    token: [i8; 512],
+    token_len: i64,
+    token_overflow: bool,
+    token_unicode: bool,
+    primitive_active: bool,
+    primitive: [i8; 32],
+    primitive_len: i64,
+    primitive_overflow: bool,
+    root_kind_symbol: i64,
+    root_identifier_url: i64,
+    root_interface_swift: i64,
+    topic_apple: i64,
+    topic_metal: i64,
+    topic_common: i64,
+    topic_mac: i64,
+    topic_mac_catalyst: i64,
+    inventory: PireusAppleMetalInventory,
+    error: i64,
+}
+
+fn apple_inventory_empty() -> PireusAppleMetalInventory with Mut {
+    PireusAppleMetalInventory {
+        case_kind: [0; 24],
+        case_deprecated: [0; 24],
+        platform_kind: [0; 8],
+        platform_introduced: [0; 8],
+        platform_beta: [0; 8],
+        platform_deprecated: [0; 8],
+        platform_unavailable: [0; 8],
+        count: 0,
+        platform_count: 0,
+        apple_count: 0,
+        metal_count: 0,
+        common_count: 0,
+        mac_count: 0,
+        mac_catalyst_count: 0,
+        deprecated_count: 0,
+        active_count: 0,
+        platform_beta_true_count: 0,
+        platform_deprecated_true_count: 0,
+        platform_unavailable_true_count: 0,
+        introduced_13_0_count: 0,
+        introduced_13_1_count: 0,
+        introduced_10_15_count: 0,
+        introduced_1_0_count: 0,
+        selected_topic_groups: 0,
+        json_objects: 0,
+        json_arrays: 0,
+        json_strings: 0,
+        max_depth: 0,
+        total_bytes: 0,
+        digest_match: false,
+        root_identity: false,
+        error: PIREUS_APPLE_OK,
+    }
+}
+
+fn apple_parser_new() -> AppleParser with Mut {
+    AppleParser {
+        container_kind: [0; 128],
+        container_state: [0; 128],
+        scope: [0; 128],
+        key_kind: [0; 128],
+        key_case: [0; 128],
+        key_count: [0; 128],
+        key_hashes: [0; 8192],
+        case_kind: [0; 128],
+        case_title: [0; 128],
+        case_title_count: [0; 128],
+        case_deprecated_seen: [0; 128],
+        case_deprecated: [0; 128],
+        platform_kind: [0; 128],
+        platform_name_count: [0; 128],
+        platform_introduced: [0; 128],
+        platform_introduced_count: [0; 128],
+        platform_beta_seen: [0; 128],
+        platform_beta: [0; 128],
+        platform_deprecated_seen: [0; 128],
+        platform_deprecated: [0; 128],
+        platform_unavailable_seen: [0; 128],
+        platform_unavailable: [0; 128],
+        seen_case: [0; 24],
+        seen_platform: [0; 8],
+        depth: 0,
+        root_seen: false,
+        root_done: false,
+        in_string: false,
+        string_role: 0,
+        escape: false,
+        unicode_remaining: 0,
+        token: [0; 512],
+        token_len: 0,
+        token_overflow: false,
+        token_unicode: false,
+        primitive_active: false,
+        primitive: [0; 32],
+        primitive_len: 0,
+        primitive_overflow: false,
+        root_kind_symbol: 0,
+        root_identifier_url: 0,
+        root_interface_swift: 0,
+        topic_apple: 0,
+        topic_metal: 0,
+        topic_common: 0,
+        topic_mac: 0,
+        topic_mac_catalyst: 0,
+        inventory: apple_inventory_empty(),
+        error: PIREUS_APPLE_OK,
+    }
+}
+
+pub fn pireus_apple_metal_expected_sha256() -> string {
+    "f0ed07338d44f0cce19f2ec1aebb2612638f5cab7b9a020fce8957ec21f809ea"
+}
+
+fn apple_is_ws(b: i64) -> bool {
+    b == 32 || b == 9 || b == 10 || b == 13
+}
+
+fn apple_is_hex(b: i64) -> bool {
+    (b >= 48 && b <= 57) || (b >= 65 && b <= 70) ||
+    (b >= 97 && b <= 102)
+}
+
+fn apple_token_reset(parser: &!AppleParser) with Mut {
+    parser.token_len = 0
+    parser.token_overflow = false
+    parser.token_unicode = false
+}
+
+fn apple_token_push(parser: &!AppleParser, b: i64) with Mut, Panic {
+    if parser.token_len < 512 {
+        parser.token[parser.token_len as usize] = b as i8
+    } else {
+        parser.token_overflow = true
+    }
+    parser.token_len = parser.token_len + 1
+}
+
+fn apple_token_eq(parser: &AppleParser, value: string) -> bool
+with Panic, Div {
+    if parser.token_overflow || parser.token_unicode { return false }
+    let n = str_len(value)
+    if parser.token_len != n { return false }
+    var i: i64 = 0
+    while i < n {
+        if parser.token[i as usize] != str_char_at(value, i) as i8 {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn apple_token_starts_with(parser: &AppleParser, value: string) -> bool
+with Panic, Div {
+    if parser.token_overflow || parser.token_unicode { return false }
+    let n = str_len(value)
+    if parser.token_len < n { return false }
+    var i: i64 = 0
+    while i < n {
+        if parser.token[i as usize] != str_char_at(value, i) as i8 {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn apple_key_kind(parser: &AppleParser) -> i64 with Panic, Div {
+    if apple_token_eq(parser, "references") { return APPLE_KEY_REFERENCES }
+    if apple_token_eq(parser, "title") { return APPLE_KEY_TITLE }
+    if apple_token_eq(parser, "deprecated") { return APPLE_KEY_DEPRECATED }
+    if apple_token_eq(parser, "identifier") { return APPLE_KEY_IDENTIFIER }
+    if apple_token_eq(parser, "kind") { return APPLE_KEY_KIND }
+    if apple_token_eq(parser, "interfaceLanguage") { return APPLE_KEY_INTERFACE_LANGUAGE }
+    if apple_token_eq(parser, "topicSections") { return APPLE_KEY_TOPIC_SECTIONS }
+    if apple_token_eq(parser, "url") { return APPLE_KEY_URL }
+    if apple_token_eq(parser, "metadata") { return APPLE_KEY_METADATA }
+    if apple_token_eq(parser, "platforms") { return APPLE_KEY_PLATFORMS }
+    if apple_token_eq(parser, "name") { return APPLE_KEY_NAME }
+    if apple_token_eq(parser, "beta") { return APPLE_KEY_BETA }
+    if apple_token_eq(parser, "unavailable") { return APPLE_KEY_UNAVAILABLE }
+    if apple_token_eq(parser, "introducedAt") { return APPLE_KEY_INTRODUCED_AT }
+    0
+}
+
+fn apple_platform_name(parser: &AppleParser) -> i64 with Panic, Div {
+    if apple_token_eq(parser, "iOS") { return 1 }
+    if apple_token_eq(parser, "iPadOS") { return 2 }
+    if apple_token_eq(parser, "Mac Catalyst") { return 3 }
+    if apple_token_eq(parser, "macOS") { return 4 }
+    if apple_token_eq(parser, "tvOS") { return 5 }
+    if apple_token_eq(parser, "visionOS") { return 6 }
+    -1
+}
+
+fn apple_platform_version(parser: &AppleParser) -> i64 with Panic, Div {
+    if apple_token_eq(parser, "13.0") { return 1 }
+    if apple_token_eq(parser, "13.1") { return 2 }
+    if apple_token_eq(parser, "10.15") { return 3 }
+    if apple_token_eq(parser, "1.0") { return 4 }
+    -1
+}
+
+fn apple_expected_platform_version(kind: i64) -> i64 {
+    if kind == 1 || kind == 2 || kind == 5 { return 1 }
+    if kind == 3 { return 2 }
+    if kind == 4 { return 3 }
+    if kind == 6 { return 4 }
+    -1
+}
+
+fn apple_case_suffix(parser: &AppleParser, prefix: string) -> i64
+with Panic, Div {
+    if !apple_token_starts_with(parser, prefix) { return 0 }
+    let start = str_len(prefix)
+    let remaining = parser.token_len - start
+    if remaining == 6 &&
+        parser.token[start as usize] == 97 &&
+        parser.token[(start + 1) as usize] == 112 &&
+        parser.token[(start + 2) as usize] == 112 &&
+        parser.token[(start + 3) as usize] == 108 &&
+        parser.token[(start + 4) as usize] == 101 {
+        let last = parser.token[(start + 5) as usize] as i64
+        if last >= 49 && last <= 57 { return last - 48 }
+    }
+    if remaining == 7 &&
+        parser.token[start as usize] == 97 &&
+        parser.token[(start + 1) as usize] == 112 &&
+        parser.token[(start + 2) as usize] == 112 &&
+        parser.token[(start + 3) as usize] == 108 &&
+        parser.token[(start + 4) as usize] == 101 &&
+        parser.token[(start + 5) as usize] == 49 &&
+        parser.token[(start + 6) as usize] == 48 { return 10 }
+    if remaining == 7 &&
+        parser.token[start as usize] == 99 &&
+        parser.token[(start + 1) as usize] == 111 &&
+        parser.token[(start + 2) as usize] == 109 &&
+        parser.token[(start + 3) as usize] == 109 &&
+        parser.token[(start + 4) as usize] == 111 &&
+        parser.token[(start + 5) as usize] == 110 {
+        let last = parser.token[(start + 6) as usize] as i64
+        if last >= 49 && last <= 51 { return 10 + last - 48 }
+    }
+    if remaining == 4 &&
+        parser.token[start as usize] == 109 &&
+        parser.token[(start + 1) as usize] == 97 &&
+        parser.token[(start + 2) as usize] == 99 {
+        let last = parser.token[(start + 3) as usize] as i64
+        if last >= 49 && last <= 50 { return 13 + last - 48 }
+    }
+    if remaining == 12 &&
+        parser.token[start as usize] == 109 &&
+        parser.token[(start + 1) as usize] == 97 &&
+        parser.token[(start + 2) as usize] == 99 &&
+        parser.token[(start + 3) as usize] == 67 &&
+        parser.token[(start + 4) as usize] == 97 &&
+        parser.token[(start + 5) as usize] == 116 &&
+        parser.token[(start + 6) as usize] == 97 &&
+        parser.token[(start + 7) as usize] == 108 &&
+        parser.token[(start + 8) as usize] == 121 &&
+        parser.token[(start + 9) as usize] == 115 &&
+        parser.token[(start + 10) as usize] == 116 {
+        let last = parser.token[(start + 11) as usize] as i64
+        if last >= 49 && last <= 50 { return 15 + last - 48 }
+    }
+    if remaining == 6 &&
+        parser.token[start as usize] == 109 &&
+        parser.token[(start + 1) as usize] == 101 &&
+        parser.token[(start + 2) as usize] == 116 &&
+        parser.token[(start + 3) as usize] == 97 &&
+        parser.token[(start + 4) as usize] == 108 {
+        let last = parser.token[(start + 5) as usize] as i64
+        if last == 51 { return 18 }
+        if last == 52 { return 19 }
+    }
+    -1
+}
+
+fn apple_reference_case(parser: &AppleParser) -> i64 with Panic, Div {
+    if apple_token_eq(
+        parser,
+        "doc://com.apple.metal/documentation/Metal/MTLGPUFamily/init(rawValue:)") {
+        return 0
+    }
+    apple_case_suffix(
+        parser,
+        "doc://com.apple.metal/documentation/Metal/MTLGPUFamily/")
+}
+
+fn apple_title_case(parser: &AppleParser) -> i64 with Panic, Div {
+    apple_case_suffix(parser, "MTLGPUFamily.")
+}
+
+fn apple_case_group(kind: i64) -> i64 {
+    if kind >= 1 && kind <= 10 { return PIREUS_APPLE_GROUP_APPLE }
+    if kind >= 11 && kind <= 13 { return PIREUS_APPLE_GROUP_COMMON }
+    if kind >= 14 && kind <= 15 { return PIREUS_APPLE_GROUP_MAC }
+    if kind >= 16 && kind <= 17 { return PIREUS_APPLE_GROUP_MAC_CATALYST }
+    PIREUS_APPLE_GROUP_METAL
+}
+
+fn apple_token_hash(parser: &AppleParser) -> i64 with Panic, Div {
+    var hash: i64 = 5381
+    var i: i64 = 0
+    while i < parser.token_len {
+        var b = parser.token[i as usize] as i64
+        if b < 0 { b = b + 256 }
+        hash = (hash * 33 + b) % 2147483647
+        i = i + 1
+    }
+    hash + 1
+}
+
+fn apple_register_key(parser: &!AppleParser, slot: i64)
+with Mut, Panic, Div {
+    if parser.token_overflow || parser.token_unicode {
+        parser.error = PIREUS_APPLE_ERR_CAPACITY
+        return
+    }
+    let count = parser.key_count[slot as usize]
+    if count >= APPLE_KEYS_PER_OBJECT {
+        parser.error = PIREUS_APPLE_ERR_CAPACITY
+        return
+    }
+    let hash = apple_token_hash(parser)
+    let base = slot * APPLE_KEYS_PER_OBJECT
+    var i: i64 = 0
+    while i < count {
+        if parser.key_hashes[(base + i) as usize] == hash {
+            parser.error = PIREUS_APPLE_ERR_DUPLICATE_KEY
+            return
+        }
+        i = i + 1
+    }
+    parser.key_hashes[(base + count) as usize] = hash
+    parser.key_count[slot as usize] = count + 1
+}
+
+fn apple_parent_value_start(parser: &!AppleParser) with Mut, Panic {
+    if parser.depth <= 0 { return }
+    let slot = parser.depth - 1
+    let kind = parser.container_kind[slot as usize]
+    if kind == 1 {
+        if parser.container_state[slot as usize] != 2 {
+            parser.error = PIREUS_APPLE_ERR_JSON
+            return
+        }
+        parser.container_state[slot as usize] = 3
+    } else {
+        if parser.container_state[slot as usize] != 0 {
+            parser.error = PIREUS_APPLE_ERR_JSON
+            return
+        }
+        parser.container_state[slot as usize] = 1
+    }
+}
+
+fn apple_child_scope(parser: &AppleParser, child_kind: i64) -> (i64, i64)
+with Panic {
+    if parser.depth <= 0 { return (0, 0) }
+    let parent = parser.depth - 1
+    let parent_scope = parser.scope[parent as usize]
+    let key = parser.key_kind[parent as usize]
+    if parser.depth == 1 && key == APPLE_KEY_REFERENCES && child_kind == 1 {
+        return (APPLE_SCOPE_REFERENCES, 0)
+    }
+    if parent_scope == APPLE_SCOPE_REFERENCES && child_kind == 1 {
+        return (APPLE_SCOPE_CASE, parser.key_case[parent as usize])
+    }
+    if parser.depth == 1 && key == APPLE_KEY_IDENTIFIER && child_kind == 1 {
+        return (APPLE_SCOPE_ROOT_IDENTIFIER, 0)
+    }
+    if parser.depth == 1 && key == APPLE_KEY_TOPIC_SECTIONS && child_kind == 2 {
+        return (APPLE_SCOPE_TOPIC_ARRAY, 0)
+    }
+    if parent_scope == APPLE_SCOPE_TOPIC_ARRAY && child_kind == 1 {
+        return (APPLE_SCOPE_TOPIC_ITEM, 0)
+    }
+    if parser.depth == 1 && key == APPLE_KEY_METADATA && child_kind == 1 {
+        return (APPLE_SCOPE_ROOT_METADATA, 0)
+    }
+    if parent_scope == APPLE_SCOPE_ROOT_METADATA &&
+        key == APPLE_KEY_PLATFORMS && child_kind == 2 {
+        return (APPLE_SCOPE_PLATFORM_ARRAY, 0)
+    }
+    if parent_scope == APPLE_SCOPE_PLATFORM_ARRAY && child_kind == 1 {
+        return (APPLE_SCOPE_PLATFORM_ITEM, 0)
+    }
+    (0, 0)
+}
+
+fn apple_push_container(parser: &!AppleParser, kind: i64)
+with Mut, Panic {
+    if parser.depth >= APPLE_MAX_DEPTH {
+        parser.error = PIREUS_APPLE_ERR_DEPTH
+        return
+    }
+    let (scope, case_kind) = apple_child_scope(parser, kind)
+    if case_kind < 0 {
+        parser.error = PIREUS_APPLE_ERR_SELECTED_SHAPE
+        return
+    }
+    if parser.depth == 0 {
+        if parser.root_seen {
+            parser.error = PIREUS_APPLE_ERR_JSON
+            return
+        }
+        parser.root_seen = true
+    } else {
+        apple_parent_value_start(parser)
+        if parser.error != PIREUS_APPLE_OK { return }
+    }
+    let slot = parser.depth
+    parser.container_kind[slot as usize] = kind
+    parser.container_state[slot as usize] = 0
+    parser.scope[slot as usize] = scope
+    parser.key_kind[slot as usize] = 0
+    parser.key_case[slot as usize] = 0
+    parser.key_count[slot as usize] = 0
+    parser.case_kind[slot as usize] = case_kind
+    parser.case_title[slot as usize] = 0
+    parser.case_title_count[slot as usize] = 0
+    parser.case_deprecated_seen[slot as usize] = 0
+    parser.case_deprecated[slot as usize] = 0
+    parser.platform_kind[slot as usize] = 0
+    parser.platform_name_count[slot as usize] = 0
+    parser.platform_introduced[slot as usize] = 0
+    parser.platform_introduced_count[slot as usize] = 0
+    parser.platform_beta_seen[slot as usize] = 0
+    parser.platform_beta[slot as usize] = 0
+    parser.platform_deprecated_seen[slot as usize] = 0
+    parser.platform_deprecated[slot as usize] = 0
+    parser.platform_unavailable_seen[slot as usize] = 0
+    parser.platform_unavailable[slot as usize] = 0
+    parser.depth = parser.depth + 1
+    if parser.depth > parser.inventory.max_depth {
+        parser.inventory.max_depth = parser.depth
+    }
+    if kind == 1 { parser.inventory.json_objects = parser.inventory.json_objects + 1 }
+    else { parser.inventory.json_arrays = parser.inventory.json_arrays + 1 }
+}
+
+fn apple_commit_case(parser: &!AppleParser, slot: i64)
+with Mut, Panic {
+    let kind = parser.case_kind[slot as usize]
+    if kind <= 0 { return }
+    if parser.case_title_count[slot as usize] != 1 ||
+        parser.case_title[slot as usize] != kind {
+        parser.error = PIREUS_APPLE_ERR_SELECTED_SHAPE
+        return
+    }
+    if parser.seen_case[kind as usize] != 0 {
+        parser.error = PIREUS_APPLE_ERR_DUPLICATE_CASE
+        return
+    }
+    if parser.inventory.count >= 24 {
+        parser.error = PIREUS_APPLE_ERR_CAPACITY
+        return
+    }
+    parser.seen_case[kind as usize] = 1
+    let out = parser.inventory.count
+    parser.inventory.case_kind[out as usize] = kind
+    parser.inventory.case_deprecated[out as usize] =
+        parser.case_deprecated[slot as usize]
+    parser.inventory.count = out + 1
+    let group = apple_case_group(kind)
+    if group == PIREUS_APPLE_GROUP_APPLE {
+        parser.inventory.apple_count = parser.inventory.apple_count + 1
+    }
+    if group == PIREUS_APPLE_GROUP_METAL {
+        parser.inventory.metal_count = parser.inventory.metal_count + 1
+    }
+    if group == PIREUS_APPLE_GROUP_COMMON {
+        parser.inventory.common_count = parser.inventory.common_count + 1
+    }
+    if group == PIREUS_APPLE_GROUP_MAC {
+        parser.inventory.mac_count = parser.inventory.mac_count + 1
+    }
+    if group == PIREUS_APPLE_GROUP_MAC_CATALYST {
+        parser.inventory.mac_catalyst_count =
+            parser.inventory.mac_catalyst_count + 1
+    }
+    if parser.case_deprecated[slot as usize] == 1 {
+        parser.inventory.deprecated_count = parser.inventory.deprecated_count + 1
+    } else {
+        parser.inventory.active_count = parser.inventory.active_count + 1
+    }
+}
+
+fn apple_commit_platform(parser: &!AppleParser, slot: i64)
+with Mut, Panic {
+    let kind = parser.platform_kind[slot as usize]
+    let introduced = parser.platform_introduced[slot as usize]
+    if kind <= 0 || parser.platform_name_count[slot as usize] != 1 ||
+        parser.platform_introduced_count[slot as usize] != 1 ||
+        introduced != apple_expected_platform_version(kind) ||
+        parser.platform_beta_seen[slot as usize] != 1 ||
+        parser.platform_deprecated_seen[slot as usize] != 1 ||
+        parser.platform_unavailable_seen[slot as usize] != 1 {
+        parser.error = PIREUS_APPLE_ERR_SELECTED_SHAPE
+        return
+    }
+    if parser.seen_platform[kind as usize] != 0 {
+        parser.error = PIREUS_APPLE_ERR_DUPLICATE_CASE
+        return
+    }
+    if parser.inventory.platform_count >= 8 {
+        parser.error = PIREUS_APPLE_ERR_CAPACITY
+        return
+    }
+    parser.seen_platform[kind as usize] = 1
+    let out = parser.inventory.platform_count
+    parser.inventory.platform_kind[out as usize] = kind
+    parser.inventory.platform_introduced[out as usize] = introduced
+    parser.inventory.platform_beta[out as usize] =
+        parser.platform_beta[slot as usize]
+    parser.inventory.platform_deprecated[out as usize] =
+        parser.platform_deprecated[slot as usize]
+    parser.inventory.platform_unavailable[out as usize] =
+        parser.platform_unavailable[slot as usize]
+    parser.inventory.platform_count = out + 1
+    if parser.platform_beta[slot as usize] == 1 {
+        parser.inventory.platform_beta_true_count =
+            parser.inventory.platform_beta_true_count + 1
+    }
+    if parser.platform_deprecated[slot as usize] == 1 {
+        parser.inventory.platform_deprecated_true_count =
+            parser.inventory.platform_deprecated_true_count + 1
+    }
+    if parser.platform_unavailable[slot as usize] == 1 {
+        parser.inventory.platform_unavailable_true_count =
+            parser.inventory.platform_unavailable_true_count + 1
+    }
+    if introduced == 1 {
+        parser.inventory.introduced_13_0_count =
+            parser.inventory.introduced_13_0_count + 1
+    }
+    if introduced == 2 {
+        parser.inventory.introduced_13_1_count =
+            parser.inventory.introduced_13_1_count + 1
+    }
+    if introduced == 3 {
+        parser.inventory.introduced_10_15_count =
+            parser.inventory.introduced_10_15_count + 1
+    }
+    if introduced == 4 {
+        parser.inventory.introduced_1_0_count =
+            parser.inventory.introduced_1_0_count + 1
+    }
+}
+
+fn apple_close_container(parser: &!AppleParser, kind: i64)
+with Mut, Panic {
+    if parser.depth <= 0 {
+        parser.error = PIREUS_APPLE_ERR_JSON
+        return
+    }
+    let slot = parser.depth - 1
+    if parser.container_kind[slot as usize] != kind {
+        parser.error = PIREUS_APPLE_ERR_JSON
+        return
+    }
+    let state = parser.container_state[slot as usize]
+    if state != 0 && state != 3 && !(kind == 2 && state == 1) {
+        parser.error = PIREUS_APPLE_ERR_JSON
+        return
+    }
+    if kind == 1 && parser.scope[slot as usize] == APPLE_SCOPE_PLATFORM_ITEM {
+        apple_commit_platform(parser, slot)
+    } else {
+        if kind == 1 { apple_commit_case(parser, slot) }
+    }
+    if parser.error != PIREUS_APPLE_OK { return }
+    parser.depth = parser.depth - 1
+    if parser.depth == 0 { parser.root_done = true }
+}
+
+fn apple_value_string(parser: &!AppleParser, slot: i64)
+with Mut, Panic, Div {
+    let key = parser.key_kind[slot as usize]
+    let scope = parser.scope[slot as usize]
+    if parser.depth == 1 && key == APPLE_KEY_KIND &&
+        apple_token_eq(parser, "symbol") {
+        parser.root_kind_symbol = parser.root_kind_symbol + 1
+    }
+    if scope == APPLE_SCOPE_ROOT_IDENTIFIER && key == APPLE_KEY_URL &&
+        apple_token_eq(parser,
+            "doc://com.apple.metal/documentation/Metal/MTLGPUFamily") {
+        parser.root_identifier_url = parser.root_identifier_url + 1
+    }
+    if scope == APPLE_SCOPE_ROOT_IDENTIFIER &&
+        key == APPLE_KEY_INTERFACE_LANGUAGE && apple_token_eq(parser, "swift") {
+        parser.root_interface_swift = parser.root_interface_swift + 1
+    }
+    if scope == APPLE_SCOPE_CASE && key == APPLE_KEY_TITLE {
+        parser.case_title_count[slot as usize] =
+            parser.case_title_count[slot as usize] + 1
+        parser.case_title[slot as usize] = apple_title_case(parser)
+    }
+    if scope == APPLE_SCOPE_PLATFORM_ITEM && key == APPLE_KEY_NAME {
+        parser.platform_name_count[slot as usize] =
+            parser.platform_name_count[slot as usize] + 1
+        parser.platform_kind[slot as usize] = apple_platform_name(parser)
+    }
+    if scope == APPLE_SCOPE_PLATFORM_ITEM && key == APPLE_KEY_INTRODUCED_AT {
+        parser.platform_introduced_count[slot as usize] =
+            parser.platform_introduced_count[slot as usize] + 1
+        parser.platform_introduced[slot as usize] =
+            apple_platform_version(parser)
+    }
+    if scope == APPLE_SCOPE_TOPIC_ITEM && key == APPLE_KEY_TITLE {
+        if apple_token_eq(parser, "Checking for Apple family GPU support") {
+            parser.topic_apple = parser.topic_apple + 1
+        }
+        if apple_token_eq(parser, "Checking for Metal family GPU support") {
+            parser.topic_metal = parser.topic_metal + 1
+        }
+        if apple_token_eq(parser, "Checking for common GPU support") {
+            parser.topic_common = parser.topic_common + 1
+        }
+        if apple_token_eq(parser, "Checking for macOS family GPU support") {
+            parser.topic_mac = parser.topic_mac + 1
+        }
+        if apple_token_eq(parser, "Checking for Mac Catalyst family GPU support") {
+            parser.topic_mac_catalyst = parser.topic_mac_catalyst + 1
+        }
+    }
+}
+
+fn apple_value_complete(parser: &!AppleParser) with Mut, Panic {
+    if parser.depth <= 0 {
+        parser.error = PIREUS_APPLE_ERR_JSON
+        return
+    }
+    let slot = parser.depth - 1
+    if parser.container_kind[slot as usize] == 1 {
+        if parser.container_state[slot as usize] != 2 {
+            parser.error = PIREUS_APPLE_ERR_JSON
+            return
+        }
+        parser.container_state[slot as usize] = 3
+    } else {
+        if parser.container_state[slot as usize] != 0 {
+            parser.error = PIREUS_APPLE_ERR_JSON
+            return
+        }
+        parser.container_state[slot as usize] = 1
+    }
+}
+
+fn apple_finish_string(parser: &!AppleParser) with Mut, Panic, Div {
+    parser.inventory.json_strings = parser.inventory.json_strings + 1
+    if parser.depth <= 0 {
+        parser.error = PIREUS_APPLE_ERR_JSON
+        return
+    }
+    let slot = parser.depth - 1
+    if parser.string_role == 1 {
+        apple_register_key(parser, slot)
+        if parser.error != PIREUS_APPLE_OK { return }
+        parser.key_kind[slot as usize] = apple_key_kind(parser)
+        parser.key_case[slot as usize] = 0
+        if parser.scope[slot as usize] == APPLE_SCOPE_REFERENCES {
+            parser.key_case[slot as usize] = apple_reference_case(parser)
+        }
+        parser.container_state[slot as usize] = 1
+    } else {
+        if parser.token_overflow &&
+            (parser.scope[slot as usize] == APPLE_SCOPE_CASE ||
+             parser.scope[slot as usize] == APPLE_SCOPE_ROOT_IDENTIFIER ||
+             parser.scope[slot as usize] == APPLE_SCOPE_TOPIC_ITEM ||
+             parser.scope[slot as usize] == APPLE_SCOPE_PLATFORM_ITEM) {
+            parser.error = PIREUS_APPLE_ERR_CAPACITY
+            return
+        }
+        apple_value_string(parser, slot)
+        apple_value_complete(parser)
+    }
+}
+
+fn apple_primitive_reset(parser: &!AppleParser) with Mut {
+    parser.primitive_active = true
+    parser.primitive_len = 0
+    parser.primitive_overflow = false
+}
+
+fn apple_primitive_push(parser: &!AppleParser, b: i64) with Mut, Panic {
+    if parser.primitive_len < 32 {
+        parser.primitive[parser.primitive_len as usize] = b as i8
+    } else {
+        parser.primitive_overflow = true
+    }
+    parser.primitive_len = parser.primitive_len + 1
+}
+
+fn apple_primitive_eq(parser: &AppleParser, value: string) -> bool
+with Panic, Div {
+    if parser.primitive_overflow { return false }
+    let n = str_len(value)
+    if parser.primitive_len != n { return false }
+    var i: i64 = 0
+    while i < n {
+        if parser.primitive[i as usize] != str_char_at(value, i) as i8 {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn apple_finish_primitive(parser: &!AppleParser) with Mut, Panic, Div {
+    if parser.primitive_overflow || parser.primitive_len == 0 {
+        parser.error = PIREUS_APPLE_ERR_JSON
+        return
+    }
+    let slot = parser.depth - 1
+    let is_true = apple_primitive_eq(parser, "true")
+    let is_false = apple_primitive_eq(parser, "false")
+    let is_null = apple_primitive_eq(parser, "null")
+    var is_number = true
+    var i: i64 = 0
+    while i < parser.primitive_len {
+        let b = parser.primitive[i as usize] as i64
+        if !((b >= 48 && b <= 57) || b == 45 || b == 43 ||
+             b == 46 || b == 101 || b == 69) {
+            is_number = false
+        }
+        i = i + 1
+    }
+    if !is_true && !is_false && !is_null && !is_number {
+        parser.error = PIREUS_APPLE_ERR_JSON
+        return
+    }
+    if parser.scope[slot as usize] == APPLE_SCOPE_CASE &&
+        parser.key_kind[slot as usize] == APPLE_KEY_DEPRECATED {
+        if !is_true && !is_false {
+            parser.error = PIREUS_APPLE_ERR_SELECTED_SHAPE
+            return
+        }
+        parser.case_deprecated_seen[slot as usize] =
+            parser.case_deprecated_seen[slot as usize] + 1
+        parser.case_deprecated[slot as usize] = if is_true { 1 } else { 0 }
+    }
+    if parser.scope[slot as usize] == APPLE_SCOPE_PLATFORM_ITEM {
+        let key = parser.key_kind[slot as usize]
+        if key == APPLE_KEY_BETA || key == APPLE_KEY_DEPRECATED ||
+            key == APPLE_KEY_UNAVAILABLE {
+            if !is_true && !is_false {
+                parser.error = PIREUS_APPLE_ERR_SELECTED_SHAPE
+                return
+            }
+            if key == APPLE_KEY_BETA {
+                parser.platform_beta_seen[slot as usize] =
+                    parser.platform_beta_seen[slot as usize] + 1
+                parser.platform_beta[slot as usize] = if is_true { 1 } else { 0 }
+            }
+            if key == APPLE_KEY_DEPRECATED {
+                parser.platform_deprecated_seen[slot as usize] =
+                    parser.platform_deprecated_seen[slot as usize] + 1
+                parser.platform_deprecated[slot as usize] =
+                    if is_true { 1 } else { 0 }
+            }
+            if key == APPLE_KEY_UNAVAILABLE {
+                parser.platform_unavailable_seen[slot as usize] =
+                    parser.platform_unavailable_seen[slot as usize] + 1
+                parser.platform_unavailable[slot as usize] =
+                    if is_true { 1 } else { 0 }
+            }
+        }
+    }
+    parser.primitive_active = false
+    apple_value_complete(parser)
+}
+
+fn apple_string_start(parser: &!AppleParser) with Mut, Panic {
+    if parser.depth <= 0 {
+        parser.error = PIREUS_APPLE_ERR_JSON
+        return
+    }
+    let slot = parser.depth - 1
+    let kind = parser.container_kind[slot as usize]
+    let state = parser.container_state[slot as usize]
+    if kind == 1 && state == 0 { parser.string_role = 1 }
+    else {
+        if (kind == 1 && state == 2) || (kind == 2 && state == 0) {
+            parser.string_role = 2
+        } else {
+            parser.error = PIREUS_APPLE_ERR_JSON
+            return
+        }
+    }
+    apple_token_reset(parser)
+    parser.in_string = true
+    parser.escape = false
+    parser.unicode_remaining = 0
+}
+
+fn apple_delimiter(parser: &!AppleParser, b: i64)
+with Mut, Panic, Div {
+    if b == 123 { apple_push_container(parser, 1); return }
+    if b == 91 { apple_push_container(parser, 2); return }
+    if b == 125 { apple_close_container(parser, 1); return }
+    if b == 93 { apple_close_container(parser, 2); return }
+    if b == 58 {
+        if parser.depth <= 0 {
+            parser.error = PIREUS_APPLE_ERR_JSON
+            return
+        }
+        let slot = parser.depth - 1
+        if parser.container_kind[slot as usize] != 1 ||
+            parser.container_state[slot as usize] != 1 {
+            parser.error = PIREUS_APPLE_ERR_JSON
+            return
+        }
+        parser.container_state[slot as usize] = 2
+        return
+    }
+    if b == 44 {
+        if parser.depth <= 0 {
+            parser.error = PIREUS_APPLE_ERR_JSON
+            return
+        }
+        let slot = parser.depth - 1
+        if parser.container_kind[slot as usize] == 1 &&
+            parser.container_state[slot as usize] == 3 {
+            parser.container_state[slot as usize] = 0
+            parser.key_kind[slot as usize] = 0
+            parser.key_case[slot as usize] = 0
+            return
+        }
+        if parser.container_kind[slot as usize] == 2 &&
+            parser.container_state[slot as usize] == 1 {
+            parser.container_state[slot as usize] = 0
+            return
+        }
+        parser.error = PIREUS_APPLE_ERR_JSON
+        return
+    }
+    apple_primitive_reset(parser)
+    apple_primitive_push(parser, b)
+}
+
+fn apple_parser_feed(parser: &!AppleParser, b: i64)
+with Mut, Panic, Div {
+    if parser.error != PIREUS_APPLE_OK { return }
+    if parser.in_string {
+        if parser.unicode_remaining > 0 {
+            if !apple_is_hex(b) {
+                parser.error = PIREUS_APPLE_ERR_JSON
+                return
+            }
+            parser.unicode_remaining = parser.unicode_remaining - 1
+            if parser.unicode_remaining == 0 { parser.token_unicode = true }
+            return
+        }
+        if parser.escape {
+            parser.escape = false
+            if b == 117 {
+                parser.unicode_remaining = 4
+                return
+            }
+            if b == 34 || b == 92 || b == 47 { apple_token_push(parser, b); return }
+            if b == 98 { apple_token_push(parser, 8); return }
+            if b == 102 { apple_token_push(parser, 12); return }
+            if b == 110 { apple_token_push(parser, 10); return }
+            if b == 114 { apple_token_push(parser, 13); return }
+            if b == 116 { apple_token_push(parser, 9); return }
+            parser.error = PIREUS_APPLE_ERR_JSON
+            return
+        }
+        if b == 92 { parser.escape = true; return }
+        if b == 34 {
+            parser.in_string = false
+            apple_finish_string(parser)
+            return
+        }
+        if b < 32 {
+            parser.error = PIREUS_APPLE_ERR_JSON
+            return
+        }
+        apple_token_push(parser, b)
+        return
+    }
+    if parser.primitive_active {
+        if apple_is_ws(b) || b == 44 || b == 125 || b == 93 {
+            apple_finish_primitive(parser)
+            if parser.error != PIREUS_APPLE_OK { return }
+            if !apple_is_ws(b) { apple_delimiter(parser, b) }
+            return
+        }
+        apple_primitive_push(parser, b)
+        return
+    }
+    if apple_is_ws(b) { return }
+    if b == 34 { apple_string_start(parser); return }
+    apple_delimiter(parser, b)
+}
+
+fn apple_parser_finish(parser: &!AppleParser) with Mut, Panic, Div {
+    if parser.error != PIREUS_APPLE_OK { return }
+    if parser.primitive_active { apple_finish_primitive(parser) }
+    if parser.error != PIREUS_APPLE_OK { return }
+    if parser.in_string || parser.escape || parser.unicode_remaining != 0 ||
+        parser.depth != 0 || !parser.root_seen || !parser.root_done {
+        parser.error = PIREUS_APPLE_ERR_JSON
+        return
+    }
+    parser.inventory.root_identity = parser.root_kind_symbol == 1 &&
+        parser.root_identifier_url == 1 && parser.root_interface_swift == 1
+    parser.inventory.selected_topic_groups = parser.topic_apple +
+        parser.topic_metal + parser.topic_common + parser.topic_mac +
+        parser.topic_mac_catalyst
+    var all_cases = true
+    var i: i64 = 1
+    while i <= 19 {
+        if parser.seen_case[i as usize] != 1 { all_cases = false }
+        i = i + 1
+    }
+    var all_platforms = true
+    i = 1
+    while i <= 6 {
+        if parser.seen_platform[i as usize] != 1 { all_platforms = false }
+        i = i + 1
+    }
+    let shape = parser.inventory.root_identity && all_cases &&
+        all_platforms && parser.inventory.count == 19 &&
+        parser.inventory.platform_count == 6 && parser.topic_apple == 1 &&
+        parser.topic_metal == 1 && parser.topic_common == 1 &&
+        parser.topic_mac == 1 && parser.topic_mac_catalyst == 1
+    if !shape { parser.error = PIREUS_APPLE_ERR_SELECTED_SHAPE }
+}
+
+fn apple_digest_matches(digest: &SHA256Digest) -> bool with Panic {
+    let expected: [i64; 32] = [
+        0xf0, 0xed, 0x07, 0x33, 0x8d, 0x44, 0xf0, 0xcc,
+        0xe1, 0x9f, 0x2e, 0xc1, 0xae, 0xbb, 0x26, 0x12,
+        0x63, 0x8f, 0x5c, 0xab, 0x7b, 0x9a, 0x02, 0x0f,
+        0xce, 0x89, 0x57, 0xec, 0x21, 0xf8, 0x09, 0xea
+    ]
+    var i: i64 = 0
+    while i < 32 {
+        if digest.bytes[i as usize] as i64 != expected[i as usize] { return false }
+        i = i + 1
+    }
+    true
+}
+
+pub fn pireus_apple_metal_import(path: string) -> PireusAppleMetalInventory
+with IO, Mut, Panic, Div, Alloc {
+    var parser = apple_parser_new()
+    let size = file_size(path)
+    if size < 0 {
+        var missing = apple_inventory_empty()
+        missing.error = PIREUS_APPLE_ERR_FILE
+        return missing
+    }
+    if size != APPLE_EXPECTED_BYTES || size >= 1048576 {
+        var wrong = apple_inventory_empty()
+        wrong.total_bytes = size
+        wrong.error = PIREUS_APPLE_ERR_LENGTH
+        return wrong
+    }
+    let raw = read_file(path)
+    var sha = sha256_init()
+    var pos: i64 = 0
+    while pos < size {
+        var window: [u8; 256] = [0; 256]
+        var count = size - pos
+        if count > 256 { count = 256 }
+        var i: i64 = 0
+        while i < count {
+            var b = raw[(pos + i) as usize] as i64
+            if b < 0 { b = b + 256 }
+            window[i as usize] = b as u8
+            apple_parser_feed(&!parser, b)
+            i = i + 1
+        }
+        sha = sha256_update(sha, window, count as i32)
+        pos = pos + count
+    }
+    apple_parser_finish(&!parser)
+    let digest = sha256_finalize(sha)
+    let digest_match = apple_digest_matches(&digest)
+    var inv = parser.inventory
+    inv.total_bytes = size
+    inv.digest_match = digest_match
+    if parser.error != PIREUS_APPLE_OK { inv.error = parser.error }
+    else { if !digest_match { inv.error = PIREUS_APPLE_ERR_HASH } }
+    inv
+}
+
+fn apple_scan_negative(value: string, parser: &!AppleParser)
+with Mut, Panic, Div {
+    let n = str_len(value)
+    var i: i64 = 0
+    while i < n {
+        apple_parser_feed(parser, str_char_at(value, i))
+        i = i + 1
+    }
+    apple_parser_finish(parser)
+}
+
+pub fn pireus_apple_negative_duplicate_key() -> bool
+with Mut, Panic, Div {
+    var parser = apple_parser_new()
+    apple_scan_negative("{\"kind\":\"symbol\",\"kind\":\"symbol\"}", &!parser)
+    parser.error == PIREUS_APPLE_ERR_DUPLICATE_KEY
+}
+
+pub fn pireus_apple_negative_unknown_case() -> bool
+with Mut, Panic, Div {
+    var parser = apple_parser_new()
+    apple_scan_negative(
+        "{\"references\":{\"doc://com.apple.metal/documentation/Metal/MTLGPUFamily/future\":{}}}",
+        &!parser)
+    parser.error == PIREUS_APPLE_ERR_SELECTED_SHAPE
+}
+
+pub fn pireus_apple_negative_unknown_platform() -> bool
+with Mut, Panic, Div {
+    var parser = apple_parser_new()
+    apple_scan_negative(
+        "{\"metadata\":{\"platforms\":[{\"name\":\"futureOS\",\"beta\":false,\"deprecated\":false,\"unavailable\":false,\"introducedAt\":\"1.0\"}]}}",
+        &!parser)
+    parser.error == PIREUS_APPLE_ERR_SELECTED_SHAPE
+}
+
+pub fn pireus_apple_negative_malformed_json() -> bool
+with Mut, Panic, Div {
+    var parser = apple_parser_new()
+    apple_scan_negative("{\"kind\":\"symbol\"", &!parser)
+    parser.error == PIREUS_APPLE_ERR_JSON
+}
+
+pub fn pireus_apple_negative_duplicate_case() -> bool with Mut, Panic {
+    var parser = apple_parser_new()
+    parser.seen_case[1] = 1
+    parser.case_kind[0] = 1
+    parser.case_title[0] = 1
+    parser.case_title_count[0] = 1
+    apple_commit_case(&!parser, 0)
+    parser.error == PIREUS_APPLE_ERR_DUPLICATE_CASE
+}
+
+pub fn pireus_apple_negative_capacity() -> bool with Mut, Panic, Div {
+    var parser = apple_parser_new()
+    parser.depth = 1
+    parser.container_kind[0] = 1
+    parser.key_count[0] = APPLE_KEYS_PER_OBJECT
+    apple_token_reset(&!parser)
+    apple_token_push(&!parser, 120)
+    apple_register_key(&!parser, 0)
+    parser.error == PIREUS_APPLE_ERR_CAPACITY
+}
+
+pub fn pireus_apple_negative_empty_digest() -> bool with Mut, Panic {
+    let digest = sha256_finalize(sha256_init())
+    !apple_digest_matches(&digest)
+}
+
+fn apple_add_class(store: &TripleStore, class_id: i64) {
+    triple_store_add(store, triple_iri(
+        class_id, PIREUS_RDF_TYPE, PIREUS_CLASS_ONTOLOGY_CLASS))
+}
+
+fn apple_group_iri(group: i64) -> i64 {
+    if group == PIREUS_APPLE_GROUP_APPLE { return PIREUS_APPLE_GROUP_IRI_APPLE }
+    if group == PIREUS_APPLE_GROUP_METAL { return PIREUS_APPLE_GROUP_IRI_METAL }
+    if group == PIREUS_APPLE_GROUP_COMMON { return PIREUS_APPLE_GROUP_IRI_COMMON }
+    if group == PIREUS_APPLE_GROUP_MAC { return PIREUS_APPLE_GROUP_IRI_MAC }
+    PIREUS_APPLE_GROUP_IRI_MAC_CATALYST
+}
+
+fn apple_platform_iri(kind: i64) -> i64 {
+    if kind == 1 { return PIREUS_APPLE_PLATFORM_IOS }
+    if kind == 2 { return PIREUS_APPLE_PLATFORM_IPADOS }
+    if kind == 3 { return PIREUS_APPLE_PLATFORM_MAC_CATALYST }
+    if kind == 4 { return PIREUS_APPLE_PLATFORM_MACOS }
+    if kind == 5 { return PIREUS_APPLE_PLATFORM_TVOS }
+    PIREUS_APPLE_PLATFORM_VISIONOS
+}
+
+fn apple_version_iri(kind: i64) -> i64 {
+    if kind == 1 { return PIREUS_APPLE_VERSION_13_0 }
+    if kind == 2 { return PIREUS_APPLE_VERSION_13_1 }
+    if kind == 3 { return PIREUS_APPLE_VERSION_10_15 }
+    PIREUS_APPLE_VERSION_1_0
+}
+
+fn apple_bool_iri(value: i64) -> i64 {
+    if value == 1 { PIREUS_APPLE_RAW_TRUE } else { PIREUS_APPLE_RAW_FALSE }
+}
+
+pub fn pireus_apple_metal_inventory_store(
+    inv: &PireusAppleMetalInventory,
+) -> TripleStore with Mut {
+    var store = pireus_execution_engine_store()
+    apple_add_class(&store, PIREUS_APPLE_CLASS_GPU_FAMILY_CASE)
+    apple_add_class(&store, PIREUS_APPLE_CLASS_API_ENUMERATION)
+    apple_add_class(&store, PIREUS_APPLE_CLASS_VENDOR_CORPUS)
+    apple_add_class(&store, PIREUS_APPLE_CLASS_FAMILY_GROUP)
+    apple_add_class(&store, PIREUS_APPLE_CLASS_LIFECYCLE)
+    apple_add_class(&store, PIREUS_APPLE_CLASS_PLATFORM_RECORD)
+    apple_add_class(&store, PIREUS_APPLE_CLASS_RAW_BOOLEAN)
+    apple_add_class(&store, PIREUS_APPLE_CLASS_RAW_VERSION)
+    triple_store_add(&store, triple_iri(
+        PIREUS_APPLE_CORPUS_DOCC_2026_08_06,
+        PIREUS_RDF_TYPE, PIREUS_APPLE_CLASS_VENDOR_CORPUS))
+    triple_store_add(&store, triple_iri(
+        PIREUS_APPLE_CORPUS_DOCC_2026_08_06,
+        PIREUS_HAS_EVIDENCE_ROLE, PIREUS_APPLE_EVIDENCE_NORMATIVE_API))
+    triple_store_add(&store, triple_iri(
+        PIREUS_APPLE_EVIDENCE_NORMATIVE_API,
+        PIREUS_RDF_TYPE, PIREUS_CLASS_EVIDENCE_ROLE))
+    triple_store_add(&store, triple_iri(
+        PIREUS_APPLE_ENUM_MTL_GPU_FAMILY,
+        PIREUS_RDF_TYPE, PIREUS_APPLE_CLASS_API_ENUMERATION))
+    triple_store_add(&store, triple_iri(
+        PIREUS_APPLE_ENUM_MTL_GPU_FAMILY,
+        PIREUS_APPLE_DESCRIBES_ENGINE_BLUEPRINT,
+        PIREUS_BLUEPRINT_APPLE_GPU))
+    let groups: [i64; 5] = [
+        PIREUS_APPLE_GROUP_IRI_APPLE, PIREUS_APPLE_GROUP_IRI_METAL,
+        PIREUS_APPLE_GROUP_IRI_COMMON, PIREUS_APPLE_GROUP_IRI_MAC,
+        PIREUS_APPLE_GROUP_IRI_MAC_CATALYST
+    ]
+    var gi: i64 = 0
+    while gi < 5 {
+        triple_store_add(&store, triple_iri(
+            groups[gi as usize], PIREUS_RDF_TYPE,
+            PIREUS_APPLE_CLASS_FAMILY_GROUP))
+        gi = gi + 1
+    }
+    triple_store_add(&store, triple_iri(
+        PIREUS_APPLE_LIFECYCLE_ACTIVE,
+        PIREUS_RDF_TYPE, PIREUS_APPLE_CLASS_LIFECYCLE))
+    triple_store_add(&store, triple_iri(
+        PIREUS_APPLE_LIFECYCLE_DEPRECATED,
+        PIREUS_RDF_TYPE, PIREUS_APPLE_CLASS_LIFECYCLE))
+    triple_store_add(&store, triple_iri(
+        PIREUS_APPLE_RAW_FALSE,
+        PIREUS_RDF_TYPE, PIREUS_APPLE_CLASS_RAW_BOOLEAN))
+    triple_store_add(&store, triple_iri(
+        PIREUS_APPLE_RAW_TRUE,
+        PIREUS_RDF_TYPE, PIREUS_APPLE_CLASS_RAW_BOOLEAN))
+    let versions: [i64; 4] = [
+        PIREUS_APPLE_VERSION_13_0, PIREUS_APPLE_VERSION_13_1,
+        PIREUS_APPLE_VERSION_10_15, PIREUS_APPLE_VERSION_1_0
+    ]
+    var vi: i64 = 0
+    while vi < 4 {
+        triple_store_add(&store, triple_iri(
+            versions[vi as usize], PIREUS_RDF_TYPE,
+            PIREUS_APPLE_CLASS_RAW_VERSION))
+        vi = vi + 1
+    }
+    var i: i64 = 0
+    while i < inv.platform_count {
+        let platform = apple_platform_iri(inv.platform_kind[i as usize])
+        triple_store_add(&store, triple_iri(
+            platform, PIREUS_RDF_TYPE,
+            PIREUS_APPLE_CLASS_PLATFORM_RECORD))
+        triple_store_add(&store, triple_iri(
+            PIREUS_APPLE_ENUM_MTL_GPU_FAMILY,
+            PIREUS_APPLE_HAS_PLATFORM, platform))
+        triple_store_add(&store, triple_iri(
+            platform, PIREUS_APPLE_HAS_INTRODUCED_AT,
+            apple_version_iri(inv.platform_introduced[i as usize])))
+        triple_store_add(&store, triple_iri(
+            platform, PIREUS_APPLE_HAS_RAW_BETA,
+            apple_bool_iri(inv.platform_beta[i as usize])))
+        triple_store_add(&store, triple_iri(
+            platform, PIREUS_APPLE_HAS_RAW_DEPRECATED,
+            apple_bool_iri(inv.platform_deprecated[i as usize])))
+        triple_store_add(&store, triple_iri(
+            platform, PIREUS_APPLE_HAS_RAW_UNAVAILABLE,
+            apple_bool_iri(inv.platform_unavailable[i as usize])))
+        i = i + 1
+    }
+    i = 0
+    while i < inv.count {
+        let kind = inv.case_kind[i as usize]
+        let subject = 705300 + kind
+        triple_store_add(&store, triple_iri(
+            subject, PIREUS_RDF_TYPE, PIREUS_APPLE_CLASS_GPU_FAMILY_CASE))
+        triple_store_add(&store, triple_iri(
+            subject, PIREUS_APPLE_HAS_CORPUS,
+            PIREUS_APPLE_CORPUS_DOCC_2026_08_06))
+        triple_store_add(&store, triple_iri(
+            subject, PIREUS_APPLE_HAS_ENUMERATION,
+            PIREUS_APPLE_ENUM_MTL_GPU_FAMILY))
+        triple_store_add(&store, triple_iri(
+            subject, PIREUS_APPLE_HAS_GROUP,
+            apple_group_iri(apple_case_group(kind))))
+        triple_store_add(&store, triple_iri(
+            subject, PIREUS_APPLE_HAS_LIFECYCLE,
+            if inv.case_deprecated[i as usize] == 1 {
+                PIREUS_APPLE_LIFECYCLE_DEPRECATED
+            } else { PIREUS_APPLE_LIFECYCLE_ACTIVE }))
+        i = i + 1
+    }
+    store
+}
+
+pub fn pireus_apple_query_by(
+    store: &TripleStore, predicate: i64, object: i64,
+) -> SparqlResult with Mut, Epistemic {
+    var query = sparql_new()
+    sparql_select(&query, 1)
+    sparql_add_pattern(&query, triple_pattern_new(
+        queryterm_variable(1), queryterm_iri(predicate), queryterm_iri(object)))
+    sparql_execute(store, &query)
+}

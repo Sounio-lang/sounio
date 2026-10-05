@@ -26,6 +26,7 @@
 
 use darwin_pbpk::core::pbpk28_params::*
 use darwin_pbpk::tsit5_pbpk28::*
+use darwin_pbpk::theta_pbpk28::*
 use darwin_pbpk::epistemic_pbpk28::{EpPrior28, ep28_rapamycin_params, ep28_rapamycin_priors}
 
 // ============================================================================
@@ -80,28 +81,27 @@ fn h28_step(mean: f64, variance: f64) -> f64 with Mut, Div, Panic {
 // to be accurate; the absolute AUC trajectory is allowed to be ~0.5%
 // off from the fine-grid reference.
 
+// Bolus run at the Hessian's dt = 0.1 h: Rannacher-started clamp-free CN
+// (theta_pbpk28). Shared by h28_simulate_auc and the mass-balance gate.
+// Until 2026-09-26 this was pbpk28_full_cn_step, whose floors biased AUC_blood
+// by +52% at this dt (0.611694 vs Dose/CL = 0.403226).
+pub fn h28_simulate_ledger(prm: PBPKParams28, dose_mg: f64, t_end: f64,
+                           st: &!PBPKState28, led: &!PBPK28Ledger) -> bool with Mut, Div {
+    return pbpk28_bolus_run_mut(prm, dose_mg, 0.1, t_end, 5000, st, led)
+}
+
+// A stencil AUC is usable iff finite and > 0 (0.0 is h28_simulate_auc's
+// failure value).
+fn h28_solve_ok(auc: f64) -> bool {
+    return h28_finite(auc) && auc > 0.0
+}
+
 fn h28_simulate_auc(prm: PBPKParams28, dose_mg: f64, t_end: f64) -> f64 with Mut, Div, Panic {
-    let dt = 0.1
     var st = pbpk28_state_zero()
-    st.cv[0] = dose_mg / prm.v_ref[0]
-
-    var t = 0.0
-    var auc = 0.0
-    var c_prev = st.cv[0]
-    var steps = 0
-
-    while t < t_end {
-        if steps > 5000 { return 0.0 }
-        let dt_use = if t + dt > t_end { t_end - t } else { dt }
-        let st_new = pbpk28_full_cn_step(st, prm, 0.0, dt_use)
-        let c_new = st_new.cv[0]
-        if !h28_finite(c_new) { return 0.0 }
-        auc = auc + 0.5 * (c_prev + c_new) * dt_use
-        c_prev = c_new
-        t = t + dt_use
-        st = st_new
-        steps = steps + 1
-    }
+    var led = pbpk28_ledger_zero()
+    if !h28_simulate_ledger(prm, dose_mg, t_end, &!st, &!led) { return 0.0 }
+    let auc = led.auc[0]
+    if !h28_finite(auc) { return 0.0 }
     return auc
 }
 
@@ -140,11 +140,11 @@ pub struct Pbpk28HessianBudget {
     n:                  i32,
     auc_ref:            f64,
     auc_mean_corrected: f64,       // y(μ) + ½ Σ Hᵢᵢ σᵢ²
-    sensitivity:        [f64; 8],  // 1st-order: cᵢ = ∂AUC/∂xᵢ
-    hessian:            [f64; 64], // 8×8 row-major
-    var_first_order:    f64,
-    var_second_order:   f64,       // 1st order + Hessian correction
-    success:            bool,
+    pub sensitivity:        [f64; 8],  // 1st-order: cᵢ = ∂AUC/∂xᵢ
+    pub hessian:            [f64; 64], // 8×8 row-major
+    pub var_first_order:    f64,
+    pub var_second_order:   f64,       // 1st order + Hessian correction
+    pub success:            bool,
 }
 
 fn h28_budget_zero() -> Pbpk28HessianBudget {
@@ -180,6 +180,12 @@ pub fn hessian_pbpk28_auc(
     }
     bud.auc_ref = auc0
 
+    // Every stencil solve must succeed. h28_simulate_auc returns 0.0 for a
+    // rejected trajectory (non-finite, runaway, or booked negative mass above
+    // pbpk28_neg_mass_bound_mg()); a valid AUC is > 0. One rejected solve
+    // fails the whole budget instead of entering a difference quotient as 0.
+    var all_ok = true
+
     // Step sizes per parameter
     var hs: [f64; 8] = [0.0; 8]
     var i: i32 = 0
@@ -197,6 +203,7 @@ pub fn hessian_pbpk28_auc(
             let p_n = h28_perturb(base_prm, i, 0.0 - h)
             let f_p = h28_simulate_auc(p_p, dose_mg, t_end)
             let f_n = h28_simulate_auc(p_n, dose_mg, t_end)
+            if !h28_solve_ok(f_p) || !h28_solve_ok(f_n) { all_ok = false }
             let ci  = (f_p - f_n) / (2.0 * h)
             bud.sensitivity[i] = ci
             let hii = (f_p - 2.0 * auc0 + f_n) / (h * h)
@@ -217,6 +224,7 @@ pub fn hessian_pbpk28_auc(
                 let f_pn = h28_simulate_auc(h28_perturb2(base_prm, i, hi,        j, 0.0 - hj), dose_mg, t_end)
                 let f_np = h28_simulate_auc(h28_perturb2(base_prm, i, 0.0 - hi, j, hj),        dose_mg, t_end)
                 let f_nn = h28_simulate_auc(h28_perturb2(base_prm, i, 0.0 - hi, j, 0.0 - hj), dose_mg, t_end)
+                if !h28_solve_ok(f_pp) || !h28_solve_ok(f_pn) || !h28_solve_ok(f_np) || !h28_solve_ok(f_nn) { all_ok = false }
                 let hij  = (f_pp - f_pn - f_np + f_nn) / (4.0 * hi * hj)
                 bud.hessian[i * 8 + j] = hij
                 bud.hessian[j * 8 + i] = hij
@@ -225,6 +233,8 @@ pub fn hessian_pbpk28_auc(
         }
         i = i + 1
     }
+
+    if !all_ok { return h28_budget_zero() }
 
     // First-order variance
     var v1: f64 = 0.0
@@ -269,12 +279,54 @@ pub fn hessian_pbpk28_auc(
 // NONLINEARITY RATIO ρᵢ — dual emission (JCGM 101 §B.4)
 // ============================================================================
 // Literal  ρᵢ = |½ Hᵢᵢ σᵢ²| / |cᵢ σᵢ|  (JCGM 101 §B.4 in physical units)
-// Normalised ρ̃ᵢ = |½ Hᵢᵢ σᵢ| / |cᵢ|      (dimensionless; curvature in σ-units)
+// Normalised ρ̃ᵢ = ½ ρᵢ²                  (as computed below; see its comment)
 //
 // For a perfectly linear function: Hᵢᵢ = 0 → both ratios vanish.
+// Resolvability (see the two *_resolvable helpers). Both terms are finite
+// differences with their own rounding floors:
+//   - first-order and second-order effects both unresolved → the parameter
+//     has no measurable effect at either order: both ratios report 0.0;
+//   - first order unresolved but second order resolved → a curvature with no
+//     measurable slope; the ratio is undefined and both functions return the
+//     sentinel -1.0 (never a valid ratio, which is ≥ 0);
+//   - first order resolved → the ratio as defined.
+// Under the exact mass identity AUC_blood(0-168h) = (Dose − M(168h))/CL the
+// four Kp columns are pure rounding at both orders (|cᵢ|σᵢ ~ 1e-13,
+// ½|Hᵢᵢ|σᵢ² ~ 1e-12, against AUC_ref ~ 0.4); unguarded, their ratio of two
+// noise terms printed as ρ_literal(kp_brain) = 8.2, ρ̃ = 33.6.
 // For AUC ~ 1/CL (convex), M6 CV(CL)=38% gives ρ_literal(CL) ≈ 0.38
 // and ρ̃(CL) ≈ 0.07. The legacy CV=58% prior gave ρ_literal≈0.58 and
 // ρ̃≈0.17. Threshold for "weakly nonlinear": ρ̃ < 0.20 per dissertation §4.9.
+
+// |cᵢ|σᵢ must exceed 1e-9·|AUC_ref| to be a measured effect. The central
+// difference of an AUC accumulated over n ≲ 1700 sub-steps carries absolute
+// rounding ~ n·ε·|AUC| ≈ 4e-13·|AUC|; with h = 0.01σ that puts the noise in
+// |cᵢ|σᵢ near 2e-11·|AUC|, 50× below this floor, while the smallest real
+// first-order effect here (cl_renal, |c|σ ≈ 4e-3 vs 4e-10) is 10⁷× above it.
+fn h28_first_order_resolvable(bud: Pbpk28HessianBudget, priors: EpPrior28, i: i32) -> bool with Mut, Div, Panic, Epistemic {
+    let c_i = bud.sensitivity[i]
+    let s_i = h28_sqrt(priors.kn[i].variance)
+    return h28_abs(c_i) * s_i > 1.0e-9 * h28_abs(bud.auc_ref)
+}
+
+// ½|Hᵢᵢ|σᵢ² must exceed 1e-7·|AUC_ref| to be a measured effect. The
+// three-point second difference divides ~4 rounding errors of ≈ 4e-13·|AUC|
+// by h² = (0.01σ)², so its noise in ½|Hᵢᵢ|σᵢ² is ≈ 8e-9·|AUC|, 12× below this
+// floor; the smallest real second-order term here (cl_renal,
+// ½·0.0052·0.0144 ≈ 4e-5 vs 4e-8) is 10³× above it.
+fn h28_second_order_resolvable(bud: Pbpk28HessianBudget, priors: EpPrior28, i: i32) -> bool with Mut, Div, Panic, Epistemic {
+    let h_ii = bud.hessian[i * 8 + i]
+    let v_i = priors.kn[i].variance
+    return 0.5 * h28_abs(h_ii) * v_i > 1.0e-7 * h28_abs(bud.auc_ref)
+}
+
+// 0.0 when neither order is resolvable, -1.0 (undefined) when only the
+// second order is, and 1.0 when the ratio is well defined.
+fn h28_ratio_status(bud: Pbpk28HessianBudget, priors: EpPrior28, i: i32) -> f64 with Mut, Div, Panic, Epistemic {
+    if h28_first_order_resolvable(bud, priors, i) { return 1.0 }
+    if h28_second_order_resolvable(bud, priors, i) { return 0.0 - 1.0 }
+    return 0.0
+}
 
 pub fn h28_nonlinearity_ratio_literal(
     bud:    Pbpk28HessianBudget,
@@ -287,14 +339,23 @@ pub fn h28_nonlinearity_ratio_literal(
     let s_i  = h28_sqrt(v_i)
     let num  = 0.5 * h28_abs(h_ii) * v_i
     let den  = h28_abs(c_i) * s_i
+    let status = h28_ratio_status(bud, priors, i)
+    if status < 0.5 { return status }
     if den < 1.0e-30 { return 0.0 }
     num / den
 }
 
-// ρ̃_i = ½ ρ²_literal = second-order variance fraction for param i:
-//   ½ H_ii² σ_i⁴ / (c_i² σ_i²) = ½ (H_ii σ_i / c_i)² = 2 ρ²_literal
-// → gives ~0.072 for M6 CL_hep (ρ_literal=0.380), in editorial range [0.05, 0.20].
-// Interpretation: "Hessian term adds ρ̃ × first-order variance per parameter."
+// ρ̃_i = ½ ρ²_literal, which is what this function returns (0.0722 for M6
+// CL_hep, ρ_literal = 0.380; editorial range [0.05, 0.20]).
+// It is NOT the per-parameter second-order-to-first-order variance ratio.
+// That ratio, for a normal input, is
+//   ½ H_ii² σ_i⁴ / (c_i² σ_i²) = ½ (H_ii σ_i / c_i)² = 2 ρ²_literal = 4 ρ̃_i
+// (0.2888 for M6 CL_hep, 0.125 for fu). An earlier version of this comment
+// derived 2ρ² and then labelled ½ρ² with it, a factor of 4 (caught in PR
+// #2696 review, 2026-09-26). The value and the [0.05, 0.20] range are left
+// as they are: redefining ρ̃ as the variance ratio would move CL_hep past the
+// editorial 0.20 threshold, which is a decision for the dissertation author.
+// Do not describe ρ̃ as "the fraction of variance the Hessian adds".
 pub fn h28_nonlinearity_ratio_normalized(
     bud:    Pbpk28HessianBudget,
     priors: EpPrior28,
@@ -305,6 +366,8 @@ pub fn h28_nonlinearity_ratio_normalized(
     let v_i  = priors.kn[i].variance
     let s_i  = h28_sqrt(v_i)
     let den  = h28_abs(c_i)
+    let status = h28_ratio_status(bud, priors, i)
+    if status < 0.5 { return status }
     if den < 1.0e-30 { return 0.0 }
     let rho = 0.5 * h28_abs(h_ii) * s_i / den
     0.5 * rho * rho
@@ -359,7 +422,7 @@ pub fn h28_emit_budget_csv(bud: Pbpk28HessianBudget, priors: EpPrior28) with IO,
 }
 
 // ============================================================================
-// MAIN — TEST SUITE (6 tests)
+// MAIN — TEST SUITE (7 tests)
 // ============================================================================
 
 fn h28_selftest_main() -> i32 with IO, Mut, Div, Panic, Epistemic {
@@ -441,11 +504,12 @@ fn h28_selftest_main() -> i32 with IO, Mut, Div, Panic, Epistemic {
     println("")
 
     // TEST 5: Mean correction is physically bounded (< 60% of AUC_ref)
-    // For M6 CV(CL_hep)=38% and AUC ~ 1/CL (convex), Jensen's inequality gives
-    // E[1/CL] ≥ 1/E[CL], so the Hessian mean correction is expected to be
-    // 30–50% of AUC_ref at this parameter uncertainty. The threshold is set
-    // at 60% to flag genuinely pathological values (>100% shifts) while
-    // accepting the expected pharmacological correction.
+    // AUC ~ 1/CL is convex, so by Jensen E[1/CL] ≥ 1/E[CL] and the Hessian
+    // mean correction ½ Σ Hᵢᵢ σᵢ² is positive and grows with the priors' CVs:
+    // measured |shift| / AUC_ref = 0.207 under the M6 prior (CV(CL_hep) 38%)
+    // and 0.400 under the legacy prior (σ/CL = 58%). The 60% threshold is
+    // prior-independent: it flags pathological values (> 100% shifts) and
+    // accepts either measured correction.
     println("TEST 5: Mean correction physically bounded (< 60% of AUC_ref)")
     let mean_shift = bud.auc_mean_corrected - bud.auc_ref
     let rel_shift = if bud.auc_ref > 1.0e-12 {
@@ -457,7 +521,7 @@ fn h28_selftest_main() -> i32 with IO, Mut, Div, Panic, Epistemic {
     print_f64(rel_shift)
     println("")
     if rel_shift < 0.60 {
-        println("  [PASS] Hessian mean correction in expected range for M6 CV(CL)=38%")
+        println("  [PASS] Hessian mean correction below 60% of AUC_ref")
         passed = passed + 1
     } else {
         println("  FAIL: mean correction too large (> 60%)")
@@ -473,6 +537,22 @@ fn h28_selftest_main() -> i32 with IO, Mut, Div, Panic, Epistemic {
     passed = passed + 1
     println("")
 
+    // TEST 7: Mass balance at the production dt — exact discrete identity
+    // M(T) + CL·AUC − M(0) = 0 to rounding (theta_pbpk28 gate bounds).
+    println("TEST 7: Mass balance at production dt (dt=0.1h, 5 mg bolus)")
+    var mb_st = pbpk28_state_zero()
+    var mb_led = pbpk28_ledger_zero()
+    let mb_run = h28_simulate_ledger(prm, dose_mg, t_end, &!mb_st, &!mb_led)
+    let mb_ok = mb_run && pbpk28_mass_gate_report(mb_led, mb_st, prm, dose_mg)
+    if mb_ok {
+        println("  [PASS] mass identity closes to rounding; no floor, no visible negativity")
+        passed = passed + 1
+    } else {
+        println("  FAIL: discrete mass identity violated or negative mass visible")
+        failed = failed + 1
+    }
+    println("")
+
     println("======================================================================")
     println("  HESSIAN PBPK28 — TEST SUMMARY")
     println("======================================================================")
@@ -484,7 +564,7 @@ fn h28_selftest_main() -> i32 with IO, Mut, Div, Panic, Epistemic {
     println("")
     if failed == 0 {
         println("")
-        println("  ALL 6 TESTS PASSED")
+        println("  ALL 7 TESTS PASSED")
         println("")
         println("  Second-order GUM through 28-state PBPK for rapamycin.")
         println("  Dissertation Section 4.10 Hessian stack: CONFIRMED.")
@@ -498,7 +578,7 @@ fn h28_selftest_main() -> i32 with IO, Mut, Div, Panic, Epistemic {
 }
 
 // ============================================================================
-// DUAL-RHO SELFTEST (3 tests)
+// DUAL-RHO SELFTEST (5 tests)
 // ============================================================================
 
 fn h28_dual_rho_selftest_main() -> i32 with IO, Mut, Div, Panic, Epistemic {
@@ -532,13 +612,13 @@ fn h28_dual_rho_selftest_main() -> i32 with IO, Mut, Div, Panic, Epistemic {
     println("")
 
     // TEST 2: ρ̃_normalized in M6 editorial range [0.05, 0.20].
-    // ρ̃ = ½ρ²: second-order variance fraction per parameter.
-    // For ρ_literal(CL_hep)=0.380 → ρ̃ = ½×0.380² ≈ 0.072.
+    // ρ̃ = ½ρ² (not the variance ratio, which is 2ρ² = 4ρ̃; see
+    // h28_nonlinearity_ratio_normalized). For ρ_literal(CL_hep)=0.380 → 0.072.
     println("TEST 2: rho_normalized(CL_hep) in [0.05, 0.20]")
     let rho_norm_cl = h28_nonlinearity_ratio_normalized(bud, priors, 0)
     print("  rho_normalized(CL_hep): "); print_f64(rho_norm_cl); println("")
     if rho_norm_cl > 0.05 && rho_norm_cl < 0.20 {
-        println("  [PASS] in editorial range (weakly nonlinear: second-order adds ~7% variance)")
+        println("  [PASS] rho_normalized = rho_literal^2/2 in editorial range [0.05, 0.20]")
         passed = passed + 1
     } else {
         println("  FAIL: outside [0.05, 0.20]")
@@ -566,6 +646,49 @@ fn h28_dual_rho_selftest_main() -> i32 with IO, Mut, Div, Panic, Epistemic {
     }
     println("")
 
+    // TEST 4: A purely quadratic response (zero slope, resolvable curvature)
+    // has no defined ratio: both functions return the -1.0 sentinel, never
+    // 0.0, which would read as "linear".
+    println("TEST 4: Both ratios = -1 (undefined) for a purely quadratic budget")
+    var quad_bud = h28_budget_zero()
+    quad_bud.n = 7
+    quad_bud.auc_ref = 0.4
+    quad_bud.sensitivity[0] = 0.0
+    quad_bud.hessian[0] = 1.0
+    let rho_lit_quad  = h28_nonlinearity_ratio_literal(quad_bud, priors, 0)
+    let rho_norm_quad = h28_nonlinearity_ratio_normalized(quad_bud, priors, 0)
+    print("  rho_literal (quadratic):    "); print_f64(rho_lit_quad); println("")
+    print("  rho_normalized (quadratic): "); print_f64(rho_norm_quad); println("")
+    if rho_lit_quad == 0.0 - 1.0 && rho_norm_quad == 0.0 - 1.0 {
+        println("  [PASS] both report the undefined sentinel")
+        passed = passed + 1
+    } else {
+        println("  FAIL: expected -1.0 for a purely quadratic response")
+        failed = failed + 1
+    }
+    println("")
+
+    // TEST 5: Neither order resolvable (slope and curvature below their
+    // rounding floors against AUC_ref = 0.4): both ratios report 0.0.
+    println("TEST 5: Both ratios = 0 when neither order is resolvable")
+    var flat_bud = h28_budget_zero()
+    flat_bud.n = 7
+    flat_bud.auc_ref = 0.4
+    flat_bud.sensitivity[0] = 0.0
+    flat_bud.hessian[0] = 0.0
+    let rho_lit_flat  = h28_nonlinearity_ratio_literal(flat_bud, priors, 0)
+    let rho_norm_flat = h28_nonlinearity_ratio_normalized(flat_bud, priors, 0)
+    print("  rho_literal (flat):    "); print_f64(rho_lit_flat); println("")
+    print("  rho_normalized (flat): "); print_f64(rho_norm_flat); println("")
+    if rho_lit_flat == 0.0 && rho_norm_flat == 0.0 {
+        println("  [PASS] both report 0 (no measurable effect)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: expected 0.0 when neither order is resolvable")
+        failed = failed + 1
+    }
+    println("")
+
     println("======================================================================")
     println("  DUAL-RHO TEST SUMMARY")
     println("======================================================================")
@@ -573,7 +696,7 @@ fn h28_dual_rho_selftest_main() -> i32 with IO, Mut, Div, Panic, Epistemic {
     print("  Failed: "); print_f64(failed as f64); println("")
     if failed == 0 {
         println("")
-        println("  ALL 3 DUAL-RHO TESTS PASSED")
+        println("  ALL 5 DUAL-RHO TESTS PASSED")
         println("")
         println("  HESSIAN_PBPK28_DUAL_RHO_PASS")
     } else {

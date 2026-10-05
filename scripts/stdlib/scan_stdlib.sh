@@ -10,7 +10,7 @@ QUIET=0
 
 usage() {
   cat <<'USAGE'
-Usage: bash scripts/scan_stdlib.sh [--stdlib-path PATH] [--json-out PATH] [--quiet]
+Usage: bash scripts/stdlib/scan_stdlib.sh [--stdlib-path PATH] [--json-out PATH] [--quiet]
 
 Emits a machine-checkable snapshot of stdlib inventory:
   - total .sio files
@@ -150,7 +150,7 @@ for p in hyper_stub_mod_files:
 obj = {
     "schema": "sounio.stdlib.inventory.v1",
     "generated_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
-    "command": "bash scripts/scan_stdlib.sh",
+    "command": "bash scripts/stdlib/scan_stdlib.sh",
     "stdlib_path": str(stdlib_path),
     "counts": {
         "sio_files": len(sio_files),

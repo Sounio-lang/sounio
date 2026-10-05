@@ -38,7 +38,7 @@ ones included (§2.3 of `LANGUAGE_SPECIFICATION.md`).
 | `u3`, `u4096` | **`check: OK`** |
 | `i0` | `error[E009]` |
 | `f17`, `f64000` | `error[E009]` |
-| `f128`, `f256` | `error[E218]` — Reserved |
+| `f128`, `f256` | `error[E249]` — Reserved |
 
 So `i<n>` and `u<n>` are accepted for any **n ≥ 1**. The float side is closed:
 only `f32` and `f64` exist, and the two Reserved names are refused **by name,
@@ -163,7 +163,7 @@ sites is refused on the default engine.
 
 | | Madaros v0.80.0 | lean_single |
 |---|---|---|
-| `f128` in a parameter, with a caller | **`error[E218]`** | accepted, ELF emitted |
+| `f128` in a parameter, with a caller | **`error[E249]`** | accepted, ELF emitted |
 
 `f128`/`f256` are the tree's clearest instance of the **Reserved** state — a name
 taken, every use refused with a diagnostic that says why. That state exists on
@@ -192,7 +192,7 @@ in question here.
 4. ~~**Owed measurement, not a ruling.**~~ **ANSWERED 2026-08-20 — it exceeds
    `i64`.** See §12.2.6. The question is now a ruling: what to do about a proof
    artefact whose arithmetic wraps.
-5. **Does `Reserved` belong on both engines?** `E218` is Madaros-only; lean_single
+5. **Does `Reserved` belong on both engines?** `E249` is Madaros-only; lean_single
    accepts `f128`. The Reserved state is the tree's one first-class refusal, and
    it currently holds on one engine.
 

@@ -1,0 +1,132 @@
+//@ run-pass
+// Wide-integer arithmetic must survive -O.
+//
+// A wide value occupies limb_count CONSECUTIVE registers (ir.sio: "limb k lives
+// at vreg base+k"), and an IrWide* instruction names only the base. Every peel
+// in opt_cleanup.sio tracked state per register and saw only that base, so
+// limbs 1..n-1 were invisible -- never used to a liveness scan, never written
+// to an invalidation.
+//
+// The defect tracks WIDTH: this program at i128 (2 limbs) and at i256 (4 limbs)
+// diverged under -O, and the same program at i64 (1 limb) did not. Reduced from
+// tests/run-pass/lorenz_i256_step1_taylor2_radius_artifact_tiny.sio; each mask
+// function agrees under both builds when compiled ALONE, so the four calls are
+// load-bearing and this is as small as it was reduced.
+
+
+fn mix(acc: i64, value: i64, salt: i64) -> i64 with Mod {
+    return ((acc * 16777619) + value + salt) % 1000000007
+}
+
+fn conversion_mask() -> i64 {
+    let source_scale: i128 = 4294967296 as i128
+    let target_scale: i128 = 1000000 as i128
+    let rx: i128 = 4295 as i128
+    let ry: i128 = 1116695792 as i128
+    let rz: i128 = 71584220 as i128
+    let x_conv_excess: i128 = rx * target_scale - (1 as i128) * source_scale
+    let y_conv_excess: i128 = ry * target_scale - (260001 as i128) * source_scale
+    let z_conv_excess: i128 = rz * target_scale - (16667 as i128) * source_scale
+    if x_conv_excess >= (0 as i128) {
+        if y_conv_excess >= (0 as i128) {
+            if z_conv_excess >= (0 as i128) {
+                if x_conv_excess < target_scale {
+                    if y_conv_excess < target_scale {
+                        if z_conv_excess < target_scale { return 1 }
+                    }
+                }
+            }
+        }
+    }
+    return 0
+}
+
+fn derivative_mask() -> i64 {
+    let source_scale: i128 = 4294967296 as i128
+    let x1_abs: i128 = 4294967296 as i128
+    let y1_abs: i128 = 5411658768 as i128
+    let z1: i128 = 4223384510 as i128
+    let rhoz_abs: i128 = (28 as i128) * source_scale - z1
+    let rx: i128 = 4295 as i128
+    let ry: i128 = 1116695792 as i128
+    let rz: i128 = 71584220 as i128
+    let dx_rad: i128 = 11167000870 as i128
+    let prod_x_rhoz: i128 = 71700329 as i128
+    let dy_rad: i128 = 1188396121 as i128
+    let prod_xy: i128 = 1116702321 as i128
+    let beta_rad: i128 = 190891255 as i128
+    let dz_rad: i128 = 1307593576 as i128
+
+    var mask: i64 = 0
+    if dx_rad == (10 as i128) * (rx + ry) { mask = mask + 2 }
+
+    let xrhoz_total: i128 =
+        x1_abs * rz +
+        rhoz_abs * rx +
+        rx * rz
+    if (prod_x_rhoz - (1 as i128)) * source_scale <= xrhoz_total {
+        if prod_x_rhoz * source_scale > xrhoz_total { mask = mask + 4 }
+    }
+    if dy_rad == prod_x_rhoz + ry { mask = mask + 8 }
+
+    let xy_total: i128 =
+        x1_abs * ry +
+        y1_abs * rx +
+        rx * ry
+    let beta_total: i128 = (8 as i128) * rz
+    if (prod_xy - (1 as i128)) * source_scale <= xy_total {
+        if prod_xy * source_scale > xy_total {
+            if (beta_rad - (2 as i128)) * (3 as i128) < beta_total {
+                if (beta_rad - (1 as i128)) * (3 as i128) >= beta_total {
+                    if dz_rad == prod_xy + beta_rad { mask = mask + 16 }
+                }
+            }
+        }
+    }
+    return mask
+}
+
+fn next_radius_mask() -> i64 {
+    let source_scale: i128 = 4294967296 as i128
+    let dt_q: i128 = 42949672 as i128
+    let rx: i128 = 4295 as i128
+    let ry: i128 = 1116695792 as i128
+    let rz: i128 = 71584220 as i128
+    let dx_rad: i128 = 11167000870 as i128
+    let dy_rad: i128 = 1188396121 as i128
+    let dz_rad: i128 = 1307593576 as i128
+    let next_x: i128 = 111674302 as i128
+    let next_y: i128 = 1128579753 as i128
+    let next_z: i128 = 84660156 as i128
+    if (next_x - rx - (1 as i128)) * source_scale <= dt_q * dx_rad {
+        if (next_x - rx) * source_scale > dt_q * dx_rad {
+            if (next_y - ry - (1 as i128)) * source_scale <= dt_q * dy_rad {
+                if (next_y - ry) * source_scale > dt_q * dy_rad {
+                    if (next_z - rz - (1 as i128)) * source_scale <= dt_q * dz_rad {
+                        if (next_z - rz) * source_scale > dt_q * dz_rad { return 32 }
+                    }
+                }
+            }
+        }
+    }
+    return 0
+}
+
+fn cap_mask() -> i64 {
+    if (111674302 as i128) <= (120000000 as i128) {
+        if (1128579753 as i128) <= (1200000000 as i128) {
+            if (84660156 as i128) <= (90000000 as i128) { return 64 }
+        }
+    }
+    return 0
+}
+
+fn main() -> i64 with IO {
+    let ok_mask = conversion_mask() + derivative_mask() + next_radius_mask() + cap_mask()
+    if ok_mask == 127 {
+        println("OPT_WIDE_LIMB_SPAN_OK")
+    } else {
+        println("FAIL: a wide-integer limb was dropped under -O")
+    }
+    return 0
+}

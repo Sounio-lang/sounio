@@ -1,0 +1,76 @@
+//@ run-pass
+//@ known-failure: E230 under the default checker (the op this witnesses is refused by N3; N2 dataflow verified under SOUNIO_NS_DISABLE by scripts/ci/ns_dataflow_trace_gate.sh) and E245 (#1706, Knowledge x Knowledge arithmetic has no lowering on Madaros, independent of NS)
+//@ requires: madaros
+//@ expect-stdout: ns-loop-widen: PASS
+//
+// N2 negative control (codex ruling 2026-08-23, round 4): loop-carried
+// Knowledge reassignment is now COVERED by the same env-φ fix as if/match
+// (round 3) -- widened to top, not left open. Round 3 measured and closed
+// this hole for if/else and match; round 4 (grok-4.6, on /tmp/madaros-n2d.elf)
+// PROVED the identical hole was still live for while/for loop bodies:
+//
+//   var x = measure(1)                        // {s1}
+//   while i<3 { x = x + measure(2); i=i+1 }    // inside: union={s1,s2}
+//   let y = x + x                              // AFTER the loop: union=1
+//                                               // <- x REVERTED to {s1},
+//                                               //    silently dropping s2
+//
+// Root cause was the SAME as if/match: checker_check_block_inplace's
+// push_scope()/pop_scope() around the loop body discards any env rebind made
+// inside it, so the reassignment never reached anywhere outside the loop.
+// The fix wraps BOTH checker_check_while_expr_inplace and
+// checker_check_for_in_expr_inplace with the SAME checker_ns_branch_enter_
+// inplace (before the body) / checker_merge_ns_reassigned_inplace (after)
+// pair used for if/match -- they do NOT share a single body-check function
+// (each is its own top-level expr handler calling
+// checker_check_opt_block_inplace independently), so both needed their own
+// wrap. A loop body runs 0+ times and accumulates, so the sound post-loop
+// value for any Knowledge var reassigned in the body is TOP (widen) --
+// identical hammer to if/match, deliberately NOT a per-binding fixpoint
+// union (no such pass exists, or is being added, here).
+//
+// Two probes below, while and for, each: measure a fresh value, reassign a
+// pre-loop Knowledge var to it INSIDE the loop body, then read the var again
+// AFTER the loop (`x + x` / `z + z`) -- the end-to-end proof that the
+// forced-top value survived past the loop, not just that the merge ran.
+//
+// Observable only under SOUNIO_NS_TRACE=1: both post-loop unions MUST read
+// "NS_TRACE union=-1" (top), NOT the pre-loop variable's own original handle.
+//
+// Per-rule sabotage: SOUNIO_NS_SABOTAGE_JOIN=1 (same knob as if/match)
+// disables the loop merge too, reproducing the exact fail-open grok-4.6
+// measured: both post-loop unions revert to the PRE-loop handle instead of
+// top.
+
+fn main() -> i64 with IO {
+    // ---- while-loop probe ----
+    let s0: Knowledge<f64> = measure(0.0, uncertainty: 0.1)
+    let w0: Knowledge[f64, epsilon < 1.0] = Knowledge(0.0, ε = 0.05)
+    var x: Knowledge[f64, epsilon < 1.0] = s0 + w0
+
+    var i: i64 = 0
+    while i < 3 {
+        let sk: Knowledge<f64> = measure(9.0, uncertainty: 0.1)
+        let wk: Knowledge[f64, epsilon < 1.0] = Knowledge(0.0, ε = 0.05)
+        x = sk + wk
+        i = i + 1
+    }
+
+    let y: Knowledge[f64, epsilon < 1.0] = x + x
+
+    // ---- for-loop twin ----
+    let s1: Knowledge<f64> = measure(1.0, uncertainty: 0.1)
+    let w1: Knowledge[f64, epsilon < 1.0] = Knowledge(0.0, ε = 0.05)
+    var z: Knowledge[f64, epsilon < 1.0] = s1 + w1
+
+    for j in 0..3 {
+        let sj: Knowledge<f64> = measure(8.0, uncertainty: 0.1)
+        let wj: Knowledge[f64, epsilon < 1.0] = Knowledge(0.0, ε = 0.05)
+        z = sj + wj
+    }
+
+    let zz: Knowledge[f64, epsilon < 1.0] = z + z
+
+    println("ns-loop-widen: PASS")
+    0
+}

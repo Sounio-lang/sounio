@@ -8,14 +8,64 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.rust-mac
 -->
 
 ---
-title: Four Rust macros are accepted, and three of them SIGSEGV
-status: measured
+title: Four Rust macros are accepted, and three of them SIGSEGV (SUPERSEDED by #2247)
+status: superseded
 date: 2026-08-20
 last_validated: 2026-08-20
 engines: Madaros v0.80.0 (default), lean_single
 ---
 
 # Four Rust macros are accepted, and three of them SIGSEGV
+
+> **SUPERSEDED 2026-08-28 by #2247. Everything below this box is a historical
+> record of what was true on 2026-08-20; none of it describes the compiler now.**
+>
+> Re-measured on a Madaros built from current source (the committed prebuilt ELF
+> predates the fix and still answers `check: OK`, so measuring through
+> `./bin/souc` reproduces the OLD result and is how this page could look current
+> while being false):
+>
+> | written | Madaros (source-built) | lean_single |
+> |---|---|---|
+> | `println!("x")` | **`error[E043]`** | `error[E200]` |
+> | `print!("x")` | **`error[E043]`** | `error[E200]` |
+> | `panic!("x")` | **`error[E043]`** | `error[E200]` |
+> | `assert!(1 == 2)` | **`error[E043]`** | `error[E200]` |
+>
+> All four are now refused before lowering, so neither the SIGSEGV nor the inert
+> `assert!` this page documents can still occur. The table below is kept because
+> it is the evidence that motivated the fix, not because it is current.
+>
+> **Two things this page's successor should carry, both still open:**
+>
+> 1. **The engines disagree on the identity, not the verdict.** Madaros says
+>    `E043`; lean_single says `E200` (undefined identifier). Both refuse, which
+>    is the safety property — but a language-level grammar rule should not have
+>    a different diagnostic identity depending on which frontend observed it.
+>    This matters directly to whether `DiagnosticId` can be relied on by an LSP
+>    or by tooling.
+>
+> 2. **E043 is narrower than its message says.** It reads *"Sounio does not use
+>    Rust macros"*, but it fires on lexical adjacency alone. Measured on the
+>    source-built compiler:
+>
+>    ```
+>    x!(y)     -> error[E043]
+>    x! (y)    -> accepted, rc=0
+>    x !(y)    -> accepted, rc=0
+>    x ! (y)   -> accepted, rc=0
+>    foo::bar!(z) -> error[E004], NOT E043
+>    ```
+>
+>    So it means "bare identifier followed by a tightly-adjacent bang-call", and
+>    the path-qualified macro form — the shape most Rust code actually uses for
+>    anything namespaced — is not recognised as a macro at all.
+>
+> `tests/compile-fail/parser_rust_macro.sio` remains on
+> `tests/vacuous_expect_baseline.txt` for a reason that follows from (1): the
+> Full Test Suite runs lean_single, which produces E200, not the message the
+> fixture pins. The fixture becomes honest on the day the engines agree.
+
 
 `CLAUDE.md` §7 lists `println!("hi")` under *"Critical differences — these are
 compile errors"*. `tests/compile-fail/parser_rust_macro.sio` exists to enforce it,

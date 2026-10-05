@@ -1,0 +1,38 @@
+//@ run-pass
+//@ expect-stdout: TUPLE_SRET_R12_OK
+// A tuple-returning function that CALLS another tuple-returning function used to
+// destroy its caller's aggregate-return pointer.
+//
+// The x86 SRET prologue is `push rbp; mov rbp,rsp; push r12; sub rsp,frame`, so
+// the saved r12 lives at rbp-0x08 -- which was also slot 1, where the incoming
+// SRET pointer was stored. `pop r12` then restored that pointer instead of the
+// caller's r12, and the caller wrote its result through a pointer into the
+// callee's dead frame. The next call reused those bytes, so every binding read
+// the LAST call's values.
+//
+// Confirmed under gdb: r12 intact at the callee's entry, holding the callee's
+// own SRET at its `ret`. Fixed by reserving slot 1 for the pushed r12.
+//
+// Two bindings minimum: with one, a stale pointer still reads its own values.
+
+fn inner(a: i64) -> (i64, i64) { (a, a + 1) }
+
+fn outer(v: i64) -> (i64, i64) {
+    let f = inner(v)
+    (v * 10, v * 100)
+}
+
+fn main() with IO, Mut {
+    let z1 = outer(1)
+    let z2 = outer(2)
+    let ok = z1.0 == 10 && z1.1 == 100 && z2.0 == 20 && z2.1 == 200
+    if ok {
+        print("TUPLE_SRET_R12_OK\n")
+    } else {
+        print("TUPLE_SRET_R12_FAIL\n")
+        print("z1.0="); print_int(z1.0); print(" want 10\n")
+        print("z1.1="); print_int(z1.1); print(" want 100\n")
+        print("z2.0="); print_int(z2.0); print(" want 20\n")
+        print("z2.1="); print_int(z2.1); print(" want 200\n")
+    }
+}

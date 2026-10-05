@@ -27,7 +27,7 @@ madaros_v2_enir_gate_scope_or_skip "$BASE_REF" "E3D_MULTIPRED_SCALAR_MEMORY_SSA_
 
 scripts/dev/souc-build-lock.sh "$SEED" self-hosted/enir/driver.sio "$DRIVER" >"$TMP_DIR/driver-build.log" 2>&1
 [[ -s "$DRIVER" ]] || fail "source-fresh ENIR/Join-MIR driver build produced no ELF"
-if grep -Eq '^error:|unknown identifier|typecheck: failed|assignment type mismatch|private struct field|string literal too long' "$TMP_DIR/driver-build.log"; then tail -120 "$TMP_DIR/driver-build.log" >&2; fail "Stage0 reported diagnostics while building Join-MIR driver"; fi
+if grep -Eq '^error(\[E[0-9]+\])?:|unknown identifier|typecheck: failed|assignment type mismatch|private struct field|string literal too long' "$TMP_DIR/driver-build.log"; then tail -120 "$TMP_DIR/driver-build.log" >&2; fail "Stage0 reported diagnostics while building Join-MIR driver"; fi
 chmod +x "$DRIVER"
 
 python3 scripts/dev/madaros_v2_e3d_multipred_scalar_memory_ssa_verify.py \

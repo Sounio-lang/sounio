@@ -1,0 +1,166 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+// Epistemic claim status with INTERVAL confidences — second-order uncertainty.
+//
+// Frontier: epistemic-claim-status (see FRONTIER.md)
+//
+// This prototype closes the gap "second-order uncertainty not modelled" left
+// open by claim_status.sio: instead of a single per-mille confidence, each
+// claim carries an interval [lo, hi] where lo is the most pessimistic
+// justified confidence and hi the most optimistic one (both in [0, 1]).
+//
+// Propagation rules (proved formally in formal/ClaimStatusInterval.lean):
+//   - derivation (interval weakest link): the derived claim gets
+//     [min(lo1, lo2), min(hi1, hi2)];
+//   - fusion (interval Dempster-Shafer): the fused claim gets
+//     [ds(lo1, lo2), ds(hi1, hi2)] with ds(a,b) = 1 - (1-a)(1-b).
+//
+// Checked at runtime:
+//   1. every derived/fused interval is valid (lo <= hi <= 1);
+//   2. the derived/fused interval contains the pointwise result computed at
+//      the midpoints of the source intervals;
+//   3. a threshold met by every premise lo is preserved by the derived lo;
+//   4. the fused lo never drops below the best source lo.
+//
+// NOTE: arrays need splat initialisation in the current runtime; refinements
+// `where` are not yet parsed by Madaros, so contracts are runtime assertions.
+// Intervals are stored as parallel primitive arrays lo[]/hi[].
+
+fn fabs(a: f64) -> f64 {
+    if a < 0.0 { return 0.0 - a }
+    return a
+}
+
+fn fmin(a: f64, b: f64) -> f64 {
+    if a <= b { return a }
+    return b
+}
+
+fn fmax(a: f64, b: f64) -> f64 {
+    if a >= b { return a }
+    return b
+}
+
+// Dempster-Shafer fusion of two independent point confidences.
+fn ds_combine(a: f64, b: f64) -> f64 {
+    return 1.0 - (1.0 - a) * (1.0 - b)
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var n_fail = 0
+
+    // Claim store: interval confidences [lo, hi] with provenance tags.
+    //   c0: "insulin binds insulin receptor"   (curated DB,     [0.90, 0.98])
+    //   c1: "insulin receptor is-a kinase"     (ontology axiom, [0.85, 0.95])
+    //   c2: "kinase K phosphorylates target T" (pathway DB,     [0.88, 0.96])
+    //   c3: "drug X inhibits kinase K"         (single assay,   [0.55, 0.65])
+    //   c4: "drug X inhibits kinase K"         (docking model,  [0.50, 0.60])
+    var lo: [f64; 5] = [0.0; 5]
+    var hi: [f64; 5] = [0.0; 5]
+    lo[0] = 0.90
+    hi[0] = 0.98
+    lo[1] = 0.85
+    hi[1] = 0.95
+    lo[2] = 0.88
+    hi[2] = 0.96
+    lo[3] = 0.55
+    hi[3] = 0.65
+    lo[4] = 0.50
+    hi[4] = 0.60
+
+    // ── Derivation: interval weakest link ───────────────────────────────
+    // Chain c0 -> c1: derived d01 = [min(0.90, 0.85), min(0.98, 0.95)]
+    //                             = [0.85, 0.95].
+    let d01_lo = fmin(lo[0], lo[1])
+    let d01_hi = fmin(hi[0], hi[1])
+    if fabs(d01_lo - 0.85) > 0.0001 {
+        println("FAIL: derived lo wrong")
+        n_fail = n_fail + 1
+    }
+    if fabs(d01_hi - 0.95) > 0.0001 {
+        println("FAIL: derived hi wrong")
+        n_fail = n_fail + 1
+    }
+
+    // (1) The derived interval is valid: lo <= hi <= 1.
+    if d01_lo > d01_hi { println("FAIL: derived interval empty"); n_fail = n_fail + 1 }
+    if d01_hi > 1.0 { println("FAIL: derived hi out of range"); n_fail = n_fail + 1 }
+
+    // (2) The derived interval contains the pointwise weakest link of the
+    // midpoints: mid0 = 0.94, mid1 = 0.90 => min = 0.90 in [0.85, 0.95].
+    let mid0 = (lo[0] + hi[0]) / 2.0
+    let mid1 = (lo[1] + hi[1]) / 2.0
+    let dmid = fmin(mid0, mid1)
+    if dmid < d01_lo { println("FAIL: midpoint result below derived lo"); n_fail = n_fail + 1 }
+    if dmid > d01_hi { println("FAIL: midpoint result above derived hi"); n_fail = n_fail + 1 }
+
+    // ── Threshold preservation along a chain of three ───────────────────
+    // Chain c0 -> c1 -> c2: every premise lo >= 0.85, so the twice-derived
+    // lo must stay >= 0.85. Exact result: [0.85, 0.95].
+    var acc_lo = lo[0]
+    var acc_hi = hi[0]
+    var i: i64 = 1
+    while i < 3 {
+        acc_lo = fmin(acc_lo, lo[i])
+        acc_hi = fmin(acc_hi, hi[i])
+        i = i + 1
+    }
+    if acc_lo < 0.85 {
+        println("FAIL: lo threshold not preserved along chain")
+        n_fail = n_fail + 1
+    }
+    if fabs(acc_lo - 0.85) > 0.0001 {
+        println("FAIL: chain lo wrong")
+        n_fail = n_fail + 1
+    }
+    if fabs(acc_hi - 0.95) > 0.0001 {
+        println("FAIL: chain hi wrong")
+        n_fail = n_fail + 1
+    }
+
+    // ── Fusion: interval Dempster-Shafer ────────────────────────────────
+    // assay [0.55, 0.65] + docking [0.50, 0.60]:
+    //   fused lo = 1 - (1-0.55)(1-0.50) = 1 - 0.45*0.50 = 0.775
+    //   fused hi = 1 - (1-0.65)(1-0.60) = 1 - 0.35*0.40 = 0.860
+    let f_lo = ds_combine(lo[3], lo[4])
+    let f_hi = ds_combine(hi[3], hi[4])
+    if fabs(f_lo - 0.775) > 0.0001 {
+        println("FAIL: fused lo wrong")
+        n_fail = n_fail + 1
+    }
+    if fabs(f_hi - 0.86) > 0.0001 {
+        println("FAIL: fused hi wrong")
+        n_fail = n_fail + 1
+    }
+
+    // (1) The fused interval is valid.
+    if f_lo > f_hi { println("FAIL: fused interval empty"); n_fail = n_fail + 1 }
+    if f_hi > 1.0 { println("FAIL: fused hi out of range"); n_fail = n_fail + 1 }
+
+    // (4) The fused lo never drops below the best source lo (0.55) — here it
+    // even clears 0.70, a threshold no single source lo meets.
+    if f_lo < fmax(lo[3], lo[4]) {
+        println("FAIL: fused lo below best source lo")
+        n_fail = n_fail + 1
+    }
+    if f_lo < 0.70 {
+        println("FAIL: fusion should lift lo above 0.70")
+        n_fail = n_fail + 1
+    }
+
+    // (2) The fused interval contains the pointwise fusion of the midpoints:
+    // mid3 = 0.60, mid4 = 0.55 => ds = 1 - 0.40*0.45 = 0.82 in [0.775, 0.86].
+    let mid3 = (lo[3] + hi[3]) / 2.0
+    let mid4 = (lo[4] + hi[4]) / 2.0
+    let fmid = ds_combine(mid3, mid4)
+    if fmid < f_lo { println("FAIL: midpoint fusion below fused lo"); n_fail = n_fail + 1 }
+    if fmid > f_hi { println("FAIL: midpoint fusion above fused hi"); n_fail = n_fail + 1 }
+
+    if n_fail == 0 {
+        println("ALL PASS")
+        return 0
+    }
+    println("FAILURES:")
+    println(n_fail)
+    return 1
+}

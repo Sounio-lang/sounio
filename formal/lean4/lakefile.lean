@@ -96,6 +96,13 @@ lean_lib «SounioSedenionMeasurement» where
 @[default_target]
 lean_lib «SounioCDCocycle» where
 
+-- CD-tower ZD fibers: the fiber-antisymmetry development.  Mathlib-free, no `sorry`, no
+-- `native_decide`; imports only SounioCDCocycle.  Carries the deviation law
+-- (`deviation_law_all`) and both rows of the level transfer (`s3_level_recursion`,
+-- `cp2_level_recursion`).
+@[default_target]
+lean_lib «SounioZDFiberAntisym» where
+
 @[default_target]
 lean_lib «SounioCDTowerSeam» where
 
@@ -107,6 +114,20 @@ lean_lib «SounioCDRecursiveSeam» where
 
 @[default_target]
 lean_lib «SounioCDqbig» where
+
+-- CD core-law twin recursion — per-dimension native_decide certificate (dims 16/32/64) of BOTH
+-- doubling recursions S=2S'-8·[hi_lo≠0] and S=8-2S', plus Dmax=4(2^(n-3)-1). The ∀n proof of the
+-- recursions is in SounioSeamFlip; this file anchors them at fixed dims (regression, like lsq_16/32/64).
+@[default_target]
+lean_lib «SounioCDCoreLaw» where
+
+-- Seam-flip law — the ∀n KEYSTONE under the whole 168 lane (lift / orbit theorem / annihilation=
+-- associator bridge / core-law twin recursion all bottom out on it). Proves, for ALL n, Mathlib-free,
+-- no sorry, no native_decide: the one-step cocycle recursion R (four branches), antisymmetry, cdSigma=±1,
+-- and the FULL associator seam-flip law — all eight (p,q,r) seam configurations over the whole locus
+-- (generic + degenerate), with exact chi-corrections. Axioms [propext, Classical.choice, Quot.sound].
+@[default_target]
+lean_lib «SounioSeamFlip» where
 
 @[default_target]
 lean_lib «SounioSeamBridge» where
@@ -648,6 +669,25 @@ lean_lib «EpistemicEffects» where
 @[default_target]
 lean_lib «EpistemicEffectsV2» where
 
+-- NS-extended calculus: `Knowledge⟨T, N⟩` with a noise-symbol source-set and the
+-- E230 disjointness premise on kadd/kmul (Paper A §5–§6). Runtime values carry their
+-- true affine form; proves Lemma 1 (general, Mathlib-free), Lemma 2 (support
+-- over-approximation), NS progress + preservation, exactness preservation, and
+-- Theorem 6.4 (no reached operator is an anti-garbling); x+x sabotage witness in
+-- the kernel. No sorry; axioms ⊆ {propext, Quot.sound, Classical.choice}.
+@[default_target]
+lean_lib «EpistemicEffectsNS» where
+
+-- Anti-Garbling FUSION theorem (2026-09-01): the NS calculus lifted to the Cayley–Dickson
+-- algebra CD(n) with a SECOND support certificate Q (basis elements). Axis 2 (nsDisjoint at
+-- kadd/kmul) and Axis 1 (assocCert at re-association) in one calculus: certified
+-- re-association preserves value, true form and reported variance (`reassoc_sound`); the
+-- uncertified gap is exactly the associator / three associators; orthogonality witnesses;
+-- and the THIRD axis (variance shortcut ⇒ norm-multiplicativity, fails in 𝕊). No sorry,
+-- no native_decide; axioms ⊆ {propext, Quot.sound, Classical.choice}.
+@[default_target]
+lean_lib «EpistemicEffectsNSA» where
+
 -- First Lean importer of V2: the V1 `preservation_is_false` witness,
 -- inverted. `measure (lit_nat 0)` stays `Knowledge<Nat>` after reduction.
 @[default_target]
@@ -723,3 +763,37 @@ lean_lib «SounioFoMultimodFragment» where
 -- ../sounio-pbpk-sedation-weaning/formal/lean4/SounioOpioidWeaningSafety.lean
 -- (see stdlib/darwin_pbpk/WEANING_MOVED.md). Build there:
 --   cd ../sounio-pbpk-sedation-weaning/formal/lean4 && lake build SounioOpioidWeaningSafety
+--
+-- NOTE (rebase 2026-08-27): this PR's original lakefile also registered
+-- `lean_lib «SounioCDTowerAutomorphism»`, but `formal/lean4/SounioCDTowerAutomorphism.lean`
+-- exists on neither `origin/main` nor this PR head. The registration was dangling
+-- (non-default target, so `lake build` never surfaced it) and is dropped here.
+--
+-- NOTE (merge 2026-08-30): the #1580-split block that stood here also registered
+-- «SounioCDCoreLaw» and «SounioSeamFlip». Both landed on `origin/main`
+-- independently and are registered above; re-adding them here would declare the
+-- same target twice. Only «SounioZDChi» is still carried by this branch alone --
+-- formal/lean4/SounioZDChi.lean exists on neither `origin/main` nor any other
+-- lane -- so it keeps its entry, or the file would sit in the tree unbuilt.
+@[default_target]
+lean_lib «SounioZDChi» where
+
+-- Catalysis-mechanism suite: independent Lean4 proof oracle for two
+-- enzyme-kinetics algebraic identities (enzyme conservation, Hill
+-- half-saturation). Pure Rat-field algebra; no Mathlib, no other
+-- Sounio-lean import — see file header for the dependency rationale.
+@[default_target]
+lean_lib «SounioCatalysisKinetics» where
+
+-- Surface microkinetics: site conservation as an iff, the dissociative
+-- (hydrogen) isotherm without square roots, and the proof that the
+-- dual-site Langmuir-Hinshelwood closed form IS the mechanism's
+-- quasi-equilibrium limit. Backs stdlib/chemistry/surface.sio.
+@[default_target]
+lean_lib «SounioSurfaceKinetics» where
+
+@[default_target]
+lean_lib «SounioPireusMultiProbePartitionV14» where
+
+@[default_target]
+lean_lib «SounioPireusMultiProbePartitionV14AxiomAudit» where
