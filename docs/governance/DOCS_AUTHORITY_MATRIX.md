@@ -295,6 +295,7 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.madaros-handle-182-five-sites-2026-08-17 | repo_only | docs/audit/MADAROS_HANDLE_182_FIVE_SITES_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-handle-table-182-lifetime-dispatch-2026-08-17 | repo_only | docs/audit/MADAROS_HANDLE_TABLE_182_LIFETIME_DISPATCH_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-hardening-plan-2026-08-12 | repo_only | docs/audit/MADAROS_HARDENING_PLAN_2026-08-12.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
+| repo.docs.audit.madaros-hex-float-unsigned-exponent-dispatch-2026-09-26 | repo_only | docs/audit/MADAROS_HEX_FLOAT_UNSIGNED_EXPONENT_DISPATCH_2026-09-26.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-impl-method-two-roots-2026-06-23 | repo_only | docs/audit/MADAROS_IMPL_METHOD_TWO_ROOTS_2026-06-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-impl-methods-three-layer-fix-2026-06-23 | repo_only | docs/audit/MADAROS_IMPL_METHODS_THREE_LAYER_FIX_2026-06-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-imported-array-byvalue-913-2026-07-21 | repo_only | docs/audit/MADAROS_IMPORTED_ARRAY_BYVALUE_913_2026-07-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
