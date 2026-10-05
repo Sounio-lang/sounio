@@ -159,8 +159,18 @@ async function main() {
   const expectedRegistry = await buildGovernedTopicRegistry(rootDir);
   const actualRegistry = await readRegistryFile(rootDir);
 
+  // The checked-in registry is a snapshot (see sync_governance_metadata.mjs):
+  // every check below runs against the registry rebuilt from the tree, so a
+  // stale snapshot cannot hide a defect and is only reported. Requiring it to
+  // be fresh made every docs PR regenerate it, and any two such PRs conflict.
+  // SOUNIO_DOCS_REGISTRY_STRICT_SNAPSHOT=1 restores the hard check, for the
+  // snapshot-refresh PR itself.
   if (!compareRegistry(expectedRegistry, actualRegistry)) {
-    errors.push(`Checked-in ${REGISTRY_RELATIVE_PATH} is stale. Re-run node scripts/docs/sync_governance_metadata.mjs`);
+    if (process.env.SOUNIO_DOCS_REGISTRY_STRICT_SNAPSHOT === '1') {
+      errors.push(`Checked-in ${REGISTRY_RELATIVE_PATH} is stale. Re-run node scripts/docs/sync_governance_metadata.mjs --snapshot`);
+    } else {
+      console.log(`Notice: ${REGISTRY_RELATIVE_PATH} snapshot differs from the tree (expected between snapshot refreshes; not an error).`);
+    }
   }
 
   // Deliberately NOT a function of expectedRegistry: the acceptance report is
@@ -178,7 +188,7 @@ async function main() {
     errors.push(`Missing acceptance report: ${ACCEPTANCE_RELATIVE_PATH}`);
   }
 
-  for (const topic of actualRegistry.topics) {
+  for (const topic of expectedRegistry.topics) {
     if (topic.repo_doc_path) {
       const absPath = path.join(rootDir, topic.repo_doc_path);
       try {
