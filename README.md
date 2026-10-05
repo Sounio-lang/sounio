@@ -36,6 +36,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.frontdoor.readme
 
 **Sounio** is a systems programming language for epistemic computing — its type system tracks not just what your data *is*, but how much you should *trust* it. Uncertainty propagation, provenance tracking, and confidence-gated execution are built into the type system, not bolted on as libraries.
 
+> **New here? Read [`TOUR.md`](TOUR.md).** Twenty claims, each one a program that `bash scripts/tour.sh --full` runs and checks (20/20, about 4 minutes, measured 2026-10-04), followed by a table of what does **not** work yet, with issue numbers.
+
 **Keywords:** systems programming language, scientific computing language, epistemic types, uncertainty propagation, algebraic effects, self-hosted compiler, formal verification, non-associative algebra, octonions, e-graphs.
 
 ### Technical Pillars & Core Keywords
@@ -83,15 +85,7 @@ uv run --with numpy python scripts/research/cpc2026_ossm_subset_audit.py
 
 ## For LLMs and Code Tools
 
-- Session bootstrap:
-  1. Run `./sounio-whereami --quick`
-  2. Read [ONBOARDING.md](ONBOARDING.md)
-  3. Read [CLAUDE_HANDOFF.md](CLAUDE_HANDOFF.md)
-  4. Read [CLAUDE.md](CLAUDE.md)
-  5. Read [AGENTS.md](AGENTS.md)
-  6. Verify the current branch before editing
-  7. Treat `/workspace/sounio` as the active remote-first workspace path
-  8. Do not propose destructive reset/clean/rebase flows to "simplify" recovery state
+- Start here: [CLAUDE.md](CLAUDE.md) (build and run, the syntax that differs from Rust, agent tooling, known limitations) and [AGENTS.md](AGENTS.md)
 - Prompt surface: [llms.txt](llms.txt)
 - **Repository scale (read before estimating size):** [SCALE.md](SCALE.md) · [docs/audit/README.md](docs/audit/README.md)
 - Regenerate numbers: `bash scripts/dev/measure_repo_scale.sh`
