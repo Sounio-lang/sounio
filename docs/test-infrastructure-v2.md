@@ -2,7 +2,7 @@
 topic_id: repo.docs.test-infrastructure-v2
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
+last_validated: 2026-08-24
 validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.test-infrastructure-v2
 -->
@@ -43,6 +43,7 @@ All annotations use the `//@` prefix in the test file header:
 | `//@ ignore` | Skip this test entirely |
 | `//@ check-only` | Only compile, don't execute (for run-pass tests) |
 | `//@ expect-stdout: PATTERN` | Expected output pattern in stdout |
+| `//@ expect-stdout-contains: PATTERN` | Substring that must appear in stdout (run-pass) |
 | `//@ error-pattern: PATTERN` | Expected error message pattern |
 
 ### New Annotations (V2)
@@ -69,6 +70,12 @@ All annotations use the `//@` prefix in the test file header:
 |---------|-------------|
 | `gpu` | Requires GPU support |
 | `llvm` | Requires LLVM backend |
+
+Unknown `expect-*` / `expected-*` header keys fail the test. The runner used
+to skip them, so `//@ expect-stdout-contains:` asserted nothing: a run-pass
+file that printed `FAIL` and exited 0 still went green. `skip-if` and
+`requires` already fail closed on unrecognised values; stdout assertions now
+match that contract.
 
 ## Test Result Categories
 

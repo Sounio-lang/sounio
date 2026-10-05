@@ -51,7 +51,7 @@ Expected outcome: compile error indicating a missing effect annotation.
 ## 5. Optional Fast Gate
 
 ```bash
-./scripts/fast_gate.sh
+./scripts/dev/fast_gate.sh
 ```
 
 This runs repository-specific quality checks and a focused regression subset.

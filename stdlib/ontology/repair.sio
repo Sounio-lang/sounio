@@ -1,0 +1,226 @@
+//! stdlib/ontology/repair.sio
+//!
+//! Greedy epistemic repair of ontology alignments with typed confidences,
+//! packaged from the verified ontology-frontiers prototypes
+//! (artifacts/ontology-frontiers/, frontier epistemic-alignment-repair,
+//! rounds 1, 2 and 5).
+//!
+//! Each candidate mapping carries a confidence in [0, 1]. Given a
+//! symmetric conflict relation between mappings (e.g. derived by
+//! `ontology::closure::derive_conflicts`), the greedy drop-weaker repair
+//! scans id-ordered pairs and, for every conflict, drops the mapping of
+//! lower confidence; on a confidence TIE the mapping with the LOWER id
+//! survives (lexicographic priority (conf desc, id asc)).
+//!
+//! Verified guarantees (Lean 4):
+//!   - retained set is conflict-free (formal/OntologyAlignmentRepair.lean,
+//!     `mem_repair_nil`, `pairwise_repair_nil`);
+//!   - every dropped mapping has a maximality witness: a retained
+//!     conflicting mapping of >= confidence (`repair_witness_nil`);
+//!   - the pairwise greedy equals the priority fold under the cluster
+//!     hypothesis (formal/OntologyRepairEquivalence.lean,
+//!     `repair_iff_greedy`; the mechanized counterexample
+//!     `cx_equivalence_fails` shows the cluster hypothesis is NECESSARY);
+//!   - the equivalence extends to ARBITRARY confidences via the
+//!     lexicographic (conf, id) priority (formal/OntologyRepairTies.lean,
+//!     `repair_iff_greedy_ties`, `greedyStep_prio_eq_sio`,
+//!     `greedyDrop_deterministic`).
+//!
+//! Literature anchors:
+//!   - Jimenez-Ruiz, Cuenca Grau, Horrocks 2011
+//!     (doi:10.1186/2041-1480-2-s1-s2) — confidence as removal cost.
+//!   - Solimando, Jimenez-Ruiz, Guerrini 2016
+//!     (doi:10.1007/s10115-016-0983-3) — minimizing conservativity
+//!     violations.
+//!   - Rovai 2026 (doi:10.48550/arxiv.2605.09184) — alignment
+//!     validation/repair remains open (OAEI Anatomy F1 = 0.832).
+//!
+//! NOTE (compiler limitations, see
+//! artifacts/ontology-frontiers/compiler-repros/REPORT.md): parallel
+//! primitive arrays with splat init; runtime checks instead of `where`
+//! refinements.
+//!
+//! # Conventions (match stdlib/algo)
+//! Fixed-size arrays; actual mapping count `m` (<= 256) is a parameter.
+//! Conflict matrices are flattened row-major: index `a * 256 + b`.
+//!
+//! # Usage
+//! ```sio
+//! use ontology::repair::{greedy_repair, repair_is_conflict_free, repair_all_witnessed}
+//! var keep: [bool; 256] = [true; 256]
+//! greedy_repair(&!keep, &conf, &conf_pair, m)
+//! // repair_is_conflict_free(&keep, &conf_pair, m) == true
+//! // repair_all_witnessed(&keep, &conf, &conf_pair, m) == true
+//! ```
+//!
+//! NOTE: use NAMED imports (`use ontology::repair::{...}`); the qualified
+//! form miscompiles on the current Madaros imported-module native lane
+//! (see stdlib/ontology/closure.sio header and
+//! docs/compiler/KNOWN_LIMITATIONS.md).
+
+// Maximum number of candidate mappings this module repairs over.
+// Conflict matrices are [bool; 65536] = 256 x 256 flattened.
+const MAX_MAPPINGS: i64 = 256
+
+/// Greedy drop-weaker epistemic repair with deterministic tie-break.
+///
+/// Scans pairs (i, j) with i < j; whenever two still-kept mappings
+/// conflict, drops the weaker one by lexicographic priority
+/// (confidence desc, id asc): if `conf[i] >= conf[j]` drop j, else
+/// drop i. On a confidence tie the LOWER id survives, which makes the
+/// outcome deterministic for arbitrary confidences.
+///
+/// # Parameters
+/// - `keep`: keep/drop flags, initialised to all true by the caller
+///   (mutated in place; on return `keep[k] == false` iff k was dropped).
+/// - `conf`: confidence of each mapping in [0, 1] (index < m used).
+/// - `conf_pair`: symmetric conflict matrix (e.g. from
+///   `ontology::closure::derive_conflicts`).
+/// - `m`: number of mappings (0 <= m <= 256).
+///
+/// # Complexity
+/// O(m^2)
+///
+/// # References
+/// - formal/OntologyRepairTies.lean, `greedyStep_prio_eq_sio`: this
+///   pairwise step is definitionally the (conf, id) tie-break proved
+///   equivalent to the priority fold under the cluster hypothesis.
+pub fn greedy_repair(
+    keep: &![bool; 256],
+    conf: &[f64; 256],
+    conf_pair: &[bool; 65536],
+    m: i64
+) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < m {
+        var j: i64 = i + 1
+        while j < m {
+            if keep[i] && keep[j] {
+                if conf_pair[i * MAX_MAPPINGS + j] {
+                    if conf[i] >= conf[j] {
+                        keep[j] = false
+                    } else {
+                        keep[i] = false
+                    }
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+}
+
+/// Check the repair soundness invariant: no two retained mappings
+/// conflict.
+///
+/// # Parameters
+/// - `keep`: keep/drop flags (after `greedy_repair`).
+/// - `conf_pair`: symmetric conflict matrix.
+/// - `m`: number of mappings.
+///
+/// # Return
+/// `bool` — true iff the retained set is conflict-free.
+///
+/// # Complexity
+/// O(m^2)
+///
+/// # References
+/// - formal/OntologyAlignmentRepair.lean, `mem_repair_nil`,
+///   `pairwise_repair_nil`.
+pub fn repair_is_conflict_free(
+    keep: &[bool; 256],
+    conf_pair: &[bool; 65536],
+    m: i64
+) -> bool with Div, Panic {
+    var i: i64 = 0
+    while i < m {
+        var j: i64 = i + 1
+        while j < m {
+            if keep[i] && keep[j] {
+                if conf_pair[i * MAX_MAPPINGS + j] {
+                    return false
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return true
+}
+
+/// Check the maximality-witness invariant: every dropped mapping has a
+/// retained witness it conflicts with that outranks it by the
+/// lexicographic priority — strictly higher confidence, or equal
+/// confidence and lower id (the tie rule).
+///
+/// # Parameters
+/// - `keep`: keep/drop flags (after `greedy_repair`).
+/// - `conf`: confidence of each mapping.
+/// - `conf_pair`: symmetric conflict matrix.
+/// - `m`: number of mappings.
+///
+/// # Return
+/// `bool` — true iff every dropped mapping has a maximality witness.
+///
+/// # Complexity
+/// O(m^2)
+///
+/// # References
+/// - formal/OntologyAlignmentRepair.lean, `repair_witness_nil`.
+pub fn repair_all_witnessed(
+    keep: &[bool; 256],
+    conf: &[f64; 256],
+    conf_pair: &[bool; 65536],
+    m: i64
+) -> bool with Div, Panic {
+    var i: i64 = 0
+    while i < m {
+        if !keep[i] {
+            var witnessed = false
+            var j: i64 = 0
+            while j < m {
+                if keep[j] {
+                    if conf_pair[i * MAX_MAPPINGS + j] {
+                        if conf[j] > conf[i] {
+                            witnessed = true
+                        }
+                        if conf[j] == conf[i] {
+                            if j < i {
+                                witnessed = true
+                            }
+                        }
+                    }
+                }
+                j = j + 1
+            }
+            if !witnessed {
+                return false
+            }
+        }
+        i = i + 1
+    }
+    return true
+}
+
+/// Count the retained mappings.
+///
+/// # Parameters
+/// - `keep`: keep/drop flags (after `greedy_repair`).
+/// - `m`: number of mappings.
+///
+/// # Return
+/// `i64` — number of indices k < m with `keep[k] == true`.
+///
+/// # Complexity
+/// O(m)
+pub fn repair_count_kept(keep: &[bool; 256], m: i64) -> i64 with Div, Panic {
+    var n_kept: i64 = 0
+    var i: i64 = 0
+    while i < m {
+        if keep[i] {
+            n_kept = n_kept + 1
+        }
+        i = i + 1
+    }
+    return n_kept
+}

@@ -29,12 +29,33 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
+# Content-addressed cache for both stages (scripts/dev/madaros-cache.sh).
+# shellcheck source=../dev/madaros-cache.sh
+source "$ROOT_DIR/scripts/dev/madaros-cache.sh"
 
 OUT="${1:-$ROOT_DIR/artifacts/self-hosted/madaros}"
 if [[ "$OUT" == -* ]]; then
     echo "error: output path must not start with '-': $OUT" >&2
     exit 2
 fi
+
+relax_bootstrap_vmem_limit() {
+    local before after
+    before="$(ulimit -v 2>/dev/null || true)"
+    if [[ -z "$before" || "$before" == "unlimited" ]]; then
+        return 0
+    fi
+
+    ulimit -v unlimited 2>/dev/null || true
+    after="$(ulimit -v 2>/dev/null || true)"
+    if [[ "$after" == "unlimited" ]]; then
+        echo "→ relaxed VMEM limit for bootstrap build: $before -> unlimited"
+    else
+        echo "warning: could not relax VMEM limit for bootstrap build (ulimit -v=$before); old bootstrap read_file may SIGSEGV under large module imports" >&2
+    fi
+}
+
+relax_bootstrap_vmem_limit
 
 # Resolve the bootstrap ELF used to derive the source-tracking seed. It MUST be an
 # ELF — never the bin/souc wrapper (a #!-script that now routes to Madaros); the
@@ -83,31 +104,28 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# SEED SELECTION.
-#
-# SOUC_BIN / SOUNIO_SOUC_BIN used to short-circuit derivation and pin SEED to the
-# committed prebuilt. Two things were wrong with that:
-#
-#   1. Those variables select the USER-FACING compiler (see bin/souc), not the
-#      bootstrap seed, and the workspace context hook exports SOUC_BIN — so an
-#      ordinary agent session silently opted out of derivation without asking.
-#   2. The committed prebuilt lags main.sio, which the message below already
-#      admits (#725). As of 2026-07-30 it SEGFAULTS compiling main.sio:
-#      deterministic, exit 139, no ELF. Derivation from lean_single.sio works.
-#
-# So they no longer choose the seed. To pin one deliberately, set
-# SOUNIO_MADAROS_SEED to its path — an explicit variable that means only this.
-# A pinned seed that cannot build main.sio falls back to derivation with a
-# warning rather than failing the build: a stale pin should cost time, not
-# correctness. (#1559)
-if [[ -n "${SOUNIO_MADAROS_SEED:-}" ]]; then
-    SEED="$SOUNIO_MADAROS_SEED"
-    if [[ ! -x "$SEED" ]]; then
-        echo "error: SOUNIO_MADAROS_SEED is not an executable file: $SEED" >&2
-        exit 1
+# The freshness decision must be made on the seed ACTUALLY resolved, not on
+# whether the variable happened to be set. resolve_bootstrap_elf REJECTS `#!`
+# wrappers, so SOUC_BIN=bin/souc -- the wrapper, and the default export in some
+# agent shells -- used to fall through to a committed ELF that lags the source
+# AND skip the derivation meant to compensate for exactly that lag. Result:
+# "import too large for SRC buffer: codegen_plan.sio", then SIGSEGV, ~40 s in.
+# Measured 2026-07-30 while rebuilding to re-confirm the FO GUM stack.
+PROVIDED_SEED=0
+for v in SOUC_BIN SOUNIO_SOUC_BIN; do
+    val="${!v:-}"
+    [[ -n "$val" ]] || continue
+    if [[ "$val" == "$BOOTSTRAP_ELF" ]]; then
+        PROVIDED_SEED=1
+    else
+        echo "warning: $v=$val is not usable as a bootstrap ELF (a '#!' wrapper," \
+             "or missing/non-executable); ignoring it and deriving a seed instead" >&2
     fi
-    echo "→ using pinned seed (SOUNIO_MADAROS_SEED): $SEED"
-    PINNED_SEED=1
+done
+
+if [[ $PROVIDED_SEED -eq 1 ]]; then
+    SEED="$BOOTSTRAP_ELF"
+    echo "→ using provided seed directly (SOUC_BIN/SOUNIO_SOUC_BIN): $SEED"
 else
     if [[ ! -f "$LEAN_SRC" ]]; then
         echo "error: lean_single source not found for seed derivation: $LEAN_SRC" >&2
@@ -120,7 +138,8 @@ else
     echo "  lean src:      $LEAN_SRC"
     echo "  gen seed:      $SEED"
     # One generation is sufficient — it carries the current source's features.
-    scripts/dev/souc-build-lock.sh "$BOOTSTRAP_ELF" "$LEAN_SRC" "$SEED"
+    SEED_KEY="$(madaros_seed_key "$BOOTSTRAP_ELF" "$LEAN_SRC")"
+    madaros_cache_build_locked seed "$SEED_KEY" "$SEED" "$BOOTSTRAP_ELF" "$LEAN_SRC" "$SEED"
     if [[ ! -s "$SEED" ]]; then
         echo "error: seed derivation produced no output: $SEED" >&2
         exit 1
@@ -133,43 +152,19 @@ echo "  seed:  $SEED"
 echo "  src:   $SRC"
 echo "  out:   $OUT"
 
-# Serialize heavy build via the global workspace lock.
-#
-# `|| true` so a seed that crashes is diagnosed here rather than aborting under
-# set -e. The stale committed prebuilt segfaults on current main.sio, and the
-# useful response is to say which seed died and try a good one — not to hand the
-# caller a bare exit 139.
-set +e
-scripts/dev/souc-build-lock.sh "$SEED" "$SRC" "$OUT"
-BUILD_RC=$?
-set -e
+# Serialize heavy build via the global workspace lock — unless this exact
+# (seed, tree) pair was already built on this pod, in which case the artifact is
+# copied out in seconds and the lock is never touched.
+# One tree snapshot for both the key and the store-time check.
+TREE_KEY="$(madaros_tree_key)"
+BUILD_KEY="$(madaros_build_key "$SEED" "$TREE_KEY")"
+echo "  key:   $BUILD_KEY"
+MADAROS_CACHE_TREE_AT_KEY="$TREE_KEY" \
+    madaros_cache_build_locked madaros "$BUILD_KEY" "$OUT" "$SEED" "$SRC" "$OUT"
+madaros_cache_prune
 
-if [[ "$BUILD_RC" -ne 0 || ! -s "$OUT" ]]; then
-    echo "warning: seed failed to build the compiler (exit $BUILD_RC, output $([[ -s "$OUT" ]] && echo present || echo absent))" >&2
-    echo "warning:   seed was: $SEED" >&2
-    if [[ "${PINNED_SEED:-0}" == "1" && -f "$LEAN_SRC" ]]; then
-        # A pinned seed that cannot compile main.sio is stale, not fatal: derive a
-        # fresh one from lean_single.sio and retry once. This is the exact recovery
-        # a caller would do by hand after reading the message above.
-        echo "warning: pinned seed is unusable; deriving from lean_single.sio and retrying" >&2
-        TMP_SEED_DIR="$(mktemp -d "${TMPDIR:-/tmp}/madaros-seed.XXXXXX")"
-        SEED="$TMP_SEED_DIR/gen_seed.elf"
-        scripts/dev/souc-build-lock.sh "$BOOTSTRAP_ELF" "$LEAN_SRC" "$SEED"
-        if [[ ! -s "$SEED" ]]; then
-            echo "error: fallback seed derivation produced no output: $SEED" >&2
-            exit 1
-        fi
-        chmod +x "$SEED"
-        rm -f "$OUT"
-        set +e
-        scripts/dev/souc-build-lock.sh "$SEED" "$SRC" "$OUT"
-        BUILD_RC=$?
-        set -e
-    fi
-fi
-
-if [[ "$BUILD_RC" -ne 0 || ! -s "$OUT" ]]; then
-    echo "error: modular compiler build produced no output: $OUT (seed exit $BUILD_RC)" >&2
+if [[ ! -s "$OUT" ]]; then
+    echo "error: modular compiler build produced no output: $OUT" >&2
     exit 1
 fi
 

@@ -10,7 +10,7 @@
 #   wasm-pack build compiler --target web --out-dir ../website/public/wasm
 #
 # Usage:
-#   bash scripts/build_playground_wasm.sh
+#   bash scripts/build/build_playground_wasm.sh
 #
 # The script is also wired as `npm run build:wasm` in website/package.json.
 set -euo pipefail

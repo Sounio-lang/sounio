@@ -9,6 +9,9 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 
 # Proof-Carrying Policy-State Feedback
 
+
+Status: **executable**
+
 Concept-ID: `SOUNIO-POLICY-STATE-FEEDBACK`
 
 ## Founder Intent

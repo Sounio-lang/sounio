@@ -1,0 +1,57 @@
+name: Engine parity
+
+# The founder's cutover instrument: Madaros must run everything lean_single
+# runs. This gate compiles and RUNS every tests/run-pass program under BOTH
+# engines and byte-compares what they print. It is the only instrument that
+# can see a program that compiles, exits 0, and computes the wrong answer
+# (#1504, #1502 were invisible to every single-engine check).
+#
+# The baseline (tests/engine_parity_baseline.txt) records every non-AGREE
+# verdict and may only SHRINK: a new DIVERGE/LEAN-ONLY/MADAROS-ONLY/NEITHER
+# entry fails the gate; an entry that improves is reported by name. Wiring
+# this is what freezes the LEAN-ONLY count -- no separate ratchet needed,
+# the baseline IS the ratchet.
+#
+# STACK: Madaros needs a large stack (ulimit -s 524288 in every build/run
+# step that touches it -- ci.yml's corpus job and witness job already do).
+# Without it the raw ELF SEGVs on trivial programs; measured 2026-08-23.
+
+on:
+  pull_request:
+    paths:
+      - 'self-hosted/**'
+      - 'stdlib/**'
+      - 'tests/run-pass/**'
+      - 'tests/engine_parity_baseline.txt'
+      - 'scripts/ci/engine_parity_gate.sh'
+      - '.github/workflows/engine-parity.yml'
+  merge_group:
+    types: [checks_requested]
+  workflow_dispatch:
+
+concurrency:
+  group: engine-parity-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  parity:
+    name: Engine parity
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Madaros from source
+        run: |
+          ulimit -s 524288 || true
+          bash scripts/ci/build_modular_madaros.sh /tmp/madaros.elf
+          test -x /tmp/madaros.elf || { echo "no Madaros ELF produced"; exit 1; }
+
+      - name: Differential parity against the baseline
+        run: |
+          ulimit -s 524288 || true
+          SOUNIO_PARITY_MADAROS=/tmp/madaros.elf \
+          SOUNIO_PARITY_LEAN=bin/souc-lean-single-x86_64 \
+          SOUNIO_PARITY_JOBS=4 \
+          SOUNIO_PARITY_TIMEOUT=120 \
+          bash scripts/ci/engine_parity_gate.sh

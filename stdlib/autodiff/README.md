@@ -13,17 +13,33 @@ Automatic differentiation: tape-based reverse-mode, dual numbers for forward-mod
 
 ## Quickstart
 
+`stdlib/autodiff/tape.sio` is free functions over a by-value `Tape`, not
+`Tape::new()` / `push_var()` / `grad()` methods. Each operation returns the
+updated tape. **These names are internal to `tape.sio` (none are exported):**
+the sketch below is implementation-internal pseudocode, not a public API to
+import from user code:
+
 ```sio
-use autodiff::tape::Tape;
+var tape = new_tape()
+tape = tape_new_var(tape, 3.0)
+let x = tape_last_var(tape)
+tape = tape_mul(tape, x, x)   // y = x^2
+let y = tape_last_var(tape)
+tape = backward(tape, y)
 
-// Reverse-mode AD with tape
-let mut tape = Tape::new();
-let x = tape.push_var(3.0);
-let y = tape.push_mul(x, x);  // y = x²
-tape.backward();              // Compute gradients
-
-let dx = tape.grad(x);        // dy/dx = 2x = 6
+let dx = get_grad(tape, x)    // dy/dx = 2x = 6
 ```
+
+These names — `new_tape`, `tape_new_var`, `tape_last_var`, `tape_mul`,
+`backward`, `get_grad`, and the `Var` type — are private to `tape.sio` and
+cannot be imported. The tape module is internal; `epistemic_dual`
+(e.g. `edual_new` / `edual_mul`) is the public AD surface. By contrast,
+`grad.sio` exports only the `Dual` struct — its gradient functions
+(`grad_rosenbrock`, `jacobian_polar_to_cart`, `hessian_diag_rosenbrock`) and the `dual.sio` forward-mode arithmetic
+(`dual_var`, `dual_mul`, …) are private and cannot be imported, so `grad` is
+not a usable public gradient API.
+
+More in [`TAPE_IMPLEMENTATION.md`](./TAPE_IMPLEMENTATION.md). For uncertainty-aware gradients, `stdlib/autodiff/epistemic_dual.sio` builds values with `edual_new(val, dot, unc, unc_dot)` and `edual_mul` — there is no `EpistemicDual::new` and no `Knowledge::measured`.
 
 ## Benchmarks
 
@@ -41,7 +57,7 @@ See [`VALIDATION_REPORT.md`](../../benchmarks/stdlib_validation/VALIDATION_REPOR
 | [`dual`](./dual.sio) | Forward-mode AD with dual numbers |
 | [`epistemic_dual`](./epistemic_dual.sio) | Dual numbers with uncertainty |
 | [`linear_ad`](./linear_ad.sio) | Linear AD for Jacobians |
-| [`grad`](./grad.sio) | High-level gradient API |
+| [`grad`](./grad.sio) | `Dual` struct only (gradient fns internal) |
 | [`differentiable`](./differentiable.sio) | Differentiable function traits |
 
 ## Tape Implementation Details

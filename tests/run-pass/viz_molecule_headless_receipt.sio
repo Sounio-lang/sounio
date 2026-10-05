@@ -1,0 +1,77 @@
+//@ run-pass
+// Headless proof for the Sounio molecular renderer receipt.
+//
+// Expected output:
+//   VIZ_MOLECULE_HEADLESS_RECEIPT_PASS
+
+use display::canvas::{Canvas, canvas_clear}
+use render::renderer3d::{Camera3D}
+use viz::mol3d::{mol3d_precompute_ao, mol3d_render, mol3d_render_ao}
+use viz::physchem::{molecule_rapamycin_coarse}
+
+fn make_canvas(w: i64, h: i64) -> Canvas with Alloc {
+    let pixels = heap_alloc(w * h * 8) as *mut i64
+    Canvas { pixels: pixels, width: w, height: h }
+}
+
+fn main() with IO, Alloc, Mut, Div {
+    let w: i64 = 240
+    let h: i64 = 160
+    let bg: i64 = 22 | (14 << 8) | (8 << 16)
+    var a = make_canvas(w, h)
+    var b = make_canvas(w, h)
+    canvas_clear(&!a, 8, 14, 22)
+    canvas_clear(&!b, 8, 14, 22)
+
+    var mol = molecule_rapamycin_coarse()
+    assert(mol.atom_count == 44)
+    assert(mol.bond_count == 45)
+    assert(mol.atoms[0].atomic_number == 8)
+    assert(mol.atoms[30].atomic_number == 7)
+    assert(mol.bonds[30].atom_a == 30)
+    assert(mol.bonds[30].atom_b == 0)
+
+    var atom_i: i64 = 0
+    while atom_i < mol.atom_count {
+        let z = mol.atoms[atom_i as usize].atomic_number
+        mol.atoms[atom_i as usize].radius = if z == 8 { 0.42 } else if z == 7 { 0.40 } else { 0.34 }
+        atom_i = atom_i + 1
+    }
+
+    let cam = Camera3D { pos_x: 0.0, pos_y: -0.3, pos_z: 21.0, focal: 190.0 }
+    var ao: [f64; 64] = [0.0; 64]
+    mol3d_precompute_ao(&mol, &!ao)
+    mol3d_render(&mol, &cam, 0.52, 0.30, &!a)
+    mol3d_render_ao(&mol, &cam, 0.52, 0.30, &ao, &!a)
+    mol3d_render(&mol, &cam, 0.52, 0.30, &!b)
+    mol3d_render_ao(&mol, &cam, 0.52, 0.30, &ao, &!b)
+
+    var foreground: i64 = 0
+    var mismatch: i64 = 0
+    var outer_leak: i64 = 0
+    var i: i64 = 0
+    while i < w * h {
+        let pa = read_i64(a.pixels, i)
+        let pb = read_i64(b.pixels, i)
+        if pa != bg {
+            foreground = foreground + 1
+            let py = i / w
+            let px = i - py * w
+            if px < 6 || px >= w - 6 || py < 6 || py >= h - 6 {
+                outer_leak = outer_leak + 1
+            }
+        }
+        if pa != pb { mismatch = mismatch + 1 }
+        i = i + 1
+    }
+
+    assert(foreground > 3500)
+    assert(foreground < 20000)
+    assert(mismatch == 0)
+    assert(outer_leak == 0)
+    assert(read_i64(a.pixels, 80 * w + 120) == bg)
+    println("VIZ_MOLECULE_HEADLESS_RECEIPT_PASS")
+
+    heap_free(a.pixels as *mut i8)
+    heap_free(b.pixels as *mut i8)
+}

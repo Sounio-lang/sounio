@@ -4,7 +4,17 @@ This directory contains debugger integration tools for Sounio programs.
 
 ## Overview
 
-Sounio programs compiled with debug info (`-g` flag) can be debugged with standard debuggers. The tools in this directory provide:
+> **STATUS (2026-08-15, measured):** `souc build`/`compile` has no `-g` flag today
+> (`souc build file.sio -g` errors `unsupported option: -g`, rc=2), and
+> `self-hosted/native/dwarf.sio` / `debug_info.sio` are not reachable from
+> `self-hosted/compiler/main.sio`'s `use` graph -- the shipped compiler does not
+> emit DWARF debug info. This directory's pretty printers and templates are
+> real and still useful once a native debugger attaches to a Sounio binary at
+> the machine level, but the `-g`/debug-info workflow below is a design target,
+> not a working feature. Do not present this doc as describing current `souc`
+> behaviour.
+
+Sounio programs compiled with debug info (`-g` flag, planned) can be debugged with standard debuggers. The tools in this directory provide:
 
 - **Pretty printers** for Sounio's core types (Knowledge, Quantity, Effects, etc.)
 - **Custom commands** for inspecting epistemic values

@@ -73,6 +73,15 @@ if [[ ! -f "$MANIFEST" ]]; then
   printf '%s\t%s\t%s\t%s\t%s\n' "metal_manifest" "structural" "$MANIFEST" "fail" "missing_manifest" >> "$RESULTS_TSV"
   structural_rc=1
 else
+  # Manifest row floor: the structural loop appends exactly one results row
+  # per non-comment data row. An empty or header-only manifest runs the loop
+  # zero times, every count stays 0, and status computes "pass" -- an
+  # instrument that answered nothing certifying itself.
+  manifest_rows="$(tail -n +2 "$MANIFEST" | grep -vE '^[[:space:]]*(#|$)' | grep -c . || true)"
+  if [[ "$manifest_rows" -lt 1 ]]; then
+    echo "[native-v2-metal-algebra] FAIL: manifest $MANIFEST has no data rows -- nothing to verify" >&2
+    exit 1
+  fi
   fail=0
   # Skip header, read each row positionally (manifest schema:
   # case_id, kernel_path, kernel_name, policy).
@@ -100,6 +109,14 @@ else
       printf '%s\t%s\t%s\t%s\t%s\n' "$case_id" "structural_msl" "$kernel_path" "pass" "metal_f64_policy_structural_ok" >> "$RESULTS_TSV"
     fi
   done < <(tail -n +2 "$MANIFEST")
+  # Every data row must have answered exactly once (the loop appends one
+  # results row per case, pass or fail); a shortfall means rows were lost
+  # between the manifest and the results, not that the corpus was smaller.
+  structural_rows="$(awk -F'\t' '$2=="structural_msl"' "$RESULTS_TSV" | wc -l | tr -d ' ')"
+  if [[ "$structural_rows" -ne "$manifest_rows" ]]; then
+    echo "[native-v2-metal-algebra] FAIL: $structural_rows of $manifest_rows manifest rows produced results -- incomplete structural pass" >&2
+    exit 1
+  fi
   [[ "$fail" -gt 0 ]] && structural_rc=1
 fi
 set -e

@@ -1,0 +1,471 @@
+// examples/kmc/uptake_diffraction.sio
+//
+// M6: THE SHAPE OF A HALF-ORDER DIFFRACTION SPOT DURING DISSOCIATIVE UPTAKE
+//     AS A MEASURE OF WHERE THE TWO ATOMS LAND.
+//
+// WHERE THIS COMES FROM. kmc_c2x2_production.sio (array 12050) is testing
+// whether c(2x2) ordering without diffusion shows a centre-suppressed
+// half-order spot; a preliminary look at its D=0 half gives a small-k slope
+// of 2.7 +- 0.3, i.e. yes. But verify_kawasaki_mapping.py showed that
+// dynamics is Kawasaki Ising coarsening, and for oxygen on metals desorption
+// is never faster than diffusion, so that regime has no real system. And ab
+// initio dynamics for O2/Pd(100) (Bukas & Reuter, PRL 117, 146101 (2016);
+// Lin & Jiang, JPCL 14, 7513 (2023)) puts the atoms mostly at (2,0) or (4,0)
+// separations, not the nearest-neighbour or diagonal pairs the conservation
+// law needs.
+//
+// THE REFORMULATION, which needs neither desorption nor coarsening. Every
+// dissociative adsorption event adds two atoms. Their contribution to a
+// sublattice "charge" field is a DIPOLE (+1, -1) if the two landing sites
+// are on opposite sublattices of that field, and a MONOPOLE (+-2) if on the
+// same. Which fields, for a displacement d = (dx, dy):
+//
+//     F0 = sigma * (-1)^(r+c)   c(2x2) order, spot (1/2,1/2)   dipole iff dx+dy odd
+//     F1 = sigma * (-1)^r       p(2x2) order, spot (0,1/2)     dipole iff dy odd
+//     F2 = sigma * (-1)^c       p(2x2) order, spot (1/2,0)     dipole iff dx odd
+//
+// A field built only from dipoles has |sum phi e^(iq.r)|^2 ~ q^2 at small
+// q, however the dipoles are correlated, because its total charge in any
+// region is a boundary term: the spot is suppressed at its centre
+// (hyperuniform). Any monopoles give a plateau S(q -> 0) > 0. So a spot
+// profile measured during uptake distinguishes dissociation geometries, and
+// the plateau measures the monopole fraction. That holds for IRREVERSIBLE
+// uptake at low temperature, exactly the regime where atoms are immobile.
+// No claim of novelty: a targeted search found none of this, and the closest
+// work (Evans, Nord, Rabaey, PRB 37, 8598 (1988)) was not readable in full.
+//
+// DECISION RULES AND CHECKS, fixed before any data from this file:
+//   P1 exact     for a geometry that is all dipoles in a field, that field's
+//                total charge is exactly zero at every checkpoint (integer).
+//   P2 analytic  at coverage 0.01 with no exclusion, S_field(q) per site
+//                equals (pairs/N) * <2 + 2 g cos(q.d)> over the 8 lattice
+//                images of d (g = +1 monopole, -1 dipole), within 3 SE of
+//                seed scatter, in every shell n^2 <= 16, for (1,0), (1,1) and
+//                (2,0) pairs. This is the test of the simulation itself.
+//   P3 ring      s = log2(S[n^2=4] / S[n^2=1]): > 1 by 3 SE for dipole fields,
+//                and |s| < 1 for monopole fields, at coverage 0.05.
+//   P4 plateau   mixing a fraction f of (2,0) pairs into (1,1) pairs, the
+//                p(2x2) small-q plateau S(q_min) at coverage 0.01 is
+//                (pairs/N) * [ (1-f) A_(1,1)(q_min) + f A_(2,0)(q_min) ],
+//                linear in f, within 3 SE, for f = 0.1 and 0.3.
+//   P5 exploratory, with nearest-neighbour exclusion (O/Pd(100)-like) up to
+//                coverage 0.25: spot shapes for (1,1) [Brundle-Behm-Barker],
+//                (2,0) [Lin-Jiang dominant], (4,0) [Bukas-Reuter].
+// The statistics are done by analysis/uptake_aggregate.py across seeds.
+
+fn abs_f(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn abs_i(x: i64) -> i64 { if x < 0 { 0 - x } else { x } }
+
+fn rng_step(s: i64) -> i64 { s * 6364136223846793005 + 1442695040888963407 }
+fn rng_unit(s: i64) -> f64 with Div, Panic {
+    let u: i64 = s & 4611686018427387903
+    let hi: i64 = u / 4294967296
+    (hi as f64) / 1073741824.0
+}
+
+fn cos_f(x0: f64) -> f64 with Mut, Div, Panic {
+    let pi = 3.141592653589793
+    var x = x0
+    while x > pi { x = x - 2.0 * pi }
+    while x < 0.0 - pi { x = x + 2.0 * pi }
+    var sum: f64 = 1.0
+    var term: f64 = 1.0
+    var i: i64 = 1
+    while i < 40 { term = 0.0 - term * x * x / (((2 * i - 1) * (2 * i)) as f64)  sum = sum + term  i = i + 1 }
+    sum
+}
+fn sin_f(x0: f64) -> f64 with Mut, Div, Panic {
+    let pi = 3.141592653589793
+    var x = x0
+    while x > pi { x = x - 2.0 * pi }
+    while x < 0.0 - pi { x = x + 2.0 * pi }
+    var sum: f64 = x
+    var term: f64 = x
+    var i: i64 = 1
+    while i < 40 { term = 0.0 - term * x * x / (((2 * i) * (2 * i + 1)) as f64)  sum = sum + term  i = i + 1 }
+    sum
+}
+
+fn trig_tables(l: i64, ct: &![f64; 1280], st: &![f64; 1280]) with Mut, Div, Panic {
+    let pi = 3.141592653589793
+    var mm: i64 = 0
+    while mm <= 4 {
+        var c: i64 = 0
+        while c < l {
+            let a = 2.0 * pi * ((mm * c) as f64) / (l as f64)
+            ct[(mm * l + c) as usize] = cos_f(a)
+            st[(mm * l + c) as usize] = sin_f(a)
+            c = c + 1
+        }
+        mm = mm + 1
+    }
+}
+
+// Shell-averaged |sum_i f_i e^(iq.r_i)|^2 / N over q = 2 pi (mx, my)/L,
+// |mx|,|my| <= 4, half plane; shells[j] holds mx^2 + my^2 = j. Same mode set
+// and averaging as kmc_c2x2_production.sio, applied to an arbitrary field.
+fn sk_field(fld: &[f64; 65536], l: i64, ct: &[f64; 1280], st: &[f64; 1280],
+            shells: &![f64; 33]) with Mut, Div, Panic {
+    let n = l * l
+    var cnt: [i64; 33] = [0; 33]
+    var s0: i64 = 0
+    while s0 < 33 { shells[s0 as usize] = 0.0  s0 = s0 + 1 }
+    var mx: i64 = 0
+    while mx <= 4 {
+        var my: i64 = 0 - 4
+        while my <= 4 {
+            if mx > 0 || (mx == 0 && my > 0) {
+                let amy = abs_i(my)
+                var sy: f64 = 1.0
+                if my < 0 { sy = 0.0 - 1.0 }
+                var a: f64 = 0.0
+                var bs: f64 = 0.0
+                var r: i64 = 0
+                while r < l {
+                    let cyv: f64 = ct[(amy * l + r) as usize]
+                    let syv: f64 = sy * st[(amy * l + r) as usize]
+                    var c: i64 = 0
+                    while c < l {
+                        let v: f64 = fld[(r * l + c) as usize]
+                        if v != 0.0 {
+                            let cxv: f64 = ct[(mx * l + c) as usize]
+                            let sxv: f64 = st[(mx * l + c) as usize]
+                            a = a + v * (cxv * cyv - sxv * syv)
+                            bs = bs + v * (sxv * cyv + cxv * syv)
+                        }
+                        c = c + 1
+                    }
+                    r = r + 1
+                }
+                let j = mx * mx + my * my
+                shells[j as usize] = shells[j as usize] + (a * a + bs * bs) / (n as f64)
+                cnt[j as usize] = cnt[j as usize] + 1
+            }
+            my = my + 1
+        }
+        mx = mx + 1
+    }
+    var s1: i64 = 0
+    while s1 < 33 {
+        if cnt[s1 as usize] > 0 { shells[s1 as usize] = shells[s1 as usize] / (cnt[s1 as usize] as f64) }
+        s1 = s1 + 1
+    }
+}
+
+// <2 + 2 g cos(q.d)> over the 8 lattice images of (dx, dy), shell-averaged
+// over the same modes as sk_field. field: 0 = F0, 1 = F1 (row), 2 = F2 (col).
+fn analytic_shells(dx: i64, dy: i64, field: i64, l: i64, shells: &![f64; 33]) with Mut, Div, Panic {
+    let pi = 3.141592653589793
+    var ix: [i64; 8] = [0; 8]
+    var iy: [i64; 8] = [0; 8]
+    ix[0] = dx  iy[0] = dy
+    ix[1] = 0 - dx  iy[1] = dy
+    ix[2] = dx  iy[2] = 0 - dy
+    ix[3] = 0 - dx  iy[3] = 0 - dy
+    ix[4] = dy  iy[4] = dx
+    ix[5] = 0 - dy  iy[5] = dx
+    ix[6] = dy  iy[6] = 0 - dx
+    ix[7] = 0 - dy  iy[7] = 0 - dx
+    var cnt: [i64; 33] = [0; 33]
+    var s0: i64 = 0
+    while s0 < 33 { shells[s0 as usize] = 0.0  s0 = s0 + 1 }
+    var mx: i64 = 0
+    while mx <= 4 {
+        var my: i64 = 0 - 4
+        while my <= 4 {
+            if mx > 0 || (mx == 0 && my > 0) {
+                var acc: f64 = 0.0
+                var k: i64 = 0
+                while k < 8 {
+                    let ex: i64 = ix[k as usize]
+                    let ey: i64 = iy[k as usize]
+                    var g: f64 = 1.0
+                    var par: i64 = 0
+                    if field == 0 { par = abs_i(ex + ey) }
+                    if field == 1 { par = abs_i(ey) }
+                    if field == 2 { par = abs_i(ex) }
+                    if par - (par / 2) * 2 == 1 { g = 0.0 - 1.0 }
+                    let ph = 2.0 * pi * ((mx * ex + my * ey) as f64) / (l as f64)
+                    acc = acc + 2.0 + 2.0 * g * cos_f(ph)
+                    k = k + 1
+                }
+                let j = mx * mx + my * my
+                shells[j as usize] = shells[j as usize] + acc / 8.0
+                cnt[j as usize] = cnt[j as usize] + 1
+            }
+            my = my + 1
+        }
+        mx = mx + 1
+    }
+    var s1: i64 = 0
+    while s1 < 33 {
+        if cnt[s1 as usize] > 0 { shells[s1 as usize] = shells[s1 as usize] / (cnt[s1 as usize] as f64) }
+        s1 = s1 + 1
+    }
+}
+
+fn sk_selftest() -> bool with IO, Mut, Div, Panic {
+    let pi = 3.141592653589793
+    let l: i64 = 16
+    let n = l * l
+    var ok = true
+    var fld: [f64; 65536] = [0.0; 65536]
+    var ct: [f64; 1280] = [0.0; 1280]
+    var st: [f64; 1280] = [0.0; 1280]
+    var sh: [f64; 33] = [0.0; 33]
+    trig_tables(l, &! ct, &! st)
+    var i: i64 = 0
+    while i < n {
+        let c = i - (i / l) * l
+        if c < l / 2 { fld[i as usize] = 1.0 } else { fld[i as usize] = 0.0 - 1.0 }
+        i = i + 1
+    }
+    sk_field(&fld, l, &ct, &st, &! sh)
+    var mxs: [i64; 2] = [1, 3]
+    var js: [i64; 2] = [1, 9]
+    var k: i64 = 0
+    while k < 2 {
+        let mx: i64 = mxs[k as usize]
+        var re: f64 = 0.0
+        var im: f64 = 0.0
+        var c2: i64 = 0
+        while c2 < l {
+            var ph: f64 = 1.0
+            if c2 >= l / 2 { ph = 0.0 - 1.0 }
+            let ang = 2.0 * pi * ((mx * c2) as f64) / (l as f64)
+            re = re + ph * cos_f(ang)
+            im = im + ph * sin_f(ang)
+            c2 = c2 + 1
+        }
+        let lf = l as f64
+        let direct = lf * lf * (re * re + im * im) / (n as f64) / 2.0
+        let got: f64 = sh[js[k as usize] as usize]
+        print("VALIDATION sk_field slab shell ") print(js[k as usize]) print(": ") print_f64(got)
+        print("  direct ") print_f64(direct) println("")
+        if abs_f(got - direct) > 0.000001 * (1.0 + direct) { ok = false }
+        k = k + 1
+    }
+    // a single isolated dipole (+1 at 0, -1 at the right neighbour) against the
+    // analytic shell formula with g = -1 and one image only is not available,
+    // so check the image-averaged analytic formula at q -> 0 instead: dipole
+    // fields vanish, monopole fields give 4
+    var an: [f64; 33] = [0.0; 33]
+    analytic_shells(1, 0, 0, 1000000, &! an)
+    let d1: f64 = an[1]
+    analytic_shells(2, 0, 0, 1000000, &! an)
+    let m1: f64 = an[1]
+    print("VALIDATION analytic q->0: dipole (1,0) in F0 ") print_f64(d1) print("   monopole (2,0) in F0 ") print_f64(m1) println("")
+    if abs_f(d1) > 0.000001 || abs_f(m1 - 4.0) > 0.000001 { ok = false }
+    ok
+}
+
+// One irreversible uptake run. Geometry: base displacement (ax, ay) with
+// probability 1 - fb, (bx, by) with probability fb, each in a uniformly
+// random one of its 8 lattice images. excl = 1 forbids landing on a site
+// with an occupied nearest neighbour (other than the partner). Prints the
+// three fields' shells at each coverage checkpoint.
+fn uptake_run(task: i64, scen: i64, rep: i64, l: i64, ax: i64, ay: i64, bx: i64, by: i64,
+              fb: f64, excl: i64, theta_max: f64) -> bool with IO, Mut, Div, Panic {
+    let n = l * l
+    var ok = true
+    var occ: [i64; 65536] = [0; 65536]
+    var fld: [f64; 65536] = [0.0; 65536]
+    var ct: [f64; 1280] = [0.0; 1280]
+    var st: [f64; 1280] = [0.0; 1280]
+    var sh: [f64; 33] = [0.0; 33]
+    trig_tables(l, &! ct, &! st)
+    var cps: [f64; 9] = [0.01, 0.02, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40]
+    let seed: i64 = 7777777 * (task + 1) + scen * 104729 + rep * 1299709
+    var s: i64 = seed
+    var occ_n: i64 = 0
+    var attempts: i64 = 0
+    var misses: i64 = 0
+    let miss_cap: i64 = 200 * n
+    var cp: i64 = 0
+    print("UPTAKE_BEGIN task=") print(task) print(" scen=") print(scen) print(" rep=") print(rep)
+    print(" L=") print(l) print(" a=(") print(ax) print(",") print(ay) print(") b=(") print(bx) print(",") print(by)
+    print(") fb=") print_f64(fb) print(" excl=") print(excl) print(" seed=") print(seed) println("")
+    var jammed = false
+    while cp < 9 && !jammed {
+        let target: f64 = cps[cp as usize]
+        if target > theta_max + 0.000001 {
+            cp = 9
+        } else if (occ_n as f64) >= target * (n as f64) {
+            // checkpoint: charges and spot shells of the three fields
+            var q0: i64 = 0
+            var q1: i64 = 0
+            var q2: i64 = 0
+            var fi: i64 = 0
+            while fi < 3 {
+                var i: i64 = 0
+                while i < n {
+                    let r = i / l
+                    let c = i - r * l
+                    var sg: i64 = 1
+                    if fi == 0 { if (r + c) - ((r + c) / 2) * 2 == 1 { sg = 0 - 1 } }
+                    if fi == 1 { if r - (r / 2) * 2 == 1 { sg = 0 - 1 } }
+                    if fi == 2 { if c - (c / 2) * 2 == 1 { sg = 0 - 1 } }
+                    let v = occ[i as usize] * sg
+                    fld[i as usize] = v as f64
+                    if fi == 0 { q0 = q0 + v }
+                    if fi == 1 { q1 = q1 + v }
+                    if fi == 2 { q2 = q2 + v }
+                    i = i + 1
+                }
+                sk_field(&fld, l, &ct, &st, &! sh)
+                print("SPOT scen=") print(scen) print(" rep=") print(rep) print(" field=F") print(fi)
+                print(" theta=") print_f64((occ_n as f64) / (n as f64))
+                print(" pairs=") print(occ_n / 2)
+                let a1: f64 = sh[1]
+                let a2: f64 = sh[2]
+                let a4: f64 = sh[4]
+                let a5: f64 = sh[5]
+                let a8: f64 = sh[8]
+                let a9: f64 = sh[9]
+                let a10: f64 = sh[10]
+                let a13: f64 = sh[13]
+                let a16: f64 = sh[16]
+                print(" S1u=") print_f64(1000000.0 * a1)
+                print(" S2u=") print_f64(1000000.0 * a2)
+                print(" S4u=") print_f64(1000000.0 * a4)
+                print(" S5u=") print_f64(1000000.0 * a5)
+                print(" S8u=") print_f64(1000000.0 * a8)
+                print(" S9u=") print_f64(1000000.0 * a9)
+                print(" S10u=") print_f64(1000000.0 * a10)
+                print(" S13u=") print_f64(1000000.0 * a13)
+                print(" S16u=") print_f64(1000000.0 * a16)
+                println("")
+                fi = fi + 1
+            }
+            print("CHARGE scen=") print(scen) print(" rep=") print(rep)
+            print(" theta=") print_f64((occ_n as f64) / (n as f64))
+            print(" Q0=") print(q0) print(" Q1=") print(q1) print(" Q2=") print(q2) println("")
+            cp = cp + 1
+        } else {
+            // one adsorption attempt
+            s = rng_step(s)
+            var i0: i64 = (rng_unit(s) * (n as f64)) as i64
+            if i0 >= n { i0 = n - 1 }
+            s = rng_step(s)
+            var dxb = ax
+            var dyb = ay
+            if rng_unit(s) < fb { dxb = bx  dyb = by }
+            s = rng_step(s)
+            var img: i64 = (rng_unit(s) * 8.0) as i64
+            if img > 7 { img = 7 }
+            var ex = dxb
+            var ey = dyb
+            if img == 1 { ex = 0 - dxb }
+            if img == 2 { ey = 0 - dyb }
+            if img == 3 { ex = 0 - dxb  ey = 0 - dyb }
+            if img == 4 { ex = dyb  ey = dxb }
+            if img == 5 { ex = 0 - dyb  ey = dxb }
+            if img == 6 { ex = dyb  ey = 0 - dxb }
+            if img == 7 { ex = 0 - dyb  ey = 0 - dxb }
+            let r0 = i0 / l
+            let c0 = i0 - r0 * l
+            var r1 = r0 + ey
+            var c1 = c0 + ex
+            while r1 < 0 { r1 = r1 + l }
+            while r1 >= l { r1 = r1 - l }
+            while c1 < 0 { c1 = c1 + l }
+            while c1 >= l { c1 = c1 - l }
+            let j0 = r1 * l + c1
+            attempts = attempts + 1
+            var accept = occ[i0 as usize] == 0 && occ[j0 as usize] == 0 && i0 != j0
+            if accept && excl == 1 {
+                var k: i64 = 0
+                while k < 8 {
+                    var site = i0
+                    var other = j0
+                    if k >= 4 { site = j0  other = i0 }
+                    let rr = site / l
+                    let cc = site - rr * l
+                    let kk = k - (k / 4) * 4
+                    var nr = rr
+                    var nc = cc
+                    if kk == 0 { nc = if cc + 1 == l { 0 } else { cc + 1 } }
+                    if kk == 1 { nc = if cc == 0 { l - 1 } else { cc - 1 } }
+                    if kk == 2 { nr = if rr + 1 == l { 0 } else { rr + 1 } }
+                    if kk == 3 { nr = if rr == 0 { l - 1 } else { rr - 1 } }
+                    let nb = nr * l + nc
+                    if nb != other { if occ[nb as usize] == 1 { accept = false } }
+                    k = k + 1
+                }
+            }
+            if accept {
+                occ[i0 as usize] = 1
+                occ[j0 as usize] = 1
+                occ_n = occ_n + 2
+                misses = 0
+            } else {
+                misses = misses + 1
+                if misses > miss_cap { jammed = true }
+            }
+        }
+    }
+    print("UPTAKE_END scen=") print(scen) print(" rep=") print(rep)
+    print(" theta_final=") print_f64((occ_n as f64) / (n as f64))
+    print(" attempts=") print(attempts)
+    if jammed { println(" JAMMED") } else { println("") }
+    ok
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let task_id: i64 = 0
+    print("M6 uptake diffraction, task ") print(task_id) println("")
+    let vok = sk_selftest()
+    print("VALIDATION selftest ")
+    if vok { println("ok") } else { println("FAILED") }
+    if !vok { println("M6_TASK_FAILED") return 0 }
+
+    // analytic low-coverage shells for the aggregator (P2, P4)
+    var an: [f64; 33] = [0.0; 33]
+    var gd: [i64; 3] = [1, 1, 2]
+    var ge: [i64; 3] = [0, 1, 0]
+    var gi: i64 = 0
+    while gi < 3 {
+        var fi: i64 = 0
+        while fi < 3 {
+            analytic_shells(gd[gi as usize], ge[gi as usize], fi, 256, &! an)
+            print("ANALYTIC d=(") print(gd[gi as usize]) print(",") print(ge[gi as usize]) print(") field=F") print(fi)
+            let a1: f64 = an[1]
+            let a2: f64 = an[2]
+            let a4: f64 = an[4]
+            let a5: f64 = an[5]
+            let a8: f64 = an[8]
+            let a9: f64 = an[9]
+            let a10: f64 = an[10]
+            let a13: f64 = an[13]
+            let a16: f64 = an[16]
+            print(" A1=") print_f64(a1) print(" A2=") print_f64(a2) print(" A4=") print_f64(a4)
+            print(" A5=") print_f64(a5) print(" A8=") print_f64(a8) print(" A9=") print_f64(a9)
+            print(" A10=") print_f64(a10) print(" A13=") print_f64(a13) print(" A16=") print_f64(a16) println("")
+            fi = fi + 1
+        }
+        gi = gi + 1
+    }
+
+    // Scenarios (L = 256):
+    //  0 (1,0) no exclusion      1 (1,1) no exclusion      2 (2,0) no exclusion
+    //  3 (1,1)+10% (2,0) no excl 4 (1,1)+30% (2,0) no excl
+    //  5 (1,1) NN exclusion      6 (2,0) NN exclusion      7 (4,0) NN exclusion
+    let l: i64 = 256
+    var ok = true
+    var rep: i64 = 0
+    while rep < 2 {
+        let r = task_id * 2 + rep
+        ok = uptake_run(task_id, 0, r, l, 1, 0, 1, 0, 0.0, 0, 0.10) && ok
+        ok = uptake_run(task_id, 1, r, l, 1, 1, 1, 1, 0.0, 0, 0.10) && ok
+        ok = uptake_run(task_id, 2, r, l, 2, 0, 2, 0, 0.0, 0, 0.10) && ok
+        ok = uptake_run(task_id, 3, r, l, 1, 1, 2, 0, 0.1, 0, 0.10) && ok
+        ok = uptake_run(task_id, 4, r, l, 1, 1, 2, 0, 0.3, 0, 0.10) && ok
+        ok = uptake_run(task_id, 5, r, l, 1, 1, 1, 1, 0.0, 1, 0.40) && ok
+        ok = uptake_run(task_id, 6, r, l, 2, 0, 2, 0, 0.0, 1, 0.40) && ok
+        ok = uptake_run(task_id, 7, r, l, 4, 0, 4, 0, 0.0, 1, 0.40) && ok
+        rep = rep + 1
+    }
+    if ok { print("M6_TASK_OK task=") } else { print("M6_TASK_FAILED task=") }
+    print(task_id) println("")
+    0
+}

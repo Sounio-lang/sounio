@@ -1,0 +1,66 @@
+//@ run-pass
+//@ exit-code: 0
+//@ description: stdlib/epistemic/affine — delta-method product: Var(a·b) = b²Var a + a²Var b + 2ab·Cov; x·x equals square (ep_mul understates by half); quotient and sqrt consistent
+// Companion to formal/lean4/EpistemicEffectsNS.lean: trueVar_mul, x_times_x_understates.
+
+use epistemic::affine::{
+    af_measured, af_mul, af_div, af_square, af_sqrt, af_variance, af_cov, af_value,
+}
+use epistemic::knowledge::{ep_measured, ep_mul, ep_square, ep_variance}
+
+fn close2(a: f64, b: f64) -> bool {
+    let d = a - b
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    let ab = if b < 0.0 { 0.0 - b } else { b }
+    ad <= 0.000001 * (1.0 + ab)
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    var ok: i64 = 1
+    let x = af_measured(10.0, 1.0, 0)
+    let y = af_measured(20.0, 2.0, 1)
+
+    // Disjoint sources: delta method agrees with ep_mul: 20²·1 + 10²·4 = 800.
+    let xy = af_mul(&x, &y)
+    if !close2(af_variance(&xy), 800.0) { ok = 0 }
+    let ex = ep_measured(10.0, 1.0)
+    let ey = ep_measured(20.0, 2.0)
+    let exy = ep_mul(&ex, &ey)
+    if !close2(ep_variance(&exy), 800.0) { ok = 0 }
+
+    // Shared source: x·x. True first-order Var = (2·10)²·1 = 400 = ep_square; ep_mul(x,x) = 200.
+    let xx = af_mul(&x, &x)
+    if !close2(af_variance(&xx), 400.0) { ok = 0 }
+    let xsq = af_square(&x)
+    if !close2(af_variance(&xsq), 400.0) { ok = 0 }
+    let exsq = ep_square(&ex)
+    if !close2(ep_variance(&exsq), 400.0) { ok = 0 }
+    let exx = ep_mul(&ex, &ex)
+    if !close2(ep_variance(&exx), 200.0) { ok = 0 }   // the two-formula defect, live
+
+    // Var(a·b) = b²Var a + a²Var b + 2ab·Cov(a,b), checked on a = x, b = x + y (Cov = 1).
+    let b = af_mul(&x, &x)              // reuse: b := x·x has Cov(x, b) = 2·10·1 = 20
+    let cov = af_cov(&x, &b)
+    if !close2(cov, 20.0) { ok = 0 }
+    let xb = af_mul(&x, &b)             // x³: true Var = (3·100)²·1 = 90000
+    let bv = af_value(&b)
+    let xv = af_value(&x)
+    let t1 = bv * bv * af_variance(&x)
+    let t2 = xv * xv * af_variance(&b)
+    let t3 = 2.0 * xv * bv * cov
+    let predicted = t1 + t2 + t3
+    if !close2(af_variance(&xb), predicted) { ok = 0 }
+    if !close2(af_variance(&xb), 90000.0) { ok = 0 }
+
+    // Quotient and root: y / y is exactly certain; sqrt(x)² recovers x's variance to first order.
+    let yy = af_div(&y, &y)
+    if !close2(af_variance(&yy), 0.0) { ok = 0 }
+    if !close2(af_value(&yy), 1.0) { ok = 0 }
+    let sx = af_sqrt(&x)
+    let sx2 = af_square(&sx)
+    if !close2(af_variance(&sx2), 1.0) { ok = 0 }
+
+    if ok == 1 { println("AFFINE_PRODUCT_DELTA PASS"); return 0 }
+    println("AFFINE_PRODUCT_DELTA FAIL")
+    1
+}

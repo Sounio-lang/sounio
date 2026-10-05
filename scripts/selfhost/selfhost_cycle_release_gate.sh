@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/selfhost_cycle_release_gate.sh
+# scripts/selfhost/selfhost_cycle_release_gate.sh
 #
 # Release-blocking self-host cycle gate.
 # Runs Stage1 compile + Stage2 self-compile via the canonical cycle gate and

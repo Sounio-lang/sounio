@@ -1,0 +1,976 @@
+//! Semantic contract for XOR-indexed convolution with an explicit twist.
+//!
+//! This module defines the operation before any material lowering. The direct
+//! pair form and the displacement-reduction form deliberately remain separate
+//! implementations so Sounio can create their equivalence evidence.
+
+use algebra::cayley_dickson::cd_sigma
+use crypto::sha256::{
+    SHA256State,
+    sha256_init, sha256_update, sha256_finalize, sha256_digest_byte,
+}
+
+pub const XOR_CONV_MAX_BITS: i64 = 6
+pub const XOR_CONV_MAX_DIMENSION: i64 = 64
+
+pub const XOR_TWIST_CAYLEY_DICKSON: i64 = 1
+pub const XOR_COEFFICIENT_SIGN: i64 = 1
+pub const XOR_ACCUMULATION_ASCENDING_I: i64 = 1
+
+pub const XOR_CONV_OK: i64 = 0
+pub const XOR_CONV_ERR_BITS: i64 = 1
+pub const XOR_CONV_ERR_CAPACITY: i64 = 2
+pub const XOR_CONV_ERR_VECTOR_LENGTH: i64 = 3
+pub const XOR_CONV_ERR_TWIST: i64 = 4
+pub const XOR_CONV_ERR_COEFFICIENT: i64 = 5
+pub const XOR_CONV_ERR_ACCUMULATION: i64 = 6
+
+pub struct XorDigest {
+    pub words: [i64; 8],
+}
+
+pub struct XorConvolutionContract {
+    pub bits: i64,
+    pub dimension: i64,
+    pub vector_length: i64,
+    pub twist_identity: i64,
+    pub coefficient_domain: i64,
+    pub accumulation_order: i64,
+    pub valid: bool,
+    pub error: i64,
+}
+
+pub struct XorPredicateWitness {
+    pub present: bool,
+    pub i: i64,
+    pub j: i64,
+    pub k: i64,
+    pub displacement: i64,
+    pub lhs: i64,
+    pub rhs: i64,
+}
+
+pub struct XorTwistClassification {
+    pub plus_count: i64,
+    pub minus_count: i64,
+    pub zero_count: i64,
+    pub other_count: i64,
+    pub zero_free: bool,
+    pub normalized: bool,
+    pub displacement_only: bool,
+    pub rank_one_separable: bool,
+    pub left_square: bool,
+    pub group_two_cocycle: bool,
+    pub associator_defect_count: i64,
+    pub displacement_negative_counts: [i64; 64],
+    pub zero_witness: XorPredicateWitness,
+    pub normalization_witness: XorPredicateWitness,
+    pub displacement_witness: XorPredicateWitness,
+    pub separability_witness: XorPredicateWitness,
+    pub left_square_witness: XorPredicateWitness,
+    pub group_two_cocycle_witness: XorPredicateWitness,
+}
+
+pub struct XorConvolutionNegatives {
+    pub invalid_bits: bool,
+    pub capacity_exhaustion: bool,
+    pub vector_length_mismatch: bool,
+    pub unknown_twist: bool,
+    pub coefficient_outside_domain: bool,
+    pub accumulation_order_mismatch: bool,
+    pub wrong_destination: bool,
+    pub wrong_partner: bool,
+    pub missing_table_cell: bool,
+    pub duplicate_table_cell: bool,
+    pub false_zero_free_claim: bool,
+    pub false_displacement_claim: bool,
+    pub false_separability_claim: bool,
+    pub false_cocycle_claim: bool,
+    pub false_associative_claim: bool,
+    pub unsupported_wht_claim: bool,
+    pub unsupported_fano_claim: bool,
+    pub unsupported_material_claim: bool,
+    pub parity_promotion: bool,
+    pub forbidden_producer: bool,
+    pub passed: i64,
+    pub total: i64,
+}
+
+pub struct XorConvolutionResult {
+    pub contract: XorConvolutionContract,
+    pub direct: [f64; 64],
+    pub horizontal: [f64; 64],
+    pub direct_bits: [i64; 64],
+    pub horizontal_bits: [i64; 64],
+    pub mismatch_count: i64,
+    pub first_mismatch: i64,
+    pub max_abs_difference: f64,
+    pub classification: XorTwistClassification,
+    pub negatives: XorConvolutionNegatives,
+    pub contract_digest: XorDigest,
+    pub input_digest: XorDigest,
+    pub direct_digest: XorDigest,
+    pub horizontal_digest: XorDigest,
+    pub twist_table_digest: XorDigest,
+    pub property_digest: XorDigest,
+    pub witness_digest: XorDigest,
+    pub failures: i64,
+}
+
+fn absent_witness() -> XorPredicateWitness {
+    XorPredicateWitness {
+        present: false,
+        i: 0 - 1,
+        j: 0 - 1,
+        k: 0 - 1,
+        displacement: 0 - 1,
+        lhs: 0,
+        rhs: 0,
+    }
+}
+
+fn witness(
+    i: i64,
+    j: i64,
+    k: i64,
+    displacement: i64,
+    lhs: i64,
+    rhs: i64,
+) -> XorPredicateWitness {
+    XorPredicateWitness {
+        present: true,
+        i: i,
+        j: j,
+        k: k,
+        displacement: displacement,
+        lhs: lhs,
+        rhs: rhs,
+    }
+}
+
+fn dimension_for_bits(bits: i64) -> i64 {
+    if bits < 0 || bits > XOR_CONV_MAX_BITS { return 0 }
+    1 << bits
+}
+
+fn twist_value_raw(twist_identity: i64, bits: i64, i: i64, j: i64) -> i64
+    with Mut, Panic, Div {
+    if twist_identity == XOR_TWIST_CAYLEY_DICKSON {
+        return cd_sigma(i as i32, j as i32, bits as i32) as i64
+    }
+    0
+}
+
+fn coefficient_admitted(coefficient_domain: i64, value: i64) -> bool {
+    coefficient_domain == XOR_COEFFICIENT_SIGN &&
+        (value == 1 || value == 0 - 1)
+}
+
+pub fn xor_convolution_admit(
+    bits: i64,
+    vector_length: i64,
+    twist_identity: i64,
+    coefficient_domain: i64,
+    accumulation_order: i64,
+) -> XorConvolutionContract with Mut, Panic, Div {
+    if bits < 0 {
+        return XorConvolutionContract {
+            bits: bits, dimension: 0, vector_length: vector_length,
+            twist_identity: twist_identity,
+            coefficient_domain: coefficient_domain,
+            accumulation_order: accumulation_order,
+            valid: false, error: XOR_CONV_ERR_BITS,
+        }
+    }
+    if bits > XOR_CONV_MAX_BITS {
+        return XorConvolutionContract {
+            bits: bits, dimension: 0, vector_length: vector_length,
+            twist_identity: twist_identity,
+            coefficient_domain: coefficient_domain,
+            accumulation_order: accumulation_order,
+            valid: false, error: XOR_CONV_ERR_CAPACITY,
+        }
+    }
+    let dimension = dimension_for_bits(bits)
+    if dimension <= 0 || dimension > XOR_CONV_MAX_DIMENSION {
+        return XorConvolutionContract {
+            bits: bits, dimension: dimension, vector_length: vector_length,
+            twist_identity: twist_identity,
+            coefficient_domain: coefficient_domain,
+            accumulation_order: accumulation_order,
+            valid: false, error: XOR_CONV_ERR_CAPACITY,
+        }
+    }
+    if vector_length != dimension {
+        return XorConvolutionContract {
+            bits: bits, dimension: dimension, vector_length: vector_length,
+            twist_identity: twist_identity,
+            coefficient_domain: coefficient_domain,
+            accumulation_order: accumulation_order,
+            valid: false, error: XOR_CONV_ERR_VECTOR_LENGTH,
+        }
+    }
+    if twist_identity != XOR_TWIST_CAYLEY_DICKSON {
+        return XorConvolutionContract {
+            bits: bits, dimension: dimension, vector_length: vector_length,
+            twist_identity: twist_identity,
+            coefficient_domain: coefficient_domain,
+            accumulation_order: accumulation_order,
+            valid: false, error: XOR_CONV_ERR_TWIST,
+        }
+    }
+    if accumulation_order != XOR_ACCUMULATION_ASCENDING_I {
+        return XorConvolutionContract {
+            bits: bits, dimension: dimension, vector_length: vector_length,
+            twist_identity: twist_identity,
+            coefficient_domain: coefficient_domain,
+            accumulation_order: accumulation_order,
+            valid: false, error: XOR_CONV_ERR_ACCUMULATION,
+        }
+    }
+
+    var i: i64 = 0
+    while i < dimension {
+        var j: i64 = 0
+        while j < dimension {
+            let coefficient = twist_value_raw(twist_identity, bits, i, j)
+            if !coefficient_admitted(coefficient_domain, coefficient) {
+                return XorConvolutionContract {
+                    bits: bits, dimension: dimension,
+                    vector_length: vector_length,
+                    twist_identity: twist_identity,
+                    coefficient_domain: coefficient_domain,
+                    accumulation_order: accumulation_order,
+                    valid: false, error: XOR_CONV_ERR_COEFFICIENT,
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    XorConvolutionContract {
+        bits: bits,
+        dimension: dimension,
+        vector_length: vector_length,
+        twist_identity: twist_identity,
+        coefficient_domain: coefficient_domain,
+        accumulation_order: accumulation_order,
+        valid: true,
+        error: XOR_CONV_OK,
+    }
+}
+
+pub fn xor_convolution_cayley_dickson_contract(bits: i64)
+    -> XorConvolutionContract with Mut, Panic, Div {
+    let dimension = dimension_for_bits(bits)
+    xor_convolution_admit(
+        bits,
+        dimension,
+        XOR_TWIST_CAYLEY_DICKSON,
+        XOR_COEFFICIENT_SIGN,
+        XOR_ACCUMULATION_ASCENDING_I,
+    )
+}
+
+fn twist_value(contract: &XorConvolutionContract, i: i64, j: i64) -> i64
+    with Mut, Panic, Div {
+    twist_value_raw(contract.twist_identity, contract.bits, i, j)
+}
+
+pub fn xor_convolution_direct(
+    contract: &XorConvolutionContract,
+    a: &[f64; 64],
+    b: &[f64; 64],
+) -> [f64; 64] with Mut, Panic, Div {
+    var output: [f64; 64] = [0.0; 64]
+    if !contract.valid { return output }
+    var i: i64 = 0
+    while i < contract.dimension {
+        var j: i64 = 0
+        while j < contract.dimension {
+            let destination = i ^ j
+            let coefficient = twist_value(contract, i, j) as f64
+            output[destination] = output[destination] +
+                coefficient * a[i] * b[j]
+            j = j + 1
+        }
+        i = i + 1
+    }
+    output
+}
+
+pub fn xor_convolution_horizontal(
+    contract: &XorConvolutionContract,
+    a: &[f64; 64],
+    b: &[f64; 64],
+) -> [f64; 64] with Mut, Panic, Div {
+    var output: [f64; 64] = [0.0; 64]
+    if !contract.valid { return output }
+    var displacement: i64 = 0
+    while displacement < contract.dimension {
+        var sum: f64 = 0.0
+        var i: i64 = 0
+        while i < contract.dimension {
+            let partner = i ^ displacement
+            let coefficient = twist_value(contract, i, partner) as f64
+            sum = sum + coefficient * a[i] * b[partner]
+            i = i + 1
+        }
+        output[displacement] = sum
+        displacement = displacement + 1
+    }
+    output
+}
+
+pub fn xor_convolution_generate_inputs(
+    dimension: i64,
+    a: &![f64; 64],
+    b: &![f64; 64],
+) with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < dimension {
+        let ai = ((i * 17 + 5) % 29) - 14
+        let bi = ((i * i * 11 + i * 7 + 3) % 31) - 15
+        a[i] = (ai as f64) / 7.0
+        b[i] = (bi as f64) / 11.0
+        i = i + 1
+    }
+}
+
+fn abs_f64(value: f64) -> f64 {
+    if value < 0.0 { 0.0 - value } else { value }
+}
+
+fn classify_twist(contract: &XorConvolutionContract)
+    -> XorTwistClassification with Mut, Panic, Div {
+    var plus_count: i64 = 0
+    var minus_count: i64 = 0
+    var zero_count: i64 = 0
+    var other_count: i64 = 0
+    var negative_counts: [i64; 64] = [0; 64]
+    var zero_witness = absent_witness()
+    var normalization_witness = absent_witness()
+    var displacement_witness = absent_witness()
+    var separability_witness = absent_witness()
+    var left_square_witness = absent_witness()
+    var cocycle_witness = absent_witness()
+
+    var normalized = true
+    var displacement_only = true
+    var separable = true
+    var left_square = true
+    var group_two_cocycle = true
+    var associator_defect_count: i64 = 0
+
+    var i: i64 = 0
+    while i < contract.dimension {
+        var j: i64 = 0
+        while j < contract.dimension {
+            let value = twist_value(contract, i, j)
+            if value == 1 { plus_count = plus_count + 1 }
+            else if value == 0 - 1 { minus_count = minus_count + 1 }
+            else if value == 0 {
+                zero_count = zero_count + 1
+                if !zero_witness.present {
+                    zero_witness = witness(i, j, 0 - 1, i ^ j, value, 1)
+                }
+            } else {
+                other_count = other_count + 1
+                if !zero_witness.present {
+                    zero_witness = witness(i, j, 0 - 1, i ^ j, value, 1)
+                }
+            }
+
+            let displacement = i ^ j
+            if value == 0 - 1 {
+                negative_counts[displacement] =
+                    negative_counts[displacement] + 1
+            }
+
+            if (i == 0 || j == 0) && value != 1 {
+                normalized = false
+                if !normalization_witness.present {
+                    normalization_witness = witness(
+                        i, j, 0 - 1, displacement, value, 1)
+                }
+            }
+
+            let displacement_reference = twist_value(contract, 0, displacement)
+            if value != displacement_reference {
+                displacement_only = false
+                if !displacement_witness.present {
+                    displacement_witness = witness(
+                        i, j, 0 - 1, displacement,
+                        value, displacement_reference)
+                }
+            }
+
+            let separable_expected = twist_value(contract, i, 0) *
+                twist_value(contract, 0, j) * twist_value(contract, 0, 0)
+            if value != separable_expected {
+                separable = false
+                if !separability_witness.present {
+                    separability_witness = witness(
+                        i, j, 0 - 1, displacement,
+                        value, separable_expected)
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    i = 1
+    while i < contract.dimension {
+        var j: i64 = 0
+        while j < contract.dimension {
+            let lhs = twist_value(contract, i, j) *
+                twist_value(contract, i, i ^ j)
+            if lhs != 0 - 1 {
+                left_square = false
+                if !left_square_witness.present {
+                    left_square_witness = witness(
+                        i, j, 0 - 1, i ^ j, lhs, 0 - 1)
+                }
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    i = 0
+    while i < contract.dimension {
+        var j: i64 = 0
+        while j < contract.dimension {
+            var k: i64 = 0
+            while k < contract.dimension {
+                let lhs = twist_value(contract, i, j) *
+                    twist_value(contract, i ^ j, k)
+                let rhs = twist_value(contract, j, k) *
+                    twist_value(contract, i, j ^ k)
+                if lhs != rhs {
+                    group_two_cocycle = false
+                    associator_defect_count = associator_defect_count + 1
+                    if !cocycle_witness.present {
+                        cocycle_witness = witness(i, j, k, i ^ j ^ k, lhs, rhs)
+                    }
+                }
+                k = k + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+
+    XorTwistClassification {
+        plus_count: plus_count,
+        minus_count: minus_count,
+        zero_count: zero_count,
+        other_count: other_count,
+        zero_free: zero_count == 0 && other_count == 0,
+        normalized: normalized,
+        displacement_only: displacement_only,
+        rank_one_separable: separable,
+        left_square: left_square,
+        group_two_cocycle: group_two_cocycle,
+        associator_defect_count: associator_defect_count,
+        displacement_negative_counts: negative_counts,
+        zero_witness: zero_witness,
+        normalization_witness: normalization_witness,
+        displacement_witness: displacement_witness,
+        separability_witness: separability_witness,
+        left_square_witness: left_square_witness,
+        group_two_cocycle_witness: cocycle_witness,
+    }
+}
+
+fn destination_valid(i: i64, j: i64, supplied: i64) -> bool {
+    supplied == (i ^ j)
+}
+
+fn partner_valid(i: i64, displacement: i64, supplied: i64) -> bool {
+    supplied == (i ^ displacement)
+}
+
+fn table_manifest_valid(
+    dimension: i64,
+    cell_count: i64,
+    duplicate_count: i64,
+) -> bool {
+    cell_count == dimension * dimension && duplicate_count == 0
+}
+
+fn property_claim_valid(claimed: bool, observed: bool) -> bool {
+    claimed == observed
+}
+
+fn wht_claim_valid(
+    classification: &XorTwistClassification,
+    factorization_witness_present: bool,
+) -> bool {
+    factorization_witness_present && classification.rank_one_separable
+}
+
+fn fano_claim_valid(structural_witness_present: bool) -> bool {
+    structural_witness_present
+}
+
+fn material_claim_valid(material_receipt_present: bool) -> bool {
+    material_receipt_present
+}
+
+fn authority_producer_allowed(language: i64) -> bool {
+    language == 1
+}
+
+fn parity_promotion_valid(
+    producer_language: i64,
+    parent_semantics_present: bool,
+) -> bool {
+    producer_language == 1 && parent_semantics_present
+}
+
+fn exercise_negatives(
+    contract: &XorConvolutionContract,
+    classification: &XorTwistClassification,
+) -> XorConvolutionNegatives with Mut, Panic, Div {
+    let invalid_bits = !xor_convolution_admit(
+        0 - 1, 0, XOR_TWIST_CAYLEY_DICKSON,
+        XOR_COEFFICIENT_SIGN, XOR_ACCUMULATION_ASCENDING_I).valid
+    let capacity_exhaustion = !xor_convolution_admit(
+        XOR_CONV_MAX_BITS + 1, 0, XOR_TWIST_CAYLEY_DICKSON,
+        XOR_COEFFICIENT_SIGN, XOR_ACCUMULATION_ASCENDING_I).valid
+    let vector_length_mismatch = !xor_convolution_admit(
+        contract.bits, contract.dimension - 1, XOR_TWIST_CAYLEY_DICKSON,
+        XOR_COEFFICIENT_SIGN, XOR_ACCUMULATION_ASCENDING_I).valid
+    let unknown_twist = !xor_convolution_admit(
+        contract.bits, contract.dimension, 999,
+        XOR_COEFFICIENT_SIGN, XOR_ACCUMULATION_ASCENDING_I).valid
+    let coefficient_outside_domain = !xor_convolution_admit(
+        contract.bits, contract.dimension, XOR_TWIST_CAYLEY_DICKSON,
+        999, XOR_ACCUMULATION_ASCENDING_I).valid
+    let accumulation_order_mismatch = !xor_convolution_admit(
+        contract.bits, contract.dimension, XOR_TWIST_CAYLEY_DICKSON,
+        XOR_COEFFICIENT_SIGN, 999).valid
+    let wrong_destination = !destination_valid(3, 5, (3 ^ 5) ^ 1)
+    let wrong_partner = !partner_valid(6, 9, (6 ^ 9) ^ 1)
+    let missing_table_cell = !table_manifest_valid(
+        contract.dimension, contract.dimension * contract.dimension - 1, 0)
+    let duplicate_table_cell = !table_manifest_valid(
+        contract.dimension, contract.dimension * contract.dimension, 1)
+    let false_zero_free_claim = !property_claim_valid(
+        !classification.zero_free, classification.zero_free)
+    let false_displacement_claim = !property_claim_valid(
+        !classification.displacement_only, classification.displacement_only)
+    let false_separability_claim = !property_claim_valid(
+        !classification.rank_one_separable,
+        classification.rank_one_separable)
+    let false_cocycle_claim = !property_claim_valid(
+        !classification.group_two_cocycle,
+        classification.group_two_cocycle)
+    let false_associative_claim = !property_claim_valid(
+        classification.associator_defect_count != 0,
+        classification.associator_defect_count == 0)
+    let unsupported_wht_claim = !wht_claim_valid(classification, false)
+    let unsupported_fano_claim = !fano_claim_valid(false)
+    let unsupported_material_claim = !material_claim_valid(false)
+    let parity_promotion = !parity_promotion_valid(2, true)
+    let forbidden_producer = !authority_producer_allowed(7)
+
+    var passed: i64 = 0
+    if invalid_bits { passed = passed + 1 }
+    if capacity_exhaustion { passed = passed + 1 }
+    if vector_length_mismatch { passed = passed + 1 }
+    if unknown_twist { passed = passed + 1 }
+    if coefficient_outside_domain { passed = passed + 1 }
+    if accumulation_order_mismatch { passed = passed + 1 }
+    if wrong_destination { passed = passed + 1 }
+    if wrong_partner { passed = passed + 1 }
+    if missing_table_cell { passed = passed + 1 }
+    if duplicate_table_cell { passed = passed + 1 }
+    if false_zero_free_claim { passed = passed + 1 }
+    if false_displacement_claim { passed = passed + 1 }
+    if false_separability_claim { passed = passed + 1 }
+    if false_cocycle_claim { passed = passed + 1 }
+    if false_associative_claim { passed = passed + 1 }
+    if unsupported_wht_claim { passed = passed + 1 }
+    if unsupported_fano_claim { passed = passed + 1 }
+    if unsupported_material_claim { passed = passed + 1 }
+    if parity_promotion { passed = passed + 1 }
+    if forbidden_producer { passed = passed + 1 }
+
+    XorConvolutionNegatives {
+        invalid_bits: invalid_bits,
+        capacity_exhaustion: capacity_exhaustion,
+        vector_length_mismatch: vector_length_mismatch,
+        unknown_twist: unknown_twist,
+        coefficient_outside_domain: coefficient_outside_domain,
+        accumulation_order_mismatch: accumulation_order_mismatch,
+        wrong_destination: wrong_destination,
+        wrong_partner: wrong_partner,
+        missing_table_cell: missing_table_cell,
+        duplicate_table_cell: duplicate_table_cell,
+        false_zero_free_claim: false_zero_free_claim,
+        false_displacement_claim: false_displacement_claim,
+        false_separability_claim: false_separability_claim,
+        false_cocycle_claim: false_cocycle_claim,
+        false_associative_claim: false_associative_claim,
+        unsupported_wht_claim: unsupported_wht_claim,
+        unsupported_fano_claim: unsupported_fano_claim,
+        unsupported_material_claim: unsupported_material_claim,
+        parity_promotion: parity_promotion,
+        forbidden_producer: forbidden_producer,
+        passed: passed,
+        total: 20,
+    }
+}
+
+fn digest_add_i64(state: SHA256State, value: i64) -> SHA256State
+    with Mut, Panic, Div {
+    var bytes: [u8; 256] = [0; 256]
+    var i: i64 = 0
+    while i < 8 {
+        let shift = 56 - i * 8
+        bytes[i] = ((value >> shift) & 255) as u8
+        i = i + 1
+    }
+    sha256_update(state, bytes, 8)
+}
+
+fn digest_add_bool(state: SHA256State, value: bool) -> SHA256State
+    with Mut, Panic, Div {
+    digest_add_i64(state, if value { 1 } else { 0 })
+}
+
+fn digest_finish(state: SHA256State) -> XorDigest with Mut, Panic, Div {
+    let digest = sha256_finalize(state)
+    var words: [i64; 8] = [0; 8]
+    var word: i64 = 0
+    while word < 8 {
+        var value: i64 = 0
+        var byte: i64 = 0
+        while byte < 4 {
+            value = (value << 8) |
+                sha256_digest_byte(&digest, (word * 4 + byte) as i32)
+            byte = byte + 1
+        }
+        words[word] = value
+        word = word + 1
+    }
+    XorDigest { words: words }
+}
+
+fn digest_contract(contract: &XorConvolutionContract) -> XorDigest
+    with Mut, Panic, Div, Epistemic {
+    var state = sha256_init()
+    state = digest_add_i64(state, contract.bits)
+    state = digest_add_i64(state, contract.dimension)
+    state = digest_add_i64(state, contract.vector_length)
+    state = digest_add_i64(state, contract.twist_identity)
+    state = digest_add_i64(state, contract.coefficient_domain)
+    state = digest_add_i64(state, contract.accumulation_order)
+    state = digest_add_bool(state, contract.valid)
+    state = digest_add_i64(state, contract.error)
+    digest_finish(state)
+}
+
+fn digest_inputs(
+    dimension: i64,
+    a: &[f64; 64],
+    b: &[f64; 64],
+) -> XorDigest with Mut, Panic, Div, Epistemic {
+    var state = sha256_init()
+    state = digest_add_i64(state, dimension)
+    var i: i64 = 0
+    while i < dimension {
+        state = digest_add_i64(state, f64_to_bits(a[i]))
+        state = digest_add_i64(state, f64_to_bits(b[i]))
+        i = i + 1
+    }
+    digest_finish(state)
+}
+
+fn digest_vector(dimension: i64, values: &[f64; 64]) -> XorDigest
+    with Mut, Panic, Div, Epistemic {
+    var state = sha256_init()
+    state = digest_add_i64(state, dimension)
+    var i: i64 = 0
+    while i < dimension {
+        state = digest_add_i64(state, f64_to_bits(values[i]))
+        i = i + 1
+    }
+    digest_finish(state)
+}
+
+fn digest_twist_table(contract: &XorConvolutionContract) -> XorDigest
+    with Mut, Panic, Div, Epistemic {
+    var state = sha256_init()
+    state = digest_add_i64(state, contract.dimension)
+    var i: i64 = 0
+    while i < contract.dimension {
+        var j: i64 = 0
+        while j < contract.dimension {
+            state = digest_add_i64(state, i)
+            state = digest_add_i64(state, j)
+            state = digest_add_i64(state, twist_value(contract, i, j))
+            j = j + 1
+        }
+        i = i + 1
+    }
+    digest_finish(state)
+}
+
+fn digest_properties(
+    contract: &XorConvolutionContract,
+    classification: &XorTwistClassification,
+) -> XorDigest with Mut, Panic, Div, Epistemic {
+    var state = sha256_init()
+    state = digest_add_i64(state, classification.plus_count)
+    state = digest_add_i64(state, classification.minus_count)
+    state = digest_add_i64(state, classification.zero_count)
+    state = digest_add_i64(state, classification.other_count)
+    state = digest_add_bool(state, classification.zero_free)
+    state = digest_add_bool(state, classification.normalized)
+    state = digest_add_bool(state, classification.displacement_only)
+    state = digest_add_bool(state, classification.rank_one_separable)
+    state = digest_add_bool(state, classification.left_square)
+    state = digest_add_bool(state, classification.group_two_cocycle)
+    state = digest_add_i64(state, classification.associator_defect_count)
+    var d: i64 = 0
+    while d < contract.dimension {
+        state = digest_add_i64(
+            state, classification.displacement_negative_counts[d])
+        d = d + 1
+    }
+    digest_finish(state)
+}
+
+fn digest_add_witness(
+    state: SHA256State,
+    item: &XorPredicateWitness,
+) -> SHA256State with Mut, Panic, Div {
+    var next = digest_add_bool(state, item.present)
+    next = digest_add_i64(next, item.i)
+    next = digest_add_i64(next, item.j)
+    next = digest_add_i64(next, item.k)
+    next = digest_add_i64(next, item.displacement)
+    next = digest_add_i64(next, item.lhs)
+    digest_add_i64(next, item.rhs)
+}
+
+fn digest_witnesses(classification: &XorTwistClassification) -> XorDigest
+    with Mut, Panic, Div, Epistemic {
+    var state = sha256_init()
+    state = digest_add_witness(state, &classification.zero_witness)
+    state = digest_add_witness(state, &classification.normalization_witness)
+    state = digest_add_witness(state, &classification.displacement_witness)
+    state = digest_add_witness(state, &classification.separability_witness)
+    state = digest_add_witness(state, &classification.left_square_witness)
+    state = digest_add_witness(
+        state, &classification.group_two_cocycle_witness)
+    digest_finish(state)
+}
+
+pub fn xor_digest_nonzero(digest: &XorDigest) -> bool {
+    var i: i64 = 0
+    while i < 8 {
+        if digest.words[i] != 0 { return true }
+        i = i + 1
+    }
+    false
+}
+
+pub fn xor_convolution_evaluate(bits: i64) -> XorConvolutionResult
+    with Mut, Panic, Div, Epistemic {
+    let contract = xor_convolution_cayley_dickson_contract(bits)
+    var a: [f64; 64] = [0.0; 64]
+    var b: [f64; 64] = [0.0; 64]
+    xor_convolution_generate_inputs(contract.dimension, &!a, &!b)
+    let direct = xor_convolution_direct(&contract, &a, &b)
+    let horizontal = xor_convolution_horizontal(&contract, &a, &b)
+    var direct_bits: [i64; 64] = [0; 64]
+    var horizontal_bits: [i64; 64] = [0; 64]
+    var mismatch_count: i64 = 0
+    var first_mismatch: i64 = 0 - 1
+    var max_abs_difference: f64 = 0.0
+    var d: i64 = 0
+    while d < contract.dimension {
+        direct_bits[d] = f64_to_bits(direct[d])
+        horizontal_bits[d] = f64_to_bits(horizontal[d])
+        let difference = abs_f64(direct[d] - horizontal[d])
+        if difference > max_abs_difference {
+            max_abs_difference = difference
+        }
+        if direct_bits[d] != horizontal_bits[d] {
+            mismatch_count = mismatch_count + 1
+            if first_mismatch < 0 { first_mismatch = d }
+        }
+        d = d + 1
+    }
+
+    let classification = classify_twist(&contract)
+    let negatives = exercise_negatives(&contract, &classification)
+    let contract_digest = digest_contract(&contract)
+    let input_digest = digest_inputs(contract.dimension, &a, &b)
+    let direct_digest = digest_vector(contract.dimension, &direct)
+    let horizontal_digest = digest_vector(contract.dimension, &horizontal)
+    let twist_table_digest = digest_twist_table(&contract)
+    let property_digest = digest_properties(&contract, &classification)
+    let witness_digest = digest_witnesses(&classification)
+
+    var failures: i64 = 0
+    if !contract.valid { failures = failures + 1 }
+    if mismatch_count != 0 { failures = failures + 1 }
+    if negatives.passed != negatives.total { failures = failures + 1 }
+    if !xor_digest_nonzero(&contract_digest) { failures = failures + 1 }
+    if !xor_digest_nonzero(&input_digest) { failures = failures + 1 }
+    if !xor_digest_nonzero(&direct_digest) { failures = failures + 1 }
+    if !xor_digest_nonzero(&horizontal_digest) { failures = failures + 1 }
+    if !xor_digest_nonzero(&twist_table_digest) { failures = failures + 1 }
+    if !xor_digest_nonzero(&property_digest) { failures = failures + 1 }
+    if !xor_digest_nonzero(&witness_digest) { failures = failures + 1 }
+
+    XorConvolutionResult {
+        contract: contract,
+        direct: direct,
+        horizontal: horizontal,
+        direct_bits: direct_bits,
+        horizontal_bits: horizontal_bits,
+        mismatch_count: mismatch_count,
+        first_mismatch: first_mismatch,
+        max_abs_difference: max_abs_difference,
+        classification: classification,
+        negatives: negatives,
+        contract_digest: contract_digest,
+        input_digest: input_digest,
+        direct_digest: direct_digest,
+        horizontal_digest: horizontal_digest,
+        twist_table_digest: twist_table_digest,
+        property_digest: property_digest,
+        witness_digest: witness_digest,
+        failures: failures,
+    }
+}
+
+fn digest_matches(digest: &XorDigest, expected: [i64; 8]) -> bool {
+    var i: i64 = 0
+    while i < 8 {
+        if digest.words[i] != expected[i] { return false }
+        i = i + 1
+    }
+    true
+}
+
+/// Byte-exact result predicate created only after the first Sounio execution.
+pub fn xor_convolution_matches_frozen_semantics(
+    result: &XorConvolutionResult,
+) -> bool {
+    if !result.contract.valid || result.contract.error != XOR_CONV_OK ||
+        result.contract.bits != 4 || result.contract.dimension != 16 ||
+        result.contract.vector_length != 16 ||
+        result.contract.twist_identity != XOR_TWIST_CAYLEY_DICKSON ||
+        result.contract.coefficient_domain != XOR_COEFFICIENT_SIGN ||
+        result.contract.accumulation_order != XOR_ACCUMULATION_ASCENDING_I ||
+        result.mismatch_count != 0 || result.first_mismatch != 0 - 1 ||
+        f64_to_bits(result.max_abs_difference) != 0 {
+        return false
+    }
+
+    let expected_bits: [i64; 16] = [
+        4613118981945187609,
+        0 - 4611510553506841004,
+        0 - 4614727410383534212,
+        0 - 4608966312158910915,
+        4604258003457569030,
+        0 - 4604813642372634225,
+        4612475610569848966,
+        4616423571282154268,
+        0 - 4600193066131565794,
+        4615458514219146306,
+        0 - 4606699890268513426,
+        0 - 4603058993167165201,
+        0 - 4605968786432901330,
+        0 - 4614201015621893512,
+        0 - 4608907823852061948,
+        0 - 4604608933298662840,
+    ]
+    let expected_negatives: [i64; 16] = [
+        15, 7, 7, 7, 7, 7, 7, 7,
+        7, 7, 7, 7, 7, 7, 7, 7,
+    ]
+    var d: i64 = 0
+    while d < 16 {
+        if result.direct_bits[d] != expected_bits[d] ||
+            result.horizontal_bits[d] != expected_bits[d] ||
+            result.classification.displacement_negative_counts[d] !=
+                expected_negatives[d] {
+            return false
+        }
+        d = d + 1
+    }
+
+    let class = &result.classification
+    if class.plus_count != 136 || class.minus_count != 120 ||
+        class.zero_count != 0 || class.other_count != 0 ||
+        !class.zero_free || !class.normalized || class.displacement_only ||
+        class.rank_one_separable || !class.left_square ||
+        class.group_two_cocycle || class.associator_defect_count != 1848 {
+        return false
+    }
+    if class.zero_witness.present || class.normalization_witness.present ||
+        class.left_square_witness.present {
+        return false
+    }
+    if !class.displacement_witness.present ||
+        class.displacement_witness.i != 1 ||
+        class.displacement_witness.j != 1 ||
+        class.displacement_witness.displacement != 0 ||
+        class.displacement_witness.lhs != 0 - 1 ||
+        class.displacement_witness.rhs != 1 {
+        return false
+    }
+    if !class.separability_witness.present ||
+        class.separability_witness.i != 1 ||
+        class.separability_witness.j != 1 ||
+        class.separability_witness.displacement != 0 ||
+        class.separability_witness.lhs != 0 - 1 ||
+        class.separability_witness.rhs != 1 {
+        return false
+    }
+    if !class.group_two_cocycle_witness.present ||
+        class.group_two_cocycle_witness.i != 1 ||
+        class.group_two_cocycle_witness.j != 2 ||
+        class.group_two_cocycle_witness.k != 4 ||
+        class.group_two_cocycle_witness.displacement != 7 ||
+        class.group_two_cocycle_witness.lhs != 1 ||
+        class.group_two_cocycle_witness.rhs != 0 - 1 {
+        return false
+    }
+    if result.negatives.passed != 20 || result.negatives.total != 20 ||
+        result.failures != 0 {
+        return false
+    }
+
+    digest_matches(&result.contract_digest,
+        [0x486ef520, 0xdf7669f3, 0x60be3c53, 0x1ea5fad2,
+         0x8e0e70ea, 0x793e6d53, 0xef6b9d34, 0xc1090856]) &&
+    digest_matches(&result.input_digest,
+        [0x4d4152b4, 0x88cb59c4, 0xe451af1d, 0x3255d077,
+         0xbd5c708c, 0x88aabf46, 0xfc334a47, 0x522c1039]) &&
+    digest_matches(&result.direct_digest,
+        [0x2aad13bb, 0x99d7f04f, 0xcc111603, 0x6ccdd2b4,
+         0x7abee50a, 0xba7c4d8e, 0xb2801c40, 0xe0c07b6c]) &&
+    digest_matches(&result.horizontal_digest,
+        [0x2aad13bb, 0x99d7f04f, 0xcc111603, 0x6ccdd2b4,
+         0x7abee50a, 0xba7c4d8e, 0xb2801c40, 0xe0c07b6c]) &&
+    digest_matches(&result.twist_table_digest,
+        [0x1c09a640, 0xd55cc98c, 0xfb9c51a5, 0x144dd28d,
+         0x1a0c5dd4, 0xff9e8fc4, 0xa7e9d7b1, 0x89cdc014]) &&
+    digest_matches(&result.property_digest,
+        [0xf24a6f2f, 0x6c8d0c3c, 0x77440f54, 0xd6c2e683,
+         0xba413c9e, 0x56d81a7f, 0x0aa08f1d, 0x84edf928]) &&
+    digest_matches(&result.witness_digest,
+        [0x42155cb1, 0xda7c3564, 0xbda5a83f, 0xc98d0204,
+         0x0200095e, 0xe54902bb, 0xe5c87f96, 0xe9e3e18e])
+}

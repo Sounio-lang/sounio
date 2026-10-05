@@ -9,6 +9,9 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 
 # Explicit Discharge
 
+
+Status: **executable**
+
 Concept-ID: `SOUNIO-EXPLICIT-DISCHARGE`
 
 ## Founder Intent
@@ -34,3 +37,10 @@ provenance, or status may be forgotten, but not silently at a semantic boundary.
 Precision reduction, projection, coarse-graining, measurement, and claim
 promotion require separately reviewed discharge protocols. They are not
 inferred automatically from the zero receipt.
+
+
+## Claims Forbidden
+
+- Do not claim clinical validity, ClinicalAuthority, or ClinicalRelease from this contract alone.
+- Do not claim compiler-wide integration or production cutover from fixture evidence alone.
+- Do not claim scientific truth or independent replay beyond the scoped witnesses bound in `bindings.tsv`.

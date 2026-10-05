@@ -1,0 +1,301 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+// End-to-end ontology pipeline demo — exercises the reusable stdlib
+//! modules packaged from the verified ontology-frontiers research line:
+//!
+//!   use ontology::elplus   — role-aware EL+ closure (dense 8-rule
+//!                            fixpoint) + EL+-derived conflict oracle
+//!   use ontology::repair   — greedy drop-weaker epistemic repair with
+//!                            (conf, id) tie-break + witness checks
+//!   use ontology::evolve   — guarded version-chain edits (add/remove)
+//!
+//! Pipeline: build a mini-EL+ TBox (8 atoms + top + one existential,
+//! with a part_of role layer) -> compute the role-aware EL+ closure ->
+//! DERIVE mapping conflicts from the TBox -> repair a 5-mapping
+//! alignment with confidences -> run a guarded version chain with one
+//! rejected edit and one repair-then-retry.
+//!
+//! ROUND 10: the closure + conflict phases moved from the atomic-only
+//! ontology::closure to the role-aware ontology::elplus (dense variant;
+//! executable mirror of crStep / closeSatF of
+//! formal/OntologyELPlusClosureComplete.lean, conflictBPlusC_iff).  The
+//! TBox extends the original mini-EL instance with:
+//!   heart <= ex part_of.organ ("organ-part", concept 9)
+//!   ex part_of.organ ⊥ drugclass   (non-atomic disjointness endpoint)
+//! The role layer yields a genuinely role-derived CONCEPT conflict —
+//! conflict(heart, drugclass) holds only through the interned
+//! existential (stoR + RtoS) and is invisible to the atomic closure —
+//! while the MAPPING-level derived conflicts stay exactly {m0-m1, m2-m3}
+//! (no asserted class reaches the existential), so the repair and
+//! evolution stages are unchanged.
+//!
+//! Formal companions (Lean 4, all verified): formal/OntologyELReasoner.lean,
+//! formal/OntologyELClosureVerified.lean, formal/OntologyELPlus.lean,
+//! formal/OntologyELPlusClosureComplete.lean,
+//! formal/OntologyAlignmentRepair.lean,
+//! formal/OntologyRepairEquivalence.lean, formal/OntologyRepairTies.lean,
+//! formal/OntologyEvolution.lean, formal/OntologyEvolutionRepair.lean,
+//! formal/OntologyMinimalRepair.lean.
+//!
+//! See artifacts/ontology-frontiers/TECHNICAL_NOTE.md for the full write-up.
+
+// NOTE: NAMED imports — the qualified form (`use ontology::elplus;
+// f(...)`) miscompiles on the current Madaros imported-module
+// native lane (see docs/compiler/KNOWN_LIMITATIONS.md).
+use ontology::elplus::{elplus_role_closure, elplus_seed, elplus_fixpoint, elplus_conflict, elplus_derive_conflicts}
+use ontology::repair::{greedy_repair, repair_is_conflict_free, repair_all_witnessed, repair_count_kept}
+use ontology::evolve::{version_consistent, guarded_add, remove_axiom}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var n_fail = 0
+
+    // ── Stage 1: mini-EL+ TBox (8 atoms + top + 1 existential) ─────────
+    // Atoms: 0 lymphokine, 1 protein, 2 molecule, 3 heart,
+    //        4 organ, 5 muscleonly, 6 drugclass, 7 gland
+    // 8 = top, 9 = ex part_of.organ.  Role 0 = part_of.
+    // Subsumptions: 0<=1, 1<=2, 3<=4.  Existential: 3 <= 9.
+    // Disjointness: (4,5), (1,6), (9,6) — the last has a non-atomic
+    // endpoint, only expressible over the interned EL+ universe.
+    var ckind: [i64; 64] = [0; 64]
+    var carg1: [i64; 64] = [0; 64]
+    var carg2: [i64; 64] = [0; 64]
+    var ci: i64 = 0
+    while ci < 8 {
+        ckind[ci] = 0
+        carg1[ci] = ci
+        ci = ci + 1
+    }
+    ckind[8] = 1
+    ckind[9] = 3
+    carg1[9] = 0
+    carg2[9] = 4
+
+    // exid[r*64+f] = interned id of ex r.(base f), or -1
+    var exid: [i64; 512] = [0; 512]
+    ci = 0
+    while ci < 512 {
+        exid[ci] = 0 - 1
+        ci = ci + 1
+    }
+    exid[0 * 64 + 4] = 9
+
+    // role-hierarchy closure (single role: reflexive only)
+    var rclos: [bool; 64] = [false; 64]
+    elplus_role_closure(&!rclos, 1)
+
+    // seed S: reflexivity + top + stated subsumptions + stated existential
+    var s: [bool; 4096] = [false; 4096]
+    elplus_seed(&!s, 10, 8)
+    s[0 * 64 + 1] = true
+    s[1 * 64 + 2] = true
+    s[3 * 64 + 4] = true
+    s[3 * 64 + 9] = true
+
+    // no composition chains on this instance
+    var ch1: [i64; 8] = [0; 8]
+    var ch2: [i64; 8] = [0; 8]
+    var ch3: [i64; 8] = [0; 8]
+
+    // dense 8-rule EL+ fixpoint (crStep mirror, iterated to stability)
+    var redges: [bool; 32768] = [false; 32768]
+    let rounds = elplus_fixpoint(&!s, &!redges, &ckind, &carg1, &carg2, &exid, &rclos, &ch1, &ch2, &ch3, 0, 10, 9, 1)
+
+    // Disjointness matrix (symmetric), incl. the non-atomic pair (9,6).
+    var disj: [bool; 4096] = [false; 4096]
+    disj[4 * 64 + 5] = true
+    disj[5 * 64 + 4] = true
+    disj[1 * 64 + 6] = true
+    disj[6 * 64 + 1] = true
+    disj[9 * 64 + 6] = true
+    disj[6 * 64 + 9] = true
+
+    // lymphokine reaches molecule transitively; heart does NOT reach drugclass.
+    if !s[0 * 64 + 2] {
+        println("FAIL: closure missing lymphokine <=* molecule")
+        n_fail = n_fail + 1
+    }
+    if s[3 * 64 + 6] {
+        println("FAIL: closure wrongly has heart <=* drugclass")
+        n_fail = n_fail + 1
+    }
+    // Reflexivity out of the box.
+    if !s[5 * 64 + 5] {
+        println("FAIL: closure not reflexive")
+        n_fail = n_fail + 1
+    }
+    // Role layer: heart subsumes the interned existential (RtoS), and the
+    // heart-vs-drugclass conflict is role-derived (atomic closure blind).
+    if !s[3 * 64 + 9] {
+        println("FAIL: role layer missing heart <= ex part_of.organ")
+        n_fail = n_fail + 1
+    }
+    if !elplus_conflict(&s, &disj, 10, 3, 6) {
+        println("FAIL: role-derived conflict(heart, drugclass) missing")
+        n_fail = n_fail + 1
+    }
+
+    // Count derived closure cells for the summary (10x10 universe):
+    // rows 4+3+2+4+2+2+2+2+1+2 = 24.
+    var n_edges: i64 = 0
+    var a: i64 = 0
+    while a < 10 {
+        var b: i64 = 0
+        while b < 10 {
+            if s[a * 64 + b] {
+                n_edges = n_edges + 1
+            }
+            b = b + 1
+        }
+        a = a + 1
+    }
+    if n_edges != 24 {
+        println("FAIL: expected 24 closure cells over the interned universe")
+        n_fail = n_fail + 1
+    }
+
+    // ── Stage 2: DERIVE the conflict oracle from the EL+ TBox ──────────
+    // 5 mappings (the shared instance of the research line):
+    //   m0: lymphokine under protein(1),    0.30
+    //   m1: lymphokine under drugclass(6),  0.06
+    //   m2: heart      under organ(4),      0.95
+    //   m3: heart      under muscleonly(5), 0.40
+    //   m4: protein    under molecule(2),   0.80
+    var ent: [i64; 256] = [0; 256]
+    ent[0] = 0
+    ent[1] = 0
+    ent[2] = 1
+    ent[3] = 1
+    ent[4] = 2
+
+    var cls: [i64; 256] = [0; 256]
+    cls[0] = 1
+    cls[1] = 6
+    cls[2] = 4
+    cls[3] = 5
+    cls[4] = 2
+
+    var conf: [f64; 256] = [0.0; 256]
+    conf[0] = 0.30
+    conf[1] = 0.06
+    conf[2] = 0.95
+    conf[3] = 0.40
+    conf[4] = 0.80
+
+    var conf_pair: [bool; 65536] = [false; 65536]
+    elplus_derive_conflicts(&!conf_pair, 5, &ent, &cls, &s, &disj, 10)
+
+    // Expected derived conflicts: exactly {0-1} and {2-3} (symmetric) —
+    // the role layer adds no MAPPING-level conflicts on this instance.
+    if !conf_pair[0 * 256 + 1] { println("FAIL: derived oracle misses 0-1"); n_fail = n_fail + 1 }
+    if !conf_pair[1 * 256 + 0] { println("FAIL: derived oracle misses 1-0"); n_fail = n_fail + 1 }
+    if !conf_pair[2 * 256 + 3] { println("FAIL: derived oracle misses 2-3"); n_fail = n_fail + 1 }
+    if !conf_pair[3 * 256 + 2] { println("FAIL: derived oracle misses 3-2"); n_fail = n_fail + 1 }
+    var n_conf: i64 = 0
+    var i: i64 = 0
+    while i < 5 {
+        var j: i64 = 0
+        while j < 5 {
+            if conf_pair[i * 256 + j] {
+                n_conf = n_conf + 1
+            }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    if n_conf != 4 {
+        println("FAIL: derived oracle has spurious conflicts")
+        n_fail = n_fail + 1
+    }
+
+    // ── Stage 3: greedy epistemic repair with the DERIVED oracle ──────
+    var keep: [bool; 256] = [true; 256]
+    greedy_repair(&!keep, &conf, &conf_pair, 5)
+
+    if !repair_is_conflict_free(&keep, &conf_pair, 5) {
+        println("FAIL: retained set still has a conflict")
+        n_fail = n_fail + 1
+    }
+    if !repair_all_witnessed(&keep, &conf, &conf_pair, 5) {
+        println("FAIL: dropped mapping lacks maximality witness")
+        n_fail = n_fail + 1
+    }
+    // Expected survivors: m0 (0.30 > 0.06), m2 (0.95 > 0.40), m4 (free).
+    if !keep[0] { println("FAIL: m0 should survive"); n_fail = n_fail + 1 }
+    if keep[1]  { println("FAIL: m1 should be dropped"); n_fail = n_fail + 1 }
+    if !keep[2] { println("FAIL: m2 should survive"); n_fail = n_fail + 1 }
+    if keep[3]  { println("FAIL: m3 should be dropped"); n_fail = n_fail + 1 }
+    if !keep[4] { println("FAIL: m4 should survive"); n_fail = n_fail + 1 }
+    let n_kept = repair_count_kept(&keep, 5)
+    if n_kept != 3 {
+        println("FAIL: expected 3 survivors after repair")
+        n_fail = n_fail + 1
+    }
+
+    // ── Stage 4: guarded version chain (add/remove) ───────────────────
+    // Axiom conflict oracle: the only incoherent pair is (2, 4).
+    var ax_conf: [bool; 4096] = [false; 4096]
+    ax_conf[2 * 64 + 4] = true
+    ax_conf[4 * 64 + 2] = true
+
+    var active: [bool; 64] = [false; 64]
+    var n_versions: i64 = 1  // the initial empty version
+    var n_rejected: i64 = 0
+    var n_removed: i64 = 0
+
+    // Edit script: add 1, add 2, add 3, add 4 (rejected), remove 2,
+    // add 4 (accepted after repair-then-retry).
+    var kind: [i64; 6] = [0; 6]
+    kind[4] = 1
+    var axiom: [i64; 6] = [0; 6]
+    axiom[0] = 1
+    axiom[1] = 2
+    axiom[2] = 3
+    axiom[3] = 4
+    axiom[4] = 2
+    axiom[5] = 4
+
+    var e: i64 = 0
+    while e < 6 {
+        if kind[e] == 0 {
+            let applied = guarded_add(&!active, &ax_conf, axiom[e])
+            if !applied {
+                n_rejected = n_rejected + 1
+            }
+        } else {
+            if remove_axiom(&!active, axiom[e]) {
+                n_removed = n_removed + 1
+            }
+        }
+        n_versions = n_versions + 1
+        // A priori invariant: EVERY version of the chain is consistent.
+        if !version_consistent(&active, &ax_conf, 64) {
+            println("FAIL: inconsistent version produced")
+            n_fail = n_fail + 1
+        }
+        e = e + 1
+    }
+
+    // Final version: exactly {1, 3, 4} active.
+    if !active[1] { println("FAIL: axiom 1 missing"); n_fail = n_fail + 1 }
+    if active[2]  { println("FAIL: axiom 2 should be removed"); n_fail = n_fail + 1 }
+    if !active[3] { println("FAIL: axiom 3 missing"); n_fail = n_fail + 1 }
+    if !active[4] { println("FAIL: axiom 4 should be accepted after repair"); n_fail = n_fail + 1 }
+    if n_rejected != 1 { println("FAIL: expected exactly 1 rejection"); n_fail = n_fail + 1 }
+    if n_removed != 1 { println("FAIL: expected exactly 1 removal"); n_fail = n_fail + 1 }
+    if n_versions != 7 { println("FAIL: expected 7 versions"); n_fail = n_fail + 1 }
+
+    // ── Summary ───────────────────────────────────────────────────────
+    println("closure: EL+ role-aware (10 concepts, 1 role) -> 24 closure cells")
+    println("role layer: heart <= ex part_of.organ; conflict(heart, drugclass) role-derived")
+    println("derived conflicts: 2 pairs {m0-m1, m2-m3} from TBox (not hardcoded)")
+    println("repair: kept 3 of 5 mappings {m0, m2, m4}, conflict-free + witnessed")
+    println("evolution: 7 versions, 1 edit rejected, 1 removal, final {1,3,4} consistent")
+
+    if n_fail == 0 {
+        println("ALL PASS")
+        return 0
+    }
+    println("FAILURES:")
+    println(n_fail)
+    return 1
+}

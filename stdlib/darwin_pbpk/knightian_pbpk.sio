@@ -1,0 +1,305 @@
+// darwin_pbpk/knightian_pbpk.sio — Knightian Pharmacometrics layer (P1).
+//
+// Imprecise-probability PBPK: every clinical claim ships as a probability
+// box (p-box), not a Gaussian U95. Aleatory scatter (variance) and
+// epistemic ignorance (mean band width) are kept SEPARATE — treating an
+// epistemic interval as a Gaussian manufactures precision out of
+// ignorance (category error; see stdlib/epistemic/pbox.sio docs).
+//
+// This is the FIRST imprecise-probability layer in pharmacometrics
+// (scholar search "imprecise probability p-box pharmacokinetic PBPK"
+// returned EMPTY_DATA, 2026-08-13; adjacent prior art only in
+// environmental risk: Montgomery & Coolen 2009 Bayesian p-boxes).
+//
+// Self-contained vendored subset of stdlib/epistemic/{knightian,knowledge}
+// — the epistemic:: namespace does NOT import on the 2026-08-11 Madaros
+// toolchain (segfault) nor under lean_single (rc=1, silent): issue #1715
+// bug #4. Vendoring here keeps darwin_pbpk compilable in BOTH engines.
+//
+// RUNTIME NOTE (issue #1715 bug #5): on the 2026-08-11 Madaros toolchain,
+// a pub fn that CALLS another fn of the same module compiles and links
+// cleanly but the ELF segfaults at runtime when the caller is in ANOTHER
+// module (thin-link runtime variant of bug #1; lean_single is correct).
+// Therefore every pub fn below is deliberately FLATTENED — a leaf with no
+// fn-to-fn calls (structs passed by value, per the occupancy module
+// pattern). The small helpers (kb_min/kb_max/...) are exported for
+// convenience but are never called from within this module. The chained
+// (readable) versions live in tests/run-pass/test_knightian_pbpk.sio,
+// which is self-contained and passes in BOTH engines.
+//
+// Two propagation modes, cross-validated:
+//   (a) ANALYTIC epistemic chain: typed p-box arithmetic through algebraic
+//       PK relations (e.g. Css = rate / CL) — conservative bands.
+//   (b) NUMERIC corner wrapping: evaluate the full PBPK28 kernel at the
+//       epistemic corners (EXACT bounds when the response is monotone in
+//       the parameter — monotonicity verified by kb_check_monotone) and
+//       wrap into a typed p-box with provenance + confidence.
+// Containment contract: (b) corners must sit INSIDE (a) band; if not, the
+// analytic chain was overconfident and the claim is downgraded.
+//
+// Confidence scale: i64 0..1000 (per mille), decaying on every composed
+// operation (Knightian honesty: chains of ignorance lose trust).
+//
+// Study: Agourakis DC (2026) — Phase P1, "Knightian Pharmacometrics".
+
+// ============================================================================
+// P-BOX CORE (vendored subset; Gaussian p-box = mean band + shared variance)
+// ============================================================================
+
+pub struct KPBox {
+    lo_mean: f64,
+    hi_mean: f64,
+    variance: f64,
+    confidence: i64,   // 0..1000 per mille
+    provenance: i64,   // KB_PROV_* code (audit trail)
+}
+
+pub let KB_PROV_LITERATURE: i64 = 1
+pub let KB_PROV_KERNEL_CORNERS: i64 = 2
+pub let KB_PROV_ANALYTIC_CHAIN: i64 = 3
+pub let KB_PROV_COMPOSED: i64 = 4
+pub let KB_PROV_VACUOUS: i64 = 0
+
+// Leaf helpers (exported for callers; never used inside this module — see
+// RUNTIME NOTE above).
+pub fn kb_min(a: f64, b: f64) -> f64 { if a < b { a } else { b } }
+pub fn kb_max(a: f64, b: f64) -> f64 { if a < b { b } else { a } }
+pub fn kb_min_i64(a: i64, b: i64) -> i64 { if a < b { a } else { b } }
+pub fn kb_clamp_conf(c: i64) -> i64 {
+    if c < 0 { return 0 }
+    if c > 1000 { return 1000 }
+    return c
+}
+pub fn kb_decay(c: i64) -> i64 {
+    // each composed operation costs ~2 per mille of trust (floor 0)
+    let d = c - 2
+    if d < 0 { return 0 }
+    return d
+}
+
+pub fn kb_new(lo_mean: f64, hi_mean: f64, variance: f64, confidence: i64, prov: i64) -> KPBox {
+    let lo = if lo_mean < hi_mean { lo_mean } else { hi_mean }
+    let hi = if lo_mean < hi_mean { hi_mean } else { lo_mean }
+    let c0 = if confidence < 0 { 0 } else { confidence }
+    let conf = if c0 > 1000 { 1000 } else { c0 }
+    KPBox { lo_mean: lo, hi_mean: hi, variance: variance, confidence: conf, provenance: prov }
+}
+pub fn kb_certain(v: f64, prov: i64) -> KPBox {
+    KPBox { lo_mean: v, hi_mean: v, variance: 0.0, confidence: 1000, provenance: prov }
+}
+pub fn kb_vacuous() -> KPBox {
+    KPBox { lo_mean: 0.0 - 1.0e300, hi_mean: 1.0e300, variance: 1.0e300, confidence: 0, provenance: 0 }
+}
+pub fn kb_midpoint(p: KPBox) -> f64 { 0.5 * (p.lo_mean + p.hi_mean) }
+pub fn kb_gap(p: KPBox) -> f64 { p.hi_mean - p.lo_mean }
+pub fn kb_confidence(p: KPBox) -> i64 { p.confidence }
+pub fn kb_provenance(p: KPBox) -> i64 { p.provenance }
+
+// Multiplication: exact corner bounds + linear variance propagation.
+pub fn kb_mul_corners_lo(a: KPBox, b: KPBox) -> f64 with Mut {
+    let c1 = a.lo_mean * b.lo_mean
+    let c2 = a.lo_mean * b.hi_mean
+    let c3 = a.hi_mean * b.lo_mean
+    let c4 = a.hi_mean * b.hi_mean
+    var m = c1
+    if c2 < m { m = c2 }
+    if c3 < m { m = c3 }
+    if c4 < m { m = c4 }
+    return m
+}
+pub fn kb_mul_corners_hi(a: KPBox, b: KPBox) -> f64 with Mut {
+    let c1 = a.lo_mean * b.lo_mean
+    let c2 = a.lo_mean * b.hi_mean
+    let c3 = a.hi_mean * b.lo_mean
+    let c4 = a.hi_mean * b.hi_mean
+    var m = c1
+    if c2 > m { m = c2 }
+    if c3 > m { m = c3 }
+    if c4 > m { m = c4 }
+    return m
+}
+pub fn kb_mul(a: KPBox, b: KPBox) -> KPBox with Mut {
+    let am = 0.5 * (a.lo_mean + a.hi_mean)
+    let bm = 0.5 * (b.lo_mean + b.hi_mean)
+    let c1 = a.lo_mean * b.lo_mean
+    let c2 = a.lo_mean * b.hi_mean
+    let c3 = a.hi_mean * b.lo_mean
+    let c4 = a.hi_mean * b.hi_mean
+    var lo = c1
+    if c2 < lo { lo = c2 }
+    if c3 < lo { lo = c3 }
+    if c4 < lo { lo = c4 }
+    var hi = c1
+    if c2 > hi { hi = c2 }
+    if c3 > hi { hi = c3 }
+    if c4 > hi { hi = c4 }
+    var conf = a.confidence
+    if b.confidence < conf { conf = b.confidence }
+    conf = conf - 2
+    if conf < 0 { conf = 0 }
+    KPBox {
+        lo_mean: lo,
+        hi_mean: hi,
+        variance: bm * bm * a.variance + am * am * b.variance + a.variance * b.variance,
+        confidence: conf,
+        provenance: 4,
+    }
+}
+// Division: vacuous if denominator straddles zero (honest refusal).
+pub fn kb_div(a: KPBox, b: KPBox) -> KPBox with Mut {
+    if b.lo_mean <= 0.0 && b.hi_mean >= 0.0 {
+        return KPBox { lo_mean: 0.0 - 1.0e300, hi_mean: 1.0e300, variance: 1.0e300, confidence: 0, provenance: 0 }
+    }
+    let r_lo = 1.0 / b.hi_mean
+    let r_hi = 1.0 / b.lo_mean
+    let rec_lo = if r_lo < r_hi { r_lo } else { r_hi }
+    let rec_hi = if r_lo < r_hi { r_hi } else { r_lo }
+    // inline mul(a, recip)
+    let am = 0.5 * (a.lo_mean + a.hi_mean)
+    let bm = 0.5 * (rec_lo + rec_hi)
+    let c1 = a.lo_mean * rec_lo
+    let c2 = a.lo_mean * rec_hi
+    let c3 = a.hi_mean * rec_lo
+    let c4 = a.hi_mean * rec_hi
+    var lo = c1
+    if c2 < lo { lo = c2 }
+    if c3 < lo { lo = c3 }
+    if c4 < lo { lo = c4 }
+    var hi = c1
+    if c2 > hi { hi = c2 }
+    if c3 > hi { hi = c3 }
+    if c4 > hi { hi = c4 }
+    var conf = a.confidence
+    if b.confidence < conf { conf = b.confidence }
+    conf = conf - 2
+    if conf < 0 { conf = 0 }
+    let rec_var = b.variance / (b.lo_mean * b.lo_mean * b.hi_mean * b.hi_mean)
+    KPBox {
+        lo_mean: lo,
+        hi_mean: hi,
+        variance: bm * bm * a.variance + am * am * rec_var + a.variance * rec_var,
+        confidence: conf,
+        provenance: 4,
+    }
+}
+pub fn kb_scale(a: KPBox, c: f64) -> KPBox {
+    if c >= 0.0 {
+        KPBox { lo_mean: c * a.lo_mean, hi_mean: c * a.hi_mean,
+                variance: c * c * a.variance, confidence: a.confidence,
+                provenance: a.provenance }
+    } else {
+        KPBox { lo_mean: c * a.hi_mean, hi_mean: c * a.lo_mean,
+                variance: c * c * a.variance, confidence: a.confidence,
+                provenance: a.provenance }
+    }
+}
+
+// ============================================================================
+// PBPK-SPECIFIC KNIGHTIAN OPERATIONS
+// ============================================================================
+
+// Epistemic band from a relative CV and an epistemic corner half-width:
+//   mean band = [v*(1-e), v*(1+e)]  (Knightian ignorance, NOT Gaussian)
+//   variance  = (v*cv)^2            (aleatory BSV, e.g. Potts 35.1%)
+pub fn kb_from_cv(v: f64, cv: f64, epistemic_half_width: f64, confidence: i64, prov: i64) -> KPBox {
+    let c0 = if confidence < 0 { 0 } else { confidence }
+    let conf = if c0 > 1000 { 1000 } else { c0 }
+    KPBox {
+        lo_mean: v * (1.0 - epistemic_half_width),
+        hi_mean: v * (1.0 + epistemic_half_width),
+        variance: v * v * cv * cv,
+        confidence: conf,
+        provenance: prov,
+    }
+}
+
+// Steady-state concentration chain: Css = rate / CL (typed). Flattened
+// inline of kb_div(kb_certain(rate), cl) — see RUNTIME NOTE.
+pub fn kb_css(rate_mgh: f64, cl: KPBox) -> KPBox with Mut {
+    if cl.lo_mean <= 0.0 && cl.hi_mean >= 0.0 {
+        return KPBox { lo_mean: 0.0 - 1.0e300, hi_mean: 1.0e300, variance: 1.0e300, confidence: 0, provenance: 0 }
+    }
+    let r_lo = 1.0 / cl.hi_mean
+    let r_hi = 1.0 / cl.lo_mean
+    let rec_lo = if r_lo < r_hi { r_lo } else { r_hi }
+    let rec_hi = if r_lo < r_hi { r_hi } else { r_lo }
+    // a = kb_certain(rate_mgh): lo=hi=rate, var=0, conf=1000
+    let bm = 0.5 * (rec_lo + rec_hi)
+    let c1 = rate_mgh * rec_lo
+    let c2 = rate_mgh * rec_hi
+    var lo = c1
+    if c2 < lo { lo = c2 }
+    var hi = c1
+    if c2 > hi { hi = c2 }
+    var conf = 1000
+    if cl.confidence < conf { conf = cl.confidence }
+    conf = conf - 2
+    if conf < 0 { conf = 0 }
+    let rec_var = cl.variance / (cl.lo_mean * cl.lo_mean * cl.hi_mean * cl.hi_mean)
+    KPBox {
+        lo_mean: lo,
+        hi_mean: hi,
+        variance: bm * bm * 0.0 + rate_mgh * rate_mgh * rec_var + 0.0 * rec_var,
+        confidence: conf,
+        provenance: 4,
+    }
+}
+
+// Monotonicity verification for mode (b): caller supplies kernel responses
+// at the two epistemic corners; returns 1 if monotone (corner bounds EXACT),
+// 0 if not (claim must be downgraded — corner bounds not guaranteed).
+pub fn kb_check_monotone(y_lo_corner: f64, y_hi_corner: f64) -> i64 {
+    if y_lo_corner <= y_hi_corner { return 1 }
+    return 0
+}
+
+// Wrap numeric kernel corners into a typed p-box (mode b). Flattened inline
+// of kb_new — see RUNTIME NOTE.
+pub fn kb_wrap_corners(y_lo: f64, y_hi: f64, variance: f64, confidence: i64) -> KPBox {
+    let lo = if y_lo < y_hi { y_lo } else { y_hi }
+    let hi = if y_lo < y_hi { y_hi } else { y_lo }
+    let c0 = if confidence < 0 { 0 } else { confidence }
+    let conf = if c0 > 1000 { 1000 } else { c0 }
+    KPBox { lo_mean: lo, hi_mean: hi, variance: variance, confidence: conf, provenance: 2 }
+}
+
+// Containment contract: numeric corners (b) inside analytic band (a)?
+// Returns 1 if contained (honest cross-validation), 0 if violated.
+pub fn kb_contains(inner: KPBox, outer: KPBox) -> i64 {
+    if inner.lo_mean >= outer.lo_mean && inner.hi_mean <= outer.hi_mean { return 1 }
+    return 0
+}
+
+// Does the p-box guarantee a clinical threshold with Knightian certainty?
+// (the p-box lower bound clears the target — the E4c-style claim)
+pub fn kb_guarantees(p: KPBox, threshold: f64) -> i64 {
+    if p.lo_mean >= threshold { return 1 }
+    return 0
+}
+
+// ============================================================================
+// TESTS (self-contained chains; run under `souc test` in lean_single)
+// ============================================================================
+
+fn test_kb_mul_corners() -> bool with Mut {
+    let a = kb_new(2.0, 3.0, 0.01, 900, 1)
+    let b = kb_new(4.0, 5.0, 0.01, 900, 1)
+    let c = kb_mul(a, b)
+    return c.lo_mean == 8.0 && c.hi_mean == 15.0
+}
+fn test_kb_div_vacuous() -> bool with Mut {
+    let a = kb_certain(1.0, 1)
+    let b = kb_new(0.0 - 1.0, 1.0, 0.1, 900, 1)
+    let c = kb_div(a, b)
+    return c.confidence == 0
+}
+fn test_kb_confidence_decays() -> bool with Mut {
+    let a = kb_new(1.0, 2.0, 0.01, 900, 1)
+    let b = kb_mul(a, a)
+    return b.confidence < a.confidence
+}
+fn test_kb_containment() -> bool {
+    let inner = kb_new(3.0, 7.0, 0.1, 900, 2)
+    let outer = kb_new(2.0, 8.0, 0.1, 900, 3)
+    return kb_contains(inner, outer) == 1
+}

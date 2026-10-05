@@ -7,14 +7,17 @@ canonical secondary value the bracketing could not. This rung settles it at ever
 
   Z1  The stabiliser of a single ZD b (its 4-dim fibre AS A SUBSPACE) inside the lifted
       PSL(2,7) is TRIVIAL -- so there is no group to average a single quotient Q over.
-  Z2  The right group is the LINE-stabiliser S4 (order 24), which acts on the 8-dim
-      support-class and permutes its 6 fibres.
-  Z3  The class-level secondary span (the 6-dim space spanned by (x*y)*b over the 6 ZD b of
-      the class and x,y in F(b)) contains NO S4-invariant vector: dim(K ∩ span) = 0 for all
-      7 classes, where K is the 2-dim ambient S4-invariant space. (Those ambient invariants
-      are exactly the two structural units e0 and e8=l, and they lie in the COMPLEMENT of
-      the secondary span, not in it -- a subtlety that flipped an early buggy computation.)
-  Z4  Therefore the ord-3 secondary operation is an invariant-free S4-module. No canonical
+  Z2  The acting line-stabiliser is the SIGNED-octonion-automorphism group of ORDER 192 =
+      (Z2)^3 x S4 (CORRECTION 2026-07-26: NOT the abstract S4 of order 24 -- the 24
+      collineation-reps are a transversal that generates the order-192 group; it sits in the
+      full signed-automorphism group of O of order 1344 = 8 x 168 = (Z2)^3 : PSL(2,7)). It
+      acts on the 8-dim support-class and permutes its 6 fibres.
+  Z3  The class-level secondary span (spanned by (x*y)*b over the 6 ZD b of the class and
+      x,y in F(b)) contains NO invariant vector: dim(K ∩ span) = 0 for all 7 classes, where K
+      is the 2-dim ambient invariant space. (Those ambient invariants are exactly the two
+      structural units e0 and e8=l, and they lie in the COMPLEMENT of the secondary span, not
+      in it -- a subtlety that flipped an early buggy computation.)
+  Z4  Therefore the ord-3 secondary operation is an invariant-free module. No canonical
       scalar value can exist -- at bare-algebra, single-fibre, OR class-symmetry level --
       because the module has no invariant line. NO_CANONICAL_FILL is EXPLAINED (forced by
       representation theory), not merely unachieved. The canonical object is the module
@@ -151,12 +154,19 @@ def main():
     def rank(*blocks):
         return np.linalg.matrix_rank(np.vstack(blocks), tol=TOL)
 
-    # Z2/Z3 — every class: S4 order 24; the class-level secondary span (row space of the
-    # (x*y)*b composites) contains NO S4-invariant vector at all.
+    # Z2/Z3 — every class: the acting group's class-level secondary span (row space of the
+    # (x*y)*b composites) contains NO invariant vector at all.
+    # CORRECTION (2026-07-26): the acting group is NOT the abstract S4 (order 24). The 24
+    # collineation-reps below are a TRANSVERSAL; the group they generate (the signed-octonion-
+    # automorphism line-stabiliser) has order 192 = (Z2)^3 x S4, sitting in the full signed-
+    # automorphism group of O of order 1344 = 8 x 168 = (Z2)^3 : PSL(2,7). The invariant test
+    # is via the common-kernel of the generating set (Z3), which computes the GENERATED group's
+    # invariants -- robust to the exact order -- so the invariant-free result is unaffected;
+    # only the earlier 'S4 order 24' label was wrong.
     z2 = True; z3 = True
     worst_inter = 0
     for L, members in byline.items():
-        S4 = [lift(g) for (g, pi) in autos if set(pi[p] for p in L) == L]
+        S4 = [lift(g) for (g, pi) in autos if set(pi[p] for p in L) == L]   # 24 collineation-reps (transversal)
         if len(S4) != 24 or len(members) != 6:
             z2 = False
         W = []
@@ -173,25 +183,49 @@ def main():
         worst_inter = max(worst_inter, inter)
         if inter != 0:
             z3 = False
-    print(f"Z2_CLASS_S4 every class: |S4 line-stab|=24, 6 ZD/class {'PASS' if z2 else 'FAIL'}")
-    print(f"Z3_NO_S4_INVARIANT_IN_SPAN all 7 classes: dim(S4-invariants ∩ secondary span) = "
+    # verify the CORRECTED group order: the 24 line-fixing collineation-reps generate a group
+    # of order 192 (not 24); the full signed-auto group of O has order 1344 = 8 x 168.
+    def _key(M):
+        return tuple(np.round(M, 4).ravel())
+    L0 = sorted(byline.keys(), key=lambda s: sorted(s))[0]
+    gens = [lift(g) for (g, pi) in autos if set(pi[p] for p in L0) == L0]
+    G = {_key(np.eye(16)): np.eye(16)}; frontier = list(G.values())
+    while frontier:
+        nxt = []
+        for a in frontier:
+            for g in gens:
+                p = a @ g; k = _key(p)
+                if k not in G:
+                    G[k] = p; nxt.append(p)
+        frontier = nxt
+        if len(G) > 400:
+            break
+    gen_order = len(G)
+    z2 = z2 and (gen_order == 192)
+    print(f"Z2_ACTING_GROUP 24 collineation-reps/class (transversal) GENERATE a group of order "
+          f"{gen_order} = (Z2)^3 x S4 (NOT the abstract S4=24; correction); 6 ZD/class "
+          f"{'PASS' if z2 else 'FAIL'}")
+    print(f"Z3_NO_INVARIANT_IN_SPAN all 7 classes: dim(order-192-group-invariants ∩ secondary span) = "
           f"{worst_inter} (0 => no S4-invariant secondary vector; the ambient invariants e0,e8 lie in the "
           f"complement, not the span) {'PASS' if z3 else 'FAIL'}")
 
     # Z4 — conclusion
     z4 = z1 and z2 and z3
-    print(f"Z4_NO_GENUINE_FILL the ord-3 secondary op is an invariant-free S4-module => no canonical "
+    print(f"Z4_NO_GENUINE_FILL the ord-3 secondary op is an invariant-free module (under the order-192 group) => no canonical "
           f"secondary value at any level {'PASS' if z4 else 'FAIL'}")
 
     print("=" * 70)
     if core and z1 and z2 and z3 and z4:
         print("FUNCTOR_F_ORD3SYM_VERDICT NO_INVARIANT_FILL")
-        print("FUNCTOR_F_ORD3SYM_NOTE single-fibre stabiliser trivial; line-stabiliser S4 (order 24) has "
-              "NO invariant vector in the class-level secondary span (dim(K ∩ span)=0, all 7 classes; the "
-              "ambient S4-invariants e0,e8 lie in the complement, not in the secondary content); so the "
-              "ord-3 secondary op is an invariant-free S4-module -> NO_CANONICAL_FILL holds at bare-algebra, "
-              "single-fibre AND class-symmetry level, forced by rep theory (no invariant line to select a "
-              "value); the canonical object is the module, not a value; operational, D3 respected")
+        print("FUNCTOR_F_ORD3SYM_NOTE single-fibre stabiliser trivial; the acting line-stabiliser is the "
+              "SIGNED-octonion-automorphism group of ORDER 192 = (Z2)^3 x S4 (CORRECTION: not the abstract "
+              "S4=24; it sits in the full signed-auto group of O, order 1344 = 8 x 168 = (Z2)^3:PSL(2,7)); "
+              "it has NO invariant vector in the class-level secondary span (dim(K ∩ span)=0, all 7 classes; "
+              "the ambient invariants e0,e8 lie in the complement) -> the ord-3 secondary op is an "
+              "invariant-free module -> NO_CANONICAL_FILL holds at bare-algebra, single-fibre AND class-"
+              "symmetry level (rep-theoretic). The invariant test uses the generating-set common-kernel, "
+              "robust to the exact group order, so the result is unaffected by the corrected group id; "
+              "operational, D3 respected")
         return 0
     print("FUNCTOR_F_ORD3SYM_VERDICT INCOMPLETE")
     return 1

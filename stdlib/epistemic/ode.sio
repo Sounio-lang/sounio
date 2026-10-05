@@ -11,7 +11,9 @@
 //
 // Usage:
 //   1. Create an ODESystem with a system_id
-//   2. Register your RHS by adding a branch in ode_rhs_dispatch
+//   2. Register your RHS by adding a branch in ode_rhs_dispatch, and the parameter range it reads
+//      in ode_system_params_present and its dimension in ode_system_canonical_dims (an id with no
+//      entry is rejected as invalid input)
 //   3. Call solve_ode() or solve_ode_adaptive()
 //
 // Built-in systems:
@@ -19,8 +21,19 @@
 //   SYSTEM_PBPK_14    (2) — 14-compartment PBPK (rapamycin/CYP3A4)
 //   SYSTEM_LINEAR_2   (3) — generic 2-compartment linear PK
 //   SYSTEM_LINEAR_3   (4) — generic 3-compartment linear PK
+//   SYSTEM_CHEM_SIMPLE (5) — A->B, B->C, A+B->D mass-action network
+//   SYSTEM_PBPK_CLEARANCE (6) — Drug->M1 (k1), M1->M2 (k2), M1->cleared (k3); linear, first order,
+//                               state [Drug, M1, M2, Cleared]. NOT system 5: there k3 is the
+//                               bimolecular Drug + M1 -> D. Pick the id that matches the model.
 //
-// User-defined systems: IDs 100+. Add branches to ode_rhs_dispatch.
+// User-defined systems: IDs 100+. This is a SOURCE-EDITING extension: there is no runtime
+// registration, so ode_system_new(100, n) alone (from outside this file) does not work -- it is
+// rejected the same as any other unregistered id (see step 2 above). To actually add one, edit
+// this file and update all three tables step 2 lists: ode_rhs_dispatch (the right-hand side),
+// ode_system_params_present (the parameter range it reads), and ode_system_canonical_dims (its
+// dimension). Missing any one of the three still gets a working-looking id that is invalid input
+// (status 3) for a subtly different reason (e.g. a registered dispatch with no canonical
+// dimension is rejected by ode_system_dims_ok before dispatch ever runs).
 //
 // Reference: GUM (JCGM 100:2008) §5.1.2 — law of propagation of uncertainty
 
@@ -75,7 +88,7 @@ struct EState {
     n: i64,
 }
 
-fn estate_new(n: i64) -> EState {
+pub fn estate_new(n: i64) -> EState {
     EState {
         values: [0.0; 64],
         variances: [0.0; 64],
@@ -83,7 +96,7 @@ fn estate_new(n: i64) -> EState {
     }
 }
 
-fn estate_set(s: &!EState, idx: i64, val: f64, var_: f64) with Mut {
+pub fn estate_set(s: &!EState, idx: i64, val: f64, var_: f64) with Mut {
     if idx >= 0 && idx < 64 {
         s.values[idx] = val
         s.variances[idx] = var_
@@ -136,21 +149,27 @@ fn estate_axpy(dst: &!EState, a: &EState, scale: f64, b: &EState) with Mut, Div,
 struct ODEParams {
     params: [f64; 64],
     param_variances: [f64; 64],
+    // n_params is the HIGHEST set index + 1, so it cannot tell a parameter that was never set from
+    // one deliberately set to 0.0 (setting only index 2 gives n_params = 3 and leaves 0 and 1
+    // silently zero). param_set[i] = 1 records that slot i was set.
+    param_set: [i64; 64],
     n_params: i64,
 }
 
-fn ode_params_new() -> ODEParams {
+pub fn ode_params_new() -> ODEParams {
     ODEParams {
         params: [0.0; 64],
         param_variances: [0.0; 64],
+        param_set: [0; 64],
         n_params: 0,
     }
 }
 
-fn ode_params_set(p: &!ODEParams, idx: i64, val: f64, var_: f64) with Mut {
+pub fn ode_params_set(p: &!ODEParams, idx: i64, val: f64, var_: f64) with Mut {
     if idx >= 0 && idx < 64 {
         p.params[idx] = val
         p.param_variances[idx] = var_
+        p.param_set[idx] = 1
         if idx >= p.n_params { p.n_params = idx + 1 }
     }
 }
@@ -172,6 +191,8 @@ fn ode_params_get_variance(p: &ODEParams, idx: i64) -> f64 {
 // SYSTEM_PBPK_14    = 2
 // SYSTEM_LINEAR_2   = 3
 // SYSTEM_LINEAR_3   = 4
+// SYSTEM_CHEM_SIMPLE = 5
+// SYSTEM_PBPK_CLEARANCE = 6
 // User-defined: 100+
 
 struct ODESystem {
@@ -179,18 +200,24 @@ struct ODESystem {
     n_dims: i64,
 }
 
-fn ode_system_new(system_id: i64, n_dims: i64) -> ODESystem {
+// Public so an id with no registered right-hand side / dimension / parameter range can be shown
+// to be rejected (an unregistered id, including any id 100+ that has not ALSO been added to
+// ode_rhs_dispatch, ode_system_canonical_dims and ode_system_params_present in this file's own
+// source -- see the header) rather than only constructible privately, where "it never compiles"
+// would stand in for "it is rejected at runtime". It accepts ANY (id, n_dims) pair; the solvers
+// reject a dimension that is not the built-in's own.
+pub fn ode_system_new(system_id: i64, n_dims: i64) -> ODESystem {
     ODESystem {
         system_id: system_id,
         n_dims: n_dims,
     }
 }
 
-fn ode_system_exp_decay() -> ODESystem {
+pub fn ode_system_exp_decay() -> ODESystem {
     ODESystem { system_id: 1, n_dims: 1 }
 }
 
-fn ode_system_pbpk_14() -> ODESystem {
+pub fn ode_system_pbpk_14() -> ODESystem {
     ODESystem { system_id: 2, n_dims: 14 }
 }
 
@@ -202,8 +229,12 @@ fn ode_system_linear_3() -> ODESystem {
     ODESystem { system_id: 4, n_dims: 3 }
 }
 
-fn ode_system_chem_simple() -> ODESystem {
+pub fn ode_system_chem_simple() -> ODESystem {
     ODESystem { system_id: 5, n_dims: 4 }
+}
+
+pub fn ode_system_pbpk_clearance() -> ODESystem {
+    ODESystem { system_id: 6, n_dims: 4 }
 }
 
 // ============================================================================
@@ -228,7 +259,7 @@ fn solver_options_default() -> SolverOptions {
     }
 }
 
-fn solver_options_fixed(dt: f64, max_steps: i64) -> SolverOptions {
+pub fn solver_options_fixed(dt: f64, max_steps: i64) -> SolverOptions {
     SolverOptions {
         dt: dt,
         rtol: 1.0e-6,
@@ -250,20 +281,54 @@ fn solver_options_adaptive(dt_init: f64, rtol: f64, atol: f64, max_steps: i64) -
 
 // ============================================================================
 // ODE Solution: trajectory storage
-// Max 1024 time points, max 64 state dimensions
+// values/variances hold 4096 slots, strided by n_dims: capacity is
+// min(1024, 4096 / n_dims) time points (1024 for n_dims <= 4, 292 for 14).
+// Once full, the last slot keeps being overwritten, so step n_steps - 1 is
+// always the final state. (A fixed stride of 64 used to overrun both arrays
+// from the 64th recorded point on.)
 // ============================================================================
 
 pub struct ODESolution {
     times: [f64; 1024],
-    // State values at each time: values[step * 64 + dim]
+    // State values at each time: values[step * n_dims + dim]
     values: [f64; 4096],
-    // Variances at each time: variances[step * 64 + dim]
+    // Variances at each time: variances[step * n_dims + dim]
     variances: [f64; 4096],
     pub n_steps: i64,
     n_dims: i64,
     total_error: f64,
     n_rhs_evals: i64,
     n_rejected: i64,
+    // 1: variances come from the full first-order covariance of (state, params)
+    //    carried through every step. 0: diagonal-only fallback, used only when
+    //    n_dims + n_params > 64; it drops all correlations and is known to
+    //    UNDERSTATE the variance of intermediates (see propagate_covariance_step).
+    // (solve_ode reports modes 0, 1 and 2. The adaptive solver, private here, sets 0 for the same
+    // n_dims + n_params > 64 fallback, but otherwise still clamps a bad diagonal to 0 and leaves
+    // mode 1: it never reports mode 2. That is fixed in the follow-up PR.)
+    // 2: the covariance failed: a diagonal is non-finite, or MATERIALLY negative (loss of
+    //    positive semidefiniteness: the finite-difference Jacobian lost conditioning, or an
+    //    input variance was NaN or negative). The offending variances are reported as they
+    //    came out (NaN/inf/negative), NOT clamped to zero; the state values are unaffected.
+    //    Only a diagonal within 1e-9 of the block's largest one below zero is round-off, and
+    //    that alone is clamped (a heuristic allowance; the diagonal test is necessary for positive
+    //    semidefiniteness, not sufficient).
+    pub covariance_mode: i64,
+    // Last time reached, and why the solve stopped. Set by solve_ode (fixed step). The adaptive
+    // solver (private here) does not report them yet: it leaves status 0 and t_final 0, so do not
+    // read them from it; that is done in the separate adaptive-solver PR.
+    //   status 0: reached t_end
+    //   status 1: max_steps steps were used up before t_end
+    //   status 2: reserved for the adaptive solver (no acceptable step); solve_ode never sets it
+    //   status 3: invalid input -- non-finite or backward interval, step size not finite and
+    //             > 0, a non-finite model parameter, a parameter the system reads that was
+    //             never set, an initial state with the wrong number of dimensions, an unknown
+    //             system id -- or a non-finite (NaN/inf) state at the start or from a step.
+    //             Nothing (more) was integrated; t_final is the last valid time
+    // A truncated solve is NOT an error return: the last recorded point is then the state
+    // at t_final, not at t_end. Check status == 0 before using it as the requested result.
+    pub t_final: f64,
+    pub status: i64,
 }
 
 fn ode_solution_new(n_dims: i64) -> ODESolution {
@@ -276,7 +341,216 @@ fn ode_solution_new(n_dims: i64) -> ODESolution {
         total_error: 0.0,
         n_rhs_evals: 0,
         n_rejected: 0,
+        covariance_mode: 1,
+        t_final: 0.0,
+        status: 0,
     }
+}
+
+// finite: false for NaN and +-inf (x - x is 0 only for finite x)
+fn ode_finite(x: f64) -> bool {
+    (x - x) == 0.0
+}
+
+fn ode_estate_values_finite(s: &EState, n: i64) -> bool with Mut, Div, Panic {
+    var i = 0
+    while i < n {
+        if i < 64 {
+            if !ode_finite(s.values[i]) { return false }
+        }
+        i = i + 1
+    }
+    true
+}
+
+// A variance is valid when it is finite and non-negative. (Finite alone would let a negative one
+// through: it is invalid too, and the diagonal fallback reports it unclamped.)
+fn ode_estate_variances_valid(s: &EState, n: i64) -> bool with Mut, Div, Panic {
+    var i = 0
+    while i < n {
+        if i < 64 {
+            let v = s.variances[i]
+            if !ode_finite(v) || v < 0.0 { return false }
+        }
+        i = i + 1
+    }
+    true
+}
+
+// The end of the interval is reached: `t` is at or past `t_end`, or short of it by no more than the
+// few ulps that rounding leaves when a step lands there (8 * 2^-52 * max(|t|, |t_end|)).
+// The solvers call this with ELAPSED time (tau = t - t_start, and span = t_end - t_start), so the
+// scale is the interval, not the epoch: at t = 1e15 the absolute ulp is 0.125 and a threshold
+// scaled by it (or by 1e-12 * |t_end|) would skip a real interval of 100. Both solvers land their
+// last step exactly on the end (dt is clamped to the remaining span, then tau = span).
+// Non-finite values are never "reached".
+fn ode_reached(t: f64, t_end: f64) -> bool {
+    if !ode_finite(t) || !ode_finite(t_end) { return false }
+    if t >= t_end { return true }
+    t_end - t <= 8.0 * 2.220446049250313e-16 * ode_max(ode_abs(t), ode_abs(t_end))
+}
+
+// Parameters each built-in system's right-hand side READS, as index ranges [lo, hi) (read off the
+// rhs_* functions: exp_decay p[0]; pbpk_14 p[0..43]; linear_2 p[1..3]; linear_3 p[1..5];
+// chem_simple and pbpk_clearance p[0..2]). Every one must have been SET: a slot that was never set
+// reads as 0.0, which silently switches a reaction off and reports a "successful" solve.
+// An id that is not a built-in has no registered range and is invalid: the dispatch would return
+// zero derivatives for it. A user-defined system (id 100+, a source-editing extension -- see the
+// header) adds its branch to ode_rhs_dispatch, its range here, AND its dimension to
+// ode_system_canonical_dims; ode_system_dims_ok rejects a dispatched-but-undimensioned id before
+// this range check ever runs.
+fn ode_params_range_set(p: &ODEParams, lo: i64, hi: i64) -> bool with Mut, Panic {
+    var i = lo
+    while i < hi {
+        if p.param_set[i] != 1 { return false }
+        i = i + 1
+    }
+    true
+}
+
+// Dimension of each built-in system: the number of derivatives its right-hand side WRITES (read off
+// the rhs_* functions: exp_decay 1; pbpk_14 14; linear_2 2; linear_3 3; chem_simple and
+// pbpk_clearance 4). ode_system_new(id, n_dims) accepts any pair, so `ode_system_new(1, 4)` with a
+// four-element state would agree with itself yet integrate ONE channel and leave three frozen;
+// `ode_system_new(5, 1)` would let the RHS write past the declared state. 0 = not a built-in id.
+fn ode_system_canonical_dims(id: i64) -> i64 {
+    if id == 1 { return 1 }
+    if id == 2 { return 14 }
+    if id == 3 { return 2 }
+    if id == 4 { return 3 }
+    if id == 5 { return 4 }
+    if id == 6 { return 4 }
+    0
+}
+
+// n_dims must be the built-in's own dimension, and inside the fixed 64-slot storage.
+fn ode_system_dims_ok(sys: &ODESystem) -> bool {
+    let c = ode_system_canonical_dims(sys.system_id)
+    if c < 1 || c > 64 { return false }
+    if sys.n_dims < 1 || sys.n_dims > 64 { return false }
+    sys.n_dims == c
+}
+
+// Number of parameter SLOTS a built-in system reads, counting from index 0 (matching the
+// augmented covariance's contiguous parameter block, even for a system like linear_2/linear_3
+// whose own range starts above 0 -- see ode_system_params_present). This is NOT p.n_params: that
+// field is the caller's highest SET index + 1, so a caller can inflate it by setting an
+// irrelevant slot the system never reads (e.g. p[63] on a 1-parameter system). Used to size the
+// augmented state-parameter covariance from what the MODEL needs, not from what the caller
+// happened to populate, so an unused slot cannot silently switch solve_ode onto the coarser
+// diagonal fallback (n_dims + this > 64) or make it any wider than the model actually is.
+fn ode_system_n_params(id: i64) -> i64 {
+    if id == 1 { return 1 }
+    if id == 2 { return 44 }
+    if id == 3 { return 4 }
+    if id == 4 { return 6 }
+    if id == 5 { return 3 }
+    if id == 6 { return 3 }
+    0
+}
+
+// The LOW end of a system's parameter range: 0 for every system except linear_2/linear_3 (3, 4),
+// which reserve index 0 for ka (oral absorption) but this build only ever runs them IV, so their
+// RHS (rhs_linear_2, rhs_linear_3) reads p[1..n_params) and never p[0]. [lo, ode_system_n_params(id))
+// is therefore the FULL active range -- not [0, ode_system_n_params(id)), which for these two
+// systems would still include the unused index 0 in validation, exposed to the same "irrelevant
+// slot changes the result" defect fixed for high indices (ode_initial_covariance_ok,
+// ode_solve_inputs_ok) if a caller sets p[0] anyway (e.g. carrying an oral-dosing ka value/variance
+// over into an IV-only solve of one of these two systems).
+fn ode_system_params_lo(id: i64) -> i64 {
+    if id == 3 { return 1 }
+    if id == 4 { return 1 }
+    0
+}
+
+fn ode_system_params_present(sys: &ODESystem, p: &ODEParams) -> bool with Mut, Panic {
+    let id = sys.system_id
+    let lo = ode_system_params_lo(id)
+    let hi = ode_system_n_params(id)
+    if id == 1 { return ode_params_range_set(p, lo, hi) }
+    if id == 2 { return ode_params_range_set(p, lo, hi) }
+    if id == 3 { return ode_params_range_set(p, lo, hi) }
+    if id == 4 { return ode_params_range_set(p, lo, hi) }
+    if id == 5 { return ode_params_range_set(p, lo, hi) }
+    if id == 6 { return ode_params_range_set(p, lo, hi) }
+    false
+}
+
+// Input variances must be finite and non-negative. A NaN, infinite or negative INPUT variance is
+// invalid from the start (it is not round-off), so it sets covariance_mode 2 even when no step
+// runs (an empty interval), instead of only after the first step.
+// np is the MODEL's parameter count (ode_system_n_params), and lo is where its active range
+// STARTS (ode_system_params_lo; 0 for every system except linear_2/linear_3, which reserve index
+// 0 for an unread ka) -- not p.n_params, so a caller-set but irrelevant slot (a high index like
+// p[63], or index 0 on those two systems) must not be able to fail this check, and so force
+// covariance_mode 2 on an otherwise valid solve, over a variance the augmented covariance never
+// reads in the first place (it is sized off np too, see augcov_init).
+fn ode_initial_covariance_ok(state: &EState, p: &ODEParams, n: i64, lo: i64, np: i64) -> bool with Mut, Div, Panic {
+    var i = 0
+    while i < n {
+        if i < 64 {
+            let v = state.variances[i]
+            if !ode_finite(v) || v < 0.0 { return false }
+        }
+        i = i + 1
+    }
+    var k = lo
+    while k < np {
+        if k < 64 {
+            let v = p.param_variances[k]
+            if !ode_finite(v) || v < 0.0 { return false }
+        }
+        k = k + 1
+    }
+    true
+}
+
+// Inputs a solve can run on at all. Anything else is status 3, never a "completed" solve:
+//   - t_start, t_end finite, and t_end >= t_start (backward solves are not supported)
+//   - max_steps >= 0 (zero is a valid zero-step budget)
+//   - step size (the fixed dt, or the adaptive initial dt) finite and > 0: a zero or negative
+//     step used to fall into `dt <= 0 -> t = t_end` and return the initial state as finished
+//   - the system's n_dims is the built-in's own (ode_system_dims_ok) and within 1..64, the initial
+//     state has that many dimensions, and every parameter the system reads was SET
+//     (ode_system_params_present); an unknown system id is invalid
+//   - every model parameter the system reads (p[0..ode_system_n_params(id)), NOT p[0..n_params):
+//     an irrelevant slot the caller also happened to set must stay inert, see augcov_init) finite
+//   - adaptive: rtol, atol finite and >= 0
+fn ode_solve_inputs_ok(t_start: f64, t_end: f64, opts: &SolverOptions, p: &ODEParams, sys: &ODESystem, y0_dims: i64, adaptive: bool) -> bool with Mut, Div, Panic {
+    if !ode_finite(t_start) || !ode_finite(t_end) { return false }
+    // the system's dimension must be the built-in's own (and within the 64-slot storage); the
+    // initial state must have exactly that many dimensions (a smaller one leaves the rest of the
+    // state silently 0); and the system must have every parameter it reads
+    if !ode_system_dims_ok(sys) { return false }
+    if y0_dims != sys.n_dims { return false }
+    if !ode_system_params_present(sys, p) { return false }
+    // every model parameter the system actually reads must be finite: a NaN/inf rate is invalid
+    // INPUT (status 3), not an integration failure (status 2), and on an empty interval no
+    // right-hand side would ever run to expose it. Bounded by the MODEL's own [lo, n_params)
+    // range, not [0, p.n_params): an irrelevant slot the caller also set (a high index like p[63]
+    // on any system, or index 0 on linear_2/linear_3, which reserve it for an unread ka) must not
+    // be able to fail this on a value the solver never reads.
+    let sys_np = ode_system_n_params(sys.system_id)
+    let sys_lo = ode_system_params_lo(sys.system_id)
+    if p.n_params < 0 || p.n_params > 64 { return false }
+    var k = sys_lo
+    while k < sys_np {
+        if !ode_finite(p.params[k]) { return false }
+        k = k + 1
+    }
+    if t_end < t_start { return false }
+    // two finite, ordered endpoints can still have an unrepresentable span (-1e308 .. 1e308 is +inf)
+    if !ode_finite(t_end - t_start) { return false }
+    if !ode_finite(opts.dt) || !(opts.dt > 0.0) { return false }
+    // max_steps is caller-controlled through the public options constructors. Negative makes
+    // `step < max_steps` false at once, which would read as ordinary exhaustion (status 1); it is
+    // invalid input. Zero is a legitimate zero-step budget (an empty interval still completes).
+    if opts.max_steps < 0 { return false }
+    if adaptive {
+        if !ode_finite(opts.rtol) || !ode_finite(opts.atol) { return false }
+        if opts.rtol < 0.0 || opts.atol < 0.0 { return false }
+    }
+    true
 }
 
 fn solution_record(
@@ -284,30 +558,39 @@ fn solution_record(
     t: f64,
     state: &EState
 ) with Mut, Div, Panic {
-    if sol.n_steps >= 1024 { return }
-    let step = sol.n_steps
+    var step = sol.n_steps
+    if step >= 1024 || (step + 1) * sol.n_dims > 4096 { step = step - 1 }
     sol.times[step] = t
     var i = 0
     while i < sol.n_dims {
         if i < 64 {
-            sol.values[step * 64 + i] = state.values[i]
-            sol.variances[step * 64 + i] = state.variances[i]
+            sol.values[step * sol.n_dims + i] = state.values[i]
+            sol.variances[step * sol.n_dims + i] = state.variances[i]
         }
         i = i + 1
     }
-    sol.n_steps = sol.n_steps + 1
+    sol.n_steps = step + 1
 }
 
-fn solution_get_value(sol: &ODESolution, step: i64, dim: i64) -> f64 {
-    sol.values[step * 64 + dim]
+// NaN, built by overflow so no literal is needed
+fn ode_nan() -> f64 { let big = 1.0e308; let inf = big * 10.0; inf - inf }
+
+// Trajectory accessors. `step` must be in [0, n_steps) and `dim` in [0, n_dims); anything else
+// returns NaN. (An unchecked flat index would read another step's or another variable's slot, or
+// past the arrays; and 0.0, the convention of some accessors, would look like a real value -- for a
+// variance, like "no uncertainty". NaN is the answer that cannot be mistaken for a result.)
+pub fn solution_get_value(sol: &ODESolution, step: i64, dim: i64) -> f64 {
+    if step < 0 || step >= sol.n_steps || dim < 0 || dim >= sol.n_dims { return ode_nan() }
+    sol.values[step * sol.n_dims + dim]
 }
 
-fn solution_get_variance(sol: &ODESolution, step: i64, dim: i64) -> f64 {
-    sol.variances[step * 64 + dim]
+pub fn solution_get_variance(sol: &ODESolution, step: i64, dim: i64) -> f64 {
+    if step < 0 || step >= sol.n_steps || dim < 0 || dim >= sol.n_dims { return ode_nan() }
+    sol.variances[step * sol.n_dims + dim]
 }
 
 fn solution_get_std(sol: &ODESolution, step: i64, dim: i64) -> f64 with Mut, Div, Panic {
-    ode_sqrt(sol.variances[step * 64 + dim])
+    ode_sqrt(solution_get_variance(sol, step, dim))
 }
 
 // ============================================================================
@@ -593,9 +876,76 @@ fn rhs_linear_3(
 }
 
 // ============================================================================
+// Built-in RHS: Simple chemical reaction network (system_id = 5)
+// y[0] = A, y[1] = B, y[2] = C, y[3] = D
+// Mass action:  A -> B (k1),  B -> C (k2),  A + B -> D (k3)
+// p[0] = k1, p[1] = k2, p[2] = k3
+// Same network as chemistry::kinetics dc_dt / stoich_matrix.
+// Conserves A + B + C + 2D.
+// ============================================================================
+
+fn rhs_chem_simple(
+    t: f64,
+    y: &EState,
+    p: &ODEParams,
+    out: &!EState
+) with Mut, Div, Panic {
+    let k1 = p.params[0]
+    let k2 = p.params[1]
+    let k3 = p.params[2]
+    let r0 = k1 * y.values[0]
+    let r1 = k2 * y.values[1]
+    let r2 = k3 * y.values[0] * y.values[1]
+    out.values[0] = 0.0 - r0 - r2
+    out.values[1] = r0 - r1 - r2
+    out.values[2] = r1
+    out.values[3] = r2
+    out.n = 4
+}
+
+// ============================================================================
+// Built-in RHS: linear metabolism with first-order clearance (system_id = 6)
+//
+//   Drug -> M1 (k1),   M1 -> M2 (k2),   M1 -> cleared (k3)
+//
+// y = [Drug, M1, M2, Cleared]    p = [k1, k2, k3]
+//   dDrug/dt    = -k1 Drug
+//   dM1/dt      =  k1 Drug - (k2 + k3) M1
+//   dM2/dt      =  k2 M1
+//   dCleared/dt =  k3 M1          (cumulative amount cleared from M1)
+//
+// Every reaction is first order, so the system is linear and has a closed form
+// (checked in tests/stdlib/chemistry/test_pbpk_clearance_ode.sio). It conserves
+// Drug + M1 + M2 + Cleared. This is NOT system 5: there, k3 is bimolecular
+// (Drug + M1 -> D), which is a different model.
+// ============================================================================
+
+fn rhs_pbpk_clearance(
+    t: f64,
+    y: &EState,
+    p: &ODEParams,
+    out: &!EState
+) with Mut, Div, Panic {
+    let k1 = p.params[0]
+    let k2 = p.params[1]
+    let k3 = p.params[2]
+    let r0 = k1 * y.values[0]
+    let r1 = k2 * y.values[1]
+    let r2 = k3 * y.values[1]
+    out.values[0] = 0.0 - r0
+    out.values[1] = r0 - r1 - r2
+    out.values[2] = r1
+    out.values[3] = r2
+    out.n = 4
+}
+
+// ============================================================================
 // RHS Dispatch: routes system_id to the correct RHS function
 //
-// To add a user-defined system: add an `if sys.system_id == YOUR_ID` branch.
+// To add a user-defined system: add an `if sys.system_id == YOUR_ID` branch here, AND its
+// dimension in ode_system_canonical_dims, AND the parameter range it reads in
+// ode_system_params_present -- see the header. All three are source-editing changes to this
+// file; ode_system_new alone does not make an id usable from outside it.
 // ============================================================================
 
 fn ode_rhs_dispatch(
@@ -613,8 +963,13 @@ fn ode_rhs_dispatch(
         rhs_linear_2(t, y, p, out)
     } else if sys.system_id == 4 {
         rhs_linear_3(t, y, p, out)
+    } else if sys.system_id == 5 {
+        rhs_chem_simple(t, y, p, out)
+    } else if sys.system_id == 6 {
+        rhs_pbpk_clearance(t, y, p, out)
     } else {
-        // Unknown system: zero derivatives (safe fallback)
+        // Unknown system: zero derivatives. Not reachable through the solvers: an id with no
+        // registered parameter range is rejected (status 3) before anything is integrated.
         out.n = y.n
     }
 }
@@ -804,7 +1159,11 @@ fn propagate_variance_gum(
                 k = k + 1
             }
 
-            new_var[i] = ode_max(vi, 0.0)
+            // vi is a sum of (sensitivity^2 * variance) terms, so it is negative or NaN only when an
+            // INPUT variance is. It used to be clamped with ode_max(vi, 0.0), which is false for NaN
+            // and 0 for a negative: the invalid variance became "no uncertainty" (and the mode-2 flag
+            // the solver had already set no longer matched the numbers). It is reported as it is.
+            new_var[i] = vi
         }
         i = i + 1
     }
@@ -817,6 +1176,278 @@ fn propagate_variance_gum(
         }
         i = i + 1
     }
+}
+
+// ============================================================================
+// Full first-order covariance propagation (GUM, JCGM 100:2008 eq. 13)
+//
+// propagate_variance_gum above keeps only the diagonal and linearises the step
+// as I + dt*J. Both lose information that matters: an intermediate species
+// inherits its uncertainty through its CORRELATION with the species feeding
+// it, and a rate constant's uncertainty compounds through state-parameter
+// correlation that is rebuilt from zero at every step. Measured on the
+// A->B, B->C, A+B->D network (system 5, t = 2, dt = 0.1): the diagonal
+// scheme gave sigma_B = 0.0027, sigma_C = 0.000055, sigma_D = 0.00074, while a
+// first-order GUM through the whole RK4 map and a 20 000-sample Monte Carlo
+// both give 0.0119, 0.00072 and 0.0052 -- understated 4x to 13x.
+//
+// Here the augmented vector z = (y_0..y_{n-1}, p_0..p_{np-1}) carries a full
+// covariance P. Each accepted step y' = Phi(y, p) is differentiated as a whole
+// (central differences of the integrator's own step, taken at the PRE-step
+// point), J = [[dPhi/dy, dPhi/dp], [0, I]], and P <- J P J^T. Parameters are
+// constant, so their block propagates unchanged and their correlation with
+// the state accumulates exactly. Storage is P[a * 64 + b]; requires
+// n + np <= 64.
+//
+// Known limits, stated rather than hidden (math-review 2026-09-14):
+//   - The Jacobian is a central difference with h = max(1e-7 |z_j|, 1e-7). For
+//     a component at or near zero h is absolute, so the minus-perturbation can
+//     evaluate the RHS at a slightly negative state; for a stiff explicit step
+//     the difference of two large, nearly equal steps loses digits, and the
+//     loss compounds through the product of Jacobians.
+//   - In the adaptive solver, J is the derivative of the step actually taken
+//     at fixed dt; the dependence of the controller's dt on z is not included.
+// ============================================================================
+
+struct AugCov {
+    data: [f64; 4096],
+    dim: i64,
+}
+
+// np is the MODEL's parameter count (ode_system_n_params) and lo its active range's start
+// (ode_system_params_lo) -- not p.n_params or 0 -- see those functions' docs. p.n_params must be
+// >= np here (ode_system_params_present already required every index in [lo, np) to be set
+// before a solve runs).
+//
+// The dim = n + np block still spans [0, np), one wider than [lo, np) for linear_2/linear_3 (an
+// unused index 0 reserved for ka). That slot's diagonal is deliberately left at its zero-
+// initialized default, NOT p.param_variances[0]: propagate_covariance_step's Jacobian column/row
+// for an index the RHS never reads is exactly 0.0 (perturbing it cannot change a computation that
+// never reads it), but 0.0 * NaN and 0.0 * inf are NaN, not 0 -- so copying a non-finite garbage
+// variance in there would poison the J P J^T product and leak into the REPORTED state diagonal
+// despite the Jacobian correctly saying "no sensitivity". Leaving it at 0.0 keeps every term
+// touching that slot exactly 0 through every step, so garbage in an unused slot can never reach
+// the output, finite or not.
+fn augcov_init(state: &EState, p: &ODEParams, n: i64, lo: i64, np: i64) -> AugCov with Mut, Div, Panic {
+    var cov = AugCov { data: [0.0; 4096], dim: n + np }
+    var i = 0
+    while i < n {
+        if i < 64 { cov.data[i * 64 + i] = state.variances[i] }
+        i = i + 1
+    }
+    var k = lo
+    while k < np {
+        let a = n + k
+        if a < 64 { cov.data[a * 64 + a] = p.param_variances[k] }
+        k = k + 1
+    }
+    cov
+}
+
+// ---- variance writers --------------------------------------------------------------------------
+// The adaptive solver (private here; its fixes are in the follow-up PR) keeps the ORIGINAL writer
+// below, so its behaviour is exactly what this PR had before: it clamps a non-positive or NaN
+// diagonal to 0 and reports nothing. solve_ode uses augcov_write_variances_checked, which keeps a
+// failed diagonal visible and says so.
+// the state block's diagonal becomes the reported variances
+fn augcov_write_variances(cov: &AugCov, state: &!EState, n: i64) with Mut {
+    var i = 0
+    while i < n {
+        if i < 64 {
+            let v = cov.data[i * 64 + i]
+            state.variances[i] = if v > 0.0 { v } else { 0.0 }
+        }
+        i = i + 1
+    }
+}
+
+// The state block's diagonal becomes the reported variances. Returns false when a diagonal
+// is non-finite or materially negative; those are written UNCLAMPED so the failure stays
+// visible (a clamp to 0 would show failed propagation as exact certainty).
+// Round-off can leave a diagonal slightly below zero relative to the block's scale. The
+// allowance is a HEURISTIC, 1e-9 of the largest state diagonal (about 4e6 ulps; not derived from a
+// bound on the propagation error): only a diagonal that far below zero, at most, is clamped to 0 --
+// and only when `input_ok`. When the caller already knows an input variance was invalid
+// (ode_initial_covariance_ok was false at t_start), the round-off allowance is switched off for
+// every diagonal, not just the offending one: correlations mix all of them through the augmented
+// covariance, so which diagonal is "the invalid one" is not recoverable after even one step, and a
+// small propagated value could otherwise land inside the round-off band and be laundered to a
+// usable-looking 0 despite covariance_mode already being 2 (invalid, negative -1e-12 on Drug's
+// input can propagate to about -9.68e-13 next to a healthy ~0.98 on another channel; that is well
+// inside a 1e-9-of-scale allowance sized for the healthy channel, not for the invalid one).
+// Checking the diagonal is a NECESSARY condition for positive semidefiniteness, not a sufficient
+// one: a covariance with non-negative diagonal can still be indefinite through its off-diagonal
+// entries, which this does not detect.
+fn augcov_write_variances_checked(cov: &AugCov, state: &!EState, n: i64, input_ok: bool) -> bool with Mut {
+    var scale = 0.0
+    var i = 0
+    while i < n {
+        if i < 64 {
+            let v = cov.data[i * 64 + i]
+            if ode_finite(v) && ode_abs(v) > scale { scale = ode_abs(v) }
+        }
+        i = i + 1
+    }
+    let allow = if input_ok { 1.0e-9 * scale } else { 0.0 }
+    var ok = true
+    i = 0
+    while i < n {
+        if i < 64 {
+            let v = cov.data[i * 64 + i]
+            if !ode_finite(v) {
+                ok = false
+                state.variances[i] = v
+            } else if v < 0.0 {
+                if v >= 0.0 - allow {
+                    state.variances[i] = 0.0
+                } else {
+                    ok = false
+                    state.variances[i] = v
+                }
+            } else {
+                state.variances[i] = v
+            }
+        }
+        i = i + 1
+    }
+    ok
+}
+
+// One step of the chosen integrator, values only: mode 0 = classical RK4,
+// mode 1 = Dormand-Prince 5th-order solution (as solve_ode_adaptive accepts it)
+fn eode_step_values(
+    sys: &ODESystem,
+    t: f64,
+    state: &!EState,
+    p: &ODEParams,
+    dt: f64,
+    mode: i64,
+    n_evals: &!i64
+) with Mut, Div, Panic {
+    if mode == 0 {
+        eode_rk4_advance(sys, t, state, p, dt, n_evals)
+    } else {
+        var err_unused = 0.0
+        rk45_step(sys, t, state, p, dt, &!err_unused, n_evals)
+    }
+}
+
+// np is the MODEL's parameter count (ode_system_n_params), matching augcov_init's cov -- see
+// that function's doc. Must equal what built `cov`, or the matrix dimensions this function
+// walks (dim = n + np) would no longer match cov's actual layout.
+fn propagate_covariance_step(
+    sys: &ODESystem,
+    t: f64,
+    before: &EState,
+    p: &ODEParams,
+    dt: f64,
+    mode: i64,
+    np: i64,
+    cov: &!AugCov,
+    n_evals: &!i64
+) with Mut, Div, Panic {
+    let n = sys.n_dims
+    let dim = n + np
+    let eps = 1.0e-7
+    var jm: [f64; 4096] = [0.0; 4096]
+
+    var j = 0
+    while j < dim {
+        if j < 64 {
+            var yp = estate_new(n)
+            var ym = estate_new(n)
+            estate_copy(&!yp, before)
+            estate_copy(&!ym, before)
+            var pp = ode_params_new()
+            var pm = ode_params_new()
+            var m = 0
+            while m < np {
+                if m < 64 {
+                    pp.params[m] = p.params[m]
+                    pm.params[m] = p.params[m]
+                }
+                m = m + 1
+            }
+            pp.n_params = np
+            pm.n_params = np
+            var h = eps
+            if j < n {
+                h = ode_max(eps * ode_abs(before.values[j]), eps)
+                yp.values[j] = before.values[j] + h
+                ym.values[j] = before.values[j] - h
+            } else {
+                let k = j - n
+                h = ode_max(eps * ode_abs(p.params[k]), eps)
+                pp.params[k] = p.params[k] + h
+                pm.params[k] = p.params[k] - h
+            }
+            eode_step_values(sys, t, &!yp, &pp, dt, mode, n_evals)
+            eode_step_values(sys, t, &!ym, &pm, dt, mode, n_evals)
+            let inv_2h = 1.0 / (2.0 * h)
+            var i = 0
+            while i < n {
+                if i < 64 { jm[i * 64 + j] = (yp.values[i] - ym.values[i]) * inv_2h }
+                i = i + 1
+            }
+        }
+        j = j + 1
+    }
+    var q = 0
+    while q < np {
+        let a = n + q
+        if a < 64 { jm[a * 64 + a] = 1.0 }
+        q = q + 1
+    }
+
+    // tmp = J P, then P' = tmp J^T
+    var tmp: [f64; 4096] = [0.0; 4096]
+    var r = 0
+    while r < dim {
+        var c = 0
+        while c < dim {
+            var s = 0.0
+            var a = 0
+            while a < dim {
+                s = s + jm[r * 64 + a] * cov.data[a * 64 + c]
+                a = a + 1
+            }
+            tmp[r * 64 + c] = s
+            c = c + 1
+        }
+        r = r + 1
+    }
+    r = 0
+    while r < dim {
+        var c = 0
+        while c < dim {
+            var s = 0.0
+            var b = 0
+            while b < dim {
+                s = s + tmp[r * 64 + b] * jm[c * 64 + b]
+                b = b + 1
+            }
+            cov.data[r * 64 + c] = s
+            c = c + 1
+        }
+        r = r + 1
+    }
+    // J P J^T is symmetric in exact arithmetic; in f64 the two triangles drift
+    // by O(dim eps |J|^2 |P|), which over long products can push an eigenvalue
+    // below zero and feed it into the next step. Re-symmetrise every step.
+    // Negative diagonals are clamped only where variances are REPORTED
+    // (augcov_write_variances), never inside P.
+    r = 0
+    while r < dim {
+        var c = r + 1
+        while c < dim {
+            let avg = 0.5 * (cov.data[r * 64 + c] + cov.data[c * 64 + r])
+            cov.data[r * 64 + c] = avg
+            cov.data[c * 64 + r] = avg
+            c = c + 1
+        }
+        r = r + 1
+    }
+    cov.dim = dim
 }
 
 // ============================================================================
@@ -840,6 +1471,20 @@ fn bump_n_evals(n: &!i64) with Mut {
 // this module's internal call and silently miscompile. Private helper, so the
 // rename is local to this file.
 fn eode_rk4_step(
+    sys: &ODESystem,
+    t: f64,
+    state: &!EState,
+    p: &ODEParams,
+    dt: f64,
+    n_evals: &!i64
+) with Mut, Div, Panic {
+    eode_rk4_advance(sys, t, state, p, dt, n_evals)
+    // Diagonal-only GUM: the fallback when n_dims + n_params > 64
+    propagate_variance_gum(sys, t, state, p, dt, n_evals)
+}
+
+// Classical RK4, values only
+fn eode_rk4_advance(
     sys: &ODESystem,
     t: f64,
     state: &!EState,
@@ -882,9 +1527,6 @@ fn eode_rk4_step(
         }
         i = i + 1
     }
-
-    // GUM variance propagation through this step
-    propagate_variance_gum(sys, t, state, p, dt, n_evals)
 }
 
 // ============================================================================
@@ -1021,7 +1663,7 @@ fn rk45_step(
 // General-Purpose Solve: Fixed-Step RK4
 // ============================================================================
 
-fn solve_ode(
+pub fn solve_ode(
     sys: ODESystem,
     y0: EState,
     p: ODEParams,
@@ -1029,27 +1671,87 @@ fn solve_ode(
     t_end: f64,
     opts: SolverOptions
 ) -> ODESolution with Mut, Div, Panic {
+    let y0_dims = y0.n
+    // The dimensions are validated FIRST: everything below is sized by them (augcov_init and the
+    // covariance check loop n_dims times, and solution_record with n_dims > 4096 turns the first step
+    // into -1 and writes times[-1]). ode_system_new and estate_new are public, so n_dims can be any i64.
+    // Nothing is recorded for an invalid dimension: the result has no points (n_steps = 0, every
+    // accessor index is invalid -> NaN), status 3, t_final = t_start.
+    if !ode_system_dims_ok(&sys) || y0_dims != sys.n_dims {
+        var refused = ode_solution_new(1)
+        refused.n_steps = 0
+        refused.t_final = t_start
+        refused.status = 3
+        return refused
+    }
     var state = y0
     state.n = sys.n_dims
     var sol = ode_solution_new(sys.n_dims)
     var t = t_start
     var step = 0
     var n_evals = 0
+    // The MODEL's parameter count, not p.n_params: a caller-set but system-irrelevant slot (e.g.
+    // p[63] on a 1-parameter system) must not be able to inflate the augmented dimension past 64
+    // and silently force the coarser diagonal fallback for an otherwise-full-covariance-eligible
+    // system.
+    let sys_np = ode_system_n_params(sys.system_id)
+    let sys_lo = ode_system_params_lo(sys.system_id)
+    let full_cov = sys.n_dims + sys_np <= 64
+    var cov = augcov_init(&state, &p, sys.n_dims, sys_lo, sys_np)
+    if !full_cov { sol.covariance_mode = 0 }
 
+    let input_cov_ok = ode_initial_covariance_ok(&state, &p, sys.n_dims, sys_lo, sys_np)
+    if !input_cov_ok { sol.covariance_mode = 2 }
     solution_record(&!sol, t, &state)
+    // A non-finite starting state is status 3 even when the interval is empty (the loop below
+    // would not run and the final check would call it a completed solve).
+    if !ode_solve_inputs_ok(t_start, t_end, &opts, &p, &sys, y0_dims, false) || !ode_estate_values_finite(&state, sys.n_dims) {
+        sol.t_final = t
+        sol.status = 3
+        return sol
+    }
 
-    while t < t_end && step < opts.max_steps {
-        let dt = ode_min(opts.dt, t_end - t)
-        if dt <= 0.0 { t = t_end }
+    // Work in ELAPSED time tau = t - t_start (scale = the interval), and derive the absolute time
+    // as t_start + tau: at large epochs the absolute time has too few bits left for the steps.
+    // Limit: the time ARGUMENT handed to the right-hand side is still t_start + tau, quantized to
+    // the epoch's ulp (0.125 at 1e15). Autonomous systems (all built-in ones) never read it, and
+    // the step sizes and the end of the interval are unaffected; a time-dependent right-hand side
+    // at such an epoch sees a quantized time.
+    let span = t_end - t_start
+    var tau = 0.0
+    while tau < span && step < opts.max_steps {
+        let remaining = span - tau
+        let dt = ode_min(opts.dt, remaining)
+        if ode_reached(tau, span) { tau = span; t = t_end }
         else {
-            eode_rk4_step(&sys, t, &!state, &p, dt, &!n_evals)
-            t = t + dt
+            if full_cov {
+                var before = estate_new(sys.n_dims)
+                estate_copy(&!before, &state)
+                eode_rk4_advance(&sys, t, &!state, &p, dt, &!n_evals)
+                propagate_covariance_step(&sys, t, &before, &p, dt, 0, sys_np, &!cov, &!n_evals)
+                if !augcov_write_variances_checked(&cov, &!state, sys.n_dims, input_cov_ok) { sol.covariance_mode = 2 }
+            } else {
+                eode_rk4_step(&sys, t, &!state, &p, dt, &!n_evals)
+            }
+            if !ode_estate_values_finite(&state, sys.n_dims) {
+                // do not record it: t_final stays at the last valid time
+                sol.n_rhs_evals = n_evals
+                sol.t_final = t
+                sol.status = 3
+                return sol
+            }
+            if !ode_estate_variances_valid(&state, sys.n_dims) { sol.covariance_mode = 2 }
+            // the last (possibly clamped) step lands exactly on t_end; earlier ones are all full
+            // steps, so tau_k = k dt is recomputed instead of accumulated
+            if dt >= remaining { tau = span; t = t_end } else { tau = ((step + 1) as f64) * opts.dt; t = t_start + tau }
             step = step + 1
             solution_record(&!sol, t, &state)
         }
     }
 
     sol.n_rhs_evals = n_evals
+    sol.t_final = t
+    sol.status = if ode_reached(tau, span) { 0 } else { 1 }
     sol
 }
 
@@ -1073,6 +1775,12 @@ fn solve_ode_adaptive(
     var step = 0
     var n_evals = 0
     var n_rejected = 0
+    // See solve_ode: the MODEL's parameter count and range, not p.n_params / index 0.
+    let sys_np = ode_system_n_params(sys.system_id)
+    let sys_lo = ode_system_params_lo(sys.system_id)
+    let full_cov = sys.n_dims + sys_np <= 64
+    var cov = augcov_init(&state, &p, sys.n_dims, sys_lo, sys_np)
+    if !full_cov { sol.covariance_mode = 0 }
 
     solution_record(&!sol, t, &state)
 
@@ -1089,8 +1797,14 @@ fn solve_ode_adaptive(
 
             let tol = opts.atol + opts.rtol * err
             if err <= opts.rtol || dt <= 1.0e-12 {
-                // Accept step — propagate variance
-                propagate_variance_gum(&sys, t, &!state, &p, dt, &!n_evals)
+                // Accept step — propagate uncertainty through the step just taken,
+                // differentiated at the pre-step point
+                if full_cov {
+                    propagate_covariance_step(&sys, t, &saved, &p, dt, 1, sys_np, &!cov, &!n_evals)
+                    augcov_write_variances(&cov, &!state, sys.n_dims)
+                } else {
+                    propagate_variance_gum(&sys, t, &!state, &p, dt, &!n_evals)
+                }
                 t = t + dt
                 step = step + 1
                 solution_record(&!sol, t, &state)
@@ -1145,25 +1859,19 @@ fn ode_pow_fifth(ratio: f64) -> f64 with Mut, Div, Panic {
 // Convenience: Solve Exponential Decay (backward-compatible API)
 // ============================================================================
 
-fn solve_exp_decay(
+// Backward-compatible entry point for the single exponential decay (system 1).
+// It used to "migrate" a 16-parameter ODEParams into a 64-parameter one by copying params,
+// param_variances and n_params; ODEParams is 64-wide now, and a field-by-field copy silently drops
+// any field added later -- it lost param_set, so a caller who had used ode_params_set got status 3
+// for a parameter they HAD set. The parameters are passed through unchanged.
+pub fn solve_exp_decay(
     y0: EState,
     p: ODEParams,
     t_start: f64,
     t_end: f64,
     opts: SolverOptions
 ) -> ODESolution with Mut, Div, Panic {
-    // Migrate old 16-param ODEParams to 64-param
-    var p64 = ode_params_new()
-    var i = 0
-    while i < 16 {
-        p64.params[i] = p.params[i]
-        p64.param_variances[i] = p.param_variances[i]
-        i = i + 1
-    }
-    p64.n_params = p.n_params
-
-    let sys = ode_system_exp_decay()
-    solve_ode(sys, y0, p64, t_start, t_end, opts)
+    solve_ode(ode_system_exp_decay(), y0, p, t_start, t_end, opts)
 }
 
 // ============================================================================
@@ -1176,7 +1884,7 @@ fn solve_exp_decay(
 //   - ICRP Publication 89 (2002) (reference organ volumes and flows)
 // ============================================================================
 
-fn pbpk_14_default_params() -> ODEParams with Mut {
+pub fn pbpk_14_default_params() -> ODEParams with Mut {
     var p = ode_params_new()
 
     // Cardiac output and plasma volume (70 kg human)
@@ -1249,7 +1957,7 @@ fn pbpk_14_oral_dose(dose_mg: f64, dose_var: f64) -> EState with Mut {
 }
 
 // Initial state for IV bolus of rapamycin
-fn pbpk_14_iv_dose(dose_mg: f64, dose_var: f64, v_plasma: f64) -> EState with Mut, Div, Panic {
+pub fn pbpk_14_iv_dose(dose_mg: f64, dose_var: f64, v_plasma: f64) -> EState with Mut, Div, Panic {
     var state = estate_new(14)
     // IV: drug goes directly into plasma
     let c0 = dose_mg / v_plasma

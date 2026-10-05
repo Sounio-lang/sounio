@@ -33,7 +33,35 @@ pub fn native_v2_handle_entry_field_pin_count() -> i64 { 24 }
 pub fn native_v2_handle_entry_field_flags() -> i64 { 32 }
 pub fn native_v2_handle_entry_field_epoch() -> i64 { 40 }
 pub fn native_v2_handle_entry_size() -> i64 { 48 }
-pub fn native_v2_handle_table_capacity_default() -> i64 { 1048576 }
+// Managed-handle ceiling for one native-v2 process. Handles are allocated by a
+// MONOTONIC bump of RuntimeContext.handle_count and are NEVER reclaimed: the
+// only reset emitter (native_v2_emit_gc_empty_frame_reset) is deliberately
+// unwired on this backend because stack maps carry slot COUNTS, not a root
+// bitmap, so no safe liveness point exists (see the "Fail closed" comment at the
+// exit-182 site in native/codegen_x86_linux.sio). This number is therefore a
+// hard per-process allocation budget, not a working-set size.
+//
+// 2^22 (raised from 2^20 on 2026-07-26). This MOVES the wall; it does not
+// remove it. The lifetime problem is unchanged and still open.
+//
+// Cost is zero-sum against the heap, not against the ELF. The table is carved
+// out of the single fixed 2 GiB anonymous mmap taken in the entry trampoline:
+//   handle_table_base = mmap_base + runtime_context_size()
+//   heap_base         = handle_table_base + native_v2_handle_table_bytes()
+//   heap_limit        = heap_base + (2147483648 - ctx - handle_table_bytes)
+// so ELF FileSiz/MemSiz are unchanged, the virtual mapping stays 2 GiB, and RSS
+// grows only for handle-table pages a program actually touches (demand-paged
+// MAP_ANONYMOUS). What it does spend is heap budget: 48 B/slot, so 2^20 -> 2^22
+// hands 144 MiB of the ~2000 MiB heap to the table.
+//
+// Headroom check at this capacity: the smallest MANAGED object is 56 B (32 B
+// header + a 24 B three-field aggregate; <=16 B structs are unboxed and take no
+// slot, see native_v2_is_small_value_struct_tag). Filling the table therefore
+// needs >= 56 * 2^22 = 235 MiB of heap against a 192 MiB table -- ~427 MiB of
+// the 2 GiB arena, so the handle table stays the first wall reached and the
+// heap is not starved. The balance point where both walls coincide is around
+// 2^24; do not raise past that without also growing the mmap.
+pub fn native_v2_handle_table_capacity_default() -> i64 { 4194304 }
 pub fn native_v2_handle_table_bytes() -> i64 { native_v2_handle_entry_size() * native_v2_handle_table_capacity_default() }
 
 // Values stored in struct-base slots may be either a managed handle id

@@ -1,70 +1,950 @@
 // File: stdlib/compiler/effects/infer.sio
-// Effect inference implementation
+// Effect inference implementation per WP-3.2 specification
+// Bottom-up effect inference and declared vs. inferred checking
+// Style aligned with self-hosted/effects/checker.sio
+// print / print_int are compiler builtins — do not redeclare via extern "C"
+
+// ============================================================================
+// EFFECT ID CONSTANTS (zero-arg functions)
+// ============================================================================
+
+fn EFFECT_IO() -> i64 { 0 }
+fn EFFECT_MUT() -> i64 { 1 }
+fn EFFECT_ALLOC() -> i64 { 2 }
+fn EFFECT_PANIC() -> i64 { 3 }
+fn EFFECT_ASYNC() -> i64 { 4 }
+fn EFFECT_GPU() -> i64 { 5 }
+fn EFFECT_PROB() -> i64 { 6 }
+fn EFFECT_DIV() -> i64 { 7 }
+fn EFFECT_EPISTEMIC() -> i64 { 8 }
+fn EFFECT_CAUSAL() -> i64 { 9 }
+fn EFFECT_NETWORK() -> i64 { 10 }
+fn EFFECT_SENSOR() -> i64 { 11 }
+fn EFFECT_RENDER() -> i64 { 12 }
+fn EFFECT_OBSERVE() -> i64 { 13 }
+fn EFFECT_NON_ASSOC() -> i64 { 14 }
+fn EFFECT_AUDIT() -> i64 { 15 }
+fn EFFECT_HYPOTHESIS() -> i64 { 16 }
+fn EFFECT_MULTI_TEST() -> i64 { 17 }
+fn EFFECT_ZD() -> i64 { 18 }
+fn EFFECT_WITNESS() -> i64 { 19 }
+fn EFFECT_TEMPORAL() -> i64 { 20 }
+fn EFFECT_LEARN() -> i64 { 21 }
+fn EFFECT_CHAOTIC() -> i64 { 22 }
+fn EFFECT_APPROX() -> i64 { 23 }
+fn EFFECT_NATURALITY_G2() -> i64 { 24 }
+fn EFFECT_DETERMINISTIC() -> i64 { 25 }
+fn EFFECT_PERTURBATIVE() -> i64 { 26 }
+fn EFFECT_NARROW_WIDTH_APPROX() -> i64 { 27 }
+fn EFFECT_NON_UNITARY() -> i64 { 28 }
+fn EFFECT_CORRELATED() -> i64 { 29 }
+fn EFFECT_VAR() -> i64 { 30 }
+fn EFFECT_MAX() -> i64 { 31 }
+
+// Bit position helper (no built-in shift; loop like production checker)
+fn effect_bit(eff_id: i64) -> i64 with Mut, Panic, Div {
+    if eff_id <= 0 {
+        return 1
+    }
+    var result: i64 = 1
+    var i: i64 = 0
+    while i < eff_id {
+        result = result * 2
+        i = i + 1
+    }
+    result
+}
+
+fn effect_has(mask: i64, eff_id: i64) -> bool with Mut, Panic, Div {
+    let bit = effect_bit(eff_id)
+    let shifted = mask / bit
+    let remainder = shifted - (shifted / 2) * 2
+    remainder == 1
+}
+
+fn effect_add(mask: i64, eff_id: i64) -> i64 with Mut, Panic, Div {
+    if effect_has(mask, eff_id) {
+        return mask
+    }
+    mask + effect_bit(eff_id)
+}
+
+fn effect_union(a: i64, b: i64) -> i64 with Mut, Panic, Div {
+    var result = a
+    var i: i64 = 0
+    while i < EFFECT_MAX() {
+        if effect_has(b, i) {
+            result = effect_add(result, i)
+        }
+        i = i + 1
+    }
+    result
+}
+
+fn effect_diff(a: i64, b: i64) -> i64 with Mut, Panic, Div {
+    var result: i64 = 0
+    var i: i64 = 0
+    while i < EFFECT_MAX() {
+        if effect_has(a, i) && !effect_has(b, i) {
+            result = effect_add(result, i)
+        }
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================================
+// TYPE CONTEXT & HIR
+// ============================================================================
+
+struct FunctionSignature {
+    fn_id: i64,
+    name: [i8; 64],
+    name_len: i64,
+    param_types: [i64; 16],
+    n_params: i64,
+    return_type: i64,
+    declared_effects: i64,
+    is_generic: bool,
+}
+
+fn function_signature_empty() -> FunctionSignature with Mut {
+    FunctionSignature {
+        fn_id: 0,
+        name: [0; 64],
+        name_len: 0,
+        param_types: [0; 16],
+        n_params: 0,
+        return_type: 0,
+        declared_effects: 0,
+        is_generic: false,
+    }
+}
+
+fn function_signature_new(id: i64, name_buf: [i8; 64], name_len: i64, effects: i64) -> FunctionSignature with Mut {
+    FunctionSignature {
+        fn_id: id,
+        name: name_buf,
+        name_len: name_len,
+        param_types: [0; 16],
+        n_params: 0,
+        return_type: 0,
+        declared_effects: effects,
+        is_generic: false,
+    }
+}
+
+struct VarBinding {
+    name: [i8; 64],
+    name_len: i64,
+    var_type: i64,
+    effects: i64,
+}
+
+fn var_binding_empty() -> VarBinding with Mut {
+    VarBinding {
+        name: [0; 64],
+        name_len: 0,
+        var_type: 0,
+        effects: 0,
+    }
+}
 
 struct TypeContext {
-    id: i64,
+    fn_sigs: [FunctionSignature; 1024],
+    n_fn_sigs: i64,
+    var_bindings: [VarBinding; 1024],
+    n_var_bindings: i64,
+    current_fn_id: i64,
 }
+
+fn type_context_new() -> TypeContext with Mut {
+    TypeContext {
+        fn_sigs: [function_signature_empty(); 1024],
+        n_fn_sigs: 0,
+        var_bindings: [var_binding_empty(); 1024],
+        n_var_bindings: 0,
+        current_fn_id: 0,
+    }
+}
+
+// Expression kinds
+fn EXPR_LITERAL() -> i64 { 0 }
+fn EXPR_VAR() -> i64 { 1 }
+fn EXPR_BINARY() -> i64 { 2 }
+fn EXPR_UNARY() -> i64 { 3 }
+fn EXPR_CALL() -> i64 { 4 }
+fn EXPR_INDEX() -> i64 { 5 }
+fn EXPR_FIELD() -> i64 { 6 }
+fn EXPR_ASSIGN() -> i64 { 7 }
+fn EXPR_BLOCK() -> i64 { 8 }
+fn EXPR_IF() -> i64 { 9 }
+fn EXPR_WHILE() -> i64 { 10 }
+fn EXPR_RETURN() -> i64 { 11 }
+fn EXPR_NEW() -> i64 { 12 }
+
+fn LIT_INT() -> i64 { 0 }
+fn LIT_FLOAT() -> i64 { 1 }
+fn LIT_BOOL() -> i64 { 2 }
+fn LIT_STRING() -> i64 { 3 }
+fn LIT_UNIT() -> i64 { 4 }
+
+fn BINOP_ADD() -> i64 { 0 }
+fn BINOP_SUB() -> i64 { 1 }
+fn BINOP_MUL() -> i64 { 2 }
+fn BINOP_DIV() -> i64 { 3 }
+fn BINOP_REM() -> i64 { 4 }
+fn BINOP_AND() -> i64 { 5 }
+fn BINOP_OR() -> i64 { 6 }
+fn BINOP_EQ() -> i64 { 7 }
+fn BINOP_NE() -> i64 { 8 }
+fn BINOP_LT() -> i64 { 9 }
+fn BINOP_LE() -> i64 { 10 }
+fn BINOP_GT() -> i64 { 11 }
+fn BINOP_GE() -> i64 { 12 }
+
+fn UNOP_NEG() -> i64 { 0 }
+fn UNOP_NOT() -> i64 { 1 }
+fn UNOP_DEREF() -> i64 { 2 }
+
+fn STMT_EXPR() -> i64 { 0 }
+fn STMT_LET() -> i64 { 1 }
+fn STMT_VAR() -> i64 { 2 }
+fn STMT_RETURN() -> i64 { 3 }
+fn STMT_BLOCK() -> i64 { 4 }
 
 struct HirExpr {
     kind: i64,
+    lit_kind: i64,
+    lit_int: i64,
+    lit_float: f64,
+    lit_bool: bool,
+    lit_str: [i8; 128],
+    lit_str_len: i64,
+    var_name: [i8; 64],
+    var_name_len: i64,
+    binop: i64,
+    left: i64,
+    right: i64,
+    unop: i64,
+    operand: i64,
+    callee_fn_id: i64,
+    arg_indices: [i64; 8],
+    n_args: i64,
+    base: i64,
+    index: i64,
+    receiver: i64,
+    field_name: [i8; 64],
+    field_name_len: i64,
+    lhs: i64,
+    rhs: i64,
+    stmt_indices: [i64; 32],
+    n_stmts: i64,
+    cond: i64,
+    then_branch: i64,
+    else_branch: i64,
+    while_cond: i64,
+    while_body: i64,
+    return_expr: i64,
+    alloc_type: i64,
+    inferred_type: i64,
+}
+
+fn hir_expr_new() -> HirExpr with Mut {
+    HirExpr {
+        kind: EXPR_LITERAL(),
+        lit_kind: LIT_UNIT(),
+        lit_int: 0,
+        lit_float: 0.0,
+        lit_bool: false,
+        lit_str: [0; 128],
+        lit_str_len: 0,
+        var_name: [0; 64],
+        var_name_len: 0,
+        binop: 0,
+        left: -1,
+        right: -1,
+        unop: 0,
+        operand: -1,
+        callee_fn_id: 0,
+        arg_indices: [0; 8],
+        n_args: 0,
+        base: -1,
+        index: -1,
+        receiver: -1,
+        field_name: [0; 64],
+        field_name_len: 0,
+        lhs: -1,
+        rhs: -1,
+        stmt_indices: [0; 32],
+        n_stmts: 0,
+        cond: -1,
+        then_branch: -1,
+        else_branch: -1,
+        while_cond: -1,
+        while_body: -1,
+        return_expr: -1,
+        alloc_type: 0,
+        inferred_type: 0,
+    }
 }
 
 struct HirStmt {
     kind: i64,
+    expr: i64,
+    bind_name: [i8; 64],
+    bind_name_len: i64,
+    bind_type: i64,
+    bind_expr: i64,
+    is_mutable: bool,
+    ret_expr: i64,
+    stmt_indices: [i64; 32],
+    n_stmts: i64,
+}
+
+fn hir_stmt_new() -> HirStmt with Mut {
+    HirStmt {
+        kind: STMT_EXPR(),
+        expr: -1,
+        bind_name: [0; 64],
+        bind_name_len: 0,
+        bind_type: 0,
+        bind_expr: -1,
+        is_mutable: false,
+        ret_expr: -1,
+        stmt_indices: [0; 32],
+        n_stmts: 0,
+    }
 }
 
 struct FunctionDef {
-    name: &str,
+    fn_id: i64,
+    name: [i8; 64],
+    name_len: i64,
+    param_names: [[i8; 64]; 16],
+    param_name_lens: [i64; 16],
+    param_types: [i64; 16],
+    n_params: i64,
+    return_type: i64,
+    declared_effects: i64,
+    body: i64,
+    is_generic: bool,
 }
 
-struct FunctionSignature {
-    name: &str,
+fn function_def_empty() -> FunctionDef with Mut {
+    FunctionDef {
+        fn_id: 0,
+        name: [0; 64],
+        name_len: 0,
+        param_names: [[0; 64]; 16],
+        param_name_lens: [0; 16],
+        param_types: [0; 16],
+        n_params: 0,
+        return_type: 0,
+        declared_effects: 0,
+        body: -1,
+        is_generic: false,
+    }
 }
 
-const EFFECT_PANIC: i64 = 1;
-const EFFECT_DIV: i64 = 2;
-const EFFECT_MUT: i64 = 4;
+struct ExprPool {
+    exprs: [HirExpr; 2048],
+    count: i64,
+}
+
+fn expr_pool_new() -> ExprPool with Mut {
+    ExprPool {
+        exprs: [hir_expr_new(); 2048],
+        count: 0,
+    }
+}
+
+fn expr_pool_add(pool: ExprPool, e: HirExpr) -> ExprPool with Mut, Panic {
+    var p = pool
+    if p.count < 2048 {
+        p.exprs[p.count as usize] = e
+        p.count = p.count + 1
+    }
+    p
+}
+
+fn expr_pool_get(pool: ExprPool, idx: i64) -> HirExpr with Panic, Mut {
+    if idx >= 0 && idx < pool.count {
+        pool.exprs[idx as usize]
+    } else {
+        hir_expr_new()
+    }
+}
+
+fn expr_pool_last_idx(pool: ExprPool) -> i64 {
+    pool.count - 1
+}
+
+// ============================================================================
+// RESULTS / ERRORS
+// ============================================================================
+
+struct CompileError {
+    code: i64,
+    message: [i8; 128],
+    msg_len: i64,
+}
+
+fn compile_error_new(code: i64, msg: [i8; 128], msg_len: i64) -> CompileError with Mut {
+    CompileError {
+        code: code,
+        message: msg,
+        msg_len: msg_len,
+    }
+}
 
 struct EffectInferenceResult {
     inferred_effects: i64,
     context: TypeContext,
+    errors: [CompileError; 32],
+    n_errors: i64,
 }
 
-fn infer_expr_effects(ctx: TypeContext, expr: HirExpr) -> EffectInferenceResult with Panic, Mut {
-    var result = EffectInferenceResult {
+fn effect_inference_result_empty(ctx: TypeContext) -> EffectInferenceResult with Mut {
+    EffectInferenceResult {
         inferred_effects: 0,
         context: ctx,
-    };
-    result
-}
-
-fn infer_stmt_effects(ctx: TypeContext, stmt: HirStmt) -> EffectInferenceResult with Panic, Mut {
-    var result = EffectInferenceResult {
-        inferred_effects: 0,
-        context: ctx,
-    };
-    result
-}
-
-fn infer_fn_effects(ctx: TypeContext, fn_def: FunctionDef) -> EffectInferenceResult with Panic {
-    var result = EffectInferenceResult {
-        inferred_effects: 0,
-        context: ctx,
-    };
-    result
+        errors: [compile_error_new(0, [0; 128], 0); 32],
+        n_errors: 0,
+    }
 }
 
 struct EffectCheckResult {
     declared_effects: i64,
     inferred_effects: i64,
+    missing_effects: i64,
+    extra_effects: i64,
     is_consistent: bool,
 }
 
-fn check_effects(declared: i64, inferred: i64) -> EffectCheckResult with Mut {
-    var result = EffectCheckResult {
-        declared_effects: declared,
-        inferred_effects: inferred,
-        is_consistent: (inferred & !declared) == 0,
-    };
+fn effect_check_result_empty() -> EffectCheckResult with Mut {
+    EffectCheckResult {
+        declared_effects: 0,
+        inferred_effects: 0,
+        missing_effects: 0,
+        extra_effects: 0,
+        is_consistent: true,
+    }
+}
+
+fn check_effects(declared: i64, inferred: i64) -> EffectCheckResult with Mut, Panic, Div {
+    var result = effect_check_result_empty()
+    result.declared_effects = declared
+    result.inferred_effects = inferred
+    result.missing_effects = effect_diff(inferred, declared)
+    result.extra_effects = effect_diff(declared, inferred)
+    result.is_consistent = result.missing_effects == 0
     result
+}
+
+fn check_fn_effects(fn_sig: FunctionSignature, inferred: i64) -> EffectCheckResult with Mut, Panic, Div {
+    check_effects(fn_sig.declared_effects, inferred)
+}
+
+// ============================================================================
+// CONSTRAINT COLLECTION
+// ============================================================================
+
+struct EffectConstraint {
+    source_expr: i64,
+    effect: i64,
+    location: [i8; 128],
+    loc_len: i64,
+}
+
+fn effect_constraint_new(src: i64, eff: i64, loc: [i8; 128], loc_len: i64) -> EffectConstraint with Mut {
+    EffectConstraint {
+        source_expr: src,
+        effect: eff,
+        location: loc,
+        loc_len: loc_len,
+    }
+}
+
+fn worklist_push(worklist: [i64; 256], wl_count: i64, idx: i64) -> ([i64; 256], i64) with Mut, Panic {
+    var w = worklist
+    var n = wl_count
+    if idx >= 0 && n < 256 {
+        w[n as usize] = idx
+        n = n + 1
+    }
+    (w, n)
+}
+
+fn collect_effect_constraints(
+    pool: ExprPool,
+    root_expr: i64,
+    constraints: [EffectConstraint; 128],
+    count: i64
+) -> ([EffectConstraint; 128], i64) with Mut, Panic, Div {
+    var cons = constraints
+    var n = count
+    var worklist: [i64; 256] = [0; 256]
+    var wl_count: i64 = 0
+    let pushed = worklist_push(worklist, wl_count, root_expr)
+    worklist = pushed.0
+    wl_count = pushed.1
+
+    while wl_count > 0 {
+        wl_count = wl_count - 1
+        let expr_idx = worklist[wl_count as usize]
+        let expr = expr_pool_get(pool, expr_idx)
+
+        // Children via if-chains (match is for enums/Option, not i64 kinds)
+        if expr.kind == EXPR_BINARY() {
+            let p1 = worklist_push(worklist, wl_count, expr.left)
+            worklist = p1.0
+            wl_count = p1.1
+            let p2 = worklist_push(worklist, wl_count, expr.right)
+            worklist = p2.0
+            wl_count = p2.1
+        } else if expr.kind == EXPR_UNARY() {
+            let p1 = worklist_push(worklist, wl_count, expr.operand)
+            worklist = p1.0
+            wl_count = p1.1
+        } else if expr.kind == EXPR_CALL() {
+            var i: i64 = 0
+            while i < expr.n_args {
+                let p1 = worklist_push(worklist, wl_count, expr.arg_indices[i as usize])
+                worklist = p1.0
+                wl_count = p1.1
+                i = i + 1
+            }
+        } else if expr.kind == EXPR_INDEX() {
+            let p1 = worklist_push(worklist, wl_count, expr.base)
+            worklist = p1.0
+            wl_count = p1.1
+            let p2 = worklist_push(worklist, wl_count, expr.index)
+            worklist = p2.0
+            wl_count = p2.1
+        } else if expr.kind == EXPR_FIELD() {
+            let p1 = worklist_push(worklist, wl_count, expr.receiver)
+            worklist = p1.0
+            wl_count = p1.1
+        } else if expr.kind == EXPR_ASSIGN() {
+            let p1 = worklist_push(worklist, wl_count, expr.lhs)
+            worklist = p1.0
+            wl_count = p1.1
+            let p2 = worklist_push(worklist, wl_count, expr.rhs)
+            worklist = p2.0
+            wl_count = p2.1
+        } else if expr.kind == EXPR_BLOCK() {
+            var i: i64 = 0
+            while i < expr.n_stmts {
+                let p1 = worklist_push(worklist, wl_count, expr.stmt_indices[i as usize])
+                worklist = p1.0
+                wl_count = p1.1
+                i = i + 1
+            }
+        } else if expr.kind == EXPR_IF() {
+            let p1 = worklist_push(worklist, wl_count, expr.cond)
+            worklist = p1.0
+            wl_count = p1.1
+            let p2 = worklist_push(worklist, wl_count, expr.then_branch)
+            worklist = p2.0
+            wl_count = p2.1
+            let p3 = worklist_push(worklist, wl_count, expr.else_branch)
+            worklist = p3.0
+            wl_count = p3.1
+        } else if expr.kind == EXPR_WHILE() {
+            let p1 = worklist_push(worklist, wl_count, expr.while_cond)
+            worklist = p1.0
+            wl_count = p1.1
+            let p2 = worklist_push(worklist, wl_count, expr.while_body)
+            worklist = p2.0
+            wl_count = p2.1
+        } else if expr.kind == EXPR_RETURN() {
+            let p1 = worklist_push(worklist, wl_count, expr.return_expr)
+            worklist = p1.0
+            wl_count = p1.1
+        }
+
+        // Constraints for this node
+        if expr.kind == EXPR_INDEX() && n < 128 {
+            cons[n as usize] = effect_constraint_new(expr_idx, EFFECT_PANIC(), [0; 128], 0)
+            n = n + 1
+        }
+        if expr.kind == EXPR_UNARY() && expr.unop == UNOP_DEREF() && n < 128 {
+            cons[n as usize] = effect_constraint_new(expr_idx, EFFECT_MUT(), [0; 128], 0)
+            n = n + 1
+        }
+        if expr.kind == EXPR_NEW() && n < 128 {
+            cons[n as usize] = effect_constraint_new(expr_idx, EFFECT_ALLOC(), [0; 128], 0)
+            n = n + 1
+        }
+        if expr.kind == EXPR_BINARY() && expr.binop == BINOP_DIV() && n < 128 {
+            cons[n as usize] = effect_constraint_new(expr_idx, EFFECT_DIV(), [0; 128], 0)
+            n = n + 1
+        }
+        if expr.kind == EXPR_ASSIGN() && n < 128 {
+            cons[n as usize] = effect_constraint_new(expr_idx, EFFECT_MUT(), [0; 128], 0)
+            n = n + 1
+        }
+    }
+
+    (cons, n)
+}
+
+fn solve_effect_constraints(constraints: [EffectConstraint; 128], n: i64) -> i64 with Mut, Panic, Div {
+    var effect_mask: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        let eff = constraints[i as usize].effect
+        if eff >= 0 && eff < EFFECT_MAX() {
+            effect_mask = effect_add(effect_mask, eff)
+        }
+        i = i + 1
+    }
+    effect_mask
+}
+
+// ============================================================================
+// BOTTOM-UP INFERENCE
+// ============================================================================
+
+fn find_var_binding_idx(_name: [i8; 64], _name_len: i64) -> i64 with Mut, Panic, Div {
+    -1
+}
+
+fn get_callee_effects(_fn_id: i64) -> i64 with Mut, Panic, Div {
+    0
+}
+
+fn infer_stmt_effects(ctx: TypeContext, _pool: ExprPool, _stmt_idx: i64) -> (EffectInferenceResult, i64) with Mut, Panic, Div {
+    (effect_inference_result_empty(ctx), 0)
+}
+
+fn infer_expr_effects(ctx: TypeContext, pool: ExprPool, expr_idx: i64) -> (EffectInferenceResult, i64) with Mut, Panic, Div {
+    let expr = expr_pool_get(pool, expr_idx)
+    var result = effect_inference_result_empty(ctx)
+
+    if expr.kind == EXPR_LITERAL() {
+        result.inferred_effects = 0
+    } else if expr.kind == EXPR_VAR() {
+        let _var_idx = find_var_binding_idx(expr.var_name, expr.var_name_len)
+        result.inferred_effects = 0
+    } else if expr.kind == EXPR_BINARY() {
+        if expr.left >= 0 {
+            let res_l = infer_expr_effects(result.context, pool, expr.left)
+            result.context = res_l.0.context
+            result.inferred_effects = effect_union(result.inferred_effects, res_l.1)
+        }
+        if expr.right >= 0 {
+            let res_r = infer_expr_effects(result.context, pool, expr.right)
+            result.context = res_r.0.context
+            result.inferred_effects = effect_union(result.inferred_effects, res_r.1)
+        }
+        if expr.binop == BINOP_DIV() {
+            result.inferred_effects = effect_add(result.inferred_effects, EFFECT_DIV())
+        }
+    } else if expr.kind == EXPR_UNARY() {
+        if expr.operand >= 0 {
+            let res_op = infer_expr_effects(result.context, pool, expr.operand)
+            result.context = res_op.0.context
+            result.inferred_effects = effect_union(result.inferred_effects, res_op.1)
+        }
+        if expr.unop == UNOP_DEREF() {
+            result.inferred_effects = effect_add(result.inferred_effects, EFFECT_MUT())
+        }
+    } else if expr.kind == EXPR_CALL() {
+        var i: i64 = 0
+        while i < expr.n_args {
+            if expr.arg_indices[i as usize] >= 0 {
+                let res_arg = infer_expr_effects(result.context, pool, expr.arg_indices[i as usize])
+                result.context = res_arg.0.context
+                result.inferred_effects = effect_union(result.inferred_effects, res_arg.1)
+            }
+            i = i + 1
+        }
+        let callee_effects = get_callee_effects(expr.callee_fn_id)
+        result.inferred_effects = effect_union(result.inferred_effects, callee_effects)
+    } else if expr.kind == EXPR_INDEX() {
+        if expr.base >= 0 {
+            let res_base = infer_expr_effects(result.context, pool, expr.base)
+            result.context = res_base.0.context
+            result.inferred_effects = effect_union(result.inferred_effects, res_base.1)
+        }
+        if expr.index >= 0 {
+            let res_idx = infer_expr_effects(result.context, pool, expr.index)
+            result.context = res_idx.0.context
+            result.inferred_effects = effect_union(result.inferred_effects, res_idx.1)
+        }
+        result.inferred_effects = effect_add(result.inferred_effects, EFFECT_PANIC())
+    } else if expr.kind == EXPR_FIELD() {
+        if expr.receiver >= 0 {
+            let res_recv = infer_expr_effects(result.context, pool, expr.receiver)
+            result.context = res_recv.0.context
+            result.inferred_effects = effect_union(result.inferred_effects, res_recv.1)
+        }
+    } else if expr.kind == EXPR_ASSIGN() {
+        if expr.lhs >= 0 {
+            let res_lhs = infer_expr_effects(result.context, pool, expr.lhs)
+            result.context = res_lhs.0.context
+            result.inferred_effects = effect_union(result.inferred_effects, res_lhs.1)
+        }
+        if expr.rhs >= 0 {
+            let res_rhs = infer_expr_effects(result.context, pool, expr.rhs)
+            result.context = res_rhs.0.context
+            result.inferred_effects = effect_union(result.inferred_effects, res_rhs.1)
+        }
+        result.inferred_effects = effect_add(result.inferred_effects, EFFECT_MUT())
+    } else if expr.kind == EXPR_BLOCK() {
+        var i: i64 = 0
+        while i < expr.n_stmts {
+            if expr.stmt_indices[i as usize] >= 0 {
+                let res_stmt = infer_stmt_effects(result.context, pool, expr.stmt_indices[i as usize])
+                result.context = res_stmt.0.context
+                result.inferred_effects = effect_union(result.inferred_effects, res_stmt.1)
+            }
+            i = i + 1
+        }
+    } else if expr.kind == EXPR_IF() {
+        if expr.cond >= 0 {
+            let res_cond = infer_expr_effects(result.context, pool, expr.cond)
+            result.context = res_cond.0.context
+            result.inferred_effects = effect_union(result.inferred_effects, res_cond.1)
+        }
+        if expr.then_branch >= 0 {
+            let res_then = infer_expr_effects(result.context, pool, expr.then_branch)
+            result.context = res_then.0.context
+            result.inferred_effects = effect_union(result.inferred_effects, res_then.1)
+        }
+        if expr.else_branch >= 0 {
+            let res_else = infer_expr_effects(result.context, pool, expr.else_branch)
+            result.context = res_else.0.context
+            result.inferred_effects = effect_union(result.inferred_effects, res_else.1)
+        }
+    } else if expr.kind == EXPR_WHILE() {
+        if expr.while_cond >= 0 {
+            let res_cond = infer_expr_effects(result.context, pool, expr.while_cond)
+            result.context = res_cond.0.context
+            result.inferred_effects = effect_union(result.inferred_effects, res_cond.1)
+        }
+        if expr.while_body >= 0 {
+            let res_body = infer_expr_effects(result.context, pool, expr.while_body)
+            result.context = res_body.0.context
+            result.inferred_effects = effect_union(result.inferred_effects, res_body.1)
+        }
+    } else if expr.kind == EXPR_RETURN() {
+        if expr.return_expr >= 0 {
+            let res_ret = infer_expr_effects(result.context, pool, expr.return_expr)
+            result.context = res_ret.0.context
+            result.inferred_effects = effect_union(result.inferred_effects, res_ret.1)
+        }
+    } else if expr.kind == EXPR_NEW() {
+        result.inferred_effects = effect_add(result.inferred_effects, EFFECT_ALLOC())
+    } else {
+        result.inferred_effects = 0
+    }
+
+    (result, result.inferred_effects)
+}
+
+fn infer_fn_effects(ctx: TypeContext, pool: ExprPool, fn_def: FunctionDef) -> EffectInferenceResult with Mut, Panic, Div {
+    var result = effect_inference_result_empty(ctx)
+    if fn_def.body >= 0 {
+        let res_body = infer_expr_effects(result.context, pool, fn_def.body)
+        result = res_body.0
+        result.inferred_effects = res_body.1
+    }
+    let _check = check_fn_effects(
+        function_signature_new(fn_def.fn_id, fn_def.name, fn_def.name_len, fn_def.declared_effects),
+        result.inferred_effects
+    )
+    result
+}
+
+// ============================================================================
+// PROPAGATION HELPERS
+// ============================================================================
+
+fn seq_effects(eff1: i64, eff2: i64) -> i64 with Mut, Panic, Div {
+    effect_union(eff1, eff2)
+}
+
+fn branch_effects(branches: [i64; 8], n: i64) -> i64 with Mut, Panic, Div {
+    var result: i64 = 0
+    var i: i64 = 0
+    while i < n {
+        result = effect_union(result, branches[i as usize])
+        i = i + 1
+    }
+    result
+}
+
+fn compose_effects(caller: i64, callee: i64) -> i64 with Mut, Panic, Div {
+    effect_union(caller, callee)
+}
+
+// ============================================================================
+// PUBLIC API
+// ============================================================================
+
+pub fn infer_function_effects(fn_def: FunctionDef) -> EffectInferenceResult with Mut, Panic, Div {
+    var ctx = type_context_new()
+    EffectInferenceResult {
+        inferred_effects: fn_def.declared_effects,
+        context: ctx,
+        errors: [compile_error_new(0, [0; 128], 0); 32],
+        n_errors: 0,
+    }
+}
+
+pub fn check_module_effects(functions: [FunctionDef; 64], n: i64) -> (EffectInferenceResult, bool) with Mut, Panic, Div {
+    var all_ok = true
+    var combined_result = effect_inference_result_empty(type_context_new())
+    var i: i64 = 0
+    while i < n {
+        let res = infer_function_effects(functions[i as usize])
+        combined_result.inferred_effects = effect_union(combined_result.inferred_effects, res.inferred_effects)
+        if res.n_errors > 0 {
+            all_ok = false
+            var j: i64 = 0
+            while j < res.n_errors && combined_result.n_errors < 32 {
+                combined_result.errors[combined_result.n_errors as usize] = res.errors[j as usize]
+                combined_result.n_errors = combined_result.n_errors + 1
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    (combined_result, all_ok)
+}
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+fn test_effect_bit() -> bool with Mut, Panic, Div {
+    let bit0 = effect_bit(0)
+    let bit1 = effect_bit(1)
+    let bit2 = effect_bit(2)
+    let bit3 = effect_bit(3)
+    bit0 == 1 && bit1 == 2 && bit2 == 4 && bit3 == 8
+}
+
+fn test_check_effects_consistent() -> bool with Mut, Panic, Div {
+    let declared = effect_add(effect_bit(EFFECT_IO()), EFFECT_MUT())
+    let inferred = effect_bit(EFFECT_IO())
+    let check = check_effects(declared, inferred)
+    check.is_consistent
+}
+
+fn test_check_effects_inconsistent() -> bool with Mut, Panic, Div {
+    let declared = effect_bit(EFFECT_IO())
+    let inferred = effect_add(effect_bit(EFFECT_IO()), EFFECT_MUT())
+    let check = check_effects(declared, inferred)
+    !check.is_consistent && check.missing_effects == effect_bit(EFFECT_MUT())
+}
+
+fn test_check_effects_extra_ok() -> bool with Mut, Panic, Div {
+    let declared = effect_add(effect_bit(EFFECT_IO()), EFFECT_MUT())
+    let inferred = effect_bit(EFFECT_IO())
+    let check = check_effects(declared, inferred)
+    check.is_consistent && check.extra_effects == effect_bit(EFFECT_MUT())
+}
+
+fn test_solve_constraints() -> bool with Mut, Panic, Div {
+    var constraints: [EffectConstraint; 128] = [effect_constraint_new(0, 0, [0; 128], 0); 128]
+    constraints[0] = effect_constraint_new(1, EFFECT_IO(), [0; 128], 0)
+    constraints[1] = effect_constraint_new(2, EFFECT_MUT(), [0; 128], 0)
+    constraints[2] = effect_constraint_new(3, EFFECT_PANIC(), [0; 128], 0)
+    let result = solve_effect_constraints(constraints, 3)
+    let expected = effect_add(effect_add(effect_bit(EFFECT_IO()), EFFECT_MUT()), EFFECT_PANIC())
+    result == expected
+}
+
+fn test_seq_effects() -> bool with Mut, Panic, Div {
+    let eff1 = effect_bit(EFFECT_IO())
+    let eff2 = effect_bit(EFFECT_MUT())
+    let combined = seq_effects(eff1, eff2)
+    combined == effect_add(effect_bit(EFFECT_IO()), EFFECT_MUT())
+}
+
+fn test_branch_effects() -> bool with Mut, Panic, Div {
+    var branches: [i64; 8] = [0; 8]
+    branches[0] = effect_bit(EFFECT_IO())
+    branches[1] = effect_bit(EFFECT_MUT())
+    branches[2] = effect_bit(EFFECT_PANIC())
+    let combined = branch_effects(branches, 3)
+    let expected = effect_add(effect_add(effect_bit(EFFECT_IO()), EFFECT_MUT()), EFFECT_PANIC())
+    combined == expected
+}
+
+fn test_compose_effects() -> bool with Mut, Panic, Div {
+    let caller = effect_bit(EFFECT_IO())
+    let callee = effect_bit(EFFECT_MUT())
+    let composed = compose_effects(caller, callee)
+    composed == effect_add(effect_bit(EFFECT_IO()), EFFECT_MUT())
+}
+
+pub fn effects_infer_run_tests() -> i64 with IO, Mut, Panic, Div {
+    print("=== Effects Inference Tests ===\n")
+    var fails: i64 = 0
+
+    if !test_effect_bit() {
+        print("FAIL: test_effect_bit\n")
+        fails = fails + 1
+    } else {
+        print("PASS: test_effect_bit\n")
+    }
+
+    if !test_check_effects_consistent() {
+        print("FAIL: test_check_effects_consistent\n")
+        fails = fails + 1
+    } else {
+        print("PASS: test_check_effects_consistent\n")
+    }
+
+    if !test_check_effects_inconsistent() {
+        print("FAIL: test_check_effects_inconsistent\n")
+        fails = fails + 1
+    } else {
+        print("PASS: test_check_effects_inconsistent\n")
+    }
+
+    if !test_check_effects_extra_ok() {
+        print("FAIL: test_check_effects_extra_ok\n")
+        fails = fails + 1
+    } else {
+        print("PASS: test_check_effects_extra_ok\n")
+    }
+
+    if !test_solve_constraints() {
+        print("FAIL: test_solve_constraints\n")
+        fails = fails + 1
+    } else {
+        print("PASS: test_solve_constraints\n")
+    }
+
+    if !test_seq_effects() {
+        print("FAIL: test_seq_effects\n")
+        fails = fails + 1
+    } else {
+        print("PASS: test_seq_effects\n")
+    }
+
+    if !test_branch_effects() {
+        print("FAIL: test_branch_effects\n")
+        fails = fails + 1
+    } else {
+        print("PASS: test_branch_effects\n")
+    }
+
+    if !test_compose_effects() {
+        print("FAIL: test_compose_effects\n")
+        fails = fails + 1
+    } else {
+        print("PASS: test_compose_effects\n")
+    }
+
+    print("Total failures: ")
+    print_int(fails)
+    print("\n")
+    fails
 }

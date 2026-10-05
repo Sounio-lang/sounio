@@ -7,6 +7,8 @@ validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.dissertation.results.determinism-audit-summary-v1
 -->
 
+> **Note 2026-09-26: the determinism findings stand; the quoted u_MC / rel_Hess values do not.** The `ms28_exp` root cause, the intra- and inter-process determinism measurements and the Welford/two-pass agreement are unaffected. The absolute values quoted here (u_MC = 0.549197, rel_Hess = 0.155, …) were produced through `pbpk28_full_cn_step`, whose negativity floors biased AUC_blood by +140% at the MC's dt = 0.5 h. For the regenerated values see [`prior_evolution_sprint_summary_v3.md`](prior_evolution_sprint_summary_v3.md); on the corrected kernel, two independent processes print byte-identical E1/E4 results (see that summary). Audit: `docs/audit/PBPK28_CN_RANNACHER_MASS_BALANCE_2026-09-26.md`.
+
 # PBPK28 MC Numerical-Determinism Audit — Summary
 
 **Date:** 2026-05-13  
@@ -90,6 +92,16 @@ The self-implemented `exp` function (post-fix) has < 10⁻¹² relative error fo
 `|x| ≤ 40`. The `ln` function has < 2 × 10⁻⁸ relative error.
 
 **Gate:** `MC_PBPK28_COMPILER_DETERMINISM_PASS` (via `mc_determinism_probe.sh --post-fix`)
+
+> **Engine dependency (verified 2026-08-17).** `scripts/audit/mc_determinism_probe.sh`
+> hardcodes `SOUC="./bin/souc"` (line 26) with no engine override, and under `set -euo
+> pipefail` it compiles *and executes* `pbpk28_mc_cross_validation.sio` and
+> `pbpk28_mc_prior_family_sweep.sio`. Both of those harnesses **crash at runtime with `rc=182`**
+> (`madaros: handles full`, a resource-ceiling abort) under default Madaros — so this script
+> currently aborts before it can emit `MC_PBPK28_COMPILER_DETERMINISM_PASS` at all when run
+> under the project's default engine. The "Sounio on x86-64 Linux" codegen claim above is true
+> of both engines in principle (same `addsd`/`subsd`/`mulsd`/`divsd` scalar codegen), but this
+> specific gate marker has only ever been produced under `SOUNIO_SOUC_ENGINE=lean_single`.
 
 ---
 

@@ -6,7 +6,7 @@
 // Test Helpers
 // ============================================================================
 
-fn build_module_add() -> IrModule with Mut, Panic, Div {
+fn build_module_add() -> IrModule with Alloc, Mut, Panic, Div {
     // Module A: fn add(a: i64, b: i64) -> i64 { return a + b }
     var module = ir_empty_module()
     module.fn_count = 1
@@ -20,15 +20,15 @@ fn build_module_add() -> IrModule with Mut, Panic, Div {
     func.instr_count = 3
 
     // v2 = v0 + v1
-    func.instrs[0] = ir_binop(2, 0, BinaryOp::OpAdd, 1)
+    ir_arena_store(ir_region_slot_w(func.region, (0)), ir_binop(2, 0, BinaryOp::OpAdd, 1))
 
     // return v2
-    func.instrs[1] = ir_return(2)
+    ir_arena_store(ir_region_slot_w(func.region, (1)), ir_return(2))
 
     // Extra nop for padding
-    func.instrs[2] = ir_nop()
+    ir_arena_store(ir_region_slot_w(func.region, (2)), ir_nop())
 
-    module.functions[0] = func
+    ir_fn_set(&! module, 0, func)
     module
 }
 
@@ -44,28 +44,28 @@ fn build_module_main() -> IrModule with Mut, Panic, Div, Alloc {
     func.instr_count = 4
 
     // v0 = 10
-    func.instrs[0] = ir_load_imm(0, 10)
+    ir_arena_store(ir_region_slot_w(func.region, (0)), ir_load_imm(0, 10))
 
     // v1 = 32
-    func.instrs[1] = ir_load_imm(1, 32)
+    ir_arena_store(ir_region_slot_w(func.region, (1)), ir_load_imm(1, 32))
 
     // v2 = call add(v0, v1)
     // Build argument list
     let arg0 = ir_reg_list_single(0)
     let args = ir_reg_list_append(arg0, 1)
 
-    func.instrs[2] = ir_call(
+    ir_arena_store(ir_region_slot_w(func.region, (2)), ir_call(
         2,                              // dst = v2
         -1,                             // fn_id = unresolved (will be patched by linker)
         ir_name_from_bytes(97, 100, 100, 0, 3),  // name = "add"
         Some(Box::new(args)),           // call_args
         2                               // arg_count
-    )
+    ))
 
     // return v2
-    func.instrs[3] = ir_return(2)
+    ir_arena_store(ir_region_slot_w(func.region, (3)), ir_return(2))
 
-    module.functions[0] = func
+    ir_fn_set(&! module, 0, func)
     module
 }
 
@@ -88,10 +88,10 @@ fn test_link_two_modules() -> i64 with Mut, Panic, Div, Alloc {
     if result.module.fn_count != 2 { return 2 }
 
     // Verify function names
-    if !ir_name_eq(result.module.functions[0].name, ir_name_from_bytes(97, 100, 100, 0, 3)) {
+    if !ir_name_eq(ir_fn_get(&result.module, 0).name, ir_name_from_bytes(97, 100, 100, 0, 3)) {
         return 3  // First function should be "add"
     }
-    if !ir_name_eq(result.module.functions[1].name, ir_name_from_bytes(109, 97, 105, 110, 4)) {
+    if !ir_name_eq(ir_fn_get(&result.module, 1).name, ir_name_from_bytes(109, 97, 105, 110, 4)) {
         return 4  // Second function should be "main"
     }
 
@@ -112,8 +112,8 @@ fn test_call_patching() -> i64 with Mut, Panic, Div, Alloc {
     if !result.ok { return 1 }
 
     // Check the call instruction in main (function 1, instruction 2)
-    let main_func = result.module.functions[1]
-    let call_instr = main_func.instrs[2]
+    let main_func = ir_fn_get(&result.module, 1)
+    let call_instr = ir_arena_load(ir_region_slot_r(main_func.region, (2)))
 
     if call_instr.op != IrOpcode::IrCall { return 2 }
 
@@ -145,9 +145,9 @@ fn test_link_three_modules() -> i64 with Mut, Panic, Div, Alloc {
     func_a.param_regs[0] = 0
     func_a.reg_count = 2
     func_a.instr_count = 2
-    func_a.instrs[0] = ir_binop(1, 0, BinaryOp::OpAdd, 0)  // v1 = v0 + v0
-    func_a.instrs[1] = ir_return(1)
-    module_a.functions[0] = func_a
+    ir_arena_store(ir_region_slot_w(func_a.region, (0)), ir_binop(1, 0, BinaryOp::OpAdd, 0)) // v1 = v0 + v0
+    ir_arena_store(ir_region_slot_w(func_a.region, (1)), ir_return(1))
+    ir_fn_set(&! module_a, 0, func_a)
 
     // Module B: fn quad(x: i64) -> i64 { double(double(x)) }
     var module_b = ir_empty_module()
@@ -161,25 +161,25 @@ fn test_link_three_modules() -> i64 with Mut, Panic, Div, Alloc {
 
     // v1 = call double(v0)
     let args1 = ir_reg_list_single(0)
-    func_b.instrs[0] = ir_call(
+    ir_arena_store(ir_region_slot_w(func_b.region, (0)), ir_call(
         1, -1,
         ir_name_from_bytes(100, 111, 117, 98, 6),
         Some(Box::new(args1)),
         1
-    )
+    ))
 
     // v2 = call double(v1)
     let args2 = ir_reg_list_single(1)
-    func_b.instrs[1] = ir_call(
+    ir_arena_store(ir_region_slot_w(func_b.region, (1)), ir_call(
         2, -1,
         ir_name_from_bytes(100, 111, 117, 98, 6),
         Some(Box::new(args2)),
         1
-    )
+    ))
 
     // return v2
-    func_b.instrs[2] = ir_return(2)
-    module_b.functions[0] = func_b
+    ir_arena_store(ir_region_slot_w(func_b.region, (2)), ir_return(2))
+    ir_fn_set(&! module_b, 0, func_b)
 
     // Module C: fn main() -> i64 { quad(10) }  // Returns 40
     var module_c = ir_empty_module()
@@ -191,20 +191,20 @@ fn test_link_three_modules() -> i64 with Mut, Panic, Div, Alloc {
     func_c.instr_count = 3
 
     // v0 = 10
-    func_c.instrs[0] = ir_load_imm(0, 10)
+    ir_arena_store(ir_region_slot_w(func_c.region, (0)), ir_load_imm(0, 10))
 
     // v1 = call quad(v0)
     let args3 = ir_reg_list_single(0)
-    func_c.instrs[1] = ir_call(
+    ir_arena_store(ir_region_slot_w(func_c.region, (1)), ir_call(
         1, -1,
         ir_name_from_bytes(113, 117, 97, 100, 4),
         Some(Box::new(args3)),
         1
-    )
+    ))
 
     // return v1
-    func_c.instrs[2] = ir_return(1)
-    module_c.functions[0] = func_c
+    ir_arena_store(ir_region_slot_w(func_c.region, (2)), ir_return(1))
+    ir_fn_set(&! module_c, 0, func_c)
 
     // Link all three
     var modules: [IrModule; 64] = [ir_empty_module(); 64]
@@ -219,11 +219,11 @@ fn test_link_three_modules() -> i64 with Mut, Panic, Div, Alloc {
 
     // Verify all calls are patched correctly
     // quad's first call to double should reference fn 0
-    if result.module.functions[1].instrs[0].fn_id != 0 { return 3 }
+    if IR_A_FN_ID[(ir_region_slot_r(ir_fn_get(&result.module, 1).region, (0))) as usize] != 0 { return 3 }
     // quad's second call to double should also reference fn 0
-    if result.module.functions[1].instrs[1].fn_id != 0 { return 4 }
+    if IR_A_FN_ID[(ir_region_slot_r(ir_fn_get(&result.module, 1).region, (1))) as usize] != 0 { return 4 }
     // main's call to quad should reference fn 1
-    if result.module.functions[2].instrs[1].fn_id != 1 { return 5 }
+    if IR_A_FN_ID[(ir_region_slot_r(ir_fn_get(&result.module, 2).region, (1))) as usize] != 1 { return 5 }
 
     0
 }

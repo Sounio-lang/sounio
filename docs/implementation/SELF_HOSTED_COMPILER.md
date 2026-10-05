@@ -46,10 +46,15 @@ The fastest way to orient yourself is:
 - `self-hosted/compiler/module_loader.sio`
 - `self-hosted/compiler/lexer.sio`
 - `self-hosted/compiler/parser.sio`
-- `self-hosted/compiler/typecheck.sio`
-- `self-hosted/compiler/gen.sio`
 
 Those files are useful entry points, but they are not the full implementation. In most cases they fan out into the subsystem directories listed above.
+
+`self-hosted/compiler/typecheck.sio` and `self-hosted/compiler/gen.sio` are no
+longer entry points: `2661416ce2` archived both as superseded monolithic compiler
+stages, and they now sit unbuilt at `archive/dead-code-2026/compiler/typecheck.sio`
+and `archive/dead-code-2026/compiler/gen.sio`. Type checking now lives under
+`self-hosted/check/` (start at `self-hosted/check/check.sio`) and code generation
+under `self-hosted/compiler/codegen/` and `self-hosted/ir/`.
 
 ## 4. What "self-hosted-first" means in practice
 
@@ -75,7 +80,9 @@ The source tree contains more capability than the checked public artifact expose
 For the current checked JIT artifact:
 
 - version: `Madaros v0.80.0`
-- enabled backend: Cranelift JIT
+- enabled backend: **none of the JIT kind**. `souc info` prints `[-] Cranelift JIT
+  - rebuild with --features jit`; measured 2026-08-27 no artifact compiles it.
+  This line read "enabled backend: Cranelift JIT"; it is not compiled.
 - disabled in the checked artifact: LLVM, GPU codegen, LSP, SMT, ontology, distributed, package-manager features
 
 For the separate checked GPU artifact:
@@ -87,7 +94,12 @@ For the separate checked GPU artifact:
 That means the right phrasing is:
 
 - "the repo contains GPU and LLVM backend work" when discussing source layout
-- "the checked JIT artifact exposes Cranelift JIT by default" when discussing the default path
+- **NOT** "the checked JIT artifact exposes Cranelift JIT by default" — not compiled. There is no
+  checked JIT artifact — `souc-linux-x86_64-jit` is tracked nowhere — and Cranelift
+  is compiled into nothing: `souc info` prints `[-] Cranelift JIT - rebuild with
+  --features jit`. Measured 2026-08-27. This line sat in a list of *recommended
+  phrasings*, so it did not merely record the error, it prescribed repeating it.
+  The right phrasing is "the shipped engine is native-v2 (Madaros)".
 - "the checked GPU artifact exposes GPU codegen and PTX emission" when discussing the GPU path
 
 ## 6. Validation surfaces

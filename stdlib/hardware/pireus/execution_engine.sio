@@ -1,0 +1,354 @@
+//! Pireus execution-engine ontology.
+//!
+//! Machines may own multiple CPU/GPU engines. ISA and execution interface are
+//! properties of an engine or target blueprint, never scalar machine fields.
+
+use hardware::pireus::model::{
+    PIREUS_RDF_TYPE, PIREUS_CLASS_ONTOLOGY_CLASS,
+    PIREUS_CLASS_EVIDENCE_ROLE, PIREUS_HAS_EVIDENCE_ROLE,
+}
+use hardware::pireus::target_profile::{
+    pireus_v01_store,
+    PIREUS_CLASS_MACHINE, PIREUS_HAS_TARGET,
+    PIREUS_TARGET_DARWIN_XEON, PIREUS_TARGET_APPLE_SILICON,
+    PIREUS_TARGET_DGX_SPARK,
+    PIREUS_EVIDENCE_OBSERVED_KERNEL,
+    PIREUS_MACHINE_R740, PIREUS_MACHINE_DL380, PIREUS_MACHINE_5860,
+    PIREUS_MACHINE_T560, PIREUS_MACHINE_R770,
+}
+use ontology::query::{
+    TripleStore, SparqlResult,
+    triple_store_add, triple_iri,
+    sparql_new, sparql_select, sparql_add_pattern, sparql_execute,
+    triple_pattern_new, queryterm_variable, queryterm_iri,
+}
+
+pub const PIREUS_CLASS_CLUSTER: i64 = 703000
+pub const PIREUS_CLASS_EXECUTION_ENGINE: i64 = 703001
+pub const PIREUS_CLASS_OBSERVED_EXECUTION_ENGINE: i64 = 703002
+pub const PIREUS_CLASS_ENGINE_KIND: i64 = 703003
+pub const PIREUS_CLASS_ENGINE_ISA: i64 = 703004
+pub const PIREUS_CLASS_EXECUTION_INTERFACE: i64 = 703005
+pub const PIREUS_CLASS_DRIVER_PROFILE: i64 = 703006
+pub const PIREUS_CLASS_ENGINE_BLUEPRINT: i64 = 703007
+pub const PIREUS_CLASS_MULTI_ENGINE_MACHINE: i64 = 703008
+
+pub const PIREUS_CLUSTER_HAS_MACHINE: i64 = 703100
+pub const PIREUS_MACHINE_HAS_ENGINE: i64 = 703101
+pub const PIREUS_ENGINE_HAS_KIND: i64 = 703102
+pub const PIREUS_ENGINE_IMPLEMENTS_ISA: i64 = 703103
+pub const PIREUS_ENGINE_SUPPORTS_INTERFACE: i64 = 703104
+pub const PIREUS_ENGINE_HAS_DRIVER_PROFILE: i64 = 703105
+pub const PIREUS_TARGET_DECLARES_BLUEPRINT: i64 = 703106
+
+pub const PIREUS_CLUSTER_DARWIN: i64 = 703200
+pub const PIREUS_ENGINE_KIND_CPU: i64 = 703210
+pub const PIREUS_ENGINE_KIND_GPU: i64 = 703211
+
+pub const PIREUS_ENGINE_ISA_X86_64: i64 = 703220
+pub const PIREUS_ENGINE_ISA_AARCH64: i64 = 703221
+pub const PIREUS_ENGINE_ISA_NVIDIA_SM75: i64 = 703222
+pub const PIREUS_ENGINE_ISA_NVIDIA_SM86: i64 = 703223
+pub const PIREUS_ENGINE_ISA_NVIDIA_SM89: i64 = 703224
+pub const PIREUS_ENGINE_ISA_NVIDIA_SM121: i64 = 703225
+
+pub const PIREUS_INTERFACE_CUDA: i64 = 703230
+pub const PIREUS_INTERFACE_METAL: i64 = 703231
+pub const PIREUS_DRIVER_NVIDIA_595_71_05: i64 = 703240
+pub const PIREUS_EVIDENCE_DECLARED_BLUEPRINT: i64 = 703250
+pub const PIREUS_EVIDENCE_OBSERVED_DRIVER: i64 = 703251
+
+pub const PIREUS_ENGINE_CPU_R740: i64 = 703300
+pub const PIREUS_ENGINE_CPU_DL380: i64 = 703301
+pub const PIREUS_ENGINE_CPU_5860: i64 = 703302
+pub const PIREUS_ENGINE_CPU_T560: i64 = 703303
+pub const PIREUS_ENGINE_CPU_R770: i64 = 703304
+
+pub const PIREUS_ENGINE_GPU_R740_A5000: i64 = 703310
+pub const PIREUS_ENGINE_GPU_R740_RTX8000: i64 = 703311
+pub const PIREUS_ENGINE_GPU_5860_RTX4000_ADA: i64 = 703312
+pub const PIREUS_ENGINE_GPU_R770_L4: i64 = 703313
+
+pub const PIREUS_BLUEPRINT_DARWIN_CPU: i64 = 703400
+pub const PIREUS_BLUEPRINT_DARWIN_GPU: i64 = 703401
+pub const PIREUS_BLUEPRINT_APPLE_CPU: i64 = 703402
+pub const PIREUS_BLUEPRINT_APPLE_GPU: i64 = 703403
+pub const PIREUS_BLUEPRINT_DGX_CPU: i64 = 703404
+pub const PIREUS_BLUEPRINT_DGX_GPU: i64 = 703405
+
+fn engine_add_class(store: &TripleStore, class_id: i64) {
+    triple_store_add(store, triple_iri(
+        class_id, PIREUS_RDF_TYPE, PIREUS_CLASS_ONTOLOGY_CLASS))
+}
+
+fn engine_add_typed(store: &TripleStore, subject: i64, class_id: i64) {
+    triple_store_add(store, triple_iri(subject, PIREUS_RDF_TYPE, class_id))
+}
+
+fn engine_add_cpu(store: &TripleStore, machine: i64, engine: i64) {
+    triple_store_add(store, triple_iri(
+        machine, PIREUS_MACHINE_HAS_ENGINE, engine))
+    engine_add_typed(store, engine, PIREUS_CLASS_EXECUTION_ENGINE)
+    engine_add_typed(store, engine, PIREUS_CLASS_OBSERVED_EXECUTION_ENGINE)
+    triple_store_add(store, triple_iri(
+        engine, PIREUS_ENGINE_HAS_KIND, PIREUS_ENGINE_KIND_CPU))
+    triple_store_add(store, triple_iri(
+        engine, PIREUS_ENGINE_IMPLEMENTS_ISA, PIREUS_ENGINE_ISA_X86_64))
+    triple_store_add(store, triple_iri(
+        engine, PIREUS_HAS_EVIDENCE_ROLE,
+        PIREUS_EVIDENCE_OBSERVED_KERNEL))
+}
+
+fn engine_add_gpu(
+    store: &TripleStore, machine: i64, engine: i64, isa: i64,
+) {
+    triple_store_add(store, triple_iri(
+        machine, PIREUS_MACHINE_HAS_ENGINE, engine))
+    engine_add_typed(store, engine, PIREUS_CLASS_EXECUTION_ENGINE)
+    engine_add_typed(store, engine, PIREUS_CLASS_OBSERVED_EXECUTION_ENGINE)
+    triple_store_add(store, triple_iri(
+        engine, PIREUS_ENGINE_HAS_KIND, PIREUS_ENGINE_KIND_GPU))
+    triple_store_add(store, triple_iri(
+        engine, PIREUS_ENGINE_IMPLEMENTS_ISA, isa))
+    triple_store_add(store, triple_iri(
+        engine, PIREUS_ENGINE_SUPPORTS_INTERFACE, PIREUS_INTERFACE_CUDA))
+    triple_store_add(store, triple_iri(
+        engine, PIREUS_ENGINE_HAS_DRIVER_PROFILE,
+        PIREUS_DRIVER_NVIDIA_595_71_05))
+    triple_store_add(store, triple_iri(
+        engine, PIREUS_HAS_EVIDENCE_ROLE,
+        PIREUS_EVIDENCE_OBSERVED_DRIVER))
+}
+
+fn engine_add_blueprint(
+    store: &TripleStore,
+    target: i64,
+    blueprint: i64,
+    kind: i64,
+    isa: i64,
+    interface: i64,
+) {
+    triple_store_add(store, triple_iri(
+        target, PIREUS_TARGET_DECLARES_BLUEPRINT, blueprint))
+    engine_add_typed(store, blueprint, PIREUS_CLASS_ENGINE_BLUEPRINT)
+    triple_store_add(store, triple_iri(
+        blueprint, PIREUS_ENGINE_HAS_KIND, kind))
+    if isa != 0 {
+        triple_store_add(store, triple_iri(
+            blueprint, PIREUS_ENGINE_IMPLEMENTS_ISA, isa))
+    }
+    if interface != 0 {
+        triple_store_add(store, triple_iri(
+            blueprint, PIREUS_ENGINE_SUPPORTS_INTERFACE, interface))
+    }
+    triple_store_add(store, triple_iri(
+        blueprint, PIREUS_HAS_EVIDENCE_ROLE,
+        PIREUS_EVIDENCE_DECLARED_BLUEPRINT))
+}
+
+pub fn pireus_execution_engine_store() -> TripleStore with Mut {
+    var store = pireus_v01_store()
+
+    engine_add_class(&store, PIREUS_CLASS_CLUSTER)
+    engine_add_class(&store, PIREUS_CLASS_EXECUTION_ENGINE)
+    engine_add_class(&store, PIREUS_CLASS_OBSERVED_EXECUTION_ENGINE)
+    engine_add_class(&store, PIREUS_CLASS_ENGINE_KIND)
+    engine_add_class(&store, PIREUS_CLASS_ENGINE_ISA)
+    engine_add_class(&store, PIREUS_CLASS_EXECUTION_INTERFACE)
+    engine_add_class(&store, PIREUS_CLASS_DRIVER_PROFILE)
+    engine_add_class(&store, PIREUS_CLASS_ENGINE_BLUEPRINT)
+    engine_add_class(&store, PIREUS_CLASS_MULTI_ENGINE_MACHINE)
+
+    engine_add_typed(&store, PIREUS_CLUSTER_DARWIN, PIREUS_CLASS_CLUSTER)
+    triple_store_add(&store, triple_iri(
+        PIREUS_CLUSTER_DARWIN, PIREUS_HAS_EVIDENCE_ROLE,
+        PIREUS_EVIDENCE_OBSERVED_KERNEL))
+    engine_add_typed(&store, PIREUS_ENGINE_KIND_CPU, PIREUS_CLASS_ENGINE_KIND)
+    engine_add_typed(&store, PIREUS_ENGINE_KIND_GPU, PIREUS_CLASS_ENGINE_KIND)
+
+    engine_add_typed(&store, PIREUS_ENGINE_ISA_X86_64, PIREUS_CLASS_ENGINE_ISA)
+    engine_add_typed(&store, PIREUS_ENGINE_ISA_AARCH64, PIREUS_CLASS_ENGINE_ISA)
+    engine_add_typed(&store, PIREUS_ENGINE_ISA_NVIDIA_SM75, PIREUS_CLASS_ENGINE_ISA)
+    engine_add_typed(&store, PIREUS_ENGINE_ISA_NVIDIA_SM86, PIREUS_CLASS_ENGINE_ISA)
+    engine_add_typed(&store, PIREUS_ENGINE_ISA_NVIDIA_SM89, PIREUS_CLASS_ENGINE_ISA)
+    engine_add_typed(&store, PIREUS_ENGINE_ISA_NVIDIA_SM121, PIREUS_CLASS_ENGINE_ISA)
+    engine_add_typed(&store, PIREUS_INTERFACE_CUDA,
+        PIREUS_CLASS_EXECUTION_INTERFACE)
+    engine_add_typed(&store, PIREUS_INTERFACE_METAL,
+        PIREUS_CLASS_EXECUTION_INTERFACE)
+    engine_add_typed(&store, PIREUS_DRIVER_NVIDIA_595_71_05,
+        PIREUS_CLASS_DRIVER_PROFILE)
+    triple_store_add(&store, triple_iri(
+        PIREUS_DRIVER_NVIDIA_595_71_05, PIREUS_HAS_EVIDENCE_ROLE,
+        PIREUS_EVIDENCE_OBSERVED_DRIVER))
+    engine_add_typed(&store, PIREUS_EVIDENCE_DECLARED_BLUEPRINT,
+        PIREUS_CLASS_EVIDENCE_ROLE)
+    engine_add_typed(&store, PIREUS_EVIDENCE_OBSERVED_DRIVER,
+        PIREUS_CLASS_EVIDENCE_ROLE)
+
+    triple_store_add(&store, triple_iri(
+        PIREUS_CLUSTER_DARWIN, PIREUS_CLUSTER_HAS_MACHINE, PIREUS_MACHINE_R740))
+    triple_store_add(&store, triple_iri(
+        PIREUS_CLUSTER_DARWIN, PIREUS_CLUSTER_HAS_MACHINE, PIREUS_MACHINE_DL380))
+    triple_store_add(&store, triple_iri(
+        PIREUS_CLUSTER_DARWIN, PIREUS_CLUSTER_HAS_MACHINE, PIREUS_MACHINE_5860))
+    triple_store_add(&store, triple_iri(
+        PIREUS_CLUSTER_DARWIN, PIREUS_CLUSTER_HAS_MACHINE, PIREUS_MACHINE_T560))
+    triple_store_add(&store, triple_iri(
+        PIREUS_CLUSTER_DARWIN, PIREUS_CLUSTER_HAS_MACHINE, PIREUS_MACHINE_R770))
+
+    engine_add_cpu(&store, PIREUS_MACHINE_R740, PIREUS_ENGINE_CPU_R740)
+    engine_add_cpu(&store, PIREUS_MACHINE_DL380, PIREUS_ENGINE_CPU_DL380)
+    engine_add_cpu(&store, PIREUS_MACHINE_5860, PIREUS_ENGINE_CPU_5860)
+    engine_add_cpu(&store, PIREUS_MACHINE_T560, PIREUS_ENGINE_CPU_T560)
+    engine_add_cpu(&store, PIREUS_MACHINE_R770, PIREUS_ENGINE_CPU_R770)
+
+    engine_add_gpu(&store, PIREUS_MACHINE_R740,
+        PIREUS_ENGINE_GPU_R740_A5000, PIREUS_ENGINE_ISA_NVIDIA_SM86)
+    engine_add_gpu(&store, PIREUS_MACHINE_R740,
+        PIREUS_ENGINE_GPU_R740_RTX8000, PIREUS_ENGINE_ISA_NVIDIA_SM75)
+    engine_add_gpu(&store, PIREUS_MACHINE_5860,
+        PIREUS_ENGINE_GPU_5860_RTX4000_ADA, PIREUS_ENGINE_ISA_NVIDIA_SM89)
+    engine_add_gpu(&store, PIREUS_MACHINE_R770,
+        PIREUS_ENGINE_GPU_R770_L4, PIREUS_ENGINE_ISA_NVIDIA_SM89)
+
+    engine_add_typed(&store, PIREUS_MACHINE_R740,
+        PIREUS_CLASS_MULTI_ENGINE_MACHINE)
+    engine_add_typed(&store, PIREUS_MACHINE_5860,
+        PIREUS_CLASS_MULTI_ENGINE_MACHINE)
+    engine_add_typed(&store, PIREUS_MACHINE_R770,
+        PIREUS_CLASS_MULTI_ENGINE_MACHINE)
+
+    engine_add_blueprint(&store,
+        PIREUS_TARGET_DARWIN_XEON, PIREUS_BLUEPRINT_DARWIN_CPU,
+        PIREUS_ENGINE_KIND_CPU, PIREUS_ENGINE_ISA_X86_64, 0)
+    engine_add_blueprint(&store,
+        PIREUS_TARGET_DARWIN_XEON, PIREUS_BLUEPRINT_DARWIN_GPU,
+        PIREUS_ENGINE_KIND_GPU, 0, PIREUS_INTERFACE_CUDA)
+    engine_add_blueprint(&store,
+        PIREUS_TARGET_APPLE_SILICON, PIREUS_BLUEPRINT_APPLE_CPU,
+        PIREUS_ENGINE_KIND_CPU, PIREUS_ENGINE_ISA_AARCH64, 0)
+    engine_add_blueprint(&store,
+        PIREUS_TARGET_APPLE_SILICON, PIREUS_BLUEPRINT_APPLE_GPU,
+        PIREUS_ENGINE_KIND_GPU, 0, PIREUS_INTERFACE_METAL)
+    engine_add_blueprint(&store,
+        PIREUS_TARGET_DGX_SPARK, PIREUS_BLUEPRINT_DGX_CPU,
+        PIREUS_ENGINE_KIND_CPU, PIREUS_ENGINE_ISA_AARCH64, 0)
+    engine_add_blueprint(&store,
+        PIREUS_TARGET_DGX_SPARK, PIREUS_BLUEPRINT_DGX_GPU,
+        PIREUS_ENGINE_KIND_GPU, PIREUS_ENGINE_ISA_NVIDIA_SM121,
+        PIREUS_INTERFACE_CUDA)
+
+    store
+}
+
+pub fn pireus_query_cluster_machines(store: &TripleStore) -> SparqlResult
+with Mut, Epistemic {
+    var query = sparql_new()
+    sparql_select(&query, 0)
+    sparql_add_pattern(&query, triple_pattern_new(
+        queryterm_iri(PIREUS_CLUSTER_DARWIN),
+        queryterm_iri(PIREUS_CLUSTER_HAS_MACHINE),
+        queryterm_variable(0)))
+    sparql_execute(store, &query)
+}
+
+pub fn pireus_query_machine_engines(
+    store: &TripleStore, machine: i64,
+) -> SparqlResult with Mut, Epistemic {
+    var query = sparql_new()
+    sparql_select(&query, 0)
+    sparql_add_pattern(&query, triple_pattern_new(
+        queryterm_iri(machine), queryterm_iri(PIREUS_MACHINE_HAS_ENGINE),
+        queryterm_variable(0)))
+    sparql_add_pattern(&query, triple_pattern_new(
+        queryterm_variable(0), queryterm_iri(PIREUS_RDF_TYPE),
+        queryterm_iri(PIREUS_CLASS_OBSERVED_EXECUTION_ENGINE)))
+    sparql_execute(store, &query)
+}
+
+pub fn pireus_query_observed_engines_by(
+    store: &TripleStore, predicate: i64, object: i64,
+) -> SparqlResult with Mut, Epistemic {
+    var query = sparql_new()
+    sparql_select(&query, 0)
+    sparql_add_pattern(&query, triple_pattern_new(
+        queryterm_variable(0), queryterm_iri(PIREUS_RDF_TYPE),
+        queryterm_iri(PIREUS_CLASS_OBSERVED_EXECUTION_ENGINE)))
+    sparql_add_pattern(&query, triple_pattern_new(
+        queryterm_variable(0), queryterm_iri(predicate),
+        queryterm_iri(object)))
+    sparql_execute(store, &query)
+}
+
+pub fn pireus_query_observed_engines_kind_isa(
+    store: &TripleStore, kind: i64, isa: i64,
+) -> SparqlResult with Mut, Epistemic {
+    var query = sparql_new()
+    sparql_select(&query, 0)
+    sparql_add_pattern(&query, triple_pattern_new(
+        queryterm_variable(0), queryterm_iri(PIREUS_RDF_TYPE),
+        queryterm_iri(PIREUS_CLASS_OBSERVED_EXECUTION_ENGINE)))
+    sparql_add_pattern(&query, triple_pattern_new(
+        queryterm_variable(0), queryterm_iri(PIREUS_ENGINE_HAS_KIND),
+        queryterm_iri(kind)))
+    sparql_add_pattern(&query, triple_pattern_new(
+        queryterm_variable(0), queryterm_iri(PIREUS_ENGINE_IMPLEMENTS_ISA),
+        queryterm_iri(isa)))
+    sparql_execute(store, &query)
+}
+
+pub fn pireus_query_multi_engine_machines(store: &TripleStore) -> SparqlResult
+with Mut, Epistemic {
+    var query = sparql_new()
+    sparql_select(&query, 0)
+    sparql_add_pattern(&query, triple_pattern_new(
+        queryterm_variable(0), queryterm_iri(PIREUS_RDF_TYPE),
+        queryterm_iri(PIREUS_CLASS_MULTI_ENGINE_MACHINE)))
+    sparql_execute(store, &query)
+}
+
+pub fn pireus_query_target_blueprints(
+    store: &TripleStore, target: i64,
+) -> SparqlResult with Mut, Epistemic {
+    var query = sparql_new()
+    sparql_select(&query, 0)
+    sparql_add_pattern(&query, triple_pattern_new(
+        queryterm_iri(target), queryterm_iri(PIREUS_TARGET_DECLARES_BLUEPRINT),
+        queryterm_variable(0)))
+    sparql_add_pattern(&query, triple_pattern_new(
+        queryterm_variable(0), queryterm_iri(PIREUS_RDF_TYPE),
+        queryterm_iri(PIREUS_CLASS_ENGINE_BLUEPRINT)))
+    sparql_execute(store, &query)
+}
+
+pub fn pireus_query_observed_engines_for_target(
+    store: &TripleStore, target: i64,
+) -> SparqlResult with Mut, Epistemic {
+    var query = sparql_new()
+    sparql_select(&query, 1)
+    sparql_add_pattern(&query, triple_pattern_new(
+        queryterm_variable(0), queryterm_iri(PIREUS_HAS_TARGET),
+        queryterm_iri(target)))
+    sparql_add_pattern(&query, triple_pattern_new(
+        queryterm_variable(0), queryterm_iri(PIREUS_MACHINE_HAS_ENGINE),
+        queryterm_variable(1)))
+    sparql_add_pattern(&query, triple_pattern_new(
+        queryterm_variable(1), queryterm_iri(PIREUS_RDF_TYPE),
+        queryterm_iri(PIREUS_CLASS_OBSERVED_EXECUTION_ENGINE)))
+    sparql_execute(store, &query)
+}
+
+pub fn pireus_query_blueprints_by_interface(
+    store: &TripleStore, target: i64, interface: i64,
+) -> SparqlResult with Mut, Epistemic {
+    var query = sparql_new()
+    sparql_select(&query, 0)
+    sparql_add_pattern(&query, triple_pattern_new(
+        queryterm_iri(target), queryterm_iri(PIREUS_TARGET_DECLARES_BLUEPRINT),
+        queryterm_variable(0)))
+    sparql_add_pattern(&query, triple_pattern_new(
+        queryterm_variable(0), queryterm_iri(PIREUS_ENGINE_SUPPORTS_INTERFACE),
+        queryterm_iri(interface)))
+    sparql_execute(store, &query)
+}

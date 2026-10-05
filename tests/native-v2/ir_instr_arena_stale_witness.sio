@@ -1,0 +1,61 @@
+// #1649 instruction arena: growth invalidates every OTHER copy of the handle.
+//
+// This is hazard 1 of the arena design. A function that outgrows its region is
+// reallocated and copied, which MOVES its base. Under a plain `base + count`
+// handle, any copy still holding the old base would go on reading and writing
+// the old bytes -- which by then belong to whatever was allocated there next.
+// That is a silent cross-function miscompile, the exact class #1586/#1645/#1647
+// closed, and it is the reason handles carry a generation.
+//
+// What must hold: after a reallocation the grown handle still works, and a copy
+// taken before the growth is DETECTED as stale rather than silently followed.
+
+use ir::ir::*
+use ir::instr_arena::*
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    if ir_instr_arena_init() != IR_ARENA_OK { return 10 }
+
+    var r = ir_region_invalid()
+    if ir_instr_arena_alloc(2, &! r) != IR_ARENA_OK { return 11 }
+    if ir_region_push(&! r, ir_load_imm(0, 111)) != IR_ARENA_OK { return 12 }
+    if ir_region_push(&! r, ir_load_imm(1, 222)) != IR_ARENA_OK { return 13 }
+
+    // The value copy an ordinary assignment would make.
+    var stale = r
+    if ir_region_status(&stale) != IR_ARENA_OK { return 14 }
+    let base_before = ir_region_base_read(&r)
+
+    // Grow past capacity: this reallocates and moves the region.
+    if ir_region_push(&! r, ir_load_imm(2, 333)) != IR_ARENA_OK { return 20 }
+    if ir_region_len(&r) != 3 { return 21 }
+    if ir_region_cap(&r) < 3 { return 22 }
+    let base_after = ir_region_base_read(&r)
+    if base_after == base_before { return 23 }   // it really did move
+
+    // Contents survived the move.
+    var got = ir_nop()
+    if ir_region_get(&r, 0, &! got) != IR_ARENA_OK || got.imm_i64 != 111 { return 24 }
+    if ir_region_get(&r, 1, &! got) != IR_ARENA_OK || got.imm_i64 != 222 { return 25 }
+    if ir_region_get(&r, 2, &! got) != IR_ARENA_OK || got.imm_i64 != 333 { return 26 }
+
+    // THE POINT: the pre-growth copy is stale, through every entry point.
+    if ir_region_status(&stale) != IR_ARENA_ERR_STALE { return 30 }
+    if ir_region_is_valid(&stale) { return 31 }
+    if ir_region_get(&stale, 0, &! got) != IR_ARENA_ERR_STALE { return 32 }
+    if ir_region_set(&stale, 0, ir_nop()) != IR_ARENA_ERR_STALE { return 33 }
+
+    // And on the raw path -- the one the eventual textual rewrite uses -- a stale
+    // handle must be routed to quarantine and must raise the violation flag, so
+    // the compile cannot exit 0. Silently returning the old base here is exactly
+    // the miscompile this design exists to prevent.
+    if ir_instr_arena_violation() { return 34 }
+    let quarantined = ir_region_base_write(&stale)
+    if !ir_instr_arena_violation() { return 35 }
+    if quarantined != IR_QUARANTINE_BASE { return 36 }
+    // the live region is untouched by the quarantined write target
+    if quarantined == base_after { return 37 }
+
+    print("IR_INSTR_ARENA_STALE_PASS\n")
+    0
+}

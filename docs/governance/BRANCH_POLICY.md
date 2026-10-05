@@ -56,8 +56,54 @@ ls "$(git config --get core.hooksPath || echo .git/hooks)"
 # myth and deletion is unsafe until it is understood.
 ```
 
-As of 2026-07-21 the only active hooks are `post-merge` (governance-doc regen)
-and `pre-commit` (offload-policy check) — neither touches the remote.
+**Corrected 2026-07-30.** This section previously stated that `post-merge`
+(governance-doc regen) and `pre-commit` (offload-policy check) were the active
+hooks. They were not active, and had not been: `core.hooksPath` pointed at
+`.githooks`, a directory that **did not exist**, so git ran no hooks at all —
+including the `pre-commit` sitting in `.git/hooks`, which `core.hooksPath`
+overrides. The check in the block above is the one that reveals this; running it
+is what found it. The safety conclusion was unaffected (no hooks means nothing
+propagates a local ref change to the remote), but the sentence asserting which
+hooks ran was false for as long as it stood.
+
+As of 2026-07-30 `.githooks/` exists and is tracked, holding two hooks. Neither
+touches the remote:
+
+- `pre-commit` — refuses a commit that adds a governed document without the
+  registry entry that makes CI green. Reads the **staged** tree, and is
+  skippable with `git commit --no-verify` or `SOUNIO_SKIP_DOCS_REGISTRY_HOOK=1`.
+- `post-merge` — regenerates the governance artifacts after a merge and records
+  a follow-up commit if anything changed. Verified on a real merge: the merge
+  commit alone fails the docs-registry check with 2 errors, and the follow-up
+  commit makes it green.
+
+> **`post-merge` writes commits, so what it stages matters.** It stages only
+> paths that were **clean before the sync and dirty after** — the files the
+> regeneration itself produced. A path already modified when the merge began is
+> never staged, even if the sync also rewrote it: its content is then a mix of
+> someone's work and the regeneration, which cannot be separated, and the hook
+> says so on stderr instead of committing the mix.
+>
+> This replaced a `git add -A docs/`, which on a shared checkout — three agents
+> on one worktree here — swept every other agent's uncommitted `docs/` work into
+> an automatic commit labelled as metadata regeneration. Measured both ways on
+> the same merge: with an unrelated `docs/` file dirty, `git add -A docs/` stages
+> it; the narrowed hook leaves it dirty and out of the commit.
+>
+> Still true, and unavoidable for an automatic commit: the hook commits the
+> index. If anything is already staged when a merge finishes, it refuses and
+> leaves the regenerated tree uncommitted rather than folding that work in.
+
+The offload-policy check that was chained into this `pre-commit` from
+2026-07-30 is **no longer part of this repository** (removed 2026-10-03): the
+policy, its hook script and its audit log moved out of `main` together with the
+other agent-development files. The `pre-commit` now runs only the docs-registry
+check, so commits to `docs/papers/**`, `docs/dissertation/**`,
+`stdlib/clinical/**`, the listed `stdlib/epistemic` modules and
+`formal/lean4/Sounio*.lean` are **no longer refused** for lacking a same-day
+audit row.
+
+Fresh clones activate hooks with `git config core.hooksPath .githooks`.
 
 ---
 

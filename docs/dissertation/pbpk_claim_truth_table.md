@@ -50,6 +50,34 @@ This table was re-audited against `origin/main` at `8c6631a2a` on 2026-05-21, af
 - GPU dissertation claims remain scoped to bounded K-AXI witnesses and Kretikos gates. The current table still does not support "PBPK14 Tsit5 single-kernel GPU" wording.
 - Compiler/bootstrap gates may be cited as enabling infrastructure only. They are not PBPK model-evidence gates unless a row names a dedicated PBPK source/gate pair.
 
+> **Engine dependency (verified 2026-08-17) — read before citing any `repo-backed` row below.**
+> Sounio ships two compiler engines: default Madaros (`bin/souc`, per `CLAUDE.md` §4) and the
+> bootstrap seed (`SOUNIO_SOUC_ENGINE=lean_single` / `bin/souc-lean-single-x86_64`). The evidence
+> gate behind most `repo-backed` rows in this table — `scripts/ci/dissertation_pbpk_suite_gate.sh`,
+> which rows 62, 64, 65, 68, 69, 70, 80, 81, 86 and 87 all cite — is **structurally pinned to
+> lean_single**: the gate's own source (`scripts/ci/dissertation_pbpk_suite_gate.sh:56-61`) defaults
+> `SOUC_BIN` to `scripts/ci/souc-seq-leansingle.sh` because the K-AXI fusion witness and `Seq<T>`
+> tests need a capability Madaros does not yet carry, and says so directly: *"`bin/souc` defaults to
+> Madaros (the user-facing engine since 2026-06-14), which does not yet carry `Seq<T>`."* That means
+> the gate — and therefore every "gate PASS" claim in this table's evidence columns — has not been
+> run, as a gate, under the engine `CLAUDE.md` documents as this project's default.
+>
+> This is not a hypothetical gap. Live check (2026-08-17), row 69's canonical witness,
+> `tests/run-pass/med/vancomycin_full_propagation.sio`:
+> ```
+> $ SOUNIO_STDLIB_PATH=stdlib bin/souc check tests/run-pass/med/vancomycin_full_propagation.sio
+> error[E036]: confidence bound is not tight enough
+> $ SOUNIO_STDLIB_PATH=stdlib SOUNIO_SOUC_ENGINE=lean_single bin/souc check tests/run-pass/med/vancomycin_full_propagation.sio
+> elf: ... 43315 bytes   (clean compile)
+> ```
+> Not every cited file diverges the same way — e.g. row 62's `stdlib/darwin_pbpk/epistemic_pbpk28.sio`
+> checks clean under both engines today — so this note does **not** claim every row's file currently
+> fails under Madaros. What is verified and general is the structural fact: the suite gate itself
+> cannot currently execute under default Madaros, so "the dissertation gate is green" is, at best, a
+> lean_single-scoped claim until someone runs the suite under Madaros end-to-end and records the
+> result. Cite rows accordingly: "repo-backed, verified under lean_single" is accurate; "repo-backed"
+> alone, read against `CLAUDE.md`'s default-engine framing, is not.
+
 | Claim | Status | Evidence | Allowed wording | Forbidden wording | Next gate |
 |---|---|---|---|---|---|
 | PBPK14 Tsit5/GUM CPU model exists for rapamycin/sirolimus with a 14-compartment state and finite-difference GUM propagation. | repo-backed | `stdlib/darwin_pbpk/epistemic_pbpk14.sio`; `stdlib/darwin_pbpk/tsit5_pbpk14.sio`; `scripts/ci/dissertation_pbpk_suite_gate.sh` | "The PBPK14 stdlib demonstrates adaptive Tsit5 simulation with numerical GUM propagation for the rapamycin case study." | "The PBPK14 model is GPU-first." | Keep `bash scripts/ci/dissertation_pbpk_suite_gate.sh` green and cite the exact source/gate pair. |

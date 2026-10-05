@@ -2,8 +2,8 @@
 topic_id: repo.docs.exact-core
 authority: repo_only
 audience: users
-last_validated: 2026-03-07
-validated_by: A2
+last_validated: 2026-09-22
+validated_by: claude
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.exact-core
 -->
 
@@ -53,11 +53,43 @@ enum Verdict { Proved, MeasuredF64 { eps }, MeasuredF256 { eps256 } }
 ```
 
 `Proved` (exact ℤ equality), `MeasuredF64` (f64 tolerance), `MeasuredF256` (future high-precision
-witness shape — **no f256 arithmetic is implemented**). The load-bearing rule is enforced by
+witness shape — **no f256 arithmetic is implemented under Madaros, this project's default engine**).
+The load-bearing rule is enforced by
 `requires_proof(v)`, which accepts **only** `Proved` — **a measurement can never be laundered into
 a proof.** There is no function that converts one variant to another. (Operator's `Knowledge<Verdict>`
 wrapping lands once the generic-struct-return compiler gap is fixed; until then gates return the
 plain `Verdict` enum, which compiles and runs today.)
+
+**Engine split (verified 2026-08-17).** Sounio ships two compiler engines — default Madaros
+(`bin/souc`) and the bootstrap seed (`SOUNIO_SOUC_ENGINE=lean_single` / `bin/souc-lean-single-x86_64`).
+The "no f256 arithmetic is implemented" claim above holds only for Madaros:
+
+| Engine | `fn add(a: f256, b: f256) -> f256 { a + b }` |
+|---|---|
+| **Madaros** (default `bin/souc`) | Same-format source arithmetic typechecks (V0-E.2). Casts/implicit still refused. V0-E.5 runs IEEE `F128Bits` add/sub (anti-f64). V0-E.5.1–V0-E.5.9 Madaros-run language `f128` `+` `−` `*` `/` unary `-` and comparisons via softfloat limbs, f128 params/returns across user fns (V0-E.5.4), f128 struct fields/assignment (V0-E.5.5), f128 through impl methods — `self`/`&self`/`&!self`, f128 params/returns (V0-E.5.6), `[f128; N]` fixed arrays — elements, stores, `&[f128; N]` params, array copies (V0-E.5.7), exact textual output via stdlib `print_f128` / `f128_to_string` (36 significant digits, round-half-even) and `f128_to_hex_string` (V0-E.5.8, `stdlib/math/softfloat_f128_fmt.sio`, no f64 on the path), and exact literals — any decimal or C99 hex-float text that is a dyadic rational with a ≤113-bit odd part lowers to its binary128 limbs from the source bytes, everything else fails closed (V0-E.5.9), and the surface closure — hex-float exact on the f64 path too (single rounding), literal tails / `return` of `-> f128` fns and `[f128; N]` literal elements accepted as exact limbs, `_` digit separators, and `math::softfloat_f128` pulled into the module graph implicitly whenever a module mentions `f128` (fail-closed refusal, not SIGILL, when the stdlib is unreachable) (V0-E.5.10); f256 and builtin `println(x: f128)` remain deferred / fail-closed. |
+| **lean_single** (bootstrap seed) | **Compiles and executes.** No E249, no diagnostic; the emitted ELF runs to completion (`rc=0`). |
+
+So `MeasuredF256` is unreachable under the engine this document otherwise treats as authoritative
+(Madaros), but f256 arithmetic is not, in fact, unimplemented in this codebase — it exists,
+unverified and undocumented as a witness shape, under lean_single. Same class of gap as V0-A in
+`docs/architecture/F128_F256_LADDER.md`, which carries the equivalent table for f128. Do not read
+lean_single's acceptance as license to treat f256 as available: it has no `MeasuredF256` witness
+construction, no epistemic surface, and no gate — it simply fails to refuse.
+
+The dual-engine split is **not** limited to the tilde / f128–f256 parser boundary. Two further
+measured cases (2026-08-17), recorded so this document does not leave the reader thinking
+“engine divergence = only E249”:
+
+| Case | Madaros (default) | lean_single | Status |
+|---|---|---|---|
+| Forward ontology `inverse_of` (#1798) | **Accepted** a role whose inverse target was declared later | **E158** reject | **CLOSED** — Madaros aligned to declaration-order; gate `scripts/ci/madaros_ontology_enforcement_gate.sh` |
+| GUM variance on dissertation surfaces (#1792), F2 witness (ep28 confidence bit-pattern) | **CLOSED** by PR #1882 (`d33cf585`, merged 2026-08-18) — now prints `0.671038`, matching lean_single | Non-zero, matching value | **CLOSED** |
+| GUM variance on dissertation surfaces (#1792), F1 general rung (first-order channels crossing user calls) | The `rapamycin_epistemic_adaptive` witness now also reports non-zero variance (re-measured 2026-09-22), but `tests/run-pass/gum_fo_across_call.sio` / `fo_call_boundary_arity3.sio` still carry a live `//@ known-failure` for the general case | Non-zero variance ~1e-5 / ~1e-9 on the same adaptive witness | **OPEN** (KL-11) — fail-closed detect gate `scripts/ci/epistemic_fabrication_detect_gate.sh`; `b2df0727` (2026-09-18) only relaxed that fixture's own pass criterion (`ok_mech` now also accepts `ok_var` without requiring `epist_active > 0`) and touches no `self-hosted/` file, so it cannot explain the witness's variance moving off zero — the compiler-side cause of that recovery is **unidentified** |
+
+#1792's F1 rung is thesis-critical while open: silent zero variance under the default engine, if it
+recurred on a call shape the two known-failure fixtures do not cover, would be fabricated science, not
+a docs nit. See also `CLAUDE.md` §13, `docs/compiler/KNOWN_LIMITATIONS.md` KL-11, and
+`docs/audit/EPISTEMIC_FABRICATION_DETECT_2026-08-17.md`.
 
 ## What is proved, executed, and verified (souc v0.80.0)
 
@@ -210,7 +242,7 @@ i64-range coefficients; the unbounded-width integration is a compiler-capacity r
 The four compiler features the generic engine needed (generic-struct-return **#1**, bodyless
 trait-method-sig parsing **2a**, `impl Trait for Type` **2b**, trait-bounded dispatch **#3**) **all
 landed 2026-07-06** on the fable5 compiler-generic-F lane (PR #650, merge commit `2adb8f061`,
-against the prompt `docs/handoff/compiler_generic_F_engine_unblock_prompt.md`). The generic engine
+against a written compiler-lane prompt). The generic engine
 `stdlib/algebra/cayley_dickson_exact.sio` (`CDElementExact<F: ExactRing>`) now **compiles and runs**:
 
 - **`F = i64` — adopted and proven equivalent.** `tests/run-pass/cd_exact_generic_i64.sio` proves the
@@ -235,5 +267,4 @@ against the prompt `docs/handoff/compiler_generic_F_engine_unblock_prompt.md`). 
 i.e. array-of-struct coefficients — remains open, blocked by the filed non-generic `[struct;N]`
 aggregate-loop codegen bug (#651), not by the math, the parser, or the generics. Until #651 lands,
 unbounded-ℚ work continues via the common-denominator **integer** representation
-(`sedenion_cd_full16_q.sio`, `[i64;N]`, no array-of-struct — unaffected). See
-`docs/handoff/exact_engine_prereqs.md`.
+(`sedenion_cd_full16_q.sio`, `[i64;N]`, no array-of-struct — unaffected).

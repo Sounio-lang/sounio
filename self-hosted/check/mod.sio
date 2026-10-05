@@ -12,6 +12,7 @@ use ir::ir::*
 use parser::ast::*
 use check::check::*
 use check::defs::*
+use check::specializer::{spec_item_module_lookup, spec_item_module_populated}
 use check::types::{TypeEntry, TypeEntryList, TypeKind}
 use check::ontology_side_table_cache::{
     ontology_side_table_cache_disjoint_verdict,
@@ -31,26 +32,26 @@ use check::ontology_side_table_cache::{
 }
 
 pub struct CheckResult {
-    error_count: i64,
-    had_error: bool,
+    pub error_count: i64,
+    pub had_error: bool,
 }
 
 pub struct CheckArtifactsResult {
-    error_count: i64,
-    had_error: bool,
-    checker: Checker,
+    pub error_count: i64,
+    pub had_error: bool,
+    pub checker: Checker,
 }
 
 pub struct CheckEpistemicResult {
-    error_count: i64,
-    had_error: bool,
-    epistemic: IrEpistemicSection,
+    pub error_count: i64,
+    pub had_error: bool,
+    pub epistemic: IrEpistemicSection,
 }
 
 pub struct CheckBoxedEpistemicResult {
-    error_count: i64,
-    had_error: bool,
-    epistemic: Box<IrEpistemicSection>,
+    pub error_count: i64,
+    pub had_error: bool,
+    pub epistemic: Box<IrEpistemicSection>,
 }
 
 var CHECK_MOD_ONTOCACHE_SIDECAR_VALID: bool = false
@@ -66,7 +67,7 @@ fn check_mod_alloc_checker() -> *mut Checker with Alloc {
     heap_alloc(134217728) as *mut Checker
 }
 
-fn check_policy_requirements_to_ir(
+pub fn check_policy_requirements_to_ir(
     opt: Option<Box<PolicyRequirementInfoList>>,
     out: [IrPolicyRequirementInfo; 8],
     idx: i64
@@ -227,9 +228,9 @@ fn checker_more_restrictive_alg_kind(a: i64, b: i64) -> i64 {
 }
 
 pub struct CheckerHyperAlgCollectState {
-    found_alg: i64,
-    found_any: i64,
-    ambiguous: i64,
+    pub found_alg: i64,
+    pub found_any: i64,
+    pub ambiguous: i64,
 }
 
 fn checker_collect_hyper_alg_from_type_list(
@@ -301,8 +302,10 @@ pub fn checker_apply_ir_metadata(checker: &Checker, module: &! IrModule) with Mu
     (*module).ontologies = checker_to_ir_ontologies(checker)
     var i: i64 = 0
     while i < (*module).fn_count {
-        let fn_name = (*module).functions[i].name
-        (*module).functions[i].hyper_algebra_kind = checker_infer_fn_hyper_algebra(checker, fn_name)
+        var fn_slot = ir_fn_get(&(*module), i)
+        let fn_name = fn_slot.name
+        fn_slot.hyper_algebra_kind = checker_infer_fn_hyper_algebra(checker, fn_name)
+        ir_fn_set(&! (*module), i, fn_slot)
         i = i + 1
     }
 }
@@ -371,7 +374,7 @@ fn cd_hyper_law_profile_fingerprint(algebra_tag: i64, op_kind: i64, reassoc_stra
     0
 }
 
-fn check_hyper_expr_law_profile_probe(
+pub(crate) fn check_hyper_expr_law_profile_probe(
     algebra_tag: i64,
     registry_reassoc_strategy: i64,
     registry_forbidden_law_mask: i64,
@@ -402,7 +405,7 @@ fn check_hyper_expr_law_profile_probe(
     }
 }
 
-fn check_hyper_expr_law_profile_audit_tag(info: IrHyperExprInfo) -> i64 with Mut, Panic, Div {
+pub(crate) fn check_hyper_expr_law_profile_audit_tag(info: IrHyperExprInfo) -> i64 with Mut, Panic, Div {
     let expected_fingerprint = cd_hyper_law_profile_fingerprint(
         info.algebra_tag,
         info.op_kind,
@@ -422,7 +425,7 @@ fn check_hyper_expr_law_profile_audit_tag(info: IrHyperExprInfo) -> i64 with Mut
 }
 
 
-fn check_program(prog: Program) -> CheckResult with Mut, Panic, Div, Alloc, IO {
+pub(crate) fn check_program(prog: Program) -> CheckResult with Mut, Panic, Div, Alloc, IO {
     let artifacts = check_program_with_artifacts(prog)
     CheckResult {
         error_count: artifacts.error_count,
@@ -558,7 +561,216 @@ pub fn check_items_verdict_boot4_with_module_path(items: Option<Box<ItemList>>, 
     (*checker_ptr).crate_root = module_path
     checker_collect_items_mut(checker_ptr, items)
     let had_error = checker_check_items_inner_store_return_had_error_mut(checker_ptr, items)
-    if had_error == 1 {
+    // Collect lowers parameter types. A diagnostic recorded there (E201 on
+    // ExactlyPrivate without ZD, or the always-refuse control) used to be
+    // discarded: this verdict only inspected the check-pass had_error bit,
+    // so `check: OK` and rc=0 while the checker had already failed. Honour
+    // the recorded count before freeing the checker.
+    let recorded = (*checker_ptr).error_count
+    let noted = (*checker_ptr).had_error
+    if had_error == 1 || recorded > 0 || noted {
+        heap_free(checker_ptr as i64)
+        return 1
+    }
+    heap_free(checker_ptr as i64)
+    if check_items_ontology_verdict(items) != 0 {
+        return 1
+    }
+    0
+}
+
+// Wraps one Item in a singleton ItemList so it can be fed through
+// checker_collect_items_mut / checker_check_items_mut one at a time -- see
+// check_items_verdict_boot4_with_module_map's own comment for why.
+fn check_mod_singleton_item_list(it: Item) -> Option<Box<ItemList>> with Alloc {
+    Some(Box::new(ItemList { head: it, tail: None }))
+}
+
+// run_check_mode's "WP-A3 specialized multi-module typecheck": whenever
+// ANY generic gets instantiated anywhere in a multi-module `check`, main.sio
+// merges every module's items into one flat list, runs specialize_generics_multi
+// over it, and used to hand the result straight to check_items_verdict_boot4,
+// which allocates ONE Checker and never touches its current_module_id after
+// checker_init_in_place sets it to 0 (checker_collect_items_mut /
+// checker_check_items_mut walk the WHOLE flat list in one call). That field is
+// exactly what checker_path_qualifier_all_modules_known (round 6 finding A)
+// and every defining_module_id-keyed visibility check key off of -- so under
+// THIS specific entry point, every module's qualified-call / visibility check
+// was silently comparing against module 0 for every item, regardless of which
+// module actually declared it. check_modules_verdict_boot4_with_visibility
+// (the ordinary, non-generic multi-module path) gets this right by iterating
+// `programs[i]` one at a time and setting current_module_id = i before each
+// module's own collect/check pass -- but it cannot be reused here because it
+// takes PRE-specialization per-module item lists, and specialization can only
+// run once, over the merged whole (cross-module generics need every module's
+// templates visible together).
+//
+// Fixed by iterating the POST-specialization flat list one ITEM at a time
+// instead, looking up each item's ORIGINAL declaring module via
+// spec_item_module_lookup (check::specializer's registry, mapping a
+// fn/impl-method's own name to the module index that declared it -- built
+// from the PRE-specialization `programs[]`, so names are still what they were
+// when specialize_generics_multi ran just before this function is called,
+// which is always true of every call site: run_check_mode is the only
+// caller). A name with no registry entry (a newly synthesized "__sp_..."
+// multi-instance specialization symbol, or this table's own capacity limit)
+// falls back to leaving current_module_id at whatever the PREVIOUS item set
+// it to -- the same "generic template body" residual gap
+// specialize_generics_multi's own comment already documents as unresolved,
+// not something this function makes any worse.
+//
+// Two passes (collect all items, THEN check all bodies), matching
+// check_modules_verdict_boot4_with_visibility's own structure, because a
+// call can legitimately reference a signature declared later in item order.
+// Round 9 (review comment 4098353536): `ItemUse` has no `.name` (it is
+// always empty), so a lookup keyed on `it.name` alone can never find it --
+// see spec_item_module_collect's own comment for why that registers `use`
+// items under their full joined path text instead. Mirror that here so the
+// lookup site matches the registration site for every item kind.
+//
+// Copilot review (PR #2515), comment 4114195591: for an `ItemUse`
+// specifically, this inherits SPEC_ITEM_MODULE_*'s own documented, already-
+// deliberated imprecision (see spec_item_module_note's comment in
+// specializer.sio, rounds 10-11): the registry is keyed by the `use` path's
+// TEXT alone, and keeps only the FIRST module that registered a given
+// text. `use parser::ast::*;` (or any other path legitimately `use`d by
+// many modules) is the overwhelmingly common case this bites, not a rare
+// edge case -- every module AFTER the first with that identical text gets
+// stamped with the FIRST module's id for this one item, so its own
+// use-suffix registration (checker_use_module_note_path, just below this
+// function's caller) lands under the wrong module_id, and that module's
+// later qualified calls miss it and fall through to non-fatal W044 instead
+// of getting real argument/effect/visibility checking. Round 10 tried
+// marking a collision AMBIGUOUS instead (fail-closed); round 11 found that
+// unsound the OTHER way -- it zeroes out BOTH colliding modules' own
+// attribution for what is routine, correct code. "Keep first" was the
+// deliberate, lesser-bad choice between the two text-keyed options
+// available; a real fix needs per-occurrence provenance (stamping a
+// module id onto Item itself before merging), which specializer.sio's own
+// comment already names as a genuine redesign out of scope for a
+// contained fix, not something newly discovered here.
+fn check_mod_item_module_owner(it: Item) -> i64 with Mut, Panic, Div {
+    if it.kind == ItemKind::ItemUse {
+        spec_item_module_lookup(ast_path_range_name(it.use_path, 0, it.use_path.seg_count - 1))
+    } else if it.kind == ItemKind::ItemImpl {
+        // spec_item_module_collect registers each impl METHOD under its own
+        // (unmangled) name, not the impl block's own `name` (the TYPE it is
+        // for) -- an impl block has no name of its own in that registry. All
+        // methods in one impl block share a declaring module, so look
+        // ownership up via the first method's name instead, mirroring
+        // lower.sio's lower_body_list_mut (ItemImpl branch, ~line 2826).
+        match it.impl_def {
+            Some(id) => {
+                match (*id).methods {
+                    Some(ml) => spec_item_module_lookup((*ml).head.name)
+                    None => -1
+                }
+            }
+            None => -1
+        }
+    } else {
+        spec_item_module_lookup(it.name)
+    }
+}
+
+// Copilot review (PR #2515), comment 4113458034: `current_module_id` (used
+// by every defining_module_id-keyed private-visibility check) was already
+// stamped per item below via `owner`, but `current_module` (the real
+// `AstPath`, used by `visibility_allows_access`'s `pub(in path)` check --
+// `ast_path_is_prefix(vis.path, current_module)`) stayed fixed at whatever
+// `module_path` the caller passed -- always `empty_path()` at every call
+// site. A `pub(in path)` access from a module whose real path is NOT a
+// prefix of `empty_path()` (every real path isn't) then always failed
+// closed, rejecting a legitimate restricted-public access whenever an
+// unrelated generic instantiation anywhere routed the whole program through
+// this specialized path. `programs`/`program_count` let this function look
+// up each item's real declaring module's own `AstPath` by the same `owner`
+// id, alongside `current_module_id`.
+pub fn check_items_verdict_boot4_with_module_map(items: Option<Box<ItemList>>, module_path: AstPath, programs: &! [Program; 256], program_count: i64) -> i64 with Mut, Panic, Div, Alloc, IO {
+    if !spec_item_module_populated() {
+        return check_items_verdict_boot4_with_module_path(items, module_path)
+    }
+    let checker_ptr = check_mod_alloc_checker()
+    checker_init_in_place(checker_ptr)
+    (*checker_ptr).current_module = module_path
+    (*checker_ptr).crate_root = module_path
+
+    // Round 10 (review comment 4099548914): leaving current_module_id
+    // UNCHANGED when an item's owner cannot be found let it silently inherit
+    // whatever the PRECEDING item's module happened to be -- for an item with
+    // no registry entry (a newly synthesized multi-instance specialization
+    // symbol, which never existed in the pre-specialization `programs[]` this
+    // registry was built from), that could grant it another module's private
+    // imports, or deny it its own. Fail CLOSED instead: -1 is never used as a
+    // real module id by any registration site (checker_use_module_note /
+    // spec_item_module_note both always register non-negative ids), so
+    // stamping an unmapped item's items/bodies with current_module_id=-1
+    // makes every per-module registry lookup for it correctly find nothing,
+    // rather than borrowing an unrelated module's evidence.
+    // Copilot review (PR #2515), comment 4110379088: collect builtins ONCE
+    // before this loop, then collect each item directly (bypassing
+    // checker_collect_items_inplace's whole-list wrapper, which re-ran the
+    // builtins scan and reassigned ontology_items on every one of these
+    // per-item calls) -- see checker_collect_runtime_builtins_once_mut /
+    // checker_collect_item_only_mut's own comment in check.sio for why the
+    // old per-item checker_collect_items_mut call was O(items^2).
+    checker_collect_runtime_builtins_once_mut(checker_ptr)
+    var cur = items
+    while true {
+        match cur {
+            Some(list) => {
+                let it = (*list).head
+                let owner = check_mod_item_module_owner(it)
+                (*checker_ptr).current_module_id = owner
+                if owner >= 0 && owner < program_count {
+                    (*checker_ptr).current_module = (*programs)[owner as usize].module_path
+                } else {
+                    (*checker_ptr).current_module = module_path
+                }
+                checker_collect_item_only_mut(checker_ptr, it)
+                cur = (*list).tail
+            }
+            None => break
+        }
+    }
+    // Copilot review (PR #2515): checker_collect_items_mut ->
+    // checker_collect_items_inplace assigns its whole `items` argument
+    // straight into (*c).ontology_items (checker_onto_name_subclass_walk's
+    // own source of truth for subclass-to-parent argument compatibility,
+    // E009). Calling it once PER SINGLETON item above -- required so each
+    // item gets its own current_module_id stamped first, see this
+    // function's own comment -- overwrote ontology_items on every
+    // iteration, so after the loop it held only the LAST item in the
+    // specialized merged list, not the whole program. A call whose
+    // subclass evidence lives on an EARLIER item then couldn't resolve
+    // against it and could spuriously fail E009. Restore the full list
+    // here, once, before the body-checking pass below needs it.
+    (*checker_ptr).ontology_items = items
+
+    var chk = items
+    while true {
+        match chk {
+            Some(list) => {
+                let it = (*list).head
+                let owner = check_mod_item_module_owner(it)
+                (*checker_ptr).current_module_id = owner
+                if owner >= 0 && owner < program_count {
+                    (*checker_ptr).current_module = (*programs)[owner as usize].module_path
+                } else {
+                    (*checker_ptr).current_module = module_path
+                }
+                checker_check_items_mut(checker_ptr, check_mod_singleton_item_list(it))
+                chk = (*list).tail
+            }
+            None => break
+        }
+    }
+    checker_verify_dsep_claims_mut(checker_ptr)
+    checker_flush_unemitted_type_errors_mut(checker_ptr)
+
+    let recorded = (*checker_ptr).error_count
+    let noted = (*checker_ptr).had_error
+    if noted || recorded > 0 {
         heap_free(checker_ptr as i64)
         return 1
     }
@@ -630,6 +842,10 @@ pub fn check_modules_verdict_boot4_with_visibility(programs: &! [Program; 256], 
         checker_check_items_mut(checker_ptr, (*programs)[i as usize].items)
         i = i + 1
     }
+
+    // After every module: the graph and the claims are unit-global, and a claim
+    // in one module may name a graph declared in another.
+    checker_verify_dsep_claims_mut(checker_ptr)
 
     if (*checker_ptr).had_error || (*checker_ptr).error_count > 0 {
         heap_free(checker_ptr as i64)
@@ -1423,7 +1639,7 @@ fn check_mod_ontocache_knowledge_path_first_name(path: AstPath) -> Name {
 }
 
 fn check_mod_ontocache_knowledge_empty_name() -> Name {
-    Name { buf: [0; 128], len: 0 }
+    Name { buf: [0; 384], len: 0 }
 }
 
 fn check_mod_ontocache_knowledge_is_digit(ch: i8) -> bool {
@@ -1707,6 +1923,7 @@ pub fn check_program_with_artifacts(prog: Program) -> CheckArtifactsResult with 
     checker.crate_root = prog.module_path
     checker = checker.collect_items(prog.items)
     checker = checker.check_items(prog.items)
+    checker = checker_verify_dsep_claims(checker)
     CheckArtifactsResult {
         error_count: checker.error_count,
         had_error: checker.had_error,

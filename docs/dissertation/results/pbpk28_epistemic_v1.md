@@ -18,6 +18,8 @@ version: v1
 date: 2026-05-12
 ---
 
+> **SUPERSEDED 2026-09-26: floor-biased PBPK28 numbers.** Every PBPK28 simulation number on this page was computed through `pbpk28_full_cn_step`, whose negativity floors injected mass into the 5 mg bolus: AUC_blood was +28% at dt = 0.05 h, +52% at 0.1 h and +140% at 0.5 h against the exact Dose/CL = 0.403226 mg·h/L. The same floors created parameter dependence that is not in the model, e.g. Kp sensitivities and Hessian entries. Conclusions drawn from these numbers may not hold. Regenerated results: [`pbpk28_epistemic_v2.md`](pbpk28_epistemic_v2.md). Audit: `docs/audit/PBPK28_CN_RANNACHER_MASS_BALANCE_2026-09-26.md`.
+
 # PBPK28 Epistemic Uncertainty Budget — v1 Results
 
 **Drug**: Rapamycin (Sirolimus), IV bolus 5 mg  
@@ -211,6 +213,12 @@ The PBPK28 epistemic stack applies to semaglutide by substituting
 2. **Exact numbers**: Run `./bin/souc run stdlib/darwin_pbpk/epistemic_pbpk28.sio`
    to obtain the actual AUC mean, SD, CV, and sensitivity fractions for the GUM table.
    The values in this document are expected ranges derived from the pharmacological model.
+   **Engine dependency (verified 2026-08-17):** under default Madaros this command runs and
+   8 of 9 tests pass — TEST 6 ("Confidence in [0.20, 0.90]") fails, printing
+   `AUC confidence: 4604219396932172800.000000`, the exact IEEE-bit-pattern-as-decimal
+   fabrication tracked by open issue #1792 (`docs/audit/EPISTEMIC_FABRICATION_DETECT_2026-08-17.md`).
+   Under `SOUNIO_SOUC_ENGINE=lean_single`, all 9 tests pass (`ALL 9 TESTS PASSED`). Do not use the
+   Madaros confidence number for the §4.10 confidence range until #1792 is resolved.
 
 3. **Hessian correction narrative**: The second-order correction for CL_hepatic
    (ρ_literal = 0.380, ρ̃ = 0.072 at HEAD `c25ccdc6f`) is the dissertation's novel claim

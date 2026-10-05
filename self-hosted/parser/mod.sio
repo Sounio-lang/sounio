@@ -7,7 +7,7 @@ module parser::mod
 
 use parser::ast::*
 use lexer::token::*
-use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, parser_new, parser_reset_last_errors, parser_set_last_errors, parser_set_tokens}
+use parser::parser::{parser_peek, parser_at_eof, pt_read_kind, parser_new, parser_reset_last_errors, parser_reset_truncated_literals, parser_set_last_errors, parser_set_tokens, parser_truncated_literal_count, parser_truncated_literal_first_line, parser_truncated_literal_longest}
 use parser::types::*
 use parser::exprs::*
 use parser::stmts::*
@@ -16,6 +16,7 @@ use parser::items::*
 fn parse_program_loop(mut_p: Parser) -> Program with Mut, IO, Panic, Div, Alloc {
     var p = mut_p
     var rev_items_opt: Option<Box<ItemList>> = None
+    parser_reset_extern_block_state()
 
     while !parser_at_eof(p) {
         // Skip leading trivia (newlines, semicolons, doc comments)
@@ -37,21 +38,32 @@ fn parse_program_loop(mut_p: Parser) -> Program with Mut, IO, Panic, Div, Alloc 
         // Claims are compile-time metadata: parse_claim_item already recorded
         // them in the AST claim registry, so drop them from the item stream.
         // Resolve/check/lower/codegen never observe ItemKind::ItemClaim.
-        if item.kind != ItemKind::ItemClaim {
+        if item.kind != ItemKind::ItemClaim && item.kind != ItemKind::ItemCausalGraph {
             rev_items_opt = Some(Box::new(ItemList { head: item, tail: rev_items_opt }))
         }
-        // #1547: decls 2..N of an extern "C" { ... } block queue on
-        // EXTERN_PENDING_ITEMS during parse_item; drain them here (not inside
-        // parse_item — the progress guard above must see the real advance).
-        rev_items_opt = items_drain_extern_pending(rev_items_opt)
     }
 
+    if parser_truncated_literal_count() > 0 {
+        p.had_error = true
+        p.error_count = p.error_count + parser_truncated_literal_count()
+        print("error[E258]")
+        print(": ")
+        print_int(parser_truncated_literal_count())
+        print(" string literal(s) exceed Name capacity (384 bytes incl. quotes); first at line ")
+        print_int(parser_truncated_literal_first_line())
+        print(", longest ")
+        print_int(parser_truncated_literal_longest())
+        print(" bytes.\n")
+        print("   = note: refusing to compile rather than silently truncating string content\n")
+        print("   = help: split the literal, or raise Name capacity with matching IR name-pool stride\n")
+    }
     parser_set_last_errors(p.had_error, p.error_count)
     Program { module_path: empty_path(), items: reverse_item_list_opt(rev_items_opt) }
 }
 
 fn parse_program(tokens: [Token; 2097152], token_count: i64) -> Program with Mut, IO, Panic, Div, Alloc {
     parser_reset_last_errors()
+    parser_reset_truncated_literals()
     var p = parser_new()
 
     // Load tokens into module-global parser storage.
@@ -62,6 +74,7 @@ fn parse_program(tokens: [Token; 2097152], token_count: i64) -> Program with Mut
 
 pub fn parse_program_preloaded(token_count: i64) -> Program with Mut, IO, Panic, Div, Alloc {
     parser_reset_last_errors()
+    parser_reset_truncated_literals()
     var p = parser_new()
     p.token_count = token_count
     let prog = parse_program_loop(p)
@@ -73,6 +86,7 @@ pub fn parse_program_preloaded(token_count: i64) -> Program with Mut, IO, Panic,
 fn parse_items_loop(mut_p: Parser) -> Option<Box<ItemList>> with Mut, IO, Panic, Div, Alloc {
     var p = mut_p
     var rev_items_opt: Option<Box<ItemList>> = None
+    parser_reset_extern_block_state()
     while !parser_at_eof(p) {
         while parser_peek(p) == TokenKind::Newline || parser_peek(p) == TokenKind::Semi { p = p.advance() }
         while tk_is_doc_comment(parser_peek(p)) { p = p.advance() }
@@ -83,11 +97,27 @@ fn parse_items_loop(mut_p: Parser) -> Option<Box<ItemList>> with Mut, IO, Panic,
         let item = result.1
         if p2.pos <= before_pos { p = p2.advance() } else { p = p2 }
         // See parse_program_loop: claims are metadata, dropped from the stream.
-        if item.kind != ItemKind::ItemClaim {
+        if item.kind != ItemKind::ItemClaim && item.kind != ItemKind::ItemCausalGraph {
             rev_items_opt = Some(Box::new(ItemList { head: item, tail: rev_items_opt }))
         }
-        // See parse_program_loop: drain queued extern-block decls (#1547).
-        rev_items_opt = items_drain_extern_pending(rev_items_opt)
+    }
+    // Refuse, do not truncate. A shortened string that still compiles is a lie
+    // (measured 2026-08-17: 128-char println printed 127 and exited 0). Raising
+    // Name to 384 covers self-host (max ~335); anything still past the cap is
+    // error[E258] and fails the build.
+    if parser_truncated_literal_count() > 0 {
+        p.had_error = true
+        p.error_count = p.error_count + parser_truncated_literal_count()
+        print("error[E258]")
+        print(": ")
+        print_int(parser_truncated_literal_count())
+        print(" string literal(s) exceed Name capacity (384 bytes incl. quotes); first at line ")
+        print_int(parser_truncated_literal_first_line())
+        print(", longest ")
+        print_int(parser_truncated_literal_longest())
+        print(" bytes.\n")
+        print("   = note: refusing to compile rather than silently truncating string content\n")
+        print("   = help: split the literal, or raise Name capacity with matching IR name-pool stride\n")
     }
     parser_set_last_errors(p.had_error, p.error_count)
     reverse_item_list_opt(rev_items_opt)
@@ -95,6 +125,7 @@ fn parse_items_loop(mut_p: Parser) -> Option<Box<ItemList>> with Mut, IO, Panic,
 
 pub fn parse_items_preloaded(token_count: i64) -> Option<Box<ItemList>> with Mut, IO, Panic, Div, Alloc {
     parser_reset_last_errors()
+    parser_reset_truncated_literals()
     if GLOBAL_VAR_INIT_SUPPRESS_RESET == 0 {
         ast_reset_global_var_inits()
         items_reset_pure_fn_reg()

@@ -1,0 +1,1401 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+// Round 16b: EL+ role-aware sparse closure under policy=open_fillers
+// (primary NS + foreign parents/fillers/disj partners, superclass-closed).
+// Targets: PATO open + CL open (the multi-namespace undercount of
+// CROSS_NS_RESULTS.md, now closed in Sounio against self-validating
+// packed headers).  UBERON open needs NEPW>2 endpoint words (disj scale);
+// measured in Python only until a multi-word epm sparse port lands.
+//
+// Engine: same sparse sorted-list multi-target body as chebi_pato
+// (round 15 / round-14 GO lineage).  Capacities sized to CL open
+// (H≈6206, NR≈173, NEX≈5700, role_edges≈1.2M).
+//
+// Data: pato_open_packed.txt / cl_open_packed.txt (gen_open_fillers_data.py
+// or gen_cross_ns_probe emit path).  Run from repo root.
+
+// ── capacities (compile-time; sized to ChEBI + headroom — measured by
+//    gen_chebi_data.py's CAPACITY REPORT, see CHEBI_PATO_RESULTS.md) ────
+const HC: i64 = 7000       // classes incl. the top slot
+const NRC: i64 = 192         // roles (incl. RO-closure derived targets)
+const WC: i64 = 112         // bitmask words per scratch row (HC bits)
+const SUBC: i64 = 12000     // sub axioms
+const EXC: i64 = 8000      // existential restrictions
+const DJC: i64 = 256        // disjoint pairs
+const RSC: i64 = 256        // roleSub axioms
+const RCC: i64 = 128         // roleComp chains
+const EPC: i64 = 256         // distinct disjointness endpoints (2 words)
+const CELLS: i64 = 1344000  // NRC * HC role x class cells
+const KMAX: i64 = 16         // max roleComp chains per r1 role (CL open max=9)
+const LPC: i64 = 21504000   // CELLS * KMAX (per-(chain-slot, cell) versions)
+const ARENA: i64 = 16777216  // sparse role-row arena words
+const AARC: i64 = 8388608   // ancestor-row arena words
+const HTE: i64 = 8192        // endpoint-mask group hash slots (>= 2*GCAP)
+const GCAP: i64 = 4096       // distinct endpoint-mask groups
+const RCN: i64 = 36864       // NRC * NRC (role-hierarchy closure matrix)
+
+// ── module-level workspace (mutated by own-module fns only — the &!-
+//    boundary miscompile of rounds 9-11) ─────────────────────────────────
+// sparse ancestor rows: class c's ancestors (incl. c itself and the top
+// id H) live in a_arena[a_off[c] .. +a_len[c]), ascending.
+pub var a_arena: [i64; 8388608] = [0; 8388608]
+pub var a_arena_n: i64 = 0
+pub var a_off: [i64; 7000] = [0; 7000]
+pub var a_len: [i64; 7000] = [0; 7000]
+pub var a_cap: [i64; 7000] = [0; 7000]
+// sparse row storage: row of cell = arena[f_off[cell] .. +f_len[cell]),
+// ascending filler ids; f_cap = allocated segment length.
+pub var arena: [i64; 16777216] = [0; 16777216]
+pub var arena_n: i64 = 0
+pub var f_off: [i64; 1344000] = [0; 1344000]
+pub var f_len: [i64; 1344000] = [0; 1344000]
+pub var f_cap: [i64; 1344000] = [0; 1344000]
+// version machinery: ver per cell, rmax per role, lpv per (cell, chain slot)
+pub var ver: [i64; 1344000] = [0; 1344000]
+pub var lpv: [i64; 21504000] = [0; 21504000]
+pub var rmax: [i64; 192] = [0; 192]
+pub var gver: i64 = 0
+// non-empty cell list + roleSub worklist queue
+pub var ne_flag: [bool; 1344000] = [false; 1344000]
+pub var ne_list: [i64; 1344000] = [0; 1344000]
+pub var ne_n: i64 = 0
+// chain-relevant non-empty cells (role is some chain's r1) for comp_scan
+pub var cne_list: [i64; 1344000] = [0; 1344000]
+pub var cne_n: i64 = 0
+pub var inq: [bool; 1344000] = [false; 1344000]
+pub var dq: [i64; 1344000] = [0; 1344000]
+pub var dq_head: i64 = 0
+pub var dq_tail: i64 = 0
+// merge scratch + roleComp accumulator (bitmask + touched-word list)
+pub var scra: [i64; 7000] = [0; 7000]
+pub var scrb: [i64; 7000] = [0; 7000]
+pub var accw: [i64; 112] = [0; 112]
+pub var atouch: [i64; 112] = [0; 112]
+// overflow flag (arena / group table / queue / chain slots); checked
+// before ALL PASS
+pub var overflow: i64 = 0
+// stated axioms (runtime-parsed).
+pub var sub_c: [i64; 12000] = [0; 12000]
+pub var sub_p: [i64; 12000] = [0; 12000]
+pub var ex_c: [i64; 8000] = [0; 8000]
+pub var ex_r: [i64; 8000] = [0; 8000]
+pub var ex_f: [i64; 8000] = [0; 8000]
+pub var dj_a: [i64; 256] = [0; 256]
+pub var dj_b: [i64; 256] = [0; 256]
+pub var rs_r: [i64; 256] = [0; 256]
+pub var rs_s: [i64; 256] = [0; 256]
+pub var ch1: [i64; 128] = [0; 128]
+pub var ch2: [i64; 128] = [0; 128]
+pub var ch3: [i64; 128] = [0; 128]
+// role-hierarchy closure + per-role supers CSR.
+pub var rclos: [bool; 36864] = [false; 36864]
+pub var soff: [i64; 193] = [0; 193]
+pub var slist: [i64; 36864] = [0; 36864]
+// seed-bearing roles (expand only iterates these; the rest are no-ops)
+pub var ractive: [bool; 192] = [false; 192]
+pub var ract: [i64; 192] = [0; 192]
+pub var nra: i64 = 0
+// per-r1-role chain CSR (klist = chain id, kslot = slot for lpv indexing).
+pub var koff: [i64; 193] = [0; 193]
+pub var klist: [i64; 128] = [0; 128]
+pub var kslot: [i64; 128] = [0; 128]
+// topo / CSR scratch.
+pub var indeg: [i64; 7000] = [0; 7000]
+pub var order: [i64; 7000] = [0; 7000]
+pub var queue: [i64; 7000] = [0; 7000]
+pub var coff: [i64; 7001] = [0; 7001]
+pub var clist: [i64; 12000] = [0; 12000]
+pub var poff: [i64; 7001] = [0; 7001]
+pub var plist: [i64; 12000] = [0; 12000]
+pub var csr_cnt: [i64; 7000] = [0; 7000]
+// conflict scratch: endpoint masks (4 words = 256 bits) per class.
+pub var epm0: [i64; 7000] = [0; 7000]
+pub var epm1: [i64; 7000] = [0; 7000]
+pub var epm2: [i64; 7000] = [0; 7000]
+pub var epm3: [i64; 7000] = [0; 7000]
+pub var ep_id: [i64; 7000] = [0; 7000]
+// distinct endpoint-mask groups (4-word value + multiplicity + partner
+// mask); htab = open-addressing hash (0 = empty, else group id + 1).
+pub var gv0: [i64; 4096] = [0; 4096]
+pub var gv1: [i64; 4096] = [0; 4096]
+pub var gv2: [i64; 4096] = [0; 4096]
+pub var gv3: [i64; 4096] = [0; 4096]
+pub var gmult: [i64; 4096] = [0; 4096]
+pub var pmg0: [i64; 4096] = [0; 4096]
+pub var pmg1: [i64; 4096] = [0; 4096]
+pub var pmg2: [i64; 4096] = [0; 4096]
+pub var pmg3: [i64; 4096] = [0; 4096]
+pub var htab: [i64; 8192] = [0; 8192]
+
+// parser cursor over the read_file text.
+pub var g_pos: i64 = 0
+pub var g_len: i64 = 0
+
+// ── bit helpers ──────────────────────────────────────────────────────────
+
+// count trailing zeros of a single-bit value (1 << 63 is negative; the
+// division ladder works on two's-complement values — probed).
+fn ctz64(x: i64) -> i64 with Div {
+    var n: i64 = 0
+    var v = x
+    if (v & 4294967295) == 0 { n = n + 32; v = v / 4294967296 }
+    if (v & 65535) == 0 { n = n + 16; v = v / 65536 }
+    if (v & 255) == 0 { n = n + 8; v = v / 256 }
+    if (v & 15) == 0 { n = n + 4; v = v / 16 }
+    if (v & 3) == 0 { n = n + 2; v = v / 4 }
+    if (v & 1) == 0 { n = n + 1 }
+    return n
+}
+
+// Union class c's sorted ancestor row with the sorted a_arena segment
+// at (soff2, slen), via the scra scratch.  No version machinery: ancestor
+// rows are final once built (topological order).
+fn amerge_into(c: i64, soff2: i64, slen: i64) with Mut, Div, Panic {
+    let dlen = a_len[c]
+    let doff = a_off[c]
+    var i: i64 = 0
+    var j: i64 = 0
+    var w: i64 = 0
+    while i < dlen && j < slen {
+        let dv = a_arena[doff + i]
+        let sv = a_arena[soff2 + j]
+        if dv <= sv {
+            scra[w] = dv
+            i = i + 1
+            if dv == sv {
+                j = j + 1
+            }
+        } else {
+            scra[w] = sv
+            j = j + 1
+        }
+        w = w + 1
+    }
+    while i < dlen {
+        scra[w] = a_arena[doff + i]
+        i = i + 1
+        w = w + 1
+    }
+    while j < slen {
+        scra[w] = a_arena[soff2 + j]
+        j = j + 1
+        w = w + 1
+    }
+    if w == dlen {
+        return
+    }
+    if a_cap[c] < w {
+        var ncap = w * 2
+        if ncap < 16 {
+            ncap = 16
+        }
+        if a_arena_n + ncap > AARC {
+            overflow = 1
+            return
+        }
+        a_off[c] = a_arena_n
+        a_arena_n = a_arena_n + ncap
+        a_cap[c] = ncap
+    }
+    let off = a_off[c]
+    i = 0
+    while i < w {
+        a_arena[off + i] = scra[i]
+        i = i + 1
+    }
+    a_len[c] = w
+}
+
+// ── runtime text parsing (read_file result; str_char_at access only) ─────
+
+fn skip_ws(text: string) with Mut, Div, Panic {
+    while g_pos < g_len {
+        let c = str_char_at(text, g_pos) as i64
+        if c != 32 && c != 10 && c != 13 && c != 9 {
+            return
+        }
+        g_pos = g_pos + 1
+    }
+}
+
+fn read_int(text: string) -> i64 with Mut, Div, Panic {
+    skip_ws(text)
+    var v: i64 = 0
+    while g_pos < g_len {
+        let c = str_char_at(text, g_pos) as i64
+        if c < 48 || c > 57 {
+            return v
+        }
+        v = v * 10 + (c - 48)
+        g_pos = g_pos + 1
+    }
+    return v
+}
+
+fn read_kind(text: string) -> i64 with Mut, Div, Panic {
+    skip_ws(text)
+    if g_pos >= g_len {
+        return 0
+    }
+    let c = str_char_at(text, g_pos) as i64
+    g_pos = g_pos + 1
+    return c
+}
+
+// ── sparse-row engine ────────────────────────────────────────────────────
+
+// Record a change to a cell's row: bump versions, mark non-empty, queue
+// for roleSub propagation.
+fn bump_cell(cell: i64) with Mut, Div, Panic {
+    gver = gver + 1
+    ver[cell] = gver
+    rmax[cell / HC] = gver
+    if !ne_flag[cell] {
+        ne_flag[cell] = true
+        ne_list[ne_n] = cell
+        ne_n = ne_n + 1
+        let r = cell / HC
+        if koff[r + 1] > koff[r] {
+            cne_list[cne_n] = cell
+            cne_n = cne_n + 1
+        }
+    }
+    if !inq[cell] {
+        inq[cell] = true
+        if dq_tail < CELLS {
+            dq[dq_tail] = cell
+            dq_tail = dq_tail + 1
+        } else {
+            overflow = 1
+        }
+    }
+}
+
+// Union of the sorted dst row segment and the sorted src ARENA segment,
+// written to scra; returns the merged length.
+fn merge_arena(doff: i64, dlen: i64, soff2: i64, slen: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    var j: i64 = 0
+    var w: i64 = 0
+    while i < dlen && j < slen {
+        let dv = arena[doff + i]
+        let sv = arena[soff2 + j]
+        if dv <= sv {
+            scra[w] = dv
+            i = i + 1
+            if dv == sv {
+                j = j + 1
+            }
+        } else {
+            scra[w] = sv
+            j = j + 1
+        }
+        w = w + 1
+    }
+    while i < dlen {
+        scra[w] = arena[doff + i]
+        i = i + 1
+        w = w + 1
+    }
+    while j < slen {
+        scra[w] = arena[soff2 + j]
+        j = j + 1
+        w = w + 1
+    }
+    return w
+}
+
+// Union of the sorted dst row segment and the sorted scrb prefix,
+// written to scra; returns the merged length.
+fn merge_scrb(doff: i64, dlen: i64, slen: i64) -> i64 with Mut, Div, Panic {
+    var i: i64 = 0
+    var j: i64 = 0
+    var w: i64 = 0
+    while i < dlen && j < slen {
+        let dv = arena[doff + i]
+        let sv = scrb[j]
+        if dv <= sv {
+            scra[w] = dv
+            i = i + 1
+            if dv == sv {
+                j = j + 1
+            }
+        } else {
+            scra[w] = sv
+            j = j + 1
+        }
+        w = w + 1
+    }
+    while i < dlen {
+        scra[w] = arena[doff + i]
+        i = i + 1
+        w = w + 1
+    }
+    while j < slen {
+        scra[w] = scrb[j]
+        j = j + 1
+        w = w + 1
+    }
+    return w
+}
+
+// merge_into(cell, src): cell's row |= src.  use_scrb selects the src
+// representation (1 = sorted scrb prefix of length slen; 0 = sorted arena
+// segment at soff2).  Returns 1 if the row grew.
+fn merge_into(cell: i64, use_scrb: i64, soff2: i64, slen: i64) -> i64 with Mut, Div, Panic {
+    if slen == 0 {
+        return 0
+    }
+    let dlen = f_len[cell]
+    var w: i64 = 0
+    if use_scrb == 1 {
+        w = merge_scrb(f_off[cell], dlen, slen)
+    } else {
+        w = merge_arena(f_off[cell], dlen, soff2, slen)
+    }
+    if w == dlen {
+        return 0
+    }
+    if f_cap[cell] < w {
+        var ncap = w * 2
+        if ncap < 16 {
+            ncap = 16
+        }
+        if arena_n + ncap > ARENA {
+            overflow = 1
+            return 0
+        }
+        f_off[cell] = arena_n
+        arena_n = arena_n + ncap
+        f_cap[cell] = ncap
+    }
+    let off = f_off[cell]
+    var i: i64 = 0
+    while i < w {
+        arena[off + i] = scra[i]
+        i = i + 1
+    }
+    f_len[cell] = w
+    bump_cell(cell)
+    return 1
+}
+
+// Seed F from the stated restrictions (F[r][c] |= ancestor row of f,
+// copied to scrb), then ONE topological ancestor expansion (parents
+// before children) F[r][c] |= F[r][p], skipping empty parent rows.
+// Every change is queued for the role fixpoint.
+fn seed_and_expand(nex: i64, h: i64, nr: i64) with Mut, Div, Panic {
+    var k: i64 = 0
+    while k < nex {
+        // seed = the filler's sorted ancestor row, copied to scrb
+        let f = ex_f[k]
+        let ao = a_off[f]
+        let al = a_len[f]
+        var q: i64 = 0
+        while q < al {
+            scrb[q] = a_arena[ao + q]
+            q = q + 1
+        }
+        let chg = merge_into(ex_r[k] * HC + ex_c[k], 1, 0, al)
+        k = k + 1
+    }
+    // expand only seed-bearing roles: a role without seeds has every row
+    // empty here, so its parent-edge checks are provably no-ops.
+    var i: i64 = 0
+    while i < h {
+        let c = order[i]
+        var t = poff[c]
+        while t < poff[c + 1] {
+            let p = plist[t]
+            var ai: i64 = 0
+            while ai < nra {
+                let r = ract[ai]
+                let src = r * HC + p
+                if f_len[src] > 0 {
+                    let chg = merge_into(r * HC + c, 0, f_off[src], f_len[src])
+                }
+                ai = ai + 1
+            }
+            t = t + 1
+        }
+        i = i + 1
+    }
+}
+
+// roleSub worklist drain to quiescence (complete: single-input rule).
+// with_rsub == 0 just discards stale queued cells (mirror semantics).
+fn drain(with_rsub: i64) -> i64 with Mut, Div, Panic {
+    var any: i64 = 0
+    while dq_head < dq_tail {
+        let cell = dq[dq_head]
+        dq_head = dq_head + 1
+        inq[cell] = false
+        if with_rsub == 1 {
+            let r = cell / HC
+            let c = cell - r * HC
+            var t = soff[r]
+            while t < soff[r + 1] {
+                any = any + merge_into(slist[t] * HC + c, 0, f_off[cell], f_len[cell])
+                t = t + 1
+            }
+        }
+    }
+    dq_head = 0
+    dq_tail = 0
+    return any
+}
+
+// roleComp scan over non-empty cells with per-(chain, cell) version
+// skipping.  A (chain k = r1 o r2 <= r3, cell (r1, c)) pair is
+// reprocessed only if the cell's row changed since its last processing
+// (ver > lp) or one of its current fillers' r2-rows did (precise per-row
+// check, gated by rmax[r2] > lp).  Processing recomputes
+// acc = union over f in row of F[r2][f] (bitmask scratch) and merges it
+// into F[r3][c].  Complete: every input change re-fires the pair.
+fn comp_scan() -> i64 with Mut, Div, Panic {
+    var any: i64 = 0
+    let ne_end = cne_n
+    let one: i64 = 1
+    var i: i64 = 0
+    while i < ne_end {
+        let cell = cne_list[i]
+        let r1 = cell / HC
+        let c = cell - r1 * HC
+        var t = koff[r1]
+        while t < koff[r1 + 1] {
+            let k = klist[t]
+            let lpi = cell * KMAX + kslot[t]
+            let lp = lpv[lpi]
+            let r2 = ch2[k]
+            var proc = false
+            if ver[cell] > lp {
+                proc = true
+            } else {
+                if rmax[r2] > lp {
+                    let off = f_off[cell]
+                    let ln = f_len[cell]
+                    var j: i64 = 0
+                    while j < ln {
+                        if ver[r2 * HC + arena[off + j]] > lp {
+                            proc = true
+                            j = ln
+                        }
+                        j = j + 1
+                    }
+                }
+            }
+            if proc {
+                // acc = union of F[r2][f] over f in the cell's row,
+                // accumulated in the accw bitmask (touched-word list).
+                var atn: i64 = 0
+                let off = f_off[cell]
+                let ln = f_len[cell]
+                var j: i64 = 0
+                while j < ln {
+                    let f2cell = r2 * HC + arena[off + j]
+                    let o2 = f_off[f2cell]
+                    let l2 = f_len[f2cell]
+                    var q: i64 = 0
+                    while q < l2 {
+                        let g = arena[o2 + q]
+                        let w = g / 64
+                        if accw[w] == 0 {
+                            atouch[atn] = w
+                            atn = atn + 1
+                        }
+                        accw[w] = accw[w] | (one << (g - w * 64))
+                        q = q + 1
+                    }
+                    j = j + 1
+                }
+                if atn > 0 {
+                    // sort touched words (insertion sort; atn <= WC).
+                    // NOTE: && does not short-circuit array reads on this
+                    // lane, so the v-1 access is guarded by a flag.
+                    var u: i64 = 1
+                    while u < atn {
+                        let key = atouch[u]
+                        var v = u
+                        var moving = true
+                        while moving {
+                            if v > 0 {
+                                if atouch[v - 1] > key {
+                                    atouch[v] = atouch[v - 1]
+                                    v = v - 1
+                                } else {
+                                    moving = false
+                                }
+                            } else {
+                                moving = false
+                            }
+                        }
+                        atouch[v] = key
+                        u = u + 1
+                    }
+                    // extract acc bits ascending into scrb; clear accw
+                    var sn: i64 = 0
+                    u = 0
+                    while u < atn {
+                        let w = atouch[u]
+                        var m = accw[w]
+                        accw[w] = 0
+                        while m != 0 {
+                            let low = m & (0 - m)
+                            scrb[sn] = w * 64 + ctz64(low)
+                            sn = sn + 1
+                            m = m & (m - 1)
+                        }
+                        u = u + 1
+                    }
+                    any = any + merge_into(ch3[k] * HC + c, 1, 0, sn)
+                }
+                lpv[lpi] = gver
+            }
+            t = t + 1
+        }
+        i = i + 1
+    }
+    return any
+}
+
+// Hybrid roleSub/roleComp fixpoint (same chaotic-iteration schedule as
+// round 12, with the worklist/version machinery above).  Returns the
+// number of rounds.
+fn role_fixpoint(with_rsub: i64, with_rcomp: i64) -> i64 with Mut, Div, Panic {
+    var rounds: i64 = 0
+    var any: i64 = 1
+    while any > 0 {
+        any = 0
+        rounds = rounds + 1
+        any = any + drain(with_rsub)
+        if with_rcomp == 1 {
+            any = any + comp_scan()
+        }
+    }
+    return rounds
+}
+
+// total role-edge fillers over atom rows (= existential targets).
+fn count_role_edges() -> i64 with Mut, Div, Panic {
+    var n: i64 = 0
+    var i: i64 = 0
+    while i < ne_n {
+        n = n + f_len[ne_list[i]]
+        i = i + 1
+    }
+    return n
+}
+
+// clear the sparse role workspace (for ablation re-runs and target
+// switches): only the listed non-empty cells carry state, so clearing is
+// O(ne_n * KMAX).
+fn clear_all(nr: i64) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ne_n {
+        let cell = ne_list[i]
+        f_len[cell] = 0
+        f_cap[cell] = 0
+        f_off[cell] = 0
+        ver[cell] = 0
+        ne_flag[cell] = false
+        var s: i64 = 0
+        while s < KMAX {
+            lpv[cell * KMAX + s] = 0
+            s = s + 1
+        }
+        i = i + 1
+    }
+    i = dq_head
+    while i < dq_tail {
+        inq[dq[i]] = false
+        i = i + 1
+    }
+    dq_head = 0
+    dq_tail = 0
+    var r: i64 = 0
+    while r < nr {
+        rmax[r] = 0
+        r = r + 1
+    }
+    ne_n = 0
+    cne_n = 0
+    arena_n = 0
+    gver = 0
+}
+
+// FULL per-target reset: after this function the workspace is in exactly
+// the all-zero state a fresh process has (module splat + leading-cell
+// fixups).  clear_all empties the role workspace via the non-empty cell
+// list; the rest is per-target state the role workspace does not track:
+// ancestor arena cursor, endpoint masks / endpoint ids, the endpoint-mask
+// group tables + hash, the seed-bearing role list, and the role-hierarchy
+// closure matrix (all rebuilt from the new target's data afterwards).
+// a_off/a_len/a_cap need no clearing: every class row is rebuilt from
+// scratch in topological order before any read.
+fn reset_target() with Mut, Div, Panic {
+    clear_all(NRC)
+    a_arena_n = 0
+    nra = 0
+    var c: i64 = 0
+    while c < HC {
+        epm0[c] = 0
+        epm1[c] = 0
+        epm2[c] = 0
+        epm3[c] = 0
+        ep_id[c] = 0
+        c = c + 1
+    }
+    var g: i64 = 0
+    while g < GCAP {
+        gv0[g] = 0
+        gv1[g] = 0
+        gv2[g] = 0
+        gv3[g] = 0
+        gmult[g] = 0
+        pmg0[g] = 0
+        pmg1[g] = 0
+        pmg2[g] = 0
+        pmg3[g] = 0
+        g = g + 1
+    }
+    g = 0
+    while g < HTE {
+        htab[g] = 0
+        g = g + 1
+    }
+    g = 0
+    while g < NRC {
+        ractive[g] = false
+        g = g + 1
+    }
+    g = 0
+    while g < RCN {
+        rclos[g] = false
+        g = g + 1
+    }
+}
+
+// ── per-target body ──────────────────────────────────────────────────────
+// Loads one packed file (13-int self-validating header + axiom lines),
+// runs the closure + both ablations, checks every number against the
+// header.  Returns the number of failed checks (0 = target passed).
+fn do_target(text: string) -> i64 with IO, Mut, Div, Panic {
+    var n_fail = 0
+    reset_target()
+
+    // ── runtime data load (bypasses the ~24k-statement wall) ──────────
+    g_len = str_len(text)
+    g_pos = 0
+    let H = read_int(text)
+    let NR = read_int(text)
+    let NSUB = read_int(text)
+    let NEX = read_int(text)
+    let NDJ = read_int(text)
+    let NRS = read_int(text)
+    let NCH = read_int(text)
+    let E_ATOM = read_int(text)
+    let E_ROLE = read_int(text)
+    let E_CONF = read_int(text)
+    let E_ROUNDS = read_int(text)
+    let E_NORC = read_int(text)
+    let E_NORS = read_int(text)
+    if H + 1 > HC || NR > NRC || NSUB > SUBC || NEX > EXC || NDJ > DJC || NRS > RSC || NCH > RCC {
+        println("FAIL: data exceeds compile-time capacities")
+        n_fail = n_fail + 1
+    }
+    var k: i64 = 0
+    var kind: i64 = 0
+    var isub: i64 = 0
+    var iex: i64 = 0
+    var idj: i64 = 0
+    var irs: i64 = 0
+    var ich: i64 = 0
+    while g_pos < g_len {
+        kind = read_kind(text)
+        if kind == 115 {
+            sub_c[isub] = read_int(text)
+            sub_p[isub] = read_int(text)
+            isub = isub + 1
+        }
+        if kind == 120 {
+            ex_c[iex] = read_int(text)
+            ex_r[iex] = read_int(text)
+            ex_f[iex] = read_int(text)
+            iex = iex + 1
+        }
+        if kind == 100 {
+            dj_a[idj] = read_int(text)
+            dj_b[idj] = read_int(text)
+            idj = idj + 1
+        }
+        if kind == 104 {
+            rs_r[irs] = read_int(text)
+            rs_s[irs] = read_int(text)
+            irs = irs + 1
+        }
+        if kind == 107 {
+            ch1[ich] = read_int(text)
+            ch2[ich] = read_int(text)
+            ch3[ich] = read_int(text)
+            ich = ich + 1
+        }
+    }
+    if isub != NSUB || iex != NEX || idj != NDJ || irs != NRS || ich != NCH {
+        println("FAIL: parsed axiom counts disagree with header")
+        n_fail = n_fail + 1
+    }
+    // seed-bearing roles (expand skips the provably-empty rest)
+    k = 0
+    while k < NEX {
+        ractive[ex_r[k]] = true
+        k = k + 1
+    }
+    var rr: i64 = 0
+    while rr < NR {
+        if ractive[rr] {
+            ract[nra] = rr
+            nra = nra + 1
+        }
+        rr = rr + 1
+    }
+
+    // ── role-hierarchy closure (reflexive + transitive) ───────────────
+    var r: i64 = 0
+    while r < NR {
+        rclos[r * NRC + r] = true
+        r = r + 1
+    }
+    k = 0
+    while k < NRS {
+        rclos[rs_r[k] * NRC + rs_s[k]] = true
+        k = k + 1
+    }
+    var changed2 = true
+    var a: i64 = 0
+    var b: i64 = 0
+    var d: i64 = 0
+    while changed2 {
+        changed2 = false
+        a = 0
+        while a < NR {
+            b = 0
+            while b < NR {
+                if rclos[a * NRC + b] {
+                    d = 0
+                    while d < NR {
+                        if rclos[b * NRC + d] && !rclos[a * NRC + d] {
+                            rclos[a * NRC + d] = true
+                            changed2 = true
+                        }
+                        d = d + 1
+                    }
+                }
+                b = b + 1
+            }
+            a = a + 1
+        }
+    }
+    // per-role supers CSR (proper roleSub pairs, r != s)
+    a = 0
+    while a <= NR {
+        soff[a] = 0
+        a = a + 1
+    }
+    a = 0
+    while a < NR {
+        b = 0
+        while b < NR {
+            if a != b && rclos[a * NRC + b] {
+                soff[a + 1] = soff[a + 1] + 1
+            }
+            b = b + 1
+        }
+        a = a + 1
+    }
+    a = 0
+    while a < NR {
+        soff[a + 1] = soff[a + 1] + soff[a]
+        a = a + 1
+    }
+    a = 0
+    while a < NR {
+        csr_cnt[a] = soff[a]
+        a = a + 1
+    }
+    a = 0
+    while a < NR {
+        b = 0
+        while b < NR {
+            if a != b && rclos[a * NRC + b] {
+                slist[csr_cnt[a]] = b
+                csr_cnt[a] = csr_cnt[a] + 1
+            }
+            b = b + 1
+        }
+        a = a + 1
+    }
+
+    // per-r1-role chain CSR with lpv slot numbers
+    a = 0
+    while a <= NR {
+        koff[a] = 0
+        a = a + 1
+    }
+    k = 0
+    while k < NCH {
+        koff[ch1[k] + 1] = koff[ch1[k] + 1] + 1
+        k = k + 1
+    }
+    a = 0
+    while a < NR {
+        koff[a + 1] = koff[a + 1] + koff[a]
+        a = a + 1
+    }
+    a = 0
+    while a < NR {
+        csr_cnt[a] = koff[a]
+        a = a + 1
+    }
+    k = 0
+    while k < NCH {
+        let r1k = ch1[k]
+        let pos = csr_cnt[r1k]
+        klist[pos] = k
+        kslot[pos] = pos - koff[r1k]
+        if kslot[pos] >= KMAX {
+            overflow = 1
+        }
+        csr_cnt[r1k] = csr_cnt[r1k] + 1
+        k = k + 1
+    }
+
+    // ── topological order (Kahn; the sub relation must be a DAG) ──────
+    var c: i64 = 0
+    while c < H {
+        indeg[c] = 0
+        coff[c] = 0
+        poff[c] = 0
+        c = c + 1
+    }
+    coff[H] = 0
+    poff[H] = 0
+    k = 0
+    while k < NSUB {
+        indeg[sub_c[k]] = indeg[sub_c[k]] + 1
+        coff[sub_p[k] + 1] = coff[sub_p[k] + 1] + 1
+        poff[sub_c[k] + 1] = poff[sub_c[k] + 1] + 1
+        k = k + 1
+    }
+    c = 0
+    while c < H {
+        coff[c + 1] = coff[c + 1] + coff[c]
+        poff[c + 1] = poff[c + 1] + poff[c]
+        c = c + 1
+    }
+    c = 0
+    while c < H {
+        csr_cnt[c] = coff[c]
+        c = c + 1
+    }
+    k = 0
+    while k < NSUB {
+        clist[csr_cnt[sub_p[k]]] = sub_c[k]
+        csr_cnt[sub_p[k]] = csr_cnt[sub_p[k]] + 1
+        k = k + 1
+    }
+    c = 0
+    while c < H {
+        csr_cnt[c] = poff[c]
+        c = c + 1
+    }
+    k = 0
+    while k < NSUB {
+        plist[csr_cnt[sub_c[k]]] = sub_p[k]
+        csr_cnt[sub_c[k]] = csr_cnt[sub_c[k]] + 1
+        k = k + 1
+    }
+    var head: i64 = 0
+    var tail: i64 = 0
+    c = 0
+    while c < H {
+        if indeg[c] == 0 {
+            queue[tail] = c
+            tail = tail + 1
+        }
+        c = c + 1
+    }
+    var nord: i64 = 0
+    var t: i64 = 0
+    var ch: i64 = 0
+    while head < tail {
+        c = queue[head]
+        head = head + 1
+        order[nord] = c
+        nord = nord + 1
+        t = coff[c]
+        while t < coff[c + 1] {
+            ch = clist[t]
+            indeg[ch] = indeg[ch] - 1
+            if indeg[ch] == 0 {
+                queue[tail] = ch
+                tail = tail + 1
+            }
+            t = t + 1
+        }
+    }
+    if nord != H {
+        println("FAIL: sub relation has a cycle (Kahn incomplete)")
+        n_fail = n_fail + 1
+    }
+
+    // ── atomic closure: sparse sorted ancestor rows in topological ────
+    // order.  Row of c = [c, H] (self + top; c < H so the two-id row is
+    // sorted) merged with every parent's row.
+    let one: i64 = 1
+    var i: i64 = 0
+    var p: i64 = 0
+    while i < H {
+        c = order[i]
+        if a_arena_n + 16 > AARC {
+            overflow = 1
+        } else {
+            a_off[c] = a_arena_n
+            a_arena_n = a_arena_n + 16
+            a_cap[c] = 16
+            let ao = a_off[c]
+            a_arena[ao] = c
+            a_arena[ao + 1] = H
+            a_len[c] = 2
+        }
+        t = poff[c]
+        while t < poff[c + 1] {
+            p = plist[t]
+            amerge_into(c, a_off[p], a_len[p])
+            t = t + 1
+        }
+        i = i + 1
+    }
+    // atomic closure edges (exclude the top id of every row)
+    var atomic_edges: i64 = 0
+    c = 0
+    while c < H {
+        atomic_edges = atomic_edges + a_len[c] - 1
+        c = c + 1
+    }
+    if atomic_edges != E_ATOM {
+        println("FAIL: atomic closure edges disagree with mirror")
+        n_fail = n_fail + 1
+    }
+
+    // ── role-aware closure: seed + expand + role fixpoint ─────────────
+    seed_and_expand(NEX, H, NR)
+    let rounds = role_fixpoint(1, 1)
+    println("role fixpoint rounds (full):")
+    println(rounds)
+
+    let r_atom = count_role_edges()
+    if r_atom != E_ROLE {
+        println("FAIL: atom-source role edges disagree with mirror")
+        n_fail = n_fail + 1
+    }
+    println("non-empty role x class cells (full run):")
+    println(ne_n)
+    println("sparse arena words used (full run):")
+    println(arena_n)
+    println("ancestor arena words used:")
+    println(a_arena_n)
+
+    // ── conflicts over atomic ancestors (profile theorem) ─────────────
+    // endpoint index per class (1-based, 0 = not an endpoint)
+    var nep: i64 = 0
+    k = 0
+    while k < NDJ {
+        a = dj_a[k]
+        b = dj_b[k]
+        if ep_id[a] == 0 {
+            nep = nep + 1
+            ep_id[a] = nep
+        }
+        if ep_id[b] == 0 {
+            nep = nep + 1
+            ep_id[b] = nep
+        }
+        k = k + 1
+    }
+    if nep > EPC {
+        println("FAIL: too many disjointness endpoints")
+        n_fail = n_fail + 1
+    }
+    // epm: which endpoints are ancestors of c — walk the sparse ancestor
+    // rows.
+    c = 0
+    while c < H {
+        let ao = a_off[c]
+        let al = a_len[c]
+        var q: i64 = 0
+        while q < al {
+            let eid = ep_id[a_arena[ao + q]]
+            if eid != 0 {
+                let ke = eid - 1
+                if ke < 64 {
+                    epm0[c] = epm0[c] | (one << ke)
+                } else {
+                    if ke < 128 {
+                        epm1[c] = epm1[c] | (one << (ke - 64))
+                    } else {
+                        if ke < 192 {
+                            epm2[c] = epm2[c] | (one << (ke - 128))
+                        } else {
+                            epm3[c] = epm3[c] | (one << (ke - 192))
+                        }
+                    }
+                }
+            }
+            q = q + 1
+        }
+        c = c + 1
+    }
+    // group classes by their endpoint mask (epm0, epm1): open-addressing
+    // hash over the 128-bit value (0 = empty slot, else group id + 1).
+    var ng: i64 = 0
+    c = 0
+    while c < H {
+        let e0 = epm0[c]
+        let e1 = epm1[c]
+        let e2 = epm2[c]
+        let e3 = epm3[c]
+        if e0 != 0 || e1 != 0 || e2 != 0 || e3 != 0 {
+            var hslot = (e0 * 1000003 + e1 * 9176 + e2 * 13 + e3) & 8191
+            if hslot < 0 {
+                hslot = 0 - hslot
+                hslot = hslot & 8191
+            }
+            var probing = true
+            while probing {
+                let ent = htab[hslot]
+                if ent == 0 {
+                    if ng >= GCAP {
+                        overflow = 1
+                    } else {
+                        gv0[ng] = e0
+                        gv1[ng] = e1
+                        gv2[ng] = e2
+                        gv3[ng] = e3
+                        gmult[ng] = 1
+                        htab[hslot] = ng + 1
+                        ng = ng + 1
+                    }
+                    probing = false
+                } else {
+                    let gid = ent - 1
+                    if gv0[gid] == e0 && gv1[gid] == e1 && gv2[gid] == e2 && gv3[gid] == e3 {
+                        gmult[gid] = gmult[gid] + 1
+                        probing = false
+                    } else {
+                        hslot = hslot + 1
+                        if hslot >= HTE {
+                            hslot = 0
+                        }
+                    }
+                }
+            }
+        }
+        c = c + 1
+    }
+    // partner masks per GROUP: pm[c] depends on c only through epm[c].
+    var g: i64 = 0
+    while g < ng {
+        k = 0
+        while k < NDJ {
+            let ka = ep_id[dj_a[k]] - 1
+            let kb = ep_id[dj_b[k]] - 1
+            var has_a = false
+            var has_b = false
+            if ka < 64 {
+                has_a = (gv0[g] & (one << ka)) != 0
+            } else {
+                if ka < 128 {
+                    has_a = (gv1[g] & (one << (ka - 64))) != 0
+                } else {
+                    if ka < 192 {
+                        has_a = (gv2[g] & (one << (ka - 128))) != 0
+                    } else {
+                        has_a = (gv3[g] & (one << (ka - 192))) != 0
+                    }
+                }
+            }
+            if kb < 64 {
+                has_b = (gv0[g] & (one << kb)) != 0
+            } else {
+                if kb < 128 {
+                    has_b = (gv1[g] & (one << (kb - 64))) != 0
+                } else {
+                    if kb < 192 {
+                        has_b = (gv2[g] & (one << (kb - 128))) != 0
+                    } else {
+                        has_b = (gv3[g] & (one << (kb - 192))) != 0
+                    }
+                }
+            }
+            if has_a {
+                if kb < 64 {
+                    pmg0[g] = pmg0[g] | (one << kb)
+                } else {
+                    if kb < 128 {
+                        pmg1[g] = pmg1[g] | (one << (kb - 64))
+                    } else {
+                        if kb < 192 {
+                            pmg2[g] = pmg2[g] | (one << (kb - 128))
+                        } else {
+                            pmg3[g] = pmg3[g] | (one << (kb - 192))
+                        }
+                    }
+                }
+            }
+            if has_b {
+                if ka < 64 {
+                    pmg0[g] = pmg0[g] | (one << ka)
+                } else {
+                    if ka < 128 {
+                        pmg1[g] = pmg1[g] | (one << (ka - 64))
+                    } else {
+                        if ka < 192 {
+                            pmg2[g] = pmg2[g] | (one << (ka - 128))
+                        } else {
+                            pmg3[g] = pmg3[g] | (one << (ka - 192))
+                        }
+                    }
+                }
+            }
+            k = k + 1
+        }
+        g = g + 1
+    }
+    // conflict count over group pairs: identical sum to the per-class
+    // loop — every member of group gc has epm = gv[gc] and pm = pmg[gc],
+    // and the diagonal (c2 == c1) exclusion is per member.
+    var conf: i64 = 0
+    var gc: i64 = 0
+    while gc < ng {
+        let p0 = pmg0[gc]
+        let p1 = pmg1[gc]
+        let p2 = pmg2[gc]
+        let p3 = pmg3[gc]
+        if p0 != 0 || p1 != 0 || p2 != 0 || p3 != 0 {
+            var s: i64 = 0
+            g = 0
+            while g < ng {
+                if (gv0[g] & p0) != 0 || (gv1[g] & p1) != 0 || (gv2[g] & p2) != 0 || (gv3[g] & p3) != 0 {
+                    s = s + gmult[g]
+                }
+                g = g + 1
+            }
+            // exclude the diagonal (c2 == c1), once per group member
+            if (gv0[gc] & p0) != 0 || (gv1[gc] & p1) != 0 || (gv2[gc] & p2) != 0 || (gv3[gc] & p3) != 0 {
+                s = s - 1
+            }
+            conf = conf + gmult[gc] * s
+        }
+        gc = gc + 1
+    }
+    if conf != E_CONF {
+        println("FAIL: conflicts disagree with mirror")
+        n_fail = n_fail + 1
+    }
+
+    // ── ablations: attribute derived edges to the rule families ───────
+    clear_all(NR)
+    seed_and_expand(NEX, H, NR)
+    let rounds_norc = role_fixpoint(1, 0)
+    let re_norc = count_role_edges()
+    if re_norc != E_NORC {
+        println("FAIL: no-roleComp role edges disagree with mirror")
+        n_fail = n_fail + 1
+    }
+    clear_all(NR)
+    seed_and_expand(NEX, H, NR)
+    let rounds_nors = role_fixpoint(0, 1)
+    let re_nors = count_role_edges()
+    if re_nors != E_NORS {
+        println("FAIL: no-roleSub role edges disagree with mirror")
+        n_fail = n_fail + 1
+    }
+
+    if overflow != 0 {
+        println("FAIL: workspace overflow (arena / groups / queue / chain slots)")
+        n_fail = n_fail + 1
+    }
+
+    // ── per-target summary ─────────────────────────────────────────────
+    println("classes (H):")
+    println(H)
+    println("roles (NR):")
+    println(NR)
+    println("sub axioms:")
+    println(NSUB)
+    println("existential restrictions (exsub):")
+    println(NEX)
+    println("disjoint pairs:")
+    println(NDJ)
+    println("roleSub axioms:")
+    println(NRS)
+    println("roleComp chains:")
+    println(NCH)
+    println("atomic projection closure edges:")
+    println(atomic_edges)
+    println("atom-source role edges (= existential targets, stoR/RtoS):")
+    println(r_atom)
+    println("atomic conflicts (ordered pairs):")
+    println(conf)
+    println("role fixpoint rounds (full):")
+    println(rounds)
+    println("role edges without roleComp (ablation):")
+    println(re_norc)
+    println("role edges without roleSub (ablation):")
+    println(re_nors)
+    println("role fixpoint rounds (no-roleComp):")
+    println(rounds_norc)
+    println("role fixpoint rounds (no-roleSub):")
+    println(rounds_nors)
+    return n_fail
+}
+
+fn run_pato_open() -> i64 with IO, Mut, Div, Panic {
+    println("=== PATO open_fillers: EL+ role-aware closure (round 16b) ===")
+    return do_target(read_file("artifacts/ontology-frontiers/multi-ontology/pato_open_packed.txt"))
+}
+
+fn run_cl_open() -> i64 with IO, Mut, Div, Panic {
+    println("=== CL open_fillers: EL+ role-aware closure (round 16b) ===")
+    return do_target(read_file("artifacts/ontology-frontiers/multi-ontology/cl_open_packed.txt"))
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    // Module-level SCALAR initializers are unreliable on this lane
+    // (probe: pub var g: i64 = 0 reads back garbage, same family as the
+    // array leading-cell pitfall) — assign every scalar explicitly.
+    gver = 0
+    ne_n = 0
+    cne_n = 0
+    nra = 0
+    a_arena_n = 0
+    arena_n = 0
+    dq_head = 0
+    dq_tail = 0
+    overflow = 0
+    g_pos = 0
+    g_len = 0
+
+    // fixup writes for the garbage leading cells of module-level splat
+    // arrays (known compiler pitfall, rounds 6-14)
+    a_arena[0] = 0
+    a_arena[1] = 0
+    a_arena[2] = 0
+    a_off[0] = 0
+    a_off[1] = 0
+    a_off[2] = 0
+    a_len[0] = 0
+    a_len[1] = 0
+    a_len[2] = 0
+    a_cap[0] = 0
+    a_cap[1] = 0
+    a_cap[2] = 0
+    arena[0] = 0
+    arena[1] = 0
+    arena[2] = 0
+    f_off[0] = 0
+    f_off[1] = 0
+    f_off[2] = 0
+    f_len[0] = 0
+    f_len[1] = 0
+    f_len[2] = 0
+    f_cap[0] = 0
+    f_cap[1] = 0
+    f_cap[2] = 0
+    ver[0] = 0
+    ver[1] = 0
+    ver[2] = 0
+    lpv[0] = 0
+    lpv[1] = 0
+    lpv[2] = 0
+    rmax[0] = 0
+    rmax[1] = 0
+    rmax[2] = 0
+    ne_flag[0] = false
+    ne_flag[1] = false
+    ne_flag[2] = false
+    ne_list[0] = 0
+    ne_list[1] = 0
+    ne_list[2] = 0
+    cne_list[0] = 0
+    cne_list[1] = 0
+    cne_list[2] = 0
+    ractive[0] = false
+    ractive[1] = false
+    ractive[2] = false
+    ract[0] = 0
+    ract[1] = 0
+    ract[2] = 0
+    inq[0] = false
+    inq[1] = false
+    inq[2] = false
+    dq[0] = 0
+    dq[1] = 0
+    dq[2] = 0
+    scra[0] = 0
+    scra[1] = 0
+    scra[2] = 0
+    scrb[0] = 0
+    scrb[1] = 0
+    scrb[2] = 0
+    accw[0] = 0
+    accw[1] = 0
+    accw[2] = 0
+    atouch[0] = 0
+    atouch[1] = 0
+    atouch[2] = 0
+    rclos[0] = false
+    rclos[1] = false
+    rclos[2] = false
+    soff[0] = 0
+    koff[0] = 0
+    epm0[0] = 0
+    epm0[1] = 0
+    epm0[2] = 0
+    epm1[0] = 0
+    epm1[1] = 0
+    epm1[2] = 0
+    epm2[0] = 0
+    epm2[1] = 0
+    epm2[2] = 0
+    epm3[0] = 0
+    epm3[1] = 0
+    epm3[2] = 0
+    ep_id[0] = 0
+    ep_id[1] = 0
+    ep_id[2] = 0
+    gv0[0] = 0
+    gv1[0] = 0
+    gv2[0] = 0
+    gv3[0] = 0
+    gmult[0] = 0
+    pmg0[0] = 0
+    pmg1[0] = 0
+    pmg2[0] = 0
+    pmg3[0] = 0
+    htab[0] = 0
+    htab[1] = 0
+    htab[2] = 0
+
+    var n_fail: i64 = 0
+    // Order: small open target first, then CL open (the undercount poster).
+    n_fail = n_fail + run_pato_open()
+    n_fail = n_fail + run_cl_open()
+    if n_fail == 0 {
+        println("ALL PASS")
+        return 0
+    }
+    println("FAILURES:")
+    println(n_fail)
+    return 1
+}

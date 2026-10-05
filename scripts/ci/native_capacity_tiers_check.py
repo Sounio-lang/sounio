@@ -17,6 +17,7 @@ SOURCES = [
     ("frame", "self-hosted/native/frame.sio"),
     ("cgx", "self-hosted/native/codegen_x86_linux.sio"),
     ("cg", "self-hosted/native/codegen.sio"),
+    ("ir", "self-hosted/ir/ir.sio"),
 ]
 
 
@@ -51,6 +52,8 @@ def main():
     exp_elf = int(sys.argv[4])
     exp_legacy_elf = int(sys.argv[5])
     base_addr = int(sys.argv[6])
+    exp_label = int(sys.argv[7])
+    exp_rodata = int(sys.argv[8])
 
     loaded = []
     for _key, rel in SOURCES:
@@ -58,7 +61,7 @@ def main():
         if not path.is_file():
             fail("source_missing_%s" % rel.replace("/", "_"))
         loaded.append(path.read_text(encoding="utf-8"))
-    encode, frame, cgx, cg = loaded
+    encode, frame, cgx, cg, irsrc = loaded
 
     # Tier 1: NC_BIG_CODE. Declarations stay literals; bound checks use the
     # accessor. Pinned together so a half-applied bump cannot ship.
@@ -96,6 +99,36 @@ def main():
          only(accessor("native_elf_buf_capacity_bytes", ""), cgx,
               "native_elf_buf_accessor"),
          exp_legacy_elf)
+
+    # Tier 5: the three NC_V2_LABEL_* arrays, the per-function label/jump-patch
+    # tier. Both of its bounds used to be silent (no else, no sentinel), which is
+    # what made a function with more than ~128 `if`s miscompile at rc=0.
+    label_decls = re.findall(
+        r"^pub var NC_V2_LABEL_(?:OFFSETS|PATCH_OFFSETS|PATCH_IDS): "
+        r"\[i64; ([0-9]+)\] = \[0; ([0-9]+)\]$", frame, re.MULTILINE)
+    if len(label_decls) != 3:
+        fail("nc_v2_label_decl_count_%d" % len(label_decls))
+    label_acc = only(accessor("nc_v2_label_capacity", "pub "), frame,
+                     "nc_v2_label_accessor")
+    vals = set(int(v) for pair in label_decls for v in pair)
+    vals.add(int(label_acc.group(1)))
+    if vals != set([exp_label]):
+        fail("label_tier_expected_%d_got_%s" % (exp_label, sorted(vals)))
+
+    # The tier is only PROVABLY non-overflowing while it is at least as large as
+    # IR_MAX_INSTRS: every label and every patch originates from an IR instruction
+    # read by the one emit loop, and that loop is bounded by IR_MAX_INSTRS. Pinned
+    # as >=, not ==, so raising IR_MAX_INSTRS is caught here instead of silently
+    # invalidating the argument.
+    ir_max = only(r"^pub let IR_MAX_INSTRS: i64 = ([0-9]+)\s*$", irsrc,
+                  "ir_max_instrs_decl")
+    if exp_label < int(ir_max.group(1)):
+        fail("label_tier_%d_below_ir_max_instrs_%s" % (exp_label, ir_max.group(1)))
+
+    # Past 65536 the full per-function reset stops being free and needs a dirty
+    # cursor. Force that decision here rather than letting it be discovered.
+    if exp_label > 65536 and "NC_V2_LABEL_DIRTY_LEN" not in frame:
+        fail("label_tier_%d_needs_dirty_cursor" % exp_label)
 
     # -- 2. no surviving duplicate literal bound checks --------------------
     # A comparison against a tier literal anywhere outside a declaration means a
@@ -141,12 +174,48 @@ def main():
          cgx, "apply_relocations_bound")
 
     # rc=19 (code buffer) and rc=20 (relocations) must both exist, distinctly.
-    rc19 = r"if nc\.code_overflow \%s\s*\n\s*return 19\s*\n\s*\%s" % (LB, RB)
-    rc20 = r"if nc\.reloc_overflow \%s\s*\n\s*return 20\s*\n\s*\%s" % (LB, RB)
+    # rc19 allows a diagnostic body between the brace and the return (matching
+    # the rc22/label_overflow precedent below) -- 2026-09-02: the branch now
+    # reports code_overflow_bytes_attempted so a capacity bump is sized against
+    # a measured number instead of a guess. rc20 stays bare; no diagnostic body
+    # has been added there yet.
+    rc19 = r"if nc\.code_overflow \%s(?:.|\n)*?return 19\s*\n\s*\%s" % (LB, RB)
+    # rc20 loosened the same way and for the same reason (2026-09-02):
+    # reloc_overflow_count_attempted is now reported before returning.
+    rc20 = r"if nc\.reloc_overflow \%s(?:.|\n)*?return 20\s*\n\s*\%s" % (LB, RB)
     if not re.search(rc19, cgx):
         fail("rc19_code_overflow_check_missing")
     if not re.search(rc20, cgx):
         fail("rc20_reloc_overflow_check_missing")
+
+    # -- label overflow is fail-closed with its own distinct rc=22 ---------
+    if not re.search(r"pub label_overflow: bool,", frame):
+        fail("label_overflow_field_missing")
+    if not re.search(r"out\.label_overflow = false", frame):
+        fail("label_overflow_not_initialised")
+    for fn_name in ("nc_add_label_patch", "nc_define_label"):
+        fn_body = only(r"^fn %s\(.*?\n\%s$" % (fn_name, RB), cgx,
+                       fn_name, re.MULTILINE | re.DOTALL).group(0)
+        if "nc_v2_label_capacity()" not in fn_body:
+            fail("%s_not_using_accessor" % fn_name)
+        label_sentinel = (r"\%s\s*else\s*\%s(?:.|\n)*?nc_note_label_overflow\(nc\)"
+                          % (RB, LB))
+        if not re.search(label_sentinel, fn_body):
+            fail("%s_missing_sentinel" % fn_name)
+    # The reset must clear the WHOLE tier, not a per-function extent: a partial
+    # reset leaves the previous function's real code offsets live above the bound,
+    # which is the same wrong-target defect in a different shape.
+    only(r"^\s*while i < nc_v2_label_capacity\(\) \%s$" % LB, cgx,
+         "label_reset_full_bound")
+    # patch_lid must be bounded before it indexes NC_V2_LABEL_OFFSETS. Unchecked,
+    # it read past the end of the array into the adjacent globals -- code offsets,
+    # always >= 0, so they passed the `target >= 0` guard and patched a plausible
+    # but WRONG branch target.
+    only(r"^\s*if patch_lid >= 0 && patch_lid < nc_v2_label_capacity\(\) \%s$" % LB,
+         frame, "label_patch_lid_bounded")
+    rc22 = r"if nc\.label_overflow \%s(?:.|\n)*?return 22\s*\n\s*\%s" % (LB, RB)
+    if not re.search(rc22, cgx):
+        fail("rc22_label_overflow_check_missing")
 
     # -- 5. the legacy NATIVE_ELF_BUF writer is no longer unguarded --------
     putu8 = only(r"^fn nc_elf_put_u8\(val: i64\) with Mut, Panic \%s(?:.|\n)*?^\%s$"
@@ -163,10 +232,36 @@ def main():
                (r"NATIVE_ELF_OVERFLOW != 0", "legacy_ignores_elf_overflow"),
                (r"return 19", "legacy_missing_rc19"),
                (r"return 20", "legacy_missing_rc20"),
-               (r"return 21", "legacy_missing_rc21")]
+               (r"return 21", "legacy_missing_rc21"),
+               (r"\(\*nc\)\.label_overflow", "legacy_ignores_label_overflow"),
+               (r"return 22", "legacy_missing_rc22")]
     for needle, reason in needles:
         if not re.search(needle, legacy):
             fail(reason)
+
+    # -- 5b. NC_BIG_RODATA (flat rodata: string/constant data) -- 2026-09-03,
+    # #2393. Same shape as the code/reloc/label tiers: fixed array + accessor
+    # + true attempted-count field + a distinct fail-closed rc (23). Unlike
+    # those three, the append sites here (native_v2_rodata_append_updated_tail,
+    # nc_rodata_add_ir_instr_name, nc_rodata_add_name_value,
+    # native_v2_rodata_append_byte_into) used to bound-check the write WITHOUT
+    # ever setting an overflow flag or refusing -- silent truncation, not a
+    # capacity refusal, first measured on self-hosted/compiler/main.sio
+    # (963,478 bytes needed against a 256 KiB cap). This tier proves the fix
+    # holds together, not that runtime data stays under the new cap.
+    tier("rodata_tier",
+         only(r"^pub var NC_BIG_RODATA: \[i8; ([0-9]+)\] = \[0; ([0-9]+)\]$",
+              frame, "nc_big_rodata_decl"),
+         only(accessor("nc_flat_rodata_capacity", "pub "), frame,
+              "nc_flat_rodata_capacity_accessor"),
+         exp_rodata)
+    if not re.search(r"pub rodata_overflow_bytes_attempted: i64,", frame):
+        fail("rodata_overflow_bytes_attempted_field_missing")
+    if not re.search(r"out\.rodata_overflow_bytes_attempted = 0", frame):
+        fail("rodata_overflow_bytes_attempted_not_initialised")
+    rc23 = r"if nc\.rodata_overflow_bytes_attempted > nc_flat_rodata_capacity\(\) \%s(?:.|\n)*?return 23\s*\n\s*\%s" % (LB, RB)
+    if not re.search(rc23, cgx):
+        fail("rc23_rodata_overflow_check_missing")
 
     # -- 6. the 0x400000 ELF LOAD BASE ADDRESS must survive as a literal ---
     # This is the trap: 4194304 is BOTH the retired 4 MiB ELF capacity and the
@@ -189,9 +284,9 @@ def main():
             fail("elf_base_addr_unexpected_form")
 
     print("NATIVE_CAPACITY_TIERS_CHECK "
-          "code=%d reloc=%d elf=%d legacy_elf=%d base_addr_literals=%d "
-          "fail_closed=rc19/rc20/rc21 coherent=pass"
-          % (exp_code, exp_reloc, exp_elf, exp_legacy_elf, len(occ)))
+          "code=%d reloc=%d elf=%d legacy_elf=%d label=%d rodata=%d base_addr_literals=%d "
+          "fail_closed=rc19/rc20/rc21/rc22/rc23 coherent=pass"
+          % (exp_code, exp_reloc, exp_elf, exp_legacy_elf, exp_label, exp_rodata, len(occ)))
 
 
 if __name__ == "__main__":

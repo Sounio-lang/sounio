@@ -6,12 +6,14 @@ use parser::ast::*
 use ir::ir::*
 use check::types::*
 //
-// SOIR v3 Binary Format:
+// SOIR v5 Binary Format:
 // ─────────────────────────
 // Header (8 bytes):
 //   - Magic: "SOIR" (0x534F4952 little-endian)
-//   - Version: 3 (1 byte)
-//   - Reserved: 0x00 (3 bytes padding)
+//   - Version: 5 (1 byte)
+//   - Feature flags: 1 byte (bit 0 = variable call-argument payloads,
+//     bit 1 = function-level sret ABI metadata)
+//   - Reserved: 0x00 (2 bytes padding)
 //
 // Body:
 //   - fn_count: i64 (8 bytes)
@@ -31,25 +33,54 @@ use check::types::*
 //   - compile_strategy: i64
 //   - prof_counter_id: i64
 //   - hyper_algebra_kind: i64 (v3+)
+//   - is_sret: i64 (v5+, feature bit 1)
+//   - sret_dest_reg: i64 (v5+, feature bit 1)
+//   - float_reg_word_count: i64 (v5+)
+//   - float_reg_bits: [i64; float_reg_word_count] (v5+)
 //   - instrs: array of IrInstr
 //
-// IrInstr encoding (fixed-size, 128 bytes):
+// IrInstr encoding (232 bytes through v4; 240 bytes in v5+):
 //   - op: IrOpcode (1 byte + 7 padding)
 //   - dst, src1, src2: i64 (8 bytes each)
 //   - imm_i64: i64
 //   - imm_f64: f64
 //   - label_id, fn_id, field_idx: i64 (8 bytes each)
+//   - imm_flags: i64 (v5+)
 //   - bin_op: BinaryOp (1 byte + 7 padding)
 //   - un_op: UnaryOp (1 byte + 7 padding)
 //   - name: Name (128 bytes + 8 byte length)
 //   - arg_count: i64
+//   - call_args: [i64; arg_count] (v5+)
 
 let SOIR_MAGIC: i64 = 1380206931  // "SOIR" as i32 cast to i64
-let SOIR_VERSION: i8 = 4
+let SOIR_VERSION: i8 = 5
+let SOIR_FEATURE_CALL_ARGS: i8 = 1
+let SOIR_FEATURE_SRET_ABI: i8 = 2
+let SOIR_FEATURES_CURRENT: i8 = SOIR_FEATURE_CALL_ARGS | SOIR_FEATURE_SRET_ABI
 let SOIR_MAX_SIZE: i64 = 131072  // 128KB max module size
+
+// Detectable capacity refusal. Returning ir_empty_module() on an oversized
+// fn_count / string_count (or ir_empty_function() on an oversized instr_count)
+// used to be a silent clamp: the caller could not tell "empty input" from
+// "refused because it would write past the buffer". Incremented on every
+// capacity refuse so a gate / test can observe that deserialize declined.
+pub var SOIR_DESER_REFUSAL_COUNT: i64 = 0
+pub var SOIR_SER_REFUSAL_COUNT: i64 = 0
+// Bound used by every primitive decoder during one module decode.  Composite
+// section readers are intentionally built from these primitives, so a
+// truncated declared payload is refused before any backing-array access.
+var SOIR_DESER_ACTIVE_LIMIT: i64 = SOIR_MAX_SIZE
+
+fn soir_note_deser_refusal() with Mut {
+    SOIR_DESER_REFUSAL_COUNT = SOIR_DESER_REFUSAL_COUNT + 1
+}
 
 fn write_i8(buf: [i8; 131072], pos: i64, val: i8) -> ([i8; 131072], i64) with Mut, Panic, Div {
     var b = buf
+    if pos < 0 || pos >= SOIR_MAX_SIZE {
+        SOIR_SER_REFUSAL_COUNT = SOIR_SER_REFUSAL_COUNT + 1
+        return (b, SOIR_MAX_SIZE)
+    }
     b[pos] = val
     (b, pos + 1)
 }
@@ -96,24 +127,42 @@ fn write_f64(buf: [i8; 131072], pos: i64, val: f64) -> ([i8; 131072], i64) with 
 fn write_name(buf: [i8; 131072], pos: i64, n: Name) -> ([i8; 131072], i64) with Mut, Panic, Div {
     var b = buf
     var p = pos
+    var encoded_len = n.len
+    if encoded_len < 0 || encoded_len > 128 {
+        SOIR_SER_REFUSAL_COUNT = SOIR_SER_REFUSAL_COUNT + 1
+        encoded_len = 0
+    }
     // Write length first
-    let pair = write_i64(b, p, n.len)
+    let pair = write_i64(b, p, encoded_len)
     b = pair.0
     p = pair.1
     // Write buffer bytes
     var i: i64 = 0
     while i < 128 {
-        b[p + i] = n.buf[i]
+        let byte_pair = write_i8(b, p, n.buf[i])
+        b = byte_pair.0
+        p = byte_pair.1
         i = i + 1
     }
-    (b, p + 128)
+    (b, p)
 }
 
 fn read_i8(buf: [i8; 131072], pos: i64) -> (i8, i64) with Mut, Panic, Div {
+    if pos < 0 || pos >= SOIR_DESER_ACTIVE_LIMIT || pos >= SOIR_MAX_SIZE {
+        soir_note_deser_refusal()
+        return (0 as i8, SOIR_DESER_ACTIVE_LIMIT)
+    }
     (buf[pos], pos + 1)
 }
 
 fn read_i64(buf: [i8; 131072], pos: i64) -> (i64, i64) with Mut, Panic, Div {
+    if pos < 0 ||
+       SOIR_DESER_ACTIVE_LIMIT < 8 ||
+       pos > SOIR_DESER_ACTIVE_LIMIT - 8 ||
+       pos > SOIR_MAX_SIZE - 8 {
+        soir_note_deser_refusal()
+        return (0, SOIR_DESER_ACTIVE_LIMIT)
+    }
     // Little-endian decoding - mask to ensure unsigned byte interpretation
     let raw0: i64 = buf[pos + 0] as i64
     let raw1: i64 = buf[pos + 1] as i64
@@ -205,13 +254,20 @@ fn read_name(buf: [i8; 131072], pos: i64) -> (Name, i64) with Mut, Panic, Div {
     let len = len_pair.0
     var p = len_pair.1
 
-    var n = Name { buf: [0; 128], len: len }
+    var decoded_len = len
+    if decoded_len < 0 || decoded_len > 128 {
+        soir_note_deser_refusal()
+        decoded_len = 0
+    }
+    var n = Name { buf: [0; 384], len: decoded_len }
     var i: i64 = 0
     while i < 128 {
-        n.buf[i] = buf[p + i]
+        let byte_pair = read_i8(buf, p)
+        n.buf[i] = byte_pair.0
+        p = byte_pair.1
         i = i + 1
     }
-    (n, p + 128)
+    (n, p)
 }
 
 fn write_compare_op(buf: [i8; 131072], pos: i64, op: CompareOp) -> ([i8; 131072], i64) with Mut, Panic, Div {
@@ -229,6 +285,10 @@ fn read_compare_op(buf: [i8; 131072], pos: i64) -> (CompareOp, i64) with Mut, Pa
     let pair = read_i8(buf, pos)
     let tag = pair.0
     let next_pos = pair.1
+    if tag < 0 || tag > 4 {
+        soir_note_deser_refusal()
+        return (CompareOp::CmpEq, next_pos)
+    }
     let op = if tag == 0 { CompareOp::CmpLt }
         else if tag == 1 { CompareOp::CmpLe }
         else if tag == 2 { CompareOp::CmpEq }
@@ -276,6 +336,9 @@ fn write_opcode(buf: [i8; 131072], pos: i64, op: IrOpcode) -> ([i8; 131072], i64
         IrOpcode::IrProfCounter => 34,
         IrOpcode::IrCallSret => 35,
         IrOpcode::IrReturnSret => 36,
+        IrOpcode::IrCallExtern => 37,
+        IrOpcode::IrCallIndirect => 38,
+        IrOpcode::IrLoadFnRef => 39,
     }
     write_i8(buf, pos, tag)
 }
@@ -284,6 +347,10 @@ fn read_opcode(buf: [i8; 131072], pos: i64) -> (IrOpcode, i64) with Mut, Panic, 
     let pair = read_i8(buf, pos)
     let tag = pair.0
     let next_pos = pair.1
+    if tag < 0 || tag > 39 {
+        soir_note_deser_refusal()
+        return (IrOpcode::IrNop, next_pos)
+    }
     let op = if tag == 0 { IrOpcode::IrLoadImm }
         else if tag == 1 { IrOpcode::IrLoadFloat }
         else if tag == 2 { IrOpcode::IrLoadBool }
@@ -321,6 +388,9 @@ fn read_opcode(buf: [i8; 131072], pos: i64) -> (IrOpcode, i64) with Mut, Panic, 
         else if tag == 34 { IrOpcode::IrProfCounter }
         else if tag == 35 { IrOpcode::IrCallSret }
         else if tag == 36 { IrOpcode::IrReturnSret }
+        else if tag == 37 { IrOpcode::IrCallExtern }
+        else if tag == 38 { IrOpcode::IrCallIndirect }
+        else if tag == 39 { IrOpcode::IrLoadFnRef }
         else { IrOpcode::IrNop }
     (op, next_pos)
 }
@@ -348,6 +418,13 @@ fn write_binary_op(buf: [i8; 131072], pos: i64, op: BinaryOp) -> ([i8; 131072], 
         BinaryOp::OpConcat => 18,
         BinaryOp::OpRange => 19,
         BinaryOp::OpRangeInclusive => 20,
+        // Findings 11 (#2084): unsigned counterparts. Distinct tags so a
+        // binary blob produced before the fix deserializes back to the
+        // signed variants; a binary blob after the fix can carry either,
+        // and downstream passes dispatch on the variant.
+        BinaryOp::OpUDiv => 21,
+        BinaryOp::OpURem => 22,
+        BinaryOp::OpUShr => 23,
     }
     write_i8(buf, pos, tag)
 }
@@ -356,6 +433,10 @@ fn read_binary_op(buf: [i8; 131072], pos: i64) -> (BinaryOp, i64) with Mut, Pani
     let pair = read_i8(buf, pos)
     let tag = pair.0
     let next_pos = pair.1
+    if tag < 0 || tag > 23 {
+        soir_note_deser_refusal()
+        return (BinaryOp::OpAdd, next_pos)
+    }
     let op = if tag == 0 { BinaryOp::OpAdd }
         else if tag == 1 { BinaryOp::OpSub }
         else if tag == 2 { BinaryOp::OpMul }
@@ -376,7 +457,10 @@ fn read_binary_op(buf: [i8; 131072], pos: i64) -> (BinaryOp, i64) with Mut, Pani
         else if tag == 17 { BinaryOp::OpShr }
         else if tag == 18 { BinaryOp::OpConcat }
         else if tag == 19 { BinaryOp::OpRange }
-        else { BinaryOp::OpRangeInclusive }
+        else if tag == 20 { BinaryOp::OpRangeInclusive }
+        else if tag == 21 { BinaryOp::OpUDiv }
+        else if tag == 22 { BinaryOp::OpURem }
+        else { BinaryOp::OpUShr }
     (op, next_pos)
 }
 
@@ -387,6 +471,7 @@ fn write_unary_op(buf: [i8; 131072], pos: i64, op: UnaryOp) -> ([i8; 131072], i6
         UnaryOp::OpRef => 2,
         UnaryOp::OpRefMut => 3,
         UnaryOp::OpDeref => 4,
+        UnaryOp::OpBitNot => 5,
     }
     write_i8(buf, pos, tag)
 }
@@ -395,17 +480,27 @@ fn read_unary_op(buf: [i8; 131072], pos: i64) -> (UnaryOp, i64) with Mut, Panic,
     let pair = read_i8(buf, pos)
     let tag = pair.0
     let next_pos = pair.1
+    if tag < 0 || tag > 5 {
+        soir_note_deser_refusal()
+        return (UnaryOp::OpNeg, next_pos)
+    }
     let op = if tag == 0 { UnaryOp::OpNeg }
         else if tag == 1 { UnaryOp::OpNot }
         else if tag == 2 { UnaryOp::OpRef }
         else if tag == 3 { UnaryOp::OpRefMut }
-        else { UnaryOp::OpDeref }
+        else if tag == 4 { UnaryOp::OpDeref }
+        else { UnaryOp::OpBitNot }
     (op, next_pos)
 }
 
 fn serialize_ir_instr(buf: [i8; 131072], pos: i64, instr: IrInstr) -> ([i8; 131072], i64) with Mut, Panic, Div {
     var b = buf
     var p = pos
+
+    if instr.arg_count < 0 || instr.arg_count > 64 {
+        SOIR_SER_REFUSAL_COUNT = SOIR_SER_REFUSAL_COUNT + 1
+        return (b, p)
+    }
 
     let op_pair = write_opcode(b, p, instr.op)
     b = op_pair.0
@@ -440,6 +535,10 @@ fn serialize_ir_instr(buf: [i8; 131072], pos: i64, instr: IrInstr) -> ([i8; 1310
     b = field_idx_pair.0
     p = field_idx_pair.1
 
+    let imm_flags_pair = write_i64(b, p, instr.imm_flags)
+    b = imm_flags_pair.0
+    p = imm_flags_pair.1
+
     let bin_op_pair = write_binary_op(b, p, instr.bin_op)
     b = bin_op_pair.0
     p = bin_op_pair.1
@@ -457,13 +556,38 @@ fn serialize_ir_instr(buf: [i8; 131072], pos: i64, instr: IrInstr) -> ([i8; 1310
     let arg_count_pair = write_i64(b, p, instr.arg_count)
     b = arg_count_pair.0
     p = arg_count_pair.1
-    // Note: call_args linked list is NOT serialized (reconstructed from arg_count)
+    var args = instr.call_args
+    var ai: i64 = 0
+    let has_serialized_args = instr.op == IrOpcode::IrCall || instr.op == IrOpcode::IrCallExtern || instr.op == IrOpcode::IrCallIndirect || instr.op == IrOpcode::IrCallSret
+    while has_serialized_args && ai < instr.arg_count {
+        match args {
+            Some(node) => {
+                let arg_pair = write_i64(b, p, (*node).head)
+                b = arg_pair.0
+                p = arg_pair.1
+                args = (*node).tail
+            }
+            _ => {
+                SOIR_SER_REFUSAL_COUNT = SOIR_SER_REFUSAL_COUNT + 1
+                return (b, p)
+            }
+        }
+        ai = ai + 1
+    }
+    if has_serialized_args && ir_reg_list_len(args) != 0 {
+        SOIR_SER_REFUSAL_COUNT = SOIR_SER_REFUSAL_COUNT + 1
+    }
 
     (b, p)
 }
 
-fn deserialize_ir_instr(buf: [i8; 131072], pos: i64) -> (IrInstr, i64) with Mut, Panic, Div {
+fn deserialize_ir_instr(buf: [i8; 131072], len: i64, pos: i64, version: i8, features: i8) -> (IrInstr, i64) with Mut, Panic, Div, Alloc {
     var p = pos
+    let fixed_instr_size: i64 = if version >= 5 { 240 } else { 232 }
+    if p < 0 || len < 0 || len > SOIR_MAX_SIZE || p > len - fixed_instr_size || p > SOIR_MAX_SIZE - fixed_instr_size {
+        soir_note_deser_refusal()
+        return (ir_instr_new(IrOpcode::IrNop), p)
+    }
     let op_pair = read_opcode(buf, p)
     let op = op_pair.0
     p = op_pair.1 + 7  // skip padding
@@ -500,6 +624,13 @@ fn deserialize_ir_instr(buf: [i8; 131072], pos: i64) -> (IrInstr, i64) with Mut,
     let field_idx = field_idx_pair.0
     p = field_idx_pair.1
 
+    var imm_flags: i64 = 0
+    if version >= 5 {
+        let imm_flags_pair = read_i64(buf, p)
+        imm_flags = imm_flags_pair.0
+        p = imm_flags_pair.1
+    }
+
     let bin_op_pair = read_binary_op(buf, p)
     let bin_op = bin_op_pair.0
     p = bin_op_pair.1 + 7  // skip padding
@@ -516,6 +647,36 @@ fn deserialize_ir_instr(buf: [i8; 131072], pos: i64) -> (IrInstr, i64) with Mut,
     let arg_count = arg_count_pair.0
     p = arg_count_pair.1
 
+    let has_serialized_args = op == IrOpcode::IrCall || op == IrOpcode::IrCallExtern || op == IrOpcode::IrCallIndirect || op == IrOpcode::IrCallSret
+    let call_args_present = version >= 5 && (features & SOIR_FEATURE_CALL_ARGS) != 0
+    if !call_args_present && has_serialized_args && arg_count > 0 {
+        soir_note_deser_refusal()
+        return (ir_instr_new(IrOpcode::IrNop), p)
+    }
+    if arg_count < 0 || arg_count > 64 || (call_args_present && has_serialized_args && (p > len - arg_count * 8 || p > SOIR_MAX_SIZE - arg_count * 8)) {
+        soir_note_deser_refusal()
+        return (ir_instr_new(IrOpcode::IrNop), p)
+    }
+    var call_args = ir_empty_reg_list()
+    var ai: i64 = 0
+    while call_args_present && has_serialized_args && ai < arg_count {
+        let arg_pair = read_i64(buf, p)
+        let arg_reg = arg_pair.0
+        p = arg_pair.1
+        if ai == 0 {
+            call_args = Some(Box::new(ir_reg_list_single(arg_reg)))
+        } else {
+            match call_args {
+                Some(list) => { call_args = Some(Box::new(ir_reg_list_append(*list, arg_reg))) }
+                _ => {
+                    soir_note_deser_refusal()
+                    return (ir_instr_new(IrOpcode::IrNop), p)
+                }
+            }
+        }
+        ai = ai + 1
+    }
+
     let instr = IrInstr {
         op: op,
         dst: dst,
@@ -526,11 +687,11 @@ fn deserialize_ir_instr(buf: [i8; 131072], pos: i64) -> (IrInstr, i64) with Mut,
         label_id: label_id,
         fn_id: fn_id,
         field_idx: field_idx,
-        imm_flags: 0,
+        imm_flags: imm_flags,
         bin_op: bin_op,
         un_op: un_op,
-        name: name,
-        call_args: ir_empty_reg_list(),  // Not serialized
+        name_id: ir_intern_name(name),
+        call_args: call_args,
         arg_count: arg_count,
     }
     (instr, p)
@@ -581,10 +742,55 @@ fn serialize_ir_function(buf: [i8; 131072], pos: i64, func: IrFunction) -> ([i8;
         p = hyper_alg_pair.1
     }
 
+    if SOIR_VERSION >= 5 {
+        let is_sret_pair = write_i64(b, p, func.is_sret)
+        b = is_sret_pair.0
+        p = is_sret_pair.1
+        let sret_dest_pair = write_i64(b, p, func.sret_dest_reg)
+        b = sret_dest_pair.0
+        p = sret_dest_pair.1
+        var float_word_count = (func.reg_count + 31) / 32
+        if float_word_count < 0 { float_word_count = 0 }
+        if float_word_count > 64 { float_word_count = 64 }
+        let float_count_pair = write_i64(b, p, float_word_count)
+        b = float_count_pair.0
+        p = float_count_pair.1
+        var fw: i64 = 0
+        while fw < float_word_count {
+            let float_bits_pair = write_i64(b, p, func.float_reg_bits[fw as usize])
+            b = float_bits_pair.0
+            p = float_bits_pair.1
+            fw = fw + 1
+        }
+    }
+
     // Write instructions
     var j: i64 = 0
     while j < func.instr_count {
-        let instr_pair = serialize_ir_instr(b, p, func.instrs[j])
+        let instr_slot = ir_region_slot_r(func.region, j)
+        var instr = ir_arena_load(instr_slot)
+        let has_serialized_args = instr.op == IrOpcode::IrCall || instr.op == IrOpcode::IrCallExtern || instr.op == IrOpcode::IrCallIndirect || instr.op == IrOpcode::IrCallSret
+        if has_serialized_args && instr.arg_count > 0 {
+            var args = ir_empty_reg_list()
+            var ai: i64 = 0
+            while ai < instr.arg_count {
+                let arg_reg = if instr.op == IrOpcode::IrCallSret { instr.field_idx + ai } else { ir_arena_arg_at(instr_slot, ai) }
+                if ai == 0 {
+                    args = Some(Box::new(ir_reg_list_single(arg_reg)))
+                } else {
+                    match args {
+                        Some(list) => { args = Some(Box::new(ir_reg_list_append(*list, arg_reg))) }
+                        _ => {
+                            SOIR_SER_REFUSAL_COUNT = SOIR_SER_REFUSAL_COUNT + 1
+                            return
+                        }
+                    }
+                }
+                ai = ai + 1
+            }
+            instr.call_args = args
+        }
+        let instr_pair = serialize_ir_instr(b, p, instr)
         b = instr_pair.0
         p = instr_pair.1
         j = j + 1
@@ -593,8 +799,17 @@ fn serialize_ir_function(buf: [i8; 131072], pos: i64, func: IrFunction) -> ([i8;
     (b, p)
 }
 
-fn deserialize_ir_function(buf: [i8; 131072], pos: i64, version: i8) -> (IrFunction, i64) with Mut, Panic, Div {
+fn deserialize_ir_function(buf: [i8; 131072], len: i64, pos: i64, version: i8, features: i8) -> (IrFunction, i64) with Mut, Panic, Div, Alloc {
     var p = pos
+    // The fixed header is 696 bytes through prof_counter_id, plus the
+    // hyper-algebra field introduced in v3. Refuse before the first read so a
+    // truncated cache entry cannot be observed beyond its declared length.
+    let fixed_header_size: i64 = if version >= 5 { 720 } else if version >= 3 { 704 } else { 696 }
+    if p < 0 || len < 0 || len > SOIR_MAX_SIZE || p > len - fixed_header_size || p > SOIR_MAX_SIZE - fixed_header_size {
+        soir_note_deser_refusal()
+        let empty = ir_empty_function()
+        return (empty, p)
+    }
     let name_pair = read_name(buf, p)
     let name = name_pair.0
     p = name_pair.1
@@ -642,19 +857,92 @@ fn deserialize_ir_function(buf: [i8; 131072], pos: i64, version: i8) -> (IrFunct
         p = hyper_alg_pair.1
     }
 
-    // Read instructions (capacity must match IrFunction.instrs / IR_MAX_INSTRS)
-    var instrs: [IrInstr; 4096] = [ir_nop(); 4096]
+    var is_sret: i64 = 0
+    var sret_dest_reg: i64 = -1
+    if version >= 5 {
+        let is_sret_pair = read_i64(buf, p)
+        is_sret = is_sret_pair.0
+        p = is_sret_pair.1
+        let sret_dest_pair = read_i64(buf, p)
+        sret_dest_reg = sret_dest_pair.0
+        p = sret_dest_pair.1
+        if (is_sret != 0 && is_sret != 1) ||
+            (is_sret == 1 && (sret_dest_reg < 0 || sret_dest_reg >= reg_count)) ||
+            (is_sret == 0 && sret_dest_reg != -1) {
+            soir_note_deser_refusal()
+            let empty = ir_empty_function()
+            return (empty, p)
+        }
+    }
+
+    var float_reg_bits: [i64; 64] = [0; 64]
+    if version >= 5 {
+        if p < 0 || p + 8 > len || p + 8 > SOIR_MAX_SIZE {
+            soir_note_deser_refusal()
+            let empty = ir_empty_function()
+            return (empty, p)
+        }
+        let float_count_pair = read_i64(buf, p)
+        let float_word_count = float_count_pair.0
+        p = float_count_pair.1
+        var expected_float_word_count = (reg_count + 31) / 32
+        if expected_float_word_count < 0 { expected_float_word_count = 0 }
+        if expected_float_word_count > 64 { expected_float_word_count = 64 }
+        if float_word_count != expected_float_word_count {
+            soir_note_deser_refusal()
+            let empty = ir_empty_function()
+            return (empty, p)
+        }
+        if p + float_word_count * 8 > len || p + float_word_count * 8 > SOIR_MAX_SIZE {
+            soir_note_deser_refusal()
+            let empty = ir_empty_function()
+            return (empty, p)
+        }
+        var fw: i64 = 0
+        while fw < float_word_count {
+            let float_bits_pair = read_i64(buf, p)
+            float_reg_bits[fw as usize] = float_bits_pair.0
+            p = float_bits_pair.1
+            fw = fw + 1
+        }
+    }
+
+    // Read instructions into the arena (post-#1649: IrFunction has `region`,
+    // not an inline `instrs` array). Allocate a region sized to instr_count,
+    // then store each deserialized instruction at its slot. instr_count is
+    // bounded by IR_MAX_INSTRS; a larger count is refused below.
+    if instr_count < 0 || instr_count > IR_MAX_INSTRS {
+        // Refuse an oversized function rather than allocating past the arena.
+        soir_note_deser_refusal()
+        let empty = ir_empty_function()
+        return (empty, p)
+    }
+    let instr_bytes: i64 = if version >= 5 { instr_count * 240 } else { instr_count * 232 }
+    if p < 0 || p + instr_bytes > len || p + instr_bytes > SOIR_MAX_SIZE {
+        soir_note_deser_refusal()
+        let empty = ir_empty_function()
+        return (empty, p)
+    }
+    var region = ir_region_invalid()
+    if instr_count > 0 {
+        let alloc_rc = ir_instr_arena_alloc(instr_count, &! region)
+        if alloc_rc != IR_ARENA_OK {
+            soir_note_deser_refusal()
+            let empty = ir_empty_function()
+            return (empty, p)
+        }
+    }
     var j: i64 = 0
-    while j < instr_count && j < IR_MAX_INSTRS {
-        let instr_pair = deserialize_ir_instr(buf, p)
-        instrs[j] = instr_pair.0
+    while j < instr_count {
+        let instr_pair = deserialize_ir_instr(buf, len, p, version, features)
+        ir_arena_store(ir_region_slot_w(region, (j)), instr_pair.0)
         p = instr_pair.1
         j = j + 1
     }
 
     let func = IrFunction {
         name: name,
-        instrs: instrs,
+        region: region,
         instr_count: instr_count,
         reg_count: reg_count,
         label_count: label_count,
@@ -666,10 +954,12 @@ fn deserialize_ir_function(buf: [i8; 131072], pos: i64, version: i8) -> (IrFunct
         return_fixed_array_len: 0 - 1,
         prof_counter_id: prof_counter_id,
         hyper_algebra_kind: hyper_algebra_kind,
-        is_sret: 0,
-        sret_dest_reg: -1,
+        is_sret: is_sret,
+        sret_dest_reg: sret_dest_reg,
         bss_size: 0,
         first_param_is_ref: 0,
+        f128_param_mask: 0,
+        float_reg_bits: float_reg_bits,
     }
     (func, p)
 }
@@ -3916,7 +4206,7 @@ fn serialize_ir_epistemic_section(buf: [i8; 131072], pos: i64, ep: IrEpistemicSe
     (b, p)
 }
 
-fn deserialize_ir_epistemic_section(buf: [i8; 131072], pos: i64) -> (IrEpistemicSection, i64) with Mut, Panic, Div, Alloc {
+fn deserialize_ir_epistemic_section(buf: [i8; 131072], pos: i64, len: i64) -> (IrEpistemicSection, i64) with Mut, Panic, Div, Alloc {
     var p = pos
     var ep = ir_empty_epistemic_section()
 
@@ -4372,6 +4662,7 @@ fn deserialize_ir_epistemic_section(buf: [i8; 131072], pos: i64) -> (IrEpistemic
 fn serialize_ir_module_into(module: IrModule, out_buf: &![i8; 131072], out_len: &! i64) with Mut, Panic, Div, Alloc {
     var buf: [i8; 131072] = [0; 131072]
     var pos: i64 = 0
+    let refusals_before = SOIR_SER_REFUSAL_COUNT
 
     // Write header
     buf[0] = 83 as i8   // 'S'
@@ -4379,7 +4670,7 @@ fn serialize_ir_module_into(module: IrModule, out_buf: &![i8; 131072], out_len: 
     buf[2] = 73 as i8   // 'I'
     buf[3] = 82 as i8   // 'R'
     buf[4] = SOIR_VERSION
-    buf[5] = 0 as i8
+    buf[5] = SOIR_FEATURES_CURRENT
     buf[6] = 0 as i8
     buf[7] = 0 as i8
     pos = 8
@@ -4392,7 +4683,7 @@ fn serialize_ir_module_into(module: IrModule, out_buf: &![i8; 131072], out_len: 
     // Write functions
     var i: i64 = 0
     while i < module.fn_count {
-        let func_pair = serialize_ir_function(buf, pos, module.functions[i])
+        let func_pair = serialize_ir_function(buf, pos, ir_fn_get(&module, i))
         buf = func_pair.0
         pos = func_pair.1
         i = i + 1
@@ -4425,7 +4716,11 @@ fn serialize_ir_module_into(module: IrModule, out_buf: &![i8; 131072], out_len: 
     }
 
     (*out_buf) = buf
-    (*out_len) = pos
+    if SOIR_SER_REFUSAL_COUNT != refusals_before {
+        (*out_len) = 0
+    } else {
+        (*out_len) = pos
+    }
 }
 
 fn serialize_ir_module(module: IrModule) -> ([i8; 131072], i64) with Mut, Panic, Div, Alloc {
@@ -4437,6 +4732,13 @@ fn serialize_ir_module(module: IrModule) -> ([i8; 131072], i64) with Mut, Panic,
 
 fn deserialize_ir_module(buf: [i8; 131072], len: i64) -> IrModule with Mut, Panic, Div, Alloc {
     var pos: i64 = 0
+    let refusals_before = SOIR_DESER_REFUSAL_COUNT
+
+    if len < 16 || len > SOIR_MAX_SIZE {
+        soir_note_deser_refusal()
+        return ir_empty_module()
+    }
+    SOIR_DESER_ACTIVE_LIMIT = len
 
     // Verify header magic - cast literals to i8 for comparison
     let b0: i8 = 83 as i8
@@ -4450,7 +4752,21 @@ fn deserialize_ir_module(buf: [i8; 131072], len: i64) -> IrModule with Mut, Pani
     }
 
     let version = buf[4]
-    if version != 1 && version != 2 as i8 && version != 3 as i8 && version != SOIR_VERSION {
+    // v1-v4 cannot represent imm_flags or float_reg_bits. Accepting them can
+    // turn cached f64 unary negation into integer negation, so executable cache
+    // compatibility starts at the current sound format rather than migrating
+    // missing type metadata heuristically.
+    if version != SOIR_VERSION {
+        soir_note_deser_refusal()
+        return ir_empty_module()
+    }
+    let features = if version >= 5 { buf[5] } else { 0 as i8 }
+    if features != SOIR_FEATURES_CURRENT {
+        soir_note_deser_refusal()
+        return ir_empty_module()
+    }
+    if buf[6] != 0 as i8 || buf[7] != 0 as i8 {
+        soir_note_deser_refusal()
         return ir_empty_module()
     }
 
@@ -4461,46 +4777,92 @@ fn deserialize_ir_module(buf: [i8; 131072], len: i64) -> IrModule with Mut, Pani
     let fn_count = fn_count_pair.0
     pos = fn_count_pair.1
 
-    // Read functions
-    var functions: [IrFunction; 1024] = [ir_empty_function(); 1024]
+    // Read functions. Oversized modules are refused before any table growth.
+    if fn_count < 0 || fn_count > IR_MAX_FUNCS {
+        soir_note_deser_refusal()
+        return ir_empty_module()
+    }
+    var module = ir_empty_module()
     var i: i64 = 0
     while i < fn_count {
-        let func_pair = deserialize_ir_function(buf, pos, version)
-        functions[i] = func_pair.0
+        let func_pair = deserialize_ir_function(buf, len, pos, version, features)
+        // A refused/truncated function must invalidate the whole cache entry.
+        // Keeping fn_count while storing ir_empty_function() would expose a
+        // partially accepted module to thin-cache consumers.
+        if SOIR_DESER_REFUSAL_COUNT != refusals_before {
+            return ir_empty_module()
+        }
+        ir_fn_pool_ensure(&module, i)
+        ir_fn_set(&! module, i, func_pair.0)
         pos = func_pair.1
         i = i + 1
     }
 
     // Read string count
+    if pos < 0 || pos > len - 8 {
+        soir_note_deser_refusal()
+        return ir_empty_module()
+    }
     let string_count_pair = read_i64(buf, pos)
     let string_count = string_count_pair.0
     pos = string_count_pair.1
 
-    // Read string table
-    var string_table: [Name; 4096] = [ir_empty_name(); 4096]
+    // Read string table. Literal matches IR_MAX_STRINGS (ir.sio:36).
+    // Refuse oversized modules rather than writing past the buffer.
+    if string_count < 0 || string_count > IR_MAX_STRINGS {
+        soir_note_deser_refusal()
+        return ir_empty_module()
+    }
+    // Literal MUST equal IR_MAX_STRINGS; same gate as the function table.
+    var string_table: [Name; 16384] = [ir_empty_name(); 16384]
     var j: i64 = 0
     while j < string_count {
+        if pos < 0 || pos > len - 136 {
+            soir_note_deser_refusal()
+            return ir_empty_module()
+        }
         let name_pair = read_name(buf, pos)
         string_table[j] = name_pair.0
         pos = name_pair.1
         j = j + 1
     }
 
-    var module = ir_empty_module()
-    module.functions = functions
     module.fn_count = fn_count
     module.string_table = string_table
     module.string_count = string_count
 
+    if version >= 2 && pos >= len {
+        soir_note_deser_refusal()
+        return ir_empty_module()
+    }
     if version >= 2 && pos < len {
-        let ep_pair = deserialize_ir_epistemic_section(buf, pos)
+        let ep_pair = deserialize_ir_epistemic_section(buf, pos, len)
+        if SOIR_DESER_REFUSAL_COUNT != refusals_before {
+            return ir_empty_module()
+        }
         module.epistemic = ep_pair.0
         pos = ep_pair.1
     }
 
+    if version >= 3 && pos >= len {
+        soir_note_deser_refusal()
+        return ir_empty_module()
+    }
     if version >= 3 && pos < len {
         let alg_pair = deserialize_ir_algebra_table(buf, pos)
+        if SOIR_DESER_REFUSAL_COUNT != refusals_before {
+            return ir_empty_module()
+        }
         module.algebras = alg_pair.0
+        pos = alg_pair.1
+    }
+
+    // Every serializer version emitted by this module is canonical: accepting
+    // either a truncated section or trailing bytes would let the declared
+    // length describe a different cache object than the bytes consumed.
+    if pos != len {
+        soir_note_deser_refusal()
+        return ir_empty_module()
     }
 
     module
