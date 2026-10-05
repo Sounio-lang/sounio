@@ -61,8 +61,6 @@ fi
 CRITICAL_PATHS=(
   AGENTS.md
   CLAUDE.md
-  CLAUDE_HANDOFF.md
-  ONBOARDING.md
   self-hosted/compiler
   self-hosted/ir
   self-hosted/native
