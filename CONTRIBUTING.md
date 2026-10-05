@@ -45,6 +45,21 @@ bash scripts/run_sio_test_suite.sh
 bash scripts/run_sio_test_suite.sh vancomycin --verbose
 ```
 
+### Generated snapshots: do not commit them in your PR
+
+`docs/governance/topic-registry.v1.json`, `docs/governance/DOCS_AUTHORITY_MATRIX.md`
+and `datasets/sounio-code-examples/{train,validation}.jsonl,manifest.json` are
+functions of the whole tree. Committing them from feature PRs made any two PRs
+conflict, so CI's *Generated snapshot guard* refuses them in every PR except a
+`snapshot/refresh-*` branch. The docs checkers validate against the registry
+rebuilt in memory, so a stale snapshot hides nothing.
+
+- `node scripts/docs/sync_governance_metadata.mjs` updates the metadata headers in
+  your documents (commit those) and leaves the snapshot alone.
+- To refresh the snapshot, open a PR from `snapshot/refresh-<date>` that runs
+  `node scripts/docs/sync_governance_metadata.mjs --snapshot` and
+  `python3 scripts/dev/export_hf_dataset.py`.
+
 ### Local Git Setup (one-time)
 
 Some tracked files are generated — notably the `docs/governance/` metadata
@@ -123,7 +138,7 @@ Before submitting any Pull Request:
 - Type-check your Sounio files with `./bin/souc check file.sio`
 - Compile and run your Sounio files with `./bin/souc run file.sio`
 - Ensure all automated checks pass: `bash scripts/run_sio_test_suite.sh`
-- Ensure documentation registry is aligned: `node scripts/docs/check_docs_registry.mjs` (sync with `node scripts/docs/sync_governance_metadata.mjs` if needed)
+- Ensure documentation registry is aligned: `node scripts/docs/check_docs_registry.mjs` (sync document headers with `node scripts/docs/sync_governance_metadata.mjs` if needed; do not commit the regenerated snapshot)
 
 The repository's default compiler surface is `bin/souc` as the official entrypoint (Madaros by default).
 
