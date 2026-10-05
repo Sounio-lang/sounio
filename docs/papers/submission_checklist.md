@@ -26,7 +26,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.papers.submiss
 - [ ] All Sounio code passes `bash scripts/run_sio_test_suite.sh`
 - [ ] Pre-registration filed at OSF
 - [ ] Independent biostatistician sign-off on primary outcome
-- [ ] Internal LLM review (≥ 2 reviewers per artifact, per `.claude/vancomycin_track.md`)
+- [ ] Internal LLM review (≥ 2 reviewers per artifact, per the project's private research tracker)
 - [ ] Co-author sign-off on each artifact
 
 ## PL paper (POPL/ICFP)
@@ -70,7 +70,7 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.papers.submiss
 
 ## Post-submission tracking
 
-For each submission, log to `.claude/vancomycin_track.md`:
+For each submission, log to the project's private research tracker:
 
 - Date submitted
 - Submission ID / DOI / etc.
