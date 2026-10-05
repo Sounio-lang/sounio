@@ -50,6 +50,21 @@ non_pr="$(CI_EVENT_NAME=push $CLASSIFIER)"
 expect "$non_pr" full true
 expect "$non_pr" compiler true
 
+# merge_group is diff-classified like the PR it carries (not forced full).
+mq_docs="$(CI_EVENT_NAME=merge_group "$CLASSIFIER" docs/internal/concepts/README.md)"
+expect "$mq_docs" docs true
+expect "$mq_docs" compiler false
+expect "$mq_docs" full false
+mq_compiler="$(CI_EVENT_NAME=merge_group "$CLASSIFIER" self-hosted/ir/opt_cleanup.sio)"
+expect "$mq_compiler" compiler true
+mq_workflow="$(CI_EVENT_NAME=merge_group "$CLASSIFIER" .github/workflows/ci.yml)"
+expect "$mq_workflow" full true
+# ...and refuses a merge group with no base, instead of an all-false matrix.
+if (cd "$ROOT_DIR" && CI_EVENT_NAME=merge_group CI_BASE_SHA= "$CLASSIFIER" >/dev/null 2>&1); then
+  echo "impact-ci-selftest: classifier accepted a merge_group with no base SHA" >&2
+  exit 1
+fi
+
 # A failed `git diff` used to be invisible through process substitution:
 # paths=(), every output false, exit 0 -- a run downstream reads identically
 # to "no jobs needed" (silent skip of the whole matrix). Same for an empty
@@ -102,7 +117,18 @@ json_sub() {
 }
 
 good_needs='{"impact":{"outputs":{"compiler":"false","runtime":"false","stdlib":"false","tests":"false","sio":"false","lean":"false","website":"false","full":"false"}},"contracts":{"result":"success"},"native-selfhost-linux-x86_64":{"result":"skipped"},"source-bootstrap-selfhost-linux-x86_64":{"result":"skipped"},"madaros-current-source-deref-f64":{"result":"skipped"},"native-selfhost-macos-arm64":{"result":"skipped"},"full-test-suite":{"result":"skipped"},"madaros-witness-gate":{"result":"skipped"},"gate-wave-0":{"result":"skipped"},"sounio-lint":{"result":"skipped"},"lean-proofs":{"result":"skipped"},"website":{"result":"skipped"},"r6-corpus-sweep":{"result":"skipped"},"slow-lane":{"result":"skipped"}}'
-NEEDS_JSON="$good_needs" python3 "$DECISION" | grep -Fq CI_DECISION_PASS
+# Both nightly signals pinned, like every other check below: a skipped
+# r6-corpus-sweep is only correct off the nightly cadence, and
+# is_nightly() (evaluate_ci_decision.py) treats GITHUB_EVENT_NAME=schedule and
+# NIGHTLY_INPUT=true as independent triggers -- pinning only one still lets a
+# caller whose environment happens to carry the other flip this fixture to the
+# same false failure. Left fully ambient, this fixture inherited whatever
+# invoked the selftest -- on a real `schedule` run that's GITHUB_EVENT_NAME, and
+# this "should PASS" fixture failed for a reason that had nothing to do with
+# what it tests. Confirmed 8/8 for 2026-09-14..21: every scheduled run failed
+# here, before any real job ran, and r6-corpus-sweep never executed on cadence
+# in that whole window. Same fix at compiler_green_needs below (same shape).
+NEEDS_JSON="$good_needs" GITHUB_EVENT_NAME=push NIGHTLY_INPUT=false python3 "$DECISION" | grep -Fq CI_DECISION_PASS
 
 bad_needs="$(json_sub "$good_needs" '"contracts":{"result":"success"}' '"contracts":{"result":"failure"}')"
 if NEEDS_JSON="$bad_needs" python3 "$DECISION" >/dev/null 2>&1; then
@@ -116,7 +142,9 @@ if NEEDS_JSON="$compiler_needs" python3 "$DECISION" >/dev/null 2>&1; then
   exit 1
 fi
 compiler_green_needs="${compiler_needs/\"failure\"/\"success\"}"
-NEEDS_JSON="$compiler_green_needs" python3 "$DECISION" | grep -Fq CI_DECISION_PASS
+# Same unpinned-event hazard as good_needs above (r6-corpus-sweep is skipped
+# here too) -- both nightly signals pinned, not just GITHUB_EVENT_NAME.
+NEEDS_JSON="$compiler_green_needs" GITHUB_EVENT_NAME=push NIGHTLY_INPUT=false python3 "$DECISION" | grep -Fq CI_DECISION_PASS
 witness_failed_needs="$(json_sub "$compiler_green_needs" '"madaros-witness-gate":{"result":"success"}' '"madaros-witness-gate":{"result":"failure"}')"
 if NEEDS_JSON="$witness_failed_needs" python3 "$DECISION" >/dev/null 2>&1; then
   echo "impact-ci-selftest: decision accepted failed selected Madaros witness gate" >&2
@@ -147,7 +175,11 @@ fi
 # On a scheduled run with R6 green, the decision passes.
 NEEDS_JSON="$r6_green" GITHUB_EVENT_NAME=schedule python3 "$DECISION" | grep -Fq CI_DECISION_PASS
 # On a pull request, a skipped R6 is correct and must not fail the decision.
-NEEDS_JSON="$r6_skipped" GITHUB_EVENT_NAME=pull_request python3 "$DECISION" | grep -Fq CI_DECISION_PASS
+# NIGHTLY_INPUT pinned too, same hazard as good_needs/compiler_green_needs above
+# (is_nightly() ORs it with GITHUB_EVENT_NAME==schedule; an ambient NIGHTLY_INPUT=true
+# left this "must PASS" case failing the same way, caught by testing the pinned
+# fixtures above under every ambient combination, not just the two the fix started with).
+NEEDS_JSON="$r6_skipped" GITHUB_EVENT_NAME=pull_request NIGHTLY_INPUT=false python3 "$DECISION" | grep -Fq CI_DECISION_PASS
 # A red R6 fails the decision whatever the event: it ran and it failed.
 if NEEDS_JSON="$r6_red" GITHUB_EVENT_NAME=pull_request python3 "$DECISION" >/dev/null 2>&1; then
   echo "impact-ci-selftest: decision accepted a failed R6" >&2
@@ -175,7 +207,13 @@ if NEEDS_JSON="$slow_skipped" GITHUB_EVENT_NAME=schedule python3 "$DECISION" >/d
   exit 1
 fi
 NEEDS_JSON="$slow_green" GITHUB_EVENT_NAME=schedule python3 "$DECISION" | grep -Fq CI_DECISION_PASS
-NEEDS_JSON="$slow_skipped" GITHUB_EVENT_NAME=pull_request python3 "$DECISION" | grep -Fq CI_DECISION_PASS
+# NIGHTLY_INPUT pinned, same hazard as the r6-corpus-sweep equivalent above:
+# is_nightly() ORs it with GITHUB_EVENT_NAME==schedule, so an ambient
+# NIGHTLY_INPUT=true left this "must PASS on pull_request" case failing
+# ("selected job slow-lane ended as skipped") for a reason unrelated to what
+# it tests -- caught while merging the fix that added this NIGHTLY_INPUT
+# hazard class in the first place.
+NEEDS_JSON="$slow_skipped" GITHUB_EVENT_NAME=pull_request NIGHTLY_INPUT=false python3 "$DECISION" | grep -Fq CI_DECISION_PASS
 if NEEDS_JSON="$slow_red" GITHUB_EVENT_NAME=pull_request python3 "$DECISION" >/dev/null 2>&1; then
   echo "impact-ci-selftest: decision accepted a failed slow-lane" >&2
   exit 1

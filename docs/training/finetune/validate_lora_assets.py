@@ -130,6 +130,13 @@ def validate_corpus(path: Path) -> None:
     if missing:
         preview = ", ".join(missing[:5])
         fail(f"corpus has markers for missing files: {preview}")
+    builder = (ROOT / "docs" / "training" / "finetune" / "prepare_corpus.sh").read_text(encoding="utf-8")
+    listed = re.search(r"^EXCLUDE_FILES=\((.*?)\)", builder, flags=re.MULTILINE)
+    if not listed:
+        fail("prepare_corpus.sh has no EXCLUDE_FILES list")
+    present = sorted(set(listed.group(1).split()) & set(markers))
+    if present:
+        fail(f"corpus has sections for files prepare_corpus.sh excludes: {', '.join(present)}")
     print(f"  files: {len(markers)}")
     print(f"  bytes: {len(text.encode('utf-8'))}")
 

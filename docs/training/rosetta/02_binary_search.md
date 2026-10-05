@@ -73,7 +73,6 @@ fn main() -> i32 with IO, Mut, Panic, Div {
 
 ## Key Differences
 - Fixed-size array `[i64; 256]` with explicit length param vs Python `list`
-- `0 - 1` instead of `-1` (no unary minus)
 - Effects: `Div` for division, `Panic` for array bounds, `Mut` for variables
 - Array passed by reference `&[i64; 256]`
 - No `elif` — use `if/else if` or nested `if`
