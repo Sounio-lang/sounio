@@ -36,7 +36,7 @@ OPEN_IDS=""
 # declared open ONLY by exact id + reason below. The gate fails if the actual
 # open set differs from this set in ANY direction -- new opens, or a declared
 # residual silently starting to pass (promotion must be witnessed, not assumed).
-DECLARED_OPEN="w16 w17"
+DECLARED_OPEN="w16"
 # w5 and w14 were open 2026-08-14/15 on a Madaros built fresh from current
 # main.sio source: ir_empty_function() leaves its region unallocated by
 # design (see ir_function_alloc_region's comment in ir.sio), and both the
@@ -67,6 +67,14 @@ DECLARED_OPEN="w16 w17"
 # on the arena bug before it ever reached this file's actual effect leak).
 # `souc check` on that file returns "check: OK" post-fix. Pre-existing gap
 # in self-hosted/check/, unrelated to the IR-lowering fix, not attempted.
+#
+# w17 CLOSED by #2760 (2026-10-05): the builtin `print` now carries IO in the
+# Madaros checker (as it always did in lean_single), so the closure body's
+# print is reported as E035 against `pure_fn` and the leak is rejected.
+# Measured: before, `souc check` on w17 returned "check: OK"; after, it returns
+# error[E035] ... (missing: IO) -- required by `print`. Removed from
+# DECLARED_OPEN on that evidence. Scope note: this is a consequence of builtin
+# effect attribution, not of a general HOF effect-propagation fix.
 
 run_value() {
   id="$1"; file="$2"; want="$3"; wrong="$4"; origin="$5"
