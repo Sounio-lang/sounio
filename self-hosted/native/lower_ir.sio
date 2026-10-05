@@ -139,7 +139,12 @@ pub fn nc_store_rax_to_vreg(nc: NativeCompiler, vreg: i64) -> NativeCompiler wit
 // Returns align16((highest_stack_vreg + 1) * 8), or 0 if all vregs are preg-allocated.
 // Sprint 64: replaces align16(reg_count * 8) to eliminate sub rsp for preg-only functions.
 pub fn nc_min_frame_size(nc: NativeCompiler, func: IrFunction) -> i64 with Mut, Panic, Div {
-    var max_stack_vreg: i64 = -1
+    // Registers outside vreg_to_preg have no physical-register entry, so the
+    // frame-sizing contract must treat them as stack-only even though the
+    // legacy compile entry point currently refuses such functions earlier.
+    // Keeping this helper total over every legal IR register count prevents a
+    // caller or boundary test from constructing an undersized canonical frame.
+    var max_stack_vreg: i64 = if func.reg_count > NC_MAX_VREGS { func.reg_count - 1 } else { -1 }
     var v: i64 = 0
     while v < func.reg_count && v < NC_MAX_VREGS {
         if nc.vreg_to_preg[v as usize] < 0 {
@@ -980,7 +985,20 @@ pub fn lower_unaryop(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div
     c = nc_load_vreg_to_rax(c, instr.src1)
 
     if instr.un_op == UnaryOp::OpNeg {
-        c.code = emit_neg_rax(c.code)
+        let src_float = if ((instr.imm_flags / 2) & 1) == 1 { 1 } else { 0 }
+        let class_float = if nc_reg_class_get(instr.src1) == 1 { 1 } else { 0 }
+        let marked_float = if instr.src1 >= 0 && instr.src1 < NC_MAX_VREGS && c.is_float_reg[instr.src1 as usize] == 1 { 1 } else { 0 }
+        if src_float == 1 || class_float == 1 || marked_float == 1 {
+            c.code = emit_btc_rax_63(c.code)
+            if instr.dst >= 0 && instr.dst < NC_MAX_VREGS {
+                c.is_float_reg[instr.dst as usize] = 1
+            }
+        } else {
+            c.code = emit_neg_rax(c.code)
+            if instr.dst >= 0 && instr.dst < NC_MAX_VREGS {
+                c.is_float_reg[instr.dst as usize] = 0
+            }
+        }
     } else if instr.un_op == UnaryOp::OpNot {
         c.code = emit_not_bool_rax(c.code)
     } else if instr.un_op == UnaryOp::OpBitNot {
