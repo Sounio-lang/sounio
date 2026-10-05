@@ -1,0 +1,288 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BASE_HOME="/workspace/.home/openvscode-server"
+LANE="${1:-repo}"
+REPO="${SOUNIO_LANE_REPO:-/workspace/sounio}"
+
+case "$LANE" in
+  repo)
+    export HOME="$BASE_HOME"
+    AGENT="repo"
+    ;;
+  claude-[123])
+    export HOME="$BASE_HOME/.agents/$LANE"
+    AGENT="claude"
+    ;;
+  fable-1)
+    export HOME="$BASE_HOME"
+    REPO="${SOUNIO_LANE_REPO:-/workspace/.wt/fable-1}"
+    AGENT="claude"
+    ;;
+  codex-[123])
+    export HOME="$BASE_HOME/.agents/$LANE"
+    AGENT="codex"
+    ;;
+  kimi-cli[12])
+    export HOME="$BASE_HOME/.agents/$LANE"
+    AGENT="kimi"
+    ;;
+  grok-cli[12345])
+    export HOME="$BASE_HOME/.agents/$LANE"
+    AGENT="grok"
+    ;;
+  cursor-[123])
+    export HOME="$BASE_HOME/.agents/$LANE"
+    AGENT="cursor"
+    ;;
+  glm-cli[12])
+    export HOME="$BASE_HOME/.agents/$LANE"
+    AGENT="glm"
+    ;;
+  minimax-cli[123])
+    export HOME="$BASE_HOME/.agents/$LANE"
+    AGENT="minimax"
+    ;;
+  empryo-1)
+    export HOME="$BASE_HOME"
+    REPO="${SOUNIO_LANE_REPO:-/workspace/.wt/empryo-1}"
+    AGENT="empryo"
+    ;;
+  qwen)
+    export HOME="$BASE_HOME"
+    AGENT="empryo"
+    ;;
+  *)
+    echo "Unknown Sounio lane: $LANE" >&2
+    exit 2
+    ;;
+esac
+
+# Default a lane to its OWN worktree when one exists.
+#
+# fable-1 and empryo-1 already pinned theirs by hand above; every other lane
+# fell through to the shared control checkout /workspace/sounio. That is how
+# eight lanes ended up writing to one branch: restarting a window silently put
+# the agent back in the shared tree regardless of where its work lived, and a
+# branch flip under it makes every measurement lie. An explicit
+# SOUNIO_LANE_REPO still wins, and `repo` is deliberately the shared checkout.
+if [[ -z "${SOUNIO_LANE_REPO:-}" && "$LANE" != "repo" && -d "/workspace/.wt/$LANE" ]]; then
+  REPO="/workspace/.wt/$LANE"
+fi
+
+export USER="openvscode-server"
+export LOGNAME="openvscode-server"
+export SHELL="/usr/bin/zsh"
+export BASE_HOME
+export RES_OPTIONS="attempts:1 timeout:1"
+export SOUNIO_LOCAL_CUDA_RUNTIME_RUNG="${SOUNIO_LOCAL_CUDA_RUNTIME_RUNG:-vec_add_f32}"
+export PATH="$HOME/.kimi-code/bin:$BASE_HOME/bin:$BASE_HOME/.empryo/bin:$BASE_HOME/.local/node-v20.20.2-linux-x64/bin:$BASE_HOME/.local/bin:$BASE_HOME/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+export GIT_OPTIONAL_LOCKS=0
+export SOUNIO_FLEET_TRANSPORT="${SOUNIO_FLEET_TRANSPORT:-agentd}"
+
+case "$SOUNIO_FLEET_TRANSPORT" in
+  agentd|tmux) ;;
+  *)
+    echo "Invalid SOUNIO_FLEET_TRANSPORT: $SOUNIO_FLEET_TRANSPORT (expected agentd or tmux)" >&2
+    exit 2
+    ;;
+esac
+
+apply_lane_limits() {
+  case "$AGENT" in
+    claude|glm|minimax)
+      # Keep one Claude lane from consuming the whole SSH sidecar cgroup.
+      ulimit -Sv "${SOUNIO_CLAUDE_VMEM_KB:-25165824}" || true
+      export NODE_OPTIONS="--max-old-space-size=${SOUNIO_CLAUDE_NODE_OLD_SPACE_MB:-5120} ${NODE_OPTIONS:-}"
+      ;;
+    codex)
+      ulimit -Sv "${SOUNIO_CODEX_VMEM_KB:-16777216}" || true
+      export NODE_OPTIONS="--max-old-space-size=${SOUNIO_CODEX_NODE_OLD_SPACE_MB:-3072} ${NODE_OPTIONS:-}"
+      ;;
+    kimi|grok)
+      ulimit -Sv "${SOUNIO_AGENT_VMEM_KB:-16777216}" || true
+      export NODE_OPTIONS="--max-old-space-size=${SOUNIO_AGENT_NODE_OLD_SPACE_MB:-2048} ${NODE_OPTIONS:-}"
+      ;;
+  esac
+}
+
+if [[ -n "${NODE_OPTIONS:-}" ]]; then
+  case " ${NODE_OPTIONS} " in
+    *" --dns-result-order=ipv4first "*) ;;
+    *) export NODE_OPTIONS="${NODE_OPTIONS} --dns-result-order=ipv4first" ;;
+  esac
+else
+  export NODE_OPTIONS="--dns-result-order=ipv4first"
+fi
+
+apply_lane_limits
+
+# Sounio GPU CUBIN emitters can exceed the distro default 8 MiB stack.
+ulimit -s unlimited || true
+
+mkdir -p "$HOME"
+if [[ ! -f "$HOME/.zshrc" ]]; then
+  printf "%s\n" "# Sounio agent lane shell bootstrap" > "$HOME/.zshrc"
+fi
+cd "$REPO"
+
+if [[ -x "$BASE_HOME/bin/sounio-context" ]]; then
+  "$BASE_HOME/bin/sounio-context" --brief || true
+fi
+printf "\nSounio lane: %s\nHOME: %s\nrepo: %s\n\n" "$LANE" "$HOME" "$REPO"
+
+latest_claude_session_id() {
+  local project_dir="$HOME/.claude/projects/-workspace-sounio"
+  [[ -d "$project_dir" ]] || return 1
+  find "$project_dir" -maxdepth 1 -type f -name "*.jsonl" -size +0c -printf "%T@ %f\n" 2>/dev/null |
+    sort -nr |
+    awk 'NR == 1 { sub(/\.jsonl$/, "", $2); print $2 }'
+}
+
+has_codex_session() {
+  [[ -d "$HOME/.codex/sessions" ]] && find "$HOME/.codex/sessions" -type f -name "*.jsonl" -size +0c -print -quit 2>/dev/null | grep -q .
+}
+
+fleet_runtime() {
+  local common runtime manifest helper
+  common="$(git -C "$REPO" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+  [[ -n "$common" ]] || {
+    echo "Cannot resolve the Sounio shared Git directory for $REPO" >&2
+    return 1
+  }
+  runtime="$common/sounio-coord-runtime/current"
+  manifest="$runtime/manifest"
+  helper="$runtime/bin/sounio-fleet-agent-runtime"
+  [[ -f "$manifest" && -x "$helper" ]] || {
+    echo "Crash-proof fleet runtime is unavailable or incomplete: $runtime" >&2
+    echo "Rollback is explicit: SOUNIO_FLEET_TRANSPORT=tmux $BASE_HOME/bin/sounio-lane-shell $LANE" >&2
+    return 1
+  }
+  grep -qx 'capability=fleet-launcher-v1' "$manifest" || {
+    echo "Shared runtime does not declare capability=fleet-launcher-v1: $runtime" >&2
+    return 1
+  }
+  printf '%s\n' "$helper"
+}
+
+# SOUNIO_LANE_FRESH=1 starts the agent without resuming its previous session.
+# Resume is the right default -- without it, moving a lane to a worktree loses
+# its context, which is why the `|| true` dance below exists. But a session can
+# come back BROKEN: three cursor lanes resumed straight back into a corrupted
+# TUI and a progress indicator frozen at 32.5%, and no amount of restarting
+# helped until the resume was skipped. This is the escape hatch for that.
+lane_resume() {
+  if [[ "${SOUNIO_LANE_FRESH:-0}" == "1" ]]; then
+    return 0
+  fi
+  "$@" || true
+}
+
+run_supervised() {
+  local kind="$1" helper
+  [[ "$SOUNIO_FLEET_TRANSPORT" == agentd ]] || return 0
+  helper="$(fleet_runtime)" || exit 2
+  if [[ "${SOUNIO_FLEET_DRY_RUN:-0}" == 1 ]]; then
+    exec "$helper" plan-kind --slot "$LANE" --kind "$kind" --home "$HOME" --cwd "$REPO"
+  fi
+  exec "$helper" launch-kind --slot "$LANE" --kind "$kind" --home "$HOME" --cwd "$REPO"
+}
+
+run_cli_or_shell() {
+  local bin="$1"
+  local install_hint="$2"
+
+  if command -v "$bin" >/dev/null 2>&1; then
+    exec "$bin"
+  fi
+
+  printf "%s is not installed in this workspace yet.\n" "$bin" >&2
+  printf "%s\n\n" "$install_hint" >&2
+  exec zsh -i
+}
+
+case "$AGENT" in
+  repo)
+    exec zsh -i
+    ;;
+  claude)
+    if [[ -f "$HOME/.claude.json" ]]; then
+      python3 -m json.tool "$HOME/.claude.json" >/dev/null || {
+        echo "Invalid JSON: $HOME/.claude.json" >&2
+        exec zsh -i
+      }
+    fi
+    run_supervised claude
+    if [[ -d "$HOME/.claude/projects/-workspace-sounio" ]]; then
+      exec claude --continue --setting-sources user,local
+    fi
+    exec claude --setting-sources user,local
+    ;;
+  codex)
+    run_supervised codex
+    if has_codex_session; then
+      exec codex resume --last
+    fi
+    exec codex
+    ;;
+  kimi)
+    run_supervised kimi
+    if command -v kimi >/dev/null 2>&1; then
+      exec kimi --continue
+    fi
+    if command -v kimi-cli >/dev/null 2>&1; then
+      exec kimi-cli --continue
+    fi
+    run_cli_or_shell "kimi" "Install or authenticate Kimi CLI here, then rerun: kimi --continue"
+    ;;
+  grok)
+    run_supervised grok
+    run_cli_or_shell "grok" "Grok Build uses the grok command. Install: curl -fsSL https://x.ai/cli/install.sh | bash"
+    ;;
+  cursor)
+    run_supervised cursor
+    if command -v cursor-agent >/dev/null 2>&1; then
+      # `|| true`: `--continue` sai com status != 0 quando nao ha sessao anterior nesta
+      # HOME/REPO, e o `set -e` do topo do script matava o pane ANTES de chegar no fallback
+      # abaixo. Sem isto uma lane movida para worktree novo (sem historico ali ainda) morria
+      # em vez de cair pra sessao fresca -- medido: "Pane is dead (status 1)" ao mover cursor-1.
+      lane_resume cursor-agent --continue
+      exec cursor-agent
+    fi
+    run_cli_or_shell "cursor-agent" "Cursor CLI ausente nesta lane. Instale ou copie a autenticacao de \$BASE_HOME/.config/cursor/auth.json antes de rodar."
+    ;;
+  glm)
+    # GLM (Z.ai) fala o dialeto Anthropic-compativel: eh o binario claude de verdade, so
+    # apontado para outro backend via ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN. HOME proprio
+    # (.agents/glm-cliN) ja isola sessao/historico das lanes claude-* reais.
+    if [[ -f "$BASE_HOME/.credentials/glm.env" ]]; then
+      set -a; source "$BASE_HOME/.credentials/glm.env"; set +a
+    else
+      echo "Faltando $BASE_HOME/.credentials/glm.env (ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN)" >&2
+      exec zsh -i
+    fi
+    run_supervised claude
+    # `|| true`: um diretorio de projeto de uma CWD antiga (ex.: /workspace/sounio antes de
+    # mover a lane pro worktree) engana o teste de existencia, e o --continue recusa com "No
+    # conversation found to continue" e sai != 0 -- sem o `|| true` o `set -e` matava o pane
+    # ANTES do fallback abaixo. Medido movendo glm-cli2/minimax-cli1/2/3 pro worktree.
+    lane_resume claude --continue --setting-sources user,local
+    exec claude --setting-sources user,local
+    ;;
+  minimax)
+    # Mesmo esquema do GLM acima: claude real, backend MiniMax via env.
+    if [[ -f "$BASE_HOME/.credentials/minimax.env" ]]; then
+      set -a; source "$BASE_HOME/.credentials/minimax.env"; set +a
+    else
+      echo "Faltando $BASE_HOME/.credentials/minimax.env (ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN)" >&2
+      exec zsh -i
+    fi
+    run_supervised claude
+    lane_resume claude --continue --setting-sources user,local
+    exec claude --setting-sources user,local
+    ;;
+  empryo)
+    run_supervised empryo
+    run_cli_or_shell "em" "Empryo CLI is expected at $BASE_HOME/.empryo/bin/em"
+    ;;
+esac

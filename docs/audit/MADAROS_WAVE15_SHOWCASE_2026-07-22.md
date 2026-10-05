@@ -68,8 +68,15 @@ Multi-stmt paramful global list fold remains residual fail-closed inside `madaro
 
 If a later source fix restores lognormal without losing Wave13e, rebuild and re-run with `REQUIRE_IMPORTED_F64_SCIENCE=1`:
 
+> **Correction (2026-08-25):** this originally read
+> `scripts/dev/souc-build-lock.sh make build-madaros`, which **hangs forever**.
+> `scripts/ci/build_modular_madaros.sh` takes the global build lock itself, and
+> `make` does not pass the lock's file descriptor (fd 9) to its recipe shells, so
+> the inner lock blocks on the lock its own ancestor holds — silently, at 0% CPU.
+> Run the target bare, as below. See CLAUDE.md §4.
+
 ```bash
-scripts/dev/souc-build-lock.sh make build-madaros
+make build-madaros
 MADAROS_RAW_BIN=artifacts/self-hosted/madaros REQUIRE_IMPORTED_F64_SCIENCE=1 \
   bash scripts/dev/madaros_wave15_showcase_gate.sh
 ```

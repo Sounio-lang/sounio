@@ -12,7 +12,7 @@
 #     that consumes tests/vectors/f128_f256_v0d/arith_hard_*.jsonl with
 #     **bit-identity** to MPFR `result` under RNE — including trap families
 #     that a widen-f64 shortcut fails.
-#   - Default Madaros source surface may still E218-reject user `+` on f128
+#   - Default Madaros source surface may still E249-reject user `+` on f128
 #     (V0-B/V0-D ladder: source ops stay compile-fail until later). Softfloat
 #     is compiler-internal limb code tested by a dedicated consumer.
 #

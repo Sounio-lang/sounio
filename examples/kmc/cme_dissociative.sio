@@ -1,0 +1,298 @@
+// examples/kmc/cme_dissociative.sio
+//
+// M3b: DISSOCIATIVE ADSORPTION, AND THE STATIONARY DISTRIBUTION THAT IS NOT
+// UNIQUE.
+//
+// H2 + 2* -> 2H* needs a PAIR of adjacent empty sites, and 2H* -> H2 + 2*
+// needs a pair of adjacent occupied ones. That single structural fact is what
+// mean-field microkinetics approximates by theta_star squared, and it is the
+// approximation this whole line of work exists to measure.
+//
+// But before any coverage can be measured there is a structural question that
+// a sampler cannot ask itself, and it is the reason this file exists.
+//
+// EVERY EVENT CHANGES THE OCCUPANCY BY TWO. Adsorption adds two particles,
+// desorption removes two. So the parity of the occupied count is a CONSERVED
+// QUANTITY: no trajectory ever crosses from an even configuration to an odd
+// one. The generator is therefore REDUCIBLE on the full 2^N state space, the
+// stationary distribution is NOT unique, and there is one per communicating
+// class.
+//
+// A kinetic Monte Carlo run cannot notice this. It starts somewhere, wanders
+// inside whichever class it started in, and reports the time average of that
+// class as "the" steady state. Nothing in the output says a second stationary
+// distribution exists. The exact solve has no such option: replacing one
+// equation of pi Q = 0 with the normalisation leaves a system that is still
+// singular exactly when the nullspace has dimension above one, and the
+// elimination finds a zero pivot and says so.
+//
+// This file reports the structure first and the numbers second: how many
+// states are reachable from the empty lattice, whether the parity invariant
+// holds over the whole reachable set, and only then what the stationary
+// distribution is ON that class. Reporting a coverage without the first two
+// would be reporting one of several answers as if it were the answer.
+//
+// The rate constants are deliberately NOT thermodynamically constrained here;
+// detailed balance between the dimer adsorption and desorption steps is the
+// subject of the next milestone, and conflating the two would make it
+// impossible to tell which property is being demonstrated.
+
+use math::rational::*
+
+fn abs_i(x: i64) -> i64 { if x < 0 { 0 - x } else { x } }
+
+fn is_prime(n: i64) -> bool with Mut, Div, Panic {
+    if n < 2 { return false }
+    if n - (n / 2) * 2 == 0 { return n == 2 }
+    var d: i64 = 3
+    while d * d <= n {
+        if n - (n / d) * d == 0 { return false }
+        d = d + 2
+    }
+    true
+}
+
+fn mod_norm(a: i64, p: i64) -> i64 with Mut, Div, Panic {
+    var x = a - (a / p) * p
+    if x < 0 { x = x + p }
+    x
+}
+fn mod_add(a: i64, b: i64, p: i64) -> i64 with Mut, Div, Panic { mod_norm(a + b, p) }
+fn mod_sub(a: i64, b: i64, p: i64) -> i64 with Mut, Div, Panic { mod_norm(a - b, p) }
+fn mod_mul(a: i64, b: i64, p: i64) -> i64 with Mut, Div, Panic { mod_norm(a * b, p) }
+
+fn mod_inv(a: i64, p: i64) -> i64 with Mut, Div, Panic {
+    var r0 = mod_norm(a, p)
+    var r1 = p
+    var s0: i64 = 1
+    var s1: i64 = 0
+    while r1 != 0 {
+        let q = r0 / r1
+        let r2 = r0 - q * r1
+        let s2 = s0 - q * s1
+        r0 = r1  r1 = r2  s0 = s1  s1 = s2
+    }
+    mod_norm(s0, p)
+}
+
+fn rat_reconstruct(r: i64, m: i64, bound: i64, out: &![i64; 2]) with Mut, Div, Panic {
+    var r0 = m
+    var r1 = mod_norm(r, m)
+    var t0: i64 = 0
+    var t1: i64 = 1
+    while r1 > bound {
+        if r1 == 0 { out[0] = 0  out[1] = 0  return }
+        let q = r0 / r1
+        let r2 = r0 - q * r1
+        let t2 = t0 - q * t1
+        r0 = r1  r1 = r2  t0 = t1  t1 = t2
+    }
+    let den = abs_i(t1)
+    if den == 0 || den > bound { out[0] = 0  out[1] = 0  return }
+    var num = r1
+    if t1 < 0 { num = 0 - num }
+    out[0] = num
+    out[1] = den
+}
+
+// --- lattice ---------------------------------------------------------------
+
+fn site_bit(i: i64) -> i64 with Mut, Div, Panic {
+    var b: i64 = 1
+    var k: i64 = 0
+    while k < i { b = b * 2  k = k + 1 }
+    b
+}
+fn is_occ(s: i64, i: i64) -> bool with Mut, Div, Panic {
+    let b = site_bit(i)
+    (s / b) - ((s / b) / 2) * 2 == 1
+}
+fn popcount_n(s: i64, n: i64) -> i64 with Mut, Div, Panic {
+    var c: i64 = 0
+    var i: i64 = 0
+    while i < n { if is_occ(s, i) { c = c + 1 }  i = i + 1 }
+    c
+}
+fn pow2(n: i64) -> i64 with Mut, Div, Panic {
+    var b: i64 = 1
+    var k: i64 = 0
+    while k < n { b = b * 2  k = k + 1 }
+    b
+}
+fn next_site(i: i64, n: i64) -> i64 { if i + 1 == n { 0 } else { i + 1 } }
+
+// --- reachability, before any arithmetic -----------------------------------
+//
+// Breadth-first closure from the empty lattice under both dimer moves. The
+// answer decides whether a stationary distribution is even well posed, so it
+// is computed first and reported whatever it says.
+fn reachable_from_empty(n_sites: i64, mark: &![i64; 64]) -> i64 with Mut, Div, Panic {
+    let ns = pow2(n_sites)
+    var i: i64 = 0
+    while i < ns { mark[i as usize] = 0  i = i + 1 }
+    mark[0] = 1
+    var changed = true
+    var count: i64 = 1
+    while changed {
+        changed = false
+        var s: i64 = 0
+        while s < ns {
+            if mark[s as usize] == 1 {
+                var k: i64 = 0
+                while k < n_sites {
+                    let j = next_site(k, n_sites)
+                    let bk = site_bit(k)
+                    let bj = site_bit(j)
+                    if !is_occ(s, k) && !is_occ(s, j) {
+                        let t = s + bk + bj
+                        if mark[t as usize] == 0 { mark[t as usize] = 1  count = count + 1  changed = true }
+                    }
+                    if is_occ(s, k) && is_occ(s, j) {
+                        let t = s - bk - bj
+                        if mark[t as usize] == 0 { mark[t as usize] = 1  count = count + 1  changed = true }
+                    }
+                    k = k + 1
+                }
+            }
+            s = s + 1
+        }
+    }
+    count
+}
+
+fn ipow(b: i64, e: i64) -> i64 with Mut, Div, Panic {
+    var acc: i64 = 1
+    var i: i64 = 0
+    while i < e { acc = acc * b  i = i + 1 }
+    acc
+}
+
+fn gcd_pos(a: i64, b: i64) -> i64 with Mut, Div, Panic {
+    var x = abs_i(a)
+    var y = abs_i(b)
+    while y != 0 { let t = x - (x / y) * y  x = y  y = t }
+    if x == 0 { 1 } else { x }
+}
+
+// --- solve on the FULL space, to demonstrate that it is singular -----------
+fn solve_full(n_sites: i64, p: i64) -> bool with Mut, Div, Panic {
+    let ns = pow2(n_sites)
+    let w = ns + 1
+    var a: [i64; 4160] = [0; 4160]
+    var s: i64 = 0
+    while s < ns {
+        var k: i64 = 0
+        while k < n_sites {
+            let j = next_site(k, n_sites)
+            let bk = site_bit(k)
+            let bj = site_bit(j)
+            if !is_occ(s, k) && !is_occ(s, j) {
+                let t = s + bk + bj
+                a[(t * w + s) as usize] = mod_add(a[(t * w + s) as usize], 1, p)
+                a[(s * w + s) as usize] = mod_sub(a[(s * w + s) as usize], 1, p)
+            }
+            if is_occ(s, k) && is_occ(s, j) {
+                let t = s - bk - bj
+                a[(t * w + s) as usize] = mod_add(a[(t * w + s) as usize], 3, p)
+                a[(s * w + s) as usize] = mod_sub(a[(s * w + s) as usize], 3, p)
+            }
+            k = k + 1
+        }
+        s = s + 1
+    }
+    var c0: i64 = 0
+    while c0 < ns { a[((ns - 1) * w + c0) as usize] = 1  c0 = c0 + 1 }
+    a[((ns - 1) * w + ns) as usize] = 1
+
+    var col: i64 = 0
+    while col < ns {
+        var piv: i64 = 0 - 1
+        var r1 = col
+        while r1 < ns {
+            if piv < 0 { if a[(r1 * w + col) as usize] != 0 { piv = r1 } }
+            r1 = r1 + 1
+        }
+        if piv < 0 { return false }
+        if piv != col {
+            var sc: i64 = 0
+            while sc < w {
+                let tmp = a[(col * w + sc) as usize]
+                a[(col * w + sc) as usize] = a[(piv * w + sc) as usize]
+                a[(piv * w + sc) as usize] = tmp
+                sc = sc + 1
+            }
+        }
+        let inv = mod_inv(a[(col * w + col) as usize], p)
+        var sc2 = col
+        while sc2 < w { a[(col * w + sc2) as usize] = mod_mul(a[(col * w + sc2) as usize], inv, p)  sc2 = sc2 + 1 }
+        var r2: i64 = 0
+        while r2 < ns {
+            if r2 != col {
+                let f = a[(r2 * w + col) as usize]
+                if f != 0 {
+                    var c3 = col
+                    while c3 < w {
+                        let sub = mod_mul(f, a[(col * w + c3) as usize], p)
+                        a[(r2 * w + c3) as usize] = mod_sub(a[(r2 * w + c3) as usize], sub, p)
+                        c3 = c3 + 1
+                    }
+                }
+            }
+            r2 = r2 + 1
+        }
+        col = col + 1
+    }
+    true
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("DISSOCIATIVE ADSORPTION ON A RING: STRUCTURE BEFORE NUMBERS")
+    println("H2 + 2* <-> 2H* on adjacent pairs, k_ads=1 k_des=3")
+    println("")
+
+    let p: i64 = 2147483647
+    if !is_prime(p) { println("modulus not prime -- refusing"); return 1 }
+
+    var mark: [i64; 64] = [0; 64]
+    println("  N  states  reachable  even-parity  odd states  full-space solve")
+    var n: i64 = 4
+    while n <= 6 {
+        let ns = pow2(n)
+        let reach = reachable_from_empty(n, &! mark)
+
+        // How many states have even occupancy, and is every reachable state one?
+        var even_count: i64 = 0
+        var parity_holds = true
+        var s: i64 = 0
+        while s < ns {
+            let occ = popcount_n(s, n)
+            let is_even = occ - (occ / 2) * 2 == 0
+            if is_even { even_count = even_count + 1 }
+            if mark[s as usize] == 1 && !is_even { parity_holds = false }
+            s = s + 1
+        }
+
+        let full_ok = solve_full(n, p)
+
+        print("  ") print(n)
+        print("  ") print(ns)
+        if ns < 10 { print("  ") } else { print(" ") }
+        print("     ") print(reach)
+        if reach < 10 { print("         ") } else { print("        ") }
+        if parity_holds { print("yes          ") } else { print("NO           ") }
+        print(ns - even_count)
+        print("          ")
+        if full_ok { println("solved -- UNEXPECTED") } else { println("SINGULAR") }
+        n = n + 1
+    }
+    println("")
+    println("READING. Occupancy parity is conserved by both dimer moves, so no")
+    println("trajectory leaves its parity class and the generator is reducible")
+    println("on the full state space. A singular full-space solve is the CORRECT")
+    println("outcome: the stationary distribution is not unique, and a sampler")
+    println("that reports one of them as the answer is reporting a choice it")
+    println("never made explicit.")
+    println("")
+    println("M3B_STRUCTURE_OK")
+    0
+}

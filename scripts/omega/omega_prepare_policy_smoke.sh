@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Resolved here, at the top, because this script changes directory later and a
+# relative BASH_SOURCE stops resolving once it does.
+_SOUC_GUARD_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/souc_verb_guard.sh"
+. "$_SOUC_GUARD_LIB"
 
 usage() {
   cat <<'EOF'
@@ -172,6 +176,10 @@ PY
 fi
 
 if [ "$SKIP_RETRAIN" = "0" ]; then
+  # Refuse before the work, and name what is actually missing: the `opt`
+  # verbs went with the Rust crate (79acc192e1) and the fall-through
+  # diagnostic reports a missing FILE. See scripts/lib/souc_verb_guard.sh.
+  require_souc_verb "$SOUC_BIN" opt "training and signing a smoke policy"
   SOUNIO_POLICY_SIGNING_KEY_PATH="$OMEGA_CANONICAL_PRIVKEY" \
   SOUNIO_POLICY_VERIFY_KEY_PATH="$OMEGA_CANONICAL_PUBKEY" \
     "$SOUC_BIN" opt policy train \

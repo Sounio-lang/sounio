@@ -1,0 +1,1079 @@
+//! Streaming, grammar-bounded importer for the first NVIDIA PTX slice.
+//!
+//! The normative input is the archived CUDA 13.2.0 PTX ISA 9.2 HTML. The
+//! native bootstrap read_file builtin is bounded to 1 MiB, so byte transport
+//! uses four ordered chunks. Sounio reconstructs the complete stream, verifies
+//! its length and SHA-256, parses HTML tags and attributes, and projects the
+//! unique `prmt` section without asserting a SASS or material-hardware link.
+
+use crypto::sha256::{
+    SHA256State, SHA256Digest,
+    sha256_init, sha256_update, sha256_finalize,
+}
+use hardware::pireus::model::{
+    PIREUS_RDF_TYPE, PIREUS_CLASS_ONTOLOGY_CLASS,
+    PIREUS_CLASS_EVIDENCE_ROLE, PIREUS_HAS_EVIDENCE_ROLE,
+}
+use hardware::pireus::target_profile::{pireus_v01_store}
+use ontology::query::{
+    TripleStore, SparqlResult,
+    triple_store_add, triple_iri,
+    sparql_new, sparql_select, sparql_add_pattern, sparql_execute,
+    triple_pattern_new, queryterm_variable, queryterm_iri,
+}
+
+pub const PIREUS_PTX_OK: i64 = 0
+pub const PIREUS_PTX_ERR_FILE: i64 = 1
+pub const PIREUS_PTX_ERR_LENGTH: i64 = 2
+pub const PIREUS_PTX_ERR_HASH: i64 = 3
+pub const PIREUS_PTX_ERR_HTML: i64 = 4
+pub const PIREUS_PTX_ERR_DUPLICATE_SECTION: i64 = 5
+pub const PIREUS_PTX_ERR_SELECTED_SHAPE: i64 = 6
+pub const PIREUS_PTX_ERR_CAPACITY: i64 = 7
+
+pub const PIREUS_PTX_CLASS_INSTRUCTION_FORM: i64 = 704000
+pub const PIREUS_PTX_CLASS_VENDOR_CORPUS: i64 = 704001
+pub const PIREUS_PTX_CLASS_VIRTUAL_ISA: i64 = 704002
+pub const PIREUS_PTX_CLASS_RAW_MODE: i64 = 704003
+pub const PIREUS_PTX_CLASS_TARGET_REQUIREMENT: i64 = 704004
+
+pub const PIREUS_PTX_HAS_CORPUS: i64 = 704100
+pub const PIREUS_PTX_HAS_VIRTUAL_ISA: i64 = 704101
+pub const PIREUS_PTX_HAS_RAW_MODE: i64 = 704102
+pub const PIREUS_PTX_HAS_TARGET_REQUIREMENT: i64 = 704103
+
+pub const PIREUS_PTX_CORPUS_CUDA_13_2_PTX_9_2: i64 = 704200
+pub const PIREUS_PTX_EVIDENCE_NORMATIVE_VENDOR: i64 = 704201
+pub const PIREUS_PTX_VIRTUAL_ISA_9_2: i64 = 704202
+pub const PIREUS_PTX_TARGET_SM_20_OR_HIGHER: i64 = 704203
+pub const PIREUS_PTX_FORM_PRMT: i64 = 704204
+pub const PIREUS_PTX_MODE_F4E: i64 = 704210
+pub const PIREUS_PTX_MODE_B4E: i64 = 704211
+pub const PIREUS_PTX_MODE_RC8: i64 = 704212
+pub const PIREUS_PTX_MODE_ECL: i64 = 704213
+pub const PIREUS_PTX_MODE_ECR: i64 = 704214
+pub const PIREUS_PTX_MODE_RC16: i64 = 704215
+
+const PIREUS_PTX_EXPECTED_BYTES: i64 = 3428895
+const PIREUS_PTX_CHUNKS: i64 = 4
+const PIREUS_PTX_CHUNK_BYTES: i64 = 1000000
+const PIREUS_PTX_LAST_CHUNK_BYTES: i64 = 428895
+
+const PTX_TAG_SECTION: i64 = 1
+const PTX_TAG_H4: i64 = 2
+const PTX_TAG_P: i64 = 3
+const PTX_TAG_PRE: i64 = 4
+const PTX_TAG_TABLE: i64 = 5
+const PTX_TAG_TR: i64 = 6
+const PTX_TAG_CODE: i64 = 7
+
+const PTX_RUBRIC_SYNTAX: i64 = 1
+const PTX_RUBRIC_DESCRIPTION: i64 = 2
+const PTX_RUBRIC_SEMANTICS: i64 = 3
+const PTX_RUBRIC_PTX_NOTES: i64 = 4
+const PTX_RUBRIC_TARGET_NOTES: i64 = 5
+const PTX_RUBRIC_EXAMPLES: i64 = 6
+const PTX_RUBRIC_MNEMONIC: i64 = 7
+
+pub struct PireusPtxInventory {
+    pub total_bytes: i64,
+    pub chunk_count: i64,
+    pub digest_match: bool,
+    pub selected_sections: i64,
+    pub headings: i64,
+    pub paragraphs: i64,
+    pub rubrics: i64,
+    pub pre_blocks: i64,
+    pub syntax_lines: i64,
+    pub semantics_lines: i64,
+    pub example_lines: i64,
+    pub tables: i64,
+    pub table_rows: i64,
+    pub code_tokens: i64,
+    pub mode_f4e: i64,
+    pub mode_b4e: i64,
+    pub mode_rc8: i64,
+    pub mode_ecl: i64,
+    pub mode_ecr: i64,
+    pub mode_rc16: i64,
+    pub introduced_ptx_2_0: i64,
+    pub target_sm_20_or_higher: i64,
+    pub error: i64,
+}
+
+struct PtxTagMeta {
+    selected_id: bool,
+    rubric_class: bool,
+    id_count: i64,
+    malformed: bool,
+}
+
+struct PireusPtxParser {
+    tag: [i8; 1024],
+    tag_len: i64,
+    tag_overflow: bool,
+    in_tag: bool,
+    tag_quote: i64,
+    in_comment: bool,
+    comment_dash_run: i64,
+    section_depth: i64,
+    selected_depth: i64,
+    selected_active: bool,
+    selected_done: bool,
+    in_p: bool,
+    p_rubric: bool,
+    paragraph: [i8; 2048],
+    paragraph_len: i64,
+    paragraph_space: bool,
+    paragraph_overflow: bool,
+    in_code: bool,
+    code: [i8; 512],
+    code_len: i64,
+    code_space: bool,
+    code_overflow: bool,
+    in_pre: bool,
+    pre: [i8; 4096],
+    pre_len: i64,
+    pre_overflow: bool,
+    current_rubric: i64,
+    rubric_syntax: i64,
+    rubric_description: i64,
+    rubric_semantics: i64,
+    rubric_ptx_notes: i64,
+    rubric_target_notes: i64,
+    rubric_examples: i64,
+    rubric_mnemonic: i64,
+    syntax_blocks: i64,
+    semantics_blocks: i64,
+    examples_blocks: i64,
+    raw_mnemonic_tokens: i64,
+    target_tokens: i64,
+    inventory: PireusPtxInventory,
+    error: i64,
+}
+
+struct PireusPtxRun {
+    parser: PireusPtxParser,
+    sha: SHA256State,
+    total_bytes: i64,
+    chunks: i64,
+    error: i64,
+}
+
+fn ptx_inventory_empty() -> PireusPtxInventory {
+    PireusPtxInventory {
+        total_bytes: 0,
+        chunk_count: 0,
+        digest_match: false,
+        selected_sections: 0,
+        headings: 0,
+        paragraphs: 0,
+        rubrics: 0,
+        pre_blocks: 0,
+        syntax_lines: 0,
+        semantics_lines: 0,
+        example_lines: 0,
+        tables: 0,
+        table_rows: 0,
+        code_tokens: 0,
+        mode_f4e: 0,
+        mode_b4e: 0,
+        mode_rc8: 0,
+        mode_ecl: 0,
+        mode_ecr: 0,
+        mode_rc16: 0,
+        introduced_ptx_2_0: 0,
+        target_sm_20_or_higher: 0,
+        error: PIREUS_PTX_OK,
+    }
+}
+
+fn ptx_parser_new() -> PireusPtxParser with Mut {
+    PireusPtxParser {
+        tag: [0; 1024],
+        tag_len: 0,
+        tag_overflow: false,
+        in_tag: false,
+        tag_quote: 0,
+        in_comment: false,
+        comment_dash_run: 0,
+        section_depth: 0,
+        selected_depth: 0,
+        selected_active: false,
+        selected_done: false,
+        in_p: false,
+        p_rubric: false,
+        paragraph: [0; 2048],
+        paragraph_len: 0,
+        paragraph_space: false,
+        paragraph_overflow: false,
+        in_code: false,
+        code: [0; 512],
+        code_len: 0,
+        code_space: false,
+        code_overflow: false,
+        in_pre: false,
+        pre: [0; 4096],
+        pre_len: 0,
+        pre_overflow: false,
+        current_rubric: 0,
+        rubric_syntax: 0,
+        rubric_description: 0,
+        rubric_semantics: 0,
+        rubric_ptx_notes: 0,
+        rubric_target_notes: 0,
+        rubric_examples: 0,
+        rubric_mnemonic: 0,
+        syntax_blocks: 0,
+        semantics_blocks: 0,
+        examples_blocks: 0,
+        raw_mnemonic_tokens: 0,
+        target_tokens: 0,
+        inventory: ptx_inventory_empty(),
+        error: PIREUS_PTX_OK,
+    }
+}
+
+fn ptx_run_new() -> PireusPtxRun with Mut {
+    PireusPtxRun {
+        parser: ptx_parser_new(),
+        sha: sha256_init(),
+        total_bytes: 0,
+        chunks: 0,
+        error: PIREUS_PTX_OK,
+    }
+}
+
+pub fn pireus_ptx_expected_sha256() -> string {
+    "fd013df0c9560d9f86672c379b57b30a6d5efb2eccbb0c6c487950032e6d3457"
+}
+
+fn ptx_is_ws(b: i64) -> bool {
+    b == 32 || b == 9 || b == 10 || b == 13
+}
+
+fn ptx_tag_char(parser: &PireusPtxParser, index: i64) -> i64 with Panic {
+    parser.tag[index as usize] as i64
+}
+
+fn ptx_tag_range_eq(
+    parser: &PireusPtxParser, start: i64, end: i64, value: string,
+) -> bool with Panic, Div {
+    let n = str_len(value)
+    if end - start != n { return false }
+    var i: i64 = 0
+    while i < n {
+        if ptx_tag_char(parser, start + i) != str_char_at(value, i) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn ptx_tag_class_has_rubric(
+    parser: &PireusPtxParser, start: i64, end: i64,
+) -> bool with Panic {
+    var i = start
+    while i < end {
+        while i < end && ptx_is_ws(ptx_tag_char(parser, i)) { i = i + 1 }
+        let word_start = i
+        while i < end && !ptx_is_ws(ptx_tag_char(parser, i)) { i = i + 1 }
+        if i - word_start == 6 &&
+            ptx_tag_char(parser, word_start) == 114 &&
+            ptx_tag_char(parser, word_start + 1) == 117 &&
+            ptx_tag_char(parser, word_start + 2) == 98 &&
+            ptx_tag_char(parser, word_start + 3) == 114 &&
+            ptx_tag_char(parser, word_start + 4) == 105 &&
+            ptx_tag_char(parser, word_start + 5) == 99 {
+            return true
+        }
+    }
+    false
+}
+
+fn ptx_tag_selected_id(
+    parser: &PireusPtxParser, start: i64, end: i64,
+) -> bool with Panic {
+    ptx_tag_range_eq(
+        parser, start, end,
+        "data-movement-and-conversion-instructions-prmt")
+}
+
+fn ptx_parse_tag_meta(
+    parser: &PireusPtxParser, start: i64,
+) -> PtxTagMeta with Mut, Panic, Div {
+    var meta = PtxTagMeta {
+        selected_id: false,
+        rubric_class: false,
+        id_count: 0,
+        malformed: false,
+    }
+    var i = start
+    while i < parser.tag_len {
+        while i < parser.tag_len && ptx_is_ws(ptx_tag_char(parser, i)) {
+            i = i + 1
+        }
+        if i >= parser.tag_len || ptx_tag_char(parser, i) == 47 { break }
+        let name_start = i
+        while i < parser.tag_len && !ptx_is_ws(ptx_tag_char(parser, i)) &&
+            ptx_tag_char(parser, i) != 61 && ptx_tag_char(parser, i) != 47 {
+            i = i + 1
+        }
+        let name_end = i
+        if name_end == name_start {
+            meta.malformed = true
+            return meta
+        }
+        while i < parser.tag_len && ptx_is_ws(ptx_tag_char(parser, i)) {
+            i = i + 1
+        }
+        var value_start = i
+        var value_end = i
+        var has_value = false
+        if i < parser.tag_len && ptx_tag_char(parser, i) == 61 {
+            i = i + 1
+            while i < parser.tag_len && ptx_is_ws(ptx_tag_char(parser, i)) {
+                i = i + 1
+            }
+            if i >= parser.tag_len {
+                meta.malformed = true
+                return meta
+            }
+            let quote = ptx_tag_char(parser, i)
+            if quote == 34 || quote == 39 {
+                i = i + 1
+                value_start = i
+                while i < parser.tag_len && ptx_tag_char(parser, i) != quote {
+                    i = i + 1
+                }
+                if i >= parser.tag_len {
+                    meta.malformed = true
+                    return meta
+                }
+                value_end = i
+                i = i + 1
+            } else {
+                value_start = i
+                while i < parser.tag_len && !ptx_is_ws(ptx_tag_char(parser, i)) &&
+                    ptx_tag_char(parser, i) != 47 {
+                    i = i + 1
+                }
+                value_end = i
+            }
+            has_value = true
+        }
+        if ptx_tag_range_eq(parser, name_start, name_end, "id") {
+            meta.id_count = meta.id_count + 1
+            if has_value && ptx_tag_selected_id(parser, value_start, value_end) {
+                meta.selected_id = true
+            }
+        }
+        if ptx_tag_range_eq(parser, name_start, name_end, "class") &&
+            has_value && ptx_tag_class_has_rubric(parser, value_start, value_end) {
+            meta.rubric_class = true
+        }
+    }
+    meta
+}
+
+fn ptx_tag_kind(
+    parser: &PireusPtxParser, start: i64, end: i64,
+) -> i64 with Panic, Div {
+    if ptx_tag_range_eq(parser, start, end, "section") {
+        return PTX_TAG_SECTION
+    }
+    if ptx_tag_range_eq(parser, start, end, "h4") { return PTX_TAG_H4 }
+    if ptx_tag_range_eq(parser, start, end, "p") { return PTX_TAG_P }
+    if ptx_tag_range_eq(parser, start, end, "pre") { return PTX_TAG_PRE }
+    if ptx_tag_range_eq(parser, start, end, "table") { return PTX_TAG_TABLE }
+    if ptx_tag_range_eq(parser, start, end, "tr") { return PTX_TAG_TR }
+    if ptx_tag_range_eq(parser, start, end, "code") { return PTX_TAG_CODE }
+    0
+}
+
+fn ptx_paragraph_reset(parser: &!PireusPtxParser) with Mut {
+    parser.paragraph_len = 0
+    parser.paragraph_space = false
+    parser.paragraph_overflow = false
+}
+
+fn ptx_code_reset(parser: &!PireusPtxParser) with Mut {
+    parser.code_len = 0
+    parser.code_space = false
+    parser.code_overflow = false
+}
+
+fn ptx_pre_reset(parser: &!PireusPtxParser) with Mut {
+    parser.pre_len = 0
+    parser.pre_overflow = false
+}
+
+fn ptx_paragraph_push(parser: &!PireusPtxParser, b: i64) with Mut, Panic {
+    if ptx_is_ws(b) {
+        if parser.paragraph_len > 0 { parser.paragraph_space = true }
+        return
+    }
+    if parser.paragraph_space {
+        if parser.paragraph_len < 2048 {
+            parser.paragraph[parser.paragraph_len as usize] = 32
+        } else {
+            parser.paragraph_overflow = true
+        }
+        parser.paragraph_len = parser.paragraph_len + 1
+        parser.paragraph_space = false
+    }
+    if parser.paragraph_len < 2048 {
+        parser.paragraph[parser.paragraph_len as usize] = b as i8
+    } else {
+        parser.paragraph_overflow = true
+    }
+    parser.paragraph_len = parser.paragraph_len + 1
+}
+
+fn ptx_code_push(parser: &!PireusPtxParser, b: i64) with Mut, Panic {
+    if ptx_is_ws(b) {
+        if parser.code_len > 0 { parser.code_space = true }
+        return
+    }
+    if parser.code_space {
+        if parser.code_len < 512 {
+            parser.code[parser.code_len as usize] = 32
+        } else {
+            parser.code_overflow = true
+        }
+        parser.code_len = parser.code_len + 1
+        parser.code_space = false
+    }
+    if parser.code_len < 512 {
+        parser.code[parser.code_len as usize] = b as i8
+    } else {
+        parser.code_overflow = true
+    }
+    parser.code_len = parser.code_len + 1
+}
+
+fn ptx_pre_push(parser: &!PireusPtxParser, b: i64) with Mut, Panic {
+    if parser.pre_len < 4096 {
+        parser.pre[parser.pre_len as usize] = b as i8
+    } else {
+        parser.pre_overflow = true
+    }
+    parser.pre_len = parser.pre_len + 1
+}
+
+fn ptx_paragraph_eq(parser: &PireusPtxParser, value: string) -> bool
+with Panic, Div {
+    if parser.paragraph_overflow { return false }
+    let n = str_len(value)
+    if parser.paragraph_len != n { return false }
+    var i: i64 = 0
+    while i < n {
+        if parser.paragraph[i as usize] != str_char_at(value, i) as i8 {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn ptx_code_eq(parser: &PireusPtxParser, value: string) -> bool
+with Panic, Div {
+    if parser.code_overflow { return false }
+    let n = str_len(value)
+    if parser.code_len != n { return false }
+    var i: i64 = 0
+    while i < n {
+        if parser.code[i as usize] != str_char_at(value, i) as i8 {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn ptx_pre_nonempty_lines(parser: &PireusPtxParser) -> i64 with Panic {
+    if parser.pre_overflow { return -1 }
+    var lines: i64 = 0
+    var has_text = false
+    var i: i64 = 0
+    while i < parser.pre_len {
+        let b = parser.pre[i as usize] as i64
+        if b == 10 {
+            if has_text { lines = lines + 1 }
+            has_text = false
+        } else {
+            if b != 13 && b != 32 && b != 9 { has_text = true }
+        }
+        i = i + 1
+    }
+    if has_text { lines = lines + 1 }
+    lines
+}
+
+fn ptx_finalize_paragraph(parser: &!PireusPtxParser)
+with Mut, Panic, Div {
+    if !parser.in_p {
+        parser.error = PIREUS_PTX_ERR_HTML
+        return
+    }
+    parser.inventory.paragraphs = parser.inventory.paragraphs + 1
+    if parser.paragraph_overflow {
+        parser.error = PIREUS_PTX_ERR_CAPACITY
+        return
+    }
+    if parser.p_rubric {
+        parser.inventory.rubrics = parser.inventory.rubrics + 1
+        var kind: i64 = 0
+        if ptx_paragraph_eq(parser, "Syntax") { kind = PTX_RUBRIC_SYNTAX }
+        if ptx_paragraph_eq(parser, "Description") { kind = PTX_RUBRIC_DESCRIPTION }
+        if ptx_paragraph_eq(parser, "Semantics") { kind = PTX_RUBRIC_SEMANTICS }
+        if ptx_paragraph_eq(parser, "PTX ISA Notes") { kind = PTX_RUBRIC_PTX_NOTES }
+        if ptx_paragraph_eq(parser, "Target ISA Notes") { kind = PTX_RUBRIC_TARGET_NOTES }
+        if ptx_paragraph_eq(parser, "Examples") { kind = PTX_RUBRIC_EXAMPLES }
+        if ptx_paragraph_eq(parser, "prmt") { kind = PTX_RUBRIC_MNEMONIC }
+        if kind == 0 {
+            parser.error = PIREUS_PTX_ERR_SELECTED_SHAPE
+            return
+        }
+        parser.current_rubric = kind
+        if kind == PTX_RUBRIC_SYNTAX { parser.rubric_syntax = parser.rubric_syntax + 1 }
+        if kind == PTX_RUBRIC_DESCRIPTION { parser.rubric_description = parser.rubric_description + 1 }
+        if kind == PTX_RUBRIC_SEMANTICS { parser.rubric_semantics = parser.rubric_semantics + 1 }
+        if kind == PTX_RUBRIC_PTX_NOTES { parser.rubric_ptx_notes = parser.rubric_ptx_notes + 1 }
+        if kind == PTX_RUBRIC_TARGET_NOTES { parser.rubric_target_notes = parser.rubric_target_notes + 1 }
+        if kind == PTX_RUBRIC_EXAMPLES { parser.rubric_examples = parser.rubric_examples + 1 }
+        if kind == PTX_RUBRIC_MNEMONIC { parser.rubric_mnemonic = parser.rubric_mnemonic + 1 }
+    } else {
+        if parser.current_rubric == PTX_RUBRIC_PTX_NOTES &&
+            ptx_paragraph_eq(parser, "Introduced in PTX ISA version 2.0.") {
+            parser.inventory.introduced_ptx_2_0 =
+                parser.inventory.introduced_ptx_2_0 + 1
+        }
+        if parser.current_rubric == PTX_RUBRIC_TARGET_NOTES &&
+            ptx_paragraph_eq(parser, "prmt requires sm_20 or higher.") {
+            parser.inventory.target_sm_20_or_higher =
+                parser.inventory.target_sm_20_or_higher + 1
+        }
+    }
+    parser.in_p = false
+    parser.p_rubric = false
+}
+
+fn ptx_finalize_code(parser: &!PireusPtxParser)
+with Mut, Panic, Div {
+    if !parser.in_code {
+        parser.error = PIREUS_PTX_ERR_HTML
+        return
+    }
+    if parser.code_overflow {
+        parser.error = PIREUS_PTX_ERR_CAPACITY
+        return
+    }
+    parser.inventory.code_tokens = parser.inventory.code_tokens + 1
+    if ptx_code_eq(parser, "f4e") { parser.inventory.mode_f4e = parser.inventory.mode_f4e + 1 }
+    if ptx_code_eq(parser, "b4e") { parser.inventory.mode_b4e = parser.inventory.mode_b4e + 1 }
+    if ptx_code_eq(parser, "rc8") { parser.inventory.mode_rc8 = parser.inventory.mode_rc8 + 1 }
+    if ptx_code_eq(parser, "ecl") { parser.inventory.mode_ecl = parser.inventory.mode_ecl + 1 }
+    if ptx_code_eq(parser, "ecr") { parser.inventory.mode_ecr = parser.inventory.mode_ecr + 1 }
+    if ptx_code_eq(parser, "rc16") { parser.inventory.mode_rc16 = parser.inventory.mode_rc16 + 1 }
+    if ptx_code_eq(parser, "prmt") { parser.raw_mnemonic_tokens = parser.raw_mnemonic_tokens + 1 }
+    if ptx_code_eq(parser, "sm_20") { parser.target_tokens = parser.target_tokens + 1 }
+    parser.in_code = false
+}
+
+fn ptx_finalize_pre(parser: &!PireusPtxParser) with Mut, Panic {
+    if !parser.in_pre {
+        parser.error = PIREUS_PTX_ERR_HTML
+        return
+    }
+    let lines = ptx_pre_nonempty_lines(parser)
+    if lines < 0 {
+        parser.error = PIREUS_PTX_ERR_CAPACITY
+        return
+    }
+    parser.inventory.pre_blocks = parser.inventory.pre_blocks + 1
+    if parser.current_rubric == PTX_RUBRIC_SYNTAX {
+        parser.syntax_blocks = parser.syntax_blocks + 1
+        parser.inventory.syntax_lines = lines
+    }
+    if parser.current_rubric == PTX_RUBRIC_SEMANTICS {
+        parser.semantics_blocks = parser.semantics_blocks + 1
+        parser.inventory.semantics_lines = lines
+    }
+    if parser.current_rubric == PTX_RUBRIC_EXAMPLES {
+        parser.examples_blocks = parser.examples_blocks + 1
+        parser.inventory.example_lines = lines
+    }
+    parser.in_pre = false
+}
+
+fn ptx_process_selected_start(
+    parser: &!PireusPtxParser, kind: i64, meta: PtxTagMeta,
+) with Mut, Panic {
+    if kind == PTX_TAG_H4 {
+        parser.inventory.headings = parser.inventory.headings + 1
+    }
+    if kind == PTX_TAG_P {
+        if parser.in_p {
+            parser.error = PIREUS_PTX_ERR_HTML
+            return
+        }
+        parser.in_p = true
+        parser.p_rubric = meta.rubric_class
+        ptx_paragraph_reset(parser)
+    }
+    if kind == PTX_TAG_PRE {
+        if parser.in_pre {
+            parser.error = PIREUS_PTX_ERR_HTML
+            return
+        }
+        parser.in_pre = true
+        ptx_pre_reset(parser)
+    }
+    if kind == PTX_TAG_CODE {
+        if parser.in_code {
+            parser.error = PIREUS_PTX_ERR_HTML
+            return
+        }
+        parser.in_code = true
+        ptx_code_reset(parser)
+    }
+    if kind == PTX_TAG_TABLE {
+        parser.inventory.tables = parser.inventory.tables + 1
+    }
+    if kind == PTX_TAG_TR {
+        parser.inventory.table_rows = parser.inventory.table_rows + 1
+    }
+}
+
+fn ptx_process_selected_end(
+    parser: &!PireusPtxParser, kind: i64,
+) with Mut, Panic, Div {
+    if kind == PTX_TAG_P { ptx_finalize_paragraph(parser) }
+    if kind == PTX_TAG_PRE { ptx_finalize_pre(parser) }
+    if kind == PTX_TAG_CODE { ptx_finalize_code(parser) }
+}
+
+fn ptx_process_tag(parser: &!PireusPtxParser)
+with Mut, Panic, Div {
+    if parser.error != PIREUS_PTX_OK || parser.tag_overflow { return }
+    var i: i64 = 0
+    while i < parser.tag_len && ptx_is_ws(ptx_tag_char(parser, i)) { i = i + 1 }
+    if i >= parser.tag_len { return }
+    let first = ptx_tag_char(parser, i)
+    if first == 33 || first == 63 { return }
+    var closing = false
+    if first == 47 {
+        closing = true
+        i = i + 1
+        while i < parser.tag_len && ptx_is_ws(ptx_tag_char(parser, i)) { i = i + 1 }
+    }
+    let name_start = i
+    while i < parser.tag_len && !ptx_is_ws(ptx_tag_char(parser, i)) &&
+        ptx_tag_char(parser, i) != 47 {
+        i = i + 1
+    }
+    let name_end = i
+    if name_end == name_start {
+        parser.error = PIREUS_PTX_ERR_HTML
+        return
+    }
+    let kind = ptx_tag_kind(parser, name_start, name_end)
+    let meta = ptx_parse_tag_meta(parser, name_end)
+    if meta.malformed || meta.id_count > 1 {
+        parser.error = PIREUS_PTX_ERR_HTML
+        return
+    }
+    var end = parser.tag_len
+    while end > 0 && ptx_is_ws(ptx_tag_char(parser, end - 1)) { end = end - 1 }
+    let self_closing = end > 0 && ptx_tag_char(parser, end - 1) == 47
+
+    if !closing && kind == PTX_TAG_SECTION {
+        if self_closing {
+            parser.error = PIREUS_PTX_ERR_HTML
+            return
+        }
+        parser.section_depth = parser.section_depth + 1
+        if meta.selected_id {
+            if parser.inventory.selected_sections != 0 {
+                parser.error = PIREUS_PTX_ERR_DUPLICATE_SECTION
+                return
+            }
+            parser.inventory.selected_sections = 1
+            parser.selected_active = true
+            parser.selected_done = false
+            parser.selected_depth = parser.section_depth
+        }
+    }
+
+    if parser.selected_active {
+        if closing { ptx_process_selected_end(parser, kind) }
+        else { ptx_process_selected_start(parser, kind, meta) }
+        if parser.error != PIREUS_PTX_OK { return }
+    }
+
+    if closing && kind == PTX_TAG_SECTION {
+        if parser.section_depth <= 0 {
+            parser.error = PIREUS_PTX_ERR_HTML
+            return
+        }
+        if parser.selected_active && parser.section_depth == parser.selected_depth {
+            if parser.in_p || parser.in_code || parser.in_pre {
+                parser.error = PIREUS_PTX_ERR_HTML
+                return
+            }
+            parser.selected_active = false
+            parser.selected_done = true
+        }
+        parser.section_depth = parser.section_depth - 1
+    }
+}
+
+fn ptx_tag_push(parser: &!PireusPtxParser, b: i64) with Mut, Panic {
+    if parser.tag_len < 1024 {
+        parser.tag[parser.tag_len as usize] = b as i8
+    } else {
+        parser.tag_overflow = true
+        parser.error = PIREUS_PTX_ERR_CAPACITY
+    }
+    parser.tag_len = parser.tag_len + 1
+}
+
+fn ptx_parser_feed(parser: &!PireusPtxParser, b: i64)
+with Mut, Panic, Div {
+    if parser.error != PIREUS_PTX_OK { return }
+    if parser.in_comment {
+        if b == 45 {
+            parser.comment_dash_run = parser.comment_dash_run + 1
+            if parser.comment_dash_run > 2 { parser.comment_dash_run = 2 }
+        } else {
+            if b == 62 && parser.comment_dash_run >= 2 {
+                parser.in_comment = false
+                parser.in_tag = false
+                parser.tag_len = 0
+                parser.tag_overflow = false
+            }
+            parser.comment_dash_run = 0
+        }
+        return
+    }
+    if !parser.in_tag {
+        if b == 60 {
+            parser.in_tag = true
+            parser.tag_len = 0
+            parser.tag_overflow = false
+            parser.tag_quote = 0
+            return
+        }
+        if parser.selected_active {
+            if parser.in_p { ptx_paragraph_push(parser, b) }
+            if parser.in_code { ptx_code_push(parser, b) }
+            if parser.in_pre { ptx_pre_push(parser, b) }
+        }
+        return
+    }
+
+    if parser.tag_quote != 0 {
+        ptx_tag_push(parser, b)
+        if b == parser.tag_quote { parser.tag_quote = 0 }
+        return
+    }
+    if b == 34 || b == 39 {
+        parser.tag_quote = b
+        ptx_tag_push(parser, b)
+        return
+    }
+    if b == 62 {
+        ptx_process_tag(parser)
+        parser.in_tag = false
+        parser.tag_len = 0
+        parser.tag_overflow = false
+        return
+    }
+    ptx_tag_push(parser, b)
+    if parser.tag_len == 3 &&
+        parser.tag[0] as i64 == 33 &&
+        parser.tag[1] as i64 == 45 &&
+        parser.tag[2] as i64 == 45 {
+        parser.in_comment = true
+        parser.comment_dash_run = 0
+    }
+}
+
+fn ptx_parser_finish(parser: &!PireusPtxParser) with Mut {
+    if parser.error != PIREUS_PTX_OK { return }
+    if parser.in_tag || parser.in_comment || parser.section_depth != 0 ||
+        parser.selected_active || parser.in_p || parser.in_code || parser.in_pre {
+        parser.error = PIREUS_PTX_ERR_HTML
+        return
+    }
+    if parser.inventory.selected_sections != 1 || !parser.selected_done {
+        parser.error = PIREUS_PTX_ERR_SELECTED_SHAPE
+        return
+    }
+    let shape = parser.inventory.headings == 1 &&
+        parser.rubric_mnemonic == 1 && parser.rubric_syntax == 1 &&
+        parser.rubric_description == 1 && parser.rubric_semantics == 1 &&
+        parser.rubric_ptx_notes == 1 && parser.rubric_target_notes == 1 &&
+        parser.rubric_examples == 1 && parser.syntax_blocks == 1 &&
+        parser.semantics_blocks == 1 && parser.examples_blocks == 1 &&
+        parser.inventory.mode_f4e == 1 && parser.inventory.mode_b4e == 1 &&
+        parser.inventory.mode_rc8 == 1 && parser.inventory.mode_ecl == 1 &&
+        parser.inventory.mode_ecr == 1 && parser.inventory.mode_rc16 == 1 &&
+        parser.inventory.introduced_ptx_2_0 == 1 &&
+        parser.inventory.target_sm_20_or_higher == 1 &&
+        parser.target_tokens == 1 && parser.inventory.tables == 2 &&
+        parser.inventory.example_lines == 2
+    if !shape { parser.error = PIREUS_PTX_ERR_SELECTED_SHAPE }
+}
+
+fn ptx_chunk_path(prefix: string, index: i64) -> string
+with Mut, Panic, Div, Alloc {
+    var out: [i8; 512] = [0; 512]
+    let n = str_len(prefix)
+    if n > 500 { return "" }
+    var i: i64 = 0
+    while i < n {
+        out[i as usize] = str_char_at(prefix, i) as i8
+        i = i + 1
+    }
+    let hundreds = (index / 100) - ((index / 1000) * 10)
+    let tens = (index / 10) - ((index / 100) * 10)
+    let ones = index - ((index / 10) * 10)
+    out[i as usize] = (48 + hundreds) as i8
+    out[(i + 1) as usize] = (48 + tens) as i8
+    out[(i + 2) as usize] = (48 + ones) as i8
+    out[(i + 3) as usize] = 46 as i8
+    out[(i + 4) as usize] = 112 as i8
+    out[(i + 5) as usize] = 97 as i8
+    out[(i + 6) as usize] = 114 as i8
+    out[(i + 7) as usize] = 116 as i8
+    str_from_bytes(out, i + 8)
+}
+
+fn ptx_scan_chunk(
+    run: PireusPtxRun, prefix: string, index: i64, expected_size: i64,
+) -> PireusPtxRun with IO, Mut, Panic, Div, Alloc {
+    var next = run
+    if next.error != PIREUS_PTX_OK { return next }
+    let path = ptx_chunk_path(prefix, index)
+    let size = file_size(path)
+    if size < 0 {
+        next.error = PIREUS_PTX_ERR_FILE
+        return next
+    }
+    if size != expected_size || size >= 1048576 {
+        next.error = PIREUS_PTX_ERR_LENGTH
+        return next
+    }
+    let raw = read_file(path)
+    var pos: i64 = 0
+    while pos < size {
+        var window: [u8; 256] = [0; 256]
+        var count = size - pos
+        if count > 256 { count = 256 }
+        var i: i64 = 0
+        while i < count {
+            var b = raw[(pos + i) as usize] as i64
+            if b < 0 { b = b + 256 }
+            window[i as usize] = b as u8
+            ptx_parser_feed(&!next.parser, b)
+            i = i + 1
+        }
+        next.sha = sha256_update(next.sha, window, count as i32)
+        pos = pos + count
+    }
+    next.total_bytes = next.total_bytes + size
+    next.chunks = next.chunks + 1
+    next
+}
+
+fn ptx_digest_matches(digest: &SHA256Digest) -> bool with Panic {
+    let expected: [i64; 32] = [
+        0xfd, 0x01, 0x3d, 0xf0, 0xc9, 0x56, 0x0d, 0x9f,
+        0x86, 0x67, 0x2c, 0x37, 0x9b, 0x57, 0xb3, 0x0a,
+        0x6d, 0x5e, 0xfb, 0x2e, 0xcc, 0xbb, 0x0c, 0x6c,
+        0x48, 0x79, 0x50, 0x03, 0x2e, 0x6d, 0x34, 0x57
+    ]
+    var i: i64 = 0
+    while i < 32 {
+        if digest.bytes[i as usize] as i64 != expected[i as usize] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+pub fn pireus_ptx_import_chunks(prefix: string) -> PireusPtxInventory
+with IO, Mut, Panic, Div, Alloc {
+    var run = ptx_run_new()
+    var index: i64 = 0
+    while index < PIREUS_PTX_CHUNKS {
+        let expected = if index == PIREUS_PTX_CHUNKS - 1 {
+            PIREUS_PTX_LAST_CHUNK_BYTES
+        } else {
+            PIREUS_PTX_CHUNK_BYTES
+        }
+        run = ptx_scan_chunk(run, prefix, index, expected)
+        if run.error != PIREUS_PTX_OK { break }
+        index = index + 1
+    }
+    ptx_parser_finish(&!run.parser)
+    let digest = sha256_finalize(run.sha)
+    let digest_match = run.total_bytes == PIREUS_PTX_EXPECTED_BYTES &&
+        run.chunks == PIREUS_PTX_CHUNKS && ptx_digest_matches(&digest)
+    var inv = run.parser.inventory
+    inv.total_bytes = run.total_bytes
+    inv.chunk_count = run.chunks
+    inv.digest_match = digest_match
+    if run.error != PIREUS_PTX_OK {
+        inv.error = run.error
+    } else {
+        if run.parser.error != PIREUS_PTX_OK {
+            inv.error = run.parser.error
+        } else {
+            if !digest_match { inv.error = PIREUS_PTX_ERR_HASH }
+        }
+    }
+    inv
+}
+
+fn ptx_parser_scan_text(value: string) -> PireusPtxParser
+with Mut, Panic, Div {
+    var parser = ptx_parser_new()
+    let n = str_len(value)
+    var i: i64 = 0
+    while i < n {
+        ptx_parser_feed(&!parser, str_char_at(value, i))
+        i = i + 1
+    }
+    ptx_parser_finish(&!parser)
+    parser
+}
+
+pub fn pireus_ptx_negative_duplicate_section() -> bool
+with Mut, Panic, Div {
+    var parser = ptx_parser_new()
+    parser.inventory.selected_sections = 1
+    let value =
+        "<section id=\"data-movement-and-conversion-instructions-prmt\">"
+    let n = str_len(value)
+    var i: i64 = 0
+    while i < n {
+        ptx_parser_feed(&!parser, str_char_at(value, i))
+        i = i + 1
+    }
+    parser.error == PIREUS_PTX_ERR_DUPLICATE_SECTION
+}
+
+pub fn pireus_ptx_negative_unknown_shape() -> bool
+with Mut, Panic, Div {
+    let parser = ptx_parser_scan_text(
+        "<section id=\"data-movement-and-conversion-instructions-prmt\"><p class=\"rubric\">Future</p></section>")
+    parser.error == PIREUS_PTX_ERR_SELECTED_SHAPE
+}
+
+pub fn pireus_ptx_negative_malformed_html() -> bool
+with Mut, Panic, Div {
+    let parser = ptx_parser_scan_text(
+        "<section id=\"data-movement-and-conversion-instructions-prmt\"><p>open")
+    parser.error == PIREUS_PTX_ERR_HTML
+}
+
+pub fn pireus_ptx_negative_capacity() -> bool with Mut, Panic, Div {
+    var parser = ptx_parser_new()
+    ptx_parser_feed(&!parser, 60)
+    var i: i64 = 0
+    while i < 1025 {
+        ptx_parser_feed(&!parser, 97)
+        i = i + 1
+    }
+    ptx_parser_feed(&!parser, 62)
+    parser.tag_overflow || parser.error == PIREUS_PTX_ERR_CAPACITY
+}
+
+pub fn pireus_ptx_negative_empty_digest() -> bool with Mut, Panic {
+    let digest = sha256_finalize(sha256_init())
+    !ptx_digest_matches(&digest)
+}
+
+fn ptx_add_class(store: &TripleStore, class_id: i64) {
+    triple_store_add(store, triple_iri(
+        class_id, PIREUS_RDF_TYPE, PIREUS_CLASS_ONTOLOGY_CLASS))
+}
+
+pub fn pireus_ptx_inventory_store(
+    inv: &PireusPtxInventory,
+) -> TripleStore with Mut {
+    var store = pireus_v01_store()
+    ptx_add_class(&store, PIREUS_PTX_CLASS_INSTRUCTION_FORM)
+    ptx_add_class(&store, PIREUS_PTX_CLASS_VENDOR_CORPUS)
+    ptx_add_class(&store, PIREUS_PTX_CLASS_VIRTUAL_ISA)
+    ptx_add_class(&store, PIREUS_PTX_CLASS_RAW_MODE)
+    ptx_add_class(&store, PIREUS_PTX_CLASS_TARGET_REQUIREMENT)
+
+    triple_store_add(&store, triple_iri(
+        PIREUS_PTX_CORPUS_CUDA_13_2_PTX_9_2,
+        PIREUS_RDF_TYPE, PIREUS_PTX_CLASS_VENDOR_CORPUS))
+    triple_store_add(&store, triple_iri(
+        PIREUS_PTX_CORPUS_CUDA_13_2_PTX_9_2,
+        PIREUS_HAS_EVIDENCE_ROLE, PIREUS_PTX_EVIDENCE_NORMATIVE_VENDOR))
+    triple_store_add(&store, triple_iri(
+        PIREUS_PTX_EVIDENCE_NORMATIVE_VENDOR,
+        PIREUS_RDF_TYPE, PIREUS_CLASS_EVIDENCE_ROLE))
+    triple_store_add(&store, triple_iri(
+        PIREUS_PTX_VIRTUAL_ISA_9_2,
+        PIREUS_RDF_TYPE, PIREUS_PTX_CLASS_VIRTUAL_ISA))
+    triple_store_add(&store, triple_iri(
+        PIREUS_PTX_TARGET_SM_20_OR_HIGHER,
+        PIREUS_RDF_TYPE, PIREUS_PTX_CLASS_TARGET_REQUIREMENT))
+
+    triple_store_add(&store, triple_iri(
+        PIREUS_PTX_FORM_PRMT,
+        PIREUS_RDF_TYPE, PIREUS_PTX_CLASS_INSTRUCTION_FORM))
+    triple_store_add(&store, triple_iri(
+        PIREUS_PTX_FORM_PRMT,
+        PIREUS_PTX_HAS_CORPUS, PIREUS_PTX_CORPUS_CUDA_13_2_PTX_9_2))
+    triple_store_add(&store, triple_iri(
+        PIREUS_PTX_FORM_PRMT,
+        PIREUS_PTX_HAS_VIRTUAL_ISA, PIREUS_PTX_VIRTUAL_ISA_9_2))
+    triple_store_add(&store, triple_iri(
+        PIREUS_PTX_FORM_PRMT,
+        PIREUS_PTX_HAS_TARGET_REQUIREMENT,
+        PIREUS_PTX_TARGET_SM_20_OR_HIGHER))
+
+    let modes: [i64; 6] = [
+        PIREUS_PTX_MODE_F4E, PIREUS_PTX_MODE_B4E,
+        PIREUS_PTX_MODE_RC8, PIREUS_PTX_MODE_ECL,
+        PIREUS_PTX_MODE_ECR, PIREUS_PTX_MODE_RC16
+    ]
+    let counts: [i64; 6] = [
+        inv.mode_f4e, inv.mode_b4e, inv.mode_rc8,
+        inv.mode_ecl, inv.mode_ecr, inv.mode_rc16
+    ]
+    var i: i64 = 0
+    while i < 6 {
+        if counts[i as usize] == 1 {
+            triple_store_add(&store, triple_iri(
+                modes[i as usize], PIREUS_RDF_TYPE,
+                PIREUS_PTX_CLASS_RAW_MODE))
+            triple_store_add(&store, triple_iri(
+                PIREUS_PTX_FORM_PRMT, PIREUS_PTX_HAS_RAW_MODE,
+                modes[i as usize]))
+        }
+        i = i + 1
+    }
+    store
+}
+
+pub fn pireus_ptx_query_objects_by(
+    store: &TripleStore, predicate: i64, object: i64,
+) -> SparqlResult with Mut, Epistemic {
+    var query = sparql_new()
+    sparql_select(&query, 1)
+    sparql_add_pattern(&query, triple_pattern_new(
+        queryterm_variable(1), queryterm_iri(predicate), queryterm_iri(object)))
+    sparql_execute(store, &query)
+}

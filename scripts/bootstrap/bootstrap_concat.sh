@@ -53,6 +53,7 @@ FILES=(
 
   # ── 3. Parser layer ─────────────────────────────────────────────
   self-hosted/parser/ast.sio
+  self-hosted/parser/f128_literal.sio
   self-hosted/parser/parser.sio
   self-hosted/parser/exprs.sio
   self-hosted/parser/items.sio
@@ -84,6 +85,7 @@ FILES=(
   self-hosted/check/refinement.sio
   self-hosted/check/compat.sio
   self-hosted/check/ontology_side_table_cache.sio
+  self-hosted/check/noise_sets.sio
   self-hosted/check/check.sio
   self-hosted/check/mod.sio
   self-hosted/check/patterns.sio
@@ -388,6 +390,7 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
 
     # 3. Parser layer
     self-hosted/parser/ast.sio
+    self-hosted/parser/f128_literal.sio
     self-hosted/parser/parser.sio
     self-hosted/parser/exprs.sio
     self-hosted/parser/items.sio
@@ -419,6 +422,7 @@ if [ "$BOOTSTRAP_PROFILE" != "full" ]; then
     self-hosted/check/refinement.sio
     self-hosted/check/compat.sio
     self-hosted/check/ontology_side_table_cache.sio
+    self-hosted/check/noise_sets.sio
     self-hosted/check/check.sio
     self-hosted/check/mod.sio
     self-hosted/check/patterns.sio

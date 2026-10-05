@@ -1,0 +1,194 @@
+// examples/chemistry/rep_traj_bug.sio
+//
+// Trajectory under the reported reverse-rate defect, in Sounio.  Replaces
+// benchmarks/chemistry/rep_traj_bug.py, which should never have been Python:
+// it is replica-side numerics with no Cantera in it, and CLAUDE.md section 6.4
+// says science in this repository is written in Sounio.
+//
+// Three forms of the reverse exponent are compared, not two:
+//     shipped         p = prod[r][s]
+//     proposed "fix"  p = reac[r][s] + nu[r][s]   == prod, an identity
+//     reported bug    p = reac[r][s] - nu[r][s]   == 2*reac - prod
+// Rates come from the module's own tables and rate-constant functions
+// (G30_REAC / G30_PROD / G30_NU / G30_EFF, g30_kfwd_eff, g30_kc_all), so the
+// only thing this file adds is the exponent under test.  RESULTS.md 2.3-2.5.
+//
+// Units, stated honestly (measured 2026-09-02 on lean_single):
+//   * T is typed `K`.  That is the extent of what the dimensional system
+//     enforces here: a `K` value passes into an `f64` parameter without
+//     complaint, derived unit types (mol/cm3, cal/mol) do not parse on either
+//     engine, and inferred derived units are dropped.  Concentrations below
+//     are therefore bare f64 in mol/cm^3 by convention, not by type.
+//   * Engine: lean_single.  Madaros compiles this and prints nothing.
+//
+// Run:  SOUNIO_SOUC_ENGINE=lean_single ./bin/souc run examples/chemistry/rep_traj_bug.sio
+
+use chemistry::gri30_h2::*
+
+fn pi64(x: i64) with IO, Mut, Div, Panic {
+    if x < 0 { print("-"); pi64(0 - x) } else if x >= 10 { pi64(x / 10); print((x % 10) as i32) } else { print(x as i32) }
+}
+
+// print v as an integer mantissa at 15 significant digits plus an exponent tag
+fn pv(label: string, v: f64, scale: f64, exponent: i64) with IO, Mut, Div, Panic {
+    print(label); print(" "); pi64((v * scale) as i64); print("e"); pi64(exponent); println("")
+}
+
+fn fabs(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// x^p for small non-negative integer p, by multiplication (no exp/ln)
+fn ipow(x: f64, p: f64) -> f64 with Mut, Div, Panic {
+    var acc: f64 = 1.0
+    var n: i64 = p as i64
+    while n > 0 { acc = acc * x; n = n - 1 }
+    acc
+}
+
+// reverse exponent for reaction r, species s, under form f (0 shipped, 1 fix, 2 bug)
+fn rev_exp(f: i64, r: i64, s: i64) -> f64 with Mut, Div, Panic {
+    let i: i64 = r * (10 as i64) + s
+    if f == (0 as i64) { G30_PROD[i] }
+    else if f == (1 as i64) { G30_REAC[i] + G30_NU[i] }
+    else { G30_REAC[i] - G30_NU[i] }
+}
+
+// net rates of progress for all 29 reactions under form f
+fn rates_form(f: i64, t: f64, c: &[f64; 10], kc: &[f64; 29], rn: &![f64; 29]) with Mut, Div, Panic {
+    var r: i64 = 0
+    while r < (29 as i64) {
+        var m_eff: f64 = 0.0
+        var s: i64 = 0
+        while s < (10 as i64) { m_eff = m_eff + G30_EFF[r * (10 as i64) + s] * (*c)[s]; s = s + 1 }
+        let kf = g30_kfwd_eff(r, t, m_eff)
+        var fwd: f64 = kf
+        var rev: f64 = kf / (*kc)[r]
+        s = 0
+        while s < (10 as i64) {
+            let i: i64 = r * (10 as i64) + s
+            if G30_REAC[i] > 0.0 { fwd = fwd * ipow((*c)[s], G30_REAC[i]) }
+            let p = rev_exp(f, r, s)
+            if p > 0.0 { rev = rev * ipow((*c)[s], p) }
+            s = s + 1
+        }
+        (*rn)[r] = fwd - rev
+        r = r + 1
+    }
+}
+
+fn dc_form(f: i64, t: f64, c: &[f64; 10], kc: &[f64; 29], dc: &![f64; 10]) with Mut, Div, Panic {
+    var rn: [f64; 29] = [0.0; 29]
+    rates_form(f, t, c, kc, &!rn)
+    var i: i64 = 0
+    while i < (10 as i64) {
+        var acc: f64 = 0.0
+        var r: i64 = 0
+        while r < (29 as i64) { acc = acc + G30_NU[r * (10 as i64) + i] * rn[r]; r = r + 1 }
+        (*dc)[i] = acc
+        i = i + 1
+    }
+}
+
+fn rk4_form(f: i64, t: f64, c: &![f64; 10], dt: f64, kc: &[f64; 29]) with Mut, Div, Panic {
+    var k1: [f64; 10] = [0.0; 10]
+    var k2: [f64; 10] = [0.0; 10]
+    var k3: [f64; 10] = [0.0; 10]
+    var k4: [f64; 10] = [0.0; 10]
+    var tmp: [f64; 10] = [0.0; 10]
+    dc_form(f, t, c, kc, &!k1)
+    var i: i64 = 0
+    while i < (10 as i64) { tmp[i] = (*c)[i] + 0.5 * dt * k1[i]; i = i + 1 }
+    dc_form(f, t, &tmp, kc, &!k2)
+    i = 0
+    while i < (10 as i64) { tmp[i] = (*c)[i] + 0.5 * dt * k2[i]; i = i + 1 }
+    dc_form(f, t, &tmp, kc, &!k3)
+    i = 0
+    while i < (10 as i64) { tmp[i] = (*c)[i] + dt * k3[i]; i = i + 1 }
+    dc_form(f, t, &tmp, kc, &!k4)
+    i = 0
+    while i < (10 as i64) { (*c)[i] = (*c)[i] + dt / 6.0 * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]); i = i + 1 }
+}
+
+fn init_state(t: f64, c: &![f64; 10]) with Mut, Div, Panic {
+    // the protocol the sibling probes on this branch use (aligned molar volume,
+    // additive H seed).  Whether the stdlib module's own R_cal is aligned is a
+    // separate fact; the deltas below are invariant to it at four figures.
+    let mtot: f64 = 101325.0 / (8.31446261815324 * t) * 1.0e-6
+    var i: i64 = 0
+    while i < (10 as i64) { (*c)[i] = 0.0; i = i + 1 }
+    (*c)[0] = mtot * 0.02
+    (*c)[3] = mtot * 0.01
+    (*c)[8] = mtot * 0.97
+    (*c)[1] = 1.0e-11
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let t_k: K = 1500.0                       // typed; survives only until the first f64 parameter
+    let t: f64 = t_k as f64
+    let dt: f64 = 1.0e-8
+    let steps: i64 = 10000 as i64
+    let kc: [f64; 29] = g30_kc_all(t)
+
+    println("REP_TRAJ_BUG (Sounio) -- GRI-Mech 3.0 H/O, T=1500K, dt=1e-8, 10000 steps, t=1e-4 s")
+    println("mantissas at 15 significant digits, mol/cm3; deltas as relative x1e7; fix-shipped as raw difference")
+
+    var c0: [f64; 10] = [0.0; 10]
+    var c1: [f64; 10] = [0.0; 10]
+    var c2: [f64; 10] = [0.0; 10]
+    init_state(t, &!c0)
+    init_state(t, &!c1)
+    init_state(t, &!c2)
+    var n: i64 = 0
+    while n < steps {
+        rk4_form(0 as i64, t, &!c0, dt, &kc)
+        rk4_form(1 as i64, t, &!c1, dt, &kc)
+        rk4_form(2 as i64, t, &!c2, dt, &kc)
+        n = n + 1
+    }
+
+    println("SECTION 2.3 -- per species: shipped, under reac-nu, delta*1e7, fix-shipped as raw difference")
+    let names: [string; 8] = ["H2", "H", "O", "O2", "OH", "H2O", "HO2", "H2O2"]
+    let idx: [i64; 8] = [0, 1, 2, 3, 4, 5, 6, 7]
+    let scales: [f64; 8] = [1.0e22, 1.0e24, 1.0e24, 1.0e22, 1.0e24, 1.0e23, 1.0e26, 1.0e28]
+    let expo: [i64; 8] = [0 - 22, 0 - 24, 0 - 24, 0 - 22, 0 - 24, 0 - 23, 0 - 26, 0 - 28]
+    var k: i64 = 0
+    while k < (8 as i64) {
+        let i = idx[k]
+        pv(names[k], c0[i], scales[k], expo[k])
+        pv("   bug ", c2[i], scales[k], expo[k])
+        let delta = fabs(c2[i] - c0[i]) / fabs(c0[i])
+        let dfix = c1[i] - c0[i]
+        print("   delta*1e7 = "); pi64((delta * 1.0e7) as i64)
+        print("   fix-shipped raw = "); pv("", dfix, scales[k], expo[k])
+        k = k + 1
+    }
+
+    println("SECTION 2.4 -- d[HO2]/dt at the checkpoint (x1e-8 mantissa at 15 digits)")
+    var d0: [f64; 10] = [0.0; 10]
+    var d2: [f64; 10] = [0.0; 10]
+    dc_form(0 as i64, t, &c0, &kc, &!d0)
+    dc_form(2 as i64, t, &c2, &kc, &!d2)
+    pv("  shipped  ", d0[6], 1.0e22, 0 - 22)
+    pv("  under bug", d2[6], 1.0e22, 0 - 22)
+    let rel = (d2[6] - d0[6]) / fabs(d0[6]) * 100.0
+    print("  rel change (percent x1000) = "); pi64((rel * 1000.0) as i64); println("")
+
+    println("SECTION 2.5 -- R16 forward and reverse at the shipped checkpoint state")
+    let r16: i64 = 16 as i64
+    var m_eff: f64 = 0.0
+    var s: i64 = 0
+    while s < (10 as i64) { m_eff = m_eff + G30_EFF[r16 * (10 as i64) + s] * c0[s]; s = s + 1 }
+    let kf = g30_kfwd_eff(r16, t, m_eff)
+    var fwd: f64 = kf
+    var rev: f64 = kf / kc[r16]
+    s = 0
+    while s < (10 as i64) {
+        let i: i64 = r16 * (10 as i64) + s
+        if G30_REAC[i] > 0.0 { fwd = fwd * ipow(c0[s], G30_REAC[i]) }
+        if G30_PROD[i] > 0.0 { rev = rev * ipow(c0[s], G30_PROD[i]) }
+        s = s + 1
+    }
+    pv("  forward ", fwd, 1.0e20, 0 - 20)
+    pv("  reverse ", rev, 1.0e23, 0 - 23)
+    print("  reverse/forward x1e7 = "); pi64((rev / fwd * 1.0e7) as i64); println("")
+    0
+}

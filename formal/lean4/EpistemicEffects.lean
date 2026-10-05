@@ -125,10 +125,13 @@ theorem union_sub {a b c : EffectSet} (h₁ : a ⊆ₑ c) (h₂ : b ⊆ₑ c) :
 -- ================================================================
 
 /-- Object types. `tknow` wraps a base type with a GUM/confidence cell;
-    `tarrow` carries the callee's latent effects on the arrow. -/
+    `tarrow` carries the callee's latent effects on the arrow.
+    `tmg` is the milligram unit the language ships (`Knowledge<mg>`).
+    This calculus still cannot inhabit it: `t_kraw` pins `Real`. -/
 inductive Ty where
   | tnat
   | treal
+  | tmg
   | tknow  : Ty → Ty
   | tarrow : Ty → EffectSet → Ty → Ty
 

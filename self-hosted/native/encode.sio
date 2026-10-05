@@ -28,7 +28,7 @@ pub struct CodeBuffer {
 // emitters (which emit into a copy of nc) append to the same global at the shared
 // offset, so no persist/call-site changes are needed. Accessed INLINE only —
 // never via a returning helper (miscompiles under the seed).
-pub var NC_BIG_CODE: [i8; 8388608] = [0; 8388608]
+pub var NC_BIG_CODE: [i8; 134217728] = [0; 134217728]
 
 // Single source of truth for the NC_BIG_CODE bound. The DECLARATION above must
 // stay a literal (Sounio array sizes are not expressions), but every bound CHECK
@@ -37,7 +37,7 @@ pub var NC_BIG_CODE: [i8; 8388608] = [0; 8388608]
 // native::frame, nc_elf_capacity_bytes() in native::codegen_x86_linux.
 // Declaration/accessor coherence is pinned by
 // scripts/ci/native_capacity_tiers_gate.sh.
-pub fn nc_code_capacity_bytes() -> i64 { 8388608 }
+pub fn nc_code_capacity_bytes() -> i64 { 134217728 }
 
 // Materialise NC_BIG_CODE into fixed arrays expected by legacy macho/pe assemblers
 // that still take by-value `[i8; N]`. Linux ELF writers read NC_BIG_CODE directly.
@@ -71,6 +71,14 @@ pub fn code_buffer_new() -> CodeBuffer {
     var out: CodeBuffer
     out.len = 0
     out
+}
+
+// Read materialized Linux native-v2 code without exposing the vestigial
+// CodeBuffer.bytes stub to byte-level backend gates.
+pub fn code_buffer_read_byte(buf: CodeBuffer, idx: i64) -> i64 with Mut, Panic, Div {
+    if idx < 0 || idx >= buf.len || idx >= nc_code_capacity_bytes() { return -1 }
+    let x = NC_BIG_CODE[idx as usize] as i64
+    if x < 0 { x + 256 } else { x }
 }
 
 pub fn low8(x: i64) -> i64 with Mut, Panic, Div {
@@ -188,25 +196,30 @@ pub fn emit_mov_rdi_imm(buf: CodeBuffer, val: i64) -> CodeBuffer with Mut, Panic
 }
 
 pub fn emit_mov_reg_imm32(buf: CodeBuffer, reg: i64, val: i64) -> CodeBuffer with Mut, Panic, Div {
-    // 48 c7 /0 <imm32>  — mov r/m64, imm32
+    // 48/49 c7 /0 <imm32>  — mov r/m64, imm32 (supports r0..r15 via REX.B)
     var b = buf
-    b = emit_byte(b, 0x48)
+    if reg >= 8 {
+        b = emit_byte(b, 0x49)
+    } else {
+        b = emit_byte(b, 0x48)
+    }
     b = emit_byte(b, 0xc7)
-    b = emit_byte(b, modrm_rm_imm(reg))
+    b = emit_byte(b, modrm_rm_imm(reg & 7))
     b = emit_u32_le(b, val)
     b
 }
-
 pub fn emit_mov_reg_imm64(buf: CodeBuffer, reg: i64, val: i64) -> CodeBuffer with Mut, Panic, Div {
-    // 48 b8+rd <imm64>  — mov r64, imm64
-    // Note: only supports registers 0..7 (no REX.B extension).
+    // 48/49 b8+rd <imm64>  — mov r64, imm64 (supports r0..r15 via REX.B)
     var b = buf
-    b = emit_byte(b, 0x48)
-    b = emit_byte(b, 0xb8 + reg)
+    if reg >= 8 {
+        b = emit_byte(b, 0x49)
+    } else {
+        b = emit_byte(b, 0x48)
+    }
+    b = emit_byte(b, 0xb8 + (reg & 7))
     b = emit_u64_le(b, val)
     b
 }
-
 pub fn emit_mov_reg_imm(buf: CodeBuffer, reg: i64, val: i64) -> CodeBuffer with Mut, Panic, Div {
     if val >= -2147483648 && val <= 2147483647 {
         var r32 = emit_mov_reg_imm32(buf, reg, val)
@@ -618,6 +631,17 @@ pub fn emit_neg_rax(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
     b = emit_byte(b, 0x48)
     b = emit_byte(b, 0xf7)
     b = emit_byte(b, 0xd8)
+    b
+}
+// Flip sign bit of float in rax (bit 63) — btc rax, 63 (48 0F BA F8 3F).
+// Integer neg is two's complement and is wrong on an f64.
+pub fn emit_btc_rax_63(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0x0f)
+    b = emit_byte(b, 0xba)
+    b = emit_byte(b, 0xf8)
+    b = emit_byte(b, 0x3f)
     b
 }
 
@@ -1527,12 +1551,31 @@ pub fn emit_shl_rax_cl(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
 }
 
 // sar rax, cl — 48 d3 f8
-// Arithmetic shift rax right by cl bits
+// Arithmetic shift rax right by cl bits (SIGNED; preserves sign bit)
 pub fn emit_sar_rax_cl(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
     var b = buf
     b = emit_byte(b, 0x48)
     b = emit_byte(b, 0xd3)
     b = emit_byte(b, 0xf8)
+    b
+}
+
+// SHR rax, cl — LOGICAL right shift. The one this file was missing.
+//
+// Verified against as(1): `shr rax, cl` assembles to 48 D3 E8, `sar` to
+// 48 D3 F8, `shl` to 48 D3 E0. Only the last two had encoders, so anyone
+// needing a logical shift either hand-wrote the bytes -- codegen.sio does
+// exactly that when extracting a biased exponent, with the comment
+// "shr rax, cl: 48 D3 E8" -- or reached for emit_sar_rax_cl and relied on the
+// sign bit being clear. The second habit is the dangerous one: it is correct
+// until the value it shifts can go negative, and then it is wrong by 2^64
+// with nothing to notice.
+pub fn emit_shr_rax_cl(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    // 48 D3 E8
+    var b = buf
+    b = emit_byte(b, 0x48)
+    b = emit_byte(b, 0xD3)
+    b = emit_byte(b, 0xE8)
     b
 }
 
@@ -1951,6 +1994,86 @@ pub fn emit_sqrtsd_xmm0_xmm0(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div
     b
 }
 
+// MOVSD xmm0/xmm1 <-> [rbp+disp32] — the disp32 forms of the four disp8 slot
+// moves above.
+//
+// Added because disp8 caps the frame at 15 double slots below rbp, and that
+// cap is a code limit masquerading as a numerical one. The comment on
+// emit_horner_step already records this failure mode once: the exp and log
+// emitters open-coded their Horner steps and stopped at degree 6 and degree 4
+// because the code, not the mathematics, set the accuracy. A double-double
+// pow needs more live intermediates than 15, so the same wall was waiting.
+//
+// Encoding differs from the disp8 form only in ModRM.mod (10 instead of 01)
+// and a 4-byte little-endian displacement: 0x85 for xmm0, 0x8D for xmm1.
+
+pub fn emit_movsd_xmm0_rbp_disp32(buf: CodeBuffer, disp: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0xF2)
+    b = emit_byte(b, 0x0F)
+    b = emit_byte(b, 0x10)
+    b = emit_byte(b, 0x85)   // ModRM: mod=10 reg=xmm0 r/m=rbp
+    b = emit_u32_le(b, disp)
+    b
+}
+
+pub fn emit_movsd_xmm1_rbp_disp32(buf: CodeBuffer, disp: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0xF2)
+    b = emit_byte(b, 0x0F)
+    b = emit_byte(b, 0x10)
+    b = emit_byte(b, 0x8D)   // ModRM: mod=10 reg=xmm1 r/m=rbp
+    b = emit_u32_le(b, disp)
+    b
+}
+
+pub fn emit_movsd_rbp_disp32_xmm0(buf: CodeBuffer, disp: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0xF2)
+    b = emit_byte(b, 0x0F)
+    b = emit_byte(b, 0x11)
+    b = emit_byte(b, 0x85)   // ModRM: mod=10 reg=xmm0 r/m=rbp
+    b = emit_u32_le(b, disp)
+    b
+}
+
+pub fn emit_movsd_rbp_disp32_xmm1(buf: CodeBuffer, disp: i64) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0xF2)
+    b = emit_byte(b, 0x0F)
+    b = emit_byte(b, 0x11)
+    b = emit_byte(b, 0x8D)   // ModRM: mod=10 reg=xmm1 r/m=rbp
+    b = emit_u32_le(b, disp)
+    b
+}
+
+// ROUNDSD xmm0, xmm0, imm8 — round scalar double under an explicit mode.
+//
+// SSE4.1 (66 0F 3A 0B /r ib). imm8 low two bits select the mode when bit 2 is
+// clear: 0 = nearest-even, 1 = toward -inf (floor), 2 = toward +inf (ceil),
+// 3 = toward zero (trunc). Bit 3 (0x08) suppresses the inexact exception,
+// which is what libm's floor/ceil do, so callers pass 0x09 / 0x0A.
+//
+// This is one instruction where the alternative is a branch sequence around
+// cvttsd2si, and the branch version is not merely longer: cvttsd2si saturates
+// on |x| >= 2^63 and has no defined answer for NaN, so the emulation needs a
+// magnitude guard and a NaN guard to stay IEEE-correct. ROUNDSD is correct on
+// -0.0, on both infinities, and on NaN by construction.
+//
+// SSE4.1 has been present on every x86-64 part since Penryn (2007); this
+// backend already targets Linux x86-64 only.
+pub fn emit_roundsd_xmm0_xmm0_imm8(buf: CodeBuffer, mode: i64) -> CodeBuffer with Mut, Panic, Div {
+    // 66 0F 3A 0B C0 ib
+    var b = buf
+    b = emit_byte(b, 0x66)
+    b = emit_byte(b, 0x0F)
+    b = emit_byte(b, 0x3A)
+    b = emit_byte(b, 0x0B)
+    b = emit_byte(b, 0xC0)
+    b = emit_byte(b, mode)
+    b
+}
+
 // UCOMISD xmm0, xmm1 — unordered compare scalar doubles (sets EFLAGS)
 pub fn emit_ucomisd_xmm0_xmm1(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
     // 66 0F 2E C1
@@ -1999,6 +2122,40 @@ pub fn emit_setbe_al(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
     b = emit_byte(b, 0x0F)
     b = emit_byte(b, 0x96)
     b = emit_byte(b, 0xC0)
+    b
+}
+
+// SETPO cl — set cl if parity odd (PF=0), i.e. ucomisd operands are ordered
+pub fn emit_setpo_cl(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x0F)
+    b = emit_byte(b, 0x9B)
+    b = emit_byte(b, 0xC1)
+    b
+}
+
+// SETPE cl — set cl if parity even (PF=1), i.e. ucomisd operands are unordered
+pub fn emit_setpe_cl(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x0F)
+    b = emit_byte(b, 0x9A)
+    b = emit_byte(b, 0xC1)
+    b
+}
+
+// AND al, cl — mask ordered compare result (SETcc does not clobber flags)
+pub fn emit_and_al_cl(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x22)
+    b = emit_byte(b, 0xC1)
+    b
+}
+
+// OR al, cl — fold unordered into !=
+pub fn emit_or_al_cl(buf: CodeBuffer) -> CodeBuffer with Mut, Panic, Div {
+    var b = buf
+    b = emit_byte(b, 0x0A)
+    b = emit_byte(b, 0xC1)
     b
 }
 

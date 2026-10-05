@@ -104,3 +104,10 @@ The D7 gate must:
 `sealed-receipt-and-compiler-capability-bridge` remains pending. It belongs to
 the compiler owner and must preserve the private canonical authority rather than
 promoting this public model protocol.
+
+
+## Claims Forbidden
+
+- Do not claim clinical validity, ClinicalAuthority, or ClinicalRelease from this contract alone.
+- Do not claim compiler-wide integration or production cutover from fixture evidence alone.
+- Do not claim scientific truth or independent replay beyond the scoped witnesses bound in `bindings.tsv`.

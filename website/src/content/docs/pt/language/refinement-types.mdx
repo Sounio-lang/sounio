@@ -13,9 +13,9 @@ source_of_truth: "docs/governance/topic-registry.v1.json#website.docs.language.r
 
 # Tipos Refinados (*Refinement Types*)
 
-Um tipo refinado (*refinement type*) estende um tipo base adicionando-lhe um predicado lógico. O compilador utiliza um resolvedor SMT (neste caso, o Z3) para verificar formalmente se os valores atribuídos satisfazem essa restrição lógica em tempo de compilação, prevenindo erros de limites (*out-of-bounds*) e violações físicas antes mesmo de o programa ser executado.
+Um tipo refinado estreita um tipo base com um predicado lógico. O compilador usa um solver SMT (Z3) para verificar que os valores satisfazem o predicado em tempo de compilação, capturando erros de fora-de-faixa antes de o programa rodar.
 
-## Sintaxe de Definição
+## Sintaxe
 
 ```sio
 type Positive = { x: i32 | x > 0 }
@@ -23,9 +23,9 @@ type Percentage = { p: f64 | p >= 0.0 && p <= 100.0 }
 type NonEmpty<T> = { arr: [T] | len(arr) > 0 }
 ```
 
-O predicado posicionado após a barra vertical (`|`) deve corresponder a uma expressão booleana pura, composta unicamente por variáveis locais, parâmetros vinculados e valores constantes. O compilador converte esta expressão numa asserção lógica delegada ao resolvedor Z3.
+O predicado após o `|` deve ser uma expressão booleana pura sobre a variável vinculada e constantes. O compilador delega isso ao Z3 para verificação de satisfatibilidade.
 
-## Aplicação Prática
+## Usando tipos refinados
 
 ```sio
 fn safe_divide(a: f64, b: { b: f64 | b != 0.0 }) -> f64 {
@@ -33,47 +33,47 @@ fn safe_divide(a: f64, b: { b: f64 | b != 0.0 }) -> f64 {
 }
 
 fn main() with IO {
-    let result = safe_divide(10.0, 3.0)   // Correto: Prova direta de que 3.0 != 0.0
+    let result = safe_divide(10.0, 3.0)   // OK: provado que 3.0 != 0.0
     println(result)
 
-    // safe_divide(10.0, 0.0)  // Erro de Compilação: Impossível provar que 0.0 != 0.0
+    // safe_divide(10.0, 0.0)  // erro de compilação: não é possível provar 0.0 != 0.0
 }
 ```
 
-Quando é fornecido um valor literal, o resolvedor valida a condição imediatamente. Ao passar uma variável dinâmica, o compilador utiliza os refinamentos conhecidos e preestabelecidos associados à declaração original dessa variável.
+Quando um literal é passado, o solver consegue verificar a restrição imediatamente. Quando uma variável é passada, o solver usa os refinamentos conhecidos da variável a partir do seu ponto de declaração.
 
-## Exemplo em Dosagem Farmacológica
+## Exemplo de dosagem
 
-Os tipos refinados revelam-se extremamente vantajosos em contextos científicos e industriais, onde os limites físicos e de segurança operacional são imperativos:
+Tipos refinados são especialmente poderosos em domínios científicos onde restrições físicas importam:
 
 ```sio
 type ValidDose = { dose: mg | dose > 0.0 && dose <= 2000.0 }
 
 fn administer(patient_id: i64, dose: ValidDose) with IO {
-    println("Administrando dose prescrita...")
+    println("Administering dose")
 }
 
 fn main() with IO {
     let dose: mg = 500.0
-    administer(1, dose)     // Correto: 500.0 encontra-se dentro do intervalo válido [0, 2000]
+    administer(1, dose)     // OK: 500.0 dentro da faixa
 
     // let bad: mg = 5000.0
-    // administer(1, bad)   // Erro de Compilação: 5000.0 ultrapassa o limite de 2000.0
+    // administer(1, bad)   // erro de compilação: 5000.0 > 2000.0
 }
 ```
 
-## Interação com Tipos Epistémicos
+## Interação com tipos epistêmicos
 
-Os predicados de refinamento operam em perfeita harmonia com o tipo `Knowledge<T>`: um valor do tipo `Knowledge<ValidDose>` transporta em simultâneo os envelopes de propagação de incerteza e a validação lógica do intervalo. O compilador processa ambos de forma independente: o refinamento atua no valor nominal, enquanto a propagação de confiança avalia as margens de incerteza experimental.
+Predicados de refinamento se compõem com `Knowledge<T>`: um `Knowledge<ValidDose>` carrega tanto o envelope de incerteza quanto a restrição de refinamento. O compilador verifica os dois de forma independente — o refinamento vale sobre o valor nominal, e a propagação de confiança rastreia a incerteza de medição.
 
-## Estrutura de Implementação
+## Onde a verificação de refinamentos vive
 
-- **Módulo de Verificação:** Localizado em `self-hosted/check/refinements.sio`.
-- **Ligação ao SMT:** Implementado em `compiler/src/smt/` (bindings do resolvedor Z3, dependente da flag de compilação `smt`).
-- **Artefactos Nativos:** Os binários genéricos distribuídos por omissão (`souc-linux-x86_64`) não incluem o resolvedor SMT ativado para minimizar dependências dinâmicas; a verificação integral de refinamentos requer a compilação local com a flag `--features smt`.
+- Verificação de tipos refinados: `self-hosted/check/refinements.sio`
+- Integração com SMT: `compiler/src/smt/` (bindings do Z3, requer a feature flag `smt`)
+- O artefato nativo verificado (`souc-linux-x86_64`) tem o SMT desabilitado; a verificação de refinamentos fica disponível ao compilar com `--features smt`
 
-## Limitações Atuais
+## Limitações atuais
 
-- **Construção:** A integração nativa com o resolvedor Z3 requer a flag `--features smt` durante a compilação do compilador.
-- **Formas Suportadas:** O resolvedor lida de forma estável com relações aritméticas, operadores booleanos clássicos e dimensões básicas de coleções (*arrays*). O suporte a chamadas de funções personalizadas no interior do predicado ainda se encontra em desenvolvimento.
-- **Salvaguarda de Execução:** É disponibilizada uma verificação dinâmica em tempo de execução (*runtime assertions*) para os predicados que excedam a capacidade de verificação puramente estática.
+- A integração com o Z3 requer a feature flag `smt` em tempo de build.
+- Nem toda forma de predicado é suportada — o solver lida com comparações aritméticas, conectivos booleanos e restrições de comprimento de array. Chamadas de função personalizadas dentro de predicados ainda não são suportadas.
+- Um fallback de asserção em tempo de execução está disponível para predicados que não podem ser verificados estaticamente.

@@ -11,13 +11,13 @@ validated_by: "A2"
 source_of_truth: "docs/governance/topic-registry.v1.json#website.docs.language.linear-types"
 ---
 
-# Tipos Lineares e Posse (*Ownership*)
+# Tipos Lineares e Ownership
 
-O Sounio garante uma gestão rigorosa e segura de recursos através do seu sistema de tipos lineares (*linear types*). Um valor linear tem de ser consumido exatamente uma única vez: não é permitido descartar silenciosamente descritores de ficheiros (*file handles*), ligações a bases de dados ou buffers alocados na GPU. O compilador rejeita imediatamente programas que omitam o consumo de recursos lineares.
+O Sounio garante a segurança de recursos por meio de tipos lineares. Um valor linear deve ser usado exatamente uma vez: não é possível descartar silenciosamente um file handle, uma conexão de banco de dados ou um buffer de GPU. O compilador rejeita programas que esquecem de consumir recursos lineares.
 
-## Estruturas Lineares (*Linear Structs*)
+## Structs lineares
 
-Para exigir que uma estrutura seja consumida exatamente uma vez, declare-a utilizando a palavra-chave `linear`:
+Marque uma struct como `linear` para exigir consumo exatamente uma vez:
 
 ```sio
 linear struct FileHandle {
@@ -25,27 +25,27 @@ linear struct FileHandle {
 }
 
 fn open_file(path: &str) -> FileHandle with IO {
-    // Operação do SO; devolve um descritor linear
+    // Abertura em nível de SO; retorna um handle linear
     FileHandle { fd: sys_open(path) }
 }
 
 fn close_file(handle: FileHandle) with IO {
     sys_close(handle.fd)
-    // O recurso 'handle' é consumido e destruído aqui
+    // handle é consumido aqui — o compilador fica satisfeito
 }
 
 fn main() with IO {
     let h = open_file("/tmp/data.txt")
-    // Se omitirmos o close_file(h), o compilador rejeitará o programa
+    // Se esquecermos close_file(h), o compilador rejeita este programa.
     close_file(h)
 }
 ```
 
-Caso remova a instrução `close_file(h)`, o compilador emitirá um erro estático apontando que o recurso linear `h` não foi devidamente consumido.
+Se você remover a chamada `close_file(h)`, o compilador emite um erro: o valor linear `h` não foi consumido.
 
-## Referências Partilhadas vs. Exclusivas
+## Referências: compartilhadas vs. exclusivas
 
-O Sounio diferencia o acesso a dados através de referências partilhadas de leitura (`&T`) e referências exclusivas de escrita (`&!T`). Note que `&!` não é equivalente ao `&mut` do Rust; o símbolo de exclamação `&!` sinaliza que o acesso é garantidamente exclusivo.
+O Sounio usa `&T` para referências compartilhadas (somente leitura) e `&!T` para referências exclusivas (mutáveis). Isso não é o `&mut` do Rust — o sigilo `&!` sinaliza acesso exclusivo.
 
 ```sio
 fn read_value(r: &i64) -> i64 {
@@ -58,17 +58,17 @@ fn increment(r: &!i64) {
 
 fn main() with IO {
     var x = 10
-    println(read_value(&x))   // Empréstimo partilhado (somente leitura)
-    increment(&!x)            // Empréstimo exclusivo (escrita)
-    println(x)                // Escreve 11
+    println(read_value(&x))   // empréstimo compartilhado
+    increment(&!x)            // empréstimo exclusivo
+    println(x)                // imprime 11
 }
 ```
 
-O verificador de empréstimos do compilador garante estaticamente que nenhuma referência exclusiva coexista com qualquer outro apontador ativo para a mesma região de memória.
+O compilador impede que uma referência exclusiva coexista com qualquer outra referência ao mesmo valor.
 
-## Semântica de Transferência (*Move Semantics*)
+## Semântica de move
 
-Os valores que não implementem a semântica `Copy` são movidos (*moved*) no momento de atribuição ou passagem de parâmetros. Após essa transferência, o vínculo (*binding*) original deixa de ser válido:
+Valores que não são `Copy` são movidos na atribuição. Depois de um move, o binding original deixa de ser válido:
 
 ```sio
 fn consume(h: FileHandle) with IO {
@@ -78,20 +78,20 @@ fn consume(h: FileHandle) with IO {
 fn main() with IO {
     let h = open_file("/tmp/data.txt")
     consume(h)
-    // O recurso 'h' já não é válido; utilizá-lo daqui em diante gera um erro de compilação
+    // h não é mais válido aqui — usá-lo é um erro de compilação
 }
 ```
 
-## Semântica Afim (*Affine*) e Tipos Escalares
+## Relaxamento afim
 
-Alguns tipos adotam uma semântica afim (*affine*) em vez de puramente linear: a regra dita que devem ser consumidos *no máximo* uma vez, sendo permitido o descarte silencioso. Os tipos escalares primitivos (`i32`, `i64`, `f64`, `bool`) implementam por omissão a característica `Copy` e podem ser clonados livremente. Estruturas que não incluam explicitamente a palavra-chave `linear` seguem a semântica tradicional de *move*, mas dispensam a obrigatoriedade de consumo antes de saírem de escopo.
+Alguns tipos são afins em vez de estritamente lineares: devem ser usados *no máximo* uma vez, mas podem ser descartados silenciosamente. Tipos escalares padrão (`i32`, `i64`, `f64`, `bool`) são `Copy` e podem ser usados livremente. Structs personalizadas sem a palavra-chave `linear` seguem semântica de move, mas não são obrigadas a serem consumidas.
 
-## Detalhes de Implementação
+## Onde a verificação de ownership vive
 
-O subsistema de verificação de posse (*ownership checker*) reside em `self-hosted/check/ownership.sio` e atua imediatamente após a validação do sistema de tipos. Este módulo rastreia ativamente quais os vínculos que foram transferidos, quais os que se encontram sob empréstimo (*borrowed*) e faz cumprir as regras do contrato de linearidade sobre todas as estruturas declaradas como `linear struct`.
+O verificador de ownership é implementado em `self-hosted/check/ownership.sio` e roda depois da verificação de tipos. Ele rastreia quais bindings foram movidos, quais estão emprestados, e aplica o contrato de linearidade para tipos `linear struct`.
 
-## Ressalvas e Limitações
+## Ressalvas
 
-- **Aninhamento:** Recursos lineares embutidos em estruturas tradicionais (não lineares) são rastreados de forma recursiva pelo compilador.
-- **Estruturas de Controlo:** O verificador de posse atual encontra-se em fase de otimização para lidar de forma totalmente integrada com fluxos lineares no interior de braços complexos de `match` ou funções anónimas (*closures*). Consulte a nossa página de estado das funcionalidades para aferir a cobertura atual.
-- **Interação JIT:** O motor JIT Cranelift apresenta uma limitação conhecida ao processar mutações via referências exclusivas `&!`; em ambientes JIT, dê preferência a padrões funcionais de retorno por valor para mutações que necessitem de visibilidade no chamador.
+- Campos lineares aninhados dentro de structs não lineares são rastreados de forma recursiva.
+- O checker atual ainda não trata todos os padrões envolvendo valores lineares dentro de braços de `match` ou closures — consulte a página de status de recursos para a cobertura atual.
+- Mutações via `&!` através do Cranelift JIT têm uma limitação conhecida: prefira padrões de retorno por valor para mutações que precisam ser visíveis ao chamador.

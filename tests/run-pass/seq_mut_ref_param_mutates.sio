@@ -1,0 +1,70 @@
+//@ requires: madaros
+// Madaros-only for the same reason as seq_ref_param_delivers_handle: the
+// lean_single seed has no reference-receiver method resolution and refuses
+// every `.push` / `.set` / `.get` through a reference with `unknown method`.
+//@ run-pass
+//@ expect-stdout-contains: SEQ_MUT_REF_PARAM_OK
+// A `&!Seq<T>` parameter delivers the Seq to the MUTATING intrinsics too.
+//
+// #2453 pinned the load through a `&Seq<T>` receiver for len/count/get. The
+// same lower_seq_recv_base_ref feeds the push and set paths, but the merged
+// witness only exercised reads: every push in it was on a by-value local. This
+// closes that gap -- push and set through `&!Seq<i64>`, then the effect is
+// observed by the caller (len, values, sum), which is the property a mutating
+// receiver has to deliver and a read-only witness cannot show.
+//
+// Controls: a by-value push inside a callee (always correct: a Seq is a GC
+// handle, so the callee mutates the shared object) and a `&!Holder` field push.
+
+struct Holder { xs: Seq<i64> }
+
+fn mut_push(s: &!Seq<i64>) with Panic, Epistemic {
+    s.push(40)
+    s.push(50)
+}
+fn mut_set0(s: &!Seq<i64>) with Panic, Epistemic {
+    s.set(0, 11)
+}
+fn mut_push_then_read(s: &!Seq<i64>) -> i64 with Panic, Epistemic {
+    s.push(60)
+    return s.get((s.count() - 1) as usize)
+}
+fn val_push(s: Seq<i64>) with Panic, Epistemic { s.push(70) }
+fn field_push(h: &!Holder) with Panic, Epistemic { h.xs.push(80) }
+
+fn main() -> i32 with IO, Mut, Panic, Epistemic {
+    var w: Seq<i64> = seq_new()
+    w.push(10)
+    w.push(20)
+    w.push(30)
+
+    mut_push(&!w)
+    if w.count() != 5 { print("FAIL mut_push count\n"); return 1 }
+    if w.get(3) != 40 || w.get(4) != 50 { print("FAIL mut_push values\n"); return 1 }
+
+    mut_set0(&!w)
+    if w.get(0) != 11 { print("FAIL mut_set0\n"); return 1 }
+
+    let last: i64 = mut_push_then_read(&!w)
+    if last != 60 { print("FAIL mut_push_then_read\n"); return 1 }
+    if w.count() != 6 { print("FAIL count after push_then_read\n"); return 1 }
+
+    var t: i64 = 0
+    var i: i64 = 0
+    while i < 6 {
+        t = t + w.get(i as usize)
+        i = i + 1
+    }
+    // 11 + 20 + 30 + 40 + 50 + 60
+    if t != 211 { print("FAIL sum\n"); return 1 }
+
+    // Controls.
+    val_push(w)
+    if w.count() != 7 || w.get(6) != 70 { print("FAIL val_push control\n"); return 1 }
+    var h: Holder = Holder { xs: w }
+    field_push(&!h)
+    if h.xs.count() != 8 || h.xs.get(7) != 80 { print("FAIL field_push control\n"); return 1 }
+
+    print("SEQ_MUT_REF_PARAM_OK\n")
+    return 0
+}

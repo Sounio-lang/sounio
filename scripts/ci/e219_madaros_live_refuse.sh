@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Live Madaros arm of E219. The grep correspondence gate does not compile
+# Live Madaros arm of E250. The grep correspondence gate does not compile
 # anything. This script asks the engine that has the judgment: a well-typed
 # call to an unimplemented extern must refuse, and must not become an ELF.
 #
@@ -13,9 +13,11 @@ set -uo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR" || exit 1
 
-FIXTURE="${E219_LIVE_FIXTURE:-tests/compile-fail/extern_c_unimplemented_builtin.sio}"
-CONTROL="${E219_LIVE_CONTROL:-tests/run-pass/ffi_libm_call.sio}"
-SOUC="${E219_LIVE_SOUC:-$ROOT_DIR/bin/souc}"
+# Preserve the old variables while CI and downstream callers migrate from the
+# compatibility filename.
+FIXTURE="${E250_LIVE_FIXTURE:-${E219_LIVE_FIXTURE:-tests/compile-fail/extern_c_unimplemented_builtin.sio}}"
+CONTROL="${E250_LIVE_CONTROL:-${E219_LIVE_CONTROL:-tests/run-pass/ffi_libm_call.sio}}"
+SOUC="${E250_LIVE_SOUC:-${E219_LIVE_SOUC:-$ROOT_DIR/bin/souc}}"
 ARTIFACT="${TMPDIR:-/tmp}/e219_madaros_live_refuse.v1.json"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/e219-live-refuse.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
@@ -95,9 +97,13 @@ else
   elif [[ -e "$fixture_elf" ]]; then
     FAILED=$((FAILED + 1))
     record_failure "fixture_emitted_elf"
+  elif ! grep -qF 'error[E250]' "$WORK/fixture.out"; then
+    FAILED=$((FAILED + 1))
+    record_failure "missing_e250_code"
+    sed 's/^/[fixture] /' "$WORK/fixture.out" >&2
   elif ! grep -qiF 'call to an `extern "C"` function the native backend does not implement' "$WORK/fixture.out"; then
     FAILED=$((FAILED + 1))
-    record_failure "missing_e219_pattern"
+    record_failure "missing_e250_pattern"
     sed 's/^/[fixture] /' "$WORK/fixture.out" >&2
   elif ! grep -qiF 'no dynamic linker in this backend' "$WORK/fixture.out"; then
     FAILED=$((FAILED + 1))

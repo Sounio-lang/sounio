@@ -68,4 +68,12 @@ if [[ "$BIN_MD5" != "$REP_MD5" ]]; then
 fi
 
 echo "[canonical-compiler] PASS: $SOUC IS the canonical self-reproducing fixed point of $SRC (md5=$BIN_MD5)"
+
+# Provenance leg: when a SeedReceipt is committed beside the ELF, prove it
+# names *this* source and *this* seed — not merely that the ELF self-reproduces.
+# Missing receipt → WARN+PASS (day-1 policy). See seed_receipt_provenance_gate.sh.
+if [[ -x "$ROOT_DIR/scripts/ci/seed_receipt_provenance_gate.sh" || -f "$ROOT_DIR/scripts/ci/seed_receipt_provenance_gate.sh" ]]; then
+  # shellcheck disable=SC2093
+  bash "$ROOT_DIR/scripts/ci/seed_receipt_provenance_gate.sh"
+fi
 exit 0

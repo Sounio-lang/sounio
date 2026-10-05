@@ -1,0 +1,12 @@
+import SounioPireusGaugeCoboundaryAction
+
+open SounioPireusGaugeCoboundaryAction
+
+#print axioms gauge_value_xor
+#print axioms gauge_coboundary_xor
+#print axioms gauge_action_identity
+#print axioms gauge_action_compose
+#print axioms gauge_action_inverse
+#print axioms gauge_word_enumeration_has_exactly_2048_actions
+#print axioms gauge_action_system_satisfies_concrete_finite_action_laws
+#print axioms gauge_action_progress_does_not_close_v13_target03

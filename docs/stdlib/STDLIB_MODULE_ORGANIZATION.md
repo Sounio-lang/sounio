@@ -22,17 +22,19 @@ STDLIB uses a mixed entrypoint structure:
 - `mod.sio`: module entrypoint or compatibility surface
 - `*.sio.disabled`: intentionally disabled implementation files
 
-Current inventory (`artifacts/stdlib/stdlib_inventory.v1.json`):
+Current inventory (tracked files at `main` HEAD, measured 2026-09-19 via
+`bash scripts/stdlib/scan_stdlib.sh` cross-checked with `git ls-files`; the committed
+`artifacts/stdlib/stdlib_inventory.v1.json` snapshot (2026-05-12) is stale):
 
-- `sio_files`: 599
-- `disabled_files`: 120
-- `mod_files`: 70
-- `lib_files`: 64
-- `module_entrypoints`: 134
-- `stub_mod_files`: 43
-- `active_module_entrypoints`: 91
-- `hyper_active_files`: 17
-- `hyper_disabled_files`: 6
+- `sio_files`: 1672
+- `disabled_files`: 0
+- `mod_files`: 78
+- `lib_files`: 100
+- `module_entrypoints`: 178
+- `stub_mod_files`: 0
+- `active_module_entrypoints`: 178
+- `hyper_active_files`: 56
+- `hyper_disabled_files`: 0
 - `hyper_stub_mod_files`: 0
 
 ## Contract Levels
@@ -70,7 +72,7 @@ Each module lane should be interpreted with one of three levels:
 From repository root:
 
 ```bash
-bash scripts/scan_stdlib.sh --json-out artifacts/stdlib/stdlib_inventory.v1.json
+bash scripts/stdlib/scan_stdlib.sh --json-out artifacts/stdlib/stdlib_inventory.v1.json
 OMEGA_GPU_RUNTIME_GATE_MODE=required bash scripts/omega/omega_gpu_runtime_attest_gate.sh
 bash scripts/stdlib_hyper_execution_gate.sh
 STDLIB_RUNTIME_REGRESSION_STRICT=1 bash scripts/stdlib_science_pipeline_gate.sh

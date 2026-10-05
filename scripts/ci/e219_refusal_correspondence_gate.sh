@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Guard the correspondence between SounioRefusalHonesty and the Madaros
-# E219 / empty-stub path. A well-typed unimplemented call must refuse
+# E250 / empty-stub path. A well-typed unimplemented call must refuse
 # (not return the declared type) and must not compile to a stub that
 # reads 0.
 
@@ -87,12 +87,12 @@ if [[ ! -f "$MODEL_SOURCE" ]]; then
 fi
 
 if [[ "$NOT_RUN" -eq 0 ]]; then
-  # Checker: E219 still exists, and refuse infects the expression type.
-  check_count_ge "e219_sites" \
+  # Checker: E250 still exists, and refuse infects the expression type.
+  check_count_ge "e250_sites" \
     'name_is_native_backend_builtin.*\{|!name_is_native_backend_builtin' \
     "$CHECKER_SOURCE" 3
-  check_count_ge "e219_reports" \
-    ', 219, 0, 0, 0\)' "$CHECKER_SOURCE" 3
+  check_count_ge "e250_reports" \
+    ', 250, 0, 0, 0\)' "$CHECKER_SOURCE" 3
   check_count_ge "refuse_infects_ty_error" \
     'refused_unimplemented' "$CHECKER_SOURCE" 6
   check_grep "decl_is_not_call" \
@@ -107,6 +107,12 @@ if [[ "$NOT_RUN" -eq 0 ]]; then
     'nc_emit_byte\(nc, 0x0b\)' "$CODEGEN_SOURCE"
   check_grep "live_path_uses_predicate" \
     'native_v2_empty_stub_would_fabricate\(func\)' "$CODEGEN_SOURCE"
+  check_grep "empty_stub_refusal_names_function" \
+    'NATIVE_REFUSAL kind=empty_stub_ud2 fn=' "$CODEGEN_SOURCE"
+  check_grep "empty_stub_refusal_has_stable_reason" \
+    'reason=missing_lowered_body' "$CODEGEN_SOURCE"
+  check_grep "empty_stub_refusal_summary" \
+    'NATIVE_REFUSAL_SUMMARY empty_stub_ud2=' "$CODEGEN_SOURCE"
 
   # Lean model: the two relations disagree exactly when there is something
   # to refuse, and refuse infects add.

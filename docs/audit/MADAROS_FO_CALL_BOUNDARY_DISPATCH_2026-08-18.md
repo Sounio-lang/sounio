@@ -165,7 +165,11 @@ What the FO programme itself did when it outgrew 2 — **read, not ported**: it 
 
 ### Does skip → 4 or → 8 cover the dissertation?
 
-**No.**
+**No.** Two layers, both measured:
+
+**Layer A — files that lose variance today (Knowledge / `variance_of` after a call).** After the #1889 inline, `rapamycin_epistemic_adaptive` and `rapamycin_rk4_budget` are LIVE (`FAMILY_A_VAR_LIVE`). `rapamycin_iso_budget` peels `.value` on purpose; Budget64 is the ISO path. `rapamycin_epistemic_pbpk` / `rapamycin_gum_vs_mc` do not call `variance_of`. The only remaining FO-call zero on this slice is `gum_fo_across_call.sio`: **one helper, arity 3**, body nest+`−`+`/`. skip=4 would *admit* it to classification; the classifier still would not register the body. A ceiling bump does not turn that 0 into a live GUM var.
+
+**Layer B — helpers sitting in those files if the model is written as functions again.** In `rapamycin_rk4_budget.sio` the named RHS (called only from the plain finite-diff sim today) are `rhs_brain` **4**, `rhs_periph` **4**, `rhs_blood` **11**. `examples/dissertation_pbpk_rapamycin.sio` has `pbpk_rhs(y0,y1,y2)` arity **3**, but its uncertainty is hand-rolled finite-diff, not `variance_of`. Max arity on the Knowledge-shaped RHS is **11**. skip=8 still skips `rhs_blood`. Even skip=16 would still miss the body (nest / OpSub / OpDiv).
 
 | Thesis helper (Knowledge path vs plain) | Arity | Body | skip=4 | skip=8 |
 |---|---:|---|---|---|
@@ -181,6 +185,36 @@ Census of `fn` with arity > 2 in 41 thesis-ish `tests/run-pass` files (rapamycin
 Today’s thesis **numbers** are live because of inline, not because of the ceiling. If the model is written as functions again: a ceiling of 4 or 8 still misses `rhs_blood` (11) and still misses every body that is not id/scale/add/mul. A small skip bump is **not** a small fix with large thesis value. The large value needs the bytecode path (≤4 then 8 then 16) that the preserved FO programme already named — grok-cli5’s viability triage, not this lane.
 
 Naive lift risk: changing `return lo` to “collect 2 names and classify anyway” would make `id3` look like `id1` (correct) and `add3` look like `add2` (silent **under**-estimate). Worse than an honest 0 if nobody is looking.
+
+## 4c. How many thesis surfaces **traverse** arity ≥ 3 today (not: how many fail)
+
+Measured 2026-08-19 on `origin/main` `91be3a0959`. Method: parse `fn` defs + call sites, BFS from `main`, follow same-file calls **and** resolved `use` imports. A surface counts if any reachable helper has arity ≥ 3. That is **traverse**, not fail — a surface can traverse and still print a plausible number if the lost term is small or if uncertainty is not `variance_of` FO.
+
+Universe: the 51 entries in `TESTS` + `TESTS_SMOKE` of `scripts/ci/dissertation_pbpk_suite_gate.sh`.
+
+Filter “FO-shaped”: arity ≥ 3, not `print*` / `estate_set` / `ode_params_set` / `t_test*` / string params. Printers with 3 args are not the ceiling hole.
+
+| | Count |
+|---|---:|
+| Surfaces in the gate | **51** |
+| Traverse FO-shaped arity ≥ 3 from `main` (**transitive**) | **46** |
+| Do not traverse | **5** |
+
+The five that do **not** traverse: `rapamycin_epistemic_adaptive` (RHS inlined), `dissertation_tirzepatide_demo`, `dissertation_vancomycin_demo`, `halo_pgx_gate_pass`, `rapamycin_kaxi_fuse_prior`.
+
+Max arity reached on a traversing surface: **11** (`rhs_blood` on `rapamycin_rk4_budget`; `mc_auc_sd` on `gum_vs_mc`). Typical stack is tsit5 / BBB / oral runner (4–8).
+
+Re-derive:
+
+```bash
+python3 scripts/dev/thesis_fo_arity_traverse_census.py
+```
+
+**This is not a fail count.** Most of the 46 do not print `variance_of=0` today (Budget64, finite-diff, Knightian, hand-rolled GUM). They still **cross** a helper the FO catalog cannot see. If that helper ever carries peeled Knowledge, the 0 is silent.
+
+**Urgency:** 46/51 is not two surfaces. The bytecode port is not optional before September if any of those call chains is, or becomes, a Knowledge path. Adaptive is the exception (inlined), not the rule.
+
+Limitations of the walker: line comments only; method recv counted in arity; `use` resolved by path heuristic under `stdlib/`; ambiguous callee names flagged, not guessed.
 
 ## 5. What this does to a thesis
 

@@ -1,0 +1,809 @@
+// examples/kmc/kmc_c2x2_coarsening.sio
+//
+// M5c: IS THE q=8 EXCESS AN EQUILIBRIUM WALL COST OR UNFINISHED COARSENING?
+//
+// kmc_c2x2_order.sio (commit 5f98893263) found that without diffusion, with
+// Q = occ_black - occ_white pinned at 0, the pair-density excess over the
+// ergodic run falls as 1/L through q=6 (L=16 -> 32 ratio 0.53) -- the cost of
+// two antiphase walls, gone in the thermodynamic limit. At q=8 it fell more
+// slowly (ratio 0.62, about 5 SE off 1/L). The suspected cause is kinetic:
+// every run got the same number of steps per site, and coarsening of a
+// conserved order parameter takes time growing roughly as L^3. That was an
+// inference, not a measurement. This file measures it, two ways.
+//
+// 1. LONGER RUNS. q=8, L=32, dimer moves only, from the clean surface, with
+//    the whole step budget -- burn-in included -- multiplied by f = 1, 2, 4,
+//    8, so a longer run averages over a LATER window, not a longer one that
+//    still contains the transient. If the surface is still coarsening at
+//    f=1, the excess falls with f.
+//
+// 2. FROM BOTH SIDES. A falling excess could also be a slow approach to a
+//    metastable plateau, and a flat one could be a system stuck from the
+//    start. So the same lattice is also started from two antiphase c(2x2)
+//    slabs -- Q=0, exactly two straight walls, already near the equilibrium
+//    configuration the 1/L picture predicts -- and run at f=1 and f=4. A
+//    stationary time average cannot depend on where the chain started.
+//    Clean start and slab start agreeing within error is evidence of
+//    equilibration; disagreeing is proof that at least one has not reached
+//    it.
+//
+//    Stated plainly: the slab state is in the Q=0 class, but that the Q=0
+//    class is a single communicating class is VERIFIED only up to 4x4
+//    (c2x2_exact_anchors.sio). At 32x32 it is assumed. PART B tests the slab
+//    code path on 4x4, where the answer is known exactly.
+//
+// CONTROLS. q=8 at L=16 (clean, f=1 and 4) tests whether the SMALL lattice,
+// the other point in the 1/L ratio, was itself converged. q=6 at L=32
+// (clean, f=1 and 4) re-tests the earlier conclusion that q=6 obeys 1/L: if
+// that excess also falls with run length, the q=6 conclusion was premature
+// too, and this file says so.
+//
+// DECISION RULES, fixed before the run and applied by the program:
+//   - still coarsening at f=1:  excess(f=1) - excess(f=8) > 3 combined SE
+//   - not equilibrated at f=4:  |clean(f=4) - slab(f=4)|  > 3 combined SE
+//   - equilibrated:             neither of the above
+//
+// THE ENGINE is extracted programmatically from kmc_c2x2_order.sio, byte for
+// byte, with one change: the optional slab initial state (marked in
+// kmc_run). PART A and PART B re-run that file's Fenwick self-test and exact
+// 4x4 validation on this copy, plus one new check: dimer moves from the slab
+// start on 4x4 must reproduce the exact Q=0 value, since on 4x4 the class is
+// proven to communicate.
+//
+// RUNTIME is roughly 20 minutes on one core. It is written to run on Slurm
+// cpu-ops as a compiled static ELF, not in the interactive workspace.
+
+fn abs_f(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn abs_i(x: i64) -> i64 { if x < 0 { 0 - x } else { x } }
+
+fn sqrt_newton(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var g = x
+    if g < 1.0 { g = 1.0 }
+    var i: i64 = 0
+    while i < 200 { g = 0.5 * (g + x / g)  i = i + 1 }
+    g
+}
+
+fn rng_step(s: i64) -> i64 { s * 6364136223846793005 + 1442695040888963407 }
+fn rng_unit(s: i64) -> f64 with Div, Panic {
+    let u: i64 = s & 4611686018427387903
+    let hi: i64 = u / 4294967296
+    (hi as f64) / 1073741824.0
+}
+
+// --- Onsager / Yang / mean field, in x = sqrt(q) (see c2x2_exact_anchors) --
+
+fn exp_f(x: f64) -> f64 with Mut, Div, Panic {
+    var y = x
+    var k: i64 = 0
+    while abs_f(y) > 0.5 { y = y / 2.0  k = k + 1 }
+    var sum: f64 = 1.0
+    var term: f64 = 1.0
+    var i: i64 = 1
+    while i < 30 { term = term * y / (i as f64)  sum = sum + term  i = i + 1 }
+    while k > 0 { sum = sum * sum  k = k - 1 }
+    sum
+}
+fn ln_f(a: f64) -> f64 with Mut, Div, Panic {
+    var y: f64 = 0.0
+    var i: i64 = 0
+    while i < 100 { let e = exp_f(y)  y = y + 2.0 * (a - e) / (a + e)  i = i + 1 }
+    y
+}
+fn tanh_f(x: f64) -> f64 with Mut, Div, Panic {
+    let e2 = exp_f(2.0 * x)
+    (e2 - 1.0) / (e2 + 1.0)
+}
+fn agm(a0: f64, b0: f64) -> f64 with Mut, Div, Panic {
+    var a = a0
+    var b = b0
+    var i: i64 = 0
+    while i < 60 { let an = 0.5 * (a + b)  let bn = sqrt_newton(a * b)  a = an  b = bn  i = i + 1 }
+    a
+}
+fn onsager_nn(x: f64) -> f64 with Mut, Div, Panic {
+    let pi = 3.141592653589793
+    let sh = (x - 1.0 / x) / 2.0
+    let ch = (x + 1.0 / x) / 2.0
+    let th = sh / ch
+    let kk = 2.0 * sh / (ch * ch)
+    let coef = 2.0 * th * th - 1.0
+    var brk: f64 = 1.0
+    if abs_f(coef) > 0.000000000001 {
+        brk = 1.0 + (2.0 / pi) * coef * (pi / (2.0 * agm(1.0, sqrt_newton(1.0 - kk * kk))))
+    }
+    (ch / sh) * brk / 2.0
+}
+fn yang_m(x: f64) -> f64 with Mut, Div, Panic {
+    let sh = (x - 1.0 / x) / 2.0
+    if sh <= 1.0 { return 0.0 }
+    sqrt_newton(sqrt_newton(sqrt_newton(1.0 - 1.0 / (sh * sh * sh * sh))))
+}
+fn mf_m(kj: f64) -> f64 with Mut, Div, Panic {
+    if 4.0 * kj <= 1.0 { return 0.0 }
+    var lo: f64 = 0.000000001
+    var hi: f64 = 1.0
+    var i: i64 = 0
+    while i < 200 {
+        let mid = 0.5 * (lo + hi)
+        if tanh_f(4.0 * kj * mid) - mid > 0.0 { lo = mid } else { hi = mid }
+        i = i + 1
+    }
+    0.5 * (lo + hi)
+}
+
+// --- lattice tables -----------------------------------------------------------
+
+fn nb_k(i: i64, k: i64, l: i64) -> i64 with Mut, Div, Panic {
+    let r = i / l
+    let c = i - r * l
+    if k == 0 { let c2 = if c + 1 == l { 0 } else { c + 1 }  return r * l + c2 }
+    if k == 1 { let r2 = if r + 1 == l { 0 } else { r + 1 }  return r2 * l + c }
+    if k == 2 { let c3 = if c == 0 { l - 1 } else { c - 1 }  return r * l + c3 }
+    let r3 = if r == 0 { l - 1 } else { r - 1 }
+    r3 * l + c
+}
+
+fn nocc_except(x: i64, y: i64, occ: &[i64; 1024], nbr: &[i64; 4096]) -> i64 with Mut, Div, Panic {
+    var c: i64 = 0
+    let x4 = x * 4
+    var k: i64 = 0
+    while k < 4 {
+        let z = nbr[(x4 + k) as usize]
+        if z != y { c = c + occ[z as usize] }
+        k = k + 1
+    }
+    c
+}
+
+// The rate of the single event a bond supports in the current state:
+// 00 adsorption (1), 11 desorption (q^(delta-4)), 10/01 Metropolis hop.
+fn rate_of(b: i64, occ: &[i64; 1024], nbr: &[i64; 4096], ba: &[i64; 2048], bb: &[i64; 2048],
+           qp: &[f64; 17], hops: bool) -> f64 with Mut, Div, Panic {
+    let x: i64 = ba[b as usize]
+    let y: i64 = bb[b as usize]
+    let sx: i64 = occ[x as usize]
+    let sy: i64 = occ[y as usize]
+    if sx == 0 && sy == 0 { return 1.0 }
+    let nx = nocc_except(x, y, occ, nbr)
+    let ny = nocc_except(y, x, occ, nbr)
+    if sx == 1 && sy == 1 { return qp[(8 + 1 + nx + ny - 4) as usize] }
+    if !hops { return 0.0 }
+    var d: i64 = 0
+    if sx == 1 { d = ny - nx } else { d = nx - ny }
+    if d <= 0 { 1.0 } else { qp[(8 - d) as usize] }
+}
+
+// --- Fenwick tree (1-based internally, bond b stored at b+1) -------------
+
+fn fw_add(tree: &![f64; 2049], m: i64, b: i64, delta: f64) with Mut, Div, Panic {
+    var i = b + 1
+    while i <= m { tree[i as usize] = tree[i as usize] + delta  i = i + (i & (0 - i)) }
+}
+fn fw_build(tree: &![f64; 2049], m: i64, rate: &[f64; 2048]) with Mut, Div, Panic {
+    var i: i64 = 0
+    while i <= m { tree[i as usize] = 0.0  i = i + 1 }
+    var j: i64 = 1
+    while j <= m {
+        tree[j as usize] = tree[j as usize] + rate[(j - 1) as usize]
+        let p = j + (j & (0 - j))
+        if p <= m { tree[p as usize] = tree[p as usize] + tree[j as usize] }
+        j = j + 1
+    }
+}
+fn fw_prefix(tree: &[f64; 2049], b: i64) -> f64 with Mut, Div, Panic {
+    var s: f64 = 0.0
+    var i = b + 1
+    while i > 0 { s = s + tree[i as usize]  i = i - (i & (0 - i)) }
+    s
+}
+// smallest bond b with prefix(b) > u
+fn fw_find(tree: &[f64; 2049], m: i64, top: i64, u: f64) -> i64 with Mut, Div, Panic {
+    var pos: i64 = 0
+    var rem = u
+    var step = top
+    while step > 0 {
+        let nx = pos + step
+        if nx <= m {
+            let t: f64 = tree[nx as usize]
+            if t <= rem { pos = nx  rem = rem - t }
+        }
+        step = step / 2
+    }
+    pos
+}
+
+fn fenwick_selftest() -> bool with Mut, Div, Panic {
+    let m: i64 = 1537
+    var rate: [f64; 2048] = [0.0; 2048]
+    var tree: [f64; 2049] = [0.0; 2049]
+    var s: i64 = 987654321
+    var i: i64 = 0
+    while i < m {
+        s = rng_step(s)
+        let u = rng_unit(s)
+        // a third of entries exactly zero, as forbidden events are in the engine
+        if u < 0.33 { rate[i as usize] = 0.0 } else { rate[i as usize] = u * 100.0 }
+        i = i + 1
+    }
+    fw_build(&! tree, m, &rate)
+    var top: i64 = 1
+    while top * 2 <= m { top = top * 2 }
+    var ok = true
+    var run: f64 = 0.0
+    var j: i64 = 0
+    while j < m {
+        run = run + rate[j as usize]
+        if abs_f(fw_prefix(&tree, j) - run) > 0.000001 { ok = false }
+        j = j + 1
+    }
+    var qn: i64 = 0
+    while qn < 5000 {
+        s = rng_step(s)
+        let u = rng_unit(s) * run
+        let got = fw_find(&tree, m, top, u)
+        var lin: i64 = 0
+        var acc: f64 = 0.0
+        var found = false
+        while lin < m && !found {
+            acc = acc + rate[lin as usize]
+            if acc > u { found = true } else { lin = lin + 1 }
+        }
+        if got != lin { ok = false }
+        qn = qn + 1
+    }
+    // a point update must show up in every later prefix
+    fw_add(&! tree, m, 700, 5.0)
+    if abs_f(fw_prefix(&tree, 699) - fw_prefix(&tree, 698) - rate[699]) > 0.000001 { ok = false }
+    if abs_f(fw_prefix(&tree, 700) - fw_prefix(&tree, 699) - rate[700] - 5.0) > 0.000001 { ok = false }
+    ok
+}
+
+// --- exact 4x4 reference, from the weights ----------------------------------
+
+// out[0] theta, out[1] pair density, out[2] <|M|>
+fn exact4(q: i64, hops: bool, out: &![f64; 4]) with Mut, Div, Panic {
+    let l: i64 = 4
+    let n: i64 = 16
+    let qf = q as f64
+    var qp: [f64; 129] = [0.0; 129]
+    qp[64] = 1.0
+    var e: i64 = 1
+    while e <= 64 { qp[(64 + e) as usize] = qp[(63 + e) as usize] * qf  qp[(64 - e) as usize] = qp[(65 - e) as usize] / qf  e = e + 1 }
+    var z: f64 = 0.0
+    var at: f64 = 0.0
+    var ap: f64 = 0.0
+    var am: f64 = 0.0
+    var occ: [i64; 16] = [0; 16]
+    var s: i64 = 0
+    while s < 65536 {
+        var v = s
+        var oc: i64 = 0
+        var qq: i64 = 0
+        var i: i64 = 0
+        while i < n {
+            let bit = v - (v / 2) * 2
+            occ[i as usize] = bit
+            v = v / 2
+            if bit == 1 {
+                oc = oc + 1
+                let r = i / l
+                let c = i - r * l
+                if (r + c) - ((r + c) / 2) * 2 == 0 { qq = qq + 1 } else { qq = qq - 1 }
+            }
+            i = i + 1
+        }
+        var inclass = false
+        if hops { inclass = oc - (oc / 2) * 2 == 0 } else { inclass = qq == 0 }
+        if inclass {
+            var pr: i64 = 0
+            var i2: i64 = 0
+            while i2 < n {
+                if occ[i2 as usize] == 1 {
+                    if occ[nb_k(i2, 0, l) as usize] == 1 { pr = pr + 1 }
+                    if occ[nb_k(i2, 1, l) as usize] == 1 { pr = pr + 1 }
+                }
+                i2 = i2 + 1
+            }
+            let wg = qp[(64 + 2 * oc - pr) as usize]
+            z = z + wg
+            at = at + wg * (oc as f64) / 16.0
+            ap = ap + wg * (pr as f64) / 32.0
+            am = am + wg * (abs_i(qq) as f64) / 8.0
+        }
+        s = s + 1
+    }
+    out[0] = at / z
+    out[1] = ap / z
+    out[2] = am / z
+}
+
+// --- the engine --------------------------------------------------------------
+//
+// out[0..7]  theta, SE, pair density, SE, |M|, SE, block |M|, SE
+// out[8]     incremental-vs-full rate mismatches (must be 0)
+// out[9]     1 if every recount of occupancy, bonds and Q matched
+// out[10]    selections that landed on a zero-rate bond (must be 0)
+// out[11]    1 if the lattice fit the arrays
+// out[12]    max |Q| over the run
+fn kmc_run(l: i64, q: i64, hops: bool, slab: bool, seed0: i64, n_burn: i64, n_batch: i64,
+           batch_len: i64, out: &![f64; 16]) with Mut, Div, Panic {
+    let n = l * l
+    let m = 2 * n
+    var k0: i64 = 0
+    while k0 < 16 { out[k0 as usize] = 0.0  k0 = k0 + 1 }
+    if n > 1024 || l - (l / 4) * 4 != 0 { return }
+    out[11] = 1.0
+
+    var occ: [i64; 1024] = [0; 1024]
+    var sgn: [i64; 1024] = [0; 1024]
+    var blk: [i64; 1024] = [0; 1024]
+    var nbr: [i64; 4096] = [0; 4096]
+    var inc: [i64; 4096] = [0; 4096]
+    var ba: [i64; 2048] = [0; 2048]
+    var bb: [i64; 2048] = [0; 2048]
+    var rate: [f64; 2048] = [0.0; 2048]
+    var chk: [f64; 2048] = [0.0; 2048]
+    var stamp: [i64; 2048] = [0; 2048]
+    var tree: [f64; 2049] = [0.0; 2049]
+    var qp: [f64; 17] = [0.0; 17]
+    var bq: [i64; 64] = [0; 64]
+    var bsum: [f64; 64] = [0.0; 64]
+    var bsum2: [f64; 64] = [0.0; 64]
+    var bm: [f64; 256] = [0.0; 256]
+
+    let qf = q as f64
+    qp[8] = 1.0
+    var e: i64 = 1
+    while e <= 8 { qp[(8 + e) as usize] = qp[(7 + e) as usize] * qf  qp[(8 - e) as usize] = qp[(9 - e) as usize] / qf  e = e + 1 }
+
+    let lb = l / 4
+    let nblk = lb * lb
+    var i: i64 = 0
+    while i < n {
+        let r = i / l
+        let c = i - r * l
+        if (r + c) - ((r + c) / 2) * 2 == 0 { sgn[i as usize] = 1 } else { sgn[i as usize] = 0 - 1 }
+        blk[i as usize] = (r / 4) * lb + c / 4
+        var k: i64 = 0
+        while k < 4 { nbr[(i * 4 + k) as usize] = nb_k(i, k, l)  k = k + 1 }
+        ba[i as usize] = i
+        bb[i as usize] = nb_k(i, 0, l)
+        ba[(n + i) as usize] = i
+        bb[(n + i) as usize] = nb_k(i, 1, l)
+        i = i + 1
+    }
+    // incident bonds: own right, own down, left neighbour's right, up neighbour's down
+    var i2: i64 = 0
+    while i2 < n {
+        inc[(i2 * 4) as usize] = i2
+        inc[(i2 * 4 + 1) as usize] = n + i2
+        inc[(i2 * 4 + 2) as usize] = nbr[(i2 * 4 + 2) as usize]
+        inc[(i2 * 4 + 3) as usize] = n + nbr[(i2 * 4 + 3) as usize]
+        i2 = i2 + 1
+    }
+
+    // THE ONE CHANGE FROM kmc_c2x2_order.sio: an optional initial state of two
+    // antiphase c(2x2) slabs (black sublattice filled for c < L/2, white for
+    // c >= L/2), which has Q = L^2/4 - L^2/4 = 0 and exactly two walls. Its
+    // counters are computed from the lattice here, and the 50,000-step
+    // recount verifies them like every other bookkeeping value.
+    var init_occ: i64 = 0
+    var init_pairs: i64 = 0
+    var init_q: i64 = 0
+    if slab {
+        var si0: i64 = 0
+        while si0 < n {
+            let r0 = si0 / l
+            let c0 = si0 - r0 * l
+            let black = (r0 + c0) - ((r0 + c0) / 2) * 2 == 0
+            var on = false
+            if c0 < l / 2 { on = black } else { on = !black }
+            if on { occ[si0 as usize] = 1 }
+            si0 = si0 + 1
+        }
+        var sj0: i64 = 0
+        while sj0 < n {
+            if occ[sj0 as usize] == 1 {
+                init_occ = init_occ + 1
+                init_q = init_q + sgn[sj0 as usize]
+                init_pairs = init_pairs + occ[nbr[(sj0 * 4) as usize] as usize] + occ[nbr[(sj0 * 4 + 1) as usize] as usize]
+            }
+            sj0 = sj0 + 1
+        }
+    }
+
+    var b0: i64 = 0
+    while b0 < m { rate[b0 as usize] = rate_of(b0, &occ, &nbr, &ba, &bb, &qp, hops)  b0 = b0 + 1 }
+    fw_build(&! tree, m, &rate)
+    var total: f64 = fw_prefix(&tree, m - 1)
+    var top: i64 = 1
+    while top * 2 <= m { top = top * 2 }
+
+    var s: i64 = seed0
+    var occ_n: i64 = init_occ
+    var pairs_n: i64 = init_pairs
+    var qcur: i64 = init_q
+    var max_q: i64 = abs_i(init_q)
+    var mismatches: i64 = 0
+    var book_ok = true
+    var bad_picks: i64 = 0
+
+    var numt: f64 = 0.0
+    var nump: f64 = 0.0
+    var numm: f64 = 0.0
+    var numb: f64 = 0.0
+    var den: f64 = 0.0
+    var denb: f64 = 0.0
+    var batch: i64 = 0
+    var in_batch: i64 = 0
+    let samp = n / 8
+
+    let total_steps = n_burn + n_batch * batch_len
+    var step: i64 = 0
+    while step < total_steps {
+        // --- accumulate the current state, weighted by 1/R ---
+        if step >= n_burn {
+            let inv = 1.0 / total
+            numt = numt + inv * (occ_n as f64) / (n as f64)
+            nump = nump + inv * (pairs_n as f64) / (m as f64)
+            numm = numm + inv * (abs_i(qcur) as f64) * 2.0 / (n as f64)
+            den = den + inv
+            if in_batch - (in_batch / samp) * samp == 0 {
+                var bi: i64 = 0
+                while bi < nblk { bq[bi as usize] = 0  bi = bi + 1 }
+                var si: i64 = 0
+                while si < n {
+                    if occ[si as usize] == 1 { bq[blk[si as usize] as usize] = bq[blk[si as usize] as usize] + sgn[si as usize] }
+                    si = si + 1
+                }
+                var mb: f64 = 0.0
+                var bj: i64 = 0
+                while bj < nblk { mb = mb + (abs_i(bq[bj as usize]) as f64) / 8.0  bj = bj + 1 }
+                numb = numb + inv * mb / (nblk as f64)
+                denb = denb + inv
+            }
+            in_batch = in_batch + 1
+            if in_batch == batch_len {
+                bm[(batch * 4) as usize] = numt / den
+                bm[(batch * 4 + 1) as usize] = nump / den
+                bm[(batch * 4 + 2) as usize] = numm / den
+                bm[(batch * 4 + 3) as usize] = numb / denb
+                numt = 0.0  nump = 0.0  numm = 0.0  numb = 0.0  den = 0.0  denb = 0.0
+                in_batch = 0
+                batch = batch + 1
+            }
+        }
+
+        // --- select ---
+        s = rng_step(s)
+        let u = rng_unit(s) * total
+        var pick = fw_find(&tree, m, top, u)
+        if pick >= m { pick = m - 1 }
+        if rate[pick as usize] <= 0.0 {
+            bad_picks = bad_picks + 1
+            var alt: i64 = 0
+            while alt < m && rate[alt as usize] <= 0.0 { alt = alt + 1 }
+            pick = alt
+        }
+
+        // --- execute ---
+        let x: i64 = ba[pick as usize]
+        let y: i64 = bb[pick as usize]
+        let sx: i64 = occ[x as usize]
+        let sy: i64 = occ[y as usize]
+        let nx = nocc_except(x, y, &occ, &nbr)
+        let ny = nocc_except(y, x, &occ, &nbr)
+        if sx == 0 && sy == 0 {
+            occ[x as usize] = 1  occ[y as usize] = 1
+            occ_n = occ_n + 2  pairs_n = pairs_n + 1 + nx + ny
+            qcur = qcur + sgn[x as usize] + sgn[y as usize]
+        } else if sx == 1 && sy == 1 {
+            occ[x as usize] = 0  occ[y as usize] = 0
+            occ_n = occ_n - 2  pairs_n = pairs_n - 1 - nx - ny
+            qcur = qcur - sgn[x as usize] - sgn[y as usize]
+        } else if sx == 1 {
+            occ[x as usize] = 0  occ[y as usize] = 1
+            pairs_n = pairs_n + ny - nx
+            qcur = qcur - sgn[x as usize] + sgn[y as usize]
+        } else {
+            occ[y as usize] = 0  occ[x as usize] = 1
+            pairs_n = pairs_n + nx - ny
+            qcur = qcur + sgn[x as usize] - sgn[y as usize]
+        }
+        if abs_i(qcur) > max_q { max_q = abs_i(qcur) }
+
+        // --- update every bond whose rate can have changed ---
+        let tag = step + 1
+        var w0: i64 = 0
+        while w0 < 10 {
+            var site: i64 = 0
+            if w0 == 0 { site = x } else if w0 == 1 { site = y }
+            else if w0 < 6 { site = nbr[(x * 4 + w0 - 2) as usize] }
+            else { site = nbr[(y * 4 + w0 - 6) as usize] }
+            var kk: i64 = 0
+            while kk < 4 {
+                let bnd: i64 = inc[(site * 4 + kk) as usize]
+                if stamp[bnd as usize] != tag {
+                    stamp[bnd as usize] = tag
+                    let nr = rate_of(bnd, &occ, &nbr, &ba, &bb, &qp, hops)
+                    let dr = nr - rate[bnd as usize]
+                    if dr != 0.0 {
+                        fw_add(&! tree, m, bnd, dr)
+                        total = total + dr
+                        rate[bnd as usize] = nr
+                    }
+                }
+                kk = kk + 1
+            }
+            w0 = w0 + 1
+        }
+
+        // --- periodic full verification and drift removal ---
+        if (step + 1) - ((step + 1) / 50000) * 50000 == 0 {
+            var cb: i64 = 0
+            while cb < m {
+                chk[cb as usize] = rate_of(cb, &occ, &nbr, &ba, &bb, &qp, hops)
+                if chk[cb as usize] != rate[cb as usize] { mismatches = mismatches + 1 }
+                cb = cb + 1
+            }
+            var ro: i64 = 0
+            var rp: i64 = 0
+            var rq: i64 = 0
+            var ci: i64 = 0
+            while ci < n {
+                if occ[ci as usize] == 1 {
+                    ro = ro + 1
+                    rq = rq + sgn[ci as usize]
+                    rp = rp + occ[nbr[(ci * 4) as usize] as usize] + occ[nbr[(ci * 4 + 1) as usize] as usize]
+                }
+                ci = ci + 1
+            }
+            if ro != occ_n || rp != pairs_n || rq != qcur { book_ok = false }
+            var cr: i64 = 0
+            while cr < m { rate[cr as usize] = chk[cr as usize]  cr = cr + 1 }
+            fw_build(&! tree, m, &rate)
+            total = fw_prefix(&tree, m - 1)
+        }
+        step = step + 1
+    }
+
+    var ob: i64 = 0
+    while ob < 4 {
+        var mean: f64 = 0.0
+        var bk: i64 = 0
+        while bk < n_batch { mean = mean + bm[(bk * 4 + ob) as usize]  bk = bk + 1 }
+        mean = mean / (n_batch as f64)
+        var ss: f64 = 0.0
+        var bk2: i64 = 0
+        while bk2 < n_batch { let d = bm[(bk2 * 4 + ob) as usize] - mean  ss = ss + d * d  bk2 = bk2 + 1 }
+        out[(2 * ob) as usize] = mean
+        out[(2 * ob + 1) as usize] = sqrt_newton(ss / ((n_batch as f64) * ((n_batch as f64) - 1.0)))
+        ob = ob + 1
+    }
+    out[8] = mismatches as f64
+    if book_ok { out[9] = 1.0 }
+    out[10] = bad_picks as f64
+    out[12] = max_q as f64
+}
+
+
+// One production run: prints a row and returns whether every engine check
+// held. f multiplies the whole budget, burn-in included.
+fn run_row(l: i64, q: i64, hops: bool, slab: bool, f: i64, seed: i64,
+           out: &![f64; 16]) -> bool with IO, Mut, Div, Panic {
+    let n = l * l
+    kmc_run(l, q, hops, slab, seed, 400 * n * f, 20, 150 * n * f, out)
+    let pd: f64 = out[2]
+    let pse: f64 = out[3]
+    let mb: f64 = out[6]
+    let mbse: f64 = out[7]
+    let mism: f64 = out[8]
+    let book: f64 = out[9]
+    let bad: f64 = out[10]
+    let cap: f64 = out[11]
+    let maxq: f64 = out[12]
+    print("   L=") print(l)
+    print("  q=") print(q)
+    if hops { print("  hops ") } else { print("  dimer") }
+    if slab { print("  slab ") } else { print("  clean") }
+    print("  f=") print(f)
+    print("   pairs ") print_f64(pd) print(" +- ") print_f64(pse)
+    print("   block|M| ") print_f64(mb) print(" +- ") print_f64(mbse)
+    let ok = mism == 0.0 && book > 0.5 && bad == 0.0 && cap > 0.5 && (hops || maxq == 0.0)
+    if ok { println("") } else { println("   ENGINE CHECK FAILED") }
+    ok
+}
+
+fn comb_se(a: f64, b: f64) -> f64 with Mut, Div, Panic { sqrt_newton(a * a + b * b) }
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    println("M5c: EQUILIBRIUM WALL COST OR UNFINISHED COARSENING, AT q=8?")
+    println("")
+    var all_ok = true
+
+    print("-- PART A: Fenwick tree against a linear scan: ")
+    let fw_ok = fenwick_selftest()
+    if fw_ok { println("ok") } else { println("FAILED") }
+    if !fw_ok { all_ok = false }
+    println("")
+
+    println("-- PART B: this engine copy on 4x4 against exact enumeration --")
+    var out: [f64; 16] = [0.0; 16]
+    var ex: [f64; 4] = [0.0; 4]
+    var vq: [i64; 2] = [3, 8]
+    var iv: i64 = 0
+    while iv < 3 {
+        // cases 0,1: q=3 and q=8 as in kmc_c2x2_order.sio; case 2: q=8 from slabs
+        var q: i64 = 8
+        if iv < 2 { q = vq[iv as usize] }
+        var dm: i64 = 0
+        var dmax: i64 = 2
+        if iv == 2 { dmax = 1 }
+        while dm < dmax {
+            let hops = dm == 1
+            let slab = iv == 2
+            exact4(q, hops, &! ex)
+            kmc_run(4, q, hops, slab, 777 + q * 31 + dm + iv * 101, 200000, 20, 150000, &! out)
+            var ob: i64 = 0
+            while ob < 3 {
+                let kv: f64 = out[(2 * ob) as usize]
+                let se: f64 = out[(2 * ob + 1) as usize]
+                let xv: f64 = ex[ob as usize]
+                print("   q=") print(q)
+                if hops { print(" hops ") } else { print(" dimer") }
+                if slab { print(" slab ") } else { print(" clean") }
+                print("  obs ") print(ob)
+                print("   ") print_f64(kv) print(" +- ") print_f64(se)
+                print("   exact ") print_f64(xv)
+                var ok = true
+                if se > 0.0 { ok = abs_f(kv - xv) < 3.0 * se } else { ok = abs_f(kv - xv) < 0.000000001 }
+                if ok { println("   ok") } else { println("   FAILED") }
+                if !ok { all_ok = false }
+                ob = ob + 1
+            }
+            let mism: f64 = out[8]
+            let bad: f64 = out[10]
+            let maxq: f64 = out[12]
+            if mism != 0.0 || out[9] < 0.5 || bad != 0.0 || (!hops && maxq != 0.0) {
+                println("      ENGINE CHECK FAILED")
+                all_ok = false
+            }
+            dm = dm + 1
+        }
+        iv = iv + 1
+    }
+    println("")
+    if !all_ok {
+        println("validation failed -- not running PART C")
+        println("M5C_COARSENING_FAILED")
+        return 0
+    }
+
+    println("-- PART C: q=8, L=32 --")
+    var ok = true
+    ok = run_row(32, 8, true, false, 1, 9001, &! out) && ok
+    let ref_p: f64 = out[2]
+    let ref_se: f64 = out[3]
+
+    var fs: [i64; 4] = [1, 2, 4, 8]
+    var clean_p: [f64; 4] = [0.0; 4]
+    var clean_se: [f64; 4] = [0.0; 4]
+    var i: i64 = 0
+    while i < 4 {
+        let f: i64 = fs[i as usize]
+        ok = run_row(32, 8, false, false, f, 9100 + f, &! out) && ok
+        clean_p[i as usize] = out[2]
+        clean_se[i as usize] = out[3]
+        i = i + 1
+    }
+    var slab_p: [f64; 2] = [0.0; 2]
+    var slab_se: [f64; 2] = [0.0; 2]
+    var sf: [i64; 2] = [1, 4]
+    var j: i64 = 0
+    while j < 2 {
+        let f2: i64 = sf[j as usize]
+        ok = run_row(32, 8, false, true, f2, 9200 + f2, &! out) && ok
+        slab_p[j as usize] = out[2]
+        slab_se[j as usize] = out[3]
+        j = j + 1
+    }
+    println("")
+
+    println("   excess over the ergodic reference, by run length:")
+    var k: i64 = 0
+    while k < 4 {
+        let cp: f64 = clean_p[k as usize]
+        let cs: f64 = clean_se[k as usize]
+        let fk: i64 = fs[k as usize]
+        print("     clean f=") print(fk)
+        print("   excess ") print_f64(cp - ref_p)
+        print(" +- ") print_f64(comb_se(cs, ref_se))
+        print("   excess*L ") print_f64((cp - ref_p) * 32.0) println("")
+        k = k + 1
+    }
+    var k2: i64 = 0
+    while k2 < 2 {
+        let spv: f64 = slab_p[k2 as usize]
+        let ssv: f64 = slab_se[k2 as usize]
+        let fk2: i64 = sf[k2 as usize]
+        print("     slab  f=") print(fk2)
+        print("   excess ") print_f64(spv - ref_p)
+        print(" +- ") print_f64(comb_se(ssv, ref_se))
+        print("   excess*L ") print_f64((spv - ref_p) * 32.0) println("")
+        k2 = k2 + 1
+    }
+    println("")
+
+    let c1: f64 = clean_p[0]
+    let c1s: f64 = clean_se[0]
+    let c8: f64 = clean_p[3]
+    let c8s: f64 = clean_se[3]
+    let c4: f64 = clean_p[2]
+    let c4s: f64 = clean_se[2]
+    let s4: f64 = slab_p[1]
+    let s4s: f64 = slab_se[1]
+    let drop_sig = (c1 - c8) / comb_se(c1s, c8s)
+    let side_sig = abs_f(c4 - s4) / comb_se(c4s, s4s)
+    print("   clean f=1 minus clean f=8: ") print_f64(c1 - c8)
+    print(" = ") print_f64(drop_sig) println(" SE")
+    print("   |clean f=4 - slab f=4|:    ") print_f64(abs_f(c4 - s4))
+    print(" = ") print_f64(side_sig) println(" SE")
+    let still_coarsening = drop_sig > 3.0
+    let not_equilibrated = side_sig > 3.0
+    print("   VERDICT q=8 L=32: ")
+    if still_coarsening && not_equilibrated {
+        println("still coarsening at f=1, and not equilibrated even at f=4")
+    } else if still_coarsening {
+        println("still coarsening at f=1; clean and slab starts agree by f=4")
+    } else if not_equilibrated {
+        println("no drift with run length, but the two starts disagree -- trapped")
+    } else {
+        println("equilibrated: no drift with run length, both starts agree")
+    }
+    println("")
+
+    println("-- CONTROL 1: q=8, L=16 --")
+    ok = run_row(16, 8, true, false, 1, 9301, &! out) && ok
+    let r16: f64 = out[2]
+    let r16s: f64 = out[3]
+    ok = run_row(16, 8, false, false, 1, 9302, &! out) && ok
+    let a16: f64 = out[2]
+    let a16s: f64 = out[3]
+    ok = run_row(16, 8, false, false, 4, 9304, &! out) && ok
+    let b16: f64 = out[2]
+    let b16s: f64 = out[3]
+    print("   excess f=1 ") print_f64(a16 - r16)
+    print("   f=4 ") print_f64(b16 - r16)
+    print("   drift ") print_f64((a16 - b16) / comb_se(a16s, b16s)) println(" SE")
+    print("   L=16 excess*L at f=4: ") print_f64((b16 - r16) * 16.0) println("")
+    print("   L=32 excess*L at f=8: ") print_f64((c8 - ref_p) * 32.0) println("")
+    print("   ratio excess(32, f=8) / excess(16, f=4) = ")
+    print_f64((c8 - ref_p) / (b16 - r16)) println("   (1/L predicts 0.5)")
+    println("")
+
+    println("-- CONTROL 2: q=6, L=32, re-testing the 1/L conclusion --")
+    ok = run_row(32, 6, true, false, 1, 9401, &! out) && ok
+    let r6: f64 = out[2]
+    ok = run_row(32, 6, false, false, 1, 9402, &! out) && ok
+    let a6: f64 = out[2]
+    let a6s: f64 = out[3]
+    ok = run_row(32, 6, false, false, 4, 9404, &! out) && ok
+    let b6: f64 = out[2]
+    let b6s: f64 = out[3]
+    let drift6 = (a6 - b6) / comb_se(a6s, b6s)
+    print("   excess f=1 ") print_f64(a6 - r6)
+    print("   f=4 ") print_f64(b6 - r6)
+    print("   drift ") print_f64(drift6) println(" SE")
+    if drift6 > 3.0 {
+        println("   q=6 ALSO drifts with run length: the earlier 1/L conclusion at q=6 was premature")
+    } else {
+        println("   q=6 does not drift: the earlier 1/L conclusion at q=6 stands")
+    }
+    println("")
+
+    if !ok { all_ok = false }
+    if all_ok { println("M5C_COARSENING_OK") } else { println("M5C_COARSENING_FAILED") }
+    0
+}
