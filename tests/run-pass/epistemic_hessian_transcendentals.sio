@@ -1,7 +1,25 @@
 //@ run-pass
+//@ expect-stdout: EPISTEMIC_HESSIAN_TRANSCENDENTALS_PASS
 //@ sabotage: hessian-chain
 // Tier 1: Hessian chain rule for tan, atan, tanh, asin, acos
 // Mathematical ground truth at each test point verified analytically.
+//
+// This witness printed its six values and asserted none of them, so nothing
+// here could fail except a crash -- and under Madaros it crashed for a
+// different reason: the backend had no kernel for these five names, so the
+// file died with SIGILL (#2148) and then was refused with E221 (#2172). The
+// witness gate counted it as unjudgeable, and the hessian-chain declaration
+// above measured nothing for these functions (#2507). Madaros now imports
+// math::transcendental::<name> implicitly, and the values are asserted, so a
+// sabotaged chain rule has a PASS marker to lose.
+//
+// The six original points sit at zeros of f'' for four of the five functions,
+// which a chain rule that returns 0.0 would also satisfy. The x = 0.5 block
+// asserts a non-zero f'' for every function, so dropping the rule fails.
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
 
 // atan(x) at x=1: f''= -2x/(1+x²)² = -2·1/4 = -0.5
 fn test_atan_h00() -> f64 with IO, Epistemic {
@@ -50,17 +68,84 @@ fn test_acos_h00_zero() -> f64 with IO, Epistemic {
     hessian_of(acos(x), 0, 0)
 }
 
+// Non-zero f'' at x = 0.5 (reference: Python math, analytic formulas):
+//   atan''  = -2x/(1+x²)²          = -0.64
+//   tan''   = 2·tan·(1+tan²)       =  1.4186890138709112
+//   tanh''  = -2·tanh·(1-tanh²)    = -0.7268619813835873
+//   asin''  = x/(1-x²)^(3/2)       =  0.769800358919501
+//   acos''  = -x/(1-x²)^(3/2)      = -0.769800358919501
+fn test_atan_h00_half() -> f64 with IO, Epistemic {
+    let xm: Knowledge<f64> = measure(0.5, uncertainty: 0.05)
+    let x = xm.value
+    hessian_of(atan(x), 0, 0)
+}
+
+fn test_tan_h00_half() -> f64 with IO, Epistemic {
+    let xm: Knowledge<f64> = measure(0.5, uncertainty: 0.05)
+    let x = xm.value
+    hessian_of(tan(x), 0, 0)
+}
+
+fn test_tanh_h00_half() -> f64 with IO, Epistemic {
+    let xm: Knowledge<f64> = measure(0.5, uncertainty: 0.05)
+    let x = xm.value
+    hessian_of(tanh(x), 0, 0)
+}
+
+fn test_asin_h00_half() -> f64 with IO, Epistemic {
+    let xm: Knowledge<f64> = measure(0.5, uncertainty: 0.05)
+    let x = xm.value
+    hessian_of(asin(x), 0, 0)
+}
+
+fn test_acos_h00_half() -> f64 with IO, Epistemic {
+    let xm: Knowledge<f64> = measure(0.5, uncertainty: 0.05)
+    let x = xm.value
+    hessian_of(acos(x), 0, 0)
+}
+
 fn main() with IO, Epistemic {
     let h_atan   = test_atan_h00()           // expect -0.5
     let h_tan0   = test_tan_h00_zero()       // expect  0.0
-    let h_xatan  = test_x_atan_y_h01()      // expect  0.5
+    let h_xatan  = test_x_atan_y_h01()       // expect  0.5
     let h_tanh0  = test_tanh_h00_zero()      // expect  0.0
     let h_asin   = test_asin_cross()         // expect  1.0
     let h_acos0  = test_acos_h00_zero()      // expect  0.0
-    println(h_atan)
-    println(h_tan0)
-    println(h_xatan)
-    println(h_tanh0)
-    println(h_asin)
-    println(h_acos0)
+    let h_atan5  = test_atan_h00_half()
+    let h_tan5   = test_tan_h00_half()
+    let h_tanh5  = test_tanh_h00_half()
+    let h_asin5  = test_asin_h00_half()
+    let h_acos5  = test_acos_h00_half()
+    // The zero-valued slots print `+ 0.0`: Madaros evaluates tanh'' = -2t(1-t^2)
+    // at t = 0 as -0.0 and prints "-0.000000", lean_single prints "0.000000",
+    // and the engine-parity gate compares stdout byte for byte. -0.0 + 0.0 is
+    // +0.0, so this changes only the sign of a zero; the asserts below read the
+    // raw values.
+    print("h_atan=");  print_f64(h_atan);  print("\n")
+    print("h_tan0=");  print_f64(h_tan0 + 0.0);  print("\n")
+    print("h_xatan="); print_f64(h_xatan); print("\n")
+    print("h_tanh0="); print_f64(h_tanh0 + 0.0); print("\n")
+    print("h_asin=");  print_f64(h_asin);  print("\n")
+    print("h_acos0="); print_f64(h_acos0 + 0.0); print("\n")
+    print("h_atan5="); print_f64(h_atan5); print("\n")
+    print("h_tan5=");  print_f64(h_tan5);  print("\n")
+    print("h_tanh5="); print_f64(h_tanh5); print("\n")
+    print("h_asin5="); print_f64(h_asin5); print("\n")
+    print("h_acos5="); print_f64(h_acos5); print("\n")
+    let ok = abs_f(h_atan - (0.0 - 0.5)) < 1.0e-9
+        && abs_f(h_tan0) < 1.0e-9
+        && abs_f(h_xatan - 0.5) < 1.0e-9
+        && abs_f(h_tanh0) < 1.0e-9
+        && abs_f(h_asin - 1.0) < 1.0e-9
+        && abs_f(h_acos0) < 1.0e-9
+        && abs_f(h_atan5 - (0.0 - 0.64)) < 1.0e-9
+        && abs_f(h_tan5 - 1.4186890138709112) < 1.0e-9
+        && abs_f(h_tanh5 - (0.0 - 0.7268619813835873)) < 1.0e-9
+        && abs_f(h_asin5 - 0.769800358919501) < 1.0e-9
+        && abs_f(h_acos5 - (0.0 - 0.769800358919501)) < 1.0e-9
+    if ok {
+        print("EPISTEMIC_HESSIAN_TRANSCENDENTALS_PASS\n")
+    } else {
+        print("EPISTEMIC_HESSIAN_TRANSCENDENTALS_FAIL\n")
+    }
 }

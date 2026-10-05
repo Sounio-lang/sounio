@@ -1,0 +1,137 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: NATIVE_MATH_TRANSCENDENTALS_OK
+// Bare tan, atan, tanh, asin and acos under Madaros (#2507).
+//
+// The backend has no kernel for these five. A bare call compiled to `ud2` and
+// died with SIGILL (#2148), then was refused with E221 (#2172). Madaros now
+// imports math::transcendental::<name> implicitly when a program calls the name
+// without defining it; this file is what says those bodies are right.
+//
+// Reference values are CPython 3.12 `math` (C libm). The tolerance is relative
+// and a few ulp, not 1e-6: an implementation off in the seventh digit -- which
+// math::pure::atan is near |x| = 1, and which tan built on the backend's sin/cos
+// is past x = 1 -- must fail here.
+//
+// Points cover every branch of the kernels: 0 and signed zero, arguments tiny
+// enough that t*t underflows, both half-angle regimes, the |x| > 1 reciprocal,
+// |x| -> 1 for asin/acos, both tanh regimes and its saturation, tan's pi/2
+// reduction across several quadrants up to its 2^20*pi/2 limit, and the NaN
+// results: asin/acos off their domain, tan past that limit and of NaN/inf.
+
+fn abs_f(x: f64) -> f64 {
+    if x < 0.0 { 0.0 - x } else { x }
+}
+
+fn close(got: f64, want: f64) -> bool with Mut, Div {
+    let d = abs_f(got - want)
+    var m = abs_f(want)
+    if m < 1.0 { m = 1.0 }
+    d <= 4.0e-15 * m
+}
+
+// 0.0 - 0.0 is +0.0 in IEEE 754; a negative zero has to come from a product.
+fn neg_zero() -> f64 {
+    0.0 * (0.0 - 1.0)
+}
+
+fn is_neg_zero(x: f64) -> bool with Div {
+    x == 0.0 && 1.0 / x < 0.0
+}
+
+fn is_nan(x: f64) -> bool {
+    x != x
+}
+
+fn check(label: string, got: f64, want: f64) -> i64 with IO, Mut, Div {
+    if close(got, want) { return 0 }
+    print("FAIL "); print(label); print(" got="); print_f64(got); print("\n")
+    1
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fails: i64 = 0
+    if !is_neg_zero(neg_zero()) { print("FAIL neg_zero() is not -0.0; signed-zero checks below are void\n"); fails = fails + 1 }
+
+    fails = fails + check("atan(0.1)", atan(0.1), 0.09966865249116204)
+    fails = fails + check("atan(0.25)", atan(0.25), 0.24497866312686414)
+    fails = fails + check("atan(0.4142135623730951)", atan(0.4142135623730951), 0.3926990816987242)
+    fails = fails + check("atan(0.5)", atan(0.5), 0.4636476090008061)
+    fails = fails + check("atan(0.9)", atan(0.9), 0.7328151017865066)
+    fails = fails + check("atan(0.99999)", atan(0.99999), 0.7853931633724482)
+    fails = fails + check("atan(1.0)", atan(1.0), 0.7853981633974483)
+    fails = fails + check("atan(1.5)", atan(1.5), 0.982793723247329)
+    fails = fails + check("atan(2.0)", atan(2.0), 1.1071487177940904)
+    fails = fails + check("atan(10.0)", atan(10.0), 1.4711276743037347)
+    fails = fails + check("atan(1e10)", atan(10000000000.0), 1.5707963266948965)
+    fails = fails + check("atan(1e300)", atan(1.0e300), 1.5707963267948966)
+    fails = fails + check("atan(-0.5)", atan(0.0 - 0.5), 0.0 - 0.4636476090008061)
+    fails = fails + check("atan(-2.0)", atan(0.0 - 2.0), 0.0 - 1.1071487177940904)
+    if atan(1.0e-300) != 1.0e-300 { print("FAIL atan(1e-300) not exact\n"); fails = fails + 1 }
+    if !is_neg_zero(atan(neg_zero())) { print("FAIL atan(-0.0) lost its sign\n"); fails = fails + 1 }
+
+    fails = fails + check("tan(0.1)", tan(0.1), 0.10033467208545055)
+    fails = fails + check("tan(0.5)", tan(0.5), 0.5463024898437905)
+    fails = fails + check("tan(1.0)", tan(1.0), 1.5574077246549023)
+    fails = fails + check("tan(1.5)", tan(1.5), 14.101419947171719)
+    fails = fails + check("tan(-1.5)", tan(0.0 - 1.5), 0.0 - 14.101419947171719)
+    fails = fails + check("tan(2.0)", tan(2.0), 0.0 - 2.185039863261519)
+    fails = fails + check("tan(3.0)", tan(3.0), 0.0 - 0.1425465430742778)
+    fails = fails + check("tan(4.0)", tan(4.0), 1.1578212823495775)
+    fails = fails + check("tan(10.0)", tan(10.0), 0.6483608274590866)
+    fails = fails + check("tan(100.0)", tan(100.0), 0.0 - 0.5872139151569291)
+    fails = fails + check("tan(1e6)", tan(1000000.0), 0.0 - 0.373624453987599)
+    fails = fails + check("tan(1647099.0)", tan(1647099.0), 0.0 - 0.34159248796294767)
+    fails = fails + check("tan(-0.5)", tan(0.0 - 0.5), 0.0 - 0.5463024898437905)
+    if tan(0.0) != 0.0 { print("FAIL tan(0.0) != 0\n"); fails = fails + 1 }
+    if tan(1.0e-300) != 1.0e-300 { print("FAIL tan(1e-300) not exact\n"); fails = fails + 1 }
+    if !is_neg_zero(tan(neg_zero())) { print("FAIL tan(-0.0) lost its sign\n"); fails = fails + 1 }
+    if !is_nan(tan(1.0e7)) { print("FAIL tan(1e7) past the exact-reduction limit is not NaN\n"); fails = fails + 1 }
+    let big = 1.0e308
+    let inf = big * 10.0
+    if !is_nan(tan(inf)) { print("FAIL tan(inf) is not NaN\n"); fails = fails + 1 }
+    if !is_nan(tan(inf - inf)) { print("FAIL tan(NaN) is not NaN\n"); fails = fails + 1 }
+
+    fails = fails + check("tanh(1e-10)", tanh(0.0000000001), 0.0000000001)
+    fails = fails + check("tanh(0.1)", tanh(0.1), 0.09966799462495582)
+    fails = fails + check("tanh(0.5)", tanh(0.5), 0.46211715726000974)
+    fails = fails + check("tanh(0.9)", tanh(0.9), 0.7162978701990245)
+    fails = fails + check("tanh(0.99999)", tanh(0.99999), 0.7615899561803637)
+    fails = fails + check("tanh(1.0)", tanh(1.0), 0.7615941559557649)
+    fails = fails + check("tanh(1.5)", tanh(1.5), 0.9051482536448664)
+    fails = fails + check("tanh(2.0)", tanh(2.0), 0.9640275800758169)
+    fails = fails + check("tanh(10.0)", tanh(10.0), 0.9999999958776927)
+    fails = fails + check("tanh(-2.0)", tanh(0.0 - 2.0), 0.0 - 0.9640275800758169)
+    if tanh(1.0e10) != 1.0 { print("FAIL tanh(1e10) != 1\n"); fails = fails + 1 }
+    if tanh(1.0e-300) != 1.0e-300 { print("FAIL tanh(1e-300) not exact\n"); fails = fails + 1 }
+    if !is_neg_zero(tanh(neg_zero())) { print("FAIL tanh(-0.0) lost its sign\n"); fails = fails + 1 }
+
+    fails = fails + check("asin(1e-10)", asin(0.0000000001), 0.0000000001)
+    fails = fails + check("asin(0.1)", asin(0.1), 0.1001674211615598)
+    fails = fails + check("asin(0.5)", asin(0.5), 0.5235987755982989)
+    fails = fails + check("asin(0.9)", asin(0.9), 1.1197695149986342)
+    fails = fails + check("asin(0.99999)", asin(0.99999), 1.5663241871131188)
+    fails = fails + check("asin(1.0)", asin(1.0), 1.5707963267948966)
+    fails = fails + check("asin(-0.5)", asin(0.0 - 0.5), 0.0 - 0.5235987755982989)
+    if asin(0.0) != 0.0 { print("FAIL asin(0.0) != 0\n"); fails = fails + 1 }
+    if !is_neg_zero(asin(neg_zero())) { print("FAIL asin(-0.0) lost its sign\n"); fails = fails + 1 }
+    if !is_nan(asin(2.0)) { print("FAIL asin(2.0) is not NaN\n"); fails = fails + 1 }
+
+    fails = fails + check("acos(0.0)", acos(0.0), 1.5707963267948966)
+    fails = fails + check("acos(1e-10)", acos(0.0000000001), 1.5707963266948965)
+    fails = fails + check("acos(0.1)", acos(0.1), 1.4706289056333368)
+    fails = fails + check("acos(0.5)", acos(0.5), 1.0471975511965979)
+    fails = fails + check("acos(0.9)", acos(0.9), 0.45102681179626236)
+    fails = fails + check("acos(0.99999)", acos(0.99999), 0.0044721396817777506)
+    fails = fails + check("acos(-0.5)", acos(0.0 - 0.5), 2.0943951023931957)
+    fails = fails + check("acos(-1.0)", acos(0.0 - 1.0), 3.141592653589793)
+    if acos(1.0) != 0.0 { print("FAIL acos(1.0) != 0\n"); fails = fails + 1 }
+    if !is_nan(acos(0.0 - 2.0)) { print("FAIL acos(-2.0) is not NaN\n"); fails = fails + 1 }
+
+    if fails != 0 {
+        print("NATIVE_MATH_TRANSCENDENTALS_FAIL\n")
+        return 1
+    }
+    print("NATIVE_MATH_TRANSCENDENTALS_OK\n")
+    0
+}

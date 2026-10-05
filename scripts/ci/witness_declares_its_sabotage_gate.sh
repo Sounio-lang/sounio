@@ -296,17 +296,21 @@ done
 
 # Ratchet: unjudgeable is debt, and debt that can grow silently is not debt.
 #
-# Today one witness fails before any sabotage is applied
-# (epistemic_hessian_transcendentals.sio, SIGILL, #2148). Counting it and moving
-# on was right -- blocking would have made the gate red on main from the day it
-# landed, and a gate that lives red gets ignored. But nothing stopped that count
-# from becoming six, at which point the gate would still report OK while
-# verifying almost nothing: every witness would be excused before it was tested.
+# One witness used to fail before any sabotage was applied
+# (epistemic_hessian_transcendentals.sio: SIGILL under #2148, then refused with
+# E221 after #2172). Counting it and moving on was right -- blocking would have
+# made the gate red on main from the day it landed, and a gate that lives red
+# gets ignored. But nothing stopped that count from becoming six, at which point
+# the gate would still report OK while verifying almost nothing: every witness
+# would be excused before it was tested.
 #
 # So the count is frozen at what it was when measured, and only ever lowered by
 # editing this line -- which puts each removal in a diff, next to the issue that
-# fixed it.
-UNJUDGEABLE_CEILING="${SOUNIO_WITNESS_UNJUDGEABLE_CEILING:-1}"
+# fixed it. 1 -> 0 in #2507: Madaros now has tan/atan/tanh/asin/acos (implicit
+# math::transcendental import) and the witness asserts its values, so it is
+# judged, and the next unjudgeable witness fails the gate instead of taking its
+# slot.
+UNJUDGEABLE_CEILING="${SOUNIO_WITNESS_UNJUDGEABLE_CEILING:-0}"
 
 # An unclean death is not a pass and not brokenness: it is a death whose cause
 # we cannot attribute to the witness noticing the sabotage. Same argument, same
@@ -319,7 +323,7 @@ unclean=$((d_crash + d_timeout + d_misattributed))
 # show as fail here -- an artifact reporting "pass" beside a red gate is the
 # same lie in a different file.
 status=pass
-if [[ $((failed - broken)) -ne 0 ]] || [[ $broken -gt ${SOUNIO_WITNESS_UNJUDGEABLE_CEILING:-1} ]] \
+if [[ $((failed - broken)) -ne 0 ]] || [[ $broken -gt ${SOUNIO_WITNESS_UNJUDGEABLE_CEILING:-0} ]] \
    || [[ $((d_crash + d_timeout + d_misattributed)) -gt ${SOUNIO_WITNESS_UNCLEAN_CEILING:-0} ]]; then
   status=fail
 fi
