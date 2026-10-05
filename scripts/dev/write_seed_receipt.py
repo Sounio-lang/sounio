@@ -192,32 +192,165 @@ def human_text(receipt: dict) -> str:
 def verify_receipt_file(path: Path) -> int:
     """Exit 0 if fixed_point fields match by equality; 1 otherwise."""
     data = json.loads(path.read_text(encoding="utf-8"))
-    fp = data.get("fixed_point") or {}
-    errors = []
-    if not fp.get("verified"):
-        errors.append("fixed_point.verified is not true")
-    if fp.get("gk_md5") != fp.get("gk_plus1_md5"):
-        errors.append(
-            f"md5 mismatch by eye:\n  gk_md5:       {fp.get('gk_md5')}\n  gk_plus1_md5: {fp.get('gk_plus1_md5')}"
-        )
-    if fp.get("gk_sha256") != fp.get("gk_plus1_sha256"):
-        errors.append(
-            f"sha256 mismatch by eye:\n  gk_sha256:       {fp.get('gk_sha256')}\n  gk_plus1_sha256: {fp.get('gk_plus1_sha256')}"
-        )
+    errors = receipt_internal_errors(data)
     if errors:
         print(f"[seed-receipt] FAIL {path}", file=sys.stderr)
         for e in errors:
             print(f"  - {e}", file=sys.stderr)
         return 1
+    fp = data.get("fixed_point") or {}
     print(f"[seed-receipt] PASS fixed_point verified by eye fields in {path}")
     print(f"  gk_md5:       {fp.get('gk_md5')}")
     print(f"  gk_plus1_md5: {fp.get('gk_plus1_md5')}")
     return 0
 
 
+def receipt_internal_errors(data: dict) -> list[str]:
+    """Structural / fixed-point field checks (no tree)."""
+    errors: list[str] = []
+    if data.get("schema") not in (None, "sounio.SeedReceipt"):
+        # allow missing schema on older drafts; if present must match
+        if data.get("schema") != "sounio.SeedReceipt":
+            errors.append(f"schema must be sounio.SeedReceipt, got {data.get('schema')!r}")
+    fp = data.get("fixed_point") or {}
+    if not fp:
+        errors.append("missing fixed_point object")
+        return errors
+    if not fp.get("verified"):
+        errors.append("fixed_point.verified is not true")
+    gk_md5 = (fp.get("gk_md5") or "").lower()
+    gk1_md5 = (fp.get("gk_plus1_md5") or "").lower()
+    gk_sha = (fp.get("gk_sha256") or "").lower()
+    gk1_sha = (fp.get("gk_plus1_sha256") or "").lower()
+    if not gk_md5 or not gk1_md5:
+        errors.append("fixed_point missing gk_md5 / gk_plus1_md5 (must be written side by side)")
+    elif gk_md5 != gk1_md5:
+        errors.append(
+            "md5 mismatch by eye (provenance refuse):\n"
+            f"  gk_md5:       {gk_md5}\n"
+            f"  gk_plus1_md5: {gk1_md5}"
+        )
+    if not gk_sha or not gk1_sha:
+        errors.append("fixed_point missing gk_sha256 / gk_plus1_sha256")
+    elif gk_sha != gk1_sha:
+        errors.append(
+            "sha256 mismatch by eye:\n"
+            f"  gk_sha256:       {gk_sha}\n"
+            f"  gk_plus1_sha256: {gk1_sha}"
+        )
+    gens = data.get("generations") or []
+    if len(gens) < 2:
+        errors.append("generations[] must list at least g_k and g_{k+1} (need ≥2 entries)")
+    # settled hashes must appear in the generation table
+    md5s = {(g.get("md5") or "").lower() for g in gens}
+    if gk_md5 and gk_md5 not in md5s:
+        errors.append(f"fixed_point.gk_md5 {gk_md5} not present in generations[]")
+    src = data.get("source") or {}
+    if not (src.get("sha256") or src.get("md5")):
+        errors.append("source missing sha256/md5")
+    out = data.get("output_seed") or {}
+    if not (out.get("sha256") or out.get("md5")):
+        errors.append("output_seed missing sha256/md5")
+    inn = data.get("input_seed") or {}
+    if not (inn.get("sha256") or inn.get("md5")):
+        errors.append("input_seed missing sha256/md5 (g0 of the chain)")
+    return errors
+
+
+def check_receipt_against_tree(
+    receipt_path: Path,
+    *,
+    source_path: Path,
+    seed_path: Path,
+) -> list[str]:
+    """
+    Provenance check: receipt must describe *this* tree's source + committed ELF.
+
+    Self-repro alone (canonical_compiler_gate) only proves the ELF reproduces
+    itself on the source. This check proves the receipt's claimed source SHA
+    matches the committed lean_single.sio and the claimed output matches the
+    committed seed ELF — so a substituted foreign fixed-point ELF with a
+    mismatched paper trail fails.
+    """
+    data = json.loads(receipt_path.read_text(encoding="utf-8"))
+    errors = receipt_internal_errors(data)
+    if not source_path.is_file():
+        errors.append(f"source file missing: {source_path}")
+        return errors
+    if not seed_path.is_file():
+        errors.append(f"seed ELF missing: {seed_path}")
+        return errors
+
+    live_src_sha = sha256_file(source_path)
+    live_src_md5 = md5_file(source_path)
+    live_seed_sha = sha256_file(seed_path)
+    live_seed_md5 = md5_file(seed_path)
+
+    claimed_src_sha = ((data.get("source") or {}).get("sha256") or "").lower()
+    claimed_src_md5 = ((data.get("source") or {}).get("md5") or "").lower()
+    claimed_out_sha = ((data.get("output_seed") or {}).get("sha256") or "").lower()
+    claimed_out_md5 = ((data.get("output_seed") or {}).get("md5") or "").lower()
+
+    if claimed_src_sha and claimed_src_sha != live_src_sha:
+        errors.append(
+            "PROVENANCE FAIL: receipt source.sha256 does not match committed lean_single.sio\n"
+            f"  receipt:   {claimed_src_sha}\n"
+            f"  committed: {live_src_sha}\n"
+            "  (A receipt that names another source cannot vouch for this tree.)"
+        )
+    elif claimed_src_md5 and not claimed_src_sha and claimed_src_md5 != live_src_md5:
+        errors.append(
+            "PROVENANCE FAIL: receipt source.md5 does not match committed lean_single.sio\n"
+            f"  receipt:   {claimed_src_md5}\n"
+            f"  committed: {live_src_md5}"
+        )
+    elif not claimed_src_sha and not claimed_src_md5:
+        errors.append("receipt source has neither sha256 nor md5")
+
+    if claimed_out_sha and claimed_out_sha != live_seed_sha:
+        errors.append(
+            "PROVENANCE FAIL: receipt output_seed.sha256 does not match committed seed ELF\n"
+            f"  receipt:   {claimed_out_sha}\n"
+            f"  committed: {live_seed_sha}"
+        )
+    elif claimed_out_md5 and not claimed_out_sha and claimed_out_md5 != live_seed_md5:
+        errors.append(
+            "PROVENANCE FAIL: receipt output_seed.md5 does not match committed seed ELF\n"
+            f"  receipt:   {claimed_out_md5}\n"
+            f"  committed: {live_seed_md5}"
+        )
+    elif not claimed_out_sha and not claimed_out_md5:
+        errors.append("receipt output_seed has neither sha256 nor md5")
+
+    # Settled generation must match the committed ELF
+    fp = data.get("fixed_point") or {}
+    gk_md5 = (fp.get("gk_md5") or "").lower()
+    if gk_md5 and gk_md5 != live_seed_md5:
+        errors.append(
+            "PROVENANCE FAIL: fixed_point.gk_md5 does not match committed seed ELF md5\n"
+            f"  gk_md5:    {gk_md5}\n"
+            f"  seed md5:  {live_seed_md5}"
+        )
+    gk_sha = (fp.get("gk_sha256") or "").lower()
+    if gk_sha and gk_sha != live_seed_sha:
+        errors.append(
+            "PROVENANCE FAIL: fixed_point.gk_sha256 does not match committed seed ELF sha256\n"
+            f"  gk_sha256:   {gk_sha}\n"
+            f"  seed sha256: {live_seed_sha}"
+        )
+
+    return errors
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--verify-receipt", metavar="PATH", help="validate an existing SeedReceipt JSON")
+    ap.add_argument("--verify-receipt", metavar="PATH", help="validate fixed_point fields only")
+    ap.add_argument(
+        "--check-against-tree",
+        metavar="RECEIPT",
+        help="validate receipt against --source and --seed-elf on disk (provenance)",
+    )
+    ap.add_argument("--seed-elf", type=Path, help="committed lean_single ELF (with --check-against-tree)")
     ap.add_argument("--out-dir", type=Path, help="directory for SeedReceipt-*.json and .txt")
     ap.add_argument("--gens-tsv", type=Path, help="generation table")
     ap.add_argument("--source", type=Path)
@@ -239,6 +372,23 @@ def main() -> int:
 
     if args.verify_receipt:
         return verify_receipt_file(Path(args.verify_receipt))
+
+    if args.check_against_tree:
+        receipt = Path(args.check_against_tree)
+        src = args.source
+        seed = args.seed_elf or args.output_seed
+        if src is None or seed is None:
+            ap.error("--check-against-tree requires --source and --seed-elf (or --output-seed)")
+        errs = check_receipt_against_tree(receipt, source_path=src.resolve(), seed_path=seed.resolve())
+        if errs:
+            print(f"[seed-receipt] FAIL provenance check {receipt}", file=sys.stderr)
+            for e in errs:
+                print(f"  - {e}", file=sys.stderr)
+            return 1
+        print(f"[seed-receipt] PASS provenance: receipt matches source+seed on disk")
+        print(f"  source={src}")
+        print(f"  seed={seed}")
+        return 0
 
     required = [
         args.out_dir,

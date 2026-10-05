@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/lib/gate_artifact.sh"
 # scripts/ci/global_aggregate_store_gate.sh
 #
 # Two reproductions of one defect family in the bootstrap seed: a global with an
@@ -146,7 +147,7 @@ MAD_MEASURED=$([[ -n "$MADAROS" && -x "$MADAROS" ]] && echo "OK (measured)" || e
 
 ART_DIR="${SOUNIO_ARTIFACT_DIR:-$ROOT_DIR/artifacts/gates}"
 mkdir -p "$ART_DIR"
-cat > "$ART_DIR/global_aggregate_store.json" <<JSON
+cat <<JSON | gate_write_artifact "$ART_DIR/global_aggregate_store.json"
 {
   "gate": "global_aggregate_store",
   "status": "pass",

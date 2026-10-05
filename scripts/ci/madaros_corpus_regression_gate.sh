@@ -51,11 +51,33 @@ fail() {
 [[ -n "$MADAROS" ]] || fail "SOUNIO_MADAROS_CORPUS_BIN must name a current-source Madaros ELF"
 [[ -x "$MADAROS" ]] || fail "not executable: $MADAROS"
 
+# The raw Madaros ELF needs far more stack than the default 8 MiB. This gate
+# execs it directly (bin/souc and bin/madaros raise the stack; this does not go
+# through them), so it raises the limit here, in its own shell, before anything
+# spawns: xargs and every run_one.sh inherit it.
+#
+# Measured 2026-09-15 on the workspace pod: under `ulimit -s 8192`, 47 of the 56
+# programs on the #2507 regression list SIGSEGVed inside
+# `run_check_mode: about to check N modules`; under 1048576 the same binaries
+# gave ordinary diagnostics (e.g. dissertation_pbpk14_model_form_uc.sio ->
+# error[E259]). Exit 139 is reported below as "the compiler CRASHED", and a
+# refresh writes it into the baseline, so a small stack does not produce a
+# weaker verdict -- it produces false crashes. If the limit cannot be raised,
+# refuse to measure.
+CORPUS_STACK_KB="${SOUNIO_MADAROS_CORPUS_STACK_KB:-1048576}"
+[[ "$CORPUS_STACK_KB" =~ ^([1-9][0-9]*|unlimited)$ ]] \
+  || fail "SOUNIO_MADAROS_CORPUS_STACK_KB must be a positive KiB count or 'unlimited', got '$CORPUS_STACK_KB'"
+ulimit -s "$CORPUS_STACK_KB" 2>/dev/null \
+  || fail "cannot raise the stack to $CORPUS_STACK_KB KiB (soft $(ulimit -s), hard $(ulimit -Hs)) -- compiles would SIGSEGV and read as compiler crashes; no verdict"
+[[ "$(ulimit -s)" == "$CORPUS_STACK_KB" ]] \
+  || fail "stack is $(ulimit -s) KiB after requesting $CORPUS_STACK_KB -- no verdict"
+
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/sounio-madaros-corpus.XXXXXX")"
 trap 'rm -rf "$WORK"' EXIT
 
 echo "[madaros-corpus] compiler: $MADAROS"
 "$MADAROS" --version 2>&1 | head -1 | sed 's/^/[madaros-corpus] /'
+echo "[madaros-corpus] stack: ulimit -s $(ulimit -s) KiB (SOUNIO_MADAROS_CORPUS_STACK_KB)"
 
 # Only run-pass programs. compile-fail and typecheck-fail tests have their own
 # gates and their verdicts are engine-specific by design.
@@ -102,7 +124,37 @@ if grep -qE '^//@ requires: (gpu|llvm)' "$src" 2>/dev/null; then exit 0; fi
 # Tests the repo already declares as known failures are not regressions.
 if grep -qE '^//@ known-failure' "$src" 2>/dev/null; then exit 0; fi
 
-if ! "$MADAROS" compile "$src" -o "$elf" >/dev/null 2>&1; then
+# The status is captured BEFORE any test, because inside `if ! cmd; then` the
+# value of $? is the negation's status and always 0 -- which would classify
+# every kill as an ordinary compile failure, the exact reading this guards.
+"$MADAROS" compile "$src" -o "$elf" >/dev/null 2>&1
+_rc=$?
+if [ "$_rc" -ne 0 ]; then
+  # Three different things exit non-zero here, and they are not interchangeable.
+  #
+  #   137 = 128+SIGKILL(9)   the kernel killed the compiler from outside. Under
+  #                          SOUNIO_TEST_JOBS=nproc on this pod the OOM killer
+  #                          takes compiler processes. Nothing is wrong with the
+  #                          program; the measurement did not happen.
+  #   139 = 128+SIGSEGV(11)  the compiler CRASHED on this program. That is the
+  #                          most serious finding this gate can make, and it is
+  #                          about the compiler, not the environment.
+  #   other                  the compiler rejected the program.
+  #
+  # An earlier version of this guard collapsed 137 and 139 into "killed by the
+  # kernel" and voided the whole run for either. A new regression that made
+  # Madaros segfault would have been reported as "no verdict -- raise your JOBS
+  # setting". Suppressing a compiler crash to avoid a false regression trades
+  # one wrong answer for a worse one.
+  if [ "$_rc" -eq 137 ]; then
+    printf '%s %s\n' "$name" "$_rc" >> "$WORK/killed.txt"
+    exit 0
+  fi
+  if [ "$_rc" -eq 139 ]; then
+    printf '%s\n' "$name" >> "$WORK/crashed.txt"
+    echo "$name compile"
+    exit 0
+  fi
   echo "$name compile"
   exit 0
 fi
@@ -133,6 +185,8 @@ chmod +x "$WORK/timeout_run.sh"
 export MADAROS WORK
 
 : > "$WORK/ran.txt"
+: > "$WORK/killed.txt"
+: > "$WORK/crashed.txt"
 printf '%s\n' "${PROGRAMS[@]}" \
   | xargs -P "$JOBS" -I{} "$WORK/run_one.sh" {} \
   | sort > "$WORK/actual.txt"
@@ -151,6 +205,40 @@ fi
 ACTUAL_COUNT="$(wc -l < "$WORK/actual.txt" | tr -d ' ')"
 echo "[madaros-corpus] failures observed: $ACTUAL_COUNT / ${#PROGRAMS[@]}"
 
+# Ordered BEFORE the refresh path deliberately. `SOUNIO_MADAROS_CORPUS_REFRESH=1`
+# rewrites the baseline and exits, so with this check after it a run whose
+# compilers were killed could persist its own damage as the new authority --
+# the corrupted measurement becoming the thing every later run is compared
+# against. A refresh is the one operation that must not proceed on an
+# incomplete run.
+# A run in which the kernel killed compiler processes cannot be compared to a
+# baseline at all: the programs it killed are indistinguishable, in actual.txt,
+# from programs this change broke. Refuse the comparison rather than report it.
+KILLED_COUNT="$(grep -c . "$WORK/killed.txt" 2>/dev/null || true)"
+if [ "${KILLED_COUNT:-0}" -gt 0 ]; then
+  echo "[madaros-corpus] $KILLED_COUNT compiler process(es) were KILLED by the kernel:" >&2
+  sed 's/^/    ! /' "$WORK/killed.txt" >&2
+  echo "" >&2
+  echo "This run cannot be compared against the baseline. A killed compile is" >&2
+  echo "indistinguishable from a broken program once it reaches actual.txt, so" >&2
+  echo "the regression list would name programs nothing is wrong with." >&2
+  echo "" >&2
+  echo "JOBS was $JOBS. On this pod, SOUNIO_TEST_JOBS=6 completes; nproc does not." >&2
+  fail "the instrument was killed mid-run -- no verdict, not a regression"
+fi
+
+# Crashes are reported by name and still flow into the ordinary comparison, so
+# a NEW one fails the gate as a regression -- which is what it is. They are
+# surfaced here as well because "<name> compile" in a regression list reads as
+# "the compiler rejected this program", and a segfault is a different and worse
+# statement about the compiler.
+CRASHED_COUNT="$(grep -c . "$WORK/crashed.txt" 2>/dev/null || true)"
+if [ "${CRASHED_COUNT:-0}" -gt 0 ]; then
+  echo "[madaros-corpus] $CRASHED_COUNT program(s) SEGFAULTED the compiler (exit 139):" >&2
+  sed 's/^/    !! /' "$WORK/crashed.txt" >&2
+  echo "    these are counted as compile failures below, not excused" >&2
+fi
+
 if [[ "$REFRESH" == "1" ]]; then
   {
     echo "# Failure baseline for tests/run-pass under the modular Madaros compiler."
@@ -158,6 +246,12 @@ if [[ "$REFRESH" == "1" ]]; then
     echo "# Regenerate:"
     echo "#   SOUNIO_MADAROS_CORPUS_BIN=<madaros> SOUNIO_MADAROS_CORPUS_REFRESH=1 \\"
     echo "#     bash scripts/ci/madaros_corpus_regression_gate.sh"
+    echo "#"
+    echo "# Stack: Madaros needs far more than the default 8 MiB. The gate raises"
+    echo "# ulimit -s to SOUNIO_MADAROS_CORPUS_STACK_KB (default 1048576) and refuses"
+    echo "# to run if it cannot; do not regenerate by bypassing that. On a small stack"
+    echo "# compiles SIGSEGV (exit 139) and land here as false compile/run/stdout entries."
+    echo "# This file was generated under ulimit -s $(ulimit -s) KiB."
     echo "#"
     echo "# One entry per failing program:
 #   '<name>.sio compile'  -- did not compile
@@ -171,6 +265,7 @@ if [[ "$REFRESH" == "1" ]]; then
   echo "[madaros-corpus] baseline refreshed: $BASELINE ($ACTUAL_COUNT entries)"
   exit 0
 fi
+
 
 [[ -f "$BASELINE" ]] || fail "missing baseline $BASELINE -- generate it with SOUNIO_MADAROS_CORPUS_REFRESH=1"
 

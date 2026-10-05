@@ -22,8 +22,8 @@ use check::refinement::*
 use check::units::*
 use check::env::*
 use check::traits::*
-use check::mod::{check_program, check_program_epistemic_into, check_items_verdict_boot4, check_modules_verdict_boot4_with_visibility}
-use check::specializer::{specialize_generics, spec_last_instantiated, spec_append_item_lists}
+use check::mod::{check_program, check_program_epistemic_into, check_items_verdict_boot4, check_items_verdict_boot4_with_module_map, check_modules_verdict_boot4_with_visibility}
+use check::specializer::{specialize_generics, specialize_generics_multi, spec_last_instantiated, spec_append_item_lists, spec_report_any_specializer_failure, spec_item_module_overflowed}
 use check::ownership::*
 use check::lint::*
 use check::layout::*
@@ -58,9 +58,11 @@ use frontend_callsite_probe::{run_frontend_callsite_probe}
 use claim_executor::{claim_executor_verify}
 use parser::parser::{parser_last_error_count}
 use ir::opt_strategy::{ir_opt_apply_strategy, ir_opt_find_return_vreg, ir_opt_max_label, ir_opt_max_vreg}
-use ir::lower::{ir_patch_validated_calls, lower_program_to_ir, lower_program_to_ir_with_epistemic, lower_program_to_ir_probe_summary_ref, lower_program_to_ir_probe_summary_box_ref, lower_program_to_ir_summary_box_probe_with_epistemic_ref, lower_program_function_body_from_summary_with_epistemic_ref, lower_program_to_ir_summary_flat_with_epistemic_ref, lower_program_function_body_from_summary_flat_with_epistemic_ref, lower_program_to_ir_summary_flat_owned_with_epistemic_ref}
+use ir::lower::{ir_patch_validated_calls, lower_program_to_ir, lower_program_to_ir_with_epistemic, lower_program_to_ir_probe_summary_ref, lower_program_to_ir_probe_summary_box_ref, lower_program_to_ir_summary_box_probe_with_epistemic_ref, lower_program_function_body_from_summary_with_epistemic_ref, lower_program_to_ir_summary_flat_with_epistemic_ref, lower_program_function_body_from_summary_flat_with_epistemic_ref, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_to_ir_summary_with_epistemic}
 use ir::lower::{lower_program_to_ir_with_epistemic_ref, lower_program_to_ir_ordered_with_epistemic_boxed_trace_ref, lower_monolithic_public_probe_trace_set}
 use ir::lower::{lower_program_function_body_from_program_with_epistemic_ref}
+use ir::lower::{lower_program_function_body_from_summary_with_epistemic}
+use ir::lower::{lower_fn_tuple_arr_reset, lower_fn_tuple_f64_arrays_collect, lower_fn_tuple_f64_array_mask}
 use ir::normalize::*
 use ir::const_prop::{cp_check_load_imm, cp_empty_instrs, cp_make_test_func, cp_optimize_function}
 use ir::dce::{dce_check_nop, dce_empty_instrs, dce_make_test_func, dce_optimize_function}
@@ -241,8 +243,8 @@ fn run_int_to_string_bench(iterations: i64) -> i64 with Mut, Panic, Div {
 // ============================================================================
 
 pub struct ArgList {
-    items: [string; 64],
-    len: i64,
+    pub items: [string; 64],
+    pub len: i64,
 }
 
 fn arg_list_get(lst: ArgList, i: i64) -> string with Mut, Panic {
@@ -385,7 +387,7 @@ fn run_probe_monolithic_public_lower_call(args: ArgList, flag_index: i64) with I
     var main_fn: i64 = -1
     var fi: i64 = 0
     while fi < module.fn_count {
-        let func = module.functions[fi as usize]
+        let func = ir_fn_get(&module, fi as usize)
         if func.compile_strategy == IR_STRATEGY_BSS_GLOBAL {
             bss_globals = bss_globals + 1
         }
@@ -398,7 +400,7 @@ fn run_probe_monolithic_public_lower_call(args: ArgList, flag_index: i64) with I
     var f64_adds: i64 = 0
     var i64_adds: i64 = 0
     if main_fn >= 0 {
-        let func = module.functions[main_fn as usize]
+        let func = ir_fn_get(&module, main_fn as usize)
         var ii: i64 = 0
         while ii < func.instr_count {
             let instr = ir_arena_load(ir_region_slot_r(func.region, (ii)))
@@ -650,7 +652,7 @@ fn run_probe_ir_opt_strategy(args: ArgList, flag_index: i64) with IO, Mut, Panic
         print("\n")
         var fi: i64 = 0
         while fi < (*ir_result.module).fn_count {
-            let func = (*ir_result.module).functions[fi as usize]
+            let func = ir_fn_get(&(*ir_result.module), fi as usize)
             print("probe_ir_opt_strategy: fn=")
             compiler_manifest_print_name(func.name)
             print(" strategy=")
@@ -717,7 +719,7 @@ fn run_probe_ir_opt_strategy_boxed(args: ArgList, flag_index: i64) with IO, Mut,
                 print("\n")
                 var fi: i64 = 0
                 while fi < (*module_box).fn_count {
-                    let func = (*module_box).functions[fi as usize]
+                    let func = ir_fn_get(&(*module_box), fi as usize)
                     print("probe_ir_opt_strategy_boxed: fn=")
                     compiler_manifest_print_name(func.name)
                     print(" strategy=")
@@ -1265,9 +1267,9 @@ struct CompilerOptions {
 }
 
 pub struct CompileResult {
-    success: bool,
-    errors: CompileErrors,
-    output: string,
+    pub success: bool,
+    pub errors: CompileErrors,
+    pub output: string,
 }
 
 struct CompilerIrLoadResult {
@@ -1277,12 +1279,12 @@ struct CompilerIrLoadResult {
 }
 
 pub struct CompilerManifestLoadResult {
-    ok: bool,
-    errors: CompileErrors,
-    epistemic: IrEpistemicSection,
+    pub ok: bool,
+    pub errors: CompileErrors,
+    pub epistemic: IrEpistemicSection,
 }
 
-fn compiler_ir_load_result_error(errors: CompileErrors) -> CompilerIrLoadResult {
+fn compiler_ir_load_result_error(errors: CompileErrors) -> CompilerIrLoadResult with Alloc, Panic, Div, Mut {
     CompilerIrLoadResult {
         ok: false,
         errors: errors,
@@ -1366,16 +1368,23 @@ fn compiler_mode_source_arg(args: ArgList, flag_index: i64, mode_name: string) -
     return ""
 }
 
-// Returns the Nth (0-based) positional (non-flag, non -o-value) argument after
-// flag_index, or fallback if there are fewer than N+1 positionals. Lets the
-// source-compile modes accept `<src.sio> <out.elf>` (out as 2nd positional)
-// in addition to `-o <out>`, matching the documented `mc src.sio out.elf` form.
-fn compiler_mode_positional_arg(args: ArgList, flag_index: i64, which: i64, fallback: string) -> string with Mut, Panic, Div {
+// Scans for the Nth (0-based) positional argument after flag_index and returns
+// "" when there are fewer than N+1 of them. A positional is a non-empty
+// argument that does not start with `-` and is not the VALUE of a
+// value-carrying flag; `-o`, `--output` and `--to` each consume the token that
+// follows them. "" can never be a positional here (str_len(arg) > 0 is
+// required), so it is a safe not-found marker for the two wrappers below.
+//
+// The union of the three flags is deliberate. Before this was unified there
+// were two bodies of `compiler_mode_positional_arg`: the live one skipped
+// `-o`/`--output` only, so in `--ontology-map --to TARGET CURIE` the value
+// TARGET was taken as positional 0; the dead one skipped `--to` only.
+fn compiler_mode_positional_scan(args: ArgList, flag_index: i64, which: i64) -> string with Mut, Panic, Div {
     var i: i64 = flag_index + 1
     var seen: i64 = 0
     while i < args.len {
         let arg = arg_list_get(args, i)
-        if arg == "-o" || arg == "--output" {
+        if arg == "-o" || arg == "--output" || arg == "--to" {
             i = i + 2
         } else if str_len(arg) > 0 && str_char_at(arg, 0) != 45 {
             if seen == which {
@@ -1387,7 +1396,31 @@ fn compiler_mode_positional_arg(args: ArgList, flag_index: i64, which: i64, fall
             i = i + 1
         }
     }
+    return ""
+}
+
+// OPTIONAL positional: returns `fallback` when absent. Lets the source-compile
+// modes accept `<src.sio> <out.elf>` (out as 2nd positional) in addition to
+// `-o <out>`, matching the documented `mc src.sio out.elf` form.
+fn compiler_mode_positional_arg(args: ArgList, flag_index: i64, which: i64, fallback: string) -> string with Mut, Panic, Div {
+    let found = compiler_mode_positional_scan(args, flag_index, which)
+    if str_len(found) > 0 {
+        return found
+    }
     return fallback
+}
+
+// REQUIRED positional: panics naming the mode when absent. The ontology modes
+// have no defensible default for a CURIE or a query, and before this split they
+// were calling the optional form with the mode name in the fallback slot, so a
+// missing argument became the mode name and the command exited 0.
+fn compiler_mode_required_positional(args: ArgList, flag_index: i64, position: i64, mode_name: string) -> string with Mut, Panic, Div {
+    let found = compiler_mode_positional_scan(args, flag_index, position)
+    if str_len(found) > 0 {
+        return found
+    }
+    panic(mode_name + ": missing positional argument")
+    return ""
 }
 
 fn compiler_mode_has_flag(args: ArgList, needle: string) -> bool with Mut, Panic, Div {
@@ -1414,27 +1447,6 @@ fn compiler_mode_option_string(args: ArgList, short_flag: string, long_flag: str
         i = i + 1
     }
     fallback
-}
-
-fn compiler_mode_positional_arg(args: ArgList, flag_index: i64, position: i64, mode_name: string) -> string with Mut, Panic, Div {
-    var found: i64 = 0
-    var i: i64 = flag_index + 1
-    while i < args.len {
-        let arg = arg_list_get(args, i)
-        if arg == "--to" {
-            i = i + 2
-        } else if str_len(arg) > 0 && str_char_at(arg, 0) != 45 {
-            if found == position {
-                return arg
-            }
-            found = found + 1
-            i = i + 1
-        } else {
-            i = i + 1
-        }
-    }
-    panic(mode_name + ": missing positional argument")
-    return ""
 }
 
 fn compiler_check_ok_message() -> string {
@@ -1518,7 +1530,7 @@ fn compiler_try_single_module_check(path: string) -> i64 with IO, Mut, Panic, Di
     }
 
     let check_result = check_program(program)
-    if check_result.had_error {
+    if spec_report_any_specializer_failure() || check_result.had_error {
         println("error: type checking failed")
         return 0 - 1
     }
@@ -1573,7 +1585,7 @@ fn compiler_make_render_stub_function(item: Item) -> IrFunction with Mut, Panic,
     func
 }
 
-fn compiler_build_render_stub_ir(program: Program) -> IrModule with Mut, Panic, Div {
+fn compiler_build_render_stub_ir(program: Program) -> IrModule with Alloc, Mut, Panic, Div {
     var module = ir_empty_module()
     var cur = program.items
     var done = false
@@ -1582,7 +1594,7 @@ fn compiler_build_render_stub_ir(program: Program) -> IrModule with Mut, Panic, 
             Some(list) => {
                 let item = (*list).head
                 if item.kind == ItemKind::ItemFn && module.fn_count < 1024 {
-                    module.functions[module.fn_count as usize] = compiler_make_render_stub_function(item)
+                    ir_fn_set(&! module, module.fn_count as usize, compiler_make_render_stub_function(item))
                     module.fn_count = module.fn_count + 1
                 }
                 cur = (*list).tail
@@ -1711,7 +1723,7 @@ fn compiler_ir_function_serialized_size(func: IrFunction) -> i64 {
     696 + (func.instr_count * 232)
 }
 
-fn compiler_ir_module_serialized_size(module: IrModule) -> i64 with Mut {
+fn compiler_ir_module_serialized_size(module: IrModule) -> i64 with Mut, Panic, Div {
     if !compiler_ir_epistemic_empty(module.epistemic) {
         return 0 - 1
     }
@@ -1720,7 +1732,7 @@ fn compiler_ir_module_serialized_size(module: IrModule) -> i64 with Mut {
     total = total + (module.string_count * 136)
     var i: i64 = 0
     while i < module.fn_count {
-        total = total + compiler_ir_function_serialized_size(module.functions[i as usize])
+        total = total + compiler_ir_function_serialized_size(ir_fn_get(&module, i as usize))
         i = i + 1
     }
     total
@@ -1838,6 +1850,12 @@ fn compiler_ir_ser_binary_op_tag(op: BinaryOp) -> i64 {
         BinaryOp::OpConcat => 18,
         BinaryOp::OpRange => 19,
         BinaryOp::OpRangeInclusive => 20,
+        // Findings 11 (#2084): unsigned counterparts. The new tag numbers
+        // (21/22/23) MUST match the read_binary_op switch in this file and
+        // serialize.sio. The numbers are bumped past the prior last (20).
+        BinaryOp::OpUDiv => 21,
+        BinaryOp::OpURem => 22,
+        BinaryOp::OpUShr => 23,
     }
 }
 
@@ -1848,6 +1866,7 @@ fn compiler_ir_ser_unary_op_tag(op: UnaryOp) -> i64 {
         UnaryOp::OpRef => 2,
         UnaryOp::OpRefMut => 3,
         UnaryOp::OpDeref => 4,
+        UnaryOp::OpBitNot => 5,
     }
 }
 
@@ -1913,7 +1932,7 @@ fn compiler_ir_serialize_non_ep_module(module: IrModule, out_buf: &![i8; 131072]
     pos = compiler_ir_ser_write_i64(out_buf, pos, module.fn_count)
     var i: i64 = 0
     while i < module.fn_count {
-        pos = compiler_ir_ser_write_function(out_buf, pos, module.functions[i as usize])
+        pos = compiler_ir_ser_write_function(out_buf, pos, ir_fn_get(&module, i as usize))
         i = i + 1
     }
 
@@ -1963,10 +1982,10 @@ fn compiler_ir_copy_progress(src_pos: i64, dst_pos: i64) -> CompilerIrCopyProgre
 }
 
 pub struct CompilerIrRoundtripResult {
-    ok: bool,
-    out_len: i64,
-    fn_count: i64,
-    string_count: i64,
+    pub ok: bool,
+    pub out_len: i64,
+    pub fn_count: i64,
+    pub string_count: i64,
 }
 
 fn compiler_ir_roundtrip_result(ok: bool, out_len: i64, fn_count: i64, string_count: i64) -> CompilerIrRoundtripResult {
@@ -1996,6 +2015,9 @@ fn compiler_ir_roundtrip_non_ep_buffer(in_buf: &![i8; 131072], len: i64, out_buf
     if (*in_buf)[0] != (83 as i8) || (*in_buf)[1] != (79 as i8) || (*in_buf)[2] != (73 as i8) || (*in_buf)[3] != (82 as i8) {
         return compiler_ir_roundtrip_result(false, 0, 0, 0)
     }
+    let soir_version = (*in_buf)[4]
+    let legacy_fn_header_bytes: i64 = if soir_version >= 3 { 704 } else { 696 }
+    let instr_bytes_each: i64 = if soir_version >= 5 { 240 } else { 232 }
 
     var in_pos: i64 = 0
     var out_pos: i64 = 0
@@ -2013,17 +2035,27 @@ fn compiler_ir_roundtrip_non_ep_buffer(in_buf: &![i8; 131072], len: i64, out_buf
 
     var i: i64 = 0
     while i < fn_count {
-        if in_pos + 696 > len {
+        var fn_header_bytes = legacy_fn_header_bytes
+        if soir_version >= 5 {
+            let reg_count = compiler_ir_read_i64_at(in_buf, in_pos + 144)
+            var float_word_count = (reg_count + 31) / 32
+            if float_word_count < 0 { float_word_count = 0 }
+            if float_word_count > 64 { float_word_count = 64 }
+            // SOIR v5 extends the v3 header with is_sret, sret_dest_reg, and
+            // float_word_count before the variable float-bit words.
+            fn_header_bytes = fn_header_bytes + 24 + float_word_count * 8
+        }
+        if in_pos + fn_header_bytes > len {
             return compiler_ir_roundtrip_result(false, 0, fn_count, 0)
         }
         let instr_count = compiler_ir_read_i64_at(in_buf, in_pos + 136)
         if instr_count < 0 {
             return compiler_ir_roundtrip_result(false, 0, fn_count, 0)
         }
-        let fn_header_copy = compiler_ir_copy_bytes(in_buf, in_pos, out_buf, out_pos, 696)
+        let fn_header_copy = compiler_ir_copy_bytes(in_buf, in_pos, out_buf, out_pos, fn_header_bytes)
         in_pos = fn_header_copy.src_pos
         out_pos = fn_header_copy.dst_pos
-        let instr_bytes = instr_count * 232
+        let instr_bytes = instr_count * instr_bytes_each
         if instr_bytes < 0 || in_pos + instr_bytes > len {
             return compiler_ir_roundtrip_result(false, 0, fn_count, 0)
         }
@@ -2118,6 +2150,22 @@ fn run_emit_lean_obligations(args: ArgList, flag_index: i64) with IO, Mut, Panic
 }
 
 fn compiler_visibility_preflight(source_path: string) -> bool with IO, Mut, Panic, Div, Alloc {
+    // Copilot review (PR #2515): AST_PATH_RANGE_NAME_OVERFLOWED and
+    // AST_NAMED_ITEM_TERMINAL_OVERFLOWED (parser/ast.sio) are durable
+    // process-global flags this function's own verdicts below fold in
+    // (ast_path_range_name_overflowed() / ast_named_item_terminal_overflowed()),
+    // but this IS `souc check`'s actual top-level compile entry --
+    // `run_check_mode` calls this directly, doing its own closure walk /
+    // specializer / checker calls, and never reaches
+    // module_frontend_global_init_compile_begin or
+    // bridge_lower_single_module_box (self-hosted/compiler/module_frontend.sio),
+    // the two places those flags already get reset. A prior `check` in the
+    // same long-lived process that hit either overflow left it durable
+    // across every LATER, unrelated `check` call, which then failed on
+    // source that never overflowed. Reset both here too, before the
+    // closure walk that first exercises them.
+    ast_path_range_name_reset()
+    ast_named_item_terminal_reset()
     var closure = ModuleClosure {
         paths: [""; 256],
         edge_callers: [""; 512],
@@ -2178,7 +2226,25 @@ fn compiler_visibility_preflight(source_path: string) -> bool with IO, Mut, Pani
             programs[0].items,
             source_path
         )
-        return single_verdict == 0
+        // Round 12 (review comment 4100990481): a named-item-terminal
+        // registry overflow (ast_named_item_terminal_overflowed(),
+        // parser/ast.sio) was previously only propagated through
+        // ir/lower.sio's lower_hard_error_pending(), which `souc check`
+        // never calls -- compiler_visibility_preflight runs the
+        // specializer/checker only, so a check-only compilation with more
+        // than 4096 named imports could report success after entries were
+        // dropped, letting the module registries treat later named imports
+        // as module qualifiers. Fold the same flag into this verdict too.
+        // Round 13 (review comment 4103152059): same reasoning for
+        // spec_item_module_overflowed() (check::specializer) -- its own
+        // overflow also only reached ir/lower.sio's hard-error mechanism,
+        // never this check-only verdict.
+        // Round 14 (review comment 4105262394): same reasoning for
+        // ast_path_range_name_overflowed() (parser/ast.sio) -- an overlong
+        // but otherwise-valid qualifier silently degraded to the non-fatal
+        // W044 path / legacy mangled-stub fallback instead of failing this
+        // verdict.
+        return !(spec_report_any_specializer_failure() || single_verdict != 0 || ast_named_item_terminal_overflowed() || spec_item_module_overflowed() || ast_path_range_name_overflowed())
     }
 
     print("run_check_mode: about to check ")
@@ -2199,7 +2265,7 @@ fn compiler_visibility_preflight(source_path: string) -> bool with IO, Mut, Pani
         merged = spec_append_item_lists(programs[mi as usize].items, merged)
         mi = mi - 1
     }
-    let specialized = specialize_generics(merged)
+    let specialized = specialize_generics_multi(merged, &! programs, closure.node_count)
     var verdict: i64 = 0
     if spec_last_instantiated() {
         if str_eq(read_env("SOUNIO_MM_SPEC_TRACE"), "1") {
@@ -2207,7 +2273,19 @@ fn compiler_visibility_preflight(source_path: string) -> bool with IO, Mut, Pani
             print_int(closure.node_count)
             print(" modules\n")
         }
-        verdict = check_items_verdict_boot4(specialized)
+        // check_items_verdict_boot4 allocates ONE Checker whose current_module_id
+        // never leaves 0 (see check_items_verdict_boot4_with_module_map's own
+        // comment): checker_path_qualifier_all_modules_known and every
+        // defining_module_id-keyed check silently compared every module's own
+        // items against module 0's registrations here, regardless of which
+        // module actually declared them. check_items_verdict_boot4_with_module_map
+        // fixes this by attributing each item in `specialized` back to its real
+        // declaring module via check::specializer's item->module registry
+        // (populated by the specialize_generics_multi call just above).
+        // Copilot review (PR #2515), comment 4113458034: also pass `programs`/
+        // `closure.node_count` through for the real per-module AstPath
+        // (current_module), not just the id.
+        verdict = check_items_verdict_boot4_with_module_map(specialized, empty_path(), &!programs, closure.node_count)
     } else {
         verdict = check_modules_verdict_boot4_with_visibility(
             &!programs,
@@ -2228,7 +2306,22 @@ fn compiler_visibility_preflight(source_path: string) -> bool with IO, Mut, Pani
         print_int(closure.node_count)
         print(" module(s); the diagnostics above name the offending declarations\n")
     }
-    verdict == 0
+    // Round 12 (review comment 4100990481): see the single-module return
+    // above -- this multi-module verdict has the same gap. Round 13
+    // (comment 4103152059) added spec_item_module_overflowed() alongside it.
+    if ast_named_item_terminal_overflowed() {
+        print("run_check_mode: named-item-terminal registry overflowed; qualified-call checking is incomplete for whichever names dropped past the cap\n")
+    }
+    if spec_item_module_overflowed() {
+        print("run_check_mode: item->module ownership registry overflowed; module attribution is incomplete for whichever items dropped past the cap\n")
+    }
+    // Round 14 (review comment 4105262394): see the single-module return
+    // above -- this multi-module verdict has the same gap for
+    // ast_path_range_name_overflowed().
+    if ast_path_range_name_overflowed() {
+        print("run_check_mode: a qualifier path exceeded the 384-byte Name buffer while joining; qualified-call checking is incomplete for whichever call(s) hit that overlong qualifier\n")
+    }
+    !(spec_report_any_specializer_failure() || verdict != 0 || ast_named_item_terminal_overflowed() || spec_item_module_overflowed() || ast_path_range_name_overflowed())
 }
 
 fn run_science_boundary_closure_report(
@@ -2459,26 +2552,26 @@ fn run_emit_so_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Al
 }
 
 fn run_ontology_resolve_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
-    let curie = compiler_mode_positional_arg(args, flag_index, 0, "--ontology-resolve")
+    let curie = compiler_mode_required_positional(args, flag_index, 0, "--ontology-resolve")
     let term = ontology_resolve_curie(curie)
     ontology_print_term(term)
 }
 
 fn run_ontology_search_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
-    let query = compiler_mode_positional_arg(args, flag_index, 0, "--ontology-search")
+    let query = compiler_mode_required_positional(args, flag_index, 0, "--ontology-search")
     let results = ontology_search_text(query)
     ontology_print_search_results(results)
 }
 
 fn run_ontology_ancestors_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
-    let curie = compiler_mode_positional_arg(args, flag_index, 0, "--ontology-ancestors")
+    let curie = compiler_mode_required_positional(args, flag_index, 0, "--ontology-ancestors")
     let results = ontology_ancestor_terms(curie)
     ontology_print_search_results(results)
 }
 
 fn run_ontology_is_subclass_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
-    let child = compiler_mode_positional_arg(args, flag_index, 0, "--ontology-is-subclass")
-    let parent = compiler_mode_positional_arg(args, flag_index, 1, "--ontology-is-subclass")
+    let child = compiler_mode_required_positional(args, flag_index, 0, "--ontology-is-subclass")
+    let parent = compiler_mode_required_positional(args, flag_index, 1, "--ontology-is-subclass")
     if ontology_is_subclass_of(child, parent) {
         println("true")
     } else {
@@ -2487,7 +2580,7 @@ fn run_ontology_is_subclass_mode(args: ArgList, flag_index: i64) with IO, Mut, P
 }
 
 fn run_ontology_map_mode(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
-    let source_curie = compiler_mode_positional_arg(args, flag_index, 0, "--ontology-map")
+    let source_curie = compiler_mode_required_positional(args, flag_index, 0, "--ontology-map")
     let target_ontology = compiler_mode_option_string(args, "", "--to", "")
     if str_len(target_ontology) <= 0 {
         panic("--ontology-map: missing --to <ontology>")
@@ -2791,26 +2884,26 @@ fn run_ontology_cli(args: ArgList, command_index: i64) with IO, Mut, Panic, Div,
 
     let subcommand = arg_list_get(args, command_index + 1)
     if subcommand == "resolve" {
-        let curie = compiler_mode_positional_arg(args, command_index + 1, 0, "ontology resolve")
+        let curie = compiler_mode_required_positional(args, command_index + 1, 0, "ontology resolve")
         let term = ontology_resolve_curie(curie)
         ontology_print_term(term)
         return
     }
     if subcommand == "search" {
-        let query = compiler_mode_positional_arg(args, command_index + 1, 0, "ontology search")
+        let query = compiler_mode_required_positional(args, command_index + 1, 0, "ontology search")
         let results = ontology_search_text(query)
         ontology_print_search_results(results)
         return
     }
     if subcommand == "ancestors" {
-        let curie = compiler_mode_positional_arg(args, command_index + 1, 0, "ontology ancestors")
+        let curie = compiler_mode_required_positional(args, command_index + 1, 0, "ontology ancestors")
         let results = ontology_ancestor_terms(curie)
         ontology_print_search_results(results)
         return
     }
     if subcommand == "is-subclass" {
-        let child = compiler_mode_positional_arg(args, command_index + 1, 0, "ontology is-subclass")
-        let parent = compiler_mode_positional_arg(args, command_index + 1, 1, "ontology is-subclass")
+        let child = compiler_mode_required_positional(args, command_index + 1, 0, "ontology is-subclass")
+        let parent = compiler_mode_required_positional(args, command_index + 1, 1, "ontology is-subclass")
         if ontology_is_subclass_of(child, parent) {
             println("true")
         } else {
@@ -2819,7 +2912,7 @@ fn run_ontology_cli(args: ArgList, command_index: i64) with IO, Mut, Panic, Div,
         return
     }
     if subcommand == "map" {
-        let source_curie = compiler_mode_positional_arg(args, command_index + 1, 0, "ontology map")
+        let source_curie = compiler_mode_required_positional(args, command_index + 1, 0, "ontology map")
         let target_ontology = compiler_mode_option_string(args, "", "--to", "")
         if str_len(target_ontology) <= 0 {
             panic("ontology map: missing --to <ontology>")
@@ -2989,7 +3082,7 @@ fn ir_call_sret(dst: i64, dest_reg: i64, fn_name: Name, fn_id: i64, arg0: i64, e
 
 // --- Zig-style wide-int witnesses (hand-built IR -> ELF, exercise nc_wide_*_into).
 // Each returns the HIGH limb so the exit code DISTINGUISHES real N-limb from fake-i64.
-fn compiler_main_make_native_v2_wide_add4_module() -> IrModule with Mut, Panic, Div {
+fn compiler_main_make_native_v2_wide_add4_module() -> IrModule with Alloc, Mut, Panic, Div {
     // i256 (4 limbs): (-1,-1,-1,0) + (1,0,0,0) -> carry cascades 0->1->2->3; hi limb = 1.
     var module = ir_empty_module()
     var func = ir_empty_function()
@@ -3006,11 +3099,11 @@ fn compiler_main_make_native_v2_wide_add4_module() -> IrModule with Mut, Panic, 
     ir_arena_store(ir_region_slot_w(func.region, (9)), ir_return(11))
     func.instr_count = 10
     func.reg_count = 12
-    module.functions[0] = func
+    ir_fn_set(&! module, 0, func)
     module.fn_count = 1
     module
 }
-fn compiler_main_make_native_v2_wide_sub_module() -> IrModule with Mut, Panic, Div {
+fn compiler_main_make_native_v2_wide_sub_module() -> IrModule with Alloc, Mut, Panic, Div {
     // i128: (hi=2,lo=0) - (hi=0,lo=1) -> borrow: hi = 2-0-1 = 1. Fake-i64 would give 2.
     var module = ir_empty_module()
     var func = ir_empty_function()
@@ -3023,11 +3116,11 @@ fn compiler_main_make_native_v2_wide_sub_module() -> IrModule with Mut, Panic, D
     ir_arena_store(ir_region_slot_w(func.region, (5)), ir_return(5))
     func.instr_count = 6
     func.reg_count = 6
-    module.functions[0] = func
+    ir_fn_set(&! module, 0, func)
     module.fn_count = 1
     module
 }
-fn compiler_main_make_native_v2_wide_mul_module() -> IrModule with Mut, Panic, Div {
+fn compiler_main_make_native_v2_wide_mul_module() -> IrModule with Alloc, Mut, Panic, Div {
     // i128: 2^32 * 2^32 = 2^64 -> lo=0, hi=1. Fake-i64 (single mul) would give 0.
     // dst base=4 (limbs 4,5); scratch at 6,7 -> reg_count must be 8.
     var module = ir_empty_module()
@@ -3041,7 +3134,7 @@ fn compiler_main_make_native_v2_wide_mul_module() -> IrModule with Mut, Panic, D
     ir_arena_store(ir_region_slot_w(func.region, (5)), ir_return(5))
     func.instr_count = 6
     func.reg_count = 8
-    module.functions[0] = func
+    ir_fn_set(&! module, 0, func)
     module.fn_count = 1
     module
 }
@@ -3050,7 +3143,7 @@ fn compiler_main_make_native_v2_wide_mul_module() -> IrModule with Mut, Panic, D
 // whose low limb is identical to i64 and so undetectable). a*a = 2^64 -> limbs lo=0,hi=1;
 // >>64 (1 limb) moves the hi limb into limb 0; returning limb 0 yields 1 (a broken/no-op
 // shift would return the un-shifted low limb = 0).
-fn compiler_main_make_native_v2_wide_shr_module() -> IrModule with Mut, Panic, Div {
+fn compiler_main_make_native_v2_wide_shr_module() -> IrModule with Alloc, Mut, Panic, Div {
     var module = ir_empty_module()
     var func = ir_empty_function()
     func.name = ir_name_from_bytes(109, 97, 105, 110, 4)
@@ -3063,13 +3156,13 @@ fn compiler_main_make_native_v2_wide_shr_module() -> IrModule with Mut, Panic, D
     ir_arena_store(ir_region_slot_w(func.region, (6)), ir_return(8))                // return low limb of shifted (= 1)
     func.instr_count = 7
     func.reg_count = 10
-    module.functions[0] = func
+    ir_fn_set(&! module, 0, func)
     module.fn_count = 1
     module
 }
 // (15 * 2^64) / 3 = 5 * 2^64 -> hi limb 5. Single-limb divisor (3). Proves N-limb
 // division source-independently; return the high limb so the exit code observes it.
-fn compiler_main_make_native_v2_wide_div_module() -> IrModule with Mut, Panic, Div {
+fn compiler_main_make_native_v2_wide_div_module() -> IrModule with Alloc, Mut, Panic, Div {
     var module = ir_empty_module()
     var func = ir_empty_function()
     func.name = ir_name_from_bytes(109, 97, 105, 110, 4)
@@ -3081,12 +3174,12 @@ fn compiler_main_make_native_v2_wide_div_module() -> IrModule with Mut, Panic, D
     ir_arena_store(ir_region_slot_w(func.region, (5)), ir_return(5))                // return hi limb = 5
     func.instr_count = 6
     func.reg_count = 6
-    module.functions[0] = func
+    ir_fn_set(&! module, 0, func)
     module.fn_count = 1
     module
 }
 // (2^64 + 1) % 7 = 3. Single-limb divisor 7. A low-limb-only impl would give 1 % 7 = 1.
-fn compiler_main_make_native_v2_wide_mod_module() -> IrModule with Mut, Panic, Div {
+fn compiler_main_make_native_v2_wide_mod_module() -> IrModule with Alloc, Mut, Panic, Div {
     var module = ir_empty_module()
     var func = ir_empty_function()
     func.name = ir_name_from_bytes(109, 97, 105, 110, 4)
@@ -3098,7 +3191,7 @@ fn compiler_main_make_native_v2_wide_mod_module() -> IrModule with Mut, Panic, D
     ir_arena_store(ir_region_slot_w(func.region, (5)), ir_return(4))                // return low limb = 3
     func.instr_count = 6
     func.reg_count = 6
-    module.functions[0] = func
+    ir_fn_set(&! module, 0, func)
     module.fn_count = 1
     module
 }
@@ -3106,7 +3199,7 @@ fn compiler_main_make_native_v2_wide_mod_module() -> IrModule with Mut, Panic, D
 // 5*D = 5*2^64+5, so N = 5*D + 100 -> quotient 5, remainder 100. Returns the quotient low
 // limb = 5. The divisor's HIGH limb (1) is nonzero, so the single-limb schoolbook can't be
 // used; a low-limb-only impl dividing by D's limb0 (=1) would return lo(N)=105 (≠5).
-fn compiler_main_make_native_v2_wide_divfull_module() -> IrModule with Mut, Panic, Div {
+fn compiler_main_make_native_v2_wide_divfull_module() -> IrModule with Alloc, Mut, Panic, Div {
     var module = ir_empty_module()
     var func = ir_empty_function()
     func.name = ir_name_from_bytes(109, 97, 105, 110, 4)
@@ -3118,14 +3211,14 @@ fn compiler_main_make_native_v2_wide_divfull_module() -> IrModule with Mut, Pani
     ir_arena_store(ir_region_slot_w(func.region, (5)), ir_return(4))                // quotient low limb = 5
     func.instr_count = 6
     func.reg_count = 10
-    module.functions[0] = func
+    ir_fn_set(&! module, 0, func)
     module.fn_count = 1
     module
 }
 // FULL N/N remainder by a MULTI-LIMB divisor. N = 7*2^64+200, D = 2^64+1. 7*D = 7*2^64+7,
 // N = 7*D + 193 -> remainder 193. Returns the remainder low limb = 193. A low-limb-only impl
 // (% D's limb0 = 1) would return 0.
-fn compiler_main_make_native_v2_wide_modfull_module() -> IrModule with Mut, Panic, Div {
+fn compiler_main_make_native_v2_wide_modfull_module() -> IrModule with Alloc, Mut, Panic, Div {
     var module = ir_empty_module()
     var func = ir_empty_function()
     func.name = ir_name_from_bytes(109, 97, 105, 110, 4)
@@ -3137,13 +3230,13 @@ fn compiler_main_make_native_v2_wide_modfull_module() -> IrModule with Mut, Pani
     ir_arena_store(ir_region_slot_w(func.region, (5)), ir_return(4))                // remainder low limb = 193
     func.instr_count = 6
     func.reg_count = 10
-    module.functions[0] = func
+    ir_fn_set(&! module, 0, func)
     module.fn_count = 1
     module
 }
 // 2^64 < 2^65 -> 1. a=[0,1] (2^64), b=[0,2] (2^65); the HIGH limb (1<2) decides. A
 // low-limb-only impl (0<0) would give 0. cmp_op=2 (Lt).
-fn compiler_main_make_native_v2_wide_cmp_module() -> IrModule with Mut, Panic, Div {
+fn compiler_main_make_native_v2_wide_cmp_module() -> IrModule with Alloc, Mut, Panic, Div {
     var module = ir_empty_module()
     var func = ir_empty_function()
     func.name = ir_name_from_bytes(109, 97, 105, 110, 4)
@@ -3155,13 +3248,13 @@ fn compiler_main_make_native_v2_wide_cmp_module() -> IrModule with Mut, Panic, D
     ir_arena_store(ir_region_slot_w(func.region, (5)), ir_return(4))
     func.instr_count = 6
     func.reg_count = 6
-    module.functions[0] = func
+    ir_fn_set(&! module, 0, func)
     module.fn_count = 1
     module
 }
 // Non-limb-aligned funnel shift: 2^100 >> 96 = 2^4 = 16. src limbs lo=0, hi=2^36; shift
 // 96 = 64+32 (q=1, r=32). A limb-aligned-only impl (>>64) would give 2^36; low-limb -> 0.
-fn compiler_main_make_native_v2_wide_shr_unaligned_module() -> IrModule with Mut, Panic, Div {
+fn compiler_main_make_native_v2_wide_shr_unaligned_module() -> IrModule with Alloc, Mut, Panic, Div {
     var module = ir_empty_module()
     var func = ir_empty_function()
     func.name = ir_name_from_bytes(109, 97, 105, 110, 4)
@@ -3171,7 +3264,7 @@ fn compiler_main_make_native_v2_wide_shr_unaligned_module() -> IrModule with Mut
     ir_arena_store(ir_region_slot_w(func.region, (3)), ir_return(2))                    // return low limb = 16
     func.instr_count = 4
     func.reg_count = 4
-    module.functions[0] = func
+    ir_fn_set(&! module, 0, func)
     module.fn_count = 1
     module
 }
@@ -3363,16 +3456,19 @@ fn compiler_try_default_native_v2_single(opts: CompilerOptions) -> bool with IO,
         return false
     }
 
-    let bridge_exit = module_frontend_compile_imported_to_file(opts.input_file, opts.output_file, opts.optimize)
+    let output_file: string = opts.output_file
+    let bridge_exit = module_frontend_compile_imported_to_file(opts.input_file, output_file, opts.optimize)
     if bridge_exit != 0 {
         print("Compilation failed!\n\nErrors:\n  error: native-v2 bridge compilation failed\n")
         panic("compile failed")
     }
     print("Written to ")
-    print(opts.output_file)
+    print(output_file)
     print("\n")
     println("Compilation successful!")
-    println("   Output: " + opts.output_file)
+    print("   Output: ")
+    print(output_file)
+    print("\n")
     true
 }
 
@@ -3780,6 +3876,11 @@ fn print_help() with IO {
     println("  --probe-load-ir <source.sio>  Probe parse/resolve/typecheck/IR lowering path")
     println("  --probe-load-ir-trace <source.sio>  Probe traced IR lowering path with stage counters")
     println("  --probe-native-streaming <source.sio>  Probe summary/body/native-v2 status for the single-module streaming path")
+    println("  --probe-filtered-body-lower <source.sio>  Probe the non-flat lower_program_bodies_filtered_ref lane, one function at a time")
+    println("  --probe-filtered-body-reset-boundary <file_a.sio> <file_b.sio> <fn_name>  Lower fn_name through lower_program_function_body_from_summary_with_epistemic_ref for two different inputs in one process and report its mask after each, to catch a reset-boundary leak between them")
+    println("  --probe-tuple-arr-capacity <source.sio> <fn_name>  Collect LOWER_FN_TUPLE_ARR_* directly from raw parsed items (bypasses DCE) and report one function's mask")
+    println("  --probe-tuple-arr-reset-boundary <file_a.sio> <file_b.sio> <fn_name>  Call lower_program_to_ir on two different inputs in one process and report fn_name's mask after each, to catch a reset-boundary leak between them")
+    println("  --probe-tuple-arr-callsite-reset-boundary <file_a.sio> <file_b.sio> <fn_name>  Same as --probe-tuple-arr-reset-boundary, but through the separate lower_program_to_ir_probe_callsite public entry point")
     println("  --probe-ir-callsite <source.sio> <caller_fn> <callee_fn>  Probe lowered callsite hidden-arg behavior")
     println("  --probe-ir-opt-strategy <source.sio>  Probe ir_opt_apply_strategy() on instrumented IR fns")
     println("  --probe-wasm-dispatch <source.sio> [out.wasm]  Probe wasm dispatch marker path")
@@ -3937,7 +4038,7 @@ fn parse_options(args: ArgList) -> CompilerOptions with IO, Mut, Panic, Div {
 }
 
 fn compiler_manifest_empty_name() -> Name {
-    Name { buf: [0; 128], len: 0 }
+    Name { buf: [0; 384], len: 0 }
 }
 
 fn compiler_manifest_print_name(name: Name) with IO, Mut, Panic, Div {
@@ -5446,7 +5547,7 @@ fn compile(opts: CompilerOptions) -> CompileResult with IO, Mut, Panic, Div, All
                 // in-place reference would have made it report a different set of
                 // promotions than the ones performed. A log that lies is worse
                 // than no log.
-                var lf = (*ir_result.module).functions[li as usize]
+                var lf = ir_fn_get(&(*ir_result.module), li as usize)
                 let lcount = sprof_lookup(&profile, &lf.name)
                 let ltarget = sprof_promotion_target(lcount)
                 if ltarget >= 0 {
@@ -5633,7 +5734,7 @@ fn compiler_main_native_find_pattern4(
 fn compiler_main_find_fn(m: IrModule, name: Name) -> i64 with Mut, Panic, Div {
     var i: i64 = 0
     while i < m.fn_count {
-        if ir_name_eq(m.functions[i].name, name) {
+        if ir_name_eq(ir_fn_get(&m, i).name, name) {
             return i
         }
         i = i + 1
@@ -5728,11 +5829,11 @@ fn compiler_main_test_validated_chain_forwarding() -> bool with Mut, Panic, Div,
     inner_fn.instr_count = 1
     ir_arena_store(ir_region_slot_w(inner_fn.region, (0)), ir_return(1))
 
-    module.functions[0] = outer_fn
-    module.functions[1] = inner_fn
+    ir_fn_set(&! module, 0, outer_fn)
+    ir_fn_set(&! module, 1, inner_fn)
     ir_patch_validated_calls(&! module)
 
-    let patched_outer = module.functions[0]
+    let patched_outer = ir_fn_get(&module, 0)
     let call = ir_arena_load(ir_region_slot_r(patched_outer.region, (0)))
     // #1649 EXPERIMENT: identical predicate, bound to a local instead of being
     // the tail expression. No print, no IO. If this alone makes T10 pass, the
@@ -5774,11 +5875,11 @@ fn compiler_main_test_validated_chain_top_level_fallback() -> bool with Mut, Pan
     outer_fn.instr_count = 1
     ir_arena_store(ir_region_slot_w(outer_fn.region, (0)), ir_return(1))
 
-    module.functions[0] = main_fn
-    module.functions[1] = outer_fn
+    ir_fn_set(&! module, 0, main_fn)
+    ir_fn_set(&! module, 1, outer_fn)
     ir_patch_validated_calls(&! module)
 
-    let patched_main = module.functions[0]
+    let patched_main = ir_fn_get(&module, 0)
     let call = ir_arena_load(ir_region_slot_r(patched_main.region, (2)))
     patched_main.instr_count == 4 &&
     patched_main.reg_count == 3 &&
@@ -6018,7 +6119,7 @@ fn compiler_main_test_prof_counter_reloc_recorded() -> bool with Mut, Panic, Div
 }
 
 // Sprint 46: verify __prof_dump function is emitted when prof_counter_count > 0
-fn compiler_main_test_prof_dump_emitted() -> bool with Mut, Panic, Div {
+fn compiler_main_test_prof_dump_emitted() -> bool with Alloc, Mut, Panic, Div {
     var nc = compiler_new()
     // Simulate: 1 prof counter with fn_name "test" at .rodata offset 0
     nc.prof_counter_count = 1
@@ -6041,7 +6142,7 @@ fn compiler_main_test_prof_dump_emitted() -> bool with Mut, Panic, Div {
 }
 
 // Sprint 46: verify __prof_dump writes to stderr (fd=2) and records relocations
-fn compiler_main_test_prof_dump_writes_stderr() -> bool with Mut, Panic, Div {
+fn compiler_main_test_prof_dump_writes_stderr() -> bool with Alloc, Mut, Panic, Div {
     var nc = compiler_new()
     nc.prof_counter_count = 1
     nc.prof_counter_names[0] = 0
@@ -6105,7 +6206,7 @@ fn compiler_main_test_sprof_parse() -> bool with Mut, Panic, Div {
 }
 
 // Sprint 47: verify .sprof lookup and aggressive promotion on a hot function
-fn compiler_main_test_sprof_promotion() -> bool with Mut, Panic, Div {
+fn compiler_main_test_sprof_promotion() -> bool with Alloc, Mut, Panic, Div {
     var profile = sprof_empty_profile()
     var entry = sprof_empty_entry()
 
@@ -6133,11 +6234,11 @@ fn compiler_main_test_sprof_promotion() -> bool with Mut, Panic, Div {
     var hot_fn = ir_empty_function()
     hot_fn.name = hot_name
     hot_fn.compile_strategy = IR_STRATEGY_STANDARD
-    module.functions[0] = hot_fn
+    ir_fn_set(&! module, 0, hot_fn)
     module.fn_count = 1
 
     sprof_apply_promotion(&! module, &profile)
-    if module.functions[0].compile_strategy != IR_STRATEGY_AGGRESSIVE { return false }
+    if ir_fn_get(&module, 0).compile_strategy != IR_STRATEGY_AGGRESSIVE { return false }
 
     true
 }
@@ -6216,7 +6317,7 @@ fn compiler_main_test_inline_strategy_boost() -> bool with Mut, Div, Panic {
 }
 
 // Sprint 49: verify inl_run_pass returns valid module
-fn compiler_main_test_inline_pass_returns_module() -> bool with Mut, Div, Panic {
+fn compiler_main_test_inline_pass_returns_module() -> bool with Alloc, Mut, Div, Panic {
     var module = ir_empty_module()
 
     // Add a small callee function
@@ -6233,7 +6334,7 @@ fn compiler_main_test_inline_pass_returns_module() -> bool with Mut, Div, Panic 
     ir_arena_store(ir_region_slot_w(callee.region, (0)), ir_return(0))
     callee.instr_count = 1
     callee.reg_count = 1
-    module.functions[0] = callee
+    ir_fn_set(&! module, 0, callee)
 
     // Add a caller function
     var caller = ir_empty_function()
@@ -6245,7 +6346,7 @@ fn compiler_main_test_inline_pass_returns_module() -> bool with Mut, Div, Panic 
     ir_arena_store(ir_region_slot_w(caller.region, (0)), ir_return(0))
     caller.instr_count = 1
     caller.reg_count = 1
-    module.functions[1] = caller
+    ir_fn_set(&! module, 1, caller)
 
     module.fn_count = 2
 
@@ -6256,7 +6357,7 @@ fn compiler_main_test_inline_pass_returns_module() -> bool with Mut, Div, Panic 
 }
 
 // Sprint 50: verify layout_sort_by_profile reorders hot functions first
-fn compiler_main_test_layout_sort_hot_first() -> bool with Mut, Div, Panic {
+fn compiler_main_test_layout_sort_hot_first() -> bool with Alloc, Mut, Div, Panic {
     var module = ir_empty_module()
 
     // Function 0: "alpha" (count=10, cold)
@@ -6277,7 +6378,7 @@ fn compiler_main_test_layout_sort_hot_first() -> bool with Mut, Div, Panic {
     ir_arena_store(ir_region_slot_w(f0.region, (0)), ir_return(0))
     f0.instr_count = 1
     f0.reg_count = 1
-    module.functions[0] = f0
+    ir_fn_set(&! module, 0, f0)
 
     // Function 1: "beta" (count=5000, hot)
     var f1 = ir_empty_function()
@@ -6292,7 +6393,7 @@ fn compiler_main_test_layout_sort_hot_first() -> bool with Mut, Div, Panic {
     ir_arena_store(ir_region_slot_w(f1.region, (0)), ir_return(0))
     f1.instr_count = 1
     f1.reg_count = 1
-    module.functions[1] = f1
+    ir_fn_set(&! module, 1, f1)
 
     // Function 2: "gamma" (count=500, warm)
     var f2 = ir_empty_function()
@@ -6308,7 +6409,7 @@ fn compiler_main_test_layout_sort_hot_first() -> bool with Mut, Div, Panic {
     ir_arena_store(ir_region_slot_w(f2.region, (0)), ir_return(0))
     f2.instr_count = 1
     f2.reg_count = 1
-    module.functions[2] = f2
+    ir_fn_set(&! module, 2, f2)
 
     module.fn_count = 3
 
@@ -6334,9 +6435,9 @@ fn compiler_main_test_layout_sort_hot_first() -> bool with Mut, Div, Panic {
     if !result.reordered { return false }
 
     // Order should be: beta (5000), gamma (500), alpha (10) — descending
-    if !ir_name_eq(result.module.functions[0].name, n1) { return false }
-    if !ir_name_eq(result.module.functions[1].name, n2) { return false }
-    if !ir_name_eq(result.module.functions[2].name, n0) { return false }
+    if !ir_name_eq(ir_fn_get(&result.module, 0).name, n1) { return false }
+    if !ir_name_eq(ir_fn_get(&result.module, 1).name, n2) { return false }
+    if !ir_name_eq(ir_fn_get(&result.module, 2).name, n0) { return false }
 
     // All 3 have positive counts → all hot
     if result.hot_count != 3 { return false }
@@ -6345,7 +6446,7 @@ fn compiler_main_test_layout_sort_hot_first() -> bool with Mut, Div, Panic {
 }
 
 // Sprint 50: verify layout with empty profile preserves order
-fn compiler_main_test_layout_sort_no_profile() -> bool with Mut, Div, Panic {
+fn compiler_main_test_layout_sort_no_profile() -> bool with Alloc, Mut, Div, Panic {
     var module = ir_empty_module()
 
     // Function 0: "xx"
@@ -6363,7 +6464,7 @@ fn compiler_main_test_layout_sort_no_profile() -> bool with Mut, Div, Panic {
     ir_arena_store(ir_region_slot_w(f0.region, (0)), ir_return(0))
     f0.instr_count = 1
     f0.reg_count = 1
-    module.functions[0] = f0
+    ir_fn_set(&! module, 0, f0)
 
     // Function 1: "yy"
     var f1 = ir_empty_function()
@@ -6376,7 +6477,7 @@ fn compiler_main_test_layout_sort_no_profile() -> bool with Mut, Div, Panic {
     ir_arena_store(ir_region_slot_w(f1.region, (0)), ir_return(0))
     f1.instr_count = 1
     f1.reg_count = 1
-    module.functions[1] = f1
+    ir_fn_set(&! module, 1, f1)
 
     module.fn_count = 2
 
@@ -6389,8 +6490,8 @@ fn compiler_main_test_layout_sort_no_profile() -> bool with Mut, Div, Panic {
     if result.reordered { return false }
 
     // Names should be unchanged
-    if !ir_name_eq(result.module.functions[0].name, n0) { return false }
-    if !ir_name_eq(result.module.functions[1].name, n1) { return false }
+    if !ir_name_eq(ir_fn_get(&result.module, 0).name, n0) { return false }
+    if !ir_name_eq(ir_fn_get(&result.module, 1).name, n1) { return false }
 
     true
 }
@@ -6638,14 +6739,14 @@ fn compiler_main_test_tco_is_self_call() -> bool with Mut, Div, Panic {
 }
 
 // T40: tco_run_pass transforms self-recursive tail call (stats.transformed == 1)
-fn compiler_main_test_tco_run_pass_transforms() -> bool with Mut, Div, Panic {
+fn compiler_main_test_tco_run_pass_transforms() -> bool with Alloc, Mut, Div, Panic {
     var funcs: [IrFunction; 1024] = [ir_empty_function(); 1024]
     funcs[0 as usize] = tco_make_self_tail_call_func(0, 2, 0)
     let module = tco_make_test_module(funcs, 1)
     let result = tco_run_pass(module)
     let out_module = result.0
     let ctx = result.1
-    let out_func = out_module.functions[0]
+    let out_func = ir_fn_get(&out_module, 0)
     var saw_jump = false
     var saw_self_call = false
     var i: i64 = 0
@@ -6663,7 +6764,7 @@ fn compiler_main_test_tco_run_pass_transforms() -> bool with Mut, Div, Panic {
 }
 
 // T41: tco_run_pass leaves non-tail call unchanged (stats.transformed == 0)
-fn compiler_main_test_tco_run_pass_no_transform() -> bool with Mut, Div, Panic {
+fn compiler_main_test_tco_run_pass_no_transform() -> bool with Alloc, Mut, Div, Panic {
     let target_name = tco_make_func_name(103 as i8, 1)
     var funcs: [IrFunction; 1024] = [ir_empty_function(); 1024]
     funcs[0 as usize] = tco_make_non_tail_call_func(0, target_name, 1)
@@ -6691,7 +6792,7 @@ fn compiler_main_test_tco_analyze_function() -> bool with Mut, Div, Panic {
 }
 
 // T44: tco_count_tail_calls_for_func returns 1 for single self-tail call
-fn compiler_main_test_tco_count_tail_calls() -> bool with Mut, Div, Panic {
+fn compiler_main_test_tco_count_tail_calls() -> bool with Alloc, Mut, Div, Panic {
     var funcs: [IrFunction; 1024] = [ir_empty_function(); 1024]
     funcs[0 as usize] = tco_make_self_tail_call_func(0, 0, 0)
     let module = tco_make_test_module(funcs, 1)
@@ -6702,7 +6803,7 @@ fn compiler_main_test_tco_count_tail_calls() -> bool with Mut, Div, Panic {
 }
 
 // T45: tco_run_pass on empty module returns fn_count unchanged
-fn compiler_main_test_tco_empty_module() -> bool with Mut, Div, Panic {
+fn compiler_main_test_tco_empty_module() -> bool with Alloc, Mut, Div, Panic {
     var funcs: [IrFunction; 1024] = [ir_empty_function(); 1024]
     let module = tco_make_test_module(funcs, 0)
     let result = tco_run_pass(module)
@@ -6951,17 +7052,54 @@ fn compiler_main_test_frame_trim_param_vreg() -> bool with Mut, Panic, Div {
     nc.vreg_to_preg[1 as usize] = 15   // preg-alloc
     var func = ir_empty_function()
     func.reg_count = 2
-    nc_min_frame_size(nc, func) == 16
+    if nc_min_frame_size(nc, func) != 16 { return false }
+
+    // Every vreg above the allocation table is stack-only. Exercise both the
+    // first such slot and the final legal IR slot.
+    func.reg_count = NC_MAX_VREGS + 1
+    if nc_min_frame_size(nc, func) != align16((NC_MAX_VREGS + 1) * 8) { return false }
+    func.reg_count = IR_MAX_VREGS
+    nc_min_frame_size(nc, func) == align16(IR_MAX_VREGS * 8)
 }
 
 // T70: used allocatable preg mask tracks only r12-r15 assignments
-fn compiler_main_test_used_allocatable_preg_mask() -> bool with Mut {
+fn compiler_main_test_native_vreg_rejection_paths() -> bool with Mut, Panic, Div, Alloc {
+    var oversized = ir_empty_function()
+    oversized.reg_count = IR_MAX_VREGS + 1
+    var machine = machine_function_new()
+    var core_nc = compiler_new()
+    compile_ir_function_v2_into(&! core_nc, &oversized, &machine, 0)
+    if !core_nc.ir_vreg_overflow { return false }
+    if core_nc.ir_vreg_overflow_needed != IR_MAX_VREGS + 1 { return false }
+    if core_nc.ir_vreg_overflow_limit != IR_MAX_VREGS { return false }
+
+    var legacy = ir_empty_function()
+    legacy.reg_count = NC_MAX_VREGS + 1
+    let legacy_nc = compile_ir_function(compiler_new(), legacy, 0)
+    if !legacy_nc.ir_vreg_overflow { return false }
+    if legacy_nc.ir_vreg_overflow_needed != NC_MAX_VREGS + 1 { return false }
+    legacy_nc.ir_vreg_overflow_limit == NC_MAX_VREGS
+}
+
+fn compiler_main_test_ir_vreg_boundary_contract() -> bool with Mut, Panic, Div, Alloc {
+    if !ir_reg_count_is_valid(IR_MAX_VREGS - 1) { return false }
+    if !ir_reg_count_is_valid(IR_MAX_VREGS) { return false }
+    if ir_reg_count_is_valid(IR_MAX_VREGS + 1) { return false }
+    if !ir_reg_count_can_grow(IR_MAX_VREGS - 1, 1) { return false }
+    if ir_reg_count_can_grow(IR_MAX_VREGS, 1) { return false }
+    if ir_reg_count_can_grow(IR_MAX_VREGS - 1, 2) { return false }
+    compiler_main_test_native_vreg_rejection_paths()
+}
+
+fn compiler_main_test_used_allocatable_preg_mask() -> bool with Mut, Panic, Div, Alloc {
     var nc = compiler_new()
     nc.vreg_to_preg[0 as usize] = 15
     nc.vreg_to_preg[1 as usize] = 12
     nc.vreg_to_preg[2 as usize] = -1
     nc.vreg_to_preg[3 as usize] = 0
-    nc_used_allocatable_preg_mask(nc, 4) == (X86_ALLOCATABLE_R12_MASK() | X86_ALLOCATABLE_R15_MASK())
+    if nc_used_allocatable_preg_mask(nc, 4) != (X86_ALLOCATABLE_R12_MASK() | X86_ALLOCATABLE_R15_MASK()) { return false }
+    if nc_used_allocatable_preg_mask(nc, NC_MAX_VREGS + 1) != (X86_ALLOCATABLE_R12_MASK() | X86_ALLOCATABLE_R15_MASK()) { return false }
+    compiler_main_test_ir_vreg_boundary_contract()
 }
 
 // T71: odd allocatable-save counts add an 8-byte alignment pad before calls
@@ -6988,7 +7126,7 @@ fn compiler_main_test_x86_allocation_order_drives_lowering() -> bool {
     true
 }
 
-fn compiler_main_make_native_v2_scalar_module(ret_value: i64) -> IrModule with Mut, Panic, Div {
+fn compiler_main_make_native_v2_scalar_module(ret_value: i64) -> IrModule with Alloc, Mut, Panic, Div {
     var module = ir_empty_module()
     var func = ir_empty_function()
     ir_function_alloc_region(&! func)
@@ -6997,7 +7135,7 @@ fn compiler_main_make_native_v2_scalar_module(ret_value: i64) -> IrModule with M
     ir_arena_store(ir_region_slot_w(func.region, (1)), ir_return(0))
     func.instr_count = 2
     func.reg_count = 1
-    module.functions[0] = func
+    ir_fn_set(&! module, 0, func)
     module.fn_count = 1
     module
 }
@@ -7015,7 +7153,7 @@ fn compiler_main_make_native_v2_call_module() -> IrModule with Mut, Panic, Div, 
     ir_arena_store(ir_region_slot_w(helper.region, (1)), ir_binop(2, 0, BinaryOp::OpMul, 1))
     ir_arena_store(ir_region_slot_w(helper.region, (2)), ir_return(2))
     helper.instr_count = 3
-    module.functions[0] = helper
+    ir_fn_set(&! module, 0, helper)
 
     var main_fn = ir_empty_function()
     ir_function_alloc_region(&! main_fn)
@@ -7025,7 +7163,7 @@ fn compiler_main_make_native_v2_call_module() -> IrModule with Mut, Panic, Div, 
     ir_arena_store(ir_region_slot_w(main_fn.region, (1)), ir_call(1, 0, helper.name, Some(Box::new(ir_reg_list_single(0))), 1))
     ir_arena_store(ir_region_slot_w(main_fn.region, (2)), ir_return(1))
     main_fn.instr_count = 3
-    module.functions[1] = main_fn
+    ir_fn_set(&! module, 1, main_fn)
 
     module.fn_count = 2
     module
@@ -7089,7 +7227,7 @@ fn compiler_main_make_native_v2_str_len_module() -> IrModule with Mut, Panic, Di
     str_len_fn.param_regs[0] = 0
     str_len_fn.reg_count = 2
     str_len_fn.instr_count = 0
-    module.functions[0] = str_len_fn
+    ir_fn_set(&! module, 0, str_len_fn)
 
     let str_len_name = native_v2_name_str_len()
     // "hello" = 104 101 108 108 111 (5 bytes)
@@ -7104,7 +7242,7 @@ fn compiler_main_make_native_v2_str_len_module() -> IrModule with Mut, Panic, Di
     ir_arena_store(ir_region_slot_w(main_fn.region, (1)), ir_call(1, 0, str_len_name, Some(Box::new(ir_reg_list_single(0))), 1))
     ir_arena_store(ir_region_slot_w(main_fn.region, (2)), ir_return(1))
     main_fn.instr_count = 3
-    module.functions[1] = main_fn
+    ir_fn_set(&! module, 1, main_fn)
 
     module.fn_count = 2
     module
@@ -7124,7 +7262,7 @@ fn compiler_main_make_native_v2_str_char_at_module() -> IrModule with Mut, Panic
     sca_fn.param_regs[1] = 1
     sca_fn.reg_count = 3
     sca_fn.instr_count = 0
-    module.functions[0] = sca_fn
+    ir_fn_set(&! module, 0, sca_fn)
 
     let sca_name = native_v2_name_str_char_at()
     let hello = native_v2_name_bytes10(5, 104, 101, 108, 108, 111, 0, 0, 0, 0, 0)
@@ -7139,7 +7277,7 @@ fn compiler_main_make_native_v2_str_char_at_module() -> IrModule with Mut, Panic
     ir_arena_store(ir_region_slot_w(main_fn.region, (2)), ir_call(2, 0, sca_name, Some(Box::new(ir_reg_list_append(ir_reg_list_single(0), 1))), 2))
     ir_arena_store(ir_region_slot_w(main_fn.region, (3)), ir_return(2))
     main_fn.instr_count = 4
-    module.functions[1] = main_fn
+    ir_fn_set(&! module, 1, main_fn)
 
     module.fn_count = 2
     module
@@ -7171,7 +7309,7 @@ fn compiler_main_make_native_v2_str_eq_module() -> IrModule with Mut, Panic, Div
     streq_fn.param_regs[1] = 1
     streq_fn.reg_count = 3
     streq_fn.instr_count = 0
-    module.functions[0] = streq_fn
+    ir_fn_set(&! module, 0, streq_fn)
 
     let streq_name = native_v2_name_str_eq()
     // "ab" = 97 98 (2 bytes)
@@ -7187,7 +7325,7 @@ fn compiler_main_make_native_v2_str_eq_module() -> IrModule with Mut, Panic, Div
     ir_arena_store(ir_region_slot_w(streq_main.region, (2)), ir_call(2, 0, streq_name, Some(Box::new(ir_reg_list_append(ir_reg_list_single(0), 1))), 2))
     ir_arena_store(ir_region_slot_w(streq_main.region, (3)), ir_return(2))
     streq_main.instr_count = 4
-    module.functions[1] = streq_main
+    ir_fn_set(&! module, 1, streq_main)
 
     module.fn_count = 2
     module
@@ -7213,7 +7351,7 @@ fn compiler_main_make_native_v2_strconcat_len_module() -> IrModule with Mut, Pan
     concat_fn.param_regs[1] = 1
     concat_fn.reg_count = 3
     concat_fn.instr_count = 0
-    module.functions[0] = concat_fn
+    ir_fn_set(&! module, 0, concat_fn)
 
     var len_fn = ir_empty_function()
     ir_function_alloc_region(&! len_fn)
@@ -7222,7 +7360,7 @@ fn compiler_main_make_native_v2_strconcat_len_module() -> IrModule with Mut, Pan
     len_fn.param_regs[0] = 0
     len_fn.reg_count = 2
     len_fn.instr_count = 0
-    module.functions[1] = len_fn
+    ir_fn_set(&! module, 1, len_fn)
 
     let concat_name = native_v2_name_str_concat()
     let len_name = native_v2_name_str_len()
@@ -7240,7 +7378,7 @@ fn compiler_main_make_native_v2_strconcat_len_module() -> IrModule with Mut, Pan
     ir_arena_store(ir_region_slot_w(main_fn.region, (3)), ir_call(3, 1, len_name, Some(Box::new(ir_reg_list_single(2))), 1))
     ir_arena_store(ir_region_slot_w(main_fn.region, (4)), ir_return(3))
     main_fn.instr_count = 5
-    module.functions[2] = main_fn
+    ir_fn_set(&! module, 2, main_fn)
 
     module.fn_count = 3
     module
@@ -7258,7 +7396,7 @@ fn compiler_main_make_native_v2_strconcat_charat_module() -> IrModule with Mut, 
     concat_fn.param_regs[1] = 1
     concat_fn.reg_count = 3
     concat_fn.instr_count = 0
-    module.functions[0] = concat_fn
+    ir_fn_set(&! module, 0, concat_fn)
 
     var sca_fn = ir_empty_function()
     ir_function_alloc_region(&! sca_fn)
@@ -7268,7 +7406,7 @@ fn compiler_main_make_native_v2_strconcat_charat_module() -> IrModule with Mut, 
     sca_fn.param_regs[1] = 1
     sca_fn.reg_count = 3
     sca_fn.instr_count = 0
-    module.functions[1] = sca_fn
+    ir_fn_set(&! module, 1, sca_fn)
 
     let concat_name = native_v2_name_str_concat()
     let sca_name = native_v2_name_str_char_at()
@@ -7287,7 +7425,7 @@ fn compiler_main_make_native_v2_strconcat_charat_module() -> IrModule with Mut, 
     ir_arena_store(ir_region_slot_w(main_fn.region, (4)), ir_call(4, 1, sca_name, Some(Box::new(ir_reg_list_append(ir_reg_list_single(2), 3))), 2))
     ir_arena_store(ir_region_slot_w(main_fn.region, (5)), ir_return(4))
     main_fn.instr_count = 6
-    module.functions[2] = main_fn
+    ir_fn_set(&! module, 2, main_fn)
 
     module.fn_count = 3
     module
@@ -7304,7 +7442,7 @@ fn compiler_main_make_native_v2_strlen2_module() -> IrModule with Mut, Panic, Di
     str_len_fn.param_regs[0] = 0
     str_len_fn.reg_count = 2
     str_len_fn.instr_count = 0
-    module.functions[0] = str_len_fn
+    ir_fn_set(&! module, 0, str_len_fn)
 
     let str_len_name = native_v2_name_str_len()
     let s_a = native_v2_name_bytes10(5, 104, 101, 108, 108, 111, 0, 0, 0, 0, 0)  // "hello"
@@ -7320,7 +7458,7 @@ fn compiler_main_make_native_v2_strlen2_module() -> IrModule with Mut, Panic, Di
     ir_arena_store(ir_region_slot_w(main_fn.region, (2)), ir_call(2, 0, str_len_name, Some(Box::new(ir_reg_list_single(1))), 1))
     ir_arena_store(ir_region_slot_w(main_fn.region, (3)), ir_return(2))
     main_fn.instr_count = 4
-    module.functions[1] = main_fn
+    ir_fn_set(&! module, 1, main_fn)
     module.fn_count = 2
     module
 }
@@ -7337,7 +7475,7 @@ fn compiler_main_make_native_v2_streq1_module() -> IrModule with Mut, Panic, Div
     streq_fn.param_regs[1] = 1
     streq_fn.reg_count = 3
     streq_fn.instr_count = 0
-    module.functions[0] = streq_fn
+    ir_fn_set(&! module, 0, streq_fn)
 
     let streq_name = native_v2_name_str_eq()
     let s_ab = native_v2_name_bytes10(2, 97, 98, 0, 0, 0, 0, 0, 0, 0, 0)  // "ab"
@@ -7351,7 +7489,7 @@ fn compiler_main_make_native_v2_streq1_module() -> IrModule with Mut, Panic, Div
     ir_arena_store(ir_region_slot_w(main_fn.region, (1)), ir_call(1, 0, streq_name, Some(Box::new(ir_reg_list_append(ir_reg_list_single(0), 0))), 2))
     ir_arena_store(ir_region_slot_w(main_fn.region, (2)), ir_return(1))
     main_fn.instr_count = 3
-    module.functions[1] = main_fn
+    ir_fn_set(&! module, 1, main_fn)
     module.fn_count = 2
     module
 }
@@ -7368,7 +7506,7 @@ fn compiler_main_make_native_v2_streqnocall_module() -> IrModule with Mut, Panic
     streq_fn.param_regs[1] = 1
     streq_fn.reg_count = 3
     streq_fn.instr_count = 0
-    module.functions[0] = streq_fn
+    ir_fn_set(&! module, 0, streq_fn)
 
     var main_fn = ir_empty_function()
     ir_function_alloc_region(&! main_fn)
@@ -7378,7 +7516,7 @@ fn compiler_main_make_native_v2_streqnocall_module() -> IrModule with Mut, Panic
     ir_arena_store(ir_region_slot_w(main_fn.region, (0)), ir_load_imm(0, 9))
     ir_arena_store(ir_region_slot_w(main_fn.region, (1)), ir_return(0))
     main_fn.instr_count = 2
-    module.functions[1] = main_fn
+    ir_fn_set(&! module, 1, main_fn)
     module.fn_count = 2
     module
 }
@@ -7397,7 +7535,7 @@ fn compiler_main_make_native_v2_fnptr_module() -> IrModule with Mut, Panic, Div,
     ir_arena_store(ir_region_slot_w(helper.region, (1)), ir_binop(2, 0, BinaryOp::OpMul, 1))
     ir_arena_store(ir_region_slot_w(helper.region, (2)), ir_return(2))
     helper.instr_count = 3
-    module.functions[0] = helper
+    ir_fn_set(&! module, 0, helper)
 
     var main_fn = ir_empty_function()
     ir_function_alloc_region(&! main_fn)
@@ -7408,7 +7546,7 @@ fn compiler_main_make_native_v2_fnptr_module() -> IrModule with Mut, Panic, Div,
     ir_arena_store(ir_region_slot_w(main_fn.region, (2)), ir_call_indirect(2, 0, Some(Box::new(ir_reg_list_single(1))), 1))
     ir_arena_store(ir_region_slot_w(main_fn.region, (3)), ir_return(2))
     main_fn.instr_count = 4
-    module.functions[1] = main_fn
+    ir_fn_set(&! module, 1, main_fn)
 
     module.fn_count = 2
     module
@@ -7433,7 +7571,7 @@ fn compiler_main_make_native_v2_multi_call_module() -> IrModule with Mut, Panic,
     ir_arena_store(ir_region_slot_w(add_fn.region, (0)), ir_binop(2, 0, BinaryOp::OpAdd, 1))
     ir_arena_store(ir_region_slot_w(add_fn.region, (1)), ir_return(2))
     add_fn.instr_count = 2
-    module.functions[0] = add_fn
+    ir_fn_set(&! module, 0, add_fn)
 
     // fn mul(a, b) -> a * b
     let mul_name = ir_name_from_bytes(109, 117, 108, 0, 3)
@@ -7447,7 +7585,7 @@ fn compiler_main_make_native_v2_multi_call_module() -> IrModule with Mut, Panic,
     ir_arena_store(ir_region_slot_w(mul_fn.region, (0)), ir_binop(2, 0, BinaryOp::OpMul, 1))
     ir_arena_store(ir_region_slot_w(mul_fn.region, (1)), ir_return(2))
     mul_fn.instr_count = 2
-    module.functions[1] = mul_fn
+    ir_fn_set(&! module, 1, mul_fn)
 
     // fn main() -> { x = add(10, 32); y = mul(x, 2); return y }
     let main_name = ir_name_from_bytes(109, 97, 105, 110, 4)
@@ -7463,13 +7601,13 @@ fn compiler_main_make_native_v2_multi_call_module() -> IrModule with Mut, Panic,
     ir_arena_store(ir_region_slot_w(main_fn.region, (4)), ir_call(4, 1, mul_name, Some(Box::new(ir_reg_list_append(ir_reg_list_single(2), 3))), 2))
     ir_arena_store(ir_region_slot_w(main_fn.region, (5)), ir_return(4))
     main_fn.instr_count = 6
-    module.functions[2] = main_fn
+    ir_fn_set(&! module, 2, main_fn)
 
     module.fn_count = 3
     module
 }
 
-fn compiler_main_make_native_v2_control_module() -> IrModule with Mut, Panic, Div {
+fn compiler_main_make_native_v2_control_module() -> IrModule with Alloc, Mut, Panic, Div {
     var module = ir_empty_module()
     var func = ir_empty_function()
     ir_function_alloc_region(&! func)
@@ -7484,7 +7622,7 @@ fn compiler_main_make_native_v2_control_module() -> IrModule with Mut, Panic, Di
     ir_arena_store(ir_region_slot_w(func.region, (5)), ir_load_imm(2, 1))
     ir_arena_store(ir_region_slot_w(func.region, (6)), ir_return(2))
     func.instr_count = 7
-    module.functions[0] = func
+    ir_fn_set(&! module, 0, func)
     module.fn_count = 1
     module
 }
@@ -7497,7 +7635,7 @@ fn compiler_main_make_native_v2_control_module() -> IrModule with Mut, Panic, Di
 // sees a real NaN, not a folded literal.
 //   reg layout: r0=lhs, r1=rhs, r2=cmp result (i64 0/1)
 //   NaN form:   r0=0.0, r1=0.0, r2=0.0/0.0(NaN), r3=rhs, r4=NaN OP rhs
-fn compiler_main_make_native_v2_f64cmp_module(op: BinaryOp, lhs_is_nan: i64, lhs: f64, rhs: f64) -> IrModule with Mut, Panic, Div {
+fn compiler_main_make_native_v2_f64cmp_module(op: BinaryOp, lhs_is_nan: i64, lhs: f64, rhs: f64) -> IrModule with Alloc, Mut, Panic, Div {
     var module = ir_empty_module()
     var func = ir_empty_function()
     ir_function_alloc_region(&! func)
@@ -7519,7 +7657,7 @@ fn compiler_main_make_native_v2_f64cmp_module(op: BinaryOp, lhs_is_nan: i64, lhs
         ir_arena_store(ir_region_slot_w(func.region, (3)), ir_return(2))
         func.instr_count = 4
     }
-    module.functions[0] = func
+    ir_fn_set(&! module, 0, func)
     module.fn_count = 1
     module
 }
@@ -7574,7 +7712,7 @@ fn run_native_v2_emit_f64cmp(args: ArgList, flag_index: i64) with IO, Mut, Panic
 
 // Arithmetic witness: main() -> { (100 - 16) / 2 } = 84 / 2 = 42. Exercises OpSub + OpDiv
 // in one module (OpAdd/OpMul are already covered by call/multicall).
-fn compiler_main_make_native_v2_arith_module() -> IrModule with Mut, Panic, Div {
+fn compiler_main_make_native_v2_arith_module() -> IrModule with Alloc, Mut, Panic, Div {
     var module = ir_empty_module()
     var func = ir_empty_function()
     ir_function_alloc_region(&! func)
@@ -7587,7 +7725,7 @@ fn compiler_main_make_native_v2_arith_module() -> IrModule with Mut, Panic, Div 
     ir_arena_store(ir_region_slot_w(func.region, (4)), ir_binop(4, 2, BinaryOp::OpDiv, 3))
     ir_arena_store(ir_region_slot_w(func.region, (5)), ir_return(4))
     func.instr_count = 6
-    module.functions[0] = func
+    ir_fn_set(&! module, 0, func)
     module.fn_count = 1
     module
 }
@@ -7616,7 +7754,7 @@ fn compiler_main_make_native_v2_call5_module() -> IrModule with Mut, Panic, Div,
     ir_arena_store(ir_region_slot_w(add5_fn.region, (3)), ir_binop(8, 7, BinaryOp::OpAdd, 4))
     ir_arena_store(ir_region_slot_w(add5_fn.region, (4)), ir_return(8))
     add5_fn.instr_count = 5
-    module.functions[0] = add5_fn
+    ir_fn_set(&! module, 0, add5_fn)
 
     // fn main() -> add5(1, 2, 4, 8, 16)
     let main_name = ir_name_from_bytes(109, 97, 105, 110, 4)
@@ -7634,7 +7772,7 @@ fn compiler_main_make_native_v2_call5_module() -> IrModule with Mut, Panic, Div,
     ir_arena_store(ir_region_slot_w(main_fn.region, (5)), ir_call(5, 0, add5_name, args5, 5))
     ir_arena_store(ir_region_slot_w(main_fn.region, (6)), ir_return(5))
     main_fn.instr_count = 7
-    module.functions[1] = main_fn
+    ir_fn_set(&! module, 1, main_fn)
 
     module.fn_count = 2
     module
@@ -7666,7 +7804,7 @@ fn compiler_main_make_native_v2_call6_module() -> IrModule with Mut, Panic, Div,
     ir_arena_store(ir_region_slot_w(add6_fn.region, (4)), ir_binop(10, 9, BinaryOp::OpAdd, 5))
     ir_arena_store(ir_region_slot_w(add6_fn.region, (5)), ir_return(10))
     add6_fn.instr_count = 6
-    module.functions[0] = add6_fn
+    ir_fn_set(&! module, 0, add6_fn)
 
     // fn main() -> add6(1, 2, 4, 8, 16, 32)
     let main_name = ir_name_from_bytes(109, 97, 105, 110, 4)
@@ -7685,7 +7823,7 @@ fn compiler_main_make_native_v2_call6_module() -> IrModule with Mut, Panic, Div,
     ir_arena_store(ir_region_slot_w(main_fn.region, (6)), ir_call(6, 0, add6_name, args6, 6))
     ir_arena_store(ir_region_slot_w(main_fn.region, (7)), ir_return(6))
     main_fn.instr_count = 8
-    module.functions[1] = main_fn
+    ir_fn_set(&! module, 1, main_fn)
 
     module.fn_count = 2
     module
@@ -7694,7 +7832,7 @@ fn compiler_main_make_native_v2_call6_module() -> IrModule with Mut, Panic, Div,
 // Control fall-through witness: cond = 0, so branch_true is NOT taken; execution falls
 // through to `return 7`. The symmetric companion to control_module (which proves the
 // branch-TAKEN path) — together they prove branch_true both jumps and does-not-jump.
-fn compiler_main_make_native_v2_control_fallthrough_module() -> IrModule with Mut, Panic, Div {
+fn compiler_main_make_native_v2_control_fallthrough_module() -> IrModule with Alloc, Mut, Panic, Div {
     var module = ir_empty_module()
     var func = ir_empty_function()
     ir_function_alloc_region(&! func)
@@ -7709,12 +7847,12 @@ fn compiler_main_make_native_v2_control_fallthrough_module() -> IrModule with Mu
     ir_arena_store(ir_region_slot_w(func.region, (5)), ir_load_imm(2, 99))
     ir_arena_store(ir_region_slot_w(func.region, (6)), ir_return(2))
     func.instr_count = 7
-    module.functions[0] = func
+    ir_fn_set(&! module, 0, func)
     module.fn_count = 1
     module
 }
 
-fn compiler_main_make_native_v2_unsupported_vector_module() -> IrModule with Mut, Panic, Div {
+fn compiler_main_make_native_v2_unsupported_vector_module() -> IrModule with Alloc, Mut, Panic, Div {
     var module = ir_empty_module()
     var func = ir_empty_function()
     ir_function_alloc_region(&! func)
@@ -7728,12 +7866,12 @@ fn compiler_main_make_native_v2_unsupported_vector_module() -> IrModule with Mut
     ir_arena_store(ir_region_slot_w(func.region, (1)), ir_return(0))
     func.instr_count = 2
     func.reg_count = 3
-    module.functions[0] = func
+    ir_fn_set(&! module, 0, func)
     module.fn_count = 1
     module
 }
 
-fn compiler_main_make_native_v2_huge_alloc_module() -> IrModule with Mut, Panic, Div {
+fn compiler_main_make_native_v2_huge_alloc_module() -> IrModule with Alloc, Mut, Panic, Div {
     var module = ir_empty_module()
     var func = ir_empty_function()
     ir_function_alloc_region(&! func)
@@ -7743,12 +7881,12 @@ fn compiler_main_make_native_v2_huge_alloc_module() -> IrModule with Mut, Panic,
     ir_arena_store(ir_region_slot_w(func.region, (1)), ir_load_imm(1, 0))
     ir_arena_store(ir_region_slot_w(func.region, (2)), ir_return(1))
     func.instr_count = 3
-    module.functions[0] = func
+    ir_fn_set(&! module, 0, func)
     module.fn_count = 1
     module
 }
 
-fn compiler_main_make_native_v2_alloc_field_module() -> IrModule with Mut, Panic, Div {
+fn compiler_main_make_native_v2_alloc_field_module() -> IrModule with Alloc, Mut, Panic, Div {
     var module = ir_empty_module()
     var func = ir_empty_function()
     ir_function_alloc_region(&! func)
@@ -7761,7 +7899,7 @@ fn compiler_main_make_native_v2_alloc_field_module() -> IrModule with Mut, Panic
     ir_arena_store(ir_region_slot_w(func.region, (3)), ir_field_get(2, 0, 0, field_name))
     ir_arena_store(ir_region_slot_w(func.region, (4)), ir_return(2))
     func.instr_count = 5
-    module.functions[0] = func
+    ir_fn_set(&! module, 0, func)
     module.fn_count = 1
     module
 }
@@ -7826,73 +7964,79 @@ fn compiler_main_make_native_v2_sret_module() -> IrModule with Mut, Panic, Div, 
     // Called via a plain IrCall this very fn would read v from rdi (the dest handle) and
     // mis-fill the struct; only the sret convention puts v in rsi -> f1 = 14. That gap is
     // the discriminator (see compiler_main_make_native_v2_sret_plaincall_module below).
-    module.functions[0].name.len = 4
-    module.functions[0].name.buf[0] = 109 as i8
-    module.functions[0].name.buf[1] = 97 as i8
-    module.functions[0].name.buf[2] = 105 as i8
-    module.functions[0].name.buf[3] = 110 as i8
-    module.functions[0].reg_count = 4
-    IR_A_OP[(ir_region_slot_w(module.functions[0].region, (0))) as usize] = IrOpcode::IrAlloc
-    IR_A_DST[(ir_region_slot_w(module.functions[0].region, (0))) as usize] = 0
-    IR_A_IMM_I64[(ir_region_slot_w(module.functions[0].region, (0))) as usize] = 64
-    IR_A_OP[(ir_region_slot_w(module.functions[0].region, (1))) as usize] = IrOpcode::IrLoadImm
-    IR_A_DST[(ir_region_slot_w(module.functions[0].region, (1))) as usize] = 1
-    IR_A_IMM_I64[(ir_region_slot_w(module.functions[0].region, (1))) as usize] = 7
-    IR_A_OP[(ir_region_slot_w(module.functions[0].region, (2))) as usize] = IrOpcode::IrCallSret
-    IR_A_DST[(ir_region_slot_w(module.functions[0].region, (2))) as usize] = 2
-    IR_A_SRC1[(ir_region_slot_w(module.functions[0].region, (2))) as usize] = 0
-    IR_A_FN_ID[(ir_region_slot_w(module.functions[0].region, (2))) as usize] = 1
-    IR_A_FIELD_IDX[(ir_region_slot_w(module.functions[0].region, (2))) as usize] = 1
-    IR_A_ARG_COUNT[(ir_region_slot_w(module.functions[0].region, (2))) as usize] = 1
-    IR_A_OP[(ir_region_slot_w(module.functions[0].region, (3))) as usize] = IrOpcode::IrFieldGet
-    IR_A_DST[(ir_region_slot_w(module.functions[0].region, (3))) as usize] = 3
-    IR_A_SRC1[(ir_region_slot_w(module.functions[0].region, (3))) as usize] = 2
-    IR_A_FIELD_IDX[(ir_region_slot_w(module.functions[0].region, (3))) as usize] = 1
-    IR_A_OP[(ir_region_slot_w(module.functions[0].region, (4))) as usize] = IrOpcode::IrReturn
-    IR_A_SRC1[(ir_region_slot_w(module.functions[0].region, (4))) as usize] = 3
-    module.functions[0].instr_count = 5
+    var main_slot = ir_fn_get(&module, 0)
+    main_slot.name.len = 4
+    main_slot.name.buf[0] = 109 as i8
+    main_slot.name.buf[1] = 97 as i8
+    main_slot.name.buf[2] = 105 as i8
+    main_slot.name.buf[3] = 110 as i8
+    main_slot.reg_count = 4
+    let main_region = main_slot.region
+    IR_A_OP[(ir_region_slot_w(main_region, (0))) as usize] = IrOpcode::IrAlloc
+    IR_A_DST[(ir_region_slot_w(main_region, (0))) as usize] = 0
+    IR_A_IMM_I64[(ir_region_slot_w(main_region, (0))) as usize] = 64
+    IR_A_OP[(ir_region_slot_w(main_region, (1))) as usize] = IrOpcode::IrLoadImm
+    IR_A_DST[(ir_region_slot_w(main_region, (1))) as usize] = 1
+    IR_A_IMM_I64[(ir_region_slot_w(main_region, (1))) as usize] = 7
+    IR_A_OP[(ir_region_slot_w(main_region, (2))) as usize] = IrOpcode::IrCallSret
+    IR_A_DST[(ir_region_slot_w(main_region, (2))) as usize] = 2
+    IR_A_SRC1[(ir_region_slot_w(main_region, (2))) as usize] = 0
+    IR_A_FN_ID[(ir_region_slot_w(main_region, (2))) as usize] = 1
+    IR_A_FIELD_IDX[(ir_region_slot_w(main_region, (2))) as usize] = 1
+    IR_A_ARG_COUNT[(ir_region_slot_w(main_region, (2))) as usize] = 1
+    IR_A_OP[(ir_region_slot_w(main_region, (3))) as usize] = IrOpcode::IrFieldGet
+    IR_A_DST[(ir_region_slot_w(main_region, (3))) as usize] = 3
+    IR_A_SRC1[(ir_region_slot_w(main_region, (3))) as usize] = 2
+    IR_A_FIELD_IDX[(ir_region_slot_w(main_region, (3))) as usize] = 1
+    IR_A_OP[(ir_region_slot_w(main_region, (4))) as usize] = IrOpcode::IrReturn
+    IR_A_SRC1[(ir_region_slot_w(main_region, (4))) as usize] = 3
+    main_slot.instr_count = 5
+    ir_fn_set(&! module, 0, main_slot)
 
-    module.functions[1].name.len = 4
-    module.functions[1].name.buf[0] = 109 as i8
-    module.functions[1].name.buf[1] = 97 as i8
-    module.functions[1].name.buf[2] = 107 as i8
-    module.functions[1].name.buf[3] = 101 as i8
-    module.functions[1].is_sret = 1
-    module.functions[1].sret_dest_reg = 0
-    module.functions[1].param_count = 1
-    module.functions[1].param_regs[0] = 1
-    module.functions[1].reg_count = 6
-    IR_A_OP[(ir_region_slot_w(module.functions[1].region, (0))) as usize] = IrOpcode::IrFieldSet
-    IR_A_SRC1[(ir_region_slot_w(module.functions[1].region, (0))) as usize] = 0
-    IR_A_SRC2[(ir_region_slot_w(module.functions[1].region, (0))) as usize] = 1
-    IR_A_FIELD_IDX[(ir_region_slot_w(module.functions[1].region, (0))) as usize] = 0
-    IR_A_OP[(ir_region_slot_w(module.functions[1].region, (1))) as usize] = IrOpcode::IrLoadImm
-    IR_A_DST[(ir_region_slot_w(module.functions[1].region, (1))) as usize] = 2
-    IR_A_IMM_I64[(ir_region_slot_w(module.functions[1].region, (1))) as usize] = 2
-    IR_A_OP[(ir_region_slot_w(module.functions[1].region, (2))) as usize] = IrOpcode::IrBinOp
-    IR_A_DST[(ir_region_slot_w(module.functions[1].region, (2))) as usize] = 3
-    IR_A_SRC1[(ir_region_slot_w(module.functions[1].region, (2))) as usize] = 1
-    IR_A_SRC2[(ir_region_slot_w(module.functions[1].region, (2))) as usize] = 2
-    IR_A_BIN_OP[(ir_region_slot_w(module.functions[1].region, (2))) as usize] = BinaryOp::OpMul
-    IR_A_OP[(ir_region_slot_w(module.functions[1].region, (3))) as usize] = IrOpcode::IrFieldSet
-    IR_A_SRC1[(ir_region_slot_w(module.functions[1].region, (3))) as usize] = 0
-    IR_A_SRC2[(ir_region_slot_w(module.functions[1].region, (3))) as usize] = 3
-    IR_A_FIELD_IDX[(ir_region_slot_w(module.functions[1].region, (3))) as usize] = 1
-    IR_A_OP[(ir_region_slot_w(module.functions[1].region, (4))) as usize] = IrOpcode::IrLoadImm
-    IR_A_DST[(ir_region_slot_w(module.functions[1].region, (4))) as usize] = 4
-    IR_A_IMM_I64[(ir_region_slot_w(module.functions[1].region, (4))) as usize] = 1
-    IR_A_OP[(ir_region_slot_w(module.functions[1].region, (5))) as usize] = IrOpcode::IrBinOp
-    IR_A_DST[(ir_region_slot_w(module.functions[1].region, (5))) as usize] = 5
-    IR_A_SRC1[(ir_region_slot_w(module.functions[1].region, (5))) as usize] = 1
-    IR_A_SRC2[(ir_region_slot_w(module.functions[1].region, (5))) as usize] = 4
-    IR_A_BIN_OP[(ir_region_slot_w(module.functions[1].region, (5))) as usize] = BinaryOp::OpAdd
-    IR_A_OP[(ir_region_slot_w(module.functions[1].region, (6))) as usize] = IrOpcode::IrFieldSet
-    IR_A_SRC1[(ir_region_slot_w(module.functions[1].region, (6))) as usize] = 0
-    IR_A_SRC2[(ir_region_slot_w(module.functions[1].region, (6))) as usize] = 5
-    IR_A_FIELD_IDX[(ir_region_slot_w(module.functions[1].region, (6))) as usize] = 2
-    IR_A_OP[(ir_region_slot_w(module.functions[1].region, (7))) as usize] = IrOpcode::IrReturnSret
-    IR_A_SRC1[(ir_region_slot_w(module.functions[1].region, (7))) as usize] = 0
-    module.functions[1].instr_count = 8
+    var make_slot = ir_fn_get(&module, 1)
+    make_slot.name.len = 4
+    make_slot.name.buf[0] = 109 as i8
+    make_slot.name.buf[1] = 97 as i8
+    make_slot.name.buf[2] = 107 as i8
+    make_slot.name.buf[3] = 101 as i8
+    make_slot.is_sret = 1
+    make_slot.sret_dest_reg = 0
+    make_slot.param_count = 1
+    make_slot.param_regs[0] = 1
+    make_slot.reg_count = 6
+    let make_region = make_slot.region
+    IR_A_OP[(ir_region_slot_w(make_region, (0))) as usize] = IrOpcode::IrFieldSet
+    IR_A_SRC1[(ir_region_slot_w(make_region, (0))) as usize] = 0
+    IR_A_SRC2[(ir_region_slot_w(make_region, (0))) as usize] = 1
+    IR_A_FIELD_IDX[(ir_region_slot_w(make_region, (0))) as usize] = 0
+    IR_A_OP[(ir_region_slot_w(make_region, (1))) as usize] = IrOpcode::IrLoadImm
+    IR_A_DST[(ir_region_slot_w(make_region, (1))) as usize] = 2
+    IR_A_IMM_I64[(ir_region_slot_w(make_region, (1))) as usize] = 2
+    IR_A_OP[(ir_region_slot_w(make_region, (2))) as usize] = IrOpcode::IrBinOp
+    IR_A_DST[(ir_region_slot_w(make_region, (2))) as usize] = 3
+    IR_A_SRC1[(ir_region_slot_w(make_region, (2))) as usize] = 1
+    IR_A_SRC2[(ir_region_slot_w(make_region, (2))) as usize] = 2
+    IR_A_BIN_OP[(ir_region_slot_w(make_region, (2))) as usize] = BinaryOp::OpMul
+    IR_A_OP[(ir_region_slot_w(make_region, (3))) as usize] = IrOpcode::IrFieldSet
+    IR_A_SRC1[(ir_region_slot_w(make_region, (3))) as usize] = 0
+    IR_A_SRC2[(ir_region_slot_w(make_region, (3))) as usize] = 3
+    IR_A_FIELD_IDX[(ir_region_slot_w(make_region, (3))) as usize] = 1
+    IR_A_OP[(ir_region_slot_w(make_region, (4))) as usize] = IrOpcode::IrLoadImm
+    IR_A_DST[(ir_region_slot_w(make_region, (4))) as usize] = 4
+    IR_A_IMM_I64[(ir_region_slot_w(make_region, (4))) as usize] = 1
+    IR_A_OP[(ir_region_slot_w(make_region, (5))) as usize] = IrOpcode::IrBinOp
+    IR_A_DST[(ir_region_slot_w(make_region, (5))) as usize] = 5
+    IR_A_SRC1[(ir_region_slot_w(make_region, (5))) as usize] = 1
+    IR_A_SRC2[(ir_region_slot_w(make_region, (5))) as usize] = 4
+    IR_A_BIN_OP[(ir_region_slot_w(make_region, (5))) as usize] = BinaryOp::OpAdd
+    IR_A_OP[(ir_region_slot_w(make_region, (6))) as usize] = IrOpcode::IrFieldSet
+    IR_A_SRC1[(ir_region_slot_w(make_region, (6))) as usize] = 0
+    IR_A_SRC2[(ir_region_slot_w(make_region, (6))) as usize] = 5
+    IR_A_FIELD_IDX[(ir_region_slot_w(make_region, (6))) as usize] = 2
+    IR_A_OP[(ir_region_slot_w(make_region, (7))) as usize] = IrOpcode::IrReturnSret
+    IR_A_SRC1[(ir_region_slot_w(make_region, (7))) as usize] = 0
+    make_slot.instr_count = 8
+    ir_fn_set(&! module, 1, make_slot)
 
     module.fn_count = 2
     module
@@ -7904,78 +8048,76 @@ fn compiler_main_make_native_v2_sret_module() -> IrModule with Mut, Panic, Div, 
 fn compiler_main_make_native_v2_sret_plaincall_module() -> IrModule with Mut, Panic, Div, Alloc {
     var module = ir_empty_module()
 
-    module.functions[0].name.len = 4
-    module.functions[0].name.buf[0] = 109 as i8
-    module.functions[0].name.buf[1] = 97 as i8
-    module.functions[0].name.buf[2] = 105 as i8
-    module.functions[0].name.buf[3] = 110 as i8
-    module.functions[0].reg_count = 4
-    IR_A_OP[(ir_region_slot_w(module.functions[0].region, (0))) as usize] = IrOpcode::IrAlloc
-    IR_A_DST[(ir_region_slot_w(module.functions[0].region, (0))) as usize] = 0
-    IR_A_IMM_I64[(ir_region_slot_w(module.functions[0].region, (0))) as usize] = 64
-    IR_A_OP[(ir_region_slot_w(module.functions[0].region, (1))) as usize] = IrOpcode::IrLoadImm
-    IR_A_DST[(ir_region_slot_w(module.functions[0].region, (1))) as usize] = 1
-    IR_A_IMM_I64[(ir_region_slot_w(module.functions[0].region, (1))) as usize] = 7
-    IR_A_OP[(ir_region_slot_w(module.functions[0].region, (2))) as usize] = IrOpcode::IrCall
-    IR_A_DST[(ir_region_slot_w(module.functions[0].region, (2))) as usize] = 2
-    IR_A_FN_ID[(ir_region_slot_w(module.functions[0].region, (2))) as usize] = 1
-    ir_arena_put_args(ir_region_slot_w(module.functions[0].region, (2)), Some(Box::new(ir_reg_list_single(0))), 1)
-    IR_A_ARG_COUNT[(ir_region_slot_w(module.functions[0].region, (2))) as usize] = 1
-    IR_A_OP[(ir_region_slot_w(module.functions[0].region, (3))) as usize] = IrOpcode::IrFieldGet
-    IR_A_DST[(ir_region_slot_w(module.functions[0].region, (3))) as usize] = 3
-    IR_A_SRC1[(ir_region_slot_w(module.functions[0].region, (3))) as usize] = 0
-    IR_A_FIELD_IDX[(ir_region_slot_w(module.functions[0].region, (3))) as usize] = 1
-    IR_A_OP[(ir_region_slot_w(module.functions[0].region, (4))) as usize] = IrOpcode::IrReturn
-    IR_A_SRC1[(ir_region_slot_w(module.functions[0].region, (4))) as usize] = 3
-    module.functions[0].instr_count = 5
+    var main_slot = ir_fn_get(&module, 0)
+    main_slot.name = ir_name_from_bytes(109, 97, 105, 110, 4)
+    main_slot.reg_count = 4
+    let main_region = main_slot.region
+    IR_A_OP[(ir_region_slot_w(main_region, (0))) as usize] = IrOpcode::IrAlloc
+    IR_A_DST[(ir_region_slot_w(main_region, (0))) as usize] = 0
+    IR_A_IMM_I64[(ir_region_slot_w(main_region, (0))) as usize] = 64
+    IR_A_OP[(ir_region_slot_w(main_region, (1))) as usize] = IrOpcode::IrLoadImm
+    IR_A_DST[(ir_region_slot_w(main_region, (1))) as usize] = 1
+    IR_A_IMM_I64[(ir_region_slot_w(main_region, (1))) as usize] = 7
+    IR_A_OP[(ir_region_slot_w(main_region, (2))) as usize] = IrOpcode::IrCall
+    IR_A_DST[(ir_region_slot_w(main_region, (2))) as usize] = 2
+    IR_A_FN_ID[(ir_region_slot_w(main_region, (2))) as usize] = 1
+    ir_arena_put_args(ir_region_slot_w(main_region, (2)), Some(Box::new(ir_reg_list_single(0))), 1)
+    IR_A_ARG_COUNT[(ir_region_slot_w(main_region, (2))) as usize] = 1
+    IR_A_OP[(ir_region_slot_w(main_region, (3))) as usize] = IrOpcode::IrFieldGet
+    IR_A_DST[(ir_region_slot_w(main_region, (3))) as usize] = 3
+    IR_A_SRC1[(ir_region_slot_w(main_region, (3))) as usize] = 0
+    IR_A_FIELD_IDX[(ir_region_slot_w(main_region, (3))) as usize] = 1
+    IR_A_OP[(ir_region_slot_w(main_region, (4))) as usize] = IrOpcode::IrReturn
+    IR_A_SRC1[(ir_region_slot_w(main_region, (4))) as usize] = 3
+    main_slot.instr_count = 5
+    ir_fn_set(&! module, 0, main_slot)
 
-    module.functions[1].name.len = 4
-    module.functions[1].name.buf[0] = 109 as i8
-    module.functions[1].name.buf[1] = 97 as i8
-    module.functions[1].name.buf[2] = 107 as i8
-    module.functions[1].name.buf[3] = 101 as i8
-    module.functions[1].is_sret = 1
-    module.functions[1].sret_dest_reg = 0
-    module.functions[1].param_count = 1
-    module.functions[1].param_regs[0] = 1
-    module.functions[1].reg_count = 6
-    IR_A_OP[(ir_region_slot_w(module.functions[1].region, (0))) as usize] = IrOpcode::IrFieldSet
-    IR_A_SRC1[(ir_region_slot_w(module.functions[1].region, (0))) as usize] = 0
-    IR_A_SRC2[(ir_region_slot_w(module.functions[1].region, (0))) as usize] = 1
-    IR_A_FIELD_IDX[(ir_region_slot_w(module.functions[1].region, (0))) as usize] = 0
-    IR_A_OP[(ir_region_slot_w(module.functions[1].region, (1))) as usize] = IrOpcode::IrLoadImm
-    IR_A_DST[(ir_region_slot_w(module.functions[1].region, (1))) as usize] = 2
-    IR_A_IMM_I64[(ir_region_slot_w(module.functions[1].region, (1))) as usize] = 2
-    IR_A_OP[(ir_region_slot_w(module.functions[1].region, (2))) as usize] = IrOpcode::IrBinOp
-    IR_A_DST[(ir_region_slot_w(module.functions[1].region, (2))) as usize] = 3
-    IR_A_SRC1[(ir_region_slot_w(module.functions[1].region, (2))) as usize] = 1
-    IR_A_SRC2[(ir_region_slot_w(module.functions[1].region, (2))) as usize] = 2
-    IR_A_BIN_OP[(ir_region_slot_w(module.functions[1].region, (2))) as usize] = BinaryOp::OpMul
-    IR_A_OP[(ir_region_slot_w(module.functions[1].region, (3))) as usize] = IrOpcode::IrFieldSet
-    IR_A_SRC1[(ir_region_slot_w(module.functions[1].region, (3))) as usize] = 0
-    IR_A_SRC2[(ir_region_slot_w(module.functions[1].region, (3))) as usize] = 3
-    IR_A_FIELD_IDX[(ir_region_slot_w(module.functions[1].region, (3))) as usize] = 1
-    IR_A_OP[(ir_region_slot_w(module.functions[1].region, (4))) as usize] = IrOpcode::IrLoadImm
-    IR_A_DST[(ir_region_slot_w(module.functions[1].region, (4))) as usize] = 4
-    IR_A_IMM_I64[(ir_region_slot_w(module.functions[1].region, (4))) as usize] = 1
-    IR_A_OP[(ir_region_slot_w(module.functions[1].region, (5))) as usize] = IrOpcode::IrBinOp
-    IR_A_DST[(ir_region_slot_w(module.functions[1].region, (5))) as usize] = 5
-    IR_A_SRC1[(ir_region_slot_w(module.functions[1].region, (5))) as usize] = 1
-    IR_A_SRC2[(ir_region_slot_w(module.functions[1].region, (5))) as usize] = 4
-    IR_A_BIN_OP[(ir_region_slot_w(module.functions[1].region, (5))) as usize] = BinaryOp::OpAdd
-    IR_A_OP[(ir_region_slot_w(module.functions[1].region, (6))) as usize] = IrOpcode::IrFieldSet
-    IR_A_SRC1[(ir_region_slot_w(module.functions[1].region, (6))) as usize] = 0
-    IR_A_SRC2[(ir_region_slot_w(module.functions[1].region, (6))) as usize] = 5
-    IR_A_FIELD_IDX[(ir_region_slot_w(module.functions[1].region, (6))) as usize] = 2
-    IR_A_OP[(ir_region_slot_w(module.functions[1].region, (7))) as usize] = IrOpcode::IrReturnSret
-    IR_A_SRC1[(ir_region_slot_w(module.functions[1].region, (7))) as usize] = 0
-    module.functions[1].instr_count = 8
+    var make_slot = ir_fn_get(&module, 1)
+    make_slot.name = ir_name_from_bytes(109, 97, 107, 101, 4)
+    make_slot.is_sret = 1
+    make_slot.sret_dest_reg = 0
+    make_slot.param_count = 1
+    make_slot.param_regs[0] = 1
+    make_slot.reg_count = 6
+    let make_region = make_slot.region
+    IR_A_OP[(ir_region_slot_w(make_region, (0))) as usize] = IrOpcode::IrFieldSet
+    IR_A_SRC1[(ir_region_slot_w(make_region, (0))) as usize] = 0
+    IR_A_SRC2[(ir_region_slot_w(make_region, (0))) as usize] = 1
+    IR_A_FIELD_IDX[(ir_region_slot_w(make_region, (0))) as usize] = 0
+    IR_A_OP[(ir_region_slot_w(make_region, (1))) as usize] = IrOpcode::IrLoadImm
+    IR_A_DST[(ir_region_slot_w(make_region, (1))) as usize] = 2
+    IR_A_IMM_I64[(ir_region_slot_w(make_region, (1))) as usize] = 2
+    IR_A_OP[(ir_region_slot_w(make_region, (2))) as usize] = IrOpcode::IrBinOp
+    IR_A_DST[(ir_region_slot_w(make_region, (2))) as usize] = 3
+    IR_A_SRC1[(ir_region_slot_w(make_region, (2))) as usize] = 1
+    IR_A_SRC2[(ir_region_slot_w(make_region, (2))) as usize] = 2
+    IR_A_BIN_OP[(ir_region_slot_w(make_region, (2))) as usize] = BinaryOp::OpMul
+    IR_A_OP[(ir_region_slot_w(make_region, (3))) as usize] = IrOpcode::IrFieldSet
+    IR_A_SRC1[(ir_region_slot_w(make_region, (3))) as usize] = 0
+    IR_A_SRC2[(ir_region_slot_w(make_region, (3))) as usize] = 3
+    IR_A_FIELD_IDX[(ir_region_slot_w(make_region, (3))) as usize] = 1
+    IR_A_OP[(ir_region_slot_w(make_region, (4))) as usize] = IrOpcode::IrLoadImm
+    IR_A_DST[(ir_region_slot_w(make_region, (4))) as usize] = 4
+    IR_A_IMM_I64[(ir_region_slot_w(make_region, (4))) as usize] = 1
+    IR_A_OP[(ir_region_slot_w(make_region, (5))) as usize] = IrOpcode::IrBinOp
+    IR_A_DST[(ir_region_slot_w(make_region, (5))) as usize] = 5
+    IR_A_SRC1[(ir_region_slot_w(make_region, (5))) as usize] = 1
+    IR_A_SRC2[(ir_region_slot_w(make_region, (5))) as usize] = 4
+    IR_A_BIN_OP[(ir_region_slot_w(make_region, (5))) as usize] = BinaryOp::OpAdd
+    IR_A_OP[(ir_region_slot_w(make_region, (6))) as usize] = IrOpcode::IrFieldSet
+    IR_A_SRC1[(ir_region_slot_w(make_region, (6))) as usize] = 0
+    IR_A_SRC2[(ir_region_slot_w(make_region, (6))) as usize] = 5
+    IR_A_FIELD_IDX[(ir_region_slot_w(make_region, (6))) as usize] = 2
+    IR_A_OP[(ir_region_slot_w(make_region, (7))) as usize] = IrOpcode::IrReturnSret
+    IR_A_SRC1[(ir_region_slot_w(make_region, (7))) as usize] = 0
+    make_slot.instr_count = 8
+    ir_fn_set(&! module, 1, make_slot)
 
     module.fn_count = 2
     module
 }
 
-fn compiler_main_make_native_v2_gc_retry_module() -> IrModule with Mut, Panic, Div {
+fn compiler_main_make_native_v2_gc_retry_module() -> IrModule with Alloc, Mut, Panic, Div {
     var module = ir_empty_module()
     var func = ir_empty_function()
     ir_function_alloc_region(&! func)
@@ -7990,7 +8132,7 @@ fn compiler_main_make_native_v2_gc_retry_module() -> IrModule with Mut, Panic, D
     ir_arena_store(ir_region_slot_w(func.region, (6)), ir_load_imm(1, 23))
     ir_arena_store(ir_region_slot_w(func.region, (7)), ir_return(1))
     func.instr_count = 8
-    module.functions[0] = func
+    ir_fn_set(&! module, 0, func)
     module.fn_count = 1
     module
 }
@@ -8004,8 +8146,8 @@ fn compiler_main_test_native_v2_machine_module_scalar_core() -> bool with Mut, P
     if built.fn_count != 1 { return false }
     if built.target_count != 1 { return false }
     if built.total_machine_instr_count <= 0 { return false }
-    if built.functions[0].blocks[0].instr_count <= 0 { return false }
-    native_v2_machine_function_is_legal(built.functions[0])
+    if machine_module_function_get(&built, 0).blocks[0].instr_count <= 0 { return false }
+    native_v2_machine_function_is_legal(machine_module_function_get(&built, 0))
 }
 
 fn compiler_main_test_native_v2_machine_function_legal() -> bool with Mut, Panic, Div, Alloc {
@@ -8013,7 +8155,7 @@ fn compiler_main_test_native_v2_machine_function_legal() -> bool with Mut, Panic
     let built = native_v2_build_machine_module(&module, true)
     if !built.supported { return false }
     if built.total_machine_instr_count <= built.total_ir_instr_count { return false }
-    native_v2_machine_function_is_legal(built.functions[0]) && native_v2_machine_function_is_legal(built.functions[1])
+    native_v2_machine_function_is_legal(machine_module_function_get(&built, 0)) && native_v2_machine_function_is_legal(machine_module_function_get(&built, 1))
 }
 
 fn compiler_main_test_native_v2_machine_regalloc_uses_shared_order() -> bool with Mut, Panic, Div, Alloc {
@@ -8085,9 +8227,9 @@ fn compiler_main_test_native_v2_compile_multi_call() -> bool with IO, Mut, Panic
     if !machine_module.supported { return false }
     if machine_module.fn_count != 3 { return false }
     // All 3 functions must be legal
-    native_v2_machine_function_is_legal(machine_module.functions[0])
-        && native_v2_machine_function_is_legal(machine_module.functions[1])
-        && native_v2_machine_function_is_legal(machine_module.functions[2])
+    native_v2_machine_function_is_legal(machine_module_function_get(&machine_module, 0))
+        && native_v2_machine_function_is_legal(machine_module_function_get(&machine_module, 1))
+        && native_v2_machine_function_is_legal(machine_module_function_get(&machine_module, 2))
 }
 
 fn compiler_main_test_native_v2_fail_closed_vector() -> bool with IO, Mut, Panic, Div, Alloc {
@@ -8378,7 +8520,7 @@ fn compiler_main_test_native_v2_alloc_uses_descriptor_handles() -> bool with Mut
     let module = compiler_main_make_native_v2_alloc_field_module()
     let built = native_v2_build_machine_module(&module, true)
     if !built.supported { return false }
-    let func = built.functions[0]
+    let func = machine_module_function_get(&built, 0)
     var saw_alloc = false
     var saw_field_get = false
     var i: i64 = 0
@@ -9258,6 +9400,148 @@ fn compiler_main_test_eg_small_satf_allows_optin() -> bool with Mut, Div, Panic 
 // T143d (Feature A-layer-2): even with the inexact-reassoc opt-in enabled, a CHAOTIC
 // context refuses all float reassociation — the chaos gate (e^{λt} amplification)
 // dominates the precision-preserving opt-in. 0 merges on the same chain.
+// T143e-h — the Q certificate (basis support) behind fano_selective, mirrored here from
+// egraph.sio's T86-T90 so they run LIVE (egraph.sio standalone cannot be lowered yet).
+// The context is configured the way opt_cleanup configures it (octonion registry entry,
+// fano_selective), then opted in to inexact reassociation as the epistemic pass does.
+fn compiler_eg_q_octonion_ctx(ctx: &! EgSmallContext) with Mut, Div, Panic {
+    var func = ir_empty_function()
+    func.hyper_algebra_kind = 3
+    var algebras = ir_empty_algebra_table()
+    var octonion = ir_empty_algebra_info()
+    octonion.is_valid = true
+    octonion.algebra_tag = 3
+    octonion.reassoc_strategy = 2
+    algebras.entries[0] = octonion
+    algebras.count = 1
+    ocp_configure_small_context(ctx, func, algebras)
+    ctx.allow_inexact_reassoc = true
+}
+
+// T143e: scalar f64 leaves (the epistemic feed) certify {e_0} — a real product chain
+// reassociates under fano_selective regardless of register ids (9, 18, 36 would have made
+// the old register-id-as-basis gate decide arbitrarily). Body lives in an `_inner(ctx: &!)`
+// helper — the proven pattern of T143b-d — so the 7KB context is borrowed exactly once.
+fn compiler_eg_q_scalar_chain_inner(ctx: &! EgSmallContext) -> i64 with Mut, Div, Panic {
+    compiler_eg_q_octonion_ctx(ctx)
+    let a     = eg_small_add_var_with_unc(ctx, 9, 0)
+    let b     = eg_small_add_var_with_unc(ctx, 18, 0)
+    let c     = eg_small_add_var_with_unc(ctx, 36, 0)
+    let inner = eg_small_add_binop(ctx, EG_OP_FMUL, a, b)
+    let _out  = eg_small_add_binop(ctx, EG_OP_FMUL, inner, c)
+    eg_small_saturate_float(ctx)
+}
+fn compiler_main_test_eg_q_scalar_leaves_reassociate() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    return compiler_eg_q_scalar_chain_inner(&! ctx) > 0
+}
+
+// Diagnostic probe for T143e (printed only on FAIL): the stateful half of the certificate,
+// step by step — context configuration, the stored masks, the class certificates, merges.
+fn compiler_eg_q_probe_inner(ctx: &! EgSmallContext) with IO, Mut, Div, Panic {
+    compiler_eg_q_octonion_ctx(ctx)
+    print("    probe: strategy="); print_int(ctx.reassoc_strategy)
+    print(" cd_bits="); print_int(ctx.cd_bits)
+    print(" inexact="); if ctx.allow_inexact_reassoc { print("1") } else { print("0") }
+    print(" chaotic="); if ctx.chaotic { print("1") } else { print("0") }
+    print("\n")
+    // Step-by-step: plain add_var, then the two stores add_var_with_unc performs, each
+    // followed by node_count -- so the statement that loses node_count names itself.
+    let a0    = eg_small_add_var(ctx, 9)
+    print("    probe: after add_var(9): a0="); print_int(a0); print(" node_count="); print_int(ctx.node_count); print("\n")
+    ctx.unc_lo[a0 as usize] = 0
+    print("    probe: after unc_lo store: node_count="); print_int(ctx.node_count); print("\n")
+    ctx.q_mask[a0 as usize] = 1
+    print("    probe: after q_mask store: node_count="); print_int(ctx.node_count); print(" uf_size="); print_int(ctx.uf_size); print("\n")
+    let a     = a0
+    let b     = eg_small_add_var_with_unc(ctx, 18, 0)
+    print("    probe: after with_unc(18): b="); print_int(b); print(" node_count="); print_int(ctx.node_count); print(" n0.value="); print_int(ctx.nodes[0].value); print(" n1.value="); print_int(ctx.nodes[1].value); print("\n")
+    let c     = eg_small_add_var_with_unc(ctx, 36, 0)
+    print("    probe: classes a="); print_int(a); print(" b="); print_int(b); print(" c="); print_int(c)
+    print(" node_count="); print_int(ctx.node_count); print("\n")
+    print("    probe: q_mask[a]="); print_int(ctx.q_mask[a as usize])
+    print(" q_mask[b]="); print_int(ctx.q_mask[b as usize])
+    print(" q_mask[c]="); print_int(ctx.q_mask[c as usize]); print("\n")
+    let inner = eg_small_add_binop(ctx, EG_OP_FMUL, a, b)
+    let out   = eg_small_add_binop(ctx, EG_OP_FMUL, inner, c)
+    print("    probe: inner="); print_int(inner); print(" out="); print_int(out)
+    print(" Q(a)="); print_int(eg_small_q_of_class(ctx, a, 8))
+    print(" Q(b)="); print_int(eg_small_q_of_class(ctx, b, 8))
+    print(" Q(c)="); print_int(eg_small_q_of_class(ctx, c, 8))
+    print(" Q(inner)="); print_int(eg_small_q_of_class(ctx, inner, 8)); print("\n")
+    let ok3 = eg_q_triple_associative(ctx.cd_bits, 1, 1, 1)
+    print("    probe: triple(cd_bits,{0},{0},{0})="); if ok3 { print("1") } else { print("0") }
+    let merges = eg_small_saturate_float(ctx)
+    print(" merges="); print_int(merges); print("\n")
+}
+fn compiler_eg_q_probe() with IO, Mut, Div, Panic {
+    var ctx = eg_small_init()
+    compiler_eg_q_probe_inner(&! ctx)
+}
+
+// T143f: leaves with no certificate are refused under fano_selective (ids 1,2,3 would be
+// a Fano line if ids were basis indices — they are not). Fail-closed.
+fn compiler_eg_q_unknown_chain_inner(ctx: &! EgSmallContext) -> i64 with Mut, Div, Panic {
+    compiler_eg_q_octonion_ctx(ctx)
+    let a     = eg_small_add_var(ctx, 1)
+    let b     = eg_small_add_var(ctx, 2)
+    let c     = eg_small_add_var(ctx, 3)
+    let inner = eg_small_add_binop(ctx, EG_OP_FMUL, a, b)
+    let _out  = eg_small_add_binop(ctx, EG_OP_FMUL, inner, c)
+    eg_small_saturate_float(ctx)
+}
+fn compiler_main_test_eg_q_unknown_leaves_block() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    return compiler_eg_q_unknown_chain_inner(&! ctx) == 0
+}
+
+// T143g: a sum widens the support and the gate quantifies over all of it:
+// (e1+e2)*e2 then *e4 — (1,2,4) does not associate, so no merge.
+fn compiler_eg_q_union_chain_inner(ctx: &! EgSmallContext) -> i64 with Mut, Div, Panic {
+    compiler_eg_q_octonion_ctx(ctx)
+    let e1    = eg_small_add_basis_var(ctx, 1, 1)
+    let e2    = eg_small_add_basis_var(ctx, 2, 2)
+    let e4    = eg_small_add_basis_var(ctx, 4, 4)
+    let a     = eg_small_add_binop(ctx, EG_OP_FADD, e1, e2)
+    let inner = eg_small_add_binop(ctx, EG_OP_FMUL, a, e2)
+    let _out  = eg_small_add_binop(ctx, EG_OP_FMUL, inner, e4)
+    eg_small_saturate_float(ctx)
+}
+fn compiler_main_test_eg_q_union_support_blocks() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    return compiler_eg_q_union_chain_inner(&! ctx) == 0
+}
+
+// T143g' (positive control for the union path, so a broken "allow" cannot hide behind
+// three blocking tests): (e1+e2)*e3 then *e3 — every triple in {1,2}x{3}x{3} has a
+// repeated element (alternativity), so the merge MUST fire.
+fn compiler_eg_q_union_alt_chain_inner(ctx: &! EgSmallContext) -> i64 with Mut, Div, Panic {
+    compiler_eg_q_octonion_ctx(ctx)
+    let e1    = eg_small_add_basis_var(ctx, 1, 1)
+    let e2    = eg_small_add_basis_var(ctx, 2, 2)
+    let e3    = eg_small_add_basis_var(ctx, 3, 3)
+    let a     = eg_small_add_binop(ctx, EG_OP_FADD, e1, e2)
+    let inner = eg_small_add_binop(ctx, EG_OP_FMUL, a, e3)
+    let _out  = eg_small_add_binop(ctx, EG_OP_FMUL, inner, e3)
+    eg_small_saturate_float(ctx)
+}
+fn compiler_main_test_eg_q_union_alt_reassociates() -> bool with Mut, Div, Panic {
+    var ctx = eg_small_init()
+    return compiler_eg_q_union_alt_chain_inner(&! ctx) > 0
+}
+
+// T143h: the mask algebra and the site predicate over certificates.
+fn compiler_main_test_eg_q_mask_algebra() -> bool with Mut, Div, Panic {
+    let p12   = eg_q_prod(1 << 1, 1 << 2) == (1 << 3)
+    let p124  = eg_q_prod((1 << 1) | (1 << 2), 1 << 4) == ((1 << 5) | (1 << 6))
+    let topl  = eg_q_prod(0 - 1, 1) < 0
+    let real3 = eg_q_triple_associative(3, 1, 1, 1)
+    let fano  = eg_q_triple_associative(3, 1 << 1, 1 << 2, 1 << 3)
+    let nfano = !eg_q_triple_associative(3, 1 << 1, 1 << 2, 1 << 4)
+    let unk   = !eg_q_triple_associative(3, 1 << 1, 0 - 1, 1 << 3)
+    p12 && p124 && topl && real3 && fano && nfano && unk
+}
+
 fn compiler_main_test_eg_small_satf_chaotic_blocks() -> bool with Mut, Div, Panic {
     var ctx = eg_small_init()
     ctx.allow_inexact_reassoc = true
@@ -9457,7 +9741,7 @@ fn run_probe_native_streaming(args: ArgList, flag_index: i64) with IO, Mut, Pani
 
     var fi: i64 = 0
     while fi < summary_fn_count {
-        let fn_name = (*summary_module).functions[fi as usize].name
+        let fn_name = ir_fn_get(&(*summary_module), fi as usize).name
         print("probe_native_streaming: body_begin fn=")
         compiler_manifest_print_name(fn_name)
         print("\n")
@@ -9520,6 +9804,360 @@ fn run_probe_native_streaming(args: ArgList, flag_index: i64) with IO, Mut, Pani
     print(stream_pair.1.error_msg)
     print(" len=")
     print_int(stream_pair.1.len)
+    print("\n")
+}
+
+// --probe-filtered-body-lower <file.sio>: Copilot review (PR #2516), finding
+// D on the fourth review round of the madaros-f64-array-element-kind PR.
+// run_probe_native_streaming above calls
+// lower_program_function_body_from_summary_FLAT_with_epistemic_ref, which
+// delegates to lower_program_bodies_ref -- a DIFFERENT lane from
+// lower_program_bodies_filtered_ref (the streaming single-function lane an
+// earlier round of that same review wired the tuple-array collector into).
+// Only the NON-flat lower_program_function_body_from_summary_with_
+// epistemic_ref reaches lower_program_bodies_filtered_ref, and nothing else
+// callable from the CLI drove it directly. This probe does, one function at
+// a time, and reports how many float-register marker instructions
+// (ir_mark_float_reg emits an IrNop with dst set to the marked register; an
+// ordinary IrNop's dst stays IR_INVALID_REG/-1) each body got -- direct,
+// scriptable evidence that a tuple-array-returning callee's destructured
+// array actually got classified as float THROUGH THIS SPECIFIC LANE, not
+// just that lowering completed without error.
+fn run_probe_filtered_body_lower(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 1 >= args.len {
+        panic("probe_filtered_body_lower: missing source file argument")
+    }
+    let source_path = arg_list_get(args, flag_index + 1)
+    let program = load_module_file(source_path)
+    let parse_errors = parser_last_error_count()
+    if parse_errors > 0 {
+        print("probe_filtered_body_lower: parser_errors=")
+        print_int(parse_errors)
+        print("\n")
+        panic("probe_filtered_body_lower parse failed")
+    }
+
+    let imports = extract_imports_from_ast(program)
+    print("probe_filtered_body_lower: imports=")
+    print_int(imports.count)
+    print("\n")
+    if imports.count > 0 {
+        print("probe_filtered_body_lower: fallback_imports\n")
+        return
+    }
+
+    var epistemic = ir_empty_epistemic_section()
+    print("probe_filtered_body_lower: typecheck_begin\n")
+    if !check_program_epistemic_into(program, &! epistemic) {
+        panic("probe_filtered_body_lower type check failed")
+    }
+    print("probe_filtered_body_lower: typecheck_ok\n")
+
+    print("probe_filtered_body_lower: summary_begin\n")
+    let summary_result = lower_program_to_ir_summary_with_epistemic(program, epistemic)
+    if summary_result.had_error {
+        panic("probe_filtered_body_lower summary failed")
+    }
+    print("probe_filtered_body_lower: summary_ok\n")
+
+    // Copilot review (PR #2516): lower_program_bodies_filtered_ref (reached
+    // by every per-function call below, via
+    // lower_program_function_body_from_summary_with_epistemic_ref) collects
+    // into the same process-global LOWER_FN_TUPLE_ARR_* table as
+    // lower_program_to_ir, whose own leak this same review already fixed by
+    // resetting once per compile (lower_fn_tuple_arr_reset, top of
+    // lower_program_to_ir). This probe's per-function loop below cannot put
+    // that reset inside the shared library call itself: it calls
+    // lower_program_function_body_from_summary_with_epistemic_ref once PER
+    // FUNCTION in this program, and each call's collect() must keep
+    // accumulating (idempotent by name) across that whole loop, not wipe
+    // sibling functions' entries collected by an earlier iteration. Reset
+    // exactly once here instead, at THIS probe's real compile boundary --
+    // before the per-function loop starts, after this program's own summary
+    // is built -- mirroring lower_program_to_ir's own boundary. Without
+    // this, a second program run through this same probe binary in one
+    // process (see --probe-filtered-body-reset-boundary below) would let a
+    // same-named function's mask from the FIRST program leak into the
+    // second, exactly like the lower_program_to_ir bug this mirrors.
+    lower_fn_tuple_arr_reset()
+
+    let summary_module = &(*summary_result.summary.module)
+    let summary_fn_count = (*summary_module).fn_count
+    print("probe_filtered_body_lower: fn_count=")
+    print_int(summary_fn_count)
+    print("\n")
+
+    var fi: i64 = 0
+    while fi < summary_fn_count {
+        let fn_name = ir_fn_get(summary_module, fi as usize).name
+        print("probe_filtered_body_lower: body_begin fn=")
+        compiler_manifest_print_name(fn_name)
+        print("\n")
+        // This is the NON-flat variant: it lowers `fn_name`'s body through
+        // Lowerer.lower_program_bodies_filtered_ref, not the flat helper.
+        let body_result = lower_program_function_body_from_summary_with_epistemic_ref(
+            &program,
+            &summary_result.summary,
+            epistemic,
+            fn_name
+        )
+        if body_result.had_error {
+            print("probe_filtered_body_lower: body_error fn=")
+            compiler_manifest_print_name(fn_name)
+            print("\n")
+            panic("probe_filtered_body_lower body lowering failed")
+        }
+        // Direct arena-table read (IR_A_OP/IR_A_DST via ir_region_slot_r), the
+        // same low-level accessor pattern used elsewhere in this codebase for
+        // post-lowering instruction inspection (e.g. IR_A_OP[(ir_region_slot_r(...))
+        // as usize] in ir/const_prop.sio's test helpers).
+        var float_reg_marks: i64 = 0
+        var ii: i64 = 0
+        while ii < body_result.func.instr_count {
+            let slot = ir_region_slot_r(body_result.func.region, ii)
+            let op = IR_A_OP[slot as usize] as IrOpcode
+            let dst = IR_A_DST[slot as usize]
+            if op == IrOpcode::IrNop && dst >= 0 {
+                float_reg_marks = float_reg_marks + 1
+            }
+            ii = ii + 1
+        }
+        // Copilot review (PR #2516), round 6 finding 4: float_reg_marks alone
+        // is not proof the tuple-array COLLECTOR fired through this lane --
+        // any ordinary f64 literal in the body also emits ir_mark_float_reg,
+        // so that count stays positive even if the collector call inside
+        // lower_program_bodies_filtered_ref were removed entirely. Query
+        // LOWER_FN_TUPLE_ARR_* directly for THIS function's own declared
+        // tuple-array-return mask instead: lower_fn_tuple_f64_arrays_collect
+        // (called at the top of lower_program_bodies_filtered_ref, which the
+        // call above just went through) is what would have populated this
+        // entry, so a nonzero mask here is airtight evidence specific to the
+        // fix, not a body-wide literal count.
+        let tuple_arr_mask = lower_fn_tuple_f64_array_mask(fn_name)
+        print("probe_filtered_body_lower: body_ok fn=")
+        compiler_manifest_print_name(fn_name)
+        print(" instrs=")
+        print_int(body_result.func.instr_count)
+        print(" float_reg_marks=")
+        print_int(float_reg_marks)
+        print(" tuple_arr_mask=")
+        print_int(tuple_arr_mask)
+        print("\n")
+        fi = fi + 1
+    }
+}
+
+// --probe-filtered-body-reset-boundary <file_a.sio> <file_b.sio> <fn_name>:
+// Copilot review (PR #2516), round 2 (comment 4108896586): the first version
+// of this probe called the _ref variant with a MANUAL lower_fn_tuple_arr_reset()
+// before each invocation. Round 3 (comment 4109134765) found that making the
+// OWNED wrapper reset unconditionally on every call -- what this probe was
+// changed to test instead -- broke thin-link's actual multi-call-per-unit
+// usage (an imported callee's own mask, collected on an earlier call in the
+// SAME unit, must survive to when the OWNER's body that calls it gets
+// lowered). The wrapper no longer resets itself at all (see its own comment
+// in ir/lower.sio); module_loader.sio's thin_build_compiled_unit now resets
+// once and collects every program the WHOLE unit can reach up front instead.
+// This probe's own scope is narrower (two independent single-file programs,
+// no cross-file calls between them), so it goes back to resetting manually
+// before each call, same shape as --probe-tuple-arr-reset-boundary above --
+// proving file A's and file B's masks stay independent when the CALLER
+// resets at its own correct boundary, whatever that boundary is.
+fn run_probe_filtered_body_reset_boundary(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 3 >= args.len {
+        panic("probe_filtered_body_reset_boundary: expected <file_a.sio> <file_b.sio> <fn_name>")
+    }
+    let path_a = arg_list_get(args, flag_index + 1)
+    let path_b = arg_list_get(args, flag_index + 2)
+    let fn_name_str = arg_list_get(args, flag_index + 3)
+    let target = make_name(fn_name_str)
+
+    let prog_a = load_module_file(path_a)
+    if parser_last_error_count() > 0 {
+        panic("probe_filtered_body_reset_boundary: parse failed for file_a")
+    }
+    var epistemic_a = ir_empty_epistemic_section()
+    if !check_program_epistemic_into(prog_a, &! epistemic_a) {
+        panic("probe_filtered_body_reset_boundary: typecheck failed for file_a")
+    }
+    let summary_a = lower_program_to_ir_summary_with_epistemic(prog_a, epistemic_a)
+    if summary_a.had_error {
+        panic("probe_filtered_body_reset_boundary: summary failed for file_a")
+    }
+    lower_fn_tuple_arr_reset()
+    let body_a = lower_program_function_body_from_summary_with_epistemic(prog_a, summary_a.summary, epistemic_a, target)
+    if body_a.had_error {
+        panic("probe_filtered_body_reset_boundary: body lowering failed for file_a")
+    }
+    print("probe_filtered_body_reset_boundary: after_a fn=")
+    print(fn_name_str)
+    print(" mask=")
+    print_int(lower_fn_tuple_f64_array_mask(target))
+    print("\n")
+
+    let prog_b = load_module_file(path_b)
+    if parser_last_error_count() > 0 {
+        panic("probe_filtered_body_reset_boundary: parse failed for file_b")
+    }
+    var epistemic_b = ir_empty_epistemic_section()
+    if !check_program_epistemic_into(prog_b, &! epistemic_b) {
+        panic("probe_filtered_body_reset_boundary: typecheck failed for file_b")
+    }
+    let summary_b = lower_program_to_ir_summary_with_epistemic(prog_b, epistemic_b)
+    if summary_b.had_error {
+        panic("probe_filtered_body_reset_boundary: summary failed for file_b")
+    }
+    lower_fn_tuple_arr_reset()
+    let body_b = lower_program_function_body_from_summary_with_epistemic(prog_b, summary_b.summary, epistemic_b, target)
+    if body_b.had_error {
+        panic("probe_filtered_body_reset_boundary: body lowering failed for file_b")
+    }
+    print("probe_filtered_body_reset_boundary: after_b fn=")
+    print(fn_name_str)
+    print(" mask=")
+    print_int(lower_fn_tuple_f64_array_mask(target))
+    print("\n")
+}
+
+// --probe-tuple-arr-capacity <file.sio> <fn_name>: Copilot review
+// (PR #2516), finding 3 on the sixth review round. The generated capacity
+// witness in madaros_tuple_arr_capacity_boundary_gate.sh declares 4097
+// tuple-array-returning functions, but round 5's own finding-A fix
+// (filtering the collector's input through spec_dce_filter_with_global_
+// marks) means only functions REACHABLE from `main` ever reach
+// lower_fn_tuple_f64_arrays_collect through the normal compile pipeline --
+// so a witness where only the LAST function is called gets DCE'd down to
+// one collected entry, and the gate silently stopped testing the boundary
+// it claims to. This probe calls the collector directly on the raw,
+// un-DCE'd parsed item list (bypassing the whole module_frontend pipeline,
+// DCE included), then reports the requested function's tuple-array mask --
+// so the gate can populate the table with every generated function
+// regardless of reachability, matching what it was meant to test.
+fn run_probe_tuple_arr_capacity(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 2 >= args.len {
+        panic("probe_tuple_arr_capacity: expected <source.sio> <fn_name>")
+    }
+    let source_path = arg_list_get(args, flag_index + 1)
+    let fn_name_str = arg_list_get(args, flag_index + 2)
+    let program = load_module_file(source_path)
+    let parse_errors = parser_last_error_count()
+    if parse_errors > 0 {
+        print("probe_tuple_arr_capacity: parser_errors=")
+        print_int(parse_errors)
+        print("\n")
+        panic("probe_tuple_arr_capacity parse failed")
+    }
+    lower_fn_tuple_arr_reset()
+    lower_fn_tuple_f64_arrays_collect(&program.items)
+    let target = make_name(fn_name_str)
+    let mask = lower_fn_tuple_f64_array_mask(target)
+    print("probe_tuple_arr_capacity: fn=")
+    print(fn_name_str)
+    print(" mask=")
+    print_int(mask)
+    print("\n")
+}
+
+// --probe-tuple-arr-reset-boundary <file_a.sio> <file_b.sio> <fn_name>:
+// Copilot review (PR #2516), finding 1 on the ninth review round. The
+// public lower_program_to_ir entry point (self-hosted/ir/lower.sio) collects
+// into the process-global tuple-array-mask table but, before this round's
+// fix, never reset it first -- unlike every other top-level compile entry
+// point (module_frontend.sio's four call sites, this file's
+// run_probe_tuple_arr_capacity above). Collection dedupes by name, so two
+// back-to-back lower_program_to_ir calls in one process for two DIFFERENT
+// inputs that both define a function with the same name (here, `fn_name`)
+// let the second call's lowering silently reuse the first call's mask if it
+// differs. This probe reproduces exactly that shape: lower file A, print
+// fn_name's mask, lower file B, print fn_name's mask again -- with the fix,
+// the two masks reflect each file's OWN shape for fn_name; without it, B's
+// reported mask would incorrectly equal A's.
+fn run_probe_tuple_arr_reset_boundary(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 3 >= args.len {
+        panic("probe_tuple_arr_reset_boundary: expected <file_a.sio> <file_b.sio> <fn_name>")
+    }
+    let path_a = arg_list_get(args, flag_index + 1)
+    let path_b = arg_list_get(args, flag_index + 2)
+    let fn_name_str = arg_list_get(args, flag_index + 3)
+    let target = make_name(fn_name_str)
+
+    let prog_a = load_module_file(path_a)
+    if parser_last_error_count() > 0 {
+        panic("probe_tuple_arr_reset_boundary: parse failed for file_a")
+    }
+    let low_a = lower_program_to_ir(prog_a)
+    if low_a.had_error {
+        panic("probe_tuple_arr_reset_boundary: lower failed for file_a")
+    }
+    print("probe_tuple_arr_reset_boundary: after_a fn=")
+    print(fn_name_str)
+    print(" mask=")
+    print_int(lower_fn_tuple_f64_array_mask(target))
+    print("\n")
+
+    let prog_b = load_module_file(path_b)
+    if parser_last_error_count() > 0 {
+        panic("probe_tuple_arr_reset_boundary: parse failed for file_b")
+    }
+    let low_b = lower_program_to_ir(prog_b)
+    if low_b.had_error {
+        panic("probe_tuple_arr_reset_boundary: lower failed for file_b")
+    }
+    print("probe_tuple_arr_reset_boundary: after_b fn=")
+    print(fn_name_str)
+    print(" mask=")
+    print_int(lower_fn_tuple_f64_array_mask(target))
+    print("\n")
+}
+
+// --probe-tuple-arr-callsite-reset-boundary <file_a.sio> <file_b.sio> <fn_name>:
+// Copilot review (PR #2516), comment 4115267768: lower_program_to_ir_probe_
+// callsite (self-hosted/ir/lower.sio) is a SEPARATE public entry point from
+// lower_program_to_ir above -- it reaches the same tuple-array-mask
+// collector through lower_program_bodies_filtered_ref, but did not reset the
+// table itself before this round's fix, so two calls to THIS API in one
+// process for two different inputs sharing a function name could leak the
+// first call's mask into the second, the identical shape --probe-tuple-arr-
+// reset-boundary above pins for lower_program_to_ir. Same probe shape, this
+// entry point instead: lower file A through lower_program_to_ir_probe_
+// callsite, print fn_name's mask, lower file B the same way, print again --
+// with the fix, B's mask reflects its own shape for fn_name; without it, B's
+// reported mask would incorrectly equal A's.
+fn run_probe_tuple_arr_callsite_reset_boundary(args: ArgList, flag_index: i64) with IO, Mut, Panic, Div, Alloc {
+    if flag_index + 3 >= args.len {
+        panic("probe_tuple_arr_callsite_reset_boundary: expected <file_a.sio> <file_b.sio> <fn_name>")
+    }
+    let path_a = arg_list_get(args, flag_index + 1)
+    let path_b = arg_list_get(args, flag_index + 2)
+    let fn_name_str = arg_list_get(args, flag_index + 3)
+    let target = make_name(fn_name_str)
+
+    let prog_a = load_module_file(path_a)
+    if parser_last_error_count() > 0 {
+        panic("probe_tuple_arr_callsite_reset_boundary: parse failed for file_a")
+    }
+    let low_a = lower_program_to_ir_probe_callsite(prog_a, target)
+    if low_a.had_error {
+        panic("probe_tuple_arr_callsite_reset_boundary: lower failed for file_a")
+    }
+    print("probe_tuple_arr_callsite_reset_boundary: after_a fn=")
+    print(fn_name_str)
+    print(" mask=")
+    print_int(lower_fn_tuple_f64_array_mask(target))
+    print("\n")
+
+    let prog_b = load_module_file(path_b)
+    if parser_last_error_count() > 0 {
+        panic("probe_tuple_arr_callsite_reset_boundary: parse failed for file_b")
+    }
+    let low_b = lower_program_to_ir_probe_callsite(prog_b, target)
+    if low_b.had_error {
+        panic("probe_tuple_arr_callsite_reset_boundary: lower failed for file_b")
+    }
+    print("probe_tuple_arr_callsite_reset_boundary: after_b fn=")
+    print(fn_name_str)
+    print(" mask=")
+    print_int(lower_fn_tuple_f64_array_mask(target))
     print("\n")
 }
 
@@ -12445,19 +13083,32 @@ fn compiler_main_test_emit_print_f64_produces_code() -> bool with Mut, Panic, Di
     (after_len - before_len) > 50
 }
 
-// T404: Knowledge<f64> layout registration has 3 fields
+// T404: Knowledge<f64> layout registration -- 5 NAMES over 4 SLOTS (#1499).
+// fields[3] `epsilon` ALIASES `confidence` on index 2; fields[4] `provenance`
+// takes its own index 3. Both names must be present or the lookup falls
+// through -- reads to the legacy buf[0] % 64 hash, struct-literal writes to the
+// positional default -- and lands on an unrelated slot.
 fn compiler_main_test_knowledge_layout_registered() -> bool with Mut, Panic, Div {
     let table = ir_register_knowledge_layout(empty_struct_layout_table())
     if table.count != 1 { return false }
     let entry = table.entries[0]
     if !ir_name_eq(entry.type_name, make_name("Knowledge")) { return false }
-    if entry.field_count != 3 { return false }
+    if entry.field_count != 5 { return false }
     if !ir_name_eq(ir_name_at(entry.fields[0].name_id), make_name("value")) { return false }
     if entry.fields[0].index != 0 { return false }
     if !ir_name_eq(ir_name_at(entry.fields[1].name_id), make_name("variance")) { return false }
     if entry.fields[1].index != 1 { return false }
     if !ir_name_eq(ir_name_at(entry.fields[2].name_id), make_name("confidence")) { return false }
     if entry.fields[2].index != 2 { return false }
+    // `epsilon` names the SAME slot as `confidence`, so it must carry index 2 --
+    // a distinct index here would be a fourth field, not an alias.
+    if !ir_name_eq(ir_name_at(entry.fields[3].name_id), make_name("epsilon")) { return false }
+    if entry.fields[3].index != 2 { return false }
+    // `provenance` is the one entry that is NOT an alias: its own slot, so that a
+    // struct literal naming it stops overwriting whichever field sits at its
+    // positional index.
+    if !ir_name_eq(ir_name_at(entry.fields[4].name_id), make_name("provenance")) { return false }
+    if entry.fields[4].index != 3 { return false }
     true
 }
 
@@ -13338,10 +13989,11 @@ fn compiler_main_test_gum_mul_full_chain() -> bool with Mut, Div, Panic {
         && (IR_A_BIN_OP[(ir_region_slot_r(func.region, (8))) as usize] as BinaryOp) == BinaryOp::OpAdd && IR_A_SRC1[(ir_region_slot_r(func.region, (8))) as usize] == 7 && IR_A_SRC2[(ir_region_slot_r(func.region, (8))) as usize] == 9
 }
 
-// T468: Knowledge layout field count = 3 (value, variance, confidence)
+// T468: Knowledge layout name count = 5 (value, variance, confidence, epsilon,
+// provenance) over 4 slots -- `epsilon` aliases `confidence` on index 2 (#1499).
 fn compiler_main_test_knowledge_layout_fields_3() -> bool with Mut, Panic, Div {
     let table = ir_register_knowledge_layout(empty_struct_layout_table())
-    table.count == 1 && table.entries[0 as usize].field_count == 3
+    table.count == 1 && table.entries[0 as usize].field_count == 5
 }
 
 // T469: GUM sub full chain — field_get + OpAdd (not OpSub) + alloc + field_set
@@ -22071,6 +22723,44 @@ fn compiler_main_self_tests_part_01(passed_in: i64) -> i64 with IO, Mut, Panic, 
         println("  FAIL: T143d eg_small_satf chaotic should block reassociation")
     }
 
+    // Q certificate (basis support) behind fano_selective — anti-garbling axis 1 in the
+    // e-graph. Placed with T143b-d for the same reason (reached before the downstream crash).
+    if compiler_main_test_eg_q_scalar_leaves_reassociate() {
+        println("  T143e OK: Q certificate: scalar leaves {e_0} reassociate under fano_selective")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T143e Q certificate scalar leaves should reassociate")
+        compiler_eg_q_probe()
+    }
+
+    if compiler_main_test_eg_q_unknown_leaves_block() {
+        println("  T143f OK: Q certificate: uncertified leaves are refused (register id is not a basis)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T143f Q certificate uncertified leaves should block")
+    }
+
+    if compiler_main_test_eg_q_union_support_blocks() {
+        println("  T143g OK: Q certificate: union support {1,2} x {2} x {4} refused ((1,2,4) not Fano)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T143g Q certificate union support should block")
+    }
+
+    if compiler_main_test_eg_q_union_alt_reassociates() {
+        println("  T143g' OK: Q certificate: union support {1,2} x {3} x {3} reassociates (alternativity)")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T143g' Q certificate union alternative support should reassociate")
+    }
+
+    if compiler_main_test_eg_q_mask_algebra() {
+        println("  T143h OK: Q certificate: mask algebra (xor product, union, top absorbs) + site predicate")
+        passed = passed + 1
+    } else {
+        println("  FAIL: T143h Q certificate mask algebra")
+    }
+
     if compiler_main_test_char_from_i64_valid() {
         println("  T01 OK: char_from_i64 valid digits")
         passed = passed + 1
@@ -22555,17 +23245,17 @@ fn compiler_main_self_tests_part_01(passed_in: i64) -> i64 with IO, Mut, Panic, 
     }
 
     if compiler_main_test_frame_trim_param_vreg() {
-        println("  T69 OK: nc_min_frame_size handles param vreg (RA_UNASSIGNED) as stack slot")
+        println("  T69 OK: nc_min_frame_size covers params and high stack-only vreg boundaries")
         passed = passed + 1
     } else {
-        println("  FAIL: T69 nc_min_frame_size handles param vreg (RA_UNASSIGNED) as stack slot")
+        println("  FAIL: T69 nc_min_frame_size param/high-vreg boundary contract")
     }
 
     if compiler_main_test_used_allocatable_preg_mask() {
-        println("  T70 OK: used allocatable preg mask tracks only r12-r15 assignments")
+        println("  T70 OK: preg mask and 16384-vreg growth boundaries are fail-closed")
         passed = passed + 1
     } else {
-        println("  FAIL: T70 used allocatable preg mask tracks only r12-r15 assignments")
+        println("  FAIL: T70 preg mask/vreg boundary contract")
     }
 
     if compiler_main_test_frame_align_for_saved_pregs() {
@@ -27964,7 +28654,7 @@ fn compiler_main_self_tests_part_10(passed_in: i64) -> i64 with IO, Mut, Panic, 
 
 fn run_compiler_main_self_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     var passed: i64 = 0
-    let total: i64 = 1156
+    let total: i64 = 1161
 
     println("=== compiler/main.sio self-tests ===")
     passed = compiler_main_self_tests_part_01(passed)
@@ -28144,6 +28834,39 @@ fn compiler_mark_hlir_kernels_from_items(module: HlirModule, items: Option<Box<I
     }
 }
 
+fn compiler_trace_pireus_hlir(module: &HlirModule) with IO, Mut, Panic, Div, Alloc {
+    if !str_eq(read_env("SOUNIO_PIREUS_OPERATOR_TRACE"), "1") { return }
+    var fi: i64 = 0
+    while fi < module.fn_count {
+        var bi: i64 = 0
+        while bi < module.functions[fi as usize].block_count {
+            let block = &module.functions[fi as usize].blocks[bi as usize]
+            var ii: i64 = 0
+            while ii < block.instr_count {
+                let instr = &block.instrs[ii as usize]
+                if instr.operator_kind == HLIR_OPERATOR_XOR_CONVOLUTION {
+                    print("PIREUS_HLIR_TYPED operator_kind=")
+                    print_int(instr.operator_kind)
+                    print(" bits=")
+                    print_int(instr.xor_bits)
+                    print(" twist=")
+                    print_int(instr.xor_twist)
+                    print(" candidate=")
+                    print_int(instr.xor_candidate)
+                    print(" argc=")
+                    print_int(instr.call_arg_count)
+                    print(" callee_len=")
+                    print_int(instr.call_name.len)
+                    print("\n")
+                }
+                ii = ii + 1
+            }
+            bi = bi + 1
+        }
+        fi = fi + 1
+    }
+}
+
 
 // ============================================================================
 // GPU COMPILE PIPELINE
@@ -28191,13 +28914,34 @@ fn run_gpu_compile_pipeline(
         return 1
     }
 
+    // Preserve checker-owned hypercomplex operator identity across the AST
+    // reload below. HLIR may use syntax for physical layout, but it must not
+    // invent a Sedenion operator from a spelling or function name.
+    var hyper_epistemic = ir_empty_epistemic_section()
+    let hyper_prog = load_module_file(input_path)
+    if !check_program_epistemic_into(hyper_prog, &!hyper_epistemic) {
+        print("GPU: typed metadata export failed\n")
+        return 1
+    }
+
     // module_frontend_check_items_with_source_context consumes the item list on
     // the self-hosted value path. Reload before HLIR lowering so kernel fn
     // declarations remain visible to the GPU extraction pass.
     let lower_prog = load_module_file(input_path)
-    var hlir_module = hlir_lower_module(lower_prog)
+    var hlir_module = hlir_lower_module_with_epistemic(lower_prog, &hyper_epistemic)
+    if hlir_module.lowering_error_count > 0 {
+        print("GPU: HLIR_LOWERING_REFUSED errors=")
+        print_int(hlir_module.lowering_error_count)
+        print("\n")
+        return 1
+    }
     let kernel_mark_prog = load_module_file(input_path)
     hlir_module = compiler_mark_hlir_kernels_from_items(hlir_module, kernel_mark_prog.items)
+    compiler_trace_pireus_hlir(&hlir_module)
+    if !hlir_module_xor_contracts_valid(&hlir_module) {
+        print("GPU: PIREUS_TYPED_CONTRACT_REFUSED\n")
+        return 1
+    }
 
     // Count GPU-annotated kernels
     let kcount = hlir_extract_kernel_count(hlir_module)
@@ -28223,6 +28967,10 @@ fn run_gpu_compile_pipeline(
 
         // Metal MSL — print to stdout (no file write available for MetalBuf)
         let metal_all = hlir_kernels_to_metal(hlir_module)
+        if metal_buf_contains(metal_all, "#error PIREUS_METAL_COMPOUND_SHAPE_REFUSED") {
+            print("GPU: PIREUS_METAL_COMPOUND_SHAPE_REFUSED\n")
+            return 1
+        }
         metal_buf_print(metal_all)
 
         // SPIR-V binary
@@ -28251,8 +28999,26 @@ fn run_gpu_compile_pipeline(
                                  && str_char_at(gpu_target, 3) == str_char_at("metal", 3)
                                  && str_char_at(gpu_target, 4) == str_char_at("metal", 4) {
         let metal = hlir_kernels_to_metal(hlir_module)
-        metal_buf_print(metal)
-        print("GPU: Metal MSL emitted\n")
+        if metal_buf_contains(metal, "#error PIREUS_METAL_COMPOUND_SHAPE_REFUSED") {
+            print("GPU: PIREUS_METAL_COMPOUND_SHAPE_REFUSED\n")
+            return 1
+        }
+        if str_len(output_path) > 0 {
+            let metal_ok = io_write_bytes_to_file(output_path, metal.data, metal.len)
+            if metal_ok {
+                print("GPU: Metal MSL written to ")
+                print(output_path)
+                print("\n")
+            } else {
+                print("GPU: failed to write Metal MSL to ")
+                print(output_path)
+                print("\n")
+                return 1
+            }
+        } else {
+            metal_buf_print(metal)
+            print("GPU: Metal MSL emitted\n")
+        }
         return 0
     }
 
@@ -28404,6 +29170,21 @@ fn run_gpu_compile_pipeline(
             print(")\n")
         } else {
             ptx_buf_print(kpb)
+        }
+        return 0
+    }
+
+    // Explicit DGX Spark GB10 / Blackwell profile.
+    if str_eq(gpu_target, "dgx-sm121") {
+        let dgx_ptx = hlir_kernels_to_dgx_sm121_ptx(hlir_module)
+        if str_len(output_path) > 0 {
+            if !io_write_bytes_to_file(output_path, dgx_ptx.data, dgx_ptx.len) {
+                print("GPU: failed to write DGX sm_121 PTX\n")
+                return 1
+            }
+            print("GPU: DGX sm_121 PTX written\n")
+        } else {
+            ptx_buf_print(dgx_ptx)
         }
         return 0
     }
@@ -28707,6 +29488,24 @@ fn main() with IO, Mut, Panic, Div, Alloc {
             return
         } else if mode == "--probe-native-streaming" || starts_with(mode, "--probe-native-stream") {
             run_probe_native_streaming(args, arg_idx)
+            return
+        } else if mode == "--probe-filtered-body-reset-boundary" {
+            // Must be checked before the "--probe-filtered-body" prefix
+            // match below (--probe-filtered-body-lower's own fallback),
+            // which would otherwise swallow this flag too.
+            run_probe_filtered_body_reset_boundary(args, arg_idx)
+            return
+        } else if mode == "--probe-filtered-body-lower" || starts_with(mode, "--probe-filtered-body") {
+            run_probe_filtered_body_lower(args, arg_idx)
+            return
+        } else if mode == "--probe-tuple-arr-capacity" || starts_with(mode, "--probe-tuple-arr-cap") {
+            run_probe_tuple_arr_capacity(args, arg_idx)
+            return
+        } else if mode == "--probe-tuple-arr-callsite-reset-boundary" || starts_with(mode, "--probe-tuple-arr-callsite") {
+            run_probe_tuple_arr_callsite_reset_boundary(args, arg_idx)
+            return
+        } else if mode == "--probe-tuple-arr-reset-boundary" || starts_with(mode, "--probe-tuple-arr-reset") {
+            run_probe_tuple_arr_reset_boundary(args, arg_idx)
             return
         } else if mode == "--probe-load-ir" || starts_with(mode, "--probe-load") {
             run_probe_load_ir(args, arg_idx)

@@ -1,0 +1,1768 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+// Round 13: EL+ role-aware closure on the three GO root cones (GO:0008150 BP, GO:0005575 CC, GO:0003674 MF).
+//
+// Round 13.  Executable mirror of the verified saturation engine of
+// formal/OntologyELPlusClosureComplete.lean (crStep / closeSatF), same
+// bitmask reduction as the round-12 full-GO driver
+// (../real-data/scale/go_full_elplus_driver.sio), generalised to a
+// MULTI-TARGET run: each target's TBox is loaded at RUNTIME from a
+// packed text file whose 13-int header carries the 7 axiom counts AND
+// the 6 python-mirror values (atomic edges, role edges, conflicts,
+// rounds, 2 ablations) — the round-12 separate expected_*.sio module is
+// replaced by self-validating data files.
+//
+// Per target: role-hierarchy closure, Kahn topological order, ancestor
+// bitmasks (one topo pass), role-edge seeding + ancestor expansion
+// (folds Rmono / transitivity+stoR), hybrid roleSub-worklist /
+// roleComp-full-scan fixpoint (round 12b/c corrections), atom-level
+// conflict count over endpoint masks, and the two ablation re-runs —
+// every number checked against the mirror header.
+//
+// Data + mirror: gen_multi_data.py (this directory).  Run from the repo
+// root (the gate does): the read_file paths below are repo-relative.
+
+// ── capacities (compile-time; sized to the largest target + headroom) ──
+const HC: i64 = 26600
+const NRC: i64 = 40
+const WC: i64 = 392
+const SUBC: i64 = 45000
+const EXC: i64 = 13900
+const DJC: i64 = 64
+const RSC: i64 = 80
+const RCC: i64 = 64
+const EPC: i64 = 128
+const NEPW: i64 = 2
+const FMN: i64 = 417088000
+const DCN: i64 = 1064000
+const ANCN: i64 = 10427200
+
+// ── module-level workspace (mutated by own-module fns only — the &!-
+//    boundary miscompile of rounds 9-12) ─────────────────────────────────
+pub var anc: [i64; 10427200] = [0; 10427200]
+pub var fm: [i64; 417088000] = [0; 417088000]
+pub var cur_dirty: [bool; 1064000] = [false; 1064000]
+pub var nxt_dirty: [bool; 1064000] = [false; 1064000]
+pub var f_nonempty: [bool; 1064000] = [false; 1064000]
+pub var sub_c: [i64; 45000] = [0; 45000]
+pub var sub_p: [i64; 45000] = [0; 45000]
+pub var ex_c: [i64; 13900] = [0; 13900]
+pub var ex_r: [i64; 13900] = [0; 13900]
+pub var ex_f: [i64; 13900] = [0; 13900]
+pub var dj_a: [i64; 64] = [0; 64]
+pub var dj_b: [i64; 64] = [0; 64]
+pub var rs_r: [i64; 80] = [0; 80]
+pub var rs_s: [i64; 80] = [0; 80]
+pub var ch1: [i64; 64] = [0; 64]
+pub var ch2: [i64; 64] = [0; 64]
+pub var ch3: [i64; 64] = [0; 64]
+pub var rclos: [bool; 1600] = [false; 1600]
+pub var rc_r: [i64; 1600] = [0; 1600]
+pub var rc_s: [i64; 1600] = [0; 1600]
+pub var indeg: [i64; 26600] = [0; 26600]
+pub var order: [i64; 26600] = [0; 26600]
+pub var queue: [i64; 26600] = [0; 26600]
+pub var coff: [i64; 26601] = [0; 26601]
+pub var clist: [i64; 45000] = [0; 45000]
+pub var poff: [i64; 26601] = [0; 26601]
+pub var plist: [i64; 45000] = [0; 45000]
+pub var csr_cnt: [i64; 26600] = [0; 26600]
+pub var epm: [i64; 53200] = [0; 53200]
+pub var pm: [i64; 53200] = [0; 53200]
+pub var actors: [i64; 26600] = [0; 26600]
+pub var ep_id: [i64; 26600] = [0; 26600]
+pub var acc: [i64; 392] = [0; 392]
+
+pub var g_pos: i64 = 0
+pub var g_len: i64 = 0
+
+// ── bit helpers ──────────────────────────────────────────────────────────
+
+fn ctz64(x: i64) -> i64 with Div {
+    var n: i64 = 0
+    var v = x
+    if (v & 4294967295) == 0 { n = n + 32; v = v / 4294967296 }
+    if (v & 65535) == 0 { n = n + 16; v = v / 65536 }
+    if (v & 255) == 0 { n = n + 8; v = v / 256 }
+    if (v & 15) == 0 { n = n + 4; v = v / 16 }
+    if (v & 3) == 0 { n = n + 2; v = v / 4 }
+    if (v & 1) == 0 { n = n + 1 }
+    return n
+}
+
+fn row_popcount(base: i64) -> i64 with Mut, Div, Panic {
+    var n: i64 = 0
+    var w: i64 = 0
+    while w < WC {
+        var m = anc[base + w]
+        while m != 0 {
+            n = n + 1
+            m = m & (m - 1)
+        }
+        w = w + 1
+    }
+    return n
+}
+
+// ── runtime text parsing (read_file result; str_char_at access only) ─────
+
+fn skip_ws(text: string) with Mut, Div, Panic {
+    while g_pos < g_len {
+        let c = str_char_at(text, g_pos) as i64
+        if c != 32 && c != 10 && c != 13 && c != 9 {
+            return
+        }
+        g_pos = g_pos + 1
+    }
+}
+
+fn read_int(text: string) -> i64 with Mut, Div, Panic {
+    skip_ws(text)
+    var v: i64 = 0
+    while g_pos < g_len {
+        let c = str_char_at(text, g_pos) as i64
+        if c < 48 || c > 57 {
+            return v
+        }
+        v = v * 10 + (c - 48)
+        g_pos = g_pos + 1
+    }
+    return v
+}
+
+fn read_kind(text: string) -> i64 with Mut, Div, Panic {
+    skip_ws(text)
+    if g_pos >= g_len {
+        return 0
+    }
+    let c = str_char_at(text, g_pos) as i64
+    g_pos = g_pos + 1
+    return c
+}
+
+// ── fixpoint pieces (identical semantics to the round-12 driver) ────────
+
+fn or_anc_into_f(r: i64, c: i64, f: i64, mark: i64) with Mut, Div, Panic {
+    let dst = (r * HC + c) * WC
+    let src = f * WC
+    var w: i64 = 0
+    while w < WC {
+        let sv = anc[src + w]
+        if sv != 0 {
+            let dv = fm[dst + w]
+            let nv = dv | sv
+            if nv != dv {
+                fm[dst + w] = nv
+                f_nonempty[r * HC + c] = true
+                if mark == 1 {
+                    cur_dirty[r * HC + c] = true
+                }
+            }
+        }
+        w = w + 1
+    }
+}
+
+fn or_f_into_f(r: i64, c: i64, p: i64, mark: i64) with Mut, Div, Panic {
+    let dst = (r * HC + c) * WC
+    let src = (r * HC + p) * WC
+    var w: i64 = 0
+    while w < WC {
+        let sv = fm[src + w]
+        if sv != 0 {
+            let dv = fm[dst + w]
+            let nv = dv | sv
+            if nv != dv {
+                fm[dst + w] = nv
+                f_nonempty[r * HC + c] = true
+                if mark == 1 {
+                    cur_dirty[r * HC + c] = true
+                }
+            }
+        }
+        w = w + 1
+    }
+}
+
+fn seed_and_expand(nex: i64, h: i64, nr: i64) with Mut, Div, Panic {
+    var k: i64 = 0
+    while k < nex {
+        or_anc_into_f(ex_r[k], ex_c[k], ex_f[k], 1)
+        k = k + 1
+    }
+    var i: i64 = 0
+    var c: i64 = 0
+    var t: i64 = 0
+    var p: i64 = 0
+    var r: i64 = 0
+    while i < h {
+        c = order[i]
+        t = poff[c]
+        while t < poff[c + 1] {
+            p = plist[t]
+            r = 0
+            while r < nr {
+                or_f_into_f(r, c, p, 1)
+                r = r + 1
+            }
+            t = t + 1
+        }
+        i = i + 1
+    }
+}
+
+// Hybrid roleSub-worklist / roleComp-full-scan fixpoint (rounds 12b/12c).
+fn role_fixpoint(with_rsub: i64, with_rcomp: i64, nrp: i64, nch: i64, h: i64, nr: i64) -> i64 with Mut, Div, Panic {
+    var rounds: i64 = 0
+    var any = true
+    var rsub_any = true
+    var r: i64 = 0
+    var c: i64 = 0
+    var k: i64 = 0
+    var s: i64 = 0
+    var r2: i64 = 0
+    var r3: i64 = 0
+    var w: i64 = 0
+    var m: i64 = 0
+    var low: i64 = 0
+    var f: i64 = 0
+    var dst: i64 = 0
+    var src: i64 = 0
+    var cell: i64 = 0
+    var changed_cell = false
+    var i: i64 = 0
+    while any {
+        any = false
+        rounds = rounds + 1
+        rsub_any = true
+        while rsub_any {
+            rsub_any = false
+            r = 0
+            while r < nr {
+                c = 0
+                while c < h {
+                    cell = r * HC + c
+                    if cur_dirty[cell] {
+                        cur_dirty[cell] = false
+                        if with_rsub == 1 {
+                            k = 0
+                            while k < nrp {
+                                if rc_r[k] == r {
+                                    s = rc_s[k]
+                                    src = (r * HC + c) * WC
+                                    dst = (s * HC + c) * WC
+                                    changed_cell = false
+                                    w = 0
+                                    while w < WC {
+                                        let sv = fm[src + w]
+                                        if sv != 0 {
+                                            let dv = fm[dst + w]
+                                            let nv = dv | sv
+                                            if nv != dv {
+                                                fm[dst + w] = nv
+                                                changed_cell = true
+                                            }
+                                        }
+                                        w = w + 1
+                                    }
+                                    if changed_cell {
+                                        f_nonempty[s * HC + c] = true
+                                        nxt_dirty[s * HC + c] = true
+                                        rsub_any = true
+                                        any = true
+                                    }
+                                }
+                                k = k + 1
+                            }
+                        }
+                    }
+                    c = c + 1
+                }
+                r = r + 1
+            }
+            i = 0
+            while i < DCN {
+                cur_dirty[i] = nxt_dirty[i]
+                nxt_dirty[i] = false
+                i = i + 1
+            }
+        }
+        if with_rcomp == 1 {
+            r = 0
+            while r < nr {
+                c = 0
+                while c < h {
+                    cell = r * HC + c
+                    if f_nonempty[cell] {
+                        k = 0
+                        while k < nch {
+                            if ch1[k] == r {
+                                r2 = ch2[k]
+                                r3 = ch3[k]
+                                w = 0
+                                while w < WC {
+                                    acc[w] = 0
+                                    w = w + 1
+                                }
+                                src = (r * HC + c) * WC
+                                w = 0
+                                while w < WC {
+                                    m = fm[src + w]
+                                    while m != 0 {
+                                        low = m & (0 - m)
+                                        f = w * 64 + ctz64(low)
+                                        m = m & (m - 1)
+                                        let src2 = (r2 * HC + f) * WC
+                                        var w2: i64 = 0
+                                        while w2 < WC {
+                                            let sv2 = fm[src2 + w2]
+                                            if sv2 != 0 {
+                                                acc[w2] = acc[w2] | sv2
+                                            }
+                                            w2 = w2 + 1
+                                        }
+                                    }
+                                    w = w + 1
+                                }
+                                dst = (r3 * HC + c) * WC
+                                changed_cell = false
+                                w = 0
+                                while w < WC {
+                                    let av = acc[w]
+                                    if av != 0 {
+                                        let dv = fm[dst + w]
+                                        let nv = dv | av
+                                        if nv != dv {
+                                            fm[dst + w] = nv
+                                            changed_cell = true
+                                        }
+                                    }
+                                    w = w + 1
+                                }
+                                if changed_cell {
+                                    f_nonempty[r3 * HC + c] = true
+                                    nxt_dirty[r3 * HC + c] = true
+                                    any = true
+                                }
+                            }
+                            k = k + 1
+                        }
+                    }
+                    c = c + 1
+                }
+                r = r + 1
+            }
+        }
+        // end-of-round dirty swap (round 12c fix)
+        i = 0
+        while i < DCN {
+            cur_dirty[i] = nxt_dirty[i]
+            nxt_dirty[i] = false
+            i = i + 1
+        }
+    }
+    return rounds
+}
+
+fn count_role_edges(h: i64, nr: i64) -> i64 with Mut, Div, Panic {
+    var n: i64 = 0
+    var r: i64 = 0
+    var c: i64 = 0
+    var w: i64 = 0
+    var m: i64 = 0
+    while r < nr {
+        c = 0
+        while c < h {
+            let src = (r * HC + c) * WC
+            w = 0
+            while w < WC {
+                m = fm[src + w]
+                while m != 0 {
+                    n = n + 1
+                    m = m & (m - 1)
+                }
+                w = w + 1
+            }
+            c = c + 1
+        }
+        r = r + 1
+    }
+    return n
+}
+
+// full workspace reset between targets
+fn clear_all() with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < ANCN {
+        anc[i] = 0
+        i = i + 1
+    }
+    i = 0
+    while i < FMN {
+        fm[i] = 0
+        i = i + 1
+    }
+    i = 0
+    while i < DCN {
+        cur_dirty[i] = false
+        nxt_dirty[i] = false
+        f_nonempty[i] = false
+        i = i + 1
+    }
+    i = 0
+    while i < 1600 {
+        rclos[i] = false
+        i = i + 1
+    }
+    i = 0
+    while i < 53200 {
+        epm[i] = 0
+        pm[i] = 0
+        i = i + 1
+    }
+    i = 0
+    while i < HC {
+        ep_id[i] = 0
+        i = i + 1
+    }
+}
+
+// fm-only reset for the ablation re-runs (anc and the role tables stay)
+fn clear_f() with Mut, Div, Panic {
+    var i: i64 = 0
+    while i < FMN {
+        fm[i] = 0
+        i = i + 1
+    }
+    i = 0
+    while i < DCN {
+        cur_dirty[i] = false
+        nxt_dirty[i] = false
+        f_nonempty[i] = false
+        i = i + 1
+    }
+}
+
+
+fn run_go_bp() -> i64 with IO, Mut, Div, Panic {
+    var n_fail = 0
+    clear_all()
+
+    // ── runtime data load (bypasses the ~24k-statement wall) ──────────
+    let text = read_file("artifacts/ontology-frontiers/multi-ontology/go_bp_packed.txt")
+    g_len = str_len(text)
+    g_pos = 0
+    let H = read_int(text)
+    let NR = read_int(text)
+    let NSUB = read_int(text)
+    let NEX = read_int(text)
+    let NDJ = read_int(text)
+    let NRS = read_int(text)
+    let NCH = read_int(text)
+    let E_ATOM = read_int(text)
+    let E_ROLE = read_int(text)
+    let E_CONF = read_int(text)
+    let E_ROUNDS = read_int(text)
+    let E_NORC = read_int(text)
+    let E_NORS = read_int(text)
+    if H + 1 > HC || NR > NRC || NSUB > SUBC || NEX > EXC || NDJ > DJC || NRS > RSC || NCH > RCC {
+        println("FAIL: go_bp data exceeds compile-time capacities")
+        n_fail = n_fail + 1
+    }
+    var k: i64 = 0
+    var kind: i64 = 0
+    var isub: i64 = 0
+    var iex: i64 = 0
+    var idj: i64 = 0
+    var irs: i64 = 0
+    var ich: i64 = 0
+    while g_pos < g_len {
+        kind = read_kind(text)
+        if kind == 115 {
+            sub_c[isub] = read_int(text)
+            sub_p[isub] = read_int(text)
+            isub = isub + 1
+        }
+        if kind == 120 {
+            ex_c[iex] = read_int(text)
+            ex_r[iex] = read_int(text)
+            ex_f[iex] = read_int(text)
+            iex = iex + 1
+        }
+        if kind == 100 {
+            dj_a[idj] = read_int(text)
+            dj_b[idj] = read_int(text)
+            idj = idj + 1
+        }
+        if kind == 104 {
+            rs_r[irs] = read_int(text)
+            rs_s[irs] = read_int(text)
+            irs = irs + 1
+        }
+        if kind == 107 {
+            ch1[ich] = read_int(text)
+            ch2[ich] = read_int(text)
+            ch3[ich] = read_int(text)
+            ich = ich + 1
+        }
+    }
+    if isub != NSUB || iex != NEX || idj != NDJ || irs != NRS || ich != NCH {
+        println("FAIL: go_bp parsed axiom counts disagree with header")
+        n_fail = n_fail + 1
+    }
+
+    // ── role-hierarchy closure (reflexive + transitive) ───────────────
+    var r: i64 = 0
+    while r < NR {
+        rclos[r * NRC + r] = true
+        r = r + 1
+    }
+    k = 0
+    while k < NRS {
+        rclos[rs_r[k] * NRC + rs_s[k]] = true
+        k = k + 1
+    }
+    var changed2 = true
+    var a: i64 = 0
+    var b: i64 = 0
+    var d: i64 = 0
+    while changed2 {
+        changed2 = false
+        a = 0
+        while a < NR {
+            b = 0
+            while b < NR {
+                if rclos[a * NRC + b] {
+                    d = 0
+                    while d < NR {
+                        if rclos[b * NRC + d] && !rclos[a * NRC + d] {
+                            rclos[a * NRC + d] = true
+                            changed2 = true
+                        }
+                        d = d + 1
+                    }
+                }
+                b = b + 1
+            }
+            a = a + 1
+        }
+    }
+    var nrp: i64 = 0
+    a = 0
+    while a < NR {
+        b = 0
+        while b < NR {
+            if a != b && rclos[a * NRC + b] {
+                rc_r[nrp] = a
+                rc_s[nrp] = b
+                nrp = nrp + 1
+            }
+            b = b + 1
+        }
+        a = a + 1
+    }
+
+    // ── topological order (Kahn; the is_a relation is a DAG) ──────────
+    var c: i64 = 0
+    while c < H {
+        indeg[c] = 0
+        coff[c] = 0
+        poff[c] = 0
+        c = c + 1
+    }
+    coff[H] = 0
+    poff[H] = 0
+    k = 0
+    while k < NSUB {
+        indeg[sub_c[k]] = indeg[sub_c[k]] + 1
+        coff[sub_p[k] + 1] = coff[sub_p[k] + 1] + 1
+        poff[sub_c[k] + 1] = poff[sub_c[k] + 1] + 1
+        k = k + 1
+    }
+    c = 0
+    while c < H {
+        coff[c + 1] = coff[c + 1] + coff[c]
+        poff[c + 1] = poff[c + 1] + poff[c]
+        c = c + 1
+    }
+    c = 0
+    while c < H {
+        csr_cnt[c] = coff[c]
+        c = c + 1
+    }
+    k = 0
+    while k < NSUB {
+        clist[csr_cnt[sub_p[k]]] = sub_c[k]
+        csr_cnt[sub_p[k]] = csr_cnt[sub_p[k]] + 1
+        k = k + 1
+    }
+    c = 0
+    while c < H {
+        csr_cnt[c] = poff[c]
+        c = c + 1
+    }
+    k = 0
+    while k < NSUB {
+        plist[csr_cnt[sub_c[k]]] = sub_p[k]
+        csr_cnt[sub_c[k]] = csr_cnt[sub_c[k]] + 1
+        k = k + 1
+    }
+    var head: i64 = 0
+    var tail: i64 = 0
+    c = 0
+    while c < H {
+        if indeg[c] == 0 {
+            queue[tail] = c
+            tail = tail + 1
+        }
+        c = c + 1
+    }
+    var nord: i64 = 0
+    var t: i64 = 0
+    var ch: i64 = 0
+    while head < tail {
+        c = queue[head]
+        head = head + 1
+        order[nord] = c
+        nord = nord + 1
+        t = coff[c]
+        while t < coff[c + 1] {
+            ch = clist[t]
+            indeg[ch] = indeg[ch] - 1
+            if indeg[ch] == 0 {
+                queue[tail] = ch
+                tail = tail + 1
+            }
+            t = t + 1
+        }
+    }
+    if nord != H {
+        println("FAIL: go_bp sub relation has a cycle (Kahn incomplete)")
+        n_fail = n_fail + 1
+    }
+
+    // ── atomic closure: ancestor masks in topological order ───────────
+    let one: i64 = 1
+    var i: i64 = 0
+    var w: i64 = 0
+    var p: i64 = 0
+    var dst: i64 = 0
+    var src: i64 = 0
+    while i < H {
+        c = order[i]
+        dst = c * WC
+        let cw = c / 64
+        anc[dst + cw] = anc[dst + cw] | (one << (c - cw * 64))
+        let tw = H / 64
+        anc[dst + tw] = anc[dst + tw] | (one << (H - tw * 64))
+        t = poff[c]
+        while t < poff[c + 1] {
+            p = plist[t]
+            src = p * WC
+            w = 0
+            while w < WC {
+                let sv = anc[src + w]
+                if sv != 0 {
+                    anc[dst + w] = anc[dst + w] | sv
+                }
+                w = w + 1
+            }
+            t = t + 1
+        }
+        i = i + 1
+    }
+    var atomic_edges: i64 = 0
+    c = 0
+    while c < H {
+        atomic_edges = atomic_edges + row_popcount(c * WC) - 1
+        c = c + 1
+    }
+    if atomic_edges != E_ATOM {
+        println("FAIL: go_bp atomic closure edges disagree with mirror")
+        n_fail = n_fail + 1
+    }
+
+    // ── role-aware closure: seed + expand + role fixpoint ─────────────
+    seed_and_expand(NEX, H, NR)
+    let rounds = role_fixpoint(1, 1, nrp, NCH, H, NR)
+    let r_atom = count_role_edges(H, NR)
+    if r_atom != E_ROLE {
+        println("FAIL: go_bp atom-source role edges disagree with mirror")
+        n_fail = n_fail + 1
+    }
+    if rounds != E_ROUNDS {
+        println("FAIL: go_bp role fixpoint rounds disagree with mirror")
+        n_fail = n_fail + 1
+    }
+
+    // ── conflicts over atomic ancestors (profile theorem) ─────────────
+    // endpoint masks epm[c*NEPW + w] (which disjointness endpoints are
+    // ancestors of c) and partner masks pm (union of partner bits);
+    // word-generalised (UBERON has ~600 endpoints, GO cones < 64).
+    var nep: i64 = 0
+    k = 0
+    while k < NDJ {
+        a = dj_a[k]
+        b = dj_b[k]
+        if ep_id[a] == 0 {
+            nep = nep + 1
+            ep_id[a] = nep
+        }
+        if ep_id[b] == 0 {
+            nep = nep + 1
+            ep_id[b] = nep
+        }
+        k = k + 1
+    }
+    if nep > EPC {
+        println("FAIL: go_bp too many disjointness endpoints")
+        n_fail = n_fail + 1
+    }
+    k = 0
+    while k < NDJ {
+        a = dj_a[k]
+        b = dj_b[k]
+        let aw = a / 64
+        let abit = one << (a - aw * 64)
+        let bw = b / 64
+        let bbit = one << (b - bw * 64)
+        let ka = ep_id[a] - 1
+        let kb = ep_id[b] - 1
+        let kaw = ka / 64
+        let kab = ka - kaw * 64
+        let kbw = kb / 64
+        let kbb = kb - kbw * 64
+        c = 0
+        while c < H {
+            let cw = c * WC
+            if (anc[cw + aw] & abit) != 0 {
+                epm[c * NEPW + kaw] = epm[c * NEPW + kaw] | (one << kab)
+            }
+            if (anc[cw + bw] & bbit) != 0 {
+                epm[c * NEPW + kbw] = epm[c * NEPW + kbw] | (one << kbb)
+            }
+            c = c + 1
+        }
+        k = k + 1
+    }
+    // partner masks: a class with endpoint a gets the partner bit of b
+    // and vice versa
+    k = 0
+    while k < NDJ {
+        let ka = ep_id[dj_a[k]] - 1
+        let kb = ep_id[dj_b[k]] - 1
+        let kaw = ka / 64
+        let kab = ka - kaw * 64
+        let kbw = kb / 64
+        let kbb = kb - kbw * 64
+        c = 0
+        while c < H {
+            if (epm[c * NEPW + kaw] & (one << kab)) != 0 {
+                pm[c * NEPW + kbw] = pm[c * NEPW + kbw] | (one << kbb)
+            }
+            if (epm[c * NEPW + kbw] & (one << kbb)) != 0 {
+                pm[c * NEPW + kaw] = pm[c * NEPW + kaw] | (one << kab)
+            }
+            c = c + 1
+        }
+        k = k + 1
+    }
+    var nact: i64 = 0
+    c = 0
+    while c < H {
+        var any_ep = false
+        w = 0
+        while w < NEPW {
+            if epm[c * NEPW + w] != 0 || pm[c * NEPW + w] != 0 {
+                any_ep = true
+            }
+            w = w + 1
+        }
+        if any_ep {
+            actors[nact] = c
+            nact = nact + 1
+        }
+        c = c + 1
+    }
+    var conf: i64 = 0
+    var i1: i64 = 0
+    var i2: i64 = 0
+    var c1: i64 = 0
+    var c2: i64 = 0
+    while i1 < nact {
+        c1 = actors[i1]
+        i2 = 0
+        while i2 < nact {
+            c2 = actors[i2]
+            if c1 != c2 {
+                var hit = false
+                w = 0
+                while w < NEPW {
+                    if (pm[c1 * NEPW + w] & epm[c2 * NEPW + w]) != 0 {
+                        hit = true
+                    }
+                    w = w + 1
+                }
+                if hit {
+                    conf = conf + 1
+                }
+            }
+            i2 = i2 + 1
+        }
+        i1 = i1 + 1
+    }
+    if conf != E_CONF {
+        println("FAIL: go_bp conflicts disagree with mirror")
+        n_fail = n_fail + 1
+    }
+
+    // ── ablations: attribute derived edges to the rule families ───────
+    clear_f()
+    seed_and_expand(NEX, H, NR)
+    let rounds_norc = role_fixpoint(1, 0, nrp, NCH, H, NR)
+    let re_norc = count_role_edges(H, NR)
+    if re_norc != E_NORC {
+        println("FAIL: go_bp no-roleComp role edges disagree with mirror")
+        n_fail = n_fail + 1
+    }
+    clear_f()
+    seed_and_expand(NEX, H, NR)
+    let rounds_nors = role_fixpoint(0, 1, nrp, NCH, H, NR)
+    let re_nors = count_role_edges(H, NR)
+    if re_nors != E_NORS {
+        println("FAIL: go_bp no-roleSub role edges disagree with mirror")
+        n_fail = n_fail + 1
+    }
+    println("role edges without roleComp (ablation):")
+    println(re_norc)
+    println("role edges without roleSub (ablation):")
+    println(re_nors)
+    println("role fixpoint rounds (no-roleComp):")
+    println(rounds_norc)
+    println("role fixpoint rounds (no-roleSub):")
+    println(rounds_nors)
+
+
+    // ── summary ────────────────────────────────────────────────────────
+    println("=== go_bp : EL+ role-aware closure (round 13) ===")
+    println("classes (H):")
+    println(H)
+    println("roles (NR):")
+    println(NR)
+    println("sub axioms:")
+    println(NSUB)
+    println("existential restrictions (exsub):")
+    println(NEX)
+    println("disjoint pairs:")
+    println(NDJ)
+    println("roleSub axioms:")
+    println(NRS)
+    println("roleComp chains:")
+    println(NCH)
+    println("atomic projection closure edges:")
+    println(atomic_edges)
+    println("atom-source role edges (= existential targets, stoR/RtoS):")
+    println(r_atom)
+    println("atomic conflicts (ordered pairs):")
+    println(conf)
+    println("role fixpoint rounds (full):")
+    println(rounds)
+    return n_fail
+}
+
+fn run_go_cc() -> i64 with IO, Mut, Div, Panic {
+    var n_fail = 0
+    clear_all()
+
+    // ── runtime data load (bypasses the ~24k-statement wall) ──────────
+    let text = read_file("artifacts/ontology-frontiers/multi-ontology/go_cc_packed.txt")
+    g_len = str_len(text)
+    g_pos = 0
+    let H = read_int(text)
+    let NR = read_int(text)
+    let NSUB = read_int(text)
+    let NEX = read_int(text)
+    let NDJ = read_int(text)
+    let NRS = read_int(text)
+    let NCH = read_int(text)
+    let E_ATOM = read_int(text)
+    let E_ROLE = read_int(text)
+    let E_CONF = read_int(text)
+    let E_ROUNDS = read_int(text)
+    let E_NORC = read_int(text)
+    let E_NORS = read_int(text)
+    if H + 1 > HC || NR > NRC || NSUB > SUBC || NEX > EXC || NDJ > DJC || NRS > RSC || NCH > RCC {
+        println("FAIL: go_cc data exceeds compile-time capacities")
+        n_fail = n_fail + 1
+    }
+    var k: i64 = 0
+    var kind: i64 = 0
+    var isub: i64 = 0
+    var iex: i64 = 0
+    var idj: i64 = 0
+    var irs: i64 = 0
+    var ich: i64 = 0
+    while g_pos < g_len {
+        kind = read_kind(text)
+        if kind == 115 {
+            sub_c[isub] = read_int(text)
+            sub_p[isub] = read_int(text)
+            isub = isub + 1
+        }
+        if kind == 120 {
+            ex_c[iex] = read_int(text)
+            ex_r[iex] = read_int(text)
+            ex_f[iex] = read_int(text)
+            iex = iex + 1
+        }
+        if kind == 100 {
+            dj_a[idj] = read_int(text)
+            dj_b[idj] = read_int(text)
+            idj = idj + 1
+        }
+        if kind == 104 {
+            rs_r[irs] = read_int(text)
+            rs_s[irs] = read_int(text)
+            irs = irs + 1
+        }
+        if kind == 107 {
+            ch1[ich] = read_int(text)
+            ch2[ich] = read_int(text)
+            ch3[ich] = read_int(text)
+            ich = ich + 1
+        }
+    }
+    if isub != NSUB || iex != NEX || idj != NDJ || irs != NRS || ich != NCH {
+        println("FAIL: go_cc parsed axiom counts disagree with header")
+        n_fail = n_fail + 1
+    }
+
+    // ── role-hierarchy closure (reflexive + transitive) ───────────────
+    var r: i64 = 0
+    while r < NR {
+        rclos[r * NRC + r] = true
+        r = r + 1
+    }
+    k = 0
+    while k < NRS {
+        rclos[rs_r[k] * NRC + rs_s[k]] = true
+        k = k + 1
+    }
+    var changed2 = true
+    var a: i64 = 0
+    var b: i64 = 0
+    var d: i64 = 0
+    while changed2 {
+        changed2 = false
+        a = 0
+        while a < NR {
+            b = 0
+            while b < NR {
+                if rclos[a * NRC + b] {
+                    d = 0
+                    while d < NR {
+                        if rclos[b * NRC + d] && !rclos[a * NRC + d] {
+                            rclos[a * NRC + d] = true
+                            changed2 = true
+                        }
+                        d = d + 1
+                    }
+                }
+                b = b + 1
+            }
+            a = a + 1
+        }
+    }
+    var nrp: i64 = 0
+    a = 0
+    while a < NR {
+        b = 0
+        while b < NR {
+            if a != b && rclos[a * NRC + b] {
+                rc_r[nrp] = a
+                rc_s[nrp] = b
+                nrp = nrp + 1
+            }
+            b = b + 1
+        }
+        a = a + 1
+    }
+
+    // ── topological order (Kahn; the is_a relation is a DAG) ──────────
+    var c: i64 = 0
+    while c < H {
+        indeg[c] = 0
+        coff[c] = 0
+        poff[c] = 0
+        c = c + 1
+    }
+    coff[H] = 0
+    poff[H] = 0
+    k = 0
+    while k < NSUB {
+        indeg[sub_c[k]] = indeg[sub_c[k]] + 1
+        coff[sub_p[k] + 1] = coff[sub_p[k] + 1] + 1
+        poff[sub_c[k] + 1] = poff[sub_c[k] + 1] + 1
+        k = k + 1
+    }
+    c = 0
+    while c < H {
+        coff[c + 1] = coff[c + 1] + coff[c]
+        poff[c + 1] = poff[c + 1] + poff[c]
+        c = c + 1
+    }
+    c = 0
+    while c < H {
+        csr_cnt[c] = coff[c]
+        c = c + 1
+    }
+    k = 0
+    while k < NSUB {
+        clist[csr_cnt[sub_p[k]]] = sub_c[k]
+        csr_cnt[sub_p[k]] = csr_cnt[sub_p[k]] + 1
+        k = k + 1
+    }
+    c = 0
+    while c < H {
+        csr_cnt[c] = poff[c]
+        c = c + 1
+    }
+    k = 0
+    while k < NSUB {
+        plist[csr_cnt[sub_c[k]]] = sub_p[k]
+        csr_cnt[sub_c[k]] = csr_cnt[sub_c[k]] + 1
+        k = k + 1
+    }
+    var head: i64 = 0
+    var tail: i64 = 0
+    c = 0
+    while c < H {
+        if indeg[c] == 0 {
+            queue[tail] = c
+            tail = tail + 1
+        }
+        c = c + 1
+    }
+    var nord: i64 = 0
+    var t: i64 = 0
+    var ch: i64 = 0
+    while head < tail {
+        c = queue[head]
+        head = head + 1
+        order[nord] = c
+        nord = nord + 1
+        t = coff[c]
+        while t < coff[c + 1] {
+            ch = clist[t]
+            indeg[ch] = indeg[ch] - 1
+            if indeg[ch] == 0 {
+                queue[tail] = ch
+                tail = tail + 1
+            }
+            t = t + 1
+        }
+    }
+    if nord != H {
+        println("FAIL: go_cc sub relation has a cycle (Kahn incomplete)")
+        n_fail = n_fail + 1
+    }
+
+    // ── atomic closure: ancestor masks in topological order ───────────
+    let one: i64 = 1
+    var i: i64 = 0
+    var w: i64 = 0
+    var p: i64 = 0
+    var dst: i64 = 0
+    var src: i64 = 0
+    while i < H {
+        c = order[i]
+        dst = c * WC
+        let cw = c / 64
+        anc[dst + cw] = anc[dst + cw] | (one << (c - cw * 64))
+        let tw = H / 64
+        anc[dst + tw] = anc[dst + tw] | (one << (H - tw * 64))
+        t = poff[c]
+        while t < poff[c + 1] {
+            p = plist[t]
+            src = p * WC
+            w = 0
+            while w < WC {
+                let sv = anc[src + w]
+                if sv != 0 {
+                    anc[dst + w] = anc[dst + w] | sv
+                }
+                w = w + 1
+            }
+            t = t + 1
+        }
+        i = i + 1
+    }
+    var atomic_edges: i64 = 0
+    c = 0
+    while c < H {
+        atomic_edges = atomic_edges + row_popcount(c * WC) - 1
+        c = c + 1
+    }
+    if atomic_edges != E_ATOM {
+        println("FAIL: go_cc atomic closure edges disagree with mirror")
+        n_fail = n_fail + 1
+    }
+
+    // ── role-aware closure: seed + expand + role fixpoint ─────────────
+    seed_and_expand(NEX, H, NR)
+    let rounds = role_fixpoint(1, 1, nrp, NCH, H, NR)
+    let r_atom = count_role_edges(H, NR)
+    if r_atom != E_ROLE {
+        println("FAIL: go_cc atom-source role edges disagree with mirror")
+        n_fail = n_fail + 1
+    }
+    if rounds != E_ROUNDS {
+        println("FAIL: go_cc role fixpoint rounds disagree with mirror")
+        n_fail = n_fail + 1
+    }
+
+    // ── conflicts over atomic ancestors (profile theorem) ─────────────
+    // endpoint masks epm[c*NEPW + w] (which disjointness endpoints are
+    // ancestors of c) and partner masks pm (union of partner bits);
+    // word-generalised (UBERON has ~600 endpoints, GO cones < 64).
+    var nep: i64 = 0
+    k = 0
+    while k < NDJ {
+        a = dj_a[k]
+        b = dj_b[k]
+        if ep_id[a] == 0 {
+            nep = nep + 1
+            ep_id[a] = nep
+        }
+        if ep_id[b] == 0 {
+            nep = nep + 1
+            ep_id[b] = nep
+        }
+        k = k + 1
+    }
+    if nep > EPC {
+        println("FAIL: go_cc too many disjointness endpoints")
+        n_fail = n_fail + 1
+    }
+    k = 0
+    while k < NDJ {
+        a = dj_a[k]
+        b = dj_b[k]
+        let aw = a / 64
+        let abit = one << (a - aw * 64)
+        let bw = b / 64
+        let bbit = one << (b - bw * 64)
+        let ka = ep_id[a] - 1
+        let kb = ep_id[b] - 1
+        let kaw = ka / 64
+        let kab = ka - kaw * 64
+        let kbw = kb / 64
+        let kbb = kb - kbw * 64
+        c = 0
+        while c < H {
+            let cw = c * WC
+            if (anc[cw + aw] & abit) != 0 {
+                epm[c * NEPW + kaw] = epm[c * NEPW + kaw] | (one << kab)
+            }
+            if (anc[cw + bw] & bbit) != 0 {
+                epm[c * NEPW + kbw] = epm[c * NEPW + kbw] | (one << kbb)
+            }
+            c = c + 1
+        }
+        k = k + 1
+    }
+    // partner masks: a class with endpoint a gets the partner bit of b
+    // and vice versa
+    k = 0
+    while k < NDJ {
+        let ka = ep_id[dj_a[k]] - 1
+        let kb = ep_id[dj_b[k]] - 1
+        let kaw = ka / 64
+        let kab = ka - kaw * 64
+        let kbw = kb / 64
+        let kbb = kb - kbw * 64
+        c = 0
+        while c < H {
+            if (epm[c * NEPW + kaw] & (one << kab)) != 0 {
+                pm[c * NEPW + kbw] = pm[c * NEPW + kbw] | (one << kbb)
+            }
+            if (epm[c * NEPW + kbw] & (one << kbb)) != 0 {
+                pm[c * NEPW + kaw] = pm[c * NEPW + kaw] | (one << kab)
+            }
+            c = c + 1
+        }
+        k = k + 1
+    }
+    var nact: i64 = 0
+    c = 0
+    while c < H {
+        var any_ep = false
+        w = 0
+        while w < NEPW {
+            if epm[c * NEPW + w] != 0 || pm[c * NEPW + w] != 0 {
+                any_ep = true
+            }
+            w = w + 1
+        }
+        if any_ep {
+            actors[nact] = c
+            nact = nact + 1
+        }
+        c = c + 1
+    }
+    var conf: i64 = 0
+    var i1: i64 = 0
+    var i2: i64 = 0
+    var c1: i64 = 0
+    var c2: i64 = 0
+    while i1 < nact {
+        c1 = actors[i1]
+        i2 = 0
+        while i2 < nact {
+            c2 = actors[i2]
+            if c1 != c2 {
+                var hit = false
+                w = 0
+                while w < NEPW {
+                    if (pm[c1 * NEPW + w] & epm[c2 * NEPW + w]) != 0 {
+                        hit = true
+                    }
+                    w = w + 1
+                }
+                if hit {
+                    conf = conf + 1
+                }
+            }
+            i2 = i2 + 1
+        }
+        i1 = i1 + 1
+    }
+    if conf != E_CONF {
+        println("FAIL: go_cc conflicts disagree with mirror")
+        n_fail = n_fail + 1
+    }
+
+    // ── ablations: attribute derived edges to the rule families ───────
+    clear_f()
+    seed_and_expand(NEX, H, NR)
+    let rounds_norc = role_fixpoint(1, 0, nrp, NCH, H, NR)
+    let re_norc = count_role_edges(H, NR)
+    if re_norc != E_NORC {
+        println("FAIL: go_cc no-roleComp role edges disagree with mirror")
+        n_fail = n_fail + 1
+    }
+    clear_f()
+    seed_and_expand(NEX, H, NR)
+    let rounds_nors = role_fixpoint(0, 1, nrp, NCH, H, NR)
+    let re_nors = count_role_edges(H, NR)
+    if re_nors != E_NORS {
+        println("FAIL: go_cc no-roleSub role edges disagree with mirror")
+        n_fail = n_fail + 1
+    }
+    println("role edges without roleComp (ablation):")
+    println(re_norc)
+    println("role edges without roleSub (ablation):")
+    println(re_nors)
+    println("role fixpoint rounds (no-roleComp):")
+    println(rounds_norc)
+    println("role fixpoint rounds (no-roleSub):")
+    println(rounds_nors)
+
+
+    // ── summary ────────────────────────────────────────────────────────
+    println("=== go_cc : EL+ role-aware closure (round 13) ===")
+    println("classes (H):")
+    println(H)
+    println("roles (NR):")
+    println(NR)
+    println("sub axioms:")
+    println(NSUB)
+    println("existential restrictions (exsub):")
+    println(NEX)
+    println("disjoint pairs:")
+    println(NDJ)
+    println("roleSub axioms:")
+    println(NRS)
+    println("roleComp chains:")
+    println(NCH)
+    println("atomic projection closure edges:")
+    println(atomic_edges)
+    println("atom-source role edges (= existential targets, stoR/RtoS):")
+    println(r_atom)
+    println("atomic conflicts (ordered pairs):")
+    println(conf)
+    println("role fixpoint rounds (full):")
+    println(rounds)
+    return n_fail
+}
+
+fn run_go_mf() -> i64 with IO, Mut, Div, Panic {
+    var n_fail = 0
+    clear_all()
+
+    // ── runtime data load (bypasses the ~24k-statement wall) ──────────
+    let text = read_file("artifacts/ontology-frontiers/multi-ontology/go_mf_packed.txt")
+    g_len = str_len(text)
+    g_pos = 0
+    let H = read_int(text)
+    let NR = read_int(text)
+    let NSUB = read_int(text)
+    let NEX = read_int(text)
+    let NDJ = read_int(text)
+    let NRS = read_int(text)
+    let NCH = read_int(text)
+    let E_ATOM = read_int(text)
+    let E_ROLE = read_int(text)
+    let E_CONF = read_int(text)
+    let E_ROUNDS = read_int(text)
+    let E_NORC = read_int(text)
+    let E_NORS = read_int(text)
+    if H + 1 > HC || NR > NRC || NSUB > SUBC || NEX > EXC || NDJ > DJC || NRS > RSC || NCH > RCC {
+        println("FAIL: go_mf data exceeds compile-time capacities")
+        n_fail = n_fail + 1
+    }
+    var k: i64 = 0
+    var kind: i64 = 0
+    var isub: i64 = 0
+    var iex: i64 = 0
+    var idj: i64 = 0
+    var irs: i64 = 0
+    var ich: i64 = 0
+    while g_pos < g_len {
+        kind = read_kind(text)
+        if kind == 115 {
+            sub_c[isub] = read_int(text)
+            sub_p[isub] = read_int(text)
+            isub = isub + 1
+        }
+        if kind == 120 {
+            ex_c[iex] = read_int(text)
+            ex_r[iex] = read_int(text)
+            ex_f[iex] = read_int(text)
+            iex = iex + 1
+        }
+        if kind == 100 {
+            dj_a[idj] = read_int(text)
+            dj_b[idj] = read_int(text)
+            idj = idj + 1
+        }
+        if kind == 104 {
+            rs_r[irs] = read_int(text)
+            rs_s[irs] = read_int(text)
+            irs = irs + 1
+        }
+        if kind == 107 {
+            ch1[ich] = read_int(text)
+            ch2[ich] = read_int(text)
+            ch3[ich] = read_int(text)
+            ich = ich + 1
+        }
+    }
+    if isub != NSUB || iex != NEX || idj != NDJ || irs != NRS || ich != NCH {
+        println("FAIL: go_mf parsed axiom counts disagree with header")
+        n_fail = n_fail + 1
+    }
+
+    // ── role-hierarchy closure (reflexive + transitive) ───────────────
+    var r: i64 = 0
+    while r < NR {
+        rclos[r * NRC + r] = true
+        r = r + 1
+    }
+    k = 0
+    while k < NRS {
+        rclos[rs_r[k] * NRC + rs_s[k]] = true
+        k = k + 1
+    }
+    var changed2 = true
+    var a: i64 = 0
+    var b: i64 = 0
+    var d: i64 = 0
+    while changed2 {
+        changed2 = false
+        a = 0
+        while a < NR {
+            b = 0
+            while b < NR {
+                if rclos[a * NRC + b] {
+                    d = 0
+                    while d < NR {
+                        if rclos[b * NRC + d] && !rclos[a * NRC + d] {
+                            rclos[a * NRC + d] = true
+                            changed2 = true
+                        }
+                        d = d + 1
+                    }
+                }
+                b = b + 1
+            }
+            a = a + 1
+        }
+    }
+    var nrp: i64 = 0
+    a = 0
+    while a < NR {
+        b = 0
+        while b < NR {
+            if a != b && rclos[a * NRC + b] {
+                rc_r[nrp] = a
+                rc_s[nrp] = b
+                nrp = nrp + 1
+            }
+            b = b + 1
+        }
+        a = a + 1
+    }
+
+    // ── topological order (Kahn; the is_a relation is a DAG) ──────────
+    var c: i64 = 0
+    while c < H {
+        indeg[c] = 0
+        coff[c] = 0
+        poff[c] = 0
+        c = c + 1
+    }
+    coff[H] = 0
+    poff[H] = 0
+    k = 0
+    while k < NSUB {
+        indeg[sub_c[k]] = indeg[sub_c[k]] + 1
+        coff[sub_p[k] + 1] = coff[sub_p[k] + 1] + 1
+        poff[sub_c[k] + 1] = poff[sub_c[k] + 1] + 1
+        k = k + 1
+    }
+    c = 0
+    while c < H {
+        coff[c + 1] = coff[c + 1] + coff[c]
+        poff[c + 1] = poff[c + 1] + poff[c]
+        c = c + 1
+    }
+    c = 0
+    while c < H {
+        csr_cnt[c] = coff[c]
+        c = c + 1
+    }
+    k = 0
+    while k < NSUB {
+        clist[csr_cnt[sub_p[k]]] = sub_c[k]
+        csr_cnt[sub_p[k]] = csr_cnt[sub_p[k]] + 1
+        k = k + 1
+    }
+    c = 0
+    while c < H {
+        csr_cnt[c] = poff[c]
+        c = c + 1
+    }
+    k = 0
+    while k < NSUB {
+        plist[csr_cnt[sub_c[k]]] = sub_p[k]
+        csr_cnt[sub_c[k]] = csr_cnt[sub_c[k]] + 1
+        k = k + 1
+    }
+    var head: i64 = 0
+    var tail: i64 = 0
+    c = 0
+    while c < H {
+        if indeg[c] == 0 {
+            queue[tail] = c
+            tail = tail + 1
+        }
+        c = c + 1
+    }
+    var nord: i64 = 0
+    var t: i64 = 0
+    var ch: i64 = 0
+    while head < tail {
+        c = queue[head]
+        head = head + 1
+        order[nord] = c
+        nord = nord + 1
+        t = coff[c]
+        while t < coff[c + 1] {
+            ch = clist[t]
+            indeg[ch] = indeg[ch] - 1
+            if indeg[ch] == 0 {
+                queue[tail] = ch
+                tail = tail + 1
+            }
+            t = t + 1
+        }
+    }
+    if nord != H {
+        println("FAIL: go_mf sub relation has a cycle (Kahn incomplete)")
+        n_fail = n_fail + 1
+    }
+
+    // ── atomic closure: ancestor masks in topological order ───────────
+    let one: i64 = 1
+    var i: i64 = 0
+    var w: i64 = 0
+    var p: i64 = 0
+    var dst: i64 = 0
+    var src: i64 = 0
+    while i < H {
+        c = order[i]
+        dst = c * WC
+        let cw = c / 64
+        anc[dst + cw] = anc[dst + cw] | (one << (c - cw * 64))
+        let tw = H / 64
+        anc[dst + tw] = anc[dst + tw] | (one << (H - tw * 64))
+        t = poff[c]
+        while t < poff[c + 1] {
+            p = plist[t]
+            src = p * WC
+            w = 0
+            while w < WC {
+                let sv = anc[src + w]
+                if sv != 0 {
+                    anc[dst + w] = anc[dst + w] | sv
+                }
+                w = w + 1
+            }
+            t = t + 1
+        }
+        i = i + 1
+    }
+    var atomic_edges: i64 = 0
+    c = 0
+    while c < H {
+        atomic_edges = atomic_edges + row_popcount(c * WC) - 1
+        c = c + 1
+    }
+    if atomic_edges != E_ATOM {
+        println("FAIL: go_mf atomic closure edges disagree with mirror")
+        n_fail = n_fail + 1
+    }
+
+    // ── role-aware closure: seed + expand + role fixpoint ─────────────
+    seed_and_expand(NEX, H, NR)
+    let rounds = role_fixpoint(1, 1, nrp, NCH, H, NR)
+    let r_atom = count_role_edges(H, NR)
+    if r_atom != E_ROLE {
+        println("FAIL: go_mf atom-source role edges disagree with mirror")
+        n_fail = n_fail + 1
+    }
+    if rounds != E_ROUNDS {
+        println("FAIL: go_mf role fixpoint rounds disagree with mirror")
+        n_fail = n_fail + 1
+    }
+
+    // ── conflicts over atomic ancestors (profile theorem) ─────────────
+    // endpoint masks epm[c*NEPW + w] (which disjointness endpoints are
+    // ancestors of c) and partner masks pm (union of partner bits);
+    // word-generalised (UBERON has ~600 endpoints, GO cones < 64).
+    var nep: i64 = 0
+    k = 0
+    while k < NDJ {
+        a = dj_a[k]
+        b = dj_b[k]
+        if ep_id[a] == 0 {
+            nep = nep + 1
+            ep_id[a] = nep
+        }
+        if ep_id[b] == 0 {
+            nep = nep + 1
+            ep_id[b] = nep
+        }
+        k = k + 1
+    }
+    if nep > EPC {
+        println("FAIL: go_mf too many disjointness endpoints")
+        n_fail = n_fail + 1
+    }
+    k = 0
+    while k < NDJ {
+        a = dj_a[k]
+        b = dj_b[k]
+        let aw = a / 64
+        let abit = one << (a - aw * 64)
+        let bw = b / 64
+        let bbit = one << (b - bw * 64)
+        let ka = ep_id[a] - 1
+        let kb = ep_id[b] - 1
+        let kaw = ka / 64
+        let kab = ka - kaw * 64
+        let kbw = kb / 64
+        let kbb = kb - kbw * 64
+        c = 0
+        while c < H {
+            let cw = c * WC
+            if (anc[cw + aw] & abit) != 0 {
+                epm[c * NEPW + kaw] = epm[c * NEPW + kaw] | (one << kab)
+            }
+            if (anc[cw + bw] & bbit) != 0 {
+                epm[c * NEPW + kbw] = epm[c * NEPW + kbw] | (one << kbb)
+            }
+            c = c + 1
+        }
+        k = k + 1
+    }
+    // partner masks: a class with endpoint a gets the partner bit of b
+    // and vice versa
+    k = 0
+    while k < NDJ {
+        let ka = ep_id[dj_a[k]] - 1
+        let kb = ep_id[dj_b[k]] - 1
+        let kaw = ka / 64
+        let kab = ka - kaw * 64
+        let kbw = kb / 64
+        let kbb = kb - kbw * 64
+        c = 0
+        while c < H {
+            if (epm[c * NEPW + kaw] & (one << kab)) != 0 {
+                pm[c * NEPW + kbw] = pm[c * NEPW + kbw] | (one << kbb)
+            }
+            if (epm[c * NEPW + kbw] & (one << kbb)) != 0 {
+                pm[c * NEPW + kaw] = pm[c * NEPW + kaw] | (one << kab)
+            }
+            c = c + 1
+        }
+        k = k + 1
+    }
+    var nact: i64 = 0
+    c = 0
+    while c < H {
+        var any_ep = false
+        w = 0
+        while w < NEPW {
+            if epm[c * NEPW + w] != 0 || pm[c * NEPW + w] != 0 {
+                any_ep = true
+            }
+            w = w + 1
+        }
+        if any_ep {
+            actors[nact] = c
+            nact = nact + 1
+        }
+        c = c + 1
+    }
+    var conf: i64 = 0
+    var i1: i64 = 0
+    var i2: i64 = 0
+    var c1: i64 = 0
+    var c2: i64 = 0
+    while i1 < nact {
+        c1 = actors[i1]
+        i2 = 0
+        while i2 < nact {
+            c2 = actors[i2]
+            if c1 != c2 {
+                var hit = false
+                w = 0
+                while w < NEPW {
+                    if (pm[c1 * NEPW + w] & epm[c2 * NEPW + w]) != 0 {
+                        hit = true
+                    }
+                    w = w + 1
+                }
+                if hit {
+                    conf = conf + 1
+                }
+            }
+            i2 = i2 + 1
+        }
+        i1 = i1 + 1
+    }
+    if conf != E_CONF {
+        println("FAIL: go_mf conflicts disagree with mirror")
+        n_fail = n_fail + 1
+    }
+
+    // ── ablations: attribute derived edges to the rule families ───────
+    clear_f()
+    seed_and_expand(NEX, H, NR)
+    let rounds_norc = role_fixpoint(1, 0, nrp, NCH, H, NR)
+    let re_norc = count_role_edges(H, NR)
+    if re_norc != E_NORC {
+        println("FAIL: go_mf no-roleComp role edges disagree with mirror")
+        n_fail = n_fail + 1
+    }
+    clear_f()
+    seed_and_expand(NEX, H, NR)
+    let rounds_nors = role_fixpoint(0, 1, nrp, NCH, H, NR)
+    let re_nors = count_role_edges(H, NR)
+    if re_nors != E_NORS {
+        println("FAIL: go_mf no-roleSub role edges disagree with mirror")
+        n_fail = n_fail + 1
+    }
+    println("role edges without roleComp (ablation):")
+    println(re_norc)
+    println("role edges without roleSub (ablation):")
+    println(re_nors)
+    println("role fixpoint rounds (no-roleComp):")
+    println(rounds_norc)
+    println("role fixpoint rounds (no-roleSub):")
+    println(rounds_nors)
+
+
+    // ── summary ────────────────────────────────────────────────────────
+    println("=== go_mf : EL+ role-aware closure (round 13) ===")
+    println("classes (H):")
+    println(H)
+    println("roles (NR):")
+    println(NR)
+    println("sub axioms:")
+    println(NSUB)
+    println("existential restrictions (exsub):")
+    println(NEX)
+    println("disjoint pairs:")
+    println(NDJ)
+    println("roleSub axioms:")
+    println(NRS)
+    println("roleComp chains:")
+    println(NCH)
+    println("atomic projection closure edges:")
+    println(atomic_edges)
+    println("atom-source role edges (= existential targets, stoR/RtoS):")
+    println(r_atom)
+    println("atomic conflicts (ordered pairs):")
+    println(conf)
+    println("role fixpoint rounds (full):")
+    println(rounds)
+    return n_fail
+}
+
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    // fixup writes for the garbage leading cells of module-level splat
+    // arrays (known compiler pitfall, rounds 6-12)
+    anc[0] = 0
+    anc[1] = 0
+    anc[2] = 0
+    fm[0] = 0
+    fm[1] = 0
+    fm[2] = 0
+    cur_dirty[0] = false
+    cur_dirty[1] = false
+    cur_dirty[2] = false
+    nxt_dirty[0] = false
+    nxt_dirty[1] = false
+    nxt_dirty[2] = false
+    f_nonempty[0] = false
+    f_nonempty[1] = false
+    f_nonempty[2] = false
+    rclos[0] = false
+    rclos[1] = false
+    rclos[2] = false
+    epm[0] = 0
+    epm[1] = 0
+    epm[2] = 0
+    pm[0] = 0
+    pm[1] = 0
+    pm[2] = 0
+    ep_id[0] = 0
+    ep_id[1] = 0
+    ep_id[2] = 0
+
+    var n_fail: i64 = 0
+    n_fail = n_fail + run_go_bp()
+    n_fail = n_fail + run_go_cc()
+    n_fail = n_fail + run_go_mf()
+    if n_fail == 0 {
+        println("ALL PASS")
+        return 0
+    }
+    println("FAILURES:")
+    println(n_fail)
+    return 1
+}

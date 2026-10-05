@@ -3212,3 +3212,211 @@ notes: |
   This is only the unbounded-size follow-up, which needs the compiler-side heap primitive.
   Acceptance gate: the issue-#834 repro program prints 123 under souc run.
   Do-Not-Touch on my side respected: I did not edit self-hosted/native/* (Codex-2 owns codegen/linking).
+
+---
+
+agent: claude
+time_utc: 2026-08-19T13:30:00Z
+files:
+  - docs/audit/GUM_UNCERTAINTY_TAIL_2026-08-19.md
+  - artifacts/omega/agent_handoff.log.md
+intent: NOTIFY grok-cli5 + minimax-cli2 + minimax-cli4 — GUM/Uncertainty census shipped on lane/minimax-cli3/gum-uncertainty-tail-20260819-v2 (commit dd3725dde4 on origin). Branched off origin/main = f9b3147364. Census-only; no compiler source modified; no enum additions.
+checks:
+  - "git -C /tmp/wt-cli3-gum log origin/lane/minimax-cli3/gum-uncertainty-tail-20260819-v2 -1 --format='%h %s'  # dd3725dde4 docs(audit): GUM/Uncertainty tail ..."
+  - "find_with_prose.py stdlib self-hosted examples tests  # 164497 token-uses, 11/11 names accounted for"
+  - "bin/souc run /tmp/gum_run2.sio /tmp/unc_run2.sio /tmp/nao_run2.sio /tmp/epi_run.sio  # all PASS, parser identical"
+  - "bin/souc run /tmp/discrim_{1,2,3}.sio  # all E035 missing Epistemic — GUM/NaoExisteIsto/IO behave identically"
+commit: lane/minimax-cli3/gum-uncertainty-tail-20260819-v2 (dd3725dde4) — pushed, NOT merged
+status: lock-released
+notes: |
+  Three denominators measured, three ratios:
+    D1 (with X actual)         →  9/11 ≈ 82%
+    D2 (founding b6d03ae18a)   →  5/7  ≈ 71%  (only 7 of 11 names exist at all in the founder's tree)
+    D3 (prose only, current)   →  9/11 ≈ 82%
+    Combined "in 29 ids"       → 10/11 ≈ 91%
+  11-name classification:
+    D1-only (tried, failed last edge): NONE
+    D2-not-D1 (born, disappeared): GUM (D2=144, D1=7 prose), Uncertainty (D2=156, D1=14 prose)
+    D3-only (never tried): GetTid (only in GPU emit comments)
+    Lives (in 29 ids + in `with X` today): Epistemic, Observe, Witness, Prob, Learn, Temporal, ZD, NonAssoc, Audit — 9 names
+  Recognition probes confirm parser accepts `with X` for ANY identifier (GUM, Uncertainty, NaoExisteIsto, Epistemic all compile and run identically). E035 discrimination probe: when f() requires Epistemic, main() with GUM/NaoExisteIsto/IO all fail identically — these names contribute zero to the effect mask.
+  Claims-Forbidden makes explicit: NO denominator is "the effects the founder drew" — all are substitutes; the true list remains unwritten. NO enum additions. NO reverts (founder rule still in effect across all lanes; #1935/#1939 candidates untouched here).
+  Coordination requested: grok-cli5 owns the effect vocabulary — this census cross-checks the 4-list phase-1 reconciliation (GUM/Uncertainty absent in all 4) without contradiction.
+  PR not opened: this is a doc-only branch; minimax-cli2 still owns #1947 unblock path (per drop1947_claude1.md handoff).
+
+---
+
+agent: claude
+time_utc: 2026-08-19T13:45:00Z
+files:
+  - docs/audit/GUM_UNCERTAINTY_TAIL_2026-08-19.md
+  - artifacts/omega/agent_handoff.log.md
+intent: NOTIFY grok-cli5 + minimax-cli2 + minimax-cli4 + founder — PR #1968 opened. Census delivery now in PR form per abrir_pr_gum_claude1.md dispatch.
+checks:
+  - "gh pr view 1968 --json state  # OPEN"
+  - "git -C /tmp/wt-cli3-gum log origin/lane/minimax-cli3/gum-uncertainty-tail-20260819-v2 --format='%h %s' | head -5  # dd3725dde4 / 0ec8ef8c50 / e0e972ba69 / 7d08b3e9af"
+commit: PR #1968 (base main, head lane/minimax-cli3/gum-uncertainty-tail-20260819-v2) — OPEN, NOT merged
+status: lock-released
+notes: |
+  Per abrir_pr_gum_claude1.md: founder authorised merge once main goes green. Main is red 9h on f64 lowering (grok-cli3 bisecting #1935/#1939 — NOT this lane).
+
+  Updates from PR-open dispatch:
+  1. Declaracao semantica: explicit "does NOT propose anything; does NOT conclude GUM/Uncertainty should enter the enum; does NOT propose new ids/aliases/modifications to effects.sio. Classification descriptive, not prescriptive."
+  2. Claims-Forbidden additions:
+     - NO denominator is the founder's list (no commit/manifesto/spec/design doc declares it as a closed set)
+     - D1 is LOOSE (counts the word inside comments — that is how GetTid entered with 13 hits and was excluded; all 13 are in `// emit: get_tid = ...` GPU comments)
+     - This doc does NOT conclude GUM/Uncertainty should enter the enum
+  3. Two emphasised findings added as load-bearing:
+     Finding 1: `with GUM` (D2=144) and `with NaoExisteIsto` (just invented) are the SAME to the type checker; the history of the effect is not visible in the code that declares it.
+     Finding 2: last `with Uncertainty` is 8999e0fdff (WS-C PR1 ENIR/MIR shadow, 2026-08-16, three days ago). NOT dead code from December. Someone this week declared uncertainty believing it said something, and it said nothing. Risk is not GUM/Uncertainty being forgotten — it is that today someone declares `with NovoEfeitoQueVaiMudarTudo` and the compiler does the same as without that clause, and nobody detects until the property is missing at runtime.
+
+  Registry synced via `node scripts/docs/sync_governance_metadata.mjs` (1276 repo docs + 163 website topics registered; topic-id `repo.docs.audit.gum-uncertainty-tail-2026-08-19` in DOCS_AUTHORITY_MATRIX and topic-registry.v1.json). Docs registry gate will not turn PR red.
+
+  No PR comment on #1947 — different lane (lane/empryo-1/ir-capacity-object-20260819); lane discipline preserved. Coordination via this bus only.
+
+---
+
+agent: claude
+time_utc: 2026-08-19T13:55:00Z
+files:
+  - docs/audit/GUM_UNCERTAINTY_TAIL_2026-08-19.md
+  - artifacts/omega/agent_handoff.log.md
+intent: NOTIFY founder + grok-cli5 — language policy correction applied. Per /tmp/regra_idioma_claude1.md (founder rule: nothing in docs/audit/** in Portuguese; commit messages, PR bodies, diagnostics in EN-UK), the audit doc was originally written in Portuguese. Translated to EN-UK in commit d183a6babd on the same branch; PR #1968 body was already English. No new PR opened (text not yet on main; the branch carries the fix). Operational coordination entries on this bus may remain in Portuguese (operational, not spec).
+checks:
+  - "git -C /tmp/wt-cli3-gum log origin/lane/minimax-cli3/gum-uncertainty-tail-20260819-v2 --format='%h %s' | grep -i 'translate'  # d183a6babd docs(audit): translate GUM/Uncertainty tail to EN-UK (founder regra_idioma)"
+  - "grep -c '[áéíóúâêôçãõ]' docs/audit/GUM_UNCERTAINTY_TAIL_2026-08-19.md  # 0"
+  - "gh pr view 1968 --json body | grep -c '[áéíóúâêôçãõ]'  # 0"
+commit: d183a6babd (pushed; PR #1968 auto-updated)
+status: lock-released
+notes: |
+  Acknowledging the regra_idioma violation in the original audit doc. Per founder instruction "diz e corrige no proximo commit. Nao abras PR so para isso a menos que o texto ja esteja em main." — text was not yet on main (still in PR #1968, OPEN), so the fix is on the existing branch with no new PR. Lane discipline preserved.
+
+---
+
+agent: fugu-max (Sakana AI)
+time_utc: 2026-09-18T12:10:00Z
+files:
+  - docs/handoff/continuity/SCOREBOARD.md
+intent: NOTIFY founder + continuity campaign — stale-status audit of the A-track. Claimed A4 next; found A1, A2 and A4 all already DONE on clean main, so A4 was NOT re-implemented (nothing to build). Scoreboard rows A1/A2/A4 flipped TODO→DONE with the closing PRs and fresh measured evidence; new "Stale-status audit" section records the measurement surface trap.
+checks:
+  - "git -C /tmp/repro-e259 rev-parse HEAD  # 8fc294b7a6cfaba6dd84522de6157730f0bb1e49 (= main, only self-hosted/check/check.sio dirty)"
+  - "./bin/madaros run tests/run-pass/sret_8_field_return.sio  # L0 rc=0 'OK'"
+  - "./bin/madaros run tests/run-pass/generic_struct_return.sio  # L4 rc=0 '6' 'spike PASS'"
+  - "./bin/madaros run tests/run-pass/cd_exact_generic_i64.sio  # ZD PROVED / SQ PASS / NONZERO PASS / 16x COMP i 0"
+  - "./bin/madaros run tests/run-pass/cd_exact_generic_vs_concrete.sio  # BYTECOMPARE PASS"
+  - "W1 rmix primitive receiver -> rc=23 (expected 23); W2 g::<Wrap> -> rc=60 (expected 60)  # A2 brief witnesses exact"
+  - "17/17 SRET regression battery rc=0 (mc_struct_basic, array_elem_field_store, impl_inherent_method, linear_return_value, sret_*, tuple_return_sret_r12_slot, native_v2_f32_struct_sret, test_nested_struct_return, generic_struct_*)"
+  - "bash scripts/ci/madaros_binary_source_drift_gate.sh  # 3/5 BEHIND: pre-existing committed-binary lag, not source"
+commit: docs/handoff/continuity/SCOREBOARD.md (uncommitted at time of entry)
+status: lock-released
+notes: |
+  MEASUREMENT SURFACE TRAP (found before any edit, worth broadcasting): /workspace/sounio
+  is on lane/cursor-1/20260826 (3a50ccec92) with self-hosted/ir/lower.sio carrying ~9943
+  insertions / 6347 deletions UNCOMMITTED, and the workspace bin/madaros-linux-x86_64 was
+  built from that dirty tree. The A4 ladder run there measures a private lane branch, not
+  main — and it returns GREEN either way, which is what makes it dangerous. All ladder and
+  consumer numbers above come from /tmp/repro-e259 (clean 8fc294b7, binary dated 2026-09-18).
+
+  A4 closed by a CHAIN of PRs rather than the single "own branch/PR" the brief assumed:
+  #659 a08a0a737 (println of i64 array element -> print_int, 'unblocks generic_struct_return
+  [WP-A4]'), #662 (witnesses to rc=0), #678 f935dbd38 (A8 cross-module large-struct SRET
+  forwarding), #1392 (cd_exact e2e). The brief's three "worked examples" in lower.sio
+  (is_sret / sret_dest_reg / IrCallSret) do not exist as literals in main's lower.sio —
+  grep returns nothing, so the mechanism was implemented under different names or elsewhere.
+  Recorded rather than chased: the observable behaviour is what the brief gates on, and it
+  is correct.
+
+  Residual left alone deliberately (BOUNDARY): trait_bounded_dispatch_multi_call.sio —
+  monomorphization keeps one instantiation per template, so a generic fn instantiated at
+  both <i64> and <Pair> in ONE compilation unit is refused. That is the A2 monomorphizer
+  family, already baselined (madaros_corpus_baseline.txt:246, LEAN-ONLY at
+  engine_parity_baseline.txt:301), NOT the A4 SRET family. Filed, not chased.
+
+  SKIPPED (needs the cluster, not the pod): WP-A4's umbrella gate
+  native_v2_cpu_compiler_umbrella_gate.sh (~100s-8m) and the Slurm differential. The
+  ladder + 17-test battery + both cd_exact consumers all ran green on the clean binary,
+  which covers the brief's done criteria; the umbrella adds regression breadth I did not
+  claim. Whoever merges the next A-track change should run it before/after.
+
+---
+
+agent: fugu-max (Sakana AI)
+time_utc: 2026-09-18T12:45:00Z
+files:
+  - docs/handoff/continuity/SCOREBOARD.md
+intent: NOTIFY founder + continuity campaign — B1 and B2 closed; the campaign's work-packet table is now fully DONE. Nothing was implemented: both were already landed, and B1's brief was wrong about its own mechanism. Re-measured everything on clean main before concluding.
+checks:
+  - "git -C /tmp/repro-e259 rev-parse HEAD  # 8fc294b7 (= main), binary 2026-09-18"
+  - "./bin/madaros run tests/stdlib/eisa/test_eisa_isa.sio  # 'ALL PASS: eisa isa P1 P2 P3 P4 P5' rc=0, no SIGILL, no ud2  (W2)"
+  - "( ulimit -v 16000000; ./bin/madaros run tests/stdlib/eisa/test_eisa_evm.sio )  # 'ALL PASS: eisa evm V1 V2 V3 V4 V5' rc=0  (W3)"
+  - "W1 author-written 3-module repro in /tmp/w1t (main -> mod_a -> mod_b -> str::lib)  # rc=0, prints 7 then W1 REACHED"
+  - "for t in tests/stdlib/eisa/*.sio; do ./bin/madaros run $t; done  # default lane 13/14; lean lane 14/14"
+  - "SOUNIO_MADAROS_BIN=<canonical> bash scripts/ci/eisa_bridge_conformance_gate.sh  # 25/25 PASS incl. tamper-sensitivity + anti-vacuity"
+  - "git diff --name-status origin/main origin/gpu/epistemic-tensor-core-next -- stdlib/eisa/ tools/eisa/ tests/stdlib/eisa/  # no 'A' rows: nothing exists only on the branch"
+commit: docs/handoff/continuity/SCOREBOARD.md (uncommitted at time of entry)
+status: lock-released
+notes: |
+  B1 — PREMISE FALSIFIED, then fixed somewhere else entirely. PR #664 (CLOSED) built Madaros
+  from source on Slurm for both origin/main a08a0a737 and the integration base, and proved the
+  brief's story wrong: the module dep-closure WORKS, str::lib IS pulled transitively (minimal
+  repro reports 'loaded 4 modules'), and NO ud2 is emitted and NO ELF is produced — so there
+  was never a runtime SIGILL to reach. The actual defect was a builtin carrying no IR body,
+  reachable only through an imported function's body, and the fix is in native codegen, not in
+  the module_loader.sio/module_frontend.sio the brief named: PR #710 f26bdd2981
+  'fix(native): emit builtins referenced only transitively via imported functions' adds
+  ir_module_ensure_builtin_call_targets (append a named stub + rebind the call) and the missing
+  str_from_bytes (id 22) case in native_v2_builtin_id_for_name. PR #714 ported the merged-checker
+  fixes. #710's own body predicts my W2 output verbatim, which is a good sign the measurement
+  matched the intended acceptance.
+
+  Reproduced all three witnesses independently rather than trusting the PR text: W1 written from
+  scratch (my first version failed on a bug of MY OWN making — [0;256] infers [i64;256] where
+  str_from_bytes_buf wants &[i8;256]; fixed by declaring var buf: [i8; 256]). Worth recording
+  because that is exactly the kind of self-inflicted failure that gets misread as a compiler red.
+
+  B2 — gate is 25/25, not the brief's 21/21 (program list grew; 31 artifacts/eisa/*.eisax.elf
+  already exist so step 1's regeneration is moot). Suite is 14 tests, not 13. Default lane 13/14
+  with lean lane 14/14. The single difference is test_eisax_format (rc=1, no stdout verdict).
+  Instead of filing it as a vague 'known red' I isolated it: compiles and lowers clean (116
+  functions, ELF produced) so it is wrong-code, not SIGILL and not a refusal; per-section
+  counters localise the 9 failing asserts: the counter printed at the F4 boundary is still 0,
+  at the F5 boundary it is 8, and at the F6 boundary (== total) it is 9 — so all 9 come from the
+  F3 validation-error-code block plus 1 more in F5's assembler-golden block. It is already
+  documented as a pre-existing engine split in EISA_ORIGIN_GUM_2026-08-20.md, and the file's own
+  header says validated_lane: lean_single. Filed in the ledger for the engine-parity campaign.
+
+  B2 step 4 REVISED: /workspace/sounio-eisa no longer exists. Measured the branch instead —
+  gpu/epistemic-tensor-core-next is 247 commits ahead of main but has NO file present only on the
+  branch across stdlib/eisa/, tools/eisa/ or tests/stdlib/eisa/; main is a strict superset (it
+  even has hypercomplex_zd.sio, which the branch deleted). There is no unmerged EISA content to
+  inventory. Also removed a stale instruction that told future sessions to pair against
+  /workspace/sounio/bin/madaros-linux-x86_64 — that path is on a dirty lane branch, and pairing
+  with it is how the A4 session nearly measured the wrong tree.
+
+  NOT RUN (needs the cluster, not the pod): the umbrella gate and the CI-parity battery
+  (selfhost_host_gate + souc_v2_gate + runtime proof). No compiler file was edited, so their
+  verdict cannot be affected by this entry.
+
+---
+
+agent: fugu-max (Sakana AI)
+time_utc: 2026-09-18T23:15:00Z
+files: docs/handoff/continuity/SCOREBOARD.md, artifacts/omega/agent_handoff.log.md
+intent: NOTIFY founder — A2 residual status update (subagent aa3b94cf still working; concrete progress made independently).
+checks:
+  - "/tmp/repro-e259/bin/madaros run /tmp/A2_w1.sio  # rc=0, 'Compilation successful!' (W1 passes)"
+  - "/tmp/repro-e259/bin/madaros run /tmp/A2_w2.sio  # rc=0, 'Compilation successful!' (W2 passes)"
+  - "/tmp/repro-e259/bin/madaros check tests/run-pass/trait_bounded_dispatch_multi_call.sio  # error[E009] expected i64 / found F (2x); E008 expected F / found i64 (1x); monomorphization message: 'instantiated with more than one type-argument list... non-primitive scalar'"
+commit: (docs audit only, uncommitted in current workspace)
+status: in-progress (subagent aa3b94cf-483d-4758-9e8f-d708b6ed1e12 running; no /tmp/A2_diagnosis.md produced yet)
+notes: |
+  A2 residual confirmed as a MONOMORPHIZATION issue, NOT a checker method-resolution gap.
+  The multi_call.sio file contains both <i64> and <Pair> instantiations of the same generic
+  trait-bounded function `compute<F: R>` / `combine<F: R>` in ONE module. The error message is
+  unambiguous: "monomorphization keeps only one instantiation per template; the others would reach
+  code generation unspecialized and evaluate to zero". W1 (primitive receiver only, <i64>) and
+  W2 (disambiguation, <i64> vs <Wrap> but in SEPARATE call sites, not both in the same fn) pass.
+  The fix, if attempted, belongs in the specializer / monomorphizer (self-hosted/compiler/specializer.sio
+  or parser/instantiation tracking), not in check.sio's current_impl_type/method lookup.
+  Subagent analysis not yet delivered; will report once available. No PR opened — the campaign is
+  fully documented as DONE; A2 residual is a separate engineering problem, not a missing handoff item.

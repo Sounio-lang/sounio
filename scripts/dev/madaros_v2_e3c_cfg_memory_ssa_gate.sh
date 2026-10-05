@@ -30,7 +30,7 @@ madaros_v2_enir_gate_scope_or_skip "$BASE_REF" "E3C_CFG_MEMORY_SSA_GATE" \
 
 scripts/dev/souc-build-lock.sh "$SEED" self-hosted/enir/driver.sio "$DRIVER" >"$TMP_DIR/driver-build.log" 2>&1
 [[ -s "$DRIVER" ]] || fail "ENIR/CFG-MIR driver build produced no ELF"
-if grep -Eq '^error:|unknown identifier|typecheck: failed|assignment type mismatch|private struct field|string literal too long' "$TMP_DIR/driver-build.log"; then tail -120 "$TMP_DIR/driver-build.log" >&2; fail "Stage0 reported diagnostics while building ENIR/CFG-MIR driver"; fi
+if grep -Eq '^error(\[E[0-9]+\])?:|unknown identifier|typecheck: failed|assignment type mismatch|private struct field|string literal too long' "$TMP_DIR/driver-build.log"; then tail -120 "$TMP_DIR/driver-build.log" >&2; fail "Stage0 reported diagnostics while building ENIR/CFG-MIR driver"; fi
 chmod +x "$DRIVER"
 scripts/dev/souc-build-lock.sh "$SEED" tools/eisa/eisa_evm_run.sio "$ORACLE" >"$TMP_DIR/oracle-build.log" 2>&1
 [[ -s "$ORACLE" ]] || fail "source-fresh METRON corpus build produced no ELF"

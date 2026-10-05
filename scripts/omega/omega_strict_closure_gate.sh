@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Resolved here, at the top, because this script changes directory later and a
+# relative BASH_SOURCE stops resolving once it does.
+_SOUC_GUARD_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)/souc_verb_guard.sh"
+. "$_SOUC_GUARD_LIB"
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
@@ -133,6 +137,10 @@ echo "smoke_source=$SMOKE_SOURCE"
 sounio_require_souc
 
 # Checkpoint 1: signed bootstrap state available.
+# Refuse before the work, and name what is actually missing: the `bootstrap`
+# verbs went with the Rust crate (79acc192e1) and the fall-through
+# diagnostic reports a missing FILE. See scripts/lib/souc_verb_guard.sh.
+require_souc_verb "$SOUC_BIN" bootstrap "the signed-bootstrap-state checkpoint"
 if ! run_step "$STATE_VERIFY_LOG" "$SOUC_BIN" bootstrap verify --bundle "$BOOTSTRAP_BUNDLE_DIR"; then
   CHECKPOINT_BOOTSTRAP_STATE="fail"
   FAILURE_CLASS="bootstrap_verify_failed"

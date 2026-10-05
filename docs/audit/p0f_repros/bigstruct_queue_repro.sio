@@ -1,0 +1,105 @@
+// Standalone repro for the Track A extern-queue corruption: a large Item-like
+// struct pushed into a global Option<Box<List>> via a by-value fn parameter,
+// then read back. Mimics parser/items.sio PENDING_EXTERN_ITEMS.
+
+struct RName { buf: [i8; 128], len: i64 }
+
+struct RSpan { a: i64, b: i64, c: i64, d: i64 }
+
+struct Big {
+    kind: i64,
+    span: RSpan,
+    vis: i64,
+    name: RName,
+    f01: Option<Box<i64>>,
+    f02: Option<Box<i64>>,
+    f03: Option<Box<i64>>,
+    f04: Option<Box<i64>>,
+    f05: Option<Box<i64>>,
+    f06: Option<Box<i64>>,
+    f07: Option<Box<i64>>,
+    f08: Option<Box<i64>>,
+    f09: Option<Box<i64>>,
+    f10: Option<Box<i64>>,
+    f11: Option<Box<i64>>,
+    f12: Option<Box<i64>>,
+    f13: Option<Box<i64>>,
+    f14: Option<Box<i64>>,
+    f15: Option<Box<i64>>,
+    f16: Option<Box<i64>>,
+    f17: Option<Box<i64>>,
+    f18: Option<Box<i64>>,
+    f19: Option<Box<i64>>,
+    f20: Option<Box<i64>>,
+    pathbuf: [i8; 128],
+    pathlen: i64,
+    glob: bool,
+}
+
+struct BigList { head: Big, tail: Option<Box<BigList>> }
+
+var PENDING: Option<Box<BigList>> = None
+
+fn mk_big(tag: i64) -> Big with Mut, Panic {
+    var n = RName { buf: [0; 128], len: 0 }
+    n.buf[0] = 103 as i8
+    n.len = 7
+    Big {
+        kind: 3, span: RSpan { a: 1, b: 2, c: 3, d: 4 }, vis: 1, name: n,
+        f01: None, f02: None, f03: None, f04: None, f05: None,
+        f06: None, f07: None, f08: None, f09: None, f10: None,
+        f11: None, f12: None, f13: None, f14: None, f15: None,
+        f16: None, f17: None, f18: None, f19: Some(Box::new(tag)), f20: None,
+        pathbuf: [0; 128], pathlen: 0, glob: false,
+    }
+}
+
+// Hop A: by-value fn param into global list node (the WIP queue shape).
+fn push_by_param(item: Big) with Mut, Panic, Alloc {
+    let prev = PENDING
+    PENDING = Some(Box::new(BigList { head: item, tail: prev }))
+}
+
+// Hop B: local built at the push site (parse_items_loop proven shape).
+fn push_from_local(tag: i64) with Mut, Panic, Alloc {
+    let witem = mk_big(tag)
+    let prev = PENDING
+    PENDING = Some(Box::new(BigList { head: witem, tail: prev }))
+}
+
+fn pop_and_report(label: i64) -> i64 with IO, Mut, Panic, Alloc {
+    match PENDING {
+        Some(node) => {
+            let elem = (*node).head
+            PENDING = (*node).tail
+            print("pop label=")
+            print_int(label)
+            print(" name_len=")
+            print_int(elem.name.len)
+            print(" kind=")
+            print_int(elem.kind)
+            print(" first_byte=")
+            print_int(elem.name.buf[0] as i64)
+            elem.name.len
+        },
+        None => {
+            print("pop label=")
+            print_int(label)
+            print(" EMPTY\n")
+            0 - 1
+        }
+    }
+}
+
+fn main() -> i32 with IO, Mut, Panic, Div, Alloc {
+    push_by_param(mk_big(11))
+    let a = pop_and_report(1)
+    push_from_local(22)
+    let b = pop_and_report(2)
+    var rc: i64 = 0
+    if a != 7 { rc = rc + 1 }
+    if b != 7 { rc = rc + 2 }
+    print("rc=")
+    print_int(rc)
+    rc as i32
+}

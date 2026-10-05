@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Oracle for the E219 engine-split. The theorem is a Madaros judgment.
+# Oracle for the E250 engine-split. The theorem is a Madaros judgment.
 # The default suite binary is lean_single and skips the fixture
 # (`requires: madaros`). Two greens that do not touch are not an oracle.
 #
 # This gate scores the DISAGREEMENT, the Lean `unimplemented_disagrees`
 # at CI: Madaros has the constructor and the suite skip is named; the
-# seed has no E219 constructor, implements abs, and emits an ELF for
-# the distinguishing program. A cosmetic `tc_error("E219")` on the seed
+# seed has no E250 constructor, implements abs, and emits an ELF for
+# the distinguishing program. A cosmetic `tc_error("E250")` on the seed
 # is a fail, not a close. A real seed refuse is also a fail — update
 # the theorem, do not silence the gate.
 #
@@ -24,7 +24,8 @@ SEED_SOURCE="self-hosted/compiler/lean_single.sio"
 SUITE_SOURCE="scripts/dev/run_sio_test_suite.sh"
 FIXTURE="tests/compile-fail/extern_c_unimplemented_builtin.sio"
 LIVE_FIXTURE="tests/compile-fail/extern_c_unimplemented_builtin.sio"
-SEED_ELF="${E219_ORACLE_SEED_ELF:-$ROOT_DIR/bin/souc-lean-single-x86_64}"
+# The file and legacy E219 env name remain compatibility surfaces for CI jobs.
+SEED_ELF="${E250_ORACLE_SEED_ELF:-${E219_ORACLE_SEED_ELF:-$ROOT_DIR/bin/souc-lean-single-x86_64}}"
 ARTIFACT="${TMPDIR:-/tmp}/e219_engine_oracle_gate.v1.json"
 RUN_POSITIVE_CONTROLS=1
 RUN_SEED_LIVE=1
@@ -132,16 +133,16 @@ done
 
 if [[ "$NOT_RUN" -eq 0 ]]; then
   # M — Madaros has the judgment (source). Live compile is the Witness arm.
-  check_count_ge "madaros_e219_reports" \
-    ', 219, 0, 0, 0\)' "$CHECKER_SOURCE" 3
+  check_count_ge "madaros_e250_reports" \
+    ', 250, 0, 0, 0\)' "$CHECKER_SOURCE" 3
   check_count_ge "madaros_refuse_infects" \
     'refused_unimplemented' "$CHECKER_SOURCE" 3
   check_grep "madaros_allowlist_predicate" \
     'fn name_is_native_backend_builtin\(' "$CHECKER_SOURCE"
 
   # S — seed has no constructor and still implements the distinguishing name.
-  check_absent "seed_must_not_spell_e219" \
-    'E219|refused_unimplemented' "$SEED_SOURCE"
+  check_absent "seed_must_not_spell_e250" \
+    'E250|refused_unimplemented' "$SEED_SOURCE"
   check_grep "seed_implements_abs" \
     '__native_abs_i64' "$SEED_SOURCE"
 
@@ -171,9 +172,9 @@ if [[ "$RUN_SEED_LIVE" -eq 1 && "$NOT_RUN" -eq 0 ]]; then
     elif [[ ! -e "$seed_out" ]]; then
       FAILED=$((FAILED + 1))
       record_failure "seed_live_no_elf"
-    elif grep -qiE 'error\[E219\]|call to an `extern "C"` function the native backend does not implement' "$WORK/seed-live.log"; then
+    elif grep -qiE 'error\[E250\]|call to an `extern "C"` function the native backend does not implement' "$WORK/seed-live.log"; then
       FAILED=$((FAILED + 1))
-      record_failure "seed_live_printed_e219"
+      record_failure "seed_live_printed_e250"
     else
       PASSED=$((PASSED + 1))
       echo "[e219-oracle] seed_live: compile_rc=0 elf_exists=1 (split reported)"

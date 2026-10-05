@@ -1,0 +1,41 @@
+//@ typecheck-fail
+//@ requires: madaros
+//@ error-pattern: E245
+// requires: madaros is truthful here and load-bearing. CI's Full Test Suite runs
+// souc-stage2, which selfhost_host_gate.sh builds from self-hosted/compiler/
+// lean_single.sio -- a self-contained file with its own checker. lean_single
+// IMPLEMENTS Knowledge arithmetic correctly, so it does not refuse this and must
+// not be asked to. E245 lives in the modular checker, which only Madaros runs.
+// Arithmetic between two Knowledge<T> values typechecks but has no lowering.
+//
+// checker_check_binary_with_operand_types_inplace routes through
+// knowledge_binary_result and returns Knowledge<T>, but lower_binary_expr_ref
+// (self-hosted/ir/lower.sio) has no Knowledge arm. Both operands lower as
+// scalars, and a Knowledge operand lowers to the object handle -- so `kA * kB`
+// multiplies two pointers and `.value` on the result dereferences an arbitrary
+// address.
+//
+// Measured on Madaros before this refusal: `+` faulted; `*` returned 3.0 for 2.0*3.0 -- the
+// RIGHT operand's value, silently, at exit 0 -- while `+`, `-` and `/` compiled
+// clean and segfaulted at runtime. A silent wrong answer that sometimes crashes
+// is strictly worse than a diagnostic, so the checker now refuses it.
+//
+// The mixed forms (`kA * 2.0`, `2.0 * kA`, `kA + 2.0`) were already refused.
+// lean_single implements all of this correctly; see #1706 for the engine table.
+//
+// R6 update (2026-09-03): `kA + kB` for two DIFFERENT BARE Knowledge-typed
+// IDENTIFIERS now has a real, measured-correct lowering (value'=v1+v2,
+// variance'=var1+var2 -- ordinary independent addition, no covariance term,
+// none of the sign/norm ambiguity Sub/Mul/Div still carry) -- see
+// tests/run-pass/correlated_independent_measures_ok.sio and
+// checker_is_knowledge_ident_add's E245 exemption in check.sio, which fires
+// only when BOTH operands are ExprIdent. The right operand here is an inline
+// `measure(...)` call (ExprCall, not ExprIdent) specifically so this fixture
+// keeps proving `+` still refuses in general -- only the narrower bare-ident
+// (x)-bare-ident form gained a lowering.
+
+fn main() with IO, Mut, Div, Epistemic {
+    let kA: Knowledge<f64> = measure(2.0, uncertainty: 0.1)
+    let r = kA + measure(3.0, uncertainty: 0.2)
+    print_f64(r.value)
+}

@@ -75,7 +75,7 @@ import sys
 
 root = Path(sys.argv[1])
 required = {
-    "docs/compiler/KNOWN_LIMITATIONS.md": [
+    "docs/compiler/MATURITY.md": [
         "Local `~/.sounio/registry/` only. No public registry.",
     ],
     "docs/ecosystem/REGISTRY_ARCHITECTURE.md": [
@@ -221,7 +221,9 @@ run_step physical-extraction-canonical-cutover-approval \
 run_step physical-extraction-canonical-cutover-execution \
   python3 "$ROOT_DIR/scripts/ci/physical_extraction_canonical_cutover_execution_gate.py"
 run_step physical-extraction-canonical-production-gap \
-  python3 "$ROOT_DIR/scripts/ci/physical_extraction_canonical_production_gap_gate.py"
+    python3 "$ROOT_DIR/scripts/ci/physical_extraction_canonical_production_gap_gate.py"
+run_step physical-extraction-canonical-production-repository-catalog \
+    python3 "$ROOT_DIR/scripts/ci/physical_extraction_canonical_production_repository_catalog_gate.py"
 run_step physical-extraction-canonical-production-mapping-decision \
   python3 "$ROOT_DIR/scripts/ci/physical_extraction_canonical_production_mapping_decision_gate.py"
 

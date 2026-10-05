@@ -5,7 +5,8 @@ ulimit -s unlimited 2>/dev/null || true
 # and asserts byte-identical output vs. captured goldens at
 # tests/golden/kaxi_ptx/<mode>/<pattern>.{ptx,sha256,unsupported}.
 #
-# Capture goldens first via scripts/ci/kaxi_ptx_capture.sh.
+# Capture goldens first via scripts/gpu/kaxi_ptx_capture.sh (a capture tool,
+# not a gate: it cannot fail -- this script is the assertion).
 #
 # Exit 0 only if every combo matches its golden (PTX bytes for supported,
 # unsupported marker for unsupported).
@@ -17,7 +18,7 @@ cd "$ROOT_DIR"
 GOLDEN_DIR="tests/golden/kaxi_ptx"
 
 if [[ ! -d "$GOLDEN_DIR" ]]; then
-    echo "FAIL: golden dir $GOLDEN_DIR missing -- run scripts/ci/kaxi_ptx_capture.sh first" >&2
+    echo "FAIL: golden dir $GOLDEN_DIR missing -- run scripts/gpu/kaxi_ptx_capture.sh first" >&2
     exit 2
 fi
 

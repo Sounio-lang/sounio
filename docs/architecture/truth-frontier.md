@@ -41,7 +41,7 @@ Related docs:
 
 | File | Intended class | Direct rebuilt driver | Stage bits | Wrapper verdict | Provenance | Fallback compile |
 |---|---|---|---|---|---|---|
-| `scripts/ci/ontology_min_input.sio` | good | `witness=0`, `verdict=ok`, `rc=0` | `load=0 parse=0 collect=0 check=0` | `ok`, `rc=0` | `rebuilt_direct` | `ok` |
+| `self-hosted/ci/ontology_min_input.sio` | good | `witness=0`, `verdict=ok`, `rc=0` | `load=0 parse=0 collect=0 check=0` | `ok`, `rc=0` | `rebuilt_direct` | `ok` |
 | `tests/run-pass/algebra_decl_basic.sio` | good | `witness=0`, `verdict=ok`, `rc=0` | `load=0 parse=0 collect=0 check=0` | `ok`, `rc=0` | `rebuilt_direct` | `ok` |
 | `tests/compile-fail/ontology_subclass_reject.sio` | bad | `witness=0`, `verdict=ok`, `rc=0` | `load=0 parse=0 collect=0 check=0` | `unknown`, `rc=3` | `mixed` | `reject` |
 | `tests/compile-fail/ontology_type_mismatch.sio` | bad | `witness=0`, `verdict=ok`, `rc=0` | `load=0 parse=0 collect=0 check=0` | `unknown`, `rc=3` | `mixed` | `reject` |
@@ -59,7 +59,7 @@ Related docs:
 
 ### Provisionally trusted today
 
-- `scripts/ci/ontology_min_input.sio`
+- `self-hosted/ci/ontology_min_input.sio`
 - `tests/run-pass/algebra_decl_basic.sio`
 
 These are only provisionally trusted because the direct driver still emits the

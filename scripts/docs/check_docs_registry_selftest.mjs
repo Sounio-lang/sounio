@@ -12,11 +12,13 @@ const syncScript = path.join(repoRoot, 'scripts/docs/sync_governance_metadata.mj
 const registryCheckScript = path.join(repoRoot, 'scripts/docs/check_docs_registry.mjs');
 const parityCheckScript = path.join(repoRoot, 'website/scripts/check-docs-parity.mjs');
 const locales = ['en', 'pt', 'el', 'zh', 'ja', 'es'];
+const STRICT = { SOUNIO_DOCS_REGISTRY_STRICT_SNAPSHOT: '1' };
 
-async function runNode(scriptPath, cwd) {
+async function runNode(scriptPath, cwd, args = [], env = {}) {
   try {
-    const { stdout, stderr } = await execFileAsync(process.execPath, [scriptPath], {
+    const { stdout, stderr } = await execFileAsync(process.execPath, [scriptPath, ...args], {
       cwd,
+      env: { ...process.env, ...env },
       maxBuffer: 128 * 1024 * 1024,
     });
     return { ok: true, stdout, stderr, code: 0 };
@@ -108,7 +110,7 @@ async function createBaseFixture() {
     );
   }
 
-  const syncResult = await runNode(syncScript, fixtureRoot);
+  const syncResult = await runNode(syncScript, fixtureRoot, ['--snapshot']);
   assert(syncResult.ok, `Fixture sync failed:\n${syncResult.stderr || syncResult.stdout}`);
 
   return fixtureRoot;
@@ -162,7 +164,7 @@ async function main() {
     gettingStarted.website_slug = 'getting-started-stale';
     await writeFile(slugRegistryPath, `${JSON.stringify(slugRegistry, null, 2)}\n`, 'utf8');
     await expectFailure(
-      await runNode(parityCheckScript, path.join(slugDriftDir, 'website')),
+      await runNode(parityCheckScript, path.join(slugDriftDir, 'website'), [], STRICT),
       'Website slug drift for website.docs.getting-started',
       'stale website alias detection'
     );
@@ -171,7 +173,7 @@ async function main() {
     cleanupPaths.push(missingLocaleDir);
     await rm(path.join(missingLocaleDir, 'website/src/content/docs/ja/gpu.mdx'));
     await expectFailure(
-      await runNode(parityCheckScript, path.join(missingLocaleDir, 'website')),
+      await runNode(parityCheckScript, path.join(missingLocaleDir, 'website'), [], STRICT),
       'Locale status drift for website.docs.gpu ja: expected missing, found present',
       'missing locale page detection'
     );
@@ -212,7 +214,7 @@ async function main() {
       .replace(/^last_validated: .*$/m, 'last_validated: 2026-08-13')
       .replace(/^validated_by: .*$/m, 'validated_by: claude');
     await writeFile(preservePath, realHeaderContent, 'utf8');
-    const preserveSync = await runNode(syncScript, preserveDir);
+    const preserveSync = await runNode(syncScript, preserveDir, ['--snapshot']);
     assert(preserveSync.ok, `Preserve-scenario sync failed:\n${preserveSync.stderr || preserveSync.stdout}`);
     const afterSync = await readFile(preservePath, 'utf8');
     assert(
@@ -225,7 +227,7 @@ async function main() {
     );
     const preserveCheck = await runNode(registryCheckScript, preserveDir);
     assert(preserveCheck.ok, `Checker rejected a preserved real header:\n${preserveCheck.stderr || preserveCheck.stdout}`);
-    const preserveResync = await runNode(syncScript, preserveDir);
+    const preserveResync = await runNode(syncScript, preserveDir, ['--snapshot']);
     assert(preserveResync.ok, `Preserve-scenario re-sync failed:\n${preserveResync.stderr || preserveResync.stdout}`);
     assert(
       (await readFile(preservePath, 'utf8')) === realHeaderContent,
@@ -237,7 +239,7 @@ async function main() {
     const headerlessPath = path.join(headerlessDir, 'docs/guide/getting-started.md');
     const stripped = (await readFile(headerlessPath, 'utf8')).replace(/^<!-- docs:meta\n[\s\S]*?\n-->\n\n/m, '');
     await writeFile(headerlessPath, stripped, 'utf8');
-    const headerlessSync = await runNode(syncScript, headerlessDir);
+    const headerlessSync = await runNode(syncScript, headerlessDir, ['--snapshot']);
     assert(headerlessSync.ok, `Headerless-scenario sync failed:\n${headerlessSync.stderr || headerlessSync.stdout}`);
     const restamped = await readFile(headerlessPath, 'utf8');
     assert(restamped.startsWith('<!-- docs:meta\n'), 'a genuinely headerless doc was not given a header');
@@ -275,7 +277,7 @@ async function main() {
       'expected a YYYY-MM-DD date',
       'impossible-calendar-date detection'
     );
-    const impossibleSync = await runNode(syncScript, impossibleDir);
+    const impossibleSync = await runNode(syncScript, impossibleDir, ['--snapshot']);
     assert(impossibleSync.ok, `Impossible-date sync failed:\n${impossibleSync.stderr || impossibleSync.stdout}`);
     const impossibleAfterSync = await readFile(impossiblePath, 'utf8');
     assert(
@@ -313,7 +315,7 @@ async function main() {
       'docs/guide/second-unrelated-doc.md',
       '# Second Unrelated Doc\n\nSimulates a concurrent PR landing an unrelated governed doc.\n'
     );
-    const corpusGrowthSync = await runNode(syncScript, corpusGrowthDir);
+    const corpusGrowthSync = await runNode(syncScript, corpusGrowthDir, ['--snapshot']);
     assert(corpusGrowthSync.ok, `Corpus-growth sync failed:\n${corpusGrowthSync.stderr || corpusGrowthSync.stdout}`);
     const afterGrowth = await readFile(path.join(corpusGrowthDir, acceptanceReportPath), 'utf8');
     assert(
@@ -340,8 +342,43 @@ async function main() {
       'hand-corrupted acceptance-report stub detection'
     );
 
+    // 2026-10-05 snapshot race: topic-registry.v1.json and the authority matrix
+    // are a function of every governed doc, and requiring them fresh in each PR
+    // made 23 and 21 open PRs conflict on them. A plain sync must leave them
+    // alone (1), the checker must pass on a stale snapshot (2) and refuse it in
+    // strict mode (3), and a defect must still be caught through the rebuilt
+    // registry while the snapshot is stale (4).
+    const snapshotRaceDir = await cloneFixture(baseDir, 'snapshot-race');
+    cleanupPaths.push(snapshotRaceDir);
+    const registryRelPath = 'docs/governance/topic-registry.v1.json';
+    const registryBefore = await readFile(path.join(snapshotRaceDir, registryRelPath), 'utf8');
+    await writeFixtureFile(
+      snapshotRaceDir,
+      'docs/guide/concurrent-pr-doc.md',
+      '# Concurrent PR Doc\n\nSimulates a PR adding a governed doc while another PR adds a different one.\n'
+    );
+    const plainSync = await runNode(syncScript, snapshotRaceDir);
+    assert(plainSync.ok, `Plain sync failed:\n${plainSync.stderr || plainSync.stdout}`);
+    assert(
+      (await readFile(path.join(snapshotRaceDir, registryRelPath), 'utf8')) === registryBefore,
+      'a plain sync rewrote the registry snapshot -- every docs PR would conflict on it again'
+    );
+    const staleSnapshotCheck = await runNode(registryCheckScript, snapshotRaceDir);
+    assert(staleSnapshotCheck.ok, `Checker rejected a stale snapshot:\n${staleSnapshotCheck.stderr || staleSnapshotCheck.stdout}`);
+    await expectFailure(
+      await runNode(registryCheckScript, snapshotRaceDir, [], STRICT),
+      `Checked-in ${registryRelPath} is stale`,
+      'strict snapshot staleness detection'
+    );
+    await rm(path.join(snapshotRaceDir, 'website/src/content/docs/ja/gpu.mdx'));
+    await expectFailure(
+      await runNode(registryCheckScript, snapshotRaceDir),
+      'Docs topic website.docs.gpu is missing localized coverage for ja',
+      'missing locale page detection through the rebuilt registry'
+    );
+
     console.log(
-      'Docs registry selftest passed (5 failure scenarios + baseline + 4 provenance-preserve scenarios + 2 corpus-race scenarios).'
+      'Docs registry selftest passed (5 failure scenarios + baseline + 4 provenance-preserve scenarios + 2 corpus-race scenarios + 4 snapshot-race scenarios).'
     );
   } finally {
     await Promise.all(cleanupPaths.map((target) => rm(target, { recursive: true, force: true })));

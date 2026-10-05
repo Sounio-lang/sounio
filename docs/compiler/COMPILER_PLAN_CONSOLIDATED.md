@@ -109,7 +109,8 @@ imported dereferenced-f64-array lowering: **11 checks**.
 
 ## 3. The v2 master architecture — S0→S7
 
-`docs/research/madaros-v2-sota-plus-plus-plan-2026-07-04.md`, marked `historical`,
+`docs/research/madaros-v2-sota-plus-plus-plan-2026-07-04.md` (on
+`gpu/epistemic-tensor-core-next`; never reached `main`), marked `historical`,
 self-rated **L0 (sketch), "not implemented."** It is the fullest ambition
 statement and must be read as **PLANNED**, not as state:
 
@@ -256,7 +257,7 @@ f64 (hardware)  →  dd64 ~106-bit  →  qd128 ~212-bit  →  od256 ~424-bit
 | `dd64` double-double | **BRANCH** | 16-byte hi+lo pair, ABI-free under SysV / AAPCS64 / Darwin |
 | `qd128` quad-double | **BRANCH** | Priest renormalization, ~212-bit |
 | `od256` oct-double | **verified** | 8 limbs, ~424-bit. `two_sum`/`two_prod`/`add`/`mul` confirmed **bit-exact vs CPU reference on real NVIDIA L4 and DGX Spark GB10**, up to 4096 cases; 432/428 bits vs mpmath. Known defect: the emitted GPU `add` kernel uses 2 VecSum passes and drops to ~215 bits for partial-overlap magnitude gaps — 5 passes required; this blocks GPU div/sqrt |
-| `f128` (IEEE binary128) | **PLANNED** | a real **S5 milestone**, hard-gated on f64 print/return/call witnesses (`docs/research/eisa-precision-track-2026-07-05.md`). The literal `f128` tokens on `main` today are 128-byte buffers / 128-bit SIMD, not the type |
+| `f128` (IEEE binary128) | **PLANNED** | a real **S5 milestone**, hard-gated on f64 print/return/call witnesses (`docs/research/eisa-precision-track-2026-07-05.md`, on `gpu/epistemic-tensor-core-next`, not on `main`). The literal `f128` tokens on `main` today are 128-byte buffers / 128-bit SIMD, not the type |
 | `f256` (IEEE binary256) | **out of scope** | no hardware, no ecosystem — correctly rejected *as an IEEE hardware type* |
 | octuple via EFT | **ASPIRATION → partly real** | this is the live goal, and `od256` above is its first working rung. Do not read "f256 rejected" as "octuple rejected"; the software route is alive and measured |
 
