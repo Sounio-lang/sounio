@@ -722,7 +722,7 @@ function merPow(t, n) {                        // t^n, mirrors matrix_er.sio mer
   if (t <= 0.0) return 0.0;
   if (t !== t) return t;                        // NaN t or n propagates, as matrix_er.sio
   if (n !== n) return n;
-  if (t - t !== 0.0) {                          // +inf^n limit, before pureLn's halving loop (never ends on +inf)
+  if (t === Infinity) {                         // +inf^n limit, before pureLn's halving loop (never ends on +inf)
     if (n > 0.0) return t;
     if (n < 0.0) return 0.0;
     return 1.0;
@@ -735,7 +735,7 @@ function merPow(t, n) {                        // t^n, mirrors matrix_er.sio mer
   }
   const x = n * pureLn(t);                      // non-finite x: as matrix_er.sio (t = 1, n = ±inf -> 1)
   if (x !== x) return 1.0;
-  if (x - x !== 0.0) return x > 0.0 ? x : 0.0;
+  if (!Number.isFinite(x)) return x > 0.0 ? x : 0.0;
   return pureExp(x);
 }
 // exp(x) for x<0 — port of scenarios/venlafaxine_xr.sio mer_exp_neg, same
