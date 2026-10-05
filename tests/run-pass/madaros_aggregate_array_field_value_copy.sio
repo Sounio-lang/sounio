@@ -1,0 +1,87 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: AGGREGATE_ARRAY_FIELD_VALUE_COPY_OK
+//@ description: a by-value struct copy follows `[Struct; N]` and `[[w; M]; N]` fields element by element instead of sharing their handles
+//
+// Before this carrier, emit_struct_value_copy_deep followed word-scalar array
+// fields and nested struct fields only. An array-of-struct field or a nested
+// scalar array field kept the SOURCE handle, so every tag below observed a
+// write through the other binding (Madaros from the #2700 head prints a BAD
+// line for each). Every expected value is one the program wrote itself.
+
+struct P { u: i64, w: i64 }
+struct H { xs: [P; 2], k: i64 }
+struct O { h: H, k: i64 }
+struct Q { v: [f64; 2], k: f64 }
+struct HQ { qs: [Q; 2], k: i64 }
+struct M { m: [[i64; 2]; 2], k: i64 }
+struct OM { mm: M, k: i64 }
+
+fn bad(tag: i64) -> i64 with IO {
+    print("BAD ")
+    println(tag)
+    1
+}
+
+fn store_through(dst: &!H, src: &!H) with Mut {
+    *dst = *src
+}
+
+fn main() -> i32 with IO, Mut {
+    var fails: i64 = 0
+
+    // 1: identifier copy of an outer struct holding an array-of-struct field.
+    var o1 = O { h: H { xs: [P { u: 1, w: 1 }, P { u: 1, w: 1 }], k: 0 }, k: 0 }
+    var c1 = o1
+    o1.h.xs[1] = P { u: 7, w: 7 }
+    if c1.h.xs[1].u != 1 { fails = fails + bad(1) }
+
+    // 2: field-place snapshot, owner element rewritten afterwards.
+    var o2 = O { h: H { xs: [P { u: 2, w: 2 }, P { u: 2, w: 2 }], k: 0 }, k: 0 }
+    let snap2 = o2.h
+    var t2 = o2.h.xs[0]
+    t2.u = 9
+    o2.h.xs[0] = t2
+    if snap2.xs[0].u != 2 { fails = fails + bad(2) }
+
+    // 3: assignment, field store and deref store from a place.
+    var o3 = O { h: H { xs: [P { u: 3, w: 3 }, P { u: 3, w: 3 }], k: 0 }, k: 0 }
+    var d3 = H { xs: [P { u: 0, w: 0 }, P { u: 0, w: 0 }], k: 0 }
+    d3 = o3.h
+    var o3b = O { h: H { xs: [P { u: 0, w: 0 }, P { u: 0, w: 0 }], k: 0 }, k: 0 }
+    o3b.h = o3.h
+    var e3 = H { xs: [P { u: 0, w: 0 }, P { u: 0, w: 0 }], k: 0 }
+    store_through(&!e3, &!d3)
+    o3.h.xs[0] = P { u: 9, w: 9 }
+    d3.xs[1] = P { u: 5, w: 5 }
+    if d3.xs[0].u != 3 { fails = fails + bad(3) }
+    if o3b.h.xs[0].u != 3 { fails = fails + bad(3) }
+    if e3.xs[1].u != 3 { fails = fails + bad(3) }
+
+    // 4: struct elements that carry their own f64 array field, both directions.
+    var s4 = HQ { qs: [Q { v: [1.5, 2.5], k: 3.5 }, Q { v: [4.5, 5.5], k: 6.5 }], k: 0 }
+    var c4 = s4
+    s4.qs[1].v[0] = 99.0
+    s4.qs[0].k = 99.0
+    c4.qs[0].v[1] = 77.0
+    if c4.qs[1].v[0] != 4.5 { fails = fails + bad(4) }
+    if c4.qs[0].k != 3.5 { fails = fails + bad(4) }
+    if s4.qs[0].v[1] != 2.5 { fails = fails + bad(4) }
+
+    // 5: nested word-scalar array field, identifier and field-place copies.
+    var m5 = OM { mm: M { m: [[1, 1], [1, 1]], k: 0 }, k: 0 }
+    var c5 = m5
+    let snap5 = m5.mm
+    m5.mm.m[1][0] = 9
+    if c5.mm.m[1][0] != 1 { fails = fails + bad(5) }
+    if snap5.m[1][0] != 1 { fails = fails + bad(5) }
+    c5.mm.m[0][1] = 8
+    if m5.mm.m[0][1] != 1 { fails = fails + bad(5) }
+
+    if fails == 0 {
+        println("AGGREGATE_ARRAY_FIELD_VALUE_COPY_OK")
+    } else {
+        println("AGGREGATE_ARRAY_FIELD_VALUE_COPY_FAIL")
+    }
+    0
+}

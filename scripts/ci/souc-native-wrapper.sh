@@ -164,7 +164,15 @@ souc_compile() {
   local out="$2"
   local log
   if [[ "$RAW_MODE" == "modular" ]]; then
-    log="$("$RAW_SOUC" "$src" -o "$out" 2>&1)" || true
+    local rc=0
+    log="$("$RAW_SOUC" "$src" -o "$out" 2>&1)" || rc=$?
+    # Preserve the compiler's verdict before checking the artifact. Otherwise
+    # a crash after a matching diagnostic becomes rc=1 (or even rc=0 if a
+    # partial output exists), and compile-fail can accept it as a refusal.
+    if [[ "$rc" -ne 0 ]]; then
+      printf '%s\n' "$log"
+      return "$rc"
+    fi
     if [[ ! -s "$out" ]]; then
       printf '%s\ntypecheck: failed\n' "$log"
       return 1
