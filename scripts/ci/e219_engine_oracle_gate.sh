@@ -152,7 +152,7 @@ if [[ "$NOT_RUN" -eq 0 ]]; then
   check_fixed "suite_skips_requires_madaros" \
     'reason\":\"requires:madaros\"' "$SUITE_SOURCE"
   check_grep "suite_madaros_skip_branch" \
-    'madaros\) \[\[ -z "\$\{SOUNIO_MADAROS_AVAILABLE:-\}" \]\]' "$SUITE_SOURCE"
+    'madaros\) \[\[ -z "\$\{SOUNIO_MADAROS_AVAILABLE:-\}" \|\| "\$\{SOUNIO_RESOLVED_IS_MADAROS:-0\}" != "1" \]\]' "$SUITE_SOURCE"
 fi
 
 if [[ "$RUN_SEED_LIVE" -eq 1 && "$NOT_RUN" -eq 0 ]]; then
