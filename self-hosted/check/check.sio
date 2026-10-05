@@ -11021,9 +11021,75 @@ fn checker_reject_invalid_implicit_native_builtin_arity_inplace(c: *mut Checker,
     }
 }
 
+// #2760: the effect an implicit builtin carries, or -1 when it carries none.
+//
+// These names are bound by checker_collect_runtime_builtins_inplace with
+// checker_bind_import_unknown_inplace, which gives them a type and NO effect
+// row, so `fn f() { println("x") }` used to check clean on Madaros while
+// lean_single rejected it with E035. MIRROR of the per-builtin guards in
+// lean_single.sio (tc_effect_violation at the print / println / print_char /
+// read_* / file / syscall6 / assert / panic / malloc / heap_* call arms):
+//   IO     (0): print println read_byte read_line read_file file_size
+//               write_file write_bytes append_file
+//   Panic  (3): assert panic
+//   Alloc  (2): malloc heap_alloc heap_realloc heap_free
+// Deliberately absent: print_int / print_char / syscall6 (already carry IO via
+// their own arms below), and print_f64 / read_i64 / write_i64 / read_f64 /
+// write_f64, which lean_single does not guard either -- see the table in #2760.
+// Effect ids are effects.sio's: 0=IO 2=Alloc 3=Panic.
+fn builtin_call_effect_id(n: Name) -> i64 with Mut, Panic, Div, Alloc, IO {
+    if name_eq(n, make_name("print")) { return 0 }
+    if name_eq(n, make_name("println")) { return 0 }
+    if name_eq(n, make_name("read_byte")) { return 0 }
+    if name_eq(n, make_name("read_line")) { return 0 }
+    if name_eq(n, make_name("read_file")) { return 0 }
+    if name_eq(n, make_name("file_size")) { return 0 }
+    if name_eq(n, make_name("write_file")) { return 0 }
+    if name_eq(n, make_name("write_bytes")) { return 0 }
+    if name_eq(n, make_name("append_file")) { return 0 }
+    if name_eq(n, make_name("assert")) { return 3 }
+    if name_eq(n, make_name("panic")) { return 3 }
+    if name_eq(n, make_name("malloc")) { return 2 }
+    if name_eq(n, make_name("heap_alloc")) { return 2 }
+    if name_eq(n, make_name("heap_realloc")) { return 2 }
+    if name_eq(n, make_name("heap_free")) { return 2 }
+    0 - 1
+}
+
+// Applies builtin_call_effect_id to a call whose callee is a bare identifier
+// naming a builtin that no user signature shadows (lean_single's
+// `fn_find(ns, ne) < 0`). Arity is not checked here: a wrong-arity call is
+// diagnosed elsewhere and still owes the effect.
+fn checker_check_builtin_call_effect_inplace(c: *mut Checker, e: Expr) with Mut, Panic, Div, Alloc, IO {
+    match e.left {
+        Some(callee) => {
+            if (*callee).kind != ExprKind::ExprIdent {
+                return
+            }
+            let bid = builtin_call_effect_id((*callee).name)
+            if bid < 0 {
+                return
+            }
+            if fn_sig_table_find((*c).fn_sigs, (*callee).name) >= 0 {
+                return
+            }
+            var effs: [i64; 8] = [0; 8]
+            effs[0] = bid
+            checker_check_callee_effects_named_inplace(c, e.span, effs, 1, (*callee).name)
+        }
+        None => {}
+    }
+}
+
 fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with Mut, Panic, Div, Alloc, IO {
     if checker_reject_invalid_implicit_native_builtin_arity_inplace(c, e) {
         return ty_error()
+    }
+    // #2760: effect of the implicit builtins that have no signature. println is
+    // handled in its own arm below so that its Unobserved early return cannot
+    // report the same IO requirement twice.
+    if !call_expr_is_builtin_println(e.left) {
+        checker_check_builtin_call_effect_inplace(c, e)
     }
     if checker_expr_is_gpu_launch_invocation_call(e) {
         match e.left {
@@ -11116,6 +11182,7 @@ fn checker_check_call_expr_inplace(c: *mut Checker, e: Expr) -> TypeEntry with M
             checker_check_callee_effects_inplace(c, e.span, effects_unobserved, 1)
             return ty_unit()
         }
+        checker_check_builtin_call_effect_inplace(c, e)
     }
     // Read-only GPU thread-index intrinsics (gpu_thread_id_*, gpu_block_id_*,
     // gpu_block_dim_*, gpu_barrier, gpu_sync_threads): implicit kernel builtins

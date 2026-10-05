@@ -262,3 +262,23 @@ files, 78.4% accepted by `souc check`
 - Measure with the compiler and stdlib pinned together (`SOUNIO_MADAROS_BIN`
   inside one tree; `SOUNIO_STDLIB_PATH` changes verdicts on its own). Full
   numbers and caveats: history snapshot, section "Reading a rejection".
+- **Builtin effects (#2760).** Madaros now attributes the effect row of the
+  implicit builtins the way lean_single does: `IO` for `print`, `println`,
+  `read_byte`, `read_line`, `read_file`, `file_size`, `write_file`,
+  `write_bytes`, `append_file` (`print_int`, `print_char` and `syscall6` already
+  did); `Panic` for `assert` and `panic`; `Alloc` for `malloc`, `heap_alloc`,
+  `heap_realloc` and `heap_free`. A caller that does not declare the effect is
+  rejected with E035 on both engines. A user function with the same name as a
+  builtin keeps its own signature. Still unguarded on **both** engines:
+  `print_f64`, `read_i64`, `write_i64`, `read_f64`, `write_f64` -- lean_single
+  does not check them either, so they are a shared gap, not a divergence.
+  `print_int` is guarded by Madaros only.
+- **Two E035 divergences from lean_single remain, both older than #2760.**
+  (1) lean_single grants `main` every basic effect; Madaros requires
+  `fn main() with IO` even when `main` only calls a `with IO` user function.
+  (2) Madaros checks a closure body against an empty effect row: it neither
+  inherits the enclosing function's effects nor honours `|x| -> T with IO`, so a
+  closure that prints, or calls a `with IO` function, is E035 even inside
+  `main with IO`. After #2760 this includes the builtins above;
+  `tests/run-pass/closure_effect_transparent_hof.sio` carries `known-failure`
+  for it.
