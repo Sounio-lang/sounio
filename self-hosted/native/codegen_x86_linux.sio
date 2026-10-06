@@ -4286,6 +4286,103 @@ fn emit_builtin_heap_free_into(nc: &! NativeCompiler) with Mut, Panic, Div {
     nc_patch_u32_le(nc, null_patch, done_offset - (null_patch + 4))
 }
 
+fn nc_alloc_diag_append_ascii_into(nc: &! NativeCompiler, text: string) with Mut, Panic, Div {
+    let n = str_len(text)
+    var i: i64 = 0
+    while i < n {
+        native_v2_rodata_append_byte_into(nc, str_char_at(text, i) as i64)
+        i = i + 1
+    }
+}
+
+fn nc_alloc_diag_append_decimal_into(nc: &! NativeCompiler, value: i64) with Mut, Panic, Div {
+    if value <= 0 {
+        native_v2_rodata_append_byte_into(nc, 48)
+        return
+    }
+    var div: i64 = 1
+    while div <= value / 10 { div = div * 10 }
+    while div > 0 {
+        native_v2_rodata_append_byte_into(nc, 48 + (value / div) % 10)
+        div = div / 10
+    }
+}
+
+fn nc_core_emit_alloc_failure_diagnostic_into(nc: &! NativeCompiler, fail_code: i64, request_bytes: i64) with Mut, Panic, Div {
+    let rodata_offset = native_v2_rodata_len_into(nc)
+    // Keep this byte-oriented: String lowering in this failure path is not yet
+    // reliable enough to use while reporting a runtime allocation exhaustion.
+    native_v2_rodata_append_byte_into(nc, 109) // m
+    native_v2_rodata_append_byte_into(nc, 97)  // a
+    native_v2_rodata_append_byte_into(nc, 100) // d
+    native_v2_rodata_append_byte_into(nc, 97)  // a
+    native_v2_rodata_append_byte_into(nc, 114) // r
+    native_v2_rodata_append_byte_into(nc, 111) // o
+    native_v2_rodata_append_byte_into(nc, 115) // s
+    native_v2_rodata_append_byte_into(nc, 58)  // :
+    native_v2_rodata_append_byte_into(nc, 32)  // space
+    if fail_code == 181 {
+        native_v2_rodata_append_byte_into(nc, 97)  // a
+        native_v2_rodata_append_byte_into(nc, 114) // r
+        native_v2_rodata_append_byte_into(nc, 101) // e
+        native_v2_rodata_append_byte_into(nc, 110) // n
+        native_v2_rodata_append_byte_into(nc, 97)  // a
+    } else {
+        native_v2_rodata_append_byte_into(nc, 104) // h
+        native_v2_rodata_append_byte_into(nc, 97)  // a
+        native_v2_rodata_append_byte_into(nc, 110) // n
+        native_v2_rodata_append_byte_into(nc, 100) // d
+        native_v2_rodata_append_byte_into(nc, 108) // l
+        native_v2_rodata_append_byte_into(nc, 101) // e
+        native_v2_rodata_append_byte_into(nc, 115) // s
+    }
+    native_v2_rodata_append_byte_into(nc, 32)  // space
+    native_v2_rodata_append_byte_into(nc, 102) // f
+    native_v2_rodata_append_byte_into(nc, 117) // u
+    native_v2_rodata_append_byte_into(nc, 108) // l
+    native_v2_rodata_append_byte_into(nc, 108) // l
+    // P0.4 (2026-10-06): never a bare "arena full". The first line keeps the
+    // historical prefix (CI gates and audits grep "madaros: arena full" /
+    // "madaros: handles full"); the rest names the limit, the size of the
+    // allocation that did not fit (fixed per site at compile time, so it
+    // identifies the construct: 32800 bytes is a 4096-f64 MatNM value), and
+    // the fix. The bytes are plain ASCII appended at compile time; the emitted
+    // failure path is still a single write(2) of a rodata constant.
+    if request_bytes > 0 {
+        nc_alloc_diag_append_ascii_into(nc, " (allocation of ")
+        nc_alloc_diag_append_decimal_into(nc, request_bytes)
+        nc_alloc_diag_append_ascii_into(nc, " bytes)")
+    } else {
+        nc_alloc_diag_append_ascii_into(nc, " (growing a Seq by push)")
+    }
+    if fail_code == 181 {
+        nc_alloc_diag_append_ascii_into(nc, "\n")
+        nc_alloc_diag_append_ascii_into(nc, "  the generated program's runtime heap is one fixed ~2 GiB bump arena that is\n")
+        nc_alloc_diag_append_ascii_into(nc, "  never reclaimed: every aggregate value created or copied by value (struct\n")
+        nc_alloc_diag_append_ascii_into(nc, "  literal, by-value array/struct argument or return, x = matnm_set(x, ...))\n")
+        nc_alloc_diag_append_ascii_into(nc, "  takes fresh arena space for the life of the process. A loop that does so\n")
+        nc_alloc_diag_append_ascii_into(nc, "  per iteration exhausts it. Fix: hoist buffers out of the loop and write\n")
+        nc_alloc_diag_append_ascii_into(nc, "  through &! references (see stdlib/chemistry/catalysis.sio and\n")
+        nc_alloc_diag_append_ascii_into(nc, "  simulate_general_epistemic in stdlib/chemistry/kinetics.sio).\n")
+    } else {
+        nc_alloc_diag_append_ascii_into(nc, "\n")
+        nc_alloc_diag_append_ascii_into(nc, "  the generated program's handle table (4194304 managed objects, never\n")
+        nc_alloc_diag_append_ascii_into(nc, "  reclaimed) is exhausted: every aggregate over 16 bytes created or copied\n")
+        nc_alloc_diag_append_ascii_into(nc, "  by value takes a handle for the life of the process. Fix: hoist buffers\n")
+        nc_alloc_diag_append_ascii_into(nc, "  out of the loop and write through &! references.\n")
+    }
+
+    let write_len = native_v2_rodata_len_into(nc) - rodata_offset
+    let lea_pos = (*nc).code.len
+    nc_emit_lea_rax_rip_disp32(nc, 0)
+    nc_add_rodata_reloc(nc, lea_pos + 3, rodata_offset)
+    nc_emit_mov_reg_reg(nc, 6, 0)
+    nc_emit_mov_rdi_imm(nc, 2)
+    nc_emit_mov_reg_imm(nc, 2, write_len)
+    nc_emit_mov_rax_imm(nc, 1)
+    nc_emit_syscall(nc)
+}
+
 // __sounio_seq_push(handle, value) -> unit. Seq reuses the aggregate object
 // layout: payload_size is capacity in bytes and flags is logical length. When
 // full, retargeting the existing handle-table entry preserves every alias.
@@ -4402,6 +4499,7 @@ fn emit_builtin_native_seq_push_common_into(nc: &! NativeCompiler, element_barri
 
     let heap_fail_offset = (*nc).code.len
     nc_patch_u32_le(nc, heap_fail_patch, heap_fail_offset - (heap_fail_patch + 4))
+    nc_core_emit_alloc_failure_diagnostic_into(nc, 181, 0)
     nc_emit_exit_code(nc, 181)
 }
 
@@ -9547,56 +9645,10 @@ fn nc_emit_core_float_binop_into(nc: &! NativeCompiler, op: BinaryOp) -> bool wi
 // arena / handle table under a false "empty frame" probe retargets handles that
 // remain live in callers (silent wrong values / SEGV). Until a collector can
 // prove every live root is traced, STOP with a dedicated exit code.
-fn nc_core_emit_alloc_failure_diagnostic_into(nc: &! NativeCompiler, fail_code: i64) with Mut, Panic, Div {
-    let rodata_offset = native_v2_rodata_len_into(nc)
-    // Keep this byte-oriented: String lowering in this failure path is not yet
-    // reliable enough to use while reporting a runtime allocation exhaustion.
-    native_v2_rodata_append_byte_into(nc, 109) // m
-    native_v2_rodata_append_byte_into(nc, 97)  // a
-    native_v2_rodata_append_byte_into(nc, 100) // d
-    native_v2_rodata_append_byte_into(nc, 97)  // a
-    native_v2_rodata_append_byte_into(nc, 114) // r
-    native_v2_rodata_append_byte_into(nc, 111) // o
-    native_v2_rodata_append_byte_into(nc, 115) // s
-    native_v2_rodata_append_byte_into(nc, 58)  // :
-    native_v2_rodata_append_byte_into(nc, 32)  // space
-    if fail_code == 181 {
-        native_v2_rodata_append_byte_into(nc, 97)  // a
-        native_v2_rodata_append_byte_into(nc, 114) // r
-        native_v2_rodata_append_byte_into(nc, 101) // e
-        native_v2_rodata_append_byte_into(nc, 110) // n
-        native_v2_rodata_append_byte_into(nc, 97)  // a
-    } else {
-        native_v2_rodata_append_byte_into(nc, 104) // h
-        native_v2_rodata_append_byte_into(nc, 97)  // a
-        native_v2_rodata_append_byte_into(nc, 110) // n
-        native_v2_rodata_append_byte_into(nc, 100) // d
-        native_v2_rodata_append_byte_into(nc, 108) // l
-        native_v2_rodata_append_byte_into(nc, 101) // e
-        native_v2_rodata_append_byte_into(nc, 115) // s
-    }
-    native_v2_rodata_append_byte_into(nc, 32)  // space
-    native_v2_rodata_append_byte_into(nc, 102) // f
-    native_v2_rodata_append_byte_into(nc, 117) // u
-    native_v2_rodata_append_byte_into(nc, 108) // l
-    native_v2_rodata_append_byte_into(nc, 108) // l
-    native_v2_rodata_append_byte_into(nc, 10)  // newline
-
-    let write_len = native_v2_rodata_len_into(nc) - rodata_offset
-    let lea_pos = (*nc).code.len
-    nc_emit_lea_rax_rip_disp32(nc, 0)
-    nc_add_rodata_reloc(nc, lea_pos + 3, rodata_offset)
-    nc_emit_mov_reg_reg(nc, 6, 0)
-    nc_emit_mov_rdi_imm(nc, 2)
-    nc_emit_mov_reg_imm(nc, 2, write_len)
-    nc_emit_mov_rax_imm(nc, 1)
-    nc_emit_syscall(nc)
-}
-
-fn nc_core_emit_alloc_fail_into(nc: &! NativeCompiler, slow_jnz: i64, fail_code: i64) with Mut, Panic, Div {
+fn nc_core_emit_alloc_fail_into(nc: &! NativeCompiler, slow_jnz: i64, fail_code: i64, request_bytes: i64) with Mut, Panic, Div {
     let slow_path = (*nc).code.len
     nc_patch_u32_le(nc, slow_jnz + 2, slow_path - (slow_jnz + 6))
-    nc_core_emit_alloc_failure_diagnostic_into(nc, fail_code)
+    nc_core_emit_alloc_failure_diagnostic_into(nc, fail_code, request_bytes)
     nc_emit_exit_code(nc, fail_code)
 }
 
@@ -9648,7 +9700,7 @@ fn nc_core_emit_alloc_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, elem_
         let done_jmp_u = (*nc).code.len
         nc_emit_jmp_rel32(nc)
 
-        nc_core_emit_alloc_fail_into(nc, heap_slow_jnz, 181)
+        nc_core_emit_alloc_fail_into(nc, heap_slow_jnz, 181, total_size)
 
         let done_target_u = (*nc).code.len
         nc_patch_u32_le(nc, done_jmp_u + 1, done_target_u - (done_jmp_u + 5))
@@ -9714,8 +9766,8 @@ fn nc_core_emit_alloc_into(nc: &! NativeCompiler, dst: i64, type_tag: i64, elem_
     let done_jmp = (*nc).code.len
     nc_emit_jmp_rel32(nc)
 
-    nc_core_emit_alloc_fail_into(nc, heap_slow_jnz, 181)
-    nc_core_emit_alloc_fail_into(nc, handle_slow_jnz, 182)
+    nc_core_emit_alloc_fail_into(nc, heap_slow_jnz, 181, total_size)
+    nc_core_emit_alloc_fail_into(nc, handle_slow_jnz, 182, total_size)
 
     let done_target = (*nc).code.len
     nc_patch_u32_le(nc, done_jmp + 1, done_target - (done_jmp + 5))
