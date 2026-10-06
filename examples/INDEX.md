@@ -267,7 +267,7 @@ Status: `pass` = exit code 0; `fail rc=N (Exxx)` = non-zero exit with the first 
 | [`epistemic_mcts_full.sio`](epistemic_mcts_full.sio) | examples/epistemic_mcts_full.sio | pass | pass | 7.1 / 0.8 |
 | [`epistemic_preictal_workflow.sio`](epistemic_preictal_workflow.sio) | Epistemic Workflow Prototype | fail rc=1 | fail rc=1 (E224) | 6.5 / 0.9 |
 | [`epistemic_propagation.sio`](epistemic_propagation.sio) | RSS (Root Sum of Squares) uncertainty propagation with SMT verification | fail rc=1 | pass | 5.7 / 0.9 |
-| [`epistemic_quantum_vqe.sio`](epistemic_quantum_vqe.sio) | Epistemic Quantum VQE (1-qubit H₂ approximation) | pass | fail rc=1 (E035) | 7.4 / 0.7 |
+| [`epistemic_qubit_toy_vqe.sio`](epistemic_qubit_toy_vqe.sio) | Epistemic VQE on a one-qubit toy Hamiltonian H = Z (renamed by #2770; row re-measured 2026-10-06) | pass | fail rc=1 (E035) | 7.4 / 1.0 |
 | [`epistemic_refinements.sio`](epistemic_refinements.sio) | Epistemic refinement types with SMT-verified bounds | fail rc=1 | fail rc=1 (E200) | 5.8 / 0.8 |
 | [`epistemic_smoke_native.sio`](epistemic_smoke_native.sio) | Sprint 131: Epistemic computing smoke test — native x86-64 ELF target | fail rc=1 (E245 E012) | pass | 5.9 / 0.8 |
 | [`epistemic_transformer.sio`](epistemic_transformer.sio) | Epistemic Transformer Block (seq=4, d=16, 2 heads, d_k=8) | pass | pass | 9.2 / 0.9 |
