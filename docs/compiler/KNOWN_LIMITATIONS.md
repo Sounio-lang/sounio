@@ -40,7 +40,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 | KL-14 | FFI: 14a–14d3 CLOSED | madaros |
 | KL-15 | `f256` surface (15a softfloat add/sub partial), `Knowledge<f128>`/GUM | madaros |
 | KL-16 | Hessian Tier-4 (16a–16f CLOSED; residual H-multi/non-H00 if/a64 atan2) | lean_single |
-| KL-17 | `Hyper<…>` CPU values: Madaros fail-closed; lean_single prints a wrong value (seed) | both |
+| KL-18 | `Hyper<…>` CPU values: Madaros fail-closed; lean_single prints a wrong value (seed) | both |
 
 ## Ledger
 
@@ -223,7 +223,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   `formal/ChannelAssignmentSemantics.lean`) are a model, not a defect —
   see the history snapshot for the KAS-1 rationale.
 
-### KL-17 — `Hyper<Algebra, T>` values on the CPU path (P0.8.2)
+### KL-18 — `Hyper<Algebra, T>` values on the CPU path (P0.8.2)
 
 - Engine: both. There is no CPU value lowering for `Hyper<Octonion, f64>`
   (or any `Hyper<…>`); the only implemented CPU octonion product is
