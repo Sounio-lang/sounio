@@ -1,3 +1,12 @@
+<!-- docs:meta
+topic_id: repo.docs.audit.venlafaxine-odv-ratio-citation-forensics-2026-09-26
+authority: repo_only
+audience: users
+last_validated: 2026-09-26
+validated_by: claude
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.audit.venlafaxine-odv-ratio-citation-forensics-2026-09-26
+-->
+
 # Venlafaxine ODV/parent phenotype ratios — citation forensics
 
 Date: 2026-09-26 · Branch: `claude/mystifying-goldberg-ccfc8a` · Status: **finding only.
