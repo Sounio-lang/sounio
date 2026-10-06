@@ -7,11 +7,13 @@ document; every timing and result was measured on 2026-10-04 at `main`
 
 ```bash
 bash scripts/tour.sh            # sections 1-3, about 1 minute
-bash scripts/tour.sh --full     # adds the slow simulations and the compiler rebuild, about 4 minutes
-bash scripts/tour.sh --full --lean   # adds the Lean 4 proofs (needs elan; toolchains are pinned per lakefile)
+bash scripts/tour.sh --full     # adds the slow simulations and the compiler rebuild: 16 claims, about 4 minutes
+bash scripts/tour.sh --full --lean   # adds the 4 Lean 4 checks of section 5: all 20 claims (needs elan; toolchains are pinned per lakefile)
 ```
 
-Last full run: **passed 20, failed 0, 4 min 13 s.**
+Last run with `--full --lean`: **passed 20, failed 0, 4 min 13 s.** `--full` alone
+prints `passed 16`; the other four claims are the Lean checks, which run only with
+`--lean`.
 
 Section 6 lists what does **not** work, with issue numbers. Read it before
 drawing conclusions from sections 1–5.
@@ -24,7 +26,9 @@ A self-hosted compiler for a language whose values can carry their own
 uncertainty (`Knowledge<T>`, propagated to first order by the GUM rules),
 their physical units, and declared effects (`IO`, `Mut`, `Div`, `Panic`, `GPU`,
 …). It compiles to static x86-64 ELF. The compiler is written in Sounio and
-bootstraps from a C seed (`bootstrap/stage0.c`) to a fixed point. Two engines
+rebuilds itself to a fixed point starting from the committed prebuilt compiler
+(`bin/souc-linux-x86_64`, section 4). The original C seed, `bootstrap/stage0.c`,
+is not on that path; `scripts/ci/bootstrap_chain_gate.sh` exercises it. Two engines
 share the front end: **Madaros**, the modular default behind `bin/souc`, and
 **lean_single**, the bootstrap seed, selected with `SOUNIO_SOUC_ENGINE=lean_single`.
 Where they differ, this page says which one ran.
@@ -99,7 +103,7 @@ Each result has an independent oracle outside the language:
 ## 4. Self-hosting
 
 ```bash
-make build      # stage0 JIT -> gen1 -> gen2 -> gen3; checks gen2 == gen3
+make build      # prebuilt bin/souc-linux-x86_64 -> gen1 -> gen2 -> gen3; checks gen2 == gen3
 ```
 
 32 s on `main`, `FIXED POINT OK (4b6b478d…)`. A fixed point is what makes a

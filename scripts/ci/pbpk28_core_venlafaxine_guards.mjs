@@ -13,6 +13,14 @@
 //      sentinel, not a negative quotient (it was −4.23).
 //   3. Large dt is accepted: merExpNeg range-reduces like mer_exp_neg (dt = 24 h
 //      used to throw on ka·dt > 1).
+//   4. vfxMatrixFraction edge cases, mirroring
+//      tests/run-pass/darwin_venlafaxine_xr_matrix_small_t.sio (#2722), because the
+//      Sounio test cannot see drift in this hand-maintained copy:
+//      - small t accurate (no -4.959 ln floor);
+//      - the n = 0.5 branch at small and large t (pureSqrt, with 4^k down-scaling);
+//      - the cap at 12 h;
+//      - +inf and NaN clocks;
+//      - zero, NaN and infinite exponents.
 // Prints VFX_NODE_GUARDS_PASS, or FAIL lines and exits 1.
 
 import { fileURLToPath } from 'node:url';
@@ -20,7 +28,8 @@ import { dirname, resolve } from 'node:path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const core = await import(resolve(__dirname, '../../website/src/lib/pbpk28_core.mjs'));
-const { runVenlafaxineScenario, runVenlafaxineSteadyState, vfxSsRatioClosedForm } = core;
+const { runVenlafaxineScenario, runVenlafaxineSteadyState, vfxSsRatioClosedForm,
+        vfxMatrixFraction, VFX_MATRIX_GOHEL2008 } = core;
 
 let fails = 0;
 function fail(msg) { fails++; console.log(`FAIL: ${msg}`); }
@@ -71,6 +80,32 @@ for (const dt of [1.0, 24.0]) {
     const cf = vfxSsRatioClosedForm(2);
     if (!(ss.ratioLo <= cf && cf <= ss.ratioHi)) fail(`closed form outside the dt = ${dt} h interval`);
   } catch (e) { fail(`dt = ${dt} h rejected: ${e.message}`); }
+}
+
+{
+  const rel = VFX_MATRIX_GOHEL2008;
+  const near = (got, want, what) => {
+    if (!(Math.abs(got - want) <= 1e-9 * Math.abs(want))) fail(`${what}: got ${got}, want ${want}`);
+  };
+  const same = (got, want, what) => {
+    if (!(Object.is(got, want))) fail(`${what}: got ${got}, want ${want}`);
+  };
+  near(vfxMatrixFraction(rel, 3.5e-15), 7.9890898448550897e-11, 'F(3.5e-15)');
+  near(vfxMatrixFraction(rel, 1.0e-6), 2.5052615694703923e-05, 'F(1e-6)');
+  near(vfxMatrixFraction(rel, 0.01), 9.9736259491827184e-03, 'F(0.01)');
+  same(vfxMatrixFraction(rel, 12.0), 1.0, 'F(12 h) cap');
+  near(vfxMatrixFraction({ k: 0.5, n: 0.5 }, 1.0e-6), 5.0e-4, 'n = 0.5, t = 1e-6');
+  near(vfxMatrixFraction({ k: 1.0e-15, n: 0.5 }, 1.0e20), 1.0e-5, 'n = 0.5, t = 1e20');
+  same(vfxMatrixFraction(rel, Infinity), 1.0, 'F(+inf)');
+  same(vfxMatrixFraction(rel, NaN), NaN, 'F(NaN clock)');
+  same(vfxMatrixFraction({ k: 0.199, n: -0.35 }, NaN), NaN, 'n < 0, NaN clock');
+  same(vfxMatrixFraction({ k: 0.5, n: 0.0 }, 1.0), 0.5, 'n = 0, t = 1');
+  same(vfxMatrixFraction({ k: 0.5, n: 0.0 }, Infinity), 0.5, 'n = 0, t = +inf');
+  same(vfxMatrixFraction({ k: 0.5, n: NaN }, 2.0), NaN, 'NaN n, t = 2');
+  same(vfxMatrixFraction({ k: 0.5, n: NaN }, Infinity), NaN, 'NaN n, t = +inf');
+  same(vfxMatrixFraction({ k: 0.5, n: Infinity }, 1.0), 0.5, 'n = +inf, t = 1');
+  same(vfxMatrixFraction({ k: 0.5, n: Infinity }, 2.0), 1.0, 'n = +inf, t = 2');
+  same(vfxMatrixFraction({ k: 0.5, n: Infinity }, 0.5), 0.0, 'n = +inf, t = 0.5');
 }
 
 if (fails > 0) { console.log(`VFX_NODE_GUARDS_FAIL ${fails}`); process.exit(1); }
