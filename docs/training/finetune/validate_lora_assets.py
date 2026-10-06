@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 from pathlib import Path
 
@@ -38,6 +39,22 @@ def read_jsonl(path: Path) -> list[dict]:
     return rows
 
 
+# The code dataset is a snapshot of the test corpus, refreshed in its own
+# snapshot/refresh-* PR (scripts/ci/generated_snapshot_guard.sh refuses it in any
+# other PR, because two PRs that both regenerate it always conflict). So a row
+# whose source has since been edited or deleted is drift, reported here and
+# fatal only under SOUNIO_DATASET_STRICT_SNAPSHOT=1 (the refresh PR). Structural
+# defects -- missing fields, duplicates, bad suite, empty text -- stay fatal.
+STRICT_SNAPSHOT = os.environ.get("SOUNIO_DATASET_STRICT_SNAPSHOT") == "1"
+STALE: list[str] = []
+
+
+def stale(message: str) -> None:
+    if STRICT_SNAPSHOT:
+        fail(message)
+    STALE.append(message)
+
+
 def validate_code_split(path: Path, split: str) -> int:
     rows = read_jsonl(path)
     required = {
@@ -63,14 +80,15 @@ def validate_code_split(path: Path, split: str) -> int:
             fail(f"{path}:{idx}: invalid suite {row['suite']!r}")
         src = ROOT / row["source_path"]
         if not src.is_file():
-            fail(f"{path}:{idx}: source_path does not exist: {row['source_path']}")
+            stale(f"{path}:{idx}: source_path does not exist: {row['source_path']}")
+            continue
         if not str(row["instruction"]).strip():
             fail(f"{path}:{idx}: empty instruction")
         completion = str(row["completion"])
         if not completion.strip():
             fail(f"{path}:{idx}: empty completion")
         if src.read_text(encoding="utf-8", errors="replace") != completion:
-            fail(f"{path}:{idx}: completion does not match source_path")
+            stale(f"{path}:{idx}: completion does not match source_path")
     print(f"  {split}: {len(rows)} examples")
     return len(rows)
 
@@ -151,6 +169,11 @@ def main() -> None:
     validate_corpus(args.corpus)
     validate_code_dataset(args.code_dataset)
     validate_contrastive_dataset(args.contrastive_dataset)
+    if STALE:
+        print(f"Notice: {len(STALE)} code-dataset row(s) lag the test corpus (snapshot drift, "
+              "refreshed in a snapshot/refresh-* PR; fatal only with SOUNIO_DATASET_STRICT_SNAPSHOT=1):")
+        for message in STALE[:5]:
+            print(f"  {message}")
     print("lora_assets_gate: PASS")
 
 
