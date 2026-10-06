@@ -689,6 +689,12 @@ pub fn lower_hard_error_report() with IO, Mut, Panic, Div {
         print(" virtual registers but IR_MAX_VREGS is ")
         print_int(IR_LOWER_HARD_ERROR_LIMIT)
         print("\n")
+    } else if IR_LOWER_HARD_ERROR_REASON == 6 {
+        print("  cause: function `")
+        ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
+        print("` uses a dereference whose pointee type Madaros cannot determine as an\n")
+        print("         operand next to an f64; lowering it would compute on the IEEE-754 bit\n")
+        print("         pattern as an integer, so it is refused (bind `let v: f64 = *expr` first).\n")
     } else if IR_LOWER_HARD_ERROR_NEEDED > 0 {
         print("  cause: function `")
         ir_print_flat_name(&IR_LOWER_HARD_ERROR_FN_BUF, IR_LOWER_HARD_ERROR_FN_LEN)
@@ -6835,6 +6841,26 @@ fn lower_name_is_i64_type(n: Name) -> bool with Div {
     && n.buf[0] == 105 as i8   // 'i'
     && n.buf[1] == 54 as i8    // '6'
     && n.buf[2] == 52 as i8    // '4'
+}
+
+// `f64` or `f32` as a type NAME (the backend carries f32 as f64; see
+// lower_type_expr_is_f64). Used to read the pointee of a `&f64` / `&!f64`
+// local, whose struct_types slot holds the inner named type.
+fn lower_name_is_f64_scalar_type(n: Name) -> bool with Div {
+    if n.len != 3 { return false }
+    if n.buf[0] != 102 as i8 { return false }   // 'f'
+    let is_64 = n.buf[1] == 54 as i8 && n.buf[2] == 52 as i8
+    let is_32 = n.buf[1] == 51 as i8 && n.buf[2] == 50 as i8
+    is_64 || is_32
+}
+
+// `f128` or `f256` as a type NAME (V0-E.4.1 wide floats).
+fn lower_name_is_wide_float_type(n: Name) -> bool with Div {
+    if n.len != 4 { return false }
+    if n.buf[0] != 102 as i8 { return false }   // 'f'
+    let is_128 = n.buf[1] == 49 as i8 && n.buf[2] == 50 as i8 && n.buf[3] == 56 as i8
+    let is_256 = n.buf[1] == 50 as i8 && n.buf[2] == 53 as i8 && n.buf[3] == 54 as i8
+    is_128 || is_256
 }
 
 // println bool-segfault fix (2026-08-17): a callee's return type name that is
@@ -15700,6 +15726,14 @@ impl Lowerer {
                 || self.opt_expr_result_is_wide_float_ref(&(*e).right)
         }
         if (*e).kind == ExprKind::ExprUnary {
+            // `*p` with p: &f128 / &f256 reads a wide value. Recursing into the
+            // operand asked whether the REFERENCE was wide (it is not: a `&f128`
+            // param carries no scalar kind), so `*p + *q` lowered as an integer
+            // add. Classified wide, it reaches the V0-E.4.1 refusal (a
+            // dereference is never a ready softfloat operand).
+            if (*e).un_op == UnaryOp::OpDeref && self.deref_operand_pointee_kind_ref(&(*e).left) == 5 {
+                return true
+            }
             return self.opt_expr_result_is_wide_float_ref(&(*e).left)
         }
         if (*e).kind == ExprKind::ExprIf {
@@ -15944,6 +15978,58 @@ impl Lowerer {
         false
     }
 
+    // Scalar class of the value `*operand` reads:
+    //   2 = f64 / f32, 5 = f128 / f256 (wide), 1 = integer / bool / string,
+    //   0 = unknown (the pointee could not be typed here).
+    // Only a reference-typed local or parameter (`p: &f64`, `p: &!f64`,
+    // `let r: &f64 = &x`, `let r = &x`) is typed: its struct_types slot holds
+    // the pointee's named type (lower_param_struct_type_name for params,
+    // lower_let_stmt_finalize_ref for lets). Every other shape answers 0, and
+    // lower_binary_expr_ref refuses an unknown dereference paired with a float
+    // operand rather than emitting integer arithmetic on its bits.
+    fn opt_expr_is_deref_ref(self, opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(expr) => (*expr).kind == ExprKind::ExprUnary && (*expr).un_op == UnaryOp::OpDeref,
+            None => false,
+        }
+    }
+
+    fn opt_deref_expr_pointee_kind_ref(self, opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div, Alloc {
+        match *opt {
+            Some(expr) => {
+                if (*expr).kind == ExprKind::ExprUnary && (*expr).un_op == UnaryOp::OpDeref {
+                    return self.deref_operand_pointee_kind_ref(&(*expr).left)
+                }
+                0
+            }
+            None => 0,
+        }
+    }
+
+    fn deref_operand_pointee_kind_ref(self, operand_opt: &Option<Box<Expr>>) -> i64 with Mut, Panic, Div, Alloc {
+        match *operand_opt {
+            Some(operand) => {
+                if (*operand).kind == ExprKind::ExprIdent {
+                    if !self.lookup_local_is_ref((*operand).name) {
+                        return 0
+                    }
+                    let pointee = self.lookup_local_struct_type((*operand).name)
+                    if pointee.len <= 0 { return 0 }
+                    if lower_name_is_f64_scalar_type(pointee) { return 2 }
+                    if lower_name_is_wide_float_type(pointee) { return 5 }
+                    if lower_name_is_integer_type(pointee)
+                        || lower_name_is_bool_type(pointee)
+                        || lower_name_is_string_type(pointee) {
+                        return 1
+                    }
+                    return 0
+                }
+                0
+            }
+            None => 0,
+        }
+    }
+
     fn expr_result_is_float_ref(self, e: &Expr) -> bool with Mut, Panic, Div, Alloc {
         if (*e).kind == ExprKind::ExprIntLit {
             return false
@@ -16076,6 +16162,17 @@ impl Lowerer {
         if (*e).kind == ExprKind::ExprUnary {
             if (*e).un_op == UnaryOp::OpNeg {
                 return self.opt_expr_result_is_float_ref(&(*e).left)
+            }
+            // `*p` with p: &f64 / &!f64 yields an f64. This arm was missing, so a
+            // dereference used as an OPERAND (`*p + v`, `*p < 3.0`,
+            // `*acc = *acc + v`) classified as integer: lower_binary_expr_ref
+            // passed lhs_is_float=false to ir_binop_typed and native codegen
+            // converted the raw IEEE-754 bit pattern with cvtsi2sd (2.5 + 1.0
+            // printed 4612811918334230528.0). `let cur: f64 = *p` and returning
+            // `*p` were correct only because the annotation / declared return
+            // type supplied the float-ness the classifier could not.
+            if (*e).un_op == UnaryOp::OpDeref {
+                return self.deref_operand_pointee_kind_ref(&(*e).left) == 2
             }
             return false
         }
@@ -19390,6 +19487,49 @@ impl Lowerer {
         }
         if bind_as_ref {
             lo = lo.bind_local_ref(s.name)
+            // Record the pointee's named type, as parameters already do
+            // (lower_param_struct_type_name), so `*r` used as an operand is typed
+            // by deref_operand_pointee_kind_ref. Scalar pointees only: a struct
+            // or array pointee keeps whatever the metadata pass recorded.
+            //   `let r: &f64 = ...` / `let r: &!f64 = ...`  -> the annotation
+            //   `let r = &x` / `&!x` with x an f64 local     -> f64
+            var pointee_name = ir_empty_name()
+            match s.ty {
+                Some(ty_box) => {
+                    if lower_type_expr_is_ref_like(&(*ty_box)) {
+                        pointee_name = lower_param_struct_type_name(&(*ty_box))
+                    }
+                }
+                None => {}
+            }
+            if pointee_name.len <= 0 {
+                match s.expr {
+                    Some(rhs_ref_e) => {
+                        if (*rhs_ref_e).kind == ExprKind::ExprUnary
+                            && ((*rhs_ref_e).un_op == UnaryOp::OpRef || (*rhs_ref_e).un_op == UnaryOp::OpRefMut) {
+                            match (*rhs_ref_e).left {
+                                Some(target_e) => {
+                                    // Same-name shadowing (`let x = &x`) would read the
+                                    // fresh slot bind_local just created; leave it untyped.
+                                    if (*target_e).kind == ExprKind::ExprIdent
+                                        && !ir_name_eq((*target_e).name, s.name)
+                                        && lo.lookup_local_scalar_kind((*target_e).name) == 2 {
+                                        pointee_name = make_name("f64")
+                                    }
+                                }
+                                None => {}
+                            }
+                        }
+                    }
+                    None => {}
+                }
+            }
+            if lower_name_is_f64_scalar_type(pointee_name)
+                || lower_name_is_wide_float_type(pointee_name)
+                || lower_name_is_integer_type(pointee_name)
+                || lower_name_is_bool_type(pointee_name) {
+                lo = lo.bind_local_struct_type(s.name, pointee_name, false)
+            }
         }
         if fixed_array_len >= 0 {
             lo = lo.bind_local_fixed_array_len(s.name, fixed_array_len)
@@ -23928,6 +24068,27 @@ impl Lowerer {
             lowerer_mark_hard_error(&! lo_refuse)
             return (lo_refuse, 0)
         }
+        // Fail-closed: a dereference whose pointee cannot be typed here, as an
+        // operand next to an f64. The checker only admits `*x <op> f64` when *x
+        // is itself an f64, but this lowering would classify the dereference as
+        // an integer and convert its IEEE-754 bit pattern (cvtsi2sd) -- the
+        // silent miscompile deref_operand_pointee_kind_ref exists to prevent.
+        // Refuse instead of guessing; binding the value first is always typed.
+        let lhs_untyped_deref = self.opt_expr_is_deref_ref(&e.left) && self.opt_deref_expr_pointee_kind_ref(&e.left) == 0
+        let rhs_untyped_deref = self.opt_expr_is_deref_ref(&e.right) && self.opt_deref_expr_pointee_kind_ref(&e.right) == 0
+        if (lhs_untyped_deref && self.opt_expr_result_is_float_ref(&e.right))
+            || (rhs_untyped_deref && self.opt_expr_result_is_float_ref(&e.left)) {
+            print("error: Madaros cannot type the pointee of a dereference used as an f64 operand (only `*r` with r a local or parameter of type &f64 / &!f64 is typed); bind it first, e.g. `let v: f64 = *expr` (fail-closed; no integer arithmetic on IEEE-754 bits)\n")
+            var lo_deref_refuse = self
+            if IR_LOWER_HARD_ERROR_REASON == 0 {
+                IR_LOWER_HARD_ERROR_REASON = 6
+                IR_LOWER_HARD_ERROR_NEEDED = 0
+                IR_LOWER_HARD_ERROR_LIMIT = 0
+                ir_copy_name_to_flat(&(*self.current_func).name, &! IR_LOWER_HARD_ERROR_FN_BUF, &! IR_LOWER_HARD_ERROR_FN_LEN)
+            }
+            lowerer_mark_hard_error(&! lo_deref_refuse)
+            return (lo_deref_refuse, 0)
+        }
         let wide_bits = self.expr_wide_bits_ref(e)
         let lhs_expr_is_float = self.opt_expr_result_is_float_ref(&e.left)
         let pair_l = self.lower_opt_expr_ref(&e.left)
@@ -24856,6 +25017,10 @@ impl Lowerer {
         } else {
             false
         }
+        // `*p` reading an f64 through a raw reference: the loaded register holds
+        // an f64, so mark it float (the box arm reads field 0 and is untouched).
+        let deref_yields_float = e.un_op == UnaryOp::OpDeref && !is_box_deref
+            && lo1.deref_operand_pointee_kind_ref(&e.left) == 2
         let pair_d = lo1.fresh_reg()
         let lo2 = pair_d.0
         let dst = pair_d.1
@@ -24875,7 +25040,7 @@ impl Lowerer {
             }
             lo2.emit(uins)
         }
-        if src_is_float {
+        if src_is_float || deref_yields_float {
             lo3 = lo3.emit(ir_mark_float_reg(dst))
         }
         (lo3, dst)
