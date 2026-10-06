@@ -96,6 +96,12 @@ function countStage0Lines() {
 // ---------------------------------------------------------------------------
 
 const reliability = loadJson("artifacts/stdlib/stdlib_reliability_status.v1.json");
+// The published stdlib pass figure comes from the end-to-end result written by
+// `bash scripts/stdlib/run_stdlib_e2e.sh`. The reliability-status artifact
+// (2026-05-12) predates module-privacy enforcement and is only used for the
+// file inventory below, never for a pass count.
+const STDLIB_E2E_ARTIFACT = "artifacts/stdlib/stdlib_e2e_result.v1.json";
+const stdlibE2e = loadJson(STDLIB_E2E_ARTIFACT);
 const science = loadJson("artifacts/stdlib/stdlib_science_pipeline_status.v1.json");
 const hyper = loadJson("artifacts/stdlib/stdlib_hyper_execution_status.v1.json");
 const nativeBackend = loadJson("artifacts/omega/native_backend_v2_gate.v1.json");
@@ -120,9 +126,12 @@ const fullSuite = parseReadmeFullSuite(readme);
 const bootstrapRecorded = parseBootstrapFromChangelog(changelog);
 const stage0Lines = countStage0Lines();
 
-const stdlibGatePass = reliability?.totals?.pass ?? 0;
-const stdlibGateTotal = reliability?.totals?.total ?? 0;
-const stdlibGateSkip = reliability?.totals?.skip ?? 0;
+const stdlibGatePass = stdlibE2e?.totals?.pass ?? 0;
+const stdlibGateFail = stdlibE2e?.totals?.fail ?? 0;
+const stdlibGateTotal = stdlibE2e?.totals?.total ?? 0;
+const stdlibGateSkip = stdlibE2e?.totals?.skip ?? 0;
+const stdlibE2eDate = stdlibE2e?.generated_at_utc?.slice(0, 10) ?? "undated";
+const stdlibE2eCommand = stdlibE2e?.command ?? "bash scripts/stdlib/run_stdlib_e2e.sh";
 const stdlibInventoryFiles = reliability?.inventory?.sio_files ?? null;
 const selfHostedFiles = selfhost?.self_hosted_source?.total_files ?? null;
 const selfHostedLines = selfhost?.self_hosted_source?.total_lines ?? null;
@@ -134,11 +143,10 @@ const generatedAt = new Date().toISOString();
 // Build normalized status object
 // ---------------------------------------------------------------------------
 
-// The committed stdlib result (generated 2026-05-12) predates module-privacy
-// enforcement; on 2026-10-05 (main=99d078eb) 40 stdlib programs fail with
-// E175/E259. No pass count is published until the figure is re-measured.
-const reliabilityReason = reliability
-  ? `Being re-measured: the committed result (${reliability?.generated_at_utc?.slice(0, 10) ?? "undated"}) predates module-privacy enforcement, so no pass count is published`
+// Stated exactly as measured: pass, fail and skip out of the total, with the
+// measurement date and the command that produced it.
+const reliabilityReason = stdlibE2e
+  ? `Stdlib end-to-end: ${stdlibGatePass} of ${stdlibGateTotal} test programs pass (${stdlibGateFail} fail, ${stdlibGateSkip} skipped), measured ${stdlibE2eDate} with \`${stdlibE2eCommand}\`; result in \`${STDLIB_E2E_ARTIFACT}\``
   : "artifact missing";
 
 const status = {
@@ -177,11 +185,11 @@ const status = {
     metrics: {
       stdlibReliabilityGate: {
         pass: stdlibGatePass,
-        fail: reliability?.totals?.fail ?? 0,
+        fail: stdlibGateFail,
         skip: stdlibGateSkip,
         total: stdlibGateTotal,
-        label: "Stdlib reliability gate",
-        artifact: "artifacts/stdlib/stdlib_reliability_status.v1.json",
+        label: "Stdlib end-to-end",
+        artifact: STDLIB_E2E_ARTIFACT,
       },
       fullTestSuite: fullSuite
         ? {
@@ -353,9 +361,11 @@ const status = {
     reliability: {
       label: "Core Standard Library",
       level: "unknown",
-      totals: {},
+      totals: stdlibE2e
+        ? { pass: stdlibGatePass, fail: stdlibGateFail, skip: stdlibGateSkip, total: stdlibGateTotal }
+        : {},
       reason: reliabilityReason,
-      artifact: "artifacts/stdlib/stdlib_reliability_status.v1.json",
+      artifact: STDLIB_E2E_ARTIFACT,
     },
     scienceLanes: {
       label: "Scientific Pipelines",
@@ -524,5 +534,5 @@ console.log(`  - compiler entries: ${Object.keys(status.compiler).length}`);
 console.log(`  - stdlib entries: ${Object.keys(status.stdlib).length}`);
 console.log(`  - checked artifact: ${wrapperVersion}`);
 console.log(`  - readme badge: ${readmeVersion ?? "n/a"}`);
-console.log(`  - stdlib gate: re-measuring (committed artifact ${reliability?.generated_at_utc?.slice(0, 10) ?? "missing"} not published)`);
+console.log(`  - stdlib e2e: ${stdlibGatePass}/${stdlibGateTotal} pass (${stdlibGateFail} fail, ${stdlibGateSkip} skip), ${stdlibE2eDate}`);
 console.log(`  - generatedAt: ${generatedAt}`);
