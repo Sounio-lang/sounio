@@ -37,8 +37,8 @@ These benchmarks demonstrate idiomatic Sounio patterns:
 - **`var` for mutable bindings** -- not `let mut`
 - **`&!` for exclusive references** -- not `&mut`
 - **Struct wrappers for mutable arrays** -- workaround for `&![T;N]` JIT bug
-- **`0 - x` for negation** -- no unary minus operator
+- **Negation** -- the reference solutions write `0 - x` (unary minus also works)
 - **Effects system** -- `with IO, Mut, Panic, Div` declares side effects
 - **Fixed-size arrays** -- `[i64; 256]` with explicit length parameter
 - **`assert()` not `assert!()`** -- no Rust-style macros
-- **Bit shifts use u8** -- `x >> 4u8`
+- **Bit shifts** -- plain integer amount: `x >> 4`

@@ -110,6 +110,7 @@ let PFI_SK_MAX: i64 = 256
 let PFI_R_SHADOWED: i64 = 1    // a local/param/pattern spelled like it, or a value use in a slot that cannot be rewritten
 let PFI_R_NAME: i64 = 2        // the generated name is already an existing symbol, or would be too long
 let PFI_R_EXPORTED: i64 = 3    // pub(crate)/pub(super)/pub(in ..): importers spell this name
+let PFI_R_GEN_SHADOWED: i64 = 4 // the name THIS entry would be given is itself already a local/param/pattern here
 
 // Census PREFILTER: distinct-module count per name hash (open addressing). Hash
 // only -- see the header: it may over-merge, so it can only nominate candidates.
@@ -217,13 +218,26 @@ fn pfi_slot_of(h: i64) -> i64 {
 // Record that module `mod_idx` defines a real fn with name-hash `h`. Returns
 // false when the table is full: the caller then skips the whole pass rather than
 // working from a census it knows is incomplete.
+//
+// STORED KEY IS h+1, NOT h. ast_name_hash's own clamp (`if hash < 0 { 0 - hash }
+// else { hash }`) makes every real hash >= 0, so a legitimate name CAN hash to
+// exactly 0 (confirmed: "fZOXITBAFRX_E" does, both via this compiler's own
+// ast_name_hash and independently in Python). An earlier version used `h == 0`
+// as a shortcut meaning "nothing to record" -- indistinguishable from the
+// empty-slot sentinel `PFI_KEY[slot] == 0` this table already relies on, so a
+// colliding pair that both hashed to 0 was silently never counted: PFI_DUP_ANY
+// never set, no rename, the original first-loaded-wins miscompile intact
+// (measured: SIGILL, not just a wrong value -- something ELSE downstream also
+// keys on the merged, still-colliding name). Shifting the stored/compared key
+// by 1 keeps every real hash's slot representation >= 1, so 0 stays an
+// unambiguous "truly empty" sentinel for any hash value, including 0 itself.
 fn pfi_census_note(h: i64, mod_idx: i64) -> bool with Mut, Panic, Div {
-    if h == 0 { return true }
+    let key = h + 1
     var slot = pfi_slot_of(h)
     var probes: i64 = 0
     while probes < PFI_SLOTS {
         let cur = PFI_KEY[slot as usize]
-        if cur == h {
+        if cur == key {
             if PFI_LAST[slot as usize] != mod_idx {
                 PFI_LAST[slot as usize] = mod_idx
                 PFI_MODS[slot as usize] = PFI_MODS[slot as usize] + 1
@@ -232,7 +246,7 @@ fn pfi_census_note(h: i64, mod_idx: i64) -> bool with Mut, Panic, Div {
             return true
         }
         if cur == 0 {
-            PFI_KEY[slot as usize] = h
+            PFI_KEY[slot as usize] = key
             PFI_LAST[slot as usize] = mod_idx
             PFI_MODS[slot as usize] = 1
             return true
@@ -243,13 +257,16 @@ fn pfi_census_note(h: i64, mod_idx: i64) -> bool with Mut, Panic, Div {
     false
 }
 
+// Same h+1 shift as pfi_census_note -- see its comment. A generated name whose
+// hash is exactly 0 must be checked for real, not reported unconditionally
+// available.
 fn pfi_census_mods(h: i64) -> i64 with Mut, Panic, Div {
-    if h == 0 { return 0 }
+    let key = h + 1
     var slot = pfi_slot_of(h)
     var probes: i64 = 0
     while probes < PFI_SLOTS {
         let cur = PFI_KEY[slot as usize]
-        if cur == h { return PFI_MODS[slot as usize] }
+        if cur == key { return PFI_MODS[slot as usize] }
         if cur == 0 { return 0 }
         slot = (slot + 1) % PFI_SLOTS
         probes = probes + 1
@@ -413,7 +430,36 @@ fn pfi_table_find_name(n: Name) -> i64 with Mut, Panic, Div {
     0 - 1
 }
 
-fn pfi_table_add(n: Name, mod_idx: i64, vis_kind: i64) with Mut, Panic, Div, Alloc {
+// Reconstruct table slot `idx`'s ORIGINAL (pre-rename) name from its stored bytes.
+fn pfi_table_name(idx: i64) -> Name with Mut, Panic, Div {
+    var n = Name { buf: [0; 384], len: PFI_T_LEN[idx as usize] }
+    let base = idx * 384
+    var k: i64 = 0
+    while k < n.len {
+        n.buf[k as usize] = PFI_T_BUF[(base + k) as usize]
+        k = k + 1
+    }
+    n
+}
+
+// Is `n` the name some OTHER table entry would be renamed TO in this module
+// (PFI_CUR_MOD)? Every entry currently in the table belongs to the module being
+// scanned (pfi_build_table resets PFI_T_COUNT to 0 per module), so mangling each
+// entry's own stored name against PFI_CUR_MOD is exactly the spelling a rewritten
+// call site would get. See pfi_note_binder for why this matters.
+fn pfi_table_find_generated_name(n: Name) -> i64 with Mut, Panic, Div, Alloc {
+    if PFI_T_COUNT <= 0 { return 0 - 1 }
+    if n.len <= 0 { return 0 - 1 }
+    var i: i64 = 0
+    while i < PFI_T_COUNT {
+        let gen = pfi_mangle(pfi_table_name(i), PFI_CUR_MOD)
+        if gen.len > 0 && name_eq(gen, n) { return i }
+        i = i + 1
+    }
+    0 - 1
+}
+
+fn pfi_table_add(programs: &! [Program; 256], count: i64, n: Name, mod_idx: i64, vis_kind: i64) with Mut, Panic, Div, Alloc {
     if pfi_table_find_name(n) >= 0 { return }
     if PFI_T_COUNT >= PFI_T_MAX {
         PFI_T_OVERFLOW = 1
@@ -447,8 +493,17 @@ fn pfi_table_add(n: Name, mod_idx: i64, vis_kind: i64) with Mut, Panic, Div, All
         PFI_T_UNSAFE[idx as usize] = 1
         PFI_T_REASON[idx as usize] = PFI_R_NAME
     } else if pfi_census_mods(ast_name_hash(m)) > 0 {
-        PFI_T_UNSAFE[idx as usize] = 1
-        PFI_T_REASON[idx as usize] = PFI_R_NAME
+        // Hash hit is only a PREFILTER (ast_name_hash is djb2, not collision-free --
+        // `helper__m1` and the distinct `helper__lR` collide). Confirm with an exact
+        // scan across every module -- including mod_idx itself, since the generated
+        // name must not collide with anything there either -- via the same
+        // full-name-bytes machinery pfi_build_table already trusts for source
+        // collisions (pfi_defined_elsewhere / pfi_items_define_name / name_eq).
+        // "not_mod" = -1 excludes no module: mod_idx's own definitions count too.
+        if pfi_defined_elsewhere(programs, count, 0 - 1, m) >= 0 {
+            PFI_T_UNSAFE[idx as usize] = 1
+            PFI_T_REASON[idx as usize] = PFI_R_NAME
+        }
     }
 }
 
@@ -470,7 +525,7 @@ fn pfi_build_table(programs: &! [Program; 256], count: i64, items: Option<Box<It
                     if pfi_census_mods(ast_name_hash((*list).head.name)) >= 2 {
                         if pfi_table_find_name((*list).head.name) < 0 {
                             if pfi_defined_elsewhere(programs, count, mod_idx, (*list).head.name) >= 0 {
-                                pfi_table_add((*list).head.name, mod_idx, (*list).head.visibility.kind)
+                                pfi_table_add(programs, count, (*list).head.name, mod_idx, (*list).head.visibility.kind)
                             }
                         }
                     }
@@ -528,9 +583,26 @@ fn pfi_note_unsafe_name(n: Name) with Mut, Panic, Div {
     }
 }
 
-// A local binding spelled like a colliding private fn.
-fn pfi_note_binder(n: Name) with Mut, Panic, Div {
+// A local binding spelled like a colliding private fn's ORIGINAL name, or like
+// the GENERATED name some other entry in THIS module's table would be given.
+// The second check matters because check.sio resolves a bare identifier against
+// env (local bindings) BEFORE fn_sigs (checker_check_ident_expr_inplace,
+// self-hosted/check/check.sio): if this module also binds a local, parameter or
+// pattern spelled exactly like some entry's prospective mangled name (e.g. a
+// parameter literally named `helper__m1` in the same module that is about to
+// rename a private `helper` TO `helper__m1`), a rewritten call `helper__m1()`
+// would resolve to THAT BINDING in its scope instead of the renamed function --
+// the rename would silently redirect the call, or checker's env-first lookup
+// would report it as the wrong kind of value.
+fn pfi_note_binder(n: Name) with Mut, Panic, Div, Alloc {
     pfi_note_unsafe_name(n)
+    let gi = pfi_table_find_generated_name(n)
+    if gi >= 0 {
+        if PFI_T_UNSAFE[gi as usize] == 0 {
+            PFI_T_UNSAFE[gi as usize] = 1
+            PFI_T_REASON[gi as usize] = PFI_R_GEN_SHADOWED
+        }
+    }
 }
 
 // The identifier is a bare Ident / single-segment Path.
@@ -544,7 +616,7 @@ fn pfi_note_embedded_value(e: Expr) with Mut, Panic, Div {
     }
 }
 
-fn pfi_pattern(p: Pattern) with Mut, Panic, Div {
+fn pfi_pattern(p: Pattern) with Mut, Panic, Div, Alloc {
     if p.kind == PatternKind::PatBinding {
         pfi_note_binder(p.name)
     }
@@ -706,6 +778,47 @@ fn pfi_fields(opt: Option<Box<StructFieldList> >) with IO, Mut, Panic, Div, Allo
     }
 }
 
+// Same by-value-in-list-node shape as struct field inits / match arm bodies:
+// AlternativeCandidateDef.value_expr and TransitionStepDef.value_expr are Expr
+// fields stored directly inside a list node, not behind a Box. A bare `helper`
+// there cannot be rewritten in place (flagged in MODE 0, same as pfi_fields);
+// an ordinary nested call `helper(x)` is reached and rewritten fine, because
+// the callee position is Expr.left, always a real Box, regardless of how the
+// containing value_expr itself is stored.
+fn pfi_alt_candidates(opt: Option<Box<AlternativeCandidateDefList> >) with IO, Mut, Panic, Div, Alloc {
+    var cur = opt
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                if PFI_MODE == 0 {
+                    pfi_note_embedded_value((*list).head.value_expr)
+                }
+                pfi_expr((*list).head.value_expr)
+                cur = (*list).tail
+            }
+        }
+    }
+}
+
+fn pfi_transition_steps(opt: Option<Box<TransitionStepDefList> >) with IO, Mut, Panic, Div, Alloc {
+    var cur = opt
+    var going = true
+    while going {
+        match cur {
+            None => { going = false }
+            Some(list) => {
+                if PFI_MODE == 0 {
+                    pfi_note_embedded_value((*list).head.value_expr)
+                }
+                pfi_expr((*list).head.value_expr)
+                cur = (*list).tail
+            }
+        }
+    }
+}
+
 fn pfi_block(b: Block) with IO, Mut, Panic, Div, Alloc {
     var cur = b.stmts
     var going = true
@@ -820,6 +933,16 @@ fn pfi_items(items: Option<Box<ItemList> >) with IO, Mut, Panic, Div, Alloc {
                 Some(td) => pfi_method_bodies((*td).methods)
                 None => {}
             }
+        } else if kind == ItemKind::ItemAlternativeFrontier {
+            match (*node).head.alternative_frontier_def {
+                Some(afd) => pfi_alt_candidates((*afd).candidates)
+                None => {}
+            }
+        } else if kind == ItemKind::ItemTransitionProtocol {
+            match (*node).head.transition_protocol_def {
+                Some(tpd) => pfi_transition_steps((*tpd).steps)
+                None => {}
+            }
         }
         node = pfi_itemlist_next(node)
     }
@@ -867,6 +990,16 @@ fn pfi_error_unresolved(slot: i64, other_mod: i64) with IO, Mut, Panic, Div, All
         }
         print("`) is already an existing\n")
         print("  symbol, or does not fit.\n")
+    } else if why == PFI_R_GEN_SHADOWED {
+        print("  the name it would be given (`")
+        let gen2 = pfi_mangle(pfi_sk_name(slot), PFI_SK_MOD[slot as usize])
+        if gen2.len > 0 {
+            pfi_print_name(gen2)
+        } else {
+            print("<too long>")
+        }
+        print("`) is itself already used\n")
+        print("  as a local, parameter or pattern binding in that module.\n")
     } else {
         print("  a local, parameter or pattern uses that name, or the fn is used as a\n")
         print("  value in a match arm or struct-literal field.\n")

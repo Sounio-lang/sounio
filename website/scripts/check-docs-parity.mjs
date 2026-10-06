@@ -51,4 +51,16 @@ for (const topic of actualDocsTopics) {
   }
 }
 
-fail(errors);
+// The checked-in registry is a snapshot refreshed by its own PR (see
+// scripts/docs/sync_governance_metadata.mjs). Missing locale pages are caught
+// against the rebuilt registry by scripts/docs/check_docs_registry.mjs, so drift
+// between the snapshot and the tree is reported here and only fails under
+// SOUNIO_DOCS_REGISTRY_STRICT_SNAPSHOT=1.
+if (process.env.SOUNIO_DOCS_REGISTRY_STRICT_SNAPSHOT === '1') {
+  fail(errors);
+} else {
+  for (const error of errors) {
+    console.log(`Notice (snapshot drift): ${error}`);
+  }
+  fail([]);
+}

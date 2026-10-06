@@ -64,7 +64,7 @@ I(μ,ν) = [ ν² (ψ₁(α) + ψ₁(β))      ν (ψ₁(α) - ψ₁(β))       
 
 ### Implementation
 
-Added method to [`crates/souc/src/epistemic/information_geometry.rs:70-97`](crates/souc/src/epistemic/information_geometry.rs):
+Added method to `crates/souc/src/epistemic/information_geometry.rs:70-97` (historical Rust source tree, removed on `main`):
 
 ```rust
 pub fn from_beta_log(alpha: f64, beta: f64) -> Self {
@@ -179,17 +179,17 @@ Added 2 new unit tests:
 
 ## Files Modified
 
-1. **[crates/souc/src/epistemic/information_geometry.rs](crates/souc/src/epistemic/information_geometry.rs:70-97)**
+1. **`crates/souc/src/epistemic/information_geometry.rs:70-97`** (historical Rust source tree, removed on `main`)
    - Added `from_beta_log()` method (mean-precision parameterization)
    - Updated documentation to recommend this method
    - Added 2 new unit tests
 
-2. **[crates/souc/tests/mathematical_integration.rs](crates/souc/tests/mathematical_integration.rs:22-40,282-317)**
+2. **`crates/souc/tests/mathematical_integration.rs:22-40,282-317`** (historical Rust source tree, removed on `main`)
    - Updated 2 failing tests to use `from_beta_log()`
    - Removed `#[ignore]` attributes
    - Added assertion message clarification
 
-3. **[IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md)**
+3. **[IMPLEMENTATION_SUMMARY.md](../archived/IMPLEMENTATION_SUMMARY.md)**
    - Updated pass rate: 82% → 100%
    - Documented Fisher Matrix resolution
    - Updated recommendations (Priority 2 completed)

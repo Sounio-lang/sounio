@@ -218,7 +218,6 @@ approximation.
 
 - `docs/EXACT_CORE.md` — Full technical specification (layer contract, codegen defects, caveats)
 - `docs/handoff/souc_v0800_defects.md` — Minimal repros for issues #637, #638, #639
-- `docs/handoff/exact_engine_prereqs.md` — Generic `<F>` engine prerequisites (4 compiler features)
 - `formal/lean4/SounioZeroDivisorBridge.lean` — Lean proofs of 168-census and nonfano_zd_bridge
 - `formal/lean4/SounioCayleyDickson.lean` — Lean proofs of non-Fano partition and dagger bijection
 - `scripts/ci/sedenion_zd168_crosscheck_gate.sh` — CI gate (element-wise diff vs Python oracle)
