@@ -1,0 +1,88 @@
+// tests/self-hosted/gen_fano_raw_kernel.sio
+//
+// Provenance generator for tests/run-pass/fano_raw_kernel.bin.
+//
+// It calls the compiler's own production lowering,
+// `native::lower_ir::lower_hyper_mul_o_fano`, on a synthetic IrHyperMulO
+// instruction and prints the bytes it emitted as one hex line. There is no
+// second encoder here: if the lowering changes, this output changes.
+// scripts/ci/fano_kernel_provenance_gate.sh converts the line to binary and
+// requires byte equality with the committed .bin, which the C++23 silicon
+// harness (tests/run-pass/hyper_octonion_silicon_exec.cpp) executes.
+//
+// Engine: run with SOUNIO_SOUC_ENGINE=lean_single. Measured 2026-10-06, the
+// default Madaros engine compiles this file but the program segfaults inside
+// `compiler_new()` (the 237 KB NativeCompiler value); the existing run-pass
+// witness tests/native-v2/native_compiler_data_field_assignment_witness.sio
+// segfaults the same way under Madaros and passes under lean_single.
+//
+// Not a run-pass test on purpose: the suite runs under Madaros.
+
+use native::lower_ir::{lower_hyper_mul_o_fano}
+use native::frame::{NativeCompiler, compiler_new}
+use native::encode::{NC_BIG_CODE}
+use ir::ir::{IrInstr, ir_hyper_mul_o}
+
+fn hex_digit(v: i64) -> i64 {
+    if v < 10 { 48 + v } else { 87 + v }
+}
+
+// Fill the first WINDOW bytes of the code buffer with `fill`, lower one
+// IrHyperMulO from a fresh compiler state, and return nothing: the bytes stay
+// in NC_BIG_CODE. The lowering starts at offset 0 (fresh compiler).
+fn lower_once(fill: i64, window: i64) with Mut, Panic, Div {
+    var i = 0
+    while i < window {
+        NC_BIG_CODE[i as usize] = fill as i8
+        i = i + 1
+    }
+    var nc = compiler_new()
+    // IrHyperMulO, the operand layout the silicon harness loads:
+    //   dst = zmm2, src1 (a) = zmm0, src2 (b) = zmm1,
+    //   ctrl_base = 11 (21 constants in zmm11..zmm31), no opmask, no zeroing.
+    var instr: IrInstr = ir_hyper_mul_o(2, 0, 1)
+    instr.label_id = 11 << 4
+    instr.imm_flags = 0
+    lower_hyper_mul_o_fano(&!nc, instr)
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    // How many bytes did the lowering emit? Not `nc.code.len`: under
+    // lean_single the `(*nc) = c` writeback at the end of the lowering does
+    // not reach the caller's frame (measured 2026-10-06: the length reads 0),
+    // while the bytes themselves land in the global NC_BIG_CODE
+    // (self-hosted/native/encode.sio; CodeBuffer.bytes is a vestigial stub).
+    // So lower twice over two different fill patterns: the emitted prefix is
+    // identical in both runs, and every byte past it still holds its fill,
+    // which differs between the runs. The length is the agreeing prefix.
+    let window = 512
+    var first: [i64; 512] = [0; 512]
+    lower_once(0x00, window)
+    var i = 0
+    while i < window {
+        first[i as usize] = (NC_BIG_CODE[i as usize] as i64) & 0xFF
+        i = i + 1
+    }
+    lower_once(0xFF, window)
+    var n = 0
+    while n < window && first[n as usize] == ((NC_BIG_CODE[n as usize] as i64) & 0xFF) {
+        n = n + 1
+    }
+    if n != 186 {
+        print("FAIL: lower_hyper_mul_o_fano emitted ")
+        print_int(n)
+        print(" bytes, expected 186\n")
+        return 1
+    }
+
+    print("RAW_KERNEL_HEX:")
+    i = 0
+    while i < n {
+        let byte = (NC_BIG_CODE[i as usize] as i64) & 0xFF
+        print_char(hex_digit((byte >> 4) & 0xF))
+        print_char(hex_digit(byte & 0xF))
+        i = i + 1
+    }
+    print("\n")
+    0
+}
