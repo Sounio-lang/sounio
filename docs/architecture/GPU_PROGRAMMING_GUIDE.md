@@ -9,6 +9,8 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.architecture.g
 
 # GPU Programming Guide
 
+> **Design, not a measured capability.** This page describes the GPU pipeline as designed. Measured on main `8bbc39fba` (2026-10-06): `bin/souc build examples/gpu/vec_add.sio --backend gpu -o out.ptx` stops with `GPU: HLIR_LOWERING_REFUSED errors=3` and emits no PTX. As [`TOUR.md`](../../TOUR.md) §6 records, PTX is emitted only for kernels with **empty bodies**: no arithmetic, no memory access. The epistemic propagation through kernels described below (`Knowledge<T>` shadow registers) is the internal lowering design in `self-hosted/gpu/hlir_to_gpu.sio`, not a source-level capability you can rely on today. See [`docs/compiler/KNOWN_LIMITATIONS.md`](../compiler/KNOWN_LIMITATIONS.md).
+
 Sounio GPU computing is a first-class part of the language. Kernels are declared with the `kernel fn` syntax, type-checked with the same bidirectional inference as the rest of the language, and lowered through a dedicated GPU IR pipeline (HLIR → GpuKernelIr) to three backends: PTX (CUDA), Metal (MSL), and SPIR-V (Vulkan/OpenCL). Epistemic uncertainty — `Knowledge<T>` and GUM-compliant shadow registers — propagates transparently through kernel execution.
 
 **Pipeline:**
