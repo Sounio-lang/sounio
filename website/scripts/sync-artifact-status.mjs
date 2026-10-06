@@ -228,10 +228,6 @@ const status = {
             "Linux x86-64 static ELF only (TOUR.md section 6); no macOS, Windows or AArch64 target ships",
         },
         {
-          title: "Core stdlib gate",
-          detail: reliabilityReason,
-        },
-        {
           title: "Optimizer",
           detail: "1,000+ e-graph rewrite rules with FAIL=0 in optimizer tests",
         },
@@ -247,6 +243,11 @@ const status = {
         },
       ],
       scaffolding: [
+        {
+          // 196 of 533 passing is not "works": listed with the partial lanes.
+          title: "Stdlib end-to-end tests",
+          detail: reliabilityReason,
+        },
         {
           title: "Theorem prover",
           detail: "Large arena and data structures; full inference logic not complete",
