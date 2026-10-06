@@ -61,6 +61,7 @@ use ir::opt_strategy::{ir_opt_apply_strategy, ir_opt_find_return_vreg, ir_opt_ma
 use ir::lower::{ir_patch_validated_calls, lower_program_to_ir, lower_program_to_ir_with_epistemic, lower_program_to_ir_probe_summary_ref, lower_program_to_ir_probe_summary_box_ref, lower_program_to_ir_summary_box_probe_with_epistemic_ref, lower_program_function_body_from_summary_with_epistemic_ref, lower_program_to_ir_summary_flat_with_epistemic_ref, lower_program_function_body_from_summary_flat_with_epistemic_ref, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_to_ir_summary_with_epistemic}
 use ir::lower::{lower_program_to_ir_with_epistemic_ref, lower_program_to_ir_ordered_with_epistemic_boxed_trace_ref, lower_monolithic_public_probe_trace_set}
 use ir::lower::{lower_program_function_body_from_program_with_epistemic_ref}
+use ir::lower::{lower_rgn_backend_opt_in}
 use ir::lower::{lower_program_function_body_from_summary_with_epistemic}
 use ir::lower::{lower_fn_tuple_arr_reset, lower_fn_tuple_f64_arrays_collect, lower_fn_tuple_f64_array_mask}
 use ir::normalize::*
@@ -7063,12 +7064,13 @@ fn compiler_main_test_frame_trim_param_vreg() -> bool with Mut, Panic, Div {
 }
 
 // T70: used allocatable preg mask tracks only r12-r15 assignments
-fn compiler_main_test_native_vreg_rejection_paths() -> bool with Mut, Panic, Div, Alloc {
+fn compiler_main_test_native_vreg_rejection_paths() -> bool with IO, Mut, Panic, Div, Alloc {
     var oversized = ir_empty_function()
     oversized.reg_count = IR_MAX_VREGS + 1
     var machine = machine_function_new()
     var core_nc = compiler_new()
-    compile_ir_function_v2_into(&! core_nc, &oversized, &machine, 0)
+    // An oversized body is refused: false, plus the overflow record.
+    if compile_ir_function_v2_into(&! core_nc, &oversized, &machine, 0) { return false }
     if !core_nc.ir_vreg_overflow { return false }
     if core_nc.ir_vreg_overflow_needed != IR_MAX_VREGS + 1 { return false }
     if core_nc.ir_vreg_overflow_limit != IR_MAX_VREGS { return false }
@@ -7081,7 +7083,7 @@ fn compiler_main_test_native_vreg_rejection_paths() -> bool with Mut, Panic, Div
     legacy_nc.ir_vreg_overflow_limit == NC_MAX_VREGS
 }
 
-fn compiler_main_test_ir_vreg_boundary_contract() -> bool with Mut, Panic, Div, Alloc {
+fn compiler_main_test_ir_vreg_boundary_contract() -> bool with IO, Mut, Panic, Div, Alloc {
     if !ir_reg_count_is_valid(IR_MAX_VREGS - 1) { return false }
     if !ir_reg_count_is_valid(IR_MAX_VREGS) { return false }
     if ir_reg_count_is_valid(IR_MAX_VREGS + 1) { return false }
@@ -7091,7 +7093,7 @@ fn compiler_main_test_ir_vreg_boundary_contract() -> bool with Mut, Panic, Div, 
     compiler_main_test_native_vreg_rejection_paths()
 }
 
-fn compiler_main_test_used_allocatable_preg_mask() -> bool with Mut, Panic, Div, Alloc {
+fn compiler_main_test_used_allocatable_preg_mask() -> bool with IO, Mut, Panic, Div, Alloc {
     var nc = compiler_new()
     nc.vreg_to_preg[0 as usize] = 15
     nc.vreg_to_preg[1 as usize] = 12
@@ -9805,6 +9807,19 @@ fn run_probe_native_streaming(args: ArgList, flag_index: i64) with IO, Mut, Pani
     print(" len=")
     print_int(stream_pair.1.len)
     print("\n")
+    // SOUNIO_PROBE_STREAMING_OUT=<path>: also write the streaming ELF, so a
+    // gate can RUN what this lane emits instead of trusting ok=true
+    // (scripts/ci/madaros_region_reclaim_streaming_gate.sh).
+    let stream_out = read_env("SOUNIO_PROBE_STREAMING_OUT")
+    if str_len(stream_out) > 0 && stream_pair.0 && stream_pair.1.ok {
+        if write_file(stream_out, stream_pair.1.bytes, stream_pair.1.len) < 0 {
+            print("probe_native_streaming: write_failed\n")
+        } else {
+            print("probe_native_streaming: wrote=")
+            print(stream_out)
+            print("\n")
+        }
+    }
 }
 
 // --probe-filtered-body-lower <file.sio>: Copilot review (PR #2516), finding
@@ -29372,6 +29387,9 @@ fn run_gpu_compile_pipeline(
 // ============================================================================
 
 fn main() with IO, Mut, Panic, Div, Alloc {
+    // Madaros compiles through native/codegen_x86_linux.sio, the only backend
+    // that implements the region-reclamation runtime (ir/lower.sio).
+    lower_rgn_backend_opt_in()
     let args = get_args()
 
     // Check for --serve BEFORE printing banner (stdout is binary protocol)
