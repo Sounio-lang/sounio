@@ -295,7 +295,6 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.madaros-handle-182-five-sites-2026-08-17 | repo_only | docs/audit/MADAROS_HANDLE_182_FIVE_SITES_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-handle-table-182-lifetime-dispatch-2026-08-17 | repo_only | docs/audit/MADAROS_HANDLE_TABLE_182_LIFETIME_DISPATCH_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-hardening-plan-2026-08-12 | repo_only | docs/audit/MADAROS_HARDENING_PLAN_2026-08-12.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.audit.madaros-hex-float-unsigned-exponent-dispatch-2026-09-26 | repo_only | docs/audit/MADAROS_HEX_FLOAT_UNSIGNED_EXPONENT_DISPATCH_2026-09-26.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-impl-method-two-roots-2026-06-23 | repo_only | docs/audit/MADAROS_IMPL_METHOD_TWO_ROOTS_2026-06-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-impl-methods-three-layer-fix-2026-06-23 | repo_only | docs/audit/MADAROS_IMPL_METHODS_THREE_LAYER_FIX_2026-06-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-imported-array-byvalue-913-2026-07-21 | repo_only | docs/audit/MADAROS_IMPORTED_ARRAY_BYVALUE_913_2026-07-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -307,7 +306,6 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.madaros-imported-pbpk28-cn-sigsegv-2026-08-16 | repo_only | docs/audit/MADAROS_IMPORTED_PBPK28_CN_SIGSEGV_2026-08-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-indirect-call-argc-cap-2026-08-18 | repo_only | docs/audit/MADAROS_INDIRECT_CALL_ARGC_CAP_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-ir-capacity-object-design-dispatch-2026-08-18 | repo_only | docs/audit/MADAROS_IR_CAPACITY_OBJECT_DESIGN_DISPATCH_2026-08-18.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.audit.madaros-let-field-source-alias-dispatch-2026-09-26 | repo_only | docs/audit/MADAROS_LET_FIELD_SOURCE_ALIAS_DISPATCH_2026-09-26.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-local-slot-overflow-2026-08-31 | repo_only | docs/audit/MADAROS_LOCAL_SLOT_OVERFLOW_2026-08-31.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-match-guards-2026-06-24 | repo_only | docs/audit/MADAROS_MATCH_GUARDS_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-method-call-sigsegv-2026-06-20 | repo_only | docs/audit/MADAROS_METHOD_CALL_SIGSEGV_2026-06-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -319,7 +317,6 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.madaros-native-v2-f64-remaining-bugs-2026-07-20 | repo_only | docs/audit/MADAROS_NATIVE_V2_F64_REMAINING_BUGS_2026-07-20.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-nested-aggregate-element-store-dispatch-2026-08-16 | repo_only | docs/audit/MADAROS_NESTED_AGGREGATE_ELEMENT_STORE_DISPATCH_2026-08-16.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-net-mod-sio-standalone-check-silent-fail-2026-07-01 | repo_only | docs/audit/MADAROS_NET_MOD_SIO_STANDALONE_CHECK_SILENT_FAIL_2026-07-01.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.audit.madaros-no-main-entry-fn0-dispatch-2026-09-26 | repo_only | docs/audit/MADAROS_NO_MAIN_ENTRY_FN0_DISPATCH_2026-09-26.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-open-pr-worktree-disposition-2026-06-21 | repo_only | docs/audit/MADAROS_OPEN_PR_WORKTREE_DISPOSITION_2026-06-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-operational-handoff-2026-06-21 | repo_only | docs/audit/MADAROS_OPERATIONAL_HANDOFF_2026-06-21.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-option-box-deref-2026-06-24 | repo_only | docs/audit/MADAROS_OPTION_BOX_DEREF_2026-06-24.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -366,7 +363,6 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.madaros-wave15a-global-list-multistmt-paramful-2026-07-22 | repo_only | docs/audit/MADAROS_WAVE15A_GLOBAL_LIST_MULTISTMT_PARAMFUL_2026-07-22.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-wave15c-issue901-scale-closeout-2026-07-22 | repo_only | docs/audit/MADAROS_WAVE15C_ISSUE901_SCALE_CLOSEOUT_2026-07-22.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.madaros-wave15e-global-string-bss-2026-07-22 | repo_only | docs/audit/MADAROS_WAVE15E_GLOBAL_STRING_BSS_2026-07-22.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.audit.math-pure-ln-pos-inf-dispatch-2026-09-27 | repo_only | docs/audit/MATH_PURE_LN_POS_INF_DISPATCH_2026-09-27.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.mli-s3-uncertainty-to-bytes-2026-08-17 | repo_only | docs/audit/MLI_S3_UNCERTAINTY_TO_BYTES_2026-08-17.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.modular-compiler-audit-2026-06-10 | repo_only | docs/audit/MODULAR_COMPILER_AUDIT_2026-06-10.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.modular-compiler-stack-clash-2026-05-29 | repo_only | docs/audit/MODULAR_COMPILER_STACK_CLASH_2026-05-29.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
@@ -375,7 +371,6 @@ This matrix is the human-readable companion to `docs/governance/topic-registry.v
 | repo.docs.audit.mut-effect-enforcement-dispatch-2026-07-27 | repo_only | docs/audit/MUT_EFFECT_ENFORCEMENT_DISPATCH_2026-07-27.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.mut-refactor-execution-plan-2026-05-31 | repo_only | docs/audit/MUT_REFACTOR_EXECUTION_PLAN_2026-05-31.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.native-pow-tgamma-numerical-design-2026-08-23 | repo_only | docs/audit/NATIVE_POW_TGAMMA_NUMERICAL_DESIGN_2026-08-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
-| repo.docs.audit.native-reloc-shape-fail-closed-2026-09-26 | repo_only | docs/audit/NATIVE_RELOC_SHAPE_FAIL_CLOSED_2026-09-26.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.ns-n1-grok46-mathreview-2026-08-23 | repo_only | docs/audit/NS_N1_GROK46_MATHREVIEW_2026-08-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.octonion-action-r7-2026-08-23 | repo_only | docs/audit/OCTONION_ACTION_R7_2026-08-23.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
 | repo.docs.audit.ode-epistemic-zero-params-2026-06-02 | repo_only | docs/audit/ODE_EPISTEMIC_ZERO_PARAMS_2026-06-02.md | - | A2 | en:n/a, pt:n/a, el:n/a, zh:n/a, ja:n/a, es:n/a |
