@@ -2354,6 +2354,10 @@ struct Lowerer {
     closure_caps: Box<ClosureCapTable>,
     pending_closure_fn_id: i64,
     allow_direct_capturing_closure_literal: bool,
+    // var xs = [3, 5, 7, 11]: the binding is mutable, so the literal keeps
+    // the per-element store path. Only let-bound all-i64 literals are
+    // eligible for the rodata image stamp.
+    suppress_const_array_image: bool,
     pending_variance_reg: i64,
     // β-Madaros multi-channel FO GUM (lean_single β¹⁰/β¹¹ parity target).
     // Var(y) = Σ_k (∂y/∂x_k)² · σ²_k with up to 8 Knowledge seeds per function.
@@ -2663,6 +2667,7 @@ fn lowerer_new() -> Lowerer with Alloc, Mut, Panic, Div {
         closure_caps: closure_caps,
         pending_closure_fn_id: -1,
         allow_direct_capturing_closure_literal: false,
+        suppress_const_array_image: true,
         pending_variance_reg: -1,
         fo_nchan: 0,
         fo_sigma2: [-1; 32],
@@ -3233,6 +3238,7 @@ fn lowerer_new_from_program_summary(summary: &IrProgramSummary, epistemic: &IrEp
         closure_caps: closure_caps,
         pending_closure_fn_id: -1,
         allow_direct_capturing_closure_literal: false,
+        suppress_const_array_image: true,
         pending_variance_reg: -1,
         fo_nchan: 0,
         fo_sigma2: [-1; 32],
@@ -3293,6 +3299,7 @@ fn lowerer_new_from_program_summary_owned(summary: IrProgramSummary, epistemic: 
         closure_caps: closure_caps,
         pending_closure_fn_id: -1,
         allow_direct_capturing_closure_literal: false,
+        suppress_const_array_image: true,
         pending_variance_reg: -1,
         fo_nchan: 0,
         fo_sigma2: [-1; 32],
@@ -3357,6 +3364,7 @@ fn lowerer_from_acc_module(module: Box<IrModule>) -> Lowerer with Alloc, Mut, Pa
         closure_caps: closure_caps,
         pending_closure_fn_id: -1,
         allow_direct_capturing_closure_literal: false,
+        suppress_const_array_image: true,
         pending_variance_reg: -1,
         fo_nchan: 0,
         fo_sigma2: [-1; 32],
@@ -4871,6 +4879,45 @@ fn lower_type_expr_elem_or_box_inner_name(te: &TypeExpr) -> Name with Mut, Panic
     let seq_elem = lower_type_expr_seq_named_elem_name(te)
     if seq_elem.len > 0 { return seq_elem }
     lower_type_expr_array_elem_name(te)
+}
+
+// All-i64 array literal -> pool span. -1 keeps the ir_index_set path.
+// Repeat literals ([v; N]) and any non-ExprIntLit element are rejected here.
+fn lower_i64_array_literal_pool_base_ref(e: &Expr) -> i64 with Mut, Panic, Div, Alloc {
+    if (*e).kind != ExprKind::ExprArrayLit { return -1 }
+    match (*e).left {
+        Some(_) => return -1,
+        None => {}
+    }
+    var current = &(*e).args
+    var n: i64 = 0
+    while true {
+        match *current {
+            Some(list) => {
+                if (*list).head.kind != ExprKind::ExprIntLit { return -1 }
+                n = n + 1
+                current = &(*list).tail
+            }
+            _ => break
+        }
+    }
+    if n <= 0 { return -1 }
+    let base = ir_const_i64_pool_reserve(n)
+    if base < 0 { return -1 }
+    current = &(*e).args
+    var idx: i64 = 0
+    while true {
+        match *current {
+            Some(list) => {
+                ir_const_i64_pool_set(base + idx, (*list).head.int_val)
+                idx = idx + 1
+                current = &(*list).tail
+            }
+            _ => break
+        }
+    }
+    if idx != n { return -1 }
+    base
 }
 
 fn lower_array_literal_fixed_len_ref(e: &Expr) -> i64 with Alloc, Mut, Div {
@@ -10776,6 +10823,10 @@ impl Lowerer {
         var lo = pair_dst.0
         let dst = pair_dst.1
         lo = lo.emit(ir_alloc_array(dst, lo.aggregate_storage_bytes(repeat_count), repeat_count))
+        // A repeat literal never stamps (the pool classifier rejects it), so
+        // the value expression must not stamp either: it is stored per slot,
+        // and a stamped value would drop its stores and read zeros.
+        lo.suppress_const_array_image = true
 
         let left_opt: Option<Box<Expr>> = e.left
         match left_opt {
@@ -20542,9 +20593,28 @@ impl Lowerer {
             }
             _ => {}
         }
+        // The rodata image stamp is defined for one shape only: a plain
+        // non-mut let whose RHS is exactly the array literal. The emitter
+        // fills that binding from the image; any other position (tuple
+        // packing, return, argument) must keep the per-element store path.
+        // The default is suppressed everywhere; the let opens the window
+        // only when the RHS is the literal itself, and every path that
+        // descends past a literal (element lists, repeat values) closes it
+        // again, so the window covers exactly that literal.
+        var const_array_image_ok = !is_mut
+        match s.expr {
+            Some(rhs) => {
+                if (*rhs).kind != ExprKind::ExprArrayLit {
+                    const_array_image_ok = false
+                }
+            }
+            None => { const_array_image_ok = false }
+        }
+        lhs_lo.suppress_const_array_image = !const_array_image_ok
         let pair = lhs_lo.lower_opt_expr_ref(&s.expr)
         var lo = pair.0
         lo.allow_direct_capturing_closure_literal = false
+        lo.suppress_const_array_image = true
         var reg = pair.1
         // KL-7: an annotated signed-wide binding whose RHS was lowered as one
         // machine word must materialise every high limb.  Leaving only `reg`
@@ -26232,8 +26302,26 @@ impl Lowerer {
                 var lo = pair_dst.0
                 let dst = pair_dst.1
                 let arr_lit_count = count_expr_list_ref(&e.args)
-                lo = lo.emit(ir_alloc_array(dst, lo.aggregate_storage_bytes(arr_lit_count), arr_lit_count))
-                lo = lo.lower_array_elems_ref(dst, &e.args, 0)
+                // Float literals are not i64 words. A failed reserve (pool full)
+                // leaves the store path in place and emits no image.
+                let const_base = if elem_is_float || self.suppress_const_array_image { -1 } else { lower_i64_array_literal_pool_base_ref(e) }
+                var alloc_instr = ir_alloc_array(dst, lo.aggregate_storage_bytes(arr_lit_count), arr_lit_count)
+                if const_base >= 0 {
+                    alloc_instr.fn_id = const_base
+                    alloc_instr.imm_flags = IR_CONST_I64_ARRAY_FLAG
+                }
+                lo = lo.emit(alloc_instr)
+                // Stamped literals are filled from the rodata image by the
+                // emitter. Emitting the index sets too would overwrite that
+                // image and leave it unread.
+                if const_base < 0 {
+                    // An unstamped literal keeps the store path; its elements
+                    // must not stamp either, or an all-IntLit literal nested
+                    // here would drop its own stores and read zeros once it
+                    // is stored into this outer array.
+                    lo.suppress_const_array_image = true
+                    lo = lo.lower_array_elems_ref(dst, &e.args, 0)
+                }
                 if elem_is_float {
                     lo = lo.emit(ir_mark_float_reg(dst))
                     lo = lo.bind_reg_array_elem_float(dst)

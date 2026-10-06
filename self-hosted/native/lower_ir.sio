@@ -4,7 +4,8 @@ module native::lower_ir
 
 use parser::ast::{BinaryOp, UnaryOp}
 use ir::ir::{IrInstr, IrOpcode, IrRegList, IR_MAX_FUNCS, IrFunction, BSS_BASE_LINUX,
-    IR_XOR_TWIST_CAYLEY_DICKSON_SIGN, IR_XOR_CANDIDATE_TWO_ZMM_INDEXED_PERMUTE}
+    IR_XOR_TWIST_CAYLEY_DICKSON_SIGN, IR_XOR_CANDIDATE_TWO_ZMM_INDEXED_PERMUTE,
+    IR_CONST_I64_ARRAY_FLAG, IR_CONST_I64_POOL_CAP, ir_const_i64_pool_at}
 use ir::algebra::*
 use native::regalloc::*
 use native::encode::*
@@ -458,6 +459,26 @@ pub fn lower_alloc(nc: &! NativeCompiler, instr: IrInstr) with Mut, Panic, Div {
     c.code = emit_mov_reg_imm(c.code, 1, alloc_size)
     c.code = emit_add_reg_reg(c.code, 0, 1)
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_cursor())
+    // A stamped const-array alloc carries its pool base in fn_id and its
+    // element count in field_idx; the lowering suppressed the per-element
+    // index sets. This legacy path has no flat-rodata image to read, so it
+    // materialises the same values as immediates -- obj/so outputs see an
+    // initialised payload while native v2 keeps its image loads.
+    if instr.dst >= 0 && (instr.imm_flags & IR_CONST_I64_ARRAY_FLAG) != 0 {
+        let pool_base = instr.fn_id
+        let elem_count = instr.field_idx
+        if pool_base >= 0 && elem_count > 0 && pool_base + elem_count <= IR_CONST_I64_POOL_CAP {
+            c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(instr.dst))
+            c.code = emit_mov_rdx_rax(c.code)
+            var k: i64 = 0
+            while k < elem_count {
+                c.code = emit_mov_reg_imm(c.code, 3, k)
+                c.code = emit_mov_rax_imm(c.code, ir_const_i64_pool_at(pool_base + k))
+                c.code = emit_store_rax_mem_rdx_rbx8(c.code)
+                k = k + 1
+            }
+        }
+    }
     (*nc) = c
 }
 
