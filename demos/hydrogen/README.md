@@ -79,7 +79,18 @@ line: after the fix no single section dominates (the slowest line takes under
 p-boxes, spread evenly.
 
 `examples/hydrogen/mhhc_corner_pbox.sio` (the 128-corner box over the
-seven-stage compressor): CORNER_PBOX_RESULT
+seven-stage compressor) **terminates, but takes about two hours** on Madaros;
+it is not a live demo. Measured 2026-10-06 on Madaros built from source:
+corners 0–69 took 3600 s in one process on a loaded 8-CPU host, and corners
+70–127, split into four processes, took 1585, 1223, 326 and 322 s, about
+7000 s of single-core time in all. Every one of the 128 corners reached
+cyclic steady state: 64 in 4 fixed-point sweeps, 32 in 6, and 32 in 16 (the
+high-σ corners from 64 up, the slowest at 381 s each). The 900 s sweep timed
+out on both engines; a single uninterrupted 128-corner run was not completed
+here (the pod running it restarted), and lean_single, about 4x slower than
+Madaros on the sibling `mhhc_cascade` (217 s vs 51 s), was not timed. The
+file now prints one line per corner, so a run in progress no longer looks
+like a hang.
 
 ## The physics-grounded replacement (`mh7_coupled_ceiling.sio`) — the cascade's ceiling from measured Table 3, nothing fitted
 
