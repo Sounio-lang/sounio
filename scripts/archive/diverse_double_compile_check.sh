@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# RETIRED 2026-10-06 (P1.7, Cargo-era): diverse double compilation of the Rust souc via cargo with gcc/clang; the seed-policy docs already called it dead.
 # scripts/dev/diverse_double_compile_check.sh
 #
 # Phase 7 — Diverse Double-Compilation (DDC) Check

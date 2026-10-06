@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# RETIRED 2026-10-06 (P1.7, Cargo-era): cargo build -p souc + target/debug/souc, and its inputs were stub examples now in examples/_attic; nothing references it.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

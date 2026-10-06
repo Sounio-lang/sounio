@@ -269,8 +269,8 @@ class HotReloadRuntime:
     
     def _find_compiler(self) -> Optional[Path]:
         """Find the souc compiler."""
-        # Try local build
-        local = Path("target/release/souc")
+        # Try the repository entrypoint (Madaros)
+        local = Path("bin/souc")
         if local.exists():
             return local.resolve()
         

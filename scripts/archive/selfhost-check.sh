@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# RETIRED 2026-10-06 (P1.7, Cargo-era): cargo build, rustc host triple and Rust-era `souc sysroot install` (Madaros has no such verb).
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -207,7 +208,7 @@ if [ -f "$GOLDEN_FILE" ]; then
     fail "golden-check" "HLIR drift detected (see $LOG_DIR/golden.diff)"
   fi
 else
-  fail "golden-check" "missing golden file: $GOLDEN_FILE (run dev/golden-update.sh)"
+  fail "golden-check" "missing golden file: $GOLDEN_FILE (run scripts/archive/golden-update.sh)"
 fi
 
 echo

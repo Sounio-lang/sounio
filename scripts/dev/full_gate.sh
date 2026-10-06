@@ -15,11 +15,7 @@ echo "[full-gate] 3/6 fast gate"
 bash "$ROOT_DIR/scripts/dev/fast_gate.sh"
 
 echo "[full-gate] 4/6 integration tests"
-if [[ "${SOUNIO_REPO_HARD_NO_RUST:-1}" = "1" ]]; then
-  echo "[full-gate] integration tests skipped (repo-hard no-rust mode)"
-else
-  (cd "$ROOT_DIR" && sounio_cargo test -p souc --tests)
-fi
+echo "[full-gate] skipped (these were the Rust compiler crate's tests; that crate no longer exists)"
 
 echo "[full-gate] 5/6 e2e backend gate"
 "$ROOT_DIR/scripts/dev/e2e_gate.sh"

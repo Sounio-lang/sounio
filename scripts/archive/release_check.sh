@@ -1,4 +1,5 @@
 #!/bin/bash
+# RETIRED 2026-10-06 (P1.7, Cargo-era): cargo build/test only (Rust crate removed); no workflow runs it.
 # Release quality checklist for Demetrios v0.50.0
 
 set -e

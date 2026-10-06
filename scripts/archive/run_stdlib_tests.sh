@@ -1,4 +1,5 @@
 #!/bin/bash
+# RETIRED 2026-10-06 (P1.7, Cargo-era): target/release/souc and .d test files (Rust/D era); nothing references it.
 # Demetrios stdlib test runner
 # Runs ALL stdlib D programs with main() functions
 # Exit code != 0 blocks merge

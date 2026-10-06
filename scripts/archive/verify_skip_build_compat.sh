@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# RETIRED 2026-10-06 (P1.7, Cargo-era): compares target/debug and target/release souc builds (Rust crate removed); no workflow runs it.
 # scripts/ci/verify_skip_build_compat.sh -- verify that all gate scripts work with SKIP_BUILD=1.
 #
 # Usage:

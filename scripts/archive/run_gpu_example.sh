@@ -1,4 +1,5 @@
 #!/bin/bash
+# RETIRED 2026-10-06 (P1.7, Cargo-era): cargo build/run --features gpu,cuda (Rust crate removed); nothing references it; use `bin/souc build --backend gpu`.
 
 # GPU Example Runner for Phase 2 Optimizations
 # Usage: ./run_gpu_example.sh [mixed-precision|qat|sparse|profile]
