@@ -1,0 +1,361 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: TUPLE_F64_ARRAY_IMPL_METHOD PASS
+//
+// Review follow-up (#2570). lower_fn_tuple_f64_arrays_collect only ever
+// walked top-level ItemFn entries -- an impl method returning a tuple with an
+// [f64; N] slot is lowered as a mangled free function (`Type_method`, see
+// lower_impl_methods_ref) but the prepass never reached it, so the table had
+// no entry under that mangled name and every method-result read of the array
+// slot took the integer path. expr_is_tuple_slot_f64_array_ref also only
+// recognized an ExprCall base, not ExprMethodCall, so even a correctly
+// collected mask would not have been consulted for a method call's result.
+//
+//   A  `recv.pair().0[0]`               direct projection off a method call
+//   B  `let t = recv.pair(); t.0[0]`    in-place index through a local bound
+//                                        to the method call's result
+//
+// Copilot follow-up (#2570): expr_result_tuple_float_mask_ref and
+// expr_is_tuple_slot_f64_array_ref resolved the ExprMethodCall receiver via
+// lower_method_recv_type -- the same helper actual call lowering uses -- so
+// they'd also cover field, dereference, chained-method, and associated-call
+// receivers, not just a plain local ident. Cases A/B above only exercise the
+// ident-receiver arm; C/D below pin the field-receiver arm so reverting to
+// the identifier-only lookup fails this fixture.
+//
+//   C  `holder.pairer.pair().0[0]`               field receiver, direct
+//                                                 projection
+//   D  `let u = holder.pairer.pair(); u.0[0]`    field receiver, in-place
+//                                                 index through a local
+//
+// Copilot follow-up (#2570): lower_let_stmt_type_metadata_ref's tuple-mask
+// binding treated an explicit type annotation and the initializer as
+// ALTERNATIVES -- a nonzero annotated_tuple_mask skipped
+// expr_result_tuple_float_mask_ref entirely. An annotation only ever encodes
+// the SCALAR half (an element whose type is literally f64), never the ARRAY
+// half (an `[f64; N]` element), so an explicitly typed mixed tuple lost its
+// array bits the instant any OTHER slot was also annotated f64. Case E below
+// pins the merge: `([f64; 2], f64)` sets only the scalar bit for slot 1, so
+// the annotated branch alone is nonzero and would (pre-fix) swallow slot 0's
+// array bit that only the initializer's return type carries.
+//
+//   E  `let e: ([f64; 2], f64) = pair_free(3.5); e.0[0]`
+//                                        explicit mixed-tuple annotation,
+//                                        free-function initializer
+//
+// Copilot follow-up (#2570): `let g = pair_free` binds a LOCAL to a bare
+// function reference (an identity alias, not a call) -- expr_to_callee_name_ref
+// on a later `g(...)` returns the local's own name "g", which the fn-name
+// table never has an entry for, so both expr_result_tuple_float_mask_ref's
+// and expr_is_tuple_slot_f64_array_ref's ExprCall branches read mask 0
+// regardless of what pair_free itself returns. Cases F/G pin the fix: the
+// alias is resolved once at the `let g = pair_free` binding site and stored
+// under g's own name, then read back by both consumers.
+//
+// A top-level function is ALSO named `g`, on purpose, so the alias binding
+// at `let g = pair_free` shadows a REAL same-named global rather than a
+// name that simply does not exist. Copilot follow-up: the first version of
+// this fix checked the named-function table before checking whether
+// callee_name was a local, backwards from actual call lowering
+// (self.lookup_local(callee_name) >= 0 checked BEFORE the named path,
+// lower.sio:21168-21223) -- with that ordering, `g()` executes the LOCAL
+// alias (pair_free's body -- confirmed by manual repro: it returns the
+// caller's own f64 argument, not the top-level g's distinct hard-coded
+// value) while the mask lookup used whichever the checker-visible name
+// resolved first, so a top-level `g` with a DIFFERENT tuple-array shape
+// than pair_free silently re-corrupted the read even though F/G's own
+// alias resolution (fixed in 01275b1706) was otherwise working. Kept
+// same-shaped with pair_free here so the arithmetic below still
+// type-checks (the type checker itself binds `g(...)`'s argument and
+// result types to the GLOBAL `g`, not the local alias, so a differently
+// shaped global makes `v.0[0] * 2.0` a checker error, not a lowering one --
+// the mask-divergence half of this was verified with a standalone,
+// differently-shaped repro instead: it printed the caller's argument's IEEE
+// bit pattern as an integer under the old ordering, the argument's own
+// value under the fixed one).
+//
+//   F  `let g = pair_free; let v = g(4.5); v.0[0]`   indirect call through
+//                                                     an alias that shadows
+//                                                     a same-named global,
+//                                                     in-place index through
+//                                                     a local
+//   G  `let g = pair_free; g(1.25).0[0]`              same alias/shadow,
+//                                                       direct projection
+//
+// Copilot follow-up (#2570): opt_base_tuple_float_mask_ref -- the SCALAR
+// sibling of expr_is_tuple_slot_f64_array_ref, consulted by
+// expr_result_is_float_ref for a direct `X.K` scalar projection -- handled
+// only ExprIdent and ExprCall bases and had no ExprMethodCall case at all
+// (fell straight to `else { 0 }`), even though the array-slot sibling
+// already resolved an ExprMethodCall base via lower_method_recv_type +
+// ir_mangle_method_name (cases A-D above). `recv.pair2().1` on a method
+// returning a MIXED tuple therefore always read mask 0 for the scalar slot
+// and the f64 was read through the integer path. Case H pins a direct
+// scalar projection straight off a method call, no intervening let --
+// pair2 (unlike pair, whose second slot is i64) returns `([f64; 2], f64)`
+// so the corruption is observable on the scalar half specifically.
+//
+//   H  `recv.pair2().1 * 2.0`   direct scalar projection off a method call
+//                                returning a mixed tuple, no intervening
+//                                binding
+//
+// Copilot follow-up (#2570): case E above already pins a MISSING-array-bit
+// bug for a fn-typed initializer's own mixed-tuple RETURN TYPE. It does not
+// cover a bare tuple annotation whose initializer is a tuple LITERAL, not a
+// call -- lower_opt_type_tuple_float_mask (the function that reads a bare
+// TypeTuple annotation) only ever derived the SCALAR half, and for a tuple
+// literal there is no callee return type for expr_result_tuple_float_mask_ref
+// to fall back on either, so `let t: ([f64; 2], i64) = (a, 1)` left slot 0's
+// array bit at 0 from BOTH sides at once. Fixed by switching the annotation
+// side to lower_opt_type_tuple_combined_mask (the Option-wrapped sibling of
+// lower_type_expr_tuple_combined_mask, the general function already used for
+// a fn-typed annotation's return type) instead of widening the scalar-only
+// helper itself, since that helper is also used -- deliberately scalar-only
+// there -- for a NAMED function's own returns_float encoding.
+//
+//   I  `let a = [2.5, 0.0]; let t: ([f64; 2], i64) = (a, 1); t.0[0] * 2.0`
+//                                        explicit tuple annotation, tuple-
+//                                        literal initializer with an
+//                                        array-local element
+//
+// Copilot follow-up (#2570): companion to I, on the INITIALIZER side rather
+// than the annotation side -- expr_list_tuple_float_mask_ref (consulted for
+// ANY tuple-literal initializer, annotated or not) only ever called
+// expr_result_is_float_ref (the SCALAR classifier) per element, with no
+// array-half counterpart at all, so `(a, 1)` where `a` is an f64-array local
+// always contributed mask 0 regardless of annotation. Fixed by also
+// consulting the same array classifiers lower_let_stmt_type_metadata_ref's
+// own array-local logic already uses (array_literal_elems_are_float_ref,
+// expr_result_is_f64_array_ref, expr_is_tuple_slot_f64_array_ref, and a
+// bare-local lookup via lookup_local_array_elem_float), via a new shared
+// expr_is_f64_array_value_ref helper.
+//
+//   J  `let a = [3.5, 0.0]; let t = (a, 1); let x = t.0; x[0] * 2.0`
+//                                        UNANNOTATED tuple literal, in-place
+//                                        index through a local bound from
+//                                        the tuple's own array-slot field
+//
+// Copilot follow-up (#2570): case O pins a tuple-literal element that is a
+// direct array-returning METHOD call (`recv.make_array()` returns a plain
+// `[f64; N]`, not a tuple, unlike A-D/H/N above which all return a tuple or a
+// tuple-typed function). expr_result_is_f64_array_ref's `!= ExprCall` guard
+// excluded ExprMethodCall entirely, so this always read through the integer
+// path regardless of make_array's declared return type -- the sibling gap to
+// K's (indirect call through a local fn-pointer alias) and L/M's (immediate
+// double-call), but for a method receiver instead of a named/local function.
+//
+//   O  `let to = (recv.make_array(), 1); to.0[0]`
+//                                        tuple-literal element, direct
+//                                        array-returning method call, no
+//                                        intervening binding
+fn g(scale: f64) -> ([f64; 2], f64) with Mut, Panic {
+    var a: [f64; 2] = [0.0; 2]
+    a[0] = 999.0
+    (a, 1.0)
+}
+
+struct Pairer {
+    scale: f64,
+}
+
+impl Pairer {
+    fn pair(self) -> ([f64; 2], i64) with Mut, Panic {
+        var a: [f64; 2] = [0.0; 2]
+        a[0] = self.scale
+        (a, 9)
+    }
+
+    fn pair2(self) -> ([f64; 2], f64) with Mut, Panic {
+        var a: [f64; 2] = [0.0; 2]
+        a[0] = self.scale
+        (a, self.scale + 1.0)
+    }
+
+    // Copilot follow-up (#2570): direct array return (not a tuple), for
+    // case O -- a method whose OWN return type is `[f64; N]`, consulted as
+    // a tuple-literal element.
+    fn make_array(self) -> [f64; 2] with Mut, Panic {
+        var a: [f64; 2] = [0.0; 2]
+        a[0] = self.scale
+        a
+    }
+}
+
+struct Holder {
+    pairer: Pairer,
+}
+
+fn pair_free(scale: f64) -> ([f64; 2], f64) with Mut, Panic {
+    var a: [f64; 2] = [0.0; 2]
+    a[0] = scale
+    (a, 7.0)
+}
+
+// Copilot follow-up (#2570): case K below pins a tuple-literal element that
+// is an indirect call through a LOCAL function-pointer alias returning a
+// plain `[f64; N]` (not a tuple) -- `expr_result_is_f64_array_ref` resolved
+// only NAMED functions (`lowerer_lookup_fn_id_by_name_ref` on the callee's
+// own name), and there was no per-local "this local, when called, returns
+// an array" metadata at all (only the scalar counterpart, fn_ptr_ret_float,
+// existed), so `let f = make_arr; let t = (f(), 1); t.0[0]` always read the
+// array through the integer path regardless of make_arr's own declared
+// return type. Fixed via a new fn_ptr_ret_array per-local classification,
+// propagated onto `f` at its `let f = make_arr` binding site.
+fn make_arr() -> [f64; 2] {
+    var a: [f64; 2] = [0.0; 2]
+    a[0] = 4.5
+    a
+}
+
+// Copilot follow-up (#2570): cases L/M pin an IMMEDIATE double-call through
+// a function that itself returns an array-returning function --
+// `choose_arr(): fn() -> fn() -> [f64; N]`. expr_result_is_f64_array_ref's
+// ExprCall branch never recursed for an ExprCall callee (`choose_arr()`,
+// the inner call), so expr_to_callee_name_ref could not name it and both
+// lookups always missed, same class of gap the tuple-return system already
+// had a recursion guard for. Fixed by recursing into
+// expr_ident_is_array_returning_fn_ref on the inner call.
+//
+//   L  `(choose_arr(), 1).0[0]`     tuple-literal element, immediate
+//                                   double-call, no intervening binding
+//   M  `let f = choose_arr()(); f[0]`   in-place index through a local
+//                                        bound from an immediate
+//                                        double-call
+fn concrete_arr_l() -> [f64; 2] {
+    var a: [f64; 2] = [0.0; 2]
+    a[0] = 5.0
+    a
+}
+
+fn choose_arr_l() -> fn() -> [f64; 2] {
+    concrete_arr_l
+}
+
+// Copilot follow-up (#2570): case N pins `let f = receiver.choose_arr()`
+// where the METHOD (not a plain function) returns `fn() -> [f64; N]`.
+// LOWER_FN_ARR_CHAIN already records an impl method under its MANGLED name
+// (the collector reaches it via lower_fn_tuple_f64_arrays_collect_impl_
+// methods, same as the tuple table), but
+// expr_ident_is_array_returning_fn_ref only ever handled ExprIdent/ExprCall,
+// so a method-call RHS fell through to false and `f` never got
+// fn_ptr_ret_array set. Fixed by resolving the receiver through
+// lower_method_recv_type and mangling the same way the tuple-mask readers
+// already do for this exact shape.
+struct ArrChooser {
+    tag: i64,
+}
+
+fn concrete_arr_n() -> [f64; 2] {
+    var a: [f64; 2] = [0.0; 2]
+    a[0] = 3.0
+    a
+}
+
+impl ArrChooser {
+    fn choose_arr(self) -> fn() -> [f64; 2] with Mut, Panic {
+        concrete_arr_n
+    }
+}
+
+fn main() -> i32 with IO, Mut, Panic {
+    var bad: i32 = 0
+    let recv = Pairer { scale: 1.5 }
+
+    // A: direct projection off the method call, no tuple-local binding.
+    let da: f64 = recv.pair().0[0] * 2.0
+    if da != 3.0 { bad = bad + 1 }
+
+    // B: in-place index through an ExprIdent tuple-local bound from a method call.
+    let t = recv.pair()
+    let db: f64 = t.0[0] * 2.0
+    if db != 3.0 { bad = bad + 2 }
+
+    let holder = Holder { pairer: Pairer { scale: 2.5 } }
+
+    // C: direct projection off a method call through a field receiver.
+    let dc: f64 = holder.pairer.pair().0[0] * 2.0
+    if dc != 5.0 { bad = bad + 4 }
+
+    // D: in-place index through a tuple-local bound from a field-receiver
+    // method call.
+    let u = holder.pairer.pair()
+    let dd: f64 = u.0[0] * 2.0
+    if dd != 5.0 { bad = bad + 8 }
+
+    // E: explicit mixed-tuple annotation merges with the initializer's array
+    // bits instead of discarding them.
+    let e: ([f64; 2], f64) = pair_free(3.5)
+    let de: f64 = e.0[0] * 2.0
+    if de != 7.0 { bad = bad + 16 }
+
+    // F: indirect call through a local aliasing a function's identity, then
+    // in-place index through a tuple-local bound from that call.
+    let g = pair_free
+    let v = g(4.5)
+    let dv: f64 = v.0[0] * 2.0
+    if dv != 9.0 { bad = bad + 32 }
+
+    // G: same alias, direct projection off the indirect call.
+    let dg: f64 = g(1.25).0[0] * 2.0
+    if dg != 2.5 { bad = bad + 64 }
+
+    // H: direct scalar projection off a method call returning a mixed
+    // tuple, no intervening let.
+    let dh: f64 = recv.pair2().1 * 2.0
+    if dh != 5.0 { bad = bad + 128 }
+
+    // I: explicit tuple annotation, tuple-literal initializer with an
+    // array-local element -- the annotation's own array bit.
+    let arr_i = [2.5, 0.0]
+    let ti: ([f64; 2], i64) = (arr_i, 1)
+    let di: f64 = ti.0[0] * 2.0
+    if di != 5.0 { bad = bad + 256 }
+
+    // J: unannotated tuple literal, in-place index through a local bound
+    // from the tuple's own array-slot field -- the initializer's own array
+    // bit, with no annotation to fall back on at all.
+    let arr_j = [3.5, 0.0]
+    let tj = (arr_j, 1)
+    let xj = tj.0
+    let dj: f64 = xj[0] * 2.0
+    if dj != 7.0 { bad = bad + 512 }
+
+    // K: tuple-literal element is an indirect call through a local
+    // function-pointer alias returning a plain [f64; N] (not a tuple) --
+    // the array-only counterpart of cases F/G's tuple-returning alias.
+    let fk = make_arr
+    let tk = (fk(), 1)
+    let dk: f64 = tk.0[0] * 2.0
+    if dk != 9.0 { bad = bad + 1024 }
+
+    // L: tuple-literal element, immediate double-call, no intervening
+    // binding.
+    let tl = (choose_arr_l()(), 1)
+    let dl: f64 = tl.0[0] * 2.0
+    if dl != 10.0 { bad = bad + 2048 }
+
+    // M: in-place index through a local bound from an immediate
+    // double-call.
+    let fm = choose_arr_l()()
+    let dm: f64 = fm[0] * 2.0
+    if dm != 10.0 { bad = bad + 4096 }
+
+    // N: `let f = receiver.choose_arr()` where the METHOD returns
+    // `fn() -> [f64; N]`, consulted as a tuple-literal element.
+    let chooser = ArrChooser { tag: 1 }
+    let fn2 = chooser.choose_arr()
+    let tn = (fn2(), 1)
+    let dn: f64 = tn.0[0] * 2.0
+    if dn != 6.0 { bad = bad + 8192 }
+
+    // O: tuple-literal element is a direct array-returning METHOD call (not
+    // a tuple-returning one), no intervening binding.
+    let to = (recv.make_array(), 1)
+    let doo: f64 = to.0[0] * 2.0
+    if doo != 3.0 { bad = bad + 16384 }
+
+    if bad == 0 {
+        println("TUPLE_F64_ARRAY_IMPL_METHOD PASS")
+    }
+    bad
+}

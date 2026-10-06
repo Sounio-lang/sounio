@@ -81,6 +81,11 @@ let SOUNIO_RUNTIME_VERSION_MAJOR: i64 = 1
 let SOUNIO_RUNTIME_VERSION_MINOR: i64 = 0
 let SOUNIO_RUNTIME_VERSION_PATCH: i64 = 0
 pub let IR_FLOAT_REG_MARKER_FLAG: i64 = 64064
+// IrAlloc of an all-i64 array literal. fn_id is the pool index of element 0
+// (not a callee: layout_patch_fn_ids rewrites fn_id on IrCall only).
+// label_id is not safe: inl_remap_label adds label_offset to every label_id >= 0.
+// src1 is not safe: inl_remap_instr treats it as a vreg.
+pub let IR_CONST_I64_ARRAY_FLAG: i64 = 1048576
 pub let IR_XOR_TWIST_CAYLEY_DICKSON_SIGN: i64 = 1
 pub let IR_XOR_CANDIDATE_AUTO: i64 = 0
 pub let IR_XOR_CANDIDATE_TWO_ZMM_INDEXED_PERMUTE: i64 = 1
@@ -865,6 +870,42 @@ pub fn ir_name_pool_capacity() -> i64 { 8388608 }
 pub var IR_ARG_POOL: [i64; 262144] = [0; 262144]
 pub var IR_ARG_POOL_LEN: i64 = 0
 pub fn ir_arg_pool_capacity() -> i64 { 262144 }
+
+// Little-endian i64 image of array literals whose every element is ExprIntLit.
+// Lowering reserves a span and stamps IrAlloc with IR_CONST_I64_ARRAY_FLAG and
+// fn_id = base. Native v2 appends that span to the flat rodata and suppresses
+// the per-element ir_index_set sequence: the binding reads the image. Only a
+// plain non-mut let whose RHS is exactly the literal stamps; literals in every
+// other position (mut bindings, nested elements, repeat values, arguments,
+// returns) keep the per-element store path. Overflow returns -1 and the
+// literal also keeps the store path with no image.
+pub let IR_CONST_I64_POOL_CAP: i64 = 65536
+pub var IR_CONST_I64_POOL: [i64; 65536] = [0; 65536]
+pub var IR_CONST_I64_POOL_LEN: i64 = 0
+
+pub fn ir_const_i64_pool_capacity() -> i64 { 65536 }
+
+pub fn ir_const_i64_pool_reserve(n: i64) -> i64 with Mut, Panic, Div {
+    if n <= 0 { return -1 }
+    let base = IR_CONST_I64_POOL_LEN
+    if base < 0 || n > IR_CONST_I64_POOL_CAP || base > (IR_CONST_I64_POOL_CAP - n) {
+        return -1
+    }
+    IR_CONST_I64_POOL_LEN = base + n
+    base
+}
+
+pub fn ir_const_i64_pool_set(index: i64, value: i64) with Mut, Panic, Div {
+    if index >= 0 && index < IR_CONST_I64_POOL_CAP {
+        IR_CONST_I64_POOL[index as usize] = value
+    }
+}
+
+pub fn ir_const_i64_pool_at(index: i64) -> i64 with Mut, Panic, Div {
+    if index < 0 || index >= IR_CONST_I64_POOL_CAP { return 0 }
+    IR_CONST_I64_POOL[index as usize]
+}
+
 
 // Copy one arena slot to another, field by field. Replaces what used to be a
 // single aggregate array-element copy -- which the seed silently drops.
@@ -3547,6 +3588,18 @@ pub struct StructFieldEntry {
     // resolves to a REGISTERED struct layout, which no primitive name does.
     // Ported onto main's interned-id representation (was `Name` on the PR).
     pub named_type_name_id: i64,
+    // Shape of a `[T; N]` field whose ELEMENT is itself an aggregate, packed
+    // into one word so the 1024 x 128 layout table grows by 1 MB, not 3:
+    //   N                          (bits 0..23)  outer element count
+    // + M * 2^24                   (bits 24..47) inner word-scalar array length,
+    //                                            0 when T is a named (struct) type
+    // + float * 2^48               inner array holds f64
+    // Written only by lower_type_expr_aggregate_array_code. ZERO means "not an
+    // aggregate-element array we model" (the safe omitted-field default, as for
+    // word_scalar_array_len); NEGATIVE means "an aggregate-element array the
+    // value copy cannot represent", which a by-value copy refuses rather than
+    // aliasing.
+    pub aggregate_array_code: i64,
 }
 
 pub struct StructLayoutEntry {
@@ -3587,7 +3640,7 @@ pub struct StructLayoutTable {
 }
 
 pub fn empty_struct_field_entry() -> StructFieldEntry {
-    StructFieldEntry { name_id: 0, index: 0, is_float: 0, elem_type_name_id: 0, word_scalar_array_len: 0, named_type_name_id: 0 }
+    StructFieldEntry { name_id: 0, index: 0, is_float: 0, elem_type_name_id: 0, word_scalar_array_len: 0, named_type_name_id: 0, aggregate_array_code: 0 }
 }
 
 pub fn empty_struct_layout_entry() -> StructLayoutEntry {

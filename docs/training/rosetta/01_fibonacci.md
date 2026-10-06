@@ -36,10 +36,10 @@ fn fibonacci(n: i64) -> i64 {
         a = temp
         i = i + 1
     }
-    b
+    return b
 }
 
-fn main() with IO, Mut, Panic, Div {
+fn main() -> i32 with IO, Mut, Panic, Div {
     var i: i64 = 0
     while i < 10 {
         print(fibonacci(i))
@@ -47,6 +47,7 @@ fn main() with IO, Mut, Panic, Div {
         i = i + 1
     }
     println("")
+    return 0
 }
 ```
 

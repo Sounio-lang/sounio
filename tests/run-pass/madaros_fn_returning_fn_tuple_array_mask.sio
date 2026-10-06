@@ -1,0 +1,206 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: FN_RETURNING_FN_TUPLE_ARRAY_MASK PASS
+//
+// Copilot follow-up (#2570). `fn choose() -> fn() -> ([f64; 2], i64)` --
+// choose's OWN declared return is a FUNCTION, not a tuple, so
+// lower_fn_tuple_f64_arrays_collect_one's existing TypeTuple branch never
+// applied to it and no table entry was ever recorded under choose's name.
+// `let f = choose(); f().0[0]` needs to know that the function VALUE choose
+// hands back returns a tuple with an array slot: expr_result_tuple_float_mask_ref's
+// ExprCall branch resolves `choose` via lower_named_fn_tuple_mask_ref, which
+// reads that same table -- empty for choose, so `f` was bound with mask 0
+// and the later indirect call read the f64 array through the integer path.
+// Reproduced standalone before this fix: printed the caller's own IEEE bit
+// pattern as an integer instead of the float itself.
+//
+// Fixed by extending the collector with a TypeFn branch: when a function's
+// declared return type is itself `fn() -> (tuple)`, store the INNER tuple's
+// array mask under the OUTER function's own name -- reusing the identical
+// table every consumer already reads, safe because a function's return type
+// is Tuple or Fn, never both.
+//
+//   `fn choose() -> fn() -> ([f64; 2], i64) { concrete }`
+//   `let f = choose(); let t = f(); t.0[0]`
+//
+// Copilot follow-up (#2570): case A above only exercises the ALIASED form
+// (`let f = choose(); f()`, where `f` is a plain ExprIdent). Cases B/C pin
+// the IMMEDIATE-invocation shape `choose()()`, where the outer call's own
+// callee is itself an ExprCall, not a name -- `expr_to_callee_name_ref`
+// only names an ExprIdent or ExprMethodCall callee, so it returned empty
+// for the inner `choose()`, and both the local and named-table lookups
+// always missed regardless of case A's fix. Resolved by recursing into
+// expr_result_tuple_float_mask_ref on the inner call, which already
+// resolves through the same TypeFn-branch table entry case A relies on.
+//
+//   B  `choose()().0[0]`          direct projection off an immediate
+//                                  double-call, no intervening binding
+//   C  `let t = choose()(); t.0[0]`   in-place index through a tuple-local
+//                                      bound from an immediate double-call
+//
+// Copilot follow-up (#2570): case D pins that function types are recursive
+// by GRAMMAR (parse_fn_type parses its own return with parse_type), so
+// `fn() -> fn() -> ([f64; 2], i64)` (cases A-C) is only ONE level of
+// nesting -- `fn() -> fn() -> fn() -> (...)` and deeper are equally valid
+// and were NOT handled: the collector's TypeFn branch and the two
+// parameter-side type-level helpers all unwrapped exactly one `.inner`
+// layer before giving up, so a chain three levels deep recorded no table
+// entry at all. Fixed by making the resolution genuinely recursive
+// (lower_type_expr_deep_f64_array_mask /
+// lower_type_expr_deep_has_unmarkable_f64_array for the collector;
+// lower_type_expr_tuple_combined_mask / lower_type_expr_fn_return_has_
+// unmarkable_f64_array for parameter types) instead of special-casing one
+// layer.
+//
+//   D  `outer() -> fn() -> fn() -> ([f64; 2], i64)`, `let mid = outer();
+//      let f = mid(); f().0[0]`   three levels of function-returning-
+//                                  function, not two
+//
+// Copilot follow-up (#2570): case E is the METHOD-RECEIVER form of cases
+// B/C's immediate double-call. `recv.choose()()` -- the OUTER call's own
+// callee is `recv.choose()`, an ExprMethodCall, not an ExprCall. Both
+// expr_result_tuple_float_mask_ref's ExprCall branch and its array-slot
+// sibling expr_is_tuple_slot_f64_array_ref only recursed into themselves
+// when the inner callee's kind was ExprCall (case B/C's `choose()()`
+// shape) -- an ExprMethodCall inner callee fell through to naming the bare
+// method "choose" via expr_to_callee_name_ref, but the table entry lives
+// under the MANGLED "Chooser_choose", so the lookup always missed and
+// `.0[0]` read the array through the integer path. Fixed by widening both
+// recursion guards to accept an ExprMethodCall inner callee too, since
+// this function's own (already-fixed) ExprMethodCall branch resolves the
+// mangled entry identically to how the ExprCall branch resolves a bare
+// name. Verified by code review and by tracing the mask arithmetic by
+// hand (the widened branch reduces to the identical, already-tested
+// ExprMethodCall classification, just reached via one more recursion
+// level) -- NOT by an end-to-end run of the literal reported shape. That
+// shape, `recv.choose()()` with no intervening binding, hits a separate,
+// pre-existing bug: a METHOD whose result is immediately re-invoked never
+// gets its own body lowered at all (`NATIVE_REFUSAL
+// kind=empty_stub_ud2 ... reason=missing_lowered_body`), reproduced
+// standalone with a minimal method returning a bare `fn() -> i64` --
+// zero tuple/array types involved -- so it is independent of this PR's
+// mask tracking and out of scope here. The split form below (bind the
+// method call, invoke the alias separately) sidesteps that bug and pins
+// real, working coverage for a method returning a function value -- the
+// ORIGINAL fixture only covered top-level functions returning functions,
+// never a method -- but it does not exercise the new recursion branch
+// itself (the alias-then-call shape resolves through
+// lookup_local_tuple_float_mask, same as cases A/F/G elsewhere in this
+// PR, not through the ExprCall/ExprMethodCall recursion this round adds).
+//
+//   E  `let f = recv.choose(); f().0[0]`   method returning a function,
+//                                            resolved through an alias
+// Copilot follow-up (#2570): cases A-E above only ever put an i64 in the
+// tuple's non-array slot, so they never exercised the SCALAR half of a
+// second-order tuple return. lower_fn_tuple_f64_arrays_collect_one's TypeFn
+// branch derived the array half only (LOWER_FN_TUPLE_ARR_MASK), leaving no
+// home at all for an f64 SCALAR slot at that same second order -- choose2's
+// OWN returns_float classification is for a FUNCTION-typed return, not a
+// tuple, so it never gets the 1024+mask scalar encoding either. `let f =
+// choose2(); f().1 * 2.0` therefore read the f64 scalar at slot 1 through the
+// integer path even though slot 0's array half (already covered by cases
+// A-E) was correct. Fixed by a new LOWER_FN_TUPLE_ARR_SCALAR table, written
+// and read alongside LOWER_FN_TUPLE_ARR_MASK at the same slot
+// (lower_type_expr_deep_scalar_mask mirrors lower_type_expr_deep_f64_array_mask).
+//
+//   F  `let f = choose2(); f().0[0]` and `f().1 * 2.0` -- array half and
+//      scalar half off the SAME second-order call, pinning both live
+//      alongside each other rather than one clobbering the other.
+fn concrete() -> ([f64; 2], i64) {
+    var a: [f64; 2] = [0.0; 2]
+    a[0] = 8.5
+    (a, 1)
+}
+
+fn concrete2() -> ([f64; 2], f64) {
+    var a: [f64; 2] = [0.0; 2]
+    a[0] = 6.5
+    (a, 3.25)
+}
+
+fn choose2() -> fn() -> ([f64; 2], f64) {
+    concrete2
+}
+
+fn choose() -> fn() -> ([f64; 2], i64) {
+    concrete
+}
+
+fn inner() -> fn() -> ([f64; 2], i64) {
+    concrete
+}
+
+fn outer() -> fn() -> fn() -> ([f64; 2], i64) {
+    inner
+}
+
+struct Chooser {
+    tag: i64,
+}
+
+impl Chooser {
+    fn choose(self) -> fn() -> ([f64; 2], i64) with Mut, Panic {
+        concrete
+    }
+}
+
+fn main() -> i32 with IO, Mut, Panic {
+    var bad: i32 = 0
+
+    let f = choose()
+    let t = f()
+    if t.0[0] != 8.5 { bad = bad + 1 }
+
+    // B: direct projection off an immediate double-call, no intervening
+    // binding.
+    let db = choose()().0[0]
+    if db != 8.5 { bad = bad + 2 }
+
+    // C: in-place index through a tuple-local bound from an immediate
+    // double-call.
+    let tc = choose()()
+    if tc.0[0] != 8.5 { bad = bad + 4 }
+
+    // D: three levels of function-returning-function.
+    let mid = outer()
+    let g = mid()
+    let td = g().0[0]
+    if td != 8.5 { bad = bad + 8 }
+
+    // E: method returning a function, resolved through an alias (the
+    // immediate-invocation form `chooser.choose()()` hits an unrelated,
+    // pre-existing "missing_lowered_body" bug -- see the case-E comment
+    // above).
+    let chooser = Chooser { tag: 1 }
+    let choosefn = chooser.choose()
+    let de = choosefn().0[0]
+    if de != 8.5 { bad = bad + 16 }
+
+    // F: array half and scalar half off the SAME second-order tuple return,
+    // pinning that the new scalar table does not clobber the existing
+    // array-mask table (or vice versa).
+    let f2 = choose2()
+    let df_arr = f2().0[0]
+    if df_arr != 6.5 { bad = bad + 32 }
+    let df_scalar = f2().1 * 2.0
+    if df_scalar != 6.5 { bad = bad + 64 }
+
+    // G: direct SCALAR projection off an immediate double-call, no
+    // intervening binding (`choose2()().1`). Copilot follow-up (#2570):
+    // opt_base_tuple_float_mask_ref (the scalar-projection sibling
+    // consulted by `X.K * scalar` with no let) never recursed into an
+    // ExprCall/ExprMethodCall inner callee the way its array-slot sibling
+    // (expr_is_tuple_slot_f64_array_ref) and expr_result_tuple_float_mask_ref
+    // both already did for this exact shape -- callee_expr here is itself
+    // the inner call `choose2()`, which expr_to_callee_name_ref cannot
+    // name, so this always missed and read the scalar through the integer
+    // path even though case B's array-half equivalent (`choose()().0[0]`)
+    // was already correct.
+    let dg = choose2()().1 * 2.0
+    if dg != 6.5 { bad = bad + 128 }
+
+    if bad == 0 {
+        println("FN_RETURNING_FN_TUPLE_ARRAY_MASK PASS")
+    }
+    bad
+}
