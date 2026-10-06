@@ -30,6 +30,11 @@ Madaros engine as well as lean_single. (Historical note: the cascade imports
 `stdlib/epistemic/pce.sio`, which calls libm through `extern "C"`; until
 #1550 the Madaros native path dropped all but the first extern decl and
 mis-evaluated the exp/log builtins — issue #1547, fixed.)
+Until 2026-10-06 the cascade's Monte Carlo block also differed on Madaros
+(MC mean P3 368.005190 vs 367.339816): `p = p * mh_exp(..) * rand_gaussian(..)`
+called the RNG twice per stage because the FO product rule re-lowered its
+operands. Fixed; Madaros now prints byte-identical output, pinned by
+`tests/run-pass/fo_product_rule_call_evaluated_once.sio`.
 
 ## The physics-grounded replacement (`mh7_coupled_ceiling.sio`) — the cascade's ceiling from measured Table 3, nothing fitted
 

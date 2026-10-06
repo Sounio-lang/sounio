@@ -7928,6 +7928,72 @@ fn lower_expr_contains_call_ref(e: &Expr) -> bool with Mut, Panic, Div {
     true
 }
 
+// The multi-channel FO product/quotient rule in lower_expr_variance_ref re-lowers
+// operand VALUES for the same reason the legacy algebra did (#1569), and Madaros
+// seeds an FO channel for ANY pure-float `let`, so plain `p = p * f()` reaches it.
+// `p * rand_gaussian(..)` then called the RNG twice per evaluation: the
+// mh_cascade_uq Monte Carlo block drifted from lean_single (mean 368.005 vs
+// 367.340). Re-lowering stays allowed for the backend math builtins, which are
+// pure and which the FO transfer table differentiates (sqrt, exp, sin, ...).
+fn lower_name_is_pure_math_builtin(n: Name) -> bool with Mut, Panic, Div, Alloc {
+    if ir_name_eq(n, make_name("sqrt")) { return true }
+    if ir_name_eq(n, make_name("exp")) { return true }
+    if ir_name_eq(n, make_name("log")) { return true }
+    if ir_name_eq(n, make_name("sin")) { return true }
+    if ir_name_eq(n, make_name("cos")) { return true }
+    if ir_name_eq(n, make_name("tan")) { return true }
+    if ir_name_eq(n, make_name("tanh")) { return true }
+    if ir_name_eq(n, make_name("atan")) { return true }
+    if ir_name_eq(n, make_name("asin")) { return true }
+    if ir_name_eq(n, make_name("acos")) { return true }
+    ir_name_eq(n, make_name("pow"))
+}
+
+fn lower_opt_expr_relower_safe(opt: &Option<Box<Expr>>) -> bool with Mut, Panic, Div, Alloc {
+    match *opt {
+        Some(e) => lower_expr_relower_safe_ref(&(*e)),
+        None => true,
+    }
+}
+
+fn lower_expr_list_relower_safe(opt: &Option<Box<ExprList>>) -> bool with Mut, Panic, Div, Alloc {
+    var cur = opt
+    while true {
+        match *cur {
+            Some(list) => {
+                if !lower_expr_relower_safe_ref(&(*list).head) { return false }
+                cur = &(*list).tail
+            }
+            None => break
+        }
+    }
+    true
+}
+
+// Like !lower_expr_contains_call_ref, but a call to a pure math builtin with
+// re-lower-safe arguments is still safe to evaluate twice.
+fn lower_expr_relower_safe_ref(e: &Expr) -> bool with Mut, Panic, Div, Alloc {
+    if (*e).kind == ExprKind::ExprCall {
+        match (*e).left {
+            Some(callee) => {
+                if (*callee).kind == ExprKind::ExprIdent && lower_name_is_pure_math_builtin((*callee).name) {
+                    return lower_expr_list_relower_safe(&(*e).args)
+                }
+            }
+            None => {}
+        }
+        return false
+    }
+    if (*e).kind == ExprKind::ExprBinary || (*e).kind == ExprKind::ExprIndex {
+        if !lower_opt_expr_relower_safe(&(*e).left) { return false }
+        return lower_opt_expr_relower_safe(&(*e).right)
+    }
+    if (*e).kind == ExprKind::ExprUnary || (*e).kind == ExprKind::ExprCast || (*e).kind == ExprKind::ExprFieldAccess {
+        return lower_opt_expr_relower_safe(&(*e).left)
+    }
+    !lower_expr_contains_call_ref(e)
+}
+
 fn lower_expr_is_f64_array_literal_ref(e: &Expr) -> bool with Mut, Panic, Div {
     if (*e).kind != ExprKind::ExprArrayLit { return false }
     match (*e).left {
@@ -13993,6 +14059,12 @@ impl Lowerer {
                     }
                     lo = lo.fo_combine_sens_addsub(sL, sR, is_sub)
                     return lo.fo_emit_var_from_sens()
+                }
+                // Both rules below re-lower the operand values; never re-execute
+                // an effectful call to get them (same hazard as #1569).
+                if ((*e).bin_op == BinaryOp::OpMul || (*e).bin_op == BinaryOp::OpDiv)
+                    && (!lower_opt_expr_relower_safe(&(*e).left) || !lower_opt_expr_relower_safe(&(*e).right)) {
+                    return (lo.fo_clear_expr_sens().so_clear_expr_hess(), -1)
                 }
                 if (*e).bin_op == BinaryOp::OpMul {
                     // Need operand values for the product rule.
