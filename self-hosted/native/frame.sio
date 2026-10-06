@@ -105,7 +105,8 @@ pub fn x86_allocatable_preg_count(mask: i64) -> i64 {
 pub fn nc_used_allocatable_preg_mask(nc: NativeCompiler, reg_count: i64) -> i64 {
     var mask: i64 = 0
     var v: i64 = 0
-    while v < reg_count {
+    // vreg_to_preg has NC_MAX_VREGS entries. Higher vregs are stack-only.
+    while v < reg_count && v < NC_MAX_VREGS {
         mask = mask | x86_allocatable_mask_for_reg(NC_VREG_TO_PREG[v as usize])
         v = v + 1
     }
@@ -353,63 +354,18 @@ pub var NC_STACK_MAP_OSR_ELIGIBILITY: [i64; 256] = [0; 256]
 pub var NC_VREG_TO_PREG: [i64; 2048] = [0; 2048]
 pub var NC_VREG_SPILL_SLOTS: [i64; 2048] = [0; 2048]
 
-// Float marks for vregs at or above NC_MAX_VREGS. The 2048-slot table cannot
-// hold them, and OpNeg treated "absent" as integer: `neg rax` on the IEEE bits
-// of an f64, not `btc rax, 63`. 8192 bits cover vreg ids [2048, 10240).
-// 32 bits per word so the mask stays positive, same rule as ir_float_bits.
-// A mark past the end increments NC_FLOAT_OVER_DROPPED and is not stored.
-pub let NC_FLOAT_OVER_BITS: i64 = 8192
-pub var NC_FLOAT_OVER_CAP: [i64; 256] = [0; 256]
-pub var NC_FLOAT_OVER_DROPPED: i64 = 0
-
-fn nc_float_over_mask(bit: i64) -> i64 {
-    var m: i64 = 1
-    var k: i64 = 0
-    while k < bit {
-        m = m * 2
-        k = k + 1
-    }
-    m
-}
-
-pub fn nc_float_over_is(reg: i64) -> bool with Mut, Panic, Div {
-    if reg < NC_MAX_VREGS { return false }
-    let idx = reg - NC_MAX_VREGS
-    if idx < 0 || idx >= NC_FLOAT_OVER_BITS { return false }
-    let word = idx / 32
-    let bit = idx % 32
-    let mask = nc_float_over_mask(bit)
-    (NC_FLOAT_OVER_CAP[word as usize] / mask) % 2 == 1
-}
-
-pub fn nc_float_over_mark(reg: i64) with Mut, Panic, Div {
-    if reg < NC_MAX_VREGS { return }
-    let idx = reg - NC_MAX_VREGS
-    if idx < 0 || idx >= NC_FLOAT_OVER_BITS {
-        NC_FLOAT_OVER_DROPPED = NC_FLOAT_OVER_DROPPED + 1
-        return
-    }
-    let word = idx / 32
-    let bit = idx % 32
-    let mask = nc_float_over_mask(bit)
-    NC_FLOAT_OVER_CAP[word as usize] = NC_FLOAT_OVER_CAP[word as usize] | mask
-}
-
-pub fn nc_float_over_unmark(reg: i64) with Mut, Panic, Div {
-    if reg < NC_MAX_VREGS { return }
-    let idx = reg - NC_MAX_VREGS
-    if idx < 0 || idx >= NC_FLOAT_OVER_BITS { return }
-    let word = idx / 32
-    let bit = idx % 32
-    let mask = nc_float_over_mask(bit)
-    // Low 32 bits, with this bit clear. The word stays non-negative.
-    let keep = 4294967295 - mask
-    NC_FLOAT_OVER_CAP[word as usize] = NC_FLOAT_OVER_CAP[word as usize] & keep
-}
-
-
 pub struct NativeCompiler {
     pub code: CodeBuffer,
+    // Final IR validation failure. This is distinct from an emitter capacity
+    // overflow: no ELF may be finalized after an invalid register count.
+    pub ir_vreg_overflow: bool,
+    pub ir_vreg_overflow_needed: i64,
+    pub ir_vreg_overflow_limit: i64,
+    // A structurally invalid register reference is not a capacity overflow.
+    // Keep the refusal separate so diagnostics never claim that increasing
+    // IR_MAX_VREGS would repair malformed IR.
+    pub ir_validation_failed: bool,
+    pub ir_validation_reg_count: i64,
     pub code_overflow: bool,
     // Total bytes nc_emit_byte was ever asked to emit, counted unconditionally
     // (including bytes dropped once code_overflow latches). Equals code.len
@@ -556,9 +512,87 @@ pub struct NativeCompiler {
     pub bss_total_size: i64,
 }
 
+
+// One class per vreg id, up to the lowerer's ceiling.
+// 0 unknown, 1 float, 2 int, 3 conflict.
+// NC_VREG_LIMIT must equal IR_MAX_VREGS in ir/ir.sio.
+// BSS on purpose: a [i64; 16384] local, or the same array as a field of
+// NativeCompiler, is the compiler_new frame cliff. The 2048-slot
+// is_float_reg and reg_type fields stay for the readers that already index
+// them. OpNeg reads this table, plus the flag the lowerer stamps on a
+// float unary op. There is no second ceiling past 2048.
+pub let NC_VREG_LIMIT: i64 = 16384
+pub var NC_REG_CLASS: [i64; 16384] = [0; 16384]
+pub var NC_REG_CLASS_DROPPED: i64 = 0
+// Exclusive upper bound of entries touched since the previous reset. Tiny
+// functions should not pay an unconditional 16,384-entry clear.
+pub var NC_REG_CLASS_HIGH_WATER: i64 = 0
+pub var NC_HIGH_SEEN: [i64; 512] = [0; 512]
+
+fn nc_reg_bit_mask(bit: i64) -> i64 {
+    var m: i64 = 1
+    var k: i64 = 0
+    while k < bit {
+        m = m * 2
+        k = k + 1
+    }
+    m
+}
+
+pub fn nc_reg_class_reset() with Mut {
+    var i: i64 = 0
+    while i < NC_REG_CLASS_HIGH_WATER {
+        NC_REG_CLASS[i as usize] = 0
+        i = i + 1
+    }
+    NC_REG_CLASS_HIGH_WATER = 0
+    i = 0
+    while i < 512 {
+        NC_HIGH_SEEN[i as usize] = 0
+        i = i + 1
+    }
+    NC_REG_CLASS_DROPPED = 0
+}
+
+pub fn nc_reg_class_get(reg: i64) -> i64 with Mut, Panic, Div {
+    if reg < 0 || reg >= NC_VREG_LIMIT { return 0 }
+    NC_REG_CLASS[reg as usize]
+}
+
+pub fn nc_reg_class_set(reg: i64, cls: i64) with Mut, Panic, Div {
+    if reg < 0 || reg >= NC_VREG_LIMIT {
+        NC_REG_CLASS_DROPPED = NC_REG_CLASS_DROPPED + 1
+        return
+    }
+    NC_REG_CLASS[reg as usize] = cls
+    if reg + 1 > NC_REG_CLASS_HIGH_WATER {
+        NC_REG_CLASS_HIGH_WATER = reg + 1
+    }
+}
+
+// A float marker whose vreg does not fit the 2048-bit set. Idempotent.
+// Record it directly in the full-size class table: keeping a second compact
+// list introduced an accidental 4096-entry ceiling below NC_VREG_LIMIT.
+pub fn nc_high_float_note(reg: i64) with Mut, Panic, Div {
+    if reg < NC_MAX_VREGS || reg >= NC_VREG_LIMIT { return }
+    let word = reg / 32
+    let bit = reg % 32
+    if word < 0 || word >= 512 { return }
+    let mask = nc_reg_bit_mask(bit)
+    let w = NC_HIGH_SEEN[word as usize]
+    if (w / mask) % 2 == 1 { return }
+    NC_HIGH_SEEN[word as usize] = w | mask
+    nc_reg_class_set(reg, 1)
+}
+
 pub fn compiler_new() -> NativeCompiler with Mut {
     var out: NativeCompiler
     out.code = code_buffer_new()
+    out.ir_vreg_overflow = false
+    out.ir_vreg_overflow_needed = 0
+    out.ir_vreg_overflow_limit = NC_VREG_LIMIT
+    out.ir_validation_failed = false
+    out.ir_validation_reg_count = 0
     out.code_overflow = false
     out.code_overflow_bytes_attempted = 0
     out.rodata_overflow_bytes_attempted = 0
@@ -608,13 +642,11 @@ pub fn compiler_new() -> NativeCompiler with Mut {
         NC_LABEL_PATCH_LABEL_IDS[i as usize] = -1
         NC_FIELD_FLOAT_BASE_REGS[i as usize] = -1
         NC_FIELD_FLOAT_INDICES[i as usize] = -1
-        NC_FLOAT_OVER_CAP[i as usize] = 0
         if i < 16 {
             NC_RETURN_JUMPS[i as usize] = 0
         }
         i = i + 1
     }
-    NC_FLOAT_OVER_DROPPED = 0
     i = 0
     while i < 16384 {
         NC_FN_OFFSETS[i as usize] = -1
@@ -628,6 +660,7 @@ pub fn compiler_new() -> NativeCompiler with Mut {
         NC_REG_TYPE[i as usize] = 0
         i = i + 1
     }
+    nc_reg_class_reset()
     out
 }
 
@@ -655,6 +688,7 @@ pub fn reset_function_state_mut(nc: &! NativeCompiler) with Mut, Panic, Div {
         NC_REG_TYPE[j as usize] = 0
         j = j + 1
     }
+    nc_reg_class_reset()
     (*nc).field_float_count = 0
     var fj = 0
     while fj < 256 {
@@ -669,12 +703,6 @@ pub fn reset_function_state_mut(nc: &! NativeCompiler) with Mut, Panic, Div {
         NC_VREG_SPILL_SLOTS[ra as usize] = -1
         ra = ra + 1
     }
-    var float_over_i: i64 = 0
-    while float_over_i < 256 {
-        NC_FLOAT_OVER_CAP[float_over_i as usize] = 0
-        float_over_i = float_over_i + 1
-    }
-    NC_FLOAT_OVER_DROPPED = 0
     (*nc).current_machine_base_slots = 0
     (*nc).current_machine_spill_count = 0
 }

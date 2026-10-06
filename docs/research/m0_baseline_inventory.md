@@ -76,7 +76,6 @@ Gap: no `SounioApproxCausalKnowledge.lean` (composition); no `SounioKnightian.le
 From `CLAUDE.md`:
 - `Knowledge<T>` is monomorphic (f64 only). `Knowledge<Knowledge<f64>>` will need a struct wrapper, not nested generics.
 - No closure literals — use named fn refs.
-- No unary minus — use `0 - x`.
 - `&![T; N]` bare array mutation broken in JIT — use struct wrapper.
 - GPU codegen exists but no end-to-end CLI path.
 
