@@ -339,6 +339,13 @@ run_test() {
         if [[ ! "$line" =~ ^[[:space:]]*//@\  && ! "$line" =~ ^[[:space:]]*//([[:space:]]|$) && ! "$line" =~ ^[[:space:]]*$ ]]; then
             break
         fi
+        # Only a line that STARTS with `//@ ` is an annotation. The case arms
+        # below match by substring, so without this a header comment that
+        # merely mentions one -- "The engine-forcing //@ ignore is removed",
+        # "Deliberately no `//@ requires: gpu`" -- was read as that annotation
+        # (measured 2026-10-06: it ignored ffi_system_exec.sio and overwrote
+        # gpu_kernel_lane_loop.sio's `requires: madaros`).
+        [[ "$line" =~ ^[[:space:]]*//@\  ]] || continue
         # Fail closed on invented stdout assertions. `expect-stdout-contains`
         # was silently ignored because the harness only extracted
         # `expect-stdout:`; the same hole would swallow `expected-output` or

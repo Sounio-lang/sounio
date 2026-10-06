@@ -132,6 +132,10 @@ run_test() {
     if [[ ! "$line" =~ ^[[:space:]]*//@\  && ! "$line" =~ ^[[:space:]]*//([[:space:]]|$) && ! "$line" =~ ^[[:space:]]*$ ]]; then
       break
     fi
+    # Only a line that starts with `//@ ` is an annotation; the =~ checks
+    # below match by substring, so prose such as "NOT `//@ check-only`" in a
+    # header comment would otherwise count as one.
+    [[ "$line" =~ ^[[:space:]]*//@\  ]] || continue
 
     if [[ "$line" =~ "//@ run-pass" ]]; then
       is_run_pass=true
