@@ -1,0 +1,109 @@
+//@ run-pass
+//@ expect-stdout-contains: PBPK28_DEFAULT_DT_GATE_PASS
+//@ timeout: 300
+
+// Gate: the default step of ddi/multidrug28.sio, md_default_dt() = 0.02 h,
+// meets its stated accuracy target against a dt = 0.01 h TR-BDF2 reference.
+//
+// Target (header of ddi/multidrug28.sio, "Default step"): blood AUC within
+// 0.1 % of the dt = 0.01 h reference over 60 days for the three-drug portal
+// scenario of docs/audit/repro/pbpk28_trbdf2_payoff_probe.sio (measured
+// 2026-10-06: −0.066 % / −0.044 %; dt = 0.1 h: −1.25 % / −0.81 %).
+//
+// Sixty days at dt 0.01 is too slow for the Full Test Suite (lean_single),
+// so this gate runs the same scenario for 4 days with the perpetrator infused
+// on days 0-2 (the 60-day run infuses on days 0-30): the same drugs, doses,
+// inhibition constants, portal routing and predictor-corrector coupling, and
+// one infusion switch-off. The relative AUC error is larger on the shorter
+// horizon (the first days, before the victims accumulate, weigh more), so
+// the target is re-derived for it and kept at
+//     |AUC(md_default_dt()) − AUC(0.01)| / AUC(0.01) ≤ 0.1 %   (drugs A, B).
+// Measured 2026-10-06 (Madaros): A −0.082 %, B −0.054 % at dt 0.02.
+//
+// Control (the gate must be able to fail): at dt = 0.1 h the same comparison
+// must EXCEED the target for drug A. Measured: A −1.55 %, B −1.02 %. If the
+// coupling ever became accurate at dt 0.1 the control would fail too, and the
+// default step should then be revisited rather than the control relaxed.
+//
+// Sabotage control (2026-10-06): with md_default_dt() returning 0.1 the gate
+// fails D0 and D1 on Madaros (A 1.55 %, B 1.02 %).
+//
+// Runtime (2026-10-06, this workspace, `souc run`, compile included):
+// Madaros 14.1 s, lean_single 30.3 s; both engines print identical digits.
+// At the 4.3x CI/pod ratio the other PBPK28 gates measured, lean_single
+// projects to ~130 s in the Full Test Suite, so the timeout is 300 s.
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::ddi::multidrug28::*
+
+struct Auc2 {
+    a: f64,
+    b: f64,
+}
+
+fn add_victim(md: &!MultiDrug28, cl_c: f64) -> i32 with Mut, Panic {
+    var p = pbpk28_params_rapamycin()
+    p.cl_central = cl_c
+    let i = md_add_drug(md, p, 0.1, 0.95, 1.5)
+    md_set_fu_site(md, i, md_site_gut(), 1.0)
+    md_set_clint(md, i, md_site_liver(), md_cyp3a4(), 200.0)
+    md_set_clint(md, i, md_site_gut(), md_cyp3a4(), 30.0)
+    return i
+}
+
+// The payoff probe's scenario (arm 0 transport), 4 days, infusion off at day 2.
+fn run_scenario(dt: f64) -> Auc2 with Mut, Div, Panic {
+    var md = md_new(true)
+    let a = add_victim(&!md, 1.5)
+    let b = add_victim(&!md, 0.5)
+    var pc = pbpk28_params_rapamycin()
+    pc.cl_central = 10.0
+    let c = md_add_drug(&!md, pc, 0.3, 1.0, 1.0)
+    md_set_fu_site(&!md, c, md_site_gut(), 1.0)
+    md_set_ki(&!md, a, md_cyp3a4(), 0.02)
+    md_set_ki(&!md, b, md_cyp3a4(), 0.005)
+    md_set_ki(&!md, c, md_cyp3a4(), 0.05)
+    md_set_iv_rate(&!md, c, 5.0)
+    var day: i32 = 0
+    while day < 4 {
+        if day == 2 { md_set_iv_rate(&!md, c, 0.0) }
+        md_dose_oral(&!md, a, 5.0)
+        md_dose_oral(&!md, b, 100.0)
+        md_run_to(&!md, ((day + 1) * 24) as f64, dt)
+        day = day + 1
+    }
+    return Auc2 { a: md.auc_b[a], b: md.auc_b[b] }
+}
+
+fn rel_err(x: f64, r: f64) -> f64 with Div {
+    let d = (x - r) / r
+    if d < 0.0 { return 0.0 - d }
+    return d
+}
+
+fn main() -> i32 with Mut, Div, Panic, IO {
+    let target = 0.001
+    let dt0 = md_default_dt()
+    let ref_auc = run_scenario(0.01)
+    let def_auc = run_scenario(dt0)
+    let coarse = run_scenario(0.1)
+    let ea = rel_err(def_auc.a, ref_auc.a)
+    let eb = rel_err(def_auc.b, ref_auc.b)
+    let ca = rel_err(coarse.a, ref_auc.a)
+    let cb = rel_err(coarse.b, ref_auc.b)
+    print("default dt=") println(dt0)
+    print("  |AUC err| A (%)=") print(ea * 100.0) print("  B (%)=") println(eb * 100.0)
+    print("control dt=0.1  |AUC err| A (%)=") print(ca * 100.0) print("  B (%)=") println(cb * 100.0)
+    print("target (%)=") println(target * 100.0)
+    let dt_ok = dt0 == 0.02
+    let acc_ok = ea <= target && eb <= target
+    let ctl_ok = ca > target
+    if dt_ok { println("D0 PASS default dt is 0.02 h") } else { println("D0 FAIL default dt is not 0.02 h") }
+    if acc_ok { println("D1 PASS default dt within target") } else { println("D1 FAIL default dt exceeds target") }
+    if ctl_ok { println("D2 PASS dt 0.1 exceeds target (gate can fail)") } else { println("D2 FAIL dt 0.1 within target: gate cannot discriminate") }
+    if dt_ok && acc_ok && ctl_ok {
+        println("PBPK28_DEFAULT_DT_GATE_PASS")
+        return 0
+    }
+    return 1
+}
