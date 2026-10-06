@@ -15,15 +15,39 @@
 > setting an initial state the modules do not share. The published-regime
 > numbers are kept alongside, dated, for the record.
 
-**Every number on this page was produced by the command printed above it, at
-commit `98aa8e4d5151bbc61815bf910b6c31c3d0789f5f` (branch `claude/gri-mech-cantera-preprint-776qb9`), on
-2026-09-01.** Nothing is carried forward from an earlier log, a prior session,
-or a draft. Where a run was not performed, the row says so.
+**Every number on this page was produced by the command printed above it.**
+The base measurement pass ran at commit
+`98aa8e4d5151bbc61815bf910b6c31c3d0789f5f` (branch
+`claude/gri-mech-cantera-preprint-776qb9`) on **2026-09-01**. Nothing is
+carried forward from an earlier log, a prior session, or a draft. Where a run
+was not performed, the row says so.
+
+**This is not a closed date.** Corrections, re-measurements and newly-added
+verifications made after the base pass are marked **inline, at the point they
+apply**, each carrying its own date and command — 2026-09-01 through
+2026-09-03 for the reverse-rate defect, the regime corrections and the
+instrument-hid-the-defect instances, **2026-09-22** for the reviewer-driven
+fixes to the reproduction commands and the Lean verification of §6.2, and
+**2026-09-23** for the xAI-offload-driven residual-attribution and
+species-count corrections in §7.5 and §7.7. A number without an inline date is
+the base pass; a number with one is dated as it carries, not silently as of
+2026-09-01.
 
 Environment: Linux x86-64, Python 3.11, `cantera 3.2.0`, `numpy 2.4.6`,
 `g++ (Ubuntu 13.3.0) -std=c++23 -O2`. Sounio compiler: the committed ELF
-`bin/madaros-linux-x86_64` (md5 `ff69dae4`, tree `98aa8e4d`), run under
-`SOUNIO_SOUC_ENGINE=lean_single`.
+**`bin/souc-lean-single-x86_64`, md5 `458d82bc22e44caaca1161231f56d82d` at tree
+`98aa8e4d`**, reached by the `SOUNIO_SOUC_ENGINE=lean_single` export in §7.1.
+
+> **Corrected 2026-09-22 — the line named the wrong binary.** It previously read
+> "`bin/madaros-linux-x86_64` (md5 `ff69dae4`, tree `98aa8e4d`), run under
+> `SOUNIO_SOUC_ENGINE=lean_single`", which identifies two different executables
+> in one sentence: `bin/souc` routes that environment variable to the legacy
+> single-file ELF and never invokes the Madaros one. The Madaros md5 is correct
+> as a description of the committed Madaros binary, and **that binary was not
+> executed for any measurement in this document.** No number moves; what was
+> wrong was the artefact identity, which is §6.3 instance (8) one layer down.
+> The replacement md5 is computed, not recalled:
+> `git cat-file -p 98aa8e4d:bin/souc-lean-single-x86_64 | md5sum`.
 
 > **Corrected 2026-09-01.** This line previously read `-std=c++20`, which does
 > not build the cross-check as shipped. Measured rather than assumed:
@@ -255,8 +279,28 @@ a relative difference of **7.983e-08**, sitting inside `exp(-Ea/(R·T))`.
 
 **The entire published parity gap is one rounded constant.** With the same R
 on both sides, Sounio, the Python replica and Cantera agree to
-**8.9e-13 … 1.2e-11** — at the floor set by CVODE's own `rtol = 1e-12`, and
-about five orders of magnitude better than the figure the README publishes.
+**8.9e-13 … 1.2e-11** — about five orders of magnitude better than the figure
+the README publishes. This is *not* "at the floor": the note directly below
+retires that framing (all eight figures sit below the oracle's own measured
+floor and are not citable as resolution).
+
+> **Corrected 2026-09-23, a reviewer finding.** This table is an isolated
+> substitution — `R_cal` alone, changed inside `examples/chemistry/h2_probe2.sio`
+> and re-run, historically, before the molar-volume alignment of #2382 landed
+> in the committed tree. It is **not** the same measurement as section 7.7's
+> "total residual" (2.074e-11, H2O), which comes from `rep_tolerance.py` /
+> `rep_resolution.py --dir <aligned tree>` against the fully-committed,
+> both-constants-aligned code — a different producer, a different commit
+> state, roughly three weeks apart by this document's own dated record
+> (base pass 2026-09-01, this correction 2026-09-23). The two numbers were
+> presented as though comparable; they are each real, but they are not the
+> same experiment, and their ~2x difference (9.28e-12 here vs 2.074e-11 there,
+> both nominally "H2O, aligned") is not a discrepancy needing resolution — it
+> is consistent with, and additional evidence for, section 7.7's own finding
+> that the oracle's floor at this scale varies by up to 11x under
+> perturbations of one part per million. Presenting one number as "the"
+> aligned residual without naming which producer measured it, as this section
+> did, is exactly the defect section 6 catalogues.
 
 This is the same root cause as the 1.843e-11 Kc floor in section 3.1 (there it
 was `R_SI = 8.314462618` against Cantera's `8.31446261815324`). Two independent
@@ -640,10 +684,22 @@ git stash list; git worktree list; git fsck --dangling
 described protocol on 2026-09-01; the original artefacts were not recoverable
 from the repository history.*
 
-**None is recoverable.** They were never committed to this repository — the
-object scan finds no blob under any of those names in any tree reachable from
-any ref, and there are no stashes, no other worktrees and no dangling objects.
-They exist only as references in the preprint.
+**None of the originals is recoverable.** They were never committed to this
+repository in their original, preprint-cited form — the object scan above
+finds no blob matching that original content under any of those names in any
+tree reachable from any ref, and there are no stashes, no other worktrees and
+no dangling objects. They exist only as references in the preprint.
+
+**Corrected 2026-09-23, a reviewer finding.** The table above (`in worktree:
+no`, captured 2026-09-01) is no longer current: all six names now exist in
+the worktree as committed reconstructions, each header-marked as such and
+distinct from the unrecoverable originals — see section 7.2's own account
+("are reconstructions") and section 8's summary table ("Four reconstructed
+`.sio` probes and two reconstructed `.py` probes now exist and all check and
+run clean, but they reproduce the *protocols*, not the originals").
+`audit_provenance.py` finds a producer present for sections citing these six
+files, which is correct for what a reader would actually run, not evidence
+that the original measurements were recovered.
 
 See section 6 for what was reconstructed in their place, and how it is marked.
 
@@ -1018,6 +1074,38 @@ H/O checkpoint prose, not to this.
 cd formal/lean4 && lake build SounioIndepComposition
 ```
 
+> **The command above does not run in this tree — corrected 2026-09-22, and
+> then corrected again the same day.** Measured:
+> `cd formal/lean4 && lake build SounioIndepComposition` →
+> ``error: unknown target `SounioIndepComposition` `` (exit 1). `formal/lean4/`
+> here carries a Lake project but **no source for the module**; what sits under
+> `formal/lean4/.lake/build/` is stale output from a build made elsewhere,
+> which is worse than absence because it looks like evidence. The frozen
+> snapshot carries the source at `formal/SounioIndepComposition.lean` with **no
+> Lake project beside it**, so `lake build` resolves in neither tree.
+>
+> **The development is reproducible anyway, and the first correction wrongly
+> said it was not.** Being Mathlib-free core Lean 4, it needs no Lake project:
+> ```sh
+> elan run leanprover/lean4:v4.33.0 lean formal/SounioIndepComposition.lean
+> # snapshot v1.0.3, path relative to repo root; exit 0, no diagnostics
+> ```
+> `elan run <toolchain> <cmd>` pins the invocation explicitly — a bare `lean`
+> runs whatever elan's default or an ambient override resolves to, which is
+> not necessarily this pin.
+> That is what the Verification block below now runs. The first correction
+> claimed "no Lean toolchain is installed in the environment this document
+> records", on the strength of `command -v lake lean elan` returning nothing.
+> `elan` was installed the whole time at `~/.elan/bin`, off `PATH`, with the
+> pinned v4.33.0 present. **A negative result from the wrong instrument was
+> read as a property of the environment** — §6.3 instance (1), committed by
+> this document about itself, and it cost a reproduction path that existed.
+>
+> §7.4's auditor passed this section throughout, because its criterion is a
+> *named file present in the released tree* and the command names a directory,
+> not a file. That is a gap in the auditor, recorded here rather than patched
+> in this pass.
+
 Section 5 measures a band that scales as √dt and an underestimation that grows
 as √(T/dt). That is not a fitted exponent — it is derivable, and it is now
 machine-checked.
@@ -1057,12 +1145,37 @@ uncertainties: since √ is monotone on the non-negatives, comparing variances
 In that form every statement is polynomial, and the linear ones close under
 `omega`.
 
-**Verification.** 15 theorems, **zero `sorry`**. `#print axioms` reports only
-`propext` and `Quot.sound` — the standard Lean axioms — on the arithmetic
-theorems, and the d-separation theorems **depend on no axioms at all**
-(`collider_opened_by_conditioning`, `collider_inverts_the_others`,
-`conditioning_not_monotone` are closed by `rfl`). Built under
-`leanprover/lean4:v4.33.0`, the toolchain `formal/lean4/lean-toolchain` pins.
+**Verification, re-measured 2026-09-22 from the frozen snapshot** rather than
+quoted:
+
+```sh
+elan run leanprover/lean4:v4.33.0 lean formal/SounioIndepComposition.lean
+# snapshot v1.0.3, path relative to repo root; exit 0
+grep -c '^theorem ' formal/SounioIndepComposition.lean  # 15
+grep -c 'sorry'     formal/SounioIndepComposition.lean  # 0
+```
+
+under `Lean (version 4.33.0, x86_64-unknown-linux-gnu, commit
+d8b18978322de05a8f3dba51ef03cf5461676c17, Release)` — the toolchain
+`formal/lean4/lean-toolchain` pins. **15 theorems, zero `sorry`**, confirmed.
+
+Axiom dependencies, by appending `#print axioms Sounio.IndepComposition.<name>`
+for all fifteen and re-running:
+
+| axioms reported | count | theorems |
+|---|---:|---|
+| `[propext, Quot.sound]` | 7 | `quadrature_iff_zero_covariance`, `quadrature_sound_of_independent`, `quadrature_understates_of_positive_covariance`, `quadrature_sound_iff_nonpositive_covariance`, `additive_sound`, `additive_tight_at_unit_correlation`, `quadrature_below_additive` |
+| **`[propext]` alone** | 2 | `quadrature_understates_correlated_sum`, `accumulation_agrees_at_one_step` |
+| **none** | 6 | `chain_blocked_by_conditioning`, `fork_blocked_by_conditioning`, `collider_blocked_marginally`, `collider_opened_by_conditioning`, `collider_inverts_the_others`, `conditioning_not_monotone` |
+
+> **Corrected from measurement.** This paragraph previously said `#print axioms`
+> reports `propext` *and* `Quot.sound` on the arithmetic theorems, and named
+> three axiom-free d-separation theorems. Both are off, in opposite directions:
+> two arithmetic theorems — including
+> `quadrature_understates_correlated_sum`, the √N law §5 measures — need only
+> `propext`, and **all six** d-separation theorems are axiom-free, not three.
+> Nothing in §5 depends on the difference. It is corrected because the file now
+> has a producer and the numbers can be read off it instead of recalled.
 
 **What this does not establish.** The theorems say what follows *given* a
 correlation structure; they do not certify that any particular program's
@@ -1120,14 +1233,16 @@ TDY form reports `0.000000e+00` (or one ULP once aligned), the TPX form
 
 ---
 
-## 6.3 The instrument hid the defect — nine instances
+## 6.3 The instrument hid the defect — ten instances
 
 > **A note on the count.** The brief that commissioned this section asked for
 > two new findings, bringing it to *six*. It brought it to **seven** — the
 > section already carried five instances, not four — then to **eight**,
 > when the operator recorded his own falsified premise as instance (8), and
 > to **nine** when the archive layer failed silently under the release that
-> was meant to freeze the other eight. The
+> was meant to freeze the other eight, and to **ten** on 2026-09-03, when
+> three separate harnesses turned out to have been comparing states they did
+> not share while printing agreement. The
 > miscount is worth keeping rather than absorbing, because the instance most
 > easily dropped from a mental list is (4), where the *reference's* own error
 > was the thing being attributed to the method under test, and that is the one
@@ -1145,7 +1260,7 @@ Instances **(1)–(4) are instruments set too coarse**: the resolution is a
 number, the defect is a number, and the first is larger. They are fixable by
 tightening a tolerance or choosing a finer probe.
 
-Instances **(5)–(9) have no *syntactic* signature**. They are invisible to
+Instances **(5)–(10) have no *syntactic* signature**. They are invisible to
 every tool that reads the program as text or as types — no token to grep, no
 dimension to check, no diff to review, no unit test that could have been
 written against the source alone, because each branch, file and literal
@@ -1156,7 +1271,7 @@ said they were, and then this document built an instrument that catches one of
 them, which is a contradiction and is corrected here. The distinction that
 survives is:
 
-| | (1)–(4) | (5)–(9) |
+| | (1)–(4) | (5)–(10) |
 |---|---|---|
 | signature | a magnitude | none in the syntax |
 | detected by | a tighter setting | a **behavioural** invariant, printed |
@@ -1204,6 +1319,17 @@ cancels and the comparison is blind to it:
 | published | TPX | 101325.000000 | 3.922e-05 |
 | aligned | TDY | 101325.124717 | **2.032e-11** |
 | aligned | TPX | 101325.000000 | 9.055e-06 |
+
+> **Corrected 2026-09-23, a reviewer finding.** This 2.032e-11 is a byproduct
+> print of `gri30_h2_cantera_parity.py` itself, measured incidentally to the
+> initialization comparison this table makes -- not the dedicated
+> `rep_tolerance.py`/`rep_resolution.py` bisection of section 7.3/7.7, whose
+> figure for the identical nominal quantity (aligned, TDY, replica vs Cantera)
+> is 2.074e-11. A third producer, a third value, for the same reason as the
+> Table 5/Table 8 pair above: this section 6.3 does not name which producer
+> measured its own figure, and neither did section 7.5 below before this
+> correction. Treat 2.032e-11 as this table's own measurement, not as a
+> restatement of the document's headline residual.
 
 Aligning `R_cgs` moves the TDY column **not at all** — 2.660e-06 before and
 after. Under TPX, which does not share `mtot`, the same change is worth
@@ -1434,6 +1560,66 @@ public record certifies what it was asked to reject.** The remedy is to
 pull that layer's contract — here, a schema — down to where it can be
 checked before the irreversible step.
 
+### (10) A cross-check went on printing agreement after its two sides stopped sharing a state
+
+Instance (6) is about a constant that cannot be enumerated by reading the
+program. This is what happened to the sites that enumeration missed, and it is
+a distinct failure because of *where* they were: not in the code under test,
+but in the **harnesses that measure it**. Three of them, found separately,
+all with the same shape.
+
+| harness | what it held | what the module held | found by | cost |
+|---|---|---|---|---|
+| `examples/chemistry/rep_adiabatic_bug.sio` | `1.0/(82.057*t)` | `P0/(R_SI·T)·1e-6` after #2382 | re-running it after the merge | dT/dt delay at 1100 K, 701602 → 701597 ns → §2.6 published **−2.375 %** where the shared state gives **−2.374 %** |
+| `benchmarks/chemistry/rep_prodfix.py` | `1.0/(82.057*T)` | aligned | the snapshot verifier, not by any gate here | shipped floor 9.204e-15 → **8.442e-15**; the buggy column did not move by a bit |
+| `benchmarks/chemistry/gri30_full_cantera_parity.py` | `1.0/(82.057*T)` | `gri30_full.sio`, aligned | re-running it and finding it print the published-regime pressure against a §6.2b measured in the aligned one | §6.2b had been measured from a **working copy that was never committed** |
+
+The first of the three carried a comment asserting that the two sides were
+"kept identical". The comment was true when it was written and false when it
+was read, and nothing in the tree marked the transition.
+
+Why this is not simply (6) recurring: in (6) the instrument was a `grep`, and
+it failed because a truncated literal has no signature. Here the instrument
+was **the cross-check itself**, and it failed in a way a cross-check is
+supposed to be immune to. Its whole warrant is that two independently
+constructed quantities agree. All three went on agreeing — to every digit they
+print — while charging *different initial states*, because **5.7e-06 is below
+the printed resolution of almost everything either side reports.** The one
+quantity that moved at all was the most ill-conditioned number in the
+document, a delay read off a broad dT/dt peak, and it moved by 5 ns in 701 µs.
+
+The general form: **agreement between the two sides of a cross-check is
+evidence about the two computations only if the two sides are charged from the
+same state, and nothing in the agreement itself establishes that they were.**
+A cross-check that does not print its own initial-state deviation is
+reporting a comparison whose premise it never checked — which is the same
+fail-closed recipe as (7), applied to the harness rather than to the module,
+and the reason `initial_state_deviation` is printed at all rather than assumed.
+
+**Precisely: that check is oracle-side only.** `gri30_h2_cantera_parity.py` and
+`gri30_full_cantera_parity.py` compare the state Cantera *realised* against the
+state they intended; the Python replicas and the Sounio modules carry no
+corresponding print, so the invariant covers the side where TPX/TDY and the
+molar volume do their damage and **not** the replica side.
+
+And it did not catch these three. `rep_adiabatic_bug.sio` is a Sounio probe,
+`rep_prodfix.py` builds its own radical-loaded state, and the third is a
+Cantera-side harness whose divergence was found by re-running it and reading
+the printed pressure against a section measured in the other regime — not by an
+invariant refusing to proceed. The remedy is asymmetric and, on this evidence,
+incomplete: it is the recipe the three instances *argue for*, not a gate that
+already covers them. Saying otherwise would be the retrofit this document
+refuses everywhere else.
+
+The residual honest statement: these three were found by re-running and by the
+snapshot verifier, one at a time, over three days. **No gate in this tree
+would have caught any of them**, and the count reaching ten this way is
+itself the measurement — the sweep of §1.5 reported 30 sites and closed, and
+four more surfaced afterwards, one of them (instance (6)) in the demo the
+document's own reproduction section tells a reader to run first.
+
+---
+
 ### The hazard that is NOT an instance here
 
 **Sharing the integrator would hide the integrator's error**, and would do it
@@ -1496,7 +1682,7 @@ not fixed in this pass.
 
 ```sh
 git rev-parse HEAD           # 98aa8e4d5151bbc61815bf910b6c31c3d0789f5f
-pip install 'cantera==3.2.0' numpy
+pip install 'cantera==3.2.0' 'numpy==2.4.6'      # the versions the header records
 
 export SOUNIO_STDLIB_PATH=$(pwd)/stdlib SOUNIO_SOUC_ENGINE=lean_single
 ./bin/souc run examples/chemistry/h2_ignition_uq_demo.sio        # ~90 s
@@ -1506,13 +1692,30 @@ python3 benchmarks/chemistry/gri30_full_python_replica.py        # ~20 s
 python3 benchmarks/chemistry/gri30_full_cantera_parity.py        # ~1 s
 python3 benchmarks/chemistry/gri30_full_cantera_uq_reference.py --jobs 4   # ~8 s
 
-cd benchmarks/chemistry/cpp
-g++ -std=c++23 -O2 -o band_crosscheck gri30_h2_band_crosscheck.cpp
-./band_crosscheck ../gri30_h2_mechanism.json                     # ~6 min
-
-cd ../../../formal/lean4
-lake build SounioIndepComposition                                # ~1 s
+( cd benchmarks/chemistry/cpp && \
+  g++ -std=c++23 -O2 -o band_crosscheck gri30_h2_band_crosscheck.cpp && \
+  ./band_crosscheck ../gri30_h2_mechanism.json )               # ~6 min
 ```
+
+The C++ block above is parenthesised into a subshell so it does not leave the
+working directory changed for the command that follows — an earlier revision
+`cd`'d in place, which made the Lean command below resolve under
+`benchmarks/chemistry/cpp/formal/` and fail. That is the defect §6 catalogues,
+committed by this document about itself, twice **[W]**.
+
+The `cd ../../../formal/lean4 && lake build SounioIndepComposition` line that
+originally closed this block is **withdrawn** — it fails with `unknown
+target` — and is replaced, against the frozen snapshot, by
+
+```sh
+elan run leanprover/lean4:v4.33.0 lean formal/SounioIndepComposition.lean
+# path relative to repo root (the subshell above returns here); exit 0, no diagnostics
+```
+
+which needs no Lake project because the development is Mathlib-free core
+Lean 4, and pins the toolchain explicitly rather than trusting a bare `lean`
+to resolve to v4.33.0. §6.2 gives the measured verification and the
+per-theorem axiom table.
 
 ### 7.2 Oracle-verification probes
 
@@ -1646,11 +1849,42 @@ Ten species, a fresh `gas` object per run, t = 1e-4 s:
 **The oracle's own answer at `rtol=1e-12` is uncertain at the 1.473e-11
 level.**
 
+> **Corrected 2026-09-23, twice.** This section originally said "ten
+> species," which a first correction changed to "eight species (the H/O
+> checkpoint set)" on the mistaken belief that `rep_resolution.py`'s
+> eight-member `REPORT` list fed these three comparisons. Re-checked against
+> the producer's actual call: `worst(runs[a], runs[b], ALL10)`
+> (`rep_resolution.py:120,124`, `ALL10 = REPORT + ["N2", "AR"]`) -- the three
+> comparisons above are measured over **all ten** species, and "ten species"
+> was correct originally. `REPORT` (eight species) is what the script's
+> *separate* step-bisection section iterates over; conflating the two
+> producer-internal species lists is what caused the wrong correction.
+> Separately, the underlying point still holds: this 1.473e-11 figure and the
+> 1.416e-11 floor quoted below in the dt-bisection are **two independent
+> invocations** of the same script, not the same measurement re-quoted -- this
+> run is a bare `rep_resolution.py` call at the current working state, the
+> other is `rep_resolution.py --dir <aligned tree>` inside the bisection. They
+> differ by 4%, which is not a discrepancy to resolve; it **is** the finding
+> this document states explicitly two sections on ("the floor is not even a
+> number... ranges over [3.730e-12, 4.142e-11]... with no monotone trend").
+> Quoting either alone as *the* oracle floor, without the other or the spread,
+> is the error a reviewer correctly caught -- twice, in opposite directions.
+
 ### The consequence, stated against this document's own headline
 
-The aligned-regime residual this document reports is **2.032e-11**. The oracle's
-resolution at the tolerance used to measure it is **1.473e-11**. The ratio is
-**1.38**.
+> **Corrected 2026-09-23, a reviewer finding.** "The aligned-regime residual
+> this document reports" is imprecise: 2.032e-11 is section 6.3 instance (3)'s
+> figure, a byproduct of `gri30_h2_cantera_parity.py`'s own initialization
+> comparison. Section 7.7 below measures the same nominal quantity with the
+> dedicated `rep_tolerance.py`/`rep_resolution.py` bisection and gets
+> 2.074e-11. The argument in this subsection -- that the residual sits at,
+> not below, the oracle's resolution -- holds under either figure (1.38 here,
+> 1.46 there); neither number is singled out as *the* headline value anywhere
+> past this correction.
+
+The aligned-regime residual **section 6.3 instance (3) reports** is
+**2.032e-11**. The oracle's resolution at the tolerance used to measure it is
+**1.473e-11**. The ratio is **1.38**.
 
 > **Therefore 2.032e-11 is not citable as agreement.** It is an *upper bound on
 > the disagreement*, bounded below by the instrument. Two integrators that
@@ -1661,11 +1895,15 @@ resolution at the tolerance used to measure it is **1.473e-11**. The ratio is
 
 This retires the framing used earlier in this file and in
 `benchmarks/chemistry/README.md`, where the aligned figures (8.9e-13 … 1.2e-11)
-were called agreement "at the floor of CVODE's own `rtol = 1e-12`". Two of
-those figures are **below** the measured floor of 1.473e-11 — which does not
-make the agreement better than the floor, it makes those particular numbers
-unresolvable. They are reported here as measured and must not be read as
-resolution.
+were called agreement "at the floor of CVODE's own `rtol = 1e-12`".
+**Recomputed 2026-09-23 rather than trusted:** all eight of those figures sit
+below the single-state floor of 1.473e-11 — the largest, H2O2 at 1.220e-11,
+still under it. Three of the eight — H2, O2, HO2 at 1.082e-12, 8.952e-13,
+1.246e-12 — sit below even the lowest floor value §7.7's ensemble sweep ever
+measured (3.730e-12), so those three are unresolvable against any floor value
+this document reports, not only the typical one. None of the eight is
+citable as agreement better than the floor; all are reported here as
+measured and must not be read as resolution.
 
 What survives, and it is the result that matters, is unaffected: the
 **published-regime** gap of 2.660e-06 is 180,000× the oracle's resolution, so
@@ -1924,11 +2162,21 @@ Truncation measured at one instant says nothing about the integrator elsewhere
 on the trajectory. `|c(dt=1e-8) − c(dt=5e-9)| / |c|`, worst over the eight
 reported species:
 
-| t (s) | worst | on | regime |
+> **Corrected 2026-09-23, a reviewer finding.** This table is measured entirely
+> in the **published** regime, matching that column of the two-column table in
+> §7.3. Its own "regime" column names the *trajectory phase*, not the
+> constant-alignment regime -- the same word used for two different things.
+> That collision is why this table's checkpoint figure (2.222e-14, H2O2,
+> published) and section 7.7's truncation-bound figure (3.465e-14, H2O2,
+> **aligned**) read as the same quantity disagreeing. They are the same
+> functional at the same checkpoint, in two different constant regimes, both
+> correct.
+
+| t (s) | worst | on | trajectory phase |
 |---|---|---|---|
 | 1.00e-06 | **1.608e-11** | H2O | early induction |
 | 1.00e-05 | 7.330e-14 | O | induction |
-| **1.00e-04** | **2.222e-14** | H2O2 | **the pre-front checkpoint** |
+| **1.00e-04** | **2.222e-14** | H2O2 | **the pre-front checkpoint (published regime)** |
 | 1.20e-04 | 8.508e-14 | HO2 | approaching the front |
 | 1.30e-04 | 2.088e-13 | HO2 | into the front |
 

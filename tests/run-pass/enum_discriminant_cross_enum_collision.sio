@@ -1,0 +1,69 @@
+//@ run-pass
+//@ expect-stdout: enum_discriminant_collision: PASS
+//@ description: PR #1737 w7 -- enum discriminants must key by (enum, variant), not variant alone
+// Regression port of tests/witness_matrix/cases/w7_enum_discriminant.sio into the
+// standard suite.
+//
+// Pre-fix (pre-3d8cc0cb95) behavior: lookup_variant_discriminant matched on the
+// variant NAME alone and returned the first match across ALL enums, while
+// discriminants restart at 0 per enum. With both enums below declared,
+// Color::Mark resolved to Shape's discriminant and the match ran the wrong arm:
+// well-typed program, `check: OK`, wrong value at runtime, no diagnostic.
+// Measured on the pre-fix compiler: exit 20, expected 30.
+//
+// The fix keys the lookup by the full path at BOTH call sites:
+//   - the PatEnum match arm, and
+//   - the ExprPath construction site (asserted here via the raw discriminant).
+// Both are exercised below. The declared residual -- the lookup still falls
+// back to the unqualified name when the enum is not in this unit's table
+// (e.g. an unregistered imported enum) -- is probed separately in
+// enum_discriminant_shared_variant_import.sio.
+
+enum Shape { Quad{w: i64}, Mark }
+enum Color { Red, Green, Mark }
+
+// Color::Mark is discriminant 2 *in Color* (Red=0, Green=1, Mark=2).
+// Shape::Mark is 1 *in Shape*. The pre-fix bug made them collide.
+fn color_mark_match_arm() -> i64 {
+    let c: Color = Color::Mark
+    match c {
+        Color::Red => 10,
+        Color::Green => 20,
+        Color::Mark => 30,
+        _ => 0,
+    }
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    var bad: i64 = 0
+
+    // Call site 1 (PatEnum): the match must run the Color::Mark arm (30), not
+    // resolve Color::Mark through Shape's table row. Pre-fix: 20.
+    if color_mark_match_arm() != 30 { bad = bad + 1 }
+
+    // Call site 2 (ExprPath construction): the constructed value IS the enum's
+    // own discriminant. Color::Mark is 2; pre-fix it minted Shape's 1.
+    let constructed: i64 = Color::Mark
+    if constructed != 2 { bad = bad + 1 }
+
+    // The other Color variants must be untouched by the collision (0 and 1).
+    let red: i64 = Color::Red
+    let green: i64 = Color::Green
+    if red != 0 { bad = bad + 1 }
+    if green != 1 { bad = bad + 1 }
+
+    // And Shape's own Mark must still be 1 -- the fix must resolve BOTH sides,
+    // not merely reorder which enum wins the collision (see the dedicated
+    // reverse-control file for the match-arm direction).
+    let shape_mark: i64 = Shape::Mark
+    if shape_mark != 1 { bad = bad + 1 }
+
+    if bad != 0 {
+        print("enum_discriminant_collision: FAIL ")
+        print_int(bad)
+        print("\n")
+        return 1
+    }
+    print("enum_discriminant_collision: PASS\n")
+    0
+}

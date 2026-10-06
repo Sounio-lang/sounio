@@ -77,6 +77,118 @@ This table was re-audited against `origin/main` at `8c6631a2a` on 2026-05-21, af
 > lean_single-scoped claim until someone runs the suite under Madaros end-to-end and records the
 > result. Cite rows accordingly: "repo-backed, verified under lean_single" is accurate; "repo-backed"
 > alone, read against `CLAUDE.md`'s default-engine framing, is not.
+>
+> **Superseded in part 2026-10-06 (P0.5):** the suite gate is no longer pinned to one engine. Each
+> entry now runs on the engine where its claim is defined, 39 of the 53 on default Madaros; see
+> [Suite gate: engine per test](#suite-gate-engine-per-test-p05-2026-10-06) below. The Seq<T>
+> premise for the old pin is stale: Madaros runs the gate's only Seq<T> entry
+> (`rapamycin_kaxi_fuse_prior`) and matches the closed-form posterior SD. Rows that cite the suite
+> gate are therefore "verified under the engine named for that entry", not "verified under lean_single".
+
+## Suite gate: engine per test (P0.5, 2026-10-06)
+
+`scripts/ci/dissertation_pbpk_suite_gate.sh` names an engine for each entry. Two engines are used:
+
+- **madaros**: `bin/madaros`, the default user-facing engine (`CLAUDE.md` §4). The gate compiles and
+  then runs the ELF, so PASS markers and the smoke byte count are measured on program output only.
+  The compiler banner is never counted.
+- **lean_single**: `scripts/ci/souc-seq-leansingle.sh`, a shim over `bin/souc-linux-x86_64` (a
+  2026-06-16 snapshot, *not* the current seed `bin/souc-lean-single-x86_64`). Measured: this ELF
+  strips the Knowledge variance channel at `.value`, so `variance_of()` returns 0. The gate
+  therefore **refuses** any lean_single pin whose source calls `variance_of`/`uncertainty_of`. The
+  pin fails without running, because such a claim would be vacuous on this engine.
+
+Rule: an entry runs on Madaros if it passes there. Otherwise it runs on lean_single, and only
+after checking that its claim does not read the compiler-native variance channel.
+
+How it was measured: every entry was run on main `67cbf8797` on three engines at the gate's 90 s
+budget. The third engine, the current lean_single seed, is a reference only. Results are given as
+rc, then whether a PASS marker was printed, then wall time on the workspace with 6 runs in
+parallel. The re-run commands are in the PR that introduced this section.
+
+| # | entry | kind | **engine** | Madaros | lean_single shim | lean_single seed (ref.) | why this engine |
+|---:|---|---|---|---|---|---|---|
+| 1 | rapamycin_iso_budget | test | **madaros** | 0, PASS, 6 s | 0, PASS, 1 s (var=0, see note b) | 0, PASS, 1 s (ratio 0.55, note b) | Path (a) of the Knowledge-vs-Budget64 cross-check agrees within 0.2 % only on Madaros. Since P0.5 the cross-check fails closed (note b). |
+| 2 | rapamycin_rk4_budget | test | **madaros** | 0, PASS, 9 s | 1, `EPISTEMIC_FABRICATION` | 0, PASS, 1 s | The FAMILY_A_VAR_LIVE claim needs `variance_of` to survive `.value`. It does on Madaros, and the shim collapses it to 0. The self-check is kept. |
+| 3 | rapamycin_epistemic_pbpk | test | madaros | 0, PASS, 4 s | 0, PASS | 0, PASS | Passes on the default engine. |
+| 4 | rapamycin_epistemic_adaptive | test | **madaros** | 0, PASS, 6 s | 1, `EPISTEMIC_FABRICATION` | 0, PASS, 1 s | Same as #2. |
+| 5 | rapamycin_gum_vs_mc | test | madaros | 0, PASS, 4 s | 0, PASS | 0, PASS | Passes on the default engine. |
+| 6 | biomaterial_release | test | madaros | 0, PASS, 9 s | 0, PASS | 0, PASS | Passes on the default engine. |
+| 7 | rapamycin_clinical | test | lean_single | 182, `madaros: handles full` | 0, PASS, 3 s | 0, PASS, 8 s | Madaros aborts at run time. Does not read the variance channel. Numeric output is identical to the seed. |
+| 8 | gum_vs_mc | test | lean_single | 182, handles full | 0, PASS, 5 s | 0, PASS, 11 s | Same as #7. |
+| 9 | des_sirolimus | test | madaros | 0, PASS, 10 s | 0, PASS | 0, PASS | Passes on the default engine. |
+| 10 | rapamycin_pop_sim | test | lean_single | 182, handles full | 0, PASS, 6 s | 0, PASS, 13 s | Same as #7. |
+| 11 | haloperidol_d2_pet | test | madaros | 0, PASS, 5 s | 0, PASS | 0, PASS | Passes on the default engine. |
+| 12 | haloperidol_oral_pbpk | test | madaros | 0, PASS, 9 s | 0, PASS | 0, PASS | Passes on the default engine. |
+| 13 | d2_gum | test | lean_single | 182, handles full | 0, PASS, 4 s | 0, PASS, 9 s | Same as #7. Its GUM is explicit f64 arithmetic, with no `Knowledge`. |
+| 14 | d2_voi | test | lean_single | 182, handles full | 0, PASS, 4 s | 0, PASS, 9 s | Same as #7. |
+| 15 | dissertation_pbpk_rapamycin | test | madaros | 0, PASS, 7 s | 0, PASS | 0, PASS | Passes on the default engine. |
+| 16 | dissertation_oral_pd | test | lean_single | 1, E259 ×13 (type check) | 0, PASS | 0, PASS | Madaros refuses to compile it (`struct field is private`). No variance channel. |
+| 17 | dissertation_steady_state | test | lean_single | 1, E259/E137/E008 | 0, PASS | 0, PASS | Madaros refuses to compile it. |
+| 18 | dissertation_steady_state_fullvd | test | lean_single | 1, E259/E137/E008 | 0, PASS | 0, PASS | Madaros refuses to compile it. |
+| 19 | dissertation_scenario_gate | test | lean_single | 1, E259/E137 | 0, PASS, 11 s | 0, PASS, 26 s | Madaros refuses to compile it. |
+| 20 | rodgers_rowland_kp | test | madaros | 0, PASS | 0, PASS | 0, PASS | Passes on the default engine. |
+| 21 | gnn_rapamycin_inference | test | madaros | 0, PASS | 0, PASS | 0, PASS | Passes on the default engine. |
+| 22 | hybrid_ode_rapamycin | test | madaros | 0, PASS | 0, PASS | 0, PASS | Passes on the default engine. |
+| 23 | dissertation_hybrid_demo | test | madaros | 0, PASS | 0, PASS | 0, PASS | Passes on the default engine. |
+| 24 | tirzepatide_sc_pbpk | test | madaros | 0, PASS | 0, PASS | 0, PASS | Passes on the default engine. |
+| 25 | glp1_gipr_gum | test | madaros | 0, PASS | 0, PASS | 0, PASS | Passes on the default engine. |
+| 26 | dissertation_tirzepatide_demo | test | madaros | 0, PASS | 0, PASS | 0, PASS | Passes on the default engine. |
+| 27 | vancomycin_icu_pbpk | test | madaros | 0, PASS | 0, PASS | 0, PASS | Passes on the default engine. |
+| 28 | vancomycin_auc_gum | test | madaros | 0, PASS | 0, PASS | 0, PASS | Passes on the default engine. |
+| 29 | dissertation_vancomycin_demo | test | madaros | 0, PASS | 0, PASS | 0, PASS | Passes on the default engine. |
+| 30 | tacrolimus_oral_pbpk | test | madaros | 0, PASS, 9 s | 0, PASS | 0, PASS | Passes on the default engine. |
+| 31 | tacrolimus_trough_gum | test | madaros | 0, PASS, 9 s | 0, PASS | 0, PASS | Passes on the default engine. |
+| 32 | tacrolimus_ddi_module | test | madaros | 0, PASS | 0, PASS | 0, PASS | Passes on the default engine. |
+| 33 | tacrolimus_ddi_clinical | test | madaros | 0, PASS | 0, PASS | 0, PASS | Passes on the default engine. |
+| 34 | cross_drug_iso_budget | test | madaros | 0, PASS | 0, PASS | 0, PASS | Passes on the default engine. |
+| 35 | halo_pgx_gate | test | madaros | 0, PASS | 0, PASS | 0, PASS | Passes on the default engine. |
+| 36 | halo_pgx_gate_pass | test | madaros | 0, PASS | 0, PASS | 0, PASS | Passes on the default engine. |
+| 37 | olanzapine_d2_mtor | test | madaros | 0, PASS | 0, PASS | 0, PASS | Passes on the default engine. |
+| 38 | pop_pbpk_pd | test | madaros | 0, PASS | 0, PASS | 0, PASS | Passes on the default engine. |
+| 39 | epistemic_pbpk28 | test | madaros | 0, PASS, 9 s | 0, PASS | 0, PASS, 14 s | Passes on the default engine. The only numeric differences from the seed are in print format (`0.000000` vs `2.06e-25`). |
+| 40 | epistemic_pbpk28_hessian | test | madaros | 0, PASS, 15 s | 0, PASS | 0, PASS, 39 s | Same as #39. |
+| 41 | pbpk28_mc_cross_validation | test | lean_single | 182, handles full | 0, PASS, 34 s | 124 at 90 s (0, PASS at 615 s) | Madaros aborts at run time, and the seed needs about 7× the budget. Reads `Knowledge` struct fields directly, never `variance_of`. All 71 numbers are identical between the shim and the seed. |
+| 42 | pbpk28_mc_prior_family_sweep | test | lean_single | 182, handles full | 0, PASS, 16 s | 124 at 90 s (0, PASS at 294 s) | Same as #41. All 30 numbers are identical. |
+| 43 | rapamycin_kaxi_fuse_prior | test (Seq<T>) | **madaros** | 0, PASS, 4 s (`sd_post == sd_expected`) | 0, PASS | 0, PASS | This was the reason for the old pin ("Madaros lacks Seq<T>"), and it no longer holds: Madaros runs it and the exact closed-form check passes. It is the only Seq<T> entry in the gate. |
+| 44 | dissertation_demo | smoke | madaros | 0 | 0 | 0 | Passes on the default engine. The byte count is program output only. |
+| 45 | dissertation_interactive | smoke | madaros | 0 | 0 | 0 | Same as #44. |
+| 46 | dissertation_plot | smoke | madaros | 0 | 0 | 0 | Same as #44. |
+| 47 | dissertation_pgx_demo | smoke | madaros | 0 | 0 | 0 | Same as #44. |
+| 48 | dissertation_olanzapine | smoke | madaros | 0 | 0 | 0 | Same as #44. |
+| 49 | dissertation_168_poly | smoke | lean_single | 1, E259 ×6 | 0 | 0 | Madaros refuses to compile it. |
+| 50 | dissertation_pop_demo | smoke | madaros | 0 | 0 | 0 | Same as #44. |
+| 51 | pbpk28_rapamycin_clinical | pending | lean_single | 1, E001 | 0, PENDING | 0, PENDING | Madaros refuses to compile it (`this binding expects a different type`). |
+| 52 | pbpk28_semaglutide_clinical | pending | madaros | 0, PENDING | 0, PENDING | 0, PENDING | Passes on the default engine. |
+| 53 | pbpk28_sobol_pce | expected FAIL_HONEST | lean_single | 1, E259 (type check) | rc 2, XFAIL as recorded, 160 s | 2331-2392 s (recorded) | The recorded Saltelli defect cannot be observed on Madaros, which refuses the module. Does not read the variance channel. |
+
+Notes.
+
+- (a) **Why A was not done (move everything to Madaros).** The only Seq<T> entry already runs on
+  Madaros, so A reduces to "fix 13 non-Seq Madaros defects": 7 entries die at run time with
+  `madaros: handles full`, 6 are refused at type check (E259 ×≥100, E137, E008, E001), and
+  pbpk28_sobol_pce is refused (E259). That is not a small, local change.
+- (b) **rapamycin_iso_budget is fail-closed since P0.5.** Before P0.5 the cross-check between path
+  (a) (`variance_of` through Knowledge arithmetic) and path (b) (Budget64 finite differences) was
+  advisory, so a ~0 path (a) printed "Knowledge inactive … Budget64 stands alone" and still printed
+  PASS. Measured on the three engines:
+
+  | engine | std(Knowledge) blood / brain | std(Budget64) blood / brain |
+  |---|---|---|
+  | Madaros | 0.010034 / 0.002078 | 0.010014 / 0.002080 |
+  | lean_single shim | 0 / 0 | 0.010014 / 0.002080 |
+  | lean_single seed | 0.005541 / 0.001145 (ratio about 0.55) | 0.010014 / 0.002080 |
+
+  The test now refuses ~0 as `EPISTEMIC_FABRICATION`, fails on a ratio outside [0.9, 1.1], and
+  prints `FAMILY_A_VAR_LIVE`. It passes only on Madaros.
+- (c) **Known limitation: the shim's ELF is not the current lean_single seed.** The current seed
+  (`bin/souc-lean-single-x86_64`, refreshed 2026-09-28) keeps the variance channel through `.value`.
+  It passes #2 and #4, and its outputs match the shim's on every lean_single-pinned entry. It was
+  not adopted as the lean_single engine because it is 7-18× slower on the PBPK28 Monte-Carlo
+  entries (#41, #42), and #53 is recorded at 2331-2392 s on it.
+- (d) The variance-pin refusal is static. It checks the entry's own source, not imported modules.
+  All 14 lean_single-pinned sources were checked by hand: none calls `variance_of`/`uncertainty_of`,
+  and their numeric output equals the seed's, where the channel is live.
 
 | Claim | Status | Evidence | Allowed wording | Forbidden wording | Next gate |
 |---|---|---|---|---|---|
