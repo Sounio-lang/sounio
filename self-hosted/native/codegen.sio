@@ -7,7 +7,7 @@
 module native::codegen
 
 use parser::ast::{Name}
-use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_MAX_FUNCS, IR_MAX_STRINGS, BSS_BASE_LINUX, IR_STRATEGY_BSS_GLOBAL}
+use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_MAX_FUNCS, IR_MAX_STRINGS, IR_MAX_VREGS, ir_reg_count_is_valid, ir_function_regs_are_valid, BSS_BASE_LINUX, IR_STRATEGY_BSS_GLOBAL}
 use native::encode::*
 use native::aarch64::*
 use native::elf::*
@@ -1266,15 +1266,23 @@ fn nc_emit_u64_le(nc: &! NativeCompiler, val: i64) with Mut, Panic, Div {
 }
 
 fn nc_emit_mov_reg_imm32(nc: &! NativeCompiler, reg: i64, val: i64) with Mut, Panic, Div {
-    nc_emit_byte(nc, 0x48)
+    if reg >= 8 {
+        nc_emit_byte(nc, 0x49)
+    } else {
+        nc_emit_byte(nc, 0x48)
+    }
     nc_emit_byte(nc, 0xc7)
-    nc_emit_byte(nc, modrm_rm_imm(reg))
+    nc_emit_byte(nc, modrm_rm_imm(reg & 7))
     nc_emit_u32_le(nc, val)
 }
 
 fn nc_emit_mov_reg_imm64(nc: &! NativeCompiler, reg: i64, val: i64) with Mut, Panic, Div {
-    nc_emit_byte(nc, 0x48)
-    nc_emit_byte(nc, 0xb8 + reg)
+    if reg >= 8 {
+        nc_emit_byte(nc, 0x49)
+    } else {
+        nc_emit_byte(nc, 0x48)
+    }
+    nc_emit_byte(nc, 0xb8 + (reg & 7))
     nc_emit_u64_le(nc, val)
 }
 
@@ -3395,6 +3403,23 @@ pub fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) 
     c.fn_offsets[fn_index as usize] = c.code.len
     c.symbols = symbol_data_add_name(c.symbols, fn_index, func.name.buf, func.name.len)
 
+    // Validate executable input before builtin dispatch or any optimization.
+    // Bodyless builtin/extern signatures intentionally retain parameter
+    // metadata without allocated vregs, so only the count ceiling applies to
+    // those stubs. Every function with a body must satisfy the full register
+    // contract before any consumer can observe or transform it.
+    if !ir_reg_count_is_valid(func.reg_count) {
+        c.ir_vreg_overflow = true
+        c.ir_vreg_overflow_needed = func.reg_count
+        c.ir_vreg_overflow_limit = IR_MAX_VREGS
+        return c
+    }
+    if func.instr_count != 0 && !ir_function_regs_are_valid(&func) {
+        c.ir_validation_failed = true
+        c.ir_validation_reg_count = func.reg_count
+        return c
+    }
+
     // Builtin dispatch — emit hand-coded assembly, skip normal IR lowering
     // M3: print builtins
     if name_is_print_int(func.name) { return emit_builtin_print_int(c) }
@@ -3431,6 +3456,25 @@ pub fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) 
     var effective_func = func
     if func.compile_strategy == IR_STRATEGY_INSTRUMENTED {
         effective_func = ir_opt_apply_strategy(func)
+    }
+    if !ir_function_regs_are_valid(&effective_func) {
+        if !ir_reg_count_is_valid(effective_func.reg_count) {
+            c.ir_vreg_overflow = true
+            c.ir_vreg_overflow_needed = effective_func.reg_count
+            c.ir_vreg_overflow_limit = IR_MAX_VREGS
+        } else {
+            c.ir_validation_failed = true
+            c.ir_validation_reg_count = effective_func.reg_count
+        }
+        return c
+    }
+    // This legacy fallback still carries 2048-entry float classification
+    // tables. Keep it fail-closed until those remaining accesses are migrated.
+    if effective_func.reg_count > NC_MAX_VREGS {
+        c.ir_vreg_overflow = true
+        c.ir_vreg_overflow_needed = effective_func.reg_count
+        c.ir_vreg_overflow_limit = NC_MAX_VREGS
+        return c
     }
 
     let has_control_flow = native_func_has_control_flow(effective_func)
@@ -3484,8 +3528,12 @@ fn native_v2_local_frame_size(stack_slots: i64, spill_count: i64) -> i64 with Mu
 
 fn native_v2_load_temp_to_rax(nc: NativeCompiler, temp: i64) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
-    if temp < 0 || temp >= NC_MAX_VREGS {
+    if temp < 0 {
         c.code = emit_xor_rax_rax(c.code)
+        return c
+    }
+    if temp >= NC_MAX_VREGS {
+        c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(temp))
         return c
     }
     let preg = c.vreg_to_preg[temp as usize]
@@ -3504,7 +3552,11 @@ fn native_v2_load_temp_to_rax(nc: NativeCompiler, temp: i64) -> NativeCompiler w
 
 fn native_v2_store_rax_to_temp(nc: NativeCompiler, temp: i64) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
-    if temp < 0 || temp >= NC_MAX_VREGS {
+    if temp < 0 {
+        return c
+    }
+    if temp >= NC_MAX_VREGS {
+        c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(temp))
         return c
     }
     let preg = c.vreg_to_preg[temp as usize]
@@ -3648,7 +3700,7 @@ fn native_v2_run_machine_regalloc_ref_mut(nc: &! NativeCompiler, func: &MachineF
 fn native_v2_used_allocatable_preg_mask_ref(nc: &NativeCompiler, reg_count: i64) -> i64 {
     var mask: i64 = 0
     var v: i64 = 0
-    while v < reg_count {
+    while v < reg_count && v < NC_MAX_VREGS {
         mask = mask | x86_allocatable_mask_for_reg((*nc).vreg_to_preg[v as usize])
         v = v + 1
     }
@@ -3663,10 +3715,14 @@ fn native_compiler_set_fn_offset(nc: &! NativeCompiler, fn_index: i64, offset: i
     (*nc).fn_offsets = offsets
 }
 
-fn native_v2_emit_unary_code(nc: NativeCompiler, op: UnaryOp) -> NativeCompiler with Mut, Panic, Div {
+fn native_v2_emit_unary_code(nc: NativeCompiler, op: UnaryOp, is_float: bool) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
     if op == UnaryOp::OpNeg {
-        c.code = emit_neg_rax(c.code)
+        if is_float {
+            c.code = emit_btc_rax_63(c.code)
+        } else {
+            c.code = emit_neg_rax(c.code)
+        }
     } else if op == UnaryOp::OpNot {
         c.code = emit_not_bool_rax(c.code)
     } else if op == UnaryOp::OpBitNot {
@@ -3735,7 +3791,11 @@ fn native_v2_emit_machine_instr(nc: NativeCompiler, instr: MachineInstr) -> Nati
 
     if instr.opcode == MIR_OP_UNARY {
         c = native_v2_load_temp_to_rax(c, instr.src1.value)
-        c = native_v2_emit_unary_code(c, instr.un_op)
+        let is_float = if instr.aux.value == 1 || (instr.src1.value >= 0 && instr.src1.value < NC_MAX_VREGS && c.is_float_reg[instr.src1.value as usize] == 1) { true } else { false }
+        c = native_v2_emit_unary_code(c, instr.un_op, is_float)
+        if is_float && instr.dst.value >= 0 && instr.dst.value < NC_MAX_VREGS {
+            c.is_float_reg[instr.dst.value as usize] = 1
+        }
         return native_v2_store_rax_to_temp(c, instr.dst.value)
     }
 
@@ -4089,6 +4149,13 @@ fn native_v2_emit_machine_function(nc: NativeCompiler, func: MachineFunction, fn
 }
 
 fn native_v2_emit_machine_function_mut(nc: &! NativeCompiler, func: MachineFunction, fn_index: i64, fn_offset: i64) with Mut, Panic, Div {
+    var fi: i64 = 0
+    while fi < MIR_MAX_FLOAT_SLOTS && fi < NC_MAX_VREGS {
+        if func.is_float_slot[fi as usize] == 1 {
+            (*nc).is_float_reg[fi as usize] = 1
+        }
+        fi = fi + 1
+    }
     var i: i64 = 0
     while i < func.blocks[0].instr_count {
         let instr = func.blocks[0].instrs[i as usize]
@@ -4102,6 +4169,13 @@ fn native_v2_emit_machine_function_mut(nc: &! NativeCompiler, func: MachineFunct
 }
 
 fn native_v2_emit_machine_function_ref_mut(nc: &! NativeCompiler, func: &MachineFunction, fn_index: i64, fn_offset: i64) with Mut, Panic, Div {
+    var fi: i64 = 0
+    while fi < MIR_MAX_FLOAT_SLOTS && fi < NC_MAX_VREGS {
+        if (*func).is_float_slot[fi as usize] == 1 {
+            (*nc).is_float_reg[fi as usize] = 1
+        }
+        fi = fi + 1
+    }
     var i: i64 = 0
     while i < (*func).blocks[0].instr_count {
         let instr = (*func).blocks[0].instrs[i as usize]
@@ -4114,7 +4188,7 @@ fn native_v2_emit_machine_function_ref_mut(nc: &! NativeCompiler, func: &Machine
     }
 }
 
-fn native_v2_builtin_id_for_name(name: Name) -> i64 {
+fn native_v2_builtin_id_for_name(name: Name) -> i64 with Mut, Panic, Div {
     if name_is_print_int(name) { return 1 }
     if name_is_print_char(name) { return 2 }
     if name_is_print(name) { return 3 }
@@ -4163,6 +4237,20 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
 
 pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func: MachineFunction, fn_index: i64) -> NativeCompiler with Mut, Panic, Div, Alloc {
     var c = nc
+    // Bodyless builtin/extern stubs retain signature metadata without an
+    // allocated register body. Always enforce the count ceiling, but require
+    // full register structure only when executable IR is present.
+    if !ir_reg_count_is_valid(func.reg_count) || (func.instr_count != 0 && !ir_function_regs_are_valid(&func)) {
+        if !ir_reg_count_is_valid(func.reg_count) {
+            c.ir_vreg_overflow = true
+            c.ir_vreg_overflow_needed = func.reg_count
+            c.ir_vreg_overflow_limit = IR_MAX_VREGS
+        } else {
+            c.ir_validation_failed = true
+            c.ir_validation_reg_count = func.reg_count
+        }
+        return c
+    }
 
     // --- reset_function_state (inlined, no &!) ---
     c.return_jump_count = 0
@@ -4299,6 +4387,18 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
 }
 
 pub fn compile_ir_function_v2_into(nc: &! NativeCompiler, func: &IrFunction, machine_func: &MachineFunction, fn_index: i64) with Mut, Panic, Div, Alloc {
+    // Streaming callers also see intentionally bodyless builtin/extern stubs.
+    if !ir_reg_count_is_valid((*func).reg_count) || ((*func).instr_count != 0 && !ir_function_regs_are_valid(func)) {
+        if !ir_reg_count_is_valid((*func).reg_count) {
+            (*nc).ir_vreg_overflow = true
+            (*nc).ir_vreg_overflow_needed = (*func).reg_count
+            (*nc).ir_vreg_overflow_limit = IR_MAX_VREGS
+        } else {
+            (*nc).ir_validation_failed = true
+            (*nc).ir_validation_reg_count = (*func).reg_count
+        }
+        return
+    }
     reset_function_state_mut(nc)
 
     let function_offset = (*nc).code.len
@@ -4338,6 +4438,17 @@ pub fn compile_ir_function_v2_into(nc: &! NativeCompiler, func: &IrFunction, mac
 // sites. See CODGEN_DEAD_BODY_DELETION_2026-08-18.md for the full audit.
 
 fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_func: MachineFunction, fn_index: i64) with Mut, Panic, Div, Alloc {
+    if !ir_reg_count_is_valid(func.reg_count) || (func.instr_count != 0 && !ir_function_regs_are_valid(&func)) {
+        if !ir_reg_count_is_valid(func.reg_count) {
+            (*nc).ir_vreg_overflow = true
+            (*nc).ir_vreg_overflow_needed = func.reg_count
+            (*nc).ir_vreg_overflow_limit = IR_MAX_VREGS
+        } else {
+            (*nc).ir_validation_failed = true
+            (*nc).ir_validation_reg_count = func.reg_count
+        }
+        return
+    }
     reset_function_state_mut(nc)
 
     (*nc).fn_offsets[fn_index as usize] = (*nc).code.len
@@ -6250,6 +6361,9 @@ pub fn compile_native(module: &IrModule, target_spec: NativeTargetSpec) -> Nativ
 fn compile_to_elf(module: &IrModule, base_addr: i64) -> Elf64Binary with Mut, Panic, Div, Alloc {
     var nc = compiler_new()
     nc = compile_module(nc, module)
+    if nc.ir_vreg_overflow || nc.ir_validation_failed {
+        return elf_binary_new()
+    }
     let entry = trampoline_offset(&nc)
     var final_data = nc.data
     let min_data_len = nc.prof_counter_data_base + (nc.prof_counter_count * 8)
@@ -6261,6 +6375,9 @@ fn compile_to_elf(module: &IrModule, base_addr: i64) -> Elf64Binary with Mut, Pa
 }
 
 pub fn finalize_compiled_elf(nc: NativeCompiler, base_addr: i64) -> Elf64Binary with Mut, Panic, Div, Alloc {
+    if nc.ir_vreg_overflow || nc.ir_validation_failed {
+        return elf_binary_new()
+    }
     let entry = trampoline_offset(&nc)
     var final_data = nc.data
     let min_data_len = nc.prof_counter_data_base + (nc.prof_counter_count * 8)

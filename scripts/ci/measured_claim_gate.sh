@@ -21,11 +21,12 @@
 # machinery asserting more than it can check. See scripts/ci/fixtures/
 # measured_claims.tsv for the admission rule.
 #
-# WHAT WOULD KILL THIS GATE. It compares committed text against a command. If a
+# WHAT WOULD KILL THIS GATE. It compares a recorded value against a command. If a
 # claim_cmd silently returns empty -- file renamed, JSON key gone -- an
 # unguarded gate would compare "" to "" and pass. Both sides are therefore
 # required non-empty and strictly formatted (numeric or SHA-256 digest), and
-# the selftest drives that path directly.
+# the selftest drives that path directly. The witness census it reads is
+# derived at the top of this script rather than committed; see the block above.
 set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -33,7 +34,21 @@ cd "$ROOT_DIR" || exit 9
 . "$ROOT_DIR/scripts/lib/gate_assert.sh"
 gate_name "measured_claim_gate"
 
+# The witness census is derived, not committed. Two branches that each add a
+# run-pass witness edit the same single-line JSON and conflict on every merge,
+# and the conflict cannot be resolved by picking a side: the cardinality and
+# the corpus digest are functions of the tree. So the artifact is regenerated
+# here, in the mode that writes the census and runs nothing, and the two
+# witness_census_* rows below compare THAT against the tree. Committing the
+# JSON is what made Contracts red on any pull request that adds a test.
 CLAIMS="${SOUNIO_MEASURED_CLAIMS:-$ROOT_DIR/scripts/ci/fixtures/measured_claims.tsv}"
+# Derive the census whenever the claims being checked are the canonical ones,
+# even when a wrapper reached them by setting SOUNIO_MEASURED_CLAIMS to that
+# path explicitly. Skipping on any non-empty override would leave the two
+# witness_census_* rows reading a JSON that is no longer committed.
+if [[ "$CLAIMS" == "$ROOT_DIR/scripts/ci/fixtures/measured_claims.tsv" ]]; then
+  SOUNIO_WITNESS_SABOTAGE_CENSUS_ONLY=1 bash "$ROOT_DIR/scripts/ci/witness_declares_its_sabotage_gate.sh" >/dev/null || { echo "witness census could not be derived; the witness_census_* claims have nothing to read" >&2; exit 1; }
+fi
 BASELINE="${SOUNIO_MEASURED_CLAIMS_BASELINE:-$ROOT_DIR/scripts/ci/fixtures/measured_claims_baseline.txt}"
 
 require_file "$CLAIMS" "the claims table is missing — this gate checks nothing without it"

@@ -381,17 +381,10 @@ use `Unobserved<T>`.
 ## 11. Negative Numbers
 
 ```sio
-// WRONG — no unary minus operator
 let neg = -42
 let neg_f = -3.14
-
-// CORRECT
-let neg = 0 - 42
-let neg_f = 0.0 - 3.14
-
-// In expressions
-let diff = 0.0 - x * 2.0    // -(x * 2.0)
-let negated = 0.0 - val
+let negated = -val
+let diff = -(x * 2.0)
 ```
 
 ---
@@ -466,9 +459,6 @@ fn bar(x: impl Display) { ... }
 
 // ✗ Dynamic allocation for computation
 let v = Vec::new()    // Vec exists but don't use for math
-
-// ✗ Negative literal
-let x = -1.0          // use 0.0 - 1.0
 
 // ✗ Missing effects on nested calls
 fn outer() { inner_that_divides() }   // must add with Div, Panic

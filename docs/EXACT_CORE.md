@@ -242,7 +242,7 @@ i64-range coefficients; the unbounded-width integration is a compiler-capacity r
 The four compiler features the generic engine needed (generic-struct-return **#1**, bodyless
 trait-method-sig parsing **2a**, `impl Trait for Type` **2b**, trait-bounded dispatch **#3**) **all
 landed 2026-07-06** on the fable5 compiler-generic-F lane (PR #650, merge commit `2adb8f061`,
-against the prompt `docs/handoff/compiler_generic_F_engine_unblock_prompt.md`). The generic engine
+against a written compiler-lane prompt). The generic engine
 `stdlib/algebra/cayley_dickson_exact.sio` (`CDElementExact<F: ExactRing>`) now **compiles and runs**:
 
 - **`F = i64` — adopted and proven equivalent.** `tests/run-pass/cd_exact_generic_i64.sio` proves the
@@ -267,5 +267,4 @@ against the prompt `docs/handoff/compiler_generic_F_engine_unblock_prompt.md`). 
 i.e. array-of-struct coefficients — remains open, blocked by the filed non-generic `[struct;N]`
 aggregate-loop codegen bug (#651), not by the math, the parser, or the generics. Until #651 lands,
 unbounded-ℚ work continues via the common-denominator **integer** representation
-(`sedenion_cd_full16_q.sio`, `[i64;N]`, no array-of-struct — unaffected). See
-`docs/handoff/exact_engine_prereqs.md`.
+(`sedenion_cd_full16_q.sio`, `[i64;N]`, no array-of-struct — unaffected).
