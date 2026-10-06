@@ -1,5 +1,6 @@
 // Probe: what the clamp-free TR-BDF2 transport of ddi/multidrug28.sio buys on
-// a long coupled run. Evidence for PR #2695, not a gate.
+// a long coupled run, and the evidence for its default step. Evidence for
+// PR #2695, not a gate (its 4-day version is one; see below).
 // Dispatch: docs/audit/PBPK28_CN_FLOOR_CLAMP_MASS_INJECTION_DISPATCH_2026-09-26.md
 //
 // Scenario: 60 days (1440 h), three drugs on the gate fixtures' profiles
@@ -11,12 +12,19 @@
 //   C  gate V4's perpetrator (rapamycin transport, CL_c 10, fu 0.3, no CLint),
 //      Ki 0.05; IV infusion 5 mg/h on days 0-30, then off.
 // ARM selects the run (edit the constant, or use the sed line in "Reproduce"):
-//   0  TR-BDF2 + backward-Euler restart (the new default) at dt = 0.1 h
-//   1  legacy CN + floored restart (the previous default) at dt = 0.02 h
+//   0  TR-BDF2 + backward-Euler restart at md_default_dt() = 0.02 h (the
+//      default: transport and step)
+//   1  legacy CN + floored restart (the previous transport) at dt = 0.02 h
 //   2  TR-BDF2 at dt = 0.01 h (fine reference)
-//   3  TR-BDF2 at dt = 0.02 h (the transport swap alone, at the old dt)
-//   4  legacy at dt = 0.1 h (the dt change alone, on the old transport)
+//   3  TR-BDF2 at dt = 0.1 h (the coarser step the PR first proposed as
+//      default; rejected 2026-10-06 on this probe: −1.25 % / −0.81 % AUC)
+//   4  legacy at dt = 0.1 h (the coarse step on the old transport)
 //   5  TR-BDF2 at dt = 0.1 h with 4 coupling sweeps (md.iters = 4)
+// Measured 2026-10-06 (Madaros), AUC vs arm 2, drugs A / B: arm 0 −0.066 % /
+// −0.044 %; arm 1 −0.066 % / −0.043 %; arm 3 −1.25 % / −0.81 %; arm 4
+// −1.25 % / −0.82 % with 5.6e-5 mg clamped on B; arm 5 −1.25 % / −0.80 %.
+// The 4-day version of this scenario is a CI gate:
+// tests/run-pass/darwin_pbpk28_default_dt_gate.sio.
 // Prints per drug: AUC_blood (x1e6, 12 significant digits), the identity
 // residual |body + lumen + lost + elim - dose|/dose, and the clamped mass.
 //
@@ -43,15 +51,18 @@ fn add_victim(md: &!MultiDrug28, cl_c: f64) -> i32 with Mut, Panic {
 
 fn main() -> i32 with Mut, Div, Panic, IO {
     var md = md_new(true)
-    var dt = 0.1
-    if ARM == 1 {
-        md.method = md_method_cn_legacy()
-        dt = 0.02
-    }
+    var dt = md_default_dt()
+    if ARM == 1 { md.method = md_method_cn_legacy() }
     if ARM == 2 { dt = 0.01 }
-    if ARM == 3 { dt = 0.02 }
-    if ARM == 4 { md.method = md_method_cn_legacy() }
-    if ARM == 5 { md.iters = 4 }
+    if ARM == 3 { dt = 0.1 }
+    if ARM == 4 {
+        md.method = md_method_cn_legacy()
+        dt = 0.1
+    }
+    if ARM == 5 {
+        md.iters = 4
+        dt = 0.1
+    }
     let a = add_victim(&!md, 1.5)
     let b = add_victim(&!md, 0.5)
     var pc = pbpk28_params_rapamycin()
