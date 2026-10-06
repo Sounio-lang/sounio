@@ -39,7 +39,7 @@ def read_jsonl(path: Path) -> list[dict]:
     return rows
 
 
-# The code dataset is a snapshot of the test corpus, refreshed in its own
+# The training corpus and the code dataset are snapshots of the tree, refreshed in its own
 # snapshot/refresh-* PR (scripts/ci/generated_snapshot_guard.sh refuses it in any
 # other PR, because two PRs that both regenerate it always conflict). So a row
 # whose source has since been edited or deleted is drift, reported here and
@@ -145,9 +145,8 @@ def validate_corpus(path: Path) -> None:
     if len(markers) < 100:
         fail(f"too few file markers: {len(markers)}")
     missing = [marker for marker in markers if not (ROOT / marker).is_file()]
-    if missing:
-        preview = ", ".join(missing[:5])
-        fail(f"corpus has markers for missing files: {preview}")
+    for marker in missing:
+        stale(f"corpus has a marker for a missing file: {marker}")
     builder = (ROOT / "docs" / "training" / "finetune" / "prepare_corpus.sh").read_text(encoding="utf-8")
     listed = re.search(r"^EXCLUDE_FILES=\((.*?)\)", builder, flags=re.MULTILINE)
     if not listed:
@@ -170,7 +169,7 @@ def main() -> None:
     validate_code_dataset(args.code_dataset)
     validate_contrastive_dataset(args.contrastive_dataset)
     if STALE:
-        print(f"Notice: {len(STALE)} code-dataset row(s) lag the test corpus (snapshot drift, "
+        print(f"Notice: {len(STALE)} corpus/code-dataset entr(y/ies) lag the tree (snapshot drift, "
               "refreshed in a snapshot/refresh-* PR; fatal only with SOUNIO_DATASET_STRICT_SNAPSHOT=1):")
         for message in STALE[:5]:
             print(f"  {message}")
