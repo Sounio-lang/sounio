@@ -1,0 +1,186 @@
+// stdlib/quantum/born_channel.sio
+//
+// A Born probability with two channels. A filled channel has a numeric read.
+// An empty channel does not: the reader panics, and the stored payload is a
+// poison that is not a variance. Adding that poison by mistake cannot look
+// like the silent zero.
+//
+// Present zero is a different value. At Ry(π)|0⟩ the angle channel is filled
+// and its first-order half is 0. The shot channel of that same value is empty,
+// because no bit was drawn.
+//
+// One Epistemic used on two wires fills the covariance. Two Epistemics built
+// with the same numbers leave the covariance empty. vqe_gum2 cannot say this:
+// it fixes the input covariance to σ² on the diagonal.
+
+use epistemic::knowledge::{Epistemic}
+
+use quantum::epistemic_linear::{elin_ry_gum, LinearGum}
+
+use quantum::linear::{
+    quantum_state_new,
+    qubit_alloc,
+    ry,
+    measure_qubit,
+}
+
+pub struct BandChannel {
+    pub filled: i64,
+    pub has_split: i64,
+    pub variance: f64,
+    pub u_first: f64,
+    pub u_second: f64,
+}
+
+pub fn band_filled(c: BandChannel) -> i64 {
+    c.filled
+}
+
+pub fn band_variance(c: BandChannel) -> f64 with Panic {
+    if c.filled == 0 {
+        panic("Born channel absent")
+    }
+    c.variance
+}
+
+pub fn band_u_first(c: BandChannel) -> f64 with Panic {
+    if c.filled == 0 {
+        panic("Born channel absent")
+    }
+    if c.has_split == 0 {
+        panic("Born channel has no derivative split")
+    }
+    c.u_first
+}
+
+pub fn band_u_second(c: BandChannel) -> f64 with Panic {
+    if c.filled == 0 {
+        panic("Born channel absent")
+    }
+    if c.has_split == 0 {
+        panic("Born channel has no derivative split")
+    }
+    c.u_second
+}
+
+fn channel_absent() -> BandChannel {
+    BandChannel {
+        filled: 0,
+        has_split: 0,
+        variance: 1000000.0,
+        u_first: 1000000.0,
+        u_second: 1000000.0,
+    }
+}
+
+fn channel_angle(g: LinearGum) -> BandChannel {
+    let u1 = g.u_first
+    let u2 = g.u_second
+    BandChannel {
+        filled: 1,
+        has_split: 1,
+        variance: u1 * u1 + u2 * u2,
+        u_first: u1,
+        u_second: u2,
+    }
+}
+
+fn channel_cov(c: f64) -> BandChannel {
+    BandChannel {
+        filled: 1,
+        has_split: 0,
+        variance: c,
+        u_first: 1000000.0,
+        u_second: 1000000.0,
+    }
+}
+
+fn channel_shot(v: f64) -> BandChannel {
+    BandChannel {
+        filled: 1,
+        has_split: 0,
+        variance: v,
+        u_first: 1000000.0,
+        u_second: 1000000.0,
+    }
+}
+
+pub struct Born {
+    pub prob: f64,
+    pub bit_one: i64,
+    pub angle: BandChannel,
+    pub shot: BandChannel,
+}
+
+// Angle channel filled from one parameter-shift. Shot channel empty.
+pub fn born_prepared(angle: Epistemic) -> Born with Mut, Div, Panic {
+    let g = elin_ry_gum(angle)
+    Born {
+        prob: g.prob,
+        bit_one: 0 - 1,
+        angle: channel_angle(g),
+        shot: channel_absent(),
+    }
+}
+
+// One Bernoulli draw. Shot channel filled with p(1-p). Angle channel empty:
+// theta is an f64, so no preparation band was produced.
+pub fn born_one_shot(theta: f64, seed: f64) -> Born with Mut, Div, Panic {
+    var qs = quantum_state_new()
+    let q = ry(qubit_alloc(&!qs), &!qs, theta)
+    let m = measure_qubit(q, &!qs, seed)
+    let p_one = if m.outcome { m.probability } else { 1.0 - m.probability }
+    let bit = if m.outcome { 1 } else { 0 }
+    Born {
+        prob: p_one,
+        bit_one: bit,
+        angle: channel_absent(),
+        shot: channel_shot(p_one * (1.0 - p_one)),
+    }
+}
+
+pub struct BornPair {
+    pub pa: f64,
+    pub pb: f64,
+    pub angle_a: BandChannel,
+    pub angle_b: BandChannel,
+    pub cov: BandChannel,
+}
+
+// Both wires consume the same angle. Covariance is the first-order
+// pushforward ∂a ∂b σ², from one shift, not from adding two bands.
+pub fn born_pair_one_angle(angle: Epistemic) -> BornPair with Mut, Div, Panic {
+    let g = elin_ry_gum(angle)
+    let ch = channel_angle(g)
+    let c = g.d1 * g.d1 * angle.variance
+    BornPair {
+        pa: g.prob,
+        pb: g.prob,
+        angle_a: ch,
+        angle_b: ch,
+        cov: channel_cov(c),
+    }
+}
+
+// Two angles, even with equal numbers, are two channels. Covariance stays empty.
+pub fn born_pair_two_angles(a: Epistemic, b: Epistemic) -> BornPair with Mut, Div, Panic {
+    let ga = elin_ry_gum(a)
+    let gb = elin_ry_gum(b)
+    BornPair {
+        pa: ga.prob,
+        pb: gb.prob,
+        angle_a: channel_angle(ga),
+        angle_b: channel_angle(gb),
+        cov: channel_absent(),
+    }
+}
+
+// Sum of the filled pieces. An empty covariance is left out; it is not added as 0.
+pub fn pair_var_sum(pair: BornPair) -> f64 with Panic {
+    let va = band_variance(pair.angle_a)
+    let vb = band_variance(pair.angle_b)
+    if pair.cov.filled == 0 {
+        return va + vb
+    }
+    va + vb + 2.0 * band_variance(pair.cov)
+}

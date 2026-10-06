@@ -27,5 +27,13 @@ deposit the band into `Epistemic` in the function that built it.
 At θ = π the first-order band is zero. Teleportation leaves both the
 probability and its derivative unchanged.
 
+`born_channel.sio` keeps those two zeros apart. A filled channel has a numeric
+read. An empty channel does not: `band_variance` panics, and the unread payload
+is a poison, not a variance. `born_prepared` fills the angle channel and leaves
+the shot channel empty. `born_one_shot` does the opposite, after one
+`measure_qubit`. One `Epistemic` on two wires fills the covariance with
+∂a ∂b σ². Two `Epistemic` values with the same numbers leave that covariance
+empty, and `pair_var_sum` does not treat the hole as zero.
+
 Demo, independent C++ cross-check and the full list of limits:
 [`demos/quantum/`](../../demos/quantum/README.md).
