@@ -1,0 +1,70 @@
+//@ run-pass
+// tests/run-pass/fo_product_rule_call_evaluated_once.sio
+//
+// A call operand of `*` or `/` is evaluated exactly once.
+//
+// Madaros seeds an FO sensitivity channel for every pure-float `let`, so
+// `p = p * f()` reaches the multi-channel product rule in
+// lower_expr_variance_ref, which re-lowered both operand VALUES and emitted
+// the call a second time. With f a seeded RNG that consumed two draws per
+// sample: demos/hydrogen/mh_cascade_uq.sio printed MC mean P3 368.005190 on
+// Madaros vs 367.339816 on lean_single (2026-10-06). The legacy scalar path
+// had the same hazard and was closed by #1569; this pins the FO path.
+// Integer counters only, so the expected values are engine-independent.
+
+var CNT: i64 = 0
+
+fn tick() -> f64 with Mut {
+    CNT = CNT + 1
+    2.0
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var fails = 0
+
+    var p = 1.0
+    p = p * tick()
+    if CNT != 1 { println("FAIL var * call"); fails = fails + 1 }
+
+    CNT = 0
+    p = tick() * p
+    if CNT != 1 { println("FAIL call * var"); fails = fails + 1 }
+
+    CNT = 0
+    p = p * tick() * tick()
+    if CNT != 2 { println("FAIL var * call * call"); fails = fails + 1 }
+
+    CNT = 0
+    let c = 1.5
+    let b = c * tick()
+    if CNT != 1 { println("FAIL let = let * call"); fails = fails + 1 }
+
+    CNT = 0
+    let d = c / tick()
+    if CNT != 1 { println("FAIL let = let / call"); fails = fails + 1 }
+
+    CNT = 0
+    let e = (c + 0.0) * tick()
+    if CNT != 1 { println("FAIL let = (expr) * call"); fails = fails + 1 }
+
+    CNT = 0
+    var q = 1.0
+    var k = 0
+    while k < 3 {
+        q = q * sqrt(4.0) * tick()
+        k = k + 1
+    }
+    if CNT != 3 { println("FAIL loop var * builtin * call"); fails = fails + 1 }
+
+    // Values are unaffected either way; keep them observable.
+    if p != 16.0 || b != 3.0 || d != 0.75 || e != 3.0 || q != 64.0 {
+        println("FAIL values")
+        fails = fails + 1
+    }
+
+    if fails == 0 {
+        println("FO_PRODUCT_RULE_CALL_ONCE_OK")
+        return 0
+    }
+    1
+}

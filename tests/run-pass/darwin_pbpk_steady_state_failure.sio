@@ -1,0 +1,86 @@
+//@ run-pass
+//@ requires: madaros
+//@ timeout: 120
+//@ expect-stdout: SS_FAILURE_PROPAGATION_OK
+//@ description: Steady-state runner failure signal: a dosing interval that exhausts its step budget, counted over the whole interval rather than per checkpoint, fails the whole report, and a regimen outside 1..32 doses fails without running any dose
+// Regression for the steady-state runner's failure signal (PR #2698).
+// A dosing interval whose step budget runs out before a checkpoint must fail
+// the whole report; the budget counts accepted steps over the whole
+// interval. It used to record the partial trace, carry the state into later
+// doses and report success. A regimen size outside 1..32 must also fail
+// instead of running zero doses or truncating.
+//
+// Lives under tests/run-pass with `requires: madaros` so the current-source
+// Madaros CI gate (scripts/ci/madaros_changed_tests_gate.sh) runs it: PBPK is
+// Madaros-only, and a lean_single green is not evidence.
+
+use darwin_pbpk::absorption::{rapamycin_absorption_params}
+use darwin_pbpk::bbb::bbb_rapamycin::{bbb_rapamycin_params}
+use darwin_pbpk::drugs::rapamycin::{rapamycin_mean_params}
+use darwin_pbpk::scenarios::steady_state_runner::*
+use darwin_pbpk::tsit5_pbpk14::{ODEConfig14, tight_ode_config}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let sys_prm = rapamycin_mean_params()
+    let bbb_prm = bbb_rapamycin_params()
+    let abs_prm = rapamycin_absorption_params()
+    let regimen = rapamycin_qd_regimen(3)
+
+    // One step per checkpoint, each at most 1e-3 h. Checkpoints are
+    // tau/15 = 1.6 h apart, so the first one cannot be reached.
+    var starved = tight_ode_config()
+    starved.max_steps = 1
+    starved.dt_init = 0.001
+    starved.dt_max = 0.001
+    let bad = run_oral_multidose_cfg(sys_prm, bbb_prm, abs_prm, regimen, 0.02, starved)
+    if bad.success { return 1 }
+    if bad.n_doses_run != 0 { return 2 }
+    if bad.reached_ss { return 3 }
+
+    // The budget covers the whole interval, not each checkpoint. A fixed
+    // step (dt_init = dt_min = dt_max) with tolerances loose enough that no
+    // stable step is rejected. The explicit method's stability limit here
+    // was measured between 0.005 h (all 3 doses complete) and 0.01 h (fails),
+    // so h = 0.0025 h sits at least 2x inside it. That is ~640 steps per
+    // 1.6 h checkpoint (a step or two more with rounding at the checkpoint)
+    // and ~9600 per 24 h interval. max_steps = 3000 is ~4.7x above any one
+    // checkpoint and ~3.2x below the interval: the old per-checkpoint counter
+    // completed it, the interval budget must fail it. max_steps = 30000
+    // (~3x above the interval) is the control.
+    var fixed = tight_ode_config()
+    fixed.rtol = 1.0
+    fixed.atol = 1.0
+    fixed.dt_init = 0.0025
+    fixed.dt_min = 0.0025
+    fixed.dt_max = 0.0025
+    fixed.max_steps = 3000
+    let over = run_oral_multidose_cfg(sys_prm, bbb_prm, abs_prm, regimen, 0.02, fixed)
+    if over.success { return 11 }
+    if over.n_doses_run != 0 { return 12 }
+    fixed.max_steps = 30000
+    let within = run_oral_multidose_cfg(sys_prm, bbb_prm, abs_prm, regimen, 0.02, fixed)
+    if within.success == false { return 13 }
+    if within.n_doses_run != 3 { return 14 }
+
+    // Regimen sizes the report cannot hold fail up front: no doses run, no
+    // silent truncation to 32.
+    let none = run_oral_multidose_cfg(sys_prm, bbb_prm, abs_prm, rapamycin_qd_regimen(0), 0.02, tight_ode_config())
+    if none.success || none.n_doses_run != 0 { return 6 }
+    let negative = run_oral_multidose_cfg(sys_prm, bbb_prm, abs_prm, rapamycin_qd_regimen(0 - 1), 0.02, tight_ode_config())
+    if negative.success || negative.n_doses_run != 0 { return 7 }
+    let too_many = run_oral_multidose_cfg(sys_prm, bbb_prm, abs_prm, rapamycin_qd_regimen(33), 0.02, tight_ode_config())
+    if too_many.success || too_many.n_doses_run != 0 { return 8 }
+
+    // Control: the default step control completes every interval.
+    let good = run_oral_multidose_cfg(sys_prm, bbb_prm, abs_prm, regimen, 0.02, tight_ode_config())
+    if good.success == false { return 4 }
+    if good.n_doses_run != 3 { return 5 }
+    // SS cannot be declared before dose 5, so there is no plateau and no
+    // t_90 (it used to report 2 * tau regardless).
+    if good.reached_ss { return 9 }
+    // Exactly the documented sentinel; any other value, NaN included, fails.
+    if good.t_to_90pct_h != 0.0 - 1.0 { return 10 }
+
+    println("SS_FAILURE_PROPAGATION_OK")
+    0
+}

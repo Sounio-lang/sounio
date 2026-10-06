@@ -1,0 +1,1102 @@
+// stdlib/darwin_pbpk/ddi/multidrug28.sio — dynamic multi-drug interaction driver
+// on the PBPK28 (14 organs × {vascular, interstitial}) kernel.
+//
+// Each drug owns a PBPK28 state and is advanced by the pbpk28_hepatic kernel
+// (portal routing, interstitial metabolic sinks): by default with the
+// clamp-free TR-BDF2 step and a backward-Euler restart after every dosing
+// event (see "Transport" below). Drugs interact
+// only through shared enzymes: at site s ∈ {liver (organ 1), gut (organ 8)} the
+// intrinsic clearance of victim i by enzyme k is scaled by the reversible
+// competitive factor
+//
+//     f_{i,k,s} = 1 / (1 + L_{k,s} + Σ_{j≠i, Ki_{j,k}>0} C_u,j,s / Ki_{j,k})
+//
+// with the enzyme-site unbound concentration taken from the INTERSTITIAL layer,
+//     C_u,j,s = fu_{j,s} · C_t,j[organ(s)] / K_p,j[organ(s)],
+// the same convention the kernel's sink uses (k_t = CLint_u·fu/K_p), so a drug
+// "sees" at the enzyme exactly the concentration it is metabolised from.
+// L_{k,s} is an optional constant external inhibitor load Σ I/Ki (used by the
+// static-limit gate). Self-inhibition (saturable kinetics) is not modelled here.
+//
+// Transport (md.method). Default md_method_trbdf2(): each step of a drug is
+// one TR-BDF2 step (γ = 2 − √2; L-stable, second order, no negativity floor,
+// fails closed on an entry below −tol·scale; derivation in the TR-BDF2
+// section of pbpk28_hepatic.sio), except that the first step after a dosing
+// event of that drug is two backward-Euler half-steps (the restart, below).
+// This is method 6 of
+// docs/audit/PBPK28_CN_FLOOR_CLAMP_MASS_INJECTION_DISPATCH_2026-09-26.md.
+// md_method_cn_legacy() keeps the previous transport -- the floored CN step
+// and a floored backward-Euler pair after events -- for old-path controls and
+// order studies; its clamped mass is booked in `clamped` (md_clamped). The
+// floor injects mass whenever CN's weakly damped stiff modes go negative
+// (dispatch: +28 % blood AUC at dt = 0.05 h after a rapamycin bolus); the
+// default path has no floor, so `clamped` stays 0.
+//
+// Default step (md_default_dt()). dt = 0.02 h. Accuracy target: blood AUC
+// within 0.1 % of the dt = 0.01 h TR-BDF2 reference over 60 days for the
+// three-drug portal scenario of docs/audit/repro/pbpk28_trbdf2_payoff_probe.sio
+// (two CYP3A4 victims dosed orally q24h with mutual inhibition, plus an
+// infused perpetrator on days 0-30). Measured 2026-10-06 on Madaros: drug A
+// −0.066 %, drug B −0.044 %. dt = 0.1 h gives −1.25 % / −0.81 %, and the
+// error is in the inhibition coupling, not the transport: more coupling
+// sweeps do not remove it (−1.25 % / −0.80 % with md.iters = 4), and the
+// legacy CN path at dt = 0.1 h is off by the same amount. TR-BDF2 makes mass
+// exact at any dt; it does not license a coarser step for strongly coupled
+// scenarios. The target is gated on a 4-day version of the same scenario
+// (perpetrator infused on days 0-2), where the relative error is larger
+// because the horizon is shorter: target ≤ 0.1 %, measured −0.082 % /
+// −0.054 % at dt = 0.02 h and −1.55 % / −1.02 % at dt = 0.1 h
+// (tests/run-pass/darwin_pbpk28_default_dt_gate.sio).
+//
+// Quadrature. Blood AUC and elimination (central CL and every sink) are
+// accumulated with the weights of the step actually taken, on (x_n, interior
+// point, x_{n+1}): TR-BDF2 (w, w, d) with w = 1/(2(2−γ)), d = (1−γ)/(2−γ) on
+// (x_n, x_γ, x_{n+1}); the restart (0, 1/2, 1/2) on (x_n, midpoint, x_{n+1});
+// legacy CN (1/2, 0, 1/2). With those weights each step satisfies
+// x_{n+1} − x_n = dt·A·(quadrature of x) + dt·b exactly, so
+//   body + lumen + unabsorbed + eliminated = administered
+// holds to rounding at any dt (a trapezoid over a TR-BDF2 trajectory would not;
+// the dispatch's "second, independent error").
+//
+// Coupling across drugs per step (dt):
+//   1. oral absorption from each lumen into gut tissue (organ 8), integrated
+//      exactly over the step (lumen·(1 - e^{-ka·dt})), held as a constant input
+//      over the whole step (both stages, or both restart half-steps);
+//   2. factors f^n from the states at t_n;
+//   3. predictor: step every drug over dt (its own method: restart or
+//      TR-BDF2) with f^n; factors f* from the predicted end states;
+//      f^{n+1/2} = (f^n + f*)/2;
+//   4. corrector: step every drug from t_n with f^{n+1/2}.
+// The factors -- hence each drug's matrix -- are held constant across the
+// whole step, both TR-BDF2 stages included. That keeps the two stages on one
+// matrix and keeps the quadrature identity above exact; it freezes the
+// coefficients at (an O(dt^2) approximation of) the step midpoint, which
+// costs O(dt^3) locally, so the coupling is second order. (Evaluating factors
+// at the γ-point for stage 1 and at the end for stage 2 would also conserve
+// mass -- the identity survives per-stage sinks with the stage-1 weights on
+// x_n, x_γ and the stage-2 weight on x_{n+1} -- but gains no order.)
+// `iters` sets how many predictor/corrector sweeps are made: 0 is plain Lie
+// coupling (f^n frozen, first order), 1 is the predictor-corrector above (the
+// default), k > 1 iterates the sweep to its fixed point, the
+// midpoint-coefficient coupling f_use = (f^n + f(x_{n+1}))/2 with the same
+// transport. The convergence gate uses it as the reference that shares the
+// transport discretization.
+// Transport is stiff but linear and stays implicit per drug; the interaction is
+// nonlinear and is treated explicitly, then corrected.
+// Order, as measured by tests/run-pass/darwin_pbpk28_multidrug_order_gates.sio (V5) on
+// the physiological transport and the default TR-BDF2 path (2026-09-27, both
+// engines): PC against the iterated reference D ratios 3.31, 3.74 (dt 0.02 ->
+// 0.005, second order), Lie 2.09, 2.03 (first order); PC self-convergence,
+// transport and coupling together, 3.67, 3.82 (dt 0.01 -> 0.00125). On the
+// legacy CN path the same study gave 3.89, 3.89 / 1.96, 1.99 / 3.58, 3.77.
+// How small dt must be before the ratios settle is set by the strength of the
+// interaction nonlinearity, not by transport stiffness (adversarial review,
+// 2026-09-26, on the CN path: backward-Euler transport and a 100x smaller lung
+// PS leave the ratios unchanged; with the perpetrator dose cut from 100 to
+// 10 mg the PC ratios are 3.87-3.93 from dt = 0.04 h down). With strong
+// inhibition (C_u/Ki ~ 20) the ratios only settle below dt ~ 0.003 h; at
+// dt = 0.02 h the PC error is still ~500 times below Lie's (V5b).
+//
+// Restart. TR-BDF2's first stage is a CN step of length γ·dt and rings on a
+// jump in the state or the input; two backward-Euler half-steps (R(∞) = 0)
+// absorb the jump first. The restart is scheduled PER DRUG. A dosing event
+// of drug j (oral dose, IV bolus, change of IV rate) schedules it for j and
+// for every drug i != j whose transport the event makes non-smooth. Drug i's
+// equations depend on the other drugs only through its sinks
+// k_t,i,s = fu·Σ_k CLint_i,s,k·f_i,s,k / K_p, and f_i,s,k depends on drug j
+// exactly when Ki_j,k > 0. The event makes j's enzyme-site concentration
+// non-smooth (a bolus: a kink and a seconds-scale exchange transient; an oral
+// dose or a rate change: a jump in its derivative), so i's matrix inherits
+// that non-smoothness iff
+//   there is an enzyme k with Ki_j,k > 0 and CLint_i,s,k > 0 at some site s.
+// Every other drug keeps TR-BDF2, and its trajectory is bit-identical to a run
+// without j's event (gate V6e). The rule reads Ki and CLint at the time of the
+// dosing call. It was a single global flag before 2026-09-27: dosing any drug
+// switched every drug's next step to the restart, so a co-drug dose changed an
+// uncoupled victim through the integrator alone (PR #2695 review).
+// Finitely many first-order restart steps keep the global order at two
+// (Rannacher 1984, Numer. Math. 43:309-327).
+//
+// Engine note: under the default Madaros engine every struct literal with
+// array fields, every local coefficient array and the old portal block's
+// state/array copies cost a slot in a handle table that is never reclaimed
+// (capacity 2^22; exit 182 "handles full",
+// docs/audit/MADAROS_HANDLE_TABLE_182_LIFETIME_DISPATCH_2026-08-17.md). The
+// first version of this driver used ~73 handles per step for two drugs and died
+// after ~57,500 steps. The step now works in persistent scratch (fields below,
+// and PBPK28Work for the kernel). Measured 2026-09-26 on the committed Madaros
+// ELF: two drugs run 2.5 million steps and fifteen drugs 14 days at
+// dt = 0.02 h without exhaustion; per-construct probes of the step path
+// (kernel with and without portal routing, struct copies from fields) allocate
+// nothing over 5 million calls.
+//
+// Layout note: every per-drug quantity is a FLAT f64 array indexed
+// [drug·14 + organ], [drug·8 + site·4 + enzyme], [drug·4 + enzyme] or [drug].
+// Arrays of structs are avoided on purpose: measured 2026-09-26, a struct array
+// built with a repeat initializer ([mk(); N]) aliases all elements under the
+// committed Madaros prebuilt, and a write through `bag.st[i].field` is silently
+// discarded (or kills the process via `&!`) under lean_single. Flat f64 arrays in
+// a struct, mutated through `&!`, are correct on both engines.
+
+use darwin_pbpk::core::pbpk28_params::*
+use darwin_pbpk::pbpk28_hepatic::*
+use eisa::format::{is_finite_f64}
+
+const MD_MAX: i32 = 16
+const MD_NE: i32 = 4
+const MD_NS: i32 = 2
+
+// Enzyme and site codes.
+pub fn md_cyp3a4() -> i32 { return 0 }
+pub fn md_cyp2d6() -> i32 { return 1 }
+pub fn md_cyp2c9() -> i32 { return 2 }
+pub fn md_cyp2c19() -> i32 { return 3 }
+pub fn md_site_liver() -> i32 { return 0 }
+pub fn md_site_gut() -> i32 { return 1 }
+
+fn md_site_organ(site: i32) -> i32 { if site == 0 { return 1 } return 8 }
+
+// Transport methods (MultiDrug28.method).
+pub fn md_method_trbdf2() -> i32 { return 0 }
+pub fn md_method_cn_legacy() -> i32 { return 1 }
+
+// Default step (h) for md_step / md_run_to; accuracy target in the header
+// ("Default step"), gated by tests/run-pass/darwin_pbpk28_default_dt_gate.sio.
+pub fn md_default_dt() -> f64 { return 0.02 }
+
+pub struct MultiDrug28 {
+    pub n: i32,
+    pub portal: bool,
+    pub iters: i32,           // coupling sweeps: 0 Lie, 1 predictor-corrector, >1 iterated
+    pub method: i32,          // transport: md_method_trbdf2() (default) or md_method_cn_legacy()
+    // transport parameters, [drug·14 + organ]
+    pub v_ref: [f64; 224],
+    pub vasc_frac: [f64; 224],
+    pub kp: [f64; 224],
+    pub ps: [f64; 224],
+    pub q: [f64; 224],
+    pub cl_central: [f64; 16],
+    // enzyme-site parameters
+    pub fu_site: [f64; 32],   // [drug·2 + site] unbound fraction at the enzyme site
+    pub clint: [f64; 128],    // [drug·8 + site·4 + enz] unbound intrinsic clearance (L/h)
+    pub ki: [f64; 64],        // [drug·4 + enz] competitive Ki (unbound, mg/L); <= 0: not an inhibitor
+    pub ext_load: [f64; 8],   // [site·4 + enz] constant external load Σ I/Ki
+    // absorption and dosing
+    pub fa: [f64; 16],
+    pub ka: [f64; 16],        // 1/h
+    pub iv_rate: [f64; 16],   // mg/h into blood
+    // state
+    pub cv: [f64; 224],
+    pub ct: [f64; 224],
+    pub lumen: [f64; 16],     // mg awaiting absorption (already × fa)
+    // accounting
+    pub dose_in: [f64; 16],   // mg administered (oral + IV)
+    pub lost: [f64; 16],      // mg never absorbed ((1 - fa) × oral dose)
+    pub elim: [f64; 16],      // mg eliminated (central CL + all sinks)
+    pub auc_b: [f64; 16],     // blood AUC (mg·h/L), quadrature of the step taken (see header)
+    pub clamped: [f64; 16],   // mg added by the kernel's negativity clamp (legacy path only; 0 = exact)
+    pub neg_min_rel: [f64; 16], // most negative entry / scale of any stage or step (clamp-free path; <= 0)
+    pub t: f64,
+    pub restart: [f64; 16],   // 1.0: the drug's next step is the backward-Euler restart (see header)
+    pub stepped: f64,         // 1.0 once any step has been taken (kinetic setters then restart)
+    // step scratch (not model state): persistent so that a step allocates no
+    // managed handles under Madaros (see the engine note in the header)
+    pub f_n: [f64; 128],      // factors at t_n
+    pub f_star: [f64; 128],   // factors of the predicted state
+    pub f_use: [f64; 128],    // factors the step is taken with
+    pub ct_pred: [f64; 224],  // predicted interstitial layer
+    pub gut_rate: [f64; 16],  // absorption input of this step (mg/h)
+    pub sc_p: PBPKParams28,
+    pub sc_s0: PBPKState28,   // drug state at t_n
+    pub sc_s: PBPKState28,    // drug state being stepped
+    pub sc_h: PBPK28Hepatic,
+    pub sc_i: PBPK28Input,
+    pub sc_w: PBPK28Work,
+}
+
+pub fn md_new(portal: bool) -> MultiDrug28 {
+    MultiDrug28 {
+        n: 0, portal: portal, iters: 1, method: 0,
+        v_ref: [0.0; 224], vasc_frac: [0.0; 224], kp: [0.0; 224], ps: [0.0; 224], q: [0.0; 224],
+        cl_central: [0.0; 16],
+        fu_site: [0.0; 32], clint: [0.0; 128], ki: [0.0; 64], ext_load: [0.0; 8],
+        fa: [0.0; 16], ka: [0.0; 16], iv_rate: [0.0; 16],
+        cv: [0.0; 224], ct: [0.0; 224], lumen: [0.0; 16],
+        dose_in: [0.0; 16], lost: [0.0; 16], elim: [0.0; 16], auc_b: [0.0; 16], clamped: [0.0; 16],
+        neg_min_rel: [0.0; 16], t: 0.0, restart: [0.0; 16], stepped: 0.0,
+        f_n: [1.0; 128], f_star: [1.0; 128], f_use: [1.0; 128],
+        ct_pred: [0.0; 224], gut_rate: [0.0; 16],
+        sc_p: pbpk28_params_rapamycin(), sc_s0: pbpk28_state_zero(), sc_s: pbpk28_state_zero(),
+        sc_h: pbpk28_hepatic_none(), sc_i: pbpk28_input_none(), sc_w: pbpk28_work_new(),
+    }
+}
+
+// Registers a drug; returns its index. fu_b is used for both sites; override the
+// gut site with md_set_fu_site (enterocyte convention fu_gut = 1.0).
+//
+// p.cl_central must carry ONLY the clearance this driver does not model as an
+// enzyme sink (renal, biliary, proteolytic, or metabolism by an enzyme outside
+// the four here). It is copied unchanged. The stock profiles do not satisfy
+// that: pbpk28_params_rapamycin()'s cl_central = 12.4 L/h IS its hepatic CYP3A4
+// clearance (core/pbpk28_params.sio), so registering that profile as it stands
+// and then calling md_set_clint for the liver counts hepatic elimination twice.
+// Set p.cl_central to the residual before registering -- the gates in
+// tests/run-pass/darwin_pbpk28_*_gates.sio all overwrite it for this reason.
+// Domain check of a transport parameter set, as the kernel uses each field.
+// Returns 0 when valid, else the first failing field:
+//   1 v_ref[o] not finite > 0 (o = 0..13; blood volume divides every blood
+//     row, organ volumes split into the two layers);
+//   2 cl_central not finite >= 0 (a negative clearance is a mass source);
+//   3 kp[o] not finite > 0, organs 1..13 (the kernel divides by K_p);
+//   4 ps[o] not finite >= 0, organs 1..13 (0 is a valid "no exchange");
+//   5 q[o] not finite >= 0, organs 1..13 (0 is a valid unperfused organ);
+//   6 vasc_frac[o] not finite in (0, 1) strictly, organs 1..13. The kernel
+//     floors a zero layer volume at 1e-30 L, which makes that layer's rate,
+//     hence λ_max and the fail-closed tolerance, ~1e30 times larger (the
+//     check becomes vacuous), while pbpk28_total_mass books the raw zero
+//     volume -- so 0 and 1 are rejected here even though the kernel runs;
+//   7 an index-0 field the kernel does not read (kp, ps, q, vasc_frac of
+//     blood) not finite: they are copied and returned by md_params_of;
+//   8 portal routing on and Q_liver < Q_gut + Q_spleen + Q_pancreas (the
+//     kernel would panic on the first step; rejected at registration instead).
+//   9 v_ref[o]*vasc_frac[o] or v_ref[o]*(1-vasc_frac[o]) < 1e-30, organs
+//     1..13 (Copilot review, PR #2695, 2026-10-01, confirmed by direct
+//     repro): a v_ref small enough to put either raw layer volume below the
+//     kernel's 1e-30 floor is accepted by check 1 (v_ref only needs > 0) and
+//     by check 6 (vasc_frac strictly in (0,1) alone does not bound the
+//     product), but the solver then computes that layer's rate, hence its
+//     whole trajectory, as if the volume were the floored 1e-30 -- while
+//     pbpk28_total_mass (core/pbpk28_params.sio) books the true, unfloored
+//     volume, the same split check 6 already documents for vasc_frac = 0/1.
+//     Measured: v_ref[1] = 1e-32 (vasc_frac unchanged) passes checks 1-8,
+//     and one 0.001 h CN step with no sink or dosing moves total mass by
+//     0.23% (5.0 -> 4.988324) and the tissue concentration from 0 to
+//     10.169484 -- a real mass-conservation violation, not rounding.
+// NaN fails every test (each is written as a negated conjunction).
+pub fn md_params_error(p: PBPKParams28, portal: bool) -> i32 with Mut {
+    var o: i32 = 0
+    while o < 14 {
+        if !(is_finite_f64(p.v_ref[o]) && p.v_ref[o] > 0.0) { return 1 }
+        o = o + 1
+    }
+    if !(is_finite_f64(p.cl_central) && p.cl_central >= 0.0) { return 2 }
+    o = 1
+    while o < 14 {
+        if !(is_finite_f64(p.kp[o]) && p.kp[o] > 0.0) { return 3 }
+        if !(is_finite_f64(p.ps[o]) && p.ps[o] >= 0.0) { return 4 }
+        if !(is_finite_f64(p.q[o]) && p.q[o] >= 0.0) { return 5 }
+        if !(is_finite_f64(p.vasc_frac[o]) && p.vasc_frac[o] > 0.0 && p.vasc_frac[o] < 1.0) { return 6 }
+        o = o + 1
+    }
+    if !(is_finite_f64(p.kp[0]) && is_finite_f64(p.ps[0]) && is_finite_f64(p.q[0]) && is_finite_f64(p.vasc_frac[0])) { return 7 }
+    if portal {
+        // The kernel's own expression (pbpk28_hepatic_artery_flow panics on a
+        // negative value), so validation and kernel round identically.
+        if !(pbpk28_hepatic_artery_flow_unchecked(p) >= 0.0) { return 8 }
+    }
+    o = 1
+    while o < 14 {
+        let vv_raw = p.v_ref[o] * p.vasc_frac[o]
+        let vt_raw = p.v_ref[o] * (1.0 - p.vasc_frac[o])
+        if !(vv_raw >= 1.0e-30 && vt_raw >= 1.0e-30) { return 9 }
+        o = o + 1
+    }
+    return 0
+}
+
+pub fn md_add_drug(md: &!MultiDrug28, p: PBPKParams28, fu_b: f64, fa: f64, ka: f64) -> i32 with Mut, Panic {
+    let i = (*md).n
+    if i >= MD_MAX { panic("multidrug28: more than 16 drugs") }
+    // Out-of-range values would create negative mass: fa outside [0, 1] makes
+    // the lumen or the unabsorbed pool negative, ka < 0 makes the absorbed
+    // amount negative, fu_b outside (0, 1] is not a fraction.
+    if !(fu_b > 0.0 && fu_b <= 1.0) { panic("multidrug28: md_add_drug needs 0 < fu_b <= 1") }
+    if !(fa >= 0.0 && fa <= 1.0) { panic("multidrug28: md_add_drug needs 0 <= fa <= 1") }
+    if !(is_finite_f64(ka) && ka >= 0.0) { panic("multidrug28: md_add_drug needs a finite ka >= 0") }
+    if md_params_error(p, (*md).portal) != 0 { panic("multidrug28: md_add_drug: transport parameters out of domain (see md_params_error)") }
+    var o: i32 = 0
+    while o < 14 {
+        (*md).v_ref[i * 14 + o] = p.v_ref[o]
+        (*md).vasc_frac[i * 14 + o] = p.vasc_frac[o]
+        (*md).kp[i * 14 + o] = p.kp[o]
+        (*md).ps[i * 14 + o] = p.ps[o]
+        (*md).q[i * 14 + o] = p.q[o]
+        o = o + 1
+    }
+    (*md).cl_central[i] = p.cl_central
+    (*md).fu_site[i * 2] = fu_b
+    (*md).fu_site[i * 2 + 1] = fu_b
+    (*md).fa[i] = fa
+    (*md).ka[i] = ka
+    (*md).n = i + 1
+    return i
+}
+
+// Index validation. Every per-drug quantity is a flat array, so an index that
+// is out of range for its dimension but still inside the array silently writes
+// ANOTHER drug's slot: drug 0 with site 2 lands on drug 1's liver fraction,
+// drug 0 with enzyme 4 on drug 1's first Ki. These reject that before the write.
+fn md_check_drug(md: &MultiDrug28, drug: i32) with Panic {
+    if drug < 0 || drug >= (*md).n { panic("multidrug28: drug index is not a registered drug") }
+}
+
+fn md_check_site(site: i32) with Panic {
+    if site < 0 || site >= MD_NS { panic("multidrug28: site must be md_site_liver() or md_site_gut()") }
+}
+
+fn md_check_enz(enz: i32) with Panic {
+    if enz < 0 || enz >= MD_NE { panic("multidrug28: enzyme code out of range") }
+}
+
+// Kinetic setters after integration has started (PR #2695 review). A change of
+// fu, CLint, Ki or an external load moves sink coefficients, which is a
+// discontinuity in the operator of every drug whose sink it touches; TR-BDF2
+// applied across it rings exactly as it does after a dose. So once a step has
+// been taken, a setter that actually changes a value schedules the
+// backward-Euler restart for each affected drug (md_restart_sinks_at). Before
+// the first step nothing has been integrated and nothing is scheduled, so
+// setup order leaves trajectories bit-identical; a call that writes the value
+// already stored is not an event either.
+//
+// Affected drugs: md_set_clint(i, s, k) and md_set_fu_site(i, s) change drug
+// i's own sink at site s; fu also scales i's contribution C_u = fu·C_t/K_p to
+// the inhibitor load at site s, so every drug with CLint at that site on an
+// enzyme i inhibits is affected too. md_set_ki(j, k) changes the factor of
+// every other drug with CLint on enzyme k at either site -- whatever the sign
+// of the old or new Ki, which covers switching inhibition on and off.
+// md_set_ext_load(s, k) changes the factor of every drug with CLint at (s, k).
+fn md_restart_sinks_at(md: &!MultiDrug28, skip: i32, site: i32, enz: i32) with Mut {
+    let n = (*md).n
+    var i: i32 = 0
+    while i < n {
+        if i != skip {
+            var hit = false
+            if site < 0 {
+                if (*md).clint[i * 8 + enz] > 0.0 || (*md).clint[i * 8 + 4 + enz] > 0.0 { hit = true }
+            } else {
+                if (*md).clint[i * 8 + site * 4 + enz] > 0.0 { hit = true }
+            }
+            if hit { (*md).restart[i] = 1.0 }
+        }
+        i = i + 1
+    }
+}
+
+// Has `drug` a positive CLint at `site`, over any of the 4 enzymes -- i.e.
+// does its own sink actually depend on `fu_site[drug][site]`?
+fn md_has_clint_at_site(md: &MultiDrug28, drug: i32, site: i32) -> bool with Mut {
+    var k: i32 = 0
+    while k < MD_NE {
+        if (*md).clint[drug * 8 + site * 4 + k] > 0.0 { return true }
+        k = k + 1
+    }
+    return false
+}
+
+pub fn md_set_fu_site(md: &!MultiDrug28, drug: i32, site: i32, fu: f64) with Mut, Panic {
+    md_check_drug(md, drug)
+    md_check_site(site)
+    if !(fu > 0.0 && fu <= 1.0) { panic("multidrug28: md_set_fu_site needs 0 < fu <= 1") }
+    if fu == (*md).fu_site[drug * 2 + site] { return }
+    (*md).fu_site[drug * 2 + site] = fu
+    if (*md).stepped != 0.0 {
+        // fu only enters drug's own ODE through its sink k_t = CLint_u·fu/K_p
+        // (pbpk28_sink_from_clint): with no CLint at this site that sink is
+        // zero regardless of fu, so drug's own trajectory is unaffected and
+        // restarting it would perturb an otherwise-untouched step for no
+        // physical reason (Copilot review, PR #2695, 2026-10-01). fu still
+        // scales drug's contribution to the shared inhibitor load at this
+        // site (C_u = fu·C_t/K_p), so victims restart as before.
+        if md_has_clint_at_site(md, drug, site) { (*md).restart[drug] = 1.0 }
+        var k: i32 = 0
+        while k < MD_NE {
+            if (*md).ki[drug * 4 + k] > 0.0 { md_restart_sinks_at(md, drug, site, k) }
+            k = k + 1
+        }
+    }
+}
+
+// clint_u < 0 would make the interstitial sink a mass SOURCE.
+pub fn md_set_clint(md: &!MultiDrug28, drug: i32, site: i32, enz: i32, clint_u: f64) with Mut, Panic {
+    md_check_drug(md, drug)
+    md_check_site(site)
+    md_check_enz(enz)
+    if !(is_finite_f64(clint_u) && clint_u >= 0.0) { panic("multidrug28: md_set_clint needs a finite CLint_u >= 0") }
+    if clint_u == (*md).clint[drug * 8 + site * 4 + enz] { return }
+    (*md).clint[drug * 8 + site * 4 + enz] = clint_u
+    if (*md).stepped != 0.0 { (*md).restart[drug] = 1.0 }
+}
+
+// A finite Ki <= 0 stays the documented way to declare "not an inhibitor of
+// this enzyme". A non-finite Ki is rejected: NaN would disable inhibition
+// silently (NaN > 0 is false) and +Inf would be an undocumented second sentinel.
+pub fn md_set_ki(md: &!MultiDrug28, drug: i32, enz: i32, ki_u: f64) with Mut, Panic {
+    md_check_drug(md, drug)
+    md_check_enz(enz)
+    if !is_finite_f64(ki_u) { panic("multidrug28: md_set_ki needs a finite Ki (use Ki <= 0 for no inhibition)") }
+    if ki_u == (*md).ki[drug * 4 + enz] { return }
+    (*md).ki[drug * 4 + enz] = ki_u
+    if (*md).stepped != 0.0 { md_restart_sinks_at(md, drug, 0 - 1, enz) }
+}
+
+// load < 0 would raise the factor above 1 (a competitive ACTIVATOR), and
+// load <= -1 would make the denominator 1 + load zero or negative.
+pub fn md_set_ext_load(md: &!MultiDrug28, site: i32, enz: i32, load: f64) with Mut, Panic {
+    md_check_site(site)
+    md_check_enz(enz)
+    if !(is_finite_f64(load) && load >= 0.0) { panic("multidrug28: md_set_ext_load needs a finite load >= 0") }
+    if load == (*md).ext_load[site * 4 + enz] { return }
+    (*md).ext_load[site * 4 + enz] = load
+    if (*md).stepped != 0.0 { md_restart_sinks_at(md, 0 - 1, site, enz) }
+}
+
+// A dosing event of drug j schedules the backward-Euler restart for the next
+// step of j and of every drug whose transport it makes non-smooth (the
+// propagation rule is derived in the header, "Restart"). A call that adds
+// nothing is not an event: a zero dose, or a rate equal to the current one,
+// returns before touching any state, so it leaves the trajectory bit-identical
+// to no call. A real change of infusion rate is a step discontinuity in the
+// input and still schedules the restart.
+fn md_mark_restart(md: &!MultiDrug28, j: i32) with Mut {
+    (*md).restart[j] = 1.0
+    let n = (*md).n
+    var i: i32 = 0
+    while i < n {
+        if i != j {
+            var coupled = false
+            var k: i32 = 0
+            while k < MD_NE {
+                if (*md).ki[j * 4 + k] > 0.0 {
+                    if (*md).clint[i * 8 + k] > 0.0 || (*md).clint[i * 8 + 4 + k] > 0.0 { coupled = true }
+                }
+                k = k + 1
+            }
+            if coupled { (*md).restart[i] = 1.0 }
+        }
+        i = i + 1
+    }
+}
+
+// True when drug i's next step is the backward-Euler restart.
+pub fn md_restart_pending(md: &MultiDrug28, i: i32) -> bool with Panic {
+    md_check_drug(md, i)
+    return (*md).restart[i] != 0.0
+}
+
+// The dose domain shared by the predicates and the dosing calls: a finite
+// mg >= 0. Zero is admissible (a no-op).
+fn md_dose_mg_ok(mg: f64) -> bool {
+    return is_finite_f64(mg) && mg >= 0.0
+}
+
+// Whether md_dose_oral / md_dose_iv_bolus would accept a dose of mg: true
+// exactly when the call returns normally, because each dosing call panics
+// on precisely `!predicate` (after the same index check) before mutating
+// anything. The predicate checks the dose domain first (md_dose_mg_ok, the
+// one helper the calls use): until 2026-09-27 it checked only overflow, so a
+// finite negative dose that the call rejects answered true (PR #2695
+// review). It then checks that every cumulative quantity the call updates
+// stays finite (lumen, never absorbed, administered; blood concentration and
+// administered). Each is a sum of finite doses and can overflow to +Inf: two
+// oral doses of 1e308 made `administered` +Inf and the call returned
+// normally (PR #2695 review). Exposed so that a gate can test it (a panic
+// cannot be observed by the run-pass harness).
+// Both validate the drug index like every other public per-drug function
+// (md_check_drug): an unregistered slot below capacity would otherwise answer
+// from zero-filled storage -- measured 2026-09-27 on slot 3 of a one-drug
+// driver, oral "ok", bolus "not ok" (5 mg divided by a zero volume); PR #2695
+// review.
+pub fn md_oral_dose_ok(md: &MultiDrug28, drug: i32, mg: f64) -> bool with Mut, Panic {
+    md_check_drug(md, drug)
+    if !md_dose_mg_ok(mg) { return false }
+    let fa = (*md).fa[drug]
+    return is_finite_f64((*md).lumen[drug] + fa * mg) && is_finite_f64((*md).lost[drug] + (1.0 - fa) * mg) && is_finite_f64((*md).dose_in[drug] + mg)
+}
+
+pub fn md_bolus_dose_ok(md: &MultiDrug28, drug: i32, mg: f64) -> bool with Mut, Div, Panic {
+    md_check_drug(md, drug)
+    if !md_dose_mg_ok(mg) { return false }
+    return is_finite_f64((*md).cv[drug * 14] + mg / (*md).v_ref[drug * 14]) && is_finite_f64((*md).dose_in[drug] + mg)
+}
+
+pub fn md_dose_oral(md: &!MultiDrug28, drug: i32, mg: f64) with Mut, Panic {
+    if !md_oral_dose_ok(md, drug, mg) {
+        if !md_dose_mg_ok(mg) { panic("multidrug28: md_dose_oral needs a finite mg >= 0") }
+        panic("multidrug28: md_dose_oral: cumulative dose accounting would overflow")
+    }
+    if mg == 0.0 { return }
+    let fa = (*md).fa[drug]
+    (*md).lumen[drug] = (*md).lumen[drug] + fa * mg
+    (*md).lost[drug] = (*md).lost[drug] + (1.0 - fa) * mg
+    (*md).dose_in[drug] = (*md).dose_in[drug] + mg
+    // An oral dose is a discontinuity only if drug can actually enter: with
+    // fa = 0 everything is booked as never absorbed, and with ka = 0 the lumen
+    // never releases. Either way the body's equations are unchanged, so the
+    // dose is bookkeeping, not an event (PR #2695 review; gate V6d).
+    if fa * mg > 0.0 && (*md).ka[drug] > 0.0 { md_mark_restart(md, drug) }
+}
+
+pub fn md_dose_iv_bolus(md: &!MultiDrug28, drug: i32, mg: f64) with Mut, Div, Panic {
+    if !md_bolus_dose_ok(md, drug, mg) {
+        if !md_dose_mg_ok(mg) { panic("multidrug28: md_dose_iv_bolus needs a finite mg >= 0") }
+        panic("multidrug28: md_dose_iv_bolus: blood concentration or dose accounting would overflow")
+    }
+    if mg == 0.0 { return }
+    (*md).cv[drug * 14] = (*md).cv[drug * 14] + mg / (*md).v_ref[drug * 14]
+    (*md).dose_in[drug] = (*md).dose_in[drug] + mg
+    md_mark_restart(md, drug)
+}
+
+// A negative infusion rate would remove body mass and book it as dose.
+pub fn md_set_iv_rate(md: &!MultiDrug28, drug: i32, mg_per_h: f64) with Mut, Panic {
+    md_check_drug(md, drug)
+    if !(is_finite_f64(mg_per_h) && mg_per_h >= 0.0) { panic("multidrug28: md_set_iv_rate needs a finite mg/h >= 0") }
+    if mg_per_h == (*md).iv_rate[drug] { return }
+    (*md).iv_rate[drug] = mg_per_h
+    md_mark_restart(md, drug)
+}
+
+// Both reconstructors validate the drug index: an unregistered slot below
+// capacity would otherwise yield zero-filled parameters or state that look valid.
+pub fn md_params_of(md: &MultiDrug28, i: i32) -> PBPKParams28 with Mut, Panic {
+    md_check_drug(md, i)
+    var p = pbpk28_params_rapamycin()
+    var o: i32 = 0
+    while o < 14 {
+        p.v_ref[o] = (*md).v_ref[i * 14 + o]
+        p.vasc_frac[o] = (*md).vasc_frac[i * 14 + o]
+        p.kp[o] = (*md).kp[i * 14 + o]
+        p.ps[o] = (*md).ps[i * 14 + o]
+        p.q[o] = (*md).q[i * 14 + o]
+        o = o + 1
+    }
+    p.cl_central = (*md).cl_central[i]
+    return p
+}
+
+pub fn md_state_of(md: &MultiDrug28, i: i32) -> PBPKState28 with Mut, Panic {
+    md_check_drug(md, i)
+    var s = pbpk28_state_zero()
+    var o: i32 = 0
+    while o < 14 {
+        s.cv[o] = (*md).cv[i * 14 + o]
+        s.ct[o] = (*md).ct[i * 14 + o]
+        o = o + 1
+    }
+    return s
+}
+
+// exp(-y) for y >= 0: range reduction by halving, Taylor, repeated squaring.
+//
+// The halving loop cannot make progress for y = +Inf (halving infinity is
+// infinity), so it would spin forever. That is reachable from finite inputs:
+// ka and dt are each finite but ka·dt can overflow. exp(-y) is exactly 0.0 in
+// binary64 for y above ~746, so anything from 750 up -- including +Inf -- takes
+// the short-circuit, and every finite y below it needs at most 11 halvings.
+fn md_exp_neg(y: f64) -> f64 with Mut, Div, Panic {
+    if y >= 750.0 { return 0.0 }
+    if !(is_finite_f64(y) && y >= 0.0) { panic("multidrug28: md_exp_neg needs a finite y >= 0") }
+    var z = y
+    var m: i32 = 0
+    while z > 0.5 {
+        z = z * 0.5
+        m = m + 1
+    }
+    var term = 1.0
+    var sum = 1.0
+    var k: i32 = 1
+    while k < 25 {
+        term = term * (0.0 - z) / (k as f64)
+        sum = sum + term
+        k = k + 1
+    }
+    while m > 0 {
+        sum = sum * sum
+        m = m - 1
+    }
+    return sum
+}
+
+// Fraction absorbed over a step, 1 - exp(-y) = -expm1(-y), for y = ka·dt >= 0.
+// Computing it as 1 - md_exp_neg(y) cancels catastrophically for small y:
+// measured 2026-09-27 (PR #2695 review), relative error 2.2e-5 at y = 1e-12,
+// 11 % at 1e-16, and a result of exactly 0 at 1e-17 (nothing absorbed). For
+// y <= 1/2 the alternating series y - y^2/2 + y^3/6 - ... is summed directly
+// (25 terms; the first omitted term is below 0.5^26/26! < 1e-34 of y). Its
+// rounding: 4 flops per term, 100 in all, on terms whose absolute sum is
+// e^y - 1 = e^y·(1 - e^-y) <= 1.65 times the result, so the relative error
+// is below 100·1.65·u ≈ 165u ≈ 3.7e-14. For y > 1/2, exp(-y) <= 0.61 and
+// 1 - exp(-y) >= 0.39, so the subtraction amplifies md_exp_neg's relative
+// error by at most e^-y/(1 - e^-y) < 1.55 and the range-reduced form is kept.
+pub fn md_absorbed_fraction(y: f64) -> f64 with Mut, Div, Panic {
+    if !(y >= 0.0) { panic("multidrug28: md_absorbed_fraction needs y >= 0") }
+    if y > 0.5 { return 1.0 - md_exp_neg(y) }
+    var term = y
+    var sum = y
+    var k: i32 = 2
+    while k < 26 {
+        term = term * (0.0 - y) / (k as f64)
+        sum = sum + term
+        k = k + 1
+    }
+    return sum
+}
+
+// Inhibitor load L_{i,s,k} = ext_load + Σ_{j≠i, Ki_{j,k}>0} C_u,j,s / Ki_{j,k}
+// seen by victim i at (site s, enzyme k), from the state (from_pred = false:
+// ct) or the predicted state (true: ct_pred). This is the ONE implementation:
+// the step's factors (md_factors_into) and the inspection path
+// (md_factor_now) both call it, so they agree by construction.
+// The interstitial concentration is floored at zero here, and only here.
+// The clamp-free transport tolerates entries down to -tol·scale (rounding),
+// and such an entry would make the load negative -- the inhibitor an
+// ACTIVATOR, with a factor above 1 (measured 2026-09-27: 1 + 1.85e-11 for
+// C_t = -1e-15·C_b with Ki = 1e-6; PR #2695 review). The floor keeps every
+// factor in (0, 1]. The state itself is untouched, and so is mass
+// conservation, since the factors only scale a sink k >= 0. For
+// non-negative concentrations the arithmetic is the same as before, bit for
+// bit.
+// The sum is checked for overflow, here and therefore on both paths. Every
+// input is finite, but the sum need not be: ext_load = 1e308 plus one
+// contribution of 1e308 is +Inf, the factor 1/(1 + Inf) is exactly 0, and the
+// victim's sink disappears without a word (PR #2695 review). A non-finite load
+// panics instead.
+fn md_site_load(md: &MultiDrug28, from_pred: bool, i: i32, s: i32, k: i32) -> f64 with Mut, Div, Panic {
+    let n = (*md).n
+    let o = md_site_organ(s)
+    var load = (*md).ext_load[s * 4 + k]
+    var j: i32 = 0
+    while j < n {
+        let kij = (*md).ki[j * 4 + k]
+        if j != i && kij > 0.0 {
+            let c_raw = if from_pred { (*md).ct_pred[j * 14 + o] } else { (*md).ct[j * 14 + o] }
+            let c = if c_raw > 0.0 { c_raw } else { 0.0 }
+            let cu = (*md).fu_site[j * 2 + s] * c / (*md).kp[j * 14 + o]
+            load = load + cu / kij
+        }
+        j = j + 1
+    }
+    if !is_finite_f64(load) { panic("multidrug28: inhibitor load is not finite (overflow in ext_load + sum C_u/Ki)") }
+    return load
+}
+
+// Competitive factors 1/(1 + load) for every (victim, site, enzyme), in place:
+// source layer `from_pred` (false: the state ct, true: ct_pred), destination
+// `into_star` (false: f_n, true: f_star).
+fn md_factors_into(md: &!MultiDrug28, from_pred: bool, into_star: bool) with Mut, Div, Panic {
+    let n = (*md).n
+    var i: i32 = 0
+    while i < n {
+        var s: i32 = 0
+        while s < MD_NS {
+            var k: i32 = 0
+            while k < MD_NE {
+                let fk = 1.0 / (1.0 + md_site_load(md, from_pred, i, s, k))
+                if into_star { (*md).f_star[i * 8 + s * 4 + k] = fk } else { (*md).f_n[i * 8 + s * 4 + k] = fk }
+                k = k + 1
+            }
+            s = s + 1
+        }
+        i = i + 1
+    }
+}
+
+// f_use = f_n (Lie) or (f_n + f_star)/2 (predictor-corrector midpoint).
+fn md_set_f_use(md: &!MultiDrug28, midpoint: bool) with Mut {
+    var x: i32 = 0
+    while x < 128 {
+        if midpoint {
+            (*md).f_use[x] = 0.5 * ((*md).f_n[x] + (*md).f_star[x])
+        } else {
+            (*md).f_use[x] = (*md).f_n[x]
+        }
+        x = x + 1
+    }
+}
+
+// Loads drug i into the step scratch: parameters, state (twice: t_n and the
+// copy being stepped), sinks under f_use, and inputs.
+fn md_load(md: &!MultiDrug28, i: i32) with Mut, Div {
+    var o: i32 = 0
+    while o < 14 {
+        (*md).sc_p.v_ref[o] = (*md).v_ref[i * 14 + o]
+        (*md).sc_p.vasc_frac[o] = (*md).vasc_frac[i * 14 + o]
+        (*md).sc_p.kp[o] = (*md).kp[i * 14 + o]
+        (*md).sc_p.ps[o] = (*md).ps[i * 14 + o]
+        (*md).sc_p.q[o] = (*md).q[i * 14 + o]
+        (*md).sc_s0.cv[o] = (*md).cv[i * 14 + o]
+        (*md).sc_s0.ct[o] = (*md).ct[i * 14 + o]
+        (*md).sc_s.cv[o] = (*md).cv[i * 14 + o]
+        (*md).sc_s.ct[o] = (*md).ct[i * 14 + o]
+        o = o + 1
+    }
+    (*md).sc_p.cl_central = (*md).cl_central[i]
+    (*md).sc_h.portal = (*md).portal
+    var s: i32 = 0
+    while s < MD_NS {
+        let org = md_site_organ(s)
+        var clint_eff = 0.0
+        var k: i32 = 0
+        while k < MD_NE {
+            clint_eff = clint_eff + (*md).clint[i * 8 + s * 4 + k] * (*md).f_use[i * 8 + s * 4 + k]
+            k = k + 1
+        }
+        (*md).sc_h.k_t[org] = pbpk28_sink_from_clint(clint_eff, (*md).fu_site[i * 2 + s], (*md).kp[i * 14 + org])
+        s = s + 1
+    }
+    (*md).sc_i.in_b = (*md).iv_rate[i]
+    (*md).sc_i.in_t[8] = (*md).gut_rate[i]
+}
+
+// Steps the loaded drug i in place over dt with its method for this step:
+// the backward-Euler restart when one is due, otherwise TR-BDF2 (clamp-free,
+// fails closed on negativity) or, on the legacy path, the floored CN step
+// (the V0-verified extension of the original kernel) and the floored BE pair.
+// Every branch leaves x_n and the interior point in sc_w for md_advance.
+fn md_kernel_loaded(md: &!MultiDrug28, i: i32, dt: f64) with Mut, Div, Panic {
+    let p = (*md).sc_p
+    let hep = (*md).sc_h
+    let inp = (*md).sc_i
+    let rs = (*md).restart[i] != 0.0
+    if (*md).method == 1 {
+        if rs {
+            pbpk28_hepatic_be2_floor_step_ws(&!(*md).sc_s, p, hep, inp, dt, &!(*md).sc_w)
+        } else {
+            pbpk28_hepatic_cn_step_saved_ws(&!(*md).sc_s, p, hep, inp, dt, &!(*md).sc_w)
+        }
+    } else {
+        if rs {
+            pbpk28_hepatic_be2_step_ws(&!(*md).sc_s, p, hep, inp, dt, &!(*md).sc_w)
+        } else {
+            pbpk28_hepatic_trbdf2_step_ws(&!(*md).sc_s, p, hep, inp, dt, &!(*md).sc_w)
+        }
+    }
+}
+
+// Quadrature weights (x_n, interior, x_{n+1}) of the step drug i takes:
+// restart (0, 1/2, 1/2); TR-BDF2 (w, w, d); legacy CN (1/2, 0, 1/2).
+fn md_weights(md: &MultiDrug28, i: i32) -> (f64, f64, f64) with Div {
+    if (*md).restart[i] != 0.0 { return (0.0, 0.5, 0.5) }
+    if (*md).method == 1 { return (0.5, 0.0, 0.5) }
+    let w = pbpk28_trbdf2_w()
+    return (w, w, pbpk28_trbdf2_d())
+}
+
+// Predictor pass: step every drug under f_use into ct_pred.
+fn md_predict(md: &!MultiDrug28, dt: f64) with Mut, Div, Panic {
+    let n = (*md).n
+    var i: i32 = 0
+    while i < n {
+        md_load(md, i)
+        md_kernel_loaded(md, i, dt)
+        // The predictor's stages are stages of this step too: fold their most
+        // negative entry in before sc_w is reused, or md_neg_min_rel misses a
+        // negative that only the predictor produced (PR #2695 review).
+        if (*md).method != 1 {
+            if (*md).sc_w.neg_min_rel < (*md).neg_min_rel[i] { (*md).neg_min_rel[i] = (*md).sc_w.neg_min_rel }
+        }
+        var o: i32 = 0
+        while o < 14 {
+            (*md).ct_pred[i * 14 + o] = (*md).sc_s.ct[o]
+            o = o + 1
+        }
+        i = i + 1
+    }
+}
+
+// Absorption for this step: removes the absorbed mass from each lumen and sets
+// the constant gut-tissue input rate (mg/h) per drug.
+fn md_absorb(md: &!MultiDrug28, dt: f64) with Mut, Div, Panic {
+    let n = (*md).n
+    var i: i32 = 0
+    while i < n {
+        let lum = (*md).lumen[i]
+        if lum > 0.0 {
+            let absorbed = lum * md_absorbed_fraction((*md).ka[i] * dt)
+            let rate = absorbed / dt
+            // A representable positive `absorbed` can still round to a zero
+            // rate (Copilot review, PR #2695, 2026-10-01): e.g. absorbed =
+            // 5e-324 (the smallest positive subnormal) at dt = 2 gives
+            // absorbed/dt = 0 exactly. Removing `absorbed` from the lumen
+            // and then injecting nothing into the tissue would silently
+            // drop that mass rather than account for it -- validate the
+            // rate before mutating anything and fail closed instead.
+            if !(absorbed == 0.0 || rate > 0.0) {
+                panic("multidrug28: absorbed oral dose underflowed to a zero rate; cannot certify mass accounting")
+            }
+            (*md).lumen[i] = lum - absorbed
+            (*md).gut_rate[i] = rate
+        } else {
+            (*md).gut_rate[i] = 0.0
+        }
+        i = i + 1
+    }
+}
+
+// Corrector pass: advances every drug from t_n under f_use and books
+// elimination, dose and AUC with the step's own quadrature weights, then
+// clears the drug's restart flag.
+fn md_advance(md: &!MultiDrug28, dt: f64) with Mut, Div, Panic {
+    let n = (*md).n
+    var i: i32 = 0
+    while i < n {
+        md_load(md, i)
+        md_kernel_loaded(md, i, dt)
+        let (w0, wg, w1) = md_weights(md, i)
+        let cl = (*md).sc_p.cl_central
+        // Accumulate into locals and check before writing: the state is finite
+        // (the kernel checks it), but the cumulative sums can still overflow
+        // over many steps (AUC grows without bound in a closed system).
+        let e_new = (*md).elim[i] + pbpk28_hepatic_elim_quad_ws(&(*md).sc_s, &(*md).sc_w, cl, &(*md).sc_h, dt, w0, wg, w1)
+        let d_new = (*md).dose_in[i] + dt * (*md).sc_i.in_b
+        let a_new = (*md).auc_b[i] + pbpk28_hepatic_auc_quad_ws(&(*md).sc_s, &(*md).sc_w, dt, w0, wg, w1)
+        let c_new = (*md).clamped[i] + (*md).sc_w.clamped
+        if !(is_finite_f64(e_new) && is_finite_f64(d_new) && is_finite_f64(a_new) && is_finite_f64(c_new)) {
+            panic("multidrug28: step accounting (elimination, dose, AUC) would overflow")
+        }
+        (*md).elim[i] = e_new
+        (*md).dose_in[i] = d_new
+        (*md).auc_b[i] = a_new
+        (*md).clamped[i] = c_new
+        if (*md).method != 1 {
+            if (*md).sc_w.neg_min_rel < (*md).neg_min_rel[i] { (*md).neg_min_rel[i] = (*md).sc_w.neg_min_rel }
+        }
+        (*md).restart[i] = 0.0
+        var o: i32 = 0
+        while o < 14 {
+            (*md).cv[i * 14 + o] = (*md).sc_s.cv[o]
+            (*md).ct[i * 14 + o] = (*md).sc_s.ct[o]
+            o = o + 1
+        }
+        i = i + 1
+    }
+}
+
+// One coupled step of length dt with md.iters coupling sweeps (see header).
+fn md_coupled_step(md: &!MultiDrug28, dt: f64) with Mut, Div, Panic {
+    md_absorb(md, dt)
+    md_factors_into(md, false, false)
+    md_set_f_use(md, false)
+    var sweep: i32 = 0
+    while sweep < (*md).iters {
+        md_predict(md, dt)
+        md_factors_into(md, true, true)
+        md_set_f_use(md, true)
+        sweep = sweep + 1
+    }
+    md_advance(md, dt)
+}
+
+// A step must leave every drug's blood concentration finite. A finite but
+// absurd dt still overflows the kernel's coefficients (h·Q/V and friends), and
+// Inf/Inf or Inf-Inf then yields NaN: measured 2026-09-26, dt = 1e300 returned
+// a NaN body mass with no error, and NaN spreads through the blood row on the
+// next mixing step. Checking the 16 blood entries fails that closed instead of
+// handing back a number that is not one; the deep state is reached through
+// blood, so a NaN anywhere surfaces here within a step or two.
+fn md_check_finite_blood(md: &MultiDrug28) with Mut, Panic {
+    let n = (*md).n
+    var i: i32 = 0
+    while i < n {
+        if !is_finite_f64((*md).cv[i * 14]) { panic("multidrug28: step produced a non-finite blood concentration (dt too large?)") }
+        i = i + 1
+    }
+}
+
+// Configuration check made by every md_step, exposed so that a gate can test
+// it (a panic cannot be observed by the run-pass harness). Returns 0 when the
+// configuration is valid, 1 for an unknown md.method, 2 for md.iters < 0: a
+// negative sweep count ran zero sweeps and silently fell back to Lie coupling
+// (measured 2026-09-27: iters = -1 gave a victim AUC bit-identical to
+// iters = 0; PR #2695 review).
+pub fn md_config_error(md: &MultiDrug28) -> i32 {
+    if !((*md).method == 0 || (*md).method == 1) { return 1 }
+    if (*md).iters < 0 { return 2 }
+    return 0
+}
+
+// One coupled step from t to the representable time t_next > t. The step is
+// integrated over the ACTUAL clock delta h = fl(t_next - t), never over a
+// requested dt: transport, absorption, infusion, AUC and elimination all use
+// h, and the clock then becomes t_next. So the integrated time and the clock
+// advance agree (PR #2695 review: at t = 2^53, fl(t + 3) = t + 4, and a step
+// integrated over 3 h while the clock moved 4 h, so an infusion delivered 3 mg
+// for 4 h of clock). The subtraction is exact whenever t >= t_next - t
+// (Sterbenz), which covers every step after the first on any grid; otherwise
+// it carries one rounding, <= ulp(h)/2. The clock update is checked before
+// anything is mutated: t_next must be finite and ahead of t, so h > 0.
+fn md_step_to(md: &!MultiDrug28, t_next: f64) with Mut, Div, Panic {
+    let t = (*md).t
+    if !(is_finite_f64(t_next) && t_next > t) { panic("multidrug28: md_step: t + dt is not finite or does not advance t") }
+    let h = t_next - t
+    let cfg = md_config_error(md)
+    if cfg == 1 { panic("multidrug28: md.method must be md_method_trbdf2() or md_method_cn_legacy()") }
+    if cfg == 2 { panic("multidrug28: md.iters must be >= 0 (0 Lie, 1 predictor-corrector, >1 iterated)") }
+    md_coupled_step(md, h)
+    md_check_finite_blood(md)
+    (*md).t = t_next
+    (*md).stepped = 1.0
+}
+
+// Advances the clock to fl(t + dt) and integrates the step over the actual
+// clock delta h = fl(t + dt) - t (md_step_to), which differs from dt by the
+// rounding of the clock addition: |h - dt| <= ulp(t + dt)/2. At ordinary
+// clocks that is a relative 1.1e-16 of dt, or nothing; at t = 2^53 with
+// dt = 3 it is h = 4. t + dt can overflow to +Inf (two steps of 1e308), and
+// at a large t a small dt is absorbed by round-off (t + dt == t, h = 0),
+// which would leave md_run_to looping forever: both panic before anything is
+// mutated.
+pub fn md_step(md: &!MultiDrug28, dt: f64) with Mut, Div, Panic {
+    if !(is_finite_f64(dt) && dt > 0.0) { panic("multidrug28: md_step needs a finite dt > 0") }
+    md_step_to(md, (*md).t + dt)
+}
+
+// Advances to exactly t_end with steps of dt. A full step is taken only while
+// its endpoint on the actual clock does not pass the target, fl(t + dt) <=
+// t_end, compared exactly. Then whatever is left, rem = t_end - t, is
+// integrated as one more step whenever it is positive. No tolerance is
+// involved: because no full step passes t_end, rem >= 0, and a positive rem
+// between two representable times is at least one ulp of t, so the step
+// always advances the clock. Every hour of clock is therefore integrated, and
+// an infusion delivers exactly (to the rounding of each step) its rate times
+// the clock advance. The cost is that clock drift from accumulating t + dt
+// can leave a remainder of a few ulps, which is integrated as a tiny step
+// (e.g. ten steps of 0.1 from 0 end at 0.9999999999999999, and the 1.1e-16 h
+// left is stepped). That is harmless, and it is the price of never discarding
+// time. Earlier versions discarded remainders they judged to be round-off,
+// and every such rule dropped real time somewhere: a 1e-9·dt snap lost a
+// 5e-10 h remainder, a count fixed from span/dt overshot at t0 = 2^53, and a
+// drift allowance skipped 2 h of a 6 h target at t0 = 2^53 with dt = 4
+// (4 mg infused for 6 h of a 1 mg/h infusion; PR #2695 review).
+// Consequences for grid targets: (0.6, 0.02) is 30 steps, 29 of dt and a
+// last remainder 0.6 - t, because thirty accumulated steps of 0.02 put the
+// clock at 0.6000000000000002, past 0.6. (0.61, 0.02) is 30 steps plus a
+// 0.01 remainder, and (1.0000000005, 1.0) is a 1.0 step plus a 5e-10 step.
+// A dt far larger than the span takes one step of the whole span.
+// Every step, full or remainder, integrates the actual clock delta, not the
+// requested dt (md_step_to): a full step integrates h = fl(t + dt) - t, with
+// |h - dt| <= ulp(t + dt)/2, and the remainder step goes to t_end exactly and
+// integrates h = fl(t_end - t), exact when t >= t_end/2 and otherwise within
+// ulp(h)/2 of the true delta. At t = 2^53, run_to(t + 4, dt 3) is one step
+// that the clock rounds to 4 h, and it integrates 4 h. At ordinary clocks h
+// equals dt or differs from it in the last bit.
+// A non-finite t_end (NaN, +-Inf) panics, as does a non-finite or
+// non-positive dt. A finite target not strictly ahead of t is a no-op, so
+// the clock never moves backwards. The run ends with t == t_end exactly.
+// Spacing of the doubles in the binade of y >= 0 (finite): ulp(y) = 2^e·2^-52
+// for 2^e <= y < 2^(e+1) normal, and 2^-1074 below the normal range. The
+// power of two is found by halving or doubling from 1, which is exact.
+fn md_ulp(y: f64) -> f64 with Mut {
+    if y < 2.2250738585072014e-308 { return 4.9406564584124654e-324 }
+    var p = 1.0
+    if y >= 1.0 {
+        while p * 2.0 <= y { p = p * 2.0 }
+    } else {
+        while p > y { p = p * 0.5 }
+    }
+    return p * 2.220446049250313e-16
+}
+
+// Argument check of md_run_to, exposed so that a gate can test it (a panic
+// cannot be observed by the run-pass harness): 0 valid, 1 dt not a finite
+// positive number, 2 t_end not finite, 3 dt below the clock's resolution
+// somewhere on the way to a target ahead of t, 4 the current clock not
+// finite. md_run_to refuses on any nonzero code before any step, so nothing
+// is mutated. It deliberately does
+// not substitute a coarser step: that would change the integrator's
+// resolution without saying so.
+// Code 3 must hold for the whole run, not only at the starting clock (PR
+// #2695 review): from t = 2^53 - 1 toward 2^53 + 2 with dt = 1, the first
+// step is fine (ulp 1) and lands on 2^53, where fl(2^53 + 1) = 2^53 (ulp 2,
+// ties to even), so the next md_step panicked after the first had already
+// mutated the state. The check is therefore made where resolution is
+// coarsest. Every clock value x at which a full step can be taken lies in
+// [t, t_end]: steps only move forward, the loop steps only while
+// fl(x + dt) <= t_end, and a step that does not advance leaves x <= t_end.
+// So |x| <= Y = max(|t|, |t_end|), and since the spacing of doubles is
+// non-decreasing in |x|, the gap from x to its upper neighbour is at most
+// ulp(Y) (for x < 0 it can only be smaller). If dt > ulp(Y)/2, then x + dt
+// lies strictly beyond the midpoint between x and that neighbour, so
+// fl(x + dt) is at least the neighbour and exceeds x: every full step
+// advances the clock. The strict inequality is needed: at dt = ulp/2 exactly
+// the tie goes to the even neighbour, which is x itself half of the time, so
+// testing fl(x + dt) > x at one point would pass or fail by parity. The
+// remainder step then goes to t_end itself (md_step_to), which is ahead of
+// the clock, so it lands on t_end exactly and integrates h > 0.
+// Code 4: the current clock is not finite (PR #2695 review). md.t is a public
+// field; with t = NaN every comparison is false, so md_run_to returned
+// without stepping and reported nothing, and t = -Inf reached md_ulp(+Inf),
+// whose doubling loop never ends.
+pub fn md_run_to_error(md: &MultiDrug28, t_end: f64, dt: f64) -> i32 with Mut {
+    if !(is_finite_f64(dt) && dt > 0.0) { return 1 }
+    if !(is_finite_f64(t_end)) { return 2 }
+    let t = (*md).t
+    if !(is_finite_f64(t)) { return 4 }
+    if t_end > t {
+        let at = if t < 0.0 { 0.0 - t } else { t }
+        let ae = if t_end < 0.0 { 0.0 - t_end } else { t_end }
+        let y = if at > ae { at } else { ae }
+        if !(dt > 0.5 * md_ulp(y)) { return 3 }
+    }
+    return 0
+}
+
+pub fn md_run_to(md: &!MultiDrug28, t_end: f64, dt: f64) with Mut, Div, Panic {
+    let e = md_run_to_error(md, t_end, dt)
+    if e == 1 { panic("multidrug28: md_run_to needs a finite dt > 0") }
+    if e == 2 { panic("multidrug28: md_run_to needs a finite t_end") }
+    if e == 3 { panic("multidrug28: md_run_to: dt below clock resolution between t and t_end (dt <= ulp/2); refusing rather than stepping coarser") }
+    if e == 4 { panic("multidrug28: md_run_to: the current clock md.t is not finite") }
+    if !(t_end > (*md).t) { return }
+    while (*md).t + dt <= t_end {
+        md_step(md, dt)
+    }
+    if t_end > (*md).t {
+        md_step_to(md, t_end)
+    }
+}
+
+// Mass currently in the body (all organs, both layers) for drug i.
+// An unregistered slot below capacity would reconstruct a zero state and
+// report a plausible 0.0, so the index is validated like the setters'.
+pub fn md_body_mass(md: &MultiDrug28, i: i32) -> f64 with Mut, Div, Panic {
+    md_check_drug(md, i)
+    return pbpk28_total_mass(md_state_of(md, i), md_params_of(md, i))
+}
+
+// |body + lumen + lost + eliminated - administered| / administered for drug i.
+pub fn md_mass_residual(md: &MultiDrug28, i: i32) -> f64 with Mut, Div, Panic {
+    md_check_drug(md, i)
+    let d = (*md).dose_in[i]
+    if d <= 0.0 { return 0.0 }
+    let m = md_body_mass(md, i) + (*md).lumen[i] + (*md).lost[i] + (*md).elim[i]
+    let r = (m - d) / d
+    return if r < 0.0 { 0.0 - r } else { r }
+}
+
+// Mass (mg) the negativity clamp has added to drug i so far (legacy CN path;
+// always 0 on the default TR-BDF2 path, which has no clamp). Mass balance and
+// the discrete AUC identity are exact only while this is zero.
+pub fn md_clamped(md: &MultiDrug28, i: i32) -> f64 with Panic {
+    md_check_drug(md, i)
+    return (*md).clamped[i]
+}
+
+// Most negative entry of any stage or endpoint of drug i so far, relative to
+// its step's scale (default path; 0 when none was negative), counting the
+// predictor passes of every coupling sweep as well as the corrector. The kernel
+// panics below -tol, so a finished run has this >= -tol of every step.
+pub fn md_neg_min_rel(md: &MultiDrug28, i: i32) -> f64 with Panic {
+    md_check_drug(md, i)
+    return (*md).neg_min_rel[i]
+}
+
+// Current competitive factor seen by victim i at (site, enz).
+// All three codes are validated: site 2 would otherwise alias the next victim's
+// factor, and an unregistered victim would return an initialised scratch value.
+pub fn md_factor_now(md: &MultiDrug28, i: i32, site: i32, enz: i32) -> f64 with Mut, Div, Panic {
+    md_check_drug(md, i)
+    md_check_site(site)
+    md_check_enz(enz)
+    return 1.0 / (1.0 + md_site_load(md, false, i, site, enz))
+}

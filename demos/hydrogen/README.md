@@ -1,7 +1,6 @@
 # demos/hydrogen — Metal-Hydride Hydrogen Compression, Uncertainty-Quantified
 
-A Sounio demonstration written for **Dr. Emmanuel Stamatakis** (NCSR Demokritos,
-Integrated Hydrogen Laboratory / H2Lab; CYRUS S.A.).
+A Sounio demonstration written for **Dr. Emmanuel Stamatakis**.
 
 It takes the single-stage core of the metal-hydride (MH) thermal compression
 concept he has published on for a decade — and shows what Sounio adds on top of
@@ -30,6 +29,11 @@ ends with its `*_OK` marker (`MH_STAGE_UQ_OK`, `MH_CASCADE_UQ_OK`, ...).
 libm through `extern "C"`; until #1550 the Madaros native path dropped all but
 the first extern decl and mis-evaluated the exp/log builtins — issue #1547,
 fixed.)
+Until 2026-10-06 the cascade's Monte Carlo block also differed on Madaros
+(MC mean P3 368.005190 vs 367.339816): `p = p * mh_exp(..) * rand_gaussian(..)`
+called the RNG twice per stage because the FO product rule re-lowered its
+operands. Fixed; Madaros now prints byte-identical output, pinned by
+`tests/run-pass/fo_product_rule_call_evaluated_once.sio`.
 
 ### Engine status, measured
 
@@ -51,7 +55,7 @@ times as ±30 %.
 | `methanation_logk_gate` | OK | OK | yes | 5 s | 1 s |
 | `mh7_coupled_ceiling` | OK | OK | yes | 4 s | 1 s |
 | `mh7_reliability` | OK | OK | yes | 8 s | 3 s |
-| `mh_cascade_uq` | OK | OK | **no** — the three Monte Carlo lines differ (mean P3 368.005 vs 367.340 bar, reliability 80.41 vs 81.14 %); open | 6 s | 2 s |
+| `mh_cascade_uq` | OK | OK | yes (re-measured after merging main's FO product-rule fix; before it the three Monte Carlo lines differed) | 6 s | 2 s |
 | `mh_stage_uq` | OK | OK | yes | 5 s | 1 s |
 | `site_screening` | OK | OK | yes | 55 s | 62 s |
 | `smr_h2_lcoh` | OK | OK | yes | 5 s | 3 s |
