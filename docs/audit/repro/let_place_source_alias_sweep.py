@@ -129,40 +129,38 @@ FN_RE = re.compile(r"\bfn\s+(" + ID + r")\s*(?:<[^>(]*>)?\s*\(")
 
 def parse_structs_in(text):
     structs = {}
-    if True:
-        for m in STRUCT_RE.finditer(text):
-            name = m.group(1)
-            ob = m.end() - 1
-            body = text[ob + 1:match_brace(text, ob)]
-            body = "\n".join(strip_comment(l) for l in body.split("\n"))
-            fields = {}
-            for part in split_top(body):
-                part = part.strip()
-                fm = re.match(r"(?:pub\s+)?(" + ID + r")\s*:\s*(.+)$", part, re.S)
-                if fm:
-                    fields[fm.group(1)] = " ".join(fm.group(2).split())
-            structs.setdefault(name, fields)
+    for m in STRUCT_RE.finditer(text):
+        name = m.group(1)
+        ob = m.end() - 1
+        body = text[ob + 1:match_brace(text, ob)]
+        body = "\n".join(strip_comment(l) for l in body.split("\n"))
+        fields = {}
+        for part in split_top(body):
+            part = part.strip()
+            fm = re.match(r"(?:pub\s+)?(" + ID + r")\s*:\s*(.+)$", part, re.S)
+            if fm:
+                fields[fm.group(1)] = " ".join(fm.group(2).split())
+        structs.setdefault(name, fields)
     return structs
 
 
 def parse_fn_returns_in(text):
     rets = {}
-    if True:
-        for m in FN_RE.finditer(text):
-            # find matching ')' of params
-            depth, i = 0, m.end() - 1
-            while i < len(text):
-                if text[i] == "(":
-                    depth += 1
-                elif text[i] == ")":
-                    depth -= 1
-                    if depth == 0:
-                        break
-                i += 1
-            rest = text[i + 1:i + 300]
-            rm = re.match(r"\s*->\s*([^{]+?)\s*(?:with\b[^{]*)?\{", rest, re.S)
-            if rm:
-                rets.setdefault(m.group(1), " ".join(rm.group(1).split()))
+    for m in FN_RE.finditer(text):
+        # find matching ')' of params
+        depth, i = 0, m.end() - 1
+        while i < len(text):
+            if text[i] == "(":
+                depth += 1
+            elif text[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        rest = text[i + 1:i + 300]
+        rm = re.match(r"\s*->\s*([^{]+?)\s*(?:with\b[^{]*)?\{", rest, re.S)
+        if rm:
+            rets.setdefault(m.group(1), " ".join(rm.group(1).split()))
     return rets
 
 
@@ -322,8 +320,11 @@ def sweep(root, subdirs):
     texts = {}
     for p in sorted(set(all_files) | set(files)):
         try:
-            texts[p] = mask_comments(open(f"{root}/{p}", encoding="utf-8", errors="replace").read())
+            with open(f"{root}/{p}", encoding="utf-8", errors="replace") as fh:
+                texts[p] = mask_comments(fh.read())
         except OSError:
+            # Best effort: a file listed by git ls-files but unreadable (e.g. a
+            # dangling symlink) is skipped; the sweep reports on what it read.
             pass
     tables = SymbolTables(texts)
     rows = []
@@ -358,7 +359,6 @@ def sweep(root, subdirs):
                     byval.add(pm.group(1))
             first, last = line_no(ob), line_no(cb)
             loop_heads = []  # (line, end_line)
-            depth_stack = []
             for ln in range(first, last + 1):
                 raw = strip_comment(lines[ln - 1])
                 if re.match(r"^\s*(while|for|loop)\b", raw):
