@@ -6595,6 +6595,38 @@ fn lower_type_expr_is_f64(te: &TypeExpr) -> bool with Mut, Panic, Div {
     is_64 || is_32
 }
 
+// P0.8.2: `Hyper<Algebra, T>` has no native CPU value lowering. The checker
+// types `[..] as Hyper<Octonion, f64>`, `.eN` and `a * b`, but the lowering
+// treated the cast as a plain scalar move: measured on the shipped Madaros,
+// `([2.0, 1.0, 0, ..] as Hyper<Octonion, f64>).e1` printed 0.000000 (not 1),
+// `a + b` segfaulted and `a * b` died in the backend with rc 12. A cast is the
+// only way to make a Hyper value outside a GPU kernel (there is no constructor),
+// so refusing the cast closes the CPU value surface. The `--backend gpu` path
+// lowers Hyper through HLIR and never reaches this code.
+fn lower_type_expr_is_hyper(te: &TypeExpr) -> bool with Mut, Panic, Div {
+    if (*te).kind == TypeExprKind::TypeReference || (*te).kind == TypeExprKind::TypeRefMut {
+        match (*te).inner {
+            Some(inner) => { return lower_type_expr_is_hyper(&(*inner)) }
+            None => { return false }
+        }
+    }
+    if (*te).kind != TypeExprKind::TypeNamed { return false }
+    let seg = (*te).path.segments
+    seg.head_len == 5
+        && seg.head_buf[0] as i64 == 72  // H
+        && seg.head_buf[1] as i64 == 121 // y
+        && seg.head_buf[2] as i64 == 112 // p
+        && seg.head_buf[3] as i64 == 101 // e
+        && seg.head_buf[4] as i64 == 114 // r
+}
+
+fn lower_opt_type_is_hyper(opt: &Option<Box<TypeExpr>>) -> bool with Mut, Panic, Div {
+    match *opt {
+        Some(te) => lower_type_expr_is_hyper(&(*te)),
+        None => false,
+    }
+}
+
 // V0-E.4.1: f128/f256 must NOT ride the f64 scalar_kind=2 path (lean_single
 // greenwash). scalar_kind=5 marks wide-float locals/params so binary lower
 // can fail-closed until softfloat language lowering lands.
@@ -24605,6 +24637,15 @@ impl Lowerer {
     }
 
     fn lower_cast_expr_ref(self, e: &Expr) -> (Lowerer, i64) with Mut, Panic, Div, Alloc, IO {
+        if lower_opt_type_is_hyper(&e.cast_type) {
+            print("error: Hyper<...> values (e.g. Hyper<Octonion, f64>) are not implemented on the native CPU path of this engine\n")
+            print("  construction by `as`, arithmetic including multiplication, and component access would compute wrong results (P0.8.2 fail-closed)\n")
+            print("  help: use the stdlib octonion functions: algebra::octonion::oct_mul(&a, &b, &!out) over [f64; 8] (Fano convention, e1*e2 = e3)\n")
+            print("  note: the GPU path (`souc build --backend gpu`) lowers Hyper<...> separately and is unaffected\n")
+            var lo_hyper = self
+            lowerer_mark_hard_error(&! lo_hyper)
+            return (lo_hyper, 0)
+        }
         let sub = self.lower_opt_expr_ref(&e.left)
         let lo1 = sub.0
         let src_reg = sub.1
