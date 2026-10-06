@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Gate for scalar literals in `kernel fn` bodies through `souc build --backend gpu`
+# Gate for scalar literals, and for constructs the emitter used to drop, in
+# `kernel fn` bodies through `souc build --backend gpu`
 # (P0.8.1: a wrong number that prints is worse than a refusal).
 #
 # Before this gate, `let b = a * 2.0` emitted `mov.u64 %rd2, 0` and a multiply that
@@ -113,6 +114,22 @@ lowered int_lit_neg      'sub\.s64 %rd[0-9]+, %rd[0-9]+, %rd[0-9]+;' "sub\\.[su]
 
 refused bool_lit          'refus(ed|ing to emit PTX)'
 refused int_lit_float_ctx 'E004|cannot be combined'
+
+# Constructs the emitter used to drop without a word (follow-up to P0.8.1).
+# gpu_thread_id_y() was matched by prefix and read %tid.x.
+lowered thread_id_y       'mov\.u32 %r[0-9]+, %tid\.y;' 'tid\.x'
+# `var` locals: the stack slot was never allocated (st/ld through an unwritten %rd).
+refused var_local          'GPU codegen refused: a `var` local'
+# A call to a user fn vanished; the store wrote an unwritten register.
+refused unknown_call       'GPU codegen refused: a call .* \(call `scale`\)'
+# Not an intrinsic axis: refused as an unknown call, never read as %tid.x.
+refused thread_id_bad_axis 'GPU codegen refused: a call .* \(call `gpu_thread_id_w`\)'
+# An if-expression value (phi) is refused (HLIR already refuses this shape).
+refused if_value           'HLIR_LOWERING_REFUSED|GPU codegen refused'
+# A block expression's value is its tail; it used to be unit, so `y` stored 0.
+lowered block_value        'st\.global\.f64 \[%rd[0-9]+\], %fd[0-9]+;' 'st\.global\.s64'
+# `match` lowered only its first arm, unconditionally, for every thread.
+refused match_stmt         'GPU codegen refused: `match` in a kernel body'
 
 echo ""
 echo "Summary: pass=$PASS fail=$FAIL"
