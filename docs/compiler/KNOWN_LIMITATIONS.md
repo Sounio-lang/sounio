@@ -2,7 +2,7 @@
 topic_id: repo.docs.compiler.known-limitations
 authority: repo_only
 audience: contributors
-last_validated: 2026-09-22
+last_validated: 2026-10-06
 validated_by: claude
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.known-limitations
 -->
@@ -43,6 +43,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 | KL-20 | enum variants with payloads (`Circle(f64)`, `Rect { w: f64 }`): no runtime representation | both |
 | KL-21 | user fns named like compiler builtins: `pub` residual on Madaros; seed hijacks or rejects | both |
 | KL-18 | `Hyper<…>` CPU values: Madaros fail-closed; lean_single prints a wrong value (seed) | both |
+| KL-17 | #2773 same-named items across modules: seed binds first-loaded; Madaros refuses differing structs instead of keeping them apart | lean_single (fns, structs); madaros (types) |
 
 ## Ledger
 
@@ -339,6 +340,42 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
   change and a seed refresh (`scripts/dev/refresh_lean_seed.sh`), which is a
   founder-run step. Until then: do not use `Hyper<…>` values under
   `SOUNIO_SOUC_ENGINE=lean_single`.
+
+### KL-17 — #2773: same-named items in different modules
+
+- **Madaros, functions — CLOSED for plain `pub` and private fns (#2773).** A
+  module's unqualified call to its own function used to bind to a same-named
+  `pub fn` of another, first-loaded module (the merged IR keys functions by
+  bare name): measured `-14.5` expected, `3.0` printed, on both engines.
+  `self-hosted/compiler/private_fn_identity.sio` (pub phase) now renames
+  every non-first plain-`pub` definer to `N__m<idx>` and rebinds each
+  importer's unqualified, module-qualified and import-list references through
+  that importer's own `use` items (explicit import beats glob; own definition
+  beats both). Two explicit imports of different definers, or two globs of
+  different definers neither of which is the first-loaded one, are refused
+  with `error[module_name_resolution]`. Pins:
+  `tests/run-pass/madaros_module_local_name_resolution.sio`,
+  `tests/run-pass/madaros_module_local_name_import_rebind.sio`,
+  `tests/run-pass/madaros_module_local_name_glob.sio`,
+  `tests/compile-fail/madaros_module_name_ambiguous_import.sio`.
+- **Madaros, structs — refused, not resolved.** Two loaded modules that
+  define one struct name with *different* definitions are refused with
+  `error[module_struct_identity]` (struct layouts and the checker's struct
+  table are bare-name keyed, so they would be one type). Identical copies are
+  accepted. Pins: `tests/compile-fail/madaros_module_same_struct_differs.sio`,
+  `tests/run-pass/madaros_module_same_struct_identical_copies.sio`. Residual:
+  keeping two different same-named structs apart (module-qualified type
+  identity) is not implemented; same-named enums, type aliases and globals are
+  not checked at all.
+- **Madaros, residual fn shapes.** A name referenced by a module that does not
+  import it from any definer keeps the first-loaded binding (unchanged); a
+  re-export (`pub use`) is not followed; restricted-public (`pub(crate)` …)
+  collisions are refused as before.
+- **lean_single (seed) — OPEN.** `self-hosted/compiler/lean_single.sio`
+  still binds every same-named fn to the first-loaded module's body (the #2773
+  repro prints `3.0`), and for same-named structs it may run with the wrong
+  layout. Changing the seed needs the seed-refresh procedure (KL-9 last
+  bullet). The pins above are `//@ requires: madaros`. Pin for the seed: none.
 
 ## Registry-governed, not rungs
 
