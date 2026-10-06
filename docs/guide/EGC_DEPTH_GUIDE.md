@@ -106,7 +106,7 @@ read_conf:   mov rax, [r15 + rdi*8]   ; 0x49 0x8B 0x04 0xFF
 ```
 Only active when `CLI_R15_MONITOR != 0`.
 
-**Example:** `examples/science/epistemic_adaptive.sio`
+**Example:** `examples/_attic/science/epistemic_adaptive.sio` (quarantined 2026-10-06: `read_conf`/`update_conf` no longer resolve, E137 on both engines)
 
 ---
 
@@ -209,7 +209,7 @@ Dimension propagation — `compile_multiplicative()`, `compile_additive()`.
 `unit NAME;` parsing — Pass 0a in `compile_all()`.
 
 **Stdlib:** `stdlib/units/imperial.sio`, `cgs.sio`, `astronomical.sio`, `pharmacological.sio`, `atomic.sio`, `natural.sio`  
-**Examples:** `examples/units/basics.sio`, `examples/units/pharma_dose.sio`
+**Examples:** `examples/units/pharma_dose.sio`; `examples/_attic/units/basics.sio` (quarantined 2026-10-06: its `_suffix` literals no longer resolve, E137 on both engines)
 
 ---
 
