@@ -21,10 +21,10 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.contributor-gu
 
 ```bash
 # Example: Fix a bug in type inference
-vim self-hosted/check/type_inference.sio
+vim self-hosted/check/infer.sio
 
 # Or add a new feature
-vim self-hosted/parser/pattern_matching.sio
+vim self-hosted/parser/patterns.sio
 ```
 
 ### 2. Test Locally (Quick Validation)
@@ -45,8 +45,8 @@ make test-selfhost
 ```bash
 # Compile your changes and check if Stage 1 ≡ Stage 2
 ./scripts/sounio-verify compare \
-    <(cargo run -- compile self-hosted/check/type_inference.sio --emit-soir) \
-    <(cargo run -- run stage1.soir self-hosted/check/type_inference.sio --emit-soir)
+    <(cargo run -- compile self-hosted/check/infer.sio --emit-soir) \
+    <(cargo run -- run stage1.soir self-hosted/check/infer.sio --emit-soir)
 
 # Shortcut using Makefile:
 make verify-quick
@@ -92,7 +92,7 @@ SOUNIO_TRACE=1 ./scripts/poseidon stage1.soir
 
 ```bash
 # Standard commit workflow
-git add self-hosted/check/type_inference.sio
+git add self-hosted/check/infer.sio
 git commit -m "[check] Fix type inference for pattern matching"
 git push
 
@@ -154,8 +154,9 @@ vim self-hosted/native/lower_ir.sio
 #   IrOpcode::IrMyNewOp => { ... }
 
 # 5. Add tests
-vim self-hosted/ir/test_serialize.sio
-# Add roundtrip test for new opcode
+vim self-hosted/test_ir.sio
+# There is no dedicated serializer test file; add the write_opcode/read_opcode
+# roundtrip case for the new opcode to the IR test suite.
 
 # 6. Update documentation
 vim docs/architecture/SOIR_REFERENCE.md
@@ -219,7 +220,7 @@ for name in names {
 
 ```bash
 # 1. Compile to native binary
-cargo run -- compile-native self-hosted/test_simple.sio --output test.elf
+cargo run -- compile-native examples/hello.sio --output test.elf
 
 # 2. Run the native binary
 chmod +x test.elf
@@ -227,7 +228,7 @@ chmod +x test.elf
 echo $?  # Check exit code
 
 # 3. Compare output with VM execution
-cargo run -- run self-hosted/test_simple.sio > vm_output.txt
+cargo run -- run examples/hello.sio > vm_output.txt
 ./test.elf > native_output.txt
 diff vm_output.txt native_output.txt
 
@@ -296,27 +297,30 @@ echo $?  # Should be 42
 
 ## Project Structure
 
+Note: the per-module test files live at the top of `self-hosted/`, not inside the
+module directories.
+
 ```
 self-hosted/
+├── test_lexer.sio          # Lexer tests
+├── test_parser.sio         # Parser tests
+├── test_check.sio          # Type checker tests
+├── test_ir.sio             # IR tests
 ├── bootstrap/
 │   ├── driver.sio          # Main compilation driver
-│   └── verify.sio          # Bootstrap verification logic
+│   └── bootstrap_v0.sio    # Zero-import single-file bootstrap compiler v0
 ├── lexer/
-│   ├── lexer.sio           # Lexical analysis
-│   └── test_lexer.sio      # Lexer tests
+│   └── mod.sio             # Lexical analysis
 ├── parser/
 │   ├── parser.sio          # Syntax analysis
-│   ├── expr.sio            # Expression parsing
-│   ├── pattern.sio         # Pattern parsing
-│   └── test_parser.sio     # Parser tests
+│   ├── exprs.sio           # Expression parsing
+│   └── patterns.sio        # Pattern parsing
 ├── check/
-│   ├── type_check.sio      # Type checking
-│   ├── type_inference.sio  # Type inference
-│   └── test_check.sio      # Type checker tests
+│   ├── check.sio           # Type checking
+│   └── infer.sio           # Type inference
 ├── ir/
 │   ├── ir.sio              # IR definitions
-│   ├── serialize.sio       # SOIR serialization
-│   └── test_ir.sio         # IR tests
+│   └── serialize.sio       # SOIR serialization
 ├── vm/
 │   ├── vm.sio              # Bytecode interpreter
 │   └── test_vm.sio         # VM tests
@@ -429,7 +433,7 @@ cargo run -- run self-hosted/test_check.sio
 ```bash
 # Enable compiler phase tracing
 export SOUNIO_DEBUG=1
-cargo run -- compile self-hosted/test_simple.sio
+cargo run -- compile examples/hello.sio
 
 # Output shows each compilation phase:
 # [souc] Phase: Lexing
@@ -478,7 +482,7 @@ ls -lh stage1.soir
 time make verify > baseline.txt
 
 # 2. Make optimization changes
-vim self-hosted/check/type_inference.sio
+vim self-hosted/check/infer.sio
 
 # 3. Measure impact
 time make verify > optimized.txt
@@ -564,7 +568,7 @@ Before merging a PR:
 
 **A**: Use the module's test file directly:
 ```bash
-cargo run -- run self-hosted/check/test_check.sio
+cargo run -- run self-hosted/test_check.sio
 ```
 
 ### Q: Can I modify multiple modules in one commit?

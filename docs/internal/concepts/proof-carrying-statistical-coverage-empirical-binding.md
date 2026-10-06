@@ -274,3 +274,10 @@ instrument and measurement validation, population and temporal applicability,
 sealed out-of-sample validation, causal and benefit-harm evidence where action
 is contemplated, consent, and explicit clinical governance. None may be
 inferred from D9's current receipts.
+
+
+## Claims Forbidden
+
+- Do not claim clinical validity, ClinicalAuthority, or ClinicalRelease from this contract alone.
+- Do not claim compiler-wide integration or production cutover from fixture evidence alone.
+- Do not claim scientific truth or independent replay beyond the scoped witnesses bound in `bindings.tsv`.

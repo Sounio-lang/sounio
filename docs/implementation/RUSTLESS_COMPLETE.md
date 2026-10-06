@@ -166,7 +166,7 @@ This document describes the complete implementation of Sounio's Rustless Cutover
 **Files Created**:
 - `self-hosted/ir/serialize.sio` (503 LOC)
 - `self-hosted/ir/normalize.sio` (318 LOC)
-- `self-hosted/ir/test_serialize.sio` (tests)
+- `self-hosted/ir/test_serialize.sio` (tests) -- listed as created, but never committed; no such file exists in the tree
 
 #### SOIR v1 Binary Format
 
@@ -546,9 +546,9 @@ echo $?
 **Goal**: Document the new architecture and provide developer workflows.
 
 **Files Created**:
-- `docs/RUSTLESS_CUTOVER.md` (810 lines) - Workflow guide
-- `docs/SOIR_REFERENCE.md` (277 lines) - Format specification
-- `docs/DEVELOPER_WORKFLOW.md` (577 lines) - Daily workflows
+- `docs/implementation/RUSTLESS_CUTOVER.md` (810 lines) - Workflow guide
+- `docs/architecture/SOIR_REFERENCE.md` (277 lines) - Format specification
+- `docs/contributor-guide/DEVELOPER_WORKFLOW.md` (577 lines) - Daily workflows
 - `bootstrap/poseidon/README.md` (93 lines) - VM documentation
 - `crates/soir/README.md` (100 lines) - Library documentation
 
@@ -1469,7 +1469,7 @@ git diff HEAD~1 self-hosted/check/
 - `self-hosted/ir/serialize.sio` (503 LOC)
 - `self-hosted/ir/normalize.sio` (318 LOC)
 - `self-hosted/ir/verify.sio` (412 LOC)
-- `self-hosted/ir/test_serialize.sio` (tests)
+- `self-hosted/ir/test_serialize.sio` (tests) -- listed as created, but never committed; no such file exists in the tree
 - `self-hosted/native/*.sio` (6 files, 2,600 LOC)
 - `self-hosted/linker/mod.sio` (340 LOC)
 - `self-hosted/vm/*.sio` (2 files, 800 LOC)
@@ -1499,12 +1499,12 @@ git diff HEAD~1 self-hosted/check/
 - `crates/souc/tests/vm_selfhost.rs` (55 LOC)
 
 **Documentation**:
-- `docs/RUSTLESS_CUTOVER.md` (810 lines)
-- `docs/SOIR_REFERENCE.md` (277 lines)
-- `docs/DEVELOPER_WORKFLOW.md` (577 lines)
+- `docs/implementation/RUSTLESS_CUTOVER.md` (810 lines)
+- `docs/architecture/SOIR_REFERENCE.md` (277 lines)
+- `docs/contributor-guide/DEVELOPER_WORKFLOW.md` (577 lines)
 - `bootstrap/poseidon/README.md` (93 lines)
 - `crates/soir/README.md` (100 lines)
-- `docs/RUSTLESS_COMPLETE.md` (this file)
+- `docs/implementation/RUSTLESS_COMPLETE.md` (this file)
 
 **Total**: 29,539 LOC + 5,000 words documentation
 

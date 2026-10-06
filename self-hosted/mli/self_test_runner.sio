@@ -1,0 +1,402 @@
+// MLI S1 self-test runner — the S1 gate: unit tests on fixtures.
+//
+// Run: ./bin/souc run self-hosted/mli/self_test_runner.sio
+// Exit 0 iff every fixture passes.
+//
+// Fixture classes:
+//   - positive fixtures (well-formed MLI must verify OK), including the
+//     no-phi copy-insertion diamond and the R1 Knowledge/CD ops;
+//   - positive CONTROLS (focus-plan risk #6): fixtures where the verifier
+//     MUST fire a specific error code — cross-kind move, qd128/f128
+//     conflation, Int{128} exclusion, non-Bool branch condition, missing
+//     terminator, use-before-def across a branch, control opcode in the
+//     body, fadd-on-Knowledge, cd_mul without policy. A verifier that stays
+//     silent on any of these is broken, and this gate says so.
+
+use mli::ir::*
+use mli::builder::*
+use mli::verify::*
+use mli::dump::*
+
+fn expect(name: string, res: MliVerifyResult, want: i64) -> i64 with IO {
+    if res.code == want {
+        print("PASS: ")
+        print(name)
+        print("\n")
+        return 0
+    }
+    print("FAIL: ")
+    print(name)
+    print(" got code=")
+    print_int(res.code)
+    print(" want=")
+    print_int(want)
+    print(" block=")
+    print_int(res.block)
+    print(" idx=")
+    print_int(res.index)
+    print("\n")
+    1
+}
+
+fn build_fail(name: string) -> i64 with IO {
+    print("FAIL: ")
+    print(name)
+    print(" (builder refused a step it should accept)")
+    print("\n")
+    1
+}
+
+// A. Phase-2 golden shape (design §8.1): add1(x: f64) -> f64. Must verify
+//    OK. Dumped as the visual receipt for the text-dump deliverable.
+fn fixture_add1() -> i64 with IO, Mut, Panic {
+    var f = mli_func_new("add1", mli_kind_float(64))
+    let v0 = mli_add_arg(&!f, mli_kind_float(64))
+    let b0 = mli_new_block(&!f)
+    let v1 = mli_new_vreg(&!f, mli_kind_float(64))
+    if v0 < 0 || b0 < 0 || v1 < 0 { return build_fail("A add1") }
+
+    let dst = mli_vreg_opd(&f, v1)
+    let s1 = mli_vreg_opd(&f, v0)
+    let inst = mli_inst3(MLI_OP_FADD, dst, s1, mli_opd_imm_f64(1.0))
+    if !mli_emit(&!f, b0, inst) { return build_fail("A add1") }
+
+    let rv = mli_vreg_opd(&f, v1)
+    if !mli_set_term(&!f, b0, mli_term_ret(rv)) { return build_fail("A add1") }
+
+    let res = mli_verify_function(&f)
+    mli_dump_function(&f)
+    expect("A add1 verifies OK", res, MLI_VERR_OK)
+}
+
+// B. POSITIVE CONTROL — the load-bearing invariant. mov f64 <- i64 without a
+//    conversion op MUST fire MLI_VERR_CROSS_KIND_MOVE.
+fn fixture_cross_kind_move() -> i64 with IO, Mut, Panic {
+    var f = mli_func_new("crossmove", mli_kind_void())
+    let a = mli_add_arg(&!f, mli_kind_int(64, 1))
+    let b0 = mli_new_block(&!f)
+    let x = mli_new_vreg(&!f, mli_kind_float(64))
+    if a < 0 || b0 < 0 || x < 0 { return build_fail("B crossmove") }
+
+    let dst = mli_vreg_opd(&f, x)
+    let src = mli_vreg_opd(&f, a)
+    if !mli_emit(&!f, b0, mli_inst2(MLI_OP_MOV, dst, src)) { return build_fail("B crossmove") }
+    if !mli_set_term(&!f, b0, mli_term_ret_void()) { return build_fail("B crossmove") }
+
+    let res = mli_verify_function(&f)
+    expect("B cross-kind move FIRES", res, MLI_VERR_CROSS_KIND_MOVE)
+}
+
+// C. POSITIVE CONTROL — br condition must be Bool (Flags is not a kind, D2).
+fn fixture_br_not_bool() -> i64 with IO, Mut, Panic {
+    var f = mli_func_new("brbad", mli_kind_void())
+    let c = mli_add_arg(&!f, mli_kind_int(64, 1))
+    let b0 = mli_new_block(&!f)
+    let b1 = mli_new_block(&!f)
+    let b2 = mli_new_block(&!f)
+    if c < 0 || b0 < 0 || b1 < 0 || b2 < 0 { return build_fail("C brbad") }
+
+    let cond = mli_vreg_opd(&f, c)
+    if !mli_set_term(&!f, b0, mli_term_br(cond, b1, b2)) { return build_fail("C brbad") }
+    if !mli_set_term(&!f, b1, mli_term_ret_void()) { return build_fail("C brbad") }
+    if !mli_set_term(&!f, b2, mli_term_ret_void()) { return build_fail("C brbad") }
+
+    let res = mli_verify_function(&f)
+    expect("C br cond not Bool FIRES", res, MLI_VERR_BR_COND_NOT_BOOL)
+}
+
+// D. POSITIVE CONTROL — Int{128} is excluded from MLI R0 by design (D2):
+//    dedicated code, not a generic invalid-kind.
+fn fixture_int128_excluded() -> i64 with IO, Mut, Panic {
+    var f = mli_func_new("i128", mli_kind_void())
+    let b0 = mli_new_block(&!f)
+    let w = mli_new_vreg(&!f, mli_kind_int(128, 1))
+    if b0 < 0 || w < 0 { return build_fail("D i128") }
+    if !mli_set_term(&!f, b0, mli_term_ret_void()) { return build_fail("D i128") }
+
+    let res = mli_verify_function(&f)
+    expect("D Int128 exclusion FIRES", res, MLI_VERR_INT128_EXCLUDED)
+}
+
+// E1. POSITIVE CONTROL — IEEE float arithmetic on QD128 lanes MUST fire:
+//     qd128 is double-double family, not a hardware float format.
+fn fixture_qd128_arith() -> i64 with IO, Mut, Panic {
+    var f = mli_func_new("qdarith", mli_kind_void())
+    let q0 = mli_add_arg(&!f, mli_kind_qd128())
+    let q1 = mli_add_arg(&!f, mli_kind_qd128())
+    let b0 = mli_new_block(&!f)
+    let q2 = mli_new_vreg(&!f, mli_kind_qd128())
+    if q0 < 0 || q1 < 0 || b0 < 0 || q2 < 0 { return build_fail("E1 qdarith") }
+
+    let dst = mli_vreg_opd(&f, q2)
+    let s1 = mli_vreg_opd(&f, q0)
+    let s2 = mli_vreg_opd(&f, q1)
+    if !mli_emit(&!f, b0, mli_inst3(MLI_OP_FADD, dst, s1, s2)) { return build_fail("E1 qdarith") }
+    if !mli_set_term(&!f, b0, mli_term_ret_void()) { return build_fail("E1 qdarith") }
+
+    let res = mli_verify_function(&f)
+    expect("E1 fadd on QD128 FIRES", res, MLI_VERR_QD128_ARITH)
+}
+
+// E2. POSITIVE CONTROL — the D2 rule-1 conflation: mov between QD128 and
+//     IEEE Float{128} MUST fire its DEDICATED code. A silent f128 := qd128
+//     mapping is a semantic miscompile by construction.
+fn fixture_qd128_f128_conflation() -> i64 with IO, Mut, Panic {
+    var f = mli_func_new("qdconflate", mli_kind_void())
+    let q = mli_add_arg(&!f, mli_kind_qd128())
+    let b0 = mli_new_block(&!f)
+    let x = mli_new_vreg(&!f, mli_kind_float(128))
+    if q < 0 || b0 < 0 || x < 0 { return build_fail("E2 qdconflate") }
+
+    let dst = mli_vreg_opd(&f, x)
+    let src = mli_vreg_opd(&f, q)
+    if !mli_emit(&!f, b0, mli_inst2(MLI_OP_MOV, dst, src)) { return build_fail("E2 qdconflate") }
+    if !mli_set_term(&!f, b0, mli_term_ret_void()) { return build_fail("E2 qdconflate") }
+
+    let res = mli_verify_function(&f)
+    expect("E2 qd128<->f128 conflation FIRES", res, MLI_VERR_QD128_F128_CONFLATION)
+}
+
+// F. POSITIVE CONTROL — a block without a terminator MUST fire.
+fn fixture_missing_term() -> i64 with IO, Mut, Panic {
+    var f = mli_func_new("noterm", mli_kind_void())
+    let b0 = mli_new_block(&!f)
+    if b0 < 0 { return build_fail("F noterm") }
+    let res = mli_verify_function(&f)
+    expect("F missing terminator FIRES", res, MLI_VERR_NO_TERM)
+}
+
+// G. POSITIVE CONTROL — definite assignment across a branch: a vreg defined
+//    on only ONE side of a diamond and used after the join MUST fire.
+fn fixture_use_before_def() -> i64 with IO, Mut, Panic {
+    var f = mli_func_new("ubd", mli_kind_void())
+    let c = mli_add_arg(&!f, mli_kind_bool())
+    let b0 = mli_new_block(&!f)
+    let b1 = mli_new_block(&!f)
+    let b2 = mli_new_block(&!f)
+    let b3 = mli_new_block(&!f)
+    let vx = mli_new_vreg(&!f, mli_kind_int(64, 1))
+    let vy = mli_new_vreg(&!f, mli_kind_int(64, 1))
+    if c < 0 || b0 < 0 || b1 < 0 || b2 < 0 || b3 < 0 || vx < 0 || vy < 0 { return build_fail("G ubd") }
+
+    let cond = mli_vreg_opd(&f, c)
+    if !mli_set_term(&!f, b0, mli_term_br(cond, b1, b2)) { return build_fail("G ubd") }
+
+    // b1 defines vx; b2 does not.
+    let dx = mli_vreg_opd(&f, vx)
+    if !mli_emit(&!f, b1, mli_inst2(MLI_OP_MOV, dx, mli_opd_imm_int(1, mli_kind_int(64, 1)))) { return build_fail("G ubd") }
+    if !mli_set_term(&!f, b1, mli_term_jmp(b3)) { return build_fail("G ubd") }
+    if !mli_set_term(&!f, b2, mli_term_jmp(b3)) { return build_fail("G ubd") }
+
+    // b3 uses vx after the join.
+    let dy = mli_vreg_opd(&f, vy)
+    let sx = mli_vreg_opd(&f, vx)
+    if !mli_emit(&!f, b3, mli_inst2(MLI_OP_MOV, dy, sx)) { return build_fail("G ubd") }
+    if !mli_set_term(&!f, b3, mli_term_ret_void()) { return build_fail("G ubd") }
+
+    let res = mli_verify_function(&f)
+    expect("G use-before-def across branch FIRES", res, MLI_VERR_USE_BEFORE_DEF)
+}
+
+// H. Positive — the no-phi representation: copy insertion in BOTH
+//    predecessors (same vreg defined on every path) MUST verify OK. This is
+//    the D2 §4.4 decision made executable.
+fn fixture_diamond_copy_insertion() -> i64 with IO, Mut, Panic {
+    var f = mli_func_new("diamond", mli_kind_int(64, 1))
+    let c = mli_add_arg(&!f, mli_kind_bool())
+    let b0 = mli_new_block(&!f)
+    let b1 = mli_new_block(&!f)
+    let b2 = mli_new_block(&!f)
+    let b3 = mli_new_block(&!f)
+    let vx = mli_new_vreg(&!f, mli_kind_int(64, 1))
+    if c < 0 || b0 < 0 || b1 < 0 || b2 < 0 || b3 < 0 || vx < 0 { return build_fail("H diamond") }
+
+    let cond = mli_vreg_opd(&f, c)
+    if !mli_set_term(&!f, b0, mli_term_br(cond, b1, b2)) { return build_fail("H diamond") }
+
+    let dx1 = mli_vreg_opd(&f, vx)
+    if !mli_emit(&!f, b1, mli_inst2(MLI_OP_MOV, dx1, mli_opd_imm_int(1, mli_kind_int(64, 1)))) { return build_fail("H diamond") }
+    if !mli_set_term(&!f, b1, mli_term_jmp(b3)) { return build_fail("H diamond") }
+
+    let dx2 = mli_vreg_opd(&f, vx)
+    if !mli_emit(&!f, b2, mli_inst2(MLI_OP_MOV, dx2, mli_opd_imm_int(2, mli_kind_int(64, 1)))) { return build_fail("H diamond") }
+    if !mli_set_term(&!f, b2, mli_term_jmp(b3)) { return build_fail("H diamond") }
+
+    let rx = mli_vreg_opd(&f, vx)
+    if !mli_set_term(&!f, b3, mli_term_ret(rx)) { return build_fail("H diamond") }
+
+    let res = mli_verify_function(&f)
+    expect("H diamond copy-insertion verifies OK", res, MLI_VERR_OK)
+}
+
+// I1. Positive — R1 Knowledge kinds are legal MLI from S1: k_add over
+//     Knowledge<f64,Min3> plus the ONLY legal discharge path.
+fn fixture_knowledge_ops() -> i64 with IO, Mut, Panic {
+    var f = mli_func_new("kadd", mli_kind_float(64))
+    let kk = mli_kind_knowledge(MLI_KIND_FLOAT, 64, MLI_KSHAPE_MIN3)
+    let ka = mli_add_arg(&!f, kk)
+    let kb = mli_add_arg(&!f, kk)
+    let b0 = mli_new_block(&!f)
+    let kc = mli_new_vreg(&!f, kk)
+    let d = mli_new_vreg(&!f, mli_kind_float(64))
+    if ka < 0 || kb < 0 || b0 < 0 || kc < 0 || d < 0 { return build_fail("I1 kadd") }
+
+    let dst = mli_vreg_opd(&f, kc)
+    let s1 = mli_vreg_opd(&f, ka)
+    let s2 = mli_vreg_opd(&f, kb)
+    if !mli_emit(&!f, b0, mli_inst3(MLI_OP_K_ADD, dst, s1, s2)) { return build_fail("I1 kadd") }
+
+    let dd = mli_vreg_opd(&f, d)
+    let sc = mli_vreg_opd(&f, kc)
+    if !mli_emit(&!f, b0, mli_inst2(MLI_OP_K_DISCHARGE, dd, sc)) { return build_fail("I1 kadd") }
+
+    let rv = mli_vreg_opd(&f, d)
+    if !mli_set_term(&!f, b0, mli_term_ret(rv)) { return build_fail("I1 kadd") }
+
+    let res = mli_verify_function(&f)
+    mli_dump_function(&f)
+    expect("I1 k_add + k_discharge verify OK", res, MLI_VERR_OK)
+}
+
+// I2. POSITIVE CONTROL — the "k_add is not fadd" rule: plain float add on
+//     Knowledge operands MUST fire (variance would be silently dropped).
+fn fixture_fadd_on_knowledge() -> i64 with IO, Mut, Panic {
+    var f = mli_func_new("kerase", mli_kind_void())
+    let kk = mli_kind_knowledge(MLI_KIND_FLOAT, 64, MLI_KSHAPE_MIN3)
+    let ka = mli_add_arg(&!f, kk)
+    let kb = mli_add_arg(&!f, kk)
+    let b0 = mli_new_block(&!f)
+    let kc = mli_new_vreg(&!f, kk)
+    if ka < 0 || kb < 0 || b0 < 0 || kc < 0 { return build_fail("I2 kerase") }
+
+    let dst = mli_vreg_opd(&f, kc)
+    let s1 = mli_vreg_opd(&f, ka)
+    let s2 = mli_vreg_opd(&f, kb)
+    if !mli_emit(&!f, b0, mli_inst3(MLI_OP_FADD, dst, s1, s2)) { return build_fail("I2 kerase") }
+    if !mli_set_term(&!f, b0, mli_term_ret_void()) { return build_fail("I2 kerase") }
+
+    let res = mli_verify_function(&f)
+    expect("I2 fadd on Knowledge FIRES", res, MLI_VERR_KNOWLEDGE_ON_SCALAR_OP)
+}
+
+// J1. Positive — octonion multiply (CD dim=8) with explicit policies.
+fn fixture_cd_mul_ok() -> i64 with IO, Mut, Panic {
+    var f = mli_func_new("octmul", mli_kind_void())
+    let ck = mli_kind_cd(8, 64)
+    let a = mli_add_arg(&!f, ck)
+    let b = mli_add_arg(&!f, ck)
+    let b0 = mli_new_block(&!f)
+    let r = mli_new_vreg(&!f, ck)
+    if a < 0 || b < 0 || b0 < 0 || r < 0 { return build_fail("J1 octmul") }
+
+    let dst = mli_vreg_opd(&f, r)
+    let s1 = mli_vreg_opd(&f, a)
+    let s2 = mli_vreg_opd(&f, b)
+    if !mli_emit(&!f, b0, mli_inst_cd_mul(dst, s1, s2, MLI_ASSOC_STRICT, MLI_ZD_FLAG)) { return build_fail("J1 octmul") }
+    if !mli_set_term(&!f, b0, mli_term_ret_void()) { return build_fail("J1 octmul") }
+
+    let res = mli_verify_function(&f)
+    mli_dump_function(&f)
+    expect("J1 cd_mul dim=8 with policies verifies OK", res, MLI_VERR_OK)
+}
+
+// J2. POSITIVE CONTROL — cd_mul without explicit assoc/zd policy MUST fire:
+//     policies exist so optimizers cannot silently reassociate octonions.
+fn fixture_cd_mul_no_policy() -> i64 with IO, Mut, Panic {
+    var f = mli_func_new("octmulnp", mli_kind_void())
+    let ck = mli_kind_cd(8, 64)
+    let a = mli_add_arg(&!f, ck)
+    let b = mli_add_arg(&!f, ck)
+    let b0 = mli_new_block(&!f)
+    let r = mli_new_vreg(&!f, ck)
+    if a < 0 || b < 0 || b0 < 0 || r < 0 { return build_fail("J2 octmulnp") }
+
+    let dst = mli_vreg_opd(&f, r)
+    let s1 = mli_vreg_opd(&f, a)
+    let s2 = mli_vreg_opd(&f, b)
+    if !mli_emit(&!f, b0, mli_inst3(MLI_OP_CD_MUL, dst, s1, s2)) { return build_fail("J2 octmulnp") }
+    if !mli_set_term(&!f, b0, mli_term_ret_void()) { return build_fail("J2 octmulnp") }
+
+    let res = mli_verify_function(&f)
+    expect("J2 cd_mul without policy FIRES", res, MLI_VERR_CD_POLICY_MISSING)
+}
+
+// K. POSITIVE CONTROL — a terminator opcode in the block body MUST fire.
+fn fixture_control_in_body() -> i64 with IO, Mut, Panic {
+    var f = mli_func_new("ctlbody", mli_kind_void())
+    let b0 = mli_new_block(&!f)
+    if b0 < 0 { return build_fail("K ctlbody") }
+    if !mli_emit(&!f, b0, mli_term_jmp(b0)) { return build_fail("K ctlbody") }
+    if !mli_set_term(&!f, b0, mli_term_ret_void()) { return build_fail("K ctlbody") }
+
+    let res = mli_verify_function(&f)
+    expect("K control opcode in body FIRES", res, MLI_VERR_CONTROL_IN_BODY)
+}
+
+// L. Fail-closed builder walls: overflowing the instruction capacity marks
+//    the function and verify rejects it (never a silent drop).
+fn fixture_overflow_fail_closed() -> i64 with IO, Mut, Panic {
+    var f = mli_func_new("overflow", mli_kind_void())
+    let b0 = mli_new_block(&!f)
+    if b0 < 0 { return build_fail("L overflow") }
+    var i: i64 = 0
+    while i < MLI_MAX_INSTRS + 1 {
+        let ok = mli_emit(&!f, b0, mli_inst_nop())
+        if !ok && i < MLI_MAX_INSTRS { return build_fail("L overflow") }
+        i = i + 1
+    }
+    if !f.overflowed {
+        print("FAIL: L overflow flag not set")
+        print("\n")
+        return 1
+    }
+    let res = mli_verify_function(&f)
+    expect("L capacity overflow FIRES fail-closed", res, MLI_VERR_OVERFLOW)
+}
+
+// M. POSITIVE CONTROL — CALL has no ABI in R0. Stamping OK was a default
+//    guess (E219 / #1784 / #1788 class). Verify must refuse detectably.
+fn fixture_call_unspecified() -> i64 with IO, Mut, Panic {
+    var f = mli_func_new("callsite", mli_kind_int(64, 1))
+    let a = mli_add_arg(&!f, mli_kind_int(64, 1))
+    let b0 = mli_new_block(&!f)
+    let d = mli_new_vreg(&!f, mli_kind_int(64, 1))
+    if a < 0 || b0 < 0 || d < 0 { return build_fail("M call") }
+    let dst = mli_vreg_opd(&f, d)
+    let s1 = mli_vreg_opd(&f, a)
+    if !mli_emit(&!f, b0, mli_inst2(MLI_OP_CALL, dst, s1)) { return build_fail("M call") }
+    if !mli_set_term(&!f, b0, mli_term_ret(dst)) { return build_fail("M call") }
+    let res = mli_verify_function(&f)
+    expect("M CALL without ABI FIRES", res, MLI_VERR_CALL_UNSPECIFIED)
+}
+
+fn main() -> i64 with IO, Mut, Panic {
+    println("=== MLI S1 self-test: kinds, builder, dump, V-struct verify ===")
+    var failures: i64 = 0
+    failures = failures + fixture_add1()
+    failures = failures + fixture_cross_kind_move()
+    failures = failures + fixture_br_not_bool()
+    failures = failures + fixture_int128_excluded()
+    failures = failures + fixture_qd128_arith()
+    failures = failures + fixture_qd128_f128_conflation()
+    failures = failures + fixture_missing_term()
+    failures = failures + fixture_use_before_def()
+    failures = failures + fixture_diamond_copy_insertion()
+    failures = failures + fixture_knowledge_ops()
+    failures = failures + fixture_fadd_on_knowledge()
+    failures = failures + fixture_cd_mul_ok()
+    failures = failures + fixture_cd_mul_no_policy()
+    failures = failures + fixture_control_in_body()
+    failures = failures + fixture_overflow_fail_closed()
+    failures = failures + fixture_call_unspecified()
+
+    if failures == 0 {
+        println("=== MLI S1: ALL FIXTURES PASS ===")
+        return 0
+    }
+    print("=== MLI S1: FAILURES = ")
+    print_int(failures)
+    print(" ===")
+    print("\n")
+    1
+}

@@ -1,0 +1,562 @@
+//@ run-pass
+//@ expect-stdout: ALL PASS
+
+// examples/clinical/pgx_elplus_demo.sio
+//
+// Pharmacogenomic (PGx) diplotype -> phenotype -> safety reasoning as an
+// EL+ TBox, SMOKE DEMO (unit test, not a validated prescribing service):
+// the gene-drug knowledge that stdlib/darwin_pbpk/pgx/*.sio today
+// hand-codes as per-drug activity-score thresholds is stated here as a
+// role-aware EL+ TBox and closed with the verified engine of
+// stdlib/ontology/elplus.sio.  PGx is GENE-DRUG, not drug-drug: the
+// safety flag is DERIVED from the allele hierarchy, the phenotype
+// definitions, and ONE role-composition axiom, per patient diplotype.
+//
+// CLAIMS SPLIT:
+//   * Proven: logical fidelity only.  The boolean closure coincides with
+//     EL+ entailment over the interned concept universe
+//     (formal/OntologyELPlusClosureComplete.lean, theorem subBPlusC_iff).
+//   * NOT established: clinical adequacy of this hand-built TBox,
+//     completeness of the allele/drug lists, CPIC/DPWG guideline
+//     concordance, or any FP/FN rate against curated PGx databases
+//     (PharmGKB/CPIC).  A derived "contraindicated" edge here is a
+//     POTENTIAL loss-of-function flag, not a prescribing decision.
+//
+// Engine: default (Madaros).  Like the SNOMED demo
+//   (examples/ontology/biomedical/snomed_elplus_demo.sio) this file keeps
+//   ALL table construction and all concept ids as `let` bindings inside
+//   `main` and calls the 14-parameter elplus_fixpoint directly from
+//   `main`: a first draft of this demo used module-level `const` ids
+//   referenced from helper fns, which miscompiled (wrong-value reads and
+//   an out-of-bounds store -> segfault) on the current Madaros native
+//   lane while passing cleanly under lean_single; the main-local shape
+//   below runs under BOTH engines (verified 2026-08-05).
+// Gate: bash scripts/clinical_pgx_elplus_gate.sh
+//
+// TBox:
+//
+//   Allele hierarchy (function classes):
+//     *4  <= NullAllele <= NoFunction        (CYP2D6*4 is a null allele)
+//     *10 <= ReducedFunction                 (CYP2D6*10 decreased function)
+//
+//   Phenotype classes (conjunction in the PM definition):
+//     PM  <= exists hasVariant.(NoFunction ⊓ NoFunction)   (e.g. *4/*4)
+//     IM  <= exists hasVariant.ReducedFunction             (e.g. *4/*10)
+//     NM, UM, NormalFunction: vocabulary only (no stated definition)
+//   Honest note (offload review 2026-08-05, xai): in EL+ the filler
+//   NoFunction ⊓ NoFunction is logically EQUIVALENT to NoFunction — the
+//   language cannot count two distinct alleles.  The conjunction exists
+//   here to exercise conjElim/conjIntro in the engine; the allele-level
+//   patient assertion (exists hasVariant.*4) provides a second,
+//   independent derivation path to the same flag.  The
+//   diplotype -> phenotype classification itself is DELEGATED to the
+//   numeric activity-score lane (halo_cyp2d6_pheno_from_score); the
+//   patient extension asserts the resulting phenotype plus a
+//   representative allele, it does not re-derive the phenotype from
+//   two allele atoms.
+//
+//   Drug-enzyme facts (the fm fraction stays where it belongs: in the
+//   NUMERIC layer, stdlib/darwin_pbpk/pgx, not in the logic):
+//     haloperidol / venlafaxine / risperidone <= exists metabolizedBy.CYP2D6
+//     clopidogrel                           <= exists metabolizedBy.CYP2C19
+//     midazolam                             <= exists metabolizedBy.CYP3A4
+//                                            ⊓ exists metabolizedBy.CYP3A5
+//   (Risperidone replaced codeine after offload review: for PRODRUGS a
+//   loss-of-function flag means lack of efficacy, not toxicity, so a
+//   prodrug must not sit on the contraindication path this demo checks
+//   positively.  Clopidogrel is retained ONLY as a negative control: it
+//   is never flagged in any patient below.)
+//
+//   Role layer — the COMPLETE stated role axiom set:
+//     metabolizedBy o hasVariant <= contraindicated   (ONE chain)
+//   Role semantics: `contraindicated` reads as
+//   "contraindicatedAtStandardDose" — a FLAG for genotype-guided review,
+//   not a dosing instruction; the sentinel -1.0 returned by the gate is
+//   a demo stand-in for "withhold the standard-dose numeric scaling",
+//   not a prescription action.
+//
+// Patient-diplotype TBox extension (one fixpoint per patient):
+//   P1 (CYP2D6 *4/*4,  activity score 0):   CYP2D6 <= PM,
+//                                           CYP2D6 <= exists hasVariant.*4
+//   P2 (CYP2D6 *4/*10, activity score 0.5): CYP2D6 <= IM,
+//                                           CYP2D6 <= exists hasVariant.*10
+//   P3 (CYP2D6 *1/*4,  activity score 1.0): CYP2D6 <= NM
+//
+// The closure then derives, for P1:
+//   *4 <= NoFunction                        (allele hierarchy, transitivity)
+//   CYP2D6 <= exists hasVariant.NoFunction  (Rmono over BOTH the PM
+//                                            conjunction filler, via
+//                                            conjElim, and the *4 filler)
+//   haloperidol <= exists contraindicated.NoFunction   (roleComp + RtoS)
+// while clopidogrel (CYP2C19) and midazolam (CYP3A4/3A5) stay clear.
+// For P2 only the weaker exists contraindicated.ReducedFunction edge
+// appears; for P3 no contraindicated edge at all.
+//
+// Integration: the boolean query
+//   elplus_subsumes_dense(drug, EX_CONTRA_NOFUNC)
+// is the GATE in front of the existing numeric CL-scaling functions
+// (darwin_pbpk::pgx::cyp2d6_haloperidol::halo_cyp2d6_adjusted_cl,
+// fm_cyp2d6 = 0.55 internal to that module): a hard loss-of-function
+// flag WITHHOLDS the standard-dose numeric scaling (sentinel -1.0:
+// escalate to genotype-guided review instead of applying the numeric
+// multiplier); a clear gate lets the numeric layer apply its phenotype
+// multiplier unchanged (IM: CLx0.50 on the CYP2D6 fraction; NM:
+// reference).  Each patient additionally asserts the CONSISTENCY of the
+// two layers: gate == (activity-score phenotype == PM).
+//
+// Not modelled (by design): prodrug ACTIVATION direction (clopidogrel
+//   appears ONLY as a negative control — for a prodrug a
+//   loss-of-function flag means lack of efficacy, not toxicity; the
+//   TBox flags loss of function, the clinical interpretation is out of
+//   scope), UM duplications, substrate strength grading, inhibitor
+//   co-medication (that is the DDI lane,
+//   examples/clinical/ddi_elplus_demo.sio), guideline recommendation
+//   text, the full CPIC star-allele tables (only *4 and *10 are
+//   interned).
+//
+// claims_not_made: CPIC/DPWG concordance; activity-score threshold
+//   validation (the numeric thresholds remain in darwin_pbpk::pgx);
+//   cohort statistics or FP/FN validation; quantitative exposure
+//   prediction beyond the existing halo_cyp2d6 numeric lane; a
+//   machine-checked instantiation of the Lean completeness theorem at
+//   THIS TBox (the claims-split linkage is at engine level, not per
+//   demo); bedside alerting product.
+
+use ontology::elplus::{
+    elplus_role_closure,
+    elplus_seed,
+    elplus_fixpoint,
+    elplus_subsumes_dense
+}
+use darwin_pbpk::pgx::cyp2d6_haloperidol::{
+    halo_cyp2d6_pheno_from_score,
+    halo_cyp2d6_adjusted_cl
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    var n_fail = 0
+
+    // ── Concept universe ────────────────────────────────────────────────
+    // elplus dense encoding (fixed ABI of stdlib/ontology/elplus.sio):
+    // ckind 0 = atom, 1 = top, 2 = conjunction, 3 = existential; concept
+    // stride 64, role stride 8.  Base (non-existential) concepts occupy
+    // ids 0..NB-1 so the conjunction filler propagates through
+    // Rmono/roleComp.
+    //   TOP = 0
+    //   drugs 1..5, enzymes 6..9, allele-function classes 10..15,
+    //   phenotypes 16..19, conjunction 20  -> NB = 21
+    //   existentials 21..32                -> NC = 33
+    let TOP = 0
+    let HALOPERIDOL = 1
+    let VENLAFAXINE = 2
+    let RISPERIDONE = 3
+    let CLOPIDOGREL = 4
+    let MIDAZOLAM = 5
+    let CYP2D6 = 6
+    let CYP2C19 = 7
+    let CYP3A4 = 8
+    let CYP3A5 = 9
+    let STAR4 = 10
+    let NULL_ALLELE = 11
+    let NO_FUNCTION = 12
+    let STAR10 = 13
+    let REDUCED_FUNCTION = 14
+    let NORMAL_FUNCTION = 15
+    let PM = 16
+    let IM = 17
+    let NM = 18
+    let UM = 19
+    let CONJ_NF_NF = 20
+    let NB = 21
+    // Interned existentials.
+    let EX_HASVAR_CONJ = 21
+    let EX_HASVAR_STAR4 = 22
+    let EX_HASVAR_NULL = 23
+    let EX_HASVAR_NOFUNC = 24
+    let EX_HASVAR_REDUCED = 25
+    let EX_MET_CYP2D6 = 26
+    let EX_MET_CYP2C19 = 27
+    let EX_MET_CYP3A4 = 28
+    let EX_MET_CYP3A5 = 29
+    let EX_CONTRA_NOFUNC = 30
+    let EX_CONTRA_REDUCED = 31
+    let EX_HASVAR_STAR10 = 32
+    let NC = 33
+
+    // Roles.
+    let METABOLIZED_BY = 0
+    let HAS_VARIANT = 1
+    let CONTRAINDICATED = 2
+    let NR = 3
+    let N_CHAINS = 1
+
+    // ── Concept table ───────────────────────────────────────────────────
+    var ckind: [i64; 64] = [0; 64]
+    var carg1: [i64; 64] = [0; 64]
+    var carg2: [i64; 64] = [0; 64]
+    var exid: [i64; 512] = [0; 512]
+    var rclos: [bool; 64] = [false; 64]
+    var s: [bool; 4096] = [false; 4096]
+    var redges: [bool; 32768] = [false; 32768]
+    var ch1: [i64; 8] = [0; 8]
+    var ch2: [i64; 8] = [0; 8]
+    var ch3: [i64; 8] = [0; 8]
+
+    // Atoms (kind 0, carg1 = own id) and top (kind 1).
+    ckind[TOP] = 1
+    var a: i64 = 1
+    while a <= 19 {
+        ckind[a] = 0
+        carg1[a] = a
+        a = a + 1
+    }
+    // Conjunction: NoFunction ⊓ NoFunction (the PM diplotype filler).
+    ckind[CONJ_NF_NF] = 2
+    carg1[CONJ_NF_NF] = NO_FUNCTION
+    carg2[CONJ_NF_NF] = NO_FUNCTION
+    // Existentials (kind 3): carg1 = role, carg2 = filler.
+    ckind[EX_HASVAR_CONJ] = 3
+    carg1[EX_HASVAR_CONJ] = HAS_VARIANT
+    carg2[EX_HASVAR_CONJ] = CONJ_NF_NF
+    ckind[EX_HASVAR_STAR4] = 3
+    carg1[EX_HASVAR_STAR4] = HAS_VARIANT
+    carg2[EX_HASVAR_STAR4] = STAR4
+    ckind[EX_HASVAR_NULL] = 3
+    carg1[EX_HASVAR_NULL] = HAS_VARIANT
+    carg2[EX_HASVAR_NULL] = NULL_ALLELE
+    ckind[EX_HASVAR_NOFUNC] = 3
+    carg1[EX_HASVAR_NOFUNC] = HAS_VARIANT
+    carg2[EX_HASVAR_NOFUNC] = NO_FUNCTION
+    ckind[EX_HASVAR_REDUCED] = 3
+    carg1[EX_HASVAR_REDUCED] = HAS_VARIANT
+    carg2[EX_HASVAR_REDUCED] = REDUCED_FUNCTION
+    ckind[EX_HASVAR_STAR10] = 3
+    carg1[EX_HASVAR_STAR10] = HAS_VARIANT
+    carg2[EX_HASVAR_STAR10] = STAR10
+    ckind[EX_MET_CYP2D6] = 3
+    carg1[EX_MET_CYP2D6] = METABOLIZED_BY
+    carg2[EX_MET_CYP2D6] = CYP2D6
+    ckind[EX_MET_CYP2C19] = 3
+    carg1[EX_MET_CYP2C19] = METABOLIZED_BY
+    carg2[EX_MET_CYP2C19] = CYP2C19
+    ckind[EX_MET_CYP3A4] = 3
+    carg1[EX_MET_CYP3A4] = METABOLIZED_BY
+    carg2[EX_MET_CYP3A4] = CYP3A4
+    ckind[EX_MET_CYP3A5] = 3
+    carg1[EX_MET_CYP3A5] = METABOLIZED_BY
+    carg2[EX_MET_CYP3A5] = CYP3A5
+    ckind[EX_CONTRA_NOFUNC] = 3
+    carg1[EX_CONTRA_NOFUNC] = CONTRAINDICATED
+    carg2[EX_CONTRA_NOFUNC] = NO_FUNCTION
+    ckind[EX_CONTRA_REDUCED] = 3
+    carg1[EX_CONTRA_REDUCED] = CONTRAINDICATED
+    carg2[EX_CONTRA_REDUCED] = REDUCED_FUNCTION
+    // exid[role * 64 + filler] = interned id; -1 = not interned.
+    var i: i64 = 0
+    while i < 512 {
+        exid[i] = 0 - 1
+        i = i + 1
+    }
+    exid[HAS_VARIANT * 64 + CONJ_NF_NF] = EX_HASVAR_CONJ
+    exid[HAS_VARIANT * 64 + STAR4] = EX_HASVAR_STAR4
+    exid[HAS_VARIANT * 64 + NULL_ALLELE] = EX_HASVAR_NULL
+    exid[HAS_VARIANT * 64 + NO_FUNCTION] = EX_HASVAR_NOFUNC
+    exid[HAS_VARIANT * 64 + REDUCED_FUNCTION] = EX_HASVAR_REDUCED
+    exid[HAS_VARIANT * 64 + STAR10] = EX_HASVAR_STAR10
+    exid[METABOLIZED_BY * 64 + CYP2D6] = EX_MET_CYP2D6
+    exid[METABOLIZED_BY * 64 + CYP2C19] = EX_MET_CYP2C19
+    exid[METABOLIZED_BY * 64 + CYP3A4] = EX_MET_CYP3A4
+    exid[METABOLIZED_BY * 64 + CYP3A5] = EX_MET_CYP3A5
+    exid[CONTRAINDICATED * 64 + NO_FUNCTION] = EX_CONTRA_NOFUNC
+    exid[CONTRAINDICATED * 64 + REDUCED_FUNCTION] = EX_CONTRA_REDUCED
+
+    // ── Role layer ──────────────────────────────────────────────────────
+    // No role hierarchy in this TBox; the closure seeds reflexivity only.
+    elplus_role_closure(&!rclos, NR)
+    // metabolizedBy o hasVariant <= contraindicated (ONE chain).
+    ch1[0] = METABOLIZED_BY
+    ch2[0] = HAS_VARIANT
+    ch3[0] = CONTRAINDICATED
+
+    // ══ Patient 1: CYP2D6 *4/*4 (activity score 0, PM) ═════════════════
+    // Fresh seed, then the patient-independent TBox, then the diplotype
+    // extension: PM definition AND the null allele itself.
+    elplus_seed(&!s, NC, TOP)
+    s[STAR4 * 64 + NULL_ALLELE] = true
+    s[NULL_ALLELE * 64 + NO_FUNCTION] = true
+    s[STAR10 * 64 + REDUCED_FUNCTION] = true
+    s[PM * 64 + EX_HASVAR_CONJ] = true
+    s[IM * 64 + EX_HASVAR_REDUCED] = true
+    s[HALOPERIDOL * 64 + EX_MET_CYP2D6] = true
+    s[VENLAFAXINE * 64 + EX_MET_CYP2D6] = true
+    s[RISPERIDONE * 64 + EX_MET_CYP2D6] = true
+    s[CLOPIDOGREL * 64 + EX_MET_CYP2C19] = true
+    s[MIDAZOLAM * 64 + EX_MET_CYP3A4] = true
+    s[MIDAZOLAM * 64 + EX_MET_CYP3A5] = true
+    s[CYP2D6 * 64 + PM] = true
+    s[CYP2D6 * 64 + EX_HASVAR_STAR4] = true
+    i = 0
+    while i < 32768 {
+        redges[i] = false
+        i = i + 1
+    }
+    let rounds1 = elplus_fixpoint(&!s, &!redges, &ckind, &carg1, &carg2, &exid, &rclos, &ch1, &ch2, &ch3, N_CHAINS, NC, NB, NR)
+    if rounds1 <= 0 {
+        println("FAIL: P1 fixpoint took no rounds")
+        n_fail = n_fail + 1
+    }
+
+    // 1. Allele hierarchy: *4 reaches NoFunction through NullAllele.
+    if !s[STAR4 * 64 + NULL_ALLELE] || !s[STAR4 * 64 + NO_FUNCTION] {
+        println("FAIL: *4 should subsume to NullAllele and NoFunction")
+        n_fail = n_fail + 1
+    }
+
+    // 2. Conjunction elimination: NoFunction ⊓ NoFunction <= NoFunction.
+    if !s[CONJ_NF_NF * 64 + NO_FUNCTION] {
+        println("FAIL: conjunction should eliminate to NoFunction")
+        n_fail = n_fail + 1
+    }
+
+    // 3. Phenotype definition reaches the enzyme: CYP2D6 <= PM <=
+    //    exists hasVariant.(NoFunction ⊓ NoFunction).
+    if !s[CYP2D6 * 64 + EX_HASVAR_CONJ] {
+        println("FAIL: CYP2D6 should reach the PM diplotype existential")
+        n_fail = n_fail + 1
+    }
+
+    // 4. Chain derivation: every CYP2D6 drug is flagged
+    //    exists contraindicated.NoFunction (hard loss-of-function gate).
+    if !elplus_subsumes_dense(&s, HALOPERIDOL, EX_CONTRA_NOFUNC) {
+        println("FAIL: P1 haloperidol should be flagged contraindicated.NoFunction")
+        n_fail = n_fail + 1
+    }
+    if !elplus_subsumes_dense(&s, VENLAFAXINE, EX_CONTRA_NOFUNC) {
+        println("FAIL: P1 venlafaxine should be flagged contraindicated.NoFunction")
+        n_fail = n_fail + 1
+    }
+    if !elplus_subsumes_dense(&s, RISPERIDONE, EX_CONTRA_NOFUNC) {
+        println("FAIL: P1 risperidone should be flagged contraindicated.NoFunction")
+        n_fail = n_fail + 1
+    }
+
+    // 5. Negative: non-CYP2D6 drugs stay clear of the hard flag.
+    if elplus_subsumes_dense(&s, CLOPIDOGREL, EX_CONTRA_NOFUNC) {
+        println("FAIL: P1 clopidogrel (CYP2C19) must not be flagged")
+        n_fail = n_fail + 1
+    }
+    if elplus_subsumes_dense(&s, MIDAZOLAM, EX_CONTRA_NOFUNC) {
+        println("FAIL: P1 midazolam (CYP3A4/3A5) must not be flagged")
+        n_fail = n_fail + 1
+    }
+
+    // 6. Negative: a *4/*4 patient derives NO reduced-function flag
+    //    (the weaker soft flag is IM-specific).
+    if elplus_subsumes_dense(&s, HALOPERIDOL, EX_CONTRA_REDUCED) {
+        println("FAIL: P1 haloperidol must not reach contraindicated.ReducedFunction")
+        n_fail = n_fail + 1
+    }
+
+    // 7. Integration: the gate WITHHOLDS numeric scaling for the PM
+    //    (sentinel -1.0).  The activity score from the numeric lane
+    //    agrees (0 -> PM), and the two layers are asserted CONSISTENT:
+    //    gate == (phenotype == PM).
+    let pheno1 = halo_cyp2d6_pheno_from_score(0.0)
+    if pheno1 != 0 {
+        println("FAIL: activity score 0.0 should classify as PM (0)")
+        n_fail = n_fail + 1
+    }
+    let gate1 = elplus_subsumes_dense(&s, HALOPERIDOL, EX_CONTRA_NOFUNC)
+    if gate1 != (pheno1 == 0) {
+        println("FAIL: P1 EL+ gate and numeric phenotype disagree")
+        n_fail = n_fail + 1
+    }
+    var cl1: f64 = 0.0 - 1.0
+    if !gate1 {
+        cl1 = halo_cyp2d6_adjusted_cl(40.0, pheno1)
+    }
+    if cl1 > -0.5 {
+        println("FAIL: P1 gate must withhold numeric CL scaling (sentinel -1)")
+        n_fail = n_fail + 1
+    }
+
+    // ══ Patient 2: CYP2D6 *4/*10 (activity score 0.5, IM) ══════════════
+    elplus_seed(&!s, NC, TOP)
+    s[STAR4 * 64 + NULL_ALLELE] = true
+    s[NULL_ALLELE * 64 + NO_FUNCTION] = true
+    s[STAR10 * 64 + REDUCED_FUNCTION] = true
+    s[PM * 64 + EX_HASVAR_CONJ] = true
+    s[IM * 64 + EX_HASVAR_REDUCED] = true
+    s[HALOPERIDOL * 64 + EX_MET_CYP2D6] = true
+    s[VENLAFAXINE * 64 + EX_MET_CYP2D6] = true
+    s[RISPERIDONE * 64 + EX_MET_CYP2D6] = true
+    s[CLOPIDOGREL * 64 + EX_MET_CYP2C19] = true
+    s[MIDAZOLAM * 64 + EX_MET_CYP3A4] = true
+    s[MIDAZOLAM * 64 + EX_MET_CYP3A5] = true
+    // Diplotype extension: IM definition AND the reduced allele itself.
+    s[CYP2D6 * 64 + IM] = true
+    s[CYP2D6 * 64 + EX_HASVAR_STAR10] = true
+    i = 0
+    while i < 32768 {
+        redges[i] = false
+        i = i + 1
+    }
+    let rounds2 = elplus_fixpoint(&!s, &!redges, &ckind, &carg1, &carg2, &exid, &rclos, &ch1, &ch2, &ch3, N_CHAINS, NC, NB, NR)
+    if rounds2 <= 0 {
+        println("FAIL: P2 fixpoint took no rounds")
+        n_fail = n_fail + 1
+    }
+
+    // 8. Soft flag only: contraindicated.ReducedFunction is derived via
+    //    BOTH the IM definition and the *10 allele hierarchy.
+    if !s[STAR10 * 64 + REDUCED_FUNCTION] {
+        println("FAIL: *10 should subsume to ReducedFunction")
+        n_fail = n_fail + 1
+    }
+    if !elplus_subsumes_dense(&s, HALOPERIDOL, EX_CONTRA_REDUCED) {
+        println("FAIL: P2 haloperidol should be flagged contraindicated.ReducedFunction")
+        n_fail = n_fail + 1
+    }
+
+    // 9. Hard gate stays CLEAR for the IM patient.
+    if elplus_subsumes_dense(&s, HALOPERIDOL, EX_CONTRA_NOFUNC) {
+        println("FAIL: P2 haloperidol must not reach contraindicated.NoFunction")
+        n_fail = n_fail + 1
+    }
+    if elplus_subsumes_dense(&s, CLOPIDOGREL, EX_CONTRA_REDUCED) {
+        println("FAIL: P2 clopidogrel (CYP2C19) must not be flagged")
+        n_fail = n_fail + 1
+    }
+
+    // 10. Integration: gate clear -> the existing numeric lane applies
+    //     its IM multiplier: CL = 40 * (0.45 + 0.55 * 0.50) = 29.0.
+    //     Layers asserted consistent: gate == (phenotype == PM).
+    let pheno2 = halo_cyp2d6_pheno_from_score(0.5)
+    if pheno2 != 1 {
+        println("FAIL: activity score 0.5 should classify as IM (1)")
+        n_fail = n_fail + 1
+    }
+    let gate2 = elplus_subsumes_dense(&s, HALOPERIDOL, EX_CONTRA_NOFUNC)
+    if gate2 != (pheno2 == 0) {
+        println("FAIL: P2 EL+ gate and numeric phenotype disagree")
+        n_fail = n_fail + 1
+    }
+    var cl2: f64 = 0.0 - 1.0
+    if !gate2 {
+        cl2 = halo_cyp2d6_adjusted_cl(40.0, pheno2)
+    }
+    var d2 = cl2 - 29.0
+    if d2 < 0.0 {
+        d2 = 0.0 - d2
+    }
+    if d2 > 0.001 {
+        println("FAIL: P2 gated adjusted CL should be ~29.0 L/h (IM scaling)")
+        n_fail = n_fail + 1
+    }
+
+    // ══ Patient 3: CYP2D6 *1/*4 (activity score 1.0, NM) ═══════════════
+    elplus_seed(&!s, NC, TOP)
+    s[STAR4 * 64 + NULL_ALLELE] = true
+    s[NULL_ALLELE * 64 + NO_FUNCTION] = true
+    s[STAR10 * 64 + REDUCED_FUNCTION] = true
+    s[PM * 64 + EX_HASVAR_CONJ] = true
+    s[IM * 64 + EX_HASVAR_REDUCED] = true
+    s[HALOPERIDOL * 64 + EX_MET_CYP2D6] = true
+    s[VENLAFAXINE * 64 + EX_MET_CYP2D6] = true
+    s[RISPERIDONE * 64 + EX_MET_CYP2D6] = true
+    s[CLOPIDOGREL * 64 + EX_MET_CYP2C19] = true
+    s[MIDAZOLAM * 64 + EX_MET_CYP3A4] = true
+    s[MIDAZOLAM * 64 + EX_MET_CYP3A5] = true
+    // Diplotype extension: NM only.  Note the *1/*4 carrier state is NOT
+    // asserted at allele level: the gate is diplotype/phenotype-driven,
+    // not allele-presence-driven (contrast P1's *4/*4).
+    s[CYP2D6 * 64 + NM] = true
+    i = 0
+    while i < 32768 {
+        redges[i] = false
+        i = i + 1
+    }
+    let rounds3 = elplus_fixpoint(&!s, &!redges, &ckind, &carg1, &carg2, &exid, &rclos, &ch1, &ch2, &ch3, N_CHAINS, NC, NB, NR)
+    if rounds3 <= 0 {
+        println("FAIL: P3 fixpoint took no rounds")
+        n_fail = n_fail + 1
+    }
+
+    // 11. No contraindicated edge of either strength for the NM patient.
+    if elplus_subsumes_dense(&s, HALOPERIDOL, EX_CONTRA_NOFUNC) {
+        println("FAIL: P3 haloperidol must not reach contraindicated.NoFunction")
+        n_fail = n_fail + 1
+    }
+    if elplus_subsumes_dense(&s, HALOPERIDOL, EX_CONTRA_REDUCED) {
+        println("FAIL: P3 haloperidol must not reach contraindicated.ReducedFunction")
+        n_fail = n_fail + 1
+    }
+
+    // 12. Integration: gate clear -> reference numeric scaling
+    //     (NM multiplier 1.0): CL = 40 * (0.45 + 0.55 * 1.0) = 40.0.
+    //     Layers asserted consistent: gate == (phenotype == PM).
+    let pheno3 = halo_cyp2d6_pheno_from_score(1.0)
+    if pheno3 != 2 {
+        println("FAIL: activity score 1.0 should classify as NM (2)")
+        n_fail = n_fail + 1
+    }
+    let gate3 = elplus_subsumes_dense(&s, HALOPERIDOL, EX_CONTRA_NOFUNC)
+    if gate3 != (pheno3 == 0) {
+        println("FAIL: P3 EL+ gate and numeric phenotype disagree")
+        n_fail = n_fail + 1
+    }
+    var cl3: f64 = 0.0 - 1.0
+    if !gate3 {
+        cl3 = halo_cyp2d6_adjusted_cl(40.0, pheno3)
+    }
+    var d3 = cl3 - 40.0
+    if d3 < 0.0 {
+        d3 = 0.0 - d3
+    }
+    if d3 > 0.001 {
+        println("FAIL: P3 gated adjusted CL should be ~40.0 L/h (NM reference)")
+        n_fail = n_fail + 1
+    }
+
+    // ══ Regression: with the ONE chain disabled, P1 derives NO flag ════
+    // 13. Fail-closed evidence: the hard flag above is chain-DERIVED, not
+    //     seeded.  Re-run the P1 diplotype extension with nchain = 0;
+    //     the gate must stay CLEAR (if it did not, the flag would be an
+    //     artifact of the seeding, not of role composition).
+    elplus_seed(&!s, NC, TOP)
+    s[STAR4 * 64 + NULL_ALLELE] = true
+    s[NULL_ALLELE * 64 + NO_FUNCTION] = true
+    s[STAR10 * 64 + REDUCED_FUNCTION] = true
+    s[PM * 64 + EX_HASVAR_CONJ] = true
+    s[IM * 64 + EX_HASVAR_REDUCED] = true
+    s[HALOPERIDOL * 64 + EX_MET_CYP2D6] = true
+    s[VENLAFAXINE * 64 + EX_MET_CYP2D6] = true
+    s[RISPERIDONE * 64 + EX_MET_CYP2D6] = true
+    s[CLOPIDOGREL * 64 + EX_MET_CYP2C19] = true
+    s[MIDAZOLAM * 64 + EX_MET_CYP3A4] = true
+    s[MIDAZOLAM * 64 + EX_MET_CYP3A5] = true
+    s[CYP2D6 * 64 + PM] = true
+    s[CYP2D6 * 64 + EX_HASVAR_STAR4] = true
+    i = 0
+    while i < 32768 {
+        redges[i] = false
+        i = i + 1
+    }
+    let rounds4 = elplus_fixpoint(&!s, &!redges, &ckind, &carg1, &carg2, &exid, &rclos, &ch1, &ch2, &ch3, 0, NC, NB, NR)
+    if rounds4 <= 0 {
+        println("FAIL: chain-disabled fixpoint took no rounds")
+        n_fail = n_fail + 1
+    }
+    if elplus_subsumes_dense(&s, HALOPERIDOL, EX_CONTRA_NOFUNC) {
+        println("FAIL: with the chain disabled, P1 must derive NO contraindicated.NoFunction flag")
+        n_fail = n_fail + 1
+    }
+
+    if n_fail == 0 {
+        println("ALL PASS")
+        return 0
+    }
+    println("FAILURES:")
+    println(n_fail)
+    return 1
+}

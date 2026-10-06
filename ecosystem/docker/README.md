@@ -112,7 +112,7 @@ Sounio programs are memory-intensive when using native compilation. Allocate mor
 ## Further Reading
 
 - **[MINIMUM_VIABLE_SOUNIO.md](../../docs/MINIMUM_VIABLE_SOUNIO.md)** — Language basics
-- **[LLM_PROGRAMMING_GUIDE.md](../../docs/LLM_PROGRAMMING_GUIDE.md)** — Syntax reference
+- **[LLM_PROGRAMMING_GUIDE.md](../../docs/guide/LLM_PROGRAMMING_GUIDE.md)** — Syntax reference
 - **[Triple Sounio Ecosystem README](../README.md)** — Project overview
 - **[Drug-Discovery Guide](../drug-discovery/)** — PK/PD modeling tutorials
 

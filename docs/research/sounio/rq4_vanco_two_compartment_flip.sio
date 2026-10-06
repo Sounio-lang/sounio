@@ -1,0 +1,342 @@
+//@ run-pass
+//@ requires: madaros
+//@ exit-code: 0
+//@ description: RQ4 — two-compartment vancomycin AUC24: shared-source phase sum, naive vs first-order affine; WARN flip rate over a cohort
+//! Paper A §8.4 (RQ4). The steady-state AUC over a dosing interval in a two-compartment
+//! model can be written as the sum of its two exponential phases,
+//!     AUC = A/α + B/β,
+//! where A, α, B, β all descend from the SAME measured quantities (weight → Vc and CrCl,
+//! SCr → CrCl → CL, Q, Vp). Algebraically the sum equals D/CL. An uncertainty library that
+//! assumes independence at `add` drops Cov(A/α, B/β) (Lemma 1: gap = 2·Cov) and, along the
+//! chain, every other shared-source covariance too. This program measures the clinical
+//! consequence: how many patients' "WARN: possible subtherapeutic" (lower 95% bound < 400
+//! while the point estimate reads therapeutic) are SILENCED by the naive propagation.
+//!
+//! Three propagations over one deterministic cohort (LCG, N patients):
+//!   T  first-order affine forms over the 4 measured sources everywhere (the truth to first
+//!      order; the same object as the NS calculus' `Aff` in EpistemicEffectsNS.lean)
+//!   N  the shipped scalar `ep_*` chain everywhere (independence assumed at every op)
+//!   S  exact (affine) phase terms, independence-assuming final sum only — the controlled
+//!      instance of §8.4: isolates the `2·Cov` term of Lemma 1 at the one `add`
+//! Decision rule (as in examples/vancomycin_auc_epistemic.sio): WARN iff AUC ≥ 400 and
+//! AUC − 2·u(AUC) < 400.  Flip = WARN under T, THERAPEUTIC under N (or S).
+//!
+//! Not a clinical tool. Population constants are the example's (Cockcroft–Gault, Matzke
+//! 1984, Vc = 0.5 L/kg, Q = 7 L/h, Vp = 0.5 L/kg), u(weight) = 1 kg, u(SCr) = 10 %,
+//! u(Q) = u(Vp) = 20 % (popPK), age 65 male, 500 mg q12h.
+
+use epistemic::knowledge::{ep_measured, ep_certain, ep_add, ep_sub, ep_mul, ep_div, ep_scale, ep_sqrt_ep, ep_val, ep_variance, Epistemic}
+
+fn nsqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var y = x
+    var i: i64 = 0
+    while i < 24 { y = 0.5 * (y + x / y); i = i + 1 }
+    y
+}
+
+fn absf(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+
+// ── first-order affine forms over 4 measured sources: 0 weight, 1 SCr, 2 Q, 3 Vp ────────
+
+struct Aff { v: f64, c0: f64, c1: f64, c2: f64, c3: f64 }
+
+fn af_const(v: f64) -> Aff { Aff { v: v, c0: 0.0, c1: 0.0, c2: 0.0, c3: 0.0 } }
+
+fn af_src(v: f64, sd: f64, idx: i64) -> Aff {
+    var a = af_const(v)
+    if idx == 0 { a.c0 = sd }
+    if idx == 1 { a.c1 = sd }
+    if idx == 2 { a.c2 = sd }
+    if idx == 3 { a.c3 = sd }
+    a
+}
+
+fn af_add(a: &Aff, b: &Aff) -> Aff {
+    Aff { v: a.v + b.v, c0: a.c0 + b.c0, c1: a.c1 + b.c1, c2: a.c2 + b.c2, c3: a.c3 + b.c3 }
+}
+fn af_sub(a: &Aff, b: &Aff) -> Aff {
+    Aff { v: a.v - b.v, c0: a.c0 - b.c0, c1: a.c1 - b.c1, c2: a.c2 - b.c2, c3: a.c3 - b.c3 }
+}
+fn af_scale(a: &Aff, k: f64) -> Aff {
+    Aff { v: a.v * k, c0: a.c0 * k, c1: a.c1 * k, c2: a.c2 * k, c3: a.c3 * k }
+}
+// d(ab) = b·da + a·db
+fn af_mul(a: &Aff, b: &Aff) -> Aff {
+    Aff { v: a.v * b.v,
+          c0: b.v * a.c0 + a.v * b.c0, c1: b.v * a.c1 + a.v * b.c1,
+          c2: b.v * a.c2 + a.v * b.c2, c3: b.v * a.c3 + a.v * b.c3 }
+}
+// d(a/b) = da/b − a·db/b²
+fn af_div(a: &Aff, b: &Aff) -> Aff with Div, Panic {
+    let ib = 1.0 / b.v
+    let q = a.v * ib * ib
+    Aff { v: a.v * ib,
+          c0: a.c0 * ib - q * b.c0, c1: a.c1 * ib - q * b.c1,
+          c2: a.c2 * ib - q * b.c2, c3: a.c3 * ib - q * b.c3 }
+}
+// d√a = da / (2√a)
+fn af_sqrt(a: &Aff) -> Aff with Mut, Div, Panic {
+    let r = nsqrt(a.v)
+    let k = if r > 0.0 { 0.5 / r } else { 0.0 }
+    Aff { v: r, c0: a.c0 * k, c1: a.c1 * k, c2: a.c2 * k, c3: a.c3 * k }
+}
+fn af_var(a: &Aff) -> f64 { a.c0 * a.c0 + a.c1 * a.c1 + a.c2 * a.c2 + a.c3 * a.c3 }
+// covariance of two forms = inner product of their coefficient vectors (Lemma 1)
+fn af_cov(a: &Aff, b: &Aff) -> f64 { a.c0 * b.c0 + a.c1 * b.c1 + a.c2 * b.c2 + a.c3 * b.c3 }
+
+// ── the two-compartment AUC24, written the way a PK library writes it ─────────────────
+// Stage helpers keep every function under ~16 five-field struct locals: the committed
+// Madaros (v0.80.0) miscompiles a function with ≳ 23 such locals (≈120 scalar slots) —
+// segfault, or silently wrong values — measured on this program 2026-08-31
+// (docs/audit/MADAROS_LOCAL_SLOT_OVERFLOW_2026-08-31.md). Also: one 5-field struct per
+// return (nested by-value aggregate returns hit the #1692 SRET defect), and no `&f(&g(x))`.
+
+// CL from weight and SCr: Cockcroft–Gault (65 y male) then Matzke 1984
+fn st_cl_aff(w: &Aff, sc: &Aff) -> Aff with Mut, Div, Panic {
+    let w75 = af_scale(w, 75.0)
+    let sc72 = af_scale(sc, 72.0)
+    let crcl = af_div(&w75, &sc72)
+    let cl_renal = af_scale(&crcl, 0.06 * 0.695)
+    let cl_nr = af_const(0.05)
+    af_add(&cl_renal, &cl_nr)
+}
+
+// α (which = 0) or β (which = 1) from the micro-constants
+fn st_root_aff(k10: &Aff, k12: &Aff, k21: &Aff, which: i64) -> Aff with Mut, Div, Panic {
+    let s01 = af_add(k10, k12)
+    let s = af_add(&s01, k21)
+    let p = af_mul(k10, k21)
+    let s2 = af_mul(&s, &s)
+    let p4 = af_scale(&p, 4.0)
+    let rad = af_sub(&s2, &p4)
+    let disc = af_sqrt(&rad)
+    let spd = af_add(&s, &disc)
+    let smd = af_sub(&s, &disc)
+    if which == 0 { return af_scale(&spd, 0.5) }
+    af_scale(&smd, 0.5)
+}
+
+// 2·A/α (which = 0) or 2·B/β (which = 1): A = (D/Vc)(α−k21)/(α−β), B = (D/Vc)(k21−β)/(α−β)
+fn st_phase_aff(d_over_vc: &Aff, alpha: &Aff, beta: &Aff, k21: &Aff, which: i64) -> Aff with Mut, Div, Panic {
+    let amb = af_sub(alpha, beta)
+    let amk = af_sub(alpha, k21)
+    let kmb = af_sub(k21, beta)
+    let coef_a = af_div(&amk, &amb)
+    let coef_b = af_div(&kmb, &amb)
+    let a_ = af_mul(d_over_vc, &coef_a)
+    let b_ = af_mul(d_over_vc, &coef_b)
+    let aa = af_div(&a_, alpha)
+    let bb = af_div(&b_, beta)
+    if which == 0 { return af_scale(&aa, 2.0) }
+    af_scale(&bb, 2.0)
+}
+
+// `which`: 0 = 2·A/α phase, 1 = 2·B/β phase, 2 = the direct 2·D/CL reference
+fn phase_aff(weight: f64, scr: f64, q: f64, vp: f64, dose: f64, which: i64) -> Aff with Mut, Div, Panic {
+    let w  = af_src(weight, 1.0, 0)
+    let sc = af_src(scr, 0.10 * scr, 1)
+    let qq = af_src(q, 0.20 * q, 2)
+    let vpp = af_src(vp, 0.20 * vp, 3)
+    let cl = st_cl_aff(&w, &sc)
+    // Vc = 0.5 L/kg — shares the WEIGHT source with CrCl
+    let vc = af_scale(&w, 0.5)
+    if which == 2 {
+        let d2 = af_const(2.0 * dose)
+        return af_div(&d2, &cl)
+    }
+    let k10 = af_div(&cl, &vc)
+    let k12 = af_div(&qq, &vc)
+    let k21 = af_div(&qq, &vpp)
+    let alpha = st_root_aff(&k10, &k12, &k21, 0)
+    let beta  = st_root_aff(&k10, &k12, &k21, 1)
+    let dc = af_const(dose)
+    let d_over_vc = af_div(&dc, &vc)
+    st_phase_aff(&d_over_vc, &alpha, &beta, &k21, which)
+}
+
+// Same stages through the shipped scalar Epistemic chain (independence assumed at every op).
+
+// CL from weight and SCr: Cockcroft–Gault (65 y male) then Matzke 1984
+fn st_cl_ep(w: &Epistemic, sc: &Epistemic) -> Epistemic with Mut, Div, Panic {
+    let w75 = ep_scale(w, 75.0)
+    let sc72 = ep_scale(sc, 72.0)
+    let crcl = ep_div(&w75, &sc72)
+    let cl_renal = ep_scale(&crcl, 0.06 * 0.695)
+    let cl_nr = ep_certain(0.05)
+    ep_add(&cl_renal, &cl_nr)
+}
+
+// α (which = 0) or β (which = 1) from the micro-constants
+fn st_root_ep(k10: &Epistemic, k12: &Epistemic, k21: &Epistemic, which: i64) -> Epistemic with Mut, Div, Panic {
+    let s01 = ep_add(k10, k12)
+    let s = ep_add(&s01, k21)
+    let p = ep_mul(k10, k21)
+    let s2 = ep_mul(&s, &s)
+    let p4 = ep_scale(&p, 4.0)
+    let rad = ep_sub(&s2, &p4)
+    let disc = ep_sqrt_ep(&rad)
+    let spd = ep_add(&s, &disc)
+    let smd = ep_sub(&s, &disc)
+    if which == 0 { return ep_scale(&spd, 0.5) }
+    ep_scale(&smd, 0.5)
+}
+
+// 2·A/α (which = 0) or 2·B/β (which = 1): A = (D/Vc)(α−k21)/(α−β), B = (D/Vc)(k21−β)/(α−β)
+fn st_phase_ep(d_over_vc: &Epistemic, alpha: &Epistemic, beta: &Epistemic, k21: &Epistemic, which: i64) -> Epistemic with Mut, Div, Panic {
+    let amb = ep_sub(alpha, beta)
+    let amk = ep_sub(alpha, k21)
+    let kmb = ep_sub(k21, beta)
+    let coef_a = ep_div(&amk, &amb)
+    let coef_b = ep_div(&kmb, &amb)
+    let a_ = ep_mul(d_over_vc, &coef_a)
+    let b_ = ep_mul(d_over_vc, &coef_b)
+    let aa = ep_div(&a_, alpha)
+    let bb = ep_div(&b_, beta)
+    if which == 0 { return ep_scale(&aa, 2.0) }
+    ep_scale(&bb, 2.0)
+}
+
+// `which`: 0 = 2·A/α phase, 1 = 2·B/β phase, 2 = the direct 2·D/CL reference
+fn phase_ep(weight: f64, scr: f64, q: f64, vp: f64, dose: f64, which: i64) -> Epistemic with Mut, Div, Panic {
+    let w  = ep_measured(weight, 1.0)
+    let sc = ep_measured(scr, 0.10 * scr)
+    let qq = ep_measured(q, 0.20 * q)
+    let vpp = ep_measured(vp, 0.20 * vp)
+    let cl = st_cl_ep(&w, &sc)
+    // Vc = 0.5 L/kg — shares the WEIGHT source with CrCl
+    let vc = ep_scale(&w, 0.5)
+    if which == 2 {
+        let d2 = ep_certain(2.0 * dose)
+        return ep_div(&d2, &cl)
+    }
+    let k10 = ep_div(&cl, &vc)
+    let k12 = ep_div(&qq, &vc)
+    let k21 = ep_div(&qq, &vpp)
+    let alpha = st_root_ep(&k10, &k12, &k21, 0)
+    let beta  = st_root_ep(&k10, &k12, &k21, 1)
+    let dc = ep_certain(dose)
+    let d_over_vc = ep_div(&dc, &vc)
+    st_phase_ep(&d_over_vc, &alpha, &beta, &k21, which)
+}
+
+// WARN iff point ≥ 400 and lower 95 % bound < 400  (0 = THERAPEUTIC/other, 1 = WARN)
+fn warn(point: f64, variance: f64) -> i64 with Mut, Div, Panic {
+    let sd = nsqrt(variance)
+    if point >= 400.0 && point - 2.0 * sd < 400.0 { 1 } else { 0 }
+}
+
+fn lcg(seed: i64) -> i64 { (seed * 1103515245 + 12345) % 2147483648 }
+fn unit(seed: i64) -> f64 with Div { (seed % 1000000) as f64 / 1000000.0 }
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    let n: i64 = 5000
+    let dose = 500.0
+    var seed: i64 = 20260831
+    var i: i64 = 0
+    var true_warn: i64 = 0
+    var naive_warn: i64 = 0
+    var sum_warn: i64 = 0
+    var silenced_naive: i64 = 0
+    var silenced_sum: i64 = 0
+    var spurious_naive: i64 = 0
+    var max_identity_err: f64 = 0.0
+    var ratio_naive_acc: f64 = 0.0
+    var ratio_sum_acc: f64 = 0.0
+    var cov_neg: i64 = 0
+    var in_window: i64 = 0
+    // scenario B — interval sum: AUC0-24 = AUC(0-12) + AUC(12-24), each interval = D/CL from the
+    // SAME clearance estimate (ρ = 1). The shared-source sum a PK library actually performs.
+    var b_true_warn: i64 = 0
+    var b_sum_warn: i64 = 0
+    var b_silenced: i64 = 0
+    var b_ratio_acc: f64 = 0.0
+
+    while i < n {
+        seed = lcg(seed); let weight = 45.0 + 75.0 * unit(seed)
+        seed = lcg(seed); let scr = 0.6 + 2.0 * unit(seed)
+        seed = lcg(seed); let q = 7.0 * (0.7 + 0.6 * unit(seed))
+        seed = lcg(seed); let vp = 0.5 * weight * (0.7 + 0.6 * unit(seed))
+
+        // T — affine truth, phase sum done affinely
+        let pa_t = phase_aff(weight, scr, q, vp, dose, 0)
+        let pb_t = phase_aff(weight, scr, q, vp, dose, 1)
+        let direct_t = phase_aff(weight, scr, q, vp, dose, 2)
+        let auc_t = af_add(&pa_t, &pb_t)
+        let var_t = af_var(&auc_t)
+        // identity check: phase sum == 2·D/CL to first order (value and variance)
+        let e1 = absf(auc_t.v - direct_t.v) / direct_t.v
+        let e2 = absf(var_t - af_var(&direct_t)) / af_var(&direct_t)
+        if e1 > max_identity_err { max_identity_err = e1 }
+        if e2 > max_identity_err { max_identity_err = e2 }
+
+        // S — exact phase terms, independence-assuming final add: drops 2·Cov (Lemma 1)
+        let var_s = af_var(&pa_t) + af_var(&pb_t)
+        if af_cov(&pa_t, &pb_t) < 0.0 { cov_neg = cov_neg + 1 }
+
+        // N — the shipped scalar chain
+        let pa_n = phase_ep(weight, scr, q, vp, dose, 0)
+        let pb_n = phase_ep(weight, scr, q, vp, dose, 1)
+        let auc_n = ep_add(&pa_n, &pb_n)
+        let var_n = ep_variance(&auc_n)
+
+        let wt = warn(auc_t.v, var_t)
+        let ws = warn(auc_t.v, var_s)
+        let wn = warn(ep_val(&auc_n), var_n)
+        true_warn = true_warn + wt
+        sum_warn = sum_warn + ws
+        naive_warn = naive_warn + wn
+        if wt == 1 && wn == 0 { silenced_naive = silenced_naive + 1 }
+        if wt == 1 && ws == 0 { silenced_sum = silenced_sum + 1 }
+        if wt == 0 && wn == 1 { spurious_naive = spurious_naive + 1 }
+        if auc_t.v >= 400.0 && auc_t.v <= 600.0 { in_window = in_window + 1 }
+
+        // scenario B: two interval AUCs, each D/CL = direct/2, on the same sources
+        let half_t = af_scale(&direct_t, 0.5)
+        let auc_b_t = af_add(&half_t, &half_t)             // T: affine (exact) sum
+        let var_b_t = af_var(&auc_b_t)
+        let var_b_s = af_var(&half_t) + af_var(&half_t)      // S: independence-assuming add
+        let wbt = warn(auc_b_t.v, var_b_t)
+        let wbs = warn(auc_b_t.v, var_b_s)
+        b_true_warn = b_true_warn + wbt
+        b_sum_warn = b_sum_warn + wbs
+        if wbt == 1 && wbs == 0 { b_silenced = b_silenced + 1 }
+        b_ratio_acc = b_ratio_acc + var_b_s / var_b_t
+        ratio_naive_acc = ratio_naive_acc + var_n / var_t
+        ratio_sum_acc = ratio_sum_acc + var_s / var_t
+        i = i + 1
+    }
+
+    let nf = n as f64
+    println("RQ4 two-compartment vancomycin AUC24 — cohort flip measurement")
+    print("patients                         = "); println(n)
+    print("point AUC in [400,600]           = "); println(in_window)
+    print("WARN under T (affine truth)      = "); println(true_warn)
+    print("WARN under S (naive final add)   = "); println(sum_warn)
+    print("WARN under N (naive ep chain)    = "); println(naive_warn)
+    print("silenced by S (T warn, S quiet)  = "); println(silenced_sum)
+    print("silenced by N (T warn, N quiet)  = "); println(silenced_naive)
+    print("spurious under N (N warn, T not) = "); println(spurious_naive)
+    print("phase pairs with Cov < 0         = "); println(cov_neg)
+    print("mean var ratio S/T  (x1000)      = "); println((1000.0 * ratio_sum_acc / nf) as i64)
+    print("mean var ratio N/T  (x1000)      = "); println((1000.0 * ratio_naive_acc / nf) as i64)
+    print("max identity error  (x1e9)       = "); println((1000000000.0 * max_identity_err) as i64)
+    println("scenario B — interval sum AUC(0-12)+AUC(12-24), same CL (rho = 1)")
+    print("B: WARN under T (affine truth)   = "); println(b_true_warn)
+    print("B: WARN under S (naive add)      = "); println(b_sum_warn)
+    print("B: silenced by S (T warn, S quiet)= "); println(b_silenced)
+    print("B: mean var ratio S/T (x1000)    = "); println((1000.0 * b_ratio_acc / nf) as i64)
+    print("RQ4_FLIP n="); print(n)
+    print(" true_warn="); print(true_warn)
+    print(" silenced_sum="); print(silenced_sum)
+    print(" silenced_naive="); print(silenced_naive)
+    print(" spurious_naive="); print(spurious_naive)
+    print(" var_ratio_sum_permille="); print((1000.0 * ratio_sum_acc / nf) as i64)
+    print(" var_ratio_naive_permille="); print((1000.0 * ratio_naive_acc / nf) as i64)
+    print(" B_true_warn="); print(b_true_warn)
+    print(" B_silenced="); print(b_silenced)
+    print(" B_var_ratio_permille="); println((1000.0 * b_ratio_acc / nf) as i64)
+    // acceptance: the identity must hold to first order (else the affine model is wrong)
+    if max_identity_err > 0.000001 { return 1 }
+    0
+}

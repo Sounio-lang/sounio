@@ -1,0 +1,50 @@
+//@ run-pass
+// A swap through a temporary must survive -O.
+//
+// ocp_mfi_copy_prop recorded "read `src` instead of `dst`" for an IrCopy and
+// invalidated that record when `dst` was written -- but not when `src` was.
+// A swap writes exactly that register between the copy and its use:
+//
+//     tv = v0     recorded: read v0 instead of tv
+//     v0 = v1     v0 changes; the record above is now false
+//     v1 = tv     rewritten to `v1 = v0`, so both hold the new value
+//
+// The values must be opaque to the earlier peels: with literals, dedup_imm and
+// const_fold (which run before copy_prop) fold the swap away and nothing is
+// left for it to get wrong. Found by reducing tests/run-pass/gum_reporting.sio,
+// whose selection sort ranked its second contributor wrong under -O only.
+
+fn opaque_sqrt(x: f64) -> f64 with Mut {
+    if x <= 0.0 { return 0.0 }
+    var guess = x / 2.0
+    var i = 0
+    while i < 30 {
+        guess = (guess + x / guess) / 2.0
+        i = i + 1
+    }
+    return guess
+}
+
+fn main() -> i64 with IO, Mut, Div, Panic {
+    var v0: f64 = opaque_sqrt(4.0)
+    var v1: f64 = opaque_sqrt(49.0)
+    var i0: i64 = 0
+    var i1: i64 = 1
+
+    if v1 > v0 {
+        var ti = i0
+        i0 = i1
+        i1 = ti
+        var tv = v0
+        v0 = v1
+        v1 = tv
+    }
+
+    // After the swap: v0=7, v1=2, i0=1, i1=0.
+    if (v0 as i64) == 7 && (v1 as i64) == 2 && i0 == 1 && i1 == 0 {
+        println("OPT_COPY_PROP_SWAP_TEMP_OK")
+    } else {
+        println("FAIL: swap through a temporary lost a value")
+    }
+    return 0
+}

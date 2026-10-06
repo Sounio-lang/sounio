@@ -1,0 +1,236 @@
+<!-- docs:meta
+topic_id: repo.docs.architecture.f128-f256-ladder
+authority: repo_only
+audience: users
+last_validated: 2026-03-07
+validated_by: A2
+source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.architecture.f128-f256-ladder
+-->
+
+# F128/F256 Implementation Ladder (V0-B → V0-E)
+
+**Dispatch**: Wave-1 from fleet-orchestrator (claude-1), full context in `docs/internal/coordination/MADAROS_FOCUS_PLAN_2026-08-16.md` §WS-G.  
+**Owner**: grok-cli3 (lane `ws-g-f128-spec`).  
+**Claim**: `bin/sounio-coord claim --agent grok-cli3 --lane ws-g-f128-spec --intent 'WS-G f128/f256 ladder spec' --files docs/architecture/F128_F256_LADDER.md` (active).
+
+This document lifts the current **V0-A boundary** (parser rejection of `f128`/`f256` source forms with E249 before any check/IR/SOIR/ABI/native lowering) into a staged, gate-defined ladder. No changes to `self-hosted/` are authorized in this phase. All progress is expressed through:
+
+- New/updated test fixtures and compile-fail cases.
+- Extension of the three existing scaffolds in `self-hosted/compiler/` (`f128_f256_format_descriptor_probe.sio`, `f128_f256_numeric_payload_probe.sio`, `f128_f256_numeric_wire_probe.sio`).
+- New CI gates that exercise the ladder without claiming semantic arithmetic or epistemic surface until V0-E.
+- Updates to `docs/EXACT_CORE.md`, `docs/compiler/KNOWN_LIMITATIONS.md`, and the epistemic trust map.
+
+The ladder aligns with the single-semantic-clock rule (executable meaning for language and library claims is owned by Sounio under the default compiler, Madaros / `bin/souc`), precision preservation (`docs/internal/concepts/precision-preservation.md`), and the `Verdict` enum evolution in `stdlib/algebra/sedenion_verdict.sio`. The semantic-clock rule was drafted as ADR-008 on a branch that never landed, so there is no ADR of record for it — `docs/decisions/` stops at ADR-007.
+
+## Current V0-A Boundary (as of Madaros v0.80.0)
+
+From `docs/EXACT_CORE.md:55-57` and `self-hosted/parser/types.sio:27-45`:
+
+```sounio
+// Parser immediately rejects with E249
+fn identity_f128(x: f128) -> f128 { x }  // compile-fail
+let a: f128 = 1.0                         // compile-fail
+let b = a + 1.0f128                       // compile-fail
+```
+
+- `MeasuredF256 { eps256 }` exists only as a future witness shape in `Verdict`; no arithmetic.
+- Format descriptors, limb pools, and wire formats are already partially exercised by the three probes (binary128/binary256 IEEE-like, LSW-first limbs, roundtrip, negative cases, IR constant emission).
+- Gates: `scripts/ci/madaros_f128_f256_format_identity_gate.sh`, `madaros_f128_f256_numeric_payload_gate.sh`, `madaros_f128_f256_numeric_wire_gate.sh` (included in IR/SOIR bridges).
+- No literals, no user-visible operations, no stdlib surface, no `print_f128`/`Knowledge<f128>` interaction.
+- All `tests/compile-fail/f128_f256_*.sio` and `tests/native-v2/f128_format_identity_*` remain authoritative negatives.
+
+This boundary is **structural-only** and enforced **on Madaros** before type checking or IR lowering.
+
+### Engine split (FINDING 2026-08-17; V0-B lift 2026-09-06)
+
+| Engine | `f128`/`f256` type spellings + literals | Arithmetic / casts |
+|---|---|---|
+| **Madaros** (default `bin/souc`) | **V0-B green:** accepted through `check` (E249 lifted). | Still refused (E004 / E248 / mismatch). |
+| **lean_single** (bootstrap seed) | Accepts type names + literals. | Annotated `f128` locals lower as **binary128** (kind 13, two i64 limbs, libgcc `__*tf3`); the #2387 probe reports real f128 arithmetic. Closed by #2426. `as f128` / `print_f128` and the Madaros V0-B–E contract remain out of scope. |
+
+V0-A (parser E249 on all `f128`/`f256` source forms) was the Madaros-owned boundary before this stage. Compile-fail fixtures that still mention E249 under lean_single suite participation may carry `//@ known-failure: lean_single-only gap…` where needed — that documents an engine gap, **not** permission to treat f128 arithmetic as accepted under Madaros.
+
+The authoritative V0-B contract remains `scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0b` under default Madaros.
+
+## The V0-B..E Ladder
+
+Each stage has a **gate definition** (CI command, positive/negative witnesses, success receipt, semantic-lane ID, acceptance criteria). Gates are additive; later stages subsume earlier ones. **V0-B green is judged on Madaros** (`madaros_f128_f256_ladder_gate.sh`); lean_single suite participation uses known-failure annotations until the seed gains E249 or is retired from this surface. Success receipts must be exact-string matched in gate scripts.
+
+### V0-B: Literals Accepted End-to-End Through Check
+
+**Goal**: Parser accepts `f128`/`f256` type spellings and decimal/hex/binary literals. Type checker accepts them as distinct from `f64` (no implicit conversion). No arithmetic, no casts, no runtime values yet. Negative witnesses for arithmetic remain.
+
+**Gate**:
+```bash
+bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0b
+```
+(or integrated into `madaros_f128_f256_format_identity_gate.sh --stage v0b`).
+
+**Positive witnesses** (new):
+- `tests/run-pass/f128_v0b_literal_smoke.sio` — binds literals, passes to imported identity functions (see existing `tests/fixtures/f128_format_identity_leaf.sio`), `check` only.
+- `tests/run-pass/f256_v0b_hex_literal.sio` — `0x1.0p+0f256`, array initializers.
+
+**Negative witnesses** (updated/expanded):
+- Existing `tests/compile-fail/f128_f256_arithmetic_unimplemented.sio`, `f128_f256_literal_unimplemented.sio` (now only arithmetic/cast cases fail).
+- New: implicit conversion, generic arg misuse (already partially present).
+
+**Success receipt**:
+```
+PASS f128_f256_v0b_literals check=green parser=E249_lifted typecheck=distinct_no_implicit literals=decimal+hex+binary negative_arithmetic=4
+```
+
+**Status (2026-09-06):** gate green on Madaros. Positive probes
+`tests/run-pass/f128_v0b_literal_smoke.sio` /
+`tests/run-pass/f256_v0b_literal_forms.sio` reach `check: OK`.
+
+### V0-C: Wire Format / Limb Pools (Extend Existing Three Probes)
+
+**Goal**: Fully exercise and extend the existing scaffold probes for 128/256-bit payloads. Limb pool management, wire serialization (byte-exact roundtrip, adler32 checksums, negative encoding), descriptor queries, IR constant emission for wide literals, SOIR/BSS layout. No arithmetic.
+
+**Gate**:
+```bash
+bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0c
+```
+(extends `madaros_f128_f256_numeric_payload_gate.sh` + `numeric_wire_gate.sh`).
+
+**Positive witnesses** (extensions of existing):
+- `self-hosted/compiler/f128_f256_format_descriptor_probe.sio` (already green; extend with more formats).
+- `self-hosted/compiler/f128_f256_numeric_payload_probe.sio` (extend limb counts, LSW-first validation, pool merging, 256-bit 4-limb cases).
+- `self-hosted/compiler/f128_f256_numeric_wire_probe.sio` (extend to full 256-bit wire buffers, more negative cases, transactional reseal, IR→SOIR roundtrip).
+
+**Negative witnesses**: malformed limb counts, wrong format_id, checksum mismatch, overflow.
+
+**Success receipt** (example, expanded):
+```
+PASS f128_f256_v0c_wire limbs=8 order=lsw-first payloads=4 wire_bytes=272 roundtrip=exact decode_negative=24 encode_negative=4 checksum=adler32 ir_emit=green soir_bss=green
+```
+
+**Acceptance criteria**:
+- Existing three probes pass with expanded coverage (at least 256-bit full limb support).
+- Wide literals from V0-B emit as `IrWideNumericPayload` constants without fallback.
+- Wire format is authoritative for ABI and future softfloat constants.
+- No runtime arithmetic emitted.
+- Semantic-Lane-ID: `WS-G-V0C-WIRE-LIMB-POOLS`.
+- Ties into `docs/architecture/SOIR_REFERENCE.md` and native-v2 SRET/ABI.
+
+**Status (2026-09-22):** gate red by design, not a regression. The three
+scaffold probes above are green (positive control fires), and the external
+corpus (`tests/vectors/f128_f256_v0c/wire_f{128,256}.jsonl`) passes its
+integrity oracle, but nothing yet maps each corpus row through the
+limb/wire codec end to end — `scripts/ci/madaros_f128_f256_v0c_wire_gate.sh`
+has asserted this failure since its introduction (`dd3b68ef9b`, #1775,
+2026-08-17: "gate FAILs today because no codec consumer maps those 31+24
+encodings through the limb/wire path"). The corpus-consuming codec
+(`self-hosted/compiler/f128_f256_v0c_wire_corpus_probe.sio`,
+`tests/run-pass/f128_v0c_wire_corpus_smoke.sio`,
+`scripts/dev/ws_g_v0c_codec_corpus_runner.py`) has never existed anywhere in
+this repo's history — a deferred milestone, tracked in
+`tests/vectors/f128_f256_v0c/V0C_GATE_CONSUMPTION.md`, not something that
+regressed. `scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0c` is
+deliberately left out of the CI wiring in `.github/workflows/ci.yml`'s
+`madaros-witness-gate` job until that consumer is built.
+
+### V0-D: Softfloat Arithmetic (Compiler-Owned Limb Routines)
+
+**Goal**: Implement `add`/`sub`/`mul`/`div`/`cmp` (and `sqrt`, `fma` if natural) as compiler-owned routines operating on limb pools. Constant folding where possible. Rounded vs exact semantics defined. No user `+`/`-` surface yet (still compile-fail for source ops); used internally for constant evaluation and future `MeasuredF256`.
+
+**Gate**:
+```bash
+bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0d
+```
+
+**Positive witnesses**:
+- `tests/run-pass/f128_v0d_softfloat_const_fold.sio` — compile-time evaluation of wide constants.
+- Extended numeric probes exercising limb routines (add/sub/mul/div/cmp on known values, including edge cases: subnormals, NaN, inf, zero-divisor proximity for epistemic use).
+- New `self-hosted/compiler/f128_f256_softfloat_limb_probe.sio`.
+
+**Negative witnesses**: overflow without rounding mode, incorrect rounding, provenance loss.
+
+**Success receipt**:
+```
+PASS f128_f256_v0d_softfloat ops=add/sub/mul/div/cmp limb_routines=green const_fold=exact rounded=ieee754-2019 negative_cases=32 MeasuredF256_witness=structural
+```
+
+**Acceptance criteria**:
+- Compiler owns the limb implementations (no libc dependency for these ops).
+- `Verdict::MeasuredF256` can now be populated with real eps256 from softfloat.
+- Ties directly to GUM propagation rules and `stdlib/epistemic/`.
+- No stdlib surface or `print` yet.
+- Semantic-Lane-ID: `WS-G-V0D-SOFTFLOAT-LIMB-ROUTINES`.
+- Updates `docs/compiler/KNOWN_LIMITATIONS.md` (removes arithmetic unimplemented note) and epistemic trust map.
+
+### V0-E: Stdlib Surface + Printing + GUM Interaction
+
+**Goal**: Full user-visible surface. `stdlib/math/float128.sio` (or `wide_float.sio`), `print_f128`, `format`, `Knowledge<f128>`, `Knowledge<f256>`, refinement types, epistemic propagation (`GUM` variance, provenance), units integration if applicable. Full `souc run` support. Printing must be deterministic and match softfloat results.
+
+**Staged delivery (2026-09-06):**
+
+| Slice | Gate | Status bar |
+|---|---|---|
+| **V0-E.1** print + limb stdlib API | `bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e` | Deterministic softfloat decimal/hex print; `stdlib/math/wide_float.sio`; Madaros `check` + seed-run hex wire smoke. |
+| **V0-E.2** source ops through check | `bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e2` | Same-format `f128`/`f256` `+ - * /` and comparisons typecheck (no E004). Mixed/cast/implicit still rejected. Madaros-run softfloat lowering, builtin `print_f128`, GUM/`MeasuredF256` deferred. |
+| **V0-E.3** run ops (scaffold) | `bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e3` | Seed-run `F128Bits` soft_add cases + hex wires; **claim clock = `sounio_native_expected` (ADR-008/009)**. Python/Rust softfloat may measure only. Madaros-run language lower / GUM / `MeasuredF256` still deferred. |
+| **V0-E.4** anti-f64 exact-case + lower prep | `bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e4` | Seed-run **stdlib** `f128_bits_exact_case_add/sub` (`F128ExactCase.supported`) with anti-f64 (`(1+~1e-20)-1 ≠ 0`); lean_single language `f128` was then proven f64-greenwash (negative); since #2387 it is binary128. **Not** general softfloat. Claim clock = `sounio_native_expected`. Madaros-run language softfloat lower still deferred. |
+| **V0-E.4.1** fail-closed Madaros lower | `bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e41` | Madaros **check** still admits same-format ops; Madaros **compile** of wide-float arithmetic with no payload (the **f256** form of `f128_v0e2_arith_check.sio`) refuses with the V0-E.4.1 sentinel (no f64 greenwash ELF). The f128 form compiles and runs rc=0 since V0-E.5.1–V0-E.5.9 (until V0-E.5.9 the gate saw it refused only because `4.0` was outside the literal table). |
+| **V0-E.5** general F128Bits add/sub | `bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e5` | IEEE binary128 **add/sub** in `stdlib/math/softfloat_f128.sio` (not the V0-E.4 table). Seed-run anti-f64 + off-table `0.5+1` / `2+tiny`. Language `f128` desugar / mul/div / f256 / `print_f128` / GUM still deferred. |
+| **V0-E.5.1** language f128 +/− | `bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e51` | Madaros-run language `f128` `+`/`−` desugars to stdlib softfloat (2×i64 limbs, no f64 payload). Honest dyadic literals + `f128_from_limbs` for ~1e-20. Params/mul/div/f256/`print_f128`/GUM still deferred. lean_single language `f128` is binary128 since #2387 (libgcc `__*tf*`; limb intrinsics lowered as rax:rdx), so this stage's fixtures also run on lean_single. |
+| **V0-E.5.2** language f128 * / unary − / cmp | `bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e52` | Madaros-run language `f128` `*`, unary `-`, `< <= > >= == !=` desugar to stdlib softfloat (`f128_bits_soft_mul/neg/lt..ne`; IEEE RNE 113×113-bit product, +0 == -0, NaN unordered). Anti-f64 `(1+~1e-20)^2 ≠ 1`, `(1+~1e-20) > 1`. `/`, params/f256/`print_f128`/GUM still deferred. |
+| **V0-E.5.3** language f128 / | `bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e53` | Madaros-run language `f128` `/` desugars to `f128_bits_soft_div` (117-bit restoring long division, RNE; x/0 → ±inf, 0/0 → qNaN). Anti-f64 `1/(1+~1e-20) ≠ 1`; RNE tie `(1/3)*3 == 1`. `%`, params/f256/`print_f128`/GUM still deferred. |
+| **V0-E.5.4** language f128 params/returns ABI | `bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e54` | Madaros-run user fns with `f128` params and `-> f128` returns: the value crosses the boundary as an `F128Bits` handle (one GPR word). f128 params are ready softfloat operands; a call to an `-> f128` fn is an f128 expression (let RHS, operand, argument); bare literal args to f128 params lower as binary128 (never f64). Mixed param kinds, early return, recursion. Anti-f64 through the ABI: `(1+~1e-20)^2 ≠ 1`, `1/(1+~1e-20) ≠ 1`. f256 params/returns, `%`, `print_f128`/GUM still deferred. |
+| **V0-E.5.5** language f128 struct fields + assignment | `bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e55` | Madaros-run structs with `f128` fields: the field slot holds the `F128Bits` handle (layout unchanged). Field reads are f128 expressions (operands, `let` RHS, nested `b.lo.x`, through `&Struct`/by-value params); struct-literal `1.0` initialisers are binary128; `v.x = expr` and plain `acc = 2.0` / `acc = y` (limb copy) stores take a handle — closing the V0-E.5.1 gap where a literal store put f64 bits in the slot. DCE marks the desugar targets for any struct with an f128 field. Anti-f64 `(1+~1e-20)^2 ≠ 1` through a field. f256 fields, methods returning f128, f128 arrays, `+=` still deferred / fail-closed. |
+| **V0-E.5.6** language f128 methods | `bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e56` | Madaros-run impl methods with `-> f128` returns and `f128` params on `self` / `self: &T` / `self: &!T` receivers: the method is the mangled fn `Vec2_norm2` and its `IrFunction` carries the same identity a free fn does (`return_struct_name == "f128"`, `f128_param_mask`), read at the method call — no name-keyed side table. `v.norm2()` is an f128 expression (annotated/unannotated `let`, operand, argument to an f128-param fn, comparison operand, assignment RHS, chained `v.scale(two).norm2()`, `v.scale(two).x`); explicit args to f128 params lower through the callee mask with the receiver bit shifted out, so `v.scale(2.0)` is binary128 (never f64). `&!self` mutates an f128 field through the reference; mixed `i64 + f128` params. DCE: a method signature with f128 marks the desugar targets (method_only probe). Anti-f64 `(1+~1e-20)^2 ≠ 1` through a method. f256 methods, f128 arrays, `+=`, `%` still deferred / fail-closed. |
+| **V0-E.5.7** language f128 fixed arrays | `bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e57` | Madaros-run `[f128; N]` locals/params/struct fields: every slot holds an `F128Bits` handle (ordinary boxed one-word array slot). `a[i]` is an f128 expression (operand, `let` RHS annotated or not, comparisons, loop-indexed `acc + xs[i]`); `a[i] = 2.0` is binary128 and `a[i] = y` / `a[i] = b[j]` copy; `[a, b, c]` and `[v; N]` initialisers fill handle slots element-wise (never the f64 array-literal classifier; repeat fills all N — a null handle is not 0.0); `&[f128; N]` and by-value `[f128; N]` params (slot copy, no aliasing); `let zs = xs` copies; `arr: [f128; N]` struct fields incl. `q.arr[i] = expr`. Element identity is one recorded fact per binding (`array_elem_wide_bits` on the local / the layout element type on the field). DCE marks the desugar targets for any `[f128; N]` type. Anti-f64 `(1+~1e-20)^2 ≠ 1` through an element. Checker still infers a bare-literal `[1.0, 2.0]` as `[f64; N]` (E001) — idents only. `[f256; N]`, inexact element literals, `+=` on an element fail closed; fns returning `[f128; N]`, `Seq<f128>`, `for x in xs`, methods, `print_f128`, GUM deferred. |
+| **V0-E.5.8** `print_f128` exact text | `bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e58` | Stdlib Sounio (`stdlib/math/softfloat_f128_fmt.sio`, over the V0-E.5.4 ABI) renders a language `f128` from its limbs: `print_f128` / `println_f128` / `f128_to_string` — decimal, 36 significant digits, correctly rounded half-to-even, `[-]d.ddd…e[+-]dddd` with a signed four-digit exponent (`0.0e+0000`, `inf`, `-inf`, `nan`); `print_f128_hex` / `f128_to_hex_string` — exact C99 hex float `[-]0x1.<28 hex>p<±exp>` (subnormals `0x0.…p-16382`). Exact base-10^9 big-integer scaling by 2^e / 5^-e, 37 digits + sticky, no f64 anywhere; full range (max finite e+4932, min normal e-4932, smallest subnormal e-4966, 999…9 carry). Anti-f64 `(1+~1e-20)^2 = 1.00000000000000000001999999999999989e+0000`. Builtin `println(x: f128)` still fails closed at lowering; f256 printing, format options, parsing deferred. |
+| **V0-E.5.9** exact f128 literals (decimal + C99 hex-float) | `bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e59` | The parser stamps every float literal with its exact binary128 identity read from the SOURCE BYTES (`Expr.f128_lit_lo/hi/exact`, `self-hosted/parser/f128_literal.sio`): decimal `d.ddd e±N` and C99 hex-float `0xh.hhh p±N` are exact iff the value is a dyadic rational with an odd part of at most 113 bits in the finite range (subnormals when no bit is lost). The lowerer emits those limbs in every f128 position or fails closed (`V0-E.5.9; no f64 widen`) — 0.1, 2.5e-3, a 29-hex-digit mantissa, `0x1p+16384` are refused; `4.0`, `1e3`, `1e23`, `1152921504606846977.0` (2^60+1), `1e38`, `0x1.0000000000000000000000000001p+0` (1+2^-112), max finite and min subnormal hex-floats are exact. Replaces the V0-E.5.1 8-entry table keyed on the literal's f64 value and closes the latent greenwash where a hex-float reached that table as the parser's placeholder magnitude (`0x1.8p+0` lowered as 1.0/0.0). The f64 path's hex-float magnitude is still the placeholder (closed in V0-E.5.10). |
+| **V0-E.5.10** f128 surface closure (hex-float f64, literal tail/array, `_`, implicit import) | `bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e510` | Four gaps V0-E.5.9 documented, closed. (1) A C99 hex-float in an **f64** position is its correctly rounded binary64 value read from the source bytes (`f64_hex_literal_from_source`: 60-bit significand + sticky, one nearest-even rounding, exact power-of-two scaling, subnormals and max finite; `0x1.00000000000008p+0` ties to 1.0, `…08000000000001p+0` rounds up) — no more 1.0/0.0 placeholder anywhere. (2) A bare float literal is accepted as the **tail** of an `-> f128` fn / method (`fn q() -> f128 { 0.25 }`, `-0.5`) and `return 1.5` is routed through the exact-limb path (before, check passed it and the lowerer put binary64 bits in the `F128Bits` slot); only the fn body block and `return` are routed — a literal tail of a nested `if` block is still E008. (3) `let a: [f128; N] = [1.0, 2.0]` / `[0.5; 3]` / struct-field initialisers: a literal array of float literals is accepted against a wide-float array (`checker_array_float_literal_compatible`); inexact elements fail closed. (4) The live flat lexer accepts `_` before a digit in integer, fraction, exponent and hex digits (`1_024.0`, `1_000`, `0x1_0`, `1_0.5e0_1`; a `_` not followed by a digit still ends the number). (5) The driver adds `stdlib/math/softfloat_f128.sio` to the module graph itself when any loaded module mentions language `f128` (`spec_program_mentions_f128`; trace `imported_compile: implicit_import math/softfloat_f128.sio reason=f128_in_ast`) — the first implicit import; and refuses to write a binary if an `f128_bits_soft_*` call still has no body (`an f128 desugar target has no body (V0-E.5.10 …)`) instead of emitting an ELF that traps with SIGILL 132. The V0-E.4.1 gate runs `f128_v0e2_arith_check.sio` as written. lean_single language f128, f256, `+=`, `%`, GUM unchanged. |
+| **V0-F.5** general F256Bits add/sub (KL-15a) | `bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0f5` | IEEE binary256 **add/sub** in `stdlib/math/softfloat_f256.sio` over `F256Bits` (4×i64). Seed-run + Madaros-run anti-f64 + off-f64 `0.5+1` / `2+tiny`. Language `f256` desugar / mul/div / fields/params/arrays / `print_f256` / GUM / `MeasuredF256` still deferred (V0-E.4.1 fail-closed). |
+
+**Gate** (V0-E.1):
+```bash
+bash scripts/ci/madaros_f128_f256_ladder_gate.sh --stage v0e
+```
+
+**Positive witnesses (V0-E.1)**:
+- `tests/run-pass/f128_v0e_stdlib_smoke.sio` — limb constructors + hex wire print
+- `scripts/dev/ws_g_v0e_wide_print_oracle.py` — decimal/hex vs softfloat (rump ≠ f64)
+- `stdlib/math/wide_float.sio` — `F128Bits` / `F256Bits` API
+
+**Success receipt (V0-E.1)**:
+```
+PASS f128_f256_v0e_surface print=deterministic stdlib=wide_float.sio hex_wire=softfloat_match madaros_check=green seed_smoke=green gum=deferred MeasuredF256=deferred
+PASS madaros_f128_f256_ladder_gate stage=v0e
+```
+
+**Positive witnesses (V0-E.2 — not yet)**:
+- `tests/run-pass/f128_v0e_stdlib_smoke.sio`, `f256_gum_interaction.sio`, `print_wide_precision.sio`.
+- Integration with `sedenion_verdict.sio` and `Knowledge<T>` for high-precision measurements.
+- CPC-style receipts using `f256` where `f64` was previously marginal.
+
+**Success receipt (V0-E.2 full)**:
+```
+PASS f128_f256_v0e_full stdlib_surface=complete print=deterministic gum_interaction=k95_trust MeasuredF256=executable epistemic_trust_map=updated ladder_complete=V0-E
+```
+
+**Acceptance criteria (V0-E.1)**:
+- Print oracle bit-stable and rump decimal ≠ f64 greenwash path.
+- `stdlib/math/wide_float.sio` is the limb API source of truth; smoke hex wires match softfloat.
+- Language source arithmetic / GUM / `MeasuredF256` remain explicitly deferred (V0-E.2).
+- Semantic-Lane-ID: `WS-G-V0E-STDLIB-GUM-SURFACE`.
+
+## Implementation Notes & Non-Goals
+
+- **Order**: Must be strictly staged. V0-B before V0-C, etc. Each gate must pass independently.
+- **No self-hosted edits in this doc**: Implementation of gates, probes, and softfloat routines belongs to subsequent dispatches (after this spec is reviewed/registered).
+- **Auditability**: Every stage requires positive + negative witnesses, exact receipts, and updates to the claim oracle. No retrofitted tolerances. Claim clocks follow ADR-008 / ADR-009: Sounio native or closed-form twin by default; Python/Rust never judge; verified foreign reference only for Futhark/F*/Koka/F#/C++23 (or other admitted SOTA++++).
+- **Coordination**: Use `bin/sounio-coord` for any overlapping lanes (especially parser, IR, stdlib, epistemic). See `docs/internal/concepts/SEMANTIC_LANE_CONTRACT.md`.
+- **Dependencies**: Builds on existing numeric payload/wire infrastructure. Softfloat must be limb-based (no external libm for core ops).
+- **Next actions after this spec**:
+  1. Register semantic lane in `docs/governance/topic-registry.v1.json`.
+  2. Implement V0-B gate + probes (next Codex lane).
+  3. Update `EXACT_CORE.md`, `KNOWN_LIMITATIONS.md`, and CI inclusion.
+  4. LLM-offload review of the full ladder for epistemic/math claims.
+  5. Handoff back to fleet-orchestrator.
+
+**Status**: Spec complete (V0-A baseline + full staged ladder with gates). Ready for review.
+
+*Last revised 2026-08-16. See `git log --oneline docs/architecture/F128_F256_LADDER.md` for updates. Measure before claiming (run the ladder gate).*

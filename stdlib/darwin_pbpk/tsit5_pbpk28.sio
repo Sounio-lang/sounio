@@ -12,9 +12,10 @@
 //     a single scalar equation for C_b_new closes the step.
 //
 // Derivation (Schur complement):
-//   For each peripheral organ i ∈ {1..13}, the CN step on (C_v_i, C_t_i) at
-//   frozen blood midpoint gives a 2×2 system:
-//       [ p  -q ] [Cv_i_new]   [rhs_v + γ·C_b_mid]
+//   For each peripheral organ i ∈ {1..13}, the CN step on (C_v_i, C_t_i)
+//   with unknown blood C_b_new (fully coupled via Schur, not a frozen
+//   midpoint guess) gives a 2×2 system:
+//       [ p  -q ] [Cv_i_new]   [rhs_v + γ·C_b_new]
 //       [-r   s ] [Ct_i_new] = [rhs_t            ]
 //   where p, q, r, s are the local mass-balance coefficients (functions of
 //   Q_i, PS_i, V_v_i, V_t_i, K_p_i, h). Solving for (Cv_i, Ct_i) yields
@@ -34,15 +35,89 @@
 
 use darwin_pbpk::core::pbpk28_params::*
 
+// Apply Schur coefficients to reconstruct the new PBPK28 state in place.
+// Lives in a separate function on purpose: Madaros multimodule native miscompiles
+// a second `while` in the same frame as the Schur fill that reads `a_v[i]` with a
+// dynamic index (observes zeros; lean_single is fine). Crossing a function
+// boundary with `&[f64; 14]` restores correct loads
+// (docs/audit/MADAROS_IMPORTED_PBPK28_CN_SIGSEGV_2026-08-16.md).
+fn pbpk28_cn_apply_schur(
+    state: &!PBPKState28,
+    cb_new: f64,
+    a_v: &[f64; 14],
+    b_v: &[f64; 14],
+    a_t: &[f64; 14],
+    b_t: &[f64; 14]
+) with Mut, Div {
+    (*state).cv[0] = if cb_new < 0.0 { 0.0 } else { cb_new }
+    var i: i32 = 1
+    while i < 14 {
+        let cv = (*a_v)[i] + (*b_v)[i] * cb_new
+        let ct = (*a_t)[i] + (*b_t)[i] * cb_new
+        (*state).cv[i] = if cv < 0.0 { 0.0 } else { cv }
+        (*state).ct[i] = if ct < 0.0 { 0.0 } else { ct }
+        i = i + 1
+    }
+}
+
+// Organ-average concentration C_avg,i = (V_v · C_v + V_t · C_t) / V_i read
+// through a reference (the CN kernel only holds `&!state`). By-value twin:
+// `pbpk28_organ_average` below.
+fn pbpk28_organ_average_ref(s: &PBPKState28, p: PBPKParams28, i: i32) -> f64 with Div {
+    if i == 0 { return (*s).cv[0] }
+    let vi = p.v_ref[i]
+    let vf = p.vasc_frac[i]
+    let vv = vi * vf
+    let vt = vi * (1.0 - vf)
+    return (vv * (*s).cv[i] + vt * (*s).ct[i]) / vi
+}
+
 // One fully-coupled implicit-CN step at midpoint release rate `rel_mid` (mg/h
-// — set to 0.0 for bolus-IV scenarios). Pure function: takes current state +
-// drug-specific params + rel_mid + dt, returns new state. Does not touch
-// TMDD or PD layers — those compose at the scenario level.
-pub fn pbpk28_full_cn_step(state: PBPKState28, p: PBPKParams28, rel_mid: f64, dt: f64)
-    -> PBPKState28 with Mut, Div
-{
+// — set to 0.0 for bolus-IV scenarios), with an optional first-order organ
+// sink. Writes the new state into `*state` and returns the mass (mg) the sink
+// removed over the step. Does not touch TMDD or PD layers — those compose at
+// the scenario level.
+//
+// Organ sink (e.g. a metabolite-formation clearance): flux = cl_sink ·
+// C_avg,k with C_avg,k = (V_v·C_v,k + V_t·C_t,k) / V_k, for one peripheral
+// organ k = sink_organ ∈ {1..13}. Splitting that flux over the two
+// sub-compartments by their mass share gives the same rate constant
+// k_s = cl_sink / V_k on both C_v,k and C_t,k. It enters the organ's 2×2 CN
+// block on both sides (implicit diagonal +h·k_s, explicit diagonal −h·k_s),
+// exactly as `cl_central` enters the blood row through `big_s`, so the Schur
+// closure stays exact and the flux stays cl_sink · C_avg,k in the coupled
+// solve at any cl_sink·dt/V_k — there is no demand-versus-content cap to
+// saturate. The mass it removes is the CN trapezoid
+// h·cl_sink·(C_avg,old + C_avg,new), the same quantity the discrete
+// equations subtract, so M_new = M_old + dt·rel_mid
+// − h·cl_central·(C_b,old + C_b,new) − returned mass holds to rounding on
+// every step where `pbpk28_cn_apply_schur` clamps no state. (CN is A-stable,
+// not positivity-preserving: when a stiff mode undershoots below zero, that
+// clamp — shared with the sink-free kernel — breaks the identity.)
+// sink_organ outside 1..13 or cl_sink == 0.0 means no sink: every added term
+// is then an exact ±0.0 and the step is bit-identical to the sink-free kernel.
+//
+// Madaros multimodule native workarounds (same audit note):
+// 1. Do not return a freshly rebuilt `PBPKState28` from the Schur frame —
+//    caller's field load SIGSEGVs. In-place mut + thin by-value wrapper below.
+// 2. Do not reconstruct with a second dynamic-index loop over local `a_v`/`b_v`
+//    in this same frame — use `pbpk28_cn_apply_schur` instead.
+pub fn pbpk28_full_cn_step_sink_mut(
+    state: &!PBPKState28,
+    p: PBPKParams28,
+    rel_mid: f64,
+    dt: f64,
+    sink_organ: i32,
+    cl_sink: f64
+) -> f64 with Mut, Div {
+    var a_v: [f64; 14] = [0.0; 14]
+    var b_v: [f64; 14] = [0.0; 14]
+    var a_t: [f64; 14] = [0.0; 14]
+    var b_t: [f64; 14] = [0.0; 14]
     let h = 0.5 * dt
     let vb = p.v_ref[0]
+    let has_sink = sink_organ >= 1 && sink_organ < 14 && cl_sink > 0.0
+    let sink_avg_old = if has_sink { pbpk28_organ_average_ref(state, p, sink_organ) } else { 0.0 }
 
     // Big-S = h · (Σ Q + CL) / V_b — diagonal of the blood row.
     var sum_q = 0.0
@@ -53,14 +128,10 @@ pub fn pbpk28_full_cn_step(state: PBPKState28, p: PBPKParams28, rel_mid: f64, dt
     }
     let big_s = h * (sum_q + p.cl_central) / vb
 
-    let cb_old = state.cv[0]
+    let cb_old = (*state).cv[0]
     var rhs0 = (1.0 - big_s) * cb_old + dt * rel_mid / vb
 
     // Per-organ Schur-complement coefficients.
-    var a_v: [f64; 14] = [0.0; 14]
-    var b_v: [f64; 14] = [0.0; 14]
-    var a_t: [f64; 14] = [0.0; 14]
-    var b_t: [f64; 14] = [0.0; 14]
     var sum_beta_a = 0.0
     var sum_beta_b = 0.0
 
@@ -77,19 +148,21 @@ pub fn pbpk28_full_cn_step(state: PBPKState28, p: PBPKParams28, rel_mid: f64, dt
         let kp = p.kp[i]
         let ps = p.ps[i]
         let qi = p.q[i]
+        // h·k_s for the sink organ, exactly 0.0 elsewhere (see header).
+        let hks = if has_sink && i == sink_organ { h * cl_sink / vi } else { 0.0 }
 
         let beta  = h * qi / vb
         let gamma = h * qi / vv
-        let pp    = 1.0 + h * (qi + ps) / vv
+        let pp    = 1.0 + h * (qi + ps) / vv + hks
         let qq    = h * ps / (vv * kp)
         let rr    = h * ps / vt
-        let sb    = 1.0 + h * ps / (vt * kp)
+        let sb    = 1.0 + h * ps / (vt * kp) + hks
         let det   = pp * sb - qq * rr
 
-        rhs0 = rhs0 + beta * state.cv[i]
+        rhs0 = rhs0 + beta * (*state).cv[i]
 
-        let rhs_v = gamma * cb_old + (1.0 - h * (qi + ps) / vv) * state.cv[i] + qq * state.ct[i]
-        let rhs_t = rr * state.cv[i] + (1.0 - h * ps / (vt * kp)) * state.ct[i]
+        let rhs_v = gamma * cb_old + (1.0 - h * (qi + ps) / vv - hks) * (*state).cv[i] + qq * (*state).ct[i]
+        let rhs_t = rr * (*state).cv[i] + (1.0 - h * ps / (vt * kp) - hks) * (*state).ct[i]
 
         let av = (sb * rhs_v + qq * rhs_t) / det
         let bv = (sb * gamma) / det
@@ -108,19 +181,26 @@ pub fn pbpk28_full_cn_step(state: PBPKState28, p: PBPKParams28, rel_mid: f64, dt
 
     // Close the step: scalar equation for C_b_new.
     let cb_new = (rhs0 + sum_beta_a) / ((1.0 + big_s) - sum_beta_b)
+    pbpk28_cn_apply_schur(state, cb_new, &a_v, &b_v, &a_t, &b_t)
+    if !has_sink { return 0.0 }
+    let sink_avg_new = pbpk28_organ_average_ref(state, p, sink_organ)
+    return h * cl_sink * (sink_avg_old + sink_avg_new)
+}
 
-    // Reconstruct peripheral organs from C_b_new.
-    var out = pbpk28_state_zero()
-    out.cv[0] = if cb_new < 0.0 { 0.0 } else { cb_new }
-    i = 1
-    while i < 14 {
-        let cv = a_v[i] + b_v[i] * cb_new
-        let ct = a_t[i] + b_t[i] * cb_new
-        out.cv[i] = if cv < 0.0 { 0.0 } else { cv }
-        out.ct[i] = if ct < 0.0 { 0.0 } else { ct }
-        i = i + 1
-    }
-    return out
+// Sink-free step (the original kernel): identical to the sink form with no
+// sink, which adds only exact ±0.0 terms.
+pub fn pbpk28_full_cn_step_mut(state: &!PBPKState28, p: PBPKParams28, rel_mid: f64, dt: f64) with Mut, Div {
+    let _removed = pbpk28_full_cn_step_sink_mut(state, p, rel_mid, dt, 0, 0.0)
+}
+
+// By-value API preserved for existing callers. Thin: copy → mut → return copy.
+// Math identical to the pre-mitigation reconstruct-into-`out` body.
+pub fn pbpk28_full_cn_step(state: PBPKState28, p: PBPKParams28, rel_mid: f64, dt: f64)
+    -> PBPKState28 with Mut, Div
+{
+    var st = state
+    pbpk28_full_cn_step_mut(&!st, p, rel_mid, dt)
+    return st
 }
 
 // Convenience: organ-average concentration C_avg,i = (V_v · C_v + V_t · C_t) / V_i

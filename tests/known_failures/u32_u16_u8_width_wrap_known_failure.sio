@@ -1,0 +1,58 @@
+//@ known-failure: u32 / u16 / u8 do not wrap at 2^N -- tracked as Finding 13 of the unsigned-ops scope extension.
+
+// Findings 11 / 13 / 14 are ONE defect (see finding11_scope_extension dispatch):
+// the modular compiler has no width information on integer locals, so addition
+// on a u32 always goes through i64 arithmetic and the result is the i64 sum
+// rather than the value mod 2^32. Finding 11 added the unsigned /, %, >>
+// instructions (OpUDiv / OpURem / OpUShr). It did NOT add wrapping for +, -, *
+// on sub-64-bit unsigned types, because that needs a width to live on
+// somewhere -- a slot-wide [1..64]-bit width carried through lowering. This
+// fixture states the gap so it is not invisible.
+//
+// Expected behaviour (NOT what the compiler does today):
+//   u32(4294967295) + u32(1)            == 0           // 2^32 mod 2^32
+//   u32(4294967295) * u32(2)            == 4294967294  // (2^32 - 1) * 2 mod 2^32
+//   u16(70000)        - u16(1)          == 6999        // 70000 - 1 mod 2^16
+//   u8(255)           + u8(1)           == 0           // 2^8 mod 2^8
+//   u8(200)           + u8(200)         == 144         // 400 mod 256
+//
+// What the compiler does today: each operand is implicitly widened to i64,
+// the i64 sum is returned and re-interpreted through a no-op (the cast that
+// "should" mask to width emits nothing -- see the matching cast fixture), so
+// u32(4294967295) + u32(1) prints 4294967296.
+//
+// This is a follow-up change. The signedness-only bridge (Finding 11) is the
+// first half; the width side is the second half. Both sides have to live
+// somewhere in the lowering for narrow integer types to be honest.
+
+fn main() -> i64 with IO, Div {
+    // u32 wrap at 2^32.
+    let a: u32 = 4294967295
+    let b: u32 = 1
+    let s: u32 = a + b
+    if s == 0 { return 0 }       // would prove u32 wraps
+    if s == 4294967296 { return 1 }  // current broken behaviour: i64 sum, no mask
+
+    // u16 wrap at 2^16.
+    let c: u16 = 65535
+    let d: u16 = 1
+    let s16: u16 = c + d
+    if s16 == 0 { return 0 }       // would prove u16 wraps
+    if s16 == 65536 { return 2 }   // current broken behaviour
+
+    // u8 wrap at 2^8.
+    let e: u8 = 255
+    let f: u8 = 1
+    let s8: u8 = e + f
+    if s8 == 0 { return 0 }        // would prove u8 wraps
+    if s8 == 256 { return 3 }      // current broken behaviour
+
+    // u8 sum (200 + 200) = 400 mod 256 = 144. Broken returns 400.
+    let g: u8 = 200
+    let h: u8 = 200
+    let s8b: u8 = g + h
+    if s8b == 144 { return 0 }     // would prove u8 wraps
+    if s8b == 400 { return 4 }     // current broken behaviour
+
+    return 7
+}

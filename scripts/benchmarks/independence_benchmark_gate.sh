@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 if [ -n "${CONTRACT_PATH:-}" ]; then
@@ -12,7 +12,7 @@ else
   CONTRACT_PATH="benchmarks/independence/contract.v1.json"
 fi
 
-SOUC_BIN="${SOUC_BIN:-$ROOT_DIR/target/debug/souc}"
+SOUC_BIN="${SOUC_BIN:-$ROOT_DIR/bin/souc}"
 RUN_EXTERNAL_BASELINES="${RUN_EXTERNAL_BASELINES:-0}"
 POLICY_TRAIN_CORPUS="${OMEGA_POLICY_TRAIN_CORPUS:-benchmarks/independence}"
 POLICY_SMOKE_OUTPUT="${OMEGA_POLICY_SMOKE_OUTPUT:-artifacts/omega/policy_status_smoke.v2.json}"
@@ -158,9 +158,6 @@ run_policy_smoke() {
 if [ -x "$SOUC_BIN" ] && "$SOUC_BIN" opt --help >/dev/null 2>&1; then
   echo "==> policy contract smoke"
   run_policy_smoke "$SOUC_BIN"
-elif [ -x "$ROOT_DIR/target/debug/souc" ] && "$ROOT_DIR/target/debug/souc" opt --help >/dev/null 2>&1; then
-  echo "==> policy contract smoke (fallback debug binary)"
-  run_policy_smoke "$ROOT_DIR/target/debug/souc"
 else
   echo "warning: no souc binary with 'opt' subcommand available; skipping policy status smoke"
 fi

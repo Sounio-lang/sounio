@@ -18,6 +18,8 @@ version: m6-v1
 date: 2026-05-14
 ---
 
+> **SUPERSEDED 2026-09-26: floor-biased PBPK28 numbers.** Every PBPK28 simulation number on this page was computed through `pbpk28_full_cn_step`, whose negativity floors injected mass into the 5 mg bolus: AUC_blood was +28% at dt = 0.05 h, +52% at 0.1 h and +140% at 0.5 h against the exact Dose/CL = 0.403226 mg·h/L. The same floors created parameter dependence that is not in the model, e.g. Kp sensitivities and Hessian entries. Conclusions drawn from these numbers may not hold. Sections 1–5 (prior evidence, Julia reconciliation, source edit) involve no PBPK28 stepping and remain valid. Regenerated numerical sections: [`m6_prior_update_v2.md`](m6_prior_update_v2.md). Audit: `docs/audit/PBPK28_CN_RANNACHER_MASS_BALANCE_2026-09-26.md`.
+
 # M6 Prior Update: CL_hep Variability and Julia Binding Reconciliation
 
 ## 1. Background
@@ -185,6 +187,14 @@ sha256 = 3cbea2b475e79737046f8ccf463c07d22cd5fb678fd479a032ee04bd8e19da93
 ```
 
 ## 6. New Canonical Numbers
+
+> **Engine dependency (verified 2026-08-17).** This section is dated 2026-05-14, a month
+> before `bin/souc` switched its default engine to Madaros (2026-06-14). The command below was
+> accurate when written and is silently wrong today: under default Madaros, this file compiles
+> clean but **crashes at runtime with `rc=182`** (`madaros: handles full`, a resource-ceiling
+> abort) partway through the N=2000 Monte Carlo loop. It still runs to completion (`rc=0`,
+> `PASS`) under `SOUNIO_SOUC_ENGINE=lean_single`. The numbers below have not been reproduced
+> under the project's current default engine.
 
 Command:
 

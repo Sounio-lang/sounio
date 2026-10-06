@@ -10,7 +10,7 @@
 #
 # Usage:
 #   pkill -9 -f souc   # IMPORTANT: free memory first
-#   bash scripts/bootstrap_self_host.sh
+#   bash scripts/build/bootstrap_self_host.sh
 #
 # Stages:
 #   Stage 0: JIT runs bootstrap_v0.sio → compiles hello.sio → hello.elf
@@ -155,7 +155,7 @@ if timeout 300 $SOUC run $BOOT -- "$BOOT" "$TMPDIR/stage1.elf" 2>/dev/null; then
     fi
 else
     echo "SKIP: Stage 1 — self-compile OOM (need 35GB+ free, no linter processes)"
-    echo "  To retry: pkill -9 -f souc && sleep 5 && bash scripts/bootstrap_self_host.sh"
+    echo "  To retry: pkill -9 -f souc && sleep 5 && bash scripts/build/bootstrap_self_host.sh"
     skip=$((skip+1))
 fi
 

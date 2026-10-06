@@ -1,0 +1,405 @@
+// Strict parser for the canonical E1 ENIR line format.
+
+use enir::ir::*
+
+struct EnirParsedI64 {
+    ok: bool,
+    value: i64,
+}
+
+pub struct EnirParseResult {
+    pub ok: bool,
+    pub error_code: i64,
+    pub module: EnirModule,
+}
+
+fn enir_parse_fail(code: i64, module: EnirModule) -> EnirParseResult {
+    EnirParseResult { ok: false, error_code: code, module: module }
+}
+
+fn enir_line_field_count(text: string, start: i64, end: i64) -> i64 with Mut, Panic, Div {
+    if end <= start { return 0 }
+    var count: i64 = 1
+    var i = start
+    while i < end {
+        let ch = str_char_at(text, i) as i64
+        if ch == 13 { return -1 }
+        if ch == 124 { count = count + 1 }
+        i = i + 1
+    }
+    count
+}
+
+fn enir_line_field(text: string, start: i64, end: i64, wanted: i64) -> EnirName with Mut, Panic, Div {
+    var field: i64 = 0
+    var token_start = start
+    var i = start
+    while i <= end {
+        let at_end = i == end
+        let is_sep = if at_end { true } else { (str_char_at(text, i) as i64) == 124 }
+        if is_sep {
+            if field == wanted {
+                let len = i - token_start
+                if len <= 0 || len > ENIR_NAME_CAP { return enir_name_empty() }
+                var out = enir_name_empty()
+                var j: i64 = 0
+                while j < len {
+                    let ch = str_char_at(text, token_start + j) as i64
+                    if ch < 33 || ch > 126 || ch == 124 { return enir_name_empty() }
+                    out.buf[j as usize] = ch as i8
+                    j = j + 1
+                }
+                out.len = len
+                return out
+            }
+            field = field + 1
+            token_start = i + 1
+        }
+        i = i + 1
+    }
+    enir_name_empty()
+}
+
+fn enir_token_eq(token: EnirName, expected: string) -> bool with Mut, Panic, Div {
+    let n = str_len(expected)
+    if token.len != n { return false }
+    var i: i64 = 0
+    while i < n {
+        if token.buf[i as usize] != (str_char_at(expected, i) as i8) { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn enir_i64_fail() -> EnirParsedI64 {
+    EnirParsedI64 { ok: false, value: 0 }
+}
+
+fn enir_token_i64(token: EnirName) -> EnirParsedI64 with Mut, Panic, Div {
+    if token.len <= 0 { return enir_i64_fail() }
+    var negative = false
+    var i: i64 = 0
+    if token.buf[0] == (45 as i8) {
+        negative = true
+        i = 1
+        if i >= token.len { return enir_i64_fail() }
+    }
+    // Accumulate negatively so INT64_MIN is representable without overflow.
+    var limit: i64 = -9223372036854775807
+    if negative { limit = -9223372036854775807 - 1 }
+    let multiply_limit = limit / 10
+    var value: i64 = 0
+    while i < token.len {
+        let ch = token.buf[i as usize] as i64
+        if ch < 48 || ch > 57 { return enir_i64_fail() }
+        let digit = ch - 48
+        if value < multiply_limit { return enir_i64_fail() }
+        value = value * 10
+        if value < limit + digit { return enir_i64_fail() }
+        value = value - digit
+        i = i + 1
+    }
+    EnirParsedI64 { ok: true, value: if negative { value } else { 0 - value } }
+}
+
+pub fn enir_parse(text: string) -> EnirParseResult with Mut, Panic, Div, Alloc {
+    var module = enir_module_empty()
+    let n = str_len(text)
+    if n <= 0 { return enir_parse_fail(1, module) }
+    if (str_char_at(text, n - 1) as i64) != 10 { return enir_parse_fail(6, module) }
+
+    var pos: i64 = 0
+    var line_no: i64 = 0
+    var seen_header = false
+    var seen_end = false
+
+    while pos < n {
+        var line_end = pos
+        while line_end < n && (str_char_at(text, line_end) as i64) != 10 {
+            line_end = line_end + 1
+        }
+        if line_end == pos { return enir_parse_fail(2, module) }
+        if seen_end { return enir_parse_fail(3, module) }
+
+        let field_count = enir_line_field_count(text, pos, line_end)
+        if field_count <= 0 { return enir_parse_fail(4, module) }
+        let tag = enir_line_field(text, pos, line_end, 0)
+        if tag.len <= 0 { return enir_parse_fail(5, module) }
+
+        if enir_token_eq(tag, "enir") {
+            if line_no != 0 || seen_header || field_count != 5 { return enir_parse_fail(10, module) }
+            let schema = enir_token_i64(enir_line_field(text, pos, line_end, 1))
+            let stage = enir_token_i64(enir_line_field(text, pos, line_end, 2))
+            let name = enir_line_field(text, pos, line_end, 3)
+            let profile = enir_token_i64(enir_line_field(text, pos, line_end, 4))
+            if !schema.ok || !stage.ok || !profile.ok || name.len <= 0 {
+                return enir_parse_fail(11, module)
+            }
+            module.schema_version = schema.value
+            module.stage = stage.value
+            module.name = name
+            module.profile = profile.value
+            seen_header = true
+        } else if enir_token_eq(tag, "resource") {
+            if !seen_header || field_count != 2 || !enir_schema_has_cfg(module.schema_version) || module.fuel_limit >= 0 { return enir_parse_fail(15, module) }
+            let fuel_limit = enir_token_i64(enir_line_field(text, pos, line_end, 1))
+            if !fuel_limit.ok || fuel_limit.value <= 0 || fuel_limit.value > 1000000 { return enir_parse_fail(16, module) }
+            module.fuel_limit = fuel_limit.value
+        } else if enir_token_eq(tag, "type") {
+            if !seen_header || field_count != 8 || module.type_count >= ENIR_MAX_TYPES { return enir_parse_fail(20, module) }
+            let id = enir_token_i64(enir_line_field(text, pos, line_end, 1))
+            let value_kind = enir_token_i64(enir_line_field(text, pos, line_end, 2))
+            let error_kind = enir_token_i64(enir_line_field(text, pos, line_end, 3))
+            let uncertainty_kind = enir_token_i64(enir_line_field(text, pos, line_end, 4))
+            let status_tracked = enir_token_i64(enir_line_field(text, pos, line_end, 5))
+            let provenance_tracked = enir_token_i64(enir_line_field(text, pos, line_end, 6))
+            let profile = enir_token_i64(enir_line_field(text, pos, line_end, 7))
+            if !id.ok || !value_kind.ok || !error_kind.ok || !uncertainty_kind.ok || !status_tracked.ok || !provenance_tracked.ok || !profile.ok {
+                return enir_parse_fail(21, module)
+            }
+            module = enir_module_push_type(module, EnirType {
+                id: id.value,
+                value_kind: value_kind.value,
+                error_kind: error_kind.value,
+                uncertainty_kind: uncertainty_kind.value,
+                status_tracked: status_tracked.value,
+                provenance_tracked: provenance_tracked.value,
+                profile: profile.value,
+            })
+        } else if enir_token_eq(tag, "value") {
+            if !seen_header { return enir_parse_fail(22, module) }
+            if field_count != 14 { return enir_parse_fail(23, module) }
+            if module.value_count >= ENIR_MAX_VALUES { return enir_parse_fail(24, module) }
+            let id = enir_token_i64(enir_line_field(text, pos, line_end, 1))
+            let type_id = enir_token_i64(enir_line_field(text, pos, line_end, 2))
+            let known_bits = enir_token_i64(enir_line_field(text, pos, line_end, 3))
+            let value_bits = enir_token_i64(enir_line_field(text, pos, line_end, 4))
+            let fp_class = enir_token_i64(enir_line_field(text, pos, line_end, 5))
+            let error0_bits = enir_token_i64(enir_line_field(text, pos, line_end, 6))
+            let error1_bits = enir_token_i64(enir_line_field(text, pos, line_end, 7))
+            let error2_bits = enir_token_i64(enir_line_field(text, pos, line_end, 8))
+            let error3_bits = enir_token_i64(enir_line_field(text, pos, line_end, 9))
+            let uncertainty_bits = enir_token_i64(enir_line_field(text, pos, line_end, 10))
+            let status_kind = enir_token_i64(enir_line_field(text, pos, line_end, 11))
+            let status_reason = enir_token_i64(enir_line_field(text, pos, line_end, 12))
+            let provenance_id = enir_token_i64(enir_line_field(text, pos, line_end, 13))
+            if !id.ok || !type_id.ok || !known_bits.ok || !value_bits.ok || !fp_class.ok || !error0_bits.ok || !error1_bits.ok || !error2_bits.ok || !error3_bits.ok || !uncertainty_bits.ok || !status_kind.ok || !status_reason.ok || !provenance_id.ok {
+                return enir_parse_fail(26, module)
+            }
+            module = enir_module_push_value(module, EnirValue {
+                id: id.value,
+                type_id: type_id.value,
+                known_bits: known_bits.value,
+                value_bits: value_bits.value,
+                fp_class: fp_class.value,
+                error0_bits: error0_bits.value,
+                error1_bits: error1_bits.value,
+                error2_bits: error2_bits.value,
+                error3_bits: error3_bits.value,
+                uncertainty_bits: uncertainty_bits.value,
+                status_kind: status_kind.value,
+                status_reason: status_reason.value,
+                provenance_id: provenance_id.value,
+            })
+        } else if enir_token_eq(tag, "prov") {
+            if !seen_header || field_count != 7 || module.provenance_count >= ENIR_MAX_PROVENANCE { return enir_parse_fail(27, module) }
+            let id = enir_token_i64(enir_line_field(text, pos, line_end, 1))
+            let source_span_id = enir_token_i64(enir_line_field(text, pos, line_end, 2))
+            let input_origin_id = enir_token_i64(enir_line_field(text, pos, line_end, 3))
+            let transform_id = enir_token_i64(enir_line_field(text, pos, line_end, 4))
+            let assumption_id = enir_token_i64(enir_line_field(text, pos, line_end, 5))
+            let policy_id = enir_token_i64(enir_line_field(text, pos, line_end, 6))
+            if !id.ok || !source_span_id.ok || !input_origin_id.ok || !transform_id.ok || !assumption_id.ok || !policy_id.ok {
+                return enir_parse_fail(28, module)
+            }
+            module = enir_module_push_provenance(module, EnirProvenance {
+                id: id.value,
+                source_span_id: source_span_id.value,
+                input_origin_id: input_origin_id.value,
+                transform_id: transform_id.value,
+                assumption_id: assumption_id.value,
+                policy_id: policy_id.value,
+            })
+        } else if enir_token_eq(tag, "policy") {
+            if !seen_header || field_count != 5 || module.policy_count >= ENIR_MAX_POLICIES { return enir_parse_fail(30, module) }
+            let id = enir_token_i64(enir_line_field(text, pos, line_end, 1))
+            let name = enir_line_field(text, pos, line_end, 2)
+            let branch_kind = enir_token_i64(enir_line_field(text, pos, line_end, 3))
+            let gate_kind = enir_token_i64(enir_line_field(text, pos, line_end, 4))
+            if !id.ok || name.len <= 0 || !branch_kind.ok || !gate_kind.ok {
+                return enir_parse_fail(31, module)
+            }
+            module = enir_module_push_policy(module, EnirPolicy {
+                id: id.value,
+                name: name,
+                branch_kind: branch_kind.value,
+                gate_kind: gate_kind.value,
+            })
+        } else if enir_token_eq(tag, "block") {
+            if !seen_header || !enir_schema_has_cfg(module.schema_version) || field_count != 11 || module.block_count >= ENIR_MAX_BLOCKS { return enir_parse_fail(32, module) }
+            let id = enir_token_i64(enir_line_field(text, pos, line_end, 1))
+            let first_op = enir_token_i64(enir_line_field(text, pos, line_end, 2))
+            let op_count = enir_token_i64(enir_line_field(text, pos, line_end, 3))
+            let arg_start = enir_token_i64(enir_line_field(text, pos, line_end, 4))
+            let arg_count = enir_token_i64(enir_line_field(text, pos, line_end, 5))
+            let term = enir_token_i64(enir_line_field(text, pos, line_end, 6))
+            let condition = enir_token_i64(enir_line_field(text, pos, line_end, 7))
+            let edge0 = enir_token_i64(enir_line_field(text, pos, line_end, 8))
+            let edge1 = enir_token_i64(enir_line_field(text, pos, line_end, 9))
+            let term_fuel = enir_token_i64(enir_line_field(text, pos, line_end, 10))
+            if !id.ok || !first_op.ok || !op_count.ok || !arg_start.ok || !arg_count.ok || !term.ok || !condition.ok || !edge0.ok || !edge1.ok || !term_fuel.ok {
+                return enir_parse_fail(33, module)
+            }
+            module = enir_module_push_block(module, EnirBlock {
+                id: id.value,
+                first_op: first_op.value,
+                op_count: op_count.value,
+                arg_start: arg_start.value,
+                arg_count: arg_count.value,
+                terminator_kind: term.value,
+                condition_value: condition.value,
+                edge0: edge0.value,
+                edge1: edge1.value,
+                terminator_fuel_cost: term_fuel.value,
+            })
+        } else if enir_token_eq(tag, "barg") {
+            if !seen_header || !enir_schema_has_cfg(module.schema_version) || field_count != 7 || module.block_arg_count >= ENIR_MAX_BLOCK_ARGS { return enir_parse_fail(34, module) }
+            let id = enir_token_i64(enir_line_field(text, pos, line_end, 1))
+            let block_id = enir_token_i64(enir_line_field(text, pos, line_end, 2))
+            let ordinal = enir_token_i64(enir_line_field(text, pos, line_end, 3))
+            let value_id = enir_token_i64(enir_line_field(text, pos, line_end, 4))
+            let type_id = enir_token_i64(enir_line_field(text, pos, line_end, 5))
+            let provenance_id = enir_token_i64(enir_line_field(text, pos, line_end, 6))
+            if !id.ok || !block_id.ok || !ordinal.ok || !value_id.ok || !type_id.ok || !provenance_id.ok { return enir_parse_fail(35, module) }
+            module = enir_module_push_block_arg(module, EnirBlockArg {
+                id: id.value,
+                block_id: block_id.value,
+                ordinal: ordinal.value,
+                value_id: value_id.value,
+                type_id: type_id.value,
+                provenance_id: provenance_id.value,
+            })
+        } else if enir_token_eq(tag, "edge") {
+            if !seen_header || !enir_schema_has_cfg(module.schema_version) || field_count != 9 || module.edge_count >= ENIR_MAX_EDGES { return enir_parse_fail(36, module) }
+            let id = enir_token_i64(enir_line_field(text, pos, line_end, 1))
+            let from_block = enir_token_i64(enir_line_field(text, pos, line_end, 2))
+            let to_block = enir_token_i64(enir_line_field(text, pos, line_end, 3))
+            let arg_count = enir_token_i64(enir_line_field(text, pos, line_end, 4))
+            let arg0 = enir_token_i64(enir_line_field(text, pos, line_end, 5))
+            let arg1 = enir_token_i64(enir_line_field(text, pos, line_end, 6))
+            let arg2 = enir_token_i64(enir_line_field(text, pos, line_end, 7))
+            let arg3 = enir_token_i64(enir_line_field(text, pos, line_end, 8))
+            if !id.ok || !from_block.ok || !to_block.ok || !arg_count.ok || !arg0.ok || !arg1.ok || !arg2.ok || !arg3.ok { return enir_parse_fail(37, module) }
+            module = enir_module_push_edge(module, EnirEdge {
+                id: id.value,
+                from_block: from_block.value,
+                to_block: to_block.value,
+                arg_count: arg_count.value,
+                arg0: arg0.value,
+                arg1: arg1.value,
+                arg2: arg2.value,
+                arg3: arg3.value,
+            })
+        } else if enir_token_eq(tag, "op") {
+            if !seen_header || field_count != 11 || module.op_count >= ENIR_MAX_OPS { return enir_parse_fail(40, module) }
+            let id = enir_token_i64(enir_line_field(text, pos, line_end, 1))
+            let opcode = enir_token_i64(enir_line_field(text, pos, line_end, 2))
+            let result_id = enir_token_i64(enir_line_field(text, pos, line_end, 3))
+            let type_id = enir_token_i64(enir_line_field(text, pos, line_end, 4))
+            let a = enir_token_i64(enir_line_field(text, pos, line_end, 5))
+            let b = enir_token_i64(enir_line_field(text, pos, line_end, 6))
+            let target = enir_token_i64(enir_line_field(text, pos, line_end, 7))
+            let policy_id = enir_token_i64(enir_line_field(text, pos, line_end, 8))
+            let memory_slot = enir_token_i64(enir_line_field(text, pos, line_end, 9))
+            let fuel_cost = enir_token_i64(enir_line_field(text, pos, line_end, 10))
+            if !id.ok || !opcode.ok || !result_id.ok || !type_id.ok || !a.ok || !b.ok || !target.ok || !policy_id.ok || !memory_slot.ok || !fuel_cost.ok {
+                return enir_parse_fail(41, module)
+            }
+            module = enir_module_push_op(module, EnirOp {
+                id: id.value,
+                opcode: opcode.value,
+                result_id: result_id.value,
+                type_id: type_id.value,
+                a: a.value,
+                b: b.value,
+                target: target.value,
+                policy_id: policy_id.value,
+                memory_slot: memory_slot.value,
+                fuel_cost: fuel_cost.value,
+            })
+        } else if enir_token_eq(tag, "obs") {
+            if !seen_header || field_count != 5 || module.observation_count >= ENIR_MAX_OBSERVATIONS { return enir_parse_fail(50, module) }
+            let id = enir_token_i64(enir_line_field(text, pos, line_end, 1))
+            let program_name = enir_line_field(text, pos, line_end, 2)
+            let ordinal = enir_token_i64(enir_line_field(text, pos, line_end, 3))
+            let kind = enir_token_i64(enir_line_field(text, pos, line_end, 4))
+            if !id.ok || program_name.len <= 0 || !ordinal.ok || !kind.ok {
+                return enir_parse_fail(51, module)
+            }
+            module = enir_module_push_observation(module, EnirObservation {
+                id: id.value,
+                program_name: program_name,
+                ordinal: ordinal.value,
+                kind: kind.value,
+            })
+        } else if enir_token_eq(tag, "end2") || enir_token_eq(tag, "end3") {
+            let expected_end = (enir_token_eq(tag, "end2") && module.schema_version == ENIR_SCHEMA_CFG_VERSION) ||
+                               (enir_token_eq(tag, "end3") && module.schema_version == ENIR_SCHEMA_JOIN_VERSION)
+            if !seen_header || !expected_end || field_count != 11 { return enir_parse_fail(62, module) }
+            let type_count = enir_token_i64(enir_line_field(text, pos, line_end, 1))
+            let value_count = enir_token_i64(enir_line_field(text, pos, line_end, 2))
+            let provenance_count = enir_token_i64(enir_line_field(text, pos, line_end, 3))
+            let policy_count = enir_token_i64(enir_line_field(text, pos, line_end, 4))
+            let block_count = enir_token_i64(enir_line_field(text, pos, line_end, 5))
+            let block_arg_count = enir_token_i64(enir_line_field(text, pos, line_end, 6))
+            let edge_count = enir_token_i64(enir_line_field(text, pos, line_end, 7))
+            let op_count = enir_token_i64(enir_line_field(text, pos, line_end, 8))
+            let observation_count = enir_token_i64(enir_line_field(text, pos, line_end, 9))
+            let program_count = enir_token_i64(enir_line_field(text, pos, line_end, 10))
+            if !type_count.ok || !value_count.ok || !provenance_count.ok || !policy_count.ok || !block_count.ok || !block_arg_count.ok || !edge_count.ok || !op_count.ok || !observation_count.ok || !program_count.ok {
+                return enir_parse_fail(63, module)
+            }
+            module.declared_type_count = type_count.value
+            module.declared_value_count = value_count.value
+            module.declared_provenance_count = provenance_count.value
+            module.declared_policy_count = policy_count.value
+            module.declared_block_count = block_count.value
+            module.declared_block_arg_count = block_arg_count.value
+            module.declared_edge_count = edge_count.value
+            module.declared_op_count = op_count.value
+            module.declared_observation_count = observation_count.value
+            module.declared_program_count = program_count.value
+            module.program_count = module.declared_program_count
+            seen_end = true
+        } else if enir_token_eq(tag, "end") {
+            if !seen_header || module.schema_version != ENIR_SCHEMA_VERSION || field_count != 8 { return enir_parse_fail(60, module) }
+            let type_count = enir_token_i64(enir_line_field(text, pos, line_end, 1))
+            let value_count = enir_token_i64(enir_line_field(text, pos, line_end, 2))
+            let provenance_count = enir_token_i64(enir_line_field(text, pos, line_end, 3))
+            let policy_count = enir_token_i64(enir_line_field(text, pos, line_end, 4))
+            let op_count = enir_token_i64(enir_line_field(text, pos, line_end, 5))
+            let observation_count = enir_token_i64(enir_line_field(text, pos, line_end, 6))
+            let program_count = enir_token_i64(enir_line_field(text, pos, line_end, 7))
+            if !type_count.ok || !value_count.ok || !provenance_count.ok || !policy_count.ok || !op_count.ok || !observation_count.ok || !program_count.ok {
+                return enir_parse_fail(61, module)
+            }
+            module.declared_type_count = type_count.value
+            module.declared_value_count = value_count.value
+            module.declared_provenance_count = provenance_count.value
+            module.declared_policy_count = policy_count.value
+            module.declared_op_count = op_count.value
+            module.declared_observation_count = observation_count.value
+            module.declared_program_count = program_count.value
+            module.program_count = module.declared_program_count
+            seen_end = true
+        } else {
+            return enir_parse_fail(70, module)
+        }
+
+        line_no = line_no + 1
+        pos = if line_end < n { line_end + 1 } else { line_end }
+    }
+
+    if !seen_header || !seen_end { return enir_parse_fail(80, module) }
+    EnirParseResult { ok: true, error_code: 0, module: module }
+}

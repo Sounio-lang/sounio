@@ -58,7 +58,7 @@ Siga [`CONVENTIONS.md`](CONVENTIONS.md) para benchmarks por módulo.
 
 ### Justificativa
 
-Tipos epistêmicos ([`Knowledge<T>`](epistemic/knowledge.sio), [`GUMUncertainty`](epistemic/gum.sio)) propagam incerteza automaticamente. O overhead aceitável é 20% para garantir que a segurança epistêmica não comprometa viabilidade em produção.
+Tipos epistêmicos ([`Epistemic`](epistemic/knowledge.sio), [`GUMUncertainty`](epistemic/gum.sio)) propagam incerteza automaticamente. O overhead aceitável é 20% para garantir que a segurança epistêmica não comprometa viabilidade em produção.
 
 ### Como Medir
 
@@ -94,7 +94,7 @@ bash benchmarks/comparison/run_all.sh
 ### 4.3 Benchmarks GPU
 
 ```bash
-scripts/gpu_test_runner.sh
+scripts/archive/gpu_test_runner.sh
 ```
 
 Relatório completo: [`benchmarks/results/NVIDIA_L4_BENCHMARKS.md`](../benchmarks/results/NVIDIA_L4_BENCHMARKS.md)

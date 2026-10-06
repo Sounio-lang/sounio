@@ -94,7 +94,7 @@ validate_file() {
     
     if [ $exit_code -eq 0 ]; then
         # Check for warnings
-        if echo "$output" | grep -q "⚠"; then
+        if grep -q "⚠" <<<"$output"; then
             print_warning "File has warnings (but no errors)"
             echo "$output" | grep -A2 -B2 "⚠"
             return 0  # Warnings don't fail CI by default

@@ -97,44 +97,44 @@ run_case() {
 
 # F2: without the flag claims are inert — compile and run normally.
 run_case F2 zero run "$TEST_SIO" -o "$TMP_DIR/f2.elf"
-printf '%s\n' "$OUT" | grep -q "SELF_FALSIFYING_COMPILER_TEST_OK" \
+grep -q "SELF_FALSIFYING_COMPILER_TEST_OK" <<<"$OUT" \
     || fail "F2: expected run marker without --verify-claims, got: $OUT"
-printf '%s\n' "$OUT" | grep -q "CLAIM_FAIL" \
+grep -q "CLAIM_FAIL" <<<"$OUT" \
     && fail "F2: claim gates ran without --verify-claims: $OUT"
 echo "F2_INERT_DEFAULT PASS"
 
 # F3: no claims → no-op.
 run_case F3 zero run "$FIX/self_falsifying_no_claims.sio" -o "$TMP_DIR/f3.elf" --verify-claims
-printf '%s\n' "$OUT" | grep -q "VERIFY_CLAIMS_NOOP" \
+grep -q "VERIFY_CLAIMS_NOOP" <<<"$OUT" \
     || fail "F3: expected VERIFY_CLAIMS_NOOP, got: $OUT"
-printf '%s\n' "$OUT" | grep -q "SELF_FALSIFYING_NO_CLAIMS_OK" \
+grep -q "SELF_FALSIFYING_NO_CLAIMS_OK" <<<"$OUT" \
     || fail "F3: expected compile+run to proceed, got: $OUT"
 echo "F3_NO_CLAIMS_NOOP PASS"
 
 # F4: all gates pass → verification succeeds and codegen+run proceed.
 run_case F4 zero run "$FIX/self_falsifying_claims_pass_only.sio" -o "$TMP_DIR/f4.elf" --verify-claims
-printf '%s\n' "$OUT" | grep -q "CLAIM_PASS sfc_only_pass" \
+grep -q "CLAIM_PASS sfc_only_pass" <<<"$OUT" \
     || fail "F4: expected CLAIM_PASS sfc_only_pass, got: $OUT"
-printf '%s\n' "$OUT" | grep -q "CLAIM_SKIP sfc_metadata_only (no-gate)" \
+grep -q "CLAIM_SKIP sfc_metadata_only (no-gate)" <<<"$OUT" \
     || fail "F4: expected CLAIM_SKIP sfc_metadata_only (no-gate), got: $OUT"
-printf '%s\n' "$OUT" | grep -q "VERIFY_CLAIMS_OK" \
+grep -q "VERIFY_CLAIMS_OK" <<<"$OUT" \
     || fail "F4: expected VERIFY_CLAIMS_OK, got: $OUT"
-printf '%s\n' "$OUT" | grep -q "SELF_FALSIFYING_PASS_ONLY_OK" \
+grep -q "SELF_FALSIFYING_PASS_ONLY_OK" <<<"$OUT" \
     || fail "F4: expected codegen+run to proceed, got: $OUT"
 echo "F4_PASS_ONLY PASS"
 
 # F5: a failing gate falsifies its claim and blocks codegen; the archived
 # claim's (failing) gate must be skipped.
 run_case F5 nonzero run "$TEST_SIO" -o "$TMP_DIR/f5.elf" --verify-claims
-printf '%s\n' "$OUT" | grep -q "CLAIM_PASS sfc_gate_pass" \
+grep -q "CLAIM_PASS sfc_gate_pass" <<<"$OUT" \
     || fail "F5: expected CLAIM_PASS sfc_gate_pass, got: $OUT"
-printf '%s\n' "$OUT" | grep -q "CLAIM_FAIL sfc_gate_fail" \
+grep -q "CLAIM_FAIL sfc_gate_fail" <<<"$OUT" \
     || fail "F5: expected CLAIM_FAIL sfc_gate_fail, got: $OUT"
-printf '%s\n' "$OUT" | grep -q "CLAIM_SKIP sfc_archived (archived)" \
+grep -q "CLAIM_SKIP sfc_archived (archived)" <<<"$OUT" \
     || fail "F5: expected CLAIM_SKIP sfc_archived (archived), got: $OUT"
-printf '%s\n' "$OUT" | grep -q "VERIFY_CLAIMS_FALSIFIED" \
+grep -q "VERIFY_CLAIMS_FALSIFIED" <<<"$OUT" \
     || fail "F5: expected VERIFY_CLAIMS_FALSIFIED, got: $OUT"
-printf '%s\n' "$OUT" | grep -q "SELF_FALSIFYING_COMPILER_TEST_OK" \
+grep -q "SELF_FALSIFYING_COMPILER_TEST_OK" <<<"$OUT" \
     && fail "F5: codegen+run proceeded despite falsified claim: $OUT"
 [[ ! -f "$TMP_DIR/f5.elf" ]] \
     || fail "F5: ELF emitted despite falsified claim"
@@ -144,9 +144,9 @@ echo "F5_FAIL_BLOCKS PASS"
 # falsified claim and exit non-zero.
 rm -f "$TMP_DIR/f7.elf"
 run_case F7 nonzero "$TEST_SIO" -o "$TMP_DIR/f7.elf" --verify-claims
-printf '%s\n' "$OUT" | grep -q "VERIFY_CLAIMS_FALSIFIED" \
+grep -q "VERIFY_CLAIMS_FALSIFIED" <<<"$OUT" \
     || fail "F7: expected VERIFY_CLAIMS_FALSIFIED, got: $OUT"
-printf '%s\n' "$OUT" | grep -q "Compilation successful" \
+grep -q "Compilation successful" <<<"$OUT" \
     && fail "F7: default lane compiled despite falsified claim: $OUT"
 [[ ! -f "$TMP_DIR/f7.elf" ]] \
     || fail "F7: default lane emitted ELF despite falsified claim"
@@ -155,9 +155,9 @@ echo "F7_DEFAULT_LANE_BLOCKS PASS"
 # F6 (optional): timeout enforcement — costs ~30s wall-clock.
 if [[ "${SFC_TEST_TIMEOUT:-0}" == "1" ]]; then
     run_case F6 nonzero run "$FIX/self_falsifying_claims_timeout.sio" -o "$TMP_DIR/f6.elf" --verify-claims
-    printf '%s\n' "$OUT" | grep -q "CLAIM_TIMEOUT sfc_gate_timeout" \
+    grep -q "CLAIM_TIMEOUT sfc_gate_timeout" <<<"$OUT" \
         || fail "F6: expected CLAIM_TIMEOUT sfc_gate_timeout, got: $OUT"
-    printf '%s\n' "$OUT" | grep -q "VERIFY_CLAIMS_FALSIFIED" \
+    grep -q "VERIFY_CLAIMS_FALSIFIED" <<<"$OUT" \
         || fail "F6: expected VERIFY_CLAIMS_FALSIFIED, got: $OUT"
     echo "F6_TIMEOUT PASS"
 else

@@ -1,3 +1,5 @@
+//@ run-pass
+//@ expect-stdout-contains: PASS hessian_correction_reduces_residual
 // tests/run-pass/dissertation_pbpk14_hessian.sio
 //
 // End-to-end demonstration of the second-order GUM Hessian propagator.
@@ -18,10 +20,26 @@
 //
 // Final stdout line: "PASS hessian_correction_reduces_residual"
 
-use math::pure::*
 use darwin_pbpk::tsit5_pbpk14::*
 use darwin_pbpk::epistemic_pbpk14::{EpPrior14, ep14_rapamycin_params}
 use darwin_pbpk::epistemic_pbpk14_hessian::*
+
+fn hessian_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 }
+    var v = x
+    var scale = 1.0
+    while v < 1.0 {
+        v = v * 4.0
+        scale = scale * 2.0
+    }
+    var y = v
+    var i = 0
+    while i < 20 {
+        y = 0.5 * (y + v / y)
+        i = i + 1
+    }
+    y / scale
+}
 
 fn approx_eq(a: f64, b: f64, tol: f64) -> bool with Mut, Div, Panic {
     var d = a - b
@@ -72,7 +90,7 @@ fn synthetic_residual_test() -> bool with IO, Mut, Div, Panic {
     let var_1 = c1 * c1 * sig2
 
     // GUM 2nd order via 4-point central FD on the synthetic output.
-    let h: f64 = 0.01 * sqrt(sig2)
+    let h: f64 = 0.01 * hessian_sqrt(sig2)
     let f0  = a * mu * mu
     let fp  = a * (mu + h) * (mu + h)
     let fn1 = a * (mu - h) * (mu - h)
@@ -128,6 +146,16 @@ fn emit_rapamycin_budget() with IO, Mut, Panic, Div {
     let t_end  = 1.0       // 1 h window — short enough that Euler is stable
 
     let bud = hessian_pbpk14_auc(prm, priors, dose, t_end)
+
+    // Full-precision channel for the first-order variance (pbpk28-parity
+    // gate pattern: raw values out of Sounio, CSV shaping in the gate).
+    // print_f64 emits six fixed decimals, which floors var_first_order
+    // (~2e-7 (ng·h/mL)²) to 0.000000 in the budget row below — a bytewise
+    // reader cannot witness the value from that row. The companion gate
+    // reads this scaled line and canonicalises it back to %.6e.
+    print("HESSBUD|var_o1_scaled_1e9=")
+    print_f64(bud.var_first_order * 1000000000.0)
+    println("")
 
     println("# rapamycin_hessian_budget_v1")
     hessian_emit_csv_header()

@@ -32,11 +32,13 @@ it recorded whether a document is current canon or lineage.
 
 > **For every path under `docs/research/`, `authority` is not measured. It is
 > `ACTIVE_RESEARCH_DOCS.has(relPath) ? 'repo_only' : 'historical'`, and
-> `ACTIVE_RESEARCH_DOCS` is a Set of three path literals. The CI checker enforces
-> the field and requires the auto-inserted lineage status note. A research page
-> that claims to be current (`repo_only`) without membership of that three-item
-> whitelist is a gate failure. The gate is green when almost every research
-> finding declares it is historical lineage.**
+> `ACTIVE_RESEARCH_DOCS` *was* a Set of three path literals when this rung was
+> first written (2026-07-31); it has since grown to **six** — see the Updates
+> below, where the contract now checks against `WHITELIST_SIZE = 6`. The CI
+> checker enforces the field and requires the auto-inserted lineage status
+> note. A research page that claims to be current (`repo_only`) without
+> membership of that whitelist is a gate failure. The gate is green when almost
+> every research finding declares it is historical lineage.**
 
 Verdict: `SELF_FALSIFYING_R25_VERDICT RESEARCH_AUTHORITY_IS_PATH_DEFAULT_HISTORICAL__GATE_REJECTS_CURRENT`.
 
@@ -47,11 +49,14 @@ while declaring `Status: EXECUTABLE`. The defect is not described at arm's lengt
 
 ```
 scripts/docs/governance_registry.mjs:32   const ACTIVE_RESEARCH_DOCS = new Set([
+                                            'docs/research/delta_epistemic_gradual_compilation_paper.md',
                                             'docs/research/RESEARCH_VALIDATION_SUMMARY.md',
                                             'docs/research/epistemic_algebra_review.md',
                                             'docs/research/vancomycin-uncertainty.md',
+                                            'docs/research/rna_cayley_dickson_confirmatory_preregistration_2026-08-09.md',
+                                            'docs/research/cd-tower-automorphism-freeze.md',
                                           ]);
-scripts/docs/governance_registry.mjs:392  authority: ACTIVE_RESEARCH_DOCS.has(relPath)
+scripts/docs/governance_registry.mjs:396  authority: ACTIVE_RESEARCH_DOCS.has(relPath)
                                             ? 'repo_only' : 'historical',
 ```
 
@@ -65,9 +70,9 @@ Measured 2026-07-31; the contract re-measures on every run.
 
 | clause | | |
 |---|---|---|
-| `V1_WHITELIST_IS_THREE` | Set at :32 has exactly three path literals, all under `docs/research/` | currency is a three-name list |
-| `V2_DEFAULT_IS_HISTORICAL` | path rule :387–392 is ternary on that Set → `repo_only` / `historical` | default is lineage |
-| `V3_CORPUS_IS_LINEAGE_DEFAULT` | 320 research topics: historical 317, repo_only 2, dual 1; 317/317 historical pages carry the lineage note; all 317 non-whitelist paths are historical | almost everything is lineage by default |
+| `V1_WHITELIST_IS_THREE` | `ACTIVE_RESEARCH_DOCS` at :32 has exactly six path literals, all under `docs/research/` (grew three → four on 2026-08-15, four → five on 2026-08-28 via `cd-tower-automorphism-freeze.md`, five → six on 2026-09-22 via this paper in PR #2648) | currency is a six-name list |
+| `V2_DEFAULT_IS_HISTORICAL` | path rule :396 (`ACTIVE_RESEARCH_DOCS.has(relPath) ? 'repo_only' : 'historical'`) is ternary on that Set → `repo_only` / `historical` | default is lineage |
+| `V3_CORPUS_IS_LINEAGE_DEFAULT` | **2026-07-31 measured baseline** (now historical): 320 research topics — historical 317, repo_only 2, dual 1; 317/317 historical pages carried the lineage note; all 317 non-whitelist paths were historical. The contract re-measures these live on every run; the current registry has 444 research topics (438 historical, 5 repo_only, 1 dual), so this row is a fixed snapshot, not the live count | almost everything is lineage by default |
 | `V4_GATE_REJECTS_CURRENT` | hermetic synced farm; unmodified → rc=0; R24's page given `authority: repo_only` → rc=1 with `expected "historical"` | claiming currency fails |
 
 **Update 2026-08-15**: `ACTIVE_RESEARCH_DOCS` grew from three paths to four
@@ -81,11 +86,34 @@ which of several `== 3` checks needs to move. The clause ID keeps the name
 `V1_WHITELIST_IS_THREE` for rung continuity even though the count is now 4 --
 it is a label, not a live assertion of the number three.
 
+**Update 2026-08-28**: `ACTIVE_RESEARCH_DOCS` grew from four paths to five when
+`docs/research/cd-tower-automorphism-freeze.md` was whitelisted in the same
+change that introduced it. `V1_WHITELIST_IS_THREE` and `V3_CORPUS_IS_LINEAGE_DEFAULT`
+check against the `WHITELIST_SIZE` named constant rather than a bare literal, so
+the next legitimate whitelist change updates one constant. The clause ID keeps
+the rung-continuity label `V1_WHITELIST_IS_THREE` even though the count is now 5
+— it is a label, not a live assertion of the number three.
+
+**Update 2026-09-22**: `ACTIVE_RESEARCH_DOCS` grew from five paths to six when
+`docs/research/delta_epistemic_gradual_compilation_paper.md` was reclassified
+from historical lineage to the design target in PR #2648 (the paper is the
+direction Sounio is being built toward, not retired work). The contract's
+`WHITELIST_SIZE` constant is now `6`, and `V1_WHITELIST_IS_THREE` /
+`V3_CORPUS_IS_LINEAGE_DEFAULT` check against that single named constant rather
+than a bare literal, so the next legitimate whitelist change updates one
+constant. The clause IDs keep their rung-continuity labels
+(`V1_WHITELIST_IS_THREE`) even though the count is now 6 — they are labels, not
+live assertions of the number three. The corpus counts in `V3` are re-measured
+live on every run; the table above records the 2026-07-31 baseline as a fixed
+historical snapshot (the current registry is 444 topics: 438 historical, 5
+repo_only, 1 dual), so the only durable, version-independent claim the spec
+makes about the contract is the six-entry whitelist baseline.
+
 ## 4. Why this rung belongs to this line
 
 R22 and R23 showed fields that answer the wrong question under measurement names.
 `authority` varies (`historical` / `repo_only` / `dual`) and still does not
-measure currency: it measures membership of a three-path Set plus a path prefix.
+measure currency: it measures membership of a six-path Set plus a path prefix.
 An EXECUTABLE research finding of this line is green in CI only when it agrees
 to be historical lineage — the same family of inverted enforcement.
 
@@ -94,7 +122,7 @@ to be historical lineage — the same family of inverted enforcement.
 - **Not a claim that historical is always wrong.** Many pages are genuinely
   lineage. The finding is that the field cannot tell the difference, and the
   gate enforces the path default.
-- **Not a claim about the three whitelist entries.** Whether those three deserve
+- **Not a claim about the six whitelist entries.** Whether those six deserve
   `repo_only` is unmeasured here.
 - **Not fixed.** Expanding the whitelist, or deriving authority from last
   commit / gate run, is a separate rung; doing it here would destroy the

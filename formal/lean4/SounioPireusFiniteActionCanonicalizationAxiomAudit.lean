@@ -1,0 +1,9 @@
+import SounioPireusFiniteActionCanonicalization
+
+open SounioPireusFiniteActionCanonicalization
+
+#print axioms sameOrbit_refl
+#print axioms sameOrbit_symm
+#print axioms sameOrbit_trans
+#print axioms canonicalOption_eq_iff_sameOrbit
+#print axioms generic_theorem_does_not_close_v13_without_concrete_instantiation

@@ -42,6 +42,13 @@ Use these labels inside every seed:
 | `Hypothesis` | A precise direction that could become testable but is not yet proven. |
 | `Executable` | Backed by a repo command, test, gate, artifact, or implementation path. |
 | `Claim-ready` | Suitable for paper or public use only after explicit validation and review. |
+| `Reserved` | The name is taken and the system **refuses every use** with a named diagnostic, pending implementation. Beside the ladder, not on it. |
+
+The ladder is **monotone**: each state requires every state beneath it. A
+seed or kind cannot be `Claim-ready` without being `Executable`. `Reserved`
+sits beside the ladder — it has not failed to reach `Executable`, it is held
+short of it on purpose. See `docs/internal/concepts/MATURITY_LADDER.md` for
+the two-program test that decides a position.
 
 Most seeds should start as `Garden` or `Hypothesis`. A seed becomes
 `Executable` only when it names a concrete artifact or gate. A seed becomes
@@ -76,6 +83,16 @@ Most seeds should start as `Garden` or `Hypothesis`. A seed becomes
   two AMD U250 FPGAs planned for catastrophe scan, QEC simulation, exact
   Cayley-Dickson arithmetic, and Mercyful Learning acceleration; records the
   2026-07-25/26 session's 19 deliverables.
+- [`Pharos — a compiler that publishes its own erasures`](seeds/2026-08-29-pharos-loss-ledger.md) —
+  a loss-certificate ledger hash-bound to compilation lineage, making
+  undeclared semantic erasure a compile error; EISA's compiler-side dual.
+- [`Convergence Detector — same shape, independently arrived`](seeds/2026-08-30-convergence-detector.md) —
+  cross-domain convergence as shared orbit under declared gauges; candidates
+  capped at `Hypothesis` until an isomorphism witness exists.
+- [`The unknown, typed by cause`](seeds/2026-08-31-unknown-typed-by-cause.md) —
+  missingness carries its reason (`Unmeasured | Withheld | Redacted | Lost |
+  Expired | NeverExisted`); computing with an `Unknown` requires a
+  cause-appropriate resolution, never a silent default.
 
 ## Hard Boundaries
 

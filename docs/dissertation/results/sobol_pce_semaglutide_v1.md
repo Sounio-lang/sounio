@@ -7,10 +7,20 @@ validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.dissertation.results.sobol-pce-semaglutide-v1
 -->
 
+> **SUPERSEDED 2026-09-26: floor-biased PBPK28 numbers.** Every Saltelli sample on this page was simulated through `pbpk28_full_cn_step`, whose negativity floors injected mass into the bolus: +28% AUC_blood for the 1 mg semaglutide bolus at the harness's dt = 0.5 h, by an amount that depends on the sampled parameters. Regenerated results: [`sobol_pce_semaglutide_v2.md`](sobol_pce_semaglutide_v2.md). Audit: `docs/audit/PBPK28_CN_RANNACHER_MASS_BALANCE_2026-09-26.md`.
+
 # §4.10.5 — Sobol' / Cut-HDMR / PCE: Semaglutide
 
 **Source**: `stdlib/darwin_pbpk/validation/pbpk28_sobol_pce.sio` —
 `sp28_selftest_semaglutide_main` (full Saltelli N=512, seed=42)
+
+> **Engine dependency (verified 2026-08-17).** Under default Madaros (`bin/souc`), this file
+> **fails to compile**: `error[E009]` (argument type does not match parameter, twice) and
+> `error[E035]` (missing `Epistemic` effect on `epistemic_pbpk28::main`) — `Compilation failed!`.
+> Under `SOUNIO_SOUC_ENGINE=lean_single` it compiles (with two non-fatal `tuple index out of
+> bounds` warnings at `stdlib/epistemic/pce.sio:519-520`) and runs to completion: all 5 tests
+> pass, `SOBOL_PCE_SEMAGLUTIDE_FULL_PASS`. Every number below was produced under lean_single;
+> the project's default engine cannot currently produce this page's evidence at all.
 
 **Drug**: Semaglutide (Ozempic/Wegovy), 4114 Da GLP-1 receptor agonist.
 **Priors**: 7 epistemic parameters (see `ep28_semaglutide_priors()` in

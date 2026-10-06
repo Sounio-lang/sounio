@@ -1,0 +1,681 @@
+//@ module compress::inflate
+//! Bounded pure-Sounio RFC 1950/RFC 1951 inflater.
+
+pub const SOUNIO_INFLATE_OK: i64 = 0
+pub const SOUNIO_INFLATE_ERR_INPUT_BOUNDS: i64 = 1
+pub const SOUNIO_INFLATE_ERR_OUTPUT_CAPACITY: i64 = 2
+pub const SOUNIO_INFLATE_ERR_TRUNCATED: i64 = 3
+pub const SOUNIO_INFLATE_ERR_RESERVED_BLOCK: i64 = 4
+pub const SOUNIO_INFLATE_ERR_STORED_LENGTH: i64 = 5
+pub const SOUNIO_INFLATE_ERR_TREE: i64 = 6
+pub const SOUNIO_INFLATE_ERR_SYMBOL: i64 = 7
+pub const SOUNIO_INFLATE_ERR_DISTANCE: i64 = 8
+pub const SOUNIO_INFLATE_ERR_ZLIB_HEADER: i64 = 9
+pub const SOUNIO_INFLATE_ERR_DICTIONARY: i64 = 10
+pub const SOUNIO_INFLATE_ERR_ADLER32: i64 = 11
+pub const SOUNIO_INFLATE_ERR_TRAILING_DATA: i64 = 12
+pub const SOUNIO_INFLATE_ERR_BLOCK_CAPACITY: i64 = 13
+
+pub const SOUNIO_INFLATE_INPUT_CAPACITY: i64 = 65536
+pub const SOUNIO_INFLATE_OUTPUT_CAPACITY: i64 = 262144
+
+const INFLATE_MAX_BITS: i64 = 15
+const INFLATE_MAX_SYMBOLS: i64 = 320
+const INFLATE_MAX_BLOCKS: i64 = 4096
+
+pub struct SounioInflateInput {
+    pub bytes: [i64; 65536],
+}
+
+pub struct SounioInflateResult {
+    pub bytes: [i64; 262144],
+    pub error: i64,
+    pub input_bytes: i64,
+    pub output_bytes: i64,
+    pub blocks: i64,
+    pub stored_blocks: i64,
+    pub fixed_blocks: i64,
+    pub dynamic_blocks: i64,
+    pub literals: i64,
+    pub copies: i64,
+    pub max_distance: i64,
+    pub checksum_match: bool,
+}
+
+struct InflateState {
+    pos: i64,
+    end: i64,
+    bits: i64,
+    nbits: i64,
+    output_limit: i64,
+    error: i64,
+}
+
+struct InflateHuffman {
+    count: [i64; 16],
+    symbols: [i64; 320],
+    symbol_count: i64,
+}
+
+pub fn sounio_inflate_input_reset(input: &!SounioInflateInput) with Mut {
+    var i: i64 = 0
+    while i < SOUNIO_INFLATE_INPUT_CAPACITY {
+        input.bytes[i as usize] = 0
+        i = i + 1
+    }
+}
+
+pub fn sounio_inflate_result_reset(result: &!SounioInflateResult) with Mut {
+    result.error = SOUNIO_INFLATE_OK
+    result.input_bytes = 0
+    result.output_bytes = 0
+    result.blocks = 0
+    result.stored_blocks = 0
+    result.fixed_blocks = 0
+    result.dynamic_blocks = 0
+    result.literals = 0
+    result.copies = 0
+    result.max_distance = 0
+    result.checksum_match = false
+}
+
+fn inflate_huffman_reset(table: &!InflateHuffman) with Mut, Panic {
+    var i: i64 = 0
+    while i < 16 {
+        table.count[i as usize] = 0
+        i = i + 1
+    }
+    i = 0
+    while i < INFLATE_MAX_SYMBOLS {
+        table.symbols[i as usize] = 0
+        i = i + 1
+    }
+    table.symbol_count = 0
+}
+
+fn inflate_input_bytes_valid(
+    input: &SounioInflateInput,
+    input_len: i64,
+) -> bool with Panic {
+    var i: i64 = 0
+    while i < input_len {
+        let byte = input.bytes[i as usize]
+        if byte < 0 || byte > 255 { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn inflate_build_huffman(
+    table: &!InflateHuffman,
+    lengths: &[i64; 320],
+    symbol_count: i64,
+) -> bool with Mut, Panic {
+    inflate_huffman_reset(table)
+    if symbol_count <= 0 || symbol_count > INFLATE_MAX_SYMBOLS { return false }
+    var nonzero: i64 = 0
+    var max_len: i64 = 0
+    var symbol: i64 = 0
+    while symbol < symbol_count {
+        let len = lengths[symbol as usize]
+        if len < 0 || len > INFLATE_MAX_BITS { return false }
+        table.count[len as usize] = table.count[len as usize] + 1
+        if len > 0 {
+            nonzero = nonzero + 1
+            if len > max_len { max_len = len }
+        }
+        symbol = symbol + 1
+    }
+    if nonzero == 0 { return false }
+
+    var left: i64 = 1
+    var len: i64 = 1
+    while len <= INFLATE_MAX_BITS {
+        left = left * 2 - table.count[len as usize]
+        if left < 0 { return false }
+        len = len + 1
+    }
+    if left != 0 && !(nonzero == 1 && max_len == 1) { return false }
+
+    var offsets: [i64; 16] = [0; 16]
+    offsets[1] = 0
+    len = 1
+    while len < INFLATE_MAX_BITS {
+        offsets[(len + 1) as usize] = offsets[len as usize] +
+            table.count[len as usize]
+        len = len + 1
+    }
+    symbol = 0
+    while symbol < symbol_count {
+        len = lengths[symbol as usize]
+        if len != 0 {
+            let at = offsets[len as usize]
+            if at < 0 || at >= INFLATE_MAX_SYMBOLS { return false }
+            table.symbols[at as usize] = symbol
+            offsets[len as usize] = at + 1
+        }
+        symbol = symbol + 1
+    }
+    table.symbol_count = symbol_count
+    true
+}
+
+fn inflate_read_bits(
+    input: &SounioInflateInput,
+    state: &!InflateState,
+    count: i64,
+) -> i64 with Mut, Panic {
+    if count < 0 || count > 15 {
+        state.error = SOUNIO_INFLATE_ERR_SYMBOL
+        return 0
+    }
+    while state.nbits < count {
+        if state.pos >= state.end {
+            state.error = SOUNIO_INFLATE_ERR_TRUNCATED
+            return 0
+        }
+        let byte = input.bytes[state.pos as usize]
+        if byte < 0 || byte > 255 {
+            state.error = SOUNIO_INFLATE_ERR_INPUT_BOUNDS
+            return 0
+        }
+        state.bits = state.bits | (byte << state.nbits)
+        state.nbits = state.nbits + 8
+        state.pos = state.pos + 1
+    }
+    let mask = if count == 0 { 0 } else { (1 << count) - 1 }
+    let value = state.bits & mask
+    state.bits = state.bits >> count
+    state.nbits = state.nbits - count
+    value
+}
+
+fn inflate_align_byte(state: &!InflateState) with Mut {
+    state.bits = 0
+    state.nbits = 0
+}
+
+fn inflate_decode_symbol(
+    input: &SounioInflateInput,
+    state: &!InflateState,
+    table: &InflateHuffman,
+) -> i64 with Mut, Panic {
+    var code: i64 = 0
+    var first: i64 = 0
+    var index: i64 = 0
+    var len: i64 = 1
+    while len <= INFLATE_MAX_BITS {
+        let bit = inflate_read_bits(input, state, 1)
+        if state.error != SOUNIO_INFLATE_OK { return -1 }
+        code = code | bit
+        let count = table.count[len as usize]
+        if code < first + count {
+            let at = index + code - first
+            if at < 0 || at >= table.symbol_count {
+                state.error = SOUNIO_INFLATE_ERR_SYMBOL
+                return -1
+            }
+            return table.symbols[at as usize]
+        }
+        index = index + count
+        first = (first + count) << 1
+        code = code << 1
+        len = len + 1
+    }
+    state.error = SOUNIO_INFLATE_ERR_SYMBOL
+    -1
+}
+
+fn inflate_emit(
+    result: &!SounioInflateResult,
+    state: &!InflateState,
+    byte: i64,
+) with Mut, Panic {
+    if result.output_bytes >= state.output_limit ||
+        result.output_bytes >= SOUNIO_INFLATE_OUTPUT_CAPACITY {
+        state.error = SOUNIO_INFLATE_ERR_OUTPUT_CAPACITY
+        return
+    }
+    result.bytes[result.output_bytes as usize] = byte
+    result.output_bytes = result.output_bytes + 1
+}
+
+fn inflate_length_base(index: i64) -> i64 with Panic {
+    let values: [i64; 29] = [
+        3, 4, 5, 6, 7, 8, 9, 10,
+        11, 13, 15, 17, 19, 23, 27, 31,
+        35, 43, 51, 59, 67, 83, 99, 115,
+        131, 163, 195, 227, 258
+    ]
+    values[index as usize]
+}
+
+fn inflate_length_extra(index: i64) -> i64 with Panic {
+    let values: [i64; 29] = [
+        0, 0, 0, 0, 0, 0, 0, 0,
+        1, 1, 1, 1, 2, 2, 2, 2,
+        3, 3, 3, 3, 4, 4, 4, 4,
+        5, 5, 5, 5, 0
+    ]
+    values[index as usize]
+}
+
+fn inflate_distance_base(index: i64) -> i64 with Panic {
+    let values: [i64; 30] = [
+        1, 2, 3, 4, 5, 7, 9, 13,
+        17, 25, 33, 49, 65, 97, 129, 193,
+        257, 385, 513, 769, 1025, 1537, 2049, 3073,
+        4097, 6145, 8193, 12289, 16385, 24577
+    ]
+    values[index as usize]
+}
+
+fn inflate_distance_extra(index: i64) -> i64 with Panic {
+    let values: [i64; 30] = [
+        0, 0, 0, 0, 1, 1, 2, 2,
+        3, 3, 4, 4, 5, 5, 6, 6,
+        7, 7, 8, 8, 9, 9, 10, 10,
+        11, 11, 12, 12, 13, 13
+    ]
+    values[index as usize]
+}
+
+fn inflate_compressed_block(
+    input: &SounioInflateInput,
+    state: &!InflateState,
+    result: &!SounioInflateResult,
+    literal_table: &InflateHuffman,
+    distance_table: &InflateHuffman,
+) with Mut, Panic {
+    var done = false
+    while !done && state.error == SOUNIO_INFLATE_OK {
+        let symbol = inflate_decode_symbol(input, state, literal_table)
+        if state.error != SOUNIO_INFLATE_OK { return }
+        if symbol < 256 {
+            inflate_emit(result, state, symbol)
+            if state.error != SOUNIO_INFLATE_OK { return }
+            result.literals = result.literals + 1
+        } else {
+            if symbol == 256 {
+                done = true
+            } else {
+                if symbol < 257 || symbol > 285 {
+                    state.error = SOUNIO_INFLATE_ERR_SYMBOL
+                    return
+                }
+                let li = symbol - 257
+                let length = inflate_length_base(li) +
+                    inflate_read_bits(input, state, inflate_length_extra(li))
+                if state.error != SOUNIO_INFLATE_OK { return }
+                let distance_symbol =
+                    inflate_decode_symbol(input, state, distance_table)
+                if state.error != SOUNIO_INFLATE_OK { return }
+                if distance_symbol < 0 || distance_symbol > 29 {
+                    state.error = SOUNIO_INFLATE_ERR_DISTANCE
+                    return
+                }
+                let distance = inflate_distance_base(distance_symbol) +
+                    inflate_read_bits(
+                        input, state, inflate_distance_extra(distance_symbol))
+                if state.error != SOUNIO_INFLATE_OK { return }
+                if distance <= 0 || distance > 32768 ||
+                    distance > result.output_bytes {
+                    state.error = SOUNIO_INFLATE_ERR_DISTANCE
+                    return
+                }
+                if distance > result.max_distance {
+                    result.max_distance = distance
+                }
+                var copied: i64 = 0
+                while copied < length && state.error == SOUNIO_INFLATE_OK {
+                    let from = result.output_bytes - distance
+                    let byte = result.bytes[from as usize]
+                    inflate_emit(result, state, byte)
+                    copied = copied + 1
+                }
+                if state.error != SOUNIO_INFLATE_OK { return }
+                result.copies = result.copies + 1
+            }
+        }
+    }
+}
+
+fn inflate_stored_block(
+    input: &SounioInflateInput,
+    state: &!InflateState,
+    result: &!SounioInflateResult,
+) with Mut, Panic {
+    inflate_align_byte(state)
+    let len_lo = inflate_read_bits(input, state, 8)
+    let len_hi = inflate_read_bits(input, state, 8)
+    let nlen_lo = inflate_read_bits(input, state, 8)
+    let nlen_hi = inflate_read_bits(input, state, 8)
+    if state.error != SOUNIO_INFLATE_OK { return }
+    let len = len_lo | (len_hi << 8)
+    let nlen = nlen_lo | (nlen_hi << 8)
+    if (len ^ nlen) != 65535 {
+        state.error = SOUNIO_INFLATE_ERR_STORED_LENGTH
+        return
+    }
+    var i: i64 = 0
+    while i < len && state.error == SOUNIO_INFLATE_OK {
+        let byte = inflate_read_bits(input, state, 8)
+        if state.error != SOUNIO_INFLATE_OK { return }
+        inflate_emit(result, state, byte)
+        i = i + 1
+    }
+}
+
+fn inflate_fixed_tables(
+    literal_table: &!InflateHuffman,
+    distance_table: &!InflateHuffman,
+) -> bool with Mut, Panic {
+    var literal_lengths: [i64; 320] = [0; 320]
+    var distance_lengths: [i64; 320] = [0; 320]
+    var i: i64 = 0
+    while i <= 143 { literal_lengths[i as usize] = 8; i = i + 1 }
+    while i <= 255 { literal_lengths[i as usize] = 9; i = i + 1 }
+    while i <= 279 { literal_lengths[i as usize] = 7; i = i + 1 }
+    while i <= 287 { literal_lengths[i as usize] = 8; i = i + 1 }
+    i = 0
+    while i < 32 { distance_lengths[i as usize] = 5; i = i + 1 }
+    inflate_build_huffman(literal_table, &literal_lengths, 288) &&
+        inflate_build_huffman(distance_table, &distance_lengths, 32)
+}
+
+fn inflate_dynamic_tables(
+    input: &SounioInflateInput,
+    state: &!InflateState,
+    literal_table: &!InflateHuffman,
+    distance_table: &!InflateHuffman,
+) -> bool with Mut, Panic {
+    let hlit = inflate_read_bits(input, state, 5) + 257
+    let hdist = inflate_read_bits(input, state, 5) + 1
+    let hclen = inflate_read_bits(input, state, 4) + 4
+    if state.error != SOUNIO_INFLATE_OK { return false }
+    if hlit > 286 || hdist > 32 || hclen > 19 {
+        state.error = SOUNIO_INFLATE_ERR_TREE
+        return false
+    }
+    let order: [i64; 19] = [
+        16, 17, 18, 0, 8, 7, 9, 6, 10, 5,
+        11, 4, 12, 3, 13, 2, 14, 1, 15
+    ]
+    var code_lengths: [i64; 320] = [0; 320]
+    var i: i64 = 0
+    while i < hclen {
+        code_lengths[order[i as usize] as usize] =
+            inflate_read_bits(input, state, 3)
+        i = i + 1
+    }
+    if state.error != SOUNIO_INFLATE_OK { return false }
+    var code_table = InflateHuffman {
+        count: [0; 16], symbols: [0; 320], symbol_count: 0
+    }
+    if !inflate_build_huffman(&!code_table, &code_lengths, 19) {
+        state.error = SOUNIO_INFLATE_ERR_TREE
+        return false
+    }
+
+    var lengths: [i64; 320] = [0; 320]
+    let total = hlit + hdist
+    i = 0
+    while i < total && state.error == SOUNIO_INFLATE_OK {
+        let symbol = inflate_decode_symbol(input, state, &code_table)
+        if state.error != SOUNIO_INFLATE_OK { return false }
+        if symbol >= 0 && symbol <= 15 {
+            lengths[i as usize] = symbol
+            i = i + 1
+        } else {
+            if symbol == 16 {
+                if i == 0 {
+                    state.error = SOUNIO_INFLATE_ERR_TREE
+                    return false
+                }
+                let repeat = inflate_read_bits(input, state, 2) + 3
+                if state.error != SOUNIO_INFLATE_OK || i + repeat > total {
+                    state.error = SOUNIO_INFLATE_ERR_TREE
+                    return false
+                }
+                let previous = lengths[(i - 1) as usize]
+                var j: i64 = 0
+                while j < repeat {
+                    lengths[i as usize] = previous
+                    i = i + 1
+                    j = j + 1
+                }
+            } else {
+                if symbol != 17 && symbol != 18 {
+                    state.error = SOUNIO_INFLATE_ERR_TREE
+                    return false
+                }
+                let repeat = if symbol == 17 {
+                    inflate_read_bits(input, state, 3) + 3
+                } else {
+                    inflate_read_bits(input, state, 7) + 11
+                }
+                if state.error != SOUNIO_INFLATE_OK || i + repeat > total {
+                    state.error = SOUNIO_INFLATE_ERR_TREE
+                    return false
+                }
+                var j: i64 = 0
+                while j < repeat {
+                    lengths[i as usize] = 0
+                    i = i + 1
+                    j = j + 1
+                }
+            }
+        }
+    }
+    if i != total || lengths[256] == 0 {
+        state.error = SOUNIO_INFLATE_ERR_TREE
+        return false
+    }
+    var distance_lengths: [i64; 320] = [0; 320]
+    var distance_nonzero: i64 = 0
+    i = 0
+    while i < hdist {
+        distance_lengths[i as usize] = lengths[(hlit + i) as usize]
+        if distance_lengths[i as usize] != 0 {
+            distance_nonzero = distance_nonzero + 1
+        }
+        i = i + 1
+    }
+    if !inflate_build_huffman(literal_table, &lengths, hlit) {
+        state.error = SOUNIO_INFLATE_ERR_TREE
+        return false
+    }
+    if distance_nonzero == 0 {
+        // RFC 1951 permits an empty distance alphabet when no length symbol is
+        // used. Any attempted copy still fails in inflate_decode_symbol().
+        inflate_huffman_reset(distance_table)
+    } else {
+        if !inflate_build_huffman(distance_table, &distance_lengths, hdist) {
+            state.error = SOUNIO_INFLATE_ERR_TREE
+            return false
+        }
+    }
+    true
+}
+
+fn inflate_blocks(
+    input: &SounioInflateInput,
+    state: &!InflateState,
+    result: &!SounioInflateResult,
+) with Mut, Panic {
+    var final_block = false
+    while !final_block && state.error == SOUNIO_INFLATE_OK {
+        if result.blocks >= INFLATE_MAX_BLOCKS {
+            state.error = SOUNIO_INFLATE_ERR_BLOCK_CAPACITY
+            return
+        }
+        final_block = inflate_read_bits(input, state, 1) == 1
+        let block_type = inflate_read_bits(input, state, 2)
+        if state.error != SOUNIO_INFLATE_OK { return }
+        result.blocks = result.blocks + 1
+        if block_type == 0 {
+            result.stored_blocks = result.stored_blocks + 1
+            inflate_stored_block(input, state, result)
+        } else {
+            if block_type == 3 {
+                state.error = SOUNIO_INFLATE_ERR_RESERVED_BLOCK
+                return
+            }
+            var literal_table = InflateHuffman {
+                count: [0; 16], symbols: [0; 320], symbol_count: 0
+            }
+            var distance_table = InflateHuffman {
+                count: [0; 16], symbols: [0; 320], symbol_count: 0
+            }
+            var tables_ok = false
+            if block_type == 1 {
+                result.fixed_blocks = result.fixed_blocks + 1
+                tables_ok = inflate_fixed_tables(&!literal_table, &!distance_table)
+            } else {
+                result.dynamic_blocks = result.dynamic_blocks + 1
+                tables_ok = inflate_dynamic_tables(
+                    input, state, &!literal_table, &!distance_table)
+            }
+            if !tables_ok {
+                if state.error == SOUNIO_INFLATE_OK {
+                    state.error = SOUNIO_INFLATE_ERR_TREE
+                }
+                return
+            }
+            inflate_compressed_block(
+                input, state, result, &literal_table, &distance_table)
+        }
+    }
+}
+
+fn inflate_adler32(result: &SounioInflateResult) -> i64 with Mut, Panic, Div {
+    var s1: i64 = 1
+    var s2: i64 = 0
+    var i: i64 = 0
+    while i < result.output_bytes {
+        s1 = (s1 + result.bytes[i as usize]) % 65521
+        s2 = (s2 + s1) % 65521
+        i = i + 1
+    }
+    (s2 << 16) | s1
+}
+
+fn sounio_inflate_raw_at_limit(
+    input: &SounioInflateInput,
+    start: i64,
+    end: i64,
+    output_limit: i64,
+    result: &!SounioInflateResult,
+) with Mut, Panic {
+    if start < 0 || end < start || end > SOUNIO_INFLATE_INPUT_CAPACITY ||
+        output_limit < 0 || output_limit > SOUNIO_INFLATE_OUTPUT_CAPACITY {
+        result.error = SOUNIO_INFLATE_ERR_INPUT_BOUNDS
+        return
+    }
+    var state = InflateState {
+        pos: start, end: end, bits: 0, nbits: 0,
+        output_limit: output_limit, error: SOUNIO_INFLATE_OK
+    }
+    inflate_blocks(input, &!state, result)
+    if state.error == SOUNIO_INFLATE_OK && state.pos != end {
+        state.error = SOUNIO_INFLATE_ERR_TRAILING_DATA
+    }
+    result.error = state.error
+}
+
+pub fn sounio_inflate_raw_limit(
+    input: &SounioInflateInput,
+    input_len: i64,
+    output_limit: i64,
+    result: &!SounioInflateResult,
+) with Mut, Panic {
+    sounio_inflate_result_reset(result)
+    result.input_bytes = input_len
+    if input_len < 0 || input_len > SOUNIO_INFLATE_INPUT_CAPACITY ||
+        !inflate_input_bytes_valid(input, input_len) {
+        result.error = SOUNIO_INFLATE_ERR_INPUT_BOUNDS
+        return
+    }
+    sounio_inflate_raw_at_limit(input, 0, input_len, output_limit, result)
+}
+
+pub fn sounio_inflate_raw(
+    input: &SounioInflateInput,
+    input_len: i64,
+    result: &!SounioInflateResult,
+) with Mut, Panic {
+    sounio_inflate_raw_limit(
+        input, input_len, SOUNIO_INFLATE_OUTPUT_CAPACITY, result)
+}
+
+pub fn sounio_inflate_zlib_limit(
+    input: &SounioInflateInput,
+    input_len: i64,
+    output_limit: i64,
+    result: &!SounioInflateResult,
+) with Mut, Panic, Div {
+    sounio_inflate_result_reset(result)
+    result.input_bytes = input_len
+    if input_len < 6 || input_len > SOUNIO_INFLATE_INPUT_CAPACITY {
+        result.error = SOUNIO_INFLATE_ERR_INPUT_BOUNDS
+        return
+    }
+    if !inflate_input_bytes_valid(input, input_len) {
+        result.error = SOUNIO_INFLATE_ERR_INPUT_BOUNDS
+        return
+    }
+    let cmf = input.bytes[0]
+    let flg = input.bytes[1]
+    if cmf < 0 || cmf > 255 || flg < 0 || flg > 255 ||
+        (cmf & 15) != 8 || (cmf >> 4) > 7 ||
+        ((cmf << 8) + flg) % 31 != 0 {
+        result.error = SOUNIO_INFLATE_ERR_ZLIB_HEADER
+        return
+    }
+    if (flg & 32) != 0 {
+        result.error = SOUNIO_INFLATE_ERR_DICTIONARY
+        return
+    }
+    sounio_inflate_raw_at_limit(input, 2, input_len - 4, output_limit, result)
+    if result.error != SOUNIO_INFLATE_OK { return }
+    let expected = (input.bytes[(input_len - 4) as usize] << 24) |
+        (input.bytes[(input_len - 3) as usize] << 16) |
+        (input.bytes[(input_len - 2) as usize] << 8) |
+        input.bytes[(input_len - 1) as usize]
+    let actual = inflate_adler32(result)
+    result.checksum_match = actual == expected
+    if !result.checksum_match {
+        result.error = SOUNIO_INFLATE_ERR_ADLER32
+    }
+}
+
+pub fn sounio_inflate_zlib(
+    input: &SounioInflateInput,
+    input_len: i64,
+    result: &!SounioInflateResult,
+) with Mut, Panic, Div {
+    sounio_inflate_zlib_limit(
+        input, input_len, SOUNIO_INFLATE_OUTPUT_CAPACITY, result)
+}
+
+pub fn sounio_inflate_negative_oversubscribed_tree() -> bool
+with Mut, Panic {
+    var lengths: [i64; 320] = [0; 320]
+    lengths[0] = 1
+    lengths[1] = 1
+    lengths[2] = 1
+    var table = InflateHuffman {
+        count: [0; 16], symbols: [0; 320], symbol_count: 0
+    }
+    !inflate_build_huffman(&!table, &lengths, 3)
+}
+
+pub fn sounio_inflate_negative_incomplete_tree() -> bool
+with Mut, Panic {
+    var lengths: [i64; 320] = [0; 320]
+    lengths[0] = 2
+    var table = InflateHuffman {
+        count: [0; 16], symbols: [0; 320], symbol_count: 0
+    }
+    !inflate_build_huffman(&!table, &lengths, 1)
+}

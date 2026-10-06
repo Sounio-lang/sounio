@@ -1489,6 +1489,64 @@ fn ocp_is_nop(op: IrOpcode) -> bool {
 }
 
 // Returns true if this opcode produces a destination register value
+// A wide integer is software-emulated over CONSECUTIVE registers: limb k of the
+// value based at r lives at r+k (ir.sio, "limb k lives at vreg base+k"). An
+// IrWide* instruction names only the BASE in dst/src1/src2 and carries the limb
+// count in imm_i64.
+//
+// Every peel in this file tracks state per register and saw only that base, so
+// limbs 1..n-1 were invisible: never used to a liveness scan, never written to
+// an invalidation. Measured 2026-09-01 -- the same program diverges under -O at
+// i256 (4 limbs) and i128 (2 limbs) and agrees at i64 (1 limb, nothing to be
+// blind to). See docs/audit/OPTIMIZER_WIDE_LIMB_BLINDNESS_2026-09-01.md.
+//
+// IrWideReject is deliberately NOT in this list: it stores `base` in imm_i64,
+// not a limb count, and reading it the same way would fabricate a span.
+fn ocp_is_wide_limb_op(op: IrOpcode) -> bool {
+    match op {
+        IrOpcode::IrWideAdd => true,
+        IrOpcode::IrWideSub => true,
+        IrOpcode::IrWideMul => true,
+        IrOpcode::IrWideDiv => true,
+        IrOpcode::IrWideMod => true,
+        IrOpcode::IrWideDivFull => true,
+        IrOpcode::IrWideModFull => true,
+        IrOpcode::IrWideCmp => true,
+        IrOpcode::IrWideShr => true,
+        IrOpcode::IrWideShrLimb => true,
+        _ => false,
+    }
+}
+
+// How many consecutive registers this instruction's wide operands occupy.
+// 1 for everything that is not a wide op, so a caller can multiply blindly.
+fn ocp_limb_count(at: i64) -> i64 with Div {
+    if !ocp_is_wide_limb_op((IR_A_OP[at as usize] as IrOpcode)) { return 1 }
+    let n = IR_A_IMM_I64[at as usize]
+    if n < 1 { return 1 }
+    if n > OCP_REBRACKET_TRACKED_REG_LIMIT { return OCP_REBRACKET_TRACKED_REG_LIMIT }
+    return n
+}
+
+// The DESTINATION span. IrWideCmp is the exception: it reads two wide values
+// and writes ONE boolean, so widening its dst would clobber whatever follows it.
+fn ocp_dst_limb_count(at: i64) -> i64 with Div {
+    if (IR_A_OP[at as usize] as IrOpcode) == IrOpcode::IrWideCmp { return 1 }
+    return ocp_limb_count(at)
+}
+
+// Whether src2 names a REGISTER. On IrWideShr and IrWideShrLimb it does not --
+// it carries the shift amount (bits, or limbs) as a plain number. A peel that
+// rewrites src2 unconditionally would substitute a shift count for a register
+// number, and small shift counts collide with low register numbers.
+fn ocp_src2_is_register(op: IrOpcode) -> bool {
+    match op {
+        IrOpcode::IrWideShr => false,
+        IrOpcode::IrWideShrLimb => false,
+        _ => true,
+    }
+}
+
 fn ocp_has_dst(op: IrOpcode) -> bool {
     match op {
         IrOpcode::IrLoadImm => true,
@@ -1981,6 +2039,7 @@ fn ocp_const_fold_pass_a1(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     // Sprint 112 Block AI: Bitwise NOT via XOR(-1) tracking.
     var is_bnot:  [bool; 256] = [false; 256]
     var bnot_src: [i64;  256] = [-1;    256]
+    var bnot_op:  [UnaryOp; 256] = [UnaryOp::OpNeg; 256]
     // Sprint 88 Block O: Mul-div cancellation — track r = x * C (partial-const mul).
     // (x * C) / C → x.  SOTA: LLVM InstCombineMulDivRem.cpp; Cooper & Torczon §9.
     var mul_valid:   [bool; 256] = [false; 256]
@@ -2067,6 +2126,7 @@ fn ocp_const_fold_pass_a1(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             is_const[d] = false
             is_neg[d] = false
             is_bnot[d] = false
+            bnot_op[d] = UnaryOp::OpNeg
             mul_valid[d] = false
             as_valid[d] = false
             sh_valid[d] = false
@@ -4204,10 +4264,11 @@ fn ocp_const_fold_pass_a1(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                         && cx_s2_ok && is_const[cx_s2 as usize]
                         && (bm_xor_cval[cx_s1 as usize] ^ -1) == const_val[cx_s2 as usize] {
                     let cx_x = bm_xor_src[cx_s1 as usize]
-                    ir_arena_store(ir_region_slot_w(result.region, (i)), ir_unaryop(cx_instr.dst, UnaryOp::OpNot, cx_x))
+                    ir_arena_store(ir_region_slot_w(result.region, (i)), ir_unaryop(cx_instr.dst, UnaryOp::OpBitNot, cx_x))
                     if cx_instr.dst >= 0 && cx_instr.dst < 256 {
                         is_bnot[cx_instr.dst as usize]  = true
                         bnot_src[cx_instr.dst as usize] = cx_x
+                        bnot_op[cx_instr.dst as usize] = UnaryOp::OpBitNot
                     }
                 }
                 // ~C^(x^C) → ~x commutative
@@ -4215,10 +4276,11 @@ fn ocp_const_fold_pass_a1(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                         && cx_s1_ok && is_const[cx_s1 as usize]
                         && (bm_xor_cval[cx_s2 as usize] ^ -1) == const_val[cx_s1 as usize] {
                     let cx_x = bm_xor_src[cx_s2 as usize]
-                    ir_arena_store(ir_region_slot_w(result.region, (i)), ir_unaryop(cx_instr.dst, UnaryOp::OpNot, cx_x))
+                    ir_arena_store(ir_region_slot_w(result.region, (i)), ir_unaryop(cx_instr.dst, UnaryOp::OpBitNot, cx_x))
                     if cx_instr.dst >= 0 && cx_instr.dst < 256 {
                         is_bnot[cx_instr.dst as usize]  = true
                         bnot_src[cx_instr.dst as usize] = cx_x
+                        bnot_op[cx_instr.dst as usize] = UnaryOp::OpBitNot
                     }
                 }
             }
@@ -4516,9 +4578,9 @@ fn ocp_const_fold_pass_a1(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                         let dg_xl = as_xor_rr_lhs[dg_xor as usize]
                         let dg_xr = as_xor_rr_rhs[dg_xor as usize]
                         if dg_s2 == dg_xl {
-                            ir_arena_store(ir_region_slot_w(result.region, (i)), ir_unaryop(dg_instr.dst, UnaryOp::OpNot, dg_xr))
+                            ir_arena_store(ir_region_slot_w(result.region, (i)), ir_unaryop(dg_instr.dst, UnaryOp::OpBitNot, dg_xr))
                         } else if dg_s2 == dg_xr {
-                            ir_arena_store(ir_region_slot_w(result.region, (i)), ir_unaryop(dg_instr.dst, UnaryOp::OpNot, dg_xl))
+                            ir_arena_store(ir_region_slot_w(result.region, (i)), ir_unaryop(dg_instr.dst, UnaryOp::OpBitNot, dg_xl))
                         }
                     }
                 }
@@ -4530,9 +4592,9 @@ fn ocp_const_fold_pass_a1(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                         let dg_xl = as_xor_rr_lhs[dg_xor as usize]
                         let dg_xr = as_xor_rr_rhs[dg_xor as usize]
                         if dg_s1 == dg_xl {
-                            ir_arena_store(ir_region_slot_w(result.region, (i)), ir_unaryop(dg_instr.dst, UnaryOp::OpNot, dg_xr))
+                            ir_arena_store(ir_region_slot_w(result.region, (i)), ir_unaryop(dg_instr.dst, UnaryOp::OpBitNot, dg_xr))
                         } else if dg_s1 == dg_xr {
-                            ir_arena_store(ir_region_slot_w(result.region, (i)), ir_unaryop(dg_instr.dst, UnaryOp::OpNot, dg_xl))
+                            ir_arena_store(ir_region_slot_w(result.region, (i)), ir_unaryop(dg_instr.dst, UnaryOp::OpBitNot, dg_xl))
                         }
                     }
                 }
@@ -4875,6 +4937,11 @@ fn ocp_const_fold_pass_a2(func: IrFunction) -> IrFunction with Mut, Div, Panic {
     // Sprint 112 Block AI: Bitwise NOT via XOR(-1) tracking.
     var is_bnot:  [bool; 256] = [false; 256]
     var bnot_src: [i64;  256] = [-1;    256]
+    var bnot_op:  [UnaryOp; 256] = [UnaryOp::OpNeg; 256]
+    // Logical NOT is tracked separately: its truth-table semantics must never
+    // enter the integer complement rewrites that consume is_bnot/bnot_src.
+    var is_lnot:  [bool; 256] = [false; 256]
+    var lnot_src: [i64;  256] = [-1;    256]
     // Sprint 88 Block O: Mul-div cancellation — track r = x * C (partial-const mul).
     // (x * C) / C → x.  SOTA: LLVM InstCombineMulDivRem.cpp; Cooper & Torczon §9.
     var mul_valid:   [bool; 256] = [false; 256]
@@ -4962,6 +5029,8 @@ fn ocp_const_fold_pass_a2(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             is_const[d] = false
             is_neg[d] = false
             is_bnot[d] = false
+            bnot_op[d] = UnaryOp::OpNeg
+            is_lnot[d] = false
             mul_valid[d] = false
             as_valid[d] = false
             sh_valid[d] = false
@@ -5006,7 +5075,7 @@ fn ocp_const_fold_pass_a2(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             let dr_instr = ir_arena_load(ir_region_slot_r(result.region, (i)))
             let dr_s = dr_instr.src1
             let dr_s_ok = dr_s >= 0 && dr_s < 256
-            if dr_instr.un_op == UnaryOp::OpNot && dr_s_ok && ao_and_rr_valid[dr_s as usize] {
+            if dr_instr.un_op == UnaryOp::OpBitNot && dr_s_ok && ao_and_rr_valid[dr_s as usize] {
                 let dr_al = ao_and_rr_lhs[dr_s as usize]
                 let dr_ar = ao_and_rr_rhs[dr_s as usize]
                 let dr_al_ok = dr_al >= 0 && dr_al < 256
@@ -5027,7 +5096,7 @@ fn ocp_const_fold_pass_a2(func: IrFunction) -> IrFunction with Mut, Div, Panic {
             let ds_instr = ir_arena_load(ir_region_slot_r(result.region, (i)))
             let ds_s = ds_instr.src1
             let ds_s_ok = ds_s >= 0 && ds_s < 256
-            if ds_instr.un_op == UnaryOp::OpNot && ds_s_ok && ao_or_rr_valid[ds_s as usize] {
+            if ds_instr.un_op == UnaryOp::OpBitNot && ds_s_ok && ao_or_rr_valid[ds_s as usize] {
                 let ds_ol = ao_or_rr_lhs[ds_s as usize]
                 let ds_or = ao_or_rr_rhs[ds_s as usize]
                 let ds_ol_ok = ds_ol >= 0 && ds_ol < 256
@@ -6451,10 +6520,11 @@ fn ocp_const_fold_pass_a2(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                         && am_or_var_src[cq_s1 as usize] == am_or_var_src[cq_s2 as usize]
                         && am_or_const_val[cq_s1 as usize] == (am_or_const_val[cq_s2 as usize] ^ -1) {
                     let cq_x = am_or_var_src[cq_s1 as usize]
-                    ir_arena_store(ir_region_slot_w(result.region, (i)), ir_unaryop(cq_instr.dst, UnaryOp::OpNot, cq_x))
+                    ir_arena_store(ir_region_slot_w(result.region, (i)), ir_unaryop(cq_instr.dst, UnaryOp::OpBitNot, cq_x))
                     if cq_instr.dst >= 0 && cq_instr.dst < 256 {
                         is_bnot[cq_instr.dst as usize]  = true
                         bnot_src[cq_instr.dst as usize] = cq_x
+                        bnot_op[cq_instr.dst as usize] = UnaryOp::OpBitNot
                     }
                 }
             }
@@ -6475,12 +6545,13 @@ fn ocp_const_fold_pass_a2(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                         && and_const_val[cr_s1 as usize] == const_val[cr_s2 as usize] {
                     let cr_x = and_var_src[cr_s1 as usize]
                     // Rewrite: repurpose s1 slot as NOT(x), then AND with s2 (holds C)
-                    ir_arena_store(ir_region_slot_w(result.region, (cr_s1)), ir_unaryop(cr_s1, UnaryOp::OpNot, cr_x))
+                    ir_arena_store(ir_region_slot_w(result.region, (cr_s1)), ir_unaryop(cr_s1, UnaryOp::OpBitNot, cr_x))
                     ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(cr_instr.dst,
                         cr_s1, BinaryOp::OpBitAnd, cr_s2))
                     if cr_s1 >= 0 && cr_s1 < 256 {
                         is_bnot[cr_s1 as usize]  = true
                         bnot_src[cr_s1 as usize] = cr_x
+                        bnot_op[cr_s1 as usize] = UnaryOp::OpBitNot
                     }
                 }
                 // C ^ (x & C) → ~x & C: commutative
@@ -6488,26 +6559,30 @@ fn ocp_const_fold_pass_a2(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                         && cr_s1_ok && is_const[cr_s1 as usize]
                         && and_const_val[cr_s2 as usize] == const_val[cr_s1 as usize] {
                     let cr_x = and_var_src[cr_s2 as usize]
-                    ir_arena_store(ir_region_slot_w(result.region, (cr_s2)), ir_unaryop(cr_s2, UnaryOp::OpNot, cr_x))
+                    ir_arena_store(ir_region_slot_w(result.region, (cr_s2)), ir_unaryop(cr_s2, UnaryOp::OpBitNot, cr_x))
                     ir_arena_store(ir_region_slot_w(result.region, (i)), ir_binop(cr_instr.dst,
                         cr_s2, BinaryOp::OpBitAnd, cr_s1))
                     if cr_s2 >= 0 && cr_s2 < 256 {
                         is_bnot[cr_s2 as usize]  = true
                         bnot_src[cr_s2 as usize] = cr_x
+                        bnot_op[cr_s2 as usize] = UnaryOp::OpBitNot
                     }
                 }
             }
         }
         // Sprint 82 Block J: Unary operation constant folding.
         // Folds IrUnaryOp when the source operand is a known constant.
-        // Only OpNeg and OpNot are foldable (Ref/RefMut/Deref are memory ops).
+        // OpNeg, logical OpNot, and integer OpBitNot are foldable.
         // (Wegman & Zadeck TOPLAS 1991 §4: constant folding completeness
         //  requires all operator families — unary included.)
         if instr.op == IrOpcode::IrUnaryOp {
             let us = instr.src1
             let us_ok = us >= 0 && us < 256
-            // Fold: -(const) → IrLoadImm(-const)
-            if us_ok && is_const[us as usize] && instr.un_op == UnaryOp::OpNeg {
+            // Fold: -(const) → IrLoadImm(-const). Integers only: a float constant
+            // is an IrLoadImm of its bit pattern, and `0 - bits` is not f64
+            // negation (at bits 0 it yields +0.0 where -0.0 is right).
+            if us_ok && is_const[us as usize] && instr.un_op == UnaryOp::OpNeg
+                    && !ocp_rebracket_has_float_marker_before(&result, us, i) {
                 let neg_val = 0 - const_val[us as usize]
                 ir_arena_store(ir_region_slot_w(result.region, (i)), ir_load_imm(instr.dst, neg_val))
                 if instr.dst >= 0 && instr.dst < 256 {
@@ -6516,9 +6591,9 @@ fn ocp_const_fold_pass_a2(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                     def_at[instr.dst as usize] = i
                 }
             }
-            // Fold: !(const) → IrLoadImm(~const)  (bitwise NOT = XOR with -1)
+            // Fold logical NOT: zero becomes one; every non-zero value becomes zero.
             if us_ok && is_const[us as usize] && instr.un_op == UnaryOp::OpNot {
-                let not_val = const_val[us as usize] ^ -1
+                let not_val = if const_val[us as usize] == 0 { 1 } else { 0 }
                 ir_arena_store(ir_region_slot_w(result.region, (i)), ir_load_imm(instr.dst, not_val))
                 if instr.dst >= 0 && instr.dst < 256 {
                     is_const[instr.dst as usize] = true
@@ -6526,12 +6601,27 @@ fn ocp_const_fold_pass_a2(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                     def_at[instr.dst as usize] = i
                 }
             }
-            // Sprint 148 Block BJ: Double NOT cancel — ~(~x) → IrCopy(x).
-            // If src is itself a NOT (is_bnot), the two NOTs cancel: ~~x = x.
-            // Zero new arrays: reuses is_bnot/bnot_src from Block AI (Sprint 120) and Sprint 144.
+            // Fold integer bitwise NOT.
+            if us_ok && is_const[us as usize] && instr.un_op == UnaryOp::OpBitNot {
+                let not_val = const_val[us as usize] ^ (0 - 1)
+                ir_arena_store(ir_region_slot_w(result.region, (i)), ir_load_imm(instr.dst, not_val))
+                if instr.dst >= 0 && instr.dst < 256 {
+                    is_const[instr.dst as usize] = true
+                    const_val[instr.dst as usize] = not_val
+                    def_at[instr.dst as usize] = i
+                }
+            }
+            // Double NOT cancellation is valid only for two identical operators.
             // SOTA: LLVM InstCombineAndOrXor; Boolean double negation law; Hacker's Delight §2-2.
-            if us_ok && instr.un_op == UnaryOp::OpNot && is_bnot[us as usize] {
-                let bj_inner = bnot_src[us as usize]
+            if us_ok
+                && ((instr.un_op == UnaryOp::OpBitNot && is_bnot[us as usize]
+                        && bnot_op[us as usize] == UnaryOp::OpBitNot)
+                    || (instr.un_op == UnaryOp::OpNot && is_lnot[us as usize])) {
+                let bj_inner = if instr.un_op == UnaryOp::OpNot {
+                    lnot_src[us as usize]
+                } else {
+                    bnot_src[us as usize]
+                }
                 ir_arena_store(ir_region_slot_w(result.region, (i)), ir_copy(instr.dst, bj_inner))
                 if instr.dst >= 0 && instr.dst < 256 {
                     if bj_inner >= 0 && bj_inner < 256 && is_const[bj_inner as usize] {
@@ -6541,10 +6631,16 @@ fn ocp_const_fold_pass_a2(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                 }
             }
         }
-        if instr.op == IrOpcode::IrUnaryOp && instr.un_op == UnaryOp::OpNot {
+        if instr.op == IrOpcode::IrUnaryOp && instr.un_op == UnaryOp::OpBitNot {
             if instr.dst >= 0 && instr.dst < 256 {
                 is_bnot[instr.dst as usize]  = true
                 bnot_src[instr.dst as usize] = instr.src1
+                bnot_op[instr.dst as usize] = UnaryOp::OpBitNot
+            }
+        } else if instr.op == IrOpcode::IrUnaryOp && instr.un_op == UnaryOp::OpNot {
+            if instr.dst >= 0 && instr.dst < 256 {
+                is_lnot[instr.dst as usize] = true
+                lnot_src[instr.dst as usize] = instr.src1
             }
         }
 
@@ -6598,7 +6694,7 @@ fn ocp_const_fold_pass_a2(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                 // x ^ (-1): s2 is const -1
                 if bn_s2_ok && is_const[bn_s2 as usize] && const_val[bn_s2 as usize] == -1 && bn_s1_ok {
                     // Double-NOT: src1 was itself x ^ (-1)
-                    if is_bnot[bn_s1 as usize] {
+                    if is_bnot[bn_s1 as usize] && bnot_op[bn_s1 as usize] == UnaryOp::OpBitNot {
                         ir_arena_store(ir_region_slot_w(result.region, (i)), ir_copy(bn_instr.dst, bnot_src[bn_s1 as usize]))
                         if bn_instr.dst >= 0 && bn_instr.dst < 256 {
                             is_bnot[bn_instr.dst as usize] = false
@@ -6608,12 +6704,13 @@ fn ocp_const_fold_pass_a2(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                         if bn_instr.dst >= 0 && bn_instr.dst < 256 {
                             is_bnot[bn_instr.dst as usize] = true
                             bnot_src[bn_instr.dst as usize] = bn_s1
+                            bnot_op[bn_instr.dst as usize] = UnaryOp::OpBitNot
                         }
                     }
                 }
                 // (-1) ^ x: s1 is const -1 (commutative)
                 if bn_s1_ok && is_const[bn_s1 as usize] && const_val[bn_s1 as usize] == -1 && bn_s2_ok {
-                    if is_bnot[bn_s2 as usize] {
+                    if is_bnot[bn_s2 as usize] && bnot_op[bn_s2 as usize] == UnaryOp::OpBitNot {
                         ir_arena_store(ir_region_slot_w(result.region, (i)), ir_copy(bn_instr.dst, bnot_src[bn_s2 as usize]))
                         if bn_instr.dst >= 0 && bn_instr.dst < 256 {
                             is_bnot[bn_instr.dst as usize] = false
@@ -6622,6 +6719,7 @@ fn ocp_const_fold_pass_a2(func: IrFunction) -> IrFunction with Mut, Div, Panic {
                         if bn_instr.dst >= 0 && bn_instr.dst < 256 {
                             is_bnot[bn_instr.dst as usize] = true
                             bnot_src[bn_instr.dst as usize] = bn_s2
+                            bnot_op[bn_instr.dst as usize] = UnaryOp::OpBitNot
                         }
                     }
                 }
@@ -7157,10 +7255,16 @@ fn ocp_const_fold_pass_b(
             let cd_instr = ir_arena_load(ir_region_slot_r(result.region, (i)))
             let cd_s1 = cd_instr.src1; let cd_s2 = cd_instr.src2
             let cd_s1_ok = cd_s1 >= 0 && cd_s1 < 256; let cd_s2_ok = cd_s2 >= 0 && cd_s2 < 256
+            // Integers only. For f64, `0.0 - x` and `-x` differ at x = +0.0
+            // (+0.0 vs -0.0), so the rewrite is not an identity.
             if cd_instr.bin_op == BinaryOp::OpSub
                     && cd_s1_ok && is_const[cd_s1 as usize]
                     && const_val[cd_s1 as usize] == 0
-                    && cd_s2_ok {
+                    && cd_s2_ok
+                    && (cd_instr.imm_flags & 6) == 0
+                    && !ocp_rebracket_has_float_marker_before(&result, cd_s1, i)
+                    && !ocp_rebracket_has_float_marker_before(&result, cd_s2, i)
+                    && !ocp_rebracket_has_float_marker_before(&result, cd_instr.dst, i + 2) {
                 ir_arena_store(ir_region_slot_w(result.region, (i)), ir_unaryop(cd_instr.dst, UnaryOp::OpNeg, cd_s2))
                 if cd_instr.dst >= 0 && cd_instr.dst < 256 {
                     is_neg[cd_instr.dst as usize]  = true
@@ -9043,12 +9147,12 @@ pub(crate) fn ocp_compact_nops(func: IrFunction) -> IrFunction with Mut, Div, Pa
 // Measured root causes for multi-module -O SEGV after lower_done (2026-07-20):
 // 1. By-value `IrFunction` copies scramble live `IrInstr.call_args: Option<Box<…>>`
 //    (A8 / A14 family — Box-carrying large-struct copy under lean_single).
-// 2. Taking `&! (*module).functions[fi]` (exclusive ref to an array element of
+// 2. Taking `&! ir_fn_get(&(*module), fi)` (exclusive ref to an array element of
 //    `[IrFunction; 2048]`) is miscompiled: field reads through that ref return
 //    garbage (instr_count ~1e13) and the pass loop SEGVs.
 //
 // Therefore the multi-module -O entry mutates ONLY via
-//   `(*module).functions[fi as usize].field…`
+//   `ir_fn_get(&(*module), fi as usize).field…`
 // and never forms an intermediate `&! IrFunction` to a module array slot, never
 // copies a whole `IrFunction` or a whole `IrInstr` with live call_args.
 //
@@ -9064,10 +9168,10 @@ fn ocp_mfi_dedup_imm(module: &! IrModule, fi: i64) with Mut, Div, Panic {
     var seen_const: [bool; 256] = [false; 256]
     var seen_val: [i64; 256] = [0; 256]
     var i: i64 = 0
-    while i < (*module).functions[fi as usize].instr_count {
-        let op = (IR_A_OP[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize] as IrOpcode)
-        let dst = IR_A_DST[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize]
-        let imm = IR_A_IMM_I64[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize]
+    while i < ir_fn_get(&(*module), fi as usize).instr_count {
+        let op = (IR_A_OP[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize] as IrOpcode)
+        let dst = IR_A_DST[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
+        let imm = IR_A_IMM_I64[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
         // #1667: this is a LINEAR scan, so state carried across a block
         // boundary is carried between basic blocks, where it does not hold. A
         // value established in one arm of an if/else was reaching the other arm
@@ -9077,6 +9181,25 @@ fn ocp_mfi_dedup_imm(module: &! IrModule, fi: i64) with Mut, Div, Panic {
         if op == IrOpcode::IrLabel {
             var bb: i64 = 0
             while bb < 256 { seen_const[bb as usize] = false  bb = bb + 1 }
+        }
+        // #1667 killed the table at block boundaries but never invalidated a
+        // single register. Any instruction that WRITES a tracked register makes
+        // its recorded immediate stale, and the next matching IrLoadImm was
+        // rewritten as a copy of it:
+        //     var a = 5      // seen[ra] = 5
+        //     a = a + 1      // ra is now 6, seen[ra] still says 5
+        //     var b = 5      // became copy(rb, ra) -> b == 6
+        // Five lines of ordinary code returning the wrong number. ocp_mfi_cse
+        // invalidates on every write for this reason; this peel did not.
+        // The written range, not just its base: a wide write changes every limb
+        // it covers, and a record on limb k survived it.
+        if ocp_has_dst(op) && dst >= 0 && dst < 256 {
+            let dspan = ocp_dst_limb_count(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i)))
+            var dk: i64 = 0
+            while dk < dspan {
+                if dst + dk < 256 { seen_const[(dst + dk) as usize] = false }
+                dk = dk + 1
+            }
         }
         if op == IrOpcode::IrLoadImm && dst >= 0 && dst < 256 {
             var found: i64 = 0 - 1
@@ -9089,7 +9212,7 @@ fn ocp_mfi_dedup_imm(module: &! IrModule, fi: i64) with Mut, Div, Panic {
                 j = j + 1
             }
             if found >= 0 {
-                ir_arena_store(ir_region_slot_w((*module).functions[fi as usize].region, (i)), ir_copy(dst, found))
+                ir_arena_store(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (i)), ir_copy(dst, found))
             } else {
                 seen_const[dst as usize] = true
                 seen_val[dst as usize] = imm
@@ -9107,17 +9230,31 @@ fn ocp_mfi_dedup_imm(module: &! IrModule, fi: i64) with Mut, Div, Panic {
 // Copy-prop: rewrite src1/src2 through IrCopy chains; scalar field stores only.
 fn ocp_mfi_copy_prop(module: &! IrModule, fi: i64) with Mut, Div, Panic {
     var copy_target: [i64; 256] = [-1; 256]
+    // Guard for the invalidation below: true when some entry's VALUE is this
+    // register. Without it the scan runs on every instruction with a dst, the
+    // common case; with it, only where a mapping could actually be stale.
+    var copy_is_source: [bool; 256] = [false; 256]
     var i: i64 = 0
-    while i < (*module).functions[fi as usize].instr_count {
-        let s1 = IR_A_SRC1[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize]
-        if s1 >= 0 && s1 < 256 && copy_target[s1 as usize] >= 0 {
-            IR_A_SRC1[(ir_region_slot_w((*module).functions[fi as usize].region, (i))) as usize] = copy_target[s1 as usize]
+    while i < ir_fn_get(&(*module), fi as usize).instr_count {
+        let here = ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))
+        let here_op = (IR_A_OP[here as usize] as IrOpcode)
+        // A wide operand is a RANGE of consecutive registers and this table maps
+        // single registers. Substituting the base of a wide read would point it
+        // at a register whose FOLLOWING limbs are unrelated, so wide reads are
+        // left alone -- the copy is still correct, it is only not propagated.
+        let wide_here = ocp_is_wide_limb_op(here_op)
+        let s1 = IR_A_SRC1[here as usize]
+        if !wide_here && s1 >= 0 && s1 < 256 && copy_target[s1 as usize] >= 0 {
+            IR_A_SRC1[(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (i))) as usize] = copy_target[s1 as usize]
         }
-        let s2 = IR_A_SRC2[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize]
-        if s2 >= 0 && s2 < 256 && copy_target[s2 as usize] >= 0 {
-            IR_A_SRC2[(ir_region_slot_w((*module).functions[fi as usize].region, (i))) as usize] = copy_target[s2 as usize]
+        let s2 = IR_A_SRC2[here as usize]
+        // src2 is not always a register: on IrWideShr and IrWideShrLimb it is a
+        // shift amount. Rewriting it substitutes a register number for a shift
+        // count, and small shift counts collide with low register numbers.
+        if !wide_here && ocp_src2_is_register(here_op) && s2 >= 0 && s2 < 256 && copy_target[s2 as usize] >= 0 {
+            IR_A_SRC2[(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (i))) as usize] = copy_target[s2 as usize]
         }
-        let op = (IR_A_OP[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize] as IrOpcode)
+        let op = (IR_A_OP[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize] as IrOpcode)
         // #1667: this is a LINEAR scan, so state carried across a block
         // boundary is carried between basic blocks, where it does not hold. A
         // value established in one arm of an if/else was reaching the other arm
@@ -9128,14 +9265,60 @@ fn ocp_mfi_copy_prop(module: &! IrModule, fi: i64) with Mut, Div, Panic {
             var bb: i64 = 0
             while bb < 256 { copy_target[bb as usize] = 0 - 1  bb = bb + 1 }
         }
-        let dst = IR_A_DST[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize]
-        let cur_s1 = IR_A_SRC1[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize]
+        let dst = IR_A_DST[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
+        let cur_s1 = IR_A_SRC1[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
+        // A write to `dst` invalidates the entry whose KEY is `dst` (below) and
+        // also every entry whose VALUE is `dst` -- those record "read this
+        // register instead", which stops being true the moment it is written.
+        // Only the key was cleared, so a swap through a temporary miscompiled:
+        //     tv = v0        copy_target[tv] = v0
+        //     v0 = v1        clears copy_target[v0] -- not the entry tv -> v0
+        //     v1 = tv        the read of tv is rewritten to v0, already changed
+        // leaving v0 and v1 both holding the new value. This runs BEFORE the
+        // record below, because that record's own dst is a write as well.
+        // `dst >= 256` also scans: the else branch below stores an unchecked
+        // cur_s1, so an entry's VALUE can name a register outside the tracked
+        // window, and a write to that register must still invalidate it. The
+        // guard array cannot be indexed there, so those writes always scan --
+        // rare, and over-invalidating is sound where under-invalidating is not.
+        // A wide definition writes its whole range, so every limb of it
+        // invalidates records -- both those KEYED on the limb and those whose
+        // VALUE is the limb. Handling only the base left records alive across a
+        // write that had in fact changed the register they name.
+        let write_span = ocp_dst_limb_count(here)
+        var wk: i64 = 0
+        while wk < write_span {
+            let wreg = dst + wk
+            if ocp_has_dst(op) && dst >= 0 && (wreg >= 256 || copy_is_source[wreg as usize]) {
+                var q: i64 = 0
+                while q < 256 {
+                    if copy_target[q as usize] == wreg { copy_target[q as usize] = 0 - 1 }
+                    q = q + 1
+                }
+                if wreg < 256 { copy_is_source[wreg as usize] = false }
+            }
+            if ocp_has_dst(op) && dst >= 0 && wk > 0 && wreg < 256 {
+                copy_target[wreg as usize] = 0 - 1
+            }
+            wk = wk + 1
+        }
         if op == IrOpcode::IrCopy && dst >= 0 && dst < 256 {
             if cur_s1 >= 0 && cur_s1 < 256 && copy_target[cur_s1 as usize] >= 0 {
                 copy_target[dst as usize] = copy_target[cur_s1 as usize]
-                IR_A_SRC1[(ir_region_slot_w((*module).functions[fi as usize].region, (i))) as usize] = copy_target[cur_s1 as usize]
+                // Both guard writes are range-checked: copy_target holds a
+                // register number that was never bounded above (the else branch
+                // stores an unchecked cur_s1), so indexing the guard with it
+                // unchecked walks off the array -- it segfaulted the compiler
+                // on the first build. A register outside the tracked window is
+                // simply not guarded; the invalidation scan below is likewise
+                // limited to dst < 256, so nothing new is missed.
+                if copy_target[cur_s1 as usize] < 256 {
+                    copy_is_source[copy_target[cur_s1 as usize] as usize] = true
+                }
+                IR_A_SRC1[(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (i))) as usize] = copy_target[cur_s1 as usize]
             } else {
                 copy_target[dst as usize] = cur_s1
+                if cur_s1 >= 0 && cur_s1 < 256 { copy_is_source[cur_s1 as usize] = true }
             }
         } else if dst >= 0 && dst < 256 {
             copy_target[dst as usize] = 0 - 1
@@ -9153,27 +9336,63 @@ fn ocp_mfi_copy_prop(module: &! IrModule, fi: i64) with Mut, Div, Panic {
 fn ocp_mfi_dse(module: &! IrModule, fi: i64) with Mut, Div, Panic {
     var last_write: [i64; 256] = [-1; 256]
     var i: i64 = 0
-    while i < (*module).functions[fi as usize].instr_count {
-        let op = (IR_A_OP[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize] as IrOpcode)
-        let s1 = IR_A_SRC1[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize]
-        let s2 = IR_A_SRC2[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize]
-        let dst = IR_A_DST[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize]
-        if s1 >= 0 && s1 < 256 {
-            last_write[s1 as usize] = 0 - 1
+    while i < ir_fn_get(&(*module), fi as usize).instr_count {
+        let op = (IR_A_OP[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize] as IrOpcode)
+        let s1 = IR_A_SRC1[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
+        let s2 = IR_A_SRC2[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
+        let dst = IR_A_DST[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
+        // A wide READ consumes every limb, so every pending write under that
+        // range is live. Clearing only the base left a write to limb k killable
+        // by a later store, after this instruction had already read it.
+        let at_i = ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))
+        let rspan = ocp_limb_count(at_i)
+        let s2_span = if ocp_src2_is_register(op) { rspan } else { 1 }
+        var rk: i64 = 0
+        while rk < rspan {
+            if s1 >= 0 && s1 + rk < 256 { last_write[(s1 + rk) as usize] = 0 - 1 }
+            rk = rk + 1
         }
-        if s2 >= 0 && s2 < 256 {
-            last_write[s2 as usize] = 0 - 1
+        rk = 0
+        while rk < s2_span {
+            if s2 >= 0 && s2 + rk < 256 { last_write[(s2 + rk) as usize] = 0 - 1 }
+            rk = rk + 1
         }
         if ocp_has_dst(op) && !ocp_has_side_effect(op) {
             if dst >= 0 && dst < 256 {
+                let wspan = ocp_dst_limb_count(at_i)
                 let prev = last_write[dst as usize]
-                if prev >= 0 {
-                    ir_arena_store(ir_region_slot_w((*module).functions[fi as usize].region, (prev)), ir_nop())
+                // Neither side may be wide. NOPing a wide instruction because
+                // its BASE was overwritten would delete the definitions of its
+                // other limbs with it, and a wide write is not a full overwrite
+                // of anything a scalar write recorded.
+                if prev >= 0 && wspan == 1 {
+                    let at_prev = ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (prev))
+                    if ocp_dst_limb_count(at_prev) == 1 {
+                        ir_arena_store(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (prev)), ir_nop())
+                    }
                 }
-                last_write[dst as usize] = i
+                // Limbs above the base are written here too, but recording them
+                // as removable would let a later write to one of them NOP an
+                // instruction that also defines the others.
+                if wspan == 1 {
+                    last_write[dst as usize] = i
+                } else {
+                    var wk: i64 = 0
+                    while wk < wspan {
+                        if dst + wk < 256 { last_write[(dst + wk) as usize] = 0 - 1 }
+                        wk = wk + 1
+                    }
+                }
             }
         }
-        if op == IrOpcode::IrLabel || op == IrOpcode::IrJump || op == IrOpcode::IrBranchTrue || op == IrOpcode::IrBranchFalse {
+        // A call READS its arguments from instr.call_args, a Box list this pass
+        // does not walk (see the note on ocp_mfi_dce_once). Those reads are
+        // invisible to the SRC1/SRC2 scan above, so a store whose only consumer
+        // is a call argument looked dead and was NOPed -- `x = f(x, a); x = f(x, b)`
+        // lost the first assignment, every call then read the pre-loop x, and only
+        // the last write survived. Treating a call as a barrier restores
+        // correctness without walking the Box.
+        if op == IrOpcode::IrLabel || op == IrOpcode::IrJump || op == IrOpcode::IrBranchTrue || op == IrOpcode::IrBranchFalse || op == IrOpcode::IrCall || op == IrOpcode::IrCallSret {
             var k: i64 = 0
             while k < 256 {
                 last_write[k as usize] = 0 - 1
@@ -9187,20 +9406,20 @@ fn ocp_mfi_dse(module: &! IrModule, fi: i64) with Mut, Div, Panic {
 // Jump/branch immediately followed by its target label → NOP.
 fn ocp_mfi_redundant_jump(module: &! IrModule, fi: i64) with Mut, Div, Panic {
     var i: i64 = 0
-    while i + 1 < (*module).functions[fi as usize].instr_count {
-        let cur_op = (IR_A_OP[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize] as IrOpcode)
-        let cur_lab = IR_A_LABEL_ID[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize]
-        let next_op = (IR_A_OP[(ir_region_slot_r((*module).functions[fi as usize].region, ((i + 1)))) as usize] as IrOpcode)
-        let next_lab = IR_A_LABEL_ID[(ir_region_slot_r((*module).functions[fi as usize].region, ((i + 1)))) as usize]
+    while i + 1 < ir_fn_get(&(*module), fi as usize).instr_count {
+        let cur_op = (IR_A_OP[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize] as IrOpcode)
+        let cur_lab = IR_A_LABEL_ID[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
+        let next_op = (IR_A_OP[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, ((i + 1)))) as usize] as IrOpcode)
+        let next_lab = IR_A_LABEL_ID[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, ((i + 1)))) as usize]
         if next_op == IrOpcode::IrLabel {
             if cur_op == IrOpcode::IrJump && cur_lab == next_lab {
-                ir_arena_store(ir_region_slot_w((*module).functions[fi as usize].region, (i)), ir_nop())
+                ir_arena_store(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (i)), ir_nop())
             }
             if cur_op == IrOpcode::IrBranchTrue && cur_lab == next_lab {
-                ir_arena_store(ir_region_slot_w((*module).functions[fi as usize].region, (i)), ir_nop())
+                ir_arena_store(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (i)), ir_nop())
             }
             if cur_op == IrOpcode::IrBranchFalse && cur_lab == next_lab {
-                ir_arena_store(ir_region_slot_w((*module).functions[fi as usize].region, (i)), ir_nop())
+                ir_arena_store(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (i)), ir_nop())
             }
         }
         i = i + 1
@@ -9210,29 +9429,29 @@ fn ocp_mfi_redundant_jump(module: &! IrModule, fi: i64) with Mut, Div, Panic {
 // IrJump to a block whose first non-NOP is IrReturn → fold to IrReturn.
 fn ocp_mfi_jump_to_return(module: &! IrModule, fi: i64) with Mut, Div, Panic {
     var i: i64 = 0
-    while i < (*module).functions[fi as usize].instr_count {
-        let op = (IR_A_OP[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize] as IrOpcode)
-        let lab = IR_A_LABEL_ID[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize]
+    while i < ir_fn_get(&(*module), fi as usize).instr_count {
+        let op = (IR_A_OP[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize] as IrOpcode)
+        let lab = IR_A_LABEL_ID[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
         if op == IrOpcode::IrJump {
             var j: i64 = 0
-            while j < (*module).functions[fi as usize].instr_count {
-                let jop = (IR_A_OP[(ir_region_slot_r((*module).functions[fi as usize].region, (j))) as usize] as IrOpcode)
-                let jlab = IR_A_LABEL_ID[(ir_region_slot_r((*module).functions[fi as usize].region, (j))) as usize]
+            while j < ir_fn_get(&(*module), fi as usize).instr_count {
+                let jop = (IR_A_OP[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (j))) as usize] as IrOpcode)
+                let jlab = IR_A_LABEL_ID[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (j))) as usize]
                 if jop == IrOpcode::IrLabel && jlab == lab {
                     var k = j + 1
-                    while k < (*module).functions[fi as usize].instr_count {
-                        let kop = (IR_A_OP[(ir_region_slot_r((*module).functions[fi as usize].region, (k))) as usize] as IrOpcode)
+                    while k < ir_fn_get(&(*module), fi as usize).instr_count {
+                        let kop = (IR_A_OP[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (k))) as usize] as IrOpcode)
                         if kop == IrOpcode::IrNop {
                             k = k + 1
                         } else {
                             if kop == IrOpcode::IrReturn {
-                                let rsrc = IR_A_SRC1[(ir_region_slot_r((*module).functions[fi as usize].region, (k))) as usize]
-                                ir_arena_store(ir_region_slot_w((*module).functions[fi as usize].region, (i)), ir_return(rsrc))
+                                let rsrc = IR_A_SRC1[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (k))) as usize]
+                                ir_arena_store(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (i)), ir_return(rsrc))
                             }
-                            k = (*module).functions[fi as usize].instr_count
+                            k = ir_fn_get(&(*module), fi as usize).instr_count
                         }
                     }
-                    j = (*module).functions[fi as usize].instr_count
+                    j = ir_fn_get(&(*module), fi as usize).instr_count
                 }
                 j = j + 1
             }
@@ -9244,16 +9463,16 @@ fn ocp_mfi_jump_to_return(module: &! IrModule, fi: i64) with Mut, Div, Panic {
 // Code after unconditional jump until next label is unreachable → NOP.
 fn ocp_mfi_dead_after_jump(module: &! IrModule, fi: i64) with Mut, Div, Panic {
     var i: i64 = 0
-    while i < (*module).functions[fi as usize].instr_count {
-        let op = (IR_A_OP[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize] as IrOpcode)
+    while i < ir_fn_get(&(*module), fi as usize).instr_count {
+        let op = (IR_A_OP[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize] as IrOpcode)
         if op == IrOpcode::IrJump || op == IrOpcode::IrReturn {
             var j = i + 1
-            while j < (*module).functions[fi as usize].instr_count {
-                let jop = (IR_A_OP[(ir_region_slot_r((*module).functions[fi as usize].region, (j))) as usize] as IrOpcode)
+            while j < ir_fn_get(&(*module), fi as usize).instr_count {
+                let jop = (IR_A_OP[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (j))) as usize] as IrOpcode)
                 if jop == IrOpcode::IrLabel {
-                    j = (*module).functions[fi as usize].instr_count
+                    j = ir_fn_get(&(*module), fi as usize).instr_count
                 } else {
-                    ir_arena_store(ir_region_slot_w((*module).functions[fi as usize].region, (j)), ir_nop())
+                    ir_arena_store(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (j)), ir_nop())
                     j = j + 1
                 }
             }
@@ -9266,9 +9485,9 @@ fn ocp_mfi_dead_after_jump(module: &! IrModule, fi: i64) with Mut, Div, Panic {
 fn ocp_mfi_dead_label(module: &! IrModule, fi: i64) with Mut, Div, Panic {
     var targeted: [bool; 256] = [false; 256]
     var i: i64 = 0
-    while i < (*module).functions[fi as usize].instr_count {
-        let op = (IR_A_OP[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize] as IrOpcode)
-        let lab = IR_A_LABEL_ID[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize]
+    while i < ir_fn_get(&(*module), fi as usize).instr_count {
+        let op = (IR_A_OP[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize] as IrOpcode)
+        let lab = IR_A_LABEL_ID[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
         if op == IrOpcode::IrJump || op == IrOpcode::IrBranchTrue || op == IrOpcode::IrBranchFalse {
             if lab >= 0 && lab < 256 {
                 targeted[lab as usize] = true
@@ -9277,12 +9496,12 @@ fn ocp_mfi_dead_label(module: &! IrModule, fi: i64) with Mut, Div, Panic {
         i = i + 1
     }
     i = 0
-    while i < (*module).functions[fi as usize].instr_count {
-        let op = (IR_A_OP[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize] as IrOpcode)
-        let lab = IR_A_LABEL_ID[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize]
+    while i < ir_fn_get(&(*module), fi as usize).instr_count {
+        let op = (IR_A_OP[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize] as IrOpcode)
+        let lab = IR_A_LABEL_ID[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
         if op == IrOpcode::IrLabel && lab >= 0 && lab < 256 {
             if !targeted[lab as usize] {
-                ir_arena_store(ir_region_slot_w((*module).functions[fi as usize].region, (i)), ir_nop())
+                ir_arena_store(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (i)), ir_nop())
             }
         }
         i = i + 1
@@ -9297,19 +9516,28 @@ fn ocp_mfi_cse(module: &! IrModule, fi: i64) with Mut, Div, Panic {
     var cse_dst: [i64; 128] = [0; 128]
     var cse_len: i64 = 0
     var i: i64 = 0
-    while i < (*module).functions[fi as usize].instr_count {
-        let op = (IR_A_OP[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize] as IrOpcode)
-        let dst = IR_A_DST[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize]
-        let bin = (IR_A_BIN_OP[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize] as BinaryOp)
-        let s1 = IR_A_SRC1[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize]
-        let s2 = IR_A_SRC2[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize]
+    while i < ir_fn_get(&(*module), fi as usize).instr_count {
+        let op = (IR_A_OP[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize] as IrOpcode)
+        let dst = IR_A_DST[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
+        let bin = (IR_A_BIN_OP[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize] as BinaryOp)
+        let s1 = IR_A_SRC1[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
+        let s2 = IR_A_SRC2[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
+        // Every limb of a wide write invalidates: an expression recorded over
+        // limb k stops holding when the wide instruction overwrites it. Wide
+        // ops are not IrBinOp so they are never RECORDED here, but they do
+        // write registers that recorded expressions name.
         if ocp_has_dst(op) && dst >= 0 {
-            let invalidated = ocp_cse_invalidate_reg(cse_op, cse_src1, cse_src2, cse_dst, cse_len, dst)
-            cse_op = invalidated.op
-            cse_src1 = invalidated.src1
-            cse_src2 = invalidated.src2
-            cse_dst = invalidated.dst
-            cse_len = invalidated.len
+            let ispan = ocp_dst_limb_count(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i)))
+            var ik: i64 = 0
+            while ik < ispan {
+                let invalidated = ocp_cse_invalidate_reg(cse_op, cse_src1, cse_src2, cse_dst, cse_len, dst + ik)
+                cse_op = invalidated.op
+                cse_src1 = invalidated.src1
+                cse_src2 = invalidated.src2
+                cse_dst = invalidated.dst
+                cse_len = invalidated.len
+                ik = ik + 1
+            }
         }
         if ocp_is_binop(op) {
             let op_key = ocp_binop_to_cse_key(bin)
@@ -9331,7 +9559,7 @@ fn ocp_mfi_cse(module: &! IrModule, fi: i64) with Mut, Div, Panic {
                     j = j + 1
                 }
                 if found >= 0 {
-                    ir_arena_store(ir_region_slot_w((*module).functions[fi as usize].region, (i)), ir_copy(dst, cse_dst[found as usize]))
+                    ir_arena_store(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (i)), ir_copy(dst, cse_dst[found as usize]))
                 } else {
                     if cse_len < 128 {
                         cse_op[cse_len as usize] = op_key
@@ -9343,6 +9571,22 @@ fn ocp_mfi_cse(module: &! IrModule, fi: i64) with Mut, Div, Panic {
                 }
             }
         }
+        // A matched entry is substitutable only where the instruction that
+        // produced it DOMINATES the use. This peel has no dominance
+        // information, so its table must not cross a basic-block boundary:
+        //   if a { return f(e) }
+        //   if b { return f(e) + k }
+        // had the second occurrence rewritten as a copy of the first, whose
+        // register is never written when the first branch is not taken. The
+        // value read was whatever the preceding call left there -- measured as
+        // atan(1.0) after a sqrt(1.0), giving pi + 0.791495 instead of pi.
+        //
+        // ocp_mfi_dse resets on the same opcodes for the same reason. Dropping
+        // the table at control flow makes this block-local, which is what a
+        // peel without dominance analysis can honestly claim.
+        if op == IrOpcode::IrLabel || op == IrOpcode::IrJump || op == IrOpcode::IrBranchTrue || op == IrOpcode::IrBranchFalse {
+            cse_len = 0
+        }
         i = i + 1
     }
 }
@@ -9353,15 +9597,27 @@ fn ocp_mfi_cse(module: &! IrModule, fi: i64) with Mut, Div, Panic {
 fn ocp_mfi_dce_once(module: &! IrModule, fi: i64) -> i64 with Mut, Div, Panic {
     var used: [bool; 256] = [false; 256]
     var i: i64 = 0
-    while i < (*module).functions[fi as usize].instr_count {
-        let at = ir_region_slot_r((*module).functions[fi as usize].region, (i))
+    while i < ir_fn_get(&(*module), fi as usize).instr_count {
+        let at = ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))
         let s1 = IR_A_SRC1[at as usize]
         let s2 = IR_A_SRC2[at as usize]
-        if s1 >= 0 && s1 < 256 {
-            used[s1 as usize] = true
+        // A wide operand is a RANGE of consecutive registers, not one. Marking
+        // only the base left limbs 1..n-1 looking unused, and their defining
+        // instructions were NOPed -- the wrong answer under -O with no runtime
+        // signal. src2 is spanned only where it is a register: on the shift ops
+        // it is a shift amount, and marking a span there would be marking
+        // arithmetic on a number that is not a register at all.
+        let span = ocp_limb_count(at)
+        let s2_span = if ocp_src2_is_register((IR_A_OP[at as usize] as IrOpcode)) { span } else { 1 }
+        var lk: i64 = 0
+        while lk < span {
+            if s1 >= 0 && s1 + lk < 256 { used[(s1 + lk) as usize] = true }
+            lk = lk + 1
         }
-        if s2 >= 0 && s2 < 256 {
-            used[s2 as usize] = true
+        lk = 0
+        while lk < s2_span {
+            if s2 >= 0 && s2 + lk < 256 { used[(s2 + lk) as usize] = true }
+            lk = lk + 1
         }
         // #1682: NOT EVERY REGISTER USE LIVES IN src1/src2, and this scan used to
         // assume it did. Two operand classes were invisible to it:
@@ -9397,13 +9653,23 @@ fn ocp_mfi_dce_once(module: &! IrModule, fi: i64) -> i64 with Mut, Div, Panic {
     }
     var removed: i64 = 0
     i = 0
-    while i < (*module).functions[fi as usize].instr_count {
-        let op = (IR_A_OP[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize] as IrOpcode)
-        let dst = IR_A_DST[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize]
+    while i < ir_fn_get(&(*module), fi as usize).instr_count {
+        let op = (IR_A_OP[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize] as IrOpcode)
+        let dst = IR_A_DST[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
         if ocp_has_dst(op) && !ocp_has_side_effect(op) {
             if dst >= 0 && dst < 256 {
-                if !used[dst as usize] {
-                    ir_arena_store(ir_region_slot_w((*module).functions[fi as usize].region, (i)), ir_nop())
+                // A wide definition writes its whole range, so it is dead only
+                // when EVERY limb is unused. Testing the base alone removed
+                // instructions whose upper limbs were still read.
+                let dspan = ocp_dst_limb_count(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i)))
+                var any_used: bool = false
+                var dk: i64 = 0
+                while dk < dspan {
+                    if dst + dk < 256 && used[(dst + dk) as usize] { any_used = true }
+                    dk = dk + 1
+                }
+                if !any_used {
+                    ir_arena_store(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (i)), ir_nop())
                     removed = removed + 1
                 }
             }
@@ -9421,9 +9687,9 @@ fn ocp_mfi_const_fold(module: &! IrModule, fi: i64) with Mut, Div, Panic {
     var is_const: [bool; 256] = [false; 256]
     var const_val: [i64; 256] = [0; 256]
     var i: i64 = 0
-    while i < (*module).functions[fi as usize].instr_count {
-        let op = (IR_A_OP[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize] as IrOpcode)
-        let dst = IR_A_DST[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize]
+    while i < ir_fn_get(&(*module), fi as usize).instr_count {
+        let op = (IR_A_OP[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize] as IrOpcode)
+        let dst = IR_A_DST[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
         // #1667: this is a LINEAR scan, so state carried across a block
         // boundary is carried between basic blocks, where it does not hold. A
         // value established in one arm of an if/else was reaching the other arm
@@ -9434,30 +9700,37 @@ fn ocp_mfi_const_fold(module: &! IrModule, fi: i64) with Mut, Div, Panic {
             var bb: i64 = 0
             while bb < 256 { is_const[bb as usize] = false  bb = bb + 1 }
         }
+        // The written RANGE: a wide write covers limb_count consecutive
+        // registers, and a constant recorded on limb k outlived it.
         if dst >= 0 && dst < 256 {
-            is_const[dst as usize] = false
+            let cspan = ocp_dst_limb_count(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i)))
+            var ck: i64 = 0
+            while ck < cspan {
+                if dst + ck < 256 { is_const[(dst + ck) as usize] = false }
+                ck = ck + 1
+            }
         }
         if ocp_is_load_imm(op) || op == IrOpcode::IrLoadBool {
             if dst >= 0 && dst < 256 {
                 is_const[dst as usize] = true
-                const_val[dst as usize] = IR_A_IMM_I64[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize]
+                const_val[dst as usize] = IR_A_IMM_I64[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
             }
         }
         if op == IrOpcode::IrCopy {
-            let s1 = IR_A_SRC1[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize]
+            let s1 = IR_A_SRC1[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
             if s1 >= 0 && s1 < 256 && is_const[s1 as usize] {
                 if dst >= 0 && dst < 256 {
                     let v = const_val[s1 as usize]
-                    ir_arena_store(ir_region_slot_w((*module).functions[fi as usize].region, (i)), ir_load_imm(dst, v))
+                    ir_arena_store(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (i)), ir_load_imm(dst, v))
                     is_const[dst as usize] = true
                     const_val[dst as usize] = v
                 }
             }
         }
         if ocp_is_binop(op) {
-            let s1 = IR_A_SRC1[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize]
-            let s2 = IR_A_SRC2[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize]
-            let bin = (IR_A_BIN_OP[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize] as BinaryOp)
+            let s1 = IR_A_SRC1[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
+            let s2 = IR_A_SRC2[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
+            let bin = (IR_A_BIN_OP[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize] as BinaryOp)
             let s1_ok = s1 >= 0 && s1 < 256
             let s2_ok = s2 >= 0 && s2 < 256
             let s1_known = s1_ok && is_const[s1 as usize]
@@ -9541,7 +9814,7 @@ fn ocp_mfi_const_fold(module: &! IrModule, fi: i64) with Mut, Div, Panic {
                     did_fold = true
                 }
                 if did_fold && dst >= 0 && dst < 256 {
-                    ir_arena_store(ir_region_slot_w((*module).functions[fi as usize].region, (i)), ir_load_imm(dst, fold_val))
+                    ir_arena_store(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (i)), ir_load_imm(dst, fold_val))
                     is_const[dst as usize] = true
                     const_val[dst as usize] = fold_val
                 }
@@ -9552,20 +9825,20 @@ fn ocp_mfi_const_fold(module: &! IrModule, fi: i64) with Mut, Div, Panic {
                 let v2 = if s2_known { const_val[s2 as usize] } else { 0 }
                 if bin == BinaryOp::OpMul {
                     if s2_known && v2 == 1 {
-                        ir_arena_store(ir_region_slot_w((*module).functions[fi as usize].region, (i)), ir_copy(dst, s1))
+                        ir_arena_store(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (i)), ir_copy(dst, s1))
                     }
                     if s1_known && v1 == 1 {
-                        ir_arena_store(ir_region_slot_w((*module).functions[fi as usize].region, (i)), ir_copy(dst, s2))
+                        ir_arena_store(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (i)), ir_copy(dst, s2))
                     }
                     if s2_known && v2 == 0 {
-                        ir_arena_store(ir_region_slot_w((*module).functions[fi as usize].region, (i)), ir_load_imm(dst, 0))
+                        ir_arena_store(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (i)), ir_load_imm(dst, 0))
                         if dst >= 0 && dst < 256 {
                             is_const[dst as usize] = true
                             const_val[dst as usize] = 0
                         }
                     }
                     if s1_known && v1 == 0 {
-                        ir_arena_store(ir_region_slot_w((*module).functions[fi as usize].region, (i)), ir_load_imm(dst, 0))
+                        ir_arena_store(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (i)), ir_load_imm(dst, 0))
                         if dst >= 0 && dst < 256 {
                             is_const[dst as usize] = true
                             const_val[dst as usize] = 0
@@ -9574,28 +9847,28 @@ fn ocp_mfi_const_fold(module: &! IrModule, fi: i64) with Mut, Div, Panic {
                 }
                 if bin == BinaryOp::OpAdd {
                     if s2_known && v2 == 0 {
-                        ir_arena_store(ir_region_slot_w((*module).functions[fi as usize].region, (i)), ir_copy(dst, s1))
+                        ir_arena_store(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (i)), ir_copy(dst, s1))
                     }
                     if s1_known && v1 == 0 {
-                        ir_arena_store(ir_region_slot_w((*module).functions[fi as usize].region, (i)), ir_copy(dst, s2))
+                        ir_arena_store(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (i)), ir_copy(dst, s2))
                     }
                 }
                 if bin == BinaryOp::OpSub {
                     if s2_known && v2 == 0 {
-                        ir_arena_store(ir_region_slot_w((*module).functions[fi as usize].region, (i)), ir_copy(dst, s1))
+                        ir_arena_store(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (i)), ir_copy(dst, s1))
                     }
                 }
                 if bin == BinaryOp::OpBitOr {
                     if s2_known && v2 == 0 {
-                        ir_arena_store(ir_region_slot_w((*module).functions[fi as usize].region, (i)), ir_copy(dst, s1))
+                        ir_arena_store(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (i)), ir_copy(dst, s1))
                     }
                     if s1_known && v1 == 0 {
-                        ir_arena_store(ir_region_slot_w((*module).functions[fi as usize].region, (i)), ir_copy(dst, s2))
+                        ir_arena_store(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (i)), ir_copy(dst, s2))
                     }
                 }
                 if bin == BinaryOp::OpBitAnd {
                     if (s2_known && v2 == 0) || (s1_known && v1 == 0) {
-                        ir_arena_store(ir_region_slot_w((*module).functions[fi as usize].region, (i)), ir_load_imm(dst, 0))
+                        ir_arena_store(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (i)), ir_load_imm(dst, 0))
                         if dst >= 0 && dst < 256 {
                             is_const[dst as usize] = true
                             const_val[dst as usize] = 0
@@ -9604,22 +9877,24 @@ fn ocp_mfi_const_fold(module: &! IrModule, fi: i64) with Mut, Div, Panic {
                 }
                 if bin == BinaryOp::OpBitXor {
                     if s2_known && v2 == 0 {
-                        ir_arena_store(ir_region_slot_w((*module).functions[fi as usize].region, (i)), ir_copy(dst, s1))
+                        ir_arena_store(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (i)), ir_copy(dst, s1))
                     }
                     if s1_known && v1 == 0 {
-                        ir_arena_store(ir_region_slot_w((*module).functions[fi as usize].region, (i)), ir_copy(dst, s2))
+                        ir_arena_store(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (i)), ir_copy(dst, s2))
                     }
                 }
             }
         }
         // Unary OpNeg of a known constant.
         if op == IrOpcode::IrUnaryOp {
-            let un = (IR_A_UN_OP[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize] as UnaryOp)
-            let s1 = IR_A_SRC1[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize]
+            let un = (IR_A_UN_OP[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize] as UnaryOp)
+            let s1 = IR_A_SRC1[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
             if un == UnaryOp::OpNeg && s1 >= 0 && s1 < 256 && is_const[s1 as usize] {
-                if dst >= 0 && dst < 256 {
+                // Integers only: `0 - bits` is not f64 negation (see pass_a2).
+                let mfi_fn = ir_fn_get(&(*module), fi as usize)
+                if dst >= 0 && dst < 256 && !ocp_rebracket_has_float_marker_before(&mfi_fn, s1, i) {
                     let v = 0 - const_val[s1 as usize]
-                    ir_arena_store(ir_region_slot_w((*module).functions[fi as usize].region, (i)), ir_load_imm(dst, v))
+                    ir_arena_store(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (i)), ir_load_imm(dst, v))
                     is_const[dst as usize] = true
                     const_val[dst as usize] = v
                 }
@@ -9644,9 +9919,9 @@ fn ocp_mfi_sccp(module: &! IrModule, fi: i64) with Mut, Div, Panic {
     var is_const: [bool; 256] = [false; 256]
     var const_val: [i64; 256] = [0; 256]
     var i: i64 = 0
-    while i < (*module).functions[fi as usize].instr_count {
-        let op = (IR_A_OP[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize] as IrOpcode)
-        let dst = IR_A_DST[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize]
+    while i < ir_fn_get(&(*module), fi as usize).instr_count {
+        let op = (IR_A_OP[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize] as IrOpcode)
+        let dst = IR_A_DST[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
         // #1667: this is a LINEAR scan, so state carried across a block
         // boundary is carried between basic blocks, where it does not hold. A
         // value established in one arm of an if/else was reaching the other arm
@@ -9657,41 +9932,48 @@ fn ocp_mfi_sccp(module: &! IrModule, fi: i64) with Mut, Div, Panic {
             var bb: i64 = 0
             while bb < 256 { is_const[bb as usize] = false  bb = bb + 1 }
         }
+        // The written RANGE: a wide write covers limb_count consecutive
+        // registers, and a constant recorded on limb k outlived it.
         if dst >= 0 && dst < 256 {
-            is_const[dst as usize] = false
+            let cspan = ocp_dst_limb_count(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i)))
+            var ck: i64 = 0
+            while ck < cspan {
+                if dst + ck < 256 { is_const[(dst + ck) as usize] = false }
+                ck = ck + 1
+            }
         }
         if ocp_is_load_imm(op) || op == IrOpcode::IrLoadBool {
             if dst >= 0 && dst < 256 {
                 is_const[dst as usize] = true
-                const_val[dst as usize] = IR_A_IMM_I64[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize]
+                const_val[dst as usize] = IR_A_IMM_I64[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
             }
         }
         if op == IrOpcode::IrCopy {
-            let s1 = IR_A_SRC1[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize]
+            let s1 = IR_A_SRC1[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
             if s1 >= 0 && s1 < 256 && is_const[s1 as usize] && dst >= 0 && dst < 256 {
                 is_const[dst as usize] = true
                 const_val[dst as usize] = const_val[s1 as usize]
             }
         }
         if op == IrOpcode::IrBranchTrue {
-            let cond = IR_A_SRC1[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize]
-            let lab = IR_A_LABEL_ID[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize]
+            let cond = IR_A_SRC1[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
+            let lab = IR_A_LABEL_ID[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
             if cond >= 0 && cond < 256 && is_const[cond as usize] {
                 if const_val[cond as usize] != 0 {
-                    ir_arena_store(ir_region_slot_w((*module).functions[fi as usize].region, (i)), ir_jump(lab))
+                    ir_arena_store(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (i)), ir_jump(lab))
                 } else {
-                    ir_arena_store(ir_region_slot_w((*module).functions[fi as usize].region, (i)), ir_nop())
+                    ir_arena_store(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (i)), ir_nop())
                 }
             }
         }
         if op == IrOpcode::IrBranchFalse {
-            let cond = IR_A_SRC1[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize]
-            let lab = IR_A_LABEL_ID[(ir_region_slot_r((*module).functions[fi as usize].region, (i))) as usize]
+            let cond = IR_A_SRC1[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
+            let lab = IR_A_LABEL_ID[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (i))) as usize]
             if cond >= 0 && cond < 256 && is_const[cond as usize] {
                 if const_val[cond as usize] == 0 {
-                    ir_arena_store(ir_region_slot_w((*module).functions[fi as usize].region, (i)), ir_jump(lab))
+                    ir_arena_store(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (i)), ir_jump(lab))
                 } else {
-                    ir_arena_store(ir_region_slot_w((*module).functions[fi as usize].region, (i)), ir_nop())
+                    ir_arena_store(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (i)), ir_nop())
                 }
             }
         }
@@ -9710,32 +9992,32 @@ fn ocp_mfi_sccp(module: &! IrModule, fi: i64) with Mut, Div, Panic {
 // Transfers call_args by field assign then clears the source slot (module_frontend
 // already uses this pattern for call_args rebuild).
 fn ocp_mfi_instr_move_fields(module: &! IrModule, fi: i64, dst_i: i64, src_i: i64) with Mut, Div, Panic {
-    let op = (IR_A_OP[(ir_region_slot_r((*module).functions[fi as usize].region, (src_i))) as usize] as IrOpcode)
-    let dst = IR_A_DST[(ir_region_slot_r((*module).functions[fi as usize].region, (src_i))) as usize]
-    let s1 = IR_A_SRC1[(ir_region_slot_r((*module).functions[fi as usize].region, (src_i))) as usize]
-    let s2 = IR_A_SRC2[(ir_region_slot_r((*module).functions[fi as usize].region, (src_i))) as usize]
-    let imm = IR_A_IMM_I64[(ir_region_slot_r((*module).functions[fi as usize].region, (src_i))) as usize]
-    let immf = IR_A_IMM_F64[(ir_region_slot_r((*module).functions[fi as usize].region, (src_i))) as usize]
-    let lab = IR_A_LABEL_ID[(ir_region_slot_r((*module).functions[fi as usize].region, (src_i))) as usize]
-    let fnid = IR_A_FN_ID[(ir_region_slot_r((*module).functions[fi as usize].region, (src_i))) as usize]
-    let fidx = IR_A_FIELD_IDX[(ir_region_slot_r((*module).functions[fi as usize].region, (src_i))) as usize]
-    let flags = IR_A_IMM_FLAGS[(ir_region_slot_r((*module).functions[fi as usize].region, (src_i))) as usize]
-    let bin = (IR_A_BIN_OP[(ir_region_slot_r((*module).functions[fi as usize].region, (src_i))) as usize] as BinaryOp)
-    let un = (IR_A_UN_OP[(ir_region_slot_r((*module).functions[fi as usize].region, (src_i))) as usize] as UnaryOp)
-    let nm = ir_arena_name(ir_region_slot_r((*module).functions[fi as usize].region, (src_i)))
-    let ac = IR_A_ARG_COUNT[(ir_region_slot_r((*module).functions[fi as usize].region, (src_i))) as usize]
-    IR_A_OP[(ir_region_slot_w((*module).functions[fi as usize].region, (dst_i))) as usize] = op
-    IR_A_DST[(ir_region_slot_w((*module).functions[fi as usize].region, (dst_i))) as usize] = dst
-    IR_A_SRC1[(ir_region_slot_w((*module).functions[fi as usize].region, (dst_i))) as usize] = s1
-    IR_A_SRC2[(ir_region_slot_w((*module).functions[fi as usize].region, (dst_i))) as usize] = s2
-    IR_A_IMM_I64[(ir_region_slot_w((*module).functions[fi as usize].region, (dst_i))) as usize] = imm
-    IR_A_IMM_F64[(ir_region_slot_w((*module).functions[fi as usize].region, (dst_i))) as usize] = immf
-    IR_A_LABEL_ID[(ir_region_slot_w((*module).functions[fi as usize].region, (dst_i))) as usize] = lab
-    IR_A_FN_ID[(ir_region_slot_w((*module).functions[fi as usize].region, (dst_i))) as usize] = fnid
-    IR_A_FIELD_IDX[(ir_region_slot_w((*module).functions[fi as usize].region, (dst_i))) as usize] = fidx
-    IR_A_IMM_FLAGS[(ir_region_slot_w((*module).functions[fi as usize].region, (dst_i))) as usize] = flags
-    IR_A_BIN_OP[(ir_region_slot_w((*module).functions[fi as usize].region, (dst_i))) as usize] = bin
-    IR_A_UN_OP[(ir_region_slot_w((*module).functions[fi as usize].region, (dst_i))) as usize] = un
+    let op = (IR_A_OP[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (src_i))) as usize] as IrOpcode)
+    let dst = IR_A_DST[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (src_i))) as usize]
+    let s1 = IR_A_SRC1[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (src_i))) as usize]
+    let s2 = IR_A_SRC2[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (src_i))) as usize]
+    let imm = IR_A_IMM_I64[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (src_i))) as usize]
+    let immf = IR_A_IMM_F64[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (src_i))) as usize]
+    let lab = IR_A_LABEL_ID[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (src_i))) as usize]
+    let fnid = IR_A_FN_ID[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (src_i))) as usize]
+    let fidx = IR_A_FIELD_IDX[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (src_i))) as usize]
+    let flags = IR_A_IMM_FLAGS[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (src_i))) as usize]
+    let bin = (IR_A_BIN_OP[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (src_i))) as usize] as BinaryOp)
+    let un = (IR_A_UN_OP[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (src_i))) as usize] as UnaryOp)
+    let nm = ir_arena_name(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (src_i)))
+    let ac = IR_A_ARG_COUNT[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (src_i))) as usize]
+    IR_A_OP[(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (dst_i))) as usize] = op
+    IR_A_DST[(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (dst_i))) as usize] = dst
+    IR_A_SRC1[(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (dst_i))) as usize] = s1
+    IR_A_SRC2[(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (dst_i))) as usize] = s2
+    IR_A_IMM_I64[(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (dst_i))) as usize] = imm
+    IR_A_IMM_F64[(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (dst_i))) as usize] = immf
+    IR_A_LABEL_ID[(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (dst_i))) as usize] = lab
+    IR_A_FN_ID[(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (dst_i))) as usize] = fnid
+    IR_A_FIELD_IDX[(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (dst_i))) as usize] = fidx
+    IR_A_IMM_FLAGS[(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (dst_i))) as usize] = flags
+    IR_A_BIN_OP[(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (dst_i))) as usize] = bin
+    IR_A_UN_OP[(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (dst_i))) as usize] = un
     // #1667 / #1649: this was `ir_arena_name(<dst slot>) = nm`. ir_arena_name is
     // a GETTER returning a Name by value, so the assignment wrote nothing and the
     // destination slot kept the previous occupant's name. compact_nops moves every
@@ -9743,26 +10025,26 @@ fn ocp_mfi_instr_move_fields(module: &! IrModule, fi: i64, dst_i: i64, src_i: i6
     // constants printed some other instruction's name -- `print_char` instead of
     // the literal. A transform artifact: the original `X.instrs[d].name = ...` had
     // its left-hand side rewritten into the getter.
-    ir_arena_put_name(ir_region_slot_w((*module).functions[fi as usize].region, (dst_i)), nm)
-    IR_A_ARG_COUNT[(ir_region_slot_w((*module).functions[fi as usize].region, (dst_i))) as usize] = ac
+    ir_arena_put_name(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (dst_i)), nm)
+    IR_A_ARG_COUNT[(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (dst_i))) as usize] = ac
     // Move call_args ownership: field assign then clear source before NOP.
     // (Same field-level call_args write pattern as module_frontend arebox.)
     if ac > 0 {
-        ir_arena_move_args(ir_region_slot_w((*module).functions[fi as usize].region, (dst_i)), ir_region_slot_r((*module).functions[fi as usize].region, (src_i)))
-        ir_arena_clear_args(ir_region_slot_w((*module).functions[fi as usize].region, (src_i)))
-        IR_A_ARG_COUNT[(ir_region_slot_w((*module).functions[fi as usize].region, (src_i))) as usize] = 0
+        ir_arena_move_args(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (dst_i)), ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (src_i)))
+        ir_arena_clear_args(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (src_i)))
+        IR_A_ARG_COUNT[(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (src_i))) as usize] = 0
     } else {
-        ir_arena_clear_args(ir_region_slot_w((*module).functions[fi as usize].region, (dst_i)))
+        ir_arena_clear_args(ir_region_slot_w(ir_fn_get(&(*module), fi as usize).region, (dst_i)))
     }
 }
 
 // Compact IrNop holes by field-wise dense packing. Label ids are symbolic.
-fn ocp_mfi_compact_nops(module: &! IrModule, fi: i64) with Mut, Div, Panic {
+fn ocp_mfi_compact_nops(module: &! IrModule, fi: i64) with Alloc, Mut, Div, Panic {
     var write: i64 = 0
     var read: i64 = 0
-    let ic = (*module).functions[fi as usize].instr_count
+    let ic = ir_fn_get(&(*module), fi as usize).instr_count
     while read < ic {
-        let op = (IR_A_OP[(ir_region_slot_r((*module).functions[fi as usize].region, (read))) as usize] as IrOpcode)
+        let op = (IR_A_OP[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (read))) as usize] as IrOpcode)
         // A nop carrying IR_FLOAT_REG_MARKER_FLAG is NOT dead. Codegen reads it
         // to learn that a register holds f64 -- codegen_x86_linux.sio:7406,
         // "Always honor an explicit float-marker IrNop". Dropping it makes the
@@ -9774,7 +10056,7 @@ fn ocp_mfi_compact_nops(module: &! IrModule, fi: i64) with Mut, Div, Panic {
         //
         // This is also why an epistemic variance read back as 0 under -O: the
         // shadow value is an f64 reached through exactly this marker.
-        let marker = IR_A_IMM_FLAGS[(ir_region_slot_r((*module).functions[fi as usize].region, (read))) as usize]
+        let marker = IR_A_IMM_FLAGS[(ir_region_slot_r(ir_fn_get(&(*module), fi as usize).region, (read))) as usize]
         if op != IrOpcode::IrNop || marker == IR_FLOAT_REG_MARKER_FLAG {
             if write != read {
                 ocp_mfi_instr_move_fields(module, fi, write, read)
@@ -9784,11 +10066,13 @@ fn ocp_mfi_compact_nops(module: &! IrModule, fi: i64) with Mut, Div, Panic {
         read = read + 1
     }
     var fill = write
+    var fn_slot = ir_fn_get(&(*module), fi as usize)
     while fill < ic {
-        ir_arena_store(ir_region_slot_w((*module).functions[fi as usize].region, (fill)), ir_nop())
+        ir_arena_store(ir_region_slot_w(fn_slot.region, (fill)), ir_nop())
         fill = fill + 1
     }
-    (*module).functions[fi as usize].instr_count = write
+    fn_slot.instr_count = write
+    ir_fn_set(&! (*module), fi as usize, fn_slot)
 }
 
 // Safe multi-module function cleanup via module+fi field access only.
@@ -9812,8 +10096,8 @@ fn ocp_skip(bit: i64) -> bool with Div {
     (OCP_SKIP_MASK / bit) % 2 == 1
 }
 
-fn opt_cleanup_function_mfi(module: &! IrModule, fi: i64) with Mut, Div, Panic {
-    let ic = (*module).functions[fi as usize].instr_count
+fn opt_cleanup_function_mfi(module: &! IrModule, fi: i64) with Alloc, Mut, Div, Panic {
+    let ic = ir_fn_get(&(*module), fi as usize).instr_count
     if ic <= 0 {
         return
     }
@@ -9844,7 +10128,7 @@ fn opt_cleanup_function_mfi(module: &! IrModule, fi: i64) with Mut, Div, Panic {
 
 // Run safe field-wise cleanup on every function without copying IrModule or
 // IrFunction by value, and without taking `&! functions[fi]`.
-pub fn opt_cleanup_module_inplace(module: &! IrModule) -> OcpCleanupModuleReceipt with Mut, Div, Panic {
+pub fn opt_cleanup_module_inplace(module: &! IrModule) -> OcpCleanupModuleReceipt with Alloc, Mut, Div, Panic {
     // Exact-bitwise rebracket audit still lives on the by-value const-fold
     // spine (self-test / pipeline probe path). Multi-module -O uses mfi peels
     // (including core const-fold / SCCP-lite / compact_nops); heavy Block-L
@@ -9858,7 +10142,7 @@ pub fn opt_cleanup_module_inplace(module: &! IrModule) -> OcpCleanupModuleReceip
     while fi < (*module).fn_count {
         let transactions_before = audit.transaction_count
         let applications_before = audit.application_count
-        let function_name = (*module).functions[fi as usize].name
+        let function_name = ir_fn_get(&(*module), fi as usize).name
         // A module-level global lowers to a PSEUDO-FUNCTION slot
         // (compile_strategy = IR_STRATEGY_BSS_GLOBAL) whose instrs[] does not
         // hold code: for a multi-element initialiser it holds the init WORDS,
@@ -9866,13 +10150,13 @@ pub fn opt_cleanup_module_inplace(module: &! IrModule) -> OcpCleanupModuleReceip
         // instruction index. Running instruction peels over that is meaningless
         // at best -- compaction deletes those data-carrying nops outright and
         // destroys the initialiser. Skip them.
-        if (*module).functions[fi as usize].compile_strategy != IR_STRATEGY_BSS_GLOBAL {
+        if ir_fn_get(&(*module), fi as usize).compile_strategy != IR_STRATEGY_BSS_GLOBAL {
             // Inplace field-wise peels — never by-value IrFunction from the array.
             opt_cleanup_function_mfi(module, fi)
         }
         // Audit links are keyed by the lowered function name. Cleanup is not a
         // symbol-renaming pass, so fail loudly if that invariant ever changes.
-        assert(ir_name_eq(function_name, (*module).functions[fi as usize].name))
+        assert(ir_name_eq(function_name, ir_fn_get(&(*module), fi as usize).name))
         let transaction_delta = audit.transaction_count - transactions_before
         let application_delta = audit.application_count - applications_before
         if transaction_delta > 0 {
@@ -9912,7 +10196,7 @@ pub fn opt_cleanup_module_inplace(module: &! IrModule) -> OcpCleanupModuleReceip
 }
 
 // Legacy by-value API retained for callers that already own an IrModule value.
-pub fn opt_cleanup_module(module: IrModule) -> IrModule with Mut, Div, Panic {
+pub fn opt_cleanup_module(module: IrModule) -> IrModule with Alloc, Mut, Div, Panic {
     var result = module
     opt_cleanup_module_inplace(&! result)
     result

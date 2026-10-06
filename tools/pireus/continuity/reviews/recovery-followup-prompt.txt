@@ -1,0 +1,228 @@
+Follow-up review. Prior Grok blockers retained. The updated adapter inventories ALL DaemonSets/Deployments/StatefulSets/NodeSets and refuses any other spec referencing the selector; proves target NodeSet selector. It re-runs the complete observation+native admission before EACH node CAS, checks live lease RV again, and records postconditions. Printed contract flags asserted. Explicit verified predicate replaces tautological True. Pair-wide atomicity is impossible across Kubernetes objects; PARTIAL_OR_UNVERIFIED is retained on any mid-pair failure, no automatic rollback restores workers or grants GPUs; script stops and never automatically runs canonical recover. This is a safe stop-only action while both GPUs remain fenced, not an all-or-nothing grant. Slurm bit definitions from frozen predecessor: 0 GPUrequestExact,1 controllerReady,2 bothDrained,3 activeJobsZero,4 allocationsZero,5 bothWorkersAbsent,6 bothGpuBound,7 resumedVerified. Requiring bits1..4 is intentional: workers may be present or absent, no resume is permitted, unrelated positive bits never mean an error. Reject unknown values above511. Review all code/lock below. Return CLEAR or concrete BLOCKER; no execution claim.
+
+FILE recovery_detach.sio
+// Bounded recovery authority: stop worker recreation only, never grant GPU access.
+// Input: schema=1, fifteen boolean facts and one predecessor Slurm observation mask, two MemAvailable MiB.
+// No grant, lease transition, barrier change, threshold override or resume action.
+fn main() -> i32 with IO, Mut, Panic, Div {
+    if arg_count() != 1 { return 2 }
+    let path = get_arg(0)
+    let size = file_size(path)
+    if size <= 0 || size > 256 { return 2 }
+    let raw = read_file(path)
+    if str_len(raw) != size { return 2 }
+    var values: [i64; 19] = [0; 19]
+    var p: i64 = 0
+    var i: i64 = 0
+    while i < 19 {
+        var digits: i64 = 0
+        var value: i64 = 0
+        while p < size {
+            let c = str_char_at(raw, p)
+            if c < 48 || c > 57 { break }
+            if digits >= 9 { return 2 }
+            value = value * 10 + c - 48
+            digits = digits + 1
+            p = p + 1
+        }
+        if digits == 0 || p >= size { return 2 }
+        if str_char_at(raw, p) != (if i == 18 { 10 } else { 32 }) { return 2 }
+        values[i as usize] = value
+        p = p + 1
+        i = i + 1
+    }
+    if p != size || values[0] != 1 { return 2 }
+    var allowed = true
+    i = 1
+    while i <= 16 {
+        if i == 15 {
+            if values[15] > 511 { return 2 }
+            if (values[15] & 30) != 30 { allowed = false }
+        } else {
+            if values[i as usize] > 1 { return 2 }
+            if values[i as usize] != 1 { allowed = false }
+        }
+        i = i + 1
+    }
+    if values[17] < 32768 || values[18] < 32768 { allowed = false }
+    print("{\"schema\":1,\"authority\":\"Sounio\",\"action\":\"DETACH_FENCED_WORKERS\",\"decision\":\"")
+    if allowed { print("ALLOW") } else { print("REFUSE") }
+    println("\",\"gpu_grant\":false,\"resume\":false,\"minimum_free_memory_mb\":32768,\"claim_ready\":false}")
+    if allowed { 0 } else { 1 }
+}
+
+FILE recovery_detach.py
+#!/usr/bin/env python3
+"""Transport one bounded Sounio recovery decision into exact node label removal."""
+import argparse,datetime,hashlib,json,os,subprocess,time,sys
+from pathlib import Path
+HERE=Path(__file__).resolve().parent
+ROOT=HERE.parents[3]
+NODES=("spark-3c59","spark-8e54")
+def sha(data):return hashlib.sha256(data).hexdigest()
+def fields(raw):return dict(x.split("=",1) for x in raw.split() if "=" in x)
+def kube(*args):return subprocess.check_output(["kubectl",*args],text=True,timeout=60)
+def jsonk(*args):return json.loads(kube(*args,"-o","json"))
+def main():
+ ap=argparse.ArgumentParser();ap.add_argument("--engine",type=Path,required=True)
+ ap.add_argument("--arbiter-root",type=Path,required=True);ap.add_argument("--evidence",type=Path,required=True)
+ ap.add_argument("--holder",required=True);ap.add_argument("--apply",action="store_true");a=ap.parse_args()
+ if not os.environ.get("TMUX"):raise ValueError("remote tmux required")
+ lock=json.loads((HERE/"recovery-detach-lock.json").read_text())
+ assert sha(a.engine.read_bytes())==lock["executable_sha256"],"native authority drift"
+ for name,expected in lock["sources"].items():assert sha((HERE/name).read_bytes())==expected,"source drift"
+ policy=a.arbiter_root/"tools/cluster/spark_pair_arbiter.policy.v1"
+ freeze=a.arbiter_root/"tools/cluster/spark_pair_arbiter.freeze.v1"
+ cfg=fields(policy.read_text());frozen=fields(freeze.read_text())
+ assert sha(freeze.read_bytes())==lock["arbiter_freeze_sha256"],"unexpected predecessor freeze"
+ verified=subprocess.check_output([str(a.arbiter_root/"scripts/dev/spark_pair_arbiter.sh"),"verify"],text=True,timeout=60)
+ assert verified.startswith("SPARK_PAIR_VERIFY_PASS")
+ a.evidence.mkdir(parents=True,exist_ok=False)
+ def save(name,value):
+  data=value.encode() if isinstance(value,str) else (json.dumps(value,sort_keys=True,indent=2)+"\n").encode()
+  path=a.evidence/name;path.write_bytes(data);return path
+ base=[str(a.arbiter_root/"scripts/dev/spark_pair_arbiter_k8s_backend.sh"),"--policy",str(policy),"--freeze",str(freeze)]
+ raw_frame=subprocess.check_output(base+["facts","--holder",a.holder],text=True,timeout=190)
+ frame=fields(raw_frame);save("arbiter-frame.txt",raw_frame)
+ lease=jsonk("-n","beagle","get","lease","pireus-spark-pair")
+ save("lease.json",lease)
+ nodes=[jsonk("get","node",n) for n in NODES]
+ nodeset=jsonk("-n",cfg["nodeset_namespace"],"get","nodeset",cfg["nodeset_name"])
+ save("nodes.json",nodes);save("nodeset.json",nodeset)
+ key=cfg["slurmd_selector_key"]
+ selectors=jsonk("get","daemonsets,deployments,statefulsets,nodesets","-A")
+ save("selector-inventory.json",selectors)
+ target_selector=nodeset["spec"]["template"]["spec"]["nodeSelector"].get(key)==cfg["slurmd_selector_value"]
+ isolated=all(key not in json.dumps(item["spec"]) for item in selectors["items"] if item["metadata"]["uid"]!=cfg["nodeset_uid"])
+
+ pods=jsonk("-n","beagle","get","pods")["items"];reports=[]
+ for n in NODES:
+  found=[p for p in pods if p["spec"].get("nodeName")==n and p["metadata"]["name"].startswith("pireus-spark-host-fence-") and not p["metadata"].get("deletionTimestamp")]
+  assert len(found)==1
+  raw=kube("-n","beagle","exec",found[0]["metadata"]["name"],"-c","host-fence","--","bash","/fence/host-fence.sh","report")
+  save(n+".host-report.txt",raw);reports.append(fields(raw))
+ ann=lease["metadata"]["annotations"];epoch=ann[cfg["epoch_annotation"]]
+ expiry=datetime.datetime.fromisoformat(lease["spec"]["renewTime"].replace("Z","+00:00")).timestamp()+lease["spec"]["leaseDurationSeconds"]
+ checks=[
+  all(p["metadata"]["uid"]==cfg["node_"+str(i)+"_uid"] for i,p in enumerate(nodes)),
+  nodeset["metadata"]["uid"]==cfg["nodeset_uid"],
+  verified.startswith("SPARK_PAIR_VERIFY_PASS") and target_selector and isolated,
+  ann[cfg["state_annotation"]]=="RECOVERY_REQUIRED" and frame["state"]=="RECOVERY_REQUIRED",
+  lease["spec"]["holderIdentity"]==a.holder,
+  expiry-time.time()>60,
+  frame["epoch"]==epoch and frame["observed_epoch"]==epoch and all(r["grant_epoch"]==epoch and r["grant_owner"]==a.holder for r in reports),
+  all(r["lease_uid"]==lease["metadata"]["uid"] for r in reports),
+  all(r["grant_mode"]=="FENCED" and r["grant_valid"]=="0" for r in reports),
+  all(r["source_sha256"]==frozen["authority_sha256"] and r["freeze_sha256"]==lock["arbiter_freeze_sha256"] for r in reports),
+  all(r["watchdog"]=="1" and 0<=int(r["reported_monotonic"])-int(r["watchdog_monotonic"])<=55 for r in reports),
+  all(r["device_barrier"]=="1" and r["device_barrier_source_sha256"]==frozen["device_barrier_source_sha256"] for r in reports),
+  all(r["protected"]=="1" for r in reports),
+  all(all(r[k]=="1" for k in ("inventory","services","restarts","docker_claims")) for r in reports),
+  int(frame["slurm_mask"]),
+  all(r["consumers"]=="1" for r in reports),
+ ]
+ values=[1]+[int(v) for v in checks]+[int(r["mem_available_mb"]) for r in reports]
+ input_path=save("facts.v1"," ".join(map(str,values))+"\n")
+ decision=subprocess.run([str(a.engine.resolve()),str(input_path.resolve())],capture_output=True,text=True,timeout=60)
+ save("decision.json",decision.stdout);save("decision.stderr.txt",decision.stderr)
+ receipt=json.loads(decision.stdout)
+ assert receipt["authority"]=="Sounio" and receipt["action"]=="DETACH_FENCED_WORKERS"
+ assert receipt["gpu_grant"] is False and receipt["resume"] is False and receipt["claim_ready"] is False
+ assert receipt["minimum_free_memory_mb"]==32768
+ save("custody.json",dict(facts_sha256=sha(input_path.read_bytes()),engine_sha256=lock["executable_sha256"],apply=a.apply,contract=lock))
+ if decision.returncode or receipt["decision"]!="ALLOW":raise ValueError("Sounio refused recovery detachment")
+ if not a.apply:print("RECOVERY_DETACH_REVIEWABLE_ALLOW");return
+ # Re-observe through the same native gate immediately before each node effect.
+ applied=[]
+ try:
+  for index in range(2):
+   fresh=a.evidence/("recheck-"+str(index))
+   subprocess.run([sys.executable,str(Path(__file__).resolve()),"--engine",str(a.engine.resolve()),
+     "--arbiter-root",str(a.arbiter_root.resolve()),"--holder",a.holder,
+     "--evidence",str(fresh.resolve())],check=True,timeout=240)
+   refreshed=json.loads((fresh/"lease.json").read_text())
+   assert refreshed["metadata"]["resourceVersion"]==lease["metadata"]["resourceVersion"],"lease changed during re-observation"
+   node=json.loads((fresh/"nodes.json").read_text())[index]
+   current=jsonk("-n","beagle","get","lease","pireus-spark-pair")
+   assert current["metadata"]["resourceVersion"]==lease["metadata"]["resourceVersion"],"lease changed before effect"
+   assert expiry-time.time()>15,"lease too near expiry"
+   assert node["metadata"]["labels"].get(key)==cfg["slurmd_selector_value"]
+   escaped=key.replace("~","~0").replace("/","~1")
+   patch=[dict(op="test",path="/metadata/uid",value=node["metadata"]["uid"]),
+     dict(op="test",path="/metadata/resourceVersion",value=node["metadata"]["resourceVersion"]),
+     dict(op="test",path="/metadata/labels/"+escaped,value=cfg["slurmd_selector_value"]),
+     dict(op="remove",path="/metadata/labels/"+escaped)]
+   save(node["metadata"]["name"]+".patch.json",patch)
+   result=kube("patch","node",node["metadata"]["name"],"--type=json","-p",json.dumps(patch))
+   save(node["metadata"]["name"]+".effect.txt",result)
+   applied.append(node["metadata"]["name"])
+  post_nodes=[jsonk("get","node",n) for n in NODES]
+  post_lease=jsonk("-n","beagle","get","lease","pireus-spark-pair")
+  save("post-nodes.json",post_nodes);save("post-lease.json",post_lease)
+  assert all(key not in node["metadata"]["labels"] for node in post_nodes)
+  assert post_lease["metadata"]["resourceVersion"]==lease["metadata"]["resourceVersion"]
+  for n in NODES:
+   fresh_pods=jsonk("-n","beagle","get","pods")["items"]
+   found=[p for p in fresh_pods if p["spec"].get("nodeName")==n and p["metadata"]["name"].startswith("pireus-spark-host-fence-") and not p["metadata"].get("deletionTimestamp")]
+   assert len(found)==1
+   raw=kube("-n","beagle","exec",found[0]["metadata"]["name"],"-c","host-fence","--","bash","/fence/host-fence.sh","report")
+   save(n+".post-host.txt",raw);r=fields(raw)
+   assert r["grant_mode"]=="FENCED" and r["grant_valid"]=="0"
+   assert all(r[k]=="1" for k in ("watchdog","device_barrier","protected"))
+  save("effect-status.json",dict(status="DETACHED_FENCED",applied=applied,pair_atomic=False))
+ except BaseException:
+  save("effect-status.json",dict(status="PARTIAL_OR_UNVERIFIED" if applied else "NOT_APPLIED",applied=applied,pair_atomic=False))
+  raise
+
+ print("RECOVERY_DETACH_APPLIED; GPU remains fenced; resume only through canonical arbiter")
+if __name__=="__main__":main()
+
+FILE recovery-detach-lock.json
+{
+  "schema": 1,
+  "action": "DETACH_FENCED_WORKERS",
+  "executable_sha256": "cf0bc8c57e6e16ae35eab3718bf08ab95291b9cc9a7a1c6b11fa77b31443f6fc",
+  "compiler_sha256": "859d37dd115c9f51a3182ff3fcb1a6c72efcd5b65547fe609d49fa2b97cb67a7",
+  "arbiter_freeze_sha256": "14cec6d7126a8aea9317451e35ab31adb1c8d35270c7dfa1c3f9cbf4980edf45",
+  "sources": {
+    "recovery_detach.sio": "768c44a2cccdc0cc9cec72af1f2ebc831fa8e9e5b3e00ab77b039f5a0dc84d27",
+    "recovery_detach.py": "6e5c0c2e8ab8b39b1a2a445a28a5b30265bbb2abbd1f5c6090ed5c49a875fdcb"
+  },
+  "gpu_grant": false,
+  "minimum_free_memory_mb": 32768
+}
+
+FILE test_recovery_detach.py
+#!/usr/bin/env python3
+"""Refusal controls for the bounded native recovery decision."""
+import json,subprocess,sys,tempfile
+from pathlib import Path
+def main():
+ engine=Path(sys.argv[1]).resolve()
+ base=[1]+[1]*16+[32768,32768];base[15]=30
+ with tempfile.TemporaryDirectory() as directory:
+  path=Path(directory)/"facts"
+  def run(values,expected,raw=None):
+   path.write_text(raw if raw is not None else " ".join(map(str,values))+"\n")
+   result=subprocess.run([str(engine),str(path)],capture_output=True,text=True,timeout=30)
+   assert result.returncode==expected,(values,result.returncode,result.stdout)
+   if expected!=2:
+    r=json.loads(result.stdout)
+    assert r["authority"]=="Sounio" and r["decision"]==("ALLOW" if expected==0 else "REFUSE")
+    assert r["gpu_grant"] is False and r["resume"] is False and r["minimum_free_memory_mb"]==32768
+  run(base,0)
+  for i in range(1,17):
+   if i==15:
+    for bit in (2,4,8,16):
+     values=base.copy();values[i]=30-bit;run(values,1)
+   else:
+    values=base.copy();values[i]=0;run(values,1)
+    values[i]=2;run(values,2)
+  for i in (17,18):
+   values=base.copy();values[i]=32767;run(values,1)
+  for raw in ("", " ".join(map(str,base)), " ".join(map(str,base))+"\nextra",
+              " ".join(map(str,base))+"\n\n", "-1 "+"1 "*17+"32768\n"):
+   run(base,2,raw)
+  values=base.copy();values[15]=512;run(values,2)
+ print("PIREUS_RECOVERY_DETACH_CONTROLS_PASS; no cluster mutation")
+if __name__=="__main__":main()

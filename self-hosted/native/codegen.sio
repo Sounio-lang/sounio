@@ -7,7 +7,7 @@
 module native::codegen
 
 use parser::ast::{Name}
-use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_MAX_FUNCS, IR_MAX_STRINGS, BSS_BASE_LINUX, IR_STRATEGY_BSS_GLOBAL}
+use ir::ir::{IrModule, IrFunction, IrInstr, IrOpcode, IR_MAX_FUNCS, IR_MAX_STRINGS, IR_MAX_VREGS, ir_reg_count_is_valid, ir_function_regs_are_valid, BSS_BASE_LINUX, IR_STRATEGY_BSS_GLOBAL}
 use native::encode::*
 use native::aarch64::*
 use native::elf::*
@@ -66,8 +66,6 @@ pub fn ERR_OK() -> i64 { 0 }
 pub fn ERR_BACKEND_NOT_IMPLEMENTED() -> i64 { 1 }
 fn ERR_INVALID_TARGET() -> i64 { 2 }
 fn ERR_INVALID_MATRIX() -> i64 { 3 }
-fn ERR_TRACE_WRITE_FAILED() -> i64 { 4 }
-fn ERR_TARGET_FLAGS_REQUIRE_NATIVE() -> i64 { 5 }
 
 fn TARGET_SOURCE_UNKNOWN() -> i64 { 0 }
 fn TARGET_SOURCE_EXPLICIT() -> i64 { 1 }
@@ -76,22 +74,22 @@ fn TARGET_SOURCE_ENV_OVERRIDE() -> i64 { 3 }
 fn TARGET_SOURCE_FALLBACK() -> i64 { 4 }
 
 pub struct NativeTargetSpec {
-    arch_id: i64,
-    os_id: i64,
-    matrix_mode: i64,
-    source_id: i64,
-    requested_target: string,
-    resolved_target: string,
-    fallback_reason: string,
+    pub arch_id: i64,
+    pub os_id: i64,
+    pub matrix_mode: i64,
+    pub source_id: i64,
+    pub requested_target: string,
+    pub resolved_target: string,
+    pub fallback_reason: string,
 }
 
 pub struct NativeCompileResult {
-    ok: bool,
-    bytes: [i8; 131072],
-    len: i64,
-    format_id: i64,
-    error_code: i64,
-    error_msg: string,
+    pub ok: bool,
+    pub bytes: [i8; 131072],
+    pub len: i64,
+    pub format_id: i64,
+    pub error_code: i64,
+    pub error_msg: string,
 }
 
 struct NativeV2RuntimeContextLayout {
@@ -169,7 +167,7 @@ fn NATIVE_V2_SAFEPOINT_RET() -> i64 { 2 }
 fn native_v2_runtime_context_layout() -> NativeV2RuntimeContextLayout {
     NativeV2RuntimeContextLayout {
         language_visible: true,
-        tracing_gc: true,
+        tracing_gc: false,  // UNWIRED: no tracing collector on live path
         // Conservative, not precise: root_temp_counts == temp_count below treats
         // every live temp as a GC root instead of deriving the live root set from
         // the regalloc's actual liveness. See scripts/ci/precise_stack_maps_honesty_gate.sh.
@@ -275,7 +273,7 @@ fn native_v2_count_ir_instrs(module: &IrModule) -> i64 with Mut, Panic, Div {
     var total: i64 = 0
     var i: i64 = 0
     while i < module.fn_count {
-        total = total + module.functions[i as usize].instr_count
+        total = total + ir_fn_get(module, i as usize).instr_count
         i = i + 1
     }
     total
@@ -301,7 +299,7 @@ fn native_v2_count_machine_module_safepoints(module: MachineModule) -> i64 with 
     var total: i64 = 0
     var i: i64 = 0
     while i < module.fn_count {
-        total = total + native_v2_count_machine_function_safepoints(module.functions[i as usize])
+        total = total + native_v2_count_machine_function_safepoints(machine_module_function_get(&module, i))
         i = i + 1
     }
     total
@@ -497,7 +495,7 @@ fn native_v2_write_contract(path: string, module: &IrModule, target_spec: Native
     buf = p18a.0; p = p18a.1
     let p18b = native_v2_append_named_json_bool(buf, p, "descriptor_tables", true, true)
     buf = p18b.0; p = p18b.1
-    let p18c = native_v2_append_named_json_bool(buf, p, "pin_registry_ready", true, true)
+    let p18c = native_v2_append_named_json_bool(buf, p, "pin_registry_ready", false, true)
     buf = p18c.0; p = p18c.1
     let p19 = native_v2_append_runtime_group_array(buf, p)
     buf = p19.0; p = p19.1
@@ -574,19 +572,19 @@ fn native_v2_write_contract(path: string, module: &IrModule, target_spec: Native
     buf = p33gd.0; p = p33gd.1
     let p33ge = native_v2_append_named_json_bool(buf, p, "descriptor_tables_embedded", runtime_metadata_active, true)
     buf = p33ge.0; p = p33ge.1
-    let p33gf = native_v2_append_named_json_bool(buf, p, "pin_registry_ready", true, true)
+    let p33gf = native_v2_append_named_json_bool(buf, p, "pin_registry_ready", false, true)
     buf = p33gf.0; p = p33gf.1
-    let p33gg = native_v2_append_named_json_bool(buf, p, "gc_mark_compact_model", true, true)
+    let p33gg = native_v2_append_named_json_bool(buf, p, "gc_mark_compact_model", false, true)
     buf = p33gg.0; p = p33gg.1
-    let p33gh = native_v2_append_named_json_bool(buf, p, "gc_precise_descriptor_scanning", true, true)
+    let p33gh = native_v2_append_named_json_bool(buf, p, "gc_precise_descriptor_scanning", false, true)
     buf = p33gh.0; p = p33gh.1
-    let p33gi = native_v2_append_named_json_bool(buf, p, "gc_handle_relocation_model", true, true)
+    let p33gi = native_v2_append_named_json_bool(buf, p, "gc_handle_relocation_model", false, true)
     buf = p33gi.0; p = p33gi.1
-    let p33gj = native_v2_append_named_json_bool(buf, p, "ffi_pinning_model", true, true)
+    let p33gj = native_v2_append_named_json_bool(buf, p, "ffi_pinning_model", false, true)
     buf = p33gj.0; p = p33gj.1
-    let p33gk = native_v2_append_named_json_bool(buf, p, "gc_runtime_retry_active", runtime_metadata_active, true)
+    let p33gk = native_v2_append_named_json_bool(buf, p, "gc_runtime_retry_active", false, true)
     buf = p33gk.0; p = p33gk.1
-    let p33gl = native_v2_append_named_json_bool(buf, p, "gc_current_frame_root_scan", runtime_metadata_active, true)
+    let p33gl = native_v2_append_named_json_bool(buf, p, "gc_current_frame_root_scan", false, true)
     buf = p33gl.0; p = p33gl.1
     let p33h = native_v2_append_named_json_bool(buf, p, "heterogeneous_shared", machine.heterogeneous_shared, false)
     buf = p33h.0; p = p33h.1
@@ -946,6 +944,24 @@ pub fn name_is_print(n: Name) -> bool with Mut, Panic, Div {
 
 // M4: argv and string builtins
 pub fn name_is_get_arg_count(n: Name) -> bool with Mut, Panic, Div {
+    // Source-level spelling is "arg_count"; retain the older
+    // "get_arg_count" backend alias for hand-built IR witnesses.
+    // Synced 2026-08-18 from codegen_x86_linux.sio (L1217-1247, commit
+    // f664766e134, 2026-07-11) where the 9-char alias was deliberately
+    // introduced; codegen.sio was missed in that propagation.
+    // "arg_count" = 9 chars
+    if n.len == 9 {
+        if n.buf[0] != 97 as i8 { return false }      // 'a'
+        if n.buf[1] != 114 as i8 { return false }     // 'r'
+        if n.buf[2] != 103 as i8 { return false }     // 'g'
+        if n.buf[3] != 95 as i8 { return false }      // '_'
+        if n.buf[4] != 99 as i8 { return false }      // 'c'
+        if n.buf[5] != 111 as i8 { return false }     // 'o'
+        if n.buf[6] != 117 as i8 { return false }     // 'u'
+        if n.buf[7] != 110 as i8 { return false }     // 'n'
+        if n.buf[8] != 116 as i8 { return false }     // 't'
+        return true
+    }
     // "get_arg_count" = 13 chars
     if n.len != 13 { return false }
     if n.buf[0] != 103 as i8 { return false }     // 'g'
@@ -1014,6 +1030,24 @@ pub fn name_is_str_slice(n: Name) -> bool with Mut, Panic, Div {
     if n.buf[6] != 105 as i8 { return false }     // 'i'
     if n.buf[7] != 99 as i8 { return false }      // 'c'
     if n.buf[8] != 101 as i8 { return false }     // 'e'
+    true
+}
+
+// #2244: the arity-tagged 3-argument spelling. See emit_builtin_str_slice3.
+pub fn name_is_str_slice3(n: Name) -> bool with Mut, Panic, Div {
+    // "str_slice.3" = 11 chars
+    if n.len != 11 { return false }
+    if n.buf[0] != 115 as i8 { return false }
+    if n.buf[1] != 116 as i8 { return false }
+    if n.buf[2] != 114 as i8 { return false }
+    if n.buf[3] != 95 as i8 { return false }
+    if n.buf[4] != 115 as i8 { return false }
+    if n.buf[5] != 108 as i8 { return false }
+    if n.buf[6] != 105 as i8 { return false }
+    if n.buf[7] != 99 as i8 { return false }
+    if n.buf[8] != 101 as i8 { return false }
+    if n.buf[9] != 46 as i8 { return false }
+    if n.buf[10] != 51 as i8 { return false }
     true
 }
 
@@ -1232,15 +1266,23 @@ fn nc_emit_u64_le(nc: &! NativeCompiler, val: i64) with Mut, Panic, Div {
 }
 
 fn nc_emit_mov_reg_imm32(nc: &! NativeCompiler, reg: i64, val: i64) with Mut, Panic, Div {
-    nc_emit_byte(nc, 0x48)
+    if reg >= 8 {
+        nc_emit_byte(nc, 0x49)
+    } else {
+        nc_emit_byte(nc, 0x48)
+    }
     nc_emit_byte(nc, 0xc7)
-    nc_emit_byte(nc, modrm_rm_imm(reg))
+    nc_emit_byte(nc, modrm_rm_imm(reg & 7))
     nc_emit_u32_le(nc, val)
 }
 
 fn nc_emit_mov_reg_imm64(nc: &! NativeCompiler, reg: i64, val: i64) with Mut, Panic, Div {
-    nc_emit_byte(nc, 0x48)
-    nc_emit_byte(nc, 0xb8 + reg)
+    if reg >= 8 {
+        nc_emit_byte(nc, 0x49)
+    } else {
+        nc_emit_byte(nc, 0x48)
+    }
+    nc_emit_byte(nc, 0xb8 + (reg & 7))
     nc_emit_u64_le(nc, val)
 }
 
@@ -2137,7 +2179,8 @@ fn emit_builtin_str_eq(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Di
     c
 }
 
-// str_slice(s: *u8, start: i64) -> *u8
+// str_slice(s: *u8, start: i64) -> *u8 -- the 2-argument spelling only.
+// The 3-argument spelling is retagged to str_slice.3 (emit_builtin_str_slice3).
 // Returns s + start (pointer arithmetic — string is null-terminated)
 fn emit_builtin_str_slice(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
@@ -2148,6 +2191,109 @@ fn emit_builtin_str_slice(nc: NativeCompiler) -> NativeCompiler with Mut, Panic,
     c.code = emit_ret(c.code)
     c
 }
+
+// str_slice.3(s: *u8, start: i64, end: i64) -> *u8 -- the 3-argument spelling.
+// Returns a fresh NUL-terminated copy of s[start, end). #2244: the single
+// str_slice stub took only (s, start) and returned s + start, so every 3-arg
+// call site silently got the whole suffix. lean_single has always emitted this
+// range copy (emit_str_slice_range_slots_x86), dispatched on arity at parse time.
+//
+// rdi = s, rsi = start, rdx = end. len = max(end - start, 0), and the copy also
+// stops at the source NUL, so an out-of-range end yields the rest of the string
+// instead of reading past it. lean_single clamps neither: a negative length
+// there hands rep movsb a huge count.
+fn emit_builtin_str_slice3(nc: NativeCompiler) -> NativeCompiler with Mut, Panic, Div {
+    var c = nc
+
+    // Prologue. rbx is callee-saved and the RuntimeContext helpers below use it.
+    c.code = emit_push_rbp(c.code)
+    c.code = emit_mov_rbp_rsp(c.code)
+    c.code = emit_sub_rsp_imm32(c.code, 48)
+    c.code = emit_store_reg_rbp_disp32(c.code, 0 - 32, 3)
+
+    // [rbp-8] = s + start (copy source)
+    c.code = emit_mov_reg_reg(c.code, 0, 7)              // mov rax, rdi
+    c.code = emit_add_reg_reg(c.code, 0, 6)              // add rax, rsi
+    c.code = emit_store_rax_rbp_disp32(c.code, 0 - 8)
+
+    // [rbp-16] = max(end - start, 0)
+    c.code = emit_xor_rcx_rcx(c.code)                    // rcx = 0
+    c.code = emit_mov_reg_reg(c.code, 0, 2)              // mov rax, rdx (end)
+    c.code = emit_sub_reg_reg(c.code, 0, 6)              // sub rax, rsi (start)
+    var cm = c.code                                      // cmovs rax, rcx
+    cm = emit_byte(cm, 0x48)
+    cm = emit_byte(cm, 0x0f)
+    cm = emit_byte(cm, 0x48)
+    cm = emit_byte(cm, 0xc1)
+    c.code = cm
+    c.code = emit_store_rax_rbp_disp32(c.code, 0 - 16)
+
+    // Allocate len + 1 from RuntimeContext.heap_cursor; [rbp-24] = result
+    c = emit_load_runtime_context_field_rax(c, runtime_context_field_heap_cursor())
+    c.code = emit_store_rax_rbp_disp32(c.code, 0 - 24)
+    c.code = emit_load_rbp_disp32_rax(c.code, 0 - 16)    // rax = len
+    var ab = c.code                                      // add rax, 1
+    ab = emit_byte(ab, 0x48)
+    ab = emit_byte(ab, 0x83)
+    ab = emit_byte(ab, 0xc0)
+    ab = emit_byte(ab, 0x01)
+    c.code = ab
+    c.code = emit_mov_rcx_rax(c.code)                    // rcx = total
+    c = emit_load_runtime_context_field_rax(c, runtime_context_field_heap_cursor())
+    c.code = emit_add_reg_reg(c.code, 0, 1)              // rax = cursor + total
+    c = emit_store_rax_runtime_context_field(c, runtime_context_field_heap_cursor())
+
+    // rdi = source, rsi = dest, rcx = bytes remaining
+    c.code = emit_load_rbp_disp32_rax(c.code, 0 - 8)
+    c.code = emit_mov_rdi_rax(c.code)
+    c.code = emit_load_rbp_disp32_rax(c.code, 0 - 24)
+    c.code = emit_mov_rsi_rax(c.code)
+    c.code = emit_load_rbp_disp32_rax(c.code, 0 - 16)
+    c.code = emit_mov_rcx_rax(c.code)
+
+    // copy_loop, byte offsets from the top of the loop:
+    //   0:  test rcx, rcx          3   (48 85 c9)
+    //   3:  jz done                2   rel8 = 29 - 5  = 24
+    //   5:  movzx rax, byte [rdi]  4
+    //   9:  test al, al            2
+    //   11: jz done                2   rel8 = 29 - 13 = 16
+    //   13: mov rdx, rax           3
+    //   16: mov [rsi], dl          2
+    //   18: inc rdi                3
+    //   21: inc rsi                3
+    //   24: dec rcx                3   (48 ff c9)
+    //   27: jmp copy_loop          2   rel8 = 0 - 29
+    //   29: done
+    var lp = c.code                                      // test rcx, rcx
+    lp = emit_byte(lp, 0x48)
+    lp = emit_byte(lp, 0x85)
+    lp = emit_byte(lp, 0xc9)
+    c.code = lp
+    c.code = emit_jz_rel8(c.code, 24)
+    c.code = emit_movzx_rax_byte_rdi(c.code)
+    c.code = emit_test_al_al(c.code)
+    c.code = emit_jz_rel8(c.code, 16)
+    c.code = emit_mov_reg_reg(c.code, 2, 0)              // mov rdx, rax
+    c.code = emit_mov_byte_mem_rsi_dl(c.code)
+    c.code = emit_inc_rdi(c.code)
+    c.code = emit_inc_rsi(c.code)
+    var dc = c.code                                      // dec rcx
+    dc = emit_byte(dc, 0x48)
+    dc = emit_byte(dc, 0xff)
+    dc = emit_byte(dc, 0xc9)
+    c.code = dc
+    c.code = emit_jmp_rel8(c.code, 0 - 29)
+
+    // done: NUL-terminate, restore rbx, return the result pointer
+    c.code = emit_mov_byte_mem_rsi_imm8(c.code, 0)
+    c.code = emit_load_rbp_disp32_rbx(c.code, 0 - 32)
+    c.code = emit_load_rbp_disp32_rax(c.code, 0 - 24)
+    c.code = emit_mov_rsp_rbp(c.code)
+    c.code = emit_pop_rbp(c.code)
+    c.code = emit_ret(c.code)
+    c
+}
+
 
 // starts_with(s: *u8, prefix: *u8) -> i64 (1 if starts with, 0 if not)
 // Compares prefix against beginning of s until prefix reaches null.
@@ -3210,7 +3356,7 @@ fn compile_module(nc: NativeCompiler, module: &IrModule) -> NativeCompiler with 
 
     var fi = 0
     while fi < module.fn_count {
-        let fn_slot = module.functions[fi as usize]
+        let fn_slot = ir_fn_get(module, fi as usize)
         if fn_slot.compile_strategy == 99 {
             c.bss_total_size = c.bss_total_size + 8
         }
@@ -3225,7 +3371,7 @@ fn compile_module(nc: NativeCompiler, module: &IrModule) -> NativeCompiler with 
 fn find_main_index(module: &IrModule) -> i64 with Mut, Panic, Div {
     var i = 0
     while i < module.fn_count {
-        if name_is_main(module.functions[i as usize].name) {
+        if name_is_main(ir_fn_get(module, i as usize).name) {
             return i
         }
         i = i + 1
@@ -3257,6 +3403,23 @@ pub fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) 
     c.fn_offsets[fn_index as usize] = c.code.len
     c.symbols = symbol_data_add_name(c.symbols, fn_index, func.name.buf, func.name.len)
 
+    // Validate executable input before builtin dispatch or any optimization.
+    // Bodyless builtin/extern signatures intentionally retain parameter
+    // metadata without allocated vregs, so only the count ceiling applies to
+    // those stubs. Every function with a body must satisfy the full register
+    // contract before any consumer can observe or transform it.
+    if !ir_reg_count_is_valid(func.reg_count) {
+        c.ir_vreg_overflow = true
+        c.ir_vreg_overflow_needed = func.reg_count
+        c.ir_vreg_overflow_limit = IR_MAX_VREGS
+        return c
+    }
+    if func.instr_count != 0 && !ir_function_regs_are_valid(&func) {
+        c.ir_validation_failed = true
+        c.ir_validation_reg_count = func.reg_count
+        return c
+    }
+
     // Builtin dispatch — emit hand-coded assembly, skip normal IR lowering
     // M3: print builtins
     if name_is_print_int(func.name) { return emit_builtin_print_int(c) }
@@ -3268,6 +3431,7 @@ pub fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) 
     if name_is_str_len(func.name) { return emit_builtin_str_len(c) }
     if name_is_str_eq(func.name) { return emit_builtin_str_eq(c) }
     if name_is_str_slice(func.name) { return emit_builtin_str_slice(c) }
+    if name_is_str_slice3(func.name) { return emit_builtin_str_slice3(c) }
     if name_is_starts_with(func.name) { return emit_builtin_starts_with(c) }
     if name_is_str_concat(func.name) { return emit_builtin_str_concat(c) }
     // M5: file I/O builtins
@@ -3292,6 +3456,25 @@ pub fn compile_ir_function(nc: NativeCompiler, func: IrFunction, fn_index: i64) 
     var effective_func = func
     if func.compile_strategy == IR_STRATEGY_INSTRUMENTED {
         effective_func = ir_opt_apply_strategy(func)
+    }
+    if !ir_function_regs_are_valid(&effective_func) {
+        if !ir_reg_count_is_valid(effective_func.reg_count) {
+            c.ir_vreg_overflow = true
+            c.ir_vreg_overflow_needed = effective_func.reg_count
+            c.ir_vreg_overflow_limit = IR_MAX_VREGS
+        } else {
+            c.ir_validation_failed = true
+            c.ir_validation_reg_count = effective_func.reg_count
+        }
+        return c
+    }
+    // This legacy fallback still carries 2048-entry float classification
+    // tables. Keep it fail-closed until those remaining accesses are migrated.
+    if effective_func.reg_count > NC_MAX_VREGS {
+        c.ir_vreg_overflow = true
+        c.ir_vreg_overflow_needed = effective_func.reg_count
+        c.ir_vreg_overflow_limit = NC_MAX_VREGS
+        return c
     }
 
     let has_control_flow = native_func_has_control_flow(effective_func)
@@ -3345,8 +3528,12 @@ fn native_v2_local_frame_size(stack_slots: i64, spill_count: i64) -> i64 with Mu
 
 fn native_v2_load_temp_to_rax(nc: NativeCompiler, temp: i64) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
-    if temp < 0 || temp >= NC_MAX_VREGS {
+    if temp < 0 {
         c.code = emit_xor_rax_rax(c.code)
+        return c
+    }
+    if temp >= NC_MAX_VREGS {
+        c.code = emit_load_rbp_disp32_rax(c.code, ir_slot_offset(temp))
         return c
     }
     let preg = c.vreg_to_preg[temp as usize]
@@ -3365,7 +3552,11 @@ fn native_v2_load_temp_to_rax(nc: NativeCompiler, temp: i64) -> NativeCompiler w
 
 fn native_v2_store_rax_to_temp(nc: NativeCompiler, temp: i64) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
-    if temp < 0 || temp >= NC_MAX_VREGS {
+    if temp < 0 {
+        return c
+    }
+    if temp >= NC_MAX_VREGS {
+        c.code = emit_store_rax_rbp_disp32(c.code, ir_slot_offset(temp))
         return c
     }
     let preg = c.vreg_to_preg[temp as usize]
@@ -3509,7 +3700,7 @@ fn native_v2_run_machine_regalloc_ref_mut(nc: &! NativeCompiler, func: &MachineF
 fn native_v2_used_allocatable_preg_mask_ref(nc: &NativeCompiler, reg_count: i64) -> i64 {
     var mask: i64 = 0
     var v: i64 = 0
-    while v < reg_count {
+    while v < reg_count && v < NC_MAX_VREGS {
         mask = mask | x86_allocatable_mask_for_reg((*nc).vreg_to_preg[v as usize])
         v = v + 1
     }
@@ -3524,12 +3715,18 @@ fn native_compiler_set_fn_offset(nc: &! NativeCompiler, fn_index: i64, offset: i
     (*nc).fn_offsets = offsets
 }
 
-fn native_v2_emit_unary_code(nc: NativeCompiler, op: UnaryOp) -> NativeCompiler with Mut, Panic, Div {
+fn native_v2_emit_unary_code(nc: NativeCompiler, op: UnaryOp, is_float: bool) -> NativeCompiler with Mut, Panic, Div {
     var c = nc
     if op == UnaryOp::OpNeg {
-        c.code = emit_neg_rax(c.code)
+        if is_float {
+            c.code = emit_btc_rax_63(c.code)
+        } else {
+            c.code = emit_neg_rax(c.code)
+        }
     } else if op == UnaryOp::OpNot {
         c.code = emit_not_bool_rax(c.code)
+    } else if op == UnaryOp::OpBitNot {
+        c.code = emit_not_rax(c.code)
     } else if op == UnaryOp::OpDeref {
         c.code = emit_load_rax_mem_rax(c.code)
     }
@@ -3594,7 +3791,11 @@ fn native_v2_emit_machine_instr(nc: NativeCompiler, instr: MachineInstr) -> Nati
 
     if instr.opcode == MIR_OP_UNARY {
         c = native_v2_load_temp_to_rax(c, instr.src1.value)
-        c = native_v2_emit_unary_code(c, instr.un_op)
+        let is_float = if instr.aux.value == 1 || (instr.src1.value >= 0 && instr.src1.value < NC_MAX_VREGS && c.is_float_reg[instr.src1.value as usize] == 1) { true } else { false }
+        c = native_v2_emit_unary_code(c, instr.un_op, is_float)
+        if is_float && instr.dst.value >= 0 && instr.dst.value < NC_MAX_VREGS {
+            c.is_float_reg[instr.dst.value as usize] = 1
+        }
         return native_v2_store_rax_to_temp(c, instr.dst.value)
     }
 
@@ -3948,6 +4149,13 @@ fn native_v2_emit_machine_function(nc: NativeCompiler, func: MachineFunction, fn
 }
 
 fn native_v2_emit_machine_function_mut(nc: &! NativeCompiler, func: MachineFunction, fn_index: i64, fn_offset: i64) with Mut, Panic, Div {
+    var fi: i64 = 0
+    while fi < MIR_MAX_FLOAT_SLOTS && fi < NC_MAX_VREGS {
+        if func.is_float_slot[fi as usize] == 1 {
+            (*nc).is_float_reg[fi as usize] = 1
+        }
+        fi = fi + 1
+    }
     var i: i64 = 0
     while i < func.blocks[0].instr_count {
         let instr = func.blocks[0].instrs[i as usize]
@@ -3961,6 +4169,13 @@ fn native_v2_emit_machine_function_mut(nc: &! NativeCompiler, func: MachineFunct
 }
 
 fn native_v2_emit_machine_function_ref_mut(nc: &! NativeCompiler, func: &MachineFunction, fn_index: i64, fn_offset: i64) with Mut, Panic, Div {
+    var fi: i64 = 0
+    while fi < MIR_MAX_FLOAT_SLOTS && fi < NC_MAX_VREGS {
+        if (*func).is_float_slot[fi as usize] == 1 {
+            (*nc).is_float_reg[fi as usize] = 1
+        }
+        fi = fi + 1
+    }
     var i: i64 = 0
     while i < (*func).blocks[0].instr_count {
         let instr = (*func).blocks[0].instrs[i as usize]
@@ -3973,7 +4188,7 @@ fn native_v2_emit_machine_function_ref_mut(nc: &! NativeCompiler, func: &Machine
     }
 }
 
-fn native_v2_builtin_id_for_name(name: Name) -> i64 {
+fn native_v2_builtin_id_for_name(name: Name) -> i64 with Mut, Panic, Div {
     if name_is_print_int(name) { return 1 }
     if name_is_print_char(name) { return 2 }
     if name_is_print(name) { return 3 }
@@ -3982,6 +4197,7 @@ fn native_v2_builtin_id_for_name(name: Name) -> i64 {
     if name_is_str_len(name) { return 6 }
     if name_is_str_eq(name) { return 7 }
     if name_is_str_slice(name) { return 8 }
+    if name_is_str_slice3(name) { return 54 }
     if name_is_starts_with(name) { return 9 }
     if name_is_str_concat(name) { return 10 }
     if name_is_read_file(name) { return 11 }
@@ -4005,6 +4221,7 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
     if builtin_id == 6 { (*nc) = emit_builtin_str_len((*nc)); return }
     if builtin_id == 7 { (*nc) = emit_builtin_str_eq((*nc)); return }
     if builtin_id == 8 { (*nc) = emit_builtin_str_slice((*nc)); return }
+    if builtin_id == 54 { (*nc) = emit_builtin_str_slice3((*nc)); return }
     if builtin_id == 9 { (*nc) = emit_builtin_starts_with((*nc)); return }
     if builtin_id == 10 { (*nc) = emit_builtin_str_concat((*nc)); return }
     if builtin_id == 11 { (*nc) = emit_builtin_read_file((*nc)); return }
@@ -4020,6 +4237,20 @@ fn native_v2_emit_builtin_by_id_into(nc: &! NativeCompiler, builtin_id: i64) wit
 
 pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func: MachineFunction, fn_index: i64) -> NativeCompiler with Mut, Panic, Div, Alloc {
     var c = nc
+    // Bodyless builtin/extern stubs retain signature metadata without an
+    // allocated register body. Always enforce the count ceiling, but require
+    // full register structure only when executable IR is present.
+    if !ir_reg_count_is_valid(func.reg_count) || (func.instr_count != 0 && !ir_function_regs_are_valid(&func)) {
+        if !ir_reg_count_is_valid(func.reg_count) {
+            c.ir_vreg_overflow = true
+            c.ir_vreg_overflow_needed = func.reg_count
+            c.ir_vreg_overflow_limit = IR_MAX_VREGS
+        } else {
+            c.ir_validation_failed = true
+            c.ir_validation_reg_count = func.reg_count
+        }
+        return c
+    }
 
     // --- reset_function_state (inlined, no &!) ---
     c.return_jump_count = 0
@@ -4056,6 +4287,7 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
     if name_is_str_len(func.name) { return emit_builtin_str_len(c) }
     if name_is_str_eq(func.name) { return emit_builtin_str_eq(c) }
     if name_is_str_slice(func.name) { return emit_builtin_str_slice(c) }
+    if name_is_str_slice3(func.name) { return emit_builtin_str_slice3(c) }
     if name_is_starts_with(func.name) { return emit_builtin_starts_with(c) }
     if name_is_str_concat(func.name) { return emit_builtin_str_concat(c) }
     if name_is_read_file(func.name) { return emit_builtin_read_file(c) }
@@ -4155,6 +4387,18 @@ pub fn compile_ir_function_v2(nc: NativeCompiler, func: IrFunction, machine_func
 }
 
 pub fn compile_ir_function_v2_into(nc: &! NativeCompiler, func: &IrFunction, machine_func: &MachineFunction, fn_index: i64) with Mut, Panic, Div, Alloc {
+    // Streaming callers also see intentionally bodyless builtin/extern stubs.
+    if !ir_reg_count_is_valid((*func).reg_count) || ((*func).instr_count != 0 && !ir_function_regs_are_valid(func)) {
+        if !ir_reg_count_is_valid((*func).reg_count) {
+            (*nc).ir_vreg_overflow = true
+            (*nc).ir_vreg_overflow_needed = (*func).reg_count
+            (*nc).ir_vreg_overflow_limit = IR_MAX_VREGS
+        } else {
+            (*nc).ir_validation_failed = true
+            (*nc).ir_validation_reg_count = (*func).reg_count
+        }
+        return
+    }
     reset_function_state_mut(nc)
 
     let function_offset = (*nc).code.len
@@ -4184,13 +4428,27 @@ pub fn compile_ir_function_v2_into(nc: &! NativeCompiler, func: &IrFunction, mac
     patch_label_forwards_mut(nc)
 }
 
-pub fn compile_ir_function_v2_ref(nc: NativeCompiler, func: &IrFunction, machine_func: &MachineFunction, fn_index: i64) -> NativeCompiler with Mut, Panic, Div, Alloc {
-    var c = nc
-    compile_ir_function_v2_into(&! c, func, machine_func, fn_index)
-    c
-}
+// compile_ir_function_v2_ref deleted 2026-08-18: zero external callers across
+// the entire repo including tests (census: `grep -rn compile_ir_function_v2_ref
+// --include='*.sio' .` returns only the two definitions and the single
+// internal call inside the body itself). Removal brings codegen.sio's
+// compile_ir_function_v2_into reachability surface to zero inside this file
+// without breaking any external importer, since the function was neither
+// imported qualified nor called by glob-imported `use native::codegen::*`
+// sites. See CODGEN_DEAD_BODY_DELETION_2026-08-18.md for the full audit.
 
 fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_func: MachineFunction, fn_index: i64) with Mut, Panic, Div, Alloc {
+    if !ir_reg_count_is_valid(func.reg_count) || (func.instr_count != 0 && !ir_function_regs_are_valid(&func)) {
+        if !ir_reg_count_is_valid(func.reg_count) {
+            (*nc).ir_vreg_overflow = true
+            (*nc).ir_vreg_overflow_needed = func.reg_count
+            (*nc).ir_vreg_overflow_limit = IR_MAX_VREGS
+        } else {
+            (*nc).ir_validation_failed = true
+            (*nc).ir_validation_reg_count = func.reg_count
+        }
+        return
+    }
     reset_function_state_mut(nc)
 
     (*nc).fn_offsets[fn_index as usize] = (*nc).code.len
@@ -4204,6 +4462,7 @@ fn compile_ir_function_v2_mut(nc: &! NativeCompiler, func: IrFunction, machine_f
     if name_is_str_len(func.name) { (*nc) = emit_builtin_str_len((*nc)); return }
     if name_is_str_eq(func.name) { (*nc) = emit_builtin_str_eq((*nc)); return }
     if name_is_str_slice(func.name) { (*nc) = emit_builtin_str_slice((*nc)); return }
+    if name_is_str_slice3(func.name) { (*nc) = emit_builtin_str_slice3((*nc)); return }
     if name_is_starts_with(func.name) { (*nc) = emit_builtin_starts_with((*nc)); return }
     if name_is_str_concat(func.name) { (*nc) = emit_builtin_str_concat((*nc)); return }
     if name_is_read_file(func.name) { (*nc) = emit_builtin_read_file((*nc)); return }
@@ -4265,7 +4524,7 @@ fn compile_module_v2_mut(nc: &! NativeCompiler, module: &IrModule) -> string wit
 
     var fi: i64 = 0
     while fi < module.fn_count {
-        compile_ir_function_v2_mut(nc, module.functions[fi as usize], built.functions[fi as usize], fi)
+        compile_ir_function_v2_mut(nc, ir_fn_get(module, fi as usize), machine_module_function_get(&built, fi), fi)
         fi = fi + 1
     }
 
@@ -4759,8 +5018,8 @@ fn emit_entry_trampoline_context_into(nc: &! NativeCompiler) with Mut, Panic, Di
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_handle_table_base())
     emit_store_runtime_context_imm_into(nc, runtime_context_field_handle_count(), 0)
     emit_store_runtime_context_imm_into(nc, runtime_context_field_handle_capacity(), native_v2_handle_table_capacity_default())
-    emit_store_runtime_context_imm_into(nc, runtime_context_field_pin_registry(), 0)
-    emit_store_runtime_context_imm_into(nc, runtime_context_field_pin_count(), 0)
+    emit_store_runtime_context_imm_into(nc, runtime_context_field_pin_registry(), runtime_context_pin_registry_unwired())
+    emit_store_runtime_context_imm_into(nc, runtime_context_field_pin_count(), runtime_context_pin_count_unwired())
     emit_store_runtime_context_imm_into(nc, runtime_context_field_collector_epoch(), 0)
     emit_store_runtime_context_imm_into(nc, runtime_context_field_last_gc_stats(), 0)
 
@@ -4863,8 +5122,8 @@ pub fn emit_entry_trampoline_into(nc: &! NativeCompiler, main_fn_index: i64) wit
     emit_store_rax_runtime_context_field_into(nc, runtime_context_field_handle_table_base())
     emit_store_runtime_context_imm_into(nc, runtime_context_field_handle_count(), 0)
     emit_store_runtime_context_imm_into(nc, runtime_context_field_handle_capacity(), native_v2_handle_table_capacity_default())
-    emit_store_runtime_context_imm_into(nc, runtime_context_field_pin_registry(), 0)
-    emit_store_runtime_context_imm_into(nc, runtime_context_field_pin_count(), 0)
+    emit_store_runtime_context_imm_into(nc, runtime_context_field_pin_registry(), runtime_context_pin_registry_unwired())
+    emit_store_runtime_context_imm_into(nc, runtime_context_field_pin_count(), runtime_context_pin_count_unwired())
     emit_store_runtime_context_imm_into(nc, runtime_context_field_collector_epoch(), 0)
     emit_store_runtime_context_imm_into(nc, runtime_context_field_last_gc_stats(), 0)
 
@@ -5007,8 +5266,8 @@ fn emit_entry_trampoline_windows_x86(nc: NativeCompiler, main_fn_index: i64) -> 
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_handle_table_base())
     c = emit_store_runtime_context_imm(c, runtime_context_field_handle_count(), 0)
     c = emit_store_runtime_context_imm(c, runtime_context_field_handle_capacity(), native_v2_handle_table_capacity_default())
-    c = emit_store_runtime_context_imm(c, runtime_context_field_pin_registry(), 0)
-    c = emit_store_runtime_context_imm(c, runtime_context_field_pin_count(), 0)
+    c = emit_store_runtime_context_imm(c, runtime_context_field_pin_registry(), runtime_context_pin_registry_unwired())
+    c = emit_store_runtime_context_imm(c, runtime_context_field_pin_count(), runtime_context_pin_count_unwired())
     c = emit_store_runtime_context_imm(c, runtime_context_field_collector_epoch(), 0)
     c = emit_store_runtime_context_imm(c, runtime_context_field_last_gc_stats(), 0)
 
@@ -5108,7 +5367,6 @@ fn emit_entry_trampoline_windows_x86(nc: NativeCompiler, main_fn_index: i64) -> 
 fn MACOS_SYS_EXIT() -> i64 { 33554433 }       // 0x2000001
 fn MACOS_SYS_WRITE() -> i64 { 33554436 }      // 0x2000004
 fn MACOS_SYS_MMAP() -> i64 { 33554629 }       // 0x20000C5 (197)
-fn MACOS_SYS_OPEN() -> i64 { 33554437 }       // 0x2000005
 
 // macOS x86-64 entry trampoline — same System V ABI as Linux, different syscall numbers.
 fn emit_entry_trampoline_macos_x86(nc: NativeCompiler, main_fn_index: i64) -> NativeCompiler with Mut, Panic, Div {
@@ -5131,8 +5389,8 @@ fn emit_entry_trampoline_macos_x86(nc: NativeCompiler, main_fn_index: i64) -> Na
     c = emit_store_rax_runtime_context_field(c, runtime_context_field_handle_table_base())
     c = emit_store_runtime_context_imm(c, runtime_context_field_handle_count(), 0)
     c = emit_store_runtime_context_imm(c, runtime_context_field_handle_capacity(), native_v2_handle_table_capacity_default())
-    c = emit_store_runtime_context_imm(c, runtime_context_field_pin_registry(), 0)
-    c = emit_store_runtime_context_imm(c, runtime_context_field_pin_count(), 0)
+    c = emit_store_runtime_context_imm(c, runtime_context_field_pin_registry(), runtime_context_pin_registry_unwired())
+    c = emit_store_runtime_context_imm(c, runtime_context_field_pin_count(), runtime_context_pin_count_unwired())
     c = emit_store_runtime_context_imm(c, runtime_context_field_collector_epoch(), 0)
     c = emit_store_runtime_context_imm(c, runtime_context_field_last_gc_stats(), 0)
     c = emit_load_runtime_context_field_rax(c, runtime_context_field_handle_table_base())
@@ -5412,8 +5670,13 @@ fn a64_preview_emit_machine_instr(c: A64PreviewCompiler, instr: MachineInstr) ->
             out.code = a64_emit_mul(out.code, A64_X9, A64_X9, A64_X10)
         } else if instr.bin_op == BinaryOp::OpDiv {
             out.code = a64_emit_sdiv(out.code, A64_X9, A64_X9, A64_X10)
+        } else if instr.bin_op == BinaryOp::OpUDiv {
+            out.code = a64_emit_udiv(out.code, A64_X9, A64_X9, A64_X10)
         } else if instr.bin_op == BinaryOp::OpRem {
             out.code = a64_emit_sdiv(out.code, A64_X11, A64_X9, A64_X10)
+            out.code = a64_emit_msub(out.code, A64_X9, A64_X11, A64_X10, A64_X9)
+        } else if instr.bin_op == BinaryOp::OpURem {
+            out.code = a64_emit_udiv(out.code, A64_X11, A64_X9, A64_X10)
             out.code = a64_emit_msub(out.code, A64_X9, A64_X11, A64_X10, A64_X9)
         } else if instr.bin_op == BinaryOp::OpBitAnd {
             out.code = a64_emit_and(out.code, A64_X9, A64_X9, A64_X10)
@@ -5425,6 +5688,8 @@ fn a64_preview_emit_machine_instr(c: A64PreviewCompiler, instr: MachineInstr) ->
             out.code = a64_emit_lsl(out.code, A64_X9, A64_X9, A64_X10)
         } else if instr.bin_op == BinaryOp::OpShr {
             out.code = a64_emit_asr(out.code, A64_X9, A64_X9, A64_X10)
+        } else if instr.bin_op == BinaryOp::OpUShr {
+            out.code = a64_emit_lsr(out.code, A64_X9, A64_X9, A64_X10)
         } else {
             return (out, "aarch64_binop_pending:" + native_v2_ir_opcode_name(IrOpcode::IrBinOp))
         }
@@ -5438,6 +5703,8 @@ fn a64_preview_emit_machine_instr(c: A64PreviewCompiler, instr: MachineInstr) ->
         } else if instr.un_op == UnaryOp::OpNot {
             out.code = a64_emit_mov_imm64(out.code, A64_X10, 1)
             out.code = a64_emit_eor(out.code, A64_X9, A64_X9, A64_X10)
+        } else if instr.un_op == UnaryOp::OpBitNot {
+            out.code = a64_emit_mvn(out.code, A64_X9, A64_X9)
         } else {
             return (out, "aarch64_unary_pending")
         }
@@ -5567,7 +5834,7 @@ fn compile_to_macho_arm64_preview(module: &IrModule, target_spec: NativeTargetSp
 
     var fi: i64 = 0
     while fi < module.fn_count {
-        let pair = a64_preview_compile_function(c, module.functions[fi as usize], built.functions[fi as usize], fi)
+        let pair = a64_preview_compile_function(c, ir_fn_get(module, fi as usize), machine_module_function_get(&built, fi), fi)
         c = pair.0
         if str_len(pair.1) > 0 {
             return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "native_v2_unsupported_opcode:" + pair.1)
@@ -5606,9 +5873,9 @@ fn compile_to_elf_aarch64_preview(module: &IrModule, target_spec: NativeTargetSp
 
     var fi: i64 = 0
     while fi < module.fn_count {
-        let func = module.functions[fi as usize]
+        let func = ir_fn_get(module, fi as usize)
         symbols = symbol_data_add_name(symbols, fi, func.name.buf, func.name.len)
-        let pair = a64_preview_compile_function(c, func, built.functions[fi as usize], fi)
+        let pair = a64_preview_compile_function(c, func, machine_module_function_get(&built, fi), fi)
         c = pair.0
         if str_len(pair.1) > 0 {
             return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "native_v2_unsupported_opcode:" + pair.1)
@@ -5662,7 +5929,7 @@ fn compile_to_elf_v2(module: &IrModule, base_addr: i64) -> NativeCompileResult w
     var bss_total: i64 = 0
     var bsi: i64 = 0
     while bsi < (*module).fn_count {
-        var bss_fn_slot = (*module).functions[bsi as usize]
+        var bss_fn_slot = ir_fn_get(&(*module), bsi as usize)
         if bss_fn_slot.compile_strategy == 99 {
             bss_total = bss_total + 8
         }
@@ -5879,7 +6146,7 @@ fn compile_to_pe_aarch64_preview(module: &IrModule, target_spec: NativeTargetSpe
 
     var fi: i64 = 0
     while fi < module.fn_count {
-        let pair = a64_preview_compile_function(c, module.functions[fi as usize], built.functions[fi as usize], fi)
+        let pair = a64_preview_compile_function(c, ir_fn_get(module, fi as usize), machine_module_function_get(&built, fi), fi)
         c = pair.0
         if str_len(pair.1) > 0 {
             return native_compile_result_error(ERR_BACKEND_NOT_IMPLEMENTED(), "native_v2_unsupported_opcode:" + pair.1)
@@ -6094,6 +6361,9 @@ pub fn compile_native(module: &IrModule, target_spec: NativeTargetSpec) -> Nativ
 fn compile_to_elf(module: &IrModule, base_addr: i64) -> Elf64Binary with Mut, Panic, Div, Alloc {
     var nc = compiler_new()
     nc = compile_module(nc, module)
+    if nc.ir_vreg_overflow || nc.ir_validation_failed {
+        return elf_binary_new()
+    }
     let entry = trampoline_offset(&nc)
     var final_data = nc.data
     let min_data_len = nc.prof_counter_data_base + (nc.prof_counter_count * 8)
@@ -6105,6 +6375,9 @@ fn compile_to_elf(module: &IrModule, base_addr: i64) -> Elf64Binary with Mut, Pa
 }
 
 pub fn finalize_compiled_elf(nc: NativeCompiler, base_addr: i64) -> Elf64Binary with Mut, Panic, Div, Alloc {
+    if nc.ir_vreg_overflow || nc.ir_validation_failed {
+        return elf_binary_new()
+    }
     let entry = trampoline_offset(&nc)
     var final_data = nc.data
     let min_data_len = nc.prof_counter_data_base + (nc.prof_counter_count * 8)
@@ -6324,7 +6597,7 @@ fn compile_module_for_obj(nc: NativeCompiler, module: &IrModule) -> NativeCompil
     var c = compile_module_streaming_begin(nc, module)
     var fi = 0
     while fi < module.fn_count {
-        c = compile_ir_function(c, module.functions[fi as usize], fi)
+        c = compile_ir_function(c, ir_fn_get(module, fi as usize), fi)
         fi = fi + 1
     }
     c

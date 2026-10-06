@@ -7,12 +7,21 @@ use gpu::kernel_ir::*
 use gpu::ptx::*
 
 // Lower a complete GPU kernel IR to PTX
-pub fn gpu_lower_to_ptx(kernel: GpuKernelIr) -> PtxBuf with Mut, Panic, Div, Alloc {
+pub fn gpu_lower_to_ptx(kernel: GpuKernelIr) -> PtxBuf with IO, Mut, Panic, Div, Alloc {
+    gpu_lower_to_ptx_for_target(kernel, false)
+}
+
+pub fn gpu_lower_to_ptx_for_target(kernel: GpuKernelIr, dgx_sm121: bool) -> PtxBuf with IO, Mut, Panic, Div, Alloc {
     var buf = ptx_buf_new()
+    if !gpu_xor_compound_shape_valid(kernel) {
+        return gpu_refuse_unlowered(buf, "PIREUS_PTX_COMPOUND_SHAPE_REFUSED")
+    }
 
     // 1. Emit header (.version, .target, .address_size). A wmma m16n16k16 tile needs sm_70+
     // and a matching .version; the default header targets sm_50 (no tensor cores), so bump it.
-    if gpu_has_wmma_tile(kernel) {
+    if dgx_sm121 {
+        buf = ptx_emit_dgx_sm121_header(buf)
+    } else if gpu_has_wmma_tile(kernel) {
         buf = ptx_push_str(buf, ".version 8.0\n.target sm_80\n.address_size 64\n\n")
     } else {
         buf = ptx_emit_header(buf)
@@ -59,6 +68,9 @@ pub fn gpu_lower_to_ptx(kernel: GpuKernelIr) -> PtxBuf with Mut, Panic, Div, All
         let fdim = gpu_step_f64_dim(kernel)
         let fbits = if fdim == 16 { 4 } else { 3 }
         buf = ptx_push_str(buf, gpu_emit_cell_sign_table(fdim, fbits))
+    }
+    if gpu_has_xor_convolution_f64(kernel) {
+        buf = ptx_push_str(buf, gpu_emit_cell_sign_table(16, 4))
     }
     // f64 tensor-core tile: ossm_Lsgn σ(k⊕j,j) for the f64 L(a) build.
     if gpu_has_oct_batch_f64(kernel) {
@@ -191,9 +203,10 @@ fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Pani
     let cell = gpu_has_oct_cell(kernel) || gpu_has_oct_recur(kernel) || gpu_has_oct_assoc(kernel) || gpu_has_oct_assoc_bwd_dh(kernel) || gpu_has_oct_vjp(kernel) || gpu_has_oct_bwd(kernel) || gpu_has_oct_bwd_nl(kernel)
     let readout = gpu_has_oct_readout(kernel)
     let stepf64 = gpu_has_oct_step_f64(kernel)
+    let xorconv64 = gpu_has_xor_convolution_f64(kernel)
     let tc64 = gpu_has_oct_batch_f64(kernel)
     let matvec = gpu_has_oct_matvec(kernel)
-    let stage_or_pa = stage || postadd || cell || readout || stepf64 || tc64 || matvec
+    let stage_or_pa = stage || postadd || cell || readout || stepf64 || xorconv64 || tc64 || matvec
 
     // .reg .pred %p<N> — the staging loop / post-add need at least %p<2>.
     var pred_count = kernel.max_reg_pred
@@ -210,6 +223,7 @@ fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Pani
     if cell && b32_count < 12 { b32_count = 12 }
     if readout && b32_count < 6 { b32_count = 6 }
     if stepf64 && b32_count < 12 { b32_count = 12 }
+    if xorconv64 && b32_count < 12 { b32_count = 12 }
     if tc64 && b32_count < 12 { b32_count = 12 }
     if matvec && b32_count < 12 { b32_count = 12 }
     if b32_count > 0 {
@@ -222,7 +236,7 @@ fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Pani
     // (params occupy %rd0..%rd5, so scratch must avoid clobbering them, e.g. pC=%rd3).
     var b64_count = if kernel.max_reg_u64 > kernel.max_reg_i64 { kernel.max_reg_u64 } else { kernel.max_reg_i64 }
     // The cell and the O-SSM-step post-add both use %rd7 as address scratch (runtime loops).
-    if (cell || postadd || readout || stepf64 || tc64 || matvec) && b64_count < 8 { b64_count = 8 }
+    if (cell || postadd || readout || stepf64 || xorconv64 || tc64 || matvec) && b64_count < 8 { b64_count = 8 }
     if b64_count > 0 {
         out = ptx_push_str(out, "    .reg .b64 %rd<")
         out = gpu_push_i64(out, b64_count)
@@ -237,6 +251,7 @@ fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Pani
     var f32_count = kernel.max_reg_f32
     if postadd && f32_count < 4 { f32_count = 4 }
     if stepf64 && f32_count < 1 { f32_count = 1 }
+    if xorconv64 && f32_count < 1 { f32_count = 1 }
     if tc64 && f32_count < 1 { f32_count = 1 }
     if matvec && f32_count < 2 { f32_count = 2 }
     if cell && f32_count < 8 { f32_count = 8 }
@@ -249,7 +264,7 @@ fn gpu_emit_reg_decls(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Pani
     // .reg .f64 %fd<N> — staging needs %fd0; post-add/cell need %fd1..%fd2.
     var f64_count = kernel.max_reg_f64
     if stage && f64_count < 2 { f64_count = 2 }
-    if (postadd || cell || readout || stepf64) && f64_count < 3 { f64_count = 3 }
+    if (postadd || cell || readout || stepf64 || xorconv64) && f64_count < 3 { f64_count = 3 }
     if tc64 && f64_count < 14 { f64_count = 14 }
     if matvec && f64_count < 3 { f64_count = 3 }
     if f64_count > 0 {
@@ -1247,6 +1262,58 @@ fn gpu_step_f64_dim(kernel: GpuKernelIr) -> i64 {
     8
 }
 
+fn gpu_has_xor_convolution_f64(kernel: GpuKernelIr) -> bool {
+    var i: i64 = 0
+    while i < kernel.op_count {
+        if kernel.ops[i as usize].opcode == GpuOpcode::GpuXorConvolutionF64 { return true }
+        i = i + 1
+    }
+    false
+}
+
+// One sedenion component per lane. Lane d computes the serially ordered sum
+// r[d] = Σ_j σ(d⊕j,j)·a[d⊕j]·b[j]. b[j] arrives from lane j via bfly(d⊕j).
+fn gpu_emit_xor_convolution_f64(paR: string, pbR: string, poutR: string) -> string with Mut, Panic, Div, Alloc {
+    var t = "    mov.u32 %r1, %tid.x;\n    setp.ge.u32 %p1, %r1, 16;\n    @%p1 bra $XCDONE;\n"
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r1, 8;\n    add.s64 %rd7, "), pbR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd2, [%rd7];\n    mov.b64 {%r2, %r3}, %fd2;\n")
+    t = str_concat(t, "    mov.f64 %fd0, 0d0000000000000000;\n    mov.u32 %r8, 0;\n$XCJ:\n")
+    t = str_concat(t, "    xor.b32 %r9, %r1, %r8;\n")
+    t = str_concat(t, "    shfl.sync.bfly.b32 %r4, %r2, %r9, 15, 65535;\n")
+    t = str_concat(t, "    shfl.sync.bfly.b32 %r5, %r3, %r9, 15, 65535;\n")
+    t = str_concat(t, "    mov.b64 %fd2, {%r4, %r5};\n")
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r9, 8;\n    add.s64 %rd7, "), paR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd1, [%rd7];\n    mul.f64 %fd1, %fd1, %fd2;\n")
+    t = str_concat(t, "    mad.lo.u32 %r10, %r1, 16, %r8;\n    mul.wide.u32 %rd7, %r10, 4;\n")
+    t = str_concat(t, "    mov.u64 %rd6, ossm_Lsgn;\n    add.s64 %rd7, %rd6, %rd7;\n")
+    t = str_concat(t, "    ld.global.f32 %f0, [%rd7];\n    cvt.f64.f32 %fd2, %f0;\n")
+    t = str_concat(t, "    mul.f64 %fd1, %fd1, %fd2;\n    add.f64 %fd0, %fd0, %fd1;\n")
+    t = str_concat(t, "    add.u32 %r8, %r8, 1;\n    setp.lt.u32 %p1, %r8, 16;\n    @%p1 bra $XCJ;\n")
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r1, 8;\n    add.s64 %rd7, "), poutR)
+    t = str_concat(t, ", %rd7;\n    st.global.f64 [%rd7], %fd0;\n$XCDONE:\n")
+    t
+}
+
+// Foundry candidate 1: preserve the same lane/output and serial accumulation order,
+// but obtain b[j] through a direct global load rather than a two-half warp shuffle.
+fn gpu_emit_xor_convolution_global_f64(paR: string, pbR: string, poutR: string) -> string with Mut, Panic, Div, Alloc {
+    var t = "    mov.u32 %r1, %tid.x;\n    setp.ge.u32 %p1, %r1, 16;\n    @%p1 bra $XCGDONE;\n"
+    t = str_concat(t, "    mov.f64 %fd0, 0d0000000000000000;\n    mov.u32 %r8, 0;\n$XCGJ:\n")
+    t = str_concat(t, "    xor.b32 %r9, %r1, %r8;\n")
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r8, 8;\n    add.s64 %rd7, "), pbR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd2, [%rd7];\n")
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r9, 8;\n    add.s64 %rd7, "), paR)
+    t = str_concat(t, ", %rd7;\n    ld.global.f64 %fd1, [%rd7];\n    mul.f64 %fd1, %fd1, %fd2;\n")
+    t = str_concat(t, "    mad.lo.u32 %r10, %r1, 16, %r8;\n    mul.wide.u32 %rd7, %r10, 4;\n")
+    t = str_concat(t, "    mov.u64 %rd6, ossm_Lsgn;\n    add.s64 %rd7, %rd6, %rd7;\n")
+    t = str_concat(t, "    ld.global.f32 %f0, [%rd7];\n    cvt.f64.f32 %fd2, %f0;\n")
+    t = str_concat(t, "    mul.f64 %fd1, %fd1, %fd2;\n    add.f64 %fd0, %fd0, %fd1;\n")
+    t = str_concat(t, "    add.u32 %r8, %r8, 1;\n    setp.lt.u32 %p1, %r8, 16;\n    @%p1 bra $XCGJ;\n")
+    t = str_concat(str_concat(t, "    mul.wide.u32 %rd7, %r1, 8;\n    add.s64 %rd7, "), poutR)
+    t = str_concat(t, ", %rd7;\n    st.global.f64 [%rd7], %fd0;\n$XCGDONE:\n")
+    t
+}
+
 // FULL-f64 O-SSM step S[k,b] = Σ_j σ(k⊕j,j)·A[k⊕j]·H[b*dim+j] + B[k]·x[b], computed entirely in f64
 // (no f16 tile) → EXACT forward. thread 0, nested runtime loops: outer idx=k*16+b, inner j. σ(k⊕j,j)
 // read at runtime from ossm_Lsgn[k*dim+j]. Output S is f64 D-layout [k*16+b].
@@ -1585,7 +1652,7 @@ fn gpu_emit_oct_recur(pAR: string, pBR: string, pxR: string, pCR: string, pHR: s
 }
 
 // Lower all operations in sequence
-fn gpu_lower_ops(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Panic, Div, Alloc {
+fn gpu_lower_ops(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with IO, Mut, Panic, Div, Alloc {
     var out = buf
     var i: i64 = 0
 
@@ -1598,8 +1665,42 @@ fn gpu_lower_ops(buf: PtxBuf, kernel: GpuKernelIr) -> PtxBuf with Mut, Panic, Di
     out
 }
 
+// Fail-closed refusal for a GpuOpcode that reaches PTX lowering with no rule (#2221).
+//
+// This match had 53 arms against 102 declared GpuOpcode variants and no wildcard.
+// The cost was not confined to the 49 missing arms. lean_single reports a
+// non-exhaustive match with tc_error_hard and then RETURNS from compiling the
+// match, leaving it valueless (lean_single.sio:25492) — and the build still exits
+// 0. So gpu_lower_op returned garbage for EVERY opcode, and `souc --gpu-target`
+// on current main emitted 2 bytes of PTX for kernels that used to lower fully.
+// Measured 2026-08-28: with these arms in place a 9-kernel PTX corpus is again
+// byte-identical to the last compiler built before #2215 made the
+// non-exhaustiveness visible; without them it was empty.
+//
+// Every unlowered opcode now has an arm that calls this and names itself. The
+// refusal is COMPILE-TIME for the programmer and a runtime abort inside the
+// compiler process: gpu_lower_op runs while Madaros lowers a user kernel, so this
+// aborts that compilation and no PTX is written. It cannot be a static check on
+// the enum, because the static check is exactly the non-exhaustiveness error being
+// removed here. What preserves the static signal is that the 49 arms are NAMED
+// rather than a wildcard: a future 103rd variant is again reported as
+// non-exhaustive at build time.
+//
+// panic() discards its message under the lean_single codegen that builds Madaros
+// (it lowers to a bare exit(1) — emit_assert_fail, lean_single.sio:8491), so the
+// opcode name has to be printed before the panic. That is why this function, and
+// its callers up to the two GPU drivers (which already declare IO), carries the
+// IO effect.
+fn gpu_refuse_unlowered(buf: PtxBuf, opcode_name: string) -> PtxBuf with IO, Mut, Panic, Div, Alloc {
+    print("error: gpu codegen: no PTX lowering rule for GpuOpcode::")
+    print(opcode_name)
+    print(" - refusing to emit PTX (see issue #2221)\n")
+    panic("gpu codegen: unlowered GpuOpcode reached PTX lowering")
+    buf
+}
+
 // Lower a single GPU operation to PTX
-fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut, Panic, Div, Alloc {
+fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with IO, Mut, Panic, Div, Alloc {
     // Struct-first representation avoids enum field destructuring in the
     // self-hosted IR; switch on opcode and use struct fields explicitly.
     let opcode = op.opcode
@@ -1984,6 +2085,14 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
             // Full-f64 O-SSM step. Pointers: pA=lhs, pB=rhs, px=addr, pH=src, pout=shared_addr.
             let fdim = if op.rhs_imm == 16 { 16 } else { 8 }
             ptx_push_str(buf, gpu_emit_oct_step_f64(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg), gpu_reg_u64(op.addr_reg), gpu_reg_u64(op.src_reg), gpu_reg_u64(op.shared_addr), fdim))
+        }
+
+        GpuOpcode::GpuXorConvolutionF64 => {
+            if op.byte_offset == 1 {
+                ptx_push_str(buf, gpu_emit_xor_convolution_global_f64(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg), gpu_reg_u64(op.addr_reg)))
+            } else {
+                ptx_push_str(buf, gpu_emit_xor_convolution_f64(gpu_reg_u64(op.lhs_reg), gpu_reg_u64(op.rhs_reg), gpu_reg_u64(op.addr_reg)))
+            }
         }
 
         GpuOpcode::GpuOctBatchF64 => {
@@ -2558,6 +2667,60 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
         GpuOpcode::GpuAddImm => {
             let dst_str = if op.ty == GpuType::GpuU32 { gpu_reg_u32(op.dst_reg) } else { gpu_reg_u64(op.dst_reg) }
             var aout = buf
+            // P0.8.1: a pure immediate goes into the register class its consumers read.
+            // Floats carry their IEEE bit pattern in rhs_imm (set by hlir_to_gpu). Before
+            // this, every constant was `mov.u64 %rdN, int_val`, so `2.0` became integer 0
+            // in %rd2 while the f64 multiply read the never-written %fd2.
+            if op.lhs_reg < 0 && op.ty == GpuType::GpuF64 {
+                aout = ptx_push_str(aout, "    mov.f64 ")
+                aout = ptx_push_str(aout, gpu_reg_f64(op.dst_reg))
+                aout = ptx_push_str(aout, ", 0d")
+                aout = gpu_push_hex_fixed(aout, op.rhs_imm, 16)
+                aout = ptx_push_str(aout, ";\n")
+                return aout
+            }
+            if op.lhs_reg < 0 && op.ty == GpuType::GpuF32 {
+                aout = ptx_push_str(aout, "    mov.f32 ")
+                aout = ptx_push_str(aout, gpu_reg_f32(op.dst_reg))
+                aout = ptx_push_str(aout, ", 0f")
+                aout = gpu_push_hex_fixed(aout, op.rhs_imm, 8)
+                aout = ptx_push_str(aout, ";\n")
+                return aout
+            }
+            if op.lhs_reg < 0 && op.ty == GpuType::GpuI32 {
+                aout = ptx_push_str(aout, "    mov.s32 ")
+                aout = ptx_push_str(aout, gpu_reg_i32(op.dst_reg))
+                aout = ptx_push_str(aout, ", ")
+                aout = gpu_push_i64_signed(aout, op.rhs_imm)
+                aout = ptx_push_str(aout, ";\n")
+                return aout
+            }
+            if op.ty == GpuType::GpuF64 || op.ty == GpuType::GpuF32 || op.ty == GpuType::GpuI32 || op.ty == GpuType::GpuBool {
+                // HLIR_OP_COPY is AddImm(src, 0): a register move in the value's own class
+                // (it used to be `add.u64 %rdD, %rdS, 0` whatever the type).
+                if op.lhs_reg >= 0 && op.rhs_imm == 0 {
+                    let mv = if op.ty == GpuType::GpuF64 { "    mov.f64 " }
+                             else if op.ty == GpuType::GpuF32 { "    mov.f32 " }
+                             else if op.ty == GpuType::GpuI32 { "    mov.b32 " }
+                             else { "    mov.pred " }
+                    let d = if op.ty == GpuType::GpuF64 { gpu_reg_f64(op.dst_reg) }
+                            else if op.ty == GpuType::GpuF32 { gpu_reg_f32(op.dst_reg) }
+                            else if op.ty == GpuType::GpuI32 { gpu_reg_i32(op.dst_reg) }
+                            else { str_concat("%p", i64_to_string(op.dst_reg)) }
+                    let s = if op.ty == GpuType::GpuF64 { gpu_reg_f64(op.lhs_reg) }
+                            else if op.ty == GpuType::GpuF32 { gpu_reg_f32(op.lhs_reg) }
+                            else if op.ty == GpuType::GpuI32 { gpu_reg_i32(op.lhs_reg) }
+                            else { str_concat("%p", i64_to_string(op.lhs_reg)) }
+                    aout = ptx_push_str(aout, mv)
+                    aout = ptx_push_str(aout, d)
+                    aout = ptx_push_str(aout, ", ")
+                    aout = ptx_push_str(aout, s)
+                    aout = ptx_push_str(aout, ";\n")
+                    return aout
+                }
+                // No faithful integer add-immediate exists for these classes.
+                return gpu_refuse_unlowered(aout, "GpuAddImm (float/i32/bool register class)")
+            }
             // lhs_reg < 0 marks a PURE immediate (HLIR_OP_CONST): emit `mov dst, imm`.
             // The `add dst, %reg0, imm` form would read the first kernel param as a bogus
             // zero base and corrupt every integer constant (e.g. GEP indices).
@@ -2565,7 +2728,7 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
                 aout = ptx_push_str(aout, if op.ty == GpuType::GpuU32 { "    mov.u32 " } else { "    mov.u64 " })
                 aout = ptx_push_str(aout, dst_str)
                 aout = ptx_push_str(aout, ", ")
-                aout = gpu_push_i64(aout, op.rhs_imm)
+                aout = gpu_push_i64_signed(aout, op.rhs_imm)
                 aout = ptx_push_str(aout, ";\n")
                 return aout
             }
@@ -2578,7 +2741,7 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
             aout = ptx_push_str(aout, ", ")
             aout = ptx_push_str(aout, src_str)
             aout = ptx_push_str(aout, ", ")
-            aout = gpu_push_i64(aout, op.rhs_imm)
+            aout = gpu_push_i64_signed(aout, op.rhs_imm)
             aout = ptx_push_str(aout, ";\n")
             aout
         }
@@ -2756,6 +2919,78 @@ fn gpu_lower_op(buf: PtxBuf, op: GpuOp, kernel: GpuKernelIr) -> PtxBuf with Mut,
             out = ptx_push_str(out, ";\n")
             out
         }
+
+        // --- Unlowered opcodes: fail closed, by name (#2221) ---
+        // These 49 GpuOpcode variants have no PTX emission rule. Until one is
+        // written each refuses by name, instead of falling off a non-exhaustive
+        // match and emitting nothing at all. Writing a real lowering means
+        // REPLACING the arm here, never deleting it: the named arms are what keep
+        // this match exhaustive, so a 103rd variant is still caught at build time.
+        GpuOpcode::GpuAtomicAnd => gpu_refuse_unlowered(buf, "GpuAtomicAnd"),
+        GpuOpcode::GpuAtomicCas => gpu_refuse_unlowered(buf, "GpuAtomicCas"),
+        GpuOpcode::GpuAtomicExch => gpu_refuse_unlowered(buf, "GpuAtomicExch"),
+        GpuOpcode::GpuAtomicMax => gpu_refuse_unlowered(buf, "GpuAtomicMax"),
+        GpuOpcode::GpuAtomicMin => gpu_refuse_unlowered(buf, "GpuAtomicMin"),
+        GpuOpcode::GpuAtomicOr => gpu_refuse_unlowered(buf, "GpuAtomicOr"),
+        GpuOpcode::GpuAtomicXor => gpu_refuse_unlowered(buf, "GpuAtomicXor"),
+        GpuOpcode::GpuBallot => gpu_refuse_unlowered(buf, "GpuBallot"),
+        GpuOpcode::GpuCgReduce => gpu_refuse_unlowered(buf, "GpuCgReduce"),
+        GpuOpcode::GpuCgSync => gpu_refuse_unlowered(buf, "GpuCgSync"),
+        GpuOpcode::GpuCgTiledPartition => gpu_refuse_unlowered(buf, "GpuCgTiledPartition"),
+        GpuOpcode::GpuClz => gpu_refuse_unlowered(buf, "GpuClz"),
+        GpuOpcode::GpuCos => gpu_refuse_unlowered(buf, "GpuCos"),
+        GpuOpcode::GpuCpAsyncWait => gpu_refuse_unlowered(buf, "GpuCpAsyncWait"),
+        GpuOpcode::GpuCvtF32Tf32 => gpu_refuse_unlowered(buf, "GpuCvtF32Tf32"),
+        GpuOpcode::GpuExit => gpu_refuse_unlowered(buf, "GpuExit"),
+        GpuOpcode::GpuExp2 => gpu_refuse_unlowered(buf, "GpuExp2"),
+        GpuOpcode::GpuFenceAcqRel => gpu_refuse_unlowered(buf, "GpuFenceAcqRel"),
+        GpuOpcode::GpuFenceAcquire => gpu_refuse_unlowered(buf, "GpuFenceAcquire"),
+        GpuOpcode::GpuFenceRelease => gpu_refuse_unlowered(buf, "GpuFenceRelease"),
+        GpuOpcode::GpuGetGridDim => gpu_refuse_unlowered(buf, "GpuGetGridDim"),
+        GpuOpcode::GpuGetLaneId => gpu_refuse_unlowered(buf, "GpuGetLaneId"),
+        GpuOpcode::GpuGetSmId => gpu_refuse_unlowered(buf, "GpuGetSmId"),
+        GpuOpcode::GpuGetWarpId => gpu_refuse_unlowered(buf, "GpuGetWarpId"),
+        GpuOpcode::GpuLdGlobalCached => gpu_refuse_unlowered(buf, "GpuLdGlobalCached"),
+        GpuOpcode::GpuLg2 => gpu_refuse_unlowered(buf, "GpuLg2"),
+        GpuOpcode::GpuMembar => gpu_refuse_unlowered(buf, "GpuMembar"),
+        GpuOpcode::GpuMma => gpu_refuse_unlowered(buf, "GpuMma"),
+        GpuOpcode::GpuMmaF16 => gpu_refuse_unlowered(buf, "GpuMmaF16"),
+        GpuOpcode::GpuMmaTf32 => gpu_refuse_unlowered(buf, "GpuMmaTf32"),
+        GpuOpcode::GpuNot => gpu_refuse_unlowered(buf, "GpuNot"),
+        GpuOpcode::GpuOr => gpu_refuse_unlowered(buf, "GpuOr"),
+        GpuOpcode::GpuPopc => gpu_refuse_unlowered(buf, "GpuPopc"),
+        GpuOpcode::GpuPrefetch => gpu_refuse_unlowered(buf, "GpuPrefetch"),
+        GpuOpcode::GpuRcp => gpu_refuse_unlowered(buf, "GpuRcp"),
+        GpuOpcode::GpuRsqrt => gpu_refuse_unlowered(buf, "GpuRsqrt"),
+        GpuOpcode::GpuSetpGt => gpu_refuse_unlowered(buf, "GpuSetpGt"),
+        GpuOpcode::GpuSetpNe => gpu_refuse_unlowered(buf, "GpuSetpNe"),
+        GpuOpcode::GpuShflBfly => {
+            var out = buf
+            out = ptx_push_str(out, "    shfl.sync.bfly.b32 ")
+            out = ptx_push_str(out, gpu_reg_u32(op.dst_reg))
+            out = ptx_push_str(out, ", ")
+            out = ptx_push_str(out, gpu_reg_u32(op.src_reg))
+            out = ptx_push_str(out, ", ")
+            out = ptx_push_str(out, i64_to_string(op.rhs_imm))
+            out = ptx_push_str(out, ", ")
+            // byte_offset carries the explicit butterfly clamp; zero keeps a full warp.
+            let clamp = if op.byte_offset > 0 { op.byte_offset } else { 31 }
+            out = ptx_push_str(out, i64_to_string(clamp))
+            out = ptx_push_str(out, ", ")
+            out = ptx_push_str(out, i64_to_string(op.mask))
+            out = ptx_push_str(out, ";\n")
+            out
+        },
+        GpuOpcode::GpuShflIdx => gpu_refuse_unlowered(buf, "GpuShflIdx"),
+        GpuOpcode::GpuShflUp => gpu_refuse_unlowered(buf, "GpuShflUp"),
+        GpuOpcode::GpuShl => gpu_refuse_unlowered(buf, "GpuShl"),
+        GpuOpcode::GpuShr => gpu_refuse_unlowered(buf, "GpuShr"),
+        GpuOpcode::GpuShra => gpu_refuse_unlowered(buf, "GpuShra"),
+        GpuOpcode::GpuSin => gpu_refuse_unlowered(buf, "GpuSin"),
+        GpuOpcode::GpuStGlobalWriteback => gpu_refuse_unlowered(buf, "GpuStGlobalWriteback"),
+        GpuOpcode::GpuTmaLoad => gpu_refuse_unlowered(buf, "GpuTmaLoad"),
+        GpuOpcode::GpuTmaStore => gpu_refuse_unlowered(buf, "GpuTmaStore"),
+        GpuOpcode::GpuVote => gpu_refuse_unlowered(buf, "GpuVote"),
     }
 }
 
@@ -2822,6 +3057,20 @@ fn gpu_push_name(buf: PtxBuf, name: Name) -> PtxBuf with Mut, Panic, Div {
     out
 }
 
+// Fixed-width uppercase hex of the low `digits` nibbles of `v` (PTX float
+// immediates: 0dXXXXXXXXXXXXXXXX for f64, 0fXXXXXXXX for f32).
+fn gpu_push_hex_fixed(buf: PtxBuf, v: i64, digits: i64) -> PtxBuf with Mut, Panic, Div {
+    var out = buf
+    var d: i64 = digits - 1
+    while d >= 0 {
+        let nib = (v >> (d * 4)) & 15
+        let ch = if nib < 10 { 48 + nib } else { 55 + nib }
+        out = ptx_push_byte(out, ch as i8)
+        d = d - 1
+    }
+    out
+}
+
 // Helper: Push i64 as ASCII digits directly into PtxBuf (avoids i64_to_string UAF)
 pub fn gpu_push_i64(buf: PtxBuf, n: i64) -> PtxBuf with Mut, Panic, Div {
     if n == 0 { return ptx_push_byte(buf, 48) }
@@ -2840,4 +3089,17 @@ pub fn gpu_push_i64(buf: PtxBuf, n: i64) -> PtxBuf with Mut, Panic, Div {
         k = k - 1
     }
     out
+}
+
+// Signed decimal immediate. gpu_push_i64 below prints NOTHING for a negative
+// value (it clamps to 0 and then emits no digits), which turned the constant -5
+// into `mov.u64 %rd2, ;`. Immediates that can be negative use this instead.
+pub fn gpu_push_i64_signed(buf: PtxBuf, n: i64) -> PtxBuf with Mut, Panic, Div {
+    if n >= 0 { return gpu_push_i64(buf, n) }
+    var out = ptx_push_byte(buf, 45)
+    // -(i64::MIN) overflows; peel the last digit first so every step stays in range.
+    let last = 0 - (n % 10)
+    let rest = 0 - (n / 10)
+    if rest > 0 { out = gpu_push_i64(out, rest) }
+    ptx_push_byte(out, (48 + last) as i8)
 }

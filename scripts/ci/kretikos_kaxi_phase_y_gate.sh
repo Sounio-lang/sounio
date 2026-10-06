@@ -49,8 +49,12 @@ if ! command -v cc >/dev/null 2>&1; then
   echo "kretikos_kaxi_phase_y_gate: SKIPPED (cc missing)"
   exit 0
 fi
-if ! ldconfig -p 2>/dev/null | grep -q libcuda &&
-   ! find /usr/lib /usr/local/lib -name "libcuda.so*" -maxdepth 3 2>/dev/null | grep -q libcuda; then
+# `find | grep -q` EPIPEs when CUDA exists (many matches, find is still
+# writing when grep -q exits) and pipefail turns that into "not found" --
+# the arm selector concluded no-CUDA exactly when CUDA was present. Find
+# stops itself now (-print -quit), and ldconfig's output is captured whole.
+if ! grep -q libcuda <<<"$(ldconfig -p 2>/dev/null || true)" &&
+   [[ -z "$(find /usr/lib /usr/local/lib -name "libcuda.so*" -maxdepth 3 -print -quit 2>/dev/null || true)" ]]; then
   echo "kretikos_kaxi_phase_y_gate: SKIPPED (libcuda not found)"
   exit 0
 fi

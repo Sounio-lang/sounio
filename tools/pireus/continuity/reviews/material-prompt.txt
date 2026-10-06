@@ -1,0 +1,555 @@
+Review Pireus Sounio-owned PTX material probe and Sounio numeric reference/parity decision. Return CLEAR or concrete BLOCKER. Only plans admitted by admission.sio can call materializer: stride odd1..15,offset0..15,load/layout0or1,unroll1/2/4/8/16. Kernel is launched one block of exactly16threads per Sedenion; grid.x vector count; buffers contain16*grid.x doubles in declared AoS or SoA layout. Numeric contract: ascending right operand j, i=k XOR j; a*b, then multiply by exact sigma +/-1, then add, all separate RN f64. This matches current canonical GPU emitter sequence, distinct from older ascending-i ontology contract. Review inverse lane mapping, member mask/clamp, sign table and addressing, unroll schedule, integer bounds. Parity contract is frozen finite-bits-nan-class-v1: exact bits for all non-NaNs including infinities and signedzero; NaN payloads intentionally outside claim. Inputs/outputs reference are Sounio-produced. Python GPU driver only moves observed bits; Sounio material_parity.sio decides equality. This is finite regression material evidence, not general FP proof, formal V13/V14 closure or novelty. Do not claim test execution.
+
+FILE admission.sio
+// External proposals are data. This executable owns admission and reconstruction.
+// Protocol v1 is a bounded JSON object: ASCII keys, nonnegative integer values,
+// and one lowercase SHA256 context string. Unknown/duplicate keys are refused.
+use algebra::cayley_dickson::cd_sigma
+use materialize_ptx::emit_lowering_ptx
+use crypto::sha256::{sha256_init, sha256_update, sha256_finalize, SHA256Digest}
+
+struct Document {
+    values: [i64; 18],
+    seen: i64,
+    context: [i64; 64],
+    valid: bool,
+}
+fn key_name(i: i64) -> string {
+    if i == 0 { return "schema" }
+    if i == 1 { return "target" }
+    if i == 2 { return "dimension" }
+    if i == 3 { return "precision" }
+    if i == 4 { return "order" }
+    if i == 5 { return "fma" }
+    if i == 6 { return "capabilities" }
+    if i == 7 { return "lane_width" }
+    if i == 8 { return "facts_state" }
+    if i == 9 { return "kind" }
+    if i == 10 { return "lane_stride" }
+    if i == 11 { return "lane_offset" }
+    if i == 12 { return "load" }
+    if i == 13 { return "layout" }
+    if i == 14 { return "unroll" }
+    if i == 15 { return "context" }
+    "UNKNOWN"
+}
+fn whitespace(c: i64) -> bool { c == 32 || c == 9 || c == 10 || c == 13 }
+fn skip(s: string, p: i64, n: i64) -> i64 with Mut {
+    var x = p
+    while x < n && whitespace(str_char_at(s, x)) { x = x + 1 }
+    x
+}
+fn parse(s: string, n: i64) -> Document with Mut, Panic, Div {
+    var d = Document { values: [0; 18], seen: 0, context: [0; 64], valid: false }
+    if n <= 0 || n > 4096 || str_len(s) != n { return d }
+    var p = skip(s, 0, n)
+    if p >= n || str_char_at(s, p) != 123 { return d }
+    p = p + 1
+    var count: i64 = 0
+    while count < 16 {
+        p = skip(s, p, n)
+        if p >= n || str_char_at(s, p) != 34 { return d }
+        p = p + 1
+        let start = p
+        while p < n && str_char_at(s, p) != 34 {
+            let c = str_char_at(s, p)
+            if !((c >= 97 && c <= 122) || c == 95) { return d }
+            p = p + 1
+        }
+        if p >= n { return d }
+        var key: i64 = -1
+        var k: i64 = 0
+        while k < 16 {
+            let name = key_name(k)
+            if str_len(name) == p - start {
+                var same = true
+                var j: i64 = 0
+                while j < p - start {
+                    if str_char_at(name, j) != str_char_at(s, start + j) { same = false }
+                    j = j + 1
+                }
+                if same { key = k }
+            }
+            k = k + 1
+        }
+        if key < 0 { return d }
+        if (d.seen & (1 << key)) != 0 { return d }
+        d.seen = d.seen | (1 << key)
+        p = skip(s, p + 1, n)
+        if p >= n || str_char_at(s, p) != 58 { return d }
+        p = skip(s, p + 1, n)
+        if p >= n { return d }
+        if key == 15 {
+            if str_char_at(s, p) != 34 { return d }
+            p = p + 1
+            var j: i64 = 0
+            while j < 64 {
+                if p >= n { return d }
+                let c = str_char_at(s, p)
+                if !((c >= 48 && c <= 57) || (c >= 97 && c <= 102)) { return d }
+                d.context[j as usize] = c
+                p = p + 1
+                j = j + 1
+            }
+            if p >= n || str_char_at(s, p) != 34 { return d }
+            p = p + 1
+        } else {
+            let first = p
+            var value: i64 = 0
+            while p < n && str_char_at(s, p) >= 48 && str_char_at(s, p) <= 57 {
+                if p - first >= 9 { return d }
+                value = value * 10 + str_char_at(s, p) - 48
+                p = p + 1
+            }
+            if first == p { return d }
+            if p - first > 1 && str_char_at(s, first) == 48 { return d }
+            d.values[key as usize] = value
+        }
+        count = count + 1
+        p = skip(s, p, n)
+        if p >= n { return d }
+        if str_char_at(s, p) == 125 {
+            if skip(s, p + 1, n) != n { return d }
+            d.valid = true
+            return d
+        }
+        if str_char_at(s, p) != 44 { return d }
+        p = p + 1
+    }
+    d
+}
+fn hash_text(s: string, n: i64) -> SHA256Digest with Mut, Panic, Div {
+    var state = sha256_init()
+    var p: i64 = 0
+    while p < n {
+        var chunk: [u8; 256] = [0; 256]
+        var count: i64 = 0
+        while p < n && count < 256 {
+            chunk[count as usize] = str_char_at(s, p) as u8
+            count = count + 1
+            p = p + 1
+        }
+        state = sha256_update(state, chunk, count as i32)
+    }
+    sha256_finalize(state)
+}
+fn hex_char(n: i64) -> i64 { if n < 10 { 48 + n } else { 87 + n } }
+fn hash_matches(d: SHA256Digest, proposal: &Document) -> bool with Mut, Panic, Div {
+    var i: i64 = 0
+    while i < 32 {
+        let b = d.bytes[i as usize] as i64
+        if proposal.context[(i * 2) as usize] != hex_char(b / 16) { return false }
+        if proposal.context[(i * 2 + 1) as usize] != hex_char(b % 16) { return false }
+        i = i + 1
+    }
+    true
+}
+fn print_digest(d: SHA256Digest) with IO, Mut, Panic, Div {
+    var i: i64 = 0
+    while i < 32 {
+        let b = d.bytes[i as usize] as i64
+        print_char(hex_char(b / 16) as i32)
+        print_char(hex_char(b % 16) as i32)
+        i = i + 1
+    }
+}
+fn refuse(reason: string) -> i32 with IO {
+    print("{\"schema\":1,\"authority\":\"Sounio\",\"decision\":\"REFUSE\",\"reason\":\"")
+    print(reason); print("\"}\n")
+    1
+}
+fn main() -> i32 with IO, Mut, Panic, Div {
+    if arg_count() != 2 && arg_count() != 3 { return refuse("ARGUMENTS") }
+    var materialize = false
+    if arg_count() == 3 {
+        let mode = get_arg(2)
+        if str_len(mode) != 3 || str_char_at(mode, 0) != 112 || str_char_at(mode, 1) != 116 || str_char_at(mode, 2) != 120 { return refuse("MODE") }
+        materialize = true
+    }
+    let cp = get_arg(0)
+    let pp = get_arg(1)
+    let cn = file_size(cp)
+    let pn = file_size(pp)
+    if cn <= 0 || cn > 4096 || pn <= 0 || pn > 4096 { return refuse("SIZE") }
+    let cs = read_file(cp)
+    let ps = read_file(pp)
+    let c = parse(cs, cn)
+    let p = parse(ps, pn)
+    if !c.valid || c.seen != 511 { return refuse("CONTEXT_FORMAT") }
+    // Proposal fields 0..5 and 9..15; context-only fields cannot be overridden.
+    if !p.valid || p.seen != 65087 { return refuse("PROPOSAL_FORMAT") }
+    if !hash_matches(hash_text(cs, cn), &p) { return refuse("SNAPSHOT") }
+    if c.values[0] != 1 || p.values[0] != 1 { return refuse("SCHEMA") }
+    if c.values[1] != 701202 || p.values[1] != c.values[1] { return refuse("TARGET") }
+    if c.values[2] != 16 || p.values[2] != 16 { return refuse("DIMENSION") }
+    if c.values[3] != 64 || p.values[3] != 64 { return refuse("PRECISION") }
+    // order=1 means output k, ascending right operand j, left i=k XOR j.
+    if c.values[4] != 1 || p.values[4] != 1 { return refuse("ORDER") }
+    if c.values[5] != 0 || p.values[5] != 0 { return refuse("FMA") }
+    if c.values[8] != 1 { return refuse("UNKNOWN_OR_CONTRADICTORY_FACTS") }
+    if c.values[6] < 0 || c.values[6] > 63 || c.values[7] != 32 { return refuse("CAPABILITY") }
+    if p.values[9] != 1 { return refuse("KIND") }
+    let stride = p.values[10]
+    let offset = p.values[11]
+    let load = p.values[12]
+    let layout = p.values[13]
+    let unroll = p.values[14]
+    if stride < 1 || stride > 15 || stride % 2 != 1 || offset > 15 { return refuse("LANE_MAP") }
+    if load > 1 || layout > 1 { return refuse("GRAMMAR") }
+    if unroll != 1 && unroll != 2 && unroll != 4 && unroll != 8 && unroll != 16 { return refuse("UNROLL") }
+    var required: i64 = 39
+    if load == 1 { required = required | 16 }
+    if (c.values[6] & required) != required { return refuse("CAPABILITY") }
+    var lanes: [i64; 16] = [0; 16]
+    var lane: i64 = 0
+    while lane < 16 {
+        let k = (lane * stride + offset) % 16
+        lanes[k as usize] = lanes[k as usize] + 1
+        lane = lane + 1
+    }
+    var i: i64 = 0
+    while i < 16 {
+        if lanes[i as usize] != 1 { return refuse("LANE_COVERAGE") }
+        i = i + 1
+    }
+    // Reconstruct every coefficient in labeled basis order (a,b,k).
+    // Algebraic tensor parity alone does not establish floating-point parity.
+    // Canonical tensor encoding cd16-abk-offset1-v1: a,b,k ascending, one
+    // byte per coefficient; -1 maps to 0, 0 to 1, +1 to 2. This is injective
+    // on the admitted coefficient set. No tensor/hash is accepted from the LLM.
+    var state = sha256_init()
+    var a: i64 = 0
+    var failures: i64 = 0
+    while a < 16 {
+        var block: [u8; 256] = [0; 256]
+        var b: i64 = 0
+        while b < 16 {
+            var k: i64 = 0
+            while k < 16 {
+                var reconstructed: i64 = 0
+                lane = 0
+                while lane < 16 {
+                    let output = (lane * stride + offset) % 16
+                    if output == k && (output ^ b) == a {
+                        reconstructed = reconstructed + cd_sigma(a as i32, b as i32, 4) as i64
+                    }
+                    lane = lane + 1
+                }
+                var expected: i64 = 0
+                if (a ^ b) == k { expected = cd_sigma(a as i32, b as i32, 4) as i64 }
+                if reconstructed != expected { failures = failures + 1 }
+                block[(b * 16 + k) as usize] = (reconstructed + 1) as u8
+                k = k + 1
+            }
+            b = b + 1
+        }
+        state = sha256_update(state, block, 256)
+        a = a + 1
+    }
+    if failures != 0 { return refuse("TENSOR") }
+    if materialize {
+        emit_lowering_ptx(stride, offset, load, layout, unroll)
+        return 0
+    }
+    let plan_id = (((stride * 16 + offset) * 2 + load) * 2 + layout) * 32 + unroll
+    print("{\"schema\":1,\"authority\":\"Sounio\",\"decision\":\"ADMIT\",\"kind\":\"lowering\",\"plan_id\":")
+    print_int(plan_id)
+    print(",\"tensor_components\":4096,\"tensor_encoding\":\"cd16-abk-offset1-v1\",\"tensor_sha256\":\"")
+    print_digest(sha256_finalize(state))
+    print("\",\"context_sha256\":\""); print_digest(hash_text(cs, cn))
+    print("\",\"proposal_sha256\":\""); print_digest(hash_text(ps, pn))
+    print("\",\"fp_parity\":\"UNMEASURED\",\"claim_ready\":false,\"formal_v13_v14\":\"OPEN\"}\n")
+    0
+}
+
+FILE materialize_ptx.sio
+// Sounio-owned material probe for admitted Pireus plans.
+// One block of 16 threads computes one Sedenion. Grid x is vector count.
+// The arithmetic sequence matches the canonical ascending-j GPU experiment:
+// product=a[i]*b[j]; signed=product*sigma(i,j); sum=sum+signed.
+// Explicit .rn instructions preserve separate multiply and addition.
+use algebra::cayley_dickson::cd_sigma
+
+fn address_index(layout: i64, coefficient: string) with IO {
+    if layout == 0 {
+        print("    mad.lo.u32 %r7, %r1, 16, "); print(coefficient); print(";\n")
+    } else {
+        print("    mad.lo.u32 %r7, "); print(coefficient); print(", %r2, %r1;\n")
+    }
+}
+pub fn emit_lowering_ptx(stride: i64, offset: i64, load: i64, layout: i64, unroll: i64) with IO, Mut, Panic, Div {
+    print(".version 9.0\n.target sm_121\n.address_size 64\n")
+    print("// PIREUS material probe: f64 mul, sign mul, add; ascending j; no FMA.\n")
+    print(".const .align 4 .u32 pireus_signs[16] = {")
+    var j: i64 = 0
+    while j < 16 {
+        var mask: i64 = 0
+        var k: i64 = 0
+        while k < 16 {
+            if cd_sigma((k ^ j) as i32, j as i32, 4) < 0 { mask = mask | (1 << k) }
+            k = k + 1
+        }
+        if j > 0 { print(",") }
+        print_int(mask)
+        j = j + 1
+    }
+    print("};\n.visible .entry pireus_candidate(.param .u64 pa, .param .u64 pb, .param .u64 pc)\n.maxntid 16,1,1\n{\n")
+    print("    .reg .b32 %r<32>;\n    .reg .b64 %rd<16>;\n    .reg .f64 %fd<8>;\n    .reg .pred %p<4>;\n")
+    print("    ld.param.u64 %rd0, [pa];\n    ld.param.u64 %rd1, [pb];\n    ld.param.u64 %rd2, [pc];\n")
+    print("    mov.u32 %r0, %tid.x;\n    mov.u32 %r1, %ctaid.x;\n    mov.u32 %r2, %nctaid.x;\n")
+    print("    setp.gt.u32 %p0, %r2, 16777216;\n    @%p0 bra DONE;\n")
+    print("    mad.lo.u32 %r3, %r0, "); print_int(stride); print(", "); print_int(offset); print(";\n    and.b32 %r3, %r3, 15;\n")
+    var inverse: i64 = 1
+    while (inverse * stride) % 16 != 1 { inverse = inverse + 2 }
+    if load == 1 {
+        address_index(layout, "%r3")
+        print("    mul.wide.u32 %rd3, %r7, 8;\n    add.u64 %rd3, %rd1, %rd3;\n    ld.global.f64 %fd2, [%rd3];\n")
+        print("    mov.b64 {%r11,%r12}, %fd2;\n")
+    }
+    print("    mov.f64 %fd0, 0d0000000000000000;\n    mov.u32 %r4, 0;\nLOOP:\n")
+    var u: i64 = 0
+    while u < unroll {
+        print("    add.u32 %r5, %r4, "); print_int(u); print(";\n    xor.b32 %r6, %r3, %r5;\n")
+        address_index(layout, "%r6")
+        print("    mul.wide.u32 %rd3, %r7, 8;\n    add.u64 %rd3, %rd0, %rd3;\n    ld.global.f64 %fd1, [%rd3];\n")
+        if load == 0 {
+            address_index(layout, "%r5")
+            print("    mul.wide.u32 %rd3, %r7, 8;\n    add.u64 %rd3, %rd1, %rd3;\n    ld.global.f64 %fd2, [%rd3];\n")
+        } else {
+            print("    sub.u32 %r8, %r5, "); print_int(offset); print(";\n")
+            print("    mul.lo.u32 %r8, %r8, "); print_int(inverse); print(";\n    and.b32 %r8, %r8, 15;\n")
+            print("    shfl.sync.idx.b32 %r9, %r11, %r8, 15, 65535;\n    shfl.sync.idx.b32 %r10, %r12, %r8, 15, 65535;\n    mov.b64 %fd2, {%r9,%r10};\n")
+        }
+        print("    mul.rn.f64 %fd3, %fd1, %fd2;\n")
+        print("    mov.u64 %rd4, pireus_signs;\n    mul.wide.u32 %rd5, %r5, 4;\n    add.u64 %rd4, %rd4, %rd5;\n    ld.const.u32 %r13, [%rd4];\n")
+        print("    shr.u32 %r13, %r13, %r3;\n    and.b32 %r13, %r13, 1;\n    setp.ne.u32 %p1, %r13, 0;\n")
+        print("    selp.f64 %fd4, 0dBFF0000000000000, 0d3FF0000000000000, %p1;\n")
+        print("    mul.rn.f64 %fd3, %fd3, %fd4;\n    add.rn.f64 %fd0, %fd0, %fd3;\n")
+        u = u + 1
+    }
+    if unroll < 16 {
+        print("    add.u32 %r4, %r4, "); print_int(unroll); print(";\n    setp.lt.u32 %p2, %r4, 16;\n    @%p2 bra LOOP;\n")
+    }
+    address_index(layout, "%r3")
+    print("    mul.wide.u32 %rd3, %r7, 8;\n    add.u64 %rd3, %rd2, %rd3;\n    st.global.f64 [%rd3], %fd0;\nDONE:\n    ret;\n}\n")
+}
+
+FILE numeric_fixtures.sio
+// Sounio produces reference inputs and outputs; adapters only move their bits.
+// 256 basis pairs, 32 dense finite vectors, and 32 numerical edge vectors.
+use algebra::cayley_dickson::cd_sigma
+fn edge(i: i64) -> f64 with Div {
+    if i == 0 { return 0.0 }
+    if i == 1 { return bits_to_f64(1 << 63) }
+    if i == 2 { return 1.0 }
+    if i == 3 { return -1.0 }
+    if i == 4 { return 1.0e-300 }
+    if i == 5 { return -1.0e-300 }
+    if i == 6 { return 1.0e300 }
+    if i == 7 { return -1.0e300 }
+    if i == 8 { return 1.0e-160 }
+    if i == 9 { return -1.0e-160 }
+    if i == 10 { return bits_to_f64(4503599627370496) }
+    if i == 11 { return bits_to_f64(1) }
+    if i == 12 { return bits_to_f64(9218868437227405311) }
+    if i == 13 { return bits_to_f64(9218868437227405312) }
+    if i == 14 { return bits_to_f64(-4503599627370496) }
+    bits_to_f64(9221120237041090561)
+}
+fn main() -> i32 with IO, Mut, Panic, Div {
+    var v: i64 = 0
+    while v < 320 {
+        var a: [f64; 16] = [0.0; 16]
+        var b: [f64; 16] = [0.0; 16]
+        var i: i64 = 0
+        while i < 16 {
+            if v < 256 {
+                if i == v / 16 { a[i as usize] = 1.0 }
+                if i == v % 16 { b[i as usize] = 1.0 }
+            } else if v < 288 {
+                a[i as usize] = ((v * 17 + i * 29) % 97 - 48) as f64 / 13.0
+                b[i as usize] = ((v * 31 + i * 7) % 89 - 44) as f64 / 11.0
+            } else if v < 304 {
+                a[i as usize] = edge(v - 288)
+                b[i as usize] = if i % 2 == 0 { 2.0 } else { -2.0 }
+            } else {
+                if i == v % 16 { a[i as usize] = edge(v - 304) }
+                b[i as usize] = if i % 2 == 0 { 1.0e-160 } else { 1.0e160 }
+            }
+            i = i + 1
+        }
+        var out: [f64; 16] = [0.0; 16]
+        var k: i64 = 0
+        while k < 16 {
+            var sum = 0.0
+            var j: i64 = 0
+            while j < 16 {
+                let product = a[(k ^ j) as usize] * b[j as usize]
+                let signed_product = product * (cd_sigma((k ^ j) as i32, j as i32, 4) as f64)
+                sum = sum + signed_product
+                j = j + 1
+            }
+            out[k as usize] = sum
+            k = k + 1
+        }
+        print("{\"index\":"); print_int(v); print(",\"a_bits\":[")
+        i = 0
+        while i < 16 { if i > 0 { print(",") }; print_int(f64_to_bits(a[i as usize])); i = i + 1 }
+        print("],\"b_bits\":[")
+        i = 0
+        while i < 16 { if i > 0 { print(",") }; print_int(f64_to_bits(b[i as usize])); i = i + 1 }
+        print("],\"output_bits\":[")
+        i = 0
+        while i < 16 { if i > 0 { print(",") }; print_int(f64_to_bits(out[i as usize])); i = i + 1 }
+        print("]}\n")
+        v = v + 1
+    }
+    0
+}
+
+FILE material_parity.sio
+// Material parity decision over transported IEEE754 bit strings.
+// Input frame: 16 lowercase hex words of 16 digits, then LF, per vector.
+// Contract v1: finite/zero/infinity bit identity; NaN payloads are not compared.
+fn nibble(c: i64) -> i64 {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    -1
+}
+fn bits_at(s: string, start: i64) -> i64 with Mut, Div {
+    var value: i64 = 0
+    var i: i64 = 0
+    while i < 16 {
+        value = (value << 4) | nibble(str_char_at(s, start + i))
+        i = i + 1
+    }
+    value
+}
+fn valid(s: string, n: i64) -> bool with Mut, Div {
+    if str_len(s) != n || n <= 0 || n % 257 != 0 { return false }
+    var i: i64 = 0
+    while i < n {
+        if i % 257 == 256 {
+            if str_char_at(s, i) != 10 { return false }
+        } else if nibble(str_char_at(s, i)) < 0 { return false }
+        i = i + 1
+    }
+    true
+}
+fn is_nan(bits: i64) -> bool {
+    (bits & 9218868437227405312) == 9218868437227405312 && (bits & 4503599627370495) != 0
+}
+fn main() -> i32 with IO, Mut, Panic, Div {
+    if arg_count() != 2 { return 2 }
+    let rp = get_arg(0)
+    let op = get_arg(1)
+    let n = file_size(rp)
+    if n != file_size(op) || n <= 0 || n > 1048576 { return 2 }
+    let reference = read_file(rp)
+    let observation = read_file(op)
+    if !valid(reference, n) || !valid(observation, n) { return 2 }
+    var exact: i64 = 0
+    var nan_class: i64 = 0
+    var mismatch: i64 = 0
+    var first: i64 = -1
+    var vector: i64 = 0
+    while vector < n / 257 {
+        var lane: i64 = 0
+        while lane < 16 {
+            let start = vector * 257 + lane * 16
+            let a = bits_at(reference, start)
+            let b = bits_at(observation, start)
+            if a == b { exact = exact + 1 }
+            else if is_nan(a) && is_nan(b) { nan_class = nan_class + 1 }
+            else {
+                mismatch = mismatch + 1
+                if first < 0 { first = vector * 16 + lane }
+            }
+            lane = lane + 1
+        }
+        vector = vector + 1
+    }
+    print("{\"authority\":\"Sounio\",\"contract\":\"finite-bits-nan-class-v1\",\"exact_bits\":")
+    print_int(exact); print(",\"nan_class_only\":"); print_int(nan_class)
+    print(",\"mismatches\":"); print_int(mismatch); print(",\"first_mismatch\":"); print_int(first)
+    print(",\"decision\":\""); if mismatch == 0 { print("PASS") } else { print("REFUSE") }
+    print("\",\"general_fp_proof\":false}\n")
+    if mismatch == 0 { 0 } else { 1 }
+}
+
+FILE gpu_probe.py
+#!/usr/bin/env python3
+"""CUDA material observer: loads Sounio PTX, moves fixture bits, records output bits."""
+import argparse,ctypes,hashlib,json,os,socket
+from pathlib import Path
+import numpy as np
+import torch
+class Driver:
+ def __init__(self):
+  self.lib=ctypes.CDLL("libcuda.so.1")
+  self.lib.cuInit.argtypes=[ctypes.c_uint]
+  self.lib.cuModuleLoadData.argtypes=[ctypes.POINTER(ctypes.c_void_p),ctypes.c_void_p]
+  self.lib.cuModuleGetFunction.argtypes=[ctypes.POINTER(ctypes.c_void_p),ctypes.c_void_p,ctypes.c_char_p]
+  self.lib.cuLaunchKernel.argtypes=[ctypes.c_void_p,*([ctypes.c_uint]*7),ctypes.c_void_p,ctypes.POINTER(ctypes.c_void_p),ctypes.c_void_p]
+  self.lib.cuModuleUnload.argtypes=[ctypes.c_void_p]
+  self.lib.cuGetErrorString.argtypes=[ctypes.c_int,ctypes.POINTER(ctypes.c_char_p)]
+  self.check(self.lib.cuInit(0))
+  torch.cuda.init()
+ def check(self,code):
+  if code:
+   text=ctypes.c_char_p();self.lib.cuGetErrorString(code,ctypes.byref(text))
+   raise RuntimeError(str(code)+": "+str(text.value))
+ def load(self,path):
+  module=ctypes.c_void_p()
+  data=ctypes.create_string_buffer(path.read_bytes())
+  self.check(self.lib.cuModuleLoadData(ctypes.byref(module),ctypes.cast(data,ctypes.c_void_p)))
+  function=ctypes.c_void_p()
+  self.check(self.lib.cuModuleGetFunction(ctypes.byref(function),module,b"pireus_candidate"))
+  return module,function
+ def launch(self,function,a,b,c,n):
+  assert 0<n<=16777216
+  values=[ctypes.c_uint64(t.data_ptr()) for t in (a,b,c)]
+  parameters=(ctypes.c_void_p*3)(*[ctypes.addressof(v) for v in values])
+  self.check(self.lib.cuLaunchKernel(function,n,1,1,16,1,1,0,
+              ctypes.c_void_p(torch.cuda.current_stream().cuda_stream),parameters,None))
+def hex_frame(values):
+ return "".join("".join(format(int(x)&((1<<64)-1),"016x") for x in row)+"\n" for row in values)
+def main():
+ ap=argparse.ArgumentParser();ap.add_argument("--run",type=Path,required=True);args=ap.parse_args()
+ assert os.environ.get("SLURM_JOB_ID"),"Slurm allocation required"
+ root=args.run
+ manifest=json.loads((root/"gpu-manifest.json").read_text())
+ fixtures=(root/"numeric-fixtures.jsonl").read_bytes()
+ assert hashlib.sha256(fixtures).hexdigest()==manifest["fixtures_sha256"]
+ rows=[json.loads(line) for line in fixtures.splitlines()]
+ arrays={}
+ for key in ["a_bits","b_bits","output_bits"]:
+  arrays[key]=np.array([r[key] for r in rows],dtype=np.int64)
+ n=len(rows);driver=Driver()
+ output=root/("observed-"+socket.gethostname());output.mkdir(exist_ok=True)
+ (output/"reference.hex").write_text(hex_frame(arrays["output_bits"]))
+ for candidate in manifest["candidates"]:
+  path=root/candidate["ptx"]
+  assert hashlib.sha256(path.read_bytes()).hexdigest()==candidate["ptx_sha256"]
+  module,function=driver.load(path)
+  tensors=[]
+  for key in ["a_bits","b_bits"]:
+   value=arrays[key].view(np.float64)
+   if candidate["layout"]==1:value=value.T
+   tensors.append(torch.from_numpy(np.ascontiguousarray(value)).to("cuda"))
+  out=torch.empty_like(tensors[0])
+  driver.launch(function,*tensors,out,n)
+  torch.cuda.synchronize()
+  raw=out.cpu().numpy()
+  if candidate["layout"]==1:raw=raw.T
+  bits=np.ascontiguousarray(raw).view(np.int64)
+  destination=output/(candidate["id"]+".hex")
+  destination.write_text(hex_frame(bits))
+  print(json.dumps(dict(stage="MATERIAL_OBSERVATION",candidate=candidate["id"],
+    sha256=hashlib.sha256(destination.read_bytes()).hexdigest(),components=int(bits.size),
+    node=socket.gethostname(),job=os.environ["SLURM_JOB_ID"])),flush=True)
+  driver.check(driver.lib.cuModuleUnload(module))
+ (output/"inventory.json").write_text(json.dumps(dict(job=os.environ["SLURM_JOB_ID"],
+    node=socket.gethostname(),gpu=torch.cuda.get_device_name(0),cuda=torch.version.cuda,
+    observation_only=True),indent=2)+"\n")
+if __name__=="__main__":main()

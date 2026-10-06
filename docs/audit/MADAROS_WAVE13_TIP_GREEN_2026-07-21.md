@@ -44,8 +44,15 @@ bash scripts/dev/madaros_wave13_tip_green_gate.sh
 
 If stock `bin/madaros-linux-x86_64` predates #1392:
 
+> **Correction (2026-08-25):** this originally read
+> `scripts/dev/souc-build-lock.sh make build-madaros`, which **hangs forever**.
+> `scripts/ci/build_modular_madaros.sh` takes the global build lock itself, and
+> `make` does not pass the lock's file descriptor (fd 9) to its recipe shells, so
+> the inner lock blocks on the lock its own ancestor holds — silently, at 0% CPU.
+> Run the target bare, as below. See CLAUDE.md §4.
+
 ```bash
-scripts/dev/souc-build-lock.sh make build-madaros
+make build-madaros
 MADAROS_RAW_BIN=artifacts/self-hosted/madaros bash scripts/dev/madaros_wave13_tip_green_gate.sh
 ```
 

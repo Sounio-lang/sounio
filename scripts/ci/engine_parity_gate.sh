@@ -281,6 +281,21 @@ printf '%s\n' "$sources" \
 
 sort -o "$WORK/results.tsv" "$WORK/results.tsv"
 
+# Completeness floor: parity_one prints exactly one verdict row per program,
+# so any shortfall is a worker that died before answering (OOM kill, broken
+# worker script, dead xargs) -- not a cleaner corpus. Under a wholesale
+# failure every count below reads 0, observed.txt reads empty, and comm
+# reports "no new divergences"; zero evidence must not read as a clean run
+# (the same contract the v2 suite's result-completeness asserts enforce).
+n_rows=$(grep -c . "$WORK/results.tsv" || true)
+if [ "$n_rows" -ne "$total" ]; then
+    echo "[engine-parity] FAIL: incomplete results -- $n_rows of $total programs answered" >&2
+    cut -f2 "$WORK/results.tsv" | sort > "$WORK/answered.txt"
+    printf '%s\n' "$sources" | sort > "$WORK/expected.txt"
+    comm -13 "$WORK/answered.txt" "$WORK/expected.txt" | sed 's/^/  no-verdict: /' >&2
+    exit 1
+fi
+
 agree=$(grep -c '^AGREE'           "$WORK/results.tsv" || true)
 diverge=$(grep -c '^DIVERGE'       "$WORK/results.tsv" || true)
 mad_only=$(grep -c '^MADAROS-ONLY' "$WORK/results.tsv" || true)

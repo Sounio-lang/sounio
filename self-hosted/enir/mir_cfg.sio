@@ -1,0 +1,705 @@
+// E3C ABI-independent semantic MIR with explicit CFG and Memory SSA.
+// The implemented profile is the canonical four-block qd128 loop shape.
+
+use enir::ir::*
+use enir::verify::*
+use enir::canonical::*
+use enir::qd::*
+use enir::mir::*
+
+pub let CMIR_SCHEMA_VERSION: i64 = 3
+pub let CMIR_STAGE_LOWERED: i64 = 4
+pub let CMIR_MEMORY_STORE: i64 = 0
+pub let CMIR_MEMORY_PHI: i64 = 1
+
+pub struct EnirCfgMirBlock {
+    pub id: i64, pub first_instr: i64, pub instr_count: i64,
+    pub arg_start: i64, pub arg_count: i64, pub terminator_kind: i64,
+    pub condition_value: i64, pub edge0: i64, pub edge1: i64,
+    pub terminator_tick: i64, pub source_block_id: i64,
+}
+
+pub struct EnirCfgMirBlockArg {
+    pub id: i64, pub block_id: i64, pub ordinal: i64, pub value_id: i64,
+    pub type_id: i64, pub provenance_id: i64, pub source_arg_id: i64,
+}
+
+pub struct EnirCfgMirEdge {
+    pub id: i64, pub from_block: i64, pub to_block: i64, pub arg_count: i64,
+    pub arg0: i64, pub arg1: i64, pub arg2: i64, pub arg3: i64,
+    pub source_edge_id: i64,
+}
+
+pub struct EnirCfgMirMemoryVersion {
+    pub id: i64, pub slot: i64, pub kind: i64, pub block_id: i64,
+    pub defining_instr: i64, pub source_store_op: i64,
+}
+
+pub struct EnirCfgMirMemoryPhi {
+    pub id: i64, pub block_id: i64, pub slot: i64, pub result_version: i64,
+    pub edge0: i64, pub version0: i64, pub edge1: i64, pub version1: i64,
+    pub source_block_id: i64,
+}
+
+pub struct EnirCfgMirInstr {
+    pub id: i64, pub opcode: i64, pub result_id: i64, pub type_id: i64,
+    pub a: i64, pub b: i64, pub effect_kind: i64, pub trap_kind: i64,
+    pub policy_id: i64, pub source_op_id: i64, pub semantic_tick: i64,
+    pub memory_slot: i64, pub memory_in: i64, pub memory_out: i64,
+}
+
+pub struct EnirCfgMirModule {
+    pub schema_version: i64, pub stage: i64, pub name: EnirName, pub profile: i64,
+    pub fuel_limit: i64, pub source_enir_hash: i64, pub ty: EnirType, pub type_count: i64,
+    pub values: [EnirMirValue; 128], pub value_count: i64,
+    pub provenance: [EnirMirProvenance; 128], pub provenance_count: i64,
+    pub blocks: [EnirCfgMirBlock; 16], pub block_count: i64,
+    pub block_args: [EnirCfgMirBlockArg; 32], pub block_arg_count: i64,
+    pub edges: [EnirCfgMirEdge; 32], pub edge_count: i64,
+    pub memory_versions: [EnirCfgMirMemoryVersion; 32], pub memory_version_count: i64,
+    pub memory_phis: [EnirCfgMirMemoryPhi; 16], pub memory_phi_count: i64,
+    pub instrs: [EnirCfgMirInstr; 128], pub instr_count: i64,
+    pub observations: [EnirMirObservation; 64], pub observation_count: i64,
+    pub declared_type_count: i64, pub declared_value_count: i64,
+    pub declared_provenance_count: i64, pub declared_block_count: i64,
+    pub declared_block_arg_count: i64, pub declared_edge_count: i64,
+    pub declared_memory_version_count: i64, pub declared_memory_phi_count: i64,
+    pub declared_instr_count: i64, pub declared_observation_count: i64,
+}
+
+pub struct EnirCfgMirLowerResult { pub ok: bool, pub error_code: i64, pub module: EnirCfgMirModule }
+pub struct EnirCfgMirParseResult { pub ok: bool, pub error_code: i64, pub module: EnirCfgMirModule }
+pub struct EnirCfgMirExecResult {
+    pub ok: bool, pub error_code: i64, pub executed_instrs: i64,
+    pub observations: i64, pub fuel_left: i64, pub last_write: i64,
+    pub stop_kind: i64, pub branch_poisoned: i64, pub frail_branches: i64,
+}
+
+struct EnirCfgMirParsedI64 { ok: bool, value: i64 }
+struct EnirCfgMirRuntimeValue { val: f64, err: Qd128, uncertainty: f64, poisoned: i64 }
+
+pub fn enir_cfg_mir_empty() -> EnirCfgMirModule {
+    EnirCfgMirModule {
+        schema_version: CMIR_SCHEMA_VERSION, stage: CMIR_STAGE_LOWERED,
+        name: enir_name_empty(), profile: -1, fuel_limit: -1, source_enir_hash: 0,
+        ty: EnirType { id: -1, value_kind: -1, error_kind: -1, uncertainty_kind: -1, status_tracked: 0, provenance_tracked: 0, profile: -1 }, type_count: 0,
+        values: [EnirMirValue { id: -1, type_id: -1, known_bits: 0, value_bits: 0, fp_class: -1, error0_bits: 0, error1_bits: 0, error2_bits: 0, error3_bits: 0, uncertainty_bits: 0, status_kind: -1, status_reason: -1, provenance_id: -1, source_value_id: -1 }; 128], value_count: 0,
+        provenance: [EnirMirProvenance { id: -1, source_span_id: -1, input_origin_id: -1, transform_id: -1, assumption_id: -1, policy_id: -1, source_provenance_id: -1 }; 128], provenance_count: 0,
+        blocks: [EnirCfgMirBlock { id: -1, first_instr: -1, instr_count: -1, arg_start: -1, arg_count: -1, terminator_kind: -1, condition_value: -1, edge0: -1, edge1: -1, terminator_tick: -1, source_block_id: -1 }; 16], block_count: 0,
+        block_args: [EnirCfgMirBlockArg { id: -1, block_id: -1, ordinal: -1, value_id: -1, type_id: -1, provenance_id: -1, source_arg_id: -1 }; 32], block_arg_count: 0,
+        edges: [EnirCfgMirEdge { id: -1, from_block: -1, to_block: -1, arg_count: -1, arg0: -1, arg1: -1, arg2: -1, arg3: -1, source_edge_id: -1 }; 32], edge_count: 0,
+        memory_versions: [EnirCfgMirMemoryVersion { id: -1, slot: -1, kind: -1, block_id: -1, defining_instr: -1, source_store_op: -1 }; 32], memory_version_count: 0,
+        memory_phis: [EnirCfgMirMemoryPhi { id: -1, block_id: -1, slot: -1, result_version: -1, edge0: -1, version0: -1, edge1: -1, version1: -1, source_block_id: -1 }; 16], memory_phi_count: 0,
+        instrs: [EnirCfgMirInstr { id: -1, opcode: -1, result_id: -1, type_id: -1, a: -1, b: -1, effect_kind: -1, trap_kind: -1, policy_id: -1, source_op_id: -1, semantic_tick: -1, memory_slot: -1, memory_in: -1, memory_out: -1 }; 128], instr_count: 0,
+        observations: [EnirMirObservation { id: -1, program_name: EnirName { buf: [0; 64], len: 0 }, ordinal: -1, kind: -1, source_observation_id: -1 }; 64], observation_count: 0,
+        declared_type_count: -1, declared_value_count: -1, declared_provenance_count: -1,
+        declared_block_count: -1, declared_block_arg_count: -1, declared_edge_count: -1,
+        declared_memory_version_count: -1, declared_memory_phi_count: -1,
+        declared_instr_count: -1, declared_observation_count: -1,
+    }
+}
+
+fn enir_cfg_mir_fail(code: i64, module: EnirCfgMirModule) -> EnirCfgMirLowerResult {
+    EnirCfgMirLowerResult { ok: false, error_code: code, module: module }
+}
+
+fn enir_cfg_mir_opcode(opcode: i64) -> i64 {
+    if opcode == enir_op_econst() { return EMIR_OP_CONST }
+    if opcode == enir_op_eadd() { return EMIR_OP_ADD }
+    if opcode == enir_op_esub() { return EMIR_OP_SUB }
+    if opcode == enir_op_emul() { return EMIR_OP_MUL }
+    if opcode == enir_op_ediv() { return EMIR_OP_DIV }
+    if opcode == enir_op_esqrt() { return EMIR_OP_SQRT }
+    if opcode == enir_op_egate() { return EMIR_OP_OBSERVE }
+    if opcode == enir_op_eload() { return EMIR_OP_LOAD }
+    if opcode == enir_op_estore() { return EMIR_OP_STORE }
+    if opcode == enir_op_emov() { return EMIR_OP_MOVE }
+    -1
+}
+
+fn enir_cfg_mir_source_opcode(opcode: i64) -> i64 {
+    if opcode == EMIR_OP_CONST { return enir_op_econst() }
+    if opcode == EMIR_OP_ADD { return enir_op_eadd() }
+    if opcode == EMIR_OP_SUB { return enir_op_esub() }
+    if opcode == EMIR_OP_MUL { return enir_op_emul() }
+    if opcode == EMIR_OP_DIV { return enir_op_ediv() }
+    if opcode == EMIR_OP_SQRT { return enir_op_esqrt() }
+    if opcode == EMIR_OP_OBSERVE { return enir_op_egate() }
+    if opcode == EMIR_OP_LOAD { return enir_op_eload() }
+    if opcode == EMIR_OP_STORE { return enir_op_estore() }
+    if opcode == EMIR_OP_MOVE { return enir_op_emov() }
+    -1
+}
+
+fn enir_cfg_mir_effect(opcode: i64) -> i64 {
+    if opcode == EMIR_OP_OBSERVE { return EMIR_EFFECT_OBSERVE }
+    if opcode == EMIR_OP_LOAD { return EMIR_EFFECT_MEMORY_READ }
+    if opcode == EMIR_OP_STORE { return EMIR_EFFECT_MEMORY_WRITE }
+    EMIR_EFFECT_PURE
+}
+
+fn enir_cfg_mir_block_of(source: EnirModule, op_id: i64) -> i64 {
+    var i: i64 = 0
+    while i < source.block_count {
+        let block = source.blocks[i as usize]
+        if op_id >= block.first_op && op_id < block.first_op + block.op_count { return i }
+        i = i + 1
+    }
+    -1
+}
+
+pub fn enir_lower_to_cfg_mir(source: EnirModule, source_hash: i64) -> EnirCfgMirLowerResult with Mut, Panic, Div {
+    var out = enir_cfg_mir_empty()
+    if enir_verify(source) != 0 || source.schema_version != ENIR_SCHEMA_CFG_VERSION || source.stage != ENIR_STAGE_LOWERED { return enir_cfg_mir_fail(10, out) }
+    if source.profile != enir_profile_eisa_v2() || source.type_count != 1 || source.block_count != 4 || source.edge_count != 4 { return enir_cfg_mir_fail(11, out) }
+    out.name = source.name; out.profile = source.profile; out.fuel_limit = source.fuel_limit; out.source_enir_hash = source_hash
+    out.ty = source.types[0]; out.type_count = 1
+    var i: i64 = 0
+    while i < source.value_count {
+        let v = source.values[i as usize]
+        out.values[i as usize] = EnirMirValue { id: v.id, type_id: v.type_id, known_bits: v.known_bits, value_bits: v.value_bits, fp_class: v.fp_class, error0_bits: v.error0_bits, error1_bits: v.error1_bits, error2_bits: v.error2_bits, error3_bits: v.error3_bits, uncertainty_bits: v.uncertainty_bits, status_kind: v.status_kind, status_reason: v.status_reason, provenance_id: v.provenance_id, source_value_id: v.id }
+        i = i + 1
+    }
+    out.value_count = source.value_count
+    i = 0
+    while i < source.provenance_count {
+        let p = source.provenance[i as usize]
+        out.provenance[i as usize] = EnirMirProvenance { id: p.id, source_span_id: p.source_span_id, input_origin_id: p.input_origin_id, transform_id: p.transform_id, assumption_id: p.assumption_id, policy_id: p.policy_id, source_provenance_id: p.id }
+        i = i + 1
+    }
+    out.provenance_count = source.provenance_count
+    i = 0
+    while i < source.block_count {
+        let b = source.blocks[i as usize]
+        out.blocks[i as usize] = EnirCfgMirBlock { id: b.id, first_instr: b.first_op, instr_count: b.op_count, arg_start: b.arg_start, arg_count: b.arg_count, terminator_kind: b.terminator_kind, condition_value: b.condition_value, edge0: b.edge0, edge1: b.edge1, terminator_tick: b.terminator_fuel_cost, source_block_id: b.id }
+        i = i + 1
+    }
+    out.block_count = source.block_count
+    i = 0
+    while i < source.block_arg_count {
+        let a = source.block_args[i as usize]
+        out.block_args[i as usize] = EnirCfgMirBlockArg { id: a.id, block_id: a.block_id, ordinal: a.ordinal, value_id: a.value_id, type_id: a.type_id, provenance_id: a.provenance_id, source_arg_id: a.id }
+        i = i + 1
+    }
+    out.block_arg_count = source.block_arg_count
+    i = 0
+    while i < source.edge_count {
+        let e = source.edges[i as usize]
+        out.edges[i as usize] = EnirCfgMirEdge { id: e.id, from_block: e.from_block, to_block: e.to_block, arg_count: e.arg_count, arg0: e.arg0, arg1: e.arg1, arg2: e.arg2, arg3: e.arg3, source_edge_id: e.id }
+        i = i + 1
+    }
+    out.edge_count = source.edge_count
+
+    var store_version: [i64; 128] = [-1; 128]
+    var entry_store_version: i64 = -1
+    var body_store_version: i64 = -1
+    var saw_memory = false
+    i = 0
+    while i < source.op_count {
+        let op = source.ops[i as usize]
+        if op.opcode == enir_op_estore() {
+            if op.memory_slot != 0 || out.memory_version_count >= 31 { return enir_cfg_mir_fail(20, out) }
+            let block_id = enir_cfg_mir_block_of(source, i)
+            if block_id != 0 && block_id != 2 { return enir_cfg_mir_fail(21, out) }
+            let version = out.memory_version_count
+            out.memory_versions[version as usize] = EnirCfgMirMemoryVersion { id: version, slot: 0, kind: CMIR_MEMORY_STORE, block_id: block_id, defining_instr: i, source_store_op: i }
+            out.memory_version_count = version + 1; store_version[i as usize] = version; saw_memory = true
+            if block_id == 0 { if entry_store_version >= 0 { return enir_cfg_mir_fail(22, out) }; entry_store_version = version }
+            if block_id == 2 { if body_store_version >= 0 { return enir_cfg_mir_fail(23, out) }; body_store_version = version }
+        } else if op.opcode == enir_op_eload() {
+            if op.memory_slot != 0 || enir_cfg_mir_block_of(source, i) != 3 { return enir_cfg_mir_fail(24, out) }
+            saw_memory = true
+        }
+        i = i + 1
+    }
+    var phi_version: i64 = -1
+    if saw_memory {
+        if entry_store_version < 0 || body_store_version < 0 { return enir_cfg_mir_fail(25, out) }
+        phi_version = out.memory_version_count
+        out.memory_versions[phi_version as usize] = EnirCfgMirMemoryVersion { id: phi_version, slot: 0, kind: CMIR_MEMORY_PHI, block_id: 1, defining_instr: -1, source_store_op: -1 }
+        out.memory_version_count = phi_version + 1
+        out.memory_phis[0] = EnirCfgMirMemoryPhi { id: 0, block_id: 1, slot: 0, result_version: phi_version, edge0: 0, version0: entry_store_version, edge1: 3, version1: body_store_version, source_block_id: 1 }
+        out.memory_phi_count = 1
+    }
+
+    i = 0
+    while i < source.op_count {
+        let op = source.ops[i as usize]
+        let opcode = enir_cfg_mir_opcode(op.opcode)
+        if opcode < 0 { return enir_cfg_mir_fail(30 + i, out) }
+        let block_id = enir_cfg_mir_block_of(source, i)
+        var memory_in: i64 = -1
+        var memory_out: i64 = -1
+        if opcode == EMIR_OP_STORE {
+            memory_out = store_version[i as usize]
+            if block_id == 2 { memory_in = phi_version }
+        } else if opcode == EMIR_OP_LOAD { memory_in = phi_version }
+        out.instrs[i as usize] = EnirCfgMirInstr { id: i, opcode: opcode, result_id: op.result_id, type_id: op.type_id, a: op.a, b: op.b, effect_kind: enir_cfg_mir_effect(opcode), trap_kind: if opcode >= EMIR_OP_ADD && opcode <= EMIR_OP_SQRT { EMIR_TRAP_POISON_INVALID } else { EMIR_TRAP_NONE }, policy_id: op.policy_id, source_op_id: op.id, semantic_tick: op.fuel_cost, memory_slot: op.memory_slot, memory_in: memory_in, memory_out: memory_out }
+        i = i + 1
+    }
+    out.instr_count = source.op_count
+    i = 0
+    while i < source.observation_count {
+        let o = source.observations[i as usize]
+        out.observations[i as usize] = EnirMirObservation { id: o.id, program_name: o.program_name, ordinal: o.ordinal, kind: o.kind, source_observation_id: o.id }
+        i = i + 1
+    }
+    out.observation_count = source.observation_count
+    out.declared_type_count = out.type_count; out.declared_value_count = out.value_count
+    out.declared_provenance_count = out.provenance_count; out.declared_block_count = out.block_count
+    out.declared_block_arg_count = out.block_arg_count; out.declared_edge_count = out.edge_count
+    out.declared_memory_version_count = out.memory_version_count; out.declared_memory_phi_count = out.memory_phi_count
+    out.declared_instr_count = out.instr_count; out.declared_observation_count = out.observation_count
+    let rc = enir_cfg_mir_verify(out)
+    if rc != 0 { return enir_cfg_mir_fail(1000 + rc, out) }
+    EnirCfgMirLowerResult { ok: true, error_code: 0, module: out }
+}
+
+fn enir_cfg_mir_edge_arg(edge: EnirCfgMirEdge, ordinal: i64) -> i64 {
+    if ordinal == 0 { return edge.arg0 }
+    if ordinal == 1 { return edge.arg1 }
+    if ordinal == 2 { return edge.arg2 }
+    if ordinal == 3 { return edge.arg3 }
+    -1
+}
+
+fn enir_cfg_mir_value_available(value_id: i64, block_id: i64, position: i64, def_blocks: [i64; 128], def_positions: [i64; 128], dominators: [i64; 16]) -> bool {
+    if value_id < 0 || value_id >= 128 || def_blocks[value_id as usize] < 0 { return false }
+    let def_block = def_blocks[value_id as usize]
+    if def_block == block_id { return def_positions[value_id as usize] < position }
+    (dominators[block_id as usize] & (1 << def_block)) != 0
+}
+
+pub fn enir_cfg_mir_verify(module: EnirCfgMirModule) -> i64 with Mut, Panic, Div {
+    if module.schema_version != CMIR_SCHEMA_VERSION || module.stage != CMIR_STAGE_LOWERED || module.profile != enir_profile_eisa_v2() { return 1 }
+    if module.name.len <= 0 || module.fuel_limit <= 0 || module.source_enir_hash < 0 || module.type_count != 1 || module.block_count != 4 || module.edge_count != 4 || module.instr_count < 0 || module.value_count <= 0 || module.value_count != module.provenance_count || module.observation_count != 1 { return 2 }
+    if module.declared_type_count != module.type_count || module.declared_value_count != module.value_count || module.declared_provenance_count != module.provenance_count || module.declared_block_count != module.block_count || module.declared_block_arg_count != module.block_arg_count || module.declared_edge_count != module.edge_count || module.declared_memory_version_count != module.memory_version_count || module.declared_memory_phi_count != module.memory_phi_count || module.declared_instr_count != module.instr_count || module.declared_observation_count != module.observation_count { return 3 }
+    if module.ty.id != 0 || module.ty.error_kind != enir_error_qd128() || module.ty.profile != module.profile { return 4 }
+    var i: i64 = 0
+    while i < module.value_count {
+        let v = module.values[i as usize]
+        let p = module.provenance[i as usize]
+        if v.id != i || v.type_id != 0 || v.provenance_id != i || v.source_value_id != i || v.status_kind != enir_status_clean() || v.status_reason != -1 || p.id != i || p.source_provenance_id != i || p.source_span_id <= 0 || p.transform_id < 0 { return 20 + i }
+        if v.known_bits != 0 && v.known_bits != 1 { return 160 + i }
+        if v.known_bits == 1 {
+            if v.fp_class != enir_f64_class_from_bits(v.value_bits) || v.fp_class >= enir_fp_positive_infinity() || v.error0_bits != 0 || v.error1_bits != 0 || v.error2_bits != 0 || v.error3_bits != 0 || v.uncertainty_bits != 0 { return 300 + i }
+        } else if v.value_bits != 0 || v.fp_class != -1 || v.error0_bits != 0 || v.error1_bits != 0 || v.error2_bits != 0 || v.error3_bits != 0 || v.uncertainty_bits != 0 { return 440 + i }
+        i = i + 1
+    }
+    var expected_first: i64 = 0
+    var expected_arg: i64 = 0
+    var op_blocks: [i64; 128] = [-1; 128]
+    i = 0
+    while i < module.block_count {
+        let b = module.blocks[i as usize]
+        if b.id != i || b.source_block_id != i || b.first_instr != expected_first || b.instr_count < 0 || b.first_instr + b.instr_count > module.instr_count || b.arg_start != expected_arg || b.arg_count < 0 || b.arg_start + b.arg_count > module.block_arg_count { return 600 + i }
+        var p = b.first_instr
+        while p < b.first_instr + b.instr_count { if op_blocks[p as usize] != -1 { return 620 + p }; op_blocks[p as usize] = i; p = p + 1 }
+        expected_first = b.first_instr + b.instr_count; expected_arg = b.arg_start + b.arg_count; i = i + 1
+    }
+    if expected_first != module.instr_count || expected_arg != module.block_arg_count { return 640 }
+    let entry = module.blocks[0]; let header = module.blocks[1]; let body = module.blocks[2]; let exit = module.blocks[3]
+    if entry.terminator_kind != enir_term_jump() || entry.edge0 != 0 || entry.edge1 != -1 || entry.condition_value != -1 || entry.terminator_tick != 0 || header.terminator_kind != enir_term_branch_zero() || header.edge0 != 1 || header.edge1 != 2 || header.terminator_tick != 1 || body.terminator_kind != enir_term_jump() || body.edge0 != 3 || body.edge1 != -1 || body.condition_value != -1 || body.terminator_tick != 1 || exit.terminator_kind != enir_term_halt() || exit.edge0 != -1 || exit.edge1 != -1 || exit.condition_value != -1 || exit.terminator_tick != 1 { return 650 }
+    i = 0
+    while i < module.edge_count {
+        let e = module.edges[i as usize]
+        if e.id != i || e.source_edge_id != i || e.from_block < 0 || e.from_block >= 4 || e.to_block < 0 || e.to_block >= 4 || e.arg_count != module.blocks[e.to_block as usize].arg_count { return 660 + i }
+        var a: i64 = 0
+        while a < 4 { let value = enir_cfg_mir_edge_arg(e, a); if a < e.arg_count { if value < 0 || value >= module.value_count { return 680 + i } } else if value != -1 { return 700 + i }; a = a + 1 }
+        i = i + 1
+    }
+    if module.edges[0].from_block != 0 || module.edges[0].to_block != 1 || module.edges[1].from_block != 1 || module.edges[1].to_block != 3 || module.edges[2].from_block != 1 || module.edges[2].to_block != 2 || module.edges[3].from_block != 2 || module.edges[3].to_block != 1 { return 720 }
+
+    var def_blocks: [i64; 128] = [-1; 128]
+    var def_positions: [i64; 128] = [-1; 128]
+    i = 0
+    while i < module.block_arg_count {
+        let a = module.block_args[i as usize]
+        if a.id != i || a.source_arg_id != i || a.block_id < 0 || a.block_id >= 4 || a.ordinal != i - module.blocks[a.block_id as usize].arg_start || a.value_id < 0 || a.value_id >= module.value_count || a.type_id != 0 || a.provenance_id != a.value_id || module.provenance[a.provenance_id as usize].transform_id != enir_transform_block_arg() || def_blocks[a.value_id as usize] != -1 { return 740 + i }
+        def_blocks[a.value_id as usize] = a.block_id; def_positions[a.value_id as usize] = -1; i = i + 1
+    }
+    var dominators: [i64; 16] = [0; 16]
+    dominators[0] = 1; dominators[1] = 3; dominators[2] = 7; dominators[3] = 11
+    var gate_count: i64 = 0
+    i = 0
+    while i < module.instr_count {
+        let op = module.instrs[i as usize]
+        let block_id = op_blocks[i as usize]
+        if op.id != i || op.source_op_id != i || block_id < 0 || op.semantic_tick != 1 || enir_cfg_mir_source_opcode(op.opcode) < 0 { return 800 + i }
+        var produces = false
+        if op.opcode == EMIR_OP_CONST {
+            produces = true
+            if op.a != -1 || op.b != -1 || op.type_id != 0 || op.effect_kind != EMIR_EFFECT_PURE || op.trap_kind != EMIR_TRAP_NONE || op.policy_id != -1 { return 940 + i }
+        } else if op.opcode >= EMIR_OP_ADD && op.opcode <= EMIR_OP_DIV {
+            produces = true
+            if !enir_cfg_mir_value_available(op.a, block_id, i, def_blocks, def_positions, dominators) || !enir_cfg_mir_value_available(op.b, block_id, i, def_blocks, def_positions, dominators) || op.effect_kind != EMIR_EFFECT_PURE || op.trap_kind != EMIR_TRAP_POISON_INVALID || op.policy_id != -1 { return 1080 + i }
+        } else if op.opcode == EMIR_OP_SQRT {
+            produces = true
+            if !enir_cfg_mir_value_available(op.a, block_id, i, def_blocks, def_positions, dominators) || op.b != -1 || op.effect_kind != EMIR_EFFECT_PURE || op.trap_kind != EMIR_TRAP_POISON_INVALID || op.policy_id != -1 { return 1220 + i }
+        } else if op.opcode == EMIR_OP_MOVE {
+            produces = true
+            if !enir_cfg_mir_value_available(op.a, block_id, i, def_blocks, def_positions, dominators) || op.b != -1 || op.effect_kind != EMIR_EFFECT_PURE || op.trap_kind != EMIR_TRAP_NONE || op.policy_id != -1 { return 1290 + i }
+        } else if op.opcode == EMIR_OP_LOAD {
+            produces = true
+            if op.a != -1 || op.b != -1 || op.memory_slot != 0 || op.memory_in < 0 || op.memory_out != -1 || op.effect_kind != EMIR_EFFECT_MEMORY_READ || op.trap_kind != EMIR_TRAP_NONE || op.policy_id != -1 || block_id != 3 { return 1360 + i }
+        } else if op.opcode == EMIR_OP_STORE {
+            if op.result_id != -1 || op.type_id != -1 || !enir_cfg_mir_value_available(op.a, block_id, i, def_blocks, def_positions, dominators) || op.b != -1 || op.memory_slot != 0 || op.memory_out < 0 || op.effect_kind != EMIR_EFFECT_MEMORY_WRITE || op.trap_kind != EMIR_TRAP_NONE || op.policy_id != -1 || (block_id != 0 && block_id != 2) { return 1500 + i }
+        } else if op.opcode == EMIR_OP_OBSERVE {
+            if op.result_id != -1 || op.type_id != -1 || !enir_cfg_mir_value_available(op.a, block_id, i, def_blocks, def_positions, dominators) || op.b != -1 || op.effect_kind != EMIR_EFFECT_OBSERVE || op.trap_kind != EMIR_TRAP_NONE || op.policy_id != 0 || block_id != 3 { return 1640 + i }
+            gate_count = gate_count + 1
+        }
+        if op.opcode != EMIR_OP_LOAD && op.opcode != EMIR_OP_STORE && (op.memory_slot != -1 || op.memory_in != -1 || op.memory_out != -1) { return 1780 + i }
+        if produces {
+            if op.result_id < 0 || op.result_id >= module.value_count || op.type_id != 0 || def_blocks[op.result_id as usize] != -1 || module.provenance[op.result_id as usize].transform_id != enir_cfg_mir_source_opcode(op.opcode) { return 1920 + i }
+            def_blocks[op.result_id as usize] = block_id; def_positions[op.result_id as usize] = i
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < module.value_count { if def_blocks[i as usize] < 0 { return 2060 + i }; i = i + 1 }
+    if !enir_cfg_mir_value_available(header.condition_value, 1, header.first_instr + header.instr_count, def_blocks, def_positions, dominators) { return 2190 }
+    i = 0
+    while i < module.edge_count {
+        let edge = module.edges[i as usize]; let source_block = module.blocks[edge.from_block as usize]; var a: i64 = 0
+        while a < edge.arg_count { if !enir_cfg_mir_value_available(enir_cfg_mir_edge_arg(edge, a), edge.from_block, source_block.first_instr + source_block.instr_count, def_blocks, def_positions, dominators) { return 2191 + i }; a = a + 1 }
+        i = i + 1
+    }
+    if gate_count == 1 {
+        if module.observations[0].kind != enir_observation_gate() { return 2200 }
+    } else if gate_count == 0 { if module.observations[0].kind != enir_observation_fuel() { return 2201 } } else { return 2202 }
+    if module.observations[0].id != 0 || module.observations[0].ordinal != 0 || module.observations[0].source_observation_id != 0 || !enir_name_eq(module.observations[0].program_name, module.name) { return 2203 }
+
+    if module.memory_version_count == 0 {
+        if module.memory_phi_count != 0 { return 2300 }
+        i = 0
+        while i < module.instr_count { if module.instrs[i as usize].opcode == EMIR_OP_LOAD || module.instrs[i as usize].opcode == EMIR_OP_STORE { return 2301 + i }; i = i + 1 }
+        return 0
+    }
+    if module.memory_version_count != 3 || module.memory_phi_count != 1 { return 2400 }
+    let v0 = module.memory_versions[0]; let v1 = module.memory_versions[1]; let vp = module.memory_versions[2]; let phi = module.memory_phis[0]
+    if v0.id != 0 || v0.slot != 0 || v0.kind != CMIR_MEMORY_STORE || v0.block_id != 0 || v0.defining_instr < entry.first_instr || v0.defining_instr >= entry.first_instr + entry.instr_count || v0.source_store_op != v0.defining_instr { return 2401 }
+    if v1.id != 1 || v1.slot != 0 || v1.kind != CMIR_MEMORY_STORE || v1.block_id != 2 || v1.defining_instr < body.first_instr || v1.defining_instr >= body.first_instr + body.instr_count || v1.source_store_op != v1.defining_instr { return 2402 }
+    if vp.id != 2 || vp.slot != 0 || vp.kind != CMIR_MEMORY_PHI || vp.block_id != 1 || vp.defining_instr != -1 || vp.source_store_op != -1 { return 2403 }
+    if phi.id != 0 || phi.block_id != 1 || phi.slot != 0 || phi.result_version != 2 || phi.edge0 != 0 || phi.version0 != 0 || phi.edge1 != 3 || phi.version1 != 1 || phi.source_block_id != 1 { return 2404 }
+    if module.instrs[v0.defining_instr as usize].opcode != EMIR_OP_STORE || module.instrs[v0.defining_instr as usize].memory_in != -1 || module.instrs[v0.defining_instr as usize].memory_out != 0 { return 2405 }
+    if module.instrs[v1.defining_instr as usize].opcode != EMIR_OP_STORE || module.instrs[v1.defining_instr as usize].memory_in != 2 || module.instrs[v1.defining_instr as usize].memory_out != 1 { return 2406 }
+    var load_count: i64 = 0
+    i = exit.first_instr
+    while i < exit.first_instr + exit.instr_count { if module.instrs[i as usize].opcode == EMIR_OP_LOAD { if module.instrs[i as usize].memory_in != 2 { return 2407 }; load_count = load_count + 1 }; i = i + 1 }
+    if load_count != 1 { return 2408 }
+    0
+}
+
+pub fn enir_cfg_mir_validate_relation(source: EnirModule, mir: EnirCfgMirModule, source_hash: i64) -> i64 with Mut, Panic, Div {
+    if enir_verify(source) != 0 || enir_cfg_mir_verify(mir) != 0 { return 1 }
+    if source.schema_version != ENIR_SCHEMA_CFG_VERSION || source.profile != enir_profile_eisa_v2() || source.block_count != 4 || source.edge_count != 4 { return 2 }
+    if mir.source_enir_hash != source_hash || !enir_name_eq(mir.name, source.name) || mir.profile != source.profile || mir.fuel_limit != source.fuel_limit { return 3 }
+    if mir.value_count != source.value_count || mir.provenance_count != source.provenance_count || mir.block_count != source.block_count || mir.block_arg_count != source.block_arg_count || mir.edge_count != source.edge_count || mir.instr_count != source.op_count || mir.observation_count != source.observation_count { return 4 }
+    var i: i64 = 0
+    while i < source.value_count {
+        let a = source.values[i as usize]; let b = mir.values[i as usize]
+        if b.id != a.id || b.type_id != a.type_id || b.known_bits != a.known_bits || b.value_bits != a.value_bits || b.fp_class != a.fp_class || b.error0_bits != a.error0_bits || b.error1_bits != a.error1_bits || b.error2_bits != a.error2_bits || b.error3_bits != a.error3_bits || b.uncertainty_bits != a.uncertainty_bits || b.status_kind != a.status_kind || b.status_reason != a.status_reason || b.provenance_id != a.provenance_id || b.source_value_id != a.id { return 20 + i }
+        let ap = source.provenance[i as usize]; let bp = mir.provenance[i as usize]
+        if bp.id != ap.id || bp.source_span_id != ap.source_span_id || bp.input_origin_id != ap.input_origin_id || bp.transform_id != ap.transform_id || bp.assumption_id != ap.assumption_id || bp.policy_id != ap.policy_id || bp.source_provenance_id != ap.id { return 160 + i }
+        i = i + 1
+    }
+    i = 0
+    while i < source.block_count {
+        let a = source.blocks[i as usize]; let b = mir.blocks[i as usize]
+        if b.id != a.id || b.first_instr != a.first_op || b.instr_count != a.op_count || b.arg_start != a.arg_start || b.arg_count != a.arg_count || b.terminator_kind != a.terminator_kind || b.condition_value != a.condition_value || b.edge0 != a.edge0 || b.edge1 != a.edge1 || b.terminator_tick != a.terminator_fuel_cost || b.source_block_id != a.id { return 300 + i }
+        i = i + 1
+    }
+    i = 0
+    while i < source.block_arg_count {
+        let a = source.block_args[i as usize]; let b = mir.block_args[i as usize]
+        if b.id != a.id || b.block_id != a.block_id || b.ordinal != a.ordinal || b.value_id != a.value_id || b.type_id != a.type_id || b.provenance_id != a.provenance_id || b.source_arg_id != a.id { return 320 + i }
+        i = i + 1
+    }
+    i = 0
+    while i < source.edge_count {
+        let a = source.edges[i as usize]; let b = mir.edges[i as usize]
+        if b.id != a.id || b.from_block != a.from_block || b.to_block != a.to_block || b.arg_count != a.arg_count || b.arg0 != a.arg0 || b.arg1 != a.arg1 || b.arg2 != a.arg2 || b.arg3 != a.arg3 || b.source_edge_id != a.id { return 360 + i }
+        i = i + 1
+    }
+    i = 0
+    while i < source.op_count {
+        let a = source.ops[i as usize]; let b = mir.instrs[i as usize]
+        let opcode = enir_cfg_mir_opcode(a.opcode)
+        if b.id != a.id || b.opcode != opcode || b.result_id != a.result_id || b.type_id != a.type_id || b.a != a.a || b.b != a.b || b.effect_kind != enir_cfg_mir_effect(opcode) || b.trap_kind != (if opcode >= EMIR_OP_ADD && opcode <= EMIR_OP_SQRT { EMIR_TRAP_POISON_INVALID } else { EMIR_TRAP_NONE }) || b.policy_id != a.policy_id || b.source_op_id != a.id || b.semantic_tick != a.fuel_cost || b.memory_slot != a.memory_slot { return 400 + i }
+        i = i + 1
+    }
+    i = 0
+    while i < source.observation_count {
+        let a = source.observations[i as usize]; let b = mir.observations[i as usize]
+        if b.id != a.id || !enir_name_eq(b.program_name, a.program_name) || b.ordinal != a.ordinal || b.kind != a.kind || b.source_observation_id != a.id { return 540 + i }
+        i = i + 1
+    }
+    0
+}
+
+fn enir_cfg_mir_append(out: string, value: i64) -> string with Mut, Panic, Div, Alloc {
+    out ++ "|" ++ enir_i64_string(value)
+}
+
+pub fn enir_cfg_mir_print(module: EnirCfgMirModule) -> string with Mut, Panic, Div, Alloc {
+    var out = "cmir"; out = enir_cfg_mir_append(out, module.schema_version); out = enir_cfg_mir_append(out, module.stage)
+    out = out ++ "|" ++ enir_name_to_string(module.name); out = enir_cfg_mir_append(out, module.profile); out = enir_cfg_mir_append(out, module.fuel_limit); out = enir_cfg_mir_append(out, module.source_enir_hash) ++ "\n"
+    out = out ++ "ctype"; out = enir_cfg_mir_append(out, module.ty.id); out = enir_cfg_mir_append(out, module.ty.value_kind); out = enir_cfg_mir_append(out, module.ty.error_kind); out = enir_cfg_mir_append(out, module.ty.uncertainty_kind); out = enir_cfg_mir_append(out, module.ty.status_tracked); out = enir_cfg_mir_append(out, module.ty.provenance_tracked); out = enir_cfg_mir_append(out, module.ty.profile) ++ "\n"
+    var i: i64 = 0
+    while i < module.value_count {
+        let v = module.values[i as usize]; out = out ++ "cvalue"; out = enir_cfg_mir_append(out, v.id); out = enir_cfg_mir_append(out, v.type_id); out = enir_cfg_mir_append(out, v.known_bits); out = enir_cfg_mir_append(out, v.value_bits); out = enir_cfg_mir_append(out, v.fp_class); out = enir_cfg_mir_append(out, v.error0_bits); out = enir_cfg_mir_append(out, v.error1_bits); out = enir_cfg_mir_append(out, v.error2_bits); out = enir_cfg_mir_append(out, v.error3_bits); out = enir_cfg_mir_append(out, v.uncertainty_bits); out = enir_cfg_mir_append(out, v.status_kind); out = enir_cfg_mir_append(out, v.status_reason); out = enir_cfg_mir_append(out, v.provenance_id); out = enir_cfg_mir_append(out, v.source_value_id) ++ "\n"; i = i + 1
+    }
+    i = 0
+    while i < module.provenance_count {
+        let p = module.provenance[i as usize]; out = out ++ "cprov"; out = enir_cfg_mir_append(out, p.id); out = enir_cfg_mir_append(out, p.source_span_id); out = enir_cfg_mir_append(out, p.input_origin_id); out = enir_cfg_mir_append(out, p.transform_id); out = enir_cfg_mir_append(out, p.assumption_id); out = enir_cfg_mir_append(out, p.policy_id); out = enir_cfg_mir_append(out, p.source_provenance_id) ++ "\n"; i = i + 1
+    }
+    i = 0
+    while i < module.block_count {
+        let b = module.blocks[i as usize]; out = out ++ "cblock"; out = enir_cfg_mir_append(out, b.id); out = enir_cfg_mir_append(out, b.first_instr); out = enir_cfg_mir_append(out, b.instr_count); out = enir_cfg_mir_append(out, b.arg_start); out = enir_cfg_mir_append(out, b.arg_count); out = enir_cfg_mir_append(out, b.terminator_kind); out = enir_cfg_mir_append(out, b.condition_value); out = enir_cfg_mir_append(out, b.edge0); out = enir_cfg_mir_append(out, b.edge1); out = enir_cfg_mir_append(out, b.terminator_tick); out = enir_cfg_mir_append(out, b.source_block_id) ++ "\n"; i = i + 1
+    }
+    i = 0
+    while i < module.block_arg_count {
+        let a = module.block_args[i as usize]; out = out ++ "cbarg"; out = enir_cfg_mir_append(out, a.id); out = enir_cfg_mir_append(out, a.block_id); out = enir_cfg_mir_append(out, a.ordinal); out = enir_cfg_mir_append(out, a.value_id); out = enir_cfg_mir_append(out, a.type_id); out = enir_cfg_mir_append(out, a.provenance_id); out = enir_cfg_mir_append(out, a.source_arg_id) ++ "\n"; i = i + 1
+    }
+    i = 0
+    while i < module.edge_count {
+        let e = module.edges[i as usize]; out = out ++ "cedge"; out = enir_cfg_mir_append(out, e.id); out = enir_cfg_mir_append(out, e.from_block); out = enir_cfg_mir_append(out, e.to_block); out = enir_cfg_mir_append(out, e.arg_count); out = enir_cfg_mir_append(out, e.arg0); out = enir_cfg_mir_append(out, e.arg1); out = enir_cfg_mir_append(out, e.arg2); out = enir_cfg_mir_append(out, e.arg3); out = enir_cfg_mir_append(out, e.source_edge_id) ++ "\n"; i = i + 1
+    }
+    i = 0
+    while i < module.memory_version_count {
+        let v = module.memory_versions[i as usize]; out = out ++ "cmver"; out = enir_cfg_mir_append(out, v.id); out = enir_cfg_mir_append(out, v.slot); out = enir_cfg_mir_append(out, v.kind); out = enir_cfg_mir_append(out, v.block_id); out = enir_cfg_mir_append(out, v.defining_instr); out = enir_cfg_mir_append(out, v.source_store_op) ++ "\n"; i = i + 1
+    }
+    i = 0
+    while i < module.memory_phi_count {
+        let p = module.memory_phis[i as usize]; out = out ++ "cmphi"; out = enir_cfg_mir_append(out, p.id); out = enir_cfg_mir_append(out, p.block_id); out = enir_cfg_mir_append(out, p.slot); out = enir_cfg_mir_append(out, p.result_version); out = enir_cfg_mir_append(out, p.edge0); out = enir_cfg_mir_append(out, p.version0); out = enir_cfg_mir_append(out, p.edge1); out = enir_cfg_mir_append(out, p.version1); out = enir_cfg_mir_append(out, p.source_block_id) ++ "\n"; i = i + 1
+    }
+    i = 0
+    while i < module.instr_count {
+        let op = module.instrs[i as usize]; out = out ++ "cinstr"; out = enir_cfg_mir_append(out, op.id); out = enir_cfg_mir_append(out, op.opcode); out = enir_cfg_mir_append(out, op.result_id); out = enir_cfg_mir_append(out, op.type_id); out = enir_cfg_mir_append(out, op.a); out = enir_cfg_mir_append(out, op.b); out = enir_cfg_mir_append(out, op.effect_kind); out = enir_cfg_mir_append(out, op.trap_kind); out = enir_cfg_mir_append(out, op.policy_id); out = enir_cfg_mir_append(out, op.source_op_id); out = enir_cfg_mir_append(out, op.semantic_tick); out = enir_cfg_mir_append(out, op.memory_slot); out = enir_cfg_mir_append(out, op.memory_in); out = enir_cfg_mir_append(out, op.memory_out) ++ "\n"; i = i + 1
+    }
+    i = 0
+    while i < module.observation_count {
+        let o = module.observations[i as usize]; out = out ++ "cobs"; out = enir_cfg_mir_append(out, o.id); out = out ++ "|" ++ enir_name_to_string(o.program_name); out = enir_cfg_mir_append(out, o.ordinal); out = enir_cfg_mir_append(out, o.kind); out = enir_cfg_mir_append(out, o.source_observation_id) ++ "\n"; i = i + 1
+    }
+    out = out ++ "cend"; out = enir_cfg_mir_append(out, module.type_count); out = enir_cfg_mir_append(out, module.value_count); out = enir_cfg_mir_append(out, module.provenance_count); out = enir_cfg_mir_append(out, module.block_count); out = enir_cfg_mir_append(out, module.block_arg_count); out = enir_cfg_mir_append(out, module.edge_count); out = enir_cfg_mir_append(out, module.memory_version_count); out = enir_cfg_mir_append(out, module.memory_phi_count); out = enir_cfg_mir_append(out, module.instr_count); out = enir_cfg_mir_append(out, module.observation_count) ++ "\n"
+    out
+}
+
+fn enir_cfg_mir_field_count(text: string, start: i64, finish: i64) -> i64 with Mut, Panic, Div {
+    var count: i64 = 1; var i = start
+    while i < finish { let ch = str_char_at(text, i) as i64; if ch == 13 { return -1 }; if ch == 124 { count = count + 1 }; i = i + 1 }
+    count
+}
+
+fn enir_cfg_mir_field(text: string, start: i64, finish: i64, wanted: i64) -> EnirName with Mut, Panic, Div {
+    var field: i64 = 0; var token_start = start; var i = start
+    while i <= finish {
+        let split = if i == finish { true } else { (str_char_at(text, i) as i64) == 124 }
+        if split {
+            if field == wanted {
+                let len = i - token_start
+                if len <= 0 || len > ENIR_NAME_CAP { return enir_name_empty() }
+                var out = enir_name_empty(); var j: i64 = 0
+                while j < len { let ch = str_char_at(text, token_start + j) as i64; if ch < 33 || ch > 126 || ch == 124 { return enir_name_empty() }; out.buf[j as usize] = ch as i8; j = j + 1 }
+                out.len = len; return out
+            }
+            field = field + 1; token_start = i + 1
+        }
+        i = i + 1
+    }
+    enir_name_empty()
+}
+
+fn enir_cfg_mir_token_eq(token: EnirName, text: string) -> bool with Mut, Panic, Div {
+    if token.len != str_len(text) { return false }
+    var i: i64 = 0
+    while i < token.len { if token.buf[i as usize] != (str_char_at(text, i) as i8) { return false }; i = i + 1 }
+    true
+}
+
+fn enir_cfg_mir_i64(token: EnirName) -> EnirCfgMirParsedI64 {
+    if token.len <= 0 { return EnirCfgMirParsedI64 { ok: false, value: 0 } }
+    var negative = false; var i: i64 = 0
+    if token.buf[0] == (45 as i8) { negative = true; i = 1 }
+    if i >= token.len { return EnirCfgMirParsedI64 { ok: false, value: 0 } }
+    var limit: i64 = -9223372036854775807; if negative { limit = -9223372036854775807 - 1 }
+    let multiply_limit = limit / 10; var value: i64 = 0
+    while i < token.len {
+        let ch = token.buf[i as usize] as i64
+        if ch < 48 || ch > 57 || value < multiply_limit { return EnirCfgMirParsedI64 { ok: false, value: 0 } }
+        let digit = ch - 48; value = value * 10
+        if value < limit + digit { return EnirCfgMirParsedI64 { ok: false, value: 0 } }
+        value = value - digit; i = i + 1
+    }
+    EnirCfgMirParsedI64 { ok: true, value: if negative { value } else { 0 - value } }
+}
+
+fn enir_cfg_mir_parse_fail(code: i64, module: EnirCfgMirModule) -> EnirCfgMirParseResult {
+    EnirCfgMirParseResult { ok: false, error_code: code, module: module }
+}
+
+pub fn enir_cfg_mir_parse(text: string) -> EnirCfgMirParseResult with Mut, Panic, Div, Alloc {
+    var module = enir_cfg_mir_empty(); let n = str_len(text)
+    if n <= 0 || (str_char_at(text, n - 1) as i64) != 10 { return enir_cfg_mir_parse_fail(1, module) }
+    var pos: i64 = 0; var line: i64 = 0; var seen_end = false
+    while pos < n {
+        var finish = pos; while finish < n && (str_char_at(text, finish) as i64) != 10 { finish = finish + 1 }
+        if finish <= pos || seen_end { return enir_cfg_mir_parse_fail(2, module) }
+        let fields = enir_cfg_mir_field_count(text, pos, finish); let tag = enir_cfg_mir_field(text, pos, finish, 0)
+        if fields <= 0 || tag.len <= 0 { return enir_cfg_mir_parse_fail(3, module) }
+        if enir_cfg_mir_token_eq(tag, "cmir") {
+            if line != 0 || fields != 7 { return enir_cfg_mir_parse_fail(10, module) }
+            let schema = enir_cfg_mir_i64(enir_cfg_mir_field(text,pos,finish,1)); let stage = enir_cfg_mir_i64(enir_cfg_mir_field(text,pos,finish,2)); let name = enir_cfg_mir_field(text,pos,finish,3); let profile = enir_cfg_mir_i64(enir_cfg_mir_field(text,pos,finish,4)); let fuel = enir_cfg_mir_i64(enir_cfg_mir_field(text,pos,finish,5)); let hash = enir_cfg_mir_i64(enir_cfg_mir_field(text,pos,finish,6))
+            if !schema.ok || !stage.ok || name.len <= 0 || !profile.ok || !fuel.ok || !hash.ok { return enir_cfg_mir_parse_fail(11,module) }
+            module.schema_version=schema.value; module.stage=stage.value; module.name=name; module.profile=profile.value; module.fuel_limit=fuel.value; module.source_enir_hash=hash.value
+        } else if enir_cfg_mir_token_eq(tag, "ctype") {
+            if fields != 8 || module.type_count != 0 { return enir_cfg_mir_parse_fail(20,module) }
+            var v:[i64;7]=[0;7]; var j:i64=0; while j<7 { let p=enir_cfg_mir_i64(enir_cfg_mir_field(text,pos,finish,j+1)); if !p.ok{return enir_cfg_mir_parse_fail(21,module)};v[j as usize]=p.value;j=j+1 }
+            module.ty=EnirType{id:v[0],value_kind:v[1],error_kind:v[2],uncertainty_kind:v[3],status_tracked:v[4],provenance_tracked:v[5],profile:v[6]};module.type_count=1
+        } else if enir_cfg_mir_token_eq(tag, "cvalue") {
+            if fields != 15 || module.value_count >= 128 { return enir_cfg_mir_parse_fail(30,module) }
+            var v:[i64;14]=[0;14];var j:i64=0;while j<14{let p=enir_cfg_mir_i64(enir_cfg_mir_field(text,pos,finish,j+1));if !p.ok{return enir_cfg_mir_parse_fail(31,module)};v[j as usize]=p.value;j=j+1}
+            module.values[module.value_count as usize]=EnirMirValue{id:v[0],type_id:v[1],known_bits:v[2],value_bits:v[3],fp_class:v[4],error0_bits:v[5],error1_bits:v[6],error2_bits:v[7],error3_bits:v[8],uncertainty_bits:v[9],status_kind:v[10],status_reason:v[11],provenance_id:v[12],source_value_id:v[13]};module.value_count=module.value_count+1
+        } else if enir_cfg_mir_token_eq(tag, "cprov") {
+            if fields != 8 || module.provenance_count >= 128 { return enir_cfg_mir_parse_fail(40,module) }
+            var v:[i64;7]=[0;7];var j:i64=0;while j<7{let p=enir_cfg_mir_i64(enir_cfg_mir_field(text,pos,finish,j+1));if !p.ok{return enir_cfg_mir_parse_fail(41,module)};v[j as usize]=p.value;j=j+1}
+            module.provenance[module.provenance_count as usize]=EnirMirProvenance{id:v[0],source_span_id:v[1],input_origin_id:v[2],transform_id:v[3],assumption_id:v[4],policy_id:v[5],source_provenance_id:v[6]};module.provenance_count=module.provenance_count+1
+        } else if enir_cfg_mir_token_eq(tag, "cblock") {
+            if fields != 12 || module.block_count >= 16 { return enir_cfg_mir_parse_fail(50,module) }
+            var v:[i64;11]=[0;11];var j:i64=0;while j<11{let p=enir_cfg_mir_i64(enir_cfg_mir_field(text,pos,finish,j+1));if !p.ok{return enir_cfg_mir_parse_fail(51,module)};v[j as usize]=p.value;j=j+1}
+            module.blocks[module.block_count as usize]=EnirCfgMirBlock{id:v[0],first_instr:v[1],instr_count:v[2],arg_start:v[3],arg_count:v[4],terminator_kind:v[5],condition_value:v[6],edge0:v[7],edge1:v[8],terminator_tick:v[9],source_block_id:v[10]};module.block_count=module.block_count+1
+        } else if enir_cfg_mir_token_eq(tag, "cbarg") {
+            if fields != 8 || module.block_arg_count >= 32 { return enir_cfg_mir_parse_fail(60,module) }
+            var v:[i64;7]=[0;7];var j:i64=0;while j<7{let p=enir_cfg_mir_i64(enir_cfg_mir_field(text,pos,finish,j+1));if !p.ok{return enir_cfg_mir_parse_fail(61,module)};v[j as usize]=p.value;j=j+1}
+            module.block_args[module.block_arg_count as usize]=EnirCfgMirBlockArg{id:v[0],block_id:v[1],ordinal:v[2],value_id:v[3],type_id:v[4],provenance_id:v[5],source_arg_id:v[6]};module.block_arg_count=module.block_arg_count+1
+        } else if enir_cfg_mir_token_eq(tag, "cedge") {
+            if fields != 10 || module.edge_count >= 32 { return enir_cfg_mir_parse_fail(70,module) }
+            var v:[i64;9]=[0;9];var j:i64=0;while j<9{let p=enir_cfg_mir_i64(enir_cfg_mir_field(text,pos,finish,j+1));if !p.ok{return enir_cfg_mir_parse_fail(71,module)};v[j as usize]=p.value;j=j+1}
+            module.edges[module.edge_count as usize]=EnirCfgMirEdge{id:v[0],from_block:v[1],to_block:v[2],arg_count:v[3],arg0:v[4],arg1:v[5],arg2:v[6],arg3:v[7],source_edge_id:v[8]};module.edge_count=module.edge_count+1
+        } else if enir_cfg_mir_token_eq(tag, "cmver") {
+            if fields != 7 || module.memory_version_count >= 32 { return enir_cfg_mir_parse_fail(80,module) }
+            var v:[i64;6]=[0;6];var j:i64=0;while j<6{let p=enir_cfg_mir_i64(enir_cfg_mir_field(text,pos,finish,j+1));if !p.ok{return enir_cfg_mir_parse_fail(81,module)};v[j as usize]=p.value;j=j+1}
+            module.memory_versions[module.memory_version_count as usize]=EnirCfgMirMemoryVersion{id:v[0],slot:v[1],kind:v[2],block_id:v[3],defining_instr:v[4],source_store_op:v[5]};module.memory_version_count=module.memory_version_count+1
+        } else if enir_cfg_mir_token_eq(tag, "cmphi") {
+            if fields != 10 || module.memory_phi_count >= 16 { return enir_cfg_mir_parse_fail(90,module) }
+            var v:[i64;9]=[0;9];var j:i64=0;while j<9{let p=enir_cfg_mir_i64(enir_cfg_mir_field(text,pos,finish,j+1));if !p.ok{return enir_cfg_mir_parse_fail(91,module)};v[j as usize]=p.value;j=j+1}
+            module.memory_phis[module.memory_phi_count as usize]=EnirCfgMirMemoryPhi{id:v[0],block_id:v[1],slot:v[2],result_version:v[3],edge0:v[4],version0:v[5],edge1:v[6],version1:v[7],source_block_id:v[8]};module.memory_phi_count=module.memory_phi_count+1
+        } else if enir_cfg_mir_token_eq(tag, "cinstr") {
+            if fields != 15 || module.instr_count >= 128 { return enir_cfg_mir_parse_fail(100,module) }
+            var v:[i64;14]=[0;14];var j:i64=0;while j<14{let p=enir_cfg_mir_i64(enir_cfg_mir_field(text,pos,finish,j+1));if !p.ok{return enir_cfg_mir_parse_fail(101,module)};v[j as usize]=p.value;j=j+1}
+            module.instrs[module.instr_count as usize]=EnirCfgMirInstr{id:v[0],opcode:v[1],result_id:v[2],type_id:v[3],a:v[4],b:v[5],effect_kind:v[6],trap_kind:v[7],policy_id:v[8],source_op_id:v[9],semantic_tick:v[10],memory_slot:v[11],memory_in:v[12],memory_out:v[13]};module.instr_count=module.instr_count+1
+        } else if enir_cfg_mir_token_eq(tag, "cobs") {
+            if fields != 6 || module.observation_count >= 64 { return enir_cfg_mir_parse_fail(110,module) }
+            let a=enir_cfg_mir_i64(enir_cfg_mir_field(text,pos,finish,1));let name=enir_cfg_mir_field(text,pos,finish,2);let b=enir_cfg_mir_i64(enir_cfg_mir_field(text,pos,finish,3));let c=enir_cfg_mir_i64(enir_cfg_mir_field(text,pos,finish,4));let d=enir_cfg_mir_i64(enir_cfg_mir_field(text,pos,finish,5));if !a.ok||name.len<=0||!b.ok||!c.ok||!d.ok{return enir_cfg_mir_parse_fail(111,module)}
+            module.observations[module.observation_count as usize]=EnirMirObservation{id:a.value,program_name:name,ordinal:b.value,kind:c.value,source_observation_id:d.value};module.observation_count=module.observation_count+1
+        } else if enir_cfg_mir_token_eq(tag, "cend") {
+            if fields != 11 || seen_end { return enir_cfg_mir_parse_fail(120,module) }
+            var v:[i64;10]=[0;10];var j:i64=0;while j<10{let p=enir_cfg_mir_i64(enir_cfg_mir_field(text,pos,finish,j+1));if !p.ok{return enir_cfg_mir_parse_fail(121,module)};v[j as usize]=p.value;j=j+1}
+            module.declared_type_count=v[0];module.declared_value_count=v[1];module.declared_provenance_count=v[2];module.declared_block_count=v[3];module.declared_block_arg_count=v[4];module.declared_edge_count=v[5];module.declared_memory_version_count=v[6];module.declared_memory_phi_count=v[7];module.declared_instr_count=v[8];module.declared_observation_count=v[9];seen_end=true
+        } else { return enir_cfg_mir_parse_fail(130,module) }
+        line=line+1;pos=finish+1
+    }
+    if !seen_end { return enir_cfg_mir_parse_fail(131,module) }
+    EnirCfgMirParseResult { ok: true, error_code: 0, module: module }
+}
+
+fn enir_cfg_mir_result(ok: bool, code: i64, executed: i64, observations: i64, fuel: i64, last_write: i64, stop: i64, branch_poisoned: i64, frail: i64) -> EnirCfgMirExecResult {
+    EnirCfgMirExecResult { ok: ok, error_code: code, executed_instrs: executed, observations: observations, fuel_left: fuel, last_write: last_write, stop_kind: stop, branch_poisoned: branch_poisoned, frail_branches: frail }
+}
+
+fn enir_cfg_mir_bits_to_f64(bits: i64) -> f64 with Mut, Div {
+    let sign=(bits>>63)&1;let exponent=(bits>>52)&2047;let fraction=bits&4503599627370495
+    if exponent==2047{return 0.0/0.0}
+    if exponent==0&&fraction==0{return if sign==1{(0.0-1.0)*0.0}else{0.0}}
+    var mantissa:f64=0.0;var bit_value:f64=0.5;var bit:i64=51
+    while bit>=0{if((fraction>>bit)&1)==1{mantissa=mantissa+bit_value};bit_value=bit_value*0.5;bit=bit-1}
+    var value=if exponent==0{mantissa}else{1.0+mantissa};let power=if exponent==0{-1022}else{exponent-1023};var e:i64=0
+    if power>0{while e<power{value=value*2.0;e=e+1}}else if power<0{while e<(0-power){value=value*0.5;e=e+1}}
+    if sign==1{0.0-value}else{value}
+}
+
+fn enir_cfg_mir_clean(value:f64)->EnirCfgMirRuntimeValue{EnirCfgMirRuntimeValue{val:if value==0.0{0.0}else{value},err:qd_zero(),uncertainty:0.0,poisoned:0}}
+fn enir_cfg_mir_poison()->EnirCfgMirRuntimeValue{EnirCfgMirRuntimeValue{val:0.0,err:qd_zero(),uncertainty:0.0,poisoned:1}}
+fn enir_cfg_mir_true(value:EnirCfgMirRuntimeValue)->Qd128 with Mut,Panic{qd_add(qd_from_f64(value.val),value.err)}
+fn enir_cfg_mir_sqrt(value:f64)->f64 with Mut,Div{if value<=0.0{return 0.0};var guess=if value>1.0{value*0.5}else{1.0};var i:i64=0;while i<40{guess=0.5*(guess+value/guess);i=i+1};guess}
+
+fn enir_cfg_mir_binary(x:EnirCfgMirRuntimeValue,y:EnirCfgMirRuntimeValue,opcode:i64)->EnirCfgMirRuntimeValue with Mut,Panic,Div{
+    if x.poisoned==1||y.poisoned==1||(opcode==EMIR_OP_DIV&&y.val==0.0){return enir_cfg_mir_poison()}
+    let raw=if opcode==EMIR_OP_ADD{x.val+y.val}else{if opcode==EMIR_OP_SUB{x.val-y.val}else{if opcode==EMIR_OP_MUL{x.val*y.val}else{x.val/y.val}}};let value=if raw==0.0{0.0}else{raw}
+    let tx=enir_cfg_mir_true(x);let ty=enir_cfg_mir_true(y);let truth=if opcode==EMIR_OP_ADD{qd_add(tx,ty)}else{if opcode==EMIR_OP_SUB{qd_sub(tx,ty)}else{if opcode==EMIR_OP_MUL{qd_mul(tx,ty)}else{qd_div(tx,ty)}}}
+    EnirCfgMirRuntimeValue{val:value,err:qd_sub(truth,qd_from_f64(value)),uncertainty:0.0,poisoned:0}
+}
+
+fn enir_cfg_mir_sqrt_value(x:EnirCfgMirRuntimeValue)->EnirCfgMirRuntimeValue with Mut,Panic,Div{
+    if x.poisoned==1{return enir_cfg_mir_poison()};if x.val<=0.0{return enir_cfg_mir_clean(0.0)};let value=enir_cfg_mir_sqrt(x.val)
+    EnirCfgMirRuntimeValue{val:value,err:qd_sub(qd_sqrt(enir_cfg_mir_true(x)),qd_from_f64(value)),uncertainty:0.0,poisoned:0}
+}
+
+fn enir_cfg_mir_abs(x:f64)->f64{if x<0.0{0.0-x}else{x}}
+fn enir_cfg_mir_frail(x:EnirCfgMirRuntimeValue)->bool{let error=enir_cfg_mir_abs(x.err.x0);let band=if x.uncertainty>error{x.uncertainty}else{error};band!=0.0&&enir_cfg_mir_abs(x.val)<=band}
+
+fn enir_cfg_mir_words(module:EnirCfgMirModule,value:EnirCfgMirRuntimeValue)->string with Mut,Panic,Div,Alloc{
+    var out="value_bits="++enir_i64_string(if value.poisoned==1{9218868437227405313}else{f64_to_bits(value.val)})
+    out=out++"|error0_bits="++enir_i64_string(f64_to_bits(value.err.x0));out=out++"|error1_bits="++enir_i64_string(f64_to_bits(value.err.x1));out=out++"|error2_bits="++enir_i64_string(f64_to_bits(value.err.x2));out=out++"|error3_bits="++enir_i64_string(f64_to_bits(value.err.x3));out=out++"|uncertainty_bits="++enir_i64_string(if value.poisoned==1{9218868437227405312}else{f64_to_bits(value.uncertainty)});out=out++"|status="++enir_i64_string(value.poisoned);out
+}
+
+fn enir_cfg_mir_exec_receipt(module:EnirCfgMirModule,op:EnirCfgMirInstr,value:EnirCfgMirRuntimeValue,ordinal:i64,branch_poisoned:i64,frail:i64)->string with Mut,Panic,Div,Alloc{
+    let p=module.provenance[module.values[op.a as usize].provenance_id as usize]
+    var out="cmir-exec|schema="++enir_i64_string(module.schema_version)++"|stage="++enir_i64_string(module.stage)++"|module="++enir_name_to_string(module.name)++"|source_enir_hash="++enir_i64_string(module.source_enir_hash)
+    out=out++"|ordinal="++enir_i64_string(ordinal)++"|site="++enir_i64_string(op.id)++"|source_op="++enir_i64_string(op.source_op_id)++"|value_id="++enir_i64_string(op.a)++"|"++enir_cfg_mir_words(module,value)
+    out=out++"|branch_poisoned="++enir_i64_string(branch_poisoned)++"|frail_branches="++enir_i64_string(frail)++"|source_span="++enir_i64_string(p.source_span_id)++"\n";out
+}
+
+fn enir_cfg_mir_control_receipt(module:EnirCfgMirModule,block:EnirCfgMirBlock,edge:EnirCfgMirEdge,taken:i64,poisoned:i64,frail:i64)->string with Mut,Panic,Div,Alloc{
+    "cmir-control|schema="++enir_i64_string(module.schema_version)++"|module="++enir_name_to_string(module.name)++"|block="++enir_i64_string(block.id)++"|source_block="++enir_i64_string(block.source_block_id)++"|term="++enir_i64_string(block.terminator_kind)++"|condition="++enir_i64_string(block.condition_value)++"|edge="++enir_i64_string(edge.id)++"|source_edge="++enir_i64_string(edge.source_edge_id)++"|to="++enir_i64_string(edge.to_block)++"|taken="++enir_i64_string(taken)++"|poisoned="++enir_i64_string(poisoned)++"|frail="++enir_i64_string(frail)++"\n"
+}
+
+fn enir_cfg_mir_phi_receipt(module:EnirCfgMirModule,phi:EnirCfgMirMemoryPhi,edge:i64,incoming:i64)->string with Mut,Panic,Div,Alloc{
+    "cmir-memory-phi|schema="++enir_i64_string(module.schema_version)++"|module="++enir_name_to_string(module.name)++"|source_enir_hash="++enir_i64_string(module.source_enir_hash)++"|phi="++enir_i64_string(phi.id)++"|block="++enir_i64_string(phi.block_id)++"|slot="++enir_i64_string(phi.slot)++"|edge="++enir_i64_string(edge)++"|incoming_version="++enir_i64_string(incoming)++"|result_version="++enir_i64_string(phi.result_version)++"\n"
+}
+
+fn enir_cfg_mir_memory_receipt(module:EnirCfgMirModule,slot:i64,version:i64,site:i64,value:EnirCfgMirRuntimeValue)->string with Mut,Panic,Div,Alloc{
+    "cmir-memory|schema="++enir_i64_string(module.schema_version)++"|module="++enir_name_to_string(module.name)++"|source_enir_hash="++enir_i64_string(module.source_enir_hash)++"|slot="++enir_i64_string(slot)++"|version="++enir_i64_string(version)++"|site="++enir_i64_string(site)++"|source_op="++enir_i64_string(module.instrs[site as usize].source_op_id)++"|"++enir_cfg_mir_words(module,value)++"\n"
+}
+
+fn enir_cfg_mir_fuel_receipt(module:EnirCfgMirModule,value_id:i64,value:EnirCfgMirRuntimeValue,branch_poisoned:i64,frail:i64)->string with Mut,Panic,Div,Alloc{
+    let p=module.provenance[value_id as usize]
+    var out="cmir-fuel|schema="++enir_i64_string(module.schema_version)++"|stage="++enir_i64_string(module.stage)++"|module="++enir_name_to_string(module.name)++"|source_enir_hash="++enir_i64_string(module.source_enir_hash)++"|ordinal=0|fuel_initial="++enir_i64_string(module.fuel_limit)++"|fuel_left=0|stop_kind=1|last_value_id="++enir_i64_string(value_id)
+    out=out++"|value_bits="++enir_i64_string(if value.poisoned==1{9218868437227405313}else{f64_to_bits(value.val)})++"|error0_bits="++enir_i64_string(f64_to_bits(value.err.x0))++"|error1_bits="++enir_i64_string(f64_to_bits(value.err.x1))++"|error2_bits="++enir_i64_string(f64_to_bits(value.err.x2))++"|error3_bits="++enir_i64_string(f64_to_bits(value.err.x3))++"|uncertainty_bits="++enir_i64_string(if value.poisoned==1{9218868437227405312}else{f64_to_bits(value.uncertainty)})++"|status=1"
+    out=out++"|branch_poisoned="++enir_i64_string(branch_poisoned)++"|frail_branches="++enir_i64_string(frail)++"|source_span="++enir_i64_string(p.source_span_id)++"\n";out
+}
+
+pub fn enir_cfg_mir_interpret(module:EnirCfgMirModule)->EnirCfgMirExecResult with IO,Mut,Panic,Div,Alloc{
+    let rc=enir_cfg_mir_verify(module);if rc!=0{return enir_cfg_mir_result(false,rc,0,0,module.fuel_limit,-1,0,0,0)}
+    var values:[EnirCfgMirRuntimeValue;128]=[EnirCfgMirRuntimeValue{val:0.0,err:Qd128{x0:0.0,x1:0.0,x2:0.0,x3:0.0},uncertainty:0.0,poisoned:1};128];var defined:[i64;128]=[0;128]
+    var memory:[EnirCfgMirRuntimeValue;16]=[EnirCfgMirRuntimeValue{val:0.0,err:Qd128{x0:0.0,x1:0.0,x2:0.0,x3:0.0},uncertainty:0.0,poisoned:1};16];var memory_defined:[i64;16]=[0;16];var memory_version:[i64;16]=[-1;16];var memory_site:[i64;16]=[-1;16]
+    var fuel=module.fuel_limit;var observations:i64=0;var executed:i64=0;var last_write:i64=-1;var branch_poisoned:i64=0;var frail_branches:i64=0;var block_id:i64=0;var halted=false
+    while !halted{
+        let block=module.blocks[block_id as usize];var pc=block.first_instr
+        while pc<block.first_instr+block.instr_count{
+            if fuel<=0{if module.observations[0].kind!=enir_observation_fuel()||last_write<0{return enir_cfg_mir_result(false,3000+pc,executed,observations,0,last_write,1,branch_poisoned,frail_branches)};print(enir_cfg_mir_fuel_receipt(module,last_write,values[last_write as usize],branch_poisoned,frail_branches));return enir_cfg_mir_result(true,0,executed,1,0,last_write,1,branch_poisoned,frail_branches)}
+            fuel=fuel-1;executed=executed+1;let op=module.instrs[pc as usize]
+            if op.opcode==EMIR_OP_CONST{values[op.result_id as usize]=enir_cfg_mir_clean(enir_cfg_mir_bits_to_f64(module.values[op.result_id as usize].value_bits));defined[op.result_id as usize]=1;last_write=op.result_id}
+            else if op.opcode>=EMIR_OP_ADD&&op.opcode<=EMIR_OP_DIV{values[op.result_id as usize]=enir_cfg_mir_binary(values[op.a as usize],values[op.b as usize],op.opcode);defined[op.result_id as usize]=1;last_write=op.result_id}
+            else if op.opcode==EMIR_OP_SQRT{values[op.result_id as usize]=enir_cfg_mir_sqrt_value(values[op.a as usize]);defined[op.result_id as usize]=1;last_write=op.result_id}
+            else if op.opcode==EMIR_OP_MOVE{values[op.result_id as usize]=values[op.a as usize];defined[op.result_id as usize]=1;last_write=op.result_id}
+            else if op.opcode==EMIR_OP_STORE{if memory_version[op.memory_slot as usize]!=op.memory_in{return enir_cfg_mir_result(false,3200+pc,executed,observations,fuel,last_write,0,branch_poisoned,frail_branches)};memory[op.memory_slot as usize]=values[op.a as usize];memory_defined[op.memory_slot as usize]=1;memory_version[op.memory_slot as usize]=op.memory_out;memory_site[op.memory_slot as usize]=pc}
+            else if op.opcode==EMIR_OP_LOAD{if memory_defined[op.memory_slot as usize]==0||memory_version[op.memory_slot as usize]!=op.memory_in{return enir_cfg_mir_result(false,3300+pc,executed,observations,fuel,last_write,0,branch_poisoned,frail_branches)};values[op.result_id as usize]=memory[op.memory_slot as usize];defined[op.result_id as usize]=1;last_write=op.result_id}
+            else if op.opcode==EMIR_OP_OBSERVE{print(enir_cfg_mir_exec_receipt(module,op,values[op.a as usize],observations,branch_poisoned,frail_branches));observations=observations+1}
+            pc=pc+1
+        }
+        if block.terminator_tick==1{if fuel<=0{if module.observations[0].kind!=enir_observation_fuel()||last_write<0{return enir_cfg_mir_result(false,3400+block_id,executed,observations,0,last_write,1,branch_poisoned,frail_branches)};print(enir_cfg_mir_fuel_receipt(module,last_write,values[last_write as usize],branch_poisoned,frail_branches));return enir_cfg_mir_result(true,0,executed,1,0,last_write,1,branch_poisoned,frail_branches)};fuel=fuel-1;executed=executed+1}
+        if block.terminator_kind==enir_term_halt(){halted=true}else{
+            var edge_id=block.edge0;var taken:i64=1;var poisoned:i64=0;var frail:i64=0
+            if block.terminator_kind==enir_term_branch_zero(){let condition=values[block.condition_value as usize];taken=0;if condition.poisoned==1{poisoned=1;branch_poisoned=1;edge_id=block.edge1}else{if enir_cfg_mir_frail(condition){frail=1;frail_branches=frail_branches+1};if condition.val==0.0{taken=1};edge_id=if taken==1{block.edge0}else{block.edge1}}}
+            let edge=module.edges[edge_id as usize];print(enir_cfg_mir_control_receipt(module,block,edge,taken,poisoned,frail))
+            var p:i64=0;while p<module.memory_phi_count{let phi=module.memory_phis[p as usize];if phi.block_id==edge.to_block{let incoming=if phi.edge0==edge_id{phi.version0}else{if phi.edge1==edge_id{phi.version1}else{-1}};if incoming<0||memory_version[phi.slot as usize]!=incoming{return enir_cfg_mir_result(false,3500+p,executed,observations,fuel,last_write,0,branch_poisoned,frail_branches)};print(enir_cfg_mir_phi_receipt(module,phi,edge_id,incoming));memory_version[phi.slot as usize]=phi.result_version};p=p+1}
+            var incoming_values:[EnirCfgMirRuntimeValue;4]=[EnirCfgMirRuntimeValue{val:0.0,err:Qd128{x0:0.0,x1:0.0,x2:0.0,x3:0.0},uncertainty:0.0,poisoned:1};4];var a:i64=0
+            while a<edge.arg_count{let source_id=enir_cfg_mir_edge_arg(edge,a);if source_id<0||defined[source_id as usize]==0{return enir_cfg_mir_result(false,3600+a,executed,observations,fuel,last_write,0,branch_poisoned,frail_branches)};incoming_values[a as usize]=values[source_id as usize];a=a+1}
+            let target=module.blocks[edge.to_block as usize];a=0;while a<edge.arg_count{let target_arg=module.block_args[(target.arg_start+a) as usize];values[target_arg.value_id as usize]=incoming_values[a as usize];defined[target_arg.value_id as usize]=1;a=a+1};block_id=edge.to_block
+        }
+    }
+    if observations!=module.observation_count{return enir_cfg_mir_result(false,3700,executed,observations,fuel,last_write,0,branch_poisoned,frail_branches)}
+    var slot:i64=0;while slot<16{if memory_defined[slot as usize]==1{print(enir_cfg_mir_memory_receipt(module,slot,memory_version[slot as usize],memory_site[slot as usize],memory[slot as usize]))};slot=slot+1}
+    enir_cfg_mir_result(true,0,executed,observations,fuel,last_write,0,branch_poisoned,frail_branches)
+}

@@ -14,8 +14,8 @@
 #   //@ contract-adjustment: X  tracks rewritten active-contract tests
 #
 # Usage:
-#   bash scripts/run_stdlib_e2e.sh [--filter PATTERN] [--verbose] [--json-out PATH]
-#   bash scripts/run_stdlib_e2e.sh PATTERN --verbose
+#   bash scripts/stdlib/run_stdlib_e2e.sh [--filter PATTERN] [--verbose] [--json-out PATH]
+#   bash scripts/stdlib/run_stdlib_e2e.sh PATTERN --verbose
 
 set -euo pipefail
 
@@ -37,7 +37,7 @@ RUN_ALL_RUN_PASS="${STDLIB_E2E_RUN_ALL_RUN_PASS:-1}"
 
 usage() {
   cat <<'USAGE'
-Usage: bash scripts/run_stdlib_e2e.sh [--filter PATTERN] [--verbose] [--json-out PATH]
+Usage: bash scripts/stdlib/run_stdlib_e2e.sh [--filter PATTERN] [--verbose] [--json-out PATH]
 USAGE
 }
 
@@ -177,7 +177,7 @@ run_test() {
   output=$("$SOUC_BIN" check "$file" 2>&1) || exit_code=$?
   if [[ $exit_code -ne 0 ]]; then
     local excerpt
-    excerpt="$(echo "$output" | head -6)"
+    excerpt="$(head -6 <<< "$output")"
     FAIL=$((FAIL + 1))
     ERRORS="${ERRORS}\n  FAIL  $relpath (check exited $exit_code)"
     record_result "fail" "$relpath" "check" "check-failed" "" "" "$exit_code" "$excerpt"
@@ -214,7 +214,7 @@ run_test() {
   fi
   if [[ $exit_code -ne 0 ]]; then
     local excerpt
-    excerpt="$(echo "$output" | head -6)"
+    excerpt="$(head -6 <<< "$output")"
     FAIL=$((FAIL + 1))
     local reason="run-failed"
     if [[ $exit_code -eq 124 ]]; then
@@ -231,7 +231,7 @@ run_test() {
 
   local pattern
   for pattern in "${expect_stdout[@]}"; do
-    if ! echo "$output" | grep -qF "$pattern"; then
+    if ! grep -qF -- "$pattern" <<< "$output"; then
       FAIL=$((FAIL + 1))
       ERRORS="${ERRORS}\n  FAIL  $relpath (missing stdout: $pattern)"
       record_result "fail" "$relpath" "stdout" "missing-stdout" "" "" "0" "missing: $pattern"
@@ -312,7 +312,7 @@ for line in results_path.read_text(encoding="utf-8").splitlines():
 obj = {
     "schema": "sounio.stdlib.e2e.result.v1",
     "generated_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
-    "command": "bash scripts/run_stdlib_e2e.sh",
+    "command": "bash scripts/stdlib/run_stdlib_e2e.sh",
     "context": {
         "root_dir": root_dir,
         "souc_bin": souc_bin,

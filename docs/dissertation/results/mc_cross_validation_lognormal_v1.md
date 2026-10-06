@@ -7,9 +7,19 @@ validated_by: A2
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.dissertation.results.mc-cross-validation-lognormal-v1
 -->
 
+> **SUPERSEDED 2026-09-26: floor-biased PBPK28 numbers.** Every PBPK28 simulation number on this page was computed through `pbpk28_full_cn_step`, whose negativity floors injected mass into the 5 mg bolus: AUC_blood was +28% at dt = 0.05 h, +52% at 0.1 h and +140% at 0.5 h against the exact Dose/CL = 0.403226 mg·h/L. The same floors created parameter dependence that is not in the model, e.g. Kp sensitivities and Hessian entries. Conclusions drawn from these numbers may not hold. Regenerated results: [`mc_cross_validation_lognormal_v3.md`](mc_cross_validation_lognormal_v3.md). Audit: `docs/audit/PBPK28_CN_RANNACHER_MASS_BALANCE_2026-09-26.md`.
+
 # §4.12 — Monte Carlo Cross-Validation (Lognormal Prior)
 
 **Source**: `stdlib/darwin_pbpk/validation/pbpk28_mc_cross_validation.sio`
+
+> **Engine dependency (verified 2026-08-17).** `pbpk28_mc_cross_validation.sio` runs to
+> completion under `SOUNIO_SOUC_ENGINE=lean_single` (`rc=0`, `PASS`). Under default Madaros
+> (`bin/souc`), the same file compiles clean but **crashes at runtime with `rc=182`**
+> (`madaros: handles full`) partway through the N=2000 Monte Carlo loop — a resource-ceiling
+> abort, not a numerical disagreement. Every number and gate marker on this page was produced
+> under lean_single; it has not been reproduced under the project's default engine.
+
 **Parameters**: N=2000, seed=1729, rapamycin, 5 mg dose, 168 h.
 **Prior**: LogNormal for all 7 parameters (σ²_log = ln(1 + CV²), μ_log = ln(mean) − σ²_log/2).
 

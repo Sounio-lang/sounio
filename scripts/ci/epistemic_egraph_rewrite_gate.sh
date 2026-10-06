@@ -42,11 +42,13 @@
 #      skipped and not falsely marked FAIL -- they are real, separate,
 #      already-present defects this gate does not attempt to fix.
 #
-# This gate is therefore honest about three different states: the gate
+# This gate is therefore honest about four different states: the gate
 # logic verified working (T143b/c/d, live, in a freshly built Madaros),
 # the gate logic duplicated but not yet independently exercisable (T83-T85),
-# and a pre-existing crash class blocking further verification (both
-# crashes above) -- rather than reporting one number that blurs the three.
+# a pre-existing crash class blocking further verification (both crashes
+# above), and a run that produced no evidence at all (empty self-test log
+# or every subject absent -- FAIL, never green) -- rather than reporting
+# one number that blurs them.
 set -uo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -77,16 +79,29 @@ cg "egraph:duplicated_helper"     "fn eg_satf_fadd_chain_merges" "$E"
 cg "egraph:duplicated_T83"        "fn test_eg_small_satf_blocks_inexact_default" "$E"
 cg "egraph:duplicated_T84"        "fn test_eg_small_satf_allows_optin" "$E"
 cg "egraph:duplicated_T85"        "fn test_eg_small_satf_chaotic_blocks" "$E"
-cg "egraph:total_85"              "let total: i64 = 85" "$E"
+cg "egraph:q_mask_field"          "q_mask:\s*\[i64; 64\]" "$E"
+cg "egraph:q_prod"                "fn eg_q_prod" "$E"
+cg "egraph:q_of_class"            "fn eg_small_q_of_class" "$E"
+cg "egraph:q_triple_associative"  "fn eg_q_triple_associative" "$E"
+cg "egraph:no_register_as_basis"  "eg_q_triple_associative\(ctx.cd_bits, qa, qb, qc\)" "$E"
+cg "egraph:T86"                   "fn test_eg_q_scalar_leaves_reassociate" "$E"
+cg "egraph:T87"                   "fn test_eg_q_unknown_leaves_block" "$E"
+cg "egraph:T88"                   "fn test_eg_q_union_support_blocks" "$E"
+cg "egraph:T90"                   "fn test_eg_q_mask_algebra" "$E"
+cg "egraph:total_90"              "let total: i64 = 90" "$E"
 cg "main:T143b_fn"                "fn compiler_main_test_eg_small_satf_blocks_inexact_default" "$M"
 cg "main:T143c_fn"                "fn compiler_main_test_eg_small_satf_allows_optin" "$M"
 cg "main:T143d_fn"                "fn compiler_main_test_eg_small_satf_chaotic_blocks" "$M"
-cg "main:total_1156"              "let total: i64 = 1156" "$M"
+cg "main:T143e_fn"                "fn compiler_main_test_eg_q_scalar_leaves_reassociate" "$M"
+cg "main:T143f_fn"                "fn compiler_main_test_eg_q_unknown_leaves_block" "$M"
+cg "main:T143g_fn"                "fn compiler_main_test_eg_q_union_support_blocks" "$M"
+cg "main:T143h_fn"                "fn compiler_main_test_eg_q_mask_algebra" "$M"
+cg "main:total_1161"              "let total: i64 = 1161" "$M"
 
 echo ""
-echo "--- Live check: main.sio self-tests, T143b/c/d (requires a Madaros built from current source) ---"
+echo "--- Live check: main.sio self-tests, T143b/c/d (three axes) + T143e/f/g/h (Q certificate) (requires a Madaros built from current source) ---"
 if [ -z "$MADAROS" ] || [ ! -x "$MADAROS" ]; then
-  for t in T143b T143c T143d; do
+  for t in T143b T143c T143d T143e T143f T143g T143h; do
     TOTAL=$((TOTAL + 1))
     echo "NOT_RUN  live:$t (set SOUNIO_EPISTEMIC_EGRAPH_MADAROS to a Madaros built via scripts/ci/build_modular_madaros.sh)"
     NOT_RUN=$((NOT_RUN + 1))
@@ -95,10 +110,19 @@ else
   L="$(mktemp)"
   # A pre-existing crash further into this same run is expected and is not
   # this gate's concern (see header) -- capture whatever prints before it.
-  timeout 60 "$MADAROS" --self-test > "$L" 2>&1 || true
-  for t in T143b T143c T143d; do
+  # The rc is recorded, not `|| true`-discarded: a nonzero rc with a
+  # non-empty log is the documented mid-run crash class, but a run that
+  # printed NOTHING is an instrument that did not answer, and an
+  # instrument that did not answer cannot certify anything.
+  madaros_rc=0
+  timeout 60 "$MADAROS" --self-test > "$L" 2>&1 || madaros_rc=$?
+  live_log_bytes="$(wc -c <"$L" 2>/dev/null || echo 0)"
+  for t in T143b T143c T143d T143e T143f T143g T143h; do
     TOTAL=$((TOTAL + 1))
-    if grep -q "$t OK" "$L"; then echo "PASS  live:$t"; PASS=$((PASS + 1))
+    if [ "$live_log_bytes" -eq 0 ]; then
+      echo "FAIL  live:$t (self-test log is empty: the instrument produced no evidence, rc=$madaros_rc)"
+      FAIL=$((FAIL + 1))
+    elif grep -q "$t OK" "$L"; then echo "PASS  live:$t"; PASS=$((PASS + 1))
     elif grep -q "FAIL: $t" "$L"; then echo "FAIL  live:$t"; FAIL=$((FAIL + 1))
     else echo "NOT_RUN  live:$t (not reached in self-test log)"; NOT_RUN=$((NOT_RUN + 1)); fi
   done
@@ -114,5 +138,12 @@ TOTAL=$((TOTAL + 2)); NOT_RUN=$((NOT_RUN + 2))
 echo ""
 echo "=== SUMMARY ==="
 echo "PASS=$PASS  FAIL=$FAIL  NOT_RUN=$NOT_RUN  TOTAL=$TOTAL"
-if [ "$FAIL" -eq 0 ]; then echo "GATE: PASS (structural + live checks clean; NOT_RUN entries are known, separately-tracked blockers, not silent passes)"; exit 0
+# Zero-evidence guard: FAIL==0 alone cannot certify green, because every
+# check can be NOT_RUN (subjects moved/renamed, instrument absent or dead).
+# "The instrument did not answer" and "the selected set is empty and clean"
+# are different states; only the second may read PASS (CI trust contract).
+if [ "$PASS" -eq 0 ]; then
+  echo "GATE: FAIL (zero evidence: no check produced a PASS -- all NOT_RUN is a dead or absent instrument, not a green run)"
+  exit 1
+elif [ "$FAIL" -eq 0 ]; then echo "GATE: PASS (structural + live checks clean; NOT_RUN entries are known, separately-tracked blockers, not silent passes)"; exit 0
 else echo "GATE: FAIL"; exit 1; fi

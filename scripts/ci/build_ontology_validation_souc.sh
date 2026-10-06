@@ -346,7 +346,7 @@ fallback_compile_oracle() {
     rm -f "\$out"
     return \$rc
   fi
-  if grep -qiE '(^|[[:space:]])error:|warning: unknown identifier' "\$log_path"; then
+  if grep -qiE '(^|[[:space:]])error(\[E[0-9]+\])?:|warning: unknown identifier' "\$log_path"; then
     rm -f "\$out"
     return 1
   fi

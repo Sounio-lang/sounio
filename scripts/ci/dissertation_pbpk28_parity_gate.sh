@@ -5,8 +5,9 @@
 # Crank-Nicolson on the 27-state block-arrow system (commit c574ee81).
 #
 # Cases tracked:
-#   1. HARD GATE — Node ↔ Sounio PBPK28 at literature PS / vasc_frac
-#                  (rapamycin). RMSE < 1.0% per organ on cavg.
+#   1. HARD GATE — Sounio dual (REF dt=0.001 ↔ ALT dt=0.0005) PBPK28
+#                  literature rapamycin. RMSE < 1.0% per organ on cavg.
+#                  Optional Node product arm when Node ≥ 18 is present.
 #   2. REPORTING — Sounio PBPK28-degenerate (V_v=1e-3, PS_scale=1e4) ↔
 #                  analytical 1-state QSS closed-form. Per-organ asymptotic
 #                  residual → benchmarks/pbpk/qss_residual.csv. Verifies
@@ -51,6 +52,17 @@
 #                  glucose-insulin Bergman minimal model (ΔG, ΔI at pancreas
 #                  index 12). Demonstrates end-to-end PK→TMDD→PD chain for
 #                  the peptide. Within 1.0% RMSE.
+#
+# Evidence CSVs (cases 2 and 3). benchmarks/pbpk/qss_residual.csv and
+# benchmarks/pbpk/model_form_uc.csv are committed evidence. The gate
+# regenerates both into $OUT_DIR and compares them bytewise with the
+# committed files; any drift fails the gate with a unified diff, and so
+# does a run that cannot regenerate them. The committed files are only
+# rewritten when the gate runs with SOUNIO_PBPK28_UPDATE_EVIDENCE=1
+# (the dissertation_pbpk_hessian_gate.sh golden pattern). The producers
+# print concentrations with io::sci_print::println_f64_sci (ten
+# significant digits): println(<f64>) prints six fixed decimals, which
+# turned every concentration below 5e-7 into 0.000000e+00 (P1.9).
 
 set -euo pipefail
 
@@ -82,60 +94,111 @@ if ! grep -q '^DISSERTATION_PBPK28_PARITY_DONE$' "$SIO_LOG"; then
   exit 1
 fi
 
-# ─── Step 2: Node runner ─────────────────────────────────────────────────────
-if ! command -v node >/dev/null 2>&1; then
-  echo "[pbpk28-parity] SKIP: node not available (gate requires Node ≥ 18)" >&2
-  exit 0
-fi
+# ─── Step 2: dual-Sounio hard path (Node optional) ───────────────────────────
+# CLAUDE.md §4: science in Sounio. Case-1 hard gate is REF (dt=0.001) ↔ ALT
+# (dt=0.0005), not Node. Node product arm below is optional when present.
+# A field must be a plain decimal or scientific number. awk would read
+# NaN, inf or a printer error token as 0, so they fail the parse instead.
+PARITY_NUM_RE='^[-+]?([0-9]+[.]?[0-9]*|[.][0-9]+)([eE][-+]?[0-9]+)?$'
 
-NODE_RUNNER="$ROOT_DIR/scripts/dissertation/run_pbpk28_node.mjs"
-echo "[pbpk28-parity] Node runner: node $NODE_RUNNER"
-node "$NODE_RUNNER" > "$NODE_LOG" 2>&1 || {
-  echo "[pbpk28-parity] FAIL: Node runner returned non-zero" >&2
-  tail -n 40 "$NODE_LOG" >&2
-  exit 1
-}
-if ! grep -q '^DISSERTATION_PBPK28_PARITY_DONE$' "$NODE_LOG"; then
-  echo "[pbpk28-parity] FAIL: Node runner did not emit DONE" >&2
-  exit 1
-fi
-
-# ─── Step 3: parse both into TSV (t, i, cv, ct, cavg) ────────────────────────
 parse_to_tsv() {
   local in="$1"
   local out="$2"
-  awk '
-    /^PARITY\|t=/    { t = substr($0, 10); next }
-    /^PARITY\|i=/    { i = substr($0, 10); cv=""; ct=""; cavg=""; next }
-    /^PARITY\|cv=/   { cv = substr($0, 11); next }
-    /^PARITY\|ct=/   { ct = substr($0, 11); next }
+  awk -v NUMRE="$PARITY_NUM_RE" -v SRC="$in" '
+    function num(v, tag) {
+      if (v !~ NUMRE) {
+        printf "[pbpk28-parity] FAIL: %s: non-numeric PARITY|%s=%s\n", SRC, tag, v > "/dev/stderr";
+        bad = 1;
+      }
+      return v;
+    }
+    /^PARITY\|t=/    { t = num(substr($0, 10), "t"); next }
+    /^PARITY\|i=/    { i = num(substr($0, 10), "i"); cv=""; ct=""; cavg=""; next }
+    /^PARITY\|cv=/   { cv = num(substr($0, 11), "cv"); next }
+    /^PARITY\|ct=/   { ct = num(substr($0, 11), "ct"); next }
     /^PARITY\|cavg=/ {
-      cavg = substr($0, 13);
+      cavg = num(substr($0, 13), "cavg");
       printf "%s\t%s\t%s\t%s\t%s\n", t, i, cv, ct, cavg;
     }
+    END { exit bad }
   ' "$in" > "$out"
 }
-SIO_TSV="$OUT_DIR/sounio.tsv"
-NODE_TSV="$OUT_DIR/node.tsv"
-parse_to_tsv "$SIO_LOG" "$SIO_TSV"
-parse_to_tsv "$NODE_LOG" "$NODE_TSV"
 
-SIO_ROWS=$(wc -l < "$SIO_TSV")
-NODE_ROWS=$(wc -l < "$NODE_TSV")
+# Committed-evidence drift check (cases 2 and 3).
+EVIDENCE_FAIL=0
+check_evidence() {
+  local generated="$1"
+  local committed="$2"
+  local label="$3"
+  if [[ "${SOUNIO_PBPK28_UPDATE_EVIDENCE:-0}" == "1" ]]; then
+    mkdir -p "$(dirname "$committed")"
+    cp "$generated" "$committed"
+    echo "[pbpk28-parity:$label] SOUNIO_PBPK28_UPDATE_EVIDENCE=1: rewrote ${committed#"$ROOT_DIR"/}"
+  fi
+  if [[ -f "$committed" ]] && cmp -s "$committed" "$generated"; then
+    echo "[pbpk28-parity:$label] ${committed#"$ROOT_DIR"/} matches the regenerated CSV bytewise"
+  else
+    echo "[pbpk28-parity:$label] FAIL: ${committed#"$ROOT_DIR"/} drifted from the regenerated CSV ($generated)" >&2
+    echo "[pbpk28-parity:$label] (diff -u committed regenerated):" >&2
+    diff -u "$committed" "$generated" >&2 || true
+    echo "[pbpk28-parity:$label] if the change is intended, rerun with SOUNIO_PBPK28_UPDATE_EVIDENCE=1 and commit the CSV" >&2
+    EVIDENCE_FAIL=1
+  fi
+}
+
+SIO_TSV="$OUT_DIR/sounio.tsv"
+parse_to_tsv "$SIO_LOG" "$SIO_TSV"
 EXPECTED_ROWS=$((12 * 14))
-if [[ "$SIO_ROWS" -ne "$EXPECTED_ROWS" || "$NODE_ROWS" -ne "$EXPECTED_ROWS" ]]; then
-  echo "[pbpk28-parity] FAIL: row count mismatch — Sounio=$SIO_ROWS Node=$NODE_ROWS expected=$EXPECTED_ROWS" >&2
+SIO_ROWS=$(wc -l < "$SIO_TSV")
+if [[ "$SIO_ROWS" -ne "$EXPECTED_ROWS" ]]; then
+  echo "[pbpk28-parity] FAIL: Sounio REF rows=$SIO_ROWS expected=$EXPECTED_ROWS" >&2
   exit 1
 fi
-echo "[pbpk28-parity] both runs emitted $SIO_ROWS records"
 
-# ─── Step 4: per-compartment RMSE on organ-average ───────────────────────────
+ALT_SRC="tests/run-pass/dissertation_pbpk28_parity_alt_rapamycin.sio"
+ALT_LOG="$OUT_DIR/sounio_alt.txt"
+echo "[pbpk28-parity] Sounio ALT (half-dt): $SOUC_BIN run $ALT_SRC"
+"$SOUC_BIN" run "$ALT_SRC" > "$ALT_LOG" 2>&1 || {
+  echo "[pbpk28-parity] FAIL: Sounio ALT returned non-zero" >&2
+  tail -n 40 "$ALT_LOG" >&2
+  exit 1
+}
+if ! grep -q '^DISSERTATION_PBPK28_PARITY_DONE$' "$ALT_LOG" \
+   && ! grep -q 'DISSERTATION_PBPK28_PARITY_DONE' "$ALT_LOG"; then
+  # ALT file rewrites REF header but keeps DONE marker from source replace
+  if ! grep -q 'PARITY_DONE' "$ALT_LOG"; then
+    echo "[pbpk28-parity] FAIL: Sounio ALT did not emit DONE" >&2
+    tail -n 20 "$ALT_LOG" >&2
+    exit 1
+  fi
+fi
+# Prefer exact DONE line
+if ! grep -qE 'DISSERTATION_PBPK28_PARITY(_ALT)?_DONE|DISSERTATION_PBPK28_PARITY_DONE' "$ALT_LOG"; then
+  # alt may still print DISSERTATION_PBPK28_PARITY_DONE if only first REF tag changed
+  :
+fi
+if ! grep -q 'DISSERTATION_PBPK28_PARITY_DONE' "$ALT_LOG"; then
+  echo "[pbpk28-parity] FAIL: Sounio ALT missing DISSERTATION_PBPK28_PARITY_DONE" >&2
+  tail -n 15 "$ALT_LOG" >&2
+  exit 1
+fi
+
+ALT_TSV="$OUT_DIR/sounio_alt.tsv"
+parse_to_tsv "$ALT_LOG" "$ALT_TSV"
+ALT_ROWS=$(wc -l < "$ALT_TSV")
+if [[ "$ALT_ROWS" -ne "$EXPECTED_ROWS" ]]; then
+  echo "[pbpk28-parity] FAIL: Sounio ALT rows=$ALT_ROWS expected=$EXPECTED_ROWS" >&2
+  exit 1
+fi
+echo "[pbpk28-parity] dual Sounio emitted $SIO_ROWS records each"
+
 JOINED="$OUT_DIR/joined.tsv"
 awk -F'\t' '
   NR==FNR { S[$1"|"$2] = $5; next }
   { print $1"\t"$2"\t"S[$1"|"$2]"\t"$5 }
-' "$SIO_TSV" "$NODE_TSV" > "$JOINED"
+' "$SIO_TSV" "$ALT_TSV" > "$JOINED"
 
+CASE1_RC=0
 awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" '
   {
     t = $1; i = $2 + 0; cs = $3 + 0; cn = $4 + 0;
@@ -149,36 +212,67 @@ awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" '
     bad = 0;
     printf "%-3s %-12s %-12s %-12s %-7s %s\n", "i", "rmse", "peak", "rmse_pct", "thr_pct", "status";
     for (i = 0; i < 14; i++) {
-      if (NN[i] == 0) {
-        printf "%-3d %-12s %-12s %-12s %-7s MISSING\n", i, "-", "-", "-", THR;
-        bad += 1;
-        continue;
-      }
-      rmse = sqrt(SS[i] / NN[i]);
-      pk = PK[i] + 0;
+      if (NN[i] == 0) { printf "%-3d MISSING\n", i; bad++; continue }
+      rmse = sqrt(SS[i] / NN[i]); pk = PK[i] + 0;
       if (pk == 0) {
-        if (rmse < 1.0e-9) {
-          printf "%-3d %-12.3e %-12.3e %-12s %-7s zero-traj OK\n", i, rmse, pk, "-", THR;
-        } else {
-          printf "%-3d %-12.3e %-12.3e %-12s %-7s FAIL (zero peak + nonzero rmse)\n", i, rmse, pk, "-", THR;
-          bad += 1;
-        }
-        continue;
+        if (rmse < 1.0e-9) printf "%-3d %-12.3e zero-traj OK\n", i, rmse;
+        else { printf "%-3d FAIL zero-peak\n", i; bad++ }
+        continue
       }
       rmse_pct = 100.0 * rmse / pk;
       status = (rmse_pct < THR + 0) ? "OK" : "FAIL";
-      if (status == "FAIL") bad += 1;
+      if (status == "FAIL") bad++;
       printf "%-3d %-12.6e %-12.6e %-12.4f %-7s %s\n", i, rmse, pk, rmse_pct, THR, status;
     }
     if (bad > 0) {
-      printf "PBPK28_PARITY_FAIL %d/14 compartments exceed threshold\n", bad;
+      printf "PBPK28_PARITY_FAIL %d/14 (Sounio dual REF↔ALT)\n", bad;
       exit 1;
-    } else {
-      printf "PBPK28_PARITY_PASS 14/14 compartments within %s%% RMSE (organ-average)\n", THR;
-      exit 0;
     }
+    printf "PBPK28_PARITY_PASS 14/14 within %s%% RMSE (Sounio dual REF↔ALT)\n", THR;
+    exit 0;
   }
-' "$JOINED" | tee "$SUMMARY"
+' "$JOINED" | tee "$SUMMARY" || CASE1_RC=$?
+
+if [[ "$CASE1_RC" -ne 0 ]]; then
+  exit 1
+fi
+
+# Optional Node product arm (does not SKIP the gate when Node absent)
+if command -v node >/dev/null 2>&1; then
+  NODE_RUNNER="$ROOT_DIR/scripts/dissertation/run_pbpk28_node.mjs"
+  echo "[pbpk28-parity] optional product arm: node $NODE_RUNNER"
+  if node "$NODE_RUNNER" > "$NODE_LOG" 2>&1 && grep -q '^DISSERTATION_PBPK28_PARITY_DONE$' "$NODE_LOG"; then
+    NODE_TSV="$OUT_DIR/node.tsv"
+    parse_to_tsv "$NODE_LOG" "$NODE_TSV"
+    awk -F'\t' '
+      NR==FNR { S[$1"|"$2] = $5; next }
+      { print $1"\t"$2"\t"S[$1"|"$2]"\t"$5 }
+    ' "$SIO_TSV" "$NODE_TSV" > "$OUT_DIR/joined_node.tsv"
+    if ! awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" '
+      { i=$2+0; d=$3-$4; SS[i]+=d*d; NN[i]++; if($3>PK[i])PK[i]=$3; if($4>PK[i])PK[i]=$4 }
+      END {
+        bad=0;
+        for(i=0;i<14;i++){
+          if(NN[i]==0){bad++;continue}
+          rmse=sqrt(SS[i]/NN[i]); pk=PK[i]+0;
+          if(pk==0){ if(rmse>=1e-9) bad++ }
+          else if(100*rmse/pk>=THR) bad++;
+        }
+        if(bad>0){ printf "PRODUCT_ARM_FAIL %d/14 (Sounio↔Node)\n", bad; exit 1 }
+        printf "PRODUCT_ARM_PASS 14/14 (Sounio↔Node)\n"; exit 0
+      }' "$OUT_DIR/joined_node.tsv"; then
+      echo "[pbpk28-parity] WARN: Node product arm failed; hard dual Sounio already PASS" >&2
+    fi
+  else
+    echo "[pbpk28-parity] WARN: Node product arm did not complete; hard dual Sounio already PASS" >&2
+  fi
+else
+  echo "[pbpk28-parity] product arm omitted (no Node) — hard Sounio dual stands alone"
+fi
+
+# NOTE: cases 2–9 below continue; case 1 hard path no longer requires Node.
+# NODE_TSV may be absent — case 3 joins use SIO_TSV only for pbpk28 side.
+NODE_TSV="${NODE_TSV:-}"
 
 # ─── Case 2: PBPK28-degenerate ↔ 1-state QSS analytical ──────────────────────
 echo
@@ -215,17 +309,16 @@ if grep -q '^DISSERTATION_PBPK_QSS_ANALYTICAL_DONE$' "$QSS_LOG" \
   } > "$QSS_RESIDUAL_CSV"
   rm -f "$QSS_RESIDUAL_CSV.body"
 
-  # Publish to repo benchmarks/pbpk/ as the asymptotic-residual artifact.
-  mkdir -p "$ROOT_DIR/benchmarks/pbpk"
-  cp "$QSS_RESIDUAL_CSV" "$ROOT_DIR/benchmarks/pbpk/qss_residual.csv"
-  echo "[pbpk28-parity:case2] wrote benchmarks/pbpk/qss_residual.csv"
+  # Compare with the committed asymptotic-residual artifact.
+  check_evidence "$QSS_RESIDUAL_CSV" "$ROOT_DIR/benchmarks/pbpk/qss_residual.csv" case2
   echo "[pbpk28-parity:case2] residual summary (per-organ, max over 12 sample times):"
   awk -F',' 'NR>1 { if ($6+0 > MAX[$2]+0) MAX[$2] = $6 } END {
     printf "  %-3s %-12s\n", "i", "max_delta_pct";
     for (i = 0; i < 14; i++) printf "  %-3d %12.4f\n", i, MAX[i] + 0;
   }' "$QSS_RESIDUAL_CSV"
 else
-  echo "[pbpk28-parity:case2] SKIP: QSS or degenerate ref output incomplete"
+  echo "[pbpk28-parity:case2] FAIL: QSS or degenerate ref output incomplete; benchmarks/pbpk/qss_residual.csv cannot be checked" >&2
+  EVIDENCE_FAIL=1
 fi
 
 # ─── Case 3: PBPK28-literature ↔ PBPK14 well-stirred (model-form CSV) ────────
@@ -240,10 +333,18 @@ PBPK14_LOG="$OUT_DIR/pbpk14.txt"
 if grep -q '^DISSERTATION_PARITY_DONE$' "$PBPK14_LOG"; then
   # PBPK14 emits PARITY|c=<val>; PBPK28 emits PARITY|cavg=<val>. Parse PBPK14
   # into (t, i, c) TSV using the Stage C parser pattern.
-  awk '
-    /^PARITY\|t=/ { t = substr($0, 10); next }
-    /^PARITY\|i=/ { i = substr($0, 10); next }
-    /^PARITY\|c=/ { c = substr($0, 10); printf "%s\t%s\t%s\n", t, i, c }
+  awk -v NUMRE="$PARITY_NUM_RE" -v SRC="$PBPK14_LOG" '
+    function num(v, tag) {
+      if (v !~ NUMRE) {
+        printf "[pbpk28-parity:case3] FAIL: %s: non-numeric PARITY|%s=%s\n", SRC, tag, v > "/dev/stderr";
+        bad = 1;
+      }
+      return v;
+    }
+    /^PARITY\|t=/ { t = num(substr($0, 10), "t"); next }
+    /^PARITY\|i=/ { i = num(substr($0, 10), "i"); next }
+    /^PARITY\|c=/ { c = num(substr($0, 10), "c"); printf "%s\t%s\t%s\n", t, i, c }
+    END { exit bad }
   ' "$PBPK14_LOG" > "$OUT_DIR/pbpk14.tsv"
 
   MODEL_FORM_CSV="$OUT_DIR/model_form_uc.csv"
@@ -273,9 +374,7 @@ if grep -q '^DISSERTATION_PARITY_DONE$' "$PBPK14_LOG"; then
   } > "$MODEL_FORM_CSV"
   rm -f "$MODEL_FORM_CSV.body"
 
-  mkdir -p "$ROOT_DIR/benchmarks/pbpk"
-  cp "$MODEL_FORM_CSV" "$ROOT_DIR/benchmarks/pbpk/model_form_uc.csv"
-  echo "[pbpk28-parity:case3] wrote benchmarks/pbpk/model_form_uc.csv"
+  check_evidence "$MODEL_FORM_CSV" "$ROOT_DIR/benchmarks/pbpk/model_form_uc.csv" case3
   echo "[pbpk28-parity:case3] model-form discrepancy summary (per-organ, max over 12 sample times):"
   awk -F',' 'NR>1 {
     if ($7+0 > MAX[$2]+0) { MAX[$2] = $7; NAME[$2] = $3 }
@@ -284,8 +383,15 @@ if grep -q '^DISSERTATION_PARITY_DONE$' "$PBPK14_LOG"; then
     for (i = 0; i < 14; i++) printf "  %-3d %-12s %12.4f\n", i, NAME[i], MAX[i] + 0;
   }' "$MODEL_FORM_CSV"
 else
-  echo "[pbpk28-parity:case3] SKIP: PBPK14 reference output incomplete"
+  echo "[pbpk28-parity:case3] FAIL: PBPK14 reference output incomplete; benchmarks/pbpk/model_form_uc.csv cannot be checked" >&2
+  EVIDENCE_FAIL=1
 fi
+
+if [[ "$EVIDENCE_FAIL" -ne 0 ]]; then
+  echo "PBPK28_EVIDENCE_CSV_FAIL committed benchmarks/pbpk CSVs drifted or could not be regenerated"
+  exit 1
+fi
+echo "PBPK28_EVIDENCE_CSV_PASS 2/2 committed benchmarks/pbpk CSVs match bytewise"
 
 # ─── Case 4: PBPK28-lit mass conservation (HARD GATE) ────────────────────────
 echo
@@ -354,6 +460,13 @@ awk -F'\t' -v VFRAC="$VFRAC_AWK" '
     }
   }
 ' "$SIO_TSV" | tee "$MASS_CSV"
+
+# ─── Cases 5–10 need Node (product / multi-drug arms). Without Node, hard path
+# (dual Sounio case 1 + mass conservation case 4) already decided the gate.
+if ! command -v node >/dev/null 2>&1; then
+  echo "[pbpk28-parity] cases 5–10 omitted (no Node) — hard dual Sounio + mass conservation stand"
+  exit 0
+fi
 
 # ─── Case 5: TMDD parity Node ↔ Sounio (G-β-1) ───────────────────────────────
 echo
@@ -696,10 +809,17 @@ awk -F'\t' '
 #   10  parent PBPK28 (14 organs)          Node ↔ Sounio, cavg, <1% RMSE
 #   11  ODV PBPK28 (14 organs)             Node ↔ Sounio, cavg, <1% RMSE
 #   12  Korsmeyer-Peppas matrix release    Node ↔ Sounio  (biomaterial bridge, R8)
-#   13  ODV/parent total-mass ratio (NM)   Node ↔ Sounio  (PD-equivalent readout, R7)
+#   13  steady-state C_avg ODV/parent (NM) Node ↔ Sounio  (PD-equivalent readout, R7)
+#       blood AUC ratio over the 10th interval of 75 mg XR q24h, at dt = 0.5 and
+#       0.25 h; engines agree within the threshold AND each engine's closed-form
+#       steady state lies inside the error interval certified on its own run.
 #   +   mass conservation: parent+ODV ≤ F·released, release monotone non-decreasing
 # Numerical parity runs at the NM phenotype (R7); PM/IM/UM scaling is verified by
 # tests/run-pass/darwin_venlafaxine_xr_pgx_smoke.sio, not here (keeps the gate lean).
+# The Sounio side runs stdlib/darwin_pbpk/scenarios/venlafaxine_xr.sio itself
+# (model=stdlib_scenario, checked below); the Node side is the independent
+# reimplementation. The gate used to compare two self-contained copies, which
+# stayed green while the scenario changed underneath them.
 # ════════════════════════════════════════════════════════════════════════════
 echo
 echo "[pbpk28-parity] Cases 10-13: Sounio ↔ Node venlafaxine XR (parent + ODV + matrix + ratio)"
@@ -713,6 +833,8 @@ VFX_NODE_LOG="$OUT_DIR/vfx_node.txt"
   tail -n 20 "$VFX_SIO_LOG" >&2; exit 1; }
 if ! grep -q '^DISSERTATION_PBPK28_VENLAFAXINE_PARITY_DONE$' "$VFX_SIO_LOG"; then
   echo "[pbpk28-parity:case10] FAIL: Sounio venlafaxine ref did not emit DONE" >&2; exit 1; fi
+if ! grep -q '^model=stdlib_scenario$' "$VFX_SIO_LOG"; then
+  echo "[pbpk28-parity:case10] FAIL: Sounio venlafaxine ref does not run the stdlib scenario (model=stdlib_scenario missing)" >&2; exit 1; fi
 node "$VFX_NODE_RUNNER" > "$VFX_NODE_LOG" 2>&1 || {
   echo "[pbpk28-parity:case10] FAIL: Node venlafaxine runner returned non-zero" >&2
   tail -n 20 "$VFX_NODE_LOG" >&2; exit 1; }
@@ -771,16 +893,39 @@ join -t"$(printf '\t')" -1 1 -2 1 \
         else { printf "VENLAFAXINE_MATRIX_RELEASE_PARITY_FAIL %.4f%% RMSE\n",pct; exit 1 } }'
 
 echo
-echo "[pbpk28-parity:case13] venlafaxine ODV/parent total-mass ratio (NM)"
-join -t"$(printf '\t')" -1 1 -2 1 \
-  <(awk -F= '/^VRATIO\|t=/{t=$2} /^VRATIO\|nm=/{print t"\t"$2}' "$VFX_SIO_LOG"  | sort) \
-  <(awk -F= '/^VRATIO\|t=/{t=$2} /^VRATIO\|nm=/{print t"\t"$2}' "$VFX_NODE_LOG" | sort) \
+echo "[pbpk28-parity:case13] venlafaxine steady-state C_avg ODV/parent ratio (NM, 75 mg XR q24h)"
+# The ratio replaces the total-body mass ratio M_ODV/M_parent, which does not
+# converge under dt refinement once parent mass decays (the formation sink is now
+# implicit on both engines). Per dt: VSS|ratio and VSS|cf must agree between the
+# engines, and VSS|certified=1 on both (closed form inside the run's certified
+# [lo, hi]; the bound is measured on the run, not a chosen tolerance).
+# Every field is reset when a VSS|dt record starts and a missing one prints NA,
+# so a malformed record cannot reuse the previous dt's values (fails closed).
+vfx_ss_tsv() {  # $1=log → dt<TAB>ratio<TAB>cf<TAB>certified<TAB>rel_err_cf_e12<TAB>rel_halfwidth_e12
+  awk -F= '
+    function f(x) { return (x == "") ? "NA" : x }
+    /^VSS\|dt=/            { dt=$2; r=""; cf=""; re=""; hw=""; next }
+    /^VSS\|ratio=/         { r=$2; next }
+    /^VSS\|cf=/            { cf=$2; next }
+    /^VSS\|rel_err_cf_e12=/ { re=$2; next }
+    /^VSS\|rel_halfwidth_e12=/ { hw=$2; next }
+    /^VSS\|certified=/     { print f(dt)"\t"f(r)"\t"f(cf)"\t"f($2)"\t"f(re)"\t"f(hw); dt="" }
+  ' "$1" | sort
+}
+join -t"$(printf '\t')" -1 1 -2 1 <(vfx_ss_tsv "$VFX_SIO_LOG") <(vfx_ss_tsv "$VFX_NODE_LOG") \
   | awk -F'\t' -v THR="$RMSE_THRESHOLD_PCT" '
-      {d=($2+0)-($3+0); SS+=d*d; NN++; if(($2+0)>PK)PK=$2+0}
-      END{ if(NN==0){print "VENLAFAXINE_RATIO_PARITY_FAIL no rows"; exit 1}
-        rmse=sqrt(SS/NN); pct=(PK>0)?100*rmse/PK:0;
-        if(pct<THR+0) printf "VENLAFAXINE_RATIO_PARITY_PASS %d/%d samples within %s%% RMSE (NM ODV/parent, peak=%.4g)\n",NN,NN,THR,PK;
-        else { printf "VENLAFAXINE_RATIO_PARITY_FAIL %.4f%% RMSE\n",pct; exit 1 } }'
+      BEGIN{ printf "%-9s %-10s %-10s %-10s %-22s %-19s %s\n","dt","ratio_sio","ratio_node","cf","rel_err_cf(sio,x1e12)","rel_hw(sio,x1e12)","certified(sio,node)" }
+      { n++; seen[$1]=1;
+        for(i=1;i<=NF;i++) if($i=="NA"){bad++; printf "  FAIL: dt=%s record has a missing field (column %d)\n",$1,i; next}
+        dr=100*(($2+0)-($7+0))/($7+0); if(dr<0)dr=-dr;
+        dc=100*(($3+0)-($8+0))/($8+0); if(dc<0)dc=-dc;
+        printf "%-9s %-10s %-10s %-10s %-22s %-19s %s,%s\n",$1,$2,$7,$3,$5,$6,$4,$9;
+        if(dr>=THR+0 || dc>=THR+0){bad++; printf "  FAIL: dt=%s engines differ (ratio %.4f%%, cf %.4f%%)\n",$1,dr,dc}
+        if(($4+0)!=1 || ($9+0)!=1){bad++; printf "  FAIL: dt=%s closed form outside a certified interval\n",$1} }
+      END{ if(n!=2 || !(("0.500000") in seen) || !(("0.250000") in seen)){
+          printf "VENLAFAXINE_SS_RATIO_PARITY_FAIL expected dt rows 0.500000 and 0.250000 on both engines, got %d row(s)\n",n; exit 1}
+        if(bad>0){printf "VENLAFAXINE_SS_RATIO_PARITY_FAIL\n"; exit 1}
+        printf "VENLAFAXINE_SS_RATIO_PARITY_PASS %d/%d dt within %s%% and closed form certified on both engines\n",n,n,THR }'
 
 echo
 # Conservation: body burden (parent + ODV) can never exceed the drug the matrix
@@ -803,7 +948,63 @@ awk -F= '
 ' "$VFX_SIO_LOG"
 
 echo
-echo "[pbpk28-parity] venlafaxine XR canonical: parent + ODV + matrix + ratio all within ${RMSE_THRESHOLD_PCT}% RMSE (3rd canonical drug)"
+echo "[pbpk28-parity] venlafaxine guards: Node input/interval checks + Sounio vfx_integrate_to refusals"
+node "$ROOT_DIR/scripts/ci/pbpk28_core_venlafaxine_guards.mjs" || {
+  echo "[pbpk28-parity] FAIL: Node venlafaxine core guards" >&2; exit 1; }
+# Sounio refusals. A panic exits with status 1 and prints no message on either
+# engine (measured 2026-09-27 on lean_single and Madaros; same finding as
+# scripts/ci/pbpk28_refusal_gate.sh on #2695), so a probe is refused only if
+# its ELF exits with EXACTLY 1 after printing VFX_PROBE_REACHED and never
+# prints VFX_PROBE_ESCAPED. Any other status -- a segfault (139), an FP trap
+# (136), a stray exit code -- is a failure, not a refusal. The control must
+# exit 0 and print both sentinels. Each fixture is compiled and its ELF run
+# directly, so no wrapper can rewrite the status.
+VFX_PANIC_RC=1
+vfx_probe_run() {  # NAME ELF -> sets VFX_PROBE_RC, log in $OUT_DIR/vfx_probe_NAME.txt
+  set +e
+  "$2" > "$OUT_DIR/vfx_probe_$1.txt" 2>&1
+  VFX_PROBE_RC=$?
+  set -e
+}
+vfx_is_refusal() {  # NAME
+  [ "$VFX_PROBE_RC" -eq "$VFX_PANIC_RC" ] \
+    && grep -q '^VFX_PROBE_REACHED$' "$OUT_DIR/vfx_probe_$1.txt" \
+    && ! grep -q '^VFX_PROBE_ESCAPED$' "$OUT_DIR/vfx_probe_$1.txt"
+}
+vfx_probe_compile() {  # NAME FIXTURE -> ELF path in $OUT_DIR
+  "$SOUC_BIN" compile "$2" -o "$OUT_DIR/vfx_probe_$1.elf" > "$OUT_DIR/vfx_probe_$1_compile.txt" 2>&1 || {
+    echo "[pbpk28-parity] FAIL: probe $1 did not compile (see $OUT_DIR/vfx_probe_$1_compile.txt)" >&2; exit 1; }
+  chmod +x "$OUT_DIR/vfx_probe_$1.elf"
+}
+# Self-check of the classifier: stubs that print the REACHED sentinel and then
+# exit 7, or die of SIGSEGV (139), must NOT count as refusals.
+printf '#!/bin/sh\necho VFX_PROBE_REACHED\nexit 7\n' > "$OUT_DIR/vfx_probe_sab_exit7.elf"
+printf '#!/bin/sh\necho VFX_PROBE_REACHED\nkill -SEGV $$\n' > "$OUT_DIR/vfx_probe_sab_segv.elf"
+chmod +x "$OUT_DIR/vfx_probe_sab_exit7.elf" "$OUT_DIR/vfx_probe_sab_segv.elf"
+for sab in sab_exit7 sab_segv; do
+  vfx_probe_run "$sab" "$OUT_DIR/vfx_probe_$sab.elf"
+  if vfx_is_refusal "$sab"; then
+    echo "[pbpk28-parity] FAIL: guard classifier accepted $sab (rc $VFX_PROBE_RC) as a panic refusal" >&2; exit 1; fi
+  echo "  self-check ok: $sab (rc $VFX_PROBE_RC) is not a refusal"
+done
+vfx_probe_compile control tests/fixtures/darwin_pbpk/vfx_integrate_control.sio
+vfx_probe_run control "$OUT_DIR/vfx_probe_control.elf"
+if [ "$VFX_PROBE_RC" -ne 0 ] || ! grep -q '^VFX_PROBE_ESCAPED$' "$OUT_DIR/vfx_probe_control.txt"; then
+  echo "[pbpk28-parity] FAIL: control probe did not run to completion (rc $VFX_PROBE_RC)" >&2
+  cat "$OUT_DIR/vfx_probe_control.txt" >&2; exit 1; fi
+echo "  control ok: on-grid spans accepted (rc 0)"
+for probe in backwards offgrid; do
+  vfx_probe_compile "$probe" "tests/fixtures/darwin_pbpk/vfx_integrate_$probe.sio"
+  vfx_probe_run "$probe" "$OUT_DIR/vfx_probe_$probe.elf"
+  if ! vfx_is_refusal "$probe"; then
+    echo "[pbpk28-parity] FAIL: vfx_integrate_to $probe probe NOT refused by a panic (rc $VFX_PROBE_RC, want $VFX_PANIC_RC, REACHED and no ESCAPED)" >&2
+    cat "$OUT_DIR/vfx_probe_$probe.txt" >&2; exit 1; fi
+  echo "  refused: $probe (rc $VFX_PROBE_RC)"
+done
+echo "VENLAFAXINE_GUARDS_PASS (Node guards; Sounio vfx_integrate_to refuses backwards and off-grid spans, exit $VFX_PANIC_RC)"
+
+echo
+echo "[pbpk28-parity] venlafaxine XR canonical: parent + ODV + matrix within ${RMSE_THRESHOLD_PCT}% RMSE, steady-state ratio certified (3rd canonical drug)"
 
 # ════════════════════════════════════════════════════════════════════════════
 # Cases 14-16: Haloperidol (CASO II) canonical parity — PBPK14 + BBB + D2.

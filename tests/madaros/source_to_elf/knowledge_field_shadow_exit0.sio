@@ -1,0 +1,58 @@
+// A user struct field named `value` was silently clobbered by its sibling.
+//
+// `ir_register_knowledge_layout` preseeds a synthetic `Knowledge` layout —
+// value@0, variance@1, confidence@2 — as entry 0 of the struct layout table,
+// before any user struct is registered. `field_idx_from_name_simple` resolves a
+// field *name* to a slot by scanning the whole table in order and taking the
+// first hit in any struct, and that path runs whenever the base is not a typed
+// local: `arr[i].f` reaches it because array locals record a length but no
+// element type.
+//
+// So `ext[0].value` resolved to Knowledge's slot 0 — the same slot as `oid` —
+// and the store overwrote the `oid` written just before it. Both reads then
+// went to slot 0 too, so `value` read back correct while `oid` returned
+// `value`'s bytes: a silent wrong answer at exit 0, with no diagnostic.
+//
+// The trigger was the identifier, not the shape: the same program with the
+// field named `val` was always correct, at any struct size, array length or
+// index form. Guard all three preseeded names.
+//
+// This gate compiles with --native-v2-compile, which is the path that carries
+// the defect; the run-pass suite runs under souc-stage2 and is green either way.
+
+struct Ext {
+    oid: [u8; 20],
+    value: [u8; 512],
+    variance: i64,
+    confidence: i64,
+}
+
+fn zero_ext() -> Ext {
+    Ext { oid: [0; 20], value: [0; 512], variance: 0, confidence: 0 }
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    var ext: [Ext; 4] = [ zero_ext(), zero_ext(), zero_ext(), zero_ext() ]
+
+    var oid_buf: [u8; 20] = [0; 20]
+    oid_buf[0] = 0x55
+    oid_buf[1] = 0x1D
+    var val_buf: [u8; 512] = [0; 512]
+    val_buf[0] = 0xAA
+    val_buf[1] = 0xBB
+
+    var i: i64 = 0
+    ext[i as usize].oid = oid_buf
+    ext[i as usize].value = val_buf
+    ext[i as usize].variance = 7
+    ext[i as usize].confidence = 9
+
+    // Each field must read back its own bytes, not its sibling's.
+    if ext[0].oid[0] as i64 != 85 { return 1 }
+    if ext[0].oid[1] as i64 != 29 { return 1 }
+    if ext[0].value[0] as i64 != 170 { return 1 }
+    if ext[0].value[1] as i64 != 187 { return 1 }
+    if ext[0].variance != 7 { return 1 }
+    if ext[0].confidence != 9 { return 1 }
+    return 0
+}

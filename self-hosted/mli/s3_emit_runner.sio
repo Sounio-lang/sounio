@@ -1,0 +1,87 @@
+// MLI S3 emit runner — prints the pipeline-B bytes for the Phase-2 golden.
+//
+// Pipeline B (design §6.4): hand-built add1 IR -> ir_to_mli_scalar -> V-struct
+// -> mli_legalize_x86 -> bytes, printed as space-separated decimals on one
+// line prefixed "S3BYTES ". scripts/ci/mli_s3_bit_identity_gate.sh compares
+// this against pipeline A: the bytes of add1 as ACTUALLY EMITTED by the
+// resolved souc engine compiling the golden source, extracted from the ELF
+// at gate time (never a hardcoded expectation — if the pinned emitter
+// changes, the gate honestly reds until the mimicry catches up).
+
+use ir::ir::*
+use mli::ir::*
+use mli::builder::*
+use mli::verify::*
+use mli::ir_to_mli::*
+use mli::legalize_x86::*
+
+fn gate_push_ir(f: &!IrFunction, inst: IrInstr) -> bool with Mut, Panic, Div {
+    var r = f.region
+    if ir_region_push(&!r, inst) != IR_ARENA_OK { return false }
+    f.region = r
+    f.instr_count = f.instr_count + 1
+    true
+}
+
+fn main() -> i64 with IO, Mut, Panic, Div {
+    if ir_instr_arena_init() != IR_ARENA_OK {
+        println("S3EMIT_FAIL arena")
+        return 1
+    }
+
+    var f = ir_empty_function()
+    var r = ir_region_invalid()
+    if ir_instr_arena_alloc(4, &!r) != IR_ARENA_OK {
+        println("S3EMIT_FAIL region")
+        return 1
+    }
+    f.region = r
+    f.param_regs[0] = 0
+    f.param_count = 1
+    f.reg_count = 3
+    f.returns_float = 1
+    if ir_float_bits_set(&!f, 0) < 0 {
+        println("S3EMIT_FAIL floatbits")
+        return 1
+    }
+    var ok = gate_push_ir(&!f, ir_load_float(1, 1.0))
+    ok = ok && gate_push_ir(&!f, ir_binop_typed(2, 0, BinaryOp::OpAdd, 1, true, true))
+    ok = ok && gate_push_ir(&!f, ir_return(2))
+    if !ok {
+        println("S3EMIT_FAIL build")
+        return 1
+    }
+
+    var m = mli_func_empty()
+    let st = ir_to_mli_scalar(&f, &!m)
+    if !st.ok {
+        print("S3EMIT_FAIL lower code=")
+        print_int(st.code)
+        print("\n")
+        return 1
+    }
+    let vr = mli_verify_function(&m)
+    if vr.code != MLI_VERR_OK {
+        print("S3EMIT_FAIL verify code=")
+        print_int(vr.code)
+        print("\n")
+        return 1
+    }
+    var cb = mli_codebuf_empty()
+    if !mli_legalize_x86(&m, &!cb) {
+        print("S3EMIT_FAIL legalize code=")
+        print_int(cb.code)
+        print("\n")
+        return 1
+    }
+
+    print("S3BYTES")
+    var k: i64 = 0
+    while k < cb.len {
+        print(" ")
+        print_int(cb.bytes[k])
+        k = k + 1
+    }
+    print("\n")
+    0
+}

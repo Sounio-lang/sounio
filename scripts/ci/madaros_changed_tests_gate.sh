@@ -22,8 +22,9 @@ fi
 paths=()
 if (($#)); then
   paths=("$@")
-elif [[ "$EVENT_NAME" == "pull_request" ]]; then
-  [[ -n "$BASE_SHA" ]] || fail "missing_pull_request_base_sha"
+elif [[ "$EVENT_NAME" == "pull_request" || "$EVENT_NAME" == "merge_group" ]]; then
+  # A merge-queue run tests exactly the queued diff (merge_group.base_sha..head_sha).
+  [[ -n "$BASE_SHA" ]] || fail "missing_${EVENT_NAME}_base_sha"
   if ! changed_paths="$(
     git -C "$ROOT_DIR" diff --name-only --diff-filter=ACMR "$BASE_SHA...$HEAD_SHA"
   )"; then
@@ -40,6 +41,16 @@ selected=()
 for path in "${paths[@]}"; do
   case "$path" in
     tests/run-pass/*.sio) ;;
+    # Copilot review (PR #2515), comments 4113834092/4113834108: this used to
+    # select only tests/run-pass, so a changed compile-fail fixture with
+    # //@ requires: madaros (e.g. the module-qualified-call private-fn /
+    # wrong-arg-type regressions this PR adds) was never actually compiled
+    # against Madaros here -- the full suite runs lean_single stage2, which
+    # `requires: madaros` skips outright. run_sio_test_suite.sh's --test-list
+    # path already validates //@ error-pattern for compile-fail fixtures
+    # (that is how the full suite's own compile-fail tests are checked), so
+    # widening this case is the only change needed.
+    tests/compile-fail/*.sio) ;;
     *) continue ;;
   esac
   [[ -f "$ROOT_DIR/$path" ]] || continue
@@ -62,9 +73,10 @@ fi
 # DUAL_GUM_KNOWLEDGE_OK.
 #
 # 131072 was calibrated on THAT witness alone, and "leaves headroom" did not
-# hold. This gate runs tests through `$SOUC_BIN run <file>`
-# (scripts/dev/run_sio_test_suite_v1.sh:153), which executes the program on top
-# of the compiler's own frame rather than in a fresh process, so it needs
+# hold. This gate runs tests through `$SOUC_BIN run <file>`, which executes
+# the program on top of the compiler's own frame rather than in a fresh
+# process (the same in-process shape the retired scripts/dev/
+# run_sio_test_suite_v1.sh used at its :153), so it needs
 # materially more stack than `compile` + exec. Measured 2026-08-09 on a
 # current-source Madaros, six tests, unanimous:
 #
@@ -159,6 +171,48 @@ compiler_sha256="$(sha256sum "$MADAROS_BIN" | cut -d' ' -f1)"
 echo "MADAROS_CHANGED_TESTS_START count=${#selected[@]} event=$EVENT_NAME compiler=$MADAROS_BIN compiler_sha256=$compiler_sha256"
 printf 'test=%s\n' "${selected[@]}"
 
+# KL-14b/c pins are dynlinked ELFs. The Witness gates build their probes;
+# the generic harness only does `souc run`, so stage the .so here whenever
+# those pins are in the changed set.
+for path in "${selected[@]}"; do
+  if [[ "$path" == "tests/run-pass/kl14b_dynlink_one_symbol.sio" ]]; then
+    gcc -shared -fPIC -O0 -o "$work_dir/libkl14b_probe.so" \
+      "$ROOT_DIR/tests/fixtures/kl14b/kl14b_probe.c"
+    export LD_LIBRARY_PATH="$work_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    echo "MADAROS_CHANGED_TESTS_DYNLINK probe=$work_dir/libkl14b_probe.so"
+  fi
+  if [[ "$path" == "tests/run-pass/kl14c_dynlink_n_symbols.sio" ]]; then
+    gcc -shared -fPIC -O0 -o "$work_dir/libkl14c_probe.so" \
+      "$ROOT_DIR/tests/fixtures/kl14c/kl14c_probe.c"
+    export LD_LIBRARY_PATH="$work_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    echo "MADAROS_CHANGED_TESTS_DYNLINK probe=$work_dir/libkl14c_probe.so"
+  fi
+  if [[ "$path" == "tests/run-pass/kl14d_multi_needed.sio" ]]; then
+    gcc -shared -fPIC -O0 -o "$work_dir/libkl14d_a.so" \
+      "$ROOT_DIR/tests/fixtures/kl14d/lib_a.c"
+    gcc -shared -fPIC -O0 -o "$work_dir/libkl14d_b.so" \
+      "$ROOT_DIR/tests/fixtures/kl14d/lib_b.c"
+    export LD_LIBRARY_PATH="$work_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    echo "MADAROS_CHANGED_TESTS_DYNLINK probes=$work_dir/libkl14d_{a,b}.so"
+  fi
+  # kl14d_zstd_e2e.sio needs system libzstd.so.1 (DT_NEEDED); no probe staging.
+  if [[ "$path" == "tests/run-pass/kl14d_zstd_e2e.sio" ]]; then
+    if ! ldconfig -p 2>/dev/null | grep -q 'libzstd\.so\.1' \
+      && [[ ! -e /usr/lib/x86_64-linux-gnu/libzstd.so.1 ]] \
+      && [[ ! -e /lib/x86_64-linux-gnu/libzstd.so.1 ]]; then
+      echo "MADAROS_CHANGED_TESTS_DYNLINK: libzstd.so.1 missing for kl14d_zstd_e2e" >&2
+      exit 2
+    fi
+    echo "MADAROS_CHANGED_TESTS_DYNLINK system=libzstd.so.1"
+  fi
+  if [[ "$path" == "tests/run-pass/kl14d_dlopen.sio" ]]; then
+    gcc -shared -fPIC -O0 -o "$work_dir/libkl14d_dl.so" \
+      "$ROOT_DIR/tests/fixtures/kl14d/lib_dl.c"
+    export LD_LIBRARY_PATH="$work_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    echo "MADAROS_CHANGED_TESTS_DYNLINK probe=$work_dir/libkl14d_dl.so"
+  fi
+done
+
 SOUNIO_MADAROS_AVAILABLE=1 \
 SOUNIO_SOUC_RAW_MODE=modular \
 SOUNIO_TEST_SOUC_BIN="$MADAROS_BIN" \
@@ -167,3 +221,8 @@ SOUNIO_TEST_SOUC_BIN="$MADAROS_BIN" \
     --jobs "${SOUNIO_TEST_JOBS:-4}"
 
 echo "MADAROS_CHANGED_TESTS_PASS count=${#selected[@]}"
+
+# Changed-tests only sees the PR diff. Recheck every suite-visible
+# requires:madaros known-failure so a compiler-only change cannot rot a tag
+# the way the 240 imported/native 139s did.
+bash "$ROOT_DIR/scripts/ci/known_failure_madaros_recheck.sh"
