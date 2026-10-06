@@ -52,6 +52,17 @@
 #                  glucose-insulin Bergman minimal model (ΔG, ΔI at pancreas
 #                  index 12). Demonstrates end-to-end PK→TMDD→PD chain for
 #                  the peptide. Within 1.0% RMSE.
+#
+# Evidence CSVs (cases 2 and 3). benchmarks/pbpk/qss_residual.csv and
+# benchmarks/pbpk/model_form_uc.csv are committed evidence. The gate
+# regenerates both into $OUT_DIR and compares them bytewise with the
+# committed files; any drift fails the gate with a unified diff, and so
+# does a run that cannot regenerate them. The committed files are only
+# rewritten when the gate runs with SOUNIO_PBPK28_UPDATE_EVIDENCE=1
+# (the dissertation_pbpk_hessian_gate.sh golden pattern). The producers
+# print concentrations with io::sci_print::println_f64_sci (ten
+# significant digits): println(<f64>) prints six fixed decimals, which
+# turned every concentration below 5e-7 into 0.000000e+00 (P1.9).
 
 set -euo pipefail
 
@@ -86,19 +97,53 @@ fi
 # ─── Step 2: dual-Sounio hard path (Node optional) ───────────────────────────
 # CLAUDE.md §4: science in Sounio. Case-1 hard gate is REF (dt=0.001) ↔ ALT
 # (dt=0.0005), not Node. Node product arm below is optional when present.
+# A field must be a plain decimal or scientific number. awk would read
+# NaN, inf or a printer error token as 0, so they fail the parse instead.
+PARITY_NUM_RE='^[-+]?([0-9]+[.]?[0-9]*|[.][0-9]+)([eE][-+]?[0-9]+)?$'
+
 parse_to_tsv() {
   local in="$1"
   local out="$2"
-  awk '
-    /^PARITY\|t=/    { t = substr($0, 10); next }
-    /^PARITY\|i=/    { i = substr($0, 10); cv=""; ct=""; cavg=""; next }
-    /^PARITY\|cv=/   { cv = substr($0, 11); next }
-    /^PARITY\|ct=/   { ct = substr($0, 11); next }
+  awk -v NUMRE="$PARITY_NUM_RE" -v SRC="$in" '
+    function num(v, tag) {
+      if (v !~ NUMRE) {
+        printf "[pbpk28-parity] FAIL: %s: non-numeric PARITY|%s=%s\n", SRC, tag, v > "/dev/stderr";
+        bad = 1;
+      }
+      return v;
+    }
+    /^PARITY\|t=/    { t = num(substr($0, 10), "t"); next }
+    /^PARITY\|i=/    { i = num(substr($0, 10), "i"); cv=""; ct=""; cavg=""; next }
+    /^PARITY\|cv=/   { cv = num(substr($0, 11), "cv"); next }
+    /^PARITY\|ct=/   { ct = num(substr($0, 11), "ct"); next }
     /^PARITY\|cavg=/ {
-      cavg = substr($0, 13);
+      cavg = num(substr($0, 13), "cavg");
       printf "%s\t%s\t%s\t%s\t%s\n", t, i, cv, ct, cavg;
     }
+    END { exit bad }
   ' "$in" > "$out"
+}
+
+# Committed-evidence drift check (cases 2 and 3).
+EVIDENCE_FAIL=0
+check_evidence() {
+  local generated="$1"
+  local committed="$2"
+  local label="$3"
+  if [[ "${SOUNIO_PBPK28_UPDATE_EVIDENCE:-0}" == "1" ]]; then
+    mkdir -p "$(dirname "$committed")"
+    cp "$generated" "$committed"
+    echo "[pbpk28-parity:$label] SOUNIO_PBPK28_UPDATE_EVIDENCE=1: rewrote ${committed#"$ROOT_DIR"/}"
+  fi
+  if [[ -f "$committed" ]] && cmp -s "$committed" "$generated"; then
+    echo "[pbpk28-parity:$label] ${committed#"$ROOT_DIR"/} matches the regenerated CSV bytewise"
+  else
+    echo "[pbpk28-parity:$label] FAIL: ${committed#"$ROOT_DIR"/} drifted from the regenerated CSV ($generated)" >&2
+    echo "[pbpk28-parity:$label] (diff -u committed regenerated):" >&2
+    diff -u "$committed" "$generated" >&2 || true
+    echo "[pbpk28-parity:$label] if the change is intended, rerun with SOUNIO_PBPK28_UPDATE_EVIDENCE=1 and commit the CSV" >&2
+    EVIDENCE_FAIL=1
+  fi
 }
 
 SIO_TSV="$OUT_DIR/sounio.tsv"
@@ -264,17 +309,16 @@ if grep -q '^DISSERTATION_PBPK_QSS_ANALYTICAL_DONE$' "$QSS_LOG" \
   } > "$QSS_RESIDUAL_CSV"
   rm -f "$QSS_RESIDUAL_CSV.body"
 
-  # Publish to repo benchmarks/pbpk/ as the asymptotic-residual artifact.
-  mkdir -p "$ROOT_DIR/benchmarks/pbpk"
-  cp "$QSS_RESIDUAL_CSV" "$ROOT_DIR/benchmarks/pbpk/qss_residual.csv"
-  echo "[pbpk28-parity:case2] wrote benchmarks/pbpk/qss_residual.csv"
+  # Compare with the committed asymptotic-residual artifact.
+  check_evidence "$QSS_RESIDUAL_CSV" "$ROOT_DIR/benchmarks/pbpk/qss_residual.csv" case2
   echo "[pbpk28-parity:case2] residual summary (per-organ, max over 12 sample times):"
   awk -F',' 'NR>1 { if ($6+0 > MAX[$2]+0) MAX[$2] = $6 } END {
     printf "  %-3s %-12s\n", "i", "max_delta_pct";
     for (i = 0; i < 14; i++) printf "  %-3d %12.4f\n", i, MAX[i] + 0;
   }' "$QSS_RESIDUAL_CSV"
 else
-  echo "[pbpk28-parity:case2] SKIP: QSS or degenerate ref output incomplete"
+  echo "[pbpk28-parity:case2] FAIL: QSS or degenerate ref output incomplete; benchmarks/pbpk/qss_residual.csv cannot be checked" >&2
+  EVIDENCE_FAIL=1
 fi
 
 # ─── Case 3: PBPK28-literature ↔ PBPK14 well-stirred (model-form CSV) ────────
@@ -289,10 +333,18 @@ PBPK14_LOG="$OUT_DIR/pbpk14.txt"
 if grep -q '^DISSERTATION_PARITY_DONE$' "$PBPK14_LOG"; then
   # PBPK14 emits PARITY|c=<val>; PBPK28 emits PARITY|cavg=<val>. Parse PBPK14
   # into (t, i, c) TSV using the Stage C parser pattern.
-  awk '
-    /^PARITY\|t=/ { t = substr($0, 10); next }
-    /^PARITY\|i=/ { i = substr($0, 10); next }
-    /^PARITY\|c=/ { c = substr($0, 10); printf "%s\t%s\t%s\n", t, i, c }
+  awk -v NUMRE="$PARITY_NUM_RE" -v SRC="$PBPK14_LOG" '
+    function num(v, tag) {
+      if (v !~ NUMRE) {
+        printf "[pbpk28-parity:case3] FAIL: %s: non-numeric PARITY|%s=%s\n", SRC, tag, v > "/dev/stderr";
+        bad = 1;
+      }
+      return v;
+    }
+    /^PARITY\|t=/ { t = num(substr($0, 10), "t"); next }
+    /^PARITY\|i=/ { i = num(substr($0, 10), "i"); next }
+    /^PARITY\|c=/ { c = num(substr($0, 10), "c"); printf "%s\t%s\t%s\n", t, i, c }
+    END { exit bad }
   ' "$PBPK14_LOG" > "$OUT_DIR/pbpk14.tsv"
 
   MODEL_FORM_CSV="$OUT_DIR/model_form_uc.csv"
@@ -322,9 +374,7 @@ if grep -q '^DISSERTATION_PARITY_DONE$' "$PBPK14_LOG"; then
   } > "$MODEL_FORM_CSV"
   rm -f "$MODEL_FORM_CSV.body"
 
-  mkdir -p "$ROOT_DIR/benchmarks/pbpk"
-  cp "$MODEL_FORM_CSV" "$ROOT_DIR/benchmarks/pbpk/model_form_uc.csv"
-  echo "[pbpk28-parity:case3] wrote benchmarks/pbpk/model_form_uc.csv"
+  check_evidence "$MODEL_FORM_CSV" "$ROOT_DIR/benchmarks/pbpk/model_form_uc.csv" case3
   echo "[pbpk28-parity:case3] model-form discrepancy summary (per-organ, max over 12 sample times):"
   awk -F',' 'NR>1 {
     if ($7+0 > MAX[$2]+0) { MAX[$2] = $7; NAME[$2] = $3 }
@@ -333,8 +383,15 @@ if grep -q '^DISSERTATION_PARITY_DONE$' "$PBPK14_LOG"; then
     for (i = 0; i < 14; i++) printf "  %-3d %-12s %12.4f\n", i, NAME[i], MAX[i] + 0;
   }' "$MODEL_FORM_CSV"
 else
-  echo "[pbpk28-parity:case3] SKIP: PBPK14 reference output incomplete"
+  echo "[pbpk28-parity:case3] FAIL: PBPK14 reference output incomplete; benchmarks/pbpk/model_form_uc.csv cannot be checked" >&2
+  EVIDENCE_FAIL=1
 fi
+
+if [[ "$EVIDENCE_FAIL" -ne 0 ]]; then
+  echo "PBPK28_EVIDENCE_CSV_FAIL committed benchmarks/pbpk CSVs drifted or could not be regenerated"
+  exit 1
+fi
+echo "PBPK28_EVIDENCE_CSV_PASS 2/2 committed benchmarks/pbpk CSVs match bytewise"
 
 # ─── Case 4: PBPK28-lit mass conservation (HARD GATE) ────────────────────────
 echo
