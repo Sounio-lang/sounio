@@ -860,6 +860,10 @@ jobs:
     needs: impact
     outputs:
       rung_outcome: ${{ steps.rung.outcome }}
+      # 'true' once the compiler build step has started. A job that fails
+      # before it (Set up job, action download, toolchain/cache setup) has
+      # measured nothing about the compiler; see fixed-point-regression-alert.
+      compiler_reached: ${{ steps.compiler-reached.outputs.reached }}
     # `stdlib` is here for a measured reason: 7 files in main.sio's own import
     # closure live under stdlib/compiler/ontology/ and classify as stdlib, not
     # compiler. A PR that makes stdlib/compiler/ontology/store.sio unparseable
@@ -957,6 +961,9 @@ jobs:
           sudo mkswap /mnt/swapfile-gen2
           sudo swapon /mnt/swapfile-gen2
           echo "--- after"; free -m; swapon --show
+      - name: Mark that the compiler build was reached
+        id: compiler-reached
+        run: echo "reached=true" >> "$GITHUB_OUTPUT"
       - name: Build Madaros once and run current-source f64 lowering gates
         run: bash scripts/ci/madaros_current_source_f64_lowering_gate.sh
       - name: Madaros IR function table stays heap-backed
@@ -1918,15 +1925,20 @@ jobs:
   # is given. "Required gate skipped" had been traded for "required gate not
   # counted".
   # The self-compile rung runs post-merge only (see its step). When it goes red
-  # on main -- or the job fails before reaching it -- open (or bump) one issue so
-  # the regression is visible without anyone watching the Actions tab.
+  # on main -- or the job fails after reaching the compiler build, e.g. the
+  # build itself or a gate before the rung breaks, so the rung never ran --
+  # open (or bump) one issue so the regression is visible without anyone
+  # watching the Actions tab. A job that fails BEFORE the build step (Set up
+  # job, action download, toolchain/cache setup; run 36848177901 opened #2742
+  # that way) has measured nothing about the compiler: it still fails the
+  # normal CI decision, but it is not reported as a self-compile regression.
   # `cancelled` is deliberately NOT an alert: the concurrency group cancels a
   # superseded main run whenever the next merge lands, and the newer run
   # carries the verdict.
   fixed-point-regression-alert:
     name: Fixed-point regression alert
     needs: madaros-current-source-deref-f64
-    if: always() && (github.event_name == 'push' || github.event_name == 'schedule') && (needs.madaros-current-source-deref-f64.outputs.rung_outcome == 'failure' || needs.madaros-current-source-deref-f64.result == 'failure')
+    if: always() && (github.event_name == 'push' || github.event_name == 'schedule') && (needs.madaros-current-source-deref-f64.outputs.rung_outcome == 'failure' || (needs.madaros-current-source-deref-f64.result == 'failure' && needs.madaros-current-source-deref-f64.outputs.compiler_reached == 'true'))
     runs-on: ubuntu-24.04
     permissions:
       issues: write
