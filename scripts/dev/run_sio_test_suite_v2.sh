@@ -377,10 +377,13 @@ run_test() {
                 fi
                 ;;
             *"//@ xfail-exit:"*)
-                if [[ "$line" =~ xfail-exit:[[:space:]]*([0-9]+)[[:space:]]*$ ]]; then
-                    xfail_exit="${BASH_REMATCH[1]}"
+                # A process status is 0-255. Anything else could never match,
+                # so it would read as a pin while pinning nothing: refuse it.
+                # Canonicalised (base 10, no leading zeros) for the comparison.
+                if [[ "$line" =~ xfail-exit:[[:space:]]*([0-9]{1,3})[[:space:]]*$ ]] && ((10#${BASH_REMATCH[1]} <= 255)); then
+                    xfail_exit="$((10#${BASH_REMATCH[1]}))"
                 else
-                    xfail_error="${xfail_error:-//@ xfail-exit: needs one integer exit code}"
+                    xfail_error="${xfail_error:-//@ xfail-exit: needs one exit code in 0-255}"
                 fi
                 ;;
             *"//@ known-failure"*) 
@@ -731,16 +734,22 @@ run_test() {
     # enforced in every mode, including --filter runs where the manifest is not
     # loaded. A declared known failure counts as xfail only if it fails THE
     # DECLARED WAY: the raw exit code of the souc invocation equals N (124 = the
-    # harness timeout) and every TEXT occurs in the full compiler/program output
-    # (or, for a timeout, in the harness verdict). A crash, a different exit
-    # code or a different failure message is a fresh FAIL; a pass is still XPAS.
+    # harness timeout) and every TEXT occurs in the full compiler/program output.
+    # Only for a timeout (raw exit 124, when souc printed nothing final) is the
+    # harness verdict searched too; otherwise a pin could match text the harness
+    # wrote itself ("run exited 139", "missing stdout: ..."). A crash, a
+    # different exit code or a different failure message is a fresh FAIL; a
+    # pass is still XPAS.
     if $is_known_failure && [[ $exit_code -ne 0 ]] && { ((${#xfail_expect[@]} > 0)) || [[ -n "$xfail_exit" ]]; }; then
         local xfail_mismatch=""
         if [[ -n "$xfail_exit" && "$raw_exit" != "$xfail_exit" ]]; then
             xfail_mismatch="exit ${raw_exit:-none}, expected $xfail_exit"
         fi
         if [[ -z "$xfail_mismatch" ]]; then
-            local xfail_haystack="$output"$'\n'"$test_output"
+            local xfail_haystack="$output"
+            if [[ "$raw_exit" == "124" ]]; then
+                xfail_haystack="$output"$'\n'"$test_output"
+            fi
             local xfail_pat
             for xfail_pat in "${xfail_expect[@]}"; do
                 if ! grep -qF -- "$xfail_pat" <<<"$xfail_haystack"; then

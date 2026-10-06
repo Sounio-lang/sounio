@@ -26,7 +26,7 @@
 #      tests/known_failures/unpinned_inline_known_failures.txt: a new unpinned
 #      one fails; a listed one that is now pinned, deleted or no longer a
 #      known failure also fails until the baseline is shrunk. Regenerate the
-#      baseline with --write-baseline (only ever to remove lines).
+#      baseline with --write-baseline, which refuses to add lines.
 #
 # Scope and header rule mirror the harness: the files it enumerates, and
 # annotations only in the leading run of `//@ `, `// ` and blank lines (a bare
@@ -109,6 +109,21 @@ STUB
   mk pin_stranded  1   'SELFTEST_FAIL_HONEST'                "$RP" '//@ xfail-expect: FAIL_HONEST' "$EC"
   mk pin_bad_exit  1   'SELFTEST_FAIL_HONEST'                "$RP" "$KF" '//@ xfail-exit: one' "$EC"
   mk unpinned      139 'anything at all'                     "$RP" "$KF" "$EC"
+  # souc exits 0 but the expect-stdout check fails: the harness verdict is 1,
+  # the raw souc status is 0. xfail-exit must compare the RAW status, so the
+  # :0 pin is xfail and the :1 pin is a mismatch.
+  mk pin_raw0      0   'SELFTEST_FAIL_HONEST'                "$RP" "$KF" '//@ xfail-exit: 0' "$EC"
+  mk pin_raw0_as1  0   'SELFTEST_FAIL_HONEST'                "$RP" "$KF" '//@ xfail-exit: 1' "$EC"
+  # Text the harness writes itself ("run exited 139") is not souc output.
+  mk pin_harness_text 139 'segfault-ish noise'               "$RP" "$KF" '//@ xfail-expect: run exited 139' "$EC"
+  # A status outside 0-255 can never match: refused, not a silent non-pin.
+  mk pin_exit_256  1   'SELFTEST_FAIL_HONEST'                "$RP" "$KF" '//@ xfail-exit: 256' "$EC"
+  # The other capture sites: check-only, compile-fail, typecheck-fail.
+  mk pin_check_only 1  'error[E001] SELFTEST_FAIL_HONEST'    '//@ check-only' "$KF" '//@ xfail-expect: SELFTEST_FAIL_HONEST' '//@ xfail-exit: 1'
+  mk pin_compile_fail 0 'compiled when it should not'        '//@ compile-fail' '//@ error-pattern: E001' "$KF" '//@ xfail-exit: 0'
+  mk pin_compile_fail_as1 0 'compiled when it should not'    '//@ compile-fail' '//@ error-pattern: E001' "$KF" '//@ xfail-exit: 1'
+  mk pin_typecheck_fail 0 'typechecked when it should not'   '//@ typecheck-fail' '//@ error-pattern: E001' "$KF" '//@ xfail-exit: 0'
+  mk pin_typecheck_fail_as1 0 'typechecked when it should not' '//@ typecheck-fail' '//@ error-pattern: E001' "$KF" '//@ xfail-exit: 1'
 
   # Verdict per test from the JUnit report, which covers every result
   # (including the early refusals the per-result copy directory never sees).
@@ -138,7 +153,11 @@ STUB
       SOUNIO_TEST_KNOWN_FAILURES_FILE=/dev/null \
       bash "$HARNESS" "${args[@]}" > "$tmp/log-$mode" 2>&1 || true
     for name in pin_ok:xfail pin_text:fail pin_exit:fail pin_passes:xpas \
-                pin_stranded:fail pin_bad_exit:fail unpinned:xfail; do
+                pin_stranded:fail pin_bad_exit:fail unpinned:xfail \
+                pin_raw0:xfail pin_raw0_as1:fail pin_harness_text:fail \
+                pin_exit_256:fail pin_check_only:xfail \
+                pin_compile_fail:xfail pin_compile_fail_as1:fail \
+                pin_typecheck_fail:xfail pin_typecheck_fail_as1:fail; do
       want="${name#*:}"; name="${name%%:*}"
       got="$(status_of "$junit" "$name")"
       if [[ "$got" != "$want" ]]; then
@@ -146,6 +165,17 @@ STUB
         bad=1
       fi
     done
+  done
+  # pin_exit_256 fails either way; make sure it fails as a REFUSED pin, not as
+  # an ordinary exit mismatch against an unmatchable value.
+  for mode in unfiltered filtered; do
+    if ! awk '/<testcase name="pin_exit_256"/ { on = 1; next }
+              /<testcase name="/ { on = 0 }
+              on && /bad xfail pin/ { hit = 1 }
+              END { exit !hit }' "$tmp/junit-$mode.xml"; then
+      echo "selftest FAILED ($mode): pin_exit_256 was not refused as a bad xfail pin" >&2
+      bad=1
+    fi
   done
   if [[ "$bad" -ne 0 ]]; then
     sed -n '1,60p' "$tmp/log-unfiltered" >&2
@@ -158,7 +188,7 @@ STUB
     echo "selftest FAILED: header reader read past a bare // line" >&2
     return 1
   fi
-  echo "known_failure_pin_gate: selftest OK (7 harness cases x 2 modes, header rule)"
+  echo "known_failure_pin_gate: selftest OK (17 harness cases x 2 modes, header rule)"
 }
 
 selftest
@@ -169,6 +199,18 @@ fi
 
 current="$(unpinned_known_failures)"
 if [[ "${1:-}" == "--write-baseline" ]]; then
+  # Shrink-only applies to the writer too: regenerating must never be a way
+  # to admit a new unpinned known failure.
+  if [[ -f "$BASELINE" ]]; then
+    old_baseline="$(grep -v '^#' "$BASELINE" | sed '/^[[:space:]]*$/d' | LC_ALL=C sort)"
+    added="$(LC_ALL=C comm -13 <(printf '%s\n' "$old_baseline") <(printf '%s\n' "$current") | sed '/^$/d')"
+    if [[ -n "$added" ]]; then
+      echo "known_failure_pin_gate: REFUSED --write-baseline: it would add unpinned known failures:" >&2
+      printf '  %s\n' $added >&2
+      echo "  Pin them (//@ xfail-expect / //@ xfail-exit) first; the baseline only shrinks." >&2
+      exit 1
+    fi
+  fi
   {
     echo "# Inline //@ known-failure tests with no //@ xfail-expect / //@ xfail-exit pin."
     echo "# Shrink-only: scripts/ci/known_failure_pin_gate.sh fails on any new entry and"
