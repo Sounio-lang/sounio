@@ -99,6 +99,19 @@ expect_rc 1 "$TMP/unknown.log" run_list "$TMP/list_unknown.txt"
 grep -Fq "unknown annotation: expect-stdout-not-a-thing" "$TMP/unknown.log" \
     || fail "unknown expect-* key was not rejected"
 
+# --- 3b. A bare `//` must not end the header ---
+# It used to: every annotation after a `//` paragraph break was silently
+# dropped (madaros_uninit_struct_local.sio et al., measured 2026-10-06). A
+# garbage marker placed there must now be read, and so go red.
+awk '
+    NR==1 { print; print "//"; print "//@ expect-stdout-contains: THIS_MARKER_IS_GARBAGE"; next }
+    { print }
+' "$HELLO" > "$TMP/bare_comment.sio"
+printf '%s\n' "$TMP/bare_comment.sio" > "$TMP/list_bare_comment.txt"
+expect_rc 1 "$TMP/bare_comment.log" run_list "$TMP/list_bare_comment.txt"
+grep -Fq "missing stdout contains: THIS_MARKER_IS_GARBAGE" "$TMP/bare_comment.log" \
+    || fail "annotation after a bare // was not read"
+
 # --- 4/5/6. Known-failure manifest reason pin (path|substring) ---
 # A deterministic, non-timing-dependent failure: fixed exit code, fixed marker.
 # Never listed under tests/, so the ordinary suite (which globs tests/run-pass/*.sio

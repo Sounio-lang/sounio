@@ -23,6 +23,15 @@
 # Unknown `expect-*` / `expected-*` header keys fail the test. They used to
 # be skipped silently, so `expect-stdout-contains` asserted nothing.
 #
+# The header is the leading run of `//@ ` lines, `//` comment lines and blank
+# lines; the first other line ends it and nothing after it is read. A bare `//`
+# (no trailing space) is a comment line too. It used to end the header, so a
+# `//@ requires:` or `//@ expect-stdout:` placed after a `//` paragraph break
+# was silently ignored (madaros_uninit_struct_local.sio, global_array_len1_index.sio,
+# madaros_wide_struct_variance_field.sio, measured 2026-10-06).
+# scripts/ci/test_annotation_coverage_gate.sh refuses a `//@ ` line past the
+# header, so an annotation cannot go unread again.
+#
 # Usage:
 #   bash scripts/dev/run_sio_test_suite_v2.sh [--filter PATTERN] [--verbose] [--format junit] [--jobs N]
 #   bash scripts/dev/run_sio_test_suite_v2.sh --filter-prefix PREFIX [--verbose] [--format junit] [--jobs N]
@@ -327,7 +336,7 @@ run_test() {
     
     # Parse annotations
     while IFS= read -r line; do
-        if [[ ! "$line" =~ ^[[:space:]]*//@\  && ! "$line" =~ ^[[:space:]]*//\  && ! "$line" =~ ^[[:space:]]*$ ]]; then
+        if [[ ! "$line" =~ ^[[:space:]]*//@\  && ! "$line" =~ ^[[:space:]]*//([[:space:]]|$) && ! "$line" =~ ^[[:space:]]*$ ]]; then
             break
         fi
         # Fail closed on invented stdout assertions. `expect-stdout-contains`
@@ -496,7 +505,7 @@ run_test() {
     local expect_stdout_contains=()
     local error_patterns=()
     while IFS= read -r line; do
-        if [[ ! "$line" =~ ^[[:space:]]*//@\  && ! "$line" =~ ^[[:space:]]*//\  && ! "$line" =~ ^[[:space:]]*$ ]]; then
+        if [[ ! "$line" =~ ^[[:space:]]*//@\  && ! "$line" =~ ^[[:space:]]*//([[:space:]]|$) && ! "$line" =~ ^[[:space:]]*$ ]]; then
             break
         fi
         # Extraction by parameter expansion, not regex: the pattern that
