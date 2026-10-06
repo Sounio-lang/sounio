@@ -226,7 +226,7 @@ var b = epistemic_tensor_new(16, 16)
 var c = epistemic_tensor_new(16, 16)
 
 // Set data
-a.data[0] = 1.0f32
+a.data[0] = 1.0
 a.provenance[0] = atom_hash
 
 // Fused kernel

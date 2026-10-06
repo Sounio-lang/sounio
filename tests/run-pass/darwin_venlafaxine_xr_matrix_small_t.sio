@@ -1,0 +1,60 @@
+//@ run-pass
+//@ expect-stdout-contains: KP_SMALL_T_OK
+// Regression: matrix_er Korsmeyer-Peppas F(t) = min(1, 0.199*t^0.65) must be accurate away
+// from t = 1. The former helpers (20-term artanh ln with no range reduction, exp as
+// (1 + x/1024)^1024) floored F at 7.88e-3 as t -> 0+ (0.59 mg of 75 mg) and reached the cap
+// at 12.00987 h instead of 11.98637 h. A q24h regimen with dt = 0.1 evaluates F at
+// t = 2.14e-15 h just before each dose. Before the fix this test exits 1
+// (REPRO_KP_SMALL_T_FLOOR). See docs/audit/MATRIX_ER_TRANSCENDENTAL_ACCURACY_DISPATCH_2026-09-26.md.
+use darwin_pbpk::release::matrix_er::{matrix_fraction, matrix_release_rate, matrix_korsmeyer_peppas, venlafaxine_xr_matrix_gohel2008}
+
+// NaN compares false both ways under IEEE-754, so it is mapped to a huge error first:
+// otherwise a NaN F(t) would pass every `> 1e-9` check below.
+fn rel_err(got: f64, want: f64) -> f64 {
+    if got != got { return 1.0e300 }
+    if got > want { (got - want) / want } else { (want - got) / want }
+}
+
+fn main() -> i32 with IO, Mut, Div, Panic {
+    let rel = venlafaxine_xr_matrix_gohel2008()
+    // Exact 0.199*t^0.65 (IEEE-754 pow, 17 s.f.) at t = 3.5e-15, 1e-6, 0.01 h
+    let e0 = rel_err(matrix_fraction(rel, 3.5e-15), 7.9890898448550897e-11)
+    let e1 = rel_err(matrix_fraction(rel, 1.0e-6), 2.5052615694703923e-05)
+    let e2 = rel_err(matrix_fraction(rel, 0.01), 9.9736259491827184e-03)
+    // The n = 0.5 branch (sqrt): 0.5 * sqrt(1e-6) = 5e-4. The former 10-step Newton sqrt from
+    // y = x gave sqrt(1e-6) = 1.296e-3 (+30%).
+    let e_sqrt = rel_err(matrix_fraction(matrix_korsmeyer_peppas(75.0, 0.5, 0.5), 1.0e-6), 5.0e-4)
+    // ...and at a large t: 1e-15 * sqrt(1e20) = 1e-5. pure.sio sqrt alone does not converge above ~1e8.
+    let e_sqrt_big = rel_err(matrix_fraction(matrix_korsmeyer_peppas(75.0, 1.0e-15, 0.5), 1.0e20), 1.0e-5)
+    // The cap F = 1 is reached at t* = 0.199^(-1/0.65) = 11.98637 h, so F(12 h) = 1 exactly.
+    let f12 = matrix_fraction(rel, 12.0)
+    // An overflowed clock must return the cap promptly: pure.sio ln never terminates on +inf.
+    let big = 1.0e308
+    let f_inf = matrix_fraction(rel, big * 10.0)
+    // A NaN clock must propagate, not collapse to a plausible 0 (release rate uses t^(n-1), n-1 < 0).
+    let zz = 0.0
+    let r_nan = matrix_release_rate(rel, zz / zz)
+    // At t = +inf the exponent cases must match the finite path: n = 0 gives F = k, a NaN n propagates.
+    let f_inf_n0 = matrix_fraction(matrix_korsmeyer_peppas(75.0, 0.5, 0.0), big * 10.0)
+    let f_inf_nnan = matrix_fraction(matrix_korsmeyer_peppas(75.0, 0.5, zz / zz), big * 10.0)
+    // A NaN exponent at a finite clock must return NaN promptly (pure.sio exp(NaN) practically never ends).
+    let f_fin_nnan = matrix_fraction(matrix_korsmeyer_peppas(75.0, 0.5, zz / zz), 2.0)
+    // An infinite exponent at a finite clock: 1^inf = 1 (IEEE pow), 2^inf caps, 0.5^inf = 0.
+    let rel_ninf = matrix_korsmeyer_peppas(75.0, 0.5, big * 10.0)
+    let f_one_ninf = matrix_fraction(rel_ninf, 1.0)
+    let f_two_ninf = matrix_fraction(rel_ninf, 2.0)
+    let f_half_ninf = matrix_fraction(rel_ninf, 0.5)
+    println(e0)
+    println(e1)
+    println(e2)
+    println(e_sqrt)
+    println(e_sqrt_big)
+    println(f12)
+    println(f_inf)
+    if e0 > 1.0e-9 || e1 > 1.0e-9 || e2 > 1.0e-9 || e_sqrt > 1.0e-9 || e_sqrt_big > 1.0e-9 || f12 != 1.0 || f_inf != 1.0 || r_nan == r_nan || f_inf_n0 != 0.5 || f_inf_nnan == f_inf_nnan || f_fin_nnan == f_fin_nnan || f_one_ninf != 0.5 || f_two_ninf != 1.0 || f_half_ninf != 0.0 {
+        println("REPRO_KP_SMALL_T_FLOOR")
+        return 1
+    }
+    println("KP_SMALL_T_OK")
+    return 0
+}

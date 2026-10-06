@@ -25,11 +25,9 @@ require_marker() {
 require_file FOUNDER_INTENT.md
 require_file AGENTS.md
 require_file CLAUDE.md
-require_file ONBOARDING.md
 
 require_marker 'FOUNDER_INTENT.md' AGENTS.md
 require_marker 'FOUNDER_INTENT.md' CLAUDE.md
-require_marker 'FOUNDER_INTENT.md' ONBOARDING.md
 
 require_marker 'Do not diminish the intuition. Do not spare it from the test.' FOUNDER_INTENT.md
 require_marker 'intuition != analogy != formal model != executable implementation' FOUNDER_INTENT.md
