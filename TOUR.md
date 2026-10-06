@@ -127,6 +127,7 @@ only the ones it cites.
 | **`where` refinements** | `souc run` accepts `Knowledge<T where {…}>` and **does not enforce it** on either engine. Enforcement today is a source-to-source script | [#2753](https://github.com/Sounio-lang/sounio/issues/2753) |
 | **engine divergence** | with the lowering fix of #2750, three chemistry tests that pass on lean_single fail at run time on Madaros (illegal instruction, wrong result, arena exhaustion), and so does the UHS demo | `demos/hydrogen/README.md` |
 | **GPU** | `souc build --backend gpu` emits valid PTX, but only for kernels with **empty bodies**: no arithmetic, no memory access. It is an emission skeleton, not a backend | `examples/kernel_vec_add.sio` |
+| **WASM** | there is no WASM backend on main: `souc build f.sio --backend wasm` exits 2 with `unsupported backend: wasm`. The draft backend emits modules that `WebAssembly.validate` rejects, because every call loses its arguments | [#2237](https://github.com/Sounio-lang/sounio/pull/2237) (draft) |
 | **first-order uncertainty across calls** | first-order variance channels do not cross user function calls | KL-11, `docs/compiler/KNOWN_LIMITATIONS.md` |
 | **performance** | not benchmarked on this page. The one same-algorithm comparison measured during this tour's preparation was dominated by the model code, not the compiler, so no number is given | — |
 | **platform** | Linux x86-64 only. The binaries are static ELF and do not run on macOS | — |
