@@ -1,0 +1,193 @@
+//@ run-pass
+// Tests for stdlib/quantum/linear — linear Qubit gates and statevector sim
+//
+// Coverage:
+//   T1  Y² = I on |0⟩ (norm and prob_zero)
+//   T2  HXH ≈ Z on |0⟩ (global phase irrelevant; 1e-10)
+//   T3  Bell: prob_zero ≈ 0.5, total_prob ≈ 1
+//   T4  CZ on |11⟩ produces phase −1
+//   T5  SWAP exchanges two-qubit populations
+//   T6  ghz3: ≈ 1/2 on |000⟩ and |111⟩
+//   T7  teleport |1⟩, both classical branches, output measures 1
+//   T8  10th alloc ok (1024 amplitudes)
+//
+// The 11th qubit_alloc panics ("QuantumState: QUANTUM_MAX_QUBITS exceeded").
+// That path is not a run-pass; the harness has compile-fail, not run-fail.
+
+use quantum::linear::{
+    quantum_state_new,
+    qubit_alloc,
+    hadamard,
+    pauli_x,
+    pauli_y,
+    pauli_z,
+    cnot,
+    cz,
+    swap,
+    qubit_measure,
+    bell_pair,
+    ghz3,
+    teleport,
+    quantum_state_info,
+    amp_real,
+    amp_imag,
+    amp_prob,
+    Qubit,
+    QubitPair,
+    QubitTriple,
+    TeleportResult,
+    QuantumState,
+}
+
+fn near(a: f64, b: f64, tol: f64) -> bool {
+    let d = a - b
+    let ad = if d < 0.0 { 0.0 - d } else { d }
+    return ad < tol
+}
+
+fn check(name: string, ok: bool) -> i32 with IO {
+    if ok {
+        print(name)
+        print(": PASS\n")
+        return 0
+    }
+    print(name)
+    print(": FAIL\n")
+    return 1
+}
+
+fn sink(q: Qubit, qs: &!QuantumState) -> i32 with Mut, Div, Panic {
+    let r = qubit_measure(q, qs, 0.5)
+    if r.outcome { 1 } else { 0 }
+}
+
+fn main() -> i32 with Mut, Div, Panic, IO {
+    var fail = 0
+    let tol = 0.0000000001
+
+    // T1: pauli_y twice = identity on |0⟩
+    var qs1 = quantum_state_new()
+    let q1a = qubit_alloc(&!qs1)
+    let q1b = pauli_y(q1a, &!qs1)
+    let q1c = pauli_y(q1b, &!qs1)
+    let info1 = quantum_state_info(&qs1)
+    fail = fail + check("T1_y2_norm", near(info1.total_prob, 1.0, tol))
+    fail = fail + check("T1_y2_prob0", near(info1.prob_zero, 1.0, tol))
+    let _s1 = sink(q1c, &!qs1)
+
+    // T2: HXH ≈ Z on |0⟩
+    var qs2h = quantum_state_new()
+    let q2h = qubit_alloc(&!qs2h)
+    let q2h1 = hadamard(q2h, &!qs2h)
+    let q2h2 = pauli_x(q2h1, &!qs2h)
+    let q2h3 = hadamard(q2h2, &!qs2h)
+    var qs2z = quantum_state_new()
+    let q2z = qubit_alloc(&!qs2z)
+    let q2z1 = pauli_z(q2z, &!qs2z)
+    fail = fail + check("T2_hxh_z_re", near(amp_real(&qs2h, 0), amp_real(&qs2z, 0), tol))
+    fail = fail + check("T2_hxh_z_im", near(amp_imag(&qs2h, 0), amp_imag(&qs2z, 0), tol))
+    fail = fail + check("T2_hxh_z_p0", near(quantum_state_info(&qs2h).prob_zero, quantum_state_info(&qs2z).prob_zero, tol))
+    let _s2h = sink(q2h3, &!qs2h)
+    let _s2z = sink(q2z1, &!qs2z)
+
+    // T3: Bell
+    var qs3 = quantum_state_new()
+    let q3a = qubit_alloc(&!qs3)
+    let q3b = qubit_alloc(&!qs3)
+    let QubitPair { first: b1, second: b2 } = bell_pair(q3a, q3b, &!qs3)
+    let info3 = quantum_state_info(&qs3)
+    fail = fail + check("T3_bell_p0", near(info3.prob_zero, 0.5, 0.0000000001))
+    fail = fail + check("T3_bell_norm", near(info3.total_prob, 1.0, tol))
+    let _s3a = sink(b1, &!qs3)
+    let _s3b = sink(b2, &!qs3)
+
+    // T4: CZ on |11⟩ (prepare XX|00⟩)
+    var qs4 = quantum_state_new()
+    let q4a = qubit_alloc(&!qs4)
+    let q4b = qubit_alloc(&!qs4)
+    let q4x0 = pauli_x(q4a, &!qs4)
+    let q4x1 = pauli_x(q4b, &!qs4)
+    let QubitPair { first: c4a, second: c4b } = cz(q4x0, q4x1, &!qs4)
+    fail = fail + check("T4_cz_re", near(amp_real(&qs4, 3), 0.0 - 1.0, tol))
+    fail = fail + check("T4_cz_im", near(amp_imag(&qs4, 3), 0.0, tol))
+    fail = fail + check("T4_cz_p11", near(amp_prob(&qs4, 3), 1.0, tol))
+    let _s4a = sink(c4a, &!qs4)
+    let _s4b = sink(c4b, &!qs4)
+
+    // T5: SWAP exchanges |10⟩ → |01⟩
+    var qs5 = quantum_state_new()
+    let q5a = qubit_alloc(&!qs5)
+    let q5b = qubit_alloc(&!qs5)
+    let q5x = pauli_x(q5b, &!qs5)
+    let QubitPair { first: s5a, second: s5b } = swap(q5a, q5x, &!qs5)
+    fail = fail + check("T5_swap_01", near(amp_prob(&qs5, 1), 1.0, tol))
+    fail = fail + check("T5_swap_10", near(amp_prob(&qs5, 2), 0.0, tol))
+    let _s5a = sink(s5a, &!qs5)
+    let _s5b = sink(s5b, &!qs5)
+
+    // T6: ghz3
+    var qs6 = quantum_state_new()
+    let g0 = qubit_alloc(&!qs6)
+    let g1 = qubit_alloc(&!qs6)
+    let g2 = qubit_alloc(&!qs6)
+    let QubitTriple { first: gz0, second: gz1, third: gz2 } = ghz3(g0, g1, g2, &!qs6)
+    let info6 = quantum_state_info(&qs6)
+    fail = fail + check("T6_ghz_000", near(amp_prob(&qs6, 0), 0.5, 0.0000000001))
+    fail = fail + check("T6_ghz_111", near(amp_prob(&qs6, 7), 0.5, 0.0000000001))
+    fail = fail + check("T6_ghz_norm", near(info6.total_prob, 1.0, tol))
+    let _g0 = sink(gz0, &!qs6)
+    let _g1 = sink(gz1, &!qs6)
+    let _g2 = sink(gz2, &!qs6)
+
+    // T7: teleport |1⟩ — seed pair (0,0) and (0.9, 0.9)
+    var qs7a = quantum_state_new()
+    let m7a = pauli_x(qubit_alloc(&!qs7a), &!qs7a)
+    let a7a = qubit_alloc(&!qs7a)
+    let b7a = qubit_alloc(&!qs7a)
+    let TeleportResult { qubit: o7a, m1: _m7a1, m2: _m7a2 } = teleport(m7a, a7a, b7a, &!qs7a, 0.0, 0.0)
+    let r7a = qubit_measure(o7a, &!qs7a, 0.0)
+    fail = fail + check("T7_teleport_00_bit", r7a.outcome)
+    fail = fail + check("T7_teleport_00_p", near(r7a.probability, 1.0, 0.0000000001))
+
+    var qs7b = quantum_state_new()
+    let m7b = pauli_x(qubit_alloc(&!qs7b), &!qs7b)
+    let a7b = qubit_alloc(&!qs7b)
+    let b7b = qubit_alloc(&!qs7b)
+    let TeleportResult { qubit: o7b, m1: _m7b1, m2: _m7b2 } = teleport(m7b, a7b, b7b, &!qs7b, 0.9, 0.9)
+    let r7b = qubit_measure(o7b, &!qs7b, 0.0)
+    fail = fail + check("T7_teleport_99_bit", r7b.outcome)
+    fail = fail + check("T7_teleport_99_p", near(r7b.probability, 1.0, 0.0000000001))
+
+    // T8: 10th alloc ok
+    var qs8 = quantum_state_new()
+    let k0 = qubit_alloc(&!qs8)
+    let k1 = qubit_alloc(&!qs8)
+    let k2 = qubit_alloc(&!qs8)
+    let k3 = qubit_alloc(&!qs8)
+    let k4 = qubit_alloc(&!qs8)
+    let k5 = qubit_alloc(&!qs8)
+    let k6 = qubit_alloc(&!qs8)
+    let k7 = qubit_alloc(&!qs8)
+    let k8 = qubit_alloc(&!qs8)
+    let k9 = qubit_alloc(&!qs8)
+    let info8 = quantum_state_info(&qs8)
+    fail = fail + check("T8_n_qubits", info8.n_qubits == 10)
+    fail = fail + check("T8_n_amp", info8.n_amplitudes == 1024)
+    fail = fail + check("T8_norm", near(info8.total_prob, 1.0, tol))
+    let _k0 = sink(k0, &!qs8)
+    let _k1 = sink(k1, &!qs8)
+    let _k2 = sink(k2, &!qs8)
+    let _k3 = sink(k3, &!qs8)
+    let _k4 = sink(k4, &!qs8)
+    let _k5 = sink(k5, &!qs8)
+    let _k6 = sink(k6, &!qs8)
+    let _k7 = sink(k7, &!qs8)
+    let _k8 = sink(k8, &!qs8)
+    let _k9 = sink(k9, &!qs8)
+
+    if fail == 0 {
+        print("ALL_PASS\n")
+        return 0
+    }
+    return 1
+}
