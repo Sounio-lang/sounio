@@ -1,21 +1,49 @@
-// stdlib/quantum/epistemic_vqe.sio — Variational Quantum Eigensolver
-//                                      with Epistemic Uncertainty
+// stdlib/quantum/epistemic_vqe.sio — two-qubit H2 VQE with a second-order
+//                                      GUM band on the gate angles
 //
-// Simulates a quantum circuit classically using statevector representation.
-// For n qubits, statevector has 2^n complex amplitudes (max 4 qubits = 16).
+// What this module is:
+//   * A classical statevector simulator for at most 4 qubits (16 complex
+//     amplitudes). No noise model, no shot noise, no hardware backend.
+//   * The two-qubit H2 Hamiltonian of O'Malley et al.,
+//       H = c0 I + c1 Z0 + c2 Z1 + c3 Z0Z1 + c4 (X0X1 + Y0Y1),
+//       c0 = -0.4804, c1 = 0.3435, c2 = -0.4347, c3 = 0.5716, c4 = 0.0910,
+//     P. J. J. O'Malley et al., "Scalable Quantum Simulation of Molecular
+//     Energies", Phys. Rev. X 6, 031007 (2016).
+//     c0 does not contain the nuclear repulsion, so the ground eigenvalue of
+//     this operator is an electronic energy:
+//       E_exact = -1.851199... Ha   (h2_exact_ground_energy, below)
+//     It is NOT the often-quoted total energy -1.137 Ha.
+//   * A Ry-CNOT-Ry ansatz (4 angles) that can represent the exact ground
+//     state (H is real, its ground state is a real combination of |01>, |10>).
+//   * An optimiser: Rotosolve / sequential minimal optimisation. Each angle
+//     enters through one Ry gate, so E is a sinusoid a + b cos t + c sin t in
+//     that angle and three evaluations locate its exact 1-D minimum.
+//       Ostaszewski, Grant, Benedetti, Quantum 5, 391 (2021);
+//       Nakanishi, Fujii, Todo, Phys. Rev. Research 2, 043158 (2020).
+//   * An uncertainty band on E for Gaussian gate-angle errors
+//     theta ~ N(theta*, Sigma), Sigma = diag(u_theta^2), to SECOND order:
+//       u^2(E) = g^T Sigma g + 1/2 tr((H Sigma)^2)
+//     with g and H the exact gradient and Hessian from the parameter-shift
+//     rule (Mari, Bromley, Killoran, Phys. Rev. A 103, 012405 (2021)).
+//     At a variational minimum g = 0, so the first-order GUM term
+//     (JCGM 100:2008, eq. 10) vanishes and the second-order term
+//     (JCGM 100:2008, 5.1.2 note) is the whole answer.
+//   * A seeded Monte Carlo of the same propagation (JCGM 101:2008) that the
+//     second-order band is validated against (vqe_mc_band).
 //
-// Epistemic layer propagates gate-angle uncertainty through circuits via
-// GUM (Guide to the Expression of Uncertainty in Measurement) first-order
-// sensitivity: u(amp) ≈ |∂amp/∂θ| · u(θ).
+// Statevector index i encodes |b_{n-1} ... b_1 b_0>; bit k of i is qubit k.
+//
+// Self-contained on purpose (no cross-module imports): the module is used as
+// an import target, and the imported-module native path is the fragile one.
 //
 // References:
 //   Peruzzo et al., Nature Commun. 5, 4213 (2014) — original VQE
 //   McClean et al., New J. Phys. 18, 023023 (2016) — variational theory
 //   Kandala et al., Nature 549, 242 (2017) — hardware-efficient ansatz
-//   JCGM 100:2008 (GUM) — uncertainty propagation
+//   JCGM 100:2008 (GUM), JCGM 101:2008 (GUM Supplement 1, Monte Carlo)
 
 // =============================================================================
-// MATH HELPERS (self-contained — no cross-module imports)
+// MATH HELPERS (self-contained)
 // =============================================================================
 
 fn vqe_abs(x: f64) -> f64 {
@@ -23,129 +51,184 @@ fn vqe_abs(x: f64) -> f64 {
     return x
 }
 
-fn vqe_sqrt(x: f64) -> f64 with Mut, Div, Panic {
+pub fn vqe_pi() -> f64 {
+    return 3.141592653589793
+}
+
+// Newton square root, scaled so the iteration starts near the answer.
+pub fn vqe_sqrt(x: f64) -> f64 with Mut, Div, Panic {
     if x <= 0.0 { return 0.0 }
-    var y = x
+    var m = x
+    var scale = 1.0
+    while m > 4.0 { m = m / 4.0; scale = scale * 2.0 }
+    while m < 0.25 { m = m * 4.0; scale = scale / 2.0 }
+    var y = 1.0
     var i = 0
-    while i < 30 {
-        y = 0.5 * (y + x / y)
+    while i < 8 {
+        y = 0.5 * (y + m / y)
         i = i + 1
     }
+    return y * scale
+}
+
+// Reduce to [-pi, pi].
+fn vqe_wrap(x: f64) -> f64 with Mut, Div, Panic {
+    let pi = vqe_pi()
+    var y = x
+    while y > pi { y = y - 2.0 * pi }
+    while y < 0.0 - pi { y = y + 2.0 * pi }
     return y
 }
 
-// Sine via Taylor series (range-reduced to [-π, π])
-fn vqe_sin(x: f64) -> f64 with Mut, Div, Panic {
-    let pi = 3.141592653589793
-    var y = x
-    while y > pi  { y = y - 2.0 * pi }
-    while y < 0.0 - pi { y = y + 2.0 * pi }
+// Sine: reduce to [-pi, pi], then Taylor to x^29 (truncation < 1e-16 there).
+pub fn vqe_sin(x: f64) -> f64 with Mut, Div, Panic {
+    let y = vqe_wrap(x)
     let x2 = y * y
     var sum = y
     var term = y
-    term = term * (0.0 - x2) / (2.0 * 3.0)
-    sum = sum + term
-    term = term * (0.0 - x2) / (4.0 * 5.0)
-    sum = sum + term
-    term = term * (0.0 - x2) / (6.0 * 7.0)
-    sum = sum + term
-    term = term * (0.0 - x2) / (8.0 * 9.0)
-    sum = sum + term
-    term = term * (0.0 - x2) / (10.0 * 11.0)
-    sum = sum + term
-    term = term * (0.0 - x2) / (12.0 * 13.0)
-    sum = sum + term
+    var k = 1
+    while k < 15 {
+        let a = 2.0 * (k as f64)
+        term = term * (0.0 - x2) / (a * (a + 1.0))
+        sum = sum + term
+        k = k + 1
+    }
     return sum
 }
 
-// Cosine via Taylor series
-fn vqe_cos(x: f64) -> f64 with Mut, Div, Panic {
-    let pi = 3.141592653589793
-    var y = x
-    while y > pi  { y = y - 2.0 * pi }
-    while y < 0.0 - pi { y = y + 2.0 * pi }
+// Cosine: same reduction, Taylor to x^28.
+pub fn vqe_cos(x: f64) -> f64 with Mut, Div, Panic {
+    let y = vqe_wrap(x)
     let x2 = y * y
     var sum = 1.0
     var term = 1.0
-    term = term * (0.0 - x2) / (1.0 * 2.0)
-    sum = sum + term
-    term = term * (0.0 - x2) / (3.0 * 4.0)
-    sum = sum + term
-    term = term * (0.0 - x2) / (5.0 * 6.0)
-    sum = sum + term
-    term = term * (0.0 - x2) / (7.0 * 8.0)
-    sum = sum + term
-    term = term * (0.0 - x2) / (9.0 * 10.0)
-    sum = sum + term
-    term = term * (0.0 - x2) / (11.0 * 12.0)
-    sum = sum + term
+    var k = 1
+    while k < 15 {
+        let a = 2.0 * (k as f64)
+        term = term * (0.0 - x2) / ((a - 1.0) * a)
+        sum = sum + term
+        k = k + 1
+    }
     return sum
 }
 
-// =============================================================================
-// STATEVECTOR — classical simulation of quantum state
-// =============================================================================
-// For n qubits, statevector has dim = 2^n complex amplitudes.
-// Index i encodes the computational basis state |b_{n-1}...b_1 b_0⟩
-// where bit k of i gives the state of qubit k.
-
-struct Statevector {
-    re: [f64; 16],      // real parts of amplitudes α_i
-    im: [f64; 16],      // imaginary parts of amplitudes
-    n_qubits: i32,
-    dim: i32,           // 2^n_qubits, ≤ 16
+// atan for |x| <= 1: two argument halvings (|x| <= 0.199), then Taylor.
+fn vqe_atan_unit(x: f64) -> f64 with Mut, Div, Panic {
+    let x1 = x / (1.0 + vqe_sqrt(1.0 + x * x))
+    let x2 = x1 / (1.0 + vqe_sqrt(1.0 + x1 * x1))
+    let t2 = x2 * x2
+    var sum = x2
+    var p = x2
+    var k = 1
+    while k < 18 {
+        p = p * (0.0 - t2)
+        sum = sum + p / (2.0 * (k as f64) + 1.0)
+        k = k + 1
+    }
+    return 4.0 * sum
 }
 
-// EpistemicStatevector — statevector augmented with amplitude uncertainty
-struct EpistemicStatevector {
-    sv: Statevector,
-    amp_unc: [f64; 16],  // GUM standard uncertainty on |α_i|²
+pub fn vqe_atan2(y: f64, x: f64) -> f64 with Mut, Div, Panic {
+    let pi = vqe_pi()
+    if x == 0.0 {
+        if y > 0.0 { return 0.5 * pi }
+        if y < 0.0 { return 0.0 - 0.5 * pi }
+        return 0.0
+    }
+    var base = 0.0
+    if vqe_abs(y) <= vqe_abs(x) {
+        base = vqe_atan_unit(y / x)
+    } else {
+        let inner = vqe_atan_unit(x / y)
+        if y / x > 0.0 { base = 0.5 * pi - inner } else { base = 0.0 - 0.5 * pi - inner }
+    }
+    if x > 0.0 { return base }
+    if y >= 0.0 { return base + pi }
+    return base - pi
+}
+
+// Natural log: x = m * 2^k with m in [1, 2), ln m = 2 atanh((m-1)/(m+1)).
+fn vqe_ln(x: f64) -> f64 with Mut, Div, Panic {
+    if x <= 0.0 { return 0.0 - 1.0e308 }
+    var m = x
+    var k = 0.0
+    while m >= 2.0 { m = m / 2.0; k = k + 1.0 }
+    while m < 1.0 { m = m * 2.0; k = k - 1.0 }
+    let s = (m - 1.0) / (m + 1.0)
+    let s2 = s * s
+    var sum = 0.0
+    var p = s
+    var j = 0
+    while j < 30 {
+        sum = sum + p / (2.0 * (j as f64) + 1.0)
+        p = p * s2
+        j = j + 1
+    }
+    return 2.0 * sum + k * 0.6931471805599453
+}
+
+// =============================================================================
+// STATEVECTOR — classical simulation of a quantum state (<= 4 qubits)
+// =============================================================================
+
+pub struct Statevector {
+    pub re: [f64; 16],      // real parts of amplitudes
+    pub im: [f64; 16],      // imaginary parts of amplitudes
+    pub n_qubits: i32,
+    pub dim: i32,           // 2^n_qubits, <= 16
 }
 
 // VQEResult — output of a VQE run
-struct VQEResult {
-    energy: f64,
-    energy_unc: f64,          // measurement / propagated uncertainty
-    optimal_params: [f64; 16],
-    n_params: i32,
-    n_iterations: i32,
-    converged: i32,            // 1 = converged, 0 = did not converge
+pub struct VQEResult {
+    pub energy: f64,
+    pub energy_unc: f64,          // 0 from vqe_optimize; second-order GUM u(E) from vqe_epistemic
+    pub optimal_params: [f64; 16],
+    pub n_params: i32,
+    pub n_iterations: i32,        // Rotosolve sweeps
+    pub converged: i32,           // 1 = converged, 0 = did not converge
 }
 
-// =============================================================================
-// STATEVECTOR CONSTRUCTORS
-// =============================================================================
+// GumBand — second-order GUM propagation of gate-angle uncertainty to E
+pub struct GumBand {
+    pub energy: f64,          // E(theta*)
+    pub grad_norm: f64,       // |g|, parameter-shift gradient at theta*
+    pub u_first: f64,         // sqrt(g^T Sigma g)
+    pub u_second: f64,        // sqrt(1/2 tr((H Sigma)^2))
+    pub u_total: f64,         // sqrt(u_first^2 + u_second^2)
+    pub bias_second: f64,     // 1/2 tr(H Sigma): second-order shift of the mean
+}
 
-// sv_zero — initialise statevector in |00...0⟩ ground state
-fn sv_zero(n_qubits: i32) -> Statevector with Mut, Div, Panic {
+// McBand — Monte Carlo propagation of the same angle distribution
+pub struct McBand {
+    pub mean: f64,
+    pub sigma: f64,           // sample standard deviation (n - 1)
+    pub n: i32,
+}
+
+// sv_zero — |00...0>
+pub fn sv_zero(n_qubits: i32) -> Statevector with Mut, Div, Panic {
     var sv = Statevector {
         re: [0.0; 16],
         im: [0.0; 16],
         n_qubits: n_qubits,
         dim: 1,
     }
-    // dim = 2^n_qubits
     var d = 1
     var k = 0
     while k < n_qubits { d = d * 2; k = k + 1 }
     sv.dim = d
-    sv.re[0] = 1.0    // amplitude of |0...0⟩ = 1
+    sv.re[0] = 1.0
     return sv
 }
 
 // =============================================================================
-// SINGLE-QUBIT GATES
+// SINGLE-QUBIT GATES (butterfly over pairs (i, i | 2^q) with bit q of i = 0)
 // =============================================================================
-// All gates iterate over the statevector using a butterfly pattern.
-// For qubit q with stride = 2^q:
-//   pairs (i, j = i | stride) where bit q of i is 0 are processed together.
 
-// sv_apply_rx — Rx(θ) = exp(-i θ X / 2) = cos(θ/2)·I - i·sin(θ/2)·X
-//   |0⟩ → cos(θ/2)|0⟩ - i·sin(θ/2)|1⟩
-//   |1⟩ → -i·sin(θ/2)|0⟩ + cos(θ/2)|1⟩
-fn sv_apply_rx(sv: Statevector, qubit: i32, theta: f64) -> Statevector with Mut, Div, Panic {
+// Rx(theta) = exp(-i theta X / 2) = [[c, -i s], [-i s, c]], c = cos(theta/2), s = sin(theta/2)
+pub fn sv_apply_rx(sv: Statevector, qubit: i32, theta: f64) -> Statevector with Mut, Div, Panic {
     let c = vqe_cos(theta / 2.0)
-    let s = vqe_sin(theta / 2.0)  // multiplied by -i in the gate
+    let s = vqe_sin(theta / 2.0)
     var out = sv
     let stride = 1 << qubit
     var i = 0
@@ -157,16 +240,8 @@ fn sv_apply_rx(sv: Statevector, qubit: i32, theta: f64) -> Statevector with Mut,
             let im0 = sv.im[i]
             let r1 = sv.re[j]
             let im1 = sv.im[j]
-            // new[i] = c*α_0 + (-i*s)*α_1 = c*α_0 + s*im1 - i*(-s*r1... wait)
-            // Rx matrix row 0: [c, -is], row 1: [-is, c]
-            // real part of c*(r0+i*im0) + (-i*s)*(r1+i*im1)
-            //   = c*r0 + (-i*s)*r1 + (-i*s)*(i*im1)
-            //   = c*r0 - i*s*r1 + s*im1
-            //   real: c*r0 + s*im1,  imag: c*im0 - s*r1
             out.re[i] = c * r0 + s * im1
             out.im[i] = c * im0 - s * r1
-            // new[j] = (-is)*α_0 + c*α_1
-            //   real: c*r1 + s*im0,  imag: c*im1 - s*r0
             out.re[j] = c * r1 + s * im0
             out.im[j] = c * im1 - s * r0
         }
@@ -175,9 +250,8 @@ fn sv_apply_rx(sv: Statevector, qubit: i32, theta: f64) -> Statevector with Mut,
     return out
 }
 
-// sv_apply_ry — Ry(θ) = exp(-i θ Y / 2)
-//   Ry matrix: [[cos(θ/2), -sin(θ/2)], [sin(θ/2), cos(θ/2)]] (all real)
-fn sv_apply_ry(sv: Statevector, qubit: i32, theta: f64) -> Statevector with Mut, Div, Panic {
+// Ry(theta) = exp(-i theta Y / 2) = [[c, -s], [s, c]]
+pub fn sv_apply_ry(sv: Statevector, qubit: i32, theta: f64) -> Statevector with Mut, Div, Panic {
     let c = vqe_cos(theta / 2.0)
     let s = vqe_sin(theta / 2.0)
     var out = sv
@@ -201,26 +275,21 @@ fn sv_apply_ry(sv: Statevector, qubit: i32, theta: f64) -> Statevector with Mut,
     return out
 }
 
-// sv_apply_rz — Rz(θ) = exp(-i θ Z / 2)
-//   Rz matrix: [[e^{-iθ/2}, 0], [0, e^{iθ/2}]]
-fn sv_apply_rz(sv: Statevector, qubit: i32, theta: f64) -> Statevector with Mut, Div, Panic {
+// Rz(theta) = exp(-i theta Z / 2) = diag(e^{-i theta/2}, e^{i theta/2})
+pub fn sv_apply_rz(sv: Statevector, qubit: i32, theta: f64) -> Statevector with Mut, Div, Panic {
     let c = vqe_cos(theta / 2.0)
     let s = vqe_sin(theta / 2.0)
     var out = sv
     var i = 0
     while i < sv.dim {
         let bit = (i >> qubit) & 1
+        let r = sv.re[i]
+        let im = sv.im[i]
         if bit == 0 {
-            // multiply by e^{-iθ/2} = cos(θ/2) - i·sin(θ/2)
-            let r = sv.re[i]
-            let im = sv.im[i]
             out.re[i] = c * r + s * im
             out.im[i] = c * im - s * r
         }
         if bit == 1 {
-            // multiply by e^{iθ/2} = cos(θ/2) + i·sin(θ/2)
-            let r = sv.re[i]
-            let im = sv.im[i]
             out.re[i] = c * r - s * im
             out.im[i] = c * im + s * r
         }
@@ -229,8 +298,8 @@ fn sv_apply_rz(sv: Statevector, qubit: i32, theta: f64) -> Statevector with Mut,
     return out
 }
 
-// sv_apply_h — Hadamard gate: H = (1/√2)[[1,1],[1,-1]]
-fn sv_apply_h(sv: Statevector, qubit: i32) -> Statevector with Mut, Div, Panic {
+// Hadamard H = (1/sqrt 2)[[1, 1], [1, -1]]
+pub fn sv_apply_h(sv: Statevector, qubit: i32) -> Statevector with Mut, Div, Panic {
     let inv_sqrt2 = 0.7071067811865476
     var out = sv
     let stride = 1 << qubit
@@ -253,8 +322,8 @@ fn sv_apply_h(sv: Statevector, qubit: i32) -> Statevector with Mut, Div, Panic {
     return out
 }
 
-// sv_apply_cx — CNOT gate: flips target qubit when control qubit is |1⟩
-fn sv_apply_cx(sv: Statevector, control: i32, target: i32) -> Statevector with Mut, Div, Panic {
+// CNOT: flips target when control is |1>
+pub fn sv_apply_cx(sv: Statevector, control: i32, target: i32) -> Statevector with Mut, Div, Panic {
     var out = sv
     let t_stride = 1 << target
     var i = 0
@@ -278,91 +347,63 @@ fn sv_apply_cx(sv: Statevector, control: i32, target: i32) -> Statevector with M
 }
 
 // =============================================================================
-// MEASUREMENT — expectation values
+// EXPECTATION VALUES
 // =============================================================================
 
-// sv_measure_z — ⟨ψ|Z_qubit|ψ⟩ = Σ_i |α_i|² · (-1)^{bit_qubit(i)}
-fn sv_measure_z(sv: &Statevector, qubit: i32) -> f64 with Mut, Div, Panic {
+// <psi| Z_qubit |psi> = sum_i |a_i|^2 (-1)^{bit_qubit(i)}
+pub fn sv_measure_z(sv: &Statevector, qubit: i32) -> f64 with Mut, Div, Panic {
     var result = 0.0
     var i = 0
     while i < sv.dim {
         let prob = sv.re[i] * sv.re[i] + sv.im[i] * sv.im[i]
         let bit = (i >> qubit) & 1
-        if bit == 0 {
-            result = result + prob
-        }
-        if bit == 1 {
-            result = result - prob
-        }
+        if bit == 0 { result = result + prob }
+        if bit == 1 { result = result - prob }
         i = i + 1
     }
     return result
 }
 
-// expectation_pauli_z — alias for sv_measure_z (public API)
-fn expectation_pauli_z(sv: &Statevector, qubit: i32) -> f64 with Mut, Div, Panic {
+pub fn expectation_pauli_z(sv: &Statevector, qubit: i32) -> f64 with Mut, Div, Panic {
     return sv_measure_z(sv, qubit)
 }
 
-// expectation_zz — ⟨ψ|Z_{q1}⊗Z_{q2}|ψ⟩
-// = Σ_i |α_i|² · (-1)^{bit_q1(i) ⊕ bit_q2(i)}
-fn expectation_zz(sv: &Statevector, q1: i32, q2: i32) -> f64 with Mut, Div, Panic {
+// <psi| Z_q1 Z_q2 |psi>
+pub fn expectation_zz(sv: &Statevector, q1: i32, q2: i32) -> f64 with Mut, Div, Panic {
     var result = 0.0
     var i = 0
     while i < sv.dim {
         let prob = sv.re[i] * sv.re[i] + sv.im[i] * sv.im[i]
         let b1 = (i >> q1) & 1
         let b2 = (i >> q2) & 1
-        let sign = (b1 + b2) & 1   // XOR parity: 0 → +1, 1 → -1
-        if sign == 0 {
-            result = result + prob
-        }
-        if sign == 1 {
-            result = result - prob
-        }
+        let sign = (b1 + b2) & 1
+        if sign == 0 { result = result + prob }
+        if sign == 1 { result = result - prob }
         i = i + 1
     }
     return result
 }
 
 // =============================================================================
-// H₂ HAMILTONIAN — STO-3G minimal basis (Jordan-Wigner mapping)
+// H2 HAMILTONIAN (two qubits; O'Malley et al., PRX 6, 031007 (2016))
 // =============================================================================
-// H = c0·I + c1·Z0 + c2·Z1 + c3·Z0Z1 + (XX and YY terms omitted for
-//     the real part; the VQE ansatz accounts for the full Hamiltonian via
-//     the parameter landscape)
-//
-// Standard coefficients at R = 0.74 Å (equilibrium geometry):
-//   c0 = -0.4804 (nuclear repulsion + one-electron constant)
-//   c1 =  0.3435 (Z on qubit 0)
-//   c2 = -0.4347 (Z on qubit 1)
-//   c3 =  0.5716 (ZZ)
-//   c4 =  0.0910 (XX + YY — enter via the ansatz)
-//
-// The last term requires XX and YY measurements which mix the real/imaginary
-// parts. For classical statevector simulation we can compute them directly.
-//
-// ⟨XX⟩ = ⟨ψ|X0 X1|ψ⟩ and ⟨YY⟩ = ⟨ψ|Y0 Y1|ψ⟩
-// For a 2-qubit statevector |ψ⟩ = α00|00⟩+α01|01⟩+α10|10⟩+α11|11⟩:
-//   ⟨XX⟩ = 2·Re(α00·α11* + α01·α10*)
-//   ⟨YY⟩ = -2·Re(α00·α11* - α01·α10*) + 2·Im terms
-// We compute these by applying X⊗X and measuring.
+// Basis index i = 2 b1 + b0. On {|00>, |11>} X0X1 and Y0Y1 cancel; on
+// {|01>, |10>} both map |01> <-> |10> with +1, so XX + YY couples only that
+// pair, with matrix element 2 c4. Hence the ground state lives in the 2x2
+// block on {|01>, |10>} (see h2_exact_ground_energy).
 
-fn h2_hamiltonian(sv: &Statevector) -> f64 with Mut, Div, Panic {
-    let c0 = 0.0 - 0.4804   // identity constant
-    let c1 =  0.3435          // Z0
-    let c2 = 0.0 - 0.4347    // Z1
-    let c3 =  0.5716          // Z0Z1
-    let c4 =  0.0910          // coefficient of XX + YY
+pub fn h2_c0() -> f64 { return 0.0 - 0.4804 }   // identity
+pub fn h2_c1() -> f64 { return 0.3435 }         // Z0
+pub fn h2_c2() -> f64 { return 0.0 - 0.4347 }   // Z1
+pub fn h2_c3() -> f64 { return 0.5716 }         // Z0 Z1
+pub fn h2_c4() -> f64 { return 0.0910 }         // X0 X1 + Y0 Y1
 
-    let ez0  = sv_measure_z(sv, 0)
-    let ez1  = sv_measure_z(sv, 1)
-    let ezz  = expectation_zz(sv, 0, 1)
+// <psi|H|psi> for a 2-qubit statevector.
+pub fn h2_hamiltonian(sv: &Statevector) -> f64 with Mut, Div, Panic {
+    let ez0 = sv_measure_z(sv, 0)
+    let ez1 = sv_measure_z(sv, 1)
+    let ezz = expectation_zz(sv, 0, 1)
 
-    // ⟨XX⟩: apply H⊗H, measure ZZ, apply H⊗H
-    // For 2-qubit: ⟨XX⟩ computed from amplitude cross-products
-    // α_{b1 b0}: index 0=|00⟩, 1=|01⟩, 2=|10⟩, 3=|11⟩
-    // ⟨XX⟩ = 2·Re(α00·conj(α11) + α01·conj(α10))
     let r00 = sv.re[0]
     let i00 = sv.im[0]
     let r01 = sv.re[1]
@@ -372,120 +413,117 @@ fn h2_hamiltonian(sv: &Statevector) -> f64 with Mut, Div, Panic {
     let r11 = sv.re[3]
     let i11 = sv.im[3]
 
+    // X0X1 swaps |00> <-> |11> and |01> <-> |10>:
+    //   <XX> = 2 Re(a00* a11 + a01* a10)
+    // Y0Y1 = [[0,0,0,-1],[0,0,1,0],[0,1,0,0],[-1,0,0,0]]:
+    //   <YY> = -2 Re(a00* a11) + 2 Re(a01* a10)
     let exx = 2.0 * (r00 * r11 + i00 * i11 + r01 * r10 + i01 * i10)
-    // ⟨YY⟩ = -2·Im(α00·conj(α11) - α01·conj(α10)) actually:
-    // Y0 Y1 has matrix: |00⟩↔-|11⟩, |01⟩↔|10⟩ with phases
-    // ⟨YY⟩ = 2·(i00·r11 - r00·i11 - (i01·r10 - r01·i10))
-    // Equivalently: ⟨YY⟩ = -⟨XX⟩ + 2*(real cross terms with imaginary)
-    // Exact: Y⊗Y matrix on basis:
-    //   Y⊗Y|00⟩ = -|11⟩,  Y⊗Y|01⟩ = |10⟩,  Y⊗Y|10⟩ = |01⟩,  Y⊗Y|11⟩ = -|00⟩
-    //   (all with factor -(-1)(-1)=−1 for 00,11 and +1·1=+1... let's be precise)
-    //   Y = [[0,-i],[i,0]]. Y⊗Y = [[0,0,0,-1],[0,0,1,0],[0,1,0,0],[-1,0,0,0]]
-    // ⟨YY⟩ = -α00*conj(α11) + α01*conj(α10) + α10*conj(α01) - α11*conj(α00)
-    //       = -2·Re(α00·conj(α11)) + 2·Re(α01·conj(α10))
     let eyy = 0.0 - 2.0 * (r00 * r11 + i00 * i11) + 2.0 * (r01 * r10 + i01 * i10)
 
-    return c0 + c1 * ez0 + c2 * ez1 + c3 * ezz + c4 * (exx + eyy)
+    return h2_c0() + h2_c1() * ez0 + h2_c2() * ez1 + h2_c3() * ezz + h2_c4() * (exx + eyy)
+}
+
+// Exact ground energy: lowest eigenvalue of the 2x2 block on {|01>, |10>},
+//   d01 = c0 - c1 + c2 - c3,  d10 = c0 + c1 - c2 - c3,  off-diagonal 2 c4,
+//   E0 = (d01 + d10)/2 - sqrt(((d01 - d10)/2)^2 + (2 c4)^2).
+// The other two eigenvalues are the diagonal entries on |00> and |11>
+// (c0 + c1 + c2 + c3 and c0 - c1 - c2 + c3), both above E0.
+pub fn h2_exact_ground_energy() -> f64 with Mut, Div, Panic {
+    let d01 = h2_c0() - h2_c1() + h2_c2() - h2_c3()
+    let d10 = h2_c0() + h2_c1() - h2_c2() - h2_c3()
+    let half = 0.5 * (d01 - d10)
+    let off = 2.0 * h2_c4()
+    return 0.5 * (d01 + d10) - vqe_sqrt(half * half + off * off)
 }
 
 // =============================================================================
-// VQE ANSATZ — hardware-efficient, 2 qubits, 4 parameters
+// ANSATZ — Ry(p0) q0, Ry(p1) q1, CNOT(q0 -> q1), Ry(p2) q0, Ry(p3) q1
 // =============================================================================
-// Layer: Ry(p0)|q0⟩, Ry(p1)|q1⟩, CNOT(q0→q1), Ry(p2)|q0⟩, Ry(p3)|q1⟩
-// params: fixed-size [f64; 16], n_params = 4
-fn vqe_ansatz(params: &[f64; 16], n_params: i32, n_qubits: i32) -> Statevector with Mut, Div, Panic {
+
+pub fn vqe_ansatz(params: &[f64; 16], n_params: i32, n_qubits: i32) -> Statevector with Mut, Div, Panic {
+    let p0: f64 = params[0]
+    let p1: f64 = params[1]
+    let p2: f64 = params[2]
+    let p3: f64 = params[3]
     var sv = sv_zero(n_qubits)
-    // First Ry layer
-    sv = sv_apply_ry(sv, 0, params[0])
-    sv = sv_apply_ry(sv, 1, params[1])
-    // Entangling CNOT
+    sv = sv_apply_ry(sv, 0, p0)
+    sv = sv_apply_ry(sv, 1, p1)
     sv = sv_apply_cx(sv, 0, 1)
-    // Second Ry layer
-    sv = sv_apply_ry(sv, 0, params[2])
-    sv = sv_apply_ry(sv, 1, params[3])
+    sv = sv_apply_ry(sv, 0, p2)
+    sv = sv_apply_ry(sv, 1, p3)
     return sv
 }
 
-// vqe_cost — evaluate H₂ energy for given parameter vector
-fn vqe_cost(params: &[f64; 16], n_params: i32) -> f64 with Mut, Div, Panic {
+// E(theta) for the H2 Hamiltonian
+pub fn vqe_cost(params: &[f64; 16], n_params: i32) -> f64 with Mut, Div, Panic {
     let sv = vqe_ansatz(params, n_params, 2)
     return h2_hamiltonian(&sv)
 }
 
-// =============================================================================
-// VQE OPTIMIZER — coordinate descent
-// =============================================================================
-// Coordinate descent: cycle through each parameter, evaluate cost ±step,
-// move in the direction that lowers the energy. Converge when max change < tol.
+// E with angle `k` shifted by `dk` and angle `l` shifted by `dl`
+fn vqe_cost_shift2(params: &[f64; 16], k: i32, dk: f64, l: i32, dl: f64) -> f64 with Mut, Div, Panic {
+    var q: [f64; 16] = [0.0; 16]
+    var i = 0
+    while i < 16 {
+        let v: f64 = params[i]
+        q[i] = v
+        i = i + 1
+    }
+    let vk: f64 = q[k]
+    q[k] = vk + dk
+    let vl: f64 = q[l]
+    q[l] = vl + dl
+    return vqe_cost(&q, 4)
+}
 
-fn vqe_optimize(n_iterations: i32, learning_rate: f64) -> VQEResult with Mut, Div, Panic {
+// =============================================================================
+// OPTIMISER — Rotosolve (exact coordinate minimisation of a sinusoid)
+// =============================================================================
+// Along angle d, E(phi + t) = a + B cos t + C sin t with
+//   C = (E(+pi/2) - E(-pi/2)) / 2,  B = E(0) - (E(+pi/2) + E(-pi/2)) / 2,
+// minimised at t = pi + atan2(C, B). Sweeps stop when a full sweep lowers the
+// energy by less than 1e-15 Ha or after n_iterations sweeps.
+// `learning_rate` is unused (kept for API compatibility with older callers).
+
+pub fn vqe_optimize(n_iterations: i32, learning_rate: f64) -> VQEResult with Mut, Div, Panic {
     let n_params = 4
+    let pi = vqe_pi()
     var params: [f64; 16] = [0.0; 16]
-
-    // Start near the Hartree-Fock / mean-field point
-    // For H₂ in STO-3G, a good starting point is θ ≈ π/4 on qubit 0
     params[0] = 0.5
     params[1] = 0.0
     params[2] = 0.5
     params[3] = 0.0
 
-    var best_energy = vqe_cost(&params, n_params)
+    var energy = vqe_cost(&params, n_params)
     var n_iter = 0
     var converged = 0
-    let tol = 0.0001
-
-    var iter = 0
-    while iter < n_iterations {
-        var max_improvement = 0.0
-        var p = 0
-        while p < n_params {
-            let step = learning_rate
-
-            // Evaluate at params[p] + step
-            var params_plus: [f64; 16] = params
-            params_plus[p] = params_plus[p] + step
-            let e_plus = vqe_cost(&params_plus, n_params)
-
-            // Evaluate at params[p] - step
-            var params_minus: [f64; 16] = params
-            params_minus[p] = params_minus[p] - step
-            let e_minus = vqe_cost(&params_minus, n_params)
-
-            // Take the better direction
-            var improvement = 0.0
-            if e_plus < best_energy {
-                improvement = best_energy - e_plus
-                params = params_plus
-                best_energy = e_plus
-            }
-            if e_minus < best_energy {
-                let imp2 = best_energy - e_minus
-                if imp2 > improvement {
-                    improvement = imp2
-                    params = params_minus
-                    best_energy = e_minus
-                }
-            }
-
-            if improvement > max_improvement {
-                max_improvement = improvement
-            }
-
-            p = p + 1
+    var sweep = 0
+    while sweep < n_iterations {
+        let e_start = energy
+        var d = 0
+        while d < n_params {
+            let e0 = vqe_cost(&params, n_params)
+            let ep = vqe_cost_shift2(&params, d, 0.5 * pi, d, 0.0)
+            let em = vqe_cost_shift2(&params, d, 0.0 - 0.5 * pi, d, 0.0)
+            let cc = 0.5 * (ep - em)
+            let bb = e0 - 0.5 * (ep + em)
+            let phi: f64 = params[d]
+            let t = pi + vqe_atan2(cc, bb)
+            params[d] = vqe_wrap(phi + t)
+            d = d + 1
         }
-
+        energy = vqe_cost(&params, n_params)
         n_iter = n_iter + 1
-
-        if max_improvement < tol {
+        let gain = e_start - energy
+        if gain < 1.0e-15 {
             converged = 1
-            iter = n_iterations  // break
+            sweep = n_iterations
         }
-
-        iter = iter + 1
+        sweep = sweep + 1
     }
 
     return VQEResult {
-        energy: best_energy,
+        energy: energy,
         energy_unc: 0.0,
         optimal_params: params,
         n_params: n_params,
@@ -495,100 +533,240 @@ fn vqe_optimize(n_iterations: i32, learning_rate: f64) -> VQEResult with Mut, Di
 }
 
 // =============================================================================
-// EPISTEMIC GATES — uncertainty-propagating versions
+// PARAMETER-SHIFT GRADIENT AND HESSIAN (exact for single-Ry parameters)
 // =============================================================================
+// g_k  = [E(+pi/2 e_k) - E(-pi/2 e_k)] / 2
+// H_kl = [E(++)-E(+-)-E(-+)+E(--)] / 4  (shifts of pi/2 on k and l), k != l
+// H_kk = [E(+pi e_k) - 2 E + E(-pi e_k)] / 4
 
-// esv_apply_ry — Ry with gate-angle uncertainty
-// GUM first-order propagation: u(|α_i|²)_new = |∂|α_i|²/∂θ| · u(θ)
-// Since Ry mixes pairs (i, j), the sensitivity is bounded by:
-//   |∂α/∂θ| ≤ (1/2) · max(|α_0|, |α_1|)
-// We use: u_amp_new[i] = u_amp_old[i] + (1/2) · θ_unc · |α_i|
-// (first-order quadrature sum in amplitude space)
-fn esv_apply_ry(esv: EpistemicStatevector, qubit: i32, theta: f64, theta_unc: f64) -> EpistemicStatevector with Mut, Div, Panic {
-    let sv_new = sv_apply_ry(esv.sv, qubit, theta)
-    var unc_new: [f64; 16] = esv.amp_unc
-    let stride = 1 << qubit
-    var i = 0
-    while i < esv.sv.dim {
-        let bit = (i >> qubit) & 1
-        if bit == 0 {
-            let j = i | stride
-            // Amplitude magnitudes before gate
-            let mag0 = vqe_sqrt(esv.sv.re[i] * esv.sv.re[i] + esv.sv.im[i] * esv.sv.im[i])
-            let mag1 = vqe_sqrt(esv.sv.re[j] * esv.sv.re[j] + esv.sv.im[j] * esv.sv.im[j])
-            // Sensitivity of output amplitude |α_out| to θ: ≤ 0.5·(mag0+mag1)
-            let sens = 0.5 * (mag0 + mag1)
-            let new_unc = esv.amp_unc[i] + sens * theta_unc
-            let new_unc_j = esv.amp_unc[j] + sens * theta_unc
-            unc_new[i] = new_unc
-            unc_new[j] = new_unc_j
-        }
-        i = i + 1
+pub fn vqe_gradient(params: &[f64; 16]) -> [f64; 16] with Mut, Div, Panic {
+    let h = 0.5 * vqe_pi()
+    var g: [f64; 16] = [0.0; 16]
+    var k = 0
+    while k < 4 {
+        let ep = vqe_cost_shift2(params, k, h, k, 0.0)
+        let em = vqe_cost_shift2(params, k, 0.0 - h, k, 0.0)
+        g[k] = 0.5 * (ep - em)
+        k = k + 1
     }
-    return EpistemicStatevector {
-        sv: sv_new,
-        amp_unc: unc_new,
+    return g
+}
+
+// Row-major 4x4 Hessian in the first 16 slots
+pub fn vqe_hessian(params: &[f64; 16]) -> [f64; 16] with Mut, Div, Panic {
+    let h = 0.5 * vqe_pi()
+    let e0 = vqe_cost(params, 4)
+    var hess: [f64; 16] = [0.0; 16]
+    var k = 0
+    while k < 4 {
+        var l = 0
+        while l < 4 {
+            var v = 0.0
+            if k == l {
+                let ep = vqe_cost_shift2(params, k, 2.0 * h, k, 0.0)
+                let em = vqe_cost_shift2(params, k, 0.0 - 2.0 * h, k, 0.0)
+                v = 0.25 * (ep - 2.0 * e0 + em)
+            } else {
+                let epp = vqe_cost_shift2(params, k, h, l, h)
+                let epm = vqe_cost_shift2(params, k, h, l, 0.0 - h)
+                let emp = vqe_cost_shift2(params, k, 0.0 - h, l, h)
+                let emm = vqe_cost_shift2(params, k, 0.0 - h, l, 0.0 - h)
+                v = 0.25 * (epp - epm - emp + emm)
+            }
+            hess[k * 4 + l] = v
+            l = l + 1
+        }
+        k = k + 1
+    }
+    return hess
+}
+
+// =============================================================================
+// SECOND-ORDER GUM BAND
+// =============================================================================
+// theta ~ N(theta*, Sigma), Sigma = gate_unc^2 I_4. For Gaussian inputs
+//   Var[g.d + 1/2 d^T H d] = g^T Sigma g + 1/2 tr((H Sigma)^2)
+//   E[1/2 d^T H d]         = 1/2 tr(H Sigma)
+pub fn vqe_gum2(params: &[f64; 16], gate_unc: f64) -> GumBand with Mut, Div, Panic {
+    let s2 = gate_unc * gate_unc
+    let g = vqe_gradient(params)
+    let hess = vqe_hessian(params)
+    var gg = 0.0
+    var k = 0
+    while k < 4 {
+        let gk: f64 = g[k]
+        gg = gg + gk * gk
+        k = k + 1
+    }
+    var hh = 0.0
+    var tr = 0.0
+    var m = 0
+    while m < 16 {
+        let hm: f64 = hess[m]
+        hh = hh + hm * hm
+        m = m + 1
+    }
+    var d = 0
+    while d < 4 {
+        let hd: f64 = hess[d * 4 + d]
+        tr = tr + hd
+        d = d + 1
+    }
+    let u1sq = s2 * gg
+    let u2sq = 0.5 * s2 * s2 * hh
+    return GumBand {
+        energy: vqe_cost(params, 4),
+        grad_norm: vqe_sqrt(gg),
+        u_first: vqe_sqrt(u1sq),
+        u_second: vqe_sqrt(u2sq),
+        u_total: vqe_sqrt(u1sq + u2sq),
+        bias_second: 0.5 * s2 * tr,
     }
 }
 
-// esv_zero — epistemic statevector in |00...0⟩ with zero amplitude uncertainty
-fn esv_zero(n_qubits: i32) -> EpistemicStatevector with Mut, Div, Panic {
-    return EpistemicStatevector {
-        sv: sv_zero(n_qubits),
-        amp_unc: [0.0; 16],
+// =============================================================================
+// MONTE CARLO VALIDATION (JCGM 101)
+// =============================================================================
+// Uniform generator: L'Ecuyer combined LCG (CACM 31, 742 (1988)),
+//   s1 <- 40014 s1 mod 2147483563,  s2 <- 40692 s2 mod 2147483399,
+//   z = (s1 - s2) mod 2147483562, u = z / 2147483563 in (0, 1).
+// All products stay below 2^47, so i64 arithmetic is exact.
+// Normals: Box-Muller, both outputs used.
+
+pub struct VqeRng {
+    pub s1: i64,
+    pub s2: i64,
+}
+
+pub fn vqe_rng_new(seed: i64) -> VqeRng with Mut, Div, Panic {
+    var a = seed % 2147483562
+    if a < 0 { a = 0 - a }
+    var b = (seed / 7 + 12345) % 2147483398
+    if b < 0 { b = 0 - b }
+    return VqeRng { s1: a + 1, s2: b + 1 }
+}
+
+fn vqe_rng_uniform(r: &!VqeRng) -> f64 with Mut, Div, Panic {
+    let n1 = (40014 * r.s1) % 2147483563
+    let n2 = (40692 * r.s2) % 2147483399
+    r.s1 = n1
+    r.s2 = n2
+    var z = n1 - n2
+    if z < 1 { z = z + 2147483562 }
+    return (z as f64) / 2147483563.0
+}
+
+pub fn vqe_mc_band(params: &[f64; 16], gate_unc: f64, n: i32, seed: i64) -> McBand with Mut, Div, Panic {
+    let two_pi = 2.0 * vqe_pi()
+    var rng = vqe_rng_new(seed)
+    var z: [f64; 4] = [0.0; 4]
+    var q: [f64; 16] = [0.0; 16]
+    // Welford running mean / M2 for a stable variance
+    var mean = 0.0
+    var m2 = 0.0
+    var t = 0
+    while t < n {
+        // four standard normals from two Box-Muller pairs
+        var j = 0
+        while j < 4 {
+            let u1 = vqe_rng_uniform(&!rng)
+            let u2 = vqe_rng_uniform(&!rng)
+            let rad = vqe_sqrt(0.0 - 2.0 * vqe_ln(u1))
+            z[j] = rad * vqe_cos(two_pi * u2)
+            z[j + 1] = rad * vqe_sin(two_pi * u2)
+            j = j + 2
+        }
+        var i = 0
+        while i < 4 {
+            let pv: f64 = params[i]
+            let zv: f64 = z[i]
+            q[i] = pv + gate_unc * zv
+            i = i + 1
+        }
+        let e = vqe_cost(&q, 4)
+        let cnt = (t + 1) as f64
+        let delta = e - mean
+        mean = mean + delta / cnt
+        m2 = m2 + delta * (e - mean)
+        t = t + 1
     }
+    var sigma = 0.0
+    if n > 1 { sigma = vqe_sqrt(m2 / ((n - 1) as f64)) }
+    return McBand { mean: mean, sigma: sigma, n: n }
+}
+
+// =============================================================================
+// PRINTING — x as d.ddddde+XX with `digits` digits after the point
+// =============================================================================
+// println(f64) prints six decimals, which hides the 1e-10-level agreements
+// this module is checked to; demos and tests print through this instead.
+
+fn vqe_print_digits(v: i64, width: i32) with IO, Mut, Div, Panic {
+    var p: i64 = 1
+    var k = 1
+    while k < width { p = p * 10; k = k + 1 }
+    var rest = v
+    while p > 0 {
+        let d = rest / p
+        print(d)
+        rest = rest - d * p
+        p = p / 10
+    }
+}
+
+pub fn vqe_print_sci(x: f64, digits: i32) with IO, Mut, Div, Panic {
+    if x == 0.0 {
+        print("0.0e+00")
+        return
+    }
+    var m = x
+    if m < 0.0 {
+        print("-")
+        m = 0.0 - m
+    }
+    var e = 0
+    while m >= 10.0 { m = m / 10.0; e = e + 1 }
+    while m < 1.0 { m = m * 10.0; e = e - 1 }
+    var scale = 1.0
+    var k = 0
+    while k < digits { scale = scale * 10.0; k = k + 1 }
+    var r = (m * scale + 0.5) as i64
+    var top: i64 = 1
+    k = 0
+    while k <= digits { top = top * 10; k = k + 1 }
+    if r >= top {
+        r = r / 10
+        e = e + 1
+    }
+    let unit = (scale as i64)
+    let lead = r / unit
+    print(lead)
+    print(".")
+    vqe_print_digits(r - lead * unit, digits)
+    print("e")
+    var ae = e
+    if e < 0 {
+        print("-")
+        ae = 0 - e
+    } else {
+        print("+")
+    }
+    if ae < 10 { print("0") }
+    print(ae)
 }
 
 // =============================================================================
 // EPISTEMIC VQE
 // =============================================================================
-// Runs VQE then evaluates energy uncertainty at the optimal parameters
-// by propagating gate_unc through the ansatz via esv_apply_ry.
+// Runs the VQE, then attaches the second-order GUM standard uncertainty of
+// E for independent Gaussian gate-angle errors of standard deviation gate_unc.
 
-fn vqe_epistemic(n_iterations: i32, gate_unc: f64) -> VQEResult with Mut, Div, Panic {
-    // Step 1: run standard VQE to find optimal parameters
-    let base = vqe_optimize(n_iterations, 0.1)
-
-    // Step 2: evaluate epistemic (uncertainty-propagated) statevector
-    var esv = esv_zero(2)
-
-    // Apply same ansatz as vqe_ansatz but using epistemic gates
-    esv = esv_apply_ry(esv, 0, base.optimal_params[0], gate_unc)
-    esv = esv_apply_ry(esv, 1, base.optimal_params[1], gate_unc)
-    // CNOT is a Clifford gate — no angle uncertainty; propagate amp unc passively
-    esv.sv = sv_apply_cx(esv.sv, 0, 1)
-    esv = esv_apply_ry(esv, 0, base.optimal_params[2], gate_unc)
-    esv = esv_apply_ry(esv, 1, base.optimal_params[3], gate_unc)
-
-    // Step 3: compute energy uncertainty via GUM sensitivity on Hamiltonian terms
-    // u(E) ≈ sqrt( Σ_i (∂E/∂|α_i|²)² · u(|α_i|²)² )
-    // ∂E/∂|α_i|² = eigenvalue of H for basis state i:
-    //   e_i = c0 + c1·(-1)^{b0} + c2·(-1)^{b1} + c3·(-1)^{b0⊕b1}
-    let c0 = 0.0 - 0.4804
-    let c1 =  0.3435
-    let c2 = 0.0 - 0.4347
-    let c3 =  0.5716
-
-    var unc_sq = 0.0
-    var i = 0
-    while i < 4 {
-        let b0 = i & 1
-        let b1 = (i >> 1) & 1
-        let s0 = if b0 == 0 { 1.0 } else { 0.0 - 1.0 }
-        let s1 = if b1 == 0 { 1.0 } else { 0.0 - 1.0 }
-        let parity = (b0 + b1) & 1
-        let s01 = if parity == 0 { 1.0 } else { 0.0 - 1.0 }
-        let eigenval = c0 + c1 * s0 + c2 * s1 + c3 * s01
-        let contrib = eigenval * esv.amp_unc[i]
-        unc_sq = unc_sq + contrib * contrib
-        i = i + 1
-    }
-
-    let energy_unc = vqe_sqrt(unc_sq)
-
+pub fn vqe_epistemic(n_iterations: i32, gate_unc: f64) -> VQEResult with Mut, Div, Panic {
+    let base = vqe_optimize(n_iterations, 0.0)
+    let band = vqe_gum2(&base.optimal_params, gate_unc)
     return VQEResult {
         energy: base.energy,
-        energy_unc: energy_unc,
+        energy_unc: band.u_total,
         optimal_params: base.optimal_params,
         n_params: base.n_params,
         n_iterations: base.n_iterations,
