@@ -31,7 +31,7 @@ are not removed.
 
 ## sounio-loom
 
-Built by following [Loom extraction plan](LOOM_EXTRACTION_PLAN.md) (PR #2807).
+Built by following `docs/research/LOOM_EXTRACTION_PLAN.md` from [PR #2807](https://github.com/Sounio-lang/sounio/pull/2807) (not yet on `main` when this page was written).
 
 **What moved.** The 23 Loom branches listed in the plan, filtered with
 `git filter-repo` to the Loom paths:
