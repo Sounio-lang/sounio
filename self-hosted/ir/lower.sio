@@ -1976,12 +1976,60 @@ var LOWER_RGN_TOK_REG: i64 = 0 - 1
 var LOWER_RGN_RET_REG: i64 = 0 - 1
 var LOWER_RGN_EXIT_LABEL: i64 = 0 - 1
 var LOWER_RGN_FN_ID: i64 = 0 - 1
+
+// Region reclamation's cast escape hook. A cast from a non-numeric value (a
+// struct handle, a reference, a Seq, a string, ...) to a numeric type turns a
+// reference into a plain number that the store barrier and the exit
+// classifier can no longer follow: `(p as i64) ^ (1 << 62)` is neither a live
+// handle id nor a heap address, yet the caller can undo the XOR and cast the
+// bits back. So every such cast calls __rgn_barrier(value, 0) first: if the
+// value is a heap reference, every open region that contains its object is
+// marked escaped -- the object can then never be reclaimed by a region reset,
+// whatever arithmetic is applied to the number afterwards (a later region
+// started after the object was born, so its reset cannot touch it). A numeric
+// SOURCE needs no hook: an integer or float only carries reference bits if
+// they came through such a cast, which already ran the hook.
+//
+// LOWER_RGN_CAST_BARRIER_ID caches the __rgn_barrier slot of the module whose
+// function is being lowered (refreshed at every function start,
+// lowerer_rgn_fn_start, and re-validated by name before use). The slot is
+// added on demand under the same headroom guard under which a function may
+// open a region, so a module that can open regions always gets the hook.
+var LOWER_RGN_CAST_BARRIER_ID: i64 = 0 - 1
+
+// Proven-numeric locals, for skipping the cast hook on a source that cannot be
+// a reference. A local is proven when its binding has a DECLARED integer,
+// float or bool type (param or annotated let), is a range-for induction
+// variable, or is initialised from an expression rgn_expr_is_numeric_ref
+// proves. Indexed by local-stack slot; a proof is valid only for the current
+// function (epoch, bumped at every function start, since the locals stack is
+// reused) and only while the slot still holds the register it was proven for
+// (a slot reused by a later binding in the same function does not inherit it).
+// Kept apart from LowerLocalStack.scalar_kind on purpose: scalar_kind is a
+// print-dispatch heuristic (a `for v in arr` element is kind 1 whatever arr
+// holds) and must not be trusted for soundness.
+var LOWER_RGN_NUM_EPOCH: i64 = 1
+var LOWER_RGN_NUM_SLOT_EPOCH: [i64; 4096] = [0; 4096]
+var LOWER_RGN_NUM_SLOT_REG: [i64; 4096] = [0; 4096]
+
 var LOWER_RGN_CHECKED: i64 = 0
 var LOWER_RGN_ON: i64 = 0
+var LOWER_RGN_BACKEND_OK: i64 = 0
+
+// Region reclamation needs the __rgn_* runtime, the store barriers and the
+// escape hooks, which only native/codegen_x86_linux.sio implements. A driver
+// that consumes this lowering through any other backend (the legacy
+// native/codegen.sio used by module_loader's thin linker and the standalone
+// render/wide drivers) never opts in, so its IR carries no region calls and no
+// __rgn_* stubs. compiler/main.sio (Madaros) opts in at startup.
+pub fn lower_rgn_backend_opt_in() with Mut {
+    LOWER_RGN_BACKEND_OK = 1
+}
 
 // SOUNIO_NO_REGION_RECLAIM=1 lowers every function without a region, as before
 // region reclamation existed. For A/B measurement and as a fallback.
 fn lower_rgn_enabled() -> bool with IO, Mut, Panic, Div {
+    if LOWER_RGN_BACKEND_OK == 0 { return false }
     if LOWER_RGN_CHECKED == 0 {
         LOWER_RGN_CHECKED = 1
         LOWER_RGN_ON = 1
