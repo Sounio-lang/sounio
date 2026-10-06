@@ -2,8 +2,8 @@
 topic_id: repo.docs.compiler.known-limitations
 authority: repo_only
 audience: contributors
-last_validated: 2026-09-11
-validated_by: codex-3
+last_validated: 2026-09-22
+validated_by: claude
 source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.compiler.known-limitations
 -->
 
@@ -40,6 +40,7 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 | KL-14 | FFI: 14a–14d3 CLOSED | madaros |
 | KL-15 | `f256` surface (15a softfloat add/sub partial), `Knowledge<f128>`/GUM | madaros |
 | KL-16 | Hessian Tier-4 (16a–16f CLOSED; residual H-multi/non-H00 if/a64 atan2) | lean_single |
+| KL-18 | `Hyper<…>` CPU values: Madaros fail-closed; lean_single prints a wrong value (seed) | both |
 
 ## Ledger
 
@@ -69,12 +70,34 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 
 ### KL-11 — #1792: first-order channels do not cross user calls
 
-- Engine: `madaros` prints `var=0.000000` where `lean_single` shows ~1e-5 on
-  the dissertation adaptive witnesses (`tests/run-pass/rapamycin_epistemic_adaptive.sio`,
-  `stdlib/darwin_pbpk/epistemic_pbpk28.sio`), plus an ep28 confidence
-  bit-pattern fabrication. `tests/run-pass/gum_fo_across_call.sio` documents
-  that FO/variance channels stop at `ir_call`.
-- Pin: `scripts/ci/epistemic_fabrication_detect_gate.sh` (detect-only).
+- #1792 (filed 2026-08-17) named two distinct witnesses. **F1**:
+  `tests/run-pass/rapamycin_epistemic_adaptive.sio` — `madaros` originally
+  printed `var(blood)=0.000000` where `lean_single` shows ~1e-5. **F2**:
+  `stdlib/darwin_pbpk/epistemic_pbpk28.sio` TEST 6 — Madaros printed an IEEE
+  bit-pattern (~4.6e18) as the AUC confidence, not a variance collapse.
+  **F2 is CLOSED**, fixed by PR #1882
+  (`d33cf5856b57f3341db9392d263045d090d88ae7`, merged 2026-08-18):
+  `Knowledge.confidence` was tagged `is_float: 3` at IR layout instead of `1`,
+  so `sitofp` on the raw bits produced the huge value;
+  `ir_register_knowledge_layout` now tags it `1`. **F1, and this rung in
+  general, stay OPEN**: `tests/run-pass/gum_fo_across_call.sio` and
+  `tests/run-pass/fo_call_boundary_arity3.sio` still document, with a live
+  `//@ known-failure`, that FO/variance channels stop at `ir_call` for the
+  general case. Re-measured 2026-09-22: the specific
+  `rapamycin_epistemic_adaptive` witness (F1) now reports non-zero variance
+  too, and the accompanying test change is `b2df0727` (2026-09-18) — but that
+  commit touches only the test fixture and its recorded gate/dataset
+  artefacts (`git show --stat b2df0727`: no `self-hosted/` file), relaxing
+  `ok_mech` from requiring `epist_active > 0` to `epist_active > 0 ||
+  ok_var`. It documents that the lookbehind mechanism no longer needs to
+  fire for the test to pass; it does **not** touch variance computation, so
+  it cannot be the cause of the witness's variance moving off zero. That
+  compiler-side cause is **unidentified**. Do not read the healthy witness,
+  or `b2df0727`, as KL-11 closing.
+- Pin: `scripts/ci/epistemic_fabrication_detect_gate.sh` (detect-only; as of
+  2026-09-22 both its F1 and F2 checks take the "engine healthy" branch on
+  the two named witnesses, which is expected given the above and is not by
+  itself evidence this rung is closed).
 - Locus: `ir/lower.sio` Knowledge layout / `variance_*_regs` / `pending_variance_reg`.
   Audit: `docs/audit/EPISTEMIC_FABRICATION_DETECT_2026-08-17.md`,
   `docs/audit/MADAROS_FO_CALL_BOUNDARY_DISPATCH_2026-08-18.md`.
@@ -199,6 +222,27 @@ it fixes anything. Line numbers are as measured at `3868c1805`.
 - Channel-at-`.value` semantics (`MEAS_KNOW_IDX`,
   `formal/ChannelAssignmentSemantics.lean`) are a model, not a defect —
   see the history snapshot for the KAS-1 rationale.
+
+### KL-18 — `Hyper<Algebra, T>` values on the CPU path (P0.8.2)
+
+- Engine: both. There is no CPU value lowering for `Hyper<Octonion, f64>`
+  (or any `Hyper<…>`); the only implemented CPU octonion product is
+  `algebra::octonion::oct_mul` over `[f64; 8]` (Fano convention, e1·e2 = e3).
+  Reference: `(2 + e1)(3 + e2) = [6, 3, 2, 1, 0, 0, 0, 0]`, which `oct_mul`
+  returns on both engines.
+- **Madaros — fail-closed.** `[..] as Hyper<…>` is refused in CPU lowering
+  ("Hyper<...> values ... are not implemented on the native CPU path"). Before
+  the refusal (measured 2026-10-06 on the shipped ELF): `.e1` of the cast
+  printed `0.000000`, `a + b` segfaulted, `a * b` failed in the backend with
+  rc 12. Pin: `tests/compile-fail/hyper_octonion_mul_cpu_refused.sio`.
+  The `--backend gpu` path lowers `Hyper<…>` through HLIR and is unaffected.
+- **lean_single — OPEN, silent wrong value.** The engine does not know the
+  type: `println(([2.0, 1.0, 0.0, ..] as Hyper<Octonion, f64>) * ..)` prints
+  `8843176242182119936` and exits 0; routing the product back through
+  `as [f64; 8]` segfaults (rc 139). Closing it requires a lean_single source
+  change and a seed refresh (`scripts/dev/refresh_lean_seed.sh`), which is a
+  founder-run step. Until then: do not use `Hyper<…>` values under
+  `SOUNIO_SOUC_ENGINE=lean_single`.
 
 ## Registry-governed, not rungs
 

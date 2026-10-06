@@ -16,7 +16,7 @@
 #   //@ error-pattern: X      — stderr/stdout must contain X (compile-fail only)
 #   //@ known-failure: REASON — documented accepted failure
 #   //@ skip-if: CONDITION    — conditional skip (e.g., skip-if: no-gpu)
-#   //@ requires: FEATURE     — feature dependency (e.g., requires: gpu)
+#   //@ requires: FEATURE     — feature dependency (gpu|llvm|madaros|lean_single|slow)
 #   //@ flaky                 — known flaky test
 #   //@ timeout: SECONDS      — override default timeout
 #
@@ -212,8 +212,14 @@ ERRORS=""
 
 # Repo-level blocker manifest. This lets CI stay strict about new failures while
 # keeping old, audited hardening backlog items visible as xfails instead of noise.
+# An entry may pin the failure mode it was audited for with `path|substring`: the
+# manifest only launders a failure whose test_output contains that substring, so a
+# regression that fails a DIFFERENT way (a new SIGSEGV, a wrong answer) still reports
+# as a fresh fail instead of being silently absorbed by an old entry that was about
+# something else. Plain `path` entries (most of the file) are unchecked, as before.
 KNOWN_FAILURES_FILE="${SOUNIO_TEST_KNOWN_FAILURES_FILE:-}"
 declare -A KNOWN_FAILURE_MAP=()
+declare -A KNOWN_FAILURE_REASON_MAP=()
 if [[ -z "$KNOWN_FAILURES_FILE" && -z "$FILTER" && "$FORMAT" == "junit" ]]; then
     KNOWN_FAILURES_FILE="$ROOT_DIR/tests/known_failures/hardened_diagnostics_full_suite.txt"
 fi
@@ -223,7 +229,15 @@ if [[ -n "$KNOWN_FAILURES_FILE" && -f "$KNOWN_FAILURES_FILE" ]]; then
         line="${line#"${line%%[![:space:]]*}"}"
         line="${line%"${line##*[![:space:]]}"}"
         [[ -z "$line" ]] && continue
-        KNOWN_FAILURE_MAP["$line"]=1
+        kf_path="$line"; kf_reason=""
+        if [[ "$line" == *"|"* ]]; then
+            kf_path="${line%%|*}"
+            kf_reason="${line#*|}"
+            kf_path="${kf_path%"${kf_path##*[![:space:]]}"}"
+            kf_reason="${kf_reason#"${kf_reason%%[![:space:]]*}"}"
+        fi
+        KNOWN_FAILURE_MAP["$kf_path"]=1
+        [[ -n "$kf_reason" ]] && KNOWN_FAILURE_REASON_MAP["$kf_path"]="$kf_reason"
     done < "$KNOWN_FAILURES_FILE"
 fi
 
@@ -450,13 +464,22 @@ run_test() {
                     return
                 fi
                 ;;
+            # `requires: slow` — tests that legitimately need minutes, not
+            # seconds (full GRI-Mech kinetics integrations, PINN training
+            # loops, a Lyapunov spectrum). The default Full Test Suite job
+            # runs on a shared GHA runner where these routinely exceed their
+            # own generous `//@ timeout:` -- not because they are wrong, but
+            # because they are slow. Skipped unless SOUNIO_SLOW_TESTS_AVAILABLE
+            # is set; the nightly slow-lane job sets it, with a much larger
+            # job timeout budget.
+            slow) [[ -z "${SOUNIO_SLOW_TESTS_AVAILABLE:-}" ]] && { echo "{\"status\":\"skip\",\"reason\":\"requires:slow\",\"name\":\"$basename\",\"idx\":$idx}" > "$output_file"; return; } ;;
             # An unrecognized requires value must not fall through silently: a typo
             # (e.g. `requires: madros`) would otherwise run the test against
             # whatever engine is present instead of being gated as intended, with
             # the annotation asserting nothing -- indistinguishable from the
             # vacuous-match defect this PR exists to remove.
             *)
-                echo "{\"status\":\"fail\",\"category\":\"fail\",\"name\":\"$basename\",\"output\":\"unknown requires: $requires (expected: gpu|llvm|madaros|lean_single)\",\"idx\":$idx}" > "$output_file"
+                echo "{\"status\":\"fail\",\"category\":\"fail\",\"name\":\"$basename\",\"output\":\"unknown requires: $requires (expected: gpu|llvm|madaros|lean_single|slow)\",\"idx\":$idx}" > "$output_file"
                 return
                 ;;
         esac
@@ -648,11 +671,23 @@ run_test() {
 
     end_time=$(date +%s)
     local duration=$((end_time - start_time))
-    
+
+    # A manifest entry that pinned its failure mode (path|substring) only covers a
+    # failure whose test_output matches; anything else is a fresh fail, not a repeat
+    # of the audited one. Checked here, before is_known_failure is consulted below,
+    # so unmatched entries fall straight through to the ordinary fail path.
+    if $is_known_failure && [[ $exit_code -ne 0 ]]; then
+        expected_reason="${KNOWN_FAILURE_REASON_MAP[$rel_file]:-}"
+        if [[ -n "$expected_reason" ]] && ! grep -qF -- "$expected_reason" <<<"$test_output"; then
+            is_known_failure=false
+            test_output="known-failure reason mismatch: expected '$expected_reason', got: $test_output"
+        fi
+    fi
+
     # Determine final status
     local status=""
     local category=""
-    
+
     if [[ $exit_code -eq 0 ]]; then
         if $is_known_failure; then
             status="xpas"

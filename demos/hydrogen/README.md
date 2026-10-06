@@ -11,7 +11,8 @@ reproducibility living inside the language itself**, not in an external toolbox.
 ## Run
 
 ```bash
-bin/souc run demos/hydrogen/mh7_reliability.sio                         # 7-stage HRS reliability (flagship)
+bin/souc run demos/hydrogen/mh7_coupled_ceiling.sio                     # 7-stage cascade ceiling from measured Table 3, nothing fitted
+bin/souc run demos/hydrogen/mh7_reliability.sio                         # 7-stage HRS reliability (fitted surrogate, see below)
 bin/souc run demos/hydrogen/trieres_chain.sio                           # TRIERES valley: dispensed EUR/kg p-box
 bin/souc run demos/hydrogen/valley_chain_epistemic.sio                  # composed twin: subsurface -> compressor -> dispenser
 bin/souc run demos/hydrogen/mh_stage_uq.sio                              # stage model
@@ -29,6 +30,58 @@ Madaros engine as well as lean_single. (Historical note: the cascade imports
 `stdlib/epistemic/pce.sio`, which calls libm through `extern "C"`; until
 #1550 the Madaros native path dropped all but the first extern decl and
 mis-evaluated the exp/log builtins — issue #1547, fixed.)
+
+## The physics-grounded replacement (`mh7_coupled_ceiling.sio`) — the cascade's ceiling from measured Table 3, nothing fitted
+
+Added 2026-10-04. `mh7_reliability.sio` below reproduces the paper's ratios by
+fitting to them, and its README section says why that form is wrong. This file
+is what the measured Table 3 supports **without any fitted parameter**:
+
+```bash
+bin/souc run demos/hydrogen/mh7_coupled_ceiling.sio      # ends MH7_COUPLED_CEILING_OK (both engines, ~3 s)
+g++ -std=c++23 -O2 -o mh7x demos/hydrogen/tools/mh7_ceiling_crosscheck.cpp && ./mh7x   # independent cross-check
+```
+
+Under flat plateaus (the σ→0, Y→0 limit of the paper's eq. 11), a cascade
+coupled through interconnectors is bounded by one number, the desorption
+plateau of its **last** stage at T_hot, provided every coupling
+P_des,i(T_hot) > P_abs,i+1(T_cold) is feasible. The free per-stage ratios do
+not multiply.
+
+| case | T_hot | ceiling P_des,7 (bar) | paper COMSOL (bar) | paper/ceiling | ratio-chain product |
+|---|---|---|---|---|---|
+| 1 | 80 °C | 561.55 | 374.0 | 0.666 | 6640 |
+| 2 | 90 °C | 670.55 | 483.2 | 0.721 | 29029 |
+| 3 | 100 °C | 793.13 | 606.4 | 0.765 | 117263 |
+| 4 | 105 °C | 859.72 | 682.0 | 0.793 | 229245 |
+| 5 | 110 °C | 929.93 | 742.0 | 0.798 | 440394 |
+| 6 | 120 °C | 1081.55 | 830.0 | 0.767 | 1546278 |
+
+What follows from Table 3 alone, checked mechanically in the file:
+
+- all 36 couplings (6 links × 6 cases) are thermodynamically feasible;
+- the bottleneck link is **S6 → S7 in every case** (driving force
+  ln P_des,6/P_abs,7 = 0.140 at 80 °C, 0.803 at 120 °C);
+- the ceiling orders the paper's delivered pressures in **15/15** case pairs,
+  and the S6 → S7 driving force orders its cycle times (shorter as the drive
+  rises) in **15/15** pairs.
+
+What it does **not** claim: the delivered pressure. The COMSOL output sits at
+67–80 % of the ceiling, and that ratio is not monotone, so the ceiling orders
+the cases without predicting the kinetic gap. The gap belongs to eqs. 9–11,
+whose constants (C_a, C_d, E_a, E_d, σ_s, σ_0, Y) the paper does not publish.
+
+**Two questions this raises for the authors** (printed in sections D and E):
+
+1. The text gives 180 bar (80 °C) and 365 bar (120 °C) at the *third*
+   coupling. By the paper's own Step 3, coupling 1 is S1 → S2, so the third is
+   S3 → S4, but S3 desorbs at only 101.5 bar at 80 °C under Table 3. Either
+   the figure counts couplings differently, or the S3 plateau slope is large.
+2. A ±1 kJ/mol ΔH error at fixed ΔS moves the 80 °C ceiling by ×1.41, while
+   the same error compensated through ΔS (as a van 't Hoff fit couples them)
+   moves it by ×1.02 at an illustrative 60 °C pivot. The covariance of each
+   van 't Hoff fit is the single number per stage that would bound the
+   ceiling honestly.
 
 ## The flagship (`mh7_reliability.sio`) — the seven-stage HRS compressor he co-authored, reliability-quantified
 
@@ -674,15 +727,39 @@ comparison-arguable and labeled unproven. Second, the house engine's
 per-step GUM propagator has its own caveats — the band scales with dt
 and does not accumulate, sub-1e-6 σ values hit a sqrt-convergence floor
 (flagged ENGINE-FLOOR), and at 90 °C the J² amplification diverges, so
-the band is **refused** there rather than printed. All of this is
+the band is **refused** there rather than printed. The refusal accepts a
+band only when every printed σ is finite and positive: the engine hands
+the diverged variance back as 0.0 on some lean_single seeds and as NaN on
+others, and a NaN used to slip past the old `<= 0` test and hang the digit
+printer (fixed 2026-09-15). All of this is
 labeled E1–E6 in the file header (E6: lean_single aliases returned
 arrays across calls, so the demo extracts every run's scalars before the
 next call — do not refactor it to collect-then-print).
 
-Engine coverage: **lean_single only** — on current main, Madaros fails
-"visibility preflight" on *any* `chemistry::kinetics` import (reproduced
-with the repo's own `tests/stdlib/chemistry/test_kinetics_epistemic_ensemble.sio`;
-pre-existing blocker, not from this demo). Run:
+**On the 90 °C column (corrected 2026-10-04).** The 0.000 % loss at 90 °C
+is the k_m = 0 slot read back, not a test of the abstract's "negligible
+above ~70 °C". An earlier revision of the demo printed it as "consistent
+with the abstract's qualitative claim", which was circular; it now prints
+"A2: NOT TESTED HERE". Only the paper's own rate law (slot S2) can test A2.
+
+Engine coverage: **lean_single only.** Until 2026-10-04 Madaros
+type-checked the file but stopped in native lowering at stdlib/plot's
+`error_bar_chart` ("cannot safely lower print/println argument with
+unresolved scalar kind"), the same failure as the four
+`tests/stdlib/chemistry/test_kinetics_*` tests. Binding the struct-field
+string to a typed local fixes the lowering. Measured on Madaros with the fix:
+
+| program | Madaros | lean_single |
+|---|---|---|
+| `test_kinetics_deep_stdlib` | `KINETICS_DEEP_STDLIB_OK` | OK |
+| `test_kinetics_core` | `Illegal instruction` | OK |
+| `test_kinetics_epistemic_ensemble` | `FAIL structural_ensemble` | `PASS` |
+| `test_kinetics_gri_mech` | `madaros: arena full` | `PASS` |
+| this demo | H2 prints `NON-FINITE`, then `arena full` | `UHS_BRINE_CALCITE_OK` |
+
+So the compile-time block is gone and three run-time engine divergences
+are now visible instead of masked. They are compiler defects, not
+chemistry ones, and they are open. Run:
 
 ```bash
 SOUNIO_SOUC_ENGINE=lean_single bin/souc run demos/hydrogen/uhs_brine_calcite.sio
