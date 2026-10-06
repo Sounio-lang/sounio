@@ -36,7 +36,6 @@ Start with these current-state maps before diving into older deep reports:
 - [Self-Hosted Compiler](implementation/SELF_HOSTED_COMPILER.md)
 - [Tooling Summary](implementation/TOOLING_SUMMARY.md)
 - [Developer Workflow](contributor-guide/DEVELOPER_WORKFLOW.md)
-- [Foundry/Slurm Handoff](ops/foundry_slurm_handoff.md)
 
 ### Additional internals and design notes
 - [Technical Report](compiler/TECHNICAL_REPORT.md)
@@ -58,6 +57,15 @@ Start with these current-state maps before diving into older deep reports:
 ## Specification
 
 - [Language Specification](spec/LANGUAGE_SPECIFICATION.md)
+- [S17 — Conformance Suite](spec/S17_CONFORMANCE_SUITE.md)
+
+> **Conformance note (S17, measured):** 437 of the 1,527 CI greens are **green
+> under `lean_single` (the bootstrap seed) but fail under source-built
+> Madaros** — 28.6% of those 1,527 CI-counted greens (437 of the full 3,012-test
+> selection is ~14.5%, per §17.2). The Full Test Suite runs `lean_single`, not
+> Madaros, by CI configuration. Until §17 is rule-promoted, every other
+> section of this specification inherits that gap. See
+> `docs/spec/S17_CONFORMANCE_SUITE.md` §17.2 for the measured table.
 
 ## Important reading rule
 

@@ -85,4 +85,3 @@ fn main() -> i32 with IO, Mut, Panic, Div {
 - **By-value return** for `translate` — returns new `Point`, no mutation
 - **No `**0.5`** — write your own `sqrt` via Newton's method
 - **No f-strings** — use multiple `print()` calls
-- **No unary minus** — `0.0 - 1.0` instead of `-1.0`
