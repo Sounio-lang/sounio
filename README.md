@@ -224,7 +224,15 @@ While developing Sounio's octonion multiplication backend, we discovered and pro
 
 The decomposition is 343 = 133 (repeated indices) + 42 (Fano-line triples) + **168** (non-collinear triples). We also report that sedenion nonzero associator counts are multiples of 168, and that the primitive zero-divisor pair count 336 = 2 x 168.
 
-The result was verified computationally in Sounio and independently reproduced in Python/NumPy.
+The result was verified computationally in Sounio and independently reproduced in Python/NumPy. To re-run the check on the default (Madaros) engine:
+
+```bash
+./bin/souc run examples/octonion_168_associators.sio            # 168 count, Fano checks, ends "ALL PASS"
+./bin/souc run tests/run-pass/octonion_168_test.sio             # 210 distinct triples = 42 Fano + 168 non-Fano
+./bin/souc run tests/run-pass/octonion_nonfano_census_168.sio   # exact census: 343 = 175 + 168, 84 forward + 84 backward
+```
+
+All three exit 0 under both `./bin/souc` and `SOUNIO_SOUC_ENGINE=lean_single ./bin/souc` (measured 2026-10-06); the example's output is identical on the two engines.
 
 **Paper:** "The 168 Theorem: PSL(2,7) Governs Non-Associativity and Zero-Divisor Structure in the Cayley-Dickson Tower" — Agourakis & Gerenutti (2026). Submitted to *Advances in Applied Clifford Algebras*.
 
