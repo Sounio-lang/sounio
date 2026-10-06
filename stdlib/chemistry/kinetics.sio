@@ -1807,6 +1807,32 @@ pub fn simulate_general_epistemic(initv: &[f64; 8], inits: &[f64; 8], ks: &[f64;
     i = 0
     while i < nsp { v[i] = inits[i] * inits[i]; i = i + 1 }
 
+    // VALUE-ONLY FAST PATH, exact. When every k-uncertainty is zero and the
+    // variance vector is zero, the update below yields
+    //   v+_i = sum_k J_ik^2 * 0  +  sum_r sens^2 * 0 * 0  =  +0.0
+    // for every finite J and sens, so the Jacobian (2*nsp of the 4 + 2*nsp + 1
+    // rate evaluations per step) changes nothing and is skipped. It is skipped
+    // only under bounds that PROVE J and sens finite (inf * 0 would be NaN):
+    // |y_s| <= 1e10, |ks_r| <= 1e30, mass-action orders <= 4, |nu| <= 1e3 and
+    // |dt| <= 1e3 give |rate| <= 1e70, |J| <= ~1e81, J^2 <= ~1e162. A NaN fails
+    // every comparison and takes the full path. The corner/p-box runs of
+    // demos/hydrogen (uks = 0, initial sigmas 0) spend most of their time here.
+    var skip_ok = true
+    if dt > 1000.0 || dt < 0.0 - 1000.0 { skip_ok = false }
+    if !(dt == dt) { skip_ok = false }
+    var gr: i64 = 0
+    while gr < nrxn {
+        if uks[gr] != 0.0 { skip_ok = false }
+        if !(ks[gr] <= 1.0e30 && ks[gr] >= 0.0 - 1.0e30) { skip_ok = false }
+        gr = gr + 1
+    }
+    var gq: i64 = 0
+    while gq < 64 {
+        if !(nuf[gq] <= 1000.0 && nuf[gq] >= 0.0 - 1000.0) { skip_ok = false }
+        if nuf[gq] <= 0.0 - 5.0 { skip_ok = false }
+        gq = gq + 1
+    }
+
     var s: i64 = 0
     while s < steps {
         var ii: i64 = 0
@@ -1828,6 +1854,17 @@ pub fn simulate_general_epistemic(initv: &[f64; 8], inits: &[f64; 8], ks: &[f64;
             ii = ii + 1
         }
 
+        var skip_var = skip_ok
+        if skip_var {
+            ii = 0
+            while ii < 8 {
+                if !(y[ii] <= 1.0e10 && y[ii] >= 0.0 - 1.0e10) { skip_var = false }
+                if ii < nsp && v[ii] != 0.0 { skip_var = false }
+                ii = ii + 1
+            }
+        }
+
+        if !skip_var {
         // Numeric Jacobian of the general mass-action RHS w.r.t. concentrations
         // (central differences; respects the user-supplied stoichiometry nu).
         var jc: i64 = 0
@@ -1875,6 +1912,7 @@ pub fn simulate_general_epistemic(initv: &[f64; 8], inits: &[f64; 8], ks: &[f64;
         while ii < 8 {
             if ii < nsp { v[ii] = newv[ii] } else { v[ii] = 0.0 }
             ii = ii + 1
+        }
         }
         s = s + 1
     }
