@@ -1,0 +1,88 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: REGION_RECLAIM_CAST_XOR_OK
+//@ description: a young struct cast to an integer and reversibly transformed must not be reclaimed
+// Copilot review (PR #2737): the exit classifier checks the FINAL value of an
+// integer result against the live handle range and the heap range. A helper
+// that casts a young struct to i64 and flips a high bit returns a number that
+// is neither, so the region reset, and the caller -- undoing the flip and
+// casting back -- read reclaimed memory (the churn's 99s). Every cast of a
+// non-numeric value to a numeric type now runs the escape hook (ir/lower.sio,
+// LOWER_RGN_CAST_BARRIER_ID), whatever arithmetic follows.
+
+struct P { a: i64, b: i64, c: i64 }
+
+// A call (that also allocates) makes each helper worth a region
+// (lowerer_rgn_body_worth_region); a lone allocation would not open one.
+fn decoy() -> i64 with Mut {
+    let d = P { a: 0, b: 0, c: 0 }
+    d.a
+}
+
+fn hide_xor() -> i64 with Mut {
+    let z = decoy()
+    let p = P { a: 42, b: 43, c: 44 }
+    let bits = p as i64
+    (bits ^ 4611686018427387904) + z
+}
+
+fn hide_add() -> i64 with Mut {
+    let z = decoy()
+    let p = P { a: 52, b: 53, c: 54 }
+    (p as i64) + 1000000007 + z
+}
+
+fn hide_f64() -> f64 with Mut {
+    let z = decoy()
+    let p = P { a: 62, b: 63, c: 64 }
+    // int -> float is exact below 2^53, so the bits survive a round trip.
+    ((p as i64 + z) as f64) * 2.0
+}
+
+// The cast sits in a callee: its hook must mark the CALLER's open region,
+// where p was born.
+fn encode(p: P) -> i64 with Mut {
+    (p as i64) ^ 4611686018427387904
+}
+
+fn hide_via_callee() -> i64 with Mut {
+    let p = P { a: 72, b: 73, c: 74 }
+    encode(p)
+}
+
+fn churn() -> i64 with Mut {
+    var i: i64 = 0
+    var n: i64 = 0
+    while i < 10000 {
+        let q = P { a: 99, b: 99, c: 99 }
+        n = n + q.a
+        i = i + 1
+    }
+    n
+}
+
+fn main() -> i32 with IO, Mut, Panic {
+    let h1 = hide_xor()
+    let c1 = churn()
+    let p1 = (h1 ^ 4611686018427387904) as P
+    if p1.a != 42 || p1.b != 43 || p1.c != 44 { return 1 }
+
+    let h2 = hide_add()
+    let c2 = churn()
+    let p2 = (h2 - 1000000007) as P
+    if p2.a != 52 || p2.b != 53 || p2.c != 54 { return 2 }
+
+    let h3 = hide_f64()
+    let c3 = churn()
+    let p3 = ((h3 / 2.0) as i64) as P
+    if p3.a != 62 || p3.b != 63 || p3.c != 64 { return 3 }
+
+    let h4 = hide_via_callee()
+    let c4 = churn()
+    let p4 = (h4 ^ 4611686018427387904) as P
+    if p4.a != 72 || p4.b != 73 || p4.c != 74 { return 4 }
+
+    if c1 != 990000 || c2 != 990000 || c3 != 990000 || c4 != 990000 { return 5 }
+    println("REGION_RECLAIM_CAST_XOR_OK")
+    0
+}
