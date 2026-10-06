@@ -1,0 +1,63 @@
+//@ run-pass
+//@ description: &t.N / &!t.N on a tuple element that is a ONE-FIELD struct must not crash
+//@ expect-stdout-contains: tuple_one_slot_struct_borrow: PASS
+//
+// tuple_borrow_elem_resolve() (fix for &t.0 / &!t.0 generally) resolves a tuple element's
+// address and type, but every element wider than one slot is copied inline by the tuple
+// constructor while a ONE-slot struct element is stored as the struct's value in rax --
+// a pointer to its data, not the cell holding a pointer. Taking that cell's address (as
+// every other element kind wants) yields a pointer to a pointer; the first read through
+// it dereferences garbage and segfaults.
+//
+// Scope: locally built tuples only. A one-field struct inside a tuple RETURNED from a
+// function is its own, separate, older, pre-existing bug -- the pointer such an element
+// holds is into the callee's dead frame, so it is garbage after the next call whether or
+// not any borrow is involved (`let a = mk_one(); other_call(); a.0.n` reads garbage with
+// zero borrows in play). That bug is not fixed here; this test avoids it by only
+// constructing the one-field-struct tuples in `main`'s own frame.
+//
+// Scope: local variables only (x86). Global tuple variables have a separate, pre-existing
+// issue with tuple-typed globals unrelated to element width, so a one-field struct in a
+// global tuple is not covered here either.
+
+struct One { n: i64 }
+
+fn one_n(b: &One) -> i64 { b.n }
+fn set_n(b: &!One, v: i64) with Mut { b.n = v }
+fn iv(x: &i64) -> i64 { *x }
+fn noise(a: i64) -> i64 { a * 3 }
+
+fn main() -> i64 with IO, Mut {
+    var bad: i64 = 0
+
+    // read, first position
+    let a = (One { n: 7 }, 2)
+    if one_n(&a.0) != 7 { bad = bad + 1 }
+
+    // read, second position
+    let b = (2, One { n: 9 })
+    if one_n(&b.1) != 9 { bad = bad + 1 }
+
+    // mutate through &!t.0 changes the tuple itself
+    var u = (One { n: 0 }, 2)
+    set_n(&!u.0, 42)
+    if u.0.n != 42 { bad = bad + 1 }
+
+    // borrow survives other calls (the tuple is local, not returned)
+    let z = noise(5)
+    if one_n(&a.0) != 7 { bad = bad + 1 }
+
+    // chained field access through the borrow, after another call
+    let q = (One { n: 11 }, 22)
+    let z2 = noise(6)
+    if one_n(&q.0) != 11 { bad = bad + 1 }
+    if iv(&q.1) != 22 { bad = bad + 1 }
+
+    if bad == 0 {
+        println("tuple_one_slot_struct_borrow: PASS")
+        return 0
+    }
+    print("tuple_one_slot_struct_borrow: FAIL, wrong/crashed = ")
+    println(bad)
+    return 1
+}

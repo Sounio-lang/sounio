@@ -50,7 +50,10 @@ var TL: [i64; 2097152] = [0; 2097152]
 var TC: i64 = 0
 
 // Code output
-var CD: [i8; 134217728] = [0; 134217728]
+// The modular compiler now exceeds 128 MiB of bootstrap machine code after
+// carrying SOIR float metadata and full vreg validation. Keep this seed-only
+// emission buffer distinct from NC_BIG_CODE's separately gated runtime tier.
+var CD: [i8; 268435456] = [0; 268435456]
 var CL: i64 = 0
 var CD_OVF: i64 = 0
 var CD_OVF_FN: i64 = 0
@@ -2186,6 +2189,7 @@ fn gl_add(ns: i64, ne: i64, esiz: i64, alen: i64) -> i64 with Mut, Panic {
     }
     var sz: i64 = 8
     if alen > 0 { sz = alen * esiz }
+    else if esiz > 8 { sz = esiz }
     let aligned = (sz + 7) / 8 * 8
     let gix = GL_COUNT
     GL[(GL_COUNT * 4 + 0) as usize] = gl_name_hash(ns, ne)
@@ -2241,7 +2245,7 @@ var CONST_FOUND_IDX: i64 = 0
 
 // ─── Helpers ───
 fn sb(i: i64) -> i64 with Panic, Mut { if i >= 0 && i < SRC_LEN { return SRC[i as usize] as i64 & 0xFF }; return 0 }
-fn em(b: i64) with Mut { if CL >= 134217728 { if CD_OVF == 0 { CD_OVF_FN = CURRENT_FN; CD_OVF_CL = CL } CD_OVF = 1; return } CD[CL as usize] = b as i8; CL = CL + 1 }
+fn em(b: i64) with Mut { if CL >= 268435456 { if CD_OVF == 0 { CD_OVF_FN = CURRENT_FN; CD_OVF_CL = CL } CD_OVF = 1; return } CD[CL as usize] = b as i8; CL = CL + 1 }
 fn em32(v: i64) with Mut { em(v & 0xFF); em((v >> 8) & 0xFF); em((v >> 16) & 0xFF); em((v >> 24) & 0xFF) }
 fn em64(v: i64) with Mut { em32(v & 0xFFFFFFFF); em32((v >> 32) & 0xFFFFFFFF) }
 
@@ -12501,6 +12505,40 @@ fn compile_knowledge_paren_x86() with IO, Mut, Panic, Div {
 
 // Precedence (low→high): || < && < comparison < bitwise OR < bitwise AND < shift < additive < multiplicative < unary < postfix < primary
 
+// `&t.0` / `&t.1` on a tuple. The borrow path only knew struct fields, so a
+// tuple element fell into the st_find() < 0 arm, warned, and emitted a null
+// pointer that crashed at the first use. Element layout mirrors the value read
+// of `.0` / `.1` in the postfix walker: elements are laid out in order from the
+// tuple's base address, and `.1` starts after the first element's slots.
+var TUP_BORROW_OFF: i64 = 0
+var TUP_BORROW_TY: i64 = 0
+var TUP_BORROW_HASH: i64 = 0
+
+fn tuple_borrow_elem_resolve(tup_hash: i64, tup_idx: i64) with Panic, Div, Mut {
+    let first_slots = tup_first_slots_true(tup_hash)
+    TUP_BORROW_OFF = 0
+    if tup_idx == 1 { TUP_BORROW_OFF = first_slots * 8 }
+    let tci = tup_cache_lookup(tup_hash)
+    if tci >= 0 {
+        if tup_idx == 0 {
+            TUP_BORROW_TY = TUP_CACHE_FIRST_TY[tci as usize]
+            TUP_BORROW_HASH = TUP_CACHE_FIRST_HASH[tci as usize]
+        } else if TUP_CACHE_TCOUNT[tci as usize] > 2 {
+            TUP_BORROW_TY = TUP_CACHE_ELEM_TY[(tci * 16 + 1) as usize]
+            TUP_BORROW_HASH = TUP_CACHE_ELEM_HASH[(tci * 16 + 1) as usize]
+        } else {
+            TUP_BORROW_TY = TUP_CACHE_LAST_TY[tci as usize]
+            TUP_BORROW_HASH = TUP_CACHE_LAST_HASH[tci as usize]
+        }
+    } else {
+        var elem_slots = first_slots
+        if tup_idx == 1 { elem_slots = tup_total_slots_true(tup_hash) - first_slots }
+        TUP_BORROW_TY = 6
+        TUP_BORROW_HASH = 0
+        if elem_slots > 0 { TUP_BORROW_HASH = 1000000007 + elem_slots }
+    }
+}
+
 fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
     EP = EP + 1
     var want_mut: i64 = 0
@@ -12847,7 +12885,22 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
             let fh = gl_name_hash(TS[EP as usize], TE[EP as usize])
             EP = EP + 1
             let si = st_find(inner_hash)
-            if si < 0 {
+            if si < 0 && TK[f_tok as usize] == 4 {
+                let tb_idx = TV[f_tok as usize]
+                if tb_idx > 1 { tc_error_hard(f_tok, "tuple index out of bounds") }
+                tuple_borrow_elem_resolve(inner_hash, tb_idx)
+                if TUP_BORROW_OFF > 0 { em(0x48); em(0x8d); em(0x80); em32(TUP_BORROW_OFF) }
+                inner_ty = TUP_BORROW_TY
+                inner_hash = TUP_BORROW_HASH
+                // A ONE-slot struct element is stored as the struct value in rax (a
+                // pointer to its data), not copied inline like wider elements -- the
+                // tuple constructor's bulk-copy only runs for elem_slots > 1. The
+                // reference to such an element is therefore that pointer, one load
+                // away, not the address of the cell holding it.
+                if type_is_struct_like(inner_ty, inner_hash) && ty_slot_count(inner_ty, inner_hash) == 1 {
+                    em(0x48); em(0x8b); em(0x00)   // mov rax, [rax]
+                }
+            } else if si < 0 {
                 tc_error(f_tok, "field borrow requires struct base")
                 em(0x31); em(0xc0)
                 inner_ty = 0
@@ -12912,7 +12965,14 @@ fn compile_borrow_primary_x86() with IO, Mut, Panic, Div {
                 let fh2 = gl_name_hash(TS[EP as usize], TE[EP as usize])
                 EP = EP + 1
                 let si2 = st_find(inner_hash2)
-                if si2 < 0 {
+                if si2 < 0 && TK[f_tok2 as usize] == 4 {
+                    let tb_idx2 = TV[f_tok2 as usize]
+                    if tb_idx2 > 1 { tc_error_hard(f_tok2, "tuple index out of bounds") }
+                    tuple_borrow_elem_resolve(inner_hash2, tb_idx2)
+                    if TUP_BORROW_OFF > 0 { em(0x48); em(0x8d); em(0x80); em32(TUP_BORROW_OFF) }
+                    inner_ty2 = TUP_BORROW_TY
+                    inner_hash2 = TUP_BORROW_HASH
+                } else if si2 < 0 {
                     tc_error(f_tok2, "field borrow requires struct base")
                     em(0x31); em(0xc0)
                     inner_ty2 = 0
@@ -20741,7 +20801,7 @@ fn compile_multiplicative() with IO, Mut, Panic, Div {
     EXPR_HSHADOW_77 = -1
         var b4_result_slot_m: i64 = -1
         var b4_result_slot_d: i64 = -1
-        if left_f64 == 1 && op == 19 && ((left_vshadow >= 0 || right_vshadow >= 0) || (left_sshadow >= 0 || right_sshadow >= 0) || (left_sshadow_1 >= 0 || right_sshadow_1 >= 0) || (left_sshadow_2 >= 0 || right_sshadow_2 >= 0) || (left_sshadow_3 >= 0 || right_sshadow_3 >= 0)) {
+        if left_f64 == 1 && op == 19 && ((left_vshadow >= 0 || right_vshadow >= 0) || (left_sshadow >= 0 || right_sshadow >= 0) || (left_sshadow_1 >= 0 || right_sshadow_1 >= 0) || (left_sshadow_2 >= 0 || right_sshadow_2 >= 0) || (left_sshadow_3 >= 0 || right_sshadow_3 >= 0) || (left_sshadow_4 >= 0 || right_sshadow_4 >= 0) || (left_sshadow_5 >= 0 || right_sshadow_5 >= 0) || (left_sshadow_6 >= 0 || right_sshadow_6 >= 0) || (left_sshadow_7 >= 0 || right_sshadow_7 >= 0)) {
             b4_result_slot_m = NEXT_SLOT; NEXT_SLOT = NEXT_SLOT + 1
             emit_store_var(b4_result_slot_m)
         }
@@ -34896,6 +34956,190 @@ fn emit_read_f64_a64() with Mut {
 }
 
 // ─── ARM64 read_file ───
+// ARM64 read_byte() -- read one byte from stdin (fd=0). Twin of emit_read_byte_x86.
+// The a64 spine never implemented this or read_line, so an aarch64-targeted build
+// that calls either fails E200 "undefined identifier" -- measured 2026-09-22 with
+// a lean_single cross-compiled --target aarch64-linux, and the same gap blocks
+// self-hosted/interop/protocol.sio (ipc_read_u8 -> read_byte) in the Madaros
+// bundle, one of the sites the aarch64 typecheck fails on.
+// -1 on EOF/error, else the byte value zero-extended in x0.
+fn emit_read_byte_a64() with Mut, Panic {
+    em32(0xD10043FF)  // sub sp, sp, #16 (reserve an aligned 1-byte buffer)
+    em32(0xD2800000)  // movz x0, #0 (fd = 0, stdin)
+    em32(0x910003E1)  // mov x1, sp (buf = sp)
+    em32(0xD2800022)  // movz x2, #1 (count = 1)
+    if TARGET_OS == 2 {
+        emit_imm64_reg_a64(16, 3)  // macOS SYS_read = 3 (via x16, svc #0x80)
+    } else {
+        em32(0xD2800000 | ((63 & 0xFFFF) << 5) | 8)  // Linux arm64 SYS_read = 63 (x8)
+    }
+    emit_syscall_a64()
+    if TARGET_OS == 2 {
+        // macOS/XNU signals a failed syscall with the CARRY flag set and a
+        // POSITIVE errno in x0 (documented at emit_file_size_a64 above), not
+        // a negative return the way Linux does. Left unchecked, the plain
+        // `cmp x0, #0` below clobbers that carry and treats the positive
+        // errno as a "successful" byte count, so read_byte() would return an
+        // uninitialized stack byte instead of -1 on a genuine read failure.
+        // Normalize carry-set to x0 = -1 (this function's own EOF/error
+        // sentinel) before falling into the comparison shared with Linux,
+        // which already returns a negative errno there and needs no
+        // equivalent fixup.
+        let rb_carry_ok = CL
+        em32(0x54000003)  // b.cc ok (carry clear = success; patched)
+        em32(0x92800000)  // movn x0, #0 -> x0 = -1 (carry set: read() failed)
+        patch_branch_a64(rb_carry_ok, CL)
+    }
+    // x0 = bytes_read (<=0 on EOF/error)
+    em32(0xF100001F)  // cmp x0, #0
+    let eof_patch = CL
+    em32(0x5400000D)  // b.le eof
+    em32(0x394003E0)  // ldrb w0, [sp] (zero-extends into x0)
+    let done_patch = CL
+    em32(0x14000000)  // b done
+    let eof_target = CL
+    emit_imm64_reg_a64(0, -1)  // x0 = -1
+    let done_target = CL
+    patch_branch_a64(eof_patch, eof_target)
+    patch_branch_a64(done_patch, done_target)
+    em32(0x910043FF)  // add sp, sp, #16
+}
+
+// ARM64 read_line() -- read one line from stdin (fd=0) into a fresh mmap buffer,
+// stripping a trailing '\n' and null-terminating. Twin of emit_read_line_x86.
+fn emit_read_line_a64() with Mut, Panic, Div {
+    // mmap(NULL, 4096, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0)
+    em32(0xD2800000)  // movz x0, #0 (NULL)
+    emit_imm64_reg_a64(1, 4096)  // x1 = 4096
+    em32(0xD2800062)  // movz x2, #3 (PROT_READ|PROT_WRITE)
+    if TARGET_OS == 2 {
+        emit_imm64_reg_a64(3, 0x1002)  // MAP_PRIVATE|MAP_ANON (Darwin)
+    } else {
+        em32(0xD2800000 | ((0x22 & 0xFFFF) << 5) | 3)  // MAP_PRIVATE|MAP_ANON (Linux)
+    }
+    emit_imm64_reg_a64(4, -1)  // fd = -1
+    em32(0xD2800005)  // movz x5, #0 (offset)
+    if TARGET_OS == 2 {
+        emit_imm64_reg_a64(16, 197)  // macOS SYS_mmap
+    } else {
+        em32(0xD2800000 | ((222 & 0xFFFF) << 5) | 8)  // Linux arm64 SYS_mmap
+    }
+    emit_syscall_a64()
+    // Check the mmap() result BEFORE using it as a buffer for anything. A
+    // failed mmap returns the same negative-errno (Linux) / carry-set (macOS)
+    // pattern as a failed read() above -- left unchecked, the invalid "buf"
+    // pointer would be pushed, handed to read() as the destination, and
+    // finally dereferenced by the null-terminate `strb` near the end of this
+    // function, turning an allocation failure into an out-of-bounds
+    // write/segfault. Mirror emit_file_size_a64's open()-failure pattern: on
+    // failure, jump straight to the function's end, never pushing/
+    // dereferencing the bad pointer or reaching the read()/strip/
+    // null-terminate code below.
+    //
+    // The sentinel returned in x0 on that path must itself be a genuinely
+    // usable empty string, NOT NULL/0: read_line()'s return type is string,
+    // and every string primitive in this file (e.g. emit_str_len_a64 just
+    // below: `ldrb w10, [x9, x0]` with x9 = the string pointer) dereferences
+    // its argument unconditionally with no null check. Returning 0 would not
+    // avoid the crash Bug 3 fixed -- it would only move it to the first
+    // string operation a caller performs on the result, e.g.
+    // `str_len(read_line())` would fault reading address zero. Point x0 at a
+    // freshly reserved, permanently zero-initialized 8-byte BSS slot instead
+    // (bss_alloc_aligned + emit_image_addr_a64, the same allocation/address
+    // idiom RET_AGG_BSS_OFF and friends already use above): BSS is
+    // zero-initialized by the loader, so its first byte is already a valid
+    // NUL terminator with no store needed, and the pointer stays valid for
+    // the life of the process (unlike a stack address, which would dangle
+    // once this function returns).
+    let rl_empty_str_off = bss_alloc_aligned(8)
+    var mmap_fail_done: i64 = 0
+    if TARGET_OS == 2 {
+        let mmap_ok = CL
+        em32(0x54000003)  // b.cc ok (carry clear = success; patched)
+        emit_image_addr_a64(GL_BSS_BASE + rl_empty_str_off)  // x0 = &empty_str (carry set: mmap() failed)
+        mmap_fail_done = CL
+        em32(0x14000000)  // b done (patched)
+        patch_branch_a64(mmap_ok, CL)
+    } else {
+        em32(0xF100001F)  // cmp x0, #0
+        let mmap_ok = CL
+        em32(0x5400000A)  // b.ge ok (x0 >= 0, mmap() succeeded; patched)
+        emit_image_addr_a64(GL_BSS_BASE + rl_empty_str_off)  // x0 = &empty_str (negative errno: mmap() failed)
+        mmap_fail_done = CL
+        em32(0x14000000)  // b done (patched)
+        patch_branch_a64(mmap_ok, CL)
+    }
+    // x0 = buf. Keep it on the stack (16-byte slot) across the read syscall.
+    emit_push_a64()
+    // read(0, buf, 4095) -- leave room for '\0'
+    em32(0xAA0003E1)  // mov x1, x0 (buf)
+    em32(0xD2800000)  // movz x0, #0 (fd = 0, stdin)
+    emit_imm64_reg_a64(2, 4095)
+    if TARGET_OS == 2 {
+        emit_imm64_reg_a64(16, 3)  // macOS SYS_read
+    } else {
+        em32(0xD2800000 | ((63 & 0xFFFF) << 5) | 8)  // Linux arm64 SYS_read
+    }
+    emit_syscall_a64()
+    if TARGET_OS == 2 {
+        // macOS/XNU carry-flag normalization, same root cause as
+        // emit_read_byte_a64 above: a failed read() sets carry and returns
+        // +errno in x0, which the plain `cmp x0, #0` below would otherwise
+        // read as a positive "successful" byte count. Unlike read_byte(),
+        // this function indexes the mmap'd buffer at buf[x0] on the
+        // EOF/error path (below), so the sentinel here is 0, not -1: -1
+        // would compute buf[-1], an out-of-bounds write one byte before the
+        // mapped page. Folding a genuine read() error into the same buf[0]
+        // empty-string path as ordinary EOF is safe and matches this
+        // builtin's existing EOF contract.
+        let rl_carry_ok = CL
+        em32(0x54000003)  // b.cc ok (carry clear = success; patched)
+        em32(0xD2800000)  // movz x0, #0 -> x0 = 0 (carry set: read() failed)
+        patch_branch_a64(rl_carry_ok, CL)
+    } else {
+        // Linux has no carry-flag error signaling: a failed read() returns
+        // -errno directly in x0 (e.g. -5 for EIO), with no other indication.
+        // Below, the EOF/error branch indexes the mmap'd buffer at
+        // buf[bytes_read] to null-terminate it -- left unclamped, a negative
+        // errno would compute buf[-5], an out-of-bounds write before the
+        // mapped page (same class of bug as the macOS carry case above, just
+        // without carry semantics to detect it). Clamp negative results to 0
+        // first, reusing the existing branch-based clamp idiom this file
+        // already uses in emit_read_file_a64 above (there on x2; here on x0),
+        // and matching the documented aarch64 read_line() contract in
+        // docs/audit/windows_assert_a64_parity/READ_LINE.md ("clamp bytes_read
+        // < 0 -> 0").
+        em32(0xF100001F)  // cmp x0, #0
+        let rl_neg_ok = CL
+        em32(0x5400000A)  // b.ge ok (x0 >= 0, skip clamp; patched)
+        em32(0xD2800000)  // movz x0, #0 (negative errno -> clamp to 0)
+        patch_branch_a64(rl_neg_ok, CL)
+    }
+    // x0 = bytes_read (<=0 on EOF/error; still null-terminate at buf[0] in that case)
+    em32(0xF100001F)  // cmp x0, #0
+    let strip_skip_patch = CL
+    em32(0x5400000D)  // b.le null_terminate (skip the newline-strip probe)
+    // Strip a trailing '\n' (10) if present: byte at buf[bytes_read - 1]
+    em32(0xF94003E1)  // ldr x1, [sp] (buf, without popping)
+    em32(0x8B000021)  // add x1, x1, x0 (buf + bytes_read)
+    em32(0xD1000421)  // sub x1, x1, #1 (address of the last byte)
+    em32(0x39400022)  // ldrb w2, [x1] (zero-extends into x2)
+    em32(0xF100285F)  // cmp x2, #10 (arithmetic re-checked: imm12=10,Rn=2,Rd=31)
+    let no_strip_patch = CL
+    em32(0x54000001)  // b.ne no_strip
+    em32(0xD1000400)  // sub x0, x0, #1 (drop the trailing newline)
+    let no_strip_target = CL
+    patch_branch_a64(no_strip_patch, no_strip_target)
+    let null_terminate_target = CL
+    patch_branch_a64(strip_skip_patch, null_terminate_target)
+    // Null-terminate buf[bytes_read]
+    em32(0xF94003E1)  // ldr x1, [sp] (buf, without popping)
+    em32(0x8B000021)  // add x1, x1, x0
+    em32(0x3900003F)  // strb wzr, [x1]
+    emit_pop_x0_a64()  // return buf
+    patch_branch_a64(mmap_fail_done, CL)  // done: (mmap() failure lands here with x0 = &empty_str, the BSS slot reserved above)
+}
+
 fn emit_read_file_a64() with Mut, Panic {
     // x0 = path (C string pointer)
     emit_push_a64()
@@ -36691,7 +36935,26 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 let fbh = gl_name_hash(TS[EP as usize], TE[EP as usize])
                 EP = EP + 1
                 let fbsi = st_find(inner_hash_b)
-                if fbsi < 0 {
+                if fbsi < 0 && TK[fb_tok as usize] == 4 {
+                    let tb_idx_b = TV[fb_tok as usize]
+                    if tb_idx_b > 1 { tc_error_hard(fb_tok, "tuple index out of bounds") }
+                    tuple_borrow_elem_resolve(inner_hash_b, tb_idx_b)
+                    if TUP_BORROW_OFF != 0 {
+                        if TUP_BORROW_OFF < 4096 { em32(0x91000000 | ((TUP_BORROW_OFF & 0xFFF) << 10)) }  // add x0, x0, #off
+                        else { emit_imm64_reg_a64(9, TUP_BORROW_OFF); em32(0x8B090000) }               // x9=off; add x0,x0,x9
+                    }
+                    inner_ty_b = TUP_BORROW_TY
+                    inner_hash_b = TUP_BORROW_HASH
+                    borrow_fields_consumed = 1
+                    // A ONE-slot struct element is stored as the struct value in rax (a
+                    // pointer to its data), not copied inline like wider elements -- the
+                    // tuple constructor's bulk-copy only runs for elem_slots > 1. The
+                    // reference to such an element is therefore that pointer, one load
+                    // away, not the address of the cell holding it.
+                    if type_is_struct_like(inner_ty_b, inner_hash_b) && ty_slot_count(inner_ty_b, inner_hash_b) == 1 {
+                        em32(0xF9400000)   // ldr x0, [x0]
+                    }
+                } else if fbsi < 0 {
                     tc_error(fb_tok, "field borrow requires struct base")
                     em32(0xD2800000)
                     inner_ty_b = 0
@@ -36904,7 +37167,7 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
         return
     }
     // Identifier or function call
-    if k == 3 {
+    if k == 3 || k == 79 {  // "kernel" lexes as TK=79 (the `kernel fn` GPU keyword), not TK=3; the x86 twin, compile_primary's identifier-dispatch check, already handles `k == 3 || k == 79`. Missing here, any bare use of the identifier "kernel" as a value (e.g. a parameter named kernel passed as a call argument) fell through this dispatch unrecognized on aarch64, leaving EXPR_TY/EXPR_TY_HASH at whatever the previous expression left them.
         var ns: i64 = TS[EP as usize]
         var ne: i64 = TE[EP as usize]
         EP = EP + 1
@@ -37802,6 +38065,26 @@ fn compile_primary_a64() with IO, Mut, Panic, Div {
                 }
                 EXPR_IS_F64 = 0
                 EXPR_TY = 5
+                EXPR_TY_HASH = 0
+                return
+            }
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "read_byte") {
+                if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
+                EP = EP + 1
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_read_byte_a64()
+                EXPR_IS_F64 = 0
+                EXPR_TY = 1
+                EXPR_TY_HASH = 0
+                return
+            }
+            if fn_find(ns, ne) < 0 && src_match(ns, ne - ns, "read_line") {
+                if (FN_EFFECTS[CURRENT_FN as usize] & 1) == 0 { tc_effect_violation(name_tok, 1, FN_EFFECTS[CURRENT_FN as usize]) }
+                EP = EP + 1
+                if TK[EP as usize] == 7 { EP = EP + 1 }
+                emit_read_line_a64()
+                EXPR_IS_F64 = 0
+                EXPR_TY = 3
                 EXPR_TY_HASH = 0
                 return
             }

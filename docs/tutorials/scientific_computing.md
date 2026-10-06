@@ -165,8 +165,6 @@ fn main() with IO, Mut, Div, Panic {
 }
 ```
 
-Note: `0.0 - x` instead of `-x`. Sounio has no unary minus operator.
-
 ## 5. Optimization (Golden Section Search)
 
 Golden-section search finds the minimum of a unimodal function on an interval. Same pattern: pass any `fn(f64) -> f64`.

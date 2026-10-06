@@ -927,32 +927,170 @@ fn ir_test_16_method_call_lowered() -> bool with Mut, Panic, Div, Alloc, IO {
 // Phase 0 tests: IR serialization and normalization
 fn ir_test_17_serialize_roundtrip() -> bool with Alloc, Mut, Panic, Div, IO {
     var module = ir_empty_module()
-    module.fn_count = 1
+    module.fn_count = 2
 
     var func = ir_empty_function()
     func.name = ir_name_from_bytes(116 as i8, 101 as i8, 115 as i8, 116 as i8, 4)
-    func.instr_count = 2
-    func.reg_count = 1
+    func.instr_count = 8
+    func.reg_count = 5
+    var func_region = ir_region_invalid()
+    if ir_instr_arena_alloc(func.instr_count, &! func_region) != IR_ARENA_OK { return false }
+    func.region = func_region
     ir_arena_store(ir_region_slot_w(func.region, (0)), ir_load_imm(0, 42))
-    ir_arena_store(ir_region_slot_w(func.region, (1)), ir_return(0))
+    var neg = ir_unaryop(1, UnaryOp::OpNeg, 0)
+    neg.imm_flags = 2
+    ir_arena_store(ir_region_slot_w(func.region, (1)), neg)
+    let call_args = Some(Box::new(ir_reg_list_cons(0, Some(Box::new(ir_reg_list_single(1))))))
+    ir_arena_store(ir_region_slot_w(func.region, (2)), ir_call(2, 0, irt_name4(99, 97, 108, 108), call_args, 2))
+    let extern_args = Some(Box::new(ir_reg_list_cons(1, Some(Box::new(ir_reg_list_single(2))))))
+    ir_arena_store(ir_region_slot_w(func.region, (3)), ir_call_extern(3, irt_name4(101, 120, 116, 0), extern_args, 2))
+    ir_arena_store(ir_region_slot_w(func.region, (4)), ir_load_fn_ref(4, 1))
+    let indirect_args = Some(Box::new(ir_reg_list_cons(2, Some(Box::new(ir_reg_list_single(3))))))
+    ir_arena_store(ir_region_slot_w(func.region, (5)), ir_call_indirect(4, 4, indirect_args, 2))
+    var sret_call = ir_call_sret(4, 1, irt_name4(115, 114, 101, 116), 0, 1, 2)
+    sret_call.call_args = Some(Box::new(ir_reg_list_cons(1, Some(Box::new(ir_reg_list_single(2))))))
+    ir_arena_store(ir_region_slot_w(func.region, (6)), sret_call)
+    ir_arena_store(ir_region_slot_w(func.region, (7)), ir_return(4))
+    ir_float_bits_set(&! func, 1)
 
     ir_fn_set(&! module, 0, func)
+    var sret_callee = ir_empty_function()
+    sret_callee.name = irt_name4(115, 114, 101, 116)
+    sret_callee.instr_count = 1
+    sret_callee.reg_count = 1
+    sret_callee.is_sret = 1
+    sret_callee.sret_dest_reg = 0
+    var sret_region = ir_region_invalid()
+    if ir_instr_arena_alloc(sret_callee.instr_count, &! sret_region) != IR_ARENA_OK { return false }
+    sret_callee.region = sret_region
+    ir_arena_store(ir_region_slot_w(sret_callee.region, (0)), ir_return_sret(0))
+    ir_fn_set(&! module, 1, sret_callee)
 
     let pair = serialize_ir_module(module)
     let buf = pair.0
     let len = pair.1
+    if buf[5] != 3 as i8 { return false }
 
     let restored = deserialize_ir_module(buf, len)
 
-    if restored.fn_count != 1 {
+    if restored.fn_count != 2 {
         return false
     }
-    if ir_fn_get(&restored, 0).instr_count != 2 {
+    let restored_func = ir_fn_get(&restored, 0)
+    if restored_func.instr_count != 8 {
         return false
     }
-    if IR_A_IMM_I64[(ir_region_slot_r(ir_fn_get(&restored, 0).region, (0))) as usize] != 42 {
+    if IR_A_IMM_I64[(ir_region_slot_r(restored_func.region, (0))) as usize] != 42 {
         return false
     }
+    if IR_A_IMM_FLAGS[(ir_region_slot_r(restored_func.region, (1))) as usize] != 2 {
+        return false
+    }
+    if !ir_float_bits_get(&restored_func, 1) {
+        return false
+    }
+    let restored_call_slot = ir_region_slot_r(restored_func.region, (2))
+    if IR_A_ARG_COUNT[restored_call_slot as usize] != 2 ||
+        ir_arena_arg_at(restored_call_slot, 0) != 0 || ir_arena_arg_at(restored_call_slot, 1) != 1 {
+        return false
+    }
+    let restored_extern_slot = ir_region_slot_r(restored_func.region, (3))
+    if (IR_A_OP[restored_extern_slot as usize] as IrOpcode) != IrOpcode::IrCallExtern ||
+        ir_arena_arg_at(restored_extern_slot, 0) != 1 || ir_arena_arg_at(restored_extern_slot, 1) != 2 {
+        return false
+    }
+    let restored_fn_ref_slot = ir_region_slot_r(restored_func.region, (4))
+    if (IR_A_OP[restored_fn_ref_slot as usize] as IrOpcode) != IrOpcode::IrLoadFnRef ||
+        IR_A_FN_ID[restored_fn_ref_slot as usize] != 1 {
+        return false
+    }
+    let restored_indirect_slot = ir_region_slot_r(restored_func.region, (5))
+    if (IR_A_OP[restored_indirect_slot as usize] as IrOpcode) != IrOpcode::IrCallIndirect ||
+        IR_A_SRC1[restored_indirect_slot as usize] != 4 ||
+        ir_arena_arg_at(restored_indirect_slot, 0) != 2 || ir_arena_arg_at(restored_indirect_slot, 1) != 3 {
+        return false
+    }
+    let restored_sret_slot = ir_region_slot_r(restored_func.region, (6))
+    if (IR_A_OP[restored_sret_slot as usize] as IrOpcode) != IrOpcode::IrCallSret ||
+        IR_A_ARG_COUNT[restored_sret_slot as usize] != 2 ||
+        IR_A_FIELD_IDX[restored_sret_slot as usize] != 1 ||
+        ir_arena_arg_at(restored_sret_slot, 0) != 1 || ir_arena_arg_at(restored_sret_slot, 1) != 2 {
+        return false
+    }
+    let restored_sret_callee = ir_fn_get(&restored, 1)
+    if restored_sret_callee.is_sret != 1 || restored_sret_callee.sret_dest_reg != 0 ||
+        restored_sret_callee.instr_count != 1 {
+        return false
+    }
+
+    // A legacy v5 header cannot honestly describe the new variable call
+    // payload. The reader must refuse rather than silently drop arguments.
+    var legacy_buf = buf
+    legacy_buf[5] = 0 as i8
+    let refusals_before = SOIR_DESER_REFUSAL_COUNT
+    let legacy = deserialize_ir_module(legacy_buf, len)
+    if legacy.fn_count != 0 || SOIR_DESER_REFUSAL_COUNT == refusals_before {
+        return false
+    }
+
+    // The final trailing section must refuse at the primitive read boundary,
+    // before a composite decoder can inspect bytes beyond the declared payload.
+    let truncated_refusals_before = SOIR_DESER_REFUSAL_COUNT
+    let truncated = deserialize_ir_module(buf, len - 1)
+    if truncated.fn_count != 0 ||
+       SOIR_DESER_REFUSAL_COUNT == truncated_refusals_before {
+        return false
+    }
+
+    var reserved_buf = buf
+    reserved_buf[6] = 1 as i8
+    let reserved_refusals_before = SOIR_DESER_REFUSAL_COUNT
+    let reserved = deserialize_ir_module(reserved_buf, len)
+    if reserved.fn_count != 0 ||
+       SOIR_DESER_REFUSAL_COUNT == reserved_refusals_before {
+        return false
+    }
+
+    var malformed = ir_empty_function()
+    malformed.reg_count = 1
+    malformed.instr_count = 1
+    var malformed_region = ir_region_invalid()
+    if ir_instr_arena_alloc(malformed.instr_count, &! malformed_region) != IR_ARENA_OK { return false }
+    malformed.region = malformed_region
+    ir_arena_store(
+        ir_region_slot_w(malformed.region, 0),
+        ir_unaryop(0, UnaryOp::OpNeg, IR_INVALID_REG),
+    )
+    if ir_function_regs_are_valid(&malformed) { return false }
+
+    var malformed_sret = ir_empty_function()
+    malformed_sret.reg_count = 3
+    malformed_sret.instr_count = 1
+    var malformed_sret_region = ir_region_invalid()
+    if ir_instr_arena_alloc(malformed_sret.instr_count, &! malformed_sret_region) != IR_ARENA_OK { return false }
+    malformed_sret.region = malformed_sret_region
+    var invalid_sret = ir_call_sret(0, 1, irt_name4(115, 114, 101, 116), IR_INVALID_REG, 1, 2)
+    invalid_sret.call_args = Some(Box::new(ir_reg_list_cons(1, Some(Box::new(ir_reg_list_single(2))))))
+    ir_arena_store(ir_region_slot_w(malformed_sret.region, 0), invalid_sret)
+    if ir_function_regs_are_valid(&malformed_sret) { return false }
+
+    var malformed_index_set = ir_empty_function()
+    malformed_index_set.reg_count = 1
+    malformed_index_set.instr_count = 1
+    var malformed_index_region = ir_region_invalid()
+    if ir_instr_arena_alloc(malformed_index_set.instr_count, &! malformed_index_region) != IR_ARENA_OK { return false }
+    malformed_index_set.region = malformed_index_region
+    ir_arena_store(
+        ir_region_slot_w(malformed_index_set.region, 0),
+        ir_index_set(0, 0, IR_INVALID_REG),
+    )
+    if ir_function_regs_are_valid(&malformed_index_set) { return false }
+
+    // Only exactly zero instructions denotes a bodyless stub. A negative
+    // count is malformed metadata and must not bypass native validation.
+    var negative_count = ir_empty_function()
+    negative_count.instr_count = -1
+    if ir_function_regs_are_valid(&negative_count) { return false }
 
     true
 }
@@ -1437,8 +1575,15 @@ fn ir_test_32_serialize_refuses_oversized() -> bool with Mut, Panic, Div, Alloc 
     buf[1] = 79 as i8
     buf[2] = 73 as i8
     buf[3] = 82 as i8
-    buf[4] = 1 as i8
+    buf[4] = 4 as i8
     irt_write_i64_le(&! buf, 8, IR_MAX_FUNCS + 1)
+    let legacy_before = SOIR_DESER_REFUSAL_COUNT
+    let legacy = deserialize_ir_module(buf, 16)
+    if legacy.fn_count != 0 || SOIR_DESER_REFUSAL_COUNT != legacy_before + 1 {
+        return false
+    }
+
+    buf[4] = SOIR_VERSION
     let before = SOIR_DESER_REFUSAL_COUNT
     let restored = deserialize_ir_module(buf, 16)
     restored.fn_count == 0 && SOIR_DESER_REFUSAL_COUNT == before + 1
@@ -1483,6 +1628,58 @@ fn ir_test_33_module_function_table_chunks() -> bool with Mut, Panic, Div, Alloc
     ir_module_fn_set(&! module, IR_MAX_FUNCS, other_fn)
     ir_module_fn_storage_status(&module) == IR_FN_TABLE_ERR_INDEX &&
         ir_fn_get(&module, IR_MAX_FUNCS - 1).name.buf[0] == 101 as i8
+}
+
+// T34: SOIR v5 names have a fixed 128-byte payload. Both encoder and decoder
+// must refuse a longer declared name rather than truncate it into a different
+// symbol while preserving the original length.
+fn ir_test_34_serialize_refuses_long_name() -> bool with Mut, Panic, Div, Alloc {
+    var module = ir_empty_module()
+    module.fn_count = 1
+    var func = ir_empty_function()
+    func.name = Name { buf: [0; 384], len: 129 }
+    ir_fn_set(&! module, 0, func)
+
+    let ser_before = SOIR_SER_REFUSAL_COUNT
+    let refused = serialize_ir_module(module)
+    if refused.1 != 0 || SOIR_SER_REFUSAL_COUNT != ser_before + 1 {
+        return false
+    }
+
+    func.name = irt_name4(110, 97, 109, 101)
+    ir_fn_set(&! module, 0, func)
+    let valid = serialize_ir_module(module)
+    if valid.1 <= 0 { return false }
+    var malformed = valid.0
+    irt_write_i64_le(&! malformed, 16, 129)
+    let deser_before = SOIR_DESER_REFUSAL_COUNT
+    let restored = deserialize_ir_module(malformed, valid.1)
+    restored.fn_count == 0 && SOIR_DESER_REFUSAL_COUNT == deser_before + 1
+}
+
+// T35: unknown enum tags must fail closed. Opcode 18 is the real IrNop;
+// arbitrary bytes cannot be normalized into it because that deletes evidence
+// of cache corruption.
+fn ir_test_35_deserialize_refuses_unknown_opcode() -> bool with Mut, Panic, Div, Alloc {
+    var module = ir_empty_module()
+    module.fn_count = 1
+    var func = ir_empty_function()
+    func.name = irt_name4(110, 111, 112, 0)
+    func.reg_count = 0
+    func.instr_count = 1
+    var region = ir_region_invalid()
+    if ir_instr_arena_alloc(1, &! region) != IR_ARENA_OK { return false }
+    func.region = region
+    ir_arena_store(ir_region_slot_w(region, 0), ir_instr_new(IrOpcode::IrNop))
+    ir_fn_set(&! module, 0, func)
+
+    let encoded = serialize_ir_module(module)
+    if encoded.1 <= 0 { return false }
+    var malformed = encoded.0
+    malformed[(16 + 720) as usize] = 99 as i8
+    let before = SOIR_DESER_REFUSAL_COUNT
+    let restored = deserialize_ir_module(malformed, encoded.1)
+    restored.fn_count == 0 && SOIR_DESER_REFUSAL_COUNT == before + 1
 }
 
 fn run_ir_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
@@ -1561,6 +1758,10 @@ fn run_ir_tests() -> i32 with IO, Mut, Panic, Div, Alloc {
     if ir_test_32_serialize_refuses_oversized() { passed = passed + 1; print("  T32 OK\n") } else { print("  FAIL T32\n") }
     total = total + 1
     if ir_test_33_module_function_table_chunks() { passed = passed + 1; print("  T33 OK\n") } else { print("  FAIL T33\n") }
+    total = total + 1
+    if ir_test_34_serialize_refuses_long_name() { passed = passed + 1; print("  T34 OK\n") } else { print("  FAIL T34\n") }
+    total = total + 1
+    if ir_test_35_deserialize_refuses_unknown_opcode() { passed = passed + 1; print("  T35 OK\n") } else { print("  FAIL T35\n") }
 
     if passed == total { print("\n✅ IR tests: all passed\n") } else { print("\n❌ IR tests: suite fail\n") }
 
