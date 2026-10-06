@@ -21,7 +21,8 @@ echo ""
 # 1. Run epistemic QNN benchmark
 echo "[1/4] Running epistemic QNN-MNIST benchmark..."
 cd "$ROOT_DIR"
-cargo run --release --bin souc -- run benchmarks/qnn/mnist_epistemic.sio \
+export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
+./bin/souc run benchmarks/qnn/mnist_epistemic.sio \
     2>&1 | tee "$RESULTS_DIR/epistemic_qnn_output.txt"
 echo ""
 

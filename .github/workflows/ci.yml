@@ -108,6 +108,15 @@ jobs:
       # Epistemic is a plain struct, not Knowledge<T>.
       - name: GUM rules carry their covariance term
         run: bash scripts/ci/ep_gum_covariance_gate.sh
+      # The run-pass harness cannot observe a panic, so the PBPK28 driver's
+      # refusals (unregistered slots, invalid doses, overflowing loads) are
+      # probed here, with an exact panic status. Once per engine: the
+      # full-suite job runs lean_single but cannot see these refusals, so a
+      # lean_single-only regression would otherwise merge (PR #2695 review).
+      - name: PBPK28 driver refusals (Madaros)
+        run: bash scripts/ci/pbpk28_refusal_gate.sh
+      - name: PBPK28 driver refusals (lean_single)
+        run: SOUNIO_SOUC_ENGINE=lean_single bash scripts/ci/pbpk28_refusal_gate.sh
       - name: Measured-claim gate fails when it should
         run: bash scripts/ci/measured_claim_gate_selftest.sh
       # One name, one definition per scope. #2341 removed one of two identical
@@ -200,6 +209,10 @@ jobs:
       # PTX golden gate silently went 318 PASS -> 318 FAIL for four months.
       - name: self-hosted/gpu import resolution
         run: bash scripts/ci/self_hosted_import_resolution_gate.sh
+      # The NCSR Demokritos run-of-show: every demo shown in the talk, judged by
+      # its own sentinel; long steps checked against their committed goldens.
+      - name: Talk run-of-show (fast)
+        run: bash scripts/talk.sh --fast
       # Concept contracts must declare Status and not drift past/behind
       # bindings.tsv evidence (both directions). No skip escape.
       - name: Concept status ladder (bindings evidence)
@@ -619,6 +632,13 @@ jobs:
         run: bash scripts/ci/souc_launcher_portability_gate.sh
       - name: lean_single run surfaces compile diagnostics
         run: bash scripts/ci/souc_lean_run_diagnostics_gate.sh
+      # The committed AVX-512 Fano octonion kernel must be byte-identical to what
+      # native::lower_ir::lower_hyper_mul_o_fano emits from current source, and
+      # runs on silicon when the runner has AVX-512F (skips, saying so, when not).
+      - name: Fano kernel bytes come from the compiler's lowering
+        run: bash scripts/ci/fano_kernel_provenance_gate.sh
+      - name: Fano kernel provenance gate rejects a one-bit mutation
+        run: bash scripts/ci/fano_kernel_provenance_gate.sh --selftest
       - name: Output-path invariants
         run: bash scripts/dev/check_outpath_invariant.sh
       - name: Output-path leading-dash guard
@@ -847,6 +867,10 @@ jobs:
     needs: impact
     outputs:
       rung_outcome: ${{ steps.rung.outcome }}
+      # 'true' once the compiler build step has started. A job that fails
+      # before it (Set up job, action download, toolchain/cache setup) has
+      # measured nothing about the compiler; see fixed-point-regression-alert.
+      compiler_reached: ${{ steps.compiler-reached.outputs.reached }}
     # `stdlib` is here for a measured reason: 7 files in main.sio's own import
     # closure live under stdlib/compiler/ontology/ and classify as stdlib, not
     # compiler. A PR that makes stdlib/compiler/ontology/store.sio unparseable
@@ -944,6 +968,9 @@ jobs:
           sudo mkswap /mnt/swapfile-gen2
           sudo swapon /mnt/swapfile-gen2
           echo "--- after"; free -m; swapon --show
+      - name: Mark that the compiler build was reached
+        id: compiler-reached
+        run: echo "reached=true" >> "$GITHUB_OUTPUT"
       - name: Build Madaros once and run current-source f64 lowering gates
         run: bash scripts/ci/madaros_current_source_f64_lowering_gate.sh
       - name: Madaros IR function table stays heap-backed
@@ -978,6 +1005,15 @@ jobs:
         env:
           MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
         run: bash scripts/ci/madaros_private_fn_identity_gate.sh
+      # The parser folds pure-fn calls in global initialisers through a side table
+      # keyed by the BARE name that accumulates across modules, so `var G = helper()`
+      # in a module with its own private `helper` folded the FIRST module's body --
+      # a table private_fn_identity cannot reach (it renames after parsing). Every
+      # word now carries its module. Reuses the ELF built above.
+      - name: Same-named definitions keep separate global-initialiser folds across modules
+        env:
+          MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/madaros_global_init_identity_gate.sh
       # Copilot review (PR #2515), comment 4110379104: this gate's fixtures
       # (private fn/struct/enum/field, plain and specialized-generic) guard
       # the specialized multi-module visibility fixes on this branch, but no
@@ -1030,6 +1066,14 @@ jobs:
         env:
           MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
         run: bash scripts/ci/madaros_thinlink_tuple_arr_import_gate.sh
+      # PR #2737 (region reclamation): the streaming lane compiles and RUNS the
+      # region witnesses, both lanes fail closed on a refused function, each
+      # store-path barrier is shown load-bearing by removing it, and the
+      # SOUNIO_NO_REGION_RECLAIM=1 opt-out emits no region runtime.
+      - name: Region reclamation witnesses (streaming, fail-closed, barrier mutation, opt-out)
+        env:
+          MADAROS_RAW_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash scripts/ci/madaros_region_reclaim_gate.sh
       - name: KL-3 specializer caps and method turbofish fail closed
         env:
           SOUNIO_MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
@@ -1122,6 +1166,15 @@ jobs:
         env:
           SOUNIO_MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
         run: bash scripts/ci/madaros_kl1_parity_small_gate.sh
+      # P0.8.1: GPU kernel literals lower to the right register class with the
+      # exact IEEE encoding (golden PTX), and constructs the emitter cannot lower
+      # (bool literals, `var` locals, unknown calls, bad intrinsic axes) are
+      # refused instead of dropped. Needs the current-source ELF: the committed
+      # one predates the fix. Reuses the ELF built above; no extra build.
+      - name: GPU kernel literals and dropped constructs fail closed
+        env:
+          SOUNIO_MADAROS_BIN: /tmp/sounio-madaros-current-source-f64-lowering/madaros
+        run: bash tests/gpu/gate_ptx_scalar_literals.sh
       # The compiler must be able to read its own source tree. On 2026-08-03 one
       # built from main could not parse self-hosted/resolve/scope.sio; 417 gates
       # missed it and it was found by accident. Re-measured afterwards: 118 of
@@ -1839,6 +1892,16 @@ jobs:
           EOF
           lake env lean /tmp/axiom_check.lean 2>&1 | grep -v "propext\|Classical\|Quot" \
             | grep "axioms" && echo "unexpected axioms" && exit 1 || echo "✓ No unexpected axioms"
+      # The real `#print axioms` list for the headline theorems that
+      # formal/AXIOM_INVENTORY.md refers to (the inventory generator does not
+      # run Lean). Builds the formal/ package modules too: before this step no
+      # CI job compiled OntologyELPlusClosureComplete, ElfLinker or TypeChecker.
+      - name: Axiom report for headline theorems
+        run: bash scripts/ci/lean_axiom_report.sh
+      # The counts in formal/AXIOM_INVENTORY.md are generated from source;
+      # a PR that adds an axiom or a native_decide must regenerate it.
+      - name: Axiom inventory is current
+        run: bash scripts/dev/gen_axiom_inventory.sh --check
 
   website:
     name: Website
@@ -1869,15 +1932,20 @@ jobs:
   # is given. "Required gate skipped" had been traded for "required gate not
   # counted".
   # The self-compile rung runs post-merge only (see its step). When it goes red
-  # on main -- or the job fails before reaching it -- open (or bump) one issue so
-  # the regression is visible without anyone watching the Actions tab.
+  # on main -- or the job fails after reaching the compiler build, e.g. the
+  # build itself or a gate before the rung breaks, so the rung never ran --
+  # open (or bump) one issue so the regression is visible without anyone
+  # watching the Actions tab. A job that fails BEFORE the build step (Set up
+  # job, action download, toolchain/cache setup; run 36848177901 opened #2742
+  # that way) has measured nothing about the compiler: it still fails the
+  # normal CI decision, but it is not reported as a self-compile regression.
   # `cancelled` is deliberately NOT an alert: the concurrency group cancels a
   # superseded main run whenever the next merge lands, and the newer run
   # carries the verdict.
   fixed-point-regression-alert:
     name: Fixed-point regression alert
     needs: madaros-current-source-deref-f64
-    if: always() && (github.event_name == 'push' || github.event_name == 'schedule') && (needs.madaros-current-source-deref-f64.outputs.rung_outcome == 'failure' || needs.madaros-current-source-deref-f64.result == 'failure')
+    if: always() && (github.event_name == 'push' || github.event_name == 'schedule') && (needs.madaros-current-source-deref-f64.outputs.rung_outcome == 'failure' || (needs.madaros-current-source-deref-f64.result == 'failure' && needs.madaros-current-source-deref-f64.outputs.compiler_reached == 'true'))
     runs-on: ubuntu-24.04
     permissions:
       issues: write
