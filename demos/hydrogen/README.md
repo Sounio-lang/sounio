@@ -825,9 +825,10 @@ hid the next:
 
 The allocation wall itself is still there for other programs. Its message is
 no longer bare: it now names the size of the allocation that did not fit
-(32800 bytes is a `MatNM`), the 2 GiB limit, and the fix. Still open on
-Madaros: `test_kinetics_gri_mech` (`arena full`, a `MatNM` in
-`simulate_big_crn_gri`'s step loop). `test_kinetics_core`,
+(32800 bytes is a `MatNM`), the 2 GiB limit, and the fix.
+`test_kinetics_gri_mech` hit the same wall through a `MatNM` in
+`simulate_big_crn_gri`'s step loop and got the same rewrite (D06, closed
+2026-10-06). `test_kinetics_gri_mech`, `test_kinetics_core`,
 `test_kinetics_deep_stdlib` and `test_kinetics_epistemic_ensemble` exit 0 on
 both engines with identical output (measured 2026-10-06).
 
