@@ -6075,7 +6075,7 @@ fn lowerer_lower_fn_params_mut(
                     lowerer_mark_local_ref_mut(lo, (*list).head.name)
                 }
                 // #2787: `a: Option<f64>` -> a `Some(x)` binding of a gets kind 2.
-                let param_opk = lower_type_expr_option_payload_kind(&(*list).head.ty)
+                let param_opk = lower_type_expr_option_payload_kind_in(&(*list).head.ty, &(*(*lo).struct_layouts))
                 if param_opk != 0 {
                     lowerer_mark_local_opt_payload_kind_mut(lo, (*list).head.name, param_opk)
                 }
@@ -8133,9 +8133,42 @@ fn lower_type_expr_option_payload_kind(ty: &TypeExpr) -> i64 with Mut, Panic, Di
     }
 }
 
-fn lower_opt_type_option_payload_kind(opt: &Option<Box<TypeExpr>>) -> i64 with Mut, Panic, Div {
+// #2787: an Option payload that is a user struct is recorded as this base plus
+// the struct's layout index (< 1024), so its `Some(p)` binding gets that struct
+// type instead of the Box marking (which made `p.x` fault). Disjoint from the
+// scalar kinds above.
+fn lower_opt_payload_struct_base() -> i64 { 1024 }
+
+// Payload kind of `Option<T>` including user structs, given the layout table.
+fn lower_type_expr_option_payload_kind_in(ty: &TypeExpr, layouts: &StructLayoutTable) -> i64 with Mut, Panic, Div {
+    let k = lower_type_expr_option_payload_kind(ty)
+    if k != 0 {
+        return k
+    }
+    if (*ty).kind != TypeExprKind::TypeNamed {
+        return 0
+    }
+    if !ir_name_eq(ir_path_first_name((*ty).path), make_name("Option")) {
+        return 0
+    }
+    match (*ty).type_args {
+        Some(list) => {
+            if (*list).head.kind != TypeExprKind::TypeNamed {
+                return 0
+            }
+            let li = lower_struct_layout_index_of(layouts, ir_path_first_name((*list).head.path))
+            if li >= 0 {
+                return lower_opt_payload_struct_base() + li
+            }
+            0
+        }
+        None => 0,
+    }
+}
+
+fn lower_opt_type_option_payload_kind_in(opt: &Option<Box<TypeExpr>>, layouts: &StructLayoutTable) -> i64 with Mut, Panic, Div {
     match *opt {
-        Some(te) => lower_type_expr_option_payload_kind(&(*te)),
+        Some(te) => lower_type_expr_option_payload_kind_in(&(*te), layouts),
         None => 0,
     }
 }
@@ -18481,7 +18514,7 @@ impl Lowerer {
                         }
                         // #2787: `a: Option<f64>` -> a `Some(x)` binding of a gets kind 2.
                         // Written unconditionally: this path bypasses bind_local's reset.
-                        (*(*locals).opt_payload_kind).values[idx as usize] = lower_type_expr_option_payload_kind(&(*list).head.ty)
+                        (*(*locals).opt_payload_kind).values[idx as usize] = lower_type_expr_option_payload_kind_in(&(*list).head.ty, &(*lo.struct_layouts))
                         (*locals).count = idx + 1
                     } else {
                         lo = lo.report_error_at(10813)
@@ -20449,7 +20482,7 @@ impl Lowerer {
         }
         // #2787: `let a: Option<f64> = ..` (or `let b = a` from such a local) records
         // the payload kind a later `Some(x)` binding of it receives.
-        let let_opk = lower_opt_type_option_payload_kind(&s.ty)
+        let let_opk = lower_opt_type_option_payload_kind_in(&s.ty, &(*lo.struct_layouts))
         if let_opk != 0 {
             lo = lo.bind_local_opt_payload_kind(s.name, let_opk)
         } else {
@@ -23456,7 +23489,11 @@ impl Lowerer {
                 }
                 if (*inner).kind == PatternKind::PatBinding {
                     lo = lo.bind_local((*inner).name, payload, (*inner).is_mut)
-                    if opk > 0 {
+                    if opk >= lower_opt_payload_struct_base() {
+                        let li = opk - lower_opt_payload_struct_base()
+                        let sname = (*lo.struct_layouts).entries[li as usize].type_name
+                        lo = lo.bind_local_struct_type((*inner).name, sname, false)
+                    } else if opk > 0 {
                         lo = lo.bind_local_scalar_kind((*inner).name, opk)
                     } else {
                         // Payload type unknown here. An Option<Box<T>> payload is a Box
@@ -23470,7 +23507,7 @@ impl Lowerer {
                     return lo
                 }
                 if (*inner).kind == PatternKind::PatIntLit {
-                    if opk == 2 || opk == 3 || opk == 5 {
+                    if opk == 2 || opk == 3 || opk == 5 || opk >= lower_opt_payload_struct_base() {
                         return lo.lower_option_pattern_refused("an integer literal against a non-integer payload")
                     }
                     let pair_k = lo.fresh_reg()
