@@ -12,10 +12,18 @@ use chemistry::ontology;
 // type to later arithmetic (lean_single checker bug) — use a fn instead of a let.
 fn r_const() -> f64 { gas_constant_approx() }
 
-fn abs_f64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
-fn check_near(a: f64, b: f64, tol: f64) -> bool { abs_f64(a - b) < tol }
+// Prefixed equilibrium_* (not the bare abs_f64/check_near/etc used by other
+// stdlib/chemistry files): see the note in acids.sio -- on a Madaros built
+// before self-hosted/compiler/private_fn_identity.sio landed (2026-09-21),
+// these bare names collided across modules and which module's copy won
+// depended on import order, not the caller's own module, with no diagnostic
+// either way. A Madaros built from current source disambiguates them before
+// lowering, so this is a compatibility concern for older/shipped builds, not
+// an open defect in current source.
+fn equilibrium_abs_f64(x: f64) -> f64 { if x < 0.0 { 0.0 - x } else { x } }
+fn equilibrium_check_near(a: f64, b: f64, tol: f64) -> bool { equilibrium_abs_f64(a - b) < tol }
 
-fn ln_approx(x: f64) -> f64 with Mut, Div, Panic {
+fn equilibrium_ln_approx(x: f64) -> f64 with Mut, Div, Panic {
     if x <= 0.0 { return 0.0; }
     let z = (x - 1.0) / (x + 1.0);
     var sum = z; var term = z; var k = 1;
@@ -27,9 +35,9 @@ fn ln_approx(x: f64) -> f64 with Mut, Div, Panic {
     2.0 * sum
 }
 
-fn exp_approx(x: f64) -> f64 with Mut, Div, Panic {
+fn equilibrium_exp_approx(x: f64) -> f64 with Mut, Div, Panic {
     if x < -50.0 { return 0.0; }
-    if x < 0.0 { return 1.0 / exp_approx(0.0 - x); }
+    if x < 0.0 { return 1.0 / equilibrium_exp_approx(0.0 - x); }
     var sumv = 1.0; var term = 1.0; var k = 1;
     while k < 25 {
         term = term * x / (k as f64);
@@ -39,25 +47,92 @@ fn exp_approx(x: f64) -> f64 with Mut, Div, Panic {
     sumv
 }
 
-fn sqrt_approx(x: f64) -> f64 with Mut, Div, Panic {
+// sqrt(x) by exponent reduction plus Newton (Copilot review,
+// sounio-lang/sounio#2694). The previous 20 Newton steps from y = x spend
+// about 0.5*|log2 x| steps just halving toward the root before converging, so
+// they covered only a middle band of magnitudes. Reproduced through
+// k_from_delta_g (ut = 0, where uk*R*T/(K*udg) must be exactly 1): udg = 1e-9
+// gave 2378786.8, udg = 1e12 gave 382.3. Write x = m*4^k with m in [1, 4):
+// Newton on [1, 4) from (1 + m)/2 reaches full precision in about 5 steps
+// (8 taken), and the 2^k rescaling is exact.
+fn equilibrium_sqrt_approx(x: f64) -> f64 with Mut, Div, Panic {
     if x <= 0.0 { return 0.0; }
-    var y = x; var i=0; while i<20 { y = 0.5*(y + x/y); i=i+1; } y
+    // False for +Inf and NaN alike, which would not terminate the loops below.
+    if !(x <= 1.7976931348623157e308) { panic("equilibrium_sqrt_approx: argument is +Inf or NaN"); }
+    var m = x;
+    var k: i64 = 0;
+    while m >= 4.0 { m = m * 0.25; k = k + 1; }
+    while m < 1.0 { m = m * 4.0; k = k - 1; }
+    var y = (1.0 + m) * 0.5;
+    var i = 0;
+    while i < 8 { y = (y + m / y) * 0.5; i = i + 1; }
+    let n = if k < 0 { 0 - k } else { k };
+    var j: i64 = 0;
+    while j < n {
+        if k < 0 { y = y * 0.5; } else { y = y * 2.0; }
+        j = j + 1;
+    }
+    y
+}
+
+// Root-sum-square of three terms without squaring them first (Copilot review,
+// sounio-lang/sounio#2694): squaring 4e-204 underflows to 0 and squaring
+// 4e196 overflows to +Inf although the RSS itself is representable. Every
+// term is divided by the largest magnitude m, so each ratio is in [0, 1] and
+// the sum in [1, 3]; the RSS is then m*sqrt(sum). Pass 0.0 for an unused term.
+fn equilibrium_rss3(a: f64, b: f64, c: f64) -> f64 with Mut, Div, Panic {
+    let aa = equilibrium_abs_f64(a);
+    let ab = equilibrium_abs_f64(b);
+    let ac = equilibrium_abs_f64(c);
+    var m = aa;
+    if ab > m { m = ab; }
+    if ac > m { m = ac; }
+    if m == 0.0 { return 0.0; }
+    let ra = aa / m;
+    let rb = ab / m;
+    let rc = ac / m;
+    m * equilibrium_sqrt_approx(ra * ra + rb * rb + rc * rc)
 }
 
 // Real K from deltaG
 pub fn k_from_delta_g(dg: f64, udg: f64, t: f64, ut: f64) -> (f64, f64) with Mut, Div, Panic {
     if t <= 0.0 { return (0.0, 0.0); }
     let arg = 0.0 - dg / (r_const() * t);
-    let k = exp_approx(arg);
-    let uk = abs_f64(k) * (udg / abs_f64(r_const() * t) + (dg / (r_const() * t * t)) * ut); // approx
+    let k = equilibrium_exp_approx(arg);
+    // Copilot review, sounio-lang/sounio#2694, two rounds:
+    // 1. The temperature-sensitivity term kept dg's sign, so a valid
+    //    negative dg (any spontaneous reaction) with udg=0 and ut>0
+    //    returned a NEGATIVE standard uncertainty (reproduced: dg=-5000,
+    //    udg=0, t=300, ut=5 -> uk=-0.248). First fix summed the two
+    //    sensitivity terms by absolute magnitude instead.
+    // 2. That was still wrong: dg and t are independent inputs, so their
+    //    GUM combined standard uncertainty is the root-sum-square (RSS) of
+    //    the two sensitivity contributions, not their linear sum -- an
+    //    absolute-value sum overstates the combined uncertainty whenever
+    //    both terms are nonzero (reproduced: dg=-5000, udg=100, t=300,
+    //    ut=5 -> abs-sum uk=0.545656, RSS uk=0.387363; the two agree only
+    //    when at most one term is nonzero, which is why the sign bug's own
+    //    regression case, udg=0, didn't catch this).
+    let term_dg = udg / equilibrium_abs_f64(r_const() * t);
+    let term_t = equilibrium_abs_f64(dg / (r_const() * t * t)) * ut;
+    let uk = equilibrium_abs_f64(k) * equilibrium_rss3(term_dg, term_t, 0.0); // GUM RSS combination
     (k, uk)
 }
 
 // Real deltaG from K
 pub fn delta_g_from_k(k: f64, uk: f64, t: f64, ut: f64) -> (f64, f64) with Mut, Div, Panic {
     if k <= 0.0 || t <= 0.0 { return (0.0, 0.0); }
-    let dg = 0.0 - r_const() * t * ln_approx(k);
-    let udg = abs_f64(r_const() * t * (uk / (k * abs_f64(ln_approx(k))))) + abs_f64(r_const() * ln_approx(k)) * ut;
+    let lnk = equilibrium_ln_approx(k);
+    let dg = 0.0 - r_const() * t * lnk;
+    // Copilot review, sounio-lang/sounio#2694: the K term divided by |ln K|,
+    // but for dG = -RT ln K the sensitivities are dG/dK = -RT/K and
+    // dG/dT = -R ln K; ln K does not appear in the first. At K = 1 the old
+    // term was 0/0 (uk = 0) or +Inf (uk > 0). K and T are independent inputs,
+    // so the two contributions combine by root-sum-square, as in
+    // k_from_delta_g above.
+    let term_k = equilibrium_abs_f64(r_const() * t / k) * uk;
+    let term_t = equilibrium_abs_f64(r_const() * lnk) * ut;
+    let udg = equilibrium_rss3(term_k, term_t, 0.0); // GUM RSS combination
     (dg, udg)
 }
 
@@ -67,7 +142,7 @@ pub fn solve_simple_equil(total: f64, utotal: f64, k: f64, uk: f64) -> ((f64,f64
     let b = k * total / (1.0 + k);
     let a = total - b;
     // GUM rough
-    let ub = abs_f64( (uk / (1.0+k) * total) + (k / (1.0+k) * utotal) ); // approx
+    let ub = equilibrium_abs_f64( (uk / (1.0+k) * total) + (k / (1.0+k) * utotal) ); // approx
     ((a, ub/(1.0+k) ), (b, ub))
 }
 
@@ -78,10 +153,10 @@ pub fn newton_equil_solve(guess: f64, tol: f64) -> f64 with Mut, Div, Panic {
     while i < 20 {
         let f = x*x - 0.01; // example K=0.01 for x^2 = K (total-x) or simple
         let df = 2.0 * x;
-        if abs_f64(df) < 1e-12 { break; }
+        if equilibrium_abs_f64(df) < 1e-12 { break; }
         let dx = f / df;
         x = x - dx;
-        if abs_f64(dx) < tol { break; }
+        if equilibrium_abs_f64(dx) < tol { break; }
         i = i + 1;
     }
     x
@@ -90,9 +165,25 @@ pub fn newton_equil_solve(guess: f64, tol: f64) -> f64 with Mut, Div, Panic {
 // Electro: Nernst E = E0 - (RT/nF) ln Q , with unc. F~96485
 pub fn nernst(e0: f64, ue0: f64, n: i64, q: f64, uq: f64, t: f64, ut: f64) -> (f64, f64) with Mut, Div, Panic {
     if n == 0 { return (e0, ue0); }
+    // Q is a ratio of activities/concentrations, so it is undefined for
+    // q <= 0 -- ln(q) has no real value there. equilibrium_ln_approx
+    // silently returns 0.0 for nonpositive x, which let this function
+    // compute a finite-looking (e, ue) for a q that should never reach it
+    // (Copilot review, sounio-lang/sounio#2694: "q < 0 now returns a
+    // plausible finite result even though ln(q) is undefined"). Guarded
+    // the same way delta_g_from_k rejects k <= 0 below, for the same
+    // reason: a (0.0, 0.0) sentinel, not a silently-plausible value.
+    if q <= 0.0 { return (0.0, 0.0); }
     let rt_nf = (r_const() * t) / (n as f64 * 96485.0);
-    let e = e0 - rt_nf * ln_approx(q);
-    let ue = ue0 + abs_f64(rt_nf * (uq / (q * abs_f64(ln_approx(q))))) + abs_f64( (ln_approx(q) * r_const() / (n as f64 * 96485.0)) * ut );
+    let lnq = equilibrium_ln_approx(q);
+    let e = e0 - rt_nf * lnq;
+    // Same defect as delta_g_from_k (same review): dE/dQ = -(RT/nF)/Q, with
+    // no 1/|ln Q| factor, so Q = 1 gave +Inf for any uq > 0. E0, Q and T are
+    // independent inputs and combine by root-sum-square, not linearly.
+    let term_e0 = ue0;
+    let term_q = equilibrium_abs_f64(rt_nf / q) * uq;
+    let term_t = equilibrium_abs_f64(lnq * r_const() / (n as f64 * 96485.0)) * ut;
+    let ue = equilibrium_rss3(term_e0, term_q, term_t); // GUM RSS combination
     (e, ue)
 }
 
@@ -104,17 +195,17 @@ pub fn test_k_dg() -> bool with Mut, Div, Panic {
 
 pub fn test_delta_g() -> bool with Mut, Div, Panic {
     let (dg, _) = delta_g_from_k(1.0, 0.0, 298.0, 0.0);
-    check_near(dg, 0.0, 10.0)
+    equilibrium_check_near(dg, 0.0, 10.0)
 }
 
 pub fn test_nernst() -> bool with Mut, Div, Panic {
     let (e, ue) = nernst(1.0, 0.01, 1, 1.0, 0.1, 298.0, 1.0);
-    check_near(e, 1.0, 0.1) && ue > 0.0
+    equilibrium_check_near(e, 1.0, 0.1) && ue > 0.0
 }
 
 pub fn test_newton_equil() -> bool with Mut, Div, Panic {
     let x = newton_equil_solve(0.1, 1e-6);
-    check_near(x, 0.1, 0.01) // for the example f
+    equilibrium_check_near(x, 0.1, 0.01) // for the example f
 }
 
 // Real solver for A + B ⇌ C , Kc = [C]/([A][B])
@@ -126,16 +217,19 @@ pub fn solve_ab_c_equil(a0: f64, ua0: f64, b0: f64, ub0: f64, k: f64, uk: f64) -
     let p = a0 * b0;
     let alpha = s + 1.0/k;
     let disc = alpha*alpha - 4.0 * p;
-    let x = (alpha - sqrt_approx(disc)) / 2.0;
+    let x = (alpha - equilibrium_sqrt_approx(disc)) / 2.0;
     // GUM rough: dx from da,db,dk
-    let dx_da = 0.5 * (1.0 - (s - 2.0*a0)/sqrt_approx(disc) ); // simplified
-    let u = abs_f64( dx_da * ua0 ) + abs_f64( (0.5 - dx_da) * ub0 ) + abs_f64( (p / (k*k * sqrt_approx(disc))) * uk );
+    let dx_da = 0.5 * (1.0 - (s - 2.0*a0)/equilibrium_sqrt_approx(disc) ); // simplified
+    let u = equilibrium_abs_f64( dx_da * ua0 ) + equilibrium_abs_f64( (0.5 - dx_da) * ub0 ) + equilibrium_abs_f64( (p / (k*k * equilibrium_sqrt_approx(disc))) * uk );
     (x, u)
 }
 
 pub fn test_ab_c() -> bool with Mut, Div, Panic {
     let (x, ux) = solve_ab_c_equil(1.0, 0.01, 1.0, 0.01, 10.0, 0.1);
-    check_near(x, 0.45, 0.05) && ux > 0.0  // approx for K=10
+    // A + B <-> C, a0=b0=1, K=10: x/((1-x)^2)=10 -> 10x^2-21x+10=0 ->
+    // x=(21-sqrt(41))/20 = 0.729844 (physical root, x<1). The prior
+    // expectation of 0.45 was never the root of this equation.
+    equilibrium_check_near(x, 0.729844, 0.001) && ux > 0.0
 }
 
 // More equil speciation: simple 2-equil system e.g. H2A <-> HA + H , HA <-> A + H
@@ -151,13 +245,133 @@ pub fn solve_diprotic_speciation(total: f64, k1: f64, k2: f64, h: f64) -> (f64, 
 
 pub fn test_speciation() -> bool with Mut, Div, Panic {
     let (h2a, ha, a) = solve_diprotic_speciation(1.0, 1e-3, 1e-6, 1e-4);
-    check_near(h2a + ha + a, 1.0, 0.01)
+    equilibrium_check_near(h2a + ha + a, 1.0, 0.01)
 }
 
-// Real example: for a reaction with known deltaG ~ 5.7 kJ/mol for K~10 at 298K (rough for illustration, like some binding)
+// Real example: for a reaction with known deltaG ~ -5.7 kJ/mol for K~10 at
+// 298K (rough for illustration, like some binding). deltaG = -RT ln K is
+// NEGATIVE for K > 1; the previous +5700.0 here gave k = exp(-(+5700)/RT) =
+// 0.100, not 10 -- the sign, not the magnitude, was the bug.
 pub fn test_real_delta_g() -> bool with Mut, Div, Panic {
-    let (k, _) = k_from_delta_g(5700.0, 100.0, 298.0, 1.0);
-    check_near(k, 10.0, 1.0)  // real-ish
+    let (k, _) = k_from_delta_g(-5700.0, 100.0, 298.0, 1.0);
+    equilibrium_check_near(k, 10.0, 1.0)  // real-ish
+}
+
+// Regression for the negative-standard-uncertainty bug (Copilot review,
+// sounio-lang/sounio#2694): the temperature-sensitivity term kept dg's own
+// sign instead of being summed by absolute magnitude, so any spontaneous
+// reaction (dg < 0, the common case) with udg=0 and ut>0 returned a
+// NEGATIVE uk -- a standard uncertainty can never be negative. Cross-checked
+// in Python before fixing: dg=-5000, udg=0, t=300, ut=5 gave uk=-0.248
+// under the old body; the fix (wrapping the sensitivity term in
+// equilibrium_abs_f64) gives uk=+0.248 for the same inputs and is
+// numerically unchanged for a positive-dg input (test_k_dg/test_real_delta_g
+// above), since the term was already positive there.
+pub fn test_k_dg_negative_uncertainty_sign() -> bool with Mut, Div, Panic {
+    let (_, uk) = k_from_delta_g(-5000.0, 0.0, 300.0, 5.0);
+    uk > 0.0
+}
+
+// Regression for the RSS-vs-absolute-sum bug (Copilot review, same PR,
+// second round): with BOTH sensitivity terms nonzero (udg=100 here, not
+// 0.0 as above), an absolute-value sum overstates the combined
+// uncertainty -- reproduced in Python: abs-sum gives uk=0.545656, the
+// correct GUM root-sum-square gives uk=0.387363, for
+// dg=-5000, udg=100, t=300, ut=5. The test above alone couldn't catch
+// this because with udg=0 the two combination rules coincide.
+pub fn test_k_dg_rss_combination() -> bool with Mut, Div, Panic {
+    let (_, uk) = k_from_delta_g(-5000.0, 100.0, 300.0, 5.0);
+    equilibrium_check_near(uk, 0.387363, 1e-5)
+}
+
+// Regression for equilibrium_sqrt_approx's magnitude range (Copilot review,
+// same PR, third round). With ut = 0 the RSS collapses to one term, so
+// uk * R * T / (K * udg) must equal 1 for EVERY udg; the old 20-step Newton
+// from y = x returned 2378786.8 at udg = 1e-9 and 382.3 at udg = 1e12. The
+// tolerance is a few ulps times the ~10 roundings in the chain, not a value
+// chosen from the output. udg = 1e-200 and 1e200 (next round of the same
+// review) cover the RSS itself: squaring the term before the root returned
+// uk = 0 and uk = +Inf there; equilibrium_rss3 scales first.
+pub fn test_k_dg_sqrt_magnitude_range() -> bool with Mut, Div, Panic {
+    let udgs: [f64; 7] = [1.0e-200, 1.0e-9, 1.0e-3, 100.0, 1.0e6, 1.0e12, 1.0e200];
+    var ok = true;
+    var i = 0;
+    while i < 7 {
+        let (k, uk) = k_from_delta_g(-5000.0, udgs[i], 300.0, 0.0);
+        let ratio = uk * r_const() * 300.0 / (k * udgs[i]);
+        if !equilibrium_check_near(ratio, 1.0, 1e-12) { ok = false; }
+        i = i + 1;
+    }
+    ok
+}
+
+// Regression for the K and Q sensitivities (Copilot review, same PR). At
+// K = 1 (and Q = 1) ln = 0, where the old 1/|ln| factor gave +Inf. With one
+// input uncertain, the RSS is that single term, so each identity below must
+// hold to rounding: udg = RT*uk/K and ue = (RT/nF)*uq/Q. The 1e-12 is a few
+// ulps times the handful of roundings in the chain, not a fitted value.
+pub fn test_delta_g_k_sensitivity() -> bool with Mut, Div, Panic {
+    let ks: [f64; 3] = [1.0, 2.0, 0.25];
+    var ok = true;
+    var i = 0;
+    while i < 3 {
+        let (_, udg) = delta_g_from_k(ks[i], 0.1, 298.0, 0.0);
+        let ratio = udg * ks[i] / (r_const() * 298.0 * 0.1);
+        if !equilibrium_check_near(ratio, 1.0, 1e-12) { ok = false; }
+        i = i + 1;
+    }
+    // Extreme magnitudes: the single-term identity must survive where squaring
+    // the term first would underflow (1e-200) or overflow (1e200).
+    let uks: [f64; 2] = [1.0e-200, 1.0e200];
+    var j = 0;
+    while j < 2 {
+        let (_, udx) = delta_g_from_k(2.0, uks[j], 298.0, 0.0);
+        if !equilibrium_check_near(udx * 2.0 / (r_const() * 298.0 * uks[j]), 1.0, 1e-12) { ok = false; }
+        let (_, uex) = nernst(1.0, 0.0, 1, 1.0, uks[j], 298.0, 0.0);
+        if !equilibrium_check_near(uex / (r_const() * 298.0 / 96485.0 * uks[j]), 1.0, 1e-12) { ok = false; }
+        j = j + 1;
+    }
+    // Both inputs uncertain: RSS is strictly below the linear sum.
+    let (_, u_both) = delta_g_from_k(2.0, 0.1, 298.0, 1.0);
+    let (_, u_k) = delta_g_from_k(2.0, 0.1, 298.0, 0.0);
+    let (_, u_t) = delta_g_from_k(2.0, 0.0, 298.0, 1.0);
+    if !equilibrium_check_near(u_both * u_both / (u_k * u_k + u_t * u_t), 1.0, 1e-12) { ok = false; }
+    if !(u_both < u_k + u_t) { ok = false; }
+    ok
+}
+
+pub fn test_nernst_q_sensitivity() -> bool with Mut, Div, Panic {
+    let (_, ue) = nernst(1.0, 0.0, 1, 1.0, 0.1, 298.0, 0.0);
+    let expect = r_const() * 298.0 / 96485.0 * 0.1;
+    equilibrium_check_near(ue / expect, 1.0, 1e-12)
+}
+
+// Regression for the three-input RSS combination (Copilot review, same PR).
+// test_nernst_q_sensitivity above sets ue0 = ut = 0, so RSS(0, term_q, 0)
+// reduces to term_q itself -- numerically identical to the old linear sum
+// and unable to catch a revert. Q = 2.0 (not 1.0) keeps term_q itself
+// nonzero so none of the three terms collapses the comparison. Same
+// both-uncertain pattern as test_delta_g_k_sensitivity.
+pub fn test_nernst_rss_three_term() -> bool with Mut, Div, Panic {
+    let (_, u_all) = nernst(1.0, 0.02, 1, 2.0, 0.1, 298.0, 1.0);
+    let (_, u_e0) = nernst(1.0, 0.02, 1, 2.0, 0.0, 298.0, 0.0);
+    let (_, u_q) = nernst(1.0, 0.0, 1, 2.0, 0.1, 298.0, 0.0);
+    let (_, u_t) = nernst(1.0, 0.0, 1, 2.0, 0.0, 298.0, 1.0);
+    if !equilibrium_check_near(u_all * u_all / (u_e0 * u_e0 + u_q * u_q + u_t * u_t), 1.0, 1e-12) { return false; }
+    u_all < u_e0 + u_q + u_t
+}
+
+// Regression for the q <= 0 domain guard (Copilot review, same PR): Q is a
+// ratio of activities/concentrations and has no real logarithm at or below
+// zero. Checks negative, zero and a valid positive control so the guard is
+// pinned on both invalid branches without disturbing the normal case.
+pub fn test_nernst_q_domain_guard() -> bool with Mut, Div, Panic {
+    let (e_neg, u_neg) = nernst(1.0, 0.02, 1, 0.0 - 1.0, 0.1, 298.0, 1.0);
+    let (e_zero, u_zero) = nernst(1.0, 0.02, 1, 0.0, 0.1, 298.0, 1.0);
+    let (e_ok, u_ok) = nernst(1.0, 0.02, 1, 2.0, 0.1, 298.0, 1.0);
+    if e_neg != 0.0 || u_neg != 0.0 { return false; }
+    if e_zero != 0.0 || u_zero != 0.0 { return false; }
+    e_ok != 0.0 && u_ok > 0.0
 }
 
 fn main() -> i32 with Mut, Div, Panic, IO {
@@ -168,6 +382,13 @@ fn main() -> i32 with Mut, Div, Panic, IO {
     if test_newton_equil() { p = p + 1 } else { f = f + 1; println("FAIL newton") }
     if test_ab_c() { p = p + 1 } else { f = f + 1; println("FAIL ab c") }
     if test_real_delta_g() { p = p + 1 } else { f = f + 1; println("FAIL real delta g") }
+    if test_k_dg_negative_uncertainty_sign() { p = p + 1 } else { f = f + 1; println("FAIL k_dg negative uncertainty sign") }
+    if test_k_dg_rss_combination() { p = p + 1 } else { f = f + 1; println("FAIL k_dg rss combination") }
+    if test_k_dg_sqrt_magnitude_range() { p = p + 1 } else { f = f + 1; println("FAIL k_dg sqrt magnitude range") }
+    if test_delta_g_k_sensitivity() { p = p + 1 } else { f = f + 1; println("FAIL delta_g k sensitivity") }
+    if test_nernst_q_sensitivity() { p = p + 1 } else { f = f + 1; println("FAIL nernst q sensitivity") }
+    if test_nernst_rss_three_term() { p = p + 1 } else { f = f + 1; println("FAIL nernst rss three term") }
+    if test_nernst_q_domain_guard() { p = p + 1 } else { f = f + 1; println("FAIL nernst q domain guard") }
     if test_speciation() { p = p + 1 } else { f = f + 1; println("FAIL speciation") }
     if f == 0 { println("EQUILIBRIUM + ELECTRO + SOLVERS REAL ALL PASS (phase3+)") } else { println("EQUIL FAILS") }
     return f

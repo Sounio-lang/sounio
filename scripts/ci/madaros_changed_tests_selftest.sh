@@ -9,10 +9,15 @@ bash -n "$GATE"
 
 selected="$(SOUNIO_MADAROS_CHANGED_TESTS_STACK_KB=0 "$GATE" --select-only \
   tests/run-pass/array_repeat_i8_binding.sio \
+  tests/compile-fail/madaros_aggregate_copy_depth_refused.sio \
+  tests/compile-fail/madaros_aggregate_copy_shape_refused.sio \
+  tests/compile-fail/borrow_call_exclusive_conflict.sio \
   tests/run-pass/generic_struct_return.sio \
   docs/internal/coordination/CI_WATCH_CONTRACT.md)"
 
 grep -Fxq 'tests/run-pass/array_repeat_i8_binding.sio' <<<"$selected"
+grep -Fxq 'tests/compile-fail/madaros_aggregate_copy_depth_refused.sio' <<<"$selected"
+grep -Fxq 'tests/compile-fail/madaros_aggregate_copy_shape_refused.sio' <<<"$selected"
 if grep -Fq 'MADAROS_CHANGED_TESTS_STACK' <<<"$selected"; then
   echo 'madaros-changed-tests: select-only emitted a stack receipt' >&2
   exit 1
@@ -21,8 +26,12 @@ if grep -Fq 'generic_struct_return.sio' <<<"$selected"; then
   echo 'madaros-changed-tests: selected an unannotated test' >&2
   exit 1
 fi
+if grep -Fq 'borrow_call_exclusive_conflict.sio' <<<"$selected"; then
+  echo 'madaros-changed-tests: selected a compile-fail without requires:madaros' >&2
+  exit 1
+fi
 if grep -Fq 'CI_WATCH_CONTRACT.md' <<<"$selected"; then
-  echo 'madaros-changed-tests: selected a path outside tests/run-pass' >&2
+  echo 'madaros-changed-tests: selected a path outside supported test directories' >&2
   exit 1
 fi
 

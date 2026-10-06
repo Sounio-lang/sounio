@@ -1,0 +1,107 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: TUPLE_F64_ARRAY_HASH_COLLISION PASS
+//
+// `ab` and `bA` both hash to 5863210 under fo_name_hash -- unmixed djb2
+// (h*33 + b, seed 5381) plus n.len, so 'a'*33 + 'b' == 'b'*33 + 'A'. The
+// f64-array tuple side table keyed on that hash ALONE, so `bA`, whose slots
+// are integer arrays, picked up `ab`'s f64 mask and its destructured elements
+// were read as f64 bits. That is the same bits-as-i64 corruption the table
+// exists to prevent, pointed the other way -- i.e. worse than not having the
+// table at all. The stored name settles it.
+//
+// TWO FAILURE MODES, TWO PAIRS. The table is consulted twice: on lookup, and by
+// the collector's dedup probe before it inserts. `ab`/`bA` pins the lookup side:
+// bA's mask is zero, so it is never inserted and only the lookup can go wrong.
+// `cd`/`dC` pins the insert side, which that pair cannot reach: both have
+// NON-ZERO masks and they DIFFER (cd = slot 0, dC = slot 1). Under hash-only
+// matching the probe took cd's entry for a duplicate of dC and dropped dC
+// outright, so dC's own f64 slot went unmarked AND its lookup returned cd's
+// mask -- marking dC's integer slot 0 as f64. Each must get back its own mask.
+//
+// THE PAIRS ARE DERIVED, NOT FOUND. For two-byte names c1c2 and d1d2 the seed
+// folds out and the hashes are equal exactly when c1*33 + c2 == d1*33 + d2,
+// i.e. any (d1 = c1 + 1, d2 = c2 - 33). 'a','b' -> 'b','A' and 'c','d' ->
+// 'd','C' are the two used here (5863210 and 5863278). If fo_name_hash is ever
+// mixed, these pairs stop colliding and this test keeps passing while no longer
+// testing anything -- re-derive a pair against the new hash rather than trusting
+// a green run here.
+fn ab() -> ([f64; 4], [f64; 4]) with Mut, Panic {
+    var x: [f64; 4] = [0.0; 4]
+    var y: [f64; 4] = [0.0; 4]
+    x[0] = 1.5
+    y[0] = 0.25
+    (x, y)
+}
+
+fn bA() -> ([i64; 4], [i64; 4]) with Mut, Panic {
+    var u: [i64; 4] = [0; 4]
+    var v: [i64; 4] = [0; 4]
+    u[0] = 7
+    v[0] = 9
+    (u, v)
+}
+
+// Insert side: both masks non-zero and different, so neither entry may stand in
+// for the other. cd -> 0b01 (slot 0 is f64), dC -> 0b10 (slot 1 is f64).
+fn cd() -> ([f64; 4], [i64; 4]) with Mut, Panic {
+    var x: [f64; 4] = [0.0; 4]
+    var n: [i64; 4] = [0; 4]
+    x[0] = 1.5
+    n[0] = 7
+    (x, n)
+}
+
+fn dC() -> ([i64; 4], [f64; 4]) with Mut, Panic {
+    var n: [i64; 4] = [0; 4]
+    var y: [f64; 4] = [0.0; 4]
+    n[0] = 9
+    y[0] = 0.25
+    (n, y)
+}
+
+// The exit code is a BITMASK of every failed check, not the first one, so a single
+// run says which sides of the table broke -- an early return would hide the
+// insert-side checks behind a lookup-side failure and make the second pair
+// unfalsifiable. 0 = all pass.
+//     1 bA slot 0   integer array inherited ab's f64 mask      (lookup side)
+//     2 bA slot 1   integer array inherited ab's f64 mask      (lookup side)
+//     4 ab slot 0   real f64 array lost its mark               (over-correction)
+//     8 ab slot 1   real f64 array lost its mark               (over-correction)
+//    16 cd slot 0   f64 array lost its mark                    (insert side)
+//    32 cd slot 1   integer array picked up a f64 mark         (insert side)
+//    64 dC slot 0   integer array picked up cd's f64 mark      (insert side)
+//   128 dC slot 1   f64 array lost its mark: dC was dropped    (insert side)
+fn main() -> i32 with IO, Mut, Panic {
+    var bad: i32 = 0
+    // Lookup side: the colliding integer-array fn must NOT inherit ab()'s mask.
+    let (p, q) = bA()
+    let a0: i64 = p[0] * 2
+    let b0: i64 = q[0] + 1
+    if a0 != 14 { bad = bad + 1 }
+    if b0 != 10 { bad = bad + 2 }
+    // ...and the real f64 fn must still be marked: requiring name equality
+    // must not cost the entry it was added for.
+    let (f, g) = ab()
+    let f0: f64 = f[0] * 2.0
+    let g0: f64 = 2.0 * g[0]
+    if f0 != 3.0 { bad = bad + 4 }
+    if g0 != 0.5 { bad = bad + 8 }
+    // Insert side: both masks non-zero and different. cd's f64 slot is 0 and
+    // its integer slot is 1; dC is the mirror image. A dropped or swapped entry
+    // corrupts exactly one of these four.
+    let (c0, c1) = cd()
+    let (d0, d1) = dC()
+    let cf: f64 = c0[0] * 2.0
+    let ci: i64 = c1[0] + 1
+    let di: i64 = d0[0] * 2
+    let df: f64 = 2.0 * d1[0]
+    if cf != 3.0 { bad = bad + 16 }
+    if ci != 8 { bad = bad + 32 }
+    if di != 18 { bad = bad + 64 }
+    if df != 0.5 { bad = bad + 128 }
+    if bad == 0 {
+        println("TUPLE_F64_ARRAY_HASH_COLLISION PASS")
+    }
+    bad
+}

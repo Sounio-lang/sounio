@@ -1,0 +1,129 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: LET_FIELD_SOURCE_NO_ALIAS_OK
+//@ expect-stdout: LET_FIELD_ARRAY_ELEM 1.500000
+//@ description: an aggregate bound from a field, deref or index place is a value copy, not an alias of its owner
+//
+// Witness for docs/audit/MADAROS_LET_FIELD_SOURCE_ALIAS_DISPATCH_2026-09-26.md.
+// lean_single prints LET_FIELD_SOURCE_NO_ALIAS_OK. Madaros built from main
+// 2e8b76d31 prints a BAD line for every tag below and then the summary FAIL.
+//
+// Tag 1 is the reported shape (venlafaxine_xr steady-state audit). Tags 2-9
+// are the forms the dispatch measured. Tag 10 (ported from the #2731 witness at
+// a6c6c2ad) is row 12: the binding must keep the f64 element mark, which only
+// rendering shows -- a comparison succeeds either way -- so it is asserted by its
+// own expect-stdout line, not by `fails`. Every comparison is between a value the
+// program already wrote and the value it reads back, so the expected answer is
+// the value-semantics answer by hand.
+
+struct In { v: [f64; 4] }
+struct Out { a: In, b: In, k: f64 }
+struct Arr { arr: [f64; 4], k: f64 }
+struct L2 { v: [f64; 4] }
+struct L1 { l2: L2, k: f64 }
+struct L0 { l1: L1, k: f64 }
+struct P3 { u: f64, v: f64, w: f64 }
+struct P2 { u: f64, v: f64 }
+struct Host { p3: P3, p2: P2, k: f64 }
+
+fn bad(tag: i64) -> i64 with IO {
+    print("BAD ")
+    println(tag)
+    1
+}
+
+// Written in place through a `var` bound from a field of a BY-VALUE parameter.
+fn bump(o: Out) -> Out with Mut {
+    var a = o.a
+    a.v[0] = a.v[0] + 1.0
+    Out { a: a, b: o.b, k: o.k }
+}
+
+fn snapshot_through_deref(p: &!In) -> i64 with IO, Mut {
+    var fails: i64 = 0
+    let snap = *p
+    (*p).v[0] = 9.0
+    if snap.v[0] != 1.0 { fails = fails + bad(4) }
+    fails
+}
+
+fn main() -> i32 with IO, Mut {
+    var fails: i64 = 0
+
+    // 1: the reported shape -- snapshot a field, then rebind the owner through
+    // a callee that writes a field-bound `var`.
+    var s = Out { a: In { v: [1.0; 4] }, b: In { v: [2.0; 4] }, k: 0.0 }
+    let a_start = s.a
+    s = bump(s)
+    if a_start.v[0] != 1.0 { fails = fails + bad(1) }
+    if s.a.v[0] != 2.0 { fails = fails + bad(1) }
+
+    // 2: the callee must not change the caller's immutable argument.
+    let s2 = Out { a: In { v: [1.0; 4] }, b: In { v: [2.0; 4] }, k: 0.0 }
+    let r2 = bump(s2)
+    if s2.a.v[0] != 1.0 { fails = fails + bad(2) }
+    if r2.a.v[0] != 2.0 { fails = fails + bad(2) }
+
+    // 3: struct field snapshot, owner written in place.
+    var s3 = Out { a: In { v: [1.0; 4] }, b: In { v: [2.0; 4] }, k: 0.0 }
+    let a3 = s3.a
+    s3.a.v[0] = 9.0
+    if a3.v[0] != 1.0 { fails = fails + bad(3) }
+
+    // 4: `let v = *p`, then written through p.
+    var x4 = In { v: [1.0; 4] }
+    fails = fails + snapshot_through_deref(&!x4)
+
+    // 5: fixed-array field snapshot.
+    var s5 = Arr { arr: [1.0; 4], k: 0.0 }
+    let a5 = s5.arr
+    s5.arr[0] = 9.0
+    if a5[0] != 1.0 { fails = fails + bad(5) }
+
+    // 6: nested field chain, both depths.
+    var o6 = L0 { l1: L1 { l2: L2 { v: [1.0; 4] }, k: 0.0 }, k: 0.0 }
+    let deep6 = o6.l1.l2
+    let mid6 = o6.l1
+    o6.l1.l2.v[0] = 9.0
+    o6.l1.k = 5.0
+    if deep6.v[0] != 1.0 { fails = fails + bad(6) }
+    if mid6.l2.v[0] != 1.0 { fails = fails + bad(6) }
+    if mid6.k != 0.0 { fails = fails + bad(6) }
+
+    // 7: scalar-only struct fields, 24 B and 16 B.
+    var h7 = Host { p3: P3 { u: 1.0, v: 1.0, w: 1.0 }, p2: P2 { u: 1.0, v: 1.0 }, k: 0.0 }
+    let q3 = h7.p3
+    let q2 = h7.p2
+    h7.p3.u = 9.0
+    h7.p2.u = 9.0
+    if q3.u != 1.0 { fails = fails + bad(7) }
+    if q2.u != 1.0 { fails = fails + bad(7) }
+
+    // 8: the reverse direction -- writing the new binding must not write the owner.
+    var s8 = Out { a: In { v: [1.0; 4] }, b: In { v: [2.0; 4] }, k: 0.0 }
+    var a8 = s8.a
+    a8.v[0] = 9.0
+    if s8.a.v[0] != 1.0 { fails = fails + bad(8) }
+    if a8.v[0] != 9.0 { fails = fails + bad(8) }
+
+    // 9: element of an array of structs. The annotation is what records the
+    // element type on Madaros; the unannotated literal is a boundary recorded in
+    // the dispatch, not asserted here.
+    var xs9: [In; 2] = [In { v: [1.0; 4] }, In { v: [1.0; 4] }]
+    let e9 = xs9[0]
+    xs9[0].v[0] = 9.0
+    if e9.v[0] != 1.0 { fails = fails + bad(9) }
+
+    // 10: element of a field-bound f64 array renders as f64, not raw IEEE bits.
+    let s10 = Arr { arr: [1.5; 4], k: 0.0 }
+    let a10 = s10.arr
+    print("LET_FIELD_ARRAY_ELEM ")
+    println(a10[0])
+
+    if fails == 0 {
+        println("LET_FIELD_SOURCE_NO_ALIAS_OK")
+    } else {
+        println("LET_FIELD_SOURCE_NO_ALIAS_FAIL")
+    }
+    0
+}

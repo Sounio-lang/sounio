@@ -1,0 +1,181 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: FN_PTR_PARAM_TUPLE_ARRAY_MASK PASS
+//
+// Copilot follow-up (#2570). A function-VALUED parameter (`f: fn() ->
+// ([f64; 2], i64)`) has no name of its own to key the
+// lower_fn_tuple_f64_arrays_collect prepass by -- that table is keyed by
+// FUNCTION NAME, and the whole point of a function pointer is genericity
+// over whichever concrete function the caller passes. Neither
+// parameter-binding path (the by-value "path-A" binder via
+// lowerer_bind_local_mut, nor the summary-owned lower_fn_params_ref) ever
+// derived or wrote tuple_float_mask for such a parameter, so a local bound
+// to a tuple-returning function pointer kept mask 0 -- or, since
+// lowerer_bind_local_mut never zero-initialized this field for a REUSED
+// slot either, potentially inherited stale metadata an unrelated earlier
+// function's local happened to leave at the same slot index.
+//
+// Fixed by deriving the combined mask directly from the parameter's own
+// declared type (lower_type_expr_fn_return_tuple_mask, reading
+// TypeFn.inner) at both binding sites, and explicitly zero-initializing the
+// field on the by-value path so a reused slot's stale value cannot leak in
+// (matching the existing box_inner_layout precedent for the same reuse
+// concern).
+//
+//   `fn use_it(f: fn() -> ([f64; 2], i64) with Mut, Panic) -> f64 with Mut,
+//   Panic { let t = f(); t.0[0] }` called as `use_it(concrete)` --
+//   `concrete` and the fn-type parameter declare the SAME effect set
+//   (`Mut, Panic`) on purpose: a mismatch gives the parameter and the
+//   argument DIFFERENT internal function-type ids (E009 "argument type does
+//   not match parameter"), an unrelated, pre-existing checker limitation.
+//   The effects clause itself is also load-bearing for a separate reason
+//   (fn_type_effect_ratchet_gate.sh, SOUNIO-SPEC-06 §6.0): a parameter-
+//   position function type with no `with` clause at all is a bare function
+//   type, and that gate freezes the count of those in the tree.
+//
+// Copilot follow-up (#2570): case B pins a SIBLING gap in the SCALAR half of
+// the same table. `opt_base_tuple_float_mask_ref` -- the scalar-projection
+// counterpart of expr_is_tuple_slot_f64_array_ref -- got the local-vs-global
+// precedence fix (self.lookup_local(callee_name) checked before the named
+// table) in every OTHER reader of this table, but not here: for
+// `f().1 * 2.0` where `f` is a function-pointer parameter, callee_name is
+// f's own local name, which the named-function table has no entry for, so
+// this reader kept returning 0 and the f64 scalar at slot 1 read through the
+// integer path even after case A's array fix landed. Same fix, same local
+// existence check.
+//
+// Copilot follow-up (#2570): cases A/B above only exercise a function-VALUED
+// parameter (`f: fn() -> (...)`) -- both parameter-binding call sites used
+// lower_type_expr_fn_return_tuple_mask, which explicitly `return 0` for
+// anything but a TypeFn, so a parameter declared with a DIRECT tuple type
+// (`t: ([f64; 2], i64)`, no `fn` wrapper at all) got tuple_float_mask 0 --
+// BOTH halves lost, not just the array bit -- and every projection off it
+// read through the integer path. Fixed by switching both call sites to the
+// already-general lower_type_expr_tuple_combined_mask /
+// lower_type_expr_deep_has_unmarkable_f64_array, which handle a bare
+// TypeTuple directly as well as a TypeFn chain. Cases C/D below add
+// dedicated coverage for this direct-tuple-parameter shape.
+//
+//   C  `t.0[0] * 2.0` on a direct tuple-typed parameter -- array half,
+//      direct projection, no intervening let.
+//   D  `let x = t; x.1 * 2.0` on a direct tuple-typed parameter -- scalar
+//      half, in-place index through a local bound from the parameter.
+fn use_direct_tuple(t: ([f64; 2], i64)) -> f64 with Mut, Panic {
+    t.0[0] * 2.0
+}
+
+fn use_direct_tuple_scalar(t: (i64, f64)) -> f64 with Mut, Panic {
+    let x = t
+    x.1 * 2.0
+}
+
+fn concrete() -> ([f64; 2], i64) with Mut, Panic {
+    var a: [f64; 2] = [0.0; 2]
+    a[0] = 9.5
+    (a, 1)
+}
+
+fn use_it(f: fn() -> ([f64; 2], i64) with Mut, Panic) -> f64 with Mut, Panic {
+    let t = f()
+    t.0[0] * 2.0
+}
+
+fn provide_scalar() -> (i64, f64) with Mut, Panic {
+    (1, 4.75)
+}
+
+fn use_it_scalar(f: fn() -> (i64, f64) with Mut, Panic) -> f64 with Mut, Panic {
+    f().1 * 2.0
+}
+
+// Copilot follow-up (#2570): case E pins a function-pointer PARAMETER
+// declared `fn() -> [f64; N]` (a plain array return, not a tuple) used as a
+// tuple-literal element -- expr_result_is_f64_array_ref resolved only NAMED
+// functions and there was no per-local "this local returns an array"
+// metadata at all (only the scalar counterpart, fn_ptr_ret_float, existed),
+// so `(f(), 1).0[0]` inside this function always read the array through the
+// integer path regardless of what the caller actually passed. Fixed via a
+// new fn_ptr_ret_array per-local classification, marked at parameter-binding
+// time (mirroring fn_ptr_ret_float's existing marking for the scalar case).
+fn make_plain_array() -> [f64; 2] with Mut, Panic {
+    var a: [f64; 2] = [0.0; 2]
+    a[0] = 2.5
+    a
+}
+
+fn use_it_plain_array(f: fn() -> [f64; 2] with Mut, Panic) -> f64 with Mut, Panic {
+    let t = (f(), 1)
+    t.0[0] * 2.0
+}
+
+// Copilot follow-up (#2570): case F pins `let f = choose_arr()` where
+// choose_arr's OWN declared return is `fn() -> [f64; N]` (one level down,
+// not a tuple) -- expr_ident_is_array_returning_fn_ref only ever handled a
+// bare ExprIdent alias (`let f = make_plain_array`, case E's argument
+// shape), so this ExprCall-initializer shape fell through to `false` and
+// `f`'s own fn_ptr_ret_array classification was never set, even though the
+// array-slot sibling on the tuple-returning side (lower_named_fn_tuple_
+// mask_ref) already handles the analogous `let f = choose(); f()` shape for
+// a TUPLE return. Fixed via a new small LOWER_FN_ARR_CHAIN table (populated
+// by lower_fn_arr_chain_collect_one, alongside the existing tuple-array
+// prepass) recording which NAMED functions return `fn() -> [f64; N]`
+// directly, consulted here for an ExprCall initializer whose callee is a
+// named function (not a local -- a local callee's array-returning-ness is
+// already handled by expr_result_is_f64_array_ref/bind_local_array_elem_float
+// instead, since calling it produces the array value itself, not another
+// function).
+fn concrete_arr2() -> [f64; 2] {
+    var a: [f64; 2] = [0.0; 2]
+    a[0] = 1.5
+    a
+}
+
+fn choose_arr() -> fn() -> [f64; 2] {
+    concrete_arr2
+}
+
+fn main() -> i32 with IO, Mut, Panic {
+    var bad: i32 = 0
+
+    // A: in-place index through a tuple-local bound from calling a
+    // function-pointer parameter.
+    let r = use_it(concrete)
+    if r != 19.0 { bad = bad + 1 }
+
+    // B: direct SCALAR projection off calling a function-pointer parameter,
+    // no intervening let-binding.
+    let rb = use_it_scalar(provide_scalar)
+    if rb != 9.5 { bad = bad + 2 }
+
+    // C: array-half projection, direct, on a DIRECT tuple-typed parameter
+    // (no fn wrapper).
+    var a: [f64; 2] = [0.0; 2]
+    a[0] = 3.5
+    let rc = use_direct_tuple((a, 1))
+    if rc != 7.0 { bad = bad + 4 }
+
+    // D: scalar-half projection, in-place through a local, on a DIRECT
+    // tuple-typed parameter.
+    let rd = use_direct_tuple_scalar((1, 6.25))
+    if rd != 12.5 { bad = bad + 8 }
+
+    // E: function-pointer parameter declared `fn() -> [f64; N]` (a plain
+    // array return, not a tuple), consulted as a tuple-literal element
+    // inside the callee.
+    let re = use_it_plain_array(make_plain_array)
+    if re != 5.0 { bad = bad + 16 }
+
+    // F: `let f = choose_arr()` where choose_arr returns `fn() -> [f64; N]`
+    // directly (one level, not a tuple) -- propagating the array-returning
+    // classification onto `f` through a CALL initializer, not just a bare
+    // identity alias.
+    let f = choose_arr()
+    let tf = (f(), 1)
+    let rf = tf.0[0] * 2.0
+    if rf != 3.0 { bad = bad + 32 }
+
+    if bad == 0 {
+        println("FN_PTR_PARAM_TUPLE_ARRAY_MASK PASS")
+    }
+    bad
+}
