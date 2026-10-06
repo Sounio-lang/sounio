@@ -20,5 +20,12 @@ noise and no hardware backend.
 Rx/Ry/Rz also exist on `Statevector` in `epistemic_vqe.sio`. The two simulators
 are not unified.
 
+`epistemic_linear.sio` runs parameter-shift GUM on linear `ry`. The angle
+is an `Epistemic`: its variance is a struct field and survives a call.
+Builtin `Knowledge<f64>` drops its uncertainty when passed as an argument;
+deposit the band into `Epistemic` in the function that built it.
+At θ = π the first-order band is zero. Teleportation leaves both the
+probability and its derivative unchanged.
+
 Demo, independent C++ cross-check and the full list of limits:
 [`demos/quantum/`](../../demos/quantum/README.md).
