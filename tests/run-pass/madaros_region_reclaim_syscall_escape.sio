@@ -1,0 +1,58 @@
+//@ run-pass
+//@ requires: madaros
+//@ expect-stdout: REGION_RECLAIM_SYSCALL_ESCAPE_OK
+//@ description: a raw syscall6 marks every open region escaped; a region without one is reclaimed
+// Copilot review (PR #2737): syscall6 is an unrestricted escape hatch -- a
+// kernel may keep a pointer argument after the call returns (set_tid_address,
+// io_uring_register, ...), where no store barrier can see it. The syscall6
+// builtin therefore marks every open region escaped before trapping into the
+// kernel (emit_builtin_syscall6_into), exactly like a dynlinked extern stub.
+//
+// Observed through the bump cursor (__arena_mark): a helper whose region
+// resets leaves the cursor where it was; a helper that passed a young struct
+// to syscall6 must keep its allocations, so the cursor must advance. getpid
+// ignores its arguments, which keeps the probe harmless; the compiler cannot
+// know that, so it must assume retention.
+
+// f64 payloads and results: a small integer result can coincide with the id of
+// the helper's own youngest handle, which the exit classifier must (and does)
+// treat as a possible reference -- that would retain the region for an
+// unrelated reason and blind the control.
+struct P { a: f64, b: f64, c: f64 }
+
+fn plain(k: f64) -> f64 with Mut {
+    let a = P { a: k, b: k + 1.0, c: k + 2.0 }
+    let b = P { a: k, b: k, c: k }
+    a.a + b.b
+}
+
+fn with_syscall(k: f64) -> f64 with IO, Mut {
+    let a = P { a: k, b: k + 1.0, c: k + 2.0 }
+    let b = P { a: k, b: k, c: k }
+    let pid = syscall6(39, a, 0, 0, 0, 0, 0)
+    a.a + b.b + (pid - pid) as f64
+}
+
+fn main() -> i32 with IO, Mut {
+    var sum = 0.0
+    let m0: i64 = __arena_mark()
+    var i: i64 = 0
+    while i < 200 {
+        sum = sum + plain(i as f64)
+        i = i + 1
+    }
+    let m1: i64 = __arena_mark()
+    i = 0
+    while i < 200 {
+        sum = sum + with_syscall(i as f64)
+        i = i + 1
+    }
+    let m2: i64 = __arena_mark()
+    // Control: without the syscall the region resets, so the cursor is back.
+    if m1 != m0 { return 1 }
+    // The syscall must have retained every call's allocations.
+    if m2 - m1 < 200 * 48 { return 2 }
+    if sum != 79600.0 { return 3 }
+    println("REGION_RECLAIM_SYSCALL_ESCAPE_OK")
+    0
+}

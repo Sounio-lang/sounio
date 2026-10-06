@@ -46,7 +46,23 @@ fi
 case "$RAW" in /*) ;; *) RAW="$PWD/$RAW" ;; esac
 
 export SOUNIO_STDLIB_PATH="${SOUNIO_STDLIB_PATH:-$ROOT_DIR/stdlib}"
-if ! (cd "$FIX" && "$RAW" --native-compile main.sio -o "$WORK/probe.elf") >"$WORK/compile.log" 2>&1; then
+
+# Exercise the shipped default, even if the caller exported the A/B opt-out.
+unset SOUNIO_NO_REGION_RECLAIM
+
+# Match bin/madaros without changing the compiled program's stack limit.
+raw_compile() (
+  local stack_kb="${MADAROS_STACK_KB:-524288}"
+  case "$stack_kb" in
+    ''|*[!0-9]*) fail "invalid MADAROS_STACK_KB: $stack_kb" ;;
+    0) stack_kb=unlimited ;;
+  esac
+  ulimit -s "$stack_kb" 2>/dev/null || fail "cannot configure compiler stack to $stack_kb KiB; no verdict"
+  [[ "$(ulimit -s)" == "$stack_kb" ]] || fail "compiler stack does not match requested $stack_kb; no verdict"
+  exec "$RAW" "$@"
+)
+
+if ! (cd "$FIX" && raw_compile --native-compile main.sio -o "$WORK/probe.elf") >"$WORK/compile.log" 2>&1; then
   tail -n 40 "$WORK/compile.log" >&2 || true
   fail "specialized-collapse fixture did not compile"
 fi
@@ -73,7 +89,7 @@ echo "$TAG PASS: USER_MAIN is the sole executable entry on specialized collapse"
 
 BAD_FIX="$ROOT_DIR/tests/multimodule/duplicate_main_collapse/typecheck_error"
 BAD_ELF="$WORK/typecheck-error.elf"
-if (cd "$BAD_FIX" && "$RAW" --native-compile main.sio -o "$BAD_ELF") >"$WORK/typecheck-error.log" 2>&1; then
+if (cd "$BAD_FIX" && raw_compile --native-compile main.sio -o "$BAD_ELF") >"$WORK/typecheck-error.log" 2>&1; then
   tail -n 40 "$WORK/typecheck-error.log" >&2 || true
   fail "dependency main semantic error was not typechecked"
 fi

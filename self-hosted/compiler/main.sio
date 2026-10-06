@@ -61,6 +61,7 @@ use ir::opt_strategy::{ir_opt_apply_strategy, ir_opt_find_return_vreg, ir_opt_ma
 use ir::lower::{ir_patch_validated_calls, lower_program_to_ir, lower_program_to_ir_with_epistemic, lower_program_to_ir_probe_summary_ref, lower_program_to_ir_probe_summary_box_ref, lower_program_to_ir_summary_box_probe_with_epistemic_ref, lower_program_function_body_from_summary_with_epistemic_ref, lower_program_to_ir_summary_flat_with_epistemic_ref, lower_program_function_body_from_summary_flat_with_epistemic_ref, lower_program_to_ir_summary_flat_owned_with_epistemic_ref, lower_program_to_ir_summary_with_epistemic}
 use ir::lower::{lower_program_to_ir_with_epistemic_ref, lower_program_to_ir_ordered_with_epistemic_boxed_trace_ref, lower_monolithic_public_probe_trace_set}
 use ir::lower::{lower_program_function_body_from_program_with_epistemic_ref}
+use ir::lower::{lower_rgn_backend_opt_in}
 use ir::lower::{lower_program_function_body_from_summary_with_epistemic}
 use ir::lower::{lower_fn_tuple_arr_reset, lower_fn_tuple_f64_arrays_collect, lower_fn_tuple_f64_array_mask}
 use ir::normalize::*
@@ -7085,12 +7086,13 @@ fn compiler_main_test_frame_trim_param_vreg() -> bool with Mut, Panic, Div {
 }
 
 // T70: used allocatable preg mask tracks only r12-r15 assignments
-fn compiler_main_test_native_vreg_rejection_paths() -> bool with Mut, Panic, Div, Alloc {
+fn compiler_main_test_native_vreg_rejection_paths() -> bool with IO, Mut, Panic, Div, Alloc {
     var oversized = ir_empty_function()
     oversized.reg_count = IR_MAX_VREGS + 1
     var machine = machine_function_new()
     var core_nc = compiler_new()
-    compile_ir_function_v2_into(&! core_nc, &oversized, &machine, 0)
+    // An oversized body is refused: false, plus the overflow record.
+    if compile_ir_function_v2_into(&! core_nc, &oversized, &machine, 0) { return false }
     if !core_nc.ir_vreg_overflow { return false }
     if core_nc.ir_vreg_overflow_needed != IR_MAX_VREGS + 1 { return false }
     if core_nc.ir_vreg_overflow_limit != IR_MAX_VREGS { return false }
@@ -7103,7 +7105,7 @@ fn compiler_main_test_native_vreg_rejection_paths() -> bool with Mut, Panic, Div
     legacy_nc.ir_vreg_overflow_limit == NC_MAX_VREGS
 }
 
-fn compiler_main_test_ir_vreg_boundary_contract() -> bool with Mut, Panic, Div, Alloc {
+fn compiler_main_test_ir_vreg_boundary_contract() -> bool with IO, Mut, Panic, Div, Alloc {
     if !ir_reg_count_is_valid(IR_MAX_VREGS - 1) { return false }
     if !ir_reg_count_is_valid(IR_MAX_VREGS) { return false }
     if ir_reg_count_is_valid(IR_MAX_VREGS + 1) { return false }
@@ -7113,7 +7115,7 @@ fn compiler_main_test_ir_vreg_boundary_contract() -> bool with Mut, Panic, Div, 
     compiler_main_test_native_vreg_rejection_paths()
 }
 
-fn compiler_main_test_used_allocatable_preg_mask() -> bool with Mut, Panic, Div, Alloc {
+fn compiler_main_test_used_allocatable_preg_mask() -> bool with IO, Mut, Panic, Div, Alloc {
     var nc = compiler_new()
     nc.vreg_to_preg[0 as usize] = 15
     nc.vreg_to_preg[1 as usize] = 12
@@ -9827,6 +9829,19 @@ fn run_probe_native_streaming(args: ArgList, flag_index: i64) with IO, Mut, Pani
     print(" len=")
     print_int(stream_pair.1.len)
     print("\n")
+    // SOUNIO_PROBE_STREAMING_OUT=<path>: also write the streaming ELF, so a
+    // gate can RUN what this lane emits instead of trusting ok=true
+    // (scripts/ci/madaros_region_reclaim_streaming_gate.sh).
+    let stream_out = read_env("SOUNIO_PROBE_STREAMING_OUT")
+    if str_len(stream_out) > 0 && stream_pair.0 && stream_pair.1.ok {
+        if write_file(stream_out, stream_pair.1.bytes, stream_pair.1.len) < 0 {
+            print("probe_native_streaming: write_failed\n")
+        } else {
+            print("probe_native_streaming: wrote=")
+            print(stream_out)
+            print("\n")
+        }
+    }
 }
 
 // --probe-filtered-body-lower <file.sio>: Copilot review (PR #2516), finding
@@ -28906,6 +28921,78 @@ fn compiler_trace_pireus_hlir(module: &HlirModule) with IO, Mut, Panic, Div, All
 // Output is written to output_path as text (.ptx/.metal) or binary (.spv).
 // If output_path is empty, output is printed to stdout.
 
+// P0.8.1: hlir_instr_to_gpu_ops records shapes it cannot lower faithfully
+// (gpu/hlir_to_gpu.sio, HLIR_GPU_REFUSE_REASON). Every GPU emitter path checks
+// this after lowering and before writing, so a refused kernel produces no file.
+fn gpu_lowering_refused() -> bool with IO, Mut {
+    let reason = hlir_gpu_refusal_reason()
+    if reason == 0 { return false }
+    print("error: GPU codegen refused: ")
+    print(hlir_gpu_refusal_message(reason))
+    let nlen = hlir_gpu_refusal_name_len()
+    if nlen > 0 {
+        print(" (call `")
+        var i: i64 = 0
+        while i < nlen {
+            print_char(hlir_gpu_refusal_name_byte(i))
+            i = i + 1
+        }
+        print("`)")
+    } else if hlir_gpu_refusal_op_kind() >= 0 {
+        print(" (")
+        print(hlir_gpu_op_kind_name(hlir_gpu_refusal_op_kind()))
+        print(", HLIR op ")
+        print_int(hlir_gpu_refusal_op_kind())
+        print(")")
+    }
+    print("; no output written (a wrong kernel is worse than none)\n")
+    true
+}
+
+// Float literals are lowered for PTX only (P0.8.1). The other GPU renderers
+// read a pure immediate as an integer addend and would emit a wrong constant.
+fn gpu_float_literal_refused(backend: string) -> bool with IO {
+    if !hlir_gpu_float_imm_seen() { return false }
+    print("error: GPU codegen refused: a floating-point literal in a kernel body is lowered only by the PTX backend; the ")
+    print(backend)
+    print(" backend would emit a wrong constant; no output written\n")
+    true
+}
+
+// Log the `.target` line the PTX actually carries. The requested profile
+// (`--gpu-target`, default cuda-sm80 from bin/madaros) is not what the default
+// emitter writes (`.target sm_50` unless a kernel needs wmma), and the log used
+// to print only the request.
+fn gpu_log_ptx_target(ptx: PtxBuf, requested: string) with IO, Mut, Panic, Div {
+    let needle = ".target "
+    let nlen = str_len(needle)
+    var i: i64 = 0
+    var found: i64 = 0 - 1
+    while i + nlen <= ptx.len && found < 0 {
+        var j: i64 = 0
+        var ok = true
+        while j < nlen && ok {
+            if ptx.data[(i + j) as usize] != (str_char_at(needle, j) as i8) { ok = false }
+            j = j + 1
+        }
+        if ok { found = i + nlen }
+        i = i + 1
+    }
+    print("GPU: emitted PTX .target ")
+    if found < 0 {
+        print("<none>")
+    } else {
+        var k = found
+        while k < ptx.len && ptx.data[k as usize] != (10 as i8) && k < found + 32 {
+            print_char(ptx.data[k as usize] as i64)
+            k = k + 1
+        }
+    }
+    print(" (requested target=")
+    print(requested)
+    print(")\n")
+}
+
 fn run_gpu_compile_pipeline(
     input_path: string,
     output_path: string,
@@ -28955,6 +29042,12 @@ fn run_gpu_compile_pipeline(
         print("GPU: HLIR_LOWERING_REFUSED errors=")
         print_int(hlir_module.lowering_error_count)
         print("\n")
+        let what = hlir_lower_refusal_what()
+        if str_len(what) > 0 {
+            print("error: GPU codegen refused: ")
+            print(what)
+            print("; no output written (a wrong kernel is worse than none)\n")
+        }
         return 1
     }
     let kernel_mark_prog = load_module_file(input_path)
@@ -28981,6 +29074,12 @@ fn run_gpu_compile_pipeline(
     if str_eq(gpu_target, "all") {
         // PTX
         let ptx_all = hlir_kernels_to_ptx(hlir_module)
+        if gpu_lowering_refused() {
+            return 1
+        }
+        if gpu_float_literal_refused("Metal/SPIR-V/K-AXI (--gpu-target all)") {
+            return 1
+        }
         let ptx_path = if str_len(output_path) > 0 { output_path ++ ".ptx" } else { "out.ptx" }
         let ptx_ok = io_write_bytes_to_file(ptx_path, ptx_all.data, ptx_all.len)
         if ptx_ok { print("GPU: PTX written to ") } else { print("GPU: WARN PTX write failed: ") }
@@ -29021,6 +29120,9 @@ fn run_gpu_compile_pipeline(
                                  && str_char_at(gpu_target, 3) == str_char_at("metal", 3)
                                  && str_char_at(gpu_target, 4) == str_char_at("metal", 4) {
         let metal = hlir_kernels_to_metal(hlir_module)
+        if gpu_lowering_refused() || gpu_float_literal_refused("Metal") {
+            return 1
+        }
         if metal_buf_contains(metal, "#error PIREUS_METAL_COMPOUND_SHAPE_REFUSED") {
             print("GPU: PIREUS_METAL_COMPOUND_SHAPE_REFUSED\n")
             return 1
@@ -29050,6 +29152,9 @@ fn run_gpu_compile_pipeline(
                                 && str_char_at(gpu_target, 2) == str_char_at("kaxi", 2)
                                 && str_char_at(gpu_target, 3) == str_char_at("kaxi", 3) {
         let kaxi = hlir_kernels_to_kaxi(hlir_module)
+        if gpu_lowering_refused() || gpu_float_literal_refused("K-AXI") {
+            return 1
+        }
         if str_len(output_path) > 0 {
             let kaxi_ok = io_write_kaxi_binary(output_path, kaxi.data, kaxi.len)
             if kaxi_ok {
@@ -29074,6 +29179,9 @@ fn run_gpu_compile_pipeline(
     let is_epistemic_spirv = str_eq(gpu_target, "spirv-epistemic") || str_eq(gpu_target, "vulkan-epistemic")
     if is_epistemic_spirv {
         let espv_artifact = hlir_kernels_to_epistemic_spirv_artifact(hlir_module)
+        if gpu_lowering_refused() || gpu_float_literal_refused("SPIR-V") {
+            return 1
+        }
         if str_len(output_path) > 0 {
             let espv_ok = io_write_bytes_to_file(output_path, espv_artifact.data, espv_artifact.len)
             if !espv_ok {
@@ -29114,6 +29222,9 @@ fn run_gpu_compile_pipeline(
                     && str_char_at(gpu_target, 5) == str_char_at("vulkan", 5)
     if is_spirv || is_vulkan {
         let spv_artifact = hlir_kernels_to_spirv_artifact(hlir_module)
+        if gpu_lowering_refused() || gpu_float_literal_refused("SPIR-V") {
+            return 1
+        }
         if str_len(output_path) > 0 {
             let spv_write_ok = io_write_bytes_to_file(output_path, spv_artifact.data, spv_artifact.len)
             if !spv_write_ok {
@@ -29144,6 +29255,9 @@ fn run_gpu_compile_pipeline(
     // Routes through hlir_kernels_to_cuda_tile -> gpu_lower_to_cuda_tile.
     if str_eq(gpu_target, "cuda-tile") {
         let tile_buf = hlir_kernels_to_cuda_tile(hlir_module)
+        if gpu_lowering_refused() || gpu_float_literal_refused("CUDA Tile IR") {
+            return 1
+        }
         if str_len(output_path) > 0 {
             let tile_ok = io_write_bytes_to_file(output_path, tile_buf.data, tile_buf.len)
             if !tile_ok {
@@ -29168,6 +29282,9 @@ fn run_gpu_compile_pipeline(
     // transpiler mode (the GUM 4-buffer C1/C2/V1/V2 layout flows through for mode 5).
     if str_eq(gpu_target, "ptx-kaxi") {
         let kaxi = hlir_kernels_to_kaxi(hlir_module)
+        if gpu_lowering_refused() || gpu_float_literal_refused("K-AXI PTX") {
+            return 1
+        }
         let mode_id = if str_eq(gpu_binary_format, "epistemic") { 1 }
                       else if str_eq(gpu_binary_format, "f32-gum") { 5 }
                       else if str_eq(gpu_binary_format, "f32") { 2 }
@@ -29199,6 +29316,9 @@ fn run_gpu_compile_pipeline(
     // Explicit DGX Spark GB10 / Blackwell profile.
     if str_eq(gpu_target, "dgx-sm121") {
         let dgx_ptx = hlir_kernels_to_dgx_sm121_ptx(hlir_module)
+        if gpu_lowering_refused() {
+            return 1
+        }
         if str_len(output_path) > 0 {
             if !io_write_bytes_to_file(output_path, dgx_ptx.data, dgx_ptx.len) {
                 print("GPU: failed to write DGX sm_121 PTX\n")
@@ -29235,6 +29355,10 @@ fn run_gpu_compile_pipeline(
     } else {
         hlir_kernels_to_ptx(hlir_module)
     }
+    if gpu_lowering_refused() {
+        return 1
+    }
+    gpu_log_ptx_target(ptx, gpu_target)
 
     if str_len(output_path) > 0 {
         // Write PTX text to output file — PtxBuf.data is [i8; 65536], matches io_write_bytes_to_file
@@ -29285,6 +29409,9 @@ fn run_gpu_compile_pipeline(
 // ============================================================================
 
 fn main() with IO, Mut, Panic, Div, Alloc {
+    // Madaros compiles through native/codegen_x86_linux.sio, the only backend
+    // that implements the region-reclamation runtime (ir/lower.sio).
+    lower_rgn_backend_opt_in()
     let args = get_args()
 
     // Check for --serve BEFORE printing banner (stdout is binary protocol)

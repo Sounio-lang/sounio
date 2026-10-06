@@ -1,7 +1,6 @@
 # demos/hydrogen — Metal-Hydride Hydrogen Compression, Uncertainty-Quantified
 
-A Sounio demonstration written for **Dr. Emmanuel Stamatakis** (NCSR Demokritos,
-Integrated Hydrogen Laboratory / H2Lab; CYRUS S.A.).
+A Sounio demonstration written for **Dr. Emmanuel Stamatakis**.
 
 It takes the single-stage core of the metal-hydride (MH) thermal compression
 concept he has published on for a decade — and shows what Sounio adds on top of
