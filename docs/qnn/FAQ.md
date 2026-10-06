@@ -58,7 +58,7 @@ Quaternion rotation: Only 4 parameters, non-commutative algebra built-in
 - GPU kernel implementation: 2-3 weeks
 - Numerically stable normalization: 1 week
 
-**Recommendation:** Start with [hello_quaternion.sio](../examples/qnn/01_hello_quaternion.sio), then [PROGRAMMING_GUIDE.md](PROGRAMMING_GUIDE.md).
+**Recommendation:** Start with [hello_quaternion.sio](../../examples/qnn/01_hello_quaternion.sio), then [PROGRAMMING_GUIDE.md](PROGRAMMING_GUIDE.md).
 
 ---
 
@@ -413,9 +413,9 @@ SU(2):             2×2 unitary matrices
 
 ### Examples
 
-- [01_hello_quaternion.sio](../examples/qnn/01_hello_quaternion.sio)
-- [02_basic_linear.sio](../examples/qnn/02_basic_linear.sio)
-- [qnn_mnist.sio](../examples/qnn_mnist.sio) - Full training example
+- [01_hello_quaternion.sio](../../examples/qnn/01_hello_quaternion.sio)
+- [02_basic_linear.sio](../../examples/qnn/02_basic_linear.sio)
+- [qnn_mnist.sio](../../examples/qnn/qnn_mnist.sio) - Full training example (example removed from repo)
 
 ---
 

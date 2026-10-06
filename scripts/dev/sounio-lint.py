@@ -169,31 +169,6 @@ def check_line(line: str, lineno: int, source: str) -> list[Diagnostic]:
                     explanation="Sounio has no macros. Restructure using functions and error codes.",
                 ))
 
-    # ── Rule 5: Unary minus literal (-42, -3.14) ──────────────────────────
-    # Only flag: assignment/return context with a bare negative literal
-    # Exclude: "0 - N" pattern (already correct), inside arithmetic expressions
-    # Pattern: = -N or return -N or ( -N at start of expression
-    unary_m = re.search(r'(?:=|return|\(|,)\s*(-\s*\d+\.?\d*)(?!\s*[\-+])', stripped)
-    if unary_m:
-        full_match = unary_m.group(1).strip()
-        # Exclude if preceded by a digit (e.g., `0 - 42` → the `- 42` part)
-        pre_char_pos = unary_m.start(1) - 1
-        pre_char = stripped[pre_char_pos:pre_char_pos+1].strip() if pre_char_pos >= 0 else ""
-        if pre_char not in "0123456789":
-            num = re.sub(r'^-\s*', '', full_match)
-            typ = "0.0" if "." in num else "0"
-            fix_expr = f"{typ} - {num}"
-            diags.append(Diagnostic(
-                rule="no_unary_minus",
-                severity="error",
-                line=lineno, col=unary_m.start(1) + 1,
-                message=f"Unary minus `{full_match}` is not valid. "
-                        f"Use `{fix_expr}` instead.",
-                fix=None,
-                explanation="Sounio has no unary minus operator. "
-                            "Write `0 - 42` not `-42`, `0.0 - 3.14` not `-3.14`.",
-            ))
-
     # ── Rule 6: `Vec<T>` ──────────────────────────────────────────────────
     if re.search(r'\bVec\s*<', stripped):
         diags.append(Diagnostic(
@@ -264,19 +239,6 @@ def check_line(line: str, lineno: int, source: str) -> list[Diagnostic]:
             message=f"Compound assignment `{op}` is not valid. Spell out fully.",
             fix=None,
             explanation=f"No `+=`, `-=`, `*=` etc. Write `x = x {op[0]} expr` instead.",
-        ))
-
-    # ── Rule 11: Bit shift without u8 suffix ──────────────────────────────
-    shift_m = re.search(r'>>\s*\d+(?!u8)\b|<<\s*\d+(?!u8)\b', stripped)
-    if shift_m:
-        diags.append(Diagnostic(
-            rule="shift_operand_u8",
-            severity="error",
-            line=lineno, col=shift_m.start() + 1,
-            message="Shift amount must be `u8`. Add `u8` suffix to the shift operand.",
-            fix=re.sub(r'(>>|<<)\s*(\d+)(?!u8)', r'\1 \2u8', stripped),
-            explanation="Example: `x >> 4` → `x >> 4u8`. "
-                        "For variable shift amounts: `x >> (n as u8)`.",
         ))
 
     # ── Rule 12: `self: &mut` instead of `self: &!` ───────────────────────
@@ -479,7 +441,6 @@ def apply_fixes(source: str) -> tuple[str, int]:
         (r'\blet\s+mut\b', 'var', "let mut → var"),
         (r'&\s*mut\b', '&!', "&mut → &!"),
         (r'\b(assert|println|print|eprintln|eprint)!\s*\(', r'\1(', "macro → fn"),
-        (r'(>>|<<)\s*(\d+)(?!u8)', r'\1 \2u8', "shift → u8"),
         (r'use\s+std::', 'use ', "remove std::"),
         (r'assert_eq!\s*\(([^,]+),\s*([^)]+)\)', r'assert(\1 == \2)', "assert_eq → assert"),
         (r'vec!\s*\[', '[', "vec! → ["),

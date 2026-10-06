@@ -114,7 +114,7 @@ HEADER
         clean="${line#"${line%%[![:space:]]*}"}"
         module_fns+="- \`${clean}\` — *${rel}*"$'\n'
         ((module_count++)) || true
-      done < <(grep -E '^[[:space:]]*(pub[[:space:]]+)?fn[[:space:]]' "$f" | grep 'pub' || true)
+      done < <(grep -E '^[[:space:]]*pub[[:space:]]+fn[[:space:]]' "$f" || true)
     done
 
     if [ "$module_count" -gt 0 ]; then
