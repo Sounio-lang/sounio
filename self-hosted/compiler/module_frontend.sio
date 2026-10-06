@@ -16,7 +16,7 @@ use native::codegen_x86_linux::{compile_native_v2_preview_to_file, native_resolv
 use check::knowledge_context::{knowledge_context_validate_items, knowledge_context_validate_items_values_only}
 use resolve::mod::{resolve_modules}
 use module_parse::{extract_imports_from_ast, file_exists, file_path_to_module_path, load_module_file}
-use private_fn_identity::{private_fn_identity_apply}
+use private_fn_identity::{private_fn_identity_apply, module_struct_identity_check, pfi_use_map_reset, pfi_use_map_module_begin, pfi_use_map_note}
 use check::specializer::{specialize_generics, specialize_generics_multi, spec_last_instantiated, spec_mono_marker_count, spec_append_item_lists, spec_dce_unreachable_item_fns, spec_dce_mark_across_programs, spec_dce_filter_with_global_marks, spec_dce_live_item_fns, spec_report_any_specializer_failure, spec_program_mentions_f128}
 
 // Multi-module parse accumulates every module's GLOBAL_VAR_INIT_* side-table
@@ -6664,8 +6664,79 @@ fn module_frontend_private_fn_identity_ok(
     programs: &! [Program; 256],
     count: i64
 ) -> bool with IO, Mut, Panic, Div, Alloc {
+    // #2773: one struct name, two different definitions in two loaded modules
+    // would be merged into ONE type downstream; refuse instead.
+    if !module_struct_identity_check(programs, count) {
+        return false
+    }
     let renamed = private_fn_identity_apply(programs, count)
     renamed >= 0 - 1
+}
+
+fn module_frontend_pfi_find_loaded(file_paths: [string; 256], loaded: i64, path: string) -> i64 with Mut, Panic, Div {
+    var j: i64 = 0
+    while j < loaded && j < 256 {
+        if str_eq(file_paths[j as usize], path) {
+            return j
+        }
+        j = j + 1
+    }
+    0 - 1
+}
+
+// #2773: tell private_fn_identity which loaded module every `use` item of every
+// loaded module resolves to (item order; -1 = none), so its pub phase can bind
+// an importer's unqualified name to the module the importer actually named. The
+// resolution is the one the BFS loader used to put that module in file_paths[]
+// -- module_frontend_resolve_ast_import_relpath on the importer's directory,
+// then the named-item fallback to the parent file -- and the match is on the
+// resolved path string, so it is file identity, not spelling. No side effects
+// (unlike resolve_import_file_path, which notes registries and re-parses).
+fn module_frontend_pfi_note_use_targets(
+    programs: &! [Program; 256],
+    file_paths: [string; 256],
+    loaded: i64
+) with IO, Mut, Panic, Div, Alloc {
+    pfi_use_map_reset()
+    var x: i64 = 0
+    while x < loaded && x < 256 {
+        var prog = (*programs)[x as usize]
+        let cur_dir = module_frontend_path_directory_slice(file_paths[x as usize])
+        pfi_use_map_module_begin(x)
+        var cur = prog.items
+        var going = true
+        while going {
+            match cur {
+                None => { going = false }
+                Some(list) => {
+                    if (*list).head.kind == ItemKind::ItemUse {
+                        var tgt: i64 = 0 - 1
+                        var named = false
+                        let rel = module_frontend_ast_import_relpath((*list).head.use_path)
+                        if str_len(rel) > 0 {
+                            var dep = module_frontend_resolve_ast_import_relpath(rel, cur_dir)
+                            if !file_exists(dep) && (*list).head.use_path.seg_count >= 2 {
+                                let parent_rel = module_frontend_relpath_strip_last_segment(rel)
+                                if str_len(parent_rel) > 0 {
+                                    let parent_dep = module_frontend_resolve_ast_import_relpath(parent_rel, cur_dir)
+                                    if file_exists(parent_dep) {
+                                        dep = parent_dep
+                                        named = true
+                                    }
+                                }
+                            }
+                            if file_exists(dep) {
+                                tgt = module_frontend_pfi_find_loaded(file_paths, loaded, dep)
+                            }
+                        }
+                        pfi_use_map_note(x, tgt, named)
+                    }
+                    cur = (*list).tail
+                }
+            }
+        }
+        x = x + 1
+    }
 }
 
 // WP-A3 full prepare: merge → specialize → typecheck, and when a generic was
@@ -7186,8 +7257,9 @@ pub fn module_frontend_compile_imported_to_file(
     print_int(loaded)
     print(" modules\n")
 
+    module_frontend_pfi_note_use_targets(&! programs, file_paths, loaded)
     if !module_frontend_private_fn_identity_ok(&! programs, loaded) {
-        print("Same-named private functions could not be disambiguated\n")
+        print("Same-named functions or structs could not be disambiguated\n")
         module_frontend_global_init_compile_end()
         return 1
     }
@@ -8501,6 +8573,8 @@ fn load_multimodule_ir_to_box_traced(main_path: string, trace: &! LoadMultimodul
     }
 
     // Multi-mod: Box stays boxed through finalize. No densify here.
+    // #2773: the `use` map private_fn_identity's pub phase resolves importers by.
+    module_frontend_pfi_note_use_targets(&! programs, file_paths, loaded)
     let merged = module_frontend_merge_imported_box(&! programs, loaded, trace)
     if !merged.ok {
         module_frontend_global_init_compile_end()
