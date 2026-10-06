@@ -54,7 +54,6 @@ This directory contains comprehensive examples demonstrating Sounio's features.
 ### Domain-Specific
 - `medlang/` - PK/PD models (pharmacokinetics/pharmacodynamics)
 - `pbpk/` - Physiologically-based PK
-- `fmri/` - fMRI neuroimaging analysis
 - `darwin_atlas/` - Darwin Atlas integration
 - `darwin_pbpk/` - Darwin + PBPK combination
 - `causal/` - Causal inference
@@ -65,7 +64,6 @@ This directory contains comprehensive examples demonstrating Sounio's features.
 - `qnn/` - Quantized neural networks
 - `nn/` - Neural network primitives
 - `ml/` - Machine learning
-- `fusion/` - Tensor operations
 - `autodiff/` - Automatic differentiation
 
 ### Systems & I/O

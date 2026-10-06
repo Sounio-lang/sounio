@@ -104,3 +104,44 @@ Two groups:
 | `wave3_hybrid_regression.sio` | stub | original commented out; placeholder prints `36` | 2026-10-06 |
 | `wave3_kepler_discovery.sio` | stub | original commented out; placeholder prints `36` | 2026-10-06 |
 | `wave3_pinn_heat.sio` | stub | original commented out; placeholder prints `36` | 2026-10-06 |
+| `epistemic/autodiff_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `epistemic/budget_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `epistemic/causal_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `epistemic/combine_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `epistemic/core_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `epistemic/correlation_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `epistemic/coverage_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `epistemic/dual_check_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `epistemic/fusion_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `epistemic/gum_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `epistemic/interval_ieee_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `epistemic/invariants_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `epistemic/montecarlo_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `epistemic/multivariate_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `epistemic/policy_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `epistemic/proptest_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `epistemic/prov_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `epistemic/refutation_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `epistemic/roi_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `epistemic/slsa_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `epistemic/sobol_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `epistemic/stats_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `epistemic/traceability_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `fmri/atlas_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `fmri/connectivity_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `fmri/connectivity_epistemic_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `fmri/nifti_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `fmri/pipeline_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `fmri/preprocess_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `fusion/eeg_fmri_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `multi_feature_training_example.sio` | legacy | uses an undeclared `Quaternion` and pre-current syntax; E137 + E004/E019 and others on both engines | 2026-10-06 |
+| `ontology/biomedical/go_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `ontology/biomedical/hpo_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `ontology/biomedical/loinc_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `ontology/namespaces_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `pbpk/covariate_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `pbpk/error_models_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `pbpk/population_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `pbpk/types_demo.sio` | legacy | calls library functions it never imports (pre-module demo); E137 on both engines | 2026-10-06 |
+| `science/epistemic_adaptive.sio` | legacy | Gen-17 R15 intrinsics `read_conf`/`update_conf` no longer exist; E137 on both engines | 2026-10-06 |
+| `units/basics.sio` | legacy | Gen-19 `_suffix` unit literals (`500.0_mg`) no longer resolve; E137 + E001/E004 on both engines | 2026-10-06 |
