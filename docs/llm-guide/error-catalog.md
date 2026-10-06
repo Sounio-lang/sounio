@@ -450,6 +450,9 @@ Codes the compiler *can* emit in `error[Exxxx]:` format. Note: there is **no** `
 | E200 | lean_single/resolve | error | Undefined identifier | — |
 | E178 | type-checker/epistemic | error | noise-source capacity exceeded: more independent measurement sources than the noise-symbol domain can represent | — |
 | E179 | type-checker/epistemic | error | noise-set interning table exhausted: too many distinct source-sets in one checker run | — |
+| E188 | lean_single/chemistry | error | reaction does not balance for an element: the left and right sides of a `reaction` literal carry different counts of that element (the note line gives both) | — |
+| E189 | lean_single/chemistry | error | reaction does not balance in charge: the summed charges of the two sides of a `reaction` literal differ (the note line gives both) | — |
+| E190 | lean_single/chemistry | error | unknown element symbol in a `reaction` literal: the symbol is not in the checker's periodic table | — |
 | E201 | type-checker/zero-divisor | error | `ExactlyPrivate<T>` requires `with ZD` | [E201.md](explanations/E201.md) |
 | E202 | type-checker/zero-divisor | error | `Editable<T>` requires `with ZD` | [E202.md](explanations/E202.md) |
 | E203 | type-checker/zero-divisor | error | `CapabilityGated<T>` requires `with ZD` | [E203.md](explanations/E203.md) |
