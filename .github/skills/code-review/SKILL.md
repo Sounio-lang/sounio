@@ -56,12 +56,12 @@ Performance: when the change makes or plausibly affects a performance claim, sta
 3.4 Code
 Coding standard conformance for the target project (see §4–§7). Run the formatter; report only the formatter's residual diff, not your opinions.
 Naming reflects semantics; comments explain why, not what; no commented-out code; no TODO without owner and issue.
-Error paths: every Expected<T>/ErrorOr/Result/Knowledge<T> is consumed; no cantFail on a path that can fail; assertions state invariants, not input validation.
+Error paths: every Expected<T>/ErrorOr/Result is consumed; no cantFail on a path that can fail; assertions state invariants, not input validation. `Knowledge<T>` is an epistemic value (value plus uncertainty, confidence and provenance; `stdlib/epistemic/SEMANTICS.md`), not an error carrier: the relevant check is whether its uncertainty/provenance metadata is discarded explicitly, verified against the checker as in §7.1, not whether it is "consumed".
 Ownership and lifetime: raw pointers documented as non-owning; iterator invalidation across container mutation checked; ArrayRef/StringRef never outlive their backing store.
 3.5 Verdict format
 TEXT
 VERDICT: BLOCK | REQUEST-CHANGES | APPROVE-WITH-NITS | LGTM
-Evidence level: OBSERVED / ESTABLISHED / NOT ESTABLISHED (per finding)
+Evidence level: OBSERVED / ESTABLISHED / DERIVED / NOT ESTABLISHED (per finding)
 BLOCKING
   B1. <file:line> — <finding>. Why: <spec/LangRef §, or reproducer>. Fix: <concrete>.
 MUST-FIX (correctness or policy, non-blocking only because trivial)
@@ -97,7 +97,7 @@ undef vs poison: treat undef as "each use may differ"; never fold across it as i
 volatile and atomic: never reorder, duplicate, delete, or widen. volatile is not "may alias"; it is "must execute exactly as written".
 Memory: use AliasAnalysis/MemorySSA queries, not structural guesses; state the AA result you relied on.
 Control flow: dominance before hoisting; noreturn/unwind edges are barriers; EH pads are not ordinary blocks.
-Alive2: attach the query and its output (or alive-tv link) for InstCombine/InstSimplify/VectorCombine/ValueTracking changes. If Alive2 times out, reduce the query; if it is inexpressible, write the refinement proof in the commit message.
+Alive2: for InstCombine/InstSimplify/VectorCombine/ValueTracking changes, attach the query and its output (or alive-tv link) where Alive2 supports the transformation and is available. If it times out, reduce the query; if the transformation is inexpressible or Alive2 is unavailable, use the fallback in §3.2: an explicit refinement argument in the commit message plus targeted tests, with the limitation stated.
 4.4 Backend / MC / TableGen
 Encoding changes: round-trip test via llvm-mc -show-encoding → llvm-objdump -d (and the inverse -disassemble). Cross-check bit fields against the ISA manual, cite page/table.
 Scheduling models: llvm-mca on the canonical loop plus at least one adversarial pattern; latency/throughput numbers cited from the vendor optimisation manual or uops.info, with the source named.
@@ -121,8 +121,8 @@ Performance: parsing/Sema changes measured on the compile-time tracker; any O(n�
 6. Hand-written assembly
 Every routine ships with its contract: ABI, clobbers, alignment assumptions, stack usage, flags state on exit, and the target features required (checked at runtime or documented as a hard requirement).
 Encodings and behaviour are checked against the ISA manual; cite the volume/section. Never rely on a mnemonic's "obvious" meaning (shr vs sar, movsx widths, vpermq lane semantics, AVX-512 masking merge vs zero, EVEX.X extension of register indices ≥ 16, NEON vs SVE predication).
-Correctness evidence: a C++23 harness that runs the routine against a scalar reference over structured + random inputs, including denormals, NaN payloads, alignment offsets, and length boundaries (0, 1, VL−1, VL, VL+1). Disassemble the shipped bytes (objdump -d) and diff against the intended sequence — the shipped bytes are the truth, not the source.
-Performance evidence: llvm-mca (or uiCA where applicable) plus measured cycles, with the frequency governor and SMT state recorded.
+Correctness evidence: a harness, in the language the target project uses for such harnesses, that runs the routine against a scalar reference over structured + random inputs: alignment offsets and length boundaries (0, 1, VL−1, VL, VL+1) always, and denormals and NaN payloads when the routine handles floating point. Disassemble the shipped bytes (objdump -d) and diff against the intended sequence — the shipped bytes are the truth, not the source.
+Performance evidence, when the change makes or plausibly affects a performance claim: llvm-mca (or uiCA where applicable) plus measured cycles, with the frequency governor and SMT state recorded. A correctness-only change with no performance claim does not need it.
 Constant-time: if the routine touches secret data, no data-dependent branches, no data-dependent memory indexing, no early-exit compare; state this as a property and give the review a way to check it (e.g. dudect-style measurement or a written argument per instruction).
 Micro-architecture claims ("this avoids a port-5 bottleneck") are NOT ESTABLISHED unless a vendor document or uops.info is cited.
 7. [SOUNIO] Sounio / Madaros
@@ -137,9 +137,9 @@ Epistemic types: verify unwrapping, subsumption, branch joins, correlation, temp
 Do not present `sorry`, an added assumption, or an axiom as a proved result. Apply the repository's actual axiom-admission and inventory policy to new assumptions; an axiom used to replace a proof obligation does not establish that obligation.
 Inspect `#print axioms <theorem>` for load-bearing results and compare dependencies against the repository's current allowed trust base and axiom inventory. Do not hard-code a universal allowed set in this skill.
 Distinguish kernel-checked `decide` from native evaluation and inspect the actual trust/dependency implications before flagging either; do not group them together automatically.
-Definitions are single-sourced: e.g. octMul is the Cayley–Dickson duplication; expanded forms are separate definitions with proven equality (on the basis at minimum, with the scope of the equality stated). A "proof" that only covers the basis is described as such — never as a proof of the general statement.
+Definitions are single-sourced: one definition is authoritative, and any alternative form (for example, a Cayley–Dickson duplication next to an expanded component formula) is a separate definition with a proven equality whose scope is stated. Check the actual file rather than assuming a layout: `formal/OctonionAlgebra.lean` defines `octMul` directly as the expanded formula derived from Cayley–Dickson, with no separate duplication definition. A "proof" that only covers the basis is described as such — never as a proof of the general statement.
 If a closed proof of `False` appears, first inspect its assumptions and axiom dependencies. A contradiction derived under a contradictory hypothesis is not an unconditional inconsistency. Escalate a demonstrated inconsistency through the repository blocker contract.
-Generated tables (Fano, encodings) live under formal/generated/ with the generator checked in and the generation command in the file header; hand edits are a BLOCK.
+Generated Lean artefacts (tables, encodings, obligations) carry their generator checked in and the generation command in the file header, wherever the repository places them (currently alongside hand-written files, e.g. under `formal/lean4/`; there is no `formal/generated/`). Hand edits to a generated file are a BLOCK.
 7.3 Provenance of binaries
 Any .bin/kernel bytes checked into tests must be produced by souc from checked-in source, with the exact command recorded. A hand-reimplemented emitter that produces "the same bytes" gives the bytes no provenance and does not close an item.
 Backend reachability is verified: a lowering path that no souc run pipeline can reach is documented as unreachable in the ADR that decides its fate; it is not counted as implemented.
@@ -149,13 +149,13 @@ Apply `.claude/AGENT_OFFLOAD_POLICY.md` only at its actual triggers; record unav
 Use ADRs for governed contract changes when required by current repository policy; do not invent a universal rule that every cross-layer correction needs a separately pre-merged ADR.
 Commit messages and PR descriptions in the same English register as upstream; test names state the property, not the ticket.
 8. Authoring workflow (when you write the patch)
-Reproduce — minimal failing input checked in as a test, confirmed failing at the base commit (show the run).
+Reproduce — for a bug fix, a minimal failing input checked in as a test and confirmed failing at the base commit (show the run). For genuinely new behaviour or documentation-only work, test the intended contract instead (§3.3); do not manufacture a historical failure.
 Locate — git log -S, git blame, find the owning module; read the surrounding invariants; identify the effect/AA/type query you must call.
-Design — write the two-paragraph "why + how" that will become the commit body before touching code. If it needs a heuristic, stop and write the RFC/ADR instead.
+Design — write the two-paragraph "why + how" that will become the commit body before touching code. If it introduces a heuristic, meet the §2 heuristic requirements, and write an RFC/ADR when the target project's policy requires one (§7.4), not by default.
 Implement — smallest diff that satisfies the test; no speculative generality.
 Prove — Alive2 / Lean / harness / ISA-manual citation as appropriate. Attach output.
 Test — the focused witness plus negative/boundary coverage where discriminating; run the applicable repository gates and additional sanitizers/expensive checks only when required or justified by the changed component and risk.
-Measure — compile-time and runtime where applicable; report medians.
+Measure — compile-time and runtime where applicable, with a summary and dispersion appropriate to the effect and noise (§3.3), not a fixed estimator.
 Self-review — apply §3 as a hostile reader; fix; format.
 Describe — PR body: motivation, approach, alternatives rejected, evidence (commands + hashes), what was not tested and why.
 Iterate to convergence until the applicable acceptance conditions are satisfied or the precise remaining obligation is identified. There is no minimum number of review/rewrite cycles. Never knowingly deliver "claims X, delivers Y".
