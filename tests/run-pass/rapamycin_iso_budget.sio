@@ -1,6 +1,7 @@
 //@ run-pass
 //@ expect-stdout: PASS
 //@ expect-stdout: inf
+//@ expect-stdout: FAMILY_A_VAR_LIVE
 // ============================================================================
 // RAPAMYCIN 3-COMPARTMENT PBPK — ISO UNCERTAINTY BUDGET (JCGM 100:2008 §8)
 // ============================================================================
@@ -87,7 +88,7 @@ fn iso_sqrt(x: f64) -> f64 with Mut, Div {
     return y
 }
 
-fn main() with IO, Mut, Div, Epistemic {
+fn main() -> i64 with IO, Mut, Div, Epistemic {
     // ── Uncertain parameters via measure() → seed budget channels ──
     let k_cl: Knowledge<f64> = measure(12.4, uncertainty: 1.24)
     let k_kp: Knowledge<f64> = measure(0.08, uncertainty: 0.008)
@@ -192,11 +193,17 @@ fn main() with IO, Mut, Div, Epistemic {
     // Epistemic effect tracking variance through arithmetic on Knowledge<f64>;
     // path-b uses 3 explicit perturbations of a plain-f64 model.
     //
-    // Note: this test extracts plain f64 via `.value` on line 28, which is
-    // the documented Knowledge-strip pattern. After that, c_blood/c_brain
-    // are plain f64 and variance_of() returns 0. That is expected here, not
-    // a methodology failure — Path-b stands on its own as the ISO §8 budget.
-    // For an active Knowledge<f64> chain see dissertation_pbpk14_gum.sio.
+    // Note: this test extracts plain f64 via `.value` (cl, kp_brain, fu above).
+    // On the default engine (Madaros) the variance channel survives `.value`
+    // and path (a) agrees with Budget64 to 0.2 % (measured 2026-10-06:
+    // blood 0.010034 vs 0.010014, brain 0.002078 vs 0.002080). The older
+    // lean_single shim ELF (bin/souc-linux-x86_64) strips it, so variance_of()
+    // returns 0 there; the current lean_single seed keeps a channel but
+    // under-counts it (ratio ~0.55). Both used to fall through to an
+    // advisory message and still print PASS. Since P0.5 the cross-check is
+    // fail-closed: a ~0 path (a) is EPISTEMIC_FABRICATION and a disagreement
+    // outside [0.9, 1.1] is a FAIL, so this witness only passes on an engine
+    // where the cross-check it describes actually holds.
     print("\n--- Cross-check: Knowledge propagation vs Budget64 ---\n")
     let std_blood_k = iso_sqrt(var_blood_k)
     let std_blood_b = bb.combined_std_uncert
@@ -207,22 +214,26 @@ fn main() with IO, Mut, Div, Epistemic {
     print("brain: std(Knowledge)="); println(std_brain_k)
     print("brain: std(Budget64)="); println(std_brain_b)
 
-    // Cross-check is comparative only when Knowledge propagation is active.
-    // If std_k ≈ 0, .value stripped Knowledge — Budget64 stands alone.
-    if std_blood_k > 1.0e-15 {
-        let r_blood = std_blood_k / std_blood_b
-        if r_blood > 0.9 { if r_blood < 1.1 { print("blood: Knowledge ≈ Budget64 (within 10%)\n") } else { print("blood: Knowledge / Budget64 ratio out of [0.9,1.1]\n") } }
-        else { print("blood: Knowledge / Budget64 ratio out of [0.9,1.1]\n") }
-    } else {
-        print("blood: Knowledge inactive (.value strips Knowledge); Budget64 stands alone\n")
+    // Fail-closed cross-check (P0.5): a ~0 path (a) is a fabricated zero, not
+    // "Budget64 stands alone"; a ratio outside [0.9, 1.1] is a disagreement.
+    if std_blood_k <= 1.0e-15 || std_brain_k <= 1.0e-15 {
+        print("FABRICATED_ZERO\n")
+        print("EPISTEMIC_FABRICATION: variance_of collapsed to ~0 under this engine\n")
+        return 1
     }
-    if std_brain_k > 1.0e-15 {
-        let r_brain = std_brain_k / std_brain_b
-        if r_brain > 0.9 { if r_brain < 1.1 { print("brain: Knowledge ≈ Budget64 (within 10%)\n") } else { print("brain: Knowledge / Budget64 ratio out of [0.9,1.1]\n") } }
-        else { print("brain: Knowledge / Budget64 ratio out of [0.9,1.1]\n") }
-    } else {
-        print("brain: Knowledge inactive (.value strips Knowledge); Budget64 stands alone\n")
+    var ok_cross: i64 = 1
+    let r_blood = std_blood_k / std_blood_b
+    if r_blood > 0.9 && r_blood < 1.1 { print("blood: Knowledge ≈ Budget64 (within 10%)\n") }
+    else { print("blood: Knowledge / Budget64 ratio out of [0.9,1.1]\n"); ok_cross = 0 }
+    let r_brain = std_brain_k / std_brain_b
+    if r_brain > 0.9 && r_brain < 1.1 { print("brain: Knowledge ≈ Budget64 (within 10%)\n") }
+    else { print("brain: Knowledge / Budget64 ratio out of [0.9,1.1]\n"); ok_cross = 0 }
+    if ok_cross == 0 {
+        print("FAIL: Knowledge propagation disagrees with Budget64 under this engine\n")
+        return 1
     }
 
+    println("FAMILY_A_VAR_LIVE")
     print("PASS\n")
+    0
 }
