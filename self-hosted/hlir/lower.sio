@@ -2436,12 +2436,12 @@ fn hlir_gpu_axis_flat_name(e: Expr) -> string with Mut, Panic, Div, Alloc {
 }
 
 pub fn hlir_lower_match(state: HlirLowerState, scrutinee: i64, arms: Option<Box<MatchArmList>>) -> (HlirLowerState, i64) with Mut, Panic, Div, Alloc {
-    // Minimal bridge implementation: lower first arm body if present.
-    // Full pattern dispatch is handled by match_begin/match_merge APIs.
-    match arms {
-        Some(list) => hlir_lower_expr(state, (*list).head.body),
-        None => hlir_lower_unit(state),
-    }
+    // This used to lower the FIRST arm's body unconditionally ("minimal bridge"):
+    // no comparison, no other arm, so every thread ran arm 0. Pattern dispatch is
+    // not wired (match_begin/match_merge are unused), so a match is a lowering
+    // error until it is.
+    let _unused_arms = arms
+    (hlir_lower_report_error(state), HLIR_INVALID_VALUE)
 }
 
 pub fn hlir_lower_assign_target(state: HlirLowerState, target: Expr, value_id: i64) -> HlirLowerState with Mut, Panic, Div, Alloc {
@@ -2552,6 +2552,25 @@ pub fn hlir_lower_stmt_list(state: HlirLowerState, stmts: Option<Box<StmtList>>)
             hlir_lower_stmt_list(s1, (*list).tail)
         }
         None => state,
+    }
+}
+
+// Lower a statement list and return the value of its tail expression (the last
+// statement, when it is an expression statement), or HLIR_INVALID_VALUE.
+fn hlir_lower_stmt_list_value(state: HlirLowerState, stmts: Option<Box<StmtList>>) -> (HlirLowerState, i64) with Mut, Panic, Div, Alloc {
+    match stmts {
+        Some(list) => {
+            let is_last = match (*list).tail {
+                Some(_t) => false,
+                None => true,
+            }
+            if is_last && (*list).head.kind == StmtKind::StmtExpr {
+                return hlir_lower_expr_opt(state, (*list).head.expr)
+            }
+            let s1 = hlir_lower_stmt(state, (*list).head)
+            hlir_lower_stmt_list_value(s1, (*list).tail)
+        }
+        None => (state, HLIR_INVALID_VALUE),
     }
 }
 
@@ -2874,9 +2893,20 @@ pub fn hlir_lower_expr(state: HlirLowerState, expr: Expr) -> (HlirLowerState, i6
     }
 
     if expr.kind == ExprKind::ExprBlock {
+        // A block expression's value is its tail expression. This used to lower the
+        // statements and return unit, so `let y = { ..; t * 2.0 }` stored 0.
+        var tail_val: i64 = HLIR_INVALID_VALUE
         match expr.block {
-            Some(block) => { s = hlir_lower_block_from_ast(s, *block) }
+            Some(block) => {
+                s = hlir_scope_push(s)
+                let bv = hlir_lower_stmt_list_value(s, (*block).stmts)
+                s = hlir_scope_pop(bv.0)
+                tail_val = bv.1
+            }
             None => {}
+        }
+        if tail_val != HLIR_INVALID_VALUE {
+            return (s, tail_val)
         }
         return hlir_lower_unit(s)
     }
@@ -2901,8 +2931,10 @@ pub fn hlir_lower_expr(state: HlirLowerState, expr: Expr) -> (HlirLowerState, i6
         let rhs_pair = hlir_lower_expr_opt(s, expr.right)
         s = rhs_pair.0
         let rhs_val = rhs_pair.1
-        let op = hlir_ast_binary_to_hlir(expr.bin_op)
-        return hlir_lower_binary(s, op, lhs_val, rhs_val, hlir_type_i64())
+        // A range value has no scalar lowering; it used to become a binary op on
+        // whatever bin_op the node carried. Refused.
+        let _range_ends = lhs_val + rhs_val
+        return (hlir_lower_report_error(s), HLIR_INVALID_VALUE)
     }
 
     if expr.kind == ExprKind::ExprReturn {
