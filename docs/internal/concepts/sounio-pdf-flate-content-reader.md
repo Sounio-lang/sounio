@@ -10,7 +10,14 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 # Sounio PDF Flate Content Reader
 
 **Concept-ID:** `SOUNIO-PDF-FLATE-CONTENT-READER`
-**Status:** executable candidate; canonical Loom acceptance required
+Status: executable
+
+Historical-Lane-State: executable candidate; canonical Loom acceptance required
+Evidence-Pass: examples/sounio_pdf_flate_content_reader.sio
+
+Maturity-Scope: executable names the existing bounded witness. This metadata
+binding does not establish fresh execution, Loom acceptance, physical hardware
+acceptance, or claim readiness; the specific boundaries below remain in force.
 **Owner:** Sounio document substrate
 **Semantic authority:** Sounio
 
@@ -127,3 +134,10 @@ conflicting duplicate filters, content capacity, and Adler-32 propagation.
 This concept ends at decompressed content bytes. Text operators, font resource
 resolution, ToUnicode CMaps, and Apple feature rows require later Garden-first
 concepts.
+
+## Claims Forbidden
+
+- Existence of this witness proves fresh execution on the current host.
+- Decompressed page-content bytes establish decoded text or Apple feature semantics.
+- This pinned classic-xref profile establishes general PDF conformance.
+- Registry metadata establishes Loom acceptance, semantic freeze, or claim readiness.

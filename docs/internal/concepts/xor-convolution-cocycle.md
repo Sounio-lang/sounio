@@ -9,7 +9,15 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 
 # XorConvolution Twist Contract
 
-> **Status**: Executable | **Concept-ID**: `SOUNIO-XOR-CONVOLUTION-COCYCLE`
+Concept-ID: `SOUNIO-XOR-CONVOLUTION-COCYCLE`
+
+Status: executable
+
+Evidence-Pass: examples/xor_convolution_cocycle.sio
+
+Maturity-Scope: executable names the existing bounded witness. This metadata
+binding does not establish fresh execution, Loom acceptance, physical hardware
+acceptance, or claim readiness; the specific boundaries below remain in force.
 
 ## Authority
 
@@ -83,3 +91,10 @@ The next admissible layers are:
 
 Parity remains closed until an explicit Loom transition opens it. Claim-ready
 status remains false.
+
+## Claims Forbidden
+
+- Existence of this witness proves fresh execution on the current host.
+- The frozen bits=4 result establishes an ISA lowering, instruction count, or performance result.
+- The selected Cayley-Dickson twist establishes an associative cocycle classification.
+- This contract establishes a subquadratic transform algorithm or claim readiness.

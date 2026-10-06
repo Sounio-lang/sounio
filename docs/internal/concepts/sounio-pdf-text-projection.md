@@ -10,7 +10,14 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 # Sounio PDF Text Projection
 
 **Concept-ID:** `SOUNIO-PDF-TEXT-PROJECTION`
-**Status:** executable candidate; canonical Loom acceptance required
+Status: executable
+
+Historical-Lane-State: executable candidate; canonical Loom acceptance required
+Evidence-Pass: examples/sounio_pdf_text_projection.sio
+
+Maturity-Scope: executable names the existing bounded witness. This metadata
+binding does not establish fresh execution, Loom acceptance, physical hardware
+acceptance, or claim readiness; the specific boundaries below remain in force.
 **Owner:** Sounio document substrate
 **Semantic authority:** Sounio
 
@@ -133,3 +140,10 @@ This concept does not establish general PDF conformance, OCR, visual table
 cells, feature inheritance, Apple-family meaning, processor identity,
 instruction equivalence, observed hardware, lowering correctness, cost, or
 performance.
+
+## Claims Forbidden
+
+- Existence of this witness proves fresh execution on the current host.
+- Geometric line projections establish table cells or Apple capability facts.
+- This projection establishes general PDF conformance, OCR, or visual table recovery.
+- Registry metadata establishes lowering correctness, cost, performance, or claim readiness.

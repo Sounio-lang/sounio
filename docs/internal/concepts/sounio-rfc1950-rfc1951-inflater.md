@@ -10,7 +10,14 @@ source_of_truth: docs/governance/topic-registry.v1.json#repo.docs.internal.conce
 # Sounio RFC 1950/RFC 1951 Inflater
 
 **Concept-ID:** `SOUNIO-RFC1950-RFC1951-INFLATER`
-**Status:** executable candidate; Loom acceptance required
+Status: executable
+
+Historical-Lane-State: executable candidate; Loom acceptance required
+Evidence-Pass: examples/sounio_rfc1950_rfc1951_inflate.sio
+
+Maturity-Scope: executable names the existing bounded witness. This metadata
+binding does not establish fresh execution, Loom acceptance, physical hardware
+acceptance, or claim readiness; the specific boundaries below remain in force.
 **Owner:** Sounio compression substrate
 **Semantic authority:** Sounio
 
@@ -89,3 +96,10 @@ expected results.
 
 This concept is compression substrate only. Pireus PDF ingestion must begin
 with its own Garden artifact after this stage is accepted.
+
+## Claims Forbidden
+
+- Existence of this witness proves fresh execution on the current host.
+- Successful inflation establishes a trusted vendor claim or PDF object semantics.
+- This bounded inflater establishes general ZIP, gzip, or Numbers/IWA support.
+- Registry metadata establishes Loom acceptance, semantic freeze, or claim readiness.
