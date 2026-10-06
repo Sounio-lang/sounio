@@ -111,7 +111,7 @@ touches the dissertation surface and its cost must precede its ruling.
 **Footprint.** Four files, thirteen constructions, **two reads**. The four files
 each carry an identical copy-pasted three-constructor preamble (`label: 0`,
 `label: 1`, `label: 2`); twelve of the thirteen constructions are inside those
-helpers. The only reads are `examples/epistemic_quantum_vqe.sio:247-248`, two
+helpers. The only reads are `examples/epistemic_qubit_toy_vqe.sio:249-250`, two
 equality comparisons. **`darwin_epistemic_pbpk.sio` — the dissertation surface —
 never reads `.label` at all.** There, the tag is write-only metadata.
 
