@@ -2278,7 +2278,22 @@ pub fn hlir_ast_unary_to_hlir(op: UnaryOp) -> i64 {
     match op {
         UnaryOp::OpNot => HLIR_UNARY_NOT,
         UnaryOp::OpBitNot => HLIR_UNARY_BIT_NOT,
-        _ => HLIR_UNARY_NEG,
+        UnaryOp::OpNeg => HLIR_UNARY_NEG,
+        _ => HLIR_UNARY_UNSUPPORTED,
+    }
+}
+
+fn hlir_opt_expr_is_float_lit(e: &Option<Box<Expr>>) -> bool {
+    match *e {
+        Some(x) => (*x).kind == ExprKind::ExprFloatLit,
+        None => false,
+    }
+}
+
+fn hlir_opt_expr_float_lit_val(e: &Option<Box<Expr>>) -> f64 {
+    match *e {
+        Some(x) => (*x).float_val,
+        None => 0.0,
     }
 }
 
@@ -2580,6 +2595,10 @@ pub fn hlir_lower_expr(state: HlirLowerState, expr: Expr) -> (HlirLowerState, i6
     }
 
     if expr.kind == ExprKind::ExprBinary {
+        let lhs_is_flit = hlir_opt_expr_is_float_lit(&expr.left)
+        let lhs_flit_val = hlir_opt_expr_float_lit_val(&expr.left)
+        let rhs_is_flit = hlir_opt_expr_is_float_lit(&expr.right)
+        let rhs_flit_val = hlir_opt_expr_float_lit_val(&expr.right)
         let lhs_pair = hlir_lower_expr_opt(s, expr.left)
         s = lhs_pair.0
         let lhs_val = lhs_pair.1
@@ -2614,11 +2633,35 @@ pub fn hlir_lower_expr(state: HlirLowerState, expr: Expr) -> (HlirLowerState, i6
             let contract = hlir_cayley_dickson_xor_convolution(bits)
             return hlir_xor_convolution(s, lhs_val, rhs_val, contract)
         }
-        let lhs_ty = hlir_lower_value_type(s, lhs_val)
-        let rhs_ty = hlir_lower_value_type(s, rhs_val)
+        var lhs_v = lhs_val
+        var rhs_v = rhs_val
+        var lhs_ty = hlir_lower_value_type(s, lhs_val)
+        var rhs_ty = hlir_lower_value_type(s, rhs_val)
+        // P0.8.1: a float literal is lowered as f64. Next to an f32 operand it is an
+        // f32 literal (the checker types it so); re-materialise it at f32 so the GPU
+        // backend does not multiply an f32 register by an f64 one.
+        if lhs_ty.kind == HlirTypeKind::HlirTypeF32 && rhs_is_flit {
+            let p32 = hlir_lower_literal_float(s, rhs_flit_val, hlir_type_f32())
+            s = p32.0
+            rhs_v = p32.1
+            rhs_ty = hlir_type_f32()
+        } else if rhs_ty.kind == HlirTypeKind::HlirTypeF32 && lhs_is_flit {
+            let p32 = hlir_lower_literal_float(s, lhs_flit_val, hlir_type_f32())
+            s = p32.0
+            lhs_v = p32.1
+            lhs_ty = hlir_type_f32()
+        }
+        // Mixed f32/f64 operands have no faithful lowering here (no implicit
+        // conversion is emitted): refuse instead of reading one register class as
+        // the other.
+        let lhs_f = lhs_ty.kind == HlirTypeKind::HlirTypeF32 || lhs_ty.kind == HlirTypeKind::HlirTypeF64
+        let rhs_f = rhs_ty.kind == HlirTypeKind::HlirTypeF32 || rhs_ty.kind == HlirTypeKind::HlirTypeF64
+        if lhs_f && rhs_f && lhs_ty.kind != rhs_ty.kind {
+            return (hlir_lower_report_error(s), HLIR_INVALID_VALUE)
+        }
         let op = hlir_ast_binary_to_hlir_typed(expr.bin_op, lhs_ty, rhs_ty)
         let ty = hlir_ast_binary_result_ty_typed(expr.bin_op, lhs_ty, rhs_ty)
-        return hlir_lower_binary(s, op, lhs_val, rhs_val, ty)
+        return hlir_lower_binary(s, op, lhs_v, rhs_v, ty)
     }
 
     if expr.kind == ExprKind::ExprUnary {
@@ -2637,6 +2680,20 @@ pub fn hlir_lower_expr(state: HlirLowerState, expr: Expr) -> (HlirLowerState, i6
                     return hlir_oct_load(s, src_pair.1, 16)
                 }
             }
+        }
+        // P0.8.1: negation takes its operand's type (it was always i64, so `-x` on an
+        // f64 became an integer subtraction in a %rd register). An operand of unknown
+        // type, and deref/ref (which used to fall through to NEG), get
+        // HLIR_UNARY_UNSUPPORTED so the GPU backend refuses them.
+        if expr.un_op == UnaryOp::OpNeg {
+            let src_ty = hlir_lower_value_type(s, src_pair.1)
+            if src_ty.kind == HlirTypeKind::HlirTypeF64 || src_ty.kind == HlirTypeKind::HlirTypeF32 {
+                return hlir_lower_unary(s, HLIR_UNARY_FNEG, src_pair.1, src_ty)
+            }
+            if src_ty.kind == HlirTypeKind::HlirTypeI64 || src_ty.kind == HlirTypeKind::HlirTypeI32 {
+                return hlir_lower_unary(s, HLIR_UNARY_NEG, src_pair.1, src_ty)
+            }
+            return hlir_lower_unary(s, HLIR_UNARY_UNSUPPORTED, src_pair.1, hlir_type_i64())
         }
         let op = hlir_ast_unary_to_hlir(expr.un_op)
         return hlir_lower_unary(s, op, src_pair.1, hlir_type_i64())
