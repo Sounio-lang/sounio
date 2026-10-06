@@ -1456,6 +1456,113 @@ fn hlir_get_kernel_index(module: HlirModule, kernel_idx: i64) -> i64 {
     0 - 1
 }
 
+// ----------------------------------------------------------------------------
+// Fail-closed refusal ledger (P0.8.1).
+//
+// hlir_instr_to_gpu_ops has no IO and returns a kernel, so it cannot stop the
+// pipeline itself. When it meets a shape it cannot lower faithfully it records
+// a reason here, and the driver (run_gpu_compile_pipeline in
+// compiler/main.sio) refuses to write any output. A wrong kernel that
+// assembles is worse than no kernel: before this ledger existed the literal
+// `2.0` in `a * 2.0` became `mov.u64 %rd2, 0` while the multiply read the
+// uninitialised `%fd2`.
+// ----------------------------------------------------------------------------
+var HLIR_GPU_REFUSE_REASON: i64 = 0
+
+let HLIR_GPU_REFUSE_BOOL_CONST: i64 = 1
+let HLIR_GPU_REFUSE_FLOAT_LIT_INT_SLOT: i64 = 2
+let HLIR_GPU_REFUSE_CONST_KIND: i64 = 3
+let HLIR_GPU_REFUSE_UNARY_NOT: i64 = 4
+let HLIR_GPU_REFUSE_UNARY_TYPE: i64 = 5
+
+fn hlir_gpu_refuse(reason: i64) with Mut {
+    if HLIR_GPU_REFUSE_REASON == 0 {
+        HLIR_GPU_REFUSE_REASON = reason
+    }
+}
+
+pub fn hlir_gpu_refusal_reason() -> i64 { HLIR_GPU_REFUSE_REASON }
+
+// Set when a float-typed pure immediate (rhs_imm = IEEE bit pattern) enters a
+// GpuKernelIr. Only the PTX renderer (gpu/lower_to_ptx.sio) understands that
+// encoding; the Metal, SPIR-V, K-AXI and Tile renderers read rhs_imm as an
+// integer addend, so the driver refuses those targets when this is set.
+var HLIR_GPU_FLOAT_IMM_SEEN: bool = false
+
+pub fn hlir_gpu_float_imm_seen() -> bool { HLIR_GPU_FLOAT_IMM_SEEN }
+
+pub fn hlir_gpu_refusal_message(reason: i64) -> string {
+    if reason == HLIR_GPU_REFUSE_BOOL_CONST {
+        "a bool constant in a kernel body has no PTX lowering (predicate materialisation is not implemented)"
+    } else if reason == HLIR_GPU_REFUSE_FLOAT_LIT_INT_SLOT {
+        "a floating-point literal reached an integer-typed slot in a kernel body"
+    } else if reason == HLIR_GPU_REFUSE_CONST_KIND {
+        "a constant of this kind (string, array, struct, null, function or global reference) has no PTX lowering in a kernel body"
+    } else if reason == HLIR_GPU_REFUSE_UNARY_NOT {
+        "logical or bitwise NOT in a kernel body has no PTX lowering"
+    } else if reason == HLIR_GPU_REFUSE_UNARY_TYPE {
+        "unary negation of this type has no PTX lowering"
+    } else {
+        "unknown GPU lowering refusal"
+    }
+}
+
+// Round an IEEE binary64 bit pattern to the nearest binary32 bit pattern
+// (round-half-to-even), done on the bits so it does not depend on how the
+// compiling engine lowers `as f32`. Used for f32 literals: PTX writes them as
+// `0fXXXXXXXX`.
+fn hlir_gpu_f64_bits_to_f32_bits(b: i64) -> i64 {
+    let sign = (b >> 63) & 1
+    let exp64 = (b >> 52) & 2047
+    let mant64 = b & 4503599627370495
+    let sbit = sign << 31
+    if exp64 == 2047 {
+        if mant64 == 0 { return sbit | 2139095040 }
+        return sbit | 2143289344 | ((mant64 >> 29) & 4194303)
+    }
+    if exp64 == 0 { return sbit }
+    var e32 = exp64 - 1023 + 127
+    let full = mant64 | 4503599627370496
+    var shift: i64 = 29
+    if e32 <= 0 {
+        shift = 30 - e32
+        e32 = 0
+        if shift > 53 { return sbit }
+    }
+    var m = full >> shift
+    let rem = full - (m << shift)
+    let half = 1 << (shift - 1)
+    if rem > half || (rem == half && (m & 1) == 1) { m = m + 1 }
+    if e32 == 0 {
+        // Subnormal; a round-up to 1<<23 is exactly the smallest normal's encoding.
+        return sbit | m
+    }
+    if m >= 16777216 {
+        m = m >> 1
+        e32 = e32 + 1
+    }
+    if e32 >= 255 { return sbit | 2139095040 }
+    sbit | (e32 << 23) | (m & 8388607)
+}
+
+// Bit pattern a float-typed GPU constant must carry in rhs_imm, or refuse.
+fn hlir_gpu_float_const_bits(c: HlirConstant, ty: GpuType) -> i64 with Mut {
+    HLIR_GPU_FLOAT_IMM_SEEN = true
+    var bits: i64 = 0
+    if c.kind == HlirConstKind::HlirConstFloat {
+        bits = f64_to_bits(c.float_val)
+    } else if c.kind == HlirConstKind::HlirConstInt {
+        bits = f64_to_bits(c.int_val as f64)
+    } else {
+        hlir_gpu_refuse(HLIR_GPU_REFUSE_CONST_KIND)
+        return 0
+    }
+    if ty == GpuType::GpuF32 {
+        return hlir_gpu_f64_bits_to_f32_bits(bits)
+    }
+    bits
+}
+
 // Map an HlirTypeKind to a GpuType for kernel parameter mapping.
 fn hlir_type_kind_to_gpu(kind: HlirTypeKind) -> GpuType {
     if kind == HlirTypeKind::HlirTypeI32 { GpuType::GpuI32 }
@@ -1687,12 +1794,30 @@ fn hlir_instr_to_gpu_ops(kernel: GpuKernelIr, instr: HlirInstr) -> GpuKernelIr w
         // PURE immediate (no base register) so the renderer emits `mov dst, imm` rather than
         // `add dst, %reg0, imm` — reg 0 is the first kernel param, NOT a zero register, so the
         // add form silently corrupts every integer constant (e.g. array/GEP indices).
+        //
+        // P0.8.1: the immediate used to be `constant.int_val` for EVERY constant, so a
+        // float literal (`2.0`, int_val = 0) became integer 0 in a %rd register while its
+        // f64 consumer read an uninitialised %fd register. A float-typed constant now
+        // carries its IEEE bit pattern (rhs_imm) and the renderer emits mov.f64/mov.f32
+        // into the register class its consumers read. Shapes with no faithful lowering
+        // are refused (hlir_gpu_refuse), never approximated.
         var op = gpu_op_new()
         op.opcode = GpuOpcode::GpuAddImm
         op.dst_reg = instr.result
         op.lhs_reg = 0 - 1
-        op.rhs_imm = instr.constant.int_val
         op.ty = hlir_type_kind_to_gpu(instr.ty.kind)
+        let ck = instr.constant.kind
+        if op.ty == GpuType::GpuF64 || op.ty == GpuType::GpuF32 {
+            op.rhs_imm = hlir_gpu_float_const_bits(instr.constant, op.ty)
+        } else if op.ty == GpuType::GpuBool || ck == HlirConstKind::HlirConstBool {
+            hlir_gpu_refuse(HLIR_GPU_REFUSE_BOOL_CONST)
+        } else if ck == HlirConstKind::HlirConstFloat {
+            hlir_gpu_refuse(HLIR_GPU_REFUSE_FLOAT_LIT_INT_SLOT)
+        } else if ck == HlirConstKind::HlirConstInt {
+            op.rhs_imm = instr.constant.int_val
+        } else {
+            hlir_gpu_refuse(HLIR_GPU_REFUSE_CONST_KIND)
+        }
         k = gpu_kernel_append_op(k, op)
     } else if op_kind == HLIR_OP_COPY {
         // Copy maps to a mov (implemented as add with zero imm)
@@ -1718,14 +1843,51 @@ fn hlir_instr_to_gpu_ops(kernel: GpuKernelIr, instr: HlirInstr) -> GpuKernelIr w
     } else if op_kind == HLIR_OP_PHI {
         // PHI nodes resolved during register allocation — skip in MVP
     } else if op_kind == HLIR_OP_UNARY {
-        // Unary ops — map negation to sub from zero
-        var op = gpu_op_new()
-        op.opcode = GpuOpcode::GpuSub
-        op.dst_reg = instr.result
-        op.lhs_reg = 0
-        op.rhs_reg = instr.src
-        op.ty = hlir_type_kind_to_gpu(instr.ty.kind)
-        k = gpu_kernel_append_op(k, op)
+        // P0.8.1: this used to emit `sub dst, %<reg 0>, src` for every unary op. Register 0
+        // is the first kernel parameter, not a zero register, so `-x` computed `param0 - x`
+        // and NOT/BIT_NOT became a subtraction. Negation now materialises its own
+        // constant into dst first (dst is a fresh SSA value, distinct from src):
+        //   float: dst = -1.0; dst = src * dst   (exact IEEE negation, keeps -0.0)
+        //   int:   dst = 0;    dst = dst - src
+        // NOT / BIT_NOT have no lowering here and are refused.
+        let uty = hlir_type_kind_to_gpu(instr.ty.kind)
+        let is_neg = instr.un_op == HLIR_UNARY_NEG || instr.un_op == HLIR_UNARY_FNEG
+        if !is_neg {
+            hlir_gpu_refuse(HLIR_GPU_REFUSE_UNARY_NOT)
+        } else if uty == GpuType::GpuF64 || uty == GpuType::GpuF32 {
+            var cst = gpu_op_new()
+            cst.opcode = GpuOpcode::GpuAddImm
+            cst.dst_reg = instr.result
+            cst.lhs_reg = 0 - 1
+            cst.ty = uty
+            HLIR_GPU_FLOAT_IMM_SEEN = true
+            cst.rhs_imm = if uty == GpuType::GpuF32 { hlir_gpu_f64_bits_to_f32_bits(f64_to_bits(0.0 - 1.0)) } else { f64_to_bits(0.0 - 1.0) }
+            k = gpu_kernel_append_op(k, cst)
+            var mulop = gpu_op_new()
+            mulop.opcode = GpuOpcode::GpuMul
+            mulop.dst_reg = instr.result
+            mulop.lhs_reg = instr.src
+            mulop.rhs_reg = instr.result
+            mulop.ty = uty
+            k = gpu_kernel_append_op(k, mulop)
+        } else if uty == GpuType::GpuI64 || uty == GpuType::GpuI32 {
+            var zero = gpu_op_new()
+            zero.opcode = GpuOpcode::GpuAddImm
+            zero.dst_reg = instr.result
+            zero.lhs_reg = 0 - 1
+            zero.rhs_imm = 0
+            zero.ty = uty
+            k = gpu_kernel_append_op(k, zero)
+            var subop = gpu_op_new()
+            subop.opcode = GpuOpcode::GpuSub
+            subop.dst_reg = instr.result
+            subop.lhs_reg = instr.result
+            subop.rhs_reg = instr.src
+            subop.ty = uty
+            k = gpu_kernel_append_op(k, subop)
+        } else {
+            hlir_gpu_refuse(HLIR_GPU_REFUSE_UNARY_TYPE)
+        }
     } else if op_kind == HLIR_OP_CALL_DIRECT {
         // Check if it's a GPU intrinsic by name
         // gpu_thread_id_x → GpuGetTid axis=0
