@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# RETIRED 2026-10-06 (P1.7, Cargo-era): reruns cargo check/test -p souc (Rust crate removed); its only caller already pointed at a wrong path.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

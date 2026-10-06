@@ -1,4 +1,5 @@
 #!/bin/bash
+# RETIRED 2026-10-06 (P1.7, Cargo-era): cargo run --bin souc -- check (Rust crate removed); nothing references it; use `bin/souc check`.
 # Stdlib Verification Script - Check overnight expansion results
 
 set -e

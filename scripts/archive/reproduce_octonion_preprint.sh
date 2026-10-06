@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# RETIRED 2026-10-06 (P1.7, Cargo-era): cargo test -p souc integration_octonion_* (those Rust tests no longer exist).
 set -euo pipefail
 
 # Reproduce all validation + benchmark artifacts referenced by

@@ -1,4 +1,5 @@
 #!/bin/bash
+# RETIRED 2026-10-06 (P1.7, Cargo-era): cargo test geometry::* (Rust crate removed); nothing references it.
 # AlphaGeoZero Showcase Runner
 # First geometry theorem prover with honest confidence intervals
 #

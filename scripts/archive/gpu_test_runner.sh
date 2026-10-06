@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# RETIRED 2026-10-06 (P1.7, Cargo-era): cargo build/test --features gpu and target/release/souc (Rust crate removed); the L4 numbers it produced are kept in benchmarks/results/.
 # gpu_test_runner.sh — run epistemic GEMM profile on remote GPU node
 #
 # Usage:
